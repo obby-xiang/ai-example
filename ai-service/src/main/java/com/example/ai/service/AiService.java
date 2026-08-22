@@ -1,0 +1,862 @@
+package com.example.ai.service;
+
+import com.example.ai.dto.AiDTO;
+import com.example.ai.entity.AiChatMessage;
+import com.example.ai.entity.AgentState;
+import com.example.ai.entity.ConfigDefinition;
+import com.example.ai.entity.Task;
+import com.example.ai.repository.AiChatMessageRepository;
+import com.example.ai.repository.AgentStateRepository;
+import com.example.ai.tool.FrontendTools;
+import com.example.ai.tool.ToolDiscoveryService;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.MediaType;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.client.RestClient;
+
+import java.time.LocalDateTime;
+import java.util.*;
+
+/**
+ * AI 对话服务 —— 方案二：后端 Runtime + Agent Loop + 前端工具暂停-恢复。
+ *
+ * ====== 架构核心（业界主流 LangGraph checkpointer / OpenAI Assistants Thread） ======
+ *   1. agent loop 在后端：调 DeepSeek → 解析 tool_calls → 分类处理 → 必要时回灌结果 → 继续调用
+ *   2. 所有工具定义集中在后端 FrontendTools（用户硬约束），前端只接收 toolName+args
+ *   3. 工具分类：
+ *      - FRONTEND：loop 暂停，保存 AgentState(resumeToken) → 返回前端 → 前端执行 → POST /tool-result 回灌 → 恢复 loop
+ *      - BACKEND ：loop 内同步执行（预留扩展点，当前 7 个工具均为 FRONTEND）
+ *   4. loop 结束条件：模型不再返回 tool_calls（返回最终回复）
+ *
+ * ====== 单一对话入口 ======
+ *   - chat(req)             : 首次发起/继续对话
+ *   - submitToolResult(req) : 前端工具执行结果回灌，恢复 loop
+ *   两个入口共享 runAgentLoop() 核心逻辑
+ */
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class AiService {
+
+    private final AiChatMessageRepository messageRepository;
+    private final AgentStateRepository agentStateRepository;
+    private final TaskService taskService;
+    private final ConfigDefinitionService definitionService;
+    private final ToolDiscoveryService toolDiscoveryService;
+
+    // =============== DeepSeek 原生 API 配置 ===============
+    @Value("${app.ai.base-url:https://api.deepseek.com}")
+    private String baseUrl;
+
+    @Value("${app.ai.chat-path:/chat/completions}")
+    private String chatPath;
+
+    @Value("${app.ai.model:deepseek-v4-flash}")
+    private String model;
+
+    @Value("${app.ai.api-key:}")
+    private String apiKey;
+
+    @Value("${spring.ai.openai.chat.options.temperature:0.2}")
+    private double temperature;
+
+    @Value("${spring.ai.openai.chat.options.max-tokens:4096}")
+    private int maxTokens;
+
+    /** Agent loop 最大迭代次数（防止无限循环） */
+    private static final int MAX_LOOP_ITERATIONS = 8;
+
+    private volatile RestClient cachedClient;
+
+    private RestClient client() {
+        if (cachedClient == null) {
+            synchronized (this) {
+                if (cachedClient == null) {
+                    cachedClient = RestClient.builder().baseUrl(baseUrl).build();
+                }
+            }
+        }
+        return cachedClient;
+    }
+
+    private final ObjectMapper om = new ObjectMapper()
+            .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+
+    private static final TypeReference<LinkedHashMap<String, Object>> MAP_TYPE = new TypeReference<>() {};
+    private static final TypeReference<List<Map<String, Object>>> LIST_MAP_TYPE = new TypeReference<>() {};
+
+    // ================================ 对外接口 ================================
+
+    public List<AiChatMessage> listHistory(Long taskId, String sessionId) {
+        if (taskId != null) {
+            return messageRepository.findByTaskIdOrderByCreatedAtAscIdAsc(taskId);
+        }
+        if (sessionId != null) {
+            return messageRepository.findByTaskIdIsNullAndSessionIdOrderByCreatedAtAscIdAsc(sessionId);
+        }
+        return Collections.emptyList();
+    }
+
+    /**
+     * 首次发起/继续对话入口。
+     * 调用流程：
+     *   1. 保存用户消息
+     *   2. 启动 agent loop
+     *   3. 返回 {reply, toolCalls?, resumeToken?, done}
+     */
+    @Transactional
+    public AiDTO.ChatResp chat(AiDTO.ChatReq req) {
+        // 0. 清理同一 session 残留的 WAITING_TOOL 状态（避免冲突）
+        cleanupWaitingState(req.getSessionId());
+
+        // 1. 保存用户消息
+        AiChatMessage userMsg = AiChatMessage.builder()
+                .taskId(req.getTaskId())
+                .sessionId(req.getSessionId())
+                .role("user")
+                .content(req.getMessage())
+                .build();
+        messageRepository.save(userMsg);
+
+        // 2. 构造完整 messages 数组（system + 历史 + user）
+        List<Map<String, Object>> messages = buildRawMessages(req);
+
+        // 3. 启动 agent loop（按当前 scenario+step 动态过滤工具集）
+        return runAgentLoop(req, messages, null, req.getCurrentScenario(), req.getCurrentStep());
+    }
+
+    /**
+     * 前端工具执行结果回灌入口 —— 恢复暂停的 agent loop。
+     * 调用流程：
+     *   1. 加载 AgentState(resumeToken)
+     *   2. 把 tool result 追加为 tool message
+     *   3. 继续 agent loop（从 state 恢复 scenario+step）
+     */
+    @Transactional
+    public AiDTO.ChatResp submitToolResult(AiDTO.ToolResultReq req) {
+        // 1. 加载 state
+        AgentState state = agentStateRepository.findById(req.getResumeToken())
+                .orElseThrow(() -> new IllegalArgumentException("resumeToken 无效或已过期: " + req.getResumeToken()));
+        if (!"WAITING_TOOL".equals(state.getStatus())) {
+            throw new IllegalStateException("state 状态非 WAITING_TOOL，无法回灌: " + state.getStatus());
+        }
+
+        // 2. 反序列化 messages + pendingToolCalls
+        List<Map<String, Object>> messages;
+        List<AiDTO.FrontendToolCall> pendingCalls;
+        try {
+            messages = om.readValue(state.getMessagesJson(), LIST_MAP_TYPE);
+            pendingCalls = om.readValue(state.getPendingToolCallsJson(),
+                    new TypeReference<List<AiDTO.FrontendToolCall>>() {});
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException("AgentState 反序列化失败: " + e.getMessage(), e);
+        }
+
+        // 3. 找到本次回灌对应的 toolCall（OpenAI 协议要求 tool message 必须有 tool_call_id）
+        //    pendingCalls 中第一个未回灌的（前端按顺序回灌）
+        AiDTO.FrontendToolCall matchedCall = null;
+        for (AiDTO.FrontendToolCall tc : pendingCalls) {
+            if (tc.getCallId().equals(req.getCallId())) {
+                matchedCall = tc;
+                break;
+            }
+        }
+        if (matchedCall == null) {
+            throw new IllegalArgumentException("callId 不匹配当前 pending toolCalls: " + req.getCallId());
+        }
+
+        // 4. 把 assistant 的 tool_calls 消息（如果尚未追加）追加为 assistant message
+        //    注意：暂停时我们只在 messages 里追加了 user 的 system + 历史，没有追加 assistant
+        //    的 tool_calls 响应。这里要把那次 assistant 响应补齐（OpenAI 协议要求）。
+        appendAssistantToolCallMessage(messages, state, matchedCall);
+
+        // 5. 把 tool 执行结果作为 tool message 追加到 messages
+        Map<String, Object> toolMessage = new LinkedHashMap<>();
+        toolMessage.put("role", "tool");
+        toolMessage.put("tool_call_id", matchedCall.getCallId());
+        // DeepSeek 要求 content 是字符串
+        String resultStr;
+        try {
+            resultStr = om.writeValueAsString(req.getResult() == null ? Map.of("ok", false) : req.getResult());
+        } catch (JsonProcessingException e) {
+            resultStr = "{\"ok\":false,\"message\":\"result serialization failed\"}";
+        }
+        toolMessage.put("content", resultStr);
+        messages.add(toolMessage);
+
+        // 6. 标记 state 为 RUNNING（已使用），并继续 loop
+        state.setStatus("RUNNING");
+        agentStateRepository.save(state);
+
+        // 7. 构造 ChatReq 等价物（用于 system prompt 上下文 + 状态机上下文）
+        AiDTO.ChatReq chatReq = new AiDTO.ChatReq();
+        chatReq.setTaskId(state.getTaskId());
+        chatReq.setSessionId(state.getSessionId());
+        chatReq.setMessage(null); // 不再追加 user message（已在原 chat 中追加过）
+        chatReq.setAutoPrompt(false);
+        // Phase 2: 从 state 恢复 scenario+step，用于 buildRawMessages 和工具动态发现
+        chatReq.setCurrentScenario(state.getCurrentScenario());
+        chatReq.setCurrentStep(state.getCurrentStep());
+
+        // 8. 恢复 loop（从 state 恢复 scenario+step，按当前步骤动态过滤工具）
+        return runAgentLoopInternal(chatReq, messages, null,
+                state.getCurrentScenario(), state.getCurrentStep());
+    }
+
+    @Transactional
+    public void clear(Long taskId) {
+        if (taskId != null) {
+            messageRepository.deleteByTaskId(taskId);
+        }
+    }
+
+    // ================================ Agent Loop 核心 ================================
+
+    /**
+     * Agent loop 入口（首次对话用）。
+     * 已包含完整 messages（system + 历史 + user），直接进入 loop。
+     * Phase 2.4: 接受 scenario+step，按当前步骤动态过滤工具集（progressive disclosure）
+     */
+    private AiDTO.ChatResp runAgentLoop(AiDTO.ChatReq req, List<Map<String, Object>> messages,
+                                        String interimContent, String scenario, String step) {
+        return runAgentLoopInternal(req, messages, interimContent, scenario, step);
+    }
+
+    /**
+     * Agent loop 内部实现（chat + submitToolResult 共享）。
+     *
+     * 循环逻辑：
+     *   while (iteration < MAX):
+     *     1. 调 DeepSeek（按 scenario+step 动态过滤工具集）
+     *     2. 解析 content + tool_calls
+     *     3. 把 assistant 消息追加到 messages（用于下次调用上下文）
+     *     4. 分类 tool_calls：
+     *        - BACKEND：同步执行，追加 tool message，继续 loop
+     *        - FRONTEND：保存 AgentState（含 scenario+step），返回 ChatResp(done=false, resumeToken, toolCalls)
+     *     5. 没有 tool_calls：返回最终回复 ChatResp(done=true)
+     */
+    private AiDTO.ChatResp runAgentLoopInternal(AiDTO.ChatReq req,
+                                                List<Map<String, Object>> messages,
+                                                String interimContent,
+                                                String scenario, String step) {
+        String latestContent = interimContent == null ? "" : interimContent;
+        int iteration = 0;
+
+        while (iteration < MAX_LOOP_ITERATIONS) {
+            iteration++;
+            try {
+                // 1. 构造请求体（Phase 2.4: 按 scenario+step 动态过滤工具集）
+                Map<String, Object> requestBody = buildRawRequestBody(messages, scenario, step);
+
+                // 2. 调用 DeepSeek
+                JsonNode responseNode = callDeepSeekApi(requestBody);
+
+                // 3. 解析 content + tool_calls
+                JsonNode msgNode = responseNode.path("choices").get(0).path("message");
+                latestContent = msgNode.path("content").isNull() ? "" : msgNode.path("content").asText("");
+                latestContent = sanitizeAssistantContent(latestContent);
+
+                JsonNode toolCallsNode = msgNode.path("tool_calls");
+                List<RawToolCall> rawCalls = new ArrayList<>();
+                if (!toolCallsNode.isMissingNode() && toolCallsNode.isArray()) {
+                    for (JsonNode tcNode : toolCallsNode) {
+                        try {
+                            rawCalls.add(parseRawToolCall(tcNode));
+                        } catch (Exception ex) {
+                            log.warn("解析 tool_call 失败，跳过", ex);
+                        }
+                    }
+                }
+
+                // 4. 把 assistant 消息追加到 messages（含 tool_calls，下次调用需要）
+                appendAssistantMessage(messages, msgNode, rawCalls);
+
+                // 5. 没有 tool_calls → loop 结束，返回最终回复
+                if (rawCalls.isEmpty()) {
+                    return finalizeResponse(req, latestContent, Collections.emptyList(), null, true,
+                            scenario, step, null);
+                }
+
+                // 6. 分类处理 tool_calls（业界共识：严格串行执行避免依赖问题）
+                //    Phase 2.5: 取第一个 tool_call 执行，等结果回灌后再决定下一步
+                RawToolCall c = rawCalls.get(0);
+                String toolKind = toolDiscoveryService.kindOf(c.name);
+
+                if ("BACKEND".equals(toolKind)) {
+                    // 后端工具：同步执行（loop 内），追加 tool message，继续下次 loop
+                    Object result = executeBackendTool(c.name, c.args, req);
+                    Map<String, Object> toolMessage = new LinkedHashMap<>();
+                    toolMessage.put("role", "tool");
+                    toolMessage.put("tool_call_id", c.id);
+                    try {
+                        toolMessage.put("content", om.writeValueAsString(result));
+                    } catch (JsonProcessingException e) {
+                        toolMessage.put("content", "{\"ok\":false}");
+                    }
+                    messages.add(toolMessage);
+                    // 继续下一次 loop（让模型消费结果）
+                    continue;
+                }
+
+                // FRONTEND 工具：暂停 loop，保存 state（含 scenario+step），返回
+                AiDTO.FrontendToolCall frontendDTO = convertRawToolCallToFrontendDTO(c);
+                List<AiDTO.FrontendToolCall> frontendDTOs = List.of(frontendDTO);
+                String token = saveAgentState(req, messages, frontendDTOs, latestContent, scenario, step);
+                return finalizeResponse(req, latestContent, frontendDTOs, token, false,
+                        scenario, step, frontendDTO.getMode());
+
+            } catch (Exception e) {
+                log.error("Agent loop 第 {} 次迭代失败，转入兜底", iteration, e);
+                return fallbackResponse(req, e.getMessage());
+            }
+        }
+
+        // 超过最大迭代数，返回当前内容
+        log.warn("Agent loop 达到最大迭代数 {}", MAX_LOOP_ITERATIONS);
+        return finalizeResponse(req, latestContent, Collections.emptyList(), null, true,
+                scenario, step, null);
+    }
+
+    // ================================ AgentState 持久化 ================================
+
+    /** 保存 loop 状态并生成 resumeToken（Phase 2: 含 scenario+step 上下文） */
+    private String saveAgentState(AiDTO.ChatReq req, List<Map<String, Object>> messages,
+                                  List<AiDTO.FrontendToolCall> pendingCalls, String interimContent,
+                                  String scenario, String step) {
+        String token = "rst-" + UUID.randomUUID().toString().replace("-", "").substring(0, 24);
+        try {
+            AgentState state = AgentState.builder()
+                    .resumeToken(token)
+                    .taskId(req.getTaskId())
+                    .sessionId(req.getSessionId())
+                    .messagesJson(om.writeValueAsString(messages))
+                    .pendingToolCallsJson(om.writeValueAsString(pendingCalls))
+                    .interimContent(interimContent)
+                    .currentScenario(scenario)
+                    .currentStep(step)
+                    .mode(pendingCalls.isEmpty() ? "AUTO" : pendingCalls.get(0).getMode())
+                    .status("WAITING_TOOL")
+                    .expiresAt(LocalDateTime.now().plusHours(24))
+                    .build();
+            agentStateRepository.save(state);
+            return token;
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException("AgentState 序列化失败: " + e.getMessage(), e);
+        }
+    }
+
+    /** 清理同一 session 残留的 WAITING_TOOL 状态 */
+    private void cleanupWaitingState(String sessionId) {
+        if (sessionId == null) return;
+        List<AgentState> existing = agentStateRepository
+                .findAllBySessionIdAndStatus(sessionId, "WAITING_TOOL");
+        for (AgentState s : existing) {
+            s.setStatus("EXPIRED");
+            agentStateRepository.save(s);
+        }
+    }
+
+    // ================================ 后端工具执行（预留扩展点） ================================
+
+    /**
+     * 后端工具同步执行（Phase 4 实现）。
+     *
+     * 业界 MCP tools/call 的等价实现：BACKEND 工具在 agent loop 内同步执行，
+     * 结果作为 tool message 回灌给模型，模型据此继续推理。
+     *
+     * 已实现工具：
+     *   - list_config_defs  : 列出所有配置定义摘要（id/code/name/fieldCount）
+     *   - get_config_def    : 按 defId 查询单个配置定义的字段详情（key/type/label/defaultValue）
+     *   - get_workspace_state: 返回前端传入的工作区状态快照（场景/步骤/已选配置项等）
+     *
+     * 设计动机（Phase 4 核心价值）：
+     *   系统不再把所有配置定义全量注入 system prompt（token 浪费 + 上下文污染），
+     *   而是 AI 按需调用 list_config_defs / get_config_def 获取信息。
+     *   即"告诉 AI 能做什么，而非把数据喂给 AI"（用户核心诉求）。
+     */
+    private Object executeBackendTool(String name, Map<String, Object> args, AiDTO.ChatReq req) {
+        log.info("执行后端工具: name={} args={}", name, args);
+        try {
+            switch (name == null ? "" : name) {
+                case "list_config_defs":
+                    return executeListConfigDefs();
+                case "get_config_def":
+                    return executeGetConfigDef(args);
+                case "get_workspace_state":
+                    return executeGetWorkspaceState(req);
+                default:
+                    return Map.of("ok", false, "message", "未实现的后端工具: " + name);
+            }
+        } catch (Exception e) {
+            log.error("后端工具 {} 执行失败", name, e);
+            return Map.of("ok", false, "message", "工具执行异常: " + e.getMessage());
+        }
+    }
+
+    /** list_config_defs：列出所有启用的配置定义摘要 */
+    private Object executeListConfigDefs() {
+        List<ConfigDefinition> defs = definitionService.listAll();
+        List<Map<String, Object>> list = new ArrayList<>();
+        for (ConfigDefinition d : defs) {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("id", d.getId());
+            item.put("code", d.getCode());
+            item.put("name", d.getName());
+            item.put("fieldCount", d.getColumns() != null ? d.getColumns().size() : 0);
+            list.add(item);
+        }
+        return Map.of("ok", true, "count", list.size(), "defs", list);
+    }
+
+    /** get_config_def：按 defId 查询单个配置定义的字段详情 */
+    private Object executeGetConfigDef(Map<String, Object> args) {
+        Object defIdObj = args == null ? null : args.get("defId");
+        if (defIdObj == null) {
+            return Map.of("ok", false, "message", "缺少必填字段: defId");
+        }
+        Long defId;
+        try {
+            defId = ((Number) defIdObj).longValue();
+        } catch (ClassCastException e) {
+            defId = Long.parseLong(String.valueOf(defIdObj));
+        }
+        Optional<ConfigDefinition> opt = definitionService.getById(defId);
+        if (opt.isEmpty()) {
+            return Map.of("ok", false, "message", "配置定义不存在: " + defId);
+        }
+        ConfigDefinition d = opt.get();
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("ok", true);
+        result.put("id", d.getId());
+        result.put("code", d.getCode());
+        result.put("name", d.getName());
+        result.put("description", d.getDescription());
+        result.put("fields", d.getColumns() != null ? d.getColumns() : List.of());
+        return result;
+    }
+
+    /** get_workspace_state：返回前端传入的工作区状态快照 */
+    private Object executeGetWorkspaceState(AiDTO.ChatReq req) {
+        Map<String, Object> ws = req.getWorkspaceState();
+        if (ws == null || ws.isEmpty()) {
+            return Map.of("ok", true, "workspaceState", Map.of(),
+                    "message", "当前无工作区状态快照（用户尚未进入向导或未传状态）");
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("ok", true);
+        result.put("workspaceState", ws);
+        return result;
+    }
+
+    // ================================ RawToolCall 内部表示 ================================
+
+    private record RawToolCall(String id, String name, Map<String, Object> args) {}
+
+    private RawToolCall parseRawToolCall(JsonNode tcNode) {
+        JsonNode fnNode = tcNode.path("function");
+        String name = fnNode.path("name").asText("");
+        String id = tcNode.path("id").asText("");
+        String argumentsStr = fnNode.path("arguments").asText("{}");
+        Map<String, Object> args;
+        try {
+            args = (argumentsStr == null || argumentsStr.isBlank())
+                    ? new LinkedHashMap<>() : om.readValue(argumentsStr, MAP_TYPE);
+        } catch (JsonProcessingException e) {
+            log.warn("tool_call arguments 不是合法 JSON，原样包装: {}", argumentsStr);
+            args = new LinkedHashMap<>();
+            args.put("_raw", argumentsStr);
+        }
+        return new RawToolCall(
+                (id == null || id.isBlank()) ? "tc-" + UUID.randomUUID().toString().substring(0, 10) : id,
+                name, args);
+    }
+
+    /**
+     * 把 RawToolCall 转为 FrontendToolCall DTO。
+     *
+     * Phase 2.5 改造：从 ToolDiscoveryService 注入 autoExec/requireDoubleConfirm/mode 元数据。
+     * 业界 Cursor Composer 模式：信任分级让前端知道是 AUTO 自动执行还是 CONFIRM 弹卡片确认。
+     */
+    private AiDTO.FrontendToolCall convertRawToolCallToFrontendDTO(RawToolCall c) {
+        Map<String, Object> args = FrontendTools.normalizeArgs(c.name, c.args);
+        boolean autoExec = toolDiscoveryService.isAutoExec(c.name);
+        boolean needConfirm = toolDiscoveryService.defaultNeedConfirm(c.name);
+        boolean requireDoubleConfirm = toolDiscoveryService.isRequireDoubleConfirm(c.name);
+        // 模式：autoExec=true 且 needConfirm=false → AUTO 自动执行；否则 CONFIRM 等用户确认
+        String mode = (autoExec && !needConfirm) ? "AUTO" : "CONFIRM";
+        return AiDTO.FrontendToolCall.builder()
+                .callId(c.id)
+                .toolName(c.name)
+                .args(args)
+                .title(toolTitle(c.name))
+                .impact(FrontendTools.summarizeImpact(c.name, args))
+                .needConfirm(needConfirm)
+                .legacy(false)
+                .autoExec(autoExec)
+                .requireDoubleConfirm(requireDoubleConfirm)
+                .mode(mode)
+                .build();
+    }
+
+    /** 把 assistant 消息（含 tool_calls）追加到 messages，供下次调用 */
+    @SuppressWarnings("unchecked")
+    private void appendAssistantMessage(List<Map<String, Object>> messages, JsonNode msgNode, List<RawToolCall> calls) {
+        Map<String, Object> assistant = new LinkedHashMap<>();
+        assistant.put("role", "assistant");
+        String content = msgNode.path("content").isNull() ? "" : msgNode.path("content").asText("");
+        assistant.put("content", content);
+        if (!calls.isEmpty()) {
+            List<Map<String, Object>> toolCallsArr = new ArrayList<>();
+            for (RawToolCall c : calls) {
+                Map<String, Object> tc = new LinkedHashMap<>();
+                tc.put("id", c.id);
+                tc.put("type", "function");
+                Map<String, Object> fn = new LinkedHashMap<>();
+                fn.put("name", c.name);
+                try {
+                    fn.put("arguments", om.writeValueAsString(c.args));
+                } catch (JsonProcessingException e) {
+                    fn.put("arguments", "{}");
+                }
+                tc.put("function", fn);
+                toolCallsArr.add(tc);
+            }
+            assistant.put("tool_calls", toolCallsArr);
+        }
+        messages.add(assistant);
+    }
+
+    /** 暂停时未追加 assistant tool_calls 消息，回灌时补齐 */
+    @SuppressWarnings("unchecked")
+    private void appendAssistantToolCallMessage(List<Map<String, Object>> messages,
+                                                AgentState state,
+                                                AiDTO.FrontendToolCall matchedCall) {
+        // 如果 messages 末尾已经是 assistant 且带 tool_calls，不再重复追加
+        if (!messages.isEmpty()) {
+            Map<String, Object> last = messages.get(messages.size() - 1);
+            if ("assistant".equals(last.get("role")) && last.get("tool_calls") != null) {
+                return;
+            }
+        }
+        Map<String, Object> assistant = new LinkedHashMap<>();
+        assistant.put("role", "assistant");
+        assistant.put("content", state.getInterimContent() == null ? "" : state.getInterimContent());
+        List<Map<String, Object>> toolCallsArr = new ArrayList<>();
+        Map<String, Object> tc = new LinkedHashMap<>();
+        tc.put("id", matchedCall.getCallId());
+        tc.put("type", "function");
+        Map<String, Object> fn = new LinkedHashMap<>();
+        fn.put("name", matchedCall.getToolName());
+        try {
+            fn.put("arguments", om.writeValueAsString(matchedCall.getArgs()));
+        } catch (JsonProcessingException e) {
+            fn.put("arguments", "{}");
+        }
+        tc.put("function", fn);
+        toolCallsArr.add(tc);
+        assistant.put("tool_calls", toolCallsArr);
+        messages.add(assistant);
+    }
+
+    // ================================ 响应构造 + 兜底 ================================
+
+    /**
+     * 构造最终响应。
+     * Phase 2: 加入 scenario/step/mode 元数据，让前端知道当前状态机位置和执行模式。
+     */
+    private AiDTO.ChatResp finalizeResponse(AiDTO.ChatReq req, String reply,
+                                            List<AiDTO.FrontendToolCall> toolCalls,
+                                            String resumeToken, boolean done,
+                                            String scenario, String step, String mode) {
+        // 保存 assistant 消息到 DB（仅当对话结束时保存最终回复）
+        AiChatMessage aiMsg = null;
+        if (done && reply != null && !reply.isBlank()) {
+            AiChatMessage msg = AiChatMessage.builder()
+                    .taskId(req.getTaskId())
+                    .sessionId(req.getSessionId())
+                    .role("assistant")
+                    .content(reply)
+                    .build();
+            aiMsg = messageRepository.save(msg);
+        }
+
+        // 兜底：如果模型未走 tool_calls 而走了文本 JSON（罕见），尝试解析
+        List<AiDTO.AiAction> legacyActions = Collections.emptyList();
+        if (done && toolCalls.isEmpty()) {
+            legacyActions = parseActionsFromReply(reply);
+            if (!legacyActions.isEmpty()) {
+                List<AiDTO.FrontendToolCall> adapted = new ArrayList<>();
+                for (AiDTO.AiAction a : legacyActions) {
+                    adapted.add(FrontendTools.adaptFromLegacy(a));
+                }
+                toolCalls = adapted;
+            }
+        }
+
+        // 序列化 toolCalls 存入 DB
+        String toolCallJsonForDb = null;
+        if (!toolCalls.isEmpty() && aiMsg != null) {
+            try {
+                toolCallJsonForDb = om.writeValueAsString(toolCalls);
+                aiMsg.setToolCall(toolCallJsonForDb);
+                messageRepository.save(aiMsg);
+            } catch (JsonProcessingException ignored) {
+            }
+        }
+
+        // 模式决定：done=true 用 DONE；否则用传入的 mode 或默认 CONFIRM
+        String responseMode = done ? "DONE" : (mode == null ? "CONFIRM" : mode);
+
+        return AiDTO.ChatResp.builder()
+                .messageId(aiMsg == null ? null : aiMsg.getId())
+                .reply(reply == null ? "" : reply)
+                .toolCalls(toolCalls)
+                .actions(legacyActions)
+                .resumeToken(resumeToken)
+                .done(done)
+                .pendingCallId(done ? null : (toolCalls.isEmpty() ? null : toolCalls.get(0).getCallId()))
+                .currentScenario(scenario)
+                .currentStep(step)
+                .mode(responseMode)
+                .build();
+    }
+
+    private AiDTO.ChatResp fallbackResponse(AiDTO.ChatReq req, String errMsg) {
+        String reply = "【AI服务暂时不可用】" + (errMsg == null ? "" : "原因: " + errMsg);
+        List<AiDTO.AiAction> actions = buildFallbackActions(req);
+        List<AiDTO.FrontendToolCall> toolCalls = new ArrayList<>();
+        for (AiDTO.AiAction a : actions) {
+            toolCalls.add(FrontendTools.adaptFromLegacy(a));
+        }
+        AiChatMessage msg = AiChatMessage.builder()
+                .taskId(req.getTaskId())
+                .sessionId(req.getSessionId())
+                .role("assistant")
+                .content(reply)
+                .build();
+        AiChatMessage saved = messageRepository.save(msg);
+        return AiDTO.ChatResp.builder()
+                .messageId(saved.getId())
+                .reply(reply)
+                .toolCalls(toolCalls)
+                .actions(actions)
+                .resumeToken(null)
+                .done(true)
+                .mode("DONE")
+                .build();
+    }
+
+    private String toolTitle(String name) {
+        return switch (name == null ? "" : name) {
+            case "navigate_step" -> "跳转工作区步骤";
+            case "select_definitions" -> "管理配置项选择";
+            case "run_flow" -> "一键执行业务流程";
+            case "table_batch_set_field" -> "表格按条件批量修改";
+            case "table_delete_rows" -> "删除表格数据行";
+            case "table_replace_values" -> "表格字段值替换";
+            case "confirm_complete" -> "确认完成流程";
+            default -> "前端工具";
+        };
+    }
+
+    // ================================ 原生协议构造 + 调用 ================================
+
+    /**
+     * 构造 DeepSeek 请求体。
+     *
+     * Phase 2.4 改造：用 ToolDiscoveryService 按当前 scenario+step 动态过滤工具集
+     * （业界 MCP tools/list + Anthropic Skills Progressive Disclosure）。
+     * 若 scenario/step 为 null，用 FrontendTools.RAW_TOOLS_AS_MAPS 兜底（兼容旧调用）。
+     */
+    private Map<String, Object> buildRawRequestBody(List<Map<String, Object>> messages,
+                                                    String scenario, String step) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("model", model);
+        body.put("temperature", temperature);
+        body.put("max_tokens", maxTokens);
+        body.put("messages", messages);
+
+        // 动态工具发现：按 scenario+step 过滤工具集
+        List<Map<String, Object>> tools;
+        if (scenario != null && step != null) {
+            tools = toolDiscoveryService.listAvailableTools(scenario, step);
+            log.debug("动态工具发现: scenario={} step={} -> {} 个工具", scenario, step, tools.size());
+        } else {
+            // 兜底：暴露所有工具
+            tools = FrontendTools.RAW_TOOLS_AS_MAPS;
+            log.debug("未指定 scenario/step，使用全部工具: {} 个", tools.size());
+        }
+        body.put("tools", tools);
+        body.put("tool_choice", "auto");
+        return body;
+    }
+
+    private JsonNode callDeepSeekApi(Map<String, Object> requestBody) {
+        String reqJson;
+        try {
+            reqJson = om.writeValueAsString(requestBody);
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException("请求体序列化失败", e);
+        }
+        log.debug("DeepSeek 请求体(前1500字符): {}", reqJson.substring(0, Math.min(1500, reqJson.length())));
+
+        String respStr = client()
+                .post()
+                .uri(chatPath)
+                .header("Authorization", "Bearer " + apiKey)
+                .contentType(MediaType.APPLICATION_JSON)
+                .accept(MediaType.APPLICATION_JSON)
+                .body(reqJson)
+                .retrieve()
+                .body(String.class);
+
+        if (respStr == null || respStr.isBlank()) {
+            throw new RuntimeException("DeepSeek 返回空响应");
+        }
+        try {
+            JsonNode root = om.readTree(respStr);
+            JsonNode err = root.path("error");
+            if (!err.isMissingNode() && !err.isNull() && err.size() > 0) {
+                throw new RuntimeException("DeepSeek 业务错误: " + err.toString());
+            }
+            JsonNode choices = root.path("choices");
+            if (choices.isMissingNode() || !choices.isArray() || choices.isEmpty()) {
+                throw new RuntimeException("DeepSeek 响应缺少 choices 字段");
+            }
+            return root;
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException("DeepSeek 响应 JSON 解析失败: " +
+                    respStr.substring(0, Math.min(300, respStr.length())), e);
+        }
+    }
+
+    // ================================ System + 历史 + 用户消息（原生格式） ================================
+
+    private List<Map<String, Object>> buildRawMessages(AiDTO.ChatReq req) {
+        List<Map<String, Object>> list = new ArrayList<>();
+
+        // Phase 4: system prompt 精简 —— 不再全量注入配置定义（token 浪费 + 上下文污染），
+        // 改为告诉 AI "能做什么"，让其按需调 list_config_defs / get_config_def 查询。
+        // 业界主流：MCP tools/list + Anthropic Skills "progressive disclosure"。
+        StringBuilder sys = new StringBuilder(1024);
+        sys.append("你是「AI配置助手」,服务于中文的配置管理系统。\n");
+        sys.append("系统支持 4 种场景: EXPORT(导出配置)、IMPORT(导入配置)、ADD(新增配置)、MODIFY(修改配置)。\n");
+        sys.append("每个场景是状态图,你只能调用当前步骤暴露的工具(由系统按 scenario+step 动态过滤)。\n");
+        sys.append("EXPORT: SELECT_SCENARIO→SELECT_DEFS→QUERY_COND→RESULT。\n");
+        sys.append("IMPORT/ADD/MODIFY: SELECT_SCENARIO→VIEW_DEFS→PRECHECK→REVIEW→PUBLISH。\n");
+
+        sys.append("\n【工具调用协议 · 强制执行】\n");
+        sys.append("1. 所有动作一律通过 tool_calls 字段指定工具,绝对不能在 content 里输出 JSON / 代码块 / 工具调用标记。\n");
+        sys.append("2. 需要配置定义信息时调 list_config_defs 取摘要(id/code/name),再用 get_config_def(defId) 查字段详情,禁止凭空猜测字段名。\n");
+        sys.append("3. 需要当前工作区状态时调 get_workspace_state。\n");
+        sys.append("4. 破坏性/大批量改动用对应表格工具,系统会自动二次确认。\n");
+        sys.append("5. 所有回复必须用中文,不要重复废话。工具结果以 tool 角色回灌,基于结果继续推理或给最终回复。\n");
+
+        if (req.getWorkspaceState() != null && !req.getWorkspaceState().isEmpty()) {
+            sys.append("\n[当前工作区状态]\n");
+            try {
+                sys.append(om.writeValueAsString(req.getWorkspaceState())).append("\n");
+            } catch (JsonProcessingException ignored) {}
+        }
+
+        if (req.getTriggerEvent() != null) {
+            sys.append("[触发事件]: ").append(req.getTriggerEvent()).append("\n");
+        }
+        if (Boolean.TRUE.equals(req.getAutoPrompt())) {
+            sys.append("这是工作区操作触发的自动提示,请用 2-3 句中文介绍当前步骤,并使用工具给出下一步操作建议。\n");
+        }
+
+        list.add(Map.of("role", "system", "content", sys.toString()));
+
+        // 加入历史消息
+        List<AiChatMessage> history = listHistory(req.getTaskId(), req.getSessionId());
+        int startIdx = Math.max(0, history.size() - 20);
+        for (int i = startIdx; i < history.size(); i++) {
+            AiChatMessage m = history.get(i);
+            if (m.getContent() == null || m.getContent().isBlank()) continue;
+            String content = m.getContent();
+            if (content.length() > 3000) content = content.substring(0, 3000) + "...(截断)";
+            if ("user".equals(m.getRole()) || "assistant".equals(m.getRole())) {
+                list.add(Map.of("role", m.getRole(), "content", content));
+            }
+        }
+
+        // 当前用户消息
+        String userContent = (req.getMessage() == null || req.getMessage().isBlank())
+                ? "（请根据工作区当前状态给出自动提示和操作建议）"
+                : req.getMessage();
+        list.add(Map.of("role", "user", "content", userContent));
+
+        return list;
+    }
+
+    // ================================ 降级兜底 + 消毒 ================================
+
+    private String sanitizeAssistantContent(String text) {
+        if (text == null) return "";
+        return text.replaceAll("(?s)```\\s*(?i:json|javascript)?\\s*\\n?.*?```", "")
+                .replaceAll("(?s)\\{\\s*\"type\"\\s*:.*?\\}(?:\\s*,\\s*\\{\\s*\"type\"\\s*:.*?\\})*", "")
+                .replaceAll("(?s)\\[\\s*\\{\\s*\"type\"\\s*:.*?\\}\\s*\\]", "")
+                .trim();
+    }
+
+    private List<AiDTO.AiAction> parseActionsFromReply(String reply) {
+        if (reply == null) return Collections.emptyList();
+        List<AiDTO.AiAction> list = new ArrayList<>();
+        int idx = 0;
+        while (true) {
+            int s = reply.indexOf("```json", idx);
+            if (s < 0) s = reply.indexOf("``` JSON", idx);
+            if (s < 0) s = reply.indexOf("```", idx);
+            if (s < 0) break;
+            int fenceLen = reply.startsWith("```json", s) ? 7
+                    : reply.startsWith("``` JSON", s) ? 8 : 3;
+            int start = s + fenceLen;
+            int end = reply.indexOf("```", start);
+            if (end < 0) break;
+            String jsonStr = reply.substring(start, end).trim();
+            try {
+                JsonNode node = om.readTree(jsonStr);
+                if (node.isArray()) {
+                    for (JsonNode e : node) {
+                        AiDTO.AiAction a = om.treeToValue(e, AiDTO.AiAction.class);
+                        if (a.getType() != null) list.add(a);
+                    }
+                } else if (node.isObject()) {
+                    AiDTO.AiAction a = om.treeToValue(node, AiDTO.AiAction.class);
+                    if (a.getType() != null) list.add(a);
+                }
+            } catch (Exception ex) {
+                log.trace("解析兜底动作JSON失败(可忽略): {}", jsonStr.substring(0, Math.min(120, jsonStr.length())));
+            }
+            idx = end + 3;
+        }
+        return list;
+    }
+
+    private List<AiDTO.AiAction> buildFallbackActions(AiDTO.ChatReq req) {
+        List<AiDTO.AiAction> list = new ArrayList<>();
+        if (req.getTaskId() != null) {
+            Optional<Task> t = taskService.getById(req.getTaskId());
+            if (t.isPresent() && "SELECT_SCENARIO".equals(t.get().getCurrentStep())) {
+                list.add(AiDTO.AiAction.builder()
+                        .id("fa-scenario")
+                        .type("navigate")
+                        .title("选择导出场景")
+                        .impact("切换场景为导出配置")
+                        .payload(Map.of("scenario", "EXPORT", "step", "SELECT_DEFS"))
+                        .needConfirm(false)
+                        .build());
+            }
+        }
+        return list;
+    }
+}

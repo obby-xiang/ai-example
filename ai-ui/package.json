@@ -1,0 +1,31 @@
+{
+  "name": "ai-ui",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview --port 5173"
+  },
+  "dependencies": {
+    "vue": "^3.5.13",
+    "vue-router": "^4.5.0",
+    "pinia": "^2.3.0",
+    "axios": "^1.7.9",
+    "element-plus": "^2.9.3",
+    "@element-plus/icons-vue": "^2.3.1",
+    "@grapecity/spread-sheets": "^17.1.10",
+    "@grapecity/spread-sheets-vue": "^17.1.10",
+    "@grapecity/spread-excelio": "^17.1.10",
+    "@grapecity/spread-sheets-charts": "^17.1.10",
+    "@grapecity/spread-sheets-resources-zh": "^17.1.10",
+    "dayjs": "^1.11.13",
+    "uuid": "^11.0.3"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "vite": "^6.0.7",
+    "sass": "^1.83.4"
+  }
+}

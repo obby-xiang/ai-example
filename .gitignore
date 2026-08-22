@@ -1,0 +1,34 @@
+# === Backend (ai-service) ===
+target/
+data/
+*.jar
+*.war
+*.log
+hsqldb.*
+mvnw*
+.mvn/wrapper/maven-wrapper.jar
+
+# === Frontend (ai-ui) ===
+node_modules/
+dist/
+dist-ssr/
+*.local
+.vite/
+.cache/
+
+# === IDE ===
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+*.swp
+*.swo
+
+# === OS ===
+.DS_Store
+Thumbs.db
+
+# === Env / Secrets ===
+.env
+.env.local

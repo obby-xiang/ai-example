@@ -1,0 +1,243 @@
+# 工具声明 —— 业界 MCP 协议核心理念（响应经验 100029435）
+# 设计原则：
+#   1. 工具 schema 自描述，模型靠 schema 理解能力边界（不投喂数据）
+#   2. 工具按"信任分级"标记 autoExec/needConfirm/requireDoubleConfirm
+#   3. 工具按 scenarios/steps 过滤，动态发现（progressive disclosure）
+#   4. 工具分类 FRONTEND/BACKEND：FRONTEND 暂停等回灌，BACKEND 同步执行
+#
+# 命名约束（DeepSeek/OpenAI 强制）：工具名只能含字母数字下划线/短横：^[a-zA-Z0-9_-]+$
+#
+# 信任分级（业界主流 Cursor Composer / Claude Code 模式）：
+#   autoExec=true           - 自动执行，无需用户点击（只读/导航/选择类）
+#   autoExec=false          - 暂停等待用户确认（破坏性/不可逆）
+#   requireDoubleConfirm=true - 二次确认弹框（高危流程）
+
+tools:
+  # ============ 路由与状态类（自动执行） ============
+  - name: navigate_step
+    description: 跳转工作区向导到某个步骤，可选先切换场景。不要在内容里输出 JSON，必须用本工具返回。
+    kind: FRONTEND
+    autoExec: true
+    needConfirm: false
+    scenarios: [EXPORT, IMPORT, ADD, MODIFY]
+    steps: [SELECT_SCENARIO, SELECT_DEFS, VIEW_DEFS, QUERY_COND, PRECHECK, REVIEW, PUBLISH, RESULT]
+    parameters:
+      type: object
+      properties:
+        step:
+          type: string
+          enum: [SELECT_SCENARIO, SELECT_DEFS, VIEW_DEFS, QUERY_COND, PRECHECK, REVIEW, PUBLISH, RESULT, DASHBOARD]
+          description: 目标步骤代码
+        scenario:
+          type: string
+          enum: [EXPORT, IMPORT, ADD, MODIFY]
+          description: 若尚未选场景，需在此指定场景代码；已选场景则可省略
+      required: [step]
+      additionalProperties: false
+
+  - name: get_workspace_state
+    description: 查询当前工作区状态（场景/步骤/已选配置项等）。只读，不修改任何数据。
+    kind: BACKEND
+    autoExec: true
+    needConfirm: false
+    scenarios: [EXPORT, IMPORT, ADD, MODIFY]
+    steps: [SELECT_SCENARIO, SELECT_DEFS, VIEW_DEFS, QUERY_COND, PRECHECK, REVIEW, PUBLISH, RESULT]
+    parameters:
+      type: object
+      properties: {}
+      additionalProperties: false
+
+  - name: list_config_defs
+    description: 列出所有配置定义摘要（id/code/name）。只读，不返回字段详情，按需调 get_config_def 获取字段。
+    kind: BACKEND
+    autoExec: true
+    needConfirm: false
+    scenarios: [EXPORT, IMPORT, ADD, MODIFY]
+    steps: [SELECT_DEFS, VIEW_DEFS, QUERY_COND]
+    parameters:
+      type: object
+      properties: {}
+      additionalProperties: false
+
+  - name: get_config_def
+    description: 按 defId 查询单个配置定义的字段详情（key/type/label/defaultValue）。需要字段信息时调用，避免凭空猜测字段名。
+    kind: BACKEND
+    autoExec: true
+    needConfirm: false
+    scenarios: [EXPORT, IMPORT, ADD, MODIFY]
+    steps: [SELECT_DEFS, VIEW_DEFS, QUERY_COND]
+    parameters:
+      type: object
+      properties:
+        defId:
+          type: integer
+          description: 配置定义 ID（来自 list_config_defs 返回的 id）
+      required: [defId]
+      additionalProperties: false
+
+  # ============ 选择/确认类（自动执行） ============
+  - name: select_definitions
+    description: 批量选择或取消配置项。模式 add 为增量添加, remove 为移除, set 为覆盖式设置。
+    kind: FRONTEND
+    autoExec: true
+    needConfirm: false
+    scenarios: [EXPORT]
+    steps: [SELECT_DEFS]
+    parameters:
+      type: object
+      properties:
+        mode:
+          type: string
+          enum: [add, remove, set]
+          description: 操作模式
+        defIds:
+          type: array
+          items:
+            type: integer
+          description: 要操作的配置定义 ID 数组，不能传 code/name，必须为整数 ID
+      required: [mode, defIds]
+      additionalProperties: false
+
+  - name: confirm_complete
+    description: 当前步骤所有工作完成，引导用户确认后结束流程或跳到下一步。
+    kind: FRONTEND
+    autoExec: true
+    needConfirm: false
+    scenarios: [EXPORT, IMPORT, ADD, MODIFY]
+    steps: [RESULT, PUBLISH]
+    parameters:
+      type: object
+      properties:
+        target:
+          type: string
+          enum: [FINISH_TASK, NEXT_STEP]
+          description: 完成方式
+      required: [target]
+      additionalProperties: false
+
+  # ============ 破坏性表格操作（必须确认） ============
+  - name: table_batch_set_field
+    description: 在当前编辑的某张配置表里，按 where 条件匹配行，把 set 对象里的字段批量修改为新值。这是破坏性写操作，必须 needConfirm=true。
+    kind: FRONTEND
+    autoExec: false
+    needConfirm: true
+    scenarios: [EXPORT, ADD, MODIFY]
+    steps: [VIEW_DEFS, QUERY_COND]
+    parameters:
+      type: object
+      properties:
+        configDefId:
+          type: integer
+          description: 要修改的配置定义 ID
+        where:
+          type: object
+          properties:
+            field:
+              type: string
+              description: 条件字段 key
+            op:
+              type: string
+              enum: [eq, ne, lt, le, gt, ge, contains, starts_with, ends_with]
+              description: 比较操作符
+            value:
+              description: 与字段类型匹配的值（数字/字符串/布尔）
+          additionalProperties: false
+          description: 匹配条件；为空或缺失表示全表更新（风险极高）
+        set:
+          type: object
+          description: "要更新的 {字段: 新值}，字段必须存在于该配置定义中"
+          additionalProperties: true
+      required: [configDefId, set]
+      additionalProperties: false
+
+  - name: table_delete_rows
+    description: 删除表格指定范围或满足条件的行。破坏性操作，必须 needConfirm=true。
+    kind: FRONTEND
+    autoExec: false
+    needConfirm: true
+    scenarios: [MODIFY]
+    steps: [VIEW_DEFS]
+    parameters:
+      type: object
+      properties:
+        configDefId:
+          type: integer
+          description: 配置定义 ID
+        fromRow:
+          type: integer
+          description: 从第 fromRow 行开始删除（1 基，表头算第 0 行，数据首行=1）
+        toRow:
+          type: integer
+          description: 删除到第 toRow 行（含）；缺失表示删到末尾
+        where:
+          type: object
+          properties:
+            field:
+              type: string
+              description: 字段 key
+            op:
+              type: string
+              enum: [eq, ne, lt, le, gt, ge]
+              description: 操作符
+            value:
+              description: 阈值
+          additionalProperties: false
+          description: 当 fromRow/toRow 缺失时使用条件删除
+      required: [configDefId]
+      additionalProperties: false
+
+  - name: table_replace_values
+    description: 将某个字段中搜索到的值替换为新值（支持字面量/正则）。
+    kind: FRONTEND
+    autoExec: false
+    needConfirm: true
+    scenarios: [EXPORT, ADD, MODIFY]
+    steps: [VIEW_DEFS, QUERY_COND]
+    parameters:
+      type: object
+      properties:
+        configDefId:
+          type: integer
+          description: 配置定义 ID
+        field:
+          type: string
+          description: 字段 key
+        search:
+          type: string
+          description: 搜索串
+        replace:
+          type: string
+          description: 替换为（字面量或正则 $1 捕获组）
+        regex:
+          type: boolean
+          default: false
+          description: 是否把 search 当作正则表达式
+      required: [configDefId, field, search, replace]
+      additionalProperties: false
+
+  # ============ 高危流程类（二次确认） ============
+  - name: run_flow
+    description: 一键走完一个业务流程（导出单个、导出全部、发布等）。对于大批量/写操作请打上 needConfirm。
+    kind: FRONTEND
+    autoExec: false
+    needConfirm: true
+    requireDoubleConfirm: true
+    scenarios: [EXPORT, IMPORT, ADD, MODIFY]
+    steps: [RESULT, PUBLISH]
+    parameters:
+      type: object
+      properties:
+        flowType:
+          type: string
+          enum: [export_single, export_all, import_commit, add_commit, modify_commit]
+          description: 流程类型
+        defIds:
+          type: array
+          items:
+            type: integer
+          description: export_single 也可用长度 1 的数组
+        defId:
+          type: integer
+          description: 仅 export_single 时使用；优先 defId
+      required: [flowType]
+      additionalProperties: false

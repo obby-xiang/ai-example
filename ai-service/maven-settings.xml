@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  项目级 Maven settings。
+  目的：绕过全局镜像（如华为云 mirrorOf=*）对 Spring AI 1.1.8 的缺失拦截，
+  让 spring-release / central-release 这两个 pom 中声明的 id 直接走源站。
+  使用方式：mvn -s maven-settings.xml ...
+-->
+<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.2.0 https://maven.apache.org/xsd/settings-1.2.0.xsd">
+    <mirrors>
+        <mirror>
+            <id>aliyun-mirror</id>
+            <!-- 拦截除 explicit 直连源之外的所有仓库，避免走到老的华为云（其 Spring AI 同步滞后） -->
+            <mirrorOf>*,!spring-release,!spring-plugin-release,!central-release</mirrorOf>
+            <name>阿里云公共仓库（Maven Central 同步更快）</name>
+            <url>https://maven.aliyun.com/repository/public</url>
+        </mirror>
+    </mirrors>
+</settings>
