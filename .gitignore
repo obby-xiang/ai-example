@@ -38,5 +38,7 @@ Thumbs.db
 .env.local
 .env.*.local
 
-# === Trae internal docs (not for repo) ===
-.trae/
+# === Trae design docs (uploaded to repo) ===
+# .trae/  # 已纳入仓库:documents/ 下设计文档供参考
+.trae/.cache/
+.trae/*.log

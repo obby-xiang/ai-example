@@ -243,6 +243,12 @@ ai-example/
 ├── docs/
 │   └── design-and-implementation.md # 详细设计与实现文档
 │
+├── .trae/
+│   └── documents/                    # 阶段设计文档（需求拆解 + 实施计划）
+│       ├── ai-ui-vercel-frontend-ai-runtime.md
+│       ├── collect-user-input-and-progress-sync.md
+│       └── excel-capabilities-plan.md
+│
 └── memory/                          # AI 助手记忆文件（经验沉淀）
     ├── user-profile.md
     ├── project-memory.md
