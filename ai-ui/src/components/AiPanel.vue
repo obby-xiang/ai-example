@@ -57,12 +57,30 @@
                 <span class="p-label">参数:</span>
                 <code class="p-code">{{ formatArgs(tc) }}</code>
               </div>
+              <!-- INPUT 模式：Schema-driven 表单（业界 Adaptive Cards 模式） -->
+              <div v-if="tc.mode === 'INPUT' && !isToolDone(m, tc)" class="a-form">
+                <SchemaFormRenderer
+                  :fields="tc.args?.fields || []"
+                  :form-title="tc.args?.formTitle"
+                  :submit-label="tc.args?.submitLabel"
+                  :disabled="isToolRunning(m, tc)"
+                  @submit="(vals) => executeAndResume(m, tc, false, vals)"
+                  @cancel="executeAndResume(m, tc, true)"
+                />
+              </div>
               <div class="a-btns">
                 <!-- 已执行 / 已取消 / 失败：显示状态 -->
                 <template v-if="isToolDone(m, tc)">
                   <el-tag size="small" :type="toolStatusTagType(m, tc)">
                     {{ toolStatusLabel(m, tc) }}
                   </el-tag>
+                </template>
+                <!-- INPUT 模式：表单已渲染在上方，仅显示状态提示 -->
+                <template v-else-if="tc.mode === 'INPUT'">
+                  <el-tag v-if="isToolRunning(m, tc)" size="small" type="success" effect="dark">
+                    <el-icon class="el-icon-loading"><Loading /></el-icon> 提交中
+                  </el-tag>
+                  <el-tag v-else size="small" type="info">请在上方填写并提交</el-tag>
                 </template>
                 <!-- AUTO 模式：自动执行中，无按钮 -->
                 <template v-else-if="isAutoExec(tc)">
@@ -147,6 +165,7 @@ import { useConfigStore } from '@/stores/config'
 import { aiApi } from '@/api/ai'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { v4 as uuidv4 } from 'uuid'
+import SchemaFormRenderer from '@/components/SchemaFormRenderer.vue'
 import {
   getToolEntry,
   resolveNeedConfirm,
@@ -252,7 +271,7 @@ function formatArgs(tc) {
  *   工具执行后必须把结果回灌给后端 → 后端恢复 agent loop → 可能返回下一轮 toolCalls
  *   如果不回灌，模型永远不知道工具执行结果，agent loop 就断了。
  */
-async function executeAndResume(message, tc, userCancelled = false) {
+async function executeAndResume(message, tc, userCancelled = false, formData = null) {
   // 必须有 resumeToken 才能回灌（done=true 的旧消息没有，跳过）
   if (!message.resumeToken) {
     // 旧协议消息（done=true），直接执行即可
@@ -275,6 +294,11 @@ async function executeAndResume(message, tc, userCancelled = false) {
   if (userCancelled) {
     result = { ok: false, message: 'user_cancelled', reason: '用户取消了执行' }
     aiStore.setToolCallStatus(tc.callId, 'cancelled')
+  } else if (formData !== null && formData !== undefined) {
+    // INPUT 模式（collect_user_input）：直接把用户填写的表单值作为结果回灌，
+    // 不调用 executeFrontendTool（表单收集本身无副作用，值即结果）
+    result = { ok: true, message: '已收集用户输入', data: formData }
+    aiStore.setToolCallStatus(tc.callId, 'succeeded')
   } else {
     try {
       result = await executeFrontendTool(tc)
@@ -486,10 +510,14 @@ function scrollBottom() {
   })
 }
 
-// 消息数量变化 → 滚动 + 检查 AUTO 自动执行
-watch(() => aiStore.messages.length, () => {
+// 最后一条消息的 done/toolCalls 变化 → 滚动 + 检查 AUTO 自动执行
+// 注意：updateLastMsg 是更新已有消息（length 不变），故不能只监听 length。
+// 监听签名 length|done|toolCalls.length，同时覆盖"新消息追加"和"同消息更新"两种情况。
+watch(() => {
+  const last = aiStore.messages[aiStore.messages.length - 1]
+  return `${aiStore.messages.length}|${last ? last.done : ''}|${last ? (last.toolCalls ? last.toolCalls.length : 0) : 0}`
+}, () => {
   scrollBottom()
-  // Phase 3: 新消息追加后,若是 done=false 的工具消息,自动执行 autoExec 工具
   const last = aiStore.messages[aiStore.messages.length - 1]
   if (last && last.role === 'assistant' && last.done === false) {
     tryAutoExecute(last)
@@ -511,3 +539,14 @@ async function clearAll() {
 
 onMounted(scrollBottom)
 </script>
+
+<style scoped>
+/* INPUT 模式表单容器（Schema-driven 表单卡片，业界 Adaptive Cards 模式） */
+.a-form {
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: #f5f7fa;
+  border-radius: 6px;
+  border: 1px dashed #dcdfe6;
+}
+</style>

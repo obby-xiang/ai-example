@@ -50,7 +50,8 @@ public final class FrontendTools {
                  "table_batch_set_field",
                  "table_delete_rows",
                  "table_replace_values",
-                 "confirm_complete" -> ToolKind.FRONTEND;
+                 "confirm_complete",
+                 "collect_user_input" -> ToolKind.FRONTEND;
             // 预留：未来后端工具在此 case 命中并返回 BACKEND
             default -> ToolKind.FRONTEND;
         };
@@ -198,7 +199,7 @@ public final class FrontendTools {
     /** 该工具是否默认需要用户确认（仅前端可最终裁定，后端给默认值） */
     public static boolean defaultNeedConfirm(String toolName) {
         return switch (toolName) {
-            case "navigate_step", "select_definitions", "confirm_complete" -> false;
+            case "navigate_step", "select_definitions", "confirm_complete", "collect_user_input" -> false;
             case "run_flow", "table_batch_set_field", "table_delete_rows", "table_replace_values" -> true;
             default -> true;
         };
@@ -243,6 +244,7 @@ public final class FrontendTools {
                         nullSafe(args.get("replace"), ""),
                         Boolean.TRUE.equals(args.get("regex")) ? "（正则模式）" : "");
                 case "confirm_complete" -> String.format("将结束流程（目标=%s）", nullSafe(args.get("target"), "NEXT_STEP"));
+                case "collect_user_input" -> String.format("将向用户收集 %d 个表单字段", arraySize(args.get("fields")));
                 default -> "未知工具，前端将阻断执行";
             };
         } catch (Exception e) {

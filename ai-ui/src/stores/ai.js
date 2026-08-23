@@ -227,8 +227,12 @@ export const useAiStore = defineStore('ai', {
         console.warn('[aiStore] submitToolResult 参数缺失:', { resumeToken, callId })
         return null
       }
-      // 标记状态
-      this.setToolCallStatus(callId, result?.ok === false ? 'failed' : 'succeeded')
+      // 标记状态（取消 user_cancelled 保留 cancelled，避免误显示为"失败"）
+      let _finalStatus
+      if (result?.ok === false && result?.message === 'user_cancelled') _finalStatus = 'cancelled'
+      else if (result?.ok === false) _finalStatus = 'failed'
+      else _finalStatus = 'succeeded'
+      this.setToolCallStatus(callId, _finalStatus)
       this.loading = true
       try {
         const resp = await aiApi.toolResult({ resumeToken, callId, result })

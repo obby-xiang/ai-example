@@ -241,3 +241,76 @@ tools:
           description: 仅 export_single 时使用；优先 defId
       required: [flowType]
       additionalProperties: false
+
+  # ============ 用户输入收集类（Schema-driven 表单，业界 Adaptive Cards 模式） ============
+  - name: collect_user_input
+    description: 向用户收集结构化输入（表单）。当需要用户提供具体参数（如导出文件名、查询条件值、选择项、配置项 code/name 等）时调用，会暂停等待用户填写并提交。fields 数组定义表单字段，可一次收集多个字段（单轮表单）或单个字段（多轮问答），由你根据需要决定。
+    kind: FRONTEND
+    autoExec: false
+    needConfirm: false
+    scenarios: [EXPORT, IMPORT, ADD, MODIFY]
+    steps: [SELECT_SCENARIO, SELECT_DEFS, VIEW_DEFS, QUERY_COND, PRECHECK, REVIEW, PUBLISH, RESULT]
+    parameters:
+      type: object
+      properties:
+        formTitle:
+          type: string
+          description: 表单标题（展示给用户）
+        submitLabel:
+          type: string
+          default: 提交
+          description: 提交按钮文字
+        fields:
+          type: array
+          description: 字段定义数组，每个字段描述一个输入控件
+          minItems: 1
+          items:
+            type: object
+            properties:
+              key:
+                type: string
+                description: 字段标识（回灌结果 data 中的 key）
+              label:
+                type: string
+                description: 显示标签
+              type:
+                type: string
+                enum: [text, textarea, number, boolean, single_select, multi_select, button_group, date]
+                description: 控件类型
+              required:
+                type: boolean
+                default: false
+                description: 是否必填
+              default:
+                description: 默认值（类型与字段 type 匹配）
+              placeholder:
+                type: string
+                description: 占位提示
+              description:
+                type: string
+                description: 帮助文本
+              options:
+                type: array
+                description: 选项列表（single_select/multi_select/button_group 必填）
+                items:
+                  type: object
+                  properties:
+                    label:
+                      type: string
+                      description: 选项显示文字
+                    value:
+                      description: 选项值（类型不限）
+                  required: [label, value]
+              min:
+                type: number
+                description: 最小值（number）或最小长度（text/textarea）
+              max:
+                type: number
+                description: 最大值（number）或最大长度（text/textarea）
+              pattern:
+                type: string
+                description: 正则校验（text/textarea）
+            required: [key, label, type]
+            additionalProperties: false
+      required: [formTitle, fields]
+      additionalProperties: false

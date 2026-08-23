@@ -18,19 +18,19 @@ scenarios:
       - id: SELECT_SCENARIO
         next: SELECT_DEFS
         description: 选择业务场景
-        tools: [navigate_step, get_workspace_state]
+        tools: [navigate_step, get_workspace_state, collect_user_input]
       - id: SELECT_DEFS
         next: QUERY_COND
         description: 选择要导出的配置项
-        tools: [navigate_step, get_workspace_state, list_config_defs, get_config_def, select_definitions]
+        tools: [navigate_step, get_workspace_state, list_config_defs, get_config_def, select_definitions, collect_user_input]
       - id: QUERY_COND
         next: RESULT
         description: 设置查询条件
-        tools: [navigate_step, get_workspace_state, list_config_defs, get_config_def, table_batch_set_field, table_replace_values]
+        tools: [navigate_step, get_workspace_state, list_config_defs, get_config_def, table_batch_set_field, table_replace_values, collect_user_input]
       - id: RESULT
         next: END
         description: 查看导出结果
-        tools: [navigate_step, get_workspace_state, run_flow, confirm_complete]
+        tools: [navigate_step, get_workspace_state, run_flow, confirm_complete, collect_user_input]
 
   IMPORT:
     name: 导入配置
@@ -39,23 +39,23 @@ scenarios:
       - id: SELECT_SCENARIO
         next: VIEW_DEFS
         description: 选择业务场景
-        tools: [navigate_step, get_workspace_state]
+        tools: [navigate_step, get_workspace_state, collect_user_input]
       - id: VIEW_DEFS
         next: PRECHECK
         description: 查看导入的配置项
-        tools: [navigate_step, get_workspace_state, list_config_defs, get_config_def]
+        tools: [navigate_step, get_workspace_state, list_config_defs, get_config_def, collect_user_input]
       - id: PRECHECK
         next: REVIEW
         description: 预检查数据
-        tools: [navigate_step, get_workspace_state]
+        tools: [navigate_step, get_workspace_state, collect_user_input]
       - id: REVIEW
         next: PUBLISH
         description: 复核确认
-        tools: [navigate_step, get_workspace_state]
+        tools: [navigate_step, get_workspace_state, collect_user_input]
       - id: PUBLISH
         next: END
         description: 发布导入
-        tools: [navigate_step, get_workspace_state, run_flow, confirm_complete]
+        tools: [navigate_step, get_workspace_state, run_flow, confirm_complete, collect_user_input]
 
   ADD:
     name: 新增配置
@@ -64,23 +64,23 @@ scenarios:
       - id: SELECT_SCENARIO
         next: VIEW_DEFS
         description: 选择业务场景
-        tools: [navigate_step, get_workspace_state]
+        tools: [navigate_step, get_workspace_state, collect_user_input]
       - id: VIEW_DEFS
         next: PRECHECK
         description: 编辑新增的配置项
-        tools: [navigate_step, get_workspace_state, list_config_defs, get_config_def, table_batch_set_field, table_replace_values]
+        tools: [navigate_step, get_workspace_state, list_config_defs, get_config_def, table_batch_set_field, table_replace_values, collect_user_input]
       - id: PRECHECK
         next: REVIEW
         description: 预检查数据
-        tools: [navigate_step, get_workspace_state]
+        tools: [navigate_step, get_workspace_state, collect_user_input]
       - id: REVIEW
         next: PUBLISH
         description: 复核确认
-        tools: [navigate_step, get_workspace_state]
+        tools: [navigate_step, get_workspace_state, collect_user_input]
       - id: PUBLISH
         next: END
         description: 发布新增
-        tools: [navigate_step, get_workspace_state, run_flow, confirm_complete]
+        tools: [navigate_step, get_workspace_state, run_flow, confirm_complete, collect_user_input]
 
   MODIFY:
     name: 修改配置
@@ -89,20 +89,20 @@ scenarios:
       - id: SELECT_SCENARIO
         next: VIEW_DEFS
         description: 选择业务场景
-        tools: [navigate_step, get_workspace_state]
+        tools: [navigate_step, get_workspace_state, collect_user_input]
       - id: VIEW_DEFS
         next: PRECHECK
         description: 编辑配置项数据
-        tools: [navigate_step, get_workspace_state, list_config_defs, get_config_def, table_batch_set_field, table_delete_rows, table_replace_values]
+        tools: [navigate_step, get_workspace_state, list_config_defs, get_config_def, table_batch_set_field, table_delete_rows, table_replace_values, collect_user_input]
       - id: PRECHECK
         next: REVIEW
         description: 预检查数据
-        tools: [navigate_step, get_workspace_state]
+        tools: [navigate_step, get_workspace_state, collect_user_input]
       - id: REVIEW
         next: PUBLISH
         description: 复核确认
-        tools: [navigate_step, get_workspace_state]
+        tools: [navigate_step, get_workspace_state, collect_user_input]
       - id: PUBLISH
         next: END
         description: 发布修改
-        tools: [navigate_step, get_workspace_state, run_flow, confirm_complete]
+        tools: [navigate_step, get_workspace_state, run_flow, confirm_complete, collect_user_input]

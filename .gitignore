@@ -4,17 +4,20 @@ data/
 *.jar
 *.war
 *.log
+*.db
+*.db.*
 hsqldb.*
 mvnw*
 .mvn/wrapper/maven-wrapper.jar
 
-# === Frontend (ai-ui) ===
+# === Frontend (ai-ui / ai-ui-vercel) ===
 node_modules/
 dist/
 dist-ssr/
 *.local
 .vite/
 .cache/
+yarn-error.log
 
 # === IDE ===
 .idea/
@@ -24,6 +27,7 @@ dist-ssr/
 .vscode/
 *.swp
 *.swo
+*.tmp
 
 # === OS ===
 .DS_Store
@@ -32,3 +36,7 @@ Thumbs.db
 # === Env / Secrets ===
 .env
 .env.local
+.env.*.local
+
+# === Trae internal docs (not for repo) ===
+.trae/

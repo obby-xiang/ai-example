@@ -276,19 +276,28 @@ public class AiService {
                     }
                 }
 
-                // 4. 把 assistant 消息追加到 messages（含 tool_calls，下次调用需要）
-                appendAssistantMessage(messages, msgNode, rawCalls);
-
-                // 5. 没有 tool_calls → loop 结束，返回最终回复
+                // 4. 没有 tool_calls → 追加纯文本 assistant 消息，loop 结束返回最终回复
                 if (rawCalls.isEmpty()) {
+                    appendAssistantMessage(messages, msgNode, rawCalls);
                     return finalizeResponse(req, latestContent, Collections.emptyList(), null, true,
                             scenario, step, null);
                 }
 
-                // 6. 分类处理 tool_calls（业界共识：严格串行执行避免依赖问题）
+                // 5. 分类处理 tool_calls（业界共识：严格串行执行避免依赖问题）
                 //    Phase 2.5: 取第一个 tool_call 执行，等结果回灌后再决定下一步
                 RawToolCall c = rawCalls.get(0);
+                if (rawCalls.size() > 1) {
+                    log.warn("AI 返回 {} 个 tool_calls，串行只执行第一个 {}，其余由模型基于结果重新推理",
+                            rawCalls.size(), c.name);
+                }
                 String toolKind = toolDiscoveryService.kindOf(c.name);
+
+                // 6. 只把要执行的这一个 tool_call 放入 assistant 消息（修复 400 bug）
+                //    OpenAI 协议要求: assistant.tool_calls 中每个 tool_call_id 必须有对应 tool message 跟随。
+                //    串行执行只处理第一个,故 assistant 只放这一个,避免"N 个 tool_calls 配 1 个 tool message"
+                //    触发 400 insufficient tool messages。其余 tool_call 丢弃,模型拿到第一个结果后
+                //    会重新推理决定下一步(Anthropic/Claude 串行 tool_use 模式)。
+                appendAssistantMessage(messages, msgNode, List.of(c));
 
                 if ("BACKEND".equals(toolKind)) {
                     // 后端工具：同步执行（loop 内），追加 tool message，继续下次 loop
@@ -353,14 +362,21 @@ public class AiService {
         }
     }
 
-    /** 清理同一 session 残留的 WAITING_TOOL 状态 */
+    /** 清理同一 session 过期的 WAITING_TOOL 状态（保留活跃的，避免误清理未回灌的 state） */
     private void cleanupWaitingState(String sessionId) {
         if (sessionId == null) return;
         List<AgentState> existing = agentStateRepository
                 .findAllBySessionIdAndStatus(sessionId, "WAITING_TOOL");
+        LocalDateTime now = LocalDateTime.now();
         for (AgentState s : existing) {
-            s.setStatus("EXPIRED");
-            agentStateRepository.save(s);
+            // 只清理过期的 WAITING_TOOL state，保留活跃的。
+            // 修复 bug: 之前无条件清理所有 WAITING_TOOL，导致用户发新消息时
+            // 前一个未回灌的 run_flow state 被误设为 EXPIRED → 二次确认后回灌 500。
+            // submitToolResult 用 resumeToken 精确查找，多个活跃 WAITING_TOOL 不冲突。
+            if (s.getExpiresAt() == null || s.getExpiresAt().isBefore(now)) {
+                s.setStatus("EXPIRED");
+                agentStateRepository.save(s);
+            }
         }
     }
 
@@ -490,8 +506,11 @@ public class AiService {
         boolean autoExec = toolDiscoveryService.isAutoExec(c.name);
         boolean needConfirm = toolDiscoveryService.defaultNeedConfirm(c.name);
         boolean requireDoubleConfirm = toolDiscoveryService.isRequireDoubleConfirm(c.name);
-        // 模式：autoExec=true 且 needConfirm=false → AUTO 自动执行；否则 CONFIRM 等用户确认
-        String mode = (autoExec && !needConfirm) ? "AUTO" : "CONFIRM";
+        // 模式：collect_user_input → INPUT（前端渲染 Schema-driven 表单收集用户输入）；
+        //       autoExec=true 且 needConfirm=false → AUTO 自动执行；否则 CONFIRM 等用户确认
+        String mode = "collect_user_input".equals(c.name)
+                ? "INPUT"
+                : ((autoExec && !needConfirm) ? "AUTO" : "CONFIRM");
         return AiDTO.FrontendToolCall.builder()
                 .callId(c.id)
                 .toolName(c.name)
@@ -513,6 +532,17 @@ public class AiService {
         assistant.put("role", "assistant");
         String content = msgNode.path("content").isNull() ? "" : msgNode.path("content").asText("");
         assistant.put("content", content);
+        // DeepSeek thinking 模式：模型可能返回 reasoning_content（思维链）。
+        // 官方 API 要求多轮调用时必须把上一轮 reasoning_content 原样传回，否则 400
+        // "reasoning_content in the thinking mode must be passed back to the API"。
+        // 这里保留 reasoning_content 以满足协议（同时下方 buildRawRequestBody 关闭思考以根治）。
+        JsonNode rcNode = msgNode.path("reasoning_content");
+        if (!rcNode.isMissingNode() && !rcNode.isNull()) {
+            String rc = rcNode.asText("");
+            if (!rc.isBlank()) {
+                assistant.put("reasoning_content", rc);
+            }
+        }
         if (!calls.isEmpty()) {
             List<Map<String, Object>> toolCallsArr = new ArrayList<>();
             for (RawToolCall c : calls) {
@@ -663,6 +693,7 @@ public class AiService {
             case "table_delete_rows" -> "删除表格数据行";
             case "table_replace_values" -> "表格字段值替换";
             case "confirm_complete" -> "确认完成流程";
+            case "collect_user_input" -> "收集用户输入";
             default -> "前端工具";
         };
     }
@@ -683,6 +714,12 @@ public class AiService {
         body.put("temperature", temperature);
         body.put("max_tokens", maxTokens);
         body.put("messages", messages);
+        // 关闭 DeepSeek 思考模式（根治 400 bug）：
+        // 官方文档(api-docs.deepseek.com/guides/thinking_mode)：思考模式默认开启,带 tools 时
+        // 中间 assistant 的 reasoning_content 必须回传,否则 400 "reasoning_content must be passed back"。
+        // 配置管理场景(导航/选择/表格操作)无需思维链推理,关闭后模型不返回 reasoning_content,
+        // 从根上消除回传问题,同时降低 token 消耗、加速响应(官方推荐:简单任务用 disabled)。
+        body.put("thinking", Map.of("type", "disabled"));
 
         // 动态工具发现：按 scenario+step 过滤工具集
         List<Map<String, Object>> tools;
@@ -759,6 +796,8 @@ public class AiService {
         sys.append("3. 需要当前工作区状态时调 get_workspace_state。\n");
         sys.append("4. 破坏性/大批量改动用对应表格工具,系统会自动二次确认。\n");
         sys.append("5. 所有回复必须用中文,不要重复废话。工具结果以 tool 角色回灌,基于结果继续推理或给最终回复。\n");
+        sys.append("6. 流程推进(关键): 当当前步骤的意图已满足时,立即调 navigate_step 推进到状态图下一步,不要停等用户确认,也不要反复调 get_workspace_state。例:用户说'新建导出/导出配置'即场景 EXPORT,调 navigate_step(scenario=EXPORT,step=SELECT_SCENARIO) 后场景已选定,应继续调 navigate_step(step=SELECT_DEFS) 进入选择配置项,而非停在 SELECT_SCENARIO。只有遇到需要用户输入(如选哪些配置项、设查询条件)时才停下给出引导。\n");
+        sys.append("7. 收集用户输入(关键): 当需要用户提供具体参数(如导出文件名、查询条件值、选择项、配置项 code/name 等)时,调 collect_user_input 工具,用 fields 数组定义表单字段(支持 text/textarea/number/boolean/single_select/multi_select/button_group/date 八种控件,每字段含 key/label/type/required/options 等),系统会渲染表单让用户填写并自动回灌结果,你基于回灌的值继续推理。一次可收集多个字段(单轮表单)或单个字段(多轮问答),由你根据需要决定。不要用纯文本提问代替表单——凡需结构化输入一律用 collect_user_input。\n");
 
         if (req.getWorkspaceState() != null && !req.getWorkspaceState().isEmpty()) {
             sys.append("\n[当前工作区状态]\n");
@@ -789,11 +828,22 @@ public class AiService {
             }
         }
 
-        // 当前用户消息
+        // 当前用户消息（去重：chat 入口已保存 user 消息到 DB，listHistory 会加载到它，
+        // 若历史末尾已是相同 content 则不重复追加，避免 messages 出现两条相同 user 消息）
         String userContent = (req.getMessage() == null || req.getMessage().isBlank())
                 ? "（请根据工作区当前状态给出自动提示和操作建议）"
                 : req.getMessage();
-        list.add(Map.of("role", "user", "content", userContent));
+        boolean alreadyAppended = false;
+        if (req.getMessage() != null && !req.getMessage().isBlank() && !list.isEmpty()) {
+            Map<String, Object> last = list.get(list.size() - 1);
+            if ("user".equals(last.get("role"))
+                    && userContent.equals(last.get("content"))) {
+                alreadyAppended = true;
+            }
+        }
+        if (!alreadyAppended) {
+            list.add(Map.of("role", "user", "content", userContent));
+        }
 
         return list;
     }

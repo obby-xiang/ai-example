@@ -83,6 +83,11 @@ export const FRONTEND_TOOL_REGISTRY = {
       // 2) 跳转步骤
       if (step) {
         if (!taskStore.currentTask) await taskStore.createTask()
+        // 防御：跨场景跳步需先选定场景，否则后端 gotoStep 会拒绝
+        // （进度条不同步 bug 根因：scenario=null 跳到后续步骤导致前端 steps 数组为空）
+        if (step !== 'SELECT_SCENARIO' && !taskStore.scenario && !scenario) {
+          return { ok: false, message: '当前任务尚未选择场景，无法跳转到 ' + step + '。请先选择场景。' }
+        }
         await taskStore.gotoStep(step)
       }
       // 3) 路由跟随
@@ -293,6 +298,31 @@ export const FRONTEND_TOOL_REGISTRY = {
       const taskStore = useTaskStore()
       await taskStore.complete()
       return { ok: true, message: '任务已完成!' }
+    }
+  },
+
+  // -------------------- 8. collect_user_input --------------------
+  // 业界 Adaptive Cards 模式：AI 通过 schema 声明要收集的字段，前端动态渲染表单。
+  // mode=INPUT 时 AiPanel 渲染 SchemaFormRenderer 替代确认按钮，提交后直接回灌表单值。
+  collect_user_input: {
+    labelText: '表单',
+    labelType: 'primary',
+    needConfirm: () => false,
+    validate(args = {}) {
+      const e = requireField(args, 'fields', 'array')
+      if (e) return e
+      if (!args.fields.length) return 'fields 不能为空'
+      for (const f of args.fields) {
+        if (!f.key || !f.label || !f.type) {
+          return '每个字段必须包含 key/label/type'
+        }
+      }
+      return null
+    },
+    // INPUT 模式下 AiPanel 直接把用户填写的表单值回灌给后端，不会调用此 execute。
+    // 此处仅作兼容兜底（若被直接调用则把 args 原样返回）。
+    async execute(args) {
+      return { ok: true, message: '已收集用户输入', data: args }
     }
   }
 }

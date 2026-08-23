@@ -33,7 +33,7 @@ spring:
 
   ai:
     openai:
-      api-key: ${DEEPSEEK_API_KEY:}
+      api-key: ${DEEPSEEK_API_KEY:your-deepseek-api-key-here}
       base-url: https://api.deepseek.com
       chat:
         options:
@@ -47,7 +47,7 @@ app:
     base-url: https://api.deepseek.com
     chat-path: /chat/completions
     model: deepseek-v4-flash
-    api-key: ${DEEPSEEK_API_KEY:}
+    api-key: ${DEEPSEEK_API_KEY:your-deepseek-api-key-here}
 
 logging:
   level:
