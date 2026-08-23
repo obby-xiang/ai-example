@@ -105,6 +105,27 @@
           style="width:100%;"
         />
 
+        <!-- file 文件上传(excel_import 用) -->
+        <el-upload
+          v-else-if="f.type === 'file'"
+          :accept="f.accept || '.xlsx,.xls'"
+          :auto-upload="false"
+          :show-file-list="true"
+          :file-list="fileListMap[f.key] || []"
+          :on-change="(file) => handleFileChange(f.key, file)"
+          :on-remove="() => handleFileRemove(f.key)"
+          :limit="1"
+          :on-exceed="() => ElMessage.warning('只能上传 1 个文件,已替换')"
+          drag
+          style="width:100%;"
+        >
+          <el-icon class="el-icon--upload"><Upload /></el-icon>
+          <div class="el-upload__text">把文件拖到此处,或<em>点击上传</em></div>
+          <template #tip>
+            <div class="sf-desc">{{ f.description || ('支持 ' + (f.accept || '.xlsx,.xls')) }}</div>
+          </template>
+        </el-upload>
+
         <!-- 未知类型兜底 -->
         <span v-else class="sf-unknown">不支持的类型: {{ f.type }}</span>
       </el-form-item>
@@ -125,12 +146,13 @@
  *
  * 设计原则：
  *   1. 由后端 collect_user_input 工具的 args.fields 驱动渲染（不写死业务表单）
- *   2. 按 type 映射 Element Plus 控件：text/textarea/number/boolean/single_select/multi_select/button_group/date
+ *   2. 按 type 映射 Element Plus 控件：text/textarea/number/boolean/single_select/multi_select/button_group/date/file
  *   3. 前端做 required/min/max/pattern 最小校验，语义校验交给后端/模型
  *   4. 提交后 emit('submit', values)，由 AiPanel 回灌给后端恢复 agent loop
  */
 import { reactive, watch } from 'vue'
 import { ElMessage } from 'element-plus'
+import { Upload } from '@element-plus/icons-vue'
 
 const props = defineProps({
   fields: { type: Array, default: () => [] },
@@ -143,6 +165,8 @@ const emit = defineEmits(['submit', 'cancel'])
 
 const formData = reactive({})
 const errors = reactive({})
+// file 类型字段的 el-upload 受控文件列表({ [key]: [{ name, raw }] })
+const fileListMap = reactive({})
 
 function initForm() {
   for (const f of props.fields || []) {
@@ -150,6 +174,9 @@ function initForm() {
       formData[f.key] = Array.isArray(f.default) ? [...f.default] : []
     } else if (f.type === 'boolean') {
       formData[f.key] = f.default !== undefined && f.default !== null ? !!f.default : false
+    } else if (f.type === 'file') {
+      formData[f.key] = null
+      fileListMap[f.key] = []
     } else if (f.default !== undefined && f.default !== null) {
       formData[f.key] = f.default
     } else {
@@ -160,6 +187,16 @@ function initForm() {
 }
 initForm()
 watch(() => props.fields, initForm, { deep: true })
+
+// el-upload on-change: (uploadFile, uploadFiles) - 取最新文件覆盖
+function handleFileChange(fkey, uploadFile) {
+  fileListMap[fkey] = [uploadFile]
+  formData[fkey] = uploadFile?.raw || null
+}
+function handleFileRemove(fkey) {
+  fileListMap[fkey] = []
+  formData[fkey] = null
+}
 
 function isEmpty(v) {
   return v === undefined || v === null || v === ''

@@ -1,7 +1,7 @@
 # AI 辅助配置管理系统 — 设计与实现文档
 
-> 版本：v1.1（含 collect_user_input 用户交互机制）
-> 更新日期：2026-08-22
+> 版本：v1.2（含 Excel 能力补齐：模板/导入/导出 + excel_import/excel_export 工具）
+> 更新日期：2026-08-23
 
 ---
 
@@ -109,7 +109,7 @@ java/com/example/ai/
 └── tool/        FrontendTools, ScenarioDefinition, ToolDefinition, ToolDiscoveryService
 resources/
 ├── application.yml
-├── tools.yaml        # 11 个工具定义（Schema + 信任分级）
+├── tools.yaml        # 13 个工具定义（Schema + 信任分级）
 └── scenarios.yaml    # 4 场景状态机
 ```
 
@@ -175,12 +175,14 @@ src/
 | 自动执行 | `autoExec=true, needConfirm=false` | AUTO | watch 自动执行（dedup Set 防循环） | navigate_step, select_definitions |
 | 用户确认 | `needConfirm=true` | CONFIRM | 显示"确认执行"按钮 | table_batch_set_field, run_flow |
 | 二次确认 | `requireDoubleConfirm=true` | CONFIRM | 工具卡片按钮 + ElMessageBox 二次弹窗 | run_flow |
-| 表单收集 | `autoExec=false, needConfirm=false`（collect_user_input 专属） | INPUT | 渲染 SchemaFormRenderer 表单 | collect_user_input（本轮新增） |
+| 表单收集 | `autoExec=false, needConfirm=false`（collect_user_input / excel_import 专属） | INPUT | 渲染 SchemaFormRenderer 表单（含 file 类型上传卡片） | collect_user_input, excel_import |
 
 mode 注入逻辑见 [AiService.convertRawToolCallToFrontendDTO](file:///e:/workspace/trae/hello-world/ai-example/ai-service/src/main/java/com/example/ai/service/AiService.java)：
 
 ```java
-String mode = "collect_user_input".equals(c.name)
+// collect_user_input / excel_import → INPUT（前端渲染 Schema-driven 表单收集用户输入/上传文件）；
+// autoExec=true 且 needConfirm=false → AUTO 自动执行；否则 CONFIRM 等用户确认
+String mode = ("collect_user_input".equals(c.name) || "excel_import".equals(c.name))
         ? "INPUT"
         : ((autoExec && !needConfirm) ? "AUTO" : "CONFIRM");
 ```
@@ -216,7 +218,7 @@ String mode = "collect_user_input".equals(c.name)
 
 ## 3. 工具体系
 
-### 3.1 工具清单（11 个）
+### 3.1 工具清单（13 个）
 
 | # | 工具名 | kind | autoExec | needConfirm | 适用步骤 | 作用 |
 |---|--------|------|----------|-------------|----------|------|
@@ -230,7 +232,9 @@ String mode = "collect_user_input".equals(c.name)
 | 8 | table_delete_rows | FRONTEND | ✗ | ✓ | MODIFY/VIEW_DEFS | 删除行 |
 | 9 | table_replace_values | FRONTEND | ✗ | ✓ | VIEW_DEFS/QUERY_COND | 替换值 |
 | 10 | run_flow | FRONTEND | ✗ | ✓+二次 | RESULT/PUBLISH | 执行导出/发布流程 |
-| 11 | **collect_user_input** | FRONTEND | ✗ | ✗ | 全步骤 | **Schema 表单收集用户输入（本轮新增）** |
+| 11 | **collect_user_input** | FRONTEND | ✗ | ✗ | 全步骤 | **Schema 表单收集用户输入（v1.1 新增）** |
+| 12 | **excel_import** | FRONTEND | ✗ | ✗ | IMPORT/ADD/MODIFY·VIEW_DEFS | **上传 xlsx 灌入指定配置定义（v1.2 新增，INPUT 模式渲染 file 上传卡片）** |
+| 13 | **excel_export** | FRONTEND | ✓ | ✗ | EXPORT·RESULT | **导出配置项为 xlsx 下载（v1.2 新增，AUTO 自动执行单/多 sheet 合并）** |
 
 ### 3.2 YAML 驱动的工具定义
 
@@ -470,7 +474,9 @@ const displaySteps = computed(() => {
 boolean autoExec = toolDiscoveryService.isAutoExec(c.name);
 boolean needConfirm = toolDiscoveryService.defaultNeedConfirm(c.name);
 boolean requireDoubleConfirm = toolDiscoveryService.isRequireDoubleConfirm(c.name);
-String mode = "collect_user_input".equals(c.name)
+// collect_user_input / excel_import → INPUT（前端渲染 Schema-driven 表单/上传文件）；
+// autoExec=true 且 needConfirm=false → AUTO 自动执行；否则 CONFIRM
+String mode = ("collect_user_input".equals(c.name) || "excel_import".equals(c.name))
         ? "INPUT"
         : ((autoExec && !needConfirm) ? "AUTO" : "CONFIRM");
 ```

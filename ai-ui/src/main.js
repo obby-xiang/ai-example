@@ -11,6 +11,9 @@ import '@grapecity/spread-sheets-resources-zh'
 import GC from '@grapecity/spread-sheets'
 // 中文资源
 GC.Spread.Common.CultureManager.culture('zh-cn')
+// SpreadJS LicenseKey(通过 .env.local 注入 VITE_SPREADJS_KEY,不入库)
+// 评估模式有水印和功能限制,正式使用需购买授权
+GC.Spread.Sheets.LicenseKey = import.meta.env.VITE_SPREADJS_KEY || ''
 
 import App from './App.vue'
 import router from './router'

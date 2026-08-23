@@ -1,18 +1,21 @@
 <template>
-  <div class="spread-host" ref="hostRef"></div>
+  <div class="spread-host" ref="hostRef" :style="{ height }"></div>
 </template>
 
 <script setup>
 import { ref, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import GC from '@grapecity/spread-sheets'
 import { ElMessage } from 'element-plus'
+import { applyColumnsToSheet } from '@/utils/excel-io'
 
 const props = defineProps({
   configDefinition: { type: Object, required: true },
   initialRows: { type: Array, default: () => [] },
   mode: { type: String, default: 'edit' }, // read/edit/modify
   // 为 MODIFY 场景追踪变化用:若传入true,表格内部维护diff
-  trackChanges: { type: Boolean, default: false }
+  trackChanges: { type: Boolean, default: false },
+  // 表格高度(导出页预览等场景需要指定)
+  height: { type: String, default: '400px' }
 })
 
 const emit = defineEmits(['data-changed', 'changes-collected'])
@@ -75,7 +78,7 @@ function initSpread() {
   sheet.suspendPaint()
   try {
     sheet.name(props.configDefinition?.name || 'Sheet1')
-    applyColumns()
+    applyColumnsToSheet(sheet, props.configDefinition, 'runtime')
     setRows(props.initialRows || [])
     applyRules()
     if (props.mode === 'read') {
@@ -103,75 +106,20 @@ function initSpread() {
   }
 }
 
-function applyColumns() {
-  const cols = columns()
-  // 列 0: 序号(隐藏在行头),我们加一列 行ID(隐藏列)和 状态列
-  sheet.setColumnCount(cols.length + 2, GC.Spread.Sheets.SheetArea.viewport)
-  // Col 0: id (hidden)
-  sheet.setValue(0, 0, '__id', GC.Spread.Sheets.SheetArea.colHeader)
-  sheet.setColumnVisible(0, false)
-  sheet.setTag(0, 0, '__id', GC.Spread.Sheets.SheetArea.colHeader)
-  // Col 1: 状态(added/modified/deleted/empty)
-  sheet.setValue(0, 1, '__mark', GC.Spread.Sheets.SheetArea.colHeader)
-  sheet.setColumnVisible(1, false)
-  sheet.setTag(0, 1, '__mark', GC.Spread.Sheets.SheetArea.colHeader)
-
-  for (let i = 0; i < cols.length; i++) {
-    const c = cols[i]
-    const colIdx = i + 2
-    sheet.setValue(0, colIdx, c.label || c.key, GC.Spread.Sheets.SheetArea.colHeader)
-    sheet.setTag(0, colIdx, c.key, GC.Spread.Sheets.SheetArea.colHeader)
-    sheet.setColumnWidth(colIdx, Math.max(100, 14 * (c.label || c.key || '').length + 40))
-
-    // 类型设置
-    const type = c.type || 'string'
-    if (type === 'select' && Array.isArray(c.options) && c.options.length) {
-      const dv = GC.Spread.Sheets.DataValidation.createListValidator(c.options.join(','))
-      dv.showInputMessage(true)
-      dv.inputMessage(`请从下拉中选择：${c.options.join('、')}`)
-      dv.showErrorMessage(true)
-      dv.errorMessage('选项不在允许的列表中')
-      sheet.setDataValidator(-1, colIdx, dv)
-      sheet.setCellType(-1, colIdx, new GC.Spread.Sheets.CellTypes.ComboBox().items(
-        c.options.map(o => ({ text: String(o), value: String(o) }))
-      ))
-    } else if (type === 'number') {
-      const dv = GC.Spread.Sheets.DataValidation.createNumberValidator(
-        GC.Spread.Sheets.ConditionalFormatting.ComparisonOperators.greaterThanOrEqualsTo,
-        -1e18, 1e18
-      )
-      dv.showErrorMessage(true)
-      dv.errorMessage('请输入数字')
-      sheet.setDataValidator(-1, colIdx, dv)
-      sheet.setFormatter(-1, colIdx, '0.####')
-    } else if (type === 'date') {
-      sheet.setFormatter(-1, colIdx, 'yyyy-mm-dd')
-    } else if (type === 'boolean') {
-      const cellType = new GC.Spread.Sheets.CellTypes.CheckBox().textTrue('启用').textFalse('停用')
-      sheet.setCellType(-1, colIdx, cellType)
+// mode 切换时重设保护状态(避免 :key 强制重挂的开销,导出页只读↔编辑切换用)
+watch(() => props.mode, (m) => {
+  if (!sheet) return
+  if (m === 'read') {
+    sheet.options.isProtected = true
+    sheet.options.protectionOption = {
+      allowInsertRows: false,
+      allowDeleteRows: false,
+      allowEditObjects: false
     }
-
-    if (c.required) {
-      const dv = GC.Spread.Sheets.DataValidation.createFormulaValidator(
-        `NOT(ISBLANK(INDIRECT(ADDRESS(ROW(),COLUMN()))))`
-      )
-      dv.showErrorMessage(true)
-      dv.errorMessage(`${c.label || c.key}为必填项`)
-      sheet.setDataValidator(-1, colIdx, dv)
-      // 给列头加红点提示
-      const oldVal = c.label || c.key
-      sheet.getCell(0, colIdx, GC.Spread.Sheets.SheetArea.colHeader)
-        .value('* ' + oldVal)
-        .foreColor('#f56c6c')
-        .font('bold 12px PingFang SC')
-    }
+  } else {
+    sheet.options.isProtected = false
   }
-  sheet.frozenRowCount(1)
-  sheet.rowFilter = new GC.Spread.Sheets.Filter.HideRowFilter(
-    new GC.Spread.Sheets.Range(-1, 2, -1, cols.length)
-  )
-  sheet.setRowHeight(0, 28)
-}
+})
 
 function setRows(rows) {
   const cols = columns()
@@ -246,7 +194,7 @@ function collectChanges() {
 /**
  * 应用校验规则(非空/类型/枚举) -> 返回不合法的行
  */
-function applyRules() { /* 已在applyColumns里使用原生 DataValidator */ }
+function applyRules() { /* 已在applyColumnsToSheet里使用原生 DataValidator */ }
 
 /**
  * 执行数据校验(使用SpreadJS原生校验)
@@ -287,11 +235,10 @@ function validateAll() {
 }
 
 /**
- * 从服务端重新拉取并刷新数据
+ * 从服务端重新拉取并刷新数据(ai-ui 后端 Agent Loop 模式:数据走 configApi.all → /api/configs/data/all)
  */
 async function refreshFromServer() {
   if (!props.configDefinition?.id) return
-  // 不引入循环:用全局API对象
   const { configApi } = await import('@/api/config')
   const rows = await configApi.all(props.configDefinition.id, 100000)
   sheet.suspendPaint()

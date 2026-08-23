@@ -64,6 +64,16 @@ export const TOOL_REGISTRY = {
     title: '收集输入', labelType: 'primary', labelText: '表单',
     autoExec: false, needConfirm: false, requireDoubleConfirm: false, inputMode: true,
     impact: (a) => `将向用户收集 ${(a.fields || []).length} 个表单字段`
+  },
+  excel_import: {
+    title: 'Excel 导入', labelType: 'success', labelText: 'Excel 导入',
+    autoExec: false, needConfirm: false, requireDoubleConfirm: false, inputMode: true,
+    impact: (a) => `上传 Excel 文件并解析灌入到配置 #${a.configDefId}${a.mode === 'merge' ? '(merge 合并)' : '(append 追加)'}`
+  },
+  excel_export: {
+    title: 'Excel 导出', labelType: 'info', labelText: 'Excel 导出',
+    autoExec: true, needConfirm: false, requireDoubleConfirm: false, inputMode: false,
+    impact: (a) => `导出 ${Array.isArray(a.configDefIds) && a.configDefIds.length ? a.configDefIds.length + ' 个' : '当前已选/全部'}配置项为 xlsx 并下载`
   }
 }
 

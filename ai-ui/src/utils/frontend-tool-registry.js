@@ -14,6 +14,7 @@ import { useTaskStore } from '@/stores/task'
 import { useConfigStore } from '@/stores/config'
 import router from '@/router'
 import { stepToRoute } from '@/router'
+import { importExcel, exportExcelByRows, exportExcelMultiSheet } from '@/utils/excel-io'
 
 const SCENARIO_NAME = {
   EXPORT: '导出配置', IMPORT: '导入配置', ADD: '新增配置', MODIFY: '修改配置'
@@ -323,6 +324,97 @@ export const FRONTEND_TOOL_REGISTRY = {
     // 此处仅作兼容兜底（若被直接调用则把 args 原样返回）。
     async execute(args) {
       return { ok: true, message: '已收集用户输入', data: args }
+    }
+  },
+
+  // -------------------- 9. excel_import --------------------
+  // 上传 Excel(.xlsx)文件,解析后灌入到指定配置定义。
+  // inputMode=true:后端下发 mode=INPUT 时 AiPanel 渲染上传卡片(固定 file 字段),
+  // 用户选文件提交后 AiPanel 把 file 注入 args 并调本 execute 执行解析+灌入,回灌结果。
+  excel_import: {
+    labelText: 'Excel 导入',
+    labelType: 'success',
+    needConfirm: () => false, // 表单提交本身即用户主动行为,无需二次确认
+    inputMode: true,
+    validate(args = {}) {
+      const e = requireField(args, 'configDefId', 'number')
+      if (e) return e
+      if (args.mode !== undefined && args.mode !== null && !['append', 'merge'].includes(args.mode)) {
+        return 'mode 必须是 append 或 merge'
+      }
+      return null
+    },
+    async execute(args) {
+      const configStore = useConfigStore()
+      const defId = Number(args.configDefId)
+      const def = configStore.defById(defId)
+      if (!def) return { ok: false, message: '未找到配置定义 #' + defId }
+      // args.file 由 AiPanel 表单提交时注入(File 对象)
+      const file = args.file
+      if (!(file instanceof File)) {
+        return { ok: false, message: '未收到有效的文件对象,请重新上传' }
+      }
+      const mode = args.mode || 'append'
+      let imp
+      try {
+        imp = await importExcel(file, def)
+      } catch (e) {
+        return { ok: false, message: 'Excel 解析失败:' + (e?.message || e) }
+      }
+      if (imp.errors && imp.errors.length) {
+        return { ok: false, message: '导入校验失败,共 ' + imp.errors.length + ' 个错误', errors: imp.errors.slice(0, 20), stats: imp.stats }
+      }
+      if (!imp.rows.length) {
+        return { ok: false, message: 'Excel 中没有可导入的数据行', stats: imp.stats }
+      }
+      const res = await configStore.batchSave(defId, imp.rows, mode)
+      // 刷新已挂载的 SpreadJS 表格(ai-ui:refreshFromServer 走 configApi.all → 落库数据)
+      if (window.__spreadsheets && window.__spreadsheets[defId]) {
+        try { await window.__spreadsheets[defId].refreshFromServer() } catch (e) { /* ignore */ }
+      }
+      fireAuto('data_change')
+      return { ok: true, message: '已导入 ' + imp.rows.length + ' 行,当前共 ' + res.total + ' 行', imported: imp.rows.length, total: res.total, stats: imp.stats }
+    }
+  },
+
+  // -------------------- 10. excel_export --------------------
+  // 导出配置数据为 Excel(.xlsx)并下载。autoExec 类只读导出,无需确认。
+  excel_export: {
+    labelText: 'Excel 导出',
+    labelType: 'info',
+    needConfirm: () => false,
+    validate(args = {}) {
+      if (args.configDefIds !== undefined && args.configDefIds !== null && !Array.isArray(args.configDefIds)) {
+        return 'configDefIds 必须是数组'
+      }
+      return null
+    },
+    async execute(args) {
+      const taskStore = useTaskStore()
+      const configStore = useConfigStore()
+      let ids = Array.isArray(args.configDefIds) ? args.configDefIds.map(Number) : []
+      if (!ids.length) ids = (taskStore.selectedDefIds || []).map(Number)
+      if (!ids.length) ids = configStore.enabledDefinitions.map(d => d.id)
+      ids = ids.filter(id => configStore.defById(id))
+      if (!ids.length) return { ok: false, message: '没有可导出的配置项' }
+      const defsAndRows = []
+      for (const id of ids) {
+        const def = configStore.defById(id)
+        const rows = (await configStore.allData(id, 100000))
+          .map(r => ({ id: r.id, data: r.rowData, mark: 'unchanged' }))
+        defsAndRows.push({ def, rows })
+      }
+      const fn = (args.fileName || 'export') + '-' + Date.now() + '.xlsx'
+      try {
+        if (defsAndRows.length === 1) {
+          await exportExcelByRows(defsAndRows[0].def, defsAndRows[0].rows, fn)
+        } else {
+          await exportExcelMultiSheet(defsAndRows, fn)
+        }
+      } catch (e) {
+        return { ok: false, message: '导出失败:' + (e?.message || e) }
+      }
+      return { ok: true, message: '已导出 ' + defsAndRows.length + ' 个配置项到 Excel', fileName: fn, sheetCount: defsAndRows.length }
     }
   }
 }

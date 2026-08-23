@@ -51,7 +51,9 @@ public final class FrontendTools {
                  "table_delete_rows",
                  "table_replace_values",
                  "confirm_complete",
-                 "collect_user_input" -> ToolKind.FRONTEND;
+                 "collect_user_input",
+                 "excel_import",
+                 "excel_export" -> ToolKind.FRONTEND;
             // 预留：未来后端工具在此 case 命中并返回 BACKEND
             default -> ToolKind.FRONTEND;
         };
@@ -130,7 +132,22 @@ public final class FrontendTools {
                     "当前步骤所有工作完成，引导用户确认后结束流程或跳到下一步。",
                     objectSchema(Map.of(
                             "target", stringEnumSchema(Arrays.asList("FINISH_TASK", "NEXT_STEP"), "完成方式")
-                    ), List.of("target")))
+                    ), List.of("target"))),
+
+            // ============ Excel 导入/导出类（浏览器内 ExcelIO，文件本体不进 LLM） ============
+            new ToolSpec("excel_import",
+                    "上传 Excel(.xlsx)文件,解析后灌入到指定配置定义。会暂停等待用户上传文件。导入前请确认已用「下载 Excel 模板」按钮下载模板填写,保证表头与配置字段一致。导入模式 append 追加(默认)或 merge 按 id 合并更新。",
+                    objectSchema(Map.of(
+                            "configDefId", integerSchema("要导入到的配置定义 ID(来自 list_config_defs 返回的 id)"),
+                            "mode", stringEnumSchema(Arrays.asList("append", "merge"), "导入模式 append 追加(默认)或 merge 按 id 合并更新")
+                    ), List.of("configDefId"))),
+
+            new ToolSpec("excel_export",
+                    "导出配置数据为 Excel(.xlsx)文件并下载。可指定单个或多个配置定义 ID,空则导出当前任务已选配置项(selectedDefIds),再空则导出全部启用配置项。多个配置项会合并为多 sheet 工作簿。",
+                    objectSchema(Map.of(
+                            "configDefIds", arraySchema(integerSchema("配置定义 ID"), "要导出的配置定义 ID 数组,空则导出当前任务 selectedDefIds 全部"),
+                            "fileName", stringSchema("导出文件名(不含扩展名,自动追加 -时间戳.xlsx)")
+                    ), List.of()))
     );
 
     // ================= 工具声明（同一套 Schema 派生两种对外格式） =================
@@ -199,7 +216,8 @@ public final class FrontendTools {
     /** 该工具是否默认需要用户确认（仅前端可最终裁定，后端给默认值） */
     public static boolean defaultNeedConfirm(String toolName) {
         return switch (toolName) {
-            case "navigate_step", "select_definitions", "confirm_complete", "collect_user_input" -> false;
+            case "navigate_step", "select_definitions", "confirm_complete", "collect_user_input",
+                 "excel_import", "excel_export" -> false;
             case "run_flow", "table_batch_set_field", "table_delete_rows", "table_replace_values" -> true;
             default -> true;
         };
@@ -245,6 +263,13 @@ public final class FrontendTools {
                         Boolean.TRUE.equals(args.get("regex")) ? "（正则模式）" : "");
                 case "confirm_complete" -> String.format("将结束流程（目标=%s）", nullSafe(args.get("target"), "NEXT_STEP"));
                 case "collect_user_input" -> String.format("将向用户收集 %d 个表单字段", arraySize(args.get("fields")));
+                case "excel_import" -> String.format("将上传 Excel 文件并解析灌入到配置 #%d%s",
+                        objInt(args.get("configDefId")),
+                        "merge".equals(args.get("mode")) ? "(merge 合并)" : "(append 追加)");
+                case "excel_export" -> {
+                    int n = arraySize(args.get("configDefIds"));
+                    yield String.format("将导出 %s 个配置项为 xlsx 并下载", n > 0 ? String.valueOf(n) : "当前已选/全部");
+                }
                 default -> "未知工具，前端将阻断执行";
             };
         } catch (Exception e) {

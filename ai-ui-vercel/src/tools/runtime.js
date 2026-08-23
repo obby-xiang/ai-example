@@ -44,14 +44,17 @@ export function waitForConfirm(toolCallId, toolName, args, impact) {
 
 /**
  * 工具 execute 调用:暂停渲染表单等待用户提交。
+ * @param toolCallId
+ * @param args          表单定义 { formTitle, submitLabel, fields }
+ * @param toolName      工具名(默认 collect_user_input;excel_import 传 'excel_import' 以区分卡片标题)
  * @returns Promise<{ ok:boolean, data?:object, cancelled?:boolean }>
  */
-export function waitForForm(toolCallId, args) {
+export function waitForForm(toolCallId, args, toolName = 'collect_user_input') {
   return new Promise((resolve, reject) => {
     pendingInteraction.value = {
       toolCallId,
       type: 'form',
-      toolName: 'collect_user_input',
+      toolName,
       args,
       impact: '',
       resolve: (val) => { resolve(val) },

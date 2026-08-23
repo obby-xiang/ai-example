@@ -314,3 +314,45 @@ tools:
             additionalProperties: false
       required: [formTitle, fields]
       additionalProperties: false
+
+  # ============ Excel 导入/导出类（浏览器内 ExcelIO，文件本体不进 LLM） ============
+  - name: excel_import
+    description: "上传 Excel(.xlsx)文件,解析后灌入到指定配置定义。会暂停等待用户上传文件。导入前请确认已用「下载 Excel 模板」按钮下载模板填写,保证表头与配置字段一致。导入模式 append 追加(默认)或 merge 按 id 合并更新。"
+    kind: FRONTEND
+    autoExec: false
+    needConfirm: false
+    scenarios: [IMPORT, ADD, MODIFY]
+    steps: [VIEW_DEFS]
+    parameters:
+      type: object
+      properties:
+        configDefId:
+          type: integer
+          description: 要导入到的配置定义 ID(来自 list_config_defs 返回的 id)
+        mode:
+          type: string
+          enum: [append, merge]
+          default: append
+          description: 导入模式 append 追加(默认)或 merge 按 id 合并更新
+      required: [configDefId]
+      additionalProperties: false
+
+  - name: excel_export
+    description: "导出配置数据为 Excel(.xlsx)文件并下载。可指定单个或多个配置定义 ID,空则导出当前任务已选配置项(selectedDefIds),再空则导出全部启用配置项。多个配置项会合并为多 sheet 工作簿。"
+    kind: FRONTEND
+    autoExec: true
+    needConfirm: false
+    scenarios: [EXPORT]
+    steps: [RESULT]
+    parameters:
+      type: object
+      properties:
+        configDefIds:
+          type: array
+          items:
+            type: integer
+          description: "要导出的配置定义 ID 数组,空则导出当前任务 selectedDefIds 全部"
+        fileName:
+          type: string
+          description: 导出文件名(不含扩展名,自动追加 -时间戳.xlsx)
+      additionalProperties: false

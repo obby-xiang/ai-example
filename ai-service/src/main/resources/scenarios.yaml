@@ -30,7 +30,7 @@ scenarios:
       - id: RESULT
         next: END
         description: 查看导出结果
-        tools: [navigate_step, get_workspace_state, run_flow, confirm_complete, collect_user_input]
+        tools: [navigate_step, get_workspace_state, run_flow, excel_export, confirm_complete, collect_user_input]
 
   IMPORT:
     name: 导入配置
@@ -43,7 +43,7 @@ scenarios:
       - id: VIEW_DEFS
         next: PRECHECK
         description: 查看导入的配置项
-        tools: [navigate_step, get_workspace_state, list_config_defs, get_config_def, collect_user_input]
+        tools: [navigate_step, get_workspace_state, list_config_defs, get_config_def, excel_import, collect_user_input]
       - id: PRECHECK
         next: REVIEW
         description: 预检查数据
@@ -68,7 +68,7 @@ scenarios:
       - id: VIEW_DEFS
         next: PRECHECK
         description: 编辑新增的配置项
-        tools: [navigate_step, get_workspace_state, list_config_defs, get_config_def, table_batch_set_field, table_replace_values, collect_user_input]
+        tools: [navigate_step, get_workspace_state, list_config_defs, get_config_def, table_batch_set_field, table_replace_values, excel_import, collect_user_input]
       - id: PRECHECK
         next: REVIEW
         description: 预检查数据
@@ -93,7 +93,7 @@ scenarios:
       - id: VIEW_DEFS
         next: PRECHECK
         description: 编辑配置项数据
-        tools: [navigate_step, get_workspace_state, list_config_defs, get_config_def, table_batch_set_field, table_delete_rows, table_replace_values, collect_user_input]
+        tools: [navigate_step, get_workspace_state, list_config_defs, get_config_def, table_batch_set_field, table_delete_rows, table_replace_values, excel_import, collect_user_input]
       - id: PRECHECK
         next: REVIEW
         description: 预检查数据

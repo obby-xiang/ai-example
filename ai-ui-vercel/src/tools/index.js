@@ -19,6 +19,7 @@ import { stepToRoute } from '@/router'
 import { ElMessage } from 'element-plus'
 import { waitForConfirm, waitForForm } from './runtime'
 import { toolImpact } from './registry'
+import { importExcel, exportExcelByRows, exportExcelMultiSheet } from '@/utils/excel-io'
 
 const SCENARIO_NAME = {
   EXPORT: '导出配置', IMPORT: '导入配置', ADD: '新增配置', MODIFY: '修改配置'
@@ -322,6 +323,100 @@ export const collect_user_input = tool({
   }
 })
 
+// ===================== Excel 导入/导出类工具 =====================
+
+// excel_import: 复用 collect_user_input 的 form 暂停机制,固定 fields=[{type:'file'}] 等用户上传。
+// 依赖 SchemaFormRenderer 新增的 file 渲染分支(el-upload)。
+export const excel_import = tool({
+  description: '上传 Excel(.xlsx)文件,解析后灌入到指定配置定义。会暂停等待用户上传文件。导入前请确认已用「下载 Excel 模板」按钮下载模板填写,保证表头与配置字段一致。导入模式: append 追加(默认), merge 按 id 合并更新。',
+  parameters: z.object({
+    configDefId: z.number().int().describe('要导入到的配置定义 ID(来自 list_config_defs)'),
+    mode: z.enum(['append', 'merge']).optional().describe('导入模式: append 追加(默认), merge 按 id 合并更新')
+  }),
+  execute: async (args, { toolCallId } = {}) => {
+    const configStore = useConfigStore()
+    const defId = Number(args.configDefId)
+    const def = configStore.defById(defId)
+    if (!def) return { ok: false, message: '未找到配置定义 #' + defId }
+    // 暂停渲染上传表单等用户提交(复用 waitForForm)
+    const formArgs = {
+      formTitle: '上传 Excel 导入到「' + def.name + '」',
+      submitLabel: '开始导入',
+      fields: [{
+        key: 'file',
+        label: 'Excel 文件',
+        type: 'file',
+        required: true,
+        accept: '.xlsx,.xls',
+        description: '请先下载 Excel 模板填写,保证表头与配置字段一致'
+      }]
+    }
+    const result = await waitForForm(toolCallId, formArgs, 'excel_import')
+    if (!result || result.cancelled) {
+      return { ok: false, message: 'user_cancelled', reason: '用户取消了上传' }
+    }
+    const raw = result.data?.file
+    // el-upload auto-upload=false 时 on-change 存的是 raw(File 对象)
+    const file = raw instanceof File ? raw : (raw?.raw || raw)
+    if (!(file instanceof File)) {
+      return { ok: false, message: '未收到有效的文件对象' }
+    }
+    const mode = args.mode || 'append'
+    let imp
+    try {
+      imp = await importExcel(file, def)
+    } catch (e) {
+      return { ok: false, message: 'Excel 解析失败:' + (e?.message || e) }
+    }
+    if (imp.errors && imp.errors.length) {
+      return { ok: false, message: '导入校验失败,共 ' + imp.errors.length + ' 个错误', errors: imp.errors.slice(0, 20), stats: imp.stats }
+    }
+    if (!imp.rows.length) {
+      return { ok: false, message: 'Excel 中没有可导入的数据行', stats: imp.stats }
+    }
+    const res = await configStore.batchSave(defId, imp.rows, mode)
+    refreshSheet(defId)
+    fireAuto('data_change')
+    return { ok: true, message: '已导入 ' + imp.rows.length + ' 行,当前共 ' + res.total + ' 行', imported: imp.rows.length, total: res.total, stats: imp.stats }
+  }
+})
+
+// excel_export: 直接下载 xlsx 文件,不修改数据。autoExec 类只读导出。
+export const excel_export = tool({
+  description: '导出配置数据为 Excel(.xlsx)文件并下载。可指定单个或多个配置定义 ID;空则导出当前任务已选配置项(selectedDefIds),再空则导出全部启用配置项。多个配置项会合并为多 sheet 工作簿。',
+  parameters: z.object({
+    configDefIds: z.array(z.number().int()).optional().describe('要导出的配置定义 ID 数组;空则导出当前任务 selectedDefIds 全部'),
+    fileName: z.string().optional().describe('导出文件名(不含扩展名,自动追加 -时间戳.xlsx)')
+  }),
+  execute: async (args) => {
+    const taskStore = useTaskStore()
+    const configStore = useConfigStore()
+    let ids = Array.isArray(args.configDefIds) ? args.configDefIds.map(Number) : []
+    if (!ids.length) ids = (taskStore.selectedDefIds || []).map(Number)
+    if (!ids.length) ids = configStore.enabledDefinitions.map(d => d.id)
+    ids = ids.filter(id => configStore.defById(id))
+    if (!ids.length) return { ok: false, message: '没有可导出的配置项' }
+    const defsAndRows = []
+    for (const id of ids) {
+      const def = configStore.defById(id)
+      const rows = (await configStore.allData(id, 100000))
+        .map(r => ({ id: r.id, data: r.rowData, mark: 'unchanged' }))
+      defsAndRows.push({ def, rows })
+    }
+    const fn = (args.fileName || 'export') + '-' + Date.now() + '.xlsx'
+    try {
+      if (defsAndRows.length === 1) {
+        await exportExcelByRows(defsAndRows[0].def, defsAndRows[0].rows, fn)
+      } else {
+        await exportExcelMultiSheet(defsAndRows, fn)
+      }
+    } catch (e) {
+      return { ok: false, message: '导出失败:' + (e?.message || e) }
+    }
+    return { ok: true, message: '已导出 ' + defsAndRows.length + ' 个配置项到 Excel', fileName: fn, sheetCount: defsAndRows.length }
+  }
+})
+
 // ===================== 工具集合(按场景+步骤动态过滤) =====================
 
 import { SCENARIO_STEPS } from '@/stores/task'
@@ -336,7 +431,8 @@ export function getToolsForStep(scenario, step) {
     navigate_step, get_workspace_state, list_config_defs, get_config_def,
     select_definitions, confirm_complete,
     table_batch_set_field, table_delete_rows, table_replace_values,
-    run_flow, collect_user_input
+    run_flow, collect_user_input,
+    excel_import, excel_export
   }
   if (!scenario || !step) {
     // 无场景:只暴露场景选择相关工具
@@ -351,31 +447,31 @@ export function getToolsForStep(scenario, step) {
   return out
 }
 
-// 平移自 scenarios.yaml 的 steps.tools
+// 平移自 scenarios.yaml 的 steps.tools(已追加 excel_import / excel_export)
 const TOOLS_BY_STEP = {
   EXPORT: {
     SELECT_SCENARIO: ['navigate_step', 'get_workspace_state', 'collect_user_input'],
     SELECT_DEFS: ['navigate_step', 'get_workspace_state', 'list_config_defs', 'get_config_def', 'select_definitions', 'collect_user_input'],
     QUERY_COND: ['navigate_step', 'get_workspace_state', 'list_config_defs', 'get_config_def', 'table_batch_set_field', 'table_replace_values', 'collect_user_input'],
-    RESULT: ['navigate_step', 'get_workspace_state', 'run_flow', 'confirm_complete', 'collect_user_input']
+    RESULT: ['navigate_step', 'get_workspace_state', 'run_flow', 'excel_export', 'confirm_complete', 'collect_user_input']
   },
   IMPORT: {
     SELECT_SCENARIO: ['navigate_step', 'get_workspace_state', 'collect_user_input'],
-    VIEW_DEFS: ['navigate_step', 'get_workspace_state', 'list_config_defs', 'get_config_def', 'collect_user_input'],
+    VIEW_DEFS: ['navigate_step', 'get_workspace_state', 'list_config_defs', 'get_config_def', 'excel_import', 'collect_user_input'],
     PRECHECK: ['navigate_step', 'get_workspace_state', 'collect_user_input'],
     REVIEW: ['navigate_step', 'get_workspace_state', 'collect_user_input'],
     PUBLISH: ['navigate_step', 'get_workspace_state', 'run_flow', 'confirm_complete', 'collect_user_input']
   },
   ADD: {
     SELECT_SCENARIO: ['navigate_step', 'get_workspace_state', 'collect_user_input'],
-    VIEW_DEFS: ['navigate_step', 'get_workspace_state', 'list_config_defs', 'get_config_def', 'table_batch_set_field', 'table_replace_values', 'collect_user_input'],
+    VIEW_DEFS: ['navigate_step', 'get_workspace_state', 'list_config_defs', 'get_config_def', 'table_batch_set_field', 'table_replace_values', 'excel_import', 'collect_user_input'],
     PRECHECK: ['navigate_step', 'get_workspace_state', 'collect_user_input'],
     REVIEW: ['navigate_step', 'get_workspace_state', 'collect_user_input'],
     PUBLISH: ['navigate_step', 'get_workspace_state', 'run_flow', 'confirm_complete', 'collect_user_input']
   },
   MODIFY: {
     SELECT_SCENARIO: ['navigate_step', 'get_workspace_state', 'collect_user_input'],
-    VIEW_DEFS: ['navigate_step', 'get_workspace_state', 'list_config_defs', 'get_config_def', 'table_batch_set_field', 'table_delete_rows', 'table_replace_values', 'collect_user_input'],
+    VIEW_DEFS: ['navigate_step', 'get_workspace_state', 'list_config_defs', 'get_config_def', 'table_batch_set_field', 'table_delete_rows', 'table_replace_values', 'excel_import', 'collect_user_input'],
     PRECHECK: ['navigate_step', 'get_workspace_state', 'collect_user_input'],
     REVIEW: ['navigate_step', 'get_workspace_state', 'collect_user_input'],
     PUBLISH: ['navigate_step', 'get_workspace_state', 'run_flow', 'confirm_complete', 'collect_user_input']

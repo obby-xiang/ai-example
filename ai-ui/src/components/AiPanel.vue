@@ -60,9 +60,9 @@
               <!-- INPUT 模式：Schema-driven 表单（业界 Adaptive Cards 模式） -->
               <div v-if="tc.mode === 'INPUT' && !isToolDone(m, tc)" class="a-form">
                 <SchemaFormRenderer
-                  :fields="tc.args?.fields || []"
-                  :form-title="tc.args?.formTitle"
-                  :submit-label="tc.args?.submitLabel"
+                  :fields="formFieldsFor(tc)"
+                  :form-title="formTitleFor(tc)"
+                  :submit-label="submitLabelFor(tc)"
                   :disabled="isToolRunning(m, tc)"
                   @submit="(vals) => executeAndResume(m, tc, false, vals)"
                   @cancel="executeAndResume(m, tc, true)"
@@ -264,6 +264,30 @@ function formatArgs(tc) {
 }
 
 // ================================================
+//       INPUT 模式表单字段注入（excel_import 用固定 file 字段）
+// ================================================
+// excel_import 的 args 只有 configDefId/mode,无 fields;这里注入固定上传字段。
+const EXCEL_IMPORT_FIELDS = [{
+  key: 'file', label: 'Excel 文件', type: 'file', required: true, accept: '.xlsx,.xls',
+  description: '请先下载 Excel 模板填写,保证表头与配置字段一致'
+}]
+function formFieldsFor(tc) {
+  if (tc.toolName === 'excel_import') return EXCEL_IMPORT_FIELDS
+  return tc.args?.fields || []
+}
+function formTitleFor(tc) {
+  if (tc.toolName === 'excel_import') {
+    const def = configStore.defById(tc.args?.configDefId)
+    return '上传 Excel 导入到「' + (def?.name || '#' + tc.args?.configDefId) + '」'
+  }
+  return tc.args?.formTitle
+}
+function submitLabelFor(tc) {
+  if (tc.toolName === 'excel_import') return '开始导入'
+  return tc.args?.submitLabel
+}
+
+// ================================================
 //       工具执行入口 —— 执行后自动回灌后端恢复 loop
 // ================================================
 /**
@@ -295,10 +319,29 @@ async function executeAndResume(message, tc, userCancelled = false, formData = n
     result = { ok: false, message: 'user_cancelled', reason: '用户取消了执行' }
     aiStore.setToolCallStatus(tc.callId, 'cancelled')
   } else if (formData !== null && formData !== undefined) {
-    // INPUT 模式（collect_user_input）：直接把用户填写的表单值作为结果回灌，
-    // 不调用 executeFrontendTool（表单收集本身无副作用，值即结果）
-    result = { ok: true, message: '已收集用户输入', data: formData }
-    aiStore.setToolCallStatus(tc.callId, 'succeeded')
+    if (tc.toolName === 'excel_import') {
+      // excel_import：表单收集到 file 后，需在前端执行 ExcelIO 解析+batchSave，
+      // 再把执行结果回灌（不能像 collect_user_input 那样纯表单值回灌，因为
+      // ExcelIO 是浏览器能力，后端无法解析 xlsx）。
+      // 把 file 注入 args，调 registry.execute 执行解析+灌入，回灌执行结果。
+      try {
+        result = await executeFrontendTool({ ...tc, args: { ...tc.args, file: formData.file } })
+        if (result && result.ok === false) {
+          aiStore.setToolCallStatus(tc.callId, 'failed')
+        } else {
+          aiStore.setToolCallStatus(tc.callId, 'succeeded')
+        }
+      } catch (e) {
+        aiStore.setToolCallStatus(tc.callId, 'failed')
+        result = { ok: false, message: e?.message || String(e) }
+        ElMessage.error('Excel 导入失败: ' + (e?.message || e))
+      }
+    } else {
+      // INPUT 模式（collect_user_input）：直接把用户填写的表单值作为结果回灌，
+      // 不调用 executeFrontendTool（表单收集本身无副作用，值即结果）
+      result = { ok: true, message: '已收集用户输入', data: formData }
+      aiStore.setToolCallStatus(tc.callId, 'succeeded')
+    }
   } else {
     try {
       result = await executeFrontendTool(tc)

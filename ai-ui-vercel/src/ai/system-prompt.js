@@ -26,6 +26,7 @@ export function buildSystemPrompt(workspaceState = {}, opts = {}) {
   sys.push('5. 所有回复必须用中文,不要重复废话。工具结果会自动回灌,基于结果继续推理或给最终回复。')
   sys.push('6. 流程推进(关键): 当当前步骤的意图已满足时,立即调 navigate_step 推进到状态图下一步,不要停等用户确认,也不要反复调 get_workspace_state。例:用户说"新建导出/导出配置"即场景 EXPORT,调 navigate_step(scenario=EXPORT,step=SELECT_SCENARIO) 后场景已选定,应继续调 navigate_step(step=SELECT_DEFS) 进入选择配置项,而非停在 SELECT_SCENARIO。只有遇到需要用户输入(如选哪些配置项、设查询条件)时才停下给出引导。')
   sys.push('7. 收集用户输入(关键): 当需要用户提供具体参数(如导出文件名、查询条件值、选择项、配置项 code/name 等)时,调 collect_user_input 工具,用 fields 数组定义表单字段(支持 text/textarea/number/boolean/single_select/multi_select/button_group/date 八种控件,每字段含 key/label/type/required/options 等),系统会渲染表单让用户填写并自动回灌结果,你基于回灌的值继续推理。一次可收集多个字段(单轮表单)或单个字段(多轮问答),由你根据需要决定。不要用纯文本提问代替表单——凡需结构化输入一律用 collect_user_input。')
+  sys.push('8. Excel 能力(关键): 当用户说「上传 Excel/导入 xlsx/把 Excel 灌进去」时,调 excel_import(configDefId, mode)——它会弹出文件上传卡片,用户选 .xlsx 后系统解析表头映射 + 校验 + 灌入到指定配置定义,无需用户在表格里逐行录入。当用户说「导出 Excel/下载 xlsx」时,调 excel_export(configDefIds?, fileName?)——直接下载 .xlsx 文件(单配置单 sheet,多配置合并多 sheet),空 configDefIds 时默认导出当前任务已选配置项。注意: excel_import 仅在 IMPORT/ADD/MODIFY 场景 VIEW_DEFS 步骤可用,excel_export 仅在 EXPORT 场景 RESULT 步骤可用。模板下载和在线编辑是 UI 按钮(配置项查看页和导出结果页),不通过工具调用。')
 
   if (workspaceState && Object.keys(workspaceState).length) {
     sys.push('')

@@ -53,9 +53,16 @@
               <el-icon><View /></el-icon> 查看变更明细
             </el-button>
             <el-button v-if="taskStore.scenario === 'ADD'" size="small" @click="addEmptyRow">
-              <el-icon><Plus /></el-icon> 在末尾新增一行
-            </el-button>
-            <span style="margin-left:auto;color:#909399;font-size:12px;">
+            <el-icon><Plus /></el-icon> 在末尾新增一行
+          </el-button>
+          <el-button size="small" type="info" plain @click="downloadTemplate">
+            <el-icon><Download /></el-icon> 下载Excel模板
+          </el-button>
+          <el-button size="small" type="success" @click="triggerUpload">
+            <el-icon><Upload /></el-icon> 导入Excel
+          </el-button>
+          <input ref="fileInputRef" type="file" accept=".xlsx,.xls" style="display:none" @change="onFileChange" />
+          <span style="margin-left:auto;color:#909399;font-size:12px;">
               支持Excel操作(Ctrl+C/V粘贴)、插入/删除行、列过滤;列校验必填/下拉/数字均使用 SpreadJS 原生能力。
             </span>
           </div>
@@ -173,6 +180,7 @@ import { useConfigStore } from '@/stores/config'
 import StepHeader from '@/components/StepHeader.vue'
 import SpreadSheet from '@/components/SpreadSheet.vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { generateTemplate, importExcel } from '@/utils/excel-io'
 
 const taskStore = useTaskStore()
 const configStore = useConfigStore()
@@ -181,6 +189,7 @@ const router = useRouter()
 const selectedIds = ref(taskStore.selectedDefIds.slice())
 const activeDef = ref(String(selectedIds.value[0] || ''))
 const sheetRef = ref(null)
+const fileInputRef = ref(null)
 const saving = ref(false)
 const showDefPicker = ref(false)
 const showChangesDlg = ref(false)
@@ -286,6 +295,67 @@ function addEmptyRow() {
     const sh = sheetRef.value.getSheet()
     if (sh) sh.addRows(sh.getRowCount(), 1)
     ElMessage.success('已在末尾新增空行,请直接填入数据。')
+  }
+}
+
+// 下载当前配置页的 Excel 模板(内嵌下拉/数字/必填等原生数据验证)
+async function downloadTemplate() {
+  if (!activeDefData.value) return ElMessage.warning('请先切换到某个配置页')
+  try {
+    await generateTemplate(activeDefData.value)
+    ElMessage.success('模板已下载,请在 Excel 中填写后点「导入Excel」上传')
+  } catch (e) {
+    ElMessage.error('模板下载失败:' + (e?.message || e))
+  }
+}
+
+// 触发隐藏的 file input
+function triggerUpload() {
+  if (!activeDefData.value) return ElMessage.warning('请先切换到某个配置页')
+  if (fileInputRef.value) fileInputRef.value.click()
+}
+
+// 选中 Excel 文件后:解析 → 表头映射 → 校验 → 灌入 → 刷新表格
+async function onFileChange(e) {
+  const file = e.target.files && e.target.files[0]
+  e.target.value = '' // 重置以支持重复选同一文件
+  if (!file) return
+  if (!activeDefData.value) return
+  const def = activeDefData.value
+  const defId = Number(activeDef.value)
+  try {
+    const result = await importExcel(file, def)
+    if (result.errors && result.errors.length) {
+      ElMessageBox({
+        title: '导入校验失败',
+        message: `<div style="max-height:360px;overflow:auto;">${result.errors.slice(0, 50).map(er => `<div>第${er.row || 0}行 · ${er.field || ''}: ${er.msg}</div>`).join('')}</div>`,
+        dangerouslyUseHTMLString: true,
+        confirmButtonText: '我去修正后重传',
+        showCancelButton: false
+      })
+      return
+    }
+    if (!result.rows.length) {
+      ElMessage.warning('Excel 中没有可导入的数据行')
+      return
+    }
+    const res = await configStore.batchSave(defId, result.rows, 'append')
+    // 刷新已挂载的 SpreadJS 表格
+    if (sheetRef.value && typeof sheetRef.value.refreshFromServer === 'function') {
+      await sheetRef.value.refreshFromServer()
+    } else {
+      await loadDef(defId, true)
+      const prev = activeDef.value
+      activeDef.value = ''
+      setTimeout(() => { activeDef.value = prev }, 30)
+    }
+    countById[defId] = res.total
+    ElMessage.success(`已导入 ${result.rows.length} 行,当前共 ${res.total} 行`)
+    if (typeof window.__triggerAiAutoPrompt === 'function') {
+      window.__triggerAiAutoPrompt('data_change')
+    }
+  } catch (err) {
+    ElMessage.error('导入失败:' + (err?.message || err))
   }
 }
 

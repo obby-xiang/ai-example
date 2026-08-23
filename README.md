@@ -193,7 +193,7 @@ ai-example/
 │       │       └── FrontendTools.java       # 前端工具影响描述
 │       └── resources/
 │           ├── application.yml              # Spring Boot 配置
-│           ├── tools.yaml                   # 11 个工具定义
+│           ├── tools.yaml                   # 13 个工具定义
 │           └── scenarios.yaml               # 场景状态图定义
 │
 ├── ai-ui/                           # 前端·范式1（后端 Agent Loop）
@@ -208,6 +208,7 @@ ai-example/
 │       ├── stores/                 # Pinia: ai / task / config
 │       ├── styles/
 │       ├── utils/
+│       │   ├── excel-io.js                  # SpreadJS ExcelIO 封装（模板/导入/导出）
 │       │   └── frontend-tool-registry.js   # 工具信任分级 + 执行逻辑
 │       └── views/
 │           ├── DashboardView.vue
@@ -232,9 +233,11 @@ ai-example/
 │       │   └── config.js           # 本地内存数据操作
 │       ├── styles/
 │       ├── tools/
-│       │   ├── index.js             # 11 个工具定义（带 execute，在浏览器内执行）
+│       │   ├── index.js             # 13 个工具定义（带 execute，在浏览器内执行）
 │       │   ├── registry.js         # 工具 UI 元数据 + 信任分级
 │       │   └── runtime.js          # 暂停-恢复运行时（waitForConfirm / waitForForm）
+│       ├── utils/
+│       │   └── excel-io.js          # SpreadJS ExcelIO 封装（与 ai-ui 同签名）
 │       └── views/                   # 复用 ai-ui 的向导视图
 │
 ├── docs/
@@ -257,7 +260,7 @@ ai-example/
 | 新增配置 | ADD | SELECT_SCENARIO → VIEW_DEFS → PRECHECK → REVIEW → PUBLISH |
 | 修改配置 | MODIFY | SELECT_SCENARIO → VIEW_DEFS → PRECHECK → REVIEW → PUBLISH |
 
-### 11 个工具
+### 13 个工具
 
 | 工具 | 类型 | 说明 |
 |------|------|------|
@@ -272,6 +275,8 @@ ai-example/
 | `table_replace_values` | 需确认 | 字段值搜索替换 |
 | `run_flow` | 二次确认 | 一键执行完整流程（高危不可逆） |
 | `collect_user_input` | 表单输入 | Schema 驱动表单收集用户输入 |
+| `excel_import` | 表单输入 | 上传 xlsx 灌入指定配置定义（依赖 SchemaFormRenderer file 类型） |
+| `excel_export` | 自动执行 | 导出配置项为 xlsx 下载（单配置/多 sheet 合并） |
 
 ### 工具信任分级
 
@@ -279,8 +284,25 @@ ai-example/
 autoExec (自动执行)          → 只读 / 导航 / 选择类，无需用户点击
 needConfirm (需确认)          → 破坏性 / 不可逆，暂停等用户确认
 requireDoubleConfirm (二次确认) → 高危流程（run_flow），ElMessageBox 弹框二次确认
-inputMode (表单输入)          → collect_user_input，渲染 Schema 驱动表单
+inputMode (表单输入)          → collect_user_input / excel_import，渲染 Schema 驱动表单
 ```
+
+## Excel 能力（SpreadJS ExcelIO）
+
+两范式各维护一份 `src/utils/excel-io.js`（接口签名一致，业务逻辑可原样复制），由 `@grapecity/spread-excelio` 在浏览器内完成 xlsx 处理，无需后端介入。
+
+| 能力 | 入口 | 实现 |
+|------|------|------|
+| 模板下载 | StepViewDefs「下载 Excel 模板」按钮 | `generateTemplate(configDef)` 离线 Workbook + 内嵌 Excel 原生 DataValidation（下拉/数字范围/必填） |
+| Excel 导入 | StepViewDefs「上传 Excel 导入」按钮 / AI 触发 `excel_import` | `importExcel(file, configDef)` 解析表头映射 + 类型转换 + 必填/选项校验 → `batchSave` 灌入 |
+| 导出页在线编辑 | StepResult 预览弹窗「只读↔编辑」切换 | SpreadSheet 组件 + `:key` 强制重挂切换 `isProtected` |
+| Excel 导出 | StepResult 弹窗「导出此配置 Excel」/「导出全部 Excel」 / AI 触发 `excel_export` | `exportExcelByRows` / `exportExcelMultiSheet` 离线 Workbook + ExcelIO.save |
+
+**长选项兜底**：select 列 `options.join(',').length > 200` 时，改用本 sheet 远离数据区的隐藏列（`colIdx+200`）写入选项 + DV 公式 `=$L$1:$L$N` 引用，规避 Excel List 公式 255 字符上限。
+
+**大文件提示**：导入 `>5MB` 文件时 console 警告 + `setTimeout(0)` 让出一帧避免 UI 冻结。
+
+**SpreadJS LicenseKey**：评估模式有水印和功能限制。两范式 `main.js` 已通过 `import.meta.env.VITE_SPREADJS_KEY` 注入（`.env.local` 配置，不入库），正式使用需购买授权。
 
 ## API 接口
 

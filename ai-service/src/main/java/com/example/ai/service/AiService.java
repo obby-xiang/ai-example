@@ -506,9 +506,9 @@ public class AiService {
         boolean autoExec = toolDiscoveryService.isAutoExec(c.name);
         boolean needConfirm = toolDiscoveryService.defaultNeedConfirm(c.name);
         boolean requireDoubleConfirm = toolDiscoveryService.isRequireDoubleConfirm(c.name);
-        // 模式：collect_user_input → INPUT（前端渲染 Schema-driven 表单收集用户输入）；
+        // 模式：collect_user_input / excel_import → INPUT（前端渲染 Schema-driven 表单收集用户输入/上传文件）；
         //       autoExec=true 且 needConfirm=false → AUTO 自动执行；否则 CONFIRM 等用户确认
-        String mode = "collect_user_input".equals(c.name)
+        String mode = ("collect_user_input".equals(c.name) || "excel_import".equals(c.name))
                 ? "INPUT"
                 : ((autoExec && !needConfirm) ? "AUTO" : "CONFIRM");
         return AiDTO.FrontendToolCall.builder()
