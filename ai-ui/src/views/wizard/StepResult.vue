@@ -48,7 +48,7 @@
         </el-table-column>
         <el-table-column label="操作" width="200" align="center" fixed="right">
           <template #default="{row}">
-            <el-button size="small" type="primary" link @click="openPreview(row)">预览前100行</el-button>
+            <el-button size="small" type="primary" link @click="openPreview(row)">查看/编辑</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -163,7 +163,8 @@ async function openPreview(row) {
   previewRow.value = row
   const def = configStore.defById(row.defId)
   previewColumns.value = def?.columns || []
-  previewRows.value = await configStore.allData(row.defId, 100)
+  // 移除 100 条限制:加载该配置项全部数据用于查看/编辑/导出
+  previewRows.value = await configStore.allData(row.defId)
   previewMode.value = 'read'
   showPreview.value = true
 }

@@ -70,7 +70,14 @@ export function applyColumnsToSheet(sheet, configDef, mode = 'runtime') {
     const c = cols[i] || {}
     const colIdx = i + offset
     const label = c.label || c.key || ('col' + i)
-    sheet.setValue(0, colIdx, label, AREA.colHeader)
+    // template 模式:表头写入 viewport 行 0(ExcelIO 导出 xlsx 时 colHeader 区默认不导出,
+    // 必须把表头放到 viewport 数据区行 0,xlsx 第 1 行才是表头)
+    // runtime 模式:表头写入 SpreadJS UI colHeader 区(在线编辑用原生表头 UI)
+    if (mode === 'template') {
+      sheet.setValue(0, colIdx, label, AREA.viewport)
+    } else {
+      sheet.setValue(0, colIdx, label, AREA.colHeader)
+    }
     sheet.setTag(0, colIdx, c.key, AREA.colHeader)
     sheet.setColumnWidth(colIdx, Math.max(100, 14 * String(label).length + 40))
 
@@ -344,17 +351,20 @@ export async function importExcel(file, configDef, opts = {}) {
 function fillSheetWithData(sheet, configDef, rows, mode = 'template') {
   const cols = (configDef && configDef.columns) || []
   const offset = mode === 'template' ? 0 : 2
+  // template 模式:行 0 是表头(applyColumnsToSheet 已写入),数据从行 1 开始
+  // runtime 模式:行 0 是数据(__id/__mark 在 colHeader),数据从行 0 开始
+  const dataStartRow = mode === 'template' ? 1 : 0
   const list = rows || []
   sheet.suspendPaint()
   try {
-    sheet.setRowCount(Math.max(list.length, 1))
+    sheet.setRowCount(Math.max(list.length + dataStartRow, dataStartRow))
     list.forEach((row, r) => {
       const data = row.data || row.rowData || {}
       for (let i = 0; i < cols.length; i++) {
         const key = cols[i].key
         let value = data[key]
         if (value === undefined || value === null) value = ''
-        sheet.setValue(r, i + offset, value)
+        sheet.setValue(r + dataStartRow, i + offset, value)
       }
     })
   } finally {

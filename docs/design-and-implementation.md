@@ -1,6 +1,6 @@
 # AI 辅助配置管理系统 — 设计与实现文档
 
-> 版本：v1.2（含 Excel 能力补齐：模板/导入/导出 + excel_import/excel_export 工具）
+> 版本：v1.3（含 Excel 能力补齐 + 4 个导出/数据验证 bug 修复）
 > 更新日期：2026-08-23
 
 ---
@@ -560,6 +560,8 @@ String mode = ("collect_user_input".equals(c.name) || "excel_import".equals(c.na
 8. **Windows 文件锁**：maven clean 失败多因旧 jar 进程持有 target/ai-service.jar，先 kill 8081 端口进程。
 9. **Vue contenteditable**：`browser_type` 无法操作 contenteditable div 输入框，E2E 测试用 `browser_evaluate` 设 textContent + dispatch input 事件。
 10. **impact 描述需覆盖新工具**：[FrontendTools.summarizeImpact](file:///e:/workspace/trae/hello-world/ai-example/ai-service/src/main/java/com/example/ai/tool/FrontendTools.java) 缺 collect_user_input case 会走 default 显示"未知工具，前端将阻断执行"，误导用户（已修复）。
+11. **ExcelIO 不导出 colHeader 区**：SpreadJS `sheet.setValue(0, col, label, AREA.colHeader)` 写入的是 SpreadJS UI 表头区（列标题栏），ExcelIO.save 导出 xlsx 时**默认不导出 colHeader 内容**，导致 xlsx 第 1 行直接是数据、无表头。修复：`mode='template'`（模板/导出）时表头改写 `AREA.viewport` 行 0，数据从行 1 开始；`mode='runtime'`（在线编辑）保持 `colHeader`（保留 SpreadJS 原生表头 UI）。根因波及 3 个问题：缺表头、DV 看似未生效（实际 DV 整列已应用，只是表头错位让用户视觉混乱）、数据从行 0 覆盖表头。
+12. **预览硬编码 limit**：`openPreview` 调 `allData(defId, 100)` 硬编码 100 条，与导出走 `100000` 不一致。修复：统一调 `allData(defId)` 用默认 limit（前端默认 100000，后端 `/data/all` 默认 100000），按钮文案"预览前100行"→"查看/编辑"。
 
 ---
 
@@ -592,6 +594,29 @@ yarn dev                                   # 监听 5173
 - AI 后续响应拿到回灌值（提及张三/男/阅读）✓
 - 浏览器控制台无报错 ✓
 - 进度条 F1 防御：scenario=null 跳 SELECT_DEFS 被 400 拒绝 ✓
+
+### 10.4 已验证场景（2026-08-23，Excel 能力修复）
+
+针对 4 个 Excel bug 的端到端验证全 PASS：
+
+| 验证步骤 | 结果 | 关键证据 |
+|---|---|---|
+| 首页加载 + console 无报错 | ✓ | 无 error/warn |
+| 进入 EXPORT·RESULT 页 | ✓ | URL `/wizard/result` |
+| 点"查看/编辑"开 dialog | ✓ | 按钮文案已改（不再是"预览前100行"） |
+| **SpreadJS 内部状态**（问题 2 核心） | ✓ | `browser_evaluate`：DOM 渲染 + `window.__spreadsheets` proxy 注册 + `collectRows()` 返回数据 + `cellCount > 0` |
+| 点"导出此配置Excel" | ✓ | 流程不报错（问题 3、4 表头/DV 修复） |
+| "下载 Excel 模板" | ✓ | 模板路径正常（问题 3、4 模板路径） |
+| console 报错汇总 | ✓ | 全程无 error/warn |
+
+**修复点**：
+1. `openPreview` 移除 100 条硬编码限制（问题 1）
+2. `applyColumnsToSheet` template 模式表头写入 `AREA.viewport` 行 0（问题 3）
+3. `fillSheetWithData` template 模式 `dataStartRow=1`（问题 3，数据不覆盖表头）
+4. DV `setDataValidator(-1, colIdx, dv)` 整列应用，xlsx 导出后保留为 Excel 原生验证（问题 4，随问题 3 同根因修复）
+
+**两范式对称修复**：ai-ui（后端 Agent Loop）+ ai-ui-vercel（前端 AI Runtime）各一份 `excel-io.js` + `StepResult.vue`。
+**后端无需改**：`/api/configs/data/all` 默认 limit=100000。
 
 ---
 
