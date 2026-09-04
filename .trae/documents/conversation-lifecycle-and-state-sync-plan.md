@@ -1,9 +1,10 @@
 # 会话生命周期与状态同步方案设计
 
-> 版本：v1.0
-> 日期：2026-09-04
+> 版本：v1.1
+> 日期：2026-09-05（v1.0 于 2026-09-04）
 > 范围：ai-ui（后端 Agent Loop）+ ai-ui-vercel（前端 AI Runtime）双范式
 > 前置文档：design-and-implementation.md、collect-user-input-and-progress-sync.md
+> 评审文档：conversation-lifecycle-industry-research-and-plan-review.md（v1.1 变更依据：行业调研发现 LLM 传输层错误处理缺口 + 2 处设计约束显式化）
 
 ---
 
@@ -33,6 +34,9 @@
 | 流程抗穿插 | Rasa slot filling：slot（状态）独立于 story（对话） | scenario/step/plan 在 AgentState，不在对话历史（已有架构红利） |
 | 打断语义 | 业界共识：打断=轮次边界停止+保留现场，非指令级中断、非自动回滚 | 改造 F |
 | 上下文管理 | Claude Code auto-compact / 读取截断；LangGraph trim/summarize | 改造 G |
+| LLM 错误分类与退避 | pydantic-ai（tenacity 尊重 Retry-After）/ Codex 流中断识别 | 改造 H（v1.1 新增） |
+| 持久化三阶段提交 | 生产对话系统共识：先存用户消息→校验响应→标记 resolved | 改造 A 补充原则（v1.1） |
+| 幂等回灌 | 确定性幂等键（防重试重复副作用） | resumeToken + toolCallId（已有，v1.1 显式声明） |
 
 **结论：本方案主干全部有业界原型，非凭空设计。**
 
@@ -85,6 +89,8 @@
 | A1 | ai-ui-vercel/src/main.js | pinia 持久化插件：ai store 的 `sessionId` 从 localStorage 迁 sessionStorage |
 | A2 | ai-ui-vercel/src/stores/ai.js L179-203 | `loadHistory`/`_persistMessages` 的 `ai-vercel-chat-{taskId}` key 迁 sessionStorage |
 | A3 | ai-ui/src/stores/ai.js L38 | `sessionId` 生成后写 sessionStorage，state 初始化时先读（**修复现状：刷新后 uuidv4() 重新生成导致历史断连**） |
+
+**持久化顺序原则（v1.1 新增，三阶段提交模式）**：用户消息必须先落库（或 sessionStorage）再发起 LLM 调用；AI 响应校验完整后才标记该轮 resolved；刷新恢复时以「最后一条 resolved 轮次」为一致点。防网络中断导致历史出现「有问无答」的污染上下文。ai-ui 侧由后端消息表天然满足（chat 入口已先落库）；ai-ui-vercel 侧在 `_persistMessages` 注释中固化该顺序约束。
 
 后端 AgentState 24h 过期兜底清理孤儿会话，无需改动。
 
@@ -158,6 +164,8 @@ router.afterEach(() => { configStore.dataVersion++ })  // 路由=上下文变更
 | D3c | AiService.submitToolResult | 版本不一致时 tool result message 前置提示：`[系统] 等待期间工作区已被用户手动修改（v15→v18），后续决策请先调 get_workspace_state 获取最新状态` |
 | D3d | ai-ui-vercel ai.js | pendingInteraction 记录挂起版本；resolveInteraction 对比，变了则在 tool result content 附加同款提示 |
 
+**决策理由（v1.1 显式化）**：版本不一致时**提示并强制现查，但不阻断回灌**——对齐业界「恢复前验证」共识中的弹性分支：验证失败告警而非拒绝执行，因为配置场景下用户手工修改后再确认是合法操作路径。仅当 snapshot 缺失或损坏时才拒绝。
+
 **D4（可选 UX）**：AiPanel 订阅 dataVersion，pending 期间显示「工作区有变更」轻提示条。
 
 ### 改造 E：prompt 行为准则
@@ -191,16 +199,27 @@ router.afterEach(() => { configStore.dataVersion++ })  // 路由=上下文变更
 
 流程不受压缩影响：plan/scenario/step 在 AgentState 不在消息里。
 
+### 改造 H：LLM 传输层健壮性（v1.1 新增，优先级中）
+
+**背景**：行业调研发现的原 plan 空白——LLM 调用层的重试/超时/断连策略。网络可靠性 99.5–99.9%，长会话多次 LLM 调用必然遇到失败，需假设失败为常态。
+
+| # | 位置 | 内容 | 业界依据 |
+|---|---|---|---|
+| H1 | 两范式 LLM 调用处 | 错误三分类：①可重试（429/5xx/网络超时/流中断）→ 指数退避（初始 1s，×2，jitter，上限 3 次），尊重 Retry-After 头；②需干预（401/400/上下文超限）→ 不重试，走 G3 压缩或明确报错；③不可恢复（403/配额耗尽）→ 直接失败 | pydantic-ai（tenacity + Retry-After）；各 provider 退避语义不同需匹配（OpenAI 429 带 retry-after，DeepSeek 需客户端退避） |
+| H2 | 两范式 LLM 客户端配置 | 调用超时设 120s+（非默认 30s），长上下文流式生成可能 60s+ 不出 token，避免误杀 | 生产复盘通用建议 |
+| H3 | 两范式前端 | SSE/fetch 断线检测：RUN 中途断连 → **不自动重跑**（防重复副作用），提示「连接中断，可重新发送」；ai-ui 可靠 `/api/ai/pending` 查询状态后再决定操作 | AG-UI 断连安全默认；Codex 流中断识别实践 |
+
 ---
 
-## 5. 实施阶段（4 阶段，各自独立可验证）
+## 5. 实施阶段（5 阶段，各自独立可验证）
 
 | 阶段 | 内容 | 验证方法 |
 |---|---|---|
-| 1 | 改造 A | 刷新→会话恢复；关窗重开→新会话；双窗口→各自独立 |
+| 1 | 改造 A（含持久化顺序原则） | 刷新→会话恢复；关窗重开→新会话；双窗口→各自独立；刷新后历史无「有问无答」污染 |
 | 2 | 改造 D（D1→D3→D4） | 「1月改2月」复现：AI 挂起确认→手动改数据→确认→AI 感知变更并现查 |
 | 3 | 改造 B + C | AI 反问表单→F5→卡片重现→提交→loop 续跑；pending 挂 10 分钟→卡片过期→回灌被拒 |
 | 4 | 改造 E + F + G（G3 可后置） | 停止按钮生效且现场可查；闲聊穿插后继续流程正确；长会话不撞上限 |
+| 5 | 改造 H（H1→H2→H3） | 故障注入：模拟 429→退避重试成功；弱网断流→不重复副作用、有明确提示；慢响应 60s+→不误判超时 |
 
 ## 6. 风险与升级路径
 
@@ -211,3 +230,4 @@ router.afterEach(() => { configStore.dataVersion++ })  // 路由=上下文变更
 | vercel 重放 loop 被 autoExecutedCallIds 去重跳过 | 恢复路径绕过该 Set（memory 已记录） |
 | AI 需要知道「改了什么」而非「改了没有」 | 升级 AG-UI STATE_DELTA（JSON Patch 事件流）——当前不需要 |
 | 多标签共享同一会话实时同步 | 升级 BroadcastChannel + SSE push——当前需求是隔离，不做 |
+| 退避重试导致用户感知延迟变长 | 重试间隔内 SSE 下发重试事件，前端显示「重试中 (2/3)」；Codex 惯例：首次网络波动的重试对用户透明 |
