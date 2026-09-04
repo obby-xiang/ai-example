@@ -18,12 +18,15 @@ GC.Spread.Sheets.LicenseKey = import.meta.env.VITE_SPREADJS_KEY || ''
 import App from './App.vue'
 import router from './router'
 import './styles/main.scss'
+import { installDataVersionCapture } from '@/utils/workspace-version'
 
 const app = createApp(App)
 const pinia = createPinia()
 
 // 本地持久化插件(持久化 currentTaskId / sessionId / expanded)
-// AI 消息历史由 ai store 自行按 taskId 持久化到 localStorage
+// 改造 A：会话随窗口——sessionId 存 sessionStorage(刷新存活、关窗自毁、多标签天然隔离)
+//   expanded(UI 偏好)与 currentTaskId(任务数据)保持 localStorage 不动
+// AI 消息历史由 ai store 自行按 taskId 持久化到 sessionStorage(见 ai.js _persistMessages)
 pinia.use(({ store }) => {
   const stored = localStorage.getItem('vercel-' + store.$id)
   if (stored) {
@@ -33,8 +36,16 @@ pinia.use(({ store }) => {
         if (parsed.currentTaskId) store.currentTaskId = parsed.currentTaskId
       }
       if (store.$id === 'ai') {
-        if (parsed.sessionId) store.sessionId = parsed.sessionId
+        // sessionId 优先读 sessionStorage；兼容旧版 localStorage 中的值(一次性迁移)
         if (parsed.expanded !== undefined) store.expanded = parsed.expanded
+        const legacySessionId = parsed.sessionId || null
+        const sessionStored = sessionStorage.getItem('vercel-ai-session')
+        if (sessionStored) {
+          store.sessionId = sessionStored
+        } else if (legacySessionId) {
+          store.sessionId = legacySessionId
+          sessionStorage.setItem('vercel-ai-session', legacySessionId)
+        }
       }
     } catch (e) { /* ignore */ }
   }
@@ -42,12 +53,16 @@ pinia.use(({ store }) => {
     const toSave = {}
     if (store.$id === 'task') toSave.currentTaskId = state.currentTaskId
     if (store.$id === 'ai') {
-      toSave.sessionId = state.sessionId
+      // sessionId → sessionStorage(会话随窗口)；expanded → localStorage(跨窗口 UI 偏好)
+      sessionStorage.setItem('vercel-ai-session', state.sessionId)
       toSave.expanded = state.expanded
     }
     localStorage.setItem('vercel-' + store.$id, JSON.stringify(toSave))
   })
 })
+
+// 改造 D1：安装 dataVersion 捕获（store 白名单 + 路由拦截点）
+installDataVersionCapture(pinia, router)
 
 for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
   app.component(key, component)

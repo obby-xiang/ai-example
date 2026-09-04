@@ -81,9 +81,20 @@ export const list_config_defs = tool({
   parameters: z.object({}),
   execute: async () => {
     const configStore = useConfigStore()
-    return configStore.enabledDefinitions.map(d => ({
+    const defs = configStore.enabledDefinitions.map(d => ({
       id: d.id, code: d.code, name: d.name, fieldCount: (d.columns || []).length
     }))
+    // 改造 G2：大结果截断摘要化(>50 项返回前 50+总数+引导查详情),防上下文膨胀(两范式对齐后端)
+    if (defs.length > 50) {
+      return {
+        ok: true,
+        count: defs.length,
+        defs: defs.slice(0, 50),
+        truncated: true,
+        message: '结果过长已截断:仅返回前 50 条(共 ' + defs.length + ' 条)。如需某配置项字段详情,请调 get_config_def(defId) 查询。'
+      }
+    }
+    return { ok: true, count: defs.length, defs }
   }
 })
 
@@ -249,12 +260,16 @@ export const run_flow = tool({
     defIds: z.array(z.number().int()).optional().describe('export_single 也可用长度 1 的数组'),
     defId: z.number().int().optional().describe('仅 export_single 时使用;优先 defId')
   }),
-  execute: async (args, { toolCallId } = {}) => {
+  execute: async (args, { toolCallId, abortSignal } = {}) => {
     const impact = toolImpact('run_flow', args)
     const decision = await waitForConfirm(toolCallId, 'run_flow', args, impact)
     if (!decision || !decision.confirmed) {
       return { ok: false, message: 'user_cancelled', reason: '用户取消了执行' }
     }
+    // 改造 F3：协作式取消——SDK 把 streamText 的 abortSignal 透传给 execute,步骤边界检查取消标志。
+    // 原则:打断=步骤边界停止+保留现场,不做指令级中断,不回滚已完成步骤(每步完成已写 stepArtifacts)。
+    const flowStoppedResult = () => ({ ok: false, message: 'user_stopped', reason: '用户停止了执行,已完成的步骤保留' })
+    const isCancelled = () => !!abortSignal?.aborted
     const taskStore = useTaskStore()
     const configStore = useConfigStore()
     const { flowType } = args
@@ -263,6 +278,8 @@ export const run_flow = tool({
       if (taskStore.currentTask?.scenario !== 'EXPORT') {
         await taskStore.selectScenario('EXPORT')
       }
+      // 步骤边界①：场景就绪后
+      if (isCancelled()) return flowStoppedResult()
       let defIds = Array.isArray(args.defIds) ? args.defIds.map(Number) : []
       if (args.defId !== undefined && args.defId !== null) defIds = [Number(args.defId)]
       if (flowType === 'export_all') {
@@ -271,11 +288,15 @@ export const run_flow = tool({
       defIds = defIds.filter(id => configStore.defById(id))
       if (!defIds.length) return { ok: false, message: '没有可导出的配置项' }
       await taskStore.updateSelectedDefs(defIds)
+      // 步骤边界②：配置项选择落库后
+      if (isCancelled()) return flowStoppedResult()
       await taskStore.gotoStep('QUERY_COND')
       await taskStore.saveStepData('QUERY_COND', { mode: 'all' })
       // 生成导出结果
       const items = []
       for (const id of defIds) {
+        // 步骤边界③：批量统计循环内逐次检查(大批量时保证可打断)
+        if (isCancelled()) return flowStoppedResult()
         const d = configStore.defById(id)
         try {
           const cnt = await configStore.count(id)
@@ -283,6 +304,8 @@ export const run_flow = tool({
         } catch (e) { /* ignore */ }
       }
       await taskStore.saveStepData('RESULT', { items, type: 'export', at: Date.now() })
+      // 步骤边界④：结果落库后、跳转前
+      if (isCancelled()) return flowStoppedResult()
       await taskStore.gotoStep('RESULT')
       const route = stepToRoute('RESULT')
       if (route) await router.push(route)

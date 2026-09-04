@@ -18,11 +18,14 @@ GC.Spread.Sheets.LicenseKey = import.meta.env.VITE_SPREADJS_KEY || ''
 import App from './App.vue'
 import router from './router'
 import './styles/main.scss'
+import { installDataVersionCapture } from '@/utils/workspace-version'
 
 const app = createApp(App)
 const pinia = createPinia()
 
 // 本地持久化插件(只持久化当前任务ID和sessionId和AI聊天,因为完整任务状态以服务端为准)
+// 改造 A：会话随窗口——sessionId 存 sessionStorage(刷新存活、关窗自毁、多标签隔离)；
+//   store 内 initSessionId() 已负责初始化,插件仅同步后续变更,不再从 localStorage 恢复 sessionId
 pinia.use(({ store }) => {
   const stored = localStorage.getItem('pinia-' + store.$id)
   if (stored) {
@@ -32,7 +35,6 @@ pinia.use(({ store }) => {
         if (parsed.currentTaskId) store.currentTaskId = parsed.currentTaskId
       }
       if (store.$id === 'ai') {
-        if (parsed.sessionId) store.sessionId = parsed.sessionId
         if (parsed.expanded) store.expanded = parsed.expanded
       }
     } catch (e) { /* ignore */ }
@@ -41,12 +43,15 @@ pinia.use(({ store }) => {
     const toSave = {}
     if (store.$id === 'task') toSave.currentTaskId = state.currentTaskId
     if (store.$id === 'ai') {
-      toSave.sessionId = state.sessionId
+      try { sessionStorage.setItem('ai-session-id', state.sessionId) } catch (e) { /* ignore */ }
       toSave.expanded = state.expanded
     }
     localStorage.setItem('pinia-' + store.$id, JSON.stringify(toSave))
   })
 })
+
+// 改造 D1：安装 dataVersion 捕获（store 白名单 + 路由拦截点）
+installDataVersionCapture(pinia, router)
 
 for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
   app.component(key, component)

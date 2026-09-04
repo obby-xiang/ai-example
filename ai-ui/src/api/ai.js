@@ -1,12 +1,17 @@
 import request from './request'
 
 export const aiApi = {
-  chat: (payload) => request.post('/ai/chat', payload).then(r => r.data),
-  autoPrompt: (payload) => request.post('/ai/auto-prompt', payload).then(r => r.data),
+  /** @param signal 改造 F1：AbortController.signal，停止按钮中断在途请求 */
+  chat: (payload, signal) => request.post('/ai/chat', payload, { signal }).then(r => r.data),
+  autoPrompt: (payload, signal) => request.post('/ai/auto-prompt', payload, { signal }).then(r => r.data),
   /** 前端工具执行结果回灌，恢复 agent loop */
-  toolResult: (payload) => request.post('/ai/tool-result', payload).then(r => r.data),
+  toolResult: (payload, signal) => request.post('/ai/tool-result', payload, { signal }).then(r => r.data),
   history: (taskId, sessionId) =>
     request.get('/ai/history', { params: { taskId, sessionId } }).then(r => r.data),
+  /** 改造 B1：查询当前 session 的 pending 交互（刷新恢复用），无则 data=null */
+  pending: (sessionId) => request.get('/ai/pending', { params: { sessionId } }).then(r => r.data),
+  /** 改造 F1：协作式取消当前 session 的运行/pending（停止按钮） */
+  cancelRun: (sessionId) => request.post('/ai/cancel', { sessionId }).then(r => r.data),
   clearHistory: (taskId) => request.delete('/ai/history', { params: { taskId } }),
   health: () => request.get('/ai/health').then(r => r.data),
 

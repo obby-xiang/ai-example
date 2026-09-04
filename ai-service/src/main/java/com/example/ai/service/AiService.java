@@ -18,12 +18,16 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClient;
+import org.springframework.web.client.RestClientResponseException;
 
 import java.time.LocalDateTime;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * AI 对话服务 —— 方案二：后端 Runtime + Agent Loop + 前端工具暂停-恢复。
@@ -71,8 +75,27 @@ public class AiService {
     @Value("${spring.ai.openai.chat.options.max-tokens:4096}")
     private int maxTokens;
 
+    /** ====== 改造 C1 ====== WAITING_TOOL 状态存活时间（分钟），超时拒绝回灌（AG-UI 超时安全默认：拒绝而非自动提交） */
+    @Value("${app.agent.waiting-tool-ttl-minutes:10}")
+    private long waitingToolTtlMinutes;
+
+    /** ====== 改造 H2 ====== LLM 调用超时（秒）。长上下文流式生成可能 60s+ 不出 token，默认 30s 会误杀，需 120s+ */
+    @Value("${app.ai.read-timeout-seconds:180}")
+    private int readTimeoutSeconds;
+
+    /** ====== 改造 H1 ====== 可重试错误的最大重试次数（429/5xx/网络超时，指数退避） */
+    @Value("${app.ai.max-retries:3}")
+    private int maxRetries;
+
     /** Agent loop 最大迭代次数（防止无限循环） */
     private static final int MAX_LOOP_ITERATIONS = 8;
+
+    /**
+     * ====== 改造 F2：协作式中断标志（sessionId 维度） ======
+     * /cancel 接口置位；agent loop 每轮开始检查，命中则当前轮边界停止（保留现场，不回滚）。
+     * 新一轮 chat() 入口清除标志（用户发新消息=显式开启新 run）。
+     */
+    private final Set<String> cancelledSessions = ConcurrentHashMap.newKeySet();
 
     private volatile RestClient cachedClient;
 
@@ -80,7 +103,15 @@ public class AiService {
         if (cachedClient == null) {
             synchronized (this) {
                 if (cachedClient == null) {
-                    cachedClient = RestClient.builder().baseUrl(baseUrl).build();
+                    // ====== 改造 H2 ====== 显式超时：connect 10s / read 默认 180s（配置项 app.ai.read-timeout-seconds）。
+                    // 长上下文流式生成可能 60s+ 不出 token，默认 30s 会误杀。
+                    SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+                    factory.setConnectTimeout(10_000);
+                    factory.setReadTimeout(readTimeoutSeconds * 1000);
+                    cachedClient = RestClient.builder()
+                            .baseUrl(baseUrl)
+                            .requestFactory(factory)
+                            .build();
                 }
             }
         }
@@ -149,6 +180,16 @@ public class AiService {
             throw new IllegalStateException("state 状态非 WAITING_TOOL，无法回灌: " + state.getStatus());
         }
 
+        // ====== 改造 C2：交互超时取消 ======
+        // 过期拒绝回灌 + 置 EXPIRED + 明确错误码（AG-UI 准则：超时默认最安全动作=拒绝）。
+        // 前端 pending 卡片有倒计时（用 expiresAt），超时置灰「已过期，请重新发起」。
+        if (state.getExpiresAt() != null && state.getExpiresAt().isBefore(LocalDateTime.now())) {
+            state.setStatus("EXPIRED");
+            agentStateRepository.save(state);
+            throw new IllegalStateException("PENDING_EXPIRED: 交互已超时（超过 "
+                    + waitingToolTtlMinutes + " 分钟未响应），请重新发起操作");
+        }
+
         // 2. 反序列化 messages + pendingToolCalls
         List<Map<String, Object>> messages;
         List<AiDTO.FrontendToolCall> pendingCalls;
@@ -189,6 +230,22 @@ public class AiService {
         } catch (JsonProcessingException e) {
             resultStr = "{\"ok\":false,\"message\":\"result serialization failed\"}";
         }
+        // ====== 改造 G2：工具结果截断（>2000 字符摘要化，防单次结果打爆上下文）======
+        if (resultStr.length() > 2000) {
+            resultStr = resultStr.substring(0, 2000)
+                    + "...(结果过长已截断,共 " + resultStr.length() + " 字符。如需完整数据请调 get_workspace_state 现查)";
+        }
+        // ====== 改造 D3c：dataVersion 变更感知 ======
+        // 挂起时记录 dataVersion 到 AgentState（D3b）；回灌携带最新快照（D3a）。
+        // 版本不一致 → tool result 前置系统提示，强制 AI 先现查再决策。
+        // 决策（plan v1.1）：提示并强制现查但不阻断回灌——配置场景下用户手工修改后再确认是合法路径。
+        Long suspendedVersion = state.getDataVersion();
+        Long currentVersion = extractDataVersion(req.getWorkspaceState());
+        if (suspendedVersion != null && currentVersion != null && !suspendedVersion.equals(currentVersion)) {
+            resultStr = "[系统] 等待期间工作区已被用户手动修改（v" + suspendedVersion + "→v" + currentVersion
+                    + "），后续决策请先调 get_workspace_state 获取最新状态。\n" + resultStr;
+            log.info("回灌检测到 dataVersion 变更: sessionId={} v{}→v{}", state.getSessionId(), suspendedVersion, currentVersion);
+        }
         toolMessage.put("content", resultStr);
         messages.add(toolMessage);
 
@@ -216,6 +273,32 @@ public class AiService {
         if (taskId != null) {
             messageRepository.deleteByTaskId(taskId);
         }
+    }
+
+    /**
+     * ====== 改造 F1 ====== 协作式取消：把 session 的活跃 WAITING_TOOL 全部置 EXPIRED。
+     * 业界共识：打断=轮次边界停止+保留现场（LangGraph interrupt / AG-UI RUN_CANCELLED），
+     * 非指令级中断、不回滚已完成操作。同步 loop 内的 LLM 调用无法中途杀线程，
+     * 采取协作语义：前端 abort HTTP 请求 + 本接口作废 pending state，
+     * 后续对该 resumeToken 的回灌会被「状态非 WAITING_TOOL」拒绝。
+     *
+     * @return 被取消的 state 数
+     */
+    @Transactional
+    public int cancelRun(String sessionId) {
+        if (sessionId == null || sessionId.isBlank()) return 0;
+        // 改造 F2：置位中断标志，运行中的 agent loop 在下一轮迭代边界停止
+        cancelledSessions.add(sessionId);
+        List<AgentState> waiting = agentStateRepository
+                .findAllBySessionIdAndStatus(sessionId, "WAITING_TOOL");
+        for (AgentState s : waiting) {
+            s.setStatus("EXPIRED");
+            agentStateRepository.save(s);
+        }
+        if (!waiting.isEmpty()) {
+            log.info("协作式取消: sessionId={} 作废 {} 个 WAITING_TOOL state", sessionId, waiting.size());
+        }
+        return waiting.size();
     }
 
     // ================================ Agent Loop 核心 ================================
@@ -252,6 +335,14 @@ public class AiService {
 
         while (iteration < MAX_LOOP_ITERATIONS) {
             iteration++;
+            // ====== 改造 F2：每轮 loop 开始检查中断标志（轮次边界停止，保留现场，不回滚） ======
+            if (req.getSessionId() != null && cancelledSessions.remove(req.getSessionId())) {
+                log.info("Agent loop 被协作式中断: sessionId={} 第 {} 轮边界停止", req.getSessionId(), iteration);
+                String stoppedContent = (latestContent == null || latestContent.isBlank() ? "" : latestContent + "\n")
+                        + "（已停止，已完成的操作保留）";
+                return finalizeResponse(req, stoppedContent, Collections.emptyList(), null, true,
+                        scenario, step, null);
+            }
             try {
                 // 1. 构造请求体（Phase 2.4: 按 scenario+step 动态过滤工具集）
                 Map<String, Object> requestBody = buildRawRequestBody(messages, scenario, step);
@@ -319,8 +410,11 @@ public class AiService {
                 AiDTO.FrontendToolCall frontendDTO = convertRawToolCallToFrontendDTO(c);
                 List<AiDTO.FrontendToolCall> frontendDTOs = List.of(frontendDTO);
                 String token = saveAgentState(req, messages, frontendDTOs, latestContent, scenario, step);
-                return finalizeResponse(req, latestContent, frontendDTOs, token, false,
+                AiDTO.ChatResp pauseResp = finalizeResponse(req, latestContent, frontendDTOs, token, false,
                         scenario, step, frontendDTO.getMode());
+                // 改造 C3：下发 pending 过期时间，前端渲染倒计时
+                pauseResp.setPendingExpiresAt(LocalDateTime.now().plusMinutes(waitingToolTtlMinutes).toString());
+                return pauseResp;
 
             } catch (Exception e) {
                 log.error("Agent loop 第 {} 次迭代失败，转入兜底", iteration, e);
@@ -336,7 +430,7 @@ public class AiService {
 
     // ================================ AgentState 持久化 ================================
 
-    /** 保存 loop 状态并生成 resumeToken（Phase 2: 含 scenario+step 上下文） */
+    /** 保存 loop 状态并生成 resumeToken（Phase 2: 含 scenario+step 上下文；改造 C1: TTL 可配置；改造 D3b: 记录挂起时 dataVersion） */
     private String saveAgentState(AiDTO.ChatReq req, List<Map<String, Object>> messages,
                                   List<AiDTO.FrontendToolCall> pendingCalls, String interimContent,
                                   String scenario, String step) {
@@ -352,14 +446,67 @@ public class AiService {
                     .currentScenario(scenario)
                     .currentStep(step)
                     .mode(pendingCalls.isEmpty() ? "AUTO" : pendingCalls.get(0).getMode())
+                    .dataVersion(extractDataVersion(req.getWorkspaceState()))
                     .status("WAITING_TOOL")
-                    .expiresAt(LocalDateTime.now().plusHours(24))
+                    // 改造 C1：WAITING_TOOL TTL 从 24h 缩到可配置（默认 10 分钟），超时拒绝回灌
+                    .expiresAt(LocalDateTime.now().plusMinutes(waitingToolTtlMinutes))
                     .build();
             agentStateRepository.save(state);
             return token;
         } catch (JsonProcessingException e) {
             throw new RuntimeException("AgentState 序列化失败: " + e.getMessage(), e);
         }
+    }
+
+    /** 从工作区快照中提取 dataVersion（契约字段，见 plan 改造 D2；容忍缺失/类型差异） */
+    private Long extractDataVersion(Map<String, Object> workspaceState) {
+        if (workspaceState == null) return null;
+        Object v = workspaceState.get("dataVersion");
+        if (v instanceof Number n) return n.longValue();
+        if (v instanceof String s) {
+            try { return Long.parseLong(s.trim()); } catch (NumberFormatException ignored) {}
+        }
+        return null;
+    }
+
+    /**
+     * ====== 改造 B1 ====== 查询 session 当前待处理的 pending 交互（供刷新恢复）。
+     * 返回最新一条未过期的 WAITING_TOOL state 的关键信息：
+     *   { resumeToken, pendingToolCalls, expiresAt, mode, currentScenario, currentStep, interimContent }
+     * 无 pending 返回 null。
+     */
+    public Map<String, Object> findPendingInteraction(String sessionId) {
+        if (sessionId == null || sessionId.isBlank()) return null;
+        List<AgentState> waiting = agentStateRepository
+                .findAllBySessionIdAndStatus(sessionId, "WAITING_TOOL");
+        LocalDateTime now = LocalDateTime.now();
+        AgentState latest = null;
+        for (AgentState s : waiting) {
+            // 过期的不返回（由 cleanupWaitingState / markExpired 兜底清理）
+            if (s.getExpiresAt() != null && s.getExpiresAt().isBefore(now)) continue;
+            if (latest == null || (s.getCreatedAt() != null && latest.getCreatedAt() != null
+                    && s.getCreatedAt().isAfter(latest.getCreatedAt()))) {
+                latest = s;
+            }
+        }
+        if (latest == null) return null;
+        List<AiDTO.FrontendToolCall> pendingCalls;
+        try {
+            pendingCalls = om.readValue(latest.getPendingToolCallsJson(),
+                    new TypeReference<List<AiDTO.FrontendToolCall>>() {});
+        } catch (JsonProcessingException e) {
+            log.warn("pendingToolCalls 反序列化失败: {}", e.getMessage());
+            return null;
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("resumeToken", latest.getResumeToken());
+        result.put("pendingToolCalls", pendingCalls);
+        result.put("expiresAt", latest.getExpiresAt() == null ? null : latest.getExpiresAt().toString());
+        result.put("mode", latest.getMode());
+        result.put("currentScenario", latest.getCurrentScenario());
+        result.put("currentStep", latest.getCurrentStep());
+        result.put("interimContent", latest.getInterimContent());
+        return result;
     }
 
     /** 清理同一 session 过期的 WAITING_TOOL 状态（保留活跃的，避免误清理未回灌的 state） */
@@ -428,6 +575,17 @@ public class AiService {
             item.put("name", d.getName());
             item.put("fieldCount", d.getColumns() != null ? d.getColumns().size() : 0);
             list.add(item);
+        }
+        // ====== 改造 G2：大结果截断摘要化（列表>50 项返回前 50+总数+查询提示），防打爆上下文 ======
+        if (list.size() > 50) {
+            Map<String, Object> r = new LinkedHashMap<>();
+            r.put("ok", true);
+            r.put("count", list.size());
+            r.put("defs", list.subList(0, 50));
+            r.put("truncated", true);
+            r.put("message", "结果过长已截断：仅返回前 50 条（共 " + list.size()
+                    + " 条）。如需某配置项字段详情，请调 get_config_def(defId) 查询。");
+            return r;
         }
         return Map.of("ok", true, "count", list.size(), "defs", list);
     }
@@ -745,6 +903,42 @@ public class AiService {
         }
         log.debug("DeepSeek 请求体(前1500字符): {}", reqJson.substring(0, Math.min(1500, reqJson.length())));
 
+        // ====== 改造 H1：错误三分类 + 指数退避重试 ======
+        //   ①可重试: 429/5xx/网络超时 → 退避(1s×2^n + jitter,上限 maxRetries 次),尊重 Retry-After
+        //   ②需干预: 401/400/上下文超限 → 不重试直接抛(上层走兜底/压缩)
+        //   ③不可恢复: 403/配额 → 直接抛
+        // 依据: pydantic-ai(tenacity + Retry-After);网络可靠性 99.5~99.9%,长会话必遇失败,按常态设计
+        RuntimeException lastError = null;
+        for (int attempt = 0; attempt <= maxRetries; attempt++) {
+            try {
+                return doCallDeepSeekApi(reqJson);
+            } catch (RestClientResponseException e) {
+                int status = e.getStatusCode().value();
+                boolean retryable = status == 429 || status >= 500;
+                if (!retryable || attempt >= maxRetries) {
+                    throw new RuntimeException("DeepSeek API 错误 HTTP " + status + ": "
+                            + abbrev(e.getResponseBodyAsString(), 300), e);
+                }
+                long backoffMs = retryAfterMs(e).orElse(backoffWithJitter(attempt));
+                log.warn("DeepSeek 调用失败(HTTP {}),第 {}/{} 次重试,退避 {}ms", status, attempt + 1, maxRetries, backoffMs);
+                sleep(backoffMs);
+                lastError = new RuntimeException("DeepSeek API 错误 HTTP " + status, e);
+            } catch (ResourceAccessException e) {
+                // 网络层失败(连接/读超时)
+                if (attempt >= maxRetries) {
+                    throw new RuntimeException("DeepSeek 网络调用失败(已重试 " + maxRetries + " 次): " + e.getMessage(), e);
+                }
+                long backoffMs = backoffWithJitter(attempt);
+                log.warn("DeepSeek 网络异常,第 {}/{} 次重试,退避 {}ms: {}", attempt + 1, maxRetries, backoffMs, e.getMessage());
+                sleep(backoffMs);
+                lastError = new RuntimeException("DeepSeek 网络调用失败: " + e.getMessage(), e);
+            }
+        }
+        throw lastError != null ? lastError : new RuntimeException("DeepSeek 调用失败(未知)");
+    }
+
+    /** 单次调用(不重试),从 callDeepSeekApi 拆出 */
+    private JsonNode doCallDeepSeekApi(String reqJson) {
         String respStr = client()
                 .post()
                 .uri(chatPath)
@@ -775,6 +969,39 @@ public class AiService {
         }
     }
 
+    // ================================ 改造 H1 重试辅助 ================================
+
+    /** 尊重服务端 Retry-After 头（秒），无则 empty */
+    private java.util.Optional<Long> retryAfterMs(RestClientResponseException e) {
+        try {
+            String h = e.getHeaders() == null ? null : e.getHeaders().getFirst("Retry-After");
+            if (h == null) return java.util.Optional.empty();
+            return java.util.Optional.of(Math.max(0L, Long.parseLong(h.trim()) * 1000L));
+        } catch (Exception ignored) {
+            return java.util.Optional.empty();
+        }
+    }
+
+    /** 指数退避 + jitter：1s, 2s, 4s... ±20% 抖动（防多实例同时重试打爆对端） */
+    private long backoffWithJitter(int attempt) {
+        long base = 1000L * (1L << Math.min(attempt, 5));
+        double jitter = 0.8 + Math.random() * 0.4;
+        return (long) (base * jitter);
+    }
+
+    private void sleep(long ms) {
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private String abbrev(String s, int max) {
+        if (s == null) return "";
+        return s.length() <= max ? s : s.substring(0, max) + "...(截断)";
+    }
+
     // ================================ System + 历史 + 用户消息（原生格式） ================================
 
     private List<Map<String, Object>> buildRawMessages(AiDTO.ChatReq req) {
@@ -798,6 +1025,12 @@ public class AiService {
         sys.append("5. 所有回复必须用中文,不要重复废话。工具结果以 tool 角色回灌,基于结果继续推理或给最终回复。\n");
         sys.append("6. 流程推进(关键): 当当前步骤的意图已满足时,立即调 navigate_step 推进到状态图下一步,不要停等用户确认,也不要反复调 get_workspace_state。例:用户说'新建导出/导出配置'即场景 EXPORT,调 navigate_step(scenario=EXPORT,step=SELECT_SCENARIO) 后场景已选定,应继续调 navigate_step(step=SELECT_DEFS) 进入选择配置项,而非停在 SELECT_SCENARIO。只有遇到需要用户输入(如选哪些配置项、设查询条件)时才停下给出引导。\n");
         sys.append("7. 收集用户输入(关键): 当需要用户提供具体参数(如导出文件名、查询条件值、选择项、配置项 code/name 等)时,调 collect_user_input 工具,用 fields 数组定义表单字段(支持 text/textarea/number/boolean/single_select/multi_select/button_group/date 八种控件,每字段含 key/label/type/required/options 等),系统会渲染表单让用户填写并自动回灌结果,你基于回灌的值继续推理。一次可收集多个字段(单轮表单)或单个字段(多轮问答),由你根据需要决定。不要用纯文本提问代替表单——凡需结构化输入一律用 collect_user_input。\n");
+
+        // ====== 改造 E：prompt 行为准则（状态一致性三铁律）======
+        sys.append("\n【状态一致性准则 · 强制执行】\n");
+        sys.append("8. 执行任何写操作(table_*、run_flow 等)前必须调 get_workspace_state 确认最新状态,不得依赖对话历史中的数据快照——快照可能已被用户手动修改。\n");
+        sys.append("9. 回答与当前流程无关的问题时不要重置或推进流程状态;用户表达继续意图(如'继续''接着做')时先调 get_workspace_state 现查当前步骤再行动。\n");
+        sys.append("10. 收到「等待期间工作区已被用户手动修改」的系统提示时,必须先调 get_workspace_state 现查最新状态再决策,禁止沿用修改前的认知。\n");
 
         if (req.getWorkspaceState() != null && !req.getWorkspaceState().isEmpty()) {
             sys.append("\n[当前工作区状态]\n");

@@ -44,6 +44,7 @@ import { useAiStore } from '@/stores/ai'
 import { stepToRoute } from '@/router'
 import AiPanel from '@/components/AiPanel.vue'
 import { ElMessage } from 'element-plus'
+import { getDataVersion } from '@/utils/workspace-version'
 
 const taskStore = useTaskStore()
 const configStore = useConfigStore()
@@ -105,6 +106,10 @@ onMounted(async () => {
     } else if (router.currentRoute.value.path !== '/dashboard') {
       router.replace('/dashboard')
     }
+    // 改造 B2：历史加载完成后恢复未完成的 pending 交互(确认/表单卡片,含 resumeToken+过期时间)。
+    // 必须在 loadHistory 之后调用——loadHistory 会整体替换 messages,先恢复会被覆盖。
+    // 无任务会话(sessionId 维度)同样需要恢复,故放在分支外统一执行。
+    await aiStore.recoverPending()
   } catch (e) {
     ElMessage.error('初始化失败:' + e.message)
   }
@@ -112,12 +117,24 @@ onMounted(async () => {
 
 /**
  * 组装工作区状态快照,发送给AI
+ * ====== 改造 D2：共享状态契约（schema v1，两范式统一）======
+ * 契约字段：route / scenario / step / selectedDefIds / rowCounts / dirty / dataVersion
+ *   （只放摘要；全量数据由 AI 调 get_workspace_state 现查，token 原则不破）
+ * 兼容字段：event / task / definitions（既有消费方继续使用）
  */
 function collectWorkspaceState(event) {
   const t = taskStore.currentTask
   return {
-    event,
+    // ---- 契约字段 ----
+    dataVersion: getDataVersion(),
     route: router.currentRoute.value.path,
+    scenario: t?.scenario || null,
+    step: t?.currentStep || null,
+    selectedDefIds: taskStore.selectedDefIds,
+    rowCounts: collectRowCounts(taskStore.selectedDefIds),
+    dirty: !!(t?.changes && Object.keys(t.changes).length),
+    // ---- 兼容字段 ----
+    event,
     task: t ? {
       id: t.id,
       name: t.name,
@@ -137,6 +154,18 @@ function collectWorkspaceState(event) {
       id: d.id, code: d.code, name: d.name
     }))
   }
+}
+
+/** 契约字段 rowCounts：{ defId: 行数 }。ai-ui 数据在服务端，仅已打开的表格可同步取数（SpreadSheet 代理），取不到则省略 */
+function collectRowCounts(defIds) {
+  const counts = {}
+  for (const id of defIds || []) {
+    const proxy = window.__spreadsheets?.[id]
+    if (proxy && typeof proxy.collectRows === 'function') {
+      try { counts[id] = proxy.collectRows().length } catch (e) { /* ignore */ }
+    }
+  }
+  return counts
 }
 
 async function triggerAutoPrompt(event) {

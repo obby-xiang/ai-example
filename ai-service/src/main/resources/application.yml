@@ -48,6 +48,14 @@ app:
     chat-path: /chat/completions
     model: deepseek-v4-flash
     api-key: ${DEEPSEEK_API_KEY:your-deepseek-api-key-here}
+    # 改造 H2：LLM 调用读超时（秒）。长上下文流式生成可能 60s+ 不出 token，默认 30s 会误杀，需 120s+
+    read-timeout-seconds: 180
+    # 改造 H1：可重试错误（429/5xx/网络超时）的最大重试次数，指数退避 1s×2^n + jitter，尊重 Retry-After
+    max-retries: 3
+  agent:
+    # 改造 C1：WAITING_TOOL 交互超时时间（分钟）。超时后端拒绝回灌并置 EXPIRED，
+    # 前端 pending 卡片倒计时置灰「已过期，请重新发起」（AG-UI 超时安全默认：拒绝）
+    waiting-tool-ttl-minutes: 10
 
 logging:
   level:

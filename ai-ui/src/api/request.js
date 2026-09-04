@@ -23,6 +23,8 @@ request.interceptors.response.use(
     return data
   },
   (err) => {
+    // 改造 F1：用户主动停止(AbortController)触发的取消不弹错误提示，由调用方按「已停止」处理
+    if (err.code === 'ERR_CANCELED') return Promise.reject(err)
     const msg = err.response?.data?.msg || err.message || '网络错误'
     ElMessage.error(msg)
     return Promise.reject(err)

@@ -15,10 +15,23 @@
  */
 import { createOpenAI } from '@ai-sdk/openai'
 
+// ====== 改造 H2：LLM 单请求超时 180s ======
+// 长上下文流式生成可能 60s+ 不出 token,浏览器 fetch 默认无整体超时,弱网挂起会无限等待。
+// AbortSignal.any 合并调用方信号(F1 停止按钮的 abort)与超时信号,任一触发即中断。
+const LLM_TIMEOUT_MS = 180 * 1000
+const fetchWithTimeout = (input, init = {}) => {
+  const timeoutSignal = AbortSignal.timeout(LLM_TIMEOUT_MS)
+  const combined = init.signal
+    ? (typeof AbortSignal.any === 'function' ? AbortSignal.any([init.signal, timeoutSignal]) : init.signal)
+    : timeoutSignal
+  return fetch(input, { ...init, signal: combined })
+}
+
 const openai = createOpenAI({
   baseURL: '/api/ai/proxy',
   apiKey: 'placeholder',
-  compatibility: 'compatible'
+  compatibility: 'compatible',
+  fetch: fetchWithTimeout
 })
 
 /** DeepSeek 对话模型(经后端代理) */

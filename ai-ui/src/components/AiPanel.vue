@@ -36,10 +36,21 @@
           </template>
           <template v-else>{{ m.content }}</template>
 
+          <!-- 工具卡片区底部：pending 倒计时（改造 C3，AG-UI 准则：超时有可见性） -->
+          <div v-if="m.done === false && m.pendingExpiresAt" class="a-ttl">
+            <template v-if="!isPendingExpired(m)">
+              <el-icon><Clock /></el-icon> 交互剩余 {{ formatRemaining(m) }}，超时将自动取消
+            </template>
+            <el-tag v-else size="small" type="danger">已过期，请重新发起</el-tag>
+          </div>
+          <!-- 改造 D4：pending 期间工作区被手动修改的轻提示条（订阅 dataVersion；回灌时后端也会强制 AI 现查） -->
+          <div v-if="m.done === false && workspaceChangedDuringPending" class="a-changed">
+            <el-icon><WarningFilled /></el-icon> 等待期间工作区有变更，AI 将在继续前重新获取最新状态
+          </div>
           <!-- ===================== 工具调用卡片：消费主协议 m.toolCalls ===================== -->
           <div v-if="m.toolCalls && m.toolCalls.length" class="ai-actions-list">
             <div v-for="tc in m.toolCalls" :key="tc.callId || uid()" class="ai-action-card"
-                 :class="{ 'legacy-card': tc.legacy, 'auto-exec': isAutoExec(tc) }">
+                 :class="{ 'legacy-card': tc.legacy, 'auto-exec': isAutoExec(tc), 'expired-card': m.done === false && isPendingExpired(m) }">
               <div class="a-title">
                 <span>
                   <el-icon style="vertical-align:-2px;color:#409EFF;"><Operation /></el-icon>
@@ -145,6 +156,11 @@
       <div class="bottom-row">
         <span class="tips">Enter 发送 · Shift+Enter 换行</span>
         <div style="display:flex;gap:6px;">
+          <!-- 改造 F1：停止按钮（生成中/等待交互中可见）。协作式取消：轮次边界停止+保留现场，不回滚已完成操作 -->
+          <el-button v-if="aiStore.loading || aiStore.hasPendingToolCall" size="small" type="danger" plain
+                     @click="aiStore.stopRun()" title="停止当前生成/等待的交互(已完成的内容保留)">
+            <el-icon style="margin-right:2px;"><CircleClose /></el-icon>停止
+          </el-button>
           <el-button size="small" :loading="aiStore.loading" @click="generatePlanFromInput()" title="先让 AI 生成执行计划,再由您确认">
             <el-icon style="margin-right:2px;"><List /></el-icon>规划
           </el-button>
@@ -158,7 +174,7 @@
 </template>
 
 <script setup>
-import { ref, watch, nextTick, onMounted, computed } from 'vue'
+import { ref, watch, nextTick, onMounted, onBeforeUnmount, computed } from 'vue'
 import { useAiStore } from '@/stores/ai'
 import { useTaskStore } from '@/stores/task'
 import { useConfigStore } from '@/stores/config'
@@ -171,6 +187,7 @@ import {
   resolveNeedConfirm,
   executeFrontendTool
 } from '@/utils/frontend-tool-registry'
+import { getDataVersion } from '@/utils/workspace-version'
 
 const aiStore = useAiStore()
 const taskStore = useTaskStore()
@@ -194,6 +211,53 @@ const quickPrompts = [
  * 业界 Cursor Composer 模式：AUTO 工具只触发一次，避免 watch 死循环。
  */
 const autoExecutedCallIds = new Set()
+
+// ================================================
+//   改造 C3：pending 交互倒计时（AG-UI 准则：超时有可见性）
+//   后端下发的 pendingExpiresAt 为 LocalDateTime.toString()（无时区，按本地时间解析）。
+// ================================================
+const nowTs = ref(Date.now())
+let ttlTimer = null
+
+/** 剩余毫秒数；无过期时间返回 null */
+function pendingRemainMs(m) {
+  if (!m || !m.pendingExpiresAt) return null
+  const t = new Date(m.pendingExpiresAt).getTime()
+  if (Number.isNaN(t)) return null
+  return t - nowTs.value
+}
+/** 是否已过期（超时后端会拒绝回灌，见 AiService.submitToolResult C2） */
+function isPendingExpired(m) {
+  const r = pendingRemainMs(m)
+  return r !== null && r <= 0
+}
+/** 格式化剩余时间：mm分ss秒 / ss秒 */
+function formatRemaining(m) {
+  const r = pendingRemainMs(m)
+  if (r === null) return ''
+  const s = Math.max(0, Math.ceil(r / 1000))
+  const mm = Math.floor(s / 60)
+  const ss = s % 60
+  return mm > 0 ? `${mm}分${String(ss).padStart(2, '0')}秒` : `${ss}秒`
+}
+
+// ================================================
+//   改造 D4：pending 期间「工作区有变更」轻提示（可选 UX）
+//   pending 开始时快照 dataVersion；订阅 dataVersionRef，变化则提示。
+//   仅提示不阻断——回灌时后端 D3c 会强制 AI 现查。
+// ================================================
+const pendingStartVersion = ref(null)
+watch(
+  () => {
+    const last = aiStore.messages[aiStore.messages.length - 1]
+    return last && last.role === 'assistant' && last.done === false ? (last.resumeToken || 'pending') : null
+  },
+  (key) => { pendingStartVersion.value = key ? getDataVersion() : null },
+  { immediate: true }
+)
+const workspaceChangedDuringPending = computed(() =>
+  pendingStartVersion.value != null && dataVersionRef.value !== pendingStartVersion.value
+)
 
 // ================================================
 //          工具卡片状态展示 + AUTO 判定
@@ -360,7 +424,8 @@ async function executeAndResume(message, tc, userCancelled = false, formData = n
 
   // 回灌给后端 → 恢复 agent loop
   // 后端可能返回下一轮 toolCalls（继续暂停）或 done=true 的最终回复
-  await aiStore.submitToolResult(message.resumeToken, tc.callId, result)
+  // 改造 D4：携带最新工作区快照（含 dataVersion），后端对比挂起时版本检测手动修改
+  await aiStore.submitToolResult(message.resumeToken, tc.callId, result, collectState())
   scrollBottom()
 }
 
@@ -507,28 +572,17 @@ function handleKeydown(e) {
   }
 }
 
+/**
+ * 工作区快照：委托 App.vue 的 collectWorkspaceState（改造 D2 契约单点实现，两范式同构），
+ * 兜底保留最小字段（含契约必含的 dataVersion——后端挂起时记录、回灌时对比 D3b/D3c）。
+ */
 function collectState() {
+  if (typeof window.__collectWorkspaceState === 'function') {
+    return window.__collectWorkspaceState()
+  }
   return {
-    route: location?.hash ? location.hash : '',
-    task: (() => {
-      const t = taskStore.currentTask
-      if (!t) return null
-      return {
-        id: t.id,
-        name: t.name,
-        scenario: t.scenario,
-        scenarioName: taskStore.scenarioName,
-        currentStep: t.currentStep,
-        status: t.status,
-        selectedDefIds: taskStore.selectedDefIds,
-        selectedDefs: taskStore.selectedDefIds.map(id => {
-          const d = configStore.defById(id)
-          return d ? { id: d.id, code: d.code, name: d.name } : null
-        }).filter(Boolean),
-        steps: taskStore.steps
-      }
-    })(),
-    definitions: configStore.enabledDefinitions.map(d => ({ id: d.id, code: d.code, name: d.name }))
+    dataVersion: getDataVersion(),
+    route: location?.hash ? location.hash : ''
   }
 }
 
@@ -580,7 +634,12 @@ async function clearAll() {
   } catch (e) { /* ignore */ }
 }
 
-onMounted(scrollBottom)
+onMounted(() => {
+  scrollBottom()
+  // 改造 C3：秒级滴答驱动倒计时刷新
+  ttlTimer = setInterval(() => { nowTs.value = Date.now() }, 1000)
+})
+onBeforeUnmount(() => { if (ttlTimer) { clearInterval(ttlTimer); ttlTimer = null } })
 </script>
 
 <style scoped>
@@ -591,5 +650,29 @@ onMounted(scrollBottom)
   background: #f5f7fa;
   border-radius: 6px;
   border: 1px dashed #dcdfe6;
+}
+/* 改造 C3：pending 倒计时 */
+.a-ttl {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #e6a23c;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+/* 改造 C3：已过期卡片置灰 */
+.expired-card { opacity: 0.55; pointer-events: none; }
+/* 改造 D4：pending 期间工作区变更轻提示条 */
+.a-changed {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #b88230;
+  background: #fdf6ec;
+  border: 1px solid #faecd8;
+  border-radius: 4px;
+  padding: 4px 8px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 </style>

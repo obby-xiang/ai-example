@@ -114,6 +114,28 @@ public class AiController {
         return R.ok(aiService.listHistory(taskId, sessionId));
     }
 
+    /**
+     * ====== 改造 B1 ====== 查询当前 session 的 pending 交互（刷新恢复用）。
+     * 前端 onMounted 调用：有未过期的 WAITING_TOOL state 则返回
+     * { resumeToken, pendingToolCalls, expiresAt, mode, currentScenario, currentStep, interimContent }，
+     * 前端据此重建交互卡片（CONFIRM→确认按钮，INPUT→表单）；无则返回 data=null。
+     */
+    @GetMapping("/pending")
+    public R<Map<String, Object>> pending(@RequestParam String sessionId) {
+        return R.ok(aiService.findPendingInteraction(sessionId));
+    }
+
+    /**
+     * ====== 改造 F1 ====== 协作式取消当前 session 的运行/pending。
+     * 前端「停止」按钮调用：作废活跃 WAITING_TOOL state（保留现场、不回滚），
+     * 返回 { cancelled: n }。
+     */
+    @PostMapping("/cancel")
+    public R<Map<String, Object>> cancel(@RequestBody Map<String, String> body) {
+        int n = aiService.cancelRun(body == null ? null : body.get("sessionId"));
+        return R.ok(Map.of("cancelled", n));
+    }
+
     /** 清空任务聊天历史 */
     @DeleteMapping("/history")
     public R<Void> clearHistory(@RequestParam(required = false) Long taskId) {

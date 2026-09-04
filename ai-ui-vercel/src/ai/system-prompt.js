@@ -28,6 +28,13 @@ export function buildSystemPrompt(workspaceState = {}, opts = {}) {
   sys.push('7. 收集用户输入(关键): 当需要用户提供具体参数(如导出文件名、查询条件值、选择项、配置项 code/name 等)时,调 collect_user_input 工具,用 fields 数组定义表单字段(支持 text/textarea/number/boolean/single_select/multi_select/button_group/date 八种控件,每字段含 key/label/type/required/options 等),系统会渲染表单让用户填写并自动回灌结果,你基于回灌的值继续推理。一次可收集多个字段(单轮表单)或单个字段(多轮问答),由你根据需要决定。不要用纯文本提问代替表单——凡需结构化输入一律用 collect_user_input。')
   sys.push('8. Excel 能力(关键): 当用户说「上传 Excel/导入 xlsx/把 Excel 灌进去」时,调 excel_import(configDefId, mode)——它会弹出文件上传卡片,用户选 .xlsx 后系统解析表头映射 + 校验 + 灌入到指定配置定义,无需用户在表格里逐行录入。当用户说「导出 Excel/下载 xlsx」时,调 excel_export(configDefIds?, fileName?)——直接下载 .xlsx 文件(单配置单 sheet,多配置合并多 sheet),空 configDefIds 时默认导出当前任务已选配置项。注意: excel_import 仅在 IMPORT/ADD/MODIFY 场景 VIEW_DEFS 步骤可用,excel_export 仅在 EXPORT 场景 RESULT 步骤可用。模板下载和在线编辑是 UI 按钮(配置项查看页和导出结果页),不通过工具调用。')
 
+  // ====== 改造 E：prompt 行为准则（状态一致性三铁律）======
+  sys.push('')
+  sys.push('【状态一致性准则 · 强制执行】')
+  sys.push('9. 执行任何写操作(table_*、run_flow、excel_import 等)前必须调 get_workspace_state 确认最新状态,不得依赖对话历史中的数据快照——快照可能已被用户手动修改。')
+  sys.push('10. 回答与当前流程无关的问题时不要重置或推进流程状态;用户表达继续意图(如"继续""接着做")时先调 get_workspace_state 现查当前步骤再行动。')
+  sys.push('11. 收到「等待期间工作区已被用户手动修改」的系统提示时,必须先调 get_workspace_state 现查最新状态再决策,禁止沿用修改前的认知。')
+
   if (workspaceState && Object.keys(workspaceState).length) {
     sys.push('')
     sys.push('[当前工作区状态]')

@@ -44,6 +44,7 @@ import { useAiStore } from '@/stores/ai'
 import { stepToRoute } from '@/router'
 import AiPanel from '@/components/AiPanel.vue'
 import { ElMessage } from 'element-plus'
+import { getDataVersion } from '@/utils/workspace-version'
 
 const taskStore = useTaskStore()
 const configStore = useConfigStore()
@@ -87,6 +88,9 @@ onMounted(async () => {
     // 如果当前有任务,加载AI历史
     if (taskStore.currentTaskId) {
       aiStore.loadHistory(taskStore.currentTaskId)
+      // 改造 B3：刷新恢复——检测未 resolved 的尾部轮次,重建 pending 交互卡片(AG-UI 重连模式);
+      // 非交互类中断卡片标记失败,不自动重跑(H3 防重复副作用)
+      aiStore.recoverPendingInteraction()
       // 如果还没消息,触发一次自动提示
       if (aiStore.messages.length === 0) {
         await triggerAutoPrompt('init')
@@ -105,11 +109,23 @@ onMounted(async () => {
 })
 
 // 组装工作区状态快照,发送给AI
+// ====== 改造 D2：共享状态契约（schema v1，两范式统一）======
+// 契约字段：route / scenario / step / selectedDefIds / rowCounts / dirty / dataVersion
+//   （只放摘要；全量数据由 AI 调 get_workspace_state 现查，token 原则不破）
+// 兼容字段：event / task / definitions（既有消费方继续使用）
 function collectWorkspaceState(event) {
   const t = taskStore.currentTask
   return {
-    event,
+    // ---- 契约字段 ----
+    dataVersion: getDataVersion(),
     route: router.currentRoute.value.path,
+    scenario: t?.scenario || null,
+    step: t?.currentStep || null,
+    selectedDefIds: taskStore.selectedDefIds,
+    rowCounts: collectRowCounts(taskStore.selectedDefIds),
+    dirty: !!(t?.changes && Object.keys(t.changes).length),
+    // ---- 兼容字段 ----
+    event,
     task: t ? {
       id: t.id,
       name: t.name,
@@ -127,6 +143,18 @@ function collectWorkspaceState(event) {
     } : null,
     definitions: configStore.enabledDefinitions.map(d => ({ id: d.id, code: d.code, name: d.name }))
   }
+}
+
+/** 契约字段 rowCounts：{ defId: 行数 }。仅已打开的表格可同步取数（SpreadSheet 代理），取不到则省略 */
+function collectRowCounts(defIds) {
+  const counts = {}
+  for (const id of defIds || []) {
+    const proxy = window.__spreadsheets?.[id]
+    if (proxy && typeof proxy.collectRows === 'function') {
+      try { counts[id] = proxy.collectRows().length } catch (e) { /* ignore */ }
+    }
+  }
+  return counts
 }
 
 async function triggerAutoPrompt(event) {

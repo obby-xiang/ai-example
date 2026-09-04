@@ -8,6 +8,7 @@ import GC from '@grapecity/spread-sheets'
 import { ElMessage } from 'element-plus'
 import { useConfigStore } from '@/stores/config'
 import { applyColumnsToSheet } from '@/utils/excel-io'
+import { bumpDataVersion, beginRestore, endRestore } from '@/utils/workspace-version'
 
 const props = defineProps({
   configDefinition: { type: Object, required: true },
@@ -93,7 +94,9 @@ function initSpread() {
       sheet.options.isProtected = false
     }
     // 绑定变更事件
+    // 改造 D1 拦截点 3：SpreadJS 用户编辑 → dataVersion++（恢复期的 setRows/refreshFromServer 用 guard 抑制）
     const changedHandler = () => {
+      bumpDataVersion()
       emit('data-changed', collectRows())
       if (props.trackChanges) {
         emit('changes-collected', collectChanges())
@@ -243,11 +246,14 @@ async function refreshFromServer() {
   const configStore = useConfigStore()
   const rows = await configStore.allData(props.configDefinition.id, 100000)
   sheet.suspendPaint()
+  // 改造 D1：数据恢复不计入 dataVersion 变更
+  beginRestore()
   try {
     sheet.clearRows(0, sheet.getRowCount())
     setRows(rows || [])
   } finally {
     sheet.resumePaint()
+    endRestore()
   }
   emit('data-changed', collectRows())
   ElMessage.success('已刷新表格数据')

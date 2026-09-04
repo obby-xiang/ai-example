@@ -89,6 +89,10 @@ public class AgentState {
     @Column(name = "mode", length = 16)
     private String mode;
 
+    /** ====== 改造 D3b ====== 挂起时的工作区数据版本号（回灌时对比，检测挂起期间用户手动修改） */
+    @Column(name = "data_version")
+    private Long dataVersion;
+
     /** WAITING_TOOL / RUNNING / COMPLETED / EXPIRED */
     @Column(nullable = false, length = 20)
     private String status;

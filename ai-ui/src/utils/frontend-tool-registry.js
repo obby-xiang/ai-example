@@ -156,6 +156,8 @@ export const FRONTEND_TOOL_REGISTRY = {
         if (taskStore.currentTask?.scenario !== 'EXPORT') {
           await taskStore.selectScenario('EXPORT')
         }
+        // 改造 F3：步骤边界检查取消标志
+        if (isFlowCancelled()) return flowStoppedResult()
         let defIds = Array.isArray(args.defIds) ? args.defIds.map(Number) : []
         if (args.defId !== undefined && args.defId !== null) defIds = [Number(args.defId)]
         if (flowType === 'export_all') {
@@ -166,11 +168,14 @@ export const FRONTEND_TOOL_REGISTRY = {
           return { ok: false, message: '没有可导出的配置项' }
         }
         await taskStore.updateSelectedDefs(defIds)
+        if (isFlowCancelled()) return flowStoppedResult()
         await taskStore.gotoStep('QUERY_COND')
         await taskStore.saveStepData('QUERY_COND', { mode: 'all' })
         // 生成导出结果（模拟计算每个配置的数据量）
         const items = []
         for (const id of defIds) {
+          // 改造 F3：批量统计循环内逐次检查（大批量时保证可打断）
+          if (isFlowCancelled()) return flowStoppedResult()
           const d = configStore.defById(id)
           try {
             const count = await configStore.count(id)
@@ -178,6 +183,7 @@ export const FRONTEND_TOOL_REGISTRY = {
           } catch (e) { /* ignore */ }
         }
         await taskStore.saveStepData('RESULT', { items, type: 'export', at: Date.now() })
+        if (isFlowCancelled()) return flowStoppedResult()
         await taskStore.gotoStep('RESULT')
         const route = stepToRoute('RESULT')
         if (route) await router.push(route)

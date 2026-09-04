@@ -66,16 +66,27 @@
                   :fields="pending.args?.fields || []"
                   :form-title="pending.args?.formTitle"
                   :submit-label="pending.args?.submitLabel"
-                  :disabled="false"
+                  :disabled="isPendingExpired"
                   @submit="onFormSubmit"
                   @cancel="onFormCancel"
                 />
                 <!-- 确认交互(table_*/run_flow) -->
                 <div v-else-if="pending.type === 'confirm'" class="a-confirm">
-                  <el-button size="small" :loading="false" @click="onConfirm(false)">取消</el-button>
-                  <el-button size="small" type="primary" @click="onConfirm(true)">
+                  <el-button size="small" :loading="false" :disabled="isPendingExpired" @click="onConfirm(false)">取消</el-button>
+                  <el-button size="small" type="primary" :disabled="isPendingExpired" @click="onConfirm(true)">
                     {{ isDoubleConfirm(tc.toolName) ? '二次确认执行' : '确认执行' }}
                   </el-button>
+                </div>
+                <!-- 改造 C3：pending 倒计时（AG-UI 准则：超时有可见性） -->
+                <div class="a-ttl">
+                  <template v-if="!isPendingExpired">
+                    <el-icon><Clock /></el-icon> 交互剩余 {{ pendingRemaining }}，超时将自动取消
+                  </template>
+                  <el-tag v-else size="small" type="danger">已过期，请重新发起</el-tag>
+                </div>
+                <!-- 改造 D4：pending 期间工作区被手动修改的轻提示条 -->
+                <div v-if="workspaceChangedDuringPending" class="a-changed">
+                  <el-icon><WarningFilled /></el-icon> 等待期间工作区有变更，AI 将在继续前重新获取最新状态
                 </div>
               </div>
               <!-- 已完成:显示状态 -->
@@ -109,12 +120,24 @@
                 :fields="pending?.args?.fields || []"
                 :form-title="pending?.args?.formTitle"
                 :submit-label="pending?.args?.submitLabel"
+                :disabled="isPendingExpired"
                 @submit="onFormSubmit"
                 @cancel="onFormCancel"
               />
               <div v-else-if="pending?.type === 'confirm'" class="a-confirm">
-                <el-button size="small" @click="onConfirm(false)">取消</el-button>
-                <el-button size="small" type="primary" @click="onConfirm(true)">确认执行</el-button>
+                <el-button size="small" :disabled="isPendingExpired" @click="onConfirm(false)">取消</el-button>
+                <el-button size="small" type="primary" :disabled="isPendingExpired" @click="onConfirm(true)">确认执行</el-button>
+              </div>
+              <!-- 改造 C3：pending 倒计时（独立卡片同样展示） -->
+              <div class="a-ttl">
+                <template v-if="!isPendingExpired">
+                  <el-icon><Clock /></el-icon> 交互剩余 {{ pendingRemaining }}，超时将自动取消
+                </template>
+                <el-tag v-else size="small" type="danger">已过期，请重新发起</el-tag>
+              </div>
+              <!-- 改造 D4：pending 期间工作区变更轻提示 -->
+              <div v-if="workspaceChangedDuringPending" class="a-changed">
+                <el-icon><WarningFilled /></el-icon> 等待期间工作区有变更，AI 将在继续前重新获取最新状态
               </div>
             </div>
           </div>
@@ -135,16 +158,23 @@
       ></div>
       <div class="bottom-row">
         <span class="tips">Enter 发送 · Shift+Enter 换行</span>
-        <el-button type="primary" size="small" :loading="aiStore.loading" @click="send()">
-          发送<el-icon style="margin-left:4px;"><Promotion /></el-icon>
-        </el-button>
+        <div style="display:flex;gap:6px;">
+          <!-- 改造 F1：停止按钮（生成中/等待交互中可见）。协作式取消：轮次边界停止+保留现场，不回滚已完成操作 -->
+          <el-button v-if="aiStore.loading || pending" size="small" type="danger" plain
+                     @click="aiStore.stopRun()" title="停止当前生成/等待的交互(已完成的内容保留)">
+            <el-icon style="margin-right:2px;"><CircleClose /></el-icon>停止
+          </el-button>
+          <el-button type="primary" size="small" :loading="aiStore.loading" @click="send()">
+            发送<el-icon style="margin-left:4px;"><Promotion /></el-icon>
+          </el-button>
+        </div>
       </div>
     </div>
   </template>
 </template>
 
 <script setup>
-import { ref, watch, nextTick, onMounted, computed } from 'vue'
+import { ref, watch, nextTick, onMounted, onBeforeUnmount, computed } from 'vue'
 import { useAiStore } from '@/stores/ai'
 import { useTaskStore } from '@/stores/task'
 import { useConfigStore } from '@/stores/config'
@@ -154,6 +184,7 @@ import { pendingInteraction, resolveInteraction } from '@/tools/runtime'
 import {
   isAutoTool, isConfirmTool, getToolMeta, toolTitle as toolTitleFn
 } from '@/tools/registry'
+import { dataVersionRef, getDataVersion } from '@/utils/workspace-version'
 
 const aiStore = useAiStore()
 const taskStore = useTaskStore()
@@ -167,6 +198,47 @@ const quickPrompts = ['有哪些配置项？', '添加配置项', '移除全部�
 
 // pendingInteraction 响应式引用(来自 tools/runtime)
 const pending = computed(() => pendingInteraction.value)
+
+// ================================================
+//   改造 C3：pending 交互倒计时（AG-UI 准则：超时有可见性）
+//   pending.expiresAt 由 runtime 在挂起/恢复时设置（TTL 10 分钟）。
+// ================================================
+const nowTs = ref(Date.now())
+let ttlTimer = null
+
+/** 是否已过期（超时 runtime 会以 interaction_expired 自动解决/标记） */
+const isPendingExpired = computed(() => {
+  const p = pending.value
+  if (!p || !p.expiresAt) return false
+  return p.expiresAt - nowTs.value <= 0
+})
+/** 格式化剩余时间：mm分ss秒 / ss秒 */
+const pendingRemaining = computed(() => {
+  const p = pending.value
+  if (!p || !p.expiresAt) return ''
+  const s = Math.max(0, Math.ceil((p.expiresAt - nowTs.value) / 1000))
+  const mm = Math.floor(s / 60)
+  const ss = s % 60
+  return mm > 0 ? `${mm}分${String(ss).padStart(2, '0')}秒` : `${ss}秒`
+})
+
+// ================================================
+//   改造 D4：pending 期间「工作区有变更」轻提示（可选 UX）
+//   pending 开始时快照 dataVersion；订阅 dataVersionRef，变化则提示。
+//   仅提示不阻断——回灌时 D3d 会在结果前置系统提示强制 AI 现查。
+// ================================================
+const pendingStartVersion = ref(null)
+watch(
+  () => pending.value?.toolCallId || null,
+  (key) => {
+    const p = pending.value
+    pendingStartVersion.value = key ? (p?.suspendedDataVersion ?? getDataVersion()) : null
+  },
+  { immediate: true }
+)
+const workspaceChangedDuringPending = computed(() =>
+  pendingStartVersion.value != null && dataVersionRef.value !== pendingStartVersion.value
+)
 
 // ====== 工具卡片状态判定 ======
 function isAuto(name) { return isAutoTool(name) }
@@ -205,17 +277,30 @@ const standaloneInteraction = computed(() => {
 })
 
 // ====== 交互回调 ======
+/**
+ * 统一交互结果出口。
+ * 改造 B4：恢复态交互（p.recovered，刷新后旧 Promise 已销毁）不走 resolveInteraction,
+ * 改调 aiStore.submitRecoveredInteraction 回填卡片终态并重开一轮 loop。
+ */
+function submitInteractionResult(result) {
+  const p = pending.value
+  if (p && p.recovered) {
+    aiStore.submitRecoveredInteraction(result, collectState())
+    return
+  }
+  resolveInteraction(result)
+}
 function onFormSubmit(vals) {
-  resolveInteraction({ ok: true, data: vals })
+  submitInteractionResult({ ok: true, data: vals })
 }
 function onFormCancel() {
-  resolveInteraction({ cancelled: true })
+  submitInteractionResult({ cancelled: true })
 }
 async function onConfirm(confirmed) {
   const p = pending.value
   if (!p) return
   if (!confirmed) {
-    resolveInteraction({ confirmed: false })
+    submitInteractionResult({ confirmed: false })
     return
   }
   // 二次确认(run_flow 等高危流程)
@@ -228,7 +313,7 @@ async function onConfirm(confirmed) {
       )
     } catch (e) {
       // 用户在二次确认弹框取消
-      resolveInteraction({ confirmed: false })
+      submitInteractionResult({ confirmed: false })
       return
     }
   } else {
@@ -240,11 +325,11 @@ async function onConfirm(confirmed) {
         { type: 'warning', confirmButtonText: '继续', cancelButtonText: '取消' }
       )
     } catch (e) {
-      resolveInteraction({ confirmed: false })
+      submitInteractionResult({ confirmed: false })
       return
     }
   }
-  resolveInteraction({ confirmed: true })
+  submitInteractionResult({ confirmed: true })
 }
 
 // ====== 发送消息 ======
@@ -295,7 +380,12 @@ async function clearAll() {
   } catch (e) { /* ignore */ }
 }
 
-onMounted(scrollBottom)
+onMounted(() => {
+  scrollBottom()
+  // 改造 C3：秒级刷新倒计时显示
+  ttlTimer = setInterval(() => { nowTs.value = Date.now() }, 1000)
+})
+onBeforeUnmount(() => { if (ttlTimer) { clearInterval(ttlTimer); ttlTimer = null } })
 </script>
 
 <style scoped>
@@ -303,6 +393,28 @@ onMounted(scrollBottom)
 .a-confirm { display: flex; gap: 8px; justify-content: flex-end; }
 .a-status { margin-top: 6px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .a-result { font-size: 12px; color: #606266; }
+/* 改造 C3：pending 倒计时 */
+.a-ttl {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #e6a23c;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+/* 改造 D4：pending 期间工作区变更轻提示条 */
+.a-changed {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #b88230;
+  background: #fdf6ec;
+  border: 1px solid #faecd8;
+  border-radius: 4px;
+  padding: 4px 8px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
 .collapse-toggle {
   width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;
   cursor: pointer; color: #409EFF; font-size: 13px; writing-mode: vertical-lr;

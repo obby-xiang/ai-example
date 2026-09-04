@@ -61,6 +61,9 @@ public class AiDTO {
         /** 当前等待回灌结果的 callId（前端可据此渲染"执行中"状态） */
         private String pendingCallId;
 
+        /** ====== 改造 C3 ====== pending 交互过期时间（ISO 字符串），前端据此渲染倒计时；done=true 时为 null */
+        private String pendingExpiresAt;
+
         /** ====== Phase 2 新增（Plan-Execute + 工具分级）====== */
         /** 当前计划（首次响应时由 Planner 生成，前端据此渲染 Plan 卡片让用户一次确认） */
         private List<PlanStep> plan;
@@ -91,6 +94,8 @@ public class AiDTO {
         private String resumeToken;
         private String callId;
         private Map<String, Object> result;
+        /** ====== 改造 D3a ====== 回灌携带的最新工作区快照（修复「挂起时快照冻结」缺口，用于 dataVersion 对比） */
+        private Map<String, Object> workspaceState;
     }
 
     /**

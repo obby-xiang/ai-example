@@ -19,6 +19,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.time.Duration;
 
 /**
  * 透明 SSE 代理 —— ai-ui-vercel「前端 AI runtime」范式的后端唯一职责。
@@ -51,6 +52,11 @@ public class AiProxyController {
 
     @Value("${app.ai.api-key:}")
     private String apiKey;
+
+    /** ====== 改造 H2 ====== 上游 LLM 调用超时（秒）。注意：对流式请求，HttpRequest.timeout
+     *  只约束「到响应头到达」为止（SSE 分片到达后即不再受限），不会误杀长流式生成。 */
+    @Value("${app.ai.read-timeout-seconds:180}")
+    private int readTimeoutSeconds;
 
     /** 复用单个 ObjectMapper(线程安全),用于请求体归一化。 */
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -85,8 +91,12 @@ public class AiProxyController {
         log.debug("[proxy] -> {} ({} bytes)", target, body.length);
 
         // 4) 构造转发请求：注入真实 api-key，忽略前端传入的占位 Authorization
-        HttpClient client = HttpClient.newHttpClient();
+        //    改造 H2：connect 10s / 首包(响应头)超时默认 180s——弱网/上游挂起不再无限等待
+        HttpClient client = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(10))
+                .build();
         HttpRequest upstream = HttpRequest.newBuilder(URI.create(target))
+                .timeout(Duration.ofSeconds(readTimeoutSeconds))
                 .header("Authorization", "Bearer " + apiKey)
                 .header("Content-Type", "application/json")
                 .header("Accept", "text/event-stream")

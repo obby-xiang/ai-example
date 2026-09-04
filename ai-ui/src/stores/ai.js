@@ -35,7 +35,9 @@ import { adaptLegacyActionToToolCall } from '@/utils/frontend-tool-registry'
  */
 export const useAiStore = defineStore('ai', {
   state: () => ({
-    sessionId: uuidv4(),
+    // 改造 A：会话随窗口——sessionId 持久化到 sessionStorage(刷新存活、关窗自毁、多标签天然隔离)
+    // 修复现状 bug：此前仅内存 uuidv4()，刷新后重新生成导致历史断连
+    sessionId: initSessionId(),
     expanded: true,
     messages: [],
     loading: false,
@@ -75,6 +77,10 @@ export const useAiStore = defineStore('ai', {
         resumeToken: msg.resumeToken || null,
         done: msg.done !== undefined ? !!msg.done : true,
         toolStatus: msg.toolStatus || {},
+        // 改造 C3：pending 过期时间(ISO 字符串)，AiPanel 倒计时展示
+        pendingExpiresAt: msg.pendingExpiresAt || null,
+        // 改造 B2：刷新恢复重建的消息打标(用于区分展示/排障)
+        recovered: !!msg.recovered,
         // Phase 2: 消息级 plan/mode 快照（消息内渲染 Plan 卡片时用）
         plan: msg.plan || null,
         mode: msg.mode || null,
@@ -188,9 +194,13 @@ export const useAiStore = defineStore('ai', {
 
     async chat(message, workspaceState, extra = {}) {
       if (!message && !extra.autoPrompt) return
+      // 改造 F3：新一轮对话开始，复位流程取消标志（配合后端 F2 中断标志清除）
+      resetFlowCancel()
       if (message) this.pushMessage({ role: 'user', content: message })
       this.pushMessage({ role: 'assistant', content: '', pending: true })
       this.loading = true
+      // 改造 F1：在途请求可被停止按钮中断
+      currentAbort = new AbortController()
       try {
         const payload = {
           taskId: extra.taskId || null,
@@ -204,14 +214,24 @@ export const useAiStore = defineStore('ai', {
           currentStep: extra.currentStep || this.currentStep || null
         }
         const resp = extra.autoPrompt
-          ? await aiApi.autoPrompt(payload)
-          : await aiApi.chat(payload)
+          ? await aiApi.autoPrompt(payload, currentAbort.signal)
+          : await aiApi.chat(payload, currentAbort.signal)
         this.updateLastMsg(resp.reply, resp)
         return resp
       } catch (e) {
-        this.updateLastMsg('抱歉，AI 服务调用失败：' + (e?.message || '未知错误'), {})
+        // 改造 F1：用户主动停止（stopRun 已把消息标记为「已停止」，此处不再覆盖）
+        if (e?.code === 'ERR_CANCELED') return null
+        // ====== 改造 H3：断连安全默认 ======
+        // RUN 中途断连不自动重跑(防重复副作用)。无 HTTP 响应=网络层断连,提示可重新发送;
+        // 有响应但业务失败(如 PENDING_EXPIRED)则原样展示后端错误。
+        const disconnected = !e?.response
+        const hint = disconnected
+          ? '连接中断，请检查网络后重新发送（已产生的交互状态可靠 /pending 接口查询恢复）'
+          : (e?.message || '未知错误')
+        this.updateLastMsg('抱歉，AI 服务调用失败：' + hint, {})
         return null
       } finally {
+        currentAbort = null
         this.loading = false
       }
     },
@@ -221,8 +241,10 @@ export const useAiStore = defineStore('ai', {
      * @param resumeToken 来自最后一条 assistant 消息的 resumeToken
      * @param callId      对应 FrontendToolCall.callId
      * @param result      { ok, message, data? } 工具执行结果
+     * @param workspaceState 改造 D3a/D4：回灌携带的最新工作区快照(含 dataVersion)，
+     *                       后端与挂起时版本对比，不一致则强制 AI 现查
      */
-    async submitToolResult(resumeToken, callId, result) {
+    async submitToolResult(resumeToken, callId, result, workspaceState = null) {
       if (!resumeToken || !callId) {
         console.warn('[aiStore] submitToolResult 参数缺失:', { resumeToken, callId })
         return null
@@ -235,7 +257,7 @@ export const useAiStore = defineStore('ai', {
       this.setToolCallStatus(callId, _finalStatus)
       this.loading = true
       try {
-        const resp = await aiApi.toolResult({ resumeToken, callId, result })
+        const resp = await aiApi.toolResult({ resumeToken, callId, result, workspaceState: workspaceState || undefined })
         // 同步 Phase 2 元数据到 store 顶层（新一轮可能切换 mode/scenario/step）
         if (resp.mode) this.mode = resp.mode
         if (resp.currentScenario) this.currentScenario = resp.currentScenario
@@ -266,6 +288,7 @@ export const useAiStore = defineStore('ai', {
             resumeToken: resp.resumeToken,
             done: false,
             pending: false,
+            pendingExpiresAt: resp.pendingExpiresAt || null,
             mode: resp.mode || null,
             currentScenario: resp.currentScenario || null,
             currentStep: resp.currentStep || null
@@ -318,6 +341,71 @@ export const useAiStore = defineStore('ai', {
         this.messages = merged
       } catch (e) { /* ignore */ }
     },
+
+    /**
+     * ====== 改造 B2：pending 刷新恢复 ======
+     * 页面刷新后调用（AiPanel onMounted）：查后端 /api/ai/pending，
+     * 有未过期的 WAITING_TOOL state 则重建工具交互卡片（含 resumeToken + 过期时间），
+     * 用户可直接在新页面上继续确认/填表，回灌后 loop 续跑。
+     * @returns {boolean} 是否恢复了 pending 交互
+     */
+    async recoverPending() {
+      try {
+        const data = await aiApi.pending(this.sessionId)
+        if (!data || !data.resumeToken) return false
+        // 幂等：已有相同 resumeToken 的未完成消息则跳过（防止重复挂载）
+        const dup = this.messages.find(m => m.resumeToken === data.resumeToken && m.done === false)
+        if (dup) return false
+        const toolCalls = data.pendingToolCalls || []
+        const msg = {
+          role: 'assistant',
+          content: data.interimContent || '（页面已刷新，恢复待处理的交互）',
+          toolCalls,
+          resumeToken: data.resumeToken,
+          done: false,
+          pending: false,
+          recovered: true,
+          pendingExpiresAt: data.expiresAt || null,
+          mode: data.mode || null,
+          currentScenario: data.currentScenario || null,
+          currentStep: data.currentStep || null
+        }
+        this.pushMessage(msg)
+        // 初始化工具状态为 pending
+        const last = this.messages[this.messages.length - 1]
+        for (const t of toolCalls) last.toolStatus[t.callId] = 'pending'
+        if (data.mode) this.mode = data.mode
+        if (data.currentScenario) this.currentScenario = data.currentScenario
+        if (data.currentStep) this.currentStep = data.currentStep
+        return true
+      } catch (e) {
+        console.warn('[aiStore] recoverPending 失败', e)
+        return false
+      }
+    },
+
+    /**
+     * ====== 改造 F1/F2：协作式停止 ======
+     * 业界共识：打断=轮次边界停止+保留现场，不删除已生成的内容、不回滚已完成的操作。
+     * 实现：① AbortController 断开在途 HTTP（F1）② 调后端 /cancel 置位中断标志+作废活跃
+     * WAITING_TOOL state（F2，后端 loop 下一轮边界停）③ 本地 pending 消息标记「已停止」。
+     * 多步流程工具（run_flow）经 flow-cancel 标志在步骤边界提前返回（F3）。
+     */
+    async stopRun() {
+      // ① 断开在途请求（axios 抛 ERR_CANCELED，chat/submitToolResult 已按「已停止」处理）
+      try { currentAbort?.abort() } catch (e) { /* ignore */ }
+      // ③ 多步流程协作式取消标志（run_flow 步骤间检查）
+      requestFlowCancel()
+      // ② 后端协作式取消（不可达也继续本地停止）
+      try { await aiApi.cancelRun(this.sessionId) } catch (e) { /* 后端不可达也继续本地停止 */ }
+      const last = this.messages[this.messages.length - 1]
+      if (last && last.role === 'assistant' && (last.pending || last.done === false)) {
+        last.pending = false
+        last.done = true
+        last.content = (last.content ? last.content + '\n' : '') + '（已停止，已完成的内容保留）'
+      }
+      this.loading = false
+    },
     toggleExpand() {
       this.expanded = !this.expanded
     },
@@ -342,4 +430,20 @@ export const useAiStore = defineStore('ai', {
 
 function safeJson(str, dft) {
   try { return JSON.parse(str) } catch (e) { return dft }
+}
+
+/**
+ * 会话随窗口（改造 A）：sessionId 存 sessionStorage。
+ * 刷新存活（同标签页 sessionStorage 保留）、关窗自毁、多标签各自独立会话。
+ */
+function initSessionId() {
+  try {
+    const stored = sessionStorage.getItem('ai-session-id')
+    if (stored) return stored
+    const id = uuidv4()
+    sessionStorage.setItem('ai-session-id', id)
+    return id
+  } catch (e) {
+    return uuidv4()
+  }
 }
