@@ -20,6 +20,8 @@
 - Scenario step validation: When scenario=null, only SELECT_SCENARIO step is allowed; jumping to subsequent steps (e.g., SELECT_DEFS) will return 400 error
 - ai-ui-vercel project: Frontend uses Vercel AI SDK 6.0.221 + @ai-sdk/openai 3.0.97 for AI runtime; backend only provides AiProxyController transparent proxy (/api/ai/proxy/**); API key never leaves backend (frontend provider.js uses 'placeholder'); data persisted via localStorage
 - .trae directory handling: .trae/documents/ must be included in the repository; .trae/.cache/ and *.log files must be excluded via .gitignore
+- Conversation lifecycle (2026-09-04 用户约束): 对话随窗口（ephemeral session）——不改 URL、无多会话历史列表、关窗即毁；sessionId+消息用 sessionStorage（刷新存活/多标签隔离），任务数据保持 localStorage
+- State consistency direction (2026-09-04 决策): 走 pull 模式（工具现查 + dataVersion 版本对比），不上 WORKSPACE_CHANGED 事件流 push（划不清「影响决策」边界会退化成全量推送回 token 膨胀老路）；方案文档 .trae/documents/conversation-lifecycle-and-state-sync-plan.md（改造 A-G，4 阶段实施）
 - Commit safety (MANDATORY): core.hooksPath=scripts/githooks is enabled — pre-commit secret scan runs on every commit and blocks on hits; NEVER use --no-verify to bypass; when committing in bulk or rewriting history, additionally run full-history scan: git grep -E "sk-[A-Za-z0-9]{20,}|ghp_|AKIA|AIza|eyJ[A-Za-z0-9_-]{25,}" $(git rev-list --all)
 
 ## Engineering Conventions
@@ -74,6 +76,12 @@
 - Cancel button state overwritten: tool execution cancellation state was incorrectly set to failed. Fix: updated ai.js store to preserve cancel state
 - Vite dev proxy 透传 SSE 正常(curl 验证),但 location.reload() 会取消前页 pending fetch 导致 ERR_ABORTED,属正常浏览器行为非 AI 流程错误
 - browser_network_requests in browser_use tool loses history after multiple page switches (agent tool limitation, not a functional issue); verify network requests via UI behavior instead
+- 快照冻结缺口（2026-09-04 代码探索发现）: ChatReq 已有 workspaceState 快照通道（AiDTO L21-22，get_workspace_state 后端工具回传它），但 ToolResultReq 只有 resumeToken/callId/result——AI 挂起等待期间用户手工改数据，回灌后 agent loop 拿到挂起时旧快照（"1月改2月"问题精确位置）。修法：ToolResultReq 补 workspaceState + 版本对比附系统提示
+- ai-ui 现状 bug（2026-09-04 发现待修）: sessionId 仅内存 uuidv4() 生成（ai.js L38），刷新后重新生成导致历史断连；修法：sessionStorage 持久化 sessionId
+- dataVersion 变更感知原型验证（2026-09-04 检索确认）: 「挂起记版本→恢复比版本→变了强制现查」= Claude Code "File has been modified since read" 机制（mtime 对比）；其著名缺陷 mtime 假阳性（IDE autosave 污染，社区建议 content hash）印证计数器方案的已交代误差；LangGraph/CopilotKit/AG-UI 均无「pending 期间外部变更感知」框架标配，应用层自建是常态
+- CopilotKit 三件套映射（2026-09-04 确认）: 项目已是 Shared State(store 单一真理+工具现查)/Generative UI(SchemaFormRenderer+工具卡片)/HITL(needConfirm+pause-resume) 架构，缺三块拼图：版本感知/超时取消/pending 刷新恢复；解耦定义=状态同源+契约交互(查询/命令/渲染/审批/版本五契约)+变更可感知；手动操作与 AI 操作在状态层同权
+- 变更感知实现决策: 用 store.$onAction 白名单统一拦截（非逐 action 手写 dataVersion++），loadXxx 恢复类 action 排除（刷新恢复不算变更）；路由 afterEach + SpreadJS EditEnded 转发补齐非 store 变更源；连续多步操作只比版本首尾（事件流方案需处理 N 个事件的去重/合并，版本号零成本）
+- 打断语义（业界共识）: 打断=轮次边界停止+保留现场（AgentState 可回答"做到哪了"），不做指令级硬中断、不做自动回滚；长流程(run_flow)用步骤间协作式取消；流程抗穿插靠状态机与对话物理分离（scenario/step/plan 在 AgentState 不在消息历史，Rasa slot 独立于 story 同款）；上下文压缩不丢流程是同一架构红利
 - ExcelIO does not export colHeader area by default, causing missing table headers in exported Excel files
 - Hardcoded data limit in preview function caused incomplete data loading in online Excel tables
 - 对话归档/恢复方法论（跨项目通用）已沉淀在 user_profile.md「Trae 会话数据恢复方法论」：用户消息逐字原文在 workspaceStorage state.vscdb 的 input-history 键，轮次级记录在 .trae-cn memory 的 session_memory_*.jsonl，AI 回答正文仅在加密库/云端不可明文恢复；本仓库 docs/conversation-archive-20260904-excel-capabilities.md 是按该方法论生成的归档样例
