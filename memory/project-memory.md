@@ -76,3 +76,4 @@
 - ExcelIO does not export colHeader area by default, causing missing table headers in exported Excel files
 - Hardcoded data limit in preview function caused incomplete data loading in online Excel tables
 - 对话归档/恢复方法论（跨项目通用）已沉淀在 user_profile.md「Trae 会话数据恢复方法论」：用户消息逐字原文在 workspaceStorage state.vscdb 的 input-history 键，轮次级记录在 .trae-cn memory 的 session_memory_*.jsonl，AI 回答正文仅在加密库/云端不可明文恢复；本仓库 docs/conversation-archive-20260904-excel-capabilities.md 是按该方法论生成的归档样例
+- 密钥泄露补救流程（2026-09-04 实战：初始提交 application.yml 含明文 key 并已推送）：①平台作废 key（唯一彻底补救）→ ②git filter-branch --index-filter 重写（Windows 下 tree-filter 易被 IDE/杀毒文件锁打断报 unable to unlink，index-filter 不落盘可避开；辅助逻辑写成 sh 脚本避免引号嵌套）→ ③删 refs/original/* + reflog expire --expire=now --all + gc --prune=now → ④push --force。提交哈希全部改变，其他 clone 需重新克隆；GitHub 服务端旧提交缓存需联系支持彻底清除。预防：提交前全历史扫描（git grep -E "sk-[A-Za-z0-9]{16,}" $(git rev-list --all)），不只扫工作树
