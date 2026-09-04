@@ -1,9 +1,13 @@
+# 项目记忆（ai-example）
+
+> 同步自 Trae 本地记忆 `project_memory.md`（2026-09-04）。跨项目通用的用户偏好见同目录 [user-profile.md](user-profile.md)。
+
 ## Hard Constraints
 - Project directory structure: 'ai-example' with 'ai-ui' (frontend) and 'ai-service' (backend) subdirectories
 - Frontend package manager: yarn
 - Backend build tool: maven (path: 'D:\Program Files\JetBrains\IntelliJ IDEA\plugins\maven-plugin\lib\maven3\')
 - Technology stack: Backend Spring Boot 3.5.14 + JDK 21, Frontend Vue3 (Composition API), table component GrapeCity SpreadJS
-- AI interface: 'https://api.deepseek.com/chat/completions' (OpenAI specification), model 'deepseek-v4-flash', API key 由环境变量 DEEPSEEK_API_KEY 注入（切勿硬编码）
+- AI interface: 'https://api.deepseek.com/chat/completions' (OpenAI specification), model 'deepseek-v4-flash', API key must be injected via environment variable DEEPSEEK_API_KEY (never hardcoded)
 - Persistence requirement: Task data must be persisted from creation (draft state) and recoverable after page refresh
 - Cross-route state: Right AI panel must not be destroyed during left route switching
 - Interface language: All interfaces must use Chinese
@@ -11,10 +15,11 @@
 - AI interaction must use DeepSeek Function Calling with frontend tool registry instead of text-based JSON parsing
 - Agent architecture: Backend runtime with agent loop, frontend tools use pause-resume mechanism
 - Tool definition location: All tool definitions centralized in backend YAML files (tools.yaml + scenarios.yaml), frontend only传递 tool names and execute logic
-- Tool inventory: 11 tools total — navigate_step, get_workspace_state, list_config_defs, get_config_def, select_definitions, confirm_complete, table_batch_set_field, table_delete_rows, table_replace_values, run_flow, collect_user_input
+- Tool inventory: 13 tools total — navigate_step, get_workspace_state, list_config_defs, get_config_def, select_definitions, confirm_complete, table_batch_set_field, table_delete_rows, table_replace_values, run_flow, collect_user_input, excel_import, excel_export
 - Backend ports: ai-service runs on 8081 (8080 occupied), frontend dev server on 5173
 - Scenario step validation: When scenario=null, only SELECT_SCENARIO step is allowed; jumping to subsequent steps (e.g., SELECT_DEFS) will return 400 error
 - ai-ui-vercel project: Frontend uses Vercel AI SDK 6.0.221 + @ai-sdk/openai 3.0.97 for AI runtime; backend only provides AiProxyController transparent proxy (/api/ai/proxy/**); API key never leaves backend (frontend provider.js uses 'placeholder'); data persisted via localStorage
+- .trae directory handling: .trae/documents/ must be included in the repository; .trae/.cache/ and *.log files must be excluded via .gitignore
 
 ## Engineering Conventions
 - Database: Use embedded H2 database with file storage (jdbc:h2:file:./data/ai_config_db;DB_CLOSE_DELAY=-1;MODE=MySQL), ddl-auto:update auto-migrates schema on restart
@@ -67,3 +72,7 @@
 - collect_user_input impact description error: summarizeImpact missing case caused incorrect "未知工具,前端将阻断执行" message. Fix: added collect_user_input impact description "将向用户收集 {n} 个表单字段"
 - Cancel button state overwritten: tool execution cancellation state was incorrectly set to failed. Fix: updated ai.js store to preserve cancel state
 - Vite dev proxy 透传 SSE 正常(curl 验证),但 location.reload() 会取消前页 pending fetch 导致 ERR_ABORTED,属正常浏览器行为非 AI 流程错误
+- browser_network_requests in browser_use tool loses history after multiple page switches (agent tool limitation, not a functional issue); verify network requests via UI behavior instead
+- ExcelIO does not export colHeader area by default, causing missing table headers in exported Excel files
+- Hardcoded data limit in preview function caused incomplete data loading in online Excel tables
+- 对话归档/恢复方法论（跨项目通用）已沉淀在 user_profile.md「Trae 会话数据恢复方法论」：用户消息逐字原文在 workspaceStorage state.vscdb 的 input-history 键，轮次级记录在 .trae-cn memory 的 session_memory_*.jsonl，AI 回答正文仅在加密库/云端不可明文恢复；本仓库 docs/conversation-archive-20260904-excel-capabilities.md 是按该方法论生成的归档样例
