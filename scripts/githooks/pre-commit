@@ -1,0 +1,16 @@
+#!/bin/sh
+# ===== pre-commit 敏感信息扫描 =====
+# 扫描范围:本次暂存区(staged)新增的行。命中即失败,阻止提交。
+# 启用方式:git config core.hooksPath scripts/githooks (clone 后执行一次)
+# 白名单:your-real / your-deepseek / <...> / REDACTED / placeholder 等占位符
+PAT='sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|gho_[A-Za-z0-9]{30,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|xox[baprs]-[A-Za-z0-9]{10,}|eyJ[A-Za-z0-9_-]{25,}'
+LEAKS=$(git diff --cached -U0 --no-color | grep -E '^\+' | grep -E "$PAT" | grep -viE 'your-real|your-deepseek|<[a-z-]+>|REDACTED|placeholder|example' || true)
+if [ -n "$LEAKS" ]; then
+  echo ""
+  echo "⛔ [pre-commit] 暂存区发现疑似密钥/令牌,提交已阻止:"
+  echo "$LEAKS"
+  echo ""
+  echo "处理:改为环境变量引用后重试;确认误报可用 git commit --no-verify 跳过(慎用)"
+  exit 1
+fi
+echo "✓ [pre-commit] 敏感信息扫描通过"

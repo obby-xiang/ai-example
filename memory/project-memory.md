@@ -20,6 +20,7 @@
 - Scenario step validation: When scenario=null, only SELECT_SCENARIO step is allowed; jumping to subsequent steps (e.g., SELECT_DEFS) will return 400 error
 - ai-ui-vercel project: Frontend uses Vercel AI SDK 6.0.221 + @ai-sdk/openai 3.0.97 for AI runtime; backend only provides AiProxyController transparent proxy (/api/ai/proxy/**); API key never leaves backend (frontend provider.js uses 'placeholder'); data persisted via localStorage
 - .trae directory handling: .trae/documents/ must be included in the repository; .trae/.cache/ and *.log files must be excluded via .gitignore
+- Commit safety (MANDATORY): core.hooksPath=scripts/githooks is enabled — pre-commit secret scan runs on every commit and blocks on hits; NEVER use --no-verify to bypass; when committing in bulk or rewriting history, additionally run full-history scan: git grep -E "sk-[A-Za-z0-9]{20,}|ghp_|AKIA|AIza|eyJ[A-Za-z0-9_-]{25,}" $(git rev-list --all)
 
 ## Engineering Conventions
 - Database: Use embedded H2 database with file storage (jdbc:h2:file:./data/ai_config_db;DB_CLOSE_DELAY=-1;MODE=MySQL), ddl-auto:update auto-migrates schema on restart

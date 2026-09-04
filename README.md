@@ -118,6 +118,20 @@ export DEEPSEEK_API_KEY=sk-your-real-api-key
 默认使用 DeepSeek `deepseek-v4-flash` 模型，温度 0.2，最大 token 4096。
 可在 `application.yml` 的 `app.ai` 节点修改。
 
+### 4. 提交前敏感信息扫描（pre-commit hook，强烈建议启用）
+
+仓库内置 pre-commit 钩子（[scripts/githooks/pre-commit](scripts/githooks/pre-commit)），
+每次 `git commit` 自动扫描暂存区新增行，命中疑似密钥/令牌即阻止提交。
+克隆后执行一次即可启用：
+
+```bash
+git config core.hooksPath scripts/githooks
+```
+
+覆盖模式：`sk-`（OpenAI/DeepSeek 风格）、`ghp_/gho_`（GitHub Token）、`AKIA`（AWS）、
+`AIza`（Google）、`xox`（Slack）、`eyJ`（JWT）；占位符（`your-real`/`placeholder`/`<...>`）自动白名单。
+密钥一律走环境变量（`DEEPSEEK_API_KEY` / `.env.local`），不要写进任何被提交的文件。
+
 ## 快速启动
 
 ### 启动后端（ai-service）
