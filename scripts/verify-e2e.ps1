@@ -1,4 +1,4 @@
-# ============================================================
+﻿# ============================================================
 # E2E 验证脚本：动态配置管理系统 全流程测试
 # 用法：pwsh -File scripts/verify-e2e.ps1 [-Base http://127.0.0.1:18080]
 # 覆盖：配置定义动态建模/数据校验/导出(条件+进度+打包)/模板/导入(匹配+检查+依赖+草稿+发布)
@@ -17,6 +17,7 @@ function Ok($name) { $script:passed++; $script:results.Add(@{ name = $name; resu
 function No($name, $why) { $script:failed++; $script:results.Add(@{ name = $name; result = "FAIL: $why" }) | Out-Null; Write-Host ("  [FAIL] " + $name + " => " + $why) -ForegroundColor Red }
 
 # ---------- HTTP 辅助 ----------
+Add-Type -AssemblyName System.Net.Http
 $http = New-Object System.Net.Http.HttpClient
 $http.Timeout = [TimeSpan]::FromMinutes(5)
 
