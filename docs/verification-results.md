@@ -84,6 +84,43 @@
 | N-AI-03 HITL 请求 | ✅ | 发布指令 → INTERACTION_REQUEST 卡片（iid 已推送） |
 | N-AI-04 HITL 批准 | ✅ | 批准后 PUBLISH 作业创建并 COMPLETED |
 
+### 3.3b API 批次五：AI 功能补充验证（10/10 通过）
+
+| 用例 | 结果 | 实测证据 |
+|------|------|---------|
+| A-T-01a 渐进披露-tasks 页 | ✅ | 5 个工具（create_task/list_tasks/list_config_defs/get_config_def/get_workspace_state），无 start_publish |
+| A-T-01b 渐进披露-导出步骤 | ✅ | 11 个工具，含 start_export/open_export_file_editor，不含 start_publish/start_precheck |
+| A-T-01c 渐进披露-发布步骤 | ✅ | 8 个工具，含 start_publish，不含 start_export |
+| A-T-01d 渐进披露-上传步骤 | ✅ | 8 个工具，含 select_defs，不含 start_publish |
+| A-T-02 多工具多轮 | ✅ | 指定步骤内 AI 调 select_defs，任务 items=2 |
+| A-T-03a HITL 拒绝卡片 | ✅ | INTERACTION_REQUEST 携带 iid |
+| A-T-03b 拒绝生效 | ✅ | 拒绝后 PUBLISH 作业 0 个、任务保持 ACTIVE、对话正常结束 |
+| A-T-04 UI_COMMAND open_editor | ✅ | 流内出现 command=open_editor + defCode=CURRENCY |
+| A-T-05 会话重置 | ✅ | DELETE 后访问返回"会话不存在或已过期" |
+
+### 3.3c 取消运行（专项，HITL 等待期间取消）
+
+| 步骤 | 实测证据 |
+|------|---------|
+| 发布指令 → HITL 卡片出现 | iid 推送 |
+| DELETE /runs/current | `{"cancelled":true}` |
+| 运行终止耗时 | **1 秒**（而非等待 5 分钟超时），输出含"取消"提示 |
+| 发布作业 | 0 个（取消未产生副作用） |
+
+### 3.3d 浏览器级 AI 对话框（真实 UI，Kimi WebBridge）
+
+| 步骤 | 实测证据 |
+|------|---------|
+| AI 面板渲染 | "AI 助手"标题、输入框、发送按钮、快捷建议芯片 |
+| 发送真实消息 | 用户消息"你好，请列出系统里所有的配置定义" |
+| 工具调用卡片 | 显示 list_config_defs 执行卡片与工具结果 |
+| 完整回复 | AI 以表格列出全部 7 个配置定义（含层级/字段数），并给出下一步建议 |
+| token 消耗显示 | "本轮消耗 token：输入 1950 / 输出 296" |
+
+> 浏览器验证中发现并修复一个前端缺陷：会话创建响应解包层级错误
+> （误取 res.data.sid，应为 res.data.data.sid），导致 sessionStorage 存入
+> 字符串 "undefined"、聊天永远不可用。已修复并回归通过（见 §4 缺陷 #17）。
+
 ### 3.4 独立用例：发布冲突检测（双任务并发）
 
 | 步骤 | 实测证据 |
@@ -128,6 +165,7 @@
 | 14 | SpreadJS 中文/授权丢失 | 重写 main.js 时误删初始化 | SpreadJSEditor 内懒加载恢复 zh-cn + LicenseKey |
 | 15 | 前端构建失败（esbuild） | Windows 下 esbuild 在系统 %TEMP% 删临时文件 Access denied | 构建时 TEMP 指向 frontend/.tmp-esbuild（已 gitignore） |
 | 16 | 测试脚本 byte[] 展开为 Object[] | PS 5.1 return 展开集合 | 脚本改用局部变量 + curl |
+| 17 | 浏览器聊天永远提示"AI 服务不可用" | 会话创建响应解包层级错误（res.data.sid → 实际是 res.data.data.sid），sessionStorage 存入字符串 "undefined" | 修正解包 + 历史 "undefined" 防御清理；浏览器回归通过 |
 
 ---
 
