@@ -81,14 +81,13 @@ public class AiController {
     }
 
     /**
-     * 从会话的 LLM 消息流重建前端可渲染的显示条目：
+     * 从会话记忆（Spring AI ChatMemory）重建前端可渲染的显示条目：
      * 用户消息 → user；助手文本 → assistant；工具响应 → tool（工具卡片）。
      * 系统消息（上下文快照）不展示。
      */
     private List<Map<String, Object>> buildDisplayMessages(AiSession session) {
         List<Map<String, Object>> items = new java.util.ArrayList<>();
-        synchronized (session.getHistory()) {
-            for (org.springframework.ai.chat.messages.Message m : session.getHistory()) {
+        for (org.springframework.ai.chat.messages.Message m : session.getMemory().get(session.getId())) {
                 if (m instanceof org.springframework.ai.chat.messages.UserMessage u) {
                     items.add(Map.of("role", "user",
                             "text", u.getText() != null ? u.getText() : ""));
@@ -106,7 +105,6 @@ public class AiController {
                                 "summary", summarizeToolData(data)));
                     }
                 }
-            }
         }
         return items;
     }

@@ -11,7 +11,7 @@
     </div>
 
     <!-- 筛选栏 -->
-    <div class="filter-bar">
+    <div class="mb-3.5 flex items-center gap-2.5">
       <el-select v-model="filters.type" clearable placeholder="任务类型" style="width:130px" @change="reload">
         <el-option label="导出配置" value="EXPORT" />
         <el-option label="导入配置" value="IMPORT" />
@@ -26,7 +26,7 @@
                 @keyup.enter="reload" @clear="reload" />
       <el-button type="primary" :icon="Search" @click="reload">查询</el-button>
       <el-button :icon="Refresh" @click="reload">刷新</el-button>
-      <span class="total-hint">共 {{ total }} 个任务</span>
+      <span class="ml-2 text-[13px] text-slate-500">共 {{ total }} 个任务</span>
     </div>
 
     <!-- 任务表格 -->
@@ -62,11 +62,11 @@
       <el-table-column label="最新作业 / 进度" min-width="220">
         <template #default="{ row }">
           <template v-if="row.latestJob">
-            <div class="job-cell">
-              <div class="job-line">
+            <div class="flex flex-col gap-1">
+              <div class="flex items-center gap-1.5">
                 <el-tag size="small" :type="jobTypeTag(row.latestJob.jobType)">{{ jobTypeLabel(row.latestJob.jobType) }}</el-tag>
                 <el-tag size="small" :type="jobStatusTag(row.latestJob.status)" effect="plain">{{ jobStatusLabel(row.latestJob.status) }}</el-tag>
-                <span v-if="row.latestJob.errorCount > 0" class="err-hint">错误 {{ row.latestJob.errorCount }}</span>
+                <span v-if="row.latestJob.errorCount > 0" class="text-xs text-red-500">错误 {{ row.latestJob.errorCount }}</span>
               </div>
               <el-progress
                 v-if="row.latestJob.total > 0"
@@ -76,7 +76,7 @@
               />
             </div>
           </template>
-          <span v-else class="empty-hint">尚未执行作业</span>
+          <span v-else class="text-xs text-slate-400">尚未执行作业</span>
         </template>
       </el-table-column>
       <el-table-column label="创建时间" width="155">
@@ -241,11 +241,3 @@ function formatTime(ts) {
 }
 </script>
 
-<style lang="scss" scoped>
-.filter-bar { display: flex; gap: 10px; margin-bottom: 14px; align-items: center; }
-.total-hint { font-size: 13px; color: var(--el-text-color-secondary); margin-left: 8px; }
-.job-cell { display: flex; flex-direction: column; gap: 4px; }
-.job-line { display: flex; gap: 6px; align-items: center; }
-.err-hint { font-size: 12px; color: var(--el-color-danger); }
-.empty-hint { font-size: 12px; color: var(--el-text-color-placeholder); }
-</style>

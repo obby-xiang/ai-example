@@ -187,11 +187,18 @@ UPLOAD → PRECHECK → IMPORT → PUBLISH
 
 #### AgentRuntime 主循环（虚拟线程）
 
+约束：能用 Spring AI 的能力就不自研——
+- 会话记忆：Spring AI `ChatMemory`（`MessageWindowChatMemory` 窗口裁剪）
+- 流式汇总：Spring AI `MessageAggregator`（聚合 text + toolCalls + usage）
+- 工具执行：Spring AI `ToolCallingManager`（`DefaultToolCallingManager` +
+  `StaticToolCallbackResolver` 装载当前上下文工具；异常转错误响应、对话历史组装由 Spring AI 完成）
+- 自研部分仅为 Spring AI 未提供的编排：迭代循环、HITL 人机确认、SSE 事件推送
+
 ```java
 // 伪代码
 void runAgentLoop(RunInput input, SseRunEmitter emitter) {
     emit(RUN_STARTED)
-    List<Message> history = session.getHistory()
+    List<Message> history = session.getMemory().get(sessionId) // Spring AI ChatMemory
     // 注入当前上下文快照
     history.add(buildContextSystemMsg(session.getContext()))
     history.add(new UserMessage(input.getMessage()))
@@ -199,13 +206,15 @@ void runAgentLoop(RunInput input, SseRunEmitter emitter) {
     long promptTokens = 0, completionTokens = 0
     for (int iter = 0; iter < MAX_ITER; iter++) {
         List<ToolCallback> tools = toolRegistry.forContext(session.getContext())
-        // 真流式：逐块 emit(TEXT_DELTA)，结束时自聚合 text + toolCalls + usage
+        // 真流式：逐块 emit(TEXT_DELTA)，MessageAggregator 汇总
         StreamResult sr = streamModel(new Prompt(history, opts(tools)), emitter)
         promptTokens += sr.usage().promptTokens; completionTokens += ...
 
         if (sr.toolCalls().isEmpty()) break
         history.add(sr.assistantMessage())
 
+        ToolCallingManager tcm = DefaultToolCallingManager.builder()
+                .toolCallbackResolver(new StaticToolCallbackResolver(tools)).build()
         for (ToolCall tc : sr.toolCalls()) {
             if (riskOf(tc) == DANGER) {
                 // 关键顺序：先创建交互并 emit(INTERACTION_REQUEST{iid})，
@@ -294,8 +303,11 @@ AI 工具调用 ─► 同一服务(直接) ─┘
 ## 3. 前端设计
 
 **样式体系**：Element Plus（组件库）+ TailwindCSS v4（布局/间距/气泡等原子化样式）。
+约束：能用 Element Plus 现成组件的（步进条 el-steps、表格、对话框、进度条等）一律使用 EP 组件，
+能用 Tailwind 原子类的样式一律用原子类（全局复用样式以 @apply 组合），
+仅保留 Tailwind/EP 未提供的部分（中文字体栈、滚动条、光标闪烁动画等）。
 引入顺序为 Tailwind（含 preflight）→ Element Plus CSS → 业务样式，
-避免 preflight 重置覆盖 Element Plus 组件样式；业务组件内继续允许 scoped SCSS。
+避免 preflight 重置覆盖 Element Plus 组件样式。
 
 ### 3.1 路由结构
 

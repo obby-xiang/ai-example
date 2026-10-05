@@ -8,7 +8,7 @@
     }"
   >
     <el-icon class="shrink-0 text-slate-500">
-      <Loading v-if="msg.success === null" class="spin" />
+      <Loading v-if="msg.success === null" class="animate-spin" />
       <Check v-else-if="msg.success" class="text-green-600" />
       <Close v-else class="text-red-500" />
     </el-icon>
@@ -24,11 +24,3 @@ import { Loading, Check, Close } from '@element-plus/icons-vue'
 defineProps({ msg: Object })
 </script>
 
-<style scoped>
-.spin {
-  animation: rotate 1.2s linear infinite;
-}
-@keyframes rotate {
-  to { transform: rotate(360deg); }
-}
-</style>

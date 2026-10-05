@@ -30,7 +30,7 @@
       </el-col>
     </el-row>
 
-    <div v-if="!selectedCode" class="empty-hint">
+    <div v-if="!selectedCode" class="py-[60px]">
       <el-empty description="请从上方选择一个配置定义查看数据" />
     </div>
 
@@ -131,6 +131,3 @@ async function loadData() {
 const groupLabel = (l) => ({ GLOBAL: '全局配置', REGION: '地区级配置', PROJECT: '项目级配置' })[l] || l
 </script>
 
-<style lang="scss" scoped>
-.empty-hint { padding: 60px 0; }
-</style>

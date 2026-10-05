@@ -2,17 +2,18 @@ package com.example.configmgr.ai.session;
 
 import com.example.configmgr.ai.hitl.InteractionRequest;
 import lombok.Data;
-import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.memory.ChatMemory;
+import org.springframework.ai.chat.memory.MessageWindowChatMemory;
 
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * In-memory AI session (per browser tab).
+ * 会话记忆使用 Spring AI 的 ChatMemory（MessageWindowChatMemory），
+ * 窗口裁剪、消息存储均复用 Spring AI 能力，不自管消息列表。
  */
 @Data
 public class AiSession {
@@ -21,8 +22,10 @@ public class AiSession {
     private volatile Instant lastActivity = Instant.now();
     private volatile boolean runActive = false;
 
-    // Conversation history for the LLM
-    private final List<Message> history = new ArrayList<>();
+    // Spring AI 会话记忆（窗口 100 条，覆盖最大迭代数的完整对话）
+    private final ChatMemory memory = MessageWindowChatMemory.builder()
+            .maxMessages(100)
+            .build();
 
     // 最近一轮对话的 token 消耗（供刷新后恢复显示）
     private volatile long lastPromptTokens = 0;
@@ -72,3 +75,4 @@ public class AiSession {
         }
     }
 }
+

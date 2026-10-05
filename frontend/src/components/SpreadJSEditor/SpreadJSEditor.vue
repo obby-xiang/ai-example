@@ -1,13 +1,13 @@
 <template>
-  <div class="spreadjs-editor" ref="containerRef">
-    <div class="editor-toolbar">
+  <div class="relative flex h-full min-h-[500px] flex-col" ref="containerRef">
+    <div class="flex shrink-0 items-center justify-between border-b border-slate-200 bg-slate-50 px-3 py-2">
       <el-button-group>
         <el-button size="small" @click="toggleProtect">
           <el-icon><component :is="isProtected ? Lock : Unlock" /></el-icon>
           {{ isProtected ? '只读模式' : '编辑模式' }}
         </el-button>
       </el-button-group>
-      <div class="toolbar-right">
+      <div class="flex gap-2">
         <el-button size="small" type="primary" :loading="saving" @click="handleSave" v-if="!isProtected">
           <el-icon><Check /></el-icon> 保存
         </el-button>
@@ -16,9 +16,9 @@
         </el-button>
       </div>
     </div>
-    <div class="spread-host" ref="hostRef"></div>
-    <div v-if="loading" class="loading-overlay">
-      <el-icon class="spin" size="32"><Loading /></el-icon>
+    <div class="min-h-0 flex-1" ref="hostRef"></div>
+    <div v-if="loading" class="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-white/80 text-sm text-slate-500">
+      <el-icon class="animate-spin" size="32"><Loading /></el-icon>
       <span>正在加载…</span>
     </div>
   </div>
@@ -159,50 +159,3 @@ async function handleDownload() {
 }
 </script>
 
-<style lang="scss" scoped>
-.spreadjs-editor {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  min-height: 500px;
-  position: relative;
-}
-
-.editor-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--el-border-color);
-  background: var(--el-bg-color-page);
-  flex-shrink: 0;
-}
-
-.toolbar-right {
-  display: flex;
-  gap: 8px;
-}
-
-.spread-host {
-  flex: 1;
-  min-height: 0;
-}
-
-.loading-overlay {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  background: rgba(255, 255, 255, 0.8);
-  font-size: 14px;
-  color: var(--el-text-color-secondary);
-}
-
-.spin {
-  animation: rotate 1.2s linear infinite;
-  @keyframes rotate { to { transform: rotate(360deg); } }
-}
-</style>

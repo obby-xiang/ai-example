@@ -1,8 +1,8 @@
 <template>
   <div>
-    <div class="step-desc">执行数据导入，将文件内容写入暂存区，可在发布前预览变更</div>
+    <div class="mb-4 text-sm text-slate-500">执行数据导入，将文件内容写入暂存区，可在发布前预览变更</div>
 
-    <div v-if="!currentJob" class="start-section">
+    <div v-if="!currentJob" class="flex min-h-[280px] items-center justify-center">
       <el-empty description="预检查通过后，点击开始导入">
         <el-button type="primary" @click="startImport">
           <el-icon><Upload /></el-icon> 开始导入
@@ -11,8 +11,8 @@
     </div>
 
     <div v-else>
-      <div class="job-header">
-        <el-icon v-if="isRunning" class="spin"><Loading /></el-icon>
+      <div class="mb-3 flex items-center gap-2.5 text-sm">
+        <el-icon v-if="isRunning" class="animate-spin"><Loading /></el-icon>
         <el-icon v-else-if="isCompleted" color="#67c23a"><CircleCheck /></el-icon>
         <el-icon v-else color="#f56c6c"><CircleClose /></el-icon>
         <span class="job-status-text">{{ statusText }}</span>
@@ -39,7 +39,7 @@
 
       <!-- Diff preview -->
       <div v-if="isCompleted && diffRows.length > 0">
-        <div class="diff-header">
+        <div class="mb-2 text-[13px] font-medium">
           <span>暂存区数据预览（共 {{ diffRows.length }} 行）</span>
         </div>
         <el-table :data="diffRows.slice(0, 100)" border size="small" max-height="280">
@@ -54,7 +54,7 @@
             <template #default="{row}">{{ row.dataJson }}</template>
           </el-table-column>
         </el-table>
-        <div v-if="diffRows.length > 100" class="diff-more">仅显示前 100 行，共 {{ diffRows.length }} 行</div>
+        <div v-if="diffRows.length > 100" class="mt-1.5 text-xs text-slate-500">仅显示前 100 行，共 {{ diffRows.length }} 行</div>
       </div>
     </div>
 
@@ -137,13 +137,3 @@ function startPoll() {
 const itemTagType = (s) => ({ COMPLETED:'success', FAILED:'danger', RUNNING:'warning', PENDING:'info' })[s] || ''
 const itemLabel = (s) => ({ COMPLETED:'已导入', FAILED:'失败', RUNNING:'导入中', PENDING:'等待' })[s] || s
 </script>
-
-<style lang="scss" scoped>
-.step-desc { color:var(--el-text-color-secondary); margin-bottom:16px; }
-.start-section { min-height:280px; display:flex; align-items:center; justify-content:center; }
-.job-header { display:flex; align-items:center; gap:10px; margin-bottom:12px; font-size:14px; }
-.job-status-text { font-weight:500; }
-.spin { animation:rotate 1.2s linear infinite; @keyframes rotate { to { transform:rotate(360deg); } } }
-.diff-header { margin-bottom:8px; font-size:13px; font-weight:500; }
-.diff-more { font-size:12px; color:var(--el-text-color-secondary); margin-top:6px; }
-</style>

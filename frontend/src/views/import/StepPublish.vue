@@ -1,13 +1,13 @@
 <template>
   <div>
-    <div class="step-desc">确认无误后发布配置，数据将从暂存区正式写入生产配置</div>
+    <div class="mb-4 text-sm text-slate-500">确认无误后发布配置，数据将从暂存区正式写入生产配置</div>
 
     <el-alert type="warning" title="发布操作不可撤销，请确认数据无误后再发布" show-icon :closable="false" style="margin-bottom:16px" />
 
-    <div v-if="!currentJob" class="start-section">
-      <div class="confirm-card">
-        <h3>即将发布以下配置项</h3>
-        <ul class="def-list">
+    <div v-if="!currentJob" class="flex min-h-[280px] items-center justify-center">
+      <div class="text-center">
+        <h3 class="mb-4 text-base font-semibold">即将发布以下配置项</h3>
+        <ul class="flex flex-wrap justify-center gap-2 list-none">
           <li v-for="item in task?.items || []" :key="item.defCode">
             <el-tag size="small">{{ item.defCode }}</el-tag>
           </li>
@@ -19,8 +19,8 @@
     </div>
 
     <div v-else>
-      <div class="job-header">
-        <el-icon v-if="isRunning" class="spin"><Loading /></el-icon>
+      <div class="mb-3 flex items-center gap-2.5 text-sm">
+        <el-icon v-if="isRunning" class="animate-spin"><Loading /></el-icon>
         <el-icon v-else-if="isCompleted" color="#67c23a"><CircleCheck /></el-icon>
         <el-icon v-else color="#f56c6c"><CircleClose /></el-icon>
         <span class="job-status-text">{{ statusText }}</span>
@@ -145,13 +145,3 @@ function startPoll() {
 const itemTagType = (s) => ({ COMPLETED:'success', FAILED:'danger', RUNNING:'warning', PENDING:'info' })[s] || ''
 const itemLabel = (s) => ({ COMPLETED:'已发布', FAILED:'失败', RUNNING:'发布中', PENDING:'等待' })[s] || s
 </script>
-
-<style lang="scss" scoped>
-.step-desc { color:var(--el-text-color-secondary); margin-bottom:16px; }
-.start-section { min-height:280px; display:flex; align-items:center; justify-content:center; }
-.confirm-card { text-align:center; h3 { font-size:16px; margin-bottom:16px; } }
-.def-list { list-style:none; display:flex; flex-wrap:wrap; gap:8px; justify-content:center; }
-.job-header { display:flex; align-items:center; gap:10px; margin-bottom:12px; font-size:14px; }
-.job-status-text { font-weight:500; }
-.spin { animation:rotate 1.2s linear infinite; @keyframes rotate { to { transform:rotate(360deg); } } }
-</style>

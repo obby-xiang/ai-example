@@ -1,34 +1,34 @@
 <template>
   <div>
-    <div class="step-desc">为每个选中的配置项设置查询条件（范围过滤 + 字段级过滤），不设条件则导出全部数据</div>
+    <div class="mb-4 text-sm text-slate-500">为每个选中的配置项设置查询条件（范围过滤 + 字段级过滤），不设条件则导出全部数据</div>
 
     <el-tabs v-model="activeTab" type="card">
       <el-tab-pane v-for="item in task?.items || []" :key="item.defCode" :label="item.defCode" :name="item.defCode">
-        <div class="cond-panel" v-if="conds[item.defCode]">
+        <div class="py-4" v-if="conds[item.defCode]">
           <!-- Scope filter -->
-          <div class="cond-row" v-if="defMap[item.defCode]?.level === 'REGION'">
-            <span class="cond-label">地区范围</span>
+          <div class="mb-2.5 flex items-center gap-2.5" v-if="defMap[item.defCode]?.level === 'REGION'">
+            <span class="w-20 shrink-0 text-[13px] font-medium">地区范围</span>
             <el-select v-model="conds[item.defCode].scopeKeys" multiple clearable placeholder="不限地区（全部）" style="width:320px">
               <el-option v-for="r in regions" :key="r.code" :label="r.name" :value="r.code" />
             </el-select>
           </div>
-          <div class="cond-row" v-else-if="defMap[item.defCode]?.level === 'PROJECT'">
-            <span class="cond-label">项目范围</span>
+          <div class="mb-2.5 flex items-center gap-2.5" v-else-if="defMap[item.defCode]?.level === 'PROJECT'">
+            <span class="w-20 shrink-0 text-[13px] font-medium">项目范围</span>
             <el-select v-model="conds[item.defCode].scopeKeys" multiple clearable placeholder="不限项目（全部）" style="width:320px">
               <el-option v-for="p in projects" :key="p.code" :label="p.name" :value="p.code" />
             </el-select>
           </div>
 
           <!-- Field conditions -->
-          <div class="section-title">字段条件（AND 关系）</div>
-          <div v-for="(row, idx) in conds[item.defCode].rows" :key="idx" class="cond-row">
+          <div class="my-3 text-[13px] font-semibold text-slate-800">字段条件（AND 关系）</div>
+          <div v-for="(row, idx) in conds[item.defCode].rows" :key="idx" class="mb-2.5 flex items-center gap-2.5">
             <el-select v-model="row.fieldCode" placeholder="选择字段" style="width:180px" @change="onFieldChange(item.defCode, idx)">
               <el-option v-for="f in defMap[item.defCode]?.fields || []" :key="f.code" :label="`${f.label}(${f.code})`" :value="f.code" />
             </el-select>
             <el-select v-model="row.operator" placeholder="操作符" style="width:150px">
               <el-option v-for="op in operatorsFor(item.defCode, row.fieldCode)" :key="op.value" :label="op.label" :value="op.value" />
             </el-select>
-            <div class="cond-value">
+            <div class="inline-flex items-center">
               <el-select v-if="isEnumField(item.defCode, row.fieldCode) && row.operator === 'IN'"
                          v-model="row.value" multiple clearable placeholder="选择一个或多个选项" style="width:260px">
                 <el-option v-for="opt in optionsFor(item.defCode, row.fieldCode)" :key="opt.value" :label="opt.label" :value="opt.value" />
@@ -48,7 +48,7 @@
             <el-button :icon="Delete" circle plain size="small" type="danger" @click="conds[item.defCode].rows.splice(idx, 1)" />
           </div>
 
-          <div class="cond-actions">
+          <div class="mt-2 flex items-center">
             <el-button size="small" :icon="Plus" @click="addRow(item.defCode)">添加条件</el-button>
             <el-button size="small" type="primary" :icon="Search" :loading="estimating === item.defCode" @click="estimate(item.defCode)">
               预估行数
@@ -243,12 +243,3 @@ async function handleNext() {
 }
 </script>
 
-<style lang="scss" scoped>
-.step-desc { color: var(--el-text-color-secondary); margin-bottom: 16px; }
-.cond-panel { padding: 16px 0; }
-.cond-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
-.cond-label { width: 80px; font-size: 13px; font-weight: 500; flex-shrink: 0; }
-.cond-value { display: inline-flex; align-items: center; }
-.section-title { font-size: 13px; font-weight: 600; margin: 12px 0 10px; color: var(--el-text-color-primary); }
-.cond-actions { display: flex; align-items: center; margin-top: 8px; }
-</style>

@@ -1,9 +1,9 @@
 <template>
   <div>
-    <div class="step-desc">选择配置项并上传对应的Excel文件，或下载模板在线编辑</div>
+    <div class="mb-4 text-sm text-slate-500">选择配置项并上传对应的Excel文件，或下载模板在线编辑</div>
 
     <!-- Config selection -->
-    <div class="section-title">1. 选择配置项</div>
+    <div class="mb-2.5 text-sm font-semibold text-slate-800">1. 选择配置项</div>
     <el-row :gutter="12" style="margin-bottom:12px">
       <el-col :span="8">
         <el-select v-model="levelFilter" clearable placeholder="按层级筛选" style="width:100%">
@@ -27,7 +27,7 @@
     </el-table>
 
     <!-- File upload section -->
-    <div class="section-title" style="margin-top:24px">2. 导入模式</div>
+    <div class="mb-2.5 text-sm font-semibold text-slate-800" style="margin-top:24px">2. 导入模式</div>
     <el-radio-group v-model="importMode" @change="handleModeChange">
       <el-radio-button value="MERGE">
         增量合并
@@ -43,8 +43,8 @@
       </el-radio-button>
     </el-radio-group>
 
-    <div class="section-title" style="margin-top:24px">3. 上传配置文件</div>
-    <div class="upload-toolbar">
+    <div class="mb-2.5 text-sm font-semibold text-slate-800" style="margin-top:24px">3. 上传配置文件</div>
+    <div class="mb-2.5 flex items-center gap-2">
       <el-button size="small" @click="downloadTemplates" :disabled="selectedCodes.length === 0">
         <el-icon><Download /></el-icon> 下载模板（{{ selectedCodes.length }} 个）
       </el-button>
@@ -224,9 +224,3 @@ function triggerDownload(blob, name) {
 const levelType = (l) => ({ GLOBAL: 'success', REGION: 'warning', PROJECT: 'primary' })[l] || ''
 const levelLabel = (l) => ({ GLOBAL: '全局', REGION: '地区', PROJECT: '项目' })[l] || l
 </script>
-
-<style lang="scss" scoped>
-.step-desc { color: var(--el-text-color-secondary); margin-bottom:16px; }
-.section-title { font-weight:600; font-size:14px; margin-bottom:10px; }
-.upload-toolbar { display:flex; gap:8px; margin-bottom:10px; align-items:center; }
-</style>

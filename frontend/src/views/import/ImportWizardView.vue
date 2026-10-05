@@ -8,14 +8,20 @@
       <el-button @click="$router.push('/tasks')">返回任务中心</el-button>
     </div>
 
-    <!-- 步进条（可点击切换步骤查看） -->
-    <StepBar
-      :steps="importSteps"
-      :current="step"
-      :completed="task?.status === 'COMPLETED'"
+    <!-- 步进条：Element Plus el-steps，步骤可点击切换（@click 透传到步骤根节点） -->
+    <el-steps
+      :active="stepActiveIndex"
+      finish-status="success"
       style="margin-bottom:24px"
-      @select="jumpToStep"
-    />
+    >
+      <el-step
+        v-for="(s, i) in importSteps"
+        :key="s.key"
+        :title="s.title"
+        class="cursor-pointer select-none hover:opacity-80"
+        @click="jumpToStep(s.key)"
+      />
+    </el-steps>
 
     <div class="wizard-body">
       <StepUpload v-if="step === 'UPLOAD'" :task="task" @next="goNext" />
@@ -35,7 +41,6 @@ import StepUpload from './StepUpload.vue'
 import StepPrecheck from './StepPrecheck.vue'
 import StepImport from './StepImport.vue'
 import StepPublish from './StepPublish.vue'
-import StepBar from '@/components/common/StepBar.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -53,6 +58,13 @@ const importSteps = [
   { key: 'IMPORT', title: '导入配置' },
   { key: 'PUBLISH', title: '发布配置' }
 ]
+
+// el-steps active：已完成任务全部走完，其余取当前步骤下标
+const stepActiveIndex = computed(() => {
+  if (task.value?.status === 'COMPLETED') return importSteps.length
+  const idx = importSteps.findIndex(s => s.key === step.value)
+  return idx < 0 ? 0 : idx
+})
 
 onMounted(async () => {
   await taskStore.loadTask(taskId.value)

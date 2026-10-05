@@ -8,14 +8,20 @@
       <el-button @click="$router.push('/tasks')">返回任务中心</el-button>
     </div>
 
-    <!-- Step progress（可点击切换步骤） -->
-    <StepBar
-      :steps="exportSteps"
-      :current="step"
-      :completed="task?.status === 'COMPLETED'"
+    <!-- 步进条：Element Plus el-steps，步骤可点击切换（@click 透传到步骤根节点） -->
+    <el-steps
+      :active="stepActiveIndex"
+      finish-status="success"
       style="margin-bottom:24px"
-      @select="jumpToStep"
-    />
+    >
+      <el-step
+        v-for="(s, i) in exportSteps"
+        :key="s.key"
+        :title="s.title"
+        class="cursor-pointer select-none hover:opacity-80"
+        @click="jumpToStep(s.key)"
+      />
+    </el-steps>
 
     <!-- Step content -->
     <div class="wizard-body">
@@ -34,7 +40,6 @@ import { useWorkspaceStore } from '@/stores/workspace.js'
 import StepSelectDefs from './StepSelectDefs.vue'
 import StepQueryCond from './StepQueryCond.vue'
 import StepExport from './StepExport.vue'
-import StepBar from '@/components/common/StepBar.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -46,6 +51,13 @@ const exportSteps = [
   { key: 'QUERY_COND', title: '查询条件' },
   { key: 'EXPORT', title: '执行导出' }
 ]
+
+// el-steps active：已完成任务全部走完，其余取当前步骤下标
+const stepActiveIndex = computed(() => {
+  if (task.value?.status === 'COMPLETED') return exportSteps.length
+  const idx = exportSteps.findIndex(s => s.key === step.value)
+  return idx < 0 ? 0 : idx
+})
 
 const step = computed(() => route.params.step)
 const taskId = computed(() => Number(route.params.id))

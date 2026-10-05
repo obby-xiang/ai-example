@@ -1,9 +1,9 @@
 <template>
   <div>
-    <div class="step-desc">对上传的配置文件进行预检查，验证数据格式、必填项和依赖关系</div>
+    <div class="mb-4 text-sm text-slate-500">对上传的配置文件进行预检查，验证数据格式、必填项和依赖关系</div>
 
     <!-- Start check -->
-    <div v-if="!currentJob" class="start-section">
+    <div v-if="!currentJob" class="flex min-h-[280px] items-center justify-center">
       <el-empty description="点击开始检查配置文件">
         <el-button type="primary" @click="startPrecheck">
           <el-icon><CircleCheck /></el-icon> 开始预检查
@@ -13,8 +13,8 @@
 
     <!-- Progress -->
     <div v-else>
-      <div class="job-header">
-        <el-icon v-if="isRunning" class="spin"><Loading /></el-icon>
+      <div class="mb-3 flex items-center gap-2.5 text-sm">
+        <el-icon v-if="isRunning" class="animate-spin"><Loading /></el-icon>
         <el-icon v-else-if="isCompleted" color="#67c23a"><CircleCheck /></el-icon>
         <el-icon v-else color="#f56c6c"><CircleClose /></el-icon>
         <span class="job-status-text">{{ statusText }}</span>
@@ -44,7 +44,7 @@
 
       <!-- Issues -->
       <div v-if="issues.length > 0">
-        <div class="issues-header">
+        <div class="mb-2 text-[13px] font-medium">
           <span>发现 <b style="color:#f56c6c">{{ errorCount }} 个错误</b>，{{ warningCount }} 个警告</span>
         </div>
         <el-table :data="issues" border size="small" max-height="300">
@@ -146,12 +146,3 @@ async function doCancel() {
 const itemTagType = (s) => ({ COMPLETED:'success', FAILED:'danger', RUNNING:'warning', PENDING:'info' })[s] || ''
 const itemLabel = (s) => ({ COMPLETED:'通过', FAILED:'有错误', RUNNING:'检查中', PENDING:'等待' })[s] || s
 </script>
-
-<style lang="scss" scoped>
-.step-desc { color:var(--el-text-color-secondary); margin-bottom:16px; }
-.start-section { min-height:280px; display:flex; align-items:center; justify-content:center; }
-.job-header { display:flex; align-items:center; gap:10px; margin-bottom:12px; font-size:14px; }
-.job-status-text { font-weight:500; }
-.spin { animation:rotate 1.2s linear infinite; @keyframes rotate { to { transform:rotate(360deg); } } }
-.issues-header { margin-bottom:8px; font-size:13px; }
-</style>

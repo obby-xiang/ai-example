@@ -8,16 +8,21 @@ import com.example.configmgr.ai.tool.ContextBuilder;
 import com.example.configmgr.ai.tool.ToolMeta;
 import com.example.configmgr.ai.tool.ToolRegistry;
 import com.example.configmgr.config.AppProperties;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.*;
 import org.springframework.ai.chat.metadata.Usage;
+import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.chat.model.Generation;
+import org.springframework.ai.chat.model.MessageAggregator;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.model.tool.DefaultToolCallingManager;
+import org.springframework.ai.model.tool.ToolCallingManager;
+import org.springframework.ai.model.tool.ToolExecutionResult;
 import org.springframework.ai.openai.OpenAiChatModel;
 import org.springframework.ai.openai.OpenAiChatOptions;
-import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.tool.ToolCallback;
+import org.springframework.ai.tool.resolution.StaticToolCallbackResolver;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
@@ -25,7 +30,13 @@ import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Core agent loop. Runs on a virtual thread per invocation.
- * Implements user-controlled tool execution (internalToolExecutionEnabled=false).
+ * <p>
+ * 复用 Spring AI 能力（约束：能用 Spring AI 就不自研）：
+ * - 会话记忆：{@link org.springframework.ai.chat.memory.ChatMemory}（MessageWindowChatMemory 窗口裁剪）
+ * - 流式汇总：{@link MessageAggregator}（聚合文本/工具调用/usage）
+ * - 工具执行：{@link ToolCallingManager}（DefaultToolCallingManager + StaticToolCallbackResolver，
+ *   异常转错误响应、对话历史组装均由 Spring AI 完成）
+ * 自研部分仅为 Spring AI 未提供的编排：迭代循环、HITL 人机确认、SSE 事件推送。
  */
 @Slf4j
 @Service
@@ -58,7 +69,6 @@ public class AgentRuntime {
     private final HitlManager hitlManager;
     private final AiSessionStore sessionStore;
     private final AppProperties appProperties;
-    private final ObjectMapper objectMapper;
 
     /**
      * Run the agent loop for a user message. Emits SSE events to the emitter.
@@ -79,19 +89,11 @@ public class AgentRuntime {
             long totalPromptTokens = 0;
             long totalCompletionTokens = 0;
 
-            // Build message history
+            // Build message history（记忆来自 Spring AI ChatMemory，窗口已裁剪）
             List<Message> messages = new ArrayList<>();
             messages.add(new SystemMessage(SYSTEM_PROMPT));
-
-            // Context snapshot
-            String ctxMsg = contextBuilder.buildContextMessage(session);
-            messages.add(new SystemMessage(ctxMsg));
-
-            // History (trimmed)
-            List<Message> history = trimHistory(session.getHistory());
-            messages.addAll(history);
-
-            // User message
+            messages.add(new SystemMessage(contextBuilder.buildContextMessage(session)));
+            messages.addAll(session.getMemory().get(sessionId));
             messages.add(new UserMessage(userMessage));
 
             int maxIter = appProperties.getAi().getMaxIterations();
@@ -101,15 +103,11 @@ public class AgentRuntime {
                     return;
                 }
 
-                // Get tools for current context
                 List<ToolCallback> tools = toolRegistry.forContext(session.getContext());
                 log.debug("Iter {} with {} tools", iter, tools.size());
 
-                // Build options with thinking disabled
-                OpenAiChatOptions opts = buildOptions(tools);
+                Prompt prompt = new Prompt(messages, buildOptions(tools));
 
-                // Call the model（真流式：逐块推送文本，末尾汇总工具调用）
-                Prompt prompt = new Prompt(messages, opts);
                 StreamResult streamResult;
                 try {
                     streamResult = streamModel(prompt, emitter);
@@ -123,7 +121,6 @@ public class AgentRuntime {
                     return;
                 }
 
-                // 组装本轮 assistant 消息（文本 + 可能存在的工具调用）
                 AssistantMessage assistantMsg = streamResult.assistantMessage();
                 messages.add(assistantMsg);
 
@@ -137,26 +134,26 @@ public class AgentRuntime {
                     break;
                 }
 
-                // Execute each tool call
-                List<Message> toolResults = new ArrayList<>();
+                // 工具执行交给 Spring AI ToolCallingManager（解析/执行/异常转错误响应）
+                ToolCallingManager toolCallingManager = DefaultToolCallingManager.builder()
+                        .toolCallbackResolver(new StaticToolCallbackResolver(tools))
+                        .build();
+
                 for (AssistantMessage.ToolCall tc : toolCalls) {
                     String toolName = tc.name();
                     String callId = tc.id();
-                    String argsJson = tc.arguments();
 
                     emitter.toolStart(callId, toolName, getDisplayName(toolName));
 
-                    // Check risk level — DANGER requires HITL
+                    // 高风险工具：HITL 人机确认（Spring AI 无此能力，属编排层）
                     ToolMeta meta = toolRegistry.getMeta(toolName);
                     if (meta != null && meta.getRiskLevel() == ToolMeta.RiskLevel.DANGER) {
-                        // 关键顺序：必须先创建请求并推送给前端（前端据此渲染确认卡片），
-                        // 然后再阻塞等待响应。否则用户永远看不到卡片，只能超时。
                         InteractionRequest request = hitlManager.createInteraction(
                                 sessionId, runId, callId,
                                 InteractionRequest.InteractionType.CONFIRM,
                                 "即将执行高风险操作: " + getDisplayName(toolName),
-                                "工具: " + toolName + "\n参数: " + argsJson,
-                                Map.of("toolName", toolName, "args", argsJson));
+                                "工具: " + toolName + "\n参数: " + tc.arguments(),
+                                Map.of("toolName", toolName, "args", tc.arguments()));
                         emitter.interactionRequest(request);
 
                         InteractionRequest.InteractionResult hitlResult =
@@ -166,7 +163,7 @@ public class AgentRuntime {
                             String resultStr = "用户拒绝了此操作: "
                                     + (hitlResult.getRejectionReason() != null
                                             ? hitlResult.getRejectionReason() : "未提供原因");
-                            toolResults.add(ToolResponseMessage.builder()
+                            messages.add(ToolResponseMessage.builder()
                                     .responses(List.of(new ToolResponseMessage.ToolResponse(callId, toolName, resultStr)))
                                     .build());
                             emitter.toolDone(callId, false, "操作已拒绝");
@@ -175,36 +172,34 @@ public class AgentRuntime {
                         emitter.toolDone(callId, true, "用户已批准");
                     }
 
-                    // Execute the tool
-                    String result;
-                    try {
-                        ToolCallback callback = toolRegistry.getCallback(toolName);
-                        if (callback == null) {
-                            result = "工具 '" + toolName + "' 不可用（当前步骤不支持此操作）";
-                        } else {
-                            result = callback.call(argsJson,
-                                    new ToolContext(Map.of(
-                                            "sessionId", sessionId,
-                                            "runId", runId)));
-                            if (result == null) result = "操作完成";
+                    // 单次调用包装为 ChatResponse 交给 ToolCallingManager 执行
+                    AssistantMessage singleCall = AssistantMessage.builder()
+                            .content("")
+                            .toolCalls(List.of(tc))
+                            .build();
+                    ChatResponse callResponse = new ChatResponse(List.of(new Generation(singleCall)));
+                    ToolExecutionResult execResult = toolCallingManager.executeToolCalls(prompt, callResponse);
+
+                    // 只取其中的工具响应消息（assistant 消息已在上方整体添加）
+                    for (Message m : execResult.conversationHistory()) {
+                        if (m instanceof ToolResponseMessage trm) {
+                            messages.add(trm);
+                            for (ToolResponseMessage.ToolResponse r : trm.getResponses()) {
+                                emitter.toolDone(r.id(),
+                                        !r.responseData().startsWith("工具执行出错"),
+                                        summarize(r.responseData()));
+                            }
                         }
-                    } catch (Exception e) {
-                        log.warn("Tool {} failed: {}", toolName, e.getMessage());
-                        result = "工具执行出错: " + e.getMessage();
                     }
-
-                    toolResults.add(ToolResponseMessage.builder()
-                            .responses(List.of(new ToolResponseMessage.ToolResponse(callId, toolName, result)))
-                            .build());
-                    emitter.toolDone(callId, !result.startsWith("工具执行出错"), summarize(result));
+                    if (execResult.returnDirect()) {
+                        break;
+                    }
                 }
-
-                messages.addAll(toolResults);
             }
 
-            // Save history (trim if needed)
-            session.getHistory().clear();
-            session.getHistory().addAll(messages.subList(2, messages.size())); // skip system messages
+            // 保存记忆（Spring AI ChatMemory；窗口裁剪由 MessageWindowChatMemory 完成）
+            session.getMemory().clear(sessionId);
+            session.getMemory().add(sessionId, messages.subList(2, messages.size())); // skip system messages
             Map<String, Object> usage = totalPromptTokens > 0 || totalCompletionTokens > 0
                     ? Map.of("promptTokens", totalPromptTokens, "completionTokens", totalCompletionTokens)
                     : Map.of();
@@ -222,41 +217,34 @@ public class AgentRuntime {
     }
 
     /**
-     * 真流式调用：逐块把文本推给前端；结束时把本轮的文本与工具调用汇总返回。
+     * 真流式调用：逐块把文本推给前端；结束时用 Spring AI MessageAggregator
+     * 汇总本轮完整 assistant 消息（文本 + 工具调用 + usage）。
      */
     private StreamResult streamModel(Prompt prompt, SseRunEmitter emitter) {
-        StringBuilder acc = new StringBuilder();
-        List<AssistantMessage.ToolCall> toolCalls =
-                java.util.Collections.synchronizedList(new ArrayList<>());
-        AtomicReference<Usage> usageRef = new AtomicReference<>();
+        MessageAggregator aggregator = new MessageAggregator();
+        AtomicReference<ChatResponse> aggregatedRef = new AtomicReference<>();
 
         chatModel.stream(prompt)
                 .doOnNext(cr -> {
-                    if (cr.getResult() == null) {
-                        return;
-                    }
+                    if (cr.getResult() == null) return;
                     String text = cr.getResult().getOutput().getText();
                     if (text != null && !text.isBlank()) {
-                        acc.append(text);
                         emitter.textDelta(text);
                     }
-                    List<AssistantMessage.ToolCall> calls = cr.getResult().getOutput().getToolCalls();
-                    if (calls != null && !calls.isEmpty()) {
-                        toolCalls.addAll(calls);
-                    }
-                    if (cr.getMetadata() != null && cr.getMetadata().getUsage() != null) {
-                        usageRef.set(cr.getMetadata().getUsage());
-                    }
                 })
+                .transform(flux -> aggregator.aggregate(flux, aggregatedRef::set))
                 .blockLast(java.time.Duration.ofMinutes(3));
 
-        String fullText = acc.toString();
-        List<AssistantMessage.ToolCall> calls = new ArrayList<>(toolCalls);
-        AssistantMessage assistantMessage = calls.isEmpty()
-                ? new AssistantMessage(fullText)
-                : AssistantMessage.builder().content(fullText).toolCalls(calls).build();
+        ChatResponse finalResponse = aggregatedRef.get();
+        AssistantMessage assistantMessage = finalResponse != null && finalResponse.getResult() != null
+                ? finalResponse.getResult().getOutput()
+                : new AssistantMessage("");
+        List<AssistantMessage.ToolCall> toolCalls = assistantMessage.getToolCalls() != null
+                ? assistantMessage.getToolCalls() : List.of();
+        Usage usage = finalResponse != null && finalResponse.getMetadata() != null
+                ? finalResponse.getMetadata().getUsage() : null;
 
-        return new StreamResult(assistantMessage, calls, usageRef.get());
+        return new StreamResult(assistantMessage, toolCalls, usage);
     }
 
     private record StreamResult(AssistantMessage assistantMessage,
@@ -281,22 +269,10 @@ public class AgentRuntime {
         }
 
         if (!tools.isEmpty()) {
-            // Tools are passed as callbacks
             builder.toolCallbacks(tools.toArray(new ToolCallback[0]));
         }
 
         return builder.build();
-    }
-
-    private List<Message> trimHistory(List<Message> history) {
-        if (history.size() <= 40) return new ArrayList<>(history);
-        // Keep last 40 messages, ensuring tool_call/response pairs stay intact
-        List<Message> trimmed = new ArrayList<>();
-        int start = Math.max(0, history.size() - 40);
-        // Skip forward if start lands in the middle of an assistant+tool pair
-        while (start < history.size() && history.get(start) instanceof ToolResponseMessage) start++;
-        trimmed.addAll(history.subList(start, history.size()));
-        return trimmed;
     }
 
     private String getDisplayName(String toolName) {

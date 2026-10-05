@@ -1,6 +1,6 @@
 <template>
   <div>
-    <div class="step-desc">选择要导出的配置项（可多选）</div>
+    <div class="mb-4 text-sm text-slate-500">选择要导出的配置项（可多选）</div>
 
     <el-row :gutter="16" style="margin-bottom:12px">
       <el-col :span="8">
@@ -14,7 +14,7 @@
         <el-input v-model="keyword" clearable placeholder="搜索配置编码或名称" :prefix-icon="Search" />
       </el-col>
       <el-col :span="8">
-        <span class="selected-hint">已选 {{ selectedCodes.length }} 个配置项</span>
+        <span class="text-sm leading-8 text-blue-600">已选 {{ selectedCodes.length }} 个配置项</span>
       </el-col>
     </el-row>
 
@@ -116,7 +116,3 @@ const levelType = (l) => ({ GLOBAL: 'success', REGION: 'warning', PROJECT: 'prim
 const levelLabel = (l) => ({ GLOBAL: '全局', REGION: '地区', PROJECT: '项目' })[l] || l
 </script>
 
-<style lang="scss" scoped>
-.step-desc { color: var(--el-text-color-secondary); margin-bottom: 16px; }
-.selected-hint { font-size: 14px; color: var(--el-color-primary); line-height: 32px; }
-</style>

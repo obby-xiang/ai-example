@@ -13,8 +13,8 @@
     <el-row :gutter="16">
       <!-- Left: definition list -->
       <el-col :span="8">
-        <div class="def-list-panel card">
-          <div class="list-toolbar">
+        <div class="card flex h-[calc(100vh-200px)] flex-col overflow-hidden">
+          <div class="flex shrink-0 gap-2 py-2">
             <el-select v-model="levelFilter" clearable size="small" placeholder="层级" style="width:100px">
               <el-option label="全局" value="GLOBAL" />
               <el-option label="地区" value="REGION" />
@@ -22,18 +22,18 @@
             </el-select>
             <el-input v-model="keyword" clearable size="small" placeholder="搜索" style="flex:1" />
           </div>
-          <div class="def-item-list" v-loading="loading">
+          <div class="flex-1 overflow-y-auto" v-loading="loading">
             <div
               v-for="def in filteredDefs" :key="def.code"
-              class="def-item"
-              :class="{ active: selected?.code === def.code }"
+              class="cursor-pointer border-b border-slate-100 px-3 py-2.5 hover:bg-slate-50"
+              :class="{ 'bg-blue-50': selected?.code === def.code }"
               @click="select(def)"
             >
-              <div class="def-item-main">
-                <span class="def-code">{{ def.code }}</span>
+              <div class="mb-0.5 flex items-center justify-between">
+                <span class="text-[13px] font-semibold">{{ def.code }}</span>
                 <el-tag :type="levelType(def.level)" size="small">{{ levelLabel(def.level) }}</el-tag>
               </div>
-              <div class="def-name">{{ def.name }}</div>
+              <div class="text-xs text-slate-500">{{ def.name }}</div>
             </div>
             <el-empty v-if="filteredDefs.length === 0" description="无配置定义" />
           </div>
@@ -43,12 +43,12 @@
       <!-- Right: definition detail -->
       <el-col :span="16">
         <div v-if="selected" class="card">
-          <div class="detail-header">
+          <div class="flex items-start justify-between">
             <div>
-              <h3>{{ selected.name }} <span class="code-badge">{{ selected.code }}</span></h3>
-              <p class="def-desc">{{ selected.description || '暂无描述' }}</p>
+              <h3 class="mb-1 text-base">{{ selected.name }} <span class="font-mono text-xs font-normal text-slate-500">{{ selected.code }}</span></h3>
+              <p class="text-[13px] text-slate-500">{{ selected.description || '暂无描述' }}</p>
             </div>
-            <div class="detail-actions">
+            <div class="flex gap-2">
               <el-button size="small" type="primary" @click="openFieldEditor">
                 <el-icon><Edit /></el-icon> 编辑字段
               </el-button>
@@ -87,7 +87,7 @@
                   <el-tag v-for="opt in parseOpts(row.optionsJson).slice(0,3)" :key="opt.value" size="small" effect="plain" style="margin-right:2px">{{ opt.label }}</el-tag>
                   <span v-if="parseOpts(row.optionsJson).length > 3">+{{ parseOpts(row.optionsJson).length - 3 }}</span>
                 </span>
-                <span v-else class="cell-empty">—</span>
+                <span v-else class="text-slate-400">—</span>
               </template>
             </el-table-column>
           </el-table>
@@ -122,9 +122,9 @@
 
     <!-- Field editor dialog -->
     <el-dialog v-model="editorVisible" :title="`编辑字段：${selected?.code} ${selected?.name}`" width="1000px" top="4vh">
-      <div class="editor-toolbar">
+      <div class="mb-2.5 flex items-center gap-3">
         <el-button size="small" :icon="Plus" @click="addFieldRow">新增字段</el-button>
-        <span class="hint">字段编码以字母开头；REFERENCE 类型需选择引用配置和引用字段；ENUM 类型选项每行一条，格式 value=label</span>
+        <span class="text-xs text-slate-500">字段编码以字母开头；REFERENCE 类型需选择引用配置和引用字段；ENUM 类型选项每行一条，格式 value=label</span>
       </div>
       <el-table :data="editingFields" border size="small" max-height="520">
         <el-table-column label="字段编码" width="150">
@@ -160,7 +160,7 @@
               <el-input v-model="row.optionsText" type="textarea" :rows="2" size="small" placeholder="PURCHASE=采购单&#10;SALES=销售单" />
             </template>
             <template v-else-if="row.fieldType === 'REFERENCE'">
-              <div class="ref-row">
+              <div class="flex gap-1.5">
                 <el-select v-model="row.refDefCode" size="small" placeholder="引用配置" style="width:140px" @change="row.refFieldCode = ''">
                   <el-option v-for="d in defs" :key="d.code" :label="`${d.code} ${d.name}`" :value="d.code" />
                 </el-select>
@@ -169,7 +169,7 @@
                 </el-select>
               </div>
             </template>
-            <span v-else class="cell-empty">—</span>
+            <span v-else class="text-slate-400">—</span>
           </template>
         </el-table-column>
         <el-table-column label="操作" width="90" fixed="right">
@@ -356,25 +356,3 @@ const levelLabel = (l) => ({ GLOBAL: '全局', REGION: '地区', PROJECT: '项�
 const typeLabel = (t) => (fieldTypes.find(f => f.value === t) || {}).label || t
 </script>
 
-<style lang="scss" scoped>
-.def-list-panel { height: calc(100vh - 200px); display: flex; flex-direction: column; overflow: hidden; }
-.list-toolbar { display: flex; gap: 8px; padding: 8px 0; flex-shrink: 0; }
-.def-item-list { flex: 1; overflow-y: auto; }
-.def-item {
-  padding: 10px 12px; border-bottom: 1px solid var(--el-border-color-lighter); cursor: pointer;
-  &:hover { background: var(--el-fill-color-light); }
-  &.active { background: var(--el-color-primary-light-9); }
-}
-.def-item-main { display: flex; align-items: center; justify-content: space-between; margin-bottom: 2px; }
-.def-code { font-weight: 600; font-size: 13px; }
-.def-name { font-size: 12px; color: var(--el-text-color-secondary); }
-.detail-header { display: flex; justify-content: space-between; align-items: flex-start; }
-.detail-actions { display: flex; gap: 8px; }
-h3 { font-size: 16px; margin-bottom: 4px; }
-.code-badge { font-size: 12px; color: var(--el-text-color-secondary); font-weight: normal; font-family: monospace; }
-.def-desc { font-size: 13px; color: var(--el-text-color-secondary); }
-.editor-toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
-.editor-toolbar .hint { font-size: 12px; color: var(--el-text-color-secondary); }
-.ref-row { display: flex; gap: 6px; }
-.cell-empty { color: var(--el-text-color-placeholder); }
-</style>

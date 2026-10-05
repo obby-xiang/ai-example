@@ -1,29 +1,29 @@
 <template>
   <div>
-    <div class="step-desc">配置导出结果，可在线预览编辑，也可下载文件</div>
+    <div class="mb-4 text-sm text-slate-500">配置导出结果，可在线预览编辑，也可下载文件</div>
 
     <!-- Job progress -->
-    <div v-if="currentJob && isRunning" class="job-progress-section">
-      <div class="job-status-header">
-        <el-icon class="spin"><Loading /></el-icon>
+    <div v-if="currentJob && isRunning" class="mb-6">
+      <div class="mb-3 flex items-center gap-2.5">
+        <el-icon class="animate-spin"><Loading /></el-icon>
         <span>正在导出，请稍候…</span>
         <el-button size="small" type="danger" plain @click="cancelJob">取消</el-button>
       </div>
       <el-progress :percentage="Math.round(currentJob.progress / Math.max(1, currentJob.total) * 100)" />
-      <div class="job-items">
-        <div v-for="item in currentJob.items || []" :key="item.defCode" class="job-item">
-          <span class="job-item-code">{{ item.defCode }}</span>
-          <el-progress :percentage="Math.round(item.processed / Math.max(1, item.total) * 100)" :status="itemStatus(item.status)" class="item-progress" />
-          <span class="job-item-count">{{ item.processed }}/{{ item.total }}</span>
+      <div class="mt-3 flex flex-col gap-2">
+        <div v-for="item in currentJob.items || []" :key="item.defCode" class="flex items-center gap-2">
+          <span class="w-[120px] shrink-0 text-xs">{{ item.defCode }}</span>
+          <el-progress :percentage="Math.round(item.processed / Math.max(1, item.total) * 100)" :status="itemStatus(item.status)" class="flex-1" />
+          <span class="w-20 shrink-0 text-right text-xs">{{ item.processed }}/{{ item.total }}</span>
         </div>
       </div>
     </div>
 
     <!-- Results table -->
-    <div v-if="!isRunning && files.length > 0" class="results-section">
-      <div class="results-header">
-        <span class="results-count">共 {{ files.length }} 个文件</span>
-        <div class="results-actions">
+    <div v-if="!isRunning && files.length > 0" class="mb-4">
+      <div class="mb-3 flex items-center justify-between">
+        <span class="text-sm">共 {{ files.length }} 个文件</span>
+        <div class="flex gap-2">
           <el-button size="small" @click="downloadChecked" :disabled="checkedCodes.length === 0">
             下载已选（{{ checkedCodes.length }}）
           </el-button>
@@ -45,7 +45,7 @@
     </div>
 
     <!-- No job yet -->
-    <div v-else-if="!isRunning && !hasCompleted" class="start-section">
+    <div v-else-if="!isRunning && !hasCompleted" class="flex min-h-[300px] items-center justify-center">
       <el-empty description="点击开始导出">
         <el-button type="primary" @click="startExport">
           <el-icon><Download /></el-icon> 开始导出
@@ -206,19 +206,3 @@ async function onFileSaved() {
 const itemStatus = (s) => ({ COMPLETED: 'success', FAILED: 'exception' })[s] || ''
 </script>
 
-<style lang="scss" scoped>
-.step-desc { color: var(--el-text-color-secondary); margin-bottom: 16px; }
-.job-progress-section { margin-bottom: 24px; }
-.job-status-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
-.spin { animation: rotate 1.2s linear infinite; @keyframes rotate { to { transform: rotate(360deg); } } }
-.job-items { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
-.job-item { display: flex; align-items: center; gap: 8px; }
-.job-item-code { width: 120px; font-size: 12px; flex-shrink: 0; }
-.item-progress { flex: 1; }
-.job-item-count { width: 80px; font-size: 12px; text-align: right; flex-shrink: 0; }
-.results-section { margin-bottom: 16px; }
-.results-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
-.results-count { font-size: 14px; }
-.results-actions { display: flex; gap: 8px; }
-.start-section { min-height: 300px; display: flex; align-items: center; justify-content: center; }
-</style>
