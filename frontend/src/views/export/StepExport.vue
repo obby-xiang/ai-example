@@ -72,7 +72,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { createJob, getJob, cancelJob as apiCancelJob } from '@/api/jobs.js'
-import { getFiles, downloadFile, downloadAllFiles, downloadTemplates } from '@/api/tasks.js'
+import { getFiles, downloadFile, downloadAllFiles, downloadFiles } from '@/api/tasks.js'
 import { ElMessage } from 'element-plus'
 import { Loading, Download, ArrowLeft } from '@element-plus/icons-vue'
 import SpreadJSEditor from '@/components/SpreadJSEditor/SpreadJSEditor.vue'
@@ -149,8 +149,9 @@ async function downloadAll() {
 }
 
 async function downloadChecked() {
-  const res = await downloadTemplates(props.task.id, checkedCodes.value)
-  triggerDownload(res.data, `export-selected.zip`)
+  // 下载勾选的导出数据文件（不是模板）
+  const res = await downloadFiles(props.task.id, checkedCodes.value)
+  triggerDownload(res.data, `export-selected-${props.task.id}.zip`)
 }
 
 function triggerDownload(blob, filename) {

@@ -129,12 +129,24 @@ async function downloadTemplates() {
 
 async function handleFileChange(file) {
   if (!props.task?.id) return
-  const res = await uploadFile(props.task.id, file.raw)
-  const matched = res.data.data?.defCode
-  if (matched) {
-    fileMap.value[matched] = { fileName: file.name }
-    if (!selectedCodes.value.includes(matched)) selectedCodes.value.push(matched)
-    ElMessage.success(`已匹配到配置项 ${matched}`)
+  try {
+    const res = await uploadFile(props.task.id, file.raw)
+    const data = res.data.data || {}
+    const matchedFiles = data.matchedFiles || (data.defCode ? [{ defCode: data.defCode, fileName: data.fileName }] : [])
+
+    for (const m of matchedFiles) {
+      fileMap.value[m.defCode] = { fileName: m.fileName }
+      if (!selectedCodes.value.includes(m.defCode)) selectedCodes.value.push(m.defCode)
+    }
+
+    let msg = `已匹配 ${matchedFiles.length} 个配置项`
+    const unmatched = data.unmatchedFiles || []
+    if (unmatched.length > 0) {
+      msg += `，${unmatched.length} 个文件未匹配: ${unmatched.slice(0, 3).join('、')}${unmatched.length > 3 ? '…' : ''}`
+    }
+    ElMessage[unmatched.length > 0 ? 'warning' : 'success'](msg)
+  } catch (e) {
+    ElMessage.error(e.response?.data?.message || '上传失败')
   }
 }
 

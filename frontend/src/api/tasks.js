@@ -22,5 +22,8 @@ export const uploadFile = (id, file) => {
 }
 export const downloadAllFiles = (id) =>
   request.get(`/tasks/${id}/files/download-all`, { responseType: 'blob' })
+// 下载勾选的导出文件（子集打包）
+export const downloadFiles = (id, codes) =>
+  request.get(`/tasks/${id}/files/download`, { params: { codes }, responseType: 'blob' })
 export const downloadTemplates = (id, codes) =>
   request.get(`/tasks/${id}/files/templates`, { params: { codes }, responseType: 'blob' })
