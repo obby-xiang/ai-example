@@ -1,0 +1,29 @@
+{
+  "name": "quickstart-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "node scripts/build.mjs",
+    "preview": "vite preview --port 5271"
+  },
+  "dependencies": {
+    "@element-plus/icons-vue": "^2.3.1",
+    "@grapecity/spread-excelio": "17.1.5",
+    "@grapecity/spread-sheets": "17.1.5",
+    "@grapecity/spread-sheets-resources-zh": "17.1.5",
+    "axios": "^1.7.9",
+    "dayjs": "^1.11.13",
+    "element-plus": "^2.9.3",
+    "jszip": "^3.10.1",
+    "pinia": "^2.3.0",
+    "uuid": "^11.0.3",
+    "vue": "^3.5.13",
+    "vue-router": "^4.5.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "vite": "^6.0.7"
+  }
+}

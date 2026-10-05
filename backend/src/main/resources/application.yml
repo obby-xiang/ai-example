@@ -1,0 +1,35 @@
+server:
+  port: 8090
+
+spring:
+  application:
+    name: quickstart-backend
+  datasource:
+    url: jdbc:h2:file:./data/quickstart_db;MODE=MySQL
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+  ai:
+    openai:
+      base-url: https://api.deepseek.com
+      api-key: ${DEEPSEEK_API_KEY:REMOVED_SECRET}
+      chat:
+        completions-path: /chat/completions
+        options:
+          model: deepseek-flash
+          parallel-tool-calls: false
+
+app:
+  job:
+    item-delay-ms: 300
+  ai:
+    max-rounds: 8
+    session-ttl-minutes: 120
+
+logging:
+  level:
+    com.example.quickstart: info
