@@ -1,0 +1,44 @@
+server:
+  port: 18290
+
+spring:
+  application:
+    name: quickstart-backend
+  datasource:
+    url: jdbc:h2:file:./data/quickstart_db;MODE=MySQL
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+  ai:
+    openai:
+      base-url: https://api.deepseek.com
+      api-key: ${DEEPSEEK_API_KEY:dummy-not-set}
+      chat:
+        completions-path: /chat/completions
+        options:
+          model: deepseek-flash
+          temperature: 0.2
+          max-tokens: 4096
+          parallel-tool-calls: false
+          extra-body:
+            # 实验验证：deepseek-flash 接受该参数并彻底关闭思考模式（省 token、避免思维链回放兼容问题）
+            thinking:
+              type: disabled
+
+app:
+  job:
+    per-config-delay-ms: 200
+    per-row-delay-ms: 8
+  ai:
+    memory-window: 30
+    session-ttl-minutes: 120
+
+logging:
+  level:
+    com.example.quickstart: DEBUG
+    org.hibernate.SQL: WARN
+    org.springframework.ai: INFO

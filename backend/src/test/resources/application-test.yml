@@ -1,0 +1,33 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:testdb;MODE=MySQL;DB_CLOSE_DELAY=-1
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    open-in-view: false
+  ai:
+    openai:
+      base-url: https://api.deepseek.com
+      api-key: test-key-not-real
+      chat:
+        completions-path: /chat/completions
+        options:
+          model: deepseek-flash
+          temperature: 0.2
+          parallel-tool-calls: false
+
+app:
+  job:
+    per-config-delay-ms: 1
+    per-row-delay-ms: 0
+  ai:
+    memory-window: 30
+    session-ttl-minutes: 120
+
+logging:
+  level:
+    com.example.quickstart: WARN
+    org.hibernate.SQL: WARN

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  项目级 Maven settings（借鉴 E:\temp\ai-example 实践）。
+  目的：绕过本机全局镜像（华为云）对 Spring AI 1.1.8 的同步滞后，统一走阿里云公共仓库，
+  spring/central 源站直连排除在镜像拦截之外。
+  使用方式：mvn -s maven-settings.xml ...
+-->
+<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.2.0 https://maven.apache.org/xsd/settings-1.2.0.xsd">
+    <mirrors>
+        <mirror>
+            <id>aliyun-mirror</id>
+            <mirrorOf>*,!spring-release,!spring-plugin-release,!central-release</mirrorOf>
+            <name>阿里云公共仓库（Maven Central 同步更快）</name>
+            <url>https://maven.aliyun.com/repository/public</url>
+        </mirror>
+    </mirrors>
+</settings>
