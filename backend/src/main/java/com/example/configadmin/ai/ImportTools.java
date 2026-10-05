@@ -107,7 +107,7 @@ public class ImportTools {
         }
     }
 
-    /** 启动检查。 */
+    /** 启动检查（只读操作，后端直接执行；同时下发 ui_event 让前端同步跳转并订阅进度）。 */
     @Component("startImportCheckTool")
     public static class StartImportCheck implements AiTool {
         @Override
@@ -121,7 +121,11 @@ public class ImportTools {
         public ToolResult run(ToolContext ctx, Map<String, Object> args) {
             Long id = ImportTools.batchId(ctx, args.get("batchId"));
             if (id == null) return ToolResult.fail("当前没有导入批次，请先调用 ensure_import_batch。");
-            ctx.imports().getBatch(id);
+            ImportBatch batch = ctx.imports().getBatch(id);
+            if (batch.getStatus() == com.example.configadmin.entity.BatchStatus.CHECKING) {
+                return ToolResult.fail("检查正在执行中，请稍后查询结果。");
+            }
+            ctx.runner().runCheck(id);
             return ToolResult.ok("已启动导入检查（批次 " + id + "），检查完成后会显示每个文件的结果明细。")
                     .event("import_action", "batchId", id)
                     .event("import_action", "action", "check")
@@ -161,7 +165,7 @@ public class ImportTools {
         }
     }
 
-    /** 导入（写操作，需确认）。 */
+    /** 导入（写操作，需确认；后端直接执行）。 */
     @Component("startImportTool")
     public static class StartImport implements AiTool {
         @Override
@@ -175,7 +179,11 @@ public class ImportTools {
         public ToolResult run(ToolContext ctx, Map<String, Object> args) {
             Long id = ImportTools.batchId(ctx, args.get("batchId"));
             if (id == null) return ToolResult.fail("当前没有导入批次。");
-            ctx.imports().getBatch(id);
+            ImportBatch batch = ctx.imports().getBatch(id);
+            if (batch.getStatus() == com.example.configadmin.entity.BatchStatus.IMPORTING) {
+                return ToolResult.fail("导入正在执行中，请稍后查询结果。");
+            }
+            ctx.runner().runImport(id);
             return ToolResult.ok("已启动导入（批次 " + id + "），通过的文件将入库为草稿（未发布），进度与结果实时可见。")
                     .event("import_action", "batchId", id)
                     .event("import_action", "action", "import")
@@ -183,7 +191,7 @@ public class ImportTools {
         }
     }
 
-    /** 发布（写操作，需确认）。 */
+    /** 发布（写操作，需确认；后端直接执行）。 */
     @Component("startPublishTool")
     public static class StartPublish implements AiTool {
         @Override
@@ -197,7 +205,11 @@ public class ImportTools {
         public ToolResult run(ToolContext ctx, Map<String, Object> args) {
             Long id = ImportTools.batchId(ctx, args.get("batchId"));
             if (id == null) return ToolResult.fail("当前没有导入批次。");
-            ctx.imports().getBatch(id);
+            ImportBatch batch = ctx.imports().getBatch(id);
+            if (batch.getStatus() != com.example.configadmin.entity.BatchStatus.IMPORTED) {
+                return ToolResult.fail("只有完成导入的批次才能发布（当前状态：" + batch.getStatus() + "），请先执行检查与导入。");
+            }
+            ctx.runner().runPublish(id);
             return ToolResult.ok("已启动发布（批次 " + id + "），发布检查通过后配置数据即对外生效。")
                     .event("import_action", "batchId", id)
                     .event("import_action", "action", "publish")

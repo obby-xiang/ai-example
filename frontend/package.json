@@ -1,0 +1,24 @@
+{
+  "name": "config-admin-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "description": "AI 辅助动态配置管理系统 - 前端（Vue3 + GrapeCity SpreadJS 17.1.5）",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@grapecity/spread-excelio": "17.1.5",
+    "@grapecity/spread-sheets": "17.1.5",
+    "element-plus": "^2.9.0",
+    "pinia": "^2.3.0",
+    "vue": "^3.5.13",
+    "vue-router": "^4.5.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "vite": "^5.4.11"
+  }
+}

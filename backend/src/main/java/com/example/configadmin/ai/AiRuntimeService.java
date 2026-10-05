@@ -299,7 +299,7 @@ public class AiRuntimeService {
 
     private FunctionTool toFunctionTool(ToolDef d) {
         Map<String, Object> schema = new LinkedHashMap<>(d.jsonSchema());
-        return new FunctionTool(new FunctionTool.Function(d.description(), d.name(), schema));
+        return new FunctionTool(new FunctionTool.Function(d.description(), d.name(), schema, null));
     }
 
     private ChatCompletionMessage toolResultMsg(ChatCompletionMessage.ToolCall tc, String content) {

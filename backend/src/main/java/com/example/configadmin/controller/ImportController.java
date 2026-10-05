@@ -99,7 +99,7 @@ public class ImportController {
     }
 
     @GetMapping("/batches")
-    public R<List<Map<String, Object>>> list() {
+    public R<List<ProgressEvent>> list() {
         return R.ok(importService.list().stream().map(b -> {
             ProgressEvent e = importService.snapshot(b);
             e.getDetail().put("createdAt", b.getCreatedAt() == null ? "" : b.getCreatedAt().toString());

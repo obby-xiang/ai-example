@@ -43,7 +43,7 @@ public class ExportController {
     }
 
     @GetMapping("/tasks")
-    public R<List<Map<String, Object>>> list() {
+    public R<List<ProgressEvent>> list() {
         return R.ok(exportService.list().stream().map(t -> {
             ProgressEvent e = exportService.snapshot(t);
             e.getDetail().put("createdAt", t.getCreatedAt() == null ? "" : t.getCreatedAt().toString());

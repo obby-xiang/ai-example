@@ -383,6 +383,9 @@ public class ImportService {
     public void runCheck(Long batchId) {
         String topic = topic(batchId);
         ImportBatch batch = getBatch(batchId);
+        if (batch.getStatus() == BatchStatus.CHECKING) {
+            return; // 幂等：已在执行
+        }
         try {
             batch.setStatus(BatchStatus.CHECKING);
             batch.setProgress(0);
@@ -408,6 +411,9 @@ public class ImportService {
     public void runImport(Long batchId) {
         String topic = topic(batchId);
         ImportBatch batch = getBatch(batchId);
+        if (batch.getStatus() == BatchStatus.IMPORTING) {
+            return; // 幂等：已在执行
+        }
         try {
             batch.setStatus(BatchStatus.IMPORTING);
             batch.setProgress(0);
@@ -471,6 +477,9 @@ public class ImportService {
     public void runPublish(Long batchId) {
         String topic = topic(batchId);
         ImportBatch batch = getBatch(batchId);
+        if (batch.getStatus() == BatchStatus.PUBLISHING || batch.getStatus() == BatchStatus.PUBLISHED) {
+            return; // 幂等：已在执行或已发布
+        }
         try {
             batch.setStatus(BatchStatus.PUBLISHING);
             batch.setProgress(0);

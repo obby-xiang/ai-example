@@ -191,15 +191,21 @@ public class ConfigDataService {
     public ConfigRow saveRow(String defCode, RowDraft draft) {
         ConfigDef def = defService.getByCode(defCode);
         List<FieldDef> fields = defService.parseFields(def);
-        ValidationEngine.RowValidation rv = engine.validateAndNormalize(def, fields, draft.getData(),
+        Map<String, Object> input = new LinkedHashMap<>(draft.getData());
+        if (def.getLevel() != com.example.configadmin.entity.Level.GLOBAL) {
+            input.put("__scope__", draft.getScope());
+        }
+        ValidationEngine.RowValidation rv = engine.validateAndNormalize(def, fields, input,
                 buildRefValueSets(null), 1);
         if (rv.hasErrors()) {
             throw ApiException.badRequest("数据校验失败：" + rv.issues().get(0).getMessage());
         }
+        Map<String, Object> data = new LinkedHashMap<>(rv.normalized());
+        data.remove("__scope__");
         ConfigRow row = new ConfigRow();
         row.setDefCode(defCode);
         row.setScope(draft.getScope());
-        row.setDataJson(writeJson(rv.normalized()));
+        row.setDataJson(writeJson(data));
         row.setPublished(draft.isPublished());
         row.setBatchId(draft.getBatchId());
         return rowRepo.save(row);
@@ -215,13 +221,19 @@ public class ConfigDataService {
         }
         ConfigDef def = defService.getByCode(defCode);
         List<FieldDef> fields = defService.parseFields(def);
-        ValidationEngine.RowValidation rv = engine.validateAndNormalize(def, fields, draft.getData(),
+        Map<String, Object> input = new LinkedHashMap<>(draft.getData());
+        if (def.getLevel() != com.example.configadmin.entity.Level.GLOBAL) {
+            input.put("__scope__", draft.getScope());
+        }
+        ValidationEngine.RowValidation rv = engine.validateAndNormalize(def, fields, input,
                 buildRefValueSets(null), 1);
         if (rv.hasErrors()) {
             throw ApiException.badRequest("数据校验失败：" + rv.issues().get(0).getMessage());
         }
+        Map<String, Object> data = new LinkedHashMap<>(rv.normalized());
+        data.remove("__scope__");
         row.setScope(draft.getScope());
-        row.setDataJson(writeJson(rv.normalized()));
+        row.setDataJson(writeJson(data));
         return rowRepo.save(row);
     }
 
