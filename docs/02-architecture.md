@@ -29,9 +29,9 @@
 ### D1：AI Runtime 放后端，手动 Agent Loop（不用 ChatClient 高层封装）
 - **决策**：使用 Spring AI 1.1.8 的 `spring-ai-starter-model-openai`，注入自动配置好的 `OpenAiApi` Bean（`base-url=https://api.deepseek.com`、`completions-path=/chat/completions` 走 yml 配置），自研一个很薄的 Agent Loop（流式消费 + 工具分发 + 暂停/恢复）。
 - **理由**：① 需求要求 API Key 不出后端、工具混排（后端数据工具 + 前端 UI 工具）——纯前端 Runtime 做不到 Key 安全；② Spring AI 的 ChatClient 自动工具循环无法表达"FRONTEND 工具要暂停、等前端执行结果回灌再恢复"的语义，而 `OpenAiApi.chatCompletionStream` 已自动合并流式 tool_calls 分片，手动循环成本低、控制力强（业界类比 LangGraph checkpointer 模式）。
-- **DeepSeek 兼容性要点**（已核实 Spring AI v1.1.8 源码）：
-  - 回填 assistant 消息时 `reasoning_content` 必须为 null，否则 400；
-  - `parallel_tool_calls=false`（1.1.8 流式合并器单帧只支持单调用）；
+- **DeepSeek 兼容性要点**（已核实 Spring AI v1.1.8 源码 + 实测验证）：
+  - **`deepseek-flash` 是思考模式模型：回填 assistant 消息必须携带本轮 `reasoning_content`，缺失会 400**（报错原文：*The `reasoning_content` in the thinking mode must be passed back to the API*）。⚠ 这与 deepseek-chat/deepseek-reasoner 的旧规则（不可回传 reasoning_content）**相反**，是实测踩坑后修正的结论——实现中每轮流式消费时累积 reasoning 文本，回填时一并带上（超长截断 8000 字符）；
+  - `parallel_tool_calls=false`（1.1.8 流式合并器单帧只支持单调用；模型仍偶发多调用时只顺序处理第一个，回填也只含这一个）；
   - 模型名 `deepseek-flash` 直接传字符串；用 `max_tokens` 而非 `max_completion_tokens`；
   - 流式末帧 `stream_options.include_usage=true` 时 choices 为空、usage 非空，需判空。
 - 循环上限 8 轮；每轮串行执行工具；429/5xx 指数退避重试（≤3 次）；工具结果截断 4000 字符。
@@ -107,7 +107,7 @@ chat(sessionId, message, context) ──SSE──▶
 tool-result(sessionId, callId, result, context) ──SSE──▶ 恢复现场，回填 tool 消息，继续 loop
 ```
 - 取消：`/api/ai/cancel` 置标志，轮次边界生效；前端 AbortController 断开 SSE。
-- 回填 assistant 消息时 reasoningContent=null。
+- 回填 assistant 消息时携带本轮 reasoningContent（思考模式必需，见 D1）。
 
 ## 4. 前端设计
 
@@ -134,9 +134,12 @@ src/
 ## 5. 风险与对策
 | 风险 | 对策 |
 |---|---|
-| DeepSeek 返回 reasoning_content 导致回填 400 | 回填置 null（已在 Loop 中强制） |
-| 模型一次输出多个 tool_calls 触发合并器异常 | parallel_tool_calls=false + 只顺序处理 |
+| deepseek-flash 思考模式要求回填 reasoning_content（缺失 400，与旧模型规则相反） | 每轮累积 reasoning 并在回填 assistant 消息时携带（实测验证） |
+| 模型一次输出多个 tool_calls 触发合并器异常 | parallel_tool_calls=false + 只顺序处理第一个 |
 | 模型幻觉调用当前页面不可用工具 | 三道防线（过滤/提示词/执行端校验） |
+| AI 导航后立即恢复 Loop 时页面未就绪（工具按旧页面过滤） | navigate_to 工具等待 workspace 切换到目标页/步骤（≤3s）后再回灌（实测修复） |
+| SpreadJS 在隐藏容器（el-tabs 未激活页）中初始化后布局塌陷 | ResizeObserver 监听宿主尺寸变化自动 `refresh()`（实测修复） |
 | 作业重复提交 | RUNNING 存在即复用返回 + 按钮防重 |
+| 异步作业在事务提交前触发、执行线程读不到作业行 | 事务 afterCommit 后再提交执行（实测修复） |
 | 大结果集进 LLM 上下文 | 工具结果截断 + 列表摘要化（>50 项只给摘要） |
 | SpreadJS 无授权水印 | 演示接受；生产注入正式 License |
