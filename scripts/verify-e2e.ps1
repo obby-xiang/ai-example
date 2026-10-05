@@ -109,7 +109,7 @@ function Upload-File($path, $files) {
     $content = New-Object System.Net.Http.MultipartFormDataContent
     foreach ($f in $files) {
         $bytes = [IO.File]::ReadAllBytes($f)
-        $byteContent = New-Object System.Net.Http.ByteArrayContent($bytes)
+        $byteContent = New-Object System.Net.Http.ByteArrayContent -ArgumentList (,$bytes)
         $byteContent.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse('application/octet-stream')
         $content.Add($byteContent, 'files', [IO.Path]::GetFileName($f))
     }
@@ -157,6 +157,17 @@ New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 Say '============================================================'
 Say ' E2E 验证开始  base=' + $Base + '  tmp=' + $tmp
 Say '============================================================'
+
+# ---- 预清理：删除可能残留的 E2E_TEMP 配置（幂等重跑） ----
+try {
+    GetJson '/api/defs/E2E_TEMP' | Out-Null
+    foreach ($pub in @('true', 'false')) {
+        $rows = GetJson "/api/data/rows?defCode=E2E_TEMP&published=$pub&page=1&size=1000"
+        foreach ($r in $rows.rows) { DeleteJson ("/api/data/rows/" + $r.id) }
+    }
+    DeleteJson '/api/defs/E2E_TEMP'
+    Say '--- 预清理：已删除残留 E2E_TEMP ---'
+} catch { Say '--- 预清理：无残留 ---' }
 
 # ---------------- TC1 配置定义与种子数据 ----------------
 Say '--- TC1 配置定义列表与种子数据 ---'
@@ -318,9 +329,9 @@ try {
     # 用导出产物作为合法上传（闭环）：SERVER_PARAM 全量 + REGION_BILLING 全量 + PROJECT_QUOTA 全量
     foreach ($code in @('SERVER_PARAM', 'REGION_BILLING', 'PROJECT_QUOTA')) {
         $bytes = GetBytes "/api/export/tasks/$script:exportTask4/files/$code"
-        [IO.File]::WriteAllBytes("$tmp\up_$code.xlsx", $bytes)
+        [IO.File]::WriteAllBytes("$tmp\$code.xlsx", $bytes)
     }
-    $report = Upload-File "/api/import/batches/$script:batchA/files" @("$tmp\up_SERVER_PARAM.xlsx", "$tmp\up_REGION_BILLING.xlsx", "$tmp\up_PROJECT_QUOTA.xlsx")
+    $report = Upload-File "/api/import/batches/$script:batchA/files" @("$tmp\SERVER_PARAM.xlsx", "$tmp\REGION_BILLING.xlsx", "$tmp\PROJECT_QUOTA.xlsx")
     if ($report.matched.Count -ne 3) { throw "上传匹配 $($report.matched.Count)" }
     PostJson "/api/import/batches/$script:batchA/check" @{} | Out-Null
     $snap = Wait-Task "/api/import/batches/$script:batchA" @('CHECKED', 'FAILED')
@@ -396,8 +407,8 @@ Say '--- TC12 导入为草稿（不影响生效数据） ---'
 try {
     # 批次A 修复 SERVER_PARAM 为合法全量文件后导入（REGION_BILLING/PROJECT_QUOTA 已合法）
     $bytes = GetBytes "/api/export/tasks/$script:exportTask4/files/SERVER_PARAM"
-    [IO.File]::WriteAllBytes("$tmp\fix_SERVER_PARAM.xlsx", $bytes)
-    Upload-File "/api/import/batches/$script:batchA/files" @("$tmp\fix_SERVER_PARAM.xlsx") | Out-Null
+    [IO.File]::WriteAllBytes("$tmp\SERVER_PARAM.xlsx", $bytes)
+    Upload-File "/api/import/batches/$script:batchA/files" @("$tmp\SERVER_PARAM.xlsx") | Out-Null
     PostJson "/api/import/batches/$script:batchA/check" @{} | Out-Null
     Wait-Task "/api/import/batches/$script:batchA" @('CHECKED', 'FAILED') | Out-Null
     $before = GetJson '/api/defs/SERVER_PARAM'
@@ -462,7 +473,7 @@ try {
     $handler = {
         param($ev, $data)
         if ($ev -in @('delta', 'tool_start', 'tool_result', 'ui_event', 'done', 'error', 'reasoning')) {
-            $script:aiEvents.Add("$ev|" + ($data | ConvertTo-Json -Depth 6 -Compress))
+            $script:aiEvents.Add("$ev|" + ($data | ConvertTo-Json -Depth 6 -Compress)) | Out-Null
         }
     }
     # 15a 列出配置（工具 list_config_defs）
@@ -492,7 +503,7 @@ try {
     $handler = {
         param($ev, $data)
         if ($ev -in @('tool_start', 'tool_result', 'ui_event', 'done', 'error')) {
-            $script:aiEvents.Add("$ev|" + ($data | ConvertTo-Json -Depth 6 -Compress))
+            $script:aiEvents.Add("$ev|" + ($data | ConvertTo-Json -Depth 6 -Compress)) | Out-Null
         }
     }
     Read-Sse '/api/ai/chat' @{ sessionId = $script:aiSession
@@ -512,15 +523,15 @@ try {
     $handler = {
         param($ev, $data)
         if ($ev -in @('tool_start', 'tool_result', 'ui_event', 'done', 'error')) {
-            $script:aiEvents.Add("$ev|" + ($data | ConvertTo-Json -Depth 6 -Compress))
+            $script:aiEvents.Add("$ev|" + ($data | ConvertTo-Json -Depth 6 -Compress)) | Out-Null
         }
     }
     # 批次D 已发布——新建一个可发布场景：先用批次B（SERVER_EXTEND+SERVER_PARAM）合法文件导入
     $bytesSp = GetBytes "/api/export/tasks/$script:exportTask4/files/SERVER_PARAM"
-    [IO.File]::WriteAllBytes("$tmp\fixB_SERVER_PARAM.xlsx", $bytesSp)
+    [IO.File]::WriteAllBytes("$tmp\SERVER_PARAM.xlsx", $bytesSp)
     $bytesSe = GetBytes "/api/export/tasks/$script:exportTask4/files/SERVER_EXTEND"
-    [IO.File]::WriteAllBytes("$tmp\fixB_SERVER_EXTEND.xlsx", $bytesSe)
-    Upload-File "/api/import/batches/$script:batchB/files" @("$tmp\fixB_SERVER_PARAM.xlsx", "$tmp\fixB_SERVER_EXTEND.xlsx") | Out-Null
+    [IO.File]::WriteAllBytes("$tmp\SERVER_EXTEND.xlsx", $bytesSe)
+    Upload-File "/api/import/batches/$script:batchB/files" @("$tmp\SERVER_PARAM.xlsx", "$tmp\SERVER_EXTEND.xlsx") | Out-Null
     PostJson "/api/import/batches/$script:batchB/check" @{} | Out-Null
     Wait-Task "/api/import/batches/$script:batchB" @('CHECKED', 'FAILED') | Out-Null
     PostJson "/api/import/batches/$script:batchB/import" @{} | Out-Null
@@ -572,9 +583,9 @@ try {
     DeleteJson '/api/defs/E2E_TEMP'
     # 恢复 SERVER_PARAM 演示数据为 5 行（再走一轮导入发布）
     $bytes = GetBytes "/api/export/tasks/$script:exportTask4/files/SERVER_PARAM"
-    [IO.File]::WriteAllBytes("$tmp\restore.xlsx", $bytes)
+    [IO.File]::WriteAllBytes("$tmp\SERVER_PARAM.xlsx", $bytes)
     $b5 = PostJson '/api/import/batches' @{ name = 'E2E-恢复批次'; defCodes = @('SERVER_PARAM') }
-    Upload-File "/api/import/batches/$($b5.detail.id)/files" @("$tmp\restore.xlsx") | Out-Null
+    Upload-File "/api/import/batches/$($b5.detail.id)/files" @("$tmp\SERVER_PARAM.xlsx") | Out-Null
     PostJson "/api/import/batches/$($b5.detail.id)/check" @{} | Out-Null
     Wait-Task "/api/import/batches/$($b5.detail.id)" @('CHECKED', 'FAILED') | Out-Null
     PostJson "/api/import/batches/$($b5.detail.id)/import" @{} | Out-Null

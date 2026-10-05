@@ -33,6 +33,10 @@ spring:
   jackson:
     date-format: yyyy-MM-dd HH:mm:ss
     time-zone: GMT+8
+    # 关键：序列化时省略 null 字段。
+    # Spring AI OpenAiApi 经 Boot 的 ObjectMapper 输出 ChatCompletionRequest，
+    # 若携带 modalities/audio/store/service_tier 等 OpenAI 专属 null 字段，DeepSeek 会返回 400。
+    default-property-inclusion: non_null
 
   # ---------- Spring AI（OpenAI 兼容：DeepSeek）----------
   ai:

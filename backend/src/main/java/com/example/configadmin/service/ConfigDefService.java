@@ -199,9 +199,10 @@ public class ConfigDefService {
         for (String c : deps.keySet()) {
             indeg.put(c, 0);
         }
+        // 入度 = 该节点的（批次内）依赖数：X 依赖 D → indeg[X]++
         for (var e : deps.entrySet()) {
-            for (String d : e.getValue()) {
-                indeg.merge(d, 1, Integer::sum);
+            for (String ignored : e.getValue()) {
+                indeg.merge(e.getKey(), 1, Integer::sum);
             }
         }
         Queue<String> queue = new ArrayDeque<>();

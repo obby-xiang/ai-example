@@ -97,7 +97,7 @@ public class ExportTools {
                     : (Map<String, Object>) st.computeIfAbsent("conditions", k -> new LinkedHashMap<String, Object>());
             all.put(defCode, conds);
             ctx.updatePageState(PAGE, "conditions", all);
-            return ToolResult.ok("已设置 " + defCode + " 的查询条件：" + ctx.mapper().valueToTree(conds))
+            return ToolResult.ok("已设置 " + defCode + " 的查询条件：" + ctx.mapper().valueToTree(conds).toString())
                     .event("set_conditions", "defCode", defCode)
                     .event("set_conditions", "conditions", conds);
         }

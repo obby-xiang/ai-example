@@ -104,6 +104,18 @@ public class ExportService {
 
                 List<Map<String, Object>> rows = dataService.queryRows(defCode, conds, scope, true, null);
 
+                // 查询返回“信封行”（data 嵌套业务字段），导出需要扁平行（字段编码为键 + __scope__）
+                List<Map<String, Object>> flatRows = new ArrayList<>();
+                for (Map<String, Object> r : rows) {
+                    Map<String, Object> flat = new LinkedHashMap<>();
+                    Object d = r.get("data");
+                    if (d instanceof Map<?, ?> dm) {
+                        dm.forEach((k, v) -> flat.put(String.valueOf(k), v));
+                    }
+                    flat.put("__scope__", r.get("scope"));
+                    flatRows.add(flat);
+                }
+
                 // 行级进度（大导出场景可见推进；simulate-delay-ms 可调，0 关闭模拟）
                 int rowTotal = rows.size();
                 for (int k = 0; k < rowTotal; k++) {
@@ -117,7 +129,7 @@ public class ExportService {
                     }
                 }
 
-                var wb = excelService.buildExport(def, fields, rows);
+                var wb = excelService.buildExport(def, fields, flatRows);
                 Path file = dir.resolve(defCode + ".xlsx");
                 try (OutputStream out = Files.newOutputStream(file)) {
                     excelService.write(wb, out);

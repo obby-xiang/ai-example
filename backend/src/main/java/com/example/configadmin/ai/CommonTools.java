@@ -19,7 +19,7 @@ public class CommonTools {
 
         @Override
         public ToolResult run(ToolContext ctx, Map<String, Object> args) {
-            return ToolResult.ok("当前工作区状态：" + ctx.mapper().valueToTree(ctx.snapshot()));
+            return ToolResult.ok("当前工作区状态：" + ctx.mapper().valueToTree(ctx.snapshot()).toString());
         }
     }
 

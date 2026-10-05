@@ -2,6 +2,9 @@ import { defineStore } from 'pinia'
 import { useRoute, useRouter } from 'vue-router'
 import { api, sseRequest, downloadFile } from '../api'
 import { workspaceVersion, bumpWorkspace } from '../utils/workspace'
+import { useExportStore } from './exportTask'
+import { useImportStore } from './importTask'
+import { useDefsStore } from './defs'
 
 /** 会话 ID：浏览器页签内唯一（sessionStorage 特性），不持久化、不看历史。 */
 function getSessionId() {
@@ -30,27 +33,18 @@ export const useAiStore = defineStore('ai', {
       const route = useRoute()
       const page = String(route.name || 'export')
       const ctx = { page, workspaceVersion: workspaceVersion() }
-      ctx.export = { step: 1, selectedDefs: [], conditions: {}, taskId: null }
-      ctx.import = { step: 1, selectedDefs: [], batchId: null }
-      try {
-        // 延迟引入避免循环依赖
-        const { useExportStore } = require('@/stores/exportTask')
-        const { useImportStore } = require('@/stores/importTask')
-        const exportStore = useExportStore()
-        const importStore = useImportStore()
-        ctx.export = {
-          step: exportStore.step,
-          selectedDefs: exportStore.selectedDefs,
-          conditions: exportStore.conditions,
-          taskId: exportStore.task ? exportStore.task.id : null
-        }
-        ctx.import = {
-          step: importStore.step,
-          selectedDefs: importStore.selectedDefs,
-          batchId: importStore.batch ? importStore.batch.id : null
-        }
-      } catch (e) {
-        /* 忽略 */
+      const exportStore = useExportStore()
+      const importStore = useImportStore()
+      ctx.export = {
+        step: exportStore.step,
+        selectedDefs: exportStore.selectedDefs,
+        conditions: exportStore.conditions,
+        taskId: exportStore.task ? exportStore.task.id : null
+      }
+      ctx.import = {
+        step: importStore.step,
+        selectedDefs: importStore.selectedDefs,
+        batchId: importStore.batch ? importStore.batch.id : null
       }
       return ctx
     },
@@ -181,9 +175,6 @@ export const useAiStore = defineStore('ai', {
       const type = ev.type
       const router = useRouter()
       try {
-        const { useExportStore } = require('@/stores/exportTask')
-        const { useImportStore } = require('@/stores/importTask')
-        const { useDefsStore } = require('@/stores/defs')
         const exportStore = useExportStore()
         const importStore = useImportStore()
         const defsStore = useDefsStore()

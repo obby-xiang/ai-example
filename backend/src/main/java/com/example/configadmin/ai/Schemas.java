@@ -16,7 +16,11 @@ public final class Schemas {
         schema.put("type", "object");
         Map<String, Object> properties = new LinkedHashMap<>();
         for (Map<String, Object> p : props) {
-            properties.put((String) p.remove("__name__"), p);
+            String name = (String) p.get("__name__");
+            // 移除内部标记，避免泄漏进 JSON Schema（DeepSeek 严格校验：属性级 required 必须是数组）
+            p.remove("__name__");
+            p.remove("required");
+            properties.put(name, p);
         }
         schema.put("properties", properties);
         if (required != null && !required.isEmpty()) {

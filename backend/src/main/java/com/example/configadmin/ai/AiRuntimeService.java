@@ -181,7 +181,7 @@ public class AiRuntimeService {
                 }
             } catch (Exception e) {
                 log.warn("模型调用失败 session={}", s.getId(), e);
-                sendError(emitter, "模型调用失败：" + e.getMessage());
+                sendError(emitter, "模型调用失败：" + extractAiError(e));
                 return;
             }
 
@@ -331,7 +331,7 @@ public class AiRuntimeService {
         sb.append("你是「AI 辅助动态配置管理系统」的中文助手，界面左侧是业务工作区（任务向导），右侧是对话栏。\n");
         sb.append("当前页面：").append(pageLabel(page)).append("\n");
         sb.append("当前工作区状态快照（JSON，写操作前可调用 get_ui_state 查看最新）：\n");
-        sb.append(mapper.valueToTree(s.getContext())).append("\n\n");
+        sb.append(mapper.valueToTree(s.getContext()).toString()).append("\n\n");
         sb.append("当前页面可用工具（渐进式披露，只能使用这些）：\n");
         for (ToolDef t : tools) {
             sb.append("- ").append(t.name()).append("：").append(t.description())
@@ -380,8 +380,25 @@ public class AiRuntimeService {
 
     // ==================== SSE 发送 ====================
 
-    private boolean send(SseEmitter emitter, String event, Object data) {
-        try {
+    /** 从异常链中提取模型服务返回的原始错误详情（便于定位 4xx 具体原因）。 */
+    private String extractAiError(Throwable e) {
+        Throwable cause = e;
+        int depth = 0;
+        while (cause != null && depth < 10) {
+            if (cause instanceof org.springframework.web.reactive.function.client.WebClientResponseException wre) {
+                String body = wre.getResponseBodyAsString();
+                if (body != null && !body.isBlank()) {
+                    return "HTTP " + wre.getStatusCode().value() + " " + body;
+                }
+                return "HTTP " + wre.getStatusCode().value() + " " + wre.getStatusText();
+            }
+            cause = cause.getCause();
+            depth++;
+        }
+        return e.getMessage();
+    }
+
+    private boolean send(SseEmitter emitter, String event, Object data) {        try {
             emitter.send(SseEmitter.event().name(event).data(mapper.writeValueAsString(data)));
             return true;
         } catch (Exception e) {
