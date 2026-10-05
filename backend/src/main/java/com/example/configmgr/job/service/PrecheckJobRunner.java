@@ -173,6 +173,34 @@ public class PrecheckJobRunner {
                     }
                     if (cancelled) break;
 
+                    // 引用完整性校验：REFERENCE 字段的值必须存在于被引用配置的
+                    // 已发布数据或本任务暂存数据中（值级依赖，依赖排序之外的第二道检查）
+                    for (ConfigField f : def.getFields()) {
+                        if (f.getFieldType() != ConfigField.FieldType.REFERENCE || f.getRefDefCode() == null) {
+                            continue;
+                        }
+                        Set<String> validValues = loadValidRefValues(
+                                job.getTaskId(), f.getRefDefCode(), f.getRefFieldCode());
+                        for (int i = 0; i < rows.size(); i++) {
+                            Object v = rows.get(i).get(f.getCode());
+                            if (v == null || v.toString().isBlank()) {
+                                continue; // 空值由必填校验负责
+                            }
+                            if (!validValues.contains(v.toString())) {
+                                ValidationIssue issue = new ValidationIssue();
+                                issue.setJobId(job.getId());
+                                issue.setDefCode(defCode);
+                                issue.setFieldCode(f.getCode());
+                                issue.setRowIndex(i + 2);
+                                issue.setSeverity(ValidationIssue.Severity.ERROR);
+                                issue.setMessage("引用字段 [" + f.getLabel() + "] 的值 " + v
+                                        + " 在配置 " + f.getRefDefCode() + " 中不存在");
+                                issueRepository.save(issue);
+                                rowErrors++;
+                            }
+                        }
+                    }
+
                     totalErrors += rowErrors;
                     totalWarnings += rowWarnings;
 
@@ -225,6 +253,32 @@ public class PrecheckJobRunner {
             sb.append(v != null ? v.toString() : "");
         }
         return sb.toString();
+    }
+
+    /**
+     * 加载被引用配置的合法值集合：已发布数据 + 本任务暂存数据。
+     */
+    private Set<String> loadValidRefValues(Long taskId, String refDefCode, String refFieldCode) {
+        Set<String> values = new HashSet<>();
+        try {
+            for (ConfigDataRow r : dataRowRepository.findByDefCodeOrderByRowKey(refDefCode)) {
+                Map<String, Object> data = objectMapper.readValue(r.getDataJson(), new TypeReference<>() {});
+                Object v = data.get(refFieldCode);
+                if (v != null && !v.toString().isBlank()) {
+                    values.add(v.toString());
+                }
+            }
+            for (ConfigStagingRow s : stagingRowRepository.findByTaskIdAndDefCode(taskId, refDefCode)) {
+                Map<String, Object> data = objectMapper.readValue(s.getDataJson(), new TypeReference<>() {});
+                Object v = data.get(refFieldCode);
+                if (v != null && !v.toString().isBlank()) {
+                    values.add(v.toString());
+                }
+            }
+        } catch (Exception e) {
+            log.warn("加载引用值集合失败 refDef={}: {}", refDefCode, e.getMessage());
+        }
+        return values;
     }
 
     private void publishProgress(Job job, String defCode, int processed, int total) {

@@ -8,6 +8,7 @@ export const selectDefs = (id, defCodes) => request.post(`/tasks/${id}/select-de
 export const setCondition = (id, defCode, condition) =>
   request.put(`/tasks/${id}/items/${defCode}/condition`, { condition })
 export const goToStep = (id, step) => request.put(`/tasks/${id}/step`, { step })
+export const setImportMode = (id, mode) => request.put(`/tasks/${id}/import-mode`, { mode })
 export const getFiles = (id) => request.get(`/tasks/${id}/files`)
 export const downloadFile = (id, defCode) =>
   request.get(`/tasks/${id}/files/${defCode}`, { responseType: 'arraybuffer' })

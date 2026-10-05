@@ -67,6 +67,11 @@ public class TaskController {
         return ApiResponse.ok(taskService.goToStep(id, body.get("step")));
     }
 
+    @PutMapping("/{id}/import-mode")
+    public ApiResponse<Task> setImportMode(@PathVariable Long id, @RequestBody Map<String, String> body) {
+        return ApiResponse.ok(taskService.setImportMode(id, body.get("mode")));
+    }
+
     @GetMapping(value = "/{id}/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter taskEvents(@PathVariable Long id) {
         return taskSseService.subscribe(id);

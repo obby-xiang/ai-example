@@ -7,13 +7,16 @@ import com.example.configmgr.task.entity.TaskFile;
 import com.example.configmgr.task.repo.TaskRepository;
 import com.example.configmgr.task.repo.TaskItemRepository;
 import com.example.configmgr.task.repo.TaskFileRepository;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 @Slf4j
 @Service
@@ -24,6 +27,7 @@ public class TaskService {
     private final TaskItemRepository taskItemRepository;
     private final TaskFileRepository taskFileRepository;
     private final ApplicationEventPublisher eventPublisher;
+    private final ObjectMapper objectMapper;
 
     public List<Task> findAll() {
         return taskRepository.findAllOrdered();
@@ -99,6 +103,38 @@ public class TaskService {
         task.setCurrentStep(step);
         task = taskRepository.save(task);
         publishTaskChanged(task, "跳转到步骤: " + step);
+        return task;
+    }
+
+    /**
+     * 设置导入任务的导入模式：MERGE（增量合并）或 REPLACE（整体替换）。
+     */
+    @Transactional
+    public Task setImportMode(Long taskId, String mode) {
+        if (!"MERGE".equals(mode) && !"REPLACE".equals(mode)) {
+            throw new IllegalArgumentException("导入模式只支持 MERGE 或 REPLACE");
+        }
+        Task task = taskRepository.findById(taskId)
+                .orElseThrow(() -> ResourceNotFoundException.of("任务", taskId));
+
+        Map<String, Object> settings = new HashMap<>();
+        if (task.getSettingsJson() != null && !task.getSettingsJson().isBlank()) {
+            try {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> parsed = objectMapper.readValue(task.getSettingsJson(), Map.class);
+                settings.putAll(parsed);
+            } catch (Exception e) {
+                log.warn("任务 {} 设置解析失败，将重建: {}", taskId, e.getMessage());
+            }
+        }
+        settings.put("importMode", mode);
+        try {
+            task.setSettingsJson(objectMapper.writeValueAsString(settings));
+        } catch (Exception e) {
+            throw new IllegalStateException("任务设置序列化失败: " + e.getMessage(), e);
+        }
+        task = taskRepository.save(task);
+        publishTaskChanged(task, "设置导入模式: " + mode);
         return task;
     }
 

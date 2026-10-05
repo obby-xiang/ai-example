@@ -38,6 +38,10 @@ public class ConfigStagingRow {
     @Column(nullable = false, length = 16)
     private String status = "STAGED"; // STAGED/PUBLISHED/FAILED
 
+    /** 导入时刻对应已发布行的版本号；null 表示当时为新增行。用于发布时并发冲突检测 */
+    @Column(name = "base_version")
+    private Long baseVersion;
+
     @CreationTimestamp
     @Column(name = "created_at", updatable = false)
     private LocalDateTime createdAt;

@@ -1,7 +1,9 @@
 package com.example.configmgr.job.service;
 
 import com.example.configmgr.config.AppProperties;
+import com.example.configmgr.data.entity.ConfigDataRow;
 import com.example.configmgr.data.entity.ConfigStagingRow;
+import com.example.configmgr.data.repo.ConfigDataRowRepository;
 import com.example.configmgr.data.repo.ConfigStagingRowRepository;
 import com.example.configmgr.definition.entity.ConfigDefinition;
 import com.example.configmgr.definition.entity.ConfigField;
@@ -34,6 +36,7 @@ public class ImportJobRunner {
 
     private final DefinitionService definitionService;
     private final DependencyResolver dependencyResolver;
+    private final ConfigDataRowRepository dataRowRepository;
     private final ConfigStagingRowRepository stagingRowRepository;
     private final TaskItemRepository taskItemRepository;
     private final TaskFileRepository taskFileRepository;
@@ -112,6 +115,11 @@ public class ImportJobRunner {
                         sr.setScopeKey(scopeKey);
                         sr.setDataJson(objectMapper.writeValueAsString(row));
                         sr.setStatus("STAGED");
+                        // 记录导入时刻的已发布行版本号，供发布时做并发冲突检测（新增行记 null）
+                        sr.setBaseVersion(dataRowRepository
+                                .findRow(defCode, scopeType, scopeKey, rowKey)
+                                .map(ConfigDataRow::getVersion)
+                                .orElse(null));
                         stagingBatch.add(sr);
 
                         if (stagingBatch.size() >= appProperties.getJob().getBatchSize()) {

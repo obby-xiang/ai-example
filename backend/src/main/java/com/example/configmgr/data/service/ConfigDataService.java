@@ -26,15 +26,12 @@ public class ConfigDataService {
     private final ObjectMapper objectMapper;
 
     public List<ConfigDataRow> findAll(String defCode, String scopeType, String scopeKey) {
-        if (scopeKey != null && !scopeKey.isBlank()) {
-            return dataRowRepository.findByDefCodeAndScopeTypeAndScopeKeyOrderByRowKey(
-                    defCode, scopeType != null ? scopeType : "GLOBAL", scopeKey);
-        }
-        return dataRowRepository.findByDefCodeOrderByRowKey(defCode);
+        return dataRowRepository.findRowsInScope(defCode,
+                scopeType != null ? scopeType : "GLOBAL", scopeKey);
     }
 
     public Page<ConfigDataRow> findPaged(String defCode, String scopeType, String scopeKey, int page, int size) {
-        return dataRowRepository.findByDefCodeAndScopeTypeAndScopeKey(
+        return dataRowRepository.findRowsInScopePaged(
                 defCode,
                 scopeType != null ? scopeType : "GLOBAL",
                 scopeKey,
@@ -51,7 +48,7 @@ public class ConfigDataService {
                                String rowKey, Map<String, Object> data) throws Exception {
         String dataJson = objectMapper.writeValueAsString(data);
         Optional<ConfigDataRow> existing = dataRowRepository
-                .findByDefCodeAndScopeTypeAndScopeKeyAndRowKey(defCode, scopeType, scopeKey, rowKey);
+                .findRow(defCode, scopeType != null ? scopeType : "GLOBAL", scopeKey, rowKey);
 
         ConfigDataRow row = existing.orElseGet(ConfigDataRow::new);
         row.setDefCode(defCode);

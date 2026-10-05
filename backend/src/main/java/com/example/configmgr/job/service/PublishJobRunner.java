@@ -15,7 +15,9 @@ import com.example.configmgr.job.entity.ValidationIssue;
 import com.example.configmgr.job.repo.JobItemRepository;
 import com.example.configmgr.job.repo.JobRepository;
 import com.example.configmgr.job.repo.ValidationIssueRepository;
+import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.repo.TaskItemRepository;
+import com.example.configmgr.task.repo.TaskRepository;
 import com.example.configmgr.task.service.TaskSseService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -37,6 +39,7 @@ public class PublishJobRunner {
     private final ConfigDataRowRepository dataRowRepository;
     private final ConfigStagingRowRepository stagingRowRepository;
     private final TaskItemRepository taskItemRepository;
+    private final TaskRepository taskRepository;
     private final JobRepository jobRepository;
     private final JobItemRepository jobItemRepository;
     private final ValidationIssueRepository issueRepository;
@@ -52,6 +55,9 @@ public class PublishJobRunner {
         jobRepository.save(job);
 
         issueRepository.deleteByJobId(job.getId());
+
+        // 导入模式：MERGE=增量合并（仅 upsert），REPLACE=整体替换（暂存范围外已发布行删除）
+        boolean replaceMode = isReplaceMode(job.getTaskId());
 
         boolean cancelled = false;
         try {
@@ -77,8 +83,6 @@ public class PublishJobRunner {
 
                 try {
                     ConfigDefinition def = definitionService.findByCode(defCode);
-                    List<ConfigField> keyFields = def.getFields().stream()
-                            .filter(ConfigField::isKey).toList();
                     String scopeType = def.getLevel() == ConfigDefinition.ConfigLevel.GLOBAL ? "GLOBAL"
                             : def.getLevel() == ConfigDefinition.ConfigLevel.REGION ? "REGION" : "PROJECT";
 
@@ -87,15 +91,38 @@ public class PublishJobRunner {
 
                     ji.setTotal(stagingRows.size());
 
+                    // REPLACE 模式：删除受影响范围内、暂存区之外的行（暂存行稍后 upsert）
+                    if (replaceMode) {
+                        int deleted = deleteOutOfStaging(defCode, scopeType, stagingRows);
+                        log.info("REPLACE 模式：{} 删除范围外已发布行 {} 行", defCode, deleted);
+                    }
+
                     int processed = 0;
                     for (ConfigStagingRow sr : stagingRows) {
                         Map<String, Object> data = objectMapper.readValue(sr.getDataJson(), new TypeReference<>() {});
 
-                        // Upsert into live table
+                        // 并发冲突检测：导入时刻快照的 baseVersion 与当前版本不一致则跳过
                         Optional<ConfigDataRow> existing = dataRowRepository
-                                .findByDefCodeAndScopeTypeAndScopeKeyAndRowKey(
-                                        defCode, sr.getScopeType(),
-                                        sr.getScopeKey(), sr.getRowKey());
+                                .findRow(defCode, sr.getScopeType(), sr.getScopeKey(), sr.getRowKey());
+                        if (hasConflict(sr, existing)) {
+                            ValidationIssue issue = new ValidationIssue();
+                            issue.setJobId(job.getId());
+                            issue.setDefCode(defCode);
+                            issue.setRowKey(sr.getRowKey());
+                            issue.setSeverity(ValidationIssue.Severity.ERROR);
+                            issue.setMessage("发布冲突：行 " + sr.getRowKey()
+                                    + " 在导入后被其他操作修改（快照版本 " + sr.getBaseVersion()
+                                    + "，当前版本 " + existing.map(ConfigDataRow::getVersion).orElse(null)
+                                    + "），请重新导入后再发布");
+                            issueRepository.save(issue);
+                            totalErrors++;
+                            sr.setStatus("FAILED");
+                            stagingRowRepository.save(sr);
+                            processed++;
+                            continue;
+                        }
+
+                        // Upsert into live table
                         ConfigDataRow liveRow = existing.orElseGet(ConfigDataRow::new);
                         liveRow.setDefCode(defCode);
                         liveRow.setScopeType(sr.getScopeType());
@@ -162,6 +189,58 @@ public class PublishJobRunner {
                     "jobId", job.getId(), "jobType", "PUBLISH",
                     "status", job.getStatus(), "errors", job.getErrorCount()));
         }
+    }
+
+    /**
+     * 冲突判定：
+     * - 暂存行有快照版本（当时是更新）：当前行不存在或版本不一致 → 冲突
+     * - 暂存行无快照版本（当时是新增）：当前行已存在 → 冲突（期间被他人创建）
+     */
+    private boolean hasConflict(ConfigStagingRow sr, Optional<ConfigDataRow> existing) {
+        if (sr.getBaseVersion() != null) {
+            return existing.isEmpty() || !existing.get().getVersion().equals(sr.getBaseVersion());
+        }
+        return existing.isPresent();
+    }
+
+    private int deleteOutOfStaging(String defCode, String scopeType, List<ConfigStagingRow> stagingRows) {
+        Set<String> stagedKeys = new HashSet<>();
+        Set<String> scopeKeys = new HashSet<>();
+        for (ConfigStagingRow sr : stagingRows) {
+            stagedKeys.add(sr.getRowKey());
+            scopeKeys.add(sr.getScopeKey());
+        }
+        // GLOBAL 只有一个范围（scopeKey=null）
+        if (scopeKeys.size() == 1 && scopeKeys.contains(null)) {
+            scopeKeys = new HashSet<>(List.of((String) null));
+        }
+
+        int deleted = 0;
+        for (String sk : scopeKeys) {
+            List<ConfigDataRow> live = dataRowRepository.findRowsInScope(defCode, scopeType, sk);
+            for (ConfigDataRow row : live) {
+                if (!stagedKeys.contains(row.getRowKey())) {
+                    dataRowRepository.delete(row);
+                    deleted++;
+                }
+            }
+        }
+        return deleted;
+    }
+
+    private boolean isReplaceMode(Long taskId) {
+        return taskRepository.findById(taskId)
+                .map(t -> {
+                    String settings = t.getSettingsJson();
+                    if (settings == null || settings.isBlank()) return false;
+                    try {
+                        return "REPLACE".equalsIgnoreCase(
+                                objectMapper.readTree(settings).path("importMode").asText("MERGE"));
+                    } catch (Exception e) {
+                        return false;
+                    }
+                })
+                .orElse(false);
     }
 
     private void publishProgress(Job job, String defCode, int processed, int total) {

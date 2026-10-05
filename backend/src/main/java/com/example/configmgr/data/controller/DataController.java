@@ -27,7 +27,7 @@ public class DataController {
                                                    @RequestParam(required = false) String scopeKey,
                                                    @RequestParam(defaultValue = "0") int page,
                                                    @RequestParam(defaultValue = "50") int size) {
-        return ApiResponse.ok(dataRowRepository.findByDefCodeAndScopeTypeAndScopeKey(
+        return ApiResponse.ok(dataRowRepository.findRowsInScopePaged(
                 defCode, scopeType != null ? scopeType : "GLOBAL", scopeKey,
                 org.springframework.data.domain.PageRequest.of(page, size)));
     }

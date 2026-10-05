@@ -27,13 +27,29 @@
     </el-table>
 
     <!-- File upload section -->
-    <div class="section-title" style="margin-top:24px">2. 上传配置文件</div>
+    <div class="section-title" style="margin-top:24px">2. 导入模式</div>
+    <el-radio-group v-model="importMode" @change="handleModeChange">
+      <el-radio-button value="MERGE">
+        增量合并
+        <el-tooltip content="只新增/更新文件中的行，不影响其他已发布数据" placement="top">
+          <el-icon style="margin-left:4px"><QuestionFilled /></el-icon>
+        </el-tooltip>
+      </el-radio-button>
+      <el-radio-button value="REPLACE">
+        整体替换
+        <el-tooltip content="以文件内容为准，删除该配置项受影响范围内不在文件中的已发布数据" placement="top">
+          <el-icon style="margin-left:4px;color:#e6a23c"><WarningFilled /></el-icon>
+        </el-tooltip>
+      </el-radio-button>
+    </el-radio-group>
+
+    <div class="section-title" style="margin-top:24px">3. 上传配置文件</div>
     <div class="upload-toolbar">
       <el-button size="small" @click="downloadTemplates" :disabled="selectedCodes.length === 0">
         <el-icon><Download /></el-icon> 下载模板（{{ selectedCodes.length }} 个）
       </el-button>
       <el-upload ref="uploadRef" :auto-upload="false" :on-change="handleFileChange" :show-file-list="false" accept=".xlsx,.zip" multiple>
-        <el-button size="small"><el-icon><Upload /></el-icon> 批量上传文件</el-button>
+        <el-button size="small"><el-icon><Upload /></el-icon> 批量上传文件（xlsx / zip）</el-button>
       </el-upload>
     </div>
 
@@ -73,10 +89,10 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { listDefinitions } from '@/api/definitions.js'
-import { downloadTemplates as apiDownloadTemplates, uploadFile, getFiles } from '@/api/tasks.js'
+import { downloadTemplates as apiDownloadTemplates, uploadFile, getFiles, setImportMode } from '@/api/tasks.js'
 import { useTaskStore } from '@/stores/task.js'
 import { ElMessage } from 'element-plus'
-import { Download, Upload, ArrowRight } from '@element-plus/icons-vue'
+import { Download, Upload, ArrowRight, QuestionFilled, WarningFilled } from '@element-plus/icons-vue'
 import SpreadJSEditor from '@/components/SpreadJSEditor/SpreadJSEditor.vue'
 
 const props = defineProps({ task: Object })
@@ -91,6 +107,19 @@ const fileMap = ref({})   // defCode -> {fileName}
 const editorVisible = ref(false)
 const editorRow = ref(null)
 const saving = ref(false)
+const importMode = ref('MERGE')
+
+async function handleModeChange(mode) {
+  if (!props.task?.id) return
+  try {
+    const res = await setImportMode(props.task.id, mode)
+    if (res.data?.data) {
+      ElMessage.success(`导入模式已切换为：${mode === 'MERGE' ? '增量合并' : '整体替换'}`)
+    }
+  } catch (e) {
+    ElMessage.error('设置导入模式失败: ' + (e.response?.data?.message || e.message))
+  }
+}
 
 const filteredDefs = computed(() => defs.value.filter(d => {
   if (levelFilter.value && d.level !== levelFilter.value) return false
@@ -104,6 +133,14 @@ const fileRows = computed(() => selectedCodes.value.map(code => {
 }))
 
 onMounted(async () => {
+  // 恢复导入模式
+  if (props.task?.settingsJson) {
+    try {
+      const settings = JSON.parse(props.task.settingsJson)
+      if (settings.importMode) importMode.value = settings.importMode
+    } catch { /* ignore */ }
+  }
+
   const [defRes, fileRes] = await Promise.all([
     listDefinitions(),
     props.task?.id ? getFiles(props.task.id) : Promise.resolve({ data: { data: [] } })
