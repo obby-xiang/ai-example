@@ -33,6 +33,7 @@
                     🔧 工具 {{ t.name }}
                     <el-tag v-if="t.status === 'ok'" type="success" size="small">成功</el-tag>
                     <el-tag v-else-if="t.status === 'fail'" type="danger" size="small">失败</el-tag>
+                    <el-tag v-else-if="t.status === 'pending'" type="warning" size="small">未执行</el-tag>
                     <el-tag v-else type="info" size="small">执行中</el-tag>
                   </span>
                 </template>

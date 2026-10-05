@@ -5,14 +5,14 @@
         <span style="font-weight: 600">快速实施任务（历史任务持久化存储）</span>
         <el-button size="small" type="primary" @click="router.push('/export')">新建导出任务</el-button>
         <el-button size="small" type="success" @click="router.push('/import')">新建导入任务</el-button>
-        <el-select v-model="typeFilter" size="small" style="width: 130px" @change="load">
+        <el-select v-model="typeFilter" size="small" style="width: 130px" @change="onFilterChange">
           <el-option label="全部类型" value="" />
           <el-option label="导出配置" value="EXPORT" />
           <el-option label="导入配置" value="IMPORT" />
         </el-select>
         <div style="flex: 1"></div>
         <el-button size="small" @click="load" :loading="loading">刷新</el-button>
-        <el-tag size="small" type="info">共 {{ tasks.length }} 个任务</el-tag>
+        <el-tag size="small" type="info">共 {{ total }} 个任务</el-tag>
       </div>
 
       <el-table :data="tasks" size="small" border v-loading="loading" @row-click="openTask" class="task-table">
@@ -55,6 +55,12 @@
           </template>
         </el-table-column>
       </el-table>
+      <div class="pager">
+        <el-pagination v-model:current-page="page" v-model:page-size="size"
+                       :total="total" :page-sizes="[10, 20, 50, 100]"
+                       layout="total, sizes, prev, pager, next, jumper" small
+                       @current-change="load" @size-change="onSizeChange" />
+      </div>
       <div class="text-muted" style="margin-top: 8px">
         说明：任务在创建时即持久化入库（导出任务在向导第 2 步“开始导出”时创建，导入任务在向导第 1 步“创建/复用导入批次”时创建）；
         运行中任务每 4 秒自动刷新（状态与进度已落库，刷新页面不丢失）；点击行或“查看”可跳转对应向导恢复该任务。
@@ -77,6 +83,9 @@ const importStore = useImportStore()
 const tasks = ref([])
 const typeFilter = ref('')
 const loading = ref(false)
+const total = ref(0)
+const page = ref(1)
+const size = ref(20)
 let timer = null
 
 const STATUS_LABEL = {
@@ -100,11 +109,24 @@ function fmtTime(t) {
 async function load() {
   loading.value = true
   try {
-    const q = typeFilter.value ? `?type=${typeFilter.value}` : ''
-    tasks.value = await api.get(`/api/tasks${q}`)
+    const q = new URLSearchParams({ page: page.value, size: size.value })
+    if (typeFilter.value) q.set('type', typeFilter.value)
+    const data = await api.get(`/api/tasks?${q.toString()}`)
+    tasks.value = data.rows || []
+    total.value = data.total || 0
   } finally {
     loading.value = false
   }
+}
+
+function onFilterChange() {
+  page.value = 1
+  load()
+}
+
+function onSizeChange() {
+  page.value = 1
+  load()
 }
 
 /** 查看/恢复任务：跳转对应向导并恢复该任务视图（运行中任务自动订阅进度）。 */
@@ -149,5 +171,10 @@ onBeforeUnmount(() => {
 }
 .task-table :deep(.el-table__row) {
   cursor: pointer;
+}
+.pager {
+  margin-top: 12px;
+  display: flex;
+  justify-content: flex-end;
 }
 </style>

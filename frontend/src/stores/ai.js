@@ -114,6 +114,34 @@ export const useAiStore = defineStore('ai', {
       this.messages = []
     },
 
+    /**
+     * 刷新恢复：按页签会话（sessionStorage 中的 sessionId）从后端恢复对话历史。
+     * 后端会话为内存态：会话仍在则完整恢复（含工具卡片）；后端重启后返回空列表，自动降级为新会话。
+     */
+    async restoreHistory() {
+      if (this.messages.length) return
+      try {
+        const history = await api.get(`/api/ai/history?sessionId=${this.sessionId}`)
+        if (!history || !history.length) return
+        this.messages = history.map(h => ({
+          id: ++seq,
+          role: h.role,
+          content: h.content || '',
+          reasoning: '',
+          tools: (h.tools || []).map(t => ({
+            name: t.name,
+            args: t.args || {},
+            status: t.status || 'ok',
+            summary: t.summary || ''
+          })),
+          confirm: null,
+          done: true
+        }))
+      } catch (e) {
+        /* 后端不可用或会话已过期：保持新会话 */
+      }
+    },
+
     /** 解析后端 SSE 事件流并更新当前 assistant 消息。 */
     async streamChat(url, body, assistantMsg, signal) {
       await sseRequest(url, {

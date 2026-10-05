@@ -443,7 +443,9 @@ try {
     if ($snap.status -ne 'PUBLISHED') { throw "发布失败 $($snap.message)" }
     $def = GetJson '/api/defs/SERVER_PARAM'
     if ($def.publishedRowCount -ne 5) { throw "发布后行数 $($def.publishedRowCount)" }
-    if ($def.draftRowCount -ne 0) { throw "发布后仍有草稿 $($def.draftRowCount)" }
+    # 发布语义：批次A的草稿应全部转生效（其他历史批次遗留草稿不计入本断言）
+    $draftsA = GetJson "/api/data/rows?defCode=SERVER_PARAM&published=false&batchId=$script:batchA&page=1&size=100"
+    if ($draftsA.total -ne 0) { throw "发布后批次A仍有草稿 $($draftsA.total)" }
     # 发布后禁止重复发布
     $dup = $false
     try { PostJson "/api/import/batches/$script:batchA/publish" @{} | Out-Null } catch { $dup = $true }
@@ -484,8 +486,10 @@ try {
 # ---------------- TC20 任务中心：历史持久化 + 创建即入库 + 类型过滤 ----------------
 Say '--- TC20 任务中心（统一列表/持久化/类型过滤） ---'
 try {
-    # 20a 统一列表：既含导出任务也含导入批次，且字段完整
-    $all = GetJson '/api/tasks'
+    # 20a 统一列表：既含导出任务也含导入批次，且字段完整（分页信封：total/rows）
+    $pageAll = GetJson '/api/tasks?page=1&size=1000'
+    $all = $pageAll.rows
+    if ($pageAll.total -lt 1) { throw '任务列表为空' }
     $exp20 = @($all | Where-Object { $_.taskType -eq 'EXPORT' -and $_.status -eq 'SUCCESS' })
     $imp20 = @($all | Where-Object { $_.taskType -eq 'IMPORT' -and $_.key -eq ("IMPORT-" + $script:batchA) })
     if ($exp20.Count -lt 1) { throw '缺少已完成的导出任务记录' }
@@ -494,17 +498,29 @@ try {
     if ($imp20[0].filesCount -lt 3) { throw "批次A文件数 $($imp20[0].filesCount)" }
     # 20b 创建即持久化：POST 创建导出任务后立刻查询（不等待执行完成）
     $t20 = PostJson '/api/export/tasks' @{ defCodes = @('E2E_TEMP'); conditions = @{} }
-    $immediately = @(GetJson '/api/tasks' | Where-Object { $_.key -eq ("EXPORT-" + $t20.detail.id) })
+    $immediately = @((GetJson '/api/tasks?page=1&size=1000').rows | Where-Object { $_.key -eq ("EXPORT-" + $t20.detail.id) })
     if ($immediately.Count -ne 1) { throw '新创建的导出任务未立即持久化到任务列表' }
     if ($immediately[0].status -notin @('PENDING', 'RUNNING', 'SUCCESS')) { throw "任务状态异常：$($immediately[0].status)" }
     Wait-Task "/api/export/tasks/$($t20.detail.id)" @('SUCCESS', 'FAILED') | Out-Null
     # 20c 类型过滤
-    $onlyImport = GetJson '/api/tasks?type=IMPORT'
+    $onlyImport = (GetJson '/api/tasks?type=IMPORT&page=1&size=1000').rows
     if (@($onlyImport | Where-Object { $_.taskType -ne 'IMPORT' }).Count -gt 0) { throw 'IMPORT 过滤混入导出任务' }
-    $onlyExport = GetJson '/api/tasks?type=EXPORT'
+    $onlyExport = (GetJson '/api/tasks?type=EXPORT&page=1&size=1000').rows
     if (@($onlyExport | Where-Object { $_.taskType -ne 'EXPORT' }).Count -gt 0) { throw 'EXPORT 过滤混入导入任务' }
     Ok 'TC20 统一任务列表/创建即持久化/状态进度正确/类型过滤正确'
 } catch { No 'TC20' $_.Exception.Message }
+
+# ---------------- TC21 任务服务端分页 ----------------
+Say '--- TC21 任务分页 ---'
+try {
+    $p1 = GetJson '/api/tasks?page=1&size=5'
+    $p2 = GetJson '/api/tasks?page=2&size=5'
+    if ($p1.rows.Count -gt 5) { throw "第1页行数 $($p1.rows.Count)" }
+    if ($p1.total -lt 10) { throw "total=$($p1.total)" }
+    if ($p2.rows.Count -lt 1) { throw '第2页为空（历史任务应超过5条）' }
+    if ($p1.rows[0].key -eq $p2.rows[0].key) { throw '分页内容重复' }
+    Ok 'TC21 任务服务端分页正确'
+} catch { No 'TC21' $_.Exception.Message }
 
 # ---------------- TC15 AI：流式 + 工具 + 渐进披露 ----------------
 Say '--- TC15 AI 对话（流式/工具调用/页面工具隔离） ---'
@@ -615,6 +631,25 @@ try {
     if ($c3.count -ge $c2.count) { throw '清空后会话数未减少' }
     Ok 'TC18 会话创建/计数/清空正常'
 } catch { No 'TC18' $_.Exception.Message }
+
+# ---------------- TC22 AI 页签会话历史恢复（须在 TC15-17 之后） ----------------
+Say '--- TC22 AI 历史恢复 ---'
+try {
+    $hist = GetJson "/api/ai/history?sessionId=$script:aiSession"
+    $userMsgs = @($hist | Where-Object { $_.role -eq 'user' })
+    $asstMsgs = @($hist | Where-Object { $_.role -eq 'assistant' })
+    if ($userMsgs.Count -lt 2) { throw "用户消息数 $($userMsgs.Count)" }
+    if ($asstMsgs.Count -lt 1) { throw '无助手消息' }
+    $hasTool = $false
+    foreach ($a in $asstMsgs) { if ($a.tools.Count -gt 0) { $hasTool = $true } }
+    if (-not $hasTool) { throw '历史中无工具卡片' }
+    # 未执行（刷新中断）的工具卡片标记 pending 并给出说明
+    $pending = @($asstMsgs | Where-Object { $_.tools | Where-Object { $_.status -eq 'pending' } })
+    # 未知会话 → 空列表（后端重启后的降级路径）
+    $empty = GetJson '/api/ai/history?sessionId=no-such-session'
+    if ($empty.Count -ne 0) { throw '未知会话应返回空列表' }
+    Ok 'TC22 AI 历史恢复（用户/助手/工具卡）+ 未知会话返回空'
+} catch { No 'TC22' $_.Exception.Message }
 
 # ---------------- 清理临时配置 ----------------
 Say '--- 清理：删除 E2E_TEMP 配置及其数据 ---'

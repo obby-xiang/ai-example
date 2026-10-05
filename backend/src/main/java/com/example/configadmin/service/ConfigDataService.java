@@ -44,7 +44,10 @@ public class ConfigDataService {
         List<FieldDef> fields = defService.parseFields(def);
         List<ConfigRow> rows;
         if (!published && batchId != null) {
-            rows = rowRepo.findByDefCodeAndBatchId(defCode, batchId);
+            // 批次草稿：仅返回未发布行（发布后批次行已转生效，不再属于草稿预览）
+            rows = rowRepo.findByDefCodeAndBatchId(defCode, batchId).stream()
+                    .filter(r -> !r.isPublished())
+                    .toList();
         } else {
             rows = rowRepo.findByDefCodeAndPublished(defCode, published);
         }

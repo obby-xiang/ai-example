@@ -2,6 +2,7 @@ html, body, #app {
   height: 100%;
   margin: 0;
   padding: 0;
+  overflow: hidden;
 }
 
 body {
@@ -9,14 +10,29 @@ body {
   background: #f5f7fa;
 }
 
+/* ===== 整体骨架：顶部导航固定 + 左工作区独立滚动 + 右 AI 栏固定 ===== */
+.app-shell {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
 .app-header {
+  flex: 0 0 56px;
   display: flex;
   align-items: center;
   gap: 24px;
-  height: 56px;
   background: linear-gradient(90deg, #1f3a5f, #2f5d8a);
   color: #fff;
   padding: 0 20px;
+  z-index: 100;
+}
+
+.app-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
 }
 
 .app-header .logo {
@@ -50,11 +66,16 @@ body {
 }
 
 .workspace {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
   padding: 16px;
-  overflow: auto;
 }
 
 .ai-side {
+  flex: 0 0 400px;
+  width: 400px;
+  min-height: 0;
   border-left: 1px solid #e4e7ed;
   background: #fff;
   display: flex;

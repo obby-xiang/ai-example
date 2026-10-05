@@ -31,9 +31,11 @@ public class TaskController {
         this.importService = importService;
     }
 
-    /** 统一任务列表（按创建时间倒序）；type 可选 EXPORT/IMPORT 过滤。 */
+    /** 统一任务列表（按创建时间倒序，服务端分页）；type 可选 EXPORT/IMPORT 过滤。 */
     @GetMapping
-    public R<List<TaskSummary>> list(@RequestParam(required = false) String type) {
+    public R<java.util.Map<String, Object>> list(@RequestParam(required = false) String type,
+                                                 @RequestParam(defaultValue = "1") int page,
+                                                 @RequestParam(defaultValue = "20") int size) {
         List<TaskSummary> all = new ArrayList<>();
         if (type == null || type.isBlank() || "EXPORT".equalsIgnoreCase(type)) {
             exportService.list().forEach(t -> all.add(toSummary(t)));
@@ -43,7 +45,16 @@ public class TaskController {
         }
         all.sort(Comparator.comparing(TaskSummary::createdAt,
                 Comparator.nullsLast(Comparator.reverseOrder())));
-        return R.ok(all);
+
+        int total = all.size();
+        int from = Math.min((page - 1) * size, total);
+        int to = Math.min(from + size, total);
+        java.util.Map<String, Object> res = new java.util.LinkedHashMap<>();
+        res.put("total", total);
+        res.put("page", page);
+        res.put("size", size);
+        res.put("rows", all.subList(from, to));
+        return R.ok(res);
     }
 
     private TaskSummary toSummary(ExportTask t) {

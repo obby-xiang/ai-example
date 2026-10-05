@@ -38,6 +38,14 @@ public class AiSessionStore {
         return s;
     }
 
+    /** 静默读取（无则返回 null）：供刷新页面恢复历史使用。 */
+    public AiSession getQuiet(String sessionId) {
+        if (sessionId == null || sessionId.isBlank()) {
+            return null;
+        }
+        return sessions.get(sessionId);
+    }
+
     public void remove(String sessionId) {
         sessions.remove(sessionId);
     }

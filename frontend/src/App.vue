@@ -1,6 +1,6 @@
 <template>
-  <el-container style="height: 100vh">
-    <el-header class="app-header" height="56px">
+  <div class="app-shell">
+    <header class="app-header">
       <span class="logo">⚙ AI 辅助动态配置管理系统</span>
       <div class="nav">
         <span v-for="item in navItems" :key="item.path"
@@ -9,16 +9,16 @@
       </div>
       <div style="flex: 1"></div>
       <span class="text-muted" style="color: #cfe0f3">{{ backendInfo }}</span>
-    </el-header>
-    <el-container>
-      <el-main class="workspace">
+    </header>
+    <div class="app-body">
+      <main class="workspace">
         <router-view />
-      </el-main>
-      <el-aside class="ai-side" width="400px">
+      </main>
+      <aside class="ai-side">
         <AiPanel />
-      </el-aside>
-    </el-container>
-  </el-container>
+      </aside>
+    </div>
+  </div>
 </template>
 
 <script setup>
@@ -27,10 +27,12 @@ import { useRoute, useRouter } from 'vue-router'
 import AiPanel from './components/AiPanel.vue'
 import { api } from './api'
 import { useDefsStore } from './stores/defs'
+import { useAiStore } from './stores/ai'
 
 const route = useRoute()
 const router = useRouter()
 const defsStore = useDefsStore()
+const aiStore = useAiStore()
 const backendInfo = ref('')
 
 const navItems = [
@@ -49,5 +51,7 @@ onMounted(async () => {
   } catch (e) {
     backendInfo.value = '后端未连接'
   }
+  // 刷新恢复：按页签会话恢复对话历史（后端内存会话存在则恢复，否则自动降级为新会话）
+  aiStore.restoreHistory()
 })
 </script>
