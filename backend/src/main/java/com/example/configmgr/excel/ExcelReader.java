@@ -73,13 +73,15 @@ public class ExcelReader {
         if (meta == null) return null;
         Row row = meta.getRow(1); // row 0 = headers, row 1 = values
         if (row == null) return null;
-        List<String> codes = new ArrayList<>();
         DataFormatter fmt = new DataFormatter();
+        // 模板第 0 列是 def_code 元信息列（row0 标签为 "def_code"），跳过以保证与数据列对齐
+        Row labelRow = meta.getRow(0);
+        boolean firstIsDefCode = labelRow != null
+                && "def_code".equals(fmt.formatCellValue(labelRow.getCell(0)).trim());
+        List<String> codes = new ArrayList<>();
         for (int c = 0; c < row.getLastCellNum(); c++) {
-            String v = fmt.formatCellValue(row.getCell(c)).trim();
-            // 模板第 0 列是 "def_code" 元信息，跳过以保证与数据列对齐
-            if (c == 0 && "def_code".equals(v)) continue;
-            codes.add(v);
+            if (c == 0 && firstIsDefCode) continue;
+            codes.add(fmt.formatCellValue(row.getCell(c)).trim());
         }
         return codes;
     }

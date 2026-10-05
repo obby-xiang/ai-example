@@ -10,7 +10,6 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
-import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -24,12 +23,9 @@ public class JobService {
 
     private final JobRepository jobRepository;
     private final ValidationIssueRepository issueRepository;
-    private final ExportJobRunner exportJobRunner;
-    private final PrecheckJobRunner precheckJobRunner;
-    private final ImportJobRunner importJobRunner;
-    private final PublishJobRunner publishJobRunner;
     private final TaskSseService taskSseService;
     private final JobCancellationRegistry cancellationRegistry;
+    private final AsyncJobExecutor asyncJobExecutor;
 
     @Transactional
     public Job createAndStart(Long taskId, Job.JobType jobType) {
@@ -39,25 +35,8 @@ public class JobService {
         job.setStatus(Job.JobStatus.PENDING);
         job = jobRepository.save(job);
         cancellationRegistry.register(job.getId());
-        runAsync(job);
+        asyncJobExecutor.execute(job);
         return job;
-    }
-
-    @Async
-    public void runAsync(Job job) {
-        log.info("Starting job {} type={} taskId={}", job.getId(), job.getJobType(), job.getTaskId());
-        try {
-            switch (job.getJobType()) {
-                case EXPORT -> exportJobRunner.run(job);
-                case PRECHECK -> precheckJobRunner.run(job);
-                case IMPORT -> importJobRunner.run(job);
-                case PUBLISH -> publishJobRunner.run(job);
-            }
-        } catch (Exception e) {
-            log.error("Job {} failed unexpectedly: {}", job.getId(), e.getMessage(), e);
-        } finally {
-            cancellationRegistry.unregister(job.getId());
-        }
     }
 
     public Job findById(Long jobId) {

@@ -210,9 +210,12 @@ public class PublishJobRunner {
             stagedKeys.add(sr.getRowKey());
             scopeKeys.add(sr.getScopeKey());
         }
-        // GLOBAL 只有一个范围（scopeKey=null）
+        // GLOBAL 只有一个范围（scopeKey=null）。
+        // 注意：不能用 List.of(null)（NPE），直接用 HashSet 保留 null 元素。
         if (scopeKeys.size() == 1 && scopeKeys.contains(null)) {
-            scopeKeys = new HashSet<>(List.of((String) null));
+            Set<String> only = new HashSet<>();
+            only.add(null);
+            scopeKeys = only;
         }
 
         int deleted = 0;
