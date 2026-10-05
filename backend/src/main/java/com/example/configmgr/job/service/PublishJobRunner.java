@@ -194,8 +194,9 @@ public class PublishJobRunner {
             } else {
                 job.setStatus(totalErrors > 0 ? Job.JobStatus.FAILED : Job.JobStatus.COMPLETED);
                 if (totalErrors == 0) {
-                    // 发布成功 → 任务完成
+                    // 发布成功 → 任务完成，步骤同步到最终步骤（列表点击标题可直接查看结果）
                     taskService.updateStatus(job.getTaskId(), Task.TaskStatus.COMPLETED);
+                    taskService.goToStep(job.getTaskId(), "PUBLISH");
                 }
             }
 

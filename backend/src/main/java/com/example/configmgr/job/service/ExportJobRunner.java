@@ -146,8 +146,9 @@ public class ExportJobRunner {
             } else {
                 job.setStatus(job.getErrorCount() > 0 ? Job.JobStatus.FAILED : Job.JobStatus.COMPLETED);
                 if (job.getErrorCount() == 0) {
-                    // 导出全部成功 → 任务完成
+                    // 导出全部成功 → 任务完成，步骤同步到最终步骤（列表点击标题可直接查看结果）
                     taskService.updateStatus(job.getTaskId(), Task.TaskStatus.COMPLETED);
+                    taskService.goToStep(job.getTaskId(), "EXPORT");
                 }
             }
         } catch (Exception e) {

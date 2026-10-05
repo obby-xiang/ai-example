@@ -8,12 +8,14 @@
       <el-button @click="$router.push('/tasks')">返回任务中心</el-button>
     </div>
 
-    <!-- Step progress -->
-    <el-steps :active="currentStepIndex" finish-status="success" style="margin-bottom:24px">
-      <el-step title="选择配置" />
-      <el-step title="查询条件" />
-      <el-step title="执行导出" />
-    </el-steps>
+    <!-- Step progress（可点击切换步骤） -->
+    <StepBar
+      :steps="exportSteps"
+      :current="step"
+      :completed="task?.status === 'COMPLETED'"
+      style="margin-bottom:24px"
+      @select="jumpToStep"
+    />
 
     <!-- Step content -->
     <div class="wizard-body">
@@ -32,18 +34,24 @@ import { useWorkspaceStore } from '@/stores/workspace.js'
 import StepSelectDefs from './StepSelectDefs.vue'
 import StepQueryCond from './StepQueryCond.vue'
 import StepExport from './StepExport.vue'
+import StepBar from '@/components/common/StepBar.vue'
 
 const route = useRoute()
 const router = useRouter()
 const taskStore = useTaskStore()
 const workspaceStore = useWorkspaceStore()
 
+const exportSteps = [
+  { key: 'SELECT_DEFS', title: '选择配置' },
+  { key: 'QUERY_COND', title: '查询条件' },
+  { key: 'EXPORT', title: '执行导出' }
+]
+
 const step = computed(() => route.params.step)
 const taskId = computed(() => Number(route.params.id))
 const task = computed(() => taskStore.currentTask)
 
 const stepOrder = ['SELECT_DEFS', 'QUERY_COND', 'EXPORT']
-const currentStepIndex = computed(() => stepOrder.indexOf(step.value))
 
 onMounted(async () => {
   await taskStore.loadTask(taskId.value)
@@ -59,6 +67,13 @@ watch(step, (s) => {
   workspaceStore.setExtra('step', s)
 })
 
+// 点击步进条任意步骤直接跳转查看（同步后端 currentStep，保持单一事实来源）
+async function jumpToStep(key) {
+  if (key === step.value) return
+  await taskStore.goToStep(taskId.value, key)
+  router.push(`/tasks/${taskId.value}/export/${key}`)
+}
+
 async function goNext() {
   const current = stepOrder.indexOf(step.value)
   if (current < stepOrder.length - 1) {
@@ -72,6 +87,7 @@ function goBack() {
   const current = stepOrder.indexOf(step.value)
   if (current > 0) {
     const prevStep = stepOrder[current - 1]
+    taskStore.goToStep(taskId.value, prevStep)
     router.push(`/tasks/${taskId.value}/export/${prevStep}`)
   }
 }

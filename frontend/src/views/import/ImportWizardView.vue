@@ -8,12 +8,14 @@
       <el-button @click="$router.push('/tasks')">返回任务中心</el-button>
     </div>
 
-    <el-steps :active="currentStepIndex" finish-status="success" style="margin-bottom:24px">
-      <el-step title="上传配置" />
-      <el-step title="检查配置" />
-      <el-step title="导入配置" />
-      <el-step title="发布配置" />
-    </el-steps>
+    <!-- 步进条（可点击切换步骤查看） -->
+    <StepBar
+      :steps="importSteps"
+      :current="step"
+      :completed="task?.status === 'COMPLETED'"
+      style="margin-bottom:24px"
+      @select="jumpToStep"
+    />
 
     <div class="wizard-body">
       <StepUpload v-if="step === 'UPLOAD'" :task="task" @next="goNext" />
@@ -33,6 +35,7 @@ import StepUpload from './StepUpload.vue'
 import StepPrecheck from './StepPrecheck.vue'
 import StepImport from './StepImport.vue'
 import StepPublish from './StepPublish.vue'
+import StepBar from '@/components/common/StepBar.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -44,7 +47,12 @@ const taskId = computed(() => Number(route.params.id))
 const task = computed(() => taskStore.currentTask)
 
 const stepOrder = ['UPLOAD', 'PRECHECK', 'IMPORT', 'PUBLISH']
-const currentStepIndex = computed(() => stepOrder.indexOf(step.value))
+const importSteps = [
+  { key: 'UPLOAD', title: '上传配置' },
+  { key: 'PRECHECK', title: '检查配置' },
+  { key: 'IMPORT', title: '导入配置' },
+  { key: 'PUBLISH', title: '发布配置' }
+]
 
 onMounted(async () => {
   await taskStore.loadTask(taskId.value)
@@ -56,6 +64,13 @@ onUnmounted(() => {
   taskStore.disconnectTaskStream()
 })
 watch(step, (s) => { workspaceStore.setExtra('step', s) })
+
+// 点击步进条任意步骤直接跳转查看（同步后端 currentStep）
+async function jumpToStep(key) {
+  if (key === step.value) return
+  await taskStore.goToStep(taskId.value, key)
+  router.push(`/tasks/${taskId.value}/import/${key}`)
+}
 
 async function goNext() {
   const idx = stepOrder.indexOf(step.value)
@@ -69,7 +84,9 @@ async function goNext() {
 function goBack() {
   const idx = stepOrder.indexOf(step.value)
   if (idx > 0) {
-    router.push(`/tasks/${taskId.value}/import/${stepOrder[idx - 1]}`)
+    const prevStep = stepOrder[idx - 1]
+    taskStore.goToStep(taskId.value, prevStep)
+    router.push(`/tasks/${taskId.value}/import/${prevStep}`)
   }
 }
 </script>

@@ -3,7 +3,7 @@
     <div class="page-header">
       <div>
         <h2>任务中心</h2>
-        <p class="subtitle">历史任务持久化存储：查看所有快速实施任务的状态与进度</p>
+        <p class="subtitle">历史任务持久化存储：点击任务标题可进入该任务的向导页查看与继续操作</p>
       </div>
       <el-button type="primary" @click="openCreate">
         <el-icon><Plus /></el-icon> 新建任务
@@ -39,9 +39,11 @@
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="任务标题" min-width="180" show-overflow-tooltip>
+      <el-table-column label="任务标题" min-width="200" show-overflow-tooltip>
         <template #default="{ row }">
-          <el-link type="primary" :underline="false" @click="openDetail(row)">{{ row.task.title }}</el-link>
+          <el-link type="primary" :underline="false" @click="openTask(row)">
+            {{ row.task.title }}
+          </el-link>
         </template>
       </el-table-column>
       <el-table-column label="当前步骤" width="110">
@@ -80,10 +82,8 @@
       <el-table-column label="创建时间" width="155">
         <template #default="{ row }">{{ formatTime(row.task.createdAt) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="170" fixed="right">
+      <el-table-column label="操作" width="90" fixed="right">
         <template #default="{ row }">
-          <el-button type="primary" link size="small" :disabled="!canResume(row)" @click="resume(row)">继续</el-button>
-          <el-button link size="small" @click="openDetail(row)">详情</el-button>
           <el-button type="danger" link size="small" @click="handleDelete(row)">删除</el-button>
         </template>
       </el-table-column>
@@ -124,107 +124,13 @@
         <el-button type="primary" :loading="creating" @click="handleCreate">创建并开始</el-button>
       </template>
     </el-dialog>
-
-    <!-- 任务详情抽屉 -->
-    <el-drawer v-model="detailVisible" size="62%" :title="detail ? `任务 #${detail.task?.id} 详情` : '任务详情'">
-      <template v-if="detail">
-        <div class="detail-section">
-          <div class="detail-header">
-            <h3>{{ detail.task?.title }}</h3>
-            <div>
-              <el-tag :type="detail.task?.type === 'EXPORT' ? 'success' : 'primary'" size="small">{{ detail.task?.type === 'EXPORT' ? '导出配置' : '导入配置' }}</el-tag>
-              <el-tag :type="statusType(detail.task?.status)" size="small" style="margin-left:6px">{{ statusLabel(detail.task?.status) }}</el-tag>
-            </div>
-          </div>
-          <p class="detail-meta">创建于 {{ formatTime(detail.task?.createdAt) }}，更新于 {{ formatTime(detail.task?.updatedAt) }}</p>
-        </div>
-
-        <!-- 步骤进度 -->
-        <div class="detail-section">
-          <div class="section-title">流程进度</div>
-          <el-steps :active="stepIndex(detail.task)" finish-status="success" align-center>
-            <el-step v-for="(s, i) in stepsOf(detail.task)" :key="i" :title="stepLabel(s)" />
-          </el-steps>
-        </div>
-
-        <!-- 配置项状态 -->
-        <div class="detail-section">
-          <div class="section-title">配置项（{{ detail.task?.items?.length || 0 }}）</div>
-          <el-table :data="detail.task?.items || []" border size="small">
-            <el-table-column prop="defCode" label="配置编码" width="150" />
-            <el-table-column label="状态" width="120">
-              <template #default="{ row }">
-                <el-tag :type="itemStatusTag(row.status)" size="small">{{ itemStatusLabel(row.status) }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="查询条件/备注" show-overflow-tooltip>
-              <template #default="{ row }">{{ row.conditionJson || '—' }}</template>
-            </el-table-column>
-          </el-table>
-        </div>
-
-        <!-- 作业历史 -->
-        <div class="detail-section">
-          <div class="section-title">作业历史（{{ detail.jobs?.length || 0 }}）</div>
-          <el-table :data="detail.jobs || []" border size="small">
-            <el-table-column label="作业" width="90">
-              <template #default="{ row }">
-                <el-tag size="small" :type="jobTypeTag(row.jobType)">{{ jobTypeLabel(row.jobType) }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="状态" width="95">
-              <template #default="{ row }">
-                <el-tag size="small" :type="jobStatusTag(row.status)">{{ jobStatusLabel(row.status) }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="进度" min-width="150">
-              <template #default="{ row }">
-                <el-progress
-                  v-if="row.total > 0"
-                  :percentage="Math.round(row.progress / row.total * 100)"
-                  :status="row.status === 'COMPLETED' ? 'success' : row.status === 'FAILED' ? 'exception' : undefined"
-                  :stroke-width="8"
-                />
-                <span v-else class="empty-hint">—</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="错误/警告" width="95" align="center">
-              <template #default="{ row }">
-                <span :class="{ 'err-hint': row.errorCount > 0 }">{{ row.errorCount }}/{{ row.warningCount }}</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="开始时间" width="150">
-              <template #default="{ row }">{{ formatTime(row.startedAt) }}</template>
-            </el-table-column>
-            <el-table-column label="结束时间" width="150">
-              <template #default="{ row }">{{ formatTime(row.finishedAt) }}</template>
-            </el-table-column>
-          </el-table>
-        </div>
-
-        <!-- 文件 -->
-        <div class="detail-section">
-          <div class="section-title">文件（{{ detail.files?.length || 0 }}）</div>
-          <el-table :data="detail.files || []" border size="small">
-            <el-table-column prop="defCode" label="配置编码" width="150" />
-            <el-table-column label="类型" width="90">
-              <template #default="{ row }">
-                <el-tag size="small" effect="plain">{{ fileTypeLabel(row.fileType) }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column prop="fileName" label="文件名" show-overflow-tooltip />
-            <el-table-column prop="rowCount" label="行数" width="80" />
-          </el-table>
-        </div>
-      </template>
-    </el-drawer>
   </div>
 </template>
 
 <script setup>
 import { ref, reactive, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { listTasks, createTask, deleteTask, getTaskOverview } from '@/api/tasks.js'
+import { listTasks, createTask, deleteTask } from '@/api/tasks.js'
 import { ElMessageBox, ElMessage } from 'element-plus'
 import { Plus, Search, Refresh, Upload, Download } from '@element-plus/icons-vue'
 
@@ -240,10 +146,6 @@ const filters = reactive({ type: '', status: '', keyword: '' })
 const createVisible = ref(false)
 const creating = ref(false)
 const createForm = reactive({ type: 'EXPORT', title: '' })
-
-const detailVisible = ref(false)
-const detail = ref(null)
-const detailLoading = ref(false)
 
 let refreshTimer = null
 
@@ -266,13 +168,22 @@ async function reload(silent) {
     })
     tasks.value = res.data.data?.content || []
     total.value = res.data.data?.totalElements || 0
-    // 详情抽屉打开时同步刷新
-    if (detailVisible.value && detail.value?.task?.id) {
-      refreshDetail(detail.value.task.id)
-    }
   } finally {
     loading.value = false
   }
+}
+
+// 点击任务标题：进入该任务的向导页（与编辑/继续同一交互）
+function openTask(row) {
+  const t = row.task
+  if (!t) return
+  const base = t.type === 'EXPORT' ? 'export' : 'import'
+  // DONE 步骤映射到各类型的最终步骤页，保证有内容可看
+  let step = t.currentStep
+  if (!step || step === 'DONE') {
+    step = t.type === 'EXPORT' ? 'EXPORT' : 'PUBLISH'
+  }
+  router.push(`/tasks/${t.id}/${base}/${step}`)
 }
 
 function openCreate() {
@@ -299,43 +210,6 @@ async function handleCreate() {
   }
 }
 
-function canResume(row) {
-  const t = row.task
-  if (!t) return false
-  if (t.status === 'COMPLETED') {
-    // 已完成的导出任务仍可进入导出结果页查看文件；导入任务走详情
-    return t.type === 'EXPORT'
-  }
-  if (t.status === 'CANCELLED') return false
-  return true
-}
-
-function resume(row) {
-  const t = row.task
-  if (!t) return
-  const base = t.type === 'EXPORT' ? 'export' : 'import'
-  router.push(`/tasks/${t.id}/${base}/${t.currentStep}`)
-}
-
-async function openDetail(row) {
-  detailVisible.value = true
-  detail.value = { task: row.task, jobs: row.latestJob ? [row.latestJob] : [], files: [] }
-  await refreshDetail(row.task.id)
-}
-
-async function refreshDetail(taskId) {
-  if (detailLoading.value) return
-  detailLoading.value = true
-  try {
-    const res = await getTaskOverview(taskId)
-    detail.value = res.data.data
-  } catch (e) {
-    // ignore
-  } finally {
-    detailLoading.value = false
-  }
-}
-
 async function handleDelete(row) {
   try {
     await ElMessageBox.confirm(`确定删除任务 #${row.task.id}「${row.task.title}」？其文件与暂存数据将一并删除。`, '删除任务', {
@@ -345,17 +219,6 @@ async function handleDelete(row) {
     ElMessage.success('任务已删除')
     reload()
   } catch (e) { /* 取消 */ }
-}
-
-function stepsOf(task) {
-  if (!task) return []
-  return task.type === 'EXPORT' ? ['SELECT_DEFS', 'QUERY_COND', 'EXPORT'] : ['UPLOAD', 'PRECHECK', 'IMPORT', 'PUBLISH']
-}
-function stepIndex(task) {
-  const steps = stepsOf(task)
-  const idx = steps.indexOf(task?.currentStep)
-  if (task?.status === 'COMPLETED') return steps.length
-  return idx < 0 ? 0 : idx
 }
 
 const stepLabels = {
@@ -372,11 +235,6 @@ const jobTypeTag = (t) => ({ EXPORT: 'success', PRECHECK: 'warning', IMPORT: 'pr
 const jobStatusLabel = (s) => ({ PENDING: '等待', RUNNING: '运行中', COMPLETED: '完成', FAILED: '失败', CANCELLED: '已取消' })[s] || s
 const jobStatusTag = (s) => ({ PENDING: 'info', RUNNING: 'warning', COMPLETED: 'success', FAILED: 'danger', CANCELLED: 'info' })[s] || ''
 
-const itemStatusLabel = (s) => ({ PENDING: '待处理', READY: '已就绪', CHECKING: '检查中', CHECKED: '检查通过', IMPORTING: '导入中', IMPORTED: '已导入', PUBLISHING: '发布中', PUBLISHED: '已发布', COMPLETED: '已完成', FAILED: '失败' })[s] || s
-const itemStatusTag = (s) => ({ CHECKED: 'success', IMPORTED: 'success', PUBLISHED: 'success', COMPLETED: 'success', FAILED: 'danger', CHECKING: 'warning', IMPORTING: 'warning', PUBLISHING: 'warning' })[s] || 'info'
-
-const fileTypeLabel = (t) => ({ TEMPLATE: '模板', UPLOAD: '上传', EXPORT: '导出' })[t] || t
-
 function formatTime(ts) {
   if (!ts) return '—'
   return String(ts).replace('T', ' ').substring(0, 19)
@@ -390,9 +248,4 @@ function formatTime(ts) {
 .job-line { display: flex; gap: 6px; align-items: center; }
 .err-hint { font-size: 12px; color: var(--el-color-danger); }
 .empty-hint { font-size: 12px; color: var(--el-text-color-placeholder); }
-.detail-section { margin-bottom: 22px; }
-.detail-header { display: flex; justify-content: space-between; align-items: center; }
-.detail-header h3 { font-size: 16px; }
-.detail-meta { font-size: 12px; color: var(--el-text-color-secondary); margin-top: 4px; }
-.section-title { font-size: 13px; font-weight: 600; margin-bottom: 8px; color: var(--el-text-color-primary); }
 </style>

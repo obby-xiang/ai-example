@@ -62,7 +62,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { createJob, getJob } from '@/api/jobs.js'
+import { createJob, getJob, listJobs } from '@/api/jobs.js'
 import { useTaskStore } from '@/stores/task.js'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Check, Loading, CircleCheck, CircleClose, ArrowLeft } from '@element-plus/icons-vue'
@@ -83,7 +83,22 @@ const progressPct = computed(() => Math.round((currentJob.value?.progress||0)/Ma
 const progressStatus = computed(() => currentJob.value?.status === 'FAILED' ? 'exception' : currentJob.value?.status === 'COMPLETED' ? 'success' : '')
 const statusText = computed(() => ({ PENDING:'等待中…', RUNNING:'正在发布…', COMPLETED:'发布成功！', FAILED:'发布失败', CANCELLED:'已取消' })[currentJob.value?.status] || '')
 
-onMounted(() => {
+onMounted(async () => {
+  // 已完成的导入任务：进入时直接展示最后一次发布的结果（点击标题查看的交互）。
+  // 任务数据异步加载，故用 watcher（immediate）等待状态就绪。
+  watch(() => props.task?.status, async (st) => {
+    if (st !== 'COMPLETED' || currentJob.value) return
+    try {
+      const jobs = await listJobs(props.task.id)
+      const last = jobs.data.data?.filter(j => j.jobType === 'PUBLISH')[0]
+      if (last) {
+        const res = await getJob(last.id)
+        currentJob.value = res.data.data
+        jobItems.value = res.data.data.items || []
+      }
+    } catch (e) { /* ignore */ }
+  }, { immediate: true })
+
   // 认领 AI/其他页签启动的 PUBLISH 作业
   watch(() => taskStore.liveJobs, async () => {
     const evt = taskStore.latestJobEvent('PUBLISH')
