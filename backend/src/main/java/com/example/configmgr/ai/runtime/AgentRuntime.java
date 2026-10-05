@@ -208,6 +208,8 @@ public class AgentRuntime {
             Map<String, Object> usage = totalPromptTokens > 0 || totalCompletionTokens > 0
                     ? Map.of("promptTokens", totalPromptTokens, "completionTokens", totalCompletionTokens)
                     : Map.of();
+            session.setLastPromptTokens(totalPromptTokens);
+            session.setLastCompletionTokens(totalCompletionTokens);
             emitter.runCompleted(runId, usage);
 
         } catch (Exception e) {

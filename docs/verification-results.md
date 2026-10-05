@@ -121,6 +121,16 @@
 > （误取 res.data.sid，应为 res.data.data.sid），导致 sessionStorage 存入
 > 字符串 "undefined"、聊天永远不可用。已修复并回归通过（见 §4 缺陷 #17）。
 
+### 3.3e 会话历史恢复（同页签刷新）
+
+| 用例 | 结果 | 实测证据 |
+|------|------|---------|
+| H-01 user 消息恢复 | ✅ | GET /sessions/{sid} 返回 1 条用户消息 |
+| H-02 assistant 回复恢复 | ✅ | 2 条助手文本 |
+| H-03 工具卡片恢复 | ✅ | 1 条工具结果卡片 |
+| H-04 内容完整 | ✅ | 含 CURRENCY 等定义内容 |
+| H-05 浏览器刷新回归 | ✅ | 发消息→刷新后：用户消息/完整回复/工具卡片/token 行（"上一轮消耗 token…"）全部恢复 |
+
 ### 3.4 独立用例：发布冲突检测（双任务并发）
 
 | 步骤 | 实测证据 |
@@ -166,6 +176,7 @@
 | 15 | 前端构建失败（esbuild） | Windows 下 esbuild 在系统 %TEMP% 删临时文件 Access denied | 构建时 TEMP 指向 frontend/.tmp-esbuild（已 gitignore） |
 | 16 | 测试脚本 byte[] 展开为 Object[] | PS 5.1 return 展开集合 | 脚本改用局部变量 + curl |
 | 17 | 浏览器聊天永远提示"AI 服务不可用" | 会话创建响应解包层级错误（res.data.sid → 实际是 res.data.data.sid），sessionStorage 存入字符串 "undefined" | 修正解包 + 历史 "undefined" 防御清理；浏览器回归通过 |
+| 18 | 刷新页面后对话历史丢失 | 后端会话保存了历史，但前端刷新后从未拉取渲染（GET /sessions/{sid} 不返回消息） | 后端返回重建的显示条目（user/assistant/tool）+ 最近 token 用量；前端 initSession 恢复消息、进行中提示、挂起的 HITL 卡片与 token 行 |
 
 ---
 
@@ -175,7 +186,7 @@
 |---|------|------|
 | 1 | SpreadJS 评估模式水印 | 需正式授权，经 `VITE_SPREADJS_KEY` 注入 |
 | 2 | 前端作业进度用 1.5s 轮询 | 后端 SSE 任务流已提供（TASK_CHANGED/JOB_PROGRESS），前端可选接入 |
-| 3 | 会话刷新后对话记录清空 | 符合"会话页签内唯一、不持久化"的约束；后端内存会话 TTL 30 分钟 |
+| 3 | 会话刷新恢复的边界 | 同一页签刷新（sessionStorage 的 sid + 后端内存会话存活）→ 历史完整恢复；后端重启或 30 分钟无活动过期 → 新会话（符合"不持久化"约束） |
 | 4 | 空 api-key 时 AI 返回 401 错误 | 业务功能不受影响；建议启动前配置环境变量 |
 | 5 | 演示延迟 300ms/批 | 用于展示进度条，可在 application.yml `app.job.demo-batch-delay-ms` 调小或置 0 |
 

@@ -24,6 +24,10 @@ public class AiSession {
     // Conversation history for the LLM
     private final List<Message> history = new ArrayList<>();
 
+    // 最近一轮对话的 token 消耗（供刷新后恢复显示）
+    private volatile long lastPromptTokens = 0;
+    private volatile long lastCompletionTokens = 0;
+
     // Context reported by the frontend
     private volatile WorkspaceContext context = new WorkspaceContext();
 

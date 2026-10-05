@@ -19,10 +19,31 @@ export const useAiStore = defineStore('ai', () => {
       sid = null
     }
     if (sid) {
-      // Verify it's still alive
+      // Verify it's still alive + 恢复对话显示（同一页签刷新后历史不丢）
       try {
-        await aiApi.getSession(sid)
+        const res = await aiApi.getSession(sid)
         sessionId.value = sid
+        const state = res.data.data || {}
+        const items = state.messages || []
+        messages.value = items.map((it, i) => ({
+          id: 'hist-' + i,
+          role: it.role,
+          text: it.text || '',
+          toolName: it.toolName,
+          summary: it.summary,
+          success: it.role === 'tool' ? true : undefined,
+          ts: new Date()
+        }))
+        if (state.runActive) {
+          addSystemMessage('上一轮对话仍在后台进行中，完成后回复会补充显示；如需立即对话可点右上角「新对话」')
+        }
+        if (state.pendingInteraction && state.pendingInteraction.iid) {
+          pendingInteraction.value = state.pendingInteraction
+        }
+        const usage = state.usage || {}
+        if (usage.promptTokens || usage.completionTokens) {
+          addSystemMessage(`上一轮消耗 token：输入 ${usage.promptTokens || 0} / 输出 ${usage.completionTokens || 0}`)
+        }
         return
       } catch (e) {
         sessionStorage.removeItem('ai_session_id')

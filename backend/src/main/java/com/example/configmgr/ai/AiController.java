@@ -62,7 +62,7 @@ public class AiController {
         return ResponseEntity.status(201).body(ApiResponse.ok(Map.of("sid", session.getId())));
     }
 
-    // GET /api/ai/sessions/{sid} — session state
+    // GET /api/ai/sessions/{sid} — session state（含对话显示条目，供同页签刷新后恢复）
     @GetMapping("/sessions/{sid}")
     public ApiResponse<Map<String, Object>> getSession(@PathVariable String sid) {
         AiSession session = sessionStore.getOrThrow(sid);
@@ -72,8 +72,51 @@ public class AiController {
                 "hasPendingInteraction", session.getPendingInteraction() != null,
                 "pendingInteraction", session.getPendingInteraction() != null
                         ? session.getPendingInteraction() : Map.of(),
+                "messages", buildDisplayMessages(session),
+                "usage", Map.of(
+                        "promptTokens", session.getLastPromptTokens(),
+                        "completionTokens", session.getLastCompletionTokens()),
                 "context", session.getContext()
         ));
+    }
+
+    /**
+     * 从会话的 LLM 消息流重建前端可渲染的显示条目：
+     * 用户消息 → user；助手文本 → assistant；工具响应 → tool（工具卡片）。
+     * 系统消息（上下文快照）不展示。
+     */
+    private List<Map<String, Object>> buildDisplayMessages(AiSession session) {
+        List<Map<String, Object>> items = new java.util.ArrayList<>();
+        synchronized (session.getHistory()) {
+            for (org.springframework.ai.chat.messages.Message m : session.getHistory()) {
+                if (m instanceof org.springframework.ai.chat.messages.UserMessage u) {
+                    items.add(Map.of("role", "user",
+                            "text", u.getText() != null ? u.getText() : ""));
+                } else if (m instanceof org.springframework.ai.chat.messages.AssistantMessage a) {
+                    if (a.getText() != null && !a.getText().isBlank()) {
+                        items.add(Map.of("role", "assistant", "text", a.getText()));
+                    }
+                    // 工具调用卡片与紧随其后的 ToolResponseMessage 配对展示
+                } else if (m instanceof org.springframework.ai.chat.messages.ToolResponseMessage t) {
+                    for (var r : t.getResponses()) {
+                        String data = r.responseData();
+                        items.add(Map.of(
+                                "role", "tool",
+                                "toolName", r.name(),
+                                "summary", summarizeToolData(data)));
+                    }
+                }
+            }
+        }
+        return items;
+    }
+
+    private String summarizeToolData(String data) {
+        if (data == null) return "";
+        String s = data.strip();
+        if (s.startsWith("\"") && s.endsWith("\"")) s = s.substring(1, s.length() - 1);
+        if (s.startsWith("用户拒绝了此操作")) s = "操作已拒绝";
+        return s.length() > 80 ? s.substring(0, 80) + "…" : s;
     }
 
     // DELETE /api/ai/sessions/{sid} — reset session
