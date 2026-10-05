@@ -12,6 +12,8 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.util.List;
 import java.util.Map;
@@ -35,7 +37,17 @@ public class JobService {
         job.setStatus(Job.JobStatus.PENDING);
         job = jobRepository.save(job);
         cancellationRegistry.register(job.getId());
-        asyncJobExecutor.execute(job);
+
+        // 关键：必须在事务提交之后再启动异步执行。
+        // 否则虚拟线程可能先于本事务提交就开始更新 Job 行，
+        // 触发 "Row was updated or deleted by another transaction" 竞态失败。
+        final Job savedJob = job;
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                asyncJobExecutor.execute(savedJob);
+            }
+        });
         return job;
     }
 
