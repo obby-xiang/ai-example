@@ -21,6 +21,9 @@ import com.example.configmgr.task.repo.TaskRepository;
 import com.example.configmgr.task.service.TaskSseService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.LockModeType;
+import jakarta.persistence.PersistenceContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -33,6 +36,9 @@ import java.util.*;
 @Service
 @RequiredArgsConstructor
 public class PublishJobRunner {
+
+    @PersistenceContext
+    private EntityManager entityManager;
 
     private final DefinitionService definitionService;
     private final DependencyResolver dependencyResolver;
@@ -129,6 +135,11 @@ public class PublishJobRunner {
                         liveRow.setScopeKey(sr.getScopeKey());
                         liveRow.setRowKey(sr.getRowKey());
                         liveRow.setDataJson(sr.getDataJson());
+                        if (existing.isPresent()) {
+                            // 发布是显式写操作：即使内容与库中一致也强制版本递增，
+                            // 否则脏检查跳过 UPDATE，并发冲突检测将失效。
+                            entityManager.lock(liveRow, LockModeType.OPTIMISTIC_FORCE_INCREMENT);
+                        }
                         dataRowRepository.save(liveRow);
 
                         // Mark staging row as published
