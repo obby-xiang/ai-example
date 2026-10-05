@@ -70,6 +70,15 @@ onMounted(async () => {
           if (router.currentRoute.value.name !== 'task') {
             router.push(`/task/${data.task.id}`)
             ElMessage.success('AI 已创建任务，已为您打开向导')
+          } else if (data.task.id !== taskStore.task?.id) {
+            // 正在其他任务向导中：不打断，提供跳转入口（导航主权归用户）
+            ElNotification({
+              title: 'AI 已创建新任务',
+              message: `「${data.task.title}」已创建，点击进入向导`,
+              type: 'success',
+              duration: 8000,
+              onClick: () => router.push(`/task/${data.task.id}`)
+            })
           }
         }
       }

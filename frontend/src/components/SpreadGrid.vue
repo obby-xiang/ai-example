@@ -70,7 +70,9 @@ onBeforeUnmount(() => {
         sheet.unbind(GC.Spread.Sheets.Events.RangeChanged, markChanged)
       }
     } catch { /* ignore */ }
-    spread.dispose()
+    try {
+      spread.destroy()
+    } catch { /* ignore */ }
     spread = null
   }
 })

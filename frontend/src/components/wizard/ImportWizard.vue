@@ -12,7 +12,7 @@
         <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
           <div v-for="c in group.items" :key="c.code"
             class="config-chip" :class="{ selected: selected.includes(c.code) }" @click="toggle(c.code)">
-            <el-checkbox :model-value="selected.includes(c.code)" @click.stop />
+            <span class="chip-check"><el-checkbox :model-value="selected.includes(c.code)" /></span>
             <div class="min-w-0 flex-1">
               <div class="text-sm font-medium text-gray-800 truncate">
                 {{ c.name }}
@@ -168,7 +168,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import JSZip from 'jszip'
 import { api } from '@/api'
@@ -213,6 +213,26 @@ onMounted(async () => {
   }
   checkResult.value = params.checkResult || null
   importResult.value = params.importResult || null
+})
+
+// 后台操作完成后（SSE 状态推进步骤）刷新结果数据
+watch(() => taskStore.currentStep, (step, old) => {
+  if (step === old) return
+  const params = taskStore.task?.params || {}
+  if (step === 'CHECK') {
+    checkResult.value = params.checkResult || null
+  }
+  if (step === 'IMPORT') {
+    importResult.value = params.importResult || null
+  }
+  if (step === 'PREPARE') {
+    const saved = params.uploads || {}
+    for (const code of selected.value) {
+      if (saved[code]) {
+        uploads[code] = { ...saved[code] }
+      }
+    }
+  }
 })
 
 function configOf(code) {
@@ -431,5 +451,8 @@ function levelType(l) {
 .config-chip.selected {
   border-color: #409eff;
   background: #ecf5ff;
+}
+.chip-check {
+  pointer-events: none;
 }
 </style>

@@ -21,10 +21,20 @@ import router from './router'
 import './styles/main.css'
 
 const app = createApp(App)
+// 临时调试：全局错误写入标题（E2E 排查用，验证后移除）
+window.addEventListener('error', (e) => {
+  document.title = 'ERR: ' + e.message
+})
+window.addEventListener('unhandledrejection', (e) => {
+  document.title = 'REJ: ' + (e.reason?.message || String(e.reason))
+})
 const pinia = createPinia()
 app.use(pinia)
 app.use(router)
 app.use(ElementPlus, { locale: zhCn })
+app.config.errorHandler = (err) => {
+  document.title = 'VUE: ' + (err?.message || String(err))
+}
 for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
   app.component(key, component)
 }

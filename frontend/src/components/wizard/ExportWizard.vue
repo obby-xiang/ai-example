@@ -12,7 +12,7 @@
         <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
           <div v-for="c in group.items" :key="c.code"
             class="config-chip" :class="{ selected: selected.includes(c.code) }" @click="toggle(c.code)">
-            <el-checkbox :model-value="selected.includes(c.code)" @click.stop />
+            <span class="chip-check"><el-checkbox :model-value="selected.includes(c.code)" /></span>
             <div class="min-w-0 flex-1">
               <div class="text-sm font-medium text-gray-800 truncate">{{ c.name }}</div>
               <div class="text-xs text-gray-400 font-mono truncate">{{ c.code }}</div>
@@ -117,7 +117,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { api } from '@/api'
 import { useTaskStore } from '@/stores/task'
@@ -157,6 +157,13 @@ onMounted(async () => {
   }
   activeNames.value = selected.value.slice(0, 1)
   if (taskStore.currentStep === 'EXECUTE_EXPORT') {
+    await loadResults()
+  }
+})
+
+// 导出完成后（SSE 状态推进到 EXECUTE_EXPORT）加载结果渲染 SpreadJS
+watch(() => taskStore.currentStep, async (step, old) => {
+  if (step === 'EXECUTE_EXPORT' && old !== 'EXECUTE_EXPORT' && !results.value.length) {
     await loadResults()
   }
 })
@@ -351,5 +358,8 @@ function levelType(l) {
 .config-chip.selected {
   border-color: #409eff;
   background: #ecf5ff;
+}
+.chip-check {
+  pointer-events: none;
 }
 </style>

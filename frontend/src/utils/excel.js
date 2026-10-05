@@ -17,63 +17,68 @@ export function applyColumnsToSheet(sheet, fields) {
     sheet.setRowCount(Math.max(sheet.getRowCount(), 200), GC.Spread.Sheets.SheetArea.viewport)
     sheet.setColumnCount(fields.length, GC.Spread.Sheets.SheetArea.viewport)
     fields.forEach((f, i) => {
-      const col = sheet.getColumn(i, GC.Spread.Sheets.SheetArea.viewport)
-      col.width(Math.min(200, Math.max(90, headerText(f).length * 16 + 30)))
-      col.formatter(f.dataType === 'DATE' ? 'yyyy-mm-dd' : undefined)
-      // 必填列高亮
-      col.backColor(f.required ? '#fff7e6' : undefined)
-      // 数据校验
-      if (f.dataType === 'ENUM' && f.options?.length) {
-        const list = f.options.map(normalizeScope).join(',')
-        const validator = DV.createListValidator(list)
-        validator.inputTitle('请选择')
-        validator.inputMessage('可选值：' + list)
-        validator.errorTitle('取值不合法')
-        validator.errorMessage('可选值：' + list)
-        sheet.getCell(-1, i, GC.Spread.Sheets.SheetArea.viewport).validator(validator)
-      } else if (f.dataType === 'SCOPE' && f.options?.length) {
-        const list = f.options.map((o) => o.split('|')[0]).join(',')
-        const validator = DV.createListValidator(list)
-        validator.errorTitle('取值不合法')
-        validator.errorMessage('可选值：' + list)
-        sheet.getCell(-1, i, GC.Spread.Sheets.SheetArea.viewport).validator(validator)
-      } else if (f.dataType === 'INT') {
-        const validator = DV.createNumberValidator('Integer', null, null, false)
-        validator.errorTitle('类型不合法')
-        validator.errorMessage('必须为整数')
-        sheet.getCell(-1, i, GC.Spread.Sheets.SheetArea.viewport).validator(validator)
-      } else if (f.dataType === 'DECIMAL') {
-        const validator = DV.createNumberValidator('Decimal', null, null, false)
-        validator.errorTitle('类型不合法')
-        validator.errorMessage('必须为数值')
-        sheet.getCell(-1, i, GC.Spread.Sheets.SheetArea.viewport).validator(validator)
-      } else if (f.dataType === 'DATE') {
-        const validator = DV.createDateValidator(
-          new Date(2000, 0, 1), new Date(2099, 11, 31), 'yyyy-mm-dd')
-        validator.errorTitle('日期不合法')
-        validator.errorMessage('格式应为 yyyy-mm-dd')
-        sheet.getCell(-1, i, GC.Spread.Sheets.SheetArea.viewport).validator(validator)
-      } else if (f.dataType === 'BOOL') {
-        const validator = DV.createFormulaListValidator('"true,false"')
-        validator.errorTitle('布尔值不合法')
-        validator.errorMessage('必须为 true/false')
-        sheet.getCell(-1, i, GC.Spread.Sheets.SheetArea.viewport).validator(validator)
+      sheet.setColumnWidth(i, Math.min(200, Math.max(90, headerText(f).length * 16 + 30)),
+        GC.Spread.Sheets.SheetArea.viewport)
+      // 整列单元格（row=-1 表示整列）
+      const colCell = sheet.getCell(-1, i, GC.Spread.Sheets.SheetArea.viewport)
+      if (f.dataType === 'DATE') {
+        colCell.formatter('yyyy-mm-dd')
+      }
+      if (f.required) {
+        colCell.backColor('#fff7e6')
+      }
+      // 数据校验（逐类型防御，避免单个校验器异常影响整体渲染）
+      try {
+        let validator = null
+        if (f.dataType === 'ENUM' && f.options?.length) {
+          const list = f.options.map(normalizeScope).join(',')
+          validator = DV.createListValidator(list)
+          validator.inputTitle('请选择')
+          validator.inputMessage('可选值：' + list)
+        } else if (f.dataType === 'SCOPE' && f.options?.length) {
+          const list = f.options.map((o) => o.split('|')[0]).join(',')
+          validator = DV.createListValidator(list)
+        } else if (f.dataType === 'INT') {
+          validator = DV.createNumberValidator(CMP.between, -2147483648, 2147483647, true)
+        } else if (f.dataType === 'DECIMAL') {
+          validator = DV.createNumberValidator(CMP.between, -1e15, 1e15, false)
+        } else if (f.dataType === 'DATE') {
+          validator = DV.createDateValidator(
+            new Date(2000, 0, 1), new Date(2099, 11, 31))
+        } else if (f.dataType === 'BOOL') {
+          validator = DV.createFormulaListValidator('"true,false"')
+        }
+        if (validator) {
+          validator.errorTitle('取值不合法')
+          validator.errorMessage('取值不符合字段定义（类型/可选值范围）')
+          validator.showErrorMessage(true)
+          colCell.validator(validator)
+        }
+      } catch (e) {
+        console.warn('校验器创建失败，字段：' + f.code, e)
       }
       if (f.key) {
-        sheet.getCell(0, i, GC.Spread.Sheets.SheetArea.viewport)
-          .foreColor('#c0392b')
-        col.tag({ key: f.code })
+        sheet.getCell(0, i, GC.Spread.Sheets.SheetArea.viewport).foreColor('#c0392b')
       }
     })
     // 表头写视口第 0 行
     fields.forEach((f, i) => {
       sheet.setValue(0, i, headerText(f), GC.Spread.Sheets.SheetArea.viewport)
-      sheet.getCell(0, i).font('bold 12px sans-serif')
-      sheet.getCell(0, i).backColor('#eef2f7')
-      sheet.getCell(0, i).hAlign(GC.Spread.Sheets.HorizontalAlign.center)
+      const headCell = sheet.getCell(0, i, GC.Spread.Sheets.SheetArea.viewport)
+      headCell.font('bold 12px sans-serif')
+      headCell.backColor('#eef2f7')
+      headCell.hAlign(GC.Spread.Sheets.HorizontalAlign.center)
     })
-    sheet.frozenRowCount(1)
-    sheet.options.selectionBackColor('rgba(64,158,255,0.2)')
+    try {
+      sheet.frozenRowCount(1)
+    } catch (e) {
+      console.warn('冻结首行失败', e)
+    }
+    try {
+      sheet.options.selectionBackColor = 'rgba(64,158,255,0.2)'
+    } catch (e) {
+      console.warn('选区颜色设置失败', e)
+    }
   } finally {
     sheet.resumePaint()
   }

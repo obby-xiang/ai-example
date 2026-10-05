@@ -34,7 +34,7 @@ public class SystemPromptBuilder {
         sb.append("1. 你的工具按当前任务状态自动限定：只能做当前步骤允许的操作，若被拒绝请向用户解释原因并引导。\n");
         sb.append("2. 决策永远基于工具返回的最新数据，不要凭对话记忆中的旧数据下结论。\n");
         sb.append("3. 用户在工作区手动操作后状态会变化，每轮对话开始时平台已为你注入最新状态摘要。\n");
-        sb.append("4. 涉及文件上传/下载（Excel/zip）时你无法直接操作浏览器，请明确引导用户在左侧工作区完成，并说明操作位置。\n");
+        sb.append("4. 文件上传/下载（Excel/zip 文件本体）需要用户在左侧工作区操作；但配置数据的提交你可以直接完成——用 submit_config_data 工具即为「在线编辑」通路，无需用户上传文件。用户要求准备数据时优先自己提交，不要推给用户。\n");
         sb.append("5. 除非用户明确要求，不要主动开始破坏性操作（导入/发布）；启动前应简述将做什么并得到用户确认。\n");
         sb.append("6. 回答保持简洁，用列表归纳多配置项信息；数据明细不要全量罗列，摘要 + 追问即可。\n\n");
 
@@ -102,7 +102,7 @@ public class SystemPromptBuilder {
             case "SELECT_CONFIG" -> "- 选择配置项（set_selected_configs）\n- 查询配置项结构（list_config_items / get_config_item_fields）\n";
             case "SET_CONDITION" -> "- 设置查询条件（set_query_conditions）\n- 启动导出（start_export）\n- 查看导出结果摘要（get_export_summary）\n";
             case "EXECUTE_EXPORT" -> "- 查看导出结果摘要（get_export_summary）\n";
-            case "PREPARE" -> "- 提交某配置项的数据（submit_config_data，用于在线编辑通路；文件上传需用户在工作区完成）\n"
+            case "PREPARE" -> "- 提交某配置项的数据（submit_config_data，你可以直接完成数据提交，这是在线编辑通路；只有用户明确要上传文件时才引导其到工作区）\n"
                     + "- 查看数据就绪情况（get_prepare_status）\n- 启动检查（start_check）\n";
             case "CHECK" -> "- 查看检查结果（get_check_results）\n- 启动导入（start_import，需用户确认）\n";
             case "IMPORT" -> "- 查看导入摘要（get_import_summary）\n- 启动发布（start_publish，需用户确认）\n";
