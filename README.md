@@ -30,7 +30,7 @@ yarn dev
 打开 http://localhost:5271 （默认进入任务列表页）。
 
 可选环境变量：
-- `DEEPSEEK_API_KEY`：DeepSeek API Key（application.yml 中已内置演示 Key 作为默认值）
+- `DEEPSEEK_API_KEY`：**必须**，DeepSeek API Key（仓库不保存密钥；本地启动示例：`DEEPSEEK_API_KEY=sk-xxx java -jar ...`）
 - `VITE_SPREADJS_KEY`（frontend/.env.local）：SpreadJS 授权 Key，缺省时仅显示水印，功能可用
 
 ## 文档索引
