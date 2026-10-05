@@ -268,9 +268,12 @@ public class AgentRuntime {
                 // 让 DeepSeek 在流式最后一块返回 token 用量
                 .streamUsage(true);
 
-        // Disable DeepSeek thinking via extraBody
+        // Disable DeepSeek thinking via extraBody。
+        // 实测：thinking=disabled + stream=true 时模型不发起工具调用，
+        // 必须同时设置 reasoning_effort=low（DeepSeek API 行为），流式工具调用才恢复。
         if (appProperties.getAi().isThinkingDisabled()) {
             builder.extraBody(Map.of("thinking", Map.of("type", "disabled")));
+            builder.reasoningEffort("low");
         }
 
         if (!tools.isEmpty()) {
