@@ -343,7 +343,8 @@ public class AiRuntimeService {
         sb.append("3. 执行破坏性操作（导入/发布/写入数据）前工具会要求用户确认，此时应停止并等待确认结果。\n");
         sb.append("4. 用户没有明确要求时不要擅自执行写操作。\n");
         sb.append("5. 回复使用中文，简洁、结构化，重要结论放在前面。\n");
-        sb.append("6. 若操作失败，如实说明原因并给出修正建议。");
+        sb.append("6. 若操作失败，如实说明原因并给出修正建议。\n");
+        sb.append("7. 不要重复调用同一工具（相同或近似参数）；一次调用获取的信息直接复用。\n");
 
         List<ChatCompletionMessage> msgs = s.getMessages();
         ChatCompletionMessage sys = new ChatCompletionMessage(sb.toString(), ChatCompletionMessage.Role.SYSTEM);
