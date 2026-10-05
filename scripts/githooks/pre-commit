@@ -1,0 +1,40 @@
+#!/bin/sh
+# 提交前敏感信息扫描钩子
+#
+# 启用方式（仓库根目录执行一次）：
+#   git config core.hooksPath scripts/githooks
+#
+# 作用：扫描本次提交暂存区的新增行，命中疑似密钥/令牌/私钥即阻止提交。
+#
+# 说明：下面各前缀刻意用变量拼接，避免本文件自身被其他密钥扫描器误判。
+
+C="A-Za-z0-9"          # 通用字母数字字符类
+P1="s""k-"             # 通用 "sk-" 风格密钥
+P2="gh""p_"            # GitHub PAT
+P3="gh""o_"            # GitHub OAuth
+P4="AK""IA"            # AWS Access Key ID
+P5="AI""za"            # Google API Key
+P6="xo""x"             # Slack token
+P7="-----BEGIN ""PRIVATE KEY-----"
+
+PATTERNS="${P1}[$C]{16,}|${P2}[$C]{20,}|${P3}[$C]{20,}|${P4}[0-9A-Z]{16}|${P5}[$C_-]{30,}|${P6}[baprs]-[$C-]{10,}|${P7}"
+
+# 白名单：占位符与说明性文本不算泄漏
+WHITELIST='your-|placeholder|<.*>|example|xxxx|REDACTED|\.\.\.|VITE_'
+
+hits=$(git diff --cached --unified=0 --diff-filter=ACMR \
+        | grep -E '^\+' \
+        | grep -vE '^\+\+\+' \
+        | grep -vE "$WHITELIST" \
+        | grep -nEI "$PATTERNS")
+
+if [ -n "$hits" ]; then
+  echo "✖ 检测到疑似密钥/令牌，已阻止提交：" >&2
+  echo "$hits" >&2
+  echo "" >&2
+  echo "请将密钥移到环境变量或未追踪的本地配置文件中。" >&2
+  echo "如确认为误报，可用 git commit --no-verify 跳过。" >&2
+  exit 1
+fi
+
+exit 0

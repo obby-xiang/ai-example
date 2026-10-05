@@ -1,0 +1,31 @@
+# Java / Maven
+backend/target/
+backend/data/
+backend/*.log
+*.class
+*.jar
+*.war
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.DS_Store
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env.local
+
+# Secrets (never commit)
+# 只排除目录内容，保留示例文件（注意：不能直接写 backend/config/，否则示例也无法追踪）
+backend/config/*
+!backend/config/application.yml.example
+
+# Scratch
+.scratch/
+
+# H2 database files
+*.db
+*.mv.db
+*.trace.db
