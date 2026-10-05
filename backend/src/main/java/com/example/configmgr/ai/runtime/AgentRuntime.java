@@ -106,6 +106,18 @@ public class AgentRuntime {
                 List<ToolCallback> tools = toolRegistry.forContext(session.getContext());
                 log.debug("Iter {} with {} tools", iter, tools.size());
 
+                // 调试：记录本轮发送的消息序列（assistant 的 toolCalls id 与 tool 响应 id）
+                log.debug("Request msgs: {}", messages.stream().map(m -> {
+                    if (m instanceof AssistantMessage a) {
+                        return "A[tc=" + (a.getToolCalls() == null ? "null" : a.getToolCalls().stream()
+                                .map(AssistantMessage.ToolCall::id).toList()) + "]";
+                    }
+                    if (m instanceof ToolResponseMessage t) {
+                        return "T[r=" + t.getResponses().stream().map(ToolResponseMessage.ToolResponse::id).toList() + "]";
+                    }
+                    return String.valueOf(m.getMessageType());
+                }).toList());
+
                 Prompt prompt = new Prompt(messages, buildOptions(tools));
 
                 StreamResult streamResult;
@@ -115,6 +127,14 @@ public class AgentRuntime {
                     if (Thread.currentThread().isInterrupted()) {
                         emitter.error("运行已被取消");
                         return;
+                    }
+                    // 记录 DeepSeek 原始错误体（便于定位 400 原因）
+                    Throwable cause = e;
+                    while (cause != null && !(cause instanceof org.springframework.web.reactive.function.client.WebClientResponseException)) {
+                        cause = cause.getCause();
+                    }
+                    if (cause instanceof org.springframework.web.reactive.function.client.WebClientResponseException we) {
+                        log.error("Model call failed [{}]: {}", we.getStatusCode(), we.getResponseBodyAsString());
                     }
                     log.error("Model call failed: {}", e.getMessage(), e);
                     emitter.error("AI 服务调用失败: " + e.getMessage() + "，请稍后重试");
@@ -180,14 +200,19 @@ public class AgentRuntime {
                     ChatResponse callResponse = new ChatResponse(List.of(new Generation(singleCall)));
                     ToolExecutionResult execResult = toolCallingManager.executeToolCalls(prompt, callResponse);
 
-                    // 只取其中的工具响应消息（assistant 消息已在上方整体添加）
+                    // 注意：conversationHistory() 返回的是"整段对话上下文"（供 ChatClient 组装），
+                    // 其中包含旧轮次的工具响应。只追加本次调用 id 对应的响应，避免重复/错序。
                     for (Message m : execResult.conversationHistory()) {
                         if (m instanceof ToolResponseMessage trm) {
-                            messages.add(trm);
                             for (ToolResponseMessage.ToolResponse r : trm.getResponses()) {
-                                emitter.toolDone(r.id(),
-                                        !r.responseData().startsWith("工具执行出错"),
-                                        summarize(r.responseData()));
+                                if (callId.equals(r.id())) {
+                                    messages.add(ToolResponseMessage.builder()
+                                            .responses(List.of(r))
+                                            .build());
+                                    emitter.toolDone(r.id(),
+                                            !r.responseData().startsWith("工具执行出错"),
+                                            summarize(r.responseData()));
+                                }
                             }
                         }
                     }

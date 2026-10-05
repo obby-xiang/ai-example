@@ -195,6 +195,7 @@
 | 16 | 测试脚本 byte[] 展开为 Object[] | PS 5.1 return 展开集合 | 脚本改用局部变量 + curl |
 | 17 | 浏览器聊天永远提示"AI 服务不可用" | 会话创建响应解包层级错误（res.data.sid → 实际是 res.data.data.sid），sessionStorage 存入字符串 "undefined" | 修正解包 + 历史 "undefined" 防御清理；浏览器回归通过 |
 | 18 | 刷新页面后对话历史丢失 | 后端会话保存了历史，但前端刷新后从未拉取渲染（GET /sessions/{sid} 不返回消息） | 后端返回重建的显示条目（user/assistant/tool）+ 最近 token 用量；前端 initSession 恢复消息、进行中提示、挂起的 HITL 卡片与 token 行 |
+| 19 | 工具调用后的下一轮对话 400 | ToolCallingManager.executeToolCalls 的 conversationHistory() 返回整段对话上下文，全部追加导致旧工具响应重复/错序，DeepSeek 报 "tool_call_id did not have response messages" | 只追加本次调用 id 对应的响应（DeepSeek 错误体实测定位；HITL 拒绝后第二轮回归通过） |
 
 ---
 
