@@ -42,6 +42,7 @@ public class ExportJobRunner {
     private final TaskSseService taskSseService;
     private final AppProperties appProperties;
     private final ObjectMapper objectMapper;
+    private final JobCancellationRegistry cancellationRegistry;
 
     @Transactional
     public void run(Job job) {
@@ -49,12 +50,17 @@ public class ExportJobRunner {
         job.setStartedAt(java.time.LocalDateTime.now());
         jobRepository.save(job);
 
+        boolean cancelled = false;
         try {
             var items = taskItemRepository.findByTaskIdOrderBySortOrder(job.getTaskId());
             job.setTotal(items.size());
             jobRepository.save(job);
 
             for (var item : items) {
+                if (cancellationRegistry.isCancelled(job.getId())) {
+                    cancelled = true;
+                    break;
+                }
                 String defCode = item.getDefCode();
                 JobItem ji = new JobItem();
                 ji.setJobId(job.getId());
@@ -88,8 +94,15 @@ public class ExportJobRunner {
                             ji.setTotal(allRows.size());
                             jobItemRepository.save(ji);
                             publishProgress(job, defCode, filtered.size(), allRows.size());
+                            if (cancellationRegistry.isCancelled(job.getId())) {
+                                cancelled = true;
+                                ji.setStatus("CANCELLED");
+                                jobItemRepository.save(ji);
+                                break;
+                            }
                         }
                     }
+                    if (cancelled) break;
 
                     // Write Excel
                     String storagePath = fileStorage.newPath(".xlsx");
@@ -124,7 +137,11 @@ public class ExportJobRunner {
                 jobRepository.save(job);
             }
 
-            job.setStatus(job.getErrorCount() > 0 ? Job.JobStatus.FAILED : Job.JobStatus.COMPLETED);
+            if (cancelled) {
+                job.setStatus(Job.JobStatus.CANCELLED);
+            } else {
+                job.setStatus(job.getErrorCount() > 0 ? Job.JobStatus.FAILED : Job.JobStatus.COMPLETED);
+            }
         } catch (Exception e) {
             log.error("Export job failed: {}", e.getMessage(), e);
             job.setStatus(Job.JobStatus.FAILED);

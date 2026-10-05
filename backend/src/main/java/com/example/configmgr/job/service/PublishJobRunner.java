@@ -43,6 +43,7 @@ public class PublishJobRunner {
     private final TaskSseService taskSseService;
     private final AppProperties appProperties;
     private final ObjectMapper objectMapper;
+    private final JobCancellationRegistry cancellationRegistry;
 
     @Transactional
     public void run(Job job) {
@@ -52,6 +53,7 @@ public class PublishJobRunner {
 
         issueRepository.deleteByJobId(job.getId());
 
+        boolean cancelled = false;
         try {
             var items = taskItemRepository.findByTaskIdOrderBySortOrder(job.getTaskId());
             List<String> defCodes = items.stream().map(i -> i.getDefCode()).toList();
@@ -63,6 +65,10 @@ public class PublishJobRunner {
             int totalErrors = 0;
 
             for (String defCode : sorted) {
+                if (cancellationRegistry.isCancelled(job.getId())) {
+                    cancelled = true;
+                    break;
+                }
                 JobItem ji = new JobItem();
                 ji.setJobId(job.getId());
                 ji.setDefCode(defCode);
@@ -108,8 +114,15 @@ public class PublishJobRunner {
                             ji.setProcessed(processed);
                             jobItemRepository.save(ji);
                             publishProgress(job, defCode, processed, stagingRows.size());
+                            if (cancellationRegistry.isCancelled(job.getId())) {
+                                cancelled = true;
+                                ji.setStatus("CANCELLED");
+                                jobItemRepository.save(ji);
+                                break;
+                            }
                         }
                     }
+                    if (cancelled) break;
 
                     ji.setStatus("COMPLETED");
                     ji.setProcessed(stagingRows.size());
@@ -133,7 +146,11 @@ public class PublishJobRunner {
             }
 
             job.setErrorCount(totalErrors);
-            job.setStatus(totalErrors > 0 ? Job.JobStatus.FAILED : Job.JobStatus.COMPLETED);
+            if (cancelled) {
+                job.setStatus(Job.JobStatus.CANCELLED);
+            } else {
+                job.setStatus(totalErrors > 0 ? Job.JobStatus.FAILED : Job.JobStatus.COMPLETED);
+            }
 
         } catch (Exception e) {
             log.error("Publish job failed: {}", e.getMessage(), e);

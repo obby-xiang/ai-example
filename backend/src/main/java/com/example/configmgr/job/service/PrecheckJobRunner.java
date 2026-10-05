@@ -50,6 +50,7 @@ public class PrecheckJobRunner {
     private final TaskSseService taskSseService;
     private final AppProperties appProperties;
     private final ObjectMapper objectMapper;
+    private final JobCancellationRegistry cancellationRegistry;
 
     @Transactional
     public void run(Job job) {
@@ -60,6 +61,7 @@ public class PrecheckJobRunner {
         // Delete old issues for this job
         issueRepository.deleteByJobId(job.getId());
 
+        boolean cancelled = false;
         try {
             var items = taskItemRepository.findByTaskIdOrderBySortOrder(job.getTaskId());
             List<String> defCodes = items.stream().map(i -> i.getDefCode()).toList();
@@ -72,6 +74,10 @@ public class PrecheckJobRunner {
             int totalWarnings = 0;
 
             for (String defCode : sorted) {
+                if (cancellationRegistry.isCancelled(job.getId())) {
+                    cancelled = true;
+                    break;
+                }
                 JobItem ji = new JobItem();
                 ji.setJobId(job.getId());
                 ji.setDefCode(defCode);
@@ -157,8 +163,15 @@ public class PrecheckJobRunner {
                             ji.setProcessed(i);
                             jobItemRepository.save(ji);
                             publishProgress(job, defCode, i, rows.size());
+                            if (cancellationRegistry.isCancelled(job.getId())) {
+                                cancelled = true;
+                                ji.setStatus("CANCELLED");
+                                jobItemRepository.save(ji);
+                                break;
+                            }
                         }
                     }
+                    if (cancelled) break;
 
                     totalErrors += rowErrors;
                     totalWarnings += rowWarnings;
@@ -186,7 +199,11 @@ public class PrecheckJobRunner {
 
             job.setErrorCount(totalErrors);
             job.setWarningCount(totalWarnings);
-            job.setStatus(totalErrors > 0 ? Job.JobStatus.FAILED : Job.JobStatus.COMPLETED);
+            if (cancelled) {
+                job.setStatus(Job.JobStatus.CANCELLED);
+            } else {
+                job.setStatus(totalErrors > 0 ? Job.JobStatus.FAILED : Job.JobStatus.COMPLETED);
+            }
 
         } catch (Exception e) {
             log.error("Precheck job failed: {}", e.getMessage(), e);

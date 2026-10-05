@@ -50,11 +50,11 @@ public class FileController {
 
         if (originalName.toLowerCase().endsWith(".zip")) {
             // ZIP 批量上传：解压后按文件名逐个匹配配置编码
-            List<String[]> entries = readZipEntries(file.getBytes());
+            List<ZipFileEntry> entries = readZipEntries(file.getBytes());
             List<Map<String, String>> matched = new ArrayList<>();
             List<String> unmatched = new ArrayList<>();
-            for (String[] entry : entries) {
-                String name = entry[0];
+            for (ZipFileEntry entry : entries) {
+                String name = entry.name();
                 if (!name.toLowerCase().endsWith(".xlsx")) {
                     unmatched.add(name + "（非 Excel 文件）");
                     continue;
@@ -64,7 +64,7 @@ public class FileController {
                     unmatched.add(name + "（无法匹配配置编码）");
                     continue;
                 }
-                storeUploadFile(taskId, defCode, name, entry[1]);
+                storeUploadFile(taskId, defCode, name, entry.content());
                 matched.add(Map.of("defCode", defCode, "fileName", name));
             }
             if (matched.isEmpty()) {
@@ -115,29 +115,31 @@ public class FileController {
     }
 
     /**
-     * 解压 zip 并返回 [文件名, 内容] 列表。文件名先按 UTF-8 解析，
+     * 解压 zip 并返回条目列表。文件名先按 UTF-8 解析，
      * 若出现乱码（替换符 U+FFFD）则按 GBK 重新解析，兼容 Windows 压缩工具。
      */
-    private List<String[]> readZipEntries(byte[] zipBytes) throws IOException {
-        List<String[]> utf8 = extractZip(zipBytes, StandardCharsets.UTF_8);
-        if (utf8.stream().anyMatch(e -> e[0].contains("\uFFFD"))) {
+    private List<ZipFileEntry> readZipEntries(byte[] zipBytes) throws IOException {
+        List<ZipFileEntry> utf8 = extractZip(zipBytes, StandardCharsets.UTF_8);
+        if (utf8.stream().anyMatch(e -> e.name().contains("\uFFFD"))) {
             return extractZip(zipBytes, Charset.forName("GBK"));
         }
         return utf8;
     }
 
-    private List<String[]> extractZip(byte[] zipBytes, Charset charset) throws IOException {
-        List<String[]> result = new ArrayList<>();
+    private List<ZipFileEntry> extractZip(byte[] zipBytes, Charset charset) throws IOException {
+        List<ZipFileEntry> result = new ArrayList<>();
         try (ZipInputStream zis = new ZipInputStream(new java.io.ByteArrayInputStream(zipBytes), charset)) {
             ZipEntry entry;
             while ((entry = zis.getNextEntry()) != null) {
                 if (entry.isDirectory()) continue;
-                result.add(new String[]{entry.getName(), zis.readAllBytes()});
+                result.add(new ZipFileEntry(entry.getName(), zis.readAllBytes()));
                 zis.closeEntry();
             }
         }
         return result;
     }
+
+    private record ZipFileEntry(String name, byte[] content) {}
 
     @GetMapping("/{defCode}")
     public ResponseEntity<byte[]> download(@PathVariable Long taskId,

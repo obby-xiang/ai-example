@@ -15,7 +15,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.Map;
 
 @Slf4j
 @Service
@@ -29,6 +29,7 @@ public class JobService {
     private final ImportJobRunner importJobRunner;
     private final PublishJobRunner publishJobRunner;
     private final TaskSseService taskSseService;
+    private final JobCancellationRegistry cancellationRegistry;
 
     @Transactional
     public Job createAndStart(Long taskId, Job.JobType jobType) {
@@ -37,6 +38,7 @@ public class JobService {
         job.setJobType(jobType);
         job.setStatus(Job.JobStatus.PENDING);
         job = jobRepository.save(job);
+        cancellationRegistry.register(job.getId());
         runAsync(job);
         return job;
     }
@@ -53,6 +55,8 @@ public class JobService {
             }
         } catch (Exception e) {
             log.error("Job {} failed unexpectedly: {}", job.getId(), e.getMessage(), e);
+        } finally {
+            cancellationRegistry.unregister(job.getId());
         }
     }
 
@@ -73,9 +77,10 @@ public class JobService {
     public void cancel(Long jobId) {
         Job job = findById(jobId);
         if (job.getStatus() == Job.JobStatus.RUNNING || job.getStatus() == Job.JobStatus.PENDING) {
+            cancellationRegistry.cancel(jobId);
             job.setStatus(Job.JobStatus.CANCELLED);
             jobRepository.save(job);
-            taskSseService.publish(job.getTaskId(), "JOB_DONE", java.util.Map.of(
+            taskSseService.publish(job.getTaskId(), "JOB_DONE", Map.of(
                     "jobId", jobId, "status", "CANCELLED"));
         }
     }
