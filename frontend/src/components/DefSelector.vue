@@ -1,13 +1,13 @@
 <template>
   <div>
-    <div class="selector-bar">
+    <div class="flex gap-3 mb-2.5">
       <el-radio-group v-model="levelFilter" size="small">
         <el-radio-button value="">全部层级</el-radio-button>
         <el-radio-button value="GLOBAL">全局</el-radio-button>
         <el-radio-button value="REGION">地区</el-radio-button>
         <el-radio-button value="PROJECT">项目</el-radio-button>
       </el-radio-group>
-      <el-input v-model="keyword" size="small" placeholder="搜索编码 / 名称" clearable style="width: 220px;" />
+      <el-input v-model="keyword" size="small" placeholder="搜索编码 / 名称" clearable class="w-[220px]" />
     </div>
     <el-table
       ref="tableRef"
@@ -29,7 +29,7 @@
       <el-table-column label="依赖" min-width="140">
         <template #default="{ row }">
           <span v-if="row.dependsOn && row.dependsOn.length">{{ row.dependsOn.join(', ') }}</span>
-          <span v-else style="color: #c0c4cc;">无</span>
+          <span v-else class="text-[#c0c4cc]">无</span>
         </template>
       </el-table-column>
       <el-table-column prop="description" label="描述" min-width="160" show-overflow-tooltip />
@@ -91,11 +91,3 @@ function levelLabel(l) {
   return { GLOBAL: '全局', REGION: '地区', PROJECT: '项目' }[l] || l
 }
 </script>
-
-<style scoped>
-.selector-bar {
-  display: flex;
-  gap: 12px;
-  margin-bottom: 10px;
-}
-</style>

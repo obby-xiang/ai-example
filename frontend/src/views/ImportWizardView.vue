@@ -1,17 +1,17 @@
 <template>
   <div v-loading="pageLoading">
-    <div class="page-head">
+    <div class="flex justify-between items-start mb-4">
       <div>
-        <h2 class="page-title">导入配置向导</h2>
-        <div class="page-sub" v-if="task">
+        <h2 class="m-0 text-xl text-[#303133]">导入配置向导</h2>
+        <div class="mt-1 text-[13px] text-[#909399]" v-if="task">
           {{ task.taskNo }} · {{ task.name }}
-          <el-tag size="small" style="margin-left: 8px;" :type="taskStatusType">{{ taskStatusLabel }}</el-tag>
+          <el-tag size="small" class="ml-2" :type="taskStatusType">{{ taskStatusLabel }}</el-tag>
         </div>
       </div>
       <el-button @click="$router.push('/tasks')">返回任务列表</el-button>
     </div>
 
-    <el-steps :active="step - 1" align-center finish-status="success" style="margin-bottom: 20px;">
+    <el-steps :active="step - 1" align-center finish-status="success" class="mb-5">
       <el-step title="上传配置" />
       <el-step title="检查配置" />
       <el-step title="导入配置" />
@@ -21,7 +21,7 @@
     <!-- ============ 第 1 步：选择 + 上传/编辑 ============ -->
     <div v-show="step === 1">
       <DefSelector v-model="selectedDefs" :defs="defs" />
-      <div class="upload-bar">
+      <div class="flex items-center gap-3 my-3">
         <el-button size="small" :disabled="!selectedDefs.length" @click="downloadSelectedTemplates">
           下载模板（{{ selectedDefs.length > 1 ? 'zip' : 'xlsx' }}）
         </el-button>
@@ -33,14 +33,14 @@
         >
           <el-button size="small" type="primary" :disabled="!selectedDefs.length">上传 xlsx / zip</el-button>
         </el-upload>
-        <span class="upload-hint">按文件名中的配置项编码匹配（如 COUNTRY.xlsx）；zip 内可含多个 xlsx；未上传的配置项可直接在线编辑。</span>
+        <span class="text-xs text-[#909399]">按文件名中的配置项编码匹配（如 COUNTRY.xlsx）；zip 内可含多个 xlsx；未上传的配置项可直接在线编辑。</span>
       </div>
       <template v-if="editorDefs.length">
         <el-tabs v-model="activeEditorTab" type="border-card">
           <el-tab-pane v-for="def in editorDefs" :key="def.code" :name="def.code">
             <template #label>
               {{ def.name }}（{{ def.code }}）
-              <el-tag v-if="uploadedFiles[def.code]" size="small" type="success" style="margin-left: 4px;">已上传</el-tag>
+              <el-tag v-if="uploadedFiles[def.code]" size="small" type="success" class="ml-1">已上传</el-tag>
             </template>
             <SpreadSheet :ref="(el) => setSpreadRef(def.code, el)" height="380px" @data-changed="onDataChanged" />
           </el-tab-pane>
@@ -50,33 +50,33 @@
 
     <!-- ============ 第 2 步：检查 ============ -->
     <div v-show="step === 2">
-      <div class="job-bar">
+      <div class="flex items-center gap-3 mb-3">
         <el-button type="primary" :loading="startingKind === 'check'" :disabled="jobRunning(checkJob)"
                    @click="startCheck">启动预检查</el-button>
-        <span class="job-hint">校验必填、类型、枚举与跨配置项引用；不写入任何数据。</span>
+        <span class="text-xs text-[#909399]">校验必填、类型、枚举与跨配置项引用；不写入任何数据。</span>
       </div>
       <JobProgress :job="checkJob" @cancel="cancelJob(checkJob)" />
       <el-alert v-if="checkJob && checkJob.status === 'SUCCESS'" type="success" :closable="false" show-icon
-                style="margin-top: 12px;" title="预检查通过，可进入下一步导入。" />
+                class="mt-3" title="预检查通过，可进入下一步导入。" />
       <el-alert v-else-if="checkJob && checkJob.status === 'FAILED'" type="warning" :closable="false" show-icon
-                style="margin-top: 12px;" title="存在校验错误，可返回第 1 步修改数据后重新检查，或直接继续（导入时将再次校验）。" />
+                class="mt-3" title="存在校验错误，可返回第 1 步修改数据后重新检查，或直接继续（导入时将再次校验）。" />
     </div>
 
     <!-- ============ 第 3 步：导入 ============ -->
     <div v-show="step === 3">
-      <div class="job-bar">
+      <div class="flex items-center gap-3 mb-3">
         <el-button type="primary" :loading="startingKind === 'import'" :disabled="jobRunning(importJob)"
                    @click="startImport">启动导入</el-button>
-        <span class="job-hint">再次校验后写入暂存区（暂不发布）；有错误的配置项其下游依赖将被跳过。</span>
+        <span class="text-xs text-[#909399]">再次校验后写入暂存区（暂不发布）；有错误的配置项其下游依赖将被跳过。</span>
       </div>
       <JobProgress :job="importJob" @cancel="cancelJob(importJob)" />
     </div>
 
     <!-- ============ 第 4 步：发布 ============ -->
     <div v-show="step === 4">
-      <el-card shadow="never" style="margin-bottom: 14px;">
+      <el-card shadow="never" class="mb-3.5">
         <template #header>
-          <div class="staging-head">
+          <div class="flex justify-between items-center">
             <span>暂存数据核查</span>
             <el-button size="small" @click="loadStaging" :loading="stagingLoading">刷新</el-button>
           </div>
@@ -91,20 +91,20 @@
                 <template #default="{ row }">{{ row.data[f.name] }}</template>
               </el-table-column>
             </el-table>
-            <div v-if="s.rowCount > 100" class="staging-more">仅展示前 100 行</div>
+            <div v-if="s.rowCount > 100" class="py-1.5 text-xs text-[#909399]">仅展示前 100 行</div>
           </el-collapse-item>
         </el-collapse>
       </el-card>
-      <div class="job-bar">
+      <div class="flex items-center gap-3 mb-3">
         <el-button type="primary" :loading="startingKind === 'publish'" :disabled="jobRunning(publishJob)"
                    @click="startPublish">确认发布</el-button>
-        <span class="job-hint">发布将按配置项全量替换正式区数据，发布成功后任务完成。</span>
+        <span class="text-xs text-[#909399]">发布将按配置项全量替换正式区数据，发布成功后任务完成。</span>
       </div>
       <JobProgress :job="publishJob" @cancel="cancelJob(publishJob)" />
     </div>
 
     <!-- ============ 步骤条 ============ -->
-    <div class="wizard-footer">
+    <div class="mt-5 pt-4 border-t border-solid border-[#ebeef5] flex justify-center gap-3">
       <el-button :disabled="step === 1" @click="goStep(step - 1)">上一步</el-button>
       <el-button v-if="step < 4" type="primary" @click="nextStep">下一步</el-button>
     </div>
@@ -420,42 +420,3 @@ onBeforeUnmount(() => {
   ws.reset()
 })
 </script>
-
-<style scoped>
-.page-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  margin-bottom: 16px;
-}
-.page-title { margin: 0; font-size: 20px; color: #303133; }
-.page-sub { margin-top: 4px; font-size: 13px; color: #909399; }
-.upload-bar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin: 12px 0;
-}
-.upload-hint { font-size: 12px; color: #909399; }
-.job-bar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 12px;
-}
-.job-hint { font-size: 12px; color: #909399; }
-.staging-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-.staging-more { padding: 6px 0; font-size: 12px; color: #909399; }
-.wizard-footer {
-  margin-top: 20px;
-  padding-top: 16px;
-  border-top: 1px solid #ebeef5;
-  display: flex;
-  justify-content: center;
-  gap: 12px;
-}
-</style>

@@ -68,3 +68,51 @@
 3. **取消语义**：AI 取消与作业取消均为轮次/配置项边界生效，单轮长回复中取消会在该轮结束后生效。
 4. **作业级 status 语义**：配置项级失败体现在 `items[].status`（FAILED/SKIPPED），作业级 status 只反映执行本身是否正常完成（详见后端实现说明）。
 5. **上传匹配**：按"文件名包含配置项编码"匹配，按编码长度降序防前缀误配；浏览器自动化环境无法模拟文件选择框，该路径经代码审查与模板/解析函数单测级验证（模板生成与 xlsx 导出均已实测），未做真实文件上传 E2E。
+
+---
+
+# 第二轮验证：四项改进要求回归（2026-10-05）
+
+改进要求：① 能用 Spring AI 现成能力的不自造；② UI 用 Element Plus + TailwindCSS 现成组件/样式；③ AI 对话栏与工作区联动不耦合、可独立移除；④ 会话以页签 session 为主，刷新不丢历史、新页签新会话。
+
+## E. Spring AI 高层 API 重构回归（后端重构为 OpenAiChatModel + ToolCallback + ChatMemory 后）
+
+| # | 结果 | 证据 |
+|---|---|---|
+| E1 | ✅ | 依赖为 `spring-ai-starter-model-openai`（保持 OpenAI 兼容组件；曾短暂评估 deepseek 原生模块，核实其 `createRequest` 存在完全相同的 reasoning 回放缺口、无实质收益，按用户要求坚守 OpenAI 组件） |
+| E2 | ✅ | 纯对话流式正常（B1 复测：token/reasoning 事件 + done=finished） |
+| E3 | ✅ | 后端工具正常（B2 复测：tool_run(list_config_defs)） |
+| E4 | ✅ | **reasoning 回放补丁生效**：多轮后端工具场景（B7 复测）7 轮 tool_run 无任何 400/error |
+| E5 | ✅ | 前端工具暂停-恢复（B3 复测：tool_call→waiting→tool-result→finished），历史接口（B6）正常 |
+| E6 | ✅ | 渐进式披露（B4 复测：TASKS 页无 start_export）、needConfirm 工具（B5 复测：EXPORT 第3步只出现该页可用工具） |
+| E7 | ✅ | `mvn package -DskipTests` BUILD SUCCESS（重构后） |
+
+实现要点：`OpenAiChatModel.stream` + `internalToolExecutionEnabled(false)` 受控执行；`RoutingToolCallback`(ToolDefinition+路由）；`MessageWindowChatMemory`(80 条窗口） 存模型历史；同名包补丁子类 `ReasoningAwareOpenAiChatModel` 仅改 createRequest 的 reasoningContent 传播一处（框架缺口，见 docs/02 D1）。
+
+## F. TailwindCSS + Element Plus 样式回归
+
+| # | 结果 | 证据 |
+|---|---|---|
+| F1 | ✅ | 引入 tailwindcss@3.4（preflight=false 防冲突）+ postcss + autoprefixer；`yarn install`/`yarn build` 通过（AiPanel 独立懒加载分包） |
+| F2 | ✅ | 约 300 行手写 CSS + 20 余处内联 style 全部替换为 Element Plus 组件（el-empty/el-tag/el-progress/el-steps…）与 Tailwind 工具类；仅 SpreadJS 动态高度、三点动画保留少量 CSS 并注明原因 |
+| F3 | ✅ | 浏览器抽查：任务列表、AI 栏空态/消息流/工具标签、导入向导（暂存核查/步骤条/按钮）视觉与布局正常 |
+
+## G. 联动不耦合验证
+
+| # | 结果 | 证据 |
+|---|---|---|
+| G1 | ✅ | workspace store 收敛为唯一接口层（snapshot/buildContext/registerPageHandler/dataVersion）；grep 确认业务视图不 import ai store，AI 侧只 import workspace 公开契约 |
+| G2 | ✅ | AI 工具动作与 UI 按钮共用同一批页面 handler——AI 代选配置/代填条件时界面实时联动（C5 已实测），用户手工操作同样经 store 反映给 AI 上下文 |
+| G3 | ✅ | AiPanel 为 defineAsyncComponent + AI_PANEL_ENABLED 开关；全部 AI 动作均有对应 UI 按钮，移除 AI 栏不影响完整业务操作；无工作区时 AI 栏可独立对话+后端工具 |
+
+## H. 页签会话验证
+
+| # | 结果 | 证据 |
+|---|---|---|
+| H1 | ✅ | 新开浏览器页签 = 空对话（新 sessionId，sessionStorage 无记录） |
+| H2 | ✅ | 对话后刷新页面：历史完整恢复（sessionStorage 镜像即时回放 + 后端 history 对账） |
+| H3 | ✅ | 后端会话失效时镜像仍可展示历史，挂起工具降级"会话已失效"，不会误触失败确认 |
+
+## 遗留事项
+- `docs/02-architecture.md` 已同步至 Spring AI 高层 API 方案（D1/3.x/4.x）；`docs/03-api-contract.md` 对外契约未变。
+- 补丁类 `ReasoningAwareOpenAiChatModel` 在 Spring AI 升级后需评审是否可移除（关注官方是否修复 reasoning_content 回放）。

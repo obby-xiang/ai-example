@@ -1,5 +1,6 @@
 <template>
-  <div ref="hostRef" class="spread-host" :style="{ height }"></div>
+  <!-- SpreadJS 宿主：高度是组件 prop（每实例不同），保留内联 style 绑定；其余样式用 Tailwind -->
+  <div ref="hostRef" class="w-full border border-solid border-[#e4e7ed] rounded overflow-hidden" :style="{ height }"></div>
 </template>
 
 <script setup>
@@ -132,12 +133,3 @@ function setReadOnly(readOnly) {
 
 defineExpose({ loadData, collectRows, setReadOnly, getSpread: () => spread })
 </script>
-
-<style scoped>
-.spread-host {
-  width: 100%;
-  border: 1px solid #e4e7ed;
-  border-radius: 4px;
-  overflow: hidden;
-}
-</style>

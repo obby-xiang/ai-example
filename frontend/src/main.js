@@ -6,6 +6,9 @@ import 'element-plus/dist/index.css'
 import GC from '@grapecity/spread-sheets'
 import '@grapecity/spread-sheets-resources-zh'
 import '@grapecity/spread-sheets/styles/gc.spread.sheets.excel2013white.css'
+// 全局样式（Tailwind）：放在 Element Plus / SpreadJS 样式之后，
+// 使工具类在同优先级下能覆盖组件默认样式（如 el-main 的 padding）
+import './style.css'
 
 import App from './App.vue'
 import router from './router'

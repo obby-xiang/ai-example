@@ -1,60 +1,71 @@
 <template>
-  <div v-if="!aiStore.expanded" class="collapse-toggle" @click="aiStore.toggleExpand()">
+  <div v-if="!aiStore.expanded"
+       class="h-full flex flex-col items-center pt-4 gap-2 cursor-pointer text-[#409eff]"
+       @click="aiStore.toggleExpand()">
     <el-icon><ChatDotRound /></el-icon>
-    <span class="collapse-text">AI 助手</span>
+    <span class="writing-vertical text-[13px]">AI 助手</span>
   </div>
 
-  <div v-else class="ai-panel">
-    <div class="ai-head">
-      <div class="ai-logo">AI</div>
-      <div class="ai-head-text">
-        <div class="ai-title">实施助手</div>
-        <div class="ai-subtitle">流式对话 · 工具调用</div>
+  <div v-else class="h-full flex flex-col">
+    <div class="flex items-center gap-2.5 px-3 py-2.5 border-b border-solid border-[#ebeef5]">
+      <div class="w-[34px] h-[34px] rounded-lg bg-gradient-to-br from-[#409eff] to-[#7b61ff] text-white flex items-center justify-center font-bold">AI</div>
+      <div class="flex-1 min-w-0">
+        <div class="text-sm font-semibold text-[#303133]">实施助手</div>
+        <div class="text-xs text-[#909399]">流式对话 · 工具调用</div>
       </div>
       <el-button size="small" text @click="aiStore.toggleExpand()" title="收起">
         <el-icon><ArrowRight /></el-icon>
       </el-button>
     </div>
 
-    <div ref="msgWrapRef" class="ai-messages">
-      <div v-if="!aiStore.messages.length" class="ai-empty">
-        <el-icon :size="36" color="#409EFF"><Promotion /></el-icon>
-        <div class="ai-empty-title">您好，我是实施助手</div>
-        <div>我可以帮您查询配置项、创建任务、<br />代选配置、下载模板、启动导出/导入作业。</div>
-      </div>
+    <div ref="msgWrapRef" class="flex-1 overflow-y-auto p-3">
+      <el-empty v-if="!aiStore.messages.length" :image-size="60">
+        <template #image>
+          <el-icon :size="36" color="#409EFF"><Promotion /></el-icon>
+        </template>
+        <template #description>
+          <div class="mb-1 text-sm font-semibold text-[#606266]">您好，我是实施助手</div>
+          <div class="text-[13px] text-[#909399] leading-[1.8]">我可以帮您查询配置项、创建任务、<br />代选配置、下载模板、启动导出/导入作业。</div>
+        </template>
+      </el-empty>
 
-      <div v-for="m in aiStore.messages" :key="m.id" class="msg" :class="m.role">
-        <div class="avatar">{{ m.role === 'user' ? '我' : 'AI' }}</div>
-        <div class="bubble">
+      <div v-for="m in aiStore.messages" :key="m.id"
+           class="flex gap-2 mb-3.5" :class="m.role === 'user' ? 'flex-row-reverse' : ''">
+        <div class="w-7 h-7 rounded-full text-xs flex items-center justify-center shrink-0"
+             :class="m.role === 'user' ? 'bg-[#409eff] text-white' : 'bg-[#e4e7ed] text-[#606266]'">
+          {{ m.role === 'user' ? '我' : 'AI' }}
+        </div>
+        <div class="max-w-[82%] rounded-lg px-2.5 py-2 text-[13px] text-[#303133] leading-[1.6] break-words"
+             :class="m.role === 'user' ? 'bg-[#d9ecff]' : 'bg-[#f4f4f5]'">
           <span v-if="m.pending && !m.content" class="typing">
             <i class="dot"></i><i class="dot"></i><i class="dot"></i>
           </span>
 
-          <details v-if="m.reasoning" class="reasoning">
-            <summary>思考过程</summary>
-            <div class="reasoning-body">{{ m.reasoning }}</div>
+          <details v-if="m.reasoning" class="mb-1.5 text-xs text-[#909399]">
+            <summary class="cursor-pointer">思考过程</summary>
+            <div class="mt-1 px-2 py-1.5 bg-[#fafafa] border-l-2 border-solid border-[#dcdfe6] whitespace-pre-wrap max-h-40 overflow-y-auto">{{ m.reasoning }}</div>
           </details>
 
-          <div v-if="m.content" class="content">{{ m.content }}</div>
+          <div v-if="m.content" class="whitespace-pre-wrap">{{ m.content }}</div>
 
-          <div v-if="m.toolRuns && m.toolRuns.length" class="tool-runs">
+          <div v-if="m.toolRuns && m.toolRuns.length" class="mt-1.5 flex flex-wrap gap-1">
             <el-tag v-for="(tr, i) in m.toolRuns" :key="i" size="small"
                     :type="tr.status === 'ok' ? 'info' : 'danger'" effect="plain">
               已执行工具 {{ tr.name }}
             </el-tag>
           </div>
 
-          <div v-if="m.toolCall" class="tool-card">
-            <div class="tool-card-title">
+          <div v-if="m.toolCall" class="mt-2 border border-solid border-[#dcdfe6] rounded-md p-2 bg-white">
+            <div class="flex items-center gap-1.5 font-semibold text-[13px]">
               <el-icon color="#409EFF"><Operation /></el-icon>
               <span>{{ toolLabel(m.toolCall.name) }}</span>
               <el-tag v-if="m.toolCall.needConfirm" size="small" type="warning">需确认</el-tag>
               <el-tag v-else size="small" type="success">自动</el-tag>
             </div>
-            <div v-if="hasArgs(m.toolCall)" class="tool-args">
+            <div v-if="hasArgs(m.toolCall)" class="mt-1.5 text-xs text-[#909399] break-all">
               <code>{{ formatArgs(m.toolCall.arguments) }}</code>
             </div>
-            <div class="tool-card-btns">
+            <div class="mt-2 flex gap-2 justify-end">
               <template v-if="m.toolCall.status === 'pending'">
                 <template v-if="m.toolCall.needConfirm">
                   <el-button size="small" :disabled="aiStore.loading"
@@ -69,6 +80,7 @@
               </el-tag>
               <el-tag v-else-if="m.toolCall.status === 'succeeded'" size="small" type="success">已执行</el-tag>
               <el-tag v-else-if="m.toolCall.status === 'rejected'" size="small" type="info">已拒绝</el-tag>
+              <el-tag v-else-if="m.toolCall.status === 'expired'" size="small" type="info">会话已失效</el-tag>
               <el-tag v-else size="small" type="danger">执行失败</el-tag>
             </div>
           </div>
@@ -76,7 +88,7 @@
       </div>
     </div>
 
-    <div class="ai-input">
+    <div class="border-t border-solid border-[#ebeef5] px-3 py-2.5">
       <el-input
         v-model="inputText"
         type="textarea"
@@ -85,8 +97,8 @@
         placeholder="输入消息，Enter 发送，Shift+Enter 换行"
         @keydown.enter.exact.prevent="send"
       />
-      <div class="ai-input-bar">
-        <span class="tips">Enter 发送 · Shift+Enter 换行</span>
+      <div class="mt-2 flex items-center justify-between">
+        <span class="text-xs text-[#c0c4cc]">Enter 发送 · Shift+Enter 换行</span>
         <div>
           <el-button v-if="aiStore.loading" size="small" type="danger" plain @click="aiStore.stop()">
             停止
@@ -163,6 +175,7 @@ watch(
 watch(() => aiStore.expanded, (v) => { if (v) setTimeout(scrollBottom, 60) })
 
 onMounted(async () => {
+  aiStore.startMirror()
   if (!aiStore.messages.length) {
     await aiStore.loadHistory()
   }
@@ -171,96 +184,7 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.collapse-toggle {
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  padding-top: 16px;
-  gap: 8px;
-  cursor: pointer;
-  color: #409eff;
-}
-.collapse-text {
-  writing-mode: vertical-rl;
-  font-size: 13px;
-  letter-spacing: 2px;
-}
-.ai-panel {
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-}
-.ai-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
-  border-bottom: 1px solid #ebeef5;
-}
-.ai-logo {
-  width: 34px;
-  height: 34px;
-  border-radius: 8px;
-  background: linear-gradient(135deg, #409eff, #7b61ff);
-  color: #fff;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: 700;
-}
-.ai-head-text { flex: 1; min-width: 0; }
-.ai-title { font-size: 14px; font-weight: 600; color: #303133; }
-.ai-subtitle { font-size: 12px; color: #909399; }
-.ai-messages {
-  flex: 1;
-  overflow-y: auto;
-  padding: 12px;
-}
-.ai-empty {
-  text-align: center;
-  color: #909399;
-  font-size: 13px;
-  padding: 32px 12px;
-  line-height: 1.8;
-}
-.ai-empty-title {
-  margin: 8px 0 4px;
-  font-size: 14px;
-  font-weight: 600;
-  color: #606266;
-}
-.msg {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 14px;
-}
-.msg.user { flex-direction: row-reverse; }
-.avatar {
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  background: #e4e7ed;
-  color: #606266;
-  font-size: 12px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-}
-.msg.user .avatar { background: #409eff; color: #fff; }
-.bubble {
-  max-width: 82%;
-  background: #f4f4f5;
-  border-radius: 8px;
-  padding: 8px 10px;
-  font-size: 13px;
-  color: #303133;
-  line-height: 1.6;
-  word-break: break-word;
-}
-.msg.user .bubble { background: #d9ecff; }
-.content { white-space: pre-wrap; }
+/* 等待回复的三点闪烁动画：CSS keyframes，Tailwind 无对应工具类，保留少量 scoped CSS */
 .typing .dot {
   display: inline-block;
   width: 6px;
@@ -276,62 +200,4 @@ onMounted(async () => {
   0%, 80%, 100% { opacity: 0.3; }
   40% { opacity: 1; }
 }
-.reasoning {
-  margin-bottom: 6px;
-  font-size: 12px;
-  color: #909399;
-}
-.reasoning summary { cursor: pointer; }
-.reasoning-body {
-  margin-top: 4px;
-  padding: 6px 8px;
-  background: #fafafa;
-  border-left: 2px solid #dcdfe6;
-  white-space: pre-wrap;
-  max-height: 160px;
-  overflow-y: auto;
-}
-.tool-runs {
-  margin-top: 6px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-.tool-card {
-  margin-top: 8px;
-  border: 1px solid #dcdfe6;
-  border-radius: 6px;
-  padding: 8px;
-  background: #fff;
-}
-.tool-card-title {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-weight: 600;
-  font-size: 13px;
-}
-.tool-args {
-  margin-top: 6px;
-  font-size: 12px;
-  color: #909399;
-  word-break: break-all;
-}
-.tool-card-btns {
-  margin-top: 8px;
-  display: flex;
-  gap: 8px;
-  justify-content: flex-end;
-}
-.ai-input {
-  border-top: 1px solid #ebeef5;
-  padding: 10px 12px;
-}
-.ai-input-bar {
-  margin-top: 8px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-.tips { font-size: 12px; color: #c0c4cc; }
 </style>

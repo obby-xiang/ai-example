@@ -1,17 +1,17 @@
 <template>
   <div v-loading="pageLoading">
-    <div class="page-head">
+    <div class="flex justify-between items-start mb-4">
       <div>
-        <h2 class="page-title">导出配置向导</h2>
-        <div class="page-sub" v-if="task">
+        <h2 class="m-0 text-xl text-[#303133]">导出配置向导</h2>
+        <div class="mt-1 text-[13px] text-[#909399]" v-if="task">
           {{ task.taskNo }} · {{ task.name }}
-          <el-tag size="small" style="margin-left: 8px;" :type="taskStatusType">{{ taskStatusLabel }}</el-tag>
+          <el-tag size="small" class="ml-2" :type="taskStatusType">{{ taskStatusLabel }}</el-tag>
         </div>
       </div>
       <el-button @click="$router.push('/tasks')">返回任务列表</el-button>
     </div>
 
-    <el-steps :active="step - 1" align-center finish-status="success" style="margin-bottom: 20px;">
+    <el-steps :active="step - 1" align-center finish-status="success" class="mb-5">
       <el-step title="选择配置" />
       <el-step title="查询配置" />
       <el-step title="导出配置" />
@@ -20,57 +20,57 @@
     <!-- ============ 第 1 步：选择配置项 ============ -->
     <div v-show="step === 1">
       <DefSelector v-model="selectedDefs" :defs="defs" />
-      <div class="step-tip">已选 {{ selectedDefs.length }} 个配置项；存在依赖关系的配置项将按依赖顺序导出。</div>
+      <div class="mt-2.5 text-[13px] text-[#909399]">已选 {{ selectedDefs.length }} 个配置项；存在依赖关系的配置项将按依赖顺序导出。</div>
     </div>
 
     <!-- ============ 第 2 步：查询条件 ============ -->
     <div v-show="step === 2">
       <el-empty v-if="!selectedDefs.length" description="请先在第 1 步选择配置项" />
-      <el-card v-for="code in selectedDefs" :key="code" class="cond-card" shadow="never">
+      <el-card v-for="code in selectedDefs" :key="code" class="mb-3" shadow="never">
         <template #header>
-          <div class="cond-head">
-            <span class="cond-title">{{ defName(code) }}（{{ code }}）</span>
+          <div class="flex items-center gap-3">
+            <span class="font-semibold mr-auto">{{ defName(code) }}（{{ code }}）</span>
             <el-button size="small" @click="previewCount(code)" :loading="countLoading[code]">预览行数</el-button>
             <el-tag v-if="counts[code] !== undefined && counts[code] !== null" size="small" type="success">
               命中 {{ counts[code] }} 行
             </el-tag>
           </div>
         </template>
-        <div v-for="(cond, idx) in condForms[code] || []" :key="idx" class="cond-row">
-          <el-select v-model="cond.field" placeholder="字段" style="width: 180px;" @change="cond.value = ''; cond.value2 = ''">
+        <div v-for="(cond, idx) in condForms[code] || []" :key="idx" class="flex gap-2 mb-2 items-center">
+          <el-select v-model="cond.field" placeholder="字段" class="w-[180px]" @change="cond.value = ''; cond.value2 = ''">
             <el-option v-for="f in fieldsOf(code)" :key="f.name" :label="`${f.label}（${f.name}）`" :value="f.name" />
           </el-select>
-          <el-select v-model="cond.op" placeholder="操作符" style="width: 130px;">
+          <el-select v-model="cond.op" placeholder="操作符" class="w-[130px]">
             <el-option v-for="op in OPS" :key="op" :label="opLabel(op)" :value="op" />
           </el-select>
           <template v-if="fieldOf(code, cond.field)?.type === 'ENUM'">
-            <el-select v-model="cond.value" placeholder="选项" style="width: 180px;" clearable>
+            <el-select v-model="cond.value" placeholder="选项" class="w-[180px]" clearable>
               <el-option v-for="o in fieldOf(code, cond.field)?.options || []" :key="o" :label="o" :value="o" />
             </el-select>
           </template>
           <template v-else-if="fieldOf(code, cond.field)?.type === 'BOOLEAN'">
-            <el-select v-model="cond.value" placeholder="取值" style="width: 180px;" clearable>
+            <el-select v-model="cond.value" placeholder="取值" class="w-[180px]" clearable>
               <el-option label="true" value="true" />
               <el-option label="false" value="false" />
             </el-select>
           </template>
           <template v-else-if="fieldOf(code, cond.field)?.type === 'DATE'">
-            <el-date-picker v-model="cond.value" type="date" value-format="YYYY-MM-DD" placeholder="日期" style="width: 180px;" />
+            <el-date-picker v-model="cond.value" type="date" value-format="YYYY-MM-DD" placeholder="日期" class="w-[180px]" />
           </template>
           <template v-else>
-            <el-input v-model="cond.value" :placeholder="cond.op === 'IN' ? '多个值用英文逗号分隔' : '值'" style="width: 180px;" />
+            <el-input v-model="cond.value" :placeholder="cond.op === 'IN' ? '多个值用英文逗号分隔' : '值'" class="w-[180px]" />
           </template>
-          <el-input v-if="cond.op === 'BETWEEN'" v-model="cond.value2" placeholder="至" style="width: 140px;" />
+          <el-input v-if="cond.op === 'BETWEEN'" v-model="cond.value2" placeholder="至" class="w-[140px]" />
           <el-button :icon="Delete" circle size="small" @click="removeCond(code, idx)" />
         </div>
         <el-button size="small" :icon="Plus" @click="addCond(code)">添加条件</el-button>
-        <span class="cond-hint">不设置条件表示导出全部数据</span>
+        <span class="ml-2.5 text-xs text-[#c0c4cc]">不设置条件表示导出全部数据</span>
       </el-card>
     </div>
 
     <!-- ============ 第 3 步：导出 ============ -->
     <div v-show="step === 3">
-      <div class="export-bar">
+      <div class="flex items-center mb-3">
         <el-button type="primary" :loading="starting" :disabled="jobRunning"
                    @click="startExport">
           {{ exportJob ? '重新导出' : '开始导出' }}
@@ -88,9 +88,9 @@
       <JobProgress :job="exportJob" @cancel="cancelJob" />
 
       <template v-if="exportResults.length">
-        <el-alert type="info" :closable="false" show-icon style="margin: 12px 0;"
+        <el-alert type="info" :closable="false" show-icon class="my-3"
                   title="可在线编辑表格内容；编辑只影响下载的文件，不会回写数据库。" />
-        <el-checkbox-group v-model="checkedDefs" style="margin-bottom: 8px;">
+        <el-checkbox-group v-model="checkedDefs" class="mb-2">
           <el-checkbox v-for="it in exportResults" :key="it.defCode" :value="it.defCode">
             {{ it.defCode }}
           </el-checkbox>
@@ -105,7 +105,7 @@
     </div>
 
     <!-- ============ 步骤条 ============ -->
-    <div class="wizard-footer">
+    <div class="mt-5 pt-4 border-t border-solid border-[#ebeef5] flex justify-center gap-3">
       <el-button :disabled="step === 1" @click="goStep(step - 1)">上一步</el-button>
       <el-button v-if="step < 3" type="primary" @click="nextStep">下一步</el-button>
     </div>
@@ -422,29 +422,3 @@ onBeforeUnmount(() => {
   ws.reset()
 })
 </script>
-
-<style scoped>
-.page-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  margin-bottom: 16px;
-}
-.page-title { margin: 0; font-size: 20px; color: #303133; }
-.page-sub { margin-top: 4px; font-size: 13px; color: #909399; }
-.step-tip { margin-top: 10px; font-size: 13px; color: #909399; }
-.cond-card { margin-bottom: 12px; }
-.cond-head { display: flex; align-items: center; gap: 12px; }
-.cond-title { font-weight: 600; margin-right: auto; }
-.cond-row { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; }
-.cond-hint { margin-left: 10px; font-size: 12px; color: #c0c4cc; }
-.export-bar { display: flex; align-items: center; margin-bottom: 12px; }
-.wizard-footer {
-  margin-top: 20px;
-  padding-top: 16px;
-  border-top: 1px solid #ebeef5;
-  display: flex;
-  justify-content: center;
-  gap: 12px;
-}
-</style>

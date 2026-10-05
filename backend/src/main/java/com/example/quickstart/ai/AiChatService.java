@@ -8,17 +8,25 @@ import com.example.quickstart.dto.ToolResultRequest;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.ai.openai.api.OpenAiApi;
-import org.springframework.ai.openai.api.OpenAiApi.ChatCompletionChunk;
-import org.springframework.ai.openai.api.OpenAiApi.ChatCompletionFinishReason;
-import org.springframework.ai.openai.api.OpenAiApi.ChatCompletionMessage;
-import org.springframework.ai.openai.api.OpenAiApi.ChatCompletionRequest;
-import org.springframework.ai.openai.api.OpenAiApi.FunctionTool;
+import org.springframework.ai.chat.memory.ChatMemory;
+import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.MessageType;
+import org.springframework.ai.chat.messages.SystemMessage;
+import org.springframework.ai.chat.messages.ToolResponseMessage;
+import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.chat.model.Generation;
+import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.openai.OpenAiChatModel;
+import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.ai.retry.NonTransientAiException;
 import org.springframework.ai.retry.TransientAiException;
+import org.springframework.ai.tool.ToolCallback;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.util.CollectionUtils;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import reactor.core.Exceptions;
 import reactor.core.publisher.Flux;
@@ -33,29 +41,34 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executor;
+import java.util.stream.Collectors;
 
 /**
- * AI 对话服务（D1/D2/D9）：注入自动配置的 OpenAiApi Bean，自研薄 Agent Loop：
+ * AI 对话服务（D1/D2/D9）：基于 Spring AI OpenAI 模块（OpenAI 兼容协议指向 DeepSeek）
+ * 的高层 API（OpenAiChatModel.stream + ChatMemory + ToolCallback），自研薄 Agent Loop：
  * 流式消费 + 工具分发 + FRONTEND 工具暂停-恢复；SSE 通过 SseEmitter + 异步线程下发。
  * <p>
- * DeepSeek 兼容性：deepseek-flash 为思考模式，回填 assistant 消息必须携带本轮 reasoningContent
- * （缺失会 400，与 deepseek-chat/reasoner 的旧规则相反）；parallelToolCalls=false；
- * 每轮只顺序处理第一个 toolCall；工具结果截断 4000 字符；429/5xx 指数退避 ≤3 次。
+ * DeepSeek 兼容性：deepseek-flash 为思考模式，回填 assistant 消息必须携带本轮 reasoning_content
+ * （流式 chunk 的 reasoning 在 AssistantMessage.properties["reasoningContent"]，聚合后同键入库，
+ * 由 ReasoningAwareOpenAiChatModel 补丁负责回放，缺失会 400）；parallelToolCalls=false（yml）；
+ * 工具结果截断 4000 字符；429/5xx 整轮指数退避 ≤3 次（流式无官方重试，已产出内容不重试）。
  */
 @Slf4j
 @Service
 public class AiChatService {
 
     private static final int MAX_TOOL_RESULT_CHARS = 4000;
-    private static final int MAX_HISTORY_MESSAGES = 50;
     /** 回填给模型的 reasoning_content 上限（思考链可能很长，仅用于满足思考模式回放要求） */
     private static final int MAX_REASONING_REPLAY = 8000;
     private static final int MAX_RETRIES = 3;
+    /** 流式 chunk 与聚合 AssistantMessage 中思维链的 properties 键（OpenAiChatModel 约定） */
+    private static final String REASONING_KEY = "reasoningContent";
 
     private static final TypeReference<LinkedHashMap<String, Object>> MAP_TYPE = new TypeReference<>() {
     };
 
-    private final OpenAiApi openAiApi;
+    private final OpenAiChatModel chatModel;
+    private final ChatMemory chatMemory;
     private final AiToolRegistry toolRegistry;
     private final BackendToolExecutor backendToolExecutor;
     private final PromptBuilder promptBuilder;
@@ -65,7 +78,8 @@ public class AiChatService {
     private final int maxRounds;
     private final String model;
 
-    public AiChatService(OpenAiApi openAiApi,
+    public AiChatService(OpenAiChatModel chatModel,
+                         ChatMemory chatMemory,
                          AiToolRegistry toolRegistry,
                          BackendToolExecutor backendToolExecutor,
                          PromptBuilder promptBuilder,
@@ -74,7 +88,8 @@ public class AiChatService {
                          ObjectMapper om,
                          @Value("${app.ai.max-rounds:8}") int maxRounds,
                          @Value("${spring.ai.openai.chat.options.model:deepseek-flash}") String model) {
-        this.openAiApi = openAiApi;
+        this.chatModel = chatModel;
+        this.chatMemory = chatMemory;
         this.toolRegistry = toolRegistry;
         this.backendToolExecutor = backendToolExecutor;
         this.promptBuilder = promptBuilder;
@@ -102,11 +117,11 @@ public class AiChatService {
             }
             session.running = true;
             session.cancelRequested = false;
-            session.messages.add(new ChatCompletionMessage(req.message(), ChatCompletionMessage.Role.USER));
+            chatMemory.add(req.sessionId(), List.of(new UserMessage(req.message())));
             session.displayMessages.add(AiSessionStore.displayMsg("user", req.message(), null));
             trimDisplay(session);
         }
-        aiExecutor.execute(() -> runLoop(session, req.context(), emitter));
+        aiExecutor.execute(() -> runLoop(req.sessionId(), session, req.context(), emitter));
     }
 
     public void toolResult(ToolResultRequest req, SseEmitter emitter) {
@@ -133,13 +148,24 @@ public class AiChatService {
             session.pendingCall = null;
             session.running = true;
             session.cancelRequested = false;
-            // 回填 tool 角色结果消息（截断 4000 字符）
+            // 回填 tool 结果（截断 4000 字符）：按暂停轮 toolCalls 原始顺序合成一条 ToolResponseMessage，
+            // 已执行的 BACKEND 调用 + 本次应答的 FRONTEND 调用 + 未应答调用补错误 ToolResponse 防 400
             String resultJson = truncate(writeJson(
                     req.result() == null ? Map.of("success", false, "error", "无结果") : req.result()));
-            session.messages.add(new ChatCompletionMessage(resultJson, ChatCompletionMessage.Role.TOOL,
-                    pending.name(), pending.callId(), null, null, null, null, null));
+            Map<String, ToolResponseMessage.ToolResponse> byId = new LinkedHashMap<>();
+            for (ToolResponseMessage.ToolResponse r : pending.completedResponses()) {
+                byId.put(r.id(), r);
+            }
+            byId.put(pending.callId(),
+                    new ToolResponseMessage.ToolResponse(pending.callId(), pending.name(), resultJson));
+            List<ToolResponseMessage.ToolResponse> responses = pending.roundCalls().stream()
+                    .map(tc -> byId.getOrDefault(tc.id(), new ToolResponseMessage.ToolResponse(tc.id(), tc.name(),
+                            "{\"success\":false,\"error\":\"该工具调用未被执行（同一轮仅恢复一个前端工具调用）\"}")))
+                    .toList();
+            chatMemory.add(req.sessionId(),
+                    List.of(ToolResponseMessage.builder().responses(responses).build()));
         }
-        aiExecutor.execute(() -> runLoop(session, req.context(), emitter));
+        aiExecutor.execute(() -> runLoop(req.sessionId(), session, req.context(), emitter));
     }
 
     /** 协作式取消：置标志，Loop 在轮次边界生效 */
@@ -180,7 +206,7 @@ public class AiChatService {
 
     // ================================ Agent Loop ================================
 
-    private void runLoop(AiSession session, AiContext context, SseEmitter emitter) {
+    private void runLoop(String sessionId, AiSession session, AiContext context, SseEmitter emitter) {
         try {
             String page = context == null ? null : context.page();
             Integer step = context == null ? null : context.step();
@@ -189,8 +215,14 @@ public class AiChatService {
             for (AiToolRegistry.AiTool t : available) {
                 availableNames.add(t.name());
             }
-            List<FunctionTool> functionTools = toolRegistry.functionTools(page, step);
+            List<ToolCallback> toolCallbacks = toolRegistry.toolCallbacks(page, step);
             String systemPrompt = promptBuilder.build(context, available);
+
+            OpenAiChatOptions options = OpenAiChatOptions.builder()
+                    .model(model)
+                    .toolCallbacks(toolCallbacks)
+                    .internalToolExecutionEnabled(false)
+                    .build();
 
             for (int round = 1; round <= maxRounds; round++) {
                 // 轮次边界检查取消标志
@@ -200,22 +232,22 @@ public class AiChatService {
                     return;
                 }
 
-                List<ChatCompletionMessage> requestMessages = new ArrayList<>();
-                requestMessages.add(new ChatCompletionMessage(systemPrompt, ChatCompletionMessage.Role.SYSTEM));
-                requestMessages.addAll(trimmedHistory(session));
+                // system prompt 不入 memory（随 context 变化），每轮请求时临时 prepend
+                List<Message> requestMessages = new ArrayList<>();
+                requestMessages.add(new SystemMessage(systemPrompt));
+                requestMessages.addAll(sanitizedHistory(sessionId));
 
-                RoundOutcome outcome = callRound(requestMessages, functionTools, emitter);
+                RoundOutcome outcome = callRound(requestMessages, options, emitter);
                 if (outcome == null) {
                     return; // 错误事件已发送或前端已断开
                 }
 
                 // 本轮无工具调用 → 结束
                 if (outcome.toolCalls().isEmpty()) {
-                    synchronized (session) {
-                        session.messages.add(new ChatCompletionMessage(
-                                outcome.content(), ChatCompletionMessage.Role.ASSISTANT,
-                                null, null, null, null, null, null, outcome.reasoning()));
-                        if (!outcome.content().isBlank()) {
+                    chatMemory.add(sessionId, List.of(aggregateAssistantMessage(
+                            outcome.content(), List.of(), outcome.reasoning())));
+                    if (!outcome.content().isBlank()) {
+                        synchronized (session) {
                             session.displayMessages.add(
                                     AiSessionStore.displayMsg("assistant", outcome.content(), null));
                             trimDisplay(session);
@@ -225,68 +257,72 @@ public class AiChatService {
                     return;
                 }
 
-                // 每轮只顺序处理第一个 toolCall，其余丢弃并记录
-                ChatCompletionMessage.ToolCall tc = outcome.toolCalls().get(0);
-                if (outcome.toolCalls().size() > 1) {
-                    log.warn("模型返回 {} 个 toolCalls，仅顺序处理第一个 {}，其余 {} 个丢弃",
-                            outcome.toolCalls().size(), tc.function().name(), outcome.toolCalls().size() - 1);
-                }
-                String callId = (tc.id() == null || tc.id().isBlank())
-                        ? "call_" + UUID.randomUUID().toString().replace("-", "").substring(0, 24)
-                        : tc.id();
-                String fnName = tc.function().name();
-                String fnArgs = (tc.function().arguments() == null || tc.function().arguments().isBlank())
-                        ? "{}" : tc.function().arguments();
+                // 规范化本轮 toolCalls（补 id / 空参数），assistant 回填与 ToolResponse 必须使用同一组 id
+                List<AssistantMessage.ToolCall> calls = outcome.toolCalls().stream()
+                        .map(this::normalizeCall)
+                        .toList();
 
-                // 回填 assistant(tool_calls) 消息：deepseek-flash 思考模式要求携带本轮 reasoning_content（否则 400）
-                var function = new ChatCompletionMessage.ChatCompletionFunction(fnName, fnArgs);
-                var toolCall = new ChatCompletionMessage.ToolCall(callId, "function", function);
-                var assistantToolCallMsg = new ChatCompletionMessage(null, ChatCompletionMessage.Role.ASSISTANT,
-                        null, null, List.of(toolCall), null, null, null, outcome.reasoning());
-                synchronized (session) {
-                    session.messages.add(assistantToolCallMsg);
-                }
+                // 回填 assistant(tool_calls)：携带本轮 reasoningContent（思考模式必需，由补丁类回放）
+                chatMemory.add(sessionId, List.of(aggregateAssistantMessage(
+                        outcome.content().isEmpty() ? null : outcome.content(), calls, outcome.reasoning())));
 
-                AiToolRegistry.AiTool toolDef = availableNames.contains(fnName) ? toolRegistry.get(fnName) : null;
-                if (toolDef == null) {
-                    // 幻觉/越权工具：不回灌给前端，直接回填错误结果让模型自我纠正
-                    log.warn("模型调用了当前页面不可用或不存在的工具: {}", fnName);
-                    send(emitter, "tool_run", Map.of("name", fnName, "status", "error"));
-                    synchronized (session) {
-                        session.messages.add(new ChatCompletionMessage(
-                                writeJson(Map.of("success", false, "error",
-                                        "工具不存在或当前页面/步骤不可用: " + fnName)),
-                                ChatCompletionMessage.Role.TOOL, fnName, callId, null, null, null, null, null));
+                // 分发：BACKEND 就地执行逐个收集 ToolResponse；只暂停第一个 FRONTEND 调用，
+                // 其余 FRONTEND 调用本轮不应答（恢复时补错误 ToolResponse）
+                List<ToolResponseMessage.ToolResponse> responses = new ArrayList<>();
+                AssistantMessage.ToolCall frontendCall = null;
+                AiToolRegistry.AiTool frontendDef = null;
+                for (AssistantMessage.ToolCall tc : calls) {
+                    String fnName = tc.name();
+                    String fnArgs = tc.arguments();
+                    AiToolRegistry.AiTool toolDef = availableNames.contains(fnName) ? toolRegistry.get(fnName) : null;
+                    if (toolDef != null && toolDef.kind() == AiToolRegistry.Kind.FRONTEND) {
+                        if (frontendCall == null) {
+                            frontendCall = tc;
+                            frontendDef = toolDef;
+                        }
+                        continue;
                     }
-                    continue;
-                }
-
-                if (toolDef.kind() == AiToolRegistry.Kind.BACKEND) {
-                    // 后端工具：Loop 内直接执行，结果回填，继续下一轮
+                    if (toolDef == null) {
+                        // 幻觉/越权工具：不回灌给前端，直接回填错误结果让模型自我纠正
+                        log.warn("模型调用了当前页面不可用或不存在的工具: {}", fnName);
+                        send(emitter, "tool_run", Map.of("name", fnName, "status", "error"));
+                        responses.add(new ToolResponseMessage.ToolResponse(tc.id(), fnName,
+                                writeJson(Map.of("success", false, "error",
+                                        "工具不存在或当前页面/步骤不可用: " + fnName))));
+                        continue;
+                    }
+                    // BACKEND 工具：Loop 内直接执行，结果收集进本轮 ToolResponseMessage
                     Object result = backendToolExecutor.execute(fnName, parseArgs(fnArgs));
                     boolean ok = !(result instanceof Map<?, ?> m && m.containsKey("error"));
                     send(emitter, "tool_run", Map.of("name", fnName, "status", ok ? "ok" : "error"));
+                    responses.add(new ToolResponseMessage.ToolResponse(tc.id(), fnName,
+                            truncate(writeJson(result))));
                     synchronized (session) {
-                        session.messages.add(new ChatCompletionMessage(truncate(writeJson(result)),
-                                ChatCompletionMessage.Role.TOOL, fnName, callId, null, null, null, null, null));
                         session.displayMessages.add(AiSessionStore.displayMsg("assistant", "", fnName));
                         trimDisplay(session);
                     }
+                }
+
+                if (frontendCall == null) {
+                    // 全部 BACKEND：一条 ToolResponseMessage 装多个 ToolResponse，继续下一轮
+                    chatMemory.add(sessionId,
+                            List.of(ToolResponseMessage.builder().responses(responses).build()));
                     continue;
                 }
 
                 // FRONTEND 工具：保存暂停现场 → SSE tool_call → done(waiting) 结束流
-                PendingCall pending = new PendingCall(callId, fnName, fnArgs, toolDef.needConfirm());
+                PendingCall pending = new PendingCall(frontendCall.id(), frontendCall.name(),
+                        frontendCall.arguments(), frontendDef.needConfirm(), calls, responses);
                 synchronized (session) {
                     session.pendingCall = pending;
-                    session.displayMessages.add(AiSessionStore.displayMsg("assistant", "", fnName));
+                    session.displayMessages.add(AiSessionStore.displayMsg("assistant", "", frontendCall.name()));
                     trimDisplay(session);
                 }
                 Map<String, Object> event = new LinkedHashMap<>();
-                event.put("callId", callId);
-                event.put("name", fnName);
-                event.put("arguments", parseArgs(fnArgs));
-                event.put("needConfirm", toolDef.needConfirm());
+                event.put("callId", frontendCall.id());
+                event.put("name", frontendCall.name());
+                event.put("arguments", parseArgs(frontendCall.arguments()));
+                event.put("needConfirm", frontendDef.needConfirm());
                 send(emitter, "tool_call", event);
                 send(emitter, "done", Map.of("status", "waiting"));
                 return;
@@ -305,51 +341,53 @@ public class AiChatService {
         }
     }
 
-    private record RoundOutcome(String content, List<ChatCompletionMessage.ToolCall> toolCalls, String reasoning) {
+    private record RoundOutcome(String content, List<AssistantMessage.ToolCall> toolCalls, String reasoning) {
     }
 
     /**
-     * 单轮流式调用（含 429/5xx/网络异常指数退避重试 ≤3 次）。
+     * 单轮流式调用（含 429/5xx/网络异常指数退避重试 ≤3 次；spring.ai.retry 只覆盖 call()，
+     * 流式无官方重试，已产出内容不重试）。
      * 返回 null 表示失败（错误事件已发送）或前端已断开。
      */
-    private RoundOutcome callRound(List<ChatCompletionMessage> messages,
-                                   List<FunctionTool> tools, SseEmitter emitter) {
+    private RoundOutcome callRound(List<Message> messages, OpenAiChatOptions options, SseEmitter emitter) {
         for (int attempt = 0; attempt <= MAX_RETRIES; attempt++) {
             StringBuilder content = new StringBuilder();
             StringBuilder reasoningBuf = new StringBuilder();
-            List<ChatCompletionMessage.ToolCall> toolCalls = new ArrayList<>();
+            List<AssistantMessage.ToolCall> toolCalls = new ArrayList<>();
             boolean emitted = false;
             try {
-                ChatCompletionRequest request = buildRequest(messages, tools);
-                Flux<ChatCompletionChunk> flux = openAiApi.chatCompletionStream(request);
-                for (ChatCompletionChunk chunk : flux.toIterable()) {
-                    // include_usage 末帧：choices 为空、usage 非空，需判空跳过
-                    if (chunk.choices() == null || chunk.choices().isEmpty()) {
+                Flux<ChatResponse> flux = chatModel.stream(new Prompt(messages, options));
+                for (ChatResponse chatResponse : flux.toIterable()) {
+                    // include_usage 末帧 / 异常帧：choices 为空，需判空跳过
+                    if (chatResponse.getResults() == null || chatResponse.getResults().isEmpty()) {
                         continue;
                     }
-                    var choice = chunk.choices().get(0);
-                    var delta = choice.delta();
-                    if (delta == null) {
-                        continue;
-                    }
-                    String text = delta.content();
-                    if (text != null && !text.isEmpty()) {
-                        content.append(text);
-                        if (!send(emitter, "token", Map.of("text", text))) {
-                            return null; // 前端已断开
+                    for (Generation generation : chatResponse.getResults()) {
+                        AssistantMessage output = generation.getOutput();
+                        if (output == null) {
+                            continue;
                         }
-                        emitted = true;
-                    }
-                    String reasoning = delta.reasoningContent();
-                    if (reasoning != null && !reasoning.isEmpty()) {
-                        reasoningBuf.append(reasoning);
-                        send(emitter, "reasoning", Map.of("text", reasoning));
-                        emitted = true;
-                    }
-                    // 框架已合并流式 tool_calls 分片：finish=tool_calls 时 arguments 完整
-                    if (choice.finishReason() == ChatCompletionFinishReason.TOOL_CALLS
-                            && delta.toolCalls() != null) {
-                        toolCalls.addAll(delta.toolCalls());
+                        String text = output.getText();
+                        if (text != null && !text.isEmpty()) {
+                            content.append(text);
+                            if (!send(emitter, "token", Map.of("text", text))) {
+                                return null; // 前端已断开
+                            }
+                            emitted = true;
+                        }
+                        // OpenAI 模块流式路径把思维链放在 properties["reasoningContent"]
+                        Object rc = output.getMetadata().get(REASONING_KEY);
+                        if (rc instanceof String reasoning && !reasoning.isEmpty()) {
+                            reasoningBuf.append(reasoning);
+                            if (!send(emitter, "reasoning", Map.of("text", reasoning))) {
+                                return null;
+                            }
+                            emitted = true;
+                        }
+                        // 流式 tool_calls 分片已被框架合并，直接可用
+                        if (!CollectionUtils.isEmpty(output.getToolCalls())) {
+                            toolCalls.addAll(output.getToolCalls());
+                        }
                     }
                 }
                 // deepseek-flash 为思考模式：回填时必须携带本轮 reasoning_content，否则下一轮 400
@@ -387,45 +425,57 @@ public class AiChatService {
                 || (cause.getMessage() != null && cause.getMessage().contains("Connection"));
     }
 
-    // ================================ OpenAiApi 请求构造（速查 A.4） ================================
-
-    private ChatCompletionRequest buildRequest(List<ChatCompletionMessage> messages,
-                                               List<FunctionTool> tools) {
-        return new ChatCompletionRequest(
-                messages,                                                       // 1  messages
-                model,                                                          // 2  model
-                null, null, null, null, null, null,                             // 3-8 store, metadata, frequencyPenalty, logitBias, logprobs, topLogprobs
-                null, null,                                                     // 9-10 maxTokens, maxCompletionTokens（互斥，DeepSeek 默认即可）
-                null,                                                           // 11 n
-                null, null,                                                     // 12-13 modalities, audio
-                null,                                                           // 14 presencePenalty
-                null,                                                           // 15 responseFormat
-                null,                                                           // 16 seed
-                null,                                                           // 17 serviceTier
-                null,                                                           // 18 stop
-                true,                                                           // 19 stream（chatCompletionStream 断言必须为 true）
-                ChatCompletionRequest.StreamOptions.INCLUDE_USAGE,              // 20 streamOptions
-                null,                                                           // 21 temperature（走模型默认）
-                null,                                                           // 22 topP
-                tools,                                                          // 23 tools
-                ChatCompletionRequest.ToolChoiceBuilder.AUTO,                   // 24 toolChoice
-                false,                                                          // 25 parallelToolCalls（1.1.8 合并器单帧只支持单调用）
-                null, null, null, null, null, null, null);                      // 26-32 user, reasoningEffort, webSearchOptions, verbosity, promptCacheKey, safetyIdentifier, extraBody
-    }
-
     // ================================ 辅助 ================================
 
-    /** 历史截断：最多保留最近 MAX_HISTORY_MESSAGES 条；丢弃开头孤立的 tool 消息避免协议错误 */
-    private List<ChatCompletionMessage> trimmedHistory(AiSession session) {
-        List<ChatCompletionMessage> copy;
-        synchronized (session) {
-            copy = new ArrayList<>(session.messages);
-        }
-        if (copy.size() > MAX_HISTORY_MESSAGES) {
-            copy = new ArrayList<>(copy.subList(copy.size() - MAX_HISTORY_MESSAGES, copy.size()));
-        }
-        while (!copy.isEmpty() && copy.get(0).role() == ChatCompletionMessage.Role.TOOL) {
-            copy.remove(0);
+    /** 聚合入库的 assistant 消息：思维链放 properties["reasoningContent"]（为空则不放该键），由补丁类回放 */
+    private AssistantMessage aggregateAssistantMessage(String content, List<AssistantMessage.ToolCall> toolCalls,
+                                                       String reasoning) {
+        return AssistantMessage.builder()
+                .content(content)
+                .toolCalls(toolCalls)
+                .properties(reasoning == null ? Map.of() : Map.of(REASONING_KEY, reasoning))
+                .build();
+    }
+
+    /** 补全缺失的 callId，空参数归一为 "{}"；assistant 回填与 ToolResponse 必须使用同一组 id */
+    private AssistantMessage.ToolCall normalizeCall(AssistantMessage.ToolCall tc) {
+        String callId = (tc.id() == null || tc.id().isBlank())
+                ? "call_" + UUID.randomUUID().toString().replace("-", "").substring(0, 24)
+                : tc.id();
+        String args = (tc.arguments() == null || tc.arguments().isBlank()) ? "{}" : tc.arguments();
+        String type = (tc.type() == null || tc.type().isBlank()) ? "function" : tc.type();
+        return new AssistantMessage.ToolCall(callId, type, tc.name(), args);
+    }
+
+    /**
+     * 历史保护：ChatMemory 窗口淘汰从头部进行，可能拆散 assistant(tool_calls)/tool 配对。
+     * 丢弃开头孤立的 tool 消息，以及 tool 应答不完整的 assistant(tool_calls) 消息，避免协议 400。
+     */
+    private List<Message> sanitizedHistory(String sessionId) {
+        List<Message> copy = new ArrayList<>(chatMemory.get(sessionId));
+        boolean changed = true;
+        while (changed && !copy.isEmpty()) {
+            changed = false;
+            Message first = copy.get(0);
+            if (first.getMessageType() == MessageType.TOOL) {
+                copy.remove(0);
+                changed = true;
+                continue;
+            }
+            if (first instanceof AssistantMessage am && !CollectionUtils.isEmpty(am.getToolCalls())) {
+                Set<String> needed = am.getToolCalls().stream()
+                        .map(AssistantMessage.ToolCall::id)
+                        .collect(Collectors.toSet());
+                Set<String> found = new HashSet<>();
+                for (int i = 1; i < copy.size() && copy.get(i).getMessageType() == MessageType.TOOL; i++) {
+                    ToolResponseMessage trm = (ToolResponseMessage) copy.get(i);
+                    trm.getResponses().forEach(r -> found.add(r.id()));
+                }
+                if (!found.containsAll(needed)) {
+                    copy.remove(0);
+                    changed = true;
+                }
+            }
         }
         return copy;
     }

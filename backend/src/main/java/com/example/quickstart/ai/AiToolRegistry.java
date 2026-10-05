@@ -1,6 +1,7 @@
 package com.example.quickstart.ai;
 
-import org.springframework.ai.openai.api.OpenAiApi;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.ai.tool.ToolCallback;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -32,7 +33,12 @@ public class AiToolRegistry {
     private final List<AiTool> tools = new ArrayList<>();
     private final Map<String, AiTool> byName = new LinkedHashMap<>();
 
-    public AiToolRegistry() {
+    private final BackendToolExecutor backendToolExecutor;
+    private final ObjectMapper om;
+
+    public AiToolRegistry(BackendToolExecutor backendToolExecutor, ObjectMapper om) {
+        this.backendToolExecutor = backendToolExecutor;
+        this.om = om;
         // ==================== 后端工具（Loop 内执行） ====================
         register("list_config_defs", "获取配置项列表（编码/名称/层级/依赖/正式区行数），可按层级过滤",
                 obj(Map.of("level", Map.of("type", "string", "enum", List.of("GLOBAL", "REGION", "PROJECT"),
@@ -125,12 +131,20 @@ public class AiToolRegistry {
         return byName.get(name);
     }
 
-    /** 转为 OpenAI FunctionTool 列表（发给模型） */
-    public List<OpenAiApi.FunctionTool> functionTools(String page, Integer step) {
+    /** 转为 Spring AI ToolCallback 列表（发给模型；过滤逻辑与 available 一致） */
+    public List<ToolCallback> toolCallbacks(String page, Integer step) {
         return available(page, step).stream()
-                .map(t -> new OpenAiApi.FunctionTool(
-                        new OpenAiApi.FunctionTool.Function(t.description(), t.name(), t.parameters(), null)))
+                .map(t -> (ToolCallback) new RoutingToolCallback(t, schemaJson(t.parameters()),
+                        backendToolExecutor, om))
                 .toList();
+    }
+
+    private String schemaJson(Map<String, Object> parameters) {
+        try {
+            return om.writeValueAsString(parameters);
+        } catch (Exception e) {
+            return "{\"type\":\"object\",\"properties\":{}}";
+        }
     }
 
     // ================================ JSON Schema 辅助 ================================

@@ -1,9 +1,9 @@
 <template>
   <div>
-    <div class="page-head">
+    <div class="flex justify-between items-center mb-4">
       <div>
-        <h2 class="page-title">实施任务</h2>
-        <div class="page-sub">导出配置 / 导入配置 任务管理</div>
+        <h2 class="m-0 text-xl text-[#303133]">实施任务</h2>
+        <div class="mt-1 text-[13px] text-[#909399]">导出配置 / 导入配置 任务管理</div>
       </div>
       <div>
         <el-button :icon="Refresh" circle @click="loadTasks" title="刷新" />
@@ -11,7 +11,7 @@
       </div>
     </div>
 
-    <el-table v-loading="loading" :data="tasks" border style="width: 100%;">
+    <el-table v-loading="loading" :data="tasks" border>
       <el-table-column prop="taskNo" label="任务编号" width="180" />
       <el-table-column prop="name" label="任务名称" min-width="160" show-overflow-tooltip />
       <el-table-column label="类型" width="100">
@@ -61,11 +61,11 @@
           <el-radio-group v-model="createForm.type">
             <el-radio value="EXPORT">
               导出配置
-              <div class="type-hint">选择配置项 → 设置查询条件 → 导出 Excel</div>
+              <div class="text-xs text-[#909399] font-normal">选择配置项 → 设置查询条件 → 导出 Excel</div>
             </el-radio>
             <el-radio value="IMPORT">
               导入配置
-              <div class="type-hint">上传/编辑 → 检查 → 导入暂存 → 发布生效</div>
+              <div class="text-xs text-[#909399] font-normal">上传/编辑 → 检查 → 导入暂存 → 发布生效</div>
             </el-radio>
           </el-radio-group>
         </el-form-item>
@@ -172,15 +172,3 @@ onBeforeUnmount(() => {
   ws.reset()
 })
 </script>
-
-<style scoped>
-.page-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 16px;
-}
-.page-title { margin: 0; font-size: 20px; color: #303133; }
-.page-sub { margin-top: 4px; font-size: 13px; color: #909399; }
-.type-hint { font-size: 12px; color: #909399; font-weight: normal; }
-</style>
