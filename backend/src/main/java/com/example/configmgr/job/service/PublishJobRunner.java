@@ -16,8 +16,10 @@ import com.example.configmgr.job.repo.JobItemRepository;
 import com.example.configmgr.job.repo.JobRepository;
 import com.example.configmgr.job.repo.ValidationIssueRepository;
 import com.example.configmgr.task.entity.Task;
+import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.repo.TaskItemRepository;
 import com.example.configmgr.task.repo.TaskRepository;
+import com.example.configmgr.task.service.TaskService;
 import com.example.configmgr.task.service.TaskSseService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -53,6 +55,7 @@ public class PublishJobRunner {
     private final AppProperties appProperties;
     private final ObjectMapper objectMapper;
     private final JobCancellationRegistry cancellationRegistry;
+    private final TaskService taskService;
 
     @Transactional
     public void run(Job job) {
@@ -165,6 +168,7 @@ public class PublishJobRunner {
                     ji.setStatus("COMPLETED");
                     ji.setProcessed(stagingRows.size());
                     jobItemRepository.save(ji);
+                    taskService.updateItemStatus(job.getTaskId(), defCode, "PUBLISHED");
 
                 } catch (Exception e) {
                     log.error("Publish failed for {}: {}", defCode, e.getMessage(), e);
@@ -177,6 +181,7 @@ public class PublishJobRunner {
                     totalErrors++;
                     ji.setStatus("FAILED");
                     jobItemRepository.save(ji);
+                    taskService.updateItemStatus(job.getTaskId(), defCode, "FAILED");
                 }
 
                 job.setProgress(job.getProgress() + 1);
@@ -188,6 +193,10 @@ public class PublishJobRunner {
                 job.setStatus(Job.JobStatus.CANCELLED);
             } else {
                 job.setStatus(totalErrors > 0 ? Job.JobStatus.FAILED : Job.JobStatus.COMPLETED);
+                if (totalErrors == 0) {
+                    // 发布成功 → 任务完成
+                    taskService.updateStatus(job.getTaskId(), Task.TaskStatus.COMPLETED);
+                }
             }
 
         } catch (Exception e) {

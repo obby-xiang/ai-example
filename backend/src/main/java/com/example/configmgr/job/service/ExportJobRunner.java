@@ -14,9 +14,11 @@ import com.example.configmgr.job.entity.Job;
 import com.example.configmgr.job.entity.JobItem;
 import com.example.configmgr.job.repo.JobItemRepository;
 import com.example.configmgr.job.repo.JobRepository;
+import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.entity.TaskFile;
 import com.example.configmgr.task.repo.TaskFileRepository;
 import com.example.configmgr.task.repo.TaskItemRepository;
+import com.example.configmgr.task.service.TaskService;
 import com.example.configmgr.task.service.TaskSseService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -35,6 +37,7 @@ public class ExportJobRunner {
     private final DefinitionService definitionService;
     private final ConfigDataRowRepository dataRowRepository;
     private final TaskItemRepository taskItemRepository;
+    private final TaskService taskService;
     private final TaskFileRepository taskFileRepository;
     private final JobRepository jobRepository;
     private final JobItemRepository jobItemRepository;
@@ -124,12 +127,14 @@ public class ExportJobRunner {
                     ji.setProcessed(filtered.size());
                     ji.setTotal(filtered.size());
                     jobItemRepository.save(ji);
+                    taskService.updateItemStatus(job.getTaskId(), defCode, "COMPLETED");
 
                 } catch (Exception e) {
                     log.error("Export failed for def {}: {}", defCode, e.getMessage(), e);
                     ji.setStatus("FAILED");
                     jobItemRepository.save(ji);
                     job.setErrorCount(job.getErrorCount() + 1);
+                    taskService.updateItemStatus(job.getTaskId(), defCode, "FAILED");
                 }
 
                 job.setProgress(job.getProgress() + 1);
@@ -140,6 +145,10 @@ public class ExportJobRunner {
                 job.setStatus(Job.JobStatus.CANCELLED);
             } else {
                 job.setStatus(job.getErrorCount() > 0 ? Job.JobStatus.FAILED : Job.JobStatus.COMPLETED);
+                if (job.getErrorCount() == 0) {
+                    // 导出全部成功 → 任务完成
+                    taskService.updateStatus(job.getTaskId(), Task.TaskStatus.COMPLETED);
+                }
             }
         } catch (Exception e) {
             log.error("Export job failed: {}", e.getMessage(), e);

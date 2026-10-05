@@ -21,6 +21,7 @@ import com.example.configmgr.job.repo.ValidationIssueRepository;
 import com.example.configmgr.task.entity.TaskFile;
 import com.example.configmgr.task.repo.TaskFileRepository;
 import com.example.configmgr.task.repo.TaskItemRepository;
+import com.example.configmgr.task.service.TaskService;
 import com.example.configmgr.task.service.TaskSseService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -51,6 +52,7 @@ public class PrecheckJobRunner {
     private final AppProperties appProperties;
     private final ObjectMapper objectMapper;
     private final JobCancellationRegistry cancellationRegistry;
+    private final TaskService taskService;
 
     @Transactional
     public void run(Job job) {
@@ -207,6 +209,8 @@ public class PrecheckJobRunner {
                     ji.setStatus(rowErrors > 0 ? "FAILED" : "COMPLETED");
                     ji.setProcessed(rows.size());
                     jobItemRepository.save(ji);
+                    taskService.updateItemStatus(job.getTaskId(), defCode,
+                            rowErrors > 0 ? "FAILED" : "CHECKED");
 
                 } catch (Exception e) {
                     log.error("Precheck failed for {}: {}", defCode, e.getMessage(), e);
@@ -219,6 +223,7 @@ public class PrecheckJobRunner {
                     totalErrors++;
                     ji.setStatus("FAILED");
                     jobItemRepository.save(ji);
+                    taskService.updateItemStatus(job.getTaskId(), defCode, "FAILED");
                 }
 
                 job.setProgress(job.getProgress() + 1);

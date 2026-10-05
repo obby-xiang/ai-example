@@ -1,11 +1,17 @@
 package com.example.configmgr.task.controller;
 
 import com.example.configmgr.common.ApiResponse;
+import com.example.configmgr.job.entity.Job;
+import com.example.configmgr.job.repo.JobRepository;
 import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.entity.TaskFile;
+import com.example.configmgr.task.repo.TaskFileRepository;
+import com.example.configmgr.task.repo.TaskRepository;
 import com.example.configmgr.task.service.TaskService;
 import com.example.configmgr.task.service.TaskSseService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -21,10 +27,44 @@ public class TaskController {
 
     private final TaskService taskService;
     private final TaskSseService taskSseService;
+    private final TaskRepository taskRepository;
+    private final JobRepository jobRepository;
+    private final TaskFileRepository taskFileRepository;
 
+    /**
+     * 历史任务列表：类型/状态/关键词筛选 + 分页，每条附带配置项数、文件数与最新作业进度。
+     */
     @GetMapping
-    public ApiResponse<List<Task>> list() {
-        return ApiResponse.ok(taskService.findAll());
+    public ApiResponse<Page<TaskSummary>> list(
+            @RequestParam(required = false) String type,
+            @RequestParam(required = false) String status,
+            @RequestParam(required = false) String keyword,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "10") int size) {
+        Task.TaskType tt = (type == null || type.isBlank()) ? null : Task.TaskType.valueOf(type.toUpperCase());
+        Task.TaskStatus st = (status == null || status.isBlank()) ? null : Task.TaskStatus.valueOf(status.toUpperCase());
+        Page<Task> result = taskRepository.search(tt, st, keyword, PageRequest.of(page, size));
+        return ApiResponse.ok(result.map(this::toSummary));
+    }
+
+    /**
+     * 任务详情概览：任务 + 全部作业 + 文件，供详情抽屉使用。
+     */
+    @GetMapping("/{id}/overview")
+    public ApiResponse<Map<String, Object>> overview(@PathVariable Long id) {
+        Task task = taskService.findById(id);
+        List<Job> jobs = jobRepository.findByTaskIdOrderByCreatedAtDesc(id);
+        List<TaskFile> files = taskFileRepository.findByTaskId(id);
+        return ApiResponse.ok(Map.of("task", task, "jobs", jobs, "files", files));
+    }
+
+    private TaskSummary toSummary(Task task) {
+        List<Job> jobs = jobRepository.findByTaskIdOrderByCreatedAtDesc(task.getId());
+        Job latest = jobs.isEmpty() ? null : jobs.get(0);
+        int fileCount = taskFileRepository.findByTaskId(task.getId()).size();
+        return new TaskSummary(task,
+                task.getItems() != null ? task.getItems().size() : 0,
+                fileCount, latest);
     }
 
     @PostMapping

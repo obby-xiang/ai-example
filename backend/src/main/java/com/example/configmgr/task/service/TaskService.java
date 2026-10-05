@@ -156,6 +156,29 @@ public class TaskService {
         publishTaskChanged(task, "任务完成");
     }
 
+    /**
+     * 只更新任务状态（不改步骤），供作业完成/失败时流转。
+     */
+    @Transactional
+    public void updateStatus(Long taskId, Task.TaskStatus status) {
+        Task task = taskRepository.findById(taskId)
+                .orElseThrow(() -> ResourceNotFoundException.of("任务", taskId));
+        task.setStatus(status);
+        taskRepository.save(task);
+        publishTaskChanged(task, "任务状态更新: " + status);
+    }
+
+    /**
+     * 更新任务内某配置项的状态（CHECKED/IMPORTED/PUBLISHED/COMPLETED/FAILED 等）。
+     */
+    @Transactional
+    public void updateItemStatus(Long taskId, String defCode, String status) {
+        taskItemRepository.findByTaskIdAndDefCode(taskId, defCode).ifPresent(item -> {
+            item.setStatus(status);
+            taskItemRepository.save(item);
+        });
+    }
+
     @Transactional
     public void delete(Long taskId) {
         if (!taskRepository.existsById(taskId)) {

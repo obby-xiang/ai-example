@@ -20,6 +20,7 @@ import com.example.configmgr.job.repo.ValidationIssueRepository;
 import com.example.configmgr.task.entity.TaskFile;
 import com.example.configmgr.task.repo.TaskFileRepository;
 import com.example.configmgr.task.repo.TaskItemRepository;
+import com.example.configmgr.task.service.TaskService;
 import com.example.configmgr.task.service.TaskSseService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -49,6 +50,7 @@ public class ImportJobRunner {
     private final AppProperties appProperties;
     private final ObjectMapper objectMapper;
     private final JobCancellationRegistry cancellationRegistry;
+    private final TaskService taskService;
 
     @Transactional
     public void run(Job job) {
@@ -145,6 +147,7 @@ public class ImportJobRunner {
                     ji.setStatus("COMPLETED");
                     ji.setProcessed(rows.size());
                     jobItemRepository.save(ji);
+                    taskService.updateItemStatus(job.getTaskId(), defCode, "IMPORTED");
 
                 } catch (Exception e) {
                     log.error("Import failed for {}: {}", defCode, e.getMessage(), e);
@@ -157,6 +160,7 @@ public class ImportJobRunner {
                     job.setErrorCount(job.getErrorCount() + 1);
                     ji.setStatus("FAILED");
                     jobItemRepository.save(ji);
+                    taskService.updateItemStatus(job.getTaskId(), defCode, "FAILED");
                 }
 
                 job.setProgress(job.getProgress() + 1);
