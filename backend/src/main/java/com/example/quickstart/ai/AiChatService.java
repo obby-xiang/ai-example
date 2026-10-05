@@ -38,7 +38,8 @@ import java.util.concurrent.Executor;
  * AI 对话服务（D1/D2/D9）：注入自动配置的 OpenAiApi Bean，自研薄 Agent Loop：
  * 流式消费 + 工具分发 + FRONTEND 工具暂停-恢复；SSE 通过 SseEmitter + 异步线程下发。
  * <p>
- * DeepSeek 兼容性：回填 assistant 消息 reasoningContent 恒为 null；parallelToolCalls=false；
+ * DeepSeek 兼容性：deepseek-flash 为思考模式，回填 assistant 消息必须携带本轮 reasoningContent
+ * （缺失会 400，与 deepseek-chat/reasoner 的旧规则相反）；parallelToolCalls=false；
  * 每轮只顺序处理第一个 toolCall；工具结果截断 4000 字符；429/5xx 指数退避 ≤3 次。
  */
 @Slf4j
@@ -47,6 +48,8 @@ public class AiChatService {
 
     private static final int MAX_TOOL_RESULT_CHARS = 4000;
     private static final int MAX_HISTORY_MESSAGES = 50;
+    /** 回填给模型的 reasoning_content 上限（思考链可能很长，仅用于满足思考模式回放要求） */
+    private static final int MAX_REASONING_REPLAY = 8000;
     private static final int MAX_RETRIES = 3;
 
     private static final TypeReference<LinkedHashMap<String, Object>> MAP_TYPE = new TypeReference<>() {
@@ -210,7 +213,8 @@ public class AiChatService {
                 if (outcome.toolCalls().isEmpty()) {
                     synchronized (session) {
                         session.messages.add(new ChatCompletionMessage(
-                                outcome.content(), ChatCompletionMessage.Role.ASSISTANT));
+                                outcome.content(), ChatCompletionMessage.Role.ASSISTANT,
+                                null, null, null, null, null, null, outcome.reasoning()));
                         if (!outcome.content().isBlank()) {
                             session.displayMessages.add(
                                     AiSessionStore.displayMsg("assistant", outcome.content(), null));
@@ -234,11 +238,11 @@ public class AiChatService {
                 String fnArgs = (tc.function().arguments() == null || tc.function().arguments().isBlank())
                         ? "{}" : tc.function().arguments();
 
-                // 回填 assistant(tool_calls) 消息：reasoningContent 必须为 null（否则 DeepSeek 400）
+                // 回填 assistant(tool_calls) 消息：deepseek-flash 思考模式要求携带本轮 reasoning_content（否则 400）
                 var function = new ChatCompletionMessage.ChatCompletionFunction(fnName, fnArgs);
                 var toolCall = new ChatCompletionMessage.ToolCall(callId, "function", function);
                 var assistantToolCallMsg = new ChatCompletionMessage(null, ChatCompletionMessage.Role.ASSISTANT,
-                        null, null, List.of(toolCall), null, null, null, null);
+                        null, null, List.of(toolCall), null, null, null, outcome.reasoning());
                 synchronized (session) {
                     session.messages.add(assistantToolCallMsg);
                 }
@@ -301,7 +305,7 @@ public class AiChatService {
         }
     }
 
-    private record RoundOutcome(String content, List<ChatCompletionMessage.ToolCall> toolCalls) {
+    private record RoundOutcome(String content, List<ChatCompletionMessage.ToolCall> toolCalls, String reasoning) {
     }
 
     /**
@@ -312,6 +316,7 @@ public class AiChatService {
                                    List<FunctionTool> tools, SseEmitter emitter) {
         for (int attempt = 0; attempt <= MAX_RETRIES; attempt++) {
             StringBuilder content = new StringBuilder();
+            StringBuilder reasoningBuf = new StringBuilder();
             List<ChatCompletionMessage.ToolCall> toolCalls = new ArrayList<>();
             boolean emitted = false;
             try {
@@ -337,6 +342,7 @@ public class AiChatService {
                     }
                     String reasoning = delta.reasoningContent();
                     if (reasoning != null && !reasoning.isEmpty()) {
+                        reasoningBuf.append(reasoning);
                         send(emitter, "reasoning", Map.of("text", reasoning));
                         emitted = true;
                     }
@@ -346,7 +352,10 @@ public class AiChatService {
                         toolCalls.addAll(delta.toolCalls());
                     }
                 }
-                return new RoundOutcome(content.toString(), toolCalls);
+                // deepseek-flash 为思考模式：回填时必须携带本轮 reasoning_content，否则下一轮 400
+                String reasoningText = reasoningBuf.isEmpty() ? null
+                        : abbrev(reasoningBuf.toString(), MAX_REASONING_REPLAY);
+                return new RoundOutcome(content.toString(), toolCalls, reasoningText);
             } catch (Exception e) {
                 Throwable cause = Exceptions.unwrap(e);
                 if (emitted || attempt >= MAX_RETRIES || !isRetryable(cause)) {
