@@ -13,12 +13,16 @@ export const useAiStore = defineStore('ai', () => {
   // Initialize session from sessionStorage or create new
   async function initSession() {
     let sid = sessionStorage.getItem('ai_session_id')
+    // 防御：历史版本可能存入过 "undefined" 字符串
+    if (sid && (sid === 'undefined' || sid === 'null')) {
+      sessionStorage.removeItem('ai_session_id')
+      sid = null
+    }
     if (sid) {
       // Verify it's still alive
       try {
-        const res = await aiApi.getSession(sid)
+        await aiApi.getSession(sid)
         sessionId.value = sid
-        // Restore messages if any
         return
       } catch (e) {
         sessionStorage.removeItem('ai_session_id')
@@ -27,8 +31,9 @@ export const useAiStore = defineStore('ai', () => {
     // Create new session
     try {
       const res = await aiApi.createSession()
-      sessionId.value = res.data.sid
-      sessionStorage.setItem('ai_session_id', res.data.sid)
+      // ApiResponse 信封：sid 位于 data.data.sid（此前误取 data.sid，导致存入 "undefined"）
+      sessionId.value = res.data.data.sid
+      sessionStorage.setItem('ai_session_id', res.data.data.sid)
     } catch (e) {
       console.error('Failed to create AI session:', e)
     }
