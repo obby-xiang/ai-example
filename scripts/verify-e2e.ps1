@@ -481,6 +481,31 @@ try {
     Ok 'TC14 检查失败→导入失败；非已导入批次禁止发布'
 } catch { No 'TC14' $_.Exception.Message }
 
+# ---------------- TC20 任务中心：历史持久化 + 创建即入库 + 类型过滤 ----------------
+Say '--- TC20 任务中心（统一列表/持久化/类型过滤） ---'
+try {
+    # 20a 统一列表：既含导出任务也含导入批次，且字段完整
+    $all = GetJson '/api/tasks'
+    $exp20 = @($all | Where-Object { $_.taskType -eq 'EXPORT' -and $_.status -eq 'SUCCESS' })
+    $imp20 = @($all | Where-Object { $_.taskType -eq 'IMPORT' -and $_.key -eq ("IMPORT-" + $script:batchA) })
+    if ($exp20.Count -lt 1) { throw '缺少已完成的导出任务记录' }
+    if ($imp20.Count -ne 1) { throw '缺少批次A的导入任务记录' }
+    if ($imp20[0].status -ne 'PUBLISHED') { throw "批次A状态应为 PUBLISHED，实际 $($imp20[0].status)" }
+    if ($imp20[0].filesCount -lt 3) { throw "批次A文件数 $($imp20[0].filesCount)" }
+    # 20b 创建即持久化：POST 创建导出任务后立刻查询（不等待执行完成）
+    $t20 = PostJson '/api/export/tasks' @{ defCodes = @('E2E_TEMP'); conditions = @{} }
+    $immediately = @(GetJson '/api/tasks' | Where-Object { $_.key -eq ("EXPORT-" + $t20.detail.id) })
+    if ($immediately.Count -ne 1) { throw '新创建的导出任务未立即持久化到任务列表' }
+    if ($immediately[0].status -notin @('PENDING', 'RUNNING', 'SUCCESS')) { throw "任务状态异常：$($immediately[0].status)" }
+    Wait-Task "/api/export/tasks/$($t20.detail.id)" @('SUCCESS', 'FAILED') | Out-Null
+    # 20c 类型过滤
+    $onlyImport = GetJson '/api/tasks?type=IMPORT'
+    if (@($onlyImport | Where-Object { $_.taskType -ne 'IMPORT' }).Count -gt 0) { throw 'IMPORT 过滤混入导出任务' }
+    $onlyExport = GetJson '/api/tasks?type=EXPORT'
+    if (@($onlyExport | Where-Object { $_.taskType -ne 'EXPORT' }).Count -gt 0) { throw 'EXPORT 过滤混入导入任务' }
+    Ok 'TC20 统一任务列表/创建即持久化/状态进度正确/类型过滤正确'
+} catch { No 'TC20' $_.Exception.Message }
+
 # ---------------- TC15 AI：流式 + 工具 + 渐进披露 ----------------
 Say '--- TC15 AI 对话（流式/工具调用/页面工具隔离） ---'
 try {

@@ -81,7 +81,8 @@ export const useImportStore = defineStore('importTask', {
     },
     async refresh() {
       if (this.batch) {
-        this.batch = await api.get(`/api/import/batches/${this.batch.id}`)
+        const snap = await api.get(`/api/import/batches/${this.batch.id}`)
+        this.batch = { ...snap, id: this.batch.id }
         await this.reloadEntries()
       }
     },

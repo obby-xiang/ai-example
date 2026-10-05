@@ -34,6 +34,7 @@ const defsStore = useDefsStore()
 const backendInfo = ref('')
 
 const navItems = [
+  { path: '/tasks', label: '任务管理' },
   { path: '/export', label: '导出配置' },
   { path: '/import', label: '导入配置' },
   { path: '/defs', label: '配置定义' },

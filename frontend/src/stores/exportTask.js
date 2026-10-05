@@ -52,7 +52,10 @@ export const useExportStore = defineStore('exportTask', {
       return this.task
     },
     async refresh() {
-      if (this.task) this.task = await api.get(`/api/export/tasks/${this.task.id}`)
+      if (this.task) {
+        const snap = await api.get(`/api/export/tasks/${this.task.id}`)
+        this.task = { ...snap, id: this.task.id }
+      }
     },
     subscribe(taskId) {
       this.stopSse()

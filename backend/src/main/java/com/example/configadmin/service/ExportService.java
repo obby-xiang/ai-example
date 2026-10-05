@@ -242,7 +242,7 @@ public class ExportService {
         progressHub.publish(topic, ev);
     }
 
-    private List<String> readList(String json) {
+    public List<String> readList(String json) {
         try {
             return mapper.readValue(json == null || json.isBlank() ? "[]" : json,
                     new TypeReference<List<String>>() {
