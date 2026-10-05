@@ -58,5 +58,5 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\verify-e2e.ps1
 ## 备注
 
 - SpreadJS 17.1.5 为商业组件：未配置授权为评估模式（水印），功能完整；授权经 `frontend/.env.local` 的 `VITE_SPREADJS_KEY` 注入（不入库）。
-- 模型服务为 OpenAI 兼容的 DeepSeek `deepseek-flash`（推理模型）；密钥仅后端持有，可用环境变量 `DEEPSEEK_API_KEY` 覆盖。
+- 模型服务为 OpenAI 兼容的 DeepSeek `deepseek-flash`（推理模型）；密钥仅后端持有，通过环境变量 `DEEPSEEK_API_KEY` 注入（禁止写入仓库）。
 - 演示数据于首次启动自动初始化（4 个配置定义覆盖全部层级/字段类型/依赖/引用），删除 `backend\data` 可重置。
