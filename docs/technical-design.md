@@ -349,7 +349,7 @@ io.save(spread.toJSON(), (blob) => uploadBlob(blob), {fileType: GC.Spread.Excel.
 |------|------|------|
 | AI Runtime 位置 | 后端 | API Key 安全；业务逻辑一致性 |
 | 工具循环 | 自管循环（非内置） | 每轮刷新工具集；HITL 暂停；流式逐步输出 |
-| DeepSeek thinking | 关闭（extraBody: {thinking:{type:disabled}}） | 带 tools 时避免 reasoning_content 导致的 400 错误 |
+| DeepSeek thinking | 关闭（extraBody: {thinking:{type:disabled}}）+ reasoning_effort=low | 实测：thinking=disabled + stream=true 时模型不发起工具调用，需同时设置 reasoning_effort=low 才恢复；新版 deepseek-flash 第二轮回传无需 reasoning_content |
 | 会话存储 | Caffeine 内存（TTL 30min） | 无需持久化；前端 sessionStorage 页签唯一 |
 | 历史裁剪 | 保持 tool_calls/tool message 配对完整 | OpenAI 协议要求配对，断对会 400 |
 | 进度推送 | SSE（任务级别 + AI run 级别两条流） | 简单、无状态；与 fetch 兼容 |
