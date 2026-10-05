@@ -3,7 +3,8 @@ package com.example.configmgr.job.service;
 import com.example.configmgr.config.AppProperties;
 import com.example.configmgr.data.entity.ConfigDataRow;
 import com.example.configmgr.data.repo.ConfigDataRowRepository;
-import com.example.configmgr.data.service.ConfigDataService;
+import com.example.configmgr.data.service.ConditionEvaluator;
+import com.example.configmgr.data.service.QueryCondition;
 import com.example.configmgr.definition.entity.ConfigDefinition;
 import com.example.configmgr.definition.entity.ConfigField;
 import com.example.configmgr.definition.service.DefinitionService;
@@ -76,15 +77,13 @@ public class ExportJobRunner {
                     // Parse condition
                     QueryCondition cond = parseCondition(item.getConditionJson());
 
-                    // Load all rows matching condition
+                    // Load all rows matching condition（范围过滤 + 字段级过滤统一由 ConditionEvaluator 处理）
                     List<ConfigDataRow> allRows = dataRowRepository.findByDefCodeOrderByRowKey(defCode);
                     List<Map<String, Object>> filtered = new ArrayList<>();
                     for (ConfigDataRow r : allRows) {
                         Map<String, Object> data = objectMapper.readValue(r.getDataJson(), new TypeReference<>() {});
-                        // Apply scope filter
-                        if (cond != null && cond.getScopeKeys() != null && !cond.getScopeKeys().isEmpty()) {
-                            Object scopeVal = data.get("regionCode") != null ? data.get("regionCode") : data.get("projectCode");
-                            if (scopeVal == null || !cond.getScopeKeys().contains(scopeVal.toString())) continue;
+                        if (!ConditionEvaluator.matches(data, cond)) {
+                            continue;
                         }
                         filtered.add(data);
                         // Demo delay per batch
@@ -167,18 +166,5 @@ public class ExportJobRunner {
         } catch (Exception e) {
             return null;
         }
-    }
-
-    @lombok.Data
-    public static class QueryCondition {
-        private List<String> scopeKeys;
-        private List<FieldCondition> fields;
-    }
-
-    @lombok.Data
-    public static class FieldCondition {
-        private String fieldCode;
-        private String operator;
-        private Object value;
     }
 }
