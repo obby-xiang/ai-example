@@ -1,7 +1,9 @@
 import request from './request.js'
 
-export const listTasks = () => request.get('/tasks')
+// 历史任务列表：支持 type/status/keyword 筛选 + 分页，返回 Page<TaskSummary>
+export const listTasks = (params) => request.get('/tasks', { params })
 export const getTask = (id) => request.get(`/tasks/${id}`)
+export const getTaskOverview = (id) => request.get(`/tasks/${id}/overview`)
 export const createTask = (data) => request.post('/tasks', data)
 export const deleteTask = (id) => request.delete(`/tasks/${id}`)
 export const selectDefs = (id, defCodes) => request.post(`/tasks/${id}/select-defs`, { defCodes })
