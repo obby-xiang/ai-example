@@ -167,7 +167,8 @@ export const useAiStore = defineStore('ai', () => {
     switch (event.type) {
       case 'RUN_STARTED':
         handlers.onAssistantStart?.()
-        break      case 'TEXT_DELTA':
+        break
+      case 'TEXT_DELTA':
         handlers.onTextDelta?.(event.delta)
         break
       case 'TOOL_START':
