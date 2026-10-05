@@ -18,6 +18,7 @@ let spread = null
 let sheet = null
 let fields = []
 let restoring = false
+let resizeObserver = null
 
 onMounted(() => {
   spread = new GC.Spread.Sheets.Workbook(hostRef.value)
@@ -25,9 +26,20 @@ onMounted(() => {
   sheet.bind(GC.Spread.Sheets.Events.CellChanged, onChanged)
   sheet.bind(GC.Spread.Sheets.Events.RowChanged, onChanged)
   sheet.bind(GC.Spread.Sheets.Events.RangeChanged, onChanged)
+  // 宿主可能初始不可见（el-tabs 懒渲染等），尺寸从 0 变为有效值时刷新布局
+  let resizeTimer = null
+  resizeObserver = new ResizeObserver(() => {
+    clearTimeout(resizeTimer)
+    resizeTimer = setTimeout(() => { spread && spread.refresh() }, 50)
+  })
+  resizeObserver.observe(hostRef.value)
 })
 
 onBeforeUnmount(() => {
+  if (resizeObserver) {
+    resizeObserver.disconnect()
+    resizeObserver = null
+  }
   if (spread) {
     try { spread.dispose && spread.dispose() } catch (e) { /* ignore */ }
     spread = null

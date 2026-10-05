@@ -46,6 +46,14 @@ export async function executeFrontendTool(name, args = {}) {
         return { success: false, error: '跳转向导页面必须携带 taskId' }
       }
       await router.push(builder(args.taskId))
+      // 等待目标页面挂载并更新 workspace（page/step/taskId），否则紧随其后的 tool-result
+      // 会携带旧页面上下文，导致后端按旧页面过滤工具（页面就绪竞态）
+      const deadline = Date.now() + 3000
+      const needStep = page === 'EXPORT' || page === 'IMPORT'
+      while (Date.now() < deadline) {
+        if (ws.page === page && (!needStep || ws.step != null)) break
+        await new Promise((r) => setTimeout(r, 100))
+      }
       return { success: true, data: { page, taskId: args.taskId || null } }
     }
 
