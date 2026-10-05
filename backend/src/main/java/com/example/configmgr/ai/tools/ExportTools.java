@@ -4,6 +4,7 @@ import com.example.configmgr.ai.runtime.AgentRunContext;
 import com.example.configmgr.ai.tool.ToolScope;
 import com.example.configmgr.ai.tool.ToolRisk;
 import com.example.configmgr.ai.tool.ToolMeta;
+import com.example.configmgr.data.service.ConfigDataService;
 import com.example.configmgr.job.entity.Job;
 import com.example.configmgr.job.service.JobService;
 import com.example.configmgr.task.service.TaskService;
