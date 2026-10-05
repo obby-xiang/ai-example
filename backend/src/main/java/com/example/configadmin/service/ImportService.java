@@ -500,15 +500,14 @@ public class ImportService {
 
             for (String defCode : readList(batch.getOrderJson())) {
                 ImportFileEntry entry = entryByCode.get(defCode);
-                // 1) 本批次草稿转生效
+                // 1) 删除旧生效数据（发布=替换，保持单一生效版本）
+                List<ConfigRow> oldRows = rowRepo.findByDefCodeAndPublished(defCode, true);
+                oldRows.removeIf(r -> String.valueOf(batchId).equals(r.getBatchId()));
+                rowRepo.deleteAll(oldRows);
+                // 2) 本批次草稿转生效
                 List<ConfigRow> draftRows = rowRepo.findByDefCodeAndBatchId(defCode, String.valueOf(batchId));
                 draftRows.forEach(r -> r.setPublished(true));
                 rowRepo.saveAll(draftRows);
-                // 2) 同配置旧生效数据退出生效（保持唯一生效版本）
-                List<ConfigRow> oldRows = rowRepo.findByDefCodeAndPublished(defCode, true);
-                oldRows.stream().filter(r -> !String.valueOf(batchId).equals(r.getBatchId()))
-                        .forEach(r -> r.setPublished(false));
-                rowRepo.saveAll(oldRows);
                 entry.setStatus("PUBLISHED");
                 entry.setMessage("已发布生效（替换旧数据）");
                 batch.setFilesJson(dataService.writeJson(new ArrayList<>(entryByCode.values())));

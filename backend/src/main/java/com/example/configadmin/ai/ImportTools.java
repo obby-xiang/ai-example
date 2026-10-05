@@ -47,8 +47,7 @@ public class ImportTools {
             }
             ctx.updatePageState(PAGE, "selectedDefs", codes);
             return ToolResult.ok("已选择导入配置：" + String.join("、", codes))
-                    .event("select_defs", "task", "import")
-                    .event("select_defs", "defCodes", codes);
+                    .event("select_defs", Map.of("task", "import", "defCodes", codes));
         }
     }
 
@@ -77,8 +76,7 @@ public class ImportTools {
             String url = "/api/import/templates?defCodes=" + String.join(",", codes) + "&zip=" + zip;
             return ToolResult.ok("已触发模板下载（" + String.join("、", codes) + "，格式："
                     + (zip ? "zip" : "xlsx") + "），请填写后上传或在线编辑后上传。")
-                    .event("download", "url", url)
-                    .event("download", "filename", zip ? "templates.zip" : codes.get(0) + ".xlsx");
+                    .event("download", Map.of("url", url, "filename", zip ? "templates.zip" : codes.get(0) + ".xlsx"));
         }
     }
 
@@ -101,8 +99,7 @@ public class ImportTools {
             ctx.updatePageState(PAGE, "batchId", b.getId());
             return ToolResult.ok("导入批次就绪（批次ID " + b.getId() + "，配置："
                     + String.join("、", codes) + "）。请上传文件或下载模板填写后上传。")
-                    .event("import_batch", "batchId", b.getId())
-                    .event("import_batch", "defCodes", codes)
+                    .event("import_batch", Map.of("batchId", b.getId(), "defCodes", codes))
                     .event("goto_step", "step", 1);
         }
     }
@@ -127,8 +124,7 @@ public class ImportTools {
             }
             ctx.runner().runCheck(id);
             return ToolResult.ok("已启动导入检查（批次 " + id + "），检查完成后会显示每个文件的结果明细。")
-                    .event("import_action", "batchId", id)
-                    .event("import_action", "action", "check")
+                    .event("import_action", Map.of("batchId", id, "action", "check"))
                     .event("goto_step", "step", 2);
         }
     }
@@ -152,13 +148,14 @@ public class ImportTools {
                     .append("，进度=").append(snap.getProgress()).append("%，").append(snap.getMessage());
             List<?> files = (List<?>) snap.getDetail().getOrDefault("files", List.of());
             for (Object f : files) {
-                Map<String, Object> m = (Map<String, Object>) f;
-                sb.append("\n  ").append(m.get("defCode")).append("[").append(m.get("status")).append("]")
-                        .append(" 行数=").append(m.get("rowCount"))
-                        .append(" 错误=").append(m.get("errorCount"))
-                        .append(" 警告=").append(m.get("warnCount"));
-                if (m.get("message") != null && !String.valueOf(m.get("message")).isBlank()) {
-                    sb.append("（").append(m.get("message")).append("）");
+                ImportFileEntry m = f instanceof ImportFileEntry ie
+                        ? ie : ctx.mapper().convertValue(f, ImportFileEntry.class);
+                sb.append("\n  ").append(m.getDefCode()).append("[").append(m.getStatus()).append("]")
+                        .append(" 行数=").append(m.getRowCount())
+                        .append(" 错误=").append(m.getErrorCount())
+                        .append(" 警告=").append(m.getWarnCount());
+                if (m.getMessage() != null && !m.getMessage().isBlank()) {
+                    sb.append("（").append(m.getMessage()).append("）");
                 }
             }
             return ToolResult.ok(sb.toString());
@@ -185,8 +182,7 @@ public class ImportTools {
             }
             ctx.runner().runImport(id);
             return ToolResult.ok("已启动导入（批次 " + id + "），通过的文件将入库为草稿（未发布），进度与结果实时可见。")
-                    .event("import_action", "batchId", id)
-                    .event("import_action", "action", "import")
+                    .event("import_action", Map.of("batchId", id, "action", "import"))
                     .event("goto_step", "step", 3);
         }
     }
@@ -211,8 +207,7 @@ public class ImportTools {
             }
             ctx.runner().runPublish(id);
             return ToolResult.ok("已启动发布（批次 " + id + "），发布检查通过后配置数据即对外生效。")
-                    .event("import_action", "batchId", id)
-                    .event("import_action", "action", "publish")
+                    .event("import_action", Map.of("batchId", id, "action", "publish"))
                     .event("goto_step", "step", 4);
         }
     }

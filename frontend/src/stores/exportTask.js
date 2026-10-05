@@ -40,15 +40,16 @@ export const useExportStore = defineStore('exportTask', {
     },
     async startExport(conditions) {
       const conds = conditions || this.conditions
-      const task = await api.post('/api/export/tasks', {
+      const snap = await api.post('/api/export/tasks', {
         defCodes: this.selectedDefs,
         conditions: conds
       })
-      this.task = task
+      // 快照的 id 位于 detail 内，归一化为顶层 id 便于引用
+      this.task = { ...snap, id: snap.detail.id }
       this.step = 3
       bumpWorkspace()
-      this.subscribe(task.id)
-      return task
+      this.subscribe(this.task.id)
+      return this.task
     },
     async refresh() {
       if (this.task) this.task = await api.get(`/api/export/tasks/${this.task.id}`)
@@ -58,7 +59,7 @@ export const useExportStore = defineStore('exportTask', {
       this.controller = new AbortController()
       const onEvent = (ev, data) => {
         if (ev === 'snapshot' || ev === 'progress' || ev === 'done') {
-          this.task = data
+          this.task = { ...data, id: data.detail.id }
         }
       }
       sseRequest(`/api/export/tasks/${taskId}/events`, {

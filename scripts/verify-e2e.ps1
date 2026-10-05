@@ -120,26 +120,36 @@ function Upload-File($path, $files) {
     return $obj.data
 }
 
-# xlsx = zip；篡改 sharedStrings.xml 中的值（构造非法数据）
-function Corrupt-Xlsx($src, $dst, $old, $new) {
+# xlsx = zip；篡改 sharedStrings.xml 中的值（构造非法数据）。
+# 通过“读全部条目→改写→新建 zip”的方式重建，避免原地 Update 破坏 OOXML 包结构。
+function Corrupt-Xlsx($path, $old, $new) {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
-    Copy-Item $src $dst -Force
-    $zip = [System.IO.Compression.ZipFile]::Open($dst, 'Update')
-    $entry = $zip.GetEntry('xl/sharedStrings.xml')
-    if ($entry) {
-        $stream = $entry.Open()
-        $reader = New-Object System.IO.StreamReader($stream)
-        $content = $reader.ReadToEnd()
-        $reader.Close()
-        $content2 = $content.Replace($old, $new)
-        $stream2 = $entry.Open()
-        $stream2.SetLength(0)
-        $writer = New-Object System.IO.StreamWriter($stream2)
-        $writer.Write($content2)
-        $writer.Flush()
-        $writer.Close()
+    $outPath = "$path.tmp"
+    if (Test-Path $outPath) { Remove-Item $outPath -Force }
+    $src = [System.IO.Compression.ZipFile]::OpenRead($path)
+    $dst = [System.IO.Compression.ZipFile]::Open($outPath, 'Create')
+    foreach ($entry in $src.Entries) {
+        $newEntry = $dst.CreateEntry($entry.FullName)
+        $s = $entry.Open()
+        $d = $newEntry.Open()
+        if ($entry.FullName -eq 'xl/sharedStrings.xml') {
+            $reader = New-Object System.IO.StreamReader($s, [System.Text.Encoding]::UTF8)
+            $content = $reader.ReadToEnd()
+            $reader.Close()
+            $content2 = $content.Replace($old, $new)
+            $writer = New-Object System.IO.StreamWriter($d, (New-Object System.Text.UTF8Encoding($false)))
+            $writer.Write($content2)
+            $writer.Flush()
+            $writer.Close()
+        } else {
+            $s.CopyTo($d)
+        }
+        $s.Close()
+        $d.Close()
     }
-    $zip.Dispose()
+    $src.Dispose()
+    $dst.Dispose()
+    Move-Item $outPath $path -Force
 }
 
 # zip 包内容检查
@@ -268,6 +278,7 @@ try {
     if ($rb.rowCount -ne 1) { throw "华东区 应为 1 行，实际 $($rb.rowCount)" }
     $script:exportTask5 = $t.detail.id
     # 保存“生产=3行”文件，供后续发布替换测试
+    # 保存“生产=3行”文件，供后续发布替换测试（TC13 会先写回 5 行文件，故这里直接存为匹配名）
     [IO.File]::WriteAllBytes("$tmp\SERVER_PARAM_prod3.xlsx", (GetBytes "/api/export/tasks/$($t.detail.id)/files/SERVER_PARAM"))
     Ok 'TC5 字段条件(env=生产→3行)与范围条件(华东区→1行)正确'
 } catch { No 'TC5' $_.Exception.Message }
@@ -349,11 +360,11 @@ try {
 # ---------------- TC10 检查：失败场景（选项/引用/缺文件） ----------------
 Say '--- TC10 检查失败明细（非法选项 + 引用不存在 + 未上传） ---'
 try {
-    # 10a: 非法选项
+    # 10a: 非法选项（文件名必须匹配配置编码才能被上传识别）
     $bytes = GetBytes "/api/export/tasks/$script:exportTask4/files/SERVER_PARAM"
-    [IO.File]::WriteAllBytes("$tmp\bad_env.xlsx", $bytes)
-    Corrupt-Xlsx "$tmp\bad_env.xlsx" "$tmp\bad_env2.xlsx" '生产' '不存在的环境'
-    $report = Upload-File "/api/import/batches/$script:batchA/files" @("$tmp\bad_env2.xlsx")
+    [IO.File]::WriteAllBytes("$tmp\SERVER_PARAM.xlsx", $bytes)
+    Corrupt-Xlsx "$tmp\SERVER_PARAM.xlsx" '生产' '不存在的环境'
+    $report = Upload-File "/api/import/batches/$script:batchA/files" @("$tmp\SERVER_PARAM.xlsx")
     PostJson "/api/import/batches/$script:batchA/check" @{} | Out-Null
     $snap = Wait-Task "/api/import/batches/$script:batchA" @('CHECKED', 'FAILED')
     $sp = $snap.detail.files | Where-Object { $_.defCode -eq 'SERVER_PARAM' }
@@ -362,9 +373,9 @@ try {
     if (-not ($issues | Where-Object { $_.message -like '*不在可选范围*' })) { throw '未发现选项错误明细' }
     # 10b: 引用不存在（SERVER_EXTEND 引用 SERVER_PARAM.server_name）
     $bytes2 = GetBytes "/api/export/tasks/$script:exportTask4/files/SERVER_EXTEND"
-    [IO.File]::WriteAllBytes("$tmp\bad_ref.xlsx", $bytes2)
-    Corrupt-Xlsx "$tmp\bad_ref.xlsx" "$tmp\bad_ref2.xlsx" 'srv-app-01' 'srv-ghost-99'
-    Upload-File "/api/import/batches/$script:batchB/files" @("$tmp\bad_ref2.xlsx") | Out-Null
+    [IO.File]::WriteAllBytes("$tmp\SERVER_EXTEND.xlsx", $bytes2)
+    Corrupt-Xlsx "$tmp\SERVER_EXTEND.xlsx" 'srv-app-01' 'srv-ghost-99'
+    Upload-File "/api/import/batches/$script:batchB/files" @("$tmp\SERVER_EXTEND.xlsx") | Out-Null
     PostJson "/api/import/batches/$script:batchB/check" @{} | Out-Null
     $snapB = Wait-Task "/api/import/batches/$script:batchB" @('CHECKED', 'FAILED')
     $se = $snapB.detail.files | Where-Object { $_.defCode -eq 'SERVER_EXTEND' }
@@ -437,13 +448,16 @@ try {
     $dup = $false
     try { PostJson "/api/import/batches/$script:batchA/publish" @{} | Out-Null } catch { $dup = $true }
     if (-not $dup) { throw '重复发布未拦截' }
-    # 用“生产=3行”文件再走一轮导入发布 → 生效数据替换为 3 行
+    # 用“生产=3行”文件再走一轮导入发布 → 生效数据替换为 3 行（文件名必须匹配配置编码）
     $b4 = PostJson '/api/import/batches' @{ name = 'E2E-批次D'; defCodes = @('SERVER_PARAM') }
-    Upload-File "/api/import/batches/$($b4.detail.id)/files" @("$tmp\SERVER_PARAM_prod3.xlsx") | Out-Null
+    Copy-Item "$tmp\SERVER_PARAM_prod3.xlsx" "$tmp\SERVER_PARAM.xlsx" -Force
+    $report4 = Upload-File "/api/import/batches/$($b4.detail.id)/files" @("$tmp\SERVER_PARAM.xlsx")
+    if ($report4.matched.Count -ne 1) { throw "批次D上传未匹配: $($report4.matched.Count)" }
     PostJson "/api/import/batches/$($b4.detail.id)/check" @{} | Out-Null
     Wait-Task "/api/import/batches/$($b4.detail.id)" @('CHECKED', 'FAILED') | Out-Null
     PostJson "/api/import/batches/$($b4.detail.id)/import" @{} | Out-Null
-    Wait-Task "/api/import/batches/$($b4.detail.id)" @('IMPORTED', 'FAILED') | Out-Null
+    $snapD = Wait-Task "/api/import/batches/$($b4.detail.id)" @('IMPORTED', 'FAILED')
+    if ($snapD.status -ne 'IMPORTED') { throw "批次D导入失败: $($snapD.message)" }
     PostJson "/api/import/batches/$($b4.detail.id)/publish" @{} | Out-Null
     Wait-Task "/api/import/batches/$($b4.detail.id)" @('PUBLISHED', 'FAILED') | Out-Null
     $def2 = GetJson '/api/defs/SERVER_PARAM'
@@ -455,12 +469,14 @@ try {
 # ---------------- TC14 发布检查失败保护 ----------------
 Say '--- TC14 发布前最终检查失败保护 ---'
 try {
-    # 批次C 未上传 → 检查失败；直接导入应整体失败，且发布被拒
-    PostJson "/api/import/batches/$script:batchC/import" @{} | Out-Null
-    $snap = Wait-Task "/api/import/batches/$script:batchC" @('FAILED', 'IMPORTED')
+    # 自建批次（未上传任何文件）：导入应整体失败，发布被拒
+    $b14 = PostJson '/api/import/batches' @{ name = 'E2E-批次保护'; defCodes = @('PROJECT_QUOTA') }
+    $bid14 = $b14.detail.id
+    PostJson "/api/import/batches/$bid14/import" @{} | Out-Null
+    $snap = Wait-Task "/api/import/batches/$bid14" @('FAILED', 'IMPORTED')
     if ($snap.status -ne 'FAILED') { throw '未上传文件批次不应导入成功' }
     $rej = $false
-    try { PostJson "/api/import/batches/$script:batchC/publish" @{} | Out-Null } catch { $rej = $true }
+    try { PostJson "/api/import/batches/$bid14/publish" @{} | Out-Null } catch { $rej = $true }
     if (-not $rej) { throw '非 IMPORTED 批次发布未被拒' }
     Ok 'TC14 检查失败→导入失败；非已导入批次禁止发布'
 } catch { No 'TC14' $_.Exception.Message }

@@ -66,8 +66,7 @@ public class ExportTools {
             }
             ctx.updatePageState(PAGE, "selectedDefs", codes);
             return ToolResult.ok("已选择导出配置：" + String.join("、", codes))
-                    .event("select_defs", "task", "export")
-                    .event("select_defs", "defCodes", codes);
+                    .event("select_defs", Map.of("task", "export", "defCodes", codes));
         }
     }
 
@@ -98,8 +97,7 @@ public class ExportTools {
             all.put(defCode, conds);
             ctx.updatePageState(PAGE, "conditions", all);
             return ToolResult.ok("已设置 " + defCode + " 的查询条件：" + ctx.mapper().valueToTree(conds).toString())
-                    .event("set_conditions", "defCode", defCode)
-                    .event("set_conditions", "conditions", conds);
+                    .event("set_conditions", Map.of("defCode", defCode, "conditions", (Object) conds));
         }
     }
 
@@ -127,8 +125,7 @@ public class ExportTools {
             ProgressEvent snap = ctx.exports().snapshot(ctx.exports().get(t.getId()));
             return ToolResult.ok("导出任务已启动（任务ID " + t.getId() + "，共 " + codes.size()
                     + " 个配置），右侧可查看进度，导出完成后可在线编辑与下载。")
-                    .event("export_started", "taskId", t.getId())
-                    .event("export_started", "snapshot", snap)
+                    .event("export_started", Map.of("taskId", t.getId(), "snapshot", (Object) snap))
                     .event("goto_step", "step", 3);
         }
     }
@@ -184,8 +181,8 @@ public class ExportTools {
             if (id == null) return ToolResult.fail("当前没有导出任务，请先启动导出。");
             String defCode = String.valueOf(args.get("defCode"));
             return ToolResult.ok("已触发下载：" + defCode + ".xlsx")
-                    .event("download", "url", "/api/export/tasks/" + id + "/files/" + defCode)
-                    .event("download", "filename", defCode + ".xlsx");
+                    .event("download", Map.of("url", "/api/export/tasks/" + id + "/files/" + defCode,
+                            "filename", defCode + ".xlsx"));
         }
     }
 
@@ -211,8 +208,7 @@ public class ExportTools {
             List<String> codes = o instanceof List<?> l ? l.stream().map(String::valueOf).toList() : List.of();
             String url = "/api/export/tasks/" + id + "/package" + (codes.isEmpty() ? "" : "?defCodes=" + String.join(",", codes));
             return ToolResult.ok("已触发打包下载：" + (codes.isEmpty() ? "全部文件" : String.join("、", codes)))
-                    .event("download", "url", url)
-                    .event("download", "filename", "export-task-" + id + ".zip");
+                    .event("download", Map.of("url", url, "filename", "export-task-" + id + ".zip"));
         }
     }
 }

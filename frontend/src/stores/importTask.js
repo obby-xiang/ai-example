@@ -31,14 +31,15 @@ export const useImportStore = defineStore('importTask', {
       bumpWorkspace()
     },
     async ensureBatch(name) {
-      const batch = await api.post('/api/import/batches/ensure', {
+      const snap = await api.post('/api/import/batches/ensure', {
         name: name || '导入批次',
         defCodes: this.selectedDefs
       })
-      this.batch = batch
-      this.entries = batch.detail.files || []
+      // 快照的 id 位于 detail 内，归一化为顶层 id 便于引用
+      this.batch = { ...snap, id: snap.detail.id }
+      this.entries = snap.detail.files || []
       bumpWorkspace()
-      return batch
+      return this.batch
     },
     async upload(files) {
       if (!this.batch) throw new Error('请先创建导入批次')
@@ -89,7 +90,7 @@ export const useImportStore = defineStore('importTask', {
       this.controller = new AbortController()
       const onEvent = (ev, data) => {
         if (ev === 'snapshot' || ev === 'progress' || ev === 'done') {
-          this.batch = data
+          this.batch = { ...data, id: data.detail.id }
           if (data.detail && data.detail.files) this.entries = data.detail.files
           if (ev === 'done') this.reloadEntries()
         }

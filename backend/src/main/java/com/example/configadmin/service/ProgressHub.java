@@ -57,11 +57,23 @@ public class ProgressHub {
         emitter.onError(e -> heartbeatTask.cancel(true));
 
         try {
-            emitter.send(SseEmitter.event().name("snapshot").data(json(snapshot.get())));
+            ProgressEvent snap = snapshot.get();
+            emitter.send(SseEmitter.event().name("snapshot").data(json(snap)));
+            // 订阅时任务已结束：补发 done 事件让客户端确定性收尾（否则只能靠超时）
+            if (isTerminal(snap.getStatus())) {
+                emitter.send(SseEmitter.event().name("done").data(json(snap)));
+                heartbeatTask.cancel(true);
+                emitter.complete();
+                remove(topic, emitter);
+            }
         } catch (IOException e) {
             remove(topic, emitter);
         }
         return emitter;
+    }
+
+    private boolean isTerminal(String status) {
+        return "SUCCESS".equals(status) || "FAILED".equals(status) || "PUBLISHED".equals(status);
     }
 
     /** 推送进度事件。 */

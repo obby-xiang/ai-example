@@ -12,7 +12,8 @@
         </el-radio-group>
         <el-select v-if="!published" v-model="batchId" size="small" style="width: 200px" placeholder="选择批次"
                    @change="loadData">
-          <el-option v-for="b in batches" :key="b.id" :label="`批次#${b.id} ${b.message || ''}`" :value="b.id" />
+          <el-option v-for="b in batches" :key="b.detail.id" :label="'批次#' + b.detail.id + ' ' + (b.message || '')"
+                     :value="b.detail.id" />
         </el-select>
         <div style="flex: 1"></div>
         <el-button size="small" @click="loadData">刷新</el-button>

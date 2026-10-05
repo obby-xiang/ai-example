@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { useRoute, useRouter } from 'vue-router'
+import router from '../router'
 import { api, sseRequest, downloadFile } from '../api'
 import { workspaceVersion, bumpWorkspace } from '../utils/workspace'
 import { useExportStore } from './exportTask'
@@ -30,8 +30,8 @@ export const useAiStore = defineStore('ai', {
   actions: {
     /** 业务 → AI：构建上下文快照（摘要级，避免 token 浪费）。 */
     buildContext() {
-      const route = useRoute()
-      const page = String(route.name || 'export')
+      const current = router.currentRoute.value
+      const page = String(current && current.name ? current.name : 'export')
       const ctx = { page, workspaceVersion: workspaceVersion() }
       const exportStore = useExportStore()
       const importStore = useImportStore()
@@ -80,6 +80,8 @@ export const useAiStore = defineStore('ai', {
     async confirmTool(approved) {
       const last = this.messages[this.messages.length - 1]
       if (!last || !last.confirm || this.streaming) return
+      // 先清掉当前确认卡；续跑流中若出现新的确认卡由 ui_event 处理器重新挂上
+      last.confirm = null
       this.streaming = true
       this.controller = new AbortController()
       try {
@@ -87,11 +89,9 @@ export const useAiStore = defineStore('ai', {
           sessionId: this.sessionId,
           approved
         }, last, this.controller.signal)
-        last.confirm = null
       } catch (e) {
         if (e.name !== 'AbortError') last.content += `\n[错误] ${e.message}`
         last.done = true
-        last.confirm = null
       } finally {
         this.streaming = false
         this.controller = null
@@ -173,7 +173,6 @@ export const useAiStore = defineStore('ai', {
     /** AI → 业务：ui_event 统一分发（与用户点击同一 store action，保证状态一致）。 */
     async applyUiEvent(ev) {
       const type = ev.type
-      const router = useRouter()
       try {
         const exportStore = useExportStore()
         const importStore = useImportStore()
@@ -187,8 +186,9 @@ export const useAiStore = defineStore('ai', {
             break
           }
           case 'goto_step': {
-            if (router.currentRoute.value.name === 'export') exportStore.goStep(ev.step)
-            else if (router.currentRoute.value.name === 'import') importStore.goStep(ev.step)
+            const current = router.currentRoute.value
+            if (current && current.name === 'export') exportStore.goStep(ev.step)
+            else if (current && current.name === 'import') importStore.goStep(ev.step)
             break
           }
           case 'select_defs': {
@@ -200,7 +200,9 @@ export const useAiStore = defineStore('ai', {
             exportStore.setConditions(ev.defCode, ev.conditions || {})
             break
           case 'export_started': {
-            exportStore.task = ev.snapshot || { id: ev.taskId }
+            exportStore.task = ev.snapshot
+              ? { ...ev.snapshot, id: ev.snapshot.detail.id }
+              : { id: ev.taskId, detail: { files: [] } }
             exportStore.goStep(3)
             exportStore.subscribe(ev.taskId)
             break

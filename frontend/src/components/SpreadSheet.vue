@@ -51,11 +51,23 @@ async function open(source) {
       if (!res.ok) throw new Error(`加载失败（HTTP ${res.status}）`)
       blob = await res.blob()
     }
+    // ExcelIO 17.x：open(file, success, error) 返回 JSON，需 fromJSON 灌入；
+    // 传 File 类型（内部 FileReader 严格校验）
+    const file = blob instanceof File ? blob
+      : new File([blob], props.filename || 'spread.xlsx',
+        { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
     if (!spread) createWorkbook()
     else spread.suspendPaint()
     const excelIO = new ExcelIO.IO()
     await new Promise((resolve, reject) => {
-      excelIO.open(spread, blob, () => resolve(), (e) => reject(new Error(e && e.errorMessage || '解析失败')))
+      excelIO.open(file, (json) => {
+        try {
+          spread.fromJSON(json)
+          resolve()
+        } catch (err) {
+          reject(err)
+        }
+      }, (e) => reject(new Error(e && e.errorMessage || '解析失败')))
     })
     spread.resumePaint()
   } catch (e) {
@@ -69,12 +81,13 @@ function reload() {
   open(props.source)
 }
 
-/** 导出当前编辑内容为 Blob（ExcelIO 往返保留数据验证等能力）。 */
+/** 导出当前编辑内容为 Blob（ExcelIO 17.x：save(json, success, error)）。 */
 function exportBlob() {
   return new Promise((resolve, reject) => {
     if (!spread) return reject(new Error('表格尚未初始化'))
+    const json = spread.toJSON()
     const excelIO = new ExcelIO.IO()
-    excelIO.save(spread, (blob) => resolve(blob), (e) => reject(new Error(e && e.errorMessage || '导出失败')))
+    excelIO.save(json, (blob) => resolve(blob), (e) => reject(new Error(e && e.errorMessage || '导出失败')))
   })
 }
 
