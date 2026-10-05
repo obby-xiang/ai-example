@@ -143,29 +143,30 @@ public class AgentRuntime {
                     // Check risk level — DANGER requires HITL
                     ToolMeta meta = toolRegistry.getMeta(toolName);
                     if (meta != null && meta.getRiskLevel() == ToolMeta.RiskLevel.DANGER) {
-                        InteractionRequest.InteractionResult hitlResult;
-                        try {
-                            hitlResult = hitlManager.awaitInteraction(
-                                    sessionId, runId, callId,
-                                    InteractionRequest.InteractionType.CONFIRM,
-                                    "即将执行高风险操作: " + getDisplayName(toolName),
-                                    "工具: " + toolName + "\n参数: " + argsJson,
-                                    Map.of("toolName", toolName, "args", argsJson));
-                            emitter.interactionRequest(hitlResult.isApproved()
-                                    ? "用户已批准操作" : "用户已拒绝操作");
-                        } catch (Exception e) {
-                            hitlResult = new InteractionRequest.InteractionResult();
-                            hitlResult.setApproved(false);
-                            hitlResult.setRejectionReason("交互请求失败: " + e.getMessage());
-                        }
+                        // 关键顺序：必须先创建请求并推送给前端（前端据此渲染确认卡片），
+                        // 然后再阻塞等待响应。否则用户永远看不到卡片，只能超时。
+                        InteractionRequest request = hitlManager.createInteraction(
+                                sessionId, runId, callId,
+                                InteractionRequest.InteractionType.CONFIRM,
+                                "即将执行高风险操作: " + getDisplayName(toolName),
+                                "工具: " + toolName + "\n参数: " + argsJson,
+                                Map.of("toolName", toolName, "args", argsJson));
+                        emitter.interactionRequest(request);
+
+                        InteractionRequest.InteractionResult hitlResult =
+                                hitlManager.awaitResponse(sessionId, request);
+
                         if (!hitlResult.isApproved()) {
-                            String resultStr = "用户拒绝了此操作: " + hitlResult.getRejectionReason();
+                            String resultStr = "用户拒绝了此操作: "
+                                    + (hitlResult.getRejectionReason() != null
+                                            ? hitlResult.getRejectionReason() : "未提供原因");
                             toolResults.add(ToolResponseMessage.builder()
                                     .responses(List.of(new ToolResponseMessage.ToolResponse(callId, toolName, resultStr)))
                                     .build());
                             emitter.toolDone(callId, false, "操作已拒绝");
                             continue;
                         }
+                        emitter.toolDone(callId, true, "用户已批准");
                     }
 
                     // Execute the tool

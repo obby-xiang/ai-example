@@ -50,8 +50,10 @@ spring:
       # 未配置时启动会给出明确提示，AI 功能不可用但业务功能不受影响。
       api-key: ${DEEPSEEK_API_KEY:}
       base-url: https://api.deepseek.com
-      completions-path: /chat/completions
       chat:
+        # 注意：DeepSeek 的接口路径是 /chat/completions（无 /v1 前缀），
+        # 必须覆盖默认的 /v1/chat/completions，否则请求 404。
+        completions-path: /chat/completions
         options:
           model: deepseek-flash
           temperature: 0.2

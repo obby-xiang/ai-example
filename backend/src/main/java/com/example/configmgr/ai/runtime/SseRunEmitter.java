@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.runtime;
 
+import com.example.configmgr.ai.hitl.InteractionRequest;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
@@ -40,11 +41,31 @@ public class SseRunEmitter {
 
     public void toolDone(String callId, boolean success, String summary) {
         send(Map.of("type", "TOOL_DONE", "toolCallId", callId,
-                "success", success, "summary", summary));
+                "success", success, "summary", summary != null ? summary : ""));
     }
 
-    public void interactionRequest(String summary) {
-        send(Map.of("type", "INTERACTION_REQUEST_RESULT", "summary", summary));
+    /**
+     * 推送 HITL 交互请求（前端据此渲染确认/选择卡片，并把 iid 回传给后端）。
+     */
+    public void interactionRequest(InteractionRequest request) {
+        send(Map.of(
+                "type", "INTERACTION_REQUEST",
+                "iid", request.getIid(),
+                "runId", request.getRunId(),
+                "toolCallId", request.getToolCallId(),
+                "interactionType", request.getInteractionType().name(),
+                "summary", request.getSummary() != null ? request.getSummary() : "",
+                "details", request.getDetails() != null ? request.getDetails() : "",
+                "params", request.getParams() != null ? request.getParams() : Map.of()
+        ));
+    }
+
+    /**
+     * 推送前端执行指令（导航 / 打开编辑器 / 下载等）。
+     */
+    public void uiCommand(String command, Map<String, Object> payload) {
+        send(Map.of("type", "UI_COMMAND", "command", command,
+                "payload", payload != null ? payload : Map.of()));
     }
 
     public void error(String message) {

@@ -56,6 +56,10 @@ onBeforeUnmount(() => {
 
 async function initSpread() {
   const GC = (await import('@grapecity/spread-sheets')).default
+  // 中文语言包（副作用模块，注册 zh-cn 资源）与授权 Key
+  await import('@grapecity/spread-sheets-resources-zh')
+  GC.Spread.Sheets.LicenseKey = import.meta.env.VITE_SPREADJS_KEY || ''
+  GC.Spread.Common.CultureManager.culture('zh-cn')
   spread = new GC.Spread.Sheets.Workbook(hostRef.value, {
     sheetCount: 1,
     allowUserDragFill: true,
