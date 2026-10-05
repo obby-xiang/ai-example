@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.tools;
 
+import com.example.configmgr.ai.runtime.AgentRunContext;
 import com.example.configmgr.ai.tool.ToolScope;
 import com.example.configmgr.ai.tool.ToolRisk;
 import com.example.configmgr.ai.tool.ToolMeta;
@@ -34,6 +35,13 @@ public class TaskTools {
             return "无效的任务类型: " + type + "，请使用 EXPORT 或 IMPORT";
         }
         Task task = taskService.create(taskType, title);
+        // 让前端立即跳转到新任务的向导页
+        var emitter = AgentRunContext.get();
+        if (emitter != null) {
+            String base = task.getType() == Task.TaskType.EXPORT ? "export" : "import";
+            emitter.uiCommand("navigate", java.util.Map.of(
+                    "route", "/tasks/" + task.getId() + "/" + base + "/" + task.getCurrentStep()));
+        }
         return String.format("任务创建成功！任务 #%d [%s] \"%s\"，当前步骤: %s",
                 task.getId(), task.getType(), task.getTitle(), task.getCurrentStep());
     }
@@ -61,6 +69,13 @@ public class TaskTools {
             @ToolParam(description = "目标步骤，如 QUERY_COND、EXPORT、UPLOAD、PRECHECK、IMPORT、PUBLISH") String step) {
         try {
             Task task = taskService.goToStep(taskId, step);
+            // 让前端立即跳转到目标步骤
+            var emitter = AgentRunContext.get();
+            if (emitter != null) {
+                String base = task.getType() == Task.TaskType.EXPORT ? "export" : "import";
+                emitter.uiCommand("navigate", java.util.Map.of(
+                        "route", "/tasks/" + taskId + "/" + base + "/" + step));
+            }
             return String.format("已跳转到步骤: %s（任务 #%d）", step, taskId);
         } catch (Exception e) {
             return "跳转步骤失败: " + e.getMessage();

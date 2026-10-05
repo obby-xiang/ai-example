@@ -93,9 +93,22 @@ const hasCompleted = computed(() => currentJob.value?.status === 'COMPLETED')
 
 onMounted(async () => {
   await loadFiles()
+  window.addEventListener('ui-command', onUiCommand)
 })
 
-onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
+onUnmounted(() => {
+  if (pollTimer) clearInterval(pollTimer)
+  window.removeEventListener('ui-command', onUiCommand)
+})
+
+// AI 下发的打开编辑器指令
+function onUiCommand(e) {
+  const { command, payload } = e.detail || {}
+  if (command !== 'open_editor' || !payload?.defCode) return
+  if (payload.taskId && payload.taskId !== props.task?.id) return
+  const file = files.value.find(f => f.defCode === payload.defCode)
+  if (file) openEditor(file)
+}
 
 async function loadFiles() {
   if (!props.task?.id) return

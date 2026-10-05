@@ -87,7 +87,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { listDefinitions } from '@/api/definitions.js'
 import { downloadTemplates as apiDownloadTemplates, uploadFile, getFiles, setImportMode } from '@/api/tasks.js'
 import { useTaskStore } from '@/stores/task.js'
@@ -133,6 +133,7 @@ const fileRows = computed(() => selectedCodes.value.map(code => {
 }))
 
 onMounted(async () => {
+  window.addEventListener('ui-command', onUiCommand)
   // 恢复导入模式
   if (props.task?.settingsJson) {
     try {
@@ -156,6 +157,17 @@ onMounted(async () => {
 })
 
 function handleDefSelection(rows) { selectedCodes.value = rows.map(r => r.code) }
+
+// AI 下发的打开编辑器指令
+function onUiCommand(e) {
+  const { command, payload } = e.detail || {}
+  if (command !== 'open_editor' || !payload?.defCode) return
+  if (payload.taskId && payload.taskId !== props.task?.id) return
+  const row = fileRows.value.find(r => r.defCode === payload.defCode)
+  if (row) openEditor(row)
+}
+
+onUnmounted(() => window.removeEventListener('ui-command', onUiCommand))
 
 async function downloadTemplates() {
   if (!props.task?.id || selectedCodes.value.length === 0) return

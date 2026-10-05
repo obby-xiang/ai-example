@@ -1,9 +1,9 @@
 package com.example.configmgr.ai.tools;
 
+import com.example.configmgr.ai.runtime.AgentRunContext;
 import com.example.configmgr.ai.tool.ToolScope;
 import com.example.configmgr.ai.tool.ToolRisk;
 import com.example.configmgr.ai.tool.ToolMeta;
-import com.example.configmgr.data.service.ConfigDataService;
 import com.example.configmgr.job.entity.Job;
 import com.example.configmgr.job.service.JobService;
 import com.example.configmgr.task.service.TaskService;
@@ -11,6 +11,8 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.stereotype.Component;
+
+import java.util.Map;
 
 /**
  * Export workflow tools.
@@ -75,5 +77,35 @@ public class ExportTools {
         } catch (Exception e) {
             return "查询作业失败: " + e.getMessage();
         }
+    }
+
+    @Tool(name = "open_export_file_editor", description = "请求前端打开指定配置的导出文件在线编辑器（SpreadJS）")
+    @ToolScope("task:EXPORT/EXPORT")
+    @ToolRisk(ToolMeta.RiskLevel.READ)
+    public String openEditor(
+            @ToolParam(description = "任务ID") Long taskId,
+            @ToolParam(description = "配置定义编码") String defCode) {
+        var emitter = AgentRunContext.get();
+        if (emitter == null) {
+            return "无法发送前端指令（当前不在 AI 运行上下文中）";
+        }
+        emitter.uiCommand("open_editor", Map.of("taskId", taskId, "defCode", defCode));
+        return "已请求前端打开 " + defCode + " 的在线编辑器";
+    }
+
+    @Tool(name = "download_export_file", description = "触发浏览器下载指定配置的导出文件")
+    @ToolScope("task:EXPORT/EXPORT")
+    @ToolRisk(ToolMeta.RiskLevel.READ)
+    public String downloadFile(
+            @ToolParam(description = "任务ID") Long taskId,
+            @ToolParam(description = "配置定义编码") String defCode) {
+        var emitter = AgentRunContext.get();
+        if (emitter == null) {
+            return "无法发送前端指令（当前不在 AI 运行上下文中）";
+        }
+        emitter.uiCommand("download", Map.of(
+                "url", "/api/tasks/" + taskId + "/files/" + defCode,
+                "fileName", defCode + ".xlsx"));
+        return "已触发浏览器下载 " + defCode + " 的导出文件";
     }
 }

@@ -67,6 +67,8 @@ public class AgentRuntime {
             return;
         }
         session.getCurrentRunThread().set(Thread.currentThread());
+        // 工具在同一虚拟线程执行，可经 ThreadLocal 拿到发射器推送 UI 指令
+        AgentRunContext.set(emitter);
 
         try {
             emitter.runStarted(runId);
@@ -206,6 +208,7 @@ public class AgentRuntime {
             emitter.error("对话出现未预期错误: " + e.getMessage());
         } finally {
             session.endRun();
+            AgentRunContext.clear();
         }
     }
 

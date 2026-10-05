@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, reactive } from 'vue'
 import * as aiApi from '@/api/ai.js'
+import router from '@/router/index.js'
 
 export const useAiStore = defineStore('ai', () => {
   const sessionId = ref(null)
@@ -166,8 +167,7 @@ export const useAiStore = defineStore('ai', () => {
     switch (event.type) {
       case 'RUN_STARTED':
         handlers.onAssistantStart?.()
-        break
-      case 'TEXT_DELTA':
+        break      case 'TEXT_DELTA':
         handlers.onTextDelta?.(event.delta)
         break
       case 'TOOL_START':
@@ -182,6 +182,9 @@ export const useAiStore = defineStore('ai', () => {
       case 'INTERACTION_REQUEST':
         pendingInteraction.value = event
         handlers.onInteraction?.(event)
+        break
+      case 'UI_COMMAND':
+        handleUiCommand(event)
         break
       case 'ERROR':
         handlers.onError?.(event.message)
@@ -205,6 +208,30 @@ export const useAiStore = defineStore('ai', () => {
     if (!sessionId.value) return
     await aiApi.submitInteraction(sessionId.value, iid, approved, reason, data)
     pendingInteraction.value = null
+  }
+
+  /**
+   * 处理 AI 下发的 UI 指令：
+   * - navigate：路由跳转
+   * - download：触发浏览器下载
+   * - 其他（open_editor 等）：通过 window 事件广播给业务组件处理
+   */
+  function handleUiCommand(event) {
+    const { command, payload } = event
+    if (command === 'navigate' && payload?.route) {
+      try {
+        router.push(payload.route)
+      } catch (e) { /* ignore */ }
+      return
+    }
+    if (command === 'download' && payload?.url) {
+      const a = document.createElement('a')
+      a.href = payload.url
+      if (payload.fileName) a.download = payload.fileName
+      a.click()
+      return
+    }
+    window.dispatchEvent(new CustomEvent('ui-command', { detail: { command, payload } }))
   }
 
   return {
