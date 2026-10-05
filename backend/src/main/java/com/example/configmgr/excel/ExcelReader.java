@@ -76,7 +76,10 @@ public class ExcelReader {
         List<String> codes = new ArrayList<>();
         DataFormatter fmt = new DataFormatter();
         for (int c = 0; c < row.getLastCellNum(); c++) {
-            codes.add(fmt.formatCellValue(row.getCell(c)).trim());
+            String v = fmt.formatCellValue(row.getCell(c)).trim();
+            // 模板第 0 列是 "def_code" 元信息，跳过以保证与数据列对齐
+            if (c == 0 && "def_code".equals(v)) continue;
+            codes.add(v);
         }
         return codes;
     }
