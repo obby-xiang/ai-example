@@ -1,10 +1,10 @@
 <template>
   <div>
     <div class="page-card">
-      <el-steps :active="store.step - 1" finish-status="success" align-center>
-        <el-step title="选择配置" description="多选要导出的配置项" />
-        <el-step title="查询条件" description="按各配置结构设置过滤" />
-        <el-step title="导出与编辑" description="进度 / SpreadJS 在线编辑 / 打包下载" />
+      <el-steps :active="store.step - 1" align-center class="wizard-steps" @click="onStepClick">
+        <el-step v-for="(s, i) in exportSteps" :key="i"
+                 :title="s.title" :description="s.desc" :status="exportStepStatus[i]"
+                 :class="exportStepClass(i)" />
       </el-steps>
     </div>
 
@@ -133,6 +133,52 @@ const filteredDefs = computed(() => defsStore.enabled.filter(d =>
   (!keyword.value || d.name.includes(keyword.value) || d.code.toLowerCase().includes(keyword.value.toLowerCase()))
   && (!levelFilter.value || d.level === levelFilter.value)))
 
+const exportSteps = [
+  { title: '选择配置', desc: '多选要导出的配置项' },
+  { title: '查询条件', desc: '按各配置结构设置过滤' },
+  { title: '导出与编辑', desc: '进度 / SpreadJS 在线编辑 / 打包下载' }
+]
+
+/** 每步状态随任务真实状态映射：process=当前、finish=已过、success=完成、error=失败、wait=未开始。 */
+const exportStepStatus = computed(() => {
+  const t = store.task
+  const fail = t && t.status === 'FAILED'
+  const done = t && t.status === 'SUCCESS'
+  const cur = store.step
+  const st = ['wait', 'wait', 'wait']
+  st[0] = cur === 1 ? 'process' : 'finish'
+  st[1] = cur === 2 ? 'process' : (cur > 2 ? 'finish' : 'wait')
+  if (fail) {
+    st[2] = 'error'
+  } else if (done) {
+    st[0] = 'success'; st[1] = 'success'; st[2] = 'success'
+  } else {
+    st[2] = cur === 3 ? 'process' : 'wait'
+  }
+  return st
+})
+
+/** 步骤可点击性：前置条件未满足的步骤禁用。 */
+function exportStepClickable(i) {
+  if (i === 0) return true
+  if (i === 1) return store.selectedDefs.length > 0
+  if (i === 2) return !!store.task
+  return false
+}
+
+function exportStepClass(i) {
+  return exportStepClickable(i) && store.step !== i + 1 ? 'is-clickable' : 'is-disabled'
+}
+
+function onStepClick(e) {
+  const steps = [...e.currentTarget.querySelectorAll('.el-step')]
+  const target = e.target.closest('.el-step')
+  const idx = steps.indexOf(target)
+  if (idx < 0 || idx + 1 === store.step) return
+  if (!exportStepClickable(idx)) return
+  store.goStep(idx + 1)
+}
+
 const files = computed(() => {
   const t = store.task
   return t && t.detail && t.detail.files ? t.detail.files : []
@@ -260,5 +306,14 @@ function fmtSize(n) {
   text-align: right;
   font-size: 13px;
   color: #606266;
+}
+.wizard-steps :deep(.el-step.is-clickable) {
+  cursor: pointer;
+}
+.wizard-steps :deep(.el-step.is-clickable:hover .el-step__title) {
+  color: #409eff;
+}
+.wizard-steps :deep(.el-step.is-disabled) {
+  cursor: not-allowed;
 }
 </style>

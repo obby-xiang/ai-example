@@ -1,11 +1,10 @@
 <template>
   <div>
     <div class="page-card">
-      <el-steps :active="store.step - 1" finish-status="success" align-center>
-        <el-step title="上传配置" description="模板下载 / 上传 xlsx·zip / 在线编辑" />
-        <el-step title="检查配置" description="异步预检查：进度 + 明细（含依赖）" />
-        <el-step title="导入配置" description="再次检查并入库（未发布草稿）" />
-        <el-step title="发布配置" description="最终检查 + 替换生效数据" />
+      <el-steps :active="store.step - 1" align-center class="wizard-steps" @click="onStepClick">
+        <el-step v-for="(s, i) in importSteps" :key="i"
+                 :title="s.title" :description="s.desc" :status="importStepStatus[i]"
+                 :class="importStepClass(i)" />
       </el-steps>
     </div>
 
@@ -202,6 +201,92 @@ const checkPassed = computed(() => {
   if (!['CHECKED', 'IMPORTED', 'PUBLISHED'].includes(status)) return false
   return (store.entries || []).every(e => e.errorCount === 0)
 })
+
+const importSteps = [
+  { title: '上传配置', desc: '模板下载 / 上传 xlsx·zip / 在线编辑' },
+  { title: '检查配置', desc: '异步预检查：进度 + 明细（含依赖）' },
+  { title: '导入配置', desc: '再次检查并入库（未发布草稿）' },
+  { title: '发布配置', desc: '最终检查 + 替换生效数据' }
+]
+
+/** 每步状态随批次状态机映射：process=当前、finish=已过、success=完成、error=失败、wait=未开始。 */
+const importStepStatus = computed(() => {
+  const st = ['wait', 'wait', 'wait', 'wait']
+  const b = store.batch
+  const status = b ? b.status : null
+  const cur = store.step
+  if (!status) {
+    st[0] = cur === 1 ? 'process' : 'wait'
+    return st
+  }
+  const ok1 = () => { st[0] = 'finish' }
+  const ok2 = () => { st[0] = 'finish'; st[1] = 'success' }
+  const ok3 = () => { st[0] = 'finish'; st[1] = 'success'; st[2] = 'success' }
+  const ok4 = () => { st[0] = 'success'; st[1] = 'success'; st[2] = 'success'; st[3] = 'success' }
+  switch (status) {
+    case 'CREATED':
+      st[0] = cur === 1 ? 'process' : 'finish'
+      break
+    case 'CHECKING':
+      ok1(); st[1] = 'process'
+      break
+    case 'CHECKED':
+      ok1(); st[1] = checkPassed.value ? 'success' : (cur === 2 ? 'process' : 'finish')
+      break
+    case 'IMPORTING':
+      ok2(); st[2] = 'process'
+      break
+    case 'IMPORTED':
+      ok3(); st[3] = 'wait'
+      break
+    case 'PUBLISHING':
+      ok3(); st[3] = 'process'
+      break
+    case 'PUBLISHED':
+      ok4()
+      break
+    case 'FAILED':
+      for (let i = 0; i < 4; i++) {
+        if (i < cur - 1) st[i] = 'finish'
+        else if (i === cur - 1) st[i] = 'error'
+      }
+      break
+    default:
+      break
+  }
+  return st
+})
+
+/** 允许跳转到的最大步骤（1-4）：由批次状态与检查结果决定。 */
+function importMaxStep() {
+  if (!store.batch) return 1
+  const status = store.batch.status
+  switch (status) {
+    case 'CREATED': return 2   // 批次已创建：可进入第2步执行检查
+    case 'CHECKING': return 2
+    case 'CHECKED': return checkPassed.value ? 3 : 2
+    case 'IMPORTING': return 3
+    case 'IMPORTED':
+    case 'PUBLISHING':
+    case 'PUBLISHED': return 4
+    case 'FAILED': return Math.max(1, store.step)
+    default: return 1
+  }
+}
+
+function importStepClass(i) {
+  const clickable = i + 1 <= importMaxStep() && store.step !== i + 1
+  return clickable ? 'is-clickable' : 'is-disabled'
+}
+
+function onStepClick(e) {
+  const steps = [...e.currentTarget.querySelectorAll('.el-step')]
+  const target = e.target.closest('.el-step')
+  const idx = steps.indexOf(target)
+  if (idx < 0 || idx + 1 === store.step) return
+  if (idx + 1 > importMaxStep()) return
+  store.goStep(idx + 1)
+}
 
 const canProceed = computed(() => store.batch && store.selectedDefs.length > 0)
 
@@ -402,5 +487,14 @@ watch(() => store.batch && store.batch.status, (s) => {
   border: 1px dashed #dcdfe6;
   border-radius: 6px;
   padding: 4px 10px;
+}
+.wizard-steps :deep(.el-step.is-clickable) {
+  cursor: pointer;
+}
+.wizard-steps :deep(.el-step.is-clickable:hover .el-step__title) {
+  color: #409eff;
+}
+.wizard-steps :deep(.el-step.is-disabled) {
+  cursor: not-allowed;
 }
 </style>
