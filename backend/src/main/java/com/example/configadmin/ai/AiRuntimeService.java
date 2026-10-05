@@ -1,361 +1,232 @@
 package com.example.configadmin.ai;
 
+import com.example.configadmin.common.ApiException;
 import com.example.configadmin.service.*;
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.ai.openai.api.OpenAiApi;
-import org.springframework.ai.openai.api.OpenAiApi.*;
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
+import org.springframework.ai.chat.memory.ChatMemory;
+import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.tool.ToolCallback;
+import org.springframework.ai.tool.method.MethodToolCallbackProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.task.TaskExecutor;
-import org.springframework.stereotype.Service;
+import org.springframework.stereotype.Component;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
-import reactor.core.publisher.Flux;
 
-import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 /**
- * 后端 AI Runtime（Agent 循环）：
- * 1. 流式调用 OpenAI 兼容模型（DeepSeek），SSE 推送 delta/reasoning/tool_start/tool_result/ui_event/done；
- * 2. 手动工具循环：模型产出 tool_calls → 执行后端工具 → 回填消息 → 下一轮（最多 maxIterations 轮）；
- * 3. 渐进式披露：仅把当前页面允许的工具清单放入请求与系统提示词；
- * 4. HITL：confirm=true 的破坏性工具暂停流、经 ui_event 请求确认，确认后经 /api/ai/confirm 续跑；
- * 5. 状态同步：前端上下文快照 → 影子状态；工具写操作更新影子状态并下发 ui_event 镜像前端。
+ * AI 运行时（官方 Spring AI 能力组合，不自行实现协议/循环/Schema）：
+ * - Agent 循环：ChatClient + 模型内部 ToolCallingManager（HooksToolCallingManager 仅做 HITL 与可见性钩子）；
+ * - 工具：@Tool 注解方法（AiTools），JSON Schema 由 Spring AI 自动生成；
+ * - 历史：MessageChatMemoryAdvisor + AiSessionChatMemory（按页签会话，H2 持久化）；
+ * - 流式：stream().chatResponse() 增量推送（含 reasoningContent 折叠展示）。
  */
-@Service
+@Component
 public class AiRuntimeService {
 
     private static final Logger log = LoggerFactory.getLogger(AiRuntimeService.class);
 
-    private final OpenAiApi openAiApi;
     private final AiSessionStore store;
-    private final ToolRegistry registry;
+    private final Services services;
     private final ObjectMapper mapper;
-    private final ConfigDefService defService;
-    private final ConfigDataService dataService;
-    private final ExportService exportService;
-    private final ImportService importService;
-    private final TaskRunner taskRunner;
-    private final TaskExecutor taskExecutor;
+    private final List<ToolCallback> allCallbacks;
+    private final ChatClient chatClient;
+    private final TaskExecutor executor;
 
-    @Value("${spring.ai.openai.chat.options.model:deepseek-flash}")
-    private String model;
-
-    @Value("${app.ai.max-tool-iterations:12}")
-    private int maxIterations;
-
-    @Value("${app.ai.max-messages:40}")
-    private int maxMessages;
-
-    @Value("${app.ai.tool-result-max-chars:4000}")
-    private int toolResultMaxChars;
-
-    public AiRuntimeService(OpenAiApi openAiApi, AiSessionStore store, ToolRegistry registry,
-                            ObjectMapper mapper, ConfigDefService defService, ConfigDataService dataService,
-                            ExportService exportService, ImportService importService, TaskRunner taskRunner,
-                            @Qualifier("taskExecutor") TaskExecutor taskExecutor) {
-        this.openAiApi = openAiApi;
+    public AiRuntimeService(ChatModel chatModel, AiSessionStore store, AiTools aiTools, Services services,
+                            AiSessionChatMemory chatMemory, ObjectMapper mapper,
+                            @Qualifier("taskExecutor") TaskExecutor executor) {
         this.store = store;
-        this.registry = registry;
+        this.services = services;
         this.mapper = mapper;
-        this.defService = defService;
-        this.dataService = dataService;
-        this.exportService = exportService;
-        this.importService = importService;
-        this.taskRunner = taskRunner;
-        this.taskExecutor = taskExecutor;
+        this.executor = executor;
+        // 全部 @Tool 方法 → ToolCallback（Spring AI 自动生成 Schema）
+        this.allCallbacks = Arrays.asList(MethodToolCallbackProvider.builder()
+                .toolObjects(aiTools).build().getToolCallbacks());
+        // ChatClient：官方记忆 Advisor（会话隔离靠 advisor param CONVERSATION_ID）
+        this.chatClient = ChatClient.builder(chatModel)
+                .defaultAdvisors(MessageChatMemoryAdvisor.builder(chatMemory).build())
+                .build();
     }
 
-    // ==================== 入口 ====================
+    /** 发起对话（SSE 流式）。 */
+    public SseEmitter doChat(String sessionId, String message, Map<String, Object> context) {
+        AiSession s = store.getOrCreate(sessionId);
+        s.touch();
+        s.setCancelled(false);
+        s.autoDenyPending(); // 遗留未确认操作 → 自动视为取消（安全默认）
+        s.setContext(context == null ? new LinkedHashMap<>() : context);
 
-    public void chat(String sessionId, String message, Map<String, Object> context, SseEmitter emitter) {
-        taskExecutor.execute(() -> doChat(sessionId, message, context, emitter));
-    }
-
-    private void doChat(String sessionId, String message, Map<String, Object> context, SseEmitter emitter) {
-        try {
-            AiSession s = store.getOrCreate(sessionId);
-            s.touch();
-            if (message == null || message.isBlank()) {
-                sendError(emitter, "消息不能为空");
-                return;
-            }
-            // 1) 合并上下文快照（业务 → AI）
-            if (context != null) {
-                Map<String, Object> merged = new LinkedHashMap<>(s.getContext());
-                merged.putAll(context);
-                s.setContext(merged);
-            }
-            // 2) 未确认的旧操作：自动视为拒绝（超时安全默认：拒绝）
-            if (s.getPending() != null) {
-                AiSession.PendingConfirm p = s.getPending();
-                s.getMessages().add(toolResultMsg(p.calls().get(p.index()),
-                        "用户未确认（发送了新消息），视为拒绝该操作"));
-                s.setPending(null);
-            }
-            s.getMessages().add(new ChatCompletionMessage(message, ChatCompletionMessage.Role.USER));
-            trim(s);
-            store.save(s); // 用户消息先落库（刷新/重启不丢）
-            runLoop(s, emitter);
-            store.save(s); // 本轮结束后落库（含最终回复或暂停的确认卡状态）
-        } catch (Exception e) {
-            log.error("AI 对话异常", e);
-            sendError(emitter, "系统异常：" + e.getMessage());
-        }
-    }
-
-    /** 确认续跑：approved=true 执行工具并继续批次与循环；false 回填拒绝结果继续。 */
-    public void confirm(String sessionId, boolean approved, SseEmitter emitter) {
-        taskExecutor.execute(() -> {
+        SseEmitter emitter = new SseEmitter(0L);
+        executor.execute(() -> {
             try {
-                AiSession s = store.get(sessionId);
-                s.touch();
-                AiSession.PendingConfirm p = s.getPending();
-                if (p == null) {
-                    sendError(emitter, "没有待确认的操作（可能已超时或已被处理）");
-                    return;
-                }
-                s.setPending(null);
-                ChatCompletionMessage.ToolCall tc = p.calls().get(p.index());
-                if (approved) {
-                    AiTool tool = registry.get(tc.function().name()).orElse(null);
-                    Map<String, Object> args = parseArgs(tc.function().arguments());
-                    if (tool == null) {
-                        s.getMessages().add(toolResultMsg(tc, "错误：未注册的工具"));
-                        send(emitter, "tool_result", Map.of("name", tc.function().name(), "ok", false, "summary", "未注册工具"));
-                    } else if (!executeOne(s, emitter, tc, tool, args)) {
-                        return;
-                    }
+                String page = String.valueOf(s.getContext().getOrDefault("page", "export"));
+                List<ToolCallback> callbacks = callbacksForPage(page);
+                Map<String, Object> toolCtx = Map.of(
+                        "session", s,
+                        "sink", (UiEventSink) ev -> {
+                            String type = String.valueOf(ev.getOrDefault("type", "ui_event"));
+                            if ("ping".equals(type)) {
+                                // 确认门等待期间的心跳：仅保活，不下发业务事件
+                                send(emitter, "ping", Map.of());
+                                return;
+                            }
+                            if ("tool_start".equals(type) || "tool_result".equals(type) || "confirm_tool".equals(type)) {
+                                // 钩子事件：SSE 事件名 = 类型，data 为剩余字段
+                                Map<String, Object> payload = new LinkedHashMap<>(ev);
+                                payload.remove("type");
+                                send(emitter, type, payload);
+                            } else {
+                                // 业务 ui_event：统一经 ui_event 事件下发（前端分发到工作区）
+                                send(emitter, "ui_event", ev);
+                            }
+                        },
+                        "services", services);
+
+                // 客户端断开（点“停止”/关闭页签/测试脚本提前断开）→ 自动释放 HITL 确认门并终止流
+                emitter.onCompletion(() -> {
+                    s.approveConfirm(false);
+                    s.setCancelled(true);
+                });
+                emitter.onError(ex -> {
+                    s.approveConfirm(false);
+                    s.setCancelled(true);
+                });
+                emitter.onTimeout(() -> {
+                    s.approveConfirm(false);
+                    s.setCancelled(true);
+                });
+
+                StringBuilder full = new StringBuilder();
+                // 立即下发 start 事件：确保响应头尽早发出（代理/网关不会因首包延迟超时断开）
+                send(emitter, "start", Map.of("sessionId", sessionId));
+                // 整条流调度到 boundedElastic：HITL 门在工具执行处的阻塞不会占用 Netty 事件循环线程
+                chatClient.prompt()
+                        .system(buildSystemPrompt(page, callbacks))
+                        .user(message)
+                        .toolCallbacks(callbacks)
+                        .toolContext(toolCtx)
+                        .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, sessionId))
+                        .stream()
+                        .chatResponse()
+                        .subscribeOn(reactor.core.scheduler.Schedulers.boundedElastic())
+                        .takeUntil(cr -> s.isCancelled())
+                        // 健壮性：90 秒无任何事件视为上游断流 → 自动重试一次（确认门等待期间有心跳保活）
+                        .timeout(java.time.Duration.ofSeconds(90))
+                        .retry(1)
+                        .doOnNext(cr -> {
+                            AssistantMessage out = cr.getResult() == null ? null : cr.getResult().getOutput();
+                            if (out == null) {
+                                return;
+                            }
+                            String delta = out.getText();
+                            if (delta != null && !delta.isEmpty()) {
+                                full.append(delta);
+                                send(emitter, "delta", Map.of("content", delta));
+                            }
+                            Object rc = out.getMetadata() == null ? null : out.getMetadata().get("reasoningContent");
+                            if (rc != null && !String.valueOf(rc).isEmpty()) {
+                                send(emitter, "reasoning", Map.of("content", String.valueOf(rc)));
+                            }
+                        })
+                        .doFinally(sig -> {
+                            // 流终止（含取消）时兜底释放遗留确认门
+                            s.approveConfirm(false);
+                        })
+                        .blockLast();
+
+                if (s.isCancelled()) {
+                    send(emitter, "done", Map.of("content", full.toString(), "cancelled", true));
                 } else {
-                    s.getMessages().add(toolResultMsg(tc, "用户拒绝了该操作"));
-                    send(emitter, "tool_result", Map.of("name", tc.function().name(), "ok", false, "summary", "用户已拒绝执行"));
+                    send(emitter, "done", Map.of("content", full.toString(), "cancelled", false));
                 }
-                processToolBatch(s, emitter, p.calls(), p.index() + 1);
-                store.save(s); // 确认续跑后落库
+                store.save(s);
             } catch (Exception e) {
-                log.error("确认续跑异常", e);
-                sendError(emitter, "系统异常：" + e.getMessage());
+                log.warn("AI 对话异常 session={}", sessionId, e);
+                send(emitter, "error", Map.of("message", friendlyError(e)));
+            } finally {
+                emitter.complete();
             }
         });
+        return emitter;
     }
 
-    // ==================== Agent 循环 ====================
-
-    private void runLoop(AiSession s, SseEmitter emitter) {
-        for (int iter = 0; iter < maxIterations; iter++) {
-            ensureSystemPrompt(s);
-            List<FunctionTool> tools = registry.forPage(pageOf(s)).stream()
-                    .map(this::toFunctionTool).toList();
-            List<ChatCompletionMessage> messages = List.copyOf(s.getMessages());
-
-            StringBuilder text = new StringBuilder();
-            List<ChatCompletionMessage.ToolCall> pending = new ArrayList<>();
-
-            try {
-                ChatCompletionRequest req = buildRequest(messages, tools);
-                Flux<ChatCompletionChunk> flux = openAiApi.chatCompletionStream(req);
-                for (ChatCompletionChunk chunk : flux.toIterable()) {
-                    if (chunk.choices() == null || chunk.choices().isEmpty()) {
-                        if (chunk.usage() != null) {
-                            if (!send(emitter, "usage", Map.of("usage", String.valueOf(chunk.usage())))) return;
-                        }
-                        continue;
-                    }
-                    ChatCompletionChunk.ChunkChoice choice = chunk.choices().get(0);
-                    ChatCompletionMessage delta = choice.delta();
-                    if (delta == null) continue;
-                    Object c = delta.content();
-                    if (c != null && !String.valueOf(c).isEmpty()) {
-                        text.append(String.valueOf(c));
-                        if (!send(emitter, "delta", Map.of("content", String.valueOf(c)))) return;
-                    }
-                    if (delta.reasoningContent() != null && !delta.reasoningContent().isEmpty()) {
-                        if (!send(emitter, "reasoning", Map.of("content", delta.reasoningContent()))) return;
-                    }
-                    if (choice.finishReason() == ChatCompletionFinishReason.TOOL_CALLS
-                            && delta.toolCalls() != null) {
-                        pending.addAll(delta.toolCalls());
-                    }
-                }
-            } catch (Exception e) {
-                log.warn("模型调用失败 session={}", s.getId(), e);
-                sendError(emitter, "模型调用失败：" + extractAiError(e));
-                return;
-            }
-
-            if (pending.isEmpty()) {
-                s.getMessages().add(new ChatCompletionMessage(text.toString(), ChatCompletionMessage.Role.ASSISTANT));
-                trim(s);
-                send(emitter, "done", Map.of("content", text.toString()));
-                emitter.complete();
-                return;
-            }
-
-            // 回填 assistant(tool_calls)（注意：reasoning_content 绝不能回传，DeepSeek 会 400）
-            List<ChatCompletionMessage.ToolCall> calls = pending.stream()
-                    .map(tc -> new ChatCompletionMessage.ToolCall(tc.id(), "function",
-                            new ChatCompletionMessage.ChatCompletionFunction(
-                                    tc.function().name(), tc.function().arguments())))
-                    .toList();
-            s.getMessages().add(new ChatCompletionMessage(null, ChatCompletionMessage.Role.ASSISTANT,
-                    null, null, calls, null, null, null, null));
-            if (!processToolBatch(s, emitter, pending, 0)) {
-                return;
-            }
-        }
-        sendError(emitter, "工具调用轮次超过上限（" + maxIterations + "），已停止");
-    }
-
-    /** 处理工具批次；confirm 工具会暂停（返回 false 表示流已结束）。 */
-    private boolean processToolBatch(AiSession s, SseEmitter emitter,
-                                     List<ChatCompletionMessage.ToolCall> calls, int from) {
-        for (int i = from; i < calls.size(); i++) {
-            ChatCompletionMessage.ToolCall tc = calls.get(i);
-            String name = tc.function().name();
-            Map<String, Object> args = parseArgs(tc.function().arguments());
-            if (!send(emitter, "tool_start", Map.of("name", name, "args", args == null ? Map.of() : args))) {
-                return false;
-            }
-            AiTool tool = registry.get(name).orElse(null);
-            if (tool == null) {
-                s.getMessages().add(toolResultMsg(tc, "错误：未注册的工具 " + name));
-                if (!send(emitter, "tool_result", Map.of("name", name, "ok", false, "summary", "未注册工具"))) {
-                    return false;
-                }
-                continue;
-            }
-            if (tool.def().confirm()) {
-                // HITL：暂停流，前端展示确认卡片；确认后经 /api/ai/confirm 续跑
-                s.setPending(new AiSession.PendingConfirm(calls, i));
-                Map<String, Object> uiEvent = new LinkedHashMap<>();
-                uiEvent.put("type", "confirm_tool");
-                uiEvent.put("toolCallId", tc.id() == null ? String.valueOf(i) : tc.id());
-                uiEvent.put("toolName", name);
-                uiEvent.put("summary", args == null ? "无参数" : mapper.valueToTree(args).toString());
-                if (!send(emitter, "ui_event", uiEvent)) return false;
-                send(emitter, "done", Map.of("content", "⏸ 请求执行「" + name + "」，请在下方确认或取消"));
-                emitter.complete();
-                return false;
-            }
-            if (!executeOne(s, emitter, tc, tool, args)) {
-                return false;
-            }
-        }
-        runLoop(s, emitter);
-        return true;
-    }
-
-    private boolean executeOne(AiSession s, SseEmitter emitter, ChatCompletionMessage.ToolCall tc,
-                               AiTool tool, Map<String, Object> args) {
-        try {
-            ToolContext tctx = new ToolContext(s, mapper, defService, dataService,
-                    exportService, importService, taskRunner);
-            ToolResult res = tool.run(tctx, args == null ? Map.of() : args);
-            String truncated = truncate(res.getText());
-            s.getMessages().add(toolResultMsg(tc, truncated));
-            if (!send(emitter, "tool_result", Map.of("name", tool.def().name(), "ok", res.isOk(),
-                    "summary", truncated))) {
-                return false;
-            }
-            for (Map<String, Object> ui : res.getUiEvents()) {
-                if (!send(emitter, "ui_event", ui)) return false;
-            }
-            return true;
-        } catch (Exception e) {
-            log.warn("工具执行失败 {}", tool.def().name(), e);
-            String msg = "工具执行失败：" + e.getMessage();
-            s.getMessages().add(toolResultMsg(tc, msg));
-            return send(emitter, "tool_result", Map.of("name", tool.def().name(), "ok", false, "summary", msg));
+    /** 确认/取消破坏性工具：释放确认门，原 chat SSE 流继续推进。 */
+    public void confirm(String sessionId, boolean approved) {
+        AiSession s = store.get(sessionId);
+        s.touch();
+        if (!s.approveConfirm(approved)) {
+            throw ApiException.badRequest("当前没有待确认的操作（可能已超时取消）");
         }
     }
 
-    // ==================== 组装 ====================
-
-    private ChatCompletionRequest buildRequest(List<ChatCompletionMessage> messages, List<FunctionTool> tools) {
-        return new ChatCompletionRequest(
-                messages,                       // messages
-                model,                          // model
-                null, null, null, null, null, null, // store/metadata/frequencyPenalty/logitBias/logprobs/topLogprobs
-                4096,                           // maxTokens（DeepSeek 用 max_tokens）
-                null,                           // maxCompletionTokens（与 max_tokens 互斥）
-                null,                           // n
-                null, null,                     // modalities/audio
-                null,                           // presencePenalty
-                null,                           // responseFormat
-                null,                           // seed
-                null,                           // serviceTier
-                null,                           // stop
-                true,                           // stream
-                ChatCompletionRequest.StreamOptions.INCLUDE_USAGE, // streamOptions
-                null,                           // temperature（走模型默认）
-                null,                           // topP
-                tools,                          // tools
-                ChatCompletionRequest.ToolChoiceBuilder.AUTO, // toolChoice
-                false,                          // parallelToolCalls（1.1.8 合并器仅支持单帧单调用）
-                null, null, null, null, null, null, null); // 其余
-    }
-
-    private FunctionTool toFunctionTool(ToolDef d) {
-        Map<String, Object> schema = new LinkedHashMap<>(d.jsonSchema());
-        return new FunctionTool(new FunctionTool.Function(d.description(), d.name(), schema, null));
-    }
-
-    private ChatCompletionMessage toolResultMsg(ChatCompletionMessage.ToolCall tc, String content) {
-        return new ChatCompletionMessage(content, ChatCompletionMessage.Role.TOOL,
-                tc.function().name(), tc.id(), null, null, null, null, null);
-    }
-
-    private Map<String, Object> parseArgs(String argsJson) {
-        if (argsJson == null || argsJson.isBlank()) return Map.of();
-        try {
-            return mapper.readValue(argsJson, new TypeReference<Map<String, Object>>() {
-            });
-        } catch (Exception e) {
-            log.warn("工具参数解析失败: {}", argsJson);
-            return Map.of("_raw", argsJson);
+    /** 停止生成：取消标记 + 释放遗留确认门。 */
+    public void stop(String sessionId) {
+        AiSession s = store.getQuiet(sessionId);
+        if (s == null) {
+            return;
         }
+        s.setCancelled(true);
+        s.approveConfirm(false);
     }
 
-    private String pageOf(AiSession s) {
-        Object p = s.getContext().get("page");
-        return p == null ? "unknown" : String.valueOf(p);
+    /** 当前页披露的工具清单（供 /api/ai/tools 查看）。 */
+    public List<Map<String, Object>> toolsForPage(String page) {
+        List<Map<String, Object>> out = new java.util.ArrayList<>();
+        callbacksForPage(page).forEach(cb -> {
+            ToolMeta.Meta meta = ToolMeta.ALL.get(cb.getToolDefinition().name());
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("name", cb.getToolDefinition().name());
+            m.put("description", cb.getToolDefinition().description());
+            m.put("confirm", meta != null && meta.confirm());
+            out.add(m);
+        });
+        return out;
     }
 
-    /** 系统提示词：每次循环重建（页面切换后渐进披露的工具清单随之变化）。 */
-    private void ensureSystemPrompt(AiSession s) {
-        String page = pageOf(s);
-        List<ToolDef> tools = registry.forPage(page);
+    /** 当前页披露的工具回调（渐进式披露）。 */
+    private List<ToolCallback> callbacksForPage(String page) {
+        return allCallbacks.stream()
+                .filter(cb -> {
+                    ToolMeta.Meta meta = ToolMeta.ALL.get(cb.getToolDefinition().name());
+                    return meta != null && meta.visibleOn(page);
+                })
+                .toList();
+    }
+
+    /** 渐进式披露提示词：仅披露当前页可用工具。 */
+    private String buildSystemPrompt(String page, List<ToolCallback> callbacks) {
         StringBuilder sb = new StringBuilder();
-        sb.append("你是「AI 辅助动态配置管理系统」的中文助手，界面左侧是业务工作区（任务向导），右侧是对话栏。\n");
-        sb.append("当前页面：").append(pageLabel(page)).append("\n");
-        sb.append("当前工作区状态快照（JSON，写操作前可调用 get_ui_state 查看最新）：\n");
-        sb.append(mapper.valueToTree(s.getContext()).toString()).append("\n\n");
-        sb.append("当前页面可用工具（渐进式披露，只能使用这些）：\n");
-        for (ToolDef t : tools) {
-            sb.append("- ").append(t.name()).append("：").append(t.description())
-                    .append(t.confirm() ? "（⚠ 执行前需用户确认）" : "").append("\n");
-        }
-        sb.append("\n行为准则：\n");
-        sb.append("1. 先理解用户意图；不确定工作区状态时先调 get_ui_state。\n");
-        sb.append("2. 工具执行会自动通过 ui_event 同步前端界面（勾选配置、跳转步骤、启动任务、触发下载等），你在回复中简要说明做了什么即可。\n");
-        sb.append("3. 执行破坏性操作（导入/发布/写入数据）前工具会要求用户确认，此时应停止并等待确认结果。\n");
-        sb.append("4. 用户没有明确要求时不要擅自执行写操作。\n");
+        sb.append("你是「AI 辅助动态配置管理系统」的智能助手。右侧为对话区，左侧为业务工作区（与对话联动）。\n");
+        sb.append("当前工作区页面：").append(pageLabel(page)).append("。\n");
+        sb.append("行为准则：\n");
+        sb.append("1. 优先调用工具完成操作；工具执行结果会自动同步到左侧工作区（无需用户手工操作）。\n");
+        sb.append("2. 涉及破坏性操作（创建/修改定义、写入数据、导入、发布）的工具执行前系统会请求用户确认；确认前不要宣称操作已完成。\n");
+        sb.append("3. 查询类操作无需确认，直接执行。\n");
+        sb.append("4. 用户可能在工作区手工操作后再与你对话；若用户描述与工作区状态不符，以工作区当前状态为准（先调用 get_ui_state 核对）。\n");
         sb.append("5. 回复使用中文，简洁、结构化，重要结论放在前面。\n");
         sb.append("6. 若操作失败，如实说明原因并给出修正建议。\n");
         sb.append("7. 不要重复调用同一工具（相同或近似参数）；一次调用获取的信息直接复用。\n");
-
-        List<ChatCompletionMessage> msgs = s.getMessages();
-        ChatCompletionMessage sys = new ChatCompletionMessage(sb.toString(), ChatCompletionMessage.Role.SYSTEM);
-        if (!msgs.isEmpty() && msgs.get(0).role() == ChatCompletionMessage.Role.SYSTEM) {
-            msgs.set(0, sys);
-        } else {
-            msgs.add(0, sys);
-        }
+        sb.append("\n当前页面可用工具（仅可调用以下工具）：\n");
+        callbacks.forEach(cb -> {
+            ToolMeta.Meta meta = ToolMeta.ALL.get(cb.getToolDefinition().name());
+            sb.append("- ").append(cb.getToolDefinition().name()).append("：")
+                    .append(cb.getToolDefinition().description());
+            if (meta != null && meta.confirm()) {
+                sb.append("（需用户确认）");
+            }
+            sb.append("\n");
+        });
+        return sb.toString();
     }
 
     private String pageLabel(String page) {
@@ -364,62 +235,35 @@ public class AiRuntimeService {
             case "import" -> "导入配置向导";
             case "defs" -> "配置定义管理";
             case "data" -> "数据浏览";
+            case "tasks" -> "任务管理";
             default -> page;
         };
     }
 
-    private void trim(AiSession s) {
-        List<ChatCompletionMessage> msgs = s.getMessages();
-        // 保留 system 头 + 最近 maxMessages 条
-        while (msgs.size() > 1 && msgs.size() - 1 > maxMessages) {
-            msgs.remove(1);
-        }
-    }
-
-    private String truncate(String text) {
-        if (text == null) return "";
-        return text.length() <= toolResultMaxChars ? text
-                : text.substring(0, toolResultMaxChars) + "\n…（结果已截断）";
-    }
-
-    // ==================== SSE 发送 ====================
-
-    /** 从异常链中提取模型服务返回的原始错误详情（便于定位 4xx 具体原因）。 */
-    private String extractAiError(Throwable e) {
-        Throwable cause = e;
-        int depth = 0;
-        while (cause != null && depth < 10) {
-            if (cause instanceof org.springframework.web.reactive.function.client.WebClientResponseException wre) {
-                String body = wre.getResponseBodyAsString();
-                if (body != null && !body.isBlank()) {
-                    return "HTTP " + wre.getStatusCode().value() + " " + body;
-                }
-                return "HTTP " + wre.getStatusCode().value() + " " + wre.getStatusText();
-            }
-            cause = cause.getCause();
-            depth++;
-        }
-        return e.getMessage();
-    }
-
-    private boolean send(SseEmitter emitter, String event, Object data) {        try {
-            emitter.send(SseEmitter.event().name(event).data(mapper.writeValueAsString(data)));
-            return true;
+    private void send(SseEmitter emitter, String event, Map<String, Object> data) {
+        try {
+            emitter.send(SseEmitter.event().name(event).data(data));
         } catch (Exception e) {
-            log.debug("SSE 发送失败（客户端断开）");
+            // 客户端断开（如点击“停止”或关闭页签）：终止 emitter 以触发 onError → 释放确认门并取消流
             try {
-                emitter.complete();
+                emitter.completeWithError(e);
             } catch (Exception ignored) {
             }
-            return false;
         }
     }
 
-    private void sendError(SseEmitter emitter, String message) {
-        send(emitter, "error", Map.of("message", message));
-        try {
-            emitter.complete();
-        } catch (Exception ignored) {
+    private String friendlyError(Throwable e) {
+        Throwable root = e;
+        while (root.getCause() != null && root.getCause() != root) {
+            root = root.getCause();
         }
+        String msg = root.getMessage() == null ? root.getClass().getSimpleName() : root.getMessage();
+        if (msg.contains("401") || msg.contains("Unauthorized")) {
+            return "模型服务认证失败（API Key 无效或未配置）。";
+        }
+        if (msg.contains("timeout") || msg.contains("Timeout")) {
+            return "模型服务响应超时，请稍后重试。";
+        }
+        return "模型服务异常：" + (msg.length() > 200 ? msg.substring(0, 200) : msg);
     }
 }

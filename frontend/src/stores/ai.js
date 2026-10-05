@@ -75,30 +75,26 @@ export const useAiStore = defineStore('ai', {
       }
     },
 
-    /** 确认/拒绝破坏性工具，续跑 Agent 循环。 */
+    /**
+     * 确认/取消破坏性工具：仅向后端释放 HITL 确认门，
+     * 后续事件（工具结果/增量回复）继续从原 chat SSE 流推进同一助手消息。
+     */
     async confirmTool(approved) {
       const last = this.messages[this.messages.length - 1]
-      if (!last || !last.confirm || this.streaming) return
+      if (!last || !last.confirm) return
       // 先清掉当前确认卡；续跑流中若出现新的确认卡由 ui_event 处理器重新挂上
       last.confirm = null
-      this.streaming = true
-      this.controller = new AbortController()
       try {
-        await this.streamChat('/api/ai/confirm', {
-          sessionId: this.sessionId,
-          approved
-        }, last, this.controller.signal)
+        await api.post('/api/ai/confirm', { sessionId: this.sessionId, approved })
       } catch (e) {
-        if (e.name !== 'AbortError') last.content += `\n[错误] ${e.message}`
+        last.content += `\n[错误] ${e.message}`
         last.done = true
-      } finally {
-        this.streaming = false
-        this.controller = null
       }
     },
 
     stop() {
       if (this.controller) this.controller.abort()
+      api.post('/api/ai/stop', { sessionId: this.sessionId }).catch(() => {})
       this.streaming = false
       this.sending = false
     },

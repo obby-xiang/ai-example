@@ -7,7 +7,11 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.ai.openai.api.OpenAiApi;
+import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.MessageType;
+import org.springframework.ai.chat.messages.ToolResponseMessage;
+import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -23,8 +27,8 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * 会话存储：内存 Map（热）+ H2 持久化（ai_session 表，冷）。
  * - 页签唯一：sessionId 由前端 sessionStorage 生成，新页签=新会话；
- * - 刷新不丢：前端经 /api/ai/history 恢复；后端重启后由 H2 恢复，历史依然保留；
- * - 空闲清理：内存与 H2 同步清理（超过 TTL 未访问）。
+ * - 刷新不丢：前端经 /api/ai/history 恢复；后端重启后由 H2 恢复；
+ * - 消息以 Spring AI Message 表示，持久化为平台无关 JSON（手动 Map 映射，便于跨版本稳定）。
  */
 @Component
 public class AiSessionStore {
@@ -52,7 +56,6 @@ public class AiSessionStore {
             s.touch();
             return s;
         }
-        // 内存未命中 → 从 H2 恢复（后端重启场景）
         AiSession restored = recordRepo.findById(sessionId).map(this::fromRecord).orElse(null);
         if (restored != null) {
             sessions.put(sessionId, restored);
@@ -65,13 +68,7 @@ public class AiSessionStore {
     }
 
     public AiSession get(String sessionId) {
-        AiSession s = sessions.get(sessionId);
-        if (s == null) {
-            s = recordRepo.findById(sessionId).map(this::fromRecord).orElse(null);
-            if (s != null) {
-                sessions.put(sessionId, s);
-            }
-        }
+        AiSession s = getQuiet(sessionId);
         if (s == null) {
             throw ApiException.notFound("会话不存在或已过期：" + sessionId);
         }
@@ -139,26 +136,35 @@ public class AiSessionStore {
         }
     }
 
-    // ---------- 消息 ↔ JSON 转换（OpenAI 协议消息的可持久化表示） ----------
+    // ---------- 消息 ↔ JSON 转换（Spring AI Message 的平台无关表示） ----------
 
-    private List<Map<String, Object>> toMaps(List<OpenAiApi.ChatCompletionMessage> msgs) {
+    private List<Map<String, Object>> toMaps(List<Message> msgs) {
         List<Map<String, Object>> out = new ArrayList<>();
-        for (OpenAiApi.ChatCompletionMessage m : msgs) {
-            if (m.role() == OpenAiApi.ChatCompletionMessage.Role.SYSTEM) {
+        for (Message m : msgs) {
+            if (m.getMessageType() == MessageType.SYSTEM) {
                 continue; // 系统提示每轮重建，不入库
             }
+            if (m instanceof ToolResponseMessage trm) {
+                for (ToolResponseMessage.ToolResponse tr : trm.getResponses()) {
+                    Map<String, Object> map = new LinkedHashMap<>();
+                    map.put("role", "tool");
+                    map.put("content", tr.responseData());
+                    map.put("toolCallId", tr.id());
+                    map.put("name", tr.name());
+                    out.add(map);
+                }
+                continue;
+            }
             Map<String, Object> map = new LinkedHashMap<>();
-            map.put("role", m.role().name());
-            map.put("content", m.content() == null ? null : String.valueOf(m.content()));
-            if (m.name() != null) map.put("name", m.name());
-            if (m.toolCallId() != null) map.put("toolCallId", m.toolCallId());
-            if (m.toolCalls() != null && !m.toolCalls().isEmpty()) {
+            map.put("role", m.getMessageType().name().toLowerCase());
+            map.put("content", m.getText());
+            if (m instanceof AssistantMessage am && am.hasToolCalls()) {
                 List<Map<String, Object>> calls = new ArrayList<>();
-                for (OpenAiApi.ChatCompletionMessage.ToolCall tc : m.toolCalls()) {
+                for (AssistantMessage.ToolCall tc : am.getToolCalls()) {
                     Map<String, Object> c = new LinkedHashMap<>();
                     c.put("id", tc.id());
-                    c.put("name", tc.function().name());
-                    c.put("arguments", tc.function().arguments());
+                    c.put("name", tc.name());
+                    c.put("arguments", tc.arguments());
                     calls.add(c);
                 }
                 map.put("toolCalls", calls);
@@ -174,9 +180,28 @@ public class AiSessionStore {
             List<Map<String, Object>> maps = mapper.readValue(rec.getMessagesJson(),
                     new TypeReference<List<Map<String, Object>>>() {
                     });
+            List<Message> msgs = new ArrayList<>();
+            // 连续 tool 记录合并为一条 ToolResponseMessage（OpenAI 协议要求）
+            List<ToolResponseMessage.ToolResponse> pendingResponses = new ArrayList<>();
             for (Map<String, Object> m : maps) {
-                s.getMessages().add(fromMap(m));
+                String role = String.valueOf(m.getOrDefault("role", "user"));
+                if ("tool".equals(role)) {
+                    pendingResponses.add(new ToolResponseMessage.ToolResponse(
+                            m.get("toolCallId") == null ? null : String.valueOf(m.get("toolCallId")),
+                            m.get("name") == null ? null : String.valueOf(m.get("name")),
+                            m.get("content") == null ? null : String.valueOf(m.get("content"))));
+                    continue;
+                }
+                if (!pendingResponses.isEmpty()) {
+                    msgs.add(ToolResponseMessage.builder().responses(List.copyOf(pendingResponses)).build());
+                    pendingResponses.clear();
+                }
+                msgs.add(fromMap(m));
             }
+            if (!pendingResponses.isEmpty()) {
+                msgs.add(ToolResponseMessage.builder().responses(List.copyOf(pendingResponses)).build());
+            }
+            s.getMessages().addAll(msgs);
         } catch (Exception e) {
             log.warn("会话消息反序列化失败 session={}", rec.getSessionId(), e);
         }
@@ -190,30 +215,26 @@ public class AiSessionStore {
         return s;
     }
 
-    private OpenAiApi.ChatCompletionMessage fromMap(Map<String, Object> m) {
-        String role = String.valueOf(m.getOrDefault("role", "USER"));
+    private Message fromMap(Map<String, Object> m) {
+        String role = String.valueOf(m.getOrDefault("role", "user"));
         String content = m.get("content") == null ? null : String.valueOf(m.get("content"));
-        OpenAiApi.ChatCompletionMessage.Role r = OpenAiApi.ChatCompletionMessage.Role.valueOf(role);
-        if (r == OpenAiApi.ChatCompletionMessage.Role.TOOL) {
-            return new OpenAiApi.ChatCompletionMessage(content, r,
-                    m.get("name") == null ? null : String.valueOf(m.get("name")),
-                    m.get("toolCallId") == null ? null : String.valueOf(m.get("toolCallId")),
-                    null, null, null, null, null);
-        }
-        Object rawCalls = m.get("toolCalls");
-        if (r == OpenAiApi.ChatCompletionMessage.Role.ASSISTANT && rawCalls instanceof List<?> list && !list.isEmpty()) {
-            List<OpenAiApi.ChatCompletionMessage.ToolCall> calls = new ArrayList<>();
-            for (Object o : list) {
-                @SuppressWarnings("unchecked")
-                Map<String, Object> c = (Map<String, Object>) o;
-                calls.add(new OpenAiApi.ChatCompletionMessage.ToolCall(
-                        c.get("id") == null ? null : String.valueOf(c.get("id")), "function",
-                        new OpenAiApi.ChatCompletionMessage.ChatCompletionFunction(
-                                String.valueOf(c.get("name")),
-                                c.get("arguments") == null ? "{}" : String.valueOf(c.get("arguments")))));
+        if ("assistant".equals(role)) {
+            Object rawCalls = m.get("toolCalls");
+            if (rawCalls instanceof List<?> list && !list.isEmpty()) {
+                List<AssistantMessage.ToolCall> calls = new ArrayList<>();
+                for (Object o : list) {
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> c = (Map<String, Object>) o;
+                    calls.add(new AssistantMessage.ToolCall(
+                            c.get("id") == null ? null : String.valueOf(c.get("id")),
+                            "function",
+                            String.valueOf(c.get("name")),
+                            c.get("arguments") == null ? "{}" : String.valueOf(c.get("arguments"))));
+                }
+                return AssistantMessage.builder().content(content).toolCalls(calls).build();
             }
-            return new OpenAiApi.ChatCompletionMessage(content, r, null, null, calls, null, null, null, null);
+            return content == null || content.isEmpty() ? new AssistantMessage("") : new AssistantMessage(content);
         }
-        return new OpenAiApi.ChatCompletionMessage(content, r);
+        return new UserMessage(content == null ? "" : content);
     }
 }

@@ -132,23 +132,16 @@ watch(() => ai.messages.length, scrollBottom)
 </script>
 
 <style scoped>
+/* Tailwind 工具类样式（不手写 CSS 值） */
 .ai-panel {
-  height: 100%;
-  display: flex;
-  flex-direction: column;
+  @apply flex h-full flex-col;
 }
 .ai-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 10px 12px;
-  border-bottom: 1px solid #e4e7ed;
-  background: #fff;
+  @apply flex items-center justify-between border-b border-[#e4e7ed] bg-white px-3 py-2.5;
 }
-.ai-title { font-size: 15px; font-weight: 600; color: #303133; }
-.session-tag { margin-right: 6px; }
-.ai-input-btns { display: flex; flex-direction: column; gap: 4px; }
-.cursor { animation: blink 1s infinite; color: #409eff; }
-@keyframes blink { 50% { opacity: 0; } }
-.reasoning-body { white-space: pre-wrap; font-size: 12px; color: #909399; }
+.ai-title { @apply text-[15px] font-semibold text-[#303133]; }
+.session-tag { @apply mr-1.5; }
+.ai-input-btns { @apply flex flex-col gap-1; }
+.cursor { @apply animate-pulse text-[#409eff]; }
+.reasoning-body { @apply whitespace-pre-wrap text-xs text-[#909399]; }
 </style>

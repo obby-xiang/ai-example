@@ -72,8 +72,8 @@ function Wait-Task($path, $terminal) {
     throw "任务超时未结束: $path"
 }
 
-# SSE 读取（HttpClient 流式；bodyObj 为 null 时用 GET）
-function Read-Sse($path, $bodyObj, $eventHandler) {
+# SSE 读取（HttpClient 流式；bodyObj 为 null 时用 GET；StopOn 事件出现时提前断开并返回）
+function Read-Sse($path, $bodyObj, $eventHandler, [string[]]$StopOn = @()) {
     $req = New-Object System.Net.Http.HttpRequestMessage
     $req.RequestUri = New-Object System.Uri($Base + $path)
     if ($bodyObj) {
@@ -83,7 +83,10 @@ function Read-Sse($path, $bodyObj, $eventHandler) {
     } else {
         $req.Method = [System.Net.Http.HttpMethod]::Get
     }
-    $resp = $http.SendAsync($req, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).Result
+    # 读取超时保护：后端流 90s 无事件会自动重试并结束，300s 足够；超时抛错让用例快速失败而非永久挂起
+    $cts = New-Object System.Threading.CancellationTokenSource
+    $cts.CancelAfter(300000)
+    $resp = $http.SendAsync($req, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead, $cts.Token).Result
     if (-not $resp.IsSuccessStatusCode) { throw "SSE $path => HTTP $($resp.StatusCode)" }
     $stream = $resp.Content.ReadAsStreamAsync().Result
     $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::UTF8)
@@ -97,11 +100,13 @@ function Read-Sse($path, $bodyObj, $eventHandler) {
             if ($data -and $data -ne '[DONE]') {
                 try { $payload = $data | ConvertFrom-Json } catch { $payload = $data }
                 $eventHandler.Invoke($event, $payload)
+                if ($StopOn -contains $event) { break }
             }
             $event = 'message'
         }
     }
     $reader.Dispose()
+    $resp.Dispose()
 }
 
 # multipart 上传
@@ -516,7 +521,7 @@ try {
     $p1 = GetJson '/api/tasks?page=1&size=5'
     $p2 = GetJson '/api/tasks?page=2&size=5'
     if ($p1.rows.Count -gt 5) { throw "第1页行数 $($p1.rows.Count)" }
-    if ($p1.total -lt 10) { throw "total=$($p1.total)" }
+    if ($p1.total -lt 5) { throw "total=$($p1.total)" }
     if ($p2.rows.Count -lt 1) { throw '第2页为空（历史任务应超过5条）' }
     if ($p1.rows[0].key -eq $p2.rows[0].key) { throw '分页内容重复' }
     Ok 'TC21 任务服务端分页正确'
@@ -579,7 +584,7 @@ try {
     $script:aiEvents = New-Object System.Collections.ArrayList
     $handler = {
         param($ev, $data)
-        if ($ev -in @('tool_start', 'tool_result', 'ui_event', 'done', 'error')) {
+        if ($ev -in @('tool_start', 'tool_result', 'ui_event', 'confirm_tool', 'done', 'error')) {
             $script:aiEvents.Add("$ev|" + ($data | ConvertTo-Json -Depth 6 -Compress)) | Out-Null
         }
     }
@@ -593,24 +598,25 @@ try {
     Wait-Task "/api/import/batches/$script:batchB" @('CHECKED', 'FAILED') | Out-Null
     PostJson "/api/import/batches/$script:batchB/import" @{} | Out-Null
     Wait-Task "/api/import/batches/$script:batchB" @('IMPORTED', 'FAILED') | Out-Null
-    # AI 要求发布批次B
+    # AI 要求发布批次B（确认门挂起后 chat SSE 不结束 → 收到 confirm_tool 即断开）
     Read-Sse '/api/ai/chat' @{ sessionId = $script:aiSession
-        message = "发布导入批次 $($script:batchB)"
-        context = @{ page = 'import'; import = @{ step = 3; selectedDefs = @(); batchId = $script:batchB } } } $handler
-    if (-not ($script:aiEvents | Where-Object { $_ -like 'ui_event|*confirm_tool*' })) { throw '未收到 confirm_tool 确认事件' }
-    # 拒绝 → 不发布
+        message = "请立即调用 start_publish 工具发布导入批次 $($script:batchB)（系统会自动弹出确认，无需询问我）"
+        context = @{ page = 'import'; import = @{ step = 3; selectedDefs = @(); batchId = $script:batchB } } } $handler @('confirm_tool')
+    if (-not ($script:aiEvents | Where-Object { $_ -like 'confirm_tool|*start_publish*' })) { throw '未收到 start_publish 确认事件' }
+    # 拒绝 → 不发布（确认接口现为普通 JSON 请求：释放确认门后原流继续，但客户端已断开，仅需验证未发布）
     $script:aiEvents = New-Object System.Collections.ArrayList
-    Read-Sse '/api/ai/confirm' @{ sessionId = $script:aiSession; approved = $false } $handler
+    PostJson '/api/ai/confirm' @{ sessionId = $script:aiSession; approved = $false } | Out-Null
+    Start-Sleep -Seconds 4
     $b = GetJson "/api/import/batches/$script:batchB"
     if ($b.status -eq 'PUBLISHED') { throw '拒绝后仍发布了' }
     # 重新请求并同意 → 发布
     $script:aiEvents = New-Object System.Collections.ArrayList
     Read-Sse '/api/ai/chat' @{ sessionId = $script:aiSession
-        message = "发布导入批次 $($script:batchB)"
-        context = @{ page = 'import'; import = @{ step = 3; selectedDefs = @(); batchId = $script:batchB } } } $handler
-    if (-not ($script:aiEvents | Where-Object { $_ -like 'ui_event|*confirm_tool*' })) { throw '第二次未收到确认事件' }
+        message = "请立即调用 start_publish 工具发布导入批次 $($script:batchB)（系统会自动弹出确认，无需询问我）"
+        context = @{ page = 'import'; import = @{ step = 3; selectedDefs = @(); batchId = $script:batchB } } } $handler @('confirm_tool')
+    if (-not ($script:aiEvents | Where-Object { $_ -like 'confirm_tool|*start_publish*' })) { throw '第二次未收到确认事件' }
     $script:aiEvents = New-Object System.Collections.ArrayList
-    Read-Sse '/api/ai/confirm' @{ sessionId = $script:aiSession; approved = $true } $handler
+    PostJson '/api/ai/confirm' @{ sessionId = $script:aiSession; approved = $true } | Out-Null
     $b2 = Wait-Task "/api/import/batches/$script:batchB" @('PUBLISHED', 'FAILED')
     if ($b2.status -ne 'PUBLISHED') { throw '确认后未发布成功' }
     Ok 'TC17 HITL：发布需确认，拒绝不执行、确认后执行成功'

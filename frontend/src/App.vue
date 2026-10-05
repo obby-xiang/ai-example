@@ -3,12 +3,12 @@
   <div class="app-shell flex h-screen flex-col overflow-hidden">
     <header class="app-header flex h-14 shrink-0 items-center gap-6 bg-gradient-to-r from-brand-from to-brand-to px-5 text-white">
       <span class="text-[17px] font-semibold whitespace-nowrap">⚙ AI 辅助动态配置管理系统</span>
-      <nav class="flex gap-1.5">
-        <span v-for="item in navItems" :key="item.path"
-              :class="['nav-item cursor-pointer rounded-md px-4 py-1.5 text-sm',
-                       route.path.startsWith(item.path) ? 'active bg-white/20 font-semibold text-white' : 'text-[#d7e4f2] hover:bg-white/10 hover:text-white']"
-              @click="router.push(item.path)">{{ item.label }}</span>
-      </nav>
+      <!-- 顶部导航：Element Plus 菜单组件（horizontal + router 模式），非自绘 -->
+      <el-menu mode="horizontal" router :default-active="route.path" :ellipsis="false"
+               background-color="transparent" text-color="#d7e4f2" active-text-color="#ffffff"
+               class="nav-menu">
+        <el-menu-item v-for="item in navItems" :key="item.path" :index="item.path">{{ item.label }}</el-menu-item>
+      </el-menu>
       <div class="flex-1"></div>
       <span class="text-xs text-[#cfe0f3]">{{ backendInfo }}</span>
     </header>

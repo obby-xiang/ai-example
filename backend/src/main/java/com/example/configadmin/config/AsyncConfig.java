@@ -14,10 +14,11 @@ public class AsyncConfig {
     @Bean(name = "taskExecutor")
     public TaskExecutor taskExecutor() {
         var executor = new ThreadPoolTaskExecutor();
-        // 虚拟线程：任务以行级 IO 为主，虚拟线程吞吐与隔离性最佳
-        executor.setVirtualThreads(true);
-        executor.setCorePoolSize(1);
-        executor.setMaxPoolSize(64);
+        // 平台线程池：导出/检查/导入/发布 + AI 对话流（blockLast 阻塞式等待）共享；
+        // 虚拟线程在 H2/POI 等阻塞 IO 上存在载波钉死风险，平台线程池行为更可预期
+        executor.setCorePoolSize(8);
+        executor.setMaxPoolSize(32);
+        executor.setQueueCapacity(2000);
         executor.setThreadNamePrefix("async-task-");
         executor.initialize();
         return executor;

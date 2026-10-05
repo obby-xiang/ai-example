@@ -1,86 +1,56 @@
 html, body, #app {
-  height: 100%;
+  @apply h-full overflow-hidden;
   margin: 0;
   padding: 0;
-  overflow: hidden;
 }
 
 body {
   font-family: 'PingFang SC', 'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;
-  background: #f5f7fa;
+  @apply bg-[#f5f7fa];
 }
 
-/* ===== 整体骨架：顶部导航固定 + 左工作区独立滚动 + 右 AI 栏固定 ===== */
+/* ===== 整体骨架：顶部导航固定 + 左工作区独立滚动 + 右 AI 栏固定（Tailwind 布局工具类） ===== */
 .app-shell {
-  height: 100vh;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
+  @apply flex h-screen flex-col overflow-hidden;
 }
 
 .app-header {
-  flex: 0 0 56px;
-  display: flex;
-  align-items: center;
-  gap: 24px;
-  background: linear-gradient(90deg, #1f3a5f, #2f5d8a);
-  color: #fff;
-  padding: 0 20px;
-  z-index: 100;
+  @apply z-[100] flex h-14 shrink-0 items-center gap-6 bg-gradient-to-r from-[#1f3a5f] to-[#2f5d8a] px-5 text-white;
 }
 
 .app-body {
-  flex: 1;
-  display: flex;
-  min-height: 0;
+  @apply flex min-h-0 flex-1;
 }
 
 .app-header .logo {
-  font-size: 17px;
-  font-weight: 600;
-  white-space: nowrap;
+  @apply text-[17px] font-semibold whitespace-nowrap;
 }
 
-.app-header .nav {
-  display: flex;
-  gap: 6px;
+/* Element Plus 导航菜单融入渐变头部（仅做主题微调，不自绘导航） */
+.app-header .nav-menu {
+  @apply h-14 border-none bg-transparent;
 }
-
-.app-header .nav .nav-item {
-  padding: 6px 16px;
-  border-radius: 6px;
-  cursor: pointer;
-  color: #d7e4f2;
-  font-size: 14px;
+.app-header .nav-menu .el-menu-item {
+  @apply h-14 leading-[56px];
+  background: transparent !important;
 }
-
-.app-header .nav .nav-item:hover {
-  background: rgba(255, 255, 255, 0.12);
-  color: #fff;
+.app-header .nav-menu .el-menu-item:hover {
+  background: rgba(255, 255, 255, 0.12) !important;
 }
-
-.app-header .nav .nav-item.active {
-  background: rgba(255, 255, 255, 0.22);
-  color: #fff;
-  font-weight: 600;
+.app-header .nav-menu .el-menu-item.is-active {
+  background: rgba(255, 255, 255, 0.22) !important;
+  @apply font-semibold;
+}
+.app-header .nav-menu.el-menu--horizontal {
+  border-bottom: none;
 }
 
 .workspace {
-  flex: 1;
-  min-width: 0;
-  overflow-y: auto;
-  padding: 16px;
+  @apply min-w-0 flex-1 overflow-y-auto p-4;
 }
 
 .ai-side {
-  flex: 0 0 400px;
-  width: 400px;
-  min-height: 0;
-  border-left: 1px solid #e4e7ed;
-  background: #fff;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
+  @apply flex w-[400px] shrink-0 basis-[400px] flex-col overflow-hidden border-l border-[#e4e7ed] bg-white;
 }
 
 .page-card {
@@ -101,104 +71,59 @@ body {
   font-family: Consolas, Menlo, monospace;
 }
 
-/* AI 面板消息 */
+/* AI 面板消息（Tailwind 工具类，不自绘样式） */
 .ai-messages {
-  flex: 1;
-  overflow-y: auto;
-  padding: 12px;
-  background: #f8fafc;
+  @apply flex-1 overflow-y-auto bg-[#f8fafc] p-3;
 }
 
 .ai-msg {
-  margin-bottom: 12px;
-  display: flex;
+  @apply mb-3 flex;
 }
 
 .ai-msg.user {
-  justify-content: flex-end;
+  @apply justify-end;
 }
 
 .ai-bubble {
-  max-width: 88%;
-  border-radius: 10px;
-  padding: 8px 12px;
-  font-size: 13px;
-  line-height: 1.6;
-  word-break: break-word;
+  @apply max-w-[88%] rounded-[10px] px-3 py-2 text-[13px] leading-relaxed break-words;
 }
 
 .ai-msg.user .ai-bubble {
-  background: #409eff;
-  color: #fff;
+  @apply bg-[#409eff] text-white;
 }
 
 .ai-msg.assistant .ai-bubble {
-  background: #fff;
-  border: 1px solid #e4e7ed;
-  color: #303133;
-  white-space: pre-wrap;
+  @apply border border-[#e4e7ed] bg-white text-[#303133] whitespace-pre-wrap;
 }
 
 .ai-reasoning {
-  max-width: 88%;
-  border-radius: 8px;
-  padding: 6px 10px;
-  font-size: 12px;
-  color: #909399;
-  background: #f0f2f5;
-  margin-bottom: 6px;
+  @apply mb-1.5 max-w-[88%] rounded-lg bg-[#f0f2f5] px-2.5 py-1.5 text-xs text-[#909399];
 }
 
 .ai-tool-card {
-  max-width: 88%;
-  border: 1px solid #dfe4ea;
-  border-radius: 8px;
-  background: #fbfcfe;
-  font-size: 12px;
-  margin-bottom: 6px;
-  overflow: hidden;
+  @apply mb-1.5 max-w-[88%] overflow-hidden rounded-lg border border-[#dfe4ea] bg-[#fbfcfe] text-xs;
 }
 
 .ai-tool-card .tool-head {
-  padding: 5px 10px;
-  background: #eef3f9;
-  color: #47617e;
-  font-weight: 600;
-  cursor: pointer;
+  @apply cursor-pointer bg-[#eef3f9] px-2.5 py-[5px] font-semibold text-[#47617e];
 }
 
 .ai-tool-card .tool-body {
-  padding: 6px 10px;
-  color: #606266;
-  word-break: break-all;
+  @apply break-all px-2.5 py-1.5 text-[#606266];
 }
 
 .ai-confirm-card {
-  max-width: 88%;
-  border: 1px solid #f3d19e;
-  background: #fef7ec;
-  border-radius: 8px;
-  padding: 10px 12px;
-  font-size: 13px;
-  margin-bottom: 8px;
+  @apply mb-2 max-w-[88%] rounded-lg border border-[#f3d19e] bg-[#fef7ec] px-3 py-2.5 text-[13px];
 }
 
 .ai-input {
-  display: flex;
-  gap: 8px;
-  padding: 10px 12px;
-  border-top: 1px solid #e4e7ed;
-  background: #fff;
-  align-items: flex-end;
+  @apply flex items-end gap-2 border-t border-[#e4e7ed] bg-white px-3 py-2.5;
 }
 
 .ai-suggestions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 6px 12px 0;
+  @apply flex flex-wrap gap-1.5 px-3 pt-1.5;
 }
 
 .ai-suggestions .el-tag {
-  cursor: pointer;
+  @apply cursor-pointer;
 }
