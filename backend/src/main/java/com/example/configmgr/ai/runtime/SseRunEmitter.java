@@ -27,7 +27,17 @@ public class SseRunEmitter {
     }
 
     public void runCompleted(String runId) {
-        send(Map.of("type", "RUN_COMPLETED", "runId", runId));
+        runCompleted(runId, Map.of());
+    }
+
+    public void runCompleted(String runId, Map<String, Object> usage) {
+        Map<String, Object> event = new java.util.HashMap<>();
+        event.put("type", "RUN_COMPLETED");
+        event.put("runId", runId);
+        if (usage != null && !usage.isEmpty()) {
+            event.put("usage", usage);
+        }
+        send(event);
     }
 
     public void textDelta(String delta) {

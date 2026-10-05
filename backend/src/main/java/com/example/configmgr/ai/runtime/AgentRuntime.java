@@ -12,15 +12,16 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.*;
-import org.springframework.ai.chat.model.ChatModel;
-import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.chat.metadata.Usage;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.openai.OpenAiChatModel;
 import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Core agent loop. Runs on a virtual thread per invocation.
@@ -49,7 +50,7 @@ public class AgentRuntime {
             5. 主动提示用户下一步可以做什么
             """;
 
-    private final ChatModel chatModel;
+    private final OpenAiChatModel chatModel;
     private final ToolRegistry toolRegistry;
     private final ContextBuilder contextBuilder;
     private final HitlManager hitlManager;
@@ -72,6 +73,9 @@ public class AgentRuntime {
 
         try {
             emitter.runStarted(runId);
+
+            long totalPromptTokens = 0;
+            long totalCompletionTokens = 0;
 
             // Build message history
             List<Message> messages = new ArrayList<>();
@@ -102,11 +106,11 @@ public class AgentRuntime {
                 // Build options with thinking disabled
                 OpenAiChatOptions opts = buildOptions(tools);
 
-                // Call the model
+                // Call the model（真流式：逐块推送文本，末尾汇总工具调用）
                 Prompt prompt = new Prompt(messages, opts);
-                ChatResponse response;
+                StreamResult streamResult;
                 try {
-                    response = callModelWithStreaming(prompt, emitter);
+                    streamResult = streamModel(prompt, emitter);
                 } catch (Exception e) {
                     if (Thread.currentThread().isInterrupted()) {
                         emitter.error("运行已被取消");
@@ -117,19 +121,17 @@ public class AgentRuntime {
                     return;
                 }
 
-                if (response == null) break;
-
-                // Extract tool calls
-                var generation = response.getResult();
-                if (generation == null) break;
-                AssistantMessage assistantMsg = generation.getOutput();
-                List<AssistantMessage.ToolCall> toolCalls = assistantMsg.getToolCalls();
-
-                // Add assistant message to history
+                // 组装本轮 assistant 消息（文本 + 可能存在的工具调用）
+                AssistantMessage assistantMsg = streamResult.assistantMessage();
                 messages.add(assistantMsg);
 
-                if (toolCalls == null || toolCalls.isEmpty()) {
-                    // Done — no more tool calls
+                if (streamResult.usage() != null) {
+                    totalPromptTokens += streamResult.usage().getPromptTokens();
+                    totalCompletionTokens += streamResult.usage().getCompletionTokens();
+                }
+
+                List<AssistantMessage.ToolCall> toolCalls = streamResult.toolCalls();
+                if (toolCalls.isEmpty()) {
                     break;
                 }
 
@@ -201,7 +203,10 @@ public class AgentRuntime {
             // Save history (trim if needed)
             session.getHistory().clear();
             session.getHistory().addAll(messages.subList(2, messages.size())); // skip system messages
-            emitter.runCompleted(runId);
+            Map<String, Object> usage = totalPromptTokens > 0 || totalCompletionTokens > 0
+                    ? Map.of("promptTokens", totalPromptTokens, "completionTokens", totalCompletionTokens)
+                    : Map.of();
+            emitter.runCompleted(runId, usage);
 
         } catch (Exception e) {
             log.error("Agent run failed: {}", e.getMessage(), e);
@@ -212,25 +217,56 @@ public class AgentRuntime {
         }
     }
 
-    private ChatResponse callModelWithStreaming(Prompt prompt, SseRunEmitter emitter) {
-        // Use blocking call — on virtual thread this is fine
-        // Collect text via the response; streaming text to frontend via emitter
-        ChatResponse response = chatModel.call(prompt);
-        // Send text delta
-        if (response != null && response.getResult() != null) {
-            String text = response.getResult().getOutput().getText();
-            if (text != null && !text.isBlank()) {
-                emitter.textDelta(text);
-            }
-        }
-        return response;
+    /**
+     * 真流式调用：逐块把文本推给前端；结束时把本轮的文本与工具调用汇总返回。
+     */
+    private StreamResult streamModel(Prompt prompt, SseRunEmitter emitter) {
+        StringBuilder acc = new StringBuilder();
+        List<AssistantMessage.ToolCall> toolCalls =
+                java.util.Collections.synchronizedList(new ArrayList<>());
+        AtomicReference<Usage> usageRef = new AtomicReference<>();
+
+        chatModel.stream(prompt)
+                .doOnNext(cr -> {
+                    if (cr.getResult() == null) {
+                        return;
+                    }
+                    String text = cr.getResult().getOutput().getText();
+                    if (text != null && !text.isBlank()) {
+                        acc.append(text);
+                        emitter.textDelta(text);
+                    }
+                    List<AssistantMessage.ToolCall> calls = cr.getResult().getOutput().getToolCalls();
+                    if (calls != null && !calls.isEmpty()) {
+                        toolCalls.addAll(calls);
+                    }
+                    if (cr.getMetadata() != null && cr.getMetadata().getUsage() != null) {
+                        usageRef.set(cr.getMetadata().getUsage());
+                    }
+                })
+                .blockLast(java.time.Duration.ofMinutes(3));
+
+        String fullText = acc.toString();
+        List<AssistantMessage.ToolCall> calls = new ArrayList<>(toolCalls);
+        AssistantMessage assistantMessage = calls.isEmpty()
+                ? new AssistantMessage(fullText)
+                : AssistantMessage.builder().content(fullText).toolCalls(calls).build();
+
+        return new StreamResult(assistantMessage, calls, usageRef.get());
+    }
+
+    private record StreamResult(AssistantMessage assistantMessage,
+                                List<AssistantMessage.ToolCall> toolCalls,
+                                Usage usage) {
     }
 
     private OpenAiChatOptions buildOptions(List<ToolCallback> tools) {
         var builder = OpenAiChatOptions.builder()
                 .internalToolExecutionEnabled(false)
                 .temperature(0.2)
-                .maxTokens(4096);
+                .maxTokens(4096)
+                // 让 DeepSeek 在流式最后一块返回 token 用量
+                .streamUsage(true);
 
         // Disable DeepSeek thinking via extraBody
         if (appProperties.getAi().isThinkingDisabled()) {

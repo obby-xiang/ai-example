@@ -191,6 +191,9 @@ export const useAiStore = defineStore('ai', () => {
         break
       case 'RUN_COMPLETED':
         handlers.onDone?.()
+        if (event.usage?.promptTokens || event.usage?.completionTokens) {
+          addSystemMessage(`本轮消耗 token：输入 ${event.usage.promptTokens} / 输出 ${event.usage.completionTokens}`)
+        }
         break
     }
   }
