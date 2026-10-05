@@ -71,14 +71,16 @@
 </template>
 
 <script setup>
-import { ref, computed, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { createJob, getJob, cancelJob as apiCancel, getIssues } from '@/api/jobs.js'
+import { useTaskStore } from '@/stores/task.js'
 import { ElMessage } from 'element-plus'
 import { CircleCheck, CircleClose, Loading, ArrowLeft, ArrowRight } from '@element-plus/icons-vue'
 
 const props = defineProps({ task: Object })
 const emit = defineEmits(['next', 'back'])
 
+const taskStore = useTaskStore()
 const currentJob = ref(null)
 const jobItems = ref([])
 const issues = ref([])
@@ -92,6 +94,24 @@ const statusText = computed(() => ({ PENDING:'等待中…', RUNNING:'正在检�
 const errorCount = computed(() => issues.value.filter(i => i.severity === 'ERROR').length)
 const warningCount = computed(() => issues.value.filter(i => i.severity === 'WARNING').length)
 const canProceed = computed(() => isCompleted.value && errorCount.value === 0)
+
+onMounted(() => {
+  // 认领 AI/其他页签启动的 PRECHECK 作业
+  watch(() => taskStore.liveJobs, async () => {
+    const evt = taskStore.latestJobEvent('PRECHECK')
+    if (!evt || !evt.jobId || currentJob.value?.id === evt.jobId) return
+    try {
+      const res = await getJob(evt.jobId)
+      currentJob.value = res.data.data
+      jobItems.value = res.data.data.items || []
+      if (isRunning.value) startPoll()
+      else {
+        const ir = await getIssues(evt.jobId)
+        issues.value = ir.data.data?.content || []
+      }
+    } catch (e) { /* ignore */ }
+  }, { deep: true })
+})
 
 onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
 

@@ -267,9 +267,35 @@ void runAgentLoop(RunInput input, SseRunEmitter emitter) {
 - AI 工具修改业务数据 → `TaskChangedEvent` → `GET /api/tasks/{id}/events` SSE 推送
 - AI 下发的导航/编辑器指令 → UI_COMMAND（见上）
 
+#### 联动而不耦合（关键架构原则）
+
+**单一事实来源**：任务/作业/配置的全部状态只存在后端。用户在工作区的操作与
+AI 的工具调用**走同一套 REST 接口修改后端状态**，并通过**同一条任务 SSE 事件流**
+广播变更。前端只订阅事件流、按事件刷新本地快照——事件来源（用户 or AI）对消费方透明：
+
+```
+用户操作 ──► REST(同一接口) ──┐
+                              ├──► 后端状态 ──► TaskSseService ──► SSE ──► 工作区订阅刷新
+AI 工具调用 ─► 同一服务(直接) ─┘
+```
+
+由此保证解耦与可拆卸性：
+- **去掉 AI 面板**：工作区操作零依赖 AI 模块，功能完全不受影响
+- **去掉工作区**：AI 工具直接操作后端服务，任务/作业照常流转，事件无人订阅也不报错
+- 工作区步骤组件"认领"事件流中对应类型的作业（AI 启动的作业自动接管展示进度），
+  外部变更同步本地表单状态（选配置勾选、查询条件等），本地未保存编辑受快照守卫保护
+
+**会话与页签**：sid 存于 sessionStorage（跟随浏览器页签）；新页签 = 新会话（无历史）；
+同页签刷新 = 从后端内存会话恢复全部对话显示（用户消息/AI回复/工具卡片/token 行）。
+后端内存会话 30 分钟 TTL，过期或后端重启则开新会话（符合"不持久化"约束）。
+
 ---
 
 ## 3. 前端设计
+
+**样式体系**：Element Plus（组件库）+ TailwindCSS v4（布局/间距/气泡等原子化样式）。
+引入顺序为 Tailwind（含 preflight）→ Element Plus CSS → 业务样式，
+避免 preflight 重置覆盖 Element Plus 组件样式；业务组件内继续允许 scoped SCSS。
 
 ### 3.1 路由结构
 
@@ -286,10 +312,9 @@ void runAgentLoop(RunInput input, SseRunEmitter emitter) {
 ### 3.2 布局组件
 
 ```
-AppLayout.vue
-├── WorkspacePanel.vue (left, 65%)
-│   └── <RouterView />
-└── AiPanel.vue (right, 35%, keepalive)
+App.vue（Tailwind flex 双栏：flex-1 工作区 + w-[380px] AI 栏）
+├── 左侧业务工作区（<RouterView />，独立可替换）
+└── 右侧 AiPanel.vue（常驻，不随路由销毁）
 ```
 
 ### 3.3 Pinia Stores
@@ -297,8 +322,8 @@ AppLayout.vue
 | Store | 职责 |
 |-------|------|
 | `useWorkspaceStore` | 当前页面上下文（page, taskId, step），上报给后端 |
-| `useTaskStore` | 任务数据、任务项、文件、作业状态 |
-| `useAiStore` | 会话管理、消息列表、当前 run 状态、HITL 交互 |
+| `useTaskStore` | 任务数据、任务项、文件、作业状态；**订阅任务 SSE 事件流**（connectTaskStream），维护 liveJobs 片段供步骤组件认领 AI 启动的作业 |
+| `useAiStore` | 会话管理、消息列表（含刷新恢复）、当前 run 状态、HITL 交互 |
 | `useDefinitionsStore` | 配置定义缓存 |
 
 ### 3.4 事件流（AG-UI 协议）

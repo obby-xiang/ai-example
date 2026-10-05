@@ -198,7 +198,7 @@ public class ImportJobRunner {
     private void publishProgress(Job job, String defCode, int processed, int total) {
         int pct = total > 0 ? (processed * 100 / total) : 0;
         taskSseService.publish(job.getTaskId(), "JOB_PROGRESS", Map.of(
-                "jobId", job.getId(), "defCode", defCode,
+                "jobId", job.getId(), "jobType", job.getJobType(), "defCode", defCode,
                 "processed", processed, "total", total, "pct", pct));
     }
 }

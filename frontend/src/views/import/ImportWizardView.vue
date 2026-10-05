@@ -25,7 +25,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useTaskStore } from '@/stores/task.js'
 import { useWorkspaceStore } from '@/stores/workspace.js'
@@ -46,7 +46,15 @@ const task = computed(() => taskStore.currentTask)
 const stepOrder = ['UPLOAD', 'PRECHECK', 'IMPORT', 'PUBLISH']
 const currentStepIndex = computed(() => stepOrder.indexOf(step.value))
 
-onMounted(async () => { await taskStore.loadTask(taskId.value) })
+onMounted(async () => {
+  await taskStore.loadTask(taskId.value)
+  // 订阅任务事件流：AI 或用户对任务的任何变更都会实时同步到工作区
+  taskStore.connectTaskStream(taskId.value)
+})
+
+onUnmounted(() => {
+  taskStore.disconnectTaskStream()
+})
 watch(step, (s) => { workspaceStore.setExtra('step', s) })
 
 async function goNext() {

@@ -50,7 +50,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, nextTick } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { listDefinitions } from '@/api/definitions.js'
 import { useTaskStore } from '@/stores/task.js'
 import { Search, ArrowRight } from '@element-plus/icons-vue'
@@ -79,15 +79,28 @@ onMounted(async () => {
   try {
     const res = await listDefinitions()
     defs.value = res.data.data || []
-    // Pre-select already selected items
-    if (props.task?.items?.length > 0) {
-      const preSelected = props.task.items.map(i => i.defCode)
-      selectedCodes.value = [...preSelected]
-    }
+    syncSelectionFromTask()
   } finally {
     loading.value = false
   }
 })
+
+// 外部变更（AI 或另一页签操作）后同步表格勾选状态
+watch(() => (props.task?.items || []).map(i => i.defCode).join(','), () => {
+  syncSelectionFromTask()
+})
+
+function syncSelectionFromTask() {
+  const codes = (props.task?.items || []).map(i => i.defCode)
+  selectedCodes.value = [...codes]
+  const table = tableRef.value
+  if (table && defs.value.length) {
+    table.clearSelection()
+    defs.value.forEach(row => {
+      if (codes.includes(row.code)) table.toggleRowSelection(row, true)
+    })
+  }
+}
 
 function handleSelectionChange(rows) {
   selectedCodes.value = rows.map(r => r.code)

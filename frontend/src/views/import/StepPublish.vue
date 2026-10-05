@@ -60,9 +60,10 @@
 </template>
 
 <script setup>
-import { ref, computed, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { createJob, getJob } from '@/api/jobs.js'
+import { useTaskStore } from '@/stores/task.js'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Check, Loading, CircleCheck, CircleClose, ArrowLeft } from '@element-plus/icons-vue'
 
@@ -70,6 +71,7 @@ const props = defineProps({ task: Object })
 const emit = defineEmits(['back'])
 const router = useRouter()
 
+const taskStore = useTaskStore()
 const currentJob = ref(null)
 const jobItems = ref([])
 const confirming = ref(false)
@@ -80,6 +82,20 @@ const isCompleted = computed(() => currentJob.value?.status === 'COMPLETED')
 const progressPct = computed(() => Math.round((currentJob.value?.progress||0)/Math.max(1,currentJob.value?.total||1)*100))
 const progressStatus = computed(() => currentJob.value?.status === 'FAILED' ? 'exception' : currentJob.value?.status === 'COMPLETED' ? 'success' : '')
 const statusText = computed(() => ({ PENDING:'等待中…', RUNNING:'正在发布…', COMPLETED:'发布成功！', FAILED:'发布失败', CANCELLED:'已取消' })[currentJob.value?.status] || '')
+
+onMounted(() => {
+  // 认领 AI/其他页签启动的 PUBLISH 作业
+  watch(() => taskStore.liveJobs, async () => {
+    const evt = taskStore.latestJobEvent('PUBLISH')
+    if (!evt || !evt.jobId || currentJob.value?.id === evt.jobId) return
+    try {
+      const res = await getJob(evt.jobId)
+      currentJob.value = res.data.data
+      jobItems.value = res.data.data.items || []
+      if (isRunning.value) startPoll()
+    } catch (e) { /* ignore */ }
+  }, { deep: true })
+})
 
 onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
 

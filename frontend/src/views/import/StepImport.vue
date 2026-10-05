@@ -68,14 +68,16 @@
 </template>
 
 <script setup>
-import { ref, computed, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { createJob, getJob, getDiff } from '@/api/jobs.js'
+import { useTaskStore } from '@/stores/task.js'
 import { ElMessage } from 'element-plus'
 import { Upload, Loading, CircleCheck, CircleClose, ArrowLeft, ArrowRight } from '@element-plus/icons-vue'
 
 const props = defineProps({ task: Object })
 const emit = defineEmits(['next', 'back'])
 
+const taskStore = useTaskStore()
 const currentJob = ref(null)
 const jobItems = ref([])
 const diffRows = ref([])
@@ -87,6 +89,24 @@ const progressPct = computed(() => Math.round((currentJob.value?.progress||0)/Ma
 const progressStatus = computed(() => currentJob.value?.status === 'FAILED' ? 'exception' : currentJob.value?.status === 'COMPLETED' ? 'success' : '')
 const statusText = computed(() => ({ PENDING:'等待中…', RUNNING:'正在导入…', COMPLETED:'导入完成，数据已写入暂存区', FAILED:'导入失败', CANCELLED:'已取消' })[currentJob.value?.status] || '')
 const canProceed = computed(() => isCompleted.value)
+
+onMounted(() => {
+  // 认领 AI/其他页签启动的 IMPORT 作业
+  watch(() => taskStore.liveJobs, async () => {
+    const evt = taskStore.latestJobEvent('IMPORT')
+    if (!evt || !evt.jobId || currentJob.value?.id === evt.jobId) return
+    try {
+      const res = await getJob(evt.jobId)
+      currentJob.value = res.data.data
+      jobItems.value = res.data.data.items || []
+      if (isRunning.value) startPoll()
+      else if (isCompleted.value) {
+        const dr = await getDiff(evt.jobId)
+        diffRows.value = dr.data.data || []
+      }
+    } catch (e) { /* ignore */ }
+  }, { deep: true })
+})
 
 onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
 

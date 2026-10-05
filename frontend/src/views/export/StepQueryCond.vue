@@ -74,7 +74,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, computed } from 'vue'
+import { ref, reactive, onMounted, computed, watch } from 'vue'
 import { listDefinitions } from '@/api/definitions.js'
 import { getRegions, getProjects } from '@/api/masterdata.js'
 import { useTaskStore } from '@/stores/task.js'
@@ -89,6 +89,8 @@ const taskStore = useTaskStore()
 const defs = ref([])
 const regions = ref([])
 const projects = ref([])
+// 已保存的条件 JSON 快照（防外部同步覆盖本地未保存编辑）
+const syncedJson = reactive({})
 const activeTab = ref('')
 const saving = ref(false)
 const estimating = ref('')
@@ -127,9 +129,28 @@ onMounted(async () => {
         scopeKeys: parsed.scopeKeys || [],
         rows: parsed.fields || []
       })
+      syncedJson[item.defCode] = item.conditionJson || ''
     }
   }
 })
+
+// 外部变更（AI 设置条件等）同步；本地编辑保存后 syncedJson 更新，避免覆盖
+watch(() => (props.task?.items || []).map(i => i.defCode + ':' + (i.conditionJson || '')).join('|'),
+  (val, oldVal) => {
+    if (val === oldVal) return
+    for (const item of (props.task?.items || [])) {
+      const cur = item.conditionJson || ''
+      if (syncedJson[item.defCode] !== cur) {
+        const parsed = parseExisting(cur)
+        if (!conds[item.defCode]) {
+          conds[item.defCode] = reactive({ scopeKeys: [], rows: [] })
+        }
+        conds[item.defCode].scopeKeys = parsed.scopeKeys || []
+        conds[item.defCode].rows = parsed.fields || []
+        syncedJson[item.defCode] = cur
+      }
+    }
+  })
 
 function parseExisting(json) {
   if (!json) return {}
@@ -213,6 +234,7 @@ async function handleNext() {
     for (const item of (props.task?.items || [])) {
       const condJson = JSON.stringify(buildCondition(item.defCode))
       await taskStore.setCondition(props.task.id, item.defCode, condJson)
+      syncedJson[item.defCode] = condJson
     }
     emit('next')
   } finally {

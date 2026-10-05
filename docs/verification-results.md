@@ -131,6 +131,15 @@
 | H-04 内容完整 | ✅ | 含 CURRENCY 等定义内容 |
 | H-05 浏览器刷新回归 | ✅ | 发消息→刷新后：用户消息/完整回复/工具卡片/token 行（"上一轮消耗 token…"）全部恢复 |
 
+### 3.3f TailwindCSS 与 AI↔工作区联动（真实浏览器）
+
+| 用例 | 结果 | 实测证据 |
+|------|------|---------|
+| T-01 Tailwind 集成 | ✅ | TailwindCSS 4.3.3 + @tailwindcss/vite；App/AiPanel/ContextChip/SuggestionChips/ToolCallCard 套用原子类；yarn build 通过，界面渲染正常 |
+| T-02 AI 选择配置→工作区联动 | ✅ | 浏览器停留在导出-选择配置步骤（已选 0）→ 同一会话 AI 调 select_defs → 工作区实时变为"已选 2"（任务 SSE 事件流驱动） |
+| T-03 AI 启动导出→工作区接管 | ✅ | AI 调 start_export → 工作区显示导出结果（在线编辑/全部下载）；大配置（PROJ_PRICE 1200 行）场景捕获中间态："正在导出"+进度条+取消按钮 |
+| T-04 会话页签语义 | ✅ | sid 存 sessionStorage；新页签=新会话无历史；同页签刷新=历史恢复（见 3.3e） |
+
 ### 3.4 独立用例：发布冲突检测（双任务并发）
 
 | 步骤 | 实测证据 |

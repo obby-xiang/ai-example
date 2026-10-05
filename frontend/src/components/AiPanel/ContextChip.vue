@@ -1,7 +1,7 @@
 <template>
-  <div class="context-chip" v-if="label">
+  <div v-if="label" class="flex items-center gap-1 border-b border-slate-100 bg-slate-50 px-4 py-1.5 text-[11px] text-slate-500">
     <el-icon size="12"><Location /></el-icon>
-    <span>{{ label }}</span>
+    <span>AI 当前视野：{{ label }}</span>
   </div>
 </template>
 
@@ -30,16 +30,3 @@ const label = computed(() => {
   return pageLabels[ws.page] || ''
 })
 </script>
-
-<style lang="scss" scoped>
-.context-chip {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 12px;
-  font-size: 11px;
-  color: var(--el-text-color-secondary);
-  background: var(--el-fill-color-light);
-  border-bottom: 1px solid var(--el-border-color-lighter);
-}
-</style>

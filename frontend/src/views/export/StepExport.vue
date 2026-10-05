@@ -70,9 +70,10 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { createJob, getJob, cancelJob as apiCancelJob } from '@/api/jobs.js'
 import { getFiles, downloadFile, downloadAllFiles, downloadFiles } from '@/api/tasks.js'
+import { useTaskStore } from '@/stores/task.js'
 import { ElMessage } from 'element-plus'
 import { Loading, Download, ArrowLeft } from '@element-plus/icons-vue'
 import SpreadJSEditor from '@/components/SpreadJSEditor/SpreadJSEditor.vue'
@@ -80,6 +81,7 @@ import SpreadJSEditor from '@/components/SpreadJSEditor/SpreadJSEditor.vue'
 const props = defineProps({ task: Object })
 const emit = defineEmits(['back'])
 
+const taskStore = useTaskStore()
 const currentJob = ref(null)
 const files = ref([])
 const checkedCodes = ref([])
@@ -94,12 +96,34 @@ const hasCompleted = computed(() => currentJob.value?.status === 'COMPLETED')
 onMounted(async () => {
   await loadFiles()
   window.addEventListener('ui-command', onUiCommand)
+  // AI 启动的导出作业经任务事件流同步到工作区
+  watchAdoptJob()
 })
 
 onUnmounted(() => {
   if (pollTimer) clearInterval(pollTimer)
   window.removeEventListener('ui-command', onUiCommand)
 })
+
+// 认领外部（AI 或另一页签）启动的 EXPORT 作业：事件到达后接管展示与轮询
+let stopWatch = null
+function watchAdoptJob() {
+  stopWatch = watch(() => taskStore.liveJobs, async () => {
+    const evt = taskStore.latestJobEvent('EXPORT')
+    if (!evt || !evt.jobId) return
+    if (currentJob.value?.id === evt.jobId) {
+      // 同一作业：合并进度片段
+      if (evt.processed !== undefined) currentJob.value.progress = evt.progress !== undefined ? evt.progress : currentJob.value.progress
+      return
+    }
+    try {
+      const res = await getJob(evt.jobId)
+      currentJob.value = res.data.data
+      if (isRunning.value) startPoll()
+      else await loadFiles()
+    } catch (e) { /* ignore */ }
+  }, { deep: true })
+}
 
 // AI 下发的打开编辑器指令
 function onUiCommand(e) {

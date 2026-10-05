@@ -1,5 +1,5 @@
 <template>
-  <div v-if="chips.length > 0" class="suggestion-chips">
+  <div class="flex shrink-0 flex-wrap gap-1.5 border-t border-slate-100 bg-slate-50 px-3 py-2">
     <el-button
       v-for="chip in chips"
       :key="chip"
@@ -7,7 +7,7 @@
       round
       plain
       @click="$emit('select', chip)"
-      class="chip"
+      class="!h-6 !px-2.5 !text-xs"
     >{{ chip }}</el-button>
   </div>
 </template>
@@ -36,19 +36,3 @@ const chips = computed(() => {
   return ['帮我介绍一下系统功能', '列出所有配置定义']
 })
 </script>
-
-<style lang="scss" scoped>
-.suggestion-chips {
-  padding: 8px 12px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  border-top: 1px solid var(--el-border-color-lighter);
-  background: var(--el-bg-color-page);
-}
-.chip {
-  font-size: 12px;
-  padding: 0 10px;
-  height: 26px;
-}
-</style>
