@@ -92,6 +92,19 @@
 | B 先发布 | TO3 版本 1→2（OPTIMISTIC_FORCE_INCREMENT 强制递增） |
 | A 后发布 | ✅ FAILED + 问题"发布冲突：行 TO3 在导入后被其他操作修改（快照版本 1，当前版本 2），请重新导入后再发布" |
 
+### 3.5 API 批次四：历史任务管理（11/11 通过）
+
+| 用例 | 结果 | 实测证据 |
+|------|------|---------|
+| TM-01 创建即持久化 | ✅ | POST /tasks 后总数 63→64，任务 #321 立即可查 |
+| TM-02 filter-type / keyword / status | ✅ | EXPORT 过滤仅导出任务；关键词精确命中 1 条；ACTIVE 过滤正确 |
+| TM-03 overview 接口 | ✅ | /tasks/{id}/overview 返回 task+jobs+files |
+| TM-04 导入状态流转 | ✅ | 导入后条目 IMPORTED；发布后条目 PUBLISHED、任务 COMPLETED |
+| TM-05 列表摘要 | ✅ | 每行 latestJob=PUBLISH/COMPLETED |
+| TM-06 导出完成流转 | ✅ | 任务 COMPLETED、条目 COMPLETED |
+| TM-07 删除任务 | ✅ | 删除后检索为 0 |
+| TM-08 前端 | ✅ | TaskListView.vue 经 Vite 编译 200；分页/概览接口经代理 200 |
+
 ---
 
 ## 4. 验证过程中发现并修复的缺陷
