@@ -57,17 +57,20 @@ backend/
     │   └── ai/
     │       ├── AiController.java
     │       ├── session/  AiSession.java, AiSessionStore.java
-    │       ├── runtime/  AgentRuntime.java, RunInput.java, SseRunEmitter.java
-    │       ├── tool/     ToolRegistry.java, ToolScope.java, ToolMeta.java
+    │       ├── runtime/  AgentRuntime.java, SseRunEmitter.java, AgentRunContext.java
+    │       ├── tool/     ToolRegistry.java, ToolScope.java, ToolMeta.java, ToolRisk.java
     │       │             ContextBuilder.java
     │       ├── tools/    GlobalTools.java, TaskTools.java, ExportTools.java
-    │       │             ImportTools.java, DefinitionTools.java
+    │       │             ImportTools.java
     │       └── hitl/     HitlManager.java, InteractionRequest.java
     └── resources/
         ├── application.yml
-        ├── db/migration/   V1__schema.sql, V2__seed.sql
-        └── system-prompt.txt
+        └── db/migration/   V1__schema.sql, V2__staging_base_version.sql
 ```
+
+> 注：目录结构与最初规划略有差异——种子数据在 `seed/DataSeedRunner.java`（Java 侧幂等初始化），
+> 不需要 V2__seed.sql；V2 迁移实际用于暂存行 base_version 字段；AI 的 DefinitionTools 未单列
+> （定义相关能力由 GlobalTools 的 list/get 覆盖，定义编辑走 UI + REST）。
 
 ---
 
@@ -95,7 +98,7 @@ backend/
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/data/{defCode}` | 查询发布数据（支持 scopeType/scopeKey 过滤）|
-| GET | `/api/data/{defCode}/count` | 预估行数（带条件） |
+| GET | `/api/data/{defCode}/count` | 预估行数（支持 `conditions` 参数：QueryCondition JSON）|
 
 ### 2.4 任务管理
 
@@ -114,10 +117,12 @@ backend/
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/api/tasks/{id}/files/upload` | 上传文件（multipart，自动匹配配置编码）|
+| POST | `/api/tasks/{id}/files/upload` | 上传文件（multipart；xlsx 单文件或 zip 批量，自动按文件名匹配配置编码）|
 | GET | `/api/tasks/{id}/files/{defCode}` | 下载文件内容（ArrayBuffer，供 SpreadJS 使用）|
 | PUT | `/api/tasks/{id}/files/{defCode}` | 保存 SpreadJS 编辑后的文件 |
-| GET | `/api/tasks/{id}/templates` | 下载模板（单个：xlsx；多个：zip）|
+| GET | `/api/tasks/{id}/files/download` | 下载勾选的导出文件（`codes` 参数，子集打包 zip）|
+| GET | `/api/tasks/{id}/files/download-all` | 全部导出文件打包下载 |
+| GET | `/api/tasks/{id}/files/templates` | 下载模板（单个：xlsx；多个：zip）|
 
 ### 2.6 作业
 
@@ -134,13 +139,13 @@ backend/
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | `/api/ai/sessions` | 创建会话 → 201 `{sid}` |
-| GET | `/api/ai/sessions/{sid}` | 会话状态（messages, pendingInteraction, runStatus）|
+| GET | `/api/ai/sessions/{sid}` | 会话状态（runActive, pendingInteraction, context）|
 | DELETE | `/api/ai/sessions/{sid}` | 重置会话（新对话）|
-| PUT | `/api/ai/sessions/{sid}/context` | 上报当前上下文（page, taskId, step）|
-| GET | `/api/ai/sessions/{sid}/stream` | SSE：会话事件流 |
-| POST | `/api/ai/sessions/{sid}/runs` | 发起 AI run（带用户消息）→ SSE |
+| PUT | `/api/ai/sessions/{sid}/context` | 上报当前上下文（page, taskId, taskType, step, extra）|
+| POST | `/api/ai/sessions/{sid}/runs` | 发起 AI run（带用户消息）→ per-run SSE 流 |
 | DELETE | `/api/ai/sessions/{sid}/runs/current` | 取消当前 run |
-| POST | `/api/ai/sessions/{sid}/interactions/{iid}` | 提交 HITL 响应（approve/reject）|
+| POST | `/api/ai/sessions/{sid}/interactions/{iid}` | 提交 HITL 响应（approve/reject/reason/data）|
+| GET | `/api/ai/health` | AI 健康检查 |
 
 ---
 
@@ -168,10 +173,13 @@ backend/
 
 // 运行控制
 {"type": "RUN_STARTED", "runId": "r1"}
-{"type": "RUN_COMPLETED", "runId": "r1", "usage": {"prompt": 1200, "completion": 340}}
+{"type": "RUN_COMPLETED", "runId": "r1", "usage": {"promptTokens": 1200, "completionTokens": 340}}
 {"type": "ERROR", "message": "AI 服务暂时不可用，请稍后重试"}
 {"type": "HEARTBEAT"}
 ```
+
+> 作业进度（JOB_PROGRESS / JOB_DONE）走任务流 `GET /api/tasks/{id}/events`；
+> 前端作业进度当前用 1.5s 轮询 `GET /api/jobs/{id}`（与 SSE 并存）。
 
 ---
 

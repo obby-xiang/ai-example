@@ -148,10 +148,16 @@ UPLOAD → PRECHECK → IMPORT → PUBLISH
 - 使用 SXSSFWorkbook（内存 100 行刷盘）
 - 按 100 行一批写入，每批触发进度事件
 
-#### Excel 读取（POI SAX 流式）
-- `XSSFReader` + `XSSFSheetXMLHandler`
-- 先读 `_meta` 工作表获取字段映射，再读数据工作表
-- 降级：若无 `_meta` 工作表，按表头文字匹配字段
+#### Excel 读取（Apache POI XSSFWorkbook）
+- 先读隐藏 `_meta` 工作表获取列字段映射，再读数据工作表
+- 降级：若无 `_meta` 工作表，按表头文字匹配字段（标签/编码双匹配）
+- 跳过空行、trim 首尾空格；表头在 Excel 第 1 行，数据从第 2 行开始
+
+#### 上传文件匹配（单文件与 ZIP）
+- 单文件：文件名 `编码_xxx.xlsx` / `编码-xxx.xlsx` / 纯 `编码.xlsx`（最长前缀匹配）
+- ZIP：解压后逐文件匹配；文件名编码先 UTF-8 解析、出现乱码（U+FFFD）回退 GBK；
+  未匹配文件明确报告，不静默挂到第一个配置项
+- 上传覆盖：同配置项重复上传覆盖旧文件；在线编辑保存同样覆盖
 
 ### 2.5 AI 模块设计
 
@@ -163,75 +169,103 @@ UPLOAD → PRECHECK → IMPORT → PUBLISH
   ├── PUT /api/ai/sessions/{sid}/context  (每次路由变化时上报)
   │    body: {page, taskId, taskType, step, extra}
   │
-  └── GET /api/ai/sessions/{sid}/stream  (SSE 长连接)
-       event types: SESSION_SNAPSHOT, TEXT_DELTA, TOOL_START, TOOL_DONE,
-                    INTERACTION_REQUEST, UI_COMMAND, JOB_PROGRESS, ERROR, HEARTBEAT
+  ├── POST /api/ai/sessions/{sid}/runs    (发起一轮对话，返回 per-run SSE 流)
+  │    event types: RUN_STARTED, TEXT_DELTA（真流式逐块）,
+  │                 TOOL_START, TOOL_DONE,
+  │                 INTERACTION_REQUEST（HITL，携带 iid，先推送再阻塞等待）,
+  │                 UI_COMMAND（导航/打开编辑器/下载）, ERROR, HEARTBEAT,
+  │                 RUN_COMPLETED（携带 usage: promptTokens/completionTokens）
+  │
+  ├── POST /api/ai/sessions/{sid}/interactions/{iid}  (批准/拒绝 HITL)
+  └── DELETE /api/ai/sessions/{sid}/runs/current      (取消本轮)
+
+任务/作业进度走另一条流：
+  GET /api/tasks/{id}/events → TASK_CHANGED / JOB_PROGRESS / JOB_DONE
+  （后端已实现 SSE 推送；前端作业进度当前采用 1.5s 轮询 GET /api/jobs/{id}，
+    二者并存，互不冲突）
 ```
 
 #### AgentRuntime 主循环（虚拟线程）
 
 ```java
 // 伪代码
-void runAgentLoop(RunInput input, SseEmitter emitter) {
+void runAgentLoop(RunInput input, SseRunEmitter emitter) {
     emit(RUN_STARTED)
     List<Message> history = session.getHistory()
     // 注入当前上下文快照
     history.add(buildContextSystemMsg(session.getContext()))
     history.add(new UserMessage(input.getMessage()))
 
+    long promptTokens = 0, completionTokens = 0
     for (int iter = 0; iter < MAX_ITER; iter++) {
         List<ToolCallback> tools = toolRegistry.forContext(session.getContext())
-        ChatResponse resp = chatModel.stream(new Prompt(history, opts(tools)))
-        // 收集流式 text + toolCalls
-        collectStream(resp, emitter)
+        // 真流式：逐块 emit(TEXT_DELTA)，结束时自聚合 text + toolCalls + usage
+        StreamResult sr = streamModel(new Prompt(history, opts(tools)), emitter)
+        promptTokens += sr.usage().promptTokens; completionTokens += ...
 
-        if (noToolCalls(resp)) break
+        if (sr.toolCalls().isEmpty()) break
+        history.add(sr.assistantMessage())
 
-        for (ToolCall tc : resp.getToolCalls()) {
-            ConfirmSpec cs = toolRegistry.getConfirmSpec(tc)
-            if (cs.requiresConfirmation()) {
-                // 暂停：推送 INTERACTION_REQUEST，await future
-                Result r = suspendForHITL(tc, cs, emitter)
-                if (r.isRejected()) appendRejected(history, tc, r); continue
+        for (ToolCall tc : sr.toolCalls()) {
+            if (riskOf(tc) == DANGER) {
+                // 关键顺序：先创建交互并 emit(INTERACTION_REQUEST{iid})，
+                // 再阻塞 awaitResponse——否则前端收不到卡片只能超时
+                InteractionRequest req = hitl.createInteraction(session, tc)
+                emit(INTERACTION_REQUEST, req)
+                Result r = hitl.awaitResponse(session, req)
+                if (!r.approved) appendRejected(history, tc, r); continue
             }
-            // 执行工具
+            // 执行工具（工具可经 AgentRunContext 下发 UI_COMMAND）
             String result = executeTool(tc, session)
-            emit(TOOL_DONE, tc.getName(), result)
-            history.add(new AssistantMessage(tc))
+            emit(TOOL_DONE, tc.name(), result)
             history.add(new ToolResponseMessage(tc.id, result))
         }
     }
     session.saveHistory(history)
-    emit(RUN_COMPLETED)
+    emit(RUN_COMPLETED, usage)   // 前端展示本轮 token 消耗
 }
 ```
 
 #### 工具渐进式披露
 
-工具按 `@ToolScope` 注解声明可用上下文（支持通配符）：
+工具按 `@ToolScope` 注解声明可用上下文（支持通配符，标签匹配）：
 
 ```java
-@ToolScope(pages = {"*"})                      // 全局工具
-@ToolScope(pages = {"task"}, taskTypes = {"*"}) // 所有任务页
-@ToolScope(pages = {"task"}, taskTypes = {"EXPORT"}, steps = {"SELECT_DEFS"})
+@ToolScope("*")                        // 全局工具
+@ToolScope({"*", "page:tasks"})        // 全局 + 任务中心页
+@ToolScope({"task:EXPORT/SELECT_DEFS", "task:IMPORT/UPLOAD"})  // 指定任务类型+步骤
 ```
 
-`ToolRegistry.forContext(ctx)` 在每轮模型调用前动态解析可用工具集。
+`ToolRegistry.forContext(ctx)` 在每轮模型调用前按 `{*, page:xxx, task:*, task:TYPE, task:TYPE/STEP}`
+标签集合动态解析可用工具集；运行中上下文变化（跳步骤）后下一轮自动生效。
 
 #### HITL 协议
 
 ```
-后端：emit INTERACTION_REQUEST {runId, iid, type:CONFIRM, summary, params}
+后端：emit INTERACTION_REQUEST {iid, runId, toolCallId, interactionType, summary, details, params}
+      （先推送再 awaitResponse；future 由 HitlManager 以 iid 为键独立持有）
 前端：用户点击确认/拒绝 → POST /api/ai/sessions/{sid}/interactions/{iid}
-后端：future.complete(result) → 继续循环
-超时（5min）：future.completeExceptionally(TimeoutException) → 拒绝
+后端：future.complete(result) → 继续循环；拒绝结果同样作为工具结果回填模型
+超时（5min）/取消：按拒绝处理，保证 tool_calls 与 tool 结果配对完整
 ```
+
+#### UI_COMMAND 协议（AI → 前端）
+
+工具通过 `AgentRunContext`（ThreadLocal）拿到当前发射器，可下发前端指令：
+
+```json
+{"type":"UI_COMMAND","command":"navigate","payload":{"route":"/tasks/1/export/EXPORT"}}
+{"type":"UI_COMMAND","command":"open_editor","payload":{"taskId":1,"defCode":"CURRENCY"}}
+{"type":"UI_COMMAND","command":"download","payload":{"url":"/api/tasks/1/files/CURRENCY","fileName":"CURRENCY.xlsx"}}
+```
+
+前端：navigate 走 router.push，download 触发浏览器下载，其余经 window 事件广播给业务组件。
 
 #### 状态同步
 
 - 前端路由变化 → `PUT /api/ai/sessions/{sid}/context`
-- AI 工具修改业务数据 → `TaskChangedEvent` → SSE Task 流推送版本号
-- 前端订阅 `GET /api/tasks/{id}/events` 接收任务更新
+- AI 工具修改业务数据 → `TaskChangedEvent` → `GET /api/tasks/{id}/events` SSE 推送
+- AI 下发的导航/编辑器指令 → UI_COMMAND（见上）
 
 ---
 
