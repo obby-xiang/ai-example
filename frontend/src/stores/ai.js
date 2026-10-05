@@ -1,12 +1,9 @@
 import { defineStore } from 'pinia'
-import router from '../router'
-import { api, sseRequest, downloadFile } from '../api'
-import { workspaceVersion, bumpWorkspace } from '../utils/workspace'
-import { useExportStore } from './exportTask'
-import { useImportStore } from './importTask'
-import { useDefsStore } from './defs'
+import { api, sseRequest } from '../api'
+import { workspaceVersion } from '../utils/workspace'
+import { on, emit, getContextSnapshot } from '../utils/workspaceBus'
 
-/** 会话 ID：浏览器页签内唯一（sessionStorage 特性），不持久化、不看历史。 */
+/** 会话 ID：浏览器页签内唯一（sessionStorage 特性）。新页签=新会话（无历史）；刷新同页签历史保留。 */
 function getSessionId() {
   let id = sessionStorage.getItem('ai_session_id')
   if (!id) {
@@ -18,40 +15,42 @@ function getSessionId() {
 
 let seq = 0
 
-/** AI 对话状态：流式消息 + 工具卡片 + HITL 确认 + ui_event 分发（AI→业务状态同步）。 */
+/**
+ * AI 对话状态：流式消息 + 工具卡片 + HITL 确认。
+ * 与业务工作区完全解耦：只通过 workspaceBus 收发事件与上下文快照，
+ * 不 import 任何工作区 store / 路由（工作区可独立运行；AI 也可独立完成全部操作）。
+ */
 export const useAiStore = defineStore('ai', {
   state: () => ({
     sessionId: getSessionId(),
     messages: [],          // {id, role, content, reasoning, tools:[], confirm, done}
     streaming: false,
     controller: null,
-    sending: false
+    sending: false,
+    workspaceDirty: false, // 用户在工作区手动操作后置位（总线通知），发送消息时复位
+    busReady: false
   }),
   actions: {
-    /** 业务 → AI：构建上下文快照（摘要级，避免 token 浪费）。 */
+    /** 订阅工作区变更事件（解耦联动：仅总线通知）。 */
+    initBus() {
+      if (this.busReady) return
+      this.busReady = true
+      on('workspace_changed', () => {
+        this.workspaceDirty = true
+      })
+    },
+
+    /** 业务 → AI：经总线聚合上下文快照（工作区不存在时仅含 page 与版本号）。 */
     buildContext() {
-      const current = router.currentRoute.value
-      const page = String(current && current.name ? current.name : 'export')
-      const ctx = { page, workspaceVersion: workspaceVersion() }
-      const exportStore = useExportStore()
-      const importStore = useImportStore()
-      ctx.export = {
-        step: exportStore.step,
-        selectedDefs: exportStore.selectedDefs,
-        conditions: exportStore.conditions,
-        taskId: exportStore.task ? exportStore.task.id : null
-      }
-      ctx.import = {
-        step: importStore.step,
-        selectedDefs: importStore.selectedDefs,
-        batchId: importStore.batch ? importStore.batch.id : null
-      }
+      const ctx = { page: 'export', workspaceVersion: workspaceVersion() }
+      Object.assign(ctx, getContextSnapshot())
       return ctx
     },
 
     async send(text) {
       const content = (text || '').trim()
       if (!content || this.streaming) return
+      this.workspaceDirty = false
       this.messages.push({ id: ++seq, role: 'user', content, tools: [] })
       const assistantMsg = { id: ++seq, role: 'assistant', content: '', reasoning: '', tools: [], confirm: null, done: false }
       this.messages.push(assistantMsg)
@@ -116,7 +115,8 @@ export const useAiStore = defineStore('ai', {
 
     /**
      * 刷新恢复：按页签会话（sessionStorage 中的 sessionId）从后端恢复对话历史。
-     * 后端会话为内存态：会话仍在则完整恢复（含工具卡片）；后端重启后返回空列表，自动降级为新会话。
+     * 会话已持久化于 H2：刷新页面或后端重启后均完整恢复（含工具卡片）；
+     * 会话不存在（新页签/超时清理）时返回空列表，前端保持新会话。
      */
     async restoreHistory() {
       if (this.messages.length) return
@@ -198,87 +198,21 @@ export const useAiStore = defineStore('ai', {
       if (!assistantMsg.done) assistantMsg.done = true
     },
 
-    /** AI → 业务：ui_event 统一分发（与用户点击同一 store action，保证状态一致）。 */
-    async applyUiEvent(ev) {
-      const type = ev.type
-      try {
-        const exportStore = useExportStore()
-        const importStore = useImportStore()
-        const defsStore = useDefsStore()
-
-        switch (type) {
-          case 'open_page': {
-            const page = ev.page
-            const route = { export: '/export', import: '/import', defs: '/defs', data: '/data' }[page]
-            if (route) await router.push(route)
-            break
+    /** AI → 业务：ui_event 经总线转发（契约层执行与用户点击相同的 store action）。
+     *  AI 面板自身只处理确认卡；工作区不存在时事件无人订阅，不影响对话。 */
+    applyUiEvent(ev) {
+      if (ev.type === 'confirm_tool') {
+        const last = this.messages[this.messages.length - 1]
+        if (last && last.role === 'assistant') {
+          last.confirm = {
+            toolCallId: ev.toolCallId,
+            toolName: ev.toolName,
+            summary: ev.summary
           }
-          case 'goto_step': {
-            const current = router.currentRoute.value
-            if (current && current.name === 'export') exportStore.goStep(ev.step)
-            else if (current && current.name === 'import') importStore.goStep(ev.step)
-            break
-          }
-          case 'select_defs': {
-            if (ev.task === 'export') exportStore.selectDefs(ev.defCodes || [])
-            else importStore.selectDefs(ev.defCodes || [])
-            break
-          }
-          case 'set_conditions':
-            exportStore.setConditions(ev.defCode, ev.conditions || {})
-            break
-          case 'export_started': {
-            exportStore.task = ev.snapshot
-              ? { ...ev.snapshot, id: ev.snapshot.detail.id }
-              : { id: ev.taskId, detail: { files: [] } }
-            exportStore.goStep(3)
-            exportStore.subscribe(ev.taskId)
-            break
-          }
-          case 'import_batch': {
-            importStore.batch = { id: ev.batchId, detail: { files: [] } }
-            importStore.goStep(1)
-            importStore.reloadEntries()
-            break
-          }
-          case 'import_action': {
-            // 后端工具已实际启动任务；前端只同步步骤并订阅进度（避免重复触发）
-            if (ev.action === 'check') importStore.goStep(2)
-            else if (ev.action === 'import') importStore.goStep(3)
-            else if (ev.action === 'publish') importStore.goStep(4)
-            if (ev.batchId) {
-              importStore.batch = importStore.batch || { id: ev.batchId, detail: {} }
-              importStore.subscribe(ev.batchId)
-            }
-            break
-          }
-          case 'download':
-            downloadFile(ev.url, ev.filename)
-            break
-          case 'refresh_defs':
-            await defsStore.load()
-            break
-          case 'refresh_data':
-            window.dispatchEvent(new CustomEvent('refresh-data', { detail: { defCode: ev.defCode } }))
-            break
-          case 'confirm_tool': {
-            const last = this.messages[this.messages.length - 1]
-            if (last && last.role === 'assistant') {
-              last.confirm = {
-                toolCallId: ev.toolCallId,
-                toolName: ev.toolName,
-                summary: ev.summary
-              }
-            }
-            break
-          }
-          default:
-            break
         }
-        bumpWorkspace()
-      } catch (e) {
-        console.warn('ui_event 处理失败', type, e)
+        return
       }
+      emit('ui_event', ev)
     }
   }
 })

@@ -84,25 +84,21 @@ body {
 }
 
 .page-card {
-  background: #fff;
-  border-radius: 8px;
-  padding: 16px 20px;
-  margin-bottom: 14px;
+  @apply mb-3.5 rounded-lg bg-white px-5 py-4;
   box-shadow: 0 1px 4px rgba(0, 21, 41, 0.06);
 }
 
 .wizard-step-body {
-  margin-top: 18px;
+  @apply mt-[18px];
 }
 
 .text-muted {
-  color: #909399;
-  font-size: 12px;
+  @apply text-xs text-[#909399];
 }
 
 .mono {
+  @apply text-[13px];
   font-family: Consolas, Menlo, monospace;
-  font-size: 13px;
 }
 
 /* AI 面板消息 */

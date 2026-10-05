@@ -100,7 +100,9 @@ public class AiRuntimeService {
             }
             s.getMessages().add(new ChatCompletionMessage(message, ChatCompletionMessage.Role.USER));
             trim(s);
+            store.save(s); // 用户消息先落库（刷新/重启不丢）
             runLoop(s, emitter);
+            store.save(s); // 本轮结束后落库（含最终回复或暂停的确认卡状态）
         } catch (Exception e) {
             log.error("AI 对话异常", e);
             sendError(emitter, "系统异常：" + e.getMessage());
@@ -134,6 +136,7 @@ public class AiRuntimeService {
                     send(emitter, "tool_result", Map.of("name", tc.function().name(), "ok", false, "summary", "用户已拒绝执行"));
                 }
                 processToolBatch(s, emitter, p.calls(), p.index() + 1);
+                store.save(s); // 确认续跑后落库
             } catch (Exception e) {
                 log.error("确认续跑异常", e);
                 sendError(emitter, "系统异常：" + e.getMessage());

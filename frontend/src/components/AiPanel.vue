@@ -3,6 +3,7 @@
     <div class="ai-header">
       <span class="ai-title">🤖 AI 助手</span>
       <div>
+        <el-tag v-if="ai.workspaceDirty && !ai.streaming" size="small" type="warning" class="session-tag">工作区已更新</el-tag>
         <el-tag size="small" type="info" class="session-tag">页签会话</el-tag>
         <el-button size="small" text type="danger" @click="onClear" :disabled="!ai.messages.length">清空</el-button>
       </div>
@@ -75,7 +76,7 @@
 </template>
 
 <script setup>
-import { ref, computed, nextTick, watch } from 'vue'
+import { ref, computed, nextTick, watch, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useAiStore } from '../stores/ai'
@@ -84,6 +85,10 @@ const ai = useAiStore()
 const route = useRoute()
 const input = ref('')
 const msgBox = ref(null)
+
+onMounted(() => {
+  ai.initBus()
+})
 
 const suggestions = computed(() => {
   const name = String(route.name)
