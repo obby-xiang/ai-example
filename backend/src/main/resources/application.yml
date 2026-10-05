@@ -1,0 +1,73 @@
+server:
+  # 18080：启动前已检测 8080(占用)/8081(参考项目占用风险) 均不可用，选空闲端口
+  port: ${SERVER_PORT:18080}
+  servlet:
+    context-path: /
+
+spring:
+  application:
+    name: config-admin-backend
+  threads:
+    virtual:
+      enabled: true          # JDK21 虚拟线程：长任务(导出/检查/导入/发布)异步执行
+
+  datasource:
+    # 嵌入式 H2 文件库，数据落在 backend/data 目录，无需外部数据库
+    url: jdbc:h2:file:./data/config_admin_db;DB_CLOSE_DELAY=-1;MODE=MySQL
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+      settings:
+        web-allow-others: false
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.H2Dialect
+  jackson:
+    date-format: yyyy-MM-dd HH:mm:ss
+    time-zone: GMT+8
+
+  # ---------- Spring AI（OpenAI 兼容：DeepSeek）----------
+  ai:
+    openai:
+      api-key: ${DEEPSEEK_API_KEY:__REMOVED_API_KEY__}
+      base-url: https://api.deepseek.com
+      chat:
+        # 自定义补全路径：与用户给定地址 https://api.deepseek.com/chat/completions 一致
+        completions-path: /chat/completions
+        options:
+          model: deepseek-flash
+          temperature: 0.2
+          max-tokens: 4096
+      # HTTP 读超时（毫秒）：推理模型流式生成较慢，放宽避免误杀
+      connect-timeout: 30s
+      read-timeout: 180s
+
+# ---------- 应用自定义配置 ----------
+app:
+  ai:
+    # Agent 循环相关
+    max-tool-iterations: 12        # 单轮对话最多执行工具轮数（防死循环）
+    max-messages: 40               # 会话保留最近消息条数
+    session-ttl-minutes: 30        # 会话空闲超时（分钟），超时清理
+    tool-result-max-chars: 4000    # 工具结果回灌模型的单条最大字符数
+  storage:
+    export-dir: ./data/exports     # 导出 xlsx 存放目录
+    import-dir: ./data/imports     # 上传 xlsx 解压存放目录
+  task:
+    # 演示环境：每处理一行数据人工休眠(毫秒)，让进度可见、可测
+    simulate-delay-ms: 5
+
+logging:
+  level:
+    root: INFO
+    com.example.configadmin: INFO
+    org.springframework.ai: WARN
+    org.apache.poi: WARN

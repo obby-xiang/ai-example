@@ -1,0 +1,30 @@
+# ===== Java / Maven =====
+backend/target/
+*.class
+*.jar
+!.mvn/wrapper/maven-wrapper.jar
+
+# ===== Node / Yarn =====
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/.env.local
+frontend/.env.*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ===== 运行期数据（H2 文件库 / Excel 临时文件 / 日志）=====
+backend/data/
+backend/logs/
+*.log
+
+# ===== IDE =====
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# ===== 系统 =====
+*.tmp

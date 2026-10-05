@@ -1,0 +1,6 @@
+package com.example.configadmin.entity;
+
+/** 导入批次状态机：CREATED → CHECKING → CHECKED → IMPORTING → IMPORTED → PUBLISHING → PUBLISHED */
+public enum BatchStatus {
+    CREATED, CHECKING, CHECKED, IMPORTING, IMPORTED, PUBLISHING, PUBLISHED, FAILED
+}
