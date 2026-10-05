@@ -1,0 +1,138 @@
+package com.example.configmgr.ai;
+
+import com.example.configmgr.ai.hitl.HitlManager;
+import com.example.configmgr.ai.runtime.AgentRuntime;
+import com.example.configmgr.ai.runtime.SseRunEmitter;
+import com.example.configmgr.ai.session.AiSession;
+import com.example.configmgr.ai.session.AiSessionStore;
+import com.example.configmgr.common.ApiResponse;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+
+import java.util.Map;
+import java.util.UUID;
+
+@Slf4j
+@RestController
+@RequestMapping("/api/ai")
+@RequiredArgsConstructor
+public class AiController {
+
+    private final AiSessionStore sessionStore;
+    private final AgentRuntime agentRuntime;
+    private final HitlManager hitlManager;
+    private final ObjectMapper objectMapper;
+
+    // POST /api/ai/sessions — create session
+    @PostMapping("/sessions")
+    public ResponseEntity<ApiResponse<Map<String, String>>> createSession() {
+        AiSession session = sessionStore.create();
+        return ResponseEntity.status(201).body(ApiResponse.ok(Map.of("sid", session.getId())));
+    }
+
+    // GET /api/ai/sessions/{sid} — session state
+    @GetMapping("/sessions/{sid}")
+    public ApiResponse<Map<String, Object>> getSession(@PathVariable String sid) {
+        AiSession session = sessionStore.getOrThrow(sid);
+        return ApiResponse.ok(Map.of(
+                "sid", sid,
+                "runActive", session.isRunActive(),
+                "hasPendingInteraction", session.getPendingInteraction() != null,
+                "pendingInteraction", session.getPendingInteraction() != null
+                        ? session.getPendingInteraction() : Map.of(),
+                "context", session.getContext()
+        ));
+    }
+
+    // DELETE /api/ai/sessions/{sid} — reset session
+    @DeleteMapping("/sessions/{sid}")
+    public ApiResponse<?> resetSession(@PathVariable String sid) {
+        sessionStore.remove(sid);
+        return ApiResponse.ok();
+    }
+
+    // PUT /api/ai/sessions/{sid}/context — update workspace context
+    @PutMapping("/sessions/{sid}/context")
+    public ApiResponse<?> updateContext(@PathVariable String sid,
+                                         @RequestBody Map<String, Object> body) {
+        AiSession session = sessionStore.getOrThrow(sid);
+        AiSession.WorkspaceContext ctx = session.getContext();
+        if (body.containsKey("page")) ctx.setPage((String) body.get("page"));
+        if (body.containsKey("taskId") && body.get("taskId") != null) {
+            ctx.setTaskId(Long.valueOf(body.get("taskId").toString()));
+        }
+        if (body.containsKey("taskType")) ctx.setTaskType((String) body.get("taskType"));
+        if (body.containsKey("step")) ctx.setStep((String) body.get("step"));
+        if (body.containsKey("extra") && body.get("extra") instanceof Map<?,?> extra) {
+            @SuppressWarnings("unchecked") Map<String, Object> extraMap = (Map<String, Object>) extra;
+            ctx.getExtra().putAll(extraMap);
+        }
+        session.touch();
+        return ApiResponse.ok();
+    }
+
+    // POST /api/ai/sessions/{sid}/runs — start a run (returns SSE stream)
+    @PostMapping(value = "/sessions/{sid}/runs", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter startRun(@PathVariable String sid,
+                                @RequestBody Map<String, Object> body) {
+        String message = (String) body.getOrDefault("message", "");
+        String runId = UUID.randomUUID().toString();
+
+        SseEmitter emitter = new SseEmitter(600_000L); // 10 minutes
+        SseRunEmitter runEmitter = new SseRunEmitter(emitter, objectMapper);
+
+        // Run on virtual thread
+        Thread.ofVirtual().start(() -> {
+            try {
+                agentRuntime.run(sid, runId, message, runEmitter);
+            } catch (Exception e) {
+                log.error("Run failed for session {}: {}", sid, e.getMessage(), e);
+                runEmitter.error(e.getMessage());
+            } finally {
+                emitter.complete();
+            }
+        });
+
+        return emitter;
+    }
+
+    // DELETE /api/ai/sessions/{sid}/runs/current — cancel current run
+    @DeleteMapping("/sessions/{sid}/runs/current")
+    public ApiResponse<?> cancelRun(@PathVariable String sid) {
+        AiSession session = sessionStore.getOrThrow(sid);
+        if (session.isRunActive()) {
+            session.cancelRun();
+            return ApiResponse.ok(Map.of("cancelled", true));
+        }
+        return ApiResponse.ok(Map.of("cancelled", false, "message", "没有活跃的运行"));
+    }
+
+    // POST /api/ai/sessions/{sid}/interactions/{iid} — HITL response
+    @PostMapping("/sessions/{sid}/interactions/{iid}")
+    public ApiResponse<?> submitInteraction(@PathVariable String sid,
+                                              @PathVariable String iid,
+                                              @RequestBody Map<String, Object> body) {
+        boolean approved = Boolean.TRUE.equals(body.get("approved"));
+        String reason = (String) body.getOrDefault("reason", "");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> data = body.containsKey("data") ? (Map<String, Object>) body.get("data") : Map.of();
+
+        hitlManager.submitResponse(sid, iid, approved, reason, data);
+        return ApiResponse.ok(Map.of("submitted", true));
+    }
+
+    // GET /api/ai/health — AI service health
+    @GetMapping("/health")
+    public ApiResponse<Map<String, Object>> health() {
+        return ApiResponse.ok(Map.of(
+                "status", "ok",
+                "model", "deepseek-flash",
+                "sessionCount", sessionStore.getClass().getSimpleName()
+        ));
+    }
+}

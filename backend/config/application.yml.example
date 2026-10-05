@@ -1,0 +1,12 @@
+# 本地配置示例
+#
+# 使用方法：
+#   复制为 backend/config/application.yml（该目录已在 .gitignore 中，不会被提交）
+#   Spring Boot 会自动加载 ./config/application.yml 并覆盖 classpath 中的默认配置。
+#
+# 也可以用环境变量代替：$env:DEEPSEEK_API_KEY = "<你的密钥>"
+
+spring:
+  ai:
+    openai:
+      api-key: "<在此填入你的 DeepSeek API Key>"
