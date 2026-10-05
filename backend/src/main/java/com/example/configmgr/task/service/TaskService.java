@@ -8,6 +8,8 @@ import com.example.configmgr.task.repo.TaskRepository;
 import com.example.configmgr.task.repo.TaskItemRepository;
 import com.example.configmgr.task.repo.TaskFileRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationEventPublisher;
@@ -22,6 +24,9 @@ import java.util.Map;
 @Service
 @RequiredArgsConstructor
 public class TaskService {
+
+    @PersistenceContext
+    private EntityManager entityManager;
 
     private final TaskRepository taskRepository;
     private final TaskItemRepository taskItemRepository;
@@ -79,6 +84,9 @@ public class TaskService {
 
         task.setCurrentStep("SELECT_DEFS");
         task = taskRepository.save(task);
+        // EAGER 集合在方法入口 findById 时已快照；一级缓存里还是旧对象，
+        // 用 refresh 强制从数据库重读，保证返回的 items 包含刚保存的条目。
+        entityManager.refresh(task);
         publishTaskChanged(task, "更新配置项选择");
         return task;
     }

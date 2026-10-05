@@ -37,7 +37,11 @@ public class Task {
     @Version
     private Long version = 1L;
 
-    @OneToMany(mappedBy = "taskId", fetch = FetchType.LAZY, cascade = CascadeType.ALL, orphanRemoval = true)
+    // 单向一对多：task_items.task_id = tasks.id（同 ConfigDefinition 原因，不用 mappedBy 标量）
+    @OneToMany(fetch = FetchType.EAGER, cascade = CascadeType.ALL, orphanRemoval = true)
+    @JoinColumn(name = "task_id", referencedColumnName = "id",
+            insertable = false, updatable = false,
+            foreignKey = @ForeignKey(ConstraintMode.NO_CONSTRAINT))
     @OrderBy("sortOrder ASC")
     private List<TaskItem> items = new ArrayList<>();
 

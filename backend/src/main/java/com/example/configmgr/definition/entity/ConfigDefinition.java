@@ -8,7 +8,6 @@ import org.hibernate.annotations.UpdateTimestamp;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
-
 @Data
 @Entity
 @Table(name = "config_definitions")
@@ -34,7 +33,13 @@ public class ConfigDefinition {
     @Column(name = "sort_order")
     private int sortOrder = 0;
 
-    @OneToMany(mappedBy = "defCode", fetch = FetchType.LAZY, cascade = CascadeType.ALL, orphanRemoval = true)
+    // 单向一对多：config_fields.def_code = config_definitions.code。
+    // 不能用 mappedBy（mappedBy 只能指向实体关联属性，指向标量字段会导致
+    // Hibernate 6.6 集合加载时参数类型推断错误）；FK 由业务代码显式写入 def_code。
+    @OneToMany(fetch = FetchType.EAGER, cascade = CascadeType.ALL, orphanRemoval = true)
+    @JoinColumn(name = "def_code", referencedColumnName = "code",
+            insertable = false, updatable = false,
+            foreignKey = @ForeignKey(ConstraintMode.NO_CONSTRAINT))
     @OrderBy("sortOrder ASC")
     private List<ConfigField> fields = new ArrayList<>();
 

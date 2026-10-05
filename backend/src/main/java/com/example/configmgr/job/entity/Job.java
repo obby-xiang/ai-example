@@ -39,7 +39,11 @@ public class Job {
     @Column(name = "result_json", columnDefinition = "CLOB")
     private String resultJson;
 
-    @OneToMany(mappedBy = "jobId", cascade = CascadeType.ALL, orphanRemoval = true)
+    // 单向一对多：job_items.job_id = jobs.id（同 ConfigDefinition 原因，不用 mappedBy 标量）
+    @OneToMany(fetch = FetchType.EAGER, cascade = CascadeType.ALL, orphanRemoval = true)
+    @JoinColumn(name = "job_id", referencedColumnName = "id",
+            insertable = false, updatable = false,
+            foreignKey = @ForeignKey(ConstraintMode.NO_CONSTRAINT))
     private List<JobItem> items = new ArrayList<>();
 
     @CreationTimestamp

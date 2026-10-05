@@ -5,6 +5,8 @@ import com.example.configmgr.data.entity.ConfigDataRow;
 import com.example.configmgr.data.repo.ConfigDataRowRepository;
 import com.example.configmgr.data.service.ConditionEvaluator;
 import com.example.configmgr.data.service.QueryCondition;
+import com.example.configmgr.definition.entity.ConfigDefinition;
+import com.example.configmgr.definition.service.DefinitionService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -20,6 +22,19 @@ public class DataController {
 
     private final ConfigDataRowRepository dataRowRepository;
     private final ObjectMapper objectMapper;
+    private final DefinitionService definitionService;
+
+    /** scopeType 未传时按配置定义的层级推导（而非写死 GLOBAL） */
+    private String effectiveScopeType(String defCode, String scopeType) {
+        if (scopeType != null && !scopeType.isBlank()) {
+            return scopeType;
+        }
+        try {
+            return definitionService.findByCode(defCode).getLevel().name();
+        } catch (Exception e) {
+            return "GLOBAL";
+        }
+    }
 
     @GetMapping("/{defCode}")
     public ApiResponse<Page<ConfigDataRow>> list(@PathVariable String defCode,
@@ -28,7 +43,7 @@ public class DataController {
                                                    @RequestParam(defaultValue = "0") int page,
                                                    @RequestParam(defaultValue = "50") int size) {
         return ApiResponse.ok(dataRowRepository.findRowsInScopePaged(
-                defCode, scopeType != null ? scopeType : "GLOBAL", scopeKey,
+                defCode, effectiveScopeType(defCode, scopeType), scopeKey,
                 org.springframework.data.domain.PageRequest.of(page, size)));
     }
 
@@ -67,8 +82,7 @@ public class DataController {
                     })
                     .count();
         } else {
-            count = dataRowRepository.countByScope(defCode,
-                    scopeType != null ? scopeType : "GLOBAL", scopeKey);
+            count = dataRowRepository.countByScope(defCode, effectiveScopeType(defCode, scopeType), scopeKey);
         }
         return ApiResponse.ok(Map.of("count", count));
     }
