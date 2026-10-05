@@ -1,0 +1,19 @@
+# ---- backend ----
+backend/target/
+backend/data/
+backend/.local.env
+backend/*.log
+
+# ---- frontend ----
+frontend/node_modules/
+frontend/dist/
+frontend/.tmp-build/
+frontend/*.local
+
+# ---- misc ----
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+*.iml
+.vscode/

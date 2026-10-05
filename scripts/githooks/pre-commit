@@ -1,0 +1,17 @@
+#!/bin/sh
+# 敏感信息扫描：阻止 API Key 等机密进入仓库（借鉴 E:\temp\ai-example 的实践与事故教训）
+# 启用方式：git config core.hooksPath scripts/githooks
+PATTERN='sk-[A-Za-z0-9]\{16,\}\|ghp_[A-Za-z0-9]\{20,\}\|AKIA[A-Z0-9]\{12,\}\|AIza[A-Za-z0-9_-]\{20,\}\|xox[baprs]-[A-Za-z0-9-]\{10,\}'
+WHITELIST='sk-your-api-key-here\|sk-xxx\|your-deepseek-api-key'
+
+staged=$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null)
+[ -z "$staged" ] && exit 0
+
+hits=$(git diff --cached -U0 --diff-filter=ACM 2>/dev/null | grep '^+' | grep -v '^+++' | grep "$PATTERN" | grep -v "$WHITELIST")
+if [ -n "$hits" ]; then
+  echo "[pre-commit] 检测到疑似密钥，已阻止提交："
+  echo "$hits" | head -5
+  echo "请使用环境变量 / .local.env（已 gitignore）注入密钥后重试。"
+  exit 1
+fi
+exit 0
