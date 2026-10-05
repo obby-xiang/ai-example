@@ -52,14 +52,15 @@ public class DataController {
 
         long count;
         if (cond != null) {
-            // 有条件时逐行过滤（范围条件合并进 scope 参数，字段条件逐个匹配）
+            // 有条件时逐行过滤（字段条件逐个匹配）
+            final QueryCondition effectiveCond = cond;
             count = dataRowRepository.findByDefCodeOrderByRowKey(defCode).stream()
                     .filter(r -> scopeKey == null || scopeKey.isBlank() || scopeKey.equals(r.getScopeKey()))
                     .filter(r -> {
                         try {
                             Map<String, Object> data =
                                     objectMapper.readValue(r.getDataJson(), new TypeReference<>() {});
-                            return ConditionEvaluator.matches(data, cond);
+                            return ConditionEvaluator.matches(data, effectiveCond);
                         } catch (Exception e) {
                             return false;
                         }
