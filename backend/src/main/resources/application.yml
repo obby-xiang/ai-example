@@ -1,0 +1,81 @@
+server:
+  port: 8081
+  servlet:
+    context-path: /
+  tomcat:
+    connection-timeout: 120000
+
+spring:
+  application:
+    name: config-mgr
+
+  threads:
+    virtual:
+      enabled: true
+
+  datasource:
+    url: jdbc:h2:file:./data/config_mgr_db;DB_CLOSE_DELAY=-1
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+      settings:
+        web-allow-others: true
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    open-in-view: false
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+  jackson:
+    date-format: yyyy-MM-dd HH:mm:ss
+    time-zone: GMT+8
+    default-property-inclusion: non_null
+
+  ai:
+    openai:
+      # 真实密钥只能通过以下方式之一注入，绝不写入版本库：
+      #   1) 环境变量 DEEPSEEK_API_KEY
+      #   2) 本地未追踪文件 backend/config/application.yml（已在 .gitignore 中排除）
+      # 未配置时启动会给出明确提示，AI 功能不可用但业务功能不受影响。
+      api-key: ${DEEPSEEK_API_KEY:}
+      base-url: https://api.deepseek.com
+      chat:
+        # 注意：DeepSeek 的接口路径是 /chat/completions（无 /v1 前缀），
+        # 必须覆盖默认的 /v1/chat/completions，否则请求 404。
+        completions-path: /chat/completions
+        options:
+          model: deepseek-flash
+          temperature: 0.2
+          max-tokens: 4096
+
+app:
+  ai:
+    max-iterations: 12
+    session-ttl-minutes: 30
+    hitl-timeout-minutes: 5
+    thinking-disabled: true
+  job:
+    demo-batch-delay-ms: 300
+    batch-size: 100
+  file:
+    storage-path: ./data/files
+  server:
+    backend-port: 8081
+    frontend-port: 5173
+
+logging:
+  level:
+    com.example.configmgr: DEBUG
+    org.springframework.ai: INFO
+    org.hibernate.SQL: WARN
