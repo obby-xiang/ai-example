@@ -8,7 +8,7 @@
 - **核验端口**：18297（`--server.port=18297` 首跑、`SERVER_PORT=18297` 环境变量二次启动）
 - **工具链**：Apache Maven 3.9.16（`<MAVEN_HOME>`）/ JDK 21.0.12（Oracle）/ Spring Boot 3.5.14 / Spring 6.2.18 / H2 2.3.232 / Tomcat 10.1.54
 - **AI Key**：`DEEPSEEK_API_KEY=***`（占位值，仅用于启动，不发起真实 AI 调用）
-- **结论汇总**：G1 ✅ 干净编译通过；G2 ✅ 清库首跑 Flyway 应用 V1+V2；G3 ✅ 种子 7 定义 / 1246 数据行落库并经只读 API 复核；G4 ✅ 原地重跑 `up to date` 无冲突；G5 ✅ 侦察完成（未安装、未构建）
+- **结论汇总**：G1 ✅ 干净编译通过；G2 ✅ 清库首跑 Flyway 应用 V1+V2；G3 ✅ 种子 7 定义 / 1230 数据行落库并经只读 API 复核；G4 ✅ 原地重跑 `up to date` 无冲突；G5 ✅ 侦察完成（未安装、未构建）
 - **纪律声明**：除本证据文档外未修改任何源码/配置；未执行任何 `git` 写操作（未 commit，未触发 pre-commit hook）
 
 ---
@@ -219,11 +219,11 @@ $ curl -s http://localhost:18297/api/data/<defCode>/count
 | PROJ_APPROVE | 0 | 0 | 仅建定义，不预置审批流行 |
 | PROJ_PRICE | 4 项目 × 300 行 = 1200 | 1200 | 演示大数据集，`Random(42)` 确定性生成 |
 
-**种子数据行合计 1246 行**（5+5+4+16+0+0+1200）。
+**种子数据行合计 1230 行**（5+5+4+16+0+0+1200）。
 
 ### 结论
 
-**【实测-通过】** combined 基座自带 **7 个配置定义**（GLOBAL 3 / REGION 1 / PROJECT 3）、**4 个地区、7 个项目、1246 行配置数据**，全部落库并经只读 API 逐项复核一致。
+**【实测-通过】** combined 基座自带 **7 个配置定义**（GLOBAL 3 / REGION 1 / PROJECT 3）、**4 个地区、7 个项目、1230 行配置数据**，全部落库并经只读 API 逐项复核一致。
 
 ---
 
@@ -333,7 +333,7 @@ node_modules ABSENT        ← 未安装依赖
 | 层级分布 | 3 / 1 / 3 | GLOBAL 3 个、REGION 1 个、PROJECT 3 个 |
 | 地区 | **4** | HE 华东区、HS 华南区、HB 华北区、XN 西南区 |
 | 项目 | **7** | HE-P001 上海智慧园区、HE-P002 杭州数字工厂、HS-P001 广州南沙项目、HS-P002 深圳湾科技园、HB-P001 北京朝阳总部、XN-P001 成都天府新区、XN-P002 重庆两江新区 |
-| 配置数据行 | **1246** | CURRENCY 5、DOC_TYPE 5、APPROVE_ROLE 4、TAX_RATE 16(4 区×4)、PROJ_PARAM 0、PROJ_APPROVE 0、PROJ_PRICE 1200(4 项目×300) |
+| 配置数据行 | **1230** | CURRENCY 5、DOC_TYPE 5、APPROVE_ROLE 4、TAX_RATE 16(4 区×4)、PROJ_PARAM 0、PROJ_APPROVE 0、PROJ_PRICE 1200(4 项目×300) |
 | AI 工具 | 16 | `ToolRegistry: registered 16 tools`（list_config_defs、get_config_def、create_task、start_export/publish 等） |
 | Flyway 迁移 | 2 | V1 schema（12 张表）、V2 staging base_version（`config_staging_rows.base_version`） |
 
