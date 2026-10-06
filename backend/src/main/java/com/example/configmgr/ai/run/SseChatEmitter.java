@@ -25,8 +25,8 @@ import java.util.concurrent.CopyOnWriteArrayList;
  *
  * <p>
  * 帧类型：{@code start}（首包）→ 若干 {@code delta}/{@code tool_*}/
- * {@code confirm_*}/{@code frontend_tool_*}/{@code heartbeat}/{@code suspended} →
- * 恰好一个 {@code done} 或 {@code error} 终帧。帧体是 JSON 对象且带 {@code type} 字段
+ * {@code retry}/{@code confirm_*}/{@code frontend_tool_*}/{@code heartbeat}/{@code suspended} →
+ * 恰好一个 {@code done}（正常完成或取消：{@code cancelled=true}/{@code false}）或 {@code error} 终帧。帧体是 JSON 对象且带 {@code type} 字段
  * （无名 SSE 事件 + 帧内 type），与基座 SSE 形态一致，前端不必改用 addEventListener。
  *
  * <p>
@@ -165,7 +165,25 @@ public class SseChatEmitter {
 		emit(frame);
 	}
 
-	public void done(Map<String, Object> usage, String model) {
+	/**
+	 * 断流重试公告（韧性棒）：本轮第 {@code nextAttempt} 次尝试即将开始 ——
+	 * 前端据此展示"上游连接中断，正在重试"，并知道本轮<b>没有</b>产出过内容
+	 * （重试三条件保证：已产出即不重试）。
+	 */
+	public void retry(Map<String, Object> data) {
+		Map<String, Object> frame = frame("retry");
+		frame.putAll(data);
+		emit(frame);
+	}
+
+	/**
+	 * 终帧：{@code done}。
+	 *
+	 * @param extra 附加信息（韧性棒：{@code cancelled} / {@code attempts} /
+	 * {@code upstreamEvents} / {@code terminalSignal}）；取消终态为 {@code cancelled=true}，
+	 * 与"正常完成"共用同一个终帧类型（前端的终态处理不必分两套）。
+	 */
+	public void done(Map<String, Object> usage, String model, Map<String, Object> extra) {
 		Map<String, Object> frame = frame("done");
 		frame.put("runId", this.runId);
 		if (usage != null && !usage.isEmpty()) {
@@ -173,6 +191,9 @@ public class SseChatEmitter {
 		}
 		if (model != null) {
 			frame.put("model", model);
+		}
+		if (extra != null) {
+			frame.putAll(extra);
 		}
 		emit(frame);
 	}

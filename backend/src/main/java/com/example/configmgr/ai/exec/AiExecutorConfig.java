@@ -1,11 +1,15 @@
 package com.example.configmgr.ai.exec;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.run.StreamWatchdog;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * AI 运行线程模型（S4.2 §2 exec/AiExecutorConfig + DC-12：禁用虚拟线程）。
@@ -41,6 +45,25 @@ public class AiExecutorConfig {
 		executor.setWaitForTasksToCompleteOnShutdown(false);
 		executor.initialize();
 		return executor;
+	}
+
+	/**
+	 * 流式看门狗的调度器（韧性棒）：每 {@link StreamWatchdog#TICK_MILLIS}ms 一次节拍，
+	 * 判定首包静默 / 事件间静默 / 总预算 / 取消。
+	 *
+	 * <p>
+	 * 单条<b>平台</b>守护线程（DC-12 禁虚拟线程）：节拍体只做常数次原子读与一次 Redis GET
+	 * （仅在未命中加速态时），不阻塞、不发起上游请求，因此不会与挂起池争线程。
+	 * 轮与轮之间共用同一个调度器（任务按 runId 命名，便于日志定位）。
+	 */
+	@Bean(name = "aiStreamWatchdog", destroyMethod = "shutdownNow")
+	public ScheduledExecutorService aiStreamWatchdog() {
+		AtomicInteger counter = new AtomicInteger();
+		return Executors.newScheduledThreadPool(2, runnable -> {
+			Thread thread = new Thread(runnable, "ai-stream-watchdog-" + counter.incrementAndGet());
+			thread.setDaemon(true);
+			return thread;
+		});
 	}
 
 }

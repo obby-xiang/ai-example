@@ -36,6 +36,8 @@ public class AiProperties {
 
 	private Session session = new Session();
 
+	private Resume resume = new Resume();
+
 	@Data
 	public static class Memory {
 
@@ -70,18 +72,59 @@ public class AiProperties {
 	public static class Resilience {
 
 		/**
-		 * 双超时 + 有界重试（ADR-6）。阈值待技术方案 §13.2 #2 压测裁决，
-		 * 本棒只提供配置位与"单轮总预算"兜底；首字节/事件间隔的判定与三条件重试
-		 * 属韧性棒次（ResilientChatService）的落地范围。
+		 * 首包静默上限：从"发起本轮请求"到"上游第一个事件"之间允许的最长静默。
+		 *
+		 * <p>
+		 * 初值 30s —— <b>待技术方案 §13.2 #2 压测裁决</b>（模型排队/冷启动时的实际首包分布）。
 		 */
 		private Duration firstByteTimeout = Duration.ofSeconds(30);
 
-		private Duration interEventTimeout = Duration.ofSeconds(30);
+		/**
+		 * 事件间静默上限：两个上游事件之间允许的最长静默。
+		 *
+		 * <p>
+		 * 初值 90s —— <b>待 §13.2 #2 压测裁决</b>。注意它与硬规范①（阈值 &gt; 最长工具耗时）的
+		 * 关系：挂起等待（确认门默认 120s &gt; 90s）期间工具处于"活跃"，
+		 * {@link com.example.configmgr.ai.run.StreamWatchdog} 在工具执行期间<b>不计静默</b>、
+		 * 退出后以退出时刻重新计时，因此本值小挂起上限仍正确；但"配置值本身要不要直接
+		 * 大于 {@code app.ai.hitl.timeout}"列为【待裁决】。
+		 */
+		private Duration interEventTimeout = Duration.ofSeconds(90);
 
+		/** 单轮最大尝试次数（首轮 + 重试次数-1）。 */
 		private int maxAttempts = 2;
 
-		/** 单轮总预算（墙钟）：SSE 超时与流式 {@code blockLast} 的上限。 */
-		private Duration totalBudget = Duration.ofMinutes(10);
+		/**
+		 * 单轮总预算（墙钟）：SSE 超时、流式等待上限与韧性看门狗的共同上界。
+		 *
+		 * <p>
+		 * 初值 300s —— <b>待 §13.2 #2 压测裁决</b>（现网最长一轮的真实耗时）。
+		 */
+		private Duration totalBudget = Duration.ofSeconds(300);
+	}
+
+	@Data
+	public static class Resume {
+
+		/**
+		 * 启动自动续跑（N3/N8）：应用就绪后扫描 {@link com.example.configmgr.ai.run.RunStore}
+		 * 里仍存活的轮次，把"已有人类决策/后端工具在飞"的那些自动续跑。
+		 *
+		 * <p>
+		 * 默认 false（保守：自动补执行破坏性工具需谨慎），由运维在 {@code application.yml}
+		 * 显式打开；打开后仍<b>只</b>续跑 `APPROVED/EXECUTED/REJECTED/TIMEOUT/FRONTEND_RESULT`
+		 * 的条目 —— 仍 {@code PENDING}（人工/前端未给结论）的一律跳过，因此不会绕开人审。
+		 */
+		private boolean onStartup = false;
+
+		/** 启动扫描的延迟（等 Web 容器与 Redis 连接就绪，避免与启动路径抢资源）。 */
+		private Duration startupDelay = Duration.ofSeconds(8);
+
+		/** 僵尸判定：状态 {@code RUNNING} 且 {@code updatedAtMs} 超过本值 ⇒ 判为僵尸轮并接管（N3）。 */
+		private Duration zombieAge = Duration.ofSeconds(60);
+
+		/** 单次启动扫描最多自动续跑多少轮（防止启动瞬间把挂起池占满）。 */
+		private int maxOnStartup = 10;
 	}
 
 	@Data
