@@ -73,6 +73,11 @@
             <artifactId>caffeine</artifactId>
             <version>${caffeine.version}</version>
         </dependency>
+        <!-- Redis：AI 会话记忆外置（S4.2 M2，Memurai 兼容） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
         <!-- Apache POI for Excel -->
         <dependency>
             <groupId>org.apache.poi</groupId>
