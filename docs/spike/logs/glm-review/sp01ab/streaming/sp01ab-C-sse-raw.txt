@@ -1,0 +1,512 @@
+# SSE subscribe http://127.0.0.1:18301/api/events/sp01ab-C-20261006-212753 at 2026-10-06T13:27:53.234Z
+# HTTP 200 content-type=text/event-stream
+[+000006ms] event:subscribed
+[+000008ms] data:{"seq":1,"ts":"2026-10-06T21:27:53.238+08:00","sessionId":"sp01ab-C-20261006-212753","event":"subscribed","data":{"sessionId":"sp01ab-C-20261006-212753","subscribers":1,"heartbeatMs":2000}}
+[+000008ms] 
+[+000205ms] event:ping
+[+000207ms] data:{"seq":2,"ts":"2026-10-06T21:27:53.439+08:00","sessionId":"sp01ab-C-20261006-212753","event":"ping","data":{"tick":58,"pending":null,"subscribers":1}}
+[+000208ms] 
+[+000815ms] event:start
+[+000815ms] data:{"seq":3,"ts":"2026-10-06T21:27:54.049+08:00","sessionId":"sp01ab-C-20261006-212753","event":"start","data":{"message":"请删除配置 def-777（这是一次真实的删除操作，按工具规则执行）。","streaming":true,"toolNames":["get_user_profile","delete_config","calculate"],"frontendToolTimeoutSeconds":60,"confirmTimeoutSeconds":30}}
+[+000816ms] 
+[+001581ms] event:tool_start
+[+001582ms] data:{"seq":4,"ts":"2026-10-06T21:27:54.814+08:00","sessionId":"sp01ab-C-20261006-212753","event":"tool_start","data":{"toolCallId":"call_00_dRIfn0HYiov1loOhBTI00626","name":"delete_config","kind":"sensitive","args":{"code":"def-777"}}}
+[+001582ms] 
+[+001583ms] event:confirm_request
+[+001584ms] data:{"seq":5,"ts":"2026-10-06T21:27:54.814+08:00","sessionId":"sp01ab-C-20261006-212753","event":"confirm_request","data":{"toolCallId":"call_00_dRIfn0HYiov1loOhBTI00626","name":"delete_config","args":{"code":"def-777"},"summary":"{code=def-777}","timeoutSeconds":30,"callback":"POST /api/confirm {sessionId, toolCallId, approved, reason}"}}
+[+001585ms] 
+[+001634ms] event:confirm_decision
+[+001635ms] data:{"seq":6,"ts":"2026-10-06T21:27:54.868+08:00","sessionId":"sp01ab-C-20261006-212753","event":"confirm_decision","data":{"toolCallId":"call_00_dRIfn0HYiov1loOhBTI00626","name":"delete_config","decision":"reject","approved":false,"reason":"该配置在生产环境仍被引用，禁止删除","source":"http-post","waitedMs":54}}
+[+001635ms] 
+[+001636ms] event:tool_result
+[+001637ms] data:{"seq":7,"ts":"2026-10-06T21:27:54.869+08:00","sessionId":"sp01ab-C-20261006-212753","event":"tool_result","data":{"toolCallId":"call_00_dRIfn0HYiov1loOhBTI00626","name":"delete_config","ok":false,"executed":false,"result":"用户拒绝了该操作，工具未执行。拒绝原因：该配置在生产环境仍被引用，禁止删除"}}
+[+001638ms] 
+[+002203ms] event:ping
+[+002204ms] data:{"seq":8,"ts":"2026-10-06T21:27:55.438+08:00","sessionId":"sp01ab-C-20261006-212753","event":"ping","data":{"tick":59,"pending":null,"subscribers":1}}
+[+002204ms] 
+[+003146ms] event:delta
+[+003177ms] data:{"seq":9,"ts":"2026-10-06T21:27:56.381+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"删除"}}
+[+003177ms] 
+[+003178ms] event:delta
+[+003178ms] data:{"seq":10,"ts":"2026-10-06T21:27:56.381+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"操作"}}
+[+003178ms] 
+[+003179ms] event:delta
+[+003179ms] data:{"seq":11,"ts":"2026-10-06T21:27:56.381+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"未"}}
+[+003180ms] 
+[+003180ms] event:delta
+[+003181ms] data:{"seq":12,"ts":"2026-10-06T21:27:56.381+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"执行"}}
+[+003181ms] 
+[+003181ms] event:delta
+[+003182ms] data:{"seq":13,"ts":"2026-10-06T21:27:56.381+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"。\n\n"}}
+[+003182ms] 
+[+003183ms] event:delta
+[+003183ms] data:{"seq":14,"ts":"2026-10-06T21:27:56.382+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"**"}}
+[+003184ms] 
+[+003184ms] event:delta
+[+003185ms] data:{"seq":15,"ts":"2026-10-06T21:27:56.382+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"执行"}}
+[+003185ms] 
+[+003185ms] event:delta
+[+003186ms] data:{"seq":16,"ts":"2026-10-06T21:27:56.382+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"结果"}}
+[+003186ms] 
+[+003187ms] event:delta
+[+003187ms] data:{"seq":17,"ts":"2026-10-06T21:27:56.382+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"："}}
+[+003187ms] 
+[+003188ms] event:delta
+[+003188ms] data:{"seq":18,"ts":"2026-10-06T21:27:56.382+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"**"}}
+[+003189ms] 
+[+003189ms] event:delta
+[+003189ms] data:{"seq":19,"ts":"2026-10-06T21:27:56.383+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":" "}}
+[+003190ms] 
+[+003190ms] event:delta
+[+003191ms] data:{"seq":20,"ts":"2026-10-06T21:27:56.383+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"用户"}}
+[+003191ms] 
+[+003191ms] event:delta
+[+003192ms] data:{"seq":21,"ts":"2026-10-06T21:27:56.383+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"拒绝了"}}
+[+003192ms] 
+[+003193ms] event:delta
+[+003193ms] data:{"seq":22,"ts":"2026-10-06T21:27:56.383+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"该"}}
+[+003193ms] 
+[+003194ms] event:delta
+[+003194ms] data:{"seq":23,"ts":"2026-10-06T21:27:56.383+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"操作"}}
+[+003194ms] 
+[+003195ms] event:delta
+[+003195ms] data:{"seq":24,"ts":"2026-10-06T21:27:56.383+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"，"}}
+[+003196ms] 
+[+003196ms] event:delta
+[+003196ms] data:{"seq":25,"ts":"2026-10-06T21:27:56.384+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"工具"}}
+[+003197ms] 
+[+003197ms] event:delta
+[+003197ms] data:{"seq":26,"ts":"2026-10-06T21:27:56.384+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"未"}}
+[+003198ms] 
+[+003198ms] event:delta
+[+003198ms] data:{"seq":27,"ts":"2026-10-06T21:27:56.384+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"实际"}}
+[+003199ms] 
+[+003199ms] event:delta
+[+003199ms] data:{"seq":28,"ts":"2026-10-06T21:27:56.384+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"执行"}}
+[+003200ms] 
+[+003200ms] event:delta
+[+003200ms] data:{"seq":29,"ts":"2026-10-06T21:27:56.384+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"。\n\n"}}
+[+003201ms] 
+[+003201ms] event:delta
+[+003201ms] data:{"seq":30,"ts":"2026-10-06T21:27:56.384+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"**"}}
+[+003202ms] 
+[+003202ms] event:delta
+[+003202ms] data:{"seq":31,"ts":"2026-10-06T21:27:56.384+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"拒绝"}}
+[+003203ms] 
+[+003203ms] event:delta
+[+003203ms] data:{"seq":32,"ts":"2026-10-06T21:27:56.384+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"原因"}}
+[+003204ms] 
+[+003204ms] event:delta
+[+003206ms] data:{"seq":33,"ts":"2026-10-06T21:27:56.385+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"："}}
+[+003206ms] 
+[+003207ms] event:delta
+[+003207ms] data:{"seq":34,"ts":"2026-10-06T21:27:56.385+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"**"}}
+[+003207ms] 
+[+003208ms] event:delta
+[+003208ms] data:{"seq":35,"ts":"2026-10-06T21:27:56.385+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":" "}}
+[+003209ms] 
+[+003209ms] event:delta
+[+003209ms] data:{"seq":36,"ts":"2026-10-06T21:27:56.385+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"该"}}
+[+003210ms] 
+[+003210ms] event:delta
+[+003210ms] data:{"seq":37,"ts":"2026-10-06T21:27:56.385+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"配置"}}
+[+003211ms] 
+[+003211ms] event:delta
+[+003211ms] data:{"seq":38,"ts":"2026-10-06T21:27:56.385+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"（"}}
+[+003212ms] 
+[+003212ms] event:delta
+[+003213ms] data:{"seq":39,"ts":"2026-10-06T21:27:56.385+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"`"}}
+[+003213ms] 
+[+003213ms] event:delta
+[+003214ms] data:{"seq":40,"ts":"2026-10-06T21:27:56.385+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"def"}}
+[+003214ms] 
+[+003214ms] event:delta
+[+003215ms] data:{"seq":41,"ts":"2026-10-06T21:27:56.386+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"-"}}
+[+003215ms] 
+[+003215ms] event:delta
+[+003216ms] data:{"seq":42,"ts":"2026-10-06T21:27:56.386+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"777"}}
+[+003216ms] 
+[+003216ms] event:delta
+[+003217ms] data:{"seq":43,"ts":"2026-10-06T21:27:56.386+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"`"}}
+[+003217ms] 
+[+003218ms] event:delta
+[+003218ms] data:{"seq":44,"ts":"2026-10-06T21:27:56.386+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"）"}}
+[+003218ms] 
+[+003219ms] event:delta
+[+003219ms] data:{"seq":45,"ts":"2026-10-06T21:27:56.386+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"在生产"}}
+[+003220ms] 
+[+003220ms] event:delta
+[+003221ms] data:{"seq":46,"ts":"2026-10-06T21:27:56.386+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"环境"}}
+[+003221ms] 
+[+003221ms] event:delta
+[+003222ms] data:{"seq":47,"ts":"2026-10-06T21:27:56.386+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"仍"}}
+[+003222ms] 
+[+003223ms] event:delta
+[+003223ms] data:{"seq":48,"ts":"2026-10-06T21:27:56.387+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"被"}}
+[+003223ms] 
+[+003224ms] event:delta
+[+003224ms] data:{"seq":49,"ts":"2026-10-06T21:27:56.387+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"引用"}}
+[+003225ms] 
+[+003225ms] event:delta
+[+003226ms] data:{"seq":50,"ts":"2026-10-06T21:27:56.387+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"，"}}
+[+003226ms] 
+[+003226ms] event:delta
+[+003227ms] data:{"seq":51,"ts":"2026-10-06T21:27:56.387+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"禁止"}}
+[+003227ms] 
+[+003227ms] event:delta
+[+003228ms] data:{"seq":52,"ts":"2026-10-06T21:27:56.387+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"删除"}}
+[+003228ms] 
+[+003228ms] event:delta
+[+003229ms] data:{"seq":53,"ts":"2026-10-06T21:27:56.387+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"。\n\n"}}
+[+003229ms] 
+[+003229ms] event:delta
+[+003230ms] data:{"seq":54,"ts":"2026-10-06T21:27:56.387+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"**"}}
+[+003230ms] 
+[+003231ms] event:delta
+[+003231ms] data:{"seq":55,"ts":"2026-10-06T21:27:56.387+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"说明"}}
+[+003231ms] 
+[+003232ms] event:delta
+[+003232ms] data:{"seq":56,"ts":"2026-10-06T21:27:56.388+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"与"}}
+[+003232ms] 
+[+003233ms] event:delta
+[+003233ms] data:{"seq":57,"ts":"2026-10-06T21:27:56.388+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"建议"}}
+[+003233ms] 
+[+003234ms] event:delta
+[+003234ms] data:{"seq":58,"ts":"2026-10-06T21:27:56.388+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"："}}
+[+003234ms] 
+[+003235ms] event:delta
+[+003235ms] data:{"seq":59,"ts":"2026-10-06T21:27:56.388+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"**\n"}}
+[+003235ms] 
+[+003236ms] event:delta
+[+003236ms] data:{"seq":60,"ts":"2026-10-06T21:27:56.388+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"-"}}
+[+003236ms] 
+[+003237ms] event:delta
+[+003237ms] data:{"seq":61,"ts":"2026-10-06T21:27:56.388+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":" "}}
+[+003237ms] 
+[+003238ms] event:delta
+[+003238ms] data:{"seq":62,"ts":"2026-10-06T21:27:56.389+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"由于"}}
+[+003238ms] 
+[+003239ms] event:delta
+[+003239ms] data:{"seq":63,"ts":"2026-10-06T21:27:56.389+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"拒绝"}}
+[+003239ms] 
+[+003240ms] event:delta
+[+003240ms] data:{"seq":64,"ts":"2026-10-06T21:27:56.389+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"发生在"}}
+[+003240ms] 
+[+003241ms] event:delta
+[+003241ms] data:{"seq":65,"ts":"2026-10-06T21:27:56.389+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"执行"}}
+[+003241ms] 
+[+003242ms] event:delta
+[+003242ms] data:{"seq":66,"ts":"2026-10-06T21:27:56.389+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"环节"}}
+[+003242ms] 
+[+003242ms] event:delta
+[+003243ms] data:{"seq":67,"ts":"2026-10-06T21:27:56.389+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"，"}}
+[+003243ms] 
+[+003243ms] event:delta
+[+003244ms] data:{"seq":68,"ts":"2026-10-06T21:27:56.390+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"`"}}
+[+003244ms] 
+[+003245ms] event:delta
+[+003245ms] data:{"seq":69,"ts":"2026-10-06T21:27:56.390+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"def"}}
+[+003245ms] 
+[+003246ms] event:delta
+[+003246ms] data:{"seq":70,"ts":"2026-10-06T21:27:56.390+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"-"}}
+[+003246ms] 
+[+003247ms] event:delta
+[+003247ms] data:{"seq":71,"ts":"2026-10-06T21:27:56.390+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"777"}}
+[+003247ms] 
+[+003247ms] event:delta
+[+003248ms] data:{"seq":72,"ts":"2026-10-06T21:27:56.390+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"`"}}
+[+003248ms] 
+[+003248ms] event:delta
+[+003249ms] data:{"seq":73,"ts":"2026-10-06T21:27:56.390+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":" "}}
+[+003249ms] 
+[+003249ms] event:delta
+[+003250ms] data:{"seq":74,"ts":"2026-10-06T21:27:56.391+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"的"}}
+[+003250ms] 
+[+003250ms] event:delta
+[+003251ms] data:{"seq":75,"ts":"2026-10-06T21:27:56.391+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"配置"}}
+[+003251ms] 
+[+003251ms] event:delta
+[+003252ms] data:{"seq":76,"ts":"2026-10-06T21:27:56.391+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"定义"}}
+[+003252ms] 
+[+003252ms] event:delta
+[+003253ms] data:{"seq":77,"ts":"2026-10-06T21:27:56.391+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"及其"}}
+[+003253ms] 
+[+003253ms] event:delta
+[+003254ms] data:{"seq":78,"ts":"2026-10-06T21:27:56.391+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"生效"}}
+[+003254ms] 
+[+003255ms] event:delta
+[+003255ms] data:{"seq":79,"ts":"2026-10-06T21:27:56.391+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"数据"}}
+[+003256ms] 
+[+003256ms] event:delta
+[+003257ms] data:{"seq":80,"ts":"2026-10-06T21:27:56.391+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"行"}}
+[+003257ms] 
+[+003258ms] event:delta
+[+003258ms] data:{"seq":81,"ts":"2026-10-06T21:27:56.391+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"均"}}
+[+003258ms] 
+[+003259ms] event:delta
+[+003259ms] data:{"seq":82,"ts":"2026-10-06T21:27:56.391+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"保持"}}
+[+003260ms] 
+[+003260ms] event:delta
+[+003260ms] data:{"seq":83,"ts":"2026-10-06T21:27:56.392+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"原"}}
+[+003261ms] 
+[+003261ms] event:delta
+[+003261ms] data:{"seq":84,"ts":"2026-10-06T21:27:56.392+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"样"}}
+[+003262ms] 
+[+003262ms] event:delta
+[+003262ms] data:{"seq":85,"ts":"2026-10-06T21:27:56.392+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"，"}}
+[+003263ms] 
+[+003263ms] event:delta
+[+003263ms] data:{"seq":86,"ts":"2026-10-06T21:27:56.392+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"未"}}
+[+003264ms] 
+[+003264ms] event:delta
+[+003264ms] data:{"seq":87,"ts":"2026-10-06T21:27:56.392+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"产生"}}
+[+003265ms] 
+[+003265ms] event:delta
+[+003265ms] data:{"seq":88,"ts":"2026-10-06T21:27:56.393+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"任何"}}
+[+003266ms] 
+[+003266ms] event:delta
+[+003267ms] data:{"seq":89,"ts":"2026-10-06T21:27:56.393+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"变更"}}
+[+003267ms] 
+[+003267ms] event:delta
+[+003268ms] data:{"seq":90,"ts":"2026-10-06T21:27:56.393+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"。\n"}}
+[+003268ms] 
+[+003268ms] event:delta
+[+003269ms] data:{"seq":91,"ts":"2026-10-06T21:27:56.394+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"-"}}
+[+003269ms] 
+[+003269ms] event:delta
+[+003270ms] data:{"seq":92,"ts":"2026-10-06T21:27:56.394+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":" "}}
+[+003270ms] 
+[+003270ms] event:delta
+[+003271ms] data:{"seq":93,"ts":"2026-10-06T21:27:56.394+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"若"}}
+[+003271ms] 
+[+003272ms] event:delta
+[+003272ms] data:{"seq":94,"ts":"2026-10-06T21:27:56.394+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"确实"}}
+[+003272ms] 
+[+003273ms] event:delta
+[+003273ms] data:{"seq":95,"ts":"2026-10-06T21:27:56.395+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"需要"}}
+[+003273ms] 
+[+003274ms] event:delta
+[+003274ms] data:{"seq":96,"ts":"2026-10-06T21:27:56.395+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"下线"}}
+[+003274ms] 
+[+003275ms] event:delta
+[+003275ms] data:{"seq":97,"ts":"2026-10-06T21:27:56.395+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"，"}}
+[+003276ms] 
+[+003276ms] event:delta
+[+003277ms] data:{"seq":98,"ts":"2026-10-06T21:27:56.395+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"建议"}}
+[+003277ms] 
+[+003277ms] event:delta
+[+003278ms] data:{"seq":99,"ts":"2026-10-06T21:27:56.395+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"先"}}
+[+003278ms] 
+[+003278ms] event:delta
+[+003279ms] data:{"seq":100,"ts":"2026-10-06T21:27:56.396+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"完成"}}
+[+003279ms] 
+[+003280ms] event:delta
+[+003280ms] data:{"seq":101,"ts":"2026-10-06T21:27:56.396+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"前置"}}
+[+003280ms] 
+[+003281ms] event:delta
+[+003282ms] data:{"seq":102,"ts":"2026-10-06T21:27:56.396+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"动作"}}
+[+003282ms] 
+[+003282ms] event:delta
+[+003283ms] data:{"seq":103,"ts":"2026-10-06T21:27:56.396+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"：\n"}}
+[+003283ms] 
+[+003283ms] event:delta
+[+003284ms] data:{"seq":104,"ts":"2026-10-06T21:27:56.396+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"  "}}
+[+003284ms] 
+[+003284ms] event:delta
+[+003285ms] data:{"seq":105,"ts":"2026-10-06T21:27:56.396+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"1"}}
+[+003285ms] 
+[+003286ms] event:delta
+[+003286ms] data:{"seq":106,"ts":"2026-10-06T21:27:56.396+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"."}}
+[+003287ms] 
+[+003288ms] event:delta
+[+003288ms] data:{"seq":107,"ts":"2026-10-06T21:27:56.396+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":" "}}
+[+003289ms] 
+[+003289ms] event:delta
+[+003289ms] data:{"seq":108,"ts":"2026-10-06T21:27:56.397+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"排查"}}
+[+003290ms] 
+[+003291ms] event:delta
+[+003291ms] data:{"seq":109,"ts":"2026-10-06T21:27:56.397+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"并"}}
+[+003291ms] 
+[+003292ms] event:delta
+[+003292ms] data:{"seq":110,"ts":"2026-10-06T21:27:56.397+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"解除"}}
+[+003292ms] 
+[+003293ms] event:delta
+[+003293ms] data:{"seq":111,"ts":"2026-10-06T21:27:56.397+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"生产"}}
+[+003293ms] 
+[+003294ms] event:delta
+[+003294ms] data:{"seq":112,"ts":"2026-10-06T21:27:56.397+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"环境中"}}
+[+003294ms] 
+[+003295ms] event:delta
+[+003295ms] data:{"seq":113,"ts":"2026-10-06T21:27:56.397+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"对该"}}
+[+003295ms] 
+[+003296ms] event:delta
+[+003296ms] data:{"seq":114,"ts":"2026-10-06T21:27:56.397+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"配置"}}
+[+003296ms] 
+[+003297ms] event:delta
+[+003297ms] data:{"seq":115,"ts":"2026-10-06T21:27:56.397+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"的"}}
+[+003297ms] 
+[+003298ms] event:delta
+[+003298ms] data:{"seq":116,"ts":"2026-10-06T21:27:56.397+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"引用"}}
+[+003299ms] 
+[+003299ms] event:delta
+[+003299ms] data:{"seq":117,"ts":"2026-10-06T21:27:56.398+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"；\n"}}
+[+003300ms] 
+[+003300ms] event:delta
+[+003300ms] data:{"seq":118,"ts":"2026-10-06T21:27:56.398+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"  "}}
+[+003301ms] 
+[+003301ms] event:delta
+[+003302ms] data:{"seq":119,"ts":"2026-10-06T21:27:56.398+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"2"}}
+[+003302ms] 
+[+003303ms] event:delta
+[+003303ms] data:{"seq":120,"ts":"2026-10-06T21:27:56.398+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"."}}
+[+003303ms] 
+[+003304ms] event:delta
+[+003304ms] data:{"seq":121,"ts":"2026-10-06T21:27:56.398+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":" "}}
+[+003304ms] 
+[+003305ms] event:delta
+[+003306ms] data:{"seq":122,"ts":"2026-10-06T21:27:56.399+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"确认"}}
+[+003306ms] 
+[+003307ms] event:delta
+[+003307ms] data:{"seq":123,"ts":"2026-10-06T21:27:56.399+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"无"}}
+[+003308ms] 
+[+003308ms] event:delta
+[+003309ms] data:{"seq":124,"ts":"2026-10-06T21:27:56.399+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"业务"}}
+[+003309ms] 
+[+003309ms] event:delta
+[+003310ms] data:{"seq":125,"ts":"2026-10-06T21:27:56.399+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"依赖"}}
+[+003310ms] 
+[+003310ms] event:delta
+[+003311ms] data:{"seq":126,"ts":"2026-10-06T21:27:56.399+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"后"}}
+[+003311ms] 
+[+003311ms] event:delta
+[+003312ms] data:{"seq":127,"ts":"2026-10-06T21:27:56.399+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"，"}}
+[+003312ms] 
+[+003312ms] event:delta
+[+003313ms] data:{"seq":128,"ts":"2026-10-06T21:27:56.399+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"在"}}
+[+003313ms] 
+[+003313ms] event:delta
+[+003314ms] data:{"seq":129,"ts":"2026-10-06T21:27:56.399+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"变更"}}
+[+003314ms] 
+[+003314ms] event:delta
+[+003315ms] data:{"seq":130,"ts":"2026-10-06T21:27:56.399+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"窗口"}}
+[+003315ms] 
+[+003315ms] event:delta
+[+003316ms] data:{"seq":131,"ts":"2026-10-06T21:27:56.399+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"内"}}
+[+003316ms] 
+[+003316ms] event:delta
+[+003317ms] data:{"seq":132,"ts":"2026-10-06T21:27:56.399+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"再次"}}
+[+003317ms] 
+[+003317ms] event:delta
+[+003318ms] data:{"seq":133,"ts":"2026-10-06T21:27:56.399+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"发起"}}
+[+003318ms] 
+[+003319ms] event:delta
+[+003319ms] data:{"seq":134,"ts":"2026-10-06T21:27:56.400+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"删除"}}
+[+003319ms] 
+[+003320ms] event:delta
+[+003320ms] data:{"seq":135,"ts":"2026-10-06T21:27:56.400+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"；\n"}}
+[+003320ms] 
+[+003320ms] event:delta
+[+003321ms] data:{"seq":136,"ts":"2026-10-06T21:27:56.400+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"  "}}
+[+003321ms] 
+[+003321ms] event:delta
+[+003322ms] data:{"seq":137,"ts":"2026-10-06T21:27:56.400+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"3"}}
+[+003322ms] 
+[+003322ms] event:delta
+[+003323ms] data:{"seq":138,"ts":"2026-10-06T21:27:56.400+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"."}}
+[+003323ms] 
+[+003323ms] event:delta
+[+003324ms] data:{"seq":139,"ts":"2026-10-06T21:27:56.400+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":" "}}
+[+003324ms] 
+[+003324ms] event:delta
+[+003325ms] data:{"seq":140,"ts":"2026-10-06T21:27:56.400+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"删除"}}
+[+003325ms] 
+[+003325ms] event:delta
+[+003326ms] data:{"seq":141,"ts":"2026-10-06T21:27:56.400+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"前"}}
+[+003326ms] 
+[+003326ms] event:delta
+[+003326ms] data:{"seq":142,"ts":"2026-10-06T21:27:56.400+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"做好"}}
+[+003327ms] 
+[+003327ms] event:delta
+[+003327ms] data:{"seq":143,"ts":"2026-10-06T21:27:56.401+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"配置"}}
+[+003328ms] 
+[+003328ms] event:delta
+[+003328ms] data:{"seq":144,"ts":"2026-10-06T21:27:56.401+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"定义的"}}
+[+003329ms] 
+[+003329ms] event:delta
+[+003330ms] data:{"seq":145,"ts":"2026-10-06T21:27:56.401+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"备份"}}
+[+003330ms] 
+[+003330ms] event:delta
+[+003331ms] data:{"seq":146,"ts":"2026-10-06T21:27:56.401+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"。\n\n"}}
+[+003331ms] 
+[+003331ms] event:delta
+[+003332ms] data:{"seq":147,"ts":"2026-10-06T21:27:56.401+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"如需"}}
+[+003332ms] 
+[+003332ms] event:delta
+[+003333ms] data:{"seq":148,"ts":"2026-10-06T21:27:56.401+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"我"}}
+[+003333ms] 
+[+003333ms] event:delta
+[+003334ms] data:{"seq":149,"ts":"2026-10-06T21:27:56.401+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"协助"}}
+[+003334ms] 
+[+003334ms] event:delta
+[+003335ms] data:{"seq":150,"ts":"2026-10-06T21:27:56.402+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"做"}}
+[+003335ms] 
+[+003335ms] event:delta
+[+003336ms] data:{"seq":151,"ts":"2026-10-06T21:27:56.402+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"其他"}}
+[+003336ms] 
+[+003336ms] event:delta
+[+003337ms] data:{"seq":152,"ts":"2026-10-06T21:27:56.402+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"非"}}
+[+003337ms] 
+[+003337ms] event:delta
+[+003338ms] data:{"seq":153,"ts":"2026-10-06T21:27:56.402+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"破坏"}}
+[+003339ms] 
+[+003339ms] event:delta
+[+003339ms] data:{"seq":154,"ts":"2026-10-06T21:27:56.402+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"性"}}
+[+003340ms] 
+[+003340ms] event:delta
+[+003340ms] data:{"seq":155,"ts":"2026-10-06T21:27:56.402+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"操作"}}
+[+003341ms] 
+[+003341ms] event:delta
+[+003341ms] data:{"seq":156,"ts":"2026-10-06T21:27:56.402+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"（"}}
+[+003342ms] 
+[+003342ms] event:delta
+[+003342ms] data:{"seq":157,"ts":"2026-10-06T21:27:56.402+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"例如"}}
+[+003343ms] 
+[+003343ms] event:delta
+[+003343ms] data:{"seq":158,"ts":"2026-10-06T21:27:56.402+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"查询"}}
+[+003344ms] 
+[+003345ms] event:delta
+[+003345ms] data:{"seq":159,"ts":"2026-10-06T21:27:56.403+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"用户"}}
+[+003345ms] 
+[+003346ms] event:delta
+[+003346ms] data:{"seq":160,"ts":"2026-10-06T21:27:56.403+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"资料"}}
+[+003347ms] 
+[+003347ms] event:delta
+[+003347ms] data:{"seq":161,"ts":"2026-10-06T21:27:56.403+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"或"}}
+[+003348ms] 
+[+003348ms] event:delta
+[+003348ms] data:{"seq":162,"ts":"2026-10-06T21:27:56.403+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"执行"}}
+[+003349ms] 
+[+003349ms] event:delta
+[+003349ms] data:{"seq":163,"ts":"2026-10-06T21:27:56.403+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"计算"}}
+[+003350ms] 
+[+003350ms] event:delta
+[+003350ms] data:{"seq":164,"ts":"2026-10-06T21:27:56.403+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"），"}}
+[+003351ms] 
+[+003351ms] event:delta
+[+003351ms] data:{"seq":165,"ts":"2026-10-06T21:27:56.403+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"可以"}}
+[+003352ms] 
+[+003352ms] event:delta
+[+003352ms] data:{"seq":166,"ts":"2026-10-06T21:27:56.403+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"继续"}}
+[+003353ms] 
+[+003353ms] event:delta
+[+003353ms] data:{"seq":167,"ts":"2026-10-06T21:27:56.404+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"告诉我"}}
+[+003354ms] 
+[+003354ms] event:delta
+[+003354ms] data:{"seq":168,"ts":"2026-10-06T21:27:56.404+08:00","sessionId":"sp01ab-C-20261006-212753","event":"delta","data":{"content":"。"}}
+[+003355ms] 
+[+003355ms] event:model_reply
+[+003355ms] data:{"seq":169,"ts":"2026-10-06T21:27:56.404+08:00","sessionId":"sp01ab-C-20261006-212753","event":"model_reply","data":{"content":"删除操作未执行。\n\n**执行结果：** 用户拒绝了该操作，工具未实际执行。\n\n**拒绝原因：** 该配置（`def-777`）在生产环境仍被引用，禁止删除。\n\n**说明与建议：**\n- 由于拒绝发生在执行环节，`def-777` 的配置定义及其生效数据行均保持原样，未产生任何变更。\n- 若确实需要下线，建议先完成前置动作：\n  1. 排查并解除生产环境中对该配置的引用；\n  2. 确认无业务依赖后，在变更窗口内再次发起删除；\n  3. 删除前做好配置定义的备份。\n\n如需我协助做其他非破坏性操作（例如查询用户资料或执行计算），可以继续告诉我。","model":"deepseek-flash","finishReason":"STOP","streamingMs":2355}}
+[+003356ms] 
+[+003356ms] event:done
+[+003357ms] data:{"seq":170,"ts":"2026-10-06T21:27:56.404+08:00","sessionId":"sp01ab-C-20261006-212753","event":"done","data":{"content":"删除操作未执行。\n\n**执行结果：** 用户拒绝了该操作，工具未实际执行。\n\n**拒绝原因：** 该配置（`def-777`）在生产环境仍被引用，禁止删除。\n\n**说明与建议：**\n- 由于拒绝发生在执行环节，`def-777` 的配置定义及其生效数据行均保持原样，未产生任何变更。\n- 若确实需要下线，建议先完成前置动作：\n  1. 排查并解除生产环境中对该配置的引用；\n  2. 确认无业务依赖后，在变更窗口内再次发起删除；\n  3. 删除前做好配置定义的备份。\n\n如需我协助做其他非破坏性操作（例如查询用户资料或执行计算），可以继续告诉我。","streaming":true,"elapsedMs":2355,"failed":false}}
+[+003357ms] 

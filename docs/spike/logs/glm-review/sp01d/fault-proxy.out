@@ -1,0 +1,61 @@
+[proxy] listening on http://127.0.0.1:18304 -> https://api.deepseek.com (evidence=<PROXY_EVIDENCE_DIR>)
+[proxy] #1 seq=1 POST /v1/chat/completions fault=none applied=false
+[proxy] #1 seq=1 -> PASSTHROUGH_COMPLETE status=200 relayed=0B dur=780ms
+[proxy] #2 seq=2 POST /v1/chat/completions fault=none applied=false
+[proxy] #2 seq=2 -> PASSTHROUGH_COMPLETE status=200 relayed=0B dur=858ms
+[proxy] #1 seq=3 POST /v1/chat/completions fault=stall applied=true
+[proxy] #2 seq=4 POST /v1/chat/completions fault=stall applied=true
+[proxy] #1 seq=3 -> STALLED_THEN_SOCKET_RESET status=null relayed=0B dur=9000ms
+[proxy] #1 seq=5 POST /v1/chat/completions fault=stall-after-content applied=true
+[proxy] #1 seq=5 going silent after 5455B / 2 content events
+[proxy] #2 seq=4 -> STALLED_THEN_SOCKET_RESET status=null relayed=0B dur=9000ms
+[proxy] #1 seq=5 -> STALLED_AFTER_CONTENT_THEN_SOCKET_RESET status=200 relayed=5455B dur=12876ms
+[proxy] #1 seq=6 POST /v1/chat/completions fault=stall-after-content applied=false
+[proxy] #1 seq=6 -> PASSTHROUGH_COMPLETE status=200 relayed=0B dur=778ms
+[proxy] #2 seq=7 POST /v1/chat/completions fault=stall-after-content applied=true
+[proxy] #2 seq=7 going silent after 622B / 1 content events
+[proxy] #1 seq=8 POST /v1/chat/completions fault=none applied=false
+[proxy] #1 seq=8 -> PASSTHROUGH_COMPLETE status=200 relayed=0B dur=1106ms
+[proxy] #2 seq=7 -> TRUNCATED_SOCKET_RESET status=200 relayed=622B dur=12778ms
+[proxy] #1 seq=9 POST /v1/chat/completions fault=stall applied=true
+[proxy] #1 seq=10 POST /v1/chat/completions fault=stall applied=true
+[proxy] #1 seq=9 -> STALLED_THEN_SOCKET_RESET status=null relayed=0B dur=9001ms
+[proxy] #1 seq=11 POST /v1/chat/completions fault=stall applied=true
+[proxy] #1 seq=10 -> STALLED_THEN_SOCKET_RESET status=null relayed=0B dur=9001ms
+[proxy] #2 seq=12 POST /v1/chat/completions fault=stall applied=true
+[proxy] #1 seq=11 -> STALLED_THEN_SOCKET_RESET status=null relayed=0B dur=9000ms
+[proxy] #2 seq=12 -> STALLED_THEN_SOCKET_RESET status=null relayed=0B dur=9001ms
+[proxy] #1 seq=13 POST /v1/chat/completions fault=stall-after-content applied=true
+[proxy] #1 seq=13 going silent after 5758B / 2 content events
+[proxy] #2 seq=14 POST /v1/chat/completions fault=stall-after-content applied=true
+[proxy] #2 seq=14 going silent after 6350B / 2 content events
+[proxy] #1 seq=15 POST /v1/chat/completions fault=fin-after-content applied=true
+[proxy] #1 seq=15 -> TRUNCATED_CLEAN_FIN status=200 relayed=922B dur=755ms
+[proxy] #1 seq=16 POST /v1/chat/completions fault=truncate applied=true
+[proxy] #1 seq=13 -> TRUNCATED_SOCKET_RESET status=200 relayed=5758B dur=12874ms
+[proxy] #1 seq=16 -> TRUNCATED_SOCKET_RESET status=200 relayed=919B dur=930ms
+[proxy] #2 seq=17 POST /v1/chat/completions fault=truncate applied=true
+[proxy] #2 seq=17 -> TRUNCATED_SOCKET_RESET status=200 relayed=922B dur=741ms
+[proxy] #1 seq=18 POST /v1/chat/completions fault=truncate-fin applied=true
+[proxy] #1 seq=18 -> TRUNCATED_CLEAN_FIN status=200 relayed=2431B dur=1223ms
+[proxy] #1 seq=19 POST /v1/chat/completions fault=none applied=false
+[proxy] #1 seq=19 -> PASSTHROUGH_COMPLETE status=200 relayed=0B dur=540ms
+[proxy] #2 seq=20 POST /v1/chat/completions fault=none applied=false
+[proxy] #2 seq=20 -> PASSTHROUGH_COMPLETE status=200 relayed=0B dur=790ms
+[proxy] #2 seq=14 -> TRUNCATED_SOCKET_RESET status=200 relayed=6350B dur=12738ms
+[proxy] #1 seq=21 POST /v1/chat/completions fault=none applied=false
+[proxy] #1 seq=21 -> PASSTHROUGH_COMPLETE status=200 relayed=0B dur=1138ms
+[proxy] #2 seq=22 POST /v1/chat/completions fault=none applied=false
+[proxy] #1 seq=23 POST /v1/chat/completions fault=none applied=false
+[proxy] #1 seq=23 -> PASSTHROUGH_COMPLETE status=200 relayed=0B dur=848ms
+[proxy] #2 seq=22 -> PASSTHROUGH_COMPLETE status=200 relayed=0B dur=2023ms
+[proxy] #2 seq=24 POST /v1/chat/completions fault=none applied=false
+[proxy] #2 seq=24 -> PASSTHROUGH_COMPLETE status=200 relayed=0B dur=1862ms
+[proxy] #3 seq=25 POST /v1/chat/completions fault=none applied=false
+[proxy] #4 seq=26 POST /v1/chat/completions fault=none applied=false
+[proxy] #4 seq=26 -> PASSTHROUGH_COMPLETE status=200 relayed=0B dur=632ms
+[proxy] #3 seq=25 -> PASSTHROUGH_COMPLETE status=200 relayed=0B dur=1022ms
+[proxy] #5 seq=27 POST /v1/chat/completions fault=none applied=false
+[proxy] #5 seq=27 -> PASSTHROUGH_COMPLETE status=200 relayed=0B dur=1101ms
+[proxy] #6 seq=28 POST /v1/chat/completions fault=none applied=false
+[proxy] #6 seq=28 -> PASSTHROUGH_COMPLETE status=200 relayed=0B dur=1178ms

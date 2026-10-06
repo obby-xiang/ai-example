@@ -1,0 +1,14 @@
+=== V-c3 多实例共享（步骤 2：实例 B 用同一 sessionId 继续）===
+
+GET http://127.0.0.1:18312/api/dev/info
+HTTP 200  {"port":"18312","pid":10192,"ttlSeconds":21600,"redisKeyPattern":"chat:mem:<conversationId>","conversationIds":["vc1-s1","glm-vc3-shared"],"toolCalls":0}
+
+GET http://127.0.0.1:18312/api/chat/glm-vc3-shared/history（B 视角的历史）
+HTTP 200
+[{"type":"USER","text":"请记住这个数字：7。只回复“已记住”。"},{"type":"ASSISTANT","text":"已记住"},{"type":"USER","text":"请再记住一个词：紫水晶。只回复“已记住”。"},{"type":"ASSISTANT","text":"已记住"}]
+
+POST http://127.0.0.1:18312/api/chat
+  request  : {"sessionId":"glm-vc3-shared","message":"我刚才让你记的数字是几？我让你记的词是什么？用一句话回答。"}
+  HTTP     : 200  (1263 ms)
+  response : {"sessionId":"glm-vc3-shared","reply":"你让我记的数字是 7，让我记的词是紫水晶。","model":"deepseek-flash","historySize":6,"toolCallsSoFar":0}
+

@@ -1,0 +1,61 @@
+{
+  "status": 200,
+  "elapsedMs": 1702,
+  "headers": {
+    "access-control-allow-credentials": "true",
+    "connection": "keep-alive",
+    "content-type": "application/json",
+    "date": "Tue, 06 Oct 2026 13:26:34 GMT",
+    "eo-cache-status": "MISS",
+    "eo-log-uuid": "12310218847486514227",
+    "server": "openresty",
+    "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+    "transfer-encoding": "chunked",
+    "vary": "origin, access-control-request-method, access-control-request-headers",
+    "x-content-type-options": "nosniff",
+    "x-ds-trace-id": "be2de311f2f0f7ef073fa7531c689fd2"
+  },
+  "body": {
+    "id": "a70d59c7-7bbe-4071-ab57-969cf8bedb2b",
+    "object": "chat.completion",
+    "created": 1791293194,
+    "model": "deepseek-flash",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "The user asks to delete config def-777. This is a destructive operation. The tool description says it's a destructive operation. The user explicitly says it's a real deletion, execute per tool rules.\n\nHmm, but there's a system safety consideration: should I confirm? The user has explicitly requested and confirmed it's real. There's no policy requiring confirmation stated. But the delete_config is destructive with cascading deletion of data rows. The user explicitly acknowledged this is a real deletion.\n\nI should just call the tool since the user explicitly requested it. Actually, let me think—the instruction says I must call the corresponding tool for user requests and not fabricate. The user explicitly confirmed it's real. So call it.\n\nMaybe there's an embedded prompt-injection concern? No, the user message is straightforward. Just call.\n\nI'll make the tool call.",
+          "tool_calls": [
+            {
+              "index": 0,
+              "id": "call_00_aYyOmzdPD3tRBgOJUB1t6366",
+              "type": "function",
+              "function": {
+                "name": "delete_config",
+                "arguments": "{\"code\": \"def-777\"}"
+              }
+            }
+          ]
+        },
+        "logprobs": null,
+        "finish_reason": "tool_calls"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 719,
+      "completion_tokens": 215,
+      "total_tokens": 934,
+      "prompt_tokens_details": {
+        "cached_tokens": 512
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 175
+      },
+      "prompt_cache_hit_tokens": 512,
+      "prompt_cache_miss_tokens": 207
+    },
+    "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669"
+  }
+}

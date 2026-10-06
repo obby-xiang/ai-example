@@ -1,0 +1,24 @@
+=== V-c3 多实例共享（步骤 1：实例 A 完成 2 轮）===
+
+GET http://127.0.0.1:18302/api/dev/info
+HTTP 200  {"port":"18302","pid":15676,"ttlSeconds":21600,"redisKeyPattern":"chat:mem:<conversationId>","conversationIds":["vc1-s1"],"toolCalls":0}
+
+POST http://127.0.0.1:18302/api/chat
+  request  : {"sessionId":"glm-vc3-shared","message":"请记住这个数字：7。只回复“已记住”。"}
+  HTTP     : 200  (638 ms)
+  response : {"sessionId":"glm-vc3-shared","reply":"已记住","model":"deepseek-flash","historySize":2,"toolCallsSoFar":0}
+
+POST http://127.0.0.1:18302/api/chat
+  request  : {"sessionId":"glm-vc3-shared","message":"请再记住一个词：紫水晶。只回复“已记住”。"}
+  HTTP     : 200  (511 ms)
+  response : {"sessionId":"glm-vc3-shared","reply":"已记住","model":"deepseek-flash","historySize":4,"toolCallsSoFar":0}
+
+$ memurai-cli TTL chat:mem:glm-vc3-shared
+21600
+
+$ memurai-cli LRANGE chat:mem:glm-vc3-shared 0 -1
+{"type":"USER","content":"请记住这个数字：7。只回复“已记住”。","metadata":{"messageType":"USER","spikeTimestamp":"2026-10-06T13:23:26.874092900Z"},"timestamp":"2026-10-06T13:23:26.874092900Z"}
+{"type":"ASSISTANT","content":"已记住","metadata":{"role":"ASSISTANT","messageType":"ASSISTANT","refusal":"","finishReason":"STOP","annotations":[{}],"index":0,"id":"8ca9cafd-75e3-4eb0-8477-75b1b8bea207","spikeTimestamp":"2026-10-06T13:23:27.493372500Z"},"timestamp":"2026-10-06T13:23:27.493372500Z"}
+{"type":"USER","content":"请再记住一个词：紫水晶。只回复“已记住”。","metadata":{"messageType":"USER","spikeTimestamp":"2026-10-06T13:23:27.513315300Z"},"timestamp":"2026-10-06T13:23:27.513315300Z"}
+{"type":"ASSISTANT","content":"已记住","metadata":{"role":"ASSISTANT","messageType":"ASSISTANT","refusal":"","finishReason":"STOP","annotations":[{}],"index":0,"id":"5f527cd6-efb3-4153-94e6-b898bd523bdd","spikeTimestamp":"2026-10-06T13:23:28.007768600Z"},"timestamp":"2026-10-06T13:23:28.007768600Z"}
+

@@ -1,0 +1,110 @@
+{
+  "case": "vd1-refmodel-mid",
+  "description": "refmodel 策略 + 已产出 2 个正文 delta 后上游静默（代理停止发送、保持连接，12s 后 RST）",
+  "fault": {
+    "mode": "stall-after-content",
+    "contentEvents": 2,
+    "stallMs": 12000
+  },
+  "sse": {
+    "eventCounts": {
+      "start": 1,
+      "delta": 2,
+      "error": 1
+    },
+    "eventSequence": [
+      "start@5ms",
+      "delta@889ms",
+      "delta@6638ms",
+      "error@11639ms"
+    ],
+    "deltaCount": 2,
+    "concatenatedDeltaText": "我是我是",
+    "concatenatedDeltaLen": 4,
+    "duplicatedPrefixLen": 2,
+    "duplicatedPrefixLikely": true,
+    "terminalEvent": "error",
+    "terminalData": {
+      "code": "UPSTREAM_SILENT_TIMEOUT_AFTER_PARTIAL",
+      "message": "模型服务在约定时间内没有任何事件（上游静默），本轮流已终止。",
+      "rawReason": "TimeoutException: Did not observe any item or terminal signal within 5000ms in 'takeUntil' (and no fallback has been configured)",
+      "attempts": 2,
+      "partial": true,
+      "toolSideEffect": false,
+      "emittedChars": 4,
+      "elapsedMs": 11634
+    },
+    "elapsedMs": 11640,
+    "clientAborted": false,
+    "streamError": null
+  },
+  "sessionState": {
+    "sessionId": "vd1-refmodel-mid",
+    "runId": "vd1-refmodel-mid#1791293652082",
+    "terminal": "FAILED",
+    "cancelled": false,
+    "clientAborted": false,
+    "emittedAny": true,
+    "deltas": 2,
+    "emittedChars": 4,
+    "content": "我是我是",
+    "attempts": 1,
+    "elapsedMs": 11634,
+    "attemptRecords": [
+      {
+        "attempt": 1,
+        "outcome": "ERROR",
+        "costMs": 11634,
+        "emittedAnythingBefore": true,
+        "reason": "TimeoutException: Did not observe any item or terminal signal within 5000ms in 'takeUntil' (and no fallback has been configured)"
+      }
+    ],
+    "toolCallItems": [],
+    "cancelRegistryRegistered": false,
+    "cancelFlagValue": false,
+    "refSubscriptions": 2,
+    "toolExecutionsForRun": [],
+    "found": true
+  },
+  "wire": [
+    {
+      "seq": 13,
+      "requestIndex": 1,
+      "tsMs": 1791293652089,
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "mode": "stall-after-content",
+      "applied": true,
+      "status": 200,
+      "relayedBytes": 5758,
+      "chunkCount": 9,
+      "outcome": null,
+      "headerBytes": 0,
+      "requestBytes": 1372,
+      "upstreamHeadersAtMs": 1791293652272,
+      "relayedEvents": 19,
+      "contentEvents": 2,
+      "stalledAtMs": 1791293652962
+    },
+    {
+      "seq": 14,
+      "requestIndex": 2,
+      "tsMs": 1791293657972,
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "mode": "stall-after-content",
+      "applied": true,
+      "status": 200,
+      "relayedBytes": 6350,
+      "chunkCount": 8,
+      "outcome": null,
+      "headerBytes": 0,
+      "requestBytes": 1372,
+      "upstreamHeadersAtMs": 1791293658137,
+      "relayedEvents": 21,
+      "contentEvents": 2,
+      "stalledAtMs": 1791293658710
+    }
+  ],
+  "capturedAt": "2026-10-06T13:34:23.730Z"
+}

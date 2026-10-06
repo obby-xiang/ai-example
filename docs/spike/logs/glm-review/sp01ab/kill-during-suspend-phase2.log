@@ -1,0 +1,3 @@
+/api/events/glm-kill-1791293345208/timeline -> 200 {"sessionId":"glm-kill-1791293345208","exists":false,"events":[]}
+/api/dev/info -> 200 {"port":"18301","pid":8928,"toolKinds":{"calculate":"BACKEND","get_user_profile":"FRONTEND","delete_config":"SENSITIVE"},"frontendToolTimeoutSeconds":60,"confirmTimeoutSeconds":30,"heartbeatMs":2000,"toolCounters":{"get_user_profile_stub_body":0,"delete_config":0,"calculate":0},"sessions":[]}
+POST /api/confirm(approve) -> 404 {"error":"unknown sessionId"}

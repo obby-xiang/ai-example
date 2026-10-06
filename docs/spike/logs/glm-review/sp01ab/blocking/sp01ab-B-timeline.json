@@ -1,0 +1,126 @@
+{
+  "sessionId": "sp01ab-B-20261006-212629",
+  "exists": true,
+  "events": [
+    {
+      "seq": 1,
+      "ts": "2026-10-06T21:26:29.207+08:00",
+      "sessionId": "sp01ab-B-20261006-212629",
+      "event": "subscribed",
+      "data": {
+        "sessionId": "sp01ab-B-20261006-212629",
+        "subscribers": 1,
+        "heartbeatMs": 2000
+      }
+    },
+    {
+      "seq": 2,
+      "ts": "2026-10-06T21:26:29.439+08:00",
+      "sessionId": "sp01ab-B-20261006-212629",
+      "event": "ping",
+      "data": {
+        "tick": 16,
+        "pending": null,
+        "subscribers": 1
+      }
+    },
+    {
+      "seq": 3,
+      "ts": "2026-10-06T21:26:30.035+08:00",
+      "sessionId": "sp01ab-B-20261006-212629",
+      "event": "start",
+      "data": {
+        "message": "请删除配置 def-777（这是一次真实的删除操作，按工具规则执行）。",
+        "streaming": false,
+        "toolNames": [
+          "get_user_profile",
+          "delete_config",
+          "calculate"
+        ],
+        "frontendToolTimeoutSeconds": 60,
+        "confirmTimeoutSeconds": 30
+      }
+    },
+    {
+      "seq": 4,
+      "ts": "2026-10-06T21:26:31.438+08:00",
+      "sessionId": "sp01ab-B-20261006-212629",
+      "event": "ping",
+      "data": {
+        "tick": 17,
+        "pending": null,
+        "subscribers": 1
+      }
+    },
+    {
+      "seq": 5,
+      "ts": "2026-10-06T21:26:31.813+08:00",
+      "sessionId": "sp01ab-B-20261006-212629",
+      "event": "tool_start",
+      "data": {
+        "toolCallId": "call_00_LEGGm96UZ78I7wuQ1Oiz3763",
+        "name": "delete_config",
+        "kind": "sensitive",
+        "args": {
+          "code": "def-777"
+        }
+      }
+    },
+    {
+      "seq": 6,
+      "ts": "2026-10-06T21:26:31.813+08:00",
+      "sessionId": "sp01ab-B-20261006-212629",
+      "event": "confirm_request",
+      "data": {
+        "toolCallId": "call_00_LEGGm96UZ78I7wuQ1Oiz3763",
+        "name": "delete_config",
+        "args": {
+          "code": "def-777"
+        },
+        "summary": "{code=def-777}",
+        "timeoutSeconds": 30,
+        "callback": "POST /api/confirm {sessionId, toolCallId, approved, reason}"
+      }
+    },
+    {
+      "seq": 7,
+      "ts": "2026-10-06T21:26:31.852+08:00",
+      "sessionId": "sp01ab-B-20261006-212629",
+      "event": "confirm_decision",
+      "data": {
+        "toolCallId": "call_00_LEGGm96UZ78I7wuQ1Oiz3763",
+        "name": "delete_config",
+        "decision": "approve",
+        "approved": true,
+        "reason": "PoC：人工确认放行",
+        "source": "http-post",
+        "waitedMs": 39
+      }
+    },
+    {
+      "seq": 8,
+      "ts": "2026-10-06T21:26:31.852+08:00",
+      "sessionId": "sp01ab-B-20261006-212629",
+      "event": "tool_result",
+      "data": {
+        "toolCallId": "call_00_LEGGm96UZ78I7wuQ1Oiz3763",
+        "name": "delete_config",
+        "ok": true,
+        "executed": true,
+        "result": "\"后端已执行删除：配置 def-777 及其 3 行生效数据已删除。\""
+      }
+    },
+    {
+      "seq": 9,
+      "ts": "2026-10-06T21:26:33.311+08:00",
+      "sessionId": "sp01ab-B-20261006-212629",
+      "event": "done",
+      "data": {
+        "content": "已执行完成，结果如下：\n\n- **配置定义**：`def-777` 已删除\n- **连带影响**：该配置下的 **3 行生效数据** 一并被删除（不可恢复）\n\n提醒一下：这是破坏性操作，配置定义和其生效数据均已从系统中移除，如果需要恢复，只能通过重新创建配置定义并重新录入生效数据来重建。\n\n如果你其实想保留数据、只是想让配置「失效」而不是删除，后续可以告诉我，我可以帮你确认是否有停用/下线之类的替代方式。",
+        "streaming": false,
+        "elapsedMs": 3276,
+        "failed": false
+      }
+    }
+  ]
+}

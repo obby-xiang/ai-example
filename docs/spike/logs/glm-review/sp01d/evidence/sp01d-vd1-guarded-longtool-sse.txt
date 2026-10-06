@@ -1,0 +1,10 @@
+# case=vd1-guarded-longtool
+start@5ms
+delta@976ms
+delta@988ms
+delta@988ms
+delta@1005ms
+delta@1006ms
+delta@1007ms
+delta@1118ms
+error@7121ms

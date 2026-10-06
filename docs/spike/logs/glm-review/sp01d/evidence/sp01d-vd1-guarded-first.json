@@ -1,0 +1,107 @@
+{
+  "case": "vd1-guarded-first",
+  "description": "guarded 策略 + 首包静默（代理不发任何字节，9s 后 RST）",
+  "fault": {
+    "mode": "stall",
+    "stallMs": 9000
+  },
+  "sse": {
+    "eventCounts": {
+      "start": 1,
+      "retry": 1,
+      "error": 1
+    },
+    "eventSequence": [
+      "start@7ms",
+      "retry@5024ms",
+      "error@10030ms"
+    ],
+    "deltaCount": 0,
+    "concatenatedDeltaText": "",
+    "concatenatedDeltaLen": 0,
+    "duplicatedPrefixLen": 0,
+    "duplicatedPrefixLikely": false,
+    "terminalEvent": "error",
+    "terminalData": {
+      "code": "UPSTREAM_SILENT_TIMEOUT",
+      "message": "模型服务在约定时间内没有任何事件（上游静默），本轮流已终止。",
+      "rawReason": "TimeoutException: Did not observe any item or terminal signal within first signal from a Publisher in 'handle' (and no fallback has been configured)",
+      "attempts": 2,
+      "partial": false,
+      "toolSideEffect": false,
+      "emittedChars": 0,
+      "elapsedMs": 10021
+    },
+    "elapsedMs": 10032,
+    "clientAborted": false,
+    "streamError": null
+  },
+  "sessionState": {
+    "sessionId": "vd1-guarded-first",
+    "runId": "vd1-guarded-first#1791293513570",
+    "terminal": "FAILED",
+    "cancelled": false,
+    "clientAborted": false,
+    "emittedAny": false,
+    "deltas": 0,
+    "emittedChars": 0,
+    "content": "",
+    "attempts": 2,
+    "elapsedMs": 10024,
+    "attemptRecords": [
+      {
+        "attempt": 1,
+        "outcome": "ERROR",
+        "costMs": 5014,
+        "emittedAnythingBefore": false,
+        "reason": "TimeoutException: Did not observe any item or terminal signal within first signal from a Publisher in 'handle' (and no fallback has been configured)"
+      },
+      {
+        "attempt": 2,
+        "outcome": "ERROR",
+        "costMs": 5003,
+        "emittedAnythingBefore": false,
+        "reason": "TimeoutException: Did not observe any item or terminal signal within first signal from a Publisher in 'handle' (and no fallback has been configured)"
+      }
+    ],
+    "toolCallItems": [],
+    "cancelRegistryRegistered": false,
+    "cancelFlagValue": false,
+    "refSubscriptions": 0,
+    "toolExecutionsForRun": [],
+    "found": true
+  },
+  "wire": [
+    {
+      "seq": 3,
+      "requestIndex": 1,
+      "tsMs": 1791293513583,
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "mode": "stall",
+      "applied": true,
+      "status": null,
+      "relayedBytes": 0,
+      "chunkCount": 0,
+      "outcome": "STALLED_THEN_SOCKET_RESET",
+      "headerBytes": 0,
+      "endTsMs": 1791293522583,
+      "durationMs": 9000
+    },
+    {
+      "seq": 4,
+      "requestIndex": 2,
+      "tsMs": 1791293518600,
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "mode": "stall",
+      "applied": true,
+      "status": null,
+      "relayedBytes": 0,
+      "chunkCount": 0,
+      "outcome": null,
+      "headerBytes": 0
+    }
+  ],
+  "capturedAt": "2026-10-06T13:32:03.610Z"
+}

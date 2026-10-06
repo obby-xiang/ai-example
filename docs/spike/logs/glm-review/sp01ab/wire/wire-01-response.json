@@ -1,0 +1,70 @@
+{
+  "status": 200,
+  "elapsedMs": 1138,
+  "headers": {
+    "access-control-allow-credentials": "true",
+    "connection": "keep-alive",
+    "content-type": "application/json",
+    "date": "Tue, 06 Oct 2026 13:26:25 GMT",
+    "eo-cache-status": "MISS",
+    "eo-log-uuid": "3982650447373998032",
+    "server": "openresty",
+    "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+    "transfer-encoding": "chunked",
+    "vary": "origin, access-control-request-method, access-control-request-headers",
+    "x-content-type-options": "nosniff",
+    "x-ds-trace-id": "c67bdd7313090a2307eabe72bffaa360"
+  },
+  "body": {
+    "id": "af6aa175-0a6d-4bde-9009-de6445d0ee88",
+    "object": "chat.completion",
+    "created": 1791293185,
+    "model": "deepseek-flash",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "我先同时发起这两个调用。",
+          "reasoning_content": "The user wants two independent calls. Both in same block.",
+          "tool_calls": [
+            {
+              "index": 0,
+              "id": "call_00_PYFttr1VP0Oi9fj0RQxk0373",
+              "type": "function",
+              "function": {
+                "name": "calculate",
+                "arguments": "{\"a\": 6, \"operator\": \"multiply\", \"b\": 7}"
+              }
+            },
+            {
+              "index": 1,
+              "id": "call_01_H17ipH1LFSFnoa0cXhw75568",
+              "type": "function",
+              "function": {
+                "name": "get_user_profile",
+                "arguments": "{\"userId\": \"u-1024\"}"
+              }
+            }
+          ]
+        },
+        "logprobs": null,
+        "finish_reason": "tool_calls"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 748,
+      "completion_tokens": 119,
+      "total_tokens": 867,
+      "prompt_tokens_details": {
+        "cached_tokens": 128
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 12
+      },
+      "prompt_cache_hit_tokens": 128,
+      "prompt_cache_miss_tokens": 620
+    },
+    "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669"
+  }
+}

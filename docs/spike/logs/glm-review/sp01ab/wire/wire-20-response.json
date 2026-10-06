@@ -1,0 +1,50 @@
+{
+  "status": 200,
+  "elapsedMs": 2032,
+  "headers": {
+    "access-control-allow-credentials": "true",
+    "connection": "keep-alive",
+    "content-type": "application/json",
+    "date": "Tue, 06 Oct 2026 13:30:26 GMT",
+    "eo-cache-status": "MISS",
+    "eo-log-uuid": "6722384800813109306",
+    "server": "openresty",
+    "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+    "transfer-encoding": "chunked",
+    "vary": "origin, access-control-request-method, access-control-request-headers",
+    "x-content-type-options": "nosniff",
+    "x-ds-trace-id": "fff4c6ae9595e0e69581a125f1f04539"
+  },
+  "body": {
+    "id": "6c960b5d-d398-4a28-ab52-55a1a014d503",
+    "object": "chat.completion",
+    "created": 1791293426,
+    "model": "deepseek-flash",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "我按你的指令调用了 `delete_config`，但**操作没有执行**——审批环节被拒绝了（拒绝原因标注为 `glm-review`），工具未实际运行，因此 `def-777` 的定义及其生效数据行均未发生任何变更。\n\n需要留意的两点：\n\n1. 这是一次**破坏性操作**：`delete_config` 不仅删除配置定义本身，还会连带删除其下已生效的数据行，且通常不可恢复。\n2. 本次结果属于「被拒绝」，不代表配置不存在，也不代表已删除——如果你确实要执行，需要先解决审批被拒的问题（例如确认审批方、补充变更单或改用其他流程）。\n\n如果你想继续，我可以帮你：\n- 确认 `def-777` 当前是否真的存在、是否有生效数据；\n- 或者换个思路做「停用」而非删除，避免连带数据丢失。\n\n需要哪一个？",
+          "reasoning_content": "The user rejected. Report back.\n\nAlso note it was a destructive operation — I should mention that since it deletes cascading data. Report result honestly."
+        },
+        "logprobs": null,
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 824,
+      "completion_tokens": 220,
+      "total_tokens": 1044,
+      "prompt_tokens_details": {
+        "cached_tokens": 384
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 31
+      },
+      "prompt_cache_hit_tokens": 384,
+      "prompt_cache_miss_tokens": 440
+    },
+    "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669"
+  }
+}

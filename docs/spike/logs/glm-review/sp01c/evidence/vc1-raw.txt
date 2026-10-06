@@ -1,0 +1,45 @@
+=== V-c1 多轮记忆：第二轮应能引用第一轮内容 ===
+
+POST http://127.0.0.1:18302/api/chat
+  request  : {"sessionId":"vc1-s1","message":"请记住这个数字：42。只回复“已记住”，不要解释。"}
+  HTTP     : 200  (1625 ms)
+  response : {"sessionId":"vc1-s1","reply":"已记住","model":"deepseek-flash","historySize":2,"toolCallsSoFar":0}
+
+POST http://127.0.0.1:18302/api/chat
+  request  : {"sessionId":"vc1-s1","message":"我刚才让你记住的数字是几？只回复数字。"}
+  HTTP     : 200  (701 ms)
+  response : {"sessionId":"vc1-s1","reply":"42","model":"deepseek-flash","historySize":4,"toolCallsSoFar":0}
+
+GET history
+HTTP 200
+[
+  {
+    "type": "USER",
+    "text": "请记住这个数字：42。只回复“已记住”，不要解释。"
+  },
+  {
+    "type": "ASSISTANT",
+    "text": "已记住"
+  },
+  {
+    "type": "USER",
+    "text": "我刚才让你记住的数字是几？只回复数字。"
+  },
+  {
+    "type": "ASSISTANT",
+    "text": "42"
+  }
+]
+
+$ memurai-cli TYPE chat:mem:vc1-s1
+list
+
+$ memurai-cli TTL chat:mem:vc1-s1
+21600
+
+$ memurai-cli LRANGE chat:mem:vc1-s1 0 -1
+{"type":"USER","content":"请记住这个数字：42。只回复“已记住”，不要解释。","metadata":{"messageType":"USER","spikeTimestamp":"2026-10-06T13:23:03.093399800Z"},"timestamp":"2026-10-06T13:23:03.093399800Z"}
+{"type":"ASSISTANT","content":"已记住","metadata":{"role":"ASSISTANT","messageType":"ASSISTANT","refusal":"","finishReason":"STOP","annotations":[{}],"index":0,"id":"53411afb-cda9-4e2a-8fab-4a4e221e6973","spikeTimestamp":"2026-10-06T13:23:04.594537100Z"},"timestamp":"2026-10-06T13:23:04.594537100Z"}
+{"type":"USER","content":"我刚才让你记住的数字是几？只回复数字。","metadata":{"messageType":"USER","spikeTimestamp":"2026-10-06T13:23:04.623616400Z"},"timestamp":"2026-10-06T13:23:04.623616400Z"}
+{"type":"ASSISTANT","content":"42","metadata":{"role":"ASSISTANT","messageType":"ASSISTANT","refusal":"","finishReason":"STOP","annotations":[{}],"index":0,"id":"98911f0a-5d38-490d-835a-fab4ca6a535d","spikeTimestamp":"2026-10-06T13:23:05.304912900Z"},"timestamp":"2026-10-06T13:23:05.304912900Z"}
+

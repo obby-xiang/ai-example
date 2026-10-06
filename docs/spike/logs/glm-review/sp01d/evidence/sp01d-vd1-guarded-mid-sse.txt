@@ -1,0 +1,4 @@
+# case=vd1-guarded-mid
+start@6ms
+delta@892ms
+error@6894ms

@@ -1,0 +1,3 @@
+# case=vd1-refbare-first
+start@5ms
+error@5013ms

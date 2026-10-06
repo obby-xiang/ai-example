@@ -1,0 +1,4 @@
+# case=vd1-truncate-rst
+start@5ms
+retry@979ms
+error@1742ms

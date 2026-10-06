@@ -1,0 +1,204 @@
+{
+  "base": "http://127.0.0.1:18301",
+  "startedAt": "2026-10-06T13:27:44.617Z",
+  "scenarios": [
+    {
+      "scenario": "A",
+      "sessionId": "sp01ab-A-20261006-212744",
+      "content": "两件事我都会调用工具，先执行：两个调用都已完成，结果如下：\n\n**1. 计算器结果**\n- `6 × 7 = 42`\n\n**2. 用户资料（u-1024）**\n| 字段 | 值 |\n|---|---|\n| 姓名 | 张三-FRONTEND-6VTBVO |\n| 等级 | VIP-FRONTEND-6VTBVO |\n| 积分 | 8800 |\n\n⚠️ 一点需要说明的：这份资料并非来自后端，而是由前端从浏览器 localStorage 缓存中回传的，属于**客户端可控数据**，不能当作权威来源。理由如下：\n\n- 该工具本身说明「后端不执行，调用后由前端回传结果」，即整条数据链路的中间层在客户端，用户可通过改缓存随意伪造。\n- 姓名和等级中都带有 `FRONTEND-6VTBVO` 这样的标记串，正常业务数据不会有这种后缀，这更像是本地 mock/占位数据，甚至可能是注入的可见标记。\n- 因此姓名、等级、积分三项都不可信；尤其「VIP 等级」和「8800 积分」这种与权益直接挂钩的字段，若用于放行权限或核销积分，会有越权风险。\n\n建议：如果这些字段要参与任何业务判断（如折扣、权限、积分消费），应改为从后端可信接口读取并做服务端校验，不要依赖前端回传的值。需要我按这个思路再做点什么吗？",
+      "pass": true,
+      "checks": [
+        {
+          "id": "A0",
+          "ok": true,
+          "detail": "POST /api/chat-stream 受理 202（streaming=true）"
+        },
+        {
+          "id": "A1",
+          "ok": true,
+          "detail": "收到透出请求 name=get_user_profile toolCallId=call_01_9vmyekAj8FaXk8IFJalk8271 args={\"userId\":\"u-1024\"} timeoutSeconds=60"
+        },
+        {
+          "id": "A2",
+          "ok": true,
+          "detail": "回灌被受理 {\"accepted\":true,\"toolCallId\":\"call_01_9vmyekAj8FaXk8IFJalk8271\",\"toolName\":\"get_user_profile\"}"
+        },
+        {
+          "id": "A3",
+          "ok": true,
+          "detail": "循环内确认回灌结果（waitedMs=39, source=browser-localStorage）"
+        },
+        {
+          "id": "A4",
+          "ok": true,
+          "detail": "循环正常结束 elapsedMs=3980"
+        },
+        {
+          "id": "A5",
+          "ok": true,
+          "detail": "最终回答含前端回灌数据（姓名/等级的随机令牌 FRONTEND-6VTBVO）"
+        },
+        {
+          "id": "A6",
+          "ok": true,
+          "detail": "最终回答含后端工具结果 42"
+        },
+        {
+          "id": "A7",
+          "ok": true,
+          "detail": "无 error 事件（0）"
+        },
+        {
+          "id": "A8",
+          "ok": true,
+          "detail": "工具分类正确 [\"calculate:backend\",\"get_user_profile:frontend\"]"
+        },
+        {
+          "id": "A9",
+          "ok": true,
+          "detail": "后端未执行前端工具方法体（桩计数 0 -> 0）"
+        },
+        {
+          "id": "A10",
+          "ok": true,
+          "detail": "后端工具 calculate 执行 1 次（1）"
+        }
+      ]
+    },
+    {
+      "scenario": "B",
+      "sessionId": "sp01ab-B-20261006-212750",
+      "content": "已完成：配置定义 **def-777** 已被删除，连带其 **3 行生效数据** 也一并清除。\n\n⚠️ 提示：该操作不可逆。如果这个配置后续还要用，需要重新创建定义并补回生效数据。如果这是误删，建议尽快联系管理员检查是否有备份可恢复。",
+      "pass": true,
+      "checks": [
+        {
+          "id": "B1",
+          "ok": true,
+          "detail": "确认门挂起并下发确认请求 toolCallId=call_00_hxfZn14BAHbL3vMGs9Pn9127 timeoutSeconds=30"
+        },
+        {
+          "id": "B2",
+          "ok": true,
+          "detail": "批准被受理 {\"accepted\":true,\"approved\":true,\"toolCallId\":\"call_00_hxfZn14BAHbL3vMGs9Pn9127\",\"toolName\":\"delete_config\"}"
+        },
+        {
+          "id": "B3",
+          "ok": true,
+          "detail": "确认门结论 approve（waitedMs=49）"
+        },
+        {
+          "id": "B4",
+          "ok": true,
+          "detail": "工具已执行 tool_result=\"\\\"后端已执行删除：配置 def-777 及其 3 行生效数据已删除。\\\"\""
+        },
+        {
+          "id": "B5",
+          "ok": true,
+          "detail": "后端 delete_config 执行次数 +1（1 -> 2）"
+        },
+        {
+          "id": "B6",
+          "ok": true,
+          "detail": "最终回答基于真实执行结果：已完成：配置定义 **def-777** 已被删除，连带其 **3 行生效数据** 也一并清除。\n\n⚠️ 提示：该操作不可逆。如果这个配置后续还要用，需要重新创建定义并补回生效数据。如果这是误删，建议尽快联系管理员检查是否有备份可恢复。"
+        }
+      ]
+    },
+    {
+      "scenario": "C",
+      "sessionId": "sp01ab-C-20261006-212753",
+      "content": "删除操作未执行。\n\n**执行结果：** 用户拒绝了该操作，工具未实际执行。\n\n**拒绝原因：** 该配置（`def-777`）在生产环境仍被引用，禁止删除。\n\n**说明与建议：**\n- 由于拒绝发生在执行环节，`def-777` 的配置定义及其生效数据行均保持原样，未产生任何变更。\n- 若确实需要下线，建议先完成前置动作：\n  1. 排查并解除生产环境中对该配置的引用；\n  2. 确认无业务依赖后，在变更窗口内再次发起删除；\n  3. 删除前做好配置定义的备份。\n\n如需我协助做其他非破坏性操作（例如查询用户资料或执行计算），可以继续告诉我。",
+      "pass": true,
+      "checks": [
+        {
+          "id": "C1",
+          "ok": true,
+          "detail": "确认门挂起 toolCallId=call_00_dRIfn0HYiov1loOhBTI00626"
+        },
+        {
+          "id": "C2",
+          "ok": true,
+          "detail": "拒绝被受理 {\"accepted\":true,\"approved\":false,\"toolCallId\":\"call_00_dRIfn0HYiov1loOhBTI00626\",\"toolName\":\"delete_config\"}"
+        },
+        {
+          "id": "C3",
+          "ok": true,
+          "detail": "确认门结论 reject reason=该配置在生产环境仍被引用，禁止删除"
+        },
+        {
+          "id": "C4",
+          "ok": true,
+          "detail": "循环未被中断，正常结束 elapsedMs=2355"
+        },
+        {
+          "id": "C5",
+          "ok": true,
+          "detail": "工具未执行并以拒绝语义回填 \"用户拒绝了该操作，工具未执行。拒绝原因：该配置在生产环境仍被引用，禁止删除\""
+        },
+        {
+          "id": "C6",
+          "ok": true,
+          "detail": "后端 delete_config 执行次数 +0（2 -> 2）"
+        },
+        {
+          "id": "C7",
+          "ok": true,
+          "detail": "模型如实说明未执行：删除操作未执行。\n\n**执行结果：** 用户拒绝了该操作，工具未实际执行。\n\n**拒绝原因：** 该配置（`def-777`）在生产环境仍被引用，禁止删除。\n\n**说明与建议：**\n- 由于拒绝发生在执行环节，`def-777` 的配置定义及其生效数据行均保持原样，未产生任何变更。\n- 若确实需要下线，建议先完成前置动"
+        }
+      ]
+    },
+    {
+      "scenario": "D",
+      "sessionId": "sp01ab-D-20261006-212756",
+      "content": "删除操作没有执行成功。\n\n**结果说明：**\n- 我针对配置定义 `def-777` 发起了删除调用；\n- 系统返回：确认等待超过 30 秒，已自动取消该操作，工具**未执行**（工具输出明确说明\"未执行\"）。\n\n**当前状态：** 配置定义 `def-777` 及其生效数据行**仍然存在**，没有任何东西被删除。\n\n这是破坏性操作（会连带删除生效数据行），且刚才的确认窗口已超时，因此我没有擅自重试。如果你确实要删除，请明确回复\"确认删除 def-777\"，我再重新发起一次调用；若你只是想先核对影响范围，我也可以先帮你确认相关信息。",
+      "pass": true,
+      "checks": [
+        {
+          "id": "D1",
+          "ok": true,
+          "detail": "确认门挂起 toolCallId=call_00_6pUVh4JxP79AmgLni8jL9156 timeoutSeconds=30"
+        },
+        {
+          "id": "D2",
+          "ok": true,
+          "detail": "挂起到自动放行用时 31854ms（>= 30000ms）"
+        },
+        {
+          "id": "D3",
+          "ok": true,
+          "detail": "确认门结论 timeout waitedMs=30002"
+        },
+        {
+          "id": "D4",
+          "ok": true,
+          "detail": "超时语义为“已取消、未执行”：\"确认等待超过 30 秒，系统已自动取消该操作（工具未执行）。\""
+        },
+        {
+          "id": "D5",
+          "ok": true,
+          "detail": "后端 delete_config 执行次数 +0（2 -> 2）"
+        },
+        {
+          "id": "D6",
+          "ok": true,
+          "detail": "循环未被中断（未抛超时异常），正常结束 elapsedMs=32506"
+        },
+        {
+          "id": "D7",
+          "ok": true,
+          "detail": "挂起窗口内 SSE 收到 15 帧携挂起态心跳（间隔约 2000ms），连接未断"
+        },
+        {
+          "id": "D8",
+          "ok": true,
+          "detail": "心跳覆盖挂起期的 28001ms（首帧 +2531ms，末帧 +30532ms）"
+        },
+        {
+          "id": "D9",
+          "ok": true,
+          "detail": "模型如实说明取消：删除操作没有执行成功。\n\n**结果说明：**\n- 我针对配置定义 `def-777` 发起了删除调用；\n- 系统返回：确认等待超过 30 秒，已自动取消该操作，工具**未执行**（工具输出明确说明\"未执行\"）。\n\n**当前状态：** 配置定义 `def-777` 及其生效数据行**仍然存在**，没有任何东西被删除。\n\n"
+        }
+      ]
+    }
+  ],
+  "finishedAt": "2026-10-06T13:28:30.686Z"
+}

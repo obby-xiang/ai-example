@@ -1,0 +1,50 @@
+{
+  "status": 200,
+  "elapsedMs": 1561,
+  "headers": {
+    "access-control-allow-credentials": "true",
+    "connection": "keep-alive",
+    "content-type": "application/json",
+    "date": "Tue, 06 Oct 2026 13:29:36 GMT",
+    "eo-cache-status": "MISS",
+    "eo-log-uuid": "16367711217702367721",
+    "server": "openresty",
+    "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+    "transfer-encoding": "chunked",
+    "vary": "origin, access-control-request-method, access-control-request-headers",
+    "x-content-type-options": "nosniff",
+    "x-ds-trace-id": "0fbf71b117bfc2e2a339c1ffaeabc970"
+  },
+  "body": {
+    "id": "fb14ce5a-7a29-44b9-bc5a-ab5e2aab1f25",
+    "object": "chat.completion",
+    "created": 1791293376,
+    "model": "deepseek-flash",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "删除未执行。工具返回结果如下：\n\n> 确认等待超过 30 秒，系统已自动取消该操作（工具未执行）。\n\n也就是说，`def-777` 这次**没有被删除**，系统因等待确认超时而自动取消了。\n\n需要重新发起一次吗？如果你确认要删除，请再回复一次，我立刻重试。",
+          "reasoning_content": "The tool returned that confirmation timed out and the operation was cancelled (not executed). So the deletion wasn't performed. I should report this and offer to retry."
+        },
+        "logprobs": null,
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 751,
+      "completion_tokens": 108,
+      "total_tokens": 859,
+      "prompt_tokens_details": {
+        "cached_tokens": 384
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 33
+      },
+      "prompt_cache_hit_tokens": 384,
+      "prompt_cache_miss_tokens": 367
+    },
+    "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669"
+  }
+}

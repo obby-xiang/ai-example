@@ -1,0 +1,49 @@
+{
+ "events": [
+  {
+   "e": "start",
+   "d": "{\"sessionId\":\"glm-short-timeout\",\"runId\":\"glm-short-timeout#1791293829745\",\"strategy\":\"guarded\",\"firstEventTimeoutMs\":5000,\"interEventTimeoutMs\":2000,\"maxAttempts\":2,\"totalBudgetMs\":20000}"
+  },
+  {
+   "e": "delta",
+   "d": "{\"content\":\"我来\"}"
+  },
+  {
+   "e": "delta",
+   "d": "{\"content\":\"执行\"}"
+  },
+  {
+   "e": "delta",
+   "d": "{\"content\":\"这个\"}"
+  },
+  {
+   "e": "delta",
+   "d": "{\"content\":\" \"}"
+  },
+  {
+   "e": "delta",
+   "d": "{\"content\":\"5\"}"
+  },
+  {
+   "e": "delta",
+   "d": "{\"content\":\" \"}"
+  },
+  {
+   "e": "delta",
+   "d": "{\"content\":\"秒\"}"
+  },
+  {
+   "e": "delta",
+   "d": "{\"content\":\"的长\"}"
+  },
+  {
+   "e": "delta",
+   "d": "{\"content\":\"任务\"}"
+  },
+  {
+   "e": "delta",
+   "d": "{\"content\":\"。\"}"
+  },
+  {
+   "e": "error",
+   "d": "{\"code\":\"UPSTREAM_SILENT_TIMEOUT_AFTER_TOOL_SIDE_EFFECT\",\"message\":\"模型服务在约定时间内没有任何事件（上游静默），�

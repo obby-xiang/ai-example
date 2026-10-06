@@ -1,0 +1,178 @@
+{
+  "case": "vd2-fronttool",
+  "description": "前端执行工具架构：start 暂停 → 回灌 tool-result → 重复回灌同一 toolCallId",
+  "start": {
+    "found": true,
+    "runId": "ftl-1",
+    "sessionId": "vd2-fronttool",
+    "status": "PAUSED_WAITING_TOOL_RESULTS",
+    "round": 1,
+    "finalText": null,
+    "pending": [
+      {
+        "toolCallId": "call_00_W4opPnhxjyRGy4iLlna43101",
+        "name": "getServerTime",
+        "arguments": "{}"
+      }
+    ],
+    "submitted": {},
+    "submissions": [],
+    "messageSequence": [
+      {
+        "index": 0,
+        "type": "SYSTEM",
+        "text": "你必须调用 getServerTime 工具来获取时间，不允许不调用工具直接回答。回复使用中文。"
+      },
+      {
+        "index": 1,
+        "type": "USER",
+        "text": "现在几点？"
+      },
+      {
+        "index": 2,
+        "type": "ASSISTANT",
+        "text": "",
+        "toolCalls": [
+          {
+            "id": "call_00_W4opPnhxjyRGy4iLlna43101",
+            "name": "getServerTime",
+            "arguments": "{}"
+          }
+        ]
+      }
+    ],
+    "toolExecLogForRun": []
+  },
+  "toolCallId": "call_00_W4opPnhxjyRGy4iLlna43101",
+  "firstSubmit": {
+    "httpStatus": 200,
+    "accepted": true,
+    "duplicate": false,
+    "toolCallId": "call_00_W4opPnhxjyRGy4iLlna43101",
+    "pendingRemaining": [],
+    "status": "DONE",
+    "finalText": "现在是 **2026-10-06 20:30:00**（服务器时间）。",
+    "loopState": {
+      "status": "DONE",
+      "round": 2,
+      "messageCount": 5,
+      "pendingIds": [],
+      "submittedIds": [
+        "call_00_W4opPnhxjyRGy4iLlna43101"
+      ]
+    }
+  },
+  "secondSubmitSameId": {
+    "httpStatus": 200,
+    "accepted": false,
+    "duplicate": true,
+    "reason": "DUPLICATE_TOOL_CALL_ID",
+    "toolCallId": "call_00_W4opPnhxjyRGy4iLlna43101",
+    "loopState": {
+      "status": "DONE",
+      "round": 2,
+      "messageCount": 5,
+      "pendingIds": [],
+      "submittedIds": [
+        "call_00_W4opPnhxjyRGy4iLlna43101"
+      ]
+    }
+  },
+  "thirdSubmitUnknownId": {
+    "httpStatus": 409,
+    "accepted": false,
+    "unknown": true,
+    "reason": "UNKNOWN_TOOL_CALL_ID",
+    "pending": []
+  },
+  "finalState": {
+    "found": true,
+    "runId": "ftl-1",
+    "sessionId": "vd2-fronttool",
+    "status": "DONE",
+    "round": 2,
+    "finalText": "现在是 **2026-10-06 20:30:00**（服务器时间）。",
+    "pending": [],
+    "submitted": {
+      "call_00_W4opPnhxjyRGy4iLlna43101": "2026-10-06 20:30:00"
+    },
+    "submissions": [
+      {
+        "tsMs": 1791293668781,
+        "toolCallId": "call_00_W4opPnhxjyRGy4iLlna43101",
+        "result": "2026-10-06 20:30:00",
+        "accepted": true,
+        "reason": "FIRST_SUBMISSION_EXECUTED"
+      },
+      {
+        "tsMs": 1791293669588,
+        "toolCallId": "call_00_W4opPnhxjyRGy4iLlna43101",
+        "result": "2026-10-06 20:30:00",
+        "accepted": false,
+        "reason": "DUPLICATE_TOOL_CALL_ID"
+      },
+      {
+        "tsMs": 1791293669595,
+        "toolCallId": "call_not_exists",
+        "result": "x",
+        "accepted": false,
+        "reason": "UNKNOWN_TOOL_CALL_ID"
+      }
+    ],
+    "messageSequence": [
+      {
+        "index": 0,
+        "type": "SYSTEM",
+        "text": "你必须调用 getServerTime 工具来获取时间，不允许不调用工具直接回答。回复使用中文。"
+      },
+      {
+        "index": 1,
+        "type": "USER",
+        "text": "现在几点？"
+      },
+      {
+        "index": 2,
+        "type": "ASSISTANT",
+        "text": "",
+        "toolCalls": [
+          {
+            "id": "call_00_W4opPnhxjyRGy4iLlna43101",
+            "name": "getServerTime",
+            "arguments": "{}"
+          }
+        ]
+      },
+      {
+        "index": 3,
+        "type": "TOOL",
+        "text": "",
+        "toolResponses": [
+          {
+            "id": "call_00_W4opPnhxjyRGy4iLlna43101",
+            "name": "getServerTime",
+            "responseData": "2026-10-06 20:30:00"
+          }
+        ]
+      },
+      {
+        "index": 4,
+        "type": "ASSISTANT",
+        "text": "现在是 **2026-10-06 20:30:00**（服务器时间）。"
+      }
+    ],
+    "toolExecLogForRun": [
+      {
+        "seq": 6,
+        "tsMs": 1791293668781,
+        "source": "FRONTEND_TOOL",
+        "runId": "ftl-1",
+        "toolCallId": "call_00_W4opPnhxjyRGy4iLlna43101",
+        "name": "getServerTime",
+        "arguments": "{}",
+        "durationMs": 0,
+        "outcome": "OK"
+      }
+    ]
+  },
+  "capturedAt": "2026-10-06T13:34:29.601Z"
+}

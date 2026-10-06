@@ -1,0 +1,62 @@
+{
+  "sessionId": "glm-conc",
+  "concurrency": 8,
+  "perRequest": [
+    {
+      "i": 1,
+      "status": 200,
+      "reply": "已记住",
+      "historySize": 9
+    },
+    {
+      "i": 2,
+      "status": 200,
+      "reply": "已记住",
+      "historySize": 0
+    },
+    {
+      "i": 3,
+      "status": 200,
+      "reply": "已记住",
+      "historySize": 14
+    },
+    {
+      "i": 4,
+      "status": 200,
+      "reply": "已记住",
+      "historySize": 13
+    },
+    {
+      "i": 5,
+      "status": 200,
+      "reply": "已记住",
+      "historySize": 12
+    },
+    {
+      "i": 6,
+      "status": 200,
+      "reply": "已记住",
+      "historySize": 15
+    },
+    {
+      "i": 7,
+      "status": 200,
+      "reply": "已记住",
+      "historySize": 9
+    },
+    {
+      "i": 8,
+      "status": 200,
+      "reply": "已记住",
+      "historySize": 11
+    }
+  ],
+  "historyLen": 15,
+  "userCount": 7,
+  "assistantCount": 8,
+  "expectedUserCount": 8,
+  "missingNumbers": [
+    "5"
+  ],
+  "duplicateUserTexts": []
+}

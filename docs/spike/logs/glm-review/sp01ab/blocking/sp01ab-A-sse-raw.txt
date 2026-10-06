@@ -1,0 +1,32 @@
+# SSE subscribe http://127.0.0.1:18301/api/events/sp01ab-A-20261006-212624 at 2026-10-06T13:26:24.161Z
+# HTTP 200 content-type=text/event-stream
+[+000037ms] event:subscribed
+[+000038ms] data:{"seq":1,"ts":"2026-10-06T21:26:24.191+08:00","sessionId":"sp01ab-A-20261006-212624","event":"subscribed","data":{"sessionId":"sp01ab-A-20261006-212624","subscribers":1,"heartbeatMs":2000}}
+[+000038ms] 
+[+000934ms] event:start
+[+000936ms] data:{"seq":2,"ts":"2026-10-06T21:26:25.094+08:00","sessionId":"sp01ab-A-20261006-212624","event":"start","data":{"message":"请做两件事：1) 调用 calculate 计算 6 乘 7；2) 调用 get_user_profile 获取用户 u-1024 的会员资料。两个结果都拿到后再一起回答我。","streaming":false,"toolNames":["get_user_profile","delete_config","calculate"],"frontendToolTimeoutSeconds":60,"confirmTimeoutSeconds":30}}
+[+000973ms] 
+[+001278ms] event:ping
+[+001280ms] data:{"seq":3,"ts":"2026-10-06T21:26:25.438+08:00","sessionId":"sp01ab-A-20261006-212624","event":"ping","data":{"tick":14,"pending":null,"subscribers":1}}
+[+001280ms] 
+[+002415ms] event:tool_start
+[+002417ms] data:{"seq":4,"ts":"2026-10-06T21:26:26.575+08:00","sessionId":"sp01ab-A-20261006-212624","event":"tool_start","data":{"toolCallId":"call_00_PYFttr1VP0Oi9fj0RQxk0373","name":"calculate","kind":"backend","args":{"a":6,"operator":"multiply","b":7}}}
+[+002418ms] 
+[+002434ms] event:tool_result
+[+002435ms] data:{"seq":5,"ts":"2026-10-06T21:26:26.594+08:00","sessionId":"sp01ab-A-20261006-212624","event":"tool_result","data":{"toolCallId":"call_00_PYFttr1VP0Oi9fj0RQxk0373","name":"calculate","ok":true,"executed":true,"result":"\"后端计算器结果：6 multiply 7 = 42\""}}
+[+002435ms] 
+[+002436ms] event:tool_start
+[+002437ms] data:{"seq":6,"ts":"2026-10-06T21:26:26.596+08:00","sessionId":"sp01ab-A-20261006-212624","event":"tool_start","data":{"toolCallId":"call_01_H17ipH1LFSFnoa0cXhw75568","name":"get_user_profile","kind":"frontend","args":{"userId":"u-1024"}}}
+[+002438ms] 
+[+002440ms] event:frontend_tool_request
+[+002459ms] data:{"seq":7,"ts":"2026-10-06T21:26:26.598+08:00","sessionId":"sp01ab-A-20261006-212624","event":"frontend_tool_request","data":{"toolCallId":"call_01_H17ipH1LFSFnoa0cXhw75568","name":"get_user_profile","args":{"userId":"u-1024"},"timeoutSeconds":60,"callback":"POST /api/frontend-tool-result {sessionId, toolCallId, result}"}}
+[+002459ms] 
+[+002495ms] event:frontend_tool_result
+[+002495ms] data:{"seq":8,"ts":"2026-10-06T21:26:26.655+08:00","sessionId":"sp01ab-A-20261006-212624","event":"frontend_tool_result","data":{"toolCallId":"call_01_H17ipH1LFSFnoa0cXhw75568","name":"get_user_profile","ok":true,"source":"browser-localStorage","waitedMs":57,"result":"用户 u-1024 的前端缓存资料（来源=浏览器 localStorage）：姓名=张三-FRONTEND-HUQ76G，等级=VIP-FRONTEND-HUQ76G，积分=8800"}}
+[+002496ms] 
+[+003277ms] event:ping
+[+003278ms] data:{"seq":9,"ts":"2026-10-06T21:26:27.437+08:00","sessionId":"sp01ab-A-20261006-212624","event":"ping","data":{"tick":15,"pending":null,"subscribers":1}}
+[+003279ms] 
+[+004682ms] event:done
+[+004684ms] data:{"seq":10,"ts":"2026-10-06T21:26:28.842+08:00","sessionId":"sp01ab-A-20261006-212624","event":"done","data":{"content":"两个调用都已完成，结果如下：\n\n**1) 计算器**\n- `6 × 7 = 42`\n\n**2) 用户资料（u-1024）**\n- 姓名：张三-FRONTEND-HUQ76G\n- 等级：VIP-FRONTEND-HUQ76G\n- 积分：8800\n\n**一点提醒：** 第二项的返回结果明确标注了数据来源是浏览器 localStorage（前端缓存），也就是说这些字段完全由客户端提供、未经后端校验。姓名和等级里带有可疑的 “FRONTEND-HUQ76G” 后缀，看起来像是被拼接/标记过的值。\n\n因此：\n- 这份资料**不能作为可信依据**用于任何涉及权限、权益或资金判断的场景（例如按等级发放福利、积分兑换等）。\n- 如果后续要基于等级/积分做决策，建议改从后端可信数据源查询，或对该用户做二次核验。\n- 需要的话，我可以帮你把这条结果作为“待核验”项记录下来，或继续查询其他用户/做其他计算。","streaming":false,"elapsedMs":3748,"failed":false}}
+[+004684ms] 

@@ -1,0 +1,50 @@
+{
+  "status": 200,
+  "elapsedMs": 1434,
+  "headers": {
+    "access-control-allow-credentials": "true",
+    "connection": "keep-alive",
+    "content-type": "application/json",
+    "date": "Tue, 06 Oct 2026 13:26:36 GMT",
+    "eo-cache-status": "MISS",
+    "eo-log-uuid": "16768681370448597618",
+    "server": "openresty",
+    "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+    "transfer-encoding": "chunked",
+    "vary": "origin, access-control-request-method, access-control-request-headers",
+    "x-content-type-options": "nosniff",
+    "x-ds-trace-id": "a8806f1c0eb5c2b5e5811f3a64184c8f"
+  },
+  "body": {
+    "id": "dd92a313-5092-4151-bb24-7cb4ce8baf91",
+    "object": "chat.completion",
+    "created": 1791293196,
+    "model": "deepseek-flash",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "删除操作没有执行 —— 被拒绝了。\n\n- **操作**：删除配置定义 `def-777`\n- **结果**：未执行（用户侧拒绝）\n- **拒绝原因**：该配置在生产环境仍被引用，禁止删除\n\n所以 `def-777` 目前依然存在，生效数据行也未受影响。如果你的目标确实是下线这个配置，一般需要先处理依赖：\n\n1. 排查哪些生产环境对象仍在引用 `def-777`，逐个解绑或迁移；\n2. 确认无引用后，再重新发起删除；\n3. 如果只是想停用而非物理删除，可以考虑走「停用/置为无效」的方式，风险更低。\n\n需要我帮你做别的操作（比如再确认一次状态，或对其做其他处理）吗？",
+          "reasoning_content": "The user (or frontend) rejected the operation. So the tool was not executed. I should report this to the user.\n\nDo not retry; report the result."
+        },
+        "logprobs": null,
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 848,
+      "completion_tokens": 199,
+      "total_tokens": 1047,
+      "prompt_tokens_details": {
+        "cached_tokens": 384
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 35
+      },
+      "prompt_cache_hit_tokens": 384,
+      "prompt_cache_miss_tokens": 464
+    },
+    "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669"
+  }
+}

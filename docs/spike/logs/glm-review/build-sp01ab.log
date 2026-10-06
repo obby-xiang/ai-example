@@ -1,0 +1,36 @@
+[INFO] Scanning for projects...
+[INFO] 
+[INFO] ------------< com.example.spike:sp01ab-frontend-tool-hitl >-------------
+[INFO] Building sp01ab-frontend-tool-hitl 0.0.1-SNAPSHOT
+[INFO]   from pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO] 
+[INFO] --- resources:3.3.1:resources (default-resources) @ sp01ab-frontend-tool-hitl ---
+[INFO] Copying 1 resource from src\main\resources to target\classes
+[INFO] Copying 0 resource from src\main\resources to target\classes
+[INFO] 
+[INFO] --- compiler:3.14.1:compile (default-compile) @ sp01ab-frontend-tool-hitl ---
+[INFO] Recompiling the module because of changed source code.
+[INFO] Compiling 13 source files with javac [debug parameters release 21] to target\classes
+[INFO] 
+[INFO] --- resources:3.3.1:testResources (default-testResources) @ sp01ab-frontend-tool-hitl ---
+[INFO] skip non existing resourceDirectory <MAIN_V2>\spike\sp01ab\src\test\resources
+[INFO] 
+[INFO] --- compiler:3.14.1:testCompile (default-testCompile) @ sp01ab-frontend-tool-hitl ---
+[INFO] No sources to compile
+[INFO] 
+[INFO] --- surefire:3.5.5:test (default-test) @ sp01ab-frontend-tool-hitl ---
+[INFO] Tests are skipped.
+[INFO] 
+[INFO] --- jar:3.4.2:jar (default-jar) @ sp01ab-frontend-tool-hitl ---
+[INFO] Building jar: <MAIN_V2>\spike\sp01ab\target\sp01ab-frontend-tool-hitl-0.0.1-SNAPSHOT.jar
+[INFO] 
+[INFO] --- spring-boot:3.5.14:repackage (repackage) @ sp01ab-frontend-tool-hitl ---
+[INFO] Replacing main artifact <MAIN_V2>\spike\sp01ab\target\sp01ab-frontend-tool-hitl-0.0.1-SNAPSHOT.jar with repackaged archive, adding nested dependencies in BOOT-INF/.
+[INFO] The original artifact has been renamed to <MAIN_V2>\spike\sp01ab\target\sp01ab-frontend-tool-hitl-0.0.1-SNAPSHOT.jar.original
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD SUCCESS
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  16.036 s
+[INFO] Finished at: 2026-10-06T21:22:08+08:00
+[INFO] ------------------------------------------------------------------------

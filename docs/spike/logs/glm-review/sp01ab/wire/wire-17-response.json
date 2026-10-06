@@ -1,0 +1,61 @@
+{
+  "status": 200,
+  "elapsedMs": 1395,
+  "headers": {
+    "access-control-allow-credentials": "true",
+    "connection": "keep-alive",
+    "content-type": "application/json",
+    "date": "Tue, 06 Oct 2026 13:29:05 GMT",
+    "eo-cache-status": "MISS",
+    "eo-log-uuid": "18119855639165396212",
+    "server": "openresty",
+    "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+    "transfer-encoding": "chunked",
+    "vary": "origin, access-control-request-method, access-control-request-headers",
+    "x-content-type-options": "nosniff",
+    "x-ds-trace-id": "15eaeb2dcf568ad12b40e801bf7948b8"
+  },
+  "body": {
+    "id": "84b97dbf-19dc-4eb9-bc6c-a9028fa12001",
+    "object": "chat.completion",
+    "created": 1791293345,
+    "model": "deepseek-flash",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "The user asks to delete config def-777. This is a destructive operation. The rules say I must call the tool. There's no rule saying I need to confirm. Let me just call it.\n\nWait — should I confirm first? The system rules say I must call the tool when asked. The user explicitly says \"这是一次真实的删除操作，按工具规则执行\". So call delete_config.",
+          "tool_calls": [
+            {
+              "index": 0,
+              "id": "call_00_YsDHFrR7KhMwDDfUJt4O5521",
+              "type": "function",
+              "function": {
+                "name": "delete_config",
+                "arguments": "{\"code\": \"def-777\"}"
+              }
+            }
+          ]
+        },
+        "logprobs": null,
+        "finish_reason": "tool_calls"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 719,
+      "completion_tokens": 121,
+      "total_tokens": 840,
+      "prompt_tokens_details": {
+        "cached_tokens": 512
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 81
+      },
+      "prompt_cache_hit_tokens": 512,
+      "prompt_cache_miss_tokens": 207
+    },
+    "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669"
+  }
+}

@@ -1,0 +1,74 @@
+=== V-c5 连续 7 轮带工具调用，全程不得出现 400 / 异常 ===
+
+system prompt: 你是工具调用验证助手。硬性规则：每一轮回答前都必须至少调用一次工具（getServerTime 或 calculate），禁止不调用工具就直接回答。回答用中文。
+
+--- 第 1 轮 ---
+POST http://127.0.0.1:18302/api/chat
+  request  : {"sessionId":"vc5-tools","message":"第 1 轮：请调用 getServerTime 查看服务器当前时间，然后告诉我结果。","system":"你是工具调用验证助手。硬性规则：每一轮回答前都必须至少调用一次工具（getServerTime 或 calculate），禁止不调用工具就直接回答。回答用中文。"}
+  HTTP     : 200  (2726 ms)
+  response : {"sessionId":"vc5-tools","reply":"服务器当前时间为 **2026-10-06 21:23:36**（来自 getServerTime 的返回值）。\n\n第 1 轮结果确认：工具已成功调用并返回数据，无需额外计算。如需继续，第 2 轮请下达新指令。","model":"deepseek-flash","historySize":2,"toolCallsSoFar":1}
+
+  本轮新增工具调用次数: 1
+
+--- 第 2 轮 ---
+POST http://127.0.0.1:18302/api/chat
+  request  : {"sessionId":"vc5-tools","message":"第 2 轮：请调用 calculate 计算 123 加 456，然后告诉我结果。","system":"你是工具调用验证助手。硬性规则：每一轮回答前都必须至少调用一次工具（getServerTime 或 calculate），禁止不调用工具就直接回答。回答用中文。"}
+  HTTP     : 200  (1860 ms)
+  response : {"sessionId":"vc5-tools","reply":"第 2 轮结果：**123 + 456 = 579**（工具返回 123.0 add 456.0 = 579.0）。\n\n计算器已成功调用并返回结果，验证通过。如需继续，请下达第 3 轮指令。","model":"deepseek-flash","historySize":4,"toolCallsSoFar":2}
+
+  本轮新增工具调用次数: 1
+
+--- 第 3 轮 ---
+POST http://127.0.0.1:18302/api/chat
+  request  : {"sessionId":"vc5-tools","message":"第 3 轮：请先调用 getServerTime，再调用 calculate 计算 88 乘 3，然后一起告诉我结果。","system":"你是工具调用验证助手。硬性规则：每一轮回答前都必须至少调用一次工具（getServerTime 或 calculate），禁止不调用工具就直接回答。回答用中文。"}
+  HTTP     : 200  (1895 ms)
+  response : {"sessionId":"vc5-tools","reply":"第 3 轮结果（两个工具已并行调用完成）：\n\n1. **getServerTime**：服务器当前时间为 **2026-10-06 21:23:41**\n2. **calculate**：88 × 3 = **264**（工具返回 88.0 multiply 3.0 = 264.0）\n\n验证通过，如需要请下达第 4 轮指令。","model":"deepseek-flash","historySize":6,"toolCallsSoFar":4}
+
+  本轮新增工具调用次数: 2
+
+--- 第 4 轮 ---
+POST http://127.0.0.1:18302/api/chat
+  request  : {"sessionId":"vc5-tools","message":"第 4 轮：请调用 calculate 计算 1000 减 250，然后告诉我结果。","system":"你是工具调用验证助手。硬性规则：每一轮回答前都必须至少调用一次工具（getServerTime 或 calculate），禁止不调用工具就直接回答。回答用中文。"}
+  HTTP     : 200  (1716 ms)
+  response : {"sessionId":"vc5-tools","reply":"第 4 轮结果：**1000 − 250 = 750**（工具返回 1000.0 subtract 250.0 = 750.0）。\n\n验证通过。如需继续，请下达第 5 轮指令。","model":"deepseek-flash","historySize":8,"toolCallsSoFar":5}
+
+  本轮新增工具调用次数: 1
+
+--- 第 5 轮 ---
+POST http://127.0.0.1:18302/api/chat
+  request  : {"sessionId":"vc5-tools","message":"第 5 轮：请调用 calculate 计算 144 除以 12，然后告诉我结果。","system":"你是工具调用验证助手。硬性规则：每一轮回答前都必须至少调用一次工具（getServerTime 或 calculate），禁止不调用工具就直接回答。回答用中文。"}
+  HTTP     : 200  (1723 ms)
+  response : {"sessionId":"vc5-tools","reply":"第 5 轮结果：**144 ÷ 12 = 12**（工具返回 144.0 divide 12.0 = 12.0）。\n\n验证通过。如需继续，请下达第 6 轮指令。","model":"deepseek-flash","historySize":10,"toolCallsSoFar":6}
+
+  本轮新增工具调用次数: 1
+
+--- 第 6 轮 ---
+POST http://127.0.0.1:18302/api/chat
+  request  : {"sessionId":"vc5-tools","message":"第 6 轮：请再次调用 getServerTime，然后告诉我结果。","system":"你是工具调用验证助手。硬性规则：每一轮回答前都必须至少调用一次工具（getServerTime 或 calculate），禁止不调用工具就直接回答。回答用中文。"}
+  HTTP     : 200  (2180 ms)
+  response : {"sessionId":"vc5-tools","reply":"第 6 轮结果：**getServerTime** 返回服务器当前时间为 **2026-10-06 21:23:47**。\n\n验证通过。如需继续，请下达第 7 轮指令。","model":"deepseek-flash","historySize":12,"toolCallsSoFar":7}
+
+  本轮新增工具调用次数: 1
+
+--- 第 7 轮 ---
+POST http://127.0.0.1:18302/api/chat
+  request  : {"sessionId":"vc5-tools","message":"第 7 轮：请调用 calculate 计算 9 乘 9，并说明本轮是第几轮对话。","system":"你是工具调用验证助手。硬性规则：每一轮回答前都必须至少调用一次工具（getServerTime 或 calculate），禁止不调用工具就直接回答。回答用中文。"}
+  HTTP     : 200  (1756 ms)
+  response : {"sessionId":"vc5-tools","reply":"第 7 轮结果：\n\n1. **本轮对话为第 7 轮**（用户消息以「第 7 轮」开头，共 7 轮指令）。\n2. **calculate**：9 × 9 = **81**（工具返回 9.0 multiply 9.0 = 81.0）。\n\n验证通过。如需继续，请下达第 8 轮指令。","model":"deepseek-flash","historySize":14,"toolCallsSoFar":8}
+
+  本轮新增工具调用次数: 1
+
+GET /api/dev/tool-stats（7 轮累计）
+HTTP 200  {"total":8,"getServerTime":3,"calculate":5}
+
+7 轮 HTTP 状态序列: 200, 200, 200, 200, 200, 200, 200
+是否出现 400: 否
+是否出现非 200: 否
+7 轮新增工具调用总次数: 8
+
+$ memurai-cli LLEN chat:mem:vc5-tools
+14
+
+$ memurai-cli TTL chat:mem:vc5-tools
+21600
+

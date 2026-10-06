@@ -1,0 +1,132 @@
+{
+  "case": "vd1-guarded-tooldup",
+  "description": "guarded 策略 + 第 2 次上游请求（工具执行后的最终作答）已产出 1 个正文 delta 后静默：验证重试是否重放工具副作用",
+  "fault": {
+    "mode": "stall-after-content",
+    "contentEvents": 1,
+    "stallMs": 12000,
+    "onlyRequestIndex": 2
+  },
+  "sse": {
+    "eventCounts": {
+      "start": 1,
+      "error": 1
+    },
+    "eventSequence": [
+      "start@6ms",
+      "error@7595ms"
+    ],
+    "deltaCount": 0,
+    "concatenatedDeltaText": "",
+    "concatenatedDeltaLen": 0,
+    "duplicatedPrefixLen": 0,
+    "duplicatedPrefixLikely": false,
+    "terminalEvent": "error",
+    "terminalData": {
+      "code": "UPSTREAM_SILENT_TIMEOUT_AFTER_TOOL_SIDE_EFFECT",
+      "message": "模型服务在约定时间内没有任何事件（上游静默），本轮流已终止。",
+      "rawReason": "TimeoutException: Did not observe any item or terminal signal within first signal from a Publisher in 'handle' (and no fallback has been configured)",
+      "attempts": 1,
+      "partial": false,
+      "toolSideEffect": true,
+      "emittedChars": 0,
+      "elapsedMs": 7590
+    },
+    "elapsedMs": 7597,
+    "clientAborted": false,
+    "streamError": null
+  },
+  "sessionState": {
+    "sessionId": "vd1-guarded-tooldup",
+    "runId": "vd1-guarded-tooldup#1791293566000",
+    "terminal": "FAILED",
+    "cancelled": false,
+    "clientAborted": false,
+    "emittedAny": false,
+    "deltas": 0,
+    "emittedChars": 0,
+    "content": "",
+    "attempts": 1,
+    "elapsedMs": 7590,
+    "attemptRecords": [
+      {
+        "attempt": 1,
+        "outcome": "ERROR",
+        "costMs": 7588,
+        "emittedAnythingBefore": false,
+        "reason": "TimeoutException: Did not observe any item or terminal signal within first signal from a Publisher in 'handle' (and no fallback has been configured)"
+      }
+    ],
+    "toolCallItems": [],
+    "cancelRegistryRegistered": false,
+    "cancelFlagValue": false,
+    "refSubscriptions": 0,
+    "toolExecutionsForRun": [
+      {
+        "seq": 2,
+        "tsMs": 1791293566796,
+        "source": "INTERNAL_LOOP",
+        "runId": "vd1-guarded-tooldup#1791293566000",
+        "toolCallId": null,
+        "name": "getServerTime",
+        "arguments": "{}",
+        "durationMs": 0,
+        "outcome": "OK"
+      }
+    ],
+    "found": true
+  },
+  "toolExecLog": [
+    {
+      "seq": 2,
+      "tsMs": 1791293566796,
+      "source": "INTERNAL_LOOP",
+      "runId": "vd1-guarded-tooldup#1791293566000",
+      "toolCallId": null,
+      "name": "getServerTime",
+      "arguments": "{}",
+      "durationMs": 0,
+      "outcome": "OK"
+    }
+  ],
+  "wire": [
+    {
+      "seq": 6,
+      "requestIndex": 1,
+      "tsMs": 1791293566011,
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "mode": "stall-after-content",
+      "applied": false,
+      "status": 200,
+      "relayedBytes": 0,
+      "chunkCount": 0,
+      "outcome": "PASSTHROUGH_COMPLETE",
+      "headerBytes": 0,
+      "requestBytes": 1254,
+      "upstreamHeadersAtMs": 1791293566222,
+      "endTsMs": 1791293566789,
+      "durationMs": 778
+    },
+    {
+      "seq": 7,
+      "requestIndex": 2,
+      "tsMs": 1791293566811,
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "mode": "stall-after-content",
+      "applied": true,
+      "status": 200,
+      "relayedBytes": 622,
+      "chunkCount": 2,
+      "outcome": null,
+      "headerBytes": 0,
+      "requestBytes": 1541,
+      "upstreamHeadersAtMs": 1791293567047,
+      "relayedEvents": 2,
+      "contentEvents": 1,
+      "stalledAtMs": 1791293567589
+    }
+  ],
+  "capturedAt": "2026-10-06T13:32:53.609Z"
+}

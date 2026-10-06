@@ -1,0 +1,61 @@
+{
+  "status": 200,
+  "elapsedMs": 1094,
+  "headers": {
+    "access-control-allow-credentials": "true",
+    "connection": "keep-alive",
+    "content-type": "application/json",
+    "date": "Tue, 06 Oct 2026 13:26:38 GMT",
+    "eo-cache-status": "MISS",
+    "eo-log-uuid": "11160778921985696381",
+    "server": "openresty",
+    "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+    "transfer-encoding": "chunked",
+    "vary": "origin, access-control-request-method, access-control-request-headers",
+    "x-content-type-options": "nosniff",
+    "x-ds-trace-id": "a691d674e1174f7490b8fc0fee73ac77"
+  },
+  "body": {
+    "id": "b2f277e1-034d-4703-a33e-33d51e7c4392",
+    "object": "chat.completion",
+    "created": 1791293198,
+    "model": "deepseek-flash",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "The user asks to delete config def-777. This is a destructive operation. Rules say I must call the tool, not fabricate. The user explicitly requests it and acknowledges it's real. I should call delete_config.\n\nShould I ask for confirmation? The rule says: user requests must be executed via tools; when a message contains multiple things, batch calls. Here just one. It's destructive but user explicitly confirmed. Let's call.",
+          "tool_calls": [
+            {
+              "index": 0,
+              "id": "call_00_bS9Txod1D7OVhfe13EFV6098",
+              "type": "function",
+              "function": {
+                "name": "delete_config",
+                "arguments": "{\"code\": \"def-777\"}"
+              }
+            }
+          ]
+        },
+        "logprobs": null,
+        "finish_reason": "tool_calls"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 719,
+      "completion_tokens": 129,
+      "total_tokens": 848,
+      "prompt_tokens_details": {
+        "cached_tokens": 512
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 89
+      },
+      "prompt_cache_hit_tokens": 512,
+      "prompt_cache_miss_tokens": 207
+    },
+    "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669"
+  }
+}

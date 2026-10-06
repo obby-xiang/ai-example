@@ -1,0 +1,50 @@
+{
+  "status": 200,
+  "elapsedMs": 2160,
+  "headers": {
+    "access-control-allow-credentials": "true",
+    "connection": "keep-alive",
+    "content-type": "application/json",
+    "date": "Tue, 06 Oct 2026 13:27:10 GMT",
+    "eo-cache-status": "MISS",
+    "eo-log-uuid": "15163500266443178097",
+    "server": "openresty",
+    "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+    "transfer-encoding": "chunked",
+    "vary": "origin, access-control-request-method, access-control-request-headers",
+    "x-content-type-options": "nosniff",
+    "x-ds-trace-id": "09fa0b1547c452b83443bb46994dab4f"
+  },
+  "body": {
+    "id": "2d079a7c-1810-4ac8-b4b9-20f47145c462",
+    "object": "chat.completion",
+    "created": 1791293230,
+    "model": "deepseek-flash",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "我尝试执行了删除操作，但结果如下：\n\n- 工具调用：`delete_config(code=\"def-777\")`\n- 返回结果：**确认等待超过 30 秒，系统已自动取消该操作（工具未执行）**\n\n也就是说，**`def-777` 并没有被删除**，配置及其生效数据行仍然存在。这不代表删除失败于数据层面，而是该破坏性操作需要的一次确认在 30 秒内没有完成，被系统自动撤销了。\n\n请你再确认一次：是否确定要删除 `def-777` 及其连带生效数据？你回复确认后，我立刻重新发起调用，并请留意在 30 秒内完成确认，否则可能再次超时取消。",
+          "reasoning_content": "The result says the operation was cancelled due to timeout, tool not executed. I should report that faithfully.\n\nShould I retry? The user asked to delete. The tool returned that it was auto-cancelled. I should inform the user and ask if they want to retry. I shouldn't fabricate success.\n\nMaybe I could call again? The message says \"确认等待超过 30 秒，系统已自动取消该操作（工具未执行）\" — a confirmation timeout. I could retry once, but likely same result. Better to report and ask user to confirm again.\n\nActually, retrying might be reasonable — the user asked. But if it times out again, same. I'll report honestly and offer to retry."
+        },
+        "logprobs": null,
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 759,
+      "completion_tokens": 307,
+      "total_tokens": 1066,
+      "prompt_tokens_details": {
+        "cached_tokens": 384
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 151
+      },
+      "prompt_cache_hit_tokens": 384,
+      "prompt_cache_miss_tokens": 375
+    },
+    "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669"
+  }
+}

@@ -1,0 +1,3 @@
+first  -> 202 {"sessionId":"glm-conc-1791293422398","accepted":true,"streaming":false,"message":"请删除配置 def-777（这是一次真实的删除操作，按工具规则执行）。","toolNames":["calculate","get_
+second -> 409 {"error":"session already running"}
+confirm-> 200 {"accepted":true,"approved":false,"toolCallId":"call_00_7OcBXU2HHhClRniUgnal0834","toolName":"delete_config"}

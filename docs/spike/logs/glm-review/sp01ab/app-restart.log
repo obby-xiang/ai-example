@@ -1,0 +1,22 @@
+
+  .   ____          _            __ _ _
+ /\\ / ___'_ __ _ _(_)_ __  __ _ \ \ \ \
+( ( )\___ | '_ | '_| | '_ \/ _` | \ \ \ \
+ \\/  ___)| |_)| | | | | || (_| |  ) ) ) )
+  '  |____| .__|_| |_|_| |_\__, | / / / /
+ =========|_|==============|___/=/_/_/_/
+
+ :: Spring Boot ::               (v3.5.14)
+
+2026-10-06T21:29:52.730+08:00  INFO 8928 --- [sp01ab-frontend-tool-hitl] [           main] com.example.spike.SpikeApplication       : Starting SpikeApplication v0.0.1-SNAPSHOT using Java 21.0.12 with PID 8928 (<MAIN_V2>\spike\sp01ab\target\sp01ab-frontend-tool-hitl-0.0.1-SNAPSHOT.jar started by <USER> in <GLM_REVIEW_WORK>\sp01ab)
+2026-10-06T21:29:52.734+08:00  INFO 8928 --- [sp01ab-frontend-tool-hitl] [           main] com.example.spike.SpikeApplication       : No active profile set, falling back to 1 default profile: "default"
+2026-10-06T21:29:53.768+08:00  INFO 8928 --- [sp01ab-frontend-tool-hitl] [           main] o.s.b.w.embedded.tomcat.TomcatWebServer  : Tomcat initialized with port 18301 (http)
+2026-10-06T21:29:53.781+08:00  INFO 8928 --- [sp01ab-frontend-tool-hitl] [           main] o.apache.catalina.core.StandardService   : Starting service [Tomcat]
+2026-10-06T21:29:53.782+08:00  INFO 8928 --- [sp01ab-frontend-tool-hitl] [           main] o.apache.catalina.core.StandardEngine    : Starting Servlet engine: [Apache Tomcat/10.1.54]
+2026-10-06T21:29:53.812+08:00  INFO 8928 --- [sp01ab-frontend-tool-hitl] [           main] o.a.c.c.C.[Tomcat].[localhost].[/]       : Initializing Spring embedded WebApplicationContext
+2026-10-06T21:29:53.813+08:00  INFO 8928 --- [sp01ab-frontend-tool-hitl] [           main] w.s.c.ServletWebServerApplicationContext : Root WebApplicationContext: initialization completed in 998 ms
+2026-10-06T21:29:54.725+08:00  INFO 8928 --- [sp01ab-frontend-tool-hitl] [           main] o.s.b.w.embedded.tomcat.TomcatWebServer  : Tomcat started on port 18301 (http) with context path '/'
+2026-10-06T21:29:54.745+08:00  INFO 8928 --- [sp01ab-frontend-tool-hitl] [           main] com.example.spike.SpikeApplication       : Started SpikeApplication in 2.511 seconds (process running for 2.936)
+2026-10-06T21:30:11.992+08:00  INFO 8928 --- [sp01ab-frontend-tool-hitl] [io-18301-exec-1] o.a.c.c.C.[Tomcat].[localhost].[/]       : Initializing Spring DispatcherServlet 'dispatcherServlet'
+2026-10-06T21:30:11.992+08:00  INFO 8928 --- [sp01ab-frontend-tool-hitl] [io-18301-exec-1] o.s.web.servlet.DispatcherServlet        : Initializing Servlet 'dispatcherServlet'
+2026-10-06T21:30:11.993+08:00  INFO 8928 --- [sp01ab-frontend-tool-hitl] [io-18301-exec-1] o.s.web.servlet.DispatcherServlet        : Completed initialization in 0 ms

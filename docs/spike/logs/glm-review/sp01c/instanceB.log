@@ -1,0 +1,25 @@
+
+  .   ____          _            __ _ _
+ /\\ / ___'_ __ _ _(_)_ __  __ _ \ \ \ \
+( ( )\___ | '_ | '_| | '_ \/ _` | \ \ \ \
+ \\/  ___)| |_)| | | | | || (_| |  ) ) ) )
+  '  |____| .__|_| |_|_| |_\__, | / / / /
+ =========|_|==============|___/=/_/_/_/
+
+ :: Spring Boot ::               (v3.5.14)
+
+2026-10-06T21:22:31.998+08:00  INFO 10192 --- [sp01c-redis-chat-memory] [           main] com.example.spike.SpikeApplication       : Starting SpikeApplication v0.0.1-SNAPSHOT using Java 21.0.12 with PID 10192 (<GLM_REVIEW_WORK>\sp01c\sp01c.jar started by <USER> in <GLM_REVIEW_WORK>\sp01c)
+2026-10-06T21:22:32.004+08:00  INFO 10192 --- [sp01c-redis-chat-memory] [           main] com.example.spike.SpikeApplication       : No active profile set, falling back to 1 default profile: "default"
+2026-10-06T21:22:33.136+08:00  INFO 10192 --- [sp01c-redis-chat-memory] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Multiple Spring Data modules found, entering strict repository configuration mode
+2026-10-06T21:22:33.139+08:00  INFO 10192 --- [sp01c-redis-chat-memory] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Bootstrapping Spring Data Redis repositories in DEFAULT mode.
+2026-10-06T21:22:33.168+08:00  INFO 10192 --- [sp01c-redis-chat-memory] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Finished Spring Data repository scanning in 10 ms. Found 0 Redis repository interfaces.
+2026-10-06T21:22:33.622+08:00  INFO 10192 --- [sp01c-redis-chat-memory] [           main] o.s.b.w.embedded.tomcat.TomcatWebServer  : Tomcat initialized with port 18312 (http)
+2026-10-06T21:22:33.636+08:00  INFO 10192 --- [sp01c-redis-chat-memory] [           main] o.apache.catalina.core.StandardService   : Starting service [Tomcat]
+2026-10-06T21:22:33.637+08:00  INFO 10192 --- [sp01c-redis-chat-memory] [           main] o.apache.catalina.core.StandardEngine    : Starting Servlet engine: [Apache Tomcat/10.1.54]
+2026-10-06T21:22:33.667+08:00  INFO 10192 --- [sp01c-redis-chat-memory] [           main] o.a.c.c.C.[Tomcat].[localhost].[/]       : Initializing Spring embedded WebApplicationContext
+2026-10-06T21:22:33.668+08:00  INFO 10192 --- [sp01c-redis-chat-memory] [           main] w.s.c.ServletWebServerApplicationContext : Root WebApplicationContext: initialization completed in 1559 ms
+2026-10-06T21:22:38.547+08:00  INFO 10192 --- [sp01c-redis-chat-memory] [           main] o.s.b.w.embedded.tomcat.TomcatWebServer  : Tomcat started on port 18312 (http) with context path '/'
+2026-10-06T21:22:38.588+08:00  INFO 10192 --- [sp01c-redis-chat-memory] [           main] com.example.spike.SpikeApplication       : Started SpikeApplication in 7.106 seconds (process running for 7.803)
+2026-10-06T21:22:56.720+08:00  INFO 10192 --- [sp01c-redis-chat-memory] [io-18312-exec-1] o.a.c.c.C.[Tomcat].[localhost].[/]       : Initializing Spring DispatcherServlet 'dispatcherServlet'
+2026-10-06T21:22:56.720+08:00  INFO 10192 --- [sp01c-redis-chat-memory] [io-18312-exec-1] o.s.web.servlet.DispatcherServlet        : Initializing Servlet 'dispatcherServlet'
+2026-10-06T21:22:56.721+08:00  INFO 10192 --- [sp01c-redis-chat-memory] [io-18312-exec-1] o.s.web.servlet.DispatcherServlet        : Completed initialization in 1 ms

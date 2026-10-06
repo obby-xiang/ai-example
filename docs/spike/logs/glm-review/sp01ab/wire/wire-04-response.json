@@ -1,0 +1,50 @@
+{
+  "status": 200,
+  "elapsedMs": 1452,
+  "headers": {
+    "access-control-allow-credentials": "true",
+    "connection": "keep-alive",
+    "content-type": "application/json",
+    "date": "Tue, 06 Oct 2026 13:26:31 GMT",
+    "eo-cache-status": "MISS",
+    "eo-log-uuid": "18234498431819176909",
+    "server": "openresty",
+    "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+    "transfer-encoding": "chunked",
+    "vary": "origin, access-control-request-method, access-control-request-headers",
+    "x-content-type-options": "nosniff",
+    "x-ds-trace-id": "45b7fef4abdd3d223c47a8808da5f789"
+  },
+  "body": {
+    "id": "6d5a38f9-2a85-4562-b131-dd71a6de415c",
+    "object": "chat.completion",
+    "created": 1791293191,
+    "model": "deepseek-flash",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "已执行完成，结果如下：\n\n- **配置定义**：`def-777` 已删除\n- **连带影响**：该配置下的 **3 行生效数据** 一并被删除（不可恢复）\n\n提醒一下：这是破坏性操作，配置定义和其生效数据均已从系统中移除，如果需要恢复，只能通过重新创建配置定义并重新录入生效数据来重建。\n\n如果你其实想保留数据、只是想让配置「失效」而不是删除，后续可以告诉我，我可以帮你确认是否有停用/下线之类的替代方式。",
+          "reasoning_content": "The deletion succeeded. Report result. Note it's destructive, 3 rows deleted."
+        },
+        "logprobs": null,
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 869,
+      "completion_tokens": 131,
+      "total_tokens": 1000,
+      "prompt_tokens_details": {
+        "cached_tokens": 384
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 17
+      },
+      "prompt_cache_hit_tokens": 384,
+      "prompt_cache_miss_tokens": 485
+    },
+    "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669"
+  }
+}

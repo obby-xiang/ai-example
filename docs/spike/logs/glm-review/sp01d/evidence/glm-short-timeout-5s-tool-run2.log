@@ -1,0 +1,42 @@
+{
+ "events": [
+  {
+   "e": "start",
+   "d": "{\"sessionId\":\"glm-short-timeout\",\"runId\":\"glm-short-timeout#1791293858794\",\"strategy\":\"guarded\",\"firstEventTimeoutMs\":5000,\"interEventTimeoutMs\":2000,\"maxAttempts\":2,\"totalBudgetMs\":20000}"
+  },
+  {
+   "e": "error",
+   "d": "{\"code\":\"UPSTREAM_SILENT_TIMEOUT_AFTER_TOOL_SIDE_EFFECT\",\"message\":\"模型服务在约定时间内没有任何事件（上游静默），本轮流已终止。\",\"rawReason\":\"TimeoutException: Did not observe any item or terminal signal within first signal from a Publisher in 'hand"
+  }
+ ],
+ "state": {
+  "terminal": "FAILED",
+  "attempts": 1,
+  "emittedChars": 0,
+  "elapsedMs": 3199
+ },
+ "toolLog": [
+  {
+   "seq": 1,
+   "tsMs": 1791293833439,
+   "source": "INTERNAL_LOOP",
+   "runId": "glm-short-timeout#1791293829745",
+   "toolCallId": null,
+   "name": "longTask",
+   "arguments": "{\"seconds\":5,\"cooperative\":false}",
+   "durationMs": 1989,
+   "outcome": "OK"
+  },
+  {
+   "seq": 2,
+   "tsMs": 1791293861991,
+   "source": "INTERNAL_LOOP",
+   "runId": "glm-short-timeout#1791293858794",
+   "toolCallId": null,
+   "name": "longTask",
+   "arguments": "{\"seconds\":5,\"cooperative\":false}",
+   "durationMs": 2001,
+   "outcome": "OK"
+  }
+ ]
+}

@@ -1,0 +1,74 @@
+# SSE subscribe http://127.0.0.1:18301/api/events/sp01ab-D-20261006-212637 at 2026-10-06T13:26:37.995Z
+# HTTP 200 content-type=text/event-stream
+[+000003ms] event:subscribed
+[+000003ms] data:{"seq":1,"ts":"2026-10-06T21:26:37.997+08:00","sessionId":"sp01ab-D-20261006-212637","event":"subscribed","data":{"sessionId":"sp01ab-D-20261006-212637","subscribers":1,"heartbeatMs":2000}}
+[+000004ms] 
+[+000811ms] event:start
+[+000812ms] data:{"seq":2,"ts":"2026-10-06T21:26:38.805+08:00","sessionId":"sp01ab-D-20261006-212637","event":"start","data":{"message":"请删除配置 def-777（这是一次真实的删除操作，按工具规则执行）。","streaming":false,"toolNames":["get_user_profile","delete_config","calculate"],"frontendToolTimeoutSeconds":60,"confirmTimeoutSeconds":30}}
+[+000847ms] 
+[+001443ms] event:ping
+[+001444ms] data:{"seq":3,"ts":"2026-10-06T21:26:39.438+08:00","sessionId":"sp01ab-D-20261006-212637","event":"ping","data":{"tick":21,"pending":null,"subscribers":1}}
+[+001444ms] 
+[+001912ms] event:tool_start
+[+001913ms] data:{"seq":4,"ts":"2026-10-06T21:26:39.906+08:00","sessionId":"sp01ab-D-20261006-212637","event":"tool_start","data":{"toolCallId":"call_00_bS9Txod1D7OVhfe13EFV6098","name":"delete_config","kind":"sensitive","args":{"code":"def-777"}}}
+[+001913ms] 
+[+001913ms] event:confirm_request
+[+001914ms] data:{"seq":5,"ts":"2026-10-06T21:26:39.907+08:00","sessionId":"sp01ab-D-20261006-212637","event":"confirm_request","data":{"toolCallId":"call_00_bS9Txod1D7OVhfe13EFV6098","name":"delete_config","args":{"code":"def-777"},"summary":"{code=def-777}","timeoutSeconds":30,"callback":"POST /api/confirm {sessionId, toolCallId, approved, reason}"}}
+[+001914ms] 
+[+003444ms] event:ping
+[+003445ms] data:{"seq":6,"ts":"2026-10-06T21:26:41.439+08:00","sessionId":"sp01ab-D-20261006-212637","event":"ping","data":{"tick":22,"pending":"confirm:delete_config","subscribers":1}}
+[+003445ms] 
+[+005443ms] event:ping
+[+005444ms] data:{"seq":7,"ts":"2026-10-06T21:26:43.438+08:00","sessionId":"sp01ab-D-20261006-212637","event":"ping","data":{"tick":23,"pending":"confirm:delete_config","subscribers":1}}
+[+005444ms] 
+[+007444ms] event:ping
+[+007445ms] data:{"seq":8,"ts":"2026-10-06T21:26:45.438+08:00","sessionId":"sp01ab-D-20261006-212637","event":"ping","data":{"tick":24,"pending":"confirm:delete_config","subscribers":1}}
+[+007446ms] 
+[+009444ms] event:ping
+[+009445ms] data:{"seq":9,"ts":"2026-10-06T21:26:47.439+08:00","sessionId":"sp01ab-D-20261006-212637","event":"ping","data":{"tick":25,"pending":"confirm:delete_config","subscribers":1}}
+[+009445ms] 
+[+011444ms] event:ping
+[+011444ms] data:{"seq":10,"ts":"2026-10-06T21:26:49.438+08:00","sessionId":"sp01ab-D-20261006-212637","event":"ping","data":{"tick":26,"pending":"confirm:delete_config","subscribers":1}}
+[+011445ms] 
+[+013445ms] event:ping
+[+013445ms] data:{"seq":11,"ts":"2026-10-06T21:26:51.439+08:00","sessionId":"sp01ab-D-20261006-212637","event":"ping","data":{"tick":27,"pending":"confirm:delete_config","subscribers":1}}
+[+013446ms] 
+[+015444ms] event:ping
+[+015445ms] data:{"seq":12,"ts":"2026-10-06T21:26:53.438+08:00","sessionId":"sp01ab-D-20261006-212637","event":"ping","data":{"tick":28,"pending":"confirm:delete_config","subscribers":1}}
+[+015445ms] 
+[+017445ms] event:ping
+[+017446ms] data:{"seq":13,"ts":"2026-10-06T21:26:55.439+08:00","sessionId":"sp01ab-D-20261006-212637","event":"ping","data":{"tick":29,"pending":"confirm:delete_config","subscribers":1}}
+[+017447ms] 
+[+019444ms] event:ping
+[+019444ms] data:{"seq":14,"ts":"2026-10-06T21:26:57.438+08:00","sessionId":"sp01ab-D-20261006-212637","event":"ping","data":{"tick":30,"pending":"confirm:delete_config","subscribers":1}}
+[+019444ms] 
+[+021444ms] event:ping
+[+021445ms] data:{"seq":15,"ts":"2026-10-06T21:26:59.438+08:00","sessionId":"sp01ab-D-20261006-212637","event":"ping","data":{"tick":31,"pending":"confirm:delete_config","subscribers":1}}
+[+021446ms] 
+[+023444ms] event:ping
+[+023445ms] data:{"seq":16,"ts":"2026-10-06T21:27:01.439+08:00","sessionId":"sp01ab-D-20261006-212637","event":"ping","data":{"tick":32,"pending":"confirm:delete_config","subscribers":1}}
+[+023445ms] 
+[+025444ms] event:ping
+[+025444ms] data:{"seq":17,"ts":"2026-10-06T21:27:03.438+08:00","sessionId":"sp01ab-D-20261006-212637","event":"ping","data":{"tick":33,"pending":"confirm:delete_config","subscribers":1}}
+[+025445ms] 
+[+027444ms] event:ping
+[+027445ms] data:{"seq":18,"ts":"2026-10-06T21:27:05.437+08:00","sessionId":"sp01ab-D-20261006-212637","event":"ping","data":{"tick":34,"pending":"confirm:delete_config","subscribers":1}}
+[+027446ms] 
+[+029443ms] event:ping
+[+029444ms] data:{"seq":19,"ts":"2026-10-06T21:27:07.437+08:00","sessionId":"sp01ab-D-20261006-212637","event":"ping","data":{"tick":35,"pending":"confirm:delete_config","subscribers":1}}
+[+029444ms] 
+[+031443ms] event:ping
+[+031444ms] data:{"seq":20,"ts":"2026-10-06T21:27:09.437+08:00","sessionId":"sp01ab-D-20261006-212637","event":"ping","data":{"tick":36,"pending":"confirm:delete_config","subscribers":1}}
+[+031445ms] 
+[+031914ms] event:confirm_decision
+[+031915ms] data:{"seq":21,"ts":"2026-10-06T21:27:09.908+08:00","sessionId":"sp01ab-D-20261006-212637","event":"confirm_decision","data":{"toolCallId":"call_00_bS9Txod1D7OVhfe13EFV6098","name":"delete_config","decision":"timeout","approved":false,"reason":"确认等待超过 30 秒，系统已自动取消该操作（工具未执行）。","source":"timeout","waitedMs":30001}}
+[+031916ms] 
+[+031916ms] event:tool_result
+[+031917ms] data:{"seq":22,"ts":"2026-10-06T21:27:09.908+08:00","sessionId":"sp01ab-D-20261006-212637","event":"tool_result","data":{"toolCallId":"call_00_bS9Txod1D7OVhfe13EFV6098","name":"delete_config","ok":false,"executed":false,"result":"确认等待超过 30 秒，系统已自动取消该操作（工具未执行）。"}}
+[+031917ms] 
+[+033443ms] event:ping
+[+033444ms] data:{"seq":23,"ts":"2026-10-06T21:27:11.437+08:00","sessionId":"sp01ab-D-20261006-212637","event":"ping","data":{"tick":37,"pending":null,"subscribers":1}}
+[+033444ms] 
+[+034086ms] event:done
+[+034087ms] data:{"seq":24,"ts":"2026-10-06T21:27:12.080+08:00","sessionId":"sp01ab-D-20261006-212637","event":"done","data":{"content":"我尝试执行了删除操作，但结果如下：\n\n- 工具调用：`delete_config(code=\"def-777\")`\n- 返回结果：**确认等待超过 30 秒，系统已自动取消该操作（工具未执行）**\n\n也就是说，**`def-777` 并没有被删除**，配置及其生效数据行仍然存在。这不代表删除失败于数据层面，而是该破坏性操作需要的一次确认在 30 秒内没有完成，被系统自动撤销了。\n\n请你再确认一次：是否确定要删除 `def-777` 及其连带生效数据？你回复确认后，我立刻重新发起调用，并请留意在 30 秒内完成确认，否则可能再次超时取消。","streaming":false,"elapsedMs":33275,"failed":false}}
+[+034088ms] 

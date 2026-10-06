@@ -1,0 +1,3 @@
+# case=vd1-guarded-tooldup
+start@6ms
+error@7595ms

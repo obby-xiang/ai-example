@@ -1,0 +1,90 @@
+{
+  "case": "vd1-fin-content",
+  "description": "上游已产出 2 个正文 delta 后静默截断（TCP 正常 FIN，无 [DONE]）：应用是否察觉",
+  "fault": {
+    "mode": "fin-after-content",
+    "contentEvents": 2
+  },
+  "sse": {
+    "eventCounts": {
+      "start": 1,
+      "delta": 2,
+      "done": 1
+    },
+    "eventSequence": [
+      "start@5ms",
+      "delta@770ms",
+      "delta@771ms",
+      "done@771ms"
+    ],
+    "deltaCount": 2,
+    "concatenatedDeltaText": "我是韧性",
+    "concatenatedDeltaLen": 4,
+    "duplicatedPrefixLen": 0,
+    "duplicatedPrefixLikely": false,
+    "terminalEvent": "done",
+    "terminalData": {
+      "cancelled": false,
+      "terminal": "OK",
+      "content": "我是韧性",
+      "emittedChars": 4,
+      "deltas": 2,
+      "attempts": 1,
+      "elapsedMs": 767
+    },
+    "elapsedMs": 772,
+    "clientAborted": false,
+    "streamError": null
+  },
+  "sessionState": {
+    "sessionId": "vd1-fin-content",
+    "runId": "vd1-fin-content#1791293663858",
+    "terminal": "OK",
+    "cancelled": false,
+    "clientAborted": false,
+    "emittedAny": true,
+    "deltas": 2,
+    "emittedChars": 4,
+    "content": "我是韧性",
+    "attempts": 1,
+    "elapsedMs": 767,
+    "attemptRecords": [
+      {
+        "attempt": 1,
+        "outcome": "COMPLETED",
+        "costMs": 766,
+        "emittedAnythingBefore": true,
+        "reason": null
+      }
+    ],
+    "toolCallItems": [],
+    "cancelRegistryRegistered": false,
+    "cancelFlagValue": false,
+    "refSubscriptions": 0,
+    "toolExecutionsForRun": [],
+    "found": true
+  },
+  "wire": [
+    {
+      "seq": 15,
+      "requestIndex": 1,
+      "tsMs": 1791293663868,
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "mode": "fin-after-content",
+      "applied": true,
+      "status": 200,
+      "relayedBytes": 922,
+      "chunkCount": 3,
+      "outcome": "TRUNCATED_CLEAN_FIN",
+      "headerBytes": 0,
+      "requestBytes": 1372,
+      "upstreamHeadersAtMs": 1791293664085,
+      "relayedEvents": 3,
+      "contentEvents": 2,
+      "endTsMs": 1791293664623,
+      "durationMs": 755
+    }
+  ],
+  "capturedAt": "2026-10-06T13:34:24.635Z"
+}

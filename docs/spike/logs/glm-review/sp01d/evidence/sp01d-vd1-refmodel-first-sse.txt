@@ -1,0 +1,3 @@
+# case=vd1-refmodel-first
+start@4ms
+error@10021ms
