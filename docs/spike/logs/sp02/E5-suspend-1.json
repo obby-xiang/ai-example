@@ -1,0 +1,47 @@
+{
+  "seq": 3,
+  "ts": "2026-10-07T00:28:08.288+08:00",
+  "wallMs": 1791304088288,
+  "runId": "run-sp02-e5-2a98bc8b",
+  "instanceId": "instance-Lenovo-pid11760-9ff6b5",
+  "event": "suspend_persisted",
+  "data": {
+    "runId": "run-sp02-e5-2a98bc8b",
+    "assistantContent": "",
+    "toolCalls": [
+      {
+        "toolCallId": "call_00_GuqmqM4d5Rm0Eny1xnHE6850",
+        "name": "get_user_profile",
+        "type": "function",
+        "kind": "FRONTEND",
+        "arguments": "{\"userId\": \"u-1024\"}",
+        "status": "PENDING",
+        "reason": null,
+        "resultText": null,
+        "executed": false,
+        "executedBy": null,
+        "executedAtMs": 0,
+        "requestedAtMs": 1791304088281,
+        "resolvedAtMs": 0
+      },
+      {
+        "toolCallId": "call_01_20n1lfwoY7cdYmle4UWf5386",
+        "name": "delete_config",
+        "type": "function",
+        "kind": "SENSITIVE",
+        "arguments": "{\"code\": \"def-999\"}",
+        "status": "PENDING",
+        "reason": null,
+        "resultText": null,
+        "executed": false,
+        "executedBy": null,
+        "executedAtMs": 0,
+        "requestedAtMs": 1791304088281,
+        "resolvedAtMs": 0
+      }
+    ],
+    "stateKey": "sp02:run:run-sp02-e5-2a98bc8b",
+    "pendingKey": "sp02:hitl:run-sp02-e5-2a98bc8b",
+    "writtenBy": "instance-Lenovo-pid11760-9ff6b5"
+  }
+}

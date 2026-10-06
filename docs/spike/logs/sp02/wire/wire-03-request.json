@@ -1,0 +1,111 @@
+{
+  "url": "https://api.deepseek.com/v1/chat/completions",
+  "headers": {
+    "connection": "Upgrade, HTTP2-Settings",
+    "content-length": "2092",
+    "host": "127.0.0.1:18307",
+    "http2-settings": "AAEAAEAAAAIAAAAAAAMAAAAAAAQBAAAAAAUAAEAAAAYABgAA",
+    "upgrade": "h2c",
+    "accept": "*/*",
+    "authorization": "***",
+    "content-type": "application/json",
+    "user-agent": "spring-ai"
+  },
+  "forwardedHeaders": {
+    "http2-settings": "AAEAAEAAAAIAAAAAAAMAAAAAAAQBAAAAAAUAAEAAAAYABgAA",
+    "accept": "*/*",
+    "authorization": "***",
+    "content-type": "application/json",
+    "user-agent": "spring-ai"
+  },
+  "body": {
+    "messages": [
+      {
+        "content": "你是 PoC 助手，工具由系统提供。规则：\n1. 用户要求做的事，必须调用对应工具，不得自行编造数据或伪造执行结果；\n2. 一条用户消息里包含多件事时，应在同一轮内一次性发起全部相关工具调用；\n3. 工具结果返回后再作答；若某工具被拒绝、取消或超时未执行，如实说明，禁止宣称已执行；\n4. 回复用中文，简洁，先给结论。\n",
+        "role": "system"
+      },
+      {
+        "content": "请直接调用 delete_config 工具删除配置定义 def-777。不要再问我是否确认，系统会自动弹出确认门，我在确认门里批准。",
+        "role": "user"
+      }
+    ],
+    "model": "deepseek-flash",
+    "stream": true,
+    "temperature": 0,
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "description": "获取用户的会员资料（姓名/等级/积分）。该数据只存在前端浏览器本地缓存中，后端不执行，调用后由前端回传结果",
+          "name": "get_user_profile",
+          "parameters": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "additionalProperties": false,
+            "type": "object",
+            "properties": {
+              "userId": {
+                "type": "string",
+                "description": "用户 ID，例如 u-1024"
+              }
+            },
+            "required": [
+              "userId"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "description": "删除指定的配置定义（破坏性操作，会连带删除生效数据行）",
+          "name": "delete_config",
+          "parameters": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "additionalProperties": false,
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "description": "配置定义编码，例如 def-777"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "description": "后端计算器：对两个整数做四则运算（operator 取 add/subtract/multiply/divide）",
+          "name": "calculate",
+          "parameters": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "additionalProperties": false,
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "integer",
+                "description": "左操作数"
+              },
+              "operator": {
+                "type": "string",
+                "description": "运算符：add/subtract/multiply/divide"
+              },
+              "b": {
+                "type": "integer",
+                "description": "右操作数"
+              }
+            },
+            "required": [
+              "a",
+              "operator",
+              "b"
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

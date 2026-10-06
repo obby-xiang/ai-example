@@ -1,0 +1,529 @@
+{
+  "runId": "run-sp02-e3-c22ac28d",
+  "exists": true,
+  "snapshot": {
+    "runId": "run-sp02-e3-c22ac28d",
+    "sessionId": "sp02-e3",
+    "mode": "predicate",
+    "status": "SUSPENDED",
+    "round": 1,
+    "messageCount": 2,
+    "inFlight": 2,
+    "assistantContent": "",
+    "finalText": null,
+    "error": null,
+    "emittedChars": 0,
+    "createdBy": "instance-Lenovo-pid15372-2650ff",
+    "createdAtMs": 1791304031533,
+    "updatedAtMs": 1791304033381,
+    "resumedBy": []
+  },
+  "pending": [
+    {
+      "toolCallId": "call_01_UvBmnWAXQ6wm64MPgd6Z2400",
+      "name": "get_user_profile",
+      "type": "function",
+      "kind": "FRONTEND",
+      "arguments": "{\"userId\": \"u-1024\"}",
+      "status": "PENDING",
+      "reason": null,
+      "resultText": null,
+      "executed": false,
+      "executedBy": null,
+      "executedAtMs": 0,
+      "requestedAtMs": 1791304033343,
+      "resolvedAtMs": 0
+    },
+    {
+      "toolCallId": "call_00_MVCqzfIzKmgF1YZyuCat2052",
+      "name": "calculate",
+      "type": "function",
+      "kind": "BACKEND",
+      "arguments": "{\"a\": 6, \"operator\": \"multiply\", \"b\": 7}",
+      "status": "FRONTEND_RESULT",
+      "reason": "IN_PROCESS_EXECUTION",
+      "resultText": "\"后端计算器结果：6 multiply 7 = 42\"",
+      "executed": true,
+      "executedBy": "instance-Lenovo-pid15372-2650ff",
+      "executedAtMs": 1791304033371,
+      "requestedAtMs": 1791304033343,
+      "resolvedAtMs": 1791304033371
+    }
+  ],
+  "ledger": [
+    {
+      "atMs": 1791304033369,
+      "at": "2026-10-06T16:27:13.369279800Z",
+      "executedBy": "instance-Lenovo-pid15372-2650ff",
+      "toolCallId": "call_00_MVCqzfIzKmgF1YZyuCat2052",
+      "name": "calculate",
+      "kind": "BACKEND",
+      "resultText": "\"后端计算器结果：6 multiply 7 = 42\""
+    }
+  ],
+  "ledgerCounts": {
+    "calculate": 1
+  },
+  "rebuildPreview": {
+    "messageCount": 4,
+    "messages": [
+      {
+        "index": 0,
+        "type": "SYSTEM",
+        "text": "你是 PoC 助手，工具由系统提供。规则：\n1. 用户要求做的事，必须调用对应工具，不得自行编造数据或伪造执行结果；\n2. 一条用户消息里包含多件事时，应在同一轮内一次性发起全部相关工具调用；\n3. 工具结果返回后再作答；若某工具被拒绝、取消或超时未执行，如实说明，禁止宣称已执行；\n4. 回复用中文，简洁，先给结论。\n"
+      },
+      {
+        "index": 1,
+        "type": "USER",
+        "text": "帮我算一下 6 乘 7 等于多少，同时读取用户 u-1024 的前端资料（姓名/等级/积分）。最后把两者一起汇报给我。"
+      },
+      {
+        "type": "ASSISTANT",
+        "content": "",
+        "toolCalls": [
+          {
+            "id": "call_00_MVCqzfIzKmgF1YZyuCat2052",
+            "name": "calculate",
+            "arguments": "{\"a\": 6, \"operator\": \"multiply\", \"b\": 7}"
+          },
+          {
+            "id": "call_01_UvBmnWAXQ6wm64MPgd6Z2400",
+            "name": "get_user_profile",
+            "arguments": "{\"userId\": \"u-1024\"}"
+          }
+        ]
+      },
+      {
+        "type": "TOOL",
+        "toolResponses": [
+          {
+            "id": "call_00_MVCqzfIzKmgF1YZyuCat2052",
+            "name": "calculate",
+            "status": "FRONTEND_RESULT",
+            "executed": true,
+            "responseData": "\"后端计算器结果：6 multiply 7 = 42\""
+          },
+          {
+            "id": "call_01_UvBmnWAXQ6wm64MPgd6Z2400",
+            "name": "get_user_profile",
+            "status": "PENDING",
+            "executed": false,
+            "responseData": null
+          }
+        ]
+      }
+    ],
+    "pending": [
+      {
+        "toolCallId": "call_01_UvBmnWAXQ6wm64MPgd6Z2400",
+        "name": "get_user_profile",
+        "type": "function",
+        "kind": "FRONTEND",
+        "arguments": "{\"userId\": \"u-1024\"}",
+        "status": "PENDING",
+        "reason": null,
+        "resultText": null,
+        "executed": false,
+        "executedBy": null,
+        "executedAtMs": 0,
+        "requestedAtMs": 1791304033343,
+        "resolvedAtMs": 0
+      },
+      {
+        "toolCallId": "call_00_MVCqzfIzKmgF1YZyuCat2052",
+        "name": "calculate",
+        "type": "function",
+        "kind": "BACKEND",
+        "arguments": "{\"a\": 6, \"operator\": \"multiply\", \"b\": 7}",
+        "status": "FRONTEND_RESULT",
+        "reason": "IN_PROCESS_EXECUTION",
+        "resultText": "\"后端计算器结果：6 multiply 7 = 42\"",
+        "executed": true,
+        "executedBy": "instance-Lenovo-pid15372-2650ff",
+        "executedAtMs": 1791304033371,
+        "requestedAtMs": 1791304033343,
+        "resolvedAtMs": 1791304033371
+      }
+    ],
+    "readyToResume": false
+  },
+  "historyMessages": [
+    {
+      "index": 0,
+      "type": "SYSTEM",
+      "text": "你是 PoC 助手，工具由系统提供。规则：\n1. 用户要求做的事，必须调用对应工具，不得自行编造数据或伪造执行结果；\n2. 一条用户消息里包含多件事时，应在同一轮内一次性发起全部相关工具调用；\n3. 工具结果返回后再作答；若某工具被拒绝、取消或超时未执行，如实说明，禁止宣称已执行；\n4. 回复用中文，简洁，先给结论。\n"
+    },
+    {
+      "index": 1,
+      "type": "USER",
+      "text": "帮我算一下 6 乘 7 等于多少，同时读取用户 u-1024 的前端资料（姓名/等级/积分）。最后把两者一起汇报给我。"
+    }
+  ],
+  "persistedEvents": [
+    {
+      "seq": 1,
+      "ts": "2026-10-07T00:27:11.570+08:00",
+      "wallMs": 1791304031570,
+      "runId": "run-sp02-e3-c22ac28d",
+      "instanceId": "instance-Lenovo-pid15372-2650ff",
+      "event": "start",
+      "data": {
+        "runId": "run-sp02-e3-c22ac28d",
+        "sessionId": "sp02-e3",
+        "mode": "predicate",
+        "message": "帮我算一下 6 乘 7 等于多少，同时读取用户 u-1024 的前端资料（姓名/等级/积分）。最后把两者一起汇报给我。",
+        "toolNames": [
+          "get_user_profile",
+          "delete_config",
+          "calculate"
+        ],
+        "history": [
+          {
+            "index": 0,
+            "type": "SYSTEM",
+            "text": "你是 PoC 助手，工具由系统提供。规则：\n1. 用户要求做的事，必须调用对应工具，不得自行编造数据或伪造执行结果；\n2. 一条用户消息里包含多件事时，应在同一轮内一次性发起全部相关工具调用；\n3. 工具结果返回后再作答；若某工具被拒绝、取消或超时未执行，如实说明，禁止宣称已执行；\n4. 回复用中文，简洁，先给结论。\n"
+          },
+          {
+            "index": 1,
+            "type": "USER",
+            "text": "帮我算一下 6 乘 7 等于多少，同时读取用户 u-1024 的前端资料（姓名/等级/积分）。最后把两者一起汇报给我。"
+          }
+        ],
+        "instanceId": "instance-Lenovo-pid15372-2650ff",
+        "suppressExternalRounds": true,
+        "execDelayMsAfterApprove": 0
+      }
+    },
+    {
+      "seq": 2,
+      "ts": "2026-10-07T00:27:11.610+08:00",
+      "wallMs": 1791304031610,
+      "runId": "run-sp02-e3-c22ac28d",
+      "instanceId": "instance-Lenovo-pid15372-2650ff",
+      "event": "reattached",
+      "data": {
+        "runId": "run-sp02-e3-c22ac28d",
+        "instanceId": "instance-Lenovo-pid15372-2650ff",
+        "snapshot": {
+          "runId": "run-sp02-e3-c22ac28d",
+          "sessionId": "sp02-e3",
+          "mode": "predicate",
+          "status": "RUNNING",
+          "round": 1,
+          "messageCount": 2,
+          "inFlight": 0,
+          "assistantContent": null,
+          "finalText": null,
+          "error": null,
+          "emittedChars": 0,
+          "createdBy": "instance-Lenovo-pid15372-2650ff",
+          "createdAtMs": 1791304031533,
+          "updatedAtMs": 1791304031601,
+          "resumedBy": []
+        },
+        "pending": [],
+        "note": "重启后前端重新订阅即可看到挂起态（状态来源为 Redis，与订阅无关）"
+      }
+    },
+    {
+      "seq": 3,
+      "ts": "2026-10-07T00:27:13.339+08:00",
+      "wallMs": 1791304033339,
+      "runId": "run-sp02-e3-c22ac28d",
+      "instanceId": "instance-Lenovo-pid15372-2650ff",
+      "event": "model_round",
+      "data": {
+        "runId": "run-sp02-e3-c22ac28d",
+        "form": "PREDICATE",
+        "elementCount": 30,
+        "textElements": [],
+        "textJoined": "",
+        "textElementCount": 0,
+        "roundText": "",
+        "finishReason": "TOOL_CALLS",
+        "toolCalls": [
+          {
+            "id": "call_00_MVCqzfIzKmgF1YZyuCat2052",
+            "name": "calculate",
+            "arguments": "{\"a\": 6, \"operator\": \"multiply\", \"b\": 7}"
+          },
+          {
+            "id": "call_01_UvBmnWAXQ6wm64MPgd6Z2400",
+            "name": "get_user_profile",
+            "arguments": "{\"userId\": \"u-1024\"}"
+          }
+        ],
+        "calledBy": "instance-Lenovo-pid15372-2650ff"
+      }
+    },
+    {
+      "seq": 4,
+      "ts": "2026-10-07T00:27:13.353+08:00",
+      "wallMs": 1791304033353,
+      "runId": "run-sp02-e3-c22ac28d",
+      "instanceId": "instance-Lenovo-pid15372-2650ff",
+      "event": "suspend_persisted",
+      "data": {
+        "runId": "run-sp02-e3-c22ac28d",
+        "form": "PREDICATE",
+        "assistantContent": "",
+        "toolCalls": [
+          {
+            "toolCallId": "call_00_MVCqzfIzKmgF1YZyuCat2052",
+            "name": "calculate",
+            "type": "function",
+            "kind": "BACKEND",
+            "arguments": "{\"a\": 6, \"operator\": \"multiply\", \"b\": 7}",
+            "status": "PENDING",
+            "reason": null,
+            "resultText": null,
+            "executed": false,
+            "executedBy": null,
+            "executedAtMs": 0,
+            "requestedAtMs": 1791304033343,
+            "resolvedAtMs": 0
+          },
+          {
+            "toolCallId": "call_01_UvBmnWAXQ6wm64MPgd6Z2400",
+            "name": "get_user_profile",
+            "type": "function",
+            "kind": "FRONTEND",
+            "arguments": "{\"userId\": \"u-1024\"}",
+            "status": "PENDING",
+            "reason": null,
+            "resultText": null,
+            "executed": false,
+            "executedBy": null,
+            "executedAtMs": 0,
+            "requestedAtMs": 1791304033343,
+            "resolvedAtMs": 0
+          }
+        ],
+        "stateKey": "sp02:run:run-sp02-e3-c22ac28d",
+        "pendingKey": "sp02:hitl:run-sp02-e3-c22ac28d",
+        "writtenBy": "instance-Lenovo-pid15372-2650ff"
+      }
+    },
+    {
+      "seq": 5,
+      "ts": "2026-10-07T00:27:13.373+08:00",
+      "wallMs": 1791304033373,
+      "runId": "run-sp02-e3-c22ac28d",
+      "instanceId": "instance-Lenovo-pid15372-2650ff",
+      "event": "tool_result",
+      "data": {
+        "toolCallId": "call_00_MVCqzfIzKmgF1YZyuCat2052",
+        "name": "calculate",
+        "kind": "BACKEND",
+        "ok": true,
+        "executed": true,
+        "reused": false,
+        "executedBy": "instance-Lenovo-pid15372-2650ff",
+        "path": "predicate",
+        "result": "\"后端计算器结果：6 multiply 7 = 42\""
+      }
+    },
+    {
+      "seq": 6,
+      "ts": "2026-10-07T00:27:13.376+08:00",
+      "wallMs": 1791304033376,
+      "runId": "run-sp02-e3-c22ac28d",
+      "instanceId": "instance-Lenovo-pid15372-2650ff",
+      "event": "frontend_tool_request",
+      "data": {
+        "toolCallId": "call_01_UvBmnWAXQ6wm64MPgd6Z2400",
+        "name": "get_user_profile",
+        "kind": "FRONTEND",
+        "arguments": "{\"userId\": \"u-1024\"}",
+        "timeoutSeconds": 120,
+        "stateKey": "sp02:hitl:run-sp02-e3-c22ac28d",
+        "callback": "POST /api/frontend-tool-result {runId, toolCallId, result}"
+      }
+    },
+    {
+      "seq": 7,
+      "ts": "2026-10-07T00:27:13.382+08:00",
+      "wallMs": 1791304033382,
+      "runId": "run-sp02-e3-c22ac28d",
+      "instanceId": "instance-Lenovo-pid15372-2650ff",
+      "event": "run_suspended",
+      "data": {
+        "form": "PREDICATE",
+        "runId": "run-sp02-e3-c22ac28d",
+        "pending": [
+          {
+            "toolCallId": "call_01_UvBmnWAXQ6wm64MPgd6Z2400",
+            "name": "get_user_profile",
+            "type": "function",
+            "kind": "FRONTEND",
+            "arguments": "{\"userId\": \"u-1024\"}",
+            "status": "PENDING",
+            "reason": null,
+            "resultText": null,
+            "executed": false,
+            "executedBy": null,
+            "executedAtMs": 0,
+            "requestedAtMs": 1791304033343,
+            "resolvedAtMs": 0
+          }
+        ],
+        "instanceId": "instance-Lenovo-pid15372-2650ff"
+      }
+    },
+    {
+      "seq": 8,
+      "ts": "2026-10-07T00:27:13.387+08:00",
+      "wallMs": 1791304033387,
+      "runId": "run-sp02-e3-c22ac28d",
+      "instanceId": "instance-Lenovo-pid15372-2650ff",
+      "event": "run_finished",
+      "data": {
+        "runId": "run-sp02-e3-c22ac28d",
+        "trigger": "start",
+        "outcome": {
+          "status": "SUSPENDED",
+          "finalText": "",
+          "pendingIds": [
+            "call_01_UvBmnWAXQ6wm64MPgd6Z2400"
+          ],
+          "modelRequests": 1,
+          "finishReason": "TOOL_CALLS"
+        },
+        "instanceId": "instance-Lenovo-pid15372-2650ff"
+      }
+    },
+    {
+      "seq": 1,
+      "ts": "2026-10-07T00:27:20.891+08:00",
+      "wallMs": 1791304040891,
+      "runId": "run-sp02-e3-c22ac28d",
+      "instanceId": "instance-Lenovo-pid29380-230c0a",
+      "event": "reattached",
+      "data": {
+        "runId": "run-sp02-e3-c22ac28d",
+        "instanceId": "instance-Lenovo-pid29380-230c0a",
+        "snapshot": {
+          "runId": "run-sp02-e3-c22ac28d",
+          "sessionId": "sp02-e3",
+          "mode": "predicate",
+          "status": "SUSPENDED",
+          "round": 1,
+          "messageCount": 2,
+          "inFlight": 2,
+          "assistantContent": "",
+          "finalText": null,
+          "error": null,
+          "emittedChars": 0,
+          "createdBy": "instance-Lenovo-pid15372-2650ff",
+          "createdAtMs": 1791304031533,
+          "updatedAtMs": 1791304033381,
+          "resumedBy": []
+        },
+        "pending": [
+          {
+            "toolCallId": "call_01_UvBmnWAXQ6wm64MPgd6Z2400",
+            "name": "get_user_profile",
+            "type": "function",
+            "kind": "FRONTEND",
+            "arguments": "{\"userId\": \"u-1024\"}",
+            "status": "PENDING",
+            "reason": null,
+            "resultText": null,
+            "executed": false,
+            "executedBy": null,
+            "executedAtMs": 0,
+            "requestedAtMs": 1791304033343,
+            "resolvedAtMs": 0
+          },
+          {
+            "toolCallId": "call_00_MVCqzfIzKmgF1YZyuCat2052",
+            "name": "calculate",
+            "type": "function",
+            "kind": "BACKEND",
+            "arguments": "{\"a\": 6, \"operator\": \"multiply\", \"b\": 7}",
+            "status": "FRONTEND_RESULT",
+            "reason": "IN_PROCESS_EXECUTION",
+            "resultText": "\"后端计算器结果：6 multiply 7 = 42\"",
+            "executed": true,
+            "executedBy": "instance-Lenovo-pid15372-2650ff",
+            "executedAtMs": 1791304033371,
+            "requestedAtMs": 1791304033343,
+            "resolvedAtMs": 1791304033371
+          }
+        ],
+        "note": "重启后前端重新订阅即可看到挂起态（状态来源为 Redis，与订阅无关）"
+      }
+    }
+  ],
+  "inProcessTimeline": [
+    {
+      "seq": 1,
+      "ts": "2026-10-07T00:27:20.891+08:00",
+      "wallMs": 1791304040891,
+      "runId": "run-sp02-e3-c22ac28d",
+      "instanceId": "instance-Lenovo-pid29380-230c0a",
+      "event": "reattached",
+      "data": {
+        "runId": "run-sp02-e3-c22ac28d",
+        "instanceId": "instance-Lenovo-pid29380-230c0a",
+        "snapshot": {
+          "runId": "run-sp02-e3-c22ac28d",
+          "sessionId": "sp02-e3",
+          "mode": "predicate",
+          "status": "SUSPENDED",
+          "round": 1,
+          "messageCount": 2,
+          "inFlight": 2,
+          "assistantContent": "",
+          "finalText": null,
+          "error": null,
+          "emittedChars": 0,
+          "createdBy": "instance-Lenovo-pid15372-2650ff",
+          "createdAtMs": 1791304031533,
+          "updatedAtMs": 1791304033381,
+          "resumedBy": []
+        },
+        "pending": [
+          {
+            "toolCallId": "call_01_UvBmnWAXQ6wm64MPgd6Z2400",
+            "name": "get_user_profile",
+            "type": "function",
+            "kind": "FRONTEND",
+            "arguments": "{\"userId\": \"u-1024\"}",
+            "status": "PENDING",
+            "reason": null,
+            "resultText": null,
+            "executed": false,
+            "executedBy": null,
+            "executedAtMs": 0,
+            "requestedAtMs": 1791304033343,
+            "resolvedAtMs": 0
+          },
+          {
+            "toolCallId": "call_00_MVCqzfIzKmgF1YZyuCat2052",
+            "name": "calculate",
+            "type": "function",
+            "kind": "BACKEND",
+            "arguments": "{\"a\": 6, \"operator\": \"multiply\", \"b\": 7}",
+            "status": "FRONTEND_RESULT",
+            "reason": "IN_PROCESS_EXECUTION",
+            "resultText": "\"后端计算器结果：6 multiply 7 = 42\"",
+            "executed": true,
+            "executedBy": "instance-Lenovo-pid15372-2650ff",
+            "executedAtMs": 1791304033371,
+            "requestedAtMs": 1791304033343,
+            "resolvedAtMs": 1791304033371
+          }
+        ],
+        "note": "重启后前端重新订阅即可看到挂起态（状态来源为 Redis，与订阅无关）"
+      }
+    }
+  ],
+  "instanceId": "instance-Lenovo-pid29380-230c0a",
+  "keys": {
+    "pending": "sp02:hitl:run-sp02-e3-c22ac28d",
+    "events": "sp02:events:run-sp02-e3-c22ac28d",
+    "ledger": "sp02:ledger:run-sp02-e3-c22ac28d",
+    "state": "sp02:run:run-sp02-e3-c22ac28d"
+  }
+}

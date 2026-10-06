@@ -1,0 +1,11 @@
+{
+  "runId": "run-sp02-e2-c86cdc85",
+  "toolCallId": "call_00_hE0cvBgN3AUzXVWNAC4n9634",
+  "instanceId": "instance-Lenovo-pid10016-ee7e11",
+  "accepted": true,
+  "duplicate": false,
+  "status": "APPROVED",
+  "approved": true,
+  "wokeInProcessGate": true,
+  "note": "决策已写入 Redis；是否已执行见 pending.executed / ledger"
+}

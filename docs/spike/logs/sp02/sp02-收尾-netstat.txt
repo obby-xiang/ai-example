@@ -1,0 +1,21 @@
+# SP-02 收尾实测输出（脱敏占位：<MAIN_V2> / <MEMURAI_HOME> / <JDK_HOME>）
+# 时间：2026-10-07 00:30:23 +0800
+
+## 1) 端口占用复核（应用 18306 / 取证代理 18307）
+$ netstat -ano | grep -E ":18306|:18307" | grep LISTENING
+(无输出 = 两个端口均无 LISTENING，已释放)
+
+$ netstat -ano | grep -E ":18306|:18307"   # 全量（含 TIME_WAIT 残影，属进程被杀后的正常回收，无进程占用）
+  TCP    127.0.0.1:1637         127.0.0.1:18306        TIME_WAIT       0
+  TCP    127.0.0.1:18306        127.0.0.1:1634         TIME_WAIT       0
+  TCP    127.0.0.1:18306        127.0.0.1:13020        TIME_WAIT       0
+  TCP    127.0.0.1:18306        127.0.0.1:13755        TIME_WAIT       0
+
+## 2) 本任务自启进程（只停本任务自启的进程）
+- 应用实例：由 sp02-experiment.mjs 在每个场景内 spawn 并 SIGKILL（PID 见各 E*-app-instance*.log）
+- 取证代理：node sp02-wire-proxy.mjs 已 taskkill /F 终止
+
+$ tasklist /FI "IMAGENAME eq java.exe"   # 无残留应用进程
+信息: 没有运行的任务匹配指定标准。
+$ tasklist /FI "IMAGENAME eq node.exe"   # 无残留代理进程
+信息: 没有运行的任务匹配指定标准。

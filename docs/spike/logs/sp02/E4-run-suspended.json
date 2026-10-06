@@ -1,0 +1,30 @@
+{
+  "seq": 13,
+  "ts": "2026-10-07T00:27:33.737+08:00",
+  "wallMs": 1791304053737,
+  "runId": "run-sp02-e4-71ec148b",
+  "instanceId": "instance-Lenovo-pid22184-c59c24",
+  "event": "run_suspended",
+  "data": {
+    "instanceId": "instance-Lenovo-pid22184-c59c24",
+    "pending": [
+      {
+        "toolCallId": "call_01_idp7ceTWdWb93Og01Thp6619",
+        "name": "get_user_profile",
+        "type": "function",
+        "kind": "FRONTEND",
+        "arguments": "{\"userId\": \"u-1024\"}",
+        "status": "PENDING",
+        "reason": null,
+        "resultText": null,
+        "executed": false,
+        "executedBy": null,
+        "executedAtMs": 0,
+        "requestedAtMs": 1791304053698,
+        "resolvedAtMs": 0
+      }
+    ],
+    "runId": "run-sp02-e4-71ec148b",
+    "form": "EXPLICIT"
+  }
+}

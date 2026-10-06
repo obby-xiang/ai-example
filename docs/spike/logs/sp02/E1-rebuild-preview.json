@@ -1,0 +1,87 @@
+{
+  "messageCount": 5,
+  "messages": [
+    {
+      "index": 0,
+      "type": "SYSTEM",
+      "text": "你是 PoC 助手，工具由系统提供。规则：\n1. 用户要求做的事，必须调用对应工具，不得自行编造数据或伪造执行结果；\n2. 一条用户消息里包含多件事时，应在同一轮内一次性发起全部相关工具调用；\n3. 工具结果返回后再作答；若某工具被拒绝、取消或超时未执行，如实说明，禁止宣称已执行；\n4. 回复用中文，简洁，先给结论。\n"
+    },
+    {
+      "index": 1,
+      "type": "USER",
+      "text": "帮我算一下 6 乘 7 等于多少，同时读取用户 u-1024 的前端资料（姓名/等级/积分）。最后把两者一起汇报给我。"
+    },
+    {
+      "index": 2,
+      "type": "ASSISTANT",
+      "text": "",
+      "toolCalls": [
+        {
+          "id": "call_00_KLREinZhv165NVFBgE519342",
+          "name": "calculate",
+          "arguments": "{\"a\": 6, \"operator\": \"multiply\", \"b\": 7}"
+        },
+        {
+          "id": "call_01_ImAnOuU5ZkmMyOFhK4vr4414",
+          "name": "get_user_profile",
+          "arguments": "{\"userId\": \"u-1024\"}"
+        }
+      ]
+    },
+    {
+      "index": 3,
+      "type": "TOOL",
+      "text": "",
+      "toolResponses": [
+        {
+          "id": "call_00_KLREinZhv165NVFBgE519342",
+          "name": "calculate",
+          "responseData": "\"后端计算器结果：6 multiply 7 = 42\""
+        },
+        {
+          "id": "call_01_ImAnOuU5ZkmMyOFhK4vr4414",
+          "name": "get_user_profile",
+          "responseData": "用户 u-1024 的前端缓存资料：姓名=张三-FRONTEND-RTRNLI，等级=白金-FRONTEND-RTRNLI，积分=880（数据来自浏览器 localStorage）。"
+        }
+      ]
+    },
+    {
+      "index": 4,
+      "type": "ASSISTANT",
+      "text": "结果如下：\n\n**1. 计算结果**\n- 6 × 7 = 42（后端计算器返回）\n\n**2. 用户 u-1024 资料**（来源：浏览器 localStorage 前端缓存）\n- 姓名：张三-FRONTEND-RTRNLI\n- 等级：白金-FRONTEND-RTRNLI\n- 积分：880\n\n提示：该资料由前端回传，后端未实际读取，仅代表浏览器本地缓存值，不一定是服务端权威数据；如需准确信息建议走服务端接口核对。"
+    }
+  ],
+  "pending": [
+    {
+      "toolCallId": "call_01_ImAnOuU5ZkmMyOFhK4vr4414",
+      "name": "get_user_profile",
+      "type": "function",
+      "kind": "FRONTEND",
+      "arguments": "{\"userId\": \"u-1024\"}",
+      "status": "FRONTEND_RESULT",
+      "reason": "source=browser-localStorage",
+      "resultText": "用户 u-1024 的前端缓存资料：姓名=张三-FRONTEND-RTRNLI，等级=白金-FRONTEND-RTRNLI，积分=880（数据来自浏览器 localStorage）。",
+      "executed": false,
+      "executedBy": null,
+      "executedAtMs": 0,
+      "requestedAtMs": 1791303998492,
+      "resolvedAtMs": 1791304004882
+    },
+    {
+      "toolCallId": "call_00_KLREinZhv165NVFBgE519342",
+      "name": "calculate",
+      "type": "function",
+      "kind": "BACKEND",
+      "arguments": "{\"a\": 6, \"operator\": \"multiply\", \"b\": 7}",
+      "status": "FRONTEND_RESULT",
+      "reason": "IN_PROCESS_EXECUTION",
+      "resultText": "\"后端计算器结果：6 multiply 7 = 42\"",
+      "executed": true,
+      "executedBy": "instance-Lenovo-pid29264-a55e94",
+      "executedAtMs": 1791303998519,
+      "requestedAtMs": 1791303998492,
+      "resolvedAtMs": 1791303998519
+    }
+  ],
+  "readyToResume": true
+}

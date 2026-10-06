@@ -1,0 +1,29 @@
+
+  .   ____          _            __ _ _
+ /\\ / ___'_ __ _ _(_)_ __  __ _ \ \ \ \
+( ( )\___ | '_ | '_| | '_ \/ _` | \ \ \ \
+ \\/  ___)| |_)| | | | | || (_| |  ) ) ) )
+  '  |____| .__|_| |_|_| |_\__, | / / / /
+ =========|_|==============|___/=/_/_/_/
+
+ :: Spring Boot ::               (v3.5.14)
+
+2026-10-07T00:26:31.991+08:00  INFO 29264 --- [sp02-resume-protocol] [           main] com.example.spike.SpikeApplication       : Starting SpikeApplication v0.0.1-SNAPSHOT using Java 21.0.12 with PID 29264 (<MAIN_V2>/spike/sp02\target\sp02-resume-protocol-0.0.1-SNAPSHOT.jar started by <USER> in <MAIN_V2>/spike/sp02)
+2026-10-07T00:26:31.995+08:00  INFO 29264 --- [sp02-resume-protocol] [           main] com.example.spike.SpikeApplication       : No active profile set, falling back to 1 default profile: "default"
+2026-10-07T00:26:32.811+08:00  INFO 29264 --- [sp02-resume-protocol] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Multiple Spring Data modules found, entering strict repository configuration mode
+2026-10-07T00:26:32.815+08:00  INFO 29264 --- [sp02-resume-protocol] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Bootstrapping Spring Data Redis repositories in DEFAULT mode.
+2026-10-07T00:26:32.839+08:00  INFO 29264 --- [sp02-resume-protocol] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Finished Spring Data repository scanning in 11 ms. Found 0 Redis repository interfaces.
+2026-10-07T00:26:33.236+08:00  INFO 29264 --- [sp02-resume-protocol] [           main] o.s.b.w.embedded.tomcat.TomcatWebServer  : Tomcat initialized with port 18306 (http)
+2026-10-07T00:26:33.247+08:00  INFO 29264 --- [sp02-resume-protocol] [           main] o.apache.catalina.core.StandardService   : Starting service [Tomcat]
+2026-10-07T00:26:33.247+08:00  INFO 29264 --- [sp02-resume-protocol] [           main] o.apache.catalina.core.StandardEngine    : Starting Servlet engine: [Apache Tomcat/10.1.54]
+2026-10-07T00:26:33.274+08:00  INFO 29264 --- [sp02-resume-protocol] [           main] o.a.c.c.C.[Tomcat].[localhost].[/]       : Initializing Spring embedded WebApplicationContext
+2026-10-07T00:26:33.275+08:00  INFO 29264 --- [sp02-resume-protocol] [           main] w.s.c.ServletWebServerApplicationContext : Root WebApplicationContext: initialization completed in 1204 ms
+2026-10-07T00:26:35.811+08:00  INFO 29264 --- [sp02-resume-protocol] [           main] o.s.b.w.embedded.tomcat.TomcatWebServer  : Tomcat started on port 18306 (http) with context path '/'
+2026-10-07T00:26:35.879+08:00  INFO 29264 --- [sp02-resume-protocol] [           main] com.example.spike.SpikeApplication       : Started SpikeApplication in 4.357 seconds (process running for 4.789)
+2026-10-07T00:26:36.161+08:00  INFO 29264 --- [sp02-resume-protocol] [io-18306-exec-1] o.a.c.c.C.[Tomcat].[localhost].[/]       : Initializing Spring DispatcherServlet 'dispatcherServlet'
+2026-10-07T00:26:36.162+08:00  INFO 29264 --- [sp02-resume-protocol] [io-18306-exec-1] o.s.web.servlet.DispatcherServlet        : Initializing Servlet 'dispatcherServlet'
+2026-10-07T00:26:36.163+08:00  INFO 29264 --- [sp02-resume-protocol] [io-18306-exec-1] o.s.web.servlet.DispatcherServlet        : Completed initialization in 1 ms
+
+# SIGKILL sent at 2026-10-06T16:26:38.766Z
+
+# process exited code=1 signal=null

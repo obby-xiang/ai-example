@@ -1,0 +1,2 @@
+call_00_hE0cvBgN3AUzXVWNAC4n9634
+{"toolCallId":"call_00_hE0cvBgN3AUzXVWNAC4n9634","name":"delete_config","type":"function","kind":"SENSITIVE","arguments":"{\"code\": \"def-777\"}","status":"APPROVED","reason":"允许删除（PoC）","resultText":null,"executed":false,"executedBy":null,"executedAtMs":0,"requestedAtMs":1791304015281,"resolvedAtMs":1791304015369}

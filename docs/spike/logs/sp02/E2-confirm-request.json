@@ -1,0 +1,17 @@
+{
+  "seq": 4,
+  "ts": "2026-10-07T00:26:55.290+08:00",
+  "wallMs": 1791304015291,
+  "runId": "run-sp02-e2-c86cdc85",
+  "instanceId": "instance-Lenovo-pid10016-ee7e11",
+  "event": "confirm_request",
+  "data": {
+    "toolCallId": "call_00_hE0cvBgN3AUzXVWNAC4n9634",
+    "name": "delete_config",
+    "kind": "SENSITIVE",
+    "arguments": "{\"code\": \"def-777\"}",
+    "timeoutSeconds": 120,
+    "stateKey": "sp02:hitl:run-sp02-e2-c86cdc85",
+    "callback": "POST /api/confirm {runId, toolCallId, approved, reason}"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "plan": {
+    "before": 6
+  },
+  "resumeFiles": [
+    "wire-04-request.json",
+    "wire-04-response.json"
+  ]
+}

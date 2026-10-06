@@ -1,0 +1,21 @@
+# subscribe http://127.0.0.1:18306/api/events/run-sp02-e2-c86cdc85 @ 2026-10-06T16:26:53.628Z
+# HTTP 200 content-type=text/event-stream
+[+000044ms] event:reattached
+[+000048ms] data:{"seq":2,"ts":"2026-10-07T00:26:53.650+08:00","wallMs":1791304013650,"runId":"run-sp02-e2-c86cdc85","instanceId":"instance-Lenovo-pid10016-ee7e11","event":"reattached","data":{"runId":"run-sp02-e2-c86cdc85","instanceId":"instance-Lenovo-pid10016-ee7e11","snapshot":{"runId":"run-sp02-e2-c86cdc85","sessionId":"sp02-e2","mode":"blocking","status":"RUNNING","round":1,"messageCount":2,"inFlight":0,"assistantContent":null,"finalText":null,"error":null,"emittedChars":0,"createdBy":"instance-Lenovo-pid10016-ee7e11","createdAtMs":1791304013574,"updatedAtMs":1791304013641,"resumedBy":[]},"pending":[],"note":"重启后前端重新订阅即可看到挂起态（状态来源为 Redis，与订阅无关）"}}
+[+000050ms] 
+[+001662ms] event:suspend_persisted
+[+001663ms] data:{"seq":3,"ts":"2026-10-07T00:26:55.287+08:00","wallMs":1791304015287,"runId":"run-sp02-e2-c86cdc85","instanceId":"instance-Lenovo-pid10016-ee7e11","event":"suspend_persisted","data":{"runId":"run-sp02-e2-c86cdc85","assistantContent":"","toolCalls":[{"toolCallId":"call_00_hE0cvBgN3AUzXVWNAC4n9634","name":"delete_config","type":"function","kind":"SENSITIVE","arguments":"{\"code\": \"def-777\"}","status":"PENDING","reason":null,"resultText":null,"executed":false,"executedBy":null,"executedAtMs":0,"requestedAtMs":1791304015281,"resolvedAtMs":0}],"stateKey":"sp02:run:run-sp02-e2-c86cdc85","pendingKey":"sp02:hitl:run-sp02-e2-c86cdc85","writtenBy":"instance-Lenovo-pid10016-ee7e11"}}
+[+001664ms] 
+[+001667ms] event:confirm_request
+[+001668ms] data:{"seq":4,"ts":"2026-10-07T00:26:55.290+08:00","wallMs":1791304015291,"runId":"run-sp02-e2-c86cdc85","instanceId":"instance-Lenovo-pid10016-ee7e11","event":"confirm_request","data":{"toolCallId":"call_00_hE0cvBgN3AUzXVWNAC4n9634","name":"delete_config","kind":"SENSITIVE","arguments":"{\"code\": \"def-777\"}","timeoutSeconds":120,"stateKey":"sp02:hitl:run-sp02-e2-c86cdc85","callback":"POST /api/confirm {runId, toolCallId, approved, reason}"}}
+[+001668ms] 
+[+001746ms] event:confirm_decision_stored
+[+001747ms] data:{"seq":5,"ts":"2026-10-07T00:26:55.371+08:00","wallMs":1791304015371,"runId":"run-sp02-e2-c86cdc85","instanceId":"instance-Lenovo-pid10016-ee7e11","event":"confirm_decision_stored","data":{"runId":"run-sp02-e2-c86cdc85","toolCallId":"call_00_hE0cvBgN3AUzXVWNAC4n9634","status":"APPROVED","approved":true,"reason":"允许删除（PoC）","executed":false,"wokeInProcessGate":true,"storedBy":"instance-Lenovo-pid10016-ee7e11","stateKey":"sp02:hitl:run-sp02-e2-c86cdc85"}}
+[+001747ms] 
+[+001749ms] event:confirm_resolution
+[+001749ms] data:{"seq":6,"ts":"2026-10-07T00:26:55.372+08:00","wallMs":1791304015372,"runId":"run-sp02-e2-c86cdc85","instanceId":"instance-Lenovo-pid10016-ee7e11","event":"confirm_resolution","data":{"toolCallId":"call_00_hE0cvBgN3AUzXVWNAC4n9634","name":"delete_config","status":"APPROVED","reason":"允许删除（PoC）","executed":false,"executedBy":null,"path":"blocking","resolvedBy":"instance-Lenovo-pid10016-ee7e11"}}
+[+001750ms] 
+[+001790ms] event:exec_pre_delay
+[+001791ms] data:{"seq":7,"ts":"2026-10-07T00:26:55.377+08:00","wallMs":1791304015377,"runId":"run-sp02-e2-c86cdc85","instanceId":"instance-Lenovo-pid10016-ee7e11","event":"exec_pre_delay","data":{"toolCallId":"call_00_hE0cvBgN3AUzXVWNAC4n9634","name":"delete_config","delayMs":8000,"status":"APPROVED","executed":false,"executedBy":"instance-Lenovo-pid10016-ee7e11"}}
+[+001792ms] 
+# stream error: TypeError: terminated

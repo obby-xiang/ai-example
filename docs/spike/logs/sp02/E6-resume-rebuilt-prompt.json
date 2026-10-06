@@ -1,0 +1,36 @@
+[
+  {
+    "index": 0,
+    "type": "SYSTEM",
+    "text": "你是 PoC 助手，工具由系统提供。规则：\n1. 用户要求做的事，必须调用对应工具，不得自行编造数据或伪造执行结果；\n2. 一条用户消息里包含多件事时，应在同一轮内一次性发起全部相关工具调用；\n3. 工具结果返回后再作答；若某工具被拒绝、取消或超时未执行，如实说明，禁止宣称已执行；\n4. 回复用中文，简洁，先给结论。\n"
+  },
+  {
+    "index": 1,
+    "type": "USER",
+    "text": "请先读取用户 u-1024 的前端资料（含积分）。拿到积分后，请调用 calculate 工具把该积分乘以 2 算出来。两步都要做。"
+  },
+  {
+    "index": 2,
+    "type": "ASSISTANT",
+    "text": "",
+    "toolCalls": [
+      {
+        "id": "call_00_VZ1BhZa87KRvpPpFiYQ43125",
+        "name": "get_user_profile",
+        "arguments": "{\"userId\": \"u-1024\"}"
+      }
+    ]
+  },
+  {
+    "index": 3,
+    "type": "TOOL",
+    "text": "",
+    "toolResponses": [
+      {
+        "id": "call_00_VZ1BhZa87KRvpPpFiYQ43125",
+        "name": "get_user_profile",
+        "responseData": "用户 u-1024 的前端缓存资料：姓名=张三-FRONTEND-5ZXJ1Z，等级=白金-FRONTEND-5ZXJ1Z，积分=880（数据来自浏览器 localStorage）。"
+      }
+    ]
+  }
+]

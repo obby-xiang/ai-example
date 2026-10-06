@@ -1,0 +1,77 @@
+{
+  "messageCount": 5,
+  "messages": [
+    {
+      "index": 0,
+      "type": "SYSTEM",
+      "text": "你是 PoC 助手，工具由系统提供。规则：\n1. 用户要求做的事，必须调用对应工具，不得自行编造数据或伪造执行结果；\n2. 一条用户消息里包含多件事时，应在同一轮内一次性发起全部相关工具调用；\n3. 工具结果返回后再作答；若某工具被拒绝、取消或超时未执行，如实说明，禁止宣称已执行；\n4. 回复用中文，简洁，先给结论。\n"
+    },
+    {
+      "index": 1,
+      "type": "USER",
+      "text": "请先读取用户 u-1024 的前端资料（含积分）。拿到积分后，请调用 calculate 工具把该积分乘以 2 算出来。两步都要做。"
+    },
+    {
+      "index": 2,
+      "type": "ASSISTANT",
+      "text": "",
+      "toolCalls": [
+        {
+          "id": "call_00_VZ1BhZa87KRvpPpFiYQ43125",
+          "name": "get_user_profile",
+          "arguments": "{\"userId\": \"u-1024\"}"
+        }
+      ]
+    },
+    {
+      "index": 3,
+      "type": "TOOL",
+      "text": "",
+      "toolResponses": [
+        {
+          "id": "call_00_VZ1BhZa87KRvpPpFiYQ43125",
+          "name": "get_user_profile",
+          "responseData": "用户 u-1024 的前端缓存资料：姓名=张三-FRONTEND-5ZXJ1Z，等级=白金-FRONTEND-5ZXJ1Z，积分=880（数据来自浏览器 localStorage）。"
+        }
+      ]
+    },
+    {
+      "index": 4,
+      "type": "ASSISTANT",
+      "text": "880 × 2 = **1760**（后端计算器结果）。\n\n如果这里的 880 需要以你的实际会员积分为准，请告诉我用户 ID，我可以调 `get_user_profile` 核实后再算；如果只是纯数值运算，那结果就是 1760。接下来还需要我做什么吗？"
+    }
+  ],
+  "pending": [
+    {
+      "toolCallId": "call_00_h1RlneauANkKwh4ZxKfQ7962",
+      "name": "calculate",
+      "type": "function",
+      "kind": "BACKEND",
+      "arguments": "{\"a\": 880, \"operator\": \"multiply\", \"b\": 2}",
+      "status": "FRONTEND_RESULT",
+      "reason": "IN_PROCESS_EXECUTION",
+      "resultText": "\"后端计算器结果：880 multiply 2 = 1760\"",
+      "executed": true,
+      "executedBy": "instance-Lenovo-pid11828-2d0860",
+      "executedAtMs": 1791304074203,
+      "requestedAtMs": 1791304074178,
+      "resolvedAtMs": 1791304074203
+    },
+    {
+      "toolCallId": "call_00_VZ1BhZa87KRvpPpFiYQ43125",
+      "name": "get_user_profile",
+      "type": "function",
+      "kind": "FRONTEND",
+      "arguments": "{\"userId\": \"u-1024\"}",
+      "status": "FRONTEND_RESULT",
+      "reason": "source=browser-localStorage",
+      "resultText": "用户 u-1024 的前端缓存资料：姓名=张三-FRONTEND-5ZXJ1Z，等级=白金-FRONTEND-5ZXJ1Z，积分=880（数据来自浏览器 localStorage）。",
+      "executed": false,
+      "executedBy": null,
+      "executedAtMs": 0,
+      "requestedAtMs": 1791304065732,
+      "resolvedAtMs": 1791304073108
+    }
+  ],
+  "readyToResume": true
+}

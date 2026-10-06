@@ -1,0 +1,450 @@
+# subscribe http://127.0.0.1:18306/api/events/run-sp02-e4-71ec148b @ 2026-10-06T16:27:33.862Z
+# HTTP 200 content-type=text/event-stream
+[+000012ms] event:reattached
+[+000013ms] data:{"seq":16,"ts":"2026-10-07T00:27:33.868+08:00","wallMs":1791304053868,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"reattached","data":{"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","snapshot":{"runId":"run-sp02-e4-71ec148b","sessionId":"sp02-e4","mode":"explicit","status":"SUSPENDED","round":1,"messageCount":2,"inFlight":2,"assistantContent":"","finalText":null,"error":null,"emittedChars":0,"createdBy":"instance-Lenovo-pid22184-c59c24","createdAtMs":1791304051772,"updatedAtMs":1791304053736,"resumedBy":[]},"pending":[{"toolCallId":"call_01_idp7ceTWdWb93Og01Thp6619","name":"get_user_profile","type":"function","kind":"FRONTEND","arguments":"{\"userId\": \"u-1024\"}","status":"FRONTEND_RESULT","reason":"source=browser-localStorage","resultText":"用户 u-1024 的前端缓存资料：姓名=张三-FRONTEND-UYC211，等级=白金-FRONTEND-UYC211，积分=880（数据来自浏览器 localStorage）。","executed":false,"executedBy":null,"executedAtMs":0,"requestedAtMs":1791304053698,"resolvedAtMs":1791304053853},{"toolCallId":"call_00_PBKemMNpP20vQK7SrtyQ1748","name":"calculate","type":"function","kind":"BACKEND","arguments":"{\"a\": 6, \"operator\": \"multiply\", \"b\": 7}","status":"FRONTEND_RESULT","reason":"IN_PROCESS_EXECUTION","resultText":"\"后端计算器结果：6 multiply 7 = 42\"","executed":true,"executedBy":"instance-Lenovo-pid22184-c59c24","executedAtMs":1791304053724,"requestedAtMs":1791304053698,"resolvedAtMs":1791304053724}],"note":"重启后前端重新订阅即可看到挂起态（状态来源为 Redis，与订阅无关）"}}
+[+000014ms] 
+[+000332ms] event:tool_result
+[+000333ms] data:{"seq":17,"ts":"2026-10-07T00:27:34.191+08:00","wallMs":1791304054192,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"tool_result","data":{"toolCallId":"call_00_PBKemMNpP20vQK7SrtyQ1748","name":"calculate","kind":"BACKEND","executed":true,"reused":true,"executedBy":"instance-Lenovo-pid22184-c59c24","path":"resume-rebuild","result":"\"后端计算器结果：6 multiply 7 = 42\""}}
+[+000333ms] 
+[+000336ms] event:frontend_tool_result
+[+000337ms] data:{"seq":18,"ts":"2026-10-07T00:27:34.195+08:00","wallMs":1791304054195,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"frontend_tool_result","data":{"toolCallId":"call_01_idp7ceTWdWb93Og01Thp6619","name":"get_user_profile","status":"FRONTEND_RESULT","executed":false,"result":"用户 u-1024 的前端缓存资料：姓名=张三-FRONTEND-UYC211，等级=白金-FRONTEND-UYC211，积分=880（数据来自浏览器 localStorage）。","path":"resume-rebuild","resolvedBy":"instance-Lenovo-pid22184-c59c24"}}
+[+000337ms] 
+[+002022ms] event:delta
+[+002024ms] data:{"seq":19,"ts":"2026-10-07T00:27:35.880+08:00","wallMs":1791304055880,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"两项","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002024ms] 
+[+002028ms] event:delta
+[+002029ms] data:{"seq":20,"ts":"2026-10-07T00:27:35.887+08:00","wallMs":1791304055887,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"都","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002029ms] 
+[+002031ms] event:delta
+[+002032ms] data:{"seq":21,"ts":"2026-10-07T00:27:35.890+08:00","wallMs":1791304055890,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"已完成","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002033ms] 
+[+002035ms] event:delta
+[+002036ms] data:{"seq":22,"ts":"2026-10-07T00:27:35.893+08:00","wallMs":1791304055893,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"：\n\n","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002036ms] 
+[+002038ms] event:delta
+[+002039ms] data:{"seq":23,"ts":"2026-10-07T00:27:35.897+08:00","wallMs":1791304055897,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"**","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002040ms] 
+[+002041ms] event:delta
+[+002042ms] data:{"seq":24,"ts":"2026-10-07T00:27:35.900+08:00","wallMs":1791304055900,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"1","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002043ms] 
+[+002045ms] event:delta
+[+002046ms] data:{"seq":25,"ts":"2026-10-07T00:27:35.904+08:00","wallMs":1791304055904,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":".","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002047ms] 
+[+002049ms] event:delta
+[+002050ms] data:{"seq":26,"ts":"2026-10-07T00:27:35.907+08:00","wallMs":1791304055908,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":" ","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002050ms] 
+[+002052ms] event:delta
+[+002053ms] data:{"seq":27,"ts":"2026-10-07T00:27:35.911+08:00","wallMs":1791304055911,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"计算结果","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002053ms] 
+[+002056ms] event:delta
+[+002057ms] data:{"seq":28,"ts":"2026-10-07T00:27:35.913+08:00","wallMs":1791304055914,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"**\n","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002058ms] 
+[+002059ms] event:delta
+[+002060ms] data:{"seq":29,"ts":"2026-10-07T00:27:35.918+08:00","wallMs":1791304055918,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"-","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002060ms] 
+[+002061ms] event:delta
+[+002062ms] data:{"seq":30,"ts":"2026-10-07T00:27:35.921+08:00","wallMs":1791304055921,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":" ","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002062ms] 
+[+002063ms] event:delta
+[+002064ms] data:{"seq":31,"ts":"2026-10-07T00:27:35.923+08:00","wallMs":1791304055923,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"6","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002065ms] 
+[+002065ms] event:delta
+[+002066ms] data:{"seq":32,"ts":"2026-10-07T00:27:35.926+08:00","wallMs":1791304055926,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":" ×","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002067ms] 
+[+002068ms] event:delta
+[+002069ms] data:{"seq":33,"ts":"2026-10-07T00:27:35.928+08:00","wallMs":1791304055928,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":" ","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002070ms] 
+[+002071ms] event:delta
+[+002072ms] data:{"seq":34,"ts":"2026-10-07T00:27:35.931+08:00","wallMs":1791304055931,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"7","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002072ms] 
+[+002074ms] event:delta
+[+002075ms] data:{"seq":35,"ts":"2026-10-07T00:27:35.933+08:00","wallMs":1791304055933,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":" =","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002075ms] 
+[+002077ms] event:delta
+[+002077ms] data:{"seq":36,"ts":"2026-10-07T00:27:35.936+08:00","wallMs":1791304055936,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":" **","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002078ms] 
+[+002079ms] event:delta
+[+002080ms] data:{"seq":37,"ts":"2026-10-07T00:27:35.938+08:00","wallMs":1791304055939,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"42","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002080ms] 
+[+002081ms] event:delta
+[+002082ms] data:{"seq":38,"ts":"2026-10-07T00:27:35.941+08:00","wallMs":1791304055941,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"**","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002082ms] 
+[+002083ms] event:delta
+[+002084ms] data:{"seq":39,"ts":"2026-10-07T00:27:35.943+08:00","wallMs":1791304055943,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"（","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002085ms] 
+[+002086ms] event:delta
+[+002086ms] data:{"seq":40,"ts":"2026-10-07T00:27:35.946+08:00","wallMs":1791304055946,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"后端","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002088ms] 
+[+002088ms] event:delta
+[+002090ms] data:{"seq":41,"ts":"2026-10-07T00:27:35.948+08:00","wallMs":1791304055948,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"计算","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002090ms] 
+[+002091ms] event:delta
+[+002094ms] data:{"seq":42,"ts":"2026-10-07T00:27:35.951+08:00","wallMs":1791304055951,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"器","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002096ms] 
+[+002097ms] event:delta
+[+002097ms] data:{"seq":43,"ts":"2026-10-07T00:27:35.953+08:00","wallMs":1791304055953,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"返回","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002098ms] 
+[+002099ms] event:delta
+[+002100ms] data:{"seq":44,"ts":"2026-10-07T00:27:35.958+08:00","wallMs":1791304055958,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"）\n\n","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002100ms] 
+[+002101ms] event:delta
+[+002102ms] data:{"seq":45,"ts":"2026-10-07T00:27:35.961+08:00","wallMs":1791304055961,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"**","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002102ms] 
+[+002103ms] event:delta
+[+002104ms] data:{"seq":46,"ts":"2026-10-07T00:27:35.963+08:00","wallMs":1791304055963,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"2","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002104ms] 
+[+002105ms] event:delta
+[+002106ms] data:{"seq":47,"ts":"2026-10-07T00:27:35.965+08:00","wallMs":1791304055965,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":".","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002107ms] 
+[+002108ms] event:delta
+[+002108ms] data:{"seq":48,"ts":"2026-10-07T00:27:35.967+08:00","wallMs":1791304055967,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":" ","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002109ms] 
+[+002117ms] event:delta
+[+002118ms] data:{"seq":49,"ts":"2026-10-07T00:27:35.969+08:00","wallMs":1791304055969,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"用户","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002118ms] 
+[+002127ms] event:delta
+[+002128ms] data:{"seq":50,"ts":"2026-10-07T00:27:35.979+08:00","wallMs":1791304055979,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":" u","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002129ms] 
+[+002129ms] event:delta
+[+002130ms] data:{"seq":51,"ts":"2026-10-07T00:27:35.989+08:00","wallMs":1791304055989,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"-","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002131ms] 
+[+002132ms] event:delta
+[+002132ms] data:{"seq":52,"ts":"2026-10-07T00:27:35.991+08:00","wallMs":1791304055991,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"102","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002133ms] 
+[+002134ms] event:delta
+[+002134ms] data:{"seq":53,"ts":"2026-10-07T00:27:35.992+08:00","wallMs":1791304055992,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"4","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002135ms] 
+[+002136ms] event:delta
+[+002136ms] data:{"seq":54,"ts":"2026-10-07T00:27:35.995+08:00","wallMs":1791304055995,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":" ","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002137ms] 
+[+002138ms] event:delta
+[+002138ms] data:{"seq":55,"ts":"2026-10-07T00:27:35.998+08:00","wallMs":1791304055998,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"资料","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002139ms] 
+[+002141ms] event:delta
+[+002142ms] data:{"seq":56,"ts":"2026-10-07T00:27:36.000+08:00","wallMs":1791304056000,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"**\n","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002142ms] 
+[+002143ms] event:delta
+[+002143ms] data:{"seq":57,"ts":"2026-10-07T00:27:36.002+08:00","wallMs":1791304056002,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"-","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002144ms] 
+[+002145ms] event:delta
+[+002145ms] data:{"seq":58,"ts":"2026-10-07T00:27:36.004+08:00","wallMs":1791304056004,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":" ","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002146ms] 
+[+002147ms] event:delta
+[+002148ms] data:{"seq":59,"ts":"2026-10-07T00:27:36.006+08:00","wallMs":1791304056006,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"姓名","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002148ms] 
+[+002149ms] event:delta
+[+002149ms] data:{"seq":60,"ts":"2026-10-07T00:27:36.008+08:00","wallMs":1791304056008,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"：","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002150ms] 
+[+002151ms] event:delta
+[+002151ms] data:{"seq":61,"ts":"2026-10-07T00:27:36.010+08:00","wallMs":1791304056011,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"张三","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002152ms] 
+[+002153ms] event:delta
+[+002153ms] data:{"seq":62,"ts":"2026-10-07T00:27:36.013+08:00","wallMs":1791304056013,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"-F","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002154ms] 
+[+002154ms] event:delta
+[+002155ms] data:{"seq":63,"ts":"2026-10-07T00:27:36.014+08:00","wallMs":1791304056014,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"R","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002155ms] 
+[+002156ms] event:delta
+[+002157ms] data:{"seq":64,"ts":"2026-10-07T00:27:36.016+08:00","wallMs":1791304056016,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"ONT","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002157ms] 
+[+002158ms] event:delta
+[+002159ms] data:{"seq":65,"ts":"2026-10-07T00:27:36.017+08:00","wallMs":1791304056017,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"END","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002159ms] 
+[+002160ms] event:delta
+[+002160ms] data:{"seq":66,"ts":"2026-10-07T00:27:36.019+08:00","wallMs":1791304056019,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"-U","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002161ms] 
+[+002162ms] event:delta
+[+002162ms] data:{"seq":67,"ts":"2026-10-07T00:27:36.021+08:00","wallMs":1791304056021,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"YC","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002163ms] 
+[+002164ms] event:delta
+[+002164ms] data:{"seq":68,"ts":"2026-10-07T00:27:36.023+08:00","wallMs":1791304056023,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"211","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002165ms] 
+[+002165ms] event:delta
+[+002166ms] data:{"seq":69,"ts":"2026-10-07T00:27:36.024+08:00","wallMs":1791304056024,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"\n","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002167ms] 
+[+002168ms] event:delta
+[+002168ms] data:{"seq":70,"ts":"2026-10-07T00:27:36.027+08:00","wallMs":1791304056027,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"-","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002169ms] 
+[+002170ms] event:delta
+[+002170ms] data:{"seq":71,"ts":"2026-10-07T00:27:36.029+08:00","wallMs":1791304056029,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":" ","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002171ms] 
+[+002171ms] event:delta
+[+002172ms] data:{"seq":72,"ts":"2026-10-07T00:27:36.031+08:00","wallMs":1791304056031,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"等级","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002172ms] 
+[+002173ms] event:delta
+[+002174ms] data:{"seq":73,"ts":"2026-10-07T00:27:36.033+08:00","wallMs":1791304056033,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"：","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002174ms] 
+[+002175ms] event:delta
+[+002176ms] data:{"seq":74,"ts":"2026-10-07T00:27:36.034+08:00","wallMs":1791304056034,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"白金","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002176ms] 
+[+002177ms] event:delta
+[+002178ms] data:{"seq":75,"ts":"2026-10-07T00:27:36.036+08:00","wallMs":1791304056036,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"-F","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002178ms] 
+[+002180ms] event:delta
+[+002180ms] data:{"seq":76,"ts":"2026-10-07T00:27:36.038+08:00","wallMs":1791304056038,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"R","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002181ms] 
+[+002182ms] event:delta
+[+002183ms] data:{"seq":77,"ts":"2026-10-07T00:27:36.042+08:00","wallMs":1791304056042,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"ONT","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002183ms] 
+[+002185ms] event:delta
+[+002185ms] data:{"seq":78,"ts":"2026-10-07T00:27:36.044+08:00","wallMs":1791304056044,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"END","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002186ms] 
+[+002186ms] event:delta
+[+002187ms] data:{"seq":79,"ts":"2026-10-07T00:27:36.046+08:00","wallMs":1791304056046,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"-U","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002188ms] 
+[+002189ms] event:delta
+[+002189ms] data:{"seq":80,"ts":"2026-10-07T00:27:36.047+08:00","wallMs":1791304056047,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"YC","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002189ms] 
+[+002190ms] event:delta
+[+002191ms] data:{"seq":81,"ts":"2026-10-07T00:27:36.049+08:00","wallMs":1791304056049,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"211","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002192ms] 
+[+002193ms] event:delta
+[+002193ms] data:{"seq":82,"ts":"2026-10-07T00:27:36.051+08:00","wallMs":1791304056051,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"\n","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002194ms] 
+[+002194ms] event:delta
+[+002195ms] data:{"seq":83,"ts":"2026-10-07T00:27:36.052+08:00","wallMs":1791304056052,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"-","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002196ms] 
+[+002197ms] event:delta
+[+002197ms] data:{"seq":84,"ts":"2026-10-07T00:27:36.054+08:00","wallMs":1791304056054,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":" ","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002198ms] 
+[+002199ms] event:delta
+[+002199ms] data:{"seq":85,"ts":"2026-10-07T00:27:36.056+08:00","wallMs":1791304056056,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"积分","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002200ms] 
+[+002201ms] event:delta
+[+002201ms] data:{"seq":86,"ts":"2026-10-07T00:27:36.059+08:00","wallMs":1791304056059,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"：","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002202ms] 
+[+002202ms] event:delta
+[+002203ms] data:{"seq":87,"ts":"2026-10-07T00:27:36.062+08:00","wallMs":1791304056062,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"880","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002204ms] 
+[+002205ms] event:delta
+[+002205ms] data:{"seq":88,"ts":"2026-10-07T00:27:36.062+08:00","wallMs":1791304056062,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"\n\n","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002206ms] 
+[+002207ms] event:delta
+[+002207ms] data:{"seq":89,"ts":"2026-10-07T00:27:36.065+08:00","wallMs":1791304056065,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"⚠","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002208ms] 
+[+002208ms] event:delta
+[+002211ms] data:{"seq":90,"ts":"2026-10-07T00:27:36.067+08:00","wallMs":1791304056067,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"️","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002213ms] 
+[+002214ms] event:delta
+[+002215ms] data:{"seq":91,"ts":"2026-10-07T00:27:36.069+08:00","wallMs":1791304056069,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":" ","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002216ms] 
+[+002217ms] event:delta
+[+002217ms] data:{"seq":92,"ts":"2026-10-07T00:27:36.070+08:00","wallMs":1791304056070,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"提醒","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002218ms] 
+[+002219ms] event:delta
+[+002219ms] data:{"seq":93,"ts":"2026-10-07T00:27:36.078+08:00","wallMs":1791304056078,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"：","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002220ms] 
+[+002220ms] event:delta
+[+002221ms] data:{"seq":94,"ts":"2026-10-07T00:27:36.080+08:00","wallMs":1791304056080,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"这份","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002221ms] 
+[+002222ms] event:delta
+[+002223ms] data:{"seq":95,"ts":"2026-10-07T00:27:36.082+08:00","wallMs":1791304056082,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"资料","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002223ms] 
+[+002224ms] event:delta
+[+002225ms] data:{"seq":96,"ts":"2026-10-07T00:27:36.083+08:00","wallMs":1791304056083,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"并非","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002226ms] 
+[+002226ms] event:delta
+[+002227ms] data:{"seq":97,"ts":"2026-10-07T00:27:36.084+08:00","wallMs":1791304056084,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"后端","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002228ms] 
+[+002229ms] event:delta
+[+002229ms] data:{"seq":98,"ts":"2026-10-07T00:27:36.086+08:00","wallMs":1791304056087,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"数据","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002230ms] 
+[+002233ms] event:delta
+[+002234ms] data:{"seq":99,"ts":"2026-10-07T00:27:36.089+08:00","wallMs":1791304056089,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"，","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002235ms] 
+[+002235ms] event:delta
+[+002236ms] data:{"seq":100,"ts":"2026-10-07T00:27:36.095+08:00","wallMs":1791304056095,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"而是","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002237ms] 
+[+002239ms] event:delta
+[+002240ms] data:{"seq":101,"ts":"2026-10-07T00:27:36.097+08:00","wallMs":1791304056097,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"来自","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002240ms] 
+[+002241ms] event:delta
+[+002241ms] data:{"seq":102,"ts":"2026-10-07T00:27:36.100+08:00","wallMs":1791304056100,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"你","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002242ms] 
+[+002244ms] event:delta
+[+002244ms] data:{"seq":103,"ts":"2026-10-07T00:27:36.103+08:00","wallMs":1791304056103,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"浏览器","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002245ms] 
+[+002246ms] event:delta
+[+002247ms] data:{"seq":104,"ts":"2026-10-07T00:27:36.105+08:00","wallMs":1791304056105,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"本地","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002247ms] 
+[+002248ms] event:delta
+[+002249ms] data:{"seq":105,"ts":"2026-10-07T00:27:36.108+08:00","wallMs":1791304056108,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"缓存","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002249ms] 
+[+002251ms] event:delta
+[+002252ms] data:{"seq":106,"ts":"2026-10-07T00:27:36.110+08:00","wallMs":1791304056110,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"（","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002252ms] 
+[+002253ms] event:delta
+[+002254ms] data:{"seq":107,"ts":"2026-10-07T00:27:36.112+08:00","wallMs":1791304056112,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"local","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002254ms] 
+[+002255ms] event:delta
+[+002256ms] data:{"seq":108,"ts":"2026-10-07T00:27:36.114+08:00","wallMs":1791304056114,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"Storage","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002257ms] 
+[+002258ms] event:delta
+[+002259ms] data:{"seq":109,"ts":"2026-10-07T00:27:36.115+08:00","wallMs":1791304056115,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"），","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002259ms] 
+[+002260ms] event:delta
+[+002261ms] data:{"seq":110,"ts":"2026-10-07T00:27:36.117+08:00","wallMs":1791304056117,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"后端","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002262ms] 
+[+002263ms] event:delta
+[+002263ms] data:{"seq":111,"ts":"2026-10-07T00:27:36.119+08:00","wallMs":1791304056119,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"不","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002264ms] 
+[+002265ms] event:delta
+[+002265ms] data:{"seq":112,"ts":"2026-10-07T00:27:36.121+08:00","wallMs":1791304056121,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"执行","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002266ms] 
+[+002267ms] event:delta
+[+002267ms] data:{"seq":113,"ts":"2026-10-07T00:27:36.123+08:00","wallMs":1791304056124,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"该","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002268ms] 
+[+002268ms] event:delta
+[+002269ms] data:{"seq":114,"ts":"2026-10-07T00:27:36.126+08:00","wallMs":1791304056126,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"查询","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002269ms] 
+[+002270ms] event:delta
+[+002271ms] data:{"seq":115,"ts":"2026-10-07T00:27:36.128+08:00","wallMs":1791304056128,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"，","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002272ms] 
+[+002272ms] event:delta
+[+002273ms] data:{"seq":116,"ts":"2026-10-07T00:27:36.130+08:00","wallMs":1791304056130,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"结果","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002274ms] 
+[+002274ms] event:delta
+[+002275ms] data:{"seq":117,"ts":"2026-10-07T00:27:36.132+08:00","wallMs":1791304056132,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"由","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002276ms] 
+[+002276ms] event:delta
+[+002277ms] data:{"seq":118,"ts":"2026-10-07T00:27:36.133+08:00","wallMs":1791304056133,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"前端","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002278ms] 
+[+002278ms] event:delta
+[+002279ms] data:{"seq":119,"ts":"2026-10-07T00:27:36.136+08:00","wallMs":1791304056136,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"回","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002279ms] 
+[+002280ms] event:delta
+[+002281ms] data:{"seq":120,"ts":"2026-10-07T00:27:36.137+08:00","wallMs":1791304056137,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"传","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002282ms] 
+[+002283ms] event:delta
+[+002284ms] data:{"seq":121,"ts":"2026-10-07T00:27:36.140+08:00","wallMs":1791304056141,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"，","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002285ms] 
+[+002286ms] event:delta
+[+002288ms] data:{"seq":122,"ts":"2026-10-07T00:27:36.143+08:00","wallMs":1791304056143,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"因此","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002288ms] 
+[+002289ms] event:delta
+[+002289ms] data:{"seq":123,"ts":"2026-10-07T00:27:36.145+08:00","wallMs":1791304056145,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"未经","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002290ms] 
+[+002291ms] event:delta
+[+002292ms] data:{"seq":124,"ts":"2026-10-07T00:27:36.147+08:00","wallMs":1791304056147,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"服务","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002292ms] 
+[+002294ms] event:delta
+[+002296ms] data:{"seq":125,"ts":"2026-10-07T00:27:36.149+08:00","wallMs":1791304056149,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"端","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002299ms] 
+[+002301ms] event:delta
+[+002301ms] data:{"seq":126,"ts":"2026-10-07T00:27:36.151+08:00","wallMs":1791304056151,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"校验","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002302ms] 
+[+002303ms] event:delta
+[+002303ms] data:{"seq":127,"ts":"2026-10-07T00:27:36.153+08:00","wallMs":1791304056153,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"，","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002304ms] 
+[+002305ms] event:delta
+[+002306ms] data:{"seq":128,"ts":"2026-10-07T00:27:36.154+08:00","wallMs":1791304056154,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"字段","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002307ms] 
+[+002307ms] event:delta
+[+002308ms] data:{"seq":129,"ts":"2026-10-07T00:27:36.157+08:00","wallMs":1791304056157,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"值","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002309ms] 
+[+002311ms] event:delta
+[+002312ms] data:{"seq":130,"ts":"2026-10-07T00:27:36.159+08:00","wallMs":1791304056159,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"里","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002312ms] 
+[+002313ms] event:delta
+[+002313ms] data:{"seq":131,"ts":"2026-10-07T00:27:36.163+08:00","wallMs":1791304056163,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"带","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002314ms] 
+[+002315ms] event:delta
+[+002315ms] data:{"seq":132,"ts":"2026-10-07T00:27:36.165+08:00","wallMs":1791304056165,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":" `","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002316ms] 
+[+002316ms] event:delta
+[+002317ms] data:{"seq":133,"ts":"2026-10-07T00:27:36.167+08:00","wallMs":1791304056167,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"FR","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002317ms] 
+[+002318ms] event:delta
+[+002318ms] data:{"seq":134,"ts":"2026-10-07T00:27:36.169+08:00","wallMs":1791304056169,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"ONT","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002319ms] 
+[+002320ms] event:delta
+[+002320ms] data:{"seq":135,"ts":"2026-10-07T00:27:36.172+08:00","wallMs":1791304056172,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"END","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002321ms] 
+[+002321ms] event:delta
+[+002322ms] data:{"seq":136,"ts":"2026-10-07T00:27:36.173+08:00","wallMs":1791304056173,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"-U","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002322ms] 
+[+002323ms] event:delta
+[+002323ms] data:{"seq":137,"ts":"2026-10-07T00:27:36.176+08:00","wallMs":1791304056176,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"YC","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002324ms] 
+[+002324ms] event:delta
+[+002325ms] data:{"seq":138,"ts":"2026-10-07T00:27:36.178+08:00","wallMs":1791304056178,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"211","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002325ms] 
+[+002326ms] event:delta
+[+002326ms] data:{"seq":139,"ts":"2026-10-07T00:27:36.179+08:00","wallMs":1791304056179,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"`","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002327ms] 
+[+002327ms] event:delta
+[+002328ms] data:{"seq":140,"ts":"2026-10-07T00:27:36.180+08:00","wallMs":1791304056180,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":" ","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002328ms] 
+[+002329ms] event:delta
+[+002329ms] data:{"seq":141,"ts":"2026-10-07T00:27:36.182+08:00","wallMs":1791304056182,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"这类","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002330ms] 
+[+002330ms] event:delta
+[+002331ms] data:{"seq":142,"ts":"2026-10-07T00:27:36.183+08:00","wallMs":1791304056183,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"后缀","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002331ms] 
+[+002332ms] event:delta
+[+002332ms] data:{"seq":143,"ts":"2026-10-07T00:27:36.184+08:00","wallMs":1791304056184,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"也","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002333ms] 
+[+002333ms] event:delta
+[+002334ms] data:{"seq":144,"ts":"2026-10-07T00:27:36.186+08:00","wallMs":1791304056186,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"说明","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002334ms] 
+[+002335ms] event:delta
+[+002335ms] data:{"seq":145,"ts":"2026-10-07T00:27:36.187+08:00","wallMs":1791304056187,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"它是","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002336ms] 
+[+002336ms] event:delta
+[+002337ms] data:{"seq":146,"ts":"2026-10-07T00:27:36.188+08:00","wallMs":1791304056188,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"前端","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002337ms] 
+[+002338ms] event:delta
+[+002338ms] data:{"seq":147,"ts":"2026-10-07T00:27:36.190+08:00","wallMs":1791304056190,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"展示","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002338ms] 
+[+002339ms] event:delta
+[+002340ms] data:{"seq":148,"ts":"2026-10-07T00:27:36.191+08:00","wallMs":1791304056191,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"态","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002340ms] 
+[+002341ms] event:delta
+[+002341ms] data:{"seq":149,"ts":"2026-10-07T00:27:36.192+08:00","wallMs":1791304056192,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"的数据","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002342ms] 
+[+002342ms] event:delta
+[+002343ms] data:{"seq":150,"ts":"2026-10-07T00:27:36.194+08:00","wallMs":1791304056194,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"。","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002343ms] 
+[+002343ms] event:delta
+[+002344ms] data:{"seq":151,"ts":"2026-10-07T00:27:36.194+08:00","wallMs":1791304056194,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"如果需要","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002345ms] 
+[+002345ms] event:delta
+[+002346ms] data:{"seq":152,"ts":"2026-10-07T00:27:36.196+08:00","wallMs":1791304056197,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"权威","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002346ms] 
+[+002347ms] event:delta
+[+002347ms] data:{"seq":153,"ts":"2026-10-07T00:27:36.198+08:00","wallMs":1791304056198,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"数据","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002348ms] 
+[+002348ms] event:delta
+[+002349ms] data:{"seq":154,"ts":"2026-10-07T00:27:36.199+08:00","wallMs":1791304056199,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"，","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002349ms] 
+[+002350ms] event:delta
+[+002351ms] data:{"seq":155,"ts":"2026-10-07T00:27:36.200+08:00","wallMs":1791304056200,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"建议","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002351ms] 
+[+002352ms] event:delta
+[+002353ms] data:{"seq":156,"ts":"2026-10-07T00:27:36.201+08:00","wallMs":1791304056202,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"改","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002353ms] 
+[+002354ms] event:delta
+[+002355ms] data:{"seq":157,"ts":"2026-10-07T00:27:36.203+08:00","wallMs":1791304056203,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"从","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002355ms] 
+[+002356ms] event:delta
+[+002356ms] data:{"seq":158,"ts":"2026-10-07T00:27:36.204+08:00","wallMs":1791304056204,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"后端","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002357ms] 
+[+002357ms] event:delta
+[+002358ms] data:{"seq":159,"ts":"2026-10-07T00:27:36.205+08:00","wallMs":1791304056205,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"接口","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002358ms] 
+[+002359ms] event:delta
+[+002359ms] data:{"seq":160,"ts":"2026-10-07T00:27:36.206+08:00","wallMs":1791304056206,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"获取","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002360ms] 
+[+002360ms] event:delta
+[+002360ms] data:{"seq":161,"ts":"2026-10-07T00:27:36.208+08:00","wallMs":1791304056208,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"delta","data":{"content":"。","form":"EXPLICIT","runId":"run-sp02-e4-71ec148b"}}
+[+002361ms] 
+[+002361ms] event:model_round
+[+002362ms] data:{"seq":162,"ts":"2026-10-07T00:27:36.209+08:00","wallMs":1791304056210,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"model_round","data":{"runId":"run-sp02-e4-71ec148b","form":"EXPLICIT","elementCount":213,"textElements":["两项","都","已完成","：\n\n","**","1","."," ","计算结果","**\n","-"," ","6"," ×"," ","7"," ="," **","42","**","（","后端","计算","器","返回","）\n\n","**","2","."," ","用户"," u","-","102","4"," ","资料","**\n","-"," ","姓名","：","张三","-F","R","ONT","END","-U","YC","211","\n","-"," ","等级","：","白金","-F","R","ONT","END","-U","YC","211","\n","-"," ","积分","：","880","\n\n","⚠","️"," ","提醒","：","这份","资料","并非","后端","数据","，","而是","来自","你","浏览器","本地","缓存","（","local","Storage","），","后端","不","执行","该","查询","，","结果","由","前端","回","传","，","因此","未经","服务","端","校验","，","字段","值","里","带"," `","FR","ONT","END","-U","YC","211","`"," ","这类","后缀","也","说明","它是","前端","展示","态","的数据","。","如果需要","权威","数据","，","建议","改","从","后端","接口","获取","。"],"textJoined":"两项都已完成：\n\n**1. 计算结果**\n- 6 × 7 = **42**（后端计算器返回）\n\n**2. 用户 u-1024 资料**\n- 姓名：张三-FRONTEND-UYC211\n- 等级：白金-FRONTEND-UYC211\n- 积分：880\n\n⚠️ 提醒：这份资料并非后端数据，而是来自你浏览器本地缓存（localStorage），后端不执行该查询，结果由前端回传，因此未经服务端校验，字段值里带 `FRONTEND-UYC211` 这类后缀也说明它是前端展示态的数据。如果需要权威数据，建议改从后端接口获取。","textElementCount":143,"roundText":"两项都已完成：\n\n**1. 计算结果**\n- 6 × 7 = **42**（后端计算器返回）\n\n**2. 用户 u-1024 资料**\n- 姓名：张三-FRONTEND-UYC211\n- 等级：白金-FRONTEND-UYC211\n- 积分：880\n\n⚠️ 提醒：这份资料并非后端数据，而是来自你浏览器本地缓存（localStorage），后端不执行该查询，结果由前端回传，因此未经服务端校验，字段值里带 `FRONTEND-UYC211` 这类后缀也说明它是前端展示态的数据。如果需要权威数据，建议改从后端接口获取。","finishReason":"STOP","toolCalls":[],"calledBy":"instance-Lenovo-pid22184-c59c24"}}
+[+002362ms] 
+[+002363ms] event:resume_done
+[+002363ms] data:{"seq":163,"ts":"2026-10-07T00:27:36.214+08:00","wallMs":1791304056214,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"resume_done","data":{"runId":"run-sp02-e4-71ec148b","round":2,"finalText":"两项都已完成：\n\n**1. 计算结果**\n- 6 × 7 = **42**（后端计算器返回）\n\n**2. 用户 u-1024 资料**\n- 姓名：张三-FRONTEND-UYC211\n- 等级：白金-FRONTEND-UYC211\n- 积分：880\n\n⚠️ 提醒：这份资料并非后端数据，而是来自你浏览器本地缓存（localStorage），后端不执行该查询，结果由前端回传，因此未经服务端校验，字段值里带 `FRONTEND-UYC211` 这类后缀也说明它是前端展示态的数据。如果需要权威数据，建议改从后端接口获取。","modelRequests":1,"instanceId":"instance-Lenovo-pid22184-c59c24"}}
+[+002364ms] 
+[+002364ms] event:run_finished
+[+002365ms] data:{"seq":164,"ts":"2026-10-07T00:27:36.216+08:00","wallMs":1791304056216,"runId":"run-sp02-e4-71ec148b","instanceId":"instance-Lenovo-pid22184-c59c24","event":"run_finished","data":{"runId":"run-sp02-e4-71ec148b","trigger":"resume","outcome":{"status":"DONE","finalText":"两项都已完成：\n\n**1. 计算结果**\n- 6 × 7 = **42**（后端计算器返回）\n\n**2. 用户 u-1024 资料**\n- 姓名：张三-FRONTEND-UYC211\n- 等级：白金-FRONTEND-UYC211\n- 积分：880\n\n⚠️ 提醒：这份资料并非后端数据，而是来自你浏览器本地缓存（localStorage），后端不执行该查询，结果由前端回传，因此未经服务端校验，字段值里带 `FRONTEND-UYC211` 这类后缀也说明它是前端展示态的数据。如果需要权威数据，建议改从后端接口获取。","pendingIds":[],"modelRequests":1,"finishReason":"STOP"},"instanceId":"instance-Lenovo-pid22184-c59c24"}}
+[+002365ms] 
+# stream closed @ 2026-10-06T16:27:36.228Z

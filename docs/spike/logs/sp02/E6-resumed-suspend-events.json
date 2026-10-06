@@ -1,0 +1,34 @@
+[
+  {
+    "seq": 4,
+    "ts": "2026-10-07T00:27:54.181+08:00",
+    "wallMs": 1791304074181,
+    "runId": "run-sp02-e6-1ae83721",
+    "instanceId": "instance-Lenovo-pid11828-2d0860",
+    "event": "suspend_persisted",
+    "data": {
+      "runId": "run-sp02-e6-1ae83721",
+      "assistantContent": "",
+      "toolCalls": [
+        {
+          "toolCallId": "call_00_h1RlneauANkKwh4ZxKfQ7962",
+          "name": "calculate",
+          "type": "function",
+          "kind": "BACKEND",
+          "arguments": "{\"a\": 880, \"operator\": \"multiply\", \"b\": 2}",
+          "status": "PENDING",
+          "reason": null,
+          "resultText": null,
+          "executed": false,
+          "executedBy": null,
+          "executedAtMs": 0,
+          "requestedAtMs": 1791304074178,
+          "resolvedAtMs": 0
+        }
+      ],
+      "stateKey": "sp02:run:run-sp02-e6-1ae83721",
+      "pendingKey": "sp02:hitl:run-sp02-e6-1ae83721",
+      "writtenBy": "instance-Lenovo-pid11828-2d0860"
+    }
+  }
+]

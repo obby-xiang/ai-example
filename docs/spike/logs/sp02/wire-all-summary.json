@@ -1,0 +1,650 @@
+{
+  "wire-01": {
+    "file": "wire-01",
+    "request": {
+      "model": "deepseek-flash",
+      "stream": true,
+      "tools": [
+        "calculate",
+        "delete_config",
+        "get_user_profile"
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "contentChars": 160,
+          "contentHead": "你是 PoC 助手，工具由系统提供。规则：\n1. 用户要求做的事，必须调用对应工具，不得自行编造数据或伪造执行结果；\n2. 一条用户消息里包含多件事时，应在同一轮内一次性发起全部相关工具调用；\n3. 工具结果返回后再作答；若某工具被拒绝、取",
+          "toolCalls": [],
+          "toolCallId": null
+        },
+        {
+          "role": "user",
+          "contentChars": 59,
+          "contentHead": "帮我算一下 6 乘 7 等于多少，同时读取用户 u-1024 的前端资料（姓名/等级/积分）。最后把两者一起汇报给我。",
+          "toolCalls": [],
+          "toolCallId": null
+        }
+      ]
+    },
+    "response": {
+      "status": 200,
+      "elapsedMs": 985,
+      "content": "我这就并行执行这两个操作。",
+      "reasoningChars": 100,
+      "finishReason": "tool_calls",
+      "done": true,
+      "toolCalls": [
+        {
+          "id": "call_00_KLREinZhv165NVFBgE519342",
+          "name": "calculate",
+          "arguments": "{\"a\": 6, \"operator\": \"multiply\", \"b\": 7}"
+        },
+        {
+          "id": "call_01_ImAnOuU5ZkmMyOFhK4vr4414",
+          "name": "get_user_profile",
+          "arguments": "{\"userId\": \"u-1024\"}"
+        }
+      ]
+    }
+  },
+  "wire-02": {
+    "file": "wire-02",
+    "request": {
+      "model": "deepseek-flash",
+      "stream": true,
+      "tools": [
+        "delete_config",
+        "get_user_profile",
+        "calculate"
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "contentChars": 160,
+          "contentHead": "你是 PoC 助手，工具由系统提供。规则：\n1. 用户要求做的事，必须调用对应工具，不得自行编造数据或伪造执行结果；\n2. 一条用户消息里包含多件事时，应在同一轮内一次性发起全部相关工具调用；\n3. 工具结果返回后再作答；若某工具被拒绝、取",
+          "toolCalls": [],
+          "toolCallId": null
+        },
+        {
+          "role": "user",
+          "contentChars": 59,
+          "contentHead": "帮我算一下 6 乘 7 等于多少，同时读取用户 u-1024 的前端资料（姓名/等级/积分）。最后把两者一起汇报给我。",
+          "toolCalls": [],
+          "toolCallId": null
+        },
+        {
+          "role": "assistant",
+          "contentChars": 0,
+          "contentHead": "",
+          "toolCalls": [
+            {
+              "id": "call_00_KLREinZhv165NVFBgE519342",
+              "name": "calculate",
+              "arguments": "{\"a\": 6, \"operator\": \"multiply\", \"b\": 7}"
+            },
+            {
+              "id": "call_01_ImAnOuU5ZkmMyOFhK4vr4414",
+              "name": "get_user_profile",
+              "arguments": "{\"userId\": \"u-1024\"}"
+            }
+          ],
+          "toolCallId": null
+        },
+        {
+          "role": "tool",
+          "contentChars": 27,
+          "contentHead": "\"后端计算器结果：6 multiply 7 = 42\"",
+          "toolCalls": [],
+          "toolCallId": "call_00_KLREinZhv165NVFBgE519342"
+        },
+        {
+          "role": "tool",
+          "contentChars": 91,
+          "contentHead": "用户 u-1024 的前端缓存资料：姓名=张三-FRONTEND-RTRNLI，等级=白金-FRONTEND-RTRNLI，积分=880（数据来自浏览器 localStorage）。",
+          "toolCalls": [],
+          "toolCallId": "call_01_ImAnOuU5ZkmMyOFhK4vr4414"
+        }
+      ]
+    },
+    "response": {
+      "status": 200,
+      "elapsedMs": 1136,
+      "content": "结果如下：\n\n**1. 计算结果**\n- 6 × 7 = 42（后端计算器返回）\n\n**2. 用户 u-1024 资料**（来源：浏览器 localStorage 前端缓存）\n- 姓名：张三-FRONTEND-RTRNLI\n- 等级：白金-FRONTEND-RTRNLI\n- 积分：880\n\n提示：该资料由前端回传，后端未实际读取，仅代表浏览器本地缓存值，不一定是服务端权威数据；如需准确信息建议走服务端接口核对。",
+      "reasoningChars": 0,
+      "finishReason": "stop",
+      "done": true,
+      "toolCalls": []
+    }
+  },
+  "wire-03": {
+    "file": "wire-03",
+    "request": {
+      "model": "deepseek-flash",
+      "stream": true,
+      "tools": [
+        "get_user_profile",
+        "delete_config",
+        "calculate"
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "contentChars": 160,
+          "contentHead": "你是 PoC 助手，工具由系统提供。规则：\n1. 用户要求做的事，必须调用对应工具，不得自行编造数据或伪造执行结果；\n2. 一条用户消息里包含多件事时，应在同一轮内一次性发起全部相关工具调用；\n3. 工具结果返回后再作答；若某工具被拒绝、取",
+          "toolCalls": [],
+          "toolCallId": null
+        },
+        {
+          "role": "user",
+          "contentChars": 67,
+          "contentHead": "请直接调用 delete_config 工具删除配置定义 def-777。不要再问我是否确认，系统会自动弹出确认门，我在确认门里批准。",
+          "toolCalls": [],
+          "toolCallId": null
+        }
+      ]
+    },
+    "response": {
+      "status": 200,
+      "elapsedMs": 1210,
+      "content": "",
+      "reasoningChars": 353,
+      "finishReason": "tool_calls",
+      "done": true,
+      "toolCalls": [
+        {
+          "id": "call_00_hE0cvBgN3AUzXVWNAC4n9634",
+          "name": "delete_config",
+          "arguments": "{\"code\": \"def-777\"}"
+        }
+      ]
+    }
+  },
+  "wire-04": {
+    "file": "wire-04",
+    "request": {
+      "model": "deepseek-flash",
+      "stream": true,
+      "tools": [
+        "get_user_profile",
+        "delete_config",
+        "calculate"
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "contentChars": 160,
+          "contentHead": "你是 PoC 助手，工具由系统提供。规则：\n1. 用户要求做的事，必须调用对应工具，不得自行编造数据或伪造执行结果；\n2. 一条用户消息里包含多件事时，应在同一轮内一次性发起全部相关工具调用；\n3. 工具结果返回后再作答；若某工具被拒绝、取",
+          "toolCalls": [],
+          "toolCallId": null
+        },
+        {
+          "role": "user",
+          "contentChars": 67,
+          "contentHead": "请直接调用 delete_config 工具删除配置定义 def-777。不要再问我是否确认，系统会自动弹出确认门，我在确认门里批准。",
+          "toolCalls": [],
+          "toolCallId": null
+        },
+        {
+          "role": "assistant",
+          "contentChars": 0,
+          "contentHead": "",
+          "toolCalls": [
+            {
+              "id": "call_00_hE0cvBgN3AUzXVWNAC4n9634",
+              "name": "delete_config",
+              "arguments": "{\"code\": \"def-777\"}"
+            }
+          ],
+          "toolCallId": null
+        },
+        {
+          "role": "tool",
+          "contentChars": 35,
+          "contentHead": "\"后端已执行删除：配置 def-777 及其 3 行生效数据已删除。\"",
+          "toolCalls": [],
+          "toolCallId": "call_00_hE0cvBgN3AUzXVWNAC4n9634"
+        }
+      ]
+    },
+    "response": {
+      "status": 200,
+      "elapsedMs": 954,
+      "content": "已执行。\n\n- 工具：`delete_config`\n- 参数：`code = def-777`\n- 结果：配置定义 def-777 及其 **3 行生效数据**已被删除（不可恢复）。\n\n如需回滚，需重新创建该配置定义并重录这 3 行数据。",
+      "reasoningChars": 0,
+      "finishReason": "stop",
+      "done": true,
+      "toolCalls": []
+    }
+  },
+  "wire-05": {
+    "file": "wire-05",
+    "request": {
+      "model": "deepseek-flash",
+      "stream": true,
+      "tools": [
+        "get_user_profile",
+        "delete_config",
+        "calculate"
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "contentChars": 160,
+          "contentHead": "你是 PoC 助手，工具由系统提供。规则：\n1. 用户要求做的事，必须调用对应工具，不得自行编造数据或伪造执行结果；\n2. 一条用户消息里包含多件事时，应在同一轮内一次性发起全部相关工具调用；\n3. 工具结果返回后再作答；若某工具被拒绝、取",
+          "toolCalls": [],
+          "toolCallId": null
+        },
+        {
+          "role": "user",
+          "contentChars": 59,
+          "contentHead": "帮我算一下 6 乘 7 等于多少，同时读取用户 u-1024 的前端资料（姓名/等级/积分）。最后把两者一起汇报给我。",
+          "toolCalls": [],
+          "toolCallId": null
+        }
+      ]
+    },
+    "response": {
+      "status": 200,
+      "elapsedMs": 1267,
+      "content": "",
+      "reasoningChars": 100,
+      "finishReason": "tool_calls",
+      "done": true,
+      "toolCalls": [
+        {
+          "id": "call_00_MVCqzfIzKmgF1YZyuCat2052",
+          "name": "calculate",
+          "arguments": "{\"a\": 6, \"operator\": \"multiply\", \"b\": 7}"
+        },
+        {
+          "id": "call_01_UvBmnWAXQ6wm64MPgd6Z2400",
+          "name": "get_user_profile",
+          "arguments": "{\"userId\": \"u-1024\"}"
+        }
+      ]
+    }
+  },
+  "wire-06": {
+    "file": "wire-06",
+    "request": {
+      "model": "deepseek-flash",
+      "stream": true,
+      "tools": [
+        "get_user_profile",
+        "delete_config",
+        "calculate"
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "contentChars": 160,
+          "contentHead": "你是 PoC 助手，工具由系统提供。规则：\n1. 用户要求做的事，必须调用对应工具，不得自行编造数据或伪造执行结果；\n2. 一条用户消息里包含多件事时，应在同一轮内一次性发起全部相关工具调用；\n3. 工具结果返回后再作答；若某工具被拒绝、取",
+          "toolCalls": [],
+          "toolCallId": null
+        },
+        {
+          "role": "user",
+          "contentChars": 59,
+          "contentHead": "帮我算一下 6 乘 7 等于多少，同时读取用户 u-1024 的前端资料（姓名/等级/积分）。最后把两者一起汇报给我。",
+          "toolCalls": [],
+          "toolCallId": null
+        },
+        {
+          "role": "assistant",
+          "contentChars": 0,
+          "contentHead": "",
+          "toolCalls": [
+            {
+              "id": "call_00_MVCqzfIzKmgF1YZyuCat2052",
+              "name": "calculate",
+              "arguments": "{\"a\": 6, \"operator\": \"multiply\", \"b\": 7}"
+            },
+            {
+              "id": "call_01_UvBmnWAXQ6wm64MPgd6Z2400",
+              "name": "get_user_profile",
+              "arguments": "{\"userId\": \"u-1024\"}"
+            }
+          ],
+          "toolCallId": null
+        },
+        {
+          "role": "tool",
+          "contentChars": 27,
+          "contentHead": "\"后端计算器结果：6 multiply 7 = 42\"",
+          "toolCalls": [],
+          "toolCallId": "call_00_MVCqzfIzKmgF1YZyuCat2052"
+        },
+        {
+          "role": "tool",
+          "contentChars": 91,
+          "contentHead": "用户 u-1024 的前端缓存资料：姓名=张三-FRONTEND-Y0ON22，等级=白金-FRONTEND-Y0ON22，积分=880（数据来自浏览器 localStorage）。",
+          "toolCalls": [],
+          "toolCallId": "call_01_UvBmnWAXQ6wm64MPgd6Z2400"
+        }
+      ]
+    },
+    "response": {
+      "status": 200,
+      "elapsedMs": 934,
+      "content": "汇报如下：\n\n1. **计算结果**：6 × 7 = **42**（后端计算器返回）。\n2. **用户 u-1024 资料**（来自前端浏览器 localStorage 缓存）：\n   - 姓名：张三-FRONTEND-Y0ON22\n   - 等级：白金-FRONTEND-Y0ON22\n   - 积分：880\n\n提示：该资料由前端本地缓存回传，后端未做校验，字段值带有明显的标记后缀，如需用于正式业务请以后端数据为准。",
+      "reasoningChars": 86,
+      "finishReason": "stop",
+      "done": true,
+      "toolCalls": []
+    }
+  },
+  "wire-07": {
+    "file": "wire-07",
+    "request": {
+      "model": "deepseek-flash",
+      "stream": true,
+      "tools": [
+        "calculate",
+        "delete_config",
+        "get_user_profile"
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "contentChars": 160,
+          "contentHead": "你是 PoC 助手，工具由系统提供。规则：\n1. 用户要求做的事，必须调用对应工具，不得自行编造数据或伪造执行结果；\n2. 一条用户消息里包含多件事时，应在同一轮内一次性发起全部相关工具调用；\n3. 工具结果返回后再作答；若某工具被拒绝、取",
+          "toolCalls": [],
+          "toolCallId": null
+        },
+        {
+          "role": "user",
+          "contentChars": 59,
+          "contentHead": "帮我算一下 6 乘 7 等于多少，同时读取用户 u-1024 的前端资料（姓名/等级/积分）。最后把两者一起汇报给我。",
+          "toolCalls": [],
+          "toolCallId": null
+        }
+      ]
+    },
+    "response": {
+      "status": 200,
+      "elapsedMs": 1384,
+      "content": "我一并发起两个调用。",
+      "reasoningChars": 311,
+      "finishReason": "tool_calls",
+      "done": true,
+      "toolCalls": [
+        {
+          "id": "call_00_PBKemMNpP20vQK7SrtyQ1748",
+          "name": "calculate",
+          "arguments": "{\"a\": 6, \"operator\": \"multiply\", \"b\": 7}"
+        },
+        {
+          "id": "call_01_idp7ceTWdWb93Og01Thp6619",
+          "name": "get_user_profile",
+          "arguments": "{\"userId\": \"u-1024\"}"
+        }
+      ]
+    }
+  },
+  "wire-08": {
+    "file": "wire-08",
+    "request": {
+      "model": "deepseek-flash",
+      "stream": true,
+      "tools": [
+        "calculate",
+        "delete_config",
+        "get_user_profile"
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "contentChars": 160,
+          "contentHead": "你是 PoC 助手，工具由系统提供。规则：\n1. 用户要求做的事，必须调用对应工具，不得自行编造数据或伪造执行结果；\n2. 一条用户消息里包含多件事时，应在同一轮内一次性发起全部相关工具调用；\n3. 工具结果返回后再作答；若某工具被拒绝、取",
+          "toolCalls": [],
+          "toolCallId": null
+        },
+        {
+          "role": "user",
+          "contentChars": 59,
+          "contentHead": "帮我算一下 6 乘 7 等于多少，同时读取用户 u-1024 的前端资料（姓名/等级/积分）。最后把两者一起汇报给我。",
+          "toolCalls": [],
+          "toolCallId": null
+        },
+        {
+          "role": "assistant",
+          "contentChars": 0,
+          "contentHead": "",
+          "toolCalls": [
+            {
+              "id": "call_00_PBKemMNpP20vQK7SrtyQ1748",
+              "name": "calculate",
+              "arguments": "{\"a\": 6, \"operator\": \"multiply\", \"b\": 7}"
+            },
+            {
+              "id": "call_01_idp7ceTWdWb93Og01Thp6619",
+              "name": "get_user_profile",
+              "arguments": "{\"userId\": \"u-1024\"}"
+            }
+          ],
+          "toolCallId": null
+        },
+        {
+          "role": "tool",
+          "contentChars": 27,
+          "contentHead": "\"后端计算器结果：6 multiply 7 = 42\"",
+          "toolCalls": [],
+          "toolCallId": "call_00_PBKemMNpP20vQK7SrtyQ1748"
+        },
+        {
+          "role": "tool",
+          "contentChars": 91,
+          "contentHead": "用户 u-1024 的前端缓存资料：姓名=张三-FRONTEND-UYC211，等级=白金-FRONTEND-UYC211，积分=880（数据来自浏览器 localStorage）。",
+          "toolCalls": [],
+          "toolCallId": "call_01_idp7ceTWdWb93Og01Thp6619"
+        }
+      ]
+    },
+    "response": {
+      "status": 200,
+      "elapsedMs": 1584,
+      "content": "两项都已完成：\n\n**1. 计算结果**\n- 6 × 7 = **42**（后端计算器返回）\n\n**2. 用户 u-1024 资料**\n- 姓名：张三-FRONTEND-UYC211\n- 等级：白金-FRONTEND-UYC211\n- 积分：880\n\n⚠️ 提醒：这份资料并非后端数据，而是来自你浏览器本地缓存（localStorage），后端不执行该查询，结果由前端回传，因此未经服务端校验，字段值里带 `FRONTEND-UYC211` 这类后缀也说明它是前端展示态的数据。如果需要权威数据，建议改从后端接口获取。",
+      "reasoningChars": 301,
+      "finishReason": "stop",
+      "done": true,
+      "toolCalls": []
+    }
+  },
+  "wire-09": {
+    "file": "wire-09",
+    "request": {
+      "model": "deepseek-flash",
+      "stream": true,
+      "tools": [
+        "calculate",
+        "get_user_profile",
+        "delete_config"
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "contentChars": 160,
+          "contentHead": "你是 PoC 助手，工具由系统提供。规则：\n1. 用户要求做的事，必须调用对应工具，不得自行编造数据或伪造执行结果；\n2. 一条用户消息里包含多件事时，应在同一轮内一次性发起全部相关工具调用；\n3. 工具结果返回后再作答；若某工具被拒绝、取",
+          "toolCalls": [],
+          "toolCallId": null
+        },
+        {
+          "role": "user",
+          "contentChars": 66,
+          "contentHead": "请先读取用户 u-1024 的前端资料（含积分）。拿到积分后，请调用 calculate 工具把该积分乘以 2 算出来。两步都要做。",
+          "toolCalls": [],
+          "toolCallId": null
+        }
+      ]
+    },
+    "response": {
+      "status": 200,
+      "elapsedMs": 1123,
+      "content": "我先读取用户资料，拿到积分后再做乘法。",
+      "reasoningChars": 261,
+      "finishReason": "tool_calls",
+      "done": true,
+      "toolCalls": [
+        {
+          "id": "call_00_VZ1BhZa87KRvpPpFiYQ43125",
+          "name": "get_user_profile",
+          "arguments": "{\"userId\": \"u-1024\"}"
+        }
+      ]
+    }
+  },
+  "wire-10": {
+    "file": "wire-10",
+    "request": {
+      "model": "deepseek-flash",
+      "stream": true,
+      "tools": [
+        "delete_config",
+        "get_user_profile",
+        "calculate"
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "contentChars": 160,
+          "contentHead": "你是 PoC 助手，工具由系统提供。规则：\n1. 用户要求做的事，必须调用对应工具，不得自行编造数据或伪造执行结果；\n2. 一条用户消息里包含多件事时，应在同一轮内一次性发起全部相关工具调用；\n3. 工具结果返回后再作答；若某工具被拒绝、取",
+          "toolCalls": [],
+          "toolCallId": null
+        },
+        {
+          "role": "user",
+          "contentChars": 66,
+          "contentHead": "请先读取用户 u-1024 的前端资料（含积分）。拿到积分后，请调用 calculate 工具把该积分乘以 2 算出来。两步都要做。",
+          "toolCalls": [],
+          "toolCallId": null
+        },
+        {
+          "role": "assistant",
+          "contentChars": 0,
+          "contentHead": "",
+          "toolCalls": [
+            {
+              "id": "call_00_VZ1BhZa87KRvpPpFiYQ43125",
+              "name": "get_user_profile",
+              "arguments": "{\"userId\": \"u-1024\"}"
+            }
+          ],
+          "toolCallId": null
+        },
+        {
+          "role": "tool",
+          "contentChars": 91,
+          "contentHead": "用户 u-1024 的前端缓存资料：姓名=张三-FRONTEND-5ZXJ1Z，等级=白金-FRONTEND-5ZXJ1Z，积分=880（数据来自浏览器 localStorage）。",
+          "toolCalls": [],
+          "toolCallId": "call_00_VZ1BhZa87KRvpPpFiYQ43125"
+        }
+      ]
+    },
+    "response": {
+      "status": 200,
+      "elapsedMs": 542,
+      "content": "",
+      "reasoningChars": 22,
+      "finishReason": "tool_calls",
+      "done": true,
+      "toolCalls": [
+        {
+          "id": "call_00_h1RlneauANkKwh4ZxKfQ7962",
+          "name": "calculate",
+          "arguments": "{\"a\": 880, \"operator\": \"multiply\", \"b\": 2}"
+        }
+      ]
+    }
+  },
+  "wire-11": {
+    "file": "wire-11",
+    "request": {
+      "model": "deepseek-flash",
+      "stream": true,
+      "tools": [
+        "delete_config",
+        "get_user_profile",
+        "calculate"
+      ],
+      "messages": [
+        {
+          "role": "assistant",
+          "contentChars": 0,
+          "contentHead": "",
+          "toolCalls": [
+            {
+              "id": "call_00_h1RlneauANkKwh4ZxKfQ7962",
+              "name": "calculate",
+              "arguments": "{\"a\": 880, \"operator\": \"multiply\", \"b\": 2}"
+            }
+          ],
+          "toolCallId": null
+        },
+        {
+          "role": "tool",
+          "contentChars": 31,
+          "contentHead": "\"后端计算器结果：880 multiply 2 = 1760\"",
+          "toolCalls": [],
+          "toolCallId": "call_00_h1RlneauANkKwh4ZxKfQ7962"
+        }
+      ]
+    },
+    "response": {
+      "status": 200,
+      "elapsedMs": 4220,
+      "content": "880 × 2 = **1760**（后端计算器结果）。\n\n如果这里的 880 需要以你的实际会员积分为准，请告诉我用户 ID，我可以调 `get_user_profile` 核实后再算；如果只是纯数值运算，那结果就是 1760。接下来还需要我做什么吗？",
+      "reasoningChars": 3395,
+      "finishReason": "stop",
+      "done": true,
+      "toolCalls": []
+    }
+  },
+  "wire-12": {
+    "file": "wire-12",
+    "request": {
+      "model": "deepseek-flash",
+      "stream": true,
+      "tools": [
+        "calculate",
+        "get_user_profile",
+        "delete_config"
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "contentChars": 160,
+          "contentHead": "你是 PoC 助手，工具由系统提供。规则：\n1. 用户要求做的事，必须调用对应工具，不得自行编造数据或伪造执行结果；\n2. 一条用户消息里包含多件事时，应在同一轮内一次性发起全部相关工具调用；\n3. 工具结果返回后再作答；若某工具被拒绝、取",
+          "toolCalls": [],
+          "toolCallId": null
+        },
+        {
+          "role": "user",
+          "contentChars": 126,
+          "contentHead": "请先读取用户 u-1024 的前端资料（姓名/等级）；读取完成后，请调用 delete_config 删除配置定义 def-999。这两步都是我的明确指令：删除的编码就是 def-999（不要从前端资料里推断编码），删除前我会在系统弹出的确",
+          "toolCalls": [],
+          "toolCallId": null
+        }
+      ]
+    },
+    "response": {
+      "status": 200,
+      "elapsedMs": 1719,
+      "content": "我先并行发起两个调用。",
+      "reasoningChars": 1184,
+      "finishReason": "tool_calls",
+      "done": true,
+      "toolCalls": [
+        {
+          "id": "call_00_GuqmqM4d5Rm0Eny1xnHE6850",
+          "name": "get_user_profile",
+          "arguments": "{\"userId\": \"u-1024\"}"
+        },
+        {
+          "id": "call_01_20n1lfwoY7cdYmle4UWf5386",
+          "name": "delete_config",
+          "arguments": "{\"code\": \"def-999\"}"
+        }
+      ]
+    }
+  }
+}

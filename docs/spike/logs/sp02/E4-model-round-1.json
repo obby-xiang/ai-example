@@ -1,0 +1,38 @@
+{
+  "seq": 9,
+  "ts": "2026-10-07T00:27:33.695+08:00",
+  "wallMs": 1791304053695,
+  "runId": "run-sp02-e4-71ec148b",
+  "instanceId": "instance-Lenovo-pid22184-c59c24",
+  "event": "model_round",
+  "data": {
+    "runId": "run-sp02-e4-71ec148b",
+    "form": "EXPLICIT",
+    "elementCount": 81,
+    "textElements": [
+      "我一",
+      "并",
+      "发起",
+      "两个",
+      "调用",
+      "。"
+    ],
+    "textJoined": "我一并发起两个调用。",
+    "textElementCount": 6,
+    "roundText": "我一并发起两个调用。",
+    "finishReason": "TOOL_CALLS",
+    "toolCalls": [
+      {
+        "id": "call_00_PBKemMNpP20vQK7SrtyQ1748",
+        "name": "calculate",
+        "arguments": "{\"a\": 6, \"operator\": \"multiply\", \"b\": 7}"
+      },
+      {
+        "id": "call_01_idp7ceTWdWb93Og01Thp6619",
+        "name": "get_user_profile",
+        "arguments": "{\"userId\": \"u-1024\"}"
+      }
+    ],
+    "calledBy": "instance-Lenovo-pid22184-c59c24"
+  }
+}

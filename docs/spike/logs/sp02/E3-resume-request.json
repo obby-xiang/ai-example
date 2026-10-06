@@ -1,0 +1,142 @@
+{
+  "runId": "run-sp02-e3-c22ac28d",
+  "mode": "predicate",
+  "statusBeforeResume": "SUSPENDED",
+  "instanceId": "instance-Lenovo-pid29380-230c0a",
+  "rebuildPreview": {
+    "messageCount": 4,
+    "messages": [
+      {
+        "index": 0,
+        "type": "SYSTEM",
+        "text": "你是 PoC 助手，工具由系统提供。规则：\n1. 用户要求做的事，必须调用对应工具，不得自行编造数据或伪造执行结果；\n2. 一条用户消息里包含多件事时，应在同一轮内一次性发起全部相关工具调用；\n3. 工具结果返回后再作答；若某工具被拒绝、取消或超时未执行，如实说明，禁止宣称已执行；\n4. 回复用中文，简洁，先给结论。\n"
+      },
+      {
+        "index": 1,
+        "type": "USER",
+        "text": "帮我算一下 6 乘 7 等于多少，同时读取用户 u-1024 的前端资料（姓名/等级/积分）。最后把两者一起汇报给我。"
+      },
+      {
+        "type": "ASSISTANT",
+        "content": "",
+        "toolCalls": [
+          {
+            "id": "call_00_MVCqzfIzKmgF1YZyuCat2052",
+            "name": "calculate",
+            "arguments": "{\"a\": 6, \"operator\": \"multiply\", \"b\": 7}"
+          },
+          {
+            "id": "call_01_UvBmnWAXQ6wm64MPgd6Z2400",
+            "name": "get_user_profile",
+            "arguments": "{\"userId\": \"u-1024\"}"
+          }
+        ]
+      },
+      {
+        "type": "TOOL",
+        "toolResponses": [
+          {
+            "id": "call_00_MVCqzfIzKmgF1YZyuCat2052",
+            "name": "calculate",
+            "status": "FRONTEND_RESULT",
+            "executed": true,
+            "responseData": "\"后端计算器结果：6 multiply 7 = 42\""
+          },
+          {
+            "id": "call_01_UvBmnWAXQ6wm64MPgd6Z2400",
+            "name": "get_user_profile",
+            "status": "FRONTEND_RESULT",
+            "executed": false,
+            "responseData": "用户 u-1024 的前端缓存资料：姓名=张三-FRONTEND-Y0ON22，等级=白金-FRONTEND-Y0ON22，积分=880（数据来自浏览器 localStorage）。"
+          }
+        ]
+      }
+    ],
+    "pending": [
+      {
+        "toolCallId": "call_01_UvBmnWAXQ6wm64MPgd6Z2400",
+        "name": "get_user_profile",
+        "type": "function",
+        "kind": "FRONTEND",
+        "arguments": "{\"userId\": \"u-1024\"}",
+        "status": "FRONTEND_RESULT",
+        "reason": "source=browser-localStorage",
+        "resultText": "用户 u-1024 的前端缓存资料：姓名=张三-FRONTEND-Y0ON22，等级=白金-FRONTEND-Y0ON22，积分=880（数据来自浏览器 localStorage）。",
+        "executed": false,
+        "executedBy": null,
+        "executedAtMs": 0,
+        "requestedAtMs": 1791304033343,
+        "resolvedAtMs": 1791304041295
+      },
+      {
+        "toolCallId": "call_00_MVCqzfIzKmgF1YZyuCat2052",
+        "name": "calculate",
+        "type": "function",
+        "kind": "BACKEND",
+        "arguments": "{\"a\": 6, \"operator\": \"multiply\", \"b\": 7}",
+        "status": "FRONTEND_RESULT",
+        "reason": "IN_PROCESS_EXECUTION",
+        "resultText": "\"后端计算器结果：6 multiply 7 = 42\"",
+        "executed": true,
+        "executedBy": "instance-Lenovo-pid15372-2650ff",
+        "executedAtMs": 1791304033371,
+        "requestedAtMs": 1791304033343,
+        "resolvedAtMs": 1791304033371
+      }
+    ],
+    "readyToResume": true
+  },
+  "resumed": true,
+  "rebuiltTools": [
+    "call_00_MVCqzfIzKmgF1YZyuCat2052:FRONTEND_RESULT:executed-by-previous-instance(instance-Lenovo-pid15372-2650ff)",
+    "call_01_UvBmnWAXQ6wm64MPgd6Z2400:FRONTEND_RESULT:reused"
+  ],
+  "promptMessageCount": 4,
+  "promptMessages": [
+    {
+      "index": 0,
+      "type": "SYSTEM",
+      "text": "你是 PoC 助手，工具由系统提供。规则：\n1. 用户要求做的事，必须调用对应工具，不得自行编造数据或伪造执行结果；\n2. 一条用户消息里包含多件事时，应在同一轮内一次性发起全部相关工具调用；\n3. 工具结果返回后再作答；若某工具被拒绝、取消或超时未执行，如实说明，禁止宣称已执行；\n4. 回复用中文，简洁，先给结论。\n"
+    },
+    {
+      "index": 1,
+      "type": "USER",
+      "text": "帮我算一下 6 乘 7 等于多少，同时读取用户 u-1024 的前端资料（姓名/等级/积分）。最后把两者一起汇报给我。"
+    },
+    {
+      "index": 2,
+      "type": "ASSISTANT",
+      "text": "",
+      "toolCalls": [
+        {
+          "id": "call_00_MVCqzfIzKmgF1YZyuCat2052",
+          "name": "calculate",
+          "arguments": "{\"a\": 6, \"operator\": \"multiply\", \"b\": 7}"
+        },
+        {
+          "id": "call_01_UvBmnWAXQ6wm64MPgd6Z2400",
+          "name": "get_user_profile",
+          "arguments": "{\"userId\": \"u-1024\"}"
+        }
+      ]
+    },
+    {
+      "index": 3,
+      "type": "TOOL",
+      "text": "",
+      "toolResponses": [
+        {
+          "id": "call_00_MVCqzfIzKmgF1YZyuCat2052",
+          "name": "calculate",
+          "responseData": "\"后端计算器结果：6 multiply 7 = 42\""
+        },
+        {
+          "id": "call_01_UvBmnWAXQ6wm64MPgd6Z2400",
+          "name": "get_user_profile",
+          "responseData": "用户 u-1024 的前端缓存资料：姓名=张三-FRONTEND-Y0ON22，等级=白金-FRONTEND-Y0ON22，积分=880（数据来自浏览器 localStorage）。"
+        }
+      ]
+    }
+  ],
+  "resumedBy": "instance-Lenovo-pid29380-230c0a"
+}

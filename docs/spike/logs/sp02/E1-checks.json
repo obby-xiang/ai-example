@@ -1,0 +1,434 @@
+[
+  {
+    "id": "E1-0",
+    "name": "instance1 起来且 Redis 可达",
+    "pass": true,
+    "detail": {
+      "port": "18306",
+      "pid": 29264,
+      "instanceId": "instance-Lenovo-pid29264-a55e94",
+      "toolKinds": {
+        "calculate": "BACKEND",
+        "get_user_profile": "FRONTEND",
+        "delete_config": "SENSITIVE"
+      },
+      "suppressExternalRounds": false,
+      "frontendToolTimeoutSeconds": 120,
+      "confirmTimeoutSeconds": 120,
+      "execDelayMsAfterApprove": 0,
+      "instanceToolCounters": {
+        "delete_config": 0,
+        "calculate": 0,
+        "get_user_profile_stub_body": 0
+      },
+      "runIds": []
+    }
+  },
+  {
+    "id": "E1-1",
+    "name": "挂起态已外置（suspend_persisted 事件含 Redis 键与 tool_calls）",
+    "pass": true,
+    "detail": {
+      "toolCallIds": [
+        {
+          "name": "calculate",
+          "kind": "BACKEND",
+          "id": "call_00_KLREinZhv165NVFBgE519342"
+        },
+        {
+          "name": "get_user_profile",
+          "kind": "FRONTEND",
+          "id": "call_01_ImAnOuU5ZkmMyOFhK4vr4414"
+        }
+      ],
+      "keys": "sp02:run:run-sp02-e1-f5ce591d"
+    }
+  },
+  {
+    "id": "E1-2",
+    "name": "kill -9 之后挂起态与台账仍在 Redis 里（含 assistant(tool_calls) 与 in-flight 条目）",
+    "pass": true,
+    "detail": {
+      "redisKey": "sp02:run:run-sp02-e1-f5ce591d",
+      "pendingKey": "sp02:hitl:run-sp02-e1-f5ce591d",
+      "sample": "# 应用已被 kill -9，以下为直接读 Redis 的结果（memurai-cli）\n## HGETALL sp02:hitl:run-sp02-e1-f5ce591d\ncall_01_ImAnOuU5ZkmMyOFhK4vr4414\n{\"toolCallId\":\"call_01_ImAnOuU5ZkmMyOFhK4vr4414\",\"name\":\"get_user_profile\",\"type\":\"function\",\"kind\":\"FRONTEND\",\"arguments\":\"{\\\"userId\\\": \\\"u-1024\\\"}\",\"status\":\"PENDING\",\"reason\":null,\"resultText\":null,\"executed\":false,\"executedBy\":null,\"executedAtMs\":0,\"requestedAtMs\":17913039984"
+    }
+  },
+  {
+    "id": "E1-3",
+    "name": "新实例与旧实例不是同一个 instanceId（进程已重启）",
+    "pass": true,
+    "detail": {
+      "instance1": "instance-Lenovo-pid29264-a55e94",
+      "instance2": "instance-Lenovo-pid26912-c13609"
+    }
+  },
+  {
+    "id": "E1-4",
+    "name": "重启后能从 Redis 发现待续跑轮次（/api/runs）",
+    "pass": true,
+    "detail": {
+      "runId": "run-sp02-e1-f5ce591d",
+      "sessionId": "sp02-e1",
+      "mode": "blocking",
+      "status": "SUSPENDED",
+      "round": 2,
+      "messageCount": 2,
+      "inFlight": 2,
+      "assistantContent": "",
+      "finalText": null,
+      "error": null,
+      "emittedChars": 0,
+      "createdBy": "instance-Lenovo-pid29264-a55e94",
+      "createdAtMs": 1791303996958,
+      "updatedAtMs": 1791303998498,
+      "resumedBy": [],
+      "pendingCount": 2
+    }
+  },
+  {
+    "id": "E1-5",
+    "name": "挂起条目在新进程可见且未被重复请求（frontend_tool_request 计数=1）",
+    "pass": true,
+    "detail": {
+      "pendingBefore": {
+        "toolCallId": "call_01_ImAnOuU5ZkmMyOFhK4vr4414",
+        "name": "get_user_profile",
+        "type": "function",
+        "kind": "FRONTEND",
+        "arguments": "{\"userId\": \"u-1024\"}",
+        "status": "PENDING",
+        "reason": null,
+        "resultText": null,
+        "executed": false,
+        "executedBy": null,
+        "executedAtMs": 0,
+        "requestedAtMs": 1791303998492,
+        "resolvedAtMs": 0
+      },
+      "requests": 1
+    }
+  },
+  {
+    "id": "E1-6",
+    "name": "挂起项未落定时拒绝续跑（409 PENDING_UNRESOLVED）且不发模型请求",
+    "pass": true,
+    "detail": {
+      "status": 409,
+      "reason": "PENDING_UNRESOLVED",
+      "wireDelta": 0
+    }
+  },
+  {
+    "id": "E1-7",
+    "name": "前端结果写入 Redis（新进程无内存门，wokeInProcessGate=false）",
+    "pass": true,
+    "detail": {
+      "runId": "run-sp02-e1-f5ce591d",
+      "toolCallId": "call_01_ImAnOuU5ZkmMyOFhK4vr4414",
+      "instanceId": "instance-Lenovo-pid26912-c13609",
+      "accepted": true,
+      "duplicate": false,
+      "status": "FRONTEND_RESULT",
+      "wokeInProcessGate": false
+    }
+  },
+  {
+    "id": "E1-8",
+    "name": "续跑被受理（202）且重建请求含 assistant(tool_calls)+role:tool",
+    "pass": true,
+    "detail": {
+      "status": 202,
+      "resumed": true,
+      "rebuiltTools": [
+        "call_00_KLREinZhv165NVFBgE519342:FRONTEND_RESULT:executed-by-previous-instance(instance-Lenovo-pid29264-a55e94)",
+        "call_01_ImAnOuU5ZkmMyOFhK4vr4414:FRONTEND_RESULT:reused"
+      ]
+    }
+  },
+  {
+    "id": "E1-8b",
+    "name": "已执行过的后端工具在续跑时被识别为“上一实例已执行”（不重复执行）",
+    "pass": true,
+    "detail": [
+      "call_00_KLREinZhv165NVFBgE519342:FRONTEND_RESULT:executed-by-previous-instance(instance-Lenovo-pid29264-a55e94)",
+      "call_01_ImAnOuU5ZkmMyOFhK4vr4414:FRONTEND_RESULT:reused"
+    ]
+  },
+  {
+    "id": "E1-9",
+    "name": "续跑全程只发 1 次模型请求（不重放第 1 轮请求）",
+    "pass": true,
+    "detail": [
+      "wire-02-request.json",
+      "wire-02-response.json"
+    ]
+  },
+  {
+    "id": "E1-10",
+    "name": "流式续接：收到 delta 且以 done/run_finished 终帧结束",
+    "pass": true,
+    "detail": {
+      "deltas": 117,
+      "frames": [
+        "reattached",
+        "frontend_result_stored",
+        "tool_result",
+        "frontend_tool_result",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "model_round",
+        "resume_done",
+        "run_finished"
+      ]
+    }
+  },
+  {
+    "id": "E1-11",
+    "name": "不重放：台账里 calculate 恰好 1 条，且第 2 个实例里 calculate 本地计数=0（未重复执行）",
+    "pass": true,
+    "detail": {
+      "ledgerCounts": {
+        "calculate": 1
+      },
+      "localCounters": {
+        "calculate": 0,
+        "delete_config": 0,
+        "get_user_profile_stub_body": 0
+      }
+    }
+  },
+  {
+    "id": "E1-12",
+    "name": "前端工具后端桩体从未执行（userProfileBodyCalls=0）",
+    "pass": true,
+    "detail": {
+      "calculate": 0,
+      "delete_config": 0,
+      "get_user_profile_stub_body": 0
+    }
+  },
+  {
+    "id": "E1-13",
+    "name": "最终回答含后端工具结果 42 与前端回灌令牌（数据真的进了续跑后的上下文）",
+    "pass": true,
+    "detail": {
+      "text": "结果如下：\n\n**1. 计算结果**\n- 6 × 7 = 42（后端计算器返回）\n\n**2. 用户 u-1024 资料**（来源：浏览器 localStorage 前端缓存）\n- 姓名：张三-FRONTEND-RTRNLI\n- 等级：白金-FRONTEND-RTRNLI\n- 积分：880\n\n提示：该资料由前端回传，后端未实际读取，仅代表浏览器本地缓存值，不一定是服务端权威数据；如需准确信息建议走服务端接口核对。"
+    }
+  },
+  {
+    "id": "E1-14",
+    "name": "重复续跑幂等（ALREADY_DONE 且不发模型请求）",
+    "pass": true,
+    "detail": {
+      "runId": "run-sp02-e1-f5ce591d",
+      "mode": "blocking",
+      "statusBeforeResume": "DONE",
+      "instanceId": "instance-Lenovo-pid26912-c13609",
+      "rebuildPreview": {
+        "messageCount": 5,
+        "messages": [
+          {
+            "index": 0,
+            "type": "SYSTEM",
+            "text": "你是 PoC 助手，工具由系统提供。规则：\n1. 用户要求做的事，必须调用对应工具，不得自行编造数据或伪造执行结果；\n2. 一条用户消息里包含多件事时，应在同一轮内一次性发起全部相关工具调用；\n3. 工具结果返回后再作答；若某工具被拒绝、取消或超时未执行，如实说明，禁止宣称已执行；\n4. 回复用中文，简洁，先给结论。\n"
+          },
+          {
+            "index": 1,
+            "type": "USER",
+            "text": "帮我算一下 6 乘 7 等于多少，同时读取用户 u-1024 的前端资料（姓名/等级/积分）。最后把两者一起汇报给我。"
+          },
+          {
+            "index": 2,
+            "type": "ASSISTANT",
+            "text": "",
+            "toolCalls": [
+              {
+                "id": "call_00_KLREinZhv165NVFBgE519342",
+                "name": "calculate",
+                "arguments": "{\"a\": 6, \"operator\": \"multiply\", \"b\": 7}"
+              },
+              {
+                "id": "call_01_ImAnOuU5ZkmMyOFhK4vr4414",
+                "name": "get_user_profile",
+                "arguments": "{\"userId\": \"u-1024\"}"
+              }
+            ]
+          },
+          {
+            "index": 3,
+            "type": "TOOL",
+            "text": "",
+            "toolResponses": [
+              {
+                "id": "call_00_KLREinZhv165NVFBgE519342",
+                "name": "calculate",
+                "responseData": "\"后端计算器结果：6 multiply 7 = 42\""
+              },
+              {
+                "id": "call_01_ImAnOuU5ZkmMyOFhK4vr4414",
+                "name": "get_user_profile",
+                "responseData": "用户 u-1024 的前端缓存资料：姓名=张三-FRONTEND-RTRNLI，等级=白金-FRONTEND-RTRNLI，积分=880（数据来自浏览器 localStorage）。"
+              }
+            ]
+          },
+          {
+            "index": 4,
+            "type": "ASSISTANT",
+            "text": "结果如下：\n\n**1. 计算结果**\n- 6 × 7 = 42（后端计算器返回）\n\n**2. 用户 u-1024 资料**（来源：浏览器 localStorage 前端缓存）\n- 姓名：张三-FRONTEND-RTRNLI\n- 等级：白金-FRONTEND-RTRNLI\n- 积分：880\n\n提示：该资料由前端回传，后端未实际读取，仅代表浏览器本地缓存值，不一定是服务端权威数据；如需准确信息建议走服务端接口核对。"
+          }
+        ],
+        "pending": [
+          {
+            "toolCallId": "call_01_ImAnOuU5ZkmMyOFhK4vr4414",
+            "name": "get_user_profile",
+            "type": "function",
+            "kind": "FRONTEND",
+            "arguments": "{\"userId\": \"u-1024\"}",
+            "status": "FRONTEND_RESULT",
+            "reason": "source=browser-localStorage",
+            "resultText": "用户 u-1024 的前端缓存资料：姓名=张三-FRONTEND-RTRNLI，等级=白金-FRONTEND-RTRNLI，积分=880（数据来自浏览器 localStorage）。",
+            "executed": false,
+            "executedBy": null,
+            "executedAtMs": 0,
+            "requestedAtMs": 1791303998492,
+            "resolvedAtMs": 1791304004882
+          },
+          {
+            "toolCallId": "call_00_KLREinZhv165NVFBgE519342",
+            "name": "calculate",
+            "type": "function",
+            "kind": "BACKEND",
+            "arguments": "{\"a\": 6, \"operator\": \"multiply\", \"b\": 7}",
+            "status": "FRONTEND_RESULT",
+            "reason": "IN_PROCESS_EXECUTION",
+            "resultText": "\"后端计算器结果：6 multiply 7 = 42\"",
+            "executed": true,
+            "executedBy": "instance-Lenovo-pid29264-a55e94",
+            "executedAtMs": 1791303998519,
+            "requestedAtMs": 1791303998492,
+            "resolvedAtMs": 1791303998519
+          }
+        ],
+        "readyToResume": true
+      },
+      "resumed": false,
+      "reason": "ALREADY_DONE"
+    }
+  }
+]

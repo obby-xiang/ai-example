@@ -1,0 +1,123 @@
+{
+  "url": "https://api.deepseek.com/v1/chat/completions",
+  "headers": {
+    "connection": "Upgrade, HTTP2-Settings",
+    "content-length": "1789",
+    "host": "127.0.0.1:18307",
+    "http2-settings": "AAEAAEAAAAIAAAAAAAMAAAAAAAQBAAAAAAUAAEAAAAYABgAA",
+    "upgrade": "h2c",
+    "accept": "*/*",
+    "authorization": "***",
+    "content-type": "application/json",
+    "user-agent": "spring-ai"
+  },
+  "forwardedHeaders": {
+    "http2-settings": "AAEAAEAAAAIAAAAAAAMAAAAAAAQBAAAAAAUAAEAAAAYABgAA",
+    "accept": "*/*",
+    "authorization": "***",
+    "content-type": "application/json",
+    "user-agent": "spring-ai"
+  },
+  "body": {
+    "messages": [
+      {
+        "content": "",
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "id": "call_00_h1RlneauANkKwh4ZxKfQ7962",
+            "type": "function",
+            "function": {
+              "name": "calculate",
+              "arguments": "{\"a\": 880, \"operator\": \"multiply\", \"b\": 2}"
+            }
+          }
+        ]
+      },
+      {
+        "content": "\"后端计算器结果：880 multiply 2 = 1760\"",
+        "role": "tool",
+        "name": "calculate",
+        "tool_call_id": "call_00_h1RlneauANkKwh4ZxKfQ7962"
+      }
+    ],
+    "model": "deepseek-flash",
+    "stream": true,
+    "temperature": 0,
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "description": "删除指定的配置定义（破坏性操作，会连带删除生效数据行）",
+          "name": "delete_config",
+          "parameters": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "additionalProperties": false,
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "description": "配置定义编码，例如 def-777"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "description": "获取用户的会员资料（姓名/等级/积分）。该数据只存在前端浏览器本地缓存中，后端不执行，调用后由前端回传结果",
+          "name": "get_user_profile",
+          "parameters": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "additionalProperties": false,
+            "type": "object",
+            "properties": {
+              "userId": {
+                "type": "string",
+                "description": "用户 ID，例如 u-1024"
+              }
+            },
+            "required": [
+              "userId"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "description": "后端计算器：对两个整数做四则运算（operator 取 add/subtract/multiply/divide）",
+          "name": "calculate",
+          "parameters": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "additionalProperties": false,
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "integer",
+                "description": "左操作数"
+              },
+              "operator": {
+                "type": "string",
+                "description": "运算符：add/subtract/multiply/divide"
+              },
+              "b": {
+                "type": "integer",
+                "description": "右操作数"
+              }
+            },
+            "required": [
+              "a",
+              "operator",
+              "b"
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

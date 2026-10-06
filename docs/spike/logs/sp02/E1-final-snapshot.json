@@ -1,0 +1,74 @@
+{
+  "snapshot": {
+    "runId": "run-sp02-e1-f5ce591d",
+    "sessionId": "sp02-e1",
+    "mode": "blocking",
+    "status": "DONE",
+    "round": 3,
+    "messageCount": 5,
+    "inFlight": 0,
+    "assistantContent": null,
+    "finalText": "结果如下：\n\n**1. 计算结果**\n- 6 × 7 = 42（后端计算器返回）\n\n**2. 用户 u-1024 资料**（来源：浏览器 localStorage 前端缓存）\n- 姓名：张三-FRONTEND-RTRNLI\n- 等级：白金-FRONTEND-RTRNLI\n- 积分：880\n\n提示：该资料由前端回传，后端未实际读取，仅代表浏览器本地缓存值，不一定是服务端权威数据；如需准确信息建议走服务端接口核对。",
+    "error": null,
+    "emittedChars": 207,
+    "createdBy": "instance-Lenovo-pid29264-a55e94",
+    "createdAtMs": 1791303996958,
+    "updatedAtMs": 1791304006983,
+    "resumedBy": [
+      "instance-Lenovo-pid26912-c13609"
+    ]
+  },
+  "pending": [
+    {
+      "toolCallId": "call_01_ImAnOuU5ZkmMyOFhK4vr4414",
+      "name": "get_user_profile",
+      "type": "function",
+      "kind": "FRONTEND",
+      "arguments": "{\"userId\": \"u-1024\"}",
+      "status": "FRONTEND_RESULT",
+      "reason": "source=browser-localStorage",
+      "resultText": "用户 u-1024 的前端缓存资料：姓名=张三-FRONTEND-RTRNLI，等级=白金-FRONTEND-RTRNLI，积分=880（数据来自浏览器 localStorage）。",
+      "executed": false,
+      "executedBy": null,
+      "executedAtMs": 0,
+      "requestedAtMs": 1791303998492,
+      "resolvedAtMs": 1791304004882
+    },
+    {
+      "toolCallId": "call_00_KLREinZhv165NVFBgE519342",
+      "name": "calculate",
+      "type": "function",
+      "kind": "BACKEND",
+      "arguments": "{\"a\": 6, \"operator\": \"multiply\", \"b\": 7}",
+      "status": "FRONTEND_RESULT",
+      "reason": "IN_PROCESS_EXECUTION",
+      "resultText": "\"后端计算器结果：6 multiply 7 = 42\"",
+      "executed": true,
+      "executedBy": "instance-Lenovo-pid29264-a55e94",
+      "executedAtMs": 1791303998519,
+      "requestedAtMs": 1791303998492,
+      "resolvedAtMs": 1791303998519
+    }
+  ],
+  "ledger": [
+    {
+      "atMs": 1791303998517,
+      "at": "2026-10-06T16:26:38.517462300Z",
+      "executedBy": "instance-Lenovo-pid29264-a55e94",
+      "toolCallId": "call_00_KLREinZhv165NVFBgE519342",
+      "name": "calculate",
+      "kind": "BACKEND",
+      "resultText": "\"后端计算器结果：6 multiply 7 = 42\""
+    }
+  ],
+  "ledgerCounts": {
+    "calculate": 1
+  },
+  "keys": {
+    "state": "sp02:run:run-sp02-e1-f5ce591d",
+    "pending": "sp02:hitl:run-sp02-e1-f5ce591d",
+    "events": "sp02:events:run-sp02-e1-f5ce591d",
+    "ledger": "sp02:ledger:run-sp02-e1-f5ce591d"
+  },
+  "instanceAtRead": "instance-Lenovo-pid26912-c13609"
+}

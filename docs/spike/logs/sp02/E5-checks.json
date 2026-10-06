@@ -1,0 +1,55 @@
+[
+  {
+    "id": "E5-1",
+    "name": "第 1 轮先挂起在前端工具（本轮模型只发了 1 个工具调用）",
+    "pass": false,
+    "detail": [
+      {
+        "toolCallId": "call_00_GuqmqM4d5Rm0Eny1xnHE6850",
+        "name": "get_user_profile",
+        "type": "function",
+        "kind": "FRONTEND",
+        "arguments": "{\"userId\": \"u-1024\"}",
+        "status": "PENDING",
+        "reason": null,
+        "resultText": null,
+        "executed": false,
+        "executedBy": null,
+        "executedAtMs": 0,
+        "requestedAtMs": 1791304088281,
+        "resolvedAtMs": 0
+      },
+      {
+        "toolCallId": "call_01_20n1lfwoY7cdYmle4UWf5386",
+        "name": "delete_config",
+        "type": "function",
+        "kind": "SENSITIVE",
+        "arguments": "{\"code\": \"def-999\"}",
+        "status": "PENDING",
+        "reason": null,
+        "resultText": null,
+        "executed": false,
+        "executedBy": null,
+        "executedAtMs": 0,
+        "requestedAtMs": 1791304088281,
+        "resolvedAtMs": 0
+      }
+    ]
+  },
+  {
+    "id": "E5-2",
+    "name": "续跑被受理并重建请求（blocking 形态，internal 执行未关闭）",
+    "pass": false,
+    "detail": {
+      "status": 409
+    }
+  },
+  {
+    "id": "E5-3",
+    "name": "续跑后的新一轮工具调用再次挂起（挂在重启后的新进程里）",
+    "pass": false,
+    "detail": {
+      "error": "timeout waiting for event confirm_request on run run-sp02-e5-2a98bc8b"
+    }
+  }
+]

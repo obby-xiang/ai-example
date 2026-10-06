@@ -1,0 +1,20 @@
+{
+  "port": "18306",
+  "pid": 13736,
+  "instanceId": "instance-Lenovo-pid13736-af4c6d",
+  "toolKinds": {
+    "calculate": "BACKEND",
+    "get_user_profile": "FRONTEND",
+    "delete_config": "SENSITIVE"
+  },
+  "suppressExternalRounds": false,
+  "frontendToolTimeoutSeconds": 120,
+  "confirmTimeoutSeconds": 120,
+  "execDelayMsAfterApprove": 0,
+  "instanceToolCounters": {
+    "get_user_profile_stub_body": 0,
+    "delete_config": 0,
+    "calculate": 0
+  },
+  "runIds": []
+}

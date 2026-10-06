@@ -1,0 +1,47 @@
+{
+  "seq": 3,
+  "ts": "2026-10-07T00:26:38.500+08:00",
+  "wallMs": 1791303998500,
+  "runId": "run-sp02-e1-f5ce591d",
+  "instanceId": "instance-Lenovo-pid29264-a55e94",
+  "event": "suspend_persisted",
+  "data": {
+    "runId": "run-sp02-e1-f5ce591d",
+    "assistantContent": "",
+    "toolCalls": [
+      {
+        "toolCallId": "call_00_KLREinZhv165NVFBgE519342",
+        "name": "calculate",
+        "type": "function",
+        "kind": "BACKEND",
+        "arguments": "{\"a\": 6, \"operator\": \"multiply\", \"b\": 7}",
+        "status": "PENDING",
+        "reason": null,
+        "resultText": null,
+        "executed": false,
+        "executedBy": null,
+        "executedAtMs": 0,
+        "requestedAtMs": 1791303998492,
+        "resolvedAtMs": 0
+      },
+      {
+        "toolCallId": "call_01_ImAnOuU5ZkmMyOFhK4vr4414",
+        "name": "get_user_profile",
+        "type": "function",
+        "kind": "FRONTEND",
+        "arguments": "{\"userId\": \"u-1024\"}",
+        "status": "PENDING",
+        "reason": null,
+        "resultText": null,
+        "executed": false,
+        "executedBy": null,
+        "executedAtMs": 0,
+        "requestedAtMs": 1791303998492,
+        "resolvedAtMs": 0
+      }
+    ],
+    "stateKey": "sp02:run:run-sp02-e1-f5ce591d",
+    "pendingKey": "sp02:hitl:run-sp02-e1-f5ce591d",
+    "writtenBy": "instance-Lenovo-pid29264-a55e94"
+  }
+}

@@ -1,0 +1,13 @@
+# SP-02 Redis 键清理记录（脱敏：<MEMURAI_HOME>）
+# 时间：2026-10-07 00:30:18 +0800
+
+## 清理前 $ <MEMURAI_HOME>/memurai-cli.exe keys "sp02*"
+sp02:run:run-sp02-e5-2a98bc8b
+sp02:hitl:run-sp02-e5-2a98bc8b
+sp02:runs
+sp02:events:run-sp02-e5-2a98bc8b
+（共 4 个键）
+
+## 清理后 keys "sp02*"
+
+（无输出 = 本实验键已全部删除）

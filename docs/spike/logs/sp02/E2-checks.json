@@ -1,0 +1,221 @@
+[
+  {
+    "id": "E2-1",
+    "name": "确认门挂起且挂起态已外置",
+    "pass": true
+  },
+  {
+    "id": "E2-2",
+    "name": "放行已写入 Redis 且“已放行未执行”（executed=false）",
+    "pass": true,
+    "detail": {
+      "approve": {
+        "runId": "run-sp02-e2-c86cdc85",
+        "toolCallId": "call_00_hE0cvBgN3AUzXVWNAC4n9634",
+        "instanceId": "instance-Lenovo-pid10016-ee7e11",
+        "accepted": true,
+        "duplicate": false,
+        "status": "APPROVED",
+        "approved": true,
+        "wokeInProcessGate": true,
+        "note": "决策已写入 Redis；是否已执行见 pending.executed / ledger"
+      },
+      "state": "call_00_hE0cvBgN3AUzXVWNAC4n9634\n{\"toolCallId\":\"call_00_hE0cvBgN3AUzXVWNAC4n9634\",\"name\":\"delete_config\",\"type\":\"function\",\"kind\":\"SENSITIVE\",\"arguments\":\"{\\\"code\\\": \\\"def-777\\\"}\",\"status\":\"APPROVED\",\"reason\":\"允许删除（PoC）\",\"resultText\":null,\"executed\":false,\"executedBy\":null,\"executedAtMs\":0,\"requestedAtMs\":1791304015281,\"resolvedAtMs\":1791304015369}\n"
+    }
+  },
+  {
+    "id": "E2-3",
+    "name": "kill 落在“已放行、未执行”窗口：台账为空（工具没被执行）",
+    "pass": true,
+    "detail": {
+      "ledger": "\n"
+    }
+  },
+  {
+    "id": "E2-4",
+    "name": "新进程发现“已放行未执行”的决策（APPROVED + executed=false）",
+    "pass": true,
+    "detail": {
+      "toolCallId": "call_00_hE0cvBgN3AUzXVWNAC4n9634",
+      "name": "delete_config",
+      "type": "function",
+      "kind": "SENSITIVE",
+      "arguments": "{\"code\": \"def-777\"}",
+      "status": "APPROVED",
+      "reason": "允许删除（PoC）",
+      "resultText": null,
+      "executed": false,
+      "executedBy": null,
+      "executedAtMs": 0,
+      "requestedAtMs": 1791304015281,
+      "resolvedAtMs": 1791304015369
+    }
+  },
+  {
+    "id": "E2-5",
+    "name": "续跑时把“已放行未执行”的工具真正执行掉（rebuiltTools 标 executed-here）",
+    "pass": true,
+    "detail": {
+      "rebuiltTools": [
+        "call_00_hE0cvBgN3AUzXVWNAC4n9634:APPROVED:executed-here"
+      ],
+      "promptMessages": [
+        {
+          "index": 0,
+          "type": "SYSTEM",
+          "text": "你是 PoC 助手，工具由系统提供。规则：\n1. 用户要求做的事，必须调用对应工具，不得自行编造数据或伪造执行结果；\n2. 一条用户消息里包含多件事时，应在同一轮内一次性发起全部相关工具调用；\n3. 工具结果返回后再作答；若某工具被拒绝、取消或超时未执行，如实说明，禁止宣称已执行；\n4. 回复用中文，简洁，先给结论。\n"
+        },
+        {
+          "index": 1,
+          "type": "USER",
+          "text": "请直接调用 delete_config 工具删除配置定义 def-777。不要再问我是否确认，系统会自动弹出确认门，我在确认门里批准。"
+        },
+        {
+          "index": 2,
+          "type": "ASSISTANT",
+          "text": "",
+          "toolCalls": [
+            {
+              "id": "call_00_hE0cvBgN3AUzXVWNAC4n9634",
+              "name": "delete_config",
+              "arguments": "{\"code\": \"def-777\"}"
+            }
+          ]
+        },
+        {
+          "index": 3,
+          "type": "TOOL",
+          "text": "",
+          "toolResponses": [
+            {
+              "id": "call_00_hE0cvBgN3AUzXVWNAC4n9634",
+              "name": "delete_config",
+              "responseData": "\"后端已执行删除：配置 def-777 及其 3 行生效数据已删除。\""
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "id": "E2-6",
+    "name": "续跑后 delete_config 恰好执行 1 次，且执行者是新实例",
+    "pass": true,
+    "detail": {
+      "ledgerCounts": {
+        "delete_config": 1
+      },
+      "ledger": [
+        {
+          "atMs": 1791304021520,
+          "at": "2026-10-06T16:27:01.520935100Z",
+          "executedBy": "instance-Lenovo-pid28140-d83206",
+          "toolCallId": "call_00_hE0cvBgN3AUzXVWNAC4n9634",
+          "name": "delete_config",
+          "kind": "SENSITIVE",
+          "resultText": "\"后端已执行删除：配置 def-777 及其 3 行生效数据已删除。\""
+        }
+      ],
+      "instance2": "instance-Lenovo-pid28140-d83206"
+    }
+  },
+  {
+    "id": "E2-7",
+    "name": "新实例本地 delete_config 计数=1（本进程真的执行了），旧实例=0（未执行）",
+    "pass": true,
+    "detail": {
+      "instance2": {
+        "get_user_profile_stub_body": 0,
+        "calculate": 0,
+        "delete_config": 1
+      },
+      "instance1": {
+        "calculate": 0,
+        "delete_config": 0,
+        "get_user_profile_stub_body": 0
+      }
+    }
+  },
+  {
+    "id": "E2-8",
+    "name": "流式续接到终帧结束且回答如实说明已执行",
+    "pass": true,
+    "detail": {
+      "frames": [
+        "reattached",
+        "confirm_resolution",
+        "tool_result",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "model_round",
+        "resume_done",
+        "run_finished"
+      ],
+      "text": "已执行。\n\n- 工具：`delete_config`\n- 参数：`code = def-777`\n- 结果：配置定义 def-777 及其 **3 行生效数据**已被删除（不可恢复）。\n\n如需回滚，需重新创建该配置定义并重录这 3 行数据。"
+    }
+  }
+]

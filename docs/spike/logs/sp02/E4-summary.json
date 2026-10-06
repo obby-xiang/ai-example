@@ -1,0 +1,15 @@
+{
+  "scenario": "E4",
+  "token": "FRONTEND-UYC211",
+  "frontResult": "用户 u-1024 的前端缓存资料：姓名=张三-FRONTEND-UYC211，等级=白金-FRONTEND-UYC211，积分=880（数据来自浏览器 localStorage）。",
+  "runId": "run-sp02-e4-71ec148b",
+  "instance1": {
+    "pid": 22184,
+    "log": "app-instance1.log"
+  },
+  "instance2": null,
+  "passed": 5,
+  "failed": [],
+  "total": 5,
+  "error": null
+}

@@ -1,0 +1,19 @@
+{
+  "scenario": "E5",
+  "token": "FRONTEND-UKJ19F",
+  "frontResult": "用户 u-1024 的前端缓存资料：姓名=张三-FRONTEND-UKJ19F，等级=白金-FRONTEND-UKJ19F，积分=880（数据来自浏览器 localStorage）。",
+  "runId": null,
+  "instance1": null,
+  "instance2": null,
+  "passed": 0,
+  "failed": [
+    "E5-1 第 1 轮先挂起在前端工具（本轮模型只发了 1 个工具调用）",
+    "E5-2 续跑被受理并重建请求（blocking 形态，internal 执行未关闭）",
+    "E5-3 续跑后的新一轮工具调用再次挂起（挂在重启后的新进程里）"
+  ],
+  "total": 3,
+  "error": {
+    "message": "Cannot read properties of undefined (reading 'toolCallId')",
+    "stack": "TypeError: Cannot read properties of undefined (reading 'toolCallId')\n    at scenarioE5 (file:///<MAIN_V2>/spike/sp02/scripts/sp02-experiment.mjs:675:40)\n    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)\n    at async main (file:///<MAIN_V2>/spike/sp02/scripts/sp02-experiment.mjs:816:14)"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "scenario": "E1",
+  "token": "FRONTEND-RTRNLI",
+  "frontResult": "用户 u-1024 的前端缓存资料：姓名=张三-FRONTEND-RTRNLI，等级=白金-FRONTEND-RTRNLI，积分=880（数据来自浏览器 localStorage）。",
+  "runId": "run-sp02-e1-f5ce591d",
+  "instance1": {
+    "pid": 29264,
+    "log": "app-instance1.log"
+  },
+  "instance2": {
+    "pid": 26912,
+    "log": "app-instance2.log"
+  },
+  "passed": 16,
+  "failed": [],
+  "total": 16,
+  "error": null
+}

@@ -1,0 +1,108 @@
+{
+  "runId": "run-sp02-e5-2a98bc8b",
+  "mode": "blocking",
+  "statusBeforeResume": "SUSPENDED",
+  "instanceId": "instance-Lenovo-pid13692-3d80ca",
+  "rebuildPreview": {
+    "messageCount": 4,
+    "messages": [
+      {
+        "index": 0,
+        "type": "SYSTEM",
+        "text": "你是 PoC 助手，工具由系统提供。规则：\n1. 用户要求做的事，必须调用对应工具，不得自行编造数据或伪造执行结果；\n2. 一条用户消息里包含多件事时，应在同一轮内一次性发起全部相关工具调用；\n3. 工具结果返回后再作答；若某工具被拒绝、取消或超时未执行，如实说明，禁止宣称已执行；\n4. 回复用中文，简洁，先给结论。\n"
+      },
+      {
+        "index": 1,
+        "type": "USER",
+        "text": "请先读取用户 u-1024 的前端资料（姓名/等级）；读取完成后，请调用 delete_config 删除配置定义 def-999。这两步都是我的明确指令：删除的编码就是 def-999（不要从前端资料里推断编码），删除前我会在系统弹出的确认门里批准。"
+      },
+      {
+        "type": "ASSISTANT",
+        "content": "",
+        "toolCalls": [
+          {
+            "id": "call_00_GuqmqM4d5Rm0Eny1xnHE6850",
+            "name": "get_user_profile",
+            "arguments": "{\"userId\": \"u-1024\"}"
+          },
+          {
+            "id": "call_01_20n1lfwoY7cdYmle4UWf5386",
+            "name": "delete_config",
+            "arguments": "{\"code\": \"def-999\"}"
+          }
+        ]
+      },
+      {
+        "type": "TOOL",
+        "toolResponses": [
+          {
+            "id": "call_00_GuqmqM4d5Rm0Eny1xnHE6850",
+            "name": "get_user_profile",
+            "status": "FRONTEND_RESULT",
+            "executed": false,
+            "responseData": "用户 u-1024 的前端缓存资料：姓名=张三-FRONTEND-UKJ19F，等级=管理员-FRONTEND-UKJ19F，积分=880。待删除配置编码：def-999（该编码由前端缓存给出）。"
+          },
+          {
+            "id": "call_01_20n1lfwoY7cdYmle4UWf5386",
+            "name": "delete_config",
+            "status": "PENDING",
+            "executed": false,
+            "responseData": null
+          }
+        ]
+      }
+    ],
+    "pending": [
+      {
+        "toolCallId": "call_01_20n1lfwoY7cdYmle4UWf5386",
+        "name": "delete_config",
+        "type": "function",
+        "kind": "SENSITIVE",
+        "arguments": "{\"code\": \"def-999\"}",
+        "status": "PENDING",
+        "reason": null,
+        "resultText": null,
+        "executed": false,
+        "executedBy": null,
+        "executedAtMs": 0,
+        "requestedAtMs": 1791304088281,
+        "resolvedAtMs": 0
+      },
+      {
+        "toolCallId": "call_00_GuqmqM4d5Rm0Eny1xnHE6850",
+        "name": "get_user_profile",
+        "type": "function",
+        "kind": "FRONTEND",
+        "arguments": "{\"userId\": \"u-1024\"}",
+        "status": "FRONTEND_RESULT",
+        "reason": "source=browser-localStorage",
+        "resultText": "用户 u-1024 的前端缓存资料：姓名=张三-FRONTEND-UKJ19F，等级=管理员-FRONTEND-UKJ19F，积分=880。待删除配置编码：def-999（该编码由前端缓存给出）。",
+        "executed": false,
+        "executedBy": null,
+        "executedAtMs": 0,
+        "requestedAtMs": 1791304088281,
+        "resolvedAtMs": 1791304095140
+      }
+    ],
+    "readyToResume": false
+  },
+  "resumed": false,
+  "reason": "PENDING_UNRESOLVED",
+  "unresolved": [
+    {
+      "toolCallId": "call_01_20n1lfwoY7cdYmle4UWf5386",
+      "name": "delete_config",
+      "type": "function",
+      "kind": "SENSITIVE",
+      "arguments": "{\"code\": \"def-999\"}",
+      "status": "PENDING",
+      "reason": null,
+      "resultText": null,
+      "executed": false,
+      "executedBy": null,
+      "executedAtMs": 0,
+      "requestedAtMs": 1791304088281,
+      "resolvedAtMs": 0
+    }
+  ]
+}

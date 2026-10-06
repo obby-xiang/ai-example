@@ -1,0 +1,18 @@
+{
+  "scenario": "E6",
+  "token": "FRONTEND-5ZXJ1Z",
+  "frontResult": "用户 u-1024 的前端缓存资料：姓名=张三-FRONTEND-5ZXJ1Z，等级=白金-FRONTEND-5ZXJ1Z，积分=880（数据来自浏览器 localStorage）。",
+  "runId": "run-sp02-e6-1ae83721",
+  "instance1": {
+    "pid": 13736,
+    "log": "app-instance1.log"
+  },
+  "instance2": {
+    "pid": 11828,
+    "log": "app-instance2.log"
+  },
+  "passed": 8,
+  "failed": [],
+  "total": 8,
+  "error": null
+}

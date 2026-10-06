@@ -1,0 +1,104 @@
+{
+  "runId": "run-sp02-e2-c86cdc85",
+  "mode": "blocking",
+  "statusBeforeResume": "SUSPENDED",
+  "instanceId": "instance-Lenovo-pid28140-d83206",
+  "rebuildPreview": {
+    "messageCount": 4,
+    "messages": [
+      {
+        "index": 0,
+        "type": "SYSTEM",
+        "text": "你是 PoC 助手，工具由系统提供。规则：\n1. 用户要求做的事，必须调用对应工具，不得自行编造数据或伪造执行结果；\n2. 一条用户消息里包含多件事时，应在同一轮内一次性发起全部相关工具调用；\n3. 工具结果返回后再作答；若某工具被拒绝、取消或超时未执行，如实说明，禁止宣称已执行；\n4. 回复用中文，简洁，先给结论。\n"
+      },
+      {
+        "index": 1,
+        "type": "USER",
+        "text": "请直接调用 delete_config 工具删除配置定义 def-777。不要再问我是否确认，系统会自动弹出确认门，我在确认门里批准。"
+      },
+      {
+        "type": "ASSISTANT",
+        "content": "",
+        "toolCalls": [
+          {
+            "id": "call_00_hE0cvBgN3AUzXVWNAC4n9634",
+            "name": "delete_config",
+            "arguments": "{\"code\": \"def-777\"}"
+          }
+        ]
+      },
+      {
+        "type": "TOOL",
+        "toolResponses": [
+          {
+            "id": "call_00_hE0cvBgN3AUzXVWNAC4n9634",
+            "name": "delete_config",
+            "status": "APPROVED",
+            "executed": false,
+            "responseData": "允许删除（PoC）"
+          }
+        ]
+      }
+    ],
+    "pending": [
+      {
+        "toolCallId": "call_00_hE0cvBgN3AUzXVWNAC4n9634",
+        "name": "delete_config",
+        "type": "function",
+        "kind": "SENSITIVE",
+        "arguments": "{\"code\": \"def-777\"}",
+        "status": "APPROVED",
+        "reason": "允许删除（PoC）",
+        "resultText": null,
+        "executed": false,
+        "executedBy": null,
+        "executedAtMs": 0,
+        "requestedAtMs": 1791304015281,
+        "resolvedAtMs": 1791304015369
+      }
+    ],
+    "readyToResume": true
+  },
+  "resumed": true,
+  "rebuiltTools": [
+    "call_00_hE0cvBgN3AUzXVWNAC4n9634:APPROVED:executed-here"
+  ],
+  "promptMessageCount": 4,
+  "promptMessages": [
+    {
+      "index": 0,
+      "type": "SYSTEM",
+      "text": "你是 PoC 助手，工具由系统提供。规则：\n1. 用户要求做的事，必须调用对应工具，不得自行编造数据或伪造执行结果；\n2. 一条用户消息里包含多件事时，应在同一轮内一次性发起全部相关工具调用；\n3. 工具结果返回后再作答；若某工具被拒绝、取消或超时未执行，如实说明，禁止宣称已执行；\n4. 回复用中文，简洁，先给结论。\n"
+    },
+    {
+      "index": 1,
+      "type": "USER",
+      "text": "请直接调用 delete_config 工具删除配置定义 def-777。不要再问我是否确认，系统会自动弹出确认门，我在确认门里批准。"
+    },
+    {
+      "index": 2,
+      "type": "ASSISTANT",
+      "text": "",
+      "toolCalls": [
+        {
+          "id": "call_00_hE0cvBgN3AUzXVWNAC4n9634",
+          "name": "delete_config",
+          "arguments": "{\"code\": \"def-777\"}"
+        }
+      ]
+    },
+    {
+      "index": 3,
+      "type": "TOOL",
+      "text": "",
+      "toolResponses": [
+        {
+          "id": "call_00_hE0cvBgN3AUzXVWNAC4n9634",
+          "name": "delete_config",
+          "responseData": "\"后端已执行删除：配置 def-777 及其 3 行生效数据已删除。\""
+        }
+      ]
+    }
+  ],
+  "resumedBy": "instance-Lenovo-pid28140-d83206"
+}

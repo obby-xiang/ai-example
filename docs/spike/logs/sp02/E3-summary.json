@@ -1,0 +1,18 @@
+{
+  "scenario": "E3",
+  "token": "FRONTEND-Y0ON22",
+  "frontResult": "用户 u-1024 的前端缓存资料：姓名=张三-FRONTEND-Y0ON22，等级=白金-FRONTEND-Y0ON22，积分=880（数据来自浏览器 localStorage）。",
+  "runId": "run-sp02-e3-c22ac28d",
+  "instance1": {
+    "pid": 15372,
+    "log": "app-instance1.log"
+  },
+  "instance2": {
+    "pid": 29380,
+    "log": "app-instance2.log"
+  },
+  "passed": 9,
+  "failed": [],
+  "total": 9,
+  "error": null
+}

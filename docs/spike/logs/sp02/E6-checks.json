@@ -1,0 +1,120 @@
+[
+  {
+    "id": "E6-1",
+    "name": "第 1 轮只挂起在前端工具（第二轮的工具调用尚未发生）",
+    "pass": true,
+    "detail": [
+      {
+        "toolCallId": "call_00_VZ1BhZa87KRvpPpFiYQ43125",
+        "name": "get_user_profile",
+        "type": "function",
+        "kind": "FRONTEND",
+        "arguments": "{\"userId\": \"u-1024\"}",
+        "status": "PENDING",
+        "reason": null,
+        "resultText": null,
+        "executed": false,
+        "executedBy": null,
+        "executedAtMs": 0,
+        "requestedAtMs": 1791304065732,
+        "resolvedAtMs": 0
+      }
+    ]
+  },
+  {
+    "id": "E6-2",
+    "name": "续跑被受理（blocking 形态，internal 执行未关闭）",
+    "pass": true,
+    "detail": {
+      "status": 202,
+      "rebuiltTools": [
+        "call_00_VZ1BhZa87KRvpPpFiYQ43125:FRONTEND_RESULT:reused"
+      ]
+    }
+  },
+  {
+    "id": "E6-3",
+    "name": "续跑后的新请求又产生了工具调用（calculate，参数取自前端回灌的积分 880）——该调用落在重启后的新进程里",
+    "pass": true,
+    "detail": [
+      {
+        "toolCallId": "call_00_h1RlneauANkKwh4ZxKfQ7962",
+        "name": "calculate",
+        "type": "function",
+        "kind": "BACKEND",
+        "arguments": "{\"a\": 880, \"operator\": \"multiply\", \"b\": 2}",
+        "status": "PENDING",
+        "reason": null,
+        "resultText": null,
+        "executed": false,
+        "executedBy": null,
+        "executedAtMs": 0,
+        "requestedAtMs": 1791304074178,
+        "resolvedAtMs": 0
+      }
+    ]
+  },
+  {
+    "id": "E6-4",
+    "name": "该新工具调用由官方循环在重启后的新实例内执行（台账 executedBy=新实例）",
+    "pass": true,
+    "detail": [
+      {
+        "atMs": 1791304074201,
+        "at": "2026-10-06T16:27:54.201271900Z",
+        "executedBy": "instance-Lenovo-pid11828-2d0860",
+        "toolCallId": "call_00_h1RlneauANkKwh4ZxKfQ7962",
+        "name": "calculate",
+        "kind": "BACKEND",
+        "resultText": "\"后端计算器结果：880 multiply 2 = 1760\""
+      }
+    ]
+  },
+  {
+    "id": "E6-5",
+    "name": "全程 2 次模型请求（续跑续接 + 新工具回填），第 1 轮请求未被重放",
+    "pass": true,
+    "detail": [
+      "wire-10-request.json",
+      "wire-10-response.json",
+      "wire-11-request.json",
+      "wire-11-response.json"
+    ]
+  },
+  {
+    "id": "E6-6",
+    "name": "不重放：前端工具请求 1 次、桩体计数 0、旧实例与新实例各执行 0/1 次 calculate",
+    "pass": true,
+    "detail": {
+      "counters": {
+        "get_user_profile_stub_body": 0,
+        "delete_config": 0,
+        "calculate": 1
+      },
+      "ledgerCounts": {
+        "calculate": 1
+      }
+    }
+  },
+  {
+    "id": "E6-7",
+    "name": "最终回答含 1760（积分 880×2 由续跑后的新工具调用算出）",
+    "pass": true,
+    "detail": {
+      "hasToken": false,
+      "text": "880 × 2 = **1760**（后端计算器结果）。\n\n如果这里的 880 需要以你的实际会员积分为准，请告诉我用户 ID，我可以调 `get_user_profile` 核实后再算；如果只是纯数值运算，那结果就是 1760。接下来还需要我做什么吗？"
+    }
+  },
+  {
+    "id": "E6-8",
+    "name": "续跑流以终帧结束",
+    "pass": true,
+    "detail": [
+      "delta",
+      "delta",
+      "model_round",
+      "resume_done",
+      "run_finished"
+    ]
+  }
+]

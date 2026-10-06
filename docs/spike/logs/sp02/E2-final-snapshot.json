@@ -1,0 +1,59 @@
+{
+  "snapshot": {
+    "runId": "run-sp02-e2-c86cdc85",
+    "sessionId": "sp02-e2",
+    "mode": "blocking",
+    "status": "DONE",
+    "round": 3,
+    "messageCount": 5,
+    "inFlight": 0,
+    "assistantContent": null,
+    "finalText": "已执行。\n\n- 工具：`delete_config`\n- 参数：`code = def-777`\n- 结果：配置定义 def-777 及其 **3 行生效数据**已被删除（不可恢复）。\n\n如需回滚，需重新创建该配置定义并重录这 3 行数据。",
+    "error": null,
+    "emittedChars": 120,
+    "createdBy": "instance-Lenovo-pid10016-ee7e11",
+    "createdAtMs": 1791304013574,
+    "updatedAtMs": 1791304023199,
+    "resumedBy": [
+      "instance-Lenovo-pid28140-d83206"
+    ]
+  },
+  "pending": [
+    {
+      "toolCallId": "call_00_hE0cvBgN3AUzXVWNAC4n9634",
+      "name": "delete_config",
+      "type": "function",
+      "kind": "SENSITIVE",
+      "arguments": "{\"code\": \"def-777\"}",
+      "status": "APPROVED",
+      "reason": "允许删除（PoC）",
+      "resultText": "\"后端已执行删除：配置 def-777 及其 3 行生效数据已删除。\"",
+      "executed": true,
+      "executedBy": "instance-Lenovo-pid28140-d83206",
+      "executedAtMs": 1791304021522,
+      "requestedAtMs": 1791304015281,
+      "resolvedAtMs": 1791304015369
+    }
+  ],
+  "ledger": [
+    {
+      "atMs": 1791304021520,
+      "at": "2026-10-06T16:27:01.520935100Z",
+      "executedBy": "instance-Lenovo-pid28140-d83206",
+      "toolCallId": "call_00_hE0cvBgN3AUzXVWNAC4n9634",
+      "name": "delete_config",
+      "kind": "SENSITIVE",
+      "resultText": "\"后端已执行删除：配置 def-777 及其 3 行生效数据已删除。\""
+    }
+  ],
+  "ledgerCounts": {
+    "delete_config": 1
+  },
+  "keys": {
+    "events": "sp02:events:run-sp02-e2-c86cdc85",
+    "ledger": "sp02:ledger:run-sp02-e2-c86cdc85",
+    "state": "sp02:run:run-sp02-e2-c86cdc85",
+    "pending": "sp02:hitl:run-sp02-e2-c86cdc85"
+  },
+  "instanceAtRead": "instance-Lenovo-pid28140-d83206"
+}

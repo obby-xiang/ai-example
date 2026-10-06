@@ -1,0 +1,74 @@
+{
+  "snapshot": {
+    "runId": "run-sp02-e4-71ec148b",
+    "sessionId": "sp02-e4",
+    "mode": "explicit",
+    "status": "DONE",
+    "round": 2,
+    "messageCount": 5,
+    "inFlight": 0,
+    "assistantContent": null,
+    "finalText": "两项都已完成：\n\n**1. 计算结果**\n- 6 × 7 = **42**（后端计算器返回）\n\n**2. 用户 u-1024 资料**\n- 姓名：张三-FRONTEND-UYC211\n- 等级：白金-FRONTEND-UYC211\n- 积分：880\n\n⚠️ 提醒：这份资料并非后端数据，而是来自你浏览器本地缓存（localStorage），后端不执行该查询，结果由前端回传，因此未经服务端校验，字段值里带 `FRONTEND-UYC211` 这类后缀也说明它是前端展示态的数据。如果需要权威数据，建议改从后端接口获取。",
+    "error": null,
+    "emittedChars": 259,
+    "createdBy": "instance-Lenovo-pid22184-c59c24",
+    "createdAtMs": 1791304051772,
+    "updatedAtMs": 1791304056214,
+    "resumedBy": [
+      "instance-Lenovo-pid22184-c59c24"
+    ]
+  },
+  "pending": [
+    {
+      "toolCallId": "call_01_idp7ceTWdWb93Og01Thp6619",
+      "name": "get_user_profile",
+      "type": "function",
+      "kind": "FRONTEND",
+      "arguments": "{\"userId\": \"u-1024\"}",
+      "status": "FRONTEND_RESULT",
+      "reason": "source=browser-localStorage",
+      "resultText": "用户 u-1024 的前端缓存资料：姓名=张三-FRONTEND-UYC211，等级=白金-FRONTEND-UYC211，积分=880（数据来自浏览器 localStorage）。",
+      "executed": false,
+      "executedBy": null,
+      "executedAtMs": 0,
+      "requestedAtMs": 1791304053698,
+      "resolvedAtMs": 1791304053853
+    },
+    {
+      "toolCallId": "call_00_PBKemMNpP20vQK7SrtyQ1748",
+      "name": "calculate",
+      "type": "function",
+      "kind": "BACKEND",
+      "arguments": "{\"a\": 6, \"operator\": \"multiply\", \"b\": 7}",
+      "status": "FRONTEND_RESULT",
+      "reason": "IN_PROCESS_EXECUTION",
+      "resultText": "\"后端计算器结果：6 multiply 7 = 42\"",
+      "executed": true,
+      "executedBy": "instance-Lenovo-pid22184-c59c24",
+      "executedAtMs": 1791304053724,
+      "requestedAtMs": 1791304053698,
+      "resolvedAtMs": 1791304053724
+    }
+  ],
+  "ledger": [
+    {
+      "atMs": 1791304053722,
+      "at": "2026-10-06T16:27:33.722969500Z",
+      "executedBy": "instance-Lenovo-pid22184-c59c24",
+      "toolCallId": "call_00_PBKemMNpP20vQK7SrtyQ1748",
+      "name": "calculate",
+      "kind": "BACKEND",
+      "resultText": "\"后端计算器结果：6 multiply 7 = 42\""
+    }
+  ],
+  "ledgerCounts": {
+    "calculate": 1
+  },
+  "keys": {
+    "ledger": "sp02:ledger:run-sp02-e4-71ec148b",
+    "state": "sp02:run:run-sp02-e4-71ec148b",
+    "pending": "sp02:hitl:run-sp02-e4-71ec148b",
+    "events": "sp02:events:run-sp02-e4-71ec148b"
+  },
+  "instanceAtRead": "instance-Lenovo-pid22184-c59c24"
+}
