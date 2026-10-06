@@ -1,0 +1,58 @@
+SP-01d 附件 D：V-d3 执行中取消 实测记录
+
+### vd3-coop-cancel
+  说明: longTask(8s, cooperative=true) 执行中发送取消信号
+  服务端终态=CANCELLED cancelled=true 上游订阅次数=0 累计时长=2908ms 已产出字符=10
+  尝试记录: [{"attempt":1,"outcome":"COMPLETED","costMs":2907,"emittedAnythingBefore":true,"reason":null}]
+  已产出内容: "我来执行这个长任务。"
+  工具执行台账: [{"seq":10,"tsMs":1791289288170,"source":"INTERNAL_LOOP","runId":"vd3-coop#1791289285944","toolCallId":null,"name":"longTask","arguments":"{\"seconds\":8,\"cooperative\":true}","durationMs":1004,"outcome":"CANCELLED_AFTER_6_SLICES"}]
+  代理逐请求台账:
+    #1 mode=none applied=false status=200
+       转发 0B / - 个事件 / - 个正文 delta
+       结果=PASSTHROUGH_COMPLETE 耗时=1205ms
+    #2 mode=none applied=false status=200
+       转发 0B / - 个事件 / - 个正文 delta
+       结果=null 耗时=undefinedms
+  时间线: 工具进入执行=+1236ms 取消信号发出=+2136ms
+          流终止=+2912ms 取消→终止=776ms
+  取消接口返回: {"found":true,"runId":"vd3-coop#1791289285944","registryRegistered":true,"cancelSignalTsMs":1791289288080,"elapsedSinceRunStartMs":2136}
+  done 事件: {"cancelled":true,"terminal":"CANCELLED","content":"我来执行这个长任务。","emittedChars":10,"deltas":6,"attempts":1,"elapsedMs":2908}
+  工具执行台账: [{"seq":10,"tsMs":1791289288170,"source":"INTERNAL_LOOP","runId":"vd3-coop#1791289285944","toolCallId":null,"name":"longTask","arguments":"{\"seconds\":8,\"cooperative\":true}","durationMs":1004,"outcome":"CANCELLED_AFTER_6_SLICES"}]
+  工具活动信标: {"active":{},"lastFinished":{"vd3-coop#1791289285944":{"slices":5,"enteredAtMs":1791289287166,"exitedAtMs":1791289288170,"runId":"vd3-coop#1791289285944","detail":"seconds=8,cooperative=true","tool":"longTask","outcome":"CANCELLED"},"vd1-ref-longtool#1791289275554":{"slices":0,"enteredAtMs":1791289276371,"exitedAtMs":1791289281373,"runId":"vd1-ref-longtool#1791289275554","detail":"seconds=8,cooperative=false","tool":"longTask","outcome":"OK"},"vd1-guarded-longtool#1791289268032":{"slices":0,"enteredAtMs":1791289269382,"exitedAtMs":1791289275380,"runId":"vd1-guarded-longtool#1791289268032","detail":"seconds=8,cooperative=false","tool":"longTask","outcome":"OK"}}}
+  取消注册表: registered=[]
+  全部 SSE 事件: ["start@4","delta@1220","delta@1222","delta@1223","delta@1225","delta@1225","delta@1226","done@2911"]
+  代理逐请求台账:
+    #1 mode=none applied=false status=200
+       转发 0B / - 个事件 / - 个正文 delta
+       结果=PASSTHROUGH_COMPLETE 耗时=1205ms
+    #2 mode=none applied=false status=200
+       转发 0B / - 个事件 / - 个正文 delta
+       结果=null 耗时=undefinedms
+
+### vd3-hard-cancel
+  说明: longTask(3s, cooperative=false) 执行中发送取消信号
+  服务端终态=CANCELLED cancelled=true 上游订阅次数=0 累计时长=4832ms 已产出字符=0
+  尝试记录: [{"attempt":1,"outcome":"COMPLETED","costMs":4832,"emittedAnythingBefore":false,"reason":null}]
+  工具执行台账: [{"seq":11,"tsMs":1791289293358,"source":"INTERNAL_LOOP","runId":"vd3-hard#1791289289030","toolCallId":null,"name":"longTask","arguments":"{\"seconds\":3,\"cooperative\":false}","durationMs":3000,"outcome":"OK"}]
+  代理逐请求台账:
+    #1 mode=none applied=false status=200
+       转发 0B / - 个事件 / - 个正文 delta
+       结果=PASSTHROUGH_COMPLETE 耗时=1319ms
+    #2 mode=none applied=false status=200
+       转发 0B / - 个事件 / - 个正文 delta
+       结果=null 耗时=undefinedms
+  时间线: 工具进入执行=+1346ms 取消信号发出=+2246ms
+          流终止=+4836ms 取消→终止=2590ms
+  取消接口返回: {"found":true,"runId":"vd3-hard#1791289289030","registryRegistered":true,"cancelSignalTsMs":1791289291274,"elapsedSinceRunStartMs":2244}
+  done 事件: {"cancelled":true,"terminal":"CANCELLED","content":"","emittedChars":0,"deltas":0,"attempts":1,"elapsedMs":4832}
+  工具执行台账: [{"seq":11,"tsMs":1791289293358,"source":"INTERNAL_LOOP","runId":"vd3-hard#1791289289030","toolCallId":null,"name":"longTask","arguments":"{\"seconds\":3,\"cooperative\":false}","durationMs":3000,"outcome":"OK"}]
+  工具活动信标: {"active":{},"lastFinished":{"vd3-coop#1791289285944":{"slices":5,"enteredAtMs":1791289287166,"exitedAtMs":1791289288170,"runId":"vd3-coop#1791289285944","detail":"seconds=8,cooperative=true","tool":"longTask","outcome":"CANCELLED"},"vd1-ref-longtool#1791289275554":{"slices":0,"enteredAtMs":1791289276371,"exitedAtMs":1791289281373,"runId":"vd1-ref-longtool#1791289275554","detail":"seconds=8,cooperative=false","tool":"longTask","outcome":"OK"},"vd1-guarded-longtool#1791289268032":{"slices":0,"enteredAtMs":1791289269382,"exitedAtMs":1791289275380,"runId":"vd1-guarded-longtool#1791289268032","detail":"seconds=8,cooperative=false","tool":"longTask","outcome":"OK"},"vd3-hard#1791289289030":{"slices":0,"enteredAtMs":1791289290358,"exitedAtMs":1791289293358,"runId":"vd3-hard#1791289289030","detail":"seconds=3,cooperative=false","tool":"longTask","outcome":"OK"}}}
+  取消注册表: registered=[]
+  全部 SSE 事件: ["start@5","done@4835"]
+  代理逐请求台账:
+    #1 mode=none applied=false status=200
+       转发 0B / - 个事件 / - 个正文 delta
+       结果=PASSTHROUGH_COMPLETE 耗时=1319ms
+    #2 mode=none applied=false status=200
+       转发 0B / - 个事件 / - 个正文 delta
+       结果=null 耗时=undefinedms

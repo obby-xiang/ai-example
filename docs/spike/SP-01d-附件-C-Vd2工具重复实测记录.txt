@@ -1,0 +1,63 @@
+SP-01d 附件 C：V-d2 tool-result 重复去重 实测记录
+
+### vd2-spi-dup
+  说明: 把一个"两个 tool_call 共用同一 id"的 AssistantMessage 直接交给官方 ToolCallingManager.executeToolCalls
+  入参 tool_call id 列表: ["call_dup_same_id","call_dup_same_id"]
+  官方 ToolCallingManager 返回历史: [{"type":"USER","text":"dup-test"},{"type":"ASSISTANT","text":"","toolCallIds":["call_dup_same_id","call_dup_same_id"]},{"type":"TOOL","text":"","toolResponseIds":["call_dup_same_id","call_dup_same_id"]}]
+  历史中 tool 响应 id 序列: ["call_dup_same_id","call_dup_same_id"] (去重后 ["call_dup_same_id"])
+  实际执行次数: 2；执行台账: [{"seq":7,"tsMs":1791289283569,"source":"INTERNAL_LOOP","runId":"vd2-spi-dup-1791289283523","toolCallId":null,"name":"getServerTime","arguments":"{}","durationMs":0,"outcome":"OK"},{"seq":8,"tsMs":1791289283569,"source":"INTERNAL_LOOP","runId":"vd2-spi-dup-1791289283523","toolCallId":null,"name":"getServerTime","arguments":"{}","durationMs":0,"outcome":"OK"}]
+  异常: null
+
+### vd2-fronttool
+  说明: 前端执行工具架构：start 暂停 → 回灌 tool-result → 重复回灌同一 toolCallId
+  start 返回: status=PAUSED_WAITING_TOOL_RESULTS round=1
+  待回灌 tool_calls: [{"toolCallId":"call_00_F8KIOsxKRgwMFGLx4IIV4309","name":"getServerTime","arguments":"{}"}]
+  消息序列(初始): [{"index":0,"type":"SYSTEM","text":"你必须调用 getServerTime 工具来获取时间，不允许不调用工具直接回答。回复使用中文。"},{"index":1,"type":"USER","text":"现在几点？"},{"index":2,"type":"ASSISTANT","text":"","toolCalls":[{"id":"call_00_F8KIOsxKRgwMFGLx4IIV4309","name":"getServerTime","arguments":"{}"}]}]
+  同一 toolCallId 两次提交:
+    第一次: {"httpStatus":200,"accepted":true,"duplicate":false,"toolCallId":"call_00_F8KIOsxKRgwMFGLx4IIV4309","pendingRemaining":[],"status":"DONE","finalText":"现在是 **2026年10月6日 20:30:00**（服务器时间）。","loopState":{"status":"DONE","round":2,"messageCount":5,"pendingIds":[],"submittedIds":["call_00_F8KIOsxKRgwMFGLx4IIV4309"]}}
+    第二次(同 id): {"httpStatus":200,"accepted":false,"duplicate":true,"reason":"DUPLICATE_TOOL_CALL_ID","toolCallId":"call_00_F8KIOsxKRgwMFGLx4IIV4309","loopState":{"status":"DONE","round":2,"messageCount":5,"pendingIds":[],"submittedIds":["call_00_F8KIOsxKRgwMFGLx4IIV4309"]}}
+    第三次(未知 id): {"httpStatus":409,"accepted":false,"unknown":true,"reason":"UNKNOWN_TOOL_CALL_ID","pending":[]}
+  最终状态: status=DONE round=2 finalText="现在是 **2026年10月6日 20:30:00**（服务器时间）。"
+  最终消息序列: [
+ {
+  "index": 0,
+  "type": "SYSTEM",
+  "text": "你必须调用 getServerTime 工具来获取时间，不允许不调用工具直接回答。回复使用中文。"
+ },
+ {
+  "index": 1,
+  "type": "USER",
+  "text": "现在几点？"
+ },
+ {
+  "index": 2,
+  "type": "ASSISTANT",
+  "text": "",
+  "toolCalls": [
+   {
+    "id": "call_00_F8KIOsxKRgwMFGLx4IIV4309",
+    "name": "getServerTime",
+    "arguments": "{}"
+   }
+  ]
+ },
+ {
+  "index": 3,
+  "type": "TOOL",
+  "text": "",
+  "toolResponses": [
+   {
+    "id": "call_00_F8KIOsxKRgwMFGLx4IIV4309",
+    "name": "getServerTime",
+    "responseData": "2026-10-06 20:30:00"
+   }
+  ]
+ },
+ {
+  "index": 4,
+  "type": "ASSISTANT",
+  "text": "现在是 **2026年10月6日 20:30:00**（服务器时间）。"
+ }
+]
+  提交记录: [{"tsMs":1791289284822,"toolCallId":"call_00_F8KIOsxKRgwMFGLx4IIV4309","result":"2026-10-06 20:30:00","accepted":true,"reason":"FIRST_SUBMISSION_EXECUTED"},{"tsMs":1791289285777,"toolCallId":"call_00_F8KIOsxKRgwMFGLx4IIV4309","result":"2026-10-06 20:30:00","accepted":false,"reason":"DUPLICATE_TOOL_CALL_ID"},{"tsMs":1791289285793,"toolCallId":"call_not_exists","result":"x","accepted":false,"reason":"UNKNOWN_TOOL_CALL_ID"}]
+  该 run 工具执行: [{"seq":9,"tsMs":1791289284824,"source":"FRONTEND_TOOL","runId":"ftl-1","toolCallId":"call_00_F8KIOsxKRgwMFGLx4IIV4309","name":"getServerTime","arguments":"{}","durationMs":0,"outcome":"OK"}]

@@ -1,0 +1,146 @@
+SP-01d 附件 E：运行日志关键行（已脱敏）
+
+===== 应用日志（本轮）：logs/app.log（共 64 行关键行）=====
+2026-10-06T20:19:18.872+08:00  INFO 8848 --- [sp01d-resilience] [oundedElastic-1] com.example.spike.tools.SpikeTools       : TOOL_EXEC source=INTERNAL_LOOP runId=vd1-baseline#1791289157549 name=getServerTime
+2026-10-06T20:19:19.808+08:00  INFO 8848 --- [sp01d-resilience] [    spike-run-1] c.e.spike.core.ResilientChatService      : RUN_END sessionId=vd1-baseline runId=vd1-baseline#1791289157549 terminal=OK attempts=1 elapsedMs=2254 deltas=17 emittedChars=28 contentLen=28
+2026-10-06T20:19:24.976+08:00  WARN 8848 --- [sp01d-resilience] [    spike-run-2] c.e.spike.core.ResilientChatService      : ATTEMPT_FAILED sessionId=vd1-guarded-first attempt=1 costMs=5009 emittedAny=false sideEffect=false overBudget=false hasNext=true retryable=true reason=TimeoutException: Did not observe any item or terminal signal within first signal from a Publisher in 'handle' (and no fallback has been configured)
+2026-10-06T20:19:29.981+08:00  WARN 8848 --- [sp01d-resilience] [    spike-run-2] c.e.spike.core.ResilientChatService      : ATTEMPT_FAILED sessionId=vd1-guarded-first attempt=2 costMs=5004 emittedAny=false sideEffect=false overBudget=false hasNext=false retryable=false reason=TimeoutException: Did not observe any item or terminal signal within first signal from a Publisher in 'handle' (and no fallback has been configured)
+2026-10-06T20:19:29.983+08:00  INFO 8848 --- [sp01d-resilience] [    spike-run-2] c.e.spike.core.ResilientChatService      : RUN_END sessionId=vd1-guarded-first runId=vd1-guarded-first#1791289159966 terminal=FAILED attempts=2 elapsedMs=10017 deltas=0 emittedChars=0 contentLen=0
+2026-10-06T20:19:30.160+08:00  INFO 8848 --- [sp01d-resilience] [    spike-run-3] c.e.spike.core.ResilientChatService      : REF_UPSTREAM_SUBSCRIBE strategy=ref sessionId=vd1-ref-first runId=vd1-ref-first#1791289170154 n=1
+2026-10-06T20:19:35.164+08:00  INFO 8848 --- [sp01d-resilience] [     parallel-6] c.e.spike.core.ResilientChatService      : REF_BEFORE_RETRY_ERROR strategy=ref sessionId=vd1-ref-first runId=vd1-ref-first#1791289170154 upstreamSubs=1 err=java.util.concurrent.TimeoutException: Did not observe any item or terminal signal within 5000ms in 'takeUntil' (and no fallback has been configured)
+2026-10-06T20:19:35.166+08:00  INFO 8848 --- [sp01d-resilience] [     parallel-6] c.e.spike.core.ResilientChatService      : REF_UPSTREAM_SUBSCRIBE strategy=ref sessionId=vd1-ref-first runId=vd1-ref-first#1791289170154 n=2
+2026-10-06T20:19:35.168+08:00  INFO 8848 --- [sp01d-resilience] [     parallel-6] c.e.spike.core.ResilientChatService      : REF_BEFORE_RETRY_ERROR strategy=ref sessionId=vd1-ref-first runId=vd1-ref-first#1791289170154 upstreamSubs=2 err=java.lang.IllegalStateException: No StreamAdvisors available to execute
+2026-10-06T20:19:35.171+08:00  INFO 8848 --- [sp01d-resilience] [    spike-run-3] c.e.spike.core.ResilientChatService      : RUN_END sessionId=vd1-ref-first runId=vd1-ref-first#1791289170154 terminal=FAILED attempts=1 elapsedMs=5017 deltas=0 emittedChars=0 contentLen=0
+2026-10-06T20:19:35.358+08:00  INFO 8848 --- [sp01d-resilience] [    spike-run-4] c.e.spike.core.ResilientChatService      : REF_UPSTREAM_SUBSCRIBE strategy=refbare sessionId=vd1-refbare-first runId=vd1-refbare-first#1791289175349 n=1
+2026-10-06T20:19:40.362+08:00  INFO 8848 --- [sp01d-resilience] [     parallel-8] c.e.spike.core.ResilientChatService      : REF_BEFORE_RETRY_ERROR strategy=refbare sessionId=vd1-refbare-first runId=vd1-refbare-first#1791289175349 upstreamSubs=1 err=java.util.concurrent.TimeoutException: Did not observe any item or terminal signal within 5000ms in 'takeUntil' (and no fallback has been configured)
+2026-10-06T20:19:40.362+08:00  INFO 8848 --- [sp01d-resilience] [     parallel-8] c.e.spike.core.ResilientChatService      : REF_UPSTREAM_SUBSCRIBE strategy=refbare sessionId=vd1-refbare-first runId=vd1-refbare-first#1791289175349 n=2
+2026-10-06T20:19:40.363+08:00  INFO 8848 --- [sp01d-resilience] [     parallel-8] c.e.spike.core.ResilientChatService      : REF_BEFORE_RETRY_ERROR strategy=refbare sessionId=vd1-refbare-first runId=vd1-refbare-first#1791289175349 upstreamSubs=2 err=java.lang.IllegalStateException: No StreamAdvisors available to execute
+2026-10-06T20:19:40.365+08:00  INFO 8848 --- [sp01d-resilience] [    spike-run-4] c.e.spike.core.ResilientChatService      : RUN_END sessionId=vd1-refbare-first runId=vd1-refbare-first#1791289175349 terminal=FAILED attempts=1 elapsedMs=5015 deltas=0 emittedChars=0 contentLen=0
+2026-10-06T20:19:58.838+08:00  INFO 8848 --- [sp01d-resilience] [    spike-run-5] c.e.spike.core.ResilientChatService      : RUN_END sessionId=vd1-plain-hang runId=vd1-plain-hang#1791289180533 terminal=FAILED attempts=0 elapsedMs=18304 deltas=0 emittedChars=0 contentLen=0
+2026-10-06T20:20:14.185+08:00  WARN 8848 --- [sp01d-resilience] [    spike-run-6] c.e.spike.core.ResilientChatService      : ATTEMPT_FAILED sessionId=vd1-guarded-mid attempt=1 costMs=6871 emittedAny=true sideEffect=false overBudget=false hasNext=true retryable=false reason=TimeoutException: Did not observe any item or terminal signal within first signal from a Publisher in 'handle' (and no fallback has been configured)
+2026-10-06T20:20:14.186+08:00  INFO 8848 --- [sp01d-resilience] [    spike-run-6] c.e.spike.core.ResilientChatService      : RUN_END sessionId=vd1-guarded-mid runId=vd1-guarded-mid#1791289207313 terminal=FAILED attempts=1 elapsedMs=6873 deltas=1 emittedChars=2 contentLen=2
+2026-10-06T20:20:14.383+08:00  INFO 8848 --- [sp01d-resilience] [    spike-run-7] c.e.spike.core.ResilientChatService      : REF_UPSTREAM_SUBSCRIBE strategy=ref sessionId=vd1-ref-mid runId=vd1-ref-mid#1791289214381 n=1
+2026-10-06T20:20:20.235+08:00  INFO 8848 --- [sp01d-resilience] [     parallel-7] c.e.spike.core.ResilientChatService      : REF_BEFORE_RETRY_ERROR strategy=ref sessionId=vd1-ref-mid runId=vd1-ref-mid#1791289214381 upstreamSubs=1 err=java.util.concurrent.TimeoutException: Did not observe any item or terminal signal within 5000ms in 'takeUntil' (and no fallback has been configured)
+2026-10-06T20:20:20.236+08:00  INFO 8848 --- [sp01d-resilience] [     parallel-7] c.e.spike.core.ResilientChatService      : REF_UPSTREAM_SUBSCRIBE strategy=ref sessionId=vd1-ref-mid runId=vd1-ref-mid#1791289214381 n=2
+2026-10-06T20:20:20.238+08:00  INFO 8848 --- [sp01d-resilience] [     parallel-7] c.e.spike.core.ResilientChatService      : REF_BEFORE_RETRY_ERROR strategy=ref sessionId=vd1-ref-mid runId=vd1-ref-mid#1791289214381 upstreamSubs=2 err=java.lang.IllegalStateException: No StreamAdvisors available to execute
+2026-10-06T20:20:20.242+08:00  INFO 8848 --- [sp01d-resilience] [    spike-run-7] c.e.spike.core.ResilientChatService      : RUN_END sessionId=vd1-ref-mid runId=vd1-ref-mid#1791289214381 terminal=FAILED attempts=1 elapsedMs=5860 deltas=1 emittedChars=2 contentLen=2
+2026-10-06T20:20:20.430+08:00  INFO 8848 --- [sp01d-resilience] [    spike-run-8] c.e.spike.core.ResilientChatService      : REF_UPSTREAM_SUBSCRIBE strategy=refbare sessionId=vd1-refbare-mid runId=vd1-refbare-mid#1791289220423 n=1
+2026-10-06T20:20:26.427+08:00  INFO 8848 --- [sp01d-resilience] [    parallel-11] c.e.spike.core.ResilientChatService      : REF_BEFORE_RETRY_ERROR strategy=refbare sessionId=vd1-refbare-mid runId=vd1-refbare-mid#1791289220423 upstreamSubs=1 err=java.util.concurrent.TimeoutException: Did not observe any item or terminal signal within 5000ms in 'takeUntil' (and no fallback has been configured)
+2026-10-06T20:20:26.427+08:00  INFO 8848 --- [sp01d-resilience] [    parallel-11] c.e.spike.core.ResilientChatService      : REF_UPSTREAM_SUBSCRIBE strategy=refbare sessionId=vd1-refbare-mid runId=vd1-refbare-mid#1791289220423 n=2
+2026-10-06T20:20:26.427+08:00  INFO 8848 --- [sp01d-resilience] [    parallel-11] c.e.spike.core.ResilientChatService      : REF_BEFORE_RETRY_ERROR strategy=refbare sessionId=vd1-refbare-mid runId=vd1-refbare-mid#1791289220423 upstreamSubs=2 err=java.lang.IllegalStateException: No StreamAdvisors available to execute
+2026-10-06T20:20:26.428+08:00  INFO 8848 --- [sp01d-resilience] [    spike-run-8] c.e.spike.core.ResilientChatService      : RUN_END sessionId=vd1-refbare-mid runId=vd1-refbare-mid#1791289220423 terminal=FAILED attempts=1 elapsedMs=6005 deltas=1 emittedChars=2 contentLen=2
+2026-10-06T20:20:39.384+08:00  INFO 8848 --- [sp01d-resilience] [    spike-run-1] c.e.spike.core.ResilientChatService      : RUN_END sessionId=vd1-plain-mid runId=vd1-plain-mid#1791289226570 terminal=FAILED attempts=0 elapsedMs=12814 deltas=1 emittedChars=2 contentLen=2
+2026-10-06T20:20:40.747+08:00  INFO 8848 --- [sp01d-resilience] [    spike-run-2] c.e.spike.core.ResilientChatService      : RUN_END sessionId=vd1-fin-content runId=vd1-fin-content#1791289239550 terminal=OK attempts=1 elapsedMs=1196 deltas=2 emittedChars=4 contentLen=4
+2026-10-06T20:20:41.765+08:00  WARN 8848 --- [sp01d-resilience] [    spike-run-3] c.e.spike.core.ResilientChatService      : ATTEMPT_FAILED sessionId=vd1-truncate attempt=1 costMs=852 emittedAny=false sideEffect=false overBudget=false hasNext=true retryable=true reason=EOFException: EOF reached while reading
+2026-10-06T20:20:42.692+08:00  WARN 8848 --- [sp01d-resilience] [    spike-run-3] c.e.spike.core.ResilientChatService      : ATTEMPT_FAILED sessionId=vd1-truncate attempt=2 costMs=927 emittedAny=false sideEffect=false overBudget=false hasNext=false retryable=false reason=EOFException: EOF reached while reading
+2026-10-06T20:20:42.692+08:00  INFO 8848 --- [sp01d-resilience] [    spike-run-3] c.e.spike.core.ResilientChatService      : RUN_END sessionId=vd1-truncate runId=vd1-truncate#1791289240912 terminal=FAILED attempts=2 elapsedMs=1780 deltas=0 emittedChars=0 contentLen=0
+2026-10-06T20:20:43.810+08:00  INFO 8848 --- [sp01d-resilience] [    spike-run-4] c.e.spike.core.ResilientChatService      : RUN_END sessionId=vd1-truncate-fin runId=vd1-truncate-fin#1791289242844 terminal=OK attempts=1 elapsedMs=965 deltas=0 emittedChars=0 contentLen=0
+2026-10-06T20:20:47.127+08:00  INFO 8848 --- [sp01d-resilience] [oundedElastic-1] com.example.spike.tools.SpikeTools       : TOOL_EXEC source=INTERNAL_LOOP runId=vd1-guarded-tooldup#1791289246207 name=getServerTime
+2026-10-06T20:20:54.091+08:00  WARN 8848 --- [sp01d-resilience] [    spike-run-5] c.e.spike.core.ResilientChatService      : ATTEMPT_FAILED sessionId=vd1-guarded-tooldup attempt=1 costMs=7884 emittedAny=false sideEffect=true overBudget=false hasNext=true retryable=false reason=TimeoutException: Did not observe any item or terminal signal within first signal from a Publisher in 'handle' (and no fallback has been configured)
+2026-10-06T20:20:54.092+08:00  INFO 8848 --- [sp01d-resilience] [    spike-run-5] c.e.spike.core.ResilientChatService      : RUN_END sessionId=vd1-guarded-tooldup runId=vd1-guarded-tooldup#1791289246207 terminal=FAILED attempts=1 elapsedMs=7885 deltas=0 emittedChars=0 contentLen=0
+2026-10-06T20:20:54.283+08:00  INFO 8848 --- [sp01d-resilience] [    spike-run-6] c.e.spike.core.ResilientChatService      : REF_UPSTREAM_SUBSCRIBE strategy=ref sessionId=vd1-ref-tooldup runId=vd1-ref-tooldup#1791289254283 n=1
+2026-10-06T20:20:55.006+08:00  INFO 8848 --- [sp01d-resilience] [oundedElastic-2] com.example.spike.tools.SpikeTools       : TOOL_EXEC source=INTERNAL_LOOP runId=vd1-ref-tooldup#1791289254283 name=getServerTime
+2026-10-06T20:21:01.003+08:00  INFO 8848 --- [sp01d-resilience] [     parallel-8] c.e.spike.core.ResilientChatService      : REF_BEFORE_RETRY_ERROR strategy=ref sessionId=vd1-ref-tooldup runId=vd1-ref-tooldup#1791289254283 upstreamSubs=1 err=java.util.concurrent.TimeoutException: Did not observe any item or terminal signal within 5000ms in 'takeUntil' (and no fallback has been configured)
+2026-10-06T20:21:01.004+08:00  INFO 8848 --- [sp01d-resilience] [     parallel-8] c.e.spike.core.ResilientChatService      : REF_UPSTREAM_SUBSCRIBE strategy=ref sessionId=vd1-ref-tooldup runId=vd1-ref-tooldup#1791289254283 n=2
+2026-10-06T20:21:01.005+08:00  INFO 8848 --- [sp01d-resilience] [     parallel-8] c.e.spike.core.ResilientChatService      : REF_BEFORE_RETRY_ERROR strategy=ref sessionId=vd1-ref-tooldup runId=vd1-ref-tooldup#1791289254283 upstreamSubs=2 err=java.lang.IllegalStateException: No StreamAdvisors available to execute
+2026-10-06T20:21:01.007+08:00  INFO 8848 --- [sp01d-resilience] [    spike-run-6] c.e.spike.core.ResilientChatService      : RUN_END sessionId=vd1-ref-tooldup runId=vd1-ref-tooldup#1791289254283 terminal=FAILED attempts=1 elapsedMs=6724 deltas=0 emittedChars=0 contentLen=0
+2026-10-06T20:21:01.187+08:00  INFO 8848 --- [sp01d-resilience] [    spike-run-7] c.e.spike.core.ResilientChatService      : REF_UPSTREAM_SUBSCRIBE strategy=refbare sessionId=vd1-refbare-tooldup runId=vd1-refbare-tooldup#1791289261184 n=1
+2026-10-06T20:21:02.079+08:00  INFO 8848 --- [sp01d-resilience] [oundedElastic-2] com.example.spike.tools.SpikeTools       : TOOL_EXEC source=INTERNAL_LOOP runId=vd1-refbare-tooldup#1791289261184 name=getServerTime
+2026-10-06T20:21:07.843+08:00  INFO 8848 --- [sp01d-resilience] [    parallel-12] c.e.spike.core.ResilientChatService      : REF_BEFORE_RETRY_ERROR strategy=refbare sessionId=vd1-refbare-tooldup runId=vd1-refbare-tooldup#1791289261184 upstreamSubs=1 err=java.util.concurrent.TimeoutException: Did not observe any item or terminal signal within 5000ms in 'takeUntil' (and no fallback has been configured)
+2026-10-06T20:21:07.843+08:00  INFO 8848 --- [sp01d-resilience] [    parallel-12] c.e.spike.core.ResilientChatService      : REF_UPSTREAM_SUBSCRIBE strategy=refbare sessionId=vd1-refbare-tooldup runId=vd1-refbare-tooldup#1791289261184 n=2
+2026-10-06T20:21:07.844+08:00  INFO 8848 --- [sp01d-resilience] [    parallel-12] c.e.spike.core.ResilientChatService      : REF_BEFORE_RETRY_ERROR strategy=refbare sessionId=vd1-refbare-tooldup runId=vd1-refbare-tooldup#1791289261184 upstreamSubs=2 err=java.lang.IllegalStateException: No StreamAdvisors available to execute
+2026-10-06T20:21:07.845+08:00  INFO 8848 --- [sp01d-resilience] [    spike-run-7] c.e.spike.core.ResilientChatService      : RUN_END sessionId=vd1-refbare-tooldup runId=vd1-refbare-tooldup#1791289261184 terminal=FAILED attempts=1 elapsedMs=6661 deltas=0 emittedChars=0 contentLen=0
+2026-10-06T20:21:15.381+08:00  INFO 8848 --- [sp01d-resilience] [oundedElastic-1] com.example.spike.tools.SpikeTools       : TOOL_EXEC source=INTERNAL_LOOP runId=vd1-guarded-longtool#1791289268032 name=longTask outcome=OK durMs=5999 slices=0
+2026-10-06T20:21:15.381+08:00  WARN 8848 --- [sp01d-resilience] [    spike-run-8] c.e.spike.core.ResilientChatService      : ATTEMPT_FAILED sessionId=vd1-guarded-longtool attempt=1 costMs=7349 emittedAny=false sideEffect=true overBudget=false hasNext=true retryable=false reason=TimeoutException: Did not observe any item or terminal signal within first signal from a Publisher in 'handle' (and no fallback has been configured)
+2026-10-06T20:21:15.381+08:00  INFO 8848 --- [sp01d-resilience] [    spike-run-8] c.e.spike.core.ResilientChatService      : RUN_END sessionId=vd1-guarded-longtool runId=vd1-guarded-longtool#1791289268032 terminal=FAILED attempts=1 elapsedMs=7349 deltas=0 emittedChars=0 contentLen=0
+2026-10-06T20:21:15.555+08:00  INFO 8848 --- [sp01d-resilience] [    spike-run-1] c.e.spike.core.ResilientChatService      : REF_UPSTREAM_SUBSCRIBE strategy=ref sessionId=vd1-ref-longtool runId=vd1-ref-longtool#1791289275554 n=1
+2026-10-06T20:21:21.373+08:00  INFO 8848 --- [sp01d-resilience] [oundedElastic-2] com.example.spike.tools.SpikeTools       : TOOL_EXEC source=INTERNAL_LOOP runId=vd1-ref-longtool#1791289275554 name=longTask outcome=OK durMs=5002 slices=0
+2026-10-06T20:21:21.373+08:00  INFO 8848 --- [sp01d-resilience] [     parallel-8] c.e.spike.core.ResilientChatService      : REF_BEFORE_RETRY_ERROR strategy=ref sessionId=vd1-ref-longtool runId=vd1-ref-longtool#1791289275554 upstreamSubs=1 err=java.util.concurrent.TimeoutException: Did not observe any item or terminal signal within 5000ms in 'takeUntil' (and no fallback has been configured)
+2026-10-06T20:21:21.373+08:00  INFO 8848 --- [sp01d-resilience] [     parallel-8] c.e.spike.core.ResilientChatService      : REF_UPSTREAM_SUBSCRIBE strategy=ref sessionId=vd1-ref-longtool runId=vd1-ref-longtool#1791289275554 n=2
+2026-10-06T20:21:21.373+08:00  INFO 8848 --- [sp01d-resilience] [     parallel-8] c.e.spike.core.ResilientChatService      : REF_BEFORE_RETRY_ERROR strategy=ref sessionId=vd1-ref-longtool runId=vd1-ref-longtool#1791289275554 upstreamSubs=2 err=java.lang.IllegalStateException: No StreamAdvisors available to execute
+2026-10-06T20:21:21.375+08:00  INFO 8848 --- [sp01d-resilience] [    spike-run-1] c.e.spike.core.ResilientChatService      : RUN_END sessionId=vd1-ref-longtool runId=vd1-ref-longtool#1791289275554 terminal=FAILED attempts=1 elapsedMs=5820 deltas=0 emittedChars=0 contentLen=0
+2026-10-06T20:21:23.569+08:00  INFO 8848 --- [sp01d-resilience] [io-18303-exec-5] com.example.spike.tools.SpikeTools       : TOOL_EXEC source=INTERNAL_LOOP runId=vd2-spi-dup-1791289283523 name=getServerTime
+2026-10-06T20:21:23.569+08:00  INFO 8848 --- [sp01d-resilience] [io-18303-exec-5] com.example.spike.tools.SpikeTools       : TOOL_EXEC source=INTERNAL_LOOP runId=vd2-spi-dup-1791289283523 name=getServerTime
+2026-10-06T20:21:28.170+08:00  INFO 8848 --- [sp01d-resilience] [oundedElastic-1] com.example.spike.tools.SpikeTools       : TOOL_EXEC source=INTERNAL_LOOP runId=vd3-coop#1791289285944 name=longTask outcome=CANCELLED durMs=1004 slices=6
+2026-10-06T20:21:28.852+08:00  INFO 8848 --- [sp01d-resilience] [    spike-run-2] c.e.spike.core.ResilientChatService      : RUN_END sessionId=vd3-coop runId=vd3-coop#1791289285944 terminal=CANCELLED attempts=1 elapsedMs=2908 deltas=6 emittedChars=10 contentLen=10
+2026-10-06T20:21:33.358+08:00  INFO 8848 --- [sp01d-resilience] [oundedElastic-2] com.example.spike.tools.SpikeTools       : TOOL_EXEC source=INTERNAL_LOOP runId=vd3-hard#1791289289030 name=longTask outcome=OK durMs=3000 slices=0
+2026-10-06T20:21:33.862+08:00  INFO 8848 --- [sp01d-resilience] [    spike-run-3] c.e.spike.core.ResilientChatService      : RUN_END sessionId=vd3-hard runId=vd3-hard#1791289289030 terminal=CANCELLED attempts=1 elapsedMs=4832 deltas=0 emittedChars=0 contentLen=0
+
+===== 故障代理日志（本轮）：logs/proxy.log（共 76 行关键行）=====
+[proxy] listening on http://127.0.0.1:18304 -> https://api.deepseek.com (evidence=evidence)
+[proxy] #1 seq=1 POST /v1/chat/completions fault=none applied=false
+[proxy] #1 seq=1 -> PASSTHROUGH_COMPLETE status=200 relayed=0B dur=893ms
+[proxy] #2 seq=2 POST /v1/chat/completions fault=none applied=false
+[proxy] #2 seq=2 -> PASSTHROUGH_COMPLETE status=200 relayed=0B dur=889ms
+[proxy] #1 seq=3 POST /v1/chat/completions fault=stall applied=true
+[proxy] #2 seq=4 POST /v1/chat/completions fault=stall applied=true
+[proxy] #1 seq=3 -> STALLED_THEN_SOCKET_RESET status=null relayed=0B dur=9001ms
+[proxy] #1 seq=5 POST /v1/chat/completions fault=stall applied=true
+[proxy] #2 seq=4 -> STALLED_THEN_SOCKET_RESET status=null relayed=0B dur=9000ms
+[proxy] #1 seq=6 POST /v1/chat/completions fault=stall applied=true
+[proxy] #1 seq=5 -> STALLED_THEN_SOCKET_RESET status=null relayed=0B dur=9001ms
+[proxy] #1 seq=7 POST /v1/chat/completions fault=stall applied=true
+[proxy] #1 seq=6 -> STALLED_THEN_SOCKET_RESET status=null relayed=0B dur=9000ms
+[proxy] #1 seq=8 POST /v1/chat/completions fault=stall-after-content applied=true
+[proxy] #1 seq=8 going silent after 922B / 2 content events
+[proxy] #1 seq=9 POST /v1/chat/completions fault=stall-after-content applied=true
+[proxy] #1 seq=9 going silent after 8167B / 2 content events
+[proxy] #1 seq=8 -> STALLED_AFTER_CONTENT_THEN_SOCKET_RESET status=200 relayed=922B dur=12856ms
+[proxy] #1 seq=10 POST /v1/chat/completions fault=stall-after-content applied=true
+[proxy] #1 seq=10 going silent after 5758B / 2 content events
+[proxy] #1 seq=11 POST /v1/chat/completions fault=stall-after-content applied=true
+[proxy] #1 seq=9 -> STALLED_AFTER_CONTENT_THEN_SOCKET_RESET status=200 relayed=8167B dur=12839ms
+[proxy] #1 seq=11 going silent after 6673B / 2 content events
+[proxy] #1 seq=10 -> STALLED_AFTER_CONTENT_THEN_SOCKET_RESET status=200 relayed=5758B dur=12988ms
+[proxy] #1 seq=11 -> STALLED_AFTER_CONTENT_THEN_SOCKET_RESET status=200 relayed=6673B dur=12796ms
+[proxy] #1 seq=12 POST /v1/chat/completions fault=fin-after-content applied=true
+[proxy] #1 seq=12 -> TRUNCATED_CLEAN_FIN status=200 relayed=7273B dur=1188ms
+[proxy] #1 seq=13 POST /v1/chat/completions fault=truncate applied=true
+[proxy] #1 seq=13 -> TRUNCATED_SOCKET_RESET status=200 relayed=922B dur=843ms
+[proxy] #2 seq=14 POST /v1/chat/completions fault=truncate applied=true
+[proxy] #2 seq=14 -> TRUNCATED_SOCKET_RESET status=200 relayed=922B dur=913ms
+[proxy] #1 seq=15 POST /v1/chat/completions fault=truncate-fin applied=true
+[proxy] #1 seq=15 -> TRUNCATED_CLEAN_FIN status=200 relayed=2422B dur=960ms
+[proxy] #1 seq=16 POST /v1/chat/completions fault=stall-after-content applied=false
+[proxy] #1 seq=16 -> PASSTHROUGH_COMPLETE status=200 relayed=0B dur=913ms
+[proxy] #2 seq=17 POST /v1/chat/completions fault=stall-after-content applied=true
+[proxy] #2 seq=17 going silent after 622B / 1 content events
+[proxy] #1 seq=18 POST /v1/chat/completions fault=stall-after-content applied=false
+[proxy] #1 seq=18 -> PASSTHROUGH_COMPLETE status=200 relayed=0B dur=714ms
+[proxy] #2 seq=19 POST /v1/chat/completions fault=stall-after-content applied=true
+[proxy] #2 seq=19 going silent after 622B / 1 content events
+[proxy] #2 seq=17 -> STALLED_AFTER_CONTENT_THEN_SOCKET_RESET status=200 relayed=622B dur=12953ms
+[proxy] #1 seq=20 POST /v1/chat/completions fault=stall-after-content applied=false
+[proxy] #1 seq=20 -> PASSTHROUGH_COMPLETE status=200 relayed=0B dur=887ms
+[proxy] #2 seq=21 POST /v1/chat/completions fault=stall-after-content applied=true
+[proxy] #2 seq=21 going silent after 622B / 1 content events
+[proxy] #2 seq=19 -> STALLED_AFTER_CONTENT_THEN_SOCKET_RESET status=200 relayed=622B dur=12981ms
+[proxy] #1 seq=22 POST /v1/chat/completions fault=none applied=false
+[proxy] #1 seq=22 -> PASSTHROUGH_COMPLETE status=200 relayed=0B dur=1340ms
+[proxy] #2 seq=21 -> TRUNCATED_SOCKET_RESET status=200 relayed=622B dur=12754ms
+[proxy] #1 seq=23 POST /v1/chat/completions fault=none applied=false
+[proxy] #1 seq=23 -> PASSTHROUGH_COMPLETE status=200 relayed=0B dur=808ms
+[proxy] #1 seq=24 POST /v1/chat/completions fault=none applied=false
+[proxy] #1 seq=24 -> PASSTHROUGH_COMPLETE status=200 relayed=0B dur=977ms
+[proxy] #2 seq=25 POST /v1/chat/completions fault=none applied=false
+[proxy] #2 seq=25 -> PASSTHROUGH_COMPLETE status=200 relayed=0B dur=931ms
+[proxy] #1 seq=26 POST /v1/chat/completions fault=none applied=false
+[proxy] #1 seq=26 -> PASSTHROUGH_COMPLETE status=200 relayed=0B dur=1205ms
+[proxy] #2 seq=27 POST /v1/chat/completions fault=none applied=false
+[proxy] #1 seq=28 POST /v1/chat/completions fault=none applied=false
+[proxy] #2 seq=27 -> PASSTHROUGH_COMPLETE status=200 relayed=0B dur=1907ms
+[proxy] #1 seq=28 -> PASSTHROUGH_COMPLETE status=200 relayed=0B dur=1319ms
+[proxy] #2 seq=29 POST /v1/chat/completions fault=none applied=false
+[proxy] #2 seq=29 -> PASSTHROUGH_COMPLETE status=200 relayed=0B dur=1747ms
+[proxy] #1 seq=7 -> STALLED_THEN_SOCKET_RESET status=null relayed=0B dur=179996ms
+[proxy] #1 seq=30 POST /v1/chat/completions fault=stall applied=true
+[proxy] #2 seq=31 POST /v1/chat/completions fault=stall applied=true
+[proxy] #1 seq=30 -> STALLED_THEN_SOCKET_RESET status=null relayed=0B dur=9000ms
+[proxy] #1 seq=32 POST /v1/chat/completions fault=stall-after-content applied=true
+[proxy] #1 seq=32 going silent after 9678B / 2 content events
+[proxy] #2 seq=31 -> STALLED_THEN_SOCKET_RESET status=null relayed=0B dur=8999ms
+[proxy] #2 seq=33 POST /v1/chat/completions fault=stall-after-content applied=true
+[proxy] #2 seq=33 going silent after 922B / 2 content events
+[proxy] #1 seq=32 -> STALLED_AFTER_CONTENT_THEN_SOCKET_RESET status=200 relayed=9678B dur=13102ms
+[proxy] #2 seq=33 -> STALLED_AFTER_CONTENT_THEN_SOCKET_RESET status=200 relayed=922B dur=12851ms
+

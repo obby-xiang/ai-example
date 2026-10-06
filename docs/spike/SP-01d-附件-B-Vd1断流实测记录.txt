@@ -1,0 +1,319 @@
+SP-01d 附件 B：V-d1 断流有界重试 逐 case 实测记录
+（原始数据：<MAIN_V2>/spike/sp01d/evidence/sp01d-vd1-*.json；此处为脱敏摘要）
+
+### vd1-baseline
+  说明: 无故障对照（代理透传）
+  故障配置: {"mode":"none"}
+  事件序列: start@71ms | delta@2242ms | delta@2278ms | delta@2279ms | delta@2287ms | delta@2291ms | delta@2294ms | delta@2296ms | delta@2298ms | delta@2299ms | delta@2301ms | delta@2302ms | delta@2303ms | delta@2304ms | delta@2305ms | delta@2306ms | delta@2307ms | delta@2308ms | done@2311ms
+  计数: {"start":1,"delta":17,"done":1}
+  delta 拼接文本(长度 28, 重放前缀长度 0): "当前服务器时间：2026-10-06 20:19:18。"
+  终态事件数据: {"cancelled":false,"terminal":"OK","content":"当前服务器时间：2026-10-06 20:19:18。","emittedChars":28,"deltas":17,"attempts":1,"elapsedMs":2254}
+  客户端耗时=2320ms 主动放弃=false 客户端异常=null
+  服务端终态=OK cancelled=false 上游订阅次数=0 累计时长=2254ms 已产出字符=28
+  尝试记录: [{"attempt":1,"outcome":"COMPLETED","costMs":2249,"emittedAnythingBefore":true,"reason":null}]
+  已产出内容: "当前服务器时间：2026-10-06 20:19:18。"
+  代理逐请求台账:
+    #1 mode=none applied=false status=200
+       转发 0B / - 个事件 / - 个正文 delta
+       结果=PASSTHROUGH_COMPLETE 耗时=893ms
+    #2 mode=none applied=false status=200
+       转发 0B / - 个事件 / - 个正文 delta
+       结果=PASSTHROUGH_COMPLETE 耗时=889ms
+
+### vd1-guarded-first
+  说明: guarded 策略 + 首包静默（代理不发任何字节，9s 后 RST）
+  故障配置: {"mode":"stall","stallMs":9000}
+  事件序列: start@4ms | retry@5015ms | error@10020ms
+  计数: {"start":1,"retry":1,"error":1}
+  delta 拼接文本(长度 0, 重放前缀长度 0): ""
+  终态事件数据: {"code":"UPSTREAM_SILENT_TIMEOUT","message":"模型服务在约定时间内没有任何事件（上游静默），本轮流已终止。","rawReason":"TimeoutException: Did not observe any item or terminal signal within first signal from a Publisher in 'handle' (and no fallback has been configured)","attempts":2,"partial":false,"toolSideEffect":false,"emittedChars":0,"elapsedMs":10016}
+  客户端耗时=10023ms 主动放弃=false 客户端异常=null
+  服务端终态=FAILED cancelled=false 上游订阅次数=0 累计时长=10017ms 已产出字符=0
+  尝试记录: [{"attempt":1,"outcome":"ERROR","costMs":5009,"emittedAnythingBefore":false,"reason":"TimeoutException: Did not observe any item or terminal signal within first signal from a Publisher in 'handle' (and no fallback has been configured)"},{"attempt":2,"outcome":"ERROR","costMs":5004,"emittedAnythingBefore":false,"reason":"TimeoutException: Did not observe any item or terminal signal within first signal from a Publisher in 'handle' (and no fallback has been configured)"}]
+  代理逐请求台账:
+    #1 mode=stall applied=true status=null
+       转发 0B / - 个事件 / - 个正文 delta
+       结果=STALLED_THEN_SOCKET_RESET 耗时=9001ms
+    #2 mode=stall applied=true status=null
+       转发 0B / - 个事件 / - 个正文 delta
+       结果=null 耗时=undefinedms
+
+### vd1-ref-first
+  说明: ref 策略 + 首包静默（代理不发任何字节，9s 后 RST）
+  故障配置: {"mode":"stall","stallMs":9000}
+  事件序列: start@5ms | error@5019ms
+  计数: {"start":1,"error":1}
+  delta 拼接文本(长度 0, 重放前缀长度 0): ""
+  终态事件数据: {"code":"UPSTREAM_STREAM_ERROR","message":"模型服务异常，本轮流已终止：IllegalStateException: No StreamAdvisors available to execute","rawReason":"IllegalStateException: No StreamAdvisors available to execute","attempts":2,"partial":false,"toolSideEffect":false,"emittedChars":0,"elapsedMs":5016}
+  客户端耗时=5020ms 主动放弃=false 客户端异常=null
+  服务端终态=FAILED cancelled=false 上游订阅次数=2 累计时长=5017ms 已产出字符=0
+  尝试记录: [{"attempt":1,"outcome":"ERROR","costMs":5013,"emittedAnythingBefore":false,"reason":"IllegalStateException: No StreamAdvisors available to execute"}]
+  代理逐请求台账:
+    #1 mode=stall applied=true status=null
+       转发 0B / - 个事件 / - 个正文 delta
+       结果=null 耗时=undefinedms
+
+### vd1-refbare-first
+  说明: refbare 策略 + 首包静默（代理不发任何字节，9s 后 RST）
+  故障配置: {"mode":"stall","stallMs":9000}
+  事件序列: start@8ms | error@5020ms
+  计数: {"start":1,"error":1}
+  delta 拼接文本(长度 0, 重放前缀长度 0): ""
+  终态事件数据: {"code":"UPSTREAM_STREAM_ERROR","message":"模型服务异常，本轮流已终止：IllegalStateException: No StreamAdvisors available to execute","rawReason":"IllegalStateException: No StreamAdvisors available to execute","attempts":2,"partial":false,"toolSideEffect":false,"emittedChars":0,"elapsedMs":5015}
+  客户端耗时=5022ms 主动放弃=false 客户端异常=null
+  服务端终态=FAILED cancelled=false 上游订阅次数=2 累计时长=5015ms 已产出字符=0
+  尝试记录: [{"attempt":1,"outcome":"ERROR","costMs":5012,"emittedAnythingBefore":false,"reason":"IllegalStateException: No StreamAdvisors available to execute"}]
+  代理逐请求台账:
+    #1 mode=stall applied=true status=null
+       转发 0B / - 个事件 / - 个正文 delta
+       结果=null 耗时=undefinedms
+
+### vd1-refmodel-first
+  说明: refmodel 策略 + 首包静默（代理不发任何字节，9s 后 RST）
+  故障配置: {"mode":"stall","stallMs":9000}
+  事件序列: start@60ms | error@10311ms
+  计数: {"start":1,"error":1}
+  delta 拼接文本(长度 0, 重放前缀长度 0): ""
+  终态事件数据: {"code":"UPSTREAM_SILENT_TIMEOUT","message":"模型服务在约定时间内没有任何事件（上游静默），本轮流已终止。","rawReason":"TimeoutException: Did not observe any item or terminal signal within 5000ms in 'takeUntil' (and no fallback has been configured)","attempts":2,"partial":false,"toolSideEffect":false,"emittedChars":0,"elapsedMs":10260}
+  客户端耗时=10328ms 主动放弃=false 客户端异常=null
+  服务端终态=FAILED cancelled=false 上游订阅次数=2 累计时长=10261ms 已产出字符=0
+  尝试记录: [{"attempt":1,"outcome":"ERROR","costMs":10254,"emittedAnythingBefore":false,"reason":"TimeoutException: Did not observe any item or terminal signal within 5000ms in 'takeUntil' (and no fallback has been configured)"}]
+  代理逐请求台账:
+    #1 mode=stall applied=true status=null
+       转发 0B / - 个事件 / - 个正文 delta
+       结果=STALLED_THEN_SOCKET_RESET 耗时=9000ms
+    #2 mode=stall applied=true status=null
+       转发 0B / - 个事件 / - 个正文 delta
+       结果=null 耗时=undefinedms
+
+### vd1-plain-hang
+  说明: plain 策略（无超时无重试）+ 上游持续静默且不关连接：客户端 15s 放弃后服务端线程是否还在挂
+  故障配置: {"mode":"stall","stallMs":180000}
+  事件序列: start@7ms
+  计数: {"start":1}
+  delta 拼接文本(长度 0, 重放前缀长度 0): ""
+  终态事件数据: {"sessionId":"vd1-plain-hang","runId":"vd1-plain-hang#1791289180533","strategy":"plain","firstEventTimeoutMs":5000,"interEventTimeoutMs":6000,"maxAttempts":2,"totalBudgetMs":20000}
+  客户端耗时=15004ms 主动放弃=true 客户端异常=This operation was aborted
+  客户端放弃后: 服务端终态=null 仍在执行本轮的线程=spike-run-5
+  3 秒后再查: 服务端终态=null 仍在执行本轮的线程=spike-run-5
+  代理强断连接后: 服务端终态=FAILED 仍在执行本轮的线程=（无）
+  阻塞线程栈顶: java.base@21.0.12/jdk.internal.misc.Unsafe.park(Native Method) <- java.base@21.0.12/java.util.concurrent.locks.LockSupport.park(LockSupport.java:221) <- java.base@21.0.12/java.util.concurrent.locks.AbstractQueuedSynchronizer.acquire(AbstractQueuedSynchronizer.java:754) <- java.base@21.0.12/java.util.concurrent.locks.AbstractQueuedSynchronizer.acquireSharedInterruptibly(AbstractQueuedSynchronizer.java:1099) <- java.base@21.0.12/java.util.concurrent.CountDownLatch.await(CountDownLatch.java:230) <- reactor.core.publisher.BlockingSingleSubscriber.blockingGet(BlockingSingleSubscriber.java:91) <- reactor.core.publisher.Flux.blockLast(Flux.java:2817) <- com.example.spike.core.ResilientChatService.runPlain(ResilientChatService.java:192)
+
+### vd1-guarded-mid
+  说明: guarded 策略 + 已产出 2 个正文 delta 后上游静默（代理停止发送、保持连接，12s 后 RST）
+  故障配置: {"mode":"stall-after-content","contentEvents":2,"stallMs":12000}
+  事件序列: start@5ms | delta@876ms | error@6877ms
+  计数: {"start":1,"delta":1,"error":1}
+  delta 拼接文本(长度 2, 重放前缀长度 0): "我是"
+  终态事件数据: {"code":"UPSTREAM_SILENT_TIMEOUT_AFTER_PARTIAL","message":"模型服务在约定时间内没有任何事件（上游静默），本轮流已终止。","rawReason":"TimeoutException: Did not observe any item or terminal signal within first signal from a Publisher in 'handle' (and no fallback has been configured)","attempts":1,"partial":true,"toolSideEffect":false,"emittedChars":2,"elapsedMs":6872}
+  客户端耗时=6878ms 主动放弃=false 客户端异常=null
+  服务端终态=FAILED cancelled=false 上游订阅次数=0 累计时长=6873ms 已产出字符=2
+  尝试记录: [{"attempt":1,"outcome":"ERROR","costMs":6871,"emittedAnythingBefore":true,"reason":"TimeoutException: Did not observe any item or terminal signal within first signal from a Publisher in 'handle' (and no fallback has been configured)"}]
+  已产出内容: "我是"
+  代理逐请求台账:
+    #1 mode=stall-after-content applied=true status=200
+       转发 922B / 3 个事件 / 2 个正文 delta
+       结果=null 耗时=undefinedms
+
+### vd1-ref-mid
+  说明: ref 策略 + 已产出 2 个正文 delta 后上游静默（代理停止发送、保持连接，12s 后 RST）
+  故障配置: {"mode":"stall-after-content","contentEvents":2,"stallMs":12000}
+  事件序列: start@5ms | delta@857ms | error@5865ms
+  计数: {"start":1,"delta":1,"error":1}
+  delta 拼接文本(长度 2, 重放前缀长度 0): "我是"
+  终态事件数据: {"code":"UPSTREAM_STREAM_ERROR_AFTER_PARTIAL","message":"模型服务异常，本轮流已终止：IllegalStateException: No StreamAdvisors available to execute","rawReason":"IllegalStateException: No StreamAdvisors available to execute","attempts":2,"partial":true,"toolSideEffect":false,"emittedChars":2,"elapsedMs":5858}
+  客户端耗时=5868ms 主动放弃=false 客户端异常=null
+  服务端终态=FAILED cancelled=false 上游订阅次数=2 累计时长=5860ms 已产出字符=2
+  尝试记录: [{"attempt":1,"outcome":"ERROR","costMs":5857,"emittedAnythingBefore":true,"reason":"IllegalStateException: No StreamAdvisors available to execute"}]
+  已产出内容: "我是"
+  代理逐请求台账:
+    #1 mode=stall-after-content applied=true status=200
+       转发 8167B / 27 个事件 / 2 个正文 delta
+       结果=null 耗时=undefinedms
+
+### vd1-refbare-mid
+  说明: refbare 策略 + 已产出 2 个正文 delta 后上游静默（代理停止发送、保持连接，12s 后 RST）
+  故障配置: {"mode":"stall-after-content","contentEvents":2,"stallMs":12000}
+  事件序列: start@6ms | delta@1008ms | error@6009ms
+  计数: {"start":1,"delta":1,"error":1}
+  delta 拼接文本(长度 2, 重放前缀长度 0): "我是"
+  终态事件数据: {"code":"UPSTREAM_STREAM_ERROR_AFTER_PARTIAL","message":"模型服务异常，本轮流已终止：IllegalStateException: No StreamAdvisors available to execute","rawReason":"IllegalStateException: No StreamAdvisors available to execute","attempts":2,"partial":true,"toolSideEffect":false,"emittedChars":2,"elapsedMs":6004}
+  客户端耗时=6010ms 主动放弃=false 客户端异常=null
+  服务端终态=FAILED cancelled=false 上游订阅次数=2 累计时长=6005ms 已产出字符=2
+  尝试记录: [{"attempt":1,"outcome":"ERROR","costMs":6002,"emittedAnythingBefore":true,"reason":"IllegalStateException: No StreamAdvisors available to execute"}]
+  已产出内容: "我是"
+  代理逐请求台账:
+    #1 mode=stall-after-content applied=true status=200
+       转发 5758B / 19 个事件 / 2 个正文 delta
+       结果=null 耗时=undefinedms
+
+### vd1-refmodel-mid
+  说明: refmodel 策略 + 已产出 2 个正文 delta 后上游静默（代理停止发送、保持连接，12s 后 RST）
+  故障配置: {"mode":"stall-after-content","contentEvents":2,"stallMs":12000}
+  事件序列: start@4ms | delta@1118ms | delta@6985ms | error@11986ms
+  计数: {"start":1,"delta":2,"error":1}
+  delta 拼接文本(长度 4, 重放前缀长度 2): "我是我是"
+  终态事件数据: {"code":"UPSTREAM_SILENT_TIMEOUT_AFTER_PARTIAL","message":"模型服务在约定时间内没有任何事件（上游静默），本轮流已终止。","rawReason":"TimeoutException: Did not observe any item or terminal signal within 5000ms in 'takeUntil' (and no fallback has been configured)","attempts":2,"partial":true,"toolSideEffect":false,"emittedChars":4,"elapsedMs":11983}
+  客户端耗时=11987ms 主动放弃=false 客户端异常=null
+  服务端终态=FAILED cancelled=false 上游订阅次数=2 累计时长=11983ms 已产出字符=4
+  尝试记录: [{"attempt":1,"outcome":"ERROR","costMs":11981,"emittedAnythingBefore":true,"reason":"TimeoutException: Did not observe any item or terminal signal within 5000ms in 'takeUntil' (and no fallback has been configured)"}]
+  已产出内容: "我是我是"
+  代理逐请求台账:
+    #1 mode=stall-after-content applied=true status=200
+       转发 9678B / 32 个事件 / 2 个正文 delta
+       结果=null 耗时=undefinedms
+    #2 mode=stall-after-content applied=true status=200
+       转发 922B / 3 个事件 / 2 个正文 delta
+       结果=null 耗时=undefinedms
+
+### vd1-plain-mid
+  说明: plain 策略 + 已产出 2 个正文 delta 后上游静默（代理停止发送、保持连接，12s 后 RST）
+  故障配置: {"mode":"stall-after-content","contentEvents":2,"stallMs":12000}
+  事件序列: start@4ms | delta@806ms | error@12818ms
+  计数: {"start":1,"delta":1,"error":1}
+  delta 拼接文本(长度 2, 重放前缀长度 0): "我是"
+  终态事件数据: {"code":"UPSTREAM_CONNECTION_BROKEN_AFTER_PARTIAL","message":"与模型服务的连接被中断（流式响应未正常结束），本轮流已终止。","rawReason":"EOFException: EOF reached while reading","attempts":1,"partial":true,"toolSideEffect":false,"emittedChars":2,"elapsedMs":12814}
+  客户端耗时=12819ms 主动放弃=false 客户端异常=null
+  服务端终态=FAILED cancelled=false 上游订阅次数=0 累计时长=12814ms 已产出字符=2
+  尝试记录: [{"attempt":1,"outcome":"ERROR","costMs":12814,"emittedAnythingBefore":true,"reason":"EOFException: EOF reached while reading"}]
+  已产出内容: "我是"
+  代理逐请求台账:
+    #1 mode=stall-after-content applied=true status=200
+       转发 6673B / 22 个事件 / 2 个正文 delta
+       结果=STALLED_AFTER_CONTENT_THEN_SOCKET_RESET 耗时=12796ms
+
+### vd1-fin-content
+  说明: 上游已产出 2 个正文 delta 后静默截断（TCP 正常 FIN，无 [DONE]）：应用是否察觉
+  故障配置: {"mode":"fin-after-content","contentEvents":2}
+  事件序列: start@4ms | delta@1198ms | delta@1199ms | done@1199ms
+  计数: {"start":1,"delta":2,"done":1}
+  delta 拼接文本(长度 4, 重放前缀长度 0): "我是韧性"
+  终态事件数据: {"cancelled":false,"terminal":"OK","content":"我是韧性","emittedChars":4,"deltas":2,"attempts":1,"elapsedMs":1196}
+  客户端耗时=1200ms 主动放弃=false 客户端异常=null
+  服务端终态=OK cancelled=false 上游订阅次数=0 累计时长=1196ms 已产出字符=4
+  尝试记录: [{"attempt":1,"outcome":"COMPLETED","costMs":1196,"emittedAnythingBefore":true,"reason":null}]
+  已产出内容: "我是韧性"
+  代理逐请求台账:
+    #1 mode=fin-after-content applied=true status=200
+       转发 7273B / 24 个事件 / 2 个正文 delta
+       结果=TRUNCATED_CLEAN_FIN 耗时=1188ms
+
+### vd1-truncate-rst
+  说明: 上游硬截断（透传 3 个事件后 RST）
+  故障配置: {"mode":"truncate","relayEvents":3}
+  事件序列: start@4ms | retry@856ms | error@1783ms
+  计数: {"start":1,"retry":1,"error":1}
+  delta 拼接文本(长度 0, 重放前缀长度 0): ""
+  终态事件数据: {"code":"UPSTREAM_CONNECTION_BROKEN","message":"与模型服务的连接被中断（流式响应未正常结束），本轮流已终止。","rawReason":"EOFException: EOF reached while reading","attempts":2,"partial":false,"toolSideEffect":false,"emittedChars":0,"elapsedMs":1780}
+  客户端耗时=1783ms 主动放弃=false 客户端异常=null
+  服务端终态=FAILED cancelled=false 上游订阅次数=0 累计时长=1780ms 已产出字符=0
+  尝试记录: [{"attempt":1,"outcome":"ERROR","costMs":852,"emittedAnythingBefore":false,"reason":"EOFException: EOF reached while reading"},{"attempt":2,"outcome":"ERROR","costMs":927,"emittedAnythingBefore":false,"reason":"EOFException: EOF reached while reading"}]
+  代理逐请求台账:
+    #1 mode=truncate applied=true status=200
+       转发 922B / 3 个事件 / 0 个正文 delta
+       结果=TRUNCATED_SOCKET_RESET 耗时=843ms
+    #2 mode=truncate applied=true status=200
+       转发 922B / 3 个事件 / 0 个正文 delta
+       结果=TRUNCATED_SOCKET_RESET 耗时=913ms
+
+### vd1-truncate-fin
+  说明: 上游静默截断（透传 8 个事件后 TCP 正常 FIN，SSE 无 [DONE]）
+  故障配置: {"mode":"truncate-fin","relayEvents":8}
+  事件序列: start@4ms | done@969ms
+  计数: {"start":1,"done":1}
+  delta 拼接文本(长度 0, 重放前缀长度 0): ""
+  终态事件数据: {"cancelled":false,"terminal":"OK","content":"","emittedChars":0,"deltas":0,"attempts":1,"elapsedMs":965}
+  客户端耗时=969ms 主动放弃=false 客户端异常=null
+  服务端终态=OK cancelled=false 上游订阅次数=0 累计时长=965ms 已产出字符=0
+  尝试记录: [{"attempt":1,"outcome":"COMPLETED","costMs":965,"emittedAnythingBefore":false,"reason":null}]
+  代理逐请求台账:
+    #1 mode=truncate-fin applied=true status=200
+       转发 2422B / 8 个事件 / 0 个正文 delta
+       结果=TRUNCATED_CLEAN_FIN 耗时=960ms
+
+### vd1-guarded-tooldup
+  说明: guarded 策略 + 第 2 次上游请求（工具执行后的最终作答）已产出 1 个正文 delta 后静默：验证重试是否重放工具副作用
+  故障配置: {"mode":"stall-after-content","contentEvents":1,"stallMs":12000,"onlyRequestIndex":2}
+  事件序列: start@4ms | error@7888ms
+  计数: {"start":1,"error":1}
+  delta 拼接文本(长度 0, 重放前缀长度 0): ""
+  终态事件数据: {"code":"UPSTREAM_SILENT_TIMEOUT_AFTER_TOOL_SIDE_EFFECT","message":"模型服务在约定时间内没有任何事件（上游静默），本轮流已终止。","rawReason":"TimeoutException: Did not observe any item or terminal signal within first signal from a Publisher in 'handle' (and no fallback has been configured)","attempts":1,"partial":false,"toolSideEffect":true,"emittedChars":0,"elapsedMs":7884}
+  客户端耗时=7891ms 主动放弃=false 客户端异常=null
+  服务端终态=FAILED cancelled=false 上游订阅次数=0 累计时长=7885ms 已产出字符=0
+  尝试记录: [{"attempt":1,"outcome":"ERROR","costMs":7884,"emittedAnythingBefore":false,"reason":"TimeoutException: Did not observe any item or terminal signal within first signal from a Publisher in 'handle' (and no fallback has been configured)"}]
+  工具执行台账: [{"seq":2,"tsMs":1791289247127,"source":"INTERNAL_LOOP","runId":"vd1-guarded-tooldup#1791289246207","toolCallId":null,"name":"getServerTime","arguments":"{}","durationMs":0,"outcome":"OK"}]
+  代理逐请求台账:
+    #1 mode=stall-after-content applied=false status=200
+       转发 0B / - 个事件 / - 个正文 delta
+       结果=PASSTHROUGH_COMPLETE 耗时=913ms
+    #2 mode=stall-after-content applied=true status=200
+       转发 622B / 2 个事件 / 1 个正文 delta
+       结果=null 耗时=undefinedms
+
+### vd1-ref-tooldup
+  说明: ref 策略 + 第 2 次上游请求（工具执行后的最终作答）已产出 1 个正文 delta 后静默：验证重试是否重放工具副作用
+  故障配置: {"mode":"stall-after-content","contentEvents":1,"stallMs":12000,"onlyRequestIndex":2}
+  事件序列: start@4ms | error@6728ms
+  计数: {"start":1,"error":1}
+  delta 拼接文本(长度 0, 重放前缀长度 0): ""
+  终态事件数据: {"code":"UPSTREAM_STREAM_ERROR_AFTER_TOOL_SIDE_EFFECT","message":"模型服务异常，本轮流已终止：IllegalStateException: No StreamAdvisors available to execute","rawReason":"IllegalStateException: No StreamAdvisors available to execute","attempts":2,"partial":false,"toolSideEffect":true,"emittedChars":0,"elapsedMs":6722}
+  客户端耗时=6730ms 主动放弃=false 客户端异常=null
+  服务端终态=FAILED cancelled=false 上游订阅次数=2 累计时长=6724ms 已产出字符=0
+  尝试记录: [{"attempt":1,"outcome":"ERROR","costMs":6722,"emittedAnythingBefore":false,"reason":"IllegalStateException: No StreamAdvisors available to execute"}]
+  工具执行台账: [{"seq":3,"tsMs":1791289255006,"source":"INTERNAL_LOOP","runId":"vd1-ref-tooldup#1791289254283","toolCallId":null,"name":"getServerTime","arguments":"{}","durationMs":0,"outcome":"OK"}]
+  代理逐请求台账:
+    #1 mode=stall-after-content applied=false status=200
+       转发 0B / - 个事件 / - 个正文 delta
+       结果=PASSTHROUGH_COMPLETE 耗时=714ms
+    #2 mode=stall-after-content applied=true status=200
+       转发 622B / 2 个事件 / 1 个正文 delta
+       结果=null 耗时=undefinedms
+
+### vd1-refbare-tooldup
+  说明: refbare 策略 + 第 2 次上游请求（工具执行后的最终作答）已产出 1 个正文 delta 后静默：验证重试是否重放工具副作用
+  故障配置: {"mode":"stall-after-content","contentEvents":1,"stallMs":12000,"onlyRequestIndex":2}
+  事件序列: start@5ms | error@6665ms
+  计数: {"start":1,"error":1}
+  delta 拼接文本(长度 0, 重放前缀长度 0): ""
+  终态事件数据: {"code":"UPSTREAM_STREAM_ERROR_AFTER_TOOL_SIDE_EFFECT","message":"模型服务异常，本轮流已终止：IllegalStateException: No StreamAdvisors available to execute","rawReason":"IllegalStateException: No StreamAdvisors available to execute","attempts":2,"partial":false,"toolSideEffect":true,"emittedChars":0,"elapsedMs":6660}
+  客户端耗时=6666ms 主动放弃=false 客户端异常=null
+  服务端终态=FAILED cancelled=false 上游订阅次数=2 累计时长=6661ms 已产出字符=0
+  尝试记录: [{"attempt":1,"outcome":"ERROR","costMs":6659,"emittedAnythingBefore":false,"reason":"IllegalStateException: No StreamAdvisors available to execute"}]
+  工具执行台账: [{"seq":4,"tsMs":1791289262079,"source":"INTERNAL_LOOP","runId":"vd1-refbare-tooldup#1791289261184","toolCallId":null,"name":"getServerTime","arguments":"{}","durationMs":0,"outcome":"OK"}]
+  代理逐请求台账:
+    #1 mode=stall-after-content applied=false status=200
+       转发 0B / - 个事件 / - 个正文 delta
+       结果=PASSTHROUGH_COMPLETE 耗时=887ms
+    #2 mode=stall-after-content applied=true status=200
+       转发 622B / 2 个事件 / 1 个正文 delta
+       结果=null 耗时=undefinedms
+
+### vd1-guarded-longtool
+  说明: guarded 策略 + 8s 工具、首包超时 5s、无取消：验证工具执行期间无下游事件时超时的表现
+  事件序列: start@4ms | error@7353ms
+  计数: {"start":1,"error":1}
+  delta 拼接文本(长度 0, 重放前缀长度 0): ""
+  终态事件数据: {"code":"UPSTREAM_SILENT_TIMEOUT_AFTER_TOOL_SIDE_EFFECT","message":"模型服务在约定时间内没有任何事件（上游静默），本轮流已终止。","rawReason":"TimeoutException: Did not observe any item or terminal signal within first signal from a Publisher in 'handle' (and no fallback has been configured)","attempts":1,"partial":false,"toolSideEffect":true,"emittedChars":0,"elapsedMs":7349}
+  客户端耗时=7355ms 主动放弃=false 客户端异常=null
+  服务端终态=FAILED cancelled=false 上游订阅次数=0 累计时长=7349ms 已产出字符=0
+  尝试记录: [{"attempt":1,"outcome":"ERROR","costMs":7349,"emittedAnythingBefore":false,"reason":"TimeoutException: Did not observe any item or terminal signal within first signal from a Publisher in 'handle' (and no fallback has been configured)"}]
+  工具执行台账: [{"seq":5,"tsMs":1791289275381,"source":"INTERNAL_LOOP","runId":"vd1-guarded-longtool#1791289268032","toolCallId":null,"name":"longTask","arguments":"{\"seconds\":8,\"cooperative\":false}","durationMs":5999,"outcome":"OK"}]
+  代理逐请求台账:
+    #1 mode=none applied=false status=200
+       转发 0B / - 个事件 / - 个正文 delta
+       结果=PASSTHROUGH_COMPLETE 耗时=1340ms
+
+### vd1-ref-longtool
+  说明: ref 策略 + 8s 工具、首包超时 5s、无取消：验证工具执行期间无下游事件时超时的表现
+  事件序列: start@5ms | error@5825ms
+  计数: {"start":1,"error":1}
+  delta 拼接文本(长度 0, 重放前缀长度 0): ""
+  终态事件数据: {"code":"UPSTREAM_STREAM_ERROR_AFTER_TOOL_SIDE_EFFECT","message":"模型服务异常，本轮流已终止：IllegalStateException: No StreamAdvisors available to execute","rawReason":"IllegalStateException: No StreamAdvisors available to execute","attempts":2,"partial":false,"toolSideEffect":true,"emittedChars":0,"elapsedMs":5820}
+  客户端耗时=5827ms 主动放弃=false 客户端异常=null
+  服务端终态=FAILED cancelled=false 上游订阅次数=2 累计时长=5820ms 已产出字符=0
+  尝试记录: [{"attempt":1,"outcome":"ERROR","costMs":5819,"emittedAnythingBefore":false,"reason":"IllegalStateException: No StreamAdvisors available to execute"}]
+  工具执行台账: [{"seq":6,"tsMs":1791289281373,"source":"INTERNAL_LOOP","runId":"vd1-ref-longtool#1791289275554","toolCallId":null,"name":"longTask","arguments":"{\"seconds\":8,\"cooperative\":false}","durationMs":5002,"outcome":"OK"}]
+  代理逐请求台账:
+    #1 mode=none applied=false status=200
+       转发 0B / - 个事件 / - 个正文 delta
+       结果=PASSTHROUGH_COMPLETE 耗时=808ms

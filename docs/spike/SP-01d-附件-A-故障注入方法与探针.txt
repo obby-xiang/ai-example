@@ -1,0 +1,41 @@
+SP-01d 附件 A：故障注入方法、复现步骤与 Reactor 超时语义探针
+
+一、故障注入方式（不在被验证进程内做任何 mock）
+    官方 ChatModel 的 base-url 指向本 spike 的本地故障代理（<MAIN_V2>/spike/sp01d/scripts/fault-proxy.mjs），
+    代理再转发到真实上游（https://api.deepseek.com）。代理按 SSE 事件边界（"\n\n"）转发，
+    绝不切碎半个事件；故障通过控制面 POST /__fault 实时切换。
+
+    模式（relayEvents = 事件个数；contentEvents = 带正文的 delta 个数）：
+      none                 透传（对照组）
+      reset                收到请求立即 RST
+      stall                完全不回字节（含响应头），stallMs 后 RST          → 首包静默
+      stall-after-content  转发到 contentEvents 个正文 delta 后停止发送、
+                           保持连接，stallMs 后 RST                        → 事件间静默
+      fin-after-content    同上但立即 res.end()（TCP 正常 FIN，无 [DONE]） → 静默截断
+      truncate             转发 relayEvents 个事件后 RST                   → 硬截断
+      truncate-fin         转发 relayEvents 个事件后正常 FIN               → 无正文的静默截断
+      onlyRequestIndex     只对该轮的第 N 次上游请求生效（用于让工具先成功执行、故障落在其后）
+
+    复现步骤：
+      export DEEPSEEK_API_KEY=***        # 仅环境变量，未写入任何文件
+      cd <MAIN_V2>/spike/sp01d && <MAVEN_HOME>/mvn -B clean package
+      node scripts/fault-proxy.mjs --port 18304 --upstream https://api.deepseek.com --evidence evidence &
+      java -jar target/sp01d-resilience-0.0.1-SNAPSHOT.jar \
+           --spring.ai.openai.base-url=http://127.0.0.1:18304 --server.port=18303 --spring.profiles.active=verbose &
+      node scripts/spike-verify.mjs <case>   # case 见 scripts/spike-verify.mjs 的 CASES
+      每个 case 自行配置故障、清空工具台账、跑请求并把结果落到 evidence/。
+
+二、Reactor 超时语义探针（scripts/FluxTimeoutProbe.java，reactive-streams 1.0.4 + 该 jar 自报版本见下）
+reactor-core version = 3.8.6
+A 首包静默 | flux=Flux.never() timeout=300ms -> TimeoutException @391ms
+B 事件间静默 | flux=concat(just(first),never) timeout=300ms -> TimeoutException @303ms emitted=1
+C 事件间静默+双超时 | 同上但用 (firstPublisher,nextFactory) -> TimeoutException @303ms emitted=1
+D retry 重订阅 | concat(A,B,error) .timeout(500ms).retry(1).doOnNext -> RuntimeException: socket reset @3ms 订阅次数=2 下游收到元素=4 内容=ABAB
+E retry 超时重订阅 | concat(A,B,never) .timeout(400ms).retry(1).doOnNext -> TimeoutException @802ms 订阅次数=2 下游收到元素=4 内容=ABAB
+
+
+探针结论：
+  B: Flux.timeout(单值) 覆盖"首包 + 事件间"两层超时（首元素后静默 303ms 即抛 TimeoutException）；
+     因此参照实现的 .timeout(90s) 确实能兜住"上游静默"，不需要额外写法。
+  D/E: .timeout(D).retry(1).doOnNext(..) 在已经产出了元素后出错/超时时会重订阅上游，
+     并把已经发给下游的内容**再发一遍**（下游收到 ABAB），即"已产出内容被重放"。
