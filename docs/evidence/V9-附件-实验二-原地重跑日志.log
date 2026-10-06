@@ -8,7 +8,7 @@
 
  :: Spring Boot ::               (v3.5.14)
 
-2026-10-06T18:53:47.082+08:00  INFO 24708 --- [config-mgr] [           main] c.e.configmgr.ConfigMgrApplication       : Starting ConfigMgrApplication v1.0.0 using Java 21.0.12 with PID 24708 (E:\temp\ai-example-code\ai-example-claude-opus-5.5\backend\target\config-mgr.jar started by Obby in E:\temp\ai-example-code\ai-example-claude-opus-5.5\backend)
+2026-10-06T18:53:47.082+08:00  INFO 24708 --- [config-mgr] [           main] c.e.configmgr.ConfigMgrApplication       : Starting ConfigMgrApplication v1.0.0 using Java 21.0.12 with PID 24708 (<REPO_ROOT>\ai-example-claude-opus-5.5\backend\target\config-mgr.jar started by <USER_HOME> in <REPO_ROOT>\ai-example-claude-opus-5.5\backend)
 2026-10-06T18:53:47.083+08:00 DEBUG 24708 --- [config-mgr] [           main] c.e.configmgr.ConfigMgrApplication       : Running with Spring Boot v3.5.14, Spring v6.2.18
 2026-10-06T18:53:47.119+08:00  INFO 24708 --- [config-mgr] [           main] c.e.configmgr.ConfigMgrApplication       : No active profile set, falling back to 1 default profile: "default"
 2026-10-06T18:53:48.128+08:00  INFO 24708 --- [config-mgr] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Bootstrapping Spring Data JPA repositories in DEFAULT mode.

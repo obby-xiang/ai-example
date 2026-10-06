@@ -14,11 +14,11 @@
 [INFO] --- compiler:3.14.1:compile (default-compile) @ config-admin-backend ---
 [INFO] Recompiling the module because of changed source code.
 [INFO] Compiling 56 source files with javac [debug parameters release 21] to target\classes
-[INFO] /E:/temp/ai-example-code/ai-example-deepseek-v4-pro/backend/src/main/java/com/example/configadmin/ai/AiTools.java: E:\temp\ai-example-code\ai-example-deepseek-v4-pro\backend\src\main\java\com\example\configadmin\ai\AiTools.java使用了未经检查或不安全的操作。
-[INFO] /E:/temp/ai-example-code/ai-example-deepseek-v4-pro/backend/src/main/java/com/example/configadmin/ai/AiTools.java: 有关详细信息, 请使用 -Xlint:unchecked 重新编译。
+[INFO] <REPO_ROOT>/ai-example-deepseek-v4-pro/backend/src/main/java/com/example/configadmin/ai/AiTools.java: <REPO_ROOT>\ai-example-deepseek-v4-pro\backend\src\main\java\com\example\configadmin\ai\AiTools.java使用了未经检查或不安全的操作。
+[INFO] <REPO_ROOT>/ai-example-deepseek-v4-pro/backend/src/main/java/com/example/configadmin/ai/AiTools.java: 有关详细信息, 请使用 -Xlint:unchecked 重新编译。
 [INFO] 
 [INFO] --- resources:3.3.1:testResources (default-testResources) @ config-admin-backend ---
-[INFO] skip non existing resourceDirectory E:\temp\ai-example-code\ai-example-deepseek-v4-pro\backend\src\test\resources
+[INFO] skip non existing resourceDirectory <REPO_ROOT>\ai-example-deepseek-v4-pro\backend\src\test\resources
 [INFO] 
 [INFO] --- compiler:3.14.1:testCompile (default-testCompile) @ config-admin-backend ---
 [INFO] No sources to compile
@@ -38,7 +38,7 @@
 
  :: Spring Boot ::               (v3.5.14)
 
-2026-10-06T18:56:11.815+08:00  INFO 11148 --- [config-admin-backend] [           main] c.e.configadmin.ConfigAdminApplication   : Starting ConfigAdminApplication using Java 21.0.12 with PID 11148 (E:\temp\ai-example-code\ai-example-deepseek-v4-pro\backend\target\classes started by Obby in E:\temp\ai-example-code\ai-example-deepseek-v4-pro\backend)
+2026-10-06T18:56:11.815+08:00  INFO 11148 --- [config-admin-backend] [           main] c.e.configadmin.ConfigAdminApplication   : Starting ConfigAdminApplication using Java 21.0.12 with PID 11148 (<REPO_ROOT>\ai-example-deepseek-v4-pro\backend\target\classes started by <USER_HOME> in <REPO_ROOT>\ai-example-deepseek-v4-pro\backend)
 2026-10-06T18:56:11.816+08:00  INFO 11148 --- [config-admin-backend] [           main] c.e.configadmin.ConfigAdminApplication   : No active profile set, falling back to 1 default profile: "default"
 2026-10-06T18:56:12.359+08:00  INFO 11148 --- [config-admin-backend] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Bootstrapping Spring Data JPA repositories in DEFAULT mode.
 2026-10-06T18:56:12.467+08:00  INFO 11148 --- [config-admin-backend] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Finished Spring Data repository scanning in 101 ms. Found 5 JPA repository interfaces.

@@ -40,7 +40,7 @@
 **检索动作与结果（可复现）**：
 
 ```bash
-cd /e/temp/ai-example-code/ai-example-kimi-k3
+cd <REPO_ROOT>/ai-example-kimi-k3
 grep -rn "reasoning" . | grep -v node_modules | grep -v /target/      # 命中：docs 2 处 + 4 个 Java 源文件（见上表）
 find . -iname "*reasoning*" -o -iname "*thinking*" -o -iname "*400*" # 唯一命中：ReasoningAwareOpenAiChatModel.java（源码，非存档）
 git log --all --diff-filter=A --name-only                           # 全历史新增文件清单中无任何报错存档文件
@@ -49,7 +49,7 @@ git log --all --format="%B" | grep -i "reasoning"                   # 仅 3 条 
 
 **实况**：分支内**不存在独立的"实测报错原文存档"文件**（无 `*.json` / `*.txt` / `*.log` / `*.md` 存档）。该报错文本仅以**内联引用**形式出现在 `docs/02-architecture.md:34` 与 `docs/05-verification.md:37` 两处，且只有一行（不含状态码、不含响应 JSON、不含 request_id）。因此"预留存档可供逐字比对"这一前提**不成立**：本次比对以 docs 中内联引用的那句文本作为分支侧基准。
 
-（附注：`grep -rl "thinking mode must be passed back" /e/temp/ai-example-code` 另命中 `ai-example-main/ai-service/.../AiService.java`、`ai-example-trae/ai-service/.../AiService.java`、`ai-example-main-v2/docs/merge/03-技术方案文档.md`，均为**其它分支**内容，不属于本核验项。）
+（附注：`grep -rl "thinking mode must be passed back" <REPO_ROOT>` 另命中 `ai-example-main/ai-service/.../AiService.java`、`ai-example-trae/ai-service/.../AiService.java`、`ai-example-main-v2/docs/merge/03-技术方案文档.md`，均为**其它分支**内容，不属于本核验项。）
 
 ---
 
@@ -57,7 +57,7 @@ git log --all --format="%B" | grep -i "reasoning"                   # 仅 3 条 
 
 | 项 | 实际值 |
 |---|---|
-| OS / Shell | Windows，Git Bash（`D:\Program Files\Git\bin\bash.exe`） |
+| OS / Shell | Windows，Git Bash（`<GIT_HOME>`） |
 | 运行时 | Node.js `v22.23.2`（脚本内用内置 `fetch` 发请求）、`curl`（`/mingw64/bin/curl`） |
 | 端点 | `https://api.deepseek.com/chat/completions`（另有 `/v1/chat/completions`、`/beta/chat/completions` 同端点复测） |
 | 鉴权 | 请求头 `Authorization: Bearer ***`（真实 key 仅存在于进程环境变量 `DEEPSEEK_API_KEY`，未写入任何文件、未出现在请求 body 中） |

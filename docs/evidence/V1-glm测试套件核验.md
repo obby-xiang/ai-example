@@ -25,7 +25,7 @@
 
 | 项 | 值 |
 |---|---|
-| 被核验分支目录 | `/e/temp/ai-example-code/ai-example-glm-5.3` |
+| 被核验分支目录 | `<REPO_ROOT>/ai-example-glm-5.3` |
 | 分支 | `glm-5.3`（`git rev-parse --abbrev-ref HEAD` 实测输出） |
 | 工作树状态 | 核验前后 `git status --porcelain` 均无输出（无改动） |
 | JDK | `java version "21.0.12" 2026-07-21 LTS` |
@@ -35,11 +35,11 @@
 实际执行命令：
 
 ```bash
-cd /e/temp/ai-example-code/ai-example-glm-5.3/backend
-"D:/Program Files/JetBrains/IntelliJ IDEA/plugins/maven-plugin/lib/maven3/bin/mvn.cmd" test
+cd <REPO_ROOT>/ai-example-glm-5.3/backend
+"<MAVEN_HOME>/bin/mvn.cmd" test
 ```
 
-完整原始日志：`/e/temp/glm-v1-test.log`（同目录附件 `V1-附件-mvn-test-raw.log`）。
+完整原始日志：`<WORKSPACE>/glm-v1-test.log`（同目录附件 `V1-附件-mvn-test-raw.log`）。
 未加 `-Dtest=`、未跳过任何测试类，未修改任何源码/测试/配置。
 
 ## 三、实际观察结果

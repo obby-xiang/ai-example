@@ -64,9 +64,9 @@
 
 | 项 | 实际值 |
 |---|---|
-| OS / Shell | Windows，Git Bash（`D:\Program Files\Git\bin\bash.exe`） |
+| OS / Shell | Windows，Git Bash（`<GIT_HOME>`） |
 | JDK | `java version "21.0.12" 2026-07-21 LTS` |
-| Maven | `D:/Program Files/JetBrains/IntelliJ IDEA/plugins/maven-plugin/lib/maven3/bin/mvn.cmd`（PATH 中无 mvn） |
+| Maven | `<MAVEN_HOME>/bin/mvn.cmd`（PATH 中无 mvn） |
 | PowerShell | **`pwsh` 不存在**（`which pwsh` → not found），改用系统自带 `powershell.exe`（`$PSVersionTable.PSVersion` = `5.1.26100.9444`） |
 | 数据库基线 | `backend/data/` **原本不存在**（新克隆，无历史 `*.mv.db`），首次启动由 `DataSeeder` 初始化演示数据；无需备份/删库 |
 | 端口 | 18291（`netstat -ano \| grep 18291` 启动前为空闲；结束时确认无 LISTENING，见 §7） |
@@ -75,9 +75,9 @@
 ### 2.1 启动命令（原样）
 
 ```bash
-cd /e/temp/ai-example-code/ai-example-deepseek-v4-pro/backend
+cd <REPO_ROOT>/ai-example-deepseek-v4-pro/backend
 SERVER_PORT=18291 DEEPSEEK_API_KEY="***" \
-  "D:/Program Files/JetBrains/IntelliJ IDEA/plugins/maven-plugin/lib/maven3/bin/mvn.cmd" spring-boot:run
+  "<MAVEN_HOME>/bin/mvn.cmd" spring-boot:run
 ```
 
 启动成功日志（`V3-附件-后端启动与运行日志.log`）：
@@ -94,7 +94,7 @@ SERVER_PORT=18291 DEEPSEEK_API_KEY="***" \
 ### 2.2 执行命令（原样，2 轮）
 
 ```bash
-cd /e/temp/ai-example-code/ai-example-deepseek-v4-pro
+cd <REPO_ROOT>/ai-example-deepseek-v4-pro
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify-e2e.ps1 -Base http://127.0.0.1:18291 > e2e-run1.txt 2>&1   # 退出码 0，real 1m15.256s
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify-e2e.ps1 -Base http://127.0.0.1:18291 > e2e-run2.txt 2>&1   # 墙钟 63.1s
 ```

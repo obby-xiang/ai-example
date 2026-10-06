@@ -53,9 +53,9 @@
 启动命令：
 
 ```bash
-cd /e/temp/ai-example-code/ai-example-deepseek-v4-pro/backend
+cd <REPO_ROOT>/ai-example-deepseek-v4-pro/backend
 SERVER_PORT=18291 DEEPSEEK_API_KEY="***" \
-  "D:/Program Files/JetBrains/IntelliJ IDEA/plugins/maven-plugin/lib/maven3/bin/mvn.cmd" spring-boot:run
+  "<MAVEN_HOME>/bin/mvn.cmd" spring-boot:run
 ```
 
 对话请求（SSE，请求体为 UTF-8 JSON 文件，避免命令行编码干扰）：
@@ -76,7 +76,7 @@ curl -s "http://127.0.0.1:18291/api/ai/history?sessionId=v4-persist-7f3a91c2"
 
 ```bash
 cd backend
-java -cp "C:/Users/Obby/.m2/repository/com/h2database/h2/2.3.232/h2-2.3.232.jar" \
+java -cp "<USER_HOME>/.m2/repository/com/h2database/h2/2.3.232/h2-2.3.232.jar" \
   org.h2.tools.Shell -url "jdbc:h2:file:./data/config_admin_db;MODE=MySQL" -user sa -password "" \
   -sql "SELECT SESSION_ID, LAST_ACCESS, LENGTH(MESSAGES_JSON) FROM AI_SESSION ORDER BY LAST_ACCESS;"
 ```

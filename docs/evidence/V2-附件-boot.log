@@ -35,7 +35,7 @@
 
  :: Spring Boot ::               (v3.5.14)
 
-2026-10-06T18:45:13.859+08:00  INFO 27312 --- [quickstart-backend] [           main] c.e.quickstart.QuickstartApplication     : Starting QuickstartApplication using Java 21.0.12 with PID 27312 (E:\temp\ai-example-code\ai-example-glm-5.3\backend\target\classes started by Obby in E:\temp\ai-example-code\ai-example-glm-5.3\backend)
+2026-10-06T18:45:13.859+08:00  INFO 27312 --- [quickstart-backend] [           main] c.e.quickstart.QuickstartApplication     : Starting QuickstartApplication using Java 21.0.12 with PID 27312 (<REPO_ROOT>\ai-example-glm-5.3\backend\target\classes started by <USER_HOME> in <REPO_ROOT>\ai-example-glm-5.3\backend)
 2026-10-06T18:45:13.860+08:00 DEBUG 27312 --- [quickstart-backend] [           main] c.e.quickstart.QuickstartApplication     : Running with Spring Boot v3.5.14, Spring v6.2.18
 2026-10-06T18:45:13.861+08:00  INFO 27312 --- [quickstart-backend] [           main] c.e.quickstart.QuickstartApplication     : No active profile set, falling back to 1 default profile: "default"
 2026-10-06T18:45:14.371+08:00  INFO 27312 --- [quickstart-backend] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Bootstrapping Spring Data JPA repositories in DEFAULT mode.

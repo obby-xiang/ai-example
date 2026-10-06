@@ -15,7 +15,7 @@
 [INFO] Nothing to compile - all classes are up to date.
 [INFO] 
 [INFO] --- resources:3.3.1:testResources (default-testResources) @ config-admin-backend ---
-[INFO] skip non existing resourceDirectory E:\temp\ai-example-code\ai-example-deepseek-v4-pro\backend\src\test\resources
+[INFO] skip non existing resourceDirectory <REPO_ROOT>\ai-example-deepseek-v4-pro\backend\src\test\resources
 [INFO] 
 [INFO] --- compiler:3.14.1:testCompile (default-testCompile) @ config-admin-backend ---
 [INFO] No sources to compile
@@ -35,7 +35,7 @@
 
  :: Spring Boot ::               (v3.5.14)
 
-2026-10-06T19:01:27.392+08:00  INFO 20440 --- [config-admin-backend] [           main] c.e.configadmin.ConfigAdminApplication   : Starting ConfigAdminApplication using Java 21.0.12 with PID 20440 (E:\temp\ai-example-code\ai-example-deepseek-v4-pro\backend\target\classes started by Obby in E:\temp\ai-example-code\ai-example-deepseek-v4-pro\backend)
+2026-10-06T19:01:27.392+08:00  INFO 20440 --- [config-admin-backend] [           main] c.e.configadmin.ConfigAdminApplication   : Starting ConfigAdminApplication using Java 21.0.12 with PID 20440 (<REPO_ROOT>\ai-example-deepseek-v4-pro\backend\target\classes started by <USER_HOME> in <REPO_ROOT>\ai-example-deepseek-v4-pro\backend)
 2026-10-06T19:01:27.394+08:00  INFO 20440 --- [config-admin-backend] [           main] c.e.configadmin.ConfigAdminApplication   : No active profile set, falling back to 1 default profile: "default"
 2026-10-06T19:01:27.927+08:00  INFO 20440 --- [config-admin-backend] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Bootstrapping Spring Data JPA repositories in DEFAULT mode.
 2026-10-06T19:01:28.035+08:00  INFO 20440 --- [config-admin-backend] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Finished Spring Data repository scanning in 98 ms. Found 5 JPA repository interfaces.

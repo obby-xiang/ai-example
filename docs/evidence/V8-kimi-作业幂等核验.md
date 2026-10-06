@@ -90,9 +90,9 @@ public synchronized JobRunDto createPublishJob(Long taskId) { ... List.of("PENDI
 
 | 项 | 实际值 |
 |---|---|
-| OS / Shell | Windows，Git Bash（`D:\Program Files\Git\bin\bash.exe`） |
+| OS / Shell | Windows，Git Bash（`<GIT_HOME>`） |
 | JDK | `java version "21.0.12" 2026-07-21 LTS` |
-| Maven | `"D:/Program Files/JetBrains/IntelliJ IDEA/plugins/maven-plugin/lib/maven3/bin/mvn.cmd"` |
+| Maven | `"<MAVEN_HOME>/bin/mvn.cmd"` |
 | 构建命令 | `cd backend && mvn -B -DskipTests package` → 产物 `backend/target/quickstart-backend-1.0.0.jar`（69,021,758 字节） |
 | 启动命令 | `cd backend && export DEEPSEEK_API_KEY=*** && java -jar target/quickstart-backend-1.0.0.jar --server.port=18293` |
 | 启动证据 | 日志：`Tomcat started on port 18293 (http)`；`Started QuickstartApplication in 8.136 seconds`；`数据库为空，开始播种示例配置项...` → `播种完成：6 个配置项` |
@@ -202,8 +202,8 @@ t=2346ms SUCCESS  processed=6/6  currentItem=null
 后端停止后，以只读方式打开 H2 文件库查询（完整输出见附件 C）：
 
 ```bash
-java -cp "C:/Users/Obby/.m2/repository/com/h2database/h2/2.3.232/h2-2.3.232.jar" org.h2.tools.Shell \
-  -url "jdbc:h2:file:E:/temp/ai-example-code/ai-example-kimi-k3/backend/data/quickstart_db;MODE=MySQL;ACCESS_MODE_DATA=r" \
+java -cp "<USER_HOME>/.m2/repository/com/h2database/h2/2.3.232/h2-2.3.232.jar" org.h2.tools.Shell \
+  -url "jdbc:h2:file:<REPO_ROOT>/ai-example-kimi-k3/backend/data/quickstart_db;MODE=MySQL;ACCESS_MODE_DATA=r" \
   -user sa -password "" \
   -sql "SELECT ID, TASK_ID, KIND, STATUS, TOTAL, PROCESSED, CREATED_AT FROM JOB_RUN ORDER BY ID"
 ```

@@ -33,11 +33,11 @@
   或显式启用了批注处理 (-proc:only, -proc:full)。
   可使用 -Xlint:-options 隐藏此消息。
   可使用 -proc:none 禁用批注处理。
-[WARNING] /E:/temp/ai-example-code/ai-example-glm-5.3/backend/src/test/java/com/example/quickstart/service/ConfigDataServiceTest.java:[143,33] 最后一个参数使用了不准确的变量类型的 varargs 方法的非 varargs 调用; 
+[WARNING] <REPO_ROOT>/ai-example-glm-5.3/backend/src/test/java/com/example/quickstart/service/ConfigDataServiceTest.java:[143,33] 最后一个参数使用了不准确的变量类型的 varargs 方法的非 varargs 调用; 
   对于 varargs 调用, 应使用 java.lang.Object
   对于非 varargs 调用, 应使用 java.lang.Object[], 这样也可以抑制此警告
-[INFO] /E:/temp/ai-example-code/ai-example-glm-5.3/backend/src/test/java/com/example/quickstart/service/ImportFlowTest.java: E:\temp\ai-example-code\ai-example-glm-5.3\backend\src\test\java\com\example\quickstart\service\ImportFlowTest.java使用了未经检查或不安全的操作。
-[INFO] /E:/temp/ai-example-code/ai-example-glm-5.3/backend/src/test/java/com/example/quickstart/service/ImportFlowTest.java: 有关详细信息, 请使用 -Xlint:unchecked 重新编译。
+[INFO] <REPO_ROOT>/ai-example-glm-5.3/backend/src/test/java/com/example/quickstart/service/ImportFlowTest.java: <REPO_ROOT>\ai-example-glm-5.3\backend\src\test\java\com\example\quickstart\service\ImportFlowTest.java使用了未经检查或不安全的操作。
+[INFO] <REPO_ROOT>/ai-example-glm-5.3/backend/src/test/java/com/example/quickstart/service/ImportFlowTest.java: 有关详细信息, 请使用 -Xlint:unchecked 重新编译。
 [INFO] 
 [INFO] --- surefire:3.5.5:test (default-test) @ quickstart-backend ---
 [INFO] Using auto detected provider org.apache.maven.surefire.junitplatform.JUnitPlatformProvider
@@ -113,7 +113,7 @@ Downloaded from huaweicloud: https://mirrors.huaweicloud.com/repository/maven/or
 2026-10-06T18:44:52.821+08:00  INFO 7172 --- [quickstart-backend] [           main] o.s.b.w.embedded.tomcat.TomcatWebServer  : Tomcat started on port 10826 (http) with context path '/'
 Mockito is currently self-attaching to enable the inline-mock-maker. This will no longer work in future releases of the JDK. Please add Mockito as an agent to your build as described in Mockito's documentation: https://javadoc.io/doc/org.mockito/mockito-core/latest/org.mockito/org/mockito/Mockito.html#0.3
 Java HotSpot(TM) 64-Bit Server VM warning: Sharing is only supported for boot loader classes because bootstrap classpath has been appended
-WARNING: A Java agent has been loaded dynamically (C:\Users\Obby\.m2\repository\net\bytebuddy\byte-buddy-agent\1.17.8\byte-buddy-agent-1.17.8.jar)
+WARNING: A Java agent has been loaded dynamically (<USER_HOME>\.m2\repository\net\bytebuddy\byte-buddy-agent\1.17.8\byte-buddy-agent-1.17.8.jar)
 WARNING: If a serviceability tool is in use, please run with -XX:+EnableDynamicAgentLoading to hide this warning
 WARNING: If a serviceability tool is not in use, please run with -Djdk.instrument.traceUsage for more information
 WARNING: Dynamic loading of agents will be disallowed by default in a future release

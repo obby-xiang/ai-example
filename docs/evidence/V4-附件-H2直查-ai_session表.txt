@@ -2,9 +2,9 @@ H2 文件库直查记录（ai_session 表）
 =====================================
 目的：证明 AI 会话确实落盘在 H2 文件库的 ai_session 表中（而非仅内存）。
 执行时间：2026-10-06 19:02 左右，后端进程已停止（netstat 确认 18291 无 LISTENING），排除"内存态"干扰。
-工作目录：E:\temp\ai-example-code\ai-example-deepseek-v4-pro\backend（数据源 URL 为相对路径 ./data/config_admin_db）
+工作目录：<REPO_ROOT>\ai-example-deepseek-v4-pro\backend（数据源 URL 为相对路径 ./data/config_admin_db）
 命令模板：
-  java -cp "C:/Users/Obby/.m2/repository/com/h2database/h2/2.3.232/h2-2.3.232.jar" \
+  java -cp "<USER_HOME>/.m2/repository/com/h2database/h2/2.3.232/h2-2.3.232.jar" \
     org.h2.tools.Shell -url "jdbc:h2:file:./data/config_admin_db;MODE=MySQL" -user sa -password "" -sql "<SQL>"
 说明：h2 Shell 的控制台输出为 GBK 编码，本文件已用 iconv -f GBK -t UTF-8 转码。
 

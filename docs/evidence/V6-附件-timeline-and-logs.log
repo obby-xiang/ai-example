@@ -5,7 +5,7 @@ V6 核验原始时间线/日志/DB 查询记录（分支 ai-example-claude-opus-
 
 ==================== A. 触发作业用的长时作业数据集 ====================
 $ java MakeXlsx.java TO_CFG_big.xlsx 5000 B 1 v
-  WROTE E:\temp\v5v6\TO_CFG_big.xlsx rows=5000 firstKey=B1
+  WROTE <WORKSPACE>\v5v6\TO_CFG_big.xlsx rows=5000 firstKey=B1
   说明: 该分支 ImportJobRunner 每写满 app.job.batch-size=100 行暂存行就 Thread.sleep(app.job.demo-batch-delay-ms=300)，
         故 5000 行导入理论耗时 >= 50*300ms = 15s，足以在 RUNNING 期间抓取并强杀进程。未修改任何配置。
 
@@ -145,8 +145,8 @@ $ GET /api/jobs/19 轮询（每次新连接读库中已提交数据）
 
 ==================== D. 强杀后、重启前，直接读 H2 库文件确认残留作业状态 ====================
 查询工具: h2-2.3.232.jar（从 target/config-mgr.jar 内 BOOT-INF/lib 解出）+ org.h2.tools.Shell
-  $ unzip -o -j target/config-mgr.jar 'BOOT-INF/lib/h2-*.jar' -d /e/temp/v5v6/h2lib
-  $ java -cp h2lib/h2-2.3.232.jar org.h2.tools.Shell -url "jdbc:h2:file:E:/temp/ai-example-code/ai-example-claude-opus-5.5+deepseek-v4-pro/backend/data/config_mgr_db" -user sa -password '' -sql "..."
+  $ unzip -o -j target/config-mgr.jar 'BOOT-INF/lib/h2-*.jar' -d <WORKSPACE>/v5v6/h2lib
+  $ java -cp h2lib/h2-2.3.232.jar org.h2.tools.Shell -url "jdbc:h2:file:<REPO_ROOT>/ai-example-claude-opus-5.5+deepseek-v4-pro/backend/data/config_mgr_db" -user sa -password '' -sql "..."
 
 $ java ... -sql "select id, task_id, job_type, status, progress, total, started_at, finished_at from jobs order by id desc limit 6"
 ID | TASK_ID | JOB_TYPE | STATUS    | PROGRESS | TOTAL | STARTED_AT                 | FINISHED_AT

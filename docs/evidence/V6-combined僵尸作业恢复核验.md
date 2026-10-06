@@ -1,6 +1,6 @@
 # V6 核验：combined 分支「僵尸作业恢复 / StaleJobRecoveryRunner」
 
-- 被核验分支：`ai-example-claude-opus-5.5+deepseek-v4-pro`（工作副本 `/e/temp/ai-example-code/ai-example-claude-opus-5.5+deepseek-v4-pro`，HEAD = `a98d0b2`）
+- 被核验分支：`ai-example-claude-opus-5.5+deepseek-v4-pro`（工作副本 `<REPO_ROOT>/ai-example-claude-opus-5.5+deepseek-v4-pro`，HEAD = `a98d0b2`）
 - 核验日期：2026-10-06
 - 结论：**【实测-符合】**（附带 2 条边界说明，见第 5 节）
 - 原始记录附件（同目录）：
@@ -41,7 +41,7 @@ java -jar target/config-mgr.jar --server.port=18292
 
 - 触发长时作业的数据集：`TO_CFG_big.xlsx`（5000 行；该分支 `ImportJobRunner` 每写满 `batch-size=100` 行就 `Thread.sleep(demo-batch-delay-ms=300)`，故 5000 行导入理论耗时 ≥15s）。**未修改任何配置文件**，一切参数为该分支默认值。
 - 杀进程：`taskkill //F //PID <18292 的监听 PID>`（模拟崩溃，非优雅关闭）。
-- 直查库：从 fat jar 内解出 H2 → `unzip -o -j target/config-mgr.jar 'BOOT-INF/lib/h2-*.jar' -d /e/temp/v5v6/h2lib`，再用 `java -cp h2lib/h2-2.3.232.jar org.h2.tools.Shell -url "jdbc:h2:file:E:/temp/ai-example-code/ai-example-claude-opus-5.5+deepseek-v4-pro/backend/data/config_mgr_db" -user sa -password "" -sql "..."`（运行期该文件被后端独占，会报 `Database may be already in use`，故运行期一律走 REST）。
+- 直查库：从 fat jar 内解出 H2 → `unzip -o -j target/config-mgr.jar 'BOOT-INF/lib/h2-*.jar' -d <WORKSPACE>/v5v6/h2lib`，再用 `java -cp h2lib/h2-2.3.232.jar org.h2.tools.Shell -url "jdbc:h2:file:<REPO_ROOT>/ai-example-claude-opus-5.5+deepseek-v4-pro/backend/data/config_mgr_db" -user sa -password "" -sql "..."`（运行期该文件被后端独占，会报 `Database may be already in use`，故运行期一律走 REST）。
 
 ---
 

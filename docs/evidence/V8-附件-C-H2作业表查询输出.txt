@@ -1,5 +1,5 @@
 H2 直查（后端已停止后以只读方式打开数据库文件）
-命令: java -cp <h2-2.3.232.jar> org.h2.tools.Shell -url "jdbc:h2:file:E:/temp/ai-example-code/ai-example-kimi-k3/backend/data/quickstart_db;MODE=MySQL;ACCESS_MODE_DATA=r" -user sa -password "" -sql "SELECT ID, TASK_ID, KIND, STATUS, TOTAL, PROCESSED, CREATED_AT FROM JOB_RUN ORDER BY ID"
+命令: java -cp <h2-2.3.232.jar> org.h2.tools.Shell -url "jdbc:h2:file:<REPO_ROOT>/ai-example-kimi-k3/backend/data/quickstart_db;MODE=MySQL;ACCESS_MODE_DATA=r" -user sa -password "" -sql "SELECT ID, TASK_ID, KIND, STATUS, TOTAL, PROCESSED, CREATED_AT FROM JOB_RUN ORDER BY ID"
 
 输出:
 ID | TASK_ID | KIND   | STATUS  | TOTAL | PROCESSED | CREATED_AT

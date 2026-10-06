@@ -1,6 +1,6 @@
 # V5 核验：combined 分支「发布冲突检测 / OPTIMISTIC_FORCE_INCREMENT 乐观锁」
 
-- 被核验分支：`ai-example-claude-opus-5.5+deepseek-v4-pro`（工作副本 `/e/temp/ai-example-code/ai-example-claude-opus-5.5+deepseek-v4-pro`，`git branch --show-current` = `claude-opus-5.5+deepseek-v4-pro`，HEAD = `a98d0b2`）
+- 被核验分支：`ai-example-claude-opus-5.5+deepseek-v4-pro`（工作副本 `<REPO_ROOT>/ai-example-claude-opus-5.5+deepseek-v4-pro`，`git branch --show-current` = `claude-opus-5.5+deepseek-v4-pro`，HEAD = `a98d0b2`）
 - 核验日期：2026-10-06
 - 结论：**【实测-符合】**（附带 2 条形态性修正，见第 5 节）
 - 原始记录附件（同目录）：
@@ -33,13 +33,13 @@
 | 项 | 值 |
 |---|---|
 | JDK | `java 21.0.12`（PATH 中） |
-| Maven | `"D:/Program Files/JetBrains/IntelliJ IDEA/plugins/maven-plugin/lib/maven3/bin/mvn.cmd"` |
+| Maven | `"<MAVEN_HOME>/bin/mvn.cmd"` |
 | 构建 | `cd backend && mvn -B -DskipTests package` → **BUILD SUCCESS**，8.9s，产物 `backend/target/config-mgr.jar` |
 | 启动 | `cd backend && export DEEPSEEK_API_KEY=dummy-for-verification && java -jar target/config-mgr.jar --server.port=18292`（该分支默认端口是 8081，用启动参数覆盖为本任务分配的 18292；未改任何配置文件） |
 | 启动前端口检查 | `netstat -ano \| grep 18292` → 空闲 |
-| 数据库 | H2 文件库 `./data/config_mgr_db`；启动前**已备份并删除**：`cp -r data /e/temp/v5v6/db-backup/data-before-fresh-start-185336 && rm -rf data`（原库只有一个空 schema，无业务数据） |
+| 数据库 | H2 文件库 `./data/config_mgr_db`；启动前**已备份并删除**：`cp -r data <WORKSPACE>/v5v6/db-backup/data-before-fresh-start-185336 && rm -rf data`（原库只有一个空 schema，无业务数据） |
 | 启动结果 | `Tomcat started on port 18292` + `Started ConfigMgrApplication in 7.121 seconds`，PID 11484；`curl /api/definitions` → 200 |
-| 客户端 | Git Bash + `curl`，所有请求/响应逐字保存于 `/e/temp/v5v6/raw/` |
+| 客户端 | Git Bash + `curl`，所有请求/响应逐字保存于 `<WORKSPACE>/v5v6/raw/` |
 
 **关于 `DEEPSEEK_API_KEY`（实测环境事实，非本核验项结论）**：该分支在 key 为空时**根本起不来**，启动直接报
 `OpenAI API key must be set. Use the connection property: spring.ai.openai.api-key or spring.ai.openai.chat.api-key property.`（见 `V5-附件-backend-console.log` 首次启动记录）。
@@ -48,7 +48,7 @@
 ### 数据集与脚本
 
 - 新建测试定义 `TO_CFG`（GLOBAL 级，主键字段 `rowKey`，普通字段 `value`），用 REST 创建：`POST /api/definitions`。
-- 测试 Excel：用 JDK 单文件程序生成最小 xlsx（内联字符串、表头 `rowKey/value`），内容 `TO3 / v3`；批量场景另生成 `TO_CFG_v9.xlsx`（`TO3 / V93`）、`TO_CFG_new.xlsx`（`NEW1 / n1`）、`TO_CFG_big.xlsx`（5000 行，V6 用）。生成器 `/e/temp/v5v6/MakeXlsx.java`（临时目录，不在被核验分支内）。
+- 测试 Excel：用 JDK 单文件程序生成最小 xlsx（内联字符串、表头 `rowKey/value`），内容 `TO3 / v3`；批量场景另生成 `TO_CFG_v9.xlsx`（`TO3 / V93`）、`TO_CFG_new.xlsx`（`NEW1 / n1`）、`TO_CFG_big.xlsx`（5000 行，V6 用）。生成器 `<WORKSPACE>/v5v6/MakeXlsx.java`（临时目录，不在被核验分支内）。
 - 作业流程：`POST /api/tasks` 建任务 → `POST /api/tasks/{id}/select-defs` → `POST /api/tasks/{id}/files/upload` → `POST /api/tasks/{id}/jobs {"jobType":"IMPORT"}` →（导入完成）→ `POST /api/tasks/{id}/jobs {"jobType":"PUBLISH"}`；用 `GET /api/jobs/{id}` 轮询到终态，`GET /api/jobs/{id}/issues` 取问题列表，`GET /api/jobs/{id}/diff` 看暂存行快照，`GET /api/data/TO_CFG?scopeType=GLOBAL` 看已发布行。
 
 ---

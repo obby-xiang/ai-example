@@ -25,7 +25,7 @@
 
 | 项 | 值 |
 |---|---|
-| 被核验分支目录 | `/e/temp/ai-example-code/ai-example-glm-5.3` |
+| 被核验分支目录 | `<REPO_ROOT>/ai-example-glm-5.3` |
 | 分支 / HEAD | `glm-5.3` / `821addb docs: 实现说明/测试用例/验证结果/README（38 自动化测试 + 10 E2E 场景全部通过）` |
 | 工作树 | 核验前后 `git status --porcelain` 均为空（未改动任何跟踪文件；未执行任何 git commit/push） |
 | 端口 | `18290`（`application.yml` 配置；启动前 `netstat` 无占用） |
@@ -35,8 +35,8 @@
 启动命令：
 
 ```bash
-cd /e/temp/ai-example-code/ai-example-glm-5.3/backend
-"D:/Program Files/JetBrains/IntelliJ IDEA/plugins/maven-plugin/lib/maven3/bin/mvn.cmd" spring-boot:run
+cd <REPO_ROOT>/ai-example-glm-5.3/backend
+"<MAVEN_HOME>/bin/mvn.cmd" spring-boot:run
 ```
 
 启动成功证据（`V2-附件-boot.log` 原文）：

@@ -12,7 +12,7 @@
 
 ### 1.1 核验手册中的待验声明（本核验项的定义来源）
 
-出处：`E:\temp\ai-example-code\ai-example-main-v2\docs\merge\05-合流落地执行手册.md` 第 127 行
+出处：`<MAIN_V2>\docs\merge\05-合流落地执行手册.md` 第 127 行
 
 ```
 | V9 | claude：Flyway 迁移可重复执行 | 清库重跑两次 | 幂等成功 |
@@ -35,9 +35,9 @@
 
 | 项 | 实际值 |
 |---|---|
-| OS / Shell | Windows，Git Bash（`D:\Program Files\Git\bin\bash.exe`） |
+| OS / Shell | Windows，Git Bash（`<GIT_HOME>`） |
 | JDK | `java version "21.0.12" 2026-07-21 LTS` |
-| Maven | `D:/Program Files/JetBrains/IntelliJ IDEA/plugins/maven-plugin/lib/maven3/bin/mvn.cmd`，本次使用 `-s maven-settings.xml`（仓库内自带的阿里云镜像配置） |
+| Maven | `<MAVEN_HOME>/bin/mvn.cmd`，本次使用 `-s maven-settings.xml`（仓库内自带的阿里云镜像配置） |
 | 构建命令 | `mvn -B -s maven-settings.xml clean package -DskipTests` → `BUILD SUCCESS`，产物 `backend/target/config-mgr.jar`（87,948,673 字节） |
 | 启动命令 | `cd backend && export DEEPSEEK_API_KEY=dummy-for-verification && java -jar target/config-mgr.jar --server.port=18294` |
 | 工作目录 | `backend/`（因数据源 URL 为相对路径 `./data/config_mgr_db`，H2 文件落于 `backend/data/`） |
@@ -48,7 +48,7 @@
 H2 文件库在应用运行期间被独占锁定，故每次均**先关闭应用**（`netstat` 确认 18294 无 LISTENING），再用本地仓库中的 H2 客户端直连查询：
 
 ```bash
-H2JAR="C:/Users/Obby/.m2/repository/com/h2database/h2/2.3.232/h2-2.3.232.jar"
+H2JAR="<USER_HOME>/.m2/repository/com/h2database/h2/2.3.232/h2-2.3.232.jar"
 java -cp "$H2JAR" org.h2.tools.Shell \
   -url "jdbc:h2:file:./data/config_mgr_db" -user sa -password "" \
   -sql 'SELECT COUNT(*) AS history_rows FROM "flyway_schema_history";'

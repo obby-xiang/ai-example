@@ -1,13 +1,13 @@
 V5 核验原始请求/响应记录（分支 ai-example-claude-opus-5.5+deepseek-v4-pro，端口 18292）
-生成时间: 2026-10-06 18:59:20  |  采集方式: curl 直连 REST；多数响应体由脚本逐字落盘于 /e/temp/v5v6/raw/，
+生成时间: 2026-10-06 18:59:20  |  采集方式: curl 直连 REST；多数响应体由脚本逐字落盘于 <WORKSPACE>/v5v6/raw/，
 少量即时查询（*/diff、/api/data）的响应体为终端原始输出的逐字复制，除注明外无删改。
-数据库: H2 文件 ./data/config_mgr_db（启动前已备份到 /e/temp/v5v6/db-backup/data-before-fresh-start-185336 并删除 data/ 目录，保证干净初始状态）
+数据库: H2 文件 ./data/config_mgr_db（启动前已备份到 <WORKSPACE>/v5v6/db-backup/data-before-fresh-start-185336 并删除 data/ 目录，保证干净初始状态）
 
 
 ==================== 0. 启动参数 ====================
 $ cd backend && export DEEPSEEK_API_KEY=dummy-for-verification   # 该分支空 key 无法启动，见正文
 $ java -jar target/config-mgr.jar --server.port=18292
-backend 日志: /e/temp/v5v6/backend-V5.log (PID 11484, Tomcat started on port 18292)
+backend 日志: <WORKSPACE>/v5v6/backend-V5.log (PID 11484, Tomcat started on port 18292)
 
 
 ==================== 1. 创建测试用配置定义 TO_CFG (GLOBAL，主键字段 rowKey) ====================
