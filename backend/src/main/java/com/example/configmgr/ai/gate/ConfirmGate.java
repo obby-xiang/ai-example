@@ -1,0 +1,270 @@
+package com.example.configmgr.ai.gate;
+
+import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.run.PendingToolCall;
+import com.example.configmgr.ai.run.RunRegistry;
+import com.example.configmgr.ai.run.RunStore;
+import com.example.configmgr.ai.run.SseChatEmitter;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Component;
+
+import java.time.Duration;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * 确认门状态机（S4.2 §2 {@code gate/ConfirmGate}）：放行 / 拒绝（原因回填）/ 超时自动取消。
+ *
+ * <h2>三结局</h2>
+ * <ul>
+ * <li><b>放行</b>：{@code POST /api/ai/confirm {approved:true}} → Redis 里
+ * {@code status=APPROVED, executed=false} → 唤醒循环内的等待 → 由循环执行工具并记台账；</li>
+ * <li><b>拒绝</b>：{@code status=REJECTED}，结果文本回填"用户拒绝 + 原因"，<b>不执行</b>，
+ * 官方循环照常继续（模型如实解释）；</li>
+ * <li><b>超时</b>：等待超过 {@code app.ai.hitl.timeout}（默认 120s，ADR-2 上限约束）
+ * 自动取消：{@code status=TIMEOUT, executed=false}，同样以"未执行"语义回填。</li>
+ * </ul>
+ *
+ * <h2>状态在哪、唤醒在哪（硬规范①）</h2>
+ * 决策状态一律先写 Redis（{@link RunStore}），进程内的 {@link Latch} 只承担"唤醒"职责 ——
+ * 因此跨进程决策（旧实例已死、新实例续跑）也能被可靠发现：等待循环在心跳节拍上重新读 Redis，
+ * 而不是只等本地闸门。SP-02 §5.2 原文即"外部输入只写 Redis，再唤醒同进程的门"。
+ *
+ * <h2>挂起期心跳保活</h2>
+ * 等待循环每 {@value #HEARTBEAT_SECONDS} 秒发一帧 {@code heartbeat}（带挂起种类与已等待秒数）：
+ * ① 保活 SSE；② 前端据此显示"等待确认中"；③ 实测证据里"挂起期确实还有帧"由此可证。
+ *
+ * <h2>执行的幂等（SP-02 E2 语义）</h2>
+ * 本类只负责"决策落库"，<b>不在</b>决策写入时执行工具 —— 执行与"已执行"标记的关系见
+ * {@link RunStore#claimExecution}：认领发生在执行<b>之前</b>且原子，从而消除
+ * "执行完成才写标记 ⇒ 两个实例都执行一次"的重复执行窗口。
+ */
+@Slf4j
+@Component
+public class ConfirmGate {
+
+	/** 心跳与"跨进程决策发现"的节拍（秒）。 */
+	public static final int HEARTBEAT_SECONDS = 2;
+
+	private final RunStore store;
+
+	private final RunRegistry registry;
+
+	private final AiProperties properties;
+
+	/** toolCallId → 进程内唤醒闸门（不承载状态）。 */
+	private final Map<String, Latch> latches = new ConcurrentHashMap<>();
+
+	public ConfirmGate(RunStore store, RunRegistry registry, AiProperties properties) {
+		this.store = store;
+		this.registry = registry;
+		this.properties = properties;
+	}
+
+	/** 确认门等待上限（秒）：{@code app.ai.hitl.timeout}。 */
+	public int confirmTimeoutSeconds() {
+		Duration timeout = this.properties.getHitl().getTimeout();
+		return (int) Math.max(1, timeout.toSeconds());
+	}
+
+	// ── 等待侧（在官方循环内阻塞） ──────────────────────────────────────────
+
+	/**
+	 * 确认门：阻塞等人工决策，返回 Redis 里的<b>最终条目</b>（调用方据此决定执行与否）。
+	 */
+	public PendingToolCall awaitDecision(String runId, PendingToolCall pending) {
+		return await(runId, pending, confirmTimeoutSeconds(), true);
+	}
+
+	/**
+	 * 前端工具：阻塞等前端回灌结果。等待上限与确认门同用一个键
+	 * （{@code app.ai.hitl.timeout}）—— 规格 §4 只定义了这一个"挂起等待上限"键。
+	 */
+	public PendingToolCall awaitFrontendResult(String runId, PendingToolCall pending) {
+		return await(runId, pending, confirmTimeoutSeconds(), false);
+	}
+
+	private PendingToolCall await(String runId, PendingToolCall pending, int timeoutSeconds, boolean confirm) {
+		String key = key(runId, pending.getToolCallId());
+		Latch latch = new Latch();
+		this.latches.put(key, latch /* 先登记闸门再发请求，避免"外部输入已到、闸门还没登记"白等到超时 */);
+		SseChatEmitter out = this.registry.of(runId);
+		if (confirm) {
+			out.confirmRequest(pending, timeoutSeconds);
+		}
+		else {
+			out.frontendToolRequest(pending, timeoutSeconds);
+		}
+		long startedAt = System.currentTimeMillis();
+		long deadline = startedAt + timeoutSeconds * 1000L;
+		try {
+			while (true) {
+				PendingToolCall fresh = this.store.pending(runId, pending.getToolCallId());
+				if (fresh != null && fresh.resolved()) {
+					// 决策可能来自本进程（闸门唤醒）也可能来自另一实例（Redis 轮询发现）
+					return fresh;
+				}
+				long remain = deadline - System.currentTimeMillis();
+				if (remain <= 0) {
+					return expire(runId, pending, timeoutSeconds, confirm);
+				}
+				boolean signalled = latch.await(Math.min(remain, HEARTBEAT_SECONDS * 1000L));
+				if (!signalled) {
+					out.heartbeat(heartbeatData(runId, pending, confirm, timeoutSeconds,
+							(System.currentTimeMillis() - startedAt) / 1000));
+				}
+			}
+		}
+		catch (InterruptedException ex) {
+			Thread.currentThread().interrupt();
+			log.warn("挂起等待被中断 runId={} toolCallId={}", runId, pending.getToolCallId());
+			return expire(runId, pending, timeoutSeconds, confirm);
+		}
+		finally {
+			this.latches.remove(key, latch);
+		}
+	}
+
+	/** 超时自动取消：把"未执行"这一结局也写进外置状态（重启后仍可读）。 */
+	private PendingToolCall expire(String runId, PendingToolCall pending, int timeoutSeconds, boolean confirm) {
+		PendingToolCall fresh = this.store.pending(runId, pending.getToolCallId());
+		if (fresh == null) {
+			fresh = pending;
+		}
+		if (!PendingToolCall.PENDING.equals(fresh.getStatus())) {
+			return fresh;
+		}
+		fresh.setStatus(PendingToolCall.TIMEOUT);
+		fresh.setReason(confirm ? "CONFIRM_TIMEOUT" : "FRONTEND_TIMEOUT");
+		fresh.setExecuted(false);
+		fresh.setResolvedAtMs(System.currentTimeMillis());
+		fresh.setResultText(confirm
+				? "确认等待超过 " + timeoutSeconds + " 秒，系统已自动取消该操作（工具未执行）。"
+				: "前端工具 " + fresh.getName() + " 未在 " + timeoutSeconds + " 秒内回传执行结果（前端超时），本次调用未获得数据。");
+		this.store.putPending(runId, fresh);
+		// 超时的结局帧与人工决策同形（SP-01ab 实测形态：confirm_decision 的 decision=timeout），
+		// 前端不必区分"人拒绝"与"等超时"两套解析路径。
+		SseChatEmitter out = this.registry.of(runId);
+		if (confirm) {
+			out.confirmDecision(fresh, "timeout", fresh.getReason(), timeoutSeconds * 1000L);
+		}
+		else {
+			out.frontendToolResult(fresh, false, fresh.getResultText());
+		}
+		return fresh;
+	}
+
+	private Map<String, Object> heartbeatData(String runId, PendingToolCall pending, boolean confirm,
+			int timeoutSeconds, long waitedSeconds) {
+		Map<String, Object> data = new LinkedHashMap<>();
+		data.put("runId", runId);
+		data.put("suspendKind", confirm ? "confirm" : "frontend-tool");
+		data.put("toolCallId", pending.getToolCallId());
+		data.put("name", pending.getName());
+		data.put("status", pending.getStatus());
+		data.put("waitedSeconds", waitedSeconds);
+		data.put("timeoutSeconds", timeoutSeconds);
+		return data;
+	}
+
+	// ── 提交侧（HTTP 端点调用） ────────────────────────────────────────────
+
+	public enum Outcome {
+
+		ACCEPTED, DUPLICATE, NOT_FOUND
+
+	}
+
+	/**
+	 * 一次外部输入的处理结果。
+	 *
+	 * @param outcome 结局（ACCEPTED / DUPLICATE / NOT_FOUND）
+	 * @param pending 落库后的条目（NOT_FOUND 时为 null）
+	 * @param woke 是否唤醒了本进程内正在等待的闸门（false 说明等待方在<b>另一个进程</b>或已死，
+	 * 由续跑接手）
+	 */
+	public record Submission(Outcome outcome, PendingToolCall pending, boolean woke) {
+	}
+
+	/** 人工决策：先写 Redis，再唤醒。重复提交按状态幂等拒绝（SP-01d V-d2B）。 */
+	public Submission submitDecision(String runId, String toolCallId, boolean approved, String reason) {
+		PendingToolCall pending = this.store.pending(runId, toolCallId);
+		if (pending == null) {
+			return new Submission(Outcome.NOT_FOUND, null, false);
+		}
+		if (!PendingToolCall.PENDING.equals(pending.getStatus())) {
+			return new Submission(Outcome.DUPLICATE, pending, false);
+		}
+		pending.setStatus(approved ? PendingToolCall.APPROVED : PendingToolCall.REJECTED);
+		pending.setReason(reason == null || reason.isBlank()
+				? (approved ? "用户在确认门中批准" : "用户在确认门中拒绝") : reason);
+		// 决策落库时"一定还没执行"：执行由循环内的认领（claimExecution）负责置位
+		pending.setExecuted(false);
+		pending.setExecutedBy(null);
+		pending.setResolvedAtMs(System.currentTimeMillis());
+		if (!approved) {
+			pending.setResultText("用户拒绝了该操作，工具未执行。拒绝原因：" + pending.getReason());
+		}
+		this.store.putPending(runId, pending);
+		boolean woke = signal(runId, toolCallId);
+		this.registry.of(runId).confirmDecision(pending, approved ? "approve" : "reject", pending.getReason(), 0L);
+		return new Submission(Outcome.ACCEPTED, pending, woke);
+	}
+
+	/** 前端工具结果回灌：先写 Redis，再唤醒。 */
+	public Submission submitFrontendResult(String runId, String toolCallId, String result, String source) {
+		PendingToolCall pending = this.store.pending(runId, toolCallId);
+		if (pending == null) {
+			return new Submission(Outcome.NOT_FOUND, null, false);
+		}
+		if (!PendingToolCall.PENDING.equals(pending.getStatus())) {
+			return new Submission(Outcome.DUPLICATE, pending, false);
+		}
+		pending.setStatus(PendingToolCall.FRONTEND_RESULT);
+		pending.setReason("source=" + (source == null || source.isBlank() ? "http-post" : source));
+		pending.setResultText(result == null ? "" : result);
+		pending.setResolvedAtMs(System.currentTimeMillis());
+		this.store.putPending(runId, pending);
+		boolean woke = signal(runId, toolCallId);
+		this.registry.of(runId).frontendToolResult(pending, true, result == null ? "" : result);
+		return new Submission(Outcome.ACCEPTED, pending, woke);
+	}
+
+	/** 唤醒本进程内正在等待该 toolCallId 的闸门；无等待方返回 false（不报错）。 */
+	public boolean signal(String runId, String toolCallId) {
+		Latch latch = this.latches.get(key(runId, toolCallId));
+		if (latch == null) {
+			return false;
+		}
+		latch.signal();
+		return true;
+	}
+
+	/** 供诊断/取证：当前进程内有几个挂起闸门。 */
+	public int pendingGates() {
+		return this.latches.size();
+	}
+
+	private static String key(String runId, String toolCallId) {
+		return runId + "|" + toolCallId;
+	}
+
+	/** 进程内闸门：只做唤醒，不承载状态。 */
+	private static final class Latch {
+
+		private final CountDownLatch latch = new CountDownLatch(1);
+
+		boolean await(long millis) throws InterruptedException {
+			return this.latch.await(millis, TimeUnit.MILLISECONDS);
+		}
+
+		void signal() {
+			this.latch.countDown();
+		}
+
+	}
+
+}
