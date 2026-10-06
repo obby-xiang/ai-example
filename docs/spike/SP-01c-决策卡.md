@@ -301,7 +301,8 @@ system prompt 硬性要求"必须调用工具"，并把工具调用次数计入 
 ```
 $ grep -oE "UPSTREAM POST [^ ]+ -> HTTP [0-9]+" 附件-B | sort | uniq -c
      15 UPSTREAM POST /v1/chat/completions -> HTTP 200
-（V-c5 的 7 轮 = 14 次上游调用，每轮 2 次：工具决策 + 最终作答；另 1 次来自 V-c4 收尾）
+（注：附件 B 为实例 A 四次运行的合并日志，全量 grep 会得 25 次；此处 15 次为 V-c5 本轮运行的口径——
+ 7 轮 = 14 次上游调用，每轮 2 次：工具决策 + 最终作答；另 1 次来自 V-c4 收尾。25 次同样全为 200）
 （4xx/5xx 匹配结果：none）
 ```
 
