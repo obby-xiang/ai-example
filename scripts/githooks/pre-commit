@@ -1,40 +1,76 @@
 #!/bin/sh
-# 提交前敏感信息扫描钩子
+# =====================================================================
+# pre-commit 敏感信息扫描钩子（阻断式）
 #
-# 启用方式（仓库根目录执行一次）：
-#   git config core.hooksPath scripts/githooks
+#   覆盖范围：本次暂存区（git diff --cached）新增/修改的行，三条规则：
+#     SECRET  API 密钥 / 令牌 / 私钥头 / Bearer 长串
+#     PATH    本机绝对路径（盘符路径、Git Bash 挂载路径）
+#     USER    个人用户名（动态取 git config user.name，不写死）
 #
-# 作用：扫描本次提交暂存区的新增行，命中疑似密钥/令牌/私钥即阻止提交。
+#   启用方式（仓库根执行一次）：git config core.hooksPath scripts/githooks
+#   误报放行：AI_SECRETS_ALLOW=1 git commit ...  —— 降级为警告并在输出中明示
+#   完全跳过：git commit --no-verify —— 慎用
 #
-# 说明：下面各前缀刻意用变量拼接，避免本文件自身被其他密钥扫描器误判。
+#   所有规则字面量均在 scan-lib.sh 中拼接构造，避免扫描器自我误报（DC-08）。
+# =====================================================================
+set -u
 
-C="A-Za-z0-9"          # 通用字母数字字符类
-P1="s""k-"             # 通用 "sk-" 风格密钥
-P2="gh""p_"            # GitHub PAT
-P3="gh""o_"            # GitHub OAuth
-P4="AK""IA"            # AWS Access Key ID
-P5="AI""za"            # Google API Key
-P6="xo""x"             # Slack token
-P7="-----BEGIN ""PRIVATE KEY-----"
-
-PATTERNS="${P1}[$C]{16,}|${P2}[$C]{20,}|${P3}[$C]{20,}|${P4}[0-9A-Z]{16}|${P5}[$C_-]{30,}|${P6}[baprs]-[$C-]{10,}|${P7}"
-
-# 白名单：占位符与说明性文本不算泄漏
-WHITELIST='your-|placeholder|<.*>|example|xxxx|REDACTED|\.\.\.|VITE_'
-
-hits=$(git diff --cached --unified=0 --diff-filter=ACMR \
-        | grep -E '^\+' \
-        | grep -vE '^\+\+\+' \
-        | grep -vE "$WHITELIST" \
-        | grep -nEI "$PATTERNS")
-
-if [ -n "$hits" ]; then
-  echo "✖ 检测到疑似密钥/令牌，已阻止提交：" >&2
-  echo "$hits" >&2
-  echo "" >&2
-  echo "请将密钥移到环境变量或未追踪的本地配置文件中。" >&2
-  echo "如确认为误报，可用 git commit --no-verify 跳过。" >&2
-  exit 1
+hook_dir=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd) || hook_dir=""
+if [ -z "$hook_dir" ] || [ ! -f "$hook_dir/scan-lib.sh" ]; then
+  top=$(git rev-parse --show-toplevel 2>/dev/null || true)
+  if [ -n "$top" ] && [ -f "$top/scripts/githooks/scan-lib.sh" ]; then
+    hook_dir="$top/scripts/githooks"
+  fi
 fi
 
-exit 0
+if [ ! -f "$hook_dir/scan-lib.sh" ]; then
+  echo "⚠ [pre-commit] 未找到扫描引擎 scan-lib.sh（$hook_dir），本次跳过敏感信息扫描" >&2
+  exit 0
+fi
+. "$hook_dir/scan-lib.sh"
+
+scan_init
+
+allow=0
+[ "${AI_SECRETS_ALLOW:-0}" = "1" ] && allow=1
+for arg in "$@"; do
+  [ "$arg" = "--allow-secrets" ] && allow=1
+done
+
+hits=$(git -c core.quotepath=false diff --cached --unified=0 --no-color \
+         --no-ext-diff --no-textconv --diff-filter=ACMR 2>/dev/null \
+       | LC_ALL=C awk "$SCAN_DIFF_AWK" \
+       | scan_engine_stream \
+       | LC_ALL=C sort -u)
+
+if [ -z "$hits" ]; then
+  echo "✓ [pre-commit] 敏感信息扫描通过（暂存区无命中）"
+  scan_user_note
+  exit 0
+fi
+
+count=$(printf '%s\n' "$hits" | wc -l | tr -d ' ')
+
+if [ "$allow" = 1 ]; then
+  echo ""
+  echo "⚠ [pre-commit] 逃生口已启用（AI_SECRETS_ALLOW=1）：以下 $count 处命中仅告警，本次提交被放行"
+  printf '%s\n' "$hits" | scan_format
+  scan_legend
+  echo "⚠ 放行即人为豁免：请在提交说明中留痕，并按 DC-08 在后续提交清理。"
+  scan_user_note
+  exit 0
+fi
+
+echo "" >&2
+echo "✖ [pre-commit] 暂存区命中 $count 处敏感信息，提交已阻止：" >&2
+printf '%s\n' "$hits" | scan_format >&2
+scan_legend >&2
+scan_user_note
+echo "" >&2
+echo "处理方式：" >&2
+echo "  1) 密钥/令牌改为环境变量或未追踪的本地配置引用，不要写进仓库；" >&2
+echo "  2) 文档/证据中的本机绝对路径按 DC-08 换成占位符（尖括号占位符不会被误报）；" >&2
+echo "  3) 个人用户名不要出现在入库正文中；" >&2
+echo "  4) 确认误报可临时放行：AI_SECRETS_ALLOW=1 git commit ...（输出中会明示放行）；" >&2
+echo "  5) 完全跳过：git commit --no-verify（慎用）。" >&2
+exit 1
