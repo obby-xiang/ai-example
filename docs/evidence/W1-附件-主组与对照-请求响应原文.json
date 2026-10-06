@@ -1,0 +1,862 @@
+[
+ {
+  "t": "01:10:29.479",
+  "mono": 1791306629.373,
+  "method": "POST",
+  "path": "/api/tasks",
+  "req_body": {
+   "type": "IMPORT",
+   "title": "W1-取消核验-主组"
+  },
+  "status": 201,
+  "elapsed_s": 0.107,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"type\":\"IMPORT\",\"title\":\"W1-取消核验-主组\",\"currentStep\":\"UPLOAD\",\"status\":\"ACTIVE\",\"settingsJson\":null,\"version\":1,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.456279\",\"updatedAt\":\"2026-10-07T01:10:29.456279\"}}"
+ },
+ {
+  "t": "01:10:29.511",
+  "mono": 1791306629.48,
+  "method": "POST",
+  "path": "/api/tasks/33/select-defs",
+  "req_body": {
+   "defCodes": [
+    "CURRENCY"
+   ]
+  },
+  "status": 200,
+  "elapsed_s": 0.032,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"type\":\"IMPORT\",\"title\":\"W1-取消核验-主组\",\"currentStep\":\"UPLOAD\",\"status\":\"ACTIVE\",\"settingsJson\":null,\"version\":1,\"items\":[{\"id\":33,\"taskId\":33,\"defCode\":\"CURRENCY\",\"sortOrder\":0,\"conditionJson\":null,\"status\":\"PENDING\"}],\"createdAt\":\"2026-10-07T01:10:29.456279\",\"updatedAt\":\"2026-10-07T01:10:29.456279\"}}"
+ },
+ {
+  "t": "01:10:29.600",
+  "mono": 1791306629.596,
+  "method": "GET",
+  "path": "/api/tasks/33/files",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.005,
+  "resp": "{\"success\":true,\"data\":[{\"id\":33,\"taskId\":33,\"defCode\":\"CURRENCY\",\"fileType\":\"UPLOAD\",\"storagePath\":\"<SRC_COMBINED>",\"originalPath\":\"<SRC_COMBINED>",\"fileName\":\"CURRENCY.xlsx\",\"rowCount\":null,\"version\":1,\"createdAt\":\"2026-10-07T01:10:29.585678\",\"updatedAt\":\"2026-10-07T01:10:29.585678\"}]}"
+ },
+ {
+  "t": "01:10:29.612",
+  "mono": 1791306629.601,
+  "method": "GET",
+  "path": "/api/data/CURRENCY/count",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.012,
+  "resp": "{\"success\":true,\"data\":{\"count\":5}}"
+ },
+ {
+  "t": "01:10:29.632",
+  "mono": 1791306629.613,
+  "method": "GET",
+  "path": "/api/tasks/33/overview",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.019,
+  "resp": "{\"success\":true,\"data\":{\"jobs\":[],\"files\":[{\"id\":33,\"taskId\":33,\"defCode\":\"CURRENCY\",\"fileType\":\"UPLOAD\",\"storagePath\":\"<SRC_COMBINED>",\"originalPath\":\"<SRC_COMBINED>",\"fileName\":\"CURRENCY.xlsx\",\"rowCount\":null,\"version\":1,\"createdAt\":\"2026-10-07T01:10:29.585678\",\"updatedAt\":\"2026-10-07T01:10:29.585678\"}],\"task\":{\"id\":33,\"type\":\"IMPORT\",\"title\":\"W1-取消核验-主组\",\"currentStep\":\"UPLOAD\",\"status\":\"ACTIVE\",\"settingsJson\":null,\"version\":1,\"items\":[{\"id\":33,\"taskId\":33,\"defCode\":\"CURRENCY\",\"sortOrder\":0,\"conditionJson\":null,\"status\":\"PENDING\"}],\"createdAt\":\"2026-10-07T01:10:29.456279\",\"updatedAt\":\"2026-10-07T01:10:29.456279\"}}}"
+ },
+ {
+  "t": "01:10:29.639",
+  "mono": 1791306629.632,
+  "method": "POST",
+  "path": "/api/tasks/33/jobs",
+  "req_body": {
+   "jobType": "IMPORT"
+  },
+  "status": 201,
+  "elapsed_s": 0.007,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:29.645",
+  "mono": 1791306629.64,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.005,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:29.850",
+  "mono": 1791306629.845,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.005,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:30.064",
+  "mono": 1791306630.051,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.014,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:30.268",
+  "mono": 1791306630.265,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.004,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:30.474",
+  "mono": 1791306630.469,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.005,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:30.687",
+  "mono": 1791306630.674,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.013,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:30.894",
+  "mono": 1791306630.888,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.006,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:31.099",
+  "mono": 1791306631.095,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.005,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:31.312",
+  "mono": 1791306631.3,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.013,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:31.526",
+  "mono": 1791306631.513,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.014,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:31.731",
+  "mono": 1791306631.728,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.004,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:31.936",
+  "mono": 1791306631.932,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.005,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:32.141",
+  "mono": 1791306632.138,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.004,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:32.345",
+  "mono": 1791306632.342,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.003,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:32.548",
+  "mono": 1791306632.546,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.003,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:32.753",
+  "mono": 1791306632.75,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.004,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:32.957",
+  "mono": 1791306632.954,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.004,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:33.161",
+  "mono": 1791306633.158,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.003,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:33.375",
+  "mono": 1791306633.362,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.014,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:33.579",
+  "mono": 1791306633.576,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.004,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:33.792",
+  "mono": 1791306633.78,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.013,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:34.006",
+  "mono": 1791306633.993,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.013,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:34.219",
+  "mono": 1791306634.207,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.013,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:34.432",
+  "mono": 1791306634.42,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.013,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:34.638",
+  "mono": 1791306634.633,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.005,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:34.842",
+  "mono": 1791306634.839,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.004,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:35.046",
+  "mono": 1791306635.043,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.004,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:35.259",
+  "mono": 1791306635.247,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.012,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:35.473",
+  "mono": 1791306635.46,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.014,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:35.686",
+  "mono": 1791306635.674,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.012,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:35.899",
+  "mono": 1791306635.887,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.012,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:36.112",
+  "mono": 1791306636.1,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.013,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:36.326",
+  "mono": 1791306636.313,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.013,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:36.539",
+  "mono": 1791306636.527,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.013,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:36.743",
+  "mono": 1791306636.74,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.004,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:36.948",
+  "mono": 1791306636.945,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.004,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:37.161",
+  "mono": 1791306637.149,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.012,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:37.365",
+  "mono": 1791306637.362,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.003,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:37.579",
+  "mono": 1791306637.566,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.014,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:37.783",
+  "mono": 1791306637.78,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.004,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:37.997",
+  "mono": 1791306637.984,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.013,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:38.210",
+  "mono": 1791306638.198,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.013,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:38.423",
+  "mono": 1791306638.411,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.012,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:38.637",
+  "mono": 1791306638.624,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.014,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:38.841",
+  "mono": 1791306638.838,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.003,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:39.045",
+  "mono": 1791306639.042,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.004,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:39.251",
+  "mono": 1791306639.246,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.005,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:39.465",
+  "mono": 1791306639.452,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.014,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:39.669",
+  "mono": 1791306639.666,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.004,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:39.885",
+  "mono": 1791306639.87,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.015,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:40.089",
+  "mono": 1791306640.086,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.004,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:40.295",
+  "mono": 1791306640.29,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.005,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:40.498",
+  "mono": 1791306640.495,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.003,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:40.711",
+  "mono": 1791306640.699,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.012,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:40.925",
+  "mono": 1791306640.912,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.013,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:41.140",
+  "mono": 1791306641.126,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.015,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:41.354",
+  "mono": 1791306641.341,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.013,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:41.568",
+  "mono": 1791306641.554,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.014,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:41.780",
+  "mono": 1791306641.769,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.012,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:41.994",
+  "mono": 1791306641.981,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.013,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:42.207",
+  "mono": 1791306642.195,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.013,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:42.411",
+  "mono": 1791306642.408,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.003,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"PENDING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:42.625",
+  "mono": 1791306642.612,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.013,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"COMPLETED\",\"progress\":1,\"total\":1,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[{\"id\":33,\"jobId\":33,\"defCode\":\"CURRENCY\",\"status\":\"COMPLETED\",\"processed\":3000,\"total\":3000}],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":\"2026-10-07T01:10:29.638697\",\"finishedAt\":\"2026-10-07T01:10:42.482136\"}}"
+ },
+ {
+  "t": "01:10:42.840",
+  "mono": 1791306642.826,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.014,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"COMPLETED\",\"progress\":1,\"total\":1,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[{\"id\":33,\"jobId\":33,\"defCode\":\"CURRENCY\",\"status\":\"COMPLETED\",\"processed\":3000,\"total\":3000}],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":\"2026-10-07T01:10:29.638697\",\"finishedAt\":\"2026-10-07T01:10:42.482136\"}}"
+ },
+ {
+  "t": "01:10:43.046",
+  "mono": 1791306643.041,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.005,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"COMPLETED\",\"progress\":1,\"total\":1,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[{\"id\":33,\"jobId\":33,\"defCode\":\"CURRENCY\",\"status\":\"COMPLETED\",\"processed\":3000,\"total\":3000}],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":\"2026-10-07T01:10:29.638697\",\"finishedAt\":\"2026-10-07T01:10:42.482136\"}}"
+ },
+ {
+  "t": "01:10:43.259",
+  "mono": 1791306643.247,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.013,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"COMPLETED\",\"progress\":1,\"total\":1,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[{\"id\":33,\"jobId\":33,\"defCode\":\"CURRENCY\",\"status\":\"COMPLETED\",\"processed\":3000,\"total\":3000}],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":\"2026-10-07T01:10:29.638697\",\"finishedAt\":\"2026-10-07T01:10:42.482136\"}}"
+ },
+ {
+  "t": "01:10:43.472",
+  "mono": 1791306643.46,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.013,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"COMPLETED\",\"progress\":1,\"total\":1,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[{\"id\":33,\"jobId\":33,\"defCode\":\"CURRENCY\",\"status\":\"COMPLETED\",\"processed\":3000,\"total\":3000}],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":\"2026-10-07T01:10:29.638697\",\"finishedAt\":\"2026-10-07T01:10:42.482136\"}}"
+ },
+ {
+  "t": "01:10:43.686",
+  "mono": 1791306643.673,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.013,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"COMPLETED\",\"progress\":1,\"total\":1,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[{\"id\":33,\"jobId\":33,\"defCode\":\"CURRENCY\",\"status\":\"COMPLETED\",\"processed\":3000,\"total\":3000}],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":\"2026-10-07T01:10:29.638697\",\"finishedAt\":\"2026-10-07T01:10:42.482136\"}}"
+ },
+ {
+  "t": "01:10:43.901",
+  "mono": 1791306643.887,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.015,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"COMPLETED\",\"progress\":1,\"total\":1,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[{\"id\":33,\"jobId\":33,\"defCode\":\"CURRENCY\",\"status\":\"COMPLETED\",\"processed\":3000,\"total\":3000}],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":\"2026-10-07T01:10:29.638697\",\"finishedAt\":\"2026-10-07T01:10:42.482136\"}}"
+ },
+ {
+  "t": "01:10:44.105",
+  "mono": 1791306644.102,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.004,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"COMPLETED\",\"progress\":1,\"total\":1,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[{\"id\":33,\"jobId\":33,\"defCode\":\"CURRENCY\",\"status\":\"COMPLETED\",\"processed\":3000,\"total\":3000}],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":\"2026-10-07T01:10:29.638697\",\"finishedAt\":\"2026-10-07T01:10:42.482136\"}}"
+ },
+ {
+  "t": "01:10:44.319",
+  "mono": 1791306644.306,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.013,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"COMPLETED\",\"progress\":1,\"total\":1,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[{\"id\":33,\"jobId\":33,\"defCode\":\"CURRENCY\",\"status\":\"COMPLETED\",\"processed\":3000,\"total\":3000}],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":\"2026-10-07T01:10:29.638697\",\"finishedAt\":\"2026-10-07T01:10:42.482136\"}}"
+ },
+ {
+  "t": "01:10:44.522",
+  "mono": 1791306644.52,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.003,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"COMPLETED\",\"progress\":1,\"total\":1,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[{\"id\":33,\"jobId\":33,\"defCode\":\"CURRENCY\",\"status\":\"COMPLETED\",\"processed\":3000,\"total\":3000}],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":\"2026-10-07T01:10:29.638697\",\"finishedAt\":\"2026-10-07T01:10:42.482136\"}}"
+ },
+ {
+  "t": "01:10:46.737",
+  "mono": 1791306646.723,
+  "method": "DELETE",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.015,
+  "resp": "{\"success\":true}"
+ },
+ {
+  "t": "01:10:46.751",
+  "mono": 1791306646.738,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.014,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"COMPLETED\",\"progress\":1,\"total\":1,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[{\"id\":33,\"jobId\":33,\"defCode\":\"CURRENCY\",\"status\":\"COMPLETED\",\"processed\":3000,\"total\":3000}],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":\"2026-10-07T01:10:29.638697\",\"finishedAt\":\"2026-10-07T01:10:42.482136\"}}"
+ },
+ {
+  "t": "01:10:46.754",
+  "mono": 1791306646.752,
+  "method": "GET",
+  "path": "/api/jobs/33",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.003,
+  "resp": "{\"success\":true,\"data\":{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"COMPLETED\",\"progress\":1,\"total\":1,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[{\"id\":33,\"jobId\":33,\"defCode\":\"CURRENCY\",\"status\":\"COMPLETED\",\"processed\":3000,\"total\":3000}],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":\"2026-10-07T01:10:29.638697\",\"finishedAt\":\"2026-10-07T01:10:42.482136\"}}"
+ },
+ {
+  "t": "01:10:46.770",
+  "mono": 1791306646.754,
+  "method": "GET",
+  "path": "/api/tasks/33/jobs",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.017,
+  "resp": "{\"success\":true,\"data\":[{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"COMPLETED\",\"progress\":1,\"total\":1,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[{\"id\":33,\"jobId\":33,\"defCode\":\"CURRENCY\",\"status\":\"COMPLETED\",\"processed\":3000,\"total\":3000}],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":\"2026-10-07T01:10:29.638697\",\"finishedAt\":\"2026-10-07T01:10:42.482136\"}]}"
+ },
+ {
+  "t": "01:10:46.780",
+  "mono": 1791306646.771,
+  "method": "GET",
+  "path": "/api/tasks/33/overview",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.01,
+  "resp": "{\"success\":true,\"data\":{\"jobs\":[{\"id\":33,\"taskId\":33,\"jobType\":\"IMPORT\",\"status\":\"COMPLETED\",\"progress\":1,\"total\":1,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[{\"id\":33,\"jobId\":33,\"defCode\":\"CURRENCY\",\"status\":\"COMPLETED\",\"processed\":3000,\"total\":3000}],\"createdAt\":\"2026-10-07T01:10:29.634677\",\"startedAt\":\"2026-10-07T01:10:29.638697\",\"finishedAt\":\"2026-10-07T01:10:42.482136\"}],\"files\":[{\"id\":33,\"taskId\":33,\"defCode\":\"CURRENCY\",\"fileType\":\"UPLOAD\",\"storagePath\":\"<SRC_COMBINED>",\"originalPath\":\"<SRC_COMBINED>",\"fileName\":\"CURRENCY.xlsx\",\"rowCount\":null,\"version\":1,\"createdAt\":\"2026-10-07T01:10:29.585678\",\"updatedAt\":\"2026-10-07T01:10:29.585678\"}],\"task\":{\"id\":33,\"type\":\"IMPORT\",\"title\":\"W1-取消核验-主组\",\"currentStep\":\"UPLOAD\",\"status\":\"ACTIVE\",\"settingsJson\":null,\"version\":1,\"items\":[{\"id\":33,\"taskId\":33,\"defCode\":\"CURRENCY\",\"sortOrder\":0,\"conditionJson\":null,\"status\":\"IMPORTED\"}],\"createdAt\":\"2026-10-07T01:10:29.456279\",\"updatedAt\":\"2026-10-07T01:10:29.456279\"}}}"
+ },
+ {
+  "t": "01:10:46.842",
+  "mono": 1791306646.781,
+  "method": "GET",
+  "path": "/api/jobs/33/diff",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.062,
+  "resp": "<已截断：/diff 返回的 3000 条 staging 行原始数组（925359 字符），行数与首尾行见正文 §3；其余字段原样保留>",
+  "resp_truncated": true
+ },
+ {
+  "t": "01:10:46.860",
+  "mono": 1791306646.852,
+  "method": "GET",
+  "path": "/api/data/CURRENCY/count",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.009,
+  "resp": "{\"success\":true,\"data\":{\"count\":5}}"
+ }
+]

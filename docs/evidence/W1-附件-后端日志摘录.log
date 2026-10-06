@@ -1,0 +1,13 @@
+68:2026-10-07T01:10:29.638+08:00  INFO 30412 --- [config-mgr] [         task-1] c.e.c.job.service.AsyncJobExecutor       : Starting job 33 type=IMPORT taskId=33
+70:2026-10-07T01:10:56.719+08:00  INFO 30412 --- [config-mgr] [         task-2] c.e.c.job.service.AsyncJobExecutor       : Starting job 34 type=IMPORT taskId=34
+72:2026-10-07T01:11:20.799+08:00  INFO 30412 --- [config-mgr] [         task-3] c.e.c.job.service.AsyncJobExecutor       : Starting job 35 type=IMPORT taskId=35
+74:2026-10-07T01:11:32.622+08:00  INFO 30412 --- [config-mgr] [         task-4] c.e.c.job.service.AsyncJobExecutor       : Starting job 36 type=IMPORT taskId=36
+76:2026-10-07T01:11:45.292+08:00  INFO 30412 --- [config-mgr] [         task-5] c.e.c.job.service.AsyncJobExecutor       : Starting job 37 type=IMPORT taskId=37
+77:2026-10-07T01:11:45.685+08:00 ERROR 30412 --- [config-mgr] [cat-handler-151] c.e.c.common.GlobalExceptionHandler      : Unhandled exception
+79:org.springframework.web.context.request.async.AsyncRequestNotUsableException: Servlet container error notification for disconnected client
+93:Caused by: java.io.IOException: Connection reset by peer
+201:2026-10-07T01:11:49.336+08:00 ERROR 30412 --- [config-mgr] [cat-handler-154] c.e.c.common.GlobalExceptionHandler      : Unhandled exception
+203:org.springframework.web.context.request.async.AsyncRequestNotUsableException: Servlet container error notification for disconnected client
+217:Caused by: java.io.IOException: Connection reset by peer
+326:2026-10-07T01:12:21.833+08:00  INFO 30412 --- [config-mgr] [         task-6] c.e.c.job.service.AsyncJobExecutor       : Starting job 38 type=IMPORT taskId=38
+328:2026-10-07T01:13:19.420+08:00  INFO 30412 --- [config-mgr] [         task-7] c.e.c.job.service.AsyncJobExecutor       : Starting job 39 type=IMPORT taskId=65

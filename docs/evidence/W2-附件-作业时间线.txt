@@ -1,0 +1,9 @@
+01:12:26.245 status=PENDING progress=0 finishedAt=None items=[]
+01:12:27.249 status=PENDING progress=0 finishedAt=None items=[]
+01:12:28.252 status=PENDING progress=0 finishedAt=None items=[]
+01:12:29.266 status=PENDING progress=0 finishedAt=None items=[]
+01:12:30.271 status=PENDING progress=0 finishedAt=None items=[]
+01:12:31.276 status=PENDING progress=0 finishedAt=None items=[]
+01:12:32.290 status=PENDING progress=0 finishedAt=None items=[]
+01:12:33.303 status=COMPLETED progress=1 finishedAt=2026-10-07T01:12:33.188462 items=[('CURRENCY', 'COMPLETED', 3000, 3000)]
+TERMINAL {"id": 38, "taskId": 38, "jobType": "IMPORT", "status": "COMPLETED", "progress": 1, "total": 1, "errorCount": 0, "warningCount": 0, "resultJson": null, "items": [{"id": 38, "jobId": 38, "defCode": "CURRENCY", "status": "COMPLETED", "processed": 3000, "total": 3000}], "createdAt": "2026-10-07T01:12:21.832438", "startedAt": "2026-10-07T01:12:21.833439", "finishedAt": "2026-10-07T01:12:33.188462"}

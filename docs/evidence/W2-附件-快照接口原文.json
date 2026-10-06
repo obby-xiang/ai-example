@@ -1,0 +1,286 @@
+{
+ "w2-snapshot-just-after-start.json": {
+  "success": true,
+  "data": {
+   "id": 38,
+   "taskId": 38,
+   "jobType": "IMPORT",
+   "status": "PENDING",
+   "progress": 0,
+   "total": 0,
+   "errorCount": 0,
+   "warningCount": 0,
+   "resultJson": null,
+   "items": [],
+   "createdAt": "2026-10-07T01:12:21.832438",
+   "startedAt": null,
+   "finishedAt": null
+  }
+ },
+ "w2-snapshot-mid.json": {
+  "success": true,
+  "data": {
+   "id": 38,
+   "taskId": 38,
+   "jobType": "IMPORT",
+   "status": "PENDING",
+   "progress": 0,
+   "total": 0,
+   "errorCount": 0,
+   "warningCount": 0,
+   "resultJson": null,
+   "items": [],
+   "createdAt": "2026-10-07T01:12:21.832438",
+   "startedAt": null,
+   "finishedAt": null
+  }
+ },
+ "w2-snapshot-after-done-job.json": {
+  "success": true,
+  "data": {
+   "id": 38,
+   "taskId": 38,
+   "jobType": "IMPORT",
+   "status": "COMPLETED",
+   "progress": 1,
+   "total": 1,
+   "errorCount": 0,
+   "warningCount": 0,
+   "resultJson": null,
+   "items": [
+    {
+     "id": 38,
+     "jobId": 38,
+     "defCode": "CURRENCY",
+     "status": "COMPLETED",
+     "processed": 3000,
+     "total": 3000
+    }
+   ],
+   "createdAt": "2026-10-07T01:12:21.832438",
+   "startedAt": "2026-10-07T01:12:21.833439",
+   "finishedAt": "2026-10-07T01:12:33.188462"
+  }
+ },
+ "w2-snapshot-during-C-job.json": {
+  "success": true,
+  "data": {
+   "id": 38,
+   "taskId": 38,
+   "jobType": "IMPORT",
+   "status": "COMPLETED",
+   "progress": 1,
+   "total": 1,
+   "errorCount": 0,
+   "warningCount": 0,
+   "resultJson": null,
+   "items": [
+    {
+     "id": 38,
+     "jobId": 38,
+     "defCode": "CURRENCY",
+     "status": "COMPLETED",
+     "processed": 3000,
+     "total": 3000
+    }
+   ],
+   "createdAt": "2026-10-07T01:12:21.832438",
+   "startedAt": "2026-10-07T01:12:21.833439",
+   "finishedAt": "2026-10-07T01:12:33.188462"
+  }
+ },
+ "w2-snapshot-after-done-overview.json": {
+  "success": true,
+  "data": {
+   "jobs": [
+    {
+     "id": 38,
+     "taskId": 38,
+     "jobType": "IMPORT",
+     "status": "COMPLETED",
+     "progress": 1,
+     "total": 1,
+     "errorCount": 0,
+     "warningCount": 0,
+     "resultJson": null,
+     "items": [
+      {
+       "id": 38,
+       "jobId": 38,
+       "defCode": "CURRENCY",
+       "status": "COMPLETED",
+       "processed": 3000,
+       "total": 3000
+      }
+     ],
+     "createdAt": "2026-10-07T01:12:21.832438",
+     "startedAt": "2026-10-07T01:12:21.833439",
+     "finishedAt": "2026-10-07T01:12:33.188462"
+    }
+   ],
+   "files": [
+    {
+     "id": 38,
+     "taskId": 38,
+     "defCode": "CURRENCY",
+     "fileType": "UPLOAD",
+     "storagePath": "<SRC_COMBINED>",
+     "originalPath": "<SRC_COMBINED>",
+     "fileName": "CURRENCY.xlsx",
+     "rowCount": null,
+     "version": 1,
+     "createdAt": "2026-10-07T01:12:20.725272",
+     "updatedAt": "2026-10-07T01:12:20.725272"
+    }
+   ],
+   "task": {
+    "id": 38,
+    "type": "IMPORT",
+    "title": "W2-终态补发核验",
+    "currentStep": "UPLOAD",
+    "status": "ACTIVE",
+    "settingsJson": null,
+    "version": 1,
+    "items": [
+     {
+      "id": 38,
+      "taskId": 38,
+      "defCode": "CURRENCY",
+      "sortOrder": 0,
+      "conditionJson": null,
+      "status": "IMPORTED"
+     }
+    ],
+    "createdAt": "2026-10-07T01:12:20.597158",
+    "updatedAt": "2026-10-07T01:12:20.597158"
+   }
+  }
+ },
+ "w2-snapshot-during-C-overview.json": {
+  "success": true,
+  "data": {
+   "jobs": [
+    {
+     "id": 38,
+     "taskId": 38,
+     "jobType": "IMPORT",
+     "status": "COMPLETED",
+     "progress": 1,
+     "total": 1,
+     "errorCount": 0,
+     "warningCount": 0,
+     "resultJson": null,
+     "items": [
+      {
+       "id": 38,
+       "jobId": 38,
+       "defCode": "CURRENCY",
+       "status": "COMPLETED",
+       "processed": 3000,
+       "total": 3000
+      }
+     ],
+     "createdAt": "2026-10-07T01:12:21.832438",
+     "startedAt": "2026-10-07T01:12:21.833439",
+     "finishedAt": "2026-10-07T01:12:33.188462"
+    }
+   ],
+   "files": [
+    {
+     "id": 38,
+     "taskId": 38,
+     "defCode": "CURRENCY",
+     "fileType": "UPLOAD",
+     "storagePath": "<SRC_COMBINED>",
+     "originalPath": "<SRC_COMBINED>",
+     "fileName": "CURRENCY.xlsx",
+     "rowCount": null,
+     "version": 1,
+     "createdAt": "2026-10-07T01:12:20.725272",
+     "updatedAt": "2026-10-07T01:12:20.725272"
+    }
+   ],
+   "task": {
+    "id": 38,
+    "type": "IMPORT",
+    "title": "W2-终态补发核验",
+    "currentStep": "UPLOAD",
+    "status": "ACTIVE",
+    "settingsJson": null,
+    "version": 1,
+    "items": [
+     {
+      "id": 38,
+      "taskId": 38,
+      "defCode": "CURRENCY",
+      "sortOrder": 0,
+      "conditionJson": null,
+      "status": "IMPORTED"
+     }
+    ],
+    "createdAt": "2026-10-07T01:12:20.597158",
+    "updatedAt": "2026-10-07T01:12:20.597158"
+   }
+  }
+ },
+ "w2-snapshot-after-done-taskjobs.json": {
+  "success": true,
+  "data": [
+   {
+    "id": 38,
+    "taskId": 38,
+    "jobType": "IMPORT",
+    "status": "COMPLETED",
+    "progress": 1,
+    "total": 1,
+    "errorCount": 0,
+    "warningCount": 0,
+    "resultJson": null,
+    "items": [
+     {
+      "id": 38,
+      "jobId": 38,
+      "defCode": "CURRENCY",
+      "status": "COMPLETED",
+      "processed": 3000,
+      "total": 3000
+     }
+    ],
+    "createdAt": "2026-10-07T01:12:21.832438",
+    "startedAt": "2026-10-07T01:12:21.833439",
+    "finishedAt": "2026-10-07T01:12:33.188462"
+   }
+  ]
+ },
+ "w2-snapshot-issues.json": {
+  "success": true,
+  "data": {
+   "content": [],
+   "pageable": {
+    "pageNumber": 0,
+    "pageSize": 50,
+    "sort": {
+     "empty": true,
+     "unsorted": true,
+     "sorted": false
+    },
+    "offset": 0,
+    "unpaged": false,
+    "paged": true
+   },
+   "last": true,
+   "totalElements": 0,
+   "totalPages": 0,
+   "first": true,
+   "size": 50,
+   "number": 0,
+   "sort": {
+    "empty": true,
+    "unsorted": true,
+    "sorted": false
+   },
+   "numberOfElements": 0,
+   "empty": true
+  }
+ }
+}

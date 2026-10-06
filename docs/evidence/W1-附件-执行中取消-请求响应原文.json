@@ -1,0 +1,111 @@
+[
+ {
+  "t": "01:10:56.674",
+  "mono": 1791306656.649,
+  "method": "POST",
+  "path": "/api/tasks",
+  "req_body": {
+   "type": "IMPORT",
+   "title": "W1-取消核验-执行中取消"
+  },
+  "status": 201,
+  "elapsed_s": 0.025,
+  "resp": "{\"success\":true,\"data\":{\"id\":34,\"type\":\"IMPORT\",\"title\":\"W1-取消核验-执行中取消\",\"currentStep\":\"UPLOAD\",\"status\":\"ACTIVE\",\"settingsJson\":null,\"version\":1,\"items\":[],\"createdAt\":\"2026-10-07T01:10:56.671125\",\"updatedAt\":\"2026-10-07T01:10:56.671125\"}}"
+ },
+ {
+  "t": "01:10:56.682",
+  "mono": 1791306656.675,
+  "method": "POST",
+  "path": "/api/tasks/34/select-defs",
+  "req_body": {
+   "defCodes": [
+    "CURRENCY"
+   ]
+  },
+  "status": 200,
+  "elapsed_s": 0.007,
+  "resp": "{\"success\":true,\"data\":{\"id\":34,\"type\":\"IMPORT\",\"title\":\"W1-取消核验-执行中取消\",\"currentStep\":\"UPLOAD\",\"status\":\"ACTIVE\",\"settingsJson\":null,\"version\":1,\"items\":[{\"id\":34,\"taskId\":34,\"defCode\":\"CURRENCY\",\"sortOrder\":0,\"conditionJson\":null,\"status\":\"PENDING\"}],\"createdAt\":\"2026-10-07T01:10:56.671125\",\"updatedAt\":\"2026-10-07T01:10:56.671125\"}}"
+ },
+ {
+  "t": "01:10:56.720",
+  "mono": 1791306656.716,
+  "method": "POST",
+  "path": "/api/tasks/34/jobs",
+  "req_body": {
+   "jobType": "IMPORT"
+  },
+  "status": 201,
+  "elapsed_s": 0.004,
+  "resp": "{\"success\":true,\"data\":{\"id\":34,\"taskId\":34,\"jobType\":\"IMPORT\",\"status\":\"RUNNING\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:56.718124\",\"startedAt\":\"2026-10-07T01:10:56.719126\",\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:59.737",
+  "mono": 1791306659.721,
+  "method": "DELETE",
+  "path": "/api/jobs/34",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.017,
+  "resp": "{\"success\":true}"
+ },
+ {
+  "t": "01:10:59.741",
+  "mono": 1791306659.738,
+  "method": "GET",
+  "path": "/api/jobs/34",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.004,
+  "resp": "{\"success\":true,\"data\":{\"id\":34,\"taskId\":34,\"jobType\":\"IMPORT\",\"status\":\"CANCELLED\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:56.718124\",\"startedAt\":null,\"finishedAt\":null}}"
+ },
+ {
+  "t": "01:10:59.745",
+  "mono": 1791306659.741,
+  "method": "GET",
+  "path": "/api/tasks/34/jobs",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.004,
+  "resp": "{\"success\":true,\"data\":[{\"id\":34,\"taskId\":34,\"jobType\":\"IMPORT\",\"status\":\"CANCELLED\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:56.718124\",\"startedAt\":null,\"finishedAt\":null}]}"
+ },
+ {
+  "t": "01:10:59.762",
+  "mono": 1791306659.745,
+  "method": "GET",
+  "path": "/api/tasks/34/overview",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.017,
+  "resp": "{\"success\":true,\"data\":{\"jobs\":[{\"id\":34,\"taskId\":34,\"jobType\":\"IMPORT\",\"status\":\"CANCELLED\",\"progress\":0,\"total\":0,\"errorCount\":0,\"warningCount\":0,\"resultJson\":null,\"items\":[],\"createdAt\":\"2026-10-07T01:10:56.718124\",\"startedAt\":null,\"finishedAt\":null}],\"files\":[{\"id\":34,\"taskId\":34,\"defCode\":\"CURRENCY\",\"fileType\":\"UPLOAD\",\"storagePath\":\"<SRC_COMBINED>",\"originalPath\":\"<SRC_COMBINED>",\"fileName\":\"CURRENCY.xlsx\",\"rowCount\":null,\"version\":1,\"createdAt\":\"2026-10-07T01:10:56.711131\",\"updatedAt\":\"2026-10-07T01:10:56.711131\"}],\"task\":{\"id\":34,\"type\":\"IMPORT\",\"title\":\"W1-取消核验-执行中取消\",\"currentStep\":\"UPLOAD\",\"status\":\"ACTIVE\",\"settingsJson\":null,\"version\":1,\"items\":[{\"id\":34,\"taskId\":34,\"defCode\":\"CURRENCY\",\"sortOrder\":0,\"conditionJson\":null,\"status\":\"PENDING\"}],\"createdAt\":\"2026-10-07T01:10:56.671125\",\"updatedAt\":\"2026-10-07T01:10:56.671125\"}}}"
+ },
+ {
+  "t": "01:10:59.766",
+  "mono": 1791306659.762,
+  "method": "GET",
+  "path": "/api/jobs/34/diff",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.004,
+  "resp": "{\"success\":true,\"data\":[]}"
+ },
+ {
+  "t": "01:10:59.783",
+  "mono": 1791306659.766,
+  "method": "GET",
+  "path": "/api/jobs/34/issues",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.017,
+  "resp": "{\"success\":true,\"data\":{\"content\":[],\"pageable\":{\"pageNumber\":0,\"pageSize\":50,\"sort\":{\"empty\":true,\"unsorted\":true,\"sorted\":false},\"offset\":0,\"unpaged\":false,\"paged\":true},\"last\":true,\"totalElements\":0,\"totalPages\":0,\"first\":true,\"size\":50,\"number\":0,\"sort\":{\"empty\":true,\"unsorted\":true,\"sorted\":false},\"numberOfElements\":0,\"empty\":true}}"
+ },
+ {
+  "t": "01:10:59.797",
+  "mono": 1791306659.784,
+  "method": "GET",
+  "path": "/api/tasks/34",
+  "req_body": null,
+  "status": 200,
+  "elapsed_s": 0.013,
+  "resp": "{\"success\":true,\"data\":{\"id\":34,\"type\":\"IMPORT\",\"title\":\"W1-取消核验-执行中取消\",\"currentStep\":\"UPLOAD\",\"status\":\"ACTIVE\",\"settingsJson\":null,\"version\":1,\"items\":[{\"id\":34,\"taskId\":34,\"defCode\":\"CURRENCY\",\"sortOrder\":0,\"conditionJson\":null,\"status\":\"PENDING\"}],\"createdAt\":\"2026-10-07T01:10:56.671125\",\"updatedAt\":\"2026-10-07T01:10:56.671125\"}}"
+ }
+]

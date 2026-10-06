@@ -1,0 +1,40 @@
+01:12:26.102 data:{"data":{},"type":"HEARTBEAT"}
+01:12:26.132 
+01:12:26.324 data:{"data":{"jobId":38,"total":3000,"defCode":"CURRENCY","jobType":"IMPORT","pct":43,"processed":1299},"type":"JOB_PROGRESS"}
+01:12:26.351 
+01:12:26.696 data:{"data":{"jobId":38,"total":3000,"defCode":"CURRENCY","jobType":"IMPORT","pct":46,"processed":1399},"type":"JOB_PROGRESS"}
+01:12:26.724 
+01:12:27.079 data:{"data":{"jobId":38,"total":3000,"defCode":"CURRENCY","jobType":"IMPORT","pct":49,"processed":1499},"type":"JOB_PROGRESS"}
+01:12:27.112 
+01:12:27.456 data:{"data":{"jobId":38,"total":3000,"defCode":"CURRENCY","jobType":"IMPORT","pct":53,"processed":1599},"type":"JOB_PROGRESS"}
+01:12:27.484 
+01:12:27.846 data:{"data":{"jobId":38,"total":3000,"defCode":"CURRENCY","jobType":"IMPORT","pct":56,"processed":1699},"type":"JOB_PROGRESS"}
+01:12:27.912 
+01:12:28.228 data:{"data":{"jobId":38,"total":3000,"defCode":"CURRENCY","jobType":"IMPORT","pct":59,"processed":1799},"type":"JOB_PROGRESS"}
+01:12:28.257 
+01:12:28.630 data:{"data":{"jobId":38,"total":3000,"defCode":"CURRENCY","jobType":"IMPORT","pct":63,"processed":1899},"type":"JOB_PROGRESS"}
+01:12:28.662 
+01:12:29.027 data:{"data":{"jobId":38,"total":3000,"defCode":"CURRENCY","jobType":"IMPORT","pct":66,"processed":1999},"type":"JOB_PROGRESS"}
+01:12:29.056 
+01:12:29.429 data:{"data":{"jobId":38,"total":3000,"defCode":"CURRENCY","jobType":"IMPORT","pct":69,"processed":2099},"type":"JOB_PROGRESS"}
+01:12:29.459 
+01:12:29.830 data:{"data":{"jobId":38,"total":3000,"defCode":"CURRENCY","jobType":"IMPORT","pct":73,"processed":2199},"type":"JOB_PROGRESS"}
+01:12:29.857 
+01:12:30.239 data:{"data":{"jobId":38,"total":3000,"defCode":"CURRENCY","jobType":"IMPORT","pct":76,"processed":2299},"type":"JOB_PROGRESS"}
+01:12:30.272 
+01:12:30.663 data:{"data":{"jobId":38,"total":3000,"defCode":"CURRENCY","jobType":"IMPORT","pct":79,"processed":2399},"type":"JOB_PROGRESS"}
+01:12:30.690 
+01:12:31.073 data:{"data":{"jobId":38,"total":3000,"defCode":"CURRENCY","jobType":"IMPORT","pct":83,"processed":2499},"type":"JOB_PROGRESS"}
+01:12:31.110 
+01:12:31.504 data:{"data":{"jobId":38,"total":3000,"defCode":"CURRENCY","jobType":"IMPORT","pct":86,"processed":2599},"type":"JOB_PROGRESS"}
+01:12:31.534 
+01:12:31.923 data:{"data":{"jobId":38,"total":3000,"defCode":"CURRENCY","jobType":"IMPORT","pct":89,"processed":2699},"type":"JOB_PROGRESS"}
+01:12:31.952 
+01:12:32.347 data:{"data":{"jobId":38,"total":3000,"defCode":"CURRENCY","jobType":"IMPORT","pct":93,"processed":2799},"type":"JOB_PROGRESS"}
+01:12:32.379 
+01:12:32.790 data:{"data":{"jobId":38,"total":3000,"defCode":"CURRENCY","jobType":"IMPORT","pct":96,"processed":2899},"type":"JOB_PROGRESS"}
+01:12:32.818 
+01:12:33.214 data:{"data":{"jobId":38,"total":3000,"defCode":"CURRENCY","jobType":"IMPORT","pct":99,"processed":2999},"type":"JOB_PROGRESS"}
+01:12:33.242 
+01:12:33.272 data:{"data":{"jobType":"IMPORT","jobId":38,"status":"COMPLETED","errors":0},"type":"JOB_DONE"}
+01:12:33.301 
