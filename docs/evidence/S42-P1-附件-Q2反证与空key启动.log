@@ -1,0 +1,26 @@
+# S4.2-P1 附件：Q2 反证与空 key 启动（日志原文摘录）
+
+## A. 反证：打开官方 OpenAI 自动配置且不带 key ⇒ 启动失败（Q2 原缺陷）
+命令: java -jar target/config-mgr.jar --server.port=18308 --spring.ai.model.chat=openai   # 未导出 AI_API_KEY
+
+2026-10-07T01:51:01.054+08:00  WARN 26692 --- [config-mgr] [           main] ConfigServletWebServerApplicationContext : Exception encountered during context initialization - cancelling refresh attempt: org.springframework.beans.factory.BeanCreationException: Error creating bean with name 'openAiApi' defined in class path resource [org/springframework/ai/model/openai/autoconfigure/OpenAiChatAutoConfiguration.class]: Failed to instantiate [org.springframework.ai.openai.api.OpenAiApi]: Factory method 'openAiApi' threw exception with message: OpenAI API key must be set. Use the connection property: spring.ai.openai.api-key or spring.ai.openai.chat.api-key property.
+org.springframework.beans.factory.BeanCreationException: Error creating bean with name 'openAiApi' defined in class path resource [org/springframework/ai/model/openai/autoconfigure/OpenAiChatAutoConfiguration.class]: Failed to instantiate [org.springframework.ai.openai.api.OpenAiApi]: Factory method 'openAiApi' threw exception with message: OpenAI API key must be set. Use the connection property: spring.ai.openai.api-key or spring.ai.openai.chat.api-key property.
+Caused by: java.lang.IllegalArgumentException: OpenAI API key must be set. Use the connection property: spring.ai.openai.api-key or spring.ai.openai.chat.api-key property.
+	at org.springframework.util.Assert.hasText(Assert.java:253) ~[spring-core-6.2.18.jar!/:6.2.18]
+exit=1
+
+## B. 修复后：默认配置 + 空 key ⇒ 正常启动
+命令: java -jar target/config-mgr.jar --server.port=18308   # 未导出任何 key
+
+2026-10-07T01:56:34.150+08:00  INFO 30636 --- [config-mgr] [           main] o.s.b.w.embedded.tomcat.TomcatWebServer  : Tomcat started on port 18308 (http) with context path '/'
+2026-10-07T01:56:34.167+08:00  INFO 30636 --- [config-mgr] [           main] c.e.configmgr.ConfigMgrApplication       : Started ConfigMgrApplication in 7.333 seconds (process running for 7.902)
+
+## C. 端点响应（同一进程）
+/api/definitions        HTTP 200
+/api/tasks              HTTP 200
+/api/definitions/CURRENCY HTTP 200
+/api/ai/chat            HTTP 503 {"code":"AI_UNAVAILABLE"}
+/api/ai/history/{sid}   HTTP 200（历史不依赖 key）
+
+## D. 模型侧 bean 未装配的直接证据（启动日志中无 AI 相关 bean 报错、无上游连接）
+日志中 OpenAiApi|WebClient 出现次数: 0
