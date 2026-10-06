@@ -1,0 +1,44 @@
+server:
+  port: ${SPIKE_PORT:18301}
+  shutdown: immediate
+  tomcat:
+    threads:
+      max: 40
+
+spring:
+  application:
+    name: sp01ab-frontend-tool-hitl
+  ai:
+    openai:
+      base-url: ${AI_BASE_URL:https://api.deepseek.com}
+      api-key: ${DEEPSEEK_API_KEY}
+      chat:
+        options:
+          model: ${AI_MODEL:deepseek-flash}
+          temperature: 0.0
+
+spike:
+  # 前端工具挂起等待上限：超时后循环得到“前端未响应”语义并继续
+  frontend-tool-timeout-seconds: 60
+  # HITL 确认门挂起上限：超时 = 自动取消（未执行）
+  confirm-timeout-seconds: 30
+  # 心跳周期：挂起期间保活 SSE
+  heartbeat-ms: 2000
+
+logging:
+  level:
+    root: INFO
+    com.example.spike: INFO
+
+---
+# 证据用 profile：打印官方 OpenAI 客户端 DEBUG 日志（请求/响应链路）
+spring:
+  config:
+    activate:
+      on-profile: wire
+
+logging:
+  level:
+    org.springframework.ai.openai: DEBUG
+    org.springframework.ai.chat.client: DEBUG
+    org.springframework.ai.model.tool: DEBUG
