@@ -1,0 +1,72 @@
+[
+  {
+    "round": 1,
+    "httpStatus": 200,
+    "elapsedMs": 1857,
+    "reply": "服务器当前时间是 **2026-10-06 19:41:58**。",
+    "historySize": 2,
+    "toolCallsThisRound": 1,
+    "toolCallsTotal": 1,
+    "raw": "{\"sessionId\":\"vc5-tools\",\"reply\":\"服务器当前时间是 **2026-10-06 19:41:58**。\",\"model\":\"deepseek-flash\",\"historySize\":2,\"toolCallsSoFar\":1}"
+  },
+  {
+    "round": 2,
+    "httpStatus": 200,
+    "elapsedMs": 2297,
+    "reply": "123 加 456 的结果是 **579**。",
+    "historySize": 4,
+    "toolCallsThisRound": 1,
+    "toolCallsTotal": 2,
+    "raw": "{\"sessionId\":\"vc5-tools\",\"reply\":\"123 加 456 的结果是 **579**。\",\"model\":\"deepseek-flash\",\"historySize\":4,\"toolCallsSoFar\":2}"
+  },
+  {
+    "round": 3,
+    "httpStatus": 200,
+    "elapsedMs": 1630,
+    "reply": "两个结果如下：\n\n- 服务器当前时间：**2026-10-06 19:42:03**\n- 88 乘 3：**264**",
+    "historySize": 6,
+    "toolCallsThisRound": 2,
+    "toolCallsTotal": 4,
+    "raw": "{\"sessionId\":\"vc5-tools\",\"reply\":\"两个结果如下：\\n\\n- 服务器当前时间：**2026-10-06 19:42:03**\\n- 88 乘 3：**264**\",\"model\":\"deepseek-flash\",\"historySize\":6,\"toolCallsSoFar\":4}"
+  },
+  {
+    "round": 4,
+    "httpStatus": 200,
+    "elapsedMs": 1944,
+    "reply": "1000 减 250 的结果是 **750**。",
+    "historySize": 8,
+    "toolCallsThisRound": 1,
+    "toolCallsTotal": 5,
+    "raw": "{\"sessionId\":\"vc5-tools\",\"reply\":\"1000 减 250 的结果是 **750**。\",\"model\":\"deepseek-flash\",\"historySize\":8,\"toolCallsSoFar\":5}"
+  },
+  {
+    "round": 5,
+    "httpStatus": 200,
+    "elapsedMs": 1932,
+    "reply": "144 除以 12 的结果是 **12**。",
+    "historySize": 10,
+    "toolCallsThisRound": 1,
+    "toolCallsTotal": 6,
+    "raw": "{\"sessionId\":\"vc5-tools\",\"reply\":\"144 除以 12 的结果是 **12**。\",\"model\":\"deepseek-flash\",\"historySize\":10,\"toolCallsSoFar\":6}"
+  },
+  {
+    "round": 6,
+    "httpStatus": 200,
+    "elapsedMs": 1748,
+    "reply": "服务器当前时间是 **2026-10-06 19:42:08**。",
+    "historySize": 12,
+    "toolCallsThisRound": 1,
+    "toolCallsTotal": 7,
+    "raw": "{\"sessionId\":\"vc5-tools\",\"reply\":\"服务器当前时间是 **2026-10-06 19:42:08**。\",\"model\":\"deepseek-flash\",\"historySize\":12,\"toolCallsSoFar\":7}"
+  },
+  {
+    "round": 7,
+    "httpStatus": 200,
+    "elapsedMs": 2103,
+    "reply": "9 乘 9 的结果是 **81**。\n\n本轮是第 **7** 轮对话。",
+    "historySize": 14,
+    "toolCallsThisRound": 1,
+    "toolCallsTotal": 8,
+    "raw": "{\"sessionId\":\"vc5-tools\",\"reply\":\"9 乘 9 的结果是 **81**。\\n\\n本轮是第 **7** 轮对话。\",\"model\":\"deepseek-flash\",\"historySize\":14,\"toolCallsSoFar\":8}"
+  }
+]

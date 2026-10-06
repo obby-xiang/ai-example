@@ -1,0 +1,424 @@
+====================================================================================================
+### V-c1 多轮记忆   （源文件：vc1-raw.txt）
+====================================================================================================
+=== V-c1 多轮记忆：第二轮应能引用第一轮内容 ===
+
+POST http://127.0.0.1:18302/api/chat
+  request  : {"sessionId":"vc1-s1","message":"请记住这个数字：42。只回复“已记住”，不要解释。"}
+  HTTP     : 200  (2210 ms)
+  response : {"sessionId":"vc1-s1","reply":"已记住","model":"deepseek-flash","historySize":2,"toolCallsSoFar":0}
+
+POST http://127.0.0.1:18302/api/chat
+  request  : {"sessionId":"vc1-s1","message":"我刚才让你记住的数字是几？只回复数字。"}
+  HTTP     : 200  (605 ms)
+  response : {"sessionId":"vc1-s1","reply":"42","model":"deepseek-flash","historySize":4,"toolCallsSoFar":0}
+
+GET history
+HTTP 200
+[
+  {
+    "type": "USER",
+    "text": "请记住这个数字：42。只回复“已记住”，不要解释。"
+  },
+  {
+    "type": "ASSISTANT",
+    "text": "已记住"
+  },
+  {
+    "type": "USER",
+    "text": "我刚才让你记住的数字是几？只回复数字。"
+  },
+  {
+    "type": "ASSISTANT",
+    "text": "42"
+  }
+]
+
+$ memurai-cli TYPE chat:mem:vc1-s1
+list
+
+$ memurai-cli TTL chat:mem:vc1-s1
+21600
+
+$ memurai-cli LRANGE chat:mem:vc1-s1 0 -1
+{"type":"USER","content":"请记住这个数字：42。只回复“已记住”，不要解释。","metadata":{"messageType":"USER","spikeTimestamp":"2026-10-06T11:40:59.133496200Z"},"timestamp":"2026-10-06T11:40:59.133496200Z"}
+{"type":"ASSISTANT","content":"已记住","metadata":{"role":"ASSISTANT","messageType":"ASSISTANT","refusal":"","finishReason":"STOP","annotations":[{}],"index":0,"id":"0d9298d4-3ed7-4392-8ec6-6f408b267ac4","spikeTimestamp":"2026-10-06T11:41:00.471500500Z"},"timestamp":"2026-10-06T11:41:00.471500500Z"}
+{"type":"USER","content":"我刚才让你记住的数字是几？只回复数字。","metadata":{"messageType":"USER","spikeTimestamp":"2026-10-06T11:41:00.513501700Z"},"timestamp":"2026-10-06T11:41:00.513501700Z"}
+{"type":"ASSISTANT","content":"42","metadata":{"role":"ASSISTANT","messageType":"ASSISTANT","refusal":"","finishReason":"STOP","annotations":[{}],"index":0,"id":"d707d592-ae43-43c1-a1aa-7ee453fa9c1c","spikeTimestamp":"2026-10-06T11:41:01.096319500Z"},"timestamp":"2026-10-06T11:41:01.096319500Z"}
+
+====================================================================================================
+### V-c2 Redis 键结构与 TTL 到期   （源文件：vc2-raw.txt）
+====================================================================================================
+=== V-c2 Redis 键结构与 TTL 到期 ===
+
+--- 2.1 普通会话键结构（复用 V-c1 会话 vc1-s1）---
+
+$ memurai-cli TYPE chat:mem:vc1-s1
+list
+
+$ memurai-cli TTL chat:mem:vc1-s1
+21598
+
+$ memurai-cli LLEN chat:mem:vc1-s1
+4
+
+$ memurai-cli LRANGE chat:mem:vc1-s1 0 -1
+{"type":"USER","content":"请记住这个数字：42。只回复“已记住”，不要解释。","metadata":{"messageType":"USER","spikeTimestamp":"2026-10-06T11:40:59.133496200Z"},"timestamp":"2026-10-06T11:40:59.133496200Z"}
+{"type":"ASSISTANT","content":"已记住","metadata":{"role":"ASSISTANT","messageType":"ASSISTANT","refusal":"","finishReason":"STOP","annotations":[{}],"index":0,"id":"0d9298d4-3ed7-4392-8ec6-6f408b267ac4","spikeTimestamp":"2026-10-06T11:41:00.471500500Z"},"timestamp":"2026-10-06T11:41:00.471500500Z"}
+{"type":"USER","content":"我刚才让你记住的数字是几？只回复数字。","metadata":{"messageType":"USER","spikeTimestamp":"2026-10-06T11:41:00.513501700Z"},"timestamp":"2026-10-06T11:41:00.513501700Z"}
+{"type":"ASSISTANT","content":"42","metadata":{"role":"ASSISTANT","messageType":"ASSISTANT","refusal":"","finishReason":"STOP","annotations":[{}],"index":0,"id":"d707d592-ae43-43c1-a1aa-7ee453fa9c1c","spikeTimestamp":"2026-10-06T11:41:01.096319500Z"},"timestamp":"2026-10-06T11:41:01.096319500Z"}
+
+$ memurai-cli SMEMBERS chat:mem:__ids__
+vc1-s1
+
+--- 2.2 短 TTL 会话：5 秒后键应自动消失（证明"不持久化"）---
+
+POST /api/dev/ttl?seconds=5
+HTTP 200  {"ttlSeconds":5}
+
+POST http://127.0.0.1:18302/api/chat
+  request  : {"sessionId":"vc2-ttl-5s","message":"短 TTL 会话：只回复“ok”。"}
+  HTTP     : 200  (674 ms)
+  response : {"sessionId":"vc2-ttl-5s","reply":"好的","model":"deepseek-flash","historySize":2,"toolCallsSoFar":0}
+
+$ memurai-cli TYPE chat:mem:vc2-ttl-5s
+list
+
+$ memurai-cli TTL chat:mem:vc2-ttl-5s
+5
+
+$ memurai-cli LRANGE chat:mem:vc2-ttl-5s 0 -1
+{"type":"USER","content":"短 TTL 会话：只回复“ok”。","metadata":{"messageType":"USER","spikeTimestamp":"2026-10-06T11:41:03.500642900Z"},"timestamp":"2026-10-06T11:41:03.500642900Z"}
+{"type":"ASSISTANT","content":"好的","metadata":{"role":"ASSISTANT","messageType":"ASSISTANT","refusal":"","finishReason":"STOP","annotations":[{}],"index":0,"id":"eeb96e1d-1311-4df0-917d-4c10747bc6d1","spikeTimestamp":"2026-10-06T11:41:04.074342200Z"},"timestamp":"2026-10-06T11:41:04.074342200Z"}
+
+$ memurai-cli EXISTS chat:mem:vc2-ttl-5s
+1
+
+等待 8 秒（> TTL 5 秒）...
+
+$ memurai-cli TTL chat:mem:vc2-ttl-5s
+-2
+
+$ memurai-cli EXISTS chat:mem:vc2-ttl-5s
+0
+
+$ memurai-cli LRANGE chat:mem:vc2-ttl-5s 0 -1
+
+
+$ memurai-cli SMEMBERS chat:mem:__ids__
+vc1-s1
+vc2-ttl-5s
+
+GET /api/chat/vc2-ttl-5s/history（键已消失，应返回空数组）
+HTTP 200  []
+
+恢复默认 TTL 21600 秒
+HTTP 200  {"ttlSeconds":21600}
+
+====================================================================================================
+### V-c3 多实例共享 · A 侧播种   （源文件：vc3-seed-raw.txt）
+====================================================================================================
+=== V-c3 多实例共享（步骤 1：实例 A 完成 2 轮）===
+
+GET http://127.0.0.1:18302/api/dev/info
+HTTP 200  {"port":"18302","pid":22048,"ttlSeconds":21600,"redisKeyPattern":"chat:mem:<conversationId>","conversationIds":["vc1-s1"],"toolCalls":0}
+
+POST http://127.0.0.1:18302/api/chat
+  request  : {"sessionId":"vc3-shared","message":"请记住这个数字：7。只回复“已记住”。"}
+  HTTP     : 200  (818 ms)
+  response : {"sessionId":"vc3-shared","reply":"已记住","model":"deepseek-flash","historySize":2,"toolCallsSoFar":0}
+
+POST http://127.0.0.1:18302/api/chat
+  request  : {"sessionId":"vc3-shared","message":"请再记住一个词：紫水晶。只回复“已记住”。"}
+  HTTP     : 200  (818 ms)
+  response : {"sessionId":"vc3-shared","reply":"已记住","model":"deepseek-flash","historySize":4,"toolCallsSoFar":0}
+
+$ memurai-cli TTL chat:mem:vc3-shared
+21600
+
+$ memurai-cli LRANGE chat:mem:vc3-shared 0 -1
+{"type":"USER","content":"请记住这个数字：7。只回复“已记住”。","metadata":{"messageType":"USER","spikeTimestamp":"2026-10-06T11:41:14.567007600Z"},"timestamp":"2026-10-06T11:41:14.567007600Z"}
+{"type":"ASSISTANT","content":"已记住","metadata":{"role":"ASSISTANT","messageType":"ASSISTANT","refusal":"","finishReason":"STOP","annotations":[{}],"index":0,"id":"261111c3-e28a-4433-b43b-ef1b62db36b8","spikeTimestamp":"2026-10-06T11:41:15.364745600Z"},"timestamp":"2026-10-06T11:41:15.364745600Z"}
+{"type":"USER","content":"请再记住一个词：紫水晶。只回复“已记住”。","metadata":{"messageType":"USER","spikeTimestamp":"2026-10-06T11:41:15.382085300Z"},"timestamp":"2026-10-06T11:41:15.382085300Z"}
+{"type":"ASSISTANT","content":"已记住","metadata":{"role":"ASSISTANT","messageType":"ASSISTANT","refusal":"","finishReason":"STOP","annotations":[{}],"index":0,"id":"8a31b5b9-0937-4933-a435-4874333acb24","spikeTimestamp":"2026-10-06T11:41:16.180360100Z"},"timestamp":"2026-10-06T11:41:16.180360100Z"}
+
+====================================================================================================
+### V-c3 多实例共享 · B 侧继续   （源文件：vc3-cont-raw.txt）
+====================================================================================================
+=== V-c3 多实例共享（步骤 2：实例 B 用同一 sessionId 继续）===
+
+GET http://127.0.0.1:18312/api/dev/info
+HTTP 200  {"port":"18312","pid":27724,"ttlSeconds":21600,"redisKeyPattern":"chat:mem:<conversationId>","conversationIds":["vc1-s1","vc3-shared"],"toolCalls":0}
+
+GET http://127.0.0.1:18312/api/chat/vc3-shared/history（B 视角的历史）
+HTTP 200
+[{"type":"USER","text":"请记住这个数字：7。只回复“已记住”。"},{"type":"ASSISTANT","text":"已记住"},{"type":"USER","text":"请再记住一个词：紫水晶。只回复“已记住”。"},{"type":"ASSISTANT","text":"已记住"}]
+
+POST http://127.0.0.1:18312/api/chat
+  request  : {"sessionId":"vc3-shared","message":"我刚才让你记的数字是几？我让你记的词是什么？用一句话回答。"}
+  HTTP     : 200  (1712 ms)
+  response : {"sessionId":"vc3-shared","reply":"你让我记的数字是 7，让我记的词是紫水晶。","model":"deepseek-flash","historySize":6,"toolCallsSoFar":0}
+
+====================================================================================================
+### V-c4 重启恢复 · 重启前   （源文件：vc4-seed-raw.txt）
+====================================================================================================
+=== V-c4 重启恢复（步骤 1：重启前完成 2 轮）===
+
+GET http://127.0.0.1:18302/api/dev/info
+HTTP 200  {"port":"18302","pid":22048,"ttlSeconds":21600,"redisKeyPattern":"chat:mem:<conversationId>","conversationIds":["vc1-s1","vc3-shared"],"toolCalls":0}
+
+POST http://127.0.0.1:18302/api/chat
+  request  : {"sessionId":"vc4-restart","message":"请记住一个暗号：青铜时代-314。只回复“已记住”。"}
+  HTTP     : 200  (896 ms)
+  response : {"sessionId":"vc4-restart","reply":"已记住","model":"deepseek-flash","historySize":2,"toolCallsSoFar":0}
+
+POST http://127.0.0.1:18302/api/chat
+  request  : {"sessionId":"vc4-restart","message":"再记住一个数字：1024。只回复“已记住”。"}
+  HTTP     : 200  (1124 ms)
+  response : {"sessionId":"vc4-restart","reply":"已记住","model":"deepseek-flash","historySize":4,"toolCallsSoFar":0}
+
+GET history（重启前基线）
+HTTP 200
+[{"type":"USER","text":"请记住一个暗号：青铜时代-314。只回复“已记住”。"},{"type":"ASSISTANT","text":"已记住"},{"type":"USER","text":"再记住一个数字：1024。只回复“已记住”。"},{"type":"ASSISTANT","text":"已记住"}]
+
+$ memurai-cli TTL chat:mem:vc4-restart
+21600
+
+$ memurai-cli LLEN chat:mem:vc4-restart
+4
+
+====================================================================================================
+### V-c4 重启恢复 · 重启后   （源文件：vc4-cont-raw.txt）
+====================================================================================================
+=== V-c4 重启恢复（步骤 2：同端口重启后核对历史）===
+
+GET http://127.0.0.1:18302/api/dev/info
+HTTP 200  {"port":"18302","pid":16496,"ttlSeconds":21600,"redisKeyPattern":"chat:mem:<conversationId>","conversationIds":["vc1-s1","vc3-shared","vc4-restart"],"toolCalls":0}
+
+GET history（重启后）
+HTTP 200
+[{"type":"USER","text":"请记住一个暗号：青铜时代-314。只回复“已记住”。"},{"type":"ASSISTANT","text":"已记住"},{"type":"USER","text":"再记住一个数字：1024。只回复“已记住”。"},{"type":"ASSISTANT","text":"已记住"}]
+
+$ memurai-cli TTL chat:mem:vc4-restart
+21568
+
+POST http://127.0.0.1:18302/api/chat
+  request  : {"sessionId":"vc4-restart","message":"我让你记的暗号和数字分别是什么？用一句话回答。"}
+  HTTP     : 200  (1557 ms)
+  response : {"sessionId":"vc4-restart","reply":"暗号是“青铜时代-314”，数字是 1024。","model":"deepseek-flash","historySize":6,"toolCallsSoFar":0}
+
+====================================================================================================
+### V-c5 连续 7 轮带工具调用   （源文件：vc5-raw.txt）
+====================================================================================================
+=== V-c5 连续 7 轮带工具调用，全程不得出现 400 / 异常 ===
+
+system prompt: 你是工具调用验证助手。硬性规则：每一轮回答前都必须至少调用一次工具（getServerTime 或 calculate），禁止不调用工具就直接回答。回答用中文。
+
+--- 第 1 轮 ---
+POST http://127.0.0.1:18302/api/chat
+  request  : {"sessionId":"vc5-tools","message":"第 1 轮：请调用 getServerTime 查看服务器当前时间，然后告诉我结果。","system":"你是工具调用验证助手。硬性规则：每一轮回答前都必须至少调用一次工具（getServerTime 或 calculate），禁止不调用工具就直接回答。回答用中文。"}
+  HTTP     : 200  (1857 ms)
+  response : {"sessionId":"vc5-tools","reply":"服务器当前时间是 **2026-10-06 19:41:58**。","model":"deepseek-flash","historySize":2,"toolCallsSoFar":1}
+
+  本轮新增工具调用次数: 1
+
+--- 第 2 轮 ---
+POST http://127.0.0.1:18302/api/chat
+  request  : {"sessionId":"vc5-tools","message":"第 2 轮：请调用 calculate 计算 123 加 456，然后告诉我结果。","system":"你是工具调用验证助手。硬性规则：每一轮回答前都必须至少调用一次工具（getServerTime 或 calculate），禁止不调用工具就直接回答。回答用中文。"}
+  HTTP     : 200  (2297 ms)
+  response : {"sessionId":"vc5-tools","reply":"123 加 456 的结果是 **579**。","model":"deepseek-flash","historySize":4,"toolCallsSoFar":2}
+
+  本轮新增工具调用次数: 1
+
+--- 第 3 轮 ---
+POST http://127.0.0.1:18302/api/chat
+  request  : {"sessionId":"vc5-tools","message":"第 3 轮：请先调用 getServerTime，再调用 calculate 计算 88 乘 3，然后一起告诉我结果。","system":"你是工具调用验证助手。硬性规则：每一轮回答前都必须至少调用一次工具（getServerTime 或 calculate），禁止不调用工具就直接回答。回答用中文。"}
+  HTTP     : 200  (1630 ms)
+  response : {"sessionId":"vc5-tools","reply":"两个结果如下：\n\n- 服务器当前时间：**2026-10-06 19:42:03**\n- 88 乘 3：**264**","model":"deepseek-flash","historySize":6,"toolCallsSoFar":4}
+
+  本轮新增工具调用次数: 2
+
+--- 第 4 轮 ---
+POST http://127.0.0.1:18302/api/chat
+  request  : {"sessionId":"vc5-tools","message":"第 4 轮：请调用 calculate 计算 1000 减 250，然后告诉我结果。","system":"你是工具调用验证助手。硬性规则：每一轮回答前都必须至少调用一次工具（getServerTime 或 calculate），禁止不调用工具就直接回答。回答用中文。"}
+  HTTP     : 200  (1944 ms)
+  response : {"sessionId":"vc5-tools","reply":"1000 减 250 的结果是 **750**。","model":"deepseek-flash","historySize":8,"toolCallsSoFar":5}
+
+  本轮新增工具调用次数: 1
+
+--- 第 5 轮 ---
+POST http://127.0.0.1:18302/api/chat
+  request  : {"sessionId":"vc5-tools","message":"第 5 轮：请调用 calculate 计算 144 除以 12，然后告诉我结果。","system":"你是工具调用验证助手。硬性规则：每一轮回答前都必须至少调用一次工具（getServerTime 或 calculate），禁止不调用工具就直接回答。回答用中文。"}
+  HTTP     : 200  (1932 ms)
+  response : {"sessionId":"vc5-tools","reply":"144 除以 12 的结果是 **12**。","model":"deepseek-flash","historySize":10,"toolCallsSoFar":6}
+
+  本轮新增工具调用次数: 1
+
+--- 第 6 轮 ---
+POST http://127.0.0.1:18302/api/chat
+  request  : {"sessionId":"vc5-tools","message":"第 6 轮：请再次调用 getServerTime，然后告诉我结果。","system":"你是工具调用验证助手。硬性规则：每一轮回答前都必须至少调用一次工具（getServerTime 或 calculate），禁止不调用工具就直接回答。回答用中文。"}
+  HTTP     : 200  (1748 ms)
+  response : {"sessionId":"vc5-tools","reply":"服务器当前时间是 **2026-10-06 19:42:08**。","model":"deepseek-flash","historySize":12,"toolCallsSoFar":7}
+
+  本轮新增工具调用次数: 1
+
+--- 第 7 轮 ---
+POST http://127.0.0.1:18302/api/chat
+  request  : {"sessionId":"vc5-tools","message":"第 7 轮：请调用 calculate 计算 9 乘 9，并说明本轮是第几轮对话。","system":"你是工具调用验证助手。硬性规则：每一轮回答前都必须至少调用一次工具（getServerTime 或 calculate），禁止不调用工具就直接回答。回答用中文。"}
+  HTTP     : 200  (2103 ms)
+  response : {"sessionId":"vc5-tools","reply":"9 乘 9 的结果是 **81**。\n\n本轮是第 **7** 轮对话。","model":"deepseek-flash","historySize":14,"toolCallsSoFar":8}
+
+  本轮新增工具调用次数: 1
+
+GET /api/dev/tool-stats（7 轮累计）
+HTTP 200  {"getServerTime":3,"calculate":5,"total":8}
+
+7 轮 HTTP 状态序列: 200, 200, 200, 200, 200, 200, 200
+是否出现 400: 否
+是否出现非 200: 否
+7 轮新增工具调用总次数: 8
+
+$ memurai-cli LLEN chat:mem:vc5-tools
+14
+
+$ memurai-cli TTL chat:mem:vc5-tools
+21600
+
+====================================================================================================
+### 补充：官方窗口裁剪落到 Redis LIST   （源文件：window-supplement-raw.txt）
+====================================================================================================
+=== 补充证据：官方 MessageWindowChatMemory 窗口裁剪落到 Redis LIST ===
+
+GET http://127.0.0.1:18302/api/dev/info
+HTTP 200  {"port":"18302","pid":6444,"ttlSeconds":21600,"redisKeyPattern":"chat:mem:<conversationId>","conversationIds":["vc1-s1","vc3-shared","vc4-restart","vc5-tools","roundtrip-check"],"toolCalls":0}
+
+POST http://127.0.0.1:18302/api/chat
+  request  : {"sessionId":"window-check","message":"第 1 轮：请记住编号 1。只回复“已记住”。"}
+  HTTP     : 200  (948 ms)
+  response : {"sessionId":"window-check","reply":"已记住","model":"deepseek-flash","historySize":2,"toolCallsSoFar":0}
+
+$ memurai-cli LLEN chat:mem:window-check
+2
+
+POST http://127.0.0.1:18302/api/chat
+  request  : {"sessionId":"window-check","message":"第 2 轮：请记住编号 2。只回复“已记住”。"}
+  HTTP     : 200  (1272 ms)
+  response : {"sessionId":"window-check","reply":"已记住","model":"deepseek-flash","historySize":4,"toolCallsSoFar":0}
+
+$ memurai-cli LLEN chat:mem:window-check
+4
+
+POST http://127.0.0.1:18302/api/chat
+  request  : {"sessionId":"window-check","message":"第 3 轮：请记住编号 3。只回复“已记住”。"}
+  HTTP     : 200  (828 ms)
+  response : {"sessionId":"window-check","reply":"已记住","model":"deepseek-flash","historySize":4,"toolCallsSoFar":0}
+
+$ memurai-cli LLEN chat:mem:window-check
+4
+
+GET history（应只剩窗口内的最后若干条）
+HTTP 200
+[
+  "USER: 第 2 轮：请记住编号 2。只回复“已记住”。",
+  "ASSISTANT: 已记住",
+  "USER: 第 3 轮：请记住编号 3。只回复“已记住”。",
+  "ASSISTANT: 已记住"
+]
+
+====================================================================================================
+### 补充：工具消息往返自检   （源文件：roundtrip-raw.txt）
+====================================================================================================
+=== 工具消息往返自检（AssistantMessage.toolCalls / ToolResponseMessage.toolResponses 经 Redis 往返）===
+
+POST http://127.0.0.1:18302/api/dev/roundtrip?sessionId=roundtrip-check
+HTTP 200
+{
+  "identical": true,
+  "differences": [],
+  "originalSize": 4,
+  "readBackSize": 4,
+  "assistantToolCalls": [
+    {
+      "id": "call_1",
+      "type": "function",
+      "name": "getServerTime",
+      "arguments": "{}"
+    },
+    {
+      "id": "call_2",
+      "type": "function",
+      "name": "calculate",
+      "arguments": "{\"a\":6,\"operator\":\"multiply\",\"b\":7}"
+    }
+  ],
+  "toolResponses": [
+    {
+      "id": "call_1",
+      "name": "getServerTime",
+      "responseData": "2026-10-06 12:00:00"
+    },
+    {
+      "id": "call_2",
+      "name": "calculate",
+      "responseData": "6 multiply 7 = 42"
+    }
+  ],
+  "originalJson": [
+    "{\"type\":\"USER\",\"content\":\"往返自检：请先查时间再算 6*7\",\"metadata\":{\"messageType\":\"USER\",\"spikeTimestamp\":\"2026-10-06T11:42:17.078695700Z\"},\"timestamp\":\"2026-10-06T11:42:17.078695700Z\"}",
+    "{\"type\":\"ASSISTANT\",\"content\":\"\",\"metadata\":{\"messageType\":\"ASSISTANT\",\"spikeTimestamp\":\"2026-10-06T11:42:17.078695700Z\"},\"toolCalls\":[{\"id\":\"call_1\",\"type\":\"function\",\"name\":\"getServerTime\",\"arguments\":\"{}\"},{\"id\":\"call_2\",\"type\":\"function\",\"name\":\"calculate\",\"arguments\":\"{\\\"a\\\":6,\\\"operator\\\":\\\"multiply\\\",\\\"b\\\":7}\"}],\"timestamp\":\"2026-10-06T11:42:17.078695700Z\"}",
+    "{\"type\":\"TOOL\",\"content\":\"\",\"metadata\":{\"messageType\":\"TOOL\",\"spikeTimestamp\":\"2026-10-06T11:42:17.078695700Z\"},\"toolResponses\":[{\"id\":\"call_1\",\"name\":\"getServerTime\",\"responseData\":\"2026-10-06 12:00:00\"},{\"id\":\"call_2\",\"name\":\"calculate\",\"responseData\":\"6 multiply 7 = 42\"}],\"timestamp\":\"2026-10-06T11:42:17.078695700Z\"}",
+    "{\"type\":\"ASSISTANT\",\"content\":\"现在是 2026-10-06 12:00:00，6 × 7 = 42。\",\"metadata\":{\"messageType\":\"ASSISTANT\",\"spikeTimestamp\":\"2026-10-06T11:42:17.078695700Z\"},\"timestamp\":\"2026-10-06T11:42:17.078695700Z\"}"
+  ],
+  "readBackJson": [
+    "{\"type\":\"USER\",\"content\":\"往返自检：请先查时间再算 6*7\",\"metadata\":{\"messageType\":\"USER\",\"spikeTimestamp\":\"2026-10-06T11:42:17.076697200Z\"},\"timestamp\":\"2026-10-06T11:42:17.076697200Z\"}",
+    "{\"type\":\"ASSISTANT\",\"content\":\"\",\"metadata\":{\"messageType\":\"ASSISTANT\",\"spikeTimestamp\":\"2026-10-06T11:42:17.076697200Z\"},\"toolCalls\":[{\"id\":\"call_1\",\"type\":\"function\",\"name\":\"getServerTime\",\"arguments\":\"{}\"},{\"id\":\"call_2\",\"type\":\"function\",\"name\":\"calculate\",\"arguments\":\"{\\\"a\\\":6,\\\"operator\\\":\\\"multiply\\\",\\\"b\\\":7}\"}],\"timestamp\":\"2026-10-06T11:42:17.076697200Z\"}",
+    "{\"type\":\"TOOL\",\"content\":\"\",\"metadata\":{\"messageType\":\"TOOL\",\"spikeTimestamp\":\"2026-10-06T11:42:17.077696600Z\"},\"toolResponses\":[{\"id\":\"call_1\",\"name\":\"getServerTime\",\"responseData\":\"2026-10-06 12:00:00\"},{\"id\":\"call_2\",\"name\":\"calculate\",\"responseData\":\"6 multiply 7 = 42\"}],\"timestamp\":\"2026-10-06T11:42:17.077696600Z\"}",
+    "{\"type\":\"ASSISTANT\",\"content\":\"现在是 2026-10-06 12:00:00，6 × 7 = 42。\",\"metadata\":{\"messageType\":\"ASSISTANT\",\"spikeTimestamp\":\"2026-10-06T11:42:17.077696600Z\"},\"timestamp\":\"2026-10-06T11:42:17.077696600Z\"}"
+  ],
+  "redisKey": "chat:mem:roundtrip-check"
+}
+
+$ memurai-cli TYPE chat:mem:roundtrip-check
+list
+
+$ memurai-cli LLEN chat:mem:roundtrip-check
+4
+
+$ memurai-cli LRANGE chat:mem:roundtrip-check 0 -1
+{"type":"USER","content":"往返自检：请先查时间再算 6*7","metadata":{"messageType":"USER","spikeTimestamp":"2026-10-06T11:42:17.076697200Z"},"timestamp":"2026-10-06T11:42:17.076697200Z"}
+{"type":"ASSISTANT","content":"","metadata":{"messageType":"ASSISTANT","spikeTimestamp":"2026-10-06T11:42:17.076697200Z"},"toolCalls":[{"id":"call_1","type":"function","name":"getServerTime","arguments":"{}"},{"id":"call_2","type":"function","name":"calculate","arguments":"{\"a\":6,\"operator\":\"multiply\",\"b\":7}"}],"timestamp":"2026-10-06T11:42:17.076697200Z"}
+{"type":"TOOL","content":"","metadata":{"messageType":"TOOL","spikeTimestamp":"2026-10-06T11:42:17.077696600Z"},"toolResponses":[{"id":"call_1","name":"getServerTime","responseData":"2026-10-06 12:00:00"},{"id":"call_2","name":"calculate","responseData":"6 multiply 7 = 42"}],"timestamp":"2026-10-06T11:42:17.077696600Z"}
+{"type":"ASSISTANT","content":"现在是 2026-10-06 12:00:00，6 × 7 = 42。","metadata":{"messageType":"ASSISTANT","spikeTimestamp":"2026-10-06T11:42:17.077696600Z"},"timestamp":"2026-10-06T11:42:17.077696600Z"}
+
+====================================================================================================
+### 补充：会话 id 索引的惰性清理   （源文件：prune-supplement-raw.txt）
+====================================================================================================
+=== 补充证据：会话 id 索引的惰性清理（findConversationIds）===
+
+POST /api/dev/ttl?seconds=3
+{"ttlSeconds":3}
+
+POST http://127.0.0.1:18302/api/chat
+  request  : {"sessionId":"prune-probe","message":"hi"}
+  response : {"sessionId":"prune-probe","reply":"你好呀！😊 又见面了～...","model":"deepseek-flash","historySize":2,"toolCallsSoFar":0}
+
+$ memurai-cli SMEMBERS chat:mem:__ids__
+prune-probe
+
+等待 6 秒（> TTL 3 秒）
+
+$ memurai-cli EXISTS chat:mem:prune-probe
+0
+
+$ memurai-cli SMEMBERS chat:mem:__ids__      （清理前：过期 id 仍留在索引里）
+prune-probe
+
+GET http://127.0.0.1:18302/api/dev/info       （内部调用 findConversationIds）
+HTTP 200  {"port":"18302","pid":24336,"ttlSeconds":3,"redisKeyPattern":"chat:mem:<conversationId>","conversationIds":[],"toolCalls":0}
+
+$ memurai-cli SMEMBERS chat:mem:__ids__      （清理后：过期 id 已被剔除）
+（空）
+
+说明：主键 chat:mem:<conversationId> 由 TTL 自动过期；索引键 chat:mem:__ids__ 不做逐会话 TTL，
+过期 id 在下次 findConversationIds() 调用时被剔除。故索引不会无限增长，代价是"过期后到下次
+读取之间"索引里会短暂残留已失效的 id。
