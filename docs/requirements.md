@@ -1,3 +1,5 @@
+> ⚠️ 本文档为 combined 基座分支遗留参考件（描述对象为源分支 v1.0 实现）。如与 docs/adr/ 决策（DC-01~13、DECISION-CARDS）冲突，一律以决策为准（例：本文含虚拟线程相关表述，已被 DC-12 禁用）。
+
 # 需求规格说明书
 
 **项目**：ai-example-claude-opus-5.5  
