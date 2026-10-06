@@ -111,15 +111,15 @@
 - **推翻条件**：M1 期间出现 H2 不支撑的需求（含提前需要真实多实例——直接切 MySQL 并激活多实例验收包）。
 - **主笔**：Kimi K3　**复核**：GLM-5.3（Challenger 通过）　**日期**：2026-10-06
 
-## ADR-10 前端架构：Vue 3 + TS 重写（deepseek 前端为功能蓝本）
+## ADR-10 前端架构：Vue 3 + TS 重写（主蓝本 kimi-k3，部件级吸收 glm/deepseek）
 
-- **选项**：A. deepseek 前端整目录替换 + 原位 TS 化／B. 按 deepseek 功能蓝本 TS 重写／C. 保留 combined 前端
-- **选择**：B（蓝本重写）；workspaceBus + workspaceContract 契约层原样吸收（双通路解耦，DC-06④）
-- **证据等级**：【实测】（Q9：deepseek 前端纯 JS——10 js/0 ts/11 vue；DC-05 TS 约束；Q3：combined 前端与后端存在 isKey/key 契约 bug；V3 佐证 deepseek 前端功能通路完整）
-- **理由**：DC-05 禁纯 JS，原位改写 11 个 vue + 10 个 js 的 TS 化成本与重写相当，重写可得干净类型设计；契约层是 DC-06④ 的载体，必须保留其接口形态；Q3 的契约 bug 在重写时以类型定义根治。
-- **被否决方案的坑**：A 留下 JS→TS 混杂债；C 继承契约 bug 且功能落后（Q3/Q4）。回归用例：双向导走查 + AI 联动 + 裁剪性验证（去 AI 栏业务可用）。
-- **推翻条件**：S4.4 评估重写工作量超阈值（>5 人日）时回退 A 并分期 TS 化。
-- **主笔**：Kimi K3　**复核**：GLM-5.3（Challenger 通过）　**日期**：2026-10-06
+- **选项**：A. deepseek 前端整目录替换 + 原位 TS 化／B. 单一蓝本 TS 重写／C. 保留 combined 前端／D. 【DC-13 修订】主蓝本 kimi-k3 + 部件级吸收
+- **选择**：D——**主蓝本 kimi-k3**（AI 面板含思考链/工具卡/HITL 双路径、契约窄接口 stores/workspace.js + registerPageHandler、sessionStorage 镜像+后端对账的刷新恢复、样式规范）；**吸收 glm-5.3**：Excel 工具层（动态校验+JSZip）+ SpreadJS 中文 Culture、向导壳/体分离结构、构建工程化（manualChunks）；**吸收 deepseek**：workspaceBus 事件协议形态、SSE 进度通道（替换 kimi 的 1s 轮询，对齐 ADR-6）、配置定义管理页与数据浏览页（功能面）、任务中心自动刷新
+- **证据等级**：【实测】（FE-1 三前端侦察 file:line 级：三前端均纯 JS 0 ts；kimi AI 协议最完整、glm Excel 层最厚、deepseek 功能面最全但样式债最重 183 行 scoped CSS）+【指令】DC-13（业务方复议）
+- **理由**：AI 面板与契约层是前端最难重建且与后端 ADR-2/DC-06/SP-02 咬合最深的部分，kimi-k3 最齐；glm 的 Excel/Culture/工程化与 deepseek 的 SSE 进度/两功能页为可移植部件；三端均纯 JS，任何选择都是重写，故按部件优劣组合而非整端搬运。
+- **被否决方案的坑**：A/C 继承契约 bug 与样式债（Q3/Q4/FE-1）；以 deepseek 整端为蓝本会带回缺失依赖（icons/jszip）与 SpreadJS 无中文 Culture 问题。回归用例：双向导走查 + AI 联动（HITL 双路径）+ 刷新恢复 + 裁剪性验证（去 AI 栏业务可用）。
+- **推翻条件**：S4.4 实施中发现 kimi-k3 蓝本存在侦察未覆盖的硬缺陷（DC-13 推翻条件同步）。
+- **主笔**：Kimi K3　**复核**：GLM-5.3（Challenger 通过）　**日期**：2026-10-06（DC-13 修订 2026-10-07）
 
 ## ADR-11 安全与审计 ~~表单登录 + RBAC 3 角色 + 审计从简~~ 【已推翻——DC-10】
 
