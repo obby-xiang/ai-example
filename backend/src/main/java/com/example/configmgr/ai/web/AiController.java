@@ -2,15 +2,18 @@ package com.example.configmgr.ai.web;
 
 import com.example.configmgr.ai.config.AiAvailability;
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.config.RedisAvailability;
 import com.example.configmgr.ai.gate.ConfirmGate;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
-import com.example.configmgr.ai.run.AiChatService;
+import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.PendingToolCall;
+import com.example.configmgr.ai.run.ResilientChatService;
 import com.example.configmgr.ai.run.ResumeService;
 import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.run.SseChatEmitter;
+import com.example.configmgr.ai.run.StartupResumeRunner;
 import com.example.configmgr.ai.session.SessionGate;
 import com.example.configmgr.common.ApiResponse;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -76,9 +79,11 @@ public class AiController {
 
 	private final AiAvailability availability;
 
-	private final ObjectProvider<AiChatService> chatService;
+	private final ObjectProvider<ResilientChatService> chatService;
 
 	private final ObjectProvider<ResumeService> resumeService;
+
+	private final ObjectProvider<StartupResumeRunner> startupResumeRunner;
 
 	private final ChatMemory chatMemory;
 
@@ -92,6 +97,10 @@ public class AiController {
 
 	private final RunRegistry runRegistry;
 
+	private final CancellationRegistry cancellations;
+
+	private final RedisAvailability redisAvailability;
+
 	private final ThreadPoolTaskExecutor aiRunExecutor;
 
 	private final ObjectMapper objectMapper;
@@ -100,21 +109,25 @@ public class AiController {
 
 	private final Environment environment;
 
-	public AiController(AiAvailability availability, ObjectProvider<AiChatService> chatService,
-			ObjectProvider<ResumeService> resumeService, ChatMemory chatMemory,
-			ChatMemoryRepository chatMemoryRepository, SessionGate sessionGate, ConfirmGate confirmGate,
-			RunStore runStore, RunRegistry runRegistry,
+	public AiController(AiAvailability availability, ObjectProvider<ResilientChatService> chatService,
+			ObjectProvider<ResumeService> resumeService, ObjectProvider<StartupResumeRunner> startupResumeRunner,
+			ChatMemory chatMemory, ChatMemoryRepository chatMemoryRepository, SessionGate sessionGate,
+			ConfirmGate confirmGate, RunStore runStore, RunRegistry runRegistry, CancellationRegistry cancellations,
+			RedisAvailability redisAvailability,
 			@Qualifier("aiRunExecutor") ThreadPoolTaskExecutor aiRunExecutor, ObjectMapper objectMapper,
 			AiProperties properties, Environment environment) {
 		this.availability = availability;
 		this.chatService = chatService;
 		this.resumeService = resumeService;
+		this.startupResumeRunner = startupResumeRunner;
 		this.chatMemory = chatMemory;
 		this.chatMemoryRepository = chatMemoryRepository;
 		this.sessionGate = sessionGate;
 		this.confirmGate = confirmGate;
 		this.runStore = runStore;
 		this.runRegistry = runRegistry;
+		this.cancellations = cancellations;
+		this.redisAvailability = redisAvailability;
 		this.aiRunExecutor = aiRunExecutor;
 		this.objectMapper = objectMapper;
 		this.properties = properties;
@@ -125,12 +138,17 @@ public class AiController {
 
 	@PostMapping(value = "/chat", produces = { MediaType.TEXT_EVENT_STREAM_VALUE, MediaType.APPLICATION_JSON_VALUE })
 	public ResponseEntity<?> chat(@RequestBody(required = false) AiChatRequest request) {
-		AiChatService service = this.chatService.getIfAvailable();
+		ResilientChatService service = this.chatService.getIfAvailable();
 		if (!this.availability.isAvailable() || service == null) {
 			return json(HttpStatus.SERVICE_UNAVAILABLE, unavailable());
 		}
+		// R4：Redis 不可用时在**开流之前**快速失败（≤ 一次 PING 的超时，见 RedisAvailability）。
+		// 顺序放在参数校验之后：参数错就该报 400，不该被 Redis 状态遮住。
 		if (request == null || !StringUtils.hasText(request.sessionId()) || !StringUtils.hasText(request.message())) {
 			return json(HttpStatus.BAD_REQUEST, Map.of("code", "BAD_REQUEST", "message", "sessionId 与 message 均为必填"));
+		}
+		if (!this.redisAvailability.isAvailable()) {
+			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
 		}
 
 		String sessionId = request.sessionId();
@@ -250,8 +268,7 @@ public class AiController {
 		SseEmitter emitter = new SseEmitter(budgetMillis());
 		SseChatEmitter out = this.runRegistry.of(runId);
 		int replayed = out.replayTo(emitter, false);
-		boolean terminal = RunSnapshot.DONE.equals(snapshot.getStatus())
-				|| RunSnapshot.FAILED.equals(snapshot.getStatus());
+		boolean terminal = isTerminal(snapshot.getStatus());
 		if (terminal) {
 			out.complete(emitter);
 		}
@@ -260,6 +277,80 @@ public class AiController {
 		}
 		log.debug("reattach runId={} status={} 回放帧数={}", runId, snapshot.getStatus(), replayed);
 		return ResponseEntity.ok(emitter);
+	}
+
+	/** 终态判定（含取消）：DONE / FAILED / CANCELLED 三种都不再产帧。 */
+	private static boolean isTerminal(String status) {
+		return RunSnapshot.DONE.equals(status) || RunSnapshot.FAILED.equals(status)
+				|| RunSnapshot.CANCELLED.equals(status);
+	}
+
+	// ── 取消（韧性棒：ADR-8 修正③） ────────────────────────────────────────
+
+	/**
+	 * 取消一轮对话：{@code POST /api/ai/cancel/{runId}}。
+	 *
+	 * <p>
+	 * 权威态写进 Redis（{@code ai:cancel:<runId>}），因此跨实例/跨进程同样生效；
+	 * 同进程时还会当场唤醒挂起闸门与流式看门狗（加速，不改变语义）。
+	 * 该轮随即以 {@code done{cancelled:true}} 收尾，快照转 {@code CANCELLED}，
+	 * 未决的挂起条目转 {@code CANCELLED}（重启续跑不会把它执行掉）。
+	 *
+	 * <p>
+	 * 幂等：重复取消返回同一事实（{@code alreadyCancelled=true}）。不依赖 AI key
+	 * （取消不该因为 key 缺失而不可用）。
+	 */
+	@PostMapping("/cancel/{runId}")
+	public ResponseEntity<?> cancel(@PathVariable String runId) {
+		RunSnapshot snapshot = this.runStore.get(runId);
+		Map<String, Object> before = this.cancellations.status(runId);
+		CancellationRegistry.CancelResult result = this.cancellations.cancel(runId, this.runStore.instanceId());
+		Map<String, Object> body = new LinkedHashMap<>();
+		body.put("runId", runId);
+		body.put("cancelled", true);
+		body.put("alreadyCancelled", Boolean.TRUE.equals(before.get("redisFlag"))
+				|| Boolean.TRUE.equals(before.get("localFlag")));
+		body.put("redisFlagWritten", result.redisWritten());
+		body.put("wokeInProcess", result.wokeInProcess());
+		body.put("cancelKey", this.cancellations.keyFor(runId));
+		body.put("degraded", this.cancellations.degraded());
+		body.put("runExists", snapshot != null);
+		body.put("statusBeforeCancel", snapshot == null ? null : snapshot.getStatus());
+		body.put("storedBy", this.runStore.instanceId());
+		body.put("note", "取消以 Redis 标志为准；运行中的轮次会在事件边界以 done{cancelled:true} 收尾");
+		return ResponseEntity.ok(body);
+	}
+
+	/** 取消标志现状（只读，取证用）。 */
+	@GetMapping("/cancel/{runId}")
+	public ApiResponse<Map<String, Object>> cancelStatus(@PathVariable String runId) {
+		return ApiResponse.ok(this.cancellations.status(runId));
+	}
+
+	// ── 启动自动续跑（N3/N8） ───────────────────────────────────────────────
+
+	/** 最近一次启动扫描的结果（含跳过原因）；未开启开关时返回 scanned=false + 原因。 */
+	@GetMapping("/startup-resume")
+	public ApiResponse<Map<String, Object>> startupResume() {
+		StartupResumeRunner runner = this.startupResumeRunner.getIfAvailable();
+		if (runner == null) {
+			return ApiResponse.ok(Map.of("scanned", false, "reason", "AI_UNAVAILABLE",
+					"message", "无 AI key，模型侧未装配，启动自动续跑不参与"));
+		}
+		return ApiResponse.ok(runner.lastScan());
+	}
+
+	/**
+	 * 手工触发一次启动口径的扫描（运维用）：<b>强制重扫</b>（自动扫描每实例只跑一次，
+	 * 于是"进程起来 20 秒后才发现某个轮次超龄成僵尸"这种情形需要人来踢一脚）。
+	 */
+	@PostMapping("/startup-resume/scan")
+	public ApiResponse<Map<String, Object>> startupResumeScan() {
+		StartupResumeRunner runner = this.startupResumeRunner.getIfAvailable();
+		if (runner == null) {
+			return ApiResponse.ok(Map.of("scanned", false, "reason", "AI_UNAVAILABLE"));
+		}
+		return ApiResponse.ok(runner.scan(true));
 	}
 
 	@GetMapping("/runs")
@@ -286,10 +377,15 @@ public class AiController {
 		if (!this.availability.isAvailable() || service == null) {
 			return json(HttpStatus.SERVICE_UNAVAILABLE, unavailable());
 		}
+		// R4：续跑同样必须"快速失败"（它读快照/台账/待决条目，全是 Redis 操作）
+		if (!this.redisAvailability.isAvailable()) {
+			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
+		}
 		ResumeService.ResumeResult result = service.resume(runId);
 		return switch (result.outcome()) {
 			case ACCEPTED -> ResponseEntity.accepted().contentType(MediaType.APPLICATION_JSON).body(result.body());
-			case ALREADY_DONE -> ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body(result.body());
+			case ALREADY_DONE, ALREADY_CANCELLED ->
+				ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body(result.body());
 			case NOT_FOUND -> json(HttpStatus.NOT_FOUND, result.body());
 			case POOL_SATURATED -> json(HttpStatus.SERVICE_UNAVAILABLE, result.body());
 			default -> json(HttpStatus.CONFLICT, result.body());
@@ -347,6 +443,18 @@ public class AiController {
 		body.put("activeSuspendGates", this.confirmGate.pendingGates());
 		body.put("heldSessions", this.sessionGate.heldSessions());
 		body.put("sessionLockRenewals", this.sessionGate.renewals());
+		body.put("resilience", Map.of(
+				"firstByteTimeout", String.valueOf(this.properties.getResilience().getFirstByteTimeout()),
+				"interEventTimeout", String.valueOf(this.properties.getResilience().getInterEventTimeout()),
+				"maxAttempts", this.properties.getResilience().getMaxAttempts(),
+				"totalBudget", String.valueOf(this.properties.getResilience().getTotalBudget())));
+		body.put("resumeOnStartup", this.properties.getResume().isOnStartup());
+		// 探活态必须"现算"：describe() 只回读上次结果，运维看 /health 时要能立刻看到 Redis 是否可用
+		// （代价 = 一次带短超时的 PING，不可用时 ≤ spring.data.redis.timeout）。
+		this.redisAvailability.isAvailable();
+		body.put("redis", this.redisAvailability.describe());
+		body.put("cancellations", Map.of("registeredRuns", this.cancellations.registeredRuns(),
+				"redisPolls", this.cancellations.polls(), "degraded", this.cancellations.degraded()));
 		body.put("instanceId", this.runStore.instanceId());
 		body.put("checkedAt", Instant.now().toString());
 		if (!this.availability.isAvailable()) {
@@ -360,6 +468,15 @@ public class AiController {
 
 	private Map<String, Object> unavailable() {
 		return Map.of("code", this.availability.code(), "message", this.availability.reason());
+	}
+
+	/** R4：Redis 不可用的 503 体（带探活事实，便于前端与排障区分"没 key"与"没 Redis"）。 */
+	private Map<String, Object> redisUnavailable() {
+		Map<String, Object> body = new LinkedHashMap<>();
+		body.put("code", RedisAvailability.code());
+		body.put("message", this.redisAvailability.reason());
+		body.put("redis", this.redisAvailability.describe());
+		return body;
 	}
 
 	private Map<String, Object> poolSaturated(String runId) {

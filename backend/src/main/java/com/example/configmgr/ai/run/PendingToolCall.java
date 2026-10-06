@@ -32,6 +32,9 @@ public class PendingToolCall {
 	/** 前端工具结果已回灌。 */
 	public static final String FRONTEND_RESULT = "FRONTEND_RESULT";
 
+	/** 本轮被用户取消（未执行；取消即落库，跨进程续跑不会把它当"待外部输入"）。 */
+	public static final String CANCELLED = "CANCELLED";
+
 	/** 后端工具已执行完成（无外部等待）。 */
 	public static final String EXECUTED = "EXECUTED";
 
@@ -67,6 +70,13 @@ public class PendingToolCall {
 	/** 执行者实例标识 —— 跨进程"重放与否"的直接判据。 */
 	private String executedBy;
 
+	/**
+	 * 认领时刻（N5）：执行<b>之前</b>由 {@link RunStore#claimExecution} 写入，
+	 * 与 {@link #executedAtMs}（执行完成时刻）分列，不再互相覆写。
+	 */
+	private long claimedAtMs;
+
+	/** 执行完成时刻（认领先于执行，故 {@code claimedAtMs ≤ executedAtMs}）。 */
 	private long executedAtMs;
 
 	private long requestedAtMs;
@@ -89,6 +99,7 @@ public class PendingToolCall {
 		out.put("resultText", this.resultText);
 		out.put("executed", this.executed);
 		out.put("executedBy", this.executedBy);
+		out.put("claimedAtMs", this.claimedAtMs);
 		out.put("executedAtMs", this.executedAtMs);
 		out.put("requestedAtMs", this.requestedAtMs);
 		out.put("resolvedAtMs", this.resolvedAtMs);

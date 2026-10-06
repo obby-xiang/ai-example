@@ -35,6 +35,9 @@ public class RunSnapshot {
 
 	public static final String FAILED = "FAILED";
 
+	/** 被用户取消（终态：不再续跑，终帧为 {@code done{cancelled:true}}）。 */
+	public static final String CANCELLED = "CANCELLED";
+
 	private String runId;
 
 	private String sessionId;
@@ -44,6 +47,12 @@ public class RunSnapshot {
 
 	/** 已完成的工具轮数（挂起即 +1，用于"轮数上限"类判定与取证）。 */
 	private int round;
+
+	/** 本轮的尝试次数（韧性棒：&gt;1 说明发生过断流重试）。 */
+	private int attempts;
+
+	/** 是否由用户取消（终态判据之一，与 {@link #CANCELLED} 同步设置）。 */
+	private boolean cancelled;
 
 	/** 完整请求历史（每条一个 {@code MessageJsonCodec} JSON 字符串）。 */
 	private List<String> messageJson = new ArrayList<>();
@@ -78,6 +87,8 @@ public class RunSnapshot {
 		out.put("sessionId", this.sessionId);
 		out.put("status", this.status);
 		out.put("round", this.round);
+		out.put("attempts", this.attempts);
+		out.put("cancelled", this.cancelled);
 		out.put("messageCount", this.messageJson.size());
 		out.put("inFlight", this.inFlightToolCalls.size());
 		out.put("assistantContent", this.assistantContent);

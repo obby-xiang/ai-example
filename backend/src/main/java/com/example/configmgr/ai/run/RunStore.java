@@ -4,6 +4,7 @@ import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.Message;
@@ -251,10 +252,14 @@ public class RunStore {
 	 *
 	 * <p>
 	 * {@code HSETNX} 语义：同一个 {@code toolCallId} 全集群只可能有一个实例认领成功，
-	 * 且认领发生在<b>执行之前</b>。认领成功即把 {@code executed=true / executedBy / executedAtMs}
+	 * 且认领发生在<b>执行之前</b>。认领成功即把 {@code claimedAtMs / executed=true / executedBy}
 	 * 写进待决条目 —— 于是"放行后进程死亡 → 新实例续跑"这一窗口里，新实例只会看到
 	 * {@code APPROVED + executed=false}（此时可安全补执行），而"已在执行中"的状态
 	 * 永远不会被第二个实例当作"未执行"再执行一次。
+	 *
+	 * <p>
+	 * <b>N5（本棒）</b>：时间戳分列 —— {@code claimedAtMs} = 认领时刻（执行<b>前</b>），
+	 * {@code executedAtMs} = 执行完成时刻（由调用方在执行返回后写），两者不再互相覆写。
 	 *
 	 * @return true = 本次由当前实例认领（可以执行）；false = 已被他实例认领（<b>不得</b>执行）
 	 */
@@ -265,9 +270,9 @@ public class RunStore {
 		if (won) {
 			PendingToolCall pending = pending(runId, toolCallId);
 			if (pending != null) {
+				pending.setClaimedAtMs(System.currentTimeMillis());
 				pending.setExecuted(true);
 				pending.setExecutedBy(executedBy);
-				pending.setExecutedAtMs(System.currentTimeMillis());
 				putPending(runId, pending);
 			}
 		}
@@ -338,9 +343,61 @@ public class RunStore {
 		return out;
 	}
 
+	/**
+	 * 自 {@code sinceMs} 起新增的台账条数（韧性棒的重试副作用判定口径：<b>本次尝试</b>内是否有
+	 * 真实执行完成）。用"执行完成时刻"（{@code atMs}）而非认领时刻，是因为"执行已完成"才是
+	 * 不可撤销的副作用；仍在执行中的窗口由 {@link #claimedBy} 与
+	 * {@code ToolActivityBeacon} 覆盖。
+	 */
+	public int ledgerCountSince(String runId, long sinceMs) {
+		int count = 0;
+		for (Map<String, Object> record : ledger(runId)) {
+			Object atMs = record.get("atMs");
+			if (atMs instanceof Number number && number.longValue() >= sinceMs) {
+				count++;
+			}
+		}
+		return count;
+	}
+
+	/**
+	 * 取消落地：把该轮仍未决（{@code PENDING}）的挂起条目一次性标为
+	 * {@link PendingToolCall#CANCELLED} 且 {@code executed=false}。
+	 *
+	 * <p>
+	 * 为什么重要：取消之后若进程死亡、又被启动续跑拾起，未决条目仍会躺在 Redis 里 ——
+	 * 若状态还是 {@code PENDING} 而续跑把它们当"待外部输入"，就会永久卡住（或更糟：
+	 * 被误当"未执行的后端工具"补执行）。取消即落库，跨进程也生效。
+	 *
+	 * @return 被改写的条目数
+	 */
+	public int cancelPendings(String runId) {
+		int changed = 0;
+		for (PendingToolCall pending : pendings(runId)) {
+			if (!PendingToolCall.PENDING.equals(pending.getStatus())) {
+				continue;
+			}
+			pending.setStatus(PendingToolCall.CANCELLED);
+			pending.setReason("RUN_CANCELLED");
+			pending.setExecuted(false);
+			pending.setResolvedAtMs(System.currentTimeMillis());
+			pending.setResultText("本轮对话已被用户取消，该工具未执行。");
+			putPending(runId, pending);
+			changed++;
+		}
+		return changed;
+	}
+
 	// ── 帧外置（重挂回放） ──────────────────────────────────────────────────
 
+	/**
+	 * 帧落档。写入时给帧补一个 <b>atMs</b> 时间戳（帧里没有才补）——
+	 * 它让"这一轮最近一次活动是什么时候"有了**可跨进程**的判据：
+	 * 流式 delta、挂起心跳、工具帧全都经这里落档，于是 R3 的僵尸判据不必只看快照
+	 * （快照只在工具落定/挂起时刷新，长流式轮次会显得"很久没动"）。
+	 */
 	public void appendEvent(String runId, Map<String, Object> frame) {
+		frame.putIfAbsent("atMs", System.currentTimeMillis());
 		try {
 			this.redis.opsForList().rightPush(eventsKey(runId), this.mapper.writeValueAsString(frame));
 			this.redis.opsForList().trim(eventsKey(runId), -EVENT_WINDOW, -1);
@@ -349,6 +406,29 @@ public class RunStore {
 		catch (Exception ex) {
 			// 帧留档失败不影响本轮运行（外置是"更耐久"，不是"更正确"的前提）
 			log.debug("外置 SSE 帧失败 runId={} type={}: {}", runId, frame.get("type"), ex.getMessage());
+		}
+	}
+
+	/**
+	 * 该轮最近一次活动时刻（毫秒）：取 {@code ai:events:<runId>} 最后一帧的 {@code atMs}。
+	 *
+	 * <p>
+	 * 只读最后一帧（{@code LRANGE key -1 -1}），不整表回放 —— 这个方法会在"每轮的可续跑性判定"
+	 * 里被调用。无帧（或旧格式帧没有 atMs）返回 0，调用方据此回落到快照的 {@code updatedAtMs}。
+	 */
+	public long lastEventAtMs(String runId) {
+		try {
+			List<String> tail = this.redis.opsForList().range(eventsKey(runId), -1, -1);
+			if (tail == null || tail.isEmpty()) {
+				return 0L;
+			}
+			JsonNode node = this.mapper.readTree(tail.get(0));
+			JsonNode atMs = node.get("atMs");
+			return atMs == null ? 0L : atMs.asLong();
+		}
+		catch (Exception ex) {
+			log.debug("读取最近活动时刻失败 runId={}：{}", runId, ex.getMessage());
+			return 0L;
 		}
 	}
 

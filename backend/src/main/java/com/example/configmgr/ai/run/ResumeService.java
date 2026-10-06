@@ -67,7 +67,7 @@ public class ResumeService {
 
 	private final MessageJsonCodec codec;
 
-	private final AiChatService chatService;
+	private final ResilientChatService chatService;
 
 	private final SpToolCallingManager toolCallingManager;
 
@@ -77,12 +77,14 @@ public class ResumeService {
 
 	private final AiProperties properties;
 
+	private final CancellationRegistry cancellations;
+
 	/** 进程内续跑互斥（Redis 不可用时仍是最后一道闸）。 */
 	private final Map<String, Boolean> resuming = new ConcurrentHashMap<>();
 
-	public ResumeService(RunStore store, RunRegistry registry, MessageJsonCodec codec, AiChatService chatService,
+	public ResumeService(RunStore store, RunRegistry registry, MessageJsonCodec codec, ResilientChatService chatService,
 			SpToolCallingManager toolCallingManager, @Qualifier("aiRunExecutor") ThreadPoolTaskExecutor suspendExecutor,
-			StringRedisTemplate redis, AiProperties properties) {
+			StringRedisTemplate redis, AiProperties properties, CancellationRegistry cancellations) {
 		this.store = store;
 		this.registry = registry;
 		this.codec = codec;
@@ -91,11 +93,13 @@ public class ResumeService {
 		this.suspendExecutor = suspendExecutor;
 		this.redis = redis;
 		this.properties = properties;
+		this.cancellations = cancellations;
 	}
 
 	public enum Outcome {
 
-		ACCEPTED, NOT_FOUND, ALREADY_DONE, ALREADY_RUNNING, PENDING_UNRESOLVED, IN_PROGRESS, POOL_SATURATED
+		ACCEPTED, NOT_FOUND, ALREADY_DONE, ALREADY_RUNNING, PENDING_UNRESOLVED, IN_PROGRESS, POOL_SATURATED,
+		ALREADY_CANCELLED
 
 	}
 
@@ -126,9 +130,50 @@ public class ResumeService {
 				.map(PendingToolCall::getToolCallId)
 				.toList());
 			item.put("ledgerCounts", this.store.ledgerCounts(runId));
+			// 发现态的"可续跑性"判定（启动自动续跑与运维端点共用同一口径）：
+			// 取消标志（Redis 为准）> 终态 > 未决外部输入 > 僵尸 RUNNING（超龄）。
+			boolean cancelled = this.cancellations.isCancelled(runId);
+			long activeAtMs = activeAtMs(snapshot);
+			boolean zombie = RunSnapshot.RUNNING.equals(snapshot.getStatus())
+					&& System.currentTimeMillis() - activeAtMs > this.properties.getResume().getZombieAge()
+						.toMillis();
+			item.put("activeAtMs", activeAtMs);
+			item.put("activeAgeMs", System.currentTimeMillis() - activeAtMs);
+			item.put("zombieAgeThresholdMs", this.properties.getResume().getZombieAge().toMillis());
+			List<String> unresolvedExternal = pendings.stream()
+				.filter(pending -> PendingToolCall.PENDING.equals(pending.getStatus()))
+				.filter(pending -> !PendingToolCall.KIND_BACKEND.equals(pending.getKind()))
+				.map(PendingToolCall::getToolCallId)
+				.toList();
+			item.put("cancelled", cancelled);
+			item.put("zombieRunning", zombie);
+			item.put("resumeable", !cancelled && unresolvedExternal.isEmpty()
+					&& !RunSnapshot.DONE.equals(snapshot.getStatus())
+					&& !RunSnapshot.FAILED.equals(snapshot.getStatus())
+					// 取消是终态（R3 补丁顺带修正）：取消标志的 TTL（2×总预算）过期之后，
+					// 不能因为"标志不在了"就把一个 CANCELLED 的轮次重新当成可续跑。
+					&& !RunSnapshot.CANCELLED.equals(snapshot.getStatus())
+					&& (zombie || !RunSnapshot.RUNNING.equals(snapshot.getStatus())));
+			item.put("unresolvedExternal", unresolvedExternal);
 			out.add(item);
 		}
 		return out;
+	}
+
+	/**
+	 * 该轮的"活跃时刻"（R3 裁决）：取<b>较新者</b> ——
+	 * 快照 {@code updatedAtMs}（工具落定/挂起/终态写入的时刻）与
+	 * {@link RunStore#lastEventAtMs(String)}（最后一帧的时刻：delta/heartbeat/tool_* 全在内）。
+	 *
+	 * <p>
+	 * 为什么必须双条件：快照只在"轮次结构变化"时刷新，<b>长流式轮次</b>（一次模型调用吐几十秒正文、
+	 * 中途不落定任何工具）会让 {@code updatedAtMs} 长时间不动 —— 只看它就会把正在流式产出的活轮
+	 * 判成僵尸并强行接管（第二次执行同一轮）。帧时间戳覆盖了流式与挂起心跳，两者取较新即
+	 * "只要有活动就不算僵尸"。
+	 */
+	public long activeAtMs(RunSnapshot snapshot) {
+		long lastEvent = this.store.lastEventAtMs(snapshot.getRunId());
+		return Math.max(snapshot.getUpdatedAtMs(), lastEvent);
 	}
 
 	/** 单轮明细（台账 + 待决条目 + 历史角色序列）。 */
@@ -157,6 +202,17 @@ public class ResumeService {
 	}
 
 	public ResumeResult resume(String runId) {
+		return resume(runId, false);
+	}
+
+	/**
+	 * 续跑（幂等 + 互斥 + 取消优先 + 可选僵尸接管）。
+	 *
+	 * @param forceTakeover 仅由<b>启动自动续跑</b>使用的僵尸接管开关（N3）：为 true 时允许
+	 * 接管"状态仍是 {@code RUNNING} 但已超龄"的轮次（上一进程死在模型调用中间留下的僵尸轮）。
+	 * 运维端点不传这个开关（{@code false}），保持"RUNNING 一律 409"的保守语义。
+	 */
+	public ResumeResult resume(String runId, boolean forceTakeover) {
 		if (!acquireResumeLock(runId)) {
 			return new ResumeResult(Outcome.IN_PROGRESS, Map.of("runId", runId, "resumed", false,
 					"reason", "RESUME_IN_PROGRESS", "instanceId", this.store.instanceId()));
@@ -182,10 +238,46 @@ public class ResumeService {
 				body.put("reason", "ALREADY_DONE");
 				return new ResumeResult(Outcome.ALREADY_DONE, body);
 			}
-			if (RunSnapshot.RUNNING.equals(snapshot.getStatus())) {
+			if (RunSnapshot.FAILED.equals(snapshot.getStatus())) {
 				body.put("resumed", false);
-				body.put("reason", "ALREADY_RUNNING");
-				return new ResumeResult(Outcome.ALREADY_RUNNING, body);
+				body.put("reason", "ALREADY_FAILED");
+				return new ResumeResult(Outcome.ALREADY_DONE, body);
+			}
+			// 取消优先（ADR-8 修正③）：权威取消标志在 Redis，跨进程同样拦得住续跑 ——
+			// 否则"用户已取消"的轮次会被重启后的自动续跑重新拾起并执行掉。
+			if (this.cancellations.isCancelled(runId)) {
+				snapshot.setStatus(RunSnapshot.CANCELLED);
+				snapshot.setCancelled(true);
+				snapshot.setError("AI_RUN_CANCELLED：本轮已由用户取消，续跑被拒绝");
+				this.store.save(snapshot);
+				this.store.cancelPendings(runId);
+				body.put("resumed", false);
+				body.put("reason", "ALREADY_CANCELLED");
+				return new ResumeResult(Outcome.ALREADY_CANCELLED, body);
+			}
+			if (RunSnapshot.CANCELLED.equals(snapshot.getStatus())) {
+				body.put("resumed", false);
+				body.put("reason", "ALREADY_CANCELLED");
+				return new ResumeResult(Outcome.ALREADY_CANCELLED, body);
+			}
+			if (RunSnapshot.RUNNING.equals(snapshot.getStatus())) {
+				if (!forceTakeover) {
+					body.put("resumed", false);
+					body.put("reason", "ALREADY_RUNNING");
+					return new ResumeResult(Outcome.ALREADY_RUNNING, body);
+				}
+				// 僵尸接管（N3/R3）：上一进程死在模型调用中间，状态永远停在 RUNNING。
+				// 判据由调用方（启动扫描/运维扫描）给出：本实例刚启动 + 活跃时刻已超龄；
+				// 活跃时刻 = max(快照 updatedAtMs, 最后一帧 atMs)，因此"还在流式吐字"的活轮不会被接管。
+				long activeAtMs = activeAtMs(snapshot);
+				log.warn("僵尸轮接管 runId={} sessionId={} 活跃时刻距今 {}ms（快照 {}ms / 末帧 {}ms，阈值 {}）",
+						runId, sessionId, System.currentTimeMillis() - activeAtMs,
+						System.currentTimeMillis() - snapshot.getUpdatedAtMs(),
+						System.currentTimeMillis() - this.store.lastEventAtMs(runId),
+						this.properties.getResume().getZombieAge());
+				body.put("zombieTakeover", true);
+				body.put("activeAtMs", activeAtMs);
+				body.put("activeAgeMs", System.currentTimeMillis() - activeAtMs);
 			}
 			List<PendingToolCall> unresolved = pendings.stream()
 				.filter(pending -> PendingToolCall.PENDING.equals(pending.getStatus()))
@@ -216,9 +308,11 @@ public class ResumeService {
 					String text = this.toolCallingManager.resolvePending(runId, prompt, effective);
 					responses.add(new ToolResponseMessage.ToolResponse(effective.getToolCallId(),
 							effective.getName(), text == null ? "" : text));
-					rebuilt.add(effective.getToolCallId() + ":" + effective.getStatus() + ":"
-							+ (this.store.instanceId().equals(effective.getExecutedBy()) ? "executed-here"
-									: "reused(" + effective.getExecutedBy() + ")"));
+					// R6 裁决：标签必须在**结算之后**回读 Redis 才算准 ——
+					// executeOnce 的认领/完成是写在 Redis 里的新副本上，传入的 effective 可能仍是旧值
+					// （旧实现因此在"本次刚执行完"时显示 reused(null)）。
+					PendingToolCall settled = this.store.pending(runId, effective.getToolCallId());
+					rebuilt.add(settlementLabel(settled == null ? effective : settled));
 				}
 				history.add(ToolResponseMessage.builder().responses(responses).build());
 				snapshot.setMessageJson(this.codec.serializeAll(history));
@@ -273,6 +367,25 @@ public class ResumeService {
 				releaseResumeLock(runId);
 			}
 		}
+	}
+
+	/**
+	 * 结算标签（R6 裁决）：{@code <toolCallId>:<status>:<execution>}，其中 execution 取
+	 * {@code executed-here}（本次续跑真的执行了）、{@code reused(<实例>) }（复用他实例的执行结果）、
+	 * {@code not-executed}（未执行：放行前被取消/拒绝/超时/前端未回灌等）。
+	 */
+	private String settlementLabel(PendingToolCall pending) {
+		String execution;
+		if (!pending.isExecuted()) {
+			execution = "not-executed";
+		}
+		else if (this.store.instanceId().equals(pending.getExecutedBy())) {
+			execution = "executed-here";
+		}
+		else {
+			execution = "reused(" + pending.getExecutedBy() + ")";
+		}
+		return pending.getToolCallId() + ":" + pending.getStatus() + ":" + execution;
 	}
 
 	/** 从快照重建挂起那一轮的 {@code assistant(tool_calls)}（顺序与 id/type/name/arguments 原样）。 */

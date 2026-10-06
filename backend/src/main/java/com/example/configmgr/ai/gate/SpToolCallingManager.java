@@ -1,11 +1,14 @@
 package com.example.configmgr.ai.gate;
 
 import com.example.configmgr.ai.memory.MessageJsonCodec;
+import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.run.SseChatEmitter;
+import com.example.configmgr.ai.run.StreamViolationException;
+import com.example.configmgr.ai.run.ToolActivityBeacon;
 import com.example.configmgr.ai.tool.ToolMeta;
 import com.example.configmgr.ai.tool.ToolRegistry;
 import lombok.extern.slf4j.Slf4j;
@@ -83,14 +86,20 @@ public class SpToolCallingManager implements ToolCallingManager {
 
 	private final MessageJsonCodec codec;
 
+	private final ToolActivityBeacon beacon;
+
+	private final CancellationRegistry cancellations;
+
 	public SpToolCallingManager(RunStore store, RunRegistry registry, ConfirmGate gate, ToolRegistry toolRegistry,
-			MessageJsonCodec codec) {
+			MessageJsonCodec codec, ToolActivityBeacon beacon, CancellationRegistry cancellations) {
 		this.delegate = ToolCallingManager.builder().build();
 		this.store = store;
 		this.registry = registry;
 		this.gate = gate;
 		this.toolRegistry = toolRegistry;
 		this.codec = codec;
+		this.beacon = beacon;
+		this.cancellations = cancellations;
 	}
 
 	@Override
@@ -121,12 +130,26 @@ public class SpToolCallingManager implements ToolCallingManager {
 
 		List<ToolResponseMessage.ToolResponse> responses = new ArrayList<>(pendings.size());
 		for (PendingToolCall pending : pendings) {
+			// 事件边界上的取消检查（ADR-8 修正③：取消在"分片/事件边界"轮询）：
+			// 逐个工具执行前先看一次权威标志，命中即终止整轮（终态 done{cancelled:true}）。
+			checkCancelled(runId);
 			out.toolStart(pending);
-			String text = switch (pending.getKind()) {
-				case PendingToolCall.KIND_FRONTEND -> awaitFrontend(runId, pending);
-				case PendingToolCall.KIND_CONFIRM -> awaitConfirm(runId, prompt, pending);
-				default -> executeOnce(runId, prompt, pending);
-			};
+			// 副作用信标（韧性棒）：工具开始执行即留下痕迹 ——
+			// ① 让看门狗在工具执行期间不计静默（硬规范①）；② 让"已产出内容前先有副作用"的重试被拦住。
+			this.beacon.enter(runId, pending.getName(), pending.getKind());
+			String text;
+			try {
+				text = switch (pending.getKind()) {
+					case PendingToolCall.KIND_FRONTEND -> awaitFrontend(runId, pending);
+					case PendingToolCall.KIND_CONFIRM -> awaitConfirm(runId, prompt, pending);
+					default -> executeOnce(runId, prompt, pending);
+				};
+			}
+			finally {
+				this.beacon.exit(runId, "done");
+			}
+			// 执行之后再查一次：确认门/前端工具可能正是在等待期间被取消
+			checkCancelled(runId);
 			responses.add(new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(), text));
 		}
 
@@ -141,6 +164,14 @@ public class SpToolCallingManager implements ToolCallingManager {
 	}
 
 	// ── 三通道 ──────────────────────────────────────────────────────────────
+
+	/** 事件边界上的取消检查：命中即抛出，交由 {@code ResilientChatService} 以取消收尾。 */
+	private void checkCancelled(String runId) {
+		if (this.cancellations.isCancelled(runId)) {
+			throw new StreamViolationException(StreamViolationException.CANCELLED,
+					"本轮对话已被取消，工具执行在事件边界终止（runId=" + runId + "）");
+		}
+	}
 
 	/** 前端工具：不执行后端桩体，挂起等前端回灌（结局帧由 ConfirmGate 侧发出）。 */
 	private String awaitFrontend(String runId, PendingToolCall pending) {

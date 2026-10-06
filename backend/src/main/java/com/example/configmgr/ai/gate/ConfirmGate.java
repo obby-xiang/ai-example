@@ -1,10 +1,12 @@
 package com.example.configmgr.ai.gate;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.run.SseChatEmitter;
+import com.example.configmgr.ai.run.ToolActivityBeacon;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
@@ -55,13 +57,20 @@ public class ConfirmGate {
 
 	private final AiProperties properties;
 
+	private final CancellationRegistry cancellations;
+
+	private final ToolActivityBeacon beacon;
+
 	/** toolCallId → 进程内唤醒闸门（不承载状态）。 */
 	private final Map<String, Latch> latches = new ConcurrentHashMap<>();
 
-	public ConfirmGate(RunStore store, RunRegistry registry, AiProperties properties) {
+	public ConfirmGate(RunStore store, RunRegistry registry, AiProperties properties,
+			CancellationRegistry cancellations, ToolActivityBeacon beacon) {
 		this.store = store;
 		this.registry = registry;
 		this.properties = properties;
+		this.cancellations = cancellations;
+		this.beacon = beacon;
 	}
 
 	/** 确认门等待上限（秒）：{@code app.ai.hitl.timeout}。 */
@@ -91,6 +100,9 @@ public class ConfirmGate {
 		String key = key(runId, pending.getToolCallId());
 		Latch latch = new Latch();
 		this.latches.put(key, latch /* 先登记闸门再发请求，避免"外部输入已到、闸门还没登记"白等到超时 */);
+		// 取消的加速通道（ADR-8 修正③）：同进程取消立即解开等待，权威态仍在 ai:cancel:<runId>。
+		// 跨进程取消则由下方循环里的 isCancelled 轮询发现（节拍 = 心跳节拍，属"分片边界"）。
+		AutoCloseable cancelHandle = this.cancellations.onCancel(runId, latch::signal);
 		SseChatEmitter out = this.registry.of(runId);
 		if (confirm) {
 			out.confirmRequest(pending, timeoutSeconds);
@@ -102,6 +114,9 @@ public class ConfirmGate {
 		long deadline = startedAt + timeoutSeconds * 1000L;
 		try {
 			while (true) {
+				if (this.cancellations.isCancelled(runId)) {
+					return cancel(runId, pending, timeoutSeconds, confirm);
+				}
 				PendingToolCall fresh = this.store.pending(runId, pending.getToolCallId());
 				if (fresh != null && fresh.resolved()) {
 					// 决策可能来自本进程（闸门唤醒）也可能来自另一实例（Redis 轮询发现）
@@ -113,6 +128,8 @@ public class ConfirmGate {
 				}
 				boolean signalled = latch.await(Math.min(remain, HEARTBEAT_SECONDS * 1000L));
 				if (!signalled) {
+					// 工具活动脉冲（韧性看门狗据此在挂起期不计静默，硬规范①）
+					this.beacon.pulse(runId);
 					out.heartbeat(heartbeatData(runId, pending, confirm, timeoutSeconds,
 							(System.currentTimeMillis() - startedAt) / 1000));
 				}
@@ -125,7 +142,43 @@ public class ConfirmGate {
 		}
 		finally {
 			this.latches.remove(key, latch);
+			try {
+				cancelHandle.close();
+			}
+			catch (Exception ex) {
+				log.debug("注销取消监听者失败 runId={}：{}", runId, ex.getMessage());
+			}
 		}
+	}
+
+	/**
+	 * 取消落地：把仍 {@code PENDING} 的挂起条目标为
+	 * {@link PendingToolCall#CANCELLED}（未执行），发一帧与人工决策同形的结局帧，
+	 * 然后由 {@code SpToolCallingManager} 在事件边界终止整轮（终态 {@code done{cancelled:true}}）。
+	 */
+	private PendingToolCall cancel(String runId, PendingToolCall pending, int timeoutSeconds, boolean confirm) {
+		PendingToolCall fresh = this.store.pending(runId, pending.getToolCallId());
+		if (fresh == null) {
+			fresh = pending;
+		}
+		if (PendingToolCall.PENDING.equals(fresh.getStatus())) {
+			fresh.setStatus(PendingToolCall.CANCELLED);
+			fresh.setReason("RUN_CANCELLED");
+			fresh.setExecuted(false);
+			fresh.setResolvedAtMs(System.currentTimeMillis());
+			fresh.setResultText("本轮对话已被用户取消，该工具未执行。");
+			this.store.putPending(runId, fresh);
+		}
+		SseChatEmitter out = this.registry.of(runId);
+		if (confirm) {
+			out.confirmDecision(fresh, "cancel", fresh.getReason(), 0L);
+		}
+		else {
+			out.frontendToolResult(fresh, false, fresh.getResultText());
+		}
+		log.info("挂起等待被取消 runId={} toolCallId={} kind={} 已等待={}s", runId, pending.getToolCallId(),
+				confirm ? "confirm" : "frontend-tool", timeoutSeconds);
+		return fresh;
 	}
 
 	/** 超时自动取消：把"未执行"这一结局也写进外置状态（重启后仍可读）。 */
