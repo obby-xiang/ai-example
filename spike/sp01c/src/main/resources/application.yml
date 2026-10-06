@@ -1,0 +1,45 @@
+server:
+  port: ${SPIKE_PORT:18302}
+  shutdown: immediate
+
+spring:
+  application:
+    name: sp01c-redis-chat-memory
+  data:
+    redis:
+      host: 127.0.0.1
+      port: 6379
+      timeout: 3s
+  ai:
+    openai:
+      base-url: ${AI_BASE_URL:https://api.deepseek.com}
+      api-key: ${DEEPSEEK_API_KEY}
+      chat:
+        options:
+          model: ${AI_MODEL:deepseek-flash}
+
+spike:
+  chat-memory:
+    ttl: 6h
+    max-messages: 40
+
+logging:
+  level:
+    root: INFO
+    com.example.spike: INFO
+
+---
+# 证据用 profile：把 OpenAI 兼容协议的请求/响应体打到日志，供"是否有 400"逐轮取证
+spring:
+  config:
+    activate:
+      on-profile: verbose
+
+logging:
+  level:
+    org.springframework.ai.openai: DEBUG
+    org.springframework.ai.chat.client: DEBUG
+    spike.upstream-http: INFO
+
+spike:
+  evidence-logging: true
