@@ -85,6 +85,7 @@ scripts/githooks/scan-history.sh --max-size 512   # 跳过 >512KB 的 blob（默
 
 - 钩子以 `#!/bin/sh` 运行（Git Bash 提供 sh）。脚本必须保持 **LF 行尾**，被 CRLF 改写会出现 `bad interpreter` 或 `\r` 相关报错。本目录已随附 `.gitattributes`（`* text eol=lf`）强制固化——本机系统级 `core.autocrlf=true`（Git for Windows 默认）会把没有该声明的脚本改写成 CRLF，导致钩子静默失效；
 - 若在别处新增脚本，请确认 `git check-attr eol -- <路径>` 输出 `lf`；
+- 本机 `core.filemode=false`（Git for Windows 默认），仓库里钩子按 `100644` 保存。Git 只在钩子**可执行**时才运行它，因此在 Linux/CI 检出后需补一次权限：`chmod +x scripts/githooks/pre-commit scripts/githooks/scan-history.sh scripts/githooks/scan-lib.sh`；若要固化进版本库，用 `git update-index --chmod=+x scripts/githooks/pre-commit scripts/githooks/scan-history.sh scripts/githooks/scan-lib.sh` 后随提交一起入库；
 - `core.hooksPath` 必须是**相对仓库根**的路径（本仓库为 `scripts/githooks`）。写成盘符绝对路径在换机器/换目录后必然失效，也违反 DC-08；
 - 环境变量写法：Git Bash 用 `AI_SECRETS_ALLOW=1 git commit ...`；PowerShell 用 `$env:AI_SECRETS_ALLOW=1; git commit ...`（仅当前会话有效）；
 - `user.name` 取的是本地配置；一台机器上有多个身份时，确认取到的是需要保护的那个用户名（可用 `git config --show-origin user.name` 核对）；
