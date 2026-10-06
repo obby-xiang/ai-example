@@ -1,0 +1,132 @@
+{
+  "case": "vd1-baseline",
+  "description": "无故障对照（代理透传）",
+  "fault": {
+    "mode": "none"
+  },
+  "sse": {
+    "eventCounts": {
+      "start": 1,
+      "delta": 17,
+      "done": 1
+    },
+    "eventSequence": [
+      "start@71ms",
+      "delta@2242ms",
+      "delta@2278ms",
+      "delta@2279ms",
+      "delta@2287ms",
+      "delta@2291ms",
+      "delta@2294ms",
+      "delta@2296ms",
+      "delta@2298ms",
+      "delta@2299ms",
+      "delta@2301ms",
+      "delta@2302ms",
+      "delta@2303ms",
+      "delta@2304ms",
+      "delta@2305ms",
+      "delta@2306ms",
+      "delta@2307ms",
+      "delta@2308ms",
+      "done@2311ms"
+    ],
+    "deltaCount": 17,
+    "concatenatedDeltaText": "当前服务器时间：2026-10-06 20:19:18。",
+    "concatenatedDeltaLen": 28,
+    "duplicatedPrefixLen": 0,
+    "duplicatedPrefixLikely": false,
+    "terminalEvent": "done",
+    "terminalData": {
+      "cancelled": false,
+      "terminal": "OK",
+      "content": "当前服务器时间：2026-10-06 20:19:18。",
+      "emittedChars": 28,
+      "deltas": 17,
+      "attempts": 1,
+      "elapsedMs": 2254
+    },
+    "elapsedMs": 2320,
+    "clientAborted": false,
+    "streamError": null
+  },
+  "sessionState": {
+    "sessionId": "vd1-baseline",
+    "runId": "vd1-baseline#1791289157549",
+    "terminal": "OK",
+    "cancelled": false,
+    "clientAborted": false,
+    "emittedAny": true,
+    "deltas": 17,
+    "emittedChars": 28,
+    "content": "当前服务器时间：2026-10-06 20:19:18。",
+    "attempts": 1,
+    "elapsedMs": 2254,
+    "attemptRecords": [
+      {
+        "attempt": 1,
+        "outcome": "COMPLETED",
+        "costMs": 2249,
+        "emittedAnythingBefore": true,
+        "reason": null
+      }
+    ],
+    "toolCallItems": [],
+    "cancelRegistryRegistered": false,
+    "cancelFlagValue": false,
+    "refSubscriptions": 0,
+    "toolExecutionsForRun": [
+      {
+        "seq": 1,
+        "tsMs": 1791289158872,
+        "source": "INTERNAL_LOOP",
+        "runId": "vd1-baseline#1791289157549",
+        "toolCallId": null,
+        "name": "getServerTime",
+        "arguments": "{}",
+        "durationMs": 0,
+        "outcome": "OK"
+      }
+    ],
+    "found": true
+  },
+  "wire": [
+    {
+      "seq": 1,
+      "requestIndex": 1,
+      "tsMs": 1791289157961,
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "mode": "none",
+      "applied": false,
+      "status": 200,
+      "relayedBytes": 0,
+      "chunkCount": 0,
+      "outcome": "PASSTHROUGH_COMPLETE",
+      "headerBytes": 0,
+      "requestBytes": 1393,
+      "upstreamHeadersAtMs": 1791289158191,
+      "endTsMs": 1791289158854,
+      "durationMs": 893
+    },
+    {
+      "seq": 2,
+      "requestIndex": 2,
+      "tsMs": 1791289158888,
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "mode": "none",
+      "applied": false,
+      "status": 200,
+      "relayedBytes": 0,
+      "chunkCount": 0,
+      "outcome": "PASSTHROUGH_COMPLETE",
+      "headerBytes": 0,
+      "requestBytes": 1686,
+      "upstreamHeadersAtMs": 1791289159053,
+      "endTsMs": 1791289159777,
+      "durationMs": 889
+    }
+  ],
+  "capturedAt": "2026-10-06T12:19:19.829Z"
+}

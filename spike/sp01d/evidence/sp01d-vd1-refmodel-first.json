@@ -1,0 +1,98 @@
+{
+  "case": "vd1-refmodel-first",
+  "description": "refmodel 策略 + 首包静默（代理不发任何字节，9s 后 RST）",
+  "fault": {
+    "mode": "stall",
+    "stallMs": 9000
+  },
+  "sse": {
+    "eventCounts": {
+      "start": 1,
+      "error": 1
+    },
+    "eventSequence": [
+      "start@60ms",
+      "error@10311ms"
+    ],
+    "deltaCount": 0,
+    "concatenatedDeltaText": "",
+    "concatenatedDeltaLen": 0,
+    "duplicatedPrefixLen": 0,
+    "duplicatedPrefixLikely": false,
+    "terminalEvent": "error",
+    "terminalData": {
+      "code": "UPSTREAM_SILENT_TIMEOUT",
+      "message": "模型服务在约定时间内没有任何事件（上游静默），本轮流已终止。",
+      "rawReason": "TimeoutException: Did not observe any item or terminal signal within 5000ms in 'takeUntil' (and no fallback has been configured)",
+      "attempts": 2,
+      "partial": false,
+      "toolSideEffect": false,
+      "emittedChars": 0,
+      "elapsedMs": 10260
+    },
+    "elapsedMs": 10328,
+    "clientAborted": false,
+    "streamError": null
+  },
+  "sessionState": {
+    "sessionId": "vd1-refmodel-first",
+    "runId": "vd1-refmodel-first#1791289390307",
+    "terminal": "FAILED",
+    "cancelled": false,
+    "clientAborted": false,
+    "emittedAny": false,
+    "deltas": 0,
+    "emittedChars": 0,
+    "content": "",
+    "attempts": 1,
+    "elapsedMs": 10261,
+    "attemptRecords": [
+      {
+        "attempt": 1,
+        "outcome": "ERROR",
+        "costMs": 10254,
+        "emittedAnythingBefore": false,
+        "reason": "TimeoutException: Did not observe any item or terminal signal within 5000ms in 'takeUntil' (and no fallback has been configured)"
+      }
+    ],
+    "toolCallItems": [],
+    "cancelRegistryRegistered": false,
+    "cancelFlagValue": false,
+    "refSubscriptions": 2,
+    "toolExecutionsForRun": [],
+    "found": true
+  },
+  "wire": [
+    {
+      "seq": 30,
+      "requestIndex": 1,
+      "tsMs": 1791289390681,
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "mode": "stall",
+      "applied": true,
+      "status": null,
+      "relayedBytes": 0,
+      "chunkCount": 0,
+      "outcome": "STALLED_THEN_SOCKET_RESET",
+      "headerBytes": 0,
+      "endTsMs": 1791289399681,
+      "durationMs": 9000
+    },
+    {
+      "seq": 31,
+      "requestIndex": 2,
+      "tsMs": 1791289395566,
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "mode": "stall",
+      "applied": true,
+      "status": null,
+      "relayedBytes": 0,
+      "chunkCount": 0,
+      "outcome": null,
+      "headerBytes": 0
+    }
+  ],
+  "capturedAt": "2026-10-06T12:23:20.605Z"
+}

@@ -1,0 +1,6 @@
+reactor-core version = 3.8.6
+A 首包静默 | flux=Flux.never() timeout=300ms -> TimeoutException @391ms
+B 事件间静默 | flux=concat(just(first),never) timeout=300ms -> TimeoutException @303ms emitted=1
+C 事件间静默+双超时 | 同上但用 (firstPublisher,nextFactory) -> TimeoutException @303ms emitted=1
+D retry 重订阅 | concat(A,B,error) .timeout(500ms).retry(1).doOnNext -> RuntimeException: socket reset @3ms 订阅次数=2 下游收到元素=4 内容=ABAB
+E retry 超时重订阅 | concat(A,B,never) .timeout(400ms).retry(1).doOnNext -> TimeoutException @802ms 订阅次数=2 下游收到元素=4 内容=ABAB

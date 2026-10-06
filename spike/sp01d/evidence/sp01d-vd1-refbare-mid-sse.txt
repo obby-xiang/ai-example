@@ -1,0 +1,4 @@
+# case=vd1-refbare-mid
+start@6ms
+delta@1008ms
+error@6009ms

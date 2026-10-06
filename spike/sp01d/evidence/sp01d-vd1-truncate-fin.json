@@ -1,0 +1,87 @@
+{
+  "case": "vd1-truncate-fin",
+  "description": "上游静默截断（透传 8 个事件后 TCP 正常 FIN，SSE 无 [DONE]）",
+  "fault": {
+    "mode": "truncate-fin",
+    "relayEvents": 8
+  },
+  "sse": {
+    "eventCounts": {
+      "start": 1,
+      "done": 1
+    },
+    "eventSequence": [
+      "start@4ms",
+      "done@969ms"
+    ],
+    "deltaCount": 0,
+    "concatenatedDeltaText": "",
+    "concatenatedDeltaLen": 0,
+    "duplicatedPrefixLen": 0,
+    "duplicatedPrefixLikely": false,
+    "terminalEvent": "done",
+    "terminalData": {
+      "cancelled": false,
+      "terminal": "OK",
+      "content": "",
+      "emittedChars": 0,
+      "deltas": 0,
+      "attempts": 1,
+      "elapsedMs": 965
+    },
+    "elapsedMs": 969,
+    "clientAborted": false,
+    "streamError": null
+  },
+  "sessionState": {
+    "sessionId": "vd1-truncate-fin",
+    "runId": "vd1-truncate-fin#1791289242844",
+    "terminal": "OK",
+    "cancelled": false,
+    "clientAborted": false,
+    "emittedAny": false,
+    "deltas": 0,
+    "emittedChars": 0,
+    "content": "",
+    "attempts": 1,
+    "elapsedMs": 965,
+    "attemptRecords": [
+      {
+        "attempt": 1,
+        "outcome": "COMPLETED",
+        "costMs": 965,
+        "emittedAnythingBefore": false,
+        "reason": null
+      }
+    ],
+    "toolCallItems": [],
+    "cancelRegistryRegistered": false,
+    "cancelFlagValue": false,
+    "refSubscriptions": 0,
+    "toolExecutionsForRun": [],
+    "found": true
+  },
+  "wire": [
+    {
+      "seq": 15,
+      "requestIndex": 1,
+      "tsMs": 1791289242848,
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "mode": "truncate-fin",
+      "applied": true,
+      "status": 200,
+      "relayedBytes": 2422,
+      "chunkCount": 5,
+      "outcome": "TRUNCATED_CLEAN_FIN",
+      "headerBytes": 0,
+      "requestBytes": 1372,
+      "upstreamHeadersAtMs": 1791289243161,
+      "relayedEvents": 8,
+      "contentEvents": 0,
+      "endTsMs": 1791289243808,
+      "durationMs": 960
+    }
+  ],
+  "capturedAt": "2026-10-06T12:20:43.818Z"
+}

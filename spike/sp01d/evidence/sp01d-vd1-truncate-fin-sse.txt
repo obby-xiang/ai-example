@@ -1,0 +1,3 @@
+# case=vd1-truncate-fin
+start@4ms
+done@969ms

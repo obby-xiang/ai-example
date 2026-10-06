@@ -1,0 +1,18 @@
+{
+  "seq": 27,
+  "requestIndex": 2,
+  "tsMs": 1791289288171,
+  "method": "POST",
+  "path": "/v1/chat/completions",
+  "mode": "none",
+  "applied": false,
+  "status": 200,
+  "relayedBytes": 0,
+  "chunkCount": 0,
+  "outcome": "PASSTHROUGH_COMPLETE",
+  "headerBytes": 0,
+  "requestBytes": 1665,
+  "upstreamHeadersAtMs": 1791289288345,
+  "endTsMs": 1791289290078,
+  "durationMs": 1907
+}

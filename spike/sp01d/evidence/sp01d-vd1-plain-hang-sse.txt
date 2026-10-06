@@ -1,0 +1,2 @@
+# case=vd1-plain-hang
+start@7ms

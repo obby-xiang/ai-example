@@ -1,0 +1,3 @@
+# case=vd1-ref-longtool
+start@5ms
+error@5825ms

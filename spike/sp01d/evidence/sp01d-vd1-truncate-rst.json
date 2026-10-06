@@ -1,0 +1,117 @@
+{
+  "case": "vd1-truncate",
+  "description": "上游硬截断（透传 3 个事件后 RST）",
+  "fault": {
+    "mode": "truncate",
+    "relayEvents": 3
+  },
+  "sse": {
+    "eventCounts": {
+      "start": 1,
+      "retry": 1,
+      "error": 1
+    },
+    "eventSequence": [
+      "start@4ms",
+      "retry@856ms",
+      "error@1783ms"
+    ],
+    "deltaCount": 0,
+    "concatenatedDeltaText": "",
+    "concatenatedDeltaLen": 0,
+    "duplicatedPrefixLen": 0,
+    "duplicatedPrefixLikely": false,
+    "terminalEvent": "error",
+    "terminalData": {
+      "code": "UPSTREAM_CONNECTION_BROKEN",
+      "message": "与模型服务的连接被中断（流式响应未正常结束），本轮流已终止。",
+      "rawReason": "EOFException: EOF reached while reading",
+      "attempts": 2,
+      "partial": false,
+      "toolSideEffect": false,
+      "emittedChars": 0,
+      "elapsedMs": 1780
+    },
+    "elapsedMs": 1783,
+    "clientAborted": false,
+    "streamError": null
+  },
+  "sessionState": {
+    "sessionId": "vd1-truncate",
+    "runId": "vd1-truncate#1791289240912",
+    "terminal": "FAILED",
+    "cancelled": false,
+    "clientAborted": false,
+    "emittedAny": false,
+    "deltas": 0,
+    "emittedChars": 0,
+    "content": "",
+    "attempts": 2,
+    "elapsedMs": 1780,
+    "attemptRecords": [
+      {
+        "attempt": 1,
+        "outcome": "ERROR",
+        "costMs": 852,
+        "emittedAnythingBefore": false,
+        "reason": "EOFException: EOF reached while reading"
+      },
+      {
+        "attempt": 2,
+        "outcome": "ERROR",
+        "costMs": 927,
+        "emittedAnythingBefore": false,
+        "reason": "EOFException: EOF reached while reading"
+      }
+    ],
+    "toolCallItems": [],
+    "cancelRegistryRegistered": false,
+    "cancelFlagValue": false,
+    "refSubscriptions": 0,
+    "toolExecutionsForRun": [],
+    "found": true
+  },
+  "wire": [
+    {
+      "seq": 13,
+      "requestIndex": 1,
+      "tsMs": 1791289240916,
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "mode": "truncate",
+      "applied": true,
+      "status": 200,
+      "relayedBytes": 922,
+      "chunkCount": 3,
+      "outcome": "TRUNCATED_SOCKET_RESET",
+      "headerBytes": 0,
+      "requestBytes": 1372,
+      "upstreamHeadersAtMs": 1791289241098,
+      "relayedEvents": 3,
+      "contentEvents": 0,
+      "endTsMs": 1791289241759,
+      "durationMs": 843
+    },
+    {
+      "seq": 14,
+      "requestIndex": 2,
+      "tsMs": 1791289241770,
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "mode": "truncate",
+      "applied": true,
+      "status": 200,
+      "relayedBytes": 922,
+      "chunkCount": 3,
+      "outcome": "TRUNCATED_SOCKET_RESET",
+      "headerBytes": 0,
+      "requestBytes": 1431,
+      "upstreamHeadersAtMs": 1791289242012,
+      "relayedEvents": 3,
+      "contentEvents": 0,
+      "endTsMs": 1791289242683,
+      "durationMs": 913
+    }
+  ],
+  "capturedAt": "2026-10-06T12:20:42.700Z"
+}

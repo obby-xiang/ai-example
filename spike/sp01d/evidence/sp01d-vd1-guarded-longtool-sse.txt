@@ -1,0 +1,3 @@
+# case=vd1-guarded-longtool
+start@4ms
+error@7353ms

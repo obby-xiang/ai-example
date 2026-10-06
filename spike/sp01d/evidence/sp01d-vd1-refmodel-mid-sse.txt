@@ -1,0 +1,5 @@
+# case=vd1-refmodel-mid
+start@4ms
+delta@1118ms
+delta@6985ms
+error@11986ms

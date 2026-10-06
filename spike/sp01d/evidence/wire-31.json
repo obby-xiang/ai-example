@@ -1,0 +1,16 @@
+{
+  "seq": 31,
+  "requestIndex": 2,
+  "tsMs": 1791289395566,
+  "method": "POST",
+  "path": "/v1/chat/completions",
+  "mode": "stall",
+  "applied": true,
+  "status": null,
+  "relayedBytes": 0,
+  "chunkCount": 0,
+  "outcome": "STALLED_THEN_SOCKET_RESET",
+  "headerBytes": 0,
+  "endTsMs": 1791289404565,
+  "durationMs": 8999
+}

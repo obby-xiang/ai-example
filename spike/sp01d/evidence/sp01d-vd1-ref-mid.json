@@ -1,0 +1,90 @@
+{
+  "case": "vd1-ref-mid",
+  "description": "ref 策略 + 已产出 2 个正文 delta 后上游静默（代理停止发送、保持连接，12s 后 RST）",
+  "fault": {
+    "mode": "stall-after-content",
+    "contentEvents": 2,
+    "stallMs": 12000
+  },
+  "sse": {
+    "eventCounts": {
+      "start": 1,
+      "delta": 1,
+      "error": 1
+    },
+    "eventSequence": [
+      "start@5ms",
+      "delta@857ms",
+      "error@5865ms"
+    ],
+    "deltaCount": 1,
+    "concatenatedDeltaText": "我是",
+    "concatenatedDeltaLen": 2,
+    "duplicatedPrefixLen": 0,
+    "duplicatedPrefixLikely": false,
+    "terminalEvent": "error",
+    "terminalData": {
+      "code": "UPSTREAM_STREAM_ERROR_AFTER_PARTIAL",
+      "message": "模型服务异常，本轮流已终止：IllegalStateException: No StreamAdvisors available to execute",
+      "rawReason": "IllegalStateException: No StreamAdvisors available to execute",
+      "attempts": 2,
+      "partial": true,
+      "toolSideEffect": false,
+      "emittedChars": 2,
+      "elapsedMs": 5858
+    },
+    "elapsedMs": 5868,
+    "clientAborted": false,
+    "streamError": null
+  },
+  "sessionState": {
+    "sessionId": "vd1-ref-mid",
+    "runId": "vd1-ref-mid#1791289214381",
+    "terminal": "FAILED",
+    "cancelled": false,
+    "clientAborted": false,
+    "emittedAny": true,
+    "deltas": 1,
+    "emittedChars": 2,
+    "content": "我是",
+    "attempts": 1,
+    "elapsedMs": 5860,
+    "attemptRecords": [
+      {
+        "attempt": 1,
+        "outcome": "ERROR",
+        "costMs": 5857,
+        "emittedAnythingBefore": true,
+        "reason": "IllegalStateException: No StreamAdvisors available to execute"
+      }
+    ],
+    "toolCallItems": [],
+    "cancelRegistryRegistered": false,
+    "cancelFlagValue": false,
+    "refSubscriptions": 2,
+    "toolExecutionsForRun": [],
+    "found": true
+  },
+  "wire": [
+    {
+      "seq": 9,
+      "requestIndex": 1,
+      "tsMs": 1791289214391,
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "mode": "stall-after-content",
+      "applied": true,
+      "status": 200,
+      "relayedBytes": 8167,
+      "chunkCount": 10,
+      "outcome": null,
+      "headerBytes": 0,
+      "requestBytes": 1372,
+      "upstreamHeadersAtMs": 1791289214566,
+      "relayedEvents": 27,
+      "contentEvents": 2,
+      "stalledAtMs": 1791289215231
+    }
+  ],
+  "capturedAt": "2026-10-06T12:20:20.263Z"
+}

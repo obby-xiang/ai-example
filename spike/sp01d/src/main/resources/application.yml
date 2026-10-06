@@ -1,0 +1,49 @@
+server:
+  port: ${SPIKE_PORT:18303}
+  shutdown: immediate
+  tomcat:
+    threads:
+      max: 40
+
+spring:
+  application:
+    name: sp01d-resilience
+  ai:
+    openai:
+      base-url: ${AI_BASE_URL:https://api.deepseek.com}
+      api-key: ${DEEPSEEK_API_KEY}
+      chat:
+        options:
+          model: ${AI_MODEL:deepseek-flash}
+
+spike:
+  # 流式韧性参数。生产取值见 docs/spike/SP-01d-决策卡.md（参照实现为固定 90s）；
+  # spike 为缩短实验时长改小，偏差已在决策卡中标注。
+  stream:
+    first-event-timeout: ${SPIKE_FIRST_EVENT_TIMEOUT:5s}
+    inter-event-timeout: ${SPIKE_INTER_EVENT_TIMEOUT:6s}
+    max-attempts: ${SPIKE_MAX_ATTEMPTS:2}
+    total-budget: ${SPIKE_TOTAL_BUDGET:20s}
+  chat-memory:
+    max-messages: 40
+  executor:
+    threads: 8
+
+logging:
+  level:
+    root: INFO
+    com.example.spike: INFO
+    org.springframework.ai.openai: INFO
+
+---
+# 证据 profile：打开上游 HTTP 细节与工具调用细节
+spring:
+  config:
+    activate:
+      on-profile: verbose
+
+logging:
+  level:
+    com.example.spike: DEBUG
+    org.springframework.ai.openai: DEBUG
+    org.springframework.ai.model.tool: DEBUG

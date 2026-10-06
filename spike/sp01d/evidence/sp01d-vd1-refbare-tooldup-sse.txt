@@ -1,0 +1,3 @@
+# case=vd1-refbare-tooldup
+start@5ms
+error@6665ms

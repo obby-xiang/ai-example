@@ -1,0 +1,20 @@
+# case=vd1-baseline
+start@71ms
+delta@2242ms
+delta@2278ms
+delta@2279ms
+delta@2287ms
+delta@2291ms
+delta@2294ms
+delta@2296ms
+delta@2298ms
+delta@2299ms
+delta@2301ms
+delta@2302ms
+delta@2303ms
+delta@2304ms
+delta@2305ms
+delta@2306ms
+delta@2307ms
+delta@2308ms
+done@2311ms

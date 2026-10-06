@@ -1,0 +1,20 @@
+{
+  "seq": 13,
+  "requestIndex": 1,
+  "tsMs": 1791289240916,
+  "method": "POST",
+  "path": "/v1/chat/completions",
+  "mode": "truncate",
+  "applied": true,
+  "status": 200,
+  "relayedBytes": 922,
+  "chunkCount": 3,
+  "outcome": "TRUNCATED_SOCKET_RESET",
+  "headerBytes": 0,
+  "requestBytes": 1372,
+  "upstreamHeadersAtMs": 1791289241098,
+  "relayedEvents": 3,
+  "contentEvents": 0,
+  "endTsMs": 1791289241759,
+  "durationMs": 843
+}

@@ -1,0 +1,92 @@
+{
+  "case": "vd1-plain-mid",
+  "description": "plain 策略 + 已产出 2 个正文 delta 后上游静默（代理停止发送、保持连接，12s 后 RST）",
+  "fault": {
+    "mode": "stall-after-content",
+    "contentEvents": 2,
+    "stallMs": 12000
+  },
+  "sse": {
+    "eventCounts": {
+      "start": 1,
+      "delta": 1,
+      "error": 1
+    },
+    "eventSequence": [
+      "start@4ms",
+      "delta@806ms",
+      "error@12818ms"
+    ],
+    "deltaCount": 1,
+    "concatenatedDeltaText": "我是",
+    "concatenatedDeltaLen": 2,
+    "duplicatedPrefixLen": 0,
+    "duplicatedPrefixLikely": false,
+    "terminalEvent": "error",
+    "terminalData": {
+      "code": "UPSTREAM_CONNECTION_BROKEN_AFTER_PARTIAL",
+      "message": "与模型服务的连接被中断（流式响应未正常结束），本轮流已终止。",
+      "rawReason": "EOFException: EOF reached while reading",
+      "attempts": 1,
+      "partial": true,
+      "toolSideEffect": false,
+      "emittedChars": 2,
+      "elapsedMs": 12814
+    },
+    "elapsedMs": 12819,
+    "clientAborted": false,
+    "streamError": null
+  },
+  "sessionState": {
+    "sessionId": "vd1-plain-mid",
+    "runId": "vd1-plain-mid#1791289226570",
+    "terminal": "FAILED",
+    "cancelled": false,
+    "clientAborted": false,
+    "emittedAny": true,
+    "deltas": 1,
+    "emittedChars": 2,
+    "content": "我是",
+    "attempts": 0,
+    "elapsedMs": 12814,
+    "attemptRecords": [
+      {
+        "attempt": 1,
+        "outcome": "ERROR",
+        "costMs": 12814,
+        "emittedAnythingBefore": true,
+        "reason": "EOFException: EOF reached while reading"
+      }
+    ],
+    "toolCallItems": [],
+    "cancelRegistryRegistered": false,
+    "cancelFlagValue": false,
+    "refSubscriptions": 0,
+    "toolExecutionsForRun": [],
+    "found": true
+  },
+  "wire": [
+    {
+      "seq": 11,
+      "requestIndex": 1,
+      "tsMs": 1791289226574,
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "mode": "stall-after-content",
+      "applied": true,
+      "status": 200,
+      "relayedBytes": 6673,
+      "chunkCount": 10,
+      "outcome": "STALLED_AFTER_CONTENT_THEN_SOCKET_RESET",
+      "headerBytes": 0,
+      "requestBytes": 1372,
+      "upstreamHeadersAtMs": 1791289226826,
+      "relayedEvents": 22,
+      "contentEvents": 2,
+      "stalledAtMs": 1791289227368,
+      "endTsMs": 1791289239370,
+      "durationMs": 12796
+    }
+  ],
+  "capturedAt": "2026-10-06T12:20:39.393Z"
+}

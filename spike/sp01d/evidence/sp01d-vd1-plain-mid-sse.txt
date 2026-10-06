@@ -1,0 +1,4 @@
+# case=vd1-plain-mid
+start@4ms
+delta@806ms
+error@12818ms

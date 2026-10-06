@@ -1,0 +1,4 @@
+# case=vd1-guarded-first
+start@4ms
+retry@5015ms
+error@10020ms

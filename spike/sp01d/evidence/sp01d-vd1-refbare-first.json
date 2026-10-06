@@ -1,0 +1,82 @@
+{
+  "case": "vd1-refbare-first",
+  "description": "refbare 策略 + 首包静默（代理不发任何字节，9s 后 RST）",
+  "fault": {
+    "mode": "stall",
+    "stallMs": 9000
+  },
+  "sse": {
+    "eventCounts": {
+      "start": 1,
+      "error": 1
+    },
+    "eventSequence": [
+      "start@8ms",
+      "error@5020ms"
+    ],
+    "deltaCount": 0,
+    "concatenatedDeltaText": "",
+    "concatenatedDeltaLen": 0,
+    "duplicatedPrefixLen": 0,
+    "duplicatedPrefixLikely": false,
+    "terminalEvent": "error",
+    "terminalData": {
+      "code": "UPSTREAM_STREAM_ERROR",
+      "message": "模型服务异常，本轮流已终止：IllegalStateException: No StreamAdvisors available to execute",
+      "rawReason": "IllegalStateException: No StreamAdvisors available to execute",
+      "attempts": 2,
+      "partial": false,
+      "toolSideEffect": false,
+      "emittedChars": 0,
+      "elapsedMs": 5015
+    },
+    "elapsedMs": 5022,
+    "clientAborted": false,
+    "streamError": null
+  },
+  "sessionState": {
+    "sessionId": "vd1-refbare-first",
+    "runId": "vd1-refbare-first#1791289175349",
+    "terminal": "FAILED",
+    "cancelled": false,
+    "clientAborted": false,
+    "emittedAny": false,
+    "deltas": 0,
+    "emittedChars": 0,
+    "content": "",
+    "attempts": 1,
+    "elapsedMs": 5015,
+    "attemptRecords": [
+      {
+        "attempt": 1,
+        "outcome": "ERROR",
+        "costMs": 5012,
+        "emittedAnythingBefore": false,
+        "reason": "IllegalStateException: No StreamAdvisors available to execute"
+      }
+    ],
+    "toolCallItems": [],
+    "cancelRegistryRegistered": false,
+    "cancelFlagValue": false,
+    "refSubscriptions": 2,
+    "toolExecutionsForRun": [],
+    "found": true
+  },
+  "wire": [
+    {
+      "seq": 6,
+      "requestIndex": 1,
+      "tsMs": 1791289175364,
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "mode": "stall",
+      "applied": true,
+      "status": null,
+      "relayedBytes": 0,
+      "chunkCount": 0,
+      "outcome": null,
+      "headerBytes": 0
+    }
+  ],
+  "capturedAt": "2026-10-06T12:19:40.376Z"
+}

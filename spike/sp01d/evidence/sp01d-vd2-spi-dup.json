@@ -1,0 +1,94 @@
+{
+  "case": "vd2-spi-dup",
+  "description": "把一个\"两个 tool_call 共用同一 id\"的 AssistantMessage 直接交给官方 ToolCallingManager.executeToolCalls",
+  "runId": "vd2-spi-dup-1791289283523",
+  "response": {
+    "runId": "vd2-spi-dup-1791289283523",
+    "inputAssistantToolCallIds": [
+      "call_dup_same_id",
+      "call_dup_same_id"
+    ],
+    "error": null,
+    "toolExecutionResultHistory": [
+      {
+        "type": "USER",
+        "text": "dup-test"
+      },
+      {
+        "type": "ASSISTANT",
+        "text": "",
+        "toolCallIds": [
+          "call_dup_same_id",
+          "call_dup_same_id"
+        ]
+      },
+      {
+        "type": "TOOL",
+        "text": "",
+        "toolResponseIds": [
+          "call_dup_same_id",
+          "call_dup_same_id"
+        ]
+      }
+    ],
+    "toolResponseIdsInOrder": [
+      "call_dup_same_id",
+      "call_dup_same_id"
+    ],
+    "distinctToolResponseIds": [
+      "call_dup_same_id"
+    ],
+    "executions": [
+      {
+        "seq": 7,
+        "tsMs": 1791289283569,
+        "source": "INTERNAL_LOOP",
+        "runId": "vd2-spi-dup-1791289283523",
+        "toolCallId": null,
+        "name": "getServerTime",
+        "arguments": "{}",
+        "durationMs": 0,
+        "outcome": "OK"
+      },
+      {
+        "seq": 8,
+        "tsMs": 1791289283569,
+        "source": "INTERNAL_LOOP",
+        "runId": "vd2-spi-dup-1791289283523",
+        "toolCallId": null,
+        "name": "getServerTime",
+        "arguments": "{}",
+        "durationMs": 0,
+        "outcome": "OK"
+      }
+    ],
+    "executionCount": 2,
+    "executionCountSameId": 0
+  },
+  "toolExecLogDelta": [
+    {
+      "seq": 7,
+      "tsMs": 1791289283569,
+      "source": "INTERNAL_LOOP",
+      "runId": "vd2-spi-dup-1791289283523",
+      "toolCallId": null,
+      "name": "getServerTime",
+      "arguments": "{}",
+      "durationMs": 0,
+      "outcome": "OK"
+    },
+    {
+      "seq": 8,
+      "tsMs": 1791289283569,
+      "source": "INTERNAL_LOOP",
+      "runId": "vd2-spi-dup-1791289283523",
+      "toolCallId": null,
+      "name": "getServerTime",
+      "arguments": "{}",
+      "durationMs": 0,
+      "outcome": "OK"
+    }
+  ],
+  "toolExecLogTotal": 3,
+  "capturedAt": "2026-10-06T12:21:23.579Z"
+}

@@ -1,0 +1,132 @@
+{
+  "case": "vd1-ref-tooldup",
+  "description": "ref 策略 + 第 2 次上游请求（工具执行后的最终作答）已产出 1 个正文 delta 后静默：验证重试是否重放工具副作用",
+  "fault": {
+    "mode": "stall-after-content",
+    "contentEvents": 1,
+    "stallMs": 12000,
+    "onlyRequestIndex": 2
+  },
+  "sse": {
+    "eventCounts": {
+      "start": 1,
+      "error": 1
+    },
+    "eventSequence": [
+      "start@4ms",
+      "error@6728ms"
+    ],
+    "deltaCount": 0,
+    "concatenatedDeltaText": "",
+    "concatenatedDeltaLen": 0,
+    "duplicatedPrefixLen": 0,
+    "duplicatedPrefixLikely": false,
+    "terminalEvent": "error",
+    "terminalData": {
+      "code": "UPSTREAM_STREAM_ERROR_AFTER_TOOL_SIDE_EFFECT",
+      "message": "模型服务异常，本轮流已终止：IllegalStateException: No StreamAdvisors available to execute",
+      "rawReason": "IllegalStateException: No StreamAdvisors available to execute",
+      "attempts": 2,
+      "partial": false,
+      "toolSideEffect": true,
+      "emittedChars": 0,
+      "elapsedMs": 6722
+    },
+    "elapsedMs": 6730,
+    "clientAborted": false,
+    "streamError": null
+  },
+  "sessionState": {
+    "sessionId": "vd1-ref-tooldup",
+    "runId": "vd1-ref-tooldup#1791289254283",
+    "terminal": "FAILED",
+    "cancelled": false,
+    "clientAborted": false,
+    "emittedAny": false,
+    "deltas": 0,
+    "emittedChars": 0,
+    "content": "",
+    "attempts": 1,
+    "elapsedMs": 6724,
+    "attemptRecords": [
+      {
+        "attempt": 1,
+        "outcome": "ERROR",
+        "costMs": 6722,
+        "emittedAnythingBefore": false,
+        "reason": "IllegalStateException: No StreamAdvisors available to execute"
+      }
+    ],
+    "toolCallItems": [],
+    "cancelRegistryRegistered": false,
+    "cancelFlagValue": false,
+    "refSubscriptions": 2,
+    "toolExecutionsForRun": [
+      {
+        "seq": 3,
+        "tsMs": 1791289255006,
+        "source": "INTERNAL_LOOP",
+        "runId": "vd1-ref-tooldup#1791289254283",
+        "toolCallId": null,
+        "name": "getServerTime",
+        "arguments": "{}",
+        "durationMs": 0,
+        "outcome": "OK"
+      }
+    ],
+    "found": true
+  },
+  "toolExecLog": [
+    {
+      "seq": 3,
+      "tsMs": 1791289255006,
+      "source": "INTERNAL_LOOP",
+      "runId": "vd1-ref-tooldup#1791289254283",
+      "toolCallId": null,
+      "name": "getServerTime",
+      "arguments": "{}",
+      "durationMs": 0,
+      "outcome": "OK"
+    }
+  ],
+  "wire": [
+    {
+      "seq": 18,
+      "requestIndex": 1,
+      "tsMs": 1791289254291,
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "mode": "stall-after-content",
+      "applied": false,
+      "status": 200,
+      "relayedBytes": 0,
+      "chunkCount": 0,
+      "outcome": "PASSTHROUGH_COMPLETE",
+      "headerBytes": 0,
+      "requestBytes": 1254,
+      "upstreamHeadersAtMs": 1791289254478,
+      "endTsMs": 1791289255005,
+      "durationMs": 714
+    },
+    {
+      "seq": 19,
+      "requestIndex": 2,
+      "tsMs": 1791289255020,
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "mode": "stall-after-content",
+      "applied": true,
+      "status": 200,
+      "relayedBytes": 622,
+      "chunkCount": 2,
+      "outcome": null,
+      "headerBytes": 0,
+      "requestBytes": 1541,
+      "upstreamHeadersAtMs": 1791289255246,
+      "relayedEvents": 2,
+      "contentEvents": 1,
+      "stalledAtMs": 1791289256000
+    }
+  ],
+  "capturedAt": "2026-10-06T12:21:01.029Z"
+}

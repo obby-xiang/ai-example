@@ -1,0 +1,21 @@
+{
+  "seq": 9,
+  "requestIndex": 1,
+  "tsMs": 1791289214391,
+  "method": "POST",
+  "path": "/v1/chat/completions",
+  "mode": "stall-after-content",
+  "applied": true,
+  "status": 200,
+  "relayedBytes": 8167,
+  "chunkCount": 10,
+  "outcome": "STALLED_AFTER_CONTENT_THEN_SOCKET_RESET",
+  "headerBytes": 0,
+  "requestBytes": 1372,
+  "upstreamHeadersAtMs": 1791289214566,
+  "relayedEvents": 27,
+  "contentEvents": 2,
+  "stalledAtMs": 1791289215231,
+  "endTsMs": 1791289227230,
+  "durationMs": 12839
+}

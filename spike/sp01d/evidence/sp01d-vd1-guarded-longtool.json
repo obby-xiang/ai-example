@@ -1,0 +1,107 @@
+{
+  "case": "vd1-guarded-longtool",
+  "description": "guarded 策略 + 8s 工具、首包超时 5s、无取消：验证工具执行期间无下游事件时超时的表现",
+  "sse": {
+    "eventCounts": {
+      "start": 1,
+      "error": 1
+    },
+    "eventSequence": [
+      "start@4ms",
+      "error@7353ms"
+    ],
+    "deltaCount": 0,
+    "concatenatedDeltaText": "",
+    "concatenatedDeltaLen": 0,
+    "duplicatedPrefixLen": 0,
+    "duplicatedPrefixLikely": false,
+    "terminalEvent": "error",
+    "terminalData": {
+      "code": "UPSTREAM_SILENT_TIMEOUT_AFTER_TOOL_SIDE_EFFECT",
+      "message": "模型服务在约定时间内没有任何事件（上游静默），本轮流已终止。",
+      "rawReason": "TimeoutException: Did not observe any item or terminal signal within first signal from a Publisher in 'handle' (and no fallback has been configured)",
+      "attempts": 1,
+      "partial": false,
+      "toolSideEffect": true,
+      "emittedChars": 0,
+      "elapsedMs": 7349
+    },
+    "elapsedMs": 7355,
+    "clientAborted": false,
+    "streamError": null
+  },
+  "sessionState": {
+    "sessionId": "vd1-guarded-longtool",
+    "runId": "vd1-guarded-longtool#1791289268032",
+    "terminal": "FAILED",
+    "cancelled": false,
+    "clientAborted": false,
+    "emittedAny": false,
+    "deltas": 0,
+    "emittedChars": 0,
+    "content": "",
+    "attempts": 1,
+    "elapsedMs": 7349,
+    "attemptRecords": [
+      {
+        "attempt": 1,
+        "outcome": "ERROR",
+        "costMs": 7349,
+        "emittedAnythingBefore": false,
+        "reason": "TimeoutException: Did not observe any item or terminal signal within first signal from a Publisher in 'handle' (and no fallback has been configured)"
+      }
+    ],
+    "toolCallItems": [],
+    "cancelRegistryRegistered": false,
+    "cancelFlagValue": false,
+    "refSubscriptions": 0,
+    "toolExecutionsForRun": [
+      {
+        "seq": 5,
+        "tsMs": 1791289275381,
+        "source": "INTERNAL_LOOP",
+        "runId": "vd1-guarded-longtool#1791289268032",
+        "toolCallId": null,
+        "name": "longTask",
+        "arguments": "{\"seconds\":8,\"cooperative\":false}",
+        "durationMs": 5999,
+        "outcome": "OK"
+      }
+    ],
+    "found": true
+  },
+  "toolExecLog": [
+    {
+      "seq": 5,
+      "tsMs": 1791289275381,
+      "source": "INTERNAL_LOOP",
+      "runId": "vd1-guarded-longtool#1791289268032",
+      "toolCallId": null,
+      "name": "longTask",
+      "arguments": "{\"seconds\":8,\"cooperative\":false}",
+      "durationMs": 5999,
+      "outcome": "OK"
+    }
+  ],
+  "wire": [
+    {
+      "seq": 22,
+      "requestIndex": 1,
+      "tsMs": 1791289268039,
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "mode": "none",
+      "applied": false,
+      "status": 200,
+      "relayedBytes": 0,
+      "chunkCount": 0,
+      "outcome": "PASSTHROUGH_COMPLETE",
+      "headerBytes": 0,
+      "requestBytes": 1309,
+      "upstreamHeadersAtMs": 1791289268263,
+      "endTsMs": 1791289269379,
+      "durationMs": 1340
+    }
+  ],
+  "capturedAt": "2026-10-06T12:21:15.398Z"
+}

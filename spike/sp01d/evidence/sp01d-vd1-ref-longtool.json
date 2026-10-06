@@ -1,0 +1,107 @@
+{
+  "case": "vd1-ref-longtool",
+  "description": "ref 策略 + 8s 工具、首包超时 5s、无取消：验证工具执行期间无下游事件时超时的表现",
+  "sse": {
+    "eventCounts": {
+      "start": 1,
+      "error": 1
+    },
+    "eventSequence": [
+      "start@5ms",
+      "error@5825ms"
+    ],
+    "deltaCount": 0,
+    "concatenatedDeltaText": "",
+    "concatenatedDeltaLen": 0,
+    "duplicatedPrefixLen": 0,
+    "duplicatedPrefixLikely": false,
+    "terminalEvent": "error",
+    "terminalData": {
+      "code": "UPSTREAM_STREAM_ERROR_AFTER_TOOL_SIDE_EFFECT",
+      "message": "模型服务异常，本轮流已终止：IllegalStateException: No StreamAdvisors available to execute",
+      "rawReason": "IllegalStateException: No StreamAdvisors available to execute",
+      "attempts": 2,
+      "partial": false,
+      "toolSideEffect": true,
+      "emittedChars": 0,
+      "elapsedMs": 5820
+    },
+    "elapsedMs": 5827,
+    "clientAborted": false,
+    "streamError": null
+  },
+  "sessionState": {
+    "sessionId": "vd1-ref-longtool",
+    "runId": "vd1-ref-longtool#1791289275554",
+    "terminal": "FAILED",
+    "cancelled": false,
+    "clientAborted": false,
+    "emittedAny": false,
+    "deltas": 0,
+    "emittedChars": 0,
+    "content": "",
+    "attempts": 1,
+    "elapsedMs": 5820,
+    "attemptRecords": [
+      {
+        "attempt": 1,
+        "outcome": "ERROR",
+        "costMs": 5819,
+        "emittedAnythingBefore": false,
+        "reason": "IllegalStateException: No StreamAdvisors available to execute"
+      }
+    ],
+    "toolCallItems": [],
+    "cancelRegistryRegistered": false,
+    "cancelFlagValue": false,
+    "refSubscriptions": 2,
+    "toolExecutionsForRun": [
+      {
+        "seq": 6,
+        "tsMs": 1791289281373,
+        "source": "INTERNAL_LOOP",
+        "runId": "vd1-ref-longtool#1791289275554",
+        "toolCallId": null,
+        "name": "longTask",
+        "arguments": "{\"seconds\":8,\"cooperative\":false}",
+        "durationMs": 5002,
+        "outcome": "OK"
+      }
+    ],
+    "found": true
+  },
+  "toolExecLog": [
+    {
+      "seq": 6,
+      "tsMs": 1791289281373,
+      "source": "INTERNAL_LOOP",
+      "runId": "vd1-ref-longtool#1791289275554",
+      "toolCallId": null,
+      "name": "longTask",
+      "arguments": "{\"seconds\":8,\"cooperative\":false}",
+      "durationMs": 5002,
+      "outcome": "OK"
+    }
+  ],
+  "wire": [
+    {
+      "seq": 23,
+      "requestIndex": 1,
+      "tsMs": 1791289275563,
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "mode": "none",
+      "applied": false,
+      "status": 200,
+      "relayedBytes": 0,
+      "chunkCount": 0,
+      "outcome": "PASSTHROUGH_COMPLETE",
+      "headerBytes": 0,
+      "requestBytes": 1309,
+      "upstreamHeadersAtMs": 1791289275762,
+      "endTsMs": 1791289276371,
+      "durationMs": 808
+    }
+  ],
+  "capturedAt": "2026-10-06T12:21:21.391Z"
+}

@@ -1,0 +1,346 @@
+{
+  "case": "vd3-hard",
+  "description": "longTask(3s, cooperative=false) 执行中发送取消信号",
+  "timeline": {
+    "runStartMs": 1791289289027,
+    "startEventAtMs": 1791289289032,
+    "toolCallEventAtMs": null,
+    "toolActiveAtMs": 1791289290373,
+    "cancelSentAtMs": 1791289291273,
+    "cancelAckAtMs": 1791289291276,
+    "streamEndedAtMs": 1791289293863,
+    "msFromCancelToStreamEnd": 2590
+  },
+  "cancelResponse": {
+    "found": true,
+    "runId": "vd3-hard#1791289289030",
+    "registryRegistered": true,
+    "cancelSignalTsMs": 1791289291274,
+    "elapsedSinceRunStartMs": 2244
+  },
+  "doneEvent": {
+    "cancelled": true,
+    "terminal": "CANCELLED",
+    "content": "",
+    "emittedChars": 0,
+    "deltas": 0,
+    "attempts": 1,
+    "elapsedMs": 4832
+  },
+  "allEvents": [
+    {
+      "tsOffsetMs": 5,
+      "event": "start",
+      "data": {
+        "sessionId": "vd3-hard",
+        "runId": "vd3-hard#1791289289030",
+        "strategy": "guarded",
+        "firstEventTimeoutMs": 5000,
+        "interEventTimeoutMs": 6000,
+        "maxAttempts": 2,
+        "totalBudgetMs": 20000
+      }
+    },
+    {
+      "tsOffsetMs": 4835,
+      "event": "done",
+      "data": {
+        "cancelled": true,
+        "terminal": "CANCELLED",
+        "content": "",
+        "emittedChars": 0,
+        "deltas": 0,
+        "attempts": 1,
+        "elapsedMs": 4832
+      }
+    }
+  ],
+  "sessionState": {
+    "sessionId": "vd3-hard",
+    "runId": "vd3-hard#1791289289030",
+    "terminal": "CANCELLED",
+    "cancelled": true,
+    "clientAborted": false,
+    "emittedAny": false,
+    "deltas": 0,
+    "emittedChars": 0,
+    "content": "",
+    "attempts": 1,
+    "elapsedMs": 4832,
+    "attemptRecords": [
+      {
+        "attempt": 1,
+        "outcome": "COMPLETED",
+        "costMs": 4832,
+        "emittedAnythingBefore": false,
+        "reason": null
+      }
+    ],
+    "toolCallItems": [],
+    "cancelRegistryRegistered": false,
+    "cancelFlagValue": true,
+    "refSubscriptions": 0,
+    "toolExecutionsForRun": [
+      {
+        "seq": 11,
+        "tsMs": 1791289293358,
+        "source": "INTERNAL_LOOP",
+        "runId": "vd3-hard#1791289289030",
+        "toolCallId": null,
+        "name": "longTask",
+        "arguments": "{\"seconds\":3,\"cooperative\":false}",
+        "durationMs": 3000,
+        "outcome": "OK"
+      }
+    ],
+    "found": true
+  },
+  "toolExecLog": [
+    {
+      "seq": 11,
+      "tsMs": 1791289293358,
+      "source": "INTERNAL_LOOP",
+      "runId": "vd3-hard#1791289289030",
+      "toolCallId": null,
+      "name": "longTask",
+      "arguments": "{\"seconds\":3,\"cooperative\":false}",
+      "durationMs": 3000,
+      "outcome": "OK"
+    }
+  ],
+  "toolActivity": {
+    "active": {},
+    "lastFinished": {
+      "vd3-coop#1791289285944": {
+        "slices": 5,
+        "enteredAtMs": 1791289287166,
+        "exitedAtMs": 1791289288170,
+        "runId": "vd3-coop#1791289285944",
+        "detail": "seconds=8,cooperative=true",
+        "tool": "longTask",
+        "outcome": "CANCELLED"
+      },
+      "vd1-ref-longtool#1791289275554": {
+        "slices": 0,
+        "enteredAtMs": 1791289276371,
+        "exitedAtMs": 1791289281373,
+        "runId": "vd1-ref-longtool#1791289275554",
+        "detail": "seconds=8,cooperative=false",
+        "tool": "longTask",
+        "outcome": "OK"
+      },
+      "vd1-guarded-longtool#1791289268032": {
+        "slices": 0,
+        "enteredAtMs": 1791289269382,
+        "exitedAtMs": 1791289275380,
+        "runId": "vd1-guarded-longtool#1791289268032",
+        "detail": "seconds=8,cooperative=false",
+        "tool": "longTask",
+        "outcome": "OK"
+      },
+      "vd3-hard#1791289289030": {
+        "slices": 0,
+        "enteredAtMs": 1791289290358,
+        "exitedAtMs": 1791289293358,
+        "runId": "vd3-hard#1791289289030",
+        "detail": "seconds=3,cooperative=false",
+        "tool": "longTask",
+        "outcome": "OK"
+      }
+    }
+  },
+  "cancelRegistryState": {
+    "registered": [],
+    "activeThreads": [
+      {
+        "thread": "spike-run-7",
+        "state": "WAITING",
+        "blockedInRun": false,
+        "topFrames": [
+          "java.base@21.0.12/jdk.internal.misc.Unsafe.park(Native Method)",
+          "java.base@21.0.12/java.util.concurrent.locks.LockSupport.park(LockSupport.java:371)",
+          "java.base@21.0.12/java.util.concurrent.locks.AbstractQueuedSynchronizer$ConditionNode.block(AbstractQueuedSynchronizer.java:519)",
+          "java.base@21.0.12/java.util.concurrent.ForkJoinPool.unmanagedBlock(ForkJoinPool.java:3778)",
+          "java.base@21.0.12/java.util.concurrent.ForkJoinPool.managedBlock(ForkJoinPool.java:3723)",
+          "java.base@21.0.12/java.util.concurrent.locks.AbstractQueuedSynchronizer$ConditionObject.await(AbstractQueuedSynchronizer.java:1712)",
+          "java.base@21.0.12/java.util.concurrent.LinkedBlockingQueue.take(LinkedBlockingQueue.java:435)",
+          "java.base@21.0.12/java.util.concurrent.ThreadPoolExecutor.getTask(ThreadPoolExecutor.java:1070)",
+          "java.base@21.0.12/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1130)",
+          "java.base@21.0.12/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642)",
+          "java.base@21.0.12/java.lang.Thread.runWith(Thread.java:1596)",
+          "java.base@21.0.12/java.lang.Thread.run(Thread.java:1583)"
+        ]
+      },
+      {
+        "thread": "spike-run-5",
+        "state": "WAITING",
+        "blockedInRun": false,
+        "topFrames": [
+          "java.base@21.0.12/jdk.internal.misc.Unsafe.park(Native Method)",
+          "java.base@21.0.12/java.util.concurrent.locks.LockSupport.park(LockSupport.java:371)",
+          "java.base@21.0.12/java.util.concurrent.locks.AbstractQueuedSynchronizer$ConditionNode.block(AbstractQueuedSynchronizer.java:519)",
+          "java.base@21.0.12/java.util.concurrent.ForkJoinPool.unmanagedBlock(ForkJoinPool.java:3778)",
+          "java.base@21.0.12/java.util.concurrent.ForkJoinPool.managedBlock(ForkJoinPool.java:3723)",
+          "java.base@21.0.12/java.util.concurrent.locks.AbstractQueuedSynchronizer$ConditionObject.await(AbstractQueuedSynchronizer.java:1712)",
+          "java.base@21.0.12/java.util.concurrent.LinkedBlockingQueue.take(LinkedBlockingQueue.java:435)",
+          "java.base@21.0.12/java.util.concurrent.ThreadPoolExecutor.getTask(ThreadPoolExecutor.java:1070)",
+          "java.base@21.0.12/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1130)",
+          "java.base@21.0.12/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642)",
+          "java.base@21.0.12/java.lang.Thread.runWith(Thread.java:1596)",
+          "java.base@21.0.12/java.lang.Thread.run(Thread.java:1583)"
+        ]
+      },
+      {
+        "thread": "spike-run-2",
+        "state": "WAITING",
+        "blockedInRun": false,
+        "topFrames": [
+          "java.base@21.0.12/jdk.internal.misc.Unsafe.park(Native Method)",
+          "java.base@21.0.12/java.util.concurrent.locks.LockSupport.park(LockSupport.java:371)",
+          "java.base@21.0.12/java.util.concurrent.locks.AbstractQueuedSynchronizer$ConditionNode.block(AbstractQueuedSynchronizer.java:519)",
+          "java.base@21.0.12/java.util.concurrent.ForkJoinPool.unmanagedBlock(ForkJoinPool.java:3778)",
+          "java.base@21.0.12/java.util.concurrent.ForkJoinPool.managedBlock(ForkJoinPool.java:3723)",
+          "java.base@21.0.12/java.util.concurrent.locks.AbstractQueuedSynchronizer$ConditionObject.await(AbstractQueuedSynchronizer.java:1712)",
+          "java.base@21.0.12/java.util.concurrent.LinkedBlockingQueue.take(LinkedBlockingQueue.java:435)",
+          "java.base@21.0.12/java.util.concurrent.ThreadPoolExecutor.getTask(ThreadPoolExecutor.java:1070)",
+          "java.base@21.0.12/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1130)",
+          "java.base@21.0.12/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642)",
+          "java.base@21.0.12/java.lang.Thread.runWith(Thread.java:1596)",
+          "java.base@21.0.12/java.lang.Thread.run(Thread.java:1583)"
+        ]
+      },
+      {
+        "thread": "spike-run-3",
+        "state": "WAITING",
+        "blockedInRun": false,
+        "topFrames": [
+          "java.base@21.0.12/jdk.internal.misc.Unsafe.park(Native Method)",
+          "java.base@21.0.12/java.util.concurrent.locks.LockSupport.park(LockSupport.java:371)",
+          "java.base@21.0.12/java.util.concurrent.locks.AbstractQueuedSynchronizer$ConditionNode.block(AbstractQueuedSynchronizer.java:519)",
+          "java.base@21.0.12/java.util.concurrent.ForkJoinPool.unmanagedBlock(ForkJoinPool.java:3778)",
+          "java.base@21.0.12/java.util.concurrent.ForkJoinPool.managedBlock(ForkJoinPool.java:3723)",
+          "java.base@21.0.12/java.util.concurrent.locks.AbstractQueuedSynchronizer$ConditionObject.await(AbstractQueuedSynchronizer.java:1712)",
+          "java.base@21.0.12/java.util.concurrent.LinkedBlockingQueue.take(LinkedBlockingQueue.java:435)",
+          "java.base@21.0.12/java.util.concurrent.ThreadPoolExecutor.getTask(ThreadPoolExecutor.java:1070)",
+          "java.base@21.0.12/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1130)",
+          "java.base@21.0.12/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642)",
+          "java.base@21.0.12/java.lang.Thread.runWith(Thread.java:1596)",
+          "java.base@21.0.12/java.lang.Thread.run(Thread.java:1583)"
+        ]
+      },
+      {
+        "thread": "spike-run-8",
+        "state": "WAITING",
+        "blockedInRun": false,
+        "topFrames": [
+          "java.base@21.0.12/jdk.internal.misc.Unsafe.park(Native Method)",
+          "java.base@21.0.12/java.util.concurrent.locks.LockSupport.park(LockSupport.java:371)",
+          "java.base@21.0.12/java.util.concurrent.locks.AbstractQueuedSynchronizer$ConditionNode.block(AbstractQueuedSynchronizer.java:519)",
+          "java.base@21.0.12/java.util.concurrent.ForkJoinPool.unmanagedBlock(ForkJoinPool.java:3778)",
+          "java.base@21.0.12/java.util.concurrent.ForkJoinPool.managedBlock(ForkJoinPool.java:3723)",
+          "java.base@21.0.12/java.util.concurrent.locks.AbstractQueuedSynchronizer$ConditionObject.await(AbstractQueuedSynchronizer.java:1712)",
+          "java.base@21.0.12/java.util.concurrent.LinkedBlockingQueue.take(LinkedBlockingQueue.java:435)",
+          "java.base@21.0.12/java.util.concurrent.ThreadPoolExecutor.getTask(ThreadPoolExecutor.java:1070)",
+          "java.base@21.0.12/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1130)",
+          "java.base@21.0.12/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642)",
+          "java.base@21.0.12/java.lang.Thread.runWith(Thread.java:1596)",
+          "java.base@21.0.12/java.lang.Thread.run(Thread.java:1583)"
+        ]
+      },
+      {
+        "thread": "spike-run-4",
+        "state": "WAITING",
+        "blockedInRun": false,
+        "topFrames": [
+          "java.base@21.0.12/jdk.internal.misc.Unsafe.park(Native Method)",
+          "java.base@21.0.12/java.util.concurrent.locks.LockSupport.park(LockSupport.java:371)",
+          "java.base@21.0.12/java.util.concurrent.locks.AbstractQueuedSynchronizer$ConditionNode.block(AbstractQueuedSynchronizer.java:519)",
+          "java.base@21.0.12/java.util.concurrent.ForkJoinPool.unmanagedBlock(ForkJoinPool.java:3778)",
+          "java.base@21.0.12/java.util.concurrent.ForkJoinPool.managedBlock(ForkJoinPool.java:3723)",
+          "java.base@21.0.12/java.util.concurrent.locks.AbstractQueuedSynchronizer$ConditionObject.await(AbstractQueuedSynchronizer.java:1712)",
+          "java.base@21.0.12/java.util.concurrent.LinkedBlockingQueue.take(LinkedBlockingQueue.java:435)",
+          "java.base@21.0.12/java.util.concurrent.ThreadPoolExecutor.getTask(ThreadPoolExecutor.java:1070)",
+          "java.base@21.0.12/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1130)",
+          "java.base@21.0.12/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642)",
+          "java.base@21.0.12/java.lang.Thread.runWith(Thread.java:1596)",
+          "java.base@21.0.12/java.lang.Thread.run(Thread.java:1583)"
+        ]
+      },
+      {
+        "thread": "spike-run-6",
+        "state": "WAITING",
+        "blockedInRun": false,
+        "topFrames": [
+          "java.base@21.0.12/jdk.internal.misc.Unsafe.park(Native Method)",
+          "java.base@21.0.12/java.util.concurrent.locks.LockSupport.park(LockSupport.java:371)",
+          "java.base@21.0.12/java.util.concurrent.locks.AbstractQueuedSynchronizer$ConditionNode.block(AbstractQueuedSynchronizer.java:519)",
+          "java.base@21.0.12/java.util.concurrent.ForkJoinPool.unmanagedBlock(ForkJoinPool.java:3778)",
+          "java.base@21.0.12/java.util.concurrent.ForkJoinPool.managedBlock(ForkJoinPool.java:3723)",
+          "java.base@21.0.12/java.util.concurrent.locks.AbstractQueuedSynchronizer$ConditionObject.await(AbstractQueuedSynchronizer.java:1712)",
+          "java.base@21.0.12/java.util.concurrent.LinkedBlockingQueue.take(LinkedBlockingQueue.java:435)",
+          "java.base@21.0.12/java.util.concurrent.ThreadPoolExecutor.getTask(ThreadPoolExecutor.java:1070)",
+          "java.base@21.0.12/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1130)",
+          "java.base@21.0.12/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642)",
+          "java.base@21.0.12/java.lang.Thread.runWith(Thread.java:1596)",
+          "java.base@21.0.12/java.lang.Thread.run(Thread.java:1583)"
+        ]
+      },
+      {
+        "thread": "spike-run-1",
+        "state": "WAITING",
+        "blockedInRun": false,
+        "topFrames": [
+          "java.base@21.0.12/jdk.internal.misc.Unsafe.park(Native Method)",
+          "java.base@21.0.12/java.util.concurrent.locks.LockSupport.park(LockSupport.java:371)",
+          "java.base@21.0.12/java.util.concurrent.locks.AbstractQueuedSynchronizer$ConditionNode.block(AbstractQueuedSynchronizer.java:519)",
+          "java.base@21.0.12/java.util.concurrent.ForkJoinPool.unmanagedBlock(ForkJoinPool.java:3778)",
+          "java.base@21.0.12/java.util.concurrent.ForkJoinPool.managedBlock(ForkJoinPool.java:3723)",
+          "java.base@21.0.12/java.util.concurrent.locks.AbstractQueuedSynchronizer$ConditionObject.await(AbstractQueuedSynchronizer.java:1712)",
+          "java.base@21.0.12/java.util.concurrent.LinkedBlockingQueue.take(LinkedBlockingQueue.java:435)",
+          "java.base@21.0.12/java.util.concurrent.ThreadPoolExecutor.getTask(ThreadPoolExecutor.java:1070)",
+          "java.base@21.0.12/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1130)",
+          "java.base@21.0.12/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642)",
+          "java.base@21.0.12/java.lang.Thread.runWith(Thread.java:1596)",
+          "java.base@21.0.12/java.lang.Thread.run(Thread.java:1583)"
+        ]
+      }
+    ]
+  },
+  "wire": [
+    {
+      "seq": 28,
+      "requestIndex": 1,
+      "tsMs": 1791289289036,
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "mode": "none",
+      "applied": false,
+      "status": 200,
+      "relayedBytes": 0,
+      "chunkCount": 0,
+      "outcome": "PASSTHROUGH_COMPLETE",
+      "headerBytes": 0,
+      "requestBytes": 1309,
+      "upstreamHeadersAtMs": 1791289289207,
+      "endTsMs": 1791289290355,
+      "durationMs": 1319
+    },
+    {
+      "seq": 29,
+      "requestIndex": 2,
+      "tsMs": 1791289293360,
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "mode": "none",
+      "applied": false,
+      "status": 200,
+      "relayedBytes": 0,
+      "chunkCount": 0,
+      "outcome": null,
+      "headerBytes": 0,
+      "requestBytes": 1659,
+      "upstreamHeadersAtMs": 1791289293548
+    }
+  ],
+  "capturedAt": "2026-10-06T12:21:33.882Z"
+}
