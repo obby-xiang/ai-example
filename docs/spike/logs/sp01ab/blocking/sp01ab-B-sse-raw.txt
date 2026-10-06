@@ -1,0 +1,29 @@
+# SSE subscribe http://127.0.0.1:18301/api/events/sp01ab-B-20261006-194824 at 2026-10-06T11:48:24.548Z
+# HTTP 200 content-type=text/event-stream
+[+000004ms] event:subscribed
+[+000005ms] data:{"seq":1,"ts":"2026-10-06T19:48:24.549+08:00","sessionId":"sp01ab-B-20261006-194824","event":"subscribed","data":{"sessionId":"sp01ab-B-20261006-194824","subscribers":1,"heartbeatMs":2000}}
+[+000005ms] 
+[+000813ms] event:start
+[+000816ms] data:{"seq":2,"ts":"2026-10-06T19:48:25.360+08:00","sessionId":"sp01ab-B-20261006-194824","event":"start","data":{"message":"请删除配置 def-777（这是一次真实的删除操作，按工具规则执行）。","toolNames":["calculate","get_user_profile","delete_config"],"frontendToolTimeoutSeconds":60,"confirmTimeoutSeconds":30}}
+[+000833ms] 
+[+001540ms] event:ping
+[+001540ms] data:{"seq":3,"ts":"2026-10-06T19:48:26.088+08:00","sessionId":"sp01ab-B-20261006-194824","event":"ping","data":{"tick":55,"pending":null,"subscribers":1}}
+[+001540ms] 
+[+001768ms] event:tool_start
+[+001768ms] data:{"seq":4,"ts":"2026-10-06T19:48:26.316+08:00","sessionId":"sp01ab-B-20261006-194824","event":"tool_start","data":{"toolCallId":"call_00_SXSpNHmX8UIlWhmb65Ga2181","name":"delete_config","kind":"sensitive","args":{"code":"def-777"}}}
+[+001769ms] 
+[+001769ms] event:confirm_request
+[+001769ms] data:{"seq":5,"ts":"2026-10-06T19:48:26.316+08:00","sessionId":"sp01ab-B-20261006-194824","event":"confirm_request","data":{"toolCallId":"call_00_SXSpNHmX8UIlWhmb65Ga2181","name":"delete_config","args":{"code":"def-777"},"summary":"{code=def-777}","timeoutSeconds":30,"callback":"POST /api/confirm {sessionId, toolCallId, approved, reason}"}}
+[+001769ms] 
+[+001779ms] event:confirm_decision
+[+001780ms] data:{"seq":6,"ts":"2026-10-06T19:48:26.327+08:00","sessionId":"sp01ab-B-20261006-194824","event":"confirm_decision","data":{"toolCallId":"call_00_SXSpNHmX8UIlWhmb65Ga2181","name":"delete_config","decision":"approve","approved":true,"reason":"PoC：人工确认放行","source":"http-post","waitedMs":11}}
+[+001780ms] 
+[+001781ms] event:tool_result
+[+001781ms] data:{"seq":7,"ts":"2026-10-06T19:48:26.328+08:00","sessionId":"sp01ab-B-20261006-194824","event":"tool_result","data":{"toolCallId":"call_00_SXSpNHmX8UIlWhmb65Ga2181","name":"delete_config","ok":true,"executed":true,"result":"\"后端已执行删除：配置 def-777 及其 3 行生效数据已删除。\""}}
+[+001781ms] 
+[+003184ms] event:model_reply
+[+003184ms] data:{"seq":8,"ts":"2026-10-06T19:48:27.731+08:00","sessionId":"sp01ab-B-20261006-194824","event":"model_reply","data":{"content":"已执行完成：\n\n- 配置定义 **def-777** 已删除\n- 同时连带删除了 **3 行**生效数据\n\n说明：该操作为破坏性且不可恢复的操作，相关配置定义与生效数据均已从后端移除。如果这是误操作，需要重新创建 def-777 的配置定义并重建那 3 行生效数据。","model":"deepseek-flash","finishReason":"STOP"}}
+[+003185ms] 
+[+003185ms] event:done
+[+003185ms] data:{"seq":9,"ts":"2026-10-06T19:48:27.731+08:00","sessionId":"sp01ab-B-20261006-194824","event":"done","data":{"content":"已执行完成：\n\n- 配置定义 **def-777** 已删除\n- 同时连带删除了 **3 行**生效数据\n\n说明：该操作为破坏性且不可恢复的操作，相关配置定义与生效数据均已从后端移除。如果这是误操作，需要重新创建 def-777 的配置定义并重建那 3 行生效数据。","elapsedMs":2371,"failed":false}}
+[+003185ms] 

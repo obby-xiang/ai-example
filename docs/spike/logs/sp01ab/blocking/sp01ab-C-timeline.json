@@ -1,0 +1,135 @@
+{
+  "sessionId": "sp01ab-C-20261006-194828",
+  "exists": true,
+  "events": [
+    {
+      "seq": 1,
+      "ts": "2026-10-06T19:48:28.057+08:00",
+      "sessionId": "sp01ab-C-20261006-194828",
+      "event": "subscribed",
+      "data": {
+        "sessionId": "sp01ab-C-20261006-194828",
+        "subscribers": 1,
+        "heartbeatMs": 2000
+      }
+    },
+    {
+      "seq": 2,
+      "ts": "2026-10-06T19:48:28.088+08:00",
+      "sessionId": "sp01ab-C-20261006-194828",
+      "event": "ping",
+      "data": {
+        "tick": 56,
+        "pending": null,
+        "subscribers": 1
+      }
+    },
+    {
+      "seq": 3,
+      "ts": "2026-10-06T19:48:28.865+08:00",
+      "sessionId": "sp01ab-C-20261006-194828",
+      "event": "start",
+      "data": {
+        "message": "请删除配置 def-777（这是一次真实的删除操作，按工具规则执行）。",
+        "toolNames": [
+          "calculate",
+          "get_user_profile",
+          "delete_config"
+        ],
+        "frontendToolTimeoutSeconds": 60,
+        "confirmTimeoutSeconds": 30
+      }
+    },
+    {
+      "seq": 4,
+      "ts": "2026-10-06T19:48:30.003+08:00",
+      "sessionId": "sp01ab-C-20261006-194828",
+      "event": "tool_start",
+      "data": {
+        "toolCallId": "call_00_0jN7srJPqCB9smxjXenq2688",
+        "name": "delete_config",
+        "kind": "sensitive",
+        "args": {
+          "code": "def-777"
+        }
+      }
+    },
+    {
+      "seq": 5,
+      "ts": "2026-10-06T19:48:30.003+08:00",
+      "sessionId": "sp01ab-C-20261006-194828",
+      "event": "confirm_request",
+      "data": {
+        "toolCallId": "call_00_0jN7srJPqCB9smxjXenq2688",
+        "name": "delete_config",
+        "args": {
+          "code": "def-777"
+        },
+        "summary": "{code=def-777}",
+        "timeoutSeconds": 30,
+        "callback": "POST /api/confirm {sessionId, toolCallId, approved, reason}"
+      }
+    },
+    {
+      "seq": 6,
+      "ts": "2026-10-06T19:48:30.026+08:00",
+      "sessionId": "sp01ab-C-20261006-194828",
+      "event": "confirm_decision",
+      "data": {
+        "toolCallId": "call_00_0jN7srJPqCB9smxjXenq2688",
+        "name": "delete_config",
+        "decision": "reject",
+        "approved": false,
+        "reason": "该配置在生产环境仍被引用，禁止删除",
+        "source": "http-post",
+        "waitedMs": 23
+      }
+    },
+    {
+      "seq": 7,
+      "ts": "2026-10-06T19:48:30.026+08:00",
+      "sessionId": "sp01ab-C-20261006-194828",
+      "event": "tool_result",
+      "data": {
+        "toolCallId": "call_00_0jN7srJPqCB9smxjXenq2688",
+        "name": "delete_config",
+        "ok": false,
+        "executed": false,
+        "result": "用户拒绝了该操作，工具未执行。拒绝原因：该配置在生产环境仍被引用，禁止删除"
+      }
+    },
+    {
+      "seq": 8,
+      "ts": "2026-10-06T19:48:30.088+08:00",
+      "sessionId": "sp01ab-C-20261006-194828",
+      "event": "ping",
+      "data": {
+        "tick": 57,
+        "pending": null,
+        "subscribers": 1
+      }
+    },
+    {
+      "seq": 9,
+      "ts": "2026-10-06T19:48:31.613+08:00",
+      "sessionId": "sp01ab-C-20261006-194828",
+      "event": "model_reply",
+      "data": {
+        "content": "删除操作**未执行**——已被拒绝，配置 `def-777` 仍然存在。\n\n**拒绝原因**：该配置在生产环境中仍被引用，禁止删除。\n\n**说明与建议**：\n- 由于存在生产环境引用，直接删除会连带清除生效数据行，可能导致依赖该配置的服务异常，因此该请求被拦截。\n- 若确实需要下线，建议按以下顺序推进：\n  1. 先排查并解除所有生产环境对该配置的引用（确认调用方已切换到新配置）；\n  2. 确认无引用后，再重新发起删除；\n  3. 如需保留可追溯性，可考虑先停用/归档而非直接删除。\n\n如果你能提供引用方清单或迁移进度，我可以协助确认下一步是否可以安全删除。",
+        "model": "deepseek-flash",
+        "finishReason": "STOP"
+      }
+    },
+    {
+      "seq": 10,
+      "ts": "2026-10-06T19:48:31.613+08:00",
+      "sessionId": "sp01ab-C-20261006-194828",
+      "event": "done",
+      "data": {
+        "content": "删除操作**未执行**——已被拒绝，配置 `def-777` 仍然存在。\n\n**拒绝原因**：该配置在生产环境中仍被引用，禁止删除。\n\n**说明与建议**：\n- 由于存在生产环境引用，直接删除会连带清除生效数据行，可能导致依赖该配置的服务异常，因此该请求被拦截。\n- 若确实需要下线，建议按以下顺序推进：\n  1. 先排查并解除所有生产环境对该配置的引用（确认调用方已切换到新配置）；\n  2. 确认无引用后，再重新发起删除；\n  3. 如需保留可追溯性，可考虑先停用/归档而非直接删除。\n\n如果你能提供引用方清单或迁移进度，我可以协助确认下一步是否可以安全删除。",
+        "elapsedMs": 2748,
+        "failed": false
+      }
+    }
+  ]
+}

@@ -1,0 +1,62 @@
+################ 场景 A 事件时序（服务端留档，seq 单调递增）############
+001 2026-10-06T19:48:20.816+08:00 subscribed             {"sessionId":"sp01ab-A-20261006-194820","subscribers":1,"heartbeatMs":2000}
+002 2026-10-06T19:48:21.634+08:00 start                  {"frontendToolTimeoutSeconds":60,"confirmTimeoutSeconds":30}
+003 2026-10-06T19:48:22.089+08:00 ping                   {"tick":53,"pending":null,"subscribers":1}
+004 2026-10-06T19:48:22.761+08:00 tool_start             {"toolCallId":"call_00_2mlyKdDAa632I3BlTwkv0134","name":"calculate","kind":"backend","args":{"a":6,"operator":"multiply","b":7}}
+005 2026-10-06T19:48:22.762+08:00 tool_result            {"toolCallId":"call_00_2mlyKdDAa632I3BlTwkv0134","name":"calculate","ok":true,"executed":true,"result":"\"后端计算器结果：6 multiply 7 = 42\""}
+006 2026-10-06T19:48:22.762+08:00 tool_start             {"toolCallId":"call_01_oxvRnYpfL9KrvWwPydK22039","name":"get_user_profile","kind":"frontend","args":{"userId":"u-1024"}}
+007 2026-10-06T19:48:22.763+08:00 frontend_tool_request  {"toolCallId":"call_01_oxvRnYpfL9KrvWwPydK22039","name":"get_user_profile","args":{"userId":"u-1024"},"timeoutSeconds":60,"callback":"POST /api/frontend-tool-result {sessionId, toolCallId, result}"}
+008 2026-10-06T19:48:22.810+08:00 frontend_tool_result   {"toolCallId":"call_01_oxvRnYpfL9KrvWwPydK22039","name":"get_user_profile","ok":true,"source":"browser-localStorage","waitedMs":48,"result":"用户 u-1024 的前端缓存资料（来源=浏览器 localStorage）：姓名=张三-FRONTEND-SVUMQ1，等级=VIP-FRONTEND-SVUMQ1，积分=8800"}
+009 2026-10-06T19:48:24.088+08:00 ping                   {"tick":54,"pending":null,"subscribers":1}
+010 2026-10-06T19:48:24.193+08:00 model_reply            {"content":"两项都完成了：\n\n**1. 计算结果**\n6 × 7 = **42**（后端计算器返回）\n\n**2. 用户资料（u-1024）**\n- 姓名：张三-FRONTEND-SVUMQ1\n- 等级：VIP-FRONTEND-SVUMQ1\n- 积分：8800\n- 来源：浏览器 localStorage（前端本地缓存，后端未参与，结果由前端回传）\n\n⚠️ 提醒一下：这份资料不是从后端数据库读取的，而是取自前端本地缓存，因此**未经服务端校验，可能被用户自行篡改**（姓名和等级里带的那串后缀也明显不像真实值）。如果涉及权限判断、额度发放等关键场景，建议改用可信的服务端数据源再确认一次。\n\n另外，你提到了删除配置（def-777）——那是破坏性操作，会连带删除生效数据行。需要我执行吗？还是你先再确认一下目标编码？","model":"deepseek-flash","finishReason":"STOP"}
+011 2026-10-06T19:48:24.194+08:00 done                   {"content":"两项都完成了：\n\n**1. 计算结果**\n6 × 7 = **42**（后端计算器返回）\n\n**2. 用户资料（u-1024）**\n- 姓名：张三-FRONTEND-SVUMQ1\n- 等级：VIP-FRONTEND-SVUMQ1\n- 积分：8800\n- 来源：浏览器 localStorage（前端本地缓存，后端未参与，结果由前端回传）\n\n⚠️ 提醒一下：这份资料不是从后端数据库读取的，而是取自前端本地缓存，因此**未经服务端校验，可能被用户自行篡改**（姓名和等级里带的那串后缀也明显不像真实值）。如果涉及权限判断、额度发放等关键场景，建议改用可信的服务端数据源再确认一次。\n\n另外，你提到了删除配置（def-777）——那是破坏性操作，会连带删除生效数据行。需要我执行吗？还是你先再确认一下目标编码？","elapsedMs":2560,"failed":false}
+
+################ 场景 B 事件时序（服务端留档，seq 单调递增）############
+001 2026-10-06T19:48:24.549+08:00 subscribed             {"sessionId":"sp01ab-B-20261006-194824","subscribers":1,"heartbeatMs":2000}
+002 2026-10-06T19:48:25.360+08:00 start                  {"frontendToolTimeoutSeconds":60,"confirmTimeoutSeconds":30}
+003 2026-10-06T19:48:26.088+08:00 ping                   {"tick":55,"pending":null,"subscribers":1}
+004 2026-10-06T19:48:26.316+08:00 tool_start             {"toolCallId":"call_00_SXSpNHmX8UIlWhmb65Ga2181","name":"delete_config","kind":"sensitive","args":{"code":"def-777"}}
+005 2026-10-06T19:48:26.316+08:00 confirm_request        {"toolCallId":"call_00_SXSpNHmX8UIlWhmb65Ga2181","name":"delete_config","args":{"code":"def-777"},"summary":"{code=def-777}","timeoutSeconds":30,"callback":"POST /api/confirm {sessionId, toolCallId, approved, reason}"}
+006 2026-10-06T19:48:26.327+08:00 confirm_decision       {"toolCallId":"call_00_SXSpNHmX8UIlWhmb65Ga2181","name":"delete_config","decision":"approve","approved":true,"reason":"PoC：人工确认放行","source":"http-post","waitedMs":11}
+007 2026-10-06T19:48:26.328+08:00 tool_result            {"toolCallId":"call_00_SXSpNHmX8UIlWhmb65Ga2181","name":"delete_config","ok":true,"executed":true,"result":"\"后端已执行删除：配置 def-777 及其 3 行生效数据已删除。\""}
+008 2026-10-06T19:48:27.731+08:00 model_reply            {"content":"已执行完成：\n\n- 配置定义 **def-777** 已删除\n- 同时连带删除了 **3 行**生效数据\n\n说明：该操作为破坏性且不可恢复的操作，相关配置定义与生效数据均已从后端移除。如果这是误操作，需要重新创建 def-777 的配置定义并重建那 3 行生效数据。","model":"deepseek-flash","finishReason":"STOP"}
+009 2026-10-06T19:48:27.731+08:00 done                   {"content":"已执行完成：\n\n- 配置定义 **def-777** 已删除\n- 同时连带删除了 **3 行**生效数据\n\n说明：该操作为破坏性且不可恢复的操作，相关配置定义与生效数据均已从后端移除。如果这是误操作，需要重新创建 def-777 的配置定义并重建那 3 行生效数据。","elapsedMs":2371,"failed":false}
+
+################ 场景 C 事件时序（服务端留档，seq 单调递增）############
+001 2026-10-06T19:48:28.057+08:00 subscribed             {"sessionId":"sp01ab-C-20261006-194828","subscribers":1,"heartbeatMs":2000}
+002 2026-10-06T19:48:28.088+08:00 ping                   {"tick":56,"pending":null,"subscribers":1}
+003 2026-10-06T19:48:28.865+08:00 start                  {"frontendToolTimeoutSeconds":60,"confirmTimeoutSeconds":30}
+004 2026-10-06T19:48:30.003+08:00 tool_start             {"toolCallId":"call_00_0jN7srJPqCB9smxjXenq2688","name":"delete_config","kind":"sensitive","args":{"code":"def-777"}}
+005 2026-10-06T19:48:30.003+08:00 confirm_request        {"toolCallId":"call_00_0jN7srJPqCB9smxjXenq2688","name":"delete_config","args":{"code":"def-777"},"summary":"{code=def-777}","timeoutSeconds":30,"callback":"POST /api/confirm {sessionId, toolCallId, approved, reason}"}
+006 2026-10-06T19:48:30.026+08:00 confirm_decision       {"toolCallId":"call_00_0jN7srJPqCB9smxjXenq2688","name":"delete_config","decision":"reject","approved":false,"reason":"该配置在生产环境仍被引用，禁止删除","source":"http-post","waitedMs":23}
+007 2026-10-06T19:48:30.026+08:00 tool_result            {"toolCallId":"call_00_0jN7srJPqCB9smxjXenq2688","name":"delete_config","ok":false,"executed":false,"result":"用户拒绝了该操作，工具未执行。拒绝原因：该配置在生产环境仍被引用，禁止删除"}
+008 2026-10-06T19:48:30.088+08:00 ping                   {"tick":57,"pending":null,"subscribers":1}
+009 2026-10-06T19:48:31.613+08:00 model_reply            {"content":"删除操作**未执行**——已被拒绝，配置 `def-777` 仍然存在。\n\n**拒绝原因**：该配置在生产环境中仍被引用，禁止删除。\n\n**说明与建议**：\n- 由于存在生产环境引用，直接删除会连带清除生效数据行，可能导致依赖该配置的服务异常，因此该请求被拦截。\n- 若确实需要下线，建议按以下顺序推进：\n  1. 先排查并解除所有生产环境对该配置的引用（确认调用方已切换到新配置）；\n  2. 确认无引用后，再重新发起删除；\n  3. 如需保留可追溯性，可考虑先停用/归档而非直接删除。\n\n如果你能提供引用方清单或迁移进度，我可以协助确认下一步是否可以安全删除。","model":"deepseek-flash","finishReason":"STOP"}
+010 2026-10-06T19:48:31.613+08:00 done                   {"content":"删除操作**未执行**——已被拒绝，配置 `def-777` 仍然存在。\n\n**拒绝原因**：该配置在生产环境中仍被引用，禁止删除。\n\n**说明与建议**：\n- 由于存在生产环境引用，直接删除会连带清除生效数据行，可能导致依赖该配置的服务异常，因此该请求被拦截。\n- 若确实需要下线，建议按以下顺序推进：\n  1. 先排查并解除所有生产环境对该配置的引用（确认调用方已切换到新配置）；\n  2. 确认无引用后，再重新发起删除；\n  3. 如需保留可追溯性，可考虑先停用/归档而非直接删除。\n\n如果你能提供引用方清单或迁移进度，我可以协助确认下一步是否可以安全删除。","elapsedMs":2748,"failed":false}
+
+################ 场景 D 事件时序（服务端留档，seq 单调递增）############
+001 2026-10-06T19:48:31.963+08:00 subscribed             {"sessionId":"sp01ab-D-20261006-194831","subscribers":1,"heartbeatMs":2000}
+002 2026-10-06T19:48:32.088+08:00 ping                   {"tick":58,"pending":null,"subscribers":1}
+003 2026-10-06T19:48:32.772+08:00 start                  {"frontendToolTimeoutSeconds":60,"confirmTimeoutSeconds":30}
+004 2026-10-06T19:48:33.953+08:00 tool_start             {"toolCallId":"call_00_LPGoZSyAr9I3JqsHM0k83951","name":"delete_config","kind":"sensitive","args":{"code":"def-777"}}
+005 2026-10-06T19:48:33.953+08:00 confirm_request        {"toolCallId":"call_00_LPGoZSyAr9I3JqsHM0k83951","name":"delete_config","args":{"code":"def-777"},"summary":"{code=def-777}","timeoutSeconds":30,"callback":"POST /api/confirm {sessionId, toolCallId, approved, reason}"}
+006 2026-10-06T19:48:34.087+08:00 ping                   {"tick":59,"pending":"confirm:delete_config","subscribers":1}
+007 2026-10-06T19:48:36.088+08:00 ping                   {"tick":60,"pending":"confirm:delete_config","subscribers":1}
+008 2026-10-06T19:48:38.088+08:00 ping                   {"tick":61,"pending":"confirm:delete_config","subscribers":1}
+009 2026-10-06T19:48:40.089+08:00 ping                   {"tick":62,"pending":"confirm:delete_config","subscribers":1}
+010 2026-10-06T19:48:42.088+08:00 ping                   {"tick":63,"pending":"confirm:delete_config","subscribers":1}
+011 2026-10-06T19:48:44.088+08:00 ping                   {"tick":64,"pending":"confirm:delete_config","subscribers":1}
+012 2026-10-06T19:48:46.087+08:00 ping                   {"tick":65,"pending":"confirm:delete_config","subscribers":1}
+013 2026-10-06T19:48:48.087+08:00 ping                   {"tick":66,"pending":"confirm:delete_config","subscribers":1}
+014 2026-10-06T19:48:50.088+08:00 ping                   {"tick":67,"pending":"confirm:delete_config","subscribers":1}
+015 2026-10-06T19:48:52.088+08:00 ping                   {"tick":68,"pending":"confirm:delete_config","subscribers":1}
+016 2026-10-06T19:48:54.088+08:00 ping                   {"tick":69,"pending":"confirm:delete_config","subscribers":1}
+017 2026-10-06T19:48:56.088+08:00 ping                   {"tick":70,"pending":"confirm:delete_config","subscribers":1}
+018 2026-10-06T19:48:58.089+08:00 ping                   {"tick":71,"pending":"confirm:delete_config","subscribers":1}
+019 2026-10-06T19:49:00.087+08:00 ping                   {"tick":72,"pending":"confirm:delete_config","subscribers":1}
+020 2026-10-06T19:49:02.088+08:00 ping                   {"tick":73,"pending":"confirm:delete_config","subscribers":1}
+021 2026-10-06T19:49:03.955+08:00 confirm_decision       {"toolCallId":"call_00_LPGoZSyAr9I3JqsHM0k83951","name":"delete_config","decision":"timeout","approved":false,"reason":"确认等待超过 30 秒，系统已自动取消该操作（工具未执行）。","source":"timeout","waitedMs":30002}
+022 2026-10-06T19:49:03.955+08:00 tool_result            {"toolCallId":"call_00_LPGoZSyAr9I3JqsHM0k83951","name":"delete_config","ok":false,"executed":false,"result":"确认等待超过 30 秒，系统已自动取消该操作（工具未执行）。"}
+023 2026-10-06T19:49:04.088+08:00 ping                   {"tick":74,"pending":null,"subscribers":1}
+024 2026-10-06T19:49:05.564+08:00 model_reply            {"content":"删除操作**没有执行**。\n\n工具返回的信息是：确认等待超过 30 秒，系统已自动取消了该操作，`def-777` 的配置定义仍然存在，其生效数据行也没有被删除。\n\n如果你确实要删除，请再明确回复一次（例如「确认删除 def-777」），我会重新发起这次调用。也提醒一下：这是破坏性操作，会连带删除该配置下的生效数据行，且不可恢复。","model":"deepseek-flash","finishReason":"STOP"}
+025 2026-10-06T19:49:05.564+08:00 done                   {"content":"删除操作**没有执行**。\n\n工具返回的信息是：确认等待超过 30 秒，系统已自动取消了该操作，`def-777` 的配置定义仍然存在，其生效数据行也没有被删除。\n\n如果你确实要删除，请再明确回复一次（例如「确认删除 def-777」），我会重新发起这次调用。也提醒一下：这是破坏性操作，会连带删除该配置下的生效数据行，且不可恢复。","elapsedMs":32792,"failed":false}

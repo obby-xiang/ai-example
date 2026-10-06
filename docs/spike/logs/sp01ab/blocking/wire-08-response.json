@@ -1,0 +1,50 @@
+{
+  "status": 200,
+  "elapsedMs": 1601,
+  "headers": {
+    "access-control-allow-credentials": "true",
+    "connection": "keep-alive",
+    "content-type": "application/json",
+    "date": "Tue, 06 Oct 2026 11:49:03 GMT",
+    "eo-cache-status": "MISS",
+    "eo-log-uuid": "17870043615513227273",
+    "server": "openresty",
+    "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+    "transfer-encoding": "chunked",
+    "vary": "origin, access-control-request-method, access-control-request-headers",
+    "x-content-type-options": "nosniff",
+    "x-ds-trace-id": "63343d498ec7eae03dcf714b429b342e"
+  },
+  "body": {
+    "id": "9fbe7373-4c3d-42a2-ab89-3ec7d70e9595",
+    "object": "chat.completion",
+    "created": 1791287344,
+    "model": "deepseek-flash",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "删除操作**没有执行**。\n\n工具返回的信息是：确认等待超过 30 秒，系统已自动取消了该操作，`def-777` 的配置定义仍然存在，其生效数据行也没有被删除。\n\n如果你确实要删除，请再明确回复一次（例如「确认删除 def-777」），我会重新发起这次调用。也提醒一下：这是破坏性操作，会连带删除该配置下的生效数据行，且不可恢复。",
+          "reasoning_content": "The tool result says the operation was auto-cancelled due to confirmation timeout — the tool was not executed. So the deletion did not happen. I should report this to the user honestly and ask if they want to retry.\n\nI should not claim it was deleted. Let me inform the user."
+        },
+        "logprobs": null,
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 786,
+      "completion_tokens": 157,
+      "total_tokens": 943,
+      "prompt_tokens_details": {
+        "cached_tokens": 384
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 60
+      },
+      "prompt_cache_hit_tokens": 384,
+      "prompt_cache_miss_tokens": 402
+    },
+    "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669"
+  }
+}

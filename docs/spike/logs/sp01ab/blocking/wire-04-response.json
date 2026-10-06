@@ -1,0 +1,50 @@
+{
+  "status": 200,
+  "elapsedMs": 1399,
+  "headers": {
+    "access-control-allow-credentials": "true",
+    "connection": "keep-alive",
+    "content-type": "application/json",
+    "date": "Tue, 06 Oct 2026 11:48:26 GMT",
+    "eo-cache-status": "MISS",
+    "eo-log-uuid": "8905632573190987094",
+    "server": "openresty",
+    "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+    "transfer-encoding": "chunked",
+    "vary": "origin, access-control-request-method, access-control-request-headers",
+    "x-content-type-options": "nosniff",
+    "x-ds-trace-id": "4ec2ba6a7f30fa4bfb78363d0814de6f"
+  },
+  "body": {
+    "id": "e4255c0e-7dd5-46c7-a762-4e8433cd8332",
+    "object": "chat.completion",
+    "created": 1791287306,
+    "model": "deepseek-flash",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "已执行完成：\n\n- 配置定义 **def-777** 已删除\n- 同时连带删除了 **3 行**生效数据\n\n说明：该操作为破坏性且不可恢复的操作，相关配置定义与生效数据均已从后端移除。如果这是误操作，需要重新创建 def-777 的配置定义并重建那 3 行生效数据。",
+          "reasoning_content": "The tool returned a result. I should report it. But note: the deletion is destructive and irreversible — the tool already executed. I should report the result honestly.\n\nShould I have warned? The policy says just call. I'll report the outcome and perhaps note it's irreversible."
+        },
+        "logprobs": null,
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 741,
+      "completion_tokens": 136,
+      "total_tokens": 877,
+      "prompt_tokens_details": {
+        "cached_tokens": 384
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 56
+      },
+      "prompt_cache_hit_tokens": 384,
+      "prompt_cache_miss_tokens": 357
+    },
+    "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669"
+  }
+}

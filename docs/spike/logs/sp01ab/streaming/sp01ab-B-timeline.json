@@ -1,0 +1,1000 @@
+{
+  "sessionId": "sp01ab-B-20261006-195106",
+  "exists": true,
+  "events": [
+    {
+      "seq": 1,
+      "ts": "2026-10-06T19:51:06.591+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "subscribed",
+      "data": {
+        "sessionId": "sp01ab-B-20261006-195106",
+        "subscribers": 1,
+        "heartbeatMs": 2000
+      }
+    },
+    {
+      "seq": 2,
+      "ts": "2026-10-06T19:51:07.401+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "start",
+      "data": {
+        "message": "请删除配置 def-777（这是一次真实的删除操作，按工具规则执行）。",
+        "streaming": true,
+        "toolNames": [
+          "calculate",
+          "get_user_profile",
+          "delete_config"
+        ],
+        "frontendToolTimeoutSeconds": 60,
+        "confirmTimeoutSeconds": 30
+      }
+    },
+    {
+      "seq": 3,
+      "ts": "2026-10-06T19:51:08.375+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "ping",
+      "data": {
+        "tick": 23,
+        "pending": null,
+        "subscribers": 1
+      }
+    },
+    {
+      "seq": 4,
+      "ts": "2026-10-06T19:51:08.568+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "tool_start",
+      "data": {
+        "toolCallId": "call_00_1pIqc6Tp8Yev2BzcL69y0456",
+        "name": "delete_config",
+        "kind": "sensitive",
+        "args": {
+          "code": "def-777"
+        }
+      }
+    },
+    {
+      "seq": 5,
+      "ts": "2026-10-06T19:51:08.568+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "confirm_request",
+      "data": {
+        "toolCallId": "call_00_1pIqc6Tp8Yev2BzcL69y0456",
+        "name": "delete_config",
+        "args": {
+          "code": "def-777"
+        },
+        "summary": "{code=def-777}",
+        "timeoutSeconds": 30,
+        "callback": "POST /api/confirm {sessionId, toolCallId, approved, reason}"
+      }
+    },
+    {
+      "seq": 6,
+      "ts": "2026-10-06T19:51:08.624+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "confirm_decision",
+      "data": {
+        "toolCallId": "call_00_1pIqc6Tp8Yev2BzcL69y0456",
+        "name": "delete_config",
+        "decision": "approve",
+        "approved": true,
+        "reason": "PoC：人工确认放行",
+        "source": "http-post",
+        "waitedMs": 56
+      }
+    },
+    {
+      "seq": 7,
+      "ts": "2026-10-06T19:51:08.626+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "tool_result",
+      "data": {
+        "toolCallId": "call_00_1pIqc6Tp8Yev2BzcL69y0456",
+        "name": "delete_config",
+        "ok": true,
+        "executed": true,
+        "result": "\"后端已执行删除：配置 def-777 及其 3 行生效数据已删除。\""
+      }
+    },
+    {
+      "seq": 8,
+      "ts": "2026-10-06T19:51:10.001+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "已"
+      }
+    },
+    {
+      "seq": 9,
+      "ts": "2026-10-06T19:51:10.002+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "执行"
+      }
+    },
+    {
+      "seq": 10,
+      "ts": "2026-10-06T19:51:10.002+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "删除"
+      }
+    },
+    {
+      "seq": 11,
+      "ts": "2026-10-06T19:51:10.002+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "：\n\n"
+      }
+    },
+    {
+      "seq": 12,
+      "ts": "2026-10-06T19:51:10.002+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "-"
+      }
+    },
+    {
+      "seq": 13,
+      "ts": "2026-10-06T19:51:10.003+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": " **"
+      }
+    },
+    {
+      "seq": 14,
+      "ts": "2026-10-06T19:51:10.003+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "配置"
+      }
+    },
+    {
+      "seq": 15,
+      "ts": "2026-10-06T19:51:10.003+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "定义"
+      }
+    },
+    {
+      "seq": 16,
+      "ts": "2026-10-06T19:51:10.003+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "**"
+      }
+    },
+    {
+      "seq": 17,
+      "ts": "2026-10-06T19:51:10.004+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "："
+      }
+    },
+    {
+      "seq": 18,
+      "ts": "2026-10-06T19:51:10.004+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "`"
+      }
+    },
+    {
+      "seq": 19,
+      "ts": "2026-10-06T19:51:10.004+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "def"
+      }
+    },
+    {
+      "seq": 20,
+      "ts": "2026-10-06T19:51:10.004+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "-"
+      }
+    },
+    {
+      "seq": 21,
+      "ts": "2026-10-06T19:51:10.005+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "777"
+      }
+    },
+    {
+      "seq": 22,
+      "ts": "2026-10-06T19:51:10.006+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "`\n"
+      }
+    },
+    {
+      "seq": 23,
+      "ts": "2026-10-06T19:51:10.006+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "-"
+      }
+    },
+    {
+      "seq": 24,
+      "ts": "2026-10-06T19:51:10.006+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": " **"
+      }
+    },
+    {
+      "seq": 25,
+      "ts": "2026-10-06T19:51:10.006+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "结果"
+      }
+    },
+    {
+      "seq": 26,
+      "ts": "2026-10-06T19:51:10.007+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "**"
+      }
+    },
+    {
+      "seq": 27,
+      "ts": "2026-10-06T19:51:10.007+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "："
+      }
+    },
+    {
+      "seq": 28,
+      "ts": "2026-10-06T19:51:10.007+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "后端"
+      }
+    },
+    {
+      "seq": 29,
+      "ts": "2026-10-06T19:51:10.007+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "已"
+      }
+    },
+    {
+      "seq": 30,
+      "ts": "2026-10-06T19:51:10.007+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "删除"
+      }
+    },
+    {
+      "seq": 31,
+      "ts": "2026-10-06T19:51:10.007+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "该"
+      }
+    },
+    {
+      "seq": 32,
+      "ts": "2026-10-06T19:51:10.007+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "配置"
+      }
+    },
+    {
+      "seq": 33,
+      "ts": "2026-10-06T19:51:10.007+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "定义"
+      }
+    },
+    {
+      "seq": 34,
+      "ts": "2026-10-06T19:51:10.007+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "，"
+      }
+    },
+    {
+      "seq": 35,
+      "ts": "2026-10-06T19:51:10.008+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "并"
+      }
+    },
+    {
+      "seq": 36,
+      "ts": "2026-10-06T19:51:10.008+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "连带"
+      }
+    },
+    {
+      "seq": 37,
+      "ts": "2026-10-06T19:51:10.008+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "删"
+      }
+    },
+    {
+      "seq": 38,
+      "ts": "2026-10-06T19:51:10.009+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "除了"
+      }
+    },
+    {
+      "seq": 39,
+      "ts": "2026-10-06T19:51:10.009+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": " **"
+      }
+    },
+    {
+      "seq": 40,
+      "ts": "2026-10-06T19:51:10.010+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "3"
+      }
+    },
+    {
+      "seq": 41,
+      "ts": "2026-10-06T19:51:10.011+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": " "
+      }
+    },
+    {
+      "seq": 42,
+      "ts": "2026-10-06T19:51:10.011+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "行"
+      }
+    },
+    {
+      "seq": 43,
+      "ts": "2026-10-06T19:51:10.011+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "**"
+      }
+    },
+    {
+      "seq": 44,
+      "ts": "2026-10-06T19:51:10.012+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "生效"
+      }
+    },
+    {
+      "seq": 45,
+      "ts": "2026-10-06T19:51:10.014+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "数据"
+      }
+    },
+    {
+      "seq": 46,
+      "ts": "2026-10-06T19:51:10.014+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "\n\n"
+      }
+    },
+    {
+      "seq": 47,
+      "ts": "2026-10-06T19:51:10.015+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "⚠"
+      }
+    },
+    {
+      "seq": 48,
+      "ts": "2026-10-06T19:51:10.015+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "️"
+      }
+    },
+    {
+      "seq": 49,
+      "ts": "2026-10-06T19:51:10.015+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": " "
+      }
+    },
+    {
+      "seq": 50,
+      "ts": "2026-10-06T19:51:10.015+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "提醒"
+      }
+    },
+    {
+      "seq": 51,
+      "ts": "2026-10-06T19:51:10.016+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "："
+      }
+    },
+    {
+      "seq": 52,
+      "ts": "2026-10-06T19:51:10.016+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "这是一"
+      }
+    },
+    {
+      "seq": 53,
+      "ts": "2026-10-06T19:51:10.016+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "次"
+      }
+    },
+    {
+      "seq": 54,
+      "ts": "2026-10-06T19:51:10.016+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "破坏"
+      }
+    },
+    {
+      "seq": 55,
+      "ts": "2026-10-06T19:51:10.017+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "性"
+      }
+    },
+    {
+      "seq": 56,
+      "ts": "2026-10-06T19:51:10.017+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "操作"
+      }
+    },
+    {
+      "seq": 57,
+      "ts": "2026-10-06T19:51:10.018+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "，"
+      }
+    },
+    {
+      "seq": 58,
+      "ts": "2026-10-06T19:51:10.018+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "配置"
+      }
+    },
+    {
+      "seq": 59,
+      "ts": "2026-10-06T19:51:10.018+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": " `"
+      }
+    },
+    {
+      "seq": 60,
+      "ts": "2026-10-06T19:51:10.018+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "def"
+      }
+    },
+    {
+      "seq": 61,
+      "ts": "2026-10-06T19:51:10.019+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "-"
+      }
+    },
+    {
+      "seq": 62,
+      "ts": "2026-10-06T19:51:10.023+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "777"
+      }
+    },
+    {
+      "seq": 63,
+      "ts": "2026-10-06T19:51:10.023+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "`"
+      }
+    },
+    {
+      "seq": 64,
+      "ts": "2026-10-06T19:51:10.023+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": " "
+      }
+    },
+    {
+      "seq": 65,
+      "ts": "2026-10-06T19:51:10.023+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "及其"
+      }
+    },
+    {
+      "seq": 66,
+      "ts": "2026-10-06T19:51:10.023+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "生效"
+      }
+    },
+    {
+      "seq": 67,
+      "ts": "2026-10-06T19:51:10.023+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "数据"
+      }
+    },
+    {
+      "seq": 68,
+      "ts": "2026-10-06T19:51:10.024+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "行"
+      }
+    },
+    {
+      "seq": 69,
+      "ts": "2026-10-06T19:51:10.024+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "已"
+      }
+    },
+    {
+      "seq": 70,
+      "ts": "2026-10-06T19:51:10.024+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "不可"
+      }
+    },
+    {
+      "seq": 71,
+      "ts": "2026-10-06T19:51:10.024+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "恢复"
+      }
+    },
+    {
+      "seq": 72,
+      "ts": "2026-10-06T19:51:10.025+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "。"
+      }
+    },
+    {
+      "seq": 73,
+      "ts": "2026-10-06T19:51:10.025+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "如果"
+      }
+    },
+    {
+      "seq": 74,
+      "ts": "2026-10-06T19:51:10.025+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "其中"
+      }
+    },
+    {
+      "seq": 75,
+      "ts": "2026-10-06T19:51:10.025+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "包含"
+      }
+    },
+    {
+      "seq": 76,
+      "ts": "2026-10-06T19:51:10.025+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "仍有"
+      }
+    },
+    {
+      "seq": 77,
+      "ts": "2026-10-06T19:51:10.025+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "业务"
+      }
+    },
+    {
+      "seq": 78,
+      "ts": "2026-10-06T19:51:10.026+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "引"
+      }
+    },
+    {
+      "seq": 79,
+      "ts": "2026-10-06T19:51:10.026+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "用的"
+      }
+    },
+    {
+      "seq": 80,
+      "ts": "2026-10-06T19:51:10.026+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "配置"
+      }
+    },
+    {
+      "seq": 81,
+      "ts": "2026-10-06T19:51:10.026+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "，"
+      }
+    },
+    {
+      "seq": 82,
+      "ts": "2026-10-06T19:51:10.026+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "相关"
+      }
+    },
+    {
+      "seq": 83,
+      "ts": "2026-10-06T19:51:10.026+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "功能"
+      }
+    },
+    {
+      "seq": 84,
+      "ts": "2026-10-06T19:51:10.026+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "可能会"
+      }
+    },
+    {
+      "seq": 85,
+      "ts": "2026-10-06T19:51:10.027+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "立即"
+      }
+    },
+    {
+      "seq": 86,
+      "ts": "2026-10-06T19:51:10.027+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "失效"
+      }
+    },
+    {
+      "seq": 87,
+      "ts": "2026-10-06T19:51:10.027+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "。"
+      }
+    },
+    {
+      "seq": 88,
+      "ts": "2026-10-06T19:51:10.028+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "若"
+      }
+    },
+    {
+      "seq": 89,
+      "ts": "2026-10-06T19:51:10.028+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "需要"
+      }
+    },
+    {
+      "seq": 90,
+      "ts": "2026-10-06T19:51:10.028+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "恢复"
+      }
+    },
+    {
+      "seq": 91,
+      "ts": "2026-10-06T19:51:10.028+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "，"
+      }
+    },
+    {
+      "seq": 92,
+      "ts": "2026-10-06T19:51:10.029+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "只能"
+      }
+    },
+    {
+      "seq": 93,
+      "ts": "2026-10-06T19:51:10.029+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "通过"
+      }
+    },
+    {
+      "seq": 94,
+      "ts": "2026-10-06T19:51:10.030+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "备份"
+      }
+    },
+    {
+      "seq": 95,
+      "ts": "2026-10-06T19:51:10.030+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "或"
+      }
+    },
+    {
+      "seq": 96,
+      "ts": "2026-10-06T19:51:10.031+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "重新"
+      }
+    },
+    {
+      "seq": 97,
+      "ts": "2026-10-06T19:51:10.031+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "创建"
+      }
+    },
+    {
+      "seq": 98,
+      "ts": "2026-10-06T19:51:10.031+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "该"
+      }
+    },
+    {
+      "seq": 99,
+      "ts": "2026-10-06T19:51:10.032+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "配置"
+      }
+    },
+    {
+      "seq": 100,
+      "ts": "2026-10-06T19:51:10.032+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "定义"
+      }
+    },
+    {
+      "seq": 101,
+      "ts": "2026-10-06T19:51:10.032+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "及其"
+      }
+    },
+    {
+      "seq": 102,
+      "ts": "2026-10-06T19:51:10.032+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "数据"
+      }
+    },
+    {
+      "seq": 103,
+      "ts": "2026-10-06T19:51:10.032+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "行"
+      }
+    },
+    {
+      "seq": 104,
+      "ts": "2026-10-06T19:51:10.032+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "delta",
+      "data": {
+        "content": "。"
+      }
+    },
+    {
+      "seq": 105,
+      "ts": "2026-10-06T19:51:10.033+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "model_reply",
+      "data": {
+        "content": "已执行删除：\n\n- **配置定义**：`def-777`\n- **结果**：后端已删除该配置定义，并连带删除了 **3 行**生效数据\n\n⚠️ 提醒：这是一次破坏性操作，配置 `def-777` 及其生效数据行已不可恢复。如果其中包含仍有业务引用的配置，相关功能可能会立即失效。若需要恢复，只能通过备份或重新创建该配置定义及其数据行。",
+        "model": "deepseek-flash",
+        "finishReason": "STOP",
+        "streamingMs": 2632
+      }
+    },
+    {
+      "seq": 106,
+      "ts": "2026-10-06T19:51:10.033+08:00",
+      "sessionId": "sp01ab-B-20261006-195106",
+      "event": "done",
+      "data": {
+        "content": "已执行删除：\n\n- **配置定义**：`def-777`\n- **结果**：后端已删除该配置定义，并连带删除了 **3 行**生效数据\n\n⚠️ 提醒：这是一次破坏性操作，配置 `def-777` 及其生效数据行已不可恢复。如果其中包含仍有业务引用的配置，相关功能可能会立即失效。若需要恢复，只能通过备份或重新创建该配置定义及其数据行。",
+        "streaming": true,
+        "elapsedMs": 2632,
+        "failed": false
+      }
+    }
+  ]
+}

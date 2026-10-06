@@ -1,0 +1,50 @@
+{
+  "status": 200,
+  "elapsedMs": 1577,
+  "headers": {
+    "access-control-allow-credentials": "true",
+    "connection": "keep-alive",
+    "content-type": "application/json",
+    "date": "Tue, 06 Oct 2026 11:48:29 GMT",
+    "eo-cache-status": "MISS",
+    "eo-log-uuid": "11434541092244289562",
+    "server": "openresty",
+    "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+    "transfer-encoding": "chunked",
+    "vary": "origin, access-control-request-method, access-control-request-headers",
+    "x-content-type-options": "nosniff",
+    "x-ds-trace-id": "8e6625b43c20af59d6b8371820c1c509"
+  },
+  "body": {
+    "id": "9c283f36-40b5-40a6-a577-74ed0425d3c4",
+    "object": "chat.completion",
+    "created": 1791287309,
+    "model": "deepseek-flash",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "删除操作**未执行**——已被拒绝，配置 `def-777` 仍然存在。\n\n**拒绝原因**：该配置在生产环境中仍被引用，禁止删除。\n\n**说明与建议**：\n- 由于存在生产环境引用，直接删除会连带清除生效数据行，可能导致依赖该配置的服务异常，因此该请求被拦截。\n- 若确实需要下线，建议按以下顺序推进：\n  1. 先排查并解除所有生产环境对该配置的引用（确认调用方已切换到新配置）；\n  2. 确认无引用后，再重新发起删除；\n  3. 如需保留可追溯性，可考虑先停用/归档而非直接删除。\n\n如果你能提供引用方清单或迁移进度，我可以协助确认下一步是否可以安全删除。",
+          "reasoning_content": "The user rejected the operation? Actually the tool result says the user refused — the config is still referenced in production, deletion forbidden. So report back: not deleted.\n\nI should not retry. Report the outcome."
+        },
+        "logprobs": null,
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 736,
+      "completion_tokens": 206,
+      "total_tokens": 942,
+      "prompt_tokens_details": {
+        "cached_tokens": 384
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 43
+      },
+      "prompt_cache_hit_tokens": 384,
+      "prompt_cache_miss_tokens": 352
+    },
+    "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669"
+  }
+}

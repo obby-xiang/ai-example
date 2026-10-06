@@ -1,0 +1,56 @@
+{
+  "scenario": "C",
+  "sessionId": "sp01ab-C-20261006-194828",
+  "checks": [
+    {
+      "id": "C1",
+      "ok": true,
+      "detail": "确认门挂起 toolCallId=call_00_0jN7srJPqCB9smxjXenq2688"
+    },
+    {
+      "id": "C2",
+      "ok": true,
+      "detail": "拒绝被受理 {\"accepted\":true,\"approved\":false,\"toolCallId\":\"call_00_0jN7srJPqCB9smxjXenq2688\",\"toolName\":\"delete_config\"}"
+    },
+    {
+      "id": "C3",
+      "ok": true,
+      "detail": "确认门结论 reject reason=该配置在生产环境仍被引用，禁止删除"
+    },
+    {
+      "id": "C4",
+      "ok": true,
+      "detail": "循环未被中断，正常结束 elapsedMs=2748"
+    }
+  ],
+  "snapshot": {
+    "sessionId": "sp01ab-C-20261006-194828",
+    "running": false,
+    "pendingKind": null,
+    "pendingFrontendGate": null,
+    "pendingConfirmGate": null,
+    "counters": {
+      "frontendToolResults": 0,
+      "backendToolExecuted": 0,
+      "sensitiveBlocked": 1,
+      "sensitiveExecuted": 0,
+      "frontendToolRequests": 0,
+      "confirmRequests": 1
+    },
+    "sseSubscribers": 1,
+    "timelineSize": 10
+  },
+  "sse": {
+    "pings": 2,
+    "events": [
+      "subscribed",
+      "start",
+      "tool_start",
+      "confirm_request",
+      "confirm_decision",
+      "tool_result",
+      "model_reply",
+      "done"
+    ]
+  }
+}

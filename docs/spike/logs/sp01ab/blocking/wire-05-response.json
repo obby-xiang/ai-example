@@ -1,0 +1,61 @@
+{
+  "status": 200,
+  "elapsedMs": 1131,
+  "headers": {
+    "access-control-allow-credentials": "true",
+    "connection": "keep-alive",
+    "content-type": "application/json",
+    "date": "Tue, 06 Oct 2026 11:48:28 GMT",
+    "eo-cache-status": "MISS",
+    "eo-log-uuid": "672719718160221906",
+    "server": "openresty",
+    "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+    "transfer-encoding": "chunked",
+    "vary": "origin, access-control-request-method, access-control-request-headers",
+    "x-content-type-options": "nosniff",
+    "x-ds-trace-id": "f12a3b5de6e4d08bee33619ae98eb62d"
+  },
+  "body": {
+    "id": "d071c246-d90c-4335-ba0a-88d886092963",
+    "object": "chat.completion",
+    "created": 1791287308,
+    "model": "deepseek-flash",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "The user asks to delete config def-777. This is a destructive operation but explicitly requested. I should call the tool.\n\nAny other tasks in the message? It's a single task. So just call delete_config.\n\nNote the instruction \"必须调用对应工具，不得自行编造数据\". Just call it.",
+          "tool_calls": [
+            {
+              "index": 0,
+              "id": "call_00_0jN7srJPqCB9smxjXenq2688",
+              "type": "function",
+              "function": {
+                "name": "delete_config",
+                "arguments": "{\"code\": \"def-777\"}"
+              }
+            }
+          ]
+        },
+        "logprobs": null,
+        "finish_reason": "tool_calls"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 719,
+      "completion_tokens": 103,
+      "total_tokens": 822,
+      "prompt_tokens_details": {
+        "cached_tokens": 512
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 63
+      },
+      "prompt_cache_hit_tokens": 512,
+      "prompt_cache_miss_tokens": 207
+    },
+    "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669"
+  }
+}

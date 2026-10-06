@@ -1,0 +1,72 @@
+{
+  "scenario": "A",
+  "sessionId": "sp01ab-A-20261006-194820",
+  "checks": [
+    {
+      "id": "A0",
+      "ok": true,
+      "detail": "POST /api/chat 受理 202"
+    },
+    {
+      "id": "A1",
+      "ok": true,
+      "detail": "收到透出请求 name=get_user_profile toolCallId=call_01_oxvRnYpfL9KrvWwPydK22039 args={\"userId\":\"u-1024\"} timeoutSeconds=60"
+    },
+    {
+      "id": "A2",
+      "ok": true,
+      "detail": "回灌被受理 {\"accepted\":true,\"toolCallId\":\"call_01_oxvRnYpfL9KrvWwPydK22039\",\"toolName\":\"get_user_profile\"}"
+    },
+    {
+      "id": "A3",
+      "ok": true,
+      "detail": "循环内确认回灌结果（waitedMs=48, source=browser-localStorage）"
+    },
+    {
+      "id": "A4",
+      "ok": true,
+      "detail": "循环正常结束 elapsedMs=2560"
+    },
+    {
+      "id": "A5",
+      "ok": true,
+      "detail": "最终回答含前端回灌数据（姓名/等级的随机令牌 FRONTEND-SVUMQ1）"
+    },
+    {
+      "id": "A6",
+      "ok": true,
+      "detail": "最终回答含后端工具结果 42"
+    }
+  ],
+  "snapshot": {
+    "sessionId": "sp01ab-A-20261006-194820",
+    "running": false,
+    "pendingKind": null,
+    "pendingFrontendGate": null,
+    "pendingConfirmGate": null,
+    "counters": {
+      "frontendToolResults": 1,
+      "backendToolExecuted": 1,
+      "sensitiveBlocked": 0,
+      "sensitiveExecuted": 0,
+      "frontendToolRequests": 1,
+      "confirmRequests": 0
+    },
+    "sseSubscribers": 1,
+    "timelineSize": 11
+  },
+  "sse": {
+    "pings": 2,
+    "events": [
+      "subscribed",
+      "start",
+      "tool_start",
+      "tool_result",
+      "tool_start",
+      "frontend_tool_request",
+      "frontend_tool_result",
+      "model_reply",
+      "done"
+    ]
+  }
+}

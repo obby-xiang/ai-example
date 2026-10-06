@@ -1,0 +1,61 @@
+{
+  "status": 200,
+  "elapsedMs": 1175,
+  "headers": {
+    "access-control-allow-credentials": "true",
+    "connection": "keep-alive",
+    "content-type": "application/json",
+    "date": "Tue, 06 Oct 2026 11:48:32 GMT",
+    "eo-cache-status": "MISS",
+    "eo-log-uuid": "5602496729955463171",
+    "server": "openresty",
+    "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+    "transfer-encoding": "chunked",
+    "vary": "origin, access-control-request-method, access-control-request-headers",
+    "x-content-type-options": "nosniff",
+    "x-ds-trace-id": "c8e86d50483cce2332f2bf380f1d323a"
+  },
+  "body": {
+    "id": "4651d893-8b49-4af6-95a1-537cee89b135",
+    "object": "chat.completion",
+    "created": 1791287312,
+    "model": "deepseek-flash",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "The user asks to delete config def-777. This is a destructive operation but the user explicitly requested it and confirmed it's a real deletion. I should call the tool. Hmm, but should I? The system rules say I must call the corresponding tool when user asks. There's no rule against destructive ops. The user explicitly authorized. I'll call delete_config.\n\nActually, let me think — is there a policy concern? The tool description says destructive. The user explicitly requested and confirmed. I'll execute.\n\nThere's no dependency on other calls. Just one call.",
+          "tool_calls": [
+            {
+              "index": 0,
+              "id": "call_00_LPGoZSyAr9I3JqsHM0k83951",
+              "type": "function",
+              "function": {
+                "name": "delete_config",
+                "arguments": "{\"code\": \"def-777\"}"
+              }
+            }
+          ]
+        },
+        "logprobs": null,
+        "finish_reason": "tool_calls"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 719,
+      "completion_tokens": 156,
+      "total_tokens": 875,
+      "prompt_tokens_details": {
+        "cached_tokens": 512
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 116
+      },
+      "prompt_cache_hit_tokens": 512,
+      "prompt_cache_miss_tokens": 207
+    },
+    "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669"
+  }
+}

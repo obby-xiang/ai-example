@@ -1,0 +1,419 @@
+# SSE subscribe http://127.0.0.1:18301/api/events/sp01ab-A-20261006-195102 at 2026-10-06T11:51:02.975Z
+# HTTP 200 content-type=text/event-stream
+[+000033ms] event:subscribed
+[+000033ms] data:{"seq":1,"ts":"2026-10-06T19:51:03.002+08:00","sessionId":"sp01ab-A-20261006-195102","event":"subscribed","data":{"sessionId":"sp01ab-A-20261006-195102","subscribers":1,"heartbeatMs":2000}}
+[+000034ms] 
+[+000868ms] event:start
+[+000868ms] data:{"seq":2,"ts":"2026-10-06T19:51:03.842+08:00","sessionId":"sp01ab-A-20261006-195102","event":"start","data":{"message":"请做两件事：1) 调用 calculate 计算 6 乘 7；2) 调用 get_user_profile 获取用户 u-1024 的会员资料。两个结果都拿到后再一起回答我。","streaming":true,"toolNames":["calculate","get_user_profile","delete_config"],"frontendToolTimeoutSeconds":60,"confirmTimeoutSeconds":30}}
+[+000876ms] 
+[+001399ms] event:ping
+[+001400ms] data:{"seq":3,"ts":"2026-10-06T19:51:04.373+08:00","sessionId":"sp01ab-A-20261006-195102","event":"ping","data":{"tick":21,"pending":null,"subscribers":1}}
+[+001400ms] 
+[+002026ms] event:tool_start
+[+002027ms] data:{"seq":4,"ts":"2026-10-06T19:51:05.001+08:00","sessionId":"sp01ab-A-20261006-195102","event":"tool_start","data":{"toolCallId":"call_00_haYSL3l5v9nDGfuQopGn8895","name":"calculate","kind":"backend","args":{"a":6,"operator":"multiply","b":7}}}
+[+002027ms] 
+[+002036ms] event:tool_result
+[+002036ms] data:{"seq":5,"ts":"2026-10-06T19:51:05.010+08:00","sessionId":"sp01ab-A-20261006-195102","event":"tool_result","data":{"toolCallId":"call_00_haYSL3l5v9nDGfuQopGn8895","name":"calculate","ok":true,"executed":true,"result":"\"后端计算器结果：6 multiply 7 = 42\""}}
+[+002037ms] 
+[+002037ms] event:tool_start
+[+002037ms] data:{"seq":6,"ts":"2026-10-06T19:51:05.011+08:00","sessionId":"sp01ab-A-20261006-195102","event":"tool_start","data":{"toolCallId":"call_01_7SRutxejnh9lJ0W3pQjE4831","name":"get_user_profile","kind":"frontend","args":{"userId":"u-1024"}}}
+[+002037ms] 
+[+002038ms] event:frontend_tool_request
+[+002038ms] data:{"seq":7,"ts":"2026-10-06T19:51:05.012+08:00","sessionId":"sp01ab-A-20261006-195102","event":"frontend_tool_request","data":{"toolCallId":"call_01_7SRutxejnh9lJ0W3pQjE4831","name":"get_user_profile","args":{"userId":"u-1024"},"timeoutSeconds":60,"callback":"POST /api/frontend-tool-result {sessionId, toolCallId, result}"}}
+[+002038ms] 
+[+002051ms] event:frontend_tool_result
+[+002052ms] data:{"seq":8,"ts":"2026-10-06T19:51:05.026+08:00","sessionId":"sp01ab-A-20261006-195102","event":"frontend_tool_result","data":{"toolCallId":"call_01_7SRutxejnh9lJ0W3pQjE4831","name":"get_user_profile","ok":true,"source":"browser-localStorage","waitedMs":14,"result":"用户 u-1024 的前端缓存资料（来源=浏览器 localStorage）：姓名=张三-FRONTEND-HS2ZEW，等级=VIP-FRONTEND-HS2ZEW，积分=8800"}}
+[+002052ms] 
+[+003156ms] event:delta
+[+003157ms] data:{"seq":9,"ts":"2026-10-06T19:51:06.131+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"两项"}}
+[+003157ms] 
+[+003157ms] event:delta
+[+003158ms] data:{"seq":10,"ts":"2026-10-06T19:51:06.132+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"都"}}
+[+003158ms] 
+[+003159ms] event:delta
+[+003159ms] data:{"seq":11,"ts":"2026-10-06T19:51:06.132+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"已完成"}}
+[+003159ms] 
+[+003160ms] event:delta
+[+003160ms] data:{"seq":12,"ts":"2026-10-06T19:51:06.133+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"：\n\n"}}
+[+003161ms] 
+[+003162ms] event:delta
+[+003162ms] data:{"seq":13,"ts":"2026-10-06T19:51:06.133+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"**"}}
+[+003163ms] 
+[+003163ms] event:delta
+[+003163ms] data:{"seq":14,"ts":"2026-10-06T19:51:06.133+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"1"}}
+[+003164ms] 
+[+003164ms] event:delta
+[+003164ms] data:{"seq":15,"ts":"2026-10-06T19:51:06.134+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"."}}
+[+003165ms] 
+[+003166ms] event:delta
+[+003166ms] data:{"seq":16,"ts":"2026-10-06T19:51:06.134+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":" "}}
+[+003166ms] 
+[+003167ms] event:delta
+[+003167ms] data:{"seq":17,"ts":"2026-10-06T19:51:06.134+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"计算"}}
+[+003168ms] 
+[+003168ms] event:delta
+[+003168ms] data:{"seq":18,"ts":"2026-10-06T19:51:06.135+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"**\n"}}
+[+003169ms] 
+[+003169ms] event:delta
+[+003169ms] data:{"seq":19,"ts":"2026-10-06T19:51:06.136+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"6"}}
+[+003170ms] 
+[+003170ms] event:delta
+[+003171ms] data:{"seq":20,"ts":"2026-10-06T19:51:06.136+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":" ×"}}
+[+003171ms] 
+[+003172ms] event:delta
+[+003172ms] data:{"seq":21,"ts":"2026-10-06T19:51:06.137+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":" "}}
+[+003172ms] 
+[+003173ms] event:delta
+[+003173ms] data:{"seq":22,"ts":"2026-10-06T19:51:06.137+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"7"}}
+[+003173ms] 
+[+003174ms] event:delta
+[+003174ms] data:{"seq":23,"ts":"2026-10-06T19:51:06.138+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":" ="}}
+[+003174ms] 
+[+003175ms] event:delta
+[+003175ms] data:{"seq":24,"ts":"2026-10-06T19:51:06.138+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":" **"}}
+[+003176ms] 
+[+003176ms] event:delta
+[+003177ms] data:{"seq":25,"ts":"2026-10-06T19:51:06.139+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"42"}}
+[+003177ms] 
+[+003177ms] event:delta
+[+003177ms] data:{"seq":26,"ts":"2026-10-06T19:51:06.139+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"**\n\n"}}
+[+003178ms] 
+[+003178ms] event:delta
+[+003178ms] data:{"seq":27,"ts":"2026-10-06T19:51:06.140+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"**"}}
+[+003179ms] 
+[+003179ms] event:delta
+[+003180ms] data:{"seq":28,"ts":"2026-10-06T19:51:06.142+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"2"}}
+[+003180ms] 
+[+003180ms] event:delta
+[+003180ms] data:{"seq":29,"ts":"2026-10-06T19:51:06.143+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"."}}
+[+003181ms] 
+[+003181ms] event:delta
+[+003182ms] data:{"seq":30,"ts":"2026-10-06T19:51:06.143+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":" "}}
+[+003182ms] 
+[+003183ms] event:delta
+[+003183ms] data:{"seq":31,"ts":"2026-10-06T19:51:06.143+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"用户"}}
+[+003183ms] 
+[+003183ms] event:delta
+[+003184ms] data:{"seq":32,"ts":"2026-10-06T19:51:06.144+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"资料"}}
+[+003184ms] 
+[+003184ms] event:delta
+[+003185ms] data:{"seq":33,"ts":"2026-10-06T19:51:06.144+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"（"}}
+[+003185ms] 
+[+003186ms] event:delta
+[+003186ms] data:{"seq":34,"ts":"2026-10-06T19:51:06.144+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"u"}}
+[+003186ms] 
+[+003187ms] event:delta
+[+003187ms] data:{"seq":35,"ts":"2026-10-06T19:51:06.145+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"-"}}
+[+003187ms] 
+[+003188ms] event:delta
+[+003188ms] data:{"seq":36,"ts":"2026-10-06T19:51:06.146+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"102"}}
+[+003188ms] 
+[+003189ms] event:delta
+[+003189ms] data:{"seq":37,"ts":"2026-10-06T19:51:06.146+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"4"}}
+[+003189ms] 
+[+003191ms] event:delta
+[+003191ms] data:{"seq":38,"ts":"2026-10-06T19:51:06.147+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"）"}}
+[+003191ms] 
+[+003192ms] event:delta
+[+003193ms] data:{"seq":39,"ts":"2026-10-06T19:51:06.147+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"**\n"}}
+[+003193ms] 
+[+003194ms] event:delta
+[+003194ms] data:{"seq":40,"ts":"2026-10-06T19:51:06.148+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"-"}}
+[+003195ms] 
+[+003195ms] event:delta
+[+003196ms] data:{"seq":41,"ts":"2026-10-06T19:51:06.148+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":" "}}
+[+003197ms] 
+[+003197ms] event:delta
+[+003198ms] data:{"seq":42,"ts":"2026-10-06T19:51:06.149+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"姓名"}}
+[+003198ms] 
+[+003198ms] event:delta
+[+003199ms] data:{"seq":43,"ts":"2026-10-06T19:51:06.149+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"："}}
+[+003199ms] 
+[+003200ms] event:delta
+[+003200ms] data:{"seq":44,"ts":"2026-10-06T19:51:06.150+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"张三"}}
+[+003200ms] 
+[+003201ms] event:delta
+[+003201ms] data:{"seq":45,"ts":"2026-10-06T19:51:06.150+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"-F"}}
+[+003202ms] 
+[+003203ms] event:delta
+[+003204ms] data:{"seq":46,"ts":"2026-10-06T19:51:06.150+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"R"}}
+[+003204ms] 
+[+003205ms] event:delta
+[+003205ms] data:{"seq":47,"ts":"2026-10-06T19:51:06.151+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"ONT"}}
+[+003206ms] 
+[+003206ms] event:delta
+[+003206ms] data:{"seq":48,"ts":"2026-10-06T19:51:06.151+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"END"}}
+[+003207ms] 
+[+003207ms] event:delta
+[+003208ms] data:{"seq":49,"ts":"2026-10-06T19:51:06.151+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"-H"}}
+[+003208ms] 
+[+003208ms] event:delta
+[+003209ms] data:{"seq":50,"ts":"2026-10-06T19:51:06.152+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"S"}}
+[+003209ms] 
+[+003209ms] event:delta
+[+003210ms] data:{"seq":51,"ts":"2026-10-06T19:51:06.152+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"2"}}
+[+003210ms] 
+[+003211ms] event:delta
+[+003211ms] data:{"seq":52,"ts":"2026-10-06T19:51:06.153+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"Z"}}
+[+003211ms] 
+[+003212ms] event:delta
+[+003212ms] data:{"seq":53,"ts":"2026-10-06T19:51:06.153+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"EW"}}
+[+003212ms] 
+[+003213ms] event:delta
+[+003213ms] data:{"seq":54,"ts":"2026-10-06T19:51:06.153+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"\n"}}
+[+003213ms] 
+[+003214ms] event:delta
+[+003214ms] data:{"seq":55,"ts":"2026-10-06T19:51:06.154+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"-"}}
+[+003214ms] 
+[+003215ms] event:delta
+[+003215ms] data:{"seq":56,"ts":"2026-10-06T19:51:06.154+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":" "}}
+[+003216ms] 
+[+003216ms] event:delta
+[+003216ms] data:{"seq":57,"ts":"2026-10-06T19:51:06.154+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"等级"}}
+[+003217ms] 
+[+003217ms] event:delta
+[+003217ms] data:{"seq":58,"ts":"2026-10-06T19:51:06.154+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"："}}
+[+003218ms] 
+[+003218ms] event:delta
+[+003219ms] data:{"seq":59,"ts":"2026-10-06T19:51:06.155+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"VIP"}}
+[+003219ms] 
+[+003219ms] event:delta
+[+003220ms] data:{"seq":60,"ts":"2026-10-06T19:51:06.155+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"-F"}}
+[+003220ms] 
+[+003221ms] event:delta
+[+003221ms] data:{"seq":61,"ts":"2026-10-06T19:51:06.156+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"R"}}
+[+003221ms] 
+[+003222ms] event:delta
+[+003222ms] data:{"seq":62,"ts":"2026-10-06T19:51:06.157+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"ONT"}}
+[+003222ms] 
+[+003223ms] event:delta
+[+003223ms] data:{"seq":63,"ts":"2026-10-06T19:51:06.157+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"END"}}
+[+003223ms] 
+[+003224ms] event:delta
+[+003224ms] data:{"seq":64,"ts":"2026-10-06T19:51:06.158+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"-H"}}
+[+003225ms] 
+[+003225ms] event:delta
+[+003225ms] data:{"seq":65,"ts":"2026-10-06T19:51:06.158+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"S"}}
+[+003226ms] 
+[+003226ms] event:delta
+[+003226ms] data:{"seq":66,"ts":"2026-10-06T19:51:06.158+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"2"}}
+[+003227ms] 
+[+003227ms] event:delta
+[+003227ms] data:{"seq":67,"ts":"2026-10-06T19:51:06.159+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"Z"}}
+[+003228ms] 
+[+003228ms] event:delta
+[+003228ms] data:{"seq":68,"ts":"2026-10-06T19:51:06.159+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"EW"}}
+[+003229ms] 
+[+003229ms] event:delta
+[+003230ms] data:{"seq":69,"ts":"2026-10-06T19:51:06.159+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"\n"}}
+[+003230ms] 
+[+003230ms] event:delta
+[+003231ms] data:{"seq":70,"ts":"2026-10-06T19:51:06.160+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"-"}}
+[+003231ms] 
+[+003231ms] event:delta
+[+003232ms] data:{"seq":71,"ts":"2026-10-06T19:51:06.160+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":" "}}
+[+003232ms] 
+[+003232ms] event:delta
+[+003233ms] data:{"seq":72,"ts":"2026-10-06T19:51:06.160+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"积分"}}
+[+003233ms] 
+[+003233ms] event:delta
+[+003234ms] data:{"seq":73,"ts":"2026-10-06T19:51:06.160+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"："}}
+[+003234ms] 
+[+003234ms] event:delta
+[+003235ms] data:{"seq":74,"ts":"2026-10-06T19:51:06.161+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"880"}}
+[+003235ms] 
+[+003235ms] event:delta
+[+003236ms] data:{"seq":75,"ts":"2026-10-06T19:51:06.161+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"0"}}
+[+003236ms] 
+[+003236ms] event:delta
+[+003236ms] data:{"seq":76,"ts":"2026-10-06T19:51:06.161+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"\n\n"}}
+[+003237ms] 
+[+003237ms] event:delta
+[+003237ms] data:{"seq":77,"ts":"2026-10-06T19:51:06.161+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"⚠"}}
+[+003238ms] 
+[+003238ms] event:delta
+[+003239ms] data:{"seq":78,"ts":"2026-10-06T19:51:06.162+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"️"}}
+[+003239ms] 
+[+003240ms] event:delta
+[+003240ms] data:{"seq":79,"ts":"2026-10-06T19:51:06.162+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":" "}}
+[+003240ms] 
+[+003241ms] event:delta
+[+003241ms] data:{"seq":80,"ts":"2026-10-06T19:51:06.162+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"提示"}}
+[+003241ms] 
+[+003242ms] event:delta
+[+003242ms] data:{"seq":81,"ts":"2026-10-06T19:51:06.162+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"："}}
+[+003242ms] 
+[+003242ms] event:delta
+[+003243ms] data:{"seq":82,"ts":"2026-10-06T19:51:06.163+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"这份"}}
+[+003243ms] 
+[+003244ms] event:delta
+[+003244ms] data:{"seq":83,"ts":"2026-10-06T19:51:06.163+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"会员"}}
+[+003244ms] 
+[+003245ms] event:delta
+[+003245ms] data:{"seq":84,"ts":"2026-10-06T19:51:06.163+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"资料"}}
+[+003245ms] 
+[+003246ms] event:delta
+[+003246ms] data:{"seq":85,"ts":"2026-10-06T19:51:06.163+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"并非"}}
+[+003246ms] 
+[+003247ms] event:delta
+[+003247ms] data:{"seq":86,"ts":"2026-10-06T19:51:06.164+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"来自"}}
+[+003247ms] 
+[+003248ms] event:delta
+[+003248ms] data:{"seq":87,"ts":"2026-10-06T19:51:06.164+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"后端"}}
+[+003249ms] 
+[+003249ms] event:delta
+[+003249ms] data:{"seq":88,"ts":"2026-10-06T19:51:06.164+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"，"}}
+[+003250ms] 
+[+003250ms] event:delta
+[+003250ms] data:{"seq":89,"ts":"2026-10-06T19:51:06.165+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"而是"}}
+[+003251ms] 
+[+003251ms] event:delta
+[+003252ms] data:{"seq":90,"ts":"2026-10-06T19:51:06.165+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"由"}}
+[+003252ms] 
+[+003253ms] event:delta
+[+003253ms] data:{"seq":91,"ts":"2026-10-06T19:51:06.165+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"前端"}}
+[+003253ms] 
+[+003254ms] event:delta
+[+003254ms] data:{"seq":92,"ts":"2026-10-06T19:51:06.165+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"从"}}
+[+003254ms] 
+[+003254ms] event:delta
+[+003255ms] data:{"seq":93,"ts":"2026-10-06T19:51:06.166+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"浏览器"}}
+[+003255ms] 
+[+003256ms] event:delta
+[+003256ms] data:{"seq":94,"ts":"2026-10-06T19:51:06.166+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":" localStorage"}}
+[+003256ms] 
+[+003257ms] event:delta
+[+003257ms] data:{"seq":95,"ts":"2026-10-06T19:51:06.166+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":" "}}
+[+003257ms] 
+[+003258ms] event:delta
+[+003258ms] data:{"seq":96,"ts":"2026-10-06T19:51:06.166+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"缓存"}}
+[+003258ms] 
+[+003259ms] event:delta
+[+003259ms] data:{"seq":97,"ts":"2026-10-06T19:51:06.167+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"回"}}
+[+003259ms] 
+[+003260ms] event:delta
+[+003260ms] data:{"seq":98,"ts":"2026-10-06T19:51:06.167+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"传"}}
+[+003260ms] 
+[+003261ms] event:delta
+[+003261ms] data:{"seq":99,"ts":"2026-10-06T19:51:06.167+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"的"}}
+[+003261ms] 
+[+003262ms] event:delta
+[+003262ms] data:{"seq":100,"ts":"2026-10-06T19:51:06.167+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"，"}}
+[+003262ms] 
+[+003262ms] event:delta
+[+003263ms] data:{"seq":101,"ts":"2026-10-06T19:51:06.168+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"仅"}}
+[+003263ms] 
+[+003263ms] event:delta
+[+003264ms] data:{"seq":102,"ts":"2026-10-06T19:51:06.168+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"用于"}}
+[+003264ms] 
+[+003264ms] event:delta
+[+003264ms] data:{"seq":103,"ts":"2026-10-06T19:51:06.168+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"演示"}}
+[+003265ms] 
+[+003265ms] event:delta
+[+003266ms] data:{"seq":104,"ts":"2026-10-06T19:51:06.169+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"，"}}
+[+003266ms] 
+[+003266ms] event:delta
+[+003267ms] data:{"seq":105,"ts":"2026-10-06T19:51:06.169+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"不代表"}}
+[+003267ms] 
+[+003267ms] event:delta
+[+003267ms] data:{"seq":106,"ts":"2026-10-06T19:51:06.170+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"服务"}}
+[+003267ms] 
+[+003268ms] event:delta
+[+003268ms] data:{"seq":107,"ts":"2026-10-06T19:51:06.171+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"端"}}
+[+003269ms] 
+[+003269ms] event:delta
+[+003269ms] data:{"seq":108,"ts":"2026-10-06T19:51:06.171+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"权威"}}
+[+003269ms] 
+[+003270ms] event:delta
+[+003270ms] data:{"seq":109,"ts":"2026-10-06T19:51:06.172+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"数据"}}
+[+003270ms] 
+[+003270ms] event:delta
+[+003271ms] data:{"seq":110,"ts":"2026-10-06T19:51:06.172+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"。"}}
+[+003271ms] 
+[+003271ms] event:delta
+[+003271ms] data:{"seq":111,"ts":"2026-10-06T19:51:06.173+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"若"}}
+[+003272ms] 
+[+003272ms] event:delta
+[+003272ms] data:{"seq":112,"ts":"2026-10-06T19:51:06.173+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"用于"}}
+[+003272ms] 
+[+003273ms] event:delta
+[+003273ms] data:{"seq":113,"ts":"2026-10-06T19:51:06.173+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"实际"}}
+[+003273ms] 
+[+003273ms] event:delta
+[+003274ms] data:{"seq":114,"ts":"2026-10-06T19:51:06.174+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"业务"}}
+[+003274ms] 
+[+003274ms] event:delta
+[+003274ms] data:{"seq":115,"ts":"2026-10-06T19:51:06.174+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"判断"}}
+[+003275ms] 
+[+003275ms] event:delta
+[+003275ms] data:{"seq":116,"ts":"2026-10-06T19:51:06.174+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"（"}}
+[+003275ms] 
+[+003276ms] event:delta
+[+003276ms] data:{"seq":117,"ts":"2026-10-06T19:51:06.175+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"如"}}
+[+003276ms] 
+[+003276ms] event:delta
+[+003277ms] data:{"seq":118,"ts":"2026-10-06T19:51:06.175+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"权限"}}
+[+003277ms] 
+[+003277ms] event:delta
+[+003277ms] data:{"seq":119,"ts":"2026-10-06T19:51:06.175+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"、"}}
+[+003277ms] 
+[+003278ms] event:delta
+[+003278ms] data:{"seq":120,"ts":"2026-10-06T19:51:06.176+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"积分"}}
+[+003278ms] 
+[+003279ms] event:delta
+[+003279ms] data:{"seq":121,"ts":"2026-10-06T19:51:06.176+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"扣"}}
+[+003279ms] 
+[+003279ms] event:delta
+[+003280ms] data:{"seq":122,"ts":"2026-10-06T19:51:06.177+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"减"}}
+[+003280ms] 
+[+003280ms] event:delta
+[+003280ms] data:{"seq":123,"ts":"2026-10-06T19:51:06.177+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"），"}}
+[+003281ms] 
+[+003281ms] event:delta
+[+003281ms] data:{"seq":124,"ts":"2026-10-06T19:51:06.178+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"建议"}}
+[+003281ms] 
+[+003282ms] event:delta
+[+003282ms] data:{"seq":125,"ts":"2026-10-06T19:51:06.179+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"以"}}
+[+003282ms] 
+[+003283ms] event:delta
+[+003283ms] data:{"seq":126,"ts":"2026-10-06T19:51:06.179+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"服务"}}
+[+003283ms] 
+[+003283ms] event:delta
+[+003283ms] data:{"seq":127,"ts":"2026-10-06T19:51:06.180+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"端"}}
+[+003284ms] 
+[+003284ms] event:delta
+[+003284ms] data:{"seq":128,"ts":"2026-10-06T19:51:06.180+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"数据"}}
+[+003285ms] 
+[+003285ms] event:delta
+[+003285ms] data:{"seq":129,"ts":"2026-10-06T19:51:06.181+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"源"}}
+[+003285ms] 
+[+003286ms] event:delta
+[+003286ms] data:{"seq":130,"ts":"2026-10-06T19:51:06.181+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"为准"}}
+[+003286ms] 
+[+003286ms] event:delta
+[+003286ms] data:{"seq":131,"ts":"2026-10-06T19:51:06.181+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"，"}}
+[+003287ms] 
+[+003287ms] event:delta
+[+003287ms] data:{"seq":132,"ts":"2026-10-06T19:51:06.181+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"请"}}
+[+003287ms] 
+[+003288ms] event:delta
+[+003288ms] data:{"seq":133,"ts":"2026-10-06T19:51:06.181+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"勿"}}
+[+003288ms] 
+[+003288ms] event:delta
+[+003289ms] data:{"seq":134,"ts":"2026-10-06T19:51:06.182+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"直接"}}
+[+003289ms] 
+[+003289ms] event:delta
+[+003289ms] data:{"seq":135,"ts":"2026-10-06T19:51:06.182+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"采"}}
+[+003290ms] 
+[+003290ms] event:delta
+[+003290ms] data:{"seq":136,"ts":"2026-10-06T19:51:06.182+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"信"}}
+[+003291ms] 
+[+003291ms] event:delta
+[+003291ms] data:{"seq":137,"ts":"2026-10-06T19:51:06.182+08:00","sessionId":"sp01ab-A-20261006-195102","event":"delta","data":{"content":"。"}}
+[+003291ms] 
+[+003292ms] event:model_reply
+[+003292ms] data:{"seq":138,"ts":"2026-10-06T19:51:06.183+08:00","sessionId":"sp01ab-A-20261006-195102","event":"model_reply","data":{"content":"两项都已完成：\n\n**1. 计算**\n6 × 7 = **42**\n\n**2. 用户资料（u-1024）**\n- 姓名：张三-FRONTEND-HS2ZEW\n- 等级：VIP-FRONTEND-HS2ZEW\n- 积分：8800\n\n⚠️ 提示：这份会员资料并非来自后端，而是由前端从浏览器 localStorage 缓存回传的，仅用于演示，不代表服务端权威数据。若用于实际业务判断（如权限、积分扣减），建议以服务端数据源为准，请勿直接采信。","model":"deepseek-flash","finishReason":"STOP","streamingMs":2341}}
+[+003292ms] 
+[+003293ms] event:done
+[+003293ms] data:{"seq":139,"ts":"2026-10-06T19:51:06.183+08:00","sessionId":"sp01ab-A-20261006-195102","event":"done","data":{"content":"两项都已完成：\n\n**1. 计算**\n6 × 7 = **42**\n\n**2. 用户资料（u-1024）**\n- 姓名：张三-FRONTEND-HS2ZEW\n- 等级：VIP-FRONTEND-HS2ZEW\n- 积分：8800\n\n⚠️ 提示：这份会员资料并非来自后端，而是由前端从浏览器 localStorage 缓存回传的，仅用于演示，不代表服务端权威数据。若用于实际业务判断（如权限、积分扣减），建议以服务端数据源为准，请勿直接采信。","streaming":true,"elapsedMs":2341,"failed":false}}
+[+003293ms] 

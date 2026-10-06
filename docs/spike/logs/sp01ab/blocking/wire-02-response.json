@@ -1,0 +1,50 @@
+{
+  "status": 200,
+  "elapsedMs": 1378,
+  "headers": {
+    "access-control-allow-credentials": "true",
+    "connection": "keep-alive",
+    "content-type": "application/json",
+    "date": "Tue, 06 Oct 2026 11:48:22 GMT",
+    "eo-cache-status": "MISS",
+    "eo-log-uuid": "9775939184686037397",
+    "server": "openresty",
+    "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+    "transfer-encoding": "chunked",
+    "vary": "origin, access-control-request-method, access-control-request-headers",
+    "x-content-type-options": "nosniff",
+    "x-ds-trace-id": "c14c064fa097b41a6ec6e28f1cf893af"
+  },
+  "body": {
+    "id": "76d9e12e-2ec2-4122-87e2-49e75740e760",
+    "object": "chat.completion",
+    "created": 1791287302,
+    "model": "deepseek-flash",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "两项都完成了：\n\n**1. 计算结果**\n6 × 7 = **42**（后端计算器返回）\n\n**2. 用户资料（u-1024）**\n- 姓名：张三-FRONTEND-SVUMQ1\n- 等级：VIP-FRONTEND-SVUMQ1\n- 积分：8800\n- 来源：浏览器 localStorage（前端本地缓存，后端未参与，结果由前端回传）\n\n⚠️ 提醒一下：这份资料不是从后端数据库读取的，而是取自前端本地缓存，因此**未经服务端校验，可能被用户自行篡改**（姓名和等级里带的那串后缀也明显不像真实值）。如果涉及权限判断、额度发放等关键场景，建议改用可信的服务端数据源再确认一次。\n\n另外，你提到了删除配置（def-777）——那是破坏性操作，会连带删除生效数据行。需要我执行吗？还是你先再确认一下目标编码？",
+          "reasoning_content": ""
+        },
+        "logprobs": null,
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 813,
+      "completion_tokens": 205,
+      "total_tokens": 1018,
+      "prompt_tokens_details": {
+        "cached_tokens": 384
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      },
+      "prompt_cache_hit_tokens": 384,
+      "prompt_cache_miss_tokens": 429
+    },
+    "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669"
+  }
+}

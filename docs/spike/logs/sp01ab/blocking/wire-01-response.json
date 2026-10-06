@@ -1,0 +1,70 @@
+{
+  "status": 200,
+  "elapsedMs": 1117,
+  "headers": {
+    "access-control-allow-credentials": "true",
+    "connection": "keep-alive",
+    "content-type": "application/json",
+    "date": "Tue, 06 Oct 2026 11:48:21 GMT",
+    "eo-cache-status": "MISS",
+    "eo-log-uuid": "5622765527425364168",
+    "server": "openresty",
+    "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+    "transfer-encoding": "chunked",
+    "vary": "origin, access-control-request-method, access-control-request-headers",
+    "x-content-type-options": "nosniff",
+    "x-ds-trace-id": "24c171edf5daf76a404b4c6d4d628f2f"
+  },
+  "body": {
+    "id": "4c81cba1-6974-4a80-93c5-dffb37dd6ebc",
+    "object": "chat.completion",
+    "created": 1791287301,
+    "model": "deepseek-flash",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "The user asks two things: calculate 6*7 and get user profile u-1024. Both are independent, so make both calls in the same block.",
+          "tool_calls": [
+            {
+              "index": 0,
+              "id": "call_00_2mlyKdDAa632I3BlTwkv0134",
+              "type": "function",
+              "function": {
+                "name": "calculate",
+                "arguments": "{\"a\": 6, \"operator\": \"multiply\", \"b\": 7}"
+              }
+            },
+            {
+              "index": 1,
+              "id": "call_01_oxvRnYpfL9KrvWwPydK22039",
+              "type": "function",
+              "function": {
+                "name": "get_user_profile",
+                "arguments": "{\"userId\": \"u-1024\"}"
+              }
+            }
+          ]
+        },
+        "logprobs": null,
+        "finish_reason": "tool_calls"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 748,
+      "completion_tokens": 135,
+      "total_tokens": 883,
+      "prompt_tokens_details": {
+        "cached_tokens": 512
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 33
+      },
+      "prompt_cache_hit_tokens": 512,
+      "prompt_cache_miss_tokens": 236
+    },
+    "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669"
+  }
+}

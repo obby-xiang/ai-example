@@ -1,0 +1,77 @@
+# SSE subscribe http://127.0.0.1:18301/api/events/sp01ab-D-20261006-194831 at 2026-10-06T11:48:31.962Z
+# HTTP 200 content-type=text/event-stream
+[+000002ms] event:subscribed
+[+000002ms] data:{"seq":1,"ts":"2026-10-06T19:48:31.963+08:00","sessionId":"sp01ab-D-20261006-194831","event":"subscribed","data":{"sessionId":"sp01ab-D-20261006-194831","subscribers":1,"heartbeatMs":2000}}
+[+000003ms] 
+[+000127ms] event:ping
+[+000127ms] data:{"seq":2,"ts":"2026-10-06T19:48:32.088+08:00","sessionId":"sp01ab-D-20261006-194831","event":"ping","data":{"tick":58,"pending":null,"subscribers":1}}
+[+000127ms] 
+[+000811ms] event:start
+[+000811ms] data:{"seq":3,"ts":"2026-10-06T19:48:32.772+08:00","sessionId":"sp01ab-D-20261006-194831","event":"start","data":{"message":"请删除配置 def-777（这是一次真实的删除操作，按工具规则执行）。","toolNames":["calculate","get_user_profile","delete_config"],"frontendToolTimeoutSeconds":60,"confirmTimeoutSeconds":30}}
+[+000848ms] 
+[+001991ms] event:tool_start
+[+001992ms] data:{"seq":4,"ts":"2026-10-06T19:48:33.953+08:00","sessionId":"sp01ab-D-20261006-194831","event":"tool_start","data":{"toolCallId":"call_00_LPGoZSyAr9I3JqsHM0k83951","name":"delete_config","kind":"sensitive","args":{"code":"def-777"}}}
+[+001992ms] 
+[+001992ms] event:confirm_request
+[+001993ms] data:{"seq":5,"ts":"2026-10-06T19:48:33.953+08:00","sessionId":"sp01ab-D-20261006-194831","event":"confirm_request","data":{"toolCallId":"call_00_LPGoZSyAr9I3JqsHM0k83951","name":"delete_config","args":{"code":"def-777"},"summary":"{code=def-777}","timeoutSeconds":30,"callback":"POST /api/confirm {sessionId, toolCallId, approved, reason}"}}
+[+001993ms] 
+[+002125ms] event:ping
+[+002126ms] data:{"seq":6,"ts":"2026-10-06T19:48:34.087+08:00","sessionId":"sp01ab-D-20261006-194831","event":"ping","data":{"tick":59,"pending":"confirm:delete_config","subscribers":1}}
+[+002126ms] 
+[+004126ms] event:ping
+[+004127ms] data:{"seq":7,"ts":"2026-10-06T19:48:36.088+08:00","sessionId":"sp01ab-D-20261006-194831","event":"ping","data":{"tick":60,"pending":"confirm:delete_config","subscribers":1}}
+[+004127ms] 
+[+006126ms] event:ping
+[+006127ms] data:{"seq":8,"ts":"2026-10-06T19:48:38.088+08:00","sessionId":"sp01ab-D-20261006-194831","event":"ping","data":{"tick":61,"pending":"confirm:delete_config","subscribers":1}}
+[+006127ms] 
+[+008127ms] event:ping
+[+008127ms] data:{"seq":9,"ts":"2026-10-06T19:48:40.089+08:00","sessionId":"sp01ab-D-20261006-194831","event":"ping","data":{"tick":62,"pending":"confirm:delete_config","subscribers":1}}
+[+008128ms] 
+[+010126ms] event:ping
+[+010140ms] data:{"seq":10,"ts":"2026-10-06T19:48:42.088+08:00","sessionId":"sp01ab-D-20261006-194831","event":"ping","data":{"tick":63,"pending":"confirm:delete_config","subscribers":1}}
+[+010140ms] 
+[+012127ms] event:ping
+[+012127ms] data:{"seq":11,"ts":"2026-10-06T19:48:44.088+08:00","sessionId":"sp01ab-D-20261006-194831","event":"ping","data":{"tick":64,"pending":"confirm:delete_config","subscribers":1}}
+[+012127ms] 
+[+014125ms] event:ping
+[+014126ms] data:{"seq":12,"ts":"2026-10-06T19:48:46.087+08:00","sessionId":"sp01ab-D-20261006-194831","event":"ping","data":{"tick":65,"pending":"confirm:delete_config","subscribers":1}}
+[+014126ms] 
+[+016125ms] event:ping
+[+016126ms] data:{"seq":13,"ts":"2026-10-06T19:48:48.087+08:00","sessionId":"sp01ab-D-20261006-194831","event":"ping","data":{"tick":66,"pending":"confirm:delete_config","subscribers":1}}
+[+016126ms] 
+[+018126ms] event:ping
+[+018127ms] data:{"seq":14,"ts":"2026-10-06T19:48:50.088+08:00","sessionId":"sp01ab-D-20261006-194831","event":"ping","data":{"tick":67,"pending":"confirm:delete_config","subscribers":1}}
+[+018127ms] 
+[+020126ms] event:ping
+[+020126ms] data:{"seq":15,"ts":"2026-10-06T19:48:52.088+08:00","sessionId":"sp01ab-D-20261006-194831","event":"ping","data":{"tick":68,"pending":"confirm:delete_config","subscribers":1}}
+[+020127ms] 
+[+022126ms] event:ping
+[+022127ms] data:{"seq":16,"ts":"2026-10-06T19:48:54.088+08:00","sessionId":"sp01ab-D-20261006-194831","event":"ping","data":{"tick":69,"pending":"confirm:delete_config","subscribers":1}}
+[+022127ms] 
+[+024126ms] event:ping
+[+024126ms] data:{"seq":17,"ts":"2026-10-06T19:48:56.088+08:00","sessionId":"sp01ab-D-20261006-194831","event":"ping","data":{"tick":70,"pending":"confirm:delete_config","subscribers":1}}
+[+024127ms] 
+[+026127ms] event:ping
+[+026127ms] data:{"seq":18,"ts":"2026-10-06T19:48:58.089+08:00","sessionId":"sp01ab-D-20261006-194831","event":"ping","data":{"tick":71,"pending":"confirm:delete_config","subscribers":1}}
+[+026128ms] 
+[+028125ms] event:ping
+[+028126ms] data:{"seq":19,"ts":"2026-10-06T19:49:00.087+08:00","sessionId":"sp01ab-D-20261006-194831","event":"ping","data":{"tick":72,"pending":"confirm:delete_config","subscribers":1}}
+[+028126ms] 
+[+030126ms] event:ping
+[+030127ms] data:{"seq":20,"ts":"2026-10-06T19:49:02.088+08:00","sessionId":"sp01ab-D-20261006-194831","event":"ping","data":{"tick":73,"pending":"confirm:delete_config","subscribers":1}}
+[+030127ms] 
+[+031993ms] event:confirm_decision
+[+031994ms] data:{"seq":21,"ts":"2026-10-06T19:49:03.955+08:00","sessionId":"sp01ab-D-20261006-194831","event":"confirm_decision","data":{"toolCallId":"call_00_LPGoZSyAr9I3JqsHM0k83951","name":"delete_config","decision":"timeout","approved":false,"reason":"确认等待超过 30 秒，系统已自动取消该操作（工具未执行）。","source":"timeout","waitedMs":30002}}
+[+031994ms] 
+[+031994ms] event:tool_result
+[+031995ms] data:{"seq":22,"ts":"2026-10-06T19:49:03.955+08:00","sessionId":"sp01ab-D-20261006-194831","event":"tool_result","data":{"toolCallId":"call_00_LPGoZSyAr9I3JqsHM0k83951","name":"delete_config","ok":false,"executed":false,"result":"确认等待超过 30 秒，系统已自动取消该操作（工具未执行）。"}}
+[+031995ms] 
+[+032126ms] event:ping
+[+032127ms] data:{"seq":23,"ts":"2026-10-06T19:49:04.088+08:00","sessionId":"sp01ab-D-20261006-194831","event":"ping","data":{"tick":74,"pending":null,"subscribers":1}}
+[+032127ms] 
+[+033603ms] event:model_reply
+[+033603ms] data:{"seq":24,"ts":"2026-10-06T19:49:05.564+08:00","sessionId":"sp01ab-D-20261006-194831","event":"model_reply","data":{"content":"删除操作**没有执行**。\n\n工具返回的信息是：确认等待超过 30 秒，系统已自动取消了该操作，`def-777` 的配置定义仍然存在，其生效数据行也没有被删除。\n\n如果你确实要删除，请再明确回复一次（例如「确认删除 def-777」），我会重新发起这次调用。也提醒一下：这是破坏性操作，会连带删除该配置下的生效数据行，且不可恢复。","model":"deepseek-flash","finishReason":"STOP"}}
+[+033603ms] 
+[+033604ms] event:done
+[+033604ms] data:{"seq":25,"ts":"2026-10-06T19:49:05.564+08:00","sessionId":"sp01ab-D-20261006-194831","event":"done","data":{"content":"删除操作**没有执行**。\n\n工具返回的信息是：确认等待超过 30 秒，系统已自动取消了该操作，`def-777` 的配置定义仍然存在，其生效数据行也没有被删除。\n\n如果你确实要删除，请再明确回复一次（例如「确认删除 def-777」），我会重新发起这次调用。也提醒一下：这是破坏性操作，会连带删除该配置下的生效数据行，且不可恢复。","elapsedMs":32792,"failed":false}}
+[+033604ms] 
