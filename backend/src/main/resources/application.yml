@@ -46,11 +46,14 @@ spring:
     default-property-inclusion: non_null
 
   # Redis：AI 会话记忆外置（S4.2 M2）。Memurai 兼容，只用到普通数据结构（LIST/SET/EXPIRE）。
+  # R4 裁决：连接/命令超时收紧到 2s —— Redis 不可用时 AI 端点由 RedisAvailability 前置探活
+  #   直接 503 AI_REDIS_UNAVAILABLE（≤2s），不再让 5 次串行 Redis 操作各等 3s（实测 15.1s）。
   data:
     redis:
       host: 127.0.0.1
       port: 6379
-      timeout: 3s
+      timeout: 2s
+      connect-timeout: 2s
       lettuce:
         shutdown-timeout: 200ms
 
@@ -102,11 +105,24 @@ app:
       # 挂起专用有界平台线程池（DC-12 禁虚拟线程）；容量即挂起并发上限，队列为 0 ⇒ 饱和快速失败 503
       pool-size: 20
     resilience:
-      # 双超时 + 有界重试的阈值待技术方案 §13.2 #2 压测裁决；本棒只用 total-budget 兜住单轮墙钟
+      # 双超时 + 有界重试 + 总预算（韧性棒落地：run/StreamWatchdog）。
+      # 三个阈值均为初值，待技术方案 §13.2 #2 压测裁决（【待裁决】见 S42-P3 证据文档）。
+      # 硬规范①：超时阈值 > 最长工具耗时 —— 挂起等待（确认门）期间工具处于"活跃"，
+      #   看门狗在工具执行期间不计静默、退出后以退出时刻重新计时，故 90s < hitl.timeout(120s) 仍正确；
+      #   "配置值本身要不要直接大于 hitl.timeout"列为待裁决。
+      # 硬规范②：TCP 静默 FIN 按断流处理 —— 正常收尾必须有终帧（finishReason/usage），
+      #   缺失即判 UPSTREAM_STREAM_INCOMPLETE 并进入重试三条件判定。
       first-byte-timeout: 30s
-      inter-event-timeout: 30s
+      inter-event-timeout: 90s
       max-attempts: 2
-      total-budget: 10m
+      total-budget: 300s
+    resume:
+      # N3/N8：应用启动自动续跑（扫描 RunStore 后自动 resume）。
+      # 仅续"已有人类结论/无外部输入需求"的轮次；仍 PENDING 的确认门/前端工具一律跳过（不绕开人审）。
+      on-startup: true
+      startup-delay: 8s
+      zombie-age: 60s
+      max-on-startup: 10
     session:
       lock:
         # ADR-5：会话锁 TTL = 轮上限；watchdog 续期；轮终态主动释放
