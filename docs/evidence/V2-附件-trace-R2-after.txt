@@ -1,0 +1,24 @@
+### STEP create task
+REQ : POST http://localhost:18290/api/tasks
+BODY: {"type":"EXPORT_CONFIG"}
+RESP: {"code":0,"msg":"ok","data":{"id":"38d6659bde0a4257a31b0538231d3ca1","type":"EXPORT_CONFIG","status":"WAITING","currentStep":"SELECT_CONFIG","title":"导出配置","createdAt":"2026-10-06T18:45:59.612811200","updatedAt":"2026-10-06T18:45:59.612811200","selection":null,"params":{"selection":null,"conditions":{},"exportResult":null}}}
+TASK_ID=38d6659bde0a4257a31b0538231d3ca1
+### STEP set selection
+REQ : POST http://localhost:18290/api/tasks/38d6659bde0a4257a31b0538231d3ca1/selection
+BODY: {"codes":["REGION_NETWORK"]}
+RESP: {"code":0,"msg":"ok","data":{"id":"38d6659bde0a4257a31b0538231d3ca1","type":"EXPORT_CONFIG","status":"WAITING","currentStep":"SET_CONDITION","title":"导出配置","createdAt":"2026-10-06T18:45:59.612811","updatedAt":"2026-10-06T18:45:59.764022300","selection":["REGION_NETWORK"],"params":{"selection":["REGION_NETWORK"],"conditions":{},"exportResult":null}}}
+### STEP set conditions (__scope EQ REGION_SOUTH)
+REQ : POST http://localhost:18290/api/tasks/38d6659bde0a4257a31b0538231d3ca1/conditions
+BODY: {"perConfig":{"REGION_NETWORK":[{"field":"__scope","op":"EQ","value":"REGION_SOUTH"}]}}
+RESP: {"code":0,"msg":"ok","data":{"id":"38d6659bde0a4257a31b0538231d3ca1","type":"EXPORT_CONFIG","status":"WAITING","currentStep":"SET_CONDITION","title":"导出配置","createdAt":"2026-10-06T18:45:59.612811","updatedAt":"2026-10-06T18:45:59.834023200","selection":["REGION_NETWORK"],"params":{"selection":["REGION_NETWORK"],"conditions":{"REGION_NETWORK":[{"field":"__scope","op":"EQ","value":"REGION_SOUTH","values":null}]},"exportResult":null}}}
+### STEP export start
+REQ : POST http://localhost:18290/api/tasks/38d6659bde0a4257a31b0538231d3ca1/export/start
+RESP: {"code":0,"msg":"ok","data":{"started":true}}
+### STEP poll status
+REQ : GET http://localhost:18290/api/tasks/38d6659bde0a4257a31b0538231d3ca1
+STATUS=SUCCESS
+### STEP export results
+REQ : GET http://localhost:18290/api/tasks/38d6659bde0a4257a31b0538231d3ca1/export/results
+RESP(first 4000 chars): {"code":0,"msg":"ok","data":[{"configCode":"REGION_NETWORK","configName":"地区网络配置","level":"REGION","fields":[{"code":"__scope","name":"适用地区","dataType":"SCOPE","required":true,"key":true,"sampleValue":null,"options":["REGION_EAST|华东地区","REGION_NE|东北地区","REGION_NORTH|华北地区","REGION_SOUTH|华南地区","REGION_SW|西南地区"]},{"code":"bandwidthMbps","name":"带宽(Mbps)","dataType":"INT","required":true,"key":true,"sampleValue":"1000","options":null},{"code":"gateway","name":"出口网关","dataType":"TEXT","required":true,"key":false,"sampleValue":"10.0.0.1","options":null},{"code":"redundancy","name":"是否双链路","dataType":"BOOL","required":true,"key":false,"sampleValue":"true","options":null}],"rows":[{"__scope":"REGION_SOUTH","bandwidthMbps":"250","gateway":"10.3.0.1","redundancy":"false","__id":202},{"__scope":"REGION_SOUTH","bandwidthMbps":"500","gateway":"10.3.0.1","redundancy":"true","__id":207},{"__scope":"REGION_SOUTH","bandwidthMbps":"750","gateway":"10.3.0.1","redundancy":"false","__id":212}],"rowCount":3}]}
+
+ROW_COUNT=3

@@ -1,0 +1,35 @@
+H2 文件库直查记录（ai_session 表）
+=====================================
+目的：证明 AI 会话确实落盘在 H2 文件库的 ai_session 表中（而非仅内存）。
+执行时间：2026-10-06 19:02 左右，后端进程已停止（netstat 确认 18291 无 LISTENING），排除"内存态"干扰。
+工作目录：E:\temp\ai-example-code\ai-example-deepseek-v4-pro\backend（数据源 URL 为相对路径 ./data/config_admin_db）
+命令模板：
+  java -cp "C:/Users/Obby/.m2/repository/com/h2database/h2/2.3.232/h2-2.3.232.jar" \
+    org.h2.tools.Shell -url "jdbc:h2:file:./data/config_admin_db;MODE=MySQL" -user sa -password "" -sql "<SQL>"
+说明：h2 Shell 的控制台输出为 GBK 编码，本文件已用 iconv -f GBK -t UTF-8 转码。
+
+== [Q1] ai_session 全部行 ==
+SQL: SELECT SESSION_ID, LAST_ACCESS, LENGTH(MESSAGES_JSON) AS MSG_JSON_LEN FROM AI_SESSION ORDER BY LAST_ACCESS;
+
+SESSION_ID                           | LAST_ACCESS                | MSG_JSON_LEN
+e2e-f2988e7244144edb86023ea6182a4dcf | 2026-10-06 18:58:09.411377 | 30018
+e2e-49b0b041fd93428c9bb9e5f64a61d0de | 2026-10-06 19:00:02.956615 | 21078
+v4-persist-7f3a91c2                  | 2026-10-06 19:02:46.637238 | 1464
+(3 rows, 12 ms)
+
+== [Q2] ai_session 表结构 ==
+SQL: SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='AI_SESSION' ORDER BY ORDINAL_POSITION;
+
+COLUMN_NAME   | DATA_TYPE              | CHARACTER_MAXIMUM_LENGTH
+SESSION_ID    | CHARACTER VARYING      | 64
+CONTEXT_JSON  | CHARACTER LARGE OBJECT | 9223372036854775807
+LAST_ACCESS   | TIMESTAMP              | null
+MESSAGES_JSON | CHARACTER LARGE OBJECT | 9223372036854775807
+(4 rows, 19 ms)
+
+== [Q3] 会话消息 JSON 原文（MESSAGES_JSON，重启前 19:01 抓取）==
+SQL: SELECT MESSAGES_JSON FROM AI_SESSION WHERE SESSION_ID='v4-persist-7f3a91c2';
+
+MESSAGES_JSON
+[{"role":"user","content":"请只回答一句话，且不要调用任何工具：我的幸运数字是 7，请确认收到。"},{"role":"assistant","content":"确认收到，您的幸运数字是 7。"},{"role":"user","content":"请只回答一句话，且不要调用任何工具：我刚才告诉你的幸运数字是多少？"},{"role":"assistant","content":"您的幸运数字是 7。"},{"role":"user","content":"请调用 list_config_defs 工具列出系统中所有配置项编码，然后用一句话总结。"},{"role":"assistant","content":"","toolCalls":[{"id":"call_00_wFA0lnWJrnzYsZkNszUm8604","name":"list_config_defs","arguments":"{}"}]},{"role":"tool","content":"\"共 4 个配置定义：\\n? SERVER_PARAM（服务器参数配置，层级：GLOBAL，状态：启用） 字段：server_name=服务器名(必填) ip=IP地址(必填) port=端口 primary_node=是否主节点 env=环境[选项:生产/测试/开发](必填) machine_room=机房[选项:北京/上海/广州/深圳] \\n? REGION_BILLING（地区计费规则，层级：REGION，状态：启用） 字段：unit_price=单价(元)(必填) discount=折扣(0-1) currency=币种[选项:CNY/USD/EUR](必填) effective_date=生效日期 \\n? PROJECT_QUOTA（项目资源配额，层级：PROJECT，状态：启用） 字段：quota_cpu=CPU核数(必填) quota_mem=内存(GB)(必填) owner=负责人(必填) remark=备注 \\n? SERVER_EXTEND（服务器扩容配置，层级：GLOBAL，状态：启用） 字段：server_ref=服务器名[引用:SERVER_PARAM.server_name](必填) add_cores=扩容核数(必填) comment=备注  依赖:SERVER_PARAM\\n\"","toolCallId":"call_00_wFA0lnWJrnzYsZkNszUm8604","name":"list_config_defs"},{"role":"assistant","content":"系统中共有 4 个启用的配置定义——SERVER_PARAM（全局，服务器参数）、REGION_BILLING（地区，计费规则）、PROJECT_QUOTA（项目，资源配额）和 SERVER_EXTEND（全局，服务器扩容，引用并依赖 SERVER_PARAM）。"}]
+(1 row, 14 ms)

@@ -1,0 +1,431 @@
+{
+  "_说明": "V7 核心三组实验：第1轮（思考模式+工具）→ 第2轮回填（含/不含 reasoning_content）。所有请求体均为实际 POST body 原文（Authorization 头中的 api-key 未写入 body，故以 *** 表示该头）。",
+  "api": "https://api.deepseek.com/chat/completions",
+  "authorization_header": "Bearer ***",
+  "A组-直连三组": [
+    {
+      "name": "第1轮 请求（thinking 默认开启 + tools）",
+      "request": {
+        "model": "deepseek-flash",
+        "messages": [
+          {
+            "role": "user",
+            "content": "上海的人口是多少？请调用工具查询。"
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "get_city_population",
+              "description": "查询指定城市的人口数量",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "city": {
+                    "type": "string",
+                    "description": "城市名称"
+                  }
+                },
+                "required": [
+                  "city"
+                ]
+              }
+            }
+          }
+        ],
+        "tool_choice": "auto",
+        "stream": false
+      }
+    },
+    {
+      "name": "第1轮 响应（HTTP 200）",
+      "response": {
+        "id": "70411db8-f224-41b2-930f-31e9d86e7745",
+        "object": "chat.completion",
+        "created": 1791284171,
+        "model": "deepseek-flash",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "I'll look that up for you.",
+              "reasoning_content": "The user asks about Shanghai's population, and asks me to call the tool.",
+              "tool_calls": [
+                {
+                  "index": 0,
+                  "id": "call_00_88FTMwhoOrXt18XRE3kt5141",
+                  "type": "function",
+                  "function": {
+                    "name": "get_city_population",
+                    "arguments": "{\"city\": \"上海\"}"
+                  }
+                }
+              ]
+            },
+            "logprobs": null,
+            "finish_reason": "tool_calls"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 306,
+          "completion_tokens": 64,
+          "total_tokens": 370,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 16
+          },
+          "prompt_cache_hit_tokens": 0,
+          "prompt_cache_miss_tokens": 306
+        },
+        "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669"
+      }
+    },
+    {
+      "name": "第2轮 请求（assistant 原样回填，含 reasoning_content）",
+      "request": {
+        "model": "deepseek-flash",
+        "messages": [
+          {
+            "role": "user",
+            "content": "上海的人口是多少？请调用工具查询。"
+          },
+          {
+            "role": "assistant",
+            "content": "I'll look that up for you.",
+            "reasoning_content": "The user asks about Shanghai's population, and asks me to call the tool.",
+            "tool_calls": [
+              {
+                "index": 0,
+                "id": "call_00_88FTMwhoOrXt18XRE3kt5141",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"上海\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_88FTMwhoOrXt18XRE3kt5141",
+            "content": "{\"city\":\"上海\",\"population\":24874500}"
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "get_city_population",
+              "description": "查询指定城市的人口数量",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "city": {
+                    "type": "string",
+                    "description": "城市名称"
+                  }
+                },
+                "required": [
+                  "city"
+                ]
+              }
+            }
+          }
+        ],
+        "tool_choice": "auto",
+        "stream": false
+      }
+    },
+    {
+      "name": "第2轮 响应（HTTP 200）",
+      "response": {
+        "id": "a59003b7-1dda-4d0c-99fd-9a7818f6928e",
+        "object": "chat.completion",
+        "created": 1791284177,
+        "model": "deepseek-flash",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "根据查询结果，上海的人口为 **24,874,500** 人（约 2487 万）。",
+              "reasoning_content": ""
+            },
+            "logprobs": null,
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 392,
+          "completion_tokens": 25,
+          "total_tokens": 417,
+          "prompt_tokens_details": {
+            "cached_tokens": 256
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "prompt_cache_hit_tokens": 256,
+          "prompt_cache_miss_tokens": 136
+        },
+        "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669"
+      }
+    },
+    {
+      "name": "第2轮 请求（对照组：assistant 去掉 reasoning_content）",
+      "request": {
+        "model": "deepseek-flash",
+        "messages": [
+          {
+            "role": "user",
+            "content": "上海的人口是多少？请调用工具查询。"
+          },
+          {
+            "role": "assistant",
+            "content": "I'll look that up for you.",
+            "tool_calls": [
+              {
+                "index": 0,
+                "id": "call_00_88FTMwhoOrXt18XRE3kt5141",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"上海\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_88FTMwhoOrXt18XRE3kt5141",
+            "content": "{\"city\":\"上海\",\"population\":24874500}"
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "get_city_population",
+              "description": "查询指定城市的人口数量",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "city": {
+                    "type": "string",
+                    "description": "城市名称"
+                  }
+                },
+                "required": [
+                  "city"
+                ]
+              }
+            }
+          }
+        ],
+        "tool_choice": "auto",
+        "stream": false
+      }
+    },
+    {
+      "name": "第2轮 响应（HTTP 200，未出现 400）",
+      "response": {
+        "id": "823d88a0-9912-4070-ad9f-e7e6f7232e61",
+        "object": "chat.completion",
+        "created": 1791284180,
+        "model": "deepseek-flash",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "根据查询结果，**上海的人口为 24,874,500 人**（约 2487 万）。\n\n需要我查询其他城市的人口数据吗？",
+              "reasoning_content": "The tool returned population 24,874,500. Let me report."
+            },
+            "logprobs": null,
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 392,
+          "completion_tokens": 50,
+          "total_tokens": 442,
+          "prompt_tokens_details": {
+            "cached_tokens": 256
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 15
+          },
+          "prompt_cache_hit_tokens": 256,
+          "prompt_cache_miss_tokens": 136
+        },
+        "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669"
+      }
+    }
+  ],
+  "F组-按官方文档样例参数(thinking=enabled + reasoning_effort=high)": [
+    [
+      {
+        "name": "F1-round1(thinking+tools)",
+        "request": {
+          "model": "deepseek-flash",
+          "messages": [
+            {
+              "role": "user",
+              "content": "上海的人口是多少？请调用工具查询。"
+            }
+          ],
+          "tools": [
+            {
+              "type": "function",
+              "function": {
+                "name": "get_city_population",
+                "description": "查询城市人口",
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "city": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "city"
+                  ]
+                }
+              }
+            }
+          ],
+          "reasoning_effort": "high",
+          "thinking": {
+            "type": "enabled"
+          },
+          "stream": false
+        },
+        "status": 200,
+        "response": "{\"id\":\"a83d4d3f-04aa-4ebe-ad41-a2d71c08da99\",\"object\":\"chat.completion\",\"created\":1791284295,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning_content\":\"The user asks about Shanghai's population. I should call the tool.\",\"tool_calls\":[{\"index\":0,\"id\":\"call_00_42cyzf5CahXFZWRldhTE2159\",\"type\":\"function\",\"function\":{\"name\":\"get_city_population\",\"arguments\":\"{\\\"city\\\": \\\"上海\\\"}\"}}]},\"logprobs\":null,\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":297,\"completion_tokens\":55,\"total_tokens\":352,\"prompt_tokens_details\":{\"cached_tokens\":128},\"completion_tokens_details\":{\"reasoning_tokens\":14},\"prompt_cache_hit_tokens\":128,\"prompt_cache_miss_tokens\":169},\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\"}"
+      },
+      {
+        "name": "F2-round2 回填含 reasoning_content",
+        "request": {
+          "model": "deepseek-flash",
+          "tools": [
+            {
+              "type": "function",
+              "function": {
+                "name": "get_city_population",
+                "description": "查询城市人口",
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "city": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "city"
+                  ]
+                }
+              }
+            }
+          ],
+          "reasoning_effort": "high",
+          "thinking": {
+            "type": "enabled"
+          },
+          "stream": false,
+          "messages": [
+            {
+              "role": "user",
+              "content": "上海的人口是多少？请调用工具查询。"
+            },
+            {
+              "role": "assistant",
+              "content": "",
+              "reasoning_content": "The user asks about Shanghai's population. I should call the tool.",
+              "tool_calls": [
+                {
+                  "index": 0,
+                  "id": "call_00_42cyzf5CahXFZWRldhTE2159",
+                  "type": "function",
+                  "function": {
+                    "name": "get_city_population",
+                    "arguments": "{\"city\": \"上海\"}"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "tool_call_id": "call_00_42cyzf5CahXFZWRldhTE2159",
+              "content": "Cloudy 7~13C"
+            }
+          ]
+        },
+        "status": 200,
+        "response": "{\"id\":\"f2a3aac4-2074-4290-b762-a1274a3b7748\",\"object\":\"chat.completion\",\"created\":1791284296,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"我调用了查询工具，但返回的结果并不是人口数据：\\n\\n- 返回内容：`Cloudy 7~13C`（看起来是天气信息：多云，7~13℃）\\n\\n这个结果和\\\"城市人口\\\"完全不相关，可能是工具本身出现了故障或返回了错误的数据源。因此我目前无法给出上海人口的准确数值。\\n\\n建议：\\n- 稍后重试该工具，或更换工具/数据源再查询；\\n- 若你只是需要参考值，我可以说明：上海市常住人口通常在约 2400 万~2500 万量级（具体数字请以官方统计公报为准），但这属于我的背景知识，而非本次工具查询的结果。\\n\\n需要我再重试一次查询吗？\",\"reasoning_content\":\"The tool returned weather-like data instead of population. It seems the tool returned an unexpected result: \\\"Cloudy 7~13C\\\" which looks like weather, not population. I should report this discrepancy — the tool did not return population data.\\n\\nI should be honest: the query returned something unrelated. Let me maybe try again? Possibly the tool is broken. I could try once more with a different city name, but likely same. I'll report that the tool returned unexpected data.\\n\\nLet me try once more to be sure? It might be a mock. I'll just report honestly. Actually trying again could be reasonable but likely yields the same. I'll report.\\n\\nI could attempt another call to confirm. Let me do one retry.\"},\"logprobs\":null,\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":371,\"completion_tokens\":302,\"total_tokens\":673,\"prompt_tokens_details\":{\"cached_tokens\":128},\"completion_tokens_details\":{\"reasoning_tokens\":150},\"prompt_cache_hit_tokens\":128,\"prompt_cache_miss_tokens\":243},\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\"}"
+      },
+      {
+        "name": "F3-round2 回填去掉 reasoning_content",
+        "request": {
+          "model": "deepseek-flash",
+          "tools": [
+            {
+              "type": "function",
+              "function": {
+                "name": "get_city_population",
+                "description": "查询城市人口",
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "city": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "city"
+                  ]
+                }
+              }
+            }
+          ],
+          "reasoning_effort": "high",
+          "thinking": {
+            "type": "enabled"
+          },
+          "stream": false,
+          "messages": [
+            {
+              "role": "user",
+              "content": "上海的人口是多少？请调用工具查询。"
+            },
+            {
+              "role": "assistant",
+              "content": "",
+              "tool_calls": [
+                {
+                  "index": 0,
+                  "id": "call_00_42cyzf5CahXFZWRldhTE2159",
+                  "type": "function",
+                  "function": {
+                    "name": "get_city_population",
+                    "arguments": "{\"city\": \"上海\"}"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "tool_call_id": "call_00_42cyzf5CahXFZWRldhTE2159",
+              "content": "Cloudy 7~13C"
+            }
+          ]
+        },
+        "status": 200,
+        "response": "{\"id\":\"81601fd1-612e-4969-9369-290c8708d47d\",\"object\":\"chat.completion\",\"created\":1791284298,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"我调用了 `get_city_population` 工具查询“上海”，但返回的结果是：\\n\\n```\\nCloudy 7~13C\\n```\\n\\n这显然是天气信息（多云，7~13℃），并不是人口数据。也就是说，该工具本次没有返回有效的人口结果，可能是工具本身返回异常或数据源不匹配。\\n\\n因此，我无法基于这次工具调用给你一个可靠的人口数字。为避免提供未经核实的信息，我不臆造数据。几点建议：\\n\\n1. 你可以让我**改用其他城市名重试**（例如“上海市”或英文 “Shanghai”），看看是否能触发正确返回；\\n2. 若工具持续返回无关结果，建议直接查阅**官方来源**，如上海市统计局或国家统计局的年度统计公报，那里会给出常住人口等权威数据。\\n\\n如果你希望，我可以再试一次其他写法。\",\"reasoning_content\":\"The tool returned \\\"Cloudy 7~13C\\\" which is weather data, not population. This is an irrelevant/unexpected result. I should report this honestly — the tool did not return population data.\\n\\nI shouldn't fabricate a population figure. I can note that I know roughly Shanghai's population is about 24.87 million (2023), but the tool didn't return it. Better to be transparent: the tool returned unrelated data.\\n\\nLet me respond honestly.\"},\"logprobs\":null,\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":371,\"completion_tokens\":273,\"total_tokens\":644,\"prompt_tokens_details\":{\"cached_tokens\":128},\"completion_tokens_details\":{\"reasoning_tokens\":96},\"prompt_cache_hit_tokens\":128,\"prompt_cache_miss_tokens\":243},\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\"}"
+      }
+    ]
+  ]
+}

@@ -1,0 +1,72 @@
+[INFO] Scanning for projects...
+[INFO] 
+[INFO] -------------------< com.example:quickstart-backend >-------------------
+[INFO] Building quickstart-backend 1.0.0
+[INFO]   from pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO] 
+[INFO] >>> spring-boot:3.5.14:run (default-cli) > test-compile @ quickstart-backend >>>
+[INFO] 
+[INFO] --- resources:3.3.1:resources (default-resources) @ quickstart-backend ---
+[INFO] Copying 1 resource from src\main\resources to target\classes
+[INFO] Copying 0 resource from src\main\resources to target\classes
+[INFO] 
+[INFO] --- compiler:3.14.1:compile (default-compile) @ quickstart-backend ---
+[INFO] Nothing to compile - all classes are up to date.
+[INFO] 
+[INFO] --- resources:3.3.1:testResources (default-testResources) @ quickstart-backend ---
+[INFO] Copying 1 resource from src\test\resources to target\test-classes
+[INFO] 
+[INFO] --- compiler:3.14.1:testCompile (default-testCompile) @ quickstart-backend ---
+[INFO] Nothing to compile - all classes are up to date.
+[INFO] 
+[INFO] <<< spring-boot:3.5.14:run (default-cli) < test-compile @ quickstart-backend <<<
+[INFO] 
+[INFO] 
+[INFO] --- spring-boot:3.5.14:run (default-cli) @ quickstart-backend ---
+[INFO] Attaching agents: []
+
+  .   ____          _            __ _ _
+ /\\ / ___'_ __ _ _(_)_ __  __ _ \ \ \ \
+( ( )\___ | '_ | '_| | '_ \/ _` | \ \ \ \
+ \\/  ___)| |_)| | | | | || (_| |  ) ) ) )
+  '  |____| .__|_| |_|_| |_\__, | / / / /
+ =========|_|==============|___/=/_/_/_/
+
+ :: Spring Boot ::               (v3.5.14)
+
+2026-10-06T18:45:13.859+08:00  INFO 27312 --- [quickstart-backend] [           main] c.e.quickstart.QuickstartApplication     : Starting QuickstartApplication using Java 21.0.12 with PID 27312 (E:\temp\ai-example-code\ai-example-glm-5.3\backend\target\classes started by Obby in E:\temp\ai-example-code\ai-example-glm-5.3\backend)
+2026-10-06T18:45:13.860+08:00 DEBUG 27312 --- [quickstart-backend] [           main] c.e.quickstart.QuickstartApplication     : Running with Spring Boot v3.5.14, Spring v6.2.18
+2026-10-06T18:45:13.861+08:00  INFO 27312 --- [quickstart-backend] [           main] c.e.quickstart.QuickstartApplication     : No active profile set, falling back to 1 default profile: "default"
+2026-10-06T18:45:14.371+08:00  INFO 27312 --- [quickstart-backend] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Bootstrapping Spring Data JPA repositories in DEFAULT mode.
+2026-10-06T18:45:14.477+08:00  INFO 27312 --- [quickstart-backend] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Finished Spring Data repository scanning in 99 ms. Found 5 JPA repository interfaces.
+2026-10-06T18:45:14.832+08:00  INFO 27312 --- [quickstart-backend] [           main] o.s.b.w.embedded.tomcat.TomcatWebServer  : Tomcat initialized with port 18290 (http)
+2026-10-06T18:45:14.843+08:00  INFO 27312 --- [quickstart-backend] [           main] o.apache.catalina.core.StandardService   : Starting service [Tomcat]
+2026-10-06T18:45:14.844+08:00  INFO 27312 --- [quickstart-backend] [           main] o.apache.catalina.core.StandardEngine    : Starting Servlet engine: [Apache Tomcat/10.1.54]
+2026-10-06T18:45:14.902+08:00  INFO 27312 --- [quickstart-backend] [           main] o.a.c.c.C.[Tomcat].[localhost].[/]       : Initializing Spring embedded WebApplicationContext
+2026-10-06T18:45:14.903+08:00  INFO 27312 --- [quickstart-backend] [           main] w.s.c.ServletWebServerApplicationContext : Root WebApplicationContext: initialization completed in 1016 ms
+2026-10-06T18:45:14.997+08:00  INFO 27312 --- [quickstart-backend] [           main] o.hibernate.jpa.internal.util.LogHelper  : HHH000204: Processing PersistenceUnitInfo [name: default]
+2026-10-06T18:45:15.028+08:00  INFO 27312 --- [quickstart-backend] [           main] org.hibernate.Version                    : HHH000412: Hibernate ORM core version 6.6.49.Final
+2026-10-06T18:45:15.050+08:00  INFO 27312 --- [quickstart-backend] [           main] o.h.c.internal.RegionFactoryInitiator    : HHH000026: Second-level cache disabled
+2026-10-06T18:45:15.220+08:00  INFO 27312 --- [quickstart-backend] [           main] o.s.o.j.p.SpringPersistenceUnitInfo      : No LoadTimeWeaver setup: ignoring JPA class transformer
+2026-10-06T18:45:15.241+08:00  INFO 27312 --- [quickstart-backend] [           main] com.zaxxer.hikari.HikariDataSource       : HikariPool-1 - Starting...
+2026-10-06T18:45:15.429+08:00  INFO 27312 --- [quickstart-backend] [           main] com.zaxxer.hikari.pool.HikariPool        : HikariPool-1 - Added connection conn0: url=jdbc:h2:file:./data/quickstart_db user=SA
+2026-10-06T18:45:15.430+08:00  INFO 27312 --- [quickstart-backend] [           main] com.zaxxer.hikari.HikariDataSource       : HikariPool-1 - Start completed.
+2026-10-06T18:45:15.477+08:00  INFO 27312 --- [quickstart-backend] [           main] org.hibernate.orm.connections.pooling    : HHH10001005: Database info:
+	Database JDBC URL [Connecting through datasource 'HikariDataSource (HikariPool-1)']
+	Database driver: undefined/unknown
+	Database version: 2.3.232
+	Autocommit mode: undefined/unknown
+	Isolation level: undefined/unknown
+	Minimum pool size: undefined/unknown
+	Maximum pool size: undefined/unknown
+2026-10-06T18:45:16.066+08:00  INFO 27312 --- [quickstart-backend] [           main] o.h.e.t.j.p.i.JtaPlatformInitiator       : HHH000489: No JTA platform available (set 'hibernate.transaction.jta.platform' to enable JTA platform integration)
+2026-10-06T18:45:16.117+08:00  INFO 27312 --- [quickstart-backend] [           main] j.LocalContainerEntityManagerFactoryBean : Initialized JPA EntityManagerFactory for persistence unit 'default'
+2026-10-06T18:45:16.969+08:00  INFO 27312 --- [quickstart-backend] [           main] o.s.b.w.embedded.tomcat.TomcatWebServer  : Tomcat started on port 18290 (http) with context path '/'
+2026-10-06T18:45:16.977+08:00  INFO 27312 --- [quickstart-backend] [           main] c.e.quickstart.QuickstartApplication     : Started QuickstartApplication in 3.433 seconds (process running for 3.748)
+2026-10-06T18:45:17.184+08:00  INFO 27312 --- [quickstart-backend] [           main] c.e.quickstart.service.SeedService       : 开始初始化种子数据 ...
+2026-10-06T18:45:17.459+08:00  INFO 27312 --- [quickstart-backend] [           main] c.e.quickstart.service.SeedService       : 种子数据初始化完成
+2026-10-06T18:45:17.466+08:00  INFO 27312 --- [quickstart-backend] [           main] c.e.q.config.StartupInitializer          : 启动初始化完成
+2026-10-06T18:45:23.528+08:00  INFO 27312 --- [quickstart-backend] [io-18290-exec-1] o.a.c.c.C.[Tomcat].[localhost].[/]       : Initializing Spring DispatcherServlet 'dispatcherServlet'
+2026-10-06T18:45:23.528+08:00  INFO 27312 --- [quickstart-backend] [io-18290-exec-1] o.s.web.servlet.DispatcherServlet        : Initializing Servlet 'dispatcherServlet'
+2026-10-06T18:45:23.529+08:00  INFO 27312 --- [quickstart-backend] [io-18290-exec-1] o.s.web.servlet.DispatcherServlet        : Completed initialization in 1 ms

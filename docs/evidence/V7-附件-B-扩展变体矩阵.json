@@ -1,0 +1,1818 @@
+{
+  "_说明": "V7 扩展试验矩阵。全部为真实 HTTP 请求/响应；凡 HTTP 200 即未触发文档所述 400。",
+  "组1_基础变体(无reasoning/空reasoning/null/流式等)": {
+    "V1_noReasoning_toolresult_last": {
+      "status": 200,
+      "body": "{\"id\":\"d3ff5f04-011d-4fe6-9d8a-1f9305c0c2ca\",\"object\":\"chat.completion\",\"created\":1791284216,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"根据查询结果，**上海的人口为 24,874,500 人**（约 2487 万）。\\n\\n需要说明的是，这个数字应该是常住人口口径的统计值；不同来源（如户籍人口、常住人口、以及统计年份）会有所差异，如果你需要特定年份或口径的数据，可以告诉我。\",\"reasoning_content\":\"The tool returned population 24,874,500. Let me report it.\"},\"logprobs\":null,\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":383,\"completion_tokens\":85,\"total_tokens\":468,\"prompt_tokens_details\":{\"cached_tokens\":0},\"completion_tokens_details\":{\"reasoning_tokens\":16},\"prompt_cache_hit_tokens\":0,\"prompt_cache_miss_tokens\":383},\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\"}"
+    },
+    "V2_noReasoning_assistant_last": {
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"An assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'. (insufficient tool messages following tool_calls message) (request_id: f23b463e-6f3f-44a2-83d6-e2cc9467b99d)\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":\"invalid_request_error\"}}"
+    },
+    "V3_noReasoning_emptyContent": {
+      "status": 200,
+      "body": "{\"id\":\"f58daea9-d299-4daa-b3fc-8d245973951b\",\"object\":\"chat.completion\",\"created\":1791284217,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"上海的人口为 **24,874,500**（约 2487 万）。\\n\\n注：该数据来自工具查询结果，可能是常住人口口径的近似值，具体年份/统计口径请以官方最新公布为准。\",\"reasoning_content\":\"\"},\"logprobs\":null,\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":376,\"completion_tokens\":48,\"total_tokens\":424,\"prompt_tokens_details\":{\"cached_tokens\":128},\"completion_tokens_details\":{\"reasoning_tokens\":0},\"prompt_cache_hit_tokens\":128,\"prompt_cache_miss_tokens\":248},\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\"}"
+    },
+    "V4_reasoningNull": {
+      "status": 200,
+      "body": "{\"id\":\"bc494a93-43ff-4bee-b125-f38c1e117d17\",\"object\":\"chat.completion\",\"created\":1791284218,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"根据工具查询结果：\\n\\n**上海的人口约为 24,874,500 人**（约 2487 万）。\\n\\n需要说明的是，这个数字来自工具的返回值，可能对应某个特定统计年份或统计口径（例如常住人口），如果你需要最新或更精确的官方数据，建议以国家统计局或上海市统计局公布的年度公报为准。需要我查询其他城市吗？\",\"reasoning_content\":\"The tool returned population 24,874,500. Let me present this.\\n\\nNote: I should just report what the tool returned.\"},\"logprobs\":null,\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":383,\"completion_tokens\":107,\"total_tokens\":490,\"prompt_tokens_details\":{\"cached_tokens\":128},\"completion_tokens_details\":{\"reasoning_tokens\":27},\"prompt_cache_hit_tokens\":128,\"prompt_cache_miss_tokens\":255},\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\"}"
+    },
+    "V5_reasoningEmptyString": {
+      "status": 200,
+      "body": "{\"id\":\"3a495902-f2d4-4d88-8047-cc66359429e6\",\"object\":\"chat.completion\",\"created\":1791284219,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"根据查询结果：\\n\\n**上海的人口约为 24,874,500 人**（约 2487 万）。\\n\\n需要说明的是，这一数字通常指的是上海市常住人口。上海市统计局公布的年度数据一般在 2480 万左右，与本次查询结果基本一致。如果你需要更精确的官方口径数据（如户籍人口、分年度数据），我可以再帮你进一步查询。\",\"reasoning_content\":\"The tool returned population 24,874,500 for Shanghai. Report this.\"},\"logprobs\":null,\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":367,\"completion_tokens\":97,\"total_tokens\":464,\"prompt_tokens_details\":{\"cached_tokens\":128},\"completion_tokens_details\":{\"reasoning_tokens\":16},\"prompt_cache_hit_tokens\":128,\"prompt_cache_miss_tokens\":239},\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\"}"
+    },
+    "V6_withReasoning_stream": {
+      "status": 200,
+      "body": "data: {\"id\":\"12a68c0b-d34c-48c6-9538-86af0731adfb\",\"object\":\"chat.completion.chunk\",\"created\":1791284220,\"model\":\"deepseek-flash\",\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":null,\"reasoning_content\":\"\"},\"logprobs\":null,\"finish_reason\":null}]}\n\ndata: {\"id\":\"12a68c0b-d34c-48c6-9538-86af0731adfb\",\"object\":\"chat.completion.chunk\",\"created\":1791284220,\"model\":\"deepseek-flash\",\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\",\"choices\":[{\"index\":0,\"delta\":{\"content\":null,\"reasoning_content\":\"The\"},\"logprobs\":null,\"finish_reason\":null}]}\n\ndata: {\"id\":\"12a68c0b-d34c-48c6-9538-86af0731adfb\",\"object\":\"chat.completion.chunk\",\"created\":1791284220,\"model\":\"deepseek-flash\",\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\",\"choices\":[{\"index\":0,\"delta\":{\"content\":null,\"reasoning_content\":\" tool\"},\"logprobs\":null,\"finish_reason\":null}]}\n\ndata: {\"id\":\"12a68c0b-d34c-48c6-9538-86af0731adfb\",\"object\":\"chat.completion.chunk\",\"created\":1791284220,\"model\":\"deepseek-flash\",\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\",\"choices\":[{\"index\":0,\"delta\":{\"content\":null,\"reasoning_content\":\" returned\"},\"logprobs\":null,\""
+    },
+    "V7_noReasoning_stream": {
+      "status": 200,
+      "body": "data: {\"id\":\"ccfc0020-4ff2-48ef-8c04-bb2f2e6a0e24\",\"object\":\"chat.completion.chunk\",\"created\":1791284221,\"model\":\"deepseek-flash\",\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":null,\"reasoning_content\":\"\"},\"logprobs\":null,\"finish_reason\":null}]}\n\ndata: {\"id\":\"ccfc0020-4ff2-48ef-8c04-bb2f2e6a0e24\",\"object\":\"chat.completion.chunk\",\"created\":1791284221,\"model\":\"deepseek-flash\",\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"根据\",\"reasoning_content\":null},\"logprobs\":null,\"finish_reason\":null}]}\n\ndata: {\"id\":\"ccfc0020-4ff2-48ef-8c04-bb2f2e6a0e24\",\"object\":\"chat.completion.chunk\",\"created\":1791284221,\"model\":\"deepseek-flash\",\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"查询\",\"reasoning_content\":null},\"logprobs\":null,\"finish_reason\":null}]}\n\ndata: {\"id\":\"ccfc0020-4ff2-48ef-8c04-bb2f2e6a0e24\",\"object\":\"chat.completion.chunk\",\"created\":1791284221,\"model\":\"deepseek-flash\",\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"结果\",\"reasoning_content\":null},\"logprobs\":null,\"finish_reas"
+    },
+    "V8_noReasoning_noname_tool": {
+      "status": 200,
+      "body": "{\"id\":\"380a94f7-f455-4a07-8427-7dd780fa2b56\",\"object\":\"chat.completion\",\"created\":1791284222,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"根据工具查询结果，上海的人口为 **24,874,500**（约 2487.45 万）。\\n\\n需要说明的是，工具返回的只是一个数字，未标注统计口径（例如是常住人口、户籍人口还是其他口径），也未注明数据年份。如果你需要精确的官方口径，建议再核对统计年鉴等权威来源。\",\"reasoning_content\":\"The tool returned 24,874,500. Report it. Note this is likely without a unit specified—assume people. Should I be careful about what the figure represents (常住人口 etc.)? I can note it as the returned figure and mention it's likely 常住人口, but better not to over-claim. Just present the number and add a light caveat that the tool didn't specify the statistical scope.\"},\"logprobs\":null,\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":376,\"completion_tokens\":159,\"total_tokens\":535,\"prompt_tokens_details\":{\"cached_tokens\":128},\"completion_tokens_details\":{\"reasoning_tokens\":86},\"prompt_cache_hit_tokens\":128,\"prompt_cache_miss_tokens\":248},\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\"}"
+    }
+  },
+  "组2_模型与参数变体(thinking/effort/reasoner/chat/garbage)": {
+    "W1_noContentKey_noReasoning": {
+      "status": 200,
+      "body": "{\"id\":\"e9a5e88a-6002-4f12-b31e-426e0992552f\",\"object\":\"chat.completion\",\"created\":1791284231,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"上海的人口约为 **24,874,500 人**（约 2487 万）。\\n\\n数据来源：`get_city_population` 工具查询结果。\",\"reasoning_content\":\"\"},\"logprobs\":null,\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":376,\"completion_tokens\":36,\"total_tokens\":412,\"prompt_tokens_details\":{\"cached_tokens\":128},\"completion_tokens_details\":{\"reasoning_tokens\":0},\"prompt_cache_hit_tokens\":128,\"prompt_cache_miss_tokens\":248},\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\"}"
+    },
+    "W2_thinkingEnabled_noReasoning": {
+      "status": 200,
+      "body": "{\"id\":\"c01f9fc1-6f5c-453c-8b6d-6a838a188f01\",\"object\":\"chat.completion\",\"created\":1791284232,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"根据工具查询结果，**上海的人口为 24,874,500 人**（约 2487 万）。\\n\\n需要说明的是，这是查询工具返回的数据，我无法确认其统计口径（如是否为常住人口、户籍人口）和更新截止时间。如果你想了解更准确或更新的数据，建议以官方发布的统计公报为准——比如上海市统计局的人口抽样调查数据。需要我查其他城市做对比吗？\",\"reasoning_content\":\"The tool returned population 24,874,500. Note: I can't say this is confirmed... but the tool is the source. I should present it.\\n\\nWait — there's a subtlety here. The tool result is presented in the \\\"user\\\" turn as a tool result. I should just report it and note it's per the tool's data, which may not be fully up to date.\"},\"logprobs\":null,\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":381,\"completion_tokens\":172,\"total_tokens\":553,\"prompt_tokens_details\":{\"cached_tokens\":128},\"completion_tokens_details\":{\"reasoning_tokens\""
+    },
+    "W3_thinkingEnabled_withReasoning": {
+      "status": 200,
+      "body": "{\"id\":\"685e0378-f430-4fbb-b9be-c6c7d11c4c1a\",\"object\":\"chat.completion\",\"created\":1791284234,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"根据查询结果，**上海的人口为 24,874,500 人**（约 2487 万）。\\n\\n（数据来源：工具查询返回结果，通常对应常住人口口径，具体统计年份未在结果中标注。）\",\"reasoning_content\":\"Report result.\"},\"logprobs\":null,\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":369,\"completion_tokens\":53,\"total_tokens\":422,\"prompt_tokens_details\":{\"cached_tokens\":128},\"completion_tokens_details\":{\"reasoning_tokens\":3},\"prompt_cache_hit_tokens\":128,\"prompt_cache_miss_tokens\":241},\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\"}"
+    },
+    "W4_reasoner_noReasoning": {
+      "status": 200,
+      "body": "{\"id\":\"63d3c102-212f-4fe8-826f-3c0ccccabc87\",\"object\":\"chat.completion\",\"created\":1791284235,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"根据查询结果，上海的人口为 **24,874,500**（约 2487 万）。\\n\\n（注：该数据来自工具返回，具体统计口径与年份未注明，实际数字会随官方发布口径而有所差异。）\",\"reasoning_content\":\"The tool returned population 24,874,500.\\n\\nNote: I should just report the result.\"},\"logprobs\":null,\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":365,\"completion_tokens\":71,\"total_tokens\":436,\"prompt_tokens_details\":{\"cached_tokens\":128},\"completion_tokens_details\":{\"reasoning_tokens\":20},\"prompt_cache_hit_tokens\":128,\"prompt_cache_miss_tokens\":237},\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\"}"
+    },
+    "W5_reasoner_withReasoning": {
+      "status": 200,
+      "body": "{\"id\":\"2d5d4e96-1db5-4bf0-899d-5bb710285a8b\",\"object\":\"chat.completion\",\"created\":1791284236,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"上海的人口约为 **24,874,500 人**（约 2487 万）。\\n\\n这是工具查询返回的数据，通常指上海市常住人口。需要注意的是，不同来源（如户籍人口、常住人口、统计年份）的数值会有所差异，如需精确引用建议注明数据年份和来源。\",\"reasoning_content\":\"\"},\"logprobs\":null,\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":369,\"completion_tokens\":64,\"total_tokens\":433,\"prompt_tokens_details\":{\"cached_tokens\":128},\"completion_tokens_details\":{\"reasoning_tokens\":0},\"prompt_cache_hit_tokens\":128,\"prompt_cache_miss_tokens\":241},\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\"}"
+    },
+    "W6_chat_noReasoning": {
+      "status": 200,
+      "body": "{\"id\":\"d3a2a85a-7317-4a85-b25a-3fd06294b039\",\"object\":\"chat.completion\",\"created\":1791284237,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"查询结果：**上海的人口为 24,874,500 人**（约 2487.45 万）。\\n\\n需要说明的是：该数据来自工具返回，未标明统计口径（如常住人口还是户籍人口）和统计年份，如果需要精确引用，建议核实数据来源。\"},\"logprobs\":null,\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":340,\"completion_tokens\":61,\"total_tokens\":401,\"prompt_tokens_details\":{\"cached_tokens\":0},\"prompt_cache_hit_tokens\":0,\"prompt_cache_miss_tokens\":340},\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\"}"
+    },
+    "W7_chat_withReasoning": {
+      "status": 200,
+      "body": "{\"id\":\"4e0a384f-2095-4dd1-8f3d-5402d2501eca\",\"object\":\"chat.completion\",\"created\":1791284238,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"根据查询结果，上海的人口为 **24,874,500**（约 2487 万）。\"},\"logprobs\":null,\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":340,\"completion_tokens\":22,\"total_tokens\":362,\"prompt_tokens_details\":{\"cached_tokens\":128},\"prompt_cache_hit_tokens\":128,\"prompt_cache_miss_tokens\":212},\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\"}"
+    },
+    "W8_reasoning_wronggarbage": {
+      "status": 200,
+      "body": "{\"id\":\"f31e2b49-ad8a-4667-a78f-9caa112c39c9\",\"object\":\"chat.completion\",\"created\":1791284238,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"根据查询结果，**上海的人口为 24,874,500 人**（约 2487 万）。\\n\\n如需其他城市的数据，我可以继续帮你查询。\",\"reasoning_content\":\"Report the result.\"},\"logprobs\":null,\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":370,\"completion_tokens\":40,\"total_tokens\":410,\"prompt_tokens_details\":{\"cached_tokens\":128},\"completion_tokens_details\":{\"reasoning_tokens\":4},\"prompt_cache_hit_tokens\":128,\"prompt_cache_miss_tokens\":242},\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\"}"
+    }
+  },
+  "组3_后续用户轮与effort/并行等": {
+    "X1_subsequent_turn_noReasoning": {
+      "status": 200,
+      "body": "{\"id\":\"2668b060-0dc7-4d50-a37a-2683265da73b\",\"object\":\"chat.completion\",\"created\":1791284252,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning_content\":\"The user asks about Beijing. I should call the tool.\\n\\nWait — there's a nuance here. The previous tool call for \\\"上海\\\" returned data. Now the user asks about 北京. I should just call the tool.\\n\\nActually, let me be careful — is there any trick here? The system prompt only gives me get_city_population. I should call it for 北京.\\n\\nHmm, but there might be a subtlety: the user said \\\"那北京呢？\\\" meaning \\\"what about Beijing?\\\" — straightforward. Call the tool.\\n\\nI should not call it in parallel with anything since there's only one call.\",\"tool_calls\":[{\"index\":0,\"id\":\"call_00_v4WL0r1SmYAHTZauguRz0701\",\"type\":\"function\",\"function\":{\"name\":\"get_city_population\",\"arguments\":\"{\\\"city\\\": \\\"北京\\\"}\"}}]"
+    },
+    "X2_subsequent_turn_withReasoning": {
+      "status": 200,
+      "body": "{\"id\":\"7dab3a0b-de52-46fa-8965-5a8c961385a9\",\"object\":\"chat.completion\",\"created\":1791284254,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning_content\":\"User wants Beijing population.\",\"tool_calls\":[{\"index\":0,\"id\":\"call_00_WllW3wV5NTiTjYtWurFi7803\",\"type\":\"function\",\"function\":{\"name\":\"get_city_population\",\"arguments\":\"{\\\"city\\\": \\\"北京\\\"}\"}}]},\"logprobs\":null,\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":374,\"completion_tokens\":46,\"total_tokens\":420,\"prompt_tokens_details\":{\"cached_tokens\":128},\"completion_tokens_details\":{\"reasoning_tokens\":5},\"prompt_cache_hit_tokens\":128,\"prompt_cache_miss_tokens\":246},\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\"}"
+    },
+    "X3_noReasoning_effortHigh": {
+      "status": 200,
+      "body": "{\"id\":\"0dda2bcd-174c-4f88-bf0a-61521e384cce\",\"object\":\"chat.completion\",\"created\":1791284254,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning_content\":\"I'll look up Beijing's population.\",\"tool_calls\":[{\"index\":0,\"id\":\"call_00_h5MafNXLlib2Dw1RAiuC6297\",\"type\":\"function\",\"function\":{\"name\":\"get_city_population\",\"arguments\":\"{\\\"city\\\": \\\"北京\\\"}\"}}]},\"logprobs\":null,\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":372,\"completion_tokens\":49,\"total_tokens\":421,\"prompt_tokens_details\":{\"cached_tokens\":128},\"completion_tokens_details\":{\"reasoning_tokens\":8},\"prompt_cache_hit_tokens\":128,\"prompt_cache_miss_tokens\":244},\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\"}"
+    },
+    "X4_noReasoning_effortMax": {
+      "status": 200,
+      "body": "{\"id\":\"8aa264d5-9b46-47a5-82aa-5d43b5a4855e\",\"object\":\"chat.completion\",\"created\":1791284255,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning_content\":\"The user asks about Beijing's population. I should call the get_city_population tool with 北京. This is independent of the previous call, so I can just call it now.\",\"tool_calls\":[{\"index\":0,\"id\":\"call_00_TWPlnLixRkho670v2Ru39397\",\"type\":\"function\",\"function\":{\"name\":\"get_city_population\",\"arguments\":\"{\\\"city\\\": \\\"北京\\\"}\"}}]},\"logprobs\":null,\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":372,\"completion_tokens\":79,\"total_tokens\":451,\"prompt_tokens_details\":{\"cached_tokens\":0},\"completion_tokens_details\":{\"reasoning_tokens\":38},\"prompt_cache_hit_tokens\":0,\"prompt_cache_miss_tokens\":372},\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\"}"
+    },
+    "X5_noReasoning_thinkingEnabled": {
+      "status": 200,
+      "body": "{\"id\":\"bc9c0921-d0df-4918-b9ec-958963471a6e\",\"object\":\"chat.completion\",\"created\":1791284256,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning_content\":\"The user asks about Beijing's population. I should call the tool.\",\"tool_calls\":[{\"index\":0,\"id\":\"call_00_xJlL0Ecaq2ewMmt1ryYf2984\",\"type\":\"function\",\"function\":{\"name\":\"get_city_population\",\"arguments\":\"{\\\"city\\\": \\\"北京\\\"}\"}}]},\"logprobs\":null,\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":372,\"completion_tokens\":55,\"total_tokens\":427,\"prompt_tokens_details\":{\"cached_tokens\":128},\"completion_tokens_details\":{\"reasoning_tokens\":14},\"prompt_cache_hit_tokens\":128,\"prompt_cache_miss_tokens\":244},\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\"}"
+    },
+    "X6_noReasoning_v4flash_name": {
+      "status": 200,
+      "body": "{\"id\":\"7d19c26a-b740-4c43-9c92-c628723396ac\",\"object\":\"chat.completion\",\"created\":1791284257,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning_content\":\"User asks about Beijing. Call the tool.\",\"tool_calls\":[{\"index\":0,\"id\":\"call_00_tUY5mTsPurELcxW67DEb9835\",\"type\":\"function\",\"function\":{\"name\":\"get_city_population\",\"arguments\":\"{\\\"city\\\": \\\"北京\\\"}\"}}]},\"logprobs\":null,\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":372,\"completion_tokens\":50,\"total_tokens\":422,\"prompt_tokens_details\":{\"cached_tokens\":128},\"completion_tokens_details\":{\"reasoning_tokens\":9},\"prompt_cache_hit_tokens\":128,\"prompt_cache_miss_tokens\":244},\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\"}"
+    },
+    "X7_noReasoning_parallelTools": {
+      "status": 200,
+      "body": "{\"id\":\"57f6bc72-6a8b-4580-bebe-415cc0680a08\",\"object\":\"chat.completion\",\"created\":1791284257,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning_content\":\"The user asks about Beijing. I should call the tool. But note: I don't have a persistent memory of tool results across turns? Actually I do — the conversation history includes the tool call and result. Let me call the tool for Beijing.\\n\\nNote: the first response \\\"上海人口约2487万。\\\" — 24,874,500 ≈ 2487万. Good.\\n\\nNow call for Beijing.\\n\\nWait — there's a subtlety. The previous assistant turn text was \\\"上海人口约2487万。\\\" without any thinking shown. Fine.\\n\\nLet me call the tool.\",\"tool_calls\":[{\"index\":0,\"id\":\"call_00_0bTOs38mNAdEQan4gfVo7378\",\"type\":\"function\",\"function\":{\"name\":\"get_city_population\",\"arguments\":\"{\\\"city\\\": \\\"北京\\\"}\"}}]},\"logprobs\":null,\"finish_reason\":\"tool_calls\"}],\"usage\":{\"pr"
+    },
+    "X8_noReasoning_stream_effortHigh": {
+      "status": 200,
+      "body": "data: {\"id\":\"c110e413-b5df-480f-8b19-cc5e9b01ec6e\",\"object\":\"chat.completion.chunk\",\"created\":1791284258,\"model\":\"deepseek-flash\",\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":null,\"reasoning_content\":\"\"},\"logprobs\":null,\"finish_reason\":null}]}\n\ndata: {\"id\":\"c110e413-b5df-480f-8b19-cc5e9b01ec6e\",\"object\":\"chat.completion.chunk\",\"created\":1791284258,\"model\":\"deepseek-flash\",\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\",\"choices\":[{\"index\":0,\"delta\":{\"content\":null,\"reasoning_content\":\"The\"},\"logprobs\":null,\"finish_reason\":null}]}\n\ndata: {\"id\":\"c110e413-b5df-480f-8b19-cc5e9b01ec6e\",\"object\":\"chat.completion.chunk\",\"created\":1791284258,\"model\":\"deepseek-flash\",\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\",\"choices\":[{\"index\":0,\"delta\":{\"content\":null,\"reasoning_content\":\" user\"},\"logprobs\":null,\"finish"
+    }
+  },
+  "组4_多轮工具循环_回填全程剥离reasoning_content(非流式)": {
+    "keep3": {
+      "mode": "keep",
+      "rounds": 3,
+      "trace": [
+        {
+          "round": 1,
+          "request": {
+            "model": "deepseek-flash",
+            "messages": [
+              {
+                "role": "user",
+                "content": "依次查询上海、北京、广州的人口，每次调用工具，最后汇总。"
+              }
+            ],
+            "tools": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "description": "查询指定城市的人口数量",
+                  "parameters": {
+                    "type": "object",
+                    "properties": {
+                      "city": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "city"
+                    ]
+                  }
+                }
+              }
+            ],
+            "tool_choice": "auto",
+            "stream": false
+          },
+          "status": 200,
+          "response": "{\"id\":\"44cc9fce-cff5-4332-94b1-4105fb1b2782\",\"object\":\"chat.completion\",\"created\":1791284201,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"我将依次查询这三座城市的人口。\\n\\n**第一步：查询上海**\",\"reasoning_content\":\"The user wants me to query the population of Shanghai, Beijing, and Guangzhou one at a time, then summarize.\\n\\nI'll call the tool for each city. Let me do them in sequence as instructed \\\"依次查询...每次调用工具\\\".\\n\\nSince these are independent calls but the user says \\\"每次调用工具\\\" - I think I can call them. Actually the instruction says sequentially. Let me make the calls. I'll do them one at a time to respect \\\"每次调用工具\\\". But actually I can batch them since they're independent. The user said \\\"依次\\\" (in sequence). Let me just call them one at a time.\\n\\nHmm, but the system says if no dependencies, make all independent calls in the same block. The user explicitly said \\\"每次调用工具\\\" which means each time call the tool. Let me interpret - I could do them in parallel. But to be safe and follow the user's sequential request, I'll do them one at a time. Actually, let me reconsider - the guidance says make independent calls in the same block. But the user explicitly wants sequential. \\n\\nI think the best approach here is to honor the user's request but the calls are independent. Let me make them one at a time as requested. Actually, I'll make the first call, then based on result make the second, etc. This shows sequential behavior.\\n\\nLet me start with Shanghai.\",\"tool_calls\":[{\"index\":0,\"id\":\"call_00_hZeG5B3J7jpRwf9MCbVs7784\",\"type\":\"function\",\"function\":{\"name\":\"get_city_population\",\"arguments\":\"{\\\"city\\\": \\\"上海\\\"}\"}}]},\"logprobs\":null,\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":306,\"completion_tokens\":336,\"total_tokens\":642,\"prompt_tokens_details\":{\"cached_tokens\":128},\"completion_tokens_details\":{\"reasoning_tokens\":282},\"prompt_cache_hit_tokens\":128,\"prompt_cache_miss_tokens\":178},\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\"}"
+        },
+        {
+          "round": 2,
+          "request": {
+            "model": "deepseek-flash",
+            "messages": [
+              {
+                "role": "user",
+                "content": "依次查询上海、北京、广州的人口，每次调用工具，最后汇总。"
+              },
+              {
+                "role": "assistant",
+                "content": "我将依次查询这三座城市的人口。\n\n**第一步：查询上海**",
+                "reasoning_content": "The user wants me to query the population of Shanghai, Beijing, and Guangzhou one at a time, then summarize.\n\nI'll call the tool for each city. Let me do them in sequence as instructed \"依次查询...每次调用工具\".\n\nSince these are independent calls but the user says \"每次调用工具\" - I think I can call them. Actually the instruction says sequentially. Let me make the calls. I'll do them one at a time to respect \"每次调用工具\". But actually I can batch them since they're independent. The user said \"依次\" (in sequence). Let me just call them one at a time.\n\nHmm, but the system says if no dependencies, make all independent calls in the same block. The user explicitly said \"每次调用工具\" which means each time call the tool. Let me interpret - I could do them in parallel. But to be safe and follow the user's sequential request, I'll do them one at a time. Actually, let me reconsider - the guidance says make independent calls in the same block. But the user explicitly wants sequential. \n\nI think the best approach here is to honor the user's request but the calls are independent. Let me make them one at a time as requested. Actually, I'll make the first call, then based on result make the second, etc. This shows sequential behavior.\n\nLet me start with Shanghai.",
+                "tool_calls": [
+                  {
+                    "index": 0,
+                    "id": "call_00_hZeG5B3J7jpRwf9MCbVs7784",
+                    "type": "function",
+                    "function": {
+                      "name": "get_city_population",
+                      "arguments": "{\"city\": \"上海\"}"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "tool",
+                "tool_call_id": "call_00_hZeG5B3J7jpRwf9MCbVs7784",
+                "content": "{\"city\":\"上海\",\"population\":1000000}"
+              }
+            ],
+            "tools": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "description": "查询指定城市的人口数量",
+                  "parameters": {
+                    "type": "object",
+                    "properties": {
+                      "city": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "city"
+                    ]
+                  }
+                }
+              }
+            ],
+            "tool_choice": "auto",
+            "stream": false
+          },
+          "status": 200,
+          "response": "{\"id\":\"50a7f046-8c6d-4a7c-983a-b6729d5d7ccf\",\"object\":\"chat.completion\",\"created\":1791284203,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"上海的人口为 1,000,000。现在查询北京。\\n\\n**第二步：查询北京**\",\"reasoning_content\":\"上海人口 1000000。接下来北京。\",\"tool_calls\":[{\"index\":0,\"id\":\"call_00_t653p5sEDRiUwebZaeDw3273\",\"type\":\"function\",\"function\":{\"name\":\"get_city_population\",\"arguments\":\"{\\\"city\\\": \\\"北京\\\"}\"}}]},\"logprobs\":null,\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":664,\"completion_tokens\":70,\"total_tokens\":734,\"prompt_tokens_details\":{\"cached_tokens\":512},\"completion_tokens_details\":{\"reasoning_tokens\":10},\"prompt_cache_hit_tokens\":512,\"prompt_cache_miss_tokens\":152},\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\"}"
+        },
+        {
+          "round": 3,
+          "request": {
+            "model": "deepseek-flash",
+            "messages": [
+              {
+                "role": "user",
+                "content": "依次查询上海、北京、广州的人口，每次调用工具，最后汇总。"
+              },
+              {
+                "role": "assistant",
+                "content": "我将依次查询这三座城市的人口。\n\n**第一步：查询上海**",
+                "reasoning_content": "The user wants me to query the population of Shanghai, Beijing, and Guangzhou one at a time, then summarize.\n\nI'll call the tool for each city. Let me do them in sequence as instructed \"依次查询...每次调用工具\".\n\nSince these are independent calls but the user says \"每次调用工具\" - I think I can call them. Actually the instruction says sequentially. Let me make the calls. I'll do them one at a time to respect \"每次调用工具\". But actually I can batch them since they're independent. The user said \"依次\" (in sequence). Let me just call them one at a time.\n\nHmm, but the system says if no dependencies, make all independent calls in the same block. The user explicitly said \"每次调用工具\" which means each time call the tool. Let me interpret - I could do them in parallel. But to be safe and follow the user's sequential request, I'll do them one at a time. Actually, let me reconsider - the guidance says make independent calls in the same block. But the user explicitly wants sequential. \n\nI think the best approach here is to honor the user's request but the calls are independent. Let me make them one at a time as requested. Actually, I'll make the first call, then based on result make the second, etc. This shows sequential behavior.\n\nLet me start with Shanghai.",
+                "tool_calls": [
+                  {
+                    "index": 0,
+                    "id": "call_00_hZeG5B3J7jpRwf9MCbVs7784",
+                    "type": "function",
+                    "function": {
+                      "name": "get_city_population",
+                      "arguments": "{\"city\": \"上海\"}"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "tool",
+                "tool_call_id": "call_00_hZeG5B3J7jpRwf9MCbVs7784",
+                "content": "{\"city\":\"上海\",\"population\":1000000}"
+              },
+              {
+                "role": "assistant",
+                "content": "上海的人口为 1,000,000。现在查询北京。\n\n**第二步：查询北京**",
+                "reasoning_content": "上海人口 1000000。接下来北京。",
+                "tool_calls": [
+                  {
+                    "index": 0,
+                    "id": "call_00_t653p5sEDRiUwebZaeDw3273",
+                    "type": "function",
+                    "function": {
+                      "name": "get_city_population",
+                      "arguments": "{\"city\": \"北京\"}"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "tool",
+                "tool_call_id": "call_00_t653p5sEDRiUwebZaeDw3273",
+                "content": "{\"city\":\"北京\",\"population\":1000001}"
+              }
+            ],
+            "tools": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "description": "查询指定城市的人口数量",
+                  "parameters": {
+                    "type": "object",
+                    "properties": {
+                      "city": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "city"
+                    ]
+                  }
+                }
+              }
+            ],
+            "tool_choice": "auto",
+            "stream": false
+          },
+          "status": 200,
+          "response": "{\"id\":\"3b71eebd-d30d-4c52-affa-5f6b746e6dba\",\"object\":\"chat.completion\",\"created\":1791284204,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"北京的人口为 1,000,001。现在查询广州。\\n\\n**第三步：查询广州**\",\"reasoning_content\":\"北京人口 1000001。接下来广州。\",\"tool_calls\":[{\"index\":0,\"id\":\"call_00_0TbjugBDPYq5SSe8Thih5293\",\"type\":\"function\",\"function\":{\"name\":\"get_city_population\",\"arguments\":\"{\\\"city\\\": \\\"广州\\\"}\"}}]},\"logprobs\":null,\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":756,\"completion_tokens\":70,\"total_tokens\":826,\"prompt_tokens_details\":{\"cached_tokens\":512},\"completion_tokens_details\":{\"reasoning_tokens\":10},\"prompt_cache_hit_tokens\":512,\"prompt_cache_miss_tokens\":244},\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\"}"
+        }
+      ],
+      "finished": true
+    },
+    "strip3": {
+      "mode": "strip",
+      "rounds": 3,
+      "trace": [
+        {
+          "round": 1,
+          "request": {
+            "model": "deepseek-flash",
+            "messages": [
+              {
+                "role": "user",
+                "content": "依次查询上海、北京、广州的人口，每次调用工具，最后汇总。"
+              }
+            ],
+            "tools": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "description": "查询指定城市的人口数量",
+                  "parameters": {
+                    "type": "object",
+                    "properties": {
+                      "city": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "city"
+                    ]
+                  }
+                }
+              }
+            ],
+            "tool_choice": "auto",
+            "stream": false
+          },
+          "status": 200,
+          "response": "{\"id\":\"a2cfcc5c-0856-4443-a64e-3039a4f768af\",\"object\":\"chat.completion\",\"created\":1791284204,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"I'll query each city's population one at a time.\",\"reasoning_content\":\"The user wants me to query the populations of Shanghai, Beijing, and Guangzhou, one at a time (each call separately), then summarize.\\n\\nSince they want sequential calls, I should make them one at a time? \\\"每次调用工具\\\" means \\\"call the tool each time.\\\" Let me do them sequentially. Actually, I could call them one at a time to be safe. But the instruction says to make independent calls in the same block. However user says \\\"依次查询...每次调用工具\\\" which suggests one at a time.\\n\\nLet me just call them one at a time to follow the user's instruction.\\n\\nActually, let me consider: the user explicitly wants sequential queries. I'll do it one at a time.\",\"tool_calls\":[{\"index\":0,\"id\":\"call_00_78aPOyrVV5BrDHTFL9Bk5808\",\"type\":\"function\",\"function\":{\"name\":\"get_city_population\",\"arguments\":\"{\\\"city\\\": \\\"上海\\\"}\"}}]},\"logprobs\":null,\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":306,\"completion_tokens\":197,\"total_tokens\":503,\"prompt_tokens_details\":{\"cached_tokens\":128},\"completion_tokens_details\":{\"reasoning_tokens\":145},\"prompt_cache_hit_tokens\":128,\"prompt_cache_miss_tokens\":178},\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\"}"
+        },
+        {
+          "round": 2,
+          "request": {
+            "model": "deepseek-flash",
+            "messages": [
+              {
+                "role": "user",
+                "content": "依次查询上海、北京、广州的人口，每次调用工具，最后汇总。"
+              },
+              {
+                "role": "assistant",
+                "content": "I'll query each city's population one at a time.",
+                "tool_calls": [
+                  {
+                    "index": 0,
+                    "id": "call_00_78aPOyrVV5BrDHTFL9Bk5808",
+                    "type": "function",
+                    "function": {
+                      "name": "get_city_population",
+                      "arguments": "{\"city\": \"上海\"}"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "tool",
+                "tool_call_id": "call_00_78aPOyrVV5BrDHTFL9Bk5808",
+                "content": "{\"city\":\"上海\",\"population\":1000000}"
+              }
+            ],
+            "tools": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "description": "查询指定城市的人口数量",
+                  "parameters": {
+                    "type": "object",
+                    "properties": {
+                      "city": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "city"
+                    ]
+                  }
+                }
+              }
+            ],
+            "tool_choice": "auto",
+            "stream": false
+          },
+          "status": 200,
+          "response": "{\"id\":\"7beecd78-8495-4d1b-80c0-60300bea3258\",\"object\":\"chat.completion\",\"created\":1791284206,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning_content\":\"Now Beijing.\",\"tool_calls\":[{\"index\":0,\"id\":\"call_00_F2owszNbWMYcIFO2ywcR9996\",\"type\":\"function\",\"function\":{\"name\":\"get_city_population\",\"arguments\":\"{\\\"city\\\": \\\"北京\\\"}\"}}]},\"logprobs\":null,\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":525,\"completion_tokens\":44,\"total_tokens\":569,\"prompt_tokens_details\":{\"cached_tokens\":384},\"completion_tokens_details\":{\"reasoning_tokens\":3},\"prompt_cache_hit_tokens\":384,\"prompt_cache_miss_tokens\":141},\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\"}"
+        },
+        {
+          "round": 3,
+          "request": {
+            "model": "deepseek-flash",
+            "messages": [
+              {
+                "role": "user",
+                "content": "依次查询上海、北京、广州的人口，每次调用工具，最后汇总。"
+              },
+              {
+                "role": "assistant",
+                "content": "I'll query each city's population one at a time.",
+                "tool_calls": [
+                  {
+                    "index": 0,
+                    "id": "call_00_78aPOyrVV5BrDHTFL9Bk5808",
+                    "type": "function",
+                    "function": {
+                      "name": "get_city_population",
+                      "arguments": "{\"city\": \"上海\"}"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "tool",
+                "tool_call_id": "call_00_78aPOyrVV5BrDHTFL9Bk5808",
+                "content": "{\"city\":\"上海\",\"population\":1000000}"
+              },
+              {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                  {
+                    "index": 0,
+                    "id": "call_00_F2owszNbWMYcIFO2ywcR9996",
+                    "type": "function",
+                    "function": {
+                      "name": "get_city_population",
+                      "arguments": "{\"city\": \"北京\"}"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "tool",
+                "tool_call_id": "call_00_F2owszNbWMYcIFO2ywcR9996",
+                "content": "{\"city\":\"北京\",\"population\":1000001}"
+              }
+            ],
+            "tools": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "description": "查询指定城市的人口数量",
+                  "parameters": {
+                    "type": "object",
+                    "properties": {
+                      "city": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "city"
+                    ]
+                  }
+                }
+              }
+            ],
+            "tool_choice": "auto",
+            "stream": false
+          },
+          "status": 200,
+          "response": "{\"id\":\"9bea6b1c-e273-4af6-b3b9-5b93a2e573be\",\"object\":\"chat.completion\",\"created\":1791284207,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning_content\":\"Now Guangzhou.\",\"tool_calls\":[{\"index\":0,\"id\":\"call_00_JwvxqJq4QqVvSDXdYxCs4154\",\"type\":\"function\",\"function\":{\"name\":\"get_city_population\",\"arguments\":\"{\\\"city\\\": \\\"广州\\\"}\"}}]},\"logprobs\":null,\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":591,\"completion_tokens\":44,\"total_tokens\":635,\"prompt_tokens_details\":{\"cached_tokens\":384},\"completion_tokens_details\":{\"reasoning_tokens\":3},\"prompt_cache_hit_tokens\":384,\"prompt_cache_miss_tokens\":207},\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\"}"
+        }
+      ],
+      "finished": true
+    },
+    "strip8": {
+      "mode": "strip",
+      "rounds": 8,
+      "trace": [
+        {
+          "round": 1,
+          "request": {
+            "model": "deepseek-flash",
+            "messages": [
+              {
+                "role": "user",
+                "content": "依次查询上海、北京、广州的人口，每次调用工具，最后汇总。"
+              }
+            ],
+            "tools": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "description": "查询指定城市的人口数量",
+                  "parameters": {
+                    "type": "object",
+                    "properties": {
+                      "city": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "city"
+                    ]
+                  }
+                }
+              }
+            ],
+            "tool_choice": "auto",
+            "stream": false
+          },
+          "status": 200,
+          "response": "{\"id\":\"ec0afb63-f8b9-4bba-81dc-a44d49b00427\",\"object\":\"chat.completion\",\"created\":1791284208,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"我来依次查询这三座城市的人口。\\n\\n首先查询上海：\",\"reasoning_content\":\"The user wants me to query the populations of Shanghai, Beijing, and Guangzhou, one at a time, then summarize.\\n\\nLet me make the calls. Since they want sequential calls (\\\"依次查询...每次调用工具\\\"), I should call one at a time. But the tool calls are independent... The user explicitly says \\\"每次调用工具\\\" (call the tool each time). Let me do them sequentially to honor the instruction.\\n\\nActually, I can make them in separate blocks. Let me start with Shanghai.\",\"tool_calls\":[{\"index\":0,\"id\":\"call_00_aGzQxob0QpITMJlJRdeI6278\",\"type\":\"function\",\"function\":{\"name\":\"get_city_population\",\"arguments\":\"{\\\"city\\\": \\\"上海\\\"}\"}}]},\"logprobs\":null,\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":306,\"completion_tokens\":152,\"total_tokens\":458,\"prompt_tokens_details\":{\"cached_tokens\":128},\"completion_tokens_details\":{\"reasoning_tokens\":100},\"prompt_cache_hit_tokens\":128,\"prompt_cache_miss_tokens\":178},\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\"}"
+        },
+        {
+          "round": 2,
+          "request": {
+            "model": "deepseek-flash",
+            "messages": [
+              {
+                "role": "user",
+                "content": "依次查询上海、北京、广州的人口，每次调用工具，最后汇总。"
+              },
+              {
+                "role": "assistant",
+                "content": "我来依次查询这三座城市的人口。\n\n首先查询上海：",
+                "tool_calls": [
+                  {
+                    "index": 0,
+                    "id": "call_00_aGzQxob0QpITMJlJRdeI6278",
+                    "type": "function",
+                    "function": {
+                      "name": "get_city_population",
+                      "arguments": "{\"city\": \"上海\"}"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "tool",
+                "tool_call_id": "call_00_aGzQxob0QpITMJlJRdeI6278",
+                "content": "{\"city\":\"上海\",\"population\":1000000}"
+              }
+            ],
+            "tools": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "description": "查询指定城市的人口数量",
+                  "parameters": {
+                    "type": "object",
+                    "properties": {
+                      "city": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "city"
+                    ]
+                  }
+                }
+              }
+            ],
+            "tool_choice": "auto",
+            "stream": false
+          },
+          "status": 200,
+          "response": "{\"id\":\"97a32f28-d749-4957-8654-ada04a8d4829\",\"object\":\"chat.completion\",\"created\":1791284209,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"上海查询完成，接下来查询北京：\",\"reasoning_content\":\"Now Beijing.\",\"tool_calls\":[{\"index\":0,\"id\":\"call_00_aklooXjXqyzsVF4hPStU6835\",\"type\":\"function\",\"function\":{\"name\":\"get_city_population\",\"arguments\":\"{\\\"city\\\": \\\"北京\\\"}\"}}]},\"logprobs\":null,\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":480,\"completion_tokens\":51,\"total_tokens\":531,\"prompt_tokens_details\":{\"cached_tokens\":256},\"completion_tokens_details\":{\"reasoning_tokens\":3},\"prompt_cache_hit_tokens\":256,\"prompt_cache_miss_tokens\":224},\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\"}"
+        },
+        {
+          "round": 3,
+          "request": {
+            "model": "deepseek-flash",
+            "messages": [
+              {
+                "role": "user",
+                "content": "依次查询上海、北京、广州的人口，每次调用工具，最后汇总。"
+              },
+              {
+                "role": "assistant",
+                "content": "我来依次查询这三座城市的人口。\n\n首先查询上海：",
+                "tool_calls": [
+                  {
+                    "index": 0,
+                    "id": "call_00_aGzQxob0QpITMJlJRdeI6278",
+                    "type": "function",
+                    "function": {
+                      "name": "get_city_population",
+                      "arguments": "{\"city\": \"上海\"}"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "tool",
+                "tool_call_id": "call_00_aGzQxob0QpITMJlJRdeI6278",
+                "content": "{\"city\":\"上海\",\"population\":1000000}"
+              },
+              {
+                "role": "assistant",
+                "content": "上海查询完成，接下来查询北京：",
+                "tool_calls": [
+                  {
+                    "index": 0,
+                    "id": "call_00_aklooXjXqyzsVF4hPStU6835",
+                    "type": "function",
+                    "function": {
+                      "name": "get_city_population",
+                      "arguments": "{\"city\": \"北京\"}"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "tool",
+                "tool_call_id": "call_00_aklooXjXqyzsVF4hPStU6835",
+                "content": "{\"city\":\"北京\",\"population\":1000001}"
+              }
+            ],
+            "tools": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "description": "查询指定城市的人口数量",
+                  "parameters": {
+                    "type": "object",
+                    "properties": {
+                      "city": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "city"
+                    ]
+                  }
+                }
+              }
+            ],
+            "tool_choice": "auto",
+            "stream": false
+          },
+          "status": 200,
+          "response": "{\"id\":\"da9cba67-1072-4d80-b066-c0e72a020447\",\"object\":\"chat.completion\",\"created\":1791284209,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"北京查询完成，最后查询广州：\",\"reasoning_content\":\"\",\"tool_calls\":[{\"index\":0,\"id\":\"call_00_ET_SvGaAyAoJVhkaInBfcWm9892\",\"type\":\"function\",\"function\":{\"name\":\"get_city_population\",\"arguments\":\"{\\\"city\\\": \\\"广州\\\"}\"}}]},\"logprobs\":null,\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":553,\"completion_tokens\":48,\"total_tokens\":601,\"prompt_tokens_details\":{\"cached_tokens\":384},\"completion_tokens_details\":{\"reasoning_tokens\":0},\"prompt_cache_hit_tokens\":384,\"prompt_cache_miss_tokens\":169},\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\"}"
+        },
+        {
+          "round": 4,
+          "request": {
+            "model": "deepseek-flash",
+            "messages": [
+              {
+                "role": "user",
+                "content": "依次查询上海、北京、广州的人口，每次调用工具，最后汇总。"
+              },
+              {
+                "role": "assistant",
+                "content": "我来依次查询这三座城市的人口。\n\n首先查询上海：",
+                "tool_calls": [
+                  {
+                    "index": 0,
+                    "id": "call_00_aGzQxob0QpITMJlJRdeI6278",
+                    "type": "function",
+                    "function": {
+                      "name": "get_city_population",
+                      "arguments": "{\"city\": \"上海\"}"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "tool",
+                "tool_call_id": "call_00_aGzQxob0QpITMJlJRdeI6278",
+                "content": "{\"city\":\"上海\",\"population\":1000000}"
+              },
+              {
+                "role": "assistant",
+                "content": "上海查询完成，接下来查询北京：",
+                "tool_calls": [
+                  {
+                    "index": 0,
+                    "id": "call_00_aklooXjXqyzsVF4hPStU6835",
+                    "type": "function",
+                    "function": {
+                      "name": "get_city_population",
+                      "arguments": "{\"city\": \"北京\"}"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "tool",
+                "tool_call_id": "call_00_aklooXjXqyzsVF4hPStU6835",
+                "content": "{\"city\":\"北京\",\"population\":1000001}"
+              },
+              {
+                "role": "assistant",
+                "content": "北京查询完成，最后查询广州：",
+                "tool_calls": [
+                  {
+                    "index": 0,
+                    "id": "call_00_ET_SvGaAyAoJVhkaInBfcWm9892",
+                    "type": "function",
+                    "function": {
+                      "name": "get_city_population",
+                      "arguments": "{\"city\": \"广州\"}"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "tool",
+                "tool_call_id": "call_00_ET_SvGaAyAoJVhkaInBfcWm9892",
+                "content": "{\"city\":\"广州\",\"population\":1000002}"
+              }
+            ],
+            "tools": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "description": "查询指定城市的人口数量",
+                  "parameters": {
+                    "type": "object",
+                    "properties": {
+                      "city": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "city"
+                    ]
+                  }
+                }
+              }
+            ],
+            "tool_choice": "auto",
+            "stream": false
+          },
+          "status": 200,
+          "response": "{\"id\":\"becb4161-6e77-46e8-8550-8cfb71126a0b\",\"object\":\"chat.completion\",\"created\":1791284210,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"三次查询均已完成，汇总如下：\\n\\n| 城市 | 人口 |\\n|------|------|\\n| 上海 | 1,000,000 |\\n| 北京 | 1,000,001 |\\n| 广州 | 1,000,002 |\\n\\n三座城市的人口数量依次递增，广州最多（1,000,002），北京次之（1,000,001），上海最少（1,000,000），彼此相差仅 1 人。\\n\\n（注：以上数值来自工具返回结果，看起来并非真实人口统计数字，仅供演示参考。）\",\"reasoning_content\":\"\"},\"logprobs\":null,\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":623,\"completion_tokens\":119,\"total_tokens\":742,\"prompt_tokens_details\":{\"cached_tokens\":384},\"completion_tokens_details\":{\"reasoning_tokens\":0},\"prompt_cache_hit_tokens\":384,\"prompt_cache_miss_tokens\":239},\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\"}"
+        }
+      ],
+      "finishedAt": 4
+    }
+  },
+  "组5_7轮工具循环_应用等价参数(thinking=enabled+reasoning_effort=high+parallel_tool_calls=false)_回填剥离reasoning_content": [
+    {
+      "round": 1,
+      "status": 200,
+      "request": {
+        "model": "deepseek-flash",
+        "messages": [
+          {
+            "role": "user",
+            "content": "依次查询上海、北京、广州、深圳、杭州、成都的人口，逐个调用工具，最后汇总。"
+          },
+          {
+            "role": "assistant",
+            "content": "I'll query each city's population one by one as requested.",
+            "tool_calls": [
+              {
+                "id": "call_00_ERGqZAELMGsun6liuzoq4439",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"上海\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_ERGqZAELMGsun6liuzoq4439",
+            "content": "{\"city\":\"上海\",\"population\":1000000}"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_00_nZHQx8NFfxCJj82Nd16q8831",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"北京\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_nZHQx8NFfxCJj82Nd16q8831",
+            "content": "{\"city\":\"北京\",\"population\":1000001}"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_00_fMxzCY546gPJRNhaD4Yl3705",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"广州\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_fMxzCY546gPJRNhaD4Yl3705",
+            "content": "{\"city\":\"广州\",\"population\":1000002}"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_00_ET_sB4m2ev7uuo8FOUALVtT2649",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"深圳\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_ET_sB4m2ev7uuo8FOUALVtT2649",
+            "content": "{\"city\":\"深圳\",\"population\":1000003}"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_00_ET_WHXObjeKoKu5IUs5q7MK1060",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"杭州\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_ET_WHXObjeKoKu5IUs5q7MK1060",
+            "content": "{\"city\":\"杭州\",\"population\":1000004}"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_00_ET_oQs8NouOT9KqMu05moVO3333",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"成都\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_ET_oQs8NouOT9KqMu05moVO3333",
+            "content": "{\"city\":\"成都\",\"population\":1000005}"
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "get_city_population",
+              "description": "查询城市人口",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "city": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "city"
+                ]
+              }
+            }
+          }
+        ],
+        "tool_choice": "auto",
+        "stream": false,
+        "parallel_tool_calls": false,
+        "reasoning_effort": "high",
+        "thinking": {
+          "type": "enabled"
+        }
+      },
+      "response": "{\"id\":\"583072de-a3f2-472d-a93a-73de25c959ce\",\"object\":\"chat.completion\",\"created\":1791284455,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"I'll query each city's population one by one as requested.\",\"reasoning_content\":\"We need to query populations of six cities one by one, calling the tool individually. Let me start with Shanghai.\\n\\nThe tool is get_city_population with parameter city. I need to call each one, one at a time (逐个调用). Let me do Shanghai first.\\n\\nActually the instruction says call them one by one. But I could call multiple in one block? It says \\\"逐个调用工具\\\" meaning call the tool for each individually. Let me call one at a time to be safe. Actually the guideline says if there are no dependencies, make all independent calls in the same block. But the user explicitly says \\\"逐个调用工具\\\" - call the tool one by one. Hmm. That's an explicit instruction to call sequentially. Let me do them one at a time.\\n\\nLet me call Shanghai.\",\"tool_calls\":[{\"index\":0,\"id\":\"call_00_ERGqZAELMGsun6liuzoq4439\",\"type\":\"function\",\"function\":{\"name\":\"get_city_population\",\"arguments\":\"{\\\"city\\\": \\\"上海\\\"}\"}}]},\"logprobs\":null,\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":310,\"completion_tokens\":217,\"total_tokens\":527,\"prompt_tokens_details\":{\"cached_tokens\":128},\"completion_tokens_details\":{\"reasoning_tokens\":164},\"prompt_cache_hit_tokens\":128,\"prompt_cache_miss_tokens\":182},\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\"}"
+    },
+    {
+      "round": 2,
+      "status": 200,
+      "request": {
+        "model": "deepseek-flash",
+        "messages": [
+          {
+            "role": "user",
+            "content": "依次查询上海、北京、广州、深圳、杭州、成都的人口，逐个调用工具，最后汇总。"
+          },
+          {
+            "role": "assistant",
+            "content": "I'll query each city's population one by one as requested.",
+            "tool_calls": [
+              {
+                "id": "call_00_ERGqZAELMGsun6liuzoq4439",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"上海\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_ERGqZAELMGsun6liuzoq4439",
+            "content": "{\"city\":\"上海\",\"population\":1000000}"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_00_nZHQx8NFfxCJj82Nd16q8831",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"北京\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_nZHQx8NFfxCJj82Nd16q8831",
+            "content": "{\"city\":\"北京\",\"population\":1000001}"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_00_fMxzCY546gPJRNhaD4Yl3705",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"广州\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_fMxzCY546gPJRNhaD4Yl3705",
+            "content": "{\"city\":\"广州\",\"population\":1000002}"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_00_ET_sB4m2ev7uuo8FOUALVtT2649",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"深圳\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_ET_sB4m2ev7uuo8FOUALVtT2649",
+            "content": "{\"city\":\"深圳\",\"population\":1000003}"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_00_ET_WHXObjeKoKu5IUs5q7MK1060",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"杭州\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_ET_WHXObjeKoKu5IUs5q7MK1060",
+            "content": "{\"city\":\"杭州\",\"population\":1000004}"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_00_ET_oQs8NouOT9KqMu05moVO3333",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"成都\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_ET_oQs8NouOT9KqMu05moVO3333",
+            "content": "{\"city\":\"成都\",\"population\":1000005}"
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "get_city_population",
+              "description": "查询城市人口",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "city": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "city"
+                ]
+              }
+            }
+          }
+        ],
+        "tool_choice": "auto",
+        "stream": false,
+        "parallel_tool_calls": false,
+        "reasoning_effort": "high",
+        "thinking": {
+          "type": "enabled"
+        }
+      },
+      "response": "{\"id\":\"ed3f0746-a7c0-4194-a008-b6d2ead5fc3e\",\"object\":\"chat.completion\",\"created\":1791284457,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning_content\":\"Hmm, that's a suspiciously low number (1,000,000). But I should just report what the tool returns. Let me continue with Beijing.\",\"tool_calls\":[{\"index\":0,\"id\":\"call_00_nZHQx8NFfxCJj82Nd16q8831\",\"type\":\"function\",\"function\":{\"name\":\"get_city_population\",\"arguments\":\"{\\\"city\\\": \\\"北京\\\"}\"}}]},\"logprobs\":null,\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":549,\"completion_tokens\":74,\"total_tokens\":623,\"prompt_tokens_details\":{\"cached_tokens\":384},\"completion_tokens_details\":{\"reasoning_tokens\":33},\"prompt_cache_hit_tokens\":384,\"prompt_cache_miss_tokens\":165},\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\"}"
+    },
+    {
+      "round": 3,
+      "status": 200,
+      "request": {
+        "model": "deepseek-flash",
+        "messages": [
+          {
+            "role": "user",
+            "content": "依次查询上海、北京、广州、深圳、杭州、成都的人口，逐个调用工具，最后汇总。"
+          },
+          {
+            "role": "assistant",
+            "content": "I'll query each city's population one by one as requested.",
+            "tool_calls": [
+              {
+                "id": "call_00_ERGqZAELMGsun6liuzoq4439",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"上海\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_ERGqZAELMGsun6liuzoq4439",
+            "content": "{\"city\":\"上海\",\"population\":1000000}"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_00_nZHQx8NFfxCJj82Nd16q8831",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"北京\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_nZHQx8NFfxCJj82Nd16q8831",
+            "content": "{\"city\":\"北京\",\"population\":1000001}"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_00_fMxzCY546gPJRNhaD4Yl3705",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"广州\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_fMxzCY546gPJRNhaD4Yl3705",
+            "content": "{\"city\":\"广州\",\"population\":1000002}"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_00_ET_sB4m2ev7uuo8FOUALVtT2649",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"深圳\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_ET_sB4m2ev7uuo8FOUALVtT2649",
+            "content": "{\"city\":\"深圳\",\"population\":1000003}"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_00_ET_WHXObjeKoKu5IUs5q7MK1060",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"杭州\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_ET_WHXObjeKoKu5IUs5q7MK1060",
+            "content": "{\"city\":\"杭州\",\"population\":1000004}"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_00_ET_oQs8NouOT9KqMu05moVO3333",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"成都\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_ET_oQs8NouOT9KqMu05moVO3333",
+            "content": "{\"city\":\"成都\",\"population\":1000005}"
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "get_city_population",
+              "description": "查询城市人口",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "city": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "city"
+                ]
+              }
+            }
+          }
+        ],
+        "tool_choice": "auto",
+        "stream": false,
+        "parallel_tool_calls": false,
+        "reasoning_effort": "high",
+        "thinking": {
+          "type": "enabled"
+        }
+      },
+      "response": "{\"id\":\"2da6a5a1-afe5-4d3f-b7f1-c3a4508628e8\",\"object\":\"chat.completion\",\"created\":1791284457,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning_content\":\"Hmm, these numbers seem off (Beijing ~1,000,001). But I should report the tool's output. Let me continue.\\n\\nActually wait, these outputs look suspicious — maybe the tool is unreliable. But my job is to report what the tool says. Let me continue querying.\",\"tool_calls\":[{\"index\":0,\"id\":\"call_00_fMxzCY546gPJRNhaD4Yl3705\",\"type\":\"function\",\"function\":{\"name\":\"get_city_population\",\"arguments\":\"{\\\"city\\\": \\\"广州\\\"}\"}}]},\"logprobs\":null,\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":645,\"completion_tokens\":101,\"total_tokens\":746,\"prompt_tokens_details\":{\"cached_tokens\":384},\"completion_tokens_details\":{\"reasoning_tokens\":60},\"prompt_cache_hit_tokens\":384,\"prompt_cache_miss_tokens\":261},\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\"}"
+    },
+    {
+      "round": 4,
+      "status": 200,
+      "request": {
+        "model": "deepseek-flash",
+        "messages": [
+          {
+            "role": "user",
+            "content": "依次查询上海、北京、广州、深圳、杭州、成都的人口，逐个调用工具，最后汇总。"
+          },
+          {
+            "role": "assistant",
+            "content": "I'll query each city's population one by one as requested.",
+            "tool_calls": [
+              {
+                "id": "call_00_ERGqZAELMGsun6liuzoq4439",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"上海\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_ERGqZAELMGsun6liuzoq4439",
+            "content": "{\"city\":\"上海\",\"population\":1000000}"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_00_nZHQx8NFfxCJj82Nd16q8831",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"北京\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_nZHQx8NFfxCJj82Nd16q8831",
+            "content": "{\"city\":\"北京\",\"population\":1000001}"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_00_fMxzCY546gPJRNhaD4Yl3705",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"广州\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_fMxzCY546gPJRNhaD4Yl3705",
+            "content": "{\"city\":\"广州\",\"population\":1000002}"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_00_ET_sB4m2ev7uuo8FOUALVtT2649",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"深圳\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_ET_sB4m2ev7uuo8FOUALVtT2649",
+            "content": "{\"city\":\"深圳\",\"population\":1000003}"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_00_ET_WHXObjeKoKu5IUs5q7MK1060",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"杭州\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_ET_WHXObjeKoKu5IUs5q7MK1060",
+            "content": "{\"city\":\"杭州\",\"population\":1000004}"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_00_ET_oQs8NouOT9KqMu05moVO3333",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"成都\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_ET_oQs8NouOT9KqMu05moVO3333",
+            "content": "{\"city\":\"成都\",\"population\":1000005}"
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "get_city_population",
+              "description": "查询城市人口",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "city": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "city"
+                ]
+              }
+            }
+          }
+        ],
+        "tool_choice": "auto",
+        "stream": false,
+        "parallel_tool_calls": false,
+        "reasoning_effort": "high",
+        "thinking": {
+          "type": "enabled"
+        }
+      },
+      "response": "{\"id\":\"587b0fbf-a85b-45f6-8adf-15838107c635\",\"object\":\"chat.completion\",\"created\":1791284459,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning_content\":\"\",\"tool_calls\":[{\"index\":0,\"id\":\"call_00_ET_sB4m2ev7uuo8FOUALVtT2649\",\"type\":\"function\",\"function\":{\"name\":\"get_city_population\",\"arguments\":\"{\\\"city\\\": \\\"深圳\\\"}\"}}]},\"logprobs\":null,\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":768,\"completion_tokens\":41,\"total_tokens\":809,\"prompt_tokens_details\":{\"cached_tokens\":512},\"completion_tokens_details\":{\"reasoning_tokens\":0},\"prompt_cache_hit_tokens\":512,\"prompt_cache_miss_tokens\":256},\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\"}"
+    },
+    {
+      "round": 5,
+      "status": 200,
+      "request": {
+        "model": "deepseek-flash",
+        "messages": [
+          {
+            "role": "user",
+            "content": "依次查询上海、北京、广州、深圳、杭州、成都的人口，逐个调用工具，最后汇总。"
+          },
+          {
+            "role": "assistant",
+            "content": "I'll query each city's population one by one as requested.",
+            "tool_calls": [
+              {
+                "id": "call_00_ERGqZAELMGsun6liuzoq4439",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"上海\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_ERGqZAELMGsun6liuzoq4439",
+            "content": "{\"city\":\"上海\",\"population\":1000000}"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_00_nZHQx8NFfxCJj82Nd16q8831",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"北京\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_nZHQx8NFfxCJj82Nd16q8831",
+            "content": "{\"city\":\"北京\",\"population\":1000001}"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_00_fMxzCY546gPJRNhaD4Yl3705",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"广州\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_fMxzCY546gPJRNhaD4Yl3705",
+            "content": "{\"city\":\"广州\",\"population\":1000002}"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_00_ET_sB4m2ev7uuo8FOUALVtT2649",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"深圳\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_ET_sB4m2ev7uuo8FOUALVtT2649",
+            "content": "{\"city\":\"深圳\",\"population\":1000003}"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_00_ET_WHXObjeKoKu5IUs5q7MK1060",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"杭州\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_ET_WHXObjeKoKu5IUs5q7MK1060",
+            "content": "{\"city\":\"杭州\",\"population\":1000004}"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_00_ET_oQs8NouOT9KqMu05moVO3333",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"成都\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_ET_oQs8NouOT9KqMu05moVO3333",
+            "content": "{\"city\":\"成都\",\"population\":1000005}"
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "get_city_population",
+              "description": "查询城市人口",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "city": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "city"
+                ]
+              }
+            }
+          }
+        ],
+        "tool_choice": "auto",
+        "stream": false,
+        "parallel_tool_calls": false,
+        "reasoning_effort": "high",
+        "thinking": {
+          "type": "enabled"
+        }
+      },
+      "response": "{\"id\":\"b944a8cc-4cdd-439e-a127-13ff5838bddb\",\"object\":\"chat.completion\",\"created\":1791284459,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning_content\":\"\",\"tool_calls\":[{\"index\":0,\"id\":\"call_00_ET_WHXObjeKoKu5IUs5q7MK1060\",\"type\":\"function\",\"function\":{\"name\":\"get_city_population\",\"arguments\":\"{\\\"city\\\": \\\"杭州\\\"}\"}}]},\"logprobs\":null,\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":831,\"completion_tokens\":41,\"total_tokens\":872,\"prompt_tokens_details\":{\"cached_tokens\":640},\"completion_tokens_details\":{\"reasoning_tokens\":0},\"prompt_cache_hit_tokens\":640,\"prompt_cache_miss_tokens\":191},\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\"}"
+    },
+    {
+      "round": 6,
+      "status": 200,
+      "request": {
+        "model": "deepseek-flash",
+        "messages": [
+          {
+            "role": "user",
+            "content": "依次查询上海、北京、广州、深圳、杭州、成都的人口，逐个调用工具，最后汇总。"
+          },
+          {
+            "role": "assistant",
+            "content": "I'll query each city's population one by one as requested.",
+            "tool_calls": [
+              {
+                "id": "call_00_ERGqZAELMGsun6liuzoq4439",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"上海\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_ERGqZAELMGsun6liuzoq4439",
+            "content": "{\"city\":\"上海\",\"population\":1000000}"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_00_nZHQx8NFfxCJj82Nd16q8831",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"北京\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_nZHQx8NFfxCJj82Nd16q8831",
+            "content": "{\"city\":\"北京\",\"population\":1000001}"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_00_fMxzCY546gPJRNhaD4Yl3705",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"广州\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_fMxzCY546gPJRNhaD4Yl3705",
+            "content": "{\"city\":\"广州\",\"population\":1000002}"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_00_ET_sB4m2ev7uuo8FOUALVtT2649",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"深圳\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_ET_sB4m2ev7uuo8FOUALVtT2649",
+            "content": "{\"city\":\"深圳\",\"population\":1000003}"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_00_ET_WHXObjeKoKu5IUs5q7MK1060",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"杭州\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_ET_WHXObjeKoKu5IUs5q7MK1060",
+            "content": "{\"city\":\"杭州\",\"population\":1000004}"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_00_ET_oQs8NouOT9KqMu05moVO3333",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"成都\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_ET_oQs8NouOT9KqMu05moVO3333",
+            "content": "{\"city\":\"成都\",\"population\":1000005}"
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "get_city_population",
+              "description": "查询城市人口",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "city": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "city"
+                ]
+              }
+            }
+          }
+        ],
+        "tool_choice": "auto",
+        "stream": false,
+        "parallel_tool_calls": false,
+        "reasoning_effort": "high",
+        "thinking": {
+          "type": "enabled"
+        }
+      },
+      "response": "{\"id\":\"736d8903-b14f-4419-94cf-481be73be619\",\"object\":\"chat.completion\",\"created\":1791284460,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning_content\":\"\",\"tool_calls\":[{\"index\":0,\"id\":\"call_00_ET_oQs8NouOT9KqMu05moVO3333\",\"type\":\"function\",\"function\":{\"name\":\"get_city_population\",\"arguments\":\"{\\\"city\\\": \\\"成都\\\"}\"}}]},\"logprobs\":null,\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":894,\"completion_tokens\":41,\"total_tokens\":935,\"prompt_tokens_details\":{\"cached_tokens\":640},\"completion_tokens_details\":{\"reasoning_tokens\":0},\"prompt_cache_hit_tokens\":640,\"prompt_cache_miss_tokens\":254},\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\"}"
+    },
+    {
+      "round": 7,
+      "status": 200,
+      "request": {
+        "model": "deepseek-flash",
+        "messages": [
+          {
+            "role": "user",
+            "content": "依次查询上海、北京、广州、深圳、杭州、成都的人口，逐个调用工具，最后汇总。"
+          },
+          {
+            "role": "assistant",
+            "content": "I'll query each city's population one by one as requested.",
+            "tool_calls": [
+              {
+                "id": "call_00_ERGqZAELMGsun6liuzoq4439",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"上海\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_ERGqZAELMGsun6liuzoq4439",
+            "content": "{\"city\":\"上海\",\"population\":1000000}"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_00_nZHQx8NFfxCJj82Nd16q8831",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"北京\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_nZHQx8NFfxCJj82Nd16q8831",
+            "content": "{\"city\":\"北京\",\"population\":1000001}"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_00_fMxzCY546gPJRNhaD4Yl3705",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"广州\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_fMxzCY546gPJRNhaD4Yl3705",
+            "content": "{\"city\":\"广州\",\"population\":1000002}"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_00_ET_sB4m2ev7uuo8FOUALVtT2649",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"深圳\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_ET_sB4m2ev7uuo8FOUALVtT2649",
+            "content": "{\"city\":\"深圳\",\"population\":1000003}"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_00_ET_WHXObjeKoKu5IUs5q7MK1060",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"杭州\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_ET_WHXObjeKoKu5IUs5q7MK1060",
+            "content": "{\"city\":\"杭州\",\"population\":1000004}"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_00_ET_oQs8NouOT9KqMu05moVO3333",
+                "type": "function",
+                "function": {
+                  "name": "get_city_population",
+                  "arguments": "{\"city\": \"成都\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_ET_oQs8NouOT9KqMu05moVO3333",
+            "content": "{\"city\":\"成都\",\"population\":1000005}"
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "get_city_population",
+              "description": "查询城市人口",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "city": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "city"
+                ]
+              }
+            }
+          }
+        ],
+        "tool_choice": "auto",
+        "stream": false,
+        "parallel_tool_calls": false,
+        "reasoning_effort": "high",
+        "thinking": {
+          "type": "enabled"
+        }
+      },
+      "response": "{\"id\":\"24a46a01-62bb-4c5e-9e8b-2c9548c85a4c\",\"object\":\"chat.completion\",\"created\":1791284461,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"已完成六个城市的逐个查询，汇总如下：\\n\\n| 城市 | 人口（工具返回） |\\n|------|----------------|\\n| 上海 | 1,000,000 |\\n| 北京 | 1,000,001 |\\n| 广州 | 1,000,002 |\\n| 深圳 | 1,000,003 |\\n| 杭州 | 1,000,004 |\\n| 成都 | 1,000,005 |\\n\\n⚠️ **提示**：以上数值来自查询工具，但结果存在明显异常——六个城市的人口恰好是 1000000 开始的连续整数，这几乎不可能是真实数据（现实中上海、北京、深圳等城市人口均在千万级以上）。因此该返回值很可能是**占位符/测试数据或工具本身存在问题**，不建议作为实际人口数据使用。如需准确数据，建议改用权威来源（如各市统计年鉴或国家统计局）。\",\"reasoning_content\":\"Now summarize. I should note that the returned values look suspicious (sequential 1000000-1000005), which is unlikely to reflect real populations. I should report the tool's output faithfully and flag the anomaly.\"},\"logprobs\":null,\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":957,\"completion_tokens\":231,\"total_tokens\":1188,\"prompt_tokens_details\":{\"cached_tokens\":768},\"completion_tokens_details\":{\"reasoning_tokens\":44},\"prompt_cache_hit_tokens\":768,\"prompt_cache_miss_tokens\":189},\"system_fingerprint\":\"aeb56401ca74e127821c4f9126dcb669\"}"
+    }
+  ]
+}

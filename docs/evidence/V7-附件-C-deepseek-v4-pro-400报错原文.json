@@ -1,0 +1,15 @@
+{
+  "_说明": "模型对照：同一构造的请求改用 deepseek-v4-pro，缺失 reasoning_content 时复现 400；携带则为 200。报错文案与分支 docs 存档逐字一致（仅多出 request_id 后缀）。",
+  "P1_v4pro_缺失reasoning_content": {
+    "status": 400,
+    "body": "{\"error\":{\"message\":\"The `reasoning_content` in the thinking mode must be passed back to the API. (request_id: 7d6fde7c-b731-4375-a3be-50fb0c5441b6)\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":\"invalid_request_error\"}}"
+  },
+  "P2_v4pro_携带reasoning_content": {
+    "status": 200,
+    "body": "{\"id\":\"28476f2a-47ac-4df5-b4be-3eaa83a2dd73\",\"object\":\"chat.completion\",\"created\":1791284435,\"model\":\"deepseek-v4-pro\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"上海的人口为 **24,874,500 人**（约 2487 万）。\",\"reasoning_content\":\"Tool result population 24,874,500. Answer in Chinese.\"},\"logprobs\":null,\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":433,\"completion_tokens\":35,\"total_tokens\":468,\"prompt_tokens_details\":{\"cached_tokens\":0},\"completion_tokens_details\":{\"reasoning_tokens\":14},\"prompt_cache_hit_tokens\":0,\"prompt_cache_miss_tokens\":433},\"system_fingerprint\":\"a307abda487cd1b463329ccb945ce396\"}"
+  },
+  "P3_v4pro_缺失reasoning_content且显式thinking=enabled": {
+    "status": 400,
+    "body": "{\"error\":{\"message\":\"The `reasoning_content` in the thinking mode must be passed back to the API. (request_id: 54dd613d-4a48-4e80-818d-b1f8c3f6f7a9)\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":\"invalid_request_error\"}}"
+  }
+}

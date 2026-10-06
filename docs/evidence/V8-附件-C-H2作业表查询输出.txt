@@ -1,0 +1,10 @@
+H2 直查（后端已停止后以只读方式打开数据库文件）
+命令: java -cp <h2-2.3.232.jar> org.h2.tools.Shell -url "jdbc:h2:file:E:/temp/ai-example-code/ai-example-kimi-k3/backend/data/quickstart_db;MODE=MySQL;ACCESS_MODE_DATA=r" -user sa -password "" -sql "SELECT ID, TASK_ID, KIND, STATUS, TOTAL, PROCESSED, CREATED_AT FROM JOB_RUN ORDER BY ID"
+
+输出:
+ID | TASK_ID | KIND   | STATUS  | TOTAL | PROCESSED | CREATED_AT
+1  | 1       | EXPORT | SUCCESS | 6     | 6         | 2026-10-06 19:00:00.515736
+2  | 1       | EXPORT | SUCCESS | 6     | 6         | 2026-10-06 19:00:02.807911
+3  | 1       | IMPORT | SUCCESS | 1     | 1         | 2026-10-06 19:00:14.459458
+4  | 1       | CHECK  | SUCCESS | 1     | 1         | 2026-10-06 19:00:14.494458
+(4 rows, 12 ms)

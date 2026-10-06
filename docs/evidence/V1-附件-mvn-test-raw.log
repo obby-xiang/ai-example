@@ -1,0 +1,192 @@
+[INFO] Scanning for projects...
+[INFO] 
+[INFO] -------------------< com.example:quickstart-backend >-------------------
+[INFO] Building quickstart-backend 1.0.0
+[INFO]   from pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO] 
+[INFO] --- resources:3.3.1:resources (default-resources) @ quickstart-backend ---
+[INFO] Copying 1 resource from src\main\resources to target\classes
+[INFO] Copying 0 resource from src\main\resources to target\classes
+[INFO] 
+[INFO] --- compiler:3.14.1:compile (default-compile) @ quickstart-backend ---
+[INFO] Recompiling the module because of changed source code.
+[INFO] Compiling 46 source files with javac [debug parameters release 21] to target\classes
+[INFO] 由于在类路径中发现了一个或多个处理程序，因此启用了
+  批注处理。未来发行版的 javac 可能会禁用批注处理，
+  除非至少按名称指定了一个处理程序 (-processor)，
+  或指定了搜索路径 (--processor-path, --processor-module-path)，
+  或显式启用了批注处理 (-proc:only, -proc:full)。
+  可使用 -Xlint:-options 隐藏此消息。
+  可使用 -proc:none 禁用批注处理。
+[INFO] 
+[INFO] --- resources:3.3.1:testResources (default-testResources) @ quickstart-backend ---
+[INFO] Copying 1 resource from src\test\resources to target\test-classes
+[INFO] 
+[INFO] --- compiler:3.14.1:testCompile (default-testCompile) @ quickstart-backend ---
+[INFO] Recompiling the module because of changed dependency.
+[INFO] Compiling 6 source files with javac [debug parameters release 21] to target\test-classes
+[INFO] 由于在类路径中发现了一个或多个处理程序，因此启用了
+  批注处理。未来发行版的 javac 可能会禁用批注处理，
+  除非至少按名称指定了一个处理程序 (-processor)，
+  或指定了搜索路径 (--processor-path, --processor-module-path)，
+  或显式启用了批注处理 (-proc:only, -proc:full)。
+  可使用 -Xlint:-options 隐藏此消息。
+  可使用 -proc:none 禁用批注处理。
+[WARNING] /E:/temp/ai-example-code/ai-example-glm-5.3/backend/src/test/java/com/example/quickstart/service/ConfigDataServiceTest.java:[143,33] 最后一个参数使用了不准确的变量类型的 varargs 方法的非 varargs 调用; 
+  对于 varargs 调用, 应使用 java.lang.Object
+  对于非 varargs 调用, 应使用 java.lang.Object[], 这样也可以抑制此警告
+[INFO] /E:/temp/ai-example-code/ai-example-glm-5.3/backend/src/test/java/com/example/quickstart/service/ImportFlowTest.java: E:\temp\ai-example-code\ai-example-glm-5.3\backend\src\test\java\com\example\quickstart\service\ImportFlowTest.java使用了未经检查或不安全的操作。
+[INFO] /E:/temp/ai-example-code/ai-example-glm-5.3/backend/src/test/java/com/example/quickstart/service/ImportFlowTest.java: 有关详细信息, 请使用 -Xlint:unchecked 重新编译。
+[INFO] 
+[INFO] --- surefire:3.5.5:test (default-test) @ quickstart-backend ---
+[INFO] Using auto detected provider org.apache.maven.surefire.junitplatform.JUnitPlatformProvider
+[INFO] Artifact org.apache.maven.surefire:surefire-junit-platform:pom:3.5.5 is present in the local repository, but cached from a remote repository ID that is unavailable in current build context, verifying that is downloadable from [huaweicloud (https://mirrors.huaweicloud.com/repository/maven/, default, releases)]
+[INFO] Artifact org.apache.maven.surefire:surefire-junit-platform:pom:3.5.5 is present in the local repository, but cached from a remote repository ID that is unavailable in current build context, verifying that is downloadable from [huaweicloud (https://mirrors.huaweicloud.com/repository/maven/, default, releases)]
+Downloading from huaweicloud: https://mirrors.huaweicloud.com/repository/maven/org/apache/maven/surefire/surefire-junit-platform/3.5.5/surefire-junit-platform-3.5.5.pom
+Downloaded from huaweicloud: https://mirrors.huaweicloud.com/repository/maven/org/apache/maven/surefire/surefire-junit-platform/3.5.5/surefire-junit-platform-3.5.5.pom (0 B at 0 B/s)
+[INFO] Artifact org.apache.maven.surefire:surefire-providers:pom:3.5.5 is present in the local repository, but cached from a remote repository ID that is unavailable in current build context, verifying that is downloadable from [huaweicloud (https://mirrors.huaweicloud.com/repository/maven/, default, releases)]
+[INFO] Artifact org.apache.maven.surefire:surefire-providers:pom:3.5.5 is present in the local repository, but cached from a remote repository ID that is unavailable in current build context, verifying that is downloadable from [huaweicloud (https://mirrors.huaweicloud.com/repository/maven/, default, releases)]
+Downloading from huaweicloud: https://mirrors.huaweicloud.com/repository/maven/org/apache/maven/surefire/surefire-providers/3.5.5/surefire-providers-3.5.5.pom
+Downloaded from huaweicloud: https://mirrors.huaweicloud.com/repository/maven/org/apache/maven/surefire/surefire-providers/3.5.5/surefire-providers-3.5.5.pom (0 B at 0 B/s)
+[INFO] Artifact org.apache.maven.surefire:common-java5:pom:3.5.5 is present in the local repository, but cached from a remote repository ID that is unavailable in current build context, verifying that is downloadable from [huaweicloud (https://mirrors.huaweicloud.com/repository/maven/, default, releases)]
+[INFO] Artifact org.apache.maven.surefire:common-java5:pom:3.5.5 is present in the local repository, but cached from a remote repository ID that is unavailable in current build context, verifying that is downloadable from [huaweicloud (https://mirrors.huaweicloud.com/repository/maven/, default, releases)]
+Downloading from huaweicloud: https://mirrors.huaweicloud.com/repository/maven/org/apache/maven/surefire/common-java5/3.5.5/common-java5-3.5.5.pom
+Downloaded from huaweicloud: https://mirrors.huaweicloud.com/repository/maven/org/apache/maven/surefire/common-java5/3.5.5/common-java5-3.5.5.pom (0 B at 0 B/s)
+[INFO] Artifact org.junit.platform:junit-platform-launcher:pom:1.12.2 is present in the local repository, but cached from a remote repository ID that is unavailable in current build context, verifying that is downloadable from [huaweicloud (https://mirrors.huaweicloud.com/repository/maven/, default, releases)]
+[INFO] Artifact org.junit.platform:junit-platform-launcher:pom:1.12.2 is present in the local repository, but cached from a remote repository ID that is unavailable in current build context, verifying that is downloadable from [huaweicloud (https://mirrors.huaweicloud.com/repository/maven/, default, releases)]
+Downloading from huaweicloud: https://mirrors.huaweicloud.com/repository/maven/org/junit/platform/junit-platform-launcher/1.12.2/junit-platform-launcher-1.12.2.pom
+Downloaded from huaweicloud: https://mirrors.huaweicloud.com/repository/maven/org/junit/platform/junit-platform-launcher/1.12.2/junit-platform-launcher-1.12.2.pom (0 B at 0 B/s)
+[INFO] Artifact org.apache.maven.surefire:surefire-junit-platform:jar:3.5.5 is present in the local repository, but cached from a remote repository ID that is unavailable in current build context, verifying that is downloadable from [huaweicloud (https://mirrors.huaweicloud.com/repository/maven/, default, releases)]
+[INFO] Artifact org.apache.maven.surefire:common-java5:jar:3.5.5 is present in the local repository, but cached from a remote repository ID that is unavailable in current build context, verifying that is downloadable from [huaweicloud (https://mirrors.huaweicloud.com/repository/maven/, default, releases)]
+[INFO] Artifact org.junit.platform:junit-platform-launcher:jar:1.12.2 is present in the local repository, but cached from a remote repository ID that is unavailable in current build context, verifying that is downloadable from [huaweicloud (https://mirrors.huaweicloud.com/repository/maven/, default, releases)]
+[INFO] Artifact org.apache.maven.surefire:surefire-junit-platform:jar:3.5.5 is present in the local repository, but cached from a remote repository ID that is unavailable in current build context, verifying that is downloadable from [huaweicloud (https://mirrors.huaweicloud.com/repository/maven/, default, releases)]
+[INFO] Artifact org.apache.maven.surefire:common-java5:jar:3.5.5 is present in the local repository, but cached from a remote repository ID that is unavailable in current build context, verifying that is downloadable from [huaweicloud (https://mirrors.huaweicloud.com/repository/maven/, default, releases)]
+[INFO] Artifact org.junit.platform:junit-platform-launcher:jar:1.12.2 is present in the local repository, but cached from a remote repository ID that is unavailable in current build context, verifying that is downloadable from [huaweicloud (https://mirrors.huaweicloud.com/repository/maven/, default, releases)]
+Downloading from huaweicloud: https://mirrors.huaweicloud.com/repository/maven/org/apache/maven/surefire/surefire-junit-platform/3.5.5/surefire-junit-platform-3.5.5.jar
+Downloaded from huaweicloud: https://mirrors.huaweicloud.com/repository/maven/org/apache/maven/surefire/surefire-junit-platform/3.5.5/surefire-junit-platform-3.5.5.jar (0 B at 0 B/s)
+Downloading from huaweicloud: https://mirrors.huaweicloud.com/repository/maven/org/apache/maven/surefire/common-java5/3.5.5/common-java5-3.5.5.jar
+Downloading from huaweicloud: https://mirrors.huaweicloud.com/repository/maven/org/junit/platform/junit-platform-launcher/1.12.2/junit-platform-launcher-1.12.2.jar
+Downloaded from huaweicloud: https://mirrors.huaweicloud.com/repository/maven/org/junit/platform/junit-platform-launcher/1.12.2/junit-platform-launcher-1.12.2.jar (0 B at 0 B/s)
+Downloaded from huaweicloud: https://mirrors.huaweicloud.com/repository/maven/org/apache/maven/surefire/common-java5/3.5.5/common-java5-3.5.5.jar (0 B at 0 B/s)
+[INFO] 
+[INFO] -------------------------------------------------------
+[INFO]  T E S T S
+[INFO] -------------------------------------------------------
+[INFO] Running com.example.quickstart.ai.AiToolsTest
+18:44:47.428 [main] INFO org.springframework.test.context.support.AnnotationConfigContextLoaderUtils -- Could not detect default configuration classes for test class [com.example.quickstart.ai.AiToolsTest]: AiToolsTest does not declare any static, non-private, non-final, nested classes annotated with @Configuration.
+18:44:47.564 [main] INFO org.springframework.boot.test.context.SpringBootTestContextBootstrapper -- Found @SpringBootConfiguration com.example.quickstart.QuickstartApplication for test class com.example.quickstart.ai.AiToolsTest
+
+  .   ____          _            __ _ _
+ /\\ / ___'_ __ _ _(_)_ __  __ _ \ \ \ \
+( ( )\___ | '_ | '_| | '_ \/ _` | \ \ \ \
+ \\/  ___)| |_)| | | | | || (_| |  ) ) ) )
+  '  |____| .__|_| |_|_| |_\__, | / / / /
+ =========|_|==============|___/=/_/_/_/
+
+ :: Spring Boot ::               (v3.5.14)
+
+2026-10-06T18:44:48.874+08:00  INFO 7172 --- [quickstart-backend] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Bootstrapping Spring Data JPA repositories in DEFAULT mode.
+2026-10-06T18:44:49.065+08:00  INFO 7172 --- [quickstart-backend] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Finished Spring Data repository scanning in 176 ms. Found 5 JPA repository interfaces.
+2026-10-06T18:44:49.679+08:00  INFO 7172 --- [quickstart-backend] [           main] o.s.b.w.embedded.tomcat.TomcatWebServer  : Tomcat initialized with port 0 (http)
+2026-10-06T18:44:49.697+08:00  INFO 7172 --- [quickstart-backend] [           main] o.apache.catalina.core.StandardService   : Starting service [Tomcat]
+2026-10-06T18:44:49.697+08:00  INFO 7172 --- [quickstart-backend] [           main] o.apache.catalina.core.StandardEngine    : Starting Servlet engine: [Apache Tomcat/10.1.54]
+2026-10-06T18:44:49.770+08:00  INFO 7172 --- [quickstart-backend] [           main] o.a.c.c.C.[Tomcat].[localhost].[/]       : Initializing Spring embedded WebApplicationContext
+2026-10-06T18:44:49.771+08:00  INFO 7172 --- [quickstart-backend] [           main] w.s.c.ServletWebServerApplicationContext : Root WebApplicationContext: initialization completed in 1706 ms
+2026-10-06T18:44:49.941+08:00  INFO 7172 --- [quickstart-backend] [           main] o.hibernate.jpa.internal.util.LogHelper  : HHH000204: Processing PersistenceUnitInfo [name: default]
+2026-10-06T18:44:50.001+08:00  INFO 7172 --- [quickstart-backend] [           main] org.hibernate.Version                    : HHH000412: Hibernate ORM core version 6.6.49.Final
+2026-10-06T18:44:50.029+08:00  INFO 7172 --- [quickstart-backend] [           main] o.h.c.internal.RegionFactoryInitiator    : HHH000026: Second-level cache disabled
+2026-10-06T18:44:50.269+08:00  INFO 7172 --- [quickstart-backend] [           main] o.s.o.j.p.SpringPersistenceUnitInfo      : No LoadTimeWeaver setup: ignoring JPA class transformer
+2026-10-06T18:44:50.296+08:00  INFO 7172 --- [quickstart-backend] [           main] com.zaxxer.hikari.HikariDataSource       : HikariPool-1 - Starting...
+2026-10-06T18:44:50.461+08:00  INFO 7172 --- [quickstart-backend] [           main] com.zaxxer.hikari.pool.HikariPool        : HikariPool-1 - Added connection conn0: url=jdbc:h2:mem:testdb user=SA
+2026-10-06T18:44:50.462+08:00  INFO 7172 --- [quickstart-backend] [           main] com.zaxxer.hikari.HikariDataSource       : HikariPool-1 - Start completed.
+2026-10-06T18:44:50.516+08:00  INFO 7172 --- [quickstart-backend] [           main] org.hibernate.orm.connections.pooling    : HHH10001005: Database info:
+	Database JDBC URL [Connecting through datasource 'HikariDataSource (HikariPool-1)']
+	Database driver: undefined/unknown
+	Database version: 2.3.232
+	Autocommit mode: undefined/unknown
+	Isolation level: undefined/unknown
+	Minimum pool size: undefined/unknown
+	Maximum pool size: undefined/unknown
+2026-10-06T18:44:51.198+08:00  INFO 7172 --- [quickstart-backend] [           main] o.h.e.t.j.p.i.JtaPlatformInitiator       : HHH000489: No JTA platform available (set 'hibernate.transaction.jta.platform' to enable JTA platform integration)
+2026-10-06T18:44:51.238+08:00  INFO 7172 --- [quickstart-backend] [           main] j.LocalContainerEntityManagerFactoryBean : Initialized JPA EntityManagerFactory for persistence unit 'default'
+2026-10-06T18:44:52.821+08:00  INFO 7172 --- [quickstart-backend] [           main] o.s.b.w.embedded.tomcat.TomcatWebServer  : Tomcat started on port 10826 (http) with context path '/'
+Mockito is currently self-attaching to enable the inline-mock-maker. This will no longer work in future releases of the JDK. Please add Mockito as an agent to your build as described in Mockito's documentation: https://javadoc.io/doc/org.mockito/mockito-core/latest/org.mockito/org/mockito/Mockito.html#0.3
+Java HotSpot(TM) 64-Bit Server VM warning: Sharing is only supported for boot loader classes because bootstrap classpath has been appended
+WARNING: A Java agent has been loaded dynamically (C:\Users\Obby\.m2\repository\net\bytebuddy\byte-buddy-agent\1.17.8\byte-buddy-agent-1.17.8.jar)
+WARNING: If a serviceability tool is in use, please run with -XX:+EnableDynamicAgentLoading to hide this warning
+WARNING: If a serviceability tool is not in use, please run with -Djdk.instrument.traceUsage for more information
+WARNING: Dynamic loading of agents will be disallowed by default in a future release
+2026-10-06T18:44:54.500+08:00  INFO 7172 --- [quickstart-backend] [           main] o.s.b.w.e.tomcat.GracefulShutdown        : Commencing graceful shutdown. Waiting for active requests to complete
+2026-10-06T18:44:54.515+08:00  INFO 7172 --- [quickstart-backend] [tomcat-shutdown] o.s.b.w.e.tomcat.GracefulShutdown        : Graceful shutdown complete
+2026-10-06T18:44:54.521+08:00  INFO 7172 --- [quickstart-backend] [           main] j.LocalContainerEntityManagerFactoryBean : Closing JPA EntityManagerFactory for persistence unit 'default'
+2026-10-06T18:44:54.527+08:00  INFO 7172 --- [quickstart-backend] [           main] com.zaxxer.hikari.HikariDataSource       : HikariPool-1 - Shutdown initiated...
+2026-10-06T18:44:54.529+08:00  INFO 7172 --- [quickstart-backend] [           main] com.zaxxer.hikari.HikariDataSource       : HikariPool-1 - Shutdown completed.
+[INFO] Tests run: 8, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 7.274 s -- in com.example.quickstart.ai.AiToolsTest
+[INFO] Running com.example.quickstart.service.CatalogServiceTest
+2026-10-06T18:44:54.540+08:00  INFO 7172 --- [quickstart-backend] [           main] t.c.s.AnnotationConfigContextLoaderUtils : Could not detect default configuration classes for test class [com.example.quickstart.service.CatalogServiceTest]: CatalogServiceTest does not declare any static, non-private, non-final, nested classes annotated with @Configuration.
+2026-10-06T18:44:54.834+08:00  INFO 7172 --- [quickstart-backend] [           main] .b.t.c.SpringBootTestContextBootstrapper : Found @SpringBootConfiguration com.example.quickstart.QuickstartApplication for test class com.example.quickstart.service.CatalogServiceTest
+
+  .   ____          _            __ _ _
+ /\\ / ___'_ __ _ _(_)_ __  __ _ \ \ \ \
+( ( )\___ | '_ | '_| | '_ \/ _` | \ \ \ \
+ \\/  ___)| |_)| | | | | || (_| |  ) ) ) )
+  '  |____| .__|_| |_|_| |_\__, | / / / /
+ =========|_|==============|___/=/_/_/_/
+
+ :: Spring Boot ::               (v3.5.14)
+
+2026-10-06T18:44:55.488+08:00  INFO 7172 --- [quickstart-backend] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Bootstrapping Spring Data JPA repositories in DEFAULT mode.
+2026-10-06T18:44:55.500+08:00  INFO 7172 --- [quickstart-backend] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Finished Spring Data repository scanning in 11 ms. Found 5 JPA repository interfaces.
+2026-10-06T18:44:55.591+08:00  INFO 7172 --- [quickstart-backend] [           main] o.s.b.w.embedded.tomcat.TomcatWebServer  : Tomcat initialized with port 0 (http)
+2026-10-06T18:44:55.592+08:00  INFO 7172 --- [quickstart-backend] [           main] o.apache.catalina.core.StandardService   : Starting service [Tomcat]
+2026-10-06T18:44:55.592+08:00  INFO 7172 --- [quickstart-backend] [           main] o.apache.catalina.core.StandardEngine    : Starting Servlet engine: [Apache Tomcat/10.1.54]
+2026-10-06T18:44:55.633+08:00  INFO 7172 --- [quickstart-backend] [           main] o.a.c.c.C.[Tomcat].[localhost].[/]       : Initializing Spring embedded WebApplicationContext
+2026-10-06T18:44:55.633+08:00  INFO 7172 --- [quickstart-backend] [           main] w.s.c.ServletWebServerApplicationContext : Root WebApplicationContext: initialization completed in 769 ms
+2026-10-06T18:44:55.658+08:00  INFO 7172 --- [quickstart-backend] [           main] o.hibernate.jpa.internal.util.LogHelper  : HHH000204: Processing PersistenceUnitInfo [name: default]
+2026-10-06T18:44:55.660+08:00  INFO 7172 --- [quickstart-backend] [           main] o.h.c.internal.RegionFactoryInitiator    : HHH000026: Second-level cache disabled
+2026-10-06T18:44:55.666+08:00  INFO 7172 --- [quickstart-backend] [           main] o.s.o.j.p.SpringPersistenceUnitInfo      : No LoadTimeWeaver setup: ignoring JPA class transformer
+2026-10-06T18:44:55.666+08:00  INFO 7172 --- [quickstart-backend] [           main] com.zaxxer.hikari.HikariDataSource       : HikariPool-2 - Starting...
+2026-10-06T18:44:55.667+08:00  INFO 7172 --- [quickstart-backend] [           main] com.zaxxer.hikari.pool.HikariPool        : HikariPool-2 - Added connection conn10: url=jdbc:h2:mem:testdb user=SA
+2026-10-06T18:44:55.668+08:00  INFO 7172 --- [quickstart-backend] [           main] com.zaxxer.hikari.HikariDataSource       : HikariPool-2 - Start completed.
+2026-10-06T18:44:55.668+08:00  INFO 7172 --- [quickstart-backend] [           main] org.hibernate.orm.connections.pooling    : HHH10001005: Database info:
+	Database JDBC URL [Connecting through datasource 'HikariDataSource (HikariPool-2)']
+	Database driver: undefined/unknown
+	Database version: 2.3.232
+	Autocommit mode: undefined/unknown
+	Isolation level: undefined/unknown
+	Minimum pool size: undefined/unknown
+	Maximum pool size: undefined/unknown
+2026-10-06T18:44:55.713+08:00  INFO 7172 --- [quickstart-backend] [           main] o.h.e.t.j.p.i.JtaPlatformInitiator       : HHH000489: No JTA platform available (set 'hibernate.transaction.jta.platform' to enable JTA platform integration)
+2026-10-06T18:44:55.717+08:00  INFO 7172 --- [quickstart-backend] [           main] j.LocalContainerEntityManagerFactoryBean : Initialized JPA EntityManagerFactory for persistence unit 'default'
+2026-10-06T18:44:55.937+08:00  INFO 7172 --- [quickstart-backend] [           main] o.s.b.w.embedded.tomcat.TomcatWebServer  : Tomcat started on port 10828 (http) with context path '/'
+[INFO] Tests run: 5, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 1.528 s -- in com.example.quickstart.service.CatalogServiceTest
+[INFO] Running com.example.quickstart.service.ConfigDataServiceTest
+2026-10-06T18:44:56.068+08:00  INFO 7172 --- [quickstart-backend] [           main] t.c.s.AnnotationConfigContextLoaderUtils : Could not detect default configuration classes for test class [com.example.quickstart.service.ConfigDataServiceTest]: ConfigDataServiceTest does not declare any static, non-private, non-final, nested classes annotated with @Configuration.
+2026-10-06T18:44:56.070+08:00  INFO 7172 --- [quickstart-backend] [           main] .b.t.c.SpringBootTestContextBootstrapper : Found @SpringBootConfiguration com.example.quickstart.QuickstartApplication for test class com.example.quickstart.service.ConfigDataServiceTest
+[INFO] Tests run: 11, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.094 s -- in com.example.quickstart.service.ConfigDataServiceTest
+[INFO] Running com.example.quickstart.service.ExportFlowTest
+2026-10-06T18:44:56.164+08:00  INFO 7172 --- [quickstart-backend] [           main] t.c.s.AnnotationConfigContextLoaderUtils : Could not detect default configuration classes for test class [com.example.quickstart.service.ExportFlowTest]: ExportFlowTest does not declare any static, non-private, non-final, nested classes annotated with @Configuration.
+2026-10-06T18:44:56.165+08:00  INFO 7172 --- [quickstart-backend] [           main] .b.t.c.SpringBootTestContextBootstrapper : Found @SpringBootConfiguration com.example.quickstart.QuickstartApplication for test class com.example.quickstart.service.ExportFlowTest
+[INFO] Tests run: 4, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.080 s -- in com.example.quickstart.service.ExportFlowTest
+[INFO] Running com.example.quickstart.service.ImportFlowTest
+2026-10-06T18:44:56.246+08:00  INFO 7172 --- [quickstart-backend] [           main] t.c.s.AnnotationConfigContextLoaderUtils : Could not detect default configuration classes for test class [com.example.quickstart.service.ImportFlowTest]: ImportFlowTest does not declare any static, non-private, non-final, nested classes annotated with @Configuration.
+2026-10-06T18:44:56.248+08:00  INFO 7172 --- [quickstart-backend] [           main] .b.t.c.SpringBootTestContextBootstrapper : Found @SpringBootConfiguration com.example.quickstart.QuickstartApplication for test class com.example.quickstart.service.ImportFlowTest
+2026-10-06T18:44:56.568+08:00  INFO 7172 --- [quickstart-backend] [           main] o.s.b.w.e.tomcat.GracefulShutdown        : Commencing graceful shutdown. Waiting for active requests to complete
+2026-10-06T18:44:56.581+08:00  INFO 7172 --- [quickstart-backend] [tomcat-shutdown] o.s.b.w.e.tomcat.GracefulShutdown        : Graceful shutdown complete
+2026-10-06T18:44:56.583+08:00  INFO 7172 --- [quickstart-backend] [           main] j.LocalContainerEntityManagerFactoryBean : Closing JPA EntityManagerFactory for persistence unit 'default'
+2026-10-06T18:44:56.585+08:00  INFO 7172 --- [quickstart-backend] [           main] com.zaxxer.hikari.HikariDataSource       : HikariPool-2 - Shutdown initiated...
+2026-10-06T18:44:56.586+08:00  INFO 7172 --- [quickstart-backend] [           main] com.zaxxer.hikari.HikariDataSource       : HikariPool-2 - Shutdown completed.
+[INFO] Tests run: 10, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.343 s -- in com.example.quickstart.service.ImportFlowTest
+[INFO] 
+[INFO] Results:
+[INFO] 
+[INFO] Tests run: 38, Failures: 0, Errors: 0, Skipped: 0
+[INFO] 
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD SUCCESS
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  19.973 s
+[INFO] Finished at: 2026-10-06T18:44:57+08:00
+[INFO] ------------------------------------------------------------------------
+TEST_EXIT=0

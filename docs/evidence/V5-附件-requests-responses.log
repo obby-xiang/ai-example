@@ -1,0 +1,231 @@
+V5 核验原始请求/响应记录（分支 ai-example-claude-opus-5.5+deepseek-v4-pro，端口 18292）
+生成时间: 2026-10-06 18:59:20  |  采集方式: curl 直连 REST；多数响应体由脚本逐字落盘于 /e/temp/v5v6/raw/，
+少量即时查询（*/diff、/api/data）的响应体为终端原始输出的逐字复制，除注明外无删改。
+数据库: H2 文件 ./data/config_mgr_db（启动前已备份到 /e/temp/v5v6/db-backup/data-before-fresh-start-185336 并删除 data/ 目录，保证干净初始状态）
+
+
+==================== 0. 启动参数 ====================
+$ cd backend && export DEEPSEEK_API_KEY=dummy-for-verification   # 该分支空 key 无法启动，见正文
+$ java -jar target/config-mgr.jar --server.port=18292
+backend 日志: /e/temp/v5v6/backend-V5.log (PID 11484, Tomcat started on port 18292)
+
+
+==================== 1. 创建测试用配置定义 TO_CFG (GLOBAL，主键字段 rowKey) ====================
+$ cat def.json
+{
+  "code": "TO_CFG",
+  "name": "V5测试配置",
+  "level": "GLOBAL",
+  "description": "V5/V6 verification fixture",
+  "sortOrder": 0,
+  "fields": [
+    {"code": "rowKey", "label": "rowKey", "fieldType": "STRING", "required": true, "key": true},
+    {"code": "value",  "label": "value",  "fieldType": "STRING", "required": false, "key": false}
+  ]
+}
+$ curl -s -X POST /api/definitions -H 'Content-Type: application/json' --data-binary @def.json
+--- response (01-create-def.json) ---
+{"success":true,"data":{"id":8,"code":"TO_CFG","name":"V5测试配置","level":"GLOBAL","description":"V5/V6 verification fixture","sortOrder":0,"fields":[{"id":34,"defCode":"TO_CFG","code":"rowKey","label":"rowKey","fieldType":"STRING","required":true,"sortOrder":0,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":true},{"id":35,"defCode":"TO_CFG","code":"value","label":"value","fieldType":"STRING","required":false,"sortOrder":1,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":false}],"createdAt":"2026-10-06T18:54:02.394303","updatedAt":"2026-10-06T18:54:02.394303"}}
+  （首次尝试把主键字段写成 {"isKey":true} 时接口 500：Unrecognized field "isKey" ... 见 V5-附件-backend-console.log:74-76；该分支期望的字段名是 "key"，
+    而 frontend/src/views/DefinitionsView.vue:286 发送的是 isKey —— 作为线索记录，本次未从 UI 端到端复现。）
+
+
+==================== 2. 任务 T0(seed)：导入 TO_CFG.xlsx（rowKey=TO3, value=v3）并发布，建立 version=1 的已发布行 ====================
+$ POST /api/tasks {"type":"IMPORT","title":"seed"}
+--- response (seed.task-create.json) ---
+{"success":true,"data":{"id":1,"type":"IMPORT","title":"seed","currentStep":"UPLOAD","status":"ACTIVE","settingsJson":null,"version":1,"items":[],"createdAt":"2026-10-06T18:54:26.774202","updatedAt":"2026-10-06T18:54:26.774202"}}
+$ POST /api/tasks/1/select-defs {"defCodes":["TO_CFG"]}
+--- response (seed.select-defs.json) ---
+{"success":true,"data":{"id":1,"type":"IMPORT","title":"seed","currentStep":"UPLOAD","status":"ACTIVE","settingsJson":null,"version":1,"items":[{"id":1,"taskId":1,"defCode":"TO_CFG","sortOrder":0,"conditionJson":null,"status":"PENDING"}],"createdAt":"2026-10-06T18:54:26.774202","updatedAt":"2026-10-06T18:54:26.774202"}}
+$ POST /api/tasks/1/files/upload  -F file=@TO_CFG.xlsx
+--- response (seed.upload.json) ---
+{"success":true,"data":{"defCode":"TO_CFG","count":1,"fileName":"TO_CFG.xlsx","matchedFiles":[{"fileName":"TO_CFG.xlsx","defCode":"TO_CFG"}]}}
+$ POST /api/tasks/1/jobs {"jobType":"IMPORT"}   # jobId=1
+--- response (IMPORT-task1.job-create.json) ---
+{"success":true,"data":{"id":1,"taskId":1,"jobType":"IMPORT","status":"RUNNING","progress":0,"total":0,"errorCount":0,"warningCount":0,"resultJson":null,"items":[],"createdAt":"2026-10-06T18:54:27.098265","startedAt":"2026-10-06T18:54:27.1022664","finishedAt":null}}
+$ GET /api/jobs/1   (轮询至终态)
+--- response (IMPORT-task1.job1.final.json) ---
+{"success":true,"data":{"id":1,"taskId":1,"jobType":"IMPORT","status":"COMPLETED","progress":1,"total":1,"errorCount":0,"warningCount":0,"resultJson":null,"items":[{"id":1,"jobId":1,"defCode":"TO_CFG","status":"COMPLETED","processed":1,"total":1}],"createdAt":"2026-10-06T18:54:27.098265","startedAt":"2026-10-06T18:54:27.102266","finishedAt":"2026-10-06T18:54:27.633268"}}
+
+$ GET /api/jobs/1/issues
+--- response (IMPORT-task1.job1.issues.json) ---
+{"success":true,"data":{"content":[],"pageable":{"pageNumber":0,"pageSize":50,"sort":{"empty":true,"sorted":false,"unsorted":true},"offset":0,"paged":true,"unpaged":false},"last":true,"totalElements":0,"totalPages":0,"size":50,"number":0,"sort":{"empty":true,"sorted":false,"unsorted":true},"first":true,"numberOfElements":0,"empty":true}}
+$ POST /api/tasks/1/jobs {"jobType":"PUBLISH"}   # jobId=2
+--- response (PUBLISH-task1.job-create.json) ---
+{"success":true,"data":{"id":2,"taskId":1,"jobType":"PUBLISH","status":"PENDING","progress":0,"total":0,"errorCount":0,"warningCount":0,"resultJson":null,"items":[],"createdAt":"2026-10-06T18:54:28.675862","startedAt":null,"finishedAt":null}}
+$ GET /api/jobs/2
+--- response (PUBLISH-task1.job2.final.json) ---
+{"success":true,"data":{"id":2,"taskId":1,"jobType":"PUBLISH","status":"COMPLETED","progress":1,"total":1,"errorCount":0,"warningCount":0,"resultJson":null,"items":[{"id":2,"jobId":2,"defCode":"TO_CFG","status":"COMPLETED","processed":1,"total":1}],"createdAt":"2026-10-06T18:54:28.675862","startedAt":"2026-10-06T18:54:28.677863","finishedAt":"2026-10-06T18:54:28.702909"}}
+
+$ GET /api/jobs/2/issues
+--- response (PUBLISH-task1.job2.issues.json) ---
+{"success":true,"data":{"content":[],"pageable":{"pageNumber":0,"pageSize":50,"sort":{"empty":true,"sorted":false,"unsorted":true},"offset":0,"paged":true,"unpaged":false},"last":true,"totalElements":0,"totalPages":0,"size":50,"number":0,"sort":{"empty":true,"sorted":false,"unsorted":true},"first":true,"numberOfElements":0,"empty":true}}
+
+
+==================== 3. 两个会话 T_A(taskId=2) / T_B(taskId=3) 各自导入同一文件（同一行 TO3、同一内容） ====================
+$ POST /api/tasks {"type":"IMPORT","title":"TaskA"} -> taskId=2
+--- response (TaskA.task-create.json) ---
+{"success":true,"data":{"id":2,"type":"IMPORT","title":"TaskA","currentStep":"UPLOAD","status":"ACTIVE","settingsJson":null,"version":1,"items":[],"createdAt":"2026-10-06T18:54:31.08111","updatedAt":"2026-10-06T18:54:31.08111"}}
+$ POST /api/tasks {"type":"IMPORT","title":"TaskB"} -> taskId=3
+--- response (TaskB.task-create.json) ---
+{"success":true,"data":{"id":3,"type":"IMPORT","title":"TaskB","currentStep":"UPLOAD","status":"ACTIVE","settingsJson":null,"version":1,"items":[],"createdAt":"2026-10-06T18:54:31.339199","updatedAt":"2026-10-06T18:54:31.339199"}}
+$ POST /api/tasks/2/select-defs {"defCodes":["TO_CFG"]} ; POST /api/tasks/2/files/upload -F file=@TO_CFG.xlsx
+--- response (TaskA.upload.json) ---
+{"success":true,"data":{"defCode":"TO_CFG","count":1,"fileName":"TO_CFG.xlsx","matchedFiles":[{"fileName":"TO_CFG.xlsx","defCode":"TO_CFG"}]}}
+$ POST /api/tasks/3/select-defs {"defCodes":["TO_CFG"]} ; POST /api/tasks/3/files/upload -F file=@TO_CFG.xlsx
+--- response (TaskB.upload.json) ---
+{"success":true,"data":{"defCode":"TO_CFG","count":1,"fileName":"TO_CFG.xlsx","matchedFiles":[{"fileName":"TO_CFG.xlsx","defCode":"TO_CFG"}]}}
+$ POST /api/tasks/2/jobs {"jobType":"IMPORT"} -> jobId=3
+--- response (IMPORT-task2.job3.final.json) ---
+{"success":true,"data":{"id":3,"taskId":2,"jobType":"IMPORT","status":"COMPLETED","progress":1,"total":1,"errorCount":0,"warningCount":0,"resultJson":null,"items":[{"id":3,"jobId":3,"defCode":"TO_CFG","status":"COMPLETED","processed":1,"total":1}],"createdAt":"2026-10-06T18:54:31.735771","startedAt":"2026-10-06T18:54:31.73777","finishedAt":"2026-10-06T18:54:31.774771"}}
+
+$ POST /api/tasks/3/jobs {"jobType":"IMPORT"} -> jobId=4
+--- response (IMPORT-task3.job4.final.json) ---
+{"success":true,"data":{"id":4,"taskId":3,"jobType":"IMPORT","status":"COMPLETED","progress":1,"total":1,"errorCount":0,"warningCount":0,"resultJson":null,"items":[{"id":4,"jobId":4,"defCode":"TO_CFG","status":"COMPLETED","processed":1,"total":1}],"createdAt":"2026-10-06T18:54:32.184663","startedAt":"2026-10-06T18:54:32.186661","finishedAt":"2026-10-06T18:54:32.222068"}}
+
+$ GET /api/jobs/3/diff   # T_A 暂存行快照（baseVersion=1）
+{"success":true,"data":[{"id":2,"taskId":2,"defCode":"TO_CFG","opType":"UPSERT","rowKey":"TO3","scopeType":"GLOBAL","scopeKey":null,"dataJson":"{\"rowKey\":\"TO3\",\"value\":\"v3\"}","status":"STAGED","baseVersion":1,"createdAt":"2026-10-06T18:54:31.77177"}]}
+$ GET /api/jobs/4/diff   # T_B 暂存行快照（baseVersion=1）
+{"success":true,"data":[{"id":3,"taskId":3,"defCode":"TO_CFG","opType":"UPSERT","rowKey":"TO3","scopeType":"GLOBAL","scopeKey":null,"dataJson":"{\"rowKey\":\"TO3\",\"value\":\"v3\"}","status":"STAGED","baseVersion":1,"createdAt":"2026-10-06T18:54:32.219068"}]}
+
+
+==================== 4. 主场景：先发布 T_A（应成功），再发布 T_B（应收到冲突提示） ====================
+$ POST /api/tasks/2/jobs {"jobType":"PUBLISH"}   # T_A 发布，jobId=5
+--- response (PUBLISH-task2.job-create.json) ---
+{"success":true,"data":{"id":5,"taskId":2,"jobType":"PUBLISH","status":"PENDING","progress":0,"total":0,"errorCount":0,"warningCount":0,"resultJson":null,"items":[],"createdAt":"2026-10-06T18:54:34.277225","startedAt":"2026-10-06T18:54:34.2792248","finishedAt":null}}
+$ GET /api/jobs/5
+--- response (PUBLISH-task2.job5.final.json) ---
+{"success":true,"data":{"id":5,"taskId":2,"jobType":"PUBLISH","status":"COMPLETED","progress":1,"total":1,"errorCount":0,"warningCount":0,"resultJson":null,"items":[{"id":5,"jobId":5,"defCode":"TO_CFG","status":"COMPLETED","processed":1,"total":1}],"createdAt":"2026-10-06T18:54:34.277225","startedAt":"2026-10-06T18:54:34.279225","finishedAt":"2026-10-06T18:54:34.306225"}}
+
+$ GET /api/jobs/5/issues
+--- response (PUBLISH-task2.job5.issues.json) ---
+{"success":true,"data":{"content":[],"pageable":{"pageNumber":0,"pageSize":50,"sort":{"empty":true,"sorted":false,"unsorted":true},"offset":0,"paged":true,"unpaged":false},"last":true,"totalElements":0,"totalPages":0,"size":50,"number":0,"sort":{"empty":true,"sorted":false,"unsorted":true},"first":true,"numberOfElements":0,"empty":true}}
+$ POST /api/tasks/3/jobs {"jobType":"PUBLISH"}   # T_B 发布，jobId=6
+--- response (PUBLISH-task3.job-create.json) ---
+{"success":true,"data":{"id":6,"taskId":3,"jobType":"PUBLISH","status":"RUNNING","progress":0,"total":0,"errorCount":0,"warningCount":0,"resultJson":null,"items":[],"createdAt":"2026-10-06T18:54:34.739375","startedAt":"2026-10-06T18:54:34.7413783","finishedAt":null}}
+$ GET /api/jobs/6   <-- 后发布者：FAILED, errorCount=1
+--- response (PUBLISH-task3.job6.final.json) ---
+{"success":true,"data":{"id":6,"taskId":3,"jobType":"PUBLISH","status":"FAILED","progress":1,"total":1,"errorCount":1,"warningCount":0,"resultJson":null,"items":[{"id":6,"jobId":6,"defCode":"TO_CFG","status":"COMPLETED","processed":1,"total":1}],"createdAt":"2026-10-06T18:54:34.739375","startedAt":"2026-10-06T18:54:34.741378","finishedAt":"2026-10-06T18:54:34.76354"}}
+
+$ GET /api/jobs/6/issues   <-- 冲突提示原文
+--- response (PUBLISH-task3.job6.issues.json) ---
+{"success":true,"data":{"content":[{"id":1,"jobId":6,"defCode":"TO_CFG","rowKey":"TO3","fieldCode":null,"severity":"ERROR","message":"发布冲突：行 TO3 在导入后被其他操作修改（快照版本 1，当前版本 2），请重新导入后再发布","rowIndex":null}],"pageable":{"pageNumber":0,"pageSize":50,"sort":{"empty":true,"sorted":false,"unsorted":true},"offset":0,"paged":true,"unpaged":false},"last":true,"totalElements":1,"totalPages":1,"size":50,"number":0,"sort":{"empty":true,"sorted":false,"unsorted":true},"first":true,"numberOfElements":1,"empty":false}}
+
+
+==================== 5. 发布后数据库实际状态 ====================
+$ GET /api/data/TO_CFG?scopeType=GLOBAL
+{"success":true,"data":{"content":[{"id":1231,"defCode":"TO_CFG","scopeType":"GLOBAL","scopeKey":null,"rowKey":"TO3","dataJson":"{\"rowKey\":\"TO3\",\"value\":\"v3\"}","version":2,"createdAt":"2026-10-06T18:54:28.697909","updatedAt":"2026-10-06T18:54:28.697909"}],"pageable":{"pageNumber":0,"pageSize":50,"sort":{"empty":true,"sorted":false,"unsorted":true},"offset":0,"paged":true,"unpaged":false},"last":true,"totalElements":1,"totalPages":1,"size":50,"number":0,"sort":{"empty":true,"sorted":false,"unsorted":true},"first":true,"numberOfElements":1,"empty":false}}
+$ GET /api/jobs/3/diff   # T_A 暂存行 status=PUBLISHED
+{"success":true,"data":[{"id":2,"taskId":2,"defCode":"TO_CFG","opType":"UPSERT","rowKey":"TO3","scopeType":"GLOBAL","scopeKey":null,"dataJson":"{\"rowKey\":\"TO3\",\"value\":\"v3\"}","status":"PUBLISHED","baseVersion":1,"createdAt":"2026-10-06T18:54:31.77177"}]}
+$ GET /api/jobs/4/diff   # T_B 暂存行 status=FAILED
+{"success":true,"data":[{"id":3,"taskId":3,"defCode":"TO_CFG","opType":"UPSERT","rowKey":"TO3","scopeType":"GLOBAL","scopeKey":null,"dataJson":"{\"rowKey\":\"TO3\",\"value\":\"v3\"}","status":"FAILED","baseVersion":1,"createdAt":"2026-10-06T18:54:32.219068"}]}
+
+
+==================== 6. 对照场景一 T_C(taskId=4)：无冲突的正常发布仍成功 ====================
+$ POST /api/tasks {"type":"IMPORT","title":"TaskC"} -> taskId=4 ; select-defs + upload 同前
+--- response (TaskC.task-create.json) ---
+{"success":true,"data":{"id":4,"type":"IMPORT","title":"TaskC","currentStep":"UPLOAD","status":"ACTIVE","settingsJson":null,"version":1,"items":[],"createdAt":"2026-10-06T18:54:42.190402","updatedAt":"2026-10-06T18:54:42.190402"}}
+$ POST /api/tasks/4/jobs {"jobType":"IMPORT"} -> jobId=7
+--- response (IMPORT-task4.job7.final.json) ---
+{"success":true,"data":{"id":7,"taskId":4,"jobType":"IMPORT","status":"COMPLETED","progress":1,"total":1,"errorCount":0,"warningCount":0,"resultJson":null,"items":[{"id":7,"jobId":7,"defCode":"TO_CFG","status":"COMPLETED","processed":1,"total":1}],"createdAt":"2026-10-06T18:54:42.439405","startedAt":"2026-10-06T18:54:42.440402","finishedAt":"2026-10-06T18:54:42.465404"}}
+
+$ GET /api/jobs/7/diff   # baseVersion=2（跟随当前版本）
+{"success":true,"data":[{"id":4,"taskId":4,"defCode":"TO_CFG","opType":"UPSERT","rowKey":"TO3","scopeType":"GLOBAL","scopeKey":null,"dataJson":"{\"rowKey\":\"TO3\",\"value\":\"v3\"}","status":"STAGED","baseVersion":2,"createdAt":"2026-10-06T18:54:42.463401"}]}
+$ POST /api/tasks/4/jobs {"jobType":"PUBLISH"} -> jobId=8
+--- response (PUBLISH-task4.job-create.json) ---
+{"success":true,"data":{"id":8,"taskId":4,"jobType":"PUBLISH","status":"RUNNING","progress":0,"total":0,"errorCount":0,"warningCount":0,"resultJson":null,"items":[],"createdAt":"2026-10-06T18:54:42.913402","startedAt":"2026-10-06T18:54:42.9144038","finishedAt":null}}
+--- response (PUBLISH-task4.job8.final.json) ---
+{"success":true,"data":{"id":8,"taskId":4,"jobType":"PUBLISH","status":"COMPLETED","progress":1,"total":1,"errorCount":0,"warningCount":0,"resultJson":null,"items":[{"id":8,"jobId":8,"defCode":"TO_CFG","status":"COMPLETED","processed":1,"total":1}],"createdAt":"2026-10-06T18:54:42.913402","startedAt":"2026-10-06T18:54:42.914404","finishedAt":"2026-10-06T18:54:42.929402"}}
+
+--- response (PUBLISH-task4.job8.issues.json) ---
+{"success":true,"data":{"content":[],"pageable":{"pageNumber":0,"pageSize":50,"sort":{"empty":true,"sorted":false,"unsorted":true},"offset":0,"paged":true,"unpaged":false},"last":true,"totalElements":0,"totalPages":0,"size":50,"number":0,"sort":{"empty":true,"sorted":false,"unsorted":true},"first":true,"numberOfElements":0,"empty":true}}
+$ GET /api/data/TO_CFG?scopeType=GLOBAL | grep -o '"version":[0-9]*'
+  "version":3            <- 发布 COMPLETED，2 -> 3（内容仍为 v3 未变）；该次仅 grep 提取版本号，未落盘完整响应体
+
+
+==================== 7. 对照场景二 T_D(taskId=5)：内容确实不同（value=V93）的合法发布 ====================
+$ POST /api/tasks {"type":"IMPORT","title":"TaskD"} -> taskId=5 ; select-defs + upload 同前
+--- response (TaskD.task-create.json) ---
+{"success":true,"data":{"id":5,"type":"IMPORT","title":"TaskD","currentStep":"UPLOAD","status":"ACTIVE","settingsJson":null,"version":1,"items":[],"createdAt":"2026-10-06T18:54:48.373223","updatedAt":"2026-10-06T18:54:48.373223"}}
+$ POST /api/tasks/5/jobs {"jobType":"IMPORT"} -> jobId=9
+--- response (IMPORT-task5.job9.final.json) ---
+{"success":true,"data":{"id":9,"taskId":5,"jobType":"IMPORT","status":"COMPLETED","progress":1,"total":1,"errorCount":0,"warningCount":0,"resultJson":null,"items":[{"id":9,"jobId":9,"defCode":"TO_CFG","status":"COMPLETED","processed":1,"total":1}],"createdAt":"2026-10-06T18:54:48.616196","startedAt":"2026-10-06T18:54:48.617209","finishedAt":"2026-10-06T18:54:48.637831"}}
+
+$ GET /api/jobs/9/diff   # 内容 V93，baseVersion=3
+{"success":true,"data":[{"id":5,"taskId":5,"defCode":"TO_CFG","opType":"UPSERT","rowKey":"TO3","scopeType":"GLOBAL","scopeKey":null,"dataJson":"{\"rowKey\":\"TO3\",\"value\":\"V93\"}","status":"STAGED","baseVersion":3,"createdAt":"2026-10-06T18:54:48.63582"}]}
+$ POST /api/tasks/5/jobs {"jobType":"PUBLISH"} -> jobId=10
+--- response (PUBLISH-task5.job10.final.json) ---
+{"success":true,"data":{"id":10,"taskId":5,"jobType":"PUBLISH","status":"COMPLETED","progress":1,"total":1,"errorCount":0,"warningCount":0,"resultJson":null,"items":[{"id":10,"jobId":10,"defCode":"TO_CFG","status":"COMPLETED","processed":1,"total":1}],"createdAt":"2026-10-06T18:54:49.084251","startedAt":"2026-10-06T18:54:49.085249","finishedAt":"2026-10-06T18:54:49.097976"}}
+
+--- response (PUBLISH-task5.job10.issues.json) ---
+{"success":true,"data":{"content":[],"pageable":{"pageNumber":0,"pageSize":50,"sort":{"empty":true,"sorted":false,"unsorted":true},"offset":0,"paged":true,"unpaged":false},"last":true,"totalElements":0,"totalPages":0,"size":50,"number":0,"sort":{"empty":true,"sorted":false,"unsorted":true},"first":true,"numberOfElements":0,"empty":true}}
+$ GET /api/data/TO_CFG?scopeType=GLOBAL
+{"success":true,"data":{"content":[{"id":1231,"defCode":"TO_CFG","scopeType":"GLOBAL","scopeKey":null,"rowKey":"TO3","dataJson":"{\"rowKey\":\"TO3\",\"value\":\"V93\"}","version":5,"createdAt":"2026-10-06T18:54:28.697909","updatedAt":"2026-10-06T18:54:49.099974"}],"pageable":{"pageNumber":0,"pageSize":50,"sort":{"empty":true,"sorted":false,"unsorted":true},"offset":0,"paged":true,"unpaged":false},"last":true,"totalElements":1,"totalPages":1,"size":50,"number":0,"sort":{"empty":true,"sorted":false,"unsorted":true},"first":true,"numberOfElements":1,"empty":false}}
+   <- version 3 -> 5（内容变更场景，强制递增 + 脏更新，故 +2）
+
+
+==================== 8. 真正同时发起的双发布：T_E(taskId=6) / T_F(taskId=7)，两条发布请求并行发出 ====================
+$ POST /api/tasks {"type":"IMPORT","title":"TaskE"} -> taskId=6
+--- response (TaskE.task-create.json) ---
+{"success":true,"data":{"id":6,"type":"IMPORT","title":"TaskE","currentStep":"UPLOAD","status":"ACTIVE","settingsJson":null,"version":1,"items":[],"createdAt":"2026-10-06T18:54:57.596003","updatedAt":"2026-10-06T18:54:57.596003"}}
+$ POST /api/tasks {"type":"IMPORT","title":"TaskF"} -> taskId=7
+--- response (TaskF.task-create.json) ---
+{"success":true,"data":{"id":7,"type":"IMPORT","title":"TaskF","currentStep":"UPLOAD","status":"ACTIVE","settingsJson":null,"version":1,"items":[],"createdAt":"2026-10-06T18:54:57.819411","updatedAt":"2026-10-06T18:54:57.819411"}}
+$ POST /api/tasks/6/jobs {"jobType":"IMPORT"} -> jobId=11
+--- response (IMPORT-task6.job11.final.json) ---
+{"success":true,"data":{"id":11,"taskId":6,"jobType":"IMPORT","status":"COMPLETED","progress":1,"total":1,"errorCount":0,"warningCount":0,"resultJson":null,"items":[{"id":11,"jobId":11,"defCode":"TO_CFG","status":"COMPLETED","processed":1,"total":1}],"createdAt":"2026-10-06T18:54:58.075114","startedAt":"2026-10-06T18:54:58.076352","finishedAt":"2026-10-06T18:54:58.096116"}}
+
+$ POST /api/tasks/7/jobs {"jobType":"IMPORT"} -> jobId=12
+--- response (IMPORT-task7.job12.final.json) ---
+{"success":true,"data":{"id":12,"taskId":7,"jobType":"IMPORT","status":"COMPLETED","progress":1,"total":1,"errorCount":0,"warningCount":0,"resultJson":null,"items":[{"id":12,"jobId":12,"defCode":"TO_CFG","status":"COMPLETED","processed":1,"total":1}],"createdAt":"2026-10-06T18:54:58.490597","startedAt":"2026-10-06T18:54:58.491584","finishedAt":"2026-10-06T18:54:58.512583"}}
+
+$ GET /api/jobs/11/diff   # baseVersion=5
+{"success":true,"data":[{"id":6,"taskId":6,"defCode":"TO_CFG","opType":"UPSERT","rowKey":"TO3","scopeType":"GLOBAL","scopeKey":null,"dataJson":"{\"rowKey\":\"TO3\",\"value\":\"V93\"}","status":"STAGED","baseVersion":5,"createdAt":"2026-10-06T18:54:58.094106"}]}
+$ GET /api/jobs/12/diff   # baseVersion=5
+{"success":true,"data":[{"id":7,"taskId":7,"defCode":"TO_CFG","opType":"UPSERT","rowKey":"TO3","scopeType":"GLOBAL","scopeKey":null,"dataJson":"{\"rowKey\":\"TO3\",\"value\":\"V93\"}","status":"STAGED","baseVersion":5,"createdAt":"2026-10-06T18:54:58.510584"}]}
+$ for t in 6 7; do curl -s -X POST /api/tasks/$t/jobs -H 'Content-Type: application/json' -d '{"jobType":"PUBLISH"}' & done; wait
+--- response (parallel-publish-task6.json) ---
+{"success":true,"data":{"id":13,"taskId":6,"jobType":"PUBLISH","status":"PENDING","progress":0,"total":0,"errorCount":0,"warningCount":0,"resultJson":null,"items":[],"createdAt":"2026-10-06T18:55:00.613","startedAt":null,"finishedAt":null}}
+--- response (parallel-publish-task7.json) ---
+{"success":true,"data":{"id":14,"taskId":7,"jobType":"PUBLISH","status":"RUNNING","progress":0,"total":0,"errorCount":0,"warningCount":0,"resultJson":null,"items":[],"createdAt":"2026-10-06T18:55:00.626995","startedAt":"2026-10-06T18:55:00.6279964","finishedAt":null}}
+$ GET /api/tasks/6/jobs
+{"success":true,"data":[{"id":13,"taskId":6,"jobType":"PUBLISH","status":"COMPLETED","progress":1,"total":1,"errorCount":0,"warningCount":0,"resultJson":null,"items":[{"id":13,"jobId":13,"defCode":"TO_CFG","status":"COMPLETED","processed":1,"total":1}],"createdAt":"2026-10-06T18:55:00.613","startedAt":"2026-10-06T18:55:00.613994","finishedAt":"2026-10-06T18:55:00.624995"},{"id":11,"taskId":6,"jobType":"IMPORT","status":"COMPLETED","progress":1,"total":1,"errorCount":0,"warningCount":0,"resultJson":null,"items":[{"id":11,"jobId":11,"defCode":"TO_CFG","status":"COMPLETED","processed":1,"total":1}],"createdAt":"2026-10-06T18:54:58.075114","startedAt":"2026-10-06T18:54:58.076352","finishedAt":"2026-10-06T18:54:58.096116"}]}
+$ GET /api/tasks/7/jobs
+{"success":true,"data":[{"id":14,"taskId":7,"jobType":"PUBLISH","status":"FAILED","progress":1,"total":1,"errorCount":1,"warningCount":0,"resultJson":null,"items":[{"id":14,"jobId":14,"defCode":"TO_CFG","status":"COMPLETED","processed":1,"total":1}],"createdAt":"2026-10-06T18:55:00.626995","startedAt":"2026-10-06T18:55:00.627996","finishedAt":"2026-10-06T18:55:00.639995"},{"id":12,"taskId":7,"jobType":"IMPORT","status":"COMPLETED","progress":1,"total":1,"errorCount":0,"warningCount":0,"resultJson":null,"items":[{"id":12,"jobId":12,"defCode":"TO_CFG","status":"COMPLETED","processed":1,"total":1}],"createdAt":"2026-10-06T18:54:58.490597","startedAt":"2026-10-06T18:54:58.491584","finishedAt":"2026-10-06T18:54:58.512583"}]}
+$ GET /api/jobs/14/issues  <-- 后完成者的冲突提示
+{"success":true,"data":{"content":[{"id":2,"jobId":14,"defCode":"TO_CFG","rowKey":"TO3","fieldCode":null,"severity":"ERROR","message":"发布冲突：行 TO3 在导入后被其他操作修改（快照版本 5，当前版本 6），请重新导入后再发布","rowIndex":null}],"pageable":{"pageNumber":0,"pageSize":50,"sort":{"empty":true,"sorted":false,"unsorted":true},"offset":0,"paged":true,"unpaged":false},"last":true,"totalElements":1,"totalPages":1,"size":50,"number":0,"sort":{"empty":true,"sorted":false,"unsorted":true},"first":true,"numberOfElements":1,"empty":false}}
+$ GET /api/jobs/13/issues  <-- 先完成者无问题
+{"success":true,"data":{"content":[],"pageable":{"pageNumber":0,"pageSize":50,"sort":{"empty":true,"sorted":false,"unsorted":true},"offset":0,"paged":true,"unpaged":false},"last":true,"totalElements":0,"totalPages":0,"size":50,"number":0,"sort":{"empty":true,"sorted":false,"unsorted":true},"first":true,"numberOfElements":0,"empty":true}}
+
+
+==================== 9. 冲突判定另一分支：新行被抢先创建（baseVersion=null） ====================
+$ POST /api/tasks {"type":"IMPORT","title":"TaskG"} -> taskId=8
+--- response (TaskG.task-create.json) ---
+{"success":true,"data":{"id":8,"type":"IMPORT","title":"TaskG","currentStep":"UPLOAD","status":"ACTIVE","settingsJson":null,"version":1,"items":[],"createdAt":"2026-10-06T18:55:15.895531","updatedAt":"2026-10-06T18:55:15.895531"}}
+$ POST /api/tasks {"type":"IMPORT","title":"TaskH"} -> taskId=9
+--- response (TaskH.task-create.json) ---
+{"success":true,"data":{"id":9,"type":"IMPORT","title":"TaskH","currentStep":"UPLOAD","status":"ACTIVE","settingsJson":null,"version":1,"items":[],"createdAt":"2026-10-06T18:55:16.146658","updatedAt":"2026-10-06T18:55:16.146658"}}
+$ POST /api/tasks/8/jobs {"jobType":"IMPORT"} -> jobId=15
+--- response (IMPORT-task8.job15.final.json) ---
+{"success":true,"data":{"id":15,"taskId":8,"jobType":"IMPORT","status":"COMPLETED","progress":1,"total":1,"errorCount":0,"warningCount":0,"resultJson":null,"items":[{"id":15,"jobId":15,"defCode":"TO_CFG","status":"COMPLETED","processed":1,"total":1}],"createdAt":"2026-10-06T18:55:16.410174","startedAt":"2026-10-06T18:55:16.411176","finishedAt":"2026-10-06T18:55:16.432174"}}
+
+$ POST /api/tasks/9/jobs {"jobType":"IMPORT"} -> jobId=16
+--- response (IMPORT-task9.job16.final.json) ---
+{"success":true,"data":{"id":16,"taskId":9,"jobType":"IMPORT","status":"COMPLETED","progress":1,"total":1,"errorCount":0,"warningCount":0,"resultJson":null,"items":[{"id":16,"jobId":16,"defCode":"TO_CFG","status":"COMPLETED","processed":1,"total":1}],"createdAt":"2026-10-06T18:55:16.814906","startedAt":"2026-10-06T18:55:16.815911","finishedAt":"2026-10-06T18:55:16.833912"}}
+
+$ GET /api/jobs/15/diff   # 行 NEW1 尚不存在，baseVersion=null
+{"success":true,"data":[{"id":8,"taskId":8,"defCode":"TO_CFG","opType":"UPSERT","rowKey":"NEW1","scopeType":"GLOBAL","scopeKey":null,"dataJson":"{\"rowKey\":\"NEW1\",\"value\":\"n1\"}","status":"STAGED","baseVersion":null,"createdAt":"2026-10-06T18:55:16.430174"}]}
+$ GET /api/jobs/16/diff   # baseVersion=null
+{"success":true,"data":[{"id":9,"taskId":9,"defCode":"TO_CFG","opType":"UPSERT","rowKey":"NEW1","scopeType":"GLOBAL","scopeKey":null,"dataJson":"{\"rowKey\":\"NEW1\",\"value\":\"n1\"}","status":"STAGED","baseVersion":null,"createdAt":"2026-10-06T18:55:16.832912"}]}
+$ POST /api/tasks/8/jobs {"jobType":"PUBLISH"} -> jobId=17（成功创建该行）
+--- response (PUBLISH-task8.job17.final.json) ---
+{"success":true,"data":{"id":17,"taskId":8,"jobType":"PUBLISH","status":"COMPLETED","progress":1,"total":1,"errorCount":0,"warningCount":0,"resultJson":null,"items":[{"id":17,"jobId":17,"defCode":"TO_CFG","status":"COMPLETED","processed":1,"total":1}],"createdAt":"2026-10-06T18:55:17.296088","startedAt":"2026-10-06T18:55:17.29709","finishedAt":"2026-10-06T18:55:17.30809"}}
+
+--- response (PUBLISH-task8.job17.issues.json) ---
+{"success":true,"data":{"content":[],"pageable":{"pageNumber":0,"pageSize":50,"sort":{"empty":true,"sorted":false,"unsorted":true},"offset":0,"paged":true,"unpaged":false},"last":true,"totalElements":0,"totalPages":0,"size":50,"number":0,"sort":{"empty":true,"sorted":false,"unsorted":true},"first":true,"numberOfElements":0,"empty":true}}
+$ POST /api/tasks/9/jobs {"jobType":"PUBLISH"} -> jobId=18（冲突）
+--- response (PUBLISH-task9.job18.final.json) ---
+{"success":true,"data":{"id":18,"taskId":9,"jobType":"PUBLISH","status":"FAILED","progress":1,"total":1,"errorCount":1,"warningCount":0,"resultJson":null,"items":[{"id":18,"jobId":18,"defCode":"TO_CFG","status":"COMPLETED","processed":1,"total":1}],"createdAt":"2026-10-06T18:55:17.679626","startedAt":"2026-10-06T18:55:17.679627","finishedAt":"2026-10-06T18:55:17.692628"}}
+
+--- response (PUBLISH-task9.job18.issues.json) ---
+{"success":true,"data":{"content":[{"id":3,"jobId":18,"defCode":"TO_CFG","rowKey":"NEW1","fieldCode":null,"severity":"ERROR","message":"发布冲突：行 NEW1 在导入后被其他操作修改（快照版本 null，当前版本 1），请重新导入后再发布","rowIndex":null}],"pageable":{"pageNumber":0,"pageSize":50,"sort":{"empty":true,"sorted":false,"unsorted":true},"offset":0,"paged":true,"unpaged":false},"last":true,"totalElements":1,"totalPages":1,"size":50,"number":0,"sort":{"empty":true,"sorted":false,"unsorted":true},"first":true,"numberOfElements":1,"empty":false}}

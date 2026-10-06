@@ -1,0 +1,67 @@
+
+  .   ____          _            __ _ _
+ /\\ / ___'_ __ _ _(_)_ __  __ _ \ \ \ \
+( ( )\___ | '_ | '_| | '_ \/ _` | \ \ \ \
+ \\/  ___)| |_)| | | | | || (_| |  ) ) ) )
+  '  |____| .__|_| |_|_| |_\__, | / / / /
+ =========|_|==============|___/=/_/_/_/
+
+ :: Spring Boot ::               (v3.5.14)
+
+2026-10-06T18:56:25.815+08:00  INFO 24708 --- [config-mgr] [           main] c.e.configmgr.ConfigMgrApplication       : Starting ConfigMgrApplication v1.0.0 using Java 21.0.12 with PID 24708 (E:\temp\ai-example-code\ai-example-claude-opus-5.5+deepseek-v4-pro\backend\target\config-mgr.jar started by Obby in E:\temp\ai-example-code\ai-example-claude-opus-5.5+deepseek-v4-pro\backend)
+2026-10-06T18:56:25.816+08:00 DEBUG 24708 --- [config-mgr] [           main] c.e.configmgr.ConfigMgrApplication       : Running with Spring Boot v3.5.14, Spring v6.2.18
+2026-10-06T18:56:25.817+08:00  INFO 24708 --- [config-mgr] [           main] c.e.configmgr.ConfigMgrApplication       : No active profile set, falling back to 1 default profile: "default"
+2026-10-06T18:56:26.756+08:00  INFO 24708 --- [config-mgr] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Bootstrapping Spring Data JPA repositories in DEFAULT mode.
+2026-10-06T18:56:26.900+08:00  INFO 24708 --- [config-mgr] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Finished Spring Data repository scanning in 135 ms. Found 12 JPA repository interfaces.
+2026-10-06T18:56:27.664+08:00  INFO 24708 --- [config-mgr] [           main] o.s.b.w.embedded.tomcat.TomcatWebServer  : Tomcat initialized with port 18292 (http)
+2026-10-06T18:56:27.679+08:00  INFO 24708 --- [config-mgr] [           main] o.apache.catalina.core.StandardService   : Starting service [Tomcat]
+2026-10-06T18:56:27.680+08:00  INFO 24708 --- [config-mgr] [           main] o.apache.catalina.core.StandardEngine    : Starting Servlet engine: [Apache Tomcat/10.1.54]
+2026-10-06T18:56:27.734+08:00  INFO 24708 --- [config-mgr] [           main] o.a.c.c.C.[Tomcat].[localhost].[/]       : Initializing Spring embedded WebApplicationContext
+2026-10-06T18:56:27.736+08:00  INFO 24708 --- [config-mgr] [           main] w.s.c.ServletWebServerApplicationContext : Root WebApplicationContext: initialization completed in 1862 ms
+2026-10-06T18:56:28.043+08:00  INFO 24708 --- [config-mgr] [           main] com.zaxxer.hikari.HikariDataSource       : HikariPool-1 - Starting...
+2026-10-06T18:56:28.261+08:00  INFO 24708 --- [config-mgr] [           main] com.zaxxer.hikari.pool.HikariPool        : HikariPool-1 - Added connection conn0: url=jdbc:h2:file:./data/config_mgr_db user=SA
+2026-10-06T18:56:28.262+08:00  INFO 24708 --- [config-mgr] [           main] com.zaxxer.hikari.HikariDataSource       : HikariPool-1 - Start completed.
+2026-10-06T18:56:28.298+08:00  INFO 24708 --- [config-mgr] [           main] org.flywaydb.core.FlywayExecutor         : Database: jdbc:h2:file:./data/config_mgr_db (H2 2.3)
+2026-10-06T18:56:28.341+08:00  INFO 24708 --- [config-mgr] [           main] o.f.core.internal.command.DbValidate     : Successfully validated 2 migrations (execution time 00:00.021s)
+2026-10-06T18:56:28.349+08:00  INFO 24708 --- [config-mgr] [           main] o.f.core.internal.command.DbMigrate      : Current version of schema "PUBLIC": 2
+2026-10-06T18:56:28.351+08:00  INFO 24708 --- [config-mgr] [           main] o.f.core.internal.command.DbMigrate      : Schema "PUBLIC" is up to date. No migration necessary.
+2026-10-06T18:56:28.524+08:00  INFO 24708 --- [config-mgr] [           main] o.hibernate.jpa.internal.util.LogHelper  : HHH000204: Processing PersistenceUnitInfo [name: default]
+2026-10-06T18:56:28.608+08:00  INFO 24708 --- [config-mgr] [           main] org.hibernate.Version                    : HHH000412: Hibernate ORM core version 6.6.49.Final
+2026-10-06T18:56:28.648+08:00  INFO 24708 --- [config-mgr] [           main] o.h.c.internal.RegionFactoryInitiator    : HHH000026: Second-level cache disabled
+2026-10-06T18:56:28.842+08:00  INFO 24708 --- [config-mgr] [           main] o.s.o.j.p.SpringPersistenceUnitInfo      : No LoadTimeWeaver setup: ignoring JPA class transformer
+2026-10-06T18:56:28.898+08:00  INFO 24708 --- [config-mgr] [           main] org.hibernate.orm.connections.pooling    : HHH10001005: Database info:
+	Database JDBC URL [Connecting through datasource 'HikariDataSource (HikariPool-1)']
+	Database driver: undefined/unknown
+	Database version: 2.3.232
+	Autocommit mode: undefined/unknown
+	Isolation level: undefined/unknown
+	Minimum pool size: undefined/unknown
+	Maximum pool size: undefined/unknown
+2026-10-06T18:56:29.763+08:00  INFO 24708 --- [config-mgr] [           main] o.h.e.t.j.p.i.JtaPlatformInitiator       : HHH000489: No JTA platform available (set 'hibernate.transaction.jta.platform' to enable JTA platform integration)
+2026-10-06T18:56:29.782+08:00  INFO 24708 --- [config-mgr] [           main] j.LocalContainerEntityManagerFactoryBean : Initialized JPA EntityManagerFactory for persistence unit 'default'
+2026-10-06T18:56:30.382+08:00  INFO 24708 --- [config-mgr] [           main] o.s.d.j.r.query.QueryEnhancerFactory     : Hibernate is in classpath; If applicable, HQL parser will be used.
+2026-10-06T18:56:31.378+08:00 DEBUG 24708 --- [config-mgr] [           main] c.e.configmgr.ai.tool.ToolRegistry       : Registered tool: open_export_file_editor scopes=[task:EXPORT/EXPORT]
+2026-10-06T18:56:31.378+08:00 DEBUG 24708 --- [config-mgr] [           main] c.e.configmgr.ai.tool.ToolRegistry       : Registered tool: download_export_file scopes=[task:EXPORT/EXPORT]
+2026-10-06T18:56:31.378+08:00 DEBUG 24708 --- [config-mgr] [           main] c.e.configmgr.ai.tool.ToolRegistry       : Registered tool: check_job_status scopes=[task:*]
+2026-10-06T18:56:31.378+08:00 DEBUG 24708 --- [config-mgr] [           main] c.e.configmgr.ai.tool.ToolRegistry       : Registered tool: start_export scopes=[task:EXPORT/EXPORT]
+2026-10-06T18:56:31.378+08:00 DEBUG 24708 --- [config-mgr] [           main] c.e.configmgr.ai.tool.ToolRegistry       : Registered tool: get_row_count scopes=[task:EXPORT/QUERY_COND, task:EXPORT/EXPORT]
+2026-10-06T18:56:31.378+08:00 DEBUG 24708 --- [config-mgr] [           main] c.e.configmgr.ai.tool.ToolRegistry       : Registered tool: set_query_condition scopes=[task:EXPORT/QUERY_COND]
+2026-10-06T18:56:31.513+08:00 DEBUG 24708 --- [config-mgr] [           main] c.e.configmgr.ai.tool.ToolRegistry       : Registered tool: list_tasks scopes=[*, page:tasks]
+2026-10-06T18:56:31.514+08:00 DEBUG 24708 --- [config-mgr] [           main] c.e.configmgr.ai.tool.ToolRegistry       : Registered tool: get_workspace_state scopes=[*]
+2026-10-06T18:56:31.514+08:00 DEBUG 24708 --- [config-mgr] [           main] c.e.configmgr.ai.tool.ToolRegistry       : Registered tool: list_config_defs scopes=[*]
+2026-10-06T18:56:31.514+08:00 DEBUG 24708 --- [config-mgr] [           main] c.e.configmgr.ai.tool.ToolRegistry       : Registered tool: get_config_def scopes=[*]
+2026-10-06T18:56:31.522+08:00 DEBUG 24708 --- [config-mgr] [           main] c.e.configmgr.ai.tool.ToolRegistry       : Registered tool: start_precheck scopes=[task:IMPORT/PRECHECK]
+2026-10-06T18:56:31.522+08:00 DEBUG 24708 --- [config-mgr] [           main] c.e.configmgr.ai.tool.ToolRegistry       : Registered tool: start_import scopes=[task:IMPORT/IMPORT]
+2026-10-06T18:56:31.522+08:00 DEBUG 24708 --- [config-mgr] [           main] c.e.configmgr.ai.tool.ToolRegistry       : Registered tool: start_publish scopes=[task:IMPORT/PUBLISH]
+2026-10-06T18:56:31.527+08:00 DEBUG 24708 --- [config-mgr] [           main] c.e.configmgr.ai.tool.ToolRegistry       : Registered tool: select_defs scopes=[task:EXPORT/SELECT_DEFS, task:IMPORT/UPLOAD]
+2026-10-06T18:56:31.527+08:00 DEBUG 24708 --- [config-mgr] [           main] c.e.configmgr.ai.tool.ToolRegistry       : Registered tool: create_task scopes=[*, page:tasks]
+2026-10-06T18:56:31.527+08:00 DEBUG 24708 --- [config-mgr] [           main] c.e.configmgr.ai.tool.ToolRegistry       : Registered tool: navigate_to_step scopes=[task:*]
+2026-10-06T18:56:32.206+08:00  INFO 24708 --- [config-mgr] [           main] o.s.b.a.h2.H2ConsoleAutoConfiguration    : H2 console available at '/h2-console'. Database available at 'jdbc:h2:file:./data/config_mgr_db'
+2026-10-06T18:56:32.232+08:00  INFO 24708 --- [config-mgr] [           main] c.e.configmgr.ai.tool.ToolRegistry       : ToolRegistry: registered 16 tools
+2026-10-06T18:56:32.268+08:00  INFO 24708 --- [config-mgr] [           main] o.s.b.w.embedded.tomcat.TomcatWebServer  : Tomcat started on port 18292 (http) with context path '/'
+2026-10-06T18:56:32.285+08:00  INFO 24708 --- [config-mgr] [           main] c.e.configmgr.ConfigMgrApplication       : Started ConfigMgrApplication in 6.931 seconds (process running for 7.484)
+2026-10-06T18:56:32.387+08:00  WARN 24708 --- [config-mgr] [           main] c.e.c.j.service.StaleJobRecoveryRunner   : 作业 #19 [IMPORT] 在服务重启时中断，已标记为 FAILED
+2026-10-06T18:56:32.419+08:00  INFO 24708 --- [config-mgr] [           main] c.example.configmgr.seed.DataSeedRunner  : Seed data already exists, skipping
+2026-10-06T18:56:40.182+08:00  INFO 24708 --- [config-mgr] [omcat-handler-0] o.a.c.c.C.[Tomcat].[localhost].[/]       : Initializing Spring DispatcherServlet 'dispatcherServlet'
+2026-10-06T18:56:40.183+08:00  INFO 24708 --- [config-mgr] [omcat-handler-0] o.s.web.servlet.DispatcherServlet        : Initializing Servlet 'dispatcherServlet'
+2026-10-06T18:56:40.183+08:00  INFO 24708 --- [config-mgr] [omcat-handler-0] o.s.web.servlet.DispatcherServlet        : Completed initialization in 0 ms

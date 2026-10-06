@@ -1,0 +1,32 @@
+=== A. R2(REGION_SOUTH) before/after ===
+before rows = 3  after rows = 3
+row0: 一致=true
+   before: __id=202 | __scope=REGION_SOUTH | bandwidthMbps=250 | gateway=10.3.0.1 | redundancy=false
+   after : __id=202 | __scope=REGION_SOUTH | bandwidthMbps=250 | gateway=10.3.0.1 | redundancy=false
+row1: 一致=true
+   before: __id=207 | __scope=REGION_SOUTH | bandwidthMbps=500 | gateway=10.3.0.1 | redundancy=true
+   after : __id=207 | __scope=REGION_SOUTH | bandwidthMbps=500 | gateway=10.3.0.1 | redundancy=true
+row2: 一致=true
+   before: __id=212 | __scope=REGION_SOUTH | bandwidthMbps=750 | gateway=10.3.0.1 | redundancy=false
+   after : __id=212 | __scope=REGION_SOUTH | bandwidthMbps=750 | gateway=10.3.0.1 | redundancy=false
+A 结论: R2 逐字段（含 __id）完全一致 = true
+
+=== B. 全部地区（ALL）排除 R1 后的行集合 ===
+before 非R1行数 = 12  after 非R1行数 = 12
+集合完全一致 = true
+before 有而 after 无: []
+after 有而 before 无: []
+
+=== C. R1(REGION_NORTH) before/after ===
+before rows = 3
+   before: __id=201 | __scope=REGION_NORTH | bandwidthMbps=200 | gateway=10.2.0.1 | redundancy=true
+   before: __id=206 | __scope=REGION_NORTH | bandwidthMbps=450 | gateway=10.2.0.1 | redundancy=false
+   before: __id=211 | __scope=REGION_NORTH | bandwidthMbps=700 | gateway=10.2.0.1 | redundancy=true
+after rows = 2
+   after : __id=359 | __scope=REGION_NORTH | bandwidthMbps=9999 | gateway=10.9.9.9 | redundancy=true
+   after : __id=360 | __scope=REGION_NORTH | bandwidthMbps=8888 | gateway=10.9.9.9 | redundancy=false
+是否发生替换 = true
+
+=== D. 行数分布 ===
+before ALL: {"REGION_EAST":3,"REGION_NE":3,"REGION_NORTH":3,"REGION_SOUTH":3,"REGION_SW":3} total= 15
+after  ALL: {"REGION_EAST":3,"REGION_NE":3,"REGION_SOUTH":3,"REGION_SW":3,"REGION_NORTH":2} total= 14

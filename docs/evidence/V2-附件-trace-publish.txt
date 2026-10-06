@@ -1,0 +1,79 @@
+##### 实验设计
+R1 = REGION_NORTH (华北地区)   发布目标范围
+R2 = REGION_SOUTH (华南地区)   观察对象（不应被影响）
+上传数据：仅含 2 行、__scope 全部为 REGION_NORTH，bandwidthMbps 用 9999/8888 便于识别替换
+
+##### STEP 1 创建导入任务
+REQ : POST http://localhost:18290/api/tasks
+BODY: {"type":"IMPORT_CONFIG"}
+RESP: {"code":0,"msg":"ok","data":{"id":"6cb1b9b98d824f3abaef2168729c69fd","type":"IMPORT_CONFIG","status":"WAITING","currentStep":"SELECT_CONFIG","title":"导入配置","createdAt":"2026-10-06T18:45:51.399176100","updatedAt":"2026-10-06T18:45:51.399176100","selection":null,"params":{"selection":null,"uploads":{},"checkResult":null,"importResult":null,"publishResult":null}}}
+TASK_ID=6cb1b9b98d824f3abaef2168729c69fd
+
+##### STEP 2 选择配置项
+REQ : POST http://localhost:18290/api/tasks/6cb1b9b98d824f3abaef2168729c69fd/selection
+BODY: {"codes":["REGION_NETWORK"]}
+RESP: {"code":0,"msg":"ok","data":{"id":"6cb1b9b98d824f3abaef2168729c69fd","type":"IMPORT_CONFIG","status":"WAITING","currentStep":"PREPARE","title":"导入配置","createdAt":"2026-10-06T18:45:51.399176","updatedAt":"2026-10-06T18:45:51.554168100","selection":["REGION_NETWORK"],"params":{"selection":["REGION_NETWORK"],"uploads":{},"checkResult":null,"importResult":null,"publishResult":null}}}
+
+##### STEP 3 提交上传数据（仅 R1 范围）
+REQ : POST http://localhost:18290/api/tasks/6cb1b9b98d824f3abaef2168729c69fd/data
+BODY: {"configCode":"REGION_NETWORK","fileName":"R1-only.json","rows":[{"__scope":"REGION_NORTH","bandwidthMbps":"9999","gateway":"10.9.9.9","redundancy":"true"},{"__scope":"REGION_NORTH","bandwidthMbps":"8888","gateway":"10.9.9.9","redundancy":"false"}]}
+RESP: {"code":0,"msg":"ok","data":{"id":"6cb1b9b98d824f3abaef2168729c69fd","type":"IMPORT_CONFIG","status":"WAITING","currentStep":"PREPARE","title":"导入配置","createdAt":"2026-10-06T18:45:51.399176","updatedAt":"2026-10-06T18:45:51.597168400","selection":["REGION_NETWORK"],"params":{"selection":["REGION_NETWORK"],"uploads":{"REGION_NETWORK":{"fileName":"R1-only.json","rows":[{"__scope":"REGION_NORTH","bandwidthMbps":"9999","gateway":"10.9.9.9","redundancy":"true"},{"__scope":"REGION_NORTH","bandwidthMbps":"8888","gateway":"10.9.9.9","redundancy":"false"}]}},"checkResult":null,"importResult":null,"publishResult":null}}}
+
+##### STEP 4 执行检查 (check/start)
+REQ : POST http://localhost:18290/api/tasks/6cb1b9b98d824f3abaef2168729c69fd/check/start
+BODY: (空)
+RESP: {"code":0,"msg":"ok","data":{"started":true}}
+REQ : GET http://localhost:18290/api/tasks/6cb1b9b98d824f3abaef2168729c69fd
+STATUS=WAITING CURRENT_STEP=CHECK
+checkResult 原文: {
+  totalErrors: 0,
+  totalWarnings: 0,
+  hasError: false,
+  messages: [],
+  configs: [
+    {
+      configCode: 'REGION_NETWORK',
+      configName: '地区网络配置',
+      hasData: true,
+      rowCount: 2,
+      errorCount: 0,
+      warnCount: 0,
+      issues: []
+    }
+  ]
+}
+
+##### STEP 5 执行导入 (import/start)
+REQ : POST http://localhost:18290/api/tasks/6cb1b9b98d824f3abaef2168729c69fd/import/start
+RESP: {"code":0,"msg":"ok","data":{"started":true}}
+REQ : GET http://localhost:18290/api/tasks/6cb1b9b98d824f3abaef2168729c69fd
+STATUS=WAITING CURRENT_STEP=IMPORT
+importResult 原文: {
+  configs: [
+    {
+      configCode: 'REGION_NETWORK',
+      configName: '地区网络配置',
+      stagedRows: 2,
+      publishedRows: 15
+    }
+  ],
+  message: '全部导入完成（暂存未发布）'
+}
+
+##### STEP 6 执行发布 (publish/start)
+REQ : POST http://localhost:18290/api/tasks/6cb1b9b98d824f3abaef2168729c69fd/publish/start
+RESP: {"code":0,"msg":"ok","data":{"started":true}}
+REQ : GET http://localhost:18290/api/tasks/6cb1b9b98d824f3abaef2168729c69fd
+STATUS=SUCCESS CURRENT_STEP=PUBLISH
+publishResult 原文: {
+  message: '全部发布完成',
+  configs: [
+    {
+      configCode: 'REGION_NETWORK',
+      status: 'DONE',
+      message: '已发布 2 行',
+      percent: 100
+    }
+  ]
+}
+IMPORT_TASK_ID=6cb1b9b98d824f3abaef2168729c69fd

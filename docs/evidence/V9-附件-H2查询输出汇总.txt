@@ -1,0 +1,64 @@
+### 实验一（清库首跑）flyway_schema_history 查询输出  [采集时刻 2026-10-06 18:53 之后，应用已停止]
+installed_rank | version | description                               | type  | script         | checksum   | success
+-1             | null    | << Flyway Schema History table created >> | TABLE |                | null       | TRUE
+1              | 1       | schema                                    | SQL   | V1__schema.sql | 1259565170 | TRUE
+(2 rows, 16 ms)
+
+### 实验一 表清单（information_schema.tables, schema=PUBLIC）
+TABLE_NAME
+CONFIG_DATA_ROWS
+CONFIG_DEFINITIONS
+CONFIG_DEPENDENCIES
+CONFIG_FIELDS
+CONFIG_STAGING_ROWS
+JOBS
+JOB_ITEMS
+PROJECTS
+REGIONS
+TASKS
+TASK_FILES
+TASK_ITEMS
+VALIDATION_ISSUES
+flyway_schema_history
+(14 rows, 19 ms)
+
+### 实验一 索引清单（information_schema.indexes, IDX%）
+INDEX_NAME         | TABLE_NAME
+IDX_DATA_DEF_SCOPE | CONFIG_DATA_ROWS
+IDX_ISSUE_JOB_DEF  | VALIDATION_ISSUES
+IDX_STAGING_TASK   | CONFIG_STAGING_ROWS
+(3 rows, 24 ms)
+
+### 实验二（原地重跑）flyway_schema_history 查询输出
+HISTORY_ROWS
+2
+(1 row, 12 ms)
+installed_rank | version | description                               | type  | script         | checksum   | success
+-1             | null    | << Flyway Schema History table created >> | TABLE |                | null       | TRUE
+1              | 1       | schema                                    | SQL   | V1__schema.sql | 1259565170 | TRUE
+(2 rows, 1 ms)
+
+### 实验三（二次清库重跑）flyway_schema_history + 表清单查询输出
+HISTORY_ROWS
+2
+(1 row, 11 ms)
+installed_rank | version | description                               | type  | script         | checksum   | success
+-1             | null    | << Flyway Schema History table created >> | TABLE |                | null       | TRUE
+1              | 1       | schema                                    | SQL   | V1__schema.sql | 1259565170 | TRUE
+(2 rows, 1 ms)
+TABLE_NAME
+CONFIG_DATA_ROWS
+CONFIG_DEFINITIONS
+CONFIG_DEPENDENCIES
+CONFIG_FIELDS
+CONFIG_STAGING_ROWS
+JOBS
+JOB_ITEMS
+PROJECTS
+REGIONS
+TASKS
+TASK_FILES
+TASK_ITEMS
+VALIDATION_ISSUES
+flyway_schema_history
+(14 rows, 8 ms)

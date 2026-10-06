@@ -1,0 +1,222 @@
+{
+  "_说明": "V8 幂等核验原始请求/响应。base=http://localhost:18293。时间戳为脚本内相对毫秒（t0=脚本启动）。",
+  "创建任务_请求体": {
+    "type": "EXPORT",
+    "name": "V8-幂等核验-20261006"
+  },
+  "创建任务_响应": {
+    "id": 1,
+    "taskNo": "EXP-20261006-0001",
+    "type": "EXPORT",
+    "name": "V8-幂等核验-20261006",
+    "status": "DRAFT",
+    "currentStep": 1,
+    "stepData": {},
+    "progress": 0,
+    "message": null,
+    "createdAt": "2026-10-06T18:59:55.5528674",
+    "updatedAt": "2026-10-06T18:59:55.5528674"
+  },
+  "导出作业_请求体": {
+    "items": [
+      {
+        "defCode": "COUNTRY",
+        "conditions": []
+      },
+      {
+        "defCode": "PROJECT_TYPE",
+        "conditions": []
+      },
+      {
+        "defCode": "REGION_GROUP",
+        "conditions": []
+      },
+      {
+        "defCode": "TAX_RATE",
+        "conditions": []
+      },
+      {
+        "defCode": "PROJECT_INFO",
+        "conditions": []
+      },
+      {
+        "defCode": "UNIT_CONVERSION",
+        "conditions": []
+      }
+    ]
+  },
+  "实验一_同任务同kind(EXPORT)并发重复提交": {
+    "jobId": 1,
+    "afterId": 2,
+    "log": [
+      {
+        "step": "1-首次提交",
+        "sentAt": 0,
+        "status": 200,
+        "body": "{\"id\":1,\"taskId\":1,\"kind\":\"EXPORT\",\"status\":\"PENDING\",\"total\":6,\"processed\":0,\"currentItem\":null,\"result\":null,\"error\":null,\"createdAt\":\"2026-10-06T19:00:00.5157363\",\"startedAt\":null,\"finishedAt\":null,\"items\":[{\"defCode\":\"COUNTRY\",\"seq\":1,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null},{\"defCode\":\"PROJECT_TYPE\",\"seq\":2,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null},{\"defCode\":\"UNIT_CONVERSION\",\"seq\":3,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null},{\"defCode\":\"REGION_GROUP\",\"seq\":4,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null},{\"defCode\":\"TAX_RATE\",\"seq\":5,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null},{\"defCode\":\"PROJECT_INFO\",\"seq\":6,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null}]}",
+        "recvAt": 116
+      },
+      {
+        "step": "2-重复提交#1",
+        "sentAt": 116,
+        "status": 200,
+        "body": "{\"id\":1,\"taskId\":1,\"kind\":\"EXPORT\",\"status\":\"RUNNING\",\"total\":6,\"processed\":1,\"currentItem\":\"COUNTRY\",\"result\":null,\"error\":null,\"createdAt\":\"2026-10-06T19:00:00.515736\",\"startedAt\":\"2026-10-06T19:00:00.54174\",\"finishedAt\":null,\"items\":[{\"defCode\":\"COUNTRY\",\"seq\":1,\"status\":\"SUCCESS\",\"totalRows\":8,\"okRows\":8,\"errorRows\":0,\"message\":null,\"detail\":null},{\"defCode\":\"PROJECT_TYPE\",\"seq\":2,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null},{\"defCode\":\"UNIT_CONVERSION\",\"seq\":3,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null},{\"defCode\":\"REGION_GROUP\",\"seq\":4,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null},{\"defCode\":\"TAX_RATE\",\"seq\":5,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null},{\"defCode\":\"PROJECT_INFO\",\"seq\":6,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null}]}",
+        "recvAt": 196
+      },
+      {
+        "step": "2-重复提交#2",
+        "sentAt": 117,
+        "status": 200,
+        "body": "{\"id\":1,\"taskId\":1,\"kind\":\"EXPORT\",\"status\":\"RUNNING\",\"total\":6,\"processed\":0,\"currentItem\":\"COUNTRY\",\"result\":null,\"error\":null,\"createdAt\":\"2026-10-06T19:00:00.515736\",\"startedAt\":\"2026-10-06T19:00:00.54174\",\"finishedAt\":null,\"items\":[{\"defCode\":\"COUNTRY\",\"seq\":1,\"status\":\"SUCCESS\",\"totalRows\":8,\"okRows\":8,\"errorRows\":0,\"message\":null,\"detail\":null},{\"defCode\":\"PROJECT_TYPE\",\"seq\":2,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null},{\"defCode\":\"UNIT_CONVERSION\",\"seq\":3,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null},{\"defCode\":\"REGION_GROUP\",\"seq\":4,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null},{\"defCode\":\"TAX_RATE\",\"seq\":5,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null},{\"defCode\":\"PROJECT_INFO\",\"seq\":6,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null}]}",
+        "recvAt": 185
+      },
+      {
+        "step": "2-重复提交#3",
+        "sentAt": 117,
+        "status": 200,
+        "body": "{\"id\":1,\"taskId\":1,\"kind\":\"EXPORT\",\"status\":\"RUNNING\",\"total\":6,\"processed\":0,\"currentItem\":\"COUNTRY\",\"result\":null,\"error\":null,\"createdAt\":\"2026-10-06T19:00:00.515736\",\"startedAt\":\"2026-10-06T19:00:00.54174\",\"finishedAt\":null,\"items\":[{\"defCode\":\"COUNTRY\",\"seq\":1,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null},{\"defCode\":\"PROJECT_TYPE\",\"seq\":2,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null},{\"defCode\":\"UNIT_CONVERSION\",\"seq\":3,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null},{\"defCode\":\"REGION_GROUP\",\"seq\":4,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null},{\"defCode\":\"TAX_RATE\",\"seq\":5,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null},{\"defCode\":\"PROJECT_INFO\",\"seq\":6,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null}]}",
+        "recvAt": 173
+      },
+      {
+        "step": "2-重复提交#4",
+        "sentAt": 117,
+        "status": 200,
+        "body": "{\"id\":1,\"taskId\":1,\"kind\":\"EXPORT\",\"status\":\"RUNNING\",\"total\":6,\"processed\":0,\"currentItem\":null,\"result\":null,\"error\":null,\"createdAt\":\"2026-10-06T19:00:00.515736\",\"startedAt\":\"2026-10-06T19:00:00.54174\",\"finishedAt\":null,\"items\":[{\"defCode\":\"COUNTRY\",\"seq\":1,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null},{\"defCode\":\"PROJECT_TYPE\",\"seq\":2,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null},{\"defCode\":\"UNIT_CONVERSION\",\"seq\":3,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null},{\"defCode\":\"REGION_GROUP\",\"seq\":4,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null},{\"defCode\":\"TAX_RATE\",\"seq\":5,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null},{\"defCode\":\"PROJECT_INFO\",\"seq\":6,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null}]}",
+        "recvAt": 147
+      },
+      {
+        "step": "2-重复提交#5",
+        "sentAt": 118,
+        "status": 200,
+        "body": "{\"id\":1,\"taskId\":1,\"kind\":\"EXPORT\",\"status\":\"RUNNING\",\"total\":6,\"processed\":0,\"currentItem\":\"COUNTRY\",\"result\":null,\"error\":null,\"createdAt\":\"2026-10-06T19:00:00.515736\",\"startedAt\":\"2026-10-06T19:00:00.54174\",\"finishedAt\":null,\"items\":[{\"defCode\":\"COUNTRY\",\"seq\":1,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null},{\"defCode\":\"PROJECT_TYPE\",\"seq\":2,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null},{\"defCode\":\"UNIT_CONVERSION\",\"seq\":3,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null},{\"defCode\":\"REGION_GROUP\",\"seq\":4,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null},{\"defCode\":\"TAX_RATE\",\"seq\":5,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null},{\"defCode\":\"PROJECT_INFO\",\"seq\":6,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null}]}",
+        "recvAt": 158
+      },
+      {
+        "step": "3-最终GET",
+        "sentAt": 2346,
+        "status": 200,
+        "body": "{\"id\":1,\"taskId\":1,\"kind\":\"EXPORT\",\"status\":\"SUCCESS\",\"total\":6,\"processed\":6,\"currentItem\":null,\"result\":null,\"error\":null,\"createdAt\":\"2026-10-06T19:00:00.515736\",\"startedAt\":\"2026-10-06T19:00:00.54174\",\"finishedAt\":\"2026-10-06T19:00:02.631883\",\"items\":[{\"defCode\":\"COUNTRY\",\"seq\":1,\"status\":\"SUCCESS\",\"totalRows\":8,\"okRows\":8,\"errorRows\":0,\"message\":null,\"detail\":null},{\"defCode\":\"PROJECT_TYPE\",\"seq\":2,\"status\":\"SUCCESS\",\"totalRows\":8,\"okRows\":8,\"errorRows\":0,\"message\":null,\"detail\":null},{\"defCode\":\"UNIT_CONVERSION\",\"seq\":3,\"status\":\"SUCCESS\",\"totalRows\":10,\"okRows\":10,\"errorRows\":0,\"message\":null,\"detail\":null},{\"defCode\":\"REGION_GROUP\",\"seq\":4,\"status\":\"SUCCESS\",\"totalRows\":8,\"okRows\":8,\"errorRows\":0,\"message\":null,\"detail\":null},{\"defCode\":\"TAX_RATE\",\"seq\":5,\"status\":\"SUCCESS\",\"totalRows\":12,\"okRows\":12,\"errorRows\":0,\"message\":null,\"detail\":null},{\"defCode\":\"PROJECT_INFO\",\"seq\":6,\"status\":\"SUCCESS\",\"totalRows\":12,\"okRows\":12,\"errorRows\":0,\"message\":null,\"detail\":null}]}",
+        "recvAt": 2360
+      },
+      {
+        "step": "4-完成后再次提交同kind",
+        "sentAt": 2360,
+        "status": 200,
+        "body": "{\"id\":2,\"taskId\":1,\"kind\":\"EXPORT\",\"status\":\"PENDING\",\"total\":6,\"processed\":0,\"currentItem\":null,\"result\":null,\"error\":null,\"createdAt\":\"2026-10-06T19:00:02.8079107\",\"startedAt\":null,\"finishedAt\":null,\"items\":[{\"defCode\":\"COUNTRY\",\"seq\":1,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null},{\"defCode\":\"PROJECT_TYPE\",\"seq\":2,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null},{\"defCode\":\"UNIT_CONVERSION\",\"seq\":3,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null},{\"defCode\":\"REGION_GROUP\",\"seq\":4,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null},{\"defCode\":\"TAX_RATE\",\"seq\":5,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null},{\"defCode\":\"PROJECT_INFO\",\"seq\":6,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null}]}",
+        "recvAt": 2386
+      }
+    ],
+    "polls": [
+      {
+        "at": 208,
+        "status": "RUNNING",
+        "processed": 1,
+        "total": 6,
+        "currentItem": "COUNTRY"
+      },
+      {
+        "at": 472,
+        "status": "RUNNING",
+        "processed": 1,
+        "total": 6,
+        "currentItem": "COUNTRY"
+      },
+      {
+        "at": 746,
+        "status": "RUNNING",
+        "processed": 2,
+        "total": 6,
+        "currentItem": "PROJECT_TYPE"
+      },
+      {
+        "at": 1017,
+        "status": "RUNNING",
+        "processed": 3,
+        "total": 6,
+        "currentItem": "UNIT_CONVERSION"
+      },
+      {
+        "at": 1292,
+        "status": "RUNNING",
+        "processed": 4,
+        "total": 6,
+        "currentItem": "REGION_GROUP"
+      },
+      {
+        "at": 1552,
+        "status": "RUNNING",
+        "processed": 4,
+        "total": 6,
+        "currentItem": "TAX_RATE"
+      },
+      {
+        "at": 1813,
+        "status": "RUNNING",
+        "processed": 5,
+        "total": 6,
+        "currentItem": "TAX_RATE"
+      },
+      {
+        "at": 2081,
+        "status": "RUNNING",
+        "processed": 6,
+        "total": 6,
+        "currentItem": "PROJECT_INFO"
+      },
+      {
+        "at": 2346,
+        "status": "SUCCESS",
+        "processed": 6,
+        "total": 6,
+        "currentItem": null
+      }
+    ],
+    "polls2": [
+      {
+        "at": 2399,
+        "status": "PENDING",
+        "processed": 0
+      },
+      {
+        "at": 2672,
+        "status": "RUNNING",
+        "processed": 1
+      },
+      {
+        "at": 2939,
+        "status": "RUNNING",
+        "processed": 2
+      },
+      {
+        "at": 3205,
+        "status": "RUNNING",
+        "processed": 3
+      },
+      {
+        "at": 3465,
+        "status": "RUNNING",
+        "processed": 4
+      },
+      {
+        "at": 3737,
+        "status": "RUNNING",
+        "processed": 4
+      },
+      {
+        "at": 4007,
+        "status": "RUNNING",
+        "processed": 5
+      },
+      {
+        "at": 4271,
+        "status": "RUNNING",
+        "processed": 6
+      },
+      {
+        "at": 4536,
+        "status": "SUCCESS",
+        "processed": 6
+      }
+    ]
+  }
+}

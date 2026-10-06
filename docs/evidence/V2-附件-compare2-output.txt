@@ -1,0 +1,18 @@
+=== 第二轮发布后 R1(REGION_NORTH) 对比 ===
+第二轮发布前 R1 行数 = 2  第二轮发布后 R1 行数 = 2
+row0: 一致=true
+   before: __id=359 | __scope=REGION_NORTH | bandwidthMbps=9999 | gateway=10.9.9.9 | redundancy=true
+   after : __id=359 | __scope=REGION_NORTH | bandwidthMbps=9999 | gateway=10.9.9.9 | redundancy=true
+row1: 一致=true
+   before: __id=360 | __scope=REGION_NORTH | bandwidthMbps=8888 | gateway=10.9.9.9 | redundancy=false
+   after : __id=360 | __scope=REGION_NORTH | bandwidthMbps=8888 | gateway=10.9.9.9 | redundancy=false
+R1 逐字段（含 __id）完全一致 = true
+
+=== 第二轮：排除 REGION_SOUTH 后的行集合对比 ===
+before 非SOUTH行数 = 11  after 非SOUTH行数 = 11  集合完全一致 = true
+before 有而 after 无: []
+after 有而 before 无: []
+
+=== 行数分布 ===
+第二轮前 ALL: {"REGION_EAST":3,"REGION_NE":3,"REGION_SOUTH":3,"REGION_SW":3,"REGION_NORTH":2} total= 14
+第二轮后 ALL: {"REGION_EAST":3,"REGION_NE":3,"REGION_SW":3,"REGION_NORTH":2,"REGION_SOUTH":2} total= 13

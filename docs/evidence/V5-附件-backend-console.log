@@ -1,0 +1,180 @@
+
+  .   ____          _            __ _ _
+ /\\ / ___'_ __ _ _(_)_ __  __ _ \ \ \ \
+( ( )\___ | '_ | '_| | '_ \/ _` | \ \ \ \
+ \\/  ___)| |_)| | | | | || (_| |  ) ) ) )
+  '  |____| .__|_| |_|_| |_\__, | / / / /
+ =========|_|==============|___/=/_/_/_/
+
+ :: Spring Boot ::               (v3.5.14)
+
+2026-10-06T18:53:39.122+08:00  INFO 11484 --- [config-mgr] [           main] c.e.configmgr.ConfigMgrApplication       : Starting ConfigMgrApplication v1.0.0 using Java 21.0.12 with PID 11484 (E:\temp\ai-example-code\ai-example-claude-opus-5.5+deepseek-v4-pro\backend\target\config-mgr.jar started by Obby in E:\temp\ai-example-code\ai-example-claude-opus-5.5+deepseek-v4-pro\backend)
+2026-10-06T18:53:39.123+08:00 DEBUG 11484 --- [config-mgr] [           main] c.e.configmgr.ConfigMgrApplication       : Running with Spring Boot v3.5.14, Spring v6.2.18
+2026-10-06T18:53:39.124+08:00  INFO 11484 --- [config-mgr] [           main] c.e.configmgr.ConfigMgrApplication       : No active profile set, falling back to 1 default profile: "default"
+2026-10-06T18:53:40.134+08:00  INFO 11484 --- [config-mgr] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Bootstrapping Spring Data JPA repositories in DEFAULT mode.
+2026-10-06T18:53:40.279+08:00  INFO 11484 --- [config-mgr] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Finished Spring Data repository scanning in 136 ms. Found 12 JPA repository interfaces.
+2026-10-06T18:53:41.092+08:00  INFO 11484 --- [config-mgr] [           main] o.s.b.w.embedded.tomcat.TomcatWebServer  : Tomcat initialized with port 18292 (http)
+2026-10-06T18:53:41.107+08:00  INFO 11484 --- [config-mgr] [           main] o.apache.catalina.core.StandardService   : Starting service [Tomcat]
+2026-10-06T18:53:41.107+08:00  INFO 11484 --- [config-mgr] [           main] o.apache.catalina.core.StandardEngine    : Starting Servlet engine: [Apache Tomcat/10.1.54]
+2026-10-06T18:53:41.151+08:00  INFO 11484 --- [config-mgr] [           main] o.a.c.c.C.[Tomcat].[localhost].[/]       : Initializing Spring embedded WebApplicationContext
+2026-10-06T18:53:41.152+08:00  INFO 11484 --- [config-mgr] [           main] w.s.c.ServletWebServerApplicationContext : Root WebApplicationContext: initialization completed in 1980 ms
+2026-10-06T18:53:41.488+08:00  INFO 11484 --- [config-mgr] [           main] com.zaxxer.hikari.HikariDataSource       : HikariPool-1 - Starting...
+2026-10-06T18:53:41.670+08:00  INFO 11484 --- [config-mgr] [           main] com.zaxxer.hikari.pool.HikariPool        : HikariPool-1 - Added connection conn0: url=jdbc:h2:file:./data/config_mgr_db user=SA
+2026-10-06T18:53:41.671+08:00  INFO 11484 --- [config-mgr] [           main] com.zaxxer.hikari.HikariDataSource       : HikariPool-1 - Start completed.
+2026-10-06T18:53:41.709+08:00  INFO 11484 --- [config-mgr] [           main] org.flywaydb.core.FlywayExecutor         : Database: jdbc:h2:file:./data/config_mgr_db (H2 2.3)
+2026-10-06T18:53:41.738+08:00  INFO 11484 --- [config-mgr] [           main] o.f.c.i.s.JdbcTableSchemaHistory         : Schema history table "PUBLIC"."flyway_schema_history" does not exist yet
+2026-10-06T18:53:41.740+08:00  INFO 11484 --- [config-mgr] [           main] o.f.core.internal.command.DbValidate     : Successfully validated 2 migrations (execution time 00:00.011s)
+2026-10-06T18:53:41.745+08:00  INFO 11484 --- [config-mgr] [           main] org.flywaydb.core.Flyway                 : All configured schemas are empty; baseline operation skipped. A baseline or migration script with a lower version than the baseline version may execute if available. Check the Schemas parameter if this is not intended.
+2026-10-06T18:53:41.745+08:00  INFO 11484 --- [config-mgr] [           main] o.f.c.i.s.JdbcTableSchemaHistory         : Creating Schema History table "PUBLIC"."flyway_schema_history" ...
+2026-10-06T18:53:41.777+08:00  INFO 11484 --- [config-mgr] [           main] o.f.core.internal.command.DbMigrate      : Current version of schema "PUBLIC": << Empty Schema >>
+2026-10-06T18:53:41.798+08:00  INFO 11484 --- [config-mgr] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "PUBLIC" to version "1 - schema"
+2026-10-06T18:53:41.833+08:00  INFO 11484 --- [config-mgr] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "PUBLIC" to version "2 - staging base version"
+2026-10-06T18:53:41.849+08:00  INFO 11484 --- [config-mgr] [           main] o.f.core.internal.command.DbMigrate      : Successfully applied 2 migrations to schema "PUBLIC", now at version v2 (execution time 00:00.034s)
+2026-10-06T18:53:41.982+08:00  INFO 11484 --- [config-mgr] [           main] o.hibernate.jpa.internal.util.LogHelper  : HHH000204: Processing PersistenceUnitInfo [name: default]
+2026-10-06T18:53:42.106+08:00  INFO 11484 --- [config-mgr] [           main] org.hibernate.Version                    : HHH000412: Hibernate ORM core version 6.6.49.Final
+2026-10-06T18:53:42.184+08:00  INFO 11484 --- [config-mgr] [           main] o.h.c.internal.RegionFactoryInitiator    : HHH000026: Second-level cache disabled
+2026-10-06T18:53:42.393+08:00  INFO 11484 --- [config-mgr] [           main] o.s.o.j.p.SpringPersistenceUnitInfo      : No LoadTimeWeaver setup: ignoring JPA class transformer
+2026-10-06T18:53:42.455+08:00  INFO 11484 --- [config-mgr] [           main] org.hibernate.orm.connections.pooling    : HHH10001005: Database info:
+	Database JDBC URL [Connecting through datasource 'HikariDataSource (HikariPool-1)']
+	Database driver: undefined/unknown
+	Database version: 2.3.232
+	Autocommit mode: undefined/unknown
+	Isolation level: undefined/unknown
+	Minimum pool size: undefined/unknown
+	Maximum pool size: undefined/unknown
+2026-10-06T18:53:43.365+08:00  INFO 11484 --- [config-mgr] [           main] o.h.e.t.j.p.i.JtaPlatformInitiator       : HHH000489: No JTA platform available (set 'hibernate.transaction.jta.platform' to enable JTA platform integration)
+2026-10-06T18:53:43.382+08:00  INFO 11484 --- [config-mgr] [           main] j.LocalContainerEntityManagerFactoryBean : Initialized JPA EntityManagerFactory for persistence unit 'default'
+2026-10-06T18:53:43.971+08:00  INFO 11484 --- [config-mgr] [           main] o.s.d.j.r.query.QueryEnhancerFactory     : Hibernate is in classpath; If applicable, HQL parser will be used.
+2026-10-06T18:53:44.897+08:00 DEBUG 11484 --- [config-mgr] [           main] c.e.configmgr.ai.tool.ToolRegistry       : Registered tool: check_job_status scopes=[task:*]
+2026-10-06T18:53:44.897+08:00 DEBUG 11484 --- [config-mgr] [           main] c.e.configmgr.ai.tool.ToolRegistry       : Registered tool: download_export_file scopes=[task:EXPORT/EXPORT]
+2026-10-06T18:53:44.898+08:00 DEBUG 11484 --- [config-mgr] [           main] c.e.configmgr.ai.tool.ToolRegistry       : Registered tool: get_row_count scopes=[task:EXPORT/QUERY_COND, task:EXPORT/EXPORT]
+2026-10-06T18:53:44.898+08:00 DEBUG 11484 --- [config-mgr] [           main] c.e.configmgr.ai.tool.ToolRegistry       : Registered tool: set_query_condition scopes=[task:EXPORT/QUERY_COND]
+2026-10-06T18:53:44.898+08:00 DEBUG 11484 --- [config-mgr] [           main] c.e.configmgr.ai.tool.ToolRegistry       : Registered tool: start_export scopes=[task:EXPORT/EXPORT]
+2026-10-06T18:53:44.898+08:00 DEBUG 11484 --- [config-mgr] [           main] c.e.configmgr.ai.tool.ToolRegistry       : Registered tool: open_export_file_editor scopes=[task:EXPORT/EXPORT]
+2026-10-06T18:53:45.004+08:00 DEBUG 11484 --- [config-mgr] [           main] c.e.configmgr.ai.tool.ToolRegistry       : Registered tool: get_config_def scopes=[*]
+2026-10-06T18:53:45.004+08:00 DEBUG 11484 --- [config-mgr] [           main] c.e.configmgr.ai.tool.ToolRegistry       : Registered tool: get_workspace_state scopes=[*]
+2026-10-06T18:53:45.004+08:00 DEBUG 11484 --- [config-mgr] [           main] c.e.configmgr.ai.tool.ToolRegistry       : Registered tool: list_config_defs scopes=[*]
+2026-10-06T18:53:45.004+08:00 DEBUG 11484 --- [config-mgr] [           main] c.e.configmgr.ai.tool.ToolRegistry       : Registered tool: list_tasks scopes=[*, page:tasks]
+2026-10-06T18:53:45.008+08:00 DEBUG 11484 --- [config-mgr] [           main] c.e.configmgr.ai.tool.ToolRegistry       : Registered tool: start_precheck scopes=[task:IMPORT/PRECHECK]
+2026-10-06T18:53:45.008+08:00 DEBUG 11484 --- [config-mgr] [           main] c.e.configmgr.ai.tool.ToolRegistry       : Registered tool: start_publish scopes=[task:IMPORT/PUBLISH]
+2026-10-06T18:53:45.008+08:00 DEBUG 11484 --- [config-mgr] [           main] c.e.configmgr.ai.tool.ToolRegistry       : Registered tool: start_import scopes=[task:IMPORT/IMPORT]
+2026-10-06T18:53:45.014+08:00 DEBUG 11484 --- [config-mgr] [           main] c.e.configmgr.ai.tool.ToolRegistry       : Registered tool: navigate_to_step scopes=[task:*]
+2026-10-06T18:53:45.014+08:00 DEBUG 11484 --- [config-mgr] [           main] c.e.configmgr.ai.tool.ToolRegistry       : Registered tool: create_task scopes=[*, page:tasks]
+2026-10-06T18:53:45.014+08:00 DEBUG 11484 --- [config-mgr] [           main] c.e.configmgr.ai.tool.ToolRegistry       : Registered tool: select_defs scopes=[task:EXPORT/SELECT_DEFS, task:IMPORT/UPLOAD]
+2026-10-06T18:53:45.702+08:00  INFO 11484 --- [config-mgr] [           main] o.s.b.a.h2.H2ConsoleAutoConfiguration    : H2 console available at '/h2-console'. Database available at 'jdbc:h2:file:./data/config_mgr_db'
+2026-10-06T18:53:45.731+08:00  INFO 11484 --- [config-mgr] [           main] c.e.configmgr.ai.tool.ToolRegistry       : ToolRegistry: registered 16 tools
+2026-10-06T18:53:45.770+08:00  INFO 11484 --- [config-mgr] [           main] o.s.b.w.embedded.tomcat.TomcatWebServer  : Tomcat started on port 18292 (http) with context path '/'
+2026-10-06T18:53:45.794+08:00  INFO 11484 --- [config-mgr] [           main] c.e.configmgr.ConfigMgrApplication       : Started ConfigMgrApplication in 7.121 seconds (process running for 7.697)
+2026-10-06T18:53:45.854+08:00  INFO 11484 --- [config-mgr] [           main] c.example.configmgr.seed.DataSeedRunner  : Seeding initial data...
+2026-10-06T18:53:47.886+08:00  INFO 11484 --- [config-mgr] [           main] c.example.configmgr.seed.DataSeedRunner  : Definitions and seed data created successfully
+2026-10-06T18:53:47.886+08:00  INFO 11484 --- [config-mgr] [           main] c.example.configmgr.seed.DataSeedRunner  : Seed data complete
+2026-10-06T18:53:57.644+08:00  INFO 11484 --- [config-mgr] [omcat-handler-0] o.a.c.c.C.[Tomcat].[localhost].[/]       : Initializing Spring DispatcherServlet 'dispatcherServlet'
+2026-10-06T18:53:57.644+08:00  INFO 11484 --- [config-mgr] [omcat-handler-0] o.s.web.servlet.DispatcherServlet        : Initializing Servlet 'dispatcherServlet'
+2026-10-06T18:53:57.645+08:00  INFO 11484 --- [config-mgr] [omcat-handler-0] o.s.web.servlet.DispatcherServlet        : Completed initialization in 1 ms
+2026-10-06T18:54:00.185+08:00 ERROR 11484 --- [config-mgr] [omcat-handler-1] c.e.c.common.GlobalExceptionHandler      : Unhandled exception
+
+org.springframework.http.converter.HttpMessageNotReadableException: JSON parse error: Unrecognized field "isKey" (class com.example.configmgr.definition.entity.ConfigField), not marked as ignorable
+	at org.springframework.http.converter.json.AbstractJackson2HttpMessageConverter.readJavaType(AbstractJackson2HttpMessageConverter.java:408) ~[spring-web-6.2.18.jar!/:6.2.18]
+	at org.springframework.http.converter.json.AbstractJackson2HttpMessageConverter.read(AbstractJackson2HttpMessageConverter.java:356) ~[spring-web-6.2.18.jar!/:6.2.18]
+	at org.springframework.web.servlet.mvc.method.annotation.AbstractMessageConverterMethodArgumentResolver.readWithMessageConverters(AbstractMessageConverterMethodArgumentResolver.java:204) ~[spring-webmvc-6.2.18.jar!/:6.2.18]
+	at org.springframework.web.servlet.mvc.method.annotation.RequestResponseBodyMethodProcessor.readWithMessageConverters(RequestResponseBodyMethodProcessor.java:176) ~[spring-webmvc-6.2.18.jar!/:6.2.18]
+	at org.springframework.web.servlet.mvc.method.annotation.RequestResponseBodyMethodProcessor.resolveArgument(RequestResponseBodyMethodProcessor.java:150) ~[spring-webmvc-6.2.18.jar!/:6.2.18]
+	at org.springframework.web.method.support.HandlerMethodArgumentResolverComposite.resolveArgument(HandlerMethodArgumentResolverComposite.java:122) ~[spring-web-6.2.18.jar!/:6.2.18]
+	at org.springframework.web.method.support.InvocableHandlerMethod.getMethodArgumentValues(InvocableHandlerMethod.java:227) ~[spring-web-6.2.18.jar!/:6.2.18]
+	at org.springframework.web.method.support.InvocableHandlerMethod.invokeForRequest(InvocableHandlerMethod.java:181) ~[spring-web-6.2.18.jar!/:6.2.18]
+	at org.springframework.web.servlet.mvc.method.annotation.ServletInvocableHandlerMethod.invokeAndHandle(ServletInvocableHandlerMethod.java:118) ~[spring-webmvc-6.2.18.jar!/:6.2.18]
+	at org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerAdapter.invokeHandlerMethod(RequestMappingHandlerAdapter.java:991) ~[spring-webmvc-6.2.18.jar!/:6.2.18]
+	at org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerAdapter.handleInternal(RequestMappingHandlerAdapter.java:896) ~[spring-webmvc-6.2.18.jar!/:6.2.18]
+	at org.springframework.web.servlet.mvc.method.AbstractHandlerMethodAdapter.handle(AbstractHandlerMethodAdapter.java:87) ~[spring-webmvc-6.2.18.jar!/:6.2.18]
+	at org.springframework.web.servlet.DispatcherServlet.doDispatch(DispatcherServlet.java:1089) ~[spring-webmvc-6.2.18.jar!/:6.2.18]
+	at org.springframework.web.servlet.DispatcherServlet.doService(DispatcherServlet.java:979) ~[spring-webmvc-6.2.18.jar!/:6.2.18]
+	at org.springframework.web.servlet.FrameworkServlet.processRequest(FrameworkServlet.java:1014) ~[spring-webmvc-6.2.18.jar!/:6.2.18]
+	at org.springframework.web.servlet.FrameworkServlet.doPost(FrameworkServlet.java:914) ~[spring-webmvc-6.2.18.jar!/:6.2.18]
+	at jakarta.servlet.http.HttpServlet.service(HttpServlet.java:590) ~[tomcat-embed-core-10.1.54.jar!/:na]
+	at org.springframework.web.servlet.FrameworkServlet.service(FrameworkServlet.java:885) ~[spring-webmvc-6.2.18.jar!/:6.2.18]
+	at jakarta.servlet.http.HttpServlet.service(HttpServlet.java:658) ~[tomcat-embed-core-10.1.54.jar!/:na]
+	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:193) ~[tomcat-embed-core-10.1.54.jar!/:na]
+	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:138) ~[tomcat-embed-core-10.1.54.jar!/:na]
+	at org.apache.tomcat.websocket.server.WsFilter.doFilter(WsFilter.java:51) ~[tomcat-embed-websocket-10.1.54.jar!/:na]
+	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:162) ~[tomcat-embed-core-10.1.54.jar!/:na]
+	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:138) ~[tomcat-embed-core-10.1.54.jar!/:na]
+	at org.springframework.web.filter.CorsFilter.doFilterInternal(CorsFilter.java:91) ~[spring-web-6.2.18.jar!/:6.2.18]
+	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116) ~[spring-web-6.2.18.jar!/:6.2.18]
+	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:162) ~[tomcat-embed-core-10.1.54.jar!/:na]
+	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:138) ~[tomcat-embed-core-10.1.54.jar!/:na]
+	at org.springframework.web.filter.RequestContextFilter.doFilterInternal(RequestContextFilter.java:100) ~[spring-web-6.2.18.jar!/:6.2.18]
+	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116) ~[spring-web-6.2.18.jar!/:6.2.18]
+	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:162) ~[tomcat-embed-core-10.1.54.jar!/:na]
+	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:138) ~[tomcat-embed-core-10.1.54.jar!/:na]
+	at org.springframework.web.filter.FormContentFilter.doFilterInternal(FormContentFilter.java:93) ~[spring-web-6.2.18.jar!/:6.2.18]
+	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116) ~[spring-web-6.2.18.jar!/:6.2.18]
+	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:162) ~[tomcat-embed-core-10.1.54.jar!/:na]
+	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:138) ~[tomcat-embed-core-10.1.54.jar!/:na]
+	at org.springframework.web.filter.CharacterEncodingFilter.doFilterInternal(CharacterEncodingFilter.java:201) ~[spring-web-6.2.18.jar!/:6.2.18]
+	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116) ~[spring-web-6.2.18.jar!/:6.2.18]
+	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:162) ~[tomcat-embed-core-10.1.54.jar!/:na]
+	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:138) ~[tomcat-embed-core-10.1.54.jar!/:na]
+	at org.apache.catalina.core.StandardWrapperValve.invoke(StandardWrapperValve.java:165) ~[tomcat-embed-core-10.1.54.jar!/:na]
+	at org.apache.catalina.core.StandardContextValve.invoke(StandardContextValve.java:88) ~[tomcat-embed-core-10.1.54.jar!/:na]
+	at org.apache.catalina.authenticator.AuthenticatorBase.invoke(AuthenticatorBase.java:492) ~[tomcat-embed-core-10.1.54.jar!/:na]
+	at org.apache.catalina.core.StandardHostValve.invoke(StandardHostValve.java:113) ~[tomcat-embed-core-10.1.54.jar!/:na]
+	at org.apache.catalina.valves.ErrorReportValve.invoke(ErrorReportValve.java:83) ~[tomcat-embed-core-10.1.54.jar!/:na]
+	at org.apache.catalina.core.StandardEngineValve.invoke(StandardEngineValve.java:72) ~[tomcat-embed-core-10.1.54.jar!/:na]
+	at org.apache.catalina.connector.CoyoteAdapter.service(CoyoteAdapter.java:342) ~[tomcat-embed-core-10.1.54.jar!/:na]
+	at org.apache.coyote.http11.Http11Processor.service(Http11Processor.java:399) ~[tomcat-embed-core-10.1.54.jar!/:na]
+	at org.apache.coyote.AbstractProcessorLight.process(AbstractProcessorLight.java:63) ~[tomcat-embed-core-10.1.54.jar!/:na]
+	at org.apache.coyote.AbstractProtocol$ConnectionHandler.process(AbstractProtocol.java:903) ~[tomcat-embed-core-10.1.54.jar!/:na]
+	at org.apache.tomcat.util.net.NioEndpoint$SocketProcessor.doRun(NioEndpoint.java:1797) ~[tomcat-embed-core-10.1.54.jar!/:na]
+	at org.apache.tomcat.util.net.SocketProcessorBase.run(SocketProcessorBase.java:52) ~[tomcat-embed-core-10.1.54.jar!/:na]
+	at java.base/java.lang.VirtualThread.run(VirtualThread.java:329) ~[na:na]
+Caused by: com.fasterxml.jackson.databind.exc.UnrecognizedPropertyException: Unrecognized field "isKey" (class com.example.configmgr.definition.entity.ConfigField), not marked as ignorable (11 known properties: "sortOrder", "defCode", "label", "optionsJson", "id", "code", "required", "fieldType", "refDefCode", "refFieldCode", "key")
+ at [Source: REDACTED (`StreamReadFeature.INCLUDE_SOURCE_IN_LOCATION` disabled); line: 8, column: 97] (through reference chain: com.example.configmgr.definition.entity.ConfigDefinition["fields"]->java.util.ArrayList[0]->com.example.configmgr.definition.entity.ConfigField["isKey"])
+	at com.fasterxml.jackson.databind.exc.UnrecognizedPropertyException.from(UnrecognizedPropertyException.java:61) ~[jackson-databind-2.21.2.jar!/:2.21.2]
+	at com.fasterxml.jackson.databind.DeserializationContext.handleUnknownProperty(DeserializationContext.java:1200) ~[jackson-databind-2.21.2.jar!/:2.21.2]
+	at com.fasterxml.jackson.databind.deser.std.StdDeserializer.handleUnknownProperty(StdDeserializer.java:2380) ~[jackson-databind-2.21.2.jar!/:2.21.2]
+	at com.fasterxml.jackson.databind.deser.BeanDeserializerBase.handleUnknownProperty(BeanDeserializerBase.java:1823) ~[jackson-databind-2.21.2.jar!/:2.21.2]
+	at com.fasterxml.jackson.databind.deser.BeanDeserializerBase.handleUnknownVanilla(BeanDeserializerBase.java:1801) ~[jackson-databind-2.21.2.jar!/:2.21.2]
+	at com.fasterxml.jackson.databind.deser.BeanDeserializer.vanillaDeserialize(BeanDeserializer.java:308) ~[jackson-databind-2.21.2.jar!/:2.21.2]
+	at com.fasterxml.jackson.databind.deser.BeanDeserializer.deserialize(BeanDeserializer.java:169) ~[jackson-databind-2.21.2.jar!/:2.21.2]
+	at com.fasterxml.jackson.databind.deser.std.CollectionDeserializer._deserializeNoNullChecks(CollectionDeserializer.java:545) ~[jackson-databind-2.21.2.jar!/:2.21.2]
+	at com.fasterxml.jackson.databind.deser.std.CollectionDeserializer._deserializeFromArray(CollectionDeserializer.java:358) ~[jackson-databind-2.21.2.jar!/:2.21.2]
+	at com.fasterxml.jackson.databind.deser.std.CollectionDeserializer.deserialize(CollectionDeserializer.java:245) ~[jackson-databind-2.21.2.jar!/:2.21.2]
+	at com.fasterxml.jackson.databind.deser.std.CollectionDeserializer.deserialize(CollectionDeserializer.java:29) ~[jackson-databind-2.21.2.jar!/:2.21.2]
+	at com.fasterxml.jackson.databind.deser.impl.MethodProperty.deserializeAndSet(MethodProperty.java:129) ~[jackson-databind-2.21.2.jar!/:2.21.2]
+	at com.fasterxml.jackson.databind.deser.BeanDeserializer.vanillaDeserialize(BeanDeserializer.java:302) ~[jackson-databind-2.21.2.jar!/:2.21.2]
+	at com.fasterxml.jackson.databind.deser.BeanDeserializer.deserialize(BeanDeserializer.java:169) ~[jackson-databind-2.21.2.jar!/:2.21.2]
+	at com.fasterxml.jackson.databind.deser.DefaultDeserializationContext.readRootValue(DefaultDeserializationContext.java:342) ~[jackson-databind-2.21.2.jar!/:2.21.2]
+	at com.fasterxml.jackson.databind.ObjectReader._bindAndClose(ObjectReader.java:2148) ~[jackson-databind-2.21.2.jar!/:2.21.2]
+	at com.fasterxml.jackson.databind.ObjectReader.readValue(ObjectReader.java:1504) ~[jackson-databind-2.21.2.jar!/:2.21.2]
+	at org.springframework.http.converter.json.AbstractJackson2HttpMessageConverter.readJavaType(AbstractJackson2HttpMessageConverter.java:397) ~[spring-web-6.2.18.jar!/:6.2.18]
+	... 52 common frames omitted
+
+2026-10-06T18:54:26.997+08:00 DEBUG 11484 --- [config-mgr] [mcat-handler-11] c.e.configmgr.file.FileStorageService    : Stored file TO_CFG.xlsx -> .\data\files\02b85898-4987-4c73-992b-7a7e8dc5cddc.xlsx
+2026-10-06T18:54:27.101+08:00  INFO 11484 --- [config-mgr] [         task-1] c.e.c.job.service.AsyncJobExecutor       : Starting job 1 type=IMPORT taskId=1
+2026-10-06T18:54:28.676+08:00  INFO 11484 --- [config-mgr] [         task-2] c.e.c.job.service.AsyncJobExecutor       : Starting job 2 type=PUBLISH taskId=1
+2026-10-06T18:54:31.219+08:00 DEBUG 11484 --- [config-mgr] [mcat-handler-31] c.e.configmgr.file.FileStorageService    : Stored file TO_CFG.xlsx -> .\data\files\8be5e9dc-3bb2-4ae0-833a-c7028720bd78.xlsx
+2026-10-06T18:54:31.537+08:00 DEBUG 11484 --- [config-mgr] [mcat-handler-36] c.e.configmgr.file.FileStorageService    : Stored file TO_CFG.xlsx -> .\data\files\5a3b7858-5f07-4a36-ba75-7c96be4fda31.xlsx
+2026-10-06T18:54:31.737+08:00  INFO 11484 --- [config-mgr] [         task-3] c.e.c.job.service.AsyncJobExecutor       : Starting job 3 type=IMPORT taskId=2
+2026-10-06T18:54:32.185+08:00  INFO 11484 --- [config-mgr] [         task-4] c.e.c.job.service.AsyncJobExecutor       : Starting job 4 type=IMPORT taskId=3
+2026-10-06T18:54:34.278+08:00  INFO 11484 --- [config-mgr] [         task-5] c.e.c.job.service.AsyncJobExecutor       : Starting job 5 type=PUBLISH taskId=2
+2026-10-06T18:54:34.740+08:00  INFO 11484 --- [config-mgr] [         task-6] c.e.c.job.service.AsyncJobExecutor       : Starting job 6 type=PUBLISH taskId=3
+2026-10-06T18:54:42.319+08:00 DEBUG 11484 --- [config-mgr] [mcat-handler-73] c.e.configmgr.file.FileStorageService    : Stored file TO_CFG.xlsx -> .\data\files\c7e3975c-0941-4c43-b76e-0978eae76d44.xlsx
+2026-10-06T18:54:42.440+08:00  INFO 11484 --- [config-mgr] [         task-7] c.e.c.job.service.AsyncJobExecutor       : Starting job 7 type=IMPORT taskId=4
+2026-10-06T18:54:42.914+08:00  INFO 11484 --- [config-mgr] [         task-8] c.e.c.job.service.AsyncJobExecutor       : Starting job 8 type=PUBLISH taskId=4
+2026-10-06T18:54:48.502+08:00 DEBUG 11484 --- [config-mgr] [mcat-handler-92] c.e.configmgr.file.FileStorageService    : Stored file TO_CFG_v9.xlsx -> .\data\files\70bae77a-f2e2-451f-b290-94fc0f2894b2.xlsx
+2026-10-06T18:54:48.617+08:00  INFO 11484 --- [config-mgr] [         task-9] c.e.c.job.service.AsyncJobExecutor       : Starting job 9 type=IMPORT taskId=5
+2026-10-06T18:54:49.084+08:00  INFO 11484 --- [config-mgr] [        task-10] c.e.c.job.service.AsyncJobExecutor       : Starting job 10 type=PUBLISH taskId=5
+2026-10-06T18:54:57.722+08:00 DEBUG 11484 --- [config-mgr] [cat-handler-112] c.e.configmgr.file.FileStorageService    : Stored file TO_CFG_v9.xlsx -> .\data\files\331a8365-ee20-4ff3-9446-31f5ced0b467.xlsx
+2026-10-06T18:54:57.940+08:00 DEBUG 11484 --- [config-mgr] [cat-handler-118] c.e.configmgr.file.FileStorageService    : Stored file TO_CFG_v9.xlsx -> .\data\files\8296e595-3a14-47c0-8fc8-e6a1e26f534a.xlsx
+2026-10-06T18:54:58.075+08:00  INFO 11484 --- [config-mgr] [        task-11] c.e.c.job.service.AsyncJobExecutor       : Starting job 11 type=IMPORT taskId=6
+2026-10-06T18:54:58.491+08:00  INFO 11484 --- [config-mgr] [        task-12] c.e.c.job.service.AsyncJobExecutor       : Starting job 12 type=IMPORT taskId=7
+2026-10-06T18:55:00.613+08:00  INFO 11484 --- [config-mgr] [        task-13] c.e.c.job.service.AsyncJobExecutor       : Starting job 13 type=PUBLISH taskId=6
+2026-10-06T18:55:00.627+08:00  INFO 11484 --- [config-mgr] [        task-14] c.e.c.job.service.AsyncJobExecutor       : Starting job 14 type=PUBLISH taskId=7
+2026-10-06T18:55:16.040+08:00 DEBUG 11484 --- [config-mgr] [cat-handler-151] c.e.configmgr.file.FileStorageService    : Stored file TO_CFG_new.xlsx -> .\data\files\2371a335-a085-4707-89dd-812b202965a2.xlsx
+2026-10-06T18:55:16.295+08:00 DEBUG 11484 --- [config-mgr] [cat-handler-156] c.e.configmgr.file.FileStorageService    : Stored file TO_CFG_new.xlsx -> .\data\files\4d3c27de-670a-4530-844d-8c96874e5742.xlsx
+2026-10-06T18:55:16.411+08:00  INFO 11484 --- [config-mgr] [        task-15] c.e.c.job.service.AsyncJobExecutor       : Starting job 15 type=IMPORT taskId=8
+2026-10-06T18:55:16.814+08:00  INFO 11484 --- [config-mgr] [        task-16] c.e.c.job.service.AsyncJobExecutor       : Starting job 16 type=IMPORT taskId=9
+2026-10-06T18:55:17.296+08:00  INFO 11484 --- [config-mgr] [        task-17] c.e.c.job.service.AsyncJobExecutor       : Starting job 17 type=PUBLISH taskId=8
+2026-10-06T18:55:17.679+08:00  INFO 11484 --- [config-mgr] [        task-18] c.e.c.job.service.AsyncJobExecutor       : Starting job 18 type=PUBLISH taskId=9
+2026-10-06T18:55:37.883+08:00 DEBUG 11484 --- [config-mgr] [cat-handler-186] c.e.configmgr.file.FileStorageService    : Stored file TO_CFG_big.xlsx -> .\data\files\5bb3c89a-961d-41f1-84a0-1bba87780e54.xlsx
+2026-10-06T18:55:38.071+08:00  INFO 11484 --- [config-mgr] [        task-19] c.e.c.job.service.AsyncJobExecutor       : Starting job 19 type=IMPORT taskId=10

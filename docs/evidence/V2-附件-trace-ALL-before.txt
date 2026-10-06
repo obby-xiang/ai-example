@@ -1,0 +1,24 @@
+### STEP create task
+REQ : POST http://localhost:18290/api/tasks
+BODY: {"type":"EXPORT_CONFIG"}
+RESP: {"code":0,"msg":"ok","data":{"id":"e8df1b683a4541d3afcd250a3d2d1fdf","type":"EXPORT_CONFIG","status":"WAITING","currentStep":"SELECT_CONFIG","title":"导出配置","createdAt":"2026-10-06T18:45:42.237502300","updatedAt":"2026-10-06T18:45:42.237502300","selection":null,"params":{"selection":null,"conditions":{},"exportResult":null}}}
+TASK_ID=e8df1b683a4541d3afcd250a3d2d1fdf
+### STEP set selection
+REQ : POST http://localhost:18290/api/tasks/e8df1b683a4541d3afcd250a3d2d1fdf/selection
+BODY: {"codes":["REGION_NETWORK"]}
+RESP: {"code":0,"msg":"ok","data":{"id":"e8df1b683a4541d3afcd250a3d2d1fdf","type":"EXPORT_CONFIG","status":"WAITING","currentStep":"SET_CONDITION","title":"导出配置","createdAt":"2026-10-06T18:45:42.237502","updatedAt":"2026-10-06T18:45:42.400583900","selection":["REGION_NETWORK"],"params":{"selection":["REGION_NETWORK"],"conditions":{},"exportResult":null}}}
+### STEP set conditions (无条件下全量导出)
+REQ : POST http://localhost:18290/api/tasks/e8df1b683a4541d3afcd250a3d2d1fdf/conditions
+BODY: {"perConfig":{}}
+RESP: {"code":0,"msg":"ok","data":{"id":"e8df1b683a4541d3afcd250a3d2d1fdf","type":"EXPORT_CONFIG","status":"WAITING","currentStep":"SET_CONDITION","title":"导出配置","createdAt":"2026-10-06T18:45:42.237502","updatedAt":"2026-10-06T18:45:42.447863","selection":["REGION_NETWORK"],"params":{"selection":["REGION_NETWORK"],"conditions":{},"exportResult":null}}}
+### STEP export start
+REQ : POST http://localhost:18290/api/tasks/e8df1b683a4541d3afcd250a3d2d1fdf/export/start
+RESP: {"code":0,"msg":"ok","data":{"started":true}}
+### STEP poll status
+REQ : GET http://localhost:18290/api/tasks/e8df1b683a4541d3afcd250a3d2d1fdf
+STATUS=SUCCESS
+### STEP export results
+REQ : GET http://localhost:18290/api/tasks/e8df1b683a4541d3afcd250a3d2d1fdf/export/results
+RESP(first 4000 chars): {"code":0,"msg":"ok","data":[{"configCode":"REGION_NETWORK","configName":"地区网络配置","level":"REGION","fields":[{"code":"__scope","name":"适用地区","dataType":"SCOPE","required":true,"key":true,"sampleValue":null,"options":["REGION_EAST|华东地区","REGION_NE|东北地区","REGION_NORTH|华北地区","REGION_SOUTH|华南地区","REGION_SW|西南地区"]},{"code":"bandwidthMbps","name":"带宽(Mbps)","dataType":"INT","required":true,"key":true,"sampleValue":"1000","options":null},{"code":"gateway","name":"出口网关","dataType":"TEXT","required":true,"key":false,"sampleValue":"10.0.0.1","options":null},{"code":"redundancy","name":"是否双链路","dataType":"BOOL","required":true,"key":false,"sampleValue":"true","options":null}],"rows":[{"__scope":"REGION_EAST","bandwidthMbps":"100","gateway":"10.0.0.1","redundancy":"true","__id":199},{"__scope":"REGION_NE","bandwidthMbps":"150","gateway":"10.1.0.1","redundancy":"false","__id":200},{"__scope":"REGION_NORTH","bandwidthMbps":"200","gateway":"10.2.0.1","redundancy":"true","__id":201},{"__scope":"REGION_SOUTH","bandwidthMbps":"250","gateway":"10.3.0.1","redundancy":"false","__id":202},{"__scope":"REGION_SW","bandwidthMbps":"300","gateway":"10.4.0.1","redundancy":"true","__id":203},{"__scope":"REGION_EAST","bandwidthMbps":"350","gateway":"10.0.0.1","redundancy":"false","__id":204},{"__scope":"REGION_NE","bandwidthMbps":"400","gateway":"10.1.0.1","redundancy":"true","__id":205},{"__scope":"REGION_NORTH","bandwidthMbps":"450","gateway":"10.2.0.1","redundancy":"false","__id":206},{"__scope":"REGION_SOUTH","bandwidthMbps":"500","gateway":"10.3.0.1","redundancy":"true","__id":207},{"__scope":"REGION_SW","bandwidthMbps":"550","gateway":"10.4.0.1","redundancy":"false","__id":208},{"__scope":"REGION_EAST","bandwidthMbps":"600","gateway":"10.0.0.1","redundancy":"true","__id":209},{"__scope":"REGION_NE","bandwidthMbps":"650","gateway":"10.1.0.1","redundancy":"false","__id":210},{"__scope":"REGION_NORTH","bandwidthMbps":"700","gateway":"10.2.0.1","redundancy":"true","__id":211},{"__scope":"REGION_SOUTH","bandwidthMbps":"750","gateway":"10.3.0.1","redundancy":"false","__id":212},{"__scope":"REGION_SW","bandwidthMbps":"800","gateway":"10.4.0.1","redundancy":"true","__id":213}],"rowCount":15}]}
+
+ROW_COUNT=15

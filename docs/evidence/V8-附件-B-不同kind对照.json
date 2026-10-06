@@ -1,0 +1,135 @@
+{
+  "_说明": "V8 实验二：同任务不同 kind（IMPORT 与 CHECK）对照，验证幂等判定按 kind 隔离。",
+  "IMPORT_请求体": {
+    "items": [
+      {
+        "defCode": "UNIT_CONVERSION",
+        "rows": [
+          {
+            "sourceUnit": "km",
+            "targetUnit": "m",
+            "factor": 1000
+          }
+        ]
+      }
+    ]
+  },
+  "结果": {
+    "import": {
+      "s": 200,
+      "t": "{\"id\":3,\"taskId\":1,\"kind\":\"IMPORT\",\"status\":\"PENDING\",\"total\":1,\"processed\":0,\"currentItem\":null,\"result\":null,\"error\":null,\"createdAt\":\"2026-10-06T19:00:14.4594578\",\"startedAt\":null,\"finishedAt\":null,\"items\":[{\"defCode\":\"UNIT_CONVERSION\",\"seq\":1,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null}]}"
+    },
+    "dups": [
+      {
+        "s": 200,
+        "t": "{\"id\":3,\"taskId\":1,\"kind\":\"IMPORT\",\"status\":\"RUNNING\",\"total\":1,\"processed\":1,\"currentItem\":\"UNIT_CONVERSION\",\"result\":null,\"error\":null,\"createdAt\":\"2026-10-06T19:00:14.459458\",\"startedAt\":\"2026-10-06T19:00:14.464458\",\"finishedAt\":null,\"items\":[{\"defCode\":\"UNIT_CONVERSION\",\"seq\":1,\"status\":\"FAILED\",\"totalRows\":1,\"okRows\":0,\"errorRows\":1,\"message\":\"1 行校验失败\",\"detail\":[{\"rowNo\":1,\"field\":\"sourceUnit\",\"message\":\"警告：未知字段，将被忽略\"},{\"rowNo\":1,\"field\":\"targetUnit\",\"message\":\"警告：未知字段，将被忽略\"},{\"rowNo\":1,\"field\":\"fromUnit\",\"message\":\"必填字段不能为空\"},{\"rowNo\":1,\"field\":\"toUnit\",\"message\":\"必填字段不能为空\"}]}]}"
+      },
+      {
+        "s": 200,
+        "t": "{\"id\":3,\"taskId\":1,\"kind\":\"IMPORT\",\"status\":\"RUNNING\",\"total\":1,\"processed\":1,\"currentItem\":\"UNIT_CONVERSION\",\"result\":null,\"error\":null,\"createdAt\":\"2026-10-06T19:00:14.459458\",\"startedAt\":\"2026-10-06T19:00:14.464458\",\"finishedAt\":null,\"items\":[{\"defCode\":\"UNIT_CONVERSION\",\"seq\":1,\"status\":\"FAILED\",\"totalRows\":1,\"okRows\":0,\"errorRows\":1,\"message\":\"1 行校验失败\",\"detail\":[{\"rowNo\":1,\"field\":\"sourceUnit\",\"message\":\"警告：未知字段，将被忽略\"},{\"rowNo\":1,\"field\":\"targetUnit\",\"message\":\"警告：未知字段，将被忽略\"},{\"rowNo\":1,\"field\":\"fromUnit\",\"message\":\"必填字段不能为空\"},{\"rowNo\":1,\"field\":\"toUnit\",\"message\":\"必填字段不能为空\"}]}]}"
+      },
+      {
+        "s": 200,
+        "t": "{\"id\":3,\"taskId\":1,\"kind\":\"IMPORT\",\"status\":\"RUNNING\",\"total\":1,\"processed\":1,\"currentItem\":\"UNIT_CONVERSION\",\"result\":null,\"error\":null,\"createdAt\":\"2026-10-06T19:00:14.459458\",\"startedAt\":\"2026-10-06T19:00:14.464458\",\"finishedAt\":null,\"items\":[{\"defCode\":\"UNIT_CONVERSION\",\"seq\":1,\"status\":\"FAILED\",\"totalRows\":1,\"okRows\":0,\"errorRows\":1,\"message\":\"1 行校验失败\",\"detail\":[{\"rowNo\":1,\"field\":\"sourceUnit\",\"message\":\"警告：未知字段，将被忽略\"},{\"rowNo\":1,\"field\":\"targetUnit\",\"message\":\"警告：未知字段，将被忽略\"},{\"rowNo\":1,\"field\":\"fromUnit\",\"message\":\"必填字段不能为空\"},{\"rowNo\":1,\"field\":\"toUnit\",\"message\":\"必填字段不能为空\"}]}]}"
+      }
+    ],
+    "check": {
+      "s": 200,
+      "t": "{\"id\":4,\"taskId\":1,\"kind\":\"CHECK\",\"status\":\"PENDING\",\"total\":1,\"processed\":0,\"currentItem\":null,\"result\":null,\"error\":null,\"createdAt\":\"2026-10-06T19:00:14.4944584\",\"startedAt\":null,\"finishedAt\":null,\"items\":[{\"defCode\":\"UNIT_CONVERSION\",\"seq\":1,\"status\":\"PENDING\",\"totalRows\":null,\"okRows\":null,\"errorRows\":null,\"message\":null,\"detail\":null}]}"
+    },
+    "importFinal": {
+      "id": 3,
+      "taskId": 1,
+      "kind": "IMPORT",
+      "status": "SUCCESS",
+      "total": 1,
+      "processed": 1,
+      "currentItem": null,
+      "result": null,
+      "error": null,
+      "createdAt": "2026-10-06T19:00:14.459458",
+      "startedAt": "2026-10-06T19:00:14.464458",
+      "finishedAt": "2026-10-06T19:00:14.776521",
+      "items": [
+        {
+          "defCode": "UNIT_CONVERSION",
+          "seq": 1,
+          "status": "FAILED",
+          "totalRows": 1,
+          "okRows": 0,
+          "errorRows": 1,
+          "message": "1 行校验失败",
+          "detail": [
+            {
+              "rowNo": 1,
+              "field": "sourceUnit",
+              "message": "警告：未知字段，将被忽略"
+            },
+            {
+              "rowNo": 1,
+              "field": "targetUnit",
+              "message": "警告：未知字段，将被忽略"
+            },
+            {
+              "rowNo": 1,
+              "field": "fromUnit",
+              "message": "必填字段不能为空"
+            },
+            {
+              "rowNo": 1,
+              "field": "toUnit",
+              "message": "必填字段不能为空"
+            }
+          ]
+        }
+      ]
+    },
+    "checkFinal": {
+      "id": 4,
+      "taskId": 1,
+      "kind": "CHECK",
+      "status": "SUCCESS",
+      "total": 1,
+      "processed": 1,
+      "currentItem": null,
+      "result": null,
+      "error": null,
+      "createdAt": "2026-10-06T19:00:14.494458",
+      "startedAt": "2026-10-06T19:00:14.498458",
+      "finishedAt": "2026-10-06T19:00:14.811513",
+      "items": [
+        {
+          "defCode": "UNIT_CONVERSION",
+          "seq": 1,
+          "status": "FAILED",
+          "totalRows": 1,
+          "okRows": 0,
+          "errorRows": 1,
+          "message": "1 行校验失败",
+          "detail": [
+            {
+              "rowNo": 1,
+              "field": "sourceUnit",
+              "message": "警告：未知字段，将被忽略"
+            },
+            {
+              "rowNo": 1,
+              "field": "targetUnit",
+              "message": "警告：未知字段，将被忽略"
+            },
+            {
+              "rowNo": 1,
+              "field": "fromUnit",
+              "message": "必填字段不能为空"
+            },
+            {
+              "rowNo": 1,
+              "field": "toUnit",
+              "message": "必填字段不能为空"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

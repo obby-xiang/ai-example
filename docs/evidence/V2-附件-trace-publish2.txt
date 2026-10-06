@@ -1,0 +1,54 @@
+##### 第二轮发布目标范围: REGION_SOUTH
+REQ : POST http://localhost:18290/api/tasks  BODY: {"type":"IMPORT_CONFIG"}
+RESP: {"code":0,"msg":"ok","data":{"id":"24be4a2f1df54718a2ef730821c1111d","type":"IMPORT_CONFIG","status":"WAITING","currentStep":"SELECT_CONFIG","title":"导入配置","createdAt":"2026-10-06T18:46:19.746858300","updatedAt":"2026-10-06T18:46:19.746858300","selection":null,"params":{"selection":null,"uploads":{},"checkResult":null,"importResult":null,"publishResult":null}}}
+TASK_ID=24be4a2f1df54718a2ef730821c1111d
+REQ : POST http://localhost:18290/api/tasks/24be4a2f1df54718a2ef730821c1111d/selection  BODY: {"codes":["REGION_NETWORK"]}
+RESP: {"code":0,"msg":"ok","data":{"id":"24be4a2f1df54718a2ef730821c1111d","type":"IMPORT_CONFIG","status":"WAITING","currentStep":"PREPARE","title":"导入配置","createdAt":"2026-10-06T18:46:19.746858","updatedAt":"2026-10-06T18:46:19.913365200","selection":["REGION_NETWORK"],"params":{"selection":["REGION_NETWORK"],"uploads":{},"checkResult":null,"importResult":null,"publishResult":null}}}
+REQ : POST http://localhost:18290/api/tasks/24be4a2f1df54718a2ef730821c1111d/data  BODY: {"configCode":"REGION_NETWORK","fileName":"REGION_SOUTH-only.json","rows":[{"__scope":"REGION_SOUTH","bandwidthMbps":"7777","gateway":"10.8.8.8","redundancy":"true"},{"__scope":"REGION_SOUTH","bandwidthMbps":"6666","gateway":"10.8.8.8","redundancy":"true"}]}
+RESP: {"code":0,"msg":"ok","data":{"id":"24be4a2f1df54718a2ef730821c1111d","type":"IMPORT_CONFIG","status":"WAITING","currentStep":"PREPARE","title":"导入配置","createdAt":"2026-10-06T18:46:19.746858","updatedAt":"2026-10-06T18:46:19.967413500","selection":["REGION_NETWORK"],"params":{"selection":["REGION_NETWORK"],"uploads":{"REGION_NETWORK":{"fileName":"REGION_SOUTH-only.json","rows":[{"__scope":"REGION_SOUTH","bandwidthMbps":"7777","gateway":"10.8.8.8","redundancy":"true"},{"__scope":"REGION_SOUTH","bandwidthMbps":"6666","gateway":"10.8.8.8","redundancy":"true"}]}},"checkResult":null,"importResult":null,"publishResult":null}}}
+REQ : POST http://localhost:18290/api/tasks/24be4a2f1df54718a2ef730821c1111d/check/start
+RESP: {"code":0,"msg":"ok","data":{"started":true}}
+CHECK STATUS=WAITING STEP=CHECK  checkResult={
+  totalErrors: 0,
+  totalWarnings: 0,
+  hasError: false,
+  messages: [],
+  configs: [
+    {
+      configCode: 'REGION_NETWORK',
+      configName: '地区网络配置',
+      hasData: true,
+      rowCount: 2,
+      errorCount: 0,
+      warnCount: 0,
+      issues: []
+    }
+  ]
+}
+REQ : POST http://localhost:18290/api/tasks/24be4a2f1df54718a2ef730821c1111d/import/start
+RESP: {"code":0,"msg":"ok","data":{"started":true}}
+IMPORT STATUS=WAITING STEP=IMPORT  importResult={
+  configs: [
+    {
+      configCode: 'REGION_NETWORK',
+      configName: '地区网络配置',
+      stagedRows: 2,
+      publishedRows: 14
+    }
+  ],
+  message: '全部导入完成（暂存未发布）'
+}
+REQ : POST http://localhost:18290/api/tasks/24be4a2f1df54718a2ef730821c1111d/publish/start
+RESP: {"code":0,"msg":"ok","data":{"started":true}}
+PUBLISH STATUS=SUCCESS STEP=PUBLISH  publishResult={
+  message: '全部发布完成',
+  configs: [
+    {
+      configCode: 'REGION_NETWORK',
+      status: 'DONE',
+      message: '已发布 2 行',
+      percent: 100
+    }
+  ]
+}
+TASK_ID_2=24be4a2f1df54718a2ef730821c1111d

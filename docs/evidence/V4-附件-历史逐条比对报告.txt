@@ -1,0 +1,45 @@
+条数: before=7 after=7 after2=11
+
+--- before（重启前）逐条 ---
+1. user|请只回答一句话，且不要调用任何工具：我的幸运数字是 7，请确认收到。|tools=
+2. assistant|确认收到，您的幸运数字是 7。|tools=
+3. user|请只回答一句话，且不要调用任何工具：我刚才告诉你的幸运数字是多少？|tools=
+4. assistant|您的幸运数字是 7。|tools=
+5. user|请调用 list_config_defs 工具列出系统中所有配置项编码，然后用一句话总结。|tools=
+6. assistant||tools=list_config_defs:ok
+7. assistant|系统中共有 4 个启用的配置定义——SERVER_PARAM（全局，服务器参数）、REGION_BILLING（地区，计费规则）、PROJECT_QUOTA（项目，资源配额）和 SERVER_EXTEND（全局，服务器扩容，引用并依赖 SERVER_PARAM）。|tools=
+
+--- 逐条比对 before vs after（第一次重启后）---
+#1 一致
+   before: user|请只回答一句话，且不要调用任何工具：我的幸运数字是 7，请确认收到。|tools=
+   after : user|请只回答一句话，且不要调用任何工具：我的幸运数字是 7，请确认收到。|tools=
+#2 一致
+   before: assistant|确认收到，您的幸运数字是 7。|tools=
+   after : assistant|确认收到，您的幸运数字是 7。|tools=
+#3 一致
+   before: user|请只回答一句话，且不要调用任何工具：我刚才告诉你的幸运数字是多少？|tools=
+   after : user|请只回答一句话，且不要调用任何工具：我刚才告诉你的幸运数字是多少？|tools=
+#4 一致
+   before: assistant|您的幸运数字是 7。|tools=
+   after : assistant|您的幸运数字是 7。|tools=
+#5 一致
+   before: user|请调用 list_config_defs 工具列出系统中所有配置项编码，然后用一句话总结。|tools=
+   after : user|请调用 list_config_defs 工具列出系统中所有配置项编码，然后用一句话总结。|tools=
+#6 一致
+   before: assistant||tools=list_config_defs:ok
+   after : assistant||tools=list_config_defs:ok
+#7 一致
+   before: assistant|系统中共有 4 个启用的配置定义——SERVER_PARAM（全局，服务器参数）、REGION_BILLING（地区，计费规则）、PROJECT_QUOTA（项目，资源配额）和 SERVER_EXTEND（全局，服务器扩容，引用并依赖 SERVER_PARAM）。|tools=
+   after : assistant|系统中共有 4 个启用的配置定义——SERVER_PARAM（全局，服务器参数）、REGION_BILLING（地区，计费规则）、PROJECT_QUOTA（项目，资源配额）和 SERVER_EXTEND（全局，服务器扩容，引用并依赖 SERVER_PARAM）。|tools=
+
+结论1: before 与 after 逐条完全一致
+结论2: JSON 文本严格相等 = true
+
+--- 逐条比对 after2 的前 7 条 vs after ---
+结论3: 第二次重启后前 7 条完全一致
+
+--- after2 新增条目（第二次重启后新对话）---
+8. user|不要调用任何工具，请只回答一句话：我前面说的幸运数字乘以 2 是多少？|tools=
+9. assistant|14。|tools=
+10. user|不要调用任何工具，请只回答一句话：我一开始告诉你的幸运数字是多少？|tools=
+11. assistant|7。|tools=

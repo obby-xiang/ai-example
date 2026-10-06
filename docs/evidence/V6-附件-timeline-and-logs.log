@@ -1,0 +1,203 @@
+V6 核验原始时间线/日志/DB 查询记录（分支 ai-example-claude-opus-5.5+deepseek-v4-pro，端口 18292）
+生成时间: 2026-10-06 18:59:34
+现场: 后端 java -jar target/config-mgr.jar --server.port=18292，PID 由 netstat 从 18292 监听者反查
+
+
+==================== A. 触发作业用的长时作业数据集 ====================
+$ java MakeXlsx.java TO_CFG_big.xlsx 5000 B 1 v
+  WROTE E:\temp\v5v6\TO_CFG_big.xlsx rows=5000 firstKey=B1
+  说明: 该分支 ImportJobRunner 每写满 app.job.batch-size=100 行暂存行就 Thread.sleep(app.job.demo-batch-delay-ms=300)，
+        故 5000 行导入理论耗时 >= 50*300ms = 15s，足以在 RUNNING 期间抓取并强杀进程。未修改任何配置。
+
+
+==================== B. 强杀时间线（v6-kill.sh 逐行 tee 产出，逐字复制自 raw/V6.timeline.txt；其中 taskkill 的成功提示原为 Windows 控制台 GBK 编码，此处已转 UTF-8） ====================
+18:55:37.622 backend JVM PID=11484
+18:55:37.986 created taskId=10 (upload of TO_CFG_big.xlsx done)
+18:55:38.179 created jobId=19 (POST /api/tasks/10/jobs -> 201)
+18:55:39.455 poll#1 api-status=PENDING
+18:55:40.658 poll#2 api-status=PENDING
+18:55:41.927 poll#3 api-status=PENDING
+18:55:41.966 TASKILL //F //PID 11484
+成功: 已终止 PID 为 11484 的进程。
+18:55:42.117 taskkill exit=0
+18:55:43.193 netstat after kill:
+  TCP    [::1]:1304             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:1305             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:1306             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:1307             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:1308             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:1309             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:1310             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:1311             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:1312             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:1313             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:1314             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:1315             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:1316             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:1317             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:1318             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:1319             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:1320             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:1321             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:1322             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:1323             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:2090             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:2093             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:2094             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:2961             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:2962             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:2963             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:2964             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:2965             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:2966             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:2967             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:2968             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:2969             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:2970             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:2971             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:2972             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:2973             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:2974             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:6806             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:6807             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:6808             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:6809             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:6810             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:6811             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:7260             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:7261             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:7262             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:7263             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:7264             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:7265             [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:10012            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:10013            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:10353            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:10354            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:10357            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:10358            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:10359            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:10360            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:10361            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:11190            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:11191            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:11192            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:11193            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:11194            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:12928            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:12929            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:12930            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:12931            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:12932            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:12933            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:12934            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:12935            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:12936            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:12937            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:12938            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:12939            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:12940            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:12941            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:12942            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:12943            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:12944            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:12945            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:12946            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:12947            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:12948            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:12949            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:12950            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:12951            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:12952            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:12953            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:12954            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:12955            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:12956            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:12957            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:12958            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:14161            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:14162            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:14163            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:14164            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:14165            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:14166            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:14167            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:14168            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:14169            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:14170            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:14171            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:14172            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:14175            [::1]:18292            TIME_WAIT       0
+  TCP    [::1]:14176            [::1]:18292            TIME_WAIT       0
+18:55:43.366 PORT 18292 STILL BOUND
+
+
+==================== C. 杀进程前对作业状态的实际观测（raw/V6.poll.jsonl，逐字） ====================
+$ POST /api/tasks/10/jobs {"jobType":"IMPORT"} 的创建响应（注意：响应体里的 status 是内存对象被异步线程改写后的竞态快照，不是库中真实状态）
+{"success":true,"data":{"id":19,"taskId":10,"jobType":"IMPORT","status":"RUNNING","progress":0,"total":0,"errorCount":0,"warningCount":0,"resultJson":null,"items":[],"createdAt":"2026-10-06T18:55:38.070377","startedAt":"2026-10-06T18:55:38.0713749","finishedAt":null}}
+
+$ GET /api/jobs/19 轮询（每次新连接读库中已提交数据）
+18:55:39.418 poll#1 GET /api/jobs/19 -> status=PENDING  raw={"success":true,"data":{"id":19,"taskId":10,"jobType":"IMPORT","status":"PENDING","progress":0,"total":0,"errorCount":0,"warningCount":0,"resultJson":null,"items":[],"createdAt":"2026-10-06T18:55:38.070377","startedAt":null,"finishedAt":null}}
+18:55:40.615 poll#2 GET /api/jobs/19 -> status=PENDING  raw={"success":true,"data":{"id":19,"taskId":10,"jobType":"IMPORT","status":"PENDING","progress":0,"total":0,"errorCount":0,"warningCount":0,"resultJson":null,"items":[],"createdAt":"2026-10-06T18:55:38.070377","startedAt":null,"finishedAt":null}}
+18:55:41.832 poll#3 GET /api/jobs/19 -> status=PENDING  raw={"success":true,"data":{"id":19,"taskId":10,"jobType":"IMPORT","status":"PENDING","progress":0,"total":0,"errorCount":0,"warningCount":0,"resultJson":null,"items":[],"createdAt":"2026-10-06T18:55:38.070377","startedAt":null,"finishedAt":null}}
+
+
+
+==================== D. 强杀后、重启前，直接读 H2 库文件确认残留作业状态 ====================
+查询工具: h2-2.3.232.jar（从 target/config-mgr.jar 内 BOOT-INF/lib 解出）+ org.h2.tools.Shell
+  $ unzip -o -j target/config-mgr.jar 'BOOT-INF/lib/h2-*.jar' -d /e/temp/v5v6/h2lib
+  $ java -cp h2lib/h2-2.3.232.jar org.h2.tools.Shell -url "jdbc:h2:file:E:/temp/ai-example-code/ai-example-claude-opus-5.5+deepseek-v4-pro/backend/data/config_mgr_db" -user sa -password '' -sql "..."
+
+$ java ... -sql "select id, task_id, job_type, status, progress, total, started_at, finished_at from jobs order by id desc limit 6"
+ID | TASK_ID | JOB_TYPE | STATUS    | PROGRESS | TOTAL | STARTED_AT                 | FINISHED_AT
+19 | 10      | IMPORT   | PENDING   | 0        | 0     | null                       | null
+18 | 9       | PUBLISH  | FAILED    | 1        | 1     | 2026-10-06 18:55:17.679627 | 2026-10-06 18:55:17.692628
+17 | 8       | PUBLISH  | COMPLETED | 1        | 1     | 2026-10-06 18:55:17.29709  | 2026-10-06 18:55:17.30809
+16 | 9       | IMPORT   | COMPLETED | 1        | 1     | 2026-10-06 18:55:16.815911 | 2026-10-06 18:55:16.833912
+15 | 8       | IMPORT   | COMPLETED | 1        | 1     | 2026-10-06 18:55:16.411176 | 2026-10-06 18:55:16.432174
+14 | 7       | PUBLISH  | FAILED    | 1        | 1     | 2026-10-06 18:55:00.627996 | 2026-10-06 18:55:00.639995
+(6 rows, 16 ms)
+
+$ java ... -sql "select count(*) as staging_rows_task10 from config_staging_rows where task_id=10"
+STAGING_ROWS_TASK10
+0
+(1 row, 16 ms)
+  -> 作业事务整体回滚：被杀作业未留下任何暂存行，只有 jobs 表留下一条 PENDING 残留记录
+
+
+==================== E. 重启后端时的 StaleJobRecoveryRunner 输出（raw 日志: backend-V6-restart.log，完整副本见 V6-附件-backend-restart.log） ====================
+62:2026-10-06T18:56:00.161+08:00  INFO 26180 --- [config-mgr] [           main] c.e.configmgr.ConfigMgrApplication       : Started ConfigMgrApplication in 7.074 seconds (process running for 7.661)
+63:2026-10-06T18:56:00.216+08:00  INFO 26180 --- [config-mgr] [           main] c.example.configmgr.seed.DataSeedRunner  : Seed data already exists, skipping
+64:2026-10-06T18:56:00.268+08:00  WARN 26180 --- [config-mgr] [           main] c.e.c.j.service.StaleJobRecoveryRunner   : 作业 #19 [IMPORT] 在服务重启时中断，已标记为 FAILED
+
+
+==================== F. 重启后作业 19 的最终状态 ====================
+$ curl -s http://localhost:18292/api/jobs/19
+{"success":true,"data":{"id":19,"taskId":10,"jobType":"IMPORT","status":"FAILED","progress":0,"total":0,"errorCount":0,"warningCount":0,"resultJson":null,"items":[],"createdAt":"2026-10-06T18:55:38.070377","startedAt":null,"finishedAt":"2026-10-06T18:56:00.262768"}}
+
+
+==================== G. 补充场景：《技术设计/验证报告》缺陷 #8 描述的是“作业偶发卡 RUNNING”，故额外验证 RUNNING 分支 ====================
+做法（人工构造，非结论臆断）：先正常停掉后端，用 H2 Shell 把残留作业 19 的 status 置为 RUNNING（finished_at 置 NULL），
+再正常重启，观察 StaleJobRecoveryRunner 是否同样处理该 RUNNING 残留。
+
+$ taskkill //F //PID 26180                # 停止上一个后端实例
+$ java ... -sql "update jobs set status=RUNNING, started_at=CURRENT_TIMESTAMP, finished_at=NULL where id=19"
+(Update count: 1, 8 ms)
+$ java ... -sql "select id, job_type, status, started_at, finished_at from jobs where id=19"
+ID | JOB_TYPE | STATUS  | STARTED_AT                 | FINISHED_AT
+19 | IMPORT   | RUNNING | 2026-10-06 18:56:22.886989 | null
+(1 row, 13 ms)
+
+$ java -jar target/config-mgr.jar --server.port=18292   # 重启，日志 raw: backend-V6-restart2-running.log
+62:2026-10-06T18:56:32.285+08:00  INFO 24708 --- [config-mgr] [           main] c.e.configmgr.ConfigMgrApplication       : Started ConfigMgrApplication in 6.931 seconds (process running for 7.484)
+63:2026-10-06T18:56:32.387+08:00  WARN 24708 --- [config-mgr] [           main] c.e.c.j.service.StaleJobRecoveryRunner   : 作业 #19 [IMPORT] 在服务重启时中断，已标记为 FAILED
+
+$ curl -s http://localhost:18292/api/jobs/19
+{"success":true,"data":{"id":19,"taskId":10,"jobType":"IMPORT","status":"FAILED","progress":0,"total":0,"errorCount":0,"warningCount":0,"resultJson":null,"items":[],"createdAt":"2026-10-06T18:55:38.070377","startedAt":"2026-10-06T18:56:22.886989","finishedAt":"2026-10-06T18:56:32.382017"}}
+
+
+==================== H. H2 查询方法小结 ====================
+1) 运行期读库：H2 文件被后端占用（Database may be already in use），运行期一律用 REST：GET /api/jobs/{id}、GET /api/tasks/{id}/overview。
+2) 停机期读库/写库：org.h2.tools.Shell（h2 jar 从 fat jar 解出）直连 jdbc:h2:file:<backend>/data/config_mgr_db，user=sa 空密码。
+3) 该分支 application.yml 启用了 H2 Web 控制台: spring.h2.console.enabled=true, path=/h2-console —— 实测 GET /h2-console 返回 302（跳登录页）。
+3) 相关表：jobs（作业主表，含 status/job_type/progress/started_at/finished_at）、job_items（作业条目进度）、validation_issues（作业问题）。

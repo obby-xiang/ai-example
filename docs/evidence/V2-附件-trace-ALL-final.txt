@@ -1,0 +1,24 @@
+### STEP create task
+REQ : POST http://localhost:18290/api/tasks
+BODY: {"type":"EXPORT_CONFIG"}
+RESP: {"code":0,"msg":"ok","data":{"id":"131198a97ec641b6a29212439b46c119","type":"EXPORT_CONFIG","status":"WAITING","currentStep":"SELECT_CONFIG","title":"导出配置","createdAt":"2026-10-06T18:46:27.284745400","updatedAt":"2026-10-06T18:46:27.284745400","selection":null,"params":{"selection":null,"conditions":{},"exportResult":null}}}
+TASK_ID=131198a97ec641b6a29212439b46c119
+### STEP set selection
+REQ : POST http://localhost:18290/api/tasks/131198a97ec641b6a29212439b46c119/selection
+BODY: {"codes":["REGION_NETWORK"]}
+RESP: {"code":0,"msg":"ok","data":{"id":"131198a97ec641b6a29212439b46c119","type":"EXPORT_CONFIG","status":"WAITING","currentStep":"SET_CONDITION","title":"导出配置","createdAt":"2026-10-06T18:46:27.284745","updatedAt":"2026-10-06T18:46:27.442894300","selection":["REGION_NETWORK"],"params":{"selection":["REGION_NETWORK"],"conditions":{},"exportResult":null}}}
+### STEP set conditions (无条件下全量导出)
+REQ : POST http://localhost:18290/api/tasks/131198a97ec641b6a29212439b46c119/conditions
+BODY: {"perConfig":{}}
+RESP: {"code":0,"msg":"ok","data":{"id":"131198a97ec641b6a29212439b46c119","type":"EXPORT_CONFIG","status":"WAITING","currentStep":"SET_CONDITION","title":"导出配置","createdAt":"2026-10-06T18:46:27.284745","updatedAt":"2026-10-06T18:46:27.489894800","selection":["REGION_NETWORK"],"params":{"selection":["REGION_NETWORK"],"conditions":{},"exportResult":null}}}
+### STEP export start
+REQ : POST http://localhost:18290/api/tasks/131198a97ec641b6a29212439b46c119/export/start
+RESP: {"code":0,"msg":"ok","data":{"started":true}}
+### STEP poll status
+REQ : GET http://localhost:18290/api/tasks/131198a97ec641b6a29212439b46c119
+STATUS=SUCCESS
+### STEP export results
+REQ : GET http://localhost:18290/api/tasks/131198a97ec641b6a29212439b46c119/export/results
+RESP(first 4000 chars): {"code":0,"msg":"ok","data":[{"configCode":"REGION_NETWORK","configName":"地区网络配置","level":"REGION","fields":[{"code":"__scope","name":"适用地区","dataType":"SCOPE","required":true,"key":true,"sampleValue":null,"options":["REGION_EAST|华东地区","REGION_NE|东北地区","REGION_NORTH|华北地区","REGION_SOUTH|华南地区","REGION_SW|西南地区"]},{"code":"bandwidthMbps","name":"带宽(Mbps)","dataType":"INT","required":true,"key":true,"sampleValue":"1000","options":null},{"code":"gateway","name":"出口网关","dataType":"TEXT","required":true,"key":false,"sampleValue":"10.0.0.1","options":null},{"code":"redundancy","name":"是否双链路","dataType":"BOOL","required":true,"key":false,"sampleValue":"true","options":null}],"rows":[{"__scope":"REGION_EAST","bandwidthMbps":"100","gateway":"10.0.0.1","redundancy":"true","__id":199},{"__scope":"REGION_NE","bandwidthMbps":"150","gateway":"10.1.0.1","redundancy":"false","__id":200},{"__scope":"REGION_SW","bandwidthMbps":"300","gateway":"10.4.0.1","redundancy":"true","__id":203},{"__scope":"REGION_EAST","bandwidthMbps":"350","gateway":"10.0.0.1","redundancy":"false","__id":204},{"__scope":"REGION_NE","bandwidthMbps":"400","gateway":"10.1.0.1","redundancy":"true","__id":205},{"__scope":"REGION_SW","bandwidthMbps":"550","gateway":"10.4.0.1","redundancy":"false","__id":208},{"__scope":"REGION_EAST","bandwidthMbps":"600","gateway":"10.0.0.1","redundancy":"true","__id":209},{"__scope":"REGION_NE","bandwidthMbps":"650","gateway":"10.1.0.1","redundancy":"false","__id":210},{"__scope":"REGION_SW","bandwidthMbps":"800","gateway":"10.4.0.1","redundancy":"true","__id":213},{"__scope":"REGION_NORTH","bandwidthMbps":"9999","gateway":"10.9.9.9","redundancy":"true","__id":359},{"__scope":"REGION_NORTH","bandwidthMbps":"8888","gateway":"10.9.9.9","redundancy":"false","__id":360},{"__scope":"REGION_SOUTH","bandwidthMbps":"7777","gateway":"10.8.8.8","redundancy":"true","__id":361},{"__scope":"REGION_SOUTH","bandwidthMbps":"6666","gateway":"10.8.8.8","redundancy":"true","__id":362}],"rowCount":13}]}
+
+ROW_COUNT=13
