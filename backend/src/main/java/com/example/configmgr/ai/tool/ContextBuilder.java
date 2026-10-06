@@ -1,17 +1,16 @@
 package com.example.configmgr.ai.tool;
 
-import com.example.configmgr.ai.session.AiSession;
 import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.service.TaskService;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
-import java.util.*;
+import java.util.List;
 
 /**
  * Builds the workspace context string that is injected into every LLM call.
+ * 上下文标签（工具渐进披露用）由 {@link ToolRegistry#forContext} 统一负责，这里只产出提示词文本。
  */
 @Slf4j
 @Component
@@ -19,16 +18,14 @@ import java.util.*;
 public class ContextBuilder {
 
     private final TaskService taskService;
-    private final ObjectMapper objectMapper;
 
     /**
      * Builds a compact snapshot of the current workspace state to inject into the system message.
      */
-    public String buildContextMessage(AiSession session) {
-        AiSession.WorkspaceContext ctx = session.getContext();
+    public String buildContextMessage(AiContext ctx) {
         StringBuilder sb = new StringBuilder();
         sb.append("## 当前工作区状态\n");
-        sb.append("页面: ").append(ctx.getPage() != null ? ctx.getPage() : "任务中心").append("\n");
+        sb.append("页面: ").append(ctx.getPage() != null && !ctx.getPage().isBlank() ? ctx.getPage() : "任务中心").append("\n");
 
         if (ctx.getTaskId() != null) {
             try {
@@ -53,28 +50,5 @@ public class ContextBuilder {
         }
 
         return sb.toString();
-    }
-
-    /**
-     * Builds the set of context tags for tool scope matching.
-     * Returns tags like: {"*", "page:tasks", "task:EXPORT", "task:EXPORT/SELECT_DEFS"}
-     */
-    public Set<String> buildContextTags(AiSession.WorkspaceContext ctx) {
-        Set<String> tags = new HashSet<>();
-        tags.add("*");
-
-        if (ctx.getPage() != null && !ctx.getPage().isBlank()) {
-            tags.add("page:" + ctx.getPage());
-        }
-
-        if (ctx.getTaskType() != null) {
-            tags.add("task:*");
-            tags.add("task:" + ctx.getTaskType());
-            if (ctx.getStep() != null) {
-                tags.add("task:" + ctx.getTaskType() + "/" + ctx.getStep());
-            }
-        }
-
-        return tags;
     }
 }

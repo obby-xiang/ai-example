@@ -1,6 +1,5 @@
 package com.example.configmgr.ai.tool;
 
-import com.example.configmgr.ai.session.AiSession;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.annotation.Tool;
@@ -77,7 +76,7 @@ public class ToolRegistry {
     /**
      * Returns the list of ToolCallbacks visible in the given context.
      */
-    public List<ToolCallback> forContext(AiSession.WorkspaceContext ctx) {
+    public List<ToolCallback> forContext(AiContext ctx) {
         Set<String> tags = buildTags(ctx);
         return callbackMap.entrySet().stream()
                 .filter(e -> {
@@ -97,7 +96,7 @@ public class ToolRegistry {
         return metaMap.get(name);
     }
 
-    private Set<String> buildTags(AiSession.WorkspaceContext ctx) {
+    private Set<String> buildTags(AiContext ctx) {
         Set<String> tags = new HashSet<>();
         tags.add("*");
         if (ctx.getPage() != null && !ctx.getPage().isBlank()) tags.add("page:" + ctx.getPage());
