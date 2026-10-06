@@ -1,0 +1,568 @@
+# 附件：baseline-combined-附件-B1-导出全链路原文.txt
+（原始运行记录，仅做路径/密钥脱敏：<REPO_ROOT>/<MAIN_V2>/<MAVEN_HOME>/<TMP> 占位、API Key 记 ***）
+
+====================================================================================================
+## B1 请求/响应逐条原文 + 作业轮询
+====================================================================================================
+===== [b1-0-cleanup] 2026-10-07 01:18:26+0800
+$ curl -sS -i -X DELETE "http://localhost:18296/api/tasks/1" 
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:18:26 GMT
+
+{"success":true}
+===== [b1-1-create-task] 2026-10-07 01:18:26+0800
+$ curl -sS -i -X POST "http://localhost:18296/api/tasks" -H Content-Type: application/json; charset=utf-8 -d @p1-create-export-task.json
+HTTP/1.1 201 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:18:26 GMT
+
+{"success":true,"data":{"id":2,"type":"EXPORT","title":"S4基线-导出任务","currentStep":"SELECT_DEFS","status":"ACTIVE","settingsJson":null,"version":1,"items":[],"createdAt":"2026-10-07T01:18:26.983629","updatedAt":"2026-10-07T01:18:26.983629"}}
+===== [b1-2-select-defs] 2026-10-07 01:18:29+0800
+$ curl -sS -i -X POST "http://localhost:18296/api/tasks/2/select-defs" -H Content-Type: application/json; charset=utf-8 -d @p2-select-defs.json
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:18:29 GMT
+
+{"success":true,"data":{"id":2,"type":"EXPORT","title":"S4基线-导出任务","currentStep":"SELECT_DEFS","status":"ACTIVE","settingsJson":null,"version":1,"items":[{"id":3,"taskId":2,"defCode":"PROJ_PRICE","sortOrder":0,"conditionJson":null,"status":"PENDING"},{"id":4,"taskId":2,"defCode":"CURRENCY","sortOrder":1,"conditionJson":null,"status":"PENDING"}],"createdAt":"2026-10-07T01:18:26.983629","updatedAt":"2026-10-07T01:18:26.983629"}}
+===== [b1-3a-cond-PROJ_PRICE] 2026-10-07 01:18:29+0800
+$ curl -sS -i -X PUT "http://localhost:18296/api/tasks/2/items/PROJ_PRICE/condition" -H Content-Type: application/json; charset=utf-8 -d @p3a-cond-PROJ_PRICE.json
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:18:29 GMT
+
+{"success":true}
+===== [b1-3b-cond-CURRENCY] 2026-10-07 01:18:29+0800
+$ curl -sS -i -X PUT "http://localhost:18296/api/tasks/2/items/CURRENCY/condition" -H Content-Type: application/json; charset=utf-8 -d @p3b-cond-CURRENCY.json
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:18:29 GMT
+
+{"success":true}
+===== [b1-4a-step-QUERY_COND] 2026-10-07 01:18:30+0800
+$ curl -sS -i -X PUT "http://localhost:18296/api/tasks/2/step" -H Content-Type: application/json; charset=utf-8 -d {"step":"QUERY_COND"}
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:18:30 GMT
+
+{"success":true,"data":{"id":2,"type":"EXPORT","title":"S4基线-导出任务","currentStep":"QUERY_COND","status":"ACTIVE","settingsJson":null,"version":2,"items":[{"id":3,"taskId":2,"defCode":"PROJ_PRICE","sortOrder":0,"conditionJson":"{scopeKeys=[HE-P001], fields=[{fieldCode=unitPrice, operator=GTE, value=100}]}","status":"READY"},{"id":4,"taskId":2,"defCode":"CURRENCY","sortOrder":1,"conditionJson":"{fields=[{fieldCode=exchangeRate, operator=GT, value=1.0}]}","status":"READY"}],"createdAt":"2026-10-07T01:18:26.983629","updatedAt":"2026-10-07T01:18:30.108253"}}
+===== [b1-4b-step-EXPORT] 2026-10-07 01:18:30+0800
+$ curl -sS -i -X PUT "http://localhost:18296/api/tasks/2/step" -H Content-Type: application/json; charset=utf-8 -d {"step":"EXPORT"}
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:18:30 GMT
+
+{"success":true,"data":{"id":2,"type":"EXPORT","title":"S4基线-导出任务","currentStep":"EXPORT","status":"ACTIVE","settingsJson":null,"version":3,"items":[{"id":3,"taskId":2,"defCode":"PROJ_PRICE","sortOrder":0,"conditionJson":"{scopeKeys=[HE-P001], fields=[{fieldCode=unitPrice, operator=GTE, value=100}]}","status":"READY"},{"id":4,"taskId":2,"defCode":"CURRENCY","sortOrder":1,"conditionJson":"{fields=[{fieldCode=exchangeRate, operator=GT, value=1.0}]}","status":"READY"}],"createdAt":"2026-10-07T01:18:26.983629","updatedAt":"2026-10-07T01:18:30.330017"}}
+===== [b1-5a-count-PROJ_PRICE] 2026-10-07 01:18:45+0800
+$ curl -sS -i -X GET "http://localhost:18296/api/data/PROJ_PRICE/count" -G --data-urlencode conditions={"scopeKeys":["HE-P001"],"fields":[{"fieldCode":"unitPrice","operator":"GTE","value":100}]}
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:18:45 GMT
+
+{"success":true,"data":{"count":287}}
+===== [b1-5b-count-CURRENCY] 2026-10-07 01:18:46+0800
+$ curl -sS -i -X GET "http://localhost:18296/api/data/CURRENCY/count" -G --data-urlencode conditions={"fields":[{"fieldCode":"exchangeRate","operator":"GT","value":1.0}]}
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:18:46 GMT
+
+{"success":true,"data":{"count":3}}
+SSE_PID=4764
+===== [b1-7-job1-create] 2026-10-07 01:18:50+0800
+$ curl -sS -i -X POST "http://localhost:18296/api/tasks/2/jobs" -H Content-Type: application/json; charset=utf-8 -d {"jobType":"EXPORT"}
+HTTP/1.1 201 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:18:50 GMT
+
+{"success":true,"data":{"id":1,"taskId":2,"jobType":"EXPORT","status":"RUNNING","progress":0,"total":0,"errorCount":0,"warningCount":0,"resultJson":null,"items":[],"createdAt":"2026-10-07T01:18:50.825137","startedAt":"2026-10-07T01:18:50.8281319","finishedAt":null}}
+[poll 1] {"success":true,"data":{"id":1,"taskId":2,"jobType":"EXPORT","status":"PENDING","progress":0,"total":0,"errorCount":0,"warningCount":0,"resultJson":null,"items":[],"createdAt":"2026-10-07T01:18:50.825137","startedAt":null,"finishedAt":null}}
+[poll 2] {"success":true,"data":{"id":1,"taskId":2,"jobType":"EXPORT","status":"PENDING","progress":0,"total":0,"errorCount":0,"warningCount":0,"resultJson":null,"items":[],"createdAt":"2026-10-07T01:18:50.825137","startedAt":null,"finishedAt":null}}
+[poll 3] {"success":true,"data":{"id":1,"taskId":2,"jobType":"EXPORT","status":"PENDING","progress":0,"total":0,"errorCount":0,"warningCount":0,"resultJson":null,"items":[],"createdAt":"2026-10-07T01:18:50.825137","startedAt":null,"finishedAt":null}}
+[poll 4] {"success":true,"data":{"id":1,"taskId":2,"jobType":"EXPORT","status":"PENDING","progress":0,"total":0,"errorCount":0,"warningCount":0,"resultJson":null,"items":[],"createdAt":"2026-10-07T01:18:50.825137","startedAt":null,"finishedAt":null}}
+[poll 5] {"success":true,"data":{"id":1,"taskId":2,"jobType":"EXPORT","status":"PENDING","progress":0,"total":0,"errorCount":0,"warningCount":0,"resultJson":null,"items":[],"createdAt":"2026-10-07T01:18:50.825137","startedAt":null,"finishedAt":null}}
+[poll 6] {"success":true,"data":{"id":1,"taskId":2,"jobType":"EXPORT","status":"PENDING","progress":0,"total":0,"errorCount":0,"warningCount":0,"resultJson":null,"items":[],"createdAt":"2026-10-07T01:18:50.825137","startedAt":null,"finishedAt":null}}
+[poll 7] {"success":true,"data":{"id":1,"taskId":2,"jobType":"EXPORT","status":"COMPLETED","progress":2,"total":2,"errorCount":0,"warningCount":0,"resultJson":null,"items":[{"id":2,"jobId":1,"defCode":"CURRENCY","status":"COMPLETED","processed":5,"total":5},{"id":1,"jobId":1,"defCode":"PROJ_PRICE","status":"COMPLETED","processed":1200,"total":1200}],"createdAt":"2026-10-07T01:18:50.825137","startedAt":"2026-10-07T01:18:50.828132","finishedAt":"2026-10-07T01:18:54.868821"}}
+===== [b1-8-task-files] 2026-10-07 01:19:02+0800
+$ curl -sS -i -X GET "http://localhost:18296/api/tasks/2/files" 
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:19:02 GMT
+
+{"success":true,"data":[{"id":2,"taskId":2,"defCode":"CURRENCY","fileType":"EXPORT","storagePath":"<REPO_ROOT>\\backend\\.\\data\\files\\6279e876-b9f8-4e9e-8274-830a5e0495bb.xlsx","originalPath":"<REPO_ROOT>\\backend\\.\\data\\files\\6279e876-b9f8-4e9e-8274-830a5e0495bb.xlsx","fileName":"CURRENCY_货币字典.xlsx","rowCount":5,"version":1,"createdAt":"2026-10-07T01:18:54.86082","updatedAt":"2026-10-07T01:18:54.86082"},{"id":1,"taskId":2,"defCode":"PROJ_PRICE","fileType":"EXPORT","storagePath":"<REPO_ROOT>\\backend\\.\\data\\files\\69d5fb74-1973-4111-85ee-d9695462bc2f.xlsx","originalPath":"<REPO_ROOT>\\backend\\.\\data\\files\\69d5fb74-1973-4111-85ee-d9695462bc2f.xlsx","fileName":"PROJ_PRICE_项目价格表.xlsx","rowCount":1200,"version":1,"createdAt":"2026-10-07T01:18:54.82082","updatedAt":"2026-10-07T01:18:54.82082"}]}
+===== [b1-8b-task-overview] 2026-10-07 01:19:02+0800
+$ curl -sS -i -X GET "http://localhost:18296/api/tasks/2/overview" 
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:19:02 GMT
+
+{"success":true,"data":{"task":{"id":2,"type":"EXPORT","title":"S4基线-导出任务","currentStep":"EXPORT","status":"COMPLETED","settingsJson":null,"version":4,"items":[{"id":3,"taskId":2,"defCode":"PROJ_PRICE","sortOrder":0,"conditionJson":"{scopeKeys=[HE-P001], fields=[{fieldCode=unitPrice, operator=GTE, value=100}]}","status":"COMPLETED"},{"id":4,"taskId":2,"defCode":"CURRENCY","sortOrder":1,"conditionJson":"{fields=[{fieldCode=exchangeRate, operator=GT, value=1.0}]}","status":"COMPLETED"}],"createdAt":"2026-10-07T01:18:26.983629","updatedAt":"2026-10-07T01:18:54.870819"},"jobs":[{"id":1,"taskId":2,"jobType":"EXPORT","status":"COMPLETED","progress":2,"total":2,"errorCount":0,"warningCount":0,"resultJson":null,"items":[{"id":2,"jobId":1,"defCode":"CURRENCY","status":"COMPLETED","processed":5,"total":5},{"id":1,"jobId":1,"defCode":"PROJ_PRICE","status":"COMPLETED","processed":1200,"total":1200}],"createdAt":"2026-10-07T01:18:50.825137","startedAt":"2026-10-07T01:18:50.828132","finishedAt":"2026-10-07T01:18:54.868821"}],"files":[{"id":2,"taskId":2,"defCode":"CURRENCY","fileType":"EXPORT","storagePath":"<REPO_ROOT>\\backend\\.\\data\\files\\6279e876-b9f8-4e9e-8274-830a5e0495bb.xlsx","originalPath":"<REPO_ROOT>\\backend\\.\\data\\files\\6279e876-b9f8-4e9e-8274-830a5e0495bb.xlsx","fileName":"CURRENCY_货币字典.xlsx","rowCount":5,"version":1,"createdAt":"2026-10-07T01:18:54.86082","updatedAt":"2026-10-07T01:18:54.86082"},{"id":1,"taskId":2,"defCode":"PROJ_PRICE","fileType":"EXPORT","storagePath":"<REPO_ROOT>\\backend\\.\\data\\files\\69d5fb74-1973-4111-85ee-d9695462bc2f.xlsx","originalPath":"<REPO_ROOT>\\backend\\.\\data\\files\\69d5fb74-1973-4111-85ee-d9695462bc2f.xlsx","fileName":"PROJ_PRICE_项目价格表.xlsx","rowCount":1200,"version":1,"createdAt":"2026-10-07T01:18:54.82082","updatedAt":"2026-10-07T01:18:54.82082"}]}}
+===== [b1-11a-cond-PROJ_PRICE-str] 2026-10-07 01:19:20+0800
+$ curl -sS -i -X PUT "http://localhost:18296/api/tasks/2/items/PROJ_PRICE/condition" -H Content-Type: application/json; charset=utf-8 -d @p3c-cond-PROJ_PRICE-str.json
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:19:20 GMT
+
+{"success":true}
+===== [b1-11b-cond-CURRENCY-str] 2026-10-07 01:19:20+0800
+$ curl -sS -i -X PUT "http://localhost:18296/api/tasks/2/items/CURRENCY/condition" -H Content-Type: application/json; charset=utf-8 -d @p3d-cond-CURRENCY-str.json
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:19:20 GMT
+
+{"success":true}
+===== [b1-12-job2-create] 2026-10-07 01:19:24+0800
+$ curl -sS -i -X POST "http://localhost:18296/api/tasks/2/jobs" -H Content-Type: application/json; charset=utf-8 -d {"jobType":"EXPORT"}
+HTTP/1.1 201 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:19:24 GMT
+
+{"success":true,"data":{"id":2,"taskId":2,"jobType":"EXPORT","status":"PENDING","progress":0,"total":0,"errorCount":0,"warningCount":0,"resultJson":null,"items":[],"createdAt":"2026-10-07T01:19:24.363782","startedAt":null,"finishedAt":null}}
+[poll 1] {"success":true,"data":{"id":2,"taskId":2,"jobType":"EXPORT","status":"PENDING","progress":0,"total":0,"errorCount":0,"warningCount":0,"resultJson":null,"items":[],"createdAt":"2026-10-07T01:19:24.363782","startedAt":null,"finishedAt":null}}
+[poll 2] {"success":true,"data":{"id":2,"taskId":2,"jobType":"EXPORT","status":"COMPLETED","progress":2,"total":2,"errorCount":0,"warningCount":0,"resultJson":null,"items":[{"id":4,"jobId":2,"defCode":"CURRENCY","status":"COMPLETED","processed":3,"total":3},{"id":3,"jobId":2,"defCode":"PROJ_PRICE","status":"COMPLETED","processed":287,"total":287}],"createdAt":"2026-10-07T01:19:24.363782","startedAt":"2026-10-07T01:19:24.364782","finishedAt":"2026-10-07T01:19:25.131812"}}
+===== [b1-13-task-files] 2026-10-07 01:19:30+0800
+$ curl -sS -i -X GET "http://localhost:18296/api/tasks/2/files" 
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:19:30 GMT
+
+{"success":true,"data":[{"id":2,"taskId":2,"defCode":"CURRENCY","fileType":"EXPORT","storagePath":"<REPO_ROOT>\\backend\\.\\data\\files\\55f8fe97-3d0e-4e3d-8a69-0d989a29a30e.xlsx","originalPath":"<REPO_ROOT>\\backend\\.\\data\\files\\55f8fe97-3d0e-4e3d-8a69-0d989a29a30e.xlsx","fileName":"CURRENCY_货币字典.xlsx","rowCount":3,"version":2,"createdAt":"2026-10-07T01:18:54.86082","updatedAt":"2026-10-07T01:19:25.133813"},{"id":1,"taskId":2,"defCode":"PROJ_PRICE","fileType":"EXPORT","storagePath":"<REPO_ROOT>\\backend\\.\\data\\files\\fc2d0a25-d405-43f8-b59b-33df0e76499c.xlsx","originalPath":"<REPO_ROOT>\\backend\\.\\data\\files\\fc2d0a25-d405-43f8-b59b-33df0e76499c.xlsx","fileName":"PROJ_PRICE_项目价格表.xlsx","rowCount":287,"version":2,"createdAt":"2026-10-07T01:18:54.82082","updatedAt":"2026-10-07T01:19:25.126812"}]}
+===== [b2-1-create-import-task] 2026-10-07 01:19:57+0800
+$ curl -sS -i -X POST "http://localhost:18296/api/tasks" -H Content-Type: application/json; charset=utf-8 -d @p4-create-import-task.json
+HTTP/1.1 201 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:19:57 GMT
+
+{"success":true,"data":{"id":3,"type":"IMPORT","title":"S4基线-导入任务","currentStep":"UPLOAD","status":"ACTIVE","settingsJson":null,"version":1,"items":[],"createdAt":"2026-10-07T01:19:57.833101","updatedAt":"2026-10-07T01:19:57.833101"}}
+===== [b2-2-select-defs] 2026-10-07 01:19:58+0800
+$ curl -sS -i -X POST "http://localhost:18296/api/tasks/3/select-defs" -H Content-Type: application/json; charset=utf-8 -d @p5-import-select-defs.json
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:19:58 GMT
+
+{"success":true,"data":{"id":3,"type":"IMPORT","title":"S4基线-导入任务","currentStep":"UPLOAD","status":"ACTIVE","settingsJson":null,"version":1,"items":[{"id":5,"taskId":3,"defCode":"CURRENCY","sortOrder":0,"conditionJson":null,"status":"PENDING"},{"id":6,"taskId":3,"defCode":"DOC_TYPE","sortOrder":1,"conditionJson":null,"status":"PENDING"},{"id":7,"taskId":3,"defCode":"APPROVE_ROLE","sortOrder":2,"conditionJson":null,"status":"PENDING"},{"id":8,"taskId":3,"defCode":"PROJ_APPROVE","sortOrder":3,"conditionJson":null,"status":"PENDING"}],"createdAt":"2026-10-07T01:19:57.833101","updatedAt":"2026-10-07T01:19:57.833101"}}
+===== [b2-3-step-UPLOAD] 2026-10-07 01:19:58+0800
+$ curl -sS -i -X PUT "http://localhost:18296/api/tasks/3/step" -H Content-Type: application/json; charset=utf-8 -d {"step":"UPLOAD"}
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:19:58 GMT
+
+{"success":true,"data":{"id":3,"type":"IMPORT","title":"S4基线-导入任务","currentStep":"UPLOAD","status":"ACTIVE","settingsJson":null,"version":1,"items":[{"id":5,"taskId":3,"defCode":"CURRENCY","sortOrder":0,"conditionJson":null,"status":"PENDING"},{"id":6,"taskId":3,"defCode":"DOC_TYPE","sortOrder":1,"conditionJson":null,"status":"PENDING"},{"id":7,"taskId":3,"defCode":"APPROVE_ROLE","sortOrder":2,"conditionJson":null,"status":"PENDING"},{"id":8,"taskId":3,"defCode":"PROJ_APPROVE","sortOrder":3,"conditionJson":null,"status":"PENDING"}],"createdAt":"2026-10-07T01:19:57.833101","updatedAt":"2026-10-07T01:19:57.833101"}}
+===== [b2-8-task-files] 2026-10-07 01:20:34+0800
+$ curl -sS -i -X GET "http://localhost:18296/api/tasks/3/files" 
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:20:34 GMT
+
+{"success":true,"data":[{"id":5,"taskId":3,"defCode":"APPROVE_ROLE","fileType":"UPLOAD","storagePath":"<REPO_ROOT>\\backend\\.\\data\\files\\35737c50-dac5-4f5a-817c-f6475fdc639a.xlsx","originalPath":"<REPO_ROOT>\\backend\\.\\data\\files\\35737c50-dac5-4f5a-817c-f6475fdc639a.xlsx","fileName":"APPROVE_ROLE_新增行.xlsx","rowCount":null,"version":1,"createdAt":"2026-10-07T01:20:32.284571","updatedAt":"2026-10-07T01:20:32.284571"},{"id":3,"taskId":3,"defCode":"CURRENCY","fileType":"UPLOAD","storagePath":"<REPO_ROOT>\\backend\\.\\data\\files\\7cb22298-3fe3-40b7-8069-06eb181400e5.xlsx","originalPath":"<REPO_ROOT>\\backend\\.\\data\\files\\7cb22298-3fe3-40b7-8069-06eb181400e5.xlsx","fileName":"CURRENCY_货币字典_带缺陷.xlsx","rowCount":null,"version":7,"createdAt":"2026-10-07T01:20:21.618356","updatedAt":"2026-10-07T01:20:32.24157"},{"id":4,"taskId":3,"defCode":"DOC_TYPE","fileType":"UPLOAD","storagePath":"<REPO_ROOT>\\backend\\.\\data\\files\\8468da97-3fd5-403d-bafa-accc75938b35.xlsx","originalPath":"<REPO_ROOT>\\backend\\.\\data\\files\\8468da97-3fd5-403d-bafa-accc75938b35.xlsx","fileName":"DOC_TYPE_枚举探针.xlsx","rowCount":null,"version":2,"createdAt":"2026-10-07T01:20:22.304299","updatedAt":"2026-10-07T01:20:32.262574"},{"id":6,"taskId":3,"defCode":"PROJ_APPROVE","fileType":"UPLOAD","storagePath":"<REPO_ROOT>\\backend\\.\\data\\files\\f46553f5-7bbd-4f4b-928f-5623ac0c470e.xlsx","originalPath":"<REPO_ROOT>\\backend\\.\\data\\files\\f46553f5-7bbd-4f4b-928f-5623ac0c470e.xlsx","fileName":"PROJ_APPROVE_引用缺陷.xlsx","rowCount":null,"version":1,"createdAt":"2026-10-07T01:20:32.303586","updatedAt":"2026-10-07T01:20:32.303586"}]}
+===== [b2-9-step-PRECHECK] 2026-10-07 01:20:35+0800
+$ curl -sS -i -X PUT "http://localhost:18296/api/tasks/3/step" -H Content-Type: application/json; charset=utf-8 -d {"step":"PRECHECK"}
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:20:35 GMT
+
+{"success":true,"data":{"id":3,"type":"IMPORT","title":"S4基线-导入任务","currentStep":"PRECHECK","status":"ACTIVE","settingsJson":null,"version":2,"items":[{"id":5,"taskId":3,"defCode":"CURRENCY","sortOrder":0,"conditionJson":null,"status":"PENDING"},{"id":6,"taskId":3,"defCode":"DOC_TYPE","sortOrder":1,"conditionJson":null,"status":"PENDING"},{"id":7,"taskId":3,"defCode":"APPROVE_ROLE","sortOrder":2,"conditionJson":null,"status":"PENDING"},{"id":8,"taskId":3,"defCode":"PROJ_APPROVE","sortOrder":3,"conditionJson":null,"status":"PENDING"}],"createdAt":"2026-10-07T01:19:57.833101","updatedAt":"2026-10-07T01:20:35.123698"}}
+===== [b2-10-precheck-job] 2026-10-07 01:20:38+0800
+$ curl -sS -i -X POST "http://localhost:18296/api/tasks/3/jobs" -H Content-Type: application/json; charset=utf-8 -d {"jobType":"PRECHECK"}
+HTTP/1.1 201 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:20:38 GMT
+
+{"success":true,"data":{"id":3,"taskId":3,"jobType":"PRECHECK","status":"PENDING","progress":0,"total":0,"errorCount":0,"warningCount":0,"resultJson":null,"items":[],"createdAt":"2026-10-07T01:20:38.536317","startedAt":null,"finishedAt":null}}
+===== [b2-11-issues] 2026-10-07 01:20:45+0800
+$ curl -sS -i -X GET "http://localhost:18296/api/jobs/3/issues?page=0&size=50" 
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:20:45 GMT
+
+{"success":true,"data":{"content":[{"id":1,"jobId":3,"defCode":"CURRENCY","rowKey":"TST","fieldCode":null,"severity":"ERROR","message":"主键重复: TST (第 4 行已存在)","rowIndex":5},{"id":2,"jobId":3,"defCode":"CURRENCY","rowKey":null,"fieldCode":"name","severity":"ERROR","message":"必填字段 [货币名称] 不能为空","rowIndex":6},{"id":3,"jobId":3,"defCode":"PROJ_APPROVE","rowKey":null,"fieldCode":"approveRole","severity":"ERROR","message":"引用字段 [审批角色] 的值 GHOST_ROLE 在配置 APPROVE_ROLE 中不存在","rowIndex":3}],"pageable":{"pageNumber":0,"pageSize":50,"sort":{"empty":true,"unsorted":true,"sorted":false},"offset":0,"unpaged":false,"paged":true},"last":true,"totalElements":3,"totalPages":1,"size":50,"number":0,"sort":{"empty":true,"unsorted":true,"sorted":false},"numberOfElements":3,"first":true,"empty":false}}
+===== [b2-13-step-IMPORT] 2026-10-07 01:20:50+0800
+$ curl -sS -i -X PUT "http://localhost:18296/api/tasks/3/step" -H Content-Type: application/json; charset=utf-8 -d {"step":"IMPORT"}
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:20:50 GMT
+
+{"success":true,"data":{"id":3,"type":"IMPORT","title":"S4基线-导入任务","currentStep":"IMPORT","status":"ACTIVE","settingsJson":null,"version":3,"items":[{"id":5,"taskId":3,"defCode":"CURRENCY","sortOrder":0,"conditionJson":null,"status":"FAILED"},{"id":6,"taskId":3,"defCode":"DOC_TYPE","sortOrder":1,"conditionJson":null,"status":"CHECKED"},{"id":7,"taskId":3,"defCode":"APPROVE_ROLE","sortOrder":2,"conditionJson":null,"status":"CHECKED"},{"id":8,"taskId":3,"defCode":"PROJ_APPROVE","sortOrder":3,"conditionJson":null,"status":"FAILED"}],"createdAt":"2026-10-07T01:19:57.833101","updatedAt":"2026-10-07T01:20:50.921953"}}
+===== [b2-13b-import-job] 2026-10-07 01:20:52+0800
+$ curl -sS -i -X POST "http://localhost:18296/api/tasks/3/jobs" -H Content-Type: application/json; charset=utf-8 -d {"jobType":"IMPORT"}
+HTTP/1.1 201 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:20:52 GMT
+
+{"success":true,"data":{"id":4,"taskId":3,"jobType":"IMPORT","status":"PENDING","progress":0,"total":0,"errorCount":0,"warningCount":0,"resultJson":null,"items":[],"createdAt":"2026-10-07T01:20:52.425329","startedAt":null,"finishedAt":null}}
+===== [b2-15-diff] 2026-10-07 01:21:01+0800
+$ curl -sS -i -X GET "http://localhost:18296/api/jobs/4/diff" 
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:21:01 GMT
+
+{"success":true,"data":[{"id":8,"taskId":3,"defCode":"APPROVE_ROLE","opType":"UPSERT","rowKey":"DEPT_MGR","scopeType":"GLOBAL","scopeKey":null,"dataJson":"{\"code\":\"DEPT_MGR\",\"name\":\"部门经理\",\"description\":\"部门级别审批\"}","status":"STAGED","baseVersion":1,"createdAt":"2026-10-07T01:20:52.495666"},{"id":9,"taskId":3,"defCode":"APPROVE_ROLE","opType":"UPSERT","rowKey":"CTO","scopeType":"GLOBAL","scopeKey":null,"dataJson":"{\"code\":\"CTO\",\"name\":\"技术总监\",\"description\":\"技术条线审批\"}","status":"STAGED","baseVersion":null,"createdAt":"2026-10-07T01:20:52.495666"},{"id":1,"taskId":3,"defCode":"CURRENCY","opType":"UPSERT","rowKey":"CNY","scopeType":"GLOBAL","scopeKey":null,"dataJson":"{\"code\":\"CNY\",\"name\":\"人民币\",\"exchangeRate\":\"1.0\",\"decimalPlaces\":\"2\"}","status":"STAGED","baseVersion":1,"createdAt":"2026-10-07T01:20:52.451642"},{"id":2,"taskId":3,"defCode":"CURRENCY","opType":"UPSERT","rowKey":"USD","scopeType":"GLOBAL","scopeKey":null,"dataJson":"{\"code\":\"USD\",\"name\":\"美元\",\"exchangeRate\":\"7.24\",\"decimalPlaces\":\"2\"}","status":"STAGED","baseVersion":1,"createdAt":"2026-10-07T01:20:52.452652"},{"id":3,"taskId":3,"defCode":"CURRENCY","opType":"UPSERT","rowKey":"TST","scopeType":"GLOBAL","scopeKey":null,"dataJson":"{\"code\":\"TST\",\"name\":\"测试币\",\"exchangeRate\":\"3.5\",\"decimalPlaces\":\"2\"}","status":"STAGED","baseVersion":null,"createdAt":"2026-10-07T01:20:52.452652"},{"id":4,"taskId":3,"defCode":"CURRENCY","opType":"UPSERT","rowKey":"TST","scopeType":"GLOBAL","scopeKey":null,"dataJson":"{\"code\":\"TST\",\"name\":\"测试币-重复主键\",\"exchangeRate\":\"4.5\",\"decimalPlaces\":\"2\"}","status":"STAGED","baseVersion":null,"createdAt":"2026-10-07T01:20:52.452652"},{"id":5,"taskId":3,"defCode":"CURRENCY","opType":"UPSERT","rowKey":"XXX","scopeType":"GLOBAL","scopeKey":null,"dataJson":"{\"code\":\"XXX\",\"exchangeRate\":\"6.0\",\"decimalPlaces\":\"2\"}","status":"STAGED","baseVersion":null,"createdAt":"2026-10-07T01:20:52.452652"},{"id":6,"taskId":3,"defCode":"DOC_TYPE","opType":"UPSERT","rowKey":"PO","scopeType":"GLOBAL","scopeKey":null,"dataJson":"{\"code\":\"PO\",\"name\":\"采购订单\",\"category\":\"PURCHASE\",\"enabled\":\"true\"}","status":"STAGED","baseVersion":1,"createdAt":"2026-10-07T01:20:52.472863"},{"id":7,"taskId":3,"defCode":"DOC_TYPE","opType":"UPSERT","rowKey":"EX","scopeType":"GLOBAL","scopeKey":null,"dataJson":"{\"code\":\"EX\",\"name\":\"特殊单据\",\"category\":\"NOT_A_CATEGORY\",\"enabled\":\"true\"}","status":"STAGED","baseVersion":null,"createdAt":"2026-10-07T01:20:52.472863"},{"id":10,"taskId":3,"defCode":"PROJ_APPROVE","opType":"UPSERT","rowKey":"STEP1|HE-P001","scopeType":"PROJECT","scopeKey":"HE-P001","dataJson":"{\"stepCode\":\"STEP1\",\"stepName\":\"部门审批\",\"approveRole\":\"DEPT_MGR\",\"stepOrder\":\"1\",\"docTypeCode\":\"PO\",\"projectCode\":\"HE-P001\"}","status":"STAGED","baseVersion":null,"createdAt":"2026-10-07T01:20:52.520663"},{"id":11,"taskId":3,"defCode":"PROJ_APPROVE","opType":"UPSERT","rowKey":"STEP2|HE-P001","scopeType":"PROJECT","scopeKey":"HE-P001","dataJson":"{\"stepCode\":\"STEP2\",\"stepName\":\"财务审批\",\"approveRole\":\"GHOST_ROLE\",\"stepOrder\":\"2\",\"docTypeCode\":\"PO\",\"projectCode\":\"HE-P001\"}","status":"STAGED","baseVersion":null,"createdAt":"2026-10-07T01:20:52.520663"},{"id":12,"taskId":3,"defCode":"PROJ_APPROVE","opType":"UPSERT","rowKey":"STEP3|NO_SUCH_PROJ","scopeType":"PROJECT","scopeKey":"NO_SUCH_PROJ","dataJson":"{\"stepCode\":\"STEP3\",\"stepName\":\"无效项目范围\",\"approveRole\":\"VP\",\"stepOrder\":\"3\",\"docTypeCode\":\"PO\",\"projectCode\":\"NO_SUCH_PROJ\"}","status":"STAGED","baseVersion":null,"createdAt":"2026-10-07T01:20:52.521662"}]}
+===== [b2-16-step-PUBLISH] 2026-10-07 01:21:01+0800
+$ curl -sS -i -X PUT "http://localhost:18296/api/tasks/3/step" -H Content-Type: application/json; charset=utf-8 -d {"step":"PUBLISH"}
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:21:01 GMT
+
+{"success":true,"data":{"id":3,"type":"IMPORT","title":"S4基线-导入任务","currentStep":"PUBLISH","status":"ACTIVE","settingsJson":null,"version":4,"items":[{"id":5,"taskId":3,"defCode":"CURRENCY","sortOrder":0,"conditionJson":null,"status":"IMPORTED"},{"id":6,"taskId":3,"defCode":"DOC_TYPE","sortOrder":1,"conditionJson":null,"status":"IMPORTED"},{"id":7,"taskId":3,"defCode":"APPROVE_ROLE","sortOrder":2,"conditionJson":null,"status":"IMPORTED"},{"id":8,"taskId":3,"defCode":"PROJ_APPROVE","sortOrder":3,"conditionJson":null,"status":"IMPORTED"}],"createdAt":"2026-10-07T01:19:57.833101","updatedAt":"2026-10-07T01:21:01.78009"}}
+===== [b2-16b-publish-job] 2026-10-07 01:21:03+0800
+$ curl -sS -i -X POST "http://localhost:18296/api/tasks/3/jobs" -H Content-Type: application/json; charset=utf-8 -d {"jobType":"PUBLISH"}
+HTTP/1.1 201 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:21:03 GMT
+
+{"success":true,"data":{"id":5,"taskId":3,"jobType":"PUBLISH","status":"PENDING","progress":0,"total":0,"errorCount":0,"warningCount":0,"resultJson":null,"items":[],"createdAt":"2026-10-07T01:21:03.257591","startedAt":null,"finishedAt":null}}
+===== [b2-18-publish-issues] 2026-10-07 01:21:08+0800
+$ curl -sS -i -X GET "http://localhost:18296/api/jobs/5/issues?page=0&size=20" 
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:21:08 GMT
+
+{"success":true,"data":{"content":[{"id":4,"jobId":5,"defCode":"CURRENCY","rowKey":"TST","fieldCode":null,"severity":"ERROR","message":"发布冲突：行 TST 在导入后被其他操作修改（快照版本 null，当前版本 1），请重新导入后再发布","rowIndex":null}],"pageable":{"pageNumber":0,"pageSize":20,"sort":{"empty":true,"unsorted":true,"sorted":false},"offset":0,"unpaged":false,"paged":true},"last":true,"totalElements":1,"totalPages":1,"size":20,"number":0,"sort":{"empty":true,"unsorted":true,"sorted":false},"numberOfElements":1,"first":true,"empty":false}}
+===== [b2-19-task-after-publish] 2026-10-07 01:21:12+0800
+$ curl -sS -i -X GET "http://localhost:18296/api/tasks/3" 
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:21:12 GMT
+
+{"success":true,"data":{"id":3,"type":"IMPORT","title":"S4基线-导入任务","currentStep":"PUBLISH","status":"ACTIVE","settingsJson":null,"version":4,"items":[{"id":5,"taskId":3,"defCode":"CURRENCY","sortOrder":0,"conditionJson":null,"status":"PUBLISHED"},{"id":6,"taskId":3,"defCode":"DOC_TYPE","sortOrder":1,"conditionJson":null,"status":"PUBLISHED"},{"id":7,"taskId":3,"defCode":"APPROVE_ROLE","sortOrder":2,"conditionJson":null,"status":"PUBLISHED"},{"id":8,"taskId":3,"defCode":"PROJ_APPROVE","sortOrder":3,"conditionJson":null,"status":"PUBLISHED"}],"createdAt":"2026-10-07T01:19:57.833101","updatedAt":"2026-10-07T01:21:01.78009"}}
+===== [b4-1-health] 2026-10-07 01:21:24+0800
+$ curl -sS -i -X GET "http://localhost:18296/api/ai/health" 
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:21:25 GMT
+
+{"success":true,"data":{"status":"ok","model":"deepseek-flash","sessionCount":"AiSessionStore"}}
+===== [b4-2-tools-none] 2026-10-07 01:21:25+0800
+$ curl -sS -i -X GET "http://localhost:18296/api/ai/tools" 
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:21:25 GMT
+
+{"success":true,"data":{"tools":[{"description":"列出最近的任务列表","name":"list_tasks"},{"description":"列出所有配置定义，可按层级筛选（GLOBAL/REGION/PROJECT）","name":"list_config_defs"},{"description":"获取指定配置定义的字段详情","name":"get_config_def"},{"description":"获取当前工作区的任务状态快照","name":"get_workspace_state"},{"description":"创建一个新的快速实施任务（导出或导入）","name":"create_task"}],"count":5}}
+===== [b4-3-tools-export-query] 2026-10-07 01:21:25+0800
+$ curl -sS -i -X GET "http://localhost:18296/api/ai/tools?page=export&taskType=EXPORT&step=QUERY_COND" 
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:21:25 GMT
+
+{"success":true,"data":{"tools":[{"description":"查询作业状态和进度","name":"check_job_status"},{"description":"预估指定配置项的数据行数","name":"get_row_count"},{"description":"为指定配置项设置导出查询条件（JSON格式）","name":"set_query_condition"},{"description":"列出最近的任务列表","name":"list_tasks"},{"description":"列出所有配置定义，可按层级筛选（GLOBAL/REGION/PROJECT）","name":"list_config_defs"},{"description":"获取指定配置定义的字段详情","name":"get_config_def"},{"description":"获取当前工作区的任务状态快照","name":"get_workspace_state"},{"description":"创建一个新的快速实施任务（导出或导入）","name":"create_task"},{"description":"跳转到任务的指定步骤","name":"navigate_to_step"}],"count":9}}
+===== [b4-4-tools-import-publish] 2026-10-07 01:21:26+0800
+$ curl -sS -i -X GET "http://localhost:18296/api/ai/tools?page=import&taskType=IMPORT&step=PUBLISH" 
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:21:26 GMT
+
+{"success":true,"data":{"tools":[{"description":"查询作业状态和进度","name":"check_job_status"},{"description":"列出最近的任务列表","name":"list_tasks"},{"description":"列出所有配置定义，可按层级筛选（GLOBAL/REGION/PROJECT）","name":"list_config_defs"},{"description":"获取指定配置定义的字段详情","name":"get_config_def"},{"description":"获取当前工作区的任务状态快照","name":"get_workspace_state"},{"description":"启动发布作业，将暂存数据正式发布到生产数据（高风险，需要用户确认）","name":"start_publish"},{"description":"创建一个新的快速实施任务（导出或导入）","name":"create_task"},{"description":"跳转到任务的指定步骤","name":"navigate_to_step"}],"count":8}}
+===== [b4-5-ai-create-session] 2026-10-07 01:21:37+0800
+$ curl -sS -i -X POST "http://localhost:18296/api/ai/sessions" 
+HTTP/1.1 201 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:21:37 GMT
+
+{"success":true,"data":{"sid":"ae3ae199-1d08-4315-b682-b1e5d062bcec"}}
+===== [b4-6-ai-context] 2026-10-07 01:21:37+0800
+$ curl -sS -i -X PUT "http://localhost:18296/api/ai/sessions/d7185100-cefe-4e7f-b665-a102edf8884c/context" -H Content-Type: application/json; charset=utf-8 -d {"page":"import","taskId":3,"taskType":"IMPORT","step":"PUBLISH"}
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:21:38 GMT
+
+{"success":true}
+===== [b4-6-ai-context] 2026-10-07 01:21:41+0800
+$ curl -sS -i -X PUT "http://localhost:18296/api/ai/sessions/95a2732b-2c75-4947-97c9-46d8ac2fe6e1/context" -H Content-Type: application/json; charset=utf-8 -d {"page":"import","taskId":3,"taskType":"IMPORT","step":"PUBLISH"}
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:21:42 GMT
+
+{"success":true}
+===== [b4-7-ai-session-state] 2026-10-07 01:21:42+0800
+$ curl -sS -i -X GET "http://localhost:18296/api/ai/sessions/95a2732b-2c75-4947-97c9-46d8ac2fe6e1" 
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:21:42 GMT
+
+{"success":true,"data":{"runActive":false,"hasPendingInteraction":false,"usage":{"promptTokens":0,"completionTokens":0},"messages":[],"sid":"95a2732b-2c75-4947-97c9-46d8ac2fe6e1","pendingInteraction":{},"context":{"page":"import","taskId":3,"taskType":"IMPORT","step":"PUBLISH","extra":{},"contextKey":"task:IMPORT/PUBLISH"}}}
+===== [b4-13-job6] 2026-10-07 01:24:16+0800
+$ curl -sS -i -X GET "http://localhost:18296/api/jobs/6" 
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:24:16 GMT
+
+{"success":true,"data":{"id":6,"taskId":3,"jobType":"PUBLISH","status":"FAILED","progress":4,"total":4,"errorCount":12,"warningCount":0,"resultJson":null,"items":[{"id":19,"jobId":6,"defCode":"APPROVE_ROLE","status":"COMPLETED","processed":2,"total":2},{"id":17,"jobId":6,"defCode":"CURRENCY","status":"COMPLETED","processed":5,"total":5},{"id":18,"jobId":6,"defCode":"DOC_TYPE","status":"COMPLETED","processed":2,"total":2},{"id":20,"jobId":6,"defCode":"PROJ_APPROVE","status":"COMPLETED","processed":3,"total":3}],"createdAt":"2026-10-07T01:23:46.19735","startedAt":"2026-10-07T01:23:46.199352","finishedAt":"2026-10-07T01:23:46.24935"}}
+
+====================================================================================================
+## B1 作业 #1 SSE 原始事件流（条件被静默忽略的那次）
+====================================================================================================
+data:{"type":"HEARTBEAT","data":{}}
+
+data:{"type":"JOB_PROGRESS","data":{"pct":8,"processed":100,"jobId":1,"total":1200,"defCode":"PROJ_PRICE","jobType":"EXPORT"}}
+
+data:{"type":"JOB_PROGRESS","data":{"pct":16,"processed":200,"jobId":1,"total":1200,"defCode":"PROJ_PRICE","jobType":"EXPORT"}}
+
+data:{"type":"JOB_PROGRESS","data":{"pct":25,"processed":300,"jobId":1,"total":1200,"defCode":"PROJ_PRICE","jobType":"EXPORT"}}
+
+data:{"type":"JOB_PROGRESS","data":{"pct":33,"processed":400,"jobId":1,"total":1200,"defCode":"PROJ_PRICE","jobType":"EXPORT"}}
+
+data:{"type":"JOB_PROGRESS","data":{"pct":41,"processed":500,"jobId":1,"total":1200,"defCode":"PROJ_PRICE","jobType":"EXPORT"}}
+
+data:{"type":"JOB_PROGRESS","data":{"pct":50,"processed":600,"jobId":1,"total":1200,"defCode":"PROJ_PRICE","jobType":"EXPORT"}}
+
+data:{"type":"JOB_PROGRESS","data":{"pct":58,"processed":700,"jobId":1,"total":1200,"defCode":"PROJ_PRICE","jobType":"EXPORT"}}
+
+data:{"type":"JOB_PROGRESS","data":{"pct":66,"processed":800,"jobId":1,"total":1200,"defCode":"PROJ_PRICE","jobType":"EXPORT"}}
+
+data:{"type":"JOB_PROGRESS","data":{"pct":75,"processed":900,"jobId":1,"total":1200,"defCode":"PROJ_PRICE","jobType":"EXPORT"}}
+
+data:{"type":"JOB_PROGRESS","data":{"pct":83,"processed":1000,"jobId":1,"total":1200,"defCode":"PROJ_PRICE","jobType":"EXPORT"}}
+
+data:{"type":"JOB_PROGRESS","data":{"pct":91,"processed":1100,"jobId":1,"total":1200,"defCode":"PROJ_PRICE","jobType":"EXPORT"}}
+
+data:{"type":"JOB_PROGRESS","data":{"pct":100,"processed":1200,"jobId":1,"total":1200,"defCode":"PROJ_PRICE","jobType":"EXPORT"}}
+
+data:{"type":"TASK_CHANGED","data":{"status":"COMPLETED","taskId":2,"currentStep":"EXPORT","version":3,"summary":"任务状态更新: COMPLETED"}}
+
+data:{"type":"TASK_CHANGED","data":{"status":"COMPLETED","taskId":2,"currentStep":"EXPORT","version":3,"summary":"跳转到步骤: EXPORT"}}
+
+data:{"type":"JOB_DONE","data":{"status":"COMPLETED","jobId":1,"jobType":"EXPORT"}}
+
+====================================================================================================
+## B1 作业 #2 SSE 原始事件流（条件生效的那次）
+====================================================================================================
+data:{"type":"HEARTBEAT","data":{}}
+
+data:{"type":"JOB_PROGRESS","data":{"pct":8,"processed":100,"jobId":2,"total":1200,"defCode":"PROJ_PRICE","jobType":"EXPORT"}}
+
+data:{"type":"JOB_PROGRESS","data":{"pct":16,"processed":200,"jobId":2,"total":1200,"defCode":"PROJ_PRICE","jobType":"EXPORT"}}
+
+data:{"type":"TASK_CHANGED","data":{"status":"COMPLETED","taskId":2,"currentStep":"EXPORT","version":4,"summary":"任务状态更新: COMPLETED"}}
+
+data:{"type":"TASK_CHANGED","data":{"status":"COMPLETED","taskId":2,"currentStep":"EXPORT","version":4,"summary":"跳转到步骤: EXPORT"}}
+
+data:{"type":"JOB_DONE","data":{"status":"COMPLETED","jobId":2,"jobType":"EXPORT"}}
+
+====================================================================================================
+## B1 相关 SQL 状态
+====================================================================================================
+### SQL[b1-cond-stored] 2026-10-07 01:18:46+0800
+SELECT def_code, status, condition_json FROM task_items WHERE task_id=2 ORDER BY sort_order
+--- RESULT ---
+DEF_CODE|STATUS|CONDITION_JSON
+PROJ_PRICE|READY|{scopeKeys=[HE-P001], fields=[{fieldCode=unitPrice, operator=GTE, value=100}]}
+CURRENCY|READY|{fields=[{fieldCode=exchangeRate, operator=GT, value=1.0}]}
+
+
+### SQL[b1-cond-stored2] 2026-10-07 01:19:20+0800
+SELECT def_code, condition_json FROM task_items WHERE task_id=2 ORDER BY sort_order
+--- RESULT ---
+DEF_CODE|CONDITION_JSON
+PROJ_PRICE|{"scopeKeys":["HE-P001"],"fields":[{"fieldCode":"unitPrice","operator":"GTE","value":100}]}
+CURRENCY|{"fields":[{"fieldCode":"exchangeRate","operator":"GT","value":1.0}]}
+
+
+### SQL[b1-job1-db] 2026-10-07 01:19:02+0800
+SELECT id,task_id,job_type,status,progress,total,error_count,warning_count FROM jobs WHERE id=1
+--- RESULT ---
+ID|TASK_ID|JOB_TYPE|STATUS|PROGRESS|TOTAL|ERROR_COUNT|WARNING_COUNT
+1|2|EXPORT|COMPLETED|2|2|0|0
+
+
+### SQL[b1-job1-items] 2026-10-07 01:19:02+0800
+SELECT id,job_id,def_code,status,processed,total FROM job_items WHERE job_id=1
+--- RESULT ---
+ID|JOB_ID|DEF_CODE|STATUS|PROCESSED|TOTAL
+2|1|CURRENCY|COMPLETED|5|5
+1|1|PROJ_PRICE|COMPLETED|1200|1200
+
+
+### SQL[b1-files-db] 2026-10-07 01:19:03+0800
+SELECT id,task_id,def_code,file_type,file_name,row_count FROM task_files WHERE task_id=2
+--- RESULT ---
+ID|TASK_ID|DEF_CODE|FILE_TYPE|FILE_NAME|ROW_COUNT
+2|2|CURRENCY|EXPORT|CURRENCY_货币字典.xlsx|5
+1|2|PROJ_PRICE|EXPORT|PROJ_PRICE_项目价格表.xlsx|1200
+
+
+### SQL[b1-taskitems-db] 2026-10-07 01:19:03+0800
+SELECT id,task_id,def_code,sort_order,status FROM task_items WHERE task_id=2 ORDER BY sort_order
+--- RESULT ---
+ID|TASK_ID|DEF_CODE|SORT_ORDER|STATUS
+3|2|PROJ_PRICE|0|COMPLETED
+4|2|CURRENCY|1|COMPLETED
+
+
+### SQL[b1-job2-db] 2026-10-07 01:19:30+0800
+SELECT id,task_id,job_type,status,progress,total,error_count,warning_count FROM jobs WHERE task_id=2 ORDER BY id
+--- RESULT ---
+ID|TASK_ID|JOB_TYPE|STATUS|PROGRESS|TOTAL|ERROR_COUNT|WARNING_COUNT
+1|2|EXPORT|COMPLETED|2|2|0|0
+2|2|EXPORT|COMPLETED|2|2|0|0
+
+
+### SQL[b1-job2-items] 2026-10-07 01:19:31+0800
+SELECT id,job_id,def_code,status,processed,total FROM job_items WHERE job_id=2
+--- RESULT ---
+ID|JOB_ID|DEF_CODE|STATUS|PROCESSED|TOTAL
+4|2|CURRENCY|COMPLETED|3|3
+3|2|PROJ_PRICE|COMPLETED|287|287
+
+
+### SQL[b1-files-db2] 2026-10-07 01:19:31+0800
+SELECT id,task_id,def_code,file_type,file_name,row_count FROM task_files WHERE task_id=2
+--- RESULT ---
+ID|TASK_ID|DEF_CODE|FILE_TYPE|FILE_NAME|ROW_COUNT
+2|2|CURRENCY|EXPORT|CURRENCY_货币字典.xlsx|3
+1|2|PROJ_PRICE|EXPORT|PROJ_PRICE_项目价格表.xlsx|287

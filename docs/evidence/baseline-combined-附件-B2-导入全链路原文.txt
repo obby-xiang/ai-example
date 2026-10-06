@@ -1,0 +1,409 @@
+# 附件：baseline-combined-附件-B2-导入全链路原文.txt
+（原始运行记录，仅做路径/密钥脱敏：<REPO_ROOT>/<MAIN_V2>/<MAVEN_HOME>/<TMP> 占位、API Key 记 ***）
+
+====================================================================================================
+## B2 请求/响应逐条原文 + 上传与作业轮询
+====================================================================================================
+===== [b2-5-nomatch-CURRENCYRATE.xlsx] 2026-10-07 01:20:17+0800
+$ curl -X POST /api/tasks/3/files/upload -F file=@uploads/CURRENCYRATE.xlsx
+{"success":false,"message":"无法从文件名匹配配置编码，请使用“编码_xxx.xlsx”命名（如 CURRENCY.xlsx），或先下载模板编辑后上传"}
+===== [b2-5-nomatch-PROJAPPROVE.xlsx] 2026-10-07 01:20:17+0800
+$ curl -X POST /api/tasks/3/files/upload -F file=@uploads/PROJAPPROVE.xlsx
+{"success":false,"message":"无法从文件名匹配配置编码，请使用“编码_xxx.xlsx”命名（如 CURRENCY.xlsx），或先下载模板编辑后上传"}
+===== [b2-5-nomatch-UNKNOWN_DEF_foo.xlsx] 2026-10-07 01:20:17+0800
+$ curl -X POST /api/tasks/3/files/upload -F file=@uploads/UNKNOWN_DEF_foo.xlsx
+{"success":false,"message":"无法从文件名匹配配置编码，请使用“编码_xxx.xlsx”命名（如 CURRENCY.xlsx），或先下载模板编辑后上传"}
+===== [b2-6-match] 2026-10-07 01:20:21+0800
+$ curl -X POST /api/tasks/3/files/upload -F file=@uploads/currency_小写匹配.xlsx
+HTTP 200
+{"success":true,"data":{"count":1,"defCode":"CURRENCY","matchedFiles":[{"defCode":"CURRENCY","fileName":"currency_Сдƥ��.xlsx"}],"fileName":"currency_Сдƥ��.xlsx"}}
+===== [b2-6-match] 2026-10-07 01:20:21+0800
+$ curl -X POST /api/tasks/3/files/upload -F file=@uploads/CURRENCY-连字符匹配.xlsx
+HTTP 200
+{"success":true,"data":{"count":1,"defCode":"CURRENCY","matchedFiles":[{"defCode":"CURRENCY","fileName":"CURRENCY-���ַ�ƥ��.xlsx"}],"fileName":"CURRENCY-���ַ�ƥ��.xlsx"}}
+===== [b2-6-match] 2026-10-07 01:20:22+0800
+$ curl -X POST /api/tasks/3/files/upload -F file=@uploads/CURRENCY_汇率2026.xlsx
+HTTP 200
+{"success":true,"data":{"count":1,"defCode":"CURRENCY","matchedFiles":[{"defCode":"CURRENCY","fileName":"CURRENCY_����2026.xlsx"}],"fileName":"CURRENCY_����2026.xlsx"}}
+===== [b2-6-match] 2026-10-07 01:20:22+0800
+$ curl -X POST /api/tasks/3/files/upload -F file=@uploads/CURRENCY.xlsx
+HTTP 200
+{"success":true,"data":{"count":1,"defCode":"CURRENCY","matchedFiles":[{"defCode":"CURRENCY","fileName":"CURRENCY.xlsx"}],"fileName":"CURRENCY.xlsx"}}
+===== [b2-6b-zip] 2026-10-07 01:20:22+0800
+$ curl -X POST /api/tasks/3/files/upload -F file=@uploads/batch-mixed.zip
+HTTP 200
+{"success":true,"data":{"matchedFiles":[{"defCode":"CURRENCY","fileName":"CURRENCY_汇率2026.xlsx"},{"defCode":"DOC_TYPE","fileName":"DOC_TYPE_枚举探针.xlsx"}],"unmatchedFiles":["UNKNOWN_DEF_foo.xlsx（无法匹配配置编码）","readme.txt（非 Excel 文件）"],"count":2}}
+===== [b2-6c-fakezip] 2026-10-07 01:20:22+0800
+$ curl -X POST /api/tasks/3/files/upload -F file=@uploads/CURRENCY_bad.zip
+HTTP 400
+{"success":false,"message":"压缩包中没有可匹配的文件，请确认文件名包含配置编码（如 CURRENCY.xlsx）。未匹配: [docProps/app.xml（非 Excel 文件）, docProps/core.xml（非 Excel 文件）, xl/theme/theme1.xml（非 Excel 文件）, xl/worksheets/sheet1.xml（非 Excel 文件）, xl/worksheets/sheet2.xml（非 Excel 文件）, xl/styles.xml（非 Excel 文件）, _rels/.rels（非 Excel 文件）, xl/workbook.xml（非 Excel 文件）, xl/_rels/workbook.xml.rels（非 Excel 文件）, [Content_Types].xml（非 Excel 文件）]"}
+--- upload CURRENCY_汇率2026.xlsx
+HTTP 200
+{"success":true,"data":{"count":1,"defCode":"CURRENCY","matchedFiles":[{"defCode":"CURRENCY","fileName":"CURRENCY_汇率2026.xlsx"}],"fileName":"CURRENCY_汇率2026.xlsx"}}
+
+--- upload CURRENCY_货币字典_带缺陷.xlsx
+HTTP 200
+{"success":true,"data":{"count":1,"defCode":"CURRENCY","matchedFiles":[{"defCode":"CURRENCY","fileName":"CURRENCY_货币字典_带缺陷.xlsx"}],"fileName":"CURRENCY_货币字典_带缺陷.xlsx"}}
+
+--- upload DOC_TYPE_枚举探针.xlsx
+HTTP 200
+{"success":true,"data":{"count":1,"defCode":"DOC_TYPE","matchedFiles":[{"defCode":"DOC_TYPE","fileName":"DOC_TYPE_枚举探针.xlsx"}],"fileName":"DOC_TYPE_枚举探针.xlsx"}}
+
+--- upload APPROVE_ROLE_新增行.xlsx
+HTTP 200
+{"success":true,"data":{"count":1,"defCode":"APPROVE_ROLE","matchedFiles":[{"defCode":"APPROVE_ROLE","fileName":"APPROVE_ROLE_新增行.xlsx"}],"fileName":"APPROVE_ROLE_新增行.xlsx"}}
+
+--- upload PROJ_APPROVE_引用缺陷.xlsx
+HTTP 200
+{"success":true,"data":{"count":1,"defCode":"PROJ_APPROVE","matchedFiles":[{"defCode":"PROJ_APPROVE","fileName":"PROJ_APPROVE_引用缺陷.xlsx"}],"fileName":"PROJ_APPROVE_引用缺陷.xlsx"}}
+
+[poll 1] {"success":true,"data":{"id":3,"taskId":3,"jobType":"PRECHECK","status":"PENDING","progress":0,"total":0,"errorCount":0,"warningCount":0,"resultJson":null,"items":[],"createdAt":"2026-10-07T01:20:38.536317","startedAt":null,"finishedAt":null}}
+[poll 2] {"success":true,"data":{"id":3,"taskId":3,"jobType":"PRECHECK","status":"PENDING","progress":0,"total":0,"errorCount":0,"warningCount":0,"resultJson":null,"items":[],"createdAt":"2026-10-07T01:20:38.536317","startedAt":null,"finishedAt":null}}
+[poll 3] {"success":true,"data":{"id":3,"taskId":3,"jobType":"PRECHECK","status":"FAILED","progress":4,"total":4,"errorCount":3,"warningCount":0,"resultJson":null,"items":[{"id":7,"jobId":3,"defCode":"APPROVE_ROLE","status":"COMPLETED","processed":2,"total":2},{"id":5,"jobId":3,"defCode":"CURRENCY","status":"FAILED","processed":5,"total":5},{"id":6,"jobId":3,"defCode":"DOC_TYPE","status":"COMPLETED","processed":2,"total":2},{"id":8,"jobId":3,"defCode":"PROJ_APPROVE","status":"FAILED","processed":3,"total":3}],"createdAt":"2026-10-07T01:20:38.536317","startedAt":"2026-10-07T01:20:38.537319","finishedAt":"2026-10-07T01:20:39.936128"}}
+[poll 1] {"success":true,"data":{"id":4,"taskId":3,"jobType":"IMPORT","status":"COMPLETED","progress":4,"total":4,"errorCount":0,"warningCount":0,"resultJson":null,"items":[{"id":11,"jobId":4,"defCode":"APPROVE_ROLE","status":"COMPLETED","processed":2,"total":2},{"id":9,"jobId":4,"defCode":"CURRENCY","status":"COMPLETED","processed":5,"total":5},{"id":10,"jobId":4,"defCode":"DOC_TYPE","status":"COMPLETED","processed":2,"total":2},{"id":12,"jobId":4,"defCode":"PROJ_APPROVE","status":"COMPLETED","processed":3,"total":3}],"createdAt":"2026-10-07T01:20:52.425329","startedAt":"2026-10-07T01:20:52.426316","finishedAt":"2026-10-07T01:20:52.526096"}}
+[poll 1] {"success":true,"data":{"id":5,"taskId":3,"jobType":"PUBLISH","status":"FAILED","progress":4,"total":4,"errorCount":1,"warningCount":0,"resultJson":null,"items":[{"id":15,"jobId":5,"defCode":"APPROVE_ROLE","status":"COMPLETED","processed":2,"total":2},{"id":13,"jobId":5,"defCode":"CURRENCY","status":"COMPLETED","processed":5,"total":5},{"id":14,"jobId":5,"defCode":"DOC_TYPE","status":"COMPLETED","processed":2,"total":2},{"id":16,"jobId":5,"defCode":"PROJ_APPROVE","status":"COMPLETED","processed":3,"total":3}],"createdAt":"2026-10-07T01:21:03.257591","startedAt":"2026-10-07T01:21:03.258592","finishedAt":"2026-10-07T01:21:03.30259"}}
+
+====================================================================================================
+## B2 PRECHECK SSE 原始事件流
+====================================================================================================
+data:{"type":"HEARTBEAT","data":{}}
+
+data:{"type":"JOB_PROGRESS","data":{"pct":0,"processed":0,"jobId":3,"total":5,"defCode":"CURRENCY","jobType":"PRECHECK"}}
+
+data:{"type":"JOB_PROGRESS","data":{"pct":0,"processed":0,"jobId":3,"total":2,"defCode":"DOC_TYPE","jobType":"PRECHECK"}}
+
+data:{"type":"JOB_PROGRESS","data":{"pct":0,"processed":0,"jobId":3,"total":2,"defCode":"APPROVE_ROLE","jobType":"PRECHECK"}}
+
+data:{"type":"JOB_PROGRESS","data":{"pct":0,"processed":0,"jobId":3,"total":3,"defCode":"PROJ_APPROVE","jobType":"PRECHECK"}}
+
+data:{"type":"JOB_DONE","data":{"jobId":3,"status":"FAILED","errors":3,"jobType":"PRECHECK"}}
+
+====================================================================================================
+## B2 IMPORT SSE 原始事件流
+====================================================================================================
+data:{"type":"HEARTBEAT","data":{}}
+
+data:{"type":"JOB_DONE","data":{"jobId":4,"status":"COMPLETED","errors":0,"jobType":"IMPORT"}}
+
+====================================================================================================
+## B2 PUBLISH SSE 原始事件流
+====================================================================================================
+data:{"type":"HEARTBEAT","data":{}}
+
+data:{"type":"JOB_DONE","data":{"jobId":5,"status":"FAILED","errors":1,"jobType":"PUBLISH"}}
+
+====================================================================================================
+## B2 相关 SQL 状态
+====================================================================================================
+### SQL[b1-job2-db] 2026-10-07 01:19:30+0800
+SELECT id,task_id,job_type,status,progress,total,error_count,warning_count FROM jobs WHERE task_id=2 ORDER BY id
+--- RESULT ---
+ID|TASK_ID|JOB_TYPE|STATUS|PROGRESS|TOTAL|ERROR_COUNT|WARNING_COUNT
+1|2|EXPORT|COMPLETED|2|2|0|0
+2|2|EXPORT|COMPLETED|2|2|0|0
+
+
+### SQL[b1-job2-items] 2026-10-07 01:19:31+0800
+SELECT id,job_id,def_code,status,processed,total FROM job_items WHERE job_id=2
+--- RESULT ---
+ID|JOB_ID|DEF_CODE|STATUS|PROCESSED|TOTAL
+4|2|CURRENCY|COMPLETED|3|3
+3|2|PROJ_PRICE|COMPLETED|287|287
+
+
+### SQL[b1-files-db2] 2026-10-07 01:19:31+0800
+SELECT id,task_id,def_code,file_type,file_name,row_count FROM task_files WHERE task_id=2
+--- RESULT ---
+ID|TASK_ID|DEF_CODE|FILE_TYPE|FILE_NAME|ROW_COUNT
+2|2|CURRENCY|EXPORT|CURRENCY_货币字典.xlsx|3
+1|2|PROJ_PRICE|EXPORT|PROJ_PRICE_项目价格表.xlsx|287
+
+
+### SQL[b2-files-db] 2026-10-07 01:20:34+0800
+SELECT id,task_id,def_code,file_type,file_name FROM task_files WHERE task_id=3 ORDER BY def_code
+--- RESULT ---
+ID|TASK_ID|DEF_CODE|FILE_TYPE|FILE_NAME
+5|3|APPROVE_ROLE|UPLOAD|APPROVE_ROLE_新增行.xlsx
+3|3|CURRENCY|UPLOAD|CURRENCY_货币字典_带缺陷.xlsx
+4|3|DOC_TYPE|UPLOAD|DOC_TYPE_枚举探针.xlsx
+6|3|PROJ_APPROVE|UPLOAD|PROJ_APPROVE_引用缺陷.xlsx
+
+
+### SQL[b2-stage-before] 2026-10-07 01:20:50+0800
+SELECT (SELECT COUNT(*) FROM config_data_rows) AS published_all, (SELECT COUNT(*) FROM config_staging_rows) AS staging_all
+--- RESULT ---
+PUBLISHED_ALL|STAGING_ALL
+1230|0
+
+
+### SQL[b2-pub-before] 2026-10-07 01:20:50+0800
+SELECT def_code, COUNT(*) AS published_rows FROM config_data_rows WHERE def_code IN ('CURRENCY','DOC_TYPE','APPROVE_ROLE','PROJ_APPROVE') GROUP BY def_code ORDER BY def_code
+--- RESULT ---
+DEF_CODE|PUBLISHED_ROWS
+APPROVE_ROLE|4
+CURRENCY|5
+DOC_TYPE|5
+
+
+### SQL[b2-stage-after] 2026-10-07 01:20:56+0800
+SELECT def_code, status, COUNT(*) AS cnt FROM config_staging_rows WHERE task_id=3 GROUP BY def_code, status ORDER BY def_code
+--- RESULT ---
+DEF_CODE|STATUS|CNT
+APPROVE_ROLE|STAGED|2
+CURRENCY|STAGED|5
+DOC_TYPE|STAGED|2
+PROJ_APPROVE|STAGED|3
+
+
+### SQL[b2-stage-rows] 2026-10-07 01:20:56+0800
+SELECT id,task_id,def_code,row_key,scope_type,scope_key,status,base_version FROM config_staging_rows WHERE task_id=3 ORDER BY id
+--- RESULT ---
+ID|TASK_ID|DEF_CODE|ROW_KEY|SCOPE_TYPE|SCOPE_KEY|STATUS|BASE_VERSION
+1|3|CURRENCY|CNY|GLOBAL|null|STAGED|1
+2|3|CURRENCY|USD|GLOBAL|null|STAGED|1
+3|3|CURRENCY|TST|GLOBAL|null|STAGED|null
+4|3|CURRENCY|TST|GLOBAL|null|STAGED|null
+5|3|CURRENCY|XXX|GLOBAL|null|STAGED|null
+6|3|DOC_TYPE|PO|GLOBAL|null|STAGED|1
+7|3|DOC_TYPE|EX|GLOBAL|null|STAGED|null
+8|3|APPROVE_ROLE|DEPT_MGR|GLOBAL|null|STAGED|1
+9|3|APPROVE_ROLE|CTO|GLOBAL|null|STAGED|null
+10|3|PROJ_APPROVE|STEP1|HE-P001|PROJECT|HE-P001|STAGED|null
+11|3|PROJ_APPROVE|STEP2|HE-P001|PROJECT|HE-P001|STAGED|null
+12|3|PROJ_APPROVE|STEP3|NO_SUCH_PROJ|PROJECT|NO_SUCH_PROJ|STAGED|null
+
+
+### SQL[b2-pub-after-import] 2026-10-07 01:20:57+0800
+SELECT def_code, COUNT(*) AS published_rows FROM config_data_rows WHERE def_code IN ('CURRENCY','DOC_TYPE','APPROVE_ROLE','PROJ_APPROVE') GROUP BY def_code ORDER BY def_code
+--- RESULT ---
+DEF_CODE|PUBLISHED_ROWS
+APPROVE_ROLE|4
+CURRENCY|5
+DOC_TYPE|5
+
+
+### SQL[b2-pub-all-after-import] 2026-10-07 01:20:57+0800
+SELECT (SELECT COUNT(*) FROM config_data_rows) AS published_all, (SELECT COUNT(*) FROM config_staging_rows) AS staging_all
+--- RESULT ---
+PUBLISHED_ALL|STAGING_ALL
+1230|12
+
+
+### SQL[b2-issues-db] 2026-10-07 01:20:45+0800
+SELECT id,def_code,field_code,row_index,severity,message FROM validation_issues WHERE job_id=3 ORDER BY id
+--- RESULT ---
+ID|DEF_CODE|FIELD_CODE|ROW_INDEX|SEVERITY|MESSAGE
+1|CURRENCY|null|5|ERROR|主键重复: TST (第 4 行已存在)
+2|CURRENCY|name|6|ERROR|必填字段 [货币名称] 不能为空
+3|PROJ_APPROVE|approveRole|3|ERROR|引用字段 [审批角色] 的值 GHOST_ROLE 在配置 APPROVE_ROLE 中不存在
+
+
+### SQL[b2-issues-classify] 2026-10-07 01:20:46+0800
+SELECT def_code, severity, COUNT(*) AS cnt FROM validation_issues WHERE job_id=3 GROUP BY def_code, severity ORDER BY def_code
+--- RESULT ---
+DEF_CODE|SEVERITY|CNT
+CURRENCY|ERROR|2
+PROJ_APPROVE|ERROR|1
+
+
+### SQL[b2-pub-after-publish] 2026-10-07 01:21:05+0800
+SELECT def_code, COUNT(*) AS published_rows FROM config_data_rows WHERE def_code IN ('CURRENCY','DOC_TYPE','APPROVE_ROLE','PROJ_APPROVE') GROUP BY def_code ORDER BY def_code
+--- RESULT ---
+DEF_CODE|PUBLISHED_ROWS
+APPROVE_ROLE|5
+CURRENCY|7
+DOC_TYPE|6
+PROJ_APPROVE|3
+
+
+### SQL[b2-stage-status-after] 2026-10-07 01:21:05+0800
+SELECT def_code, status, COUNT(*) AS cnt FROM config_staging_rows WHERE task_id=3 GROUP BY def_code, status ORDER BY def_code
+--- RESULT ---
+DEF_CODE|STATUS|CNT
+APPROVE_ROLE|PUBLISHED|2
+CURRENCY|FAILED|1
+CURRENCY|PUBLISHED|4
+DOC_TYPE|PUBLISHED|2
+PROJ_APPROVE|PUBLISHED|3
+
+
+### SQL[b2-publish-issues-db] 2026-10-07 01:21:09+0800
+SELECT id,def_code,row_key,field_code,severity,message FROM validation_issues WHERE job_id=5
+--- RESULT ---
+ID|DEF_CODE|ROW_KEY|FIELD_CODE|SEVERITY|MESSAGE
+4|CURRENCY|TST|null|ERROR|发布冲突：行 TST 在导入后被其他操作修改（快照版本 null，当前版本 1），请重新导入后再发布
+
+
+### SQL[b2-cny-tst] 2026-10-07 01:21:09+0800
+SELECT id,def_code,row_key,scope_key,version,data_json FROM config_data_rows WHERE def_code='CURRENCY' AND row_key LIKE 'TS%'
+--- RESULT ---
+ID|DEF_CODE|ROW_KEY|SCOPE_KEY|VERSION|DATA_JSON
+1231|CURRENCY|TST|null|1|{"code":"TST","name":"测试币","exchangeRate":"3.5","decimalPlaces":"2"}
+
+
+### SQL[b2-cny-all] 2026-10-07 01:21:09+0800
+SELECT id,row_key,version,data_json FROM config_data_rows WHERE def_code='CURRENCY' ORDER BY row_key
+--- RESULT ---
+ID|ROW_KEY|VERSION|DATA_JSON
+1|CNY|3|{"code":"CNY","name":"人民币","exchangeRate":"1.0","decimalPlaces":"2"}
+3|EUR|1|{"name":"欧元","exchangeRate":7.89,"code":"EUR","decimalPlaces":2}
+4|GBP|1|{"name":"英镑","exchangeRate":9.15,"code":"GBP","decimalPlaces":2}
+5|JPY|1|{"name":"日元","exchangeRate":0.048,"code":"JPY","decimalPlaces":0}
+1231|TST|1|{"code":"TST","name":"测试币","exchangeRate":"3.5","decimalPlaces":"2"}
+2|USD|3|{"code":"USD","name":"美元","exchangeRate":"7.24","decimalPlaces":"2"}
+1232|XXX|1|{"code":"XXX","exchangeRate":"6.0","decimalPlaces":"2"}
+
+
+### SQL[b2-projapprove-published] 2026-10-07 01:21:16+0800
+SELECT row_key, scope_key, version, data_json FROM config_data_rows WHERE def_code='PROJ_APPROVE' ORDER BY row_key
+--- RESULT ---
+ROW_KEY|SCOPE_KEY|VERSION|DATA_JSON
+STEP1|HE-P001|HE-P001|1|{"stepCode":"STEP1","stepName":"部门审批","approveRole":"DEPT_MGR","stepOrder":"1","docTypeCode":"PO","projectCode":"HE-P001"}
+STEP2|HE-P001|HE-P001|1|{"stepCode":"STEP2","stepName":"财务审批","approveRole":"GHOST_ROLE","stepOrder":"2","docTypeCode":"PO","projectCode":"HE-P001"}
+STEP3|NO_SUCH_PROJ|NO_SUCH_PROJ|1|{"stepCode":"STEP3","stepName":"无效项目范围","approveRole":"VP","stepOrder":"3","docTypeCode":"PO","projectCode":"NO_SUCH_PROJ"}
+
+
+### SQL[b2-doctype-published] 2026-10-07 01:21:16+0800
+SELECT row_key, data_json FROM config_data_rows WHERE def_code='DOC_TYPE' ORDER BY row_key
+--- RESULT ---
+ROW_KEY|DATA_JSON
+EX|{"code":"EX","name":"特殊单据","category":"NOT_A_CATEGORY","enabled":"true"}
+IC|{"enabled":true,"name":"库存盘点","code":"IC","category":"INVENTORY"}
+PO|{"code":"PO","name":"采购订单","category":"PURCHASE","enabled":"true"}
+PR|{"enabled":true,"name":"请购单","code":"PR","category":"PURCHASE"}
+SO|{"enabled":true,"name":"销售订单","code":"SO","category":"SALES"}
+TO|{"enabled":true,"name":"调拨申请","code":"TO","category":"TRANSFER"}
+
+
+### SQL[b2-published-final] 2026-10-07 01:21:15+0800
+SELECT def_code, COUNT(*) AS published_rows FROM config_data_rows GROUP BY def_code ORDER BY def_code
+--- RESULT ---
+DEF_CODE|PUBLISHED_ROWS
+APPROVE_ROLE|5
+CURRENCY|7
+DOC_TYPE|6
+PROJ_APPROVE|3
+PROJ_PRICE|1200
+TAX_RATE|16
+
+
+### SQL[b2-jobs-all] 2026-10-07 01:21:16+0800
+SELECT id,task_id,job_type,status,progress,total,error_count FROM jobs ORDER BY id
+--- RESULT ---
+ID|TASK_ID|JOB_TYPE|STATUS|PROGRESS|TOTAL|ERROR_COUNT
+1|2|EXPORT|COMPLETED|2|2|0
+2|2|EXPORT|COMPLETED|2|2|0
+3|3|PRECHECK|FAILED|4|4|3
+4|3|IMPORT|COMPLETED|4|4|0
+5|3|PUBLISH|FAILED|4|4|1
+
+
+### SQL[b2-issues-all] 2026-10-07 01:21:17+0800
+SELECT job_id,def_code,COUNT(*) AS issues FROM validation_issues GROUP BY job_id,def_code ORDER BY job_id
+--- RESULT ---
+JOB_ID|DEF_CODE|ISSUES
+3|CURRENCY|2
+3|PROJ_APPROVE|1
+5|CURRENCY|1
+
+====================================================================================================
+## B2 上传用测试文件构造脚本 build_xlsx.py（openpyxl，_meta 页与模板同构）
+====================================================================================================
+import os
+from openpyxl import Workbook
+
+OUT = "uploads"
+os.makedirs(OUT, exist_ok=True)
+
+
+def build(def_code, sheet_name, field_labels, field_codes, rows, path):
+    """Mirror ExcelTemplateBuilder/ExcelWriter layout: data sheet + hidden _meta sheet."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = sheet_name
+    ws.append(field_labels)
+    for r in rows:
+        ws.append(r)
+    meta = wb.create_sheet("_meta")
+    meta.append(["def_code"] + field_labels)
+    meta.append([def_code] + field_codes)
+    meta.sheet_state = "hidden"
+    wb.save(path)
+    print("wrote", path, "rows=", len(rows))
+
+
+# ---- CURRENCY: 必填缺失 + 业务键重复 + 类型探针(exchangeRate 文本) ----
+build(
+    "CURRENCY", "货币字典",
+    ["*货币代码", "*货币名称", "*对人民币汇率", "小数位数"],
+    ["code", "name", "exchangeRate", "decimalPlaces"],
+    [
+        ["CNY", "人民币", "1.0", "2"],
+        ["USD", "美元", "7.24", "2"],
+        ["TST", "测试币", "3.5", "2"],
+        ["TST", "测试币-重复主键", "4.5", "2"],
+        ["XXX", "", "6.0", "2"],
+    ],
+    f"{OUT}/CURRENCY_货币字典_带缺陷.xlsx",
+)
+
+# ---- DOC_TYPE: 枚举域探针(category=NOT_A_CATEGORY) ----
+build(
+    "DOC_TYPE", "单据类型",
+    ["*单据编码", "*单据名称", "*单据分类", "*是否启用"],
+    ["code", "name", "category", "enabled"],
+    [
+        ["PO", "采购订单", "PURCHASE", "true"],
+        ["EX", "特殊单据", "NOT_A_CATEGORY", "true"],
+    ],
+    f"{OUT}/DOC_TYPE_枚举探针.xlsx",
+)
+
+# ---- APPROVE_ROLE: 纯新增行 ----
+build(
+    "APPROVE_ROLE", "审批角色",
+    ["*角色编码", "*角色名称", "描述"],
+    ["code", "name", "description"],
+    [
+        ["DEPT_MGR", "部门经理", "部门级别审批"],
+        ["CTO", "技术总监", "技术条线审批"],
+    ],
+    f"{OUT}/APPROVE_ROLE_新增行.xlsx",
+)
+
+# ---- PROJ_APPROVE: 引用完整性缺失 + 范围有效性探针 ----
+build(
+    "PROJ_APPROVE", "项目审批流",
+    ["*环节编码", "*环节名称", "*审批角色", "*顺序", "适用单据", "*项目编码"],
+    ["stepCode", "stepName", "approveRole", "stepOrder", "docTypeCode", "projectCode"],
+    [
+        ["STEP1", "部门审批", "DEPT_MGR", "1", "PO", "HE-P001"],
+        ["STEP2", "财务审批", "GHOST_ROLE", "2", "PO", "HE-P001"],
+        ["STEP3", "无效项目范围", "VP", "3", "PO", "NO_SUCH_PROJ"],
+    ],
+    f"{OUT}/PROJ_APPROVE_引用缺陷.xlsx",
+)
+
+# ---- 文件名匹配规则用例（内容用 CURRENCY 模板，仅换文件名） ----
+src = open(f"{OUT}/CURRENCY_货币字典_带缺陷.xlsx", "rb").read()
+for name in [
+    "CURRENCY_汇率2026.xlsx",
+    "currency_小写匹配.xlsx",
+    "CURRENCY-连字符匹配.xlsx",
+    "CURRENCYRATE.xlsx",
+    "PROJAPPROVE.xlsx",
+    "UNKNOWN_DEF_foo.xlsx",
+    "CURRENCY_bad.zip",
+]:
+    with open(f"{OUT}/{name}", "wb") as f:
+        f.write(src)
+    print("wrote", f"{OUT}/{name}")
+
+import zipfile
+
+with zipfile.ZipFile(f"{OUT}/batch-mixed.zip", "w", zipfile.ZIP_DEFLATED) as z:
+    z.write(f"{OUT}/CURRENCY_汇率2026.xlsx", "CURRENCY_汇率2026.xlsx")
+    z.write(f"{OUT}/DOC_TYPE_枚举探针.xlsx", "DOC_TYPE_枚举探针.xlsx")
+    z.write(f"{OUT}/UNKNOWN_DEF_foo.xlsx", "UNKNOWN_DEF_foo.xlsx")
+    z.writestr("readme.txt", "not an excel")
+print("wrote", f"{OUT}/batch-mixed.zip")

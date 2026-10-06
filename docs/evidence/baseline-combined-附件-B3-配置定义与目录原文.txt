@@ -1,0 +1,199 @@
+# 附件：baseline-combined-附件-B3-配置定义与目录原文.txt
+（原始运行记录，仅做路径/密钥脱敏：<REPO_ROOT>/<MAIN_V2>/<MAVEN_HOME>/<TMP> 占位、API Key 记 ***）
+
+====================================================================================================
+## B3 GET /api/definitions 全量原文
+====================================================================================================
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:17:17 GMT
+
+{"success":true,"data":[{"id":1,"code":"CURRENCY","name":"货币字典","level":"GLOBAL","description":"企业使用的货币种类配置","sortOrder":0,"fields":[{"id":1,"defCode":"CURRENCY","code":"code","label":"货币代码","fieldType":"STRING","required":true,"sortOrder":0,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":true},{"id":2,"defCode":"CURRENCY","code":"name","label":"货币名称","fieldType":"STRING","required":true,"sortOrder":1,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":false},{"id":3,"defCode":"CURRENCY","code":"exchangeRate","label":"对人民币汇率","fieldType":"NUMBER","required":true,"sortOrder":2,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":false},{"id":4,"defCode":"CURRENCY","code":"decimalPlaces","label":"小数位数","fieldType":"NUMBER","required":false,"sortOrder":3,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":false}],"createdAt":"2026-10-07T01:17:03.60379","updatedAt":"2026-10-07T01:17:03.604791"},{"id":2,"code":"DOC_TYPE","name":"单据类型","level":"GLOBAL","description":"业务单据类型定义","sortOrder":1,"fields":[{"id":5,"defCode":"DOC_TYPE","code":"code","label":"单据编码","fieldType":"STRING","required":true,"sortOrder":0,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":true},{"id":6,"defCode":"DOC_TYPE","code":"name","label":"单据名称","fieldType":"STRING","required":true,"sortOrder":1,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":false},{"id":7,"defCode":"DOC_TYPE","code":"category","label":"单据分类","fieldType":"ENUM","required":true,"sortOrder":2,"optionsJson":"[{\"label\":\"采购单\",\"value\":\"PURCHASE\"},{\"label\":\"销售单\",\"value\":\"SALES\"},{\"label\":\"调拨单\",\"value\":\"TRANSFER\"},{\"label\":\"盘点单\",\"value\":\"INVENTORY\"}]","refDefCode":null,"refFieldCode":null,"key":false},{"id":8,"defCode":"DOC_TYPE","code":"enabled","label":"是否启用","fieldType":"BOOLEAN","required":true,"sortOrder":3,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":false}],"createdAt":"2026-10-07T01:17:03.743198","updatedAt":"2026-10-07T01:17:03.743198"},{"id":3,"code":"APPROVE_ROLE","name":"审批角色","level":"GLOBAL","description":"审批流程角色定义","sortOrder":2,"fields":[{"id":9,"defCode":"APPROVE_ROLE","code":"code","label":"角色编码","fieldType":"STRING","required":true,"sortOrder":0,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":true},{"id":10,"defCode":"APPROVE_ROLE","code":"name","label":"角色名称","fieldType":"STRING","required":true,"sortOrder":1,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":false},{"id":11,"defCode":"APPROVE_ROLE","code":"description","label":"描述","fieldType":"STRING","required":false,"sortOrder":2,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":false}],"createdAt":"2026-10-07T01:17:03.778179","updatedAt":"2026-10-07T01:17:03.778179"},{"id":4,"code":"TAX_RATE","name":"税率配置","level":"REGION","description":"各地区适用税率","sortOrder":3,"fields":[{"id":12,"defCode":"TAX_RATE","code":"taxCode","label":"税种编码","fieldType":"STRING","required":true,"sortOrder":0,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":true},{"id":13,"defCode":"TAX_RATE","code":"taxType","label":"税种类型","fieldType":"ENUM","required":true,"sortOrder":1,"optionsJson":"[{\"label\":\"增值税\",\"value\":\"VAT\"},{\"label\":\"消费税\",\"value\":\"CONSUMPTION\"},{\"label\":\"服务税\",\"value\":\"SERVICE\"}]","refDefCode":null,"refFieldCode":null,"key":false},{"id":14,"defCode":"TAX_RATE","code":"rate","label":"税率(%)","fieldType":"NUMBER","required":true,"sortOrder":2,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":false},{"id":15,"defCode":"TAX_RATE","code":"effectiveDate","label":"生效日期","fieldType":"DATE","required":true,"sortOrder":3,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":false},{"id":16,"defCode":"TAX_RATE","code":"regionCode","label":"地区编码","fieldType":"STRING","required":true,"sortOrder":4,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":true}],"createdAt":"2026-10-07T01:17:03.816537","updatedAt":"2026-10-07T01:17:03.816537"},{"id":5,"code":"PROJ_PARAM","name":"项目参数","level":"PROJECT","description":"项目运营参数配置","sortOrder":5,"fields":[{"id":17,"defCode":"PROJ_PARAM","code":"paramKey","label":"参数键","fieldType":"STRING","required":true,"sortOrder":0,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":true},{"id":18,"defCode":"PROJ_PARAM","code":"paramValue","label":"参数值","fieldType":"STRING","required":true,"sortOrder":1,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":false},{"id":19,"defCode":"PROJ_PARAM","code":"description","label":"说明","fieldType":"STRING","required":false,"sortOrder":2,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":false},{"id":20,"defCode":"PROJ_PARAM","code":"projectCode","label":"项目编码","fieldType":"STRING","required":true,"sortOrder":3,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":true}],"createdAt":"2026-10-07T01:17:03.892538","updatedAt":"2026-10-07T01:17:03.892538"},{"id":6,"code":"PROJ_APPROVE","name":"项目审批流","level":"PROJECT","description":"项目审批流程配置","sortOrder":6,"fields":[{"id":21,"defCode":"PROJ_APPROVE","code":"stepCode","label":"环节编码","fieldType":"STRING","required":true,"sortOrder":0,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":true},{"id":22,"defCode":"PROJ_APPROVE","code":"stepName","label":"环节名称","fieldType":"STRING","required":true,"sortOrder":1,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":false},{"id":23,"defCode":"PROJ_APPROVE","code":"approveRole","label":"审批角色","fieldType":"REFERENCE","required":true,"sortOrder":2,"optionsJson":null,"refDefCode":"APPROVE_ROLE","refFieldCode":"code","key":false},{"id":24,"defCode":"PROJ_APPROVE","code":"stepOrder","label":"顺序","fieldType":"NUMBER","required":true,"sortOrder":3,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":false},{"id":25,"defCode":"PROJ_APPROVE","code":"docTypeCode","label":"适用单据","fieldType":"STRING","required":false,"sortOrder":4,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":false},{"id":26,"defCode":"PROJ_APPROVE","code":"projectCode","label":"项目编码","fieldType":"STRING","required":true,"sortOrder":5,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":true}],"createdAt":"2026-10-07T01:17:03.897539","updatedAt":"2026-10-07T01:17:03.898538"},{"id":7,"code":"PROJ_PRICE","name":"项目价格表","level":"PROJECT","description":"项目商品价格配置","sortOrder":8,"fields":[{"id":27,"defCode":"PROJ_PRICE","code":"skuCode","label":"商品编码","fieldType":"STRING","required":true,"sortOrder":0,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":true},{"id":28,"defCode":"PROJ_PRICE","code":"skuName","label":"商品名称","fieldType":"STRING","required":true,"sortOrder":1,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":false},{"id":29,"defCode":"PROJ_PRICE","code":"unitPrice","label":"单价","fieldType":"NUMBER","required":true,"sortOrder":2,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":false},{"id":30,"defCode":"PROJ_PRICE","code":"currencyCode","label":"货币","fieldType":"REFERENCE","required":true,"sortOrder":3,"optionsJson":null,"refDefCode":"CURRENCY","refFieldCode":"code","key":false},{"id":31,"defCode":"PROJ_PRICE","code":"taxCode","label":"税率码","fieldType":"STRING","required":true,"sortOrder":4,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":false},{"id":32,"defCode":"PROJ_PRICE","code":"unit","label":"计量单位","fieldType":"STRING","required":true,"sortOrder":5,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":false},{"id":33,"defCode":"PROJ_PRICE","code":"projectCode","label":"项目编码","fieldType":"STRING","required":true,"sortOrder":6,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":true}],"createdAt":"2026-10-07T01:17:03.903536","updatedAt":"2026-10-07T01:17:03.903536"}]}
+
+====================================================================================================
+## B3 GET /api/definitions/CURRENCY
+====================================================================================================
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:17:17 GMT
+
+{"success":true,"data":{"id":1,"code":"CURRENCY","name":"货币字典","level":"GLOBAL","description":"企业使用的货币种类配置","sortOrder":0,"fields":[{"id":1,"defCode":"CURRENCY","code":"code","label":"货币代码","fieldType":"STRING","required":true,"sortOrder":0,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":true},{"id":2,"defCode":"CURRENCY","code":"name","label":"货币名称","fieldType":"STRING","required":true,"sortOrder":1,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":false},{"id":3,"defCode":"CURRENCY","code":"exchangeRate","label":"对人民币汇率","fieldType":"NUMBER","required":true,"sortOrder":2,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":false},{"id":4,"defCode":"CURRENCY","code":"decimalPlaces","label":"小数位数","fieldType":"NUMBER","required":false,"sortOrder":3,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":false}],"createdAt":"2026-10-07T01:17:03.60379","updatedAt":"2026-10-07T01:17:03.604791"}}
+
+====================================================================================================
+## B3 GET /api/definitions/DOC_TYPE
+====================================================================================================
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:17:18 GMT
+
+{"success":true,"data":{"id":2,"code":"DOC_TYPE","name":"单据类型","level":"GLOBAL","description":"业务单据类型定义","sortOrder":1,"fields":[{"id":5,"defCode":"DOC_TYPE","code":"code","label":"单据编码","fieldType":"STRING","required":true,"sortOrder":0,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":true},{"id":6,"defCode":"DOC_TYPE","code":"name","label":"单据名称","fieldType":"STRING","required":true,"sortOrder":1,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":false},{"id":7,"defCode":"DOC_TYPE","code":"category","label":"单据分类","fieldType":"ENUM","required":true,"sortOrder":2,"optionsJson":"[{\"label\":\"采购单\",\"value\":\"PURCHASE\"},{\"label\":\"销售单\",\"value\":\"SALES\"},{\"label\":\"调拨单\",\"value\":\"TRANSFER\"},{\"label\":\"盘点单\",\"value\":\"INVENTORY\"}]","refDefCode":null,"refFieldCode":null,"key":false},{"id":8,"defCode":"DOC_TYPE","code":"enabled","label":"是否启用","fieldType":"BOOLEAN","required":true,"sortOrder":3,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":false}],"createdAt":"2026-10-07T01:17:03.743198","updatedAt":"2026-10-07T01:17:03.743198"}}
+
+====================================================================================================
+## B3 GET /api/definitions/APPROVE_ROLE
+====================================================================================================
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:17:18 GMT
+
+{"success":true,"data":{"id":3,"code":"APPROVE_ROLE","name":"审批角色","level":"GLOBAL","description":"审批流程角色定义","sortOrder":2,"fields":[{"id":9,"defCode":"APPROVE_ROLE","code":"code","label":"角色编码","fieldType":"STRING","required":true,"sortOrder":0,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":true},{"id":10,"defCode":"APPROVE_ROLE","code":"name","label":"角色名称","fieldType":"STRING","required":true,"sortOrder":1,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":false},{"id":11,"defCode":"APPROVE_ROLE","code":"description","label":"描述","fieldType":"STRING","required":false,"sortOrder":2,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":false}],"createdAt":"2026-10-07T01:17:03.778179","updatedAt":"2026-10-07T01:17:03.778179"}}
+
+====================================================================================================
+## B3 GET /api/definitions/TAX_RATE
+====================================================================================================
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:17:18 GMT
+
+{"success":true,"data":{"id":4,"code":"TAX_RATE","name":"税率配置","level":"REGION","description":"各地区适用税率","sortOrder":3,"fields":[{"id":12,"defCode":"TAX_RATE","code":"taxCode","label":"税种编码","fieldType":"STRING","required":true,"sortOrder":0,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":true},{"id":13,"defCode":"TAX_RATE","code":"taxType","label":"税种类型","fieldType":"ENUM","required":true,"sortOrder":1,"optionsJson":"[{\"label\":\"增值税\",\"value\":\"VAT\"},{\"label\":\"消费税\",\"value\":\"CONSUMPTION\"},{\"label\":\"服务税\",\"value\":\"SERVICE\"}]","refDefCode":null,"refFieldCode":null,"key":false},{"id":14,"defCode":"TAX_RATE","code":"rate","label":"税率(%)","fieldType":"NUMBER","required":true,"sortOrder":2,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":false},{"id":15,"defCode":"TAX_RATE","code":"effectiveDate","label":"生效日期","fieldType":"DATE","required":true,"sortOrder":3,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":false},{"id":16,"defCode":"TAX_RATE","code":"regionCode","label":"地区编码","fieldType":"STRING","required":true,"sortOrder":4,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":true}],"createdAt":"2026-10-07T01:17:03.816537","updatedAt":"2026-10-07T01:17:03.816537"}}
+
+====================================================================================================
+## B3 GET /api/definitions/PROJ_PARAM
+====================================================================================================
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:17:18 GMT
+
+{"success":true,"data":{"id":5,"code":"PROJ_PARAM","name":"项目参数","level":"PROJECT","description":"项目运营参数配置","sortOrder":5,"fields":[{"id":17,"defCode":"PROJ_PARAM","code":"paramKey","label":"参数键","fieldType":"STRING","required":true,"sortOrder":0,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":true},{"id":18,"defCode":"PROJ_PARAM","code":"paramValue","label":"参数值","fieldType":"STRING","required":true,"sortOrder":1,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":false},{"id":19,"defCode":"PROJ_PARAM","code":"description","label":"说明","fieldType":"STRING","required":false,"sortOrder":2,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":false},{"id":20,"defCode":"PROJ_PARAM","code":"projectCode","label":"项目编码","fieldType":"STRING","required":true,"sortOrder":3,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":true}],"createdAt":"2026-10-07T01:17:03.892538","updatedAt":"2026-10-07T01:17:03.892538"}}
+
+====================================================================================================
+## B3 GET /api/definitions/PROJ_APPROVE（含 REFERENCE 字段）
+====================================================================================================
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:17:18 GMT
+
+{"success":true,"data":{"id":6,"code":"PROJ_APPROVE","name":"项目审批流","level":"PROJECT","description":"项目审批流程配置","sortOrder":6,"fields":[{"id":21,"defCode":"PROJ_APPROVE","code":"stepCode","label":"环节编码","fieldType":"STRING","required":true,"sortOrder":0,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":true},{"id":22,"defCode":"PROJ_APPROVE","code":"stepName","label":"环节名称","fieldType":"STRING","required":true,"sortOrder":1,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":false},{"id":23,"defCode":"PROJ_APPROVE","code":"approveRole","label":"审批角色","fieldType":"REFERENCE","required":true,"sortOrder":2,"optionsJson":null,"refDefCode":"APPROVE_ROLE","refFieldCode":"code","key":false},{"id":24,"defCode":"PROJ_APPROVE","code":"stepOrder","label":"顺序","fieldType":"NUMBER","required":true,"sortOrder":3,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":false},{"id":25,"defCode":"PROJ_APPROVE","code":"docTypeCode","label":"适用单据","fieldType":"STRING","required":false,"sortOrder":4,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":false},{"id":26,"defCode":"PROJ_APPROVE","code":"projectCode","label":"项目编码","fieldType":"STRING","required":true,"sortOrder":5,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":true}],"createdAt":"2026-10-07T01:17:03.897539","updatedAt":"2026-10-07T01:17:03.898538"}}
+
+====================================================================================================
+## B3 GET /api/definitions/PROJ_PRICE
+====================================================================================================
+HTTP/1.1 200 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:17:17 GMT
+
+{"success":true,"data":{"id":7,"code":"PROJ_PRICE","name":"项目价格表","level":"PROJECT","description":"项目商品价格配置","sortOrder":8,"fields":[{"id":27,"defCode":"PROJ_PRICE","code":"skuCode","label":"商品编码","fieldType":"STRING","required":true,"sortOrder":0,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":true},{"id":28,"defCode":"PROJ_PRICE","code":"skuName","label":"商品名称","fieldType":"STRING","required":true,"sortOrder":1,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":false},{"id":29,"defCode":"PROJ_PRICE","code":"unitPrice","label":"单价","fieldType":"NUMBER","required":true,"sortOrder":2,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":false},{"id":30,"defCode":"PROJ_PRICE","code":"currencyCode","label":"货币","fieldType":"REFERENCE","required":true,"sortOrder":3,"optionsJson":null,"refDefCode":"CURRENCY","refFieldCode":"code","key":false},{"id":31,"defCode":"PROJ_PRICE","code":"taxCode","label":"税率码","fieldType":"STRING","required":true,"sortOrder":4,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":false},{"id":32,"defCode":"PROJ_PRICE","code":"unit","label":"计量单位","fieldType":"STRING","required":true,"sortOrder":5,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":false},{"id":33,"defCode":"PROJ_PRICE","code":"projectCode","label":"项目编码","fieldType":"STRING","required":true,"sortOrder":6,"optionsJson":null,"refDefCode":null,"refFieldCode":null,"key":true}],"createdAt":"2026-10-07T01:17:03.903536","updatedAt":"2026-10-07T01:17:03.903536"}}
+
+====================================================================================================
+## B3 GET /api/definitions/NOPE（404 形态）
+====================================================================================================
+HTTP/1.1 404 
+Vary: Origin
+Vary: Access-Control-Request-Method
+Vary: Access-Control-Request-Headers
+Content-Type: application/json
+Transfer-Encoding: chunked
+Date: Tue, 06 Oct 2026 17:17:18 GMT
+
+{"success":false,"message":"配置定义 不存在: NOPE"}
+
+====================================================================================================
+## B3 GET /api/definitions/PROJ_PRICE/template 响应头
+====================================================================================================
+200 application/vnd.openxmlformats-officedocument.spreadsheetml.sheet 6480
+
+====================================================================================================
+## B3 相关 SQL 状态
+====================================================================================================
+### SQL[b3-defs] 2026-10-07 01:17:47+0800
+SELECT code,name,level,sort_order FROM config_definitions ORDER BY sort_order
+--- RESULT ---
+CODE|NAME|LEVEL|SORT_ORDER
+CURRENCY|货币字典|GLOBAL|0
+DOC_TYPE|单据类型|GLOBAL|1
+APPROVE_ROLE|审批角色|GLOBAL|2
+TAX_RATE|税率配置|REGION|3
+PROJ_PARAM|项目参数|PROJECT|5
+PROJ_APPROVE|项目审批流|PROJECT|6
+PROJ_PRICE|项目价格表|PROJECT|8
+
+
+### SQL[b3-fieldtypes] 2026-10-07 01:17:48+0800
+SELECT field_type, COUNT(*) AS cnt FROM config_fields GROUP BY field_type ORDER BY field_type
+--- RESULT ---
+FIELD_TYPE|CNT
+BOOLEAN|1
+DATE|1
+ENUM|2
+NUMBER|5
+REFERENCE|2
+STRING|22
+
+
+### SQL[b3-refs] 2026-10-07 01:17:48+0800
+SELECT def_code,code,ref_def_code,ref_field_code FROM config_fields WHERE field_type='REFERENCE' ORDER BY def_code
+--- RESULT ---
+DEF_CODE|CODE|REF_DEF_CODE|REF_FIELD_CODE
+PROJ_APPROVE|approveRole|APPROVE_ROLE|code
+PROJ_PRICE|currencyCode|CURRENCY|code
+
+
+### SQL[b3-deps] 2026-10-07 01:17:48+0800
+SELECT COUNT(*) AS config_dependencies_rows FROM config_dependencies
+--- RESULT ---
+CONFIG_DEPENDENCIES_ROWS
+0
+
+
+### SQL[b3-levels] 2026-10-07 01:17:49+0800
+SELECT level, COUNT(*) AS defs FROM config_definitions GROUP BY level ORDER BY level
+--- RESULT ---
+LEVEL|DEFS
+GLOBAL|3
+PROJECT|3
+REGION|1
+
+
+### SQL[b3-counts] 2026-10-07 01:17:52+0800
+SELECT (SELECT COUNT(*) FROM config_definitions) AS defs, (SELECT COUNT(*) FROM config_fields) AS fields, (SELECT COUNT(*) FROM config_data_rows) AS data_rows, (SELECT COUNT(*) FROM config_staging_rows) AS staging_rows, (SELECT COUNT(*) FROM regions) AS regions, (SELECT COUNT(*) FROM projects) AS projects, (SELECT COUNT(*) FROM tasks) AS tasks, (SELECT COUNT(*) FROM jobs) AS jobs
+--- RESULT ---
+DEFS|FIELDS|DATA_ROWS|STAGING_ROWS|REGIONS|PROJECTS|TASKS|JOBS
+7|33|1230|0|4|7|0|0
+
+
+### SQL[b3-datarows2] 2026-10-07 01:17:55+0800
+SELECT def_code, scope_type, scope_key, COUNT(*) AS cnt FROM config_data_rows GROUP BY def_code, scope_type, scope_key ORDER BY def_code, scope_key
+--- RESULT ---
+DEF_CODE|SCOPE_TYPE|SCOPE_KEY|CNT
+APPROVE_ROLE|GLOBAL|null|4
+CURRENCY|GLOBAL|null|5
+DOC_TYPE|GLOBAL|null|5
+PROJ_PRICE|PROJECT|HE-P001|300
+PROJ_PRICE|PROJECT|HE-P002|300
+PROJ_PRICE|PROJECT|HS-P001|300
+PROJ_PRICE|PROJECT|HS-P002|300
+TAX_RATE|REGION|HB|4
+TAX_RATE|REGION|HE|4
+TAX_RATE|REGION|HS|4
+TAX_RATE|REGION|XN|4

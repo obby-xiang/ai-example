@@ -1,0 +1,480 @@
+# 附件：baseline-combined-附件-数据库状态快照.txt
+（原始运行记录，仅做路径/密钥脱敏：<REPO_ROOT>/<MAIN_V2>/<MAVEN_HOME>/<TMP> 占位、API Key 记 ***）
+
+====================================================================================================
+## sql-b3-defs.txt
+====================================================================================================
+### SQL[b3-defs] 2026-10-07 01:17:47+0800
+SELECT code,name,level,sort_order FROM config_definitions ORDER BY sort_order
+--- RESULT ---
+CODE|NAME|LEVEL|SORT_ORDER
+CURRENCY|货币字典|GLOBAL|0
+DOC_TYPE|单据类型|GLOBAL|1
+APPROVE_ROLE|审批角色|GLOBAL|2
+TAX_RATE|税率配置|REGION|3
+PROJ_PARAM|项目参数|PROJECT|5
+PROJ_APPROVE|项目审批流|PROJECT|6
+PROJ_PRICE|项目价格表|PROJECT|8
+
+====================================================================================================
+## sql-b3-fieldtypes.txt
+====================================================================================================
+### SQL[b3-fieldtypes] 2026-10-07 01:17:48+0800
+SELECT field_type, COUNT(*) AS cnt FROM config_fields GROUP BY field_type ORDER BY field_type
+--- RESULT ---
+FIELD_TYPE|CNT
+BOOLEAN|1
+DATE|1
+ENUM|2
+NUMBER|5
+REFERENCE|2
+STRING|22
+
+====================================================================================================
+## sql-b3-refs.txt
+====================================================================================================
+### SQL[b3-refs] 2026-10-07 01:17:48+0800
+SELECT def_code,code,ref_def_code,ref_field_code FROM config_fields WHERE field_type='REFERENCE' ORDER BY def_code
+--- RESULT ---
+DEF_CODE|CODE|REF_DEF_CODE|REF_FIELD_CODE
+PROJ_APPROVE|approveRole|APPROVE_ROLE|code
+PROJ_PRICE|currencyCode|CURRENCY|code
+
+====================================================================================================
+## sql-b3-deps.txt
+====================================================================================================
+### SQL[b3-deps] 2026-10-07 01:17:48+0800
+SELECT COUNT(*) AS config_dependencies_rows FROM config_dependencies
+--- RESULT ---
+CONFIG_DEPENDENCIES_ROWS
+0
+
+====================================================================================================
+## sql-b3-levels.txt
+====================================================================================================
+### SQL[b3-levels] 2026-10-07 01:17:49+0800
+SELECT level, COUNT(*) AS defs FROM config_definitions GROUP BY level ORDER BY level
+--- RESULT ---
+LEVEL|DEFS
+GLOBAL|3
+PROJECT|3
+REGION|1
+
+====================================================================================================
+## sql-b3-counts.txt
+====================================================================================================
+### SQL[b3-counts] 2026-10-07 01:17:52+0800
+SELECT (SELECT COUNT(*) FROM config_definitions) AS defs, (SELECT COUNT(*) FROM config_fields) AS fields, (SELECT COUNT(*) FROM config_data_rows) AS data_rows, (SELECT COUNT(*) FROM config_staging_rows) AS staging_rows, (SELECT COUNT(*) FROM regions) AS regions, (SELECT COUNT(*) FROM projects) AS projects, (SELECT COUNT(*) FROM tasks) AS tasks, (SELECT COUNT(*) FROM jobs) AS jobs
+--- RESULT ---
+DEFS|FIELDS|DATA_ROWS|STAGING_ROWS|REGIONS|PROJECTS|TASKS|JOBS
+7|33|1230|0|4|7|0|0
+
+====================================================================================================
+## sql-b3-datarows2.txt
+====================================================================================================
+### SQL[b3-datarows2] 2026-10-07 01:17:55+0800
+SELECT def_code, scope_type, scope_key, COUNT(*) AS cnt FROM config_data_rows GROUP BY def_code, scope_type, scope_key ORDER BY def_code, scope_key
+--- RESULT ---
+DEF_CODE|SCOPE_TYPE|SCOPE_KEY|CNT
+APPROVE_ROLE|GLOBAL|null|4
+CURRENCY|GLOBAL|null|5
+DOC_TYPE|GLOBAL|null|5
+PROJ_PRICE|PROJECT|HE-P001|300
+PROJ_PRICE|PROJECT|HE-P002|300
+PROJ_PRICE|PROJECT|HS-P001|300
+PROJ_PRICE|PROJECT|HS-P002|300
+TAX_RATE|REGION|HB|4
+TAX_RATE|REGION|HE|4
+TAX_RATE|REGION|HS|4
+TAX_RATE|REGION|XN|4
+
+====================================================================================================
+## sql-b1-cond-stored.txt
+====================================================================================================
+### SQL[b1-cond-stored] 2026-10-07 01:18:46+0800
+SELECT def_code, status, condition_json FROM task_items WHERE task_id=2 ORDER BY sort_order
+--- RESULT ---
+DEF_CODE|STATUS|CONDITION_JSON
+PROJ_PRICE|READY|{scopeKeys=[HE-P001], fields=[{fieldCode=unitPrice, operator=GTE, value=100}]}
+CURRENCY|READY|{fields=[{fieldCode=exchangeRate, operator=GT, value=1.0}]}
+
+====================================================================================================
+## sql-b1-cond-stored2.txt
+====================================================================================================
+### SQL[b1-cond-stored2] 2026-10-07 01:19:20+0800
+SELECT def_code, condition_json FROM task_items WHERE task_id=2 ORDER BY sort_order
+--- RESULT ---
+DEF_CODE|CONDITION_JSON
+PROJ_PRICE|{"scopeKeys":["HE-P001"],"fields":[{"fieldCode":"unitPrice","operator":"GTE","value":100}]}
+CURRENCY|{"fields":[{"fieldCode":"exchangeRate","operator":"GT","value":1.0}]}
+
+====================================================================================================
+## sql-b1-job1-db.txt
+====================================================================================================
+### SQL[b1-job1-db] 2026-10-07 01:19:02+0800
+SELECT id,task_id,job_type,status,progress,total,error_count,warning_count FROM jobs WHERE id=1
+--- RESULT ---
+ID|TASK_ID|JOB_TYPE|STATUS|PROGRESS|TOTAL|ERROR_COUNT|WARNING_COUNT
+1|2|EXPORT|COMPLETED|2|2|0|0
+
+====================================================================================================
+## sql-b1-job1-items.txt
+====================================================================================================
+### SQL[b1-job1-items] 2026-10-07 01:19:02+0800
+SELECT id,job_id,def_code,status,processed,total FROM job_items WHERE job_id=1
+--- RESULT ---
+ID|JOB_ID|DEF_CODE|STATUS|PROCESSED|TOTAL
+2|1|CURRENCY|COMPLETED|5|5
+1|1|PROJ_PRICE|COMPLETED|1200|1200
+
+====================================================================================================
+## sql-b1-files-db.txt
+====================================================================================================
+### SQL[b1-files-db] 2026-10-07 01:19:03+0800
+SELECT id,task_id,def_code,file_type,file_name,row_count FROM task_files WHERE task_id=2
+--- RESULT ---
+ID|TASK_ID|DEF_CODE|FILE_TYPE|FILE_NAME|ROW_COUNT
+2|2|CURRENCY|EXPORT|CURRENCY_货币字典.xlsx|5
+1|2|PROJ_PRICE|EXPORT|PROJ_PRICE_项目价格表.xlsx|1200
+
+====================================================================================================
+## sql-b1-taskitems-db.txt
+====================================================================================================
+### SQL[b1-taskitems-db] 2026-10-07 01:19:03+0800
+SELECT id,task_id,def_code,sort_order,status FROM task_items WHERE task_id=2 ORDER BY sort_order
+--- RESULT ---
+ID|TASK_ID|DEF_CODE|SORT_ORDER|STATUS
+3|2|PROJ_PRICE|0|COMPLETED
+4|2|CURRENCY|1|COMPLETED
+
+====================================================================================================
+## sql-b1-job2-db.txt
+====================================================================================================
+### SQL[b1-job2-db] 2026-10-07 01:19:30+0800
+SELECT id,task_id,job_type,status,progress,total,error_count,warning_count FROM jobs WHERE task_id=2 ORDER BY id
+--- RESULT ---
+ID|TASK_ID|JOB_TYPE|STATUS|PROGRESS|TOTAL|ERROR_COUNT|WARNING_COUNT
+1|2|EXPORT|COMPLETED|2|2|0|0
+2|2|EXPORT|COMPLETED|2|2|0|0
+
+====================================================================================================
+## sql-b1-job2-items.txt
+====================================================================================================
+### SQL[b1-job2-items] 2026-10-07 01:19:31+0800
+SELECT id,job_id,def_code,status,processed,total FROM job_items WHERE job_id=2
+--- RESULT ---
+ID|JOB_ID|DEF_CODE|STATUS|PROCESSED|TOTAL
+4|2|CURRENCY|COMPLETED|3|3
+3|2|PROJ_PRICE|COMPLETED|287|287
+
+====================================================================================================
+## sql-b1-files-db2.txt
+====================================================================================================
+### SQL[b1-files-db2] 2026-10-07 01:19:31+0800
+SELECT id,task_id,def_code,file_type,file_name,row_count FROM task_files WHERE task_id=2
+--- RESULT ---
+ID|TASK_ID|DEF_CODE|FILE_TYPE|FILE_NAME|ROW_COUNT
+2|2|CURRENCY|EXPORT|CURRENCY_货币字典.xlsx|3
+1|2|PROJ_PRICE|EXPORT|PROJ_PRICE_项目价格表.xlsx|287
+
+====================================================================================================
+## sql-b2-files-db.txt
+====================================================================================================
+### SQL[b2-files-db] 2026-10-07 01:20:34+0800
+SELECT id,task_id,def_code,file_type,file_name FROM task_files WHERE task_id=3 ORDER BY def_code
+--- RESULT ---
+ID|TASK_ID|DEF_CODE|FILE_TYPE|FILE_NAME
+5|3|APPROVE_ROLE|UPLOAD|APPROVE_ROLE_新增行.xlsx
+3|3|CURRENCY|UPLOAD|CURRENCY_货币字典_带缺陷.xlsx
+4|3|DOC_TYPE|UPLOAD|DOC_TYPE_枚举探针.xlsx
+6|3|PROJ_APPROVE|UPLOAD|PROJ_APPROVE_引用缺陷.xlsx
+
+====================================================================================================
+## sql-b2-stage-before.txt
+====================================================================================================
+### SQL[b2-stage-before] 2026-10-07 01:20:50+0800
+SELECT (SELECT COUNT(*) FROM config_data_rows) AS published_all, (SELECT COUNT(*) FROM config_staging_rows) AS staging_all
+--- RESULT ---
+PUBLISHED_ALL|STAGING_ALL
+1230|0
+
+====================================================================================================
+## sql-b2-pub-before.txt
+====================================================================================================
+### SQL[b2-pub-before] 2026-10-07 01:20:50+0800
+SELECT def_code, COUNT(*) AS published_rows FROM config_data_rows WHERE def_code IN ('CURRENCY','DOC_TYPE','APPROVE_ROLE','PROJ_APPROVE') GROUP BY def_code ORDER BY def_code
+--- RESULT ---
+DEF_CODE|PUBLISHED_ROWS
+APPROVE_ROLE|4
+CURRENCY|5
+DOC_TYPE|5
+
+====================================================================================================
+## sql-b2-stage-after.txt
+====================================================================================================
+### SQL[b2-stage-after] 2026-10-07 01:20:56+0800
+SELECT def_code, status, COUNT(*) AS cnt FROM config_staging_rows WHERE task_id=3 GROUP BY def_code, status ORDER BY def_code
+--- RESULT ---
+DEF_CODE|STATUS|CNT
+APPROVE_ROLE|STAGED|2
+CURRENCY|STAGED|5
+DOC_TYPE|STAGED|2
+PROJ_APPROVE|STAGED|3
+
+====================================================================================================
+## sql-b2-stage-rows.txt
+====================================================================================================
+### SQL[b2-stage-rows] 2026-10-07 01:20:56+0800
+SELECT id,task_id,def_code,row_key,scope_type,scope_key,status,base_version FROM config_staging_rows WHERE task_id=3 ORDER BY id
+--- RESULT ---
+ID|TASK_ID|DEF_CODE|ROW_KEY|SCOPE_TYPE|SCOPE_KEY|STATUS|BASE_VERSION
+1|3|CURRENCY|CNY|GLOBAL|null|STAGED|1
+2|3|CURRENCY|USD|GLOBAL|null|STAGED|1
+3|3|CURRENCY|TST|GLOBAL|null|STAGED|null
+4|3|CURRENCY|TST|GLOBAL|null|STAGED|null
+5|3|CURRENCY|XXX|GLOBAL|null|STAGED|null
+6|3|DOC_TYPE|PO|GLOBAL|null|STAGED|1
+7|3|DOC_TYPE|EX|GLOBAL|null|STAGED|null
+8|3|APPROVE_ROLE|DEPT_MGR|GLOBAL|null|STAGED|1
+9|3|APPROVE_ROLE|CTO|GLOBAL|null|STAGED|null
+10|3|PROJ_APPROVE|STEP1|HE-P001|PROJECT|HE-P001|STAGED|null
+11|3|PROJ_APPROVE|STEP2|HE-P001|PROJECT|HE-P001|STAGED|null
+12|3|PROJ_APPROVE|STEP3|NO_SUCH_PROJ|PROJECT|NO_SUCH_PROJ|STAGED|null
+
+====================================================================================================
+## sql-b2-pub-after-import.txt
+====================================================================================================
+### SQL[b2-pub-after-import] 2026-10-07 01:20:57+0800
+SELECT def_code, COUNT(*) AS published_rows FROM config_data_rows WHERE def_code IN ('CURRENCY','DOC_TYPE','APPROVE_ROLE','PROJ_APPROVE') GROUP BY def_code ORDER BY def_code
+--- RESULT ---
+DEF_CODE|PUBLISHED_ROWS
+APPROVE_ROLE|4
+CURRENCY|5
+DOC_TYPE|5
+
+====================================================================================================
+## sql-b2-pub-all-after-import.txt
+====================================================================================================
+### SQL[b2-pub-all-after-import] 2026-10-07 01:20:57+0800
+SELECT (SELECT COUNT(*) FROM config_data_rows) AS published_all, (SELECT COUNT(*) FROM config_staging_rows) AS staging_all
+--- RESULT ---
+PUBLISHED_ALL|STAGING_ALL
+1230|12
+
+====================================================================================================
+## sql-b2-issues-db.txt
+====================================================================================================
+### SQL[b2-issues-db] 2026-10-07 01:20:45+0800
+SELECT id,def_code,field_code,row_index,severity,message FROM validation_issues WHERE job_id=3 ORDER BY id
+--- RESULT ---
+ID|DEF_CODE|FIELD_CODE|ROW_INDEX|SEVERITY|MESSAGE
+1|CURRENCY|null|5|ERROR|主键重复: TST (第 4 行已存在)
+2|CURRENCY|name|6|ERROR|必填字段 [货币名称] 不能为空
+3|PROJ_APPROVE|approveRole|3|ERROR|引用字段 [审批角色] 的值 GHOST_ROLE 在配置 APPROVE_ROLE 中不存在
+
+====================================================================================================
+## sql-b2-issues-classify.txt
+====================================================================================================
+### SQL[b2-issues-classify] 2026-10-07 01:20:46+0800
+SELECT def_code, severity, COUNT(*) AS cnt FROM validation_issues WHERE job_id=3 GROUP BY def_code, severity ORDER BY def_code
+--- RESULT ---
+DEF_CODE|SEVERITY|CNT
+CURRENCY|ERROR|2
+PROJ_APPROVE|ERROR|1
+
+====================================================================================================
+## sql-b2-pub-after-publish.txt
+====================================================================================================
+### SQL[b2-pub-after-publish] 2026-10-07 01:21:05+0800
+SELECT def_code, COUNT(*) AS published_rows FROM config_data_rows WHERE def_code IN ('CURRENCY','DOC_TYPE','APPROVE_ROLE','PROJ_APPROVE') GROUP BY def_code ORDER BY def_code
+--- RESULT ---
+DEF_CODE|PUBLISHED_ROWS
+APPROVE_ROLE|5
+CURRENCY|7
+DOC_TYPE|6
+PROJ_APPROVE|3
+
+====================================================================================================
+## sql-b2-stage-status-after.txt
+====================================================================================================
+### SQL[b2-stage-status-after] 2026-10-07 01:21:05+0800
+SELECT def_code, status, COUNT(*) AS cnt FROM config_staging_rows WHERE task_id=3 GROUP BY def_code, status ORDER BY def_code
+--- RESULT ---
+DEF_CODE|STATUS|CNT
+APPROVE_ROLE|PUBLISHED|2
+CURRENCY|FAILED|1
+CURRENCY|PUBLISHED|4
+DOC_TYPE|PUBLISHED|2
+PROJ_APPROVE|PUBLISHED|3
+
+====================================================================================================
+## sql-b2-publish-issues-db.txt
+====================================================================================================
+### SQL[b2-publish-issues-db] 2026-10-07 01:21:09+0800
+SELECT id,def_code,row_key,field_code,severity,message FROM validation_issues WHERE job_id=5
+--- RESULT ---
+ID|DEF_CODE|ROW_KEY|FIELD_CODE|SEVERITY|MESSAGE
+4|CURRENCY|TST|null|ERROR|发布冲突：行 TST 在导入后被其他操作修改（快照版本 null，当前版本 1），请重新导入后再发布
+
+====================================================================================================
+## sql-b2-cny-tst.txt
+====================================================================================================
+### SQL[b2-cny-tst] 2026-10-07 01:21:09+0800
+SELECT id,def_code,row_key,scope_key,version,data_json FROM config_data_rows WHERE def_code='CURRENCY' AND row_key LIKE 'TS%'
+--- RESULT ---
+ID|DEF_CODE|ROW_KEY|SCOPE_KEY|VERSION|DATA_JSON
+1231|CURRENCY|TST|null|1|{"code":"TST","name":"测试币","exchangeRate":"3.5","decimalPlaces":"2"}
+
+====================================================================================================
+## sql-b2-cny-all.txt
+====================================================================================================
+### SQL[b2-cny-all] 2026-10-07 01:21:09+0800
+SELECT id,row_key,version,data_json FROM config_data_rows WHERE def_code='CURRENCY' ORDER BY row_key
+--- RESULT ---
+ID|ROW_KEY|VERSION|DATA_JSON
+1|CNY|3|{"code":"CNY","name":"人民币","exchangeRate":"1.0","decimalPlaces":"2"}
+3|EUR|1|{"name":"欧元","exchangeRate":7.89,"code":"EUR","decimalPlaces":2}
+4|GBP|1|{"name":"英镑","exchangeRate":9.15,"code":"GBP","decimalPlaces":2}
+5|JPY|1|{"name":"日元","exchangeRate":0.048,"code":"JPY","decimalPlaces":0}
+1231|TST|1|{"code":"TST","name":"测试币","exchangeRate":"3.5","decimalPlaces":"2"}
+2|USD|3|{"code":"USD","name":"美元","exchangeRate":"7.24","decimalPlaces":"2"}
+1232|XXX|1|{"code":"XXX","exchangeRate":"6.0","decimalPlaces":"2"}
+
+====================================================================================================
+## sql-b2-projapprove-published.txt
+====================================================================================================
+### SQL[b2-projapprove-published] 2026-10-07 01:21:16+0800
+SELECT row_key, scope_key, version, data_json FROM config_data_rows WHERE def_code='PROJ_APPROVE' ORDER BY row_key
+--- RESULT ---
+ROW_KEY|SCOPE_KEY|VERSION|DATA_JSON
+STEP1|HE-P001|HE-P001|1|{"stepCode":"STEP1","stepName":"部门审批","approveRole":"DEPT_MGR","stepOrder":"1","docTypeCode":"PO","projectCode":"HE-P001"}
+STEP2|HE-P001|HE-P001|1|{"stepCode":"STEP2","stepName":"财务审批","approveRole":"GHOST_ROLE","stepOrder":"2","docTypeCode":"PO","projectCode":"HE-P001"}
+STEP3|NO_SUCH_PROJ|NO_SUCH_PROJ|1|{"stepCode":"STEP3","stepName":"无效项目范围","approveRole":"VP","stepOrder":"3","docTypeCode":"PO","projectCode":"NO_SUCH_PROJ"}
+
+====================================================================================================
+## sql-b2-doctype-published.txt
+====================================================================================================
+### SQL[b2-doctype-published] 2026-10-07 01:21:16+0800
+SELECT row_key, data_json FROM config_data_rows WHERE def_code='DOC_TYPE' ORDER BY row_key
+--- RESULT ---
+ROW_KEY|DATA_JSON
+EX|{"code":"EX","name":"特殊单据","category":"NOT_A_CATEGORY","enabled":"true"}
+IC|{"enabled":true,"name":"库存盘点","code":"IC","category":"INVENTORY"}
+PO|{"code":"PO","name":"采购订单","category":"PURCHASE","enabled":"true"}
+PR|{"enabled":true,"name":"请购单","code":"PR","category":"PURCHASE"}
+SO|{"enabled":true,"name":"销售订单","code":"SO","category":"SALES"}
+TO|{"enabled":true,"name":"调拨申请","code":"TO","category":"TRANSFER"}
+
+====================================================================================================
+## sql-b2-published-final.txt
+====================================================================================================
+### SQL[b2-published-final] 2026-10-07 01:21:15+0800
+SELECT def_code, COUNT(*) AS published_rows FROM config_data_rows GROUP BY def_code ORDER BY def_code
+--- RESULT ---
+DEF_CODE|PUBLISHED_ROWS
+APPROVE_ROLE|5
+CURRENCY|7
+DOC_TYPE|6
+PROJ_APPROVE|3
+PROJ_PRICE|1200
+TAX_RATE|16
+
+====================================================================================================
+## sql-b2-jobs-all.txt
+====================================================================================================
+### SQL[b2-jobs-all] 2026-10-07 01:21:16+0800
+SELECT id,task_id,job_type,status,progress,total,error_count FROM jobs ORDER BY id
+--- RESULT ---
+ID|TASK_ID|JOB_TYPE|STATUS|PROGRESS|TOTAL|ERROR_COUNT
+1|2|EXPORT|COMPLETED|2|2|0
+2|2|EXPORT|COMPLETED|2|2|0
+3|3|PRECHECK|FAILED|4|4|3
+4|3|IMPORT|COMPLETED|4|4|0
+5|3|PUBLISH|FAILED|4|4|1
+
+====================================================================================================
+## sql-b2-issues-all.txt
+====================================================================================================
+### SQL[b2-issues-all] 2026-10-07 01:21:17+0800
+SELECT job_id,def_code,COUNT(*) AS issues FROM validation_issues GROUP BY job_id,def_code ORDER BY job_id
+--- RESULT ---
+JOB_ID|DEF_CODE|ISSUES
+3|CURRENCY|2
+3|PROJ_APPROVE|1
+5|CURRENCY|1
+
+====================================================================================================
+## sql-b4-job6-db.txt
+====================================================================================================
+### SQL[b4-job6-db] 2026-10-07 01:24:17+0800
+SELECT id,job_type,status,progress,total,error_count FROM jobs WHERE id=6
+--- RESULT ---
+ID|JOB_TYPE|STATUS|PROGRESS|TOTAL|ERROR_COUNT
+6|PUBLISH|FAILED|4|4|12
+
+====================================================================================================
+## sql-b4-job6-issues.txt
+====================================================================================================
+### SQL[b4-job6-issues] 2026-10-07 01:24:17+0800
+SELECT id,def_code,row_key,severity,message FROM validation_issues WHERE job_id=6
+--- RESULT ---
+ID|DEF_CODE|ROW_KEY|SEVERITY|MESSAGE
+12|APPROVE_ROLE|DEPT_MGR|ERROR|发布冲突：行 DEPT_MGR 在导入后被其他操作修改（快照版本 1，当前版本 3），请重新导入后再发布
+13|APPROVE_ROLE|CTO|ERROR|发布冲突：行 CTO 在导入后被其他操作修改（快照版本 null，当前版本 1），请重新导入后再发布
+5|CURRENCY|CNY|ERROR|发布冲突：行 CNY 在导入后被其他操作修改（快照版本 1，当前版本 3），请重新导入后再发布
+6|CURRENCY|USD|ERROR|发布冲突：行 USD 在导入后被其他操作修改（快照版本 1，当前版本 3），请重新导入后再发布
+7|CURRENCY|TST|ERROR|发布冲突：行 TST 在导入后被其他操作修改（快照版本 null，当前版本 1），请重新导入后再发布
+8|CURRENCY|TST|ERROR|发布冲突：行 TST 在导入后被其他操作修改（快照版本 null，当前版本 1），请重新导入后再发布
+9|CURRENCY|XXX|ERROR|发布冲突：行 XXX 在导入后被其他操作修改（快照版本 null，当前版本 1），请重新导入后再发布
+10|DOC_TYPE|PO|ERROR|发布冲突：行 PO 在导入后被其他操作修改（快照版本 1，当前版本 3），请重新导入后再发布
+11|DOC_TYPE|EX|ERROR|发布冲突：行 EX 在导入后被其他操作修改（快照版本 null，当前版本 1），请重新导入后再发布
+14|PROJ_APPROVE|STEP1|HE-P001|ERROR|发布冲突：行 STEP1|HE-P001 在导入后被其他操作修改（快照版本 null，当前版本 1），请重新导入后再发布
+15|PROJ_APPROVE|STEP2|HE-P001|ERROR|发布冲突：行 STEP2|HE-P001 在导入后被其他操作修改（快照版本 null，当前版本 1），请重新导入后再发布
+16|PROJ_APPROVE|STEP3|NO_SUCH_PROJ|ERROR|发布冲突：行 STEP3|NO_SUCH_PROJ 在导入后被其他操作修改（快照版本 null，当前版本 1），请重新导入后再发布
+
+====================================================================================================
+## sql-b4-published-after-ai-publish.txt
+====================================================================================================
+### SQL[b4-published-after-ai-publish] 2026-10-07 01:24:17+0800
+SELECT def_code, COUNT(*) AS published_rows FROM config_data_rows GROUP BY def_code ORDER BY def_code
+--- RESULT ---
+DEF_CODE|PUBLISHED_ROWS
+APPROVE_ROLE|5
+CURRENCY|7
+DOC_TYPE|6
+PROJ_APPROVE|3
+PROJ_PRICE|1200
+TAX_RATE|16
+
+====================================================================================================
+## sql-final-counts.txt
+====================================================================================================
+### SQL[final-counts] 2026-10-07 01:24:21+0800
+SELECT (SELECT COUNT(*) FROM config_definitions) AS defs,(SELECT COUNT(*) FROM config_fields) AS fields,(SELECT COUNT(*) FROM config_dependencies) AS deps,(SELECT COUNT(*) FROM config_data_rows) AS published,(SELECT COUNT(*) FROM config_staging_rows) AS staging,(SELECT COUNT(*) FROM tasks) AS tasks,(SELECT COUNT(*) FROM task_items) AS task_items,(SELECT COUNT(*) FROM task_files) AS task_files,(SELECT COUNT(*) FROM jobs) AS jobs,(SELECT COUNT(*) FROM job_items) AS job_items,(SELECT COUNT(*) FROM validation_issues) AS issues
+--- RESULT ---
+DEFS|FIELDS|DEPS|PUBLISHED|STAGING|TASKS|TASK_ITEMS|TASK_FILES|JOBS|JOB_ITEMS|ISSUES
+7|33|0|1237|12|2|6|6|6|20|16
+
+====================================================================================================
+## sql-final-jobs.txt
+====================================================================================================
+### SQL[final-jobs] 2026-10-07 01:24:21+0800
+SELECT id,task_id,job_type,status,progress,total,error_count,started_at,finished_at FROM jobs ORDER BY id
+--- RESULT ---
+ID|TASK_ID|JOB_TYPE|STATUS|PROGRESS|TOTAL|ERROR_COUNT|STARTED_AT|FINISHED_AT
+1|2|EXPORT|COMPLETED|2|2|0|2026-10-07 01:18:50.828132|2026-10-07 01:18:54.868821
+2|2|EXPORT|COMPLETED|2|2|0|2026-10-07 01:19:24.364782|2026-10-07 01:19:25.131812
+3|3|PRECHECK|FAILED|4|4|3|2026-10-07 01:20:38.537319|2026-10-07 01:20:39.936128
+4|3|IMPORT|COMPLETED|4|4|0|2026-10-07 01:20:52.426316|2026-10-07 01:20:52.526096
+5|3|PUBLISH|FAILED|4|4|1|2026-10-07 01:21:03.258592|2026-10-07 01:21:03.30259
+6|3|PUBLISH|FAILED|4|4|12|2026-10-07 01:23:46.199352|2026-10-07 01:23:46.24935
+
+====================================================================================================
+## sql-final-tasks.txt
+====================================================================================================
+### SQL[final-tasks] 2026-10-07 01:24:22+0800
+SELECT id,type,title,current_step,status,version,settings_json FROM tasks ORDER BY id
+--- RESULT ---
+ID|TYPE|TITLE|CURRENT_STEP|STATUS|VERSION|SETTINGS_JSON
+2|EXPORT|S4基线-导出任务|EXPORT|COMPLETED|4|null
+3|IMPORT|S4基线-导入任务|PUBLISH|ACTIVE|4|null
