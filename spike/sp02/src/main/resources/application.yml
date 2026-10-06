@@ -1,0 +1,41 @@
+server:
+  port: ${SP02_PORT:18306}
+  shutdown: immediate
+
+spring:
+  application:
+    name: sp02-resume-protocol
+  data:
+    redis:
+      host: ${SP02_REDIS_HOST:127.0.0.1}
+      port: ${SP02_REDIS_PORT:6379}
+  ai:
+    openai:
+      base-url: ${AI_BASE_URL:https://api.deepseek.com}
+      api-key: ${DEEPSEEK_API_KEY}
+      chat:
+        options:
+          model: ${AI_MODEL:deepseek-flash}
+          temperature: 0.0
+
+spike:
+  # 前端工具挂起等待上限（阻塞式形态；等待期间挂起态已外置到 Redis）
+  frontend-tool-timeout-seconds: 120
+  # HITL 确认门挂起上限
+  confirm-timeout-seconds: 120
+  # 故障注入窗口：approve 之后、真正执行之前插入的延迟（用于复现“已放行未执行”崩溃）
+  exec-delay-ms-after-approve: ${SP02_EXEC_DELAY_MS:0}
+  # 挂起态 TTL
+  run-ttl-hours: 6
+  # 续跑显式循环的轮次上限
+  max-rounds: 5
+  # eligibility predicate 抑制开关（false=默认官方行为）
+  suppress-external-rounds: ${SP02_SUPPRESS_EXTERNAL:false}
+  # 轮次/挂起承载池容量（DC-12：平台线程 + 有界池，超限快速失败）
+  suspend-pool-size: ${SP02_SUSPEND_POOL_SIZE:16}
+
+logging:
+  level:
+    root: INFO
+    com.example.spike: INFO
+    org.springframework.data.redis: INFO
