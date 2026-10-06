@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.tools;
 
+import com.example.configmgr.ai.tool.ToolChannel;
 import com.example.configmgr.ai.tool.ToolMeta;
 import com.example.configmgr.ai.tool.ToolRisk;
 import com.example.configmgr.ai.tool.ToolScope;
@@ -24,23 +25,24 @@ import java.util.stream.Collectors;
  * <h2>与 REST 同服务层（单一事实源 FR-5.4/D2）</h2>
  * 每个工具方法都直接调用基座业务服务（DefinitionService/TaskService/ConfigDataService/JobService），
  * 与 REST 控制器走同一服务层，不复制业务逻辑、不另建数据访问路径；JSON Schema 由 Spring AI 从
- * 方法签名生成（不自建工具协议）。渐进披露标签见 {@link ToolScope}，风险等级见 {@link ToolRisk}。
+ * 方法签名生成（不自建工具协议）。渐进披露标签见 {@link ToolScope}，风险等级见 {@link ToolRisk}，
+ * 执行通道见 {@link ToolChannel} —— 这三份元数据正是 {@code gate/SpToolCallingManager}
+ * 判定"要不要挂起、挂哪种"的依据（不在此处硬编码工具名清单）。
  *
- * <h2>本棒只接两类工具（其余留给后续棒次）</h2>
+ * <h2>本棒接回的工具（P1 遗留 N7 的收口）</h2>
  * <ul>
- * <li><b>只读工具</b>：查询定义/任务/数据行数/作业状态——无副作用，可直接执行；</li>
- * <li><b>导出/导入任务的发起工具</b>：start_export / start_precheck / start_import
- * （作业创建，副作用限于生成作业与暂存数据）。</li>
+ * <li><b>只读</b>：查询定义/任务/数据行数/作业状态 —— 无副作用，直接执行；</li>
+ * <li><b>作业发起</b>：start_export / start_precheck / start_import（WRITE，作业创建）；</li>
+ * <li><b>破坏性</b>：{@code start_publish}（{@code @ToolRisk(DANGER)}）—— 必须经确认门，
+ * 放行才执行、拒绝/超时以"未执行"语义回填；</li>
+ * <li><b>前端指令</b>：{@code open_export_file_editor} / {@code download_export_file}
+ * （{@code @ToolChannel(FRONTEND)}）—— 副作用在浏览器里，后端方法体是哨兵桩，
+ * 由 {@code SpToolCallingManager} 挂起并由 {@code POST /api/ai/frontend-tool-result} 回灌结果。</li>
  * </ul>
- * <b>本棒不接（第二棒确认门落地后再接）</b>：
- * <ul>
- * <li>破坏性工具 {@code start_publish}（基座标 DANGER，必须经 HITL 确认门）；</li>
- * <li>写类工具 create_task / select_defs / set_query_condition / navigate_to_step
- * （状态变更，需与确认门/前端指令通道一起评审）；</li>
- * <li>前端指令类工具 open_export_file_editor / download_export_file
- * （依赖运行上下文里的 UI 指令通道，属渐进披露三重防线的执行兜底，随第二棒一起接）。</li>
- * </ul>
- * 被排除工具的原始实现（含 @ToolScope/@ToolRisk 标注）见基座 git 历史与 S4.2-P1 证据文档。
+ * <b>仍未接回</b>（P1 N7 的剩余项）：{@code create_task} / {@code select_defs} /
+ * {@code set_query_condition} / {@code navigate_to_step} —— 它们既非破坏性也非前端指令，
+ * 而是"任务向导状态机的写操作"，需与前端渐进披露表（kimi-k3 {@code frontend-tools.js}）
+ * 一起评审后再接（S4.4 联动）。原始实现见基座 git 历史与 S4.2-P1 证据文档。
  */
 @Component
 @RequiredArgsConstructor
@@ -202,6 +204,49 @@ public class AiTools {
         } catch (Exception e) {
             return "启动导入失败: " + e.getMessage();
         }
+    }
+
+    @Tool(name = "start_publish", description = "启动发布作业，将暂存数据正式发布到生产数据（高风险，需要用户确认）")
+    @ToolScope("task:IMPORT/PUBLISH")
+    @ToolRisk(ToolMeta.RiskLevel.DANGER)
+    public String startPublish(
+            @ToolParam(description = "任务ID") Long taskId) {
+        try {
+            Job job = jobService.createAndStart(taskId, Job.JobType.PUBLISH);
+            return String.format("发布作业已启动（作业 #%d），正在将数据写入正式库…", job.getId());
+        } catch (Exception e) {
+            return "启动发布失败: " + e.getMessage();
+        }
+    }
+
+    // ==================== 前端指令（副作用在浏览器，后端桩体永不执行） ====================
+
+    /**
+     * 前端工具哨兵：正常路径下 {@code SpToolCallingManager} 会识别
+     * {@code @ToolChannel(FRONTEND)} 并挂起，本方法体<b>不会</b>被执行。
+     * 若某处看到这段文本，说明该工具被绕开挂起、按普通工具执行了（例如 runId/toolContext 缺失），
+     * 是必须立刻定位的缺陷信号（SP-01ab §4 的同一手法）。
+     */
+    static final String FRONTEND_STUB = "FRONTEND_STUB_SHOULD_NOT_RUN";
+
+    @Tool(name = "open_export_file_editor", description = "请求前端打开指定配置的导出文件在线编辑器（SpreadJS）")
+    @ToolScope("task:EXPORT/EXPORT")
+    @ToolRisk(ToolMeta.RiskLevel.READ)
+    @ToolChannel(ToolMeta.Channel.FRONTEND)
+    public String openExportFileEditor(
+            @ToolParam(description = "任务ID") Long taskId,
+            @ToolParam(description = "配置定义编码") String defCode) {
+        return FRONTEND_STUB;
+    }
+
+    @Tool(name = "download_export_file", description = "触发浏览器下载指定配置的导出文件")
+    @ToolScope("task:EXPORT/EXPORT")
+    @ToolRisk(ToolMeta.RiskLevel.READ)
+    @ToolChannel(ToolMeta.Channel.FRONTEND)
+    public String downloadExportFile(
+            @ToolParam(description = "任务ID") Long taskId,
+            @ToolParam(description = "配置定义编码") String defCode) {
+        return FRONTEND_STUB;
     }
 
 }

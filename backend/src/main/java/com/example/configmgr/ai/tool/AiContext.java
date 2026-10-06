@@ -53,4 +53,31 @@ public class AiContext {
 		return "*";
 	}
 
+	/**
+	 * 扁平化成可存进 Redis 快照的 Map（{@code ai:run:<runId>} 的 {@code context} 段）。
+	 * 续跑时据此重建同一份上下文 —— 披露的候选工具子集必须与挂起前一致，
+	 * 否则续跑会拿着"另一套工具"继续跑循环。
+	 */
+	public Map<String, Object> toMap() {
+		Map<String, Object> out = new LinkedHashMap<>();
+		out.put("page", page);
+		out.put("taskId", taskId);
+		out.put("taskType", taskType);
+		out.put("step", step);
+		out.put("extra", extra);
+		return out;
+	}
+
+	/** {@link #toMap()} 的逆操作；容忍缺字段与 null。 */
+	@SuppressWarnings("unchecked")
+	public static AiContext fromMap(Map<String, Object> map) {
+		if (map == null) {
+			return empty();
+		}
+		Object taskId = map.get("taskId");
+		return of((String) map.get("page"), (String) map.get("taskType"), (String) map.get("step"),
+				taskId == null ? null : Long.valueOf(String.valueOf(taskId)),
+				map.get("extra") instanceof Map<?, ?> extra ? (Map<String, Object>) extra : null);
+	}
+
 }

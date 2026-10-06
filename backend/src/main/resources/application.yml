@@ -11,7 +11,10 @@ spring:
 
   threads:
     virtual:
-      enabled: true
+      # DC-12：禁用虚拟线程（N3 裁决，第二棒执行）。全局翻转 ⇒ 业务 @Async（作业执行）
+      # 与 AI 运行时都跑平台线程：作业侧见 config/AsyncConfig（有界池 4/16 + 队列 200），
+      # AI 侧见 ai/exec/AiExecutorConfig（挂起专用有界池，饱和 503 SUSPEND_POOL_SATURATED）。
+      enabled: false
 
   datasource:
     url: jdbc:h2:file:./data/config_mgr_db;DB_CLOSE_DELAY=-1
@@ -85,24 +88,30 @@ spring:
           stream-usage: true
 
 app:
+  # ── S4.2 规格 §4 配置键表（app.ai 只由 ai/config/AiProperties 绑定；基座那套
+  #    max-iterations/session-ttl-minutes/hitl-timeout-minutes/thinking-disabled 已删除，
+  #    其中 thinking-disabled 在新运行时早已失效：官方循环 + reasoning 补丁不设 extraBody.thinking）──
   ai:
-    max-iterations: 12
-    session-ttl-minutes: 30
-    hitl-timeout-minutes: 5
-    thinking-disabled: true
-    # ── S4.2 规格 §4 配置项 ──
     session-ttl: 6h
     memory:
       max-messages: 40
     hitl:
+      # 确认门/前端工具挂起的等待上限（ADR-2 上限约束；超限自动取消，工具不执行）
       timeout: 120s
     suspend:
-      # 挂起专用有界平台线程池（DC-12 禁用虚拟线程；饱和 503 SUSPEND_POOL_SATURATED 见第二棒）
+      # 挂起专用有界平台线程池（DC-12 禁虚拟线程）；容量即挂起并发上限，队列为 0 ⇒ 饱和快速失败 503
       pool-size: 20
-      queue-capacity: 100
     resilience:
-      # 双超时/重试阈值待 §13.2 #2 压测裁决，本棒只用总预算兜住单轮墙钟
+      # 双超时 + 有界重试的阈值待技术方案 §13.2 #2 压测裁决；本棒只用 total-budget 兜住单轮墙钟
+      first-byte-timeout: 30s
+      inter-event-timeout: 30s
+      max-attempts: 2
       total-budget: 10m
+    session:
+      lock:
+        # ADR-5：会话锁 TTL = 轮上限；watchdog 续期；轮终态主动释放
+        ttl: 10m
+        watchdog: 30s
   job:
     demo-batch-delay-ms: 300
     batch-size: 100

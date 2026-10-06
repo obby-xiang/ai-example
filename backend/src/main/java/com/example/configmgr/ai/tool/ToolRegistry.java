@@ -48,6 +48,7 @@ public class ToolRegistry {
                 String name = toolAnn.name().isBlank() ? method.getName() : toolAnn.name();
                 ToolScope scopeAnn = method.getAnnotation(ToolScope.class);
                 ToolRisk riskAnn = method.getAnnotation(ToolRisk.class);
+                ToolChannel channelAnn = method.getAnnotation(ToolChannel.class);
 
                 ToolMeta meta = new ToolMeta();
                 meta.setName(name);
@@ -55,6 +56,7 @@ public class ToolRegistry {
                         ? toolAnn.description().substring(0, 20) : toolAnn.description());
                 meta.setScopePatterns(scopeAnn != null ? scopeAnn.value() : new String[]{"*"});
                 meta.setRiskLevel(riskAnn != null ? riskAnn.value() : ToolMeta.RiskLevel.READ);
+                meta.setChannel(channelAnn != null ? channelAnn.value() : ToolMeta.Channel.BACKEND);
 
                 metaMap.put(name, meta);
                 log.debug("Registered tool: {} scopes={}", name, Arrays.toString(meta.getScopePatterns()));
@@ -94,6 +96,24 @@ public class ToolRegistry {
 
     public ToolMeta getMeta(String name) {
         return metaMap.get(name);
+    }
+
+    /**
+     * 风险等级（HITL 判定用）。未注册的工具按 READ 处理——与
+     * {@code @ToolRisk} 的默认值一致，不因缺元数据而把工具变成"需要人审"。
+     */
+    public ToolMeta.RiskLevel riskOf(String name) {
+        ToolMeta meta = metaMap.get(name);
+        return meta == null || meta.getRiskLevel() == null ? ToolMeta.RiskLevel.READ : meta.getRiskLevel();
+    }
+
+    /**
+     * 执行通道（挂起判定用）。未注册的工具按 BACKEND 处理，即回落官方默认执行——
+     * 挂起只对<b>已显式声明</b>的通道生效，避免元数据缺失导致工具"卡住不执行"。
+     */
+    public ToolMeta.Channel channelOf(String name) {
+        ToolMeta meta = metaMap.get(name);
+        return meta == null || meta.getChannel() == null ? ToolMeta.Channel.BACKEND : meta.getChannel();
     }
 
     private Set<String> buildTags(AiContext ctx) {

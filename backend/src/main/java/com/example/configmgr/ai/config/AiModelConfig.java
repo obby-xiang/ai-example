@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.config;
 
+import com.example.configmgr.ai.gate.SpToolCallingManager;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.memory.RedisChatMemoryRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -125,13 +126,13 @@ public class AiModelConfig {
 
 		@Bean
 		public OpenAiChatModel chatModel(OpenAiApi openAiApi, OpenAiChatProperties chatProperties,
-				ObjectProvider<ToolCallingManager> toolCallingManager, ObjectProvider<RetryTemplate> retryTemplate,
+				SpToolCallingManager spToolCallingManager, ObjectProvider<RetryTemplate> retryTemplate,
 				ObjectProvider<ObservationRegistry> observationRegistry) {
 			OpenAiChatOptions options = chatProperties.getOptions();
-			// 工具执行留在官方循环内（internalToolExecutionEnabled 取官方默认 true）：
-			// 补丁类回放 assistant(tool_calls) 的 reasoning_content，避免第二轮 400（ADR-4）。
-			return new ReasoningAwareOpenAiChatModel(openAiApi, options,
-					toolCallingManager.getIfAvailable(() -> ToolCallingManager.builder().build()),
+			// 工具执行留在官方循环内（internalToolExecutionEnabled 取官方默认 true），
+			// 但执行扩展点交给我们组合官方 DefaultToolCallingManager 的 SpToolCallingManager：
+			// 确认门 / 前端工具挂起 / 可见性钩子 / 挂起态外置都在那里（S4.2 §2）。
+			return new ReasoningAwareOpenAiChatModel(openAiApi, options, spToolCallingManager,
 					retryTemplate.getIfAvailable(RetryTemplate::new),
 					observationRegistry.getIfAvailable(() -> ObservationRegistry.NOOP));
 		}

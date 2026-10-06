@@ -39,7 +39,7 @@ public class JobService {
         cancellationRegistry.register(job.getId());
 
         // 关键：必须在事务提交之后再启动异步执行。
-        // 否则虚拟线程可能先于本事务提交就开始更新 Job 行，
+        // 否则执行线程可能先于本事务提交就开始更新 Job 行，
         // 触发 "Row was updated or deleted by another transaction" 竞态失败。
         final Job savedJob = job;
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
