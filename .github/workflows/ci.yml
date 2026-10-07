@@ -1,0 +1,65 @@
+name: CI 门禁
+
+# S5.d：门禁骨架 = 后端编译 + 后端单测 + 前端类型检查/构建。
+# E2E（scripts/verify-e2e.ps1，依赖 Memurai 与真实 AI key）不在本门禁内，属后续项。
+on:
+  push:
+    branches: [main-v2]
+  pull_request:
+    branches: [main-v2]
+
+# 门禁只读仓库内容，显式收窄 GITHUB_TOKEN 权限。
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: 后端编译与单测
+    # 全部用例为 JUnit + Mockito 桩（无 Spring 上下文/无 Redis/无 AI key 依赖），
+    # 无 Windows 专属物，故取 ubuntu-latest：启动更快、排队更短。
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 JDK 21（temurin）
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          cache-dependency-path: backend/pom.xml
+
+      - name: 编译并运行单测（mvn test，147 例）
+        run: mvn -B test
+
+  frontend:
+    name: 前端类型检查与构建
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: yarn
+          cache-dependency-path: frontend/yarn.lock
+
+      - name: 安装依赖（严格按锁文件）
+        run: yarn install --frozen-lockfile
+
+      # build 脚本本身已含 vue-tsc --noEmit；这里单列一步，使类型错误与打包错误
+      # 在 Actions 界面上可区分（注：本步骤失败后 build 步骤不会执行）。
+      - name: 类型检查（vue-tsc --noEmit）
+        run: yarn typecheck
+
+      - name: 生产构建（vue-tsc + vite build）
+        run: yarn build
