@@ -28,7 +28,7 @@ import java.util.regex.Pattern;
  * <table>
  * <caption>字段级属性（{@code fields[]}）</caption>
  * <tr><th>属性</th><th>必填</th><th>约束</th></tr>
- * <tr><td>{@code key}</td><td>是</td><td>{@code ^[A-Za-z_][A-Za-z0-9_]*$}，≤ {@value #MAX_KEY_CHARS} 字符，表单内唯一</td></tr>
+ * <tr><td>{@code key}</td><td>是</td><td>{@code ^[A-Za-z_][A-Za-z0-9_]*$}，≤ {@value #MAX_KEY_CHARS} 字符，表单内唯一，<b>且不得为原型污染键</b>（{@code __proto__}/{@code constructor}/{@code prototype}，见 {@link #FORBIDDEN_FIELD_KEYS}）</td></tr>
  * <tr><td>{@code label}</td><td>是</td><td>非空文本，≤ {@value #MAX_LABEL_CHARS} 字符</td></tr>
  * <tr><td>{@code type}</td><td>是</td><td>白名单六型：{@code text/number/boolean/date/enum/multi_select}</td></tr>
  * <tr><td>{@code required}</td><td>否</td><td>布尔（缺省 false）</td></tr>
@@ -43,6 +43,9 @@ import java.util.regex.Pattern;
  * 要求的限定形态生成式 UI（对比 DC-14 N2 拒绝的完整 A2UI/OpenGenUI 渲染层：那是任意组件树，
  * 这里只有六种预定义控件）。文案内容（title/label/placeholder/选项文本）<b>不做黑名单式启发式过滤</b>：
  * 前端以文本插值渲染（非 {@code v-html}），字符串只是数据；滥用面由长度上限封顶。
+ * 唯一一处例外是<b>字段键名字</b>的黑名单（{@link #FORBIDDEN_FIELD_KEYS}）：{@code __proto__}、{@code constructor}、
+ * {@code prototype} 三者都能通过键名正则，但赋到 JS 对象上会改写原型或取不到值，前端防御性解析会丢弃整张表单 ——
+ * 后端在此同步拒绝（不是内容级过滤，与上句"不做黑名单"不冲突），让模型拿到可修正的错误提示而不是无声取消。
  * 若将来前端引入富文本渲染，这条假设失效，必须回到此处补内容级校验。
  *
  * <h2>上限值</h2>
@@ -78,6 +81,15 @@ public final class GenerativeFormRules {
 
 	/** 允许带 {@code placeholder} 的类型。 */
 	public static final Set<String> PLACEHOLDER_TYPES = Set.of("text", "number", "date");
+
+	/**
+	 * 字段键黑名单：<b>原型污染键</b>（与前端 {@code FORBIDDEN_FIELD_KEYS} 拦截口径一致，红队问题 3）。
+	 *
+	 * <p>三者都能通过 {@code KEY_PATTERN}，但赋到 JS 对象上会改写 {@code Object.prototype} 或取不到值，
+	 * 前端防御性解析会因此丢掉整张表单 —— 对模型表现为一次无声的取消。后端在此一并拒绝，
+	 * 把"前端渲染不了"变成一条可修正的错误提示。
+	 */
+	public static final Set<String> FORBIDDEN_FIELD_KEYS = Set.of("__proto__", "constructor", "prototype");
 
 	public static final int MAX_FIELDS = 20;
 
@@ -252,6 +264,10 @@ public final class GenerativeFormRules {
 		String key = textOrNull(field.get("key"));
 		if (key == null || key.isBlank()) {
 			reasons.add(at + ".key 必填且不得为空");
+		}
+		else if (FORBIDDEN_FIELD_KEYS.contains(key)) {
+			reasons.add(at + ".key \"" + key + "\" 是原型污染键（" + String.join("/", sorted(FORBIDDEN_FIELD_KEYS))
+					+ "），拒绝（与前端 FORBIDDEN_FIELD_KEYS 拦截口径一致）");
 		}
 		else if (!KEY_PATTERN.matcher(key).matches()) {
 			reasons.add(at + ".key \"" + key + "\" 不合法（字母或下划线开头，仅字母/数字/下划线，长度 ≤" + MAX_KEY_CHARS + "）");

@@ -110,6 +110,39 @@ class GenerativeFormSchemaRulesTest {
 		assertThat(joined(GenerativeFormRules.schemaReasons(form(form)))).contains("选项属性白名单").contains("icon");
 	}
 
+	// ── 反例：原型污染键（与前端 FORBIDDEN_FIELD_KEYS 同步，红队问题 3） ──────────
+
+	@Test
+	void rejectsProtoFieldKey() throws Exception {
+		String form = """
+				{"scenario":"FILTER","fields":[{"key":"__proto__","label":"K","type":"text"}]}""";
+		List<String> reasons = GenerativeFormRules.schemaReasons(form(form));
+		assertThat(joined(reasons)).contains("\"__proto__\" 是原型污染键")
+				.contains("__proto__/constructor/prototype");
+		// 键名本身合正则：被拒的唯一原因是原型键黑名单，而不是键名字符集规则
+		assertThat(joined(reasons)).doesNotContain("不合法");
+	}
+
+	@Test
+	void rejectsConstructorFieldKey() throws Exception {
+		String form = """
+				{"scenario":"FILTER","fields":[{"key":"constructor","label":"K","type":"text"}]}""";
+		List<String> reasons = GenerativeFormRules.schemaReasons(form(form));
+		assertThat(joined(reasons)).contains("\"constructor\" 是原型污染键")
+				.contains("__proto__/constructor/prototype");
+		assertThat(joined(reasons)).doesNotContain("不合法");
+	}
+
+	@Test
+	void rejectsPrototypeFieldKey() throws Exception {
+		String form = """
+				{"scenario":"FILTER","fields":[{"key":"prototype","label":"K","type":"text"}]}""";
+		List<String> reasons = GenerativeFormRules.schemaReasons(form(form));
+		assertThat(joined(reasons)).contains("\"prototype\" 是原型污染键")
+				.contains("__proto__/constructor/prototype");
+		assertThat(joined(reasons)).doesNotContain("不合法");
+	}
+
 	// ── 反例：结构/取值不合规 ───────────────────────────────────────────────
 
 	@Test
