@@ -336,7 +336,7 @@ public class ResilientChatService {
 						runId, attempt, maxAttempts, violation.getCode(), emitted, sideEffect, overBudget, retryable,
 						watchdog.upstreamEvents(), violation.getMessage(), accumulator.tailSummary());
 				if (!retryable) {
-					fail(runId, sessionId, violation, attempt, emitted, sideEffect, out);
+					fail(runId, sessionId, violation, attempt, emitted, sideEffect, accumulator.text().length(), out);
 					return;
 				}
 				Map<String, Object> retryFrame = new LinkedHashMap<>();
@@ -490,7 +490,7 @@ public class ResilientChatService {
 	}
 
 	private void fail(String runId, String sessionId, StreamViolationException violation, int attempts, boolean emitted,
-			boolean sideEffect, SseChatEmitter out) {
+			boolean sideEffect, int partialChars, SseChatEmitter out) {
 		String code = violation.getCode();
 		if (sideEffect) {
 			code = code + "_AFTER_TOOL_SIDE_EFFECT";
@@ -507,6 +507,11 @@ public class ResilientChatService {
 			snapshot.setError(code + "：" + message);
 			this.store.save(snapshot);
 		}
+		// S5c-5：失败也是"把这一轮开过的东西关掉"——与 finish / cancelTerminal 同口径地先收正文段
+		// 再发终帧。否则"已产出半截正文后上游报错"会让运行以一条仍开着的文本消息收尾
+		// （ag-ui 的 open-message-at-run-finished 判据：运行关闭前，它打开的一切都必须先关闭）。
+		// 未开过段（纯工具轮 / 未产出正文）时 textEnd 是幂等空操作。
+		out.textEnd(partialChars);
 		out.error(code, message);
 	}
 
@@ -558,9 +563,14 @@ public class ResilientChatService {
 			return;
 		}
 		String text = generation.getOutput().getText();
-		if (StringUtils.hasText(text)) {
-			// T5：正文消息边界三段式（start/content/end）——start 只在首段前补一次，
-			// 后续每一片文本都是 content（delta）；end 在轮终态补（见 finish / cancelTerminal）。
+		// T5：正文消息边界三段式（start/content/end）——start 只在首段前补一次，
+		// 后续每一片文本都是 content（delta）；end 在轮终态补（见 finish / cancelTerminal / fail）。
+		//
+		// S5c-4：发帧判据与累计判据必须同源 —— 这里此前用 StringUtils.hasText（"非空白才算内容"），
+		// 而 Accumulator 无条件拼接每一个分片。于是模型单独吐一个纯空白分片（空格或换行，
+		// 流式分片边界上很常见）时，message_end.chars 会大于 delta 拼接长度，前端渲染的正文
+		// 与落定正文（finalText）分家。改为"非空即发"：空白也是正文的一部分，三处口径归一。
+		if (text != null && !text.isEmpty()) {
 			out.textStart();
 			out.delta(text);
 		}
