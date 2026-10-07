@@ -1,169 +1,199 @@
 <template>
-  <div class="flex h-full flex-col bg-white">
-    <!-- Header -->
-    <div class="flex items-center justify-between border-b border-slate-200 bg-slate-50 px-4 py-3">
+  <aside class="h-full flex flex-col bg-white border-l border-gray-200 ai-panel">
+    <header class="px-3 py-2 border-b border-gray-200 flex items-center justify-between">
       <div class="flex items-center gap-2">
-        <el-icon class="text-lg text-blue-500"><ChatDotRound /></el-icon>
-        <span class="text-[15px] font-semibold text-slate-800">AI 助手</span>
-        <el-tag v-if="aiStore.runActive" type="warning" size="small" effect="plain">思考中…</el-tag>
+        <span class="font-medium">AI 助手</span>
+        <el-tag size="small" :type="healthTagType">{{ healthLabel }}</el-tag>
       </div>
       <div class="flex items-center gap-1">
-        <el-tooltip content="新对话" placement="bottom">
-          <el-button :icon="RefreshRight" circle size="small" @click="handleReset" />
-        </el-tooltip>
-        <el-tooltip v-if="aiStore.runActive" content="取消" placement="bottom">
-          <el-button :icon="Close" circle size="small" type="danger" @click="aiStore.cancelRun()" />
-        </el-tooltip>
+        <el-button link size="small" @click="probe">检测可用性</el-button>
+        <el-button link size="small" :icon="Fold" title="隐藏 AI 栏（隐藏后业务功能不受影响）" @click="ai.toggleExpand()" />
       </div>
+    </header>
+
+    <div class="px-3 py-2 text-xs text-gray-500 border-b border-gray-100">
+      <div>会话 ID（页签级）：<span class="font-mono">{{ shortSessionId }}</span></div>
+      <div>工作区上下文：<span class="font-mono">{{ workspace.contextKey }}</span>（数据版本 {{ workspace.dataVersion }}）</div>
     </div>
 
-    <!-- Context chip -->
-    <ContextChip />
+    <el-alert
+      v-if="ai.notice"
+      class="m-2"
+      type="warning"
+      :closable="false"
+      show-icon
+      :title="ai.notice"
+    />
 
-    <!-- Message list -->
-    <div class="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-4 py-4" ref="messageListRef">
-      <div v-if="aiStore.messages.length === 0" class="flex flex-1 flex-col items-center justify-center gap-2 py-10 text-center text-slate-500">
-        <el-icon size="36" class="text-slate-300"><ChatDotRound /></el-icon>
-        <p class="text-sm">你好！我是 AI 助手，可以帮你管理配置数据。</p>
-        <p class="text-xs text-slate-400">尝试告诉我你想做什么，比如"帮我导出货币配置"</p>
-      </div>
+    <el-alert
+      v-if="ai.busyConflict"
+      class="m-2"
+      type="error"
+      :closable="false"
+      show-icon
+      :title="`该会话已有一轮进行中（runId=${ai.busyConflict.runId}）`"
+    >
+      <el-button size="small" type="primary" @click="ai.reattachActive()">一键重挂该轮</el-button>
+    </el-alert>
 
-      <template v-for="msg in aiStore.messages" :key="msg.id">
-        <!-- User message -->
-        <div v-if="msg.role === 'user'" class="flex justify-end">
-          <div class="max-w-[85%] whitespace-pre-wrap break-words rounded-xl rounded-br-sm bg-blue-500 px-3 py-2 text-sm leading-relaxed text-white">
-            {{ msg.text }}
-          </div>
-        </div>
-
-        <!-- Assistant message -->
-        <div v-else-if="msg.role === 'assistant'" class="flex justify-start">
-          <div class="max-w-[85%] whitespace-pre-wrap break-words rounded-xl rounded-bl-sm bg-slate-100 px-3 py-2 text-sm leading-relaxed text-slate-800">
-            <span v-if="msg.streaming">{{ msg.text }}<span class="cursor">▌</span></span>
-            <span v-else>{{ msg.text }}</span>
-          </div>
-        </div>
-
-        <!-- Tool call -->
-        <div v-else-if="msg.role === 'tool'" class="flex justify-start">
-          <ToolCallCard :msg="msg" />
-        </div>
-
-        <!-- System message -->
-        <div v-else-if="msg.role === 'system'" class="w-full text-center text-xs text-slate-400">
-          {{ msg.text }}
-        </div>
-      </template>
-
-      <!-- HITL Interaction card -->
-      <InteractionCard
-        v-if="aiStore.pendingInteraction"
-        :interaction="aiStore.pendingInteraction"
-        @approve="handleApprove"
-        @reject="handleReject"
+    <div class="flex-1 layout-column px-3 py-2 space-y-3">
+      <el-empty
+        v-if="ai.messages.length === 0"
+        description="本棒为占位壳：状态层（SSE/HITL/前端工具/恢复）已就绪，真实对话由 b 棒接入"
       />
+      <div v-for="message in ai.messages" :key="message.id" class="text-sm">
+        <div class="text-xs text-gray-400 mb-1">
+          {{ message.role === 'user' ? '用户' : message.role === 'system' ? '系统' : '助手' }}
+        </div>
+        <div class="whitespace-pre-wrap break-words">{{ message.content }}</div>
+        <el-collapse v-if="message.reasoning" class="mt-1">
+          <el-collapse-item title="思考链" name="reasoning">
+            <div class="text-xs text-gray-600 whitespace-pre-wrap">{{ message.reasoning }}</div>
+          </el-collapse-item>
+        </el-collapse>
+        <div v-if="message.toolRuns.length > 0" class="mt-1 space-y-1">
+          <div
+            v-for="run in message.toolRuns"
+            :key="run.toolCallId"
+            class="flex items-center gap-2 text-xs border border-gray-200 rounded px-2 py-1"
+          >
+            <el-tag size="small" :type="toolTagType(run.status)">{{ toolStatusLabel(run.status) }}</el-tag>
+            <span class="font-mono">{{ run.name }}</span>
+            <span v-if="run.result" class="text-gray-500 truncate">{{ run.result }}</span>
+          </div>
+        </div>
+        <div v-if="message.pendingCall" class="mt-2 border border-amber-300 rounded p-2 text-xs">
+          <div class="mb-1">
+            {{ message.pendingCall.kind === 'CONFIRM' ? '待人工确认' : '待前端执行' }}：
+            <span class="font-mono">{{ message.pendingCall.name }}</span>
+            <span v-if="message.pendingCall.timeoutSeconds">
+              （超时 {{ formatCountdown(message.pendingCall.timeoutSeconds) }}）
+            </span>
+          </div>
+          <div v-if="message.pendingCall.kind === 'CONFIRM'" class="flex gap-2">
+            <el-button size="small" type="primary" @click="ai.confirm(true)">放行</el-button>
+            <el-button size="small" type="danger" plain @click="ai.confirm(false, '用户拒绝')">拒绝</el-button>
+          </div>
+        </div>
+      </div>
     </div>
 
-    <!-- Suggestion chips -->
-    <SuggestionChips @select="handleSuggestion" />
-
-    <!-- Composer -->
-    <div class="flex items-end gap-2 border-t border-slate-200 p-3">
+    <footer class="border-t border-gray-200 p-2">
       <el-input
-        v-model="inputText"
+        v-model="draft"
         type="textarea"
         :rows="2"
-        :autosize="{ minRows: 2, maxRows: 5 }"
-        placeholder="输入消息，按 Enter 发送（Shift+Enter 换行）"
-        :disabled="aiStore.runActive && !aiStore.pendingInteraction"
-        @keydown.enter.exact.prevent="handleSend"
-        @keydown.enter.shift.exact="() => {}"
         resize="none"
-        class="flex-1"
+        placeholder="对话输入由 b 棒接入（状态层 send/confirm/reattach 已可用）"
+        :disabled="!inputEnabled"
       />
-      <el-button
-        type="primary"
-        :icon="Promotion"
-        :disabled="!inputText.trim() || (aiStore.runActive && !aiStore.pendingInteraction)"
-        :loading="aiStore.runActive"
-        @click="handleSend"
-        class="shrink-0"
-      >发送</el-button>
-    </div>
-  </div>
+      <div class="flex justify-between items-center mt-1">
+        <span class="text-xs text-gray-400">
+          {{ ai.loading ? '生成中…' : ai.suspended ? '挂起等待中…' : '空闲' }}
+        </span>
+        <div class="flex gap-1">
+          <el-button size="small" :disabled="!ai.loading" @click="ai.stop()">停止</el-button>
+          <el-button
+            size="small"
+            type="primary"
+            :disabled="!inputEnabled"
+            @click="submit"
+          >
+            发送
+          </el-button>
+        </div>
+      </div>
+    </footer>
+  </aside>
 </template>
 
-<script setup>
-import { ref, watch, nextTick } from 'vue'
-import { ChatDotRound, RefreshRight, Close, Promotion } from '@element-plus/icons-vue'
-import { useAiStore } from '@/stores/ai.js'
-import { ElMessageBox } from 'element-plus'
-import ContextChip from './ContextChip.vue'
-import ToolCallCard from './ToolCallCard.vue'
-import InteractionCard from './InteractionCard.vue'
-import SuggestionChips from './SuggestionChips.vue'
+<script setup lang="ts">
+/**
+ * AI 面板（本棒 = 占位壳）。
+ *
+ * 交互形态参照 kimi-k3 `AiPanel.vue:44-85`（思考链折叠 / 工具卡状态 / HITL 确认与拒绝
+ * 双路径），但**不接真实对话渲染**：b 棒负责流式渲染、渐进披露提示与工具卡细节。
+ *
+ * 裁剪性：本组件只依赖 stores/ai 与 stores/workspace 的窄接口；
+ * 隐藏它（App.vue 的 AI 栏开关）后全部业务功能照常。
+ */
+import { computed, onMounted, ref } from 'vue'
+import { Fold } from '@element-plus/icons-vue'
+import { useAiStore } from '@/stores/ai'
+import { useWorkspaceStore } from '@/stores/workspace'
+import { formatCountdown } from '@/utils/format'
+import type { ToolRunStatus } from '@/types/ai'
 
-const aiStore = useAiStore()
-const inputText = ref('')
-const messageListRef = ref(null)
+const ai = useAiStore()
+const workspace = useWorkspaceStore()
+const draft = ref('')
 
-// Auto-scroll to bottom when new messages arrive
-watch(() => aiStore.messages.length, async () => {
-  await nextTick()
-  if (messageListRef.value) {
-    messageListRef.value.scrollTop = messageListRef.value.scrollHeight
+/** b 棒接入前，仅当后端可用且输入非空时才允许发送 */
+const inputEnabled = computed(() => ai.available && !ai.loading && draft.value.trim().length > 0)
+
+const shortSessionId = computed(() => ai.sessionId.slice(0, 8))
+
+const healthLabel = computed(() => {
+  if (ai.health === null && ai.healthError === null) {
+    return '未检测'
   }
-}, { immediate: false })
-
-watch(() => aiStore.messages[aiStore.messages.length - 1]?.text, async () => {
-  await nextTick()
-  if (messageListRef.value) {
-    messageListRef.value.scrollTop = messageListRef.value.scrollHeight
-  }
+  return ai.available ? '可用' : '降级'
 })
 
-async function handleSend() {
-  const text = inputText.value.trim()
-  if (!text) return
-  inputText.value = ''
-  await aiStore.sendMessage(text)
-}
+const healthTagType = computed<'success' | 'warning' | 'info' | 'danger'>(() => {
+  if (ai.health === null) {
+    return 'info'
+  }
+  return ai.available ? 'success' : 'warning'
+})
 
-async function handleReset() {
-  try {
-    await ElMessageBox.confirm('确定要开始新对话吗？当前对话记录将被清除。', '新对话', {
-      confirmButtonText: '确定',
-      cancelButtonText: '取消',
-      type: 'warning'
-    })
-    await aiStore.resetSession()
-  } catch (e) { /* user cancelled */ }
-}
-
-function handleSuggestion(text) {
-  inputText.value = text
-}
-
-async function handleApprove() {
-  const interaction = aiStore.pendingInteraction
-  if (interaction?.iid) {
-    await aiStore.submitInteraction(interaction.iid, true, '', {})
+function toolTagType(status: ToolRunStatus): 'info' | 'warning' | 'success' | 'danger' {
+  switch (status) {
+    case 'succeeded':
+      return 'success'
+    case 'failed':
+    case 'rejected':
+      return 'danger'
+    case 'running':
+      return 'warning'
+    default:
+      return 'info'
   }
 }
 
-async function handleReject() {
-  const interaction = aiStore.pendingInteraction
-  if (interaction?.iid) {
-    await aiStore.submitInteraction(interaction.iid, false, '用户已拒绝此操作', {})
+function toolStatusLabel(status: ToolRunStatus): string {
+  const labels: Record<ToolRunStatus, string> = {
+    pending: '待处理',
+    running: '执行中',
+    succeeded: '已成功',
+    failed: '已失败',
+    rejected: '已拒绝',
+    expired: '已失效'
   }
+  return labels[status]
 }
+
+function probe(): void {
+  void ai.probeHealth()
+}
+
+function submit(): void {
+  const text = draft.value
+  draft.value = ''
+  void ai.send(text)
+}
+
+onMounted(() => {
+  ai.startMirror()
+  void ai.probeHealth()
+  // 刷新恢复：镜像即时恢复 + 后端历史对账（后端不可达时静默保留镜像）
+  void ai.loadHistory()
+})
 </script>
 
 <style scoped>
-.cursor {
-  animation: blink 1s step-end infinite;
-}
-@keyframes blink {
-  50% { opacity: 0; }
+.ai-panel {
+  width: 360px;
+  min-width: 320px;
 }
 </style>
