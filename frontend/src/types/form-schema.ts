@@ -39,7 +39,7 @@ export interface FormSpec {
 
 const FIELD_TYPES: readonly FormFieldType[] = ['text', 'number', 'boolean', 'date', 'enum', 'multi_select']
 
-/** 原型键黑名单（红队问题 3）：后端白名单正则不排除它们，赋到 `{}` 上会污染原型或无法取值。 */
+/** 原型键黑名单（红队问题 3）：三者都能通过键名正则，赋到 `{}` 上会污染原型或无法取值；后端已同步拒绝（GenerativeFormRules.FORBIDDEN_FIELD_KEYS）。 */
 const FORBIDDEN_FIELD_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
 
 function isRecord(value: unknown): value is Record<string, unknown> {
