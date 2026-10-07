@@ -11,6 +11,8 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * S5.a 用例（移植自 glm-5.3 {@code ConfigDataServiceTest}）：已发布数据的查询条件引擎。
@@ -25,7 +27,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <li>glm 的 {@code BETWEEN} 在本仓库不存在 → 用 {@code GTE} + {@code LTE} 两条条件表达同一区间；</li>
  * <li>glm 的 {@code __scope} 伪字段 → 本仓库用 {@link QueryCondition#getScopeKeys()} 范围过滤
  *     （求值器读行内 {@code regionCode}/{@code projectCode}）；</li>
- * <li>glm 的"非法操作符/非法字段必须抛错"没有对应实现（见证据文档"不适用清单"），故不移植该两条。</li>
+ * <li>glm 的"非法字段必须抛错"没有对应实现（见证据文档"不适用清单"，未知字段按各操作符求得"不匹配"），
+ *     故该条仍未移植；</li>
+ * <li>glm 的"非法操作符必须抛错"曾因 {@code default → true} 静默放行而未移植，
+ *     <b>M1 收尾守卫③ 后已补齐</b>（用例 10，求值器改抛 {@link IllegalArgumentException}）。</li>
  * </ul>
  *
  * <p>数据来自 glm 种子并集（{@code GlmSeedService}）：SYS_PARAM 40 行、METRIC_DICT 30 行、
@@ -153,6 +158,25 @@ class PublishedQueryConditionTest {
                 field("paramKey", "IN", List.of("param.1", "param.2", "param.3")));
 
         assertThat(rows).hasSize(3);
+    }
+
+    // ── 用例 10（M1 收尾守卫③ 补齐的 glm 用例）：非法操作符必须抛错 ──
+
+    /**
+     * glm 的 {@code invalidOperatorRejected}：原 main-v2 对未知操作符走 {@code default → true}
+     * （静默放行 = 忽略该条件 = 导出范围更宽），故当时未移植。M1 收尾守卫③ 改为抛
+     * {@link IllegalArgumentException} 后，本用例成立（端点侧 400、作业侧 FAILED 的口径见
+     * {@link ConditionOperatorGuardTest}）。
+     */
+    @Test
+    void unknownOperatorIsRejected() {
+        assertThatThrownBy(() -> rows(SYS_PARAM, field("paramKey", "BETWEEN", "a")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("BETWEEN");
+
+        assertThatCode(() -> dataService.countFiltered(SYS_PARAM, null, field("paramKey", "  ", "a")))
+                .as("空白操作符仍是'该字段不参与过滤'的既有口径，不得被本守卫误伤")
+                .doesNotThrowAnyException();
     }
 
     // ───────────────────────── helpers ─────────────────────────

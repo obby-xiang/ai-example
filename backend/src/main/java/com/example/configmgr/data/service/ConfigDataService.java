@@ -70,16 +70,25 @@ public class ConfigDataService {
         return filterRows(defCode, scopeKey, condition).size();
     }
 
-    /** 条件 JSON（可为空）→ {@link QueryCondition}；解析失败即 400（口径与 /count 一致）。 */
+    /**
+     * 条件 JSON（可为空）→ {@link QueryCondition}；解析失败或操作符未登记即 400（口径与 /count 一致）。
+     *
+     * <p>M1 收尾守卫③：这里在<b>逐行求值之前</b>做操作符白名单校验（{@link ConditionEvaluator#validate}），
+     * 故"未知操作符"不依赖行数据是否命中即可得到 400（行数为 0 时同样失败），
+     * 也不会被 {@link #filterRows} 的逐行兜底吞掉。
+     */
     public QueryCondition parseCondition(String conditions) {
         if (conditions == null || conditions.isBlank()) {
             return null;
         }
+        QueryCondition cond;
         try {
-            return objectMapper.readValue(conditions, QueryCondition.class);
+            cond = objectMapper.readValue(conditions, QueryCondition.class);
         } catch (Exception e) {
             throw new IllegalArgumentException("条件 JSON 解析失败: " + e.getMessage());
         }
+        ConditionEvaluator.validate(cond);
+        return cond;
     }
 
     /** 逐行求值：范围键收窄 + {@link ConditionEvaluator} 字段级条件（AND）。 */
@@ -87,12 +96,14 @@ public class ConfigDataService {
         return dataRowRepository.findByDefCodeOrderByRowKey(defCode).stream()
                 .filter(r -> scopeKey == null || scopeKey.isBlank() || scopeKey.equals(r.getScopeKey()))
                 .filter(r -> {
+                    Map<String, Object> data;
                     try {
-                        Map<String, Object> data = objectMapper.readValue(r.getDataJson(), new TypeReference<>() {});
-                        return ConditionEvaluator.matches(data, cond);
+                        data = objectMapper.readValue(r.getDataJson(), new TypeReference<>() {});
                     } catch (Exception e) {
                         return false;
                     }
+                    // 求值异常（如未登记的操作符）必须冒泡 → 400，不能被"行级兜底"吞成 0 行
+                    return ConditionEvaluator.matches(data, cond);
                 })
                 .toList();
     }

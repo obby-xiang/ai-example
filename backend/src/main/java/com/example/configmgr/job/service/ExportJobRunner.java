@@ -89,6 +89,9 @@ public class ExportJobRunner {
                 try {
                     ConfigDefinition def = definitionService.findByCode(defCode);
                     QueryCondition cond = parseCondition(item.getConditionJson());
+                    // M1 收尾守卫③：操作符白名单在此早失败（即便本次一行都没扫到），
+                    // 由下面的 catch 转成"该配置项 FAILED + 作业 FAILED"，绝不产出"更宽"的导出件
+                    ConditionEvaluator.validate(cond);
 
                     // Load all rows matching condition（范围过滤 + 字段级过滤统一由 ConditionEvaluator 处理）
                     List<ConfigDataRow> allRows = dataRowRepository.findByDefCodeOrderByRowKey(defCode);

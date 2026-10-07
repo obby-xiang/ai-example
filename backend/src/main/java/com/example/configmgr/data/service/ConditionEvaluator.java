@@ -4,14 +4,54 @@ import java.time.LocalDate;
 import java.time.format.DateTimeParseException;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 查询条件求值器：对动态 JSON 行应用范围过滤与字段级过滤。
  * 导出作业与行数预估共用，保证两处口径一致。
+ *
+ * <p><b>未知操作符 = 异常，不再静默放行</b>（M1 收尾守卫③，S5.a 待裁决 #3 的裁决落地）：
+ * 原实现对未登记的操作符走 {@code default → true}（等于忽略该条件），后果是<b>导出范围比用户预期更宽</b>
+ * （数据面风险：用户以为筛掉了，实际全量导出/发布）。现改为抛 {@link IllegalArgumentException}：
+ * <ul>
+ * <li>列表/计数端点：{@link ConfigDataService#parseCondition} 先用 {@link #validate} 早失败 → 400；</li>
+ * <li>导出作业：{@link com.example.configmgr.job.service.ExportJobRunner} 逐配置项捕获 → 该配置项与作业
+ *     {@code FAILED}（不产出"更宽"的文件）。</li>
+ * </ul>
  */
 public final class ConditionEvaluator {
 
+    /** 已登记的操作符（{@link #validate} 与 {@link #matchesOp} 同源，杜绝两处口径漂移）。 */
+    private static final Set<String> OPERATORS = Set.of(
+            "EMPTY", "NOT_EMPTY", "EQ", "NE", "CONTAINS", "LIKE", "STARTS_WITH", "IN", "GT", "GTE", "LT", "LTE");
+
     private ConditionEvaluator() {
+    }
+
+    /**
+     * 操作符白名单校验（与行数据无关，故行数为 0 时同样能失败 —— 列表端点对空结果集也必须给 400，
+     * 而不是"恰好没行所以没报错"）。
+     *
+     * @throws IllegalArgumentException 出现未登记的操作符
+     */
+    public static void validate(QueryCondition cond) {
+        if (cond == null || cond.getFields() == null) {
+            return;
+        }
+        for (QueryCondition.FieldCondition fc : cond.getFields()) {
+            if (fc.getOperator() == null || fc.getOperator().isBlank()) {
+                continue; // 无操作符 = 该字段不参与过滤（前端"用户未填即忽略"的既有口径）
+            }
+            String op = fc.getOperator().toUpperCase();
+            if (!OPERATORS.contains(op)) {
+                throw unknownOperator(op, fc.getFieldCode());
+            }
+        }
+    }
+
+    private static IllegalArgumentException unknownOperator(String op, String fieldCode) {
+        return new IllegalArgumentException("未知的查询条件操作符: " + op
+                + "（字段 " + fieldCode + "），已登记的操作符: " + OPERATORS);
     }
 
     public static boolean matches(Map<String, Object> row, QueryCondition cond) {
@@ -86,7 +126,8 @@ public final class ConditionEvaluator {
                 };
             }
             default:
-                return true;
+                // M1 收尾守卫③：未知操作符抛异常（原为 return true = 静默放宽，属数据面风险）
+                throw unknownOperator(op, fc.getFieldCode());
         }
     }
 
