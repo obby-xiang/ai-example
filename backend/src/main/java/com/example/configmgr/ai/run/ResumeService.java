@@ -5,6 +5,7 @@ import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.gate.SpToolCallingManager;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.tool.AiContext;
+import com.example.configmgr.ai.tool.ToolResultLimiter;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
@@ -79,12 +80,16 @@ public class ResumeService {
 
 	private final CancellationRegistry cancellations;
 
+	/** T2：重建历史的 {@code role:tool} 也要过同一份模型侧上限（口径与首轮一致，不因续跑而变）。 */
+	private final ToolResultLimiter limiter;
+
 	/** 进程内续跑互斥（Redis 不可用时仍是最后一道闸）。 */
 	private final Map<String, Boolean> resuming = new ConcurrentHashMap<>();
 
 	public ResumeService(RunStore store, RunRegistry registry, MessageJsonCodec codec, ResilientChatService chatService,
 			SpToolCallingManager toolCallingManager, @Qualifier("aiRunExecutor") ThreadPoolTaskExecutor suspendExecutor,
-			StringRedisTemplate redis, AiProperties properties, CancellationRegistry cancellations) {
+			StringRedisTemplate redis, AiProperties properties, CancellationRegistry cancellations,
+			ToolResultLimiter limiter) {
 		this.store = store;
 		this.registry = registry;
 		this.codec = codec;
@@ -94,6 +99,7 @@ public class ResumeService {
 		this.redis = redis;
 		this.properties = properties;
 		this.cancellations = cancellations;
+		this.limiter = limiter;
 	}
 
 	public enum Outcome {
@@ -306,8 +312,9 @@ public class ResumeService {
 					PendingToolCall fresh = this.store.pending(runId, item.getToolCallId());
 					PendingToolCall effective = fresh == null ? item : fresh;
 					String text = this.toolCallingManager.resolvePending(runId, prompt, effective);
+					// T2：回填模型前过模型侧上限（台账里仍是全文）
 					responses.add(new ToolResponseMessage.ToolResponse(effective.getToolCallId(),
-							effective.getName(), text == null ? "" : text));
+							effective.getName(), this.limiter.forModel(text)));
 					// R6 裁决：标签必须在**结算之后**回读 Redis 才算准 ——
 					// executeOnce 的认领/完成是写在 Redis 里的新副本上，传入的 effective 可能仍是旧值
 					// （旧实现因此在"本次刚执行完"时显示 reused(null)）。

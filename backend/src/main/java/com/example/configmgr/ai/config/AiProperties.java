@@ -38,6 +38,8 @@ public class AiProperties {
 
 	private Resume resume = new Resume();
 
+	private ToolResult toolResult = new ToolResult();
+
 	@Data
 	public static class Memory {
 
@@ -141,6 +143,29 @@ public class AiProperties {
 			/** watchdog 续期间隔（ADR-5 补记 CH-P4：锁须带续期）。 */
 			private Duration watchdog = Duration.ofSeconds(30);
 		}
+	}
+
+	/**
+	 * 工具结果<b>回填模型</b>时的上限（DC-14 T2 / R10-1 落实，§13.2 #9"回填截断长度"的取值落点）。
+	 *
+	 * <p>
+	 * <b>只约束"给模型看的"那一份</b>：工具结果进 {@code role:tool} 消息前按行数与字符数裁剪；
+	 * 发给前端的 {@code tool_result} 帧与 Redis 台账里的 {@code resultText} 都是<b>全文</b>
+	 * （两条通道分离，前端渲染/取证不受模型侧上限影响）。
+	 *
+	 * <p>
+	 * 为什么必须配置化：万行级设计目标下，一个 {@code list_*} 类工具的输出可以轻易占满整轮上下文，
+	 * 而"到底多少行合适"取决于模型窗口与业务密度，不能写死在代码里。初值 200 行 / 8000 字符
+	 * 依 R10-1 建议值，实际取值随 §13.2 #9 压测复核。
+	 */
+	@Data
+	public static class ToolResult {
+
+		/** 回填模型的最大行数（超出即截断并附截断标记）。 */
+		private int maxRows = 200;
+
+		/** 回填模型的最大字符数（行数未超但字符超限时同样截断）。 */
+		private int maxChars = 8000;
 	}
 
 }

@@ -209,6 +209,42 @@ class ToolRegistryDisclosureTest {
         assertThat(callback.call(args)).contains(AiTools.FRONTEND_STUB);
     }
 
+    // ── DC-14 T1：防线①（披露）与防线③（执行兜底）必须同源 ─────────────────────
+
+    /**
+     * 防线③复查用的 {@code matchesContext} 与防线①的披露集必须<b>完全一致</b> ——
+     * 否则会出现"披露了却被拦"（功能缺失）或"没披露却放行"（防线③形同虚设）两种漂移。
+     * 这里对全部注册工具 × 全部代表性上下文做一次全量对账。
+     */
+    @Test
+    void scopeGuardMatchesDisclosedSet() {
+        List<AiContext> contexts = List.of(
+                AiContext.empty(),
+                AiContext.of("tasks", null, null, null, null),
+                AiContext.of("definitions", null, null, null, null),
+                AiContext.of("data", null, null, null, null),
+                AiContext.of("export", "EXPORT", "SELECT_DEFS", 1L, Map.of()),
+                AiContext.of("export", "EXPORT", "QUERY_COND", 1L, Map.of()),
+                AiContext.of("export", "EXPORT", "EXPORT", 1L, Map.of()),
+                AiContext.of("import", "IMPORT", "UPLOAD", 1L, Map.of()),
+                AiContext.of("import", "IMPORT", "PRECHECK", 1L, Map.of()),
+                AiContext.of("import", "IMPORT", "IMPORT", 1L, Map.of()),
+                AiContext.of("import", "IMPORT", "PUBLISH", 1L, Map.of()));
+        List<String> allTools = List.of("list_config_defs", "get_config_def", "list_tasks", "get_workspace_state",
+                "check_job_status", "get_row_count", "create_task", "start_export", "start_precheck", "start_import",
+                "start_publish", "open_export_file_editor", "download_export_file", "navigate_to",
+                "select_definitions", "set_condition", "confirm_step");
+
+        for (AiContext context : contexts) {
+            List<String> disclosed = namesFor(context);
+            for (String tool : allTools) {
+                assertThat(toolRegistry.matchesContext(tool, context))
+                        .as("上下文 %s 下 %s 的执行兜底判定应与披露集一致", context.getContextKey(), tool)
+                        .isEqualTo(disclosed.contains(tool));
+            }
+        }
+    }
+
     private static List<String> fieldNames(JsonNode node) {
         List<String> names = new ArrayList<>();
         node.fieldNames().forEachRemaining(names::add);

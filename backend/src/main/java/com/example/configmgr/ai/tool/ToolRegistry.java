@@ -94,6 +94,34 @@ public class ToolRegistry {
         return callbackMap.get(name);
     }
 
+    /**
+     * 渐进披露<b>第三道防线</b>（FR-5.2 的三重防线，DC-14 T1 补齐）：
+     * 执行前用<b>同一份</b> scope 元数据复查该工具在当前上下文里是否本就该被披露。
+     *
+     * <p>
+     * 前两道防线是"请求侧"的：防线① {@link #forContext} 按标签裁剪工具子集（不披露即不在
+     * 请求的 toolCallbacks 里）、防线② 系统提示词声明"只能使用当前披露的工具"。两者都是
+     * <b>上游模型侧</b>的约束 —— 而模型发出的 {@code tool_calls} 是外部输入，
+     * 一旦上游返回了子集外的工具名（幻觉、注入、上游缓存了旧工具列表），前两道全部失效。
+     * 因此执行前必须再复查一次：<b>不匹配就绝不产生副作用</b>（判据与防线①同源，
+     * 不存在"两套口径"的漂移空间）。
+     *
+     * <p>
+     * 未登记元数据的工具名一律放行（与 {@link #forContext} 的"unscoped: always include"
+     * 同一口径）：元数据缺失不是"越权"的证据，执行失败由官方循环自己回填。
+     *
+     * @param name 工具名（模型给的原文）
+     * @param ctx  本轮冻结的工作区上下文（与披露时用的是同一份，见 {@code RunSnapshot#getContext()}）
+     * @return true = 该工具在当前上下文内本就被披露（可执行）；false = 越 scope（必须拦截）
+     */
+    public boolean matchesContext(String name, AiContext ctx) {
+        ToolMeta meta = metaMap.get(name);
+        if (meta == null || meta.getScopePatterns() == null || meta.getScopePatterns().length == 0) {
+            return true;
+        }
+        return matchesAny(meta.getScopePatterns(), buildTags(ctx == null ? AiContext.empty() : ctx));
+    }
+
     public ToolMeta getMeta(String name) {
         return metaMap.get(name);
     }

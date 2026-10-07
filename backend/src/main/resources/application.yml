@@ -128,6 +128,12 @@ app:
         # ADR-5：会话锁 TTL = 轮上限；watchdog 续期；轮终态主动释放
         ttl: 10m
         watchdog: 30s
+    tool-result:
+      # DC-14 T2（R10-1）：工具结果**回填模型**前的上限（行数/字符数）——防上下文爆炸。
+      # 只约束"给模型看的"那一份：前端 tool_result 帧与 Redis 台账始终是全文。
+      # 初值依 R10-1 建议（200 行 / 8000 字符），实际取值随 §13.2 #9 压测复核。
+      max-rows: 200
+      max-chars: 8000
   job:
     demo-batch-delay-ms: 300
     batch-size: 100

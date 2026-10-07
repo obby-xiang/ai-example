@@ -38,6 +38,13 @@ public class PendingToolCall {
 	/** 后端工具已执行完成（无外部等待）。 */
 	public static final String EXECUTED = "EXECUTED";
 
+	/**
+	 * 防线③拦截（DC-14 T1）：工具在当前上下文里本就不该被披露（越 scope），
+	 * 因此<b>未执行</b>、也不会执行。与 {@link #REJECTED}（人拒绝）分开记 ——
+	 * "模型越权"和"人拒绝"在排障时是两件事。
+	 */
+	public static final String BLOCKED = "BLOCKED";
+
 	/** 挂起种类：确认门（DANGER 风险）。 */
 	public static final String KIND_CONFIRM = "CONFIRM";
 

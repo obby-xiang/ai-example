@@ -9,8 +9,10 @@ import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.run.StreamViolationException;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
+import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ToolMeta;
 import com.example.configmgr.ai.tool.ToolRegistry;
+import com.example.configmgr.ai.tool.ToolResultLimiter;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
@@ -35,15 +37,27 @@ import java.util.Map;
  * 协议、循环、工具 Schema、入参解析全部由 Spring AI 负责
  * （{@code OpenAiChatModel} 内部 isToolExecutionRequired → executeToolCalls → 回填 → 再请求模型）；
  * 本类<b>组合</b>官方 {@link ToolCallingManager#builder() DefaultToolCallingManager}
- * 作为 delegate，只在每一次工具执行处插入三件事：
+ * 作为 delegate，只在每一次工具执行处插入四件事：
  * <ul>
  * <li><b>可见性钩子</b>：{@code tool_start} / {@code tool_result} 帧 —— 官方循环在
  * {@code returnDirect=false} 时<b>不把中间工具轮放进客户端流</b>（S4.2-P1 §4.4-3 实测：5 轮 10 次上游
  * 请求，客户端 0 个工具事件），因此工具卡片只能由这里提供；</li>
+ * <li><b>防线③执行兜底</b>（FR-5.2 三重防线的第三道，DC-14 T1）：
+ * 执行前用 {@link ToolRegistry#matchesContext} 复查"该工具在当前上下文里是否本就被披露"，
+ * 越 scope 一律<b>不执行副作用</b>并把结构化错误结果回填模型（{@link #SCOPE_VIOLATION_CODE}）；</li>
  * <li><b>确认门</b>：风险等级 {@code DANGER} 的工具（读基座 {@link ToolRegistry} 的
  * {@code @ToolRisk} 分级）执行前挂起等人工决策（{@link ConfirmGate}）；</li>
  * <li><b>前端工具挂起</b>：通道为 {@code FRONTEND} 的工具（{@code @ToolChannel}）不执行后端桩体，
  * 下发 {@code frontend_tool_request} 并阻塞等 {@code POST /api/ai/frontend-tool-result} 回灌。</li>
+ * </ul>
+ *
+ * <h2>结果的两条通道（DC-14 T2）</h2>
+ * 同一个工具结果有两份去向，<b>口径刻意不同</b>：
+ * <ul>
+ * <li><b>给模型看的</b>：{@code role:tool} 的 {@code responseData} —— 经
+ * {@link ToolResultLimiter} 按 {@code app.ai.tool-result.max-rows|max-chars} 裁剪（防上下文膨胀）；</li>
+ * <li><b>给前端/台账看的</b>：{@code tool_result} 帧的 {@code result} 与
+ * {@code ai:ledger:<runId>} 的 {@code resultText} —— <b>全文</b>，不裁剪。</li>
  * </ul>
  *
  * <h2>硬规范①：外置先于阻塞</h2>
@@ -71,8 +85,8 @@ import java.util.Map;
 @Component
 public class SpToolCallingManager implements ToolCallingManager {
 
-	/** 结果文本进帧的截断长度（模型收到的是全文，只有帧里截断）。 */
-	private static final int FRAME_TEXT_LIMIT = 800;
+	/** 防线③拦截时回填模型的结果文本前缀（结构化错误码，测试与排障据此断言/检索）。 */
+	public static final String SCOPE_VIOLATION_CODE = "SCOPE_NOT_DISCLOSED";
 
 	private final ToolCallingManager delegate;
 
@@ -90,8 +104,12 @@ public class SpToolCallingManager implements ToolCallingManager {
 
 	private final CancellationRegistry cancellations;
 
+	/** T2：工具结果回填模型前的行数/字符上限（前端帧与台账不受其影响）。 */
+	private final ToolResultLimiter limiter;
+
 	public SpToolCallingManager(RunStore store, RunRegistry registry, ConfirmGate gate, ToolRegistry toolRegistry,
-			MessageJsonCodec codec, ToolActivityBeacon beacon, CancellationRegistry cancellations) {
+			MessageJsonCodec codec, ToolActivityBeacon beacon, CancellationRegistry cancellations,
+			ToolResultLimiter limiter) {
 		this.delegate = ToolCallingManager.builder().build();
 		this.store = store;
 		this.registry = registry;
@@ -100,6 +118,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 		this.codec = codec;
 		this.beacon = beacon;
 		this.cancellations = cancellations;
+		this.limiter = limiter;
 	}
 
 	@Override
@@ -115,7 +134,8 @@ public class SpToolCallingManager implements ToolCallingManager {
 		}
 
 		String runId = runIdOf(prompt);
-		if (runId == null || this.store.get(runId) == null) {
+		RunSnapshot snapshot = runId == null ? null : this.store.get(runId);
+		if (runId == null || snapshot == null) {
 			log.warn("工具执行处拿不到本轮 runId/快照（runId={}），挂起态无法外置，回落官方默认执行：{}",
 					runId, assistant.getToolCalls().stream().map(AssistantMessage.ToolCall::name).toList());
 			return this.delegate.executeToolCalls(prompt, chatResponse);
@@ -123,6 +143,9 @@ public class SpToolCallingManager implements ToolCallingManager {
 
 		SseChatEmitter out = this.registry.of(runId);
 		List<PendingToolCall> pendings = newPendings(assistant);
+		// 防线③（T1）的判据来源：本轮<b>冻结</b>的工作区上下文（与请求侧披露用的同一份，
+		// 见 RunStore#create 写下的 snapshot.context），因此复查不会因上下文漂移而误判。
+		AiContext context = AiContext.fromMap(snapshot.getContext());
 
 		// ===== 硬规范①：先把 assistant(tool_calls) 与待决条目外置，再进入任何等待 =====
 		this.store.saveSuspended(runId, assistant.getText(), pendings, prompt.getInstructions(), this.codec);
@@ -139,18 +162,26 @@ public class SpToolCallingManager implements ToolCallingManager {
 			this.beacon.enter(runId, pending.getName(), pending.getKind());
 			String text;
 			try {
-				text = switch (pending.getKind()) {
-					case PendingToolCall.KIND_FRONTEND -> awaitFrontend(runId, pending);
-					case PendingToolCall.KIND_CONFIRM -> awaitConfirm(runId, prompt, pending);
-					default -> executeOnce(runId, prompt, pending);
-				};
+				// ===== 防线③：执行前复查 scope（T1）。越 scope 一律不执行、不认领、不记台账 =====
+				if (!this.toolRegistry.matchesContext(pending.getName(), context)) {
+					text = blockOutOfScope(runId, context, pending);
+				}
+				else {
+					text = switch (pending.getKind()) {
+						case PendingToolCall.KIND_FRONTEND -> awaitFrontend(runId, pending);
+						case PendingToolCall.KIND_CONFIRM -> awaitConfirm(runId, prompt, pending);
+						default -> executeOnce(runId, prompt, pending);
+					};
+				}
 			}
 			finally {
 				this.beacon.exit(runId, "done");
 			}
 			// 执行之后再查一次：确认门/前端工具可能正是在等待期间被取消
 			checkCancelled(runId);
-			responses.add(new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(), text));
+			// T2：回填模型的是裁剪后的文本；上面的 text 本身（进帧、进台账）保持全文
+			responses.add(new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
+					this.limiter.forModel(text)));
 		}
 
 		ToolResponseMessage toolMessage = ToolResponseMessage.builder().responses(responses).build();
@@ -171,6 +202,48 @@ public class SpToolCallingManager implements ToolCallingManager {
 			throw new StreamViolationException(StreamViolationException.CANCELLED,
 					"本轮对话已被取消，工具执行在事件边界终止（runId=" + runId + "）");
 		}
+	}
+
+	/**
+	 * 防线③拦截（T1）：工具在当前上下文里未披露（越 scope）——<b>不产生任何副作用</b>
+	 * （不认领、不执行、不记台账），只把结构化错误结果回填给模型，让人机都能看见"这次没执行"。
+	 *
+	 * <p>
+	 * 为什么必须回填而不是静默丢弃/抛异常：
+	 * <ul>
+	 * <li>抛异常 → 整轮以 {@code error} 收尾，一次越权调用会把用户已看到的正文一并废掉（代价过大）；</li>
+	 * <li>静默不回填 → 模型看不到任何反馈，可能反复重试同一个越权调用；</li>
+	 * <li>回填结构化错误 → 模型读到"未执行 + 原因 + 当前上下文 + 该怎么办"，
+	 * 官方循环继续（模型如实解释并改走已披露的工具或提示用户切页面）。</li>
+	 * </ul>
+	 */
+	private String blockOutOfScope(String runId, AiContext context, PendingToolCall pending) {
+		String text = SCOPE_VIOLATION_CODE + "：工具 " + pending.getName() + " 未执行 —— 它不在当前工作区上下文"
+				+ "（" + describeContext(context) + "）的披露范围内（FR-5.2 三道防线的执行兜底）。"
+				+ "请改用系统当前披露给你的工具；若用户确实要做这件事，请提示其先切换到对应的页面/步骤或任务，再重新发起。";
+		pending.setStatus(PendingToolCall.BLOCKED);
+		pending.setReason(SCOPE_VIOLATION_CODE);
+		pending.setExecuted(false);
+		pending.setExecutedBy(null);
+		pending.setResolvedAtMs(System.currentTimeMillis());
+		pending.setResultText(text);
+		this.store.putPending(runId, pending);
+		this.registry.of(runId).toolResult(pending, false, false, text);
+		log.warn("防线③拦截越 scope 工具调用 runId={} tool={} 上下文={}（未执行、未认领、未记台账）",
+				runId, pending.getName(), describeContext(context));
+		return text;
+	}
+
+	/** 上下文的人读形态（错误文本与日志共用）。 */
+	private static String describeContext(AiContext context) {
+		StringBuilder sb = new StringBuilder();
+		sb.append("page=").append(context.getPage() == null || context.getPage().isBlank() ? "未指定" : context.getPage());
+		sb.append(", taskType=").append(context.getTaskType() == null ? "无" : context.getTaskType());
+		sb.append(", step=").append(context.getStep() == null ? "无" : context.getStep());
+		if (context.getTaskId() != null) {
+			sb.append(", taskId=").append(context.getTaskId());
+		}
+		return sb.toString();
 	}
 
 	/** 前端工具：不执行后端桩体，挂起等前端回灌（结局帧由 ConfirmGate 侧发出）。 */
@@ -207,7 +280,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 			pending.setExecutedBy(String.valueOf(ledger.get("executedBy")));
 			pending.setResultText(reusedText);
 			this.store.putPending(runId, pending);
-			this.registry.of(runId).toolResult(pending, true, true, reuseFrame(reusedText));
+			this.registry.of(runId).toolResult(pending, true, true, frameText(reusedText));
 			return reusedText;
 		}
 
@@ -219,7 +292,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 			pending.setExecutedBy(claimedBy);
 			pending.setResultText(text);
 			this.store.putPending(runId, pending);
-			this.registry.of(runId).toolResult(pending, false, true, reuseFrame(text));
+			this.registry.of(runId).toolResult(pending, false, true, frameText(text));
 			return text;
 		}
 
@@ -249,7 +322,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 			fresh.setResolvedAtMs(fresh.getExecutedAtMs());
 		}
 		this.store.putPending(runId, fresh);
-		this.registry.of(runId).toolResult(fresh, ok, false, reuseFrame(text));
+		this.registry.of(runId).toolResult(fresh, ok, false, frameText(text));
 		return text;
 	}
 
@@ -347,12 +420,16 @@ public class SpToolCallingManager implements ToolCallingManager {
 		return null;
 	}
 
-	/** 帧里的结果文本截断（模型仍拿到全文）。 */
-	private String reuseFrame(String text) {
-		if (text == null) {
-			return "";
-		}
-		return text.length() > FRAME_TEXT_LIMIT ? text.substring(0, FRAME_TEXT_LIMIT) + "…" : text;
+	/**
+	 * 帧里的结果文本（T2 后<b>不再截断</b>）。
+	 *
+	 * <p>
+	 * S4.2 时期这里是 800 字符截断 —— 与 T2 的"两条通道分离"口径相反（截断属于<b>模型侧</b>的
+	 * 上下文成本控制，前端与台账要的是完整结果）。因此本方法现在只做 null 归一；
+	 * 模型侧的上限统一由 {@link ToolResultLimiter} 在回填 {@code role:tool} 时施加。
+	 */
+	private String frameText(String text) {
+		return text == null ? "" : text;
 	}
 
 	/** 供诊断端点/日志：本管理器确实被装配。 */
