@@ -452,6 +452,8 @@ public class ResilientChatService {
 		extra.put("attempts", attempts);
 		extra.put("upstreamEvents", watchdog == null ? 0 : watchdog.upstreamEvents());
 		extra.put("terminalSignal", accumulator.terminalSignal());
+		// T5：正文段收尾（未开过段则不发 —— 纯工具轮没有正文）
+		out.textEnd(text.length());
 		out.done(accumulator.usage(), accumulator.model(), extra);
 	}
 
@@ -481,6 +483,8 @@ public class ResilientChatService {
 		extra.put("attempts", attempts);
 		extra.put("upstreamEvents", watchdog == null ? 0 : watchdog.upstreamEvents());
 		extra.put("partialChars", accumulator == null ? 0 : accumulator.text().length());
+		// T5：取消也收尾正文段（半截正文不写进历史，但"这一段到此为止"必须显式告知前端）
+		out.textEnd(accumulator == null ? 0 : accumulator.text().length());
 		out.done(accumulator == null ? Map.of() : accumulator.usage(), accumulator == null ? null : accumulator.model(),
 				extra);
 	}
@@ -555,6 +559,9 @@ public class ResilientChatService {
 		}
 		String text = generation.getOutput().getText();
 		if (StringUtils.hasText(text)) {
+			// T5：正文消息边界三段式（start/content/end）——start 只在首段前补一次，
+			// 后续每一片文本都是 content（delta）；end 在轮终态补（见 finish / cancelTerminal）。
+			out.textStart();
 			out.delta(text);
 		}
 	}
@@ -649,6 +656,8 @@ public class ResilientChatService {
 			out.put("promptTokens", usage.getPromptTokens());
 			out.put("completionTokens", usage.getCompletionTokens());
 			out.put("totalTokens", usage.getTotalTokens());
+			// T8：可选维度（cachedTokens / reasoningTokens）—— 从 native usage 提取，取不到即省略
+			UsageDetails.enrich(out, usage.getNativeUsage());
 			return out;
 		}
 

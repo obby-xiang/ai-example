@@ -37,7 +37,10 @@ import java.util.UUID;
  * <li>{@code ai:ledger:<runId>} LIST（JSON）—— 工具执行台账：每次<b>真实执行完成</b>一条，
  * 含 {@code executedBy} 实例标识，是跨进程"不重放"的判据；</li>
  * <li>{@code ai:events:<runId>} LIST（JSON）—— SSE 帧外置副本（崩溃前的帧不随进程消失，
- * 供 {@code GET /api/ai/events/{runId}} 重挂时回放）。</li>
+ * 供 {@code GET /api/ai/events/{runId}} 重挂时回放）；每帧带单调 {@code seq}（T6 的差量补发判据），
+ * <b>心跳帧不入本归档</b>（T7，改记 {@code ai:beat:<runId>}）；</li>
+ * <li>{@code ai:beat:<runId>} STRING —— 心跳活动戳（毫秒时刻，TTL 随心跳续期）：
+ * 心跳不占归档窗口，但"这一轮最近有过活动"仍可跨进程判定（僵尸判据的输入之一）。</li>
  * </ul>
  *
  * <h2>硬规范①（外置先于阻塞）</h2>
@@ -60,6 +63,12 @@ public class RunStore {
 	public static final String LEDGER_PREFIX = "ai:ledger:";
 
 	public static final String EVENTS_PREFIX = "ai:events:";
+
+	/** 心跳活动戳键前缀（T7：心跳不入归档，但活动证据必须留痕）。 */
+	public static final String BEAT_PREFIX = "ai:beat:";
+
+	/** 心跳帧的类型名（T7：唯一不落归档的帧类型）。 */
+	public static final String HEARTBEAT_TYPE = "heartbeat";
 
 	/** 每轮最多留存的外置帧数（长回答的 delta 会挤掉挂起期帧，故与 SP-02 同取 3000）。 */
 	private static final int EVENT_WINDOW = 3000;
@@ -395,8 +404,19 @@ public class RunStore {
 	 * 它让"这一轮最近一次活动是什么时候"有了**可跨进程**的判据：
 	 * 流式 delta、挂起心跳、工具帧全都经这里落档，于是 R3 的僵尸判据不必只看快照
 	 * （快照只在工具落定/挂起时刷新，长流式轮次会显得"很久没动"）。
+	 *
+	 * <p>
+	 * <b>T7（DC-14 / R8-5）：心跳帧<b>不</b>入归档</b> —— 挂起期每 2s 一帧、流式期每 5s 一帧的
+	 * 心跳会挤占 {@value #EVENT_WINDOW} 的归档窗口，把真正有信息量的状态帧挤出窗口
+	 * （回放跟着变瘦）。心跳的"在线推送"语义不受影响（仍在 {@code SseChatEmitter#emit} 里
+	 * 广播给订阅者），只是改由 {@link #touchActivity(String)} 记一个轻量活动戳 ——
+	 * 于是"心跳提供活动证据"这一用途照旧，归档却不被它占位。
 	 */
 	public void appendEvent(String runId, Map<String, Object> frame) {
+		if (HEARTBEAT_TYPE.equals(String.valueOf(frame.get("type")))) {
+			touchActivity(runId);
+			return;
+		}
 		frame.putIfAbsent("atMs", System.currentTimeMillis());
 		try {
 			this.redis.opsForList().rightPush(eventsKey(runId), this.mapper.writeValueAsString(frame));
@@ -410,24 +430,80 @@ public class RunStore {
 	}
 
 	/**
-	 * 该轮最近一次活动时刻（毫秒）：取 {@code ai:events:<runId>} 最后一帧的 {@code atMs}。
+	 * 心跳的活动戳（T7 的配套）：{@code ai:beat:<runId>} = 毫秒时刻，TTL 随心跳续期。
 	 *
 	 * <p>
-	 * 只读最后一帧（{@code LRANGE key -1 -1}），不整表回放 —— 这个方法会在"每轮的可续跑性判定"
-	 * 里被调用。无帧（或旧格式帧没有 atMs）返回 0，调用方据此回落到快照的 {@code updatedAtMs}。
+	 * 为什么不干脆"心跳什么都不写"：僵尸判据（{@code ResumeService#activeAtMs}）靠"最近一次活动"
+	 * 区分"活着的长轮"与"上一进程死掉的僵尸轮"。心跳不入归档后，<b>只吐思考不吐正文</b>的
+	 * 长轮会长时间没有归档帧 —— 若不留下任何活动证据，它会被误判成僵尸并被强行接管
+	 * （同一轮被执行两次）。一个 STRING 键就把这条证据链补回来了，代价远低于归档一帧。
+	 */
+	public void touchActivity(String runId) {
+		try {
+			this.redis.opsForValue().set(beatKey(runId), String.valueOf(System.currentTimeMillis()), ttl());
+		}
+		catch (Exception ex) {
+			log.debug("心跳活动戳写入失败 runId={}：{}", runId, ex.getMessage());
+		}
+	}
+
+	/** 心跳活动戳键名（诊断/取证可直读）。 */
+	public String beatKey(String runId) {
+		return BEAT_PREFIX + runId;
+	}
+
+	/**
+	 * 该轮最近一次活动时刻（毫秒）：取 {@code ai:events:<runId>} 最后一帧的 {@code atMs}
+	 * 与心跳活动戳（{@link #touchActivity}）的<b>较新者</b>。
+	 *
+	 * <p>
+	 * 只读最后一帧（{@code LRANGE key -1 -1}）与一个 STRING，不整表回放 —— 这个方法会在
+	 * "每轮的可续跑性判定"里被调用。两者都没有（或旧格式帧没有 atMs）返回 0，
+	 * 调用方据此回落到快照的 {@code updatedAtMs}。
 	 */
 	public long lastEventAtMs(String runId) {
+		long last = 0L;
+		try {
+			List<String> tail = this.redis.opsForList().range(eventsKey(runId), -1, -1);
+			if (tail != null && !tail.isEmpty()) {
+				JsonNode node = this.mapper.readTree(tail.get(0));
+				JsonNode atMs = node.get("atMs");
+				last = atMs == null ? 0L : atMs.asLong();
+			}
+		}
+		catch (Exception ex) {
+			log.debug("读取最近活动时刻失败 runId={}：{}", runId, ex.getMessage());
+		}
+		return Math.max(last, lastBeatAtMs(runId));
+	}
+
+	/** 心跳活动戳的时刻（无则 0）。 */
+	public long lastBeatAtMs(String runId) {
+		try {
+			String raw = this.redis.opsForValue().get(beatKey(runId));
+			return raw == null ? 0L : Long.parseLong(raw);
+		}
+		catch (Exception ex) {
+			return 0L;
+		}
+	}
+
+	/**
+	 * 该轮已落档帧的最大序号（T6）：序号单调，故只读最后一帧；
+	 * 无帧（全新轮次/旧格式帧）返回 0，写出器据此从 1 起号。
+	 */
+	public long lastEventSeq(String runId) {
 		try {
 			List<String> tail = this.redis.opsForList().range(eventsKey(runId), -1, -1);
 			if (tail == null || tail.isEmpty()) {
 				return 0L;
 			}
 			JsonNode node = this.mapper.readTree(tail.get(0));
-			JsonNode atMs = node.get("atMs");
-			return atMs == null ? 0L : atMs.asLong();
+			JsonNode seq = node.get("seq");
+			return seq == null ? 0L : seq.asLong();
 		}
 		catch (Exception ex) {
-			log.debug("读取最近活动时刻失败 runId={}：{}", runId, ex.getMessage());
+			log.debug("读取末帧序号失败 runId={}：{}", runId, ex.getMessage());
 			return 0L;
 		}
 	}

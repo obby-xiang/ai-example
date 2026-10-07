@@ -36,6 +36,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
@@ -258,16 +259,22 @@ public class AiController {
 	/**
 	 * 重挂进行中（或刚结束）那一轮的流：先回放外置的状态类帧，再续接实时帧。
 	 * 挂起态外置的直接收益 —— 进程死亡后重挂仍能看到"这一轮挂在哪、谁在等什么"。
+	 *
+	 * <p>
+	 * <b>T6 差量补发</b>：可选 {@code ?lastSeq=N} —— 前端带上自己已收到的最大帧序号，
+	 * 服务端只补发 {@code seq > N} 的帧（孤儿过滤：本地已有的帧不重发）；不传则全量回放
+	 * （老客户端零改动，行为与 S4.2 时期一致）。
 	 */
 	@GetMapping(value = "/events/{runId}", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-	public ResponseEntity<?> events(@PathVariable String runId) {
+	public ResponseEntity<?> events(@PathVariable String runId,
+			@RequestParam(required = false) Long lastSeq) {
 		RunSnapshot snapshot = this.runStore.get(runId);
 		if (snapshot == null) {
 			return json(HttpStatus.NOT_FOUND, Map.of("code", "UNKNOWN_RUN", "runId", runId));
 		}
 		SseEmitter emitter = new SseEmitter(budgetMillis());
 		SseChatEmitter out = this.runRegistry.of(runId);
-		int replayed = out.replayTo(emitter, false);
+		int replayed = out.replayTo(emitter, false, lastSeq);
 		boolean terminal = isTerminal(snapshot.getStatus());
 		if (terminal) {
 			out.complete(emitter);
@@ -275,7 +282,7 @@ public class AiController {
 		else {
 			out.attach(emitter);
 		}
-		log.debug("reattach runId={} status={} 回放帧数={}", runId, snapshot.getStatus(), replayed);
+		log.debug("reattach runId={} status={} lastSeq={} 回放帧数={}", runId, snapshot.getStatus(), lastSeq, replayed);
 		return ResponseEntity.ok(emitter);
 	}
 
