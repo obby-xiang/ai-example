@@ -1,6 +1,10 @@
 /**
  * 应用入口：Vue 3 + TS + Pinia + Router + Element Plus（中文 locale）
- * + Tailwind（preflight=false）+ SpreadJS（**中文 Culture**，glm 蓝本 main.js 实践）。
+ * + Tailwind（preflight=false）。
+ *
+ * SpreadJS 已改为**按需动态加载**（`utils/spreadjs.ts` 的 loadSpreadCore）：入口不再
+ * 静态 import 它，故首屏 chunk 不背 6.2MB 的 spreadjs 包（只有真正渲染表格的页面
+ * 才经动态 import 拉取，中文 Culture 与 LicenseKey 在那一刻各自设置）。
  */
 
 import { createApp, type Component } from 'vue'
@@ -12,22 +16,9 @@ import * as ElementPlusIconsVue from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import 'dayjs/locale/zh-cn'
 
-// SpreadJS 中文资源与样式：资源包必须在 CultureManager.culture 之前加载
-import '@grapecity/spread-sheets/styles/gc.spread.sheets.excel2013white.css'
-import '@grapecity/spread-sheets-resources-zh'
-import GC from '@grapecity/spread-sheets'
-
 import App from './App.vue'
 import router from './router'
 import './styles/main.css'
-
-GC.Spread.Common.CultureManager.culture('zh-cn')
-
-// LicenseKey 经 VITE_SPREADJS_KEY 注入（不入库）；评估模式仅显示水印，功能可用
-const spreadjsKey = import.meta.env.VITE_SPREADJS_KEY
-if (spreadjsKey) {
-  GC.Spread.Sheets.LicenseKey = spreadjsKey
-}
 
 dayjs.locale('zh-cn')
 
