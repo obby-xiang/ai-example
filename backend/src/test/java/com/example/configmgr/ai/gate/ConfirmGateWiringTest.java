@@ -8,8 +8,10 @@ import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
+import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.tool.ToolMeta;
 import com.example.configmgr.ai.tool.ToolRegistry;
+import com.example.configmgr.ai.tool.ToolResultLimiter;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -19,6 +21,8 @@ import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.model.tool.ToolExecutionResult;
+import org.springframework.ai.tool.ToolCallback;
+import org.springframework.ai.tool.method.MethodToolCallbackProvider;
 
 import java.util.List;
 import java.util.Map;
@@ -72,7 +76,22 @@ class ConfirmGateWiringTest {
     private final SseChatEmitter emitter = mock(SseChatEmitter.class);
 
     private final SpToolCallingManager manager = new SpToolCallingManager(this.store, this.registry, this.gate,
-            this.toolRegistry, this.codec, this.beacon, this.cancellations);
+            this.toolRegistry, this.codec, this.beacon, this.cancellations, new ToolResultLimiter(new AiProperties()));
+
+    /** B2：确认门三结局的受控工具替身（"放行 → 真的执行"需要官方循环能解析到回调）。 */
+    private final FakeStartImportTool fakeStartImport = new FakeStartImportTool();
+
+    /**
+     * 默认"上下文匹配"（防线③放行）：本用例关心的是 HITL 判定，
+     * 而 {@code ToolRegistry} 是桩，Mockito 的 boolean 默认 false 会让所有工具都被防线③拦下。
+     * 防线③本身的行为与判据同源性由 {@code SpToolCallingManagerScopeGuardTest} /
+     * {@code ToolRegistryDisclosureTest} 覆盖。
+     */
+    @org.junit.jupiter.api.BeforeEach
+    void defaultScopeGuardAllows() {
+        when(this.toolRegistry.matchesContext(anyString(), any(com.example.configmgr.ai.tool.AiContext.class)))
+            .thenReturn(true);
+    }
 
     @Test
     void startToolsSuspendAtConfirmGate() {
@@ -136,6 +155,72 @@ class ConfirmGateWiringTest {
         verify(this.store).claimExecution(eq(RUN_ID), anyString(), anyString());
     }
 
+    // ── B2（DC-14）：start_import 确认门三结局（与 start_export 同机制，补放行/超时用例） ──
+
+    /**
+     * 放行：确认门返回 {@code APPROVED} → 管理器进入执行路径（认领 + 台账），
+     * 且回填模型的是工具本身的输出（不是"未执行"文本）。
+     */
+    @Test
+    void startImportExecutesAfterApproval() {
+        stubCommon();
+        when(this.toolRegistry.channelOf("start_import")).thenReturn(ToolMeta.Channel.BACKEND);
+        when(this.toolRegistry.riskOf("start_import")).thenReturn(ToolMeta.RiskLevel.DANGER);
+        when(this.store.ledgerFor(eq(RUN_ID), anyString())).thenReturn(null);
+        when(this.store.claimExecution(eq(RUN_ID), anyString(), anyString())).thenReturn(true);
+        // 确认门：放行（状态 APPROVED，未执行 —— 执行由循环内的认领负责）
+        when(this.gate.awaitDecision(eq(RUN_ID), any(PendingToolCall.class))).thenAnswer(invocation -> {
+            PendingToolCall pending = invocation.getArgument(1);
+            pending.setStatus(PendingToolCall.APPROVED);
+            pending.setExecuted(false);
+            return pending;
+        });
+
+        ToolExecutionResult result = this.manager.executeToolCalls(prompt("start_import", "{\"taskId\":7}"),
+                response("start_import", "{\"taskId\":7}"));
+
+        assertThat(this.fakeStartImport.invocations.get()).as("放行后工具被真实执行").isEqualTo(1);
+        verify(this.store).claimExecution(eq(RUN_ID), anyString(), anyString());
+        verify(this.store).appendLedger(eq(RUN_ID), any(PendingToolCall.class), anyString());
+        assertThat(toolText(result)).contains("导入作业已启动（作业 #4242）");
+    }
+
+    /**
+     * 超时：确认门返回 {@code TIMEOUT}（自动取消）→ 与拒绝同一路径：不认领、不执行、
+     * 回填"未执行"语义的文本（三个结局里唯一由系统而非人给出的那个）。
+     */
+    @Test
+    void startImportIsNotExecutedOnTimeout() {
+        stubCommon();
+        when(this.toolRegistry.channelOf("start_import")).thenReturn(ToolMeta.Channel.BACKEND);
+        when(this.toolRegistry.riskOf("start_import")).thenReturn(ToolMeta.RiskLevel.DANGER);
+        when(this.gate.awaitDecision(eq(RUN_ID), any(PendingToolCall.class))).thenAnswer(invocation -> {
+            PendingToolCall pending = invocation.getArgument(1);
+            pending.setStatus(PendingToolCall.TIMEOUT);
+            pending.setExecuted(false);
+            pending.setResultText("确认等待超过 120 秒，系统已自动取消该操作（工具未执行）。");
+            return pending;
+        });
+
+        ToolExecutionResult result = this.manager.executeToolCalls(prompt("start_import", "{\"taskId\":7}"),
+                response("start_import", "{\"taskId\":7}"));
+
+        assertThat(this.fakeStartImport.invocations.get()).as("超时后工具绝不执行").isZero();
+        verify(this.store, never()).claimExecution(anyString(), anyString(), anyString());
+        verify(this.store, never()).appendLedger(anyString(), any(PendingToolCall.class), anyString());
+        assertThat(toolText(result)).contains("系统已自动取消该操作（工具未执行）");
+    }
+
+    /** 三种结局共用的桩（外置状态/帧出口/取消标志）。 */
+    private void stubCommon() {
+        when(this.cancellations.isCancelled(RUN_ID)).thenReturn(false);
+        when(this.store.get(RUN_ID)).thenReturn(snapshot());
+        when(this.store.runKey(RUN_ID)).thenReturn("ai:run:" + RUN_ID);
+        when(this.store.pendingKey(RUN_ID)).thenReturn("ai:pending:" + RUN_ID);
+        when(this.store.instanceId()).thenReturn("test-instance");
+        when(this.registry.of(RUN_ID)).thenReturn(this.emitter);
+    }
+
     private static final String RUN_ID = "run-confirm-wiring";
 
     private static RunSnapshot snapshot() {
@@ -145,8 +230,15 @@ class ConfirmGateWiringTest {
         return snapshot;
     }
 
-    private static Prompt prompt(String tool, String args) {
+    private Prompt prompt(String tool, String args) {
+        // 官方循环按**名字**从 options.getToolCallbacks() 解析回调 —— 这里挂上受控替身，
+        // "放行 → 执行"的用例才能观测到工具真的被调用（其余用例的工具名不在回调集里也不影响判定）
+        List<ToolCallback> callbacks = List.of(MethodToolCallbackProvider.builder()
+            .toolObjects(this.fakeStartImport)
+            .build()
+            .getToolCallbacks());
         ToolCallingChatOptions options = ToolCallingChatOptions.builder()
+            .toolCallbacks(callbacks)
             .toolContext(Map.of("runId", RUN_ID))
             .build();
         return new Prompt(List.of(new UserMessage("hi")), options);

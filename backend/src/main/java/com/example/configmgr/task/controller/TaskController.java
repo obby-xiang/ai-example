@@ -8,6 +8,7 @@ import com.example.configmgr.task.entity.TaskFile;
 import com.example.configmgr.task.repo.TaskFileRepository;
 import com.example.configmgr.task.service.TaskService;
 import com.example.configmgr.task.service.TaskSseService;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
@@ -28,6 +29,8 @@ public class TaskController {
     private final TaskSseService taskSseService;
     private final JobRepository jobRepository;
     private final TaskFileRepository taskFileRepository;
+    /** B1：条件入参的 JSON 序列化/校验（不再用 Map.toString 落库）。 */
+    private final ObjectMapper objectMapper;
 
     /**
      * 历史任务列表：类型/状态/关键词筛选 + 分页，每条附带配置项数、文件数与最新作业进度。
@@ -97,9 +100,52 @@ public class TaskController {
     public ApiResponse<?> setCondition(@PathVariable Long id,
                                         @PathVariable String defCode,
                                         @RequestBody Map<String, Object> body) {
-        String json = body.get("condition") != null ? body.get("condition").toString() : "{}";
-        taskService.setCondition(id, defCode, json);
+        taskService.setCondition(id, defCode, conditionJson(body.get("condition")));
         return ApiResponse.ok();
+    }
+
+    /**
+     * 条件入参 → 落库的 JSON 文本（DC-14 B1 修复）。
+     *
+     * <p>
+     * <b>为什么不能 {@code toString()}</b>：前端 {@code PUT /tasks/{id}/items/{defCode}/condition}
+     * 的 {@code condition} 是<b>对象</b>（{@code frontend/src/api/tasks.ts#setCondition} 直接传
+     * 契约事件里的 {@code conditions}），而 {@code Map.toString()} 会产出
+     * {@code {scopeKeys=[XN], fields=[...]}} 这种"看着像 JSON、其实不是"的文本 ——
+     * 落库后所有读侧（导出/导入作业、{@code data/service/QueryCondition}、
+     * 前端 {@code parseConditionJson}）解析<b>全部</b>失败，且失败发生在<b>别的</b>请求里
+     * （本请求 200 成功），排障成本极高。
+     *
+     * <p>
+     * 两种入参形态都支持：字符串则按"已是 JSON 文本"处理，但**必须校验可解析**
+     * （非法文本同样会造成上述脏数据）；对象/数组则用 Jackson 序列化。
+     */
+    private String conditionJson(Object condition) {
+        if (condition == null) {
+            return "{}";
+        }
+        String text;
+        if (condition instanceof String raw) {
+            text = raw.trim();
+            if (text.isEmpty()) {
+                return "{}";
+            }
+        }
+        else {
+            try {
+                text = objectMapper.writeValueAsString(condition);
+            }
+            catch (Exception e) {
+                throw new IllegalArgumentException("condition 无法序列化为 JSON：" + e.getMessage());
+            }
+        }
+        try {
+            objectMapper.readTree(text);
+        }
+        catch (Exception e) {
+            throw new IllegalArgumentException("condition 不是合法 JSON：" + e.getMessage());
+        }
+        return text;
     }
 
     @PutMapping("/{id}/step")
