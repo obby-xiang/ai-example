@@ -226,6 +226,7 @@ import { useTaskStore } from '@/stores/task'
 import { registerPageHandler, unregisterPageHandler, useWorkspaceStore } from '@/stores/workspace'
 import { buildTemplateWorkbookJson, downloadBlob, xlsxFileName, type ExcelRowIssue } from '@/utils/excel'
 import { watchJob, type JobChannelState } from '@/utils/job-watch'
+import { stepLabel } from '@/utils/format'
 import type { PublishConflictAsync } from '@/types/api'
 import { parseRowData, type ConfigStagingRow } from '@/types/data'
 import type { ConfigDefinition, ConfigField } from '@/types/definition'
@@ -570,7 +571,8 @@ async function ensureEditorLoaded(code: string): Promise<void> {
 }
 
 function onGridChanged(): void {
-  workspace.bumpVersion()
+  // 契约联动：导入编辑区的内容改动同步进 AI 上下文（表格类改动只递增版本，避免刷爆动作记录）
+  workspace.touch('导入编辑区内容已修改（尚未写回服务端文件）')
 }
 
 /**
@@ -632,12 +634,34 @@ async function goStep(next: number): Promise<void> {
   }
   stepIndex.value = next
   workspace.setStep(STEP_KEYS[next] ?? null)
+  await syncStepToBackend()
   await nextTick()
   if (next === 0) {
     await loadEditors()
   }
   if (next === 3) {
     await loadStaging()
+  }
+}
+
+/**
+ * 把当前步骤写回任务（`PUT /tasks/{id}/step`）。
+ *
+ * 后端 `currentStep` 是刷新恢复与 AI 上下文（`task:IMPORT/<step>` 的渐进披露子集）
+ * 的唯一权威：只在前端切步不进后端，刷新会退回首步，模型也会读到旧步骤。
+ */
+async function syncStepToBackend(): Promise<void> {
+  if (taskId.value === null) {
+    return
+  }
+  const step = STEP_KEYS[stepIndex.value]
+  if (!step) {
+    return
+  }
+  try {
+    task.value = await tasksApi.goToStep(taskId.value, step)
+  } catch {
+    // 步骤同步失败不阻塞界面操作（下次切步会重试）
   }
 }
 
@@ -862,10 +886,22 @@ const HANDLER_NAMES = [
   'import.upload',
   'import.startPrecheck',
   'import.startImport',
-  'import.startPublish'
+  'import.startPublish',
+  'import.nextStep'
 ]
 
 function registerHandlers(): void {
+  // 补丁②：AI 工作区动作 confirm_step 的页面实现（推进到下一步；与用户点「下一步」同路径）
+  registerPageHandler('import.nextStep', async (payload) => {
+    const target = typeof payload.step === 'string' && payload.step !== '' ? payload.step : null
+    const index = target ? STEP_KEYS.indexOf(target as (typeof STEP_KEYS)[number]) : stepIndex.value + 1
+    if (index < 0 || index >= STEP_KEYS.length) {
+      return `步骤 ${payload.step ?? index} 不在导入向导范围内（可选：${STEP_KEYS.join('、')}）`
+    }
+    await goStep(index)
+    return `已推进到导入向导步骤「${stepLabel(STEP_KEYS[index])}」`
+  })
+
   registerPageHandler('import.selectDefs', (payload) => {
     const codes = Array.isArray(payload.defCodes) ? payload.defCodes.map((item) => String(item)) : []
     selectedDefs.value = payload.mode === 'ADD' ? [...new Set([...selectedDefs.value, ...codes])] : codes
@@ -931,4 +967,21 @@ watch(selectedDefs, async () => {
   activeEditorTab.value = selectedDefs.value[0] ?? ''
   await loadEditors(true)
 })
+
+/**
+ * 契约联动：外部（AI 经 `ui_event.goto_step` → 契约层）改了工作区步骤时，页面跟随。
+ * 只读 `workspace.step`，不反向写回（用户切步走 goStep），因此不会形成回环。
+ */
+watch(
+  () => workspace.step,
+  (step) => {
+    const index = step ? STEP_KEYS.indexOf(step as (typeof STEP_KEYS)[number]) : -1
+    if (index >= 0 && index !== stepIndex.value) {
+      stepIndex.value = index
+      if (index === 3) {
+        void loadStaging()
+      }
+    }
+  }
+)
 </script>

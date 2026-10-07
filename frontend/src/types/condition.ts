@@ -1,8 +1,8 @@
 /**
- * 查询条件契约（**后端口径**）与客户端求值镜像。
+ * 查询条件契约（**后端口径**）。
  *
  * 核对源：backend/.../data/service/QueryCondition.java、ConditionEvaluator.java
- *         backend/.../data/controller/DataController.java#count（conditions 入参）
+ *         backend/.../data/controller/DataController.java#list / #count（两处 conditions 入参）
  *         backend/.../job/service/ExportJobRunner.java#parseCondition（读 TaskItem.conditionJson）
  *
  * 形态（**与 types/task.ts 的 QueryCondition 不同**，后者是 a 棒按需求文档先写的
@@ -11,18 +11,25 @@
  * { "scopeKeys": ["XN"], "fields": [{ "fieldCode": "monthlyFee", "operator": "GT", "value": "100" }] }
  * ```
  *
- * 为什么要写客户端镜像求值器：`GET /api/data/{defCode}`（列表端点）**没有** conditions 入参
- * （只有 `/count` 有），数据浏览页的字段级过滤只能前端按同一套语义求值 —— 见证据文档【待裁决】。
+ * S4.4c 变更（补丁棒移交项⑤⑦）：
+ * - ⑤ 操作符白名单补 `LIKE`（后端 `ConditionEvaluator.matchesOp` 有该 case，与 CONTAINS 等价）；
+ * - ⑦ 列表端点 `GET /api/data/{defCode}` 已补 `conditions` 入参（S4.4 后端 P2），
+ *   数据浏览页改走后端口径分页，**客户端镜像求值器已删除**（不再有第二套语义）。
  */
 
 import type { ConfigField, FieldType } from './definition'
 import { parseFieldOptions } from './definition'
 
-/** 操作符白名单（ConditionEvaluator.matchesOp 的 case 全量）。 */
+/**
+ * 操作符白名单（ConditionEvaluator.matchesOp 的 case 全量，含 LIKE）。
+ *
+ * 后端对未知操作符的处理是"视为通过"（不丢行），前端类型只收窄登记在册的算子。
+ */
 export type ConditionOperator =
   | 'EQ'
   | 'NE'
   | 'CONTAINS'
+  | 'LIKE'
   | 'STARTS_WITH'
   | 'IN'
   | 'EMPTY'
@@ -35,8 +42,11 @@ export type ConditionOperator =
 /**
  * 前端条件表单的**草案操作符**：比后端多一个 `BETWEEN`（介于）。
  *
- * 后端没有 BETWEEN，展开为同一字段的两条条件（GTE + LTE）——求值器逐条 AND，
+ * 后端没有 BETWEEN，展开为同一字段的两条条件（GTE + LTE）——后端求值器逐条 AND，
  * 语义等价于"介于"。详见 {@link buildFieldConditions}。
+ *
+ * 注意 `BETWEEN` 只存在于**表单草案**层：提交前必被展开，因此
+ * `FieldCondition.operator`（落库/传输口径）里永远不会出现它。
  */
 export type DraftOperator = ConditionOperator | 'BETWEEN'
 
@@ -278,6 +288,7 @@ export function operatorLabel(operator: ConditionOperator): string {
     EQ: '等于',
     NE: '不等于',
     CONTAINS: '包含',
+    LIKE: '模糊匹配',
     STARTS_WITH: '以…开头',
     IN: '包含于',
     EMPTY: '为空',
@@ -290,104 +301,7 @@ export function operatorLabel(operator: ConditionOperator): string {
   return table[operator] ?? operator
 }
 
-// ── 客户端求值镜像（ConditionEvaluator.matches 的 TS 版） ─────────────────────
-
-/** 行数据字段取值（后端 row.get(fieldCode)，值来自 Excel 往返 ⇒ 字符串优先）。 */
-function rawValue(row: Record<string, unknown>, fieldCode: string): unknown {
-  return row[fieldCode]
-}
-
-function asText(value: unknown): string | null {
-  if (value === null || value === undefined) {
-    return null
-  }
-  return String(value)
-}
-
-/** 日期优先、数值次之、字符串兜底（与后端 compareValues 同序）。 */
-export function compareConditionValues(a: string, b: string): number {
-  const dateA = Date.parse(`${a}T00:00:00`)
-  const dateB = Date.parse(`${b}T00:00:00`)
-  if (/^\d{4}-\d{2}-\d{2}/.test(a) && /^\d{4}-\d{2}-\d{2}/.test(b) && !Number.isNaN(dateA) && !Number.isNaN(dateB)) {
-    return dateA === dateB ? 0 : dateA < dateB ? -1 : 1
-  }
-  const numA = Number(a)
-  const numB = Number(b)
-  if (a.trim() !== '' && b.trim() !== '' && Number.isFinite(numA) && Number.isFinite(numB)) {
-    return numA === numB ? 0 : numA < numB ? -1 : 1
-  }
-  return a.localeCompare(b)
-}
-
-function matchesOperator(value: unknown, operator: ConditionOperator, expect: unknown): boolean {
-  const text = asText(value)
-  const expected = asText(expect)
-  switch (operator) {
-    case 'EMPTY':
-      return text === null || text.trim() === ''
-    case 'NOT_EMPTY':
-      return text !== null && text.trim() !== ''
-    case 'EQ':
-      return text !== null && text === expected
-    case 'NE':
-      return text === null || text !== expected
-    case 'CONTAINS':
-      return text !== null && expected !== null && text.includes(expected)
-    case 'STARTS_WITH':
-      return text !== null && expected !== null && text.startsWith(expected)
-    case 'IN': {
-      if (text === null || expect === null || expect === undefined) {
-        return false
-      }
-      if (Array.isArray(expect)) {
-        return expect.some((item) => item !== null && item !== undefined && String(item) === text)
-      }
-      return text === expected
-    }
-    case 'GT':
-    case 'GTE':
-    case 'LT':
-    case 'LTE': {
-      if (text === null || expected === null) {
-        return false
-      }
-      const compared = compareConditionValues(text, expected)
-      return operator === 'GT' ? compared > 0
-        : operator === 'GTE' ? compared >= 0
-          : operator === 'LT' ? compared < 0
-            : compared <= 0
-    }
-    default:
-      // 未知操作符与后端一致：视为通过（不因前端不认识的算子丢行）
-      return true
-  }
-}
-
-/**
- * 单行求值（范围过滤 + 字段级 AND）。
- *
- * 范围键取 regionCode / projectCode（与后端 ConditionEvaluator 的取键顺序一致）。
- */
-export function matchRow(row: Record<string, unknown>, condition: FieldQueryCondition | null | undefined): boolean {
-  if (!condition) {
-    return true
-  }
-  if (condition.scopeKeys && condition.scopeKeys.length > 0) {
-    const scopeValue = row['regionCode'] ?? row['projectCode']
-    if (scopeValue === null || scopeValue === undefined || !condition.scopeKeys.includes(String(scopeValue))) {
-      return false
-    }
-  }
-  for (const field of condition.fields ?? []) {
-    if (!field.operator) {
-      continue
-    }
-    if (!matchesOperator(rawValue(row, field.fieldCode), field.operator, field.value)) {
-      return false
-    }
-  }
-  return true
-}
+// ── 展示辅助 ─────────────────────────────────────────────────────────────────
 
 /** 行数据按定义字段做中文标签展示（数据浏览页表头）。 */
 export function displayFieldValue(field: ConfigField, value: unknown): string {

@@ -157,6 +157,7 @@ import {
   type ExcelRowIssue
 } from '@/utils/excel'
 import { registerFrontendToolExecutor, unregisterFrontendToolExecutor, PAGE_HANDLER_OPEN_EXPORT_EDITOR } from '@/utils/frontend-tools'
+import { stepLabel } from '@/utils/format'
 import { watchJob, type JobChannelState } from '@/utils/job-watch'
 
 /** 表格宿主的最小接口（defineExpose 出来的方法）。 */
@@ -333,8 +334,30 @@ function goStep(next: number): void {
   stepIndex.value = next
   workspace.setStep(STEP_KEYS[next] ?? null)
   void persistStepData()
+  void syncStepToBackend()
   if (next === 2) {
     void refreshResults()
+  }
+}
+
+/**
+ * 把当前步骤写回任务（`PUT /tasks/{id}/step`）。
+ *
+ * 为什么必须有这一步：后端 `currentStep` 是刷新恢复与 AI 上下文（`task:EXPORT/<step>` 的
+ * 渐进披露子集）的唯一权威；只在前端切步不进后端，刷新会退回首步、且模型拿到的是旧步骤。
+ */
+async function syncStepToBackend(): Promise<void> {
+  if (taskId.value === null) {
+    return
+  }
+  const step = STEP_KEYS[stepIndex.value]
+  if (!step) {
+    return
+  }
+  try {
+    task.value = await tasksApi.goToStep(taskId.value, step)
+  } catch {
+    // 步骤同步失败不阻塞界面操作（下次切步会重试）
   }
 }
 
@@ -515,8 +538,13 @@ function onTabChange(name: string | number): void {
 }
 
 function onGridChanged(): void {
+  const firstChange = !gridDirty
   gridDirty = true
   workspace.bumpVersion()
+  if (firstChange) {
+    // 契约联动：把"用户改了导出结果表格"同步给 AI 上下文（同一批编辑只记一次）
+    workspace.touch('导出结果表格内容已修改（尚未保存到服务端文件）')
+  }
 }
 
 /** 取某配置项的下载用 xlsx（优先用表格里的**当前内容**，反映在线编辑）。 */
@@ -639,10 +667,22 @@ const HANDLER_NAMES = [
   'export.selectDefs',
   'export.setConditions',
   'export.start',
+  'export.nextStep',
   PAGE_HANDLER_OPEN_EXPORT_EDITOR
 ]
 
 function registerHandlers(): void {
+  // 补丁②：AI 工作区动作 confirm_step 的页面实现（推进到下一步；与用户点「下一步」同路径）
+  registerPageHandler('export.nextStep', (payload) => {
+    const target = typeof payload.step === 'string' && payload.step !== '' ? payload.step : null
+    const index = target ? STEP_KEYS.indexOf(target as (typeof STEP_KEYS)[number]) : stepIndex.value + 1
+    if (index < 0 || index >= STEP_KEYS.length) {
+      return `步骤 ${payload.step ?? index} 不在导出向导范围内（可选：${STEP_KEYS.join('、')}）`
+    }
+    goStep(index)
+    return `已推进到导出向导步骤「${stepLabel(STEP_KEYS[index])}」`
+  })
+
   registerPageHandler('export.selectDefs', (payload) => {
     const codes = Array.isArray(payload.defCodes) ? payload.defCodes.map((item) => String(item)) : []
     selectedDefs.value = payload.mode === 'ADD' ? [...new Set([...selectedDefs.value, ...codes])] : codes
@@ -738,4 +778,22 @@ watch(selectedDefs, (codes) => {
     draftModels[code] = draftModels[code] ?? emptyDraftModel()
   }
 })
+
+/**
+ * 契约联动：外部（AI 经 `ui_event.goto_step` → 契约层）改了工作区步骤时，页面跟随。
+ *
+ * 只读 `workspace.step`，不反向写回（用户切步走 goStep），因此不会形成回环。
+ */
+watch(
+  () => workspace.step,
+  (step) => {
+    const index = step ? STEP_KEYS.indexOf(step as (typeof STEP_KEYS)[number]) : -1
+    if (index >= 0 && index !== stepIndex.value) {
+      stepIndex.value = index
+      if (index === 2) {
+        void refreshResults()
+      }
+    }
+  }
+)
 </script>

@@ -148,3 +148,27 @@ export const UI_EVENT_TYPES: readonly UiEvent['type'][] = [
 
 /** 工作区 → AI 的通知主题（AI 面板据此更新上下文 chip）。 */
 export type WorkspaceTopic = 'workspace_changed' | 'ui_event_result'
+
+/** 工作区动作来源（契约事件与 AI 上下文标注用）。 */
+export type WorkspaceActionSource = '界面' | 'AI'
+
+/**
+ * 一次工作区动作记录（deepseek 蓝本 workspaceContract 的事件形态 + 版本号）。
+ *
+ * 两个用途：
+ * 1. `workspace_changed` 事件的载荷 —— AI 面板据此显示"工作区已同步：<摘要>"；
+ * 2. 下一轮 AI 请求的 `context.extra.recentActions` —— 让模型知道用户刚刚手点了什么
+ *    （契约联动：工作区动作经契约层同步进 AI 上下文）。
+ */
+export interface WorkspaceActionRecord {
+  /** 动作发生后的数据版本号（单调自增，与 dataVersion 同源） */
+  version: number
+  /** 中文动作摘要（展示文案，同时也是给模型看的一句话） */
+  summary: string
+  /** 时刻（epoch 毫秒） */
+  at: number
+  source: WorkspaceActionSource
+}
+
+/** 一轮对话最多携带的历史动作条数（只带最近若干条，避免上下文膨胀）。 */
+export const WORKSPACE_ACTION_LIMIT = 5

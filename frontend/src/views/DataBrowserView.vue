@@ -56,7 +56,7 @@
         v-if="currentDef"
         :fields="currentDef.fields ?? []"
         :model-value="draftModel"
-        hint="字段条件用于预估行数与当前页筛选；清空表示不设条件"
+        hint="条件随「查询」一并提交服务端（与行数预估同口径）；清空表示不设条件"
         @update:model-value="onModelChange"
       />
       <el-empty v-else description="请选择配置项" :image-size="60" />
@@ -71,7 +71,7 @@
       :description="browserNote"
     />
 
-    <el-table v-loading="loading" :data="visibleRows" border>
+    <el-table v-loading="loading" :data="rows" border>
       <el-table-column type="expand">
         <template #default="{ row }: { row: ConfigDataRow }">
           <el-descriptions :column="2" border size="small" class="my-1 mx-4">
@@ -138,11 +138,10 @@
 /**
  * 数据浏览页（五页之⑤，FR-1.1：按定义 + 范围 + 字段级条件查询）。
  *
- * 口径（重要，见证据文档【待裁决】）：
- * - **范围过滤**是服务端口径（`scopeType`/`scopeKey` 是后端入参），分页也由后端做；
- * - **字段级条件**只有 `/count` 端点接 `conditions` 入参，列表端点**没有**该入参，
- *   因此字段条件在服务端只用于"预估命中行数"，当前页则用 `types/condition.ts` 的
- *   `matchRow`（与后端 ConditionEvaluator 同语义的镜像求值器）做筛选并显式说明；
+ * 口径（S4.4c 修正：后端 P2 已给列表端点补 `conditions` 入参）：
+ * - **范围过滤与字段级条件**都是服务端口径（`scopeType`/`scopeKey`/`conditions` 三个后端入参），
+ *   分页由后端做，`total` 即命中总数 —— 前端不再做任何"只筛当前页"的镜像求值；
+ * - 行数预估（`/count`）与列表（`/{defCode}`）同源同口径，两者对同一条件的命中数应一致；
  * - 行数据来自 `dataJson` 字符串，渲染时按定义字段做中文标签转换（ENUM/BOOLEAN）。
  */
 import { computed, onMounted, ref } from 'vue'
@@ -156,13 +155,14 @@ import { masterDataApi } from '@/api/masterdata'
 import { useWorkspaceStore } from '@/stores/workspace'
 import {
   buildQueryCondition,
+  conditionSummary,
   displayFieldValue,
   emptyDraftModel,
   isConditionEmpty,
-  matchRow,
+  stringifyCondition,
   type ConditionDraftModel
 } from '@/types/condition'
-import { parseRowData, type ConfigDataRow, type ScopeType } from '@/types/data'
+import { parseRowData, type ConfigDataRow, type DataQuery, type ScopeType } from '@/types/data'
 import type { ConfigDefinition, ConfigField } from '@/types/definition'
 import type { Project, Region } from '@/types/masterdata'
 import { formatDateTime } from '@/utils/format'
@@ -192,20 +192,13 @@ const currentFields = computed<readonly ConfigField[]>(() => currentDef.value?.f
 
 const condition = computed(() => buildQueryCondition(draftModel.value))
 
-/** 当前页按字段条件筛选（与服务端口径同语义的镜像求值）。 */
-const visibleRows = computed(() => {
-  if (isConditionEmpty(condition.value)) {
-    return rows.value
-  }
-  return rows.value.filter((row) => matchRow(dataOf(row), condition.value))
-})
-
 const browserNote = computed(() => {
   if (isConditionEmpty(condition.value)) {
-    return '未设置字段条件：展示服务端按范围过滤后的分页数据。'
+    return '未设置字段条件：展示服务端按范围过滤后的分页数据（分页与命中总数均为服务端口径）。'
   }
-  return `字段条件：${condition.value?.fields?.map((field) => `${field.fieldCode} ${field.operator}`).join('、') || ''}；`
-    + `当前页在浏览器内按同一套求值语义筛选（列表端点无 conditions 入参），服务端口径命中 ${serverCount.value ?? '未预估'} 行。`
+  return `字段条件：${conditionSummary(condition.value)}；`
+    + '列表与行数预估走同一个服务端 conditions 口径（前端不再做本页求值），'
+    + `当前命中 ${total.value} 行。`
 })
 
 function dataOf(row: ConfigDataRow): Record<string, unknown> {
@@ -254,7 +247,7 @@ async function loadData(): Promise<void> {
   }
   loading.value = true
   try {
-    const params: { scopeType?: ScopeType; scopeKey?: string; page: number; size: number } = {
+    const params: DataQuery = {
       page: page.value,
       size: size.value
     }
@@ -263,6 +256,9 @@ async function loadData(): Promise<void> {
     }
     if (scopeKey.value) {
       params.scopeKey = scopeKey.value
+    }
+    if (!isConditionEmpty(condition.value)) {
+      params.conditions = stringifyCondition(condition.value)
     }
     const result = await dataApi.listData(defCode.value, params)
     rows.value = result.content ?? []
@@ -289,7 +285,7 @@ async function previewCount(): Promise<void> {
       params.scopeKey = scopeKey.value
     }
     if (!isConditionEmpty(condition.value)) {
-      params.conditions = JSON.stringify(condition.value)
+      params.conditions = stringifyCondition(condition.value)
     }
     const result = await dataApi.countData(defCode.value, params)
     serverCount.value = result.count

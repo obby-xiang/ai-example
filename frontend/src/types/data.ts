@@ -49,6 +49,8 @@ export interface ConfigStagingRow {
 export interface DataQuery {
   scopeType?: ScopeType
   scopeKey?: string
+  /** 查询条件的 JSON 字符串（QueryCondition；列表端点与 /count 同口径，S4.4 后端 P2 补齐） */
+  conditions?: string
   page?: number
   size?: number
 }

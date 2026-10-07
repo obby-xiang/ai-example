@@ -21,7 +21,16 @@ import { saveBlob } from '@/api/http'
 import { tasksApi } from '@/api/tasks'
 import { jobsApi } from '@/api/jobs'
 import { useTaskStore } from '@/stores/task'
-import { WORKSPACE_CONTRACT_VERSION, type UiEvent, type WorkspacePageId, type WorkspaceTopic } from '@/types/tools'
+import { stepLabel } from '@/utils/format'
+import {
+  WORKSPACE_ACTION_LIMIT,
+  WORKSPACE_CONTRACT_VERSION,
+  type UiEvent,
+  type WorkspaceActionRecord,
+  type WorkspaceActionSource,
+  type WorkspacePageId,
+  type WorkspaceTopic
+} from '@/types/tools'
 import type { AiChatContext } from '@/types/ai'
 import type { ImportMode, QueryCondition, TaskStatus, TaskType } from '@/types/task'
 import type { PageHandler, PageHandlerName, UiEventResult, WorkspaceSnapshot } from '@/types/workspace'
@@ -67,7 +76,9 @@ export const useWorkspaceStore = defineStore('workspace', {
     /** 导入模式 */
     importMode: null as ImportMode | null,
     /** 数据版本号：工作区状态每次变更自增，供 AI 判断是否需要重拉 */
-    dataVersion: 0
+    dataVersion: 0,
+    /** 最近的工作区动作（契约事件形态；随下一轮 AI 请求注入上下文，见 buildContext） */
+    recentActions: [] as WorkspaceActionRecord[]
   }),
 
   getters: {
@@ -84,6 +95,21 @@ export const useWorkspaceStore = defineStore('workspace', {
     /** 未进入任何向导时（任务中心/定义页/数据页）AI 只能拿到 page:* 口径的工具。 */
     inWizard(state): boolean {
       return state.taskType !== null && state.step !== null
+    },
+    /** 上下文摘要（AI 面板的上下文 chip 文案）。 */
+    contextSummary(state): string {
+      const pageText = PAGE_LABELS[state.pageId] ?? state.page
+      const parts = [pageText]
+      if (state.taskId !== null) {
+        parts.push(`任务 #${state.taskId}`)
+      }
+      if (state.step) {
+        parts.push(`步骤 ${stepLabel(state.step)}`)
+      }
+      if (state.selectedDefs.length > 0) {
+        parts.push(`已选 ${state.selectedDefs.length} 个配置项`)
+      }
+      return parts.join(' · ')
     }
   },
 
@@ -119,7 +145,7 @@ export const useWorkspaceStore = defineStore('workspace', {
       if (init.importMode !== undefined) {
         this.importMode = init.importMode
       }
-      this.bumpVersion()
+      this.touch(`进入${PAGE_LABELS[this.pageId] ?? this.page}`)
     },
 
     /** 回到任务中心口径（离开向导时清掉 task 维度，避免披露错误的工具子集）。 */
@@ -131,19 +157,19 @@ export const useWorkspaceStore = defineStore('workspace', {
       this.selectedDefs = []
       this.queryConditions = {}
       this.importMode = null
-      this.bumpVersion()
+      this.touch('离开向导，回到任务中心')
     },
 
     setStep(step: string | null): void {
       this.step = step
-      this.bumpVersion()
+      this.touch(step ? `切换到步骤「${stepLabel(step)}」` : '退出当前步骤')
     },
 
     setTaskId(taskId: number | null, taskType?: TaskType | null, status?: TaskStatus | null): void {
       this.taskId = taskId
       this.taskType = taskType === undefined ? this.taskType : taskType
       this.taskStatus = status === undefined ? this.taskStatus : status
-      this.bumpVersion()
+      this.touch(taskId === null ? '解除任务绑定' : `绑定任务 #${taskId}`)
     },
 
     setSelectedDefs(codes: string[], mode: 'REPLACE' | 'ADD' = 'REPLACE'): void {
@@ -152,21 +178,49 @@ export const useWorkspaceStore = defineStore('workspace', {
       } else {
         this.selectedDefs = [...codes]
       }
-      this.bumpVersion()
+      this.touch(`已选择配置项：${this.selectedDefs.join('、') || '（空）'}`)
     },
 
     setQueryConditions(defCode: string, conditions: QueryCondition | unknown): void {
       this.queryConditions = { ...this.queryConditions, [defCode]: conditions }
-      this.bumpVersion()
+      this.touch(`设置 ${defCode} 的查询条件`)
     },
 
     setImportMode(mode: ImportMode | null): void {
       this.importMode = mode
-      this.bumpVersion()
+      this.touch(`导入模式设为 ${mode === null ? '未设置' : mode === 'MERGE' ? '增量合并' : '整体替换'}`)
     },
 
+    /** 纯版本号自增（消息密集的变更用，例如表格连续编辑，避免动作记录被刷爆）。 */
     bumpVersion(): void {
       this.dataVersion += 1
+    },
+
+    /**
+     * 记录一次工作区动作（契约联动的心脏）：
+     * 1. 数据版本自增；
+     * 2. 记入 recentActions（随下一轮 AI 请求注入 `context.extra.recentActions`）；
+     * 3. 广播 `workspace_changed` 契约事件给 AI 面板（deepseek 蓝本事件形态 + 版本号）。
+     *
+     * @param summary 中文动作摘要（同时是给模型看的一句话）
+     * @param source  界面（用户手点）或 AI（经契约层下发）
+     */
+    touch(summary: string, source: WorkspaceActionSource = '界面'): number {
+      this.dataVersion += 1
+      const record: WorkspaceActionRecord = {
+        version: this.dataVersion,
+        summary,
+        at: Date.now(),
+        source
+      }
+      this.recentActions = [...this.recentActions, record].slice(-WORKSPACE_ACTION_LIMIT)
+      emitWorkspaceEvent('workspace_changed', record)
+      return this.dataVersion
+    },
+
+    /** 清空待同步动作（AI 发消息带上上下文后调用：动作只注入一轮，不重复累积）。 */
+    clearRecentActions(): void {
+      this.recentActions = []
     },
 
     /** 注入到每轮 chat/tool-result 的 Agent Context（严格 5 键，多余信息进 extra）。 */
@@ -181,7 +235,9 @@ export const useWorkspaceStore = defineStore('workspace', {
           selectedDefs: [...this.selectedDefs],
           importMode: this.importMode,
           dataVersion: this.dataVersion,
-          contractVersion: this.contractVersion
+          contractVersion: this.contractVersion,
+          // 契约联动：把"用户刚刚手点了什么"一并交给模型（只带最近若干条）
+          recentActions: this.recentActions.map((record) => `${record.summary}（来源：${record.source}）`)
         }
       }
     },
@@ -254,7 +310,8 @@ export function emitWorkspaceEvent(topic: WorkspaceTopic, payload?: unknown): vo
 
 /** 业务动作完成后通知 AI（AI 面板据此刷新上下文 chip）。 */
 export function notifyWorkspaceChanged(summary: string): void {
-  emitWorkspaceEvent('workspace_changed', { summary, at: Date.now() })
+  const workspace = useWorkspaceStore()
+  workspace.touch(summary, 'AI')
 }
 
 // ── ui_event 统一分发（AI → 业务，与用户点击同一套 action） ───────────────────
@@ -272,8 +329,19 @@ function fail(message: string): UiEventResult {
  *
  * 每个分支都落到**与用户手点相同**的 API/action 上，因此 AI 驱动与手工操作
  * 的后端副作用完全一致（不新建"AI 专用后门"）。
+ *
+ * 契约联动：分发结果会同时 (1) 记入工作区动作（source=AI，随下一轮请求回到模型），
+ * (2) 经 `ui_event_result` 事件广播给 AI 面板展示。
  */
 export async function dispatchUiEvent(event: UiEvent): Promise<UiEventResult> {
+  const result = await runUiEvent(event)
+  const workspace = useWorkspaceStore()
+  workspace.touch(result.message, 'AI')
+  emitWorkspaceEvent('ui_event_result', { event: event.type, ...result })
+  return result
+}
+
+async function runUiEvent(event: UiEvent): Promise<UiEventResult> {
   const workspace = useWorkspaceStore()
   const taskStore = useTaskStore()
   try {
