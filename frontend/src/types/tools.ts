@@ -4,19 +4,34 @@
  * 核对源：backend/.../ai/tools/AiTools.java（@Tool name/参数/风险/通道）、
  *         ai/tool/ToolScope.java（渐进披露标签）、ai/tool/ToolMeta.java（RiskLevel/Channel）
  *
- * 后端工具全集（name → scope，前端 ui_event 契约按此对齐）：
- *   list_config_defs            *                        READ   BACKEND
- *   get_config_def              *                        READ   BACKEND
- *   list_tasks                  * , page:tasks          READ   BACKEND
- *   get_workspace_state         *                        READ   BACKEND
- *   check_job_status            task:*                   READ   BACKEND
- *   get_row_count               * , task:EXPORT/QUERY_COND , task:EXPORT/EXPORT   READ  BACKEND
- *   start_export                task:EXPORT/EXPORT       WRITE  BACKEND
- *   start_precheck              task:IMPORT/PRECHECK     WRITE  BACKEND
- *   start_import                task:IMPORT/IMPORT       WRITE  BACKEND
- *   start_publish               task:IMPORT/PUBLISH      DANGER BACKEND（确认门挂起）
- *   open_export_file_editor     task:EXPORT/EXPORT       READ   FRONTEND（挂起等回灌）
- *   download_export_file        task:EXPORT/EXPORT       READ   FRONTEND（挂起等回灌）
+ * **后端工具全集（本棒 DC-14 复核后重写；上一版沿 S4.2 口径，风险列已过期）**
+ *
+ * | 工具 | scope | 风险 | 通道 |
+ * |---|---|---|---|
+ * | list_config_defs | `*` | READ | BACKEND |
+ * | get_config_def | `*` | READ | BACKEND |
+ * | list_tasks | `*`, `page:tasks` | READ | BACKEND |
+ * | get_workspace_state | `*` | READ | BACKEND |
+ * | check_job_status | `task:*` | READ | BACKEND |
+ * | get_row_count | `*`, `task:EXPORT/QUERY_COND`, `task:EXPORT/EXPORT` | READ | BACKEND |
+ * | create_task | `page:tasks`, `task:EXPORT`, `task:IMPORT` | WRITE | BACKEND |
+ * | start_export | `page:tasks`, `task:EXPORT/EXPORT` | **DANGER**（确认门） | BACKEND |
+ * | start_precheck | `page:tasks`, `task:IMPORT/PRECHECK` | **DANGER**（确认门） | BACKEND |
+ * | start_import | `task:IMPORT/IMPORT` | **DANGER**（确认门） | BACKEND |
+ * | start_publish | `task:IMPORT/PUBLISH` | **DANGER**（确认门） | BACKEND |
+ * | open_export_file_editor | `task:EXPORT/EXPORT` | READ | FRONTEND |
+ * | download_export_file | `task:EXPORT/EXPORT` | READ | FRONTEND |
+ * | navigate_to | `*` | READ | FRONTEND |
+ * | select_definitions | `page:tasks`, `task:EXPORT`, `task:IMPORT` | READ | FRONTEND |
+ * | set_condition | `page:tasks`, `task:EXPORT` | READ | FRONTEND |
+ * | confirm_step | `page:tasks`, `task:EXPORT`, `task:IMPORT` | READ | FRONTEND |
+ *
+ * 两处**已过期的旧口径**（勿再沿用）：① 四个 `start_*` 曾标 WRITE/BACKEND 且不进确认门，
+ * S4.4e 裁决⑥ 已全部升为 `DANGER`（执行前挂起、前端渲染确认卡片，FR-5.3）；
+ * ② `open_export_file_editor`/`download_export_file` 曾被写成"唯一两个 FRONTEND 工具"，
+ * S4.4d 起 `navigate_to`/`select_definitions`/`set_condition`/`confirm_step` 也是 FRONTEND。
+ * 增量执行兜底（DC-14 T1）：越 scope 的调用即使被上游发起，后端也会拦截并回灌结构化错误
+ * （帧里 `tool_result.status=BLOCKED`）。
  */
 
 import type { JobType } from './job'

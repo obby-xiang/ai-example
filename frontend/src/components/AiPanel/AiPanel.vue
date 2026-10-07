@@ -377,6 +377,9 @@ function toolTagType(status: ToolRunStatus): 'info' | 'warning' | 'success' | 'd
     case 'failed':
       return 'danger'
     case 'rejected':
+    // DC-14 T1：被防线③拦下（越 scope 未执行）与"人拒绝"同色（warning）——
+    // 两者都是"没有执行"，与后端执行失败（danger）语义不同
+    case 'blocked':
       return 'warning'
     case 'expired':
       return 'info'
@@ -392,6 +395,8 @@ function toolStatusLabel(status: ToolRunStatus): string {
     succeeded: '已成功',
     failed: '执行失败',
     rejected: '已拒绝',
+    // DC-14 T1：越出当前披露范围（防线③），工具未执行
+    blocked: '超出当前范围',
     expired: '会话已失效'
   }
   return labels[status]
@@ -453,11 +458,21 @@ async function decide(approved: boolean): Promise<void> {
 /** 挂起调用换人即重置倒计时与拒绝原因。 */
 function resetPendingWatch(pending: PendingToolCall | null): void {
   rejectReason.value = ''
-  if (!pending || pending.status !== 'pending' || !pending.timeoutSeconds) {
+  if (!pending || pending.status !== 'pending') {
     confirmDeadline.value = null
     return
   }
-  confirmDeadline.value = Date.now() + pending.timeoutSeconds * 1000
+  // DC-14 T4：优先用服务端给的**绝对**到期时刻（挂起时刻 + hitl.timeout），
+  // 不再用"本地收到帧的时刻 + timeoutSeconds"推断 —— 后者会把网络/渲染延迟算进倒计时，
+  // 且重挂（帧回放）时会把已经过去的等待时间重新计一遍。
+  if (typeof pending.expiresAt === 'number' && Number.isFinite(pending.expiresAt)) {
+    confirmDeadline.value = pending.expiresAt
+    return
+  }
+  // 兼容回落：老后端/前端工具挂起帧没带 expiresAt 时按相对秒数算
+  confirmDeadline.value = pending.timeoutSeconds
+    ? Date.now() + pending.timeoutSeconds * 1000
+    : null
 }
 
 watch(

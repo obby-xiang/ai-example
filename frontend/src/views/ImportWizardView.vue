@@ -8,7 +8,7 @@
     :prev-disabled="stepIndex === 0"
     :show-next="stepIndex < 3"
     :next-loading="busy === 'persist'"
-    @prev="goStep(stepIndex - 1)"
+    @prev="goPrev"
     @next="nextStep"
   >
     <!-- ============ 第 1 步：上传配置 ============ -->
@@ -621,15 +621,23 @@ async function flushEditors(): Promise<boolean> {
 
 // ── 步骤导航 ──────────────────────────────────────────────────────────────────
 
-async function goStep(next: number): Promise<void> {
+/**
+ * 步骤导航（返回"是否真的推进了"）。
+ *
+ * <p>
+ * <b>F2（DC-14）：本方法必须把结局回给调用方</b>。第 1 步的 flushEditors 失败时会**提前返回**
+ * （不推进步骤），而 AI 侧 handler 此前无条件回"已推进到…" —— 于是模型收到成功语义、
+ * 用户看到的却是没动的界面（S4.4d/f 实测的"报已推进但步骤未推进"）。
+ */
+async function goStep(next: number): Promise<boolean> {
   if (next < 0 || next >= STEP_KEYS.length) {
-    return
+    return false
   }
   if (next > stepIndex.value && stepIndex.value === 0) {
     const saved = await flushEditors()
     if (!saved) {
       ElMessage.warning('存在未写回的编辑内容，请先修正后再继续')
-      return
+      return false
     }
   }
   stepIndex.value = next
@@ -642,6 +650,7 @@ async function goStep(next: number): Promise<void> {
   if (next === 3) {
     await loadStaging()
   }
+  return true
 }
 
 /**
@@ -663,6 +672,11 @@ async function syncStepToBackend(): Promise<void> {
   } catch {
     // 步骤同步失败不阻塞界面操作（下次切步会重试）
   }
+}
+
+/** 上一步（goStep 现在返回"是否真的推进"，模板里包一层避免悬空 Promise）。 */
+function goPrev(): void {
+  void goStep(stepIndex.value - 1)
 }
 
 async function nextStep(): Promise<void> {
@@ -898,7 +912,14 @@ function registerHandlers(): void {
     if (index < 0 || index >= STEP_KEYS.length) {
       return `步骤 ${payload.step ?? index} 不在导入向导范围内（可选：${STEP_KEYS.join('、')}）`
     }
-    await goStep(index)
+    // F2（DC-14）：回灌文本必须与真实结局一致 —— 未推进就如实说"未推进 + 为什么"，
+    // 否则模型会基于假的成功语义继续往下走（例如直接 start_import，而用户还停在第一步）。
+    const advanced = await goStep(index)
+    if (!advanced) {
+      return `步骤未推进：当前仍在「${stepLabel(STEP_KEYS[stepIndex.value] ?? '')}」。`
+        + '第 1 步离开前会把在线编辑内容写回服务端文件，存在本地校验问题或保存失败时会中止。'
+        + '请提示用户修正编辑区数据（或先点「保存草稿到服务端」）后重试。'
+    }
     return `已推进到导入向导步骤「${stepLabel(STEP_KEYS[index])}」`
   })
 

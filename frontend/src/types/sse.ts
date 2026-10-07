@@ -27,6 +27,8 @@ export type PendingStatus =
   | 'FRONTEND_RESULT'
   | 'CANCELLED'
   | 'EXECUTED'
+  /** DC-14 T1：防线③（执行兜底）拦截 —— 越 scope 的工具调用未执行 */
+  | 'BLOCKED'
 
 /** 外置挂起条目（PendingToolCall#asMap 的字段集）。 */
 export interface PendingToolCallSnapshot {
@@ -51,7 +53,9 @@ export interface PendingToolCallSnapshot {
 /** 全部帧类型常量（顺序即后端产出顺序语义）。 */
 export const SseFrameTypes = [
   'start',
+  'message_start',
   'delta',
+  'message_end',
   'tool_start',
   'tool_result',
   'confirm_request',
@@ -73,6 +77,11 @@ export const REASONING_FRAME_TYPE = 'reasoning'
 export interface SseFrameBase {
   type: SseFrameType
   runId?: string
+  /**
+   * 帧的单调序号（DC-14 T6，后端每帧递增，重启续跑后接着归档里的最大值继续）。
+   * reattach 时回传 `?lastSeq=N` 即只补差量；旧帧可能没有该字段（按"照收"处理）。
+   */
+  seq?: number
 }
 
 /** 首包：runId 由服务端生成，前端据此做 reattach。 */
@@ -86,6 +95,23 @@ export interface SseStartFrame extends SseFrameBase {
 export interface SseDeltaFrame extends SseFrameBase {
   type: 'delta'
   text: string
+  /** DC-14 T5：本片正文所属的助手消息 id（消息级渲染/去重的判据） */
+  messageId?: string
+}
+
+/**
+ * 消息边界帧（DC-14 T5 / R8-2 的三段式：`message_start` → `delta`* → `message_end`）。
+ *
+ * 为什么需要它：一条助手消息可能"先思考、再正文、中间夹工具调用"，只有 content 帧时
+ * 客户端无法判断两段文本属于同一条消息还是两条（SP-01ab §7.3 的混合消息渲染痛点）。
+ * `kind` 区分文本段（`text`）与思考段（`reasoning`，后端今天不产 reasoning 帧，故实际只会出现 text）。
+ */
+export interface SseMessageBoundaryFrame extends SseFrameBase {
+  type: 'message_start' | 'message_end'
+  messageId: string
+  kind: 'text' | 'reasoning' | string
+  /** 仅 message_end：本段字符数（与 done 帧对账用） */
+  chars?: number
 }
 
 /** 工具开始（后端执行或挂起前的公告）。 */
@@ -108,6 +134,10 @@ export interface SseToolResultFrame extends SseFrameBase {
   executed: boolean
   executedBy?: string | null
   reused?: boolean
+  /** 待决条目的最终状态（DC-14 T1：BLOCKED = 被防线③拦下，未执行） */
+  status?: PendingStatus | string
+  /** DC-14 T5：结果铸为消息后的消息 id（`tool-<toolCallId>`，重放/重挂不变） */
+  messageId?: string
   result?: string | null
 }
 
@@ -120,6 +150,11 @@ export interface SseConfirmRequestFrame extends SseFrameBase {
   /** 与 args 同值（后端同时放了两份，供展示摘要用） */
   summary?: string
   timeoutSeconds: number
+  /**
+   * DC-14 T4：挂起等待的**绝对**到期时刻（epoch 毫秒 = 挂起时刻 + timeoutSeconds）。
+   * 倒计时以它为准（绝对时钟不受前端本地时间漂移与重挂延迟影响）；缺字段时回落到 timeoutSeconds。
+   */
+  expiresAt?: number
   /** 回调端点说明文本：POST /api/ai/confirm {runId, toolCallId, approved, reason} */
   callback?: string
 }
@@ -144,6 +179,8 @@ export interface SseFrontendToolRequestFrame extends SseFrameBase {
   name: string
   args?: string
   timeoutSeconds: number
+  /** DC-14 T4 同口径：绝对到期时刻（epoch 毫秒） */
+  expiresAt?: number
   /** 回调端点说明文本：POST /api/ai/frontend-tool-result {runId, toolCallId, result} */
   callback?: string
 }
@@ -155,6 +192,10 @@ export interface SseFrontendToolResultFrame extends SseFrameBase {
   name: string
   ok: boolean
   executed: boolean
+  /** 待决条目的最终状态（BLOCKED = 被防线③拦下） */
+  status?: PendingStatus | string
+  /** DC-14 T5：结果铸为消息后的消息 id */
+  messageId?: string
   result?: string | null
 }
 
@@ -215,9 +256,10 @@ export interface SseErrorFrame extends SseFrameBase {
   message: string
 }
 
-/** 一轮对话的 SSE 帧判别联合（后端 13 类 + 前向兼容的 reasoning）。 */
+/** 一轮对话的 SSE 帧判别联合（后端 15 类 + 前向兼容的 reasoning）。 */
 export type SseFrame =
   | SseStartFrame
+  | SseMessageBoundaryFrame
   | SseDeltaFrame
   | SseReasoningFrame
   | SseToolStartFrame
@@ -257,6 +299,14 @@ export function toSseFrame(value: unknown): SseFrame | null {
     return value as SseReasoningFrame
   }
   return (SseFrameTypes as readonly string[]).includes(candidate.type) ? (value as SseFrame) : null
+}
+
+/**
+ * 帧序号的读取（DC-14 T6）：缺字段/非数字一律返回 null（老帧按"照收"处理，不参与孤儿过滤）。
+ */
+export function frameSeq(frame: SseFrame): number | null {
+  const candidate = frame as { seq?: unknown }
+  return typeof candidate.seq === 'number' && Number.isFinite(candidate.seq) ? candidate.seq : null
 }
 
 // ── 任务级事件通道（GET /api/tasks/{id}/events，形态与 AI 帧不同） ──────────────

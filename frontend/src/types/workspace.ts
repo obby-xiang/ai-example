@@ -15,11 +15,13 @@ export type PageHandlerName =
   | 'export.selectDefs'
   | 'export.setConditions'
   | 'export.start'
+  | 'export.nextStep'
   | 'import.selectDefs'
   | 'import.upload'
   | 'import.startPrecheck'
   | 'import.startImport'
   | 'import.startPublish'
+  | 'import.nextStep'
   | 'data.refresh'
 
 /** 页面能力 handler：入参由各页自定，返回说明文本（作为工具结果回灌）。 */

@@ -189,6 +189,60 @@ interface WorkspaceAction {
   handlerNames: readonly string[]
   /** 无 handler 时的契约层后备动作（与用户点击同一套 action） */
   toUiEvent?: (args: Record<string, unknown>) => UiEvent | null
+  /**
+   * 本动作会把界面导航到哪个页面（F3：这类动作执行后要等目标页面就绪再回灌结果，
+   * 否则同一轮里紧随其后的动作会打在"页面还没挂载"的窗口上）。
+   */
+  navigatesTo?: (args: Record<string, unknown>) => WorkspacePageId | null
+}
+
+/**
+ * 页面就绪探针（F3）：目标页面挂载后会注册的能力 handler 名。
+ *
+ * 判断"页面就绪"的可靠口径不是"路由变了"（router.push 返回时组件可能还没 mount），
+ * 而是**页面自己登记能力之后**（`registerPageHandler` 发生在 onMounted 里）——
+ * 有 handler 就说明该页的交互能力（含后续动作要用的 handler）已经就位。
+ */
+const PAGE_READY_PROBES: Record<WorkspacePageId, readonly string[]> = {
+  tasks: [],
+  export: ['export.nextStep'],
+  import: ['import.nextStep'],
+  definitions: [],
+  data: []
+}
+
+/** 页面就绪等待上限（毫秒）：超过即如实告知"仍在加载"，不无限等。 */
+export const PAGE_READY_TIMEOUT_MS = 3_000
+
+/**
+ * 等待目标页面就绪（F3，参照 kimi-k3 蓝本"导航后等页面可用再动作"的实践）。
+ *
+ * 竞态现场（S4.4d/f 实测）：同一轮里模型先 `navigate_to(export, taskId)` 再
+ * `select_definitions` —— 前者只是 `router.push`，目标组件要等异步路由解析 + onMounted
+ * 才注册 handler；后者若在那之前执行，会落到"页面不支持该动作"的 degraded 分支，
+ * 模型据此误判"这条路走不通"（而界面上明明可以）。
+ *
+ * @returns true = 目标页面已就绪；false = 超时（调用方据此在回灌文本里如实说明）
+ */
+export async function waitForPageReady(page: WorkspacePageId, timeoutMs = PAGE_READY_TIMEOUT_MS): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  const probes = PAGE_READY_PROBES[page]
+  for (;;) {
+    const workspace = useWorkspaceStore()
+    const ready = workspace.pageId === page
+      && (probes.length === 0 || probes.some((name) => getPageHandler(name) !== null))
+    if (ready) {
+      return true
+    }
+    if (Date.now() >= deadline) {
+      return false
+    }
+    await delay(50)
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 /**
@@ -216,6 +270,10 @@ export const WORKSPACE_ACTIONS: readonly WorkspaceAction[] = [
         return { type: 'restore_task', taskId }
       }
       return isWorkspacePageId(page) ? { type: 'open_page', page } : null
+    },
+    navigatesTo: (args) => {
+      const page = typeof args.page === 'string' ? args.page.toLowerCase() : ''
+      return isWorkspacePageId(page) ? page : null
     }
   },
   {
@@ -321,6 +379,18 @@ async function runWorkspaceAction(
   }
   const outcome = await dispatchUiEvent(event)
   if (outcome.handled) {
+    // F3：导航类动作等目标页面就绪再回灌（否则同一轮里紧随的动作会打在页面未挂载的窗口上）
+    const target = action.navigatesTo?.(args) ?? null
+    if (target !== null) {
+      const ready = await waitForPageReady(target)
+      return {
+        ok: true,
+        availability: 'available',
+        result: ready
+          ? `${outcome.message}（页面已就绪，可继续执行本页动作）`
+          : `${outcome.message}（页面仍在加载中；若要继续在该页动作，请稍后重试或提示用户手动操作）`
+      }
+    }
     return { ok: true, availability: 'available', result: outcome.message }
   }
   // 契约层拒绝（缺任务/缺 handler）→ degraded：给出可行动说明，不静默

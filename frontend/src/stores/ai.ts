@@ -18,7 +18,7 @@ import type { SseFrameHandlers, SseStreamOptions } from '@/api/sse'
 import { onWorkspaceEvent, useWorkspaceStore } from '@/stores/workspace'
 import { executeFrontendTool, parseToolArgs } from '@/utils/frontend-tools'
 import { ErrorCode, type SessionBusyConflict, type SuspendPoolSaturated } from '@/types/api'
-import { isTerminalFrame } from '@/types/sse'
+import { frameSeq, isTerminalFrame } from '@/types/sse'
 import type {
   AiHealth,
   AiHistory,
@@ -185,7 +185,12 @@ export const useAiStore = defineStore('ai', {
     /** 最近一次工作区契约事件（面板"工作区已同步"chip 的数据源） */
     contextSync: null as WorkspaceActionRecord | null,
     /** 最近一次 ui_event 分发结果（AI 驱动工作区的回执展示） */
-    lastUiEventResult: null as { event: string; handled: boolean; message: string } | null
+    lastUiEventResult: null as { event: string; handled: boolean; message: string } | null,
+    /**
+     * 已收到的最大帧序号（DC-14 T6）：reattach 时回传，服务端只补增量。
+     * 按 runId 记录 —— 换轮次（新 runId）即从零开始，不跨轮混用序号。
+     */
+    runSeq: {} as Record<string, number>
   }),
 
   getters: {
@@ -485,6 +490,10 @@ export const useAiStore = defineStore('ai', {
      *
      * `runId` 参数做**类型防御**：UI 侧若把点击事件当参数传进来（形如 `[object PointerEvent]`），
      * 会把 reattach 打到 404 上（S4.4c E6 实测发现的缺陷），故非字符串一律忽略、落回现场 runId。
+     *
+     * DC-14 T6：带上该 runId 已收到的最大帧序号 —— 服务端只补发 `seq > lastSeq` 的增量
+     * （本地已有的帧不重发），回放与实时续接之间不会重复渲染。序号未知（首挂/旧格式帧）则不传，
+     * 服务端全量回放（行为与 S4.4c 一致）。
      */
     async reattachActive(runId?: string): Promise<void> {
       const explicit = typeof runId === 'string' && runId.trim() !== '' ? runId : null
@@ -493,10 +502,13 @@ export const useAiStore = defineStore('ai', {
         this.notice = '没有可重挂的轮次（缺少 runId）'
         return
       }
+      const lastSeq = this.runSeq[targetRunId]
       const assistant = this.appendAssistantMessage('（正在重挂进行中的轮次…）')
       this.loading = true
       this.streamInterrupted = false
-      this.notice = '正在重挂该轮（先回放已产出的帧，再续收实时帧）…'
+      this.notice = lastSeq === undefined
+        ? '正在重挂该轮（先回放已产出的帧，再续收实时帧）…'
+        : `正在重挂该轮（只补发第 ${lastSeq} 帧之后的增量）…`
       currentAbort = new AbortController()
       try {
         await aiApi.reattachRun(
@@ -513,7 +525,7 @@ export const useAiStore = defineStore('ai', {
               }
             }
           },
-          { signal: currentAbort.signal }
+          { signal: currentAbort.signal, lastSeq }
         )
         this.busyConflict = null
       } catch (error) {
@@ -655,10 +667,28 @@ export const useAiStore = defineStore('ai', {
         ? this.messages.find((item) => item.id === assistantId) ?? this.currentAssistantMessage()
         : this.currentAssistantMessage()
 
+      // T6：按 runId 记录最大帧序号（reattach 时回传，服务端只补增量）
+      const seq = frameSeq(frame)
+      if (seq !== null) {
+        const runId = frame.runId ?? this.activeRunId
+        if (runId) {
+          this.runSeq[runId] = Math.max(this.runSeq[runId] ?? 0, seq)
+        }
+      }
+
       switch (frame.type) {
         case 'start':
           this.activeRunId = frame.runId
           this.notice = null
+          break
+        case 'message_start':
+          // T5 三段式的 start：本条消息的边界开始了（正文/思考段共用同一套帧）
+          message.messageId = frame.messageId
+          message.streaming = true
+          break
+        case 'message_end':
+          // T5 三段式的 end：本段内容到此为止（段末不关整条消息 —— 工具调用后可能还有下一段）
+          message.messageId = frame.messageId
           break
         case 'delta':
           message.content += frame.text
@@ -684,13 +714,19 @@ export const useAiStore = defineStore('ai', {
           // 真失败（后端执行异常）才落 failed。
           const existing = message.toolRuns.find((run) => run.toolCallId === frame.toolCallId)
           const rejected = existing?.status === 'rejected'
+          // DC-14 T1：防线③拦截（BLOCKED）也是"未执行"，展示口径与"被拒绝"同类（warning 色 +
+          // 说明原因），不与后端执行失败（danger 色）混用 —— 三者语义不同，用户要能一眼分清。
+          const blocked = frame.status === 'BLOCKED' || existing?.status === 'blocked'
           this.upsertToolRun(message, {
             toolCallId: frame.toolCallId,
             name: frame.name,
             kind: frame.kind,
-            status: rejected ? 'rejected' : frame.ok ? 'succeeded' : 'failed',
+            status: blocked ? 'blocked' : rejected ? 'rejected' : frame.ok ? 'succeeded' : 'failed',
+            messageId: frame.messageId,
             result: frame.result ?? null,
-            reason: rejected ? (existing?.reason ?? '用户拒绝执行') : null
+            reason: blocked
+              ? '该工具不在当前工作区上下文的披露范围内，未执行'
+              : rejected ? (existing?.reason ?? '用户拒绝执行') : null
           })
           break
         }
@@ -745,11 +781,13 @@ export const useAiStore = defineStore('ai', {
           // 改写成"已成功"（补丁③配套：本地已失败/已拒绝则保持原终态）。
           const existing = message.toolRuns.find((run) => run.toolCallId === frame.toolCallId)
           const localTerminal = existing?.status === 'failed' || existing?.status === 'rejected'
+            || existing?.status === 'blocked'
           this.upsertToolRun(message, {
             toolCallId: frame.toolCallId,
             name: frame.name,
             kind: 'FRONTEND',
             status: localTerminal ? (existing?.status ?? 'failed') : frame.ok ? 'succeeded' : 'failed',
+            messageId: frame.messageId,
             result: frame.result ?? null
           })
           if (message.pendingCall?.toolCallId === frame.toolCallId) {
@@ -820,6 +858,8 @@ export const useAiStore = defineStore('ai', {
         args: parseToolArgs(frame.args),
         rawArgs: frame.args,
         timeoutSeconds: frame.timeoutSeconds,
+        // T4：绝对到期时刻（服务端给）；缺字段时由倒计时组件回落到 timeoutSeconds
+        expiresAt: frame.expiresAt,
         status: 'pending'
       }
     },

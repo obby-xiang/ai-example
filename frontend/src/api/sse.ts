@@ -14,7 +14,7 @@
  */
 
 import { ApiError, FRONTEND_ERROR_CODES } from './http'
-import { isTerminalFrame, toSseFrame } from '@/types/sse'
+import { frameSeq, isTerminalFrame, toSseFrame } from '@/types/sse'
 import type { SseDoneFrame, SseErrorFrame, SseFrame } from '@/types/sse'
 import type { AiChatRequest, StreamCloseInfo } from '@/types/ai'
 
@@ -29,7 +29,14 @@ export const DEFAULT_RECONNECT_DELAY_MS = 1_000
 
 export const SSE_PATHS = {
   chat: '/api/ai/chat',
-  events: (runId: string): string => `/api/ai/events/${encodeURIComponent(runId)}`
+  /**
+   * reattach 通道（DC-14 T6）：带 `lastSeq` 时服务端只补发 `seq > lastSeq` 的帧
+   * （孤儿过滤）—— 长轮次的重挂代价从"整轮全部帧"降到"差量"。
+   */
+  events: (runId: string, lastSeq?: number): string =>
+    lastSeq === undefined
+      ? `/api/ai/events/${encodeURIComponent(runId)}`
+      : `/api/ai/events/${encodeURIComponent(runId)}?lastSeq=${Math.max(0, Math.floor(lastSeq))}`
 } as const
 
 /** 帧回调集合。 */
@@ -55,6 +62,11 @@ export interface SseStreamOptions {
   idleTimeoutMs?: number
   maxReconnects?: number
   reconnectDelayMs?: number
+  /**
+   * reattach 专用（DC-14 T6）：前端已收到的最大帧序号 —— 服务端据此只补发增量。
+   * 不传 = 全量回放（与 S4.2 时期行为一致）。
+   */
+  lastSeq?: number
 }
 
 interface StreamState {
@@ -62,10 +74,12 @@ interface StreamState {
   terminal: boolean
   lastFrame: SseFrame | null
   reconnects: number
+  /** 已收到的最大帧序号（T6：重挂时回传，服务端只补增量）。 */
+  lastSeq: number | null
 }
 
 function newState(): StreamState {
-  return { runId: null, terminal: false, lastFrame: null, reconnects: 0 }
+  return { runId: null, terminal: false, lastFrame: null, reconnects: 0, lastSeq: null }
 }
 
 /** SSE 事件块切分器：把字节流切成一个个 data 载荷。 */
@@ -138,6 +152,10 @@ function consumeFrame(
   handlers: SseFrameHandlers
 ): void {
   state.lastFrame = frame
+  const seq = frameSeq(frame)
+  if (seq !== null) {
+    state.lastSeq = state.lastSeq === null ? seq : Math.max(state.lastSeq, seq)
+  }
   if (frame.type === 'start') {
     state.runId = frame.runId
   }
@@ -458,7 +476,9 @@ export async function reattach(
     }
 
     const open = (): void => {
-      source = new EventSource(SSE_PATHS.events(runId))
+      // T6：优先用"本连接已收到的最大序号"（增量重连），退回调用方给的 lastSeq
+      const since = state.lastSeq ?? options.lastSeq
+      source = new EventSource(SSE_PATHS.events(runId, since ?? undefined))
       source.onopen = () => {
         handlers.onOpen?.()
         startIdle()

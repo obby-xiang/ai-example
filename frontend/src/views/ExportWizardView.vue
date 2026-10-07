@@ -692,7 +692,7 @@ function registerHandlers(): void {
     return `已选择配置项：${selectedDefs.value.join('、') || '（空）'}`
   })
 
-  registerPageHandler('export.setConditions', (payload) => {
+  registerPageHandler('export.setConditions', async (payload) => {
     const defCode = String(payload.defCode ?? '')
     if (!defCode) {
       return '缺少 defCode，未设置条件'
@@ -700,7 +700,23 @@ function registerHandlers(): void {
     const condition = parseConditionJson(typeof payload.conditions === 'string' ? payload.conditions : JSON.stringify(payload.conditions ?? {}))
     draftModels[defCode] = draftModelFromCondition(condition)
     counts[defCode] = null
-    return `已设置 ${defCode} 的查询条件：${conditionSummary(condition)}`
+    const summary = conditionSummary(condition)
+    if (taskId.value === null) {
+      return `已设置 ${defCode} 的查询条件：${summary}（当前未绑定任务，条件只存在于本页表单，推进步骤时会尝试落库）`
+    }
+    // F1（DC-14）：与 confirm_step 同口径 —— 设置即落库，不再"只在推进步骤时落库"。
+    // 为什么必须落库：后端 conditionJson 是导出作业与 data 列表的**唯一**条件来源；
+    // 只写表单模型的话，AI 说"已设置条件"之后若用户没点下一步就刷新（或直接由 AI 触发起作业），
+    // 落库的条件仍是旧的 —— 表现为"AI 说设了但导出全量"。
+    try {
+      await tasksApi.setCondition(taskId.value, defCode, stringifyCondition(condition))
+      workspace.setQueryConditions(defCode, condition)
+      return `已设置 ${defCode} 的查询条件并落库：${summary}`
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      return `已设置 ${defCode} 的查询条件（${summary}），但落库失败：${reason}。`
+        + '请提示用户先在「选择配置」步勾选该配置项，或手动在界面上重设条件。'
+    }
   })
 
   registerPageHandler('export.start', async () => {

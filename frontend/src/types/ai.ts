@@ -147,11 +147,12 @@ export type RunDescription = Record<string, unknown>
 // ── 前端展示态（消息模型） ──────────────────────────────────────────────────
 
 /**
- * 工具卡四态（+ 挂起/失效）：
+ * 工具卡状态：
  * pending=待人确认或待前端执行，running=执行中，succeeded/failed=已结束，
- * rejected=人工拒绝，expired=会话已失效（后端历史为空，挂起态无法续跑）。
+ * rejected=人工拒绝，expired=会话已失效（后端历史为空，挂起态无法续跑），
+ * blocked=被渐进披露防线③拦下（DC-14 T1：越 scope 的调用未执行 —— 与"执行失败"不是一回事）。
  */
-export type ToolRunStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'rejected' | 'expired'
+export type ToolRunStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'rejected' | 'expired' | 'blocked'
 
 /** 工具卡的一次执行记录（同一轮可多次工具调用）。 */
 export interface ToolRun {
@@ -165,12 +166,16 @@ export interface ToolRun {
   result?: string | null
   /** 拒绝原因 / 失败原因 */
   reason?: string | null
+  /** DC-14 T5：结果铸为消息后的消息 id（`tool-<toolCallId>`），供消息级渲染/去重 */
+  messageId?: string
 }
 
 /** 前端展示用的对话消息。 */
 export interface ChatMessage {
   id: string
   role: 'user' | 'assistant' | 'system'
+  /** DC-14 T5：服务端给的消息身份（message_start/end 与 delta 帧的 messageId） */
+  messageId?: string
   content: string
   /** 思考链文本（当前后端不产 reasoning 帧，留字段供 b 棒按需填充） */
   reasoning: string
@@ -194,6 +199,11 @@ export interface PendingToolCall {
   rawArgs?: string
   /** 确认门倒计时（秒），来自 confirm_request 帧 */
   timeoutSeconds?: number
+  /**
+   * DC-14 T4：挂起等待的绝对到期时刻（epoch 毫秒，服务端给的 `expiresAt`）。
+   * 倒计时优先用它（不受本地时钟漂移/重挂延迟影响）；缺字段才回落到 timeoutSeconds。
+   */
+  expiresAt?: number
   status: 'pending' | 'running' | 'approved' | 'rejected' | 'expired'
 }
 
