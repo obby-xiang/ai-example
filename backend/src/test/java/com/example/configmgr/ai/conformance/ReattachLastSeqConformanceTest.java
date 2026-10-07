@@ -10,6 +10,10 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -62,35 +66,30 @@ class ReattachLastSeqConformanceTest {
 	}
 
 	/**
-	 * 前端把<b>心跳</b>的 seq 也算进 lastSeq（心跳确实到了订阅者），而心跳<b>不落归档</b>（T7）。
-	 * 于是 lastSeq 可能落在一个"归档里不存在"的号上 —— 补发必须照旧给出所有更大的归档帧，
-	 * 不能因为"归档里没有 seq=N"而少发或错发。
+	 * 前端给出的 {@code lastSeq} 可能落在"归档里不存在"的号上（升级期的老帧、或某次落档失败
+	 * 留下的洞）。补发必须照旧给出所有更大的归档帧，不能因为"归档里没有 seq=N"而少发或错发。
+	 *
+	 * <p>
+	 * 注：S5c-1 修复后，心跳不再占业务号 ⇒ 心跳不会再制造这种洞；本用例改用"落档失败留下的洞"
+	 * 构造同一输入形态（seq 3 缺席），守住同一条规则。
 	 *
 	 * <p>
 	 * kill：把 {@code isOrphan} 的判据从 {@code seq > lastSeq} 改成"从归档里找 seq == lastSeq 的位置再截断"
 	 * ⇒ 找不到该号就返回空补发，本用例立刻变红。
 	 */
 	@Test
-	void replayFromAHeartbeatSeqOnTheHoleLosesNothing() {
-		FrameWire online = FrameWire.attachTo(this.out);
-		this.out.start("s-1");
-		this.out.heartbeat(Map.of("phase", "suspend", "waitedSeconds", 2));
-		this.out.heartbeat(Map.of("phase", "suspend", "waitedSeconds", 4));
-		this.out.suspended(List.of(pending("c-1")), this.store.runKey(RUN_ID), this.store.pendingKey(RUN_ID),
-				this.store.instanceId());
-		this.out.done(Map.of(), "deepseek-flash", Map.of("cancelled", false));
+	void replayFromALastSeqThatIsNotInTheArchiveLosesNothing() {
+		// 归档：1、2、4、5（seq 3 缺席 —— 例如那一帧落档失败）
+		this.store.seedArchive(RUN_ID, FrameContract.fixture("start", 1L), FrameContract.fixture("suspended", 2L),
+				FrameContract.fixture("tool_start", 4L, "toolCallId", "c-1"),
+				FrameContract.fixture("tool_result", 5L, "toolCallId", "c-1"));
 
-		// 在线订阅者收到 1..5（其中 2、3 是心跳）；归档只有 1、4、5
-		assertThat(seqs(online.frames())).containsExactly(1L, 2L, 3L, 4L, 5L);
-		assertThat(this.store.archivedSeqs(RUN_ID)).containsExactly(1L, 4L, 5L);
-
-		// 前端 lastSeq = 3（心跳号）：补发的应是归档里 seq > 3 的帧（4、5）
 		FrameWire reattached = new FrameWire();
 		int replayed = this.out.replayTo(reattached.emitter(), false, 3L);
 
 		assertThat(replayed).isEqualTo(2);
 		assertThat(seqs(reattached.frames())).containsExactly(4L, 5L);
-		assertThat(FrameContract.types(reattached.frames())).containsExactly("suspended", "done");
+		assertThat(FrameContract.types(reattached.frames())).containsExactly("tool_start", "tool_result");
 	}
 
 	@Test
@@ -155,6 +154,67 @@ class ReattachLastSeqConformanceTest {
 	}
 
 	// ── ⑤ 跨进程续号（重挂的相邻口径） ───────────────────────────────────────
+
+	/**
+	 * <b>【S5c-2 回归】</b>重挂的"回放 + 挂订阅"必须是一次原子交接：回放期间发出的实时帧
+	 * 不能被交接窗口吞掉。
+	 *
+	 * <p>
+	 * 事实链：老写法 {@code replayTo(...)} 之后才 {@code attach(...)}；两次调用之间若有实时帧写出，
+	 * 该帧既不在回放快照里（快照已读完）、也还没被这个订阅者接住 ⇒ 静默丢帧。
+	 *
+	 * <p>
+	 * 本用例把窗口确定化：让回放的第一帧卡在"慢订阅者"上（此时交接尚未完成），
+	 * 与此同时另一线程发一帧实时 {@code suspended}。修复后（同一把出帧锁内完成回放 + 挂订阅）
+	 * 实时帧必然排到交接之后 ⇒ 新订阅者收得到；老写法下它落在窗口里 ⇒ 新订阅者永远收不到。
+	 *
+	 * <p>
+	 * kill：把 {@code AiController#events} 改回 {@code replayTo} + {@code attach} 两次调用
+	 * （或让 {@code replayAndAttach} 不持锁）⇒ 本用例的"实时帧必须到达"断言变红。
+	 */
+	@Test
+	void replayAndAttachIsAtomicSoNoFrameEscapesTheHandoffWindow() throws Exception {
+		this.out.start("s-1");
+		this.out.suspended(List.of(pending("c-1")), this.store.runKey(RUN_ID), this.store.pendingKey(RUN_ID),
+				this.store.instanceId());
+
+		CountDownLatch firstReplayFrameInSend = new CountDownLatch(1);
+		CountDownLatch releaseReplay = new CountDownLatch(1);
+		AtomicBoolean blocked = new AtomicBoolean(false);
+		FrameWire reattached = new FrameWire(payload -> {
+			if (blocked.compareAndSet(false, true)) {
+				firstReplayFrameInSend.countDown();
+				try {
+					releaseReplay.await(5, TimeUnit.SECONDS);
+				}
+				catch (InterruptedException ex) {
+					Thread.currentThread().interrupt();
+				}
+			}
+		});
+
+		AtomicInteger replayed = new AtomicInteger(-1);
+		Thread reattaching = new Thread(() -> replayed.set(this.out.replayAndAttach(reattached.emitter(), 0L, false)),
+				"reattach");
+		reattaching.start();
+		assertThat(firstReplayFrameInSend.await(5, TimeUnit.SECONDS)).as("回放已开始（仍卡在第一帧的写出上）").isTrue();
+
+		// 交接窗口内发出的实时帧：修复前它既不在回放快照里、订阅也还没挂上
+		Thread live = new Thread(() -> this.out.suspended(List.of(pending("c-2")), this.store.runKey(RUN_ID),
+				this.store.pendingKey(RUN_ID), this.store.instanceId()), "live-frame");
+		live.start();
+		releaseReplay.countDown();
+		reattaching.join(5000);
+		live.join(5000);
+
+		List<Map<String, Object>> received = reattached.frames();
+		assertThat(seqs(received)).as("回放帧 + 交接窗口内的实时帧都必须在（不丢帧、不重号）")
+				.containsExactly(1L, 2L, 3L);
+		assertThat(received.get(received.size() - 1)).as("最后一帧是交接之后发出的实时帧（toolCallId=c-2）")
+				.containsEntry("seq", 3L)
+				.satisfies(frame -> assertThat(String.valueOf(frame.get("toolCalls"))).contains("c-2"));
+		assertThat(FrameContract.archiveSeqContract(this.store.events(RUN_ID))).as("归档不得乱序或重号").isEmpty();
+	}
 
 	/**
 	 * 进程重启后，续跑的新写出器从归档末帧续号（{@code RunStore#lastEventSeq}）——

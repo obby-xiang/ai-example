@@ -264,6 +264,10 @@ public class AiController {
 	 * <b>T6 差量补发</b>：可选 {@code ?lastSeq=N} —— 前端带上自己已收到的最大帧序号，
 	 * 服务端只补发 {@code seq > N} 的帧（孤儿过滤：本地已有的帧不重发）；不传则全量回放
 	 * （老客户端零改动，行为与 S4.2 时期一致）。
+	 *
+	 * <p>
+	 * <b>S5c-2</b>：回放与挂订阅走 {@link SseChatEmitter#replayAndAttach}（同一把出帧锁内完成），
+	 * 消掉"回放快照读完、订阅还没挂上"之间丢帧的交接窗口。
 	 */
 	@GetMapping(value = "/events/{runId}", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
 	public ResponseEntity<?> events(@PathVariable String runId,
@@ -274,14 +278,7 @@ public class AiController {
 		}
 		SseEmitter emitter = new SseEmitter(budgetMillis());
 		SseChatEmitter out = this.runRegistry.of(runId);
-		int replayed = out.replayTo(emitter, false, lastSeq);
-		boolean terminal = isTerminal(snapshot.getStatus());
-		if (terminal) {
-			out.complete(emitter);
-		}
-		else {
-			out.attach(emitter);
-		}
+		int replayed = out.replayAndAttach(emitter, lastSeq, isTerminal(snapshot.getStatus()));
 		log.debug("reattach runId={} status={} lastSeq={} 回放帧数={}", runId, snapshot.getStatus(), lastSeq, replayed);
 		return ResponseEntity.ok(emitter);
 	}
