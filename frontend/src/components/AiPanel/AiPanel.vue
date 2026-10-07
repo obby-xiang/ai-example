@@ -1,135 +1,317 @@
 <template>
-  <aside class="h-full flex flex-col bg-white border-l border-solid border-[#e4e7ed] w-[360px] min-w-[320px]">
-    <header class="px-3 py-2 border-b border-gray-200 flex items-center justify-between">
-      <div class="flex items-center gap-2">
-        <span class="font-medium">AI 助手</span>
-        <el-tag size="small" :type="healthTagType">{{ healthLabel }}</el-tag>
-      </div>
-      <div class="flex items-center gap-1">
-        <el-button link size="small" @click="probe">检测可用性</el-button>
-        <el-button link size="small" :icon="Fold" title="隐藏 AI 栏（隐藏后业务功能不受影响）" @click="ai.toggleExpand()" />
-      </div>
-    </header>
+  <!-- 收起态：48px 竖排条（蓝本 AiPanel.vue:2-7） -->
+  <div
+    v-if="!ai.expanded"
+    class="h-full flex flex-col items-center pt-4 gap-2 cursor-pointer text-[#409eff]"
+    @click="ai.toggleExpand()"
+  >
+    <el-icon><ChatDotRound /></el-icon>
+    <span class="writing-vertical text-[13px]">AI 助手</span>
+  </div>
 
-    <div class="px-3 py-2 text-xs text-gray-500 border-b border-gray-100">
-      <div>会话 ID（页签级）：<span class="font-mono">{{ shortSessionId }}</span></div>
-      <div>工作区上下文：<span class="font-mono">{{ workspace.contextKey }}</span>（数据版本 {{ workspace.dataVersion }}）</div>
+  <div v-else class="h-full flex flex-col">
+    <!-- 头部（蓝本 AiPanel.vue:10-19） -->
+    <div class="flex items-center gap-2.5 px-3 py-2.5 border-b border-solid border-[#ebeef5]">
+      <div class="w-[34px] h-[34px] rounded-lg bg-gradient-to-br from-[#409eff] to-[#7b61ff] text-white flex items-center justify-center font-bold">AI</div>
+      <div class="flex-1 min-w-0">
+        <div class="text-sm font-semibold text-[#303133]">实施助手</div>
+        <div class="text-xs text-[#909399]">流式对话 · 工具调用</div>
+      </div>
+      <el-button size="small" text title="收起" @click="ai.toggleExpand()">
+        <el-icon><ArrowRight /></el-icon>
+      </el-button>
     </div>
 
-    <el-alert
-      v-if="ai.notice"
-      class="m-2"
-      type="warning"
-      :closable="false"
-      show-icon
-      :title="ai.notice"
-    />
+    <!-- 会话 / 工作区上下文条（本仓差异：会话恢复与契约联动状态可视化，蓝本无此行） -->
+    <div class="px-3 py-1.5 text-xs text-[#909399] border-b border-solid border-[#ebeef5] bg-aiPanel">
+      <div class="flex items-center gap-1.5 flex-wrap">
+        <el-tag size="small" :type="healthTagType" effect="plain">{{ healthLabel }}</el-tag>
+        <span>会话 {{ shortSessionId }}</span>
+        <span>·</span>
+        <span class="truncate">工作区 {{ workspace.contextSummary }}</span>
+        <span>·</span>
+        <span>数据版本 {{ workspace.dataVersion }}</span>
+        <el-button link size="small" @click="probe">重新检测</el-button>
+      </div>
+      <div v-if="ai.contextSync" class="mt-0.5 truncate">
+        工作区已同步：{{ ai.contextSync.summary }}（v{{ ai.contextSync.version }} · {{ ai.contextSync.source }}）
+      </div>
+    </div>
 
+    <!-- 降级与冲突提示（EP Alert；503/409 各有专属动作） -->
     <el-alert
       v-if="ai.busyConflict"
       class="m-2"
       type="error"
       :closable="false"
       show-icon
-      :title="`该会话已有一轮进行中（runId=${ai.busyConflict.runId}）`"
+      title="当前会话正在进行中"
+      :description="`该会话已有一轮在进行（runId=${ai.busyConflict.runId}），可一键重挂继续接收这一轮的输出。`"
     >
-      <el-button size="small" type="primary" @click="ai.reattachActive()">一键重挂该轮</el-button>
+      <el-button size="small" type="primary" class="mt-1" @click="reattach()">一键重挂收流</el-button>
     </el-alert>
 
-    <div class="flex-1 layout-column px-3 py-2 space-y-3">
-      <el-empty
-        v-if="ai.messages.length === 0"
-        description="本棒为占位壳：状态层（SSE/HITL/前端工具/恢复）已就绪，真实对话由 b 棒接入"
-      />
-      <div v-for="message in ai.messages" :key="message.id" class="text-sm">
-        <div class="text-xs text-gray-400 mb-1">
-          {{ message.role === 'user' ? '用户' : message.role === 'system' ? '系统' : '助手' }}
-        </div>
-        <div class="whitespace-pre-wrap break-words">{{ message.content }}</div>
-        <el-collapse v-if="message.reasoning" class="mt-1">
-          <el-collapse-item title="思考链" name="reasoning">
-            <div class="text-xs text-gray-600 whitespace-pre-wrap">{{ message.reasoning }}</div>
-          </el-collapse-item>
-        </el-collapse>
-        <div v-if="message.toolRuns.length > 0" class="mt-1 space-y-1">
-          <div
-            v-for="run in message.toolRuns"
-            :key="run.toolCallId"
-            class="flex items-center gap-2 text-xs border border-gray-200 rounded px-2 py-1"
-          >
-            <el-tag size="small" :type="toolTagType(run.status)">{{ toolStatusLabel(run.status) }}</el-tag>
-            <span class="font-mono">{{ run.name }}</span>
-            <span v-if="run.result" class="text-gray-500 truncate">{{ run.result }}</span>
+    <el-alert
+      v-if="ai.poolSaturated"
+      class="m-2"
+      type="error"
+      :closable="false"
+      show-icon
+      title="挂起池已饱和"
+      :description="`挂起专用线程池容量 ${ai.poolSaturated.poolSize} 已用满，请等当前挂起轮次确认/超时后再试。`"
+    />
+
+    <el-alert
+      v-if="!ai.available"
+      class="m-2"
+      type="warning"
+      :closable="false"
+      show-icon
+      title="AI 能力暂不可用（已降级，业务功能不受影响）"
+      :description="degradeReason"
+    />
+
+    <el-alert
+      v-if="ai.streamInterrupted"
+      class="m-2"
+      type="error"
+      :closable="false"
+      show-icon
+      title="连接中断，结果可能不完整"
+      description="本轮没有收到完成帧（done/error）。已生成的内容保留在上方，可重新发送或一键重挂该轮。"
+    >
+      <el-button v-if="ai.activeRunId" size="small" type="primary" class="mt-1" @click="reattach(ai.activeRunId)">
+        一键重挂该轮
+      </el-button>
+    </el-alert>
+
+    <el-alert
+      v-if="ai.notice"
+      class="m-2"
+      :type="noticeType"
+      :closable="false"
+      show-icon
+      :title="ai.notice"
+    />
+
+    <el-alert
+      v-if="ai.lastUiEventResult"
+      class="m-2"
+      :type="ai.lastUiEventResult.handled ? 'info' : 'warning'"
+      :closable="false"
+      show-icon
+      :title="`AI 驱动工作区：${ai.lastUiEventResult.message}`"
+    />
+
+    <!-- 消息流（蓝本 AiPanel.vue:21-89） -->
+    <div ref="msgWrapRef" class="flex-1 overflow-y-auto p-3">
+      <el-empty v-if="!ai.messages.length" :image-size="60">
+        <template #image>
+          <el-icon :size="36" color="#409EFF"><Promotion /></el-icon>
+        </template>
+        <template #description>
+          <div class="mb-1 text-sm font-semibold text-[#606266]">您好，我是实施助手</div>
+          <div class="text-[13px] text-[#909399] leading-[1.8]">
+            我可以帮您查询配置项与字段、查看任务、预估数据行数、<br />
+            打开导出结果在线编辑器、下载导出文件，<br />并启动导出/预检查/导入/发布作业。
           </div>
+        </template>
+      </el-empty>
+
+      <div
+        v-for="m in ai.messages"
+        :key="m.id"
+        class="flex gap-2 mb-3.5"
+        :class="m.role === 'user' ? 'flex-row-reverse' : ''"
+      >
+        <div
+          class="w-7 h-7 rounded-full text-xs flex items-center justify-center shrink-0"
+          :class="m.role === 'user' ? 'bg-[#409eff] text-white' : 'bg-[#e4e7ed] text-[#606266]'"
+        >
+          {{ m.role === 'user' ? '我' : 'AI' }}
         </div>
-        <div v-if="message.pendingCall" class="mt-2 border border-amber-300 rounded p-2 text-xs">
-          <div class="mb-1">
-            {{ message.pendingCall.kind === 'CONFIRM' ? '待人工确认' : '待前端执行' }}：
-            <span class="font-mono">{{ message.pendingCall.name }}</span>
-            <span v-if="message.pendingCall.timeoutSeconds">
-              （超时 {{ formatCountdown(message.pendingCall.timeoutSeconds) }}）
-            </span>
+        <div
+          class="max-w-[82%] rounded-lg px-2.5 py-2 text-[13px] text-[#303133] leading-[1.6] break-words"
+          :class="m.role === 'user' ? 'bg-[#d9ecff]' : 'bg-[#f4f4f5]'"
+        >
+          <!-- 等待回复的三点闪烁（仅在正文尚未产出时） -->
+          <span v-if="isTyping(m)" class="typing">
+            <i class="dot"></i><i class="dot"></i><i class="dot"></i>
+          </span>
+
+          <!-- 思考链折叠：**有 reasoning 帧才渲染**（裁决⑦，无帧则整块不出现） -->
+          <details v-if="m.reasoning" class="mb-1.5 text-xs text-[#909399]">
+            <summary class="cursor-pointer">思考过程</summary>
+            <div class="mt-1 px-2 py-1.5 bg-[#fafafa] border-l-2 border-solid border-[#dcdfe6] whitespace-pre-wrap max-h-40 overflow-y-auto">{{ m.reasoning }}</div>
+          </details>
+
+          <div v-if="m.content" class="whitespace-pre-wrap">{{ m.content }}</div>
+
+          <!-- 工具卡（四态 + 参数 + 结果） -->
+          <div v-for="run in m.toolRuns" :key="run.toolCallId" class="mt-1.5 border border-solid border-[#dcdfe6] rounded-md p-2 bg-white">
+            <div class="flex items-center gap-1.5 font-semibold text-[13px] flex-wrap">
+              <el-icon color="#409EFF"><Operation /></el-icon>
+              <span>{{ toolLabel(run.name) }}</span>
+              <el-tag v-if="run.kind === 'FRONTEND'" size="small" effect="plain">前端工具</el-tag>
+              <el-tag v-else-if="run.kind === 'CONFIRM'" size="small" type="warning" effect="plain">确认门</el-tag>
+              <el-tag :size="'small'" :type="toolTagType(run.status)" :effect="run.status === 'running' ? 'dark' : 'light'">
+                {{ toolStatusLabel(run.status) }}
+              </el-tag>
+            </div>
+            <div v-if="run.args" class="mt-1.5 text-xs text-[#909399] break-all">
+              <code>{{ run.args }}</code>
+            </div>
+            <div v-if="run.result" class="mt-1.5 px-2 py-1 text-xs text-[#606266] bg-[#fafafa] rounded max-h-24 overflow-y-auto whitespace-pre-wrap">{{ run.result }}</div>
+            <div v-if="run.reason" class="mt-1 text-xs text-[#f56c6c]">原因：{{ run.reason }}</div>
           </div>
-          <div v-if="message.pendingCall.kind === 'CONFIRM'" class="flex gap-2">
-            <el-button size="small" type="primary" @click="ai.confirm(true)">放行</el-button>
-            <el-button size="small" type="danger" plain @click="ai.confirm(false, '用户拒绝')">拒绝</el-button>
+
+          <!-- 挂起卡片：HITL 确认（确认/拒绝双路径）或待前端执行 -->
+          <div v-if="m.pendingCall" class="mt-2 border border-solid border-[#dcdfe6] rounded-md p-2 bg-white">
+            <div class="flex items-center gap-1.5 font-semibold text-[13px] flex-wrap">
+              <el-icon color="#409EFF"><Operation /></el-icon>
+              <span>{{ toolLabel(m.pendingCall.name) }}</span>
+              <el-tag v-if="m.pendingCall.kind === 'CONFIRM'" size="small" type="warning">需确认</el-tag>
+              <el-tag v-else size="small" type="success">自动</el-tag>
+              <el-tag v-if="m.pendingCall.status === 'expired'" size="small" type="info">会话已失效</el-tag>
+            </div>
+            <div v-if="argsText(m.pendingCall.args)" class="mt-1.5 text-xs text-[#909399] break-all">
+              <code>{{ argsText(m.pendingCall.args) }}</code>
+            </div>
+
+            <template v-if="m.pendingCall.kind === 'CONFIRM' && m.pendingCall.status === 'pending'">
+              <div class="mt-1.5 flex items-center gap-2 text-xs">
+                <span v-if="remainingSeconds !== null" :class="confirmExpired ? 'text-[#c0c4cc]' : 'text-[#e6a23c]'">
+                  {{ confirmExpired ? '确认已超时（按钮已置灰），本轮将按拒绝/超时收尾' : `剩余确认时间 ${formatCountdown(remainingSeconds)}` }}
+                </span>
+                <span v-else class="text-[#909399]">等待人工确认</span>
+              </div>
+              <el-input
+                v-model="rejectReason"
+                type="textarea"
+                :rows="2"
+                resize="none"
+                class="mt-2"
+                placeholder="拒绝原因（可选，填了会原样回填给模型）"
+              />
+              <div class="mt-2 flex gap-2 justify-end">
+                <el-button size="small" :disabled="confirmExpired || deciding" @click="decide(false)">拒绝</el-button>
+                <el-button size="small" type="primary" :disabled="confirmExpired || deciding" @click="decide(true)">确认执行</el-button>
+              </div>
+            </template>
+
+            <div v-else-if="m.pendingCall.kind === 'FRONTEND'" class="mt-2 flex justify-end">
+              <el-tag v-if="m.pendingCall.status === 'pending'" size="small" type="info">待浏览器自动执行</el-tag>
+              <el-tag v-else-if="m.pendingCall.status === 'running'" size="small" type="success" effect="dark">执行中…</el-tag>
+              <el-tag v-else-if="m.pendingCall.status === 'rejected'" size="small" type="info">已拒绝</el-tag>
+              <el-tag v-else-if="m.pendingCall.status === 'expired'" size="small" type="info">会话已失效</el-tag>
+              <el-tag v-else size="small" type="success">已执行</el-tag>
+            </div>
+
+            <div v-else class="mt-2 flex justify-end">
+              <el-tag v-if="m.pendingCall.status === 'running'" size="small" type="success" effect="dark">执行中…</el-tag>
+              <el-tag v-else-if="m.pendingCall.status === 'approved'" size="small" type="success">已放行</el-tag>
+              <el-tag v-else-if="m.pendingCall.status === 'rejected'" size="small" type="warning">已拒绝</el-tag>
+              <el-tag v-else-if="m.pendingCall.status === 'expired'" size="small" type="info">会话已失效</el-tag>
+              <el-tag v-else size="small" type="danger">执行失败</el-tag>
+            </div>
           </div>
         </div>
       </div>
     </div>
 
-    <footer class="border-t border-gray-200 p-2">
+    <!-- 输入区（蓝本 AiPanel.vue:91-109） -->
+    <div class="border-t border-solid border-[#ebeef5] px-3 py-2.5">
       <el-input
-        v-model="draft"
+        v-model="inputText"
         type="textarea"
-        :rows="2"
+        :rows="3"
         resize="none"
-        placeholder="对话输入由 b 棒接入（状态层 send/confirm/reattach 已可用）"
-        :disabled="!inputEnabled"
+        :disabled="!ai.canSend"
+        :placeholder="inputPlaceholder"
+        @keydown.enter.exact.prevent="send"
       />
-      <div class="flex justify-between items-center mt-1">
-        <span class="text-xs text-gray-400">
-          {{ ai.loading ? '生成中…' : ai.suspended ? '挂起等待中…' : '空闲' }}
+      <div class="mt-2 flex items-center justify-between">
+        <span class="text-xs" :class="ai.loading ? 'text-[#e6a23c]' : 'text-[#c0c4cc]'">
+          {{ ai.loading ? ai.runStateLabel : 'Enter 发送 · Shift+Enter 换行' }}
         </span>
-        <div class="flex gap-1">
-          <el-button size="small" :disabled="!ai.loading" @click="ai.stop()">停止</el-button>
-          <el-button
-            size="small"
-            type="primary"
-            :disabled="!inputEnabled"
-            @click="submit"
-          >
-            发送
-          </el-button>
+        <div>
+          <el-button v-if="ai.loading" size="small" type="danger" plain @click="stop">停止</el-button>
+          <el-button size="small" type="primary" :loading="ai.loading" :disabled="!canSubmit" @click="send">发送</el-button>
         </div>
       </div>
-    </footer>
-  </aside>
+    </div>
+  </div>
 </template>
 
 <script setup lang="ts">
 /**
- * AI 面板（本棒 = 占位壳）。
+ * AI 面板（S4.4c 完整实现，视觉 1:1 还原 kimi-k3 `AiPanel.vue`）。
  *
- * 交互形态参照 kimi-k3 `AiPanel.vue:44-85`（思考链折叠 / 工具卡状态 / HITL 确认与拒绝
- * 双路径），但**不接真实对话渲染**：b 棒负责流式渲染、渐进披露提示与工具卡细节。
+ * 对齐蓝本的部分（布局/色板/组件选型/间距/字体层级，逐块对应蓝本行号见模板注释）：
+ * 收起态竖排条、头部徽标与标题、消息气泡与头像、思考过程折叠、工具卡边框与状态区、
+ * 输入区 textarea 与发送/停止按钮、等待回复的三点闪烁动画。
  *
- * 裁剪性：本组件只依赖 stores/ai 与 stores/workspace 的窄接口；
- * 隐藏它（App.vue 的 AI 栏开关）后全部业务功能照常。
+ * 本仓功能增量（逐条理由，均属"功能差异"）：
+ * - 上下文条：会话 id / 工作区上下文 / 数据版本 / 可用性 tag / 契约同步 chip —— 蓝本无
+ *   `/api/ai/health`、无契约事件，本仓需要可视化"刷新恢复"与"工作区已同步"的状态；
+ * - 工具卡四态（调用中/成功/失败/等待确认）并展示参数与结果 —— 蓝本是"已执行工具 X"单标签；
+ * - HITL 卡片：确认/拒绝双路径 + 拒绝原因输入 + 超时倒计时置灰 —— 蓝本有双按钮但无原因与倒计时；
+ * - 409/503/断流三类降级提示（EP Alert）与一键重挂 —— 蓝本是蓝本后端（无 SESSION_BUSY/挂起池）。
+ *
+ * 裁剪性：本组件只依赖 stores/ai 与 stores/workspace 的窄接口；App.vue 收起 AI 栏
+ * （48px 竖排条）或整体移除本组件后，五页业务功能全部照常可用。
+ *
+ * 样式纪律：模板全部用 Element Plus + 内联 Tailwind 工具类；唯一的 scoped CSS 是
+ * 蓝本确有的 18 行打字机动画（`.typing .dot` + `@keyframes blink`，Tailwind 无对应工具类）。
  */
-import { computed, onMounted, ref } from 'vue'
-import { Fold } from '@element-plus/icons-vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { ArrowRight, ChatDotRound, Operation, Promotion } from '@element-plus/icons-vue'
 import { useAiStore } from '@/stores/ai'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { formatCountdown } from '@/utils/format'
-import type { ToolRunStatus } from '@/types/ai'
+import type { PendingToolCall, ToolRunStatus } from '@/types/ai'
 
 const ai = useAiStore()
 const workspace = useWorkspaceStore()
-const draft = ref('')
 
-/** b 棒接入前，仅当后端可用且输入非空时才允许发送 */
-const inputEnabled = computed(() => ai.available && !ai.loading && draft.value.trim().length > 0)
+const inputText = ref('')
+const rejectReason = ref('')
+const deciding = ref(false)
+const msgWrapRef = ref<HTMLElement | null>(null)
+
+/** 倒计时节拍（每秒推进一次；确认卡据此置灰）。 */
+const now = ref(Date.now())
+const confirmDeadline = ref<number | null>(null)
+let tickTimer: ReturnType<typeof setInterval> | null = null
+
+/** 工具名 → 中文（后端工具全集 + 前端工具/页面能力的可读名）。 */
+const TOOL_LABELS: Record<string, string> = {
+  list_config_defs: '列出配置定义',
+  get_config_def: '读取配置定义',
+  list_tasks: '列出任务',
+  get_workspace_state: '读取工作区状态',
+  check_job_status: '查询作业状态',
+  get_row_count: '预估数据行数',
+  start_export: '启动导出作业',
+  start_precheck: '启动预检查作业',
+  start_import: '启动导入作业',
+  start_publish: '启动发布作业',
+  open_export_file_editor: '打开导出文件在线编辑器',
+  download_export_file: '下载导出文件',
+  navigate_to: '跳转页面',
+  select_config_defs: '选择配置项',
+  set_query_conditions: '设置查询条件',
+  download_templates: '下载模板',
+  'export.selectDefs': '选择配置项',
+  'export.setConditions': '设置查询条件',
+  'export.start': '启动导出作业',
+  'export.openEditor': '打开在线编辑器',
+  'import.selectDefs': '选择配置项',
+  'import.upload': '上传文件',
+  'import.startPrecheck': '启动预检查作业',
+  'import.startImport': '启动导入作业',
+  'import.startPublish': '启动发布作业'
+}
 
 const shortSessionId = computed(() => ai.sessionId.slice(0, 8))
 
@@ -137,56 +319,205 @@ const healthLabel = computed(() => {
   if (ai.health === null && ai.healthError === null) {
     return '未检测'
   }
-  return ai.available ? '可用' : '降级'
+  return ai.available ? '可用' : '已降级'
 })
 
-const healthTagType = computed<'success' | 'warning' | 'info' | 'danger'>(() => {
-  if (ai.health === null) {
+const healthTagType = computed<'success' | 'warning' | 'info'>(() => {
+  if (ai.health === null && ai.healthError === null) {
     return 'info'
   }
   return ai.available ? 'success' : 'warning'
 })
 
-function toolTagType(status: ToolRunStatus): 'info' | 'warning' | 'success' | 'danger' {
+const degradeReason = computed(() => ai.unavailableReason ?? '未检测到 AI 可用性，请点击「重新检测」。')
+
+const noticeType = computed<'info' | 'warning' | 'error'>(() => {
+  if (ai.streamInterrupted) {
+    return 'error'
+  }
+  return ai.loading ? 'info' : 'warning'
+})
+
+const canSubmit = computed(() => ai.canSend && ai.available && inputText.value.trim().length > 0)
+
+const inputPlaceholder = computed(() => {
+  if (!ai.available) {
+    return 'AI 当前不可用（已降级，可继续使用页面手动操作）'
+  }
+  if (ai.suspended || ai.pendingToolCall) {
+    return '挂起等待中：请先在上方处理确认/执行，或点「停止」结束本轮'
+  }
+  return '输入消息，Enter 发送，Shift+Enter 换行'
+})
+
+const remainingSeconds = computed(() => {
+  if (confirmDeadline.value === null) {
+    return null
+  }
+  return Math.max(0, Math.ceil((confirmDeadline.value - now.value) / 1000))
+})
+
+const confirmExpired = computed(() => remainingSeconds.value !== null && remainingSeconds.value <= 0)
+
+/** 等待回复：正文与工具卡都还没产出时的三点闪烁。 */
+function isTyping(message: { streaming: boolean; content: string }): boolean {
+  return message.streaming && message.content.length === 0
+}
+
+function toolLabel(name: string): string {
+  return TOOL_LABELS[name] ?? name
+}
+
+/** 工具卡状态色（补丁③：REJECTED=warning「已拒绝」，FAILED=danger「执行失败」，互不混用）。 */
+function toolTagType(status: ToolRunStatus): 'info' | 'warning' | 'success' | 'danger' | 'primary' {
   switch (status) {
+    case 'running':
     case 'succeeded':
       return 'success'
     case 'failed':
-    case 'rejected':
       return 'danger'
-    case 'running':
+    case 'rejected':
       return 'warning'
-    default:
+    case 'expired':
       return 'info'
+    default:
+      return 'primary'
   }
 }
 
 function toolStatusLabel(status: ToolRunStatus): string {
   const labels: Record<ToolRunStatus, string> = {
-    pending: '待处理',
-    running: '执行中',
+    pending: '等待确认',
+    running: '调用中…',
     succeeded: '已成功',
-    failed: '已失败',
+    failed: '执行失败',
     rejected: '已拒绝',
-    expired: '已失效'
+    expired: '会话已失效'
   }
   return labels[status]
+}
+
+function argsText(args: Record<string, unknown> | null): string {
+  if (!args || Object.keys(args).length === 0) {
+    return ''
+  }
+  try {
+    return JSON.stringify(args)
+  } catch {
+    return String(args)
+  }
 }
 
 function probe(): void {
   void ai.probeHealth()
 }
 
-function submit(): void {
-  const text = draft.value
-  draft.value = ''
-  void ai.send(text)
+function scrollBottom(): void {
+  void nextTick(() => {
+    const wrap = msgWrapRef.value
+    if (wrap) {
+      wrap.scrollTop = wrap.scrollHeight
+    }
+  })
 }
 
-onMounted(() => {
+async function send(): Promise<void> {
+  const text = inputText.value.trim()
+  if (!text || !ai.canSend) {
+    return
+  }
+  inputText.value = ''
+  await ai.send(text)
+}
+
+function stop(): void {
+  void ai.stop()
+}
+
+function reattach(runId?: unknown): void {
+  // 传进来的可能是点击事件对象（模板里若漏写括号），一律只接受字符串
+  void ai.reattachActive(typeof runId === 'string' ? runId : undefined)
+}
+
+async function decide(approved: boolean): Promise<void> {
+  const reason = approved ? undefined : (rejectReason.value.trim() || '用户拒绝执行')
+  deciding.value = true
+  try {
+    rejectReason.value = ''
+    await ai.confirm(approved, reason)
+  } finally {
+    deciding.value = false
+  }
+}
+
+/** 挂起调用换人即重置倒计时与拒绝原因。 */
+function resetPendingWatch(pending: PendingToolCall | null): void {
+  rejectReason.value = ''
+  if (!pending || pending.status !== 'pending' || !pending.timeoutSeconds) {
+    confirmDeadline.value = null
+    return
+  }
+  confirmDeadline.value = Date.now() + pending.timeoutSeconds * 1000
+}
+
+watch(
+  () => {
+    const last = ai.messages[ai.messages.length - 1]
+    return `${ai.messages.length}|${last ? last.content.length : 0}|${last && last.pendingCall ? last.pendingCall.status : ''}|${last ? last.toolRuns.length : 0}`
+  },
+  () => scrollBottom()
+)
+
+watch(() => ai.expanded, (expanded) => {
+  if (expanded) {
+    setTimeout(scrollBottom, 60)
+  }
+})
+
+watch(
+  () => ai.pendingConfirm,
+  (pending) => resetPendingWatch(pending),
+  { immediate: true }
+)
+
+onMounted(async () => {
   ai.startMirror()
+  ai.startWorkspaceSync()
+  tickTimer = setInterval(() => {
+    now.value = Date.now()
+  }, 1000)
   void ai.probeHealth()
-  // 刷新恢复：镜像即时恢复 + 后端历史对账（后端不可达时静默保留镜像）
-  void ai.loadHistory()
+  if (!ai.messages.length) {
+    await ai.loadHistory()
+  }
+  scrollBottom()
+})
+
+onBeforeUnmount(() => {
+  if (tickTimer !== null) {
+    clearInterval(tickTimer)
+    tickTimer = null
+  }
+  ai.stopWorkspaceSync()
 })
 </script>
+
+<style scoped>
+/* 等待回复的三点闪烁动画：蓝本 AiPanel.vue 第 186-202 行原样保留
+   （Tailwind v3 无 animation/关键帧工具类，属规格 §1.1 允许的唯一 scoped CSS）。 */
+.typing .dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #a8abb2;
+  margin-right: 4px;
+  animation: blink 1.2s infinite;
+}
+.typing .dot:nth-child(2) { animation-delay: 0.2s; }
+.typing .dot:nth-child(3) { animation-delay: 0.4s; }
+@keyframes blink {
+  0%, 80%, 100% { opacity: 0.3; }
+  40% { opacity: 1; }
+}
+</style>

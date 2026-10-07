@@ -19,8 +19,12 @@ body {
   font-size: 14px;
 }
 
-/* 双栏骨架的滚动约束：工作区与 AI 栏各自可滚动，页面整体不出现双滚动条 */
-.layout-column {
-  min-height: 0;
-  overflow: auto;
+/* 双栏骨架的滚动约束改由内联 Tailwind 工具类承担（`min-h-0 overflow-auto`），
+   此处只保留 Tailwind v3 无对应工具类的一条：AI 栏收起态的竖排标题
+   （蓝本 style.css:14-19 同款，Tailwind 无 writing-mode 工具类）。 */
+@layer utilities {
+  .writing-vertical {
+    writing-mode: vertical-rl;
+    letter-spacing: 2px;
+  }
 }

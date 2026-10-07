@@ -5,16 +5,17 @@
  * 原 .js:25-52 与 248-301），TS 化并按本仓后端契约重写：
  * - 会话 id 存 **sessionStorage**（页签级：同页签刷新保持，新页签是新会话，DC-06③）；
  * - 刷新恢复走"镜像即时恢复 + `GET /api/ai/history/{sessionId}` 对账"两步；
- * - 409 SESSION_BUSY 不当作普通失败：记下进行中的 runId 并允许一键 reattach（ADR-5）。
- *
- * 本棒（a 棒）只落状态层：面板 UI 与真实对话交互由 b/c 棒接。
+ * - 409 SESSION_BUSY 不当作普通失败：记下进行中的 runId 并允许一键 reattach（ADR-5）；
+ * - 断流（缺 done/error 终帧）按 ADR-6 置 `streamInterrupted` 提示"结果可能不完整"；
+ * - 契约联动（S4.4c）：订阅工作区 `workspace_changed` 事件，把用户手点的动作同步进
+ *   下一轮请求上下文（`buildContext().extra.recentActions`）。
  */
 
 import { defineStore } from 'pinia'
 import { ApiError } from '@/api/http'
 import { aiApi } from '@/api/ai'
 import type { SseFrameHandlers, SseStreamOptions } from '@/api/sse'
-import { useWorkspaceStore } from '@/stores/workspace'
+import { onWorkspaceEvent, useWorkspaceStore } from '@/stores/workspace'
 import { executeFrontendTool, parseToolArgs } from '@/utils/frontend-tools'
 import { ErrorCode, type SessionBusyConflict, type SuspendPoolSaturated } from '@/types/api'
 import { isTerminalFrame } from '@/types/sse'
@@ -27,6 +28,7 @@ import type {
   ToolRun
 } from '@/types/ai'
 import type { SseConfirmRequestFrame, SseFrame } from '@/types/sse'
+import type { WorkspaceActionRecord } from '@/types/tools'
 
 /** sessionStorage 键：会话 id 与镜像前缀。 */
 export const SESSION_ID_KEY = 'ai-session-id'
@@ -37,6 +39,9 @@ let currentAbort: AbortController | null = null
 /** 会话镜像是否已启动（防止重复 $subscribe）。 */
 let mirrorStarted = false
 let mirrorTimer: ReturnType<typeof setTimeout> | null = null
+/** 工作区契约事件订阅是否已启动 + 反订阅句柄。 */
+let workspaceSyncStarted = false
+let workspaceSyncStops: Array<() => void> = []
 
 /** 生成页签级会话 id（crypto.randomUUID 在非安全上下文不可用，故留回退）。 */
 export function createSessionId(): string {
@@ -62,6 +67,25 @@ function initSessionId(): string {
     return created
   } catch {
     return createSessionId()
+  }
+}
+
+/** AI 栏展开态（页签级记忆：用户收起后刷新仍保持收起，裁剪性不被刷新打回）。 */
+const EXPANDED_KEY = 'ai-panel-expanded'
+
+function initExpanded(): boolean {
+  try {
+    return sessionStorage.getItem(EXPANDED_KEY) !== '0'
+  } catch {
+    return true
+  }
+}
+
+function persistExpanded(expanded: boolean): void {
+  try {
+    sessionStorage.setItem(EXPANDED_KEY, expanded ? '1' : '0')
+  } catch {
+    // 隐私模式忽略：展开态只是展示偏好
   }
 }
 
@@ -110,12 +134,29 @@ function roleOf(type: string): ChatMessage['role'] {
   return 'assistant'
 }
 
+/** 契约事件载荷 → 工作区动作记录（形态不符则忽略，不抛错）。 */
+function readActionRecord(payload: unknown): WorkspaceActionRecord | null {
+  if (!payload || typeof payload !== 'object') {
+    return null
+  }
+  const record = payload as Partial<WorkspaceActionRecord>
+  if (typeof record.summary !== 'string' || typeof record.version !== 'number') {
+    return null
+  }
+  return {
+    version: record.version,
+    summary: record.summary,
+    at: typeof record.at === 'number' ? record.at : Date.now(),
+    source: record.source === 'AI' ? 'AI' : '界面'
+  }
+}
+
 export const useAiStore = defineStore('ai', {
   state: () => ({
     /** 页签级会话 id（记忆窗口 CONVERSATION_ID） */
     sessionId: initSessionId(),
-    /** AI 面板是否展开（裁剪性：收起后业务照常） */
-    expanded: true,
+    /** AI 面板是否展开（裁剪性：收起后业务照常；页签级记忆，刷新后保持用户的选择） */
+    expanded: initExpanded(),
     messages: [] as ChatMessage[],
     /** 是否有轮次在进行 */
     loading: false,
@@ -135,7 +176,16 @@ export const useAiStore = defineStore('ai', {
     /** 历史对账是否完成（UI 可用它做骨架屏） */
     historyLoaded: false,
     /** 本轮是否已被用户停止 */
-    stopped: false
+    stopped: false,
+    /**
+     * 断流标志（ADR-6）：本轮结束时没收到 done/error 终帧 → 提示"连接中断，结果可能不完整"。
+     * 与 notice 分开，便于面板用不同级别的 Alert 呈现（notice 覆盖更多降级场景）。
+     */
+    streamInterrupted: false,
+    /** 最近一次工作区契约事件（面板"工作区已同步"chip 的数据源） */
+    contextSync: null as WorkspaceActionRecord | null,
+    /** 最近一次 ui_event 分发结果（AI 驱动工作区的回执展示） */
+    lastUiEventResult: null as { event: string; handled: boolean; message: string } | null
   }),
 
   getters: {
@@ -173,12 +223,29 @@ export const useAiStore = defineStore('ai', {
         return state.healthError
       }
       return state.health?.message ?? null
+    },
+    /**
+     * 运行状态文案（N6 裁决：按帧口径区分）。
+     * - 生成中：本轮进行中且没有挂起等待；
+     * - 挂起等待：收到 suspended / confirm_request / frontend_tool_request 后；
+     * - 空闲：没有进行中的轮次。
+     */
+    runStateLabel(state): string {
+      if (!state.loading) {
+        return '空闲'
+      }
+      return state.suspended ? '挂起等待中…（待人工确认或待前端执行）' : '生成中…'
+    },
+    /** 输入区是否可用（执行中/挂起等待中一律禁发）。 */
+    canSend(state): boolean {
+      return !state.loading
     }
   },
 
   actions: {
     toggleExpand(): void {
       this.expanded = !this.expanded
+      persistExpanded(this.expanded)
     },
 
     /** 启动会话镜像：messages 任何变化（含流式 token）防抖写入 sessionStorage。 */
@@ -193,6 +260,45 @@ export const useAiStore = defineStore('ai', {
         }
         mirrorTimer = setTimeout(() => writeMirror(this.sessionId, this.messages, this.activeRunId), 300)
       }, { detached: true, deep: true })
+    },
+
+    /**
+     * 启动工作区契约订阅（S4.4c 契约联动）。
+     *
+     * 订阅两个主题：
+     * - `workspace_changed`：用户在业务页面上的动作（选配置/切步骤/改条件/编辑表格…）
+     *   → 面板显示"工作区已同步"chip；动作本身已由 workspace store 记入 recentActions，
+     *   随下一轮 `buildContext()` 注入给模型（AI 面板不自己拼上下文，仍走窄接口）；
+     * - `ui_event_result`：AI 驱动工作区动作的回执（AI→业务方向）。
+     */
+    startWorkspaceSync(): void {
+      if (workspaceSyncStarted) {
+        return
+      }
+      workspaceSyncStarted = true
+      workspaceSyncStops.push(
+        onWorkspaceEvent('workspace_changed', (payload) => {
+          this.contextSync = readActionRecord(payload)
+        }),
+        onWorkspaceEvent('ui_event_result', (payload) => {
+          const record = payload as { event?: unknown; handled?: unknown; message?: unknown } | null
+          if (!record || typeof record.event !== 'string') {
+            return
+          }
+          this.lastUiEventResult = {
+            event: record.event,
+            handled: record.handled === true,
+            message: typeof record.message === 'string' ? record.message : ''
+          }
+        })
+      )
+    },
+
+    /** 退订工作区事件（面板卸载时调用；测试/热更场景亦可用）。 */
+    stopWorkspaceSync(): void {
+      workspaceSyncStops.forEach((stop) => stop())
+      workspaceSyncStops = []
+      workspaceSyncStarted = false
     },
 
     /** 探测 AI 可用性（不可用时后端 503 + 同一个体，属正常语义）。 */
@@ -268,7 +374,7 @@ export const useAiStore = defineStore('ai', {
       this.historyLoaded = true
     },
 
-    /** 发一轮消息（含渐进披露上下文注入）。 */
+    /** 发一轮消息（含渐进披露上下文注入 + 工作区动作同步）。 */
     async send(text: string): Promise<void> {
       const content = text.trim()
       if (!content || this.loading) {
@@ -280,6 +386,7 @@ export const useAiStore = defineStore('ai', {
       this.loading = true
       this.stopped = false
       this.notice = null
+      this.streamInterrupted = false
       this.busyConflict = null
       this.poolSaturated = null
       currentAbort = new AbortController()
@@ -291,15 +398,21 @@ export const useAiStore = defineStore('ai', {
         },
         onClose: (info) => {
           if (!info.terminal) {
-            this.notice = `本轮未收到完成帧（${info.reason ?? '断流'}）。历史已保留，可重新发送或重挂该轮。`
+            // ADR-6：缺 done/error 终帧 = 断流，必须显式提示"结果可能不完整"
+            this.streamInterrupted = true
+            this.notice = `连接中断，结果可能不完整（${info.reason ?? '未收到完成帧'}）。已生成的内容保留，可重新发送或一键重挂该轮。`
           }
         }
       }
 
       const options: SseStreamOptions = { signal: currentAbort.signal }
+      // 契约联动：上下文里带上"用户刚手点了什么"（buildContext 的 extra.recentActions）；
+      // 动作只注入这一轮，构造完即清空，避免下一轮重复携带。
+      const context = workspace.buildContext()
+      workspace.clearRecentActions()
       try {
         await aiApi.chat(
-          { sessionId: this.sessionId, message: content, context: workspace.buildContext() },
+          { sessionId: this.sessionId, message: content, context },
           handlers,
           options
         )
@@ -324,6 +437,12 @@ export const useAiStore = defineStore('ai', {
         if (message) {
           message.streaming = false
           message.done = true
+          // 本轮压根没开始：给占位助手消息一个可读的收尾，避免留空气泡
+          if (error instanceof ApiError && error.code === ErrorCode.SESSION_BUSY) {
+            message.content = message.content || '（本轮未开始：该会话已有一轮正在进行，可一键重挂接收它）'
+          } else if (message.content === '' && error instanceof Error) {
+            message.content = `（本轮未开始：${error.message}）`
+          }
         }
       }
       if (!(error instanceof ApiError)) {
@@ -349,9 +468,11 @@ export const useAiStore = defineStore('ai', {
         }
         case ErrorCode.AI_UNAVAILABLE:
           this.notice = `AI 未启用：${error.message}`
+          void this.probeHealth()
           break
         case ErrorCode.AI_REDIS_UNAVAILABLE:
           this.notice = `AI 运行时依赖的 Redis 不可用：${error.message}`
+          void this.probeHealth()
           break
         default:
           this.notice = error.message
@@ -361,15 +482,21 @@ export const useAiStore = defineStore('ai', {
     /**
      * 一键 reattach：重挂进行中那一轮（ADR-5）。
      * 409 的响应体已带 reattach 路径，这里只取 runId（路径由 sse.ts 统一拼）。
+     *
+     * `runId` 参数做**类型防御**：UI 侧若把点击事件当参数传进来（形如 `[object PointerEvent]`），
+     * 会把 reattach 打到 404 上（S4.4c E6 实测发现的缺陷），故非字符串一律忽略、落回现场 runId。
      */
     async reattachActive(runId?: string): Promise<void> {
-      const targetRunId = runId ?? this.busyConflict?.runId ?? this.activeRunId
+      const explicit = typeof runId === 'string' && runId.trim() !== '' ? runId : null
+      const targetRunId = explicit ?? this.busyConflict?.runId ?? this.activeRunId
       if (!targetRunId) {
         this.notice = '没有可重挂的轮次（缺少 runId）'
         return
       }
       const assistant = this.appendAssistantMessage('（正在重挂进行中的轮次…）')
       this.loading = true
+      this.streamInterrupted = false
+      this.notice = '正在重挂该轮（先回放已产出的帧，再续收实时帧）…'
       currentAbort = new AbortController()
       try {
         await aiApi.reattachRun(
@@ -381,7 +508,8 @@ export const useAiStore = defineStore('ai', {
             },
             onClose: (info) => {
               if (!info.terminal) {
-                this.notice = `重挂未能收到完成帧（${info.reason ?? '断流'}）`
+                this.streamInterrupted = true
+                this.notice = `连接中断，结果可能不完整（重挂未能收到完成帧：${info.reason ?? '断流'}）`
               }
             }
           },
@@ -536,6 +664,10 @@ export const useAiStore = defineStore('ai', {
           message.content += frame.text
           message.streaming = true
           break
+        case 'reasoning':
+          // 裁决⑦：有 reasoning 帧才渲染思考链（无帧则 message.reasoning 恒空 → 面板不显示折叠块）
+          message.reasoning += frame.text
+          break
         case 'tool_start': {
           message.toolRuns.push({
             toolCallId: frame.toolCallId,
@@ -547,18 +679,32 @@ export const useAiStore = defineStore('ai', {
           break
         }
         case 'tool_result': {
+          // 补丁③：终态区分显示 —— 被人工拒绝（REJECTED）保持「已拒绝」（warning 色），
+          // 不让紧随其后的 tool_result(ok=false) 把它覆盖成「执行失败」（danger 色）；
+          // 真失败（后端执行异常）才落 failed。
+          const existing = message.toolRuns.find((run) => run.toolCallId === frame.toolCallId)
+          const rejected = existing?.status === 'rejected'
           this.upsertToolRun(message, {
             toolCallId: frame.toolCallId,
             name: frame.name,
             kind: frame.kind,
-            status: frame.ok ? 'succeeded' : 'failed',
-            result: frame.result ?? null
+            status: rejected ? 'rejected' : frame.ok ? 'succeeded' : 'failed',
+            result: frame.result ?? null,
+            reason: rejected ? (existing?.reason ?? '用户拒绝执行') : null
           })
           break
         }
         case 'confirm_request': {
           this.suspended = true
           message.pendingCall = this.toPendingCall(frame, 'CONFIRM')
+          // 工具卡四态之"等待确认"：确认门未决期间，该工具卡显示为等待确认
+          this.upsertToolRun(message, {
+            toolCallId: frame.toolCallId,
+            name: frame.name,
+            kind: 'CONFIRM',
+            status: 'pending',
+            args: frame.args
+          })
           break
         }
         case 'confirm_decision': {
@@ -566,7 +712,15 @@ export const useAiStore = defineStore('ai', {
           if (pending && pending.toolCallId === frame.toolCallId) {
             pending.status = frame.approved ? 'approved' : 'rejected'
           }
-          if (!frame.approved) {
+          if (frame.approved) {
+            // 放行后工具立刻进入执行（工具卡转"调用中"，结果帧随后落定）
+            this.upsertToolRun(message, {
+              toolCallId: frame.toolCallId,
+              name: frame.name,
+              kind: 'CONFIRM',
+              status: 'running'
+            })
+          } else {
             this.upsertToolRun(message, {
               toolCallId: frame.toolCallId,
               name: frame.name,
@@ -586,11 +740,16 @@ export const useAiStore = defineStore('ai', {
           break
         }
         case 'frontend_tool_result': {
+          // 前端工具的真执行者就是浏览器：后端这帧只是"前端回灌已收到"的回执
+          // （ok 恒由后端按"收到回灌"置 true），因此**不能**用它把前端自己判定的失败
+          // 改写成"已成功"（补丁③配套：本地已失败/已拒绝则保持原终态）。
+          const existing = message.toolRuns.find((run) => run.toolCallId === frame.toolCallId)
+          const localTerminal = existing?.status === 'failed' || existing?.status === 'rejected'
           this.upsertToolRun(message, {
             toolCallId: frame.toolCallId,
             name: frame.name,
             kind: 'FRONTEND',
-            status: frame.ok ? 'succeeded' : 'failed',
+            status: localTerminal ? (existing?.status ?? 'failed') : frame.ok ? 'succeeded' : 'failed',
             result: frame.result ?? null
           })
           if (message.pendingCall?.toolCallId === frame.toolCallId) {
@@ -600,16 +759,18 @@ export const useAiStore = defineStore('ai', {
           break
         }
         case 'suspended': {
-          this.suspended = true
-          this.notice = `本轮已挂起外置（可重挂：runId=${frame.runId}）`
-          const first = frame.toolCalls[0]
-          if (first) {
+          // 后端对**每一批工具调用**都会先发 suspended（把挂起态外置，见 SpToolCallingManager），
+          // 其中只有 CONFIRM/FRONTEND 两类需要人工或浏览器介入：BACKEND 工具随即执行完毕，
+          // 不该被判成"挂起等待"（否则运行状态与输入区提示会误报）。
+          const waiting = frame.toolCalls.find((call) => call.kind === 'CONFIRM' || call.kind === 'FRONTEND')
+          if (waiting) {
+            this.suspended = true
             message.pendingCall = {
-              toolCallId: first.toolCallId,
-              name: first.name,
-              kind: first.kind === 'FRONTEND' ? 'FRONTEND' : 'CONFIRM',
-              args: parseToolArgs(first.arguments),
-              rawArgs: first.arguments,
+              toolCallId: waiting.toolCallId,
+              name: waiting.name,
+              kind: waiting.kind === 'FRONTEND' ? 'FRONTEND' : 'CONFIRM',
+              args: parseToolArgs(waiting.arguments),
+              rawArgs: waiting.arguments,
               status: 'pending'
             }
           }

@@ -67,6 +67,9 @@ export const SseFrameTypes = [
 
 export type SseFrameType = (typeof SseFrameTypes)[number]
 
+/** 前向兼容的思考链帧名（裁决⑦；后端当前不产出，故不在上面的实测白名单里）。 */
+export const REASONING_FRAME_TYPE = 'reasoning'
+
 export interface SseFrameBase {
   type: SseFrameType
   runId?: string
@@ -171,6 +174,21 @@ export interface SseHeartbeatFrame extends SseFrameBase {
   [key: string]: unknown
 }
 
+/**
+ * 思考链增量（裁决⑦：**有帧才渲染**，无帧不显示空的"思考过程"折叠块）。
+ *
+ * 与后端实测帧集的差异（如实登记，不臆造）：`SseChatEmitter` **当前不产出该帧**
+ * —— deepseek-flash 的 `reasoning_content` 只做回填补丁（ADR-4），不透传前端。
+ * 故它**不在** {@link SseFrameTypes}（后端 13 类实测白名单）里，但前端按前向兼容解析：
+ * 后端一旦补上该帧，面板的思考链折叠即自动生效，前端契约无需再改。
+ */
+export interface SseReasoningFrame {
+  type: 'reasoning'
+  runId?: string
+  /** 思考链增量文本 */
+  text: string
+}
+
 /** 断流重试公告（本轮无正文产出时才会重试）。键集不固定。 */
 export interface SseRetryFrame extends SseFrameBase {
   type: 'retry'
@@ -197,10 +215,11 @@ export interface SseErrorFrame extends SseFrameBase {
   message: string
 }
 
-/** 一轮对话的 SSE 帧判别联合。 */
+/** 一轮对话的 SSE 帧判别联合（后端 13 类 + 前向兼容的 reasoning）。 */
 export type SseFrame =
   | SseStartFrame
   | SseDeltaFrame
+  | SseReasoningFrame
   | SseToolStartFrame
   | SseToolResultFrame
   | SseConfirmRequestFrame
@@ -225,7 +244,7 @@ export function isSuspendedFrame(frame: SseFrame): boolean {
     || frame.type === 'frontend_tool_request'
 }
 
-/** 运行时校验：把任意 JSON 值收窄为 SseFrame（type 必须命中白名单且为字符串字段）。 */
+/** 运行时校验：把任意 JSON 值收窄为 SseFrame（type 命中后端白名单或前向兼容帧）。 */
 export function toSseFrame(value: unknown): SseFrame | null {
   if (!value || typeof value !== 'object') {
     return null
@@ -233,6 +252,9 @@ export function toSseFrame(value: unknown): SseFrame | null {
   const candidate = value as { type?: unknown }
   if (typeof candidate.type !== 'string') {
     return null
+  }
+  if (candidate.type === REASONING_FRAME_TYPE) {
+    return value as SseReasoningFrame
   }
   return (SseFrameTypes as readonly string[]).includes(candidate.type) ? (value as SseFrame) : null
 }
