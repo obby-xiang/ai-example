@@ -23,7 +23,9 @@ import { parseFieldOptions } from './definition'
 /**
  * 操作符白名单（ConditionEvaluator.matchesOp 的 case 全量，含 LIKE）。
  *
- * 后端对未知操作符的处理是"视为通过"（不丢行），前端类型只收窄登记在册的算子。
+ * 后端对未知操作符的处理是**白名单拒绝**：`ConditionEvaluator.validate` 在逐行求值之前先校验，
+ * 未登记的操作符抛 `IllegalArgumentException`（`matchesOp` 的 default 分支同样抛），端点据此返回 400，
+ * 不再"视为通过"（M1 收尾守卫③）。前端类型只收窄登记在册的算子。
  */
 export type ConditionOperator =
   | 'EQ'
