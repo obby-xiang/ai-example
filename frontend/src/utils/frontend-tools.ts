@@ -11,7 +11,8 @@
  * - 路由 2/3 是**补丁②**：把蓝本形态的工作区动作（`navigate_to` / `select_definitions` /
  *   `set_condition` / `confirm_step` 及蓝本别名）做成可执行能力表 —— 这 4 个后端已标为 FRONTEND
  *   并披露，故今天经任何 `frontend_tool_request` 帧或契约层驱动即可生效，前端零改动（见 `WORKSPACE_ACTIONS`）；
- * - `generative_form` 后端已披露，前端执行接入待后续棒。
+ * - `generative_form` 前端执行接入已落地（GF-B）：`stores/ai.ts` 对 `frontend_tool_request` 特判 +
+ *   AiPanel 渲染 `FormRenderer`，**不走本文件通用执行器**。
  *
  * 三条路由（AI 经 frontend_tool 帧驱动工作区的统一入口）：
  * 1. **后端披露的前端工具**（`FRONTEND_TOOLS`）：参数校验 + @ToolScope 校验 + 执行器/默认执行器；

@@ -31,7 +31,8 @@
  * S4.4e 裁决⑥ 已全部升为 `DANGER`（执行前挂起、前端渲染确认卡片，FR-5.3）；
  * ② `open_export_file_editor`/`download_export_file` 曾被写成"唯一两个 FRONTEND 工具"，
  * S4.4d 起 `navigate_to`/`select_definitions`/`set_condition`/`confirm_step` 也是 FRONTEND，
- * DC-15 起 `generative_form` 亦然（后端已披露，前端执行接入见 `utils/frontend-tools.ts` 头部口径）。
+ * DC-15 起 `generative_form` 亦然（前端接入已落地：GF-B 在 `stores/ai.ts` 对 `frontend_tool_request`
+ * 特判 + AiPanel 的 `FormRenderer` 渲染）。
  * 增量执行兜底（DC-14 T1）：越 scope 的调用即使被上游发起，后端也会拦截并回灌结构化错误
  * （帧里 `tool_result.status=BLOCKED`）。
  */
