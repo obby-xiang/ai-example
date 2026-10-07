@@ -28,8 +28,10 @@ import static org.mockito.Mockito.when;
  * <li><b>T4</b>：{@code confirm_request} / {@code frontend_tool_request} 带绝对 {@code expiresAt}；</li>
  * <li><b>T5</b>：{@code tool_result}/{@code frontend_tool_result} 带 {@code messageId}，
  * 正文有 {@code message_start → delta → message_end} 三段式边界；</li>
- * <li><b>T6</b>：每帧带单调 {@code seq}（跨进程续号），reattach 用 {@code lastSeq} 只补增量；</li>
- * <li><b>T7</b>：心跳帧不入 {@code ai:events} 归档，但仍推给在线订阅者，并留下活动戳。</li>
+ * <li><b>T6</b>：每帧带单调 {@code seq}（跨进程续号），reattach 用 {@code lastSeq} 只补增量。
+ * S5c-1 起<b>业务帧</b>才占 {@code seq}，心跳走独立的 {@code heartbeatSeq}（见下条）；</li>
+ * <li><b>T7</b>：心跳帧不入 {@code ai:events} 归档，但仍推给在线订阅者，并留下活动戳；
+ * 它同时<b>不占业务序号</b>（S5c-1：否则跨进程续号会重用前端已覆盖的号 ⇒ 差量重挂静默丢帧）。</li>
  * </ul>
  */
 class SseChatEmitterFramesTest {
@@ -129,12 +131,14 @@ class SseChatEmitterFramesTest {
         ArgumentCaptor<String> sent = ArgumentCaptor.forClass(String.class);
         verify(subscriber).send(sent.capture());
         assertThat(sent.getValue()).contains("\"type\":\"heartbeat\"").contains("\"suspendKind\":\"confirm\"");
+        // ①′ S5c-1：心跳在独立序号空间里计数，不带业务 seq
+        assertThat(sent.getValue()).contains("\"heartbeatSeq\":1").doesNotContain("\"seq\"");
         // ② 归档里没有它（回放瘦身），但活动戳留下了
         verify(this.store, never()).appendEvent(eq(RUN_ID), anyMap());
         verify(this.store).touchActivity(RUN_ID);
-        // ③ 非心跳帧照旧归档
+        // ③ 非心跳帧照旧归档，且序号是 1（心跳没有偷走一个业务号）
         this.emitter.delta("正文");
-        verify(this.store).appendEvent(eq(RUN_ID), anyMap());
+        assertThat(archivedFrames().get(0)).containsEntry("seq", 1L);
     }
 
     // ── T6：reattach 增量补发 + 孤儿过滤 ─────────────────────────────────────

@@ -34,7 +34,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <table>
  * <caption>规则与 kill</caption>
  * <tr><th>规则</th><th>内容</th><th>kill（哪一行实现改动会让它红）</th></tr>
- * <tr><td>{@link #seqContract}</td><td>每帧带 {@code seq}、严格递增、自 1 起无缺口</td>
+ * <tr><td>{@link #seqContract}</td><td>每帧带 {@code seq}、严格递增、自 1 起无缺口（业务帧口径；
+ * 心跳走独立序号空间，见 S5c-1）</td>
  * <td>{@code SseChatEmitter#nextSeq} 改成常量/每次自增 2/不写 seq</td></tr>
  * <tr><td>{@link #terminalContract}</td><td>首帧 {@code start}；恰好一个终帧；终帧之后无任何帧</td>
  * <td>在 {@code finish()} 的 {@code out.done(...)} 之后再补一帧（或终帧发两次）</td></tr>
@@ -63,7 +64,7 @@ public final class FrameContract {
 	/** 工具调用的"结局帧"类型（{@code tool_start} 的配对对象）。 */
 	public static final Set<String> TOOL_OUTCOMES = Set.of("tool_result", "frontend_tool_result");
 
-	/** 存档期帧（T7：心跳不落归档，故不在本集合）。 */
+	/** 存档期帧（T7：心跳不落归档，故不在本集合；S5c-1：心跳也不占业务 seq）。 */
 	public static final String HEARTBEAT = RunStore.HEARTBEAT_TYPE;
 
 	private FrameContract() {
@@ -95,10 +96,11 @@ public final class FrameContract {
 	 * 每个订阅者收到的帧流：每帧带 {@code seq}、严格递增、自 1 起连续。
 	 *
 	 * <p>
-	 * <b>为什么"无缺口"是对的</b>：序号在 {@code emit()} 里逐帧自增，且每帧都要广播给订阅者 ——
-	 * 心跳也占号（它同样是一条到达订阅者的帧），因此<b>订阅者视角</b>必须连续。
-	 * 注意这与<b>归档视角</b>不同：心跳不落归档（T7），所以 {@code ai:events} 里的 seq 会有
-	 * "心跳留下的空洞"，那正是 {@link #archiveSeqContract} 的断言内容。
+	 * <b>为什么"无缺口"是对的</b>：序号在 {@code emit()} 里逐帧自增，且每一帧都要广播给订阅者。
+	 * {@code S5c-1} 修复后<b>只有业务帧占号</b>：心跳走独立的 {@code heartbeatSeq} 空间
+	 * （它不落归档，因此也不参与业务时间线），所以"订阅者视角"与"归档视角"的业务 seq
+	 * 完全一致。含心跳的帧流请先滤掉心跳（{@link #HEARTBEAT}）再喂给本方法 ——
+	 * 心跳带的是另一套号，不属于本规则讨论的业务序号。
 	 */
 	public static List<String> seqContract(List<Map<String, Object>> frames) {
 		List<String> out = new ArrayList<>();
@@ -120,11 +122,16 @@ public final class FrameContract {
 	}
 
 	/**
-	 * 归档（{@code ai:events:<runId>}）视角：seq 严格递增、无重复；允许有缺口（心跳占号不落档）。
+	 * 归档（{@code ai:events:<runId>}）视角：seq 严格递增、无重复。
 	 *
 	 * <p>
-	 * kill：让心跳帧也落归档（{@code RunStore#appendEvent} 去掉心跳分支）⇒ 归档不再有洞，
-	 * 断言"至少一个洞"的用例变红。
+	 * {@code S5c-1} 修复后心跳不占业务序号（也不落归档），因此正常运行下归档是<b>无缺口</b>的；
+	 * 本方法仍只断言"不得逆序 / 不得重号"，不对缺口做要求 —— 落档失败（Redis 抖动）也会留下洞，
+	 * 那属于"重挂要多补几帧"的范畴，而不是帧协议不一致。
+	 *
+	 * <p>
+	 * kill：让归档在锁外写入（{@code emit} 去掉 {@code emitLock}）⇒ 多线程出帧时归档内可能出现
+	 * 逆序，本方法变红。
 	 */
 	public static List<String> archiveSeqContract(List<Map<String, Object>> archived) {
 		List<String> out = new ArrayList<>();

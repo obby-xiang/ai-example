@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
-import java.io.IOException;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -34,6 +33,13 @@ import java.util.concurrent.atomic.AtomicLong;
  * <p>
  * 写出失败（客户端断开）只记日志、摘除该订阅者，不打断运行线程；终帧与
  * {@code emitter.complete()} 由调用方（{@code AiController} / {@code ResumeService}）保证。
+ *
+ * <p>
+ * <b>序号口径（S5c-1）</b>：业务帧带单调 {@code seq}（自 1 起、跨进程从归档续号），
+ * 心跳帧<b>不占</b>业务序号，只在独立空间里带 {@code heartbeatSeq} —— 于是"归档末帧"
+ * 这个跨进程续号锚点恒等于已发放过的最大业务号，差量重挂不会把重启后的新帧当孤儿丢掉。
+ * <b>出帧串行（S5c-3）</b>：取号、落归档、写出在同一把锁内完成，多线程出帧的到达顺序
+ * 与 seq 顺序一致。
  */
 @Slf4j
 public class SseChatEmitter {
@@ -46,10 +52,37 @@ public class SseChatEmitter {
 
 	private final List<SseEmitter> subscribers = new CopyOnWriteArrayList<>();
 
-	/** T6：本轮帧的单调序号（首帧起自 1；跨进程/重启后从外置归档续号，见 {@link #nextSeq()}）。 */
+	/** T6：本轮<b>业务帧</b>的单调序号（首帧起自 1；跨进程/重启后从外置归档续号，见 {@link #nextSeq()}）。 */
 	private final AtomicLong seq = new AtomicLong(-1);
 
 	private final Object seqLock = new Object();
+
+	/**
+	 * S5c-1：心跳的<b>独立</b>序号空间（自 1 起）。
+	 *
+	 * <p>
+	 * 心跳不取业务 {@code seq}：心跳不落归档（T7），若它占用业务序号，则"归档末帧"这个
+	 * 跨进程续号锚点就会落后于实际发放过的号 —— 重启后的新写出器会重用心跳用过的号，
+	 * 而该号已在前端的 {@code lastSeq} 覆盖范围内，于是新帧在差量重挂里被判为孤儿而
+	 * 永久丢弃（DC-14 §3.6 实测形态）。独立计数保留"挂起期心跳到第几次"的可观测性，
+	 * 又与业务时间线彻底解耦。
+	 */
+	private final AtomicLong heartbeatSeq = new AtomicLong(0);
+
+	/**
+	 * 出帧互斥（S5c-3 / S5c-2）：取号 → 落归档 → 写出必须是一次不可分割的动作。
+	 *
+	 * <p>
+	 * 为什么必须有：<b>出帧线程不唯一</b> —— 运行线程在挂起等待里每 2s 发心跳
+	 * （{@code ConfirmGate#await}），HTTP 线程在 {@code POST /api/ai/confirm|frontend-tool-result}
+	 * 里发决策/回灌帧。不加锁时先取号的线程可能后写出，订阅者看到的到达顺序可以逆序
+	 * （实测已复现，见证据文档 S5c-3）。
+	 *
+	 * <p>
+	 * 同一把锁也让 {@link #replayAndAttach} 的"回放 + 挂订阅"成为原子段落（S5c-2），
+	 * 消掉 reattach 的交接丢帧窗口。
+	 */
+	private final Object emitLock = new Object();
 
 	/** T5：本轮 assistant 正文消息的身份（结果铸为消息 / 消息级渲染去重的判据）。 */
 	private final String assistantMessageId;
@@ -74,6 +107,29 @@ public class SseChatEmitter {
 		emitter.onCompletion(() -> this.subscribers.remove(emitter));
 		emitter.onTimeout(() -> this.subscribers.remove(emitter));
 		emitter.onError(ex -> this.subscribers.remove(emitter));
+	}
+
+	/**
+	 * <b>S5c-2</b>：重挂的原子交接 —— 回放外置帧与挂上订阅者在<b>同一把出帧锁</b>内完成。
+	 *
+	 * <p>
+	 * 为什么必须原子：{@code 回放 → attach} 两段之间若有实时帧写出，那一帧既不在回放快照里、
+	 * 也还没被这个订阅者接住 = 丢帧窗口（且 SSE 丢帧不报错，只会静默少一段）。
+	 *
+	 * @param terminal true = 该轮已终态（回放完即收尾，不再订阅）
+	 * @return 实际回放的帧数
+	 */
+	public int replayAndAttach(SseEmitter emitter, Long lastSeq, boolean terminal) {
+		synchronized (this.emitLock) {
+			int sent = replayLocked(emitter, false, lastSeq);
+			if (terminal) {
+				complete(emitter);
+			}
+			else {
+				attach(emitter);
+			}
+			return sent;
+		}
 	}
 
 	public int subscriberCount() {
@@ -293,6 +349,13 @@ public class SseChatEmitter {
 	 * @return 实际发出的帧数
 	 */
 	public int replayTo(SseEmitter emitter, boolean includeDelta, Long lastSeq) {
+		synchronized (this.emitLock) {
+			return replayLocked(emitter, includeDelta, lastSeq);
+		}
+	}
+
+	/** 回放本体（调用方持 {@link #emitLock}；见 {@link #replayAndAttach} 的原子交接）。 */
+	private int replayLocked(SseEmitter emitter, boolean includeDelta, Long lastSeq) {
 		List<Map<String, Object>> frames = this.store.events(this.runId);
 		int sent = 0;
 		for (Map<String, Object> frame : frames) {
@@ -342,6 +405,10 @@ public class SseChatEmitter {
 	 * 首帧前惰性从外置归档续号（{@link RunStore#lastEventSeq}）：进程重启后由续跑新建的
 	 * 写出器<b>不会从 0 重来</b>，否则归档里会出现两段重叠的序号，前端的 {@code lastSeq}
 	 * 差量补发就会漏帧。归档为空（全新轮次）则从 1 开始。
+	 *
+	 * <p>
+	 * S5c-1：这条"归档末帧 = 续号锚点"的推理成立的前提是<b>心跳不占业务号</b>
+	 * （见 {@link #emit}）—— 否则归档末帧会落后于实际发放的号，重启后就会重号。
 	 */
 	private long nextSeq() {
 		if (this.seq.get() < 0) {
@@ -356,18 +423,25 @@ public class SseChatEmitter {
 
 	private void emit(Map<String, Object> frame) {
 		frame.putIfAbsent("runId", this.runId);
-		frame.put("seq", nextSeq());
-		if (RunStore.HEARTBEAT_TYPE.equals(String.valueOf(frame.get("type")))) {
-			// T7：心跳照常广播（上面的 subscribers），但不进归档窗口 —— 只留一个轻量活动戳，
-			// 让"这轮最近有过活动"仍可跨进程判定（僵尸判据的输入）。归档侧的同类跳过见
-			// RunStore#appendEvent（任何其他调用方直接塞心跳帧也不会占位）。
-			this.store.touchActivity(this.runId);
-		}
-		else {
-			this.store.appendEvent(this.runId, frame);
-		}
-		for (SseEmitter emitter : this.subscribers) {
-			sendTo(emitter, frame);
+		// S5c-3：取号 → 落归档 → 写出在同一把锁内完成 —— 多线程（运行线程的心跳 / HTTP 线程的
+		// 决策与回灌）并发出帧时，订阅者看到的先后与 seq 的先后必然一致。
+		synchronized (this.emitLock) {
+			if (RunStore.HEARTBEAT_TYPE.equals(String.valueOf(frame.get("type")))) {
+				// T7：心跳照常广播（下面的 subscribers），但不进归档窗口 —— 只留一个轻量活动戳，
+				// 让"这轮最近有过活动"仍可跨进程判定（僵尸判据的输入）。归档侧的同类跳过见
+				// RunStore#appendEvent（任何其他调用方直接塞心跳帧也不会占位）。
+				// S5c-1：心跳<b>不取业务 seq</b>，只在独立序号空间里计数 —— 于是"归档末帧"
+				// （跨进程续号锚点）恒等于已发放过的最大业务号，心跳永远不会把它顶到前面去。
+				frame.put("heartbeatSeq", this.heartbeatSeq.incrementAndGet());
+				this.store.touchActivity(this.runId);
+			}
+			else {
+				frame.put("seq", nextSeq());
+				this.store.appendEvent(this.runId, frame);
+			}
+			for (SseEmitter emitter : this.subscribers) {
+				sendTo(emitter, frame);
+			}
 		}
 	}
 
@@ -386,13 +460,13 @@ public class SseChatEmitter {
 			emitter.send(this.objectMapper.writeValueAsString(frame));
 			return true;
 		}
-		catch (IOException ex) {
-			log.debug("SSE 写出失败（客户端断开？）runId={}: {}", this.runId, ex.getMessage());
-			this.subscribers.remove(emitter);
-			return false;
-		}
 		catch (Exception ex) {
-			log.debug("SSE 写出异常 runId={}: {}", this.runId, ex.getMessage());
+			// Q8② 第二层防护：对端断开的写失败（IOException / AsyncRequestNotUsableException /
+			// IllegalStateException: 已完成的 emitter）一律吞没在这里 —— 它是"这一个订阅者没了"，
+			// 不是本轮失败。若让它冒泡到 HTTP 栈，全局异常处理器会对一个内容类型已固定为
+			// text/event-stream 的响应再写一次 JSON，抛 HttpMessageNotWritableException（日志噪音）。
+			log.debug("SSE 写出失败（客户端断开？）runId={} type={}: {}", this.runId, frame.get("type"), ex.getMessage());
+			this.subscribers.remove(emitter);
 			return false;
 		}
 	}
