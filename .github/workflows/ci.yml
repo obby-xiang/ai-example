@@ -15,18 +15,19 @@ permissions:
 jobs:
   backend:
     name: 后端编译与单测
-    # 全部用例为 JUnit + Mockito 桩（无 Spring 上下文/无 Redis/无 AI key 依赖），
-    # 无 Windows 专属物，故取 ubuntu-latest：启动更快、排队更短。
+    # 用例形态：以 @SpringBootTest（真实 Spring 上下文 + H2 内存库 + Flyway 迁移）为主，
+    # 少量为纯 JUnit + Mockito 桩（如 SSE 帧序、确认门接线）。
+    # 不依赖 Redis、AI key 与 Windows 专属物，故取 ubuntu-latest：启动更快、排队更短。
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
       run:
         working-directory: backend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: 安装 JDK 21（temurin）
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
@@ -45,10 +46,10 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: 安装 Node 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: '22'
           cache: yarn
