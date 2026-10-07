@@ -1,7 +1,7 @@
 # V4 核验：deepseek-v4-pro「AI 会话经 ChatMemory H2 持久化 —— 刷新页面和后端重启均不丢对话历史」
 
 - **被核验分支**：`ai-example-deepseek-v4-pro`（`git rev-parse --abbrev-ref HEAD` = `deepseek-v4-pro`，HEAD = `25639c59380b915b9f49917f77bc642d5a4a716b`）
-- **核验项定义出处**：`ai-example-main-v2/docs/merge/05-合流落地执行手册.md:122`
+- **核验项定义出处**：`<REPO_ROOT>/docs/merge/05-合流落地执行手册.md:122`
   `| V4 | deepseek：会话 H2 持久化（重启不丢） | 对话→重启后端→取历史 | 历史完整 |`
 - **核验日期**：2026-10-06
 - **核验方式**：真实后端 + 真实 DeepSeek 模型完成 **5 轮**对话 → **停进程**（不删库）→ **重启 2 次** → 每次用 API 拉取同一会话历史并**逐条比对**；期间在后端停止状态下**直查 H2 文件库**验证落盘

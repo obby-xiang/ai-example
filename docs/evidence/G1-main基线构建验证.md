@@ -1,7 +1,7 @@
-# G1 核验：main-v2 基座后端构建 / Flyway 清库首跑 / 种子落库 / 原地重跑幂等 / 前端构建侦察
+# G1 核验：main 基座后端构建 / Flyway 清库首跑 / 种子落库 / 原地重跑幂等 / 前端构建侦察
 
-- **被核验仓库**：`<MAIN_V2>`（`<MAIN_V2>`）
-- **分支 / HEAD**：`main-v2` / `ed6745b`（`docs: S4.2 AI Runtime 合流执行规格书…`，2026-10-07）
+- **被核验仓库**：`<REPO_ROOT>`
+- **分支 / HEAD**：`main` / `ed6745b`（`docs: S4.2 AI Runtime 合流执行规格书…`，2026-10-07）
 - **基座定义**：`claude-opus-5.5 + deepseek-v4-pro` 快照（backend 为后端）
 - **核验日期**：2026-10-07
 - **核验方式**：真实执行 — Maven 编译 → 打包 jar → `java -jar` 两次真实启动（首次清库 / 二次原地）+ HTTP 只读接口实测
@@ -18,7 +18,7 @@
 ### 执行的命令
 
 ```
-cd <MAIN_V2>/backend
+cd <REPO_ROOT>/backend
 export DEEPSEEK_API_KEY=***
 "<MAVEN_HOME>/bin/mvn.cmd" -B clean compile
 ```
@@ -71,7 +71,7 @@ export DEEPSEEK_API_KEY=***
 
 ### 结论
 
-**【实测-通过】** `main-v2` 基座后端在 JDK 21 + Maven 3.9.16 下 **干净编译通过**（`clean` 已删 target，77 源文件全量重编，10.4 s），无编译错误；仅有 javac 注解处理器提示与 1 处 POI 弃用 API 告警。
+**【实测-通过】** `main` 基座后端在 JDK 21 + Maven 3.9.16 下 **干净编译通过**（`clean` 已删 target，77 源文件全量重编，10.4 s），无编译错误；仅有 javac 注解处理器提示与 1 处 POI 弃用 API 告警。
 
 ---
 
@@ -80,7 +80,7 @@ export DEEPSEEK_API_KEY=***
 ### 清库前状态（“备份并删除 backend/data/”）
 
 ```
-$ ls -la <MAIN_V2>/backend/data
+$ ls -la <REPO_ROOT>/backend/data
 NO data dir before start
 $ cp -r data <VERIFY_TMP>/data-backup
 nothing to back up
@@ -91,7 +91,7 @@ nothing to back up
 ### 启动命令
 
 ```
-cd <MAIN_V2>/backend
+cd <REPO_ROOT>/backend
 export DEEPSEEK_API_KEY=***
 java -jar target/config-mgr.jar --server.port=18297
 ```
@@ -117,7 +117,7 @@ java -jar target/config-mgr.jar --server.port=18297
 
 **应用的迁移版本：V1 `schema`、V2 `staging base version`，终态 v2，2 条全部成功，耗时 63 ms。**
 
-脚本与配置对应关系（`<MAIN_V2>/backend/src/main/resources/`）：
+脚本与配置对应关系（`<REPO_ROOT>/backend/src/main/resources/`）：
 
 | 版本 | 脚本 | 行数 | 内容 |
 |---|---|---|---|
@@ -140,7 +140,7 @@ java -jar target/config-mgr.jar --server.port=18297
 $ netstat -ano | grep -E ":18297\s"
   TCP    0.0.0.0:18297          0.0.0.0:0              LISTENING       28936
   TCP    [::]:18297             [::]:0                 LISTENING       28936
-$ ls -la <MAIN_V2>/backend/data
+$ ls -la <REPO_ROOT>/backend/data
 -rw-r--r-- 1 <USER> 197609 954368 Oct  7 01:23 config_mgr_db.mv.db
 ```
 
@@ -163,7 +163,7 @@ $ ls -la <MAIN_V2>/backend/data
 2026-10-07T01:23:31.412  INFO  c.example.configmgr.seed.DataSeedRunner : Seed data complete
 ```
 
-种子实现：`<MAIN_V2>/backend/src/main/java/com/example/configmgr/seed/DataSeedRunner.java`（`ApplicationRunner` + `@Transactional`），幂等判据为 `regionRepository.count() > 0` → 打 `Seed data already exists, skipping` 后直接返回。
+种子实现：`<REPO_ROOT>/backend/src/main/java/com/example/configmgr/seed/DataSeedRunner.java`（`ApplicationRunner` + `@Transactional`），幂等判据为 `regionRepository.count() > 0` → 打 `Seed data already exists, skipping` 后直接返回。
 
 ### 只读 API 实测：配置定义列表
 
@@ -234,7 +234,7 @@ $ curl -s http://localhost:18297/api/data/<defCode>/count
 - 停掉首跑进程（确认 `18297 NOT LISTENING`）后，**不删除 `backend/data/`**（`config_mgr_db.mv.db` 原样保留），改用环境变量方式重启以额外验证端口注入路径：
 
 ```
-cd <MAIN_V2>/backend
+cd <REPO_ROOT>/backend
 export DEEPSEEK_API_KEY=***
 export SERVER_PORT=18297
 java -jar target/config-mgr.jar
@@ -255,7 +255,7 @@ java -jar target/config-mgr.jar
 - **无 Flyway 冲突**：已存在 schema 时不再走 baseline，直接 `Successfully validated 2 migrations` → `Current version of schema "PUBLIC": 2` → `Schema "PUBLIC" is up to date. No migration necessary.`；无 `checksum mismatch` / `Detected failed migration` / `FlywayException`。
 - **种子幂等**：`Seed data already exists, skipping`，未重复插入（数据行计数与首跑一致）。
 - `SERVER_PORT=18297` 环境变量注入生效（Tomcat started on port 18297），启动 9.913 s，比首跑快约 1.4 s。
-- 交叉印证：`<MAIN_V2>/docs/evidence/V9-claude-Flyway迁移幂等核验.md` 曾在 claude 分支（端口 18294）实测同一迁移集的清库首跑/原地重跑/二次清库三实验，结论为【实测-符合】；本次在 main-v2 上于 18297 复现出完全一致的日志语义。
+- 交叉印证：`<REPO_ROOT>/docs/evidence/V9-claude-Flyway迁移幂等核验.md` 曾在 claude 分支（端口 18294）实测同一迁移集的清库首跑/原地重跑/二次清库三实验，结论为【实测-符合】；本次在 main 上于 18297 复现出完全一致的日志语义。
 
 ### 结论
 
@@ -268,7 +268,7 @@ java -jar target/config-mgr.jar
 ### 目录与工具链
 
 ```
-<MAIN_V2>/frontend$ ls -a
+<REPO_ROOT>/frontend$ ls -a
 .env.example  index.html  package.json  public  src  vite.config.js  yarn.lock
 node_modules ABSENT        ← 未安装依赖
 ```

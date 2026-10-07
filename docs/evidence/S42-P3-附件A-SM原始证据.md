@@ -2,7 +2,7 @@
 
 > 生成方式：由本次实验的原始文件机械抽取（`frames`/`grep`），未人工改写；
 > 长字段（工具结果/正文）在 800 字符处截断（帧统计与终帧字段保持完整）。
-> 脱敏：仓库路径写作 `<MAIN_V2>`、Maven 写作 `<MAVEN_HOME>`、Memurai 写作 `<MEMURAI_HOME>`、密钥一律 `***`。
+> 脱敏：仓库路径写作 `<REPO_ROOT>`、Maven 写作 `<MAVEN_HOME>`、Memurai 写作 `<MEMURAI_HOME>`、密钥一律 `***`。
 
 ## 1. SM-01 续跑 × 记忆窗口一致性
 

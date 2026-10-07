@@ -1,6 +1,6 @@
 # baseline-combined
 
-> S4 合流行为基线（红线 3：搬运前在源分支录基线，搬运后在 main-v2 重放对照）。
+> S4 合流行为基线（红线 3：搬运前在源分支录基线，搬运后在 main 重放对照）。
 > 本文只记录本次真实运行结果，未做任何"应该是这样"的补全；凡未实测到的，均在文中显式标注为【未触发】或【录制失败】。
 
 ## 0. 录制元信息
@@ -9,7 +9,7 @@
 |---|---|
 | 来源分支 | `claude-opus-5.5+deepseek-v4-pro`（= combined 分支） |
 | 来源 commit | `a98d0b2b83e9bf71671fdd44a3b8426118f7b57a`（`git log -1`；`git status --porcelain` 为空 = 未改动该分支任何源码/配置） |
-| 工作副本 | `<REPO_ROOT>`（= `<MAIN_V2>` 的上游基座分支工作树） |
+| 工作副本 | `<REPO_ROOT>`（= 上游基座分支工作树） |
 | 被测产物 | `<REPO_ROOT>/backend/target/config-mgr.jar`（Spring Boot 3.5.14 可执行 jar；`find src -newer jar -name '*.java'` 为空，jar 与 HEAD 源码一致；`mvn -DskipTests package` 退出码 0） |
 | JDK | OpenJDK 21.0.12 LTS |
 | Maven | `<MAVEN_HOME>/mvn.cmd` |
@@ -34,13 +34,13 @@
 | `baseline-combined-附件-数据库状态快照.txt` | 全部 SQL 取值快照（44 次查询，按录制顺序） |
 | `baseline-combined-附件-后端运行日志.log` | 后端控制台全量日志（118 KB，已脱敏） |
 
-脱敏口径：本机绝对路径 → `<REPO_ROOT>` / `<MAIN_V2>` / `<MAVEN_HOME>` / `<PYTHON_HOME>` / `<TMP>` 占位；API Key → `***`。已验证产出物中不存在真实密钥与裸绝对路径。
+脱敏口径：本机绝对路径 → `<REPO_ROOT>` / `<MAVEN_HOME>` / `<PYTHON_HOME>` / `<TMP>` 占位；API Key → `***`。已验证产出物中不存在真实密钥与裸绝对路径。
 
 ---
 
 ## 1. 主表（手册附录 B 格式）
 
-| # | 场景 | 输入 | 关键输出/DB 状态 | main-v2 重放结果 | 一致性 | 定性 |
+| # | 场景 | 输入 | 关键输出/DB 状态 | main 重放结果 | 一致性 | 定性 |
 |---|---|---|---|---|---|---|
 | B1.1 | 创建导出任务 | `POST /api/tasks {"type":"EXPORT","title":"S4基线-导出任务"}` | `201`；`{"id":2,"type":"EXPORT","currentStep":"SELECT_DEFS","status":"ACTIVE","version":1,"items":[]}` | 待重放 | 待比对 | 基线 |
 | B1.2 | 选 2 个配置项 | `POST /api/tasks/2/select-defs {"defCodes":["PROJ_PRICE","CURRENCY"]}` | `200`；`items` 2 条，`sortOrder` 0/1，`status=PENDING`，`conditionJson=null`；`task_items` 落 2 行 | 待重放 | 待比对 | 基线 |
@@ -149,7 +149,7 @@
 - `readZipEntries` 不做 zip 魔数校验；xlsx 改名为 `.zip` 后会被当成 zip 解压，`unmatched` 列表把 `docProps/app.xml`、`xl/workbook.xml`… 全量拼进 `400` 错误消息。合流后建议加魔数校验 + 截断错误明细。
 
 ### ⑦ 冻结需求 FR-3.3 的"8 类规则"实测只落地 3 类
-需求原文（`<MAIN_V2>/docs/02-需求设计文档-v2.2-冻结版.md:97` FR-3.3 P0）：
+需求原文（`<REPO_ROOT>/docs/02-需求设计文档-v2.2-冻结版.md:97` FR-3.3 P0）：
 > 检查（预检）：8 类规则——必填、类型、枚举域、引用完整性、业务键重复、依赖拓扑、范围有效性、自定义表达式；输出行级明细（行号/字段/原因）且可下载
 
 本次实测对照：
@@ -234,4 +234,4 @@
 - `netstat -ano | grep 18296` **无 LISTENING**（仅剩若干内核 TIME_WAIT，属已关闭的客户端连接，会自动回收）。
 - 18080 / 18290–18295 / 18301–18307 / 18312 全程未监听。
 - 被测分支工作副本：`git status --porcelain` 为空，`git log -1` 仍为 `a98d0b2b83e9bf71671fdd44a3b8426118f7b57a`（无 git 写操作）。
-- 录制前原库备份保留在 `<TMP>/s4-baseline-combined/db-backup-original/`（`config_mgr_db.mv.db`、`config_mgr_db.trace.db`、`files/`）。当前 `<REPO_ROOT>/backend/data/` 是本次基线运行后的库（含上述 §2 终态），供 main-v2 重放时对照"输入相同 → 输出相同"。
+- 录制前原库备份保留在 `<TMP>/s4-baseline-combined/db-backup-original/`（`config_mgr_db.mv.db`、`config_mgr_db.trace.db`、`files/`）。当前 `<REPO_ROOT>/backend/data/` 是本次基线运行后的库（含上述 §2 终态），供 main 重放时对照"输入相同 → 输出相同"。

@@ -1,11 +1,11 @@
 # SP-01ab 决策卡：官方循环内的「前端工具暂停-恢复」与「HITL 确认门」
 
 - **验证日期**：2026-10-06（本地时间 19:39–19:52）
-- **工程**：`<MAIN_V2>/spike/sp01ab`（Spring Boot 3.5.14 + Spring AI 1.1.8 BOM import + `spring-boot-starter-web`）
+- **工程**：`<REPO_ROOT>/spike/sp01ab`（Spring Boot 3.5.14 + Spring AI 1.1.8 BOM import + `spring-boot-starter-web`）
 - **模型**：`deepseek-flash`，`base-url = https://api.deepseek.com`，密钥仅经环境变量 `DEEPSEEK_API_KEY`（本卡与全部附件中一律写 `***`）
 - **端口**：`18301`（PoC 应用）、`18305`（仅本次取证用的本地记录代理，非产品设计）
-- **操作纪律**：未改动 `<MAIN_V2>` 其他任何目录；未执行任何 git 写操作；只停止了自己启动的进程（详见 §10）
-- **脱敏**：本卡与附件已把本机路径替换为 `<MAIN_V2>` / `<REPO_ROOT>` / `<MAVEN_HOME>` / `<JDK_HOME>` / `<M2_REPO>`，用户名替换为 `<USER>`，密钥替换为 `***`
+- **操作纪律**：未改动 `<REPO_ROOT>` 其他任何目录；未执行任何 git 写操作；只停止了自己启动的进程（详见 §10）
+- **脱敏**：本卡与附件已把本机路径替换为 `<REPO_ROOT>` / `<MAVEN_HOME>` / `<JDK_HOME>` / `<M2_REPO>`，用户名替换为 `<USER>`，密钥替换为 `***`
 
 **证据等级约定**：【实测】= 本次真实运行留档、原文可复核；【推断】= 逻辑推演、未实测（均标注）。
 
@@ -36,7 +36,7 @@
 
 > javap 实测（1.1.8）：`OpenAiChatModel$Builder` 上确有 `toolCallingManager(ToolCallingManager)` 与 `toolExecutionEligibilityPredicate(...)`；`OpenAiChatModel.call(Prompt)` 与 `stream(Prompt)` 的字节码中都出现 `ToolExecutionEligibilityPredicate.isToolExecutionRequired(...)` → `ToolCallingManager.executeToolCalls(...)` → `ToolExecutionResult.returnDirect()`。即 **两条路径的循环都在官方模型类内部，扩展点唯一**。
 
-命令（全部在 `<MAIN_V2>/spike/sp01ab` 下执行；key 只用环境变量）：
+命令（全部在 `<REPO_ROOT>/spike/sp01ab` 下执行；key 只用环境变量）：
 
 ```bash
 # 构建
@@ -196,7 +196,7 @@ messages = [ assistant(content="我这就同时发起两个调用。", tool_call
 
 ## 8. 证据清单
 
-代码即证据（`<MAIN_V2>/spike/sp01ab`）：
+代码即证据（`<REPO_ROOT>/spike/sp01ab`）：
 
 | 文件 | 作用 |
 |---|---|
@@ -210,7 +210,7 @@ messages = [ assistant(content="我这就同时发起两个调用。", tool_call
 | `scripts/sp01ab-wire-proxy.mjs` | 记录每次发给模型的请求/响应原文（Authorization → `***`） |
 | `scripts/sp01ab-sanitize.mjs` | 附件脱敏 |
 
-原始留档（同一份内容同时存放于 `<MAIN_V2>/spike/sp01ab/evidence[-stream]/` 与 `<MAIN_V2>/docs/spike/logs/sp01ab/`）：
+原始留档（同一份内容同时存放于 `<REPO_ROOT>/spike/sp01ab/evidence[-stream]/` 与 `<REPO_ROOT>/docs/spike/logs/sp01ab/`）：
 
 | 路径 | 内容 |
 |---|---|

@@ -1,10 +1,10 @@
 # M2 E2E 进 CI 门禁 设计草案（DeepSeek V4 Flash）
 
 > 角色：设计调研者（DeepSeek V4 Flash）。**零 git 写操作、未修改任何既有文件**；本文档为唯一新增文件，保持未提交（提交官统一入库）。
-> 仓库：`<MAIN_V2>`（= `<REPO_ROOT>/ai-example-code/ai-example-main-v2`），分支 `main-v2`。任务书给定的基线为 `3f0283e`；**本棒执行期间仓库 HEAD 已推进到 `123744d`**（另一棒次的 `docs(方案)` 提交），且工作区存在另一棒次在飞的后端改动（`GenerativeFormRules` 及其用例，新增"字段键原型污染黑名单"）——本草案所有代码事实取自**读到的当前工作区内容**，与该并发改动不冲突（影响见 §2.3 末行）。
+> 仓库：`<REPO_ROOT>`，分支 `main`。任务书给定的基线为 `3f0283e`；**本棒执行期间仓库 HEAD 已推进到 `123744d`**（另一棒次的 `docs(方案)` 提交），且工作区存在另一棒次在飞的后端改动（`GenerativeFormRules` 及其用例，新增"字段键原型污染黑名单"）——本草案所有代码事实取自**读到的当前工作区内容**，与该并发改动不冲突（影响见 §2.3 末行）。
 > 日期：2026-10-07。范围：为「E2E 进 CI 门禁（路线 a：`services:redis` + 桩上游）」产出设计草案，供指挥官裁决；本棒不落地任何 workflow / 脚本 / 桩代码。
 > 证据等级：**【实测】**＝本棒读到的文件原文或已入库/已落盘的历史证据；**【推断】**＝由实测事实推出的结论，未在本棒运行验证；**【假设】**＝尚无证据、需施工棒验证的前提。
-> 脱敏：仓库内绝对路径一律 `<MAIN_V2>`；仓库外历史证据目录用 `<EV>` / `<TMP>`；CI 工作目录用 `<WS>`；密钥一律 `***`；不出现用户名、主机名、内网地址与盘符样式字面量。
+> 脱敏：仓库内绝对路径一律 `<REPO_ROOT>`；仓库外历史证据目录用 `<EV>` / `<TMP>`；CI 工作目录用 `<WS>`；密钥一律 `***`；不出现用户名、主机名、内网地址与盘符样式字面量。
 
 ---
 
@@ -17,7 +17,7 @@
 | 核心理由 | 本仓历史证据已证「预制 SSE 的 Node 桩可驱动本产品完整工具循环与终帧/usage 解析」（§2.4【实测】）；GF 用例的关键断言全部落在**后端产出**（帧契约/挂起/pending/HTTP）或**桩可完全控制的 schema 与文本**上，断言粒度**允许预制**（§3.2 逐条对账）；换来的是 CI 里 **GFSKIP=0 由构造保证**、无外网依赖、无密钥面。 |
 | 最大风险 | **桩缺陷会以"产品缺陷"口径报红**：脚本把「已 `tool_start(generative_form)` 但未下发 `frontend_tool_request` 且无 `REJECTED_ARGUMENTS`」明判为产品缺陷 FAIL（§2.2），桩的 schema 违规会落到这条分支上，造成**误归因**；必须靠桩自检 + 请求 dump 归档把"桩坏/产品坏"分开（§9 R1）。 |
 | 另一处必须明示 | **GFSKIP=0 的语义迁移**：在桩下 GF1–GF4「模型未触发/漂移」分支不可达，硬底线**恒成立**而非"被测得成立"；是否接受该口径、以及真模型服从率的证据线归谁，需裁决（§5、§9【待裁决】）。 |
-| 文档路径 | `<MAIN_V2>/docs/evidence/M2-E2E门禁设计草案-DS-V4-Flash.md`（未提交） |
+| 文档路径 | `<REPO_ROOT>/docs/evidence/M2-E2E门禁设计草案-DS-V4-Flash.md`（未提交） |
 
 ---
 
@@ -44,7 +44,7 @@
 | 3 | E2E 进门禁路线 | **选 (a)：`services:redis`+桩上游**，AI 用例 CI 内走桩、真实模型 E2E 保持本地手动；排期 M2，不阻塞 M1 出口 |
 | 4 | `pull_request` 触发未验证 | 接受现状，记为已知未验证项，首个真实 PR 时顺带确认 |
 
-同文件 §8.1 给出的路线清单（原文摘要）：(a) `services: redis` 容器 + 桩上游替代真实 AI（可参照既有 `stub-upstream.mjs` 手法），**跑在 ubuntu 上**；(b) 自托管 runner（带 Memurai/Redis 与 key 的环境变量注入）；(c) 单独的 e2e job，只在 `main-v2` 或定时（nightly）触发。
+同文件 §8.1 给出的路线清单（原文摘要）：(a) `services: redis` 容器 + 桩上游替代真实 AI（可参照既有 `stub-upstream.mjs` 手法），**跑在 ubuntu 上**；(b) 自托管 runner（带 Memurai/Redis 与 key 的环境变量注入）；(c) 单独的 e2e job，只在 `main` 或定时（nightly）触发。
 
 **由此确定的三条边界**（本草案不得越线）：
 
@@ -64,7 +64,7 @@
 
 | 项 | 取值 |
 |---|---|
-| 触发 | `push` → `main-v2`；`pull_request` → `main-v2` |
+| 触发 | `push` → `main`；`pull_request` → `main` |
 | 权限 | `permissions: contents: read` |
 | job `backend` | `ubuntu-latest`、`timeout-minutes: 20`、`working-directory: backend`、`actions/checkout@v5` + `actions/setup-java@v5`（temurin 21、maven 缓存按 `backend/pom.xml`）、`mvn -B test` |
 | job `frontend` | `ubuntu-latest`、`timeout-minutes: 20`、`working-directory: frontend`、`checkout@v5` + `setup-node@v5`（node 22、yarn 缓存按 `frontend/yarn.lock`）、`yarn install --frozen-lockfile` → `yarn typecheck` → `yarn build` |
@@ -199,7 +199,7 @@
 
 ### 4.1 推荐（一句话）
 
-**采 a2 并跑满 27 用例**：E2E 作为**第三个 job**（`ubuntu-latest`、`services: redis:7`、`timeout-minutes: 25`）随 `push → main-v2` 与 `pull_request → main-v2` 触发；后端以**打包 jar** 启动、`AI_BASE_URL` 指向本机桩上游、`AI_API_KEY` 填**固定占位串**；真 key 的真实模型跑法**维持本地手动**（S5d 裁决 #3）。
+**采 a2 并跑满 27 用例**：E2E 作为**第三个 job**（`ubuntu-latest`、`services: redis:7`、`timeout-minutes: 25`）随 `push → main` 与 `pull_request → main` 触发；后端以**打包 jar** 启动、`AI_BASE_URL` 指向本机桩上游、`AI_API_KEY` 填**固定占位串**；真 key 的真实模型跑法**维持本地手动**（S5d 裁决 #3）。
 
 ### 4.2 理由（按权重排序）
 

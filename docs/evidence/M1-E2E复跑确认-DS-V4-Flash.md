@@ -1,11 +1,11 @@
 # M1 E2E 复跑确认（DeepSeek V4 Flash）——AI 相关用例新鲜实测
 
 > 角色：批量工作者（DeepSeek V4 Flash，异厂商独立复跑）。**零 git 写操作、零产品代码改动**；本文档为唯一新增文件，保持未提交（提交官统一入库）。
-> 仓库：`<MAIN_V2>`（= `<REPO_ROOT>/ai-example-code/ai-example-main-v2`），分支 `main-v2`，**基线 HEAD `61286e2`**（执行前后均未变动，见 §6）。
+> 仓库：`<REPO_ROOT>`，分支 `main`，**基线 HEAD `61286e2`**（执行前后均未变动，见 §6）。
 > 执行日期：**2026-10-07**；执行时段 20:34:55 → 20:36:20（**85 秒**）。
 > 目的：为 M1 出口评审补上「**AI 相关用例新鲜实测**」证据，闭合异厂商复核报告 `docs/evidence/M1-出口复核-GLM-5.3.md` §四 保留项 #1（该复核环境未注入 AI key ⇒ AI 相关 10 用例结论降级为【推断】）的缺口。指挥官方对此缺口的表述为「GLM-5.3 复核第 4 项」；本文按复核报告原文口径记为**保留项 #1（AI 用例实测降级）**，两者指向同一事项。
 > 证据等级：**凡标注【实测】者均为本轮真实进程 + 真实模型（`deepseek-flash`）+ 真实 Redis 的可复核观测**；未见实测的一律标注【推断】。
-> 脱敏：不出现真实盘符（统一 `<MAIN_V2>` / `<TMP>`）、密钥（统一 `***`）、用户名、主机名、内网地址；本轮无任何密钥落盘。
+> 脱敏：不出现真实盘符（统一 `<REPO_ROOT>` / `<TMP>`）、密钥（统一 `***`）、用户名、主机名、内网地址；本轮无任何密钥落盘。
 
 ---
 
@@ -44,13 +44,13 @@
 # ① 复用预编译 jar（依据见 §1.3；本轮未改后端，故不重建）
 cd <TMP>/m1-ds-run1/work1
 AI_API_KEY="***" AI_BASE_URL="https://api.deepseek.com" AI_MODEL="deepseek-flash" \
-  java -jar <MAIN_V2>/backend/target/config-mgr.jar \
+  java -jar <REPO_ROOT>/backend/target/config-mgr.jar \
   --server.port=18330 \
   --spring.datasource.url="jdbc:h2:file:./data/e2e_m1_db;DB_CLOSE_DELAY=-1" \
   --app.job.batch-size=10 --app.job.demo-batch-delay-ms=150 > <TMP>/m1-ds-run1/boot-m1.log 2>&1 &
 
 # ② 全量照跑（22 既有 + GF1–GF5；未开 -EnableGf6）
-cd <MAIN_V2>
+cd <REPO_ROOT>
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify-e2e.ps1 \
   -Base http://127.0.0.1:18330 \
   -BackendLog <TMP>/m1-ds-run1/boot-m1.log \
@@ -255,7 +255,7 @@ GF1/GF2/GF4 的值回显断言沿用 GF-C run3 起生效的裁决 #1 口径（**
 | 进程纪律 | 仅停止本棒自己启动的后端进程（PID 经日志确认）；未触碰任何其它 java 进程【实测】 |
 | 端口回收 | `netstat` 复查 18330 **无 LISTENING**（仅残留 `TIME_WAIT`，属 TCP 正常回收窗口）【实测】 |
 | 密钥 | 全程仅经环境变量注入进程，**未落任何文件**；本文档一律写 `***`【实测】 |
-| 脱敏 | 本文不出现真实盘符 / 密钥 / 用户名 / 主机名 / 内网地址；路径统一 `<MAIN_V2>` / `<TMP>`，实例名统一 `<HOST>`【实测：全文自查】 |
+| 脱敏 | 本文不出现真实盘符 / 密钥 / 用户名 / 主机名 / 内网地址；路径统一 `<REPO_ROOT>` / `<TMP>`，实例名统一 `<HOST>`【实测：全文自查】 |
 
 ---
 

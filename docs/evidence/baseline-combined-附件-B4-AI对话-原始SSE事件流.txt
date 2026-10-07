@@ -1,5 +1,5 @@
 # 附件：baseline-combined-附件-B4-AI对话-原始SSE事件流.txt
-（原始运行记录，仅做路径/密钥脱敏：<REPO_ROOT>/<MAIN_V2>/<MAVEN_HOME>/<TMP> 占位、API Key 记 ***）
+（原始运行记录，仅做路径/密钥脱敏：<REPO_ROOT>/<MAVEN_HOME>/<TMP> 占位、API Key 记 ***）
 
 ====================================================================================================
 ## B4 /api/ai/health 与 /api/ai/tools 请求响应、会话创建与上下文

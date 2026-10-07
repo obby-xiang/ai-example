@@ -1,11 +1,11 @@
 # GF-D 双 FormRenderer 冒烟验证——同 toolCallId 双挂起卡形态实测
 
 > 角色：DeepSeek V4 Flash 子智能体（CDP 自动化冒烟）。**零产品代码改动、零 git 写操作**；本文档为唯一新增文件，保持未提交（由指挥官统一入库）。
-> 仓库：`<MAIN_V2>`（= `<REPO_ROOT>/ai-example-code/ai-example-main-v2`），分支 `main-v2`，HEAD `61286e2`。
+> 仓库：`<REPO_ROOT>`，分支 `main`，HEAD `61286e2`。
 > 执行日期：2026-10-07。
 > 被验对象：工作区既有前端 + 后端（未改动任何源码）；观察项来自 GF-C 收尾（同 toolCallId 被两条 assistant 消息各持一个 `pendingCall`）。
 > 证据等级：**全部为实测**（真实前端 dev server + 真实后端进程 + 帧注入驱动真实组件渲染 + CDP 截图）；未见实测的一律标注【未验证】。
-> 脱敏：不出现真实盘符路径（仓库统一 `<MAIN_V2>`、仓库外冒烟目录统一 `<SCRATCH>`）、密钥（统一 `***`）、用户名、主机名、内网 IP；`localhost` 端口号按原值直写。
+> 脱敏：不出现真实盘符路径（仓库统一 `<REPO_ROOT>`、仓库外冒烟目录统一 `<SCRATCH>`）、密钥（统一 `***`）、用户名、主机名、内网 IP；`localhost` 端口号按原值直写。
 
 ---
 

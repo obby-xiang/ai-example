@@ -6,7 +6,7 @@
   `DefaultToolCallingManager` + 官方 `ChatModel.stream`），在其之上补齐三件韧性能力：
   ① 上游断流的有界重试（对应 TC-AI-14）；② 同一 tool-result 重复回灌的幂等去重（对应 TC-F-04 / TC-AI-25）；
   ③ 执行中取消（对应 TC-AI-15）。
-- **spike 工程**：`<MAIN_V2>/spike/sp01d`（Spring Boot 3.5.14 + JDK 21 + Spring AI 1.1.8 BOM import + web）
+- **spike 工程**：`<REPO_ROOT>/spike/sp01d`（Spring Boot 3.5.14 + JDK 21 + Spring AI 1.1.8 BOM import + web）
 - **关联决策**：DC-05（官方已有能力禁止自研）、DC-08（脱敏纪律）；参照实现 =
   `ai-example-deepseek-v4-pro` 的 `AiRuntimeService`（`.timeout(90s).retry(1)` + 确认门 SSE 心跳 + `start` 首包），
   取消语义参照 `ai-example-claude-opus-5.5+deepseek-v4-pro` 的 `JobCancellationRegistry`
@@ -82,7 +82,7 @@
 
 ```bash
 export DEEPSEEK_API_KEY=***                     # 仅环境变量，未写入任何文件
-cd <MAIN_V2>/spike/sp01d && <MAVEN_HOME>/mvn -B clean package
+cd <REPO_ROOT>/spike/sp01d && <MAVEN_HOME>/mvn -B clean package
 node scripts/fault-proxy.mjs --port 18304 --upstream https://api.deepseek.com --evidence evidence &
 java -jar target/sp01d-resilience-0.0.1-SNAPSHOT.jar \
      --spring.ai.openai.base-url=http://127.0.0.1:18304 --server.port=18303 --spring.profiles.active=verbose &
@@ -516,7 +516,7 @@ spike 只用 `onError` / `onTimeout` 承载"客户端断开"，`done` 的 `cance
 | 端口 | `netstat` 确认 **18303 / 18304 均无监听**（无进程占用） |
 | 上游副作用 | 仅调用真实 `deepseek-flash` 做对话；无写操作、无数据落库 |
 | 密钥 | 全程仅环境变量 `DEEPSEEK_API_KEY`；决策卡与全部附件、evidence 目录均无 key（`***`） |
-| 脱敏 | 决策卡与附件 A–E 已复检：无本机绝对路径（`<MAIN_V2>` / `<MAVEN_HOME>` / `<JDK_HOME>` / `<USER_HOME>` 占位）、无 API key、无用户名；锚点/明文密钥未落盘 |
+| 脱敏 | 决策卡与附件 A–E 已复检：无本机绝对路径（`<REPO_ROOT>` / `<MAVEN_HOME>` / `<JDK_HOME>` / `<USER_HOME>` 占位）、无 API key、无用户名；锚点/明文密钥未落盘 |
 | 仓库改动范围 | 仅新增 `spike/sp01d/**` 与 `docs/spike/SP-01d-*`；`spike/sp01c` 只读参照，未改动；仓库其他目录未改动 |
 | 原始运行日志 | `spike/sp01d/logs/`（约 2.2MB，含本机绝对路径）已删除；关键行已脱敏归档为 `docs/spike/SP-01d-附件-E`。原始结构化证据保留在 `spike/sp01d/evidence/`（56 个 JSON，无绝对路径/无密钥），可重跑 `scripts/make-attachments.mjs` 重新生成附件 |
 | git | 未执行任何 git 写操作（仅 `git status` 等只读命令） |

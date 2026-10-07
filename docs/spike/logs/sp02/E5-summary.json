@@ -14,6 +14,6 @@
   "total": 3,
   "error": {
     "message": "Cannot read properties of undefined (reading 'toolCallId')",
-    "stack": "TypeError: Cannot read properties of undefined (reading 'toolCallId')\n    at scenarioE5 (file:///<MAIN_V2>/spike/sp02/scripts/sp02-experiment.mjs:675:40)\n    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)\n    at async main (file:///<MAIN_V2>/spike/sp02/scripts/sp02-experiment.mjs:816:14)"
+    "stack": "TypeError: Cannot read properties of undefined (reading 'toolCallId')\n    at scenarioE5 (file:///<REPO_ROOT>/spike/sp02/scripts/sp02-experiment.mjs:675:40)\n    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)\n    at async main (file:///<REPO_ROOT>/spike/sp02/scripts/sp02-experiment.mjs:816:14)"
   }
 }

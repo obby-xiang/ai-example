@@ -1,9 +1,9 @@
 # S4.4b 移交的 5 项后端缺口 —— 修复与验证报告
 
 > 日期：2026-10-07　执行：S4.4-fix（后端补丁工程师）
-> 来源：`<MAIN_V2>/docs/evidence/S44b-五页视图验证.md` §7 缺陷 2/3、§8 遗留 1/2/3/7/8（前端联调实测移交）
-> 仓库：`<MAIN_V2>`（main-v2）　分支基准：`9113792`（S4.4b 收尾提交）
-> 路径脱敏：`<MAIN_V2>`=main-v2 仓库根、`<REPO_ROOT>`=本机仓库汇总目录（main-v2 的上级）、`<MAVEN_HOME>`=本机 Maven 安装目录的 `bin`、`<TEMP_ROOT>`=本机证据目录（原始产物与截图，不入库）
+> 来源：`<REPO_ROOT>/docs/evidence/S44b-五页视图验证.md` §7 缺陷 2/3、§8 遗留 1/2/3/7/8（前端联调实测移交）
+> 仓库：`<REPO_ROOT>`（分支 main）　分支基准：`9113792`（S4.4b 收尾提交）
+> 路径脱敏：`<REPO_ROOT>`=仓库根、`<MAVEN_HOME>`=本机 Maven 安装目录的 `bin`、`<TEMP_ROOT>`=本机证据目录（原始产物与截图，不入库）
 > 纪律：全程<b>未执行任何 git 写操作</b>；未改 `ai/` 包、发布模块、种子、前端；`docs/` 仅新增本文件。
 
 ---
@@ -13,8 +13,8 @@
 | 项 | 值 |
 |---|---|
 | JDK / Maven | JDK 21（PATH）；`"<MAVEN_HOME>/mvn.cmd" -o`（离线，本地仓库已就绪） |
-| 后端 | `<MAIN_V2>/backend`，`mvn -o clean test`（V1）、`mvn -o package -DskipTests` → `target/config-mgr.jar` |
-| 实跑 | `java -jar target/config-mgr.jar --server.port=18317`，`AI_API_KEY=dummy`，H2 文件库 `<MAIN_V2>/backend/data/`（15 定义种子态）+ Flyway，Redis 未启 |
+| 后端 | `<REPO_ROOT>/backend`，`mvn -o clean test`（V1）、`mvn -o package -DskipTests` → `target/config-mgr.jar` |
+| 实跑 | `java -jar target/config-mgr.jar --server.port=18317`，`AI_API_KEY=dummy`，H2 文件库 `<REPO_ROOT>/backend/data/`（15 定义种子态）+ Flyway，Redis 未启 |
 | 端口 | 起服务前 `netstat` 复核 18317 空闲；18080/18290-18298/18301-18316/18320/18321 全程未占用 |
 | 原始产物 | `<TEMP_ROOT>/v2-report.txt`、`v3-list-conditions.txt`、`v4-progress-sequence-{FIXED,OLDCODE,FINAL-FIXED}.txt`、`v4-snapshot-timeline-*.txt`、`v5-sse-raw-FINAL-FIXED.txt`、`v5v6-oplog.txt`、`v6-delete-endpoint.txt`、`v3-inventory.txt`、`cleanup-report.txt` |
 | DB 备份/还原 | 起服务前 `backend/data/` → `/tmp/s44f/data-backup`；收工后原样还原并复检（§6） |
@@ -129,7 +129,7 @@
 [INFO] Tests run: 30, Failures: 0, Errors: 0, Skipped: 0
 [INFO] BUILD SUCCESS
 ```
-- 既有 11 例（5+4+2）全过，无回退；新增 19 例全过。命令：`cd <MAIN_V2>/backend && AI_API_KEY=dummy "<MAVEN_HOME>/mvn.cmd" -o clean test`。
+- 既有 11 例（5+4+2）全过，无回退；新增 19 例全过。命令：`cd <REPO_ROOT>/backend && AI_API_KEY=dummy "<MAVEN_HOME>/mvn.cmd" -o clean test`。
 - **新用例对旧实现是红的**（避免"测试和实现一起错"）：
   - P1 红检：临时把 `update()` 回退回"clear + id=null 新实体"，`DefinitionUpdateTest` 2/3 失败，报文正是移交单里的 500 ——
     `DataIntegrityViolationException: ... Unique index or primary key violation: "PUBLIC.UQ_FIELD_DEF_CODE_INDEX_2 ON PUBLIC.CONFIG_FIELDS(DEF_CODE NULLS FIRST, CODE NULLS FIRST) VALUES ( /* key:75 */ 'S44F_EDIT', 'exchangeRate')"`。

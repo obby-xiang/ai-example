@@ -1,10 +1,10 @@
 # GF-C 脚本红队审查（DeepSeek V4 Pro）——verify-e2e.ps1 GF 增量
 
 > 角色：反方审查 / 红队。只审查、不改代码；本文件为唯一新增产物，未做任何 git 写操作。
-> 审查对象：`<MAIN_V2>/scripts/verify-e2e.ps1`（HEAD `d19da30`，工作区增量 +605/−5，GF-C 用例实现，作者 Kimi K2.8，与本审查异厂商）。
+> 审查对象：`<REPO_ROOT>/scripts/verify-e2e.ps1`（HEAD `d19da30`，工作区增量 +605/−5，GF-C 用例实现，作者 Kimi K2.8，与本审查异厂商）。
 > 契约参照：`docs/evidence/GFc-E2E用例设计-GLM-5.3.md`（已定稿，含裁决）、`docs/evidence/GFa-生成式表单后端工具验证.md` §8。
 > 证据等级：【实测】= 本次实际读码/静态核对后端源码确认；【推断】= 由代码路径推演、未实跑；【假设】= 需执行棒实测才能确认。
-> 脱敏：`<MAIN_V2>` 代替真实盘符；无密钥、无用户名。
+> 脱敏：`<REPO_ROOT>` 代替真实盘符；无密钥、无用户名。
 > 执行边界：未运行完整 E2E；后端契约均以 `backend/src/main/java/...` 源码静态核对为准。
 
 ---
@@ -28,7 +28,7 @@
 - **严重度**：P0（致命，确定性）
 - **位置**：`scripts/verify-e2e.ps1:1301-1309`（`function Gf-PendingEntry`）；依赖 `Invoke-Api`（`:73-88`）；设计稿 §1.2 与 §5.2 的错误契约背书。
 - **证据**【实测】：
-  - 后端 `AiController.java`（`<MAIN_V2>/backend/.../ai/web/AiController.java`）的挂起快照端点签名是 `public ApiResponse<List<Map<String, Object>>> pending(...)`，返回 `ApiResponse.ok(items)`——即 `{"success":true,"data":[{...}]}` 信封，**不是裸数组**。
+  - 后端 `AiController.java`（`<REPO_ROOT>/backend/.../ai/web/AiController.java`）的挂起快照端点签名是 `public ApiResponse<List<Map<String, Object>>> pending(...)`，返回 `ApiResponse.ok(items)`——即 `{"success":true,"data":[{...}]}` 信封，**不是裸数组**。
   - `Gf-PendingEntry` 的注释写「GET /api/ai/pending/{runId} 返回条目数组，非 ApiResponse 信封」，并直接 `$entry = @($pend.json | Where-Object { $_.toolCallId -eq $toolCallId })[0]`。但 `Invoke-Api` 只 `ConvertFrom-Json` 整个响应体，`$pend.json` 是**信封对象**（有 `success/message/code/data`，无 `toolCallId`），`Where-Object` 过滤永远命中 0 条。
   - 设计稿 §1.2「诊断端点 … → 条目数组」为错误契约，是本实现错误的源头（把 `data` 展开遗漏了）。
 - **复现路径**：后端照常启动 → 跑 GF1 → A3（回灌 POST 200）通过 → A4 `Gf-PendingEntry` 抛「pending/{runId} 无 toolCallId=… 条目」→ GF1 FAIL。同理 GF2-A4、GF3-A4、GF4-A2、GF5-A3 全部抛同一错误。

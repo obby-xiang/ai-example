@@ -1,6 +1,6 @@
 # S5c 帧序一致性测试验证（AI SSE 帧协议 conformance 资产）
 
-> 日期：2026-10-07　执行：施工子智能体（DeepSeek V4 Flash）　仓库：`<MAIN_V2>`（分支 `main-v2`，HEAD `972182b`）
+> 日期：2026-10-07　执行：施工子智能体（DeepSeek V4 Flash）　仓库：`<REPO_ROOT>`（分支 `main`，HEAD `972182b`）
 > 范围：**只新增测试资产**（`backend/src/test`）+ 本证据文档。**未改任何 `src/main` 生产代码**，未做任何 git 写操作。
 > 结论：新增 **42** 个 JUnit 用例（6 个测试类）+ 3 个测试替身/校验器；全量 **147** 用例（原 105 基线 + 42）连续两轮全绿；
 > 过程中发现 **6 项帧协议问题**（全部如实记录，未修改生产代码绕行）。
@@ -9,10 +9,10 @@
 
 ## 1. 资产形态与文件清单
 
-主体为 JUnit（纳入 `<MAIN_V2>/backend/src/test`，与既有 105 例同一条 `mvn test` 管线、未来可直接进 CI）。
+主体为 JUnit（纳入 `<REPO_ROOT>/backend/src/test`，与既有 105 例同一条 `mvn test` 管线、未来可直接进 CI）。
 模型调用一律桩化（沿用仓库既有 AI 测试的写法：Mockito 桩 + 无 Spring 上下文），**不需要 Redis、不需要 HTTP 端口、不需要 AI key**。
 
-| 文件（`<MAIN_V2>/backend/src/test/java/com/example/configmgr/ai/conformance/`） | 角色 | 用例数 |
+| 文件（`<REPO_ROOT>/backend/src/test/java/com/example/configmgr/ai/conformance/`） | 角色 | 用例数 |
 |---|---|---|
 | `FrameWire.java` | **帧线**：把 `SseChatEmitter` 真正写到 `SseEmitter` 上的 JSON 原文按到达顺序录下来并解码（含可阻塞的"到达前钩子"，用于把并发时序确定化） | 替身 |
 | `FrameContract.java` | **不变量校验器**：6 条序列规则的判据本体（seq / 终态 / 工具配对 / 正文三段式 / 因果顺序 / 终帧与终态同向） | 校验器 |
@@ -62,19 +62,19 @@
    （含 `cancelled=true`）与 `error` **都是合法终帧**：`assertConformant` 不会因为出现 `error` 而失败，
    只会因为它出现在错误的位置（终帧之后还有帧 / 一轮两个终帧）而失败。
 
-**明确不借的东西**：不引入 AG-UI 的事件模型、`RUN_*` 事件名、协议版本协商、era shim（DC-14 已裁决 main-v2 不切换 AG-UI）。
-本资产只把同一套"事件流 + 序列不变量 + kill"的判据形态，套在 main-v2 自己的帧类型上。
+**明确不借的东西**：不引入 AG-UI 的事件模型、`RUN_*` 事件名、协议版本协商、era shim（DC-14 已裁决 main 不切换 AG-UI）。
+本资产只把同一套"事件流 + 序列不变量 + kill"的判据形态，套在 main 自己的帧类型上。
 
 ---
 
 ## 4. 运行结果
 
-工具链：`<MAVEN_HOME>/bin/mvn.cmd`（IntelliJ 自带 Maven），工作目录 `<MAIN_V2>/backend`，JDK 21。
+工具链：`<MAVEN_HOME>/bin/mvn.cmd`（IntelliJ 自带 Maven），工作目录 `<REPO_ROOT>/backend`，JDK 21。
 未起 HTTP 端口；未使用 Redis（`<MEMURAI_HOME>/memurai-cli.exe ping` → `PONG`，但本资产全程不需要 Redis）。
 
 ```
 # 全量（含基线 105）
-cd <MAIN_V2>/backend
+cd <REPO_ROOT>/backend
 "<MAVEN_HOME>/bin/mvn.cmd" -o test
 
 # 只跑本次新增的帧序一致性资产
@@ -219,10 +219,10 @@ $ grep -rnE "^\s*@Test(\s*$|\()" backend/src/test --include=*.java | wc -l
 ## 7. 合规与脱敏声明
 
 - 未修改 `research-src/ag-ui`（只读参照，未写入）。
-- 未修改 `<MAIN_V2>/backend/src/main` 下任何生产代码；`git status` 显示唯一变更是新增测试目录。
+- 未修改 `<REPO_ROOT>/backend/src/main` 下任何生产代码；`git status` 显示唯一变更是新增测试目录。
 - 未执行任何 git 写操作（无 `add/commit/push/reset/rebase`）。
 - 本文档与新增测试源码中不含本机绝对路径、不含真实用户名、不含任何密钥（路径一律用
-  `<MAIN_V2>` / `<REPO_ROOT>` / `<MAVEN_HOME>` / `<MEMURAI_HOME>` 占位符；源码中已 grep 校验无本机盘符绝对路径、无用户主目录路径、无用户名泄漏）。
+  `<REPO_ROOT>` / `<MAVEN_HOME>` / `<MEMURAI_HOME>` 占位符；源码中已 grep 校验无本机盘符绝对路径、无用户主目录路径、无用户名泄漏）。
 - 未起 HTTP 端口、未占用 18330；Redis（Memurai）仅做过一次只读 `ping`（`PONG`），测试资产本身不依赖 Redis。
 
 ---

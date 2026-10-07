@@ -1,5 +1,5 @@
 /**
- * Excel 工具层（TS 重写，形态来源 glm-5.3 `utils/excel.js` 267 行，字段契约改为 main-v2 的
+ * Excel 工具层（TS 重写，形态来源 glm-5.3 `utils/excel.js` 267 行，字段契约改为 main 的
  * `ConfigField.label / fieldType / optionsJson / key`，并补上按字段定义生成的**动态校验器**）。
  *
  * 四件事：

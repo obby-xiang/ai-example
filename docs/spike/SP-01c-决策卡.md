@@ -5,7 +5,7 @@
 - **被验证方案**：不用官方 Redis 实现（1.1.8 无、2.0 需 Redis 模块），改为**实现官方 SPI**
   `org.springframework.ai.chat.memory.ChatMemoryRepository`，用 Spring Data Redis 普通数据结构承载；
   对话循环与记忆挂载走官方 `MessageWindowChatMemory` + `MessageChatMemoryAdvisor`。
-- **spike 工程**：`<MAIN_V2>/spike/sp01c`（Spring Boot 3.5.14 + JDK 21 + Spring AI 1.1.8 BOM）
+- **spike 工程**：`<REPO_ROOT>/spike/sp01c`（Spring Boot 3.5.14 + JDK 21 + Spring AI 1.1.8 BOM）
 - **关联决策**：DC-02（会话状态存 Redis、TTL 即可、不持久化）、DC-03（分布式多实例）、
   DC-05（官方已有能力禁止自研，官方能力不存在时可实现官方 SPI）、DC-08（脱敏纪律）
 - **附件**：
@@ -116,15 +116,15 @@ public interface org.springframework.ai.chat.memory.ChatMemoryRepository {
 export DEEPSEEK_API_KEY=***
 
 # 1) 构建（<MAVEN_HOME> = Maven 安装目录下的 bin/mvn）
-cd <MAIN_V2>/spike/sp01c && <MAVEN_HOME>/mvn -B clean package
+cd <REPO_ROOT>/spike/sp01c && <MAVEN_HOME>/mvn -B clean package
 
 # 2) 启动两个实例（同一 Redis、不同进程、不同端口）
-cd <WORK_DIR> && cp <MAIN_V2>/spike/sp01c/target/sp01c-redis-chat-memory-0.0.1-SNAPSHOT.jar sp01c.jar
+cd <WORK_DIR> && cp <REPO_ROOT>/spike/sp01c/target/sp01c-redis-chat-memory-0.0.1-SNAPSHOT.jar sp01c.jar
 SPIKE_PORT=18302 java -jar sp01c.jar --spring.profiles.active=verbose &   # 实例 A（verbose 记录上游状态码）
 SPIKE_PORT=18312 java -jar sp01c.jar &                                    # 实例 B
 
 # 3) 逐项取证（Memurai CLI 不在 PATH 时先 export MEMURAI_CLI=<MEMURAI_HOME>/memurai-cli.exe）
-cd <MAIN_V2>/spike/sp01c
+cd <REPO_ROOT>/spike/sp01c
 node scripts/spike-verify.mjs vc1       http://127.0.0.1:18302
 node scripts/spike-verify.mjs vc2       http://127.0.0.1:18302
 node scripts/spike-verify.mjs vc3-seed  http://127.0.0.1:18302 vc3-shared
@@ -494,6 +494,6 @@ GET /api/chat/window-check/history →
 | 删除后核对 | `KEYS chat:mem:*` 空；`DBSIZE` = 0 |
 | 进程 | 仅停止本任务自启实例（18302 / 18312 对应 PID），未触碰其他服务（另有 `sp01ab-*` 的 java 进程属他人任务，保持原样） |
 | 端口 | `netstat` 确认 18302 / 18312 无监听（仅残留内核 TIME_WAIT，无进程占用） |
-| 脱敏 | 决策卡与全部附件已复检：无本机绝对路径（`<MAIN_V2>` / `<MAVEN_HOME>` / `<MEMURAI_HOME>` / `<USER_HOME>` / `<WORK_DIR>` 占位）、无 API key（`***`）、无用户名 |
+| 脱敏 | 决策卡与全部附件已复检：无本机绝对路径（`<REPO_ROOT>` / `<MAVEN_HOME>` / `<MEMURAI_HOME>` / `<USER_HOME>` / `<WORK_DIR>` 占位）、无 API key（`***`）、无用户名 |
 | Redis 配置 | 未做任何配置修改（仅读操作 + 本次实验键的写入/删除） |
 | git | 未执行任何 git 写操作 |

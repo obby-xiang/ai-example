@@ -1,34 +1,34 @@
-# S5b 证据：deepseek-v4-pro「22 用例 PowerShell E2E」移植到 main-v2 并实跑验证
+# S5b 证据：deepseek-v4-pro「22 用例 PowerShell E2E」移植到 main 并实跑验证
 
 > 施工类型：测试资产移植（E2E 脚本）+ 真实运行验证。**未改任何生产代码**（`backend/src/main/**` 零改动）。
 > 移植源（只读，未修改）：`<REPO_ROOT>/ai-example-code/ai-example-deepseek-v4-pro/scripts/verify-e2e.ps1`（685 行 / TC1–TC22）
-> 产出物：`<MAIN_V2>/scripts/verify-e2e.ps1`（1326 行）与本文（`git status --porcelain` 实测两条 `??`，无其他改动；未修改任何既有文件）
-> 执行日期：2026-10-07　分支：main-v2（HEAD 8043224）　端口：18330（独立 H2 库文件，不动演示库）
+> 产出物：`<REPO_ROOT>/scripts/verify-e2e.ps1`（1326 行）与本文（`git status --porcelain` 实测两条 `??`，无其他改动；未修改任何既有文件）
+> 执行日期：2026-10-07　分支：main（HEAD 8043224）　端口：18330（独立 H2 库文件，不动演示库）
 > 本文只记录真实运行结果；未实测到的一律标注【未触发】/【待裁决】，不做"应该是这样"的补全。
 
 ## 0. 元信息与脱敏口径
 
 | 项 | 值 |
 |---|---|
-| 仓库 | `<MAIN_V2>`（= `<REPO_ROOT>/ai-example-code/ai-example-main-v2`） |
+| 仓库 | `<REPO_ROOT>` |
 | 移植源 | `<REPO_ROOT>/ai-example-code/ai-example-deepseek-v4-pro/scripts/verify-e2e.ps1`（md5 与 V3 证据一致：685 行） |
-| 新增产物 | `<MAIN_V2>/scripts/verify-e2e.ps1`（1326 行；md5 `bdc7a86005653e00a72437c6d3363fbe`） |
-| JDK / Maven | OpenJDK 21.0.12（PATH）/ `<MAVEN_HOME>/mvn.cmd -B -DskipTests package` → `<MAIN_V2>/backend/target/config-mgr.jar`（95 390 240 字节） |
+| 新增产物 | `<REPO_ROOT>/scripts/verify-e2e.ps1`（1326 行；md5 `bdc7a86005653e00a72437c6d3363fbe`） |
+| JDK / Maven | OpenJDK 21.0.12（PATH）/ `<MAVEN_HOME>/mvn.cmd -B -DskipTests package` → `<REPO_ROOT>/backend/target/config-mgr.jar`（95 390 240 字节） |
 | 客户端 | Windows PowerShell 5.1（`powershell.exe`；`pwsh` 不存在，与 V3 核验一致）；本机另用 Git Bash + curl 做前置探针 |
-| 数据库 | 独立库文件 `./data/e2e_s5b_db`（**不动** `<MAIN_V2>/backend/data/config_mgr_db.mv.db` 演示库；每轮验证前删除该文件冷启） |
+| 数据库 | 独立库文件 `./data/e2e_s5b_db`（**不动** `<REPO_ROOT>/backend/data/config_mgr_db.mv.db` 演示库；每轮验证前删除该文件冷启） |
 | Redis | Memurai `127.0.0.1:6379`（`<MEMURAI_HOME>/memurai-cli.exe ping` → `PONG`） |
 | AI | 真实 `https://api.deepseek.com` / `deepseek-flash`；key 仅经环境变量注入进程（`AI_API_KEY`），**未写入任何文件**；本文与脚本中 key 一律 `***` |
 | 原始记录 | `<TMP>/s5b-verify/*`（后端日志 `boot6.log`、两轮脚本 stdout `runA.txt`/`runB.txt`） |
-| 脱敏 | 本机绝对路径 → `<MAIN_V2>` / `<REPO_ROOT>` / `<MAVEN_HOME>` / `<MEMURAI_HOME>` / `<TMP>`；key → `***` |
+| 脱敏 | 本机绝对路径 → `<REPO_ROOT>` / `<MAVEN_HOME>` / `<MEMURAI_HOME>` / `<TMP>`；key → `***` |
 
 ## 1. 产出物与运行方式
 
 ### 1.1 脚本定位与设计取舍
 
 源脚本面向 deepseek 分支的**两套独立对象**（`/api/export/tasks`、`/api/import/batches`）与「批次」语义；
-main-v2 的对象模型是**任务（tasks）+ 作业（jobs: EXPORT/PRECHECK/IMPORT/PUBLISH）**，发布语义为
+main 的对象模型是**任务（tasks）+ 作业（jobs: EXPORT/PRECHECK/IMPORT/PUBLISH）**，发布语义为
 **行级 upsert + 范围差集删除**，AI 侧有**会话 409 串行化 / 确认门 / 前端工具挂起 / reattach**。
-故本脚本**保持 22 个用例编号与测试意图可对照**，逐条按 main-v2 的真实 API 与语义重写断言（差异见 §2、§3）。
+故本脚本**保持 22 个用例编号与测试意图可对照**，逐条按 main 的真实 API 与语义重写断言（差异见 §2、§3）。
 
 三条移植期硬约束（脚本头部注释同样写明）：
 
@@ -37,19 +37,19 @@ main-v2 的对象模型是**任务（tasks）+ 作业（jobs: EXPORT/PRECHECK/IM
    （更小的数据集则一处都没有），不足以断言"进度事件流"。取 10 可稳定产生 12 条进度帧。
 2. **`-BackendLog`**：TC15 的渐进披露断言与 Q8 的两项断言依赖后端 DEBUG 日志（`logging.level.com.example.configmgr=DEBUG` 已在 `application.yml`）。
    未提供时这两处判 **FAIL**（不静默跳过、不降级为 SKIP）。日志读取用 `FileShare.ReadWrite` 打开（后端进程持有写句柄）。
-3. **上传件构造走"导出产物 + 单元格手术"闭环**：main-v2 的数据面**没有行级 CRUD 端点**（写路径只有导入/发布），
-   故脚本先跑导出作业拿到合法 xlsx，再按单元格引用（`r="B2"`，main-v2 导出件为 inline string）精确改写/清空值，
+3. **上传件构造走"导出产物 + 单元格手术"闭环**：main 的数据面**没有行级 CRUD 端点**（写路径只有导入/发布），
+   故脚本先跑导出作业拿到合法 xlsx，再按单元格引用（`r="B2"`，main 导出件为 inline string）精确改写/清空值，
    构造"必填缺失/主键重复/引用不存在/范围缺失"四类缺陷件与"3 行子集件"。zip 由 `System.IO.Compression` 显式建条目（正斜杠名）避免 OOXML 包不合规。
 
 ### 1.2 运行命令（原样）
 
 ```bash
 # 构建
-cd <MAIN_V2>/backend
+cd <REPO_ROOT>/backend
 "<MAVEN_HOME>/bin/mvn.cmd" -B -DskipTests package          # BUILD SUCCESS，产出 target/config-mgr.jar
 
 # 启动（独立库文件 + 冷启；AI key 只进进程环境变量）
-cd <MAIN_V2>/backend
+cd <REPO_ROOT>/backend
 rm -f data/e2e_s5b_db.mv.db data/e2e_s5b_db.trace.db
 AI_API_KEY="***" java -jar target/config-mgr.jar \
   --server.port=18330 \
@@ -57,58 +57,58 @@ AI_API_KEY="***" java -jar target/config-mgr.jar \
   --app.job.batch-size=10 --app.job.demo-batch-delay-ms=150 > <TMP>/boot6.log 2>&1 &
 
 # 执行 E2E（两轮：第 2 轮为幂等重跑）
-cd <MAIN_V2>
+cd <REPO_ROOT>
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify-e2e.ps1 \
   -Base http://127.0.0.1:18330 -BackendLog <TMP>/boot6.log
 ```
 
 端口纪律：启动前 `netstat -ano | grep 18330` 无监听；未触碰 18080 / 18290–18299 / 18301–18321。
 
-## 2. 22 用例映射表（源 → main-v2 目标 → 断言改写点 → 结果）
+## 2. 22 用例映射表（源 → main 目标 → 断言改写点 → 结果）
 
 编号沿用源脚本（执行顺序亦与源一致：TC1–TC14 → TC20/21 → TC15–TC18 → TC22 → TC19 收尾）。
 
-| # | 源用例 | main-v2 目标（API） | 关键改写点 | 结果 |
+| # | 源用例 | main 目标（API） | 关键改写点 | 结果 |
 |---|---|---|---|---|
 | TC1 | 配置定义列表与种子数据 | `GET /api/definitions`、`GET /api/data/{code}/count` | 种子 = 基座 7 + glm 并集 8 = **15** 个定义（源为 4）；`publishedRowCount` 字段不存在 → 用 `/count`；`dependsOn` 数组 → **REFERENCE 字段**（ALARM_THRESHOLD.metricCode → METRIC_DICT.metricCode）；新增 level/keyword 过滤断言 | PASS |
 | TC2 | 动态配置定义 CRUD | `POST/PUT /api/definitions` | 字段 JSON 为 `fieldType`/`key`（非 `type`/`isKey`）；重复编码由唯一约束拒绝（**实测 HTTP 500**，断言口径=必须被拒绝）；追加字段走**整份 fields 替换**语义 → 4 字段；新增"无主键定义被拒（400）" | PASS |
-| TC3 | 数据行校验引擎 | `POST /api/tasks/{id}/jobs {PRECHECK}` + `GET /api/jobs/{id}/issues` | main-v2 **无行级数据 CRUD**，校验发生在预检查作业；规则集 = **必填 / 主键重复 / 引用存在性**（无枚举合法性与数值范围校验，`ImportFlowJobTest` 已记）；范围必填以 REGION 级 `regionCode`（key+required）表达；四类缺陷件由导出件手术构造，`errorCount=4` | PASS |
+| TC3 | 数据行校验引擎 | `POST /api/tasks/{id}/jobs {PRECHECK}` + `GET /api/jobs/{id}/issues` | main **无行级数据 CRUD**，校验发生在预检查作业；规则集 = **必填 / 主键重复 / 引用存在性**（无枚举合法性与数值范围校验，`ImportFlowJobTest` 已记）；范围必填以 REGION 级 `regionCode`（key+required）表达；四类缺陷件由导出件手术构造，`errorCount=4` | PASS |
 | TC4 | 导出（全量+进度+文件） | `EXPORT` 作业 + `GET /api/tasks/{id}/files`、`/files/{defCode}` | 文件清单含 `rowCount`（5/5/12）；`progress==total`；下载件 PK 魔数 + 长度 | PASS |
-| TC5 | 导出查询条件 | `PUT /api/tasks/{id}/items/{defCode}/condition` + `EXPORT` | 条件形态改为 main-v2/前端同形的 `{scopeKeys,fields}`；行数按实况：code=CNY→**1**、HE→**3**、HE+XN→**10**（源为 3/1）；条件条目落库后状态 `READY` | PASS |
+| TC5 | 导出查询条件 | `PUT /api/tasks/{id}/items/{defCode}/condition` + `EXPORT` | 条件形态改为 main/前端同形的 `{scopeKeys,fields}`；行数按实况：code=CNY→**1**、HE→**3**、HE+XN→**10**（源为 3/1）；条件条目落库后状态 `READY` | PASS |
 | TC6 | zip 打包下载 | `/files/download?codes=`、`/files/download-all` | 条目名 = "编码_名称.xlsx"，断言条目数与编码前缀（2 / 3 条目） | PASS |
 | TC7 | 模板下载 | `/files/templates?codes=`、`/api/definitions/{code}/template` | 单个 → xlsx；多个 → zip（2 条目）；含定义级模板端点 | PASS |
-| TC8 | 上传文件名匹配 | `POST /api/tasks/{id}/files/upload` | main-v2 匹配规则 = 文件名等于编码或以 `编码_`/`编码-` 开头；**源脚本支持的 "(1) 序号后缀"不被识别 → 断言为被拒绝**；新增"无法匹配单文件 400""zip 全不匹配 400"；未匹配清单字段名 `unmatchedFiles` | PASS |
+| TC8 | 上传文件名匹配 | `POST /api/tasks/{id}/files/upload` | main 匹配规则 = 文件名等于编码或以 `编码_`/`编码-` 开头；**源脚本支持的 "(1) 序号后缀"不被识别 → 断言为被拒绝**；新增"无法匹配单文件 400""zip 全不匹配 400"；未匹配清单字段名 `unmatchedFiles` | PASS |
 | TC9 | 检查通过 + 依赖拓扑 | `PRECHECK` + `DependencyResolver` | 依赖由 REFERENCE 推出（METRIC_DICT 先于 ALARM_THRESHOLD）；**`job_items` 无 `@OrderBy`（返回数组按 (job_id,def_code) 索引）→ 拓扑序以条目 id 递升为判据**（实测 METRIC_DICT id 更小） | PASS |
 | TC10 | 检查失败明细 + 未上传文件 | `GET /api/jobs/{id}/issues` | 明细**落库可查**（分页 `totalElements`/首页条数/归属）；未上传文件的配置项报 "未找到上传文件"；日志无 `NoSuchFileException`/`明细写入失败`（Q8① 行为面） | PASS |
 | TC11 | SSE 进度事件流 | `GET /api/tasks/{id}/events` | 帧形态：无名事件 + `data` 内 `{type,data}`；**无 snapshot 重放 → 脚本先订阅（响应头到达即视为订阅成功）再启动作业**；12 条 `JOB_PROGRESS` 单调递增、末条 120/120、`JOB_DONE(COMPLETED)` | PASS |
 | TC12 | 导入草稿隔离 | `IMPORT` + `GET /api/jobs/{importJobId}/diff` | 暂存行经 `diff` 端点读取（源为 `/drafts/{code}`）；生效数据保持 5 行、暂存 3 行 `STAGED`、任务条目 `IMPORTED` | PASS |
-| TC13 | 发布：替换生效 | `PUBLISH` + `PUT /import-mode REPLACE` | 5 行 → 发布 3 行子集 → **3 行**；**upsert 保行 id、版本递增**；差集删除 GBP/JPY；"重复发布拦截"改为 main-v2 更强的**导入快照版本比对**（二次发布 → 作业 FAILED + "发布冲突…" 明细，数据零变化）；终态作业取消 → 409 `JOB_ALREADY_FINAL` | PASS |
-| TC14 | 发布前置守卫 | `IMPORT`/`PUBLISH` | 源"检查失败 → 禁止导入/发布"**在 main-v2 无守卫**（`ImportFlowJobTest` 已登记为实现事实）→ 改写为两层可验证守卫：① 无上传文件 → IMPORT FAILED + 明细；② REPLACE 模式发布**空暂存集 → 生效数据零变化**（28 行不变，不误删） | PASS |
+| TC13 | 发布：替换生效 | `PUBLISH` + `PUT /import-mode REPLACE` | 5 行 → 发布 3 行子集 → **3 行**；**upsert 保行 id、版本递增**；差集删除 GBP/JPY；"重复发布拦截"改为 main 更强的**导入快照版本比对**（二次发布 → 作业 FAILED + "发布冲突…" 明细，数据零变化）；终态作业取消 → 409 `JOB_ALREADY_FINAL` | PASS |
+| TC14 | 发布前置守卫 | `IMPORT`/`PUBLISH` | 源"检查失败 → 禁止导入/发布"**在 main 无守卫**（`ImportFlowJobTest` 已登记为实现事实）→ 改写为两层可验证守卫：① 无上传文件 → IMPORT FAILED + 明细；② REPLACE 模式发布**空暂存集 → 生效数据零变化**（28 行不变，不误删） | PASS |
 | TC20 | 任务中心 | `GET /api/tasks` | 信封为 Spring `Page`（`content`/`totalElements`，**page 从 0 起**）；行 = `TaskSummary{task,itemCount,fileCount,latestJob}`；新增状态过滤与 **`keyword=%` → 0 命中**（Q16② LIKE 转义）断言 | PASS |
 | TC21 | 任务分页 | `GET /api/tasks?page=&size=` | page 0/1、size 5，无重叠且按 id DESC（Q16① 第二排序键） | PASS |
-| TC15 | AI 流式 + 工具 + 渐进披露 | `POST /api/ai/chat` + 后端 DEBUG 日志 | main-v2 **无 `/api/ai/tools` 端点**（披露在请求边界由 `ToolRegistry.forContext` 裁剪）→ 按 main-v2 自身取证口径断言日志行「上下文=\<ctx\> 披露工具=[…]」：`page:tasks` 12 个工具（含 `start_export`/`create_task`/`navigate_to`，**无 `start_publish`**）vs `task:IMPORT/PUBLISH`（含 `start_publish`，**无 `start_export`**）；帧断言 start/delta/tool_start(`list_config_defs`)/tool_result/done | PASS |
-| TC16 | AI 工具驱动工作区 | 确认门 + 前端工具通道 | main-v2 **无 `ui_event` 帧**：作业发起是 DANGER 工具（`confirm_request` 挂起 → `POST /api/ai/confirm` 放行后由服务层真实建作业）；工作区动作是 FRONTEND 通道工具（`frontend_tool_request` 挂起 → `POST /api/ai/frontend-tool-result` 回灌 → `GET /api/ai/events/{runId}?lastSeq=` 续读）；实测放行后真实产出导出文件，前端工具 `executed=false`（后端不直接执行） | PASS |
+| TC15 | AI 流式 + 工具 + 渐进披露 | `POST /api/ai/chat` + 后端 DEBUG 日志 | main **无 `/api/ai/tools` 端点**（披露在请求边界由 `ToolRegistry.forContext` 裁剪）→ 按 main 自身取证口径断言日志行「上下文=\<ctx\> 披露工具=[…]」：`page:tasks` 12 个工具（含 `start_export`/`create_task`/`navigate_to`，**无 `start_publish`**）vs `task:IMPORT/PUBLISH`（含 `start_publish`，**无 `start_export`**）；帧断言 start/delta/tool_start(`list_config_defs`)/tool_result/done | PASS |
+| TC16 | AI 工具驱动工作区 | 确认门 + 前端工具通道 | main **无 `ui_event` 帧**：作业发起是 DANGER 工具（`confirm_request` 挂起 → `POST /api/ai/confirm` 放行后由服务层真实建作业）；工作区动作是 FRONTEND 通道工具（`frontend_tool_request` 挂起 → `POST /api/ai/frontend-tool-result` 回灌 → `GET /api/ai/events/{runId}?lastSeq=` 续读）；实测放行后真实产出导出文件，前端工具 `executed=false`（后端不直接执行） | PASS |
 | TC17 | HITL：发布需确认 | 确认门 拒绝/确认 两路 | 拒绝 → 无 PUBLISH 作业、暂存仍 `STAGED`、生效行**版本零变化**；重复提交同一决策 → 409 `DUPLICATE_TOOL_CALL_ID`；确认 → PUBLISH `COMPLETED`、暂存行提升 `PUBLISHED`（源用 `confirm_tool` 帧 + `/api/ai/confirm{sessionId,approved}`） | PASS |
-| TC18 | 会话隔离 / 串行化 | `history`、`chat` 409、`cancel` | main-v2 **无 `/api/ai/sessions/count` 与 `/clear`** → 改写为：① 两会话记忆互不污染（按会话标识串验证）；② 同会话第二轮 → **409 `SESSION_BUSY` 且携进行中 runId + `reattach=/api/ai/events/{runId}`**（ADR-5/Q11）；③ `POST /api/ai/cancel/{runId}` 后同会话可再次发起 | PASS |
+| TC18 | 会话隔离 / 串行化 | `history`、`chat` 409、`cancel` | main **无 `/api/ai/sessions/count` 与 `/clear`** → 改写为：① 两会话记忆互不污染（按会话标识串验证）；② 同会话第二轮 → **409 `SESSION_BUSY` 且携进行中 runId + `reattach=/api/ai/events/{runId}`**（ADR-5/Q11）；③ `POST /api/ai/cancel/{runId}` 后同会话可再次发起 | PASS |
 | TC22 | 历史恢复 | `GET /api/ai/history/{sessionId}` | 响应为 `{sessionId,count,messages[{type,text,toolCalls?,toolResponses?}]}`（源为 `role/tools`）；断言 USER/ASSISTANT 计数 + 工具卡片（`toolCalls`）+ 未知会话 `count=0` | PASS |
 | TC19 | 清理与演示数据恢复 | `DELETE /api/definitions/{code}`、`DELETE /api/tasks/{id}` | 任务删除为**级联清理**（作业/条目/问题/暂存/文件）：删后任务 404 + 其作业 404；E2E_TEMP 删除后 404；CURRENCY 经"全量导出件 + REPLACE 发布"恢复 5 行（源为删 E2E_TEMP + 恢复 SERVER_PARAM） | PASS |
 
 **两轮结果：PASS=22 / FAIL=0（退出码 0），两轮均一致。**
 
-> 未移植的源断言（均因 main-v2 语义缺失，非脚本缺陷）：枚举选项越界、数值范围校验（main-v2 预检查无此两类规则）；
-> `publishedRowCount`/`published=false` 草稿计数（main-v2 数据行无 published 布尔位，草稿即 `config_staging_rows`）；
-> AI `ui_event`/`confirm_tool` 帧名与 `/api/ai/tools`、`/api/ai/sessions/count`、`/api/ai/clear` 端点（main-v2 无）。
+> 未移植的源断言（均因 main 语义缺失，非脚本缺陷）：枚举选项越界、数值范围校验（main 预检查无此两类规则）；
+> `publishedRowCount`/`published=false` 草稿计数（main 数据行无 published 布尔位，草稿即 `config_staging_rows`）；
+> AI `ui_event`/`confirm_tool` 帧名与 `/api/ai/tools`、`/api/ai/sessions/count`、`/api/ai/clear` 端点（main 无）。
 
 ## 3. Q8 四修复的适配说明与实测
 
-Q8 出处：`<MAIN_V2>/docs/evidence/核验衍生问题清单.md`（Q8 行）+ `<MAIN_V2>/docs/03-技术方案文档-v2.1.md` §12.4
+Q8 出处：`<REPO_ROOT>/docs/evidence/核验衍生问题清单.md`（Q8 行）+ `<REPO_ROOT>/docs/03-技术方案文档-v2.1.md` §12.4
 「移植期缺陷清单（Q8 逐条修复）」。
 
 | Q8 项 | 原始问题（V3 核验） | 移植时的适配与实测 | 结果 |
 |---|---|---|---|
-| ① | 未上传文件的导入批次写 issues 明细抛 `NoSuchFileException`（`ImportService.writeIssuesDetail` 未建目录），稳定 2 次 WARN | main-v2 的架构上**明细只落库**（`validation_issues` 表，经 `GET /api/jobs/{id}/issues` 读取），无"按文件写明细"的落点 → **缺陷不适用**。脚本把它变成可判定断言（TC10 + Q8 项回归）：日志无 `NoSuchFileException`/`明细写入失败`，且未上传文件批次的明细可经 REST 查得 | **通过**（日志 0 命中；明细可查） |
-| ② | `GlobalExceptionHandler` 对 SSE 请求二次写 JSON（`HttpMessageNotWritableException: No converter for R with preset Content-Type 'text/event-stream'`，日志噪音） | main-v2 只修了**一半**：`AiController#json()` 给"开流前"的错误分支显式指定 `application/json`（Q2/R4 场景已消除）；但**"向已断开客户端写帧"引发的异常仍会走 `GlobalExceptionHandler#handleGeneral` 并以 `ApiResponse` 二次写 JSON**。脚本将其单列为 Q8 项断言（不计入 22 用例），第 1 轮 **7 次**、第二轮累计 **14 次**（`No converter for xN` / `HttpMessageNotWritableException xN`，两处计数同源），触发栈：`AiController.confirm → ConfirmGate.submitDecision → SseChatEmitter.confirmDecision → emit → sendTo`（客户端已断开时写帧） | **未通过（残留）→ 见 §6【待裁决】1** |
-| ③ | 分支 docs 两处仍写"19 个测试组"与实际 22 矛盾 | main-v2 侧无该残留（本文与脚本口径统一为 22，映射表见 §2）；源分支按要求未回修 | **不适用**（口径已在本文与脚本中统一） |
+| ① | 未上传文件的导入批次写 issues 明细抛 `NoSuchFileException`（`ImportService.writeIssuesDetail` 未建目录），稳定 2 次 WARN | main 的架构上**明细只落库**（`validation_issues` 表，经 `GET /api/jobs/{id}/issues` 读取），无"按文件写明细"的落点 → **缺陷不适用**。脚本把它变成可判定断言（TC10 + Q8 项回归）：日志无 `NoSuchFileException`/`明细写入失败`，且未上传文件批次的明细可经 REST 查得 | **通过**（日志 0 命中；明细可查） |
+| ② | `GlobalExceptionHandler` 对 SSE 请求二次写 JSON（`HttpMessageNotWritableException: No converter for R with preset Content-Type 'text/event-stream'`，日志噪音） | main 只修了**一半**：`AiController#json()` 给"开流前"的错误分支显式指定 `application/json`（Q2/R4 场景已消除）；但**"向已断开客户端写帧"引发的异常仍会走 `GlobalExceptionHandler#handleGeneral` 并以 `ApiResponse` 二次写 JSON**。脚本将其单列为 Q8 项断言（不计入 22 用例），第 1 轮 **7 次**、第二轮累计 **14 次**（`No converter for xN` / `HttpMessageNotWritableException xN`，两处计数同源），触发栈：`AiController.confirm → ConfirmGate.submitDecision → SseChatEmitter.confirmDecision → emit → sendTo`（客户端已断开时写帧） | **未通过（残留）→ 见 §6【待裁决】1** |
+| ③ | 分支 docs 两处仍写"19 个测试组"与实际 22 矛盾 | main 侧无该残留（本文与脚本口径统一为 22，映射表见 §2）；源分支按要求未回修 | **不适用**（口径已在本文与脚本中统一） |
 | ④ | `verify-e2e.ps1:173` 的 `base=` 回显为空（PowerShell 把 `+` 之后当额外位置参数） | 移植脚本已修：`Say (" E2E 验证开始  base={0}  tmp={1}" -f $Base, $tmp)`，并额外回显`-BackendLog`路径。两轮输出首屏可见 `base=http://127.0.0.1:18330  tmp=<TMP>/s5b-e2e-…` | **通过**（回显非空） |
 
 Q8 项回归的输出形态（每轮末尾）：
@@ -251,7 +251,7 @@ POST /api/definitions  {"code":"CURRENCY", …}   → HTTP 500
 - 建议：改为 409 + 机器可读码（如 `DEFINITION_CODE_EXISTS` + 友好文案），与 `DefinitionService.delete` 的 409 口径一致。
   本棒未改生产代码，故保留现状待裁决。
 
-### 6.3 【待裁决】3：源 TC14 的"检查失败 → 禁止导入/发布"在 main-v2 无守卫
+### 6.3 【待裁决】3：源 TC14 的"检查失败 → 禁止导入/发布"在 main 无守卫
 
 - 实测：预检查失败（`PRECHECK` FAILED + 明细）后，同任务仍可 `IMPORT` 写暂存、可 `PUBLISH`（若暂存非空即会发布）。
 - `ImportFlowJobTest` 类注释已把该点登记为"实现里没有守卫，未移植（见证据文档【待裁决】）"。
@@ -260,9 +260,9 @@ POST /api/definitions  {"code":"CURRENCY", …}   → HTTP 500
 
 ### 6.4 【待裁决】4：上传文件名不再支持 `(1)` 序号后缀
 
-- 源脚本 TC8 断言 `SERVER_PARAM(1).xlsx` 可被识别为序号后缀；main-v2 `FileController#matchDefCode` 只认
+- 源脚本 TC8 断言 `SERVER_PARAM(1).xlsx` 可被识别为序号后缀；main `FileController#matchDefCode` 只认
   `编码` / `编码_…` / `编码-…`，`CURRENCY(1).xlsx` 被拒（400，提示"请使用'编码_xxx.xlsx'命名"）。
-- 本棒处置：按 main-v2 现状断言为"被拒绝且提示可读"。
+- 本棒处置：按 main 现状断言为"被拒绝且提示可读"。
 - 需裁定：是否为产品意图（浏览器重复下载产生的 `(1)` 后缀是否要给容错解析）。
 
 ### 6.5 【待裁决】5：REPLACE 模式下"空暂存集发布"返回 COMPLETED（0 行）
@@ -284,7 +284,7 @@ POST /api/definitions  {"code":"CURRENCY", …}   → HTTP 500
 
 ## 7. 本棒未做 / 遗留
 
-- 未改 `backend/src/main/**`、未改前端、未改 `docs/` 既有文件（仅新增本文与 `<MAIN_V2>/scripts/verify-e2e.ps1`）。
+- 未改 `backend/src/main/**`、未改前端、未改 `docs/` 既有文件（仅新增本文与 `<REPO_ROOT>/scripts/verify-e2e.ps1`）。
 - 未做任何 git 写操作（无 commit/push/add）。
 - 未移植源脚本中依赖 deepseek 专有语义的断言（枚举/数值校验、`published` 布尔位、`ui_event`/`confirm_tool` 帧名、
   `/api/ai/tools`、`/api/ai/sessions/count`、`/api/ai/clear`），理由逐条列在 §2 表下注。
@@ -295,8 +295,8 @@ POST /api/definitions  {"code":"CURRENCY", …}   → HTTP 500
 - 本棒启动的后端进程（`java -jar target/config-mgr.jar --server.port=18330`，PID 见 `<TMP>/boot6.log` 的 `INFO … [main]` 行）
   在验证结束后已 `taskkill /F` 停止；`netstat -ano | grep 18330` 无 LISTENING。
 - 未停止任何非本棒启动的进程；未占用 18080 / 18290–18299 / 18301–18321。
-- 独立 H2 库文件（`<MAIN_V2>/backend/data/e2e_s5b_db.mv.db`）与 `data/files/**` 均为运行产物，被 `.gitignore`（`*.mv.db`、`backend/data/`）覆盖；
-  工作区新增文件两个：`<MAIN_V2>/scripts/verify-e2e.ps1`、`<MAIN_V2>/docs/evidence/S5b-deepseek-E2E移植验证.md`（`git status --porcelain` 实测两条 `??`）。
+- 独立 H2 库文件（`<REPO_ROOT>/backend/data/e2e_s5b_db.mv.db`）与 `data/files/**` 均为运行产物，被 `.gitignore`（`*.mv.db`、`backend/data/`）覆盖；
+  工作区新增文件两个：`<REPO_ROOT>/scripts/verify-e2e.ps1`、`<REPO_ROOT>/docs/evidence/S5b-deepseek-E2E移植验证.md`（`git status --porcelain` 实测两条 `??`）。
 - 脱敏自查：本文与脚本内**无 key**（`sk-` / `AI_API_KEY=<值>` 均 0 命中）、**无本机绝对路径**（一律占位符）。
 
 ## 裁决结论（指挥官 K3，2026-10-07）

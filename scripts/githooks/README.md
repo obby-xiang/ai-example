@@ -34,7 +34,7 @@ git config --unset core.hooksPath      # 停用
 
 ## 3. 豁免（不会报的点）
 
-- **尖括号占位符**：`<REPO_ROOT>`、`<MAIN_V2>`、`<MAVEN_HOME>`、`<MEMURAI_HOME>`、`<WORKSPACE>`、`<USER_HOME>` 等，匹配前整段剔除，因此代码注释与文档里的占位符不会误报；
+- **尖括号占位符**：`<REPO_ROOT>`、`<MAVEN_HOME>`、`<MEMURAI_HOME>`、`<WORKSPACE>`、`<USER_HOME>` 等，匹配前整段剔除，因此代码注释与文档里的占位符不会误报；
 - **密钥占位**：命中片段含 `xxx` / `your` / `placeholder` / `REDACTED` / `example` / `dummy` / `sample` / `fake` / `change-me` / `...` 视为占位，不报；
 - **路径占位**：路径片段含 `xxx` / `placeholder` / `REDACTED` 或残留尖括号时不报；
 - **USER 规则自动跳过**：`user.name` 未设置，或为通用值（`root`/`admin`/`user`/`test`/`ci`/`git`/`runner`/`jenkins` 等）时跳过，并在输出中提示原因；

@@ -4,9 +4,9 @@ name: CI 门禁
 # E2E（scripts/verify-e2e.ps1，依赖 Memurai 与真实 AI key）不在本门禁内，属后续项。
 on:
   push:
-    branches: [main-v2]
+    branches: [main]
   pull_request:
-    branches: [main-v2]
+    branches: [main]
 
 # 门禁只读仓库内容，显式收窄 GITHUB_TOKEN 权限。
 permissions:

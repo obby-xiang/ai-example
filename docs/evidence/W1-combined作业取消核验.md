@@ -17,7 +17,7 @@
 
 | # | 自述/待验项 | 出处 |
 |---|------------|------|
-| S1 | ADR-8 逐机制证据标注把「取消注册表」列为**未实测**：SP-01d 测的是 spike 自建 CancellationRegistry，非 combined 实现 | `<MAIN_V2>/docs/adr/DECISION-CARDS.md:94-96` |
+| S1 | ADR-8 逐机制证据标注把「取消注册表」列为**未实测**：SP-01d 测的是 spike 自建 CancellationRegistry，非 combined 实现 | `<REPO_ROOT>/docs/adr/DECISION-CARDS.md:94-96` |
 | S2 | 源码自述：「作业取消标志注册表。作业执行器在循环批次之间检查标志，用户取消后尽早停止（**而非只改数据库状态**）」 | `backend/src/main/java/com/example/configmgr/job/service/JobCancellationRegistry.java:9-12` |
 
 待核验问题：取消 API 是否真正让**执行线程**停下来？停在哪个检查点？终态是什么？取消后已写入的部分数据是保留还是回滚？不取消的同类作业是否正常完成（特异性对照）？

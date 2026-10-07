@@ -1,7 +1,7 @@
 # V3 核验：deepseek-v4-pro「685 行 PowerShell E2E 脚本 22 用例全绿（含导出/导入ZIP/SSE进度/AI对话流式+工具+渐进披露+HITL确认）」
 
 - **被核验分支**：`ai-example-deepseek-v4-pro`（`git rev-parse --abbrev-ref HEAD` = `deepseek-v4-pro`，HEAD = `25639c59380b915b9f49917f77bc642d5a4a716b`）
-- **核验项定义出处**：`ai-example-main-v2/docs/merge/05-合流落地执行手册.md:121`
+- **核验项定义出处**：`<REPO_ROOT>/docs/merge/05-合流落地执行手册.md:121`
   `| V3 | deepseek-v4-pro：22 E2E 用例全绿 | 起服务跑 verify-e2e.ps1 | 记录真实通过数 |`
 - **核验日期**：2026-10-06
 - **核验方式**：把分支后端**真实启动**在 18291 端口（分支默认 18080 用环境变量覆盖），用**真实 DeepSeek 模型**跑完整 E2E 脚本 **2 轮**

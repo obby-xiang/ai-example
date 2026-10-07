@@ -1,11 +1,11 @@
 /**
  * 前端工具执行器（规格 §2「契约窄接口」/ §3 前端工具回灌）。
  *
- * **后端口径核对（本棒实测，勿凭蓝本臆造）**：main-v2 后端 `AiTools` 共 18 个 `@Tool`，
+ * **后端口径核对（本棒实测，勿凭蓝本臆造）**：main 后端 `AiTools` 共 18 个 `@Tool`，
  * 其中带 `@ToolChannel(FRONTEND)` 的**有 7 个**：`open_export_file_editor`、`download_export_file`、
  * `navigate_to`、`select_definitions`、`set_condition`、`confirm_step`、`generative_form`
  * （其余 11 个是 BACKEND 通道，由后端自己执行；`start_export/start_precheck/start_import/start_publish`
- * 在 main-v2 里都是 BACKEND，不再像旧基座那样挂起等前端）。所以：
+ * 在 main 里都是 BACKEND，不再像旧基座那样挂起等前端）。所以：
  * - 路由 1 覆盖 `FRONTEND_TOOLS` 登记的前端工具（2 个：`open_export_file_editor` / `download_export_file`），
  *   完整实现；
  * - 路由 2/3 是**补丁②**：把蓝本形态的工作区动作（`navigate_to` / `select_definitions` /
@@ -254,7 +254,7 @@ function delay(ms: number): Promise<void> {
  * 名字来源（**核对过后端口径**）：
  * - 裁决②点名的 4 个：`navigate_to` / `select_definitions` / `set_condition` / `confirm_step`；
  * - 蓝本 `frontend-tools.js:5-15` 的等价名（`select_config_defs` / `set_query_conditions`）
- *   与 main-v2 既有的 ui_event 名（`select_defs` / `set_conditions` / `goto_step` / `open_page`）
+ *   与 main 既有的 ui_event 名（`select_defs` / `set_conditions` / `goto_step` / `open_page`）
  *   作为**别名**一并登记，避免因命名差异漏路由。
  * 后端已披露 7 个 FRONTEND 工具，上述 4 个均在其中，故这些动作今天经「前端工具帧」或
  * 「契约层」触发；执行器与页面能力已就绪，后续工具接入时前端零改动。

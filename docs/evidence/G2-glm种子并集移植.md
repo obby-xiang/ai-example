@@ -1,7 +1,7 @@
-# G2 核验：glm-5.3 种子数据体系并集移植（main-v2 基座）
+# G2 核验：glm-5.3 种子数据体系并集移植（main 基座）
 
-- **被核验仓库**：`<MAIN_V2>`（main-v2 分支，基座=combined 快照）
-- **分支 / HEAD**：`main-v2` / `bc70a22`
+- **被核验仓库**：`<REPO_ROOT>`（分支 main，基座=combined 快照）
+- **分支 / HEAD**：`main` / `bc70a22`
 - **移植来源（只读）**：`<REPO_ROOT>/backend`（glm-5.3 分支，`<REPO_ROOT>` 即来源仓库根 `ai-example-glm-5.3`），种子类 `com/example/quickstart/service/SeedService.java`
 - **核验日期**：2026-10-07
 - **核验方式**：真实执行 — 备份并清空 `backend/data/` → Maven 打包 → `java -jar` 首跑（端口 18298）→ 只读 HTTP 接口实测（定义/数据/计数）→ **不删库原地重启**验幂等 → 关进程并确认端口释放
@@ -12,13 +12,13 @@
 
 ---
 
-## 一、模型映射说明（glm → main-v2）
+## 一、模型映射说明（glm → main）
 
 两套种子模型逐层对照如下。映射原则：**字段类型以基座模型为准；基座表达不了的列（无对应列）与类型（SCOPE）记录差异并降级表达，不改基座领域模型**。
 
 ### 1.1 定义模型
 
-| 维度 | glm（`entity/ConfigDef`） | main-v2（`definition/entity/ConfigDefinition`） | 映射结论 |
+| 维度 | glm（`entity/ConfigDef`） | main（`definition/entity/ConfigDefinition`） | 映射结论 |
 |---|---|---|---|
 | 主键 | `id`（自增） | `id`（自增） | 一致 |
 | 编码 | `code`（唯一，VARCHAR 64） | `code`（唯一，VARCHAR 64） | 一致，作为并集去重键 |
@@ -30,7 +30,7 @@
 
 ### 1.2 字段模型
 
-| 维度 | glm（`entity/ConfigField`） | main-v2 | 映射结论 |
+| 维度 | glm（`entity/ConfigField`） | main | 映射结论 |
 |---|---|---|---|
 | 归属 | `defId`（外键到定义 id） | `defCode`（外键到定义 code，`@OneToMany` 集合） | 语义等价（按 code 关联） |
 | 编码 / 名称 | `fieldCode` / `fieldName` | `code` / `label` | 重命名映射 |
@@ -60,7 +60,7 @@
 
 glm：`ALARM_THRESHOLD.dependsOn = [{"def":"METRIC_DICT","field":"metricCode","refField":"metricCode","label":"指标编码"}]`，字段本身仍是 `TEXT`，依赖只用于排序/提示。
 
-main-v2：等价表达是把该字段声明为 `REFERENCE` 并给出 `ref_def_code`/`ref_field_code`。基座两条既有链路都依赖这一点：
+main：等价表达是把该字段声明为 `REFERENCE` 并给出 `ref_def_code`/`ref_field_code`。基座两条既有链路都依赖这一点：
 - `DependencyResolver.sort()` 通过扫描 REFERENCE 字段推导定义间依赖（`definition/service/DependencyResolver.java:43`）；
 - `PrecheckJobRunner` 的引用完整性校验（值必须在被引用配置的已发布/暂存数据中存在，`job/service/PrecheckJobRunner.java:178-181`）。
 
@@ -74,7 +74,7 @@ main-v2：等价表达是把该字段声明为 `REFERENCE` 并给出 `ref_def_co
 **（2）范围：glm `__scope` 伪字段 / `ScopeDict` → 基座"范围载体字段 + scope_key 列"**
 
 - glm 的范围是**数据行自带的一个 SCOPE 类型字段**（`__scope`，且是业务键），区域/项目字典独立存在 `ScopeDict` 表；发布时按 `__scope` 分组。
-- main-v2 的范围是**行级列** `config_data_rows.scope_type/scope_key`，且导入链路从行的 `regionCode`（REGION 级）/`projectCode`（PROJECT 级）字段反推 scopeKey（`job/service/ImportJobRunner.java:109-110`）。基座既有 `TAX_RATE`（含 `regionCode` 字段+键）、`PROJ_*`（含 `projectCode` 字段+键）即此约定。
+- main 的范围是**行级列** `config_data_rows.scope_type/scope_key`，且导入链路从行的 `regionCode`（REGION 级）/`projectCode`（PROJECT 级）字段反推 scopeKey（`job/service/ImportJobRunner.java:109-110`）。基座既有 `TAX_RATE`（含 `regionCode` 字段+键）、`PROJ_*`（含 `projectCode` 字段+键）即此约定。
 
 因此：
 - `__scope` **不能沿用编码**：基座 `DefinitionService.validateFields` 要求字段编码匹配 `[A-Za-z][A-Za-z0-9_]*`（下划线开头被拒），`__scope` 直接落库会被校验拦下；
@@ -83,7 +83,7 @@ main-v2：等价表达是把该字段声明为 `REFERENCE` 并给出 `ref_def_co
 
 ### 1.5 数据模型
 
-| 维度 | glm（`entity/ConfigData`） | main-v2（`ConfigDataRow`） | 映射结论 |
+| 维度 | glm（`entity/ConfigData`） | main（`ConfigDataRow`） | 映射结论 |
 |---|---|---|---|
 | 归属 | `defId` | `defCode` | 按 code 关联 |
 | 范围 | 行内 `__scope` 字段 | `scope_type`（GLOBAL/REGION/PROJECT）+ `scope_key`（地区/项目码；GLOBAL 为 NULL） | 见 1.4(2) |
@@ -100,15 +100,15 @@ main-v2：等价表达是把该字段声明为 `REFERENCE` 并给出 `ref_def_co
 
 | 类型 | 路径 | 行数 | 职责 |
 |---|---|---|---|
-| 新增 | `<MAIN_V2>/backend/src/main/java/com/example/configmgr/seed/GlmSeedService.java` | 260 | glm 8 定义的完整声明（层级/字段/类型/必填/业务键/枚举/引用）、模型映射、范围数据生成与落库；幂等判据 `existsByCode` |
-| 新增 | `<MAIN_V2>/backend/src/main/java/com/example/configmgr/seed/GlmSeedRunner.java` | 32 | 触发点：`@EventListener(ApplicationReadyEvent.class)` |
+| 新增 | `<REPO_ROOT>/backend/src/main/java/com/example/configmgr/seed/GlmSeedService.java` | 260 | glm 8 定义的完整声明（层级/字段/类型/必填/业务键/枚举/引用）、模型映射、范围数据生成与落库；幂等判据 `existsByCode` |
+| 新增 | `<REPO_ROOT>/backend/src/main/java/com/example/configmgr/seed/GlmSeedRunner.java` | 32 | 触发点：`@EventListener(ApplicationReadyEvent.class)` |
 
 **未修改**：`seed/DataSeedRunner.java`（基座 7 定义播种逻辑与主数据播种**逐字节未动**）、`definition/entity/*`、`definition/service/*`、`data/service/ConfigDataService.java`、`masterdata/*`、Flyway 脚本、配置。
 
 仓库状态证据（只读命令）：
 
 ```
-$ cd <MAIN_V2> && git status --porcelain
+$ cd <REPO_ROOT> && git status --porcelain
 ?? backend/src/main/java/com/example/configmgr/seed/GlmSeedRunner.java
 ?? backend/src/main/java/com/example/configmgr/seed/GlmSeedService.java
 ?? "docs/adr/S3-Challenger重审报告.md"      # 本次之前已存在的他人在制品，与本次无关
@@ -169,7 +169,7 @@ $ cd <MAIN_V2> && git status --porcelain
 ### 4.1 环境与命令
 
 ```
-$ cd <MAIN_V2>/backend
+$ cd <REPO_ROOT>/backend
 $ cp -r data /tmp/g2-seed/data-backup        # 备份原库（1 个 mv.db，954368 字节）
 $ rm -rf data                                # 清库（首跑前提）
 $ export DEEPSEEK_API_KEY=***
@@ -256,7 +256,7 @@ PROJ_APPROVE (PROJECT, 6 字段): stepCode:STRING,key,req / stepName:STRING,req 
 PROJ_PRICE (PROJECT, 7 字段): skuCode:STRING,key,req / skuName:STRING,req / unitPrice:NUMBER,req / currencyCode:REFERENCE,req(ref=CURRENCY.code) / taxCode:STRING,req / unit:STRING,req / projectCode:STRING,key,req
 ```
 
-与 `docs/evidence/G1-main-v2基线构建验证.md` 记录的基座定义逐字段一致 ⇒ **既有 7 定义结构未被本次移植改动**。
+与 `docs/evidence/G1-main基线构建验证.md` 记录的基座定义逐字段一致 ⇒ **既有 7 定义结构未被本次移植改动**。
 
 ### 4.4 每定义数据行数（`GET /api/data/{defCode}/count`）
 
@@ -399,7 +399,7 @@ $ netstat -ano | grep -E ":18298\s+.*LISTENING"
 
 ## 六、观察项（非本次改动引入，记录备查）
 
-1. **基座 7 定义数据行实测为 1230 行**（5+5+4+16+0+0+1200），而 `G1-main-v2基线构建验证.md` 正文记为 **1246 行**（该文档自身的逐定义明细相加亦为 1230）。本次未改动基座数据，两个口径的差异属 G1 文档的合计笔误，建议在 G1 文档中更正为 1230／或"基座 7 定义 1230 + glm 8 定义 370 = 1600"。
+1. **基座 7 定义数据行实测为 1230 行**（5+5+4+16+0+0+1200），而 `G1-main基线构建验证.md` 正文记为 **1246 行**（该文档自身的逐定义明细相加亦为 1230）。本次未改动基座数据，两个口径的差异属 G1 文档的合计笔误，建议在 G1 文档中更正为 1230／或"基座 7 定义 1230 + glm 8 定义 370 = 1600"。
 2. **范围数据需带 `scopeKey` 查询**：`GET /api/data/{defCode}` 不带 `scopeKey` 时只返回 `scope_key IS NULL` 的行，故 REGION/PROJECT 级定义（含基座 `TAX_RATE`、`PROJ_PRICE`）不带范围参数会返回 0 行；`/count` 接口用的是 `(:scopeKey IS NULL OR ...)`，故计数是全范围的。这是基座既有行为，本次未改动，但会影响 S4.3/前端核对时的取数方式（须逐范围取）。
 3. `backend/data/`（H2 运行产物）仍受 `.gitignore` 覆盖，首跑重建后当前库内含 15 定义 + 1600 行，即"并集移植后"的状态；原库备份在 `/tmp/g2-seed/data-backup`（若要回到移植前状态可直接回拷该文件，但会丢失 glm 8 定义的数据）。
 

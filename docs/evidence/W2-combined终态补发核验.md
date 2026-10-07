@@ -16,7 +16,7 @@
 
 | # | 待验项 | 出处 |
 |---|--------|------|
-| S1 | ADR-8 逐机制证据标注：「**终态补发（V1~V9 零覆盖）**」 | `<MAIN_V2>/docs/adr/DECISION-CARDS.md:94-96` |
+| S1 | ADR-8 逐机制证据标注：「**终态补发（V1~V9 零覆盖）**」 | `<REPO_ROOT>/docs/adr/DECISION-CARDS.md:94-96` |
 | S2 | 分支自述的进度通道：「作业偶发…进度推送：SSE（任务级别）；**前端作业进度当前用 1.5s 轮询 `GET /api/jobs/{id}`**（与 SSE 并存）」 | 该分支 `docs/technical-design.md:184`、`docs/implementation-plan.md:182` |
 
 核验问题：进度事件走 SSE 还是轮询？作业终态后结果/进度还能否查询？"终态补发"具体指什么（事件回放？终态快照接口？）？晚订阅方（订阅发生在作业完成之后）能否拿到完整终态，还是会 hang 住或拿到空？

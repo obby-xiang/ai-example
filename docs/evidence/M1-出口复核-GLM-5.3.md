@@ -2,10 +2,10 @@
 
 > **角色**：独立复核员（Verifier，GLM-5.3；作者链条为 Kimi/DeepSeek 系，本复核为异厂商交叉验证）。
 > **职责**：不信任任何既有结论，独立复现 M1 出口标准每一项。
-> **复核基线**：`<MAIN_V2>`，分支 `main-v2`，HEAD `61286e2`。
+> **复核基线**：`<REPO_ROOT>`，分支 `main`，HEAD `61286e2`。
 > **复核日期**：2026-10-07。
 > **纪律**：零 git 写操作（无 add/commit/push，未触发 pre-commit hook）；本报告为唯一新增文件，保持未提交；未修改任何产品代码/脚本/既有文档；只启动并停止了本复核自己的后端进程（端口 18330）。
-> **脱敏**：API key 一律 `***`；本机位置一律占位符（`<MAIN_V2>` / `<MAVEN_HOME>` / `<MEMURAI_HOME>` / `<TMP>` / `<REPO_ROOT>`）；无真实用户名/主机名/内网 IP。
+> **脱敏**：API key 一律 `***`；本机位置一律占位符（`<REPO_ROOT>` / `<MAVEN_HOME>` / `<MEMURAI_HOME>` / `<TMP>`）；无真实用户名/主机名/内网 IP。
 > **证据标注**：关键断言逐条标【实测】（本复核亲自运行并读到输出）/【推断】（基于仓库内证据文档静态复核，含降级原因）/【假设】（无法验证的先行条件）。
 
 ---
@@ -14,7 +14,7 @@
 
 | # | 标准项 | 预期 | 实测 | 证据（命令与输出摘录见 §二） | 判定 |
 |---|---|---|---|---|---|
-| 1 | git 基线 | HEAD=61286e2、工作区干净、与 origin/main-v2 同步 | 三者全部成立【实测】 | §2.1 | **通过** |
+| 1 | git 基线 | HEAD=61286e2、工作区干净、与 origin/main 同步 | 三者全部成立【实测】 | §2.1 | **通过** |
 | 2 | 后端单测全绿 | 246 个 @Test 全绿 | 静态精确计数 246（38 文件）；`mvn test`：`Tests run: 246, Failures: 0, Errors: 0, Skipped: 0`，BUILD SUCCESS【实测】 | §2.2 | **通过** |
 | 3 | 前端质量门 | typecheck 与 build 全绿（以 package.json 实际脚本名为准） | 脚本名实测为 `typecheck`/`build`（vue-tsc + build.mjs）；两命令均退出码 0【实测】 | §2.3 | **通过** |
 | 4 | E2E 全绿 | 27 用例全绿（22 既有 + GF1–GF5）、Q8 项 2/2、GFSKIP=0 | 本机因 **AI key 未注入**无法全量复跑；采取"无 key 复核轮 + GFc 证据静态复核"混合策略：非 AI 用例 17/17 PASS、Q8 2/2【实测】；AI 相关 10 用例（TC15–18/22、GF1–GF5）静态复核 GFc 最终轮 `PASS=27 FAIL=0 GFSKIP=0`、五轮复跑后三轮连续全绿【推断】 | §2.4 | **通过（降级【推断】，附阻塞说明）** |
@@ -29,13 +29,13 @@
 ### 2.1 项 1：git 基线【实测】
 
 ```
-git -C <MAIN_V2> log --oneline -3
+git -C <REPO_ROOT> log --oneline -3
 61286e2 docs(evidence): GF-C 端到端执行验证——27/27 全绿，含首轮假阴性根因与五轮复跑稳定性
 faff6fe docs(evidence): GF-C 脚本红队审查（DS-V4-Pro）——11 问题打回与修复闭环
 bbc51f5 docs(evidence): GF-C E2E 用例设计（GLM-5.3）——含六条设计裁决留痕
 
-git -C <MAIN_V2> status --short --branch
-## main-v2...origin/main-v2
+git -C <REPO_ROOT> status --short --branch
+## main...origin/main
 ```
 
 - HEAD=`61286e2` ✓；status 无任何已跟踪文件改动、无 ahead/behind 标记 → 与 origin 同步 ✓；复核开始时工作区干净 ✓。
@@ -46,14 +46,14 @@ git -C <MAIN_V2> status --short --branch
 **静态精确计数**（任务指定口径，正则 `^\s*@Test(\s*$|\(`，排除 `@TestPropertySource` 等虚增）：
 
 ```
-Grep pattern='^\s*@Test(\s*$|\(' path=<MAIN_V2>/backend glob='*.java'
+Grep pattern='^\s*@Test(\s*$|\(' path=<REPO_ROOT>/backend glob='*.java'
 → Found 246 total occurrences across 38 files
 ```
 
 **实际运行**（Maven 用 `<MAVEN_HOME>` 下 mvn.cmd，即 IntelliJ 内嵌 maven3）：
 
 ```
-cd <MAIN_V2>/backend && "<MAVEN_HOME>/bin/mvn.cmd" test
+cd <REPO_ROOT>/backend && "<MAVEN_HOME>/bin/mvn.cmd" test
 [INFO] Tests run: 246, Failures: 0, Errors: 0, Skipped: 0
 [INFO] BUILD SUCCESS
 [INFO] Total time:  45.088 s
@@ -67,8 +67,8 @@ cd <MAIN_V2>/backend && "<MAVEN_HOME>/bin/mvn.cmd" test
 先核实 `frontend/package.json` 实际脚本名：`typecheck` = `vue-tsc --noEmit`；`build` = `vue-tsc --noEmit && node scripts/build.mjs`。
 
 ```
-cd <MAIN_V2>/frontend && yarn typecheck   → Done in 5.01s.   退出码 0
-cd <MAIN_V2>/frontend && yarn build       → ✓ built in 32.41s  退出码 0
+cd <REPO_ROOT>/frontend && yarn typecheck   → Done in 5.01s.   退出码 0
+cd <REPO_ROOT>/frontend && yarn build       → ✓ built in 32.41s  退出码 0
 ```
 
 - build 产物清单正常输出（element/spreadjs 独立 chunk，spreadjs 6,198.64 kB / gzip 1,783.03 kB 为最大 chunk，属 SpreadJS 17.1.5 固有体量）。
@@ -114,7 +114,7 @@ GFSKIP=1  Q8 项：PASS=2  FAIL=0     退出码 1
 
 | 层 | 对照证据 | 对照项数 | 一致项 | 备注 |
 |---|---|---|---|---|
-| S4.1 后端骨架/数据层 | `G1-main-v2基线构建验证.md`（V9 Flyway 基线在 main-v2 复现"完全一致的日志语义"） | 1 | 1 | 【推断：引 G1 原文；G1 为指挥官链证据】 |
+| S4.1 后端骨架/数据层 | `G1-main基线构建验证.md`（V9 Flyway 基线在 main 复现"完全一致的日志语义"） | 1 | 1 | 【推断：引 G1 原文；G1 为指挥官链证据】 |
 | S4.2 AI Runtime | 该层为 `ai/` 整包替换，对照物是 SP-01/SP-02 spike 实测（46/46）而非 baseline B4；S42-P1/P2/P3 以 V1–V8、SM-01~08 全部"通过"呈现 | —（无 B 系列形态对照项） | — | 架构性替换，见保留意见 |
 | S4.3 业务机制（发布核心） | `S43a-发布模块重写验证.md` C1–C6：C1 基线 B2 重放【一致】、C2 V2 双范围【一致 + Q14 有意差异】、C3 V5 冲突【一致】、C4/C5/C6 新场景【通过】 | 6 | 6 | S4.3 规格自设"不一致率 0（不放 5% 容差）"【实测：引 S43a 原文逐项核对】 |
 | S4.4 前端 | `S44a-前端基座验证.md` DTO/契约核对 8 组全部"✔ 一致"；`S44b-五页视图验证.md` 视觉逐元素对照以"一致"判定（1 项功能差异记录在案：本棒增分页/过滤，蓝本无） | 8+（视觉页组） | 8+ | 【实测：引 S44a 表格逐行核对】 |
@@ -127,14 +127,14 @@ GFSKIP=1  Q8 项：PASS=2  FAIL=0     退出码 1
 2. **C1 发布前后行数 vs 基线 B2.13/B2.19**【实测】：CURRENCY 5→7、DOC_TYPE 5→6、APPROVE_ROLE 4→5、PROJ_APPROVE 0→3，暂存 12 行（11 PUBLISHED + 1 FAILED）——与基线 B2.13/B2.15/B2.18/B2.19 完全一致。
 3. **C3 冲突文案格式 vs V5 声明 S1**【实测】：S43a 的 `发布冲突：行 HE|100 在导入后被其他操作修改（快照版本 1，当前版本 3），请重新导入后再发布` 与 V5 引用的源分支文案格式逐字同构（数值差 1→3 vs 1→2 属"内容确有变化 vs 零变化"场景差，S43a §4-② 已记录成因：Excel 往返字符串化致 `@Version` 与 `OPTIMISTIC_FORCE_INCREMENT` 各计一次）。
 
-**判定**：≥95% 断言**成立**——但附两条口径保留（详见 §四-2）：① baseline-combined 主表 50 项的"main-v2 重放结果/一致性"两列全部停留"待重放"未回填，全仓库不存在一张"对照项总数/一致项数/百分比"的汇总总账，本报告的 16 项分母是复核员自行从各层证据文档点数重建的口径；② S4.2 层的对照物是 spike 实测而非 B4 基线（AI Runtime 整包替换所致，B4 的旧协议帧形态被有意替换）。
+**判定**：≥95% 断言**成立**——但附两条口径保留（详见 §四-2）：① baseline-combined 主表 50 项的"main 重放结果/一致性"两列全部停留"待重放"未回填，全仓库不存在一张"对照项总数/一致项数/百分比"的汇总总账，本报告的 16 项分母是复核员自行从各层证据文档点数重建的口径；② S4.2 层的对照物是 spike 实测而非 B4 基线（AI Runtime 整包替换所致，B4 的旧协议帧形态被有意替换）。
 
 ### 2.6 项 6：决策登记表"待确认"清零【实测】
 
 ```
-grep -nE '待确认|待裁决|待定|未确认|TBD|待签字|待评审' <MAIN_V2>/docs/adr/DECISION-REGISTER.md
+grep -nE '待确认|待裁决|待定|未确认|TBD|待签字|待评审' <REPO_ROOT>/docs/adr/DECISION-REGISTER.md
 → 0 命中（19 行全表，DC-01～DC-15）
-grep -nE '同上' <MAIN_V2>/docs/adr/DECISION-CARDS.md
+grep -nE '同上' <REPO_ROOT>/docs/adr/DECISION-CARDS.md
 → 1 命中（第 176 行）："P3 补登待裁决+扇出 PoC 归 M2 激活包"
 ```
 
@@ -146,7 +146,7 @@ grep -nE '同上' <MAIN_V2>/docs/adr/DECISION-CARDS.md
 ### 2.7 项 7：CI 状态【实测】
 
 ```
-curl -s "https://api.github.com/repos/<GITHUB_REPO>/actions/runs?branch=main-v2&per_page=6"
+curl -s "https://api.github.com/repos/<GITHUB_REPO>/actions/runs?branch=main&per_page=6"
 （<GITHUB_REPO> 为任务书给定的仓库标识；匿名轮询，未携带凭据；run 编号/head_sha/conclusion 摘录如下）
 → total_count: 25
   29  61286e2  completed  success  push  2026-10-07T12:06:45Z
@@ -187,7 +187,7 @@ curl -s "https://api.github.com/repos/<GITHUB_REPO>/actions/runs?branch=main-v2&
 | # | 项 | 性质 | 说明与建议 |
 |---|---|---|---|
 | 1 | E2E 27/27 未能在本复核环境全量实测 | **环境阻塞**（非产品缺陷） | AI key（`AI_API_KEY`/`DEEPSEEK_API_KEY`）在本复核会话与系统三级环境均未注入【实测】。AI 相关 10 用例结论降级【推断】（依据 GFc 五轮复跑证据，其中后三轮连续全绿）。若评审要求异厂商实测闭环，需业务方注入密钥后由复核方重跑一轮（约 90–120 秒）。 |
-| 2 | baseline 主表 50 项重放列未回填、无一致率汇总总账 | **口径缺口**（不影响逐层证据成立） | `baseline-combined.md` 主表 B1.1–B4.9 共 50 行的"main-v2 重放结果/一致性"两列全部停留"待重放"；实际重放对照散落在 S43a/G1/S44a 等层证据文档中。本报告以自建口径（16 项、16/16 一致）独立重算后 ≥95% 成立，但仓库内缺一张可机械复核的"总数/一致数/百分比"汇总表。建议 M2 初补一张总账表或在 baseline 文档头部加"重放结果见各层证据"的指针说明。 |
+| 2 | baseline 主表 50 项重放列未回填、无一致率汇总总账 | **口径缺口**（不影响逐层证据成立） | `baseline-combined.md` 主表 B1.1–B4.9 共 50 行的"main 重放结果/一致性"两列全部停留"待重放"；实际重放对照散落在 S43a/G1/S44a 等层证据文档中。本报告以自建口径（16 项、16/16 一致）独立重算后 ≥95% 成立，但仓库内缺一张可机械复核的"总数/一致数/百分比"汇总表。建议 M2 初补一张总账表或在 baseline 文档头部加"重放结果见各层证据"的指针说明。 |
 | 3 | §13.2 排期锚过期（#3/#4/#5/#6/#8/#10/#12） | 流程观察 | 建议裁定时点所锚的 S4.2/S4.3/S4.4 阶段均已完成而事项未裁决（详见 §三-②）。建议评审现场逐项重新锚定到 M2。 |
 | 4 | 复核期间工作区出现新增未跟踪文件 | 如实记录（非本复核产生） | `docs/M1-出口评审材料.md` 在复核进行期间由指挥官侧并行新增（其内容引用本报告并标注"结论待填"）。已跟踪文件与 HEAD 零变化，git 基线判定不受影响。 |
 | 5 | GFSKIP 语义边界 | 轻微观察 | 本复核无 key 轮中 GF5 因前置失败记 SKIP（`GFSKIP=1`），退出码仍为 1（9 个 FAIL 驱动）——脚本"GF1–GF4 全 SKIP 才整棒 FAIL"的硬底线与本现象无冲突，仅记录 SKIP 计数包含"前置缺失"型，与"模型未触发"型混计，不影响正式口径（正式轮 GFSKIP=0）。 |

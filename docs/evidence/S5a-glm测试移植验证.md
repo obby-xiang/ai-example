@@ -1,7 +1,7 @@
-# S5.a 核验：glm-5.3 分支 JUnit 测试移植扩充（main-v2 基座）
+# S5.a 核验：glm-5.3 分支 JUnit 测试移植扩充（main 基座）
 
-- **施工目标（主仓库）**：`<MAIN_V2>`（= `ai-example-code/ai-example-main-v2`，分支 `main-v2`，后端在 `backend/`）
-- **分支 / HEAD**：`main-v2` / `e247bc3`（施工前 HEAD，无 git 写操作）
+- **施工目标（主仓库）**：`<REPO_ROOT>`（分支 `main`，后端在 `backend/`）
+- **分支 / HEAD**：`main` / `e247bc3`（施工前 HEAD，无 git 写操作）
 - **移植来源（只读参照，全程未修改）**：`<REPO_ROOT>/ai-example-glm-5.3/backend/src/test/`（`<REPO_ROOT>` = 工作区根 `ai-example-code`）
 - **核验日期**：2026-10-07
 - **核验方式**：真实执行 —— Maven 全量跑基线 → 增量跑移植类 → Maven 全量回归（+ 复跑一次验稳定性）
@@ -31,7 +31,7 @@
 | `ai/AiToolsTest.java` | 8 | AI 工具直调（工具行为、步骤守卫、渐进披露、联动事件） |
 | **合计** | **38** | |
 
-### 1.2 基线：main-v2 现有测试清单（15 个类 / 74 个 `@Test`，实测全绿）
+### 1.2 基线：main 现有测试清单（15 个类 / 74 个 `@Test`，实测全绿）
 
 | 测试类 | 被测面 | 用例数 |
 |---|---|---|
@@ -59,7 +59,7 @@
 ### 1.3 基线全绿证据（施工前先跑）
 
 ```
-cd <MAIN_V2>/backend
+cd <REPO_ROOT>/backend
 <MAVEN_HOME>/mvn.cmd -B -q test          # EXIT=0
 # Surefire 汇总（逐类相加）
 Tests run: 74, Failures: 0, Errors: 0, Skipped: 0
@@ -67,7 +67,7 @@ Tests run: 74, Failures: 0, Errors: 0, Skipped: 0
 
 ### 1.4 被测实现对照（决定"哪些能移植"）
 
-| 关注点 | glm-5.3 | main-v2 | 移植可行性 |
+| 关注点 | glm-5.3 | main | 移植可行性 |
 |---|---|---|---|
 | 任务模型 | `Task` + 参数包 `params`（会话/步骤自定义） | `Task`（type/currentStep/status）+ `TaskItem`（每个配置项一条） | 部分（语义近，载体不同） |
 | 查询条件 | `ConditionDTO.Condition(field, op, value/values)`，含 `BETWEEN`、`__scope` 伪字段 | `QueryCondition(scopeKeys, fields[fieldCode/operator/value])`，`ConditionEvaluator` 求值 | 部分（操作符集合不同） |
@@ -82,7 +82,7 @@ Tests run: 74, Failures: 0, Errors: 0, Skipped: 0
 
 ## 二、移植清单（源 → 目标 → 用例数）
 
-| # | 源（glm-5.3） | 目标（main-v2，新增文件） | 源用例 | 移植 | 跳过 |
+| # | 源（glm-5.3） | 目标（main，新增文件） | 源用例 | 移植 | 跳过 |
 |---|---|---|---|---|---|
 | 1 | `service/ConfigDataServiceTest`（11） | `backend/src/test/java/com/example/configmgr/data/service/PublishedQueryConditionTest.java` | 11 | 9 | 2 |
 | 2 | `service/CatalogServiceTest`（5） | `backend/src/test/java/com/example/configmgr/definition/service/GlmSeedCatalogTest.java` | 5 | 4 | 1 |
@@ -91,7 +91,7 @@ Tests run: 74, Failures: 0, Errors: 0, Skipped: 0
 | 5 | `ai/AiToolsTest`（8） | `backend/src/test/java/com/example/configmgr/ai/tools/AiToolsInvocationTest.java` | 8 | 6 | 2 |
 | | **合计** | **5 个新测试类** | **38** | **31** | **7** |
 
-（`BaseIntegrationTest` 是测试基类、无用例；main-v2 不用抽象基类，各测试类自带 `@SpringBootTest` + 独立内存库 `@TestPropertySource`，与既有 15 个类同风格。）
+（`BaseIntegrationTest` 是测试基类、无用例；main 不用抽象基类，各测试类自带 `@SpringBootTest` + 独立内存库 `@TestPropertySource`，与既有 15 个类同风格。）
 
 ### 2.1 逐用例映射
 
@@ -124,7 +124,7 @@ Tests run: 74, Failures: 0, Errors: 0, Skipped: 0
 
 | glm 用例 | 目标用例 | 改写要点 |
 |---|---|---|
-| `createAndSelect` | `createAndSelectDefsPersistsItemsAndConditionNeedsSelection` | `assertSelection` 无对应物 → 用 main-v2 真实守卫"条件只对已勾选配置项有效"（`ResourceNotFoundException`）+ `TaskItem` 落库/`READY` |
+| `createAndSelect` | `createAndSelectDefsPersistsItemsAndConditionNeedsSelection` | `assertSelection` 无对应物 → 用 main 真实守卫"条件只对已勾选配置项有效"（`ResourceNotFoundException`）+ `TaskItem` 落库/`READY` |
 | `runExportWithConditions` | `exportJobFiltersRowsByConditionAndWritesFiles` | 结果面从 `params.exportResult` 改为 `task_files(EXPORT)` + **用生产 `ExcelReader` 回读 xlsx** 校验内容；行数 11 / 105 / 8 |
 | `terminalTaskRejectsFurtherOps` | `completedTaskRejectsJobCancel` | 平等守卫改为终态作业取消 → `ConflictException` 码 `JOB_ALREADY_FINAL` |
 | `exportTwiceRejectedWhileRunning` | — | **未移植**（见 §5 待裁决 2） |
@@ -134,13 +134,13 @@ Tests run: 74, Failures: 0, Errors: 0, Skipped: 0
 | glm 用例 | 目标用例 | 改写要点 |
 |---|---|---|
 | `createAndPrepare` | `createAndPrepareUploads` | `params.uploads`（内存行）→ 真写 xlsx + 真落 `task_files(UPLOAD)`（生产 `ExcelWriter`） |
-| `checkDetectsAllRuleTypes` | `checkDetectsAllRuleTypes` | 三类规则改为 main-v2 实际有的：**必填缺失 / 引用不存在 / 主键重复**（原"非法枚举""非法范围"无实现） |
+| `checkDetectsAllRuleTypes` | `checkDetectsAllRuleTypes` | 三类规则改为 main 实际有的：**必填缺失 / 引用不存在 / 主键重复**（原"非法枚举""非法范围"无实现） |
 | `fixDataThenCheckPass` | `fixDataThenCheckPass` | 重写上传件 → 新 PRECHECK 作业 → `COMPLETED`/0 错误/无 issue |
 | `importStagesDataWithoutTouchingPublished` | `importStagesDataWithoutTouchingPublished` | 暂存行 `STAGED` 且已发布行数不变 |
 | `publishReplacesPublishedData` | `publishUpsertsKeepsRowIdsAndDeletesOutOfRangeRows` | **核心语义改写，见 §3.1** |
 | `dependentsImportedAfterDependency` | `dependentsImportedAfterDependency` | `ImportRunner.topoOrder` → `DependencyResolver.sort`（METRIC_DICT 先于 ALARM_THRESHOLD、ROLE_DICT 先于 PROJECT_MEMBER） |
 | `duplicateKeyDetected` | `duplicateKeyDetected` | 文案 `业务键重复` → `主键重复` |
-| `emptyUploadProducesWarning` | `emptyUploadProducesNoError` | main-v2 预检查**无警告语义** → 只保留"空文件不报错"（见 §4） |
+| `emptyUploadProducesWarning` | `emptyUploadProducesNoError` | main 预检查**无警告语义** → 只保留"空文件不报错"（见 §4） |
 | `missingRequiredFieldDetected` | `missingRequiredFieldDetected` | 文案 `必填字段为空` → `必填字段 [参数值] 不能为空` |
 | `importRejectedWhileCheckHasError` | — | **未移植**（见 §5 待裁决 1，疑似生产缺口） |
 
@@ -164,9 +164,9 @@ Tests run: 74, Failures: 0, Errors: 0, Skipped: 0
 
 glm 的 `publishReplacesPublishedData` 断言的是"**范围内全量替换**"（例如"发布后 SYS_PARAM 行数 = 3"），
 其实现是"删掉覆盖范围内的旧行 → 插入导入行"，**行身份（id）不延续**。
-main-v2 已定案（ADR-7 / Q14 / DC-06 / DC-11，S4.3 实施）为 **行级 upsert + 范围差集删除**，故该用例按下表重写：
+main 已定案（ADR-7 / Q14 / DC-06 / DC-11，S4.3 实施）为 **行级 upsert + 范围差集删除**，故该用例按下表重写：
 
-| 断言维度 | glm 原语义（删建） | main-v2 新语义（本棒断言） |
+| 断言维度 | glm 原语义（删建） | main 新语义（本棒断言） |
 |---|---|---|
 | 覆盖到的业务键行 | 旧行被删、新行 id 变更 | **保留行 id**、`version` **递增**、字段值就地更新 |
 | 覆盖范围内未导入的旧行 | 一并删除（整段替换） | **差集删除**（业务键未出现即删） |
@@ -181,7 +181,7 @@ HB/HS/XN 的 3 行**id 与内容零变化**；暂存行全部 `PUBLISHED`；任�
 
 ### 3.2 其他断言改写一览
 
-| glm 原断言 | main-v2 实际语义 | 本棒做法 |
+| glm 原断言 | main 实际语义 | 本棒做法 |
 |---|---|---|
 | `BETWEEN 2 3`（数字区间） | 无 `BETWEEN` 操作符 | 拆成 `GTE 2` + `LTE 3` 两条（AND），断言区间内全行匹配 |
 | `__scope = "REGION_NORTH"`（伪字段） | 行内字段 `regionCode`/`projectCode` + `scopeKeys` | `scopeKeys=["HB"]`，断言 `regionCode` 全为 HB |
@@ -198,14 +198,14 @@ HB/HS/XN 的 3 行**id 与内容零变化**；暂存行全部 `PUBLISHED`；任�
 
 | # | 源用例 | 所属 | 不移植原因 |
 |---|---|---|---|
-| 1 | `invalidOperatorRejected` | `ConfigDataServiceTest` | main-v2 `ConditionEvaluator` 对**未知操作符**走 `default → true`（静默放行），没有"拒绝并抛 `BizException`"的语义；无等价实现（并见 §5 待裁决 3） |
+| 1 | `invalidOperatorRejected` | `ConfigDataServiceTest` | main `ConditionEvaluator` 对**未知操作符**走 `default → true`（静默放行），没有"拒绝并抛 `BizException`"的语义；无等价实现（并见 §5 待裁决 3） |
 | 2 | `invalidFieldRejected` | `ConfigDataServiceTest` | 同上：未知字段不抛错，而是逐操作符求得"不匹配/放行"；无等价实现 |
-| 3 | `stepGuardsRejectWrongStep` | `CatalogServiceTest` | main-v2 **后端无步骤守卫**（`TaskService#goToStep` 接受任意步骤；步骤引导在前端动作表与 AI 上下文里） |
-| 4 | `exportTwiceRejectedWhileRunning` | `ExportFlowTest` | main-v2 无"同任务/同类型作业互斥"守卫：第二次导出会照常起作业并复用同一个 `task_files(task,def,EXPORT)` 行；见 §5 待裁决 2 |
-| 5 | `importRejectedWhileCheckHasError` | `ImportFlowTest` | main-v2 `ImportJobRunner` **不检查预检查结果**（预检查的错误只落 issue 与条目状态，不阻断导入）；见 §5 待裁决 1 |
-| 6 | `selectionMovesToNextStep` | `AiToolsTest` | 该用例依赖 `set_selected_configs`（后端工具）与"选择即推进步骤"；main-v2 的选择动作是**前端通道哨兵桩**（`select_definitions` 返回 `FRONTEND_STUB`）且选配置**不推进步骤** |
+| 3 | `stepGuardsRejectWrongStep` | `CatalogServiceTest` | main **后端无步骤守卫**（`TaskService#goToStep` 接受任意步骤；步骤引导在前端动作表与 AI 上下文里） |
+| 4 | `exportTwiceRejectedWhileRunning` | `ExportFlowTest` | main 无"同任务/同类型作业互斥"守卫：第二次导出会照常起作业并复用同一个 `task_files(task,def,EXPORT)` 行；见 §5 待裁决 2 |
+| 5 | `importRejectedWhileCheckHasError` | `ImportFlowTest` | main `ImportJobRunner` **不检查预检查结果**（预检查的错误只落 issue 与条目状态，不阻断导入）；见 §5 待裁决 1 |
+| 6 | `selectionMovesToNextStep` | `AiToolsTest` | 该用例依赖 `set_selected_configs`（后端工具）与"选择即推进步骤"；main 的选择动作是**前端通道哨兵桩**（`select_definitions` 返回 `FRONTEND_STUB`）且选配置**不推进步骤** |
 | 7 | `stepGuardBlocksPublishBeforeImport` | `AiToolsTest` | 同 #3：`start_publish` 只校验任务/作业类型，无"必须在 IMPORT 步"的守卫 |
-| 补充 | `emptyUploadProducesWarning` 的**警告**断言部分 | `ImportFlowTest` | main-v2 `PrecheckJobRunner` 从不产出 `WARNING` 级 issue（`warningCount` 恒 0），"空文件应产生 ≥1 警告"无对应实现；用例已按"空文件不报错"移植（`emptyUploadProducesNoError`） |
+| 补充 | `emptyUploadProducesWarning` 的**警告**断言部分 | `ImportFlowTest` | main `PrecheckJobRunner` 从不产出 `WARNING` 级 issue（`warningCount` 恒 0），"空文件应产生 ≥1 警告"无对应实现；用例已按"空文件不报错"移植（`emptyUploadProducesNoError`） |
 
 ---
 
@@ -213,19 +213,19 @@ HB/HS/XN 的 3 行**id 与内容零变化**；暂存行全部 `PUBLISHED`；任�
 
 1. **导入缺少"预检查未通过则不得导入/发布"的前置守卫**
    - glm 断言：`ImportRunner.runImport` 在检查有错时抛 `BizException("校验未通过")`。
-   - main-v2 实际：`ImportJobRunner`/`PublishJobRunner` 均不读 `validation_issues`，预检查失败后仍可 `start_import`/`start_publish`（只有 `PublishJobRunner` 之外的数据完整性错误才会阻断）。
+   - main 实际：`ImportJobRunner`/`PublishJobRunner` 均不读 `validation_issues`，预检查失败后仍可 `start_import`/`start_publish`（只有 `PublishJobRunner` 之外的数据完整性错误才会阻断）。
    - 候选改法：① 在 `ImportJobRunner`/`JobService#createAndStart` 入口校验"该任务最近一次 PRECHECK 作业 errorCount==0"，否则 409/400；② 明确"预检查只是提示，不阻断"，把该行为写进需求文档并在前端给强提示。
 2. **同任务重复/并发导出无互斥**
    - glm 断言：导出进行中再发起导出应被拒。
-   - main-v2 实际：`JobService#createAndStart` 无互斥；两个导出作业会并发写同一个 `task_files(task,def,EXPORT)`（唯一约束 → 后发者覆盖），进度也互不感知。
+   - main 实际：`JobService#createAndStart` 无互斥；两个导出作业会并发写同一个 `task_files(task,def,EXPORT)`（唯一约束 → 后发者覆盖），进度也互不感知。
    - 候选改法：① 在 `createAndStart` 加"同 task + 同 jobType 存在 PENDING/RUNNING 则 409"；② 承认并发可接受，但把"同键文件覆盖"改为每作业独立文件记录（需要改表）。
 3. **条件求值器对未知操作符/未知字段静默放行**
-   - glm：非法操作符/字段 → 异常。main-v2：`default → true`（等于"忽略该条件"，导出可能比用户预期**更宽**）。
+   - glm：非法操作符/字段 → 异常。main：`default → true`（等于"忽略该条件"，导出可能比用户预期**更宽**）。
    - 候选改法：① `ConditionEvaluator` 对未知操作符改为 `false` 或抛 `IllegalArgumentException`（列表端点已有 400 通道，`parseCondition` 会转 400）；② 保持现状但视为"宽容解析"，需在需求文档明确。
 4. **AI 工具无步骤守卫**（`start_publish` 可在 CHECK/UPLOAD 步直接调用）
    - 现状：确认门只保证"人工确认"，不保证"前置步骤已完成"；错误顺序由前端动作表兜底。
    - 候选改法：① 在工具的作业发起前校验 `task.currentStep`；② 明确"顺序由前端与用户负责"，在 FR 里写清责任边界。
-5. **AI 工具缺少"当前无任务"的错误语义**（glm 抛 `BizException(没有进行中的任务)`，main-v2 工具返回提示文本）
+5. **AI 工具缺少"当前无任务"的错误语义**（glm 抛 `BizException(没有进行中的任务)`，main 工具返回提示文本）
    - 影响：模型侧只能读文本，无法据错误码做分支；是否要统一为异常/错误码，需裁决。
 
 ---
@@ -246,7 +246,7 @@ HB/HS/XN 的 3 行**id 与内容零变化**；暂存行全部 `PUBLISHED`；任�
 
 ## 六、测试运行结果（真实执行）
 
-命令（工作目录 `<MAIN_V2>/backend`，JDK 21 在 PATH）：
+命令（工作目录 `<REPO_ROOT>/backend`，JDK 21 在 PATH）：
 
 ```bash
 # ① 基线（施工前）
@@ -308,7 +308,7 @@ BUILD SUCCESS
 | 问题 | 处置 |
 |---|---|
 | 任务书"基线 42 个"与实测 74 个不符 | 以实测为准记账，并在 §1.2 记录口径与复核方式（无 `@Disabled`/`@ParameterizedTest`/`@Nested`） |
-| 两套模型差异大（任务参数包 vs `task_items`/`task_files`；`ConditionDTO` vs `QueryCondition`） | 逐个用例找 main-v2 的同职责实现，改写断言面；找不到对应实现的用例一律不移植并登记（§4） |
+| 两套模型差异大（任务参数包 vs `task_items`/`task_files`；`ConditionDTO` vs `QueryCondition`） | 逐个用例找 main 的同职责实现，改写断言面；找不到对应实现的用例一律不移植并登记（§4） |
 | glm 的 `@Test` 计数被 `@TestPropertySource` 干扰（`grep -c "@Test"` 多计 1/类） | 改用 `grep -cE '@Test\s*$'` 复核，并按 Surefire 报告二次校对 |
 | `ImportFlowJobTest` 需要真实 xlsx 才能驱动导入链路 | 由生产侧 `ExcelWriter` 写真文件 + 真落 `task_files(UPLOAD)`，读侧由生产 `ExcelReader` 解析（往返闭环，未改生产代码） |
 | 导出/预检查/导入执行器在测试线程里的终态写入时机（`afterCommit` / `TransactionTemplate`） | 采用与既有 `PublishSemanticsTest` 相同的"直接同步驱动执行器 + 从库重读作业"手法；AI 工具链用例则真走异步 `@Async` + 轮询终态（30s 上限） |
@@ -320,12 +320,12 @@ BUILD SUCCESS
 ## 八、改动面清单（本棒新增，无修改生产代码）
 
 ```
-<MAIN_V2>/backend/src/test/java/com/example/configmgr/data/service/PublishedQueryConditionTest.java   (9 用例)
-<MAIN_V2>/backend/src/test/java/com/example/configmgr/definition/service/GlmSeedCatalogTest.java      (4 用例)
-<MAIN_V2>/backend/src/test/java/com/example/configmgr/job/service/ExportFlowJobTest.java              (3 用例)
-<MAIN_V2>/backend/src/test/java/com/example/configmgr/job/service/ImportFlowJobTest.java              (9 用例)
-<MAIN_V2>/backend/src/test/java/com/example/configmgr/ai/tools/AiToolsInvocationTest.java             (6 用例)
-<MAIN_V2>/docs/evidence/S5a-glm测试移植验证.md                                                        (本文档)
+<REPO_ROOT>/backend/src/test/java/com/example/configmgr/data/service/PublishedQueryConditionTest.java   (9 用例)
+<REPO_ROOT>/backend/src/test/java/com/example/configmgr/definition/service/GlmSeedCatalogTest.java      (4 用例)
+<REPO_ROOT>/backend/src/test/java/com/example/configmgr/job/service/ExportFlowJobTest.java              (3 用例)
+<REPO_ROOT>/backend/src/test/java/com/example/configmgr/job/service/ImportFlowJobTest.java              (9 用例)
+<REPO_ROOT>/backend/src/test/java/com/example/configmgr/ai/tools/AiToolsInvocationTest.java             (6 用例)
+<REPO_ROOT>/docs/evidence/S5a-glm测试移植验证.md                                                        (本文档)
 ```
 
 `git status --porcelain` 复核：仅上述 5 个测试文件为 `??`（新增未跟踪），**`src/main` 零改动**；未执行 `git add/commit/push`。
@@ -335,5 +335,5 @@ BUILD SUCCESS
 ## 九、遗留与后续建议
 
 1. §5 的 5 项【待裁决】需主线裁决；其中 #1（导入前置守卫）、#3（未知操作符静默放行）建议优先——它们会直接影响"导出范围比预期更宽/未通过校验的数据被发布"这类数据面后果。
-2. glm 的"范围合法性校验""枚举合法性校验"在 main-v2 预检查里缺失（`PrecheckJobRunner` 只覆盖必填/主键重复/引用存在性）。若要拉齐，属生产代码改动，需另开任务。
+2. glm 的"范围合法性校验""枚举合法性校验"在 main 预检查里缺失（`PrecheckJobRunner` 只覆盖必填/主键重复/引用存在性）。若要拉齐，属生产代码改动，需另开任务。
 3. glm 的 `emptyUploadProducesWarning` 所依赖的"警告"语义（`Severity.WARNING` + `warningCount`）在预检查路径从未产出，`Job.warningCount` 目前恒 0；若要支持，需在 `PrecheckJobRunner` 补写入并同步前端展示。

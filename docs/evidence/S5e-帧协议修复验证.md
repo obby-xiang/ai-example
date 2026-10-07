@@ -1,6 +1,6 @@
 # S5e 帧协议修复验证（S5c-1~6 + Q8②，共 7 项）
 
-> 日期：2026-10-07　执行：施工子智能体（DeepSeek V4 Flash）　仓库：`<MAIN_V2>`（分支 `main-v2`，HEAD `89aa30c` + 本棒未提交的工作区改动）
+> 日期：2026-10-07　执行：施工子智能体（DeepSeek V4 Flash）　仓库：`<REPO_ROOT>`（分支 `main`，HEAD `89aa30c` + 本棒未提交的工作区改动）
 > 范围：<b>修改 `src/main` 生产代码</b>（本棒经明确授权）+ 同步改写受影响的 conformance 用例 + 本证据文档。
 > 未做任何 git 写操作（无 add/commit/push/reset/rebase/checkout）。
 > 结论：**7 项全部修复**；单测 **152 例 × 3 轮全绿**（并发敏感子集 57 例另跑 3 轮全绿）；
@@ -112,10 +112,10 @@
 
 ## 3. 单元测试
 
-工具链：`<MAVEN_HOME>/bin/mvn.cmd`（IntelliJ 自带 Maven），工作目录 `<MAIN_V2>/backend`，JDK 21，离线 `-o`。
+工具链：`<MAVEN_HOME>/bin/mvn.cmd`（IntelliJ 自带 Maven），工作目录 `<REPO_ROOT>/backend`，JDK 21，离线 `-o`。
 
 ```
-cd <MAIN_V2>/backend
+cd <REPO_ROOT>/backend
 "<MAVEN_HOME>/bin/mvn.cmd" -B -o test
 # 并发敏感子集（含全部 conformance 类）
 "<MAVEN_HOME>/bin/mvn.cmd" -B -o test \
@@ -162,11 +162,11 @@ cd <MAIN_V2>/backend
 启动（key 仅经会话环境变量注入，**未写入任何文件**）：
 
 ```
-cd <MAIN_V2>/backend
+cd <REPO_ROOT>/backend
 java -jar target/config-mgr.jar --server.port=18330 \
   --spring.datasource.url='jdbc:h2:file:./data/e2e_s5e_db;DB_CLOSE_DELAY=-1' \
   --app.job.batch-size=10 --app.job.demo-batch-delay-ms=150
-cd <MAIN_V2>
+cd <REPO_ROOT>
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify-e2e.ps1 \
   -Base http://127.0.0.1:18330 -BackendLog <TMP>/s5e-verify/boot*.log
 ```
@@ -248,7 +248,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify-e2e.ps1 \
 - **顺带同步**：`ci.yml` 的步骤名 `编译并运行单测（mvn test，147 例）` → `编译并运行单测（mvn test，全量用例）`。
   只改显示名，不改任何门禁行为（`run: mvn -B test` 原样）。
 - 未修改 `research-src/`、未修改 `scripts/verify-e2e.ps1`、未修改前端、未修改既有证据文档。
-- 本文与代码内**无密钥**（环境变量注入，未落盘）、**无用户名**、**无本机绝对路径**（一律 `<MAIN_V2>` / `<MAVEN_HOME>` / `<MEMURAI_HOME>` / `<TMP>` 占位符）。
+- 本文与代码内**无密钥**（环境变量注入，未落盘）、**无用户名**、**无本机绝对路径**（一律 `<REPO_ROOT>` / `<MAVEN_HOME>` / `<MEMURAI_HOME>` / `<TMP>` 占位符）。
 - 收尾：本棒启动的后端进程（18330，三段 PID 见运行期记录）已全部 `taskkill /F`；`netstat` 确认 18330 无 LISTENING；
   独立库运行产物 `backend/data/e2e_s5e_db*` 已删除；`backend/data/` 下其他既有文件（演示库、`files/` 里 S5d 及更早的产物）未动。
 

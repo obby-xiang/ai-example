@@ -1,9 +1,9 @@
 # GF-B 前端棒独立复核验证（GLM-5.3）
 
 > 角色：复核与测试（GLM-5.3）。对 GF-B 前端棒做**独立复现验证**：不采信作者（Kimi K2.8）与验收者的结论，一切自己重跑。只验证、不改代码（本文档为唯一新增文件）。
-> 仓库：`<MAIN_V2>`（= `<REPO_ROOT>/ai-example-code/ai-example-main-v2`），分支 `main-v2`，HEAD `b41784a`。
+> 仓库：`<REPO_ROOT>`，分支 `main`，HEAD `b41784a`。
 > 复核日期：2026-10-07。
-> 脱敏纪律：不出现真实盘符（统一 `<MAIN_V2>`）、密钥（统一 `***`）、用户名。
+> 脱敏纪律：不出现真实盘符（统一 `<REPO_ROOT>`）、密钥（统一 `***`）、用户名。
 > 证据等级标注：【实测】= 本机重跑命令/逐行读代码直接确认；【推断】= 由代码路径推演、未跑 UI；【假设】= 需进一步验证才能确认。
 
 ---
@@ -14,7 +14,7 @@
 |---|---|
 | 操作系统 | Windows（Git Bash 执行命令） |
 | node / yarn | v22.23.2 / 1.22.22 |
-| 仓库与 HEAD | `<MAIN_V2>`，分支 `main-v2`，`b41784a`（`git rev-parse HEAD` 实测一致） |
+| 仓库与 HEAD | `<REPO_ROOT>`，分支 `main`，`b41784a`（`git rev-parse HEAD` 实测一致） |
 | 验证方式 | `git status/diff`、`yarn typecheck`、`yarn build`、仓库外临时目录 `node --experimental-strip-types` 断言、逐行读前后端源码 |
 | 约束遵守 | 全程无 git 写操作；除本文档与仓库外临时目录（用完即删）外零文件改动；零新增依赖 |
 
@@ -31,7 +31,7 @@
 ```
 $ git rev-parse HEAD && git branch --show-current
 b41784a6e8eb1c809b442dad3e4d2052ecc2f385
-main-v2
+main
 
 $ git status --porcelain
  M frontend/src/components/AiPanel/AiPanel.vue
@@ -48,7 +48,7 @@ $ git status --porcelain
 
 ### 项 2 —— typecheck 与 build：**PASS**
 
-命令与输出摘录【实测】（在 `<MAIN_V2>/frontend` 下执行）：
+命令与输出摘录【实测】（在 `<REPO_ROOT>/frontend` 下执行）：
 
 ```
 $ yarn typecheck

@@ -1,9 +1,9 @@
 # ============================================================
-# E2E 验证脚本（main-v2 版）：动态配置管理系统 全流程 22 用例
+# E2E 验证脚本（main 版）：动态配置管理系统 全流程 22 用例
 #
 # 移植来源：<REPO_ROOT>/ai-example-code/ai-example-deepseek-v4-pro/scripts/verify-e2e.ps1
 #           （685 行 / TC1–TC22 共 22 用例）。用例编号与源脚本一一对照，
-#           但断言按 main-v2 的 API 与业务语义逐条改写（映射表见
+#           但断言按 main 的 API 与业务语义逐条改写（映射表见
 #           docs/evidence/S5b-deepseek-E2E移植验证.md）：
 #             - 对象模型：任务（tasks）+ 作业（jobs，EXPORT/PRECHECK/IMPORT/PUBLISH）
 #               取代源脚本的 /api/export/tasks 与 /api/import/batches 两套独立对象
@@ -72,7 +72,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyCon
 $http = New-Object System.Net.Http.HttpClient
 $http.Timeout = [TimeSpan]::FromMinutes(5)
 
-# ---------- HTTP 辅助（main-v2 响应信封：{success, message?, code?, data?}） ----------
+# ---------- HTTP 辅助（main 响应信封：{success, message?, code?, data?}） ----------
 
 function Invoke-Api($method, $path, $body) {
     $req = New-Object System.Net.Http.HttpRequestMessage
@@ -458,7 +458,7 @@ try {
 # ============================================================
 # TC1 配置定义列表与种子数据
 #   源断言：定义数 ≥4、层级正确、publishedRowCount、dependsOn、REFERENCE 字段
-#   main-v2 适配：种子 = 基座 7 + glm 并集 8 = 15 个定义；发布行数以 /api/data/{code}/count 表达；
+#   main 适配：种子 = 基座 7 + glm 并集 8 = 15 个定义；发布行数以 /api/data/{code}/count 表达；
 #   依赖以 REFERENCE 字段表达（无独立的 dependsOn 数组）
 # ============================================================
 Say '--- TC1 配置定义列表与种子数据 ---'
@@ -500,7 +500,7 @@ try {
 # ============================================================
 # TC2 配置定义动态 CRUD
 #   源断言：创建 → 重复编码拦截 → 追加字段
-#   main-v2 适配：重复编码走 M1 收尾守卫④（DefinitionService#save 前置校验）→
+#   main 适配：重复编码走 M1 收尾守卫④（DefinitionService#save 前置校验）→
 #   409 + 机器可读码 DEFINITION_CODE_DUPLICATE，且不回显 SQL 报文（原为 500 + 原始 JDBC 报文）；
 #   追加字段走整份 fields 替换语义（PUT）
 # ============================================================
@@ -553,7 +553,7 @@ try {
 # ============================================================
 # TC3 校验引擎（预检查：必填 / 主键重复 / 引用存在性 / 范围必填）
 #   源断言：类型/必填/选项/范围/数值五类校验
-#   main-v2 适配：PrecheckJobRunner 实际覆盖"必填 / 主键重复 / 引用存在性"三类
+#   main 适配：PrecheckJobRunner 实际覆盖"必填 / 主键重复 / 引用存在性"三类
 #   （无枚举合法性与数值范围校验，见 ImportFlowJobTest 类注释），
 #   范围必填以"REGION 级的范围字段缺失"表达（regionCode 为 key+required）
 # ============================================================
@@ -607,7 +607,7 @@ try {
 # ============================================================
 # TC4 导出任务（全量 + 进度 + 文件可下载）
 #   源断言：4 文件、行数、xlsx 魔数
-#   main-v2 适配：/api/tasks/{id}/files 给出文件清单（含 rowCount），
+#   main 适配：/api/tasks/{id}/files 给出文件清单（含 rowCount），
 #   下载入口为 /api/tasks/{id}/files/{defCode}
 # ============================================================
 Say '--- TC4 导出任务（全量 + 进度 + 文件） ---'
@@ -641,7 +641,7 @@ try {
 # ============================================================
 # TC5 导出查询条件（字段条件 + 范围条件）
 #   源断言：字段条件 3 行、范围条件 1 行
-#   main-v2 适配：条件经 PUT /api/tasks/{id}/items/{defCode}/condition 落库
+#   main 适配：条件经 PUT /api/tasks/{id}/items/{defCode}/condition 落库
 #   （对象形态 {scopeKeys,fields}，与前端契约同形），行数按数据集实况断言
 # ============================================================
 Say '--- TC5 导出查询条件（字段条件 + 范围条件） ---'
@@ -685,7 +685,7 @@ try {
 # ============================================================
 # TC6 打包下载（勾选文件 zip）
 #   源断言：zip 含 SERVER_PARAM.xlsx/REGION_BILLING.xlsx 两个条目
-#   main-v2 适配：/api/tasks/{id}/files/download?codes=A,B（条目名为"编码_名称.xlsx"）
+#   main 适配：/api/tasks/{id}/files/download?codes=A,B（条目名为"编码_名称.xlsx"）
 # ============================================================
 Say '--- TC6 打包下载（勾选 + 全量） ---'
 try {
@@ -706,7 +706,7 @@ try {
 # ============================================================
 # TC7 导入模板下载
 #   源断言：单个 xlsx + 多个 zip
-#   main-v2 适配：任务级 /api/tasks/{id}/files/templates（单个 xlsx / 多个 zip），
+#   main 适配：任务级 /api/tasks/{id}/files/templates（单个 xlsx / 多个 zip），
 #   定义级 /api/definitions/{code}/template
 # ============================================================
 Say '--- TC7 导入模板下载 ---'
@@ -726,7 +726,7 @@ try {
 # ============================================================
 # TC8 上传文件名匹配（zip / 单文件 / 未匹配 / 非法命名）
 #   源断言：含"序号后缀 (1)"匹配、未匹配清单
-#   main-v2 适配：匹配规则 = 文件名去扩展名后等于编码，或以"编码_"、"编码-"开头
+#   main 适配：匹配规则 = 文件名去扩展名后等于编码，或以"编码_"、"编码-"开头
 #   （matchDefCode）；"(1) 后缀"不支持 → 断言为被拒绝并给出可读提示（语义变化见证据文档）
 # ============================================================
 Say '--- TC8 上传文件名匹配 ---'
@@ -755,16 +755,16 @@ try {
     New-ZipFile "$tmp\up2.zip" $entries2
     $bad2 = Skip-Upload $t8 "$tmp\up2.zip" 'up2.zip'
     if ($bad2.ok -or -not ($bad2.text -like '*没有可匹配的文件*')) { throw "全不匹配 zip 未被拒（HTTP $($bad2.status)）" }
-    # (e) 源脚本支持的"(1) 序号后缀"在 main-v2 不被识别 → 断言被拒绝
+    # (e) 源脚本支持的"(1) 序号后缀"在 main 不被识别 → 断言被拒绝
     $bad3 = Skip-Upload $t8 "$tmp\SOMETHING.xlsx" 'CURRENCY(1).xlsx'
-    if ($bad3.ok) { throw '"(1) 后缀"命名被接受（main-v2 语义为不支持）' }
+    if ($bad3.ok) { throw '"(1) 后缀"命名被接受（main 语义为不支持）' }
     Ok 'TC8 zip 匹配/未匹配报告/前缀命名/非法命名拒绝均正确（序号后缀语义见映射说明）'
 } catch { No 'TC8' $_.Exception.Message }
 
 # ============================================================
 # TC9 检查通过 + 依赖拓扑
 #   源断言：合法数据全部通过 + SERVER_PARAM 先于 SERVER_EXTEND
-#   main-v2 适配：依赖先序由 REFERENCE 字段推出（METRIC_DICT 先于 ALARM_THRESHOLD）。
+#   main 适配：依赖先序由 REFERENCE 字段推出（METRIC_DICT 先于 ALARM_THRESHOLD）。
 #   job_items 集合无 @OrderBy，返回数组顺序按 (job_id, def_code) 索引，故"执行顺序"以
 #   条目 id 递升为准（执行器依 DependencyResolver.sort 的次序逐个 startItem → 插入序即拓扑序）
 # ============================================================
@@ -799,7 +799,7 @@ try {
 # ============================================================
 # TC10 检查失败明细 + 未上传文件（含 Q8① 明细落库验证）
 #   源断言：非法选项/引用不存在/未上传文件三类明细
-#   main-v2 适配：① 明细经 GET /api/jobs/{jobId}/issues 分页读取（落库，不落盘）；
+#   main 适配：① 明细经 GET /api/jobs/{jobId}/issues 分页读取（落库，不落盘）；
 #   ② "未上传文件"的配置项在预检查阶段即报 ERROR 且明细可查（Q8① 的原始缺陷是写盘 NoSuchFileException，
 #   本仓库明细仅在库中，故断言"明细可查 + 日志无 NoSuchFileException/明细写入失败"）
 # ============================================================
@@ -832,7 +832,7 @@ try {
 # ============================================================
 # TC11 SSE 进度事件流（任务级事件通道）
 #   源断言：订阅导出任务事件流收到 progress/done
-#   main-v2 适配：GET /api/tasks/{id}/events（无名事件的 data 帧，type 在帧内），
+#   main 适配：GET /api/tasks/{id}/events（无名事件的 data 帧，type 在帧内），
 #   帧类型为 JOB_PROGRESS / JOB_DONE / TASK_CHANGED / HEARTBEAT；
 #   后端需以 --app.job.batch-size=10 启动（默认 100 时小配置项不跨分片边界，无进度帧）
 # ============================================================
@@ -864,7 +864,7 @@ try {
 # ============================================================
 # TC12 导入草稿隔离（暂存不动生效数据）
 #   源断言：导入后 publishedRowCount 不变、草稿可预览
-#   main-v2 适配：暂存行经 GET /api/jobs/{importJobId}/diff 读取（config_staging_rows）；
+#   main 适配：暂存行经 GET /api/jobs/{importJobId}/diff 读取（config_staging_rows）；
 #   M1 收尾守卫① 生效后 IMPORT 前必须先通过 PRECHECK（守卫把守作业入口），故本用例
 #   先跑一次预检查（真实流程），再导入
 # ============================================================
@@ -905,9 +905,9 @@ try {
 # ============================================================
 # TC13 发布：范围替换（upsert 保 id + 差集删除）+ 幂等 + 终态不可取消
 #   源断言：发布后 5→3 行、重复发布被拦截
-#   main-v2 适配（Q14 定案语义）：REPLACE = 行级 upsert（保留行 id、版本递增）
+#   main 适配（Q14 定案语义）：REPLACE = 行级 upsert（保留行 id、版本递增）
 #   + 覆盖范围内未出现的旧行删除；"重复发布"改为"重复发布幂等"，并以
-#   "取消已终态作业 → 409 JOB_ALREADY_FINAL"表达 main-v2 的冲突语义
+#   "取消已终态作业 → 409 JOB_ALREADY_FINAL"表达 main 的冲突语义
 # ============================================================
 Say '--- TC13 发布：范围替换 + 幂等 + 终态冲突 ---'
 try {
@@ -928,7 +928,7 @@ try {
     if ($afterMap.ContainsKey('JPY') -or $afterMap.ContainsKey('GBP')) { throw '范围内未出现的旧行未被差集删除' }
 
     # 重复发布同一份暂存 → 被"导入快照版本比对"拦住（作业 FAILED + 行级发布冲突文案），
-    # 且生效数据零变化。这是 main-v2 相对源脚本"重复发布未拦截"更强的守卫：
+    # 且生效数据零变化。这是 main 相对源脚本"重复发布未拦截"更强的守卫：
     # 暂存行记录了导入时刻的行版本（baseVersion），发布后版本已递增，故再次发布即判定冲突。
     $jPub2 = Start-JobOf $script:t12 'PUBLISH'
     $sPub2 = Wait-Job $jPub2.id
@@ -952,7 +952,7 @@ try {
 # ============================================================
 # TC14 导入/发布前置守卫（M1 收尾守卫①：预检查未通过 → 拒绝）
 #   源断言：检查失败 → 导入失败 → 发布被拒
-#   main-v2 适配：守卫落在作业入口 POST /api/tasks/{id}/jobs（JobService#createAndStart）——
+#   main 适配：守卫落在作业入口 POST /api/tasks/{id}/jobs（JobService#createAndStart）——
 #   ① 尚无预检查记录（从严口径）→ 409 PRECHECK_NOT_PASSED；
 #   ② 预检查真实失败（无上传文件）→ 同样 409，且被拒时不落任何作业行；
 #   ③ 守卫放行侧 + 空暂存发布的不误删不变量（S5.b 待裁决 #5：空发布是无害空操作）
@@ -1011,7 +1011,7 @@ try {
 # ============================================================
 # TC20 任务中心（统一列表 / 创建即持久化 / 类型与状态过滤 / 关键词转义）
 #   源断言：统一列表含导出与导入、创建即入库、type 过滤
-#   main-v2 适配：/api/tasks 为 Spring Page 信封（content/totalElements，page 从 0 起），
+#   main 适配：/api/tasks 为 Spring Page 信封（content/totalElements，page 从 0 起），
 #   每行为 TaskSummary{task,itemCount,fileCount,latestJob}；关键词 LIKE 转义为 Q16② 修复项
 # ============================================================
 Say '--- TC20 任务中心（列表/持久化/过滤/转义） ---'
@@ -1049,7 +1049,7 @@ try {
 # ============================================================
 # TC21 任务服务端分页
 #   源断言：size=5 两页不重复、total ≥5
-#   main-v2 适配：page 从 0 起；排序 createdAt DESC, id DESC（Q16① 第二排序键）
+#   main 适配：page 从 0 起；排序 createdAt DESC, id DESC（Q16① 第二排序键）
 # ============================================================
 Say '--- TC21 任务分页 ---'
 try {
@@ -1074,7 +1074,7 @@ try {
 # ============================================================
 # TC15 AI 对话（流式 / 工具调用 / 渐进披露）
 #   源断言：tool_start list_config_defs + /api/ai/tools?page=export 的披露子集
-#   main-v2 适配：披露子集由只读端点 GET /api/ai/tools 取证（M1 收尾项⑤新增）——
+#   main 适配：披露子集由只读端点 GET /api/ai/tools 取证（M1 收尾项⑤新增）——
 #   该端点与 ToolRegistry.forContext 同源，故断言不再依赖后端 DEBUG 日志；
 #   提供 -BackendLog 时仍做一次"日志行 vs 端点"的交叉校验。取 page:tasks 与
 #   task:IMPORT/PUBLISH 两个上下文对照（start_export 只在任务中心/导出向导披露；
@@ -1135,7 +1135,7 @@ try {
 # ============================================================
 # TC16 AI 驱动业务（确认门放行 → 真实创建作业；前端工具挂起 → 回灌续跑）
 #   源断言：ui_event(select_defs/export_started) + 导出任务数增加
-#   main-v2 适配：不再有 ui_event 帧；工作区动作是 FRONTEND 通道工具，经
+#   main 适配：不再有 ui_event 帧；工作区动作是 FRONTEND 通道工具，经
 #   frontend_tool_request 挂起 + POST /api/ai/frontend-tool-result 回灌；
 #   作业发起是 DANGER 工具，经 confirm_request 挂起 + POST /api/ai/confirm 放行后
 #   由后端真实创建作业（同一服务层，副作用可核）
@@ -1916,7 +1916,7 @@ if ($EnableGf6) {
 # ============================================================
 # TC17 HITL：破坏性操作需确认（拒绝不执行、确认后执行）
 #   源断言：confirm_tool → 拒绝后未发布、同意后 PUBLISHED
-#   main-v2 适配：确认事件为 confirm_request，回执帧为 confirm_decision；
+#   main 适配：确认事件为 confirm_request，回执帧为 confirm_decision；
 #   决策经 POST /api/ai/confirm{runId,toolCallId,approved} 提交；
 #   重复提交同一 toolCallId → 409 DUPLICATE_TOOL_CALL_ID
 # ============================================================
@@ -1965,7 +1965,7 @@ try {
     if ($dup.status -ne 409 -or $dup.json.code -ne 'DUPLICATE_TOOL_CALL_ID') {
         throw "重复决策响应 HTTP $($dup.status)/code=$($dup.json.code)，期望 409/DUPLICATE_TOOL_CALL_ID"
     }
-    # 取消该轮，避免模型在同一轮内重试发布（取消为 main-v2 权威语义：Redis 标志）
+    # 取消该轮，避免模型在同一轮内重试发布（取消为 main 权威语义：Redis 标志）
     $cancel = PostJsonRaw "/api/ai/cancel/$($script:rejectRunId)" $null
     if (-not $cancel.cancelled) { throw '取消未生效' }
     Start-Sleep -Seconds 3
@@ -2007,7 +2007,7 @@ try {
 # ============================================================
 # TC18 会话隔离 / 串行化（409）/ 取消后释放
 #   源断言：会话计数增减、清空
-#   main-v2 适配：无 /sessions/count 与 /clear；改为 main-v2 的会话语义：
+#   main 适配：无 /sessions/count 与 /clear；改为 main 的会话语义：
 #   ① 不同 sessionId 的记忆窗口互相隔离（/api/ai/history/{sessionId}）；
 #   ② 同 sessionId 并发第二轮 → 409 SESSION_BUSY 且携进行中 runId 与 reattach 端点（ADR-5/Q11）；
 #   ③ 取消该轮后同会话可再次发起。
@@ -2084,7 +2084,7 @@ try {
 # ============================================================
 # TC22 AI 会话历史恢复
 #   源断言：user/assistant 计数、工具卡片、未知会话返回空
-#   main-v2 适配：GET /api/ai/history/{sessionId} → {sessionId,count,messages[{type,text,toolCalls?,toolResponses?}]}
+#   main 适配：GET /api/ai/history/{sessionId} → {sessionId,count,messages[{type,text,toolCalls?,toolResponses?}]}
 # ============================================================
 Say '--- TC22 AI 历史恢复 ---'
 try {
@@ -2105,7 +2105,7 @@ try {
 # ============================================================
 # TC19 清理与演示数据恢复（含 Q8② 运行期日志收尾扫描）
 #   源断言：删除 E2E_TEMP、演示数据恢复为 5 行
-#   main-v2 适配：任务删除为级联清理（作业/条目/问题/暂存/文件），
+#   main 适配：任务删除为级联清理（作业/条目/问题/暂存/文件），
 #   演示数据恢复仍走"导入全量导出件 + REPLACE 发布"闭环
 # ============================================================
 Say '--- TC19 清理与演示数据恢复 ---'
@@ -2143,7 +2143,7 @@ try {
 
 # ============================================================
 # Q8 项回归（移植期缺陷清单的日志/明细类断言；不计入 22 用例，单独计数）
-#   Q8① 未上传文件的导入批次写 issues 明细抛 NoSuchFileException → main-v2 明细仅落库，不应出现
+#   Q8① 未上传文件的导入批次写 issues 明细抛 NoSuchFileException → main 明细仅落库，不应出现
 #   Q8② GlobalExceptionHandler 对 SSE 请求二次写 JSON（日志噪音）→ 修复后可断言日志无此噪音
 # ============================================================
 Say '--- Q8 项回归（移植期缺陷清单） ---'

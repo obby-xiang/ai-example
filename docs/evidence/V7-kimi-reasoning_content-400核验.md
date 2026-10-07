@@ -49,7 +49,7 @@ git log --all --format="%B" | grep -i "reasoning"                   # 仅 3 条 
 
 **实况**：分支内**不存在独立的"实测报错原文存档"文件**（无 `*.json` / `*.txt` / `*.log` / `*.md` 存档）。该报错文本仅以**内联引用**形式出现在 `docs/02-architecture.md:34` 与 `docs/05-verification.md:37` 两处，且只有一行（不含状态码、不含响应 JSON、不含 request_id）。因此"预留存档可供逐字比对"这一前提**不成立**：本次比对以 docs 中内联引用的那句文本作为分支侧基准。
 
-（附注：`grep -rl "thinking mode must be passed back" <REPO_ROOT>` 另命中 `ai-example-main/ai-service/.../AiService.java`、`ai-example-trae/ai-service/.../AiService.java`、`ai-example-main-v2/docs/merge/03-技术方案文档.md`，均为**其它分支**内容，不属于本核验项。）
+（附注：`grep -rl "thinking mode must be passed back" <REPO_ROOT>` 另命中 `ai-example-main/ai-service/.../AiService.java`、`ai-example-trae/ai-service/.../AiService.java`、`<REPO_ROOT>/docs/merge/03-技术方案文档.md`（本仓库参考件），均非本分支自产内容，不属于本核验项。）
 
 ---
 

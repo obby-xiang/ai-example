@@ -1,13 +1,13 @@
 # S5d CI 门禁骨架与缺陷注入验证
 
-> 日期：2026-10-07　执行：施工子智能体（DeepSeek V4 Flash）　仓库：`<MAIN_V2>`（分支 `main-v2`）
+> 日期：2026-10-07　执行：施工子智能体（DeepSeek V4 Flash）　仓库：`<REPO_ROOT>`（分支 `main`）
 > 范围：新增 `.github/workflows/ci.yml`（1 个提交）+ 本证据文档（1 个提交）。
-> 缺陷注入只发生在一次性分支 `ci-defect-injection-s5d` 内，该分支已删除，main-v2 历史未受污染。
+> 缺陷注入只发生在一次性分支 `ci-defect-injection-s5d` 内，该分支已删除，main 历史未受污染。
 >
-> **结论**：① 门禁骨架在 main-v2 上基线为绿（两个 job 全绿）；② 两次注入缺陷分别被**对应 job** 拦住
+> **结论**：① 门禁骨架在 main 上基线为绿（两个 job 全绿）；② 两次注入缺陷分别被**对应 job** 拦住
 > （后端注入只红后端 job、前端注入只红前端 job，且经"有/无注入"2×2 对照确认因果）；③ 一次性分支已删除。
 >
-> 脱敏口径：本机绝对路径一律用 `<MAIN_V2>` / `<REPO_ROOT>` / `<MAVEN_HOME>` / `<MEMURAI_HOME>` / `<USER_HOME>` 占位；
+> 脱敏口径：本机绝对路径一律用 `<REPO_ROOT>` / `<MAVEN_HOME>` / `<MEMURAI_HOME>` / `<USER_HOME>` 占位；
 > 仓库属主名用 `<GITHUB_OWNER>` 占位（DC-08：个人用户名不入库），run/job 以自增 ID 定位。
 
 ---
@@ -16,8 +16,8 @@
 
 | 提交 | 分支 | 说明 |
 |---|---|---|
-| `3cf5f9b` | `main-v2` | `ci(s5d): GitHub Actions 门禁骨架——后端编译+147 单测、前端构建+TS 类型检查` |
-| 本文件所在提交 | `main-v2` | `docs(evidence): S5d CI 门禁与缺陷注入验证——基线绿+两次注入均拦截` |
+| `3cf5f9b` | `main` | `ci(s5d): GitHub Actions 门禁骨架——后端编译+147 单测、前端构建+TS 类型检查` |
+| 本文件所在提交 | `main` | `docs(evidence): S5d CI 门禁与缺陷注入验证——基线绿+两次注入均拦截` |
 
 一次性分支 `ci-defect-injection-s5d` 内的提交（**已随分支删除，均为游离提交**）：
 
@@ -29,7 +29,7 @@
 | `c74ca9b` | `test(s5d): 注入缺陷验证-后端 回滚做隔离对照——复原 200，只留前端缺陷` |
 
 其中 `1cae997` 的触发脚手架（`on.push.branches` 临时加入一次性分支名）**只为让 Actions 能在侧分支上被跑到**：
-`main-v2` 上的门禁触发始终严格为 `push → main-v2` 与 `pull_request → main-v2`，该行不回流 main-v2。
+`main` 上的门禁触发始终严格为 `push → main` 与 `pull_request → main`，该行不回流 main。
 
 ---
 
@@ -37,7 +37,7 @@
 
 | 项 | 取值 |
 |---|---|
-| 触发 | `push` 到 `main-v2`；`pull_request` 指向 `main-v2` |
+| 触发 | `push` 到 `main`；`pull_request` 指向 `main` |
 | 权限 | `permissions: contents: read`（门禁只读，显式收窄 `GITHUB_TOKEN`） |
 | job `backend`（名：后端编译与单测） | `ubuntu-latest`，`actions/checkout@v4` + `actions/setup-java@v4`（temurin 21，maven 缓存按 `backend/pom.xml`），`run: mvn -B test`（`working-directory: backend`，`timeout-minutes: 20`） |
 | job `frontend`（名：前端类型检查与构建） | `ubuntu-latest`，`actions/checkout@v4` + `actions/setup-node@v4`（node 22，yarn 缓存按 `frontend/yarn.lock`），`yarn install --frozen-lockfile` → `yarn typecheck` → `yarn build`（`working-directory: frontend`，`timeout-minutes: 20`） |
@@ -57,7 +57,7 @@
 
 ---
 
-## 3. 基线 run（main-v2 @ `3cf5f9b`）
+## 3. 基线 run（main @ `3cf5f9b`）
 
 - run：`https://github.com/<GITHUB_OWNER>/ai-example/actions/runs/37586108801` → **success**（run id `37586108801`）
 
@@ -174,15 +174,15 @@
 （`SPRING_DATA_REDIS_PORT` 覆盖为 `6399`，本机 `<MEMURAI_HOME>` 的 6379 不参与）、**不加载镜像 settings**（只走 Maven Central）、
 JDK 21、Maven 3.9.9（`<MAVEN_HOME>/mvn.cmd`）。
 
-### 6.1 基线（main-v2 内容）
+### 6.1 基线（main 内容）
 
 ```
-$ cd <MAIN_V2>/backend && mvn -B test          # 无 config/、Redis 端口置空、无镜像 settings
+$ cd <REPO_ROOT>/backend && mvn -B test          # 无 config/、Redis 端口置空、无镜像 settings
 [INFO] Tests run: 147, Failures: 0, Errors: 0, Skipped: 0
 [INFO] BUILD SUCCESS
 [INFO] Total time:  01:40 min
 
-$ cd <MAIN_V2>/frontend && yarn typecheck && yarn build
+$ cd <REPO_ROOT>/frontend && yarn typecheck && yarn build
 $ vue-tsc --noEmit          → Done in 11.13s（退出码 0）
 $ node scripts/build.mjs    → ✓ built in 41.39s（退出码 0）
 ```
@@ -222,7 +222,7 @@ CI 注解的行列号 `28:5`、`13:1` 与上表逐条吻合，退出码 2 亦一
 
 ---
 
-## 7. 一次性分支删除与 main-v2 洁净性
+## 7. 一次性分支删除与 main 洁净性
 
 ```
 $ git push origin --delete ci-defect-injection-s5d
@@ -233,12 +233,12 @@ Deleted branch ci-defect-injection-s5d (was c74ca9b).
 
 删除后清点：
 
-- `git branch -a`：本地仅 `main` / `main-v2`；远程仅 `origin/{HEAD→main, main, main-v2, claude-opus-5.5, claude-opus-5.5+deepseek-v4-pro, deepseek-v4-pro, glm-5.3, kimi-k3, trae}`，
+- `git branch -a`：本地仅 `main`；远程仅 `origin/{HEAD→main, claude-opus-5.5, claude-opus-5.5+deepseek-v4-pro, deepseek-v4-pro, glm-5.3, kimi-k3, trae}`，
   **无 `ci-defect-injection-s5d` 残留**；除本任务创建的那一条外未删除/改动任何分支。
-- `git log --oneline -5`（main-v2）：顶端为 `3cf5f9b`（门禁）与 `61c9d08`（S5c 证据），
-  **两个缺陷注入提交只存在于已删除的侧分支，main-v2 内不含任何注入代码**。
-- `git status`：工作区干净；`backend/src/test/.../ToolResultLimiterTest.java` 与 `frontend/src/main.ts` 均为 `main-v2` 原状（`200` / `zhCn`）。
-- 全程未对 main-v2 强推、未提交任何注入代码到 main-v2、workflow 与文档中不含任何 API key。
+- `git log --oneline -5`（分支 main）：顶端为 `3cf5f9b`（门禁）与 `61c9d08`（S5c 证据），
+  **两个缺陷注入提交只存在于已删除的侧分支，main 内不含任何注入代码**。
+- `git status`：工作区干净；`backend/src/test/.../ToolResultLimiterTest.java` 与 `frontend/src/main.ts` 均为 `main` 原状（`200` / `zhCn`）。
+- 全程未对 main 强推、未提交任何注入代码到 main、workflow 与文档中不含任何 API key。
 
 ---
 
@@ -248,7 +248,7 @@ Deleted branch ci-defect-injection-s5d (was c74ca9b).
    在 GitHub 托管 runner 上不能直接跑。可选路线（择一或组合，需裁决）：
    (a) `services: redis` 容器 + 桩上游替代真实 AI（可参照既有 `stub-upstream.mjs` 手法），跑在 ubuntu 上；
    (b) 自托管 runner（带 Memurai/Redis 与 key 的环境变量注入）；
-   (c) 单独的 e2e job，只在 `main-v2` 或定时（nightly）触发，避免拖慢每个 PR。
+   (c) 单独的 e2e job，只在 `main` 或定时（nightly）触发，避免拖慢每个 PR。
 2. **action 版本与 runner 镜像**：基线注解提示 `setup-java@v4` 已弃用（建议 v5）、`checkout@v4`/`setup-node@v4` 有 Node 20 弃用告警、
    `ubuntu-latest` 自 **2026-10-19** 起迁移 Ubuntu 26。本棒**未擅自升级**（超出任务书范围），建议下一棒统一升 v5 并复跑基线。
 3. **原始作业日志归档**：需要凭据（`gh` 或 PAT）。本棒以三源交叉取证替代（§4.1）；若归档原始日志是硬需求，请提供凭据或改由有 `gh` 的环境补跑。

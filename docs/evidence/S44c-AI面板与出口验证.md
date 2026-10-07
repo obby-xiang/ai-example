@@ -1,8 +1,8 @@
 # S4.4c AI 面板完整实现 + 契约联动 + 出口验证（证据文档）
 
 > 日期：2026-10-07　角色：S4.4c 前端合流实施工程师（c 棒）
-> 依据：`<MAIN_V2>/docs/s4/S4.4-前端合流规格.md`（§1.1 视觉纪律、§2 部件映射、§3 API 对齐、§5 出口 8 条）
-> 仓库：`<MAIN_V2>`（main-v2，a/b 棒已落地，backend 补丁棒已修 P1–P5）
+> 依据：`<REPO_ROOT>/docs/s4/S4.4-前端合流规格.md`（§1.1 视觉纪律、§2 部件映射、§3 API 对齐、§5 出口 8 条）
+> 仓库：`<REPO_ROOT>`（分支 main，a/b 棒已落地，backend 补丁棒已修 P1–P5）
 > 实跑形态：后端 `java -jar target/config-mgr.jar --server.port=18318`（H2 文件库 + 本机 Redis 6379，
 > `AI_API_KEY=***` 仅经环境变量注入）；前端 `yarn dev`（`VITE_API_BASE=http://localhost:18318`，端口 5202）；
 > 浏览器操作经 kimi-webbridge（session `s44c`，页签组「S4.4c AI 面板与出口验证」）；AI 走真实模型 `deepseek-flash`。
@@ -16,7 +16,7 @@
 > 追加的 +243 / −3 增量见本文 §P0「补丁验证」节。
 
 ```
-$ cd <MAIN_V2> && git status --short
+$ cd <REPO_ROOT> && git status --short
  M frontend/src/App.vue
  M frontend/src/components/AiPanel/AiPanel.vue
  M frontend/src/stores/ai.ts
@@ -54,7 +54,7 @@ $ cd <MAIN_V2> && git status --short
 ## 1 E1 `yarn build` 绿（TS strict 0 error）
 
 ```
-$ cd <MAIN_V2>/frontend && yarn build
+$ cd <REPO_ROOT>/frontend && yarn build
 $ vue-tsc --noEmit && node scripts/build.mjs
 ✓ built in 32.47s
 Done in 37.17s.
@@ -90,7 +90,7 @@ dist/assets/spreadjs-…js     6,198.64 kB
 ### 3.1 渐进披露子集正确（后端 DEBUG 原文）
 
 ```
-$ grep "披露工具" <MAIN_V2>/backend 启动日志
+$ grep "披露工具" <REPO_ROOT>/backend 启动日志
 上下文=task:EXPORT/QUERY_COND 披露工具=[check_job_status, get_config_def, get_row_count,
     list_config_defs, get_workspace_state, list_tasks]
 上下文=task:EXPORT/EXPORT     披露工具=[…同上…, open_export_file_editor, download_export_file, start_export]
@@ -298,7 +298,7 @@ $ 静态 style=" 属性                  → 0（仅 SpreadGrid 的 :style="{ he
 | 4 | 文件本地选择能力 | 浏览器扩展未开启「允许访问文件网址」，`upload`/`DOM.setFileInputFiles` 均被拒（`Not allowed`）；本棒为此用 `POST /tasks/{id}/files/upload` 完成导入前置文件落盘（面向用户的路径与端点一致） | 若验收要求「全 GUI 手点上传」，需用户开启该扩展开关，或由验收方准备文件后人工选文件 |
 | 5 | 确认门超时置灰未等满 | 倒计时/置灰为代码路径 + 实时倒计时截图（`剩余确认时间 1:46/1:53` 逐步递减），未刻意等待 120s 走完超时分支 | 是否需要一次「等满 120s 观察到时置灰 + 后端 TIMEOUT 收尾」的补充取证 |
 | 6 | 行级 `total` 瞬时 100%（b 棒遗留 2） | 本次未见异常（作业 5/5 稳定），维持 b 棒记录 | 维持上级裁决 |
-| 7 | CURRENCY 已发布数据版本自增 | 本棒导入+发布两轮后实测终态 `CNY/v5, EUR/v4, GBP/v4, JPY/v4, USD/v4`（**字段值与原种子逐字一致**，仅乐观锁 version 元数据变化）；任务/文件已清理 | 如需严格还原库，请按 b 棒口径用 DB 备份回滚（本棒未找到 main-v2 的库备份） |
+| 7 | CURRENCY 已发布数据版本自增 | 本棒导入+发布两轮后实测终态 `CNY/v5, EUR/v4, GBP/v4, JPY/v4, USD/v4`（**字段值与原种子逐字一致**，仅乐观锁 version 元数据变化）；任务/文件已清理 | 如需严格还原库，请按 b 棒口径用 DB 备份回滚（本棒未找到 main 的库备份） |
 | 8 | AI 栏展开态记忆 | 本棒新增页签级记忆（`sessionStorage['ai-panel-expanded']`，蓝本无此项，理由：裁剪性不应被刷新打回） | 若要求严格 1:1 蓝本行为，可去掉该记忆 |
 
 ## 14 测试痕迹与清理
@@ -306,7 +306,7 @@ $ 静态 style=" 属性                  → 0（仅 SpreadGrid 的 :style="{ he
 - **自产任务**：本棒共创建 5 条 `S44C-*` 任务（#2 `S44C-导出-界面`、#3 `S44C-导入-AI 驱动`、
   #4 `S44C-裁剪-导出`、#5 `S44C-裁剪-导入`、#6 `S44C-编辑器-FE工具`），已全部
   `DELETE /api/tasks/{id}`（级联清作业/条目/文件）；清理后 `GET /api/tasks` → `totalElements: 0`。
-- **文件存储**：任务删除级联后 `<MAIN_V2>/backend/data/files/` **为空**（本棒上传/导出件已随任务清除）。
+- **文件存储**：任务删除级联后 `<REPO_ROOT>/backend/data/files/` **为空**（本棒上传/导出件已随任务清除）。
 - **环境异动（如实登记）**：11:45:20 出现一条非本棒动作创建的空导出任务（标题「导出任务 2026/10/7 11:45:20」），
   11:45:31 被删除（`操作流水 动作=DELETE_TASK 对象=task#1`）——两条日志均非本棒操作，推测为同机其他人/页签操作；
   对本棒证据无影响（本棒未使用该任务）。
@@ -320,11 +320,11 @@ $ 静态 style=" 属性                  → 0（仅 SpreadGrid 的 :style="{ he
 
 ```bash
 # 后端（H2 库在 backend/data/，Redis 需在 6379）
-cd <MAIN_V2>/backend && "…/maven3/bin/mvn" -o -s maven-settings.xml package -DskipTests
+cd <REPO_ROOT>/backend && "…/maven3/bin/mvn" -o -s maven-settings.xml package -DskipTests
 AI_API_KEY=*** java -jar target/config-mgr.jar --server.port=18318
 
 # 前端
-cd <MAIN_V2>/frontend && printf 'VITE_API_BASE=http://localhost:18318\nVITE_DEV_PORT=5202\n' > .env.local
+cd <REPO_ROOT>/frontend && printf 'VITE_API_BASE=http://localhost:18318\nVITE_DEV_PORT=5202\n' > .env.local
 yarn build          # E1：vue-tsc --noEmit && vite build → EXIT=0
 yarn dev            # http://localhost:5202
 
@@ -355,7 +355,7 @@ yarn dev            # http://localhost:5202
 后端 `AiTools.java` 共 **12 个 `@Tool`**，其中带 `@ToolChannel(FRONTEND)` 的**只有 2 个**：
 
 ```
-$ cd <MAIN_V2>/backend && grep -n "@ToolChannel" src/main/java/com/example/configmgr/ai/tools/AiTools.java
+$ cd <REPO_ROOT>/backend && grep -n "@ToolChannel" src/main/java/com/example/configmgr/ai/tools/AiTools.java
 235:    @ToolChannel(ToolMeta.Channel.FRONTEND)   →  @Tool(name="open_export_file_editor")  @ToolScope("task:EXPORT/EXPORT")
 245:    @ToolChannel(ToolMeta.Channel.FRONTEND)   →  @Tool(name="download_export_file")     @ToolScope("task:EXPORT/EXPORT")
 
@@ -370,7 +370,7 @@ start_import / start_publish / get_workspace_state / get_row_count / start_prech
 （`open_export_file_editor`、`download_export_file`）；未披露的工具模型根本调不到。
 
 **结论（按后端口径）**：裁决②点名的 `navigate_to` / `select_definitions` / `set_condition` / `confirm_step`
-**在 main-v2 后端不存在**（蓝本 `frontend-tools.js` 的 10 个前端工具来自**旧基座**；main-v2 把
+**在 main 后端不存在**（蓝本 `frontend-tools.js` 的 10 个前端工具来自**旧基座**；main 把
 `start_export/start_precheck/start_import/start_publish/get_workspace_state/list_config_defs`
 全部改成了 BACKEND 通道，即"后端自己执行、不再挂起等前端"）。
 因此"前端工具集"的**实做范围 = 这 2 个**，二者在 E3 已双向实测通过（打开在线编辑器 / 触发下载）。
@@ -470,5 +470,5 @@ start → suspended → tool_start → frontend_tool_request {"taskId": 33}
 | # | 项 | 现状与影响 | 建议 |
 |---|---|---|---|
 | 1 | **② 的"一句话驱动全链"需后端补工具** | 后端当前不披露导航/选配置/设条件/推进步骤工具 → 模型无法自行完成（P3.2 实测） | 后端按 P2 表补 4 个 `@ToolChannel(FRONTEND)` 工具（`navigate_to{page,taskId}`、`select_definitions{codes,mode}`、`set_condition{defCode,conditions}`、`confirm_step{step}`），前端**零改动**即生效（执行器与页面能力已就绪，P3.1 已验证） |
-| 2 | 蓝本 10 工具 vs main-v2 12 工具的口径差 | 蓝本把 `start_export/start_check/start_import/start_publish` 视为前端挂起工具；main-v2 改为 BACKEND 直执行（副作用在后端，前端只做展示与导航） | 属 main-v2 既定设计（S4.2/S4.3 后端重写），本棒按后端口径实现，不回溯蓝本 |
+| 2 | 蓝本 10 工具 vs main 12 工具的口径差 | 蓝本把 `start_export/start_check/start_import/start_publish` 视为前端挂起工具；main 改为 BACKEND 直执行（副作用在后端，前端只做展示与导航） | 属 main 既定设计（S4.2/S4.3 后端重写），本棒按后端口径实现，不回溯蓝本 |
 | 3 | 历史重建（刷新后）工具卡状态一律 `已成功` | `loadHistory` 对历史 `toolCalls` 统一置 `succeeded`（历史里没有逐调用终态），刷新后看不到"曾经的失败/拒绝" | 裁决：后端 history 端点是否补 toolCalls 的执行结局字段；否则维持现状（正文里仍有失败原因文本） |

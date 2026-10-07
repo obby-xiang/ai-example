@@ -163,7 +163,7 @@ class PublishedQueryConditionTest {
     // ── 用例 10（M1 收尾守卫③ 补齐的 glm 用例）：非法操作符必须抛错 ──
 
     /**
-     * glm 的 {@code invalidOperatorRejected}：原 main-v2 对未知操作符走 {@code default → true}
+     * glm 的 {@code invalidOperatorRejected}：原实现对未知操作符走 {@code default → true}
      * （静默放行 = 忽略该条件 = 导出范围更宽），故当时未移植。M1 收尾守卫③ 改为抛
      * {@link IllegalArgumentException} 后，本用例成立（端点侧 400、作业侧 FAILED 的口径见
      * {@link ConditionOperatorGuardTest}）。

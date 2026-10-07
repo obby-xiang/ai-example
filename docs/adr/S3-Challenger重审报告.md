@@ -1,9 +1,9 @@
 # S3 Challenger 重审报告 —— DECISION-CARDS v2.1.1 / 技术方案 v2.1.1 / SP-02 整改验收
 
 > 审查人：反方审查者（Challenger，重审）　日期：2026-10-07
-> 审查对象：`<MAIN_V2>/docs/adr/DECISION-CARDS.md`（v2.1.1）、`<MAIN_V2>/docs/03-技术方案文档-v2.1.md`（v2.1.1）、
-> `<MAIN_V2>/docs/adr/DECISION-REGISTER.md`（DC-10/11/12）、`<MAIN_V2>/docs/spike/SP-02-决策卡.md` 及附件 `<MAIN_V2>/docs/spike/logs/sp02/`
-> 前审结论：不通过（P1~P12，5 项重审条件）——见 `<MAIN_V2>/docs/adr/S3-Challenger审查报告.md`
+> 审查对象：`<REPO_ROOT>/docs/adr/DECISION-CARDS.md`（v2.1.1）、`<REPO_ROOT>/docs/03-技术方案文档-v2.1.md`（v2.1.1）、
+> `<REPO_ROOT>/docs/adr/DECISION-REGISTER.md`（DC-10/11/12）、`<REPO_ROOT>/docs/spike/SP-02-决策卡.md` 及附件 `<REPO_ROOT>/docs/spike/logs/sp02/`
+> 前审结论：不通过（P1~P12，5 项重审条件）——见 `<REPO_ROOT>/docs/adr/S3-Challenger审查报告.md`
 > 方式：只读审查 + wire/日志原文抽查 + spike 源码核读；未执行任何 git 写操作，未修改被审查文件
 > 立场声明：本报告只负责攻击。凡未列入问题清单的部分，视为本次攻击未打穿。
 
@@ -89,7 +89,7 @@
 
 - **攻击路径**：ADR-2 生产形态是 BLOCKING（官方循环 + 自定义 ToolCallingManager 阻塞挂起）。挂起等待（Gate.await，默认 120s、可配分钟级）发生在 `executeToolCalls` 内部，而 Spring AI 1.1.8 官方 `OpenAiChatModel.internalStream` 把工具执行分支**硬编码** `subscribeOn(Schedulers.boundedElastic())`（SP-02 §4.1 自己的 javap 证据）；spike 实现里 `ExplicitLoopRunner` 又叠加了一层 `subscribeOn(boundedElastic).block()`。即：**BLOCKING 形态下每次挂起实际占用 1 条专用池线程 + 1 条 boundedElastic 线程**。S4 实现者按 §5.2 字面口径（"不占 boundedElastic"）只对专用池做容量规划 → boundedElastic（默认 10×CPU 线程 + 大队列）在"挂起并发 × 2 + 非挂起轮流式订阅"的占用下逐步排队 → 全部 AI 流式（含无关会话）延迟劣化——P8 的饱和攻击以改名方式复现。
 - **缓解事实（诚实声明）**：专用池 `AbortPolicy` 充当准入闸门，挂起并发上界 = 池容量，故不是无界饱和；SP-02 §6.2-3 也只声称"承载用有界平台线程池"，未声称免占 boundedElastic——错的是技术方案 §5.2 的表述。但"专用池容量 × 2 ≤ boundedElastic 容量"这一联动约束全文未披露，§13.2 #2 的压测范围也未含 boundedElastic。
-- **依据**：`<MAIN_V2>/docs/spike/SP-02-决策卡.md` §4.1（字节码引用）；`<MAIN_V2>/spike/sp02/src/main/java/com/example/spike/core/ExplicitLoopRunner.java`（callRound 的 `subscribeOn(Schedulers.boundedElastic()).collectList().block()`）；`<MAIN_V2>/spike/sp02/.../config/ExecutorConfig.java`；技术方案 §5.2 实现边界 1。
+- **依据**：`<REPO_ROOT>/docs/spike/SP-02-决策卡.md` §4.1（字节码引用）；`<REPO_ROOT>/spike/sp02/src/main/java/com/example/spike/core/ExplicitLoopRunner.java`（callRound 的 `subscribeOn(Schedulers.boundedElastic()).collectList().block()`）；`<REPO_ROOT>/spike/sp02/.../config/ExecutorConfig.java`；技术方案 §5.2 实现边界 1。
 - **建议**：S3 冻结前修正 §5.2/ADR-2 表述为"挂起占用专用池线程 1 条 + boundedElastic 线程 1 条（官方循环硬编码，无法移出），专用池为准入闸门"；§13.2 #2 压测范围补"boundedElastic 容量与专用池容量的联动校验"；或改选 predicate/调用方驱动形态（该形态工具结算不阻塞等待，E3/E4 已实测可续跑）并同步 ADR-1 口径。
 
 ### N2【中】技术方案 v2.1.1 未同步 SP-02 完成态——S3 交付文档与决策卡版本漂移
@@ -114,7 +114,7 @@
 
 ### N6【低·背景注】遗留参考文档与 DC-12 冲突的误读风险
 
-`<MAIN_V2>/docs/requirements.md`、`docs/technical-design.md`（均为 ai-example-claude-opus-5.5 v1.0 参考件，2026-10-05）含"JDK 21 虚拟线程；每个 AI 会话同时只允许一个活跃 run"等表述，与 DC-12 相反。它们不是本 S3 交付物（描述对象是另一分支），但混放于 `docs/` 根目录且无"参考件"标注，S4 实现者检索"虚拟线程"时可能误引。建议加标注或移入 `docs/merge/` 一类参考目录。
+`<REPO_ROOT>/docs/requirements.md`、`docs/technical-design.md`（均为 ai-example-claude-opus-5.5 v1.0 参考件，2026-10-05）含"JDK 21 虚拟线程；每个 AI 会话同时只允许一个活跃 run"等表述，与 DC-12 相反。它们不是本 S3 交付物（描述对象是另一分支），但混放于 `docs/` 根目录且无"参考件"标注，S4 实现者检索"虚拟线程"时可能误引。建议加标注或移入 `docs/merge/` 一类参考目录。
 
 ---
 

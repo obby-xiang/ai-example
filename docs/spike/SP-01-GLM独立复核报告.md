@@ -214,6 +214,6 @@ V-c4（重启恢复）按任务书三项必跑未强制要求，未单独执行�
 | 自启进程 | sp01c 实例 A/B（PIDs 15676/10192）、sp01ab 应用与代理（PIDs 26832/8928/13160）、sp01d 应用与代理（PIDs 26792/24320/25928）全部停止；未触碰任何非本任务进程 |
 | 端口 | `netstat` 复核 **18301/18302/18303/18304/18305/18312 均无 LISTENING** |
 | Redis | 实验键（`chat:mem:*` 5 个，含 `__ids__`）已逐一 DEL；`KEYS chat:mem:*` 为空、`glm-*` 无残留、**DBSIZE=0**（与复核前一致） |
-| 脱敏 | 报告与 `docs/spike/logs/glm-review/` 全量扫描：无本机绝对路径（`<MAIN_V2>`/`<MAVEN_HOME>`/`<MEMURAI_HOME>`/`<EVIDENCE_DIR>` 占位）、无 API key（`***`）、无用户名 |
+| 脱敏 | 报告与 `docs/spike/logs/glm-review/` 全量扫描：无本机绝对路径（`<REPO_ROOT>`/`<MAVEN_HOME>`/`<MEMURAI_HOME>`/`<EVIDENCE_DIR>` 占位）、无 API key（`***`）、无用户名 |
 | git | 未执行任何 git 写操作 |
 | 修改范围 | 仅新增 `docs/spike/SP-01-GLM独立复核报告.md` 与 `docs/spike/logs/glm-review/**`；spike 源码与三张决策卡原文未动 |

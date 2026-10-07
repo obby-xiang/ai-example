@@ -5,19 +5,19 @@
 > 与 `docs/evidence/S5b-deepseek-E2E移植验证.md`（§6.2/§6.3 裁决：采纳；§6.6 建议：补只读端点）。
 > 证据等级：**全部为实测**（单测真实执行、E2E 真实两轮、现场 REST 原始响应照录）；
 > 未实测到的一律标注【未触发】/【待裁决】，不做"应该是这样"的补全。
-> 施工日期：2026-10-07　分支：`main-v2`　施工前 HEAD：`ea30ce4`　（本棒**未做任何 git 写操作**）
+> 施工日期：2026-10-07　分支：`main`　施工前 HEAD：`ea30ce4`　（本棒**未做任何 git 写操作**）
 
 ## 0. 元信息与脱敏口径
 
 | 项 | 值 |
 |---|---|
-| 仓库 | `<MAIN_V2>`（= `<REPO_ROOT>/ai-example-code/ai-example-main-v2`，后端在 `backend/`） |
+| 仓库 | `<REPO_ROOT>`（后端在 `backend/`） |
 | 工具链 | JDK 21（PATH）/ Maven `<MAVEN_HOME>` / Spring Boot 3.5.14 / H2 2.x / JUnit 5 + AssertJ + MockMvc |
 | 外部依赖 | Memurai `127.0.0.1:6379`（`<MEMURAI_HOME>/memurai-cli` → `PONG`，只读探活）；真实模型 `deepseek-flash`（E2E 的 AI 用例） |
 | 端口 | 18330（独立库文件；启动前 `netstat` 无监听；验证后已释放） |
 | 数据库 | 独立库 `./data/e2e_s5f_db`（**不动**演示库 `config_mgr_db.mv.db`；验证后已删除本棒库文件） |
 | 原始记录 | `<TMP>/s5f-boot-A.log`（后端 stdout）、`<TMP>/s5f-runA.txt` / `s5f-runB.txt`（两轮脚本输出）、`<TMP>/s5f-mvn-test-final.log`（全量单测）、`<TMP>/s5f-evidence/raw.txt`（现场 REST 原始响应） |
-| 脱敏 | 本机绝对路径 → `<MAIN_V2>` / `<REPO_ROOT>` / `<MAVEN_HOME>` / `<MEMURAI_HOME>` / `<TMP>`；AI key → `***`（仅经进程环境变量注入，**未落任何文件**） |
+| 脱敏 | 本机绝对路径 → `<REPO_ROOT>` / `<MAVEN_HOME>` / `<MEMURAI_HOME>` / `<TMP>`；AI key → `***`（仅经进程环境变量注入，**未落任何文件**） |
 
 **本棒 7 项**（指挥官已定，照此实施）：
 ① 预检查阻断守卫　② 导出/同类作业互斥 409　③ 未知操作符抛异常　④ 重复编码创建定义 409
@@ -200,9 +200,9 @@ GET /api/ai/tools?taskType=IMPORT&step=PUBLISH     → context=task:IMPORT/PUBLI
 3. 三者 v5 均为 `runs.using: node24` —— 这正是要清掉的弃用告警的根因（v4 系列为 node20，
    且上游已给 v4 加弃用告警：`setup-java v4.9.1` release note 明写 "Adds a deprecation warning for setup-java v4"）。
 
-**【未触发】远程 run**：见 §6.5 —— 本棒实测 `ci.yml` 的触发条件是 **push/PR 到 `main-v2`**，
+**【未触发】远程 run**：见 §6.5 —— 本棒实测 `ci.yml` 的触发条件是 **push/PR 到 `main`**，
 推一个一次性分支**不会**触发该 workflow，而触发它需要开 PR（超出"临时分支"授权），且本机无 `gh`。
-故本项以"由提交官推送到 `main-v2` 后远程 run 必须仍绿"为最终验收条件，本棒只交本地改动。
+故本项以"由提交官推送到 `main` 后远程 run 必须仍绿"为最终验收条件，本棒只交本地改动。
 
 ### 1.7 ⑦ E2E TC18 抗抖动
 
@@ -247,7 +247,7 @@ GET /api/ai/tools?taskType=IMPORT&step=PUBLISH     → context=task:IMPORT/PUBLI
 
 ---
 
-## 3. 单测结果（真实执行，工作目录 `<MAIN_V2>/backend`）
+## 3. 单测结果（真实执行，工作目录 `<REPO_ROOT>/backend`）
 
 ```bash
 <MAVEN_HOME>/bin/mvn.cmd -B test
@@ -275,14 +275,14 @@ GET /api/ai/tools?taskType=IMPORT&step=PUBLISH     → context=task:IMPORT/PUBLI
 
 ```bash
 # 构建
-cd <MAIN_V2>/backend && <MAVEN_HOME>/bin/mvn.cmd -B -DskipTests package
+cd <REPO_ROOT>/backend && <MAVEN_HOME>/bin/mvn.cmd -B -DskipTests package
 # 启动（独立库 + 冷启；key 仅经进程环境变量注入，未落文件）
 rm -f data/e2e_s5f_db.mv.db data/e2e_s5f_db.trace.db
 AI_API_KEY="***" java -jar target/config-mgr.jar --server.port=18330 \
   --spring.datasource.url="jdbc:h2:file:./data/e2e_s5f_db;DB_CLOSE_DELAY=-1" \
   --app.job.batch-size=10 --app.job.demo-batch-delay-ms=150   # stdout → <TMP>/s5f-boot-A.log
 # 执行（两轮）
-cd <MAIN_V2>
+cd <REPO_ROOT>
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify-e2e.ps1 \
   -Base http://127.0.0.1:18330 -BackendLog <TMP>/s5f-boot-A.log
 ```
@@ -405,9 +405,9 @@ docs/evidence/S5f-守卫与API语义修复验证.md（本文）
 
 ### 6.5 项⑥：远程 CI run 的验证前提不成立（**请知悉/裁决**）
 
-- 本棒实测 `ci.yml` 的触发条件是 `on: push/pull_request: branches: [main-v2]`；
+- 本棒实测 `ci.yml` 的触发条件是 `on: push/pull_request: branches: [main]`；
   推一个**一次性分支不会触发**该 workflow，凭空验证不了"远程 run 仍绿"。
-- 要触发它只能：把改动推到 `main-v2`（禁止）或**开 PR 到 `main-v2`**（本棒仅获"临时分支"授权，
+- 要触发它只能：把改动推到 `main`（禁止）或**开 PR 到 `main`**（本棒仅获"临时分支"授权，
   且本机无 `gh` CLI，故未做）。
 - 故项⑥ 的验收按任务书前提**留给提交官推送后确认**。本棒已完成的本地验证见 §1.6（v5 标签存在、
   入参兼容、node24 运行时 = 弃用告警根因）。

@@ -8,7 +8,7 @@
 
  :: Spring Boot ::               (v3.5.14)
 
-2026-10-07T00:27:38.410+08:00  INFO 13736 --- [sp02-resume-protocol] [           main] com.example.spike.SpikeApplication       : Starting SpikeApplication v0.0.1-SNAPSHOT using Java 21.0.12 with PID 13736 (<MAIN_V2>/spike/sp02\target\sp02-resume-protocol-0.0.1-SNAPSHOT.jar started by <USER> in <MAIN_V2>/spike/sp02)
+2026-10-07T00:27:38.410+08:00  INFO 13736 --- [sp02-resume-protocol] [           main] com.example.spike.SpikeApplication       : Starting SpikeApplication v0.0.1-SNAPSHOT using Java 21.0.12 with PID 13736 (<REPO_ROOT>/spike/sp02\target\sp02-resume-protocol-0.0.1-SNAPSHOT.jar started by <USER> in <REPO_ROOT>/spike/sp02)
 2026-10-07T00:27:38.413+08:00  INFO 13736 --- [sp02-resume-protocol] [           main] com.example.spike.SpikeApplication       : No active profile set, falling back to 1 default profile: "default"
 2026-10-07T00:27:39.438+08:00  INFO 13736 --- [sp02-resume-protocol] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Multiple Spring Data modules found, entering strict repository configuration mode
 2026-10-07T00:27:39.445+08:00  INFO 13736 --- [sp02-resume-protocol] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Bootstrapping Spring Data Redis repositories in DEFAULT mode.

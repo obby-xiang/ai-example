@@ -1,7 +1,7 @@
 SP-01d 附件 A：故障注入方法、复现步骤与 Reactor 超时语义探针
 
 一、故障注入方式（不在被验证进程内做任何 mock）
-    官方 ChatModel 的 base-url 指向本 spike 的本地故障代理（<MAIN_V2>/spike/sp01d/scripts/fault-proxy.mjs），
+    官方 ChatModel 的 base-url 指向本 spike 的本地故障代理（<REPO_ROOT>/spike/sp01d/scripts/fault-proxy.mjs），
     代理再转发到真实上游（https://api.deepseek.com）。代理按 SSE 事件边界（"\n\n"）转发，
     绝不切碎半个事件；故障通过控制面 POST /__fault 实时切换。
 
@@ -18,7 +18,7 @@ SP-01d 附件 A：故障注入方法、复现步骤与 Reactor 超时语义探�
 
     复现步骤：
       export DEEPSEEK_API_KEY=***        # 仅环境变量，未写入任何文件
-      cd <MAIN_V2>/spike/sp01d && <MAVEN_HOME>/mvn -B clean package
+      cd <REPO_ROOT>/spike/sp01d && <MAVEN_HOME>/mvn -B clean package
       node scripts/fault-proxy.mjs --port 18304 --upstream https://api.deepseek.com --evidence evidence &
       java -jar target/sp01d-resilience-0.0.1-SNAPSHOT.jar \
            --spring.ai.openai.base-url=http://127.0.0.1:18304 --server.port=18303 --spring.profiles.active=verbose &

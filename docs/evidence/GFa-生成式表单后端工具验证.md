@@ -5,19 +5,19 @@
 > 挂既有 frontend_tool 通道与回灌幂等语义）；`docs/adr/DECISION-CARDS.md`（前端通道工具 / 挂起外置续跑 / 409 串行化）；
 > `docs/s4/S4.2-AI-Runtime-合流规格.md`（`gate/SpToolCallingManager`、`gate/ConfirmGate`、`web/AiController` 的通道契约）。
 > 证据等级：**全部为实测**（单测真实执行；原始响应与工具结果文本照录自实跑输出）；未实测到的一律标注【未实测】/【待裁决】。
-> 施工日期：2026-10-07　分支：`main-v2`　施工前 HEAD：`4d3b76c`　（本棒**未执行任何 git 写操作**）
+> 施工日期：2026-10-07　分支：`main`　施工前 HEAD：`4d3b76c`　（本棒**未执行任何 git 写操作**）
 > 范围边界：**只做后端**（`backend/`）。前端 `frontend/` 一行未动（FormRenderer 属 GF-B）；`docs/` 下只新增本文件。
 
 ## 0. 元信息与脱敏口径
 
 | 项 | 值 |
 |---|---|
-| 仓库 | `<MAIN_V2>`（= `<REPO_ROOT>/ai-example-code/ai-example-main-v2`，后端模块 `backend/`） |
+| 仓库 | `<REPO_ROOT>`（后端模块 `backend/`） |
 | 工具链 | JDK 21 / Maven `<MAVEN_HOME>` / Spring Boot 3.5.14 / Spring AI 1.1.x（工具 Schema 与循环由官方提供）/ JUnit 5 + AssertJ + Mockito + MockMvc |
 | 外部依赖（本棒） | **无**：全部验证在单测层完成，不连 Redis、不连模型、不起 Web 容器（`@SpringBootTest` 用 H2 内存库，另有两个 standalone MockMvc 用例不启 Spring） |
-| 单测命令 | `"<MAVEN_HOME>/mvn.cmd" -B test`（工作目录 `<MAIN_V2>/backend`） |
+| 单测命令 | `"<MAVEN_HOME>/mvn.cmd" -B test`（工作目录 `<REPO_ROOT>/backend`） |
 | 原始记录 | `<TMP>/gfa-mvn-test-final.log`（全量单测）、`<TMP>/gfa-dump.log`（工具描述 / 校验输出原文）、`<TMP>/gfa-http-dump.log`（HTTP 契约原文） |
-| 脱敏 | 本机绝对路径 → `<MAIN_V2>` / `<REPO_ROOT>` / `<MAVEN_HOME>` / `<TMP>`；**本棒未使用任何 AI key**（无模型调用），故无 key 可脱敏；无用户名、无本机盘符样式路径 |
+| 脱敏 | 本机绝对路径 → `<REPO_ROOT>` / `<MAVEN_HOME>` / `<TMP>`；**本棒未使用任何 AI key**（无模型调用），故无 key 可脱敏；无用户名、无本机盘符样式路径 |
 
 ---
 
@@ -303,7 +303,7 @@ POST 同上（{"cancelled":true}）→ 200
 ### 6.2 全量单测结果（原始摘要照录，`<TMP>/gfa-mvn-test-final.log`）
 
 ```
-$ cd <MAIN_V2>/backend && "<MAVEN_HOME>/mvn.cmd" -B test
+$ cd <REPO_ROOT>/backend && "<MAVEN_HOME>/mvn.cmd" -B test
 [INFO] Tests run: 246, Failures: 0, Errors: 0, Skipped: 0
 [INFO] BUILD SUCCESS
 ```
@@ -399,7 +399,7 @@ $ cd <MAIN_V2>/backend && "<MAVEN_HOME>/mvn.cmd" -B test
 
 ### 8.4 前端需要顺手改掉的过时注释（不属本棒范围）
 
-`frontend/src/utils/frontend-tools.ts` 顶部注释仍写"main-v2 后端 `AiTools` 共 **12** 个 `@Tool`，其中带
+`frontend/src/utils/frontend-tools.ts` 顶部注释仍写"main 后端 `AiTools` 共 **12** 个 `@Tool`，其中带
 `@ToolChannel(FRONTEND)` 的**只有 2 个**"——**本棒之前就已过时**（S4.4d 把 4 个工作区动作标为 FRONTEND 后
 实为 6 个），本棒再增 1 个后为：**18 个工具 / 7 个前端通道工具**。`frontend/` 不在本棒范围内，
 故只在此登记，请 GF-B 一并更正（它与"前端零改动即可生效"的判断依据直接相关）。

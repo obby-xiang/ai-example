@@ -8,7 +8,7 @@
 
  :: Spring Boot ::               (v3.5.14)
 
-2026-10-06T21:31:14.266+08:00  INFO 26792 --- [sp01d-resilience] [           main] com.example.spike.SpikeApplication       : Starting SpikeApplication v0.0.1-SNAPSHOT using Java 21.0.12 with PID 26792 (<MAIN_V2>\spike\sp01d\target\sp01d-resilience-0.0.1-SNAPSHOT.jar started by <USER> in <MAIN_V2>\spike\sp01d)
+2026-10-06T21:31:14.266+08:00  INFO 26792 --- [sp01d-resilience] [           main] com.example.spike.SpikeApplication       : Starting SpikeApplication v0.0.1-SNAPSHOT using Java 21.0.12 with PID 26792 (<REPO_ROOT>\spike\sp01d\target\sp01d-resilience-0.0.1-SNAPSHOT.jar started by <USER> in <REPO_ROOT>\spike\sp01d)
 2026-10-06T21:31:14.269+08:00 DEBUG 26792 --- [sp01d-resilience] [           main] com.example.spike.SpikeApplication       : Running with Spring Boot v3.5.14, Spring v6.2.18
 2026-10-06T21:31:14.298+08:00  INFO 26792 --- [sp01d-resilience] [           main] com.example.spike.SpikeApplication       : The following 1 profile is active: "verbose"
 2026-10-06T21:31:15.457+08:00  INFO 26792 --- [sp01d-resilience] [           main] o.s.b.w.embedded.tomcat.TomcatWebServer  : Tomcat initialized with port 18303 (http)

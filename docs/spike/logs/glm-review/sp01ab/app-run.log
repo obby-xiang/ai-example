@@ -8,7 +8,7 @@
 
  :: Spring Boot ::               (v3.5.14)
 
-2026-10-06T21:25:57.033+08:00  INFO 26832 --- [sp01ab-frontend-tool-hitl] [           main] com.example.spike.SpikeApplication       : Starting SpikeApplication v0.0.1-SNAPSHOT using Java 21.0.12 with PID 26832 (<MAIN_V2>\spike\sp01ab\target\sp01ab-frontend-tool-hitl-0.0.1-SNAPSHOT.jar started by <USER> in <MAIN_V2>\spike\sp01ab)
+2026-10-06T21:25:57.033+08:00  INFO 26832 --- [sp01ab-frontend-tool-hitl] [           main] com.example.spike.SpikeApplication       : Starting SpikeApplication v0.0.1-SNAPSHOT using Java 21.0.12 with PID 26832 (<REPO_ROOT>\spike\sp01ab\target\sp01ab-frontend-tool-hitl-0.0.1-SNAPSHOT.jar started by <USER> in <REPO_ROOT>\spike\sp01ab)
 2026-10-06T21:25:57.038+08:00  INFO 26832 --- [sp01ab-frontend-tool-hitl] [           main] com.example.spike.SpikeApplication       : No active profile set, falling back to 1 default profile: "default"
 2026-10-06T21:25:58.116+08:00  INFO 26832 --- [sp01ab-frontend-tool-hitl] [           main] o.s.b.w.embedded.tomcat.TomcatWebServer  : Tomcat initialized with port 18301 (http)
 2026-10-06T21:25:58.127+08:00  INFO 26832 --- [sp01ab-frontend-tool-hitl] [           main] o.apache.catalina.core.StandardService   : Starting service [Tomcat]

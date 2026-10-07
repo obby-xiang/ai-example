@@ -1,7 +1,7 @@
 # S3 Challenger 审查报告 —— DECISION-CARDS（ADR-1~12）与技术方案 v2.1
 
 > 审查人：反方审查者（Challenger）　日期：2026-10-06
-> 审查对象：`<MAIN_V2>/docs/adr/DECISION-CARDS.md`（12 张 ADR）、`<MAIN_V2>/docs/03-技术方案文档-v2.1.md`
+> 审查对象：`<REPO_ROOT>/docs/adr/DECISION-CARDS.md`（12 张 ADR）、`<REPO_ROOT>/docs/03-技术方案文档-v2.1.md`
 > 依据材料：DECISION-REGISTER（DC-01~09）、需求冻结版 RD-001 v2.1、spike 三卡（SP-01ab/c/d）+ GLM 独立复核报告、evidence V1~V9 与 Q1~Q11
 > 方式：只读审查，未执行任何 git 写操作，未修改被审查文件
 > 立场声明：本报告只负责攻击。凡未列入问题清单的部分，视为本次攻击未打穿（见 §3）。

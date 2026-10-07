@@ -1,5 +1,5 @@
 SP-01d 附件 B：V-d1 断流有界重试 逐 case 实测记录
-（原始数据：<MAIN_V2>/spike/sp01d/evidence/sp01d-vd1-*.json；此处为脱敏摘要）
+（原始数据：<REPO_ROOT>/spike/sp01d/evidence/sp01d-vd1-*.json；此处为脱敏摘要）
 
 ### vd1-baseline
   说明: 无故障对照（代理透传）

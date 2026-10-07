@@ -1,13 +1,13 @@
 # GF-C 端到端执行验证（执行棒）——生成式表单 E2E 全量照跑
 
 > 角色：提交官（验收与取证）。**零产品代码改动、零 git 写操作**；本文档为唯一新增文件，保持未提交（提交官统一入库）。
-> 仓库：`<MAIN_V2>`（= `<REPO_ROOT>/ai-example-code/ai-example-main-v2`），分支 `main-v2`，HEAD `d19da30`。
+> 仓库：`<REPO_ROOT>`，分支 `main`，HEAD `d19da30`。
 > 执行日期：2026-10-07。
 > **首轮**（未修复）：19:40:01 → 19:41:34（93 秒）——§1–§9 记录此轮及其根因分析。
 > **最终轮**（裁决 #1/#3/#4 修复后）：19:59:51 → 20:01:22（91 秒），`PASS=27 FAIL=0 GFSKIP=0`——**见 §10**。
 > 被验对象：工作区未提交的 `scripts/verify-e2e.ps1`（含 GF1–GF5 新用例）；设计稿 `docs/evidence/GFc-E2E用例设计-GLM-5.3.md`。
 > 证据等级：**全部为实测**（真实后端进程 + 真实模型 `deepseek-flash` + 真实 Redis）；未见实测的一律标注【推断】/【待裁决】。
-> 脱敏：不出现真实盘符（统一 `<MAIN_V2>` / `<TMP>`）、密钥（统一 `***`）、用户名、主机名。
+> 脱敏：不出现真实盘符（统一 `<REPO_ROOT>` / `<TMP>`）、密钥（统一 `***`）、用户名、主机名。
 
 ---
 
@@ -56,7 +56,7 @@
 
 ```bash
 # ① 复用已构建的 jar（依据见 §1.3；本棒未改后端，故不重建）
-cd <MAIN_V2>/backend
+cd <REPO_ROOT>/backend
 rm -f data/e2e_gfc_db.mv.db data/e2e_gfc_db.trace.db
 AI_API_KEY="***" java -jar target/config-mgr.jar \
   --server.port=18330 \
@@ -64,7 +64,7 @@ AI_API_KEY="***" java -jar target/config-mgr.jar \
   --app.job.batch-size=10 --app.job.demo-batch-delay-ms=150 > <TMP>/boot-gfc.log 2>&1 &
 
 # ② 全量照跑（22 既有 + GF1–GF5；未开 -EnableGf6）
-cd <MAIN_V2>
+cd <REPO_ROOT>
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify-e2e.ps1 \
   -Base http://127.0.0.1:18330 -BackendLog "<TMP>/boot-gfc.log" > <TMP>/e2e-gfc-run1.log 2>&1
 ```
@@ -433,7 +433,7 @@ return $frames     // ③ 返回可能为空的集合
 - 临时库已删：`backend/data/e2e_gfc_db.mv.db`（含 `.trace.db`）；演示库 `config_mgr_db.mv.db` mtime 未变（仍 13:48）；
 - `backend/data/files/` 无本棒时段（19:38 之后）新文件残留；
 - 工作区：`git status` 仅 `scripts/verify-e2e.ps1`（M，被验对象）与 `docs/evidence/GFc-*.md`（??，含本棒新增）——无其它改动；
-- 脱敏自查：本文不出现真实盘符 / 密钥 / 用户名 / 主机名（一律 `<MAIN_V2>` / `<TMP>` / `***`）；密钥仅经环境变量注入进程，**未落文件**。
+- 脱敏自查：本文不出现真实盘符 / 密钥 / 用户名 / 主机名（一律 `<REPO_ROOT>` / `<TMP>` / `***`）；密钥仅经环境变量注入进程，**未落文件**。
 
 ---
 

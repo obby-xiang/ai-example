@@ -2,7 +2,7 @@
 
 > 角色：反方审查 / 红队。只审查、不改代码；结论写入本文档。
 > 审查对象：GF-B 生成式表单前端棒（作者 Kimi K2.8，与审查方异厂商）。
-> 仓库：`<MAIN_V2>`（= `<REPO_ROOT>/ai-example-code/ai-example-main-v2`），分支 `main-v2`，HEAD `b41784a`。
+> 仓库：`<REPO_ROOT>`，分支 `main`，HEAD `b41784a`。
 > 工作区 6 项未提交改动：4 改（`AiPanel.vue` / `stores/ai.ts` / `types/ai.ts` / `types/api.ts`）+ 2 新增（`FormRenderer.vue` / `types/form-schema.ts`）。
 > 审查方式：`git diff HEAD` 读 4 改 + 直接读 2 新增；对照后端源码 `backend/.../ai/`（`AiController` / `ConfirmGate` / `FrontendToolResultRequest` / `SseChatEmitter`）与 `docs/evidence/GFa-生成式表单后端工具验证.md` §8。
 > 证据等级：**实测**（读代码/读源码直接确认）、**推断**（由代码路径推演、未跑 UI）、**假设**（需进一步验证）。
@@ -27,7 +27,7 @@
 
 ### 问题 1 —— 中（Medium）｜回灌/取消使用可变 `activeRunId`，未使用表单捕获的 `runId`（串会话错配隐患）
 
-- **位置**：`<MAIN_V2>/frontend/src/stores/ai.ts`
+- **位置**：`<REPO_ROOT>/frontend/src/stores/ai.ts`
   - `submitFrontendToolResult`（约 L587-623）内部 `const runId = this.activeRunId`；
   - `submitGenerativeForm`（L674-699）与 `cancelGenerativeForm`（L702-713）只传 `form.toolCallId`，走上述函数时实际用的是 `this.activeRunId`；
   - `openGenerativeForm`（L655-663）明明把 `runId`、`messageId` 存进了 `activeForm`。
@@ -38,7 +38,7 @@
 
 ### 问题 2 —— 中（Medium）｜断流（非终态 `onClose`）路径不清表单态与本地超时计时器
 
-- **位置**：`<MAIN_V2>/frontend/src/stores/ai.ts` `send`（L415-426）的 `onClose` 分支只置 `streamInterrupted` 与 `notice`，**未** disarm / 未清 `activeForm`。
+- **位置**：`<REPO_ROOT>/frontend/src/stores/ai.ts` `send`（L415-426）的 `onClose` 分支只置 `streamInterrupted` 与 `notice`，**未** disarm / 未清 `activeForm`。
 - **证据（实测）**：对照四条已覆盖的清理路径 —— `done`（L979-983）、`error`（L993-996）、`stop()`（L725-729）、`resetSession()`（L755-756）都调了 `disarmFormExpiry()` + `this.activeForm = null`；唯独 `onClose`（断流/缺终帧）这一条漏了。清单 #2 明确要求"done/error/停止/重置路径都清理"，而**断流是第五个真实存在的收尾出口**（ADR-6 显式提示"结果可能不完整、可重挂"）。
 - **复现路径（推断）**：表单打开期间 SSE 连接中断 → `onClose(terminal=false)` 触发 → `loading=false`（`finally` 块）而 `activeForm`/计时器保留 → 计时器继续走（或用户仍能看到表单卡）。若计时器到点触发 `cancelGenerativeForm(true)`，回灌经 HTTP POST 仍能送达后端并收敛（POST 不依赖 SSE 流）；但若用户在计时器到点前发新消息启动新 run，则与问题 1 叠加：旧表单计时器把取消打到新 run 的 `activeRunId` 上。
 - **影响评估（推断）**：计时器不会无限泄漏（到点必触发一次取消并 disarm），但 `activeForm` 会以 `filling`/`cancelled` 态残留在会话态里，直到下一轮的 `done`/`error`/`openGenerativeForm` 覆盖或 `resetSession`。主要危害是与问题 1 组合产生错配回灌。
@@ -46,7 +46,7 @@
 
 ### 问题 3 —— 低（Low）｜字段 key 允许 `__proto__`/`constructor` 等原型键，`buildInitialValues` 用 `{}` 直接赋值
 
-- **位置**：`<MAIN_V2>/frontend/src/types/form-schema.ts` `buildInitialValues`（L136-142）/ `initialValueOf`；后端白名单正则 `^[A-Za-z_][A-Za-z0-9_]*$`（GFa §2.2）。
+- **位置**：`<REPO_ROOT>/frontend/src/types/form-schema.ts` `buildInitialValues`（L136-142）/ `initialValueOf`；后端白名单正则 `^[A-Za-z_][A-Za-z0-9_]*$`（GFa §2.2）。
 - **证据（实测）**：该正则**不排除** `__proto__`、`constructor`、`prototype`（三者均满足 `[A-Za-z_][A-Za-z0-9_]*`）。`buildInitialValues` 用 `const model = {}` 后 `model[field.key] = …` 直接赋值。
 - **复现路径（推断）**：模型给出 `{"form":{"scenario":"FILTER","fields":[{"key":"__proto__","label":"x","type":"multi_select","options":[{"value":"a"}]}]}}`（后端闸门放行，因为 regex 通过、选项合法）→ 前端 `model['__proto__'] = []`。对 `{}` 字面量赋 `__proto__` 为**数组（对象）**会改写该局部对象的原型，且**不产生 own property**。
 - **影响评估（推断）**：该字段值不会成为 own property，因此 `{...model.value}`（own 可枚举）**不会**把 `__proto__` 传播出去，`JSON.stringify` 也不会带上它 —— 不构成可利用的全局/跨对象原型污染（model 每次新建、无 `Object.assign`/深合并攻击面）。实际后果是：`__proto__` 字段无法正常取值/回填，`checkFormValues` 读的是继承来的原型对象/数组而非预期类型，最终该字段要么被误判、要么提交被后端 400 拒。属"畸形 schema 键导致字段不可用"的健壮性问题。`constructor` 键则只是覆盖自身 own property，无安全后果。
@@ -54,7 +54,7 @@
 
 ### 问题 4 —— 低（Low）｜400 非 `FORM_RESULT_REJECTED` 码时，前端仅特判其一，降级提示可恢复但拒绝细节不进表单卡
 
-- **位置**：`<MAIN_V2>/frontend/src/stores/ai.ts` `submitFrontendToolResult` 的 catch（L610-621）；后端 `AiController.rejectedFrontendResult`（L535-551）。
+- **位置**：`<REPO_ROOT>/frontend/src/stores/ai.ts` `submitFrontendToolResult` 的 catch（L610-621）；后端 `AiController.rejectedFrontendResult`（L535-551）。
 - **证据（实测）**：后端 `rejectedFrontendResult` 存在 `verdict == null` 分支，产出 `code:"FRONTEND_TOOL_RESULT_REJECTED"`。但 `ConfirmGate.submitFrontendResult` 只有 `verdict != null && !verdict.accepted()` 才返回 `Outcome.REJECTED`（L358-363），即 **REJECTED 必带非空 verdict**，故 `verdict==null` 分支是**死代码**。当前对 `generative_form` 而言，400 拒绝码只有 `FORM_RESULT_REJECTED` 一种。前端 `ErrorCode` 已登记 `FORM_RESULT_REJECTED`/`FORM_SCHEMA_REJECTED`/`FRONTEND_CANCELLED` 三码，但 `submitFrontendToolResult` 只特判 `FORM_RESULT_REJECTED`。
 - **复现路径（推断）**：若未来新增复核器（或后端改动）使某个 400 带出 `FRONTEND_TOOL_RESULT_REJECTED` 或其它码 → 前端落入通用分支 → `this.notice = message`（后端 `message` 字段进面板 `el-alert`）+ 返回 `{ok:false, message}` → `submitGenerativeForm` 置 `form.status='filling'`、`form.error='提交失败，请重试或点「取消」放弃'`。
 - **影响评估（实测+推断）**：**仍可恢复**（status 回 `filling`，可重试/取消），拒绝细节也**未完全丢失**（经 `notice` 面板 Alert 展示，`AiPanel.vue` L89-94 用 `:title="ai.notice"` 文本渲染）。但表单卡内显示的是泛化文案"提交失败"，而不是后端的具体拒绝原因（如"未知字段 xxx"），**提示略误导**。非阻断。
@@ -62,7 +62,7 @@
 
 ### 问题 5 —— 低（Low）｜取消回灌失败的错误提示不可见（`status` 已 `cancelled`，错误无人渲染）
 
-- **位置**：`<MAIN_V2>/frontend/src/stores/ai.ts` `cancelGenerativeForm`（L702-713）；`AiPanel.vue` `liveForm`（L387-391）与 fallback（L214-216）。
+- **位置**：`<REPO_ROOT>/frontend/src/stores/ai.ts` `cancelGenerativeForm`（L702-713）；`AiPanel.vue` `liveForm`（L387-391）与 fallback（L214-216）。
 - **证据（实测）**：`cancelGenerativeForm` 先置 `form.status='cancelled'`，回灌失败后写 `form.error='…取消回灌未送达…后端将在超时后自动收尾'`。但 `liveForm` 只在 `status==='filling'||'submitting'` 时非空，`cancelled` 态下 `liveForm=null` → FormRenderer 不渲染 → fallback 只显示 `表单已取消` tag，**`form.error` 无任何渲染点**。
 - **复现路径（推断）**：本地超时触发自动取消，但取消 POST 网络失败 → 用户看到"表单已取消"，却看不到"后端其实还在等、将超时收尾"的真相。
 - **影响评估（推断）**：纯 UX/可观测性缺口，后端权威超时兜底，无正确性风险。
@@ -70,14 +70,14 @@
 
 ### 问题 6 —— 信息（Info）｜提交/本地超时取消竞态的瞬时 `status` 覆写
 
-- **位置**：`<MAIN_V2>/frontend/src/stores/ai.ts` `submitGenerativeForm`（L687-698）与 `cancelGenerativeForm`（L707-712）。
+- **位置**：`<REPO_ROOT>/frontend/src/stores/ai.ts` `submitGenerativeForm`（L687-698）与 `cancelGenerativeForm`（L707-712）。
 - **证据（实测）**：两者 `await` 回灌返回后**无条件**写 `form.status`。若"提交在途"与"本地超时取消"并发（后端 `submitLock` 串行化，先到者 ACCEPTED、后到者 409 DUPLICATE），存在：提交 ACCEPTED 后取消得 409 → 取消分支不写 status，但提交分支把已 `cancelled` 覆盖回 `submitted`（或相反）的瞬时错序。
 - **影响评估（推断）**：后端为权威事实，结局帧 `frontend_tool_result` 随后清空 `activeForm`，最终收敛；仅 UI 短暂显示错误终态标签，无数据面影响。
 - **修复建议**：写 `status` 前判当前 `activeForm` 是否仍指向同一 `toolCallId` 且未被清空；或统一由结局帧收敛、本地只做"pending 中"与"出错回填"两态。
 
 ### 问题 7 —— 信息（Info）｜本地超时/倒计时依赖客户端时钟（与既有确认卡同口径）
 
-- **位置**：`<MAIN_V2>/frontend/src/stores/ai.ts` `openGenerativeForm`（L664-670）`deadline - Date.now()`；`AiPanel.vue` `formRemainingSeconds`（L395-400）。
+- **位置**：`<REPO_ROOT>/frontend/src/stores/ai.ts` `openGenerativeForm`（L664-670）`deadline - Date.now()`；`AiPanel.vue` `formRemainingSeconds`（L395-400）。
 - **证据（实测）**：`expiresAt` 为服务端 epoch 毫秒，本地 `deadline - Date.now()` 与 `deadline - now.value` 都依赖客户端时钟。若客户端时钟与服务器漂移 X，本地超时提前/滞后 X。后端 `ConfirmGate` 的 `deadline = startedAt + timeoutSeconds*1000` 才是权威。
 - **影响评估（推断）**：后端权威超时兜底；滞后时用户多填一会儿提交会得 409，提前时表单提前置灰并走取消，均可恢复。与既有确认卡倒计时同口径，**非本棒新增风险**，仅登记。
 - **修复建议**：可选——以 `expiresAt - (服务端心跳里的时间基准)` 或服务端下发剩余秒数修正漂移；或维持现状并在注释中标注"客户端时钟近似、后端兜底"。
