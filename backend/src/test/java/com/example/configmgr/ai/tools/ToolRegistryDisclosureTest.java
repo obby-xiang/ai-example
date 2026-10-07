@@ -3,28 +3,36 @@ package com.example.configmgr.ai.tools;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ToolMeta;
 import com.example.configmgr.ai.tool.ToolRegistry;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.TestPropertySource;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * S4.4d 用例：工作区动作的通道/风险元数据 + 渐进披露（FR-5.2 三重防线的防线①）。
+ * S4.4d 用例（S4.4e 扩充）：工具元数据与渐进披露（FR-5.2 三重防线的防线①）。
  *
- * <p>覆盖两件容易在改动中悄悄失守的事：
+ * <p>覆盖三类容易在改动中悄悄失守的事：
  * <ol>
- * <li><b>通道与风险</b>：4 个向导动作必须是 {@code FRONTEND} 通道（后端只挂起、不执行副作用）
+ * <li><b>通道与风险（S4.4d）</b>：4 个向导动作必须是 {@code FRONTEND} 通道（后端只挂起、不执行副作用）
  * 且为 {@code READ}（不得误升级成 DANGER —— 那会让前端动作多走一道确认门）；</li>
  * <li><b>披露边界</b>：向导动作在任务中心与对应任务类型下披露，非向导页面（配置定义/数据浏览）
  * 与空上下文不披露；同时锁住既有 BACKEND 工具的披露范围不回退（{@code start_import}/
- * {@code start_publish} 仍只在导入任务的对应步骤披露），并显式登记本棒放宽的两档
- * （{@code start_export}/{@code start_precheck} 增加 {@code page:tasks}）。</li>
+ * {@code start_publish} 仍只在导入任务的对应步骤披露），并显式登记 S4.4d 放宽的两档
+ * （{@code start_export}/{@code start_precheck} 增加 {@code page:tasks}）；</li>
+ * <li><b>S4.4e 三项</b>：{@code create_task} 的披露范围（任务中心 + 两类向导页，其余页面不披露）与
+ * 风险（{@code WRITE}，不进确认门）；启动类四个工具一律 {@code DANGER}（确认门，FR-5.3）；
+ * {@code set_condition} 的入参 Schema 里必须出现前端契约的内层结构
+ * （{@code conditions.fields[].fieldCode/operator/value} + {@code conditions.scopeKeys}），
+ * 且<b>不得</b>再出现扁平参数键（前端只读 {@code defCode/conditions}，扁平键会被静默丢弃）。</li>
  * </ol>
  */
 @SpringBootTest
@@ -47,6 +55,10 @@ class ToolRegistryDisclosureTest {
     /** 全部前端通道工具（2 个既有 + 4 个新增）。 */
     private static final List<String> FRONTEND_TOOLS = List.of("open_export_file_editor", "download_export_file",
             "navigate_to", "select_definitions", "set_condition", "confirm_step");
+
+    /** S4.4e 裁决⑥：必须经确认门的启动类工具（FR-5.3 明文清单）。 */
+    private static final List<String> GATED_START_TOOLS = List.of("start_export", "start_precheck", "start_import",
+            "start_publish");
 
     @Autowired
     private ToolRegistry toolRegistry;
@@ -77,6 +89,7 @@ class ToolRegistryDisclosureTest {
     void wizardToolsAreNotDisclosedWithoutWorkspaceContext() {
         List<String> names = namesFor(AiContext.empty());
         assertThat(names).doesNotContainAnyElementsOf(SCOPED_WIZARD_TOOLS);
+        assertThat(names).doesNotContain("create_task");
         assertThat(names).contains("list_config_defs", "list_tasks", "navigate_to");
     }
 
@@ -86,6 +99,8 @@ class ToolRegistryDisclosureTest {
             List<String> names = namesFor(AiContext.of(page, null, null, null, null));
             assertThat(names).as("页面 %s 不得披露向导动作", page)
                     .doesNotContainAnyElementsOf(SCOPED_WIZARD_TOOLS);
+            // 创建任务同理：只在任务中心/向导披露（S4.4e 裁决②）
+            assertThat(names).as("页面 %s 不得披露 create_task", page).doesNotContain("create_task");
             // 导航动作是任意页面进入向导的入口，披露范围最宽
             assertThat(names).contains("navigate_to");
         }
@@ -130,8 +145,81 @@ class ToolRegistryDisclosureTest {
         // 后端桩体永不执行：任何直接调用都只能拿到哨兵文本，绝不产生副作用
         assertThat(aiTools.navigateTo("export", 1L)).isEqualTo(AiTools.FRONTEND_STUB);
         assertThat(aiTools.selectDefinitions(new String[] { "CURRENCY" }, "REPLACE")).isEqualTo(AiTools.FRONTEND_STUB);
-        assertThat(aiTools.setCondition("CURRENCY", Map.of())).isEqualTo(AiTools.FRONTEND_STUB);
+        assertThat(aiTools.setCondition("CURRENCY", new AiTools.FieldQueryCondition(List.of("XN"),
+                List.of(new AiTools.FieldCondition("code", "EQ", "CNY"))))).isEqualTo(AiTools.FRONTEND_STUB);
         assertThat(aiTools.confirmStep(null)).isEqualTo(AiTools.FRONTEND_STUB);
+    }
+
+    // ── S4.4e 裁决②：create_task 的披露范围与风险 ───────────────────────────────
+
+    @Test
+    void createTaskIsDisclosedAtTaskCenterAndWizardPages() {
+        assertThat(namesFor(AiContext.of("tasks", null, null, null, null))).contains("create_task");
+        assertThat(namesFor(AiContext.of("export", "EXPORT", "SELECT_DEFS", 1L, Map.of()))).contains("create_task");
+        assertThat(namesFor(AiContext.of("import", "IMPORT", "UPLOAD", 1L, Map.of()))).contains("create_task");
+        // 非向导页面与空上下文不披露：创建任务只在"任务现场"（任务中心/向导）有意义
+        assertThat(namesFor(AiContext.of("definitions", null, null, null, null))).doesNotContain("create_task");
+        assertThat(namesFor(AiContext.of("data", null, null, null, null))).doesNotContain("create_task");
+        assertThat(namesFor(AiContext.empty())).doesNotContain("create_task");
+        // 风险 WRITE：创建任务可逆（删除机制既有），不进确认门；执行通道是后端（与 REST 同一服务层）
+        assertThat(toolRegistry.riskOf("create_task")).isEqualTo(ToolMeta.RiskLevel.WRITE);
+        assertThat(toolRegistry.channelOf("create_task")).isEqualTo(ToolMeta.Channel.BACKEND);
+    }
+
+    // ── S4.4e 裁决⑥：启动类工具一律经确认门（FR-5.3） ──────────────────────────
+
+    @Test
+    void startToolsRequireConfirmGate() {
+        for (String name : GATED_START_TOOLS) {
+            assertThat(toolRegistry.riskOf(name)).as("%s 必须经确认门（FR-5.3 明文清单）", name)
+                    .isEqualTo(ToolMeta.RiskLevel.DANGER);
+            assertThat(toolRegistry.channelOf(name)).as("%s 仍由后端执行（放行后创建作业）", name)
+                    .isEqualTo(ToolMeta.Channel.BACKEND);
+        }
+        // 风险元数据 → 挂起种类 → 确认门 的整条链路由 ConfirmGateWiringTest 锁（无 Redis 的行为用例）
+    }
+
+    // ── S4.4e 裁决③：set_condition 入参 = 前端契约（conditions 对象 + 内层结构） ──
+
+    @Test
+    void setConditionSchemaMirrorsFrontendContract() throws Exception {
+        ToolCallback callback = toolRegistry.getCallback("set_condition");
+        assertThat(callback).isNotNull();
+        String schema = callback.getToolDefinition().inputSchema();
+        JsonNode root = new ObjectMapper().readTree(schema);
+
+        // 顶层只有 defCode + conditions —— 前端 normalizeActionArgs 只读这两个键
+        assertThat(fieldNames(root.path("properties"))).containsExactlyInAnyOrder("defCode", "conditions");
+        assertThat(textValues(root.path("required"))).containsExactlyInAnyOrder("defCode", "conditions");
+
+        // conditions 的内层结构显式出现在 Schema 里（模型不必猜形状）
+        JsonNode conditions = root.path("properties").path("conditions");
+        assertThat(conditions.path("type").asText()).isEqualTo("object");
+        assertThat(fieldNames(conditions.path("properties"))).containsExactlyInAnyOrder("scopeKeys", "fields");
+        JsonNode item = conditions.path("properties").path("fields").path("items");
+        assertThat(item.path("type").asText()).isEqualTo("object");
+        assertThat(fieldNames(item.path("properties"))).containsExactlyInAnyOrder("fieldCode", "operator", "value");
+        // value 是可选的（EMPTY/NOT_EMPTY 不带值），fieldCode/operator 是必填
+        assertThat(textValues(item.path("required"))).containsExactlyInAnyOrder("fieldCode", "operator");
+
+        // 运行期接受前端契约形态的实参：模型按契约传参时入参能正常绑定（不会因参数类型不符抛错），
+        // 且后端仍只返回哨兵（副作用留给前端）。注：回调结果经 JSON 序列化，故用 contains 而非 isEqualTo。
+        String args = "{\"defCode\":\"CURRENCY\",\"conditions\":{\"scopeKeys\":[\"XN\"],"
+                + "\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"CNY\"}]}}";
+        assertThat(callback.call(args)).contains(AiTools.FRONTEND_STUB);
+    }
+
+    private static List<String> fieldNames(JsonNode node) {
+        List<String> names = new ArrayList<>();
+        node.fieldNames().forEachRemaining(names::add);
+        return names;
+    }
+
+    /** JSON 数组节点的元素文本（{@code required} 等数组型关键字）。 */
+    private static List<String> textValues(JsonNode array) {
+        List<String> values = new ArrayList<>();
+        array.forEach(element -> values.add(element.asText()));
+        return values;
     }
 
     private List<String> namesFor(AiContext context) {
