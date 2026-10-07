@@ -1,0 +1,26 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* 最小全局复位：preflight 已关闭（避免与 Element Plus / SpreadJS 冲突），
+   这里只补布局必需的几条，不引入通用样式重置。 */
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: #f5f7fa;
+  color: #303133;
+  font-family: 'Microsoft YaHei', 'PingFang SC', 'Helvetica Neue', Arial, sans-serif;
+  font-size: 14px;
+}
+
+/* 双栏骨架的滚动约束：工作区与 AI 栏各自可滚动，页面整体不出现双滚动条 */
+.layout-column {
+  min-height: 0;
+  overflow: auto;
+}
