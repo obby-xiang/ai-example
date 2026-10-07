@@ -1,75 +1,741 @@
 <template>
   <TaskWizard
-    title="导出向导"
-    :steps="TaskSteps.EXPORT"
-    :current-step="currentStep"
-    :task-id="taskId"
+    title="导出配置向导"
+    :subtitle="taskSubtitle"
+    :steps="WIZARD_STEPS"
+    :active-index="stepIndex"
+    :task-status="task?.status ?? null"
+    :prev-disabled="stepIndex === 0"
+    :show-next="stepIndex < 2"
+    :next-loading="persisting"
+    @prev="goStep(stepIndex - 1)"
+    @next="nextStep"
   >
-    <el-alert
-      type="info"
-      :closable="false"
-      show-icon
-      title="本棒为占位壳（b/c 棒实现业务步骤体）"
-      description="壳体（步骤条/进度条/操作区）与契约层已就绪：步骤体将按「选择配置项 → 查询条件 → 导出执行」三体分别实现。"
-    />
-
-    <div class="mt-4 text-sm text-gray-600 space-y-2">
-      <div>路由：<span class="font-mono">/export</span>（AI 上下文标签 task:EXPORT/&lt;步骤&gt;）</div>
-      <div>已注册页面能力：<span class="font-mono">{{ registeredHandlers.join('、') || '（无）' }}</span></div>
-      <div>已选配置项：<span class="font-mono">{{ workspace.selectedDefs.join('、') || '（空）' }}</span></div>
+    <!-- ============ 第 1 步：选择配置 ============ -->
+    <div v-show="stepIndex === 0">
+      <el-alert
+        v-if="!taskId"
+        type="warning"
+        :closable="false"
+        show-icon
+        title="尚未绑定任务"
+        description="导出向导需要挂在一条导出任务上（作业结果按任务存储）。可直接创建任务进入，或从任务中心点「打开」。"
+        class="mb-3"
+      >
+        <el-button size="small" type="primary" :loading="creatingTask" class="mt-2" @click="createAndBindTask">
+          创建导出任务并进入
+        </el-button>
+      </el-alert>
+      <DefSelector v-model="selectedDefs" :defs="defs" :loading="defsLoading" />
+      <div class="mt-2.5 text-[13px] text-[#909399]">
+        已选 {{ selectedDefs.length }} 个配置项；存在依赖关系的配置项将按依赖顺序导出。
+      </div>
     </div>
 
-    <template #actions>
-      <el-button disabled>上一步</el-button>
-      <el-button type="primary" disabled>下一步</el-button>
-    </template>
+    <!-- ============ 第 2 步：查询配置 ============ -->
+    <div v-show="stepIndex === 1">
+      <el-empty v-if="!selectedDefs.length" description="请先在第 1 步选择配置项" />
+      <el-card v-for="code in selectedDefs" :key="code" shadow="never" class="mb-3">
+        <template #header>
+          <div class="flex items-center gap-3">
+            <span class="font-semibold mr-auto">{{ defName(code) }}（{{ code }}）</span>
+            <el-button size="small" :loading="countLoading[code] === true" @click="previewCount(code)">预览行数</el-button>
+            <el-tag v-if="counts[code] !== undefined" size="small" type="success">命中 {{ counts[code] }} 行</el-tag>
+          </div>
+        </template>
+        <ConditionForm
+          :fields="fieldsOf(code)"
+          :model-value="draftModels[code] ?? emptyDraftModel()"
+          @update:model-value="(value) => (draftModels[code] = value)"
+        />
+      </el-card>
+    </div>
+
+    <!-- ============ 第 3 步：导出 ============ -->
+    <div v-show="stepIndex === 2">
+      <div class="flex items-center mb-3">
+        <el-button type="primary" :loading="startingExport" :disabled="jobRunning" @click="startExport">
+          {{ exportJob ? '重新导出' : '开始导出' }}
+        </el-button>
+        <template v-if="exportResults.length">
+          <el-divider direction="vertical" />
+          <el-button size="small" :loading="downloading === activeTab" @click="downloadOne(activeTab)">
+            下载当前配置项 xlsx
+          </el-button>
+          <el-button size="small" :disabled="!checkedDefs.length" :loading="downloading === 'checked'" @click="downloadChecked">
+            打包下载勾选（{{ checkedDefs.length }}）
+          </el-button>
+          <el-button size="small" :loading="downloading === 'all'" @click="downloadAll">全部打包 zip</el-button>
+          <el-button size="small" :loading="savingFiles" @click="saveEdits">保存编辑到服务端</el-button>
+        </template>
+      </div>
+
+      <JobProgress
+        :job="exportJob"
+        :issues="currentIssues"
+        :channel="channelState"
+        :error-message="jobErrorMessage"
+        @cancel="cancelJob"
+      />
+
+      <template v-if="exportResults.length">
+        <el-alert
+          type="info"
+          :closable="false"
+          show-icon
+          class="my-3"
+          title="可在线编辑表格内容；编辑只影响下载的文件与「保存编辑到服务端」写入的文件，不会直接改数据库。"
+        />
+        <el-checkbox-group v-model="checkedDefs" class="mb-2">
+          <el-checkbox v-for="item in exportResults" :key="item.defCode" :value="item.defCode">
+            {{ item.defCode }}
+          </el-checkbox>
+        </el-checkbox-group>
+        <el-tabs v-model="activeTab" type="border-card" @tab-change="onTabChange">
+          <el-tab-pane
+            v-for="item in exportResults"
+            :key="item.defCode"
+            :name="item.defCode"
+            :label="`${defName(item.defCode)}（${item.rowCount} 行）`"
+          >
+            <SpreadGrid
+              :ref="(el) => setGridRef(item.defCode, el)"
+              height="440px"
+              :def-code="item.defCode"
+              :sheet-name="defName(item.defCode)"
+              @data-changed="onGridChanged"
+            />
+          </el-tab-pane>
+        </el-tabs>
+      </template>
+    </div>
   </TaskWizard>
 </template>
 
 <script setup lang="ts">
 /**
- * 导出向导（本棒：壳 + 契约接线；三步体由 b/c 棒实现）。
+ * 导出配置向导（三步：选择配置 → 查询配置 → 导出）。
  *
- * 这里演示「页面把能力反向暴露给 AI」的登记方式（registerPageHandler）：
- * AI 侧的前端工具执行器经 getPageHandler 取到能力，页面卸载即注销，
- * 于是 AI 侧不需要 import 任何视图组件。
+ * 与蓝本的关键差别（功能差异，理由见证据文档 V6）：
+ * 1. 条件表单与选中集**落库**（`POST /tasks/{id}/select-defs`、`PUT /tasks/{id}/items/{code}/condition`），
+ *    刷新页面/换机恢复不丢；蓝本是前端 stepData 单存；
+ * 2. 导出结果来自后端已落盘的 EXPORT 文件（`GET /tasks/{id}/files/{code}`）而不是内存行数组，
+ *    与后端 ExportJobRunner/发布链路同源；
+ * 3. 进度通道为 SSE（`JOB_PROGRESS`/`JOB_DONE`）+ 轮询兜底，蓝本是纯轮询。
  */
-import { onBeforeUnmount, onMounted, ref } from 'vue'
-import { useRoute } from 'vue-router'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
+import DefSelector from '@/components/wizard/DefSelector.vue'
+import ConditionForm from '@/components/wizard/ConditionForm.vue'
+import JobProgress from '@/components/JobProgress.vue'
+import SpreadGrid from '@/components/SpreadGrid.vue'
 import TaskWizard from '@/components/TaskWizard.vue'
-import { PAGE_HANDLER_OPEN_EXPORT_EDITOR } from '@/utils/frontend-tools'
+import { definitionsApi } from '@/api/definitions'
+import { dataApi } from '@/api/data'
+import { jobsApi } from '@/api/jobs'
+import { tasksApi } from '@/api/tasks'
+import { useTaskStore } from '@/stores/task'
 import { registerPageHandler, unregisterPageHandler, useWorkspaceStore } from '@/stores/workspace'
-import { TaskSteps } from '@/types/task'
+import {
+  buildQueryCondition,
+  draftModelFromCondition,
+  emptyDraftModel,
+  isConditionEmpty,
+  conditionSummary,
+  parseConditionJson,
+  stringifyCondition,
+  type ConditionDraftModel
+} from '@/types/condition'
+import type { ConfigDefinition, ConfigField } from '@/types/definition'
+import type { Job, ValidationIssue } from '@/types/job'
+import { TaskSteps, type Task, type TaskFile } from '@/types/task'
+import {
+  downloadBlob,
+  xlsxFileName,
+  zipBlobs,
+  type ExcelRowIssue
+} from '@/utils/excel'
+import { registerFrontendToolExecutor, unregisterFrontendToolExecutor, PAGE_HANDLER_OPEN_EXPORT_EDITOR } from '@/utils/frontend-tools'
+import { watchJob, type JobChannelState } from '@/utils/job-watch'
 
-const workspace = useWorkspaceStore()
+/** 表格宿主的最小接口（defineExpose 出来的方法）。 */
+interface GridApi {
+  loadFromXlsx(blob: Blob, fields: readonly ConfigField[]): Promise<{ missingHeaders: string[] }>
+  loadData(fields: readonly ConfigField[], rows?: readonly Record<string, unknown>[]): void
+  collectRows(): Array<Record<string, string>>
+  toXlsxBlob(): Promise<Blob>
+  validateLocal(): ExcelRowIssue[]
+}
+
+interface ExportResultItem {
+  defCode: string
+  fileName: string
+  rowCount: number
+}
+
+/** 步骤 key（与后端 @ToolScope 标签一致） */
+const STEP_KEYS = TaskSteps.EXPORT
+/** 步骤文案（与蓝本同名页一致） */
+const WIZARD_STEPS = [
+  { key: STEP_KEYS[0], label: '选择配置' },
+  { key: STEP_KEYS[1], label: '查询配置' },
+  { key: STEP_KEYS[2], label: '导出配置' }
+] as const
+
 const route = useRoute()
+const router = useRouter()
+const workspace = useWorkspaceStore()
+const taskStore = useTaskStore()
 
-const taskId = ref<number | null>(null)
-const currentStep = ref<string>(TaskSteps.EXPORT[0])
-const registeredHandlers = ref<string[]>([])
+const taskId = ref<number | null>(readTaskId())
+const task = ref<Task | null>(null)
+const defs = ref<ConfigDefinition[]>([])
+const defsLoading = ref(false)
+const creatingTask = ref(false)
 
-onMounted(() => {
-  const queryTaskId = Number(route.query.taskId)
-  taskId.value = Number.isFinite(queryTaskId) && queryTaskId > 0 ? queryTaskId : null
-  currentStep.value = typeof route.query.step === 'string' ? route.query.step : TaskSteps.EXPORT[0]
+const stepIndex = ref(0)
+const selectedDefs = ref<string[]>([])
+const draftModels = reactive<Record<string, ConditionDraftModel>>({})
+const counts = reactive<Record<string, number | null>>({})
+const countLoading = reactive<Record<string, boolean>>({})
 
+const persisting = ref(false)
+const startingExport = ref(false)
+const savingFiles = ref(false)
+const downloading = ref<string | null>(null)
+
+const exportJob = ref<Job | null>(null)
+const currentIssues = ref<ValidationIssue[]>([])
+const channelState = ref<JobChannelState | null>(null)
+const exportResults = ref<ExportResultItem[]>([])
+const checkedDefs = ref<string[]>([])
+const activeTab = ref('')
+
+const gridRefs: Record<string, GridApi> = {}
+const loadedGrids = new Set<string>()
+let stopWatchJob: (() => void) | null = null
+let gridDirty = false
+
+const jobRunning = computed(() => exportJob.value !== null && ['PENDING', 'RUNNING'].includes(exportJob.value.status))
+
+const taskSubtitle = computed(() => {
+  if (!task.value) {
+    return taskId.value ? `任务 #${taskId.value}` : ''
+  }
+  return `#${task.value.id} · ${task.value.title}`
+})
+
+const jobErrorMessage = computed(() => {
+  if (!exportJob.value || exportJob.value.status !== 'FAILED') {
+    return null
+  }
+  const first = currentIssues.value.find((issue) => issue.severity === 'ERROR')
+  return first ? first.message : `导出作业失败（错误 ${exportJob.value.errorCount} 条），请查看下方明细`
+})
+
+function readTaskId(): number | null {
+  const raw = Number(route.query.taskId)
+  return Number.isFinite(raw) && raw > 0 ? raw : null
+}
+
+function defOf(code: string): ConfigDefinition | null {
+  return defs.value.find((item) => item.code === code) ?? null
+}
+
+function defName(code: string): string {
+  return defOf(code)?.name ?? code
+}
+
+function fieldsOf(code: string): readonly ConfigField[] {
+  return defOf(code)?.fields ?? []
+}
+
+function setGridRef(code: string, el: unknown): void {
+  if (!el) {
+    delete gridRefs[code]
+    return
+  }
+  gridRefs[code] = el as GridApi
+}
+
+// ── 页面加载 ───────────────────────────────────────────────────────────────────
+
+async function loadDefinitions(): Promise<void> {
+  defsLoading.value = true
+  try {
+    defs.value = await definitionsApi.listDefinitions()
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '配置定义加载失败')
+  } finally {
+    defsLoading.value = false
+  }
+}
+
+async function loadTask(): Promise<void> {
+  if (taskId.value === null) {
+    return
+  }
+  try {
+    task.value = await tasksApi.getTask(taskId.value)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '任务加载失败')
+    return
+  }
+  selectedDefs.value = (task.value.items ?? []).map((item) => item.defCode)
+  for (const item of task.value.items ?? []) {
+    draftModels[item.defCode] = draftModelFromCondition(parseConditionJson(item.conditionJson))
+  }
+  const restoredStep = STEP_KEYS.indexOf(task.value.currentStep as (typeof STEP_KEYS)[number])
+  stepIndex.value = restoredStep >= 0 ? restoredStep : 0
   workspace.enterPage({
     pageId: 'export',
     page: 'export',
     taskType: 'EXPORT',
-    step: currentStep.value,
-    taskId: taskId.value
+    step: STEP_KEYS[stepIndex.value],
+    taskId: taskId.value,
+    taskStatus: task.value.status,
+    selectedDefs: [...selectedDefs.value]
+  })
+  await loadExistingResults()
+}
+
+/** 恢复：任务里已存在的 EXPORT 文件即导出结果（刷新不丢）。 */
+async function loadExistingResults(): Promise<void> {
+  if (taskId.value === null) {
+    return
+  }
+  try {
+    const files: TaskFile[] = await tasksApi.getFiles(taskId.value)
+    exportResults.value = files
+      .filter((file) => file.fileType === 'EXPORT')
+      .map((file) => ({
+        defCode: file.defCode,
+        fileName: file.fileName ?? xlsxFileName(file.defCode, defName(file.defCode)),
+        rowCount: file.rowCount ?? 0
+      }))
+    if (exportResults.value.length > 0 && !activeTab.value) {
+      activeTab.value = exportResults.value[0]?.defCode ?? ''
+      await nextTick()
+      await ensureGridLoaded(activeTab.value)
+    }
+  } catch {
+    // 文件列表失败不影响向导本身（可能只是还没导出过）
+  }
+}
+
+// ── 步骤导航与持久化 ───────────────────────────────────────────────────────────
+
+function goStep(next: number): void {
+  if (next < 0 || next >= STEP_KEYS.length) {
+    return
+  }
+  stepIndex.value = next
+  workspace.setStep(STEP_KEYS[next] ?? null)
+  void persistStepData()
+  if (next === 2) {
+    void refreshResults()
+  }
+}
+
+function nextStep(): void {
+  if (stepIndex.value === 0 && selectedDefs.value.length === 0) {
+    ElMessage.warning('请先选择至少一个配置项')
+    return
+  }
+  goStep(stepIndex.value + 1)
+}
+
+/** 选中集与查询条件落库（后端是这两者的权威存储）。 */
+async function persistStepData(): Promise<void> {
+  if (taskId.value === null) {
+    return
+  }
+  persisting.value = true
+  try {
+    await tasksApi.selectDefs(taskId.value, [...selectedDefs.value])
+    for (const code of selectedDefs.value) {
+      const model = draftModels[code]
+      if (!model) {
+        continue
+      }
+      const condition = buildQueryCondition(model)
+      await tasksApi.setCondition(taskId.value, code, stringifyCondition(condition))
+    }
+    task.value = await tasksApi.getTask(taskId.value)
+    workspace.setSelectedDefs([...selectedDefs.value])
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '保存选择与条件失败')
+  } finally {
+    persisting.value = false
+  }
+}
+
+// ── 第 2 步：行数预览 ──────────────────────────────────────────────────────────
+
+async function previewCount(code: string): Promise<void> {
+  countLoading[code] = true
+  try {
+    const model = draftModels[code] ?? emptyDraftModel()
+    const condition = buildQueryCondition(model)
+    const result = await dataApiCount(code, condition)
+    counts[code] = result
+    ElMessage.success(
+      isConditionEmpty(condition)
+        ? `${code}：全部数据 ${result} 行`
+        : `${code}：命中 ${result} 行（${conditionSummary(condition)}）`
+    )
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '行数预览失败')
+  } finally {
+    countLoading[code] = false
+  }
+}
+
+async function dataApiCount(code: string, condition: ReturnType<typeof buildQueryCondition>): Promise<number> {
+  const params: { conditions?: string } = {}
+  if (!isConditionEmpty(condition)) {
+    params.conditions = stringifyCondition(condition)
+  }
+  const response = await dataApi.countData(code, params)
+  return response.count
+}
+
+// ── 第 3 步：导出作业 ──────────────────────────────────────────────────────────
+
+async function startExport(): Promise<void> {
+  if (taskId.value === null) {
+    ElMessage.warning('尚未绑定任务，请先创建或从任务中心打开一条导出任务')
+    return
+  }
+  if (selectedDefs.value.length === 0) {
+    ElMessage.warning('请先选择配置项')
+    return
+  }
+  await persistStepData()
+  startingExport.value = true
+  try {
+    const job = await jobsApi.createJob(taskId.value, 'EXPORT')
+    exportJob.value = job
+    exportResults.value = []
+    loadedGrids.clear()
+    ElMessage.success(`导出作业已启动（作业 #${job.id}）`)
+    beginWatchJob(job.id ?? 0)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '导出作业启动失败')
+  } finally {
+    startingExport.value = false
+  }
+}
+
+function beginWatchJob(jobId: number): void {
+  stopWatchJob?.()
+  currentIssues.value = []
+  if (taskId.value === null || jobId <= 0) {
+    return
+  }
+  stopWatchJob = watchJob({
+    taskId: taskId.value,
+    jobId,
+    onProgress: (payload) => {
+      if (exportJob.value) {
+        exportJob.value = { ...exportJob.value, status: 'RUNNING', progress: payload.processed, total: payload.total }
+      }
+    },
+    onSnapshot: (job) => {
+      exportJob.value = job
+    },
+    onChannel: (state) => {
+      channelState.value = state
+    },
+    onFinal: async (job) => {
+      exportJob.value = job
+      currentIssues.value = (await jobsApi.getIssues(jobId)).content ?? []
+      if (job.status === 'COMPLETED') {
+        ElMessage.success('导出完成')
+        await refreshResults()
+      } else if (job.status === 'FAILED') {
+        ElMessage.error('导出失败，请查看作业明细')
+      } else {
+        ElMessage.info('导出作业已取消')
+      }
+    }
+  })
+}
+
+async function refreshResults(): Promise<void> {
+  loadedGrids.clear()
+  await loadExistingResults()
+  const first = exportResults.value[0]?.defCode ?? ''
+  if (first) {
+    activeTab.value = first
+    await nextTick()
+    await ensureGridLoaded(first)
+  }
+}
+
+async function cancelJob(): Promise<void> {
+  const jobId = exportJob.value?.id
+  if (jobId === undefined) {
+    return
+  }
+  try {
+    await jobsApi.cancelJob(jobId)
+    ElMessage.info('已请求取消作业')
+  } catch (error) {
+    ElMessage.warning(error instanceof Error ? error.message : '取消作业失败')
+  }
+}
+
+// ── 结果表格（懒加载 + 编辑） ──────────────────────────────────────────────────
+
+async function ensureGridLoaded(code: string): Promise<void> {
+  if (!code || loadedGrids.has(code) || taskId.value === null) {
+    return
+  }
+  const grid = gridRefs[code]
+  if (!grid) {
+    return
+  }
+  loadedGrids.add(code)
+  try {
+    const blob = await tasksApi.downloadFile(taskId.value, code)
+    const { missingHeaders } = await grid.loadFromXlsx(blob, fieldsOf(code))
+    if (missingHeaders.length > 0) {
+      ElMessage.warning(`${code} 的文件缺少字段列：${missingHeaders.join('、')}`)
+    }
+  } catch (error) {
+    loadedGrids.delete(code)
+    ElMessage.error(error instanceof Error ? error.message : `${code} 结果文件加载失败`)
+  }
+}
+
+function onTabChange(name: string | number): void {
+  void ensureGridLoaded(String(name))
+}
+
+function onGridChanged(): void {
+  gridDirty = true
+  workspace.bumpVersion()
+}
+
+/** 取某配置项的下载用 xlsx（优先用表格里的**当前内容**，反映在线编辑）。 */
+async function buildXlsx(code: string): Promise<{ blob: Blob; fileName: string }> {
+  const grid = gridRefs[code]
+  const fileName = exportResults.value.find((item) => item.defCode === code)?.fileName ?? xlsxFileName(code, defName(code))
+  if (grid) {
+    return { blob: await grid.toXlsxBlob(), fileName }
+  }
+  if (taskId.value === null) {
+    throw new Error('尚未绑定任务')
+  }
+  return { blob: await tasksApi.downloadFile(taskId.value, code), fileName }
+}
+
+async function downloadOne(code: string): Promise<void> {
+  if (!code) {
+    ElMessage.warning('请选择要下载的配置项')
+    return
+  }
+  downloading.value = code
+  try {
+    const { blob, fileName } = await buildXlsx(code)
+    downloadBlob(blob, fileName)
+    ElMessage.success(`已下载 ${fileName}`)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '下载失败')
+  } finally {
+    downloading.value = null
+  }
+}
+
+async function downloadChecked(): Promise<void> {
+  if (checkedDefs.value.length === 0) {
+    ElMessage.warning('请先勾选要打包的配置项')
+    return
+  }
+  downloading.value = 'checked'
+  try {
+    if (checkedDefs.value.length === 1) {
+      await downloadOne(checkedDefs.value[0] ?? '')
+      return
+    }
+    const entries = await Promise.all(checkedDefs.value.map(async (code) => {
+      const { blob, fileName } = await buildXlsx(code)
+      return { name: fileName, blob }
+    }))
+    downloadBlob(await zipBlobs(entries), `export-selected-${taskId.value ?? 0}.zip`)
+    ElMessage.success(`已打包下载 ${entries.length} 个文件`)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '打包下载失败')
+  } finally {
+    downloading.value = null
+  }
+}
+
+async function downloadAll(): Promise<void> {
+  if (exportResults.value.length === 0) {
+    ElMessage.warning('尚无导出结果')
+    return
+  }
+  downloading.value = 'all'
+  try {
+    if (exportResults.value.length === 1) {
+      await downloadOne(exportResults.value[0]?.defCode ?? '')
+      return
+    }
+    const entries = await Promise.all(exportResults.value.map(async (item) => {
+      const { blob, fileName } = await buildXlsx(item.defCode)
+      return { name: fileName, blob }
+    }))
+    downloadBlob(await zipBlobs(entries), `export-${taskId.value ?? 0}.zip`)
+    ElMessage.success(`已打包下载 ${entries.length} 个文件`)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '打包下载失败')
+  } finally {
+    downloading.value = null
+  }
+}
+
+/**
+ * 把在线编辑结果写回服务端文件（`PUT /tasks/{id}/files/{defCode}`）。
+ *
+ * 为什么要这一步：后端后续步骤（导入/发布/AI 工具）读的是**服务端文件**，
+ * 只在浏览器里改 excel 不回写，别的入口看到的还是旧内容。
+ */
+async function saveEdits(): Promise<void> {
+  if (taskId.value === null) {
+    ElMessage.warning('尚未绑定任务')
+    return
+  }
+  savingFiles.value = true
+  try {
+    for (const item of exportResults.value) {
+      const grid = gridRefs[item.defCode]
+      if (!grid) {
+        continue
+      }
+      const issues = grid.validateLocal()
+      if (issues.length > 0) {
+        const first = issues[0]
+        ElMessage.warning(`${item.defCode} 存在 ${issues.length} 处本地校验问题（如第 ${first?.rowIndex} 行：${first?.reason}），已跳过保存`)
+        continue
+      }
+      const blob = await grid.toXlsxBlob()
+      await tasksApi.saveFile(taskId.value, item.defCode, await blob.arrayBuffer())
+    }
+    gridDirty = false
+    ElMessage.success('编辑结果已写回服务端文件')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '保存到服务端失败')
+  } finally {
+    savingFiles.value = false
+  }
+}
+
+// ── AI 页面能力（裁剪性：这些登记只影响 AI，手工操作不依赖它） ────────────────
+
+const HANDLER_NAMES = [
+  'export.selectDefs',
+  'export.setConditions',
+  'export.start',
+  PAGE_HANDLER_OPEN_EXPORT_EDITOR
+]
+
+function registerHandlers(): void {
+  registerPageHandler('export.selectDefs', (payload) => {
+    const codes = Array.isArray(payload.defCodes) ? payload.defCodes.map((item) => String(item)) : []
+    selectedDefs.value = payload.mode === 'ADD' ? [...new Set([...selectedDefs.value, ...codes])] : codes
+    for (const code of codes) {
+      draftModels[code] = draftModels[code] ?? emptyDraftModel()
+    }
+    return `已选择配置项：${selectedDefs.value.join('、') || '（空）'}`
   })
 
-  registerPageHandler(PAGE_HANDLER_OPEN_EXPORT_EDITOR, () => {
-    // 在线编辑器（SpreadJS + 保存回后端）由 c 棒接入，这里只回可读说明
-    return '导出向导已收到打开编辑器请求（编辑器体由 c 棒实现）'
+  registerPageHandler('export.setConditions', (payload) => {
+    const defCode = String(payload.defCode ?? '')
+    if (!defCode) {
+      return '缺少 defCode，未设置条件'
+    }
+    const condition = parseConditionJson(typeof payload.conditions === 'string' ? payload.conditions : JSON.stringify(payload.conditions ?? {}))
+    draftModels[defCode] = draftModelFromCondition(condition)
+    counts[defCode] = null
+    return `已设置 ${defCode} 的查询条件：${conditionSummary(condition)}`
   })
-  registeredHandlers.value = [PAGE_HANDLER_OPEN_EXPORT_EDITOR]
+
+  registerPageHandler('export.start', async () => {
+    await startExport()
+    return exportJob.value ? `导出作业 #${exportJob.value.id} 已启动` : '导出未启动（请检查配置项选择）'
+  })
+
+  registerPageHandler(PAGE_HANDLER_OPEN_EXPORT_EDITOR, async (payload) => {
+    const defCode = String(payload.defCode ?? '')
+    if (!defCode) {
+      return '缺少 defCode，无法打开在线编辑器'
+    }
+    if (!exportResults.value.some((item) => item.defCode === defCode)) {
+      return `${defCode} 暂无导出结果文件，请先完成导出`
+    }
+    if (stepIndex.value !== 2) {
+      goStep(2)
+    }
+    activeTab.value = defCode
+    await nextTick()
+    await ensureGridLoaded(defCode)
+    return `已打开 ${defCode} 的在线编辑器（导出结果表格）`
+  })
+
+  // 前端工具 download_export_file：副作用在浏览器，必须由页面执行器完成
+  registerFrontendToolExecutor('download_export_file', async (call) => {
+    const defCode = String(call.args.defCode ?? '')
+    if (!defCode) {
+      throw new Error('缺少 defCode')
+    }
+    if (stepIndex.value !== 2) {
+      goStep(2)
+    }
+    await downloadOne(defCode)
+    return `已触发下载 ${defCode} 的导出文件（在线编辑后的内容）`
+  })
+}
+
+onMounted(async () => {
+  workspace.enterPage({ pageId: 'export', page: 'export', taskType: 'EXPORT', step: STEP_KEYS[0], taskId: taskId.value })
+  registerHandlers()
+  await Promise.all([loadDefinitions(), loadTask()])
 })
 
 onBeforeUnmount(() => {
-  unregisterPageHandler(PAGE_HANDLER_OPEN_EXPORT_EDITOR)
-  registeredHandlers.value = []
+  stopWatchJob?.()
+  stopWatchJob = null
+  HANDLER_NAMES.forEach(unregisterPageHandler)
+  unregisterFrontendToolExecutor('download_export_file')
+  if (gridDirty) {
+    ElMessage.warning('表格有未保存的在线编辑内容（可用「保存编辑到服务端」写回）')
+  }
+})
+
+async function createAndBindTask(): Promise<void> {
+  creatingTask.value = true
+  try {
+    const created = await taskStore.createTask('EXPORT', `导出任务 ${new Date().toLocaleString('zh-CN')}`)
+    if (!created || created.id === undefined) {
+      ElMessage.error(taskStore.error ?? '创建任务失败')
+      return
+    }
+    taskId.value = created.id
+    await router.replace({ name: 'export-wizard', query: { taskId: String(created.id) } })
+    await loadTask()
+    ElMessage.success(`已创建导出任务 #${created.id}`)
+  } finally {
+    creatingTask.value = false
+  }
+}
+
+// 选中集变化时补齐条件模型（避免第 2 步出现未初始化卡片）
+watch(selectedDefs, (codes) => {
+  for (const code of codes) {
+    draftModels[code] = draftModels[code] ?? emptyDraftModel()
+  }
 })
 </script>

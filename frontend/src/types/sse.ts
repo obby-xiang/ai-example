@@ -239,8 +239,14 @@ export function toSseFrame(value: unknown): SseFrame | null {
 
 // ── 任务级事件通道（GET /api/tasks/{id}/events，形态与 AI 帧不同） ──────────────
 
-/** 任务级帧类型（TaskSseService：大写 type + 包一层 data）。 */
-export type TaskEventType = 'HEARTBEAT' | 'TASK_CHANGED' | 'JOB_DONE'
+/**
+ * 任务级帧类型（TaskSseService：大写 type + 包一层 data）。
+ *
+ * `JOB_PROGRESS` 由各作业执行器在分片边界发布
+ * （ExportJobRunner/ImportJobRunner/PrecheckJobRunner/PublishJobRunner#publishProgress），
+ * 载荷是**行级** processed/total + defCode + 百分比，是向导"SSE 进度"的数据来源。
+ */
+export type TaskEventType = 'HEARTBEAT' | 'TASK_CHANGED' | 'JOB_PROGRESS' | 'JOB_DONE'
 
 /** TASK_CHANGED 的 data（TaskSseService#onTaskChanged）。 */
 export interface TaskChangedPayload {
@@ -258,8 +264,19 @@ export interface JobDonePayload {
   status: string
 }
 
+/** JOB_PROGRESS 的 data（作业执行器 publishProgress）。 */
+export interface JobProgressPayload {
+  jobId: number
+  jobType: string
+  /** 完成一个配置项时带出的配置编码 */
+  defCode: string
+  processed: number
+  total: number
+  pct: number
+}
+
 /** 任务级 SSE 帧。 */
 export interface TaskEventFrame {
   type: TaskEventType
-  data: TaskChangedPayload | JobDonePayload | Record<string, never>
+  data: TaskChangedPayload | JobProgressPayload | JobDonePayload | Record<string, never>
 }

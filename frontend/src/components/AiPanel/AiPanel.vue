@@ -1,5 +1,5 @@
 <template>
-  <aside class="h-full flex flex-col bg-white border-l border-gray-200 ai-panel">
+  <aside class="h-full flex flex-col bg-white border-l border-solid border-[#e4e7ed] w-[360px] min-w-[320px]">
     <header class="px-3 py-2 border-b border-gray-200 flex items-center justify-between">
       <div class="flex items-center gap-2">
         <span class="font-medium">AI 助手</span>
@@ -190,10 +190,3 @@ onMounted(() => {
   void ai.loadHistory()
 })
 </script>
-
-<style scoped>
-.ai-panel {
-  width: 360px;
-  min-width: 320px;
-}
-</style>

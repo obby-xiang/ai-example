@@ -8,7 +8,7 @@
           mode="horizontal"
           :ellipsis="false"
           router
-          class="app-nav"
+          class="!border-b-0"
         >
           <el-menu-item :index="ROUTE_NAMES.taskCenter" :route="{ name: ROUTE_NAMES.taskCenter }">任务中心</el-menu-item>
           <el-menu-item :index="ROUTE_NAMES.exportWizard" :route="{ name: ROUTE_NAMES.exportWizard }">导出向导</el-menu-item>
@@ -62,9 +62,3 @@ onMounted(() => {
   workspace.enterPage({ pageId: 'tasks', page: 'tasks' })
 })
 </script>
-
-<style scoped>
-.app-nav {
-  border-bottom: none;
-}
-</style>
