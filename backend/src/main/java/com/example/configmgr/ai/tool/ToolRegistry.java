@@ -94,6 +94,11 @@ public class ToolRegistry {
         return callbackMap.get(name);
     }
 
+    /** 已登记工具总数（只读诊断面 {@code GET /api/ai/tools} 的对照值）。 */
+    public int registeredCount() {
+        return callbackMap.size();
+    }
+
     /**
      * 渐进披露<b>第三道防线</b>（FR-5.2 的三重防线，DC-14 T1 补齐）：
      * 执行前用<b>同一份</b> scope 元数据复查该工具在当前上下文里是否本就该被披露。
