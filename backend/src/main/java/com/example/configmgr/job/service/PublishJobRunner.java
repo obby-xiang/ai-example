@@ -10,10 +10,7 @@ import com.example.configmgr.definition.entity.ConfigDefinition;
 import com.example.configmgr.definition.service.DefinitionService;
 import com.example.configmgr.definition.service.DependencyResolver;
 import com.example.configmgr.job.entity.Job;
-import com.example.configmgr.job.entity.JobItem;
 import com.example.configmgr.job.entity.ValidationIssue;
-import com.example.configmgr.job.repo.JobItemRepository;
-import com.example.configmgr.job.repo.JobRepository;
 import com.example.configmgr.job.repo.ValidationIssueRepository;
 import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.entity.TaskItem;
@@ -46,12 +43,14 @@ import java.util.*;
  * <li>事务边界：整个发布（upsert + 差集删除 + 暂存/任务状态推进）在<b>单个事务</b>内完成 —— 见 {@link #run}。</li>
  * </ol>
  *
- * <h2>事务边界与作业状态落库（S4.3 §1 事务行 / C6 整批回滚）</h2>
+ * <h2>事务边界与作业状态落库（S4.3 §1 事务行 / C6 整批回滚 / 修正⑤）</h2>
  * <p>
  * 发布数据面在 {@link TransactionTemplate} 内执行：任何硬错误（异常）→ 整批回滚，已发布数据零变化。
- * 但作业自身的状态（FAILED、issue、job_item/task_item）必须<b>在回滚之后补记</b>，
- * 否则连"失败"这一事实都会随事务消失 —— 故本类不再是 {@code @Transactional}：
- * 事务外负责编排与失败补记，事务内只负责数据面。
+ * 但作业自身的状态（RUNNING、行级进度、终态、issue、job_item/task_item）必须<b>在数据面事务之外</b>写 ——
+ * 否则（a）"失败"这一事实会随事务消失；（b）运行中的快照恒为 PENDING/0（修正⑤ 要消除的假象）。
+ * 故本类不再是 {@code @Transactional}：
+ * 作业行/作业条目经 {@link JobProgressService} 的独立事务实时可见，终态经
+ * {@link JobTerminalWriter} 在数据面提交后落地并联动作业所属任务状态。
  * <p>
  * 软冲突（快照版本不一致、差集删除候选被并发保护）<b>不是异常</b>：只落行级 issue 并跳过该行，
  * 其余行照常提交（与 baseline B2.18 逐行语义一致，作业终态 FAILED）。
@@ -67,8 +66,6 @@ public class PublishJobRunner {
     private final ConfigStagingRowRepository stagingRowRepository;
     private final TaskItemRepository taskItemRepository;
     private final TaskRepository taskRepository;
-    private final JobRepository jobRepository;
-    private final JobItemRepository jobItemRepository;
     private final ValidationIssueRepository issueRepository;
     private final TaskSseService taskSseService;
     private final AppProperties appProperties;
@@ -77,70 +74,84 @@ public class PublishJobRunner {
     private final TaskService taskService;
     private final ConfigDataService configDataService;
     private final TransactionTemplate transactionTemplate;
+    private final JobProgressService progressService;
+    private final JobTerminalWriter terminalWriter;
 
-    /** 发布入口：事务外编排（RUNNING 落库 + 失败补记 + JOB_DONE），数据面整批交给单事务。 */
+    /** 发布入口：作业状态在数据面事务外编排（RUNNING 独立事务 + 失败补记 + 终态）。 */
     public void run(Job job) {
-        job.setStatus(Job.JobStatus.RUNNING);
-        job.setStartedAt(LocalDateTime.now());
-        jobRepository.save(job);
+        progressService.markRunning(job.getId(), 0);
 
+        PublishOutcome outcome = null;
         try {
-            transactionTemplate.executeWithoutResult(status -> doPublish(job));
+            outcome = transactionTemplate.execute(status -> doPublish(job));
         } catch (RuntimeException e) {
             String defCode = e instanceof PublishAbort abort ? abort.getDefCode() : null;
             log.error("Publish job {} aborted, whole batch rolled back (defCode={}): {}",
                     job.getId(), defCode, e.getMessage(), e);
             recordFailure(job, defCode, e);
+            return;
         }
 
-        Job finished = jobRepository.findById(job.getId()).orElse(job);
-        taskSseService.publish(finished.getTaskId(), "JOB_DONE", Map.of(
-                "jobId", finished.getId(), "jobType", "PUBLISH",
-                "status", finished.getStatus(), "errors", finished.getErrorCount()));
+        PublishOutcome finalOutcome = outcome != null ? outcome : new PublishOutcome(false, 0, 0, 0);
+        Job.JobStatus status = finalOutcome.cancelled() ? Job.JobStatus.CANCELLED
+                : (finalOutcome.totalErrors() > 0 ? Job.JobStatus.FAILED : Job.JobStatus.COMPLETED);
+        if (status == Job.JobStatus.COMPLETED) {
+            // 发布成功 → 任务完成，步骤同步到最终步骤（列表点击标题可直接查看结果）
+            taskService.updateStatus(job.getTaskId(), Task.TaskStatus.COMPLETED);
+            taskService.goToStep(job.getTaskId(), "PUBLISH");
+        }
+        terminalWriter.complete(job, status, finalOutcome.totalErrors(), 0,
+                finalOutcome.processedRows(), finalOutcome.totalRows(),
+                Map.of("jobId", job.getId(), "jobType", "PUBLISH",
+                        "status", status, "errors", finalOutcome.totalErrors()));
     }
 
     /**
      * 发布数据面（单事务）：upsert + 范围差集删除 + 暂存/任务状态推进。
      * 抛出的任何异常都会让整个发布回滚（调用方 {@link #run} 负责失败补记）。
+     * 作业行/作业条目的状态与进度写在这个事务之外（独立事务），故运行中即可见。
      */
-    private void doPublish(Job job) {
-        issueRepository.deleteByJobId(job.getId());
+    private PublishOutcome doPublish(Job job) {
+        final Long jobId = job.getId();
+        final Long taskId = job.getTaskId();
+
+        issueRepository.deleteByJobId(jobId);
 
         // 导入模式：MERGE=增量合并（纯 upsert）；REPLACE=范围内替换（范围内未被本次导入覆盖的旧行删除）
-        boolean replaceMode = isReplaceMode(job.getTaskId());
+        boolean replaceMode = isReplaceMode(taskId);
 
         boolean cancelled = false;
         int totalErrors = 0;
+        int processedRows = 0;
+        int totalRows = 0;
+        int finishedDefRows = 0;
 
-        List<TaskItem> items = taskItemRepository.findByTaskIdOrderBySortOrder(job.getTaskId());
+        List<TaskItem> items = taskItemRepository.findByTaskIdOrderBySortOrder(taskId);
         List<String> defCodes = items.stream().map(TaskItem::getDefCode).toList();
         List<String> sorted = dependencyResolver.sort(defCodes);
 
-        job.setTotal(sorted.size());
-        jobRepository.save(job);
-
         for (String defCode : sorted) {
-            if (cancellationRegistry.isCancelled(job.getId())) {
+            if (cancellationRegistry.isCancelled(jobId)) {
                 cancelled = true;
                 break;
             }
 
-            JobItem ji = new JobItem();
-            ji.setJobId(job.getId());
-            ji.setDefCode(defCode);
-            ji.setStatus("RUNNING");
-            ji = jobItemRepository.save(ji);
-
+            Long itemId = progressService.startItem(jobId, defCode);
             boolean defCancelled = false;
+            int defProcessed = 0;
+            int defTotal = 0;
+
             try {
                 ConfigDefinition def = definitionService.findByCode(defCode);
                 String scopeType = def.getLevel() == ConfigDefinition.ConfigLevel.GLOBAL ? "GLOBAL"
                         : def.getLevel() == ConfigDefinition.ConfigLevel.REGION ? "REGION" : "PROJECT";
 
                 List<ConfigStagingRow> stagingRows = stagingRowRepository
-                        .findByTaskIdAndDefCode(job.getTaskId(), defCode);
-                ji.setTotal(stagingRows.size());
-                jobItemRepository.save(ji);
+                        .findByTaskIdAndDefCode(taskId, defCode);
+                defTotal = stagingRows.size();
+                totalRows += defTotal;
+                progressService.updateItem(itemId, 0, defTotal);
+                progressService.snapshot(jobId, processedRows, totalRows);
 
                 // 范围差集删除（REPLACE：本次导入覆盖范围内未出现在导入数据中的旧行删除）
                 if (replaceMode) {
@@ -176,13 +187,15 @@ public class PublishJobRunner {
                     processed++;
                     if (processed % appProperties.getJob().getBatchSize() == 0) {
                         Thread.sleep(appProperties.getJob().getDemoBatchDelayMs());
-                        ji.setProcessed(processed);
-                        jobItemRepository.save(ji);
-                        publishProgress(job, defCode, processed, stagingRows.size());
-                        if (cancellationRegistry.isCancelled(job.getId())) {
+                        defProcessed = processed;
+                        processedRows = finishedDefRows + processed;
+                        // ⑤ 先落库再推送：快照与事件同一对数字
+                        progressService.updateItem(itemId, processed, defTotal);
+                        progressService.snapshot(jobId, processedRows, totalRows);
+                        publishProgress(job, defCode, processedRows, totalRows);
+                        if (cancellationRegistry.isCancelled(jobId)) {
                             defCancelled = true;
-                            ji.setStatus("CANCELLED");
-                            jobItemRepository.save(ji);
+                            progressService.finishItem(itemId, "CANCELLED", processed, defTotal);
                             break;
                         }
                     }
@@ -196,28 +209,15 @@ public class PublishJobRunner {
                 break;
             }
 
-            ji.setStatus("COMPLETED");
-            ji.setProcessed(ji.getTotal());
-            jobItemRepository.save(ji);
-            taskService.updateItemStatus(job.getTaskId(), defCode, "PUBLISHED");
-
-            job.setProgress(job.getProgress() + 1);
-            jobRepository.save(job);
+            defProcessed = defTotal;
+            finishedDefRows += defTotal;
+            processedRows = finishedDefRows;
+            progressService.finishItem(itemId, "COMPLETED", defTotal, defTotal);
+            progressService.snapshot(jobId, processedRows, totalRows);
+            taskService.updateItemStatus(taskId, defCode, "PUBLISHED");
         }
 
-        job.setErrorCount(totalErrors);
-        if (cancelled) {
-            job.setStatus(Job.JobStatus.CANCELLED);
-        } else {
-            job.setStatus(totalErrors > 0 ? Job.JobStatus.FAILED : Job.JobStatus.COMPLETED);
-            if (totalErrors == 0) {
-                // 发布成功 → 任务完成，步骤同步到最终步骤（列表点击标题可直接查看结果）
-                taskService.updateStatus(job.getTaskId(), Task.TaskStatus.COMPLETED);
-                taskService.goToStep(job.getTaskId(), "PUBLISH");
-            }
-        }
-        job.setFinishedAt(LocalDateTime.now());
-        jobRepository.save(job);
+        return new PublishOutcome(cancelled, totalErrors, processedRows, totalRows);
     }
 
     /** 范围差集删除 + 并发保护冲突落 issue，返回冲突条数（软冲突，不阻断其余行）。 */
@@ -265,39 +265,31 @@ public class PublishJobRunner {
     }
 
     /**
-     * 失败补记（回滚之后、独立事务）：作业 FAILED + errorCount + 行级 issue + job_item/task_item 失败态。
+     * 失败补记（回滚之后、独立事务）：行级 issue + job_item/task_item 失败态 + 作业 FAILED 终态。
      * 数据面已整批回滚，"失败"这一事实本身必须落库，否则对外不可见。
      */
     private void recordFailure(Job job, String defCode, Exception cause) {
+        int errors = 1;
         try {
             String message = "发布过程出错: " + cause.getMessage();
             for (String def : defCode != null ? List.of(defCode) : List.<String>of()) {
                 saveConflictIssue(job, def, null, message);
-                JobItem ji = new JobItem();
-                ji.setJobId(job.getId());
-                ji.setDefCode(def);
-                ji.setStatus("FAILED");
-                ji.setTotal((int) stagingRowRepository.countByTaskIdAndDefCode(job.getTaskId(), def));
-                jobItemRepository.save(ji);
+                progressService.markItemFinal(job.getId(), def, "FAILED",
+                        0, (int) stagingRowRepository.countByTaskIdAndDefCode(job.getTaskId(), def));
             }
             if (defCode == null) {
                 saveConflictIssue(job, "-", null, message);
             }
-
-            jobRepository.findById(job.getId()).ifPresent(fresh -> {
-                fresh.setStatus(Job.JobStatus.FAILED);
-                fresh.setErrorCount(fresh.getErrorCount() + 1);
-                fresh.setProgress(0);
-                fresh.setTotal((int) taskItemRepository.findByTaskIdOrderBySortOrder(fresh.getTaskId()).size());
-                fresh.setFinishedAt(LocalDateTime.now());
-                jobRepository.save(fresh);
-            });
             if (defCode != null) {
                 taskService.updateItemStatus(job.getTaskId(), defCode, "FAILED");
             }
         } catch (Exception e) {
             log.error("Publish job {} failure bookkeeping failed: {}", job.getId(), e.getMessage(), e);
         }
+        terminalWriter.complete(job, Job.JobStatus.FAILED, errors, 0, 0,
+                stagingRowRepository.findByTaskId(job.getTaskId()).size(),
+                Map.of("jobId", job.getId(), "jobType", "PUBLISH",
+                        "status", Job.JobStatus.FAILED, "errors", errors));
     }
 
     private boolean isReplaceMode(Long taskId) {
@@ -320,6 +312,10 @@ public class PublishJobRunner {
         taskSseService.publish(job.getTaskId(), "JOB_PROGRESS", Map.of(
                 "jobId", job.getId(), "jobType", job.getJobType(), "defCode", defCode,
                 "processed", processed, "total", total, "pct", pct));
+    }
+
+    /** 数据面执行结果：取消标记 + 错误数 + 行级进度（供事务外写终态）。 */
+    private record PublishOutcome(boolean cancelled, int totalErrors, int processedRows, int totalRows) {
     }
 
     /** 硬错误载体：携带出错配置项，供事务回滚后的失败补记定位。 */

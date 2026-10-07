@@ -8,6 +8,8 @@ import lombok.Data;
 public class ApiResponse<T> {
     private boolean success;
     private String message;
+    /** 机器可读错误码（仅错误时出现，如 JOB_ALREADY_FINAL），便于前端与验证按码判定 */
+    private String code;
     private T data;
 
     public static <T> ApiResponse<T> ok(T data) {
@@ -27,6 +29,12 @@ public class ApiResponse<T> {
         ApiResponse<T> r = new ApiResponse<>();
         r.success = false;
         r.message = message;
+        return r;
+    }
+
+    public static <T> ApiResponse<T> error(String code, String message) {
+        ApiResponse<T> r = error(message);
+        r.code = code;
         return r;
     }
 }

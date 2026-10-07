@@ -6,7 +6,6 @@ import com.example.configmgr.job.repo.JobRepository;
 import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.entity.TaskFile;
 import com.example.configmgr.task.repo.TaskFileRepository;
-import com.example.configmgr.task.repo.TaskRepository;
 import com.example.configmgr.task.service.TaskService;
 import com.example.configmgr.task.service.TaskSseService;
 import lombok.RequiredArgsConstructor;
@@ -27,12 +26,13 @@ public class TaskController {
 
     private final TaskService taskService;
     private final TaskSseService taskSseService;
-    private final TaskRepository taskRepository;
     private final JobRepository jobRepository;
     private final TaskFileRepository taskFileRepository;
 
     /**
      * 历史任务列表：类型/状态/关键词筛选 + 分页，每条附带配置项数、文件数与最新作业进度。
+     *
+     * <p>关键词的 LIKE 通配符转义在 {@link TaskService#search}（Q16②）。
      */
     @GetMapping
     public ApiResponse<Page<TaskSummary>> list(
@@ -43,7 +43,7 @@ public class TaskController {
             @RequestParam(defaultValue = "10") int size) {
         Task.TaskType tt = (type == null || type.isBlank()) ? null : Task.TaskType.valueOf(type.toUpperCase());
         Task.TaskStatus st = (status == null || status.isBlank()) ? null : Task.TaskStatus.valueOf(status.toUpperCase());
-        Page<Task> result = taskRepository.search(tt, st, keyword, PageRequest.of(page, size));
+        Page<Task> result = taskService.search(tt, st, keyword, PageRequest.of(page, size));
         return ApiResponse.ok(result.map(this::toSummary));
     }
 
@@ -53,13 +53,13 @@ public class TaskController {
     @GetMapping("/{id}/overview")
     public ApiResponse<Map<String, Object>> overview(@PathVariable Long id) {
         Task task = taskService.findById(id);
-        List<Job> jobs = jobRepository.findByTaskIdOrderByCreatedAtDesc(id);
+        List<Job> jobs = jobRepository.findByTaskIdOrderByCreatedAtDescIdDesc(id);
         List<TaskFile> files = taskFileRepository.findByTaskId(id);
         return ApiResponse.ok(Map.of("task", task, "jobs", jobs, "files", files));
     }
 
     private TaskSummary toSummary(Task task) {
-        List<Job> jobs = jobRepository.findByTaskIdOrderByCreatedAtDesc(task.getId());
+        List<Job> jobs = jobRepository.findByTaskIdOrderByCreatedAtDescIdDesc(task.getId());
         Job latest = jobs.isEmpty() ? null : jobs.get(0);
         int fileCount = taskFileRepository.findByTaskId(task.getId()).size();
         return new TaskSummary(task,

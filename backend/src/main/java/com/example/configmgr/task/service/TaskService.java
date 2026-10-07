@@ -1,6 +1,12 @@
 package com.example.configmgr.task.service;
 
 import com.example.configmgr.common.ResourceNotFoundException;
+import com.example.configmgr.data.repo.ConfigStagingRowRepository;
+import com.example.configmgr.file.FileStorageService;
+import com.example.configmgr.job.entity.Job;
+import com.example.configmgr.job.repo.JobItemRepository;
+import com.example.configmgr.job.repo.JobRepository;
+import com.example.configmgr.job.repo.ValidationIssueRepository;
 import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.entity.TaskItem;
 import com.example.configmgr.task.entity.TaskFile;
@@ -13,9 +19,14 @@ import jakarta.persistence.PersistenceContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
+import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -31,11 +42,35 @@ public class TaskService {
     private final TaskRepository taskRepository;
     private final TaskItemRepository taskItemRepository;
     private final TaskFileRepository taskFileRepository;
+    private final JobRepository jobRepository;
+    private final JobItemRepository jobItemRepository;
+    private final ValidationIssueRepository issueRepository;
+    private final ConfigStagingRowRepository stagingRowRepository;
+    private final FileStorageService fileStorage;
     private final ApplicationEventPublisher eventPublisher;
     private final ObjectMapper objectMapper;
 
     public List<Task> findAll() {
         return taskRepository.findAllOrdered();
+    }
+
+    /**
+     * 历史任务检索（任务中心列表）。
+     *
+     * <p>关键词里的 LIKE 通配符在此转义（Q16②）：调换 {@code \} 在前，避免二次转义；
+     * 转义后的 {@code %} / {@code _} 只作字面量匹配，配合查询里的 {@code ESCAPE '\'}。
+     */
+    public Page<Task> search(Task.TaskType type, Task.TaskStatus status, String keyword, Pageable pageable) {
+        return taskRepository.search(type, status, escapeLike(keyword), pageable);
+    }
+
+    static String escapeLike(String keyword) {
+        if (keyword == null) {
+            return null;
+        }
+        return keyword.replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_");
     }
 
     public Task findById(Long id) {
@@ -169,6 +204,36 @@ public class TaskService {
     }
 
     /**
+     * ⑥ 任务态机断头路补齐：作业终态联动任务态（ADR-8 修正②/Q16④）。
+     *
+     * <p>三处调用点：取消联动（{@link com.example.configmgr.job.service.JobService#cancel}）、
+     * 作业失败联动（各作业执行器终态）、僵尸恢复联动
+     * （{@link com.example.configmgr.job.service.StaleJobRecoveryRunner}）。
+     * 作业 PENDING/RUNNING 不改任务态；任务不存在（已删除级联）静默跳过；
+     * 目标态与当前态相同时不动库、不发事件（幂等，重复重启/重复终态回写无副作用）。
+     */
+    @Transactional
+    public void applyJobOutcome(Long taskId, Job.JobStatus jobStatus) {
+        Task.TaskStatus target = switch (jobStatus) {
+            case COMPLETED -> Task.TaskStatus.COMPLETED;
+            case FAILED -> Task.TaskStatus.FAILED;
+            case CANCELLED -> Task.TaskStatus.CANCELLED;
+            default -> null;
+        };
+        if (target == null) {
+            return;
+        }
+        taskRepository.findById(taskId).ifPresent(task -> {
+            if (task.getStatus() == target) {
+                return;
+            }
+            task.setStatus(target);
+            taskRepository.save(task);
+            publishTaskChanged(task, "任务状态联动作业终态: " + jobStatus);
+        });
+    }
+
+    /**
      * 更新任务内某配置项的状态（CHECKED/IMPORTED/PUBLISHED/COMPLETED/FAILED 等）。
      */
     @Transactional
@@ -179,14 +244,52 @@ public class TaskService {
         });
     }
 
+    /**
+     * ⑦ 任务删除级联清理（FR-4.4，S4.3a 遗留裁决 ⑥）。
+     *
+     * <p>级联范围 = 作业（jobs）+ 作业条目（job_items）+ 校验问题（validation_issues）
+     * + 暂存行（config_staging_rows，基座缺陷：残留）+ 任务条目/文件（task_files：上传件与导出结果）
+     * + 任务本体。物理文件（上传件/导出结果）在事务提交后再删盘，
+     * 避免事务回滚后库里还有行、盘上文件已丢。
+     *
+     * <p>删除动作的操作流水（无主体操作流水，ADR-11b）见本类 {@link #publishTaskChanged}
+     * ——删除前发一条 TASK_CHANGED（含动作摘要），流水记录不含主体维度。
+     */
     @Transactional
     public void delete(Long taskId) {
-        if (!taskRepository.existsById(taskId)) {
-            throw ResourceNotFoundException.of("任务", taskId);
+        Task task = taskRepository.findById(taskId)
+                .orElseThrow(() -> ResourceNotFoundException.of("任务", taskId));
+
+        List<TaskFile> files = taskFileRepository.findByTaskId(taskId);
+        List<Long> jobIds = jobRepository.findByTaskId(taskId).stream().map(Job::getId).toList();
+        long stagingRows = stagingRowRepository.findByTaskId(taskId).size();
+
+        publishTaskChanged(task, "删除任务（级联清理作业/暂存/导出结果）");
+        // FR-4.4「删除动作入操作流水」本期落地形态：结构化流水行（动作/对象/前值摘要/来源/时间，
+        // 无主体维度，ADR-11b）+ TASK_CHANGED 事件；落库的 AuditLog 表属 DC-10 的 P2，见证据文档【待裁决】。
+        log.info("操作流水: 动作=DELETE_TASK 对象=task#{} 前值摘要=type={},status={},jobs={},stagingRows={},files={} 来源=界面/API 时间={}",
+                taskId, task.getType(), task.getStatus(), jobIds.size(), stagingRows, files.size(), LocalDateTime.now());
+
+        if (!jobIds.isEmpty()) {
+            issueRepository.deleteByJobIdIn(jobIds);
+            jobItemRepository.deleteByJobIdIn(jobIds);
         }
+        jobRepository.deleteByTaskId(taskId);
+        stagingRowRepository.deleteByTaskId(taskId);
         taskItemRepository.deleteByTaskId(taskId);
         taskFileRepository.deleteByTaskId(taskId);
         taskRepository.deleteById(taskId);
+
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    files.forEach(f -> fileStorage.delete(f.getStoragePath()));
+                }
+            });
+        } else {
+            files.forEach(f -> fileStorage.delete(f.getStoragePath()));
+        }
     }
 
     public List<TaskFile> getFiles(Long taskId) {

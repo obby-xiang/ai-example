@@ -6,14 +6,10 @@ import com.example.configmgr.data.repo.ConfigDataRowRepository;
 import com.example.configmgr.data.service.ConditionEvaluator;
 import com.example.configmgr.data.service.QueryCondition;
 import com.example.configmgr.definition.entity.ConfigDefinition;
-import com.example.configmgr.definition.entity.ConfigField;
 import com.example.configmgr.definition.service.DefinitionService;
 import com.example.configmgr.excel.ExcelWriter;
 import com.example.configmgr.file.FileStorageService;
 import com.example.configmgr.job.entity.Job;
-import com.example.configmgr.job.entity.JobItem;
-import com.example.configmgr.job.repo.JobItemRepository;
-import com.example.configmgr.job.repo.JobRepository;
 import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.entity.TaskFile;
 import com.example.configmgr.task.repo.TaskFileRepository;
@@ -29,6 +25,13 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.util.*;
 
+/**
+ * 导出作业执行器：逐配置项按查询条件过滤已发布行 → 写 Excel + task_files（导出结果）。
+ *
+ * <p>状态/进度落库口径见 {@link JobProgressService}（⑤）：进度按"<b>已扫描行数 / 待扫描行数</b>"
+ * 报（不再用"命中行数 / 待扫描行数"——那会让进度条与真实工作量脱节），
+ * 作业行与作业条目经独立事务在分片边界实时可见；终态与任务态联动见 {@link JobTerminalWriter}（⑥）。
+ */
 @Slf4j
 @Service
 @RequiredArgsConstructor
@@ -39,51 +42,55 @@ public class ExportJobRunner {
     private final TaskItemRepository taskItemRepository;
     private final TaskService taskService;
     private final TaskFileRepository taskFileRepository;
-    private final JobRepository jobRepository;
-    private final JobItemRepository jobItemRepository;
     private final ExcelWriter excelWriter;
     private final FileStorageService fileStorage;
     private final TaskSseService taskSseService;
     private final AppProperties appProperties;
     private final ObjectMapper objectMapper;
     private final JobCancellationRegistry cancellationRegistry;
+    private final JobProgressService progressService;
+    private final JobTerminalWriter terminalWriter;
 
     @Transactional
     public void run(Job job) {
-        job.setStatus(Job.JobStatus.RUNNING);
-        job.setStartedAt(java.time.LocalDateTime.now());
-        jobRepository.save(job);
+        final Long jobId = job.getId();
+        final Long taskId = job.getTaskId();
 
         boolean cancelled = false;
+        int errorCount = 0;
+        int processedRows = 0;   // 已扫描行数（已完成配置项合计 + 当前配置项已扫描）
+        int totalRows = 0;       // 待扫描行数（已发现配置项合计）
+        int finishedDefRows = 0; // 已结束配置项的扫描行数合计
+
+        progressService.markRunning(jobId, totalRows);
+
         try {
-            var items = taskItemRepository.findByTaskIdOrderBySortOrder(job.getTaskId());
-            job.setTotal(items.size());
-            jobRepository.save(job);
+            var items = taskItemRepository.findByTaskIdOrderBySortOrder(taskId);
 
             for (var item : items) {
-                if (cancellationRegistry.isCancelled(job.getId())) {
+                if (cancellationRegistry.isCancelled(jobId)) {
                     cancelled = true;
                     break;
                 }
                 String defCode = item.getDefCode();
-                JobItem ji = new JobItem();
-                ji.setJobId(job.getId());
-                ji.setDefCode(defCode);
-                ji.setStatus("RUNNING");
-                ji = jobItemRepository.save(ji);
+                Long itemId = progressService.startItem(jobId, defCode);
+                int defTotal = 0;
+                int rowsSeen = 0;
 
                 try {
                     ConfigDefinition def = definitionService.findByCode(defCode);
-                    List<String> keyFields = def.getFields().stream()
-                            .filter(ConfigField::isKey).map(ConfigField::getCode).toList();
-
-                    // Parse condition
                     QueryCondition cond = parseCondition(item.getConditionJson());
 
                     // Load all rows matching condition（范围过滤 + 字段级过滤统一由 ConditionEvaluator 处理）
                     List<ConfigDataRow> allRows = dataRowRepository.findByDefCodeOrderByRowKey(defCode);
+                    defTotal = allRows.size();
+                    totalRows += defTotal;
+                    progressService.updateItem(itemId, 0, defTotal);
+                    progressService.snapshot(jobId, processedRows, totalRows);
+
                     List<Map<String, Object>> filtered = new ArrayList<>();
                     for (ConfigDataRow r : allRows) {
+                        rowsSeen++;
                         Map<String, Object> data = objectMapper.readValue(r.getDataJson(), new TypeReference<>() {});
                         if (!ConditionEvaluator.matches(data, cond)) {
                             continue;
@@ -92,19 +99,26 @@ public class ExportJobRunner {
                         // Demo delay per batch
                         if (filtered.size() % appProperties.getJob().getBatchSize() == 0) {
                             Thread.sleep(appProperties.getJob().getDemoBatchDelayMs());
-                            ji.setProcessed(filtered.size());
-                            ji.setTotal(allRows.size());
-                            jobItemRepository.save(ji);
-                            publishProgress(job, defCode, filtered.size(), allRows.size());
-                            if (cancellationRegistry.isCancelled(job.getId())) {
+                            processedRows = finishedDefRows + rowsSeen;
+                            // ⑤ 先落库再推送：快照与事件同一对数字
+                            progressService.updateItem(itemId, rowsSeen, defTotal);
+                            progressService.snapshot(jobId, processedRows, totalRows);
+                            publishProgress(job, defCode, processedRows, totalRows);
+                            if (cancellationRegistry.isCancelled(jobId)) {
                                 cancelled = true;
-                                ji.setStatus("CANCELLED");
-                                jobItemRepository.save(ji);
+                                progressService.finishItem(itemId, "CANCELLED", rowsSeen, defTotal);
                                 break;
                             }
                         }
                     }
                     if (cancelled) break;
+
+                    // 本配置项扫描完毕（无论命中多少行）
+                    rowsSeen = defTotal;
+                    processedRows = finishedDefRows + rowsSeen;
+                    finishedDefRows += defTotal;
+                    progressService.finishItem(itemId, "COMPLETED", defTotal, defTotal);
+                    progressService.snapshot(jobId, processedRows, totalRows);
 
                     // Write Excel
                     String storagePath = fileStorage.newPath(".xlsx");
@@ -112,9 +126,9 @@ public class ExportJobRunner {
 
                     // Save TaskFile
                     Optional<TaskFile> existing = taskFileRepository
-                            .findByTaskIdAndDefCodeAndFileType(job.getTaskId(), defCode, "EXPORT");
+                            .findByTaskIdAndDefCodeAndFileType(taskId, defCode, "EXPORT");
                     TaskFile tf = existing.orElseGet(TaskFile::new);
-                    tf.setTaskId(job.getTaskId());
+                    tf.setTaskId(taskId);
                     tf.setDefCode(defCode);
                     tf.setFileType("EXPORT");
                     tf.setStoragePath(storagePath);
@@ -123,43 +137,38 @@ public class ExportJobRunner {
                     tf.setRowCount(filtered.size());
                     taskFileRepository.save(tf);
 
-                    ji.setStatus("COMPLETED");
-                    ji.setProcessed(filtered.size());
-                    ji.setTotal(filtered.size());
-                    jobItemRepository.save(ji);
-                    taskService.updateItemStatus(job.getTaskId(), defCode, "COMPLETED");
+                    taskService.updateItemStatus(taskId, defCode, "COMPLETED");
 
                 } catch (Exception e) {
                     log.error("Export failed for def {}: {}", defCode, e.getMessage(), e);
-                    ji.setStatus("FAILED");
-                    jobItemRepository.save(ji);
-                    job.setErrorCount(job.getErrorCount() + 1);
-                    taskService.updateItemStatus(job.getTaskId(), defCode, "FAILED");
-                }
-
-                job.setProgress(job.getProgress() + 1);
-                jobRepository.save(job);
-            }
-
-            if (cancelled) {
-                job.setStatus(Job.JobStatus.CANCELLED);
-            } else {
-                job.setStatus(job.getErrorCount() > 0 ? Job.JobStatus.FAILED : Job.JobStatus.COMPLETED);
-                if (job.getErrorCount() == 0) {
-                    // 导出全部成功 → 任务完成，步骤同步到最终步骤（列表点击标题可直接查看结果）
-                    taskService.updateStatus(job.getTaskId(), Task.TaskStatus.COMPLETED);
-                    taskService.goToStep(job.getTaskId(), "EXPORT");
+                    errorCount++;
+                    finishedDefRows += defTotal;
+                    processedRows = finishedDefRows;
+                    progressService.finishItem(itemId, "FAILED", (int) Math.max(defTotal, rowsSeen), defTotal);
+                    taskService.updateItemStatus(taskId, defCode, "FAILED");
                 }
             }
         } catch (Exception e) {
             log.error("Export job failed: {}", e.getMessage(), e);
-            job.setStatus(Job.JobStatus.FAILED);
-        } finally {
-            job.setFinishedAt(java.time.LocalDateTime.now());
-            jobRepository.save(job);
-            taskSseService.publish(job.getTaskId(), "JOB_DONE", Map.of(
-                    "jobId", job.getId(), "jobType", "EXPORT", "status", job.getStatus()));
+            errorCount++;
+            terminalWriter.complete(job, Job.JobStatus.FAILED, errorCount, 0,
+                    processedRows, totalRows, doneEvent(job, Job.JobStatus.FAILED));
+            return;
         }
+
+        Job.JobStatus status = cancelled ? Job.JobStatus.CANCELLED
+                : (errorCount > 0 ? Job.JobStatus.FAILED : Job.JobStatus.COMPLETED);
+        if (!cancelled && errorCount == 0) {
+            // 导出全部成功 → 任务完成，步骤同步到最终步骤（列表点击标题可直接查看结果）
+            taskService.updateStatus(taskId, Task.TaskStatus.COMPLETED);
+            taskService.goToStep(taskId, "EXPORT");
+        }
+        terminalWriter.complete(job, status, errorCount, 0, processedRows, totalRows,
+                doneEvent(job, status));
+    }
+
+    private Map<String, Object> doneEvent(Job job, Job.JobStatus status) {
+        return Map.of("jobId", job.getId(), "jobType", "EXPORT", "status", status);
     }
 
     private void publishProgress(Job job, String defCode, int processed, int total) {

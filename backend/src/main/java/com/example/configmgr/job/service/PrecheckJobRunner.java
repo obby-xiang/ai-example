@@ -5,7 +5,6 @@ import com.example.configmgr.data.entity.ConfigDataRow;
 import com.example.configmgr.data.entity.ConfigStagingRow;
 import com.example.configmgr.data.repo.ConfigDataRowRepository;
 import com.example.configmgr.data.repo.ConfigStagingRowRepository;
-import com.example.configmgr.data.service.ConfigDataService;
 import com.example.configmgr.definition.entity.ConfigDefinition;
 import com.example.configmgr.definition.entity.ConfigField;
 import com.example.configmgr.definition.service.DefinitionService;
@@ -13,10 +12,7 @@ import com.example.configmgr.definition.service.DependencyResolver;
 import com.example.configmgr.excel.ExcelReader;
 import com.example.configmgr.file.FileStorageService;
 import com.example.configmgr.job.entity.Job;
-import com.example.configmgr.job.entity.JobItem;
 import com.example.configmgr.job.entity.ValidationIssue;
-import com.example.configmgr.job.repo.JobItemRepository;
-import com.example.configmgr.job.repo.JobRepository;
 import com.example.configmgr.job.repo.ValidationIssueRepository;
 import com.example.configmgr.task.entity.TaskFile;
 import com.example.configmgr.task.repo.TaskFileRepository;
@@ -32,6 +28,12 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.util.*;
 
+/**
+ * 预检查作业执行器：逐配置项校验必填/主键重复/引用完整性。
+ *
+ * <p>状态/进度落库口径见 {@link JobProgressService}（⑤）；终态与任务态联动见
+ * {@link JobTerminalWriter}（⑥）。
+ */
 @Slf4j
 @Service
 @RequiredArgsConstructor
@@ -43,8 +45,6 @@ public class PrecheckJobRunner {
     private final ConfigStagingRowRepository stagingRowRepository;
     private final TaskItemRepository taskItemRepository;
     private final TaskFileRepository taskFileRepository;
-    private final JobRepository jobRepository;
-    private final JobItemRepository jobItemRepository;
     private final ValidationIssueRepository issueRepository;
     private final ExcelReader excelReader;
     private final FileStorageService fileStorage;
@@ -53,38 +53,39 @@ public class PrecheckJobRunner {
     private final ObjectMapper objectMapper;
     private final JobCancellationRegistry cancellationRegistry;
     private final TaskService taskService;
+    private final JobProgressService progressService;
+    private final JobTerminalWriter terminalWriter;
 
     @Transactional
     public void run(Job job) {
-        job.setStatus(Job.JobStatus.RUNNING);
-        job.setStartedAt(java.time.LocalDateTime.now());
-        jobRepository.save(job);
-
-        // Delete old issues for this job
-        issueRepository.deleteByJobId(job.getId());
+        final Long jobId = job.getId();
+        final Long taskId = job.getTaskId();
 
         boolean cancelled = false;
+        int totalErrors = 0;
+        int totalWarnings = 0;
+        int processedRows = 0;
+        int totalRows = 0;
+        int finishedDefRows = 0;
+
+        progressService.markRunning(jobId, totalRows);
+
+        // Delete old issues for this job
+        issueRepository.deleteByJobId(jobId);
+
         try {
-            var items = taskItemRepository.findByTaskIdOrderBySortOrder(job.getTaskId());
+            var items = taskItemRepository.findByTaskIdOrderBySortOrder(taskId);
             List<String> defCodes = items.stream().map(i -> i.getDefCode()).toList();
             List<String> sorted = dependencyResolver.sort(defCodes);
 
-            job.setTotal(sorted.size());
-            jobRepository.save(job);
-
-            int totalErrors = 0;
-            int totalWarnings = 0;
-
             for (String defCode : sorted) {
-                if (cancellationRegistry.isCancelled(job.getId())) {
+                if (cancellationRegistry.isCancelled(jobId)) {
                     cancelled = true;
                     break;
                 }
-                JobItem ji = new JobItem();
-                ji.setJobId(job.getId());
-                ji.setDefCode(defCode);
-                ji.setStatus("RUNNING");
-                ji = jobItemRepository.save(ji);
+                Long itemId = progressService.startItem(jobId, defCode);
+                int defTotal = 0;
+                int rowsSeen = 0;
 
                 try {
                     ConfigDefinition def = definitionService.findByCode(defCode);
@@ -93,31 +94,32 @@ public class PrecheckJobRunner {
 
                     // Find file for this def
                     Optional<TaskFile> fileOpt = taskFileRepository
-                            .findByTaskIdAndDefCodeAndFileType(job.getTaskId(), defCode, "UPLOAD");
+                            .findByTaskIdAndDefCodeAndFileType(taskId, defCode, "UPLOAD");
                     if (fileOpt.isEmpty()) {
                         fileOpt = taskFileRepository
-                                .findByTaskIdAndDefCodeAndFileType(job.getTaskId(), defCode, "EXPORT");
+                                .findByTaskIdAndDefCodeAndFileType(taskId, defCode, "EXPORT");
                     }
 
                     if (fileOpt.isEmpty()) {
                         ValidationIssue issue = new ValidationIssue();
-                        issue.setJobId(job.getId());
+                        issue.setJobId(jobId);
                         issue.setDefCode(defCode);
                         issue.setSeverity(ValidationIssue.Severity.ERROR);
                         issue.setMessage("未找到上传文件，请先上传配置数据文件");
                         issueRepository.save(issue);
                         totalErrors++;
-                        ji.setStatus("FAILED");
-                        jobItemRepository.save(ji);
-                        job.setProgress(job.getProgress() + 1);
-                        jobRepository.save(job);
+                        progressService.finishItem(itemId, "FAILED", 0, 0);
+                        taskService.updateItemStatus(taskId, defCode, "FAILED");
                         continue;
                     }
 
                     // Read rows from Excel
                     byte[] fileBytes = fileStorage.read(fileOpt.get().getStoragePath());
                     List<Map<String, Object>> rows = excelReader.read(def, fileBytes);
-                    ji.setTotal(rows.size());
+                    defTotal = rows.size();
+                    totalRows += defTotal;
+                    progressService.updateItem(itemId, 0, defTotal);
+                    progressService.snapshot(jobId, processedRows, totalRows);
 
                     // Validate each row
                     int rowErrors = 0, rowWarnings = 0;
@@ -125,6 +127,7 @@ public class PrecheckJobRunner {
 
                     for (int i = 0; i < rows.size(); i++) {
                         Map<String, Object> row = rows.get(i);
+                        rowsSeen = i + 1;
 
                         // Check required fields
                         for (ConfigField f : def.getFields()) {
@@ -132,7 +135,7 @@ public class PrecheckJobRunner {
                                 Object val = row.get(f.getCode());
                                 if (val == null || val.toString().isBlank()) {
                                     ValidationIssue issue = new ValidationIssue();
-                                    issue.setJobId(job.getId());
+                                    issue.setJobId(jobId);
                                     issue.setDefCode(defCode);
                                     issue.setFieldCode(f.getCode());
                                     issue.setRowIndex(i + 2); // 1-based + header
@@ -148,7 +151,7 @@ public class PrecheckJobRunner {
                         String rowKey = buildRowKey(row, keyFields);
                         if (keyIndex.containsKey(rowKey)) {
                             ValidationIssue issue = new ValidationIssue();
-                            issue.setJobId(job.getId());
+                            issue.setJobId(jobId);
                             issue.setDefCode(defCode);
                             issue.setRowKey(rowKey);
                             issue.setRowIndex(i + 2);
@@ -162,13 +165,14 @@ public class PrecheckJobRunner {
 
                         if (i % appProperties.getJob().getBatchSize() == 0) {
                             Thread.sleep(appProperties.getJob().getDemoBatchDelayMs());
-                            ji.setProcessed(i);
-                            jobItemRepository.save(ji);
-                            publishProgress(job, defCode, i, rows.size());
-                            if (cancellationRegistry.isCancelled(job.getId())) {
+                            processedRows = finishedDefRows + rowsSeen;
+                            // ⑤ 先落库再推送：快照与事件同一对数字
+                            progressService.updateItem(itemId, rowsSeen, defTotal);
+                            progressService.snapshot(jobId, processedRows, totalRows);
+                            publishProgress(job, defCode, processedRows, totalRows);
+                            if (cancellationRegistry.isCancelled(jobId)) {
                                 cancelled = true;
-                                ji.setStatus("CANCELLED");
-                                jobItemRepository.save(ji);
+                                progressService.finishItem(itemId, "CANCELLED", rowsSeen, defTotal);
                                 break;
                             }
                         }
@@ -182,7 +186,7 @@ public class PrecheckJobRunner {
                             continue;
                         }
                         Set<String> validValues = loadValidRefValues(
-                                job.getTaskId(), f.getRefDefCode(), f.getRefFieldCode());
+                                taskId, f.getRefDefCode(), f.getRefFieldCode());
                         for (int i = 0; i < rows.size(); i++) {
                             Object v = rows.get(i).get(f.getCode());
                             if (v == null || v.toString().isBlank()) {
@@ -190,7 +194,7 @@ public class PrecheckJobRunner {
                             }
                             if (!validValues.contains(v.toString())) {
                                 ValidationIssue issue = new ValidationIssue();
-                                issue.setJobId(job.getId());
+                                issue.setJobId(jobId);
                                 issue.setDefCode(defCode);
                                 issue.setFieldCode(f.getCode());
                                 issue.setRowIndex(i + 2);
@@ -206,48 +210,47 @@ public class PrecheckJobRunner {
                     totalErrors += rowErrors;
                     totalWarnings += rowWarnings;
 
-                    ji.setStatus(rowErrors > 0 ? "FAILED" : "COMPLETED");
-                    ji.setProcessed(rows.size());
-                    jobItemRepository.save(ji);
-                    taskService.updateItemStatus(job.getTaskId(), defCode,
+                    rowsSeen = defTotal;
+                    finishedDefRows += defTotal;
+                    processedRows = finishedDefRows;
+                    progressService.finishItem(itemId, rowErrors > 0 ? "FAILED" : "COMPLETED",
+                            defTotal, defTotal);
+                    progressService.snapshot(jobId, processedRows, totalRows);
+                    taskService.updateItemStatus(taskId, defCode,
                             rowErrors > 0 ? "FAILED" : "CHECKED");
 
                 } catch (Exception e) {
                     log.error("Precheck failed for {}: {}", defCode, e.getMessage(), e);
                     ValidationIssue issue = new ValidationIssue();
-                    issue.setJobId(job.getId());
+                    issue.setJobId(jobId);
                     issue.setDefCode(defCode);
                     issue.setSeverity(ValidationIssue.Severity.ERROR);
                     issue.setMessage("检查过程出错: " + e.getMessage());
                     issueRepository.save(issue);
                     totalErrors++;
-                    ji.setStatus("FAILED");
-                    jobItemRepository.save(ji);
-                    taskService.updateItemStatus(job.getTaskId(), defCode, "FAILED");
+                    finishedDefRows += defTotal;
+                    processedRows = finishedDefRows;
+                    progressService.finishItem(itemId, "FAILED", (int) Math.max(defTotal, rowsSeen), defTotal);
+                    taskService.updateItemStatus(taskId, defCode, "FAILED");
                 }
-
-                job.setProgress(job.getProgress() + 1);
-                jobRepository.save(job);
             }
-
-            job.setErrorCount(totalErrors);
-            job.setWarningCount(totalWarnings);
-            if (cancelled) {
-                job.setStatus(Job.JobStatus.CANCELLED);
-            } else {
-                job.setStatus(totalErrors > 0 ? Job.JobStatus.FAILED : Job.JobStatus.COMPLETED);
-            }
-
         } catch (Exception e) {
             log.error("Precheck job failed: {}", e.getMessage(), e);
-            job.setStatus(Job.JobStatus.FAILED);
-        } finally {
-            job.setFinishedAt(java.time.LocalDateTime.now());
-            jobRepository.save(job);
-            taskSseService.publish(job.getTaskId(), "JOB_DONE", Map.of(
-                    "jobId", job.getId(), "jobType", "PRECHECK",
-                    "status", job.getStatus(), "errors", job.getErrorCount()));
+            totalErrors++;
+            terminalWriter.complete(job, Job.JobStatus.FAILED, totalErrors, totalWarnings,
+                    processedRows, totalRows, doneEvent(job, Job.JobStatus.FAILED, totalErrors));
+            return;
         }
+
+        Job.JobStatus status = cancelled ? Job.JobStatus.CANCELLED
+                : (totalErrors > 0 ? Job.JobStatus.FAILED : Job.JobStatus.COMPLETED);
+        terminalWriter.complete(job, status, totalErrors, totalWarnings, processedRows, totalRows,
+                doneEvent(job, status, totalErrors));
+    }
+
+    private Map<String, Object> doneEvent(Job job, Job.JobStatus status, int errors) {
+        return Map.of("jobId", job.getId(), "jobType", "PRECHECK",
+                "status", status, "errors", errors);
     }
 
     private String buildRowKey(Map<String, Object> row, List<ConfigField> keyFields) {

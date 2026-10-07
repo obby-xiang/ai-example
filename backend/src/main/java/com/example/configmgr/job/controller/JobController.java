@@ -5,6 +5,7 @@ import com.example.configmgr.data.entity.ConfigStagingRow;
 import com.example.configmgr.data.repo.ConfigStagingRowRepository;
 import com.example.configmgr.job.entity.Job;
 import com.example.configmgr.job.entity.ValidationIssue;
+import com.example.configmgr.job.service.JobCancellationRegistry;
 import com.example.configmgr.job.service.JobService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Page;
@@ -40,10 +41,18 @@ public class JobController {
         return ApiResponse.ok(jobService.findById(jobId));
     }
 
+    /**
+     * 取消作业。已终态（COMPLETED/FAILED/CANCELLED）→ 409 JOB_ALREADY_FINAL（ADR-8 W1 边界），
+     * 响应体带 {@code code} 供前端按码分支。
+     */
     @DeleteMapping("/jobs/{jobId}")
-    public ApiResponse<?> cancelJob(@PathVariable Long jobId) {
-        jobService.cancel(jobId);
-        return ApiResponse.ok();
+    public ApiResponse<Map<String, Object>> cancelJob(@PathVariable Long jobId) {
+        JobCancellationRegistry.CancelResult result = jobService.cancel(jobId, "api");
+        return ApiResponse.ok(Map.of(
+                "jobId", jobId,
+                "cancelKey", result.key(),
+                "redisWritten", result.redisWritten(),
+                "wokeInProcess", result.wokeInProcess()));
     }
 
     @GetMapping("/jobs/{jobId}/issues")
