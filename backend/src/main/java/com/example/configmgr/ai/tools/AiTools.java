@@ -17,6 +17,7 @@ import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
@@ -35,14 +36,26 @@ import java.util.stream.Collectors;
  * <li><b>作业发起</b>：start_export / start_precheck / start_import（WRITE，作业创建）；</li>
  * <li><b>破坏性</b>：{@code start_publish}（{@code @ToolRisk(DANGER)}）—— 必须经确认门，
  * 放行才执行、拒绝/超时以"未执行"语义回填；</li>
- * <li><b>前端指令</b>：{@code open_export_file_editor} / {@code download_export_file}
+ * <li><b>前端指令</b>：{@code open_export_file_editor} / {@code download_export_file} /
+ * {@code navigate_to} / {@code select_definitions} / {@code set_condition} / {@code confirm_step}
  * （{@code @ToolChannel(FRONTEND)}）—— 副作用在浏览器里，后端方法体是哨兵桩，
  * 由 {@code SpToolCallingManager} 挂起并由 {@code POST /api/ai/frontend-tool-result} 回灌结果。</li>
  * </ul>
- * <b>仍未接回</b>（P1 N7 的剩余项）：{@code create_task} / {@code select_defs} /
- * {@code set_query_condition} / {@code navigate_to_step} —— 它们既非破坏性也非前端指令，
- * 而是"任务向导状态机的写操作"，需与前端渐进披露表（kimi-k3 {@code frontend-tools.js}）
- * 一起评审后再接（S4.4 联动）。原始实现见基座 git 历史与 S4.2-P1 证据文档。
+ *
+ * <h2>工作区动作（S4.4d：AI 一句话驱动向导）</h2>
+ * {@code navigate_to} / {@code select_definitions} / {@code set_condition} / {@code confirm_step}
+ * 是"任务向导的驱动动作"：按 S4.4c 已实测生效的前端动作表（{@code utils/frontend-tools.ts} 的
+ * {@code WORKSPACE_ACTIONS}）登记，<b>参数名与前端契约逐字一致</b>（{@code page/taskId}、
+ * {@code codes/mode}、{@code defCode/conditions}、{@code step}）—— 后端只负责披露，
+ * 下发与执行沿用既有 {@code frontend_tool_request} 通道，前端零改动。
+ *
+ * <p>披露口径（三重防线之一，见 {@code ToolScope}）：向导动作在<b>任务中心</b>（向导入口页）与
+ * <b>对应任务类型</b>下披露，{@code definitions/data} 等非向导页面不披露；一轮内模型发起的多次
+ * 调用共享同一份披露集（上下文在请求边界冻结），因此按"任务类型"而非"单一步骤"披露 ——
+ * 步骤级/页面级适配由前端动作表的 {@code allowPages}/{@code allowSteps} 兜底校验（防线三）。
+ *
+ * <p><b>仍未接回</b>（P1 N7 的剩余项）：{@code create_task} —— 任务创建仍走界面/API
+ * （本工具集不含创建任务能力，证据文档 S44d 已登记【待裁决】）。
  */
 @Component
 @RequiredArgsConstructor
@@ -167,8 +180,21 @@ public class AiTools {
 
     // ==================== 作业发起：导出 / 预检查 / 导入 ====================
 
+    /**
+     * 导出作业发起。
+     *
+     * <p><b>S4.4d 披露范围补 {@code page:tasks}（本棒两处既有工具披露调整之一，另一处为
+     * {@link #startPrecheck}，同一口径）</b>：
+     * 一轮对话的工具子集在请求边界冻结（模型在同一轮里发起的多次调用共享同一份披露集），
+     * 而"在任务中心一句话驱动导出"这条路径的起点上下文就是 {@code page:tasks}（无 taskType）——
+     * 不补这一档，模型能在同一轮里把向导驱动到「导出执行」步，却<b>拿不到启动作业的入口</b>
+     * （S44d 证据 V2-a 实测：模型如实回复"披露的工具里没有可以直接触发导出的入口"）。
+     * 作业创建仍走与 REST 相同的服务层（{@link JobService}，FR-5.4 单一事实源），
+     * 风险等级不变（WRITE，非 DANGER），作业是否可导由任务/配置项状态决定。
+     * 该调整不影响既有的 {@code task:EXPORT/EXPORT} 披露（向导内照旧可用），见证据文档【待裁决】。
+     */
     @Tool(name = "start_export", description = "启动配置导出作业，开始将数据导出为Excel文件")
-    @ToolScope("task:EXPORT/EXPORT")
+    @ToolScope({ "page:tasks", "task:EXPORT/EXPORT" })
     @ToolRisk(ToolMeta.RiskLevel.WRITE)
     public String startExport(
             @ToolParam(description = "任务ID") Long taskId) {
@@ -180,8 +206,14 @@ public class AiTools {
         }
     }
 
+    /**
+     * 预检查作业发起：与 {@link #startExport} 同一口径，披露范围补 {@code page:tasks}
+     * （导入向导的「检查配置」步同样要有从任务中心出发的入口，否则模型的"检查"意图无处落地，
+     * 会退化成继续 confirm_step 推进步骤 —— S44d 证据 V3-a 实测到了这一退化）。
+     * 写暂存（{@code start_import}）与发布（{@code start_publish}，DANGER）保持原披露范围不动。
+     */
     @Tool(name = "start_precheck", description = "启动预检查作业，验证上传的Excel文件格式和数据")
-    @ToolScope("task:IMPORT/PRECHECK")
+    @ToolScope({ "page:tasks", "task:IMPORT/PRECHECK" })
     @ToolRisk(ToolMeta.RiskLevel.WRITE)
     public String startPrecheck(
             @ToolParam(description = "任务ID") Long taskId) {
@@ -246,6 +278,55 @@ public class AiTools {
     public String downloadExportFile(
             @ToolParam(description = "任务ID") Long taskId,
             @ToolParam(description = "配置定义编码") String defCode) {
+        return FRONTEND_STUB;
+    }
+
+    // ==================== 前端指令：工作区动作（S4.4d 向导驱动） ====================
+
+    /**
+     * 页面导航。披露范围为 {@code *}：它是任意页面进入向导的唯一入口动作，
+     * 目标页面的合法性由前端动作表白名单（{@code allowPages}）兜底校验。
+     */
+    @Tool(name = "navigate_to", description = "驱动前端页面导航：切换到任务中心/导出向导/导入向导/配置定义/数据浏览页；带 taskId 时直接打开该任务的向导")
+    @ToolScope("*")
+    @ToolRisk(ToolMeta.RiskLevel.READ)
+    @ToolChannel(ToolMeta.Channel.FRONTEND)
+    public String navigateTo(
+            @ToolParam(description = "目标页面：tasks（任务中心）/export（导出向导）/import（导入向导）/definitions（配置定义）/data（数据浏览）") String page,
+            @ToolParam(description = "任务ID：打开已有任务的导出/导入向导时必填（可从 list_tasks 或任务中心获得）", required = false) Long taskId) {
+        return FRONTEND_STUB;
+    }
+
+    @Tool(name = "select_definitions", description = "在导出/导入向导的「选择配置」步骤勾选配置项（按配置定义编码；需已导航到对应向导）")
+    @ToolScope({ "page:tasks", "task:EXPORT", "task:IMPORT" })
+    @ToolRisk(ToolMeta.RiskLevel.READ)
+    @ToolChannel(ToolMeta.Channel.FRONTEND)
+    public String selectDefinitions(
+            @ToolParam(description = "配置定义编码列表，例如 [\"CURRENCY\"]") String[] codes,
+            @ToolParam(description = "选择模式：REPLACE（替换，默认）/ ADD（追加）", required = false) String mode) {
+        return FRONTEND_STUB;
+    }
+
+    /**
+     * 查询条件。参数形态以前端动作为准（{@code conditions} 对象），
+     * 前端只会读取 {@code defCode} 与 {@code conditions} 两个键（{@code normalizeActionArgs}）。
+     */
+    @Tool(name = "set_condition", description = "在导出向导的「查询条件」步骤为指定配置项设置数据过滤条件（不设条件即导出全部；需已导航到导出向导）")
+    @ToolScope({ "page:tasks", "task:EXPORT" })
+    @ToolRisk(ToolMeta.RiskLevel.READ)
+    @ToolChannel(ToolMeta.Channel.FRONTEND)
+    public String setCondition(
+            @ToolParam(description = "配置定义编码，例如 CURRENCY") String defCode,
+            @ToolParam(description = "查询条件对象，形如 {\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"CNY\"}]}；operator 取值 EQ/NE/CONTAINS/LIKE/GT/GTE/LT/LTE/IN/EMPTY/NOT_EMPTY") Map<String, Object> conditions) {
+        return FRONTEND_STUB;
+    }
+
+    @Tool(name = "confirm_step", description = "确认并推进向导步骤（当前步骤校验通过时前端才前进；需已导航到导出/导入向导）")
+    @ToolScope({ "page:tasks", "task:EXPORT", "task:IMPORT" })
+    @ToolRisk(ToolMeta.RiskLevel.READ)
+    @ToolChannel(ToolMeta.Channel.FRONTEND)
+    public String confirmStep(
+            @ToolParam(description = "目标步骤（可选）：导出向导 SELECT_DEFS/QUERY_COND/EXPORT；导入向导 SELECT_DEFS/UPLOAD/PRECHECK/IMPORT/PUBLISH。不传则推进到下一步", required = false) String step) {
         return FRONTEND_STUB;
     }
 
