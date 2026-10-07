@@ -10,6 +10,7 @@ import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.run.StreamViolationException;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
 import com.example.configmgr.ai.tool.AiContext;
+import com.example.configmgr.ai.tool.FrontendToolGuard;
 import com.example.configmgr.ai.tool.ToolMeta;
 import com.example.configmgr.ai.tool.ToolRegistry;
 import com.example.configmgr.ai.tool.ToolResultLimiter;
@@ -48,7 +49,10 @@ import java.util.Map;
  * <li><b>确认门</b>：风险等级 {@code DANGER} 的工具（读基座 {@link ToolRegistry} 的
  * {@code @ToolRisk} 分级）执行前挂起等人工决策（{@link ConfirmGate}）；</li>
  * <li><b>前端工具挂起</b>：通道为 {@code FRONTEND} 的工具（{@code @ToolChannel}）不执行后端桩体，
- * 下发 {@code frontend_tool_request} 并阻塞等 {@code POST /api/ai/frontend-tool-result} 回灌。</li>
+ * 下发 {@code frontend_tool_request} 并阻塞等 {@code POST /api/ai/frontend-tool-result} 回灌；
+ * 另有<b>第五件事</b>：声明了复核器的前端工具（{@link FrontendToolGuard}，DC-15）在<b>挂起之前</b>
+ * 先过一道入参安全闸 —— 不合法就<b>不挂起、不下发</b>，只把结构化错误结果回填模型
+ * （见 {@link #awaitFrontend}）。</li>
  * </ul>
  *
  * <h2>结果的两条通道（DC-14 T2）</h2>
@@ -107,9 +111,15 @@ public class SpToolCallingManager implements ToolCallingManager {
 	/** T2：工具结果回填模型前的行数/字符上限（前端帧与台账不受其影响）。 */
 	private final ToolResultLimiter limiter;
 
+	/**
+	 * 前端工具的入参/回灌复核器（DC-15 安全闸）。<b>按工具名自认领</b>（{@link FrontendToolGuard#supports}），
+	 * 因此本类对"哪个工具需要复核"零知识 —— 没声明复核器的前端工具行为一字不变。
+	 */
+	private final List<FrontendToolGuard> frontendGuards;
+
 	public SpToolCallingManager(RunStore store, RunRegistry registry, ConfirmGate gate, ToolRegistry toolRegistry,
 			MessageJsonCodec codec, ToolActivityBeacon beacon, CancellationRegistry cancellations,
-			ToolResultLimiter limiter) {
+			ToolResultLimiter limiter, List<FrontendToolGuard> frontendGuards) {
 		this.delegate = ToolCallingManager.builder().build();
 		this.store = store;
 		this.registry = registry;
@@ -119,6 +129,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 		this.beacon = beacon;
 		this.cancellations = cancellations;
 		this.limiter = limiter;
+		this.frontendGuards = frontendGuards == null ? List.of() : List.copyOf(frontendGuards);
 	}
 
 	@Override
@@ -246,10 +257,55 @@ public class SpToolCallingManager implements ToolCallingManager {
 		return sb.toString();
 	}
 
-	/** 前端工具：不执行后端桩体，挂起等前端回灌（结局帧由 ConfirmGate 侧发出）。 */
+	/**
+	 * 前端工具：先过入参安全闸（DC-15），再挂起等前端回灌（结局帧由 ConfirmGate 侧发出）。
+	 *
+	 * <p>闸门（{@link FrontendToolGuard#inspectArguments}）不通过时<b>不挂起</b>：不发
+	 * {@code frontend_tool_request}、不占等待上限、前端看不到这份非法入参；结构化错误结果
+	 * （机器可读码 + 原因清单）作为该次调用的工具结果回填模型，官方循环照常继续
+	 * ——模型读到"哪一处不合规"后可以改一版再试（而不是白等 120s 超时）。
+	 */
 	private String awaitFrontend(String runId, PendingToolCall pending) {
+		FrontendToolGuard.Verdict verdict = inspectFrontendArguments(pending);
+		if (verdict != null && !verdict.accepted()) {
+			return rejectFrontendArguments(runId, pending, verdict);
+		}
 		PendingToolCall resolved = this.gate.awaitFrontendResult(runId, pending);
 		return resolved.getResultText() == null ? "" : resolved.getResultText();
+	}
+
+	/** 第一个认领该工具名的复核器的入参判定；没有复核器返回 null（= 该工具不受闸门约束）。 */
+	private FrontendToolGuard.Verdict inspectFrontendArguments(PendingToolCall pending) {
+		for (FrontendToolGuard guard : this.frontendGuards) {
+			if (guard.supports(pending.getName())) {
+				return guard.inspectArguments(pending.getArguments());
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * 入参被安全闸拒绝（DC-15）：与防线③（{@link #blockOutOfScope}）同一手法 ——
+	 * <b>不产生任何副作用</b>（不挂起、不下发前端、不认领、不记台账），只把结构化错误结果
+	 * 回填模型，让人机都能看见"这次没执行、为什么"。
+	 *
+	 * <p>结局帧用 {@code frontend_tool_result}（ok=false）：这次调用走的是前端通道且就此收敛，
+	 * 与"前端超时"（{@code FRONTEND_TIMEOUT}）同帧型 —— 前端不必为"没被问到的那次调用"再解析
+	 * 一种新帧；待决条目不留在 {@code PENDING}（否则续跑会把它当成"等人/等前端"）。
+	 */
+	private String rejectFrontendArguments(String runId, PendingToolCall pending, FrontendToolGuard.Verdict verdict) {
+		String text = verdict.render();
+		pending.setStatus(PendingToolCall.REJECTED_ARGUMENTS);
+		pending.setReason(verdict.code());
+		pending.setExecuted(false);
+		pending.setExecutedBy(null);
+		pending.setResolvedAtMs(System.currentTimeMillis());
+		pending.setResultText(text);
+		this.store.putPending(runId, pending);
+		this.registry.of(runId).frontendToolResult(pending, false, text);
+		log.warn("前端工具入参被安全闸拒绝 runId={} tool={} code={}（未挂起、未下发、未执行）：{}",
+				runId, pending.getName(), verdict.code(), verdict.reasons());
+		return text;
 	}
 
 	/** 确认门：放行则执行（经认领与台账，恰好一次），拒绝/超时以"未执行"语义回填并继续循环。 */
@@ -353,7 +409,8 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 * <li>{@code PENDING} + {@code BACKEND}：后端工具不需要外部输入，直接补执行（进程死在
 	 * "已写条目、未执行"之间时的正常路径）；</li>
 	 * <li>{@code APPROVED}：补执行恰好一次（E2 窗口）；</li>
-	 * <li>其余（{@code EXECUTED}/{@code REJECTED}/{@code TIMEOUT}/{@code FRONTEND_RESULT}）：
+	 * <li>其余（{@code EXECUTED}/{@code REJECTED}/{@code TIMEOUT}/{@code FRONTEND_RESULT}/
+	 * {@code FRONTEND_CANCELLED}/{@code REJECTED_ARGUMENTS}/{@code BLOCKED}）：
 	 * 一律复用 {@code resultText}，<b>不执行</b>。</li>
 	 * </ul>
 	 *

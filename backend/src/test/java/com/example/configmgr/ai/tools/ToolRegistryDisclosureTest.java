@@ -52,9 +52,10 @@ class ToolRegistryDisclosureTest {
     private static final List<String> SCOPED_WIZARD_TOOLS = List.of("select_definitions", "set_condition",
             "confirm_step");
 
-    /** 全部前端通道工具（2 个既有 + 4 个新增）。 */
+    /** 全部前端通道工具（2 个既有 + 4 个工作区动作 + DC-15 的 generative_form）。 */
     private static final List<String> FRONTEND_TOOLS = List.of("open_export_file_editor", "download_export_file",
-            "navigate_to", "select_definitions", "set_condition", "confirm_step");
+            "navigate_to", "select_definitions", "set_condition", "confirm_step",
+            com.example.configmgr.ai.form.GenerativeFormRules.TOOL_NAME);
 
     /** S4.4e 裁决⑥：必须经确认门的启动类工具（FR-5.3 明文清单）。 */
     private static final List<String> GATED_START_TOOLS = List.of("start_export", "start_precheck", "start_import",
@@ -233,7 +234,8 @@ class ToolRegistryDisclosureTest {
         List<String> allTools = List.of("list_config_defs", "get_config_def", "list_tasks", "get_workspace_state",
                 "check_job_status", "get_row_count", "create_task", "start_export", "start_precheck", "start_import",
                 "start_publish", "open_export_file_editor", "download_export_file", "navigate_to",
-                "select_definitions", "set_condition", "confirm_step");
+                "select_definitions", "set_condition", "confirm_step",
+                com.example.configmgr.ai.form.GenerativeFormRules.TOOL_NAME);
 
         for (AiContext context : contexts) {
             List<String> disclosed = namesFor(context);

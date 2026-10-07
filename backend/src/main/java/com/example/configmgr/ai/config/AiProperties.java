@@ -114,8 +114,9 @@ public class AiProperties {
 		 *
 		 * <p>
 		 * 默认 false（保守：自动补执行破坏性工具需谨慎），由运维在 {@code application.yml}
-		 * 显式打开；打开后仍<b>只</b>续跑 `APPROVED/EXECUTED/REJECTED/TIMEOUT/FRONTEND_RESULT`
-		 * 的条目 —— 仍 {@code PENDING}（人工/前端未给结论）的一律跳过，因此不会绕开人审。
+		 * 显式打开；打开后仍<b>只</b>续跑"已有结论"的条目（{@code APPROVED/EXECUTED/REJECTED/TIMEOUT/}
+		 * {@code FRONTEND_RESULT/FRONTEND_CANCELLED/REJECTED_ARGUMENTS/BLOCKED}）—— 仍 {@code PENDING}
+		 * （人工/前端未给结论）的一律跳过，因此不会绕开人审。
 		 */
 		private boolean onStartup = false;
 

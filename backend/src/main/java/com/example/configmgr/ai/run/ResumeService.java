@@ -42,7 +42,9 @@ import java.util.stream.Collectors;
  * <li>{@code APPROVED 且 executed=false}（SP-02 E2 的"已放行未执行"窗口，例如放行后进程死亡）
  * → 本次<b>补执行</b>，认领与台账都记在新实例名下；</li>
  * <li>{@code executed=true} → 说明上一实例已完成，直接复用其 {@code resultText}；</li>
- * <li>{@code REJECTED/TIMEOUT/FRONTEND_RESULT} → 以"未执行/已回灌"语义回填，不执行。</li>
+ * <li>其余一旦有结论的条目（{@code REJECTED/TIMEOUT/FRONTEND_RESULT/FRONTEND_CANCELLED}、
+ * 入参被安全闸拒绝的 {@code REJECTED_ARGUMENTS}、越 scope 的 {@code BLOCKED}）
+ * → 以"未执行/已回灌"语义回填，<b>不执行</b>。</li>
  * </ul>
  *
  * <h2>准入与互斥</h2>

@@ -75,7 +75,7 @@ class SpToolCallingManagerScopeGuardTest {
     private final ToolResultLimiter limiter = new ToolResultLimiter(this.properties);
 
     private final SpToolCallingManager manager = new SpToolCallingManager(this.store, this.registry, this.gate,
-            this.toolRegistry, this.codec, this.beacon, this.cancellations, this.limiter);
+            this.toolRegistry, this.codec, this.beacon, this.cancellations, this.limiter, List.of());
 
     /**
      * 本类各用例都以"上下文匹配"为默认（防线③放行），越 scope 的用例再单独把判据打回 false ——

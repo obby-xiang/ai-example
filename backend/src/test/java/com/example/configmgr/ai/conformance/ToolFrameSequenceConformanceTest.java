@@ -97,10 +97,11 @@ class ToolFrameSequenceConformanceTest {
 	private final CancellationRegistry cancellations = mock(CancellationRegistry.class);
 
 	private final ConfirmGate gate = new ConfirmGate(this.store, this.registry, this.properties, this.cancellations,
-			this.beacon);
+			this.beacon, List.of());
 
 	private final SpToolCallingManager manager = new SpToolCallingManager(this.store, this.registry, this.gate,
-			this.toolRegistry, this.codec, this.beacon, this.cancellations, new ToolResultLimiter(this.properties));
+			this.toolRegistry, this.codec, this.beacon, this.cancellations, new ToolResultLimiter(this.properties),
+			List.of());
 
 	private final FakeStartImportTool fakeStartImport = new FakeStartImportTool();
 

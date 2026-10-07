@@ -39,9 +39,12 @@ import java.util.stream.Collectors;
  * 放行才创建作业，拒绝/超时以"未执行"语义回填（FR-5.3 明文，S4.4e 裁决⑥，
  * 机制见 {@code gate/ConfirmGate}，无需工具名清单）；</li>
  * <li><b>前端指令</b>：{@code open_export_file_editor} / {@code download_export_file} /
- * {@code navigate_to} / {@code select_definitions} / {@code set_condition} / {@code confirm_step}
+ * {@code navigate_to} / {@code select_definitions} / {@code set_condition} / {@code confirm_step} /
+ * {@code generative_form}
  * （{@code @ToolChannel(FRONTEND)}）—— 副作用在浏览器里，后端方法体是哨兵桩，
- * 由 {@code SpToolCallingManager} 挂起并由 {@code POST /api/ai/frontend-tool-result} 回灌结果。</li>
+ * 由 {@code SpToolCallingManager} 挂起并由 {@code POST /api/ai/frontend-tool-result} 回灌结果。
+ * 其中 {@code generative_form}（DC-15）额外挂了两道后端闸门（schema 白名单校验 / 回灌类型复核），
+ * 见 {@link #generativeForm}。</li>
  * </ul>
  *
  * <h2>工作区动作（S4.4d：AI 一句话驱动向导；S4.4e：条件参数镜像前端契约）</h2>
@@ -437,6 +440,113 @@ public class AiTools {
     public String confirmStep(
             @ToolParam(description = "目标步骤（可选）：导出向导 SELECT_DEFS/QUERY_COND/EXPORT；导入向导 SELECT_DEFS/UPLOAD/PRECHECK/IMPORT/PUBLISH。不传则推进到下一步", required = false) String step) {
         return FRONTEND_STUB;
+    }
+
+    // ==================== 生成式表单（DC-15：限定形态生成式 UI 的后端工具） ====================
+
+    /**
+     * 生成式表单：在对话内渲染一张<b>白名单 schema 驱动</b>的表单，等用户填写后回灌值、继续本轮。
+     *
+     * <h2>两个场景（DC-15 明文）</h2>
+     * <ul>
+     * <li>{@code scenario=FILTER} —— <b>筛选条件填写</b>：用户不必跳到导出向导的「查询条件」步，
+     * 在对话里就能填（AI 收到值后可继续走 {@code set_condition} 或直接启动作业）；</li>
+     * <li>{@code scenario=CLARIFY} —— <b>询问澄清</b>：信息不足时给用户一张结构化选择/表单，
+     * 避免自由文本往返（对应 DC-15 的"模型向用户提问时给出结构化选择/表单"）。</li>
+     * </ul>
+     *
+     * <h2>披露范围（{@code page:tasks} + {@code task:*}）</h2>
+     * 两个场景的现场都在"任务驱动"这条链路上：
+     * <ul>
+     * <li>场景①的现场是<b>任务中心</b>（AI 面板所在页，用户在这里让 AI 导出/查询）与
+     * <b>导出向导各步骤</b>（{@code task:EXPORT}，含「查询条件」步：条件可以不跳转就在对话里填）；</li>
+     * <li>场景②与任务类型无关（任何任务上下文都可能信息不足），故用 {@code task:*}
+     * （与 {@code check_job_status} 同一标签），顺带覆盖导入向导。</li>
+     * </ul>
+     * 刻意<b>不</b>用 {@code *}（与 {@code navigate_to} 那样的任意页面工具不同）：{@code definitions/data}
+     * 等"只看不改"的页面没有需要收集的条件/澄清动作，而表单一旦下发就会挂起等用户提交（
+     * 与 DC-06⑤ 渐进披露的"最小必要工具集"同向）。若后续实测确有"任意页面都要澄清表单"的需求，
+     * 改这一处注解即可（一行，且披露与防线③同源，不会漂移）。
+     *
+     * <h2>三道后端闸门（本工具与其它前端工具的区别）</h2>
+     * <ol>
+     * <li><b>schema 白名单</b>（{@code form/GenerativeFormRules}，下发前）：
+     * 类型仅限 text/number/boolean/date/enum/multi_select，属性仅限白名单那几个，其余一律
+     * {@code FORM_SCHEMA_REJECTED} 且<b>不挂起、不下发</b>（前端永远看不到非法表单）；</li>
+     * <li><b>回灌类型复核</b>（回灌时）：值必须与 schema 的类型逐字段相符（number 是数、date 是
+     * {@code yyyy-MM-dd} 合法日期、enum/multi_select 的值必须在选项内、未知字段拒绝、必填缺失拒绝），
+     * 不符即 400 {@code FORM_RESULT_REJECTED} 且<b>挂起保持未决</b>（可修正后重试）；</li>
+     * <li><b>取消终态</b>：用户关闭表单 ⇒ 前端以 {@code POST /api/ai/frontend-tool-result{...,cancelled:true}}
+     * 回灌，待决条目落 {@code FRONTEND_CANCELLED}（明确终态，不会无限悬置），模型收到
+     * "用户取消，未获得数据"后自行收尾。</li>
+     * </ol>
+     * 时间上限沿用既有前端通道口径（{@code app.ai.hitl.timeout}，默认 120s）：用户长时间不提交即
+     * {@code FRONTEND_TIMEOUT}（同一条"未执行"语义）。
+     *
+     * <p><b>方法体是哨兵桩</b>（{@link #FRONTEND_STUB}）：副作用（渲染表单、收集值）在前端，
+     * 后端只挂起与回灌；schema 与回灌的校验在挂起机制里（{@code SpToolCallingManager}/
+     * {@code ConfirmGate} + {@code FrontendToolGuard}），不在此处。
+     */
+    @Tool(name = "generative_form", description = "在对话内渲染一张结构化表单并等待用户填写/选择（用于向用户收集筛选条件，"
+            + "或在信息不足时向用户澄清）；字段类型仅限白名单 text/number/boolean/date/enum/multi_select，"
+            + "禁止 HTML/脚本/自定义属性；用户提交后你会收到字段 key→值的 JSON，用户关闭表单则收到取消终态（无数据）")
+    @ToolScope({ "page:tasks", "task:*" })
+    @ToolRisk(ToolMeta.RiskLevel.READ)
+    @ToolChannel(ToolMeta.Channel.FRONTEND)
+    public String generativeForm(
+            @ToolParam(description = "表单 schema：{\"scenario\":\"FILTER|CLARIFY\",\"title\":\"标题(可选)\",\"fields\":[{\"key\":\"字段键\",\"label\":\"标签\",\"type\":\"text|number|boolean|date|enum|multi_select\",\"required\":true(可选),\"defaultValue\":默认值(可选),\"options\":[{\"value\":\"值\",\"label\":\"文本\"}](enum/multi_select 必填),\"placeholder\":\"占位提示(仅 text/number/date,可选)\"}]}（字段 ≤20）") FormSpec form) {
+        return FRONTEND_STUB;
+    }
+
+    /**
+     * 表单 schema —— 白名单的<b>类型化镜像</b>（只为让官方 JSON Schema 生成器把内层形状写进
+     * 工具 Schema，见 S4.4e 裁决③同一手法：模型不必从描述文字里猜形状）。
+     *
+     * <p>注意：<b>校验的事实源不是这个 record</b>，而是 {@code GenerativeFormRules} 对
+     * 入参<b>原文</b>的判定 —— record 反序列化会静默丢掉未知属性，而"白名单外的属性一律拒绝"
+     * 恰恰要求看得见它们。两者的属性名由用例对账锁定（防止改了 record 却忘了白名单）。
+     *
+     * @param scenario 场景：{@code FILTER}（收集筛选/查询条件）/ {@code CLARIFY}（信息不足时澄清）
+     * @param title    表单标题（可选）
+     * @param fields   字段列表（1..20）
+     */
+    public record FormSpec(
+            @ToolParam(description = "场景：FILTER（收集筛选/查询条件）或 CLARIFY（信息不足时向用户澄清）") String scenario,
+            @ToolParam(description = "表单标题（可选，≤100 字符）", required = false) String title,
+            @ToolParam(description = "字段列表（1..20 个）") List<FormField> fields) {
+    }
+
+    /**
+     * 单个表单字段（白名单属性集：key/label/type/required/defaultValue/options/placeholder）。
+     *
+     * @param key          字段键（回灌结果按此键给值；字母/下划线开头，≤40 字符，表单内唯一）
+     * @param label        字段标签（≤100 字符）
+     * @param type         字段类型（白名单六型）
+     * @param required     是否必填（缺省 false）
+     * @param defaultValue 默认值（类型必须与 {@code type} 相符；enum/multi_select 必须在选项内）
+     * @param options      选项（enum/multi_select 必填；其余类型禁止带）
+     * @param placeholder  占位提示（仅 text/number/date 可带）
+     */
+    public record FormField(
+            @ToolParam(description = "字段键（字母或下划线开头，≤40 字符，表单内唯一）") String key,
+            @ToolParam(description = "字段标签（≤100 字符）") String label,
+            @ToolParam(description = "字段类型：text/number/boolean/date/enum/multi_select") String type,
+            @ToolParam(description = "是否必填（缺省 false）", required = false) Boolean required,
+            @ToolParam(description = "默认值（类型必须与 type 相符；enum/multi_select 必须在选项内）", required = false) Object defaultValue,
+            @ToolParam(description = "选项（enum/multi_select 必填，其余类型禁止带）", required = false) List<FormOption> options,
+            @ToolParam(description = "占位提示（仅 text/number/date 可带，≤100 字符）", required = false) String placeholder) {
+    }
+
+    /**
+     * 选项 —— 统一为 {@code {"value":"…","label":"…"}} 对象（<b>不接受裸字符串</b>：
+     * 一种形态一条契约，模型不必猜"这次能不能只给字符串"）。
+     *
+     * @param value 选项值（回灌时按此值判"是否在选项内"）
+     * @param label 选项展示文本（缺省用 value）
+     */
+    public record FormOption(
+            @ToolParam(description = "选项值（≤100 字符）") String value,
+            @ToolParam(description = "选项展示文本（可选，≤100 字符，缺省用 value）", required = false) String label) {
     }
 
 }

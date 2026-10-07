@@ -76,7 +76,8 @@ class ConfirmGateWiringTest {
     private final SseChatEmitter emitter = mock(SseChatEmitter.class);
 
     private final SpToolCallingManager manager = new SpToolCallingManager(this.store, this.registry, this.gate,
-            this.toolRegistry, this.codec, this.beacon, this.cancellations, new ToolResultLimiter(new AiProperties()));
+            this.toolRegistry, this.codec, this.beacon, this.cancellations, new ToolResultLimiter(new AiProperties()),
+            List.of());
 
     /** B2：确认门三结局的受控工具替身（"放行 → 真的执行"需要官方循环能解析到回调）。 */
     private final FakeStartImportTool fakeStartImport = new FakeStartImportTool();

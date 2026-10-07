@@ -15,6 +15,7 @@ import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.run.StartupResumeRunner;
 import com.example.configmgr.ai.session.SessionGate;
+import com.example.configmgr.ai.tool.FrontendToolGuard;
 import com.example.configmgr.common.ApiResponse;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -58,7 +59,9 @@ import java.util.concurrent.RejectedExecutionException;
  * 挂起池饱和 → <b>503 SUSPEND_POOL_SATURATED</b>；无 key → 503 AI_UNAVAILABLE</td></tr>
  * <tr><td>{@code POST /api/ai/confirm}</td><td>确认门决策（放行/拒绝）；重复 toolCallId →
  * 409 DUPLICATE_TOOL_CALL_ID，未知 id → 409 UNKNOWN_TOOL_CALL</td></tr>
- * <tr><td>{@code POST /api/ai/frontend-tool-result}</td><td>前端工具结果回灌（同一套幂等口径）</td></tr>
+ * <tr><td>{@code POST /api/ai/frontend-tool-result}</td><td>前端工具结果回灌（同一套幂等口径）；
+ * 被安全闸拒绝 → <b>400</b> 携机器可读码 + 原因清单（挂起不消费，可重试）；{@code cancelled:true}
+ * → 用户取消终态（DC-15）</td></tr>
  * <tr><td>{@code GET /api/ai/events/{runId}}</td><td>reattach：回放该轮状态类帧 + 继续收实时帧
  * （ADR-5 补记 CH-P4）</td></tr>
  * <tr><td>{@code GET /api/ai/runs} / {@code GET /api/ai/runs/{runId}}</td><td>重启后的
@@ -233,8 +236,9 @@ public class AiController {
 				|| !StringUtils.hasText(request.toolCallId())) {
 			return json(HttpStatus.BAD_REQUEST, Map.of("code", "BAD_REQUEST", "message", "runId 与 toolCallId 均为必填"));
 		}
+		boolean cancelled = Boolean.TRUE.equals(request.cancelled());
 		ConfirmGate.Submission submission = this.confirmGate.submitFrontendResult(request.runId(),
-				request.toolCallId(), request.result(), request.source());
+				request.toolCallId(), request.result(), request.source(), cancelled);
 		if (submission.outcome() == ConfirmGate.Outcome.NOT_FOUND) {
 			return json(HttpStatus.CONFLICT, unknownToolCall(request.runId(), request.toolCallId()));
 		}
@@ -242,12 +246,19 @@ public class AiController {
 			return json(HttpStatus.CONFLICT,
 					duplicateToolCall(request.runId(), request.toolCallId(), submission.pending().getStatus()));
 		}
+		// DC-15：回灌被安全闸拒绝（如表单填写值不合 schema）→ 400 带机器可读码 + 原因清单；
+		// 注意"挂起仍在等待"（状态未变），前端可修正后重试，或带 cancelled=true 放弃。
+		if (submission.outcome() == ConfirmGate.Outcome.REJECTED) {
+			return json(HttpStatus.BAD_REQUEST,
+					rejectedFrontendResult(request.runId(), request.toolCallId(), submission));
+		}
 		Map<String, Object> body = new LinkedHashMap<>();
 		body.put("accepted", true);
 		body.put("duplicate", false);
 		body.put("runId", request.runId());
 		body.put("toolCallId", request.toolCallId());
 		body.put("status", submission.pending().getStatus());
+		body.put("cancelled", cancelled);
 		body.put("executed", false);
 		body.put("wokeInProcessGate", submission.woke());
 		body.put("storedBy", this.runStore.instanceId());
@@ -511,6 +522,31 @@ public class AiController {
 		body.put("status", status);
 		body.put("duplicate", true);
 		body.put("instanceId", this.runStore.instanceId());
+		return body;
+	}
+
+	/**
+	 * 回灌被安全闸拒绝（DC-15）：400 + 机器可读码（如 {@code FORM_RESULT_REJECTED}）+ 原因清单。
+	 *
+	 * <p>为什么是 400 而不是 409：这不是"重复/过期提交"（那是 409 DUPLICATE/UNKNOWN），
+	 * 而是"内容不合前端工具的参数契约" —— 前端据此提示用户改值后重试；
+	 * 挂起<b>未被消费</b>（状态仍是 PENDING），所以重试不需要重新发起整轮对话。
+	 */
+	private Map<String, Object> rejectedFrontendResult(String runId, String toolCallId,
+			ConfirmGate.Submission submission) {
+		FrontendToolGuard.Verdict verdict = submission.verdict();
+		Map<String, Object> body = new LinkedHashMap<>();
+		body.put("code", verdict == null ? "FRONTEND_TOOL_RESULT_REJECTED" : verdict.code());
+		body.put("message", verdict == null ? "回灌结果被拒绝" : verdict.message());
+		body.put("reasons", verdict == null ? List.of() : verdict.reasons());
+		body.put("runId", runId);
+		body.put("toolCallId", toolCallId);
+		body.put("name", submission.pending() == null ? null : submission.pending().getName());
+		body.put("status", submission.pending() == null ? null : submission.pending().getStatus());
+		body.put("duplicate", false);
+		body.put("accepted", false);
+		body.put("instanceId", this.runStore.instanceId());
+		body.put("note", "回灌被拒：挂起仍在等待（状态未变），修正后可重试；用户放弃请带 cancelled=true");
 		return body;
 	}
 

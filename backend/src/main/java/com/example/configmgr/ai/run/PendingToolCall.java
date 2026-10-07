@@ -32,6 +32,20 @@ public class PendingToolCall {
 	/** 前端工具结果已回灌。 */
 	public static final String FRONTEND_RESULT = "FRONTEND_RESULT";
 
+	/**
+	 * 前端用户主动放弃（关闭/取消表单等）：<b>明确终态</b> —— 未获得任何数据，本轮循环继续
+	 * （模型据"用户取消"收尾）。与 {@link #CANCELLED}（整轮被取消）分开记：前者只结束这一次
+	 * 工具调用，后者终止整轮。
+	 */
+	public static final String FRONTEND_CANCELLED = "FRONTEND_CANCELLED";
+
+	/**
+	 * 前端工具的入参被后端安全闸拒绝（DC-15）：<b>未下发、未挂起、未执行</b>，
+	 * 结论只回填模型（如生成式表单 schema 越白名单）。与 {@link #BLOCKED}（越 scope）分开记 ——
+	 * "参数不合规"和"上下文不该用它"在排障时是两件事。
+	 */
+	public static final String REJECTED_ARGUMENTS = "REJECTED_ARGUMENTS";
+
 	/** 本轮被用户取消（未执行；取消即落库，跨进程续跑不会把它当"待外部输入"）。 */
 	public static final String CANCELLED = "CANCELLED";
 

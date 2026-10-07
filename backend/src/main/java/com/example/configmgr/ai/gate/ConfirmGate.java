@@ -7,11 +7,13 @@ import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
+import com.example.configmgr.ai.tool.FrontendToolGuard;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
@@ -45,6 +47,18 @@ import java.util.concurrent.TimeUnit;
  * 本类只负责"决策落库"，<b>不在</b>决策写入时执行工具 —— 执行与"已执行"标记的关系见
  * {@link RunStore#claimExecution}：认领发生在执行<b>之前</b>且原子，从而消除
  * "执行完成才写标记 ⇒ 两个实例都执行一次"的重复执行窗口。
+ *
+ * <h2>前端工具回灌的两道附加闸门（DC-15）</h2>
+ * <ul>
+ * <li><b>结果复核</b>：认领了复核器的前端工具（{@link FrontendToolGuard#inspectResult}）在换状态
+ * <b>之前</b>复核回灌内容；不合法即 {@link Outcome#REJECTED}（HTTP 400），
+ * <b>状态不变</b>（仍 {@code PENDING}，可修正后重试）、不发帧、不唤醒 —— 一次不合法的提交
+ * 不该把挂起消费掉，否则用户再没机会改对；</li>
+ * <li><b>取消终态</b>：前端带 {@code cancelled=true} 回灌（用户关闭/放弃表单）⇒
+ * {@link PendingToolCall#FRONTEND_CANCELLED}（明确终态，不是"未决悬置"），结局帧
+ * {@code frontend_tool_result(ok=false)} 与"前端超时"同形，模型据此收尾。</li>
+ * </ul>
+ * 两道闸门都<b>按工具名自认领</b>（{@code supports}），本类对具体工具名零知识。
  */
 @Slf4j
 @Component
@@ -63,6 +77,12 @@ public class ConfirmGate {
 
 	private final ToolActivityBeacon beacon;
 
+	/**
+	 * 前端工具的入参/回灌复核器（DC-15 安全闸；见 {@link FrontendToolGuard}）。
+	 * 没有声明复核器的工具（既有 6 个前端工具）行为一字不变 —— {@link #inspectResult} 直接放行。
+	 */
+	private final List<FrontendToolGuard> frontendGuards;
+
 	/** toolCallId → 进程内唤醒闸门（不承载状态）。 */
 	private final Map<String, Latch> latches = new ConcurrentHashMap<>();
 
@@ -79,12 +99,13 @@ public class ConfirmGate {
 	private final Object submitLock = new Object();
 
 	public ConfirmGate(RunStore store, RunRegistry registry, AiProperties properties,
-			CancellationRegistry cancellations, ToolActivityBeacon beacon) {
+			CancellationRegistry cancellations, ToolActivityBeacon beacon, List<FrontendToolGuard> frontendGuards) {
 		this.store = store;
 		this.registry = registry;
 		this.properties = properties;
 		this.cancellations = cancellations;
 		this.beacon = beacon;
+		this.frontendGuards = frontendGuards == null ? List.of() : List.copyOf(frontendGuards);
 	}
 
 	/** 确认门等待上限（秒）：{@code app.ai.hitl.timeout}。 */
@@ -246,29 +267,37 @@ public class ConfirmGate {
 
 	public enum Outcome {
 
-		ACCEPTED, DUPLICATE, NOT_FOUND
+		ACCEPTED, DUPLICATE, NOT_FOUND,
+
+		/**
+		 * 回灌被安全闸拒绝（DC-15）：状态<b>未变</b>（仍 {@code PENDING}），挂起继续等待
+		 * —— 前端可修正后重试，或改以 {@code cancelled=true} 放弃。裁定理由见
+		 * {@link Submission#verdict()}。
+		 */
+		REJECTED
 
 	}
 
 	/**
 	 * 一次外部输入的处理结果。
 	 *
-	 * @param outcome 结局（ACCEPTED / DUPLICATE / NOT_FOUND）
-	 * @param pending 落库后的条目（NOT_FOUND 时为 null）
+	 * @param outcome 结局（ACCEPTED / DUPLICATE / NOT_FOUND / REJECTED）
+	 * @param pending 落库后的条目（NOT_FOUND 时为 null；REJECTED 时为<b>未改动</b>的原条目）
 	 * @param woke 是否唤醒了本进程内正在等待的闸门（false 说明等待方在<b>另一个进程</b>或已死，
 	 * 由续跑接手）
+	 * @param verdict 安全闸的裁定（仅 {@link Outcome#REJECTED} 时非空）
 	 */
-	public record Submission(Outcome outcome, PendingToolCall pending, boolean woke) {
+	public record Submission(Outcome outcome, PendingToolCall pending, boolean woke, FrontendToolGuard.Verdict verdict) {
 	}
 
 	/** 人工决策：先写 Redis，再发回执帧，最后唤醒（帧先于它唤起的后果）。重复提交按状态幂等拒绝（SP-01d V-d2B）。 */
 	public Submission submitDecision(String runId, String toolCallId, boolean approved, String reason) {
 		PendingToolCall pending = this.store.pending(runId, toolCallId);
 		if (pending == null) {
-			return new Submission(Outcome.NOT_FOUND, null, false);
+			return new Submission(Outcome.NOT_FOUND, null, false, null);
 		}
 		if (!PendingToolCall.PENDING.equals(pending.getStatus())) {
-			return new Submission(Outcome.DUPLICATE, pending, false);
+			return new Submission(Outcome.DUPLICATE, pending, false, null);
 		}
 		pending.setStatus(approved ? PendingToolCall.APPROVED : PendingToolCall.REJECTED);
 		pending.setReason(reason == null || reason.isBlank()
@@ -288,17 +317,49 @@ public class ConfirmGate {
 			this.registry.of(runId).confirmDecision(pending, approved ? "approve" : "reject", pending.getReason(), 0L);
 			woke = signal(runId, toolCallId);
 		}
-		return new Submission(Outcome.ACCEPTED, pending, woke);
+		return new Submission(Outcome.ACCEPTED, pending, woke, null);
 	}
 
-	/** 前端工具结果回灌：先写 Redis，再发回灌帧，最后唤醒（同 S5c-6 的口径）。 */
+	/** 前端工具结果回灌（保持既有四参口径：非取消路径）。 */
 	public Submission submitFrontendResult(String runId, String toolCallId, String result, String source) {
+		return submitFrontendResult(runId, toolCallId, result, source, false);
+	}
+
+	/**
+	 * 前端工具结果回灌：先写 Redis，再发回灌帧，最后唤醒（同 S5c-6 的口径）。
+	 *
+	 * <h2>三条分支（DC-15 起）</h2>
+	 * <ol>
+	 * <li><b>取消</b>（{@code cancelled=true}，用户关闭/放弃表单）→ 明确终态
+	 * {@link PendingToolCall#FRONTEND_CANCELLED}，结局帧 {@code frontend_tool_result(ok=false)}，
+	 * 结果文本用机器可读前缀标记"未获得数据"；</li>
+	 * <li><b>结果复核不过</b>（{@link FrontendToolGuard#inspectResult}）→ {@link Outcome#REJECTED}：
+	 * <b>状态不变、不发帧、不唤醒</b>，理由随 HTTP 400 返回给前端（可修正后重试）；</li>
+	 * <li><b>通过</b> → 既有口径：{@link PendingToolCall#FRONTEND_RESULT} + 回灌帧 + 唤醒。</li>
+	 * </ol>
+	 *
+	 * <p>次序刻意是"取消 &gt; 复核"：放弃是用户的兜底出口，不该因为"值不合规"而被挡住
+	 * （否则用户关掉一张填错一半的表单也被拒，挂起只能等到超时）。
+	 *
+	 * @param cancelled 前端是否报告"用户主动放弃"（关闭表单/取消对话框）
+	 */
+	public Submission submitFrontendResult(String runId, String toolCallId, String result, String source,
+			boolean cancelled) {
 		PendingToolCall pending = this.store.pending(runId, toolCallId);
 		if (pending == null) {
-			return new Submission(Outcome.NOT_FOUND, null, false);
+			return new Submission(Outcome.NOT_FOUND, null, false, null);
 		}
 		if (!PendingToolCall.PENDING.equals(pending.getStatus())) {
-			return new Submission(Outcome.DUPLICATE, pending, false);
+			return new Submission(Outcome.DUPLICATE, pending, false, null);
+		}
+		if (cancelled) {
+			return dismiss(runId, pending, source);
+		}
+		FrontendToolGuard.Verdict verdict = inspectResult(pending, result);
+		if (verdict != null && !verdict.accepted()) {
+			log.warn("前端工具回灌被安全闸拒绝 runId={} toolCallId={} name={} code={}（状态不变，挂起继续等待）：{}",
+					runId, toolCallId, pending.getName(), verdict.code(), verdict.reasons());
+			return new Submission(Outcome.REJECTED, pending, false, verdict);
 		}
 		pending.setStatus(PendingToolCall.FRONTEND_RESULT);
 		pending.setReason("source=" + (source == null || source.isBlank() ? "http-post" : source));
@@ -310,7 +371,43 @@ public class ConfirmGate {
 			this.registry.of(runId).frontendToolResult(pending, true, result == null ? "" : result);
 			woke = signal(runId, toolCallId);
 		}
-		return new Submission(Outcome.ACCEPTED, pending, woke);
+		return new Submission(Outcome.ACCEPTED, pending, woke, null);
+	}
+
+	/** 第一个认领该工具名的复核器的回灌判定；没有复核器返回 null（= 该工具不受闸门约束）。 */
+	private FrontendToolGuard.Verdict inspectResult(PendingToolCall pending, String result) {
+		for (FrontendToolGuard guard : this.frontendGuards) {
+			if (guard.supports(pending.getName())) {
+				return guard.inspectResult(pending.getArguments(), result);
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * 用户主动放弃（关闭/取消表单）：与决策写入同一套次序（落库 → 发结局帧 → 唤醒）。
+	 *
+	 * <p>为什么要有这个终态：前端工具此前只有"回灌结果"与"超时/整轮取消"三个出口 ——
+	 * 用户关掉表单时前端<b>没有合法动作</b>，挂起只能悬到 {@code app.ai.hitl.timeout} 才由
+	 * {@code FRONTEND_TIMEOUT} 收摊。取消终态把"用户不打算填了"变成一次明确的、立刻的收敛
+	 * （且与"没人响应"的超时语义分开，排障时看得清）。
+	 */
+	private Submission dismiss(String runId, PendingToolCall pending, String source) {
+		pending.setStatus(PendingToolCall.FRONTEND_CANCELLED);
+		pending.setReason("FRONTEND_DISMISSED" + (source == null || source.isBlank() ? "" : " source=" + source));
+		pending.setExecuted(false);
+		pending.setResolvedAtMs(System.currentTimeMillis());
+		String text = "FRONTEND_CANCELLED：用户取消了该前端操作（关闭表单/放弃填写），"
+				+ "本次调用未获得任何数据；如需继续，请改为向用户询问或换用其它方式。";
+		pending.setResultText(text);
+		boolean woke;
+		synchronized (this.submitLock) {
+			this.store.putPending(runId, pending);
+			this.registry.of(runId).frontendToolResult(pending, false, text);
+			woke = signal(runId, pending.getToolCallId());
+		}
+		log.info("前端工具被用户取消 runId={} toolCallId={} name={}", runId, pending.getToolCallId(), pending.getName());
+		return new Submission(Outcome.ACCEPTED, pending, woke, null);
 	}
 
 	/** 唤醒本进程内正在等待该 toolCallId 的闸门；无等待方返回 false（不报错）。 */
