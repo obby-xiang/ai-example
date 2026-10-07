@@ -14,6 +14,7 @@ import jakarta.persistence.PersistenceContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -44,6 +45,56 @@ public class ConfigDataService {
                 scopeType != null ? scopeType : "GLOBAL",
                 scopeKey,
                 PageRequest.of(page, size));
+    }
+
+    /**
+     * 带查询条件的分页列表（S4.4b 遗留 3：列表端点补 {@code conditions} 入参）。
+     *
+     * <p>口径与 {@code GET /api/data/{defCode}/count}、导出作业（{@link com.example.configmgr.job.service.ExportJobRunner}）
+     * <b>同源</b>：都走 {@link ConditionEvaluator} 逐行求值，故"前端预估命中行数"与"翻页看到的行"不会打架。
+     *
+     * <p>注意口径细节（与 /count 一致）：有条件时按该配置的<b>全部已发布行</b>过滤（仅按 scopeKey 收窄，
+     * 不再按 scopeType 收窄），这是既有 /count 的实现语义；无条件时仍走 DB 分页并按 scopeType + scopeKey 收窄。
+     */
+    public Page<ConfigDataRow> findPagedFiltered(String defCode, String scopeKey, QueryCondition condition,
+                                                  int page, int size) {
+        List<ConfigDataRow> matched = filterRows(defCode, scopeKey, condition);
+        PageRequest pageable = PageRequest.of(page, size);
+        int from = (int) Math.min(pageable.getOffset(), matched.size());
+        int to = (int) Math.min(from + pageable.getPageSize(), matched.size());
+        return new PageImpl<>(matched.subList(from, to), pageable, matched.size());
+    }
+
+    /** 条件命中行数（与 {@link #findPagedFiltered} 同一份过滤逻辑）。 */
+    public long countFiltered(String defCode, String scopeKey, QueryCondition condition) {
+        return filterRows(defCode, scopeKey, condition).size();
+    }
+
+    /** 条件 JSON（可为空）→ {@link QueryCondition}；解析失败即 400（口径与 /count 一致）。 */
+    public QueryCondition parseCondition(String conditions) {
+        if (conditions == null || conditions.isBlank()) {
+            return null;
+        }
+        try {
+            return objectMapper.readValue(conditions, QueryCondition.class);
+        } catch (Exception e) {
+            throw new IllegalArgumentException("条件 JSON 解析失败: " + e.getMessage());
+        }
+    }
+
+    /** 逐行求值：范围键收窄 + {@link ConditionEvaluator} 字段级条件（AND）。 */
+    private List<ConfigDataRow> filterRows(String defCode, String scopeKey, QueryCondition cond) {
+        return dataRowRepository.findByDefCodeOrderByRowKey(defCode).stream()
+                .filter(r -> scopeKey == null || scopeKey.isBlank() || scopeKey.equals(r.getScopeKey()))
+                .filter(r -> {
+                    try {
+                        Map<String, Object> data = objectMapper.readValue(r.getDataJson(), new TypeReference<>() {});
+                        return ConditionEvaluator.matches(data, cond);
+                    } catch (Exception e) {
+                        return false;
+                    }
+                })
+                .toList();
     }
 
     public long count(String defCode, String scopeType, String scopeKey) {

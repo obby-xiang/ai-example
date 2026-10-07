@@ -59,14 +59,22 @@ public class ExportJobRunner {
         boolean cancelled = false;
         int errorCount = 0;
         int processedRows = 0;   // 已扫描行数（已完成配置项合计 + 当前配置项已扫描）
-        int totalRows = 0;       // 待扫描行数（已发现配置项合计）
+        int discoveredRows = 0;  // 已发现行数（已开工配置项的行数合计）
         int finishedDefRows = 0; // 已结束配置项的扫描行数合计
+        int startedItems = 0;    // 已开工配置项数
+
+        var items = taskItemRepository.findByTaskIdOrderBySortOrder(taskId);
+
+        // ③ 分母下限：导出作业的行数能便宜地预估（各配置已发布行数合计），故开工即写终值，
+        //    不再"边发现边长"——首配置收尾瞬间不会出现 progress==total 的 100% 闪现。
+        int estimatedRows = items.stream()
+                .mapToInt(i -> (int) dataRowRepository.countByDefCode(i.getDefCode()))
+                .sum();
+        int totalRows = JobProgressTotals.denominator(estimatedRows, 0, items.size());
 
         progressService.markRunning(jobId, totalRows);
 
         try {
-            var items = taskItemRepository.findByTaskIdOrderBySortOrder(taskId);
-
             for (var item : items) {
                 if (cancellationRegistry.isCancelled(jobId)) {
                     cancelled = true;
@@ -74,6 +82,7 @@ public class ExportJobRunner {
                 }
                 String defCode = item.getDefCode();
                 Long itemId = progressService.startItem(jobId, defCode);
+                startedItems++;
                 int defTotal = 0;
                 int rowsSeen = 0;
 
@@ -84,7 +93,9 @@ public class ExportJobRunner {
                     // Load all rows matching condition（范围过滤 + 字段级过滤统一由 ConditionEvaluator 处理）
                     List<ConfigDataRow> allRows = dataRowRepository.findByDefCodeOrderByRowKey(defCode);
                     defTotal = allRows.size();
-                    totalRows += defTotal;
+                    discoveredRows += defTotal;
+                    totalRows = JobProgressTotals.denominator(estimatedRows, discoveredRows,
+                            items.size() - startedItems);
                     progressService.updateItem(itemId, 0, defTotal);
                     progressService.snapshot(jobId, processedRows, totalRows);
 
@@ -103,7 +114,7 @@ public class ExportJobRunner {
                             // ⑤ 先落库再推送：快照与事件同一对数字
                             progressService.updateItem(itemId, rowsSeen, defTotal);
                             progressService.snapshot(jobId, processedRows, totalRows);
-                            publishProgress(job, defCode, processedRows, totalRows);
+                            publishProgress(job, def, processedRows, totalRows);
                             if (cancellationRegistry.isCancelled(jobId)) {
                                 cancelled = true;
                                 progressService.finishItem(itemId, "CANCELLED", rowsSeen, defTotal);
@@ -117,6 +128,8 @@ public class ExportJobRunner {
                     rowsSeen = defTotal;
                     processedRows = finishedDefRows + rowsSeen;
                     finishedDefRows += defTotal;
+                    totalRows = JobProgressTotals.denominator(estimatedRows, discoveredRows,
+                            items.size() - startedItems);
                     progressService.finishItem(itemId, "COMPLETED", defTotal, defTotal);
                     progressService.snapshot(jobId, processedRows, totalRows);
 
@@ -144,6 +157,8 @@ public class ExportJobRunner {
                     errorCount++;
                     finishedDefRows += defTotal;
                     processedRows = finishedDefRows;
+                    totalRows = JobProgressTotals.denominator(estimatedRows, discoveredRows,
+                            items.size() - startedItems);
                     progressService.finishItem(itemId, "FAILED", (int) Math.max(defTotal, rowsSeen), defTotal);
                     taskService.updateItemStatus(taskId, defCode, "FAILED");
                 }
@@ -163,6 +178,8 @@ public class ExportJobRunner {
             taskService.updateStatus(taskId, Task.TaskStatus.COMPLETED);
             taskService.goToStep(taskId, "EXPORT");
         }
+        // 终态分母回归"真实工作量"（= 预估/已发现行数，未开工预留清零）：全部扫完时 processed==total→100%
+        totalRows = JobProgressTotals.denominator(estimatedRows, discoveredRows, 0);
         terminalWriter.complete(job, status, errorCount, 0, processedRows, totalRows,
                 doneEvent(job, status));
     }
@@ -171,10 +188,12 @@ public class ExportJobRunner {
         return Map.of("jobId", job.getId(), "jobType", "EXPORT", "status", status);
     }
 
-    private void publishProgress(Job job, String defCode, int processed, int total) {
+    /** 行级进度事件：与 {@link JobProgressService#snapshot} 同一对数字，并携当前处理项（④ 纯增量字段）。 */
+    private void publishProgress(Job job, ConfigDefinition def, int processed, int total) {
         int pct = total > 0 ? (processed * 100 / total) : 0;
         taskSseService.publish(job.getTaskId(), "JOB_PROGRESS", Map.of(
-                "jobId", job.getId(), "jobType", job.getJobType(), "defCode", defCode,
+                "jobId", job.getId(), "jobType", job.getJobType(), "defCode", def.getCode(),
+                "currentItem", def.getCode(), "currentItemName", def.getName(),
                 "processed", processed, "total", total, "pct", pct));
     }
 

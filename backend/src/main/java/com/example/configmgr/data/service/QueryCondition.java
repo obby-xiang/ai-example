@@ -19,7 +19,7 @@ public class QueryCondition {
     @Data
     public static class FieldCondition {
         private String fieldCode;
-        /** EQ / NE / CONTAINS / STARTS_WITH / IN / EMPTY / NOT_EMPTY / GT / GTE / LT / LTE */
+        /** EQ / NE / CONTAINS（=LIKE）/ STARTS_WITH / IN / EMPTY / NOT_EMPTY / GT / GTE / LT / LTE */
         private String operator;
         /** 单个值；IN 时为字符串列表 */
         private Object value;

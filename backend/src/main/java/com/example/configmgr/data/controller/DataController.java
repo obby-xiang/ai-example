@@ -3,12 +3,10 @@ package com.example.configmgr.data.controller;
 import com.example.configmgr.common.ApiResponse;
 import com.example.configmgr.data.entity.ConfigDataRow;
 import com.example.configmgr.data.repo.ConfigDataRowRepository;
-import com.example.configmgr.data.service.ConditionEvaluator;
+import com.example.configmgr.data.service.ConfigDataService;
 import com.example.configmgr.data.service.QueryCondition;
 import com.example.configmgr.definition.entity.ConfigDefinition;
 import com.example.configmgr.definition.service.DefinitionService;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Page;
 import org.springframework.web.bind.annotation.*;
@@ -21,8 +19,8 @@ import java.util.Map;
 public class DataController {
 
     private final ConfigDataRowRepository dataRowRepository;
-    private final ObjectMapper objectMapper;
     private final DefinitionService definitionService;
+    private final ConfigDataService configDataService;
 
     /** scopeType 未传时按配置定义的层级推导（而非写死 GLOBAL） */
     private String effectiveScopeType(String defCode, String scopeType) {
@@ -36,12 +34,24 @@ public class DataController {
         }
     }
 
+    /**
+     * 数据列表（分页）。
+     *
+     * <p>S4.4b 遗留 3 修复：新增 {@code conditions} 入参（{@link QueryCondition} 的 JSON），
+     * 与 {@code /count}、导出作业同构 —— 无条件时走 DB 分页（scopeType + scopeKey 收窄），
+     * 有条件时按同口径逐行求值后再分页，故前端不再需要"只筛当前页"的镜像求值器。
+     */
     @GetMapping("/{defCode}")
     public ApiResponse<Page<ConfigDataRow>> list(@PathVariable String defCode,
                                                    @RequestParam(required = false) String scopeType,
                                                    @RequestParam(required = false) String scopeKey,
+                                                   @RequestParam(required = false) String conditions,
                                                    @RequestParam(defaultValue = "0") int page,
                                                    @RequestParam(defaultValue = "50") int size) {
+        QueryCondition cond = configDataService.parseCondition(conditions);
+        if (cond != null) {
+            return ApiResponse.ok(configDataService.findPagedFiltered(defCode, scopeKey, cond, page, size));
+        }
         return ApiResponse.ok(dataRowRepository.findRowsInScopePaged(
                 defCode, effectiveScopeType(defCode, scopeType), scopeKey,
                 org.springframework.data.domain.PageRequest.of(page, size)));
@@ -49,41 +59,19 @@ public class DataController {
 
     /**
      * 预估行数：支持带查询条件（conditions 为 QueryCondition 的 JSON），
-     * 与导出作业的过滤口径完全一致。
+     * 与导出作业的过滤口径完全一致（并与列表端点的 {@code conditions} 同源，见
+     * {@link ConfigDataService#findPagedFiltered}）。
      */
     @GetMapping("/{defCode}/count")
     public ApiResponse<Map<String, Long>> count(@PathVariable String defCode,
                                                   @RequestParam(required = false) String scopeType,
                                                   @RequestParam(required = false) String scopeKey,
                                                   @RequestParam(required = false) String conditions) {
-        QueryCondition cond = null;
-        if (conditions != null && !conditions.isBlank()) {
-            try {
-                cond = objectMapper.readValue(conditions, QueryCondition.class);
-            } catch (Exception e) {
-                throw new IllegalArgumentException("条件 JSON 解析失败: " + e.getMessage());
-            }
-        }
+        QueryCondition cond = configDataService.parseCondition(conditions);
 
-        long count;
-        if (cond != null) {
-            // 有条件时逐行过滤（字段条件逐个匹配）
-            final QueryCondition effectiveCond = cond;
-            count = dataRowRepository.findByDefCodeOrderByRowKey(defCode).stream()
-                    .filter(r -> scopeKey == null || scopeKey.isBlank() || scopeKey.equals(r.getScopeKey()))
-                    .filter(r -> {
-                        try {
-                            Map<String, Object> data =
-                                    objectMapper.readValue(r.getDataJson(), new TypeReference<>() {});
-                            return ConditionEvaluator.matches(data, effectiveCond);
-                        } catch (Exception e) {
-                            return false;
-                        }
-                    })
-                    .count();
-        } else {
-            count = dataRowRepository.countByScope(defCode, effectiveScopeType(defCode, scopeType), scopeKey);
-        }
+        long count = cond != null
+                ? configDataService.countFiltered(defCode, scopeKey, cond)
+                : dataRowRepository.countByScope(defCode, effectiveScopeType(defCode, scopeType), scopeKey);
         return ApiResponse.ok(Map.of("count", count));
     }
 }

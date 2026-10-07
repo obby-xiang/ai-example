@@ -28,7 +28,8 @@ import java.time.LocalDateTime;
  *
  * <h2>行级口径（processed/total 的量纲）</h2>
  * 作业行的 {@code progress}/{@code total} 统一为<b>行级</b>口径：{@code progress} = 本作业
- * 已处理行数，{@code total} = 已知待处理行数（随配置项逐个发现而累加，单调不减）。
+ * 已处理行数，{@code total} = 分母（见 {@link JobProgressTotals}：预估总行数与"已发现行数 + 未开工配置项数"
+ * 取大，随配置发现而上调且恒不小于 {@code progress} —— 配置项逐个收尾时不会再闪现 100%）。
  * 配置项级进度仍由 {@code job_items.processed/total} 承载，两者不再混用同一对字段。
  * 既有前端 {@code latestJob.progress / latestJob.total} 的百分比算法因此天然成立且运行中非 0。
  *

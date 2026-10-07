@@ -65,25 +65,30 @@ public class PrecheckJobRunner {
         int totalErrors = 0;
         int totalWarnings = 0;
         int processedRows = 0;
-        int totalRows = 0;
+        int discoveredRows = 0; // 已发现行数（已开工配置项从文件读到的行数合计）
+        int startedItems = 0;   // 已开工配置项数
         int finishedDefRows = 0;
-
-        progressService.markRunning(jobId, totalRows);
 
         // Delete old issues for this job
         issueRepository.deleteByJobId(jobId);
 
-        try {
-            var items = taskItemRepository.findByTaskIdOrderBySortOrder(taskId);
-            List<String> defCodes = items.stream().map(i -> i.getDefCode()).toList();
-            List<String> sorted = dependencyResolver.sort(defCodes);
+        var items = taskItemRepository.findByTaskIdOrderBySortOrder(taskId);
+        List<String> defCodes = items.stream().map(i -> i.getDefCode()).toList();
+        List<String> sorted = dependencyResolver.sort(defCodes);
 
+        // ③ 分母下限：预检查的行数来自上传文件，开工前没有便宜来源 → 先按"配置项条数"写下界
+        //    （每个未开工配置项各预留 1 行），读到文件后并入已发现行数并上调。
+        int totalRows = JobProgressTotals.denominator(0, 0, sorted.size());
+        progressService.markRunning(jobId, totalRows);
+
+        try {
             for (String defCode : sorted) {
                 if (cancellationRegistry.isCancelled(jobId)) {
                     cancelled = true;
                     break;
                 }
                 Long itemId = progressService.startItem(jobId, defCode);
+                startedItems++;
                 int defTotal = 0;
                 int rowsSeen = 0;
 
@@ -117,7 +122,8 @@ public class PrecheckJobRunner {
                     byte[] fileBytes = fileStorage.read(fileOpt.get().getStoragePath());
                     List<Map<String, Object>> rows = excelReader.read(def, fileBytes);
                     defTotal = rows.size();
-                    totalRows += defTotal;
+                    discoveredRows += defTotal;
+                    totalRows = JobProgressTotals.denominator(0, discoveredRows, sorted.size() - startedItems);
                     progressService.updateItem(itemId, 0, defTotal);
                     progressService.snapshot(jobId, processedRows, totalRows);
 
@@ -169,7 +175,7 @@ public class PrecheckJobRunner {
                             // ⑤ 先落库再推送：快照与事件同一对数字
                             progressService.updateItem(itemId, rowsSeen, defTotal);
                             progressService.snapshot(jobId, processedRows, totalRows);
-                            publishProgress(job, defCode, processedRows, totalRows);
+                            publishProgress(job, def, processedRows, totalRows);
                             if (cancellationRegistry.isCancelled(jobId)) {
                                 cancelled = true;
                                 progressService.finishItem(itemId, "CANCELLED", rowsSeen, defTotal);
@@ -230,6 +236,7 @@ public class PrecheckJobRunner {
                     totalErrors++;
                     finishedDefRows += defTotal;
                     processedRows = finishedDefRows;
+                    totalRows = JobProgressTotals.denominator(0, discoveredRows, sorted.size() - startedItems);
                     progressService.finishItem(itemId, "FAILED", (int) Math.max(defTotal, rowsSeen), defTotal);
                     taskService.updateItemStatus(taskId, defCode, "FAILED");
                 }
@@ -244,6 +251,8 @@ public class PrecheckJobRunner {
 
         Job.JobStatus status = cancelled ? Job.JobStatus.CANCELLED
                 : (totalErrors > 0 ? Job.JobStatus.FAILED : Job.JobStatus.COMPLETED);
+        // 终态分母回归"真实工作量"（未开工预留清零）：全部跑完时 processed==total→100%
+        totalRows = JobProgressTotals.denominator(0, discoveredRows, 0);
         terminalWriter.complete(job, status, totalErrors, totalWarnings, processedRows, totalRows,
                 doneEvent(job, status, totalErrors));
     }
@@ -289,10 +298,12 @@ public class PrecheckJobRunner {
         return values;
     }
 
-    private void publishProgress(Job job, String defCode, int processed, int total) {
+    /** 行级进度事件：与 {@link JobProgressService#snapshot} 同一对数字，并携当前处理项（④ 纯增量字段）。 */
+    private void publishProgress(Job job, ConfigDefinition def, int processed, int total) {
         int pct = total > 0 ? (processed * 100 / total) : 0;
         taskSseService.publish(job.getTaskId(), "JOB_PROGRESS", Map.of(
-                "jobId", job.getId(), "jobType", job.getJobType(), "defCode", defCode,
+                "jobId", job.getId(), "jobType", job.getJobType(), "defCode", def.getCode(),
+                "currentItem", def.getCode(), "currentItemName", def.getName(),
                 "processed", processed, "total", total, "pct", pct));
     }
 }

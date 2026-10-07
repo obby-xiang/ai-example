@@ -57,6 +57,7 @@ public final class ConditionEvaluator {
             case "NE":
                 return s == null || !s.equals(expect);
             case "CONTAINS":
+            case "LIKE": // 文本包含（S4.4b P2：以 LIKE 之名的文本模糊口径，与 CONTAINS 等价）
                 return s != null && expect != null && s.contains(expect);
             case "STARTS_WITH":
                 return s != null && expect != null && s.startsWith(expect);

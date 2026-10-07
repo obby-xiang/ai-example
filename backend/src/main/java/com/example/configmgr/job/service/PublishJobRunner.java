@@ -123,12 +123,20 @@ public class PublishJobRunner {
         boolean cancelled = false;
         int totalErrors = 0;
         int processedRows = 0;
-        int totalRows = 0;
+        int discoveredRows = 0;  // 已发现行数（已开工配置项暂存行数合计）
+        int startedItems = 0;    // 已开工配置项数
         int finishedDefRows = 0;
 
         List<TaskItem> items = taskItemRepository.findByTaskIdOrderBySortOrder(taskId);
         List<String> defCodes = items.stream().map(TaskItem::getDefCode).toList();
         List<String> sorted = dependencyResolver.sort(defCodes);
+
+        // ③ 分母下限：发布行的来源是暂存表，可便宜地逐配置预数 → 分母开工即写终值，
+        //    首个配置项收尾瞬间不再出现 progress==total 的 100% 闪现（发现更多时仍会上调）。
+        int estimatedRows = sorted.stream()
+                .mapToInt(c -> (int) stagingRowRepository.countByTaskIdAndDefCode(taskId, c))
+                .sum();
+        int totalRows = JobProgressTotals.denominator(estimatedRows, 0, sorted.size());
 
         for (String defCode : sorted) {
             if (cancellationRegistry.isCancelled(jobId)) {
@@ -137,6 +145,7 @@ public class PublishJobRunner {
             }
 
             Long itemId = progressService.startItem(jobId, defCode);
+            startedItems++;
             boolean defCancelled = false;
             int defProcessed = 0;
             int defTotal = 0;
@@ -149,7 +158,9 @@ public class PublishJobRunner {
                 List<ConfigStagingRow> stagingRows = stagingRowRepository
                         .findByTaskIdAndDefCode(taskId, defCode);
                 defTotal = stagingRows.size();
-                totalRows += defTotal;
+                discoveredRows += defTotal;
+                totalRows = JobProgressTotals.denominator(estimatedRows, discoveredRows,
+                        sorted.size() - startedItems);
                 progressService.updateItem(itemId, 0, defTotal);
                 progressService.snapshot(jobId, processedRows, totalRows);
 
@@ -192,7 +203,7 @@ public class PublishJobRunner {
                         // ⑤ 先落库再推送：快照与事件同一对数字
                         progressService.updateItem(itemId, processed, defTotal);
                         progressService.snapshot(jobId, processedRows, totalRows);
-                        publishProgress(job, defCode, processedRows, totalRows);
+                        publishProgress(job, def, processedRows, totalRows);
                         if (cancellationRegistry.isCancelled(jobId)) {
                             defCancelled = true;
                             progressService.finishItem(itemId, "CANCELLED", processed, defTotal);
@@ -212,11 +223,14 @@ public class PublishJobRunner {
             defProcessed = defTotal;
             finishedDefRows += defTotal;
             processedRows = finishedDefRows;
+            totalRows = JobProgressTotals.denominator(estimatedRows, discoveredRows, sorted.size() - startedItems);
             progressService.finishItem(itemId, "COMPLETED", defTotal, defTotal);
             progressService.snapshot(jobId, processedRows, totalRows);
             taskService.updateItemStatus(taskId, defCode, "PUBLISHED");
         }
 
+        // 终态分母回归"真实工作量"（未开工预留清零）
+        totalRows = JobProgressTotals.denominator(estimatedRows, discoveredRows, 0);
         return new PublishOutcome(cancelled, totalErrors, processedRows, totalRows);
     }
 
@@ -307,10 +321,12 @@ public class PublishJobRunner {
                 .orElse(false);
     }
 
-    private void publishProgress(Job job, String defCode, int processed, int total) {
+    /** 行级进度事件：与 {@link JobProgressService#snapshot} 同一对数字，并携当前处理项（④ 纯增量字段）。 */
+    private void publishProgress(Job job, ConfigDefinition def, int processed, int total) {
         int pct = total > 0 ? (processed * 100 / total) : 0;
         taskSseService.publish(job.getTaskId(), "JOB_PROGRESS", Map.of(
-                "jobId", job.getId(), "jobType", job.getJobType(), "defCode", defCode,
+                "jobId", job.getId(), "jobType", job.getJobType(), "defCode", def.getCode(),
+                "currentItem", def.getCode(), "currentItemName", def.getName(),
                 "processed", processed, "total", total, "pct", pct));
     }
 
