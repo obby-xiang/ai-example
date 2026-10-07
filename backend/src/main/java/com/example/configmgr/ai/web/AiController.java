@@ -536,9 +536,10 @@ public class AiController {
 			ConfirmGate.Submission submission) {
 		FrontendToolGuard.Verdict verdict = submission.verdict();
 		Map<String, Object> body = new LinkedHashMap<>();
-		body.put("code", verdict == null ? "FRONTEND_TOOL_RESULT_REJECTED" : verdict.code());
-		body.put("message", verdict == null ? "回灌结果被拒绝" : verdict.message());
-		body.put("reasons", verdict == null ? List.of() : verdict.reasons());
+		// REJECTED 必带非空 verdict（ConfirmGate 只在"复核不通过"那一条分支产出 REJECTED），故不兜 null
+		body.put("code", verdict.code());
+		body.put("message", verdict.message());
+		body.put("reasons", verdict.reasons());
 		body.put("runId", runId);
 		body.put("toolCallId", toolCallId);
 		body.put("name", submission.pending() == null ? null : submission.pending().getName());
