@@ -35,7 +35,11 @@
 # ============================================================
 param(
     [string]$Base = 'http://127.0.0.1:18330',
-    [string]$BackendLog = ''
+    [string]$BackendLog = '',
+    [switch]$EnableGf6,  # GF6 可选观察用例（入参闸门），默认关闭（设计稿 §4 GF6）
+    # GF 证据落盘目录（裁决 #4 / 设计稿 §6）：每个 GF 用例把 SSE 帧与回灌请求/响应原文写到
+    # gfc-<case>.sse.txt / gfc-<case>.http.txt。默认在系统临时目录下新建 gfc-artifacts-<guid>（仓库外）
+    [string]$ArtifactDir = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -44,7 +48,10 @@ $Base = $Base.TrimEnd('/')
 $script:passed = 0
 $script:failed = 0
 $script:skippedNote = 0
+$script:gfskip = 0     # GF 用例 SKIP 计数（模型未触发，不计退出码；摘要打印 GFSKIP=n）
+$script:gfskip14 = 0   # GF1–GF4 中 SKIP 的个数；全部 SKIP（=4）触发硬底线整棒 FAIL（裁决 #1）
 $script:results = New-Object System.Collections.ArrayList
+$script:gfHttp = @()   # 当前 GF 用例的回灌 HTTP 请求/响应原文（每用例重置，Gf-Dump 落盘）
 
 function Say($msg) { Write-Host $msg }
 function Ok($name) {
@@ -280,8 +287,24 @@ function Invoke-AiTurn($sessionId, $message, $context, [scriptblock]$onSuspend, 
         if ($s.type -eq 'confirm_request') {
             PostJsonRaw '/api/ai/confirm' @{ runId = $runId; toolCallId = $s.toolCallId; approved = [bool]$act.approved; reason = 'e2e' } | Out-Null
         } else {
-            $res = if ($act.result) { $act.result } else { '{"ok":true,"source":"e2e"}' }
-            PostJsonRaw '/api/ai/frontend-tool-result' @{ runId = $runId; toolCallId = $s.toolCallId; result = $res; source = 'e2e' } | Out-Null
+            # 加法式兜底（设计稿 §5.3，裁决 #2）：模型自发调用 generative_form 时，$onSuspend 返回的
+            # 通用回灌值 '{"ok":true,"source":"e2e"}' 必被闸门 400 拒。故挂起帧 name=generative_form 时
+            # 优先直接 POST cancelled:true 收敛（对齐 GFa §8.3 契约），仅当处理器显式返回表单专用载荷
+            # （显式 cancelled，或非通用 result）时才改用处理器载荷。收敛 POST 走 Invoke-Api 并容忍
+            # 409（条目已超时/已决视为已收敛，不 throw）。$onSuspend 为 $null 时的 break 路径（上文）不受影响。
+            $formSpecific = $false
+            if ($s.name -eq 'generative_form' -and $act -is [System.Collections.IDictionary]) {
+                $hasCancelled = $act.Keys -contains 'cancelled'
+                $hasCustomResult = ($act.Keys -contains 'result') -and $act.result -and ($act.result -ne '{"ok":true,"source":"e2e"}')
+                if ($hasCancelled -or $hasCustomResult) { $formSpecific = $true }
+            }
+            if ($s.name -eq 'generative_form' -and -not $formSpecific) {
+                $converged = Invoke-Api 'POST' '/api/ai/frontend-tool-result' @{ runId = $runId; toolCallId = $s.toolCallId; cancelled = $true; source = 'e2e' }
+                if (-not $converged.ok -and $converged.status -ne 409) { throw "POST /api/ai/frontend-tool-result => HTTP $($converged.status) $($converged.text)" }
+            } else {
+                $res = if ($act.result) { $act.result } else { '{"ok":true,"source":"e2e"}' }
+                PostJsonRaw '/api/ai/frontend-tool-result' @{ runId = $runId; toolCallId = $s.toolCallId; result = $res; source = 'e2e' } | Out-Null
+            }
         }
         Start-Sleep -Milliseconds 500
     }
@@ -394,9 +417,16 @@ function Get-DisclosureMap {
 $tmp = Join-Path $env:TEMP ('s5b-e2e-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 
+# GF 证据落盘目录（裁决 #4 / 设计稿 §6）：优先用 -ArtifactDir（执行棒指定仓库外目录），
+# 否则在系统临时目录下新建 gfc-artifacts-<guid>（同样是仓库外）。
+if (-not $ArtifactDir) { $ArtifactDir = Join-Path $env:TEMP ('gfc-artifacts-' + [Guid]::NewGuid().ToString('N')) }
+New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
+$script:gfArtifactDir = (Resolve-Path -LiteralPath $ArtifactDir).Path
+
 Say '============================================================'
 Say (" E2E 验证开始  base={0}  tmp={1}" -f $Base, $tmp)
 Say (" 后端日志：{0}" -f ($(if ($BackendLog) { $BackendLog } else { '（未提供，日志类断言将判 FAIL）' })))
+Say (" GF 证据落盘目录：{0}" -f $script:gfArtifactDir)
 Say '============================================================'
 
 # ---- 预清理：删除上一次运行残留的 S5B-* 任务与 E2E_TEMP 定义（幂等重跑） ----
@@ -412,6 +442,18 @@ try {
     try { GetJson '/api/definitions/E2E_TEMP' | Out-Null; DeleteJson '/api/definitions/E2E_TEMP'; $delDef = 1 } catch { }
     Say "--- 预清理：删除残留任务 $removed 个，E2E_TEMP 定义 $delDef 个 ---"
 } catch { Say ("--- 预清理：跳过（" + $_.Exception.Message + "） ---") }
+
+# ---- 预清理（GF 追加段，设计稿 §5.4）：删除上一次运行残留的 GFC-* 任务（不改既有行，幂等重跑） ----
+try {
+    $pageGfc = GetJson '/api/tasks?page=0&size=500'
+    $removedGfc = 0
+    foreach ($rowGfc in $pageGfc.content) {
+        if ($rowGfc.task.title -like 'GFC-*') {
+            try { DeleteJson ("/api/tasks/" + $rowGfc.task.id); $removedGfc++ } catch { }
+        }
+    }
+    Say "--- 预清理（GF）：删除残留 GFC-* 任务 $removedGfc 个 ---"
+} catch { Say ("--- 预清理（GF）：跳过（" + $_.Exception.Message + "） ---") }
 
 # ============================================================
 # TC1 配置定义列表与种子数据
@@ -1151,6 +1193,727 @@ try {
 } catch { No 'TC16' $_.Exception.Message }
 
 # ============================================================
+# GF1–GF6 生成式表单 E2E 用例（设计稿 docs/evidence/GFc-E2E用例设计-GLM-5.3.md）
+#   - GF1–GF5 计入主 PASS/FAIL 与退出码；模型未触发记 SKIP（GFSKIP=n 单列，不计退出码；
+#     GF1–GF4 全部 SKIP 触发硬底线整棒 FAIL，裁决 #1）
+#   - GF6 为可选观察用例（-EnableGf6，默认关闭），不计入主计数
+#   - 会话统一 gfc-<guid> 前缀；GF2 fixture 任务 GFC-* 用例内自删 + 预清理追加段双保险
+# ============================================================
+
+# GF 用例的对话轮蓝本（设计稿 §5.2）：与 Invoke-AiTurn 同构（Read-Sse + lastSeq 差量重挂 + 180s 预算），
+# 差异仅一处——挂起处理回调返回"待 POST 的载荷描述"（$act.payload：result / cancelled / source），
+# 由本函数统一用 Invoke-Api 发 POST（非 2xx 不 throw，GF3/GF4/GF5 需要原始 400/409 响应），
+# 原始响应依次收集到 $script:gfPosts 供用例块断言。回调返回 $null 或 @{ break = $true } 表示停止本轮读取；
+# 回调未给 payload 时：generative_form 挂起按 §5.3 语义 cancelled:true 收敛，其它前端工具按通用回灌继续
+# （仿 TC17 handler17"回灌并继续"策略）。
+function Invoke-FormTurn($sessionId, $message, $context, [scriptblock]$onSuspend, [int]$maxSuspend = 6) {
+    $frames = New-Object System.Collections.ArrayList
+    $runId = $null
+    $lastSeq = 0
+    for ($i = 0; $i -le $maxSuspend; $i++) {
+        $batch = New-Object System.Collections.ArrayList
+        if ($i -eq 0) {
+            Read-Sse '/api/ai/chat' @{ sessionId = $sessionId; message = $message; context = $context } `
+                @('confirm_request', 'frontend_tool_request', 'done', 'error') $batch $null
+        } else {
+            if (-not $runId) { break }
+            Read-Sse "/api/ai/events/$runId`?lastSeq=$lastSeq" $null `
+                @('confirm_request', 'frontend_tool_request', 'done', 'error') $batch $null
+        }
+        foreach ($f in $batch) {
+            $frames.Add($f) | Out-Null
+            if ($f.type -eq 'start' -and $f.runId) { $runId = $f.runId }
+            if ($f.seq -and [int]$f.seq -gt $lastSeq) { $lastSeq = [int]$f.seq }
+        }
+        $term = @($batch | Where-Object { $_.type -eq 'done' -or $_.type -eq 'error' })
+        if ($term.Count -gt 0) { break }
+        $suspend = @($batch | Where-Object { $_.type -eq 'confirm_request' -or $_.type -eq 'frontend_tool_request' })
+        if ($suspend.Count -eq 0) { break }
+        $s = $suspend[$suspend.Count - 1]
+        if (-not $onSuspend) { break }
+        $act = & $onSuspend $s $runId
+        if ($null -eq $act) { break }
+        if ($act['break']) { break }
+        if ($s.type -eq 'confirm_request') {
+            PostJsonRaw '/api/ai/confirm' @{ runId = $runId; toolCallId = $s.toolCallId; approved = [bool]$act.approved; reason = 'e2e' } | Out-Null
+        } else {
+            $payload = $act.payload
+            if (-not $payload) {
+                $payload = if ($s.name -eq 'generative_form') { @{ cancelled = $true; source = 'e2e' } } else { @{ result = '{"ok":true,"source":"e2e"}'; source = 'e2e' } }
+            }
+            $body = @{ runId = $runId; toolCallId = $s.toolCallId }
+            foreach ($k in $payload.Keys) { $body[$k] = $payload[$k] }
+            $gfResp = Invoke-Api 'POST' '/api/ai/frontend-tool-result' $body
+            $script:gfPosts += @($gfResp)
+            # 裁决 #4：回灌请求/响应原文入档（Gf-Dump 落 gfc-<case>.http.txt）
+            Gf-Http-Note ("$($s.name) 挂起回灌（Invoke-FormTurn，payload=$($payload.Keys -join ','))") 'POST' '/api/ai/frontend-tool-result' $body $gfResp
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    return @{ frames = $frames; runId = $runId; lastSeq = $lastSeq }
+}
+
+# 值合成（设计稿 §4）：按实际收到的 schema 现场合成回灌值 JSON——按字段 type 取值
+# （text→E2EGFC / number→1 / boolean→$true / date→2026-10-07 / enum→首个 option / multi_select→单元素数组），
+# 跳过 required=false 的字段（验证"可选字段缺省合法"）；$prefer 允许用例按提示词固定选项值
+# （如 scope=XN）收紧回显断言；$includeOptional 对列出的 key 即使非必填也给出值（保证回显可断言）。
+# 产物保持"对象 + 数组字段"外壳经 ConvertTo-Json -Compress 序列化（§1.4：嵌套单元素数组产出正确）。
+function New-FormValues($form, $prefer = @{}, [string[]]$includeOptional = @()) {
+    $values = [ordered]@{}
+    foreach ($field in @($form.fields)) {
+        if ($field.required -eq $false -and $includeOptional -notcontains $field.key) { continue }
+        # 空 options 防御（裁决取舍②）：enum/multi_select 的 options 为空时跳过该字段，不产出 null 值
+        if (@('enum', 'multi_select') -contains $field.type -and @($field.options).Count -lt 1) { continue }
+        switch ($field.type) {
+            'text' { $v = 'E2EGFC' }
+            'number' { $v = 1 }
+            'boolean' { $v = $true }
+            'date' { $v = '2026-10-07' }
+            'enum' {
+                $v = $field.options[0].value
+                foreach ($opt in @($field.options)) { if ($prefer[$field.key] -eq $opt.value) { $v = $opt.value; break } }
+            }
+            'multi_select' {
+                $v = @($field.options[0].value)
+                foreach ($opt in @($field.options)) { if ($prefer[$field.key] -eq $opt.value) { $v = @($opt.value); break } }
+            }
+            default { throw "表单字段 $($field.key) 类型 $($field.type) 越六型白名单" }
+        }
+        $values[$field.key] = $v
+    }
+    return ($values | ConvertTo-Json -Depth 10 -Compress)
+}
+
+# 短窗读流：$millis 毫秒窗口内能读到的帧全部收集后返回（设计稿 GF4-A3 / GF5-A4 的"无新帧"检查窗）
+# 真正时间有界（红队高-2 修复）：读循环以 Stopwatch 定截止，每行用 ReadLineAsync 等待剩余窗口，
+# 到点主动断开——挂起 run 的流不关闭（仅心跳）也能自行结束，不会阻塞到 HITL 超时/HttpClient 超时。
+function Read-Sse-Brief($path, $millis) {
+    $frames = New-Object System.Collections.ArrayList
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    # 裁决 #3（O1）：握手（连接 + 状态码）必须**显式抛出**，不得被读流窗口的兜底 catch 吞掉——
+    # 否则重挂失败会返回空集，调用方的"无新帧"断言（GF4-A3 / GF5-A4）恒真、空转。
+    # 故把 SendAsync 与状态码判定放在吞错范围**之外**，只有"窗口内有界读流的中断/到点"才允许吞。
+    $req = New-Object System.Net.Http.HttpRequestMessage
+    $req.RequestUri = New-Object System.Uri($Base + $path)
+    $req.Method = [System.Net.Http.HttpMethod]::Get
+    $cts = New-Object System.Threading.CancellationTokenSource
+    $cts.CancelAfter($millis)
+    $resp = $null
+    try {
+        $resp = $http.SendAsync($req, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead, $cts.Token).Result
+    } catch {
+        $cts.Dispose()
+        throw "SSE $path => 重挂连接失败（${millis}ms 窗口内未建立）：$($_.Exception.Message)"
+    }
+    if (-not $resp.IsSuccessStatusCode) {
+        $code = [int]$resp.StatusCode
+        $resp.Dispose(); $cts.Dispose()
+        throw "SSE $path => HTTP $code（重挂失败，无新帧断言不可空转）"
+    }
+    $reader = New-Object System.IO.StreamReader($resp.Content.ReadAsStreamAsync().Result, [System.Text.Encoding]::UTF8)
+    try {
+        while ($sw.ElapsedMilliseconds -lt $millis) {
+            $remaining = $millis - [int]$sw.ElapsedMilliseconds
+            if ($remaining -le 0) { break }
+            $readTask = $reader.ReadLineAsync()
+            if (-not $readTask.Wait($remaining)) { break }  # 窗口到点：主动断开，不再等下一行
+            $line = $readTask.Result
+            if ($null -eq $line) { break }
+            if ($line.StartsWith('data:')) {
+                $data = $line.Substring(5).Trim()
+                if ($data -and $data -ne '[DONE]') {
+                    $frame = $null
+                    try { $frame = $data | ConvertFrom-Json } catch { $frame = $null }
+                    if ($frame) { $frames.Add($frame) | Out-Null }
+                }
+            }
+        }
+    } catch { } finally { $reader.Dispose(); $resp.Dispose(); $cts.Dispose() }
+    return $frames
+}
+
+# pending 快照取条目（红队 P0-1 修复：GET /api/ai/pending/{runId} 返回 ApiResponse 信封
+# {success,data:[...]}，后端 AiController.pending 实测——条目在 data 内，非裸数组）
+function Gf-PendingEntry($runId, $toolCallId) {
+    $pend = Invoke-Api 'GET' "/api/ai/pending/$runId" $null
+    if (-not $pend.ok -or -not $pend.json -or -not $pend.json.data) { throw "GET /api/ai/pending/$runId => HTTP $($pend.status) $($pend.text)" }
+    $entry = @($pend.json.data | Where-Object { $_.toolCallId -eq $toolCallId })[0]
+    if (-not $entry) { throw "pending/$runId 无 toolCallId=$toolCallId 条目" }
+    return $entry
+}
+
+# 失败分支收尾兜底（设计稿 §8）：已记录 toolCallId 且 pending 仍 PENDING 时，FAIL 前 POST
+# cancelled:true 收敛挂起，避免 120s 悬置拖慢后续用例
+function Gf-Converge($runId, $toolCallId) {
+    try {
+        if (-not $runId -or -not $toolCallId) { return }
+        $pend = Invoke-Api 'GET' "/api/ai/pending/$runId" $null
+        if (-not $pend.ok -or -not $pend.json -or -not $pend.json.data) { return }
+        $entry = @($pend.json.data | Where-Object { $_.toolCallId -eq $toolCallId })[0]
+        if ($entry -and $entry.status -eq 'PENDING') {
+            Invoke-Api 'POST' '/api/ai/frontend-tool-result' @{ runId = $runId; toolCallId = $toolCallId; cancelled = $true; source = 'e2e' } | Out-Null
+        }
+    } catch { }
+}
+
+# SKIP 记账（设计稿 §3.3，裁决 #1）：模型行为问题不记产品 FAIL，单列保留
+function Gf-Skip($name, $why) {
+    $script:gfskip++
+    if (@('GF1', 'GF2', 'GF3', 'GF4') -contains $name) { $script:gfskip14++ }
+    $script:results.Add(@{ name = $name; result = "SKIP: $why" }) | Out-Null
+    Write-Host ("  [SKIP] " + $name + " => " + $why) -ForegroundColor Yellow
+}
+
+# 挂起帧的通用契约断言（设计稿 GF1-A1，GF2/GF3/GF4 同构复用）
+function Gf-Assert-FrameContract($f) {
+    if (-not $f.toolCallId) { throw 'frontend_tool_request 缺 toolCallId' }
+    if ([int]$f.timeoutSeconds -le 0) { throw "frontend_tool_request timeoutSeconds=$($f.timeoutSeconds)，期望 > 0（不硬编码 120，与 app.ai.hitl.timeout 解耦）" }
+    if (-not ($f.expiresAt -match '^\d+$')) { throw 'frontend_tool_request expiresAt 非数字' }
+}
+
+# 解析 args 原始 JSON 字符串并取 form（设计稿 §4；args 缺 form / scenario 漂移按 §3.3 判定）
+function Gf-Parse-Form($f, $expectScenario, $needKeys, $driftVar) {
+    $argsObj = $null
+    try { $argsObj = $f.args | ConvertFrom-Json } catch { }
+    if (-not $argsObj -or -not $argsObj.form) { throw 'args 缺 form 键（入参闸门未拦截，产品缺陷）' }
+    $form = $argsObj.form
+    if ($form.scenario -ne $expectScenario) {
+        throw "args.form.scenario=$($form.scenario)，期望 $expectScenario（入参闸门未拦截，产品缺陷）"
+    }
+    $keys = @($form.fields | ForEach-Object { $_.key })
+    foreach ($need in $needKeys) {
+        if ($keys -notcontains $need) {
+            Set-Variable -Name $driftVar -Scope Script -Value "缺字段 $need（实际: $($keys -join ',')）"
+            return $null
+        }
+    }
+    foreach ($field in @($form.fields)) {
+        if (@('text', 'number', 'boolean', 'date', 'enum', 'multi_select') -notcontains $field.type) {
+            throw "字段 $($field.key) 类型 $($field.type) 越六型白名单（入参闸门未拦截，产品缺陷）"
+        }
+    }
+    return $form
+}
+
+# 会话记忆中的"最终助手文本"（裁决 #1 的值回显权威通道）：取该会话最后一条 text 非空的 ASSISTANT 消息。
+# 与 delta 通道不同，该文本由服务端持久化，**不受**"回灌→重挂间隙 delta 丢失"影响（首轮根因见证据文档 §4）。
+function Gf-FinalAssistantText($sessionId) {
+    $hist = GetJson "/api/ai/history/$sessionId"
+    $asst = @($hist.messages | Where-Object { $_.type -eq 'ASSISTANT' -and -not [string]::IsNullOrWhiteSpace([string]$_.text) })
+    if ($asst.Count -lt 1) { throw "会话 $sessionId 无 text 非空的 ASSISTANT 消息（值回显断言无对象）" }
+    return [string]$asst[$asst.Count - 1].text
+}
+
+# 值回显断言（裁决 #1）：会话最终助手文本必须包含**本次实际回灌的全部值**。
+# 关键：断言对象取自**实际 POST 的值 JSON**（$postedJson），而不是提示词里列出的字段——
+# 因为设计上"required=false 的字段被 New-FormValues 跳过"（验证可选字段缺省合法），
+# 若模型把某字段标为可选，该字段的值根本不会回灌，断言它必然假阴性（GF1 重跑第 1 轮的实测教训）。
+function Gf-Assert-Echo($case, $text, $postedJson) {
+    $obj = $postedJson | ConvertFrom-Json
+    $props = @($obj.PSObject.Properties)
+    if ($props.Count -lt 1) { throw "$case 回灌值为空对象，无法做值回显断言" }
+    foreach ($p in $props) {
+        $vals = @()
+        if ($p.Value -is [bool]) { $vals = @($(if ($p.Value) { 'true' } else { 'false' })) }
+        elseif ($p.Value -is [System.Array]) { $vals = @($p.Value | ForEach-Object { [string]$_ }) }
+        else { $vals = @([string]$p.Value) }
+        foreach ($v in $vals) {
+            if ($text -notlike "*$v*") { throw "$case 值回显缺 '$($p.Name)=$v'（会话最终助手文本，len=$($text.Length)）" }
+        }
+        if ($text -notlike "*$($p.Name)*") { throw "$case 值回显缺字段名 '$($p.Name)'（会话最终助手文本）" }
+    }
+}
+
+# 回灌 HTTP 原文记录（裁决 #4）：调用方在每次 POST 后追加，Gf-Dump 落盘为 gfc-<case>.http.txt
+function Gf-Http-Note($label, $method, $path, $reqBody, $r) {
+    $reqText = if ($null -eq $reqBody) { '(无请求体)' } elseif ($reqBody -is [string]) { $reqBody } else { $reqBody | ConvertTo-Json -Depth 20 -Compress }
+    $script:gfHttp += @("`n### $label`n$method $path`nREQUEST: $reqText`nRESPONSE: HTTP $($r.status)`n$($r.text)")
+}
+
+# GF 证据落盘（裁决 #4 / 设计稿 §6）：把本用例**脚本实际收到**的 SSE 帧与回灌 HTTP 原文写到
+# $script:gfArtifactDir（仓库外）下的 gfc-<case>.sse.txt / gfc-<case>.http.txt（UTF-8 无 BOM）。
+# 成功与失败路径均调用（catch 内也调用，便于事后复盘）；集合为空也写文件（仅表头注释）。
+# 落盘失败只告警不判 FAIL——归档属旁证，不应改变用例判定。
+function Gf-Dump($case, $frames) {
+    if (-not $script:gfArtifactDir) { return }
+    try {
+        $enc = New-Object System.Text.UTF8Encoding($false)
+        $sseLines = New-Object System.Collections.ArrayList
+        $sseLines.Add("# gfc-$case —— 脚本实际收到的 SSE 帧（按到达顺序，每行 data: <帧 JSON>）") | Out-Null
+        foreach ($f in @($frames)) {
+            if ($null -eq $f) { continue }
+            $sseLines.Add('data:' + ($f | ConvertTo-Json -Depth 30 -Compress)) | Out-Null
+        }
+        [IO.File]::WriteAllLines((Join-Path $script:gfArtifactDir "gfc-$case.sse.txt"), $sseLines.ToArray(), $enc)
+        $httpLines = New-Object System.Collections.ArrayList
+        $httpLines.Add("# gfc-$case —— 回灌 HTTP 请求/响应原文（脚本实际发出的 POST）") | Out-Null
+        foreach ($h in @($script:gfHttp)) { if ($h) { $httpLines.Add([string]$h) | Out-Null } }
+        [IO.File]::WriteAllLines((Join-Path $script:gfArtifactDir "gfc-$case.http.txt"), $httpLines.ToArray(), $enc)
+        Write-Host ("  [ART] gfc-{0}.sse.txt / gfc-{0}.http.txt 已落盘（帧 {1}，HTTP {2}）" -f $case, @($frames).Count, @($script:gfHttp).Count) -ForegroundColor DarkGray
+    } catch {
+        Write-Host ("  [WARN] GF 证据落盘失败（{0}）：{1}" -f $case, $_.Exception.Message) -ForegroundColor Yellow
+    }
+}
+
+# ============================================================
+# GF1 生成式表单：FILTER 回灌续跑（设计稿 §4 GF1；提示词为设计稿原文）
+#   schema 下发 → 按实际 schema 合成值 JSON 回灌 → 续跑值回显
+# ============================================================
+Say '--- GF1 生成式表单：FILTER 回灌续跑 ---'
+$script:gf1Run = $null
+$script:gf1Call = $null
+try {
+    $promptGf1 = '请调用 generative_form 工具（scenario=FILTER）出一张收集导出筛选条件的表单，字段就用这四个，key 和类型必须一致：keyword（文本，必填，占位提示"编码或名称关键字"）、minRows（数字，非必填）、effectiveDate（日期，格式 yyyy-MM-dd，非必填）、scope（下拉单选，选项 XN 和 HD）。不要用文字向我提问，也不要调用 generative_form 以外的任何工具，不会出现确认卡片。我填完后，请把每个字段按 key=值 原样逐行回报。'
+    $toolsGf1 = GetJson '/api/ai/tools?page=tasks'
+    if (@($toolsGf1.toolNames) -notcontains 'generative_form') { throw '披露端点 /api/ai/tools?page=tasks 未列出 generative_form' }
+
+    $handlerGf1 = {
+        param($f, $runId)
+        if ($f.type -eq 'confirm_request') { return @{ approved = $false } }
+        if ($f.name -ne 'generative_form') { return @{ payload = @{ result = '{"ok":true,"source":"e2e"}' } } }
+        $script:gf1Run = $runId
+        $script:gf1Call = $f.toolCallId
+        Gf-Assert-FrameContract $f
+        $form = Gf-Parse-Form $f 'FILTER' @('keyword', 'minRows', 'effectiveDate', 'scope') 'gfSchemaDrift'
+        if (-not $form) { return @{ break = $true } }
+        $values = New-FormValues $form @{ 'scope' = 'XN' } @('scope')
+        $script:gf1Posted = $values
+        return @{ payload = @{ result = $values; source = 'e2e-gf' } }
+    }
+    $attempt = 0
+    $turn = $null
+    $fe = @()
+    $drift = $null
+    $driftCount = 0
+    $formOk = $false
+    while ($attempt -lt 3) {
+        $attempt++
+        $sessionGf1 = 'gfc-' + [Guid]::NewGuid().ToString('N')
+        $script:gfPosts = @()
+        $script:gfHttp = @()   # 裁决 #4：HTTP 原文按用例重置，避免 gfc-<case>.http.txt 累积前序用例的请求
+        $script:gfSchemaDrift = $null
+        $turn = Invoke-FormTurn $sessionGf1 $promptGf1 @{ page = 'tasks' } $handlerGf1 4
+        $fe = @($turn.frames | Where-Object { $_.type -eq 'frontend_tool_request' -and $_.name -eq 'generative_form' })
+        # schema 漂移（缺 needKeys，模型行为）与"未触发表单"分开：漂移记数并继续重试，3 次皆漂移才 SKIP（§3.3）
+        if ($script:gfSchemaDrift) { $drift = $script:gfSchemaDrift; $driftCount++; Start-Sleep -Seconds 2; continue }
+        if ($fe.Count -ge 1) { $formOk = $true; break }
+        # SKIP 前置校验（§3.3 判定表第 1 行）：本轮已有 tool_start(generative_form) 却无 frontend_tool_request、
+        # 也无 REJECTED_ARGUMENTS 结局帧 → 挂起帧未下发属产品缺陷，判 FAIL，不得记 SKIP
+        $toolStartN = @($turn.frames | Where-Object { $_.type -eq 'tool_start' -and $_.name -eq 'generative_form' }).Count
+        $rejN = @($turn.frames | Where-Object { $_.type -eq 'frontend_tool_result' -and $_.name -eq 'generative_form' -and $_.status -eq 'REJECTED_ARGUMENTS' }).Count
+        if ($toolStartN -gt 0 -and $rejN -lt 1) { throw "模型已 tool_start(generative_form) 但未收到 frontend_tool_request（亦无 REJECTED_ARGUMENTS 结局帧）——挂起帧未下发，产品缺陷" }
+        Start-Sleep -Seconds 2
+    }
+    if (-not $formOk) {
+        if ($driftCount -gt 0) { throw "GF-SKIP:模型 $driftCount/3 次尝试 schema 漂移（最近：$drift），判模型行为" }
+        throw 'GF-SKIP:模型 3 次尝试均未触发表单（披露正常），判模型行为'
+    }
+
+    # A3 回灌响应：HTTP 200 + FRONTEND_RESULT + accepted + executed=false
+    $post = @($script:gfPosts)[0]
+    if (-not $post) { throw '未执行回灌 POST' }
+    if ($post.status -ne 200 -or -not $post.json) { throw "回灌 POST => HTTP $($post.status) $($post.text)" }
+    if ($post.json.status -ne 'FRONTEND_RESULT' -or $post.json.accepted -ne $true -or $post.json.executed -ne $false) {
+        throw "回灌响应异常: $($post.text)"
+    }
+    # A4 pending 终态与 resultText 原样
+    $entry = Gf-PendingEntry $script:gf1Run $script:gf1Call
+    if ($entry.status -ne 'FRONTEND_RESULT') { throw "pending 条目状态 $($entry.status)，期望 FRONTEND_RESULT" }
+    if ($entry.resultText -ne $script:gf1Posted) { throw 'pending resultText 与回灌 JSON 不一致（回灌值未原样入上下文）' }
+    # A5 结局帧：ok=true 恰 1 条 + done 恰 1 条 + 无 error
+    $ftr = @($turn.frames | Where-Object { $_.type -eq 'frontend_tool_result' -and $_.toolCallId -eq $script:gf1Call })
+    if ($ftr.Count -ne 1 -or $ftr[0].ok -ne $true) { throw "frontend_tool_result 异常（$($ftr.Count) 条 / ok=$($ftr[0].ok)）" }
+    if (@($turn.frames | Where-Object { $_.type -eq 'done' }).Count -ne 1) { throw 'done 帧不恰为 1 条' }
+    if (@($turn.frames | Where-Object { $_.type -eq 'error' }).Count -gt 0) { throw '出现 error 帧' }
+    # A6 值回显（裁决 #1）：**权威通道改为会话记忆的最终助手文本**（服务端持久化，确定性）。
+    # 断言对象取自实际回灌值 $script:gf1Posted（可选字段被跳过时不误判）。
+    # 原 delta 通道降级为纯 INFO（不判 FAIL）——delta 仅 live 流，回灌→重挂间隙产出的 delta 会丢
+    # （首轮 3 例 FAIL 的根因，见 docs/evidence/GFc-端到端执行验证.md §4）。
+    $echoGf1 = Gf-FinalAssistantText $sessionGf1
+    Gf-Assert-Echo 'GF1' $echoGf1 $script:gf1Posted
+    $deltaGf1 = ($turn.frames | Where-Object { $_.type -eq 'delta' } | ForEach-Object { [string]$_.text }) -join "`n"
+    Write-Host ("  [INFO] GF1 delta 弱旁证（不判 FAIL）：{0}" -f $(if ($deltaGf1) { "采到 $($deltaGf1.Length) 字符" } else { '未采到（回灌→重挂间隙，属预期）' })) -ForegroundColor DarkGray
+    # A7 后端日志：披露清单含 generative_form（-BackendLog 未提供时 Get-LogText 判 FAIL，与既有口径一致）
+    $disc = Get-DisclosureMap
+    if (-not $disc.ContainsKey('page:tasks')) { throw '日志中无 page:tasks 的披露记录' }
+    if (@($disc['page:tasks']) -notcontains 'generative_form') { throw '日志披露清单缺 generative_form' }
+    Gf-Dump 'GF1' $turn.frames
+    Ok 'GF1 FILTER 表单：schema 下发→值回灌 200→FRONTEND_RESULT→pending 终态→值回显（会话记忆通道，断言对象=实际回灌值）'
+} catch {
+    if ($_.Exception.Message -like 'GF-SKIP:*') { Gf-Skip 'GF1' $_.Exception.Message.Substring(8) }
+    else { Gf-Converge $script:gf1Run $script:gf1Call; Gf-Dump 'GF1' $turn.frames; No 'GF1' $_.Exception.Message }
+}
+
+# ============================================================
+# GF2 生成式表单：CLARIFY 回灌续跑（设计稿 §4 GF2；提示词为设计稿原文）
+#   fixture 任务推到查询条件步；用例内自删（A7）
+# ============================================================
+Say '--- GF2 生成式表单：CLARIFY 回灌续跑 ---'
+$script:gf2Run = $null
+$script:gf2Call = $null
+try {
+    $tGf2 = New-ExportTask 'GFC-TC-GF2-澄清' @('CURRENCY')
+    PutJson "/api/tasks/$tGf2/step" @{ step = 'QUERY_COND' } | Out-Null
+    $ctxGf2 = @{ page = 'export'; taskId = $tGf2; taskType = 'EXPORT'; step = 'QUERY_COND' }
+    $promptGf2 = '我想继续这个导出任务，但你缺两个信息。请调用 generative_form 工具（scenario=CLARIFY）向我澄清，字段就用这两个，key 和类型必须一致：exportScope（下拉单选，选项 ALL 和 SELECTED）、includeInactive（开关布尔）。不要用文字提问，也不要调用 generative_form 以外的任何工具。我填完后，把两个字段按 key=值 原样逐行回报。'
+    $toolsGf2 = GetJson '/api/ai/tools?page=export&taskType=EXPORT&step=QUERY_COND'
+    if (@($toolsGf2.toolNames) -notcontains 'generative_form') { throw '披露端点 task:EXPORT/QUERY_COND 未列出 generative_form' }
+
+    $handlerGf2 = {
+        param($f, $runId)
+        if ($f.type -eq 'confirm_request') { return @{ approved = $false } }
+        if ($f.name -ne 'generative_form') { return @{ payload = @{ result = '{"ok":true,"source":"e2e"}' } } }
+        $script:gf2Run = $runId
+        $script:gf2Call = $f.toolCallId
+        Gf-Assert-FrameContract $f
+        $form = Gf-Parse-Form $f 'CLARIFY' @('exportScope', 'includeInactive') 'gfSchemaDrift'
+        if (-not $form) { return @{ break = $true } }
+        $values = New-FormValues $form @{ 'exportScope' = 'ALL' } @('includeInactive')
+        $script:gf2Posted = $values
+        return @{ payload = @{ result = $values; source = 'e2e-gf' } }
+    }
+    $attempt = 0
+    $turn = $null
+    $fe = @()
+    $drift = $null
+    $driftCount = 0
+    $formOk = $false
+    while ($attempt -lt 3) {
+        $attempt++
+        $sessionGf2 = 'gfc-' + [Guid]::NewGuid().ToString('N')
+        $script:gfPosts = @()
+        $script:gfHttp = @()   # 裁决 #4：HTTP 原文按用例重置，避免 gfc-<case>.http.txt 累积前序用例的请求
+        $script:gfSchemaDrift = $null
+        $turn = Invoke-FormTurn $sessionGf2 $promptGf2 $ctxGf2 $handlerGf2 4
+        $fe = @($turn.frames | Where-Object { $_.type -eq 'frontend_tool_request' -and $_.name -eq 'generative_form' })
+        # schema 漂移（缺 needKeys，模型行为）与"未触发表单"分开：漂移记数并继续重试，3 次皆漂移才 SKIP（§3.3）
+        if ($script:gfSchemaDrift) { $drift = $script:gfSchemaDrift; $driftCount++; Start-Sleep -Seconds 2; continue }
+        if ($fe.Count -ge 1) { $formOk = $true; break }
+        # SKIP 前置校验（§3.3 判定表第 1 行）：本轮已有 tool_start(generative_form) 却无 frontend_tool_request、
+        # 也无 REJECTED_ARGUMENTS 结局帧 → 挂起帧未下发属产品缺陷，判 FAIL，不得记 SKIP
+        $toolStartN = @($turn.frames | Where-Object { $_.type -eq 'tool_start' -and $_.name -eq 'generative_form' }).Count
+        $rejN = @($turn.frames | Where-Object { $_.type -eq 'frontend_tool_result' -and $_.name -eq 'generative_form' -and $_.status -eq 'REJECTED_ARGUMENTS' }).Count
+        if ($toolStartN -gt 0 -and $rejN -lt 1) { throw "模型已 tool_start(generative_form) 但未收到 frontend_tool_request（亦无 REJECTED_ARGUMENTS 结局帧）——挂起帧未下发，产品缺陷" }
+        Start-Sleep -Seconds 2
+    }
+    if (-not $formOk) {
+        if ($driftCount -gt 0) { throw "GF-SKIP:模型 $driftCount/3 次尝试 schema 漂移（最近：$drift），判模型行为" }
+        throw 'GF-SKIP:模型 3 次尝试均未触发表单（披露正常），判模型行为'
+    }
+
+    $post = @($script:gfPosts)[0]
+    if (-not $post) { throw '未执行回灌 POST' }
+    if ($post.status -ne 200 -or -not $post.json) { throw "回灌 POST => HTTP $($post.status) $($post.text)" }
+    if ($post.json.status -ne 'FRONTEND_RESULT' -or $post.json.accepted -ne $true -or $post.json.executed -ne $false) {
+        throw "回灌响应异常: $($post.text)"
+    }
+    $entry = Gf-PendingEntry $script:gf2Run $script:gf2Call
+    if ($entry.status -ne 'FRONTEND_RESULT') { throw "pending 条目状态 $($entry.status)，期望 FRONTEND_RESULT" }
+    if ($entry.resultText -ne $script:gf2Posted) { throw 'pending resultText 与回灌 JSON 不一致' }
+    $ftr = @($turn.frames | Where-Object { $_.type -eq 'frontend_tool_result' -and $_.toolCallId -eq $script:gf2Call })
+    if ($ftr.Count -ne 1 -or $ftr[0].ok -ne $true) { throw "frontend_tool_result 异常（$($ftr.Count) 条 / ok=$($ftr[0].ok)）" }
+    if (@($turn.frames | Where-Object { $_.type -eq 'done' }).Count -ne 1) { throw 'done 帧不恰为 1 条' }
+    if (@($turn.frames | Where-Object { $_.type -eq 'error' }).Count -gt 0) { throw '出现 error 帧' }
+    # A6 值回显（裁决 #1）：权威通道 = 会话记忆的最终助手文本（服务端持久化）。delta 通道降级为纯 INFO。
+    $echoGf2 = Gf-FinalAssistantText $sessionGf2
+    Gf-Assert-Echo 'GF2' $echoGf2 $script:gf2Posted
+    $deltaGf2 = ($turn.frames | Where-Object { $_.type -eq 'delta' } | ForEach-Object { [string]$_.text }) -join "`n"
+    Write-Host ("  [INFO] GF2 delta 弱旁证（不判 FAIL）：{0}" -f $(if ($deltaGf2) { "采到 $($deltaGf2.Length) 字符" } else { '未采到（回灌→重挂间隙，属预期）' })) -ForegroundColor DarkGray
+    # A7 fixture 用例内自删
+    DeleteJson "/api/tasks/$tGf2" | Out-Null
+    Gf-Dump 'GF2' $turn.frames
+    Ok 'GF2 CLARIFY 表单：schema 下发→值回灌 200→续跑回显（会话记忆通道，断言对象=实际回灌值）+ fixture 自删'
+} catch {
+    if ($_.Exception.Message -like 'GF-SKIP:*') { Gf-Skip 'GF2' $_.Exception.Message.Substring(8) }
+    else { Gf-Converge $script:gf2Run $script:gf2Call; Gf-Dump 'GF2' $turn.frames; No 'GF2' $_.Exception.Message }
+}
+
+# ============================================================
+# GF3 生成式表单：取消路径（设计稿 §4 GF3；提示词为设计稿原文）
+#   回灌 cancelled:true → FRONTEND_CANCELLED 终态 → 模型收尾；记录 runId/toolCallId 供 GF5
+# ============================================================
+Say '--- GF3 生成式表单：取消路径 ---'
+$script:gf3Run = $null
+$script:gf3Call = $null
+$script:gf3LastSeq = 0
+try {
+    $promptGf3 = '请调用 generative_form 工具（scenario=FILTER）出一张表单收集一个筛选条件：keyword（文本，必填）。不要用文字提问，也不要调用其它任何工具。我填完后，把结果按 key=值 回报。'
+    $toolsGf3 = GetJson '/api/ai/tools?page=tasks'
+    if (@($toolsGf3.toolNames) -notcontains 'generative_form') { throw '披露端点 /api/ai/tools?page=tasks 未列出 generative_form' }
+
+    $handlerGf3 = {
+        param($f, $runId)
+        if ($f.type -eq 'confirm_request') { return @{ approved = $false } }
+        if ($f.name -ne 'generative_form') { return @{ payload = @{ result = '{"ok":true,"source":"e2e"}' } } }
+        $script:gf3Run = $runId
+        $script:gf3Call = $f.toolCallId
+        Gf-Assert-FrameContract $f
+        $form = Gf-Parse-Form $f 'FILTER' @('keyword') 'gfSchemaDrift'
+        if (-not $form) { return @{ break = $true } }
+        return @{ payload = @{ cancelled = $true; source = 'e2e-gf' } }
+    }
+    $attempt = 0
+    $turn = $null
+    $fe = @()
+    $drift = $null
+    $driftCount = 0
+    $formOk = $false
+    while ($attempt -lt 3) {
+        $attempt++
+        $sessionGf3 = 'gfc-' + [Guid]::NewGuid().ToString('N')
+        $script:gfPosts = @()
+        $script:gfHttp = @()   # 裁决 #4：HTTP 原文按用例重置，避免 gfc-<case>.http.txt 累积前序用例的请求
+        $script:gfSchemaDrift = $null
+        $turn = Invoke-FormTurn $sessionGf3 $promptGf3 @{ page = 'tasks' } $handlerGf3 4
+        $fe = @($turn.frames | Where-Object { $_.type -eq 'frontend_tool_request' -and $_.name -eq 'generative_form' })
+        # schema 漂移（缺 needKeys，模型行为）与"未触发表单"分开：漂移记数并继续重试，3 次皆漂移才 SKIP（§3.3）
+        if ($script:gfSchemaDrift) { $drift = $script:gfSchemaDrift; $driftCount++; Start-Sleep -Seconds 2; continue }
+        if ($fe.Count -ge 1) { $formOk = $true; break }
+        # SKIP 前置校验（§3.3 判定表第 1 行）：本轮已有 tool_start(generative_form) 却无 frontend_tool_request、
+        # 也无 REJECTED_ARGUMENTS 结局帧 → 挂起帧未下发属产品缺陷，判 FAIL，不得记 SKIP
+        $toolStartN = @($turn.frames | Where-Object { $_.type -eq 'tool_start' -and $_.name -eq 'generative_form' }).Count
+        $rejN = @($turn.frames | Where-Object { $_.type -eq 'frontend_tool_result' -and $_.name -eq 'generative_form' -and $_.status -eq 'REJECTED_ARGUMENTS' }).Count
+        if ($toolStartN -gt 0 -and $rejN -lt 1) { throw "模型已 tool_start(generative_form) 但未收到 frontend_tool_request（亦无 REJECTED_ARGUMENTS 结局帧）——挂起帧未下发，产品缺陷" }
+        Start-Sleep -Seconds 2
+    }
+    if (-not $formOk) {
+        if ($driftCount -gt 0) { throw "GF-SKIP:模型 $driftCount/3 次尝试 schema 漂移（最近：$drift），判模型行为" }
+        throw 'GF-SKIP:模型 3 次尝试均未触发表单（披露正常），判模型行为'
+    }
+    $script:gf3LastSeq = $turn.lastSeq
+
+    # A1 取消 POST：200 + FRONTEND_CANCELLED + cancelled=true + executed=false
+    $post = @($script:gfPosts)[0]
+    if (-not $post) { throw '未执行取消 POST' }
+    if ($post.status -ne 200 -or -not $post.json) { throw "取消 POST => HTTP $($post.status) $($post.text)" }
+    if ($post.json.status -ne 'FRONTEND_CANCELLED' -or $post.json.cancelled -ne $true -or $post.json.executed -ne $false) {
+        throw "取消响应异常: $($post.text)"
+    }
+    # A2 结局帧：ok=false + FRONTEND_CANCELLED + result 固定文本前缀
+    $ftr = @($turn.frames | Where-Object { $_.type -eq 'frontend_tool_result' -and $_.toolCallId -eq $script:gf3Call })
+    if ($ftr.Count -ne 1 -or $ftr[0].ok -ne $false) { throw "frontend_tool_result 异常（$($ftr.Count) 条 / ok=$($ftr[0].ok)）" }
+    if ($ftr[0].status -ne 'FRONTEND_CANCELLED') { throw "结局帧 status=$($ftr[0].status)" }
+    if ([string]$ftr[0].result -notlike 'FRONTEND_CANCELLED：*') { throw '结局帧 result 缺 FRONTEND_CANCELLED：前缀' }
+    # A3 done 到达且无 error
+    if (@($turn.frames | Where-Object { $_.type -eq 'done' }).Count -lt 1) { throw '未收到 done 帧' }
+    if (@($turn.frames | Where-Object { $_.type -eq 'error' }).Count -gt 0) { throw '出现 error 帧' }
+    # A4 pending 终态：FRONTEND_CANCELLED + reason 含 FRONTEND_DISMISSED + executed=false
+    $entry = Gf-PendingEntry $script:gf3Run $script:gf3Call
+    if ($entry.status -ne 'FRONTEND_CANCELLED') { throw "pending 条目状态 $($entry.status)，期望 FRONTEND_CANCELLED" }
+    if ([string]$entry.reason -notlike '*FRONTEND_DISMISSED*') { throw "pending reason=$($entry.reason)，缺 FRONTEND_DISMISSED" }
+    if ($entry.executed -ne $false) { throw 'pending executed 应为 false' }
+    # A5 后端日志：取消行（INFO）
+    $logGf3 = Get-LogText
+    if ($logGf3 -notlike '*前端工具被用户取消*' -or $logGf3 -notlike '*name=generative_form*') {
+        throw '日志缺"前端工具被用户取消 … name=generative_form"行'
+    }
+    # A6 同一 toolCallId 的 frontend_tool_request 不重复下发（恰 1 条）
+    $reqN = @($turn.frames | Where-Object { $_.type -eq 'frontend_tool_request' -and $_.toolCallId -eq $script:gf3Call }).Count
+    if ($reqN -ne 1) { throw "同一 toolCallId 的 frontend_tool_request $reqN 条，期望 1" }
+    # A7 模型收尾 delta（弱旁证，红队中-6 修复）：delta 仅 live 流，取消→重挂间隙可能丢失，无服务端确定性锚点；
+    # 收集到即断言，收集不到不 FAIL（受模型速度影响）
+    if (@($turn.frames | Where-Object { $_.type -eq 'delta' }).Count -lt 1) {
+        Write-Host '  [INFO] GF3 模型收尾 delta 未收集到（受模型速度影响，弱旁证不 FAIL）' -ForegroundColor Yellow
+    }
+    Gf-Dump 'GF3' $turn.frames
+    Ok 'GF3 取消路径：cancelled:true→FRONTEND_CANCELLED 终态（帧/pending/日志三面一致）+ 模型收尾'
+} catch {
+    if ($_.Exception.Message -like 'GF-SKIP:*') { Gf-Skip 'GF3' $_.Exception.Message.Substring(8) }
+    else { Gf-Converge $script:gf3Run $script:gf3Call; Gf-Dump 'GF3' $turn.frames; No 'GF3' $_.Exception.Message }
+}
+
+# ============================================================
+# GF4 生成式表单：复核拒绝路径（设计稿 §4 GF4；提示词为设计稿原文）
+#   违规值 400 FORM_RESULT_REJECTED（PENDING 保持、不发帧）→ 同 toolCallId 改值重发 200 → 续跑
+# ============================================================
+Say '--- GF4 生成式表单：复核拒绝（400→改值重发） ---'
+$script:gf4Run = $null
+$script:gf4Call = $null
+$script:gf4LastSeq = 0
+try {
+    $promptGf4 = '请调用 generative_form 工具（scenario=FILTER）出一张表单收集筛选条件，字段 key 和类型必须一致：keyword（文本，必填）、amount（数字）、scope（下拉单选，选项 XN 和 HD）。不要用文字提问，也不要调用其它任何工具。我填完后，把每个字段按 key=值 原样逐行回报。'
+    $toolsGf4 = GetJson '/api/ai/tools?page=tasks'
+    if (@($toolsGf4.toolNames) -notcontains 'generative_form') { throw '披露端点 /api/ai/tools?page=tasks 未列出 generative_form' }
+
+    $handlerGf4 = {
+        param($f, $runId)
+        if ($f.type -eq 'confirm_request') { return @{ approved = $false } }
+        if ($f.name -ne 'generative_form') { return @{ payload = @{ result = '{"ok":true,"source":"e2e"}' } } }
+        $script:gf4Run = $runId
+        $script:gf4Call = $f.toolCallId
+        Gf-Assert-FrameContract $f
+        $form = Gf-Parse-Form $f 'FILTER' @('keyword', 'amount', 'scope') 'gfSchemaDrift'
+        if (-not $form) { return @{ break = $true } }
+        return @{ break = $true }
+    }
+    $attempt = 0
+    $turn = $null
+    $fe = @()
+    $drift = $null
+    $driftCount = 0
+    $formOk = $false
+    while ($attempt -lt 3) {
+        $attempt++
+        $sessionGf4 = 'gfc-' + [Guid]::NewGuid().ToString('N')
+        $script:gfPosts = @()
+        $script:gfHttp = @()   # 裁决 #4：HTTP 原文按用例重置，避免 gfc-<case>.http.txt 累积前序用例的请求
+        $script:gfSchemaDrift = $null
+        $turn = Invoke-FormTurn $sessionGf4 $promptGf4 @{ page = 'tasks' } $handlerGf4 4
+        $fe = @($turn.frames | Where-Object { $_.type -eq 'frontend_tool_request' -and $_.name -eq 'generative_form' })
+        # schema 漂移（缺 needKeys，模型行为）与"未触发表单"分开：漂移记数并继续重试，3 次皆漂移才 SKIP（§3.3）
+        if ($script:gfSchemaDrift) { $drift = $script:gfSchemaDrift; $driftCount++; Start-Sleep -Seconds 2; continue }
+        if ($fe.Count -ge 1) { $formOk = $true; break }
+        # SKIP 前置校验（§3.3 判定表第 1 行）：本轮已有 tool_start(generative_form) 却无 frontend_tool_request、
+        # 也无 REJECTED_ARGUMENTS 结局帧 → 挂起帧未下发属产品缺陷，判 FAIL，不得记 SKIP
+        $toolStartN = @($turn.frames | Where-Object { $_.type -eq 'tool_start' -and $_.name -eq 'generative_form' }).Count
+        $rejN = @($turn.frames | Where-Object { $_.type -eq 'frontend_tool_result' -and $_.name -eq 'generative_form' -and $_.status -eq 'REJECTED_ARGUMENTS' }).Count
+        if ($toolStartN -gt 0 -and $rejN -lt 1) { throw "模型已 tool_start(generative_form) 但未收到 frontend_tool_request（亦无 REJECTED_ARGUMENTS 结局帧）——挂起帧未下发，产品缺陷" }
+        Start-Sleep -Seconds 2
+    }
+    if (-not $formOk) {
+        if ($driftCount -gt 0) { throw "GF-SKIP:模型 $driftCount/3 次尝试 schema 漂移（最近：$drift），判模型行为" }
+        throw 'GF-SKIP:模型 3 次尝试均未触发表单（披露正常），判模型行为'
+    }
+    $lastSeqGf4 = $turn.lastSeq
+    $script:gf4LastSeq = $lastSeqGf4
+
+    # A1 违规值 POST：400 + FORM_RESULT_REJECTED + reasons≥3 + status=PENDING + note 挂起仍在等待
+    $bad = Expect-Fail 'POST' '/api/ai/frontend-tool-result' @{ runId = $script:gf4Run; toolCallId = $script:gf4Call; result = '{"keyword":123,"amount":"abc","scope":"ZZ","extra":"<x>"}'; source = 'e2e-gf' } '违规回灌未被拒'
+    Gf-Http-Note 'A1 违规值回灌（期望 400）' 'POST' '/api/ai/frontend-tool-result' @{ runId = $script:gf4Run; toolCallId = $script:gf4Call; result = '{"keyword":123,"amount":"abc","scope":"ZZ","extra":"<x>"}'; source = 'e2e-gf' } $bad
+    if ($bad.status -ne 400 -or -not $bad.json) { throw "违规回灌 => HTTP $($bad.status) $($bad.text)，期望 400" }
+    if ($bad.json.code -ne 'FORM_RESULT_REJECTED') { throw "400 code=$($bad.json.code)，期望 FORM_RESULT_REJECTED" }
+    if (@($bad.json.reasons).Count -lt 3) { throw "reasons $(@($bad.json.reasons).Count) 条，期望 ≥3（推演 4 条）" }
+    if ($bad.json.status -ne 'PENDING') { throw "拒绝响应 status=$($bad.json.status)，期望 PENDING" }
+    if ([string]$bad.json.note -notlike '*挂起仍在等待*') { throw "note 缺'挂起仍在等待': $($bad.json.note)" }
+    # A2 挂起未被消费：pending 仍 PENDING
+    $entryP = Gf-PendingEntry $script:gf4Run $script:gf4Call
+    if ($entryP.status -ne 'PENDING') { throw "400 后 pending 状态 $($entryP.status)，期望仍 PENDING" }
+    # A3 拒绝路径不发帧不唤醒：3s 窗口内重挂 events 无 frontend_tool_result
+    # （裁决 #3：该窗口读失败会显式抛出，不再退化为空集让本断言空转）
+    $win = Read-Sse-Brief "/api/ai/events/$($script:gf4Run)?lastSeq=$lastSeqGf4" 3500
+    if (@($win | Where-Object { $_.type -eq 'frontend_tool_result' }).Count -gt 0) { throw '400 后 3s 窗口内出现 frontend_tool_result（拒绝路径不应发帧）' }
+    # A4 同 toolCallId 改值重发：200 + FRONTEND_RESULT + accepted
+    $good = Invoke-Api 'POST' '/api/ai/frontend-tool-result' @{ runId = $script:gf4Run; toolCallId = $script:gf4Call; result = '{"keyword":"E2EGFC","scope":"XN"}'; source = 'e2e-gf' }
+    Gf-Http-Note 'A4 同 toolCallId 改值重发（期望 200）' 'POST' '/api/ai/frontend-tool-result' @{ runId = $script:gf4Run; toolCallId = $script:gf4Call; result = '{"keyword":"E2EGFC","scope":"XN"}'; source = 'e2e-gf' } $good
+    if ($good.status -ne 200 -or -not $good.json) { throw "改值重发 => HTTP $($good.status) $($good.text)" }
+    if ($good.json.status -ne 'FRONTEND_RESULT' -or $good.json.accepted -ne $true) { throw "改值重发响应异常: $($good.text)" }
+    # A4b pending resultText 与改值重发 JSON 精确相等（红队中-6 修复的主锚点：服务端已存，确定性；
+    # delta 回显仅 live 流、存在竞态，见 A5 弱旁证）
+    $entryG4 = Gf-PendingEntry $script:gf4Run $script:gf4Call
+    if ($entryG4.resultText -ne '{"keyword":"E2EGFC","scope":"XN"}') { throw 'pending resultText 与改值重发 JSON 不一致（回灌值未原样入上下文）' }
+    # A5 续跑：恰 1 条 ok=true 结局帧 + done 到达
+    $cont = New-Object System.Collections.ArrayList
+    Read-Sse "/api/ai/events/$($script:gf4Run)?lastSeq=$lastSeqGf4" $null @('done', 'error') $cont $null
+    # 红队高-3 修复：续跑读到的结局帧/done 帧 seq 回写 gf4LastSeq（记到 done 帧 seq），
+    # 使 GF5-A4 用最终 lastSeq 重挂时重放为空，不把 GF4 已见帧误判为新帧
+    foreach ($cf in $cont) { if ($cf.seq -and [int]$cf.seq -gt $script:gf4LastSeq) { $script:gf4LastSeq = [int]$cf.seq } }
+    $ftr4 = @($cont | Where-Object { $_.type -eq 'frontend_tool_result' })
+    if ($ftr4.Count -ne 1 -or $ftr4[0].ok -ne $true) { throw "续跑结局帧异常（$($ftr4.Count) 条，期望恰 1 条 ok=true）" }
+    if (@($cont | Where-Object { $_.type -eq 'done' }).Count -lt 1) { throw '续跑未到达 done' }
+    if (@($cont | Where-Object { $_.type -eq 'error' }).Count -gt 0) { throw '续跑出现 error 帧' }
+    # A5b 值回显（裁决 #1）：权威通道 = 会话记忆的最终助手文本（服务端持久化）。delta 通道降级为纯 INFO。
+    # 断言对象 = 本用例 A4 实际改值重发的 JSON（GF4 的表单由脚本显式回灌，不经 New-FormValues）
+    $echo4 = Gf-FinalAssistantText $sessionGf4
+    Gf-Assert-Echo 'GF4' $echo4 '{"keyword":"E2EGFC","scope":"XN"}'
+    $delta4 = ($cont | Where-Object { $_.type -eq 'delta' } | ForEach-Object { [string]$_.text }) -join "`n"
+    Write-Host ("  [INFO] GF4 delta 弱旁证（不判 FAIL）：{0}" -f $(if ($delta4) { "采到 $($delta4.Length) 字符" } else { '未采到（回灌→重挂间隙，属预期）' })) -ForegroundColor DarkGray
+    # A6 后端日志：安全闸拒绝行（WARN，状态不变挂起继续等待）
+    $logGf4 = Get-LogText
+    if ($logGf4 -notlike '*前端工具回灌被安全闸拒绝*' -or $logGf4 -notlike '*code=FORM_RESULT_REJECTED*') {
+        throw '日志缺"前端工具回灌被安全闸拒绝 … code=FORM_RESULT_REJECTED"行'
+    }
+    Gf-Dump 'GF4' (@($turn.frames) + @($cont))
+    Ok 'GF4 复核拒绝：违规值 400（PENDING 保持/3s 无帧）→同 toolCallId 改值重发 200→续跑回显'
+} catch {
+    if ($_.Exception.Message -like 'GF-SKIP:*') { Gf-Skip 'GF4' $_.Exception.Message.Substring(8) }
+    else { Gf-Converge $script:gf4Run $script:gf4Call; Gf-Dump 'GF4' $turn.frames; No 'GF4' $_.Exception.Message }
+}
+
+# ============================================================
+# GF5 幂等（409 双向）：纯 HTTP，零模型轮次（设计稿 §4 GF5，裁决 #5）
+#   复用 GF3（已取消）/GF4（已回灌）的 runId+toolCallId；前置缺失则 SKIP
+# ============================================================
+Say '--- GF5 生成式表单：幂等（409 双向） ---'
+$script:gfHttp = @()   # 裁决 #4：本用例的 HTTP 原文（纯 HTTP 用例，无模型轮次）
+try {
+    if (-not $script:gf3Run -or -not $script:gf3Call -or -not $script:gf4Run -or -not $script:gf4Call) {
+        throw 'GF-SKIP:GF3/GF4 未记录 runId/toolCallId（前置 SKIP 或失败），幂等断言无对象'
+    }
+    # A1 值路径：GF4 已决条目重发合规值 → 409 DUPLICATE_TOOL_CALL_ID（回显既有终态，不改写）
+    $dup1 = Invoke-Api 'POST' '/api/ai/frontend-tool-result' @{ runId = $script:gf4Run; toolCallId = $script:gf4Call; result = '{"keyword":"E2EGFC","scope":"XN"}'; source = 'e2e' }
+    Gf-Http-Note 'A1 值路径重复回灌（期望 409）' 'POST' '/api/ai/frontend-tool-result' @{ runId = $script:gf4Run; toolCallId = $script:gf4Call; result = '{"keyword":"E2EGFC","scope":"XN"}'; source = 'e2e' } $dup1
+    if ($dup1.status -ne 409 -or -not $dup1.json) { throw "值路径重发 => HTTP $($dup1.status) $($dup1.text)，期望 409" }
+    if ($dup1.json.code -ne 'DUPLICATE_TOOL_CALL_ID') { throw "① code=$($dup1.json.code)，期望 DUPLICATE_TOOL_CALL_ID" }
+    if ($dup1.json.duplicate -ne $true) { throw '① 响应缺 duplicate=true' }
+    if ($dup1.json.status -ne 'FRONTEND_RESULT') { throw "① 回显终态 $($dup1.json.status)，期望 FRONTEND_RESULT（不改写）" }
+    # A2 取消路径：GF3 已取消条目再取消 → 409，取消终态不被重复提交改写
+    $dup2 = Invoke-Api 'POST' '/api/ai/frontend-tool-result' @{ runId = $script:gf3Run; toolCallId = $script:gf3Call; cancelled = $true; source = 'e2e' }
+    Gf-Http-Note 'A2 取消路径重复取消（期望 409）' 'POST' '/api/ai/frontend-tool-result' @{ runId = $script:gf3Run; toolCallId = $script:gf3Call; cancelled = $true; source = 'e2e' } $dup2
+    if ($dup2.status -ne 409 -or -not $dup2.json) { throw "取消路径重发 => HTTP $($dup2.status) $($dup2.text)，期望 409" }
+    if ($dup2.json.code -ne 'DUPLICATE_TOOL_CALL_ID') { throw "② code=$($dup2.json.code)，期望 DUPLICATE_TOOL_CALL_ID" }
+    if ($dup2.json.status -ne 'FRONTEND_CANCELLED') { throw "② 回显终态 $($dup2.json.status)，期望 FRONTEND_CANCELLED（不被改写）" }
+    # A3 两次 409 后 pending 条目状态不变（仍是各自终态）
+    $e4 = Gf-PendingEntry $script:gf4Run $script:gf4Call
+    if ($e4.status -ne 'FRONTEND_RESULT') { throw "GF4 条目被 409 改写: $($e4.status)" }
+    $e3 = Gf-PendingEntry $script:gf3Run $script:gf3Call
+    if ($e3.status -ne 'FRONTEND_CANCELLED') { throw "GF3 条目被 409 改写: $($e3.status)" }
+    # A4 两次 409 后 events 重挂无新帧（心跳帧除外）
+    # （裁决 #3：窗口读失败会显式抛出，不再退化为空集让本断言空转）
+    foreach ($pair in @(@($script:gf4Run, $script:gf4LastSeq), @($script:gf3Run, $script:gf3LastSeq))) {
+        $w = Read-Sse-Brief "/api/ai/events/$($pair[0])?lastSeq=$($pair[1])" 3000
+        $badFrames = @($w | Where-Object { @('frontend_tool_request', 'frontend_tool_result', 'done', 'error') -contains $_.type })
+        if ($badFrames.Count -gt 0) { throw "409 后重挂 $($pair[0]) 出现新帧: $($badFrames[0].type)" }
+    }
+    Gf-Dump 'GF5' $null
+    Ok 'GF5 幂等 409 双向：值路径/取消路径重复回灌均 409 DUPLICATE（终态不改写、无新帧）'
+} catch {
+    if ($_.Exception.Message -like 'GF-SKIP:*') { Gf-Skip 'GF5' $_.Exception.Message.Substring(8) }
+    else { Gf-Dump 'GF5' $null; No 'GF5' $_.Exception.Message }
+}
+
+# ============================================================
+# GF6（可选，-EnableGf6，默认关闭）入参闸门（设计稿 §4 GF6）
+#   诱导非法 schema → 不挂起 + REJECTED_ARGUMENTS 结局帧；模型服从率不可控，不计入主计数
+# ============================================================
+if ($EnableGf6) {
+    Say '--- GF6 生成式表单：入参闸门（可选观察用例，不计入主计数） ---'
+    $gf6Rejected = $false
+    $gf6Attempt = 0
+    while ($gf6Attempt -lt 3 -and -not $gf6Rejected) {
+        $gf6Attempt++
+        $sessionGf6 = 'gfc-' + [Guid]::NewGuid().ToString('N')
+        $script:gfPosts = @()
+        $script:gfHttp = @()
+        $handlerGf6 = {
+            param($f, $runId)
+            if ($f.type -eq 'confirm_request') { return @{ approved = $false } }
+            if ($f.name -eq 'generative_form') {
+                # 模型未按指示给非法 schema 反而下发了合法表单：收敛挂起后视为未触发
+                return @{ payload = @{ cancelled = $true; source = 'e2e' } }
+            }
+            return @{ payload = @{ result = '{"ok":true,"source":"e2e"}' } }
+        }
+        # 独立提示词（红队低-10 修复）：不再引用 GF1 try 块内的 $promptGf1，消除跨用例隐式耦合
+        $promptGf6 = '请调用 generative_form 工具（scenario=FILTER）出一张收集导出筛选条件的表单，字段就用这四个，key 和类型必须一致：keyword（文本，必填，占位提示"编码或名称关键字"）、minRows（数字，非必填）、effectiveDate（日期，格式 yyyy-MM-dd，非必填）、scope（下拉单选，选项 XN 和 HD）。不要用文字向我提问，也不要调用 generative_form 以外的任何工具，不会出现确认卡片。为了演示安全闸，请把其中一个字段的 type 故意写成 html。'
+        $turn6 = Invoke-FormTurn $sessionGf6 $promptGf6 @{ page = 'tasks' } $handlerGf6 4
+        $gf6Req = @($turn6.frames | Where-Object { $_.type -eq 'frontend_tool_request' -and $_.name -eq 'generative_form' })
+        $gf6Rej = @($turn6.frames | Where-Object { $_.type -eq 'frontend_tool_result' -and $_.name -eq 'generative_form' -and $_.ok -eq $false -and $_.status -eq 'REJECTED_ARGUMENTS' })
+        if ($gf6Req.Count -eq 0 -and $gf6Rej.Count -ge 1) { $gf6Rejected = $true }
+        Start-Sleep -Seconds 2
+    }
+    if ($gf6Rejected) {
+        $logGf6 = Get-LogText
+        if ($logGf6 -like '*前端工具入参被安全闸拒绝*') {
+            Write-Host '  [PASS] GF6 入参闸门：非法 schema 不挂起 + REJECTED_ARGUMENTS 结局帧 + 闸门日志' -ForegroundColor Green
+        } else {
+            Write-Host '  [FAIL] GF6 入参闸门 => 日志缺"前端工具入参被安全闸拒绝"行' -ForegroundColor Red
+        }
+    } else {
+        Write-Host '  [SKIP] GF6 入参闸门 => 模型 3 次均未产出非法 schema（服从率不可控，观察项）' -ForegroundColor Yellow
+    }
+}
+
+# ============================================================
 # TC17 HITL：破坏性操作需确认（拒绝不执行、确认后执行）
 #   源断言：confirm_tool → 拒绝后未发布、同意后 PUBLISHED
 #   main-v2 适配：确认事件为 confirm_request，回执帧为 confirm_decision；
@@ -1415,7 +2178,9 @@ try {
 } catch { Q8-No 'Q8 项回归' $_.Exception.Message }
 
 Say '============================================================'
-Say (" 结果：PASS={0}  FAIL={1}  （源脚本 22 用例 → 本脚本 22 用例）" -f $script:passed, $script:failed)
+Say (" 结果：PASS={0}  FAIL={1}  （22 既有 + GF 新增）" -f $script:passed, $script:failed)
+Say (" GFSKIP={0}  （模型未触发 SKIP，不计退出码；GF1–GF4 全部 SKIP 判整棒 FAIL，裁决 #1）" -f $script:gfskip)
 Say (" Q8 项：PASS={0}  FAIL={1}  （不计入 22 用例，见 docs/evidence/S5b-deepseek-E2E移植验证.md）" -f $script:q8pass, $script:q8fail)
 Say '============================================================'
-if ($script:failed -gt 0) { exit 1 }
+# 硬底线（裁决 #1）：GF1–GF4 全部 SKIP ⇒ 本棒零有效验证，整棒 FAIL（退出码 1）
+if ($script:failed -gt 0 -or $script:gfskip14 -ge 4) { exit 1 }
