@@ -199,6 +199,29 @@
               </div>
             </template>
 
+            <div v-else-if="m.pendingCall.kind === 'FRONTEND' && m.pendingCall.name === 'generative_form'" class="mt-2">
+              <!-- GF-B：生成式表单挂起 —— 渲染 FormRenderer 等用户填写（同 toolCallId 可重发/取消） -->
+              <FormRenderer
+                v-if="liveForm && liveForm.toolCallId === m.pendingCall.toolCallId"
+                :key="liveForm.toolCallId"
+                :schema="liveForm.form"
+                :submitting="liveForm.status === 'submitting'"
+                :error="liveForm.error"
+                :remaining-seconds="formRemainingSeconds"
+                @submit="onFormSubmit"
+                @cancel="onFormCancel"
+              />
+              <div v-else class="flex flex-col items-end gap-1">
+                <el-tag v-if="ai.activeForm?.status === 'cancelled'" size="small" type="info">表单已取消</el-tag>
+                <el-tag v-else-if="ai.activeForm?.status === 'submitted'" size="small" type="success">表单已提交，等待回执</el-tag>
+                <el-tag v-else size="small" type="info">表单状态已丢失（刷新后无法续填），等待后端超时收敛</el-tag>
+                <!-- 红队问题 5：取消回灌失败的提示在 cancelled 态下也要可见 -->
+                <div v-if="ai.activeForm?.status === 'cancelled' && ai.activeForm.error" class="text-xs text-[#f56c6c]">
+                  {{ ai.activeForm.error }}
+                </div>
+              </div>
+            </div>
+
             <div v-else-if="m.pendingCall.kind === 'FRONTEND'" class="mt-2 flex justify-end">
               <el-tag v-if="m.pendingCall.status === 'pending'" size="small" type="info">待浏览器自动执行</el-tag>
               <el-tag v-else-if="m.pendingCall.status === 'running'" size="small" type="success" effect="dark">执行中…</el-tag>
@@ -255,6 +278,8 @@
  * - 上下文条：会话 id / 工作区上下文 / 数据版本 / 可用性 tag / 契约同步 chip —— 蓝本无
  *   `/api/ai/health`、无契约事件，本仓需要可视化"刷新恢复"与"工作区已同步"的状态；
  * - 工具卡四态（调用中/成功/失败/等待确认）并展示参数与结果 —— 蓝本是"已执行工具 X"单标签；
+ * - 生成式表单挂起卡（GF-B）：generative_form 帧渲染 FormRenderer 等用户填写，取消/超时带
+ *   cancelled:true 回灌 —— 蓝本无此前端工具通道；
  * - HITL 卡片：确认/拒绝双路径 + 拒绝原因输入 + 超时倒计时置灰 —— 蓝本有双按钮但无原因与倒计时；
  * - 409/503/断流三类降级提示（EP Alert）与一键重挂 —— 蓝本是蓝本后端（无 SESSION_BUSY/挂起池）。
  *
@@ -269,6 +294,7 @@ import { ArrowRight, ChatDotRound, Operation, Promotion } from '@element-plus/ic
 import { useAiStore } from '@/stores/ai'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { formatCountdown } from '@/utils/format'
+import FormRenderer from '@/components/AiPanel/FormRenderer.vue'
 import type { PendingToolCall, ToolRunStatus } from '@/types/ai'
 
 const ai = useAiStore()
@@ -299,6 +325,7 @@ const TOOL_LABELS: Record<string, string> = {
   open_export_file_editor: '打开导出文件在线编辑器',
   download_export_file: '下载导出文件',
   navigate_to: '跳转页面',
+  generative_form: '生成式表单',
   select_config_defs: '选择配置项',
   set_query_conditions: '设置查询条件',
   download_templates: '下载模板',
@@ -358,6 +385,24 @@ const remainingSeconds = computed(() => {
 })
 
 const confirmExpired = computed(() => remainingSeconds.value !== null && remainingSeconds.value <= 0)
+
+/**
+ * GF-B：当前可交互的生成式表单（填写中/提交中才渲染 FormRenderer；
+ * 结局帧到达后 activeForm 被清空，挂起卡随 pendingCall 一并消失）。
+ */
+const liveForm = computed(() => {
+  const form = ai.activeForm
+  return form && (form.status === 'filling' || form.status === 'submitting') ? form : null
+})
+
+/** 表单剩余填写秒数（store 的本地超时计时器同口径：deadline − now）。 */
+const formRemainingSeconds = computed(() => {
+  const form = liveForm.value
+  if (!form || form.deadline === null) {
+    return null
+  }
+  return Math.max(0, Math.ceil((form.deadline - now.value) / 1000))
+})
 
 /** 等待回复：正文与工具卡都还没产出时的三点闪烁。 */
 function isTyping(message: { streaming: boolean; content: string }): boolean {
@@ -453,6 +498,16 @@ async function decide(approved: boolean): Promise<void> {
   } finally {
     deciding.value = false
   }
+}
+
+/** GF-B：表单提交（值已由 FormRenderer 按 schema 做过客户端复核）。 */
+function onFormSubmit(values: Record<string, unknown>): void {
+  void ai.submitGenerativeForm(values)
+}
+
+/** GF-B：表单显式取消 → store 带 cancelled:true 回灌收敛。 */
+function onFormCancel(): void {
+  void ai.cancelGenerativeForm()
 }
 
 /** 挂起调用换人即重置倒计时与拒绝原因。 */

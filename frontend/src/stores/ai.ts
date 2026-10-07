@@ -20,6 +20,7 @@ import { executeFrontendTool, parseToolArgs } from '@/utils/frontend-tools'
 import { ErrorCode, type SessionBusyConflict, type SuspendPoolSaturated } from '@/types/api'
 import { frameSeq, isTerminalFrame } from '@/types/sse'
 import type {
+  ActiveGenerativeForm,
   AiHealth,
   AiHistory,
   AiSessionMirror,
@@ -27,6 +28,7 @@ import type {
   PendingToolCall,
   ToolRun
 } from '@/types/ai'
+import { parseFormSchema, checkFormValues } from '@/types/form-schema'
 import type { SseConfirmRequestFrame, SseFrame } from '@/types/sse'
 import type { WorkspaceActionRecord } from '@/types/tools'
 
@@ -36,6 +38,15 @@ export const MIRROR_PREFIX = 'ai-mirror:'
 
 /** 当前轮的 AbortController（模块级：不进响应式状态）。 */
 let currentAbort: AbortController | null = null
+/** 生成式表单本地超时计时器（模块级：activeForm 被结局帧/新轮清掉时随之中和）。 */
+let formExpiryTimer: ReturnType<typeof setTimeout> | null = null
+
+function disarmFormExpiry(): void {
+  if (formExpiryTimer !== null) {
+    clearTimeout(formExpiryTimer)
+    formExpiryTimer = null
+  }
+}
 /** 会话镜像是否已启动（防止重复 $subscribe）。 */
 let mirrorStarted = false
 let mirrorTimer: ReturnType<typeof setTimeout> | null = null
@@ -186,6 +197,11 @@ export const useAiStore = defineStore('ai', {
     contextSync: null as WorkspaceActionRecord | null,
     /** 最近一次 ui_event 分发结果（AI 驱动工作区的回执展示） */
     lastUiEventResult: null as { event: string; handled: boolean; message: string } | null,
+    /**
+     * GF-B（DC-15）：当前待填写的生成式表单（generative_form 特判挂起，等用户填写）。
+     * 不进镜像：刷新后由 pendingCall 的 expired 降级与后端超时收敛。
+     */
+    activeForm: null as ActiveGenerativeForm | null,
     /**
      * 已收到的最大帧序号（DC-14 T6）：reattach 时回传，服务端只补增量。
      * 按 runId 记录 —— 换轮次（新 runId）即从零开始，不跨轮混用序号。
@@ -406,6 +422,12 @@ export const useAiStore = defineStore('ai', {
             // ADR-6：缺 done/error 终帧 = 断流，必须显式提示"结果可能不完整"
             this.streamInterrupted = true
             this.notice = `连接中断，结果可能不完整（${info.reason ?? '未收到完成帧'}）。已生成的内容保留，可重新发送或一键重挂该轮。`
+            if (this.activeForm !== null) {
+              // 红队问题 2：断流是第五个收尾出口 —— 与 done/error/stop/resetSession 对齐，
+              // 收表单态与本地超时计时器（刷新后由后端权威超时收敛）
+              disarmFormExpiry()
+              this.activeForm = null
+            }
           }
         }
       }
@@ -522,6 +544,12 @@ export const useAiStore = defineStore('ai', {
               if (!info.terminal) {
                 this.streamInterrupted = true
                 this.notice = `连接中断，结果可能不完整（重挂未能收到完成帧：${info.reason ?? '断流'}）`
+                if (this.activeForm !== null) {
+                  // 与红队问题 2 同构：重挂断流同样是收尾出口，不能只置通知而漏收表单态
+                  // 与本地超时计时器（刷新后由后端权威超时收敛）
+                  disarmFormExpiry()
+                  this.activeForm = null
+                }
               }
             }
           },
@@ -560,21 +588,152 @@ export const useAiStore = defineStore('ai', {
       }
     },
 
-    /** 前端工具结果回灌（幂等：重复 → 409，未知 → 409）。 */
-    async submitFrontendToolResult(toolCallId: string, result: string, source = 'http-post'): Promise<void> {
-      const runId = this.activeRunId
-      if (!runId) {
+    /**
+     * 前端工具结果回灌（幂等：重复 → 409，未知 → 409）。
+     * GF-B：cancelled=true 为取消路径（GFa 裁决 #2，可选字段，与提交共用同一入口），
+     * 用户放弃 / 渲染器不可用时回灌让挂起立刻落 FRONTEND_CANCELLED，不必等超时。
+     *
+     * 返回结构化结果（供生成式表单区分 400 FORM_RESULT_REJECTED「挂起仍在等待，可重试」
+     * 与真失败）；通用执行器路径（runFrontendTool）忽略返回值，行为不变。
+     */
+    async submitFrontendToolResult(
+      toolCallId: string,
+      result: string,
+      source = 'http-post',
+      cancelled = false,
+      runId?: string
+    ): Promise<{ ok: boolean; duplicate?: boolean; rejected?: string; message?: string }> {
+      // GF-B 修复（红队问题 1）：表单回灌优先用表单创建时捕获的 runId，
+      // 缺省才回退当前轮的 activeRunId（避免旧表单错配到新 run）
+      const targetRunId = runId ?? this.activeRunId
+      if (!targetRunId) {
         this.notice = '缺少 runId，无法回灌前端工具结果'
-        return
+        return { ok: false, message: '缺少 runId' }
       }
       try {
-        await aiApi.frontendToolResult({ runId, toolCallId, result, source })
+        await aiApi.frontendToolResult(
+          cancelled
+            ? { runId: targetRunId, toolCallId, cancelled: true, source }
+            : { runId: targetRunId, toolCallId, result, source }
+        )
+        return { ok: true }
       } catch (error) {
         if (error instanceof ApiError && error.code === ErrorCode.DUPLICATE_TOOL_CALL_ID) {
-          this.notice = '该工具结果已回灌过（幂等拒绝）'
-          return
+          this.notice = cancelled ? '该工具调用已是终态（幂等拒绝）' : '该工具结果已回灌过（幂等拒绝）'
+          return { ok: false, duplicate: true }
         }
-        this.notice = error instanceof Error ? error.message : '前端工具结果回灌失败'
+        if (error instanceof ApiError && error.code === ErrorCode.FORM_RESULT_REJECTED) {
+          // 400 + status:"PENDING"：挂起仍在等待 —— 不置 notice 打断填写，由表单卡展示拒绝原因，
+          // 用户改值后用同一 toolCallId 重发，或改发取消
+          const reasons = error.bodyAs<{ reasons?: unknown }>()?.reasons
+          const detail = Array.isArray(reasons) && reasons.length > 0
+            ? reasons.map((item) => String(item)).join('；')
+            : error.message
+          return { ok: false, rejected: detail }
+        }
+        const message = error instanceof Error ? error.message : '前端工具结果回灌失败'
+        this.notice = message
+        return { ok: false, message }
+      }
+    },
+
+    /**
+     * GF-B：generative_form 帧到达 → 防御性解析 schema。
+     * 合法：挂到会话态进"等待用户填写"（AiPanel 渲染 FormRenderer），并按帧带时限武装本地超时；
+     * 非法 / 缺 runId（渲染器不可用的任何异常路径）：带 cancelled:true 回灌，挂起立刻收敛
+     * （GFa §8.3 / 裁决 #3），绝不让通用执行器回灌说明文本。
+     */
+    openGenerativeForm(
+      message: ChatMessage,
+      frame: Extract<SseFrame, { type: 'frontend_tool_request' }>
+    ): void {
+      disarmFormExpiry()
+      const args = message.pendingCall?.args ?? parseToolArgs(frame.args)
+      const spec = parseFormSchema(args?.form)
+      const runId = frame.runId ?? this.activeRunId
+      if (!spec || !runId) {
+        this.upsertToolRun(message, {
+          toolCallId: frame.toolCallId,
+          name: frame.name,
+          kind: 'FRONTEND',
+          status: 'failed',
+          result: '表单 schema 解析失败（或缺少 runId），前端无法渲染，已带 cancelled:true 回灌收敛（GFa §8.3）'
+        })
+        void this.submitFrontendToolResult(frame.toolCallId, '', 'frontend-executor', true, runId ?? undefined)
+        return
+      }
+      const deadline = typeof frame.expiresAt === 'number' && Number.isFinite(frame.expiresAt)
+        ? frame.expiresAt
+        : frame.timeoutSeconds
+          ? Date.now() + frame.timeoutSeconds * 1000
+          : null
+      this.activeForm = {
+        toolCallId: frame.toolCallId,
+        runId,
+        form: spec,
+        status: 'filling',
+        error: null,
+        deadline
+      }
+      if (deadline !== null) {
+        formExpiryTimer = setTimeout(() => {
+          formExpiryTimer = null
+          // 本地判过期：收起表单并带 cancelled:true 回灌（409 幂等拒绝按现有口径忽略）
+          void this.cancelGenerativeForm(true)
+        }, Math.max(0, deadline - Date.now()))
+      }
+    },
+
+    /** GF-B：提交表单值 —— result 为字段 key→值的 JSON 字符串；客户端复核不过就地提示不发出。 */
+    async submitGenerativeForm(values: Record<string, unknown>): Promise<void> {
+      const form = this.activeForm
+      if (!form || form.status !== 'filling') {
+        return
+      }
+      const problems = checkFormValues(form.form, values)
+      if (problems.length > 0) {
+        form.error = problems.join('；')
+        return
+      }
+      form.status = 'submitting'
+      form.error = null
+      const outcome = await this.submitFrontendToolResult(form.toolCallId, JSON.stringify(values), 'http-post', false, form.runId)
+      if (this.activeForm?.toolCallId !== form.toolCallId) {
+        // 结局帧/新表单已收敛：不写回过期状态（红队问题 6，防瞬时覆写）
+        return
+      }
+      if (outcome.ok || outcome.duplicate) {
+        form.status = 'submitted'
+        return
+      }
+      if (outcome.rejected) {
+        // 400 FORM_RESULT_REJECTED：挂起仍在等待 —— 回填写态，同一 toolCallId 可改值重发或取消
+        form.status = 'filling'
+        form.error = `提交被后端拒绝（挂起仍在等待）：${outcome.rejected}`
+        return
+      }
+      form.status = 'filling'
+      // 红队问题 4：泛化文案并入后端具体原因，表单卡内可见真实失败点
+      form.error = outcome.message
+        ? `提交失败：${outcome.message}（可重试或点「取消」放弃）`
+        : '提交失败，请重试或点「取消」放弃'
+    },
+
+    /** GF-B：显式取消（或本地超时自动取消）—— 带 cancelled:true 回灌，挂起立刻收敛。 */
+    async cancelGenerativeForm(auto = false): Promise<void> {
+      const form = this.activeForm
+      if (!form || form.status === 'cancelled' || form.status === 'submitted') {
+        return
+      }
+      form.status = 'cancelled'
+      disarmFormExpiry()
+      const outcome = await this.submitFrontendToolResult(form.toolCallId, '', 'http-post', true, form.runId)
+      if (this.activeForm?.toolCallId !== form.toolCallId) {
+        // 结局帧/新表单已收敛：错误提示不写进过期表单（红队问题 6）
+        return
+      }
+      if (!outcome.ok && !outcome.duplicate) {
+        form.error = `${auto ? '表单已超时，' : ''}取消回灌未送达（${outcome.message ?? '网络异常'}），后端将在超时后自动收尾`
       }
     },
 
@@ -588,6 +747,11 @@ export const useAiStore = defineStore('ai', {
       }
       const runId = this.activeRunId
       this.loading = false
+      if (this.activeForm !== null) {
+        // 用户停止本轮：表单随轮收起（后端取消会让挂起走 TIMEOUT/取消收尾）
+        disarmFormExpiry()
+        this.activeForm = null
+      }
       if (!runId) {
         return
       }
@@ -613,6 +777,8 @@ export const useAiStore = defineStore('ai', {
       this.busyConflict = null
       this.poolSaturated = null
       this.suspended = false
+      disarmFormExpiry()
+      this.activeForm = null
     },
 
     // ── 内部：消息与帧处理 ─────────────────────────────────────────────────
@@ -771,6 +937,12 @@ export const useAiStore = defineStore('ai', {
         case 'frontend_tool_request': {
           this.suspended = true
           message.pendingCall = this.toPendingCall(frame, 'FRONTEND')
+          if (frame.name === 'generative_form') {
+            // GF-B：表单挂起走渲染器通道等用户填写 —— 绝不能让通用执行器兜底
+            // （那段说明文本不是值 JSON，会被闸门 400 拒、挂起拖到超时，GFa §8.3）
+            this.openGenerativeForm(message, frame)
+            break
+          }
           // 前端工具没有 HITL：立即在浏览器执行并回灌结果
           void this.runFrontendTool(message, frame)
           break
@@ -792,6 +964,11 @@ export const useAiStore = defineStore('ai', {
           })
           if (message.pendingCall?.toolCallId === frame.toolCallId) {
             message.pendingCall = null
+          }
+          if (this.activeForm?.toolCallId === frame.toolCallId) {
+            // 结局帧已到：表单收敛（提交/取消/超时皆自此收尾）
+            disarmFormExpiry()
+            this.activeForm = null
           }
           this.suspended = false
           break
@@ -824,6 +1001,11 @@ export const useAiStore = defineStore('ai', {
           message.streaming = false
           message.done = true
           message.pendingCall = message.pendingCall?.status === 'pending' ? null : message.pendingCall
+          if (this.activeForm !== null) {
+            // 轮次收尾时表单未决（如后端侧超时/放弃）：本地一并收起，计时器随之中和
+            disarmFormExpiry()
+            this.activeForm = null
+          }
           this.suspended = false
           if (frame.cancelled) {
             this.notice = '本轮已取消'
@@ -833,6 +1015,10 @@ export const useAiStore = defineStore('ai', {
         case 'error': {
           message.streaming = false
           message.done = true
+          if (this.activeForm !== null) {
+            disarmFormExpiry()
+            this.activeForm = null
+          }
           this.notice = `本轮出错（${frame.code}）：${frame.message}`
           break
         }

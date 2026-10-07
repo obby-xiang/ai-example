@@ -6,6 +6,7 @@
  */
 
 import type { SseFrame, PendingToolCallSnapshot, PendingStatus, ToolKind } from './sse'
+import type { FormSpec } from './form-schema'
 
 /**
  * 工作区上下文（AiChatRequest.Context）。
@@ -65,10 +66,15 @@ export interface ConfirmResult {
 export interface FrontendToolResultRequest {
   runId: string
   toolCallId: string
-  /** 前端执行结果文本，原样作为工具结果回填给模型 */
-  result: string
+  /** 前端执行结果文本（值 JSON），原样作为工具结果回填给模型；cancelled=true 时可省 */
+  result?: string
   /** 结果来源标注（默认 http-post），仅用于留档 */
   source?: string
+  /**
+   * GF-B（GFa 裁决 #2，可选字段）：true = 用户放弃 / 渲染器不可用 ——
+   * 条目立刻落 FRONTEND_CANCELLED，不必等超时；与提交共用同一幂等入口。
+   */
+  cancelled?: boolean
 }
 
 /** 前端工具回灌结果（响应体同样是裸对象）。 */
@@ -213,6 +219,26 @@ export interface AiSessionMirror {
   messages: Array<Pick<ChatMessage, 'id' | 'role' | 'content' | 'reasoning' | 'toolRuns' | 'pendingCall'>>
   /** 已结束轮的 runId（供 reattach 提示） */
   lastRunId?: string | null
+}
+
+/** 生成式表单（generative_form）的会话态生命周期。 */
+export type GenerativeFormStatus = 'filling' | 'submitting' | 'submitted' | 'cancelled'
+
+/**
+ * GF-B（DC-15）：当前待填写的生成式表单（会话态，挂在 store 上，AiPanel 据此渲染 FormRenderer）。
+ * 不走 frontend-tools.ts 通用执行器 —— 那段说明文本不是值 JSON，会被闸门 400 拒、挂起拖到超时
+ * （GFa §8.3），故 frontend_tool_request 帧在 store 层特判挂起，等用户填写。
+ */
+export interface ActiveGenerativeForm {
+  toolCallId: string
+  runId: string
+  /** 已过防御性解析的表单 schema */
+  form: FormSpec
+  status: GenerativeFormStatus
+  /** 客户端复核 / 后端 FORM_RESULT_REJECTED 的提示（null = 无） */
+  error: string | null
+  /** 本地判超时的绝对时刻（epoch 毫秒；expiresAt 优先，缺省按 timeoutSeconds 折算；null = 不限） */
+  deadline: number | null
 }
 
 /** SSE 一轮的收尾判定结果。 */

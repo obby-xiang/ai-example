@@ -68,7 +68,13 @@ export const ErrorCode = {
   /** 400：参数校验失败 */
   BAD_REQUEST: 'BAD_REQUEST',
   /** SSE error 帧：AI 轮次未捕获异常 */
-  AI_RUN_FAILED: 'AI_RUN_FAILED'
+  AI_RUN_FAILED: 'AI_RUN_FAILED',
+  /** 400：生成式表单回灌值不符 schema（挂起仍在等待，可改值用同一 toolCallId 重试） */
+  FORM_RESULT_REJECTED: 'FORM_RESULT_REJECTED',
+  /** 400：生成式表单 schema 越白名单（后端在工具入参处拒绝不下发，前端防御性登记展示态） */
+  FORM_SCHEMA_REJECTED: 'FORM_SCHEMA_REJECTED',
+  /** 前端工具条目终态：用户取消/渲染器不可用（结局帧 status 口径，展示态登记） */
+  FRONTEND_CANCELLED: 'FRONTEND_CANCELLED'
 } as const
 
 export type ErrorCodeValue = (typeof ErrorCode)[keyof typeof ErrorCode]
