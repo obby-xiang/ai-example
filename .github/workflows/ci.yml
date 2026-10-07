@@ -33,7 +33,8 @@ jobs:
           cache: maven
           cache-dependency-path: backend/pom.xml
 
-      - name: 编译并运行单测（mvn test，147 例）
+      # 用例数随棒次增长（S5.c 收口时 147 → S5.e 后 152），故步骤名不再写死数字。
+      - name: 编译并运行单测（mvn test，全量用例）
         run: mvn -B test
 
   frontend:
