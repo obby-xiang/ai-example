@@ -22,7 +22,9 @@
 #   - 建议启动参数：--app.job.batch-size=10 --app.job.demo-batch-delay-ms=150
 #     （TC11 断言 JOB_PROGRESS 事件流；batch-size 为默认 100 时小配置项不会跨分片边界）
 #   - -BackendLog：后端 stdout 日志文件（com.example.configmgr 为 DEBUG 级）。
-#     TC15 的渐进披露断言与 Q8 的日志类断言需要它；未提供时这两处判 FAIL（不静默跳过）
+#     TC10 的日志断言（Q8①）与 Q8 两项回归需要它；TC15 的渐进披露断言已改用只读端点
+#     GET /api/ai/tools（M1 收尾项⑤），日志仅作"日志行 vs 端点"的交叉校验（未提供则跳过）。
+#     未提供 -BackendLog 时日志类断言判 FAIL（不静默跳过）
 #
 # 数据面安全：本脚本只创建/删除自己的 S5B-* 任务与 E2E_TEMP 定义；
 #   CURRENCY 演示数据在 TC13 会被替换为 3 行，TC19 用全量导出件恢复为 5 行。
@@ -456,8 +458,9 @@ try {
 # ============================================================
 # TC2 配置定义动态 CRUD
 #   源断言：创建 → 重复编码拦截 → 追加字段
-#   main-v2 适配：重复编码由唯一约束拒绝（实测 HTTP 500，语义问题见证据文档【待裁决】，
-#   故断言口径为"必须被拒绝"而非具体状态码）；追加字段走整份 fields 替换语义（PUT）
+#   main-v2 适配：重复编码走 M1 收尾守卫④（DefinitionService#save 前置校验）→
+#   409 + 机器可读码 DEFINITION_CODE_DUPLICATE，且不回显 SQL 报文（原为 500 + 原始 JDBC 报文）；
+#   追加字段走整份 fields 替换语义（PUT）
 # ============================================================
 Say '--- TC2 动态配置定义 CRUD ---'
 try {
@@ -479,6 +482,15 @@ try {
 
     $dup = Expect-Fail 'POST' '/api/definitions' $newDef '重复编码未被拦截'
     $dupStatus = $dup.status
+    # M1 收尾守卫④：必须是 409 + 机器可读码，且报文里不得出现 SQL/JDBC 片段
+    if ($dupStatus -ne 409 -or $dup.json.code -ne 'DEFINITION_CODE_DUPLICATE') {
+        throw "重复编码响应 HTTP $dupStatus/code=$($dup.json.code)，期望 409/DEFINITION_CODE_DUPLICATE"
+    }
+    if ($dup.text -match 'insert into|Unique index|23505|could not execute statement') {
+        throw "重复编码响应泄漏 SQL 报文: $($dup.text)"
+    }
+    $dupDef = GetJson '/api/definitions/E2E_TEMP'
+    if (@($dupDef.fields).Count -ne 3) { throw '重复创建篡改了已存在定义（字段数变化）' }
 
     $newDef.fields = @($newDef.fields) + @(
         @{ code = 'f_date'; label = '日期字段'; fieldType = 'DATE'; required = $false; key = $false })
@@ -493,7 +505,7 @@ try {
             @{ code = 'a'; label = 'A'; fieldType = 'STRING'; required = $true; key = $false }) }
     Expect-Fail 'POST' '/api/definitions' $noKey '无主键定义未被拒绝' | Out-Null
 
-    Ok "TC2 定义创建/重复编码拦截(HTTP $dupStatus)/字段动态追加/无主键拒绝"
+    Ok "TC2 定义创建/重复编码拦截(HTTP $dupStatus + DEFINITION_CODE_DUPLICATE，无 SQL 泄漏)/字段动态追加/无主键拒绝"
 } catch { No 'TC2' $_.Exception.Message }
 
 # ============================================================
@@ -810,7 +822,9 @@ try {
 # ============================================================
 # TC12 导入草稿隔离（暂存不动生效数据）
 #   源断言：导入后 publishedRowCount 不变、草稿可预览
-#   main-v2 适配：暂存行经 GET /api/jobs/{importJobId}/diff 读取（config_staging_rows）
+#   main-v2 适配：暂存行经 GET /api/jobs/{importJobId}/diff 读取（config_staging_rows）；
+#   M1 收尾守卫① 生效后 IMPORT 前必须先通过 PRECHECK（守卫把守作业入口），故本用例
+#   先跑一次预检查（真实流程），再导入
 # ============================================================
 Say '--- TC12 导入草稿隔离 ---'
 try {
@@ -821,6 +835,11 @@ try {
 
     $script:t12 = New-ImportTask 'S5B-TC12-草稿隔离' @('CURRENCY')
     Upload-File $script:t12 "$tmp\CURRENCY_3rows.xlsx" 'CURRENCY_3rows.xlsx' | Out-Null
+    $jPre12 = Start-JobOf $script:t12 'PRECHECK'
+    $sPre12 = Wait-Job $jPre12.id
+    if ($sPre12.status -ne 'COMPLETED' -or $sPre12.errorCount -ne 0) {
+        throw "TC12 前置预检查未通过: $($sPre12.status) error=$($sPre12.errorCount)"
+    }
     $jImp = Start-JobOf $script:t12 'IMPORT'
     $sImp = Wait-Job $jImp.id
     if ($sImp.status -ne 'COMPLETED') { throw "导入失败: $($sImp.status)" }
@@ -889,28 +908,62 @@ try {
 } catch { No 'TC13' $_.Exception.Message }
 
 # ============================================================
-# TC14 发布前置守卫（无文件 / 空暂存不误删）
+# TC14 导入/发布前置守卫（M1 收尾守卫①：预检查未通过 → 拒绝）
 #   源断言：检查失败 → 导入失败 → 发布被拒
-#   main-v2 适配：检查失败不阻断导入/发布（ImportFlowJobTest 已登记的实现事实），
-#   故断言改为两层可验证的守卫：① 无上传文件 → IMPORT 作业 FAILED 且给出明细；
-#   ② 该任务（REPLACE 模式）发布空暂存集 → 生效数据零变化（空集不触发差集删除）
+#   main-v2 适配：守卫落在作业入口 POST /api/tasks/{id}/jobs（JobService#createAndStart）——
+#   ① 尚无预检查记录（从严口径）→ 409 PRECHECK_NOT_PASSED；
+#   ② 预检查真实失败（无上传文件）→ 同样 409，且被拒时不落任何作业行；
+#   ③ 守卫放行侧 + 空暂存发布的不误删不变量（S5.b 待裁决 #5：空发布是无害空操作）
 # ============================================================
-Say '--- TC14 发布前置守卫（无文件 / 空暂存） ---'
+Say '--- TC14 导入/发布前置守卫（预检查未过 → 被拒） ---'
 try {
     $beforeEnv = (GetJson '/api/data/PROJECT_ENV/count').count
     if ($beforeEnv -le 0) { throw 'PROJECT_ENV 无种子数据，前置不成立' }
-    $t14 = New-ImportTask 'S5B-TC14-无文件' @('PROJECT_ENV') 'REPLACE'
-    $j14 = Start-JobOf $t14 'IMPORT'
-    $s14 = Wait-Job $j14.id
-    if ($s14.status -ne 'FAILED') { throw "未上传文件的导入应 FAILED，实际 $($s14.status)" }
-    $iss14 = GetJson "/api/jobs/$($j14.id)/issues?page=0&size=50"
-    if (@($iss14.content | Where-Object { $_.message -like '*未找到文件*' }).Count -lt 1) { throw '导入失败未给出"未找到文件"明细' }
 
-    $j14p = Start-JobOf $t14 'PUBLISH'
-    $s14p = Wait-Job $j14p.id
+    # ① 从严分支：尚无任何预检查记录 → IMPORT/PUBLISH 均被拒（且不留作业行）
+    $t14 = New-ImportTask 'S5B-TC14-无预检查' @('PROJECT_ENV') 'REPLACE'
+    foreach ($jt in @('IMPORT', 'PUBLISH')) {
+        $r = Expect-Fail 'POST' "/api/tasks/$t14/jobs" @{ jobType = $jt } "无预检查记录的 $jt 未被拒"
+        if ($r.status -ne 409 -or $r.json.code -ne 'PRECHECK_NOT_PASSED') {
+            throw "无预检查记录时 $jt：HTTP $($r.status)/code=$($r.json.code)，期望 409/PRECHECK_NOT_PASSED"
+        }
+    }
+    if (@(GetJson "/api/tasks/$t14/jobs").Count -ne 0) { throw '被守卫拒绝时落了作业行' }
+
+    # ② 真实失败分支：无上传文件 → PRECHECK FAILED（明细可查）→ IMPORT/PUBLISH 仍被拒
+    $j14 = Start-JobOf $t14 'PRECHECK'
+    $s14 = Wait-Job $j14.id
+    if ($s14.status -ne 'FAILED') { throw "无上传文件的预检查应 FAILED，实际 $($s14.status)" }
+    $iss14 = GetJson "/api/jobs/$($j14.id)/issues?page=0&size=50"
+    if (@($iss14.content | Where-Object { $_.message -like '*未找到上传文件*' }).Count -lt 1) {
+        throw '预检查失败未给出"未找到上传文件"明细'
+    }
+    foreach ($jt in @('IMPORT', 'PUBLISH')) {
+        $r = Expect-Fail 'POST' "/api/tasks/$t14/jobs" @{ jobType = $jt } "预检查失败后的 $jt 未被拒"
+        if ($r.status -ne 409 -or $r.json.code -ne 'PRECHECK_NOT_PASSED') {
+            throw "预检查失败后 $jt：HTTP $($r.status)/code=$($r.json.code)，期望 409/PRECHECK_NOT_PASSED"
+        }
+    }
+    $jobs14 = @(GetJson "/api/tasks/$t14/jobs")
+    if (@($jobs14 | Where-Object { $_.jobType -ne 'PRECHECK' }).Count -gt 0) { throw '被拒的导入/发布仍落了作业行' }
     $afterEnv = (GetJson '/api/data/PROJECT_ENV/count').count
-    if ($afterEnv -ne $beforeEnv) { throw "空暂存发布改变了生效数据: $beforeEnv → $afterEnv" }
-    Ok ("TC14 无文件导入 FAILED（明细可查）+ REPLACE 空暂存发布不误删（{0} 行不变，发布终态 {1}）" -f $afterEnv, $s14p.status)
+    if ($afterEnv -ne $beforeEnv) { throw "生效数据被改变: $beforeEnv → $afterEnv" }
+
+    # ③ 放行侧 + 不误删不变量：预检查通过后可发布，但暂存集为空 → 生效数据零变化
+    $t14b = New-ImportTask 'S5B-TC14-空暂存' @('DOC_TYPE') 'REPLACE'
+    Upload-File $t14b "$tmp\DOC_TYPE_e2e.xlsx" 'DOC_TYPE_ok.xlsx' | Out-Null
+    $j14bPre = Start-JobOf $t14b 'PRECHECK'
+    $s14bPre = Wait-Job $j14bPre.id
+    if ($s14bPre.status -ne 'COMPLETED' -or $s14bPre.errorCount -ne 0) {
+        throw "空暂存分支前置预检查未通过: $($s14bPre.status) error=$($s14bPre.errorCount)"
+    }
+    $docBefore = (GetJson '/api/data/DOC_TYPE/count').count
+    $j14b = Start-JobOf $t14b 'PUBLISH'          # 守卫放行（预检查已通过）
+    $s14b = Wait-Job $j14b.id
+    $docAfter = (GetJson '/api/data/DOC_TYPE/count').count
+    if ($docAfter -ne $docBefore) { throw "空暂存发布改变了生效数据: $docBefore → $docAfter" }
+
+    Ok ("TC14 守卫真实阻断（无预检查/预检查失败 → IMPORT、PUBLISH 均 409 PRECHECK_NOT_PASSED，零作业行；PROJECT_ENV {0} 行不变）+ 放行侧空暂存发布不误删（DOC_TYPE {1} 行不变，终态 {2}）" -f $afterEnv, $docAfter, $s14b.status)
 } catch { No 'TC14' $_.Exception.Message }
 
 # ============================================================
@@ -979,14 +1032,14 @@ try {
 # ============================================================
 # TC15 AI 对话（流式 / 工具调用 / 渐进披露）
 #   源断言：tool_start list_config_defs + /api/ai/tools?page=export 的披露子集
-#   main-v2 适配：披露子集不暴露 REST 端点（ToolRegistry.forContext 在请求边界裁剪），
-#   故按 main-v2 自身的取证口径断言：后端 DEBUG 行「上下文=<ctx> 披露工具=[...]」，
-#   取 page:tasks 与 task:IMPORT/PUBLISH 两个上下文对照（start_export 只在任务中心/导出向导披露；
+#   main-v2 适配：披露子集由只读端点 GET /api/ai/tools 取证（M1 收尾项⑤新增）——
+#   该端点与 ToolRegistry.forContext 同源，故断言不再依赖后端 DEBUG 日志；
+#   提供 -BackendLog 时仍做一次"日志行 vs 端点"的交叉校验。取 page:tasks 与
+#   task:IMPORT/PUBLISH 两个上下文对照（start_export 只在任务中心/导出向导披露；
 #   start_publish 只在导入向导的发布步披露）
 # ============================================================
 Say '--- TC15 AI 对话（流式 / 工具 / 渐进披露） ---'
 try {
-    if (-not $BackendLog) { throw '未提供 -BackendLog：渐进披露断言需要后端 DEBUG 日志' }
     $script:aiSession15 = 's5b-' + [Guid]::NewGuid().ToString('N')
     $turn = $null
     $hitTool = $false
@@ -1007,18 +1060,34 @@ try {
         @{ page = 'import'; taskId = $script:t12; taskType = 'IMPORT'; step = 'PUBLISH' } $script:continueHandler 4
     if (-not (@($turn2.frames | Where-Object { $_.type -eq 'done' }).Count -ge 1)) { throw '第二个上下文未收到 done 帧' }
 
-    $disc = Get-DisclosureMap
-    if (-not $disc.ContainsKey('page:tasks')) { throw '日志中无 page:tasks 的披露记录' }
-    if (-not $disc.ContainsKey('task:IMPORT/PUBLISH')) { throw '日志中无 task:IMPORT/PUBLISH 的披露记录' }
-    $tTasks = @($disc['page:tasks'])
-    $tPub = @($disc['task:IMPORT/PUBLISH'])
+    # 主断言：只读端点 GET /api/ai/tools（M1 收尾项⑤；与 ToolRegistry.forContext 同源，不依赖日志）
+    $toolsTasks = GetJson '/api/ai/tools?page=tasks'
+    if ($toolsTasks.context -ne 'page:tasks') { throw "端点上下文 $($toolsTasks.context)，期望 page:tasks" }
+    $tTasks = @($toolsTasks.toolNames)
+    $toolsPub = GetJson '/api/ai/tools?page=import&taskType=IMPORT&step=PUBLISH'
+    if ($toolsPub.context -ne 'task:IMPORT/PUBLISH') { throw "端点上下文 $($toolsPub.context)，期望 task:IMPORT/PUBLISH" }
+    $tPub = @($toolsPub.toolNames)
+
     foreach ($need in @('list_config_defs', 'create_task', 'navigate_to', 'select_definitions', 'start_export')) {
         if ($tTasks -notcontains $need) { throw "page:tasks 未披露 $need（$($tTasks -join ',')）" }
     }
     if ($tTasks -contains 'start_publish') { throw 'page:tasks 不应披露 start_publish' }
     if ($tPub -notcontains 'start_publish') { throw "task:IMPORT/PUBLISH 缺少 start_publish（$($tPub -join ',')）" }
     if ($tPub -contains 'start_export') { throw 'task:IMPORT/PUBLISH 不应披露 start_export' }
-    Ok ("TC15 流式+工具调用可见+渐进披露：page:tasks {0} 个工具（无 start_publish）；task:IMPORT/PUBLISH 含 start_publish" -f $tTasks.Count)
+
+    # 备选交叉校验：后端 DEBUG 行的披露清单必须与只读端点一致（未提供 -BackendLog 时跳过）
+    if ($BackendLog) {
+        $disc = Get-DisclosureMap
+        if (-not $disc.ContainsKey('page:tasks')) { throw '日志中无 page:tasks 的披露记录' }
+        if (-not $disc.ContainsKey('task:IMPORT/PUBLISH')) { throw '日志中无 task:IMPORT/PUBLISH 的披露记录' }
+        $logTasks = (@($disc['page:tasks']) | Sort-Object) -join ','
+        $logPub = (@($disc['task:IMPORT/PUBLISH']) | Sort-Object) -join ','
+        $epTasks = (@($tTasks) | Sort-Object) -join ','
+        $epPub = (@($tPub) | Sort-Object) -join ','
+        if ($logTasks -ne $epTasks) { throw "page:tasks 日志($logTasks) 与端点($epTasks) 披露不一致" }
+        if ($logPub -ne $epPub) { throw "task:IMPORT/PUBLISH 日志($logPub) 与端点($epPub) 披露不一致" }
+    }
+    Ok ("TC15 流式+工具调用可见+渐进披露（只读端点 /api/ai/tools）：page:tasks {0} 个工具（无 start_publish）；task:IMPORT/PUBLISH 含 start_publish" -f $tTasks.Count)
 } catch { No 'TC15' $_.Exception.Message }
 
 # ============================================================
@@ -1178,7 +1247,11 @@ try {
 #   main-v2 适配：无 /sessions/count 与 /clear；改为 main-v2 的会话语义：
 #   ① 不同 sessionId 的记忆窗口互相隔离（/api/ai/history/{sessionId}）；
 #   ② 同 sessionId 并发第二轮 → 409 SESSION_BUSY 且携进行中 runId 与 reattach 端点（ADR-5/Q11）；
-#   ③ 取消该轮后同会话可再次发起
+#   ③ 取消该轮后同会话可再次发起。
+#   抗抖动（M1 收尾项⑦）：
+#     - fixture 改用"从未发布过的导入任务"（原先复用 TC17 的任务，而它已被发布，
+#       真实模型可能据此拒绝再次调用 start_publish，导致挂不到确认门）；
+#     - 并对"模型未调用工具"的抖动做一次换会话重试。
 # ============================================================
 Say '--- TC18 会话隔离 / 409 串行化 / 取消释放 ---'
 try {
@@ -1198,13 +1271,35 @@ try {
     if ($textA -like "*$tagB*" -or $textB -like "*$tagA*") { throw '两会话记忆互相污染' }
 
     # ② 串行化：会话 C 挂起在确认门时，第二轮请求 → 409
-    $sc = 's5b-' + [Guid]::NewGuid().ToString('N')
-    $ctx18 = @{ page = 'import'; taskId = $script:t17; taskType = 'IMPORT'; step = 'PUBLISH' }
-    $frames18 = New-Object System.Collections.ArrayList
-    Read-Sse '/api/ai/chat' @{ sessionId = $sc; message = ("请立即调用 start_publish 工具发布导入任务 {0}（系统会自动弹出确认卡片，无需再询问我）" -f $script:t17); context = $ctx18 } `
-        @('confirm_request') $frames18 $null
-    $runId18 = @($frames18 | Where-Object { $_.type -eq 'confirm_request' })[0].runId
-    if (-not $runId18) { throw '未取得挂起轮的 runId' }
+    #    fixture：全新导入任务（预检查通过 + 已导入待发布，从未发布过）
+    $t18 = New-ImportTask 'S5B-TC18-串行化' @('DOC_TYPE')
+    Upload-File $t18 "$tmp\DOC_TYPE_e2e.xlsx" 'DOC_TYPE_ok.xlsx' | Out-Null
+    $j18pre = Start-JobOf $t18 'PRECHECK'
+    if ((Wait-Job $j18pre.id).status -ne 'COMPLETED') { throw 'TC18 前置预检查未通过' }
+    $j18imp = Start-JobOf $t18 'IMPORT'
+    if ((Wait-Job $j18imp.id).status -ne 'COMPLETED') { throw 'TC18 前置导入未通过' }
+    PutJson "/api/tasks/$t18/step" @{ step = 'PUBLISH' } | Out-Null
+    if (@(GetJson "/api/tasks/$t18/jobs" | Where-Object { $_.jobType -eq 'PUBLISH' }).Count -gt 0) {
+        throw 'TC18 fixture 不应已有发布作业（否则模型可能拒绝再发布）'
+    }
+
+    $ctx18 = @{ page = 'import'; taskId = $t18; taskType = 'IMPORT'; step = 'PUBLISH' }
+    $ask18 = ("请立即调用 start_publish 工具发布导入任务 {0}（系统会自动弹出确认卡片，无需再询问我）" -f $t18)
+    $runId18 = $null
+    $sc = $null
+    for ($attempt = 1; $attempt -le 2 -and -not $runId18; $attempt++) {
+        $sc = 's5b-' + [Guid]::NewGuid().ToString('N')
+        $frames18 = New-Object System.Collections.ArrayList
+        Read-Sse '/api/ai/chat' @{ sessionId = $sc; message = $ask18; context = $ctx18 } `
+            @('confirm_request') $frames18 $null
+        $cr = @($frames18 | Where-Object { $_.type -eq 'confirm_request' })
+        if ($cr.Count -ge 1) {
+            $runId18 = $cr[0].runId
+        } else {
+            Start-Sleep -Seconds 2
+        }
+    }
+    if (-not $runId18) { throw '未取得挂起轮的 runId（2 次尝试均未挂起到确认门）' }
     $busy = Expect-Fail 'POST' '/api/ai/chat' @{ sessionId = $sc; message = '在吗'; context = @{ page = 'tasks' } } '同会话并发第二轮未被拒'
     if ($busy.status -ne 409 -or $busy.json.code -ne 'SESSION_BUSY') { throw "并发响应 HTTP $($busy.status)/code=$($busy.json.code)，期望 409/SESSION_BUSY" }
     if ($busy.json.runId -ne $runId18) { throw "409 未携带进行中 runId（$($busy.json.runId) ≠ $runId18）" }
