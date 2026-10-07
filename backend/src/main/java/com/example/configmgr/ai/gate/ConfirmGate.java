@@ -34,6 +34,8 @@ import java.util.concurrent.TimeUnit;
  * 决策状态一律先写 Redis（{@link RunStore}），进程内的 {@link Latch} 只承担"唤醒"职责 ——
  * 因此跨进程决策（旧实例已死、新实例续跑）也能被可靠发现：等待循环在心跳节拍上重新读 Redis，
  * 而不是只等本地闸门。SP-02 §5.2 原文即"外部输入只写 Redis，再唤醒同进程的门"。
+ * <b>S5c-6 补充</b>：三件事的次序固定为 <b>落库 → 发回执帧 → 唤醒</b>（且同一把锁内），
+ * 否则被唤醒的等待方会先于回执帧产出"后果帧"（{@code tool_result} 等）。
  *
  * <h2>挂起期心跳保活</h2>
  * 等待循环每 {@value #HEARTBEAT_SECONDS} 秒发一帧 {@code heartbeat}（带挂起种类与已等待秒数）：
@@ -63,6 +65,18 @@ public class ConfirmGate {
 
 	/** toolCallId → 进程内唤醒闸门（不承载状态）。 */
 	private final Map<String, Latch> latches = new ConcurrentHashMap<>();
+
+	/**
+	 * 提交侧的互斥（S5c-6）：<b>状态落库 → 发回执帧 → 唤醒</b>是一次不可分割的动作。
+	 *
+	 * <p>
+	 * 为什么必须有：唤醒一旦发出，等待方立刻会在"后果帧"（{@code tool_result} 等）里
+	 * 表达决策的结果 —— 若回执帧还没写出去，客户端就会先看到工具结局、后看到人的决策，
+	 * 极端调度下回执帧甚至落到 {@code done} 之后（违反"终帧之后不得再有帧"）。
+	 * 等待侧的 Redis 轮询也读同一把锁：否则"决策已落库、回执帧还没发"这一瞬间，
+	 * 跨进程轮询路径会把同一个窗口重新打开。
+	 */
+	private final Object submitLock = new Object();
 
 	public ConfirmGate(RunStore store, RunRegistry registry, AiProperties properties,
 			CancellationRegistry cancellations, ToolActivityBeacon beacon) {
@@ -117,7 +131,12 @@ public class ConfirmGate {
 				if (this.cancellations.isCancelled(runId)) {
 					return cancel(runId, pending, timeoutSeconds, confirm);
 				}
-				PendingToolCall fresh = this.store.pending(runId, pending.getToolCallId());
+				PendingToolCall fresh;
+				// S5c-6：与提交侧读同一把锁 —— 提交方在锁内完成"落库 + 发回执帧 + 唤醒"，
+				// 因此这里读到的"已决"状态一定伴随着已经写出去的回执帧。
+				synchronized (this.submitLock) {
+					fresh = this.store.pending(runId, pending.getToolCallId());
+				}
 				if (fresh != null && fresh.resolved()) {
 					// 决策可能来自本进程（闸门唤醒）也可能来自另一实例（Redis 轮询发现）
 					return fresh;
@@ -242,7 +261,7 @@ public class ConfirmGate {
 	public record Submission(Outcome outcome, PendingToolCall pending, boolean woke) {
 	}
 
-	/** 人工决策：先写 Redis，再唤醒。重复提交按状态幂等拒绝（SP-01d V-d2B）。 */
+	/** 人工决策：先写 Redis，再发回执帧，最后唤醒（帧先于它唤起的后果）。重复提交按状态幂等拒绝（SP-01d V-d2B）。 */
 	public Submission submitDecision(String runId, String toolCallId, boolean approved, String reason) {
 		PendingToolCall pending = this.store.pending(runId, toolCallId);
 		if (pending == null) {
@@ -261,13 +280,18 @@ public class ConfirmGate {
 		if (!approved) {
 			pending.setResultText("用户拒绝了该操作，工具未执行。拒绝原因：" + pending.getReason());
 		}
-		this.store.putPending(runId, pending);
-		boolean woke = signal(runId, toolCallId);
-		this.registry.of(runId).confirmDecision(pending, approved ? "approve" : "reject", pending.getReason(), 0L);
+		boolean woke;
+		// S5c-6：落库 → 发回执帧 → 唤醒，一次不可分割（顺序不可交换：唤醒会让等待方立刻产出
+		// "后果帧"，回执若晚于它就变成"工具结局先到、人的决策后到"，极端时晚于 done）。
+		synchronized (this.submitLock) {
+			this.store.putPending(runId, pending);
+			this.registry.of(runId).confirmDecision(pending, approved ? "approve" : "reject", pending.getReason(), 0L);
+			woke = signal(runId, toolCallId);
+		}
 		return new Submission(Outcome.ACCEPTED, pending, woke);
 	}
 
-	/** 前端工具结果回灌：先写 Redis，再唤醒。 */
+	/** 前端工具结果回灌：先写 Redis，再发回灌帧，最后唤醒（同 S5c-6 的口径）。 */
 	public Submission submitFrontendResult(String runId, String toolCallId, String result, String source) {
 		PendingToolCall pending = this.store.pending(runId, toolCallId);
 		if (pending == null) {
@@ -280,9 +304,12 @@ public class ConfirmGate {
 		pending.setReason("source=" + (source == null || source.isBlank() ? "http-post" : source));
 		pending.setResultText(result == null ? "" : result);
 		pending.setResolvedAtMs(System.currentTimeMillis());
-		this.store.putPending(runId, pending);
-		boolean woke = signal(runId, toolCallId);
-		this.registry.of(runId).frontendToolResult(pending, true, result == null ? "" : result);
+		boolean woke;
+		synchronized (this.submitLock) {
+			this.store.putPending(runId, pending);
+			this.registry.of(runId).frontendToolResult(pending, true, result == null ? "" : result);
+			woke = signal(runId, toolCallId);
+		}
 		return new Submission(Outcome.ACCEPTED, pending, woke);
 	}
 

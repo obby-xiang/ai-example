@@ -30,7 +30,6 @@ import org.springframework.ai.model.tool.ToolExecutionResult;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.method.MethodToolCallbackProvider;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -66,12 +65,12 @@ import static org.mockito.Mockito.when;
  * 挂起是阻塞的，而决策来自"另一条线程"（生产里是 HTTP 线程）—— 本类用一条决策线程 +
  * {@link FrameWire#awaitType} 把两个线程的帧序确定化，不靠 sleep 碰运气。
  *
- * <h2>为什么不直接对挂起轮用 {@code assertConformant}</h2>
- * 确认门/前端工具的<b>决策回执帧</b>由提交线程发出，而 {@code ConfirmGate} 先唤醒等待方、
- * 后发回执（{@code signal()} 早于 {@code confirmDecision(...)}），于是"回执帧"与"它唤起的后果帧"
- * （{@code tool_result}）之间的相对顺序<b>今天是竞态</b>（【待裁决 S5c-6】）。
- * 本类因此把顺序断言拆成两半：确定性部分照旧全量断言，竞态部分只断言"两条帧都在"，
- * 另用 {@link #pinsDecisionReceiptArrivingAfterItsConsequence()} 把竞态窗口确定化后钉住。
+ * <h2>为什么现在可以对挂起轮直接 {@code assertConformant}</h2>
+ * {@code S5c-6} 修复后，{@code ConfirmGate} 的次序固定为"落库 → 发回执帧 → 唤醒"且三步同锁，
+ * 等待方读待决状态的轮询也读同一把锁 —— 于是"回执帧"一定先于它唤起的后果帧，
+ * 回执也不可能落到 {@code done} 之后。原先本类放行的两类竞态违规
+ * （{@code tool_result} 早于 {@code confirm_decision}、到达顺序非严格递增）已不再可能，
+ * 因此挂起轮的帧流一律跑满六条不变量，不再有"放行名单"。
  */
 class ToolFrameSequenceConformanceTest {
 
@@ -150,12 +149,10 @@ class ToolFrameSequenceConformanceTest {
 
 		List<Map<String, Object>> frames = wire.frames();
 		List<String> types = FrameContract.types(frames);
-		// 确定性部分：挂起公告 → 工具出场 → 确认请求 … 终帧收尾
-		assertThat(types.subList(0, 4)).containsExactly("start", "suspended", "tool_start", "confirm_request");
-		assertThat(types.get(types.size() - 1)).isEqualTo("done");
-		// 竞态部分（S5c-6）：回执与后果两条帧都必须在，相对顺序今天不保证
-		assertThat(types.subList(4, types.size() - 1)).containsExactlyInAnyOrder("confirm_decision", "tool_result");
-		assertConformantToleratingEmitRaces(frames);
+		// 全序确定性（S5c-6 修复后）：回执帧一定先于它唤起的后果帧
+		assertThat(types).containsExactly("start", "suspended", "tool_start", "confirm_request", "confirm_decision",
+				"tool_result", "done");
+		FrameContract.assertConformant(frames);
 
 		assertThat(submission.outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
 		assertThat(FrameContract.oneOfType(frames, "confirm_decision")).containsEntry("decision", "approve")
@@ -192,10 +189,9 @@ class ToolFrameSequenceConformanceTest {
 
 		List<Map<String, Object>> frames = wire.frames();
 		List<String> types = FrameContract.types(frames);
-		assertThat(types.subList(0, 4)).containsExactly("start", "suspended", "tool_start", "confirm_request");
-		assertThat(types.get(types.size() - 1)).isEqualTo("done");
-		assertThat(types.subList(4, types.size() - 1)).containsExactlyInAnyOrder("confirm_decision", "tool_result");
-		assertConformantToleratingEmitRaces(frames);
+		assertThat(types).containsExactly("start", "suspended", "tool_start", "confirm_request", "confirm_decision",
+				"tool_result", "done");
+		FrameContract.assertConformant(frames);
 
 		assertThat(FrameContract.oneOfType(frames, "confirm_decision")).containsEntry("decision", "reject")
 				.containsEntry("approved", false)
@@ -281,7 +277,8 @@ class ToolFrameSequenceConformanceTest {
 		ToolExecutionResult result = this.manager.executeToolCalls(prompt("navigate_to", "{\"page\":\"export\"}"),
 				response("navigate_to", "{\"page\":\"export\"}"));
 		assertThat(backfill.get(10, TimeUnit.SECONDS).outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
-		// 回灌帧由提交线程发出：等它落到线上再收尾，避免"终帧抢在回执之前"（S5c-6 的同类窗口）
+		// 回灌帧由提交线程发出：等它落到线上再收尾（S5c-6 修复后回灌帧必然先于后果帧，
+		// 这里保留等待是为了让"终帧"在帧线上确定地排在最后）
 		wire.awaitType("frontend_tool_result", 5000L);
 		out.done(Map.of(), "deepseek-flash", Map.of("cancelled", false));
 		int framesAfterTerminal = wire.size();
@@ -347,36 +344,38 @@ class ToolFrameSequenceConformanceTest {
 		assertThat(this.store.ledger(RUN_ID)).as("复用不写新台账").hasSize(2);
 	}
 
-	// ── 钉住现行为（S5c-6）：决策回执晚于它唤起的后果，甚至晚于终帧 ─────────
+	// ── ⑦ 修复后回归（S5c-6）：决策回执帧先于它唤起的后果 ────────────────────
 
 	/**
-	 * <b>【待裁决 S5c-6】</b>钉住"决策回执帧与它唤起的后果之间的顺序不成立"这一现行为。
+	 * <b>【S5c-6 回归】</b>回执帧先于其后果：回执帧卡在"慢订阅者/慢网络"上时，
+	 * 被它唤醒的等待方<b>不得</b>先产出后果帧（{@code tool_result}），更不得把回执挤到 {@code done} 之后。
 	 *
 	 * <p>
-	 * 事实链：{@code ConfirmGate#submitDecision}（以及 {@code #submitFrontendResult}）的顺序是
-	 * {@code putPending → signal(唤醒等待方) → registry.of(runId).confirmDecision(发回执帧)}。
-	 * 唤醒<b>早于</b>发帧，于是运行线程可能在回执帧写出去之前就跑完后续动作：
-	 * 轻则 {@code tool_result} 早于 {@code confirm_decision}（客户端先看到工具结局、后看到人的决策），
-	 * 重则整轮已经收尾 —— 回执帧落到 {@code done} <b>之后</b>（"终帧之后仍有业务帧"）。
+	 * 事实链（修复前）：{@code ConfirmGate#submitDecision} 的顺序是
+	 * {@code putPending → signal(唤醒等待方) → 发回执帧}；唤醒早于发帧，运行线程可在回执帧写出去
+	 * 之前跑完后续动作 —— 轻则 {@code tool_result} 早于 {@code confirm_decision}，
+	 * 重则回执落到终帧之后（"终帧之后仍有业务帧"，客户端状态机可能错乱）。
 	 *
 	 * <p>
-	 * 本用例把"决策线程在 signal 与 emit 之间被调度切走"这一窗口<b>确定化</b>（用帧线钩子把回执帧
-	 * 压到终帧之后再写出）：这不是构造出来的假象，而是真实存在的窗口里<b>任意一次</b>调度切换的结果。
-	 * 修复方向：把回执帧的发出放到 {@code signal()} 之前（或对"状态落库 + 发帧 + 唤醒"加同一把锁）。
-	 * 本用例届时必须改写 —— 它钉的是缺陷，不是契约。
+	 * 修复后有两重保证：① 次序固定为"落库 → 发回执帧 → 唤醒"（回执先于后果）；
+	 * ② 三步与等待方的轮询同锁（{@code ConfirmGate#submitLock}），且出帧本身串行
+	 * （{@code SseChatEmitter#emitLock}）。
+	 *
+	 * <p>
+	 * kill：把 {@code submitDecision} 改回 {@code signal(...)} 在 {@code confirmDecision(...)} 之前，
+	 * 并去掉 {@code submitLock} ⇒ 卡住回执帧时等待方会先写出 {@code tool_result}，本用例变红。
 	 */
 	@Test
-	void pinsDecisionReceiptArrivingAfterItsConsequence() throws Exception {
+	void decisionReceiptIsWrittenBeforeTheConsequenceItWakes() throws Exception {
 		stubConfirmTool("start_import");
-		CountDownLatch terminalRecorded = new CountDownLatch(1);
+		CountDownLatch receiptInSend = new CountDownLatch(1);
+		CountDownLatch releaseReceipt = new CountDownLatch(1);
 		FrameWire wire = new FrameWire(payload -> {
-			if (payload.contains("\"type\":\"done\"")) {
-				terminalRecorded.countDown();
-			}
 			if (payload.contains("confirm_decision")) {
+				receiptInSend.countDown();
 				try {
-					// 决策线程被调度切走：等运行线程把后果帧（以及终帧）写完再回来发回执
-					terminalRecorded.await(5, TimeUnit.SECONDS);
+					// 回执帧的写出被拖住（模拟慢订阅者 / 慢网络）：此刻它还没"到达"
+					releaseReceipt.await(5, TimeUnit.SECONDS);
 				}
 				catch (InterruptedException ex) {
 					Thread.currentThread().interrupt();
@@ -391,59 +390,38 @@ class ToolFrameSequenceConformanceTest {
 			wire.awaitType("confirm_request", 5000L);
 			return this.gate.submitDecision(RUN_ID, CALL_ID, true, "放行");
 		});
+		ExecutorService runThread = Executors.newSingleThreadExecutor(runnable -> {
+			Thread thread = new Thread(runnable, "conformance-run");
+			thread.setDaemon(true);
+			return thread;
+		});
+		try {
+			Future<ToolExecutionResult> run = runThread.submit(() -> this.manager.executeToolCalls(
+					prompt("start_import", "{\"taskId\":7}"), response("start_import", "{\"taskId\":7}")));
 
-		this.manager.executeToolCalls(prompt("start_import", "{\"taskId\":7}"),
-				response("start_import", "{\"taskId\":7}"));
-		out.done(Map.of(), "deepseek-flash", Map.of("cancelled", false));
-		assertThat(decision.get(10, TimeUnit.SECONDS).outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
+			assertThat(receiptInSend.await(10, TimeUnit.SECONDS)).as("决策回执帧已进入写出").isTrue();
+			assertThat(FrameContract.ofType(wire.frames(), "tool_result"))
+					.as("回执帧还没到达，后果帧不得抢先（帧先于其后果）")
+					.isEmpty();
+
+			releaseReceipt.countDown();
+			assertThat(decision.get(10, TimeUnit.SECONDS).outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
+			assertThat(run.get(10, TimeUnit.SECONDS)).isNotNull();
+			out.done(Map.of(), "deepseek-flash", Map.of("cancelled", false));
+		}
+		finally {
+			runThread.shutdownNow();
+		}
 
 		List<Map<String, Object>> frames = wire.frames();
-		assertThat(FrameContract.types(frames)).as("回执帧落在了它自己的后果与终帧之后")
-				.containsExactly("start", "suspended", "tool_start", "confirm_request", "tool_result", "done",
-						"confirm_decision");
-		assertThat(FrameContract.orderingContract(frames)).anySatisfy(violation -> assertThat(violation)
-				.contains("tool_result")
-				.contains("早于 confirm_decision"));
-		assertThat(FrameContract.terminalContract(frames)).anySatisfy(
-				violation -> assertThat(violation).contains("终帧（第 5 帧 done）之后还有 1 帧"));
+		assertThat(FrameContract.types(frames)).as("回执帧先于后果帧，且终帧之后无帧")
+				.containsExactly("start", "suspended", "tool_start", "confirm_request", "confirm_decision",
+						"tool_result", "done");
+		FrameContract.assertConformant(frames);
+		assertThat(this.fakeStartImport.invocations.get()).isEqualTo(1);
 	}
 
 	// ── 桩与辅助 ────────────────────────────────────────────────────────────
-
-	/**
-	 * 挂起轮的帧序断言：<b>序号集合的完整性与唯一性照旧严格断言</b>，其余不变量照跑，
-	 * 只放行两条由同一类并发窗口造成的已知违规（都已在钉住用例里确定化复现）：
-	 * <ul>
-	 * <li>{@code tool_result} 早于 {@code confirm_decision}（【S5c-6】：{@code signal()} 早于发帧）；</li>
-	 * <li>到达顺序非严格递增（【S5c-3】：取号 → 落归档 → 写出不是一次不可分割的动作，
-	 * 于是运行线程可以在决策线程"取了号还没写出"的窗口里超车）。</li>
-	 * </ul>
-	 * 两条都只影响<b>顺序</b>，不影响<b>集合</b>；集合完整性由本方法第一段独立证明，
-	 * 因此这里的放行不会把"丢帧/重号"一起放过去。
-	 */
-	private static void assertConformantToleratingEmitRaces(List<Map<String, Object>> frames) {
-		List<Long> seqs = new ArrayList<>();
-		for (Map<String, Object> frame : frames) {
-			Object seq = frame.get("seq");
-			seqs.add(seq instanceof Number number ? number.longValue() : -1L);
-		}
-		assertThat(seqs).as("帧序号不得重号").doesNotHaveDuplicates();
-		List<Long> sorted = new ArrayList<>(seqs);
-		sorted.sort(Long::compareTo);
-		assertThat(sorted).as("帧序号集合必须完整（1..N，无缺口、无丢失）")
-				.isEqualTo(java.util.stream.LongStream.rangeClosed(1, frames.size()).boxed().toList());
-
-		List<String> tolerated = new ArrayList<>();
-		for (String violation : FrameContract.violations(frames)) {
-			if (violation.contains("早于 confirm_decision") || violation.contains("严格递增")) {
-				tolerated.add(violation);
-				continue;
-			}
-			throw new AssertionError("帧序一致性违规（帧流=" + FrameContract.types(frames) + "）：" + violation);
-		}
-		// 容忍条数不做上限断言：一次逆序会同时让"两帧各错位一次"产生多条 seq 违规，
-		// 真正的守卫是上面的"序号集合完整 + 不重号"（丢帧/重号照旧失败）。
-	}
 
 	private void stubConfirmTool(String name) {
 		when(this.toolRegistry.channelOf(name)).thenReturn(ToolMeta.Channel.BACKEND);
