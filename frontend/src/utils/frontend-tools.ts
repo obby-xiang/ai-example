@@ -1,15 +1,17 @@
 /**
  * 前端工具执行器（规格 §2「契约窄接口」/ §3 前端工具回灌）。
  *
- * **后端口径核对（本棒实测，勿凭蓝本臆造）**：main-v2 后端 `AiTools` 共 12 个 `@Tool`，
- * 其中带 `@ToolChannel(FRONTEND)` 的**只有 2 个**：`open_export_file_editor`、`download_export_file`
- * （其余 10 个是 BACKEND 通道，由后端自己执行；`start_export/start_precheck/start_import/start_publish`
+ * **后端口径核对（本棒实测，勿凭蓝本臆造）**：main-v2 后端 `AiTools` 共 18 个 `@Tool`，
+ * 其中带 `@ToolChannel(FRONTEND)` 的**有 7 个**：`open_export_file_editor`、`download_export_file`、
+ * `navigate_to`、`select_definitions`、`set_condition`、`confirm_step`、`generative_form`
+ * （其余 11 个是 BACKEND 通道，由后端自己执行；`start_export/start_precheck/start_import/start_publish`
  * 在 main-v2 里都是 BACKEND，不再像旧基座那样挂起等前端）。所以：
- * - 路由 1 覆盖后端**实际披露**的前端工具（2 个），完整实现；
+ * - 路由 1 覆盖 `FRONTEND_TOOLS` 登记的前端工具（2 个：`open_export_file_editor` / `download_export_file`），
+ *   完整实现；
  * - 路由 2/3 是**补丁②**：把蓝本形态的工作区动作（`navigate_to` / `select_definitions` /
- *   `set_condition` / `confirm_step` 及蓝本别名）做成可执行能力表 —— 后端一旦把它们标为
- *   FRONTEND 并披露，前端**零改动**即可生效；今天它们也能被任何 `frontend_tool_request` 帧
- *   或契约层驱动（见 `WORKSPACE_ACTIONS`）。
+ *   `set_condition` / `confirm_step` 及蓝本别名）做成可执行能力表 —— 这 4 个后端已标为 FRONTEND
+ *   并披露，故今天经任何 `frontend_tool_request` 帧或契约层驱动即可生效，前端零改动（见 `WORKSPACE_ACTIONS`）；
+ * - `generative_form` 后端已披露，前端执行接入待后续棒。
  *
  * 三条路由（AI 经 frontend_tool 帧驱动工作区的统一入口）：
  * 1. **后端披露的前端工具**（`FRONTEND_TOOLS`）：参数校验 + @ToolScope 校验 + 执行器/默认执行器；
@@ -253,8 +255,8 @@ function delay(ms: number): Promise<void> {
  * - 蓝本 `frontend-tools.js:5-15` 的等价名（`select_config_defs` / `set_query_conditions`）
  *   与 main-v2 既有的 ui_event 名（`select_defs` / `set_conditions` / `goto_step` / `open_page`）
  *   作为**别名**一并登记，避免因命名差异漏路由。
- * 后端当前只披露 2 个 FRONTEND 工具，故这些动作今天经「前端工具帧（后端补披露后）」或
- * 「契约层」触发；执行器与页面能力已就绪，后端补工具时前端零改动。
+ * 后端已披露 7 个 FRONTEND 工具，上述 4 个均在其中，故这些动作今天经「前端工具帧」或
+ * 「契约层」触发；执行器与页面能力已就绪，后续工具接入时前端零改动。
  */
 export const WORKSPACE_ACTIONS: readonly WorkspaceAction[] = [
   {

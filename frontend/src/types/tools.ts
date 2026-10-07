@@ -25,11 +25,13 @@
  * | select_definitions | `page:tasks`, `task:EXPORT`, `task:IMPORT` | READ | FRONTEND |
  * | set_condition | `page:tasks`, `task:EXPORT` | READ | FRONTEND |
  * | confirm_step | `page:tasks`, `task:EXPORT`, `task:IMPORT` | READ | FRONTEND |
+ * | generative_form | `page:tasks`, `task:*` | READ | FRONTEND |
  *
  * 两处**已过期的旧口径**（勿再沿用）：① 四个 `start_*` 曾标 WRITE/BACKEND 且不进确认门，
  * S4.4e 裁决⑥ 已全部升为 `DANGER`（执行前挂起、前端渲染确认卡片，FR-5.3）；
  * ② `open_export_file_editor`/`download_export_file` 曾被写成"唯一两个 FRONTEND 工具"，
- * S4.4d 起 `navigate_to`/`select_definitions`/`set_condition`/`confirm_step` 也是 FRONTEND。
+ * S4.4d 起 `navigate_to`/`select_definitions`/`set_condition`/`confirm_step` 也是 FRONTEND，
+ * DC-15 起 `generative_form` 亦然（后端已披露，前端执行接入见 `utils/frontend-tools.ts` 头部口径）。
  * 增量执行兜底（DC-14 T1）：越 scope 的调用即使被上游发起，后端也会拦截并回灌结构化错误
  * （帧里 `tool_result.status=BLOCKED`）。
  */
