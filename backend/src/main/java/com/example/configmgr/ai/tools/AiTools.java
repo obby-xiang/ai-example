@@ -17,7 +17,6 @@ import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
-import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
@@ -33,16 +32,19 @@ import java.util.stream.Collectors;
  * <h2>本棒接回的工具（P1 遗留 N7 的收口）</h2>
  * <ul>
  * <li><b>只读</b>：查询定义/任务/数据行数/作业状态 —— 无副作用，直接执行；</li>
- * <li><b>作业发起</b>：start_export / start_precheck / start_import（WRITE，作业创建）；</li>
- * <li><b>破坏性</b>：{@code start_publish}（{@code @ToolRisk(DANGER)}）—— 必须经确认门，
- * 放行才执行、拒绝/超时以"未执行"语义回填；</li>
+ * <li><b>任务创建</b>：{@code create_task}（{@code @ToolRisk(WRITE)}）—— 创建即落库，返回任务 id
+ * （S4.4e 裁决②，见 {@link #createTask}）；</li>
+ * <li><b>作业发起（确认门）</b>：{@code start_export} / {@code start_precheck} / {@code start_import} /
+ * {@code start_publish} 四个工具统一为 {@code @ToolRisk(DANGER)} —— 执行前挂起、渲染确认卡片，
+ * 放行才创建作业，拒绝/超时以"未执行"语义回填（FR-5.3 明文，S4.4e 裁决⑥，
+ * 机制见 {@code gate/ConfirmGate}，无需工具名清单）；</li>
  * <li><b>前端指令</b>：{@code open_export_file_editor} / {@code download_export_file} /
  * {@code navigate_to} / {@code select_definitions} / {@code set_condition} / {@code confirm_step}
  * （{@code @ToolChannel(FRONTEND)}）—— 副作用在浏览器里，后端方法体是哨兵桩，
  * 由 {@code SpToolCallingManager} 挂起并由 {@code POST /api/ai/frontend-tool-result} 回灌结果。</li>
  * </ul>
  *
- * <h2>工作区动作（S4.4d：AI 一句话驱动向导）</h2>
+ * <h2>工作区动作（S4.4d：AI 一句话驱动向导；S4.4e：条件参数镜像前端契约）</h2>
  * {@code navigate_to} / {@code select_definitions} / {@code set_condition} / {@code confirm_step}
  * 是"任务向导的驱动动作"：按 S4.4c 已实测生效的前端动作表（{@code utils/frontend-tools.ts} 的
  * {@code WORKSPACE_ACTIONS}）登记，<b>参数名与前端契约逐字一致</b>（{@code page/taskId}、
@@ -54,8 +56,16 @@ import java.util.stream.Collectors;
  * 调用共享同一份披露集（上下文在请求边界冻结），因此按"任务类型"而非"单一步骤"披露 ——
  * 步骤级/页面级适配由前端动作表的 {@code allowPages}/{@code allowSteps} 兜底校验（防线三）。
  *
- * <p><b>仍未接回</b>（P1 N7 的剩余项）：{@code create_task} —— 任务创建仍走界面/API
- * （本工具集不含创建任务能力，证据文档 S44d 已登记【待裁决】）。
+ * <p><b>S4.4e 裁决③</b>：{@code set_condition} 的 {@code conditions} 入参改为与前端契约
+ * （{@code frontend/src/types/condition.ts} 的 {@code FieldQueryCondition}）逐字段一致的
+ * <b>嵌套对象</b>（{@link FieldQueryCondition} / {@link FieldCondition}）—— 前端只读
+ * {@code args.conditions} 这一个键（{@code utils/frontend-tools.ts#normalizeActionArgs}），
+ * 扁平参数（{@code fieldCode/operator/value} 平铺在顶层）会被静默丢弃，产生"看似成功、实为空条件"
+ * 的错误；类型化入参同时让官方 JSON Schema 生成出 {@code fields[].fieldCode/operator/value}
+ * 的完整结构，模型不必猜内层形状。见 {@link #setCondition}。
+ *
+ * <p>创建任务的缺口已在 S4.4e 补齐（{@link #createTask}）：{@code create_task} 走 BACKEND 通道，
+ * 与任务中心/REST 同一服务层，P1 N7 到此收口。
  */
 @Component
 @RequiredArgsConstructor
@@ -178,24 +188,77 @@ public class AiTools {
         return String.format("%s 共有 %d 行数据", defCode, count);
     }
 
-    // ==================== 作业发起：导出 / 预检查 / 导入 ====================
+    // ==================== 任务创建（S4.4e 裁决②：AI 可从零创建任务） ====================
+
+    /**
+     * 任务创建：AI 从零建任务（P1 遗留 N7 的最后一个缺口接回）。
+     *
+     * <p><b>与任务中心/REST 同一服务层（FR-5.4 单一事实源）</b>：直接调 {@link TaskService#create}，
+     * 与 {@code POST /api/tasks}（{@code TaskController#create}）是同一条路径，标题缺省规则也一致
+     * —— 因此"AI 建的任务"与"手点建的任务"在库里的形态没有差别（含 {@code currentStep} 初值与任务变更事件）。
+     *
+     * <p><b>为什么需要它</b>：S44d 的 V2/V3 实测里 AI 只能 {@code list_tasks} 选已有任务，
+     * 空任务中心的"帮我新建一个导出任务并导出 CURRENCY"走不通（当年登记为【待裁决】2）。
+     * 补齐后的链路：{@code create_task} → {@code navigate_to(page, taskId)}
+     * → {@code select_definitions} →（{@code set_condition}）→ {@code confirm_step}
+     * → {@code start_export}（确认门）。
+     *
+     * <p><b>披露范围（{@code page:tasks} + 两类向导页）</b>：任务中心是"没有任务时建任务"的现场；
+     * 向导页一并披露，是为了在已有任务时也能按用户要求再建一条（否则模型得先导航回任务中心，
+     * 而一轮内的披露集在请求边界冻结，跨页会导致工具子集不一致）。
+     *
+     * <p><b>风险等级 {@code WRITE}</b>（不进确认门）：创建任务本身可逆（任务中心/REST 既有删除机制），
+     * 不直接改动业务数据；FR-5.3 的确认清单是"启动导出/检查/导入/发布 + 删除任务"，不含"创建任务"。
+     *
+     * <p>返回值刻意带上任务 id 与下一个动作（{@code navigate_to} 的目标页面），
+     * 让模型不必猜"下一步该拿哪个 id 做什么"。
+     */
+    @Tool(name = "create_task", description = "从零创建一个配置管理任务（EXPORT 导出 / IMPORT 导入），创建即落库并返回任务 id；随后用 navigate_to(page=..., taskId=...) 打开它的向导")
+    @ToolScope({ "page:tasks", "task:EXPORT", "task:IMPORT" })
+    @ToolRisk(ToolMeta.RiskLevel.WRITE)
+    public String createTask(
+            @ToolParam(description = "任务类型：EXPORT（导出配置）/ IMPORT（导入配置）") String type,
+            @ToolParam(description = "任务标题，不传则按类型生成默认标题", required = false) String title) {
+        try {
+            Task.TaskType taskType = Task.TaskType.valueOf(type == null ? "" : type.trim().toUpperCase());
+            boolean export = taskType == Task.TaskType.EXPORT;
+            String effectiveTitle = title == null || title.isBlank() ? (export ? "导出任务" : "导入任务") : title.trim();
+            Task task = taskService.create(taskType, effectiveTitle);
+            return String.format(
+                    "已创建%s任务 #%d（标题：%s，当前步骤：%s）。下一步：navigate_to(page=\"%s\", taskId=%d) 打开向导，"
+                            + "再用 select_definitions 勾选配置项。",
+                    export ? "导出" : "导入", task.getId(), task.getTitle(), task.getCurrentStep(),
+                    export ? "export" : "import", task.getId());
+        } catch (IllegalArgumentException e) {
+            return "任务类型不合法：" + type + "（只支持 EXPORT / IMPORT）";
+        } catch (Exception e) {
+            return "创建任务失败: " + e.getMessage();
+        }
+    }
+
+    // ==================== 作业发起：导出 / 预检查 / 导入 / 发布（确认门） ====================
 
     /**
      * 导出作业发起。
      *
-     * <p><b>S4.4d 披露范围补 {@code page:tasks}（本棒两处既有工具披露调整之一，另一处为
+     * <p><b>S4.4d 披露范围补 {@code page:tasks}（两处既有工具披露调整之一，另一处为
      * {@link #startPrecheck}，同一口径）</b>：
      * 一轮对话的工具子集在请求边界冻结（模型在同一轮里发起的多次调用共享同一份披露集），
      * 而"在任务中心一句话驱动导出"这条路径的起点上下文就是 {@code page:tasks}（无 taskType）——
      * 不补这一档，模型能在同一轮里把向导驱动到「导出执行」步，却<b>拿不到启动作业的入口</b>
      * （S44d 证据 V2-a 实测：模型如实回复"披露的工具里没有可以直接触发导出的入口"）。
      * 作业创建仍走与 REST 相同的服务层（{@link JobService}，FR-5.4 单一事实源），
-     * 风险等级不变（WRITE，非 DANGER），作业是否可导由任务/配置项状态决定。
-     * 该调整不影响既有的 {@code task:EXPORT/EXPORT} 披露（向导内照旧可用），见证据文档【待裁决】。
+     * 该调整不影响既有的 {@code task:EXPORT/EXPORT} 披露（向导内照旧可用），见 S44d 证据【待裁决】1。
+     *
+     * <p><b>S4.4e 裁决⑥：风险等级由 {@code WRITE} 升为 {@code DANGER}，纳入确认门（FR-5.3 明文）</b>——
+     * 与 {@link #startPublish} 同一套 {@code gate/ConfirmGate}：执行前挂起并向前端渲染确认卡片，
+     * <b>放行</b>才创建作业、<b>拒绝</b>以"用户拒绝 + 原因"回填且不执行、<b>超时</b>自动取消同样不执行
+     * （三结局一致）；机制完全由风险等级驱动（{@code SpToolCallingManager#kindOf}），
+     * 此处不新增工具名清单。披露范围不变。
      */
-    @Tool(name = "start_export", description = "启动配置导出作业，开始将数据导出为Excel文件")
+    @Tool(name = "start_export", description = "启动配置导出作业，开始将数据导出为Excel文件（高风险，需要用户确认）")
     @ToolScope({ "page:tasks", "task:EXPORT/EXPORT" })
-    @ToolRisk(ToolMeta.RiskLevel.WRITE)
+    @ToolRisk(ToolMeta.RiskLevel.DANGER)
     public String startExport(
             @ToolParam(description = "任务ID") Long taskId) {
         try {
@@ -207,14 +270,15 @@ public class AiTools {
     }
 
     /**
-     * 预检查作业发起：与 {@link #startExport} 同一口径，披露范围补 {@code page:tasks}
+     * 预检查作业发起：与 {@link #startExport} 同一口径 —— 披露范围补 {@code page:tasks}
      * （导入向导的「检查配置」步同样要有从任务中心出发的入口，否则模型的"检查"意图无处落地，
-     * 会退化成继续 confirm_step 推进步骤 —— S44d 证据 V3-a 实测到了这一退化）。
-     * 写暂存（{@code start_import}）与发布（{@code start_publish}，DANGER）保持原披露范围不动。
+     * 会退化成继续 confirm_step 推进步骤 —— S44d 证据 V3-a 实测到了这一退化），
+     * 风险等级同为 {@code DANGER}（确认门，S4.4e 裁决⑥；FR-5.3 把"启动检查"与"启动导出/导入/发布"
+     * 并列写进确认清单）。
      */
-    @Tool(name = "start_precheck", description = "启动预检查作业，验证上传的Excel文件格式和数据")
+    @Tool(name = "start_precheck", description = "启动预检查作业，验证上传的Excel文件格式和数据（需要用户确认）")
     @ToolScope({ "page:tasks", "task:IMPORT/PRECHECK" })
-    @ToolRisk(ToolMeta.RiskLevel.WRITE)
+    @ToolRisk(ToolMeta.RiskLevel.DANGER)
     public String startPrecheck(
             @ToolParam(description = "任务ID") Long taskId) {
         try {
@@ -225,9 +289,14 @@ public class AiTools {
         }
     }
 
-    @Tool(name = "start_import", description = "启动导入作业，将数据写入暂存区")
+    /**
+     * 写暂存（导入执行）发起：披露范围保持 {@code task:IMPORT/IMPORT} 不变（不在 S4.4d 放宽的两处之列，
+     * 只有向导走到「导入执行」步才披露）；风险等级 {@code DANGER}（确认门，S4.4e 裁决⑥）——
+     * 它会真正写暂存区，人工确认的必要性不低于导出。
+     */
+    @Tool(name = "start_import", description = "启动导入作业，将数据写入暂存区（高风险，需要用户确认）")
     @ToolScope("task:IMPORT/IMPORT")
-    @ToolRisk(ToolMeta.RiskLevel.WRITE)
+    @ToolRisk(ToolMeta.RiskLevel.DANGER)
     public String startImport(
             @ToolParam(description = "任务ID") Long taskId) {
         try {
@@ -281,7 +350,7 @@ public class AiTools {
         return FRONTEND_STUB;
     }
 
-    // ==================== 前端指令：工作区动作（S4.4d 向导驱动） ====================
+    // ==================== 前端指令：工作区动作（S4.4d 向导驱动；S4.4e 条件契约对齐） ====================
 
     /**
      * 页面导航。披露范围为 {@code *}：它是任意页面进入向导的唯一入口动作，
@@ -308,17 +377,57 @@ public class AiTools {
     }
 
     /**
-     * 查询条件。参数形态以前端动作为准（{@code conditions} 对象），
-     * 前端只会读取 {@code defCode} 与 {@code conditions} 两个键（{@code normalizeActionArgs}）。
+     * 查询条件（S4.4e 裁决③：入参形态 = 前端契约，逐字段对齐）。
+     *
+     * <p><b>为什么不能用扁平四参</b>：前端动作表只读 {@code args.defCode} 与 {@code args.conditions}
+     * 两个键（{@code frontend/src/utils/frontend-tools.ts#normalizeActionArgs}），
+     * 若把 {@code fieldCode/operator/value} 平铺成顶层参数，它们会被静默丢弃 —— 表现为
+     * "工具调用成功、条件却是空的"（{@link FieldQueryCondition} 的形态才是
+     * {@code types/condition.ts#parseConditionJson} 认得的）。
+     *
+     * <p><b>类型化入参的第二个收益</b>：官方 JSON Schema 由方法签名生成，嵌套 record 让
+     * Schema 里直接出现 {@code conditions.fields[].fieldCode/operator/value} 与
+     * {@code conditions.scopeKeys}（{@code Map<String,Object>} 只能生成一个无内层结构的 object），
+     * 模型不必从描述文字里猜内层形状。
+     *
+     * <p>顺序约束（前端/后端的既有事实，不是本工具的约束）：{@code set_condition} 只对<b>已勾选</b>
+     * 的配置项有效 —— 未选中时表单里没有该卡片（页面 handler 只写表单模型），
+     * 而落库（{@code conditionJson}）发生在向导推进步骤时（前端 {@code persistStepData}）。
      */
-    @Tool(name = "set_condition", description = "在导出向导的「查询条件」步骤为指定配置项设置数据过滤条件（不设条件即导出全部；需已导航到导出向导）")
+    @Tool(name = "set_condition", description = "在导出向导的「查询条件」步骤为指定配置项设置数据过滤条件（不设条件即导出全部；需已导航到导出向导并已勾选该配置项）")
     @ToolScope({ "page:tasks", "task:EXPORT" })
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolChannel(ToolMeta.Channel.FRONTEND)
     public String setCondition(
             @ToolParam(description = "配置定义编码，例如 CURRENCY") String defCode,
-            @ToolParam(description = "查询条件对象，形如 {\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"CNY\"}]}；operator 取值 EQ/NE/CONTAINS/LIKE/GT/GTE/LT/LTE/IN/EMPTY/NOT_EMPTY") Map<String, Object> conditions) {
+            @ToolParam(description = "查询条件对象，形如 {\"scopeKeys\":[\"XN\"],\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"CNY\"}]}") FieldQueryCondition conditions) {
         return FRONTEND_STUB;
+    }
+
+    /**
+     * 查询条件对象 —— 前端契约 {@code frontend/src/types/condition.ts#FieldQueryCondition} 的逐字段镜像
+     * （也是后端 {@code data/service/QueryCondition} 的同一形态；字段名一个字都不能改，
+     * 前端按这些键名读取，改名即静默失配）。
+     *
+     * @param scopeKeys 范围过滤：地区/项目编码列表（GLOBAL 级配置忽略）；省略表示全部范围
+     * @param fields    字段级过滤条件（多条之间 AND）；省略表示不按字段过滤
+     */
+    public record FieldQueryCondition(
+            @ToolParam(description = "范围过滤：地区/项目编码列表，例如 [\"XN\"]（GLOBAL 级配置忽略）；省略表示全部范围", required = false) List<String> scopeKeys,
+            @ToolParam(description = "字段级过滤条件（多条之间 AND），省略表示不按字段过滤", required = false) List<FieldCondition> fields) {
+    }
+
+    /**
+     * 单字段条件 —— 前端契约 {@code types/condition.ts#FieldCondition} 的逐字段镜像。
+     *
+     * @param fieldCode 字段编码（必须是该配置定义的字段，如 CURRENCY 的 {@code code}）
+     * @param operator  操作符（前端 {@code ConditionOperator} + 后端 {@code ConditionEvaluator} 的交集）
+     * @param value     条件值；EMPTY/NOT_EMPTY 不带值，IN 传字符串数组
+     */
+    public record FieldCondition(
+            @ToolParam(description = "字段编码，例如 code") String fieldCode,
+            @ToolParam(description = "操作符：EQ/NE/CONTAINS/LIKE/STARTS_WITH/IN/EMPTY/NOT_EMPTY/GT/GTE/LT/LTE") String operator,
+            @ToolParam(description = "条件值（文本/数字）；EMPTY/NOT_EMPTY 不传，IN 传字符串数组", required = false) Object value) {
     }
 
     @Tool(name = "confirm_step", description = "确认并推进向导步骤（当前步骤校验通过时前端才前进；需已导航到导出/导入向导）")
