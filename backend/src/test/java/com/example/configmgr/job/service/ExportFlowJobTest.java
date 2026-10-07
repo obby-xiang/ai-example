@@ -40,7 +40,9 @@ import static org.assertj.core.api.Assertions.catchThrowableOfType;
  *     与"已终态作业不可再取消"（409 JOB_ALREADY_FINAL），两条分别由用例 1、3 承接；</li>
  * <li>导出结果读取：glm 从任务参数包 {@code exportResult} 取内存结果，本仓库结果是落盘的 xlsx +
  *     task_files 行 → 用 {@link ExcelReader} 回读文件校验行数与内容；</li>
- * <li>"导出中重复导出应被拒"在实现里没有并发互斥守卫，未移植（见证据文档【待裁决】）。</li>
+ * <li>"导出中重复导出应被拒"曾因实现里无并发互斥守卫而未移植，
+ *     <b>M1 收尾守卫② 后已补齐</b>（用例 4 断言 409 JOB_ALREADY_RUNNING；正/反例全集见
+ *     {@link JobMutexGuardTest}）。</li>
  * </ul>
  */
 @SpringBootTest
@@ -157,6 +159,32 @@ class ExportFlowJobTest {
         assertThat(jobRepository.findById(job.getId()).orElseThrow().getStatus())
                 .as("终态作业不得被改成 CANCELLED")
                 .isEqualTo(Job.JobStatus.COMPLETED);
+    }
+
+    // ── 用例 4（M1 收尾守卫② 补齐的 glm 用例）：导出在途时再发起导出 → 被互斥守卫拒绝 ──
+
+    /**
+     * glm 的 {@code exportTwiceRejectedWhileRunning}。守卫在作业入口（{@link JobService#createAndStart}），
+     * 这里用一条已落库的在途作业表达"上一条导出尚未结束"（不真起异步作业，避免与执行线程赛跑）。
+     */
+    @Test
+    void exportRejectedWhileAnotherExportInFlight() {
+        Task task = taskService.create(Task.TaskType.EXPORT, "S5A-导出-并发互斥");
+        taskService.selectDefs(task.getId(), List.of(ROLE_DICT));
+
+        Job inFlight = new Job();
+        inFlight.setTaskId(task.getId());
+        inFlight.setJobType(Job.JobType.EXPORT);
+        inFlight.setStatus(Job.JobStatus.RUNNING);
+        Job saved = jobRepository.save(inFlight);
+
+        ConflictException conflict = catchThrowableOfType(
+                () -> jobService.createAndStart(task.getId(), Job.JobType.EXPORT), ConflictException.class);
+        assertThat(conflict).isNotNull();
+        assertThat(conflict.getCode()).isEqualTo("JOB_ALREADY_RUNNING");
+        assertThat(conflict.getMessage()).contains("#" + saved.getId());
+        assertThat(jobRepository.findByTaskId(task.getId()))
+                .as("被拒时不留新作业行").hasSize(1);
     }
 
     // ───────────────────────── helpers ─────────────────────────

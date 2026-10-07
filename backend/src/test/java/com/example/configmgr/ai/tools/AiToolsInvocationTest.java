@@ -190,6 +190,22 @@ class AiToolsInvocationTest {
         assertThat(aiTools.getConfigDef("NO_SUCH_DEF")).contains("未找到配置定义");
     }
 
+    // ── 用例 7（M1 收尾守卫①的 AI 通道回归）：预检查未通过 → 工具如实回报失败，不起作业 ──
+
+    @Test
+    void startImportReportsGuardWhenPrecheckNotPassed() {
+        long taskId = firstId(aiTools.createTask("IMPORT", "S5F-AI-守卫"));
+        taskService.selectDefs(taskId, List.of(ROLE_DICT));
+
+        assertThat(aiTools.startImport(taskId))
+                .as("无预检查记录时，工具文本必须含机器可读码，模型才能据实回答")
+                .contains("启动导入失败")
+                .contains("PRECHECK_NOT_PASSED");
+        assertThat(aiTools.startPublish(taskId)).contains("启动发布失败").contains("PRECHECK_NOT_PASSED");
+        assertThat(jobRepository.findByTaskId(taskId))
+                .as("被守卫拒绝时不得落作业行").isEmpty();
+    }
+
     // ───────────────────────── helpers ─────────────────────────
 
     /** 轮询等待指定类型的作业进入终态（作业由确认门放行后异步执行）。 */

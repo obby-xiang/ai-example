@@ -6,6 +6,7 @@ import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 
@@ -14,6 +15,13 @@ public interface JobRepository extends JpaRepository<Job, Long> {
     List<Job> findByTaskIdOrderByCreatedAtDescIdDesc(Long taskId);
 
     Optional<Job> findTopByTaskIdAndJobTypeOrderByCreatedAtDesc(Long taskId, Job.JobType jobType);
+
+    /** 最近一次该类作业（同刻创建时按 id 兜底）；预检查阻断守卫据此判定（M1 收尾守卫①）。 */
+    Optional<Job> findTopByTaskIdAndJobTypeOrderByCreatedAtDescIdDesc(Long taskId, Job.JobType jobType);
+
+    /** 该任务该类型尚未到终态的作业（互斥守卫判定用，M1 收尾守卫②）。 */
+    Optional<Job> findFirstByTaskIdAndJobTypeAndStatusInOrderByIdDesc(Long taskId, Job.JobType jobType,
+                                                                     Collection<Job.JobStatus> statuses);
 
     List<Job> findByTaskId(Long taskId);
 

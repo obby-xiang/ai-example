@@ -25,6 +25,10 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class JobService {
 
+    /** "在途"作业状态（互斥守卫的判定范围）：到终态（COMPLETED/FAILED/CANCELLED）即不再互斥。 */
+    private static final List<Job.JobStatus> IN_FLIGHT =
+            List.of(Job.JobStatus.PENDING, Job.JobStatus.RUNNING);
+
     private final JobRepository jobRepository;
     private final ValidationIssueRepository issueRepository;
     private final TaskSseService taskSseService;
@@ -32,8 +36,27 @@ public class JobService {
     private final AsyncJobExecutor asyncJobExecutor;
     private final TaskService taskService;
 
+    /**
+     * 建作业并异步执行（REST {@code POST /api/tasks/{id}/jobs} 与 AI 工具的同一入口）。
+     *
+     * <h2>两道入口守卫（M1 收尾棒，S5.a/S5.b 待裁决 #1/#2 的裁决落地）</h2>
+     * <ol>
+     * <li><b>同类互斥 → 409 {@code JOB_ALREADY_RUNNING}</b>（{@link #assertNoJobInFlight}）：
+     *     同任务 + 同类型已有 PENDING/RUNNING 作业时拒绝新建 —— 否则两个导出并发写同一
+     *     {@code task_files(task, def, EXPORT)} 行（后发者覆盖），进度也互不感知；</li>
+     * <li><b>预检查阻断 → 409 {@code PRECHECK_NOT_PASSED}</b>（{@link #assertPrecheckPassed}）：
+     *     IMPORT/PUBLISH 前必须存在一次<b>通过</b>的 PRECHECK —— 否则未通过校验的数据可直接写暂存并发布。</li>
+     * </ol>
+     *
+     * <p>两者都在<b>作业落库之前</b>抛出，故被拒的请求不会留下 PENDING 作业行（不会反过来把互斥守卫钉死）。
+     * 与 DC-11 的 409 串行化风格一致：{@link ConflictException#getCode()} 为机器可读码，由
+     * {@code GlobalExceptionHandler} 转成 409 + {@code code}。
+     */
     @Transactional
     public Job createAndStart(Long taskId, Job.JobType jobType) {
+        assertNoJobInFlight(taskId, jobType);
+        assertPrecheckPassed(taskId, jobType);
+
         Job job = new Job();
         job.setTaskId(taskId);
         job.setJobType(jobType);
@@ -57,6 +80,53 @@ public class JobService {
     public Job findById(Long jobId) {
         return jobRepository.findById(jobId)
                 .orElseThrow(() -> ResourceNotFoundException.of("作业", jobId));
+    }
+
+    /**
+     * 同类互斥守卫（409 {@code JOB_ALREADY_RUNNING}）：同任务 + 同类型已有在途（PENDING/RUNNING）作业 → 拒绝。
+     *
+     * <p>到终态即可再发起；确实需要打断在途作业时走取消通路
+     * （{@link #cancel}，PENDING/RUNNING 均可取消），故不会把任务钉死。
+     */
+    private void assertNoJobInFlight(Long taskId, Job.JobType jobType) {
+        jobRepository.findFirstByTaskIdAndJobTypeAndStatusInOrderByIdDesc(taskId, jobType, IN_FLIGHT)
+                .ifPresent(job -> {
+                    throw new ConflictException("JOB_ALREADY_RUNNING",
+                            "任务 #" + taskId + " 已有同类作业在途：作业 #" + job.getId() + " [" + jobType
+                                    + "] 状态 " + job.getStatus()
+                                    + "（JOB_ALREADY_RUNNING）。并发执行会互相覆盖同一批文件/暂存行，"
+                                    + "请等待其结束，或先取消该作业再发起");
+                });
+    }
+
+    /**
+     * 预检查阻断守卫（409 {@code PRECHECK_NOT_PASSED}）：{@code IMPORT}/{@code PUBLISH} 前必须有一次
+     * <b>COMPLETED 且 errorCount==0</b> 的 PRECHECK。
+     *
+     * <p><b>从严口径</b>（指挥官裁决：先按从严实现，"无 PRECHECK 记录时从严/从宽"见证据文档【待裁决】）：
+     * 该任务没有 PRECHECK 记录、最近一次 PRECHECK 未结束（PENDING/RUNNING）、被取消，
+     * 或已结束但有错误 → 一律拒绝。即"预检查通过"是导入/发布的前置条件，而不是提示。
+     *
+     * <p>EXPORT/PRECHECK 不受本守卫约束（导出读已发布数据、预检查本身即该守卫的前置动作）。
+     *
+     * <p><b>已知边界</b>：判据是"最近一次 PRECHECK"，不追踪"预检查之后上传件是否又被改动"——
+     * 上传件在预检查通过后被替换时，旧的一次通过仍会放行（见证据文档遗留项）。
+     */
+    private void assertPrecheckPassed(Long taskId, Job.JobType jobType) {
+        if (jobType != Job.JobType.IMPORT && jobType != Job.JobType.PUBLISH) {
+            return;
+        }
+        Job precheck = jobRepository
+                .findTopByTaskIdAndJobTypeOrderByCreatedAtDescIdDesc(taskId, Job.JobType.PRECHECK)
+                .orElseThrow(() -> new ConflictException("PRECHECK_NOT_PASSED",
+                        "任务 #" + taskId + " 尚无预检查记录，不能发起 " + jobType
+                                + "（PRECHECK_NOT_PASSED）：请先上传数据文件并执行预检查，通过后再继续"));
+        if (precheck.getStatus() != Job.JobStatus.COMPLETED || precheck.getErrorCount() > 0) {
+            throw new ConflictException("PRECHECK_NOT_PASSED",
+                    "任务 #" + taskId + " 最近一次预检查未通过：作业 #" + precheck.getId() + " 状态 "
+                            + precheck.getStatus() + "，错误数 " + precheck.getErrorCount()
+                            + "（PRECHECK_NOT_PASSED）。请先修复数据并重跑预检查通过后再发起 " + jobType);
+        }
     }
 
     public List<Job> findByTaskId(Long taskId) {

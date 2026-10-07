@@ -1,5 +1,6 @@
 package com.example.configmgr.job.service;
 
+import com.example.configmgr.common.ConflictException;
 import com.example.configmgr.data.entity.ConfigDataRow;
 import com.example.configmgr.data.repo.ConfigDataRowRepository;
 import com.example.configmgr.data.repo.ConfigStagingRowRepository;
@@ -32,6 +33,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * S5.a 用例（移植自 glm-5.3 {@code ImportFlowTest}）：导入全流程 ——
@@ -61,7 +63,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <li>预检查规则：glm 覆盖"必填 / 枚举合法 / 引用依赖 / 范围合法"，本仓库
  *     {@link PrecheckJobRunner} 实际覆盖"必填 / 主键重复 / 引用存在性"（无枚举合法性与范围合法性校验），
  *     故用例 2 的三类规则改为 必填 + 引用 + 主键重复；</li>
- * <li>"校验未通过则拒绝导入"在实现里没有守卫，未移植（见证据文档【待裁决】）。</li>
+ * <li>"校验未通过则拒绝导入"曾因实现里没有守卫而未移植：<b>M1 收尾守卫① 后已补齐</b> ——
+ *     守卫在作业入口 {@link JobService#createAndStart}（IMPORT/PUBLISH 前必须有 COMPLETED 且
+ *     errorCount==0 的 PRECHECK），用例 2 末尾断言该拒绝；正/反例全集见 {@code PrecheckGateGuardTest}。</li>
  * </ul>
  */
 @SpringBootTest
@@ -85,6 +89,8 @@ class ImportFlowJobTest {
 
     @Autowired
     private TaskService taskService;
+    @Autowired
+    private JobService jobService;
     @Autowired
     private TaskRepository taskRepository;
     @Autowired
@@ -163,6 +169,15 @@ class ImportFlowJobTest {
 
         assertThat(taskItemRepository.findByTaskIdOrderBySortOrder(flowTaskId))
                 .allSatisfy(i -> assertThat(i.getStatus()).isEqualTo("FAILED"));
+
+        // M1 收尾守卫①（补齐 glm 的 importRejectedWhileCheckHasError）：预检查未通过时，
+        // 作业入口（JobService#createAndStart）直接拒绝导入 —— 原实现无此守卫，故当时未移植。
+        // 守卫的正/反例全集见 PrecheckGateGuardTest（本类直接驱动执行器，绕过入口守卫）。
+        assertThatThrownBy(() -> jobService.createAndStart(flowTaskId, Job.JobType.IMPORT))
+                .isInstanceOf(ConflictException.class)
+                .satisfies(e -> assertThat(((ConflictException) e).getCode()).isEqualTo("PRECHECK_NOT_PASSED"));
+        assertThat(jobRepository.findByTaskId(flowTaskId))
+                .as("被守卫拒绝时不落导入作业行").hasSize(1);
     }
 
     // ── 用例 3：修数据后重跑预检查 → 通过 ──
