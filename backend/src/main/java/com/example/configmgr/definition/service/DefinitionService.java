@@ -45,8 +45,23 @@ public class DefinitionService {
                 .orElseThrow(() -> ResourceNotFoundException.of("配置定义", code));
     }
 
+    /**
+     * 新建定义（M1 收尾守卫④：编码重复 → 409 {@code DEFINITION_CODE_DUPLICATE}）。
+     *
+     * <p>原先唯一约束命中会抛 {@code DataIntegrityViolationException} → 落到全局处理器的 500 分支，
+     * 报文里带原始 JDBC/SQL 片段（S5.b §6.2 实测）。现改为显式前置校验：
+     * 409 + 机器可读码 + 友好文案（与 {@link #delete} 的 409 口径一致），不泄漏 SQL。
+     * 种子播种路径均先做 {@code existsByCode} 过滤（{@code GlmSeedService}）或整库跳过
+     * （{@code DataSeedRunner}），不受影响。
+     */
     @Transactional
     public ConfigDefinition save(ConfigDefinition definition) {
+        // 编号为空时交给唯一约束/后续校验，这里只拦"已存在的编码"
+        if (definition.getCode() != null && definitionRepository.findByCode(definition.getCode()).isPresent()) {
+            throw new ConflictException("DEFINITION_CODE_DUPLICATE",
+                    "配置定义编码 " + definition.getCode() + " 已存在（DEFINITION_CODE_DUPLICATE），"
+                            + "请换一个编码，或改用更新接口修改该定义");
+        }
         validateFields(definition);
         // Set defCode on all fields
         if (definition.getFields() != null) {
