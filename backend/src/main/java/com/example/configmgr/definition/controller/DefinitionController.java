@@ -14,6 +14,7 @@ import java.io.IOException;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Map;
 
 @RestController
 @RequestMapping("/api/definitions")
@@ -51,6 +52,23 @@ public class DefinitionController {
     public ApiResponse<ConfigDefinition> update(@PathVariable String code,
                                                   @RequestBody ConfigDefinition definition) {
         return ApiResponse.ok(definitionService.update(code, definition));
+    }
+
+    /**
+     * 删除定义（FR-1.4 定义管理；被引用检查与级联策略见 {@link DefinitionService#delete}）。
+     *
+     * <p>有已发布数据 / 被他定义 REFERENCE 引用 / 被进行中任务选中 → 409 + 机器可读码
+     * （{@code DEFINITION_HAS_DATA} / {@code DEFINITION_REFERENCED} / {@code DEFINITION_IN_ACTIVE_TASK}）；
+     * 不存在 → 404。放行时回显级联清理计数，并落一条无主体操作流水（ADR-11b）。
+     */
+    @DeleteMapping("/{code}")
+    public ApiResponse<Map<String, Object>> delete(@PathVariable String code) {
+        DefinitionService.DeleteResult result = definitionService.delete(code);
+        return ApiResponse.ok(Map.of(
+                "code", result.code(),
+                "deleted", true,
+                "cascadedFields", result.cascadedFields(),
+                "cascadedStagingRows", result.cascadedStagingRows()));
     }
 
     @GetMapping("/{code}/template")

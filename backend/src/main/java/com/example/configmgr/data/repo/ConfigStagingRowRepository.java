@@ -20,4 +20,11 @@ public interface ConfigStagingRowRepository extends JpaRepository<ConfigStagingR
     @Modifying
     @Query("DELETE FROM ConfigStagingRow r WHERE r.taskId = :taskId")
     void deleteByTaskId(@Param("taskId") Long taskId);
+
+    /** 定义级清理：该配置的全部暂存行（删除定义时的级联范围）。 */
+    long countByDefCode(String defCode);
+
+    @Modifying
+    @Query("DELETE FROM ConfigStagingRow r WHERE r.defCode = :defCode")
+    void deleteByDefCode(@Param("defCode") String defCode);
 }

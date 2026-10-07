@@ -48,4 +48,7 @@ public interface ConfigDataRowRepository extends JpaRepository<ConfigDataRow, Lo
                       @Param("scopeKey") String scopeKey);
 
     List<ConfigDataRow> findByDefCodeOrderByRowKey(String defCode);
+
+    /** 已发布行数（定义删除的"有数据禁止删除"检查 / 导出作业分母预估）。 */
+    long countByDefCode(String defCode);
 }
