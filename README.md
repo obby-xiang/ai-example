@@ -1,134 +1,229 @@
-# AI 辅助快速实施系统 (ai-example-claude-opus-5.5)
+# AI 辅助配置快速实施平台
 
-一个演示**后端 AI Agent Runtime + 动态配置项管理**的全栈示例项目。
+一个**后端 AI Agent Runtime + 动态配置项管理**的全栈实现：业务侧提供配置定义管理、数据浏览、导入/导出/发布向导与任务中心；AI 侧在对话栏内按页面渐进式披露工具，可驱动业务动作、在对话内渲染结构化表单、并在高风险操作前挂起等待人类确认。
 
-## 架构概览
+- 需求基线：`docs/02-需求设计文档-v2.2-冻结版.md`
+- 技术方案：`docs/03-技术方案文档-v2.1.md`
+- 决策登记：`docs/adr/DECISION-REGISTER.md`（DC-01~15）
+- 全部文档导航：`docs/README.md`
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                     浏览器（Vue3 SPA）                            │
-│  ┌────────────────────────┐    ┌─────────────────────────────┐  │
-│  │  左：业务工作区          │    │  右：AI 对话栏（常驻）         │  │
-│  │  - 任务中心             │◄──►│  - 消息列表                  │  │
-│  │  - 导出向导（4 步）      │    │  - 工具执行卡片              │  │
-│  │  - 导入向导（5 步）      │    │  - HITL 确认卡片            │  │
-│  │  - 配置定义管理         │    │  - 上下文芯片（AI 视野）      │  │
-│  │  - 配置数据浏览         │    │  - 建议快捷按钮              │  │
-│  └────────────┬───────────┘    └──────────────┬──────────────┘  │
-└───────────────┼──────────────────────────────┼─────────────────┘
-                │ REST + SSE                   │
-                ▼                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                   后端 (Spring Boot 3.5.14)                       │
-│  ┌──────────────┐  ┌──────────────────────────────────────────┐  │
-│  │ 业务模块     │  │ AI 模块                                    │  │
-│  │ - 配置定义   │  │ - AiSession (Caffeine 内存，TTL 30min)     │  │
-│  │ - 主数据     │  │ - AgentRuntime (自管工具循环，虚拟线程)      │  │
-│  │ - 配置数据   │  │ - ToolRegistry (按步骤渐进式披露)           │  │
-│  │ - 任务/条目  │  │ - ContextBuilder (工作区快照注入)          │  │
-│  │ - 作业/进度  │  │ - HITL (toolCallId→等待→回填)             │  │
-│  │ - Excel处理  │  │ - SseRunEmitter (AG-UI 事件协议)           │  │
-│  └──────┬───────┘  └───────────────────────┬──────────────────┘  │
-│         └────────────────┬─────────────────┘                     │
-│                          ▼                                        │
-│                   H2 文件数据库                                    │
-│                   (backend/data/)                                 │
-└─────────────────────────────────────────────────────────────────┘
-                           │ OpenAI 兼容 API
-                           ▼
-                  DeepSeek (deepseek-flash)
-```
+---
 
-## 技术栈
-
-| 层 | 技术 | 版本 |
-|---|---|---|
-| 后端框架 | Spring Boot | 3.5.14 |
-| 运行时 | JDK | 21 |
-| AI | Spring AI | 1.1.8 |
-| 数据库 | H2 (文件模式) | 内置 |
-| 前端框架 | Vue 3 | ^3.5 |
-| 构建工具 | Vite | ^7 |
-| 状态管理 | Pinia | ^3 |
-| UI 库 | Element Plus | ^2 |
-| 表格 | GrapeCity SpreadJS | 17.1.5 |
-| 包管理 | yarn (前端) / Maven (后端) | — |
-
-## 项目结构
+## 目录结构
 
 ```
-ai-example-claude-opus-5.5/
-├── backend/          # Spring Boot 后端
-├── frontend/         # Vue3 前端
-└── docs/             # 设计与验证文档
-    ├── requirements.md          # 需求规格说明书
-    ├── technical-design.md      # 技术方案
-    ├── implementation-plan.md   # 实现方案
-    ├── test-cases.md            # 测试用例
-    └── verification-results.md  # 验证结果（运行后填写）
+ai-example-main-v2/
+├── backend/            # Spring Boot 后端（业务模块 + AI Runtime）
+│   ├── pom.xml
+│   ├── maven-settings.xml          # 仓库内 Maven 镜像设置（阿里云，加速拉依赖）
+│   ├── config/application.yml.example   # 本地配置示例（复制为 application.yml 后填密钥，不入库）
+│   └── src/main/java/com/example/configmgr/
+│       ├── ai/         # AI Runtime：config/exec/form/gate/memory/run/session/tool/tools/web
+│       ├── definition/ data/ masterdata/ task/ job/ excel/ file/ seed/   # 业务模块
+│       └── common/ config/
+├── frontend/           # Vue 3 + TypeScript 前端（五页 + 常驻 AI 面板）
+│   ├── package.json  vite.config.ts  .env.example
+│   └── src/{views,components,stores,api,router,types,utils}/
+├── scripts/            # E2E 验证脚本 / CI 上游桩 / 提交前敏感信息钩子（见 scripts/README.md）
+│   ├── verify-e2e.ps1
+│   ├── ci/{stub-upstream.mjs,stub-routes.json}
+│   └── githooks/{pre-commit,scan-history.sh,scan-lib.sh,README.md}
+├── spike/              # 独立可运行 PoC 工程：sp01ab / sp01c / sp01d / sp02
+└── docs/               # 设计、决策与证据（六类分区，见 docs/README.md）
+    ├── 02-需求设计文档-v2.2-冻结版.md   # 现行需求基线
+    ├── 03-技术方案文档-v2.1.md          # 现行技术方案
+    ├── M1-出口评审材料.md  M2-排期计划.md
+    ├── adr/            # 决策：ADR 卡 + DC 登记表
+    ├── s4/             # 合流规格（S4.2 AI Runtime / S4.3 业务机制 / S4.4 前端）
+    ├── evidence/       # 证据：验证记录与原始附件（按主题分组）
+    ├── research/       # 外部设计研究与借鉴
+    ├── spike/          # PoC 决策卡（SP-01ab / 01c / 01d / 02）
+    └── merge/          # 前期合流包（历史阶段产物，勿当现行设计）
+        （另有 5 份源分支遗留参考件：requirements / technical-design /
+          implementation-plan / test-cases / verification-results，同样勿当现行设计）
 ```
+
+---
 
 ## 快速启动
 
 ### 前提条件
-- JDK 21
-- Node.js 18+ + yarn
-- Maven（路径 `D:\Program Files\JetBrains\IntelliJ IDEA\plugins\maven-plugin\lib\maven3\`）
+
+| 依赖 | 要求 | 说明 |
+| --- | --- | --- |
+| JDK | **21** | `pom.xml` 的 `java.version=21` |
+| Maven | 3.9+ | 下文用 `<MAVEN_HOME>` 指代你的 Maven 安装目录（`<MAVEN_HOME>/mvn` 或 Windows 下的 `<MAVEN_HOME>/mvn.cmd`） |
+| Node.js | **22** | 与 CI 一致；包管理用 yarn（仓库内含 `yarn.lock`） |
+| Redis | 7.x 或 Memurai | **AI 功能硬依赖**：会话记忆、确认门挂起态、会话锁都在 Redis。监听 `127.0.0.1:6379` |
+
+> 无 AI key 时后端仍可正常启动，业务功能（导出/导入/发布）完全可用，仅 AI 端点惰性降级为 `503 AI_UNAVAILABLE`；Redis 不可用时业务 API 正常，AI 端点返回 `503 AI_REDIS_UNAVAILABLE`。
 
 ### 启动后端
 
 ```powershell
 cd backend
-$env:DEEPSEEK_API_KEY = "<你的密钥>"   # 详见下方「AI 配置」
-& "D:\Program Files\JetBrains\IntelliJ IDEA\plugins\maven-plugin\lib\maven3\bin\mvn.cmd" clean package -DskipTests -s maven-settings.xml
-java -jar target\config-mgr.jar
-# 访问 http://localhost:8081
+
+# 1) 注入模型密钥（见下方「环境变量」；也可改为 backend/config/application.yml）
+$env:AI_API_KEY = "***"
+
+# 2) 打包（-s 走仓库内的镜像设置文件）
+& "<MAVEN_HOME>/mvn.cmd" clean package -DskipTests -s maven-settings.xml
+
+# 3) 启动，默认端口 8081
+java -jar target/config-mgr.jar
 ```
+
+Linux / macOS 把 `<MAVEN_HOME>/mvn.cmd` 换成 `<MAVEN_HOME>/mvn`，其余同上。启动后可访问 `http://localhost:8081/h2-console` 查看库（连接串见 `application.yml` 的 `spring.datasource.url`）。
 
 ### 启动前端
 
 ```powershell
 cd frontend
+
+# 1) 首次：从示例生成本地环境变量文件（.env.local 已被 .gitignore 排除）
+Copy-Item .env.example .env.local
+
+# 2) 编辑 .env.local —— 关键一项：后端在 8081，而前端 dev 代理默认指向 8080，必须覆盖
+#    VITE_API_BASE=http://localhost:8081
+
 yarn install
 yarn dev
-# 访问 http://localhost:5173
 ```
 
-## AI 配置
+`yarn dev` 后按 `.env.local` 的 `VITE_DEV_PORT`（默认 5200）打开页面。
 
-- 模型：`deepseek-flash`（DeepSeek V4.1-Flash）
-- 接口：`https://api.deepseek.com/chat/completions`（OpenAI 兼容）
-- **API Key 绝不写入版本库**，通过以下任一方式注入：
+---
 
-**方式一：环境变量（推荐）**
+## 环境变量
+
+### 后端（进程环境变量，或 `backend/config/application.yml`）
+
+| 变量 | 作用 | 默认 / 说明 |
+| --- | --- | --- |
+| `AI_API_KEY` | 模型 API Key | 无默认。为空则不装配模型 bean，AI 端点降级 `503 AI_UNAVAILABLE`，业务不受影响 |
+| `DEEPSEEK_API_KEY` | 兜底兼容名 | 仅在 `AI_API_KEY` 未设置时生效 |
+| `AI_BASE_URL` | OpenAI 兼容 base-url | 默认 `https://api.deepseek.com`（接口路径强制 `/chat/completions`） |
+| `AI_MODEL` | 模型名 | 默认 `deepseek-flash` |
+
+密钥**绝不写入版本库**。两种注入方式任选：进程环境变量（如上），或复制 `backend/config/application.yml.example` 为 `backend/config/application.yml` 后填写（该文件已在 `.gitignore` 中排除）。
+
+### 前端（写在 `frontend/.env.local`，由 `.env.example` 复制）
+
+| 变量 | 作用 | 默认 | 注意 |
+| --- | --- | --- | --- |
+| `VITE_API_BASE` | dev server 的 `/api` 代理目标 | `http://localhost:8080` | **默认值与后端端口（8081）错位**，本地开发必须在 `.env.local` 覆盖为 `http://localhost:8081`，否则所有接口 404/连接失败 |
+| `VITE_DEV_PORT` | dev server 端口 | `5200` | 端口被占用时改这里（配置了 `strictPort`，不会自动顺延） |
+| `VITE_SPREADJS_KEY` | SpreadJS 授权 Key | 空 | 留空为评估模式：仅显示水印，功能可用 |
+
+---
+
+## 端口一览
+
+| 服务 | 端口 | 事实源 |
+| --- | --- | --- |
+| 后端 | 8081 | `backend/src/main/resources/application.yml` 的 `server.port` |
+| 前端 dev server | 5200（可用 `VITE_DEV_PORT` 覆盖） | `frontend/vite.config.ts` 的 `DEFAULT_DEV_PORT` |
+| H2 Console | `http://localhost:8081/h2-console` | `spring.h2.console.path` |
+
+---
+
+## 技术栈
+
+| 层 | 技术 | 版本 / 事实源 |
+| --- | --- | --- |
+| 后端框架 | Spring Boot | 3.5.14（`backend/pom.xml` 的 parent） |
+| 运行时 | JDK | 21（`pom.xml` 的 `java.version`） |
+| AI | Spring AI | 1.1.8（`pom.xml` 的 `spring-ai.version`） |
+| 数据库 | H2 文件库 + Flyway 迁移 | 版本随 Spring Boot 管理（`pom.xml` 只声明依赖、不写版本）；迁移脚本 `backend/src/main/resources/db/migration/` |
+| 缓存/会话 | Redis（会话记忆、挂起态、分布式锁） | 外部依赖，见「快速启动」 |
+| 前端框架 | Vue 3 | `^3.5.13`（`frontend/package.json`） |
+| 语言 | TypeScript | `^5.7.2`（纯 JS 禁用） |
+| 构建工具 | Vite | `^6.0.7`（`frontend/package.json`） |
+| 状态管理 | Pinia | `^2.3.0`（`frontend/package.json`） |
+| UI / 样式 | Element Plus + TailwindCSS | `^2.9.3` / `^3.4.17`（`frontend/package.json`） |
+| 表格 | GrapeCity SpreadJS | 17.1.5（`frontend/package.json`） |
+| 包管理 | Maven（后端） / yarn（前端） | — |
+
+---
+
+## 特性清单
+
+### 业务模块
+
+- **任务中心**：任务列表、分页与过滤、进度刷新；
+- **导出向导**：配置定义选择 → 查询条件 → 导出作业 → 打包下载；
+- **导入向导**：模板下载、文件上传与匹配 → 预检查（必填/主键重复/引用存在性）→ 导入 → 发布；
+- **配置定义管理**：动态字段定义（类型/必填/主键/引用）与层级（GLOBAL/REGION/PROJECT）；
+- **数据浏览**：SpreadJS 网格展示与编辑配置数据；
+- **作业与进度**：导出/预检查/导入/发布四类作业异步执行，带进度事件流、取消与僵尸作业恢复；
+- **发布语义**：范围替换（行级 upsert + 范围差集删除）+ 乐观锁冲突检测。
+
+### AI 交互契约
+
+| 能力 | 说明 |
+| --- | --- |
+| 官方工具循环 | 走 Spring AI 官方 `ChatClient` 循环，不自研循环（不启用虚拟线程，并发承载为平台线程 + 有界池） |
+| 渐进式披露 | 工具按页面/任务类型披露（`@ToolScope`），模型只能看到当前上下文可用的工具 |
+| 生成式表单 | `generative_form` 工具 + 前端 `FormRenderer`：对话内渲染结构化表单收集筛选条件或澄清信息；字段类型限六型白名单（text/number/boolean/date/enum/multi_select），禁止 HTML/脚本注入；后端两道闸门（schema 白名单校验 + 回灌类型复核） |
+| 确认门（HITL） | 高风险工具（`start_export` / `start_precheck` / `start_import` / `start_publish`）执行前挂起，渲染确认卡片等待人类放行；拒绝或超时以"未执行"语义回填，工具不执行 |
+| 挂起与回灌 | 前端通道工具（打开导出编辑器、下载文件、跳转、选择定义、设置条件、确认步骤、生成式表单）在后端是哨兵桩，副作用在浏览器，结果经 `POST /api/ai/frontend-tool-result` 回灌续跑 |
+| 取消与续跑 | 轮次取消（`POST /api/ai/cancel/{runId}`）、断线重挂（`GET /api/ai/events/{runId}`，按 `lastSeq` 差量补发）、应用启动自动续跑（仅续"已有人类结论/无需外部输入"的轮次，仍挂起的确认门一律跳过） |
+| 会话与帧契约 | 会话记忆存 Redis（滑动 TTL 6h，非持久化）；同 `sessionId` 串行化（占用中返回 409）；SSE 自有帧契约，业务帧带单调 `seq`，心跳不占业务序号也不入归档 |
+
+---
+
+## 测试与 CI 门禁
+
+### 本地跑法
 
 ```powershell
-$env:DEEPSEEK_API_KEY = "<你的密钥>"
-java -jar target\config-mgr.jar
+# 后端单测（Spring Boot 上下文 + H2 内存库 + Flyway；不依赖 Redis 与 AI key）
+cd backend
+& "<MAVEN_HOME>/mvn.cmd" -B test -s maven-settings.xml
+# 2026-10-08 实测：Tests run: 249, Failures: 0, Errors: 0, Skipped: 0（计数随测试演进，以 mvn test 输出为准）
+
+# 前端类型检查 + 生产构建
+cd frontend
+yarn typecheck      # vue-tsc --noEmit
+yarn build          # 含 vue-tsc + vite build
+
+# 端到端（需后端已启动 + Redis + AI key；27 用例）
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify-e2e.ps1 `
+    -Base http://127.0.0.1:18330 -BackendLog <后端 stdout 日志路径> -ArtifactDir <证据落盘目录>
 ```
 
-**方式二：本地未追踪配置文件**
+E2E 脚本的参数、退出码口径、桩模式（`E2E_STUB_MODE=1` 零容忍）与证据落盘规则见 **`scripts/README.md`**。
 
-```powershell
-# 复制示例后填入密钥；backend/config/application.yml 已在 .gitignore 中排除
-Copy-Item config\application.yml.example config\application.yml
-```
+### CI 三 job（`.github/workflows/ci.yml`）
 
-未配置密钥时，服务仍可正常启动，业务功能（导出/导入/发布）完全可用，仅 AI 对话会提示未配置。
+| job | 内容 | 依赖 |
+| --- | --- | --- |
+| `backend` | JDK 21 + `mvn -B test`（全量单测） | — |
+| `frontend` | Node 22 + `yarn install --frozen-lockfile` + `yarn typecheck` + `yarn build` | — |
+| `e2e` | Redis service 容器 + 桩上游（`scripts/ci/stub-upstream.mjs`）+ `scripts/verify-e2e.ps1` 27 用例 | `backend` |
+
+触发条件为 `push` / `pull_request` 到 `main`，三个 job 均为阻塞门禁。
+
+> **桩的口径（不得扩大解释）**：CI 的 E2E 跑在**上游替身**上，它只证明"桩给出的表单/工具调用被产品链路正确消费"，**不证明模型服从率**；真模型的 E2E 维持本地手动跑。
 
 ### 提交前敏感信息防护
 
-仓库内置 pre-commit 钩子，提交前自动扫描暂存区新增行，命中疑似密钥即阻止提交：
+仓库内置 pre-commit 钩子，提交前扫描暂存区新增行，命中疑似密钥、本机绝对路径或个人用户名即阻断：
 
-```powershell
-git config core.hooksPath scripts/githooks
+```sh
+git config core.hooksPath scripts/githooks   # 仓库根执行一次
 ```
 
+规则、豁免清单、逃生口与全历史扫描见 `scripts/githooks/README.md`。
 
-## 端口规划
+---
 
-| 服务 | 端口 |
-|---|---|
-| 后端 | 8081 |
-| 前端开发服务器 | 5173 |
-| H2 Console | http://localhost:8081/h2-console |
+## 文档怎么读
+
+入口是 **`docs/README.md`**（一张表覆盖需求基线 / 技术方案 / 决策 / 排期 / 规格 / 证据 / 研究 / PoC / legacy 参考件）。三条最短路径：
+
+1. **想知道要做什么** → `docs/02-需求设计文档-v2.2-冻结版.md` §1；
+2. **想改某个机制** → 先查 `docs/adr/DECISION-REGISTER.md` 是否已有生效决策，再读对应 ADR 卡与 `docs/s4/` 规格，最后看 `docs/evidence/` 里的实测证据；
+3. **想知道为什么这么定** → `docs/adr/DECISION-CARDS.md` 与 `docs/spike/` 决策卡（含被否决方案的实测依据）。
+
+本文档只讲"如何跑、如何验、去哪读"，不搬运决策论证。
