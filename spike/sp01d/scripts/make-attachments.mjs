@@ -1,6 +1,7 @@
-// 把 evidence/sp01d-*.json 汇总为脱敏附件，写入 <MAIN_V2>/docs/spike/。
+// 把 evidence/sp01d-*.json 汇总为脱敏附件，写入 <MAIN_REPO>/docs/spike/。
 // 运行：node scripts/make-attachments.mjs
 // 脱敏：绝对路径 → 占位符；API key → ***；用户名 → <USER>
+// 注：本脚本内 sanitize 规则中的本仓路径字面量正则是脱敏匹配源，功能必需，属命名纪律豁免项（DOC#5 裁决），勿按命名纪律改写。
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -10,8 +11,8 @@ fs.mkdirSync(OUT, { recursive: true });
 
 function sanitize(s) {
   return String(s)
-    .replace(/[A-Za-z]:[\\/]+temp[\\/]+ai-example-code[\\/]+ai-example-main-v2/g, '<MAIN_V2>')
-    .replace(/\/e\/temp\/ai-example-code\/ai-example-main-v2/g, '<MAIN_V2>')
+    .replace(/[A-Za-z]:[\\/]+temp[\\/]+ai-example-code[\\/]+ai-example-main-v2/g, '<MAIN_REPO>')
+    .replace(/\/e\/temp\/ai-example-code\/ai-example-main-v2/g, '<MAIN_REPO>')
     .replace(/[A-Za-z]:[\\/]+Program Files[\\/]+JetBrains[\\/][^"'\s\\]*maven3[\\/]+bin/g, '<MAVEN_HOME>')
     .replace(/[A-Za-z]:[\\/]+Program Files[\\/]+Java[\\/][^"'\s\\]*jdk[^"'\s\\]*/g, '<JDK_HOME>')
     .replace(/[A-Za-z]:[\\/]+Users[\\/]+[^\\/]+/g, '<USER_HOME>')
@@ -132,7 +133,7 @@ const probe = fs.existsSync(path.join(EVIDENCE, 'flux-timeout-probe.txt'))
 const attachA = `SP-01d 附件 A：故障注入方法、复现步骤与 Reactor 超时语义探针
 
 一、故障注入方式（不在被验证进程内做任何 mock）
-    官方 ChatModel 的 base-url 指向本 spike 的本地故障代理（<MAIN_V2>/spike/sp01d/scripts/fault-proxy.mjs），
+    官方 ChatModel 的 base-url 指向本 spike 的本地故障代理（<MAIN_REPO>/spike/sp01d/scripts/fault-proxy.mjs），
     代理再转发到真实上游（https://api.deepseek.com）。代理按 SSE 事件边界（"\\n\\n"）转发，
     绝不切碎半个事件；故障通过控制面 POST /__fault 实时切换。
 
@@ -149,7 +150,7 @@ const attachA = `SP-01d 附件 A：故障注入方法、复现步骤与 Reactor 
 
     复现步骤：
       export DEEPSEEK_API_KEY=***        # 仅环境变量，未写入任何文件
-      cd <MAIN_V2>/spike/sp01d && <MAVEN_HOME>/mvn -B clean package
+      cd <MAIN_REPO>/spike/sp01d && <MAVEN_HOME>/mvn -B clean package
       node scripts/fault-proxy.mjs --port 18304 --upstream https://api.deepseek.com --evidence evidence &
       java -jar target/sp01d-resilience-0.0.1-SNAPSHOT.jar \\
            --spring.ai.openai.base-url=http://127.0.0.1:18304 --server.port=18303 --spring.profiles.active=verbose &
@@ -167,7 +168,7 @@ ${sanitize(probe)}
 `;
 
 const attachB = `SP-01d 附件 B：V-d1 断流有界重试 逐 case 实测记录
-（原始数据：<MAIN_V2>/spike/sp01d/evidence/sp01d-vd1-*.json；此处为脱敏摘要）
+（原始数据：<MAIN_REPO>/spike/sp01d/evidence/sp01d-vd1-*.json；此处为脱敏摘要）
 
 ${VD1.filter((n) => fs.existsSync(path.join(EVIDENCE, `sp01d-${n}.json`))).map(caseBlock).join('\n\n')}
 `;

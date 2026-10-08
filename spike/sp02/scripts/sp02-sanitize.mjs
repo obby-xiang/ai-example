@@ -1,5 +1,6 @@
 // 脱敏：把证据文件里的本机绝对路径 / 用户名 / 密钥替换为占位符，并归档到 docs/spike/logs/sp02/。
 //   node sp02-sanitize.mjs <srcDir> <destDir> [--recursive]
+// 注：下方 RULES 中的本仓路径字面量正则是脱敏匹配源，功能必需，属命名纪律豁免项（DOC#5 裁决），勿按命名纪律改写。
 import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -10,8 +11,8 @@ mkdirSync(DEST, { recursive: true });
 
 const RULES = [
   // 顺序敏感：长路径优先
-  [/[A-Za-z]:[\\/]+temp[\\/]+ai-example-code[\\/]+ai-example-main-v2[\\/]+spike[\\/]+sp02/gi, '<MAIN_V2>/spike/sp02'],
-  [/[A-Za-z]:[\\/]+temp[\\/]+ai-example-code[\\/]+ai-example-main-v2/gi, '<MAIN_V2>'],
+  [/[A-Za-z]:[\\/]+temp[\\/]+ai-example-code[\\/]+ai-example-main-v2[\\/]+spike[\\/]+sp02/gi, '<MAIN_REPO>/spike/sp02'],
+  [/[A-Za-z]:[\\/]+temp[\\/]+ai-example-code[\\/]+ai-example-main-v2/gi, '<MAIN_REPO>'],
   [/[A-Za-z]:[\\/]+temp[\\/]+ai-example-code/gi, '<REPO_ROOT>'],
   [/[A-Za-z]:[\\/]+temp/gi, '<REPO_ROOT>'],
   [/[A-Za-z]:[\\/]+Users[\\/]+[^\\/]+[\\/]+\.m2/gi, '<M2_REPO>'],
