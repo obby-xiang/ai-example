@@ -1,7 +1,11 @@
 name: CI 门禁
 
 # S5.d：门禁骨架 = 后端编译 + 后端单测 + 前端类型检查/构建。
-# E2E（scripts/verify-e2e.ps1，依赖 Memurai 与真实 AI key）不在本门禁内，属后续项。
+# M2-T1.2：新增 e2e job（桩上游 + services:redis 容器，跑满 27 用例）。
+#   口径补注（设计草案 §4.3，只补注不改判定）：CI 内的 GFSKIP=0 由构造保证——桩按路由表下发
+#   生成式表单，"模型未触发/schema 漂移"两条 SKIP 分支不可达，故它只证明"桩给出的表单被产品链路
+#   正确消费"，不证明"模型服从率"。真模型的 E2E 维持本地手动（S5d 裁决 #3）；
+#   真实模型证据线的归属见 M2 排期 T4（nightly 真 key job 评估项）。
 on:
   push:
     branches: [main]
@@ -65,3 +69,154 @@ jobs:
 
       - name: 生产构建（vue-tsc + vite build）
         run: yarn build
+
+  # ============================================================
+  # E2E 全流程（M2-T1.2）：路线 a —— services:redis 容器 + 本机桩上游，零密钥、零外网。
+  #   - 阻塞门禁：push→main 与 pull_request→main 均触发（桩的确定性支撑，裁决 #4）
+  #   - needs: backend：后端单测红时不浪费 E2E 机时（裁决 #8）
+  #   - AI_API_KEY 是固定占位串而非密钥：后端可用性判据只看 key 是否非空（AiAvailability），
+  #     故 workflow 内不存在任何仓库密钥引用
+  #   - 跑的是**打包 jar**而非 mvn spring-boot:run：stdout 可整条重定向给 -BackendLog，
+  #     脚本的日志类断言按行匹配，不能被 Maven 的 [INFO] 行污染
+  #   - 后端工作目录在仓库外（$RUNNER_TEMP），保证运行后仓库工作区不留 data/ 与上传件
+  #   - 证据目录取 backend/target/e2e-artifacts：target 已被 .gitignore 排除，
+  #     故 job 结束后 git status --porcelain 仍为空（验收 #5）；且路径在 workspace 内，
+  #     满足 upload-artifact 只能归档 workspace 内文件的限制
+  # ============================================================
+  e2e:
+    name: E2E 全流程（27 用例 · 桩上游 + redis）
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: backend
+    env:
+      E2E_STUB_MODE: '1'
+    services:
+      redis:
+        image: redis:7
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: 安装 JDK 21（temurin）
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          cache-dependency-path: backend/pom.xml
+
+      # 固定 Node 版本（红队问题 6②）：桩是纯 ESM 零依赖单文件，但不应依赖 runner 镜像预装版本的
+      # 偶然可用性（R7 镜像迁移风险）——与全仓 actions 主版本口径一致。
+      - name: 安装 Node 22
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: 打包后端（跳过单测：单测已由 backend job 全量跑过）
+        run: mvn -B -DskipTests package
+
+      # 桩自身先自证：路由表契约、与 GenerativeFormRules 的白名单对账、收敛性、SSE 帧形态。
+      # 桩坏与产品坏的区分靠这一步 + 运行期的 req-*.decision.json（设计草案 §9 R1）。
+      - name: 桩上游自检（路由契约 / 白名单对账 / 收敛自证）
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci/stub-upstream.mjs --self-check
+
+      - name: 启动桩上游（127.0.0.1:18399）
+        working-directory: ${{ github.workspace }}
+        run: |
+          mkdir -p backend/target/e2e-artifacts/stub
+          # 崩溃栈保证落盘（红队问题 2）：tee 双写——既进 stub.log（artifact），也进作业控制台（首屏可见）。
+          # 用进程替换而非 `node … | tee`，是为了让 `$!` 仍是 node 的 PID（管道形式下 $! 会是 tee 的 PID，
+          # 收尾 kill 会杀错进程）。桩内部另有 fs.writeSync 同步兜底，两道保险互为补充。
+          nohup node scripts/ci/stub-upstream.mjs --port 18399 \
+            --dir "$GITHUB_WORKSPACE/backend/target/e2e-artifacts/stub" \
+            > >(tee -a backend/target/e2e-artifacts/stub.log) 2>&1 &
+          echo $! > backend/target/e2e-artifacts/stub.pid
+          sleep 2
+          curl -sS -m 5 http://127.0.0.1:18399/probe
+
+      - name: 启动后端（占位 key + 桩上游 + 工作目录在仓库外）
+        working-directory: ${{ github.workspace }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/e2e-run"
+          cd "$RUNNER_TEMP/e2e-run"
+          AI_API_KEY=ci-stub-placeholder \
+          AI_BASE_URL=http://127.0.0.1:18399 \
+          AI_MODEL=ci-stub \
+          nohup java -jar "$GITHUB_WORKSPACE/backend/target/config-mgr.jar" \
+            --server.port=18330 \
+            --spring.datasource.url="jdbc:h2:file:./data/ci_e2e_db;DB_CLOSE_DELAY=-1" \
+            --app.job.batch-size=10 \
+            --app.job.demo-batch-delay-ms=150 \
+            > "$GITHUB_WORKSPACE/backend/target/e2e-artifacts/boot.log" 2>&1 &
+          echo $! > "$GITHUB_WORKSPACE/backend/target/e2e-artifacts/backend.pid"
+
+      # 把"环境坏"与"用例失败"分开：无 key 时 /health 回 503 AI_UNAVAILABLE、
+      # Redis 不可用时回 503 AI_REDIS_UNAVAILABLE；本步不过就直接失败，不让 27 个用例全红。
+      - name: 就绪等待（/api/ai/health：available + redis.available）
+        working-directory: ${{ github.workspace }}
+        run: |
+          for i in $(seq 1 90); do
+            body=$(curl -s -m 3 http://127.0.0.1:18330/api/ai/health || true)
+            # 用 jq 判定而非 grep（红队问题 7）：不依赖 Jackson 序列化的空格/键序形态
+            if echo "$body" | jq -e '.available == true and .redis.available == true' >/dev/null 2>&1; then
+              echo "后端就绪：$body"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::后端 90s 内未就绪（/api/ai/health 未同时满足 available 与 redis.available）"
+          tail -n 80 backend/target/e2e-artifacts/boot.log
+          exit 1
+      # T12-E#8：health 双 true 只证明 AI 链路可用，不证明种子已提交（seedIfAbsent 带 @Transactional，日志行早于提交），故以 TC1 判据轮询。
+      - name: 种子就绪等待（/api/definitions 的 data 长度 ≥ 15）
+        working-directory: ${{ github.workspace }}
+        run: |
+          for i in $(seq 1 60); do
+            n=$(curl -s -m 3 http://127.0.0.1:18330/api/definitions | jq '.data | length' 2>/dev/null || echo 0)
+            if [ "${n:-0}" -ge 15 ]; then echo "种子就绪：定义数=$n"; exit 0; fi
+            sleep 1
+          done
+          echo "::error::60s 内 /api/definitions 未达 15（基座 7 + glm 8），种子播种未完成"; tail -n 40 backend/target/e2e-artifacts/boot.log; exit 1
+
+      - name: 运行 E2E（27 用例）
+        # 去掉 run 内的 `pwsh -NoProfile -File` 双层调用（红队问题 6①）：step 已经声明 shell: pwsh，
+        # 直接以 pwsh 原生方式调用脚本；脚本内的 `exit N` 会成为 pwsh 进程退出码并被 shell 模板透传为 step 退出码。
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          ./scripts/verify-e2e.ps1 `
+            -Base http://127.0.0.1:18330 `
+            -BackendLog "$env:GITHUB_WORKSPACE/backend/target/e2e-artifacts/boot.log" `
+            -ArtifactDir "$env:GITHUB_WORKSPACE/backend/target/e2e-artifacts/gfc"
+
+      # 失败归因三件套：boot.log（产品日志）+ stub/req-*.json（桩收到的原请求与判定）+ gfc-*（脚本实收帧）。
+      # 与 S5d 裁决 #2"CI 运行日志不归档"的对象不同（那是匿名取作业日志需 admin 权限），不构成翻案。
+      # 版本核对（2026-10-08）：本仓其余 actions 一律取 v5（仓库现行 major 口径，设计草案 §2.1），
+      #   故此处也取 v5；upload-artifact 自身的最新 major 是 v7（v1/v2/v3 已弃用，v5 不在其列），
+      #   若要跟随该 action 自身最新 major，只改这一行即可。
+      - name: 归档证据（失败也归档，保留 7 天）
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: e2e-evidence
+          path: backend/target/e2e-artifacts
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: 收尾（结束后端与桩进程）
+        if: always()
+        working-directory: ${{ github.workspace }}
+        run: |
+          dir=backend/target/e2e-artifacts
+          for f in "$dir/backend.pid" "$dir/stub.pid"; do
+            if [ -f "$f" ]; then kill "$(cat "$f")" 2>/dev/null || true; fi
+          done

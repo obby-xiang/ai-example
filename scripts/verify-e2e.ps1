@@ -414,12 +414,12 @@ function Get-DisclosureMap {
     return $map
 }
 
-$tmp = Join-Path $env:TEMP ('s5b-e2e-' + [Guid]::NewGuid().ToString('N'))
+$tmp = Join-Path ([IO.Path]::GetTempPath()) ('s5b-e2e-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 
 # GF 证据落盘目录（裁决 #4 / 设计稿 §6）：优先用 -ArtifactDir（执行棒指定仓库外目录），
 # 否则在系统临时目录下新建 gfc-artifacts-<guid>（同样是仓库外）。
-if (-not $ArtifactDir) { $ArtifactDir = Join-Path $env:TEMP ('gfc-artifacts-' + [Guid]::NewGuid().ToString('N')) }
+if (-not $ArtifactDir) { $ArtifactDir = Join-Path ([IO.Path]::GetTempPath()) ('gfc-artifacts-' + [Guid]::NewGuid().ToString('N')) }
 New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
 $script:gfArtifactDir = (Resolve-Path -LiteralPath $ArtifactDir).Path
 
@@ -1540,7 +1540,7 @@ try {
     Gf-Dump 'GF1' $turn.frames
     Ok 'GF1 FILTER 表单：schema 下发→值回灌 200→FRONTEND_RESULT→pending 终态→值回显（会话记忆通道，断言对象=实际回灌值）'
 } catch {
-    if ($_.Exception.Message -like 'GF-SKIP:*') { Gf-Skip 'GF1' $_.Exception.Message.Substring(8) }
+    if ($_.Exception.Message -like 'GF-SKIP:*') { Gf-Skip 'GF1' $_.Exception.Message.Substring(8); Gf-Dump 'GF1' $turn.frames }
     else { Gf-Converge $script:gf1Run $script:gf1Call; Gf-Dump 'GF1' $turn.frames; No 'GF1' $_.Exception.Message }
 }
 
@@ -1624,7 +1624,7 @@ try {
     Gf-Dump 'GF2' $turn.frames
     Ok 'GF2 CLARIFY 表单：schema 下发→值回灌 200→续跑回显（会话记忆通道，断言对象=实际回灌值）+ fixture 自删'
 } catch {
-    if ($_.Exception.Message -like 'GF-SKIP:*') { Gf-Skip 'GF2' $_.Exception.Message.Substring(8) }
+    if ($_.Exception.Message -like 'GF-SKIP:*') { Gf-Skip 'GF2' $_.Exception.Message.Substring(8); Gf-Dump 'GF2' $turn.frames }
     else { Gf-Converge $script:gf2Run $script:gf2Call; Gf-Dump 'GF2' $turn.frames; No 'GF2' $_.Exception.Message }
 }
 
@@ -1718,7 +1718,7 @@ try {
     Gf-Dump 'GF3' $turn.frames
     Ok 'GF3 取消路径：cancelled:true→FRONTEND_CANCELLED 终态（帧/pending/日志三面一致）+ 模型收尾'
 } catch {
-    if ($_.Exception.Message -like 'GF-SKIP:*') { Gf-Skip 'GF3' $_.Exception.Message.Substring(8) }
+    if ($_.Exception.Message -like 'GF-SKIP:*') { Gf-Skip 'GF3' $_.Exception.Message.Substring(8); Gf-Dump 'GF3' $turn.frames }
     else { Gf-Converge $script:gf3Run $script:gf3Call; Gf-Dump 'GF3' $turn.frames; No 'GF3' $_.Exception.Message }
 }
 
@@ -1825,7 +1825,7 @@ try {
     Gf-Dump 'GF4' (@($turn.frames) + @($cont))
     Ok 'GF4 复核拒绝：违规值 400（PENDING 保持/3s 无帧）→同 toolCallId 改值重发 200→续跑回显'
 } catch {
-    if ($_.Exception.Message -like 'GF-SKIP:*') { Gf-Skip 'GF4' $_.Exception.Message.Substring(8) }
+    if ($_.Exception.Message -like 'GF-SKIP:*') { Gf-Skip 'GF4' $_.Exception.Message.Substring(8); Gf-Dump 'GF4' $turn.frames }
     else { Gf-Converge $script:gf4Run $script:gf4Call; Gf-Dump 'GF4' $turn.frames; No 'GF4' $_.Exception.Message }
 }
 
@@ -1867,7 +1867,7 @@ try {
     Gf-Dump 'GF5' $null
     Ok 'GF5 幂等 409 双向：值路径/取消路径重复回灌均 409 DUPLICATE（终态不改写、无新帧）'
 } catch {
-    if ($_.Exception.Message -like 'GF-SKIP:*') { Gf-Skip 'GF5' $_.Exception.Message.Substring(8) }
+    if ($_.Exception.Message -like 'GF-SKIP:*') { Gf-Skip 'GF5' $_.Exception.Message.Substring(8); Gf-Dump 'GF5' $null }
     else { Gf-Dump 'GF5' $null; No 'GF5' $_.Exception.Message }
 }
 
@@ -2179,8 +2179,16 @@ try {
 
 Say '============================================================'
 Say (" 结果：PASS={0}  FAIL={1}  （22 既有 + GF 新增）" -f $script:passed, $script:failed)
-Say (" GFSKIP={0}  （模型未触发 SKIP，不计退出码；GF1–GF4 全部 SKIP 判整棒 FAIL，裁决 #1）" -f $script:gfskip)
+# GFSKIP 摘要口径（红队问题 5）：文案随模式分支，与下方判定分支保持一致（纯文案，不改判定）
+$gfskipNote = if ($env:E2E_STUB_MODE -eq '1') {
+    '桩模式零容忍：GFSKIP≥1 即整棒 FAIL（上游是确定性替身，任何 SKIP 都属桩路由或产品链路异常）'
+} else {
+    '模型未触发 SKIP，不计退出码；GF1–GF4 全部 SKIP 判整棒 FAIL，裁决 #1'
+}
+Say (" GFSKIP={0}  （{1}）" -f $script:gfskip, $gfskipNote)
 Say (" Q8 项：PASS={0}  FAIL={1}  （不计入 22 用例，见 docs/evidence/S5b-deepseek-E2E移植验证.md）" -f $script:q8pass, $script:q8fail)
 Say '============================================================'
+# 桩模式零容忍（M2-T1.2 裁决 T12-E#1，环境变量 E2E_STUB_MODE=1）：上游是确定性替身，CI 中任何 GF SKIP 都意味着桩路由或产品链路异常，故 GFSKIP≥1 即整棒 FAIL；真 key 本地手动跑法不设该变量，语义不变。
+if ($env:E2E_STUB_MODE -eq '1' -and $script:gfskip -ge 1) { exit 1 }
 # 硬底线（裁决 #1）：GF1–GF4 全部 SKIP ⇒ 本棒零有效验证，整棒 FAIL（退出码 1）
 if ($script:failed -gt 0 -or $script:gfskip14 -ge 4) { exit 1 }
