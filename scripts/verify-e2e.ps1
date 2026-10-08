@@ -564,18 +564,18 @@ try {
     $j3x = Start-JobOf $t3x 'EXPORT'
     $s3x = Wait-Job $j3x.id
     if ($s3x.status -ne 'COMPLETED') { throw "基件导出失败: $($s3x.status)" }
-    $baseSys = "$tmp\sysparam_base.xlsx"; [IO.File]::WriteAllBytes($baseSys, (GetBytes "/api/tasks/$t3x/files/SYS_PARAM"))
-    $baseAlarm = "$tmp\alarm_base.xlsx"; [IO.File]::WriteAllBytes($baseAlarm, (GetBytes "/api/tasks/$t3x/files/ALARM_THRESHOLD"))
-    $baseNet = "$tmp\regionnet_base.xlsx"; [IO.File]::WriteAllBytes($baseNet, (GetBytes "/api/tasks/$t3x/files/REGION_NETWORK"))
+    $baseSys = (Join-Path $tmp 'sysparam_base.xlsx'); [IO.File]::WriteAllBytes($baseSys, (GetBytes "/api/tasks/$t3x/files/SYS_PARAM"))
+    $baseAlarm = (Join-Path $tmp 'alarm_base.xlsx'); [IO.File]::WriteAllBytes($baseAlarm, (GetBytes "/api/tasks/$t3x/files/ALARM_THRESHOLD"))
+    $baseNet = (Join-Path $tmp 'regionnet_base.xlsx'); [IO.File]::WriteAllBytes($baseNet, (GetBytes "/api/tasks/$t3x/files/REGION_NETWORK"))
 
     # 缺陷 1+2：SYS_PARAM 第 2 行 paramValue（B2）清空 = 必填缺失；第 3 行 paramKey（A3）改成 A2 的值 = 主键重复
-    $badSys = "$tmp\sysparam_bad.xlsx"
+    $badSys = (Join-Path $tmp 'sysparam_bad.xlsx')
     Edit-XlsxCells $baseSys $badSys ([ordered]@{ 'B2' = $null; 'A3' = 'param.1' })
     # 缺陷 3：ALARM_THRESHOLD 第 2 行 metricCode（B2）改为不存在的指标 = 引用不存在
-    $badAlarm = "$tmp\alarm_bad.xlsx"
+    $badAlarm = (Join-Path $tmp 'alarm_bad.xlsx')
     Edit-XlsxCells $baseAlarm $badAlarm ([ordered]@{ 'B2' = 'metric.999' })
     # 缺陷 4：REGION_NETWORK 第 2 行 regionCode（A2）清空 = 范围（key+必填）缺失
-    $badNet = "$tmp\regionnet_bad.xlsx"
+    $badNet = (Join-Path $tmp 'regionnet_bad.xlsx')
     Edit-XlsxCells $baseNet $badNet ([ordered]@{ 'A2' = $null })
 
     $t3 = New-ImportTask 'S5B-TC3-缺陷数据' @('SYS_PARAM', 'ALARM_THRESHOLD', 'REGION_NETWORK')
@@ -630,7 +630,7 @@ try {
     }
     $bytes = GetBytes "/api/tasks/$($script:tExp4)/files/CURRENCY"
     if ($bytes.Length -lt 1000 -or $bytes[0] -ne 0x50 -or $bytes[1] -ne 0x4B) { throw 'xlsx 魔数错误' }
-    [IO.File]::WriteAllBytes("$tmp\CURRENCY_full.xlsx", $bytes)
+    [IO.File]::WriteAllBytes((Join-Path $tmp 'CURRENCY_full.xlsx'), $bytes)
 
     $task4 = GetJson "/api/tasks/$($script:tExp4)"
     if ($task4.status -ne 'COMPLETED') { throw "任务态 $($task4.status)" }
@@ -674,7 +674,7 @@ try {
     $s5b = Wait-Job $j5b.id
     if ($s5b.status -ne 'COMPLETED') { throw "3 行子集导出失败: $($s5b.status)" }
     $bytes5b = GetBytes "/api/tasks/$t5b/files/CURRENCY"
-    [IO.File]::WriteAllBytes("$tmp\CURRENCY_3rows.xlsx", $bytes5b)
+    [IO.File]::WriteAllBytes((Join-Path $tmp 'CURRENCY_3rows.xlsx'), $bytes5b)
     $f5b = @((GetJson "/api/tasks/$t5b/files" | Where-Object { $_.defCode -eq 'CURRENCY' }))
     if ($f5b[0].rowCount -ne 3) { throw "3 行子集 rowCount=$($f5b[0].rowCount)" }
 
@@ -690,15 +690,15 @@ try {
 Say '--- TC6 打包下载（勾选 + 全量） ---'
 try {
     $bytes = GetBytes "/api/tasks/$($script:tExp4)/files/download?codes=CURRENCY,REGION_NETWORK"
-    [IO.File]::WriteAllBytes("$tmp\pkg.zip", $bytes)
-    $names = Zip-Entries "$tmp\pkg.zip"
+    [IO.File]::WriteAllBytes((Join-Path $tmp 'pkg.zip'), $bytes)
+    $names = Zip-Entries (Join-Path $tmp 'pkg.zip')
     if ($names.Count -ne 2) { throw "条目数 $($names.Count)，期望 2" }
     foreach ($code in @('CURRENCY', 'REGION_NETWORK')) {
         if (@($names | Where-Object { $_ -like "$code*" }).Count -ne 1) { throw "缺少 $code 的条目（$($names -join '|')）" }
     }
     $all = GetBytes "/api/tasks/$($script:tExp4)/files/download-all"
-    [IO.File]::WriteAllBytes("$tmp\pkg-all.zip", $all)
-    $namesAll = Zip-Entries "$tmp\pkg-all.zip"
+    [IO.File]::WriteAllBytes((Join-Path $tmp 'pkg-all.zip'), $all)
+    $namesAll = Zip-Entries (Join-Path $tmp 'pkg-all.zip')
     if ($namesAll.Count -ne 3) { throw "全量打包条目数 $($namesAll.Count)，期望 3" }
     Ok 'TC6 勾选打包（2 条目）与全量打包（3 条目）均正确'
 } catch { No 'TC6' $_.Exception.Message }
@@ -713,10 +713,10 @@ Say '--- TC7 导入模板下载 ---'
 try {
     $single = GetBytes "/api/tasks/$($script:tExp4)/files/templates?codes=CURRENCY"
     if ($single.Length -lt 500 -or $single[0] -ne 0x50 -or $single[1] -ne 0x4B) { throw '单个模板非 xlsx' }
-    [IO.File]::WriteAllBytes("$tmp\tpl_single.xlsx", $single)
+    [IO.File]::WriteAllBytes((Join-Path $tmp 'tpl_single.xlsx'), $single)
     $zipped = GetBytes "/api/tasks/$($script:tExp4)/files/templates?codes=CURRENCY,DOC_TYPE"
-    [IO.File]::WriteAllBytes("$tmp\tpl.zip", $zipped)
-    $names = Zip-Entries "$tmp\tpl.zip"
+    [IO.File]::WriteAllBytes((Join-Path $tmp 'tpl.zip'), $zipped)
+    $names = Zip-Entries (Join-Path $tmp 'tpl.zip')
     if ($names.Count -ne 2) { throw "模板 zip 条目数 $($names.Count)" }
     $defTpl = GetBytes '/api/definitions/CURRENCY/template'
     if ($defTpl.Length -lt 500 -or $defTpl[0] -ne 0x50 -or $defTpl[1] -ne 0x4B) { throw '定义级模板非 xlsx' }
@@ -734,29 +734,29 @@ try {
     $t8 = New-ImportTask 'S5B-TC8-文件名匹配' @('CURRENCY', 'DOC_TYPE')
     # (a) zip：一个可匹配 + 一个不可匹配
     $entries = [ordered]@{}
-    $entries['CURRENCY_e2e.xlsx'] = [IO.File]::ReadAllBytes("$tmp\CURRENCY_full.xlsx")
-    $entries['UNKNOWN_CFG.xlsx'] = ([IO.File]::ReadAllBytes("$tmp\CURRENCY_full.xlsx"))[0..63]
-    $zipPath = "$tmp\up1.zip"
+    $entries['CURRENCY_e2e.xlsx'] = [IO.File]::ReadAllBytes((Join-Path $tmp 'CURRENCY_full.xlsx'))
+    $entries['UNKNOWN_CFG.xlsx'] = ([IO.File]::ReadAllBytes((Join-Path $tmp 'CURRENCY_full.xlsx')))[0..63]
+    $zipPath = (Join-Path $tmp 'up1.zip')
     New-ZipFile $zipPath $entries
     $rep = Upload-File $t8 $zipPath 'up1.zip'
     if (@($rep.matchedFiles).Count -ne 1) { throw "zip 匹配数 $(@($rep.matchedFiles).Count)" }
     if (@($rep.unmatchedFiles | Where-Object { $_ -like 'UNKNOWN_CFG*' }).Count -ne 1) { throw '未匹配文件未报告' }
     # (b) 单文件前缀命名（编码_名称.xlsx）
-    [IO.File]::WriteAllBytes("$tmp\DOC_TYPE_e2e.xlsx", (GetBytes "/api/tasks/$($script:tExp4)/files/DOC_TYPE"))
-    $rep2 = Upload-File $t8 "$tmp\DOC_TYPE_e2e.xlsx" 'DOC_TYPE_名称.xlsx'
+    [IO.File]::WriteAllBytes((Join-Path $tmp 'DOC_TYPE_e2e.xlsx'), (GetBytes "/api/tasks/$($script:tExp4)/files/DOC_TYPE"))
+    $rep2 = Upload-File $t8 (Join-Path $tmp 'DOC_TYPE_e2e.xlsx') 'DOC_TYPE_名称.xlsx'
     if ($rep2.count -ne 1 -or $rep2.defCode -ne 'DOC_TYPE') { throw "单文件前缀匹配失败: $($rep2.defCode)" }
     # (c) 无法匹配的单文件 → 400
-    Copy-Item "$tmp\CURRENCY_full.xlsx" "$tmp\SOMETHING.xlsx" -Force
-    $bad = Skip-Upload $t8 "$tmp\SOMETHING.xlsx" 'SOMETHING.xlsx'
+    Copy-Item (Join-Path $tmp 'CURRENCY_full.xlsx') (Join-Path $tmp 'SOMETHING.xlsx') -Force
+    $bad = Skip-Upload $t8 (Join-Path $tmp 'SOMETHING.xlsx') 'SOMETHING.xlsx'
     if ($bad.ok -or -not ($bad.text -like '*无法从文件名匹配配置编码*')) { throw "无法匹配的单文件未被拒（HTTP $($bad.status)）" }
     # (d) zip 全部不可匹配 → 400
     $entries2 = [ordered]@{}
-    $entries2['ZZZ.xlsx'] = [IO.File]::ReadAllBytes("$tmp\CURRENCY_full.xlsx")
-    New-ZipFile "$tmp\up2.zip" $entries2
-    $bad2 = Skip-Upload $t8 "$tmp\up2.zip" 'up2.zip'
+    $entries2['ZZZ.xlsx'] = [IO.File]::ReadAllBytes((Join-Path $tmp 'CURRENCY_full.xlsx'))
+    New-ZipFile (Join-Path $tmp 'up2.zip') $entries2
+    $bad2 = Skip-Upload $t8 (Join-Path $tmp 'up2.zip') 'up2.zip'
     if ($bad2.ok -or -not ($bad2.text -like '*没有可匹配的文件*')) { throw "全不匹配 zip 未被拒（HTTP $($bad2.status)）" }
     # (e) 源脚本支持的"(1) 序号后缀"在 main 不被识别 → 断言被拒绝
-    $bad3 = Skip-Upload $t8 "$tmp\SOMETHING.xlsx" 'CURRENCY(1).xlsx'
+    $bad3 = Skip-Upload $t8 (Join-Path $tmp 'SOMETHING.xlsx') 'CURRENCY(1).xlsx'
     if ($bad3.ok) { throw '"(1) 后缀"命名被接受（main 语义为不支持）' }
     Ok 'TC8 zip 匹配/未匹配报告/前缀命名/非法命名拒绝均正确（序号后缀语义见映射说明）'
 } catch { No 'TC8' $_.Exception.Message }
@@ -774,13 +774,13 @@ try {
     $j9x = Start-JobOf $t9x 'EXPORT'
     $s9x = Wait-Job $j9x.id
     if ($s9x.status -ne 'COMPLETED') { throw "基件导出失败: $($s9x.status)" }
-    [IO.File]::WriteAllBytes("$tmp\metric_ok.xlsx", (GetBytes "/api/tasks/$t9x/files/METRIC_DICT"))
-    [IO.File]::WriteAllBytes("$tmp\alarm_ok.xlsx", (GetBytes "/api/tasks/$t9x/files/ALARM_THRESHOLD"))
+    [IO.File]::WriteAllBytes((Join-Path $tmp 'metric_ok.xlsx'), (GetBytes "/api/tasks/$t9x/files/METRIC_DICT"))
+    [IO.File]::WriteAllBytes((Join-Path $tmp 'alarm_ok.xlsx'), (GetBytes "/api/tasks/$t9x/files/ALARM_THRESHOLD"))
 
     # 选中顺序故意"依赖方在前"，用于验证后端拓扑排序
     $t9 = New-ImportTask 'S5B-TC9-检查通过' @('ALARM_THRESHOLD', 'METRIC_DICT')
-    Upload-File $t9 "$tmp\alarm_ok.xlsx" 'ALARM_THRESHOLD_ok.xlsx' | Out-Null
-    Upload-File $t9 "$tmp\metric_ok.xlsx" 'METRIC_DICT_ok.xlsx' | Out-Null
+    Upload-File $t9 (Join-Path $tmp 'alarm_ok.xlsx') 'ALARM_THRESHOLD_ok.xlsx' | Out-Null
+    Upload-File $t9 (Join-Path $tmp 'metric_ok.xlsx') 'METRIC_DICT_ok.xlsx' | Out-Null
     $j9 = Start-JobOf $t9 'PRECHECK'
     $s9 = Wait-Job $j9.id
     if ($s9.status -ne 'COMPLETED') { throw "检查应为 COMPLETED，实际 $($s9.status)（error=$($s9.errorCount)）" }
@@ -876,7 +876,7 @@ try {
     if ($before.content.Count -ne 5) { throw "前置行数 $($before.content.Count)，期望 5" }
 
     $script:t12 = New-ImportTask 'S5B-TC12-草稿隔离' @('CURRENCY')
-    Upload-File $script:t12 "$tmp\CURRENCY_3rows.xlsx" 'CURRENCY_3rows.xlsx' | Out-Null
+    Upload-File $script:t12 (Join-Path $tmp 'CURRENCY_3rows.xlsx') 'CURRENCY_3rows.xlsx' | Out-Null
     $jPre12 = Start-JobOf $script:t12 'PRECHECK'
     $sPre12 = Wait-Job $jPre12.id
     if ($sPre12.status -ne 'COMPLETED' -or $sPre12.errorCount -ne 0) {
@@ -993,7 +993,7 @@ try {
 
     # ③ 放行侧 + 不误删不变量：预检查通过后可发布，但暂存集为空 → 生效数据零变化
     $t14b = New-ImportTask 'S5B-TC14-空暂存' @('DOC_TYPE') 'REPLACE'
-    Upload-File $t14b "$tmp\DOC_TYPE_e2e.xlsx" 'DOC_TYPE_ok.xlsx' | Out-Null
+    Upload-File $t14b (Join-Path $tmp 'DOC_TYPE_e2e.xlsx') 'DOC_TYPE_ok.xlsx' | Out-Null
     $j14bPre = Start-JobOf $t14b 'PRECHECK'
     $s14bPre = Wait-Job $j14bPre.id
     if ($s14bPre.status -ne 'COMPLETED' -or $s14bPre.errorCount -ne 0) {
@@ -1924,7 +1924,7 @@ Say '--- TC17 HITL：发布需确认（拒绝/确认） ---'
 try {
     # 准备一个"已导入待发布"的导入任务
     $script:t17 = New-ImportTask 'S5B-TC17-HITL' @('DOC_TYPE')
-    Upload-File $script:t17 "$tmp\DOC_TYPE_e2e.xlsx" 'DOC_TYPE_ok.xlsx' | Out-Null
+    Upload-File $script:t17 (Join-Path $tmp 'DOC_TYPE_e2e.xlsx') 'DOC_TYPE_ok.xlsx' | Out-Null
     $j17pre = Start-JobOf $script:t17 'PRECHECK'
     if ((Wait-Job $j17pre.id).status -ne 'COMPLETED') { throw 'TC17 前置预检查未通过' }
     $j17imp = Start-JobOf $script:t17 'IMPORT'
@@ -2036,7 +2036,7 @@ try {
     # ② 串行化：会话 C 挂起在确认门时，第二轮请求 → 409
     #    fixture：全新导入任务（预检查通过 + 已导入待发布，从未发布过）
     $t18 = New-ImportTask 'S5B-TC18-串行化' @('DOC_TYPE')
-    Upload-File $t18 "$tmp\DOC_TYPE_e2e.xlsx" 'DOC_TYPE_ok.xlsx' | Out-Null
+    Upload-File $t18 (Join-Path $tmp 'DOC_TYPE_e2e.xlsx') 'DOC_TYPE_ok.xlsx' | Out-Null
     $j18pre = Start-JobOf $t18 'PRECHECK'
     if ((Wait-Job $j18pre.id).status -ne 'COMPLETED') { throw 'TC18 前置预检查未通过' }
     $j18imp = Start-JobOf $t18 'IMPORT'
@@ -2128,7 +2128,7 @@ try {
 
     # 演示数据恢复：CURRENCY 回到 5 行
     $restore = New-ImportTask 'S5B-恢复-CURRENCY' @('CURRENCY') 'REPLACE'
-    Upload-File $restore "$tmp\CURRENCY_full.xlsx" 'CURRENCY_restore.xlsx' | Out-Null
+    Upload-File $restore (Join-Path $tmp 'CURRENCY_full.xlsx') 'CURRENCY_restore.xlsx' | Out-Null
     $jr1 = Start-JobOf $restore 'PRECHECK'
     if ((Wait-Job $jr1.id).status -ne 'COMPLETED') { throw '恢复件预检查未通过' }
     $jr2 = Start-JobOf $restore 'IMPORT'
