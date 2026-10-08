@@ -1,5 +1,5 @@
 # ============================================================
-# E2E 验证脚本（main 版）：动态配置管理系统 全流程 22 用例
+# E2E 验证脚本（main 版）：动态配置管理系统 全流程 27 用例
 #
 # 移植来源：<REPO_ROOT>/ai-example-code/ai-example-deepseek-v4-pro/scripts/verify-e2e.ps1
 #           （685 行 / TC1–TC22 共 22 用例）。用例编号与源脚本一一对照，
@@ -14,7 +14,15 @@
 #
 # 用法：
 #   powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify-e2e.ps1 `
-#       -Base http://127.0.0.1:18330 -BackendLog <后端 stdout 日志路径>
+#       -Base http://127.0.0.1:18330 -BackendLog <后端 stdout 日志路径> `
+#       [-ArtifactDir <GF 证据落盘目录>] [-EnableGf6]
+#   -ArtifactDir 指定后，每个 GF 用例把实收 SSE 帧与回灌 POST 原文落 gfc-<case>.sse.txt /
+#     gfc-<case>.http.txt；-EnableGf6 启用可选观察用例 GF6（不计入主计数）。
+#
+# 桩模式（CI 路线，M2-T1.2）：先置 E2E_STUB_MODE=1 再用同一脚本调用——上游换成
+#   scripts/ci/stub-upstream.mjs 确定性替身，此时 GFSKIP≥1 即整棒 FAIL（零容忍：桩下任何
+#   SKIP 都属桩路由或产品链路异常，不可能由"模型未触发"引起）；真 key 本地手动跑法不设该
+#   变量，SKIP 语义不变（模型未触发，不计退出码）。
 #
 # 后端启动约定（本脚本的断言依赖，脚本自身不启动后端）：
 #   - AI key 经环境变量注入（AI_API_KEY，兼容 DEEPSEEK_API_KEY）；缺 key 时 AI 用例判 FAIL
@@ -29,9 +37,13 @@
 # 数据面安全：本脚本只创建/删除自己的 S5B-* 任务与 E2E_TEMP 定义；
 #   CURRENCY 演示数据在 TC13 会被替换为 3 行，TC19 用全量导出件恢复为 5 行。
 #
-# 结果口径：22 个用例（TC1–TC22）计入 PASS/FAIL 与退出码（有失败即 exit 1）；
-#   移植期缺陷清单（Q8）的两项断言单列计数（Q8 项 PASS/FAIL），不计入退出码
+# 结果口径：27 个用例计入 PASS/FAIL 与退出码（有失败即 exit 1）——TC1–TC22 共 22 个
+#   （由源脚本移植而来）+ GF1–GF5 共 5 个（生成式表单端到端，设计稿 docs/evidence/
+#   GFc-E2E用例设计-GLM-5.3.md）；GF6 为可选观察用例（-EnableGf6），不计入主计数；
+#   移植期缺陷清单（Q8）的两项断言单列计数（Q8 项 PASS/FAIL），不计入 27 用例与退出码
 #   —— Q8② 属日志质量问题，具体残留见 docs/evidence/S5b-deepseek-E2E移植验证.md
+# 退出码：任一主用例 FAIL ⇒ exit 1；GF1–GF4 全部 SKIP（本棒零有效验证，硬底线）⇒ exit 1；
+#   E2E_STUB_MODE=1 且 GFSKIP≥1 ⇒ exit 1（桩模式零容忍）
 # ============================================================
 param(
     [string]$Base = 'http://127.0.0.1:18330',
@@ -2142,7 +2154,7 @@ try {
 } catch { No 'TC19' $_.Exception.Message }
 
 # ============================================================
-# Q8 项回归（移植期缺陷清单的日志/明细类断言；不计入 22 用例，单独计数）
+# Q8 项回归（移植期缺陷清单的日志/明细类断言；不计入主用例计数，单独计数）
 #   Q8① 未上传文件的导入批次写 issues 明细抛 NoSuchFileException → main 明细仅落库，不应出现
 #   Q8② GlobalExceptionHandler 对 SSE 请求二次写 JSON（日志噪音）→ 修复后可断言日志无此噪音
 # ============================================================
@@ -2178,7 +2190,7 @@ try {
 } catch { Q8-No 'Q8 项回归' $_.Exception.Message }
 
 Say '============================================================'
-Say (" 结果：PASS={0}  FAIL={1}  （22 既有 + GF 新增）" -f $script:passed, $script:failed)
+Say (" 结果：PASS={0}  FAIL={1}  （主用例计数，含 TC1–TC22 与 GF1–GF5；基数不写死，随用例演进）" -f $script:passed, $script:failed)
 # GFSKIP 摘要口径（红队问题 5）：文案随模式分支，与下方判定分支保持一致（纯文案，不改判定）
 $gfskipNote = if ($env:E2E_STUB_MODE -eq '1') {
     '桩模式零容忍：GFSKIP≥1 即整棒 FAIL（上游是确定性替身，任何 SKIP 都属桩路由或产品链路异常）'
@@ -2186,7 +2198,7 @@ $gfskipNote = if ($env:E2E_STUB_MODE -eq '1') {
     '模型未触发 SKIP，不计退出码；GF1–GF4 全部 SKIP 判整棒 FAIL，裁决 #1'
 }
 Say (" GFSKIP={0}  （{1}）" -f $script:gfskip, $gfskipNote)
-Say (" Q8 项：PASS={0}  FAIL={1}  （不计入 22 用例，见 docs/evidence/S5b-deepseek-E2E移植验证.md）" -f $script:q8pass, $script:q8fail)
+Say (" Q8 项：PASS={0}  FAIL={1}  （不计入主用例计数，见 docs/evidence/S5b-deepseek-E2E移植验证.md）" -f $script:q8pass, $script:q8fail)
 Say '============================================================'
 # 桩模式零容忍（M2-T1.2 裁决 T12-E#1，环境变量 E2E_STUB_MODE=1）：上游是确定性替身，CI 中任何 GF SKIP 都意味着桩路由或产品链路异常，故 GFSKIP≥1 即整棒 FAIL；真 key 本地手动跑法不设该变量，语义不变。
 if ($env:E2E_STUB_MODE -eq '1' -and $script:gfskip -ge 1) { exit 1 }

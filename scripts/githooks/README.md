@@ -30,7 +30,7 @@ git config --unset core.hooksPath      # 停用
 | `PATH` | 本机绝对路径：盘符路径（`<DRIVE>:\...`、`<DRIVE>:/...`）与 Git Bash 挂载路径（`/<盘符>/...`，盘符 c~h） |
 | `USER` | 个人用户名：动态取 `git config user.name`，并拆出按 `. _ - @ 空格` 分隔、长度 >=4 的片段；只在**正文**里查，文件路径与提交信息不参与匹配；命中片段两侧必须是非字母数字（依赖包名里恰好包含该片段时不算命中） |
 
-扫描范围是 `git diff --cached -U0` 的 `+` 行（新增/修改内容）。文档类文件（`*.md`/`*.log`/`*.txt`）按 DC-08 全量查本机路径；代码文件同样检查，但注释里的尖括号占位符不计（见第 3 节）。
+扫描范围由**调用方**决定，三条规则本身不按文件类型区分：`pre-commit` 只扫 `git diff --cached -U0` 的 `+` 行（本次新增/修改内容）——**历史遗留且本次未改动的违规行不会阻断提交**；`scan-history.sh` 按 blob 扫**整份文件内容**（因此 `docs/evidence/` 附件里保存的命令行/日志原文，其历史版本同样会被翻出）。尖括号占位符在任何入口都不计（见第 3 节）。
 
 ## 3. 豁免（不会报的点）
 
@@ -73,7 +73,7 @@ scripts/githooks/scan-history.sh --max-size 512   # 跳过 >512KB 的 blob（默
 
 输出中每条命中附该历史版本的 blob 短 sha，可用 `git cat-file blob <sha>` 复核；行号对应该 blob 内容，与当前工作树行号可能不同。命中退出码为 1（便于 CI 门禁）。
 
-性能：串行逐个 blob 读取，本仓库 1464 个 blob 需数分钟；`--files-only` 不改变扫描耗时，`--max-size` 调小可跳过体积较大的文档快照。
+性能：串行逐个 blob 读取，本仓库唯一 blob 约 2000 个（2026-10-08 实测：`git rev-list --objects --all` 可达对象 4172 个 —— blob 1987 / tree 1939 / commit 246；1987 个 blob 全部在默认 2048KB 体积上限内），需数分钟；`--files-only` 不改变扫描耗时，`--max-size` 调小可跳过体积较大的文档快照。
 
 ## 5.1 与 DC-08 已知冲突点（合流前必看）
 
@@ -85,12 +85,12 @@ scripts/githooks/scan-history.sh --max-size 512   # 跳过 >512KB 的 blob（默
 
 - 钩子以 `#!/bin/sh` 运行（Git Bash 提供 sh）。脚本必须保持 **LF 行尾**，被 CRLF 改写会出现 `bad interpreter` 或 `\r` 相关报错。本目录已随附 `.gitattributes`（`* text eol=lf`）强制固化——本机系统级 `core.autocrlf=true`（Git for Windows 默认）会把没有该声明的脚本改写成 CRLF，导致钩子静默失效；
 - 若在别处新增脚本，请确认 `git check-attr eol -- <路径>` 输出 `lf`；
-- 本机 `core.filemode=false`（Git for Windows 默认），仓库里钩子按 `100644` 保存。Git 只在钩子**可执行**时才运行它，因此在 Linux/CI 检出后需补一次权限：`chmod +x scripts/githooks/pre-commit scripts/githooks/scan-history.sh scripts/githooks/scan-lib.sh`；若要固化进版本库，用 `git update-index --chmod=+x scripts/githooks/pre-commit scripts/githooks/scan-history.sh scripts/githooks/scan-lib.sh` 后随提交一起入库；
+- 可执行位已在版本库中固化：三个脚本按 `100755` 入库（实测 `git ls-files -s scripts/githooks/` → `pre-commit` / `scan-history.sh` / `scan-lib.sh` 均为 `100755`），Linux/CI 检出后即可直接执行，**无需补 `chmod +x`**。本机 `core.filemode=false`（Git for Windows 默认）只影响本机后续改动是否记录权限变化，不影响已入库的权限位；
 - `core.hooksPath` 必须是**相对仓库根**的路径（本仓库为 `scripts/githooks`）。写成盘符绝对路径在换机器/换目录后必然失效，也违反 DC-08；
 - 环境变量写法：Git Bash 用 `AI_SECRETS_ALLOW=1 git commit ...`；PowerShell 用 `$env:AI_SECRETS_ALLOW=1; git commit ...`（仅当前会话有效）；
 - `user.name` 取的是本地配置；一台机器上有多个身份时，确认取到的是需要保护的那个用户名（可用 `git config --show-origin user.name` 核对）；
 - 路径规则同时覆盖盘符写法与 Git Bash 挂载写法，因此同一台机器上两种写法都拦得住；
-- IDE/图形客户端可能自动附加 `--no-verify`，不要依赖钩子作为唯一防线，CI 侧建议再跑一次 `scan-history.sh` 兜底。
+- IDE/图形客户端可能自动附加 `--no-verify`，不要依赖钩子作为唯一防线；CI 侧再跑一次 `scan-history.sh` 兜底——**该建议已升级为待实施项**：见 `docs/M2-排期计划.md` T4「文档一致性门禁」子项（把 `scan-history.sh` 接进 CI）。在该项落地之前，CI 侧没有全历史扫描的自动门禁，只有本地手动跑法。
 
 ## 7. 维护与自测
 
