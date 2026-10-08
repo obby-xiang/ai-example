@@ -27,8 +27,11 @@ export type PendingStatus =
   | 'FRONTEND_RESULT'
   /** T2a-D#2（C2）：前端工具取消终态（用户放弃/渲染器不可用），结局帧 status 实发值 */
   | 'FRONTEND_CANCELLED'
+  /** 整轮取消（ConfirmGate#cancel 落地）实发值；T2a 返修（S1）起映射到 cancelled 终态 */
   | 'CANCELLED'
   | 'EXECUTED'
+  /** 入参被 schema 安全闸拒绝（SpToolCallingManager#rejectFrontendArguments）实发值，T2a 返修（S1）补入 */
+  | 'REJECTED_ARGUMENTS'
   /** DC-14 T1：防线③（执行兜底）拦截 —— 越 scope 的工具调用未执行 */
   | 'BLOCKED'
 

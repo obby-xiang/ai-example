@@ -235,6 +235,10 @@
               <el-tag v-else-if="m.pendingCall.status === 'rejected'" size="small" type="info">已拒绝</el-tag>
               <el-tag v-else-if="m.pendingCall.status === 'expired'" size="small" type="info">会话已失效</el-tag>
               <el-tag v-else-if="m.pendingCall.status === 'cancelled'" size="small" type="info">已取消</el-tag>
+              <!-- T2a 返修（S6）：新增 status 显式给口径 —— blocked 是"越 scope 未执行"，
+                   不得落 else 的"已执行"（与 generative_form 分支的 rejected||blocked 口径对齐） -->
+              <el-tag v-else-if="m.pendingCall.status === 'succeeded'" size="small" type="success">已执行</el-tag>
+              <el-tag v-else-if="m.pendingCall.status === 'blocked'" size="small" type="warning">未执行（超出范围）</el-tag>
               <el-tag v-else size="small" type="success">已执行</el-tag>
             </div>
 
@@ -404,8 +408,10 @@ const liveForm = computed(() => {
 })
 
 /**
- * T2a-D#3：FormRenderer 的宿主消息 —— 最后一条持该 toolCallId 挂起投影的消息。
+ * T2a-D#3：FormRenderer 的宿主消息 —— 最后一条持该 toolCallId 且**仍在途**的挂起投影的消息。
  * 同一 toolCallId 的挂起可能残留在多条消息上（历史/重挂形态），但表单只渲染一份。
+ * T2a 返修（S5）：宿主候选限定 pending/running/approved —— 终态残留消息
+ * （cancelled/succeeded/blocked/expired）不作宿主，防表单挂到已决消息上。
  */
 const formHostMessageId = computed(() => {
   const toolCallId = liveForm.value?.toolCallId
@@ -413,7 +419,9 @@ const formHostMessageId = computed(() => {
     return null
   }
   for (let i = ai.messages.length - 1; i >= 0; i -= 1) {
-    if (ai.messages[i]?.pendingCall?.toolCallId === toolCallId) {
+    const pending = ai.messages[i]?.pendingCall
+    if (pending?.toolCallId === toolCallId
+      && (pending.status === 'pending' || pending.status === 'running' || pending.status === 'approved')) {
       return ai.messages[i].id
     }
   }

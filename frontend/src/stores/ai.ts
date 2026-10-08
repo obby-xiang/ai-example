@@ -162,13 +162,26 @@ function readActionRecord(payload: unknown): WorkspaceActionRecord | null {
   }
 }
 
-/** T2a-D#2（C2）：帧/响应体 status（后端 PendingStatus 大写口径）→ pendingCall.status（小写展示态）。 */
+/**
+ * T2a-D#2（C2）：帧/响应体 status（后端 PendingStatus 大写口径）→ pendingCall.status（小写展示态）。
+ * 映射必须穷举后端经 `frontend_tool_result` / 409 响应体**实发**的 status：本函数是帧/响应体
+ * status 到 pendingCall 终态的唯一翻译层，漏一支就会被 handler 的兜底（置 null）吞成"卡片消失"。
+ */
 function frameStatusToPendingStatus(status: unknown): PendingToolCall['status'] | null {
   switch (status) {
     case 'FRONTEND_RESULT':
       return 'succeeded'
     case 'FRONTEND_CANCELLED':
       return 'cancelled'
+    case 'CANCELLED':
+      // T2a 返修（S1）：run-cancel 路径实发值 —— ConfirmGate.cancel 把仍 PENDING 的条目标为
+      // CANCELLED（reason=RUN_CANCELLED），SseChatEmitter#frontendToolResult 取 getStatus() 入帧。
+      // 与 form-cancel 的 FRONTEND_CANCELLED 同收 cancelled 终态，两条取消路径不再分叉
+      return 'cancelled'
+    case 'REJECTED_ARGUMENTS':
+      // T2a 返修（S1）：入参被 schema 安全闸拒绝的实发值
+      // （SpToolCallingManager#rejectFrontendArguments，未挂起/未执行），语义同 REJECTED
+      return 'rejected'
     case 'TIMEOUT':
       return 'expired'
     case 'REJECTED':
@@ -182,10 +195,11 @@ function frameStatusToPendingStatus(status: unknown): PendingToolCall['status'] 
 
 /**
  * T2a-D#2：该 pendingCall.status 是否已是终态。集合**含** `cancelled` —— 本地乐观 cancelled
- * 也算终态：用户取消后同一 toolCallId 不应再被重新挂起，`openGenerativeForm` 的入口守卫据此
- * 把后到的同 toolCallId 帧挡在挂起之外，防"取消竞态重挂"成一张 filling 死卡。
- * 帧终态覆盖乐观 cancelled 属**写入路径**（`applyPendingTerminal` 只覆盖 pending/cancelled 条目），
- * 与本函数的**入口拦截**语义互不冲突。
+ * 也算终态：用户取消后同一 toolCallId 不应再被重新挂起，`frontend_tool_request` case 的入口
+ * 守卫（`hasDecidedPendingResidue`）据此把后到的同 toolCallId 帧挡在**任何新挂起投影**之外，
+ * 防"取消竞态重挂"成一张 filling 死卡。
+ * 帧终态覆盖乐观 cancelled 属**写入路径**（`applyFrontendToolTerminal` 只覆盖 pending/cancelled
+ * 条目），与本函数的**入口拦截**语义互不冲突。
  */
 function isFrameDecidedPendingStatus(status: PendingToolCall['status']): boolean {
   return status === 'succeeded' || status === 'rejected' || status === 'blocked'
@@ -655,7 +669,9 @@ export const useAiStore = defineStore('ai', {
           const bodyStatus = error.bodyAs<{ status?: unknown }>()?.status
           const mapped = frameStatusToPendingStatus(bodyStatus)
           if (mapped) {
-            this.applyPendingTerminal(toolCallId, mapped)
+            // T2a 返修（S2）：与 frontend_tool_result 帧同口径 —— 终态保留只限 generative_form，
+            // 通用 FRONTEND 工具就地收掉挂起投影
+            this.applyFrontendToolTerminal(toolCallId, mapped)
           }
           this.notice = cancelled ? '该工具调用已是终态（幂等拒绝）' : '该工具结果已回灌过（幂等拒绝）'
           return { ok: false, duplicate: true }
@@ -676,6 +692,18 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
+     * T2a-D#3（B3 防御守卫）/ T2a 返修（S3）：该 toolCallId 是否已有**已决**的 pendingCall 投影
+     * （终态判定看全部消息，含本次帧即将写入的那条）。调用方必须在写入新挂起投影**之前**用它判定
+     * —— 已决 toolCallId 不得产生任何新 pending 投影（含 message.pendingCall / suspended / activeForm）。
+     */
+    hasDecidedPendingResidue(toolCallId: string): boolean {
+      return this.messages.some(
+        (item) => item.pendingCall?.toolCallId === toolCallId
+          && isFrameDecidedPendingStatus(item.pendingCall.status)
+      )
+    },
+
+    /**
      * GF-B：generative_form 帧到达 → 防御性解析 schema。
      * 合法：挂到会话态进"等待用户填写"（AiPanel 渲染 FormRenderer），并按帧带时限武装本地超时；
      * 非法 / 缺 runId（渲染器不可用的任何异常路径）：带 cancelled:true 回灌，挂起立刻收敛
@@ -685,16 +713,11 @@ export const useAiStore = defineStore('ai', {
       message: ChatMessage,
       frame: Extract<SseFrame, { type: 'frontend_tool_request' }>
     ): void {
+      // T2a-D#3（B3 防御守卫）/ T2a 返修（S3）："已决 toolCallId 不挂起"的守卫由**调用方**在
+      // 写入 message.pendingCall **之前**前置执行（`hasDecidedPendingResidue`，见
+      // frontend_tool_request case）—— 放在这里会太晚：投影已被写成 'pending'，
+      // reattach 回放会先渲染一张瞬时"表单状态已丢失"卡，再等后续结局帧收敛。
       disarmFormExpiry()
-      // T2a-D#3（B3 防御守卫）：该 toolCallId 已有帧终态则不挂起 —— 防回放把已决
-      // 条目重新武装成一张 filling 死卡（终态判定看全部消息的 pendingCall 投影）
-      const residue = this.messages.find(
-        (item) => item.pendingCall?.toolCallId === frame.toolCallId
-          && isFrameDecidedPendingStatus(item.pendingCall.status)
-      )
-      if (residue) {
-        return
-      }
       const args = message.pendingCall?.args ?? parseToolArgs(frame.args)
       const spec = parseFormSchema(args?.form)
       const runId = frame.runId ?? this.activeRunId
@@ -985,6 +1008,12 @@ export const useAiStore = defineStore('ai', {
           break
         }
         case 'frontend_tool_request': {
+          if (frame.name === 'generative_form' && this.hasDecidedPendingResidue(frame.toolCallId)) {
+            // T2a 返修（S3）：守卫前移到挂起投影写入**之前** —— 已决 toolCallId 不产生任何新
+            // pending 投影（不写 message.pendingCall、不置 suspended、不武装 activeForm），
+            // 防 reattach 回放先渲染一张瞬时挂起卡、再等后续结局帧收敛
+            break
+          }
           this.suspended = true
           message.pendingCall = this.toPendingCall(frame, 'FRONTEND')
           if (frame.name === 'generative_form') {
@@ -1017,20 +1046,10 @@ export const useAiStore = defineStore('ai', {
           })
           // T2a-D#1/D#2：帧 status 广播**只作用 pendingCall 投影**，且只覆盖仍处
           // pending/乐观 cancelled 的条目（广播域守卫）；帧终态为最终裁决（A2）。
-          const terminal = frameStatusToPendingStatus(frame.status)
-          if (terminal) {
-            this.applyPendingTerminal(frame.toolCallId, terminal)
-          } else if (frame.ok) {
-            this.applyPendingTerminal(frame.toolCallId, 'succeeded')
-          } else {
-            // 旧后端帧无 status 且 ok=false：保持既有"收掉挂起卡"语义（不入 cancelled 域）
-            for (const item of this.messages) {
-              if (item.pendingCall?.toolCallId === frame.toolCallId
-                && (item.pendingCall.status === 'pending' || item.pendingCall.status === 'cancelled')) {
-                item.pendingCall = null
-              }
-            }
-          }
+          // T2a 返修（S2）：终态**保留**只限 generative_form —— 通用 FRONTEND 工具
+          // （navigate_to 等）维持基线"收掉挂起卡"语义（结局由 toolRun 卡承载，留着会多一张卡）。
+          const terminal = frameStatusToPendingStatus(frame.status) ?? (frame.ok ? 'succeeded' : null)
+          this.applyFrontendToolTerminal(frame.toolCallId, terminal)
           if (this.activeForm?.toolCallId === frame.toolCallId) {
             // 结局帧已到：表单收敛（提交/取消/超时皆自此收尾）。
             // T2a-D#2（B2 缓释）：帧到达时本地仍在填写（未在提交在途）→ 该表单已被他端提交/处理
@@ -1132,6 +1151,37 @@ export const useAiStore = defineStore('ai', {
           && (pending.status === 'pending' || pending.status === 'cancelled')) {
           pending.status = status
         }
+      }
+    },
+
+    /**
+     * T2a 返修（S2）：`frontend_tool_result` 帧 / 409 响应体的终态投影。与
+     * {@link applyPendingTerminal} 的差别是**只对 generative_form 保留终态卡**：通用 FRONTEND
+     * 工具（navigate_to / download_export_file 等）的结局由 toolRun 卡承载，基线语义是
+     * "收掉挂起投影"（pendingCall = null），保留会与 toolRun 卡叠成一张冗余"已执行"卡。
+     * 判定依据取投影自身的既有字段（kind + name），不依赖帧字段（帧缺 name 也不误判）。
+     * `status === null` = 帧未给可翻译终态且 ok=false（旧后端口径）：沿用基线收卡。
+     */
+    applyFrontendToolTerminal(toolCallId: string, status: PendingToolCall['status'] | null): void {
+      for (const item of this.messages) {
+        const pending = item.pendingCall
+        if (!pending || pending.toolCallId !== toolCallId) {
+          continue
+        }
+        if (pending.kind !== 'FRONTEND' || pending.name !== 'generative_form') {
+          // 通用 FRONTEND 工具：基线语义 —— 收掉挂起投影（终态由 toolRun 卡展示）
+          item.pendingCall = null
+          continue
+        }
+        if (pending.status !== 'pending' && pending.status !== 'cancelled') {
+          // 已落定的终态不被后续帧改写（first-wins 单调）
+          continue
+        }
+        if (status === null) {
+          item.pendingCall = null
+          continue
+        }
+        pending.status = status
       }
     },
 

@@ -24,6 +24,14 @@ import { writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
+// ── S7（红队建议）：断言②③ 的计数与点击依赖 UI **文案**，属已知的脆弱耦合 —— 集中在此处 ──
+// 来源：FormRenderer.vue 的两个操作按钮（"取消"/"提交"）、AiPanel.vue 表单卡的取消终态 tag
+//       （"表单已取消"）。任一处文案变更而未同步本表，冒烟会静默误报（计不到 = 断言误判）。
+// T2b 候选改造：按 data-testid / 组件实例定位，解掉文案耦合（本轮不做，仅集中 + 注释）。
+const TEXT_SUBMIT = '提交'
+const TEXT_CANCEL = '取消'
+const TEXT_FORM_CANCELLED = '表单已取消'
+
 const OUT = process.env.SMOKE_OUT ?? new URL('../../m2t2a-smoke-out', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')
 // Chrome 可执行文件不写死盘符：SMOKE_CHROME 优先，缺省按 ProgramFiles 环境变量组装
 const CHROME = process.env.SMOKE_CHROME
@@ -130,12 +138,12 @@ function injectExpr(runId, toolCallId, n) {
 const countExpr = (toolCallId) => `(() => {
   const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
   return {
-    formRendererCount: [...document.querySelectorAll('button')].filter(b => b.textContent.trim() === '提交').length,
-    cancelButtons: [...document.querySelectorAll('button')].filter(b => b.textContent.trim() === '取消').length,
+    formRendererCount: [...document.querySelectorAll('button')].filter(b => b.textContent.trim() === '${TEXT_SUBMIT}').length,
+    cancelButtons: [...document.querySelectorAll('button')].filter(b => b.textContent.trim() === '${TEXT_CANCEL}').length,
     pendingCards: ai.messages.filter(m => m.pendingCall && m.pendingCall.toolCallId === '${toolCallId}').length,
     pendingStatuses: ai.messages.filter(m => m.pendingCall && m.pendingCall.toolCallId === '${toolCallId}').map(m => m.pendingCall.status),
     activeFormStatus: ai.activeForm ? ai.activeForm.status : null,
-    cancelledTags: [...document.querySelectorAll('.el-tag')].filter(e => e.textContent.trim() === '表单已取消').length
+    cancelledTags: [...document.querySelectorAll('.el-tag')].filter(e => e.textContent.trim() === '${TEXT_FORM_CANCELLED}').length
   }
 })()`
 
@@ -165,7 +173,7 @@ try {
 
   // ── 阶段 2：取消 → 断言③所有消息 pendingCall.status 收敛 cancelled ──────
   await evaluate(`(() => {
-    const btn = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === '取消')
+    const btn = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === '${TEXT_CANCEL}')
     btn.click(); return !!btn
   })()`)
   let c2 = null
