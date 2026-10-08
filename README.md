@@ -12,7 +12,7 @@
 ## 目录结构
 
 ```
-ai-example-main-v2/
+<REPO_ROOT>/
 ├── backend/            # Spring Boot 后端（业务模块 + AI Runtime）
 │   ├── pom.xml
 │   ├── maven-settings.xml          # 仓库内 Maven 镜像设置（阿里云，加速拉依赖）

@@ -1,7 +1,7 @@
 # 文档治理批（DOC#1~#4）施工与对账 —— 施工方 DS-V4-Flash
 
 > 批次：ai-example 合流项目文档治理批 DOC#1~#4　日期：2026-10-08
-> 仓库/分支：`ai-example-main-v2` / `main`，基线 HEAD = `9de199d`（docs: M2 排期 v1.2）
+> 仓库/分支：`<REPO_ROOT>` / `main`，基线 HEAD = `9de199d`（docs: M2 排期 v1.2）
 > 施工性质：**只执行不重新裁决**。审计已钉死的漂移清单逐项原文复核后执行；拿不准的一律列【待裁决】，不自行补方案。
 > 纪律遵守：**零 git 写操作**（无 add/commit/push/stash/restore），全部改动保持未提交；全中文写作；全部脱敏（`<REPO_ROOT>`/`<MAVEN_HOME>` 占位、无盘符字面量、密钥一律 `***`）。
 > 复核原则：每处事实改动前亲自读引用源（`pom.xml` / `package.json` / `application.yml` / `vite.config.ts` / 相关 Java 类 / `git ls-files` 实测），**不照抄审计提示词里的数字**；实测值与本提示词不一致时以实测为准并在第 4 节记录偏差。
