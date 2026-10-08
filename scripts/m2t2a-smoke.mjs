@@ -13,6 +13,10 @@
 //
 // 三断言（全部 PASS 退出码 0，任一 FAIL 退出码 1）：
 //   ① 挂起中刷新后页面只有一张表单卡（单卡）
+//      【T2b 占位】断言① 现为**回归守卫**——只断言"刷新后单卡 + 无 FormRenderer"，
+//      对 T2a 前后形态不判别（两形态在该计数口径下均呈单卡，仅卡内语义/续填不同）；
+//      T2b（快照重建 / 刷新续填）落地后须升级为**含后端历史/重放场景的形态**
+//      （按 runId 重放历史帧后再刷新复验）。来源：GLM 复核 F5 / 返修决策卡勘误 5。
 //   ② 同一 toolCallId 不出现双份 FormRenderer（同 toolCallId 至多一个表单实例）
 //   ③ 取消后所有持该 toolCallId 的消息 pendingCall.status 收敛为 cancelled
 //
@@ -201,6 +205,9 @@ try {
   console.log('[阶段3 刷新后]', JSON.stringify(postRefresh))
   // 刷新后 activeForm 不进镜像（T2a 范围外，T2b 刷新续填）：卡应为单张挂起卡
   // （后端历史为空 → pending 按既有规则降级 expired 展示，仍只此一张）
+  // 【T2b 占位·GLM 复核 F5 / 勘误 5】断言① 现为回归守卫（对 T2a 前后形态不判别：后端历史为空，
+  // 两形态同落"单卡 + 无 FormRenderer"）；T2b 落地后须升级为含后端历史/重放场景的形态——
+  // 先按 runId 注入/重放历史帧再刷新，断言续填语义（而非仅计数）。
   assert('①', postRefresh.pendingCards === 1 && postRefresh.formRendererCount === 0,
     { pendingCards: postRefresh.pendingCards, formRendererCount: postRefresh.formRendererCount, pendingStatuses: postRefresh.pendingStatuses })
 
