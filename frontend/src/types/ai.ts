@@ -210,7 +210,12 @@ export interface PendingToolCall {
    * 倒计时优先用它（不受本地时钟漂移/重挂延迟影响）；缺字段才回落到 timeoutSeconds。
    */
   expiresAt?: number
-  status: 'pending' | 'running' | 'approved' | 'rejected' | 'expired'
+  /**
+   * T2a-D#2：帧 status → pendingCall.status 终态映射的落点（FRONTEND_RESULT→succeeded /
+   * FRONTEND_CANCELLED→cancelled / TIMEOUT→expired / REJECTED→rejected / BLOCKED→blocked），
+   * 另保留本地确认/执行过程的 running/approved。
+   */
+  status: 'pending' | 'running' | 'approved' | 'rejected' | 'expired' | 'cancelled' | 'succeeded' | 'blocked'
 }
 
 /** 页签级会话镜像（sessionStorage）写入形态。 */

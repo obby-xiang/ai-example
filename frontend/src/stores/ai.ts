@@ -162,6 +162,36 @@ function readActionRecord(payload: unknown): WorkspaceActionRecord | null {
   }
 }
 
+/** T2a-D#2（C2）：帧/响应体 status（后端 PendingStatus 大写口径）→ pendingCall.status（小写展示态）。 */
+function frameStatusToPendingStatus(status: unknown): PendingToolCall['status'] | null {
+  switch (status) {
+    case 'FRONTEND_RESULT':
+      return 'succeeded'
+    case 'FRONTEND_CANCELLED':
+      return 'cancelled'
+    case 'TIMEOUT':
+      return 'expired'
+    case 'REJECTED':
+      return 'rejected'
+    case 'BLOCKED':
+      return 'blocked'
+    default:
+      return null
+  }
+}
+
+/**
+ * T2a-D#2：该 pendingCall.status 是否已是终态。集合**含** `cancelled` —— 本地乐观 cancelled
+ * 也算终态：用户取消后同一 toolCallId 不应再被重新挂起，`openGenerativeForm` 的入口守卫据此
+ * 把后到的同 toolCallId 帧挡在挂起之外，防"取消竞态重挂"成一张 filling 死卡。
+ * 帧终态覆盖乐观 cancelled 属**写入路径**（`applyPendingTerminal` 只覆盖 pending/cancelled 条目），
+ * 与本函数的**入口拦截**语义互不冲突。
+ */
+function isFrameDecidedPendingStatus(status: PendingToolCall['status']): boolean {
+  return status === 'succeeded' || status === 'rejected' || status === 'blocked'
+    || status === 'expired' || status === 'cancelled'
+}
+
 export const useAiStore = defineStore('ai', {
   state: () => ({
     /** 页签级会话 id（记忆窗口 CONVERSATION_ID） */
@@ -217,11 +247,12 @@ export const useAiStore = defineStore('ai', {
         if (!message) {
           continue
         }
-        if (message.role === 'assistant' && message.pendingCall && message.pendingCall.status === 'pending') {
-          return message.pendingCall
-        }
         if (message.role === 'assistant' && message.pendingCall) {
-          return null
+          // T2a-D#2（C3）：非 pending 终态（含旧镜像残留）按终态展示、跳过继续向前扫，
+          // 不得提前短路（否则会漏掉更早消息里真正 pending 的调用）
+          if (message.pendingCall.status === 'pending') {
+            return message.pendingCall
+          }
         }
       }
       return null
@@ -619,6 +650,13 @@ export const useAiStore = defineStore('ai', {
         return { ok: true }
       } catch (error) {
         if (error instanceof ApiError && error.code === ErrorCode.DUPLICATE_TOOL_CALL_ID) {
+          // T2a-D#4：409 DUPLICATE 是中性终态（不报错）：按响应体携带的条目 status
+          // 收敛 pendingCall 投影（帧未到达/丢失时的就地收敛；响应体 status 与帧同口径）
+          const bodyStatus = error.bodyAs<{ status?: unknown }>()?.status
+          const mapped = frameStatusToPendingStatus(bodyStatus)
+          if (mapped) {
+            this.applyPendingTerminal(toolCallId, mapped)
+          }
           this.notice = cancelled ? '该工具调用已是终态（幂等拒绝）' : '该工具结果已回灌过（幂等拒绝）'
           return { ok: false, duplicate: true }
         }
@@ -648,6 +686,15 @@ export const useAiStore = defineStore('ai', {
       frame: Extract<SseFrame, { type: 'frontend_tool_request' }>
     ): void {
       disarmFormExpiry()
+      // T2a-D#3（B3 防御守卫）：该 toolCallId 已有帧终态则不挂起 —— 防回放把已决
+      // 条目重新武装成一张 filling 死卡（终态判定看全部消息的 pendingCall 投影）
+      const residue = this.messages.find(
+        (item) => item.pendingCall?.toolCallId === frame.toolCallId
+          && isFrameDecidedPendingStatus(item.pendingCall.status)
+      )
+      if (residue) {
+        return
+      }
       const args = message.pendingCall?.args ?? parseToolArgs(frame.args)
       const spec = parseFormSchema(args?.form)
       const runId = frame.runId ?? this.activeRunId
@@ -726,6 +773,9 @@ export const useAiStore = defineStore('ai', {
         return
       }
       form.status = 'cancelled'
+      // T2a-D#2（A2）：本地 cancel 仅乐观置位 —— 只收敛仍处 pending 的 pendingCall 投影；
+      // 帧终态为最终裁决，后到帧可覆盖此乐观 cancelled（他端先提交时翻为 succeeded，不降级）
+      this.applyPendingTerminal(form.toolCallId, 'cancelled')
       disarmFormExpiry()
       const outcome = await this.submitFrontendToolResult(form.toolCallId, '', 'http-post', true, form.runId)
       if (this.activeForm?.toolCallId !== form.toolCallId) {
@@ -951,9 +1001,12 @@ export const useAiStore = defineStore('ai', {
           // 前端工具的真执行者就是浏览器：后端这帧只是"前端回灌已收到"的回执
           // （ok 恒由后端按"收到回灌"置 true），因此**不能**用它把前端自己判定的失败
           // 改写成"已成功"（补丁③配套：本地已失败/已拒绝则保持原终态）。
+          // T2a-D#1（C1 守卫）：localTerminal 集合含 succeeded/expired —— 已终态的 toolRun
+          // 投影不被帧回执改写（目标 toolRun 已终态不改写）。
           const existing = message.toolRuns.find((run) => run.toolCallId === frame.toolCallId)
           const localTerminal = existing?.status === 'failed' || existing?.status === 'rejected'
-            || existing?.status === 'blocked'
+            || existing?.status === 'blocked' || existing?.status === 'succeeded'
+            || existing?.status === 'expired'
           this.upsertToolRun(message, {
             toolCallId: frame.toolCallId,
             name: frame.name,
@@ -962,11 +1015,28 @@ export const useAiStore = defineStore('ai', {
             messageId: frame.messageId,
             result: frame.result ?? null
           })
-          if (message.pendingCall?.toolCallId === frame.toolCallId) {
-            message.pendingCall = null
+          // T2a-D#1/D#2：帧 status 广播**只作用 pendingCall 投影**，且只覆盖仍处
+          // pending/乐观 cancelled 的条目（广播域守卫）；帧终态为最终裁决（A2）。
+          const terminal = frameStatusToPendingStatus(frame.status)
+          if (terminal) {
+            this.applyPendingTerminal(frame.toolCallId, terminal)
+          } else if (frame.ok) {
+            this.applyPendingTerminal(frame.toolCallId, 'succeeded')
+          } else {
+            // 旧后端帧无 status 且 ok=false：保持既有"收掉挂起卡"语义（不入 cancelled 域）
+            for (const item of this.messages) {
+              if (item.pendingCall?.toolCallId === frame.toolCallId
+                && (item.pendingCall.status === 'pending' || item.pendingCall.status === 'cancelled')) {
+                item.pendingCall = null
+              }
+            }
           }
           if (this.activeForm?.toolCallId === frame.toolCallId) {
-            // 结局帧已到：表单收敛（提交/取消/超时皆自此收尾）
+            // 结局帧已到：表单收敛（提交/取消/超时皆自此收尾）。
+            // T2a-D#2（B2 缓释）：帧到达时本地仍在填写（未在提交在途）→ 该表单已被他端提交/处理
+            if (this.activeForm.status === 'filling') {
+              this.notice = '该表单已在其他窗口提交，本地填写已停止'
+            }
             disarmFormExpiry()
             this.activeForm = null
           }
@@ -1047,6 +1117,21 @@ export const useAiStore = defineStore('ai', {
         // T4：绝对到期时刻（服务端给）；缺字段时由倒计时组件回落到 timeoutSeconds
         expiresAt: frame.expiresAt,
         status: 'pending'
+      }
+    },
+
+    /**
+     * T2a-D#1/D#2：把帧裁决的终态广播到 pendingCall 投影 —— 全部持该 toolCallId 且
+     * 仍处 pending/乐观 cancelled 的消息就地置终态；toolRun 投影由各自帧写入、这里不改写
+     * （C1 双守卫之一：广播只作用 pendingCall 投影；之二的 toolRun 侧守卫在帧 handler 内）。
+     */
+    applyPendingTerminal(toolCallId: string, status: PendingToolCall['status']): void {
+      for (const item of this.messages) {
+        const pending = item.pendingCall
+        if (pending && pending.toolCallId === toolCallId
+          && (pending.status === 'pending' || pending.status === 'cancelled')) {
+          pending.status = status
+        }
       }
     },
 

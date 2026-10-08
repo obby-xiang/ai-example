@@ -25,6 +25,8 @@ export type PendingStatus =
   | 'REJECTED'
   | 'TIMEOUT'
   | 'FRONTEND_RESULT'
+  /** T2a-D#2（C2）：前端工具取消终态（用户放弃/渲染器不可用），结局帧 status 实发值 */
+  | 'FRONTEND_CANCELLED'
   | 'CANCELLED'
   | 'EXECUTED'
   /** DC-14 T1：防线③（执行兜底）拦截 —— 越 scope 的工具调用未执行 */

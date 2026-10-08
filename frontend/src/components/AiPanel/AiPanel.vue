@@ -201,8 +201,10 @@
 
             <div v-else-if="m.pendingCall.kind === 'FRONTEND' && m.pendingCall.name === 'generative_form'" class="mt-2">
               <!-- GF-B：生成式表单挂起 —— 渲染 FormRenderer 等用户填写（同 toolCallId 可重发/取消） -->
+              <!-- T2a-D#3：同 toolCallId 至多一个 FormRenderer —— 只渲染在宿主消息（最后一条
+                持该挂起调用的消息）上，其余消息的挂起卡只出卡头/终态 tag -->
               <FormRenderer
-                v-if="liveForm && liveForm.toolCallId === m.pendingCall.toolCallId"
+                v-if="liveForm && liveForm.toolCallId === m.pendingCall.toolCallId && m.id === formHostMessageId"
                 :key="liveForm.toolCallId"
                 :schema="liveForm.form"
                 :submitting="liveForm.status === 'submitting'"
@@ -212,7 +214,12 @@
                 @cancel="onFormCancel"
               />
               <div v-else class="flex flex-col items-end gap-1">
-                <el-tag v-if="ai.activeForm?.status === 'cancelled'" size="small" type="info">表单已取消</el-tag>
+                <!-- T2a-D#2：帧终态由 pendingCall 投影承载（含刷新后镜像里的终态残留），按终态展示 -->
+                <el-tag v-if="m.pendingCall.status === 'cancelled'" size="small" type="info">表单已取消</el-tag>
+                <el-tag v-else-if="m.pendingCall.status === 'succeeded'" size="small" type="success">表单已提交</el-tag>
+                <el-tag v-else-if="m.pendingCall.status === 'expired'" size="small" type="info">会话已失效</el-tag>
+                <el-tag v-else-if="m.pendingCall.status === 'rejected' || m.pendingCall.status === 'blocked'" size="small" type="warning">表单未提交</el-tag>
+                <el-tag v-else-if="ai.activeForm?.status === 'cancelled'" size="small" type="info">表单已取消</el-tag>
                 <el-tag v-else-if="ai.activeForm?.status === 'submitted'" size="small" type="success">表单已提交，等待回执</el-tag>
                 <el-tag v-else size="small" type="info">表单状态已丢失（刷新后无法续填），等待后端超时收敛</el-tag>
                 <!-- 红队问题 5：取消回灌失败的提示在 cancelled 态下也要可见 -->
@@ -227,6 +234,7 @@
               <el-tag v-else-if="m.pendingCall.status === 'running'" size="small" type="success" effect="dark">执行中…</el-tag>
               <el-tag v-else-if="m.pendingCall.status === 'rejected'" size="small" type="info">已拒绝</el-tag>
               <el-tag v-else-if="m.pendingCall.status === 'expired'" size="small" type="info">会话已失效</el-tag>
+              <el-tag v-else-if="m.pendingCall.status === 'cancelled'" size="small" type="info">已取消</el-tag>
               <el-tag v-else size="small" type="success">已执行</el-tag>
             </div>
 
@@ -393,6 +401,23 @@ const confirmExpired = computed(() => remainingSeconds.value !== null && remaini
 const liveForm = computed(() => {
   const form = ai.activeForm
   return form && (form.status === 'filling' || form.status === 'submitting') ? form : null
+})
+
+/**
+ * T2a-D#3：FormRenderer 的宿主消息 —— 最后一条持该 toolCallId 挂起投影的消息。
+ * 同一 toolCallId 的挂起可能残留在多条消息上（历史/重挂形态），但表单只渲染一份。
+ */
+const formHostMessageId = computed(() => {
+  const toolCallId = liveForm.value?.toolCallId
+  if (!toolCallId) {
+    return null
+  }
+  for (let i = ai.messages.length - 1; i >= 0; i -= 1) {
+    if (ai.messages[i]?.pendingCall?.toolCallId === toolCallId) {
+      return ai.messages[i].id
+    }
+  }
+  return null
 })
 
 /** 表单剩余填写秒数（store 的本地超时计时器同口径：deadline − now）。 */
