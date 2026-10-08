@@ -198,4 +198,19 @@
 
 ## 4. 裁决结论（指挥官 K3）
 
-> （留空，待指挥官裁决后填写。）
+裁决日期 2026-10-08，指挥官 K3。总体：接受打回。采纳 F1 拆分建议，T2 拆为 T2a（纯前端唯一投影化，先行交付）/ T2b（刷新续填，先定端点语义后施工）两包；原六卡 T2-D#1~#6 签字继续暂停，返修后重新出卡（T2a-D#1~#5、T2b-D#1~#3）请业务方签字，签字后旧卡作废留痕。逐条处置：
+
+- A1【阻断】采纳。T2b 放弃"全量回放重建"，改"快照重建+增量续收"：loadHistory 先行完成（historyLoaded 前不触发重建）；挂起卡由 pending 条目快照经唯一投影 upsert 就地重建，不 appendAssistantMessage 新起消息；续收以 lastSeq=归档最大 seq 挂载，只收新帧。
+- A2【严重】采纳。定终态单调规则：服务端帧 status 为最终裁决，本地 cancel 仅乐观置位；frontend_tool_result 帧 handler 加"已终态（succeeded/rejected/blocked/cancelled）不降级"守卫。
+- A3【建议】采纳，随 T2b 快照方案消解（不依赖回放差量去重，runSeq 无需入镜像）。
+- B1【阻断】采纳。T2b 新建 session→run 索引（Redis 键 ai:session:current:<sessionId>，挂起时写、轮终态清、TTL 与锁 watchdog 对齐，O(1)）；runs/current 返回结构化状态（runId+快照 status+pending 条目逐条状态+unresolvedExternal 计数），明确定义已超时/他端已提交/进程已死三分支降级口径（前端按条目状态标 expired/已提交展示，不留 pending 残留）。
+- B2【严重】部分采纳。本包不承诺同 session 多页签共享（写入 T2b 规格约束并文档化）；低成本缓释并入 T2a：frontend_tool_result 帧到达且本地 activeForm 仍 filling 时提示"该表单已在其他窗口提交"。
+- B3【建议】采纳，随 T2b 快照方案消解（无回放即无死卡复活）；另加防御守卫：openGenerativeForm 前查该 toolCallId 已有终态则不挂起。
+- C1【严重】采纳。D#4 广播对象写死为 pendingCall.status 投影；双守卫：目标消息 toolRun 已终态不改写；localTerminal 集合补 succeeded。
+- C2【建议】采纳。状态映射表进规格：补 FRONTEND_CANCELLED→cancelled 翻译，types/sse.ts PendingStatus 联合补 FRONTEND_CANCELLED；镜像兼容规则：旧镜像中非 pending 残留状态按终态展示、不再参与 pending 扫描。
+- C3【建议】采纳。pendingToolCall getter 改为跳过非 pending 终态继续向前扫描。
+- D1【严重】采纳。T2b 终态判定对齐 ResumeService unresolvedExternal 口径，消除"快照 SUSPENDED 但条目已决"中间态误判。
+- D2【建议】采纳。索引成本口径：新 Redis 键 O(1) 读写，TTL 与锁 watchdog 对齐；否决全量扫 allRunIds 方案。
+- E1【严重】部分采纳。维持不引 vitest；风险缓释升级：CDP 冒烟从一次性目测改为脚本化+三条可重复断言清单（①刷新后单卡 ②无双份工具卡 ③取消后所有消息 pendingCall.status 收敛），脚本入库；nightly/非阻塞 CI job 评估与 vitest 评估一并挂 T4。显式承认：本包前端态在阻塞门禁内零自动回归，属已接受风险，签字即确认。
+- E2【建议】采纳。验收矩阵显式标注：服务端 E2E 对前端投影态贡献≈0，前端态验收全部挂 CDP 冒烟断言清单。
+- F1【建议】采纳。T2 拆 T2a（原 D#3+D#4+D#5 纯前端唯一投影化+cancelled 终态+409 中性终态）/ T2b（原 D#1 服务端权威对齐+D#2 刷新续填，端点语义先定后施工）。
