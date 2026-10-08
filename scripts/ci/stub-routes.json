@@ -1,0 +1,148 @@
+{
+  "version": 1,
+  "note": "E2E 门禁桩上游的路由表（M2-T1.2，设计草案 §3.2/§4.4）。每条路由的 match.requiresTools 是硬闸：目标工具必须出现在本请求的 tools[] 披露清单里才允许发起调用（否则退化为文本轮），这是 §3.3「披露清单驱动」的落地。arguments 里 ${taskId} 是整串占位符，由桩替换为从用户消息中提取的数字。",
+  "productTools": [
+    "list_config_defs",
+    "get_config_def",
+    "list_tasks",
+    "get_workspace_state",
+    "check_job_status",
+    "get_row_count",
+    "create_task",
+    "start_export",
+    "start_precheck",
+    "start_import",
+    "start_publish",
+    "open_export_file_editor",
+    "download_export_file",
+    "navigate_to",
+    "select_definitions",
+    "set_condition",
+    "confirm_step",
+    "generative_form"
+  ],
+  "convergence": {
+    "maxCallsPerTurn": 6
+  },
+  "routes": [
+    {
+      "id": "GF-FILTER",
+      "note": "GF1/GF3/GF4 共用的 union 模板：keyword+minRows+effectiveDate 满足 GF1、keyword 满足 GF3、keyword+amount+scope 满足 GF4。只有 keyword 标 required:true —— GF4 的改值重发只带 keyword+scope，其余字段若必填会被回灌闸门 400 拒。",
+      "match": {
+        "messageAny": ["scenario=FILTER"],
+        "requiresTools": ["generative_form"]
+      },
+      "tool": "generative_form",
+      "arguments": {
+        "form": {
+          "scenario": "FILTER",
+          "title": "导出筛选条件",
+          "fields": [
+            {
+              "key": "keyword",
+              "label": "关键字",
+              "type": "text",
+              "required": true,
+              "placeholder": "编码或名称关键字"
+            },
+            {
+              "key": "minRows",
+              "label": "最少行数",
+              "type": "number"
+            },
+            {
+              "key": "effectiveDate",
+              "label": "生效日期",
+              "type": "date"
+            },
+            {
+              "key": "amount",
+              "label": "金额",
+              "type": "number"
+            },
+            {
+              "key": "scope",
+              "label": "范围",
+              "type": "enum",
+              "options": [
+                { "value": "XN", "label": "XN" },
+                { "value": "HD", "label": "HD" }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "GF-CLARIFY",
+      "note": "GF2：CLARIFY 场景，Task:EXPORT/QUERY_COND 上下文（该上下文由 task:* 披露 generative_form）。",
+      "match": {
+        "messageAny": ["scenario=CLARIFY"],
+        "requiresTools": ["generative_form"]
+      },
+      "tool": "generative_form",
+      "arguments": {
+        "form": {
+          "scenario": "CLARIFY",
+          "title": "补充导出信息",
+          "fields": [
+            {
+              "key": "exportScope",
+              "label": "导出范围",
+              "type": "enum",
+              "options": [
+                { "value": "ALL", "label": "全部" },
+                { "value": "SELECTED", "label": "仅已选" }
+              ]
+            },
+            {
+              "key": "includeInactive",
+              "label": "包含停用项",
+              "type": "boolean"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "TC17-PUBLISH",
+      "note": "TC17/TC18：DANGER 工具，产品会挂起确认门；拒绝/同意两条结局都由脚本决策，桩每轮独立、无状态依赖。",
+      "match": {
+        "messageAny": ["start_publish"],
+        "requiresTools": ["start_publish"]
+      },
+      "tool": "start_publish",
+      "arguments": { "taskId": "${taskId}" }
+    },
+    {
+      "id": "TC16-EXPORT",
+      "note": "TC16a：DANGER 工具，放行后由后端服务层真实创建导出作业。",
+      "match": {
+        "messageAny": ["start_export"],
+        "requiresTools": ["start_export"]
+      },
+      "tool": "start_export",
+      "arguments": { "taskId": "${taskId}" }
+    },
+    {
+      "id": "TC16-NAVIGATE",
+      "note": "TC16b：工作区动作走 FRONTEND 通道（后端不执行、下发 frontend_tool_request 等回灌）。",
+      "match": {
+        "messageAny": ["导出向导"],
+        "requiresTools": ["navigate_to"]
+      },
+      "tool": "navigate_to",
+      "arguments": { "page": "export", "taskId": "${taskId}" }
+    },
+    {
+      "id": "TC15-LIST-DEFS",
+      "note": "TC15：只读工具，执行后由桩给出文本轮（满足 delta ≥ 1 与 done ≥ 1）。",
+      "match": {
+        "messageAny": ["配置定义"],
+        "requiresTools": ["list_config_defs"]
+      },
+      "tool": "list_config_defs",
+      "arguments": {}
+    }
+  ]
+}
