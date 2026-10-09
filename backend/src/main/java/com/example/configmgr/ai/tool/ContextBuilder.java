@@ -41,6 +41,13 @@ public class ContextBuilder {
     public static final List<String> ALLOWED_EXTRA_KEYS = List.of("pageId", "selectedDefs", "importMode",
             "dataVersion", "contractVersion", "recentActions");
 
+    /**
+     * 拥有"页面实时选中集"的向导页 id（与前端 {@code stores/workspace.ts} 里
+     * {@code enterPage({pageId, ..., selectedDefs})} 的调用点逐页对应）——
+     * 只有这些页面上报的 {@code extra.selectedDefs} 才代表"用户当下在页面上勾的"。
+     */
+    public static final List<String> SELECTION_PAGE_IDS = List.of("export", "import");
+
     /** 单个 extra 值序列化后的上限（字符）。 */
     public static final int EXTRA_VALUE_MAX_CHARS = 300;
 
@@ -67,10 +74,18 @@ public class ContextBuilder {
                 sb.append("状态: ").append(task.getStatus().name()).append("\n");
                 sb.append("当前步骤: ").append(ctx.getStep() != null ? ctx.getStep() : task.getCurrentStep()).append("\n");
 
-                List<String> selectedDefs = task.getItems().stream()
+                List<String> taskDefs = task.getItems().stream()
                         .map(i -> i.getDefCode()).toList();
-                if (!selectedDefs.isEmpty()) {
-                    sb.append("已选配置项: ").append(String.join(", ", selectedDefs)).append("\n");
+                List<String> pageDefs = pageSelectedDefs(ctx);
+                if (pageDefs != null) {
+                    // 页面已同步过选中集（**含空集合**）⇒ 以页面真值为准：手动勾选/减选不落库，
+                    // 任务条目代表的是"上一次落库"而非"用户当下选的"，两者对立时模型会答错。
+                    sb.append("已选配置项: ")
+                            .append(pageDefs.isEmpty() ? "（空）" : String.join(", ", pageDefs))
+                            .append("（来源：页面实时勾选）\n");
+                } else if (!taskDefs.isEmpty()) {
+                    // 页面从未同步（不在拥有选中集的向导页上 / 客户端未上报）：退回任务已存条目。
+                    sb.append("已选配置项: ").append(String.join(", ", taskDefs)).append("（来源：任务条目）\n");
                 }
             } catch (Exception e) {
                 sb.append("任务: #").append(ctx.getTaskId()).append(" (加载失败)\n");
@@ -83,6 +98,35 @@ public class ContextBuilder {
         }
 
         return sb.toString();
+    }
+
+    /**
+     * 从 {@code extra.selectedDefs} 取"页面实时选中集"。
+     *
+     * <p>
+     * 两态必须分开（issue #3 裁决③）：
+     * <ul>
+     * <li><b>返回 {@code null} = 页面从未同步</b>：客户端没带这个键，或当前不在拥有选中集的向导页上
+     * （任务中心 / 定义页 / 数据浏览上报的 {@code pageId} 都不在 {@link #SELECTION_PAGE_IDS} 里）。
+     * 此时的空值只表示"不知道"，调用方应退回任务已存条目；</li>
+     * <li><b>返回空列表 = 页面同步了空集合</b>：用户把勾选全部取消。这是有效信息，
+     * 必须以页面真值呈现，否则模型会把陈旧的"任务条目"当成用户现在选的。</li>
+     * </ul>
+     */
+    private List<String> pageSelectedDefs(AiContext ctx) {
+        Map<String, Object> extra = ctx.getExtra();
+        if (extra == null) {
+            return null;
+        }
+        Object pageId = extra.get("pageId");
+        if (pageId == null || !SELECTION_PAGE_IDS.contains(String.valueOf(pageId))) {
+            return null;
+        }
+        Object raw = extra.get("selectedDefs");
+        if (!(raw instanceof List<?> list)) {
+            return null;
+        }
+        return list.stream().map(String::valueOf).toList();
     }
 
     /**
