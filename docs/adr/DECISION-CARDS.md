@@ -165,6 +165,12 @@
 > DC-11：M1 单实例部署，上表全部机制按代码前置落地（禁止写死单实例假设）；
 > Redis 单点在 M1 为已知接受风险（demo 定位），HA 形态（Sentinel/Cluster）M2 定。
 
+> **T3b 定值追加注记（2026-10-09；只追加，不改上表历史正文）**：M2-T3b 落定三项与上表相关的取值 ——
+> ① **AI 会话记忆 TTL 加绝对上限**：滑动 TTL 6h 之上以"该轮 `createdAtMs` + 6h"封顶（续期不突破创建时刻 + 6h），落点 `RunStore#remainingTtl`/`#ttlFor`；session 记忆键（`RedisChatMemoryRepository`）的绝对上限另立观察项。
+> ② **`maxmemory-policy = noeviction`**（AI 键宁报错不丢帧；上表未列该策略行，落点见技术方案 §13.2「T3b 闭环注记」#5 与 §9 注记）。
+> ③ **SSE 单帧上限 64KB**（`app.ai.frame.max-bytes`；超限对 `text`/`result` 字段级截断 + `truncated`/`truncatedReason` 标记），归档窗口仍 3000。
+> 另：HITL/前端工具挂起态一行的"续跑协议"在 T3-6a 补了**死卡兜底**（`ConfirmGate` 在 `woke=false` 且快照 `SUSPENDED` 时经轻量执行器异步触发续跑）。
+
 ## 附二：Challenger 整改记录（供重审核对）
 
 | 条件 | 问题 | 整改动作 | 落点 |
