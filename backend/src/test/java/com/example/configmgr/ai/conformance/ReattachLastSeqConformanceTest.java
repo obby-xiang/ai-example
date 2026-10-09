@@ -50,7 +50,7 @@ class ReattachLastSeqConformanceTest {
 
 		// 前端已知到 seq 2（外置帧 1..2）：重挂只应补 3、4、5
 		FrameWire reattached = new FrameWire();
-		int replayed = this.out.replayTo(reattached.emitter(), false, 2L);
+		int replayed = this.out.replayTo(reattached.emitter(), 2L);
 
 		List<Long> replayedSeqs = seqs(reattached.frames());
 		assertThat(replayed).isEqualTo(3);
@@ -85,7 +85,7 @@ class ReattachLastSeqConformanceTest {
 				FrameContract.fixture("tool_result", 5L, "toolCallId", "c-1"));
 
 		FrameWire reattached = new FrameWire();
-		int replayed = this.out.replayTo(reattached.emitter(), false, 3L);
+		int replayed = this.out.replayTo(reattached.emitter(), 3L);
 
 		assertThat(replayed).isEqualTo(2);
 		assertThat(seqs(reattached.frames())).containsExactly(4L, 5L);
@@ -99,7 +99,7 @@ class ReattachLastSeqConformanceTest {
 		assertThat(this.store.lastEventSeq(RUN_ID)).as("归档末帧号 = 前端已知号 ⇒ 无需补发").isEqualTo(5L);
 
 		FrameWire reattached = new FrameWire();
-		assertThat(this.out.replayTo(reattached.emitter(), false, 5L)).isZero();
+		assertThat(this.out.replayTo(reattached.emitter(), 5L)).isZero();
 		assertThat(reattached.frames()).isEmpty();
 		assertThat(online.frames()).isNotEmpty();
 	}
@@ -124,7 +124,7 @@ class ReattachLastSeqConformanceTest {
 		this.out.done(Map.of(), "deepseek-flash", Map.of("cancelled", false));
 
 		FrameWire reattached = new FrameWire();
-		int replayed = this.out.replayTo(reattached.emitter(), false, null);
+		int replayed = this.out.replayTo(reattached.emitter(), null);
 
 		assertThat(replayed).isEqualTo(3);
 		assertThat(FrameContract.types(reattached.frames())).containsExactly("start", "suspended", "done");
@@ -146,7 +146,7 @@ class ReattachLastSeqConformanceTest {
 				FrameContract.fixture("tool_result", 4L, "toolCallId", "c-1"));
 
 		FrameWire reattached = new FrameWire();
-		int replayed = this.out.replayTo(reattached.emitter(), false, 3L);
+		int replayed = this.out.replayTo(reattached.emitter(), 3L);
 
 		// 老帧（无 seq，照发）+ seq 4（> lastSeq）；seq 1、3 是孤儿
 		assertThat(replayed).isEqualTo(2);
@@ -239,7 +239,7 @@ class ReattachLastSeqConformanceTest {
 
 		// 前端 lastSeq = 41（它收到了旧进程的全部归档帧）⇒ 补发恰好是这一帧，不重不漏
 		FrameWire reattached = new FrameWire();
-		assertThat(resumed.replayTo(reattached.emitter(), false, 41L)).isEqualTo(1);
+		assertThat(resumed.replayTo(reattached.emitter(), 41L)).isEqualTo(1);
 		assertThat(seqs(reattached.frames())).containsExactly(42L);
 		assertThat(FrameContract.archiveSeqContract(this.store.events(RUN_ID)))
 				.as("归档里不得出现两段重叠序号").isEmpty();

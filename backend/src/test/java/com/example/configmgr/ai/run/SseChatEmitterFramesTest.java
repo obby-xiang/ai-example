@@ -148,7 +148,7 @@ class SseChatEmitterFramesTest {
         when(this.store.events(RUN_ID)).thenAnswer(invocation -> archived());
         SseEmitter subscriber = mock(SseEmitter.class);
 
-        int sent = this.emitter.replayTo(subscriber, false, 3L);
+        int sent = this.emitter.replayTo(subscriber, 3L);
 
         // 归档共 5 帧：seq 1..5（其中 seq 1 是 delta，默认不回放；seq 2 是历史遗留的无 seq 帧）
         // ⇒ 补发 = 无 seq 的遗留帧 + seq 4、5；seq ≤ 3 的孤儿（前端本地已有）不重发
@@ -165,8 +165,8 @@ class SseChatEmitterFramesTest {
         when(this.store.events(RUN_ID)).thenAnswer(invocation -> archived());
         SseEmitter subscriber = mock(SseEmitter.class);
 
-        // 不传 lastSeq = 老客户端口径：全量回放（归档 5 帧里 delta 仍按 includeDelta=false 跳过 ⇒ 4 帧）
-        assertThat(this.emitter.replayTo(subscriber, false, null)).isEqualTo(4);
+        // 不传 lastSeq = 老客户端口径：全量回放（归档 5 帧里 delta 仍按"只回放状态帧"的口径跳过 ⇒ 4 帧）
+        assertThat(this.emitter.replayTo(subscriber, null)).isEqualTo(4);
     }
 
     // ── 辅助 ────────────────────────────────────────────────────────────────

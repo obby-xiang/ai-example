@@ -37,8 +37,13 @@ import java.util.concurrent.CopyOnWriteArrayList;
  * <li><b>无 TTL、无 3000 帧窗口裁剪</b>：用例里都不触及这两个边界；</li>
  * <li><b>messageJson 不落</b>：本替身不调 {@code MessageJsonCodec}（用例断言的是帧，不是历史条数）。</li>
  * </ol>
+ *
+ * <h2>T3-2 语义同步</h2>
+ * {@code appendEvent} 与真实实现同口径跳过 {@code delta}（与心跳同待遇，只留活动戳）；
+ * {@code ai:seq:<runId>} 语义由 {@link #lastIssuedSeq}/{@link #recordIssuedSeq} 的进程内表复刻
+ * （发放即登记、跨实例续号可读），{@code deleteRun} 一并清表。
  */
-public final class InMemoryRunStore extends RunStore {
+public class InMemoryRunStore extends RunStore {
 
 	private final Map<String, RunSnapshot> runs = new ConcurrentHashMap<>();
 
@@ -54,6 +59,9 @@ public final class InMemoryRunStore extends RunStore {
 
 	/** session → 当前挂起轮（T2b-D#1 索引的进程内替身；无 TTL）。 */
 	private final Map<String, String> sessionCurrent = new ConcurrentHashMap<>();
+
+	/** T3-2：{@code ai:seq:<runId>} 的进程内替身（已发放最大业务号）。 */
+	private final Map<String, Long> issuedSeqs = new ConcurrentHashMap<>();
 
 	public InMemoryRunStore() {
 		super(null, new ObjectMapper(), new AiProperties());
@@ -94,6 +102,11 @@ public final class InMemoryRunStore extends RunStore {
 	@Override
 	public String beatKey(String runId) {
 		return BEAT_PREFIX + runId;
+	}
+
+	@Override
+	public String seqKey(String runId) {
+		return SEQ_PREFIX + runId;
 	}
 
 	// ── 快照 ────────────────────────────────────────────────────────────────
@@ -139,6 +152,7 @@ public final class InMemoryRunStore extends RunStore {
 		this.claims.remove(runId);
 		this.ledger.remove(runId);
 		this.events.remove(runId);
+		this.issuedSeqs.remove(runId);
 	}
 
 	@Override
@@ -303,11 +317,12 @@ public final class InMemoryRunStore extends RunStore {
 		return changed;
 	}
 
-	// ── 帧归档（心跳不落档 + 末帧取号，与真实实现同语义） ────────────────────
+	// ── 帧归档（心跳/delta 不落档 + 末帧取号 + 发放序号登记，与真实实现同语义） ──
 
 	@Override
 	public void appendEvent(String runId, Map<String, Object> frame) {
-		if (HEARTBEAT_TYPE.equals(String.valueOf(frame.get("type")))) {
+		if (HEARTBEAT_TYPE.equals(String.valueOf(frame.get("type")))
+				|| DELTA_TYPE.equals(String.valueOf(frame.get("type")))) {
 			touchActivity(runId);
 			return;
 		}
@@ -350,6 +365,16 @@ public final class InMemoryRunStore extends RunStore {
 	@Override
 	public List<Map<String, Object>> events(String runId) {
 		return new ArrayList<>(eventList(runId));
+	}
+
+	@Override
+	public long lastIssuedSeq(String runId) {
+		return this.issuedSeqs.getOrDefault(runId, 0L);
+	}
+
+	@Override
+	public void recordIssuedSeq(String runId, long seq) {
+		this.issuedSeqs.merge(runId, seq, Math::max);
 	}
 
 	// ── 取证辅助（只给用例用，不属于 RunStore 契约） ─────────────────────────

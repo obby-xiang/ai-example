@@ -116,13 +116,19 @@ class SseFrameSequenceConformanceTest {
 	// ── ① 心跳走独立序号空间，且不落归档（S5c-1 + T7） ───────────────────────
 
 	/**
-	 * <b>【S5c-1 修复后】</b>心跳<b>不占业务序号</b>：它在独立的 {@code heartbeatSeq} 空间里计数，
-	 * 业务 {@code seq} 只发给真正落归档的帧；心跳仍不落归档（T7），只留一个活动戳。
+	 * <b>【S5c-1 修复后 + T3-2 修订】</b>心跳<b>不占业务序号</b>：它在独立的 {@code heartbeatSeq} 空间里计数，
+	 * 业务 {@code seq} 只发给非心跳帧；心跳仍不落归档（T7），只留一个活动戳。
 	 *
 	 * <p>
-	 * 为什么必须这样：心跳不落归档 ⇒ 若它占用业务序号，"归档末帧"这个跨进程续号锚点就会
-	 * 落后于已发放的号，重启后的新写出器会重号，而该号已在前端 {@code lastSeq} 覆盖范围内
-	 * ⇒ 新帧被判为孤儿而永久丢弃（DC-14 §3.6 实测形态，见下一条用例）。
+	 * 为什么必须这样：心跳不占号 + {@code ai:seq} 发放即登记 ⇒ 跨进程续号锚点（
+	 * {@code max(归档末帧, ai:seq)}）恒等于已发放过的最大业务号，重启后的新写出器不会重号，
+	 * 而该号一旦落在前端 {@code lastSeq} 覆盖范围内，新帧会在差量重挂里被判为孤儿而<b>永久丢弃</b>
+	 * （DC-14 §3.6 实测形态，见下一条用例）。
+	 *
+	 * <p>
+	 * <b>T3-2 起归档视角只剩状态帧</b>：delta 跳过归档（与心跳同待遇），于是
+	 * {@code archivedTypes} 不再含 delta，"归档末帧"不再可靠，续号锚点迁到 {@code ai:seq}
+	 * （{@link InMemoryRunStore#lastIssuedSeq()}）。
 	 *
 	 * <p>
 	 * kill：把 {@code SseChatEmitter#emit} 的心跳分支改回 {@code frame.put("seq", nextSeq())}
@@ -149,11 +155,12 @@ class SseFrameSequenceConformanceTest {
 				.filter(frame -> !FrameContract.HEARTBEAT.equals(FrameContract.type(frame))).toList();
 		assertThat(FrameContract.types(business)).containsExactly("start", "delta");
 		assertThat(FrameContract.seqContract(business)).as("业务序号自 1 起连续无缺口").isEmpty();
-		assertThat(this.store.archivedSeqs(RUN_ID)).as("归档与订阅者视角的 seq 完全一致（心跳不占号）")
-				.containsExactly(1L, 2L);
-		assertThat(this.store.archivedTypes(RUN_ID)).containsExactly("start", "delta");
-		assertThat(this.store.lastEventSeq(RUN_ID)).as("续号锚点 = 已发放过的最大业务号").isEqualTo(2L);
-		assertThat(this.store.lastBeatAtMs(RUN_ID)).as("心跳留下活动戳（僵尸判据的输入）").isPositive();
+		// T3-2：归档只计状态帧（delta 与心跳同待遇跳过），活动戳由 touchActivity 留下
+		assertThat(this.store.archivedSeqs(RUN_ID)).as("归档只含状态帧（delta 跳过归档）").containsExactly(1L);
+		assertThat(this.store.archivedTypes(RUN_ID)).containsExactly("start");
+		assertThat(this.store.lastEventSeq(RUN_ID)).as("归档末帧（delta 跳档后不再等于最大业务号）").isEqualTo(1L);
+		assertThat(this.store.lastIssuedSeq(RUN_ID)).as("T3-2 续号锚点 = ai:seq = 已发放的最大业务号").isEqualTo(2L);
+		assertThat(this.store.lastBeatAtMs(RUN_ID)).as("心跳/delta 都留下活动戳（僵尸判据的输入）").isPositive();
 		assertThat(FrameContract.archiveSeqContract(this.store.events(RUN_ID))).as("归档本身不得乱序或重号")
 				.isEmpty();
 	}
@@ -231,7 +238,7 @@ class SseFrameSequenceConformanceTest {
 
 		// 差量重挂：seq 5 必须被补发（DC-14 §3.6 的丢帧场景在此关闭）
 		FrameWire reattached = new FrameWire();
-		int replayed = resumed.replayTo(reattached.emitter(), false, clientLastSeq);
+		int replayed = resumed.replayTo(reattached.emitter(), clientLastSeq);
 
 		assertThat(replayed).as("重启后的真实新帧不得被判为孤儿").isEqualTo(1);
 		assertThat(reattached.frames()).singleElement()
