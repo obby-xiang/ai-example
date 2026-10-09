@@ -41,6 +41,9 @@ import java.util.UUID;
  * <b>心跳帧不入本归档</b>（T7，改记 {@code ai:beat:<runId>}）；</li>
  * <li>{@code ai:beat:<runId>} STRING —— 心跳活动戳（毫秒时刻，TTL 随心跳续期）：
  * 心跳不占归档窗口，但"这一轮最近有过活动"仍可跨进程判定（僵尸判据的输入之一）；</li>
+ * <li>{@code ai:seq:<runId>} STRING —— <b>已发放的最大业务 seq</b>（T3-2）：每个业务帧发放
+ * 序号时 {@code SET} 一次并随帧刷新 TTL=session-ttl（与归档同寿）。delta 帧跳过归档后
+ * "归档末帧"不再是可靠的续号锚点，跨进程续号改由本键接管（候选 = max(归档末帧, ai:seq) + 1）；</li>
  * <li>{@code ai:session:current:<sessionId>} STRING（value=runId，T2b-D#1）——
  * session → 当前挂起轮的索引：挂起写入、轮终态清除、TTL 对齐会话锁 watchdog；
  * 仅供 {@code GET /api/ai/runs/current} 重建挂起态，<b>不承诺同 session 多页签共享</b>。</li>
@@ -80,8 +83,20 @@ public class RunStore {
 	/** 心跳帧的类型名（T7：唯一不落归档的帧类型）。 */
 	public static final String HEARTBEAT_TYPE = "heartbeat";
 
-	/** 每轮最多留存的外置帧数（长回答的 delta 会挤掉挂起期帧，故与 SP-02 同取 3000）。 */
-	private static final int EVENT_WINDOW = 3000;
+	/** delta 帧的类型名（T3-2：与心跳同待遇，跳过归档）。 */
+	public static final String DELTA_TYPE = "delta";
+
+	/** 已发放最大业务序号的键前缀（T3-2 的续号锚点，TTL 与归档同寿）。 */
+	public static final String SEQ_PREFIX = "ai:seq:";
+
+	/**
+	 * 每轮最多留存的外置帧数（长回答的 delta 会挤掉挂起期帧，故与 SP-02 同取 3000）。
+	 *
+	 * <p>
+	 * 公开口径（S3-1 修复批）：实时队列容量 &lt; 本窗口是 T3-1 的不变量，单测直接锚定本常量
+	 * （值改坏即红），故不留私有可见性。
+	 */
+	public static final int EVENT_WINDOW = 3000;
 
 	/** 本实例标识：区分"崩溃前的旧实例"与"续跑的新实例"。 */
 	private final String instanceId;
@@ -131,6 +146,11 @@ public class RunStore {
 
 	public String eventsKey(String runId) {
 		return EVENTS_PREFIX + runId;
+	}
+
+	/** 已发放最大业务序号的键名（诊断/取证可直读）。 */
+	public String seqKey(String runId) {
+		return SEQ_PREFIX + runId;
 	}
 
 	// ── 轮次快照 ────────────────────────────────────────────────────────────
@@ -272,7 +292,8 @@ public class RunStore {
 
 	/** 池饱和回滚：删掉本轮的全部键（不留半截状态）。 */
 	public void deleteRun(String runId) {
-		this.redis.delete(List.of(runKey(runId), pendingKey(runId), claimKey(runId), ledgerKey(runId), eventsKey(runId)));
+		this.redis.delete(List.of(runKey(runId), pendingKey(runId), claimKey(runId), ledgerKey(runId),
+				eventsKey(runId), seqKey(runId)));
 		this.redis.opsForSet().remove(RUN_INDEX, runId);
 	}
 
@@ -509,7 +530,7 @@ public class RunStore {
 	/**
 	 * 帧落档。写入时给帧补一个 <b>atMs</b> 时间戳（帧里没有才补）——
 	 * 它让"这一轮最近一次活动是什么时候"有了**可跨进程**的判据：
-	 * 流式 delta、挂起心跳、工具帧全都经这里落档，于是 R3 的僵尸判据不必只看快照
+	 * 挂起心跳、工具帧全都经这里落档，于是 R3 的僵尸判据不必只看快照
 	 * （快照只在工具落定/挂起时刷新，长流式轮次会显得"很久没动"）。
 	 *
 	 * <p>
@@ -520,7 +541,11 @@ public class RunStore {
 	 * 于是"心跳提供活动证据"这一用途照旧，归档却不被它占位。
 	 */
 	public void appendEvent(String runId, Map<String, Object> frame) {
-		if (HEARTBEAT_TYPE.equals(String.valueOf(frame.get("type")))) {
+		if (HEARTBEAT_TYPE.equals(String.valueOf(frame.get("type")))
+				|| DELTA_TYPE.equals(String.valueOf(frame.get("type")))) {
+			// T7：心跳照旧跳过归档；T3-2：delta 与心跳同待遇 —— 长流式轮次的 delta 量会挤掉
+			// 挂起期状态帧（回放跟着变瘦），正文重建靠"回放状态帧 + 实时 delta"两段式，不靠归档。
+			// 活动证据由 touchActivity 留下（只吐 delta 的长轮不会被僵尸判据误判）。
 			touchActivity(runId);
 			return;
 		}
@@ -533,6 +558,46 @@ public class RunStore {
 		catch (Exception ex) {
 			// 帧留档失败不影响本轮运行（外置是"更耐久"，不是"更正确"的前提）
 			log.debug("外置 SSE 帧失败 runId={} type={}: {}", runId, frame.get("type"), ex.getMessage());
+		}
+	}
+
+	// ── 已发放序号的外置（T3-2：ai:seq 键） ─────────────────────────────────
+
+	/**
+	 * 已发放的最大业务 seq（{@code ai:seq:<runId>}；无键/坏值返回 0）。
+	 *
+	 * <p>
+	 * 为什么是独立键：T3-2 起 delta 帧跳过归档，"归档末帧"可能<b>落后</b>于实际发放过的
+	 * 最大号（长流式轮次几乎必然如此）。跨进程续号的候选因此必须取
+	 * {@code max(归档末帧, ai:seq)}，本键就是后者的读取口。
+	 */
+	public long lastIssuedSeq(String runId) {
+		try {
+			String raw = this.redis.opsForValue().get(seqKey(runId));
+			return raw == null ? 0L : Long.parseLong(raw);
+		}
+		catch (Exception ex) {
+			log.debug("读取已发放序号失败 runId={}：{}", runId, ex.getMessage());
+			return 0L;
+		}
+	}
+
+	/**
+	 * 发放即登记（T3-2 的 {@code SET} 口径）：每个业务帧取号后立刻把号写进
+	 * {@code ai:seq:<runId>} 并刷新 TTL=session-ttl（与 {@code ai:events:<runId>} 同刻过期）。
+	 *
+	 * <p>
+	 * <b>SET 失败口径（S2-4）</b>：仅 WARN + 继续出帧（韧性优先）——本轮的序号发放已由
+	 * 进程内计数器推进，单帧登记失败不阻塞流；承诺收窄为"归档部分失败场景"，整体 Redis
+	 * 宕机下重号风险登记为观察项。
+	 */
+	public void recordIssuedSeq(String runId, long seq) {
+		try {
+			this.redis.opsForValue().set(seqKey(runId), String.valueOf(seq), ttl());
+		}
+		catch (Exception ex) {
+			log.warn("登记已发放序号失败 runId={} seq={}（继续出帧，跨进程续号可能回退）：{}", runId, seq,
+					ex.getMessage());
 		}
 	}
 

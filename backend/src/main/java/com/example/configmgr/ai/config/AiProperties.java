@@ -36,6 +36,8 @@ public class AiProperties {
 
 	private Session session = new Session();
 
+	private Sse sse = new Sse();
+
 	private Resume resume = new Resume();
 
 	private ToolResult toolResult = new ToolResult();
@@ -54,8 +56,9 @@ public class AiProperties {
 		 * 挂起专用有界平台线程池大小（DC-12：禁用虚拟线程；ADR-2 重审 N1：池容量即挂起并发上限）。
 		 *
 		 * <p>
-		 * BLOCKING 形态下每次挂起实际占用本池 1 条 + 官方硬编码的 {@code boundedElastic} 1 条，
-		 * 容量联动约束为"本值 × 2 ≤ boundedElastic 容量"（§13.2 #2 压测范围）。
+		 * BLOCKING 形态下每次挂起实际占用本池 1 条 + 官方硬编码的 {@code boundedElastic} 1 条；
+		 * 容量联动约束为「专用池 × 2 + 投递池 ≤ boundedElastic 容量」（T3-1 投递池
+		 * {@link Sse#getDeliveryPoolSize()}，§13.2 #2 压测范围）。
 		 */
 		private int poolSize = 20;
 	}
@@ -144,6 +147,51 @@ public class AiProperties {
 			/** watchdog 续期间隔（ADR-5 补记 CH-P4：锁须带续期）。 */
 			private Duration watchdog = Duration.ofSeconds(30);
 		}
+	}
+
+	/**
+	 * SSE 扇出投递参数（T3-1 慢订阅者隔离）。
+	 *
+	 * <p>
+	 * 容量联动（S2-8）：{@code 专用池 × 2 + 投递池 ≤ boundedElastic 容量}，纳入 §13.2 #2
+	 * 压测（T3-5 场景 E：N 挂起 × M 慢订阅者争抢 boundedElastic 的最坏态）。
+	 */
+	@Data
+	public static class Sse {
+
+		/**
+		 * 共享有界投递池的<b>工作线程数</b>（R3 语义：池"容量"即线程数）。
+		 *
+		 * <p>
+		 * 每订阅者一条<b>实时段有界</b>队列（回放初始批豁免，闸按实时段计数判定）+ CAS drain
+		 * 独占标志，一条慢连接至多占一个工作线程；
+		 * 池任务队列满时提交被拒 ⇒ 摘除触发本次提交的订阅者（显式 complete，前端重挂补帧）。
+		 * 初值 4 —— <b>待 §13.2 #2 压测裁决</b>（T3-5 定值）。
+		 */
+		private int deliveryPoolSize = 4;
+
+		/**
+		 * 每订阅者<b>实时</b>投递队列容量的缺省值（<b>单一事实源</b>）。
+		 *
+		 * <p>
+		 * 写出器与注册表都引用本常量（S3-1 修复批：此前 256 同时写在本类与 {@code SseChatEmitter}
+		 * 两处，改坏一处不必然变红）。R1 不变量：本值 &lt; 归档窗口
+		 * {@code RunStore#EVENT_WINDOW}（只约束实时段，回放初始批豁免）。
+		 * 初值 256 —— <b>待 §13.2 #2 压测裁决</b>（T3-5 定值）。
+		 */
+		public static final int DEFAULT_DELIVERY_QUEUE_CAPACITY = 256;
+
+		/**
+		 * 每订阅者<b>实时</b>投递队列容量（缺省 {@link #DEFAULT_DELIVERY_QUEUE_CAPACITY}）。
+		 *
+		 * <p>
+		 * R1 不变量：队列容量 &lt; 归档窗口 3000（只约束实时段）；回放初始批豁免本容量，
+		 * 上界 = 归档窗口 {@code EVENT_WINDOW}。溢出即摘除（主动断连）+ complete。
+		 * <b>判据口径（修复批第 2 轮）</b>：闸判「该订阅者队列中的<b>实时</b>帧条数」，
+		 * <b>不</b>判队列绝对长度 —— 回放批与实时帧共用同一条队列（单队列 FIFO 混合序），
+		 * 回放帧不计入本容量。
+		 */
+		private int deliveryQueueCapacity = DEFAULT_DELIVERY_QUEUE_CAPACITY;
 	}
 
 	/**

@@ -528,6 +528,7 @@ public class AiController {
 		body.put("sessionTtl", String.valueOf(this.properties.getSessionTtl()));
 		body.put("confirmTimeoutSeconds", this.confirmGate.confirmTimeoutSeconds());
 		body.put("suspendPoolSize", this.properties.getSuspend().getPoolSize());
+		body.put("sseDelivery", SseChatEmitter.deliveryPoolMetrics());
 		body.put("activeSuspendGates", this.confirmGate.pendingGates());
 		body.put("heldSessions", this.sessionGate.heldSessions());
 		body.put("sessionLockRenewals", this.sessionGate.renewals());

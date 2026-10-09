@@ -1,10 +1,13 @@
 package com.example.configmgr.ai.run;
 
+import com.example.configmgr.ai.config.AiProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
 
 /**
  * 进程内的轮次写出器注册表：{@code runId → SseChatEmitter}。
@@ -18,6 +21,10 @@ import java.util.concurrent.ConcurrentHashMap;
  * 重启后不存在旧实例的写出器：此时 {@link #of(String)} 惰性新建一个"零订阅者"的写出器，
  * 帧照样写进 {@code ai:events:<runId>}（外置优先），前端重挂时回放即可 —— 这正是
  * M3 与 ADR-5 reattach 的咬合点。
+ *
+ * <p>
+ * T3-1：持有 AiProperties 的构造（Spring 装配路径）会用 {@code app.ai.sse.*} 配置并启用
+ * 进程级共享有界投递池；两参构造（单测/非 Spring）保持同步直执，帧序用例的确定性不受影响。
  */
 @Component
 public class RunRegistry {
@@ -28,14 +35,42 @@ public class RunRegistry {
 
 	private final ObjectMapper objectMapper;
 
+	private final AiProperties properties;
+
+	/**
+	 * 本注册表创建写出器时使用的投递执行器。
+	 *
+	 * <p>
+	 * <b>口径（S2-1 修复批）</b>：Spring 三参装配路径（{@code properties != null}）用进程级共享
+	 * 有界投递池（异步，快慢订阅者隔离）；两参构造（单测 / 非 Spring）<b>固定同步直执</b>，
+	 * 不读进程静态池 —— 静态池一旦被 {@code @SpringBootTest} 装配，两参路径就会由"同步直执"
+	 * 悄悄变异步投递，同一 JVM 内出现测试顺序相关竞态（帧序用例要求"发完即到"）。
+	 */
+	private final Executor deliveryExecutor;
+
 	public RunRegistry(RunStore store, ObjectMapper objectMapper) {
+		this(store, objectMapper, null);
+	}
+
+	@Autowired
+	public RunRegistry(RunStore store, ObjectMapper objectMapper, AiProperties properties) {
 		this.store = store;
 		this.objectMapper = objectMapper;
+		this.properties = properties;
+		if (properties != null) {
+			SseChatEmitter.configureSharedDeliveryPool(properties.getSse().getDeliveryPoolSize(),
+					properties.getSse().getDeliveryPoolSize() * 64);
+		}
+		// 池必须先装配再取用（configureSharedDeliveryPool 幂等，首装配者胜）
+		this.deliveryExecutor = properties != null ? SseChatEmitter.sharedDeliveryExecutorOrDirect() : Runnable::run;
 	}
 
 	/** 取（必要时新建）本轮的写出器。 */
 	public SseChatEmitter of(String runId) {
-		return this.emitters.computeIfAbsent(runId, id -> new SseChatEmitter(id, this.store, this.objectMapper));
+		int queueCapacity = this.properties != null ? this.properties.getSse().getDeliveryQueueCapacity()
+				: AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY;
+		return this.emitters.computeIfAbsent(runId, id -> new SseChatEmitter(id, this.store, this.objectMapper,
+				this.deliveryExecutor, queueCapacity));
 	}
 
 	/** 只在已有写出器时返回（避免"查一下"就凭空造出一个）。 */
