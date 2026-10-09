@@ -85,6 +85,11 @@ jobs:
   #   - T3-9（A17）：redis service 显式 --maxmemory-policy noeviction ——
   #     AI 键（ai:run/ai:events/ai:seq）"宁报错不丢帧"：淘汰策略一旦生效，归档帧会无声消失
   #     （回放少帧 = seq 洞）。与本地 Memurai 的 CONFIG SET 实跑口径一致。
+  #     该参数是 redis-server 的服务端参数，只能写在 services.redis.command：runner 会把
+  #     command 追加在镜像名之后（docker create redis:7 --maxmemory-policy noeviction），
+  #     由官方镜像 entrypoint 兜底成 redis-server 参数；services.redis.options 只接受
+  #     docker create 参数，混入会以 exit 125 使「Initialize containers」直接失败
+  #     （2026-10-09 实证：命令行含该 flag 即 exit 125）。
   # ============================================================
   e2e:
     name: E2E 全流程（28 用例 · 桩上游 + redis）
@@ -97,8 +102,8 @@ jobs:
       redis:
         image: redis:7
         ports: ['6379:6379']
+        command: --maxmemory-policy noeviction
         options: >-
-          --maxmemory-policy noeviction
           --health-cmd "redis-cli ping"
           --health-interval 5s
           --health-timeout 3s
