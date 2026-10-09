@@ -20,6 +20,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 挂起态与台账的 Redis 外置存储（S4.2 §2 {@code run/RunStore}，移植自 SP-02 同名实现）。
@@ -98,8 +99,24 @@ public class RunStore {
 	 */
 	public static final int EVENT_WINDOW = 3000;
 
+	/**
+	 * 已过绝对上限时的"不再续期"TTL（T3-8）：{@code SET}/{@code EXPIRE} 不接受非正 TTL，
+	 * 而"剩余 ≤ 0"的语义是"该键此刻就该消失" —— 用一个最小正 TTL 让键随即过期，
+	 * 既保住"绝对上限"（不会因为一次续期把轮次再养 6 小时），又不给 Redis 留下永久键。
+	 */
+	public static final Duration EXPIRED_RENEWAL = Duration.ofSeconds(1);
+
 	/** 本实例标识：区分"崩溃前的旧实例"与"续跑的新实例"。 */
 	private final String instanceId;
+
+	/**
+	 * runId → 创建时刻（毫秒）的进程内缓存（T3-8）。
+	 *
+	 * <p>为什么可以缓存：{@link RunSnapshot#getCreatedAtMs()} 一经写入<b>永不改变</b>
+	 * （只读锚点），故缓存不会陈旧；没有它，每个业务帧（{@code appendEvent}/{@code touchActivity}）
+	 * 都得为"算剩余 TTL"多读一次快照键，长流式轮次下等于把 Redis 读放大约一倍。
+	 */
+	private final Map<String, Long> runCreatedAtMs = new ConcurrentHashMap<>();
 
 	private final StringRedisTemplate redis;
 
@@ -165,6 +182,7 @@ public class RunStore {
 		snapshot.setMessageJson(codec.serializeAll(history));
 		snapshot.setCreatedBy(this.instanceId);
 		snapshot.setCreatedAtMs(System.currentTimeMillis());
+		this.runCreatedAtMs.put(runId, snapshot.getCreatedAtMs());
 		save(snapshot);
 		this.redis.opsForSet().add(RUN_INDEX, runId);
 		return snapshot;
@@ -172,20 +190,25 @@ public class RunStore {
 
 	public void save(RunSnapshot snapshot) {
 		snapshot.setUpdatedAtMs(System.currentTimeMillis());
+		long createdAt = snapshot.getCreatedAtMs();
+		if (createdAt > 0) {
+			this.runCreatedAtMs.put(snapshot.getRunId(), createdAt);
+		}
 		try {
-			this.redis.opsForValue().set(runKey(snapshot.getRunId()), this.mapper.writeValueAsString(snapshot), ttl());
+			this.redis.opsForValue().set(runKey(snapshot.getRunId()), this.mapper.writeValueAsString(snapshot),
+					ttlFor(snapshot.getRunId(), createdAt));
 		}
 		catch (Exception ex) {
 			throw new IllegalStateException("无法写入轮次快照 " + snapshot.getRunId(), ex);
 		}
 		// T2b-D#1：快照持久化成功后联动 session → current 轮索引（全部走本方法这一唯一通道，
 		// 不会漏分支）。RUNNING 不动 —— settle 期间轮仍是 current，索引必须保留。
+		// T3-7（A14）：终态分支改调统一判定函数（不再散点比对字面量）。
 		String status = snapshot.getStatus();
 		if (RunSnapshot.SUSPENDED.equals(status)) {
 			markSessionCurrent(snapshot.getSessionId(), snapshot.getRunId());
 		}
-		else if (RunSnapshot.DONE.equals(status) || RunSnapshot.FAILED.equals(status)
-				|| RunSnapshot.CANCELLED.equals(status)) {
+		else if (RunSnapshot.isTerminal(status)) {
 			clearSessionCurrent(snapshot.getSessionId(), snapshot.getRunId());
 		}
 	}
@@ -295,6 +318,7 @@ public class RunStore {
 		this.redis.delete(List.of(runKey(runId), pendingKey(runId), claimKey(runId), ledgerKey(runId),
 				eventsKey(runId), seqKey(runId)));
 		this.redis.opsForSet().remove(RUN_INDEX, runId);
+		this.runCreatedAtMs.remove(runId);
 	}
 
 	/** 全部仍存活的 runId（索引里已过期的惰性剔除）。 */
@@ -348,7 +372,7 @@ public class RunStore {
 		try {
 			this.redis.opsForHash().put(pendingKey(runId), pending.getToolCallId(),
 					this.mapper.writeValueAsString(pending));
-			this.redis.expire(pendingKey(runId), ttl());
+			this.redis.expire(pendingKey(runId), ttlFor(runId));
 		}
 		catch (Exception ex) {
 			throw new IllegalStateException("无法写入待决条目 " + pending.getToolCallId(), ex);
@@ -402,7 +426,7 @@ public class RunStore {
 	 */
 	public boolean claimExecution(String runId, String toolCallId, String executedBy) {
 		Boolean claimed = this.redis.opsForHash().putIfAbsent(claimKey(runId), toolCallId, executedBy);
-		this.redis.expire(claimKey(runId), ttl());
+		this.redis.expire(claimKey(runId), ttlFor(runId));
 		boolean won = Boolean.TRUE.equals(claimed);
 		if (won) {
 			PendingToolCall pending = pending(runId, toolCallId);
@@ -433,7 +457,7 @@ public class RunStore {
 		record.put("resultText", resultText);
 		try {
 			this.redis.opsForList().rightPush(ledgerKey(runId), this.mapper.writeValueAsString(record));
-			this.redis.expire(ledgerKey(runId), ttl());
+			this.redis.expire(ledgerKey(runId), ttlFor(runId));
 		}
 		catch (Exception ex) {
 			throw new IllegalStateException("无法写入执行台账 " + pending.getToolCallId(), ex);
@@ -553,7 +577,7 @@ public class RunStore {
 		try {
 			this.redis.opsForList().rightPush(eventsKey(runId), this.mapper.writeValueAsString(frame));
 			this.redis.opsForList().trim(eventsKey(runId), -EVENT_WINDOW, -1);
-			this.redis.expire(eventsKey(runId), ttl());
+			this.redis.expire(eventsKey(runId), ttlFor(runId));
 		}
 		catch (Exception ex) {
 			// 帧留档失败不影响本轮运行（外置是"更耐久"，不是"更正确"的前提）
@@ -593,7 +617,7 @@ public class RunStore {
 	 */
 	public void recordIssuedSeq(String runId, long seq) {
 		try {
-			this.redis.opsForValue().set(seqKey(runId), String.valueOf(seq), ttl());
+			this.redis.opsForValue().set(seqKey(runId), String.valueOf(seq), ttlFor(runId));
 		}
 		catch (Exception ex) {
 			log.warn("登记已发放序号失败 runId={} seq={}（继续出帧，跨进程续号可能回退）：{}", runId, seq,
@@ -612,7 +636,7 @@ public class RunStore {
 	 */
 	public void touchActivity(String runId) {
 		try {
-			this.redis.opsForValue().set(beatKey(runId), String.valueOf(System.currentTimeMillis()), ttl());
+			this.redis.opsForValue().set(beatKey(runId), String.valueOf(System.currentTimeMillis()), ttlFor(runId));
 		}
 		catch (Exception ex) {
 			log.debug("心跳活动戳写入失败 runId={}：{}", runId, ex.getMessage());
@@ -698,8 +722,65 @@ public class RunStore {
 		return out;
 	}
 
-	private Duration ttl() {
-		return this.properties.getSessionTtl();
+	// ── TTL（T3-8：滑动 TTL + 绝对上限） ─────────────────────────────────────────
+
+	/**
+	 * 本次续期应使用的 TTL（T3-8）：取"会话滑动 TTL"与"该轮创建时刻 + 会话 TTL 的剩余量"的较小者。
+	 *
+	 * <p>锚点是 {@link RunSnapshot#getCreatedAtMs()}（不可变，A15）：写出器/心跳/台账等所有续期点
+	 * 都改走本方法，于是<b>续期不能突破"创建时刻 + session-ttl"</b> —— 否则一个每 2s 心跳的挂起轮
+	 * 可以无限续期，与 DC-06③/DC-09 D1 的"会话不做长期留存"相悖。
+	 */
+	private Duration ttlFor(String runId) {
+		return ttlFor(runId, 0L);
+	}
+
+	/** 已知创建时刻时的 TTL（{@link #save} 走这条，省一次 Redis 读）。 */
+	private Duration ttlFor(String runId, long knownCreatedAtMs) {
+		long createdAt = knownCreatedAtMs > 0 ? knownCreatedAtMs : createdAtMs(runId);
+		return remainingTtl(createdAt, System.currentTimeMillis(), this.properties.getSessionTtl());
+	}
+
+	/**
+	 * 纯函数：剩余 TTL = min(sessionTtl, createdAt + sessionTtl − now)（T3-8 / A15）。
+	 *
+	 * <ul>
+	 * <li>{@code createdAtMs <= 0}（旧数据/未登记）→ 回落整额 {@code sessionTtl}，不制造"立刻过期"；</li>
+	 * <li>剩余 {@code > 0} → 取较小者（正常滑动，但被绝对上限压住）；</li>
+	 * <li>剩余 {@code <= 0}（已过上限）→ {@link #EXPIRED_RENEWAL}：<b>不再续期</b>，
+	 *     键随最小正 TTL 立即过期（Redis 不接受非正 TTL）。</li>
+	 * </ul>
+	 */
+	static Duration remainingTtl(long createdAtMs, long nowMs, Duration sessionTtl) {
+		if (sessionTtl == null || sessionTtl.isZero() || sessionTtl.isNegative() || createdAtMs <= 0) {
+			return sessionTtl;
+		}
+		long capMs = createdAtMs + sessionTtl.toMillis();
+		long remainMs = capMs - nowMs;
+		if (remainMs <= 0) {
+			return EXPIRED_RENEWAL;
+		}
+		return Duration.ofMillis(Math.min(sessionTtl.toMillis(), remainMs));
+	}
+
+	/** 该轮的创建时刻（进程内缓存优先；未命中则读一次快照键，读不到返回 0 = 未知）。 */
+	private long createdAtMs(String runId) {
+		Long cached = this.runCreatedAtMs.get(runId);
+		if (cached != null) {
+			return cached;
+		}
+		try {
+			RunSnapshot snapshot = get(runId);
+			long createdAt = snapshot == null ? 0L : snapshot.getCreatedAtMs();
+			if (createdAt > 0) {
+				this.runCreatedAtMs.put(runId, createdAt);
+			}
+			return createdAt;
+		}
+		catch (Exception ex) {
+			log.debug("读取轮次创建时刻失败 runId={}：{}", runId, ex.getMessage());
+			return 0L;
+		}
 	}
 
 }

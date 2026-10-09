@@ -123,6 +123,10 @@ app:
       startup-delay: 8s
       zombie-age: 60s
       max-on-startup: 10
+      # T3-6a：死卡兜底的"轻量执行器"（确认门 woke=false 且快照 SUSPENDED 时触发续跑）。
+      # 容量小 + 队列有界 + 饱和拒绝：resume 内部还会向挂起池提交一次，同池提交即嵌套占用。
+      trigger-pool-size: 2
+      trigger-queue-capacity: 16
     session:
       lock:
         # ADR-5：会话锁 TTL = 轮上限；watchdog 续期；轮终态主动释放
@@ -134,6 +138,12 @@ app:
       # 初值依 R10-1 建议（200 行 / 8000 字符），实际取值随 §13.2 #9 压测复核。
       max-rows: 200
       max-chars: 8000
+    frame:
+      # T3-10 裁定：SSE 单帧 JSON 的 UTF-8 字节上限 64KB（判定=整帧字节数；
+      # 超限对 text/result 做**字段级**截断 + truncated/truncatedReason 标记，严禁字节级截断）。
+      # 该上限**优先于** T2"给前端看的帧全文不裁剪"的承诺（A21 口径变更），
+      # 修订落在 ToolResultLimiter javadoc 与 com.example.configmgr.ai.run.FrameSizeLimiter。
+      max-bytes: 65536
   job:
     demo-batch-delay-ms: 300
     batch-size: 100

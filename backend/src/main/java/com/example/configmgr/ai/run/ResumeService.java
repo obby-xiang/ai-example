@@ -155,12 +155,9 @@ public class ResumeService {
 				.toList();
 			item.put("cancelled", cancelled);
 			item.put("zombieRunning", zombie);
+			// T3-7（A14）：可续跑性组合改用统一终态判定（含 REJECTED 归一），不再散点比对三个字面量
 			item.put("resumeable", !cancelled && unresolvedExternal.isEmpty()
-					&& !RunSnapshot.DONE.equals(snapshot.getStatus())
-					&& !RunSnapshot.FAILED.equals(snapshot.getStatus())
-					// 取消是终态（R3 补丁顺带修正）：取消标志的 TTL（2×总预算）过期之后，
-					// 不能因为"标志不在了"就把一个 CANCELLED 的轮次重新当成可续跑。
-					&& !RunSnapshot.CANCELLED.equals(snapshot.getStatus())
+					&& !RunSnapshot.isTerminal(snapshot.getStatus())
 					&& (zombie || !RunSnapshot.RUNNING.equals(snapshot.getStatus())));
 			item.put("unresolvedExternal", unresolvedExternal);
 			out.add(item);
@@ -241,18 +238,9 @@ public class ResumeService {
 			body.put("statusBeforeResume", snapshot.getStatus());
 			body.put("instanceId", this.store.instanceId());
 
-			if (RunSnapshot.DONE.equals(snapshot.getStatus())) {
-				body.put("resumed", false);
-				body.put("reason", "ALREADY_DONE");
-				return new ResumeResult(Outcome.ALREADY_DONE, body);
-			}
-			if (RunSnapshot.FAILED.equals(snapshot.getStatus())) {
-				body.put("resumed", false);
-				body.put("reason", "ALREADY_FAILED");
-				return new ResumeResult(Outcome.ALREADY_DONE, body);
-			}
 			// 取消优先（ADR-8 修正③）：权威取消标志在 Redis，跨进程同样拦得住续跑 ——
 			// 否则"用户已取消"的轮次会被重启后的自动续跑重新拾起并执行掉。
+			// 位置在统一终态判定<b>之前</b>：即便快照已落 CANCELLED，也要把残留的 PENDING 条目收敛掉。
 			if (this.cancellations.isCancelled(runId)) {
 				snapshot.setStatus(RunSnapshot.CANCELLED);
 				snapshot.setCancelled(true);
@@ -263,10 +251,16 @@ public class ResumeService {
 				body.put("reason", "ALREADY_CANCELLED");
 				return new ResumeResult(Outcome.ALREADY_CANCELLED, body);
 			}
-			if (RunSnapshot.CANCELLED.equals(snapshot.getStatus())) {
+			// 统一终态判定（T3-7 / A14）：DONE/FAILED/CANCELLED（+ REJECTED 归一）一律不再续跑。
+			// 结局码保持既有对外语义：取消 → ALREADY_CANCELLED；完成 → ALREADY_DONE（reason ALREADY_DONE）；
+			// 失败 → ALREADY_DONE（reason ALREADY_FAILED，属既有口径，不动）。
+			if (RunSnapshot.isTerminal(snapshot.getStatus())) {
+				boolean cancelledStatus = RunSnapshot.CANCELLED.equals(snapshot.getStatus());
+				boolean doneStatus = RunSnapshot.DONE.equals(snapshot.getStatus());
 				body.put("resumed", false);
-				body.put("reason", "ALREADY_CANCELLED");
-				return new ResumeResult(Outcome.ALREADY_CANCELLED, body);
+				body.put("reason", cancelledStatus ? "ALREADY_CANCELLED"
+						: (doneStatus ? "ALREADY_DONE" : "ALREADY_FAILED"));
+				return new ResumeResult(cancelledStatus ? Outcome.ALREADY_CANCELLED : Outcome.ALREADY_DONE, body);
 			}
 			if (RunSnapshot.RUNNING.equals(snapshot.getStatus())) {
 				if (!forceTakeover) {

@@ -3,6 +3,7 @@ package com.example.configmgr.ai.gate;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.PendingToolCall;
+import com.example.configmgr.ai.run.ResumeService;
 import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
@@ -10,6 +11,9 @@ import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
 import com.example.configmgr.ai.tool.FrontendToolGuard;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
@@ -18,6 +22,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -84,6 +90,26 @@ public class ConfirmGate {
 	 */
 	private final List<FrontendToolGuard> frontendGuards;
 
+	/**
+	 * 续跑服务的<b>惰性</b>引用（T3-6a 第 4 方案解环①）。
+	 *
+	 * <p>依赖环 {@code ConfirmGate → ResumeService → SpToolCallingManager → ConfirmGate} 在 R4 诊断里
+	 * 是硬事实，Spring 默认拒绝构造器环。故此处只持 {@link ObjectProvider}（与
+	 * {@code AiController} 同一先例），在<b>触发时</b>才 {@code getIfAvailable()} ——
+	 * 无 key 的降级装配下返回 null，本类静默跳过（AI 不可用时本就不存在续跑）。
+	 */
+	private final ObjectProvider<ResumeService> resumeServiceProvider;
+
+	/**
+	 * 续跑触发的<b>轻量执行器</b>（T3-6a / A9）。
+	 *
+	 * <p>为什么不能用 {@code suspendExecutor}：{@code ResumeService#resume} 内部
+	 * <b>还会再向 suspendExecutor 提交一次</b>（真正的驱动任务），在 suspendExecutor 的线程里
+	 * 再提交一次 = 嵌套占用，挂起池容量被同一次续跑吃掉两条线程，饱和时自锁。
+	 * 故触发动作由本执行器（短任务：一次 Redis 读 + 重建 + 转投）承载，HTTP 线程立即返回。
+	 */
+	private final Executor resumeTriggerExecutor;
+
 	/** toolCallId → 进程内唤醒闸门（不承载状态）。 */
 	private final Map<String, Latch> latches = new ConcurrentHashMap<>();
 
@@ -101,12 +127,26 @@ public class ConfirmGate {
 
 	public ConfirmGate(RunStore store, RunRegistry registry, AiProperties properties,
 			CancellationRegistry cancellations, ToolActivityBeacon beacon, List<FrontendToolGuard> frontendGuards) {
+		this(store, registry, properties, cancellations, beacon, frontendGuards, null, null);
+	}
+
+	/**
+	 * Spring 装配路径（T3-6a）：多出 {@code ObjectProvider<ResumeService>}（惰性，解环）与
+	 * 续跑触发的轻量执行器（{@code aiResumeTrigger}，见 {@link #maybeTriggerResume}）。
+	 */
+	@Autowired
+	public ConfirmGate(RunStore store, RunRegistry registry, AiProperties properties,
+			CancellationRegistry cancellations, ToolActivityBeacon beacon, List<FrontendToolGuard> frontendGuards,
+			ObjectProvider<ResumeService> resumeServiceProvider,
+			@Qualifier("aiResumeTrigger") Executor resumeTriggerExecutor) {
 		this.store = store;
 		this.registry = registry;
 		this.properties = properties;
 		this.cancellations = cancellations;
 		this.beacon = beacon;
 		this.frontendGuards = frontendGuards == null ? List.of() : List.copyOf(frontendGuards);
+		this.resumeServiceProvider = resumeServiceProvider;
+		this.resumeTriggerExecutor = resumeTriggerExecutor;
 	}
 
 	/**
@@ -307,8 +347,43 @@ public class ConfirmGate {
 	 * @param woke 是否唤醒了本进程内正在等待的闸门（false 说明等待方在<b>另一个进程</b>或已死，
 	 * 由续跑接手）
 	 * @param verdict 安全闸的裁定（仅 {@link Outcome#REJECTED} 时非空）
+	 * @param resumeTrigger 死卡兜底的续跑触发结果（T3-6a；随响应体回给调用方，只读信息）
 	 */
-	public record Submission(Outcome outcome, PendingToolCall pending, boolean woke, FrontendToolGuard.Verdict verdict) {
+	public record Submission(Outcome outcome, PendingToolCall pending, boolean woke, FrontendToolGuard.Verdict verdict,
+			ResumeTrigger resumeTrigger) {
+
+		/** 兼容构造（非 ACCEPTED 分支与既有调用方）：不涉及续跑触发。 */
+		public Submission(Outcome outcome, PendingToolCall pending, boolean woke, FrontendToolGuard.Verdict verdict) {
+			this(outcome, pending, woke, verdict, ResumeTrigger.notApplicable());
+		}
+	}
+
+	/**
+	 * 续跑触发的结果（T3-6a）。
+	 *
+	 * <p><b>为什么 outcome 是"投递结论"而不是"续跑结论"</b>（A9）：触发动作是<b>异步</b>的
+	 * （HTTP 线程必须立即返回），此刻 {@code ResumeService.resume} 的真实结局还不存在。
+	 * 真实的续跑结局（{@code ACCEPTED}/{@code ALREADY_RUNNING}/{@code PENDING_UNRESOLVED}/
+	 * {@code POOL_SATURATED}/异常）由触发任务在执行时打 INFO 日志留痕；
+	 * 本记录只回答"这次外部输入有没有把续跑派出去、没派出是因为什么"，这正是调用方与排障需要知道的。
+	 *
+	 * @param triggered 是否已把续跑动作派给轻量执行器
+	 * @param outcome   投递结论（机器可读；见 {@link #maybeTriggerResume} 的取值表）
+	 * @param detail    人读补充（可空）
+	 */
+	public record ResumeTrigger(boolean triggered, String outcome, String detail) {
+
+		public static ResumeTrigger notApplicable() {
+			return new ResumeTrigger(false, "NOT_APPLICABLE", null);
+		}
+
+		private static ResumeTrigger skipped(String outcome, String detail) {
+			return new ResumeTrigger(false, outcome, detail);
+		}
+
+		private static ResumeTrigger dispatched() {
+			return new ResumeTrigger(true, "SCHEDULED", null);
+		}
 	}
 
 	/** 人工决策：先写 Redis，再发回执帧，最后唤醒（帧先于它唤起的后果）。重复提交按状态幂等拒绝（SP-01d V-d2B）。 */
@@ -338,7 +413,7 @@ public class ConfirmGate {
 			this.registry.of(runId).confirmDecision(pending, approved ? "approve" : "reject", pending.getReason(), 0L);
 			woke = signal(runId, toolCallId);
 		}
-		return new Submission(Outcome.ACCEPTED, pending, woke, null);
+		return new Submission(Outcome.ACCEPTED, pending, woke, null, maybeTriggerResume(runId, woke));
 	}
 
 	/** 前端工具结果回灌（保持既有四参口径：非取消路径）。 */
@@ -392,7 +467,7 @@ public class ConfirmGate {
 			this.registry.of(runId).frontendToolResult(pending, true, result == null ? "" : result);
 			woke = signal(runId, toolCallId);
 		}
-		return new Submission(Outcome.ACCEPTED, pending, woke, null);
+		return new Submission(Outcome.ACCEPTED, pending, woke, null, maybeTriggerResume(runId, woke));
 	}
 
 	/** 第一个认领该工具名的复核器的回灌判定；没有复核器返回 null（= 该工具不受闸门约束）。 */
@@ -428,7 +503,107 @@ public class ConfirmGate {
 			woke = signal(runId, pending.getToolCallId());
 		}
 		log.info("前端工具被用户取消 runId={} toolCallId={} name={}", runId, pending.getToolCallId(), pending.getName());
-		return new Submission(Outcome.ACCEPTED, pending, woke, null);
+		return new Submission(Outcome.ACCEPTED, pending, woke, null, maybeTriggerResume(runId, woke));
+	}
+
+	/**
+	 * 死卡兜底（T3-6a 第 4 方案）：{@code woke=false} 且该轮快照仍是 {@code SUSPENDED} 时，
+	 * 触发一次 {@link ResumeService#resume(String)} 把"死卡"收敛为真实续跑。
+	 *
+	 * <h2>为什么这条路径上一定安全（红队实读的结论）</h2>
+	 * {@code StartupResumeRunner} 对 {@code resumeable=false} 的轮<b>只 skip</b>（不落终态、不重建等待循环），
+	 * {@code ResumeService} 对仍 {@code PENDING} 的外部项返回 {@code PENDING_UNRESOLVED} 也不驱动 ——
+	 * 于是"快照 SUSPENDED + 已无进程等待"在重启后是一个<b>稳态</b>。而此刻外部输入刚到，
+	 * 条目已经 {@code APPROVED}/{@code REJECTED}/{@code FRONTEND_RESULT}/{@code FRONTEND_CANCELLED}
+	 * （都不是 PENDING），续跑会走正常路径（重建历史 → 执行已决工具），死闸门组合天然消失，
+	 * 不需要任何"活闸门检测"（原 S3-7 方案作废）。
+	 *
+	 * <h2>四个前置判据（缺一不触发）</h2>
+	 * <ol>
+	 * <li>{@code woke=true} → 本进程的等待方已被唤醒，正常续跑路径已成立（{@code WOKE_IN_PROCESS_GATE}）；</li>
+	 * <li>{@link #hasActiveLatch(String)} → 本进程仍有该 runId 的活跃等待
+	 *     （R4③ 的毫秒窗：{@code saveSuspended} 写完、latch 还没登记时同进程 confirm 也会看到
+	 *     {@code woke=false}）—— 触发会双驱动同一轮（{@code ACTIVE_LATCH_IN_PROCESS}）；</li>
+	 * <li>快照存在且状态为 {@code SUSPENDED}（{@code SNAPSHOT_NOT_SUSPENDED}）；</li>
+	 * <li>{@link ResumeService} 可用（无 key 的降级装配下 provider 返回 null，{@code NO_RESUME_SERVICE}）。</li>
+	 * </ol>
+	 *
+	 * <p><b>触发点是异步的（A9）</b>：动作交给 {@link #resumeTriggerExecutor}（轻量池，
+	 * 容量与拒绝策略见 {@code AiProperties.Resume}），HTTP 线程<b>立即返回</b>；
+	 * 池饱和时抛 {@code RejectedExecutionException}，此处<b>吞掉</b>并回
+	 * {@code EXECUTOR_SATURATED}（外部输入本身已经落库成功，不该因为"续跑没派出去"而报错）。
+	 * {@link RunStore#claimExecution} 的原子认领仍是"工具恰好一次"的最终兜底。
+	 *
+	 * <p>真实续跑结局由 {@link #runResume} 在执行时打 INFO 日志（ACCEPTED /
+	 * ALREADY_RUNNING / PENDING_UNRESOLVED / POOL_SATURATED / 异常都留痕）。
+	 */
+	private ResumeTrigger maybeTriggerResume(String runId, boolean woke) {
+		if (woke) {
+			return ResumeTrigger.skipped("WOKE_IN_PROCESS_GATE", null);
+		}
+		if (hasActiveLatch(runId)) {
+			log.debug("死卡兜底不触发：本进程仍有该 runId 的活跃等待 runId={}", runId);
+			return ResumeTrigger.skipped("ACTIVE_LATCH_IN_PROCESS", null);
+		}
+		RunSnapshot snapshot = this.store.get(runId);
+		if (snapshot == null || !RunSnapshot.SUSPENDED.equals(snapshot.getStatus())) {
+			return ResumeTrigger.skipped("SNAPSHOT_NOT_SUSPENDED",
+					snapshot == null ? "快照不存在" : "快照状态 " + snapshot.getStatus());
+		}
+		if (this.resumeServiceProvider == null || this.resumeTriggerExecutor == null) {
+			return ResumeTrigger.skipped("NO_RESUME_SERVICE", "本实例未装配续跑通路");
+		}
+		if (this.resumeServiceProvider.getIfAvailable() == null) {
+			return ResumeTrigger.skipped("NO_RESUME_SERVICE", "续跑服务不可用（无 AI key 的降级装配）");
+		}
+		try {
+			this.resumeTriggerExecutor.execute(() -> runResume(runId));
+		}
+		catch (RejectedExecutionException ex) {
+			log.warn("死卡兜底续跑未派发（触发池饱和）runId={}：{}", runId, ex.getMessage());
+			return ResumeTrigger.skipped("EXECUTOR_SATURATED", "续跑触发池已饱和，本次未派发");
+		}
+		catch (RuntimeException ex) {
+			log.warn("死卡兜底续跑派发失败 runId={}：{}", runId, ex.getMessage());
+			return ResumeTrigger.skipped("DISPATCH_FAILED", String.valueOf(ex.getMessage()));
+		}
+		log.info("死卡兜底触发续跑 runId={}（woke=false 且快照 SUSPENDED，已派发，HTTP 立即返回）", runId);
+		return ResumeTrigger.dispatched();
+	}
+
+	/** 触发任务本体：调 {@link ResumeService#resume(String)} 并把结局打 INFO 日志留痕（A9 的"饱和/结局可见"）。 */
+	private void runResume(String runId) {
+		try {
+			ResumeService service = this.resumeServiceProvider.getIfAvailable();
+			if (service == null) {
+				log.info("死卡兜底续跑结局 runId={} outcome=NO_RESUME_SERVICE", runId);
+				return;
+			}
+			ResumeService.ResumeResult result = service.resume(runId);
+			log.info("死卡兜底续跑结局 runId={} outcome={} body={}", runId, result.outcome(), result.body());
+		}
+		catch (Exception ex) {
+			log.error("死卡兜底续跑异常 runId={}", runId, ex);
+		}
+	}
+
+	/**
+	 * 本进程是否有该 runId 的活跃等待闸门（T3-6a / A8；只读、不加锁外状态、不改 {@code latches} 语义）。
+	 *
+	 * <p>判据是<b>前缀</b>而不是 toolCallId：一次挂起可能有多个工具调用（多闸门），
+	 * 且"防双驱动"关心的是"这一轮还有人在等"，与具体是哪个 toolCallId 无关。
+	 */
+	public boolean hasActiveLatch(String runId) {
+		if (runId == null) {
+			return false;
+		}
+		String prefix = runId + "|";
+		for (String key : this.latches.keySet()) {
+			if (key.startsWith(prefix)) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/** 唤醒本进程内正在等待该 toolCallId 的闸门；无等待方返回 false（不报错）。 */

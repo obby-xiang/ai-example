@@ -43,6 +43,8 @@ public class AiProperties {
 
 	private ToolResult toolResult = new ToolResult();
 
+	private Frame frame = new Frame();
+
 	/**
 	 * 启动期容量联动校验（T3-5 定值回灌，2026-10-09）。
 	 *
@@ -151,6 +153,22 @@ public class AiProperties {
 
 		/** 单次启动扫描最多自动续跑多少轮（防止启动瞬间把挂起池占满）。 */
 		private int maxOnStartup = 10;
+
+		/**
+		 * 续跑触发池（T3-6a / A9 的"轻量执行器"）工作线程数。
+		 *
+		 * <p>承载的动作很短：一次 {@code ResumeService.resume} 调用（读快照/台账/待决 + 重建历史 +
+		 * 转投挂起池）—— 它<b>不</b>跑模型、不阻塞等外部输入，故 2 条线程足够（同一时刻通常只有
+		 * 一两次外部输入到来）。<b>不得</b>并入挂起池：{@code resume} 内部还要向挂起池提交一次，
+		 * 同池提交即嵌套占用（R4/A9）。
+		 */
+		private int triggerPoolSize = 2;
+
+		/**
+		 * 续跑触发池的任务队列容量（有界）。满即 {@code AbortPolicy} 拒绝 ⇒ 调用方回
+		 * {@code EXECUTOR_SATURATED}（外部输入本身已落库成功，绝不因此报错）。
+		 */
+		private int triggerQueueCapacity = 16;
 	}
 
 	@Data
@@ -245,6 +263,30 @@ public class AiProperties {
 
 		/** 回填模型的最大字符数（行数未超但字符超限时同样截断）。 */
 		private int maxChars = 8000;
+	}
+
+	/**
+	 * SSE 单帧上限（T3-10 裁定，{@code app.ai.frame.max-bytes}）。
+	 *
+	 * <p>判定口径（A19）：<b>整帧 JSON 的 UTF-8 字节数</b>；超限时对 {@code text}/{@code result}
+	 * 的值做<b>字段级</b>字符截断 + 独立标记字段 {@code truncated}/{@code truncatedReason}，
+	 * <b>严禁</b>帧字节级截断 —— 后者破坏 JSON，坏帧在回放读路径（{@code RunStore#events}）被
+	 * 静默忽略，表现为 seq 洞。
+	 *
+	 * <p><b>口径变更（A21）</b>：本上限<b>优先于</b> T2"给前端看的帧全文不裁剪"的承诺 ——
+	 * 前端帧从"永不裁剪"变为"受单帧上限约束的字段级截断 + 标记"
+	 * （{@link com.example.configmgr.ai.tool.ToolResultLimiter} 的 javadoc 已同步修订）。
+	 *
+	 * <p>取值 64KB（A20 定案；"单键理论最大 ≈192MB，M1 不做额外限制"记观察项）。
+	 */
+	@Data
+	public static class Frame {
+
+		/** 单帧 JSON 的 UTF-8 字节上限的<b>单一事实源</b>（缺省 64KB；写出器装配路径与配置项同取本常量）。 */
+		public static final int DEFAULT_MAX_BYTES = 64 * 1024;
+
+		/** 单帧 JSON 的 UTF-8 字节上限（64KB）。 */
+		private int maxBytes = DEFAULT_MAX_BYTES;
 	}
 
 }

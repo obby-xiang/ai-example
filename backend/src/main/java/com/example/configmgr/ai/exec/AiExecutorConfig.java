@@ -66,4 +66,28 @@ public class AiExecutorConfig {
 		});
 	}
 
+	/**
+	 * 续跑触发的<b>轻量执行器</b>（T3-6a / A9）：承载 {@code ConfirmGate} 的
+	 * "死卡兜底 → ResumeService.resume"动作，让 HTTP 线程（{@code POST /api/ai/confirm}）立即返回。
+	 *
+	 * <h2>为什么必须独立于挂起池</h2>
+	 * {@code resume} 内部还会再向挂起池（{@code aiRunExecutor}）提交一次真正的驱动任务；
+	 * 若触发动作本身就跑在挂起池里，同一次续跑会占用该池两条线程（嵌套占用），
+	 * 池满时构成自锁。本池的任务很短（一次 Redis 读 + 重建 + 转投），容量小、队列有界、
+	 * 饱和即拒绝（{@code AbortPolicy}）—— 拒绝由 {@code ConfirmGate} 吞掉并如实回报
+	 * {@code EXECUTOR_SATURATED}。
+	 */
+	@Bean(name = "aiResumeTrigger", destroyMethod = "shutdown")
+	public ThreadPoolTaskExecutor aiResumeTrigger(AiProperties properties) {
+		ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+		executor.setCorePoolSize(properties.getResume().getTriggerPoolSize());
+		executor.setMaxPoolSize(properties.getResume().getTriggerPoolSize());
+		executor.setQueueCapacity(properties.getResume().getTriggerQueueCapacity());
+		executor.setThreadNamePrefix("ai-resume-trigger-");
+		executor.setRejectedExecutionHandler(new ThreadPoolExecutor.AbortPolicy());
+		executor.setWaitForTasksToCompleteOnShutdown(false);
+		executor.initialize();
+		return executor;
+	}
+
 }

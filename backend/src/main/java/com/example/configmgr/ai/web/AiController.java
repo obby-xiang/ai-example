@@ -226,6 +226,8 @@ public class AiController {
 		body.put("reason", submission.pending().getReason());
 		body.put("executed", submission.pending().isExecuted());
 		body.put("wokeInProcessGate", submission.woke());
+		body.put("resumeTriggered", submission.resumeTrigger().triggered());
+		body.put("resumeOutcome", submission.resumeTrigger().outcome());
 		body.put("storedBy", this.runStore.instanceId());
 		body.put("note", "决策已写入 Redis；是否已执行见 executed / GET /api/ai/runs/{runId} 的台账");
 		return ResponseEntity.ok(body);
@@ -262,6 +264,8 @@ public class AiController {
 		body.put("cancelled", cancelled);
 		body.put("executed", false);
 		body.put("wokeInProcessGate", submission.woke());
+		body.put("resumeTriggered", submission.resumeTrigger().triggered());
+		body.put("resumeOutcome", submission.resumeTrigger().outcome());
 		body.put("storedBy", this.runStore.instanceId());
 		return ResponseEntity.ok(body);
 	}
@@ -295,10 +299,12 @@ public class AiController {
 		return ResponseEntity.ok(emitter);
 	}
 
-	/** 终态判定（含取消）：DONE / FAILED / CANCELLED 三种都不再产帧。 */
+	/**
+	 * 终态判定（T3-7 / A14）：委托 {@link RunSnapshot#isTerminal(String)} —— 全仓唯一判定函数
+	 * （DONE / FAILED / CANCELLED，含 {@code REJECTED} 归一）。本方法保留为 controller 内的语义化别名。
+	 */
 	private static boolean isTerminal(String status) {
-		return RunSnapshot.DONE.equals(status) || RunSnapshot.FAILED.equals(status)
-				|| RunSnapshot.CANCELLED.equals(status);
+		return RunSnapshot.isTerminal(status);
 	}
 
 	// ── 取消（韧性棒：ADR-8 修正③） ────────────────────────────────────────

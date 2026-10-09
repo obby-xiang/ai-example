@@ -95,6 +95,16 @@ public class ResilientChatService {
 	/** 流式活动心跳的最小间隔（毫秒）：僵尸判据要"有活动痕迹"，但不能把帧刷爆。 */
 	public static final long STREAMING_HEARTBEAT_MILLIS = 5000L;
 
+	/**
+	 * 空回复的机器可读码（T3-7 / A12，口径变更）：<b>空文本（去空白后为空）的轮次终态转 FAILED</b>。
+	 *
+	 * <p>为什么采纳"空回复即失败"：上游静默截断可以产出 0 字符的"成功"终态（实测形态），
+	 * 此前 {@link #finish} 对空文本仍置 {@code DONE}，等于把"什么都没答"当成功交付；
+	 * 判定规则直接影响用户体验，故轮次级以 FAILED + 本码收尾（终帧为 {@code error}，
+	 * 不再是 {@code done}）。明细口径见技术方案 §13.2 #3 的闭环注记。
+	 */
+	public static final String EMPTY_REPLY_CODE = "EMPTY_REPLY";
+
 	private static final String SYSTEM_PROMPT = """
 			你是一个专业的配置管理 AI 助手，帮助用户完成配置数据的导出、导入和管理工作。
 
@@ -424,17 +434,25 @@ public class ResilientChatService {
 
 	// ── 落定 ────────────────────────────────────────────────────────────────
 
-	/** 成功终局：补最终 assistant 消息 → 快照 DONE → 记忆收敛 → {@code done} 终帧。 */
+	/**
+	 * 成功终局：补最终 assistant 消息 → 快照 DONE → 记忆收敛 → {@code done} 终帧。
+	 *
+	 * <p><b>T3-7 / A12：空文本不再算成功</b> —— 正文去空白后为空即转 {@link #emptyReply}
+	 * （FAILED + {@code EMPTY_REPLY}）。三形态（空串 / 纯空白 / 空文本但本轮用过工具）一律如此：
+	 * "用过工具"只说明这一轮做过事，不改变"模型没给出任何正文"这一事实。
+	 */
 	private void finish(String runId, String sessionId, Accumulator accumulator, int attempts, StreamWatchdog watchdog,
 			SseChatEmitter out) {
 		String text = accumulator.text();
+		if (!StringUtils.hasText(text)) {
+			emptyReply(runId, sessionId, accumulator, attempts, out);
+			return;
+		}
 		RunSnapshot snapshot = this.store.get(runId);
 		List<Message> history = new ArrayList<>();
 		if (snapshot != null) {
 			history = new ArrayList<>(this.codec.deserializeAll(snapshot.getMessageJson()));
-			if (StringUtils.hasText(text)) {
-				history.add(AssistantMessage.builder().content(text).build());
-			}
+			history.add(AssistantMessage.builder().content(text).build());
 			snapshot.setMessageJson(this.codec.serializeAll(history));
 			snapshot.setInFlightToolCalls(new ArrayList<>());
 			snapshot.setAssistantContent(null);
@@ -455,6 +473,39 @@ public class ResilientChatService {
 		// T5：正文段收尾（未开过段则不发 —— 纯工具轮没有正文）
 		out.textEnd(text.length());
 		out.done(accumulator.usage(), accumulator.model(), extra);
+	}
+
+	/**
+	 * 空回复终局（T3-7 / A12，<b>口径变更</b>）：正文去空白后为空 ⇒ 轮次 FAILED + 机器可读码
+	 * {@value #EMPTY_REPLY_CODE}，终帧 {@code error}（此前是 {@code done}）。
+	 *
+	 * <p>与 {@link #cancelTerminal} 同口径的两点：① 不把空正文写成 assistant 消息
+	 * （空消息会污染下一轮记忆）；② 仍以快照现状的历史收敛记忆（本轮已落定的工具配对随之进记忆，
+	 * "这一轮开过的东西"不悬空）。已经打开过的正文段（纯空白分片也发 delta，见 {@code consume}）
+	 * 先收尾再发终帧 —— 与 {@link #fail} 的帧序契约一致（运行关闭前，它打开的一切都要先关闭）。
+	 */
+	private void emptyReply(String runId, String sessionId, Accumulator accumulator, int attempts, SseChatEmitter out) {
+		String text = accumulator.text();
+		String message = "模型本轮未产出任何正文（去空白后为空），按失败收尾。"
+				+ "常见成因：上游静默截断产出 0 字符的\"成功\"响应，或模型返回空回复；请重试或换一种问法。";
+		log.error("AI 轮次空回复 runId={} sessionId={} attempts={} rawChars={} 末帧序列=[{}]", runId, sessionId, attempts,
+				text.length(), accumulator.tailSummary());
+		RunSnapshot snapshot = this.store.get(runId);
+		if (snapshot != null) {
+			List<Message> history = new ArrayList<>(this.codec.deserializeAll(snapshot.getMessageJson()));
+			snapshot.setMessageJson(this.codec.serializeAll(history));
+			snapshot.setInFlightToolCalls(new ArrayList<>());
+			snapshot.setAssistantContent(null);
+			snapshot.setFinalText(text);
+			snapshot.setStatus(RunSnapshot.FAILED);
+			snapshot.setCancelled(false);
+			snapshot.setAttempts(attempts);
+			snapshot.setError(EMPTY_REPLY_CODE + "：" + message);
+			this.store.save(snapshot);
+			convergeMemory(sessionId, history);
+		}
+		out.textEnd(text.length());
+		out.error(EMPTY_REPLY_CODE, message);
 	}
 
 	/**

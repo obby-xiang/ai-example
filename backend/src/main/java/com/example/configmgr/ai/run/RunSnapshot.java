@@ -38,6 +38,30 @@ public class RunSnapshot {
 	/** 被用户取消（终态：不再续跑，终帧为 {@code done{cancelled:true}}）。 */
 	public static final String CANCELLED = "CANCELLED";
 
+	/**
+	 * 终态串的<b>归一别名</b>（T3-7 / A13）：轮次状态本身没有 {@code REJECTED}
+	 * （条目级的 {@code PendingToolCall.REJECTED} 与前端 {@code rejected} 语义<b>不动</b>），
+	 * 但终端判定函数把该串归入"失败类终态" —— 于是任何来源传进来的 {@code REJECTED}
+	 * 都不会被当成"还能续跑的活轮"。
+	 */
+	private static final String REJECTED_ALIAS = "REJECTED";
+
+	/**
+	 * 统一终态判定（T3-7 / A14）：DONE / FAILED / CANCELLED（+ {@code REJECTED} 归一）为终态。
+	 *
+	 * <h2>为什么必须唯一函数</h2>
+	 * 此前 {@code DONE|FAILED|CANCELLED} 这一组字面量散落在三处
+	 * （{@code AiController#isTerminal}、{@code RunStore#save} 的 session→current 索引分支、
+	 * {@code ResumeService} 的早退比较与 {@code listRuns} 的 resumeable 组合）——
+	 * 任何一处漏改都会造成"一边认为终态、一边还在续跑"的分叉（例如终态轮被重新发现并驱动）。
+	 *
+	 * @param status 轮次状态串（可为 null / 未知串 → false）
+	 */
+	public static boolean isTerminal(String status) {
+		return DONE.equals(status) || FAILED.equals(status) || CANCELLED.equals(status)
+				|| REJECTED_ALIAS.equals(status);
+	}
+
 	private String runId;
 
 	private String sessionId;
