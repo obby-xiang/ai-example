@@ -232,6 +232,7 @@ import { parseRowData, type ConfigStagingRow } from '@/types/data'
 import type { ConfigDefinition, ConfigField } from '@/types/definition'
 import type { Job, ValidationIssue } from '@/types/job'
 import { readImportMode, TaskSteps, type ImportMode, type Task } from '@/types/task'
+import type { WorkspaceActionSource } from '@/types/tools'
 
 interface GridApi {
   loadFromXlsx(blob: Blob, fields: readonly ConfigField[]): Promise<{ missingHeaders: string[] }>
@@ -353,6 +354,26 @@ function cellValue(row: ConfigStagingRow, fieldCode: string): string {
   return value === null || value === undefined ? '' : String(value)
 }
 
+// ── 选中集 → 工作区（issue #3：本页唯一写入口） ────────────────────────────────
+
+/**
+ * 把页面选中集收敛进 workspace（AI 上下文 `extra.selectedDefs` 的唯一来源）。
+ *
+ * 与导出向导同因同修：手动勾选（`DefSelector` 的 v-model）与 AI 的 `select_definitions`
+ * 页面 handler 此前都只改本页 `selectedDefs` ref，`workspace.selectedDefs` 要等到
+ * `persistSelection()`（下载模板/上传等动作）才更新 ⇒ AI 侧 `buildContext()` 读到旧值。
+ * 相等短路 ⇒ 恢复任务（`loadTask` 同步块内先赋 ref、紧接着 `enterPage({selectedDefs})`）
+ * 不会二次 touch；比较按集合（顺序不敏感，裁决⑤）。
+ */
+function syncSelectedDefsToWorkspace(source: WorkspaceActionSource = '界面'): void {
+  const codes = [...selectedDefs.value]
+  const current = new Set(workspace.selectedDefs)
+  if (current.size === codes.length && codes.every((code) => current.has(code))) {
+    return
+  }
+  workspace.setSelectedDefs(codes, 'REPLACE', source)
+}
+
 // ── 加载 ──────────────────────────────────────────────────────────────────────
 
 async function loadDefinitions(): Promise<void> {
@@ -466,7 +487,8 @@ async function persistSelection(): Promise<void> {
     return
   }
   await tasksApi.selectDefs(taskId.value, [...selectedDefs.value])
-  workspace.setSelectedDefs([...selectedDefs.value])
+  // issue #3：与 watch / AI handler 共用同一收敛点（勾选早已同步时此处短路）
+  syncSelectedDefsToWorkspace()
 }
 
 async function downloadTemplates(): Promise<void> {
@@ -926,6 +948,8 @@ function registerHandlers(): void {
   registerPageHandler('import.selectDefs', (payload) => {
     const codes = Array.isArray(payload.defCodes) ? payload.defCodes.map((item) => String(item)) : []
     selectedDefs.value = payload.mode === 'ADD' ? [...new Set([...selectedDefs.value, ...codes])] : codes
+    // issue #3：AI handler 分支同样要显式收敛（来源记 'AI'；watch 随后比较已相等 ⇒ 短路）
+    syncSelectedDefsToWorkspace('AI')
     activeEditorTab.value = selectedDefs.value[0] ?? ''
     void loadEditors(true)
     return `已选择配置项：${selectedDefs.value.join('、') || '（空）'}`
@@ -983,8 +1007,9 @@ async function createAndBindTask(): Promise<void> {
   }
 }
 
-// 勾选变化：补齐编辑区（未上传的配置项给模板，便于直接在线录入）
+// 勾选变化：先收敛进工作区（issue #3，同步调用放在首行，避免被编辑器加载耗时挤后），再补齐编辑区
 watch(selectedDefs, async () => {
+  syncSelectedDefsToWorkspace()
   activeEditorTab.value = selectedDefs.value[0] ?? ''
   await loadEditors(true)
 })
