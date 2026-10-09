@@ -10,6 +10,8 @@ import com.example.configmgr.definition.service.DefinitionService;
 import com.example.configmgr.excel.ExcelWriter;
 import com.example.configmgr.file.FileStorageService;
 import com.example.configmgr.job.entity.Job;
+import com.example.configmgr.job.entity.ValidationIssue;
+import com.example.configmgr.job.repo.ValidationIssueRepository;
 import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.entity.TaskFile;
 import com.example.configmgr.task.repo.TaskFileRepository;
@@ -50,6 +52,23 @@ public class ExportJobRunner {
     private final JobCancellationRegistry cancellationRegistry;
     private final JobProgressService progressService;
     private final JobTerminalWriter terminalWriter;
+    private final ValidationIssueRepository issueRepository;
+
+    /**
+     * 作业级 issue 的 {@code def_code} 哨兵值（{@code validation_issues.def_code} 为 NOT NULL，
+     * 作业级失败没有配置项归属；空串不可读、{@code null} 违反列约束，故用 {@code "-"}）。
+     *
+     * <p><b>已知缺口</b>：前端明细区按 {@code defCode} 与作业条目分组（{@code JobProgress.vue} 的
+     * {@code detailOf(defCode)}），哨兵不落入任何分组 ⇒ 作业级 issue 在明细区不展示
+     * （展示出口登记为观察项，本轮不实现）。
+     */
+    private static final String JOB_LEVEL_DEF_CODE = "-";
+
+    /** {@code validation_issues.message} 的列宽（VARCHAR(1024)）——写入前必须保护。 */
+    private static final int ISSUE_MESSAGE_MAX = 1024;
+
+    /** 消息截断标记（列宽保护的可见痕迹）。 */
+    private static final String ISSUE_MESSAGE_TRUNCATED = "…[已按列宽截断]";
 
     @Transactional
     public void run(Job job) {
@@ -62,6 +81,9 @@ public class ExportJobRunner {
         int discoveredRows = 0;  // 已发现行数（已开工配置项的行数合计）
         int finishedDefRows = 0; // 已结束配置项的扫描行数合计
         int startedItems = 0;    // 已开工配置项数
+
+        // 幂等清理（与 PrecheckJobRunner#run 同位置同口径）：重跑同一作业不叠加历史 issue
+        issueRepository.deleteByJobId(jobId);
 
         var items = taskItemRepository.findByTaskIdOrderBySortOrder(taskId);
 
@@ -157,6 +179,7 @@ public class ExportJobRunner {
 
                 } catch (Exception e) {
                     log.error("Export failed for def {}: {}", defCode, e.getMessage(), e);
+                    saveIssue(jobId, defCode, issueMessage(e));
                     errorCount++;
                     finishedDefRows += defTotal;
                     processedRows = finishedDefRows;
@@ -168,6 +191,7 @@ public class ExportJobRunner {
             }
         } catch (Exception e) {
             log.error("Export job failed: {}", e.getMessage(), e);
+            saveIssue(jobId, JOB_LEVEL_DEF_CODE, "导出作业失败: " + issueMessage(e));
             errorCount++;
             terminalWriter.complete(job, Job.JobStatus.FAILED, errorCount, 0,
                     processedRows, totalRows, doneEvent(job, Job.JobStatus.FAILED));
@@ -189,6 +213,41 @@ public class ExportJobRunner {
 
     private Map<String, Object> doneEvent(Job job, Job.JobStatus status) {
         return Map.of("jobId", job.getId(), "jobType", "EXPORT", "status", status);
+    }
+
+    /**
+     * 写一条 ERROR 级 {@link ValidationIssue}（T3-3）。
+     *
+     * <p>模板与 {@link ImportJobRunner} 的项级 catch 同款：只落 {@code jobId/defCode/severity/message}，
+     * {@code rowKey}/{@code fieldCode} 留空（导出失败不是"某行某字段"的问题）。
+     *
+     * @param defCode 配置项编码；作业级失败用 {@link #JOB_LEVEL_DEF_CODE} 哨兵
+     */
+    private void saveIssue(Long jobId, String defCode, String message) {
+        ValidationIssue issue = new ValidationIssue();
+        issue.setJobId(jobId);
+        issue.setDefCode(defCode);
+        issue.setSeverity(ValidationIssue.Severity.ERROR);
+        issue.setMessage(message);
+        issueRepository.save(issue);
+    }
+
+    /**
+     * 异常摘要（列宽保护）：<b>异常类名 + 摘要</b>，长度不超过 {@value #ISSUE_MESSAGE_MAX}。
+     *
+     * <p>类名置于消息<b>头</b>并在截断预算里先行扣除 —— 于是"类名"这一最有排障价值的部分
+     * 永远不会被截掉（截断只吃掉摘要尾部，并在末尾留
+     * {@value #ISSUE_MESSAGE_TRUNCATED} 痕迹）。没有这层保护时，超长异常消息会让 INSERT 因列宽失败，
+     * 把"项级失败"升级成"作业级失败"（丢失其余配置项的处置）。
+     */
+    private static String issueMessage(Exception e) {
+        String head = e.getClass().getSimpleName() + ": ";
+        String detail = e.getMessage() == null ? "(无消息)" : e.getMessage();
+        int budget = ISSUE_MESSAGE_MAX - head.length() - ISSUE_MESSAGE_TRUNCATED.length();
+        if (detail.length() <= budget) {
+            return head + detail;
+        }
+        return head + detail.substring(0, Math.max(0, budget)) + ISSUE_MESSAGE_TRUNCATED;
     }
 
     /** 行级进度事件：与 {@link JobProgressService#snapshot} 同一对数字，并携当前处理项（④ 纯增量字段）。 */

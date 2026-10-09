@@ -13,6 +13,7 @@ import com.example.configmgr.excel.ExcelReader;
 import com.example.configmgr.file.FileStorageService;
 import com.example.configmgr.job.entity.Job;
 import com.example.configmgr.job.entity.ValidationIssue;
+import com.example.configmgr.job.repo.JobRepository;
 import com.example.configmgr.job.repo.ValidationIssueRepository;
 import com.example.configmgr.task.entity.TaskFile;
 import com.example.configmgr.task.repo.TaskFileRepository;
@@ -55,6 +56,7 @@ public class PrecheckJobRunner {
     private final TaskService taskService;
     private final JobProgressService progressService;
     private final JobTerminalWriter terminalWriter;
+    private final JobRepository jobRepository;
 
     @Transactional
     public void run(Job job) {
@@ -69,8 +71,14 @@ public class PrecheckJobRunner {
         int startedItems = 0;   // 已开工配置项数
         int finishedDefRows = 0;
 
-        // Delete old issues for this job
+        // 幂等先例：开工即清旧 issue（与 PrecheckJobRunner 既有口径一致）
         issueRepository.deleteByJobId(jobId);
+
+        // T3-4 文件指纹摘要：{defCode: {fileType: {sha256, size}}}。
+        // 局部变量（非字段）：本类是单例 @Service，作业可并发执行 —— 状态挂字段会串味。
+        // 键控到 fileType 而不是只到 defCode：本执行器读盘有 UPLOAD→EXPORT 回落（见下方注释），
+        // 而 ImportJobRunner 只读 UPLOAD —— 只记 defCode 会变成"记 EXPORT、比 UPLOAD"恒不相等。
+        Map<String, Map<String, Map<String, Object>>> fingerprintSummary = new LinkedHashMap<>();
 
         var items = taskItemRepository.findByTaskIdOrderBySortOrder(taskId);
         List<String> defCodes = items.stream().map(i -> i.getDefCode()).toList();
@@ -97,12 +105,14 @@ public class PrecheckJobRunner {
                     List<ConfigField> keyFields = def.getFields().stream()
                             .filter(ConfigField::isKey).toList();
 
-                    // Find file for this def
+                    // Find file for this def（UPLOAD 优先，空则回落 EXPORT：预检查对"已导出件"也可跑）
                     Optional<TaskFile> fileOpt = taskFileRepository
                             .findByTaskIdAndDefCodeAndFileType(taskId, defCode, "UPLOAD");
+                    String usedFileType = "UPLOAD";
                     if (fileOpt.isEmpty()) {
                         fileOpt = taskFileRepository
                                 .findByTaskIdAndDefCodeAndFileType(taskId, defCode, "EXPORT");
+                        usedFileType = "EXPORT";
                     }
 
                     if (fileOpt.isEmpty()) {
@@ -120,6 +130,11 @@ public class PrecheckJobRunner {
 
                     // Read rows from Excel
                     byte[] fileBytes = fileStorage.read(fileOpt.get().getStoragePath());
+                    // T3-4：同一份文件再过一次<b>流式</b>摘要（不复用上面的全量 read —— 摘要只经手
+                    // 8KB 缓冲，不给百 MB 级件再添一份等量堆内存）；按<b>本次实际使用的 fileType</b> 记账
+                    fingerprintSummary
+                            .computeIfAbsent(defCode, key -> new LinkedHashMap<>())
+                            .put(usedFileType, digestOf(fileOpt.get().getStoragePath()));
                     List<Map<String, Object>> rows = excelReader.read(def, fileBytes);
                     defTotal = rows.size();
                     discoveredRows += defTotal;
@@ -251,10 +266,51 @@ public class PrecheckJobRunner {
 
         Job.JobStatus status = cancelled ? Job.JobStatus.CANCELLED
                 : (totalErrors > 0 ? Job.JobStatus.FAILED : Job.JobStatus.COMPLETED);
+        // T3-4（A6）：指纹摘要收尾一次性写 —— 仍在数据面事务内、JobTerminalWriter.complete 之前；
+        // 摘要先于终态提交，故 IMPORT 建作业时读到的摘要必定已是提交态（无"终态可见但摘要未提交"的竞态）。
+        writeFingerprintSummary(jobId, fingerprintSummary);
         // 终态分母回归"真实工作量"（未开工预留清零）：全部跑完时 processed==total→100%
         totalRows = JobProgressTotals.denominator(0, discoveredRows, 0);
         terminalWriter.complete(job, status, totalErrors, totalWarnings, processedRows, totalRows,
                 doneEvent(job, status, totalErrors));
+    }
+
+    /** 单个文件类型的指纹（sha256 + size）。读盘失败记 WARN 并跳过 —— 该项随后走"摘要缺指纹"的从严分支。 */
+    private Map<String, Object> digestOf(String storagePath) {
+        try {
+            var digest = fileStorage.digest(storagePath);
+            Map<String, Object> entry = new LinkedHashMap<>();
+            entry.put("sha256", digest.sha256());
+            entry.put("size", digest.size());
+            return entry;
+        }
+        catch (Exception e) {
+            log.warn("计算预检查文件指纹失败 path={}: {}", storagePath, e.getMessage());
+            Map<String, Object> entry = new LinkedHashMap<>();
+            entry.put("sha256", null);
+            entry.put("size", null);
+            return entry;
+        }
+    }
+
+    /**
+     * 把指纹摘要写进作业的 {@code result_json}（T3-4 激活死列；{@code setResultJson} 此前全仓零调用）。
+     *
+     * <p>写的是<b>重新读出的受管实体</b>（{@code findById}）而不是入参 {@code job}：入参在
+     * "测试直驱执行器"场景下可能是游离态，merge 会连带 {@code items} 级联关系一起处理；
+     * 受管实体写回与 {@code JobService#cancel} 同款，副作用面最小。
+     */
+    private void writeFingerprintSummary(Long jobId, Map<String, Map<String, Map<String, Object>>> summary) {
+        jobRepository.findById(jobId).ifPresent(fresh -> {
+            try {
+                fresh.setResultJson(objectMapper.writeValueAsString(summary));
+                jobRepository.save(fresh);
+            }
+            catch (Exception e) {
+                // 摘要写失败不升级为作业失败：从严口径下"摘要缺失"在 IMPORT 侧就是 409 PRECHECK_STALE
+                log.warn("写入预检查指纹摘要失败 jobId={}: {}", jobId, e.getMessage());
+            }
+        });
     }
 
     private Map<String, Object> doneEvent(Job job, Job.JobStatus status, int errors) {
