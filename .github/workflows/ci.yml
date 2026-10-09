@@ -1,7 +1,7 @@
 name: CI 门禁
 
 # S5.d：门禁骨架 = 后端编译 + 后端单测 + 前端类型检查/构建。
-# M2-T1.2：新增 e2e job（桩上游 + services:redis 容器，跑满 27 用例）。
+# M2-T1.2：新增 e2e job（桩上游 + services:redis 容器，跑满 28 用例）。
 #   口径补注（设计草案 §4.3，只补注不改判定）：CI 内的 GFSKIP=0 由构造保证——桩按路由表下发
 #   生成式表单，"模型未触发/schema 漂移"两条 SKIP 分支不可达，故它只证明"桩给出的表单被产品链路
 #   正确消费"，不证明"模型服从率"。真模型的 E2E 维持本地手动（S5d 裁决 #3）；
@@ -82,9 +82,12 @@ jobs:
   #   - 证据目录取 backend/target/e2e-artifacts：target 已被 .gitignore 排除，
   #     故 job 结束后 git status --porcelain 仍为空（验收 #5）；且路径在 workspace 内，
   #     满足 upload-artifact 只能归档 workspace 内文件的限制
+  #   - T3-9（A17）：redis service 显式 --maxmemory-policy noeviction ——
+  #     AI 键（ai:run/ai:events/ai:seq）"宁报错不丢帧"：淘汰策略一旦生效，归档帧会无声消失
+  #     （回放少帧 = seq 洞）。与本地 Memurai 的 CONFIG SET 实跑口径一致。
   # ============================================================
   e2e:
-    name: E2E 全流程（27 用例 · 桩上游 + redis）
+    name: E2E 全流程（28 用例 · 桩上游 + redis）
     runs-on: ubuntu-latest
     timeout-minutes: 25
     needs: backend
@@ -95,6 +98,7 @@ jobs:
         image: redis:7
         ports: ['6379:6379']
         options: >-
+          --maxmemory-policy noeviction
           --health-cmd "redis-cli ping"
           --health-interval 5s
           --health-timeout 3s
@@ -160,7 +164,7 @@ jobs:
           echo $! > "$GITHUB_WORKSPACE/backend/target/e2e-artifacts/backend.pid"
 
       # 把"环境坏"与"用例失败"分开：无 key 时 /health 回 503 AI_UNAVAILABLE、
-      # Redis 不可用时回 503 AI_REDIS_UNAVAILABLE；本步不过就直接失败，不让 27 个用例全红。
+      # Redis 不可用时回 503 AI_REDIS_UNAVAILABLE；本步不过就直接失败，不让 28 个用例全红。
       - name: 就绪等待（/api/ai/health：available + redis.available）
         working-directory: ${{ github.workspace }}
         run: |
@@ -187,7 +191,7 @@ jobs:
           done
           echo "::error::60s 内 /api/definitions 未达 15（基座 7 + glm 8），种子播种未完成"; tail -n 40 backend/target/e2e-artifacts/boot.log; exit 1
 
-      - name: 运行 E2E（27 用例）
+      - name: 运行 E2E（28 用例）
         # 去掉 run 内的 `pwsh -NoProfile -File` 双层调用（红队问题 6①）：step 已经声明 shell: pwsh，
         # 直接以 pwsh 原生方式调用脚本；脚本内的 `exit N` 会成为 pwsh 进程退出码并被 shell 模板透传为 step 退出码。
         shell: pwsh

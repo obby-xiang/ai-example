@@ -5,7 +5,7 @@
 
 | 路径 | 作用 |
 | --- | --- |
-| `scripts/verify-e2e.ps1` | 端到端验证脚本（27 用例，PowerShell）。断言对象是**已启动的后端**，脚本自身不启动任何服务 |
+| `scripts/verify-e2e.ps1` | 端到端验证脚本（28 用例，PowerShell）。断言对象是**已启动的后端**，脚本自身不启动任何服务 |
 | `scripts/ci/stub-upstream.mjs` | CI E2E 用的**上游替身**（OpenAI 兼容桩），让用例在零密钥、零外网下确定性通过 |
 | `scripts/ci/stub-routes.json` | 桩的路由表（提示词 → 工具调用/表单），与 `GenerativeFormRules` 白名单手工对账 |
 | `scripts/githooks/` | 提交前敏感信息扫描（DC-08 落地），详见 `scripts/githooks/README.md` |
@@ -50,11 +50,12 @@ $env:E2E_STUB_MODE = '1'
 ./scripts/verify-e2e.ps1 -Base http://127.0.0.1:18330 -BackendLog <boot.log> -ArtifactDir <artifacts/gfc>
 ```
 
-### 1.4 用例构成（27 用例）
+### 1.4 用例构成（28 用例）
 
 | 分组 | 计数 | 计入主 PASS/FAIL 与退出码 |
 | --- | --- | --- |
 | TC1–TC22（业务全链路 + AI 交互） | 22 | 是 |
+| TC23（CONFIRM 卡快照重建，T3b/T3-6b） | 1 | 是 |
 | GF1–GF5（生成式表单端到端：FILTER/CLARIFY 回灌续跑、取消路径、复核拒绝、幂等 409 双向） | 5 | 是 |
 | Q8①/Q8②（明细落库、SSE 请求不做二次 JSON 写入） | 2 | **否**，单列计数 |
 | GF6（入参闸门观察用例，需 `-EnableGf6`） | 1 | 否 |

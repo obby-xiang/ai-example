@@ -1,5 +1,5 @@
 # ============================================================
-# E2E 验证脚本（main 版）：动态配置管理系统 全流程 27 用例
+# E2E 验证脚本（main 版）：动态配置管理系统 全流程 28 用例
 #
 # 移植来源：<REPO_ROOT>/ai-example-code/ai-example-deepseek-v4-pro/scripts/verify-e2e.ps1
 #           （685 行 / TC1–TC22 共 22 用例）。用例编号与源脚本一一对照，
@@ -37,10 +37,11 @@
 # 数据面安全：本脚本只创建/删除自己的 S5B-* 任务与 E2E_TEMP 定义；
 #   CURRENCY 演示数据在 TC13 会被替换为 3 行，TC19 用全量导出件恢复为 5 行。
 #
-# 结果口径：27 个用例计入 PASS/FAIL 与退出码（有失败即 exit 1）——TC1–TC22 共 22 个
+# 结果口径：28 个用例计入 PASS/FAIL 与退出码（有失败即 exit 1）——TC1–TC22 共 22 个
+#   + TC23（T3b 收尾：CONFIRM 卡快照重建，T3-6b）
 #   （由源脚本移植而来）+ GF1–GF5 共 5 个（生成式表单端到端，设计稿 docs/evidence/
 #   GFc-E2E用例设计-GLM-5.3.md）；GF6 为可选观察用例（-EnableGf6），不计入主计数；
-#   移植期缺陷清单（Q8）的两项断言单列计数（Q8 项 PASS/FAIL），不计入 27 用例与退出码
+#   移植期缺陷清单（Q8）的两项断言单列计数（Q8 项 PASS/FAIL），不计入 28 用例与退出码
 #   —— Q8② 属日志质量问题，具体残留见 docs/evidence/S5b-deepseek-E2E移植验证.md
 # 退出码：任一主用例 FAIL ⇒ exit 1；GF1–GF4 全部 SKIP（本棒零有效验证，硬底线）⇒ exit 1；
 #   E2E_STUB_MODE=1 且 GFSKIP≥1 ⇒ exit 1（桩模式零容忍）
@@ -2113,6 +2114,130 @@ try {
     if ($unknown.count -ne 0 -or @($unknown.messages).Count -ne 0) { throw '未知会话应返回空列表' }
     Ok ("TC22 历史恢复：{0} 条（USER {1} / ASSISTANT {2}，含工具卡片）+ 未知会话返回空" -f $hist.count, $users.Count, $assist.Count)
 } catch { No 'TC22' $_.Exception.Message }
+
+# ============================================================
+# TC23 CONFIRM 卡快照重建（T3-6b，T3b 收尾用例）
+#   流程：真挂起（start_publish 落确认门）→ 断开流（等价"整页刷新"）→
+#        GET /api/ai/runs/current 拿到重建确认卡所需的全部契约事实 →
+#        差量重挂（lastSeq=archiveMaxSeq，孤儿过滤不重发旧帧）→ 用帧里的真实 toolCallId confirm → 收敛
+#   前置约束（设计卡 §T3-6b 原文）：手工 POST /confirm 造不出 PENDING（409 UNKNOWN_TOOL_CALL）；
+#        同 session 二轮 → 409 SESSION_BUSY（故每轮独立 sessionId）；测后 POST /api/ai/cancel/{runId} 清理。
+#   口径收窄（A25，已在 T3b 施工报告登记）：本脚本没有浏览器自动化载体，
+#        "整页刷新后的前端断言"降级为接口级断言（runs/current 契约 + 差量续收的孤儿过滤）
+#        + 前端 store#restoreSuspendedSnapshot 的逻辑走查；不驱动浏览器。
+# ============================================================
+Say '--- TC23 CONFIRM 卡快照重建（挂起态外置 + 整页刷新重建 + 收敛） ---'
+try {
+    # ① 前置：一个"已导入待发布"的导入任务（与 TC17 同构，保证 confirm 后发布真能跑成）
+    $t23 = New-ImportTask 'S5B-TC23-快照重建' @('DOC_TYPE')
+    Upload-File $t23 (Join-Path $tmp 'DOC_TYPE_e2e.xlsx') 'DOC_TYPE_ok.xlsx' | Out-Null
+    $j23pre = Start-JobOf $t23 'PRECHECK'
+    if ((Wait-Job $j23pre.id).status -ne 'COMPLETED') { throw 'TC23 前置预检查未通过' }
+    $j23imp = Start-JobOf $t23 'IMPORT'
+    if ((Wait-Job $j23imp.id).status -ne 'COMPLETED') { throw 'TC23 前置导入未通过' }
+    PutJson "/api/tasks/$t23/step" @{ step = 'PUBLISH' } | Out-Null
+
+    # ② 真挂起：桩上游按 TC17-PUBLISH 路由下发 start_publish 工具轮 → 产品落确认门
+    $ctx23 = @{ page = 'import'; taskId = $t23; taskType = 'IMPORT'; step = 'PUBLISH' }
+    $ask23 = ("请立即调用 start_publish 工具发布导入任务 {0}（系统会自动弹出确认卡片，无需再询问我）" -f $t23)
+    $run23 = $null
+    $call23 = $null
+    $frames23 = New-Object System.Collections.ArrayList
+    $script:gfHttp = @()   # TC23 的 HTTP 原文按用例重置（Gf-Dump 落 gfc-TC23.http.txt）
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $session23 = 's5b-tc23-' + [Guid]::NewGuid().ToString('N')
+        $batch23 = New-Object System.Collections.ArrayList
+        Read-Sse '/api/ai/chat' @{ sessionId = $session23; message = $ask23; context = $ctx23 } `
+            @('confirm_request', 'done', 'error') $batch23 $null
+        foreach ($f in $batch23) { $frames23.Add($f) | Out-Null }
+        $cr = @($batch23 | Where-Object { $_.type -eq 'confirm_request' -and $_.name -eq 'start_publish' })
+        if ($cr.Count -ge 1) {
+            $run23 = $cr[$cr.Count - 1].runId
+            $call23 = $cr[$cr.Count - 1].toolCallId
+            break
+        }
+        Start-Sleep -Seconds 2
+    }
+    if (-not $call23) { throw 'TC23 未收到 start_publish 确认帧（3 次尝试均未调用工具）' }
+    if (-not $run23) { throw 'TC23 确认帧缺 runId' }
+    # 此刻客户端已断开流（Read-Sse 在 confirm_request 处早退并 Dispose）——即"整页刷新"的形态
+
+    # ③ 整页刷新重建：runs/current 的四项契约事实（found / awaitingExternal / PENDING 条目 / archiveMaxSeq）
+    $curRaw = Invoke-Api 'GET' "/api/ai/runs/current?sessionId=$session23" $null
+    Gf-Http-Note '整页刷新：挂起轮快照（重建确认卡的数据源）' 'GET' "/api/ai/runs/current?sessionId=$session23" $null $curRaw
+    if (-not $curRaw.ok -or -not $curRaw.json -or -not $curRaw.json.success) { throw "TC23 GET runs/current => HTTP $($curRaw.status) $($curRaw.text)" }
+    $cur23 = $curRaw.json.data
+    if (-not $cur23.found) { throw 'TC23 runs/current 未 found（挂起态未外置？）' }
+    if ($cur23.runId -ne $run23) { throw "TC23 runs/current runId=$($cur23.runId)，帧内 runId=$run23" }
+    if ($cur23.snapshotStatus -ne 'SUSPENDED') { throw "TC23 snapshotStatus=$($cur23.snapshotStatus)，期望 SUSPENDED" }
+    if ($cur23.awaitingExternal -ne $true) { throw 'TC23 awaitingExternal 非 true' }
+    $entry23 = @($cur23.pendingEntries | Where-Object { $_.toolCallId -eq $call23 })[0]
+    if (-not $entry23) { throw 'TC23 pendingEntries 缺该 toolCallId（确认卡重建无对象）' }
+    if ($entry23.entryStatus -ne 'PENDING') { throw "TC23 条目状态 $($entry23.entryStatus)，期望 PENDING" }
+    if ($entry23.kind -ne 'CONFIRM') { throw "TC23 条目 kind=$($entry23.kind)，期望 CONFIRM" }
+    if ([int]$cur23.archiveMaxSeq -lt 1) { throw "TC23 archiveMaxSeq=$($cur23.archiveMaxSeq)，期望 > 0" }
+
+    # ④ 差量续收的孤儿过滤（前端 resumeSnapshotStream 的接口级等价）：lastSeq=archiveMaxSeq 时，
+    #    重挂只收"新帧"，旧业务帧一律不重发（seq ≤ lastSeq 即孤儿）
+    $brief23 = Read-Sse-Brief "/api/ai/events/$run23`?lastSeq=$([int]$cur23.archiveMaxSeq)" 3000
+    $orphans23 = @($brief23 | Where-Object { $null -ne $_.seq -and [int]$_.seq -le [int]$cur23.archiveMaxSeq })
+    if ($orphans23.Count -gt 0) { throw "TC23 差量续收重发了 $($orphans23.Count) 个旧帧（孤儿过滤失效）" }
+
+    # ⑤ 用帧里的真实 toolCallId 提交决策（手工构造的 id 只会 409 UNKNOWN_TOOL_CALL）
+    $confBody = @{ runId = $run23; toolCallId = $call23; approved = $true; reason = 'e2e-tc23' }
+    $confRaw = Invoke-Api 'POST' '/api/ai/confirm' $confBody
+    Gf-Http-Note 'confirm（帧里的真实 toolCallId；响应含 A10 新增只读字段）' 'POST' '/api/ai/confirm' $confBody $confRaw
+    if (-not $confRaw.ok) { throw "TC23 POST /api/ai/confirm => HTTP $($confRaw.status) $($confRaw.text)" }
+    $conf23 = $confRaw.json
+    if ($conf23.accepted -ne $true) { throw "TC23 confirm 未 accepted：$($conf23 | ConvertTo-Json -Compress -Depth 5)" }
+    if ($null -eq $conf23.resumeTriggered) { throw 'TC23 confirm 响应缺 resumeTriggered（A10 契约字段）' }
+    if ([string]::IsNullOrWhiteSpace([string]$conf23.resumeOutcome)) { throw 'TC23 confirm 响应缺 resumeOutcome（A10 契约字段）' }
+    if ($conf23.resumeTriggered -ne $false -or $conf23.resumeOutcome -ne 'WOKE_IN_PROCESS_GATE') {
+        throw "TC23 进程存活时应 woke=true 且不触发死卡兜底续跑，实际 resumeTriggered=$($conf23.resumeTriggered)/$($conf23.resumeOutcome)"
+    }
+    if ($conf23.wokeInProcessGate -ne $true) { throw 'TC23 确认未唤醒同进程等待方' }
+
+    # ⑥ 收敛：重挂回放整轮状态帧（confirm_decision → tool_result → done），台账里该条目已执行
+    $after23 = New-Object System.Collections.ArrayList
+    Read-Sse "/api/ai/events/$run23" $null @('done', 'error') $after23 $null
+    $dec23 = @($after23 | Where-Object { $_.type -eq 'confirm_decision' -and $_.toolCallId -eq $call23 })
+    if ($dec23.Count -lt 1) { throw 'TC23 重挂回放里没有 confirm_decision 帧' }
+    $tr23 = @($after23 | Where-Object { $_.type -eq 'tool_result' -and $_.toolCallId -eq $call23 })
+    if ($tr23.Count -lt 1) { throw 'TC23 重挂回放里没有 tool_result 帧（未收敛）' }
+    # 条目状态口径（实读）：CONFIRM 类工具执行后仍保持 APPROVED（只有 BACKEND 类会转 EXECUTED），
+    # 故判据是"已执行"这一事实（executed=true）+ executedBy 落地，而不是状态字面量
+    if ($tr23[$tr23.Count - 1].executed -ne $true) {
+        throw "TC23 条目未执行：status=$($tr23[$tr23.Count - 1].status)/executed=$($tr23[$tr23.Count - 1].executed)"
+    }
+    if (-not $tr23[$tr23.Count - 1].executedBy) { throw 'TC23 执行者（executedBy）缺失' }
+    $done23 = @($after23 | Where-Object { $_.type -eq 'done' })
+    if ($done23.Count -ne 1) { throw "TC23 done 帧数 $($done23.Count)，期望 1" }
+    if (@($after23 | Where-Object { $_.type -eq 'error' }).Count -gt 0) { throw 'TC23 出现 error 终帧' }
+
+    # 台账面（跨进程事实源）：该 toolCallId 已有执行记录
+    $desc23 = GetJson "/api/ai/runs/$run23"
+    $ledger23 = @($desc23.ledger | Where-Object { $_.toolCallId -eq $call23 })
+    if ($ledger23.Count -lt 1) { throw 'TC23 台账里没有该 toolCallId 的执行记录' }
+
+    # 发布真的跑成了（第 4 方案"收敛为真实续跑"的最强证据）
+    $pub23 = Wait-Until {
+        $js = @(GetJson "/api/tasks/$t23/jobs" | Where-Object { $_.jobType -eq 'PUBLISH' })
+        if ($js.Count -gt 0) { return $js[0] } else { return $null }
+    } 60 'TC23 确认后未创建发布作业'
+    $pubFinal23 = Wait-Job $pub23.id
+    if ($pubFinal23.status -ne 'COMPLETED') { throw "TC23 发布作业终态 $($pubFinal23.status)" }
+    $staged23 = @(GetJson "/api/jobs/$($j23imp.id)/diff")
+    if (@($staged23 | Where-Object { $_.status -ne 'PUBLISHED' }).Count -gt 0) { throw 'TC23 发布后暂存行未提升为 PUBLISHED' }
+
+    Gf-Dump 'TC23' (@($frames23) + @($brief23) + @($after23))
+    Ok 'TC23 CONFIRM 卡快照重建：真挂起→runs/current 重建（found/awaitingExternal/PENDING/archiveMaxSeq）→差量续收孤儿过滤→真实 toolCallId confirm（resumeTriggered/Outcome 契约）→confirm_decision+tool_result(executed=true)+done 收敛 + 发布 COMPLETED'
+} catch {
+    Gf-Dump 'TC23' (@($frames23) + @($after23))
+    No 'TC23' $_.Exception.Message
+} finally {
+    # 设计卡前置约束：测后清理该轮（取消为 main 权威语义；终态轮取消同样返回 200）
+    if ($run23) { try { PostJsonRaw "/api/ai/cancel/$run23" $null | Out-Null } catch { } }
+}
 
 # ============================================================
 # TC19 清理与演示数据恢复（含 Q8② 运行期日志收尾扫描）
