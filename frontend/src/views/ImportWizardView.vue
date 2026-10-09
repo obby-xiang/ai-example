@@ -990,6 +990,28 @@ watch(selectedDefs, async () => {
 })
 
 /**
+ * 契约联动（issue #1）：AI 侧 `navigate_to(page="import", taskId=N)` 经 `restore_task`
+ * **只改路由 query**；同一路由记录下本组件不会重建（onMounted 不再执行），任务绑定必须
+ * 由本页自己跟上 —— 否则 URL 已带 `?taskId=N` 而 `workspace.taskId` 仍是 null，
+ * 紧随的 `select_definitions` / `set_import_mode` 会被 needsTask 判成"当前没有进行中的任务"。
+ *
+ * 先同步绑定 workspace（与 onMounted 同序），再拉任务详情；query 变为无 taskId 时不动绑定。
+ */
+watch(
+  () => route.query.taskId,
+  async (raw) => {
+    const parsed = Number(raw)
+    const id = Number.isFinite(parsed) && parsed > 0 ? parsed : null
+    if (id === null || id === taskId.value) {
+      return
+    }
+    taskId.value = id
+    workspace.setTaskId(id, 'IMPORT', null)
+    await loadTask()
+  }
+)
+
+/**
  * 契约联动：外部（AI 经 `ui_event.goto_step` → 契约层）改了工作区步骤时，页面跟随。
  * 只读 `workspace.step`，不反向写回（用户切步走 goStep），因此不会形成回环。
  */

@@ -197,6 +197,12 @@ interface WorkspaceAction {
    * 否则同一轮里紧随其后的动作会打在"页面还没挂载"的窗口上）。
    */
   navigatesTo?: (args: Record<string, unknown>) => WorkspacePageId | null
+  /**
+   * 本动作要求绑定哪个任务（issue #1）：非 null 时，完成判据从"页面就绪"升级为
+   * "页面就绪 **且** `workspace.taskId` 已绑定为该值"，否则紧随的 `select_definitions`
+   * 之类的动作会打在"页面在、任务还没绑上"的窗口上。
+   */
+  bindsTask?: (args: Record<string, unknown>) => number | null
 }
 
 /**
@@ -244,6 +250,48 @@ export async function waitForPageReady(page: WorkspacePageId, timeoutMs = PAGE_R
   }
 }
 
+/** "页面就绪 + 任务绑定"两个维度的等待结局（两维分开返回，供调用方给出不同的回灌文案）。 */
+export interface TaskBindWaitResult {
+  /** 目标页面已就绪：页面 id 匹配且该页能力 handler 已注册 */
+  pageReady: boolean
+  /** 期望任务已绑定：workspace.taskId === expectedTaskId */
+  taskBound: boolean
+}
+
+/**
+ * 等待"目标页面就绪 **且** 任务已绑定"（issue #1，S4.4 实测复现）。
+ *
+ * 为什么 `waitForPageReady` 不够：它的判据只有"页面 id + 能力 handler"，
+ * 而 `navigate_to(page, taskId)` 经 `restore_task` **只改路由 query**。目标向导页
+ * 已挂载时（同一路由记录下组件不重建、onMounted 不再执行），handler 早就注册着，
+ * 于是 waitForPageReady 立刻返回 true，`workspace.taskId` 却仍是 null ——
+ * 紧随其后的 `select_definitions` 被 needsTask 判成"当前没有进行中的任务"（实测 100% 复现）。
+ *
+ * 超时口径与 `waitForPageReady` 一致（默认 {@link PAGE_READY_TIMEOUT_MS}，轮询 50ms），
+ * **不无限等**：到点即如实返回两维现状，由调用方决定降级文案。
+ */
+export async function waitForTaskBound(
+  page: WorkspacePageId,
+  expectedTaskId: number,
+  timeoutMs = PAGE_READY_TIMEOUT_MS
+): Promise<TaskBindWaitResult> {
+  const deadline = Date.now() + timeoutMs
+  const probes = PAGE_READY_PROBES[page]
+  for (;;) {
+    const workspace = useWorkspaceStore()
+    const pageReady = workspace.pageId === page
+      && (probes.length === 0 || probes.some((name) => getPageHandler(name) !== null))
+    const taskBound = workspace.taskId === expectedTaskId
+    if (pageReady && taskBound) {
+      return { pageReady: true, taskBound: true }
+    }
+    if (Date.now() >= deadline) {
+      return { pageReady, taskBound }
+    }
+    await delay(50)
+  }
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
@@ -267,17 +315,16 @@ export const WORKSPACE_ACTIONS: readonly WorkspaceAction[] = [
     allowSteps: [],
     handlerNames: [],
     toUiEvent: (args) => {
-      const page = typeof args.page === 'string' ? args.page.toLowerCase() : ''
-      const taskId = toNumber(args.taskId)
-      if (taskId !== null && (page === 'export' || page === 'import')) {
-        return { type: 'restore_task', taskId }
+      const intent = resolveNavigateIntent(args)
+      if (!intent) {
+        return null
       }
-      return isWorkspacePageId(page) ? { type: 'open_page', page } : null
+      return intent.taskId === null
+        ? { type: 'open_page', page: intent.page }
+        : { type: 'restore_task', taskId: intent.taskId }
     },
-    navigatesTo: (args) => {
-      const page = typeof args.page === 'string' ? args.page.toLowerCase() : ''
-      return isWorkspacePageId(page) ? page : null
-    }
+    navigatesTo: (args) => resolveNavigateIntent(args)?.page ?? null,
+    bindsTask: (args) => resolveNavigateIntent(args)?.taskId ?? null
   },
   {
     name: 'select_definitions',
@@ -320,6 +367,22 @@ export const WORKSPACE_ACTIONS: readonly WorkspaceAction[] = [
     }
   }
 ] as const
+
+/**
+ * `navigate_to` 的意图解析（`toUiEvent` / `navigatesTo` / `bindsTask` 三处共用同一份判定，
+ * 避免"事件映射"与"完成判据"两份判断漂移）。
+ *
+ * 带 taskId 且目标是向导页 ⇒ 恢复该任务的向导（`restore_task`，会绑定任务）；
+ * 否则只是切页（`open_page`，不碰任务绑定）。
+ */
+function resolveNavigateIntent(args: Record<string, unknown>): { page: WorkspacePageId; taskId: number | null } | null {
+  const page = typeof args.page === 'string' ? args.page.toLowerCase() : ''
+  if (!isWorkspacePageId(page)) {
+    return null
+  }
+  const taskId = toNumber(args.taskId)
+  return { page, taskId: taskId !== null && (page === 'export' || page === 'import') ? taskId : null }
+}
 
 /** 蓝本名 / ui_event 名 → 动作名（别名表）。 */
 const WORKSPACE_ACTION_ALIASES: Readonly<Record<string, string>> = {
@@ -385,13 +448,34 @@ async function runWorkspaceAction(
     // F3：导航类动作等目标页面就绪再回灌（否则同一轮里紧随的动作会打在页面未挂载的窗口上）
     const target = action.navigatesTo?.(args) ?? null
     if (target !== null) {
-      const ready = await waitForPageReady(target)
+      // issue #1：带 taskId 的导航还要等**任务绑定落地**再回灌 —— 只等"页面就绪"会谎报成功
+      // （向导页已挂载时 handler 早在，workspace.taskId 却还是 null）。
+      const expectedTaskId = action.bindsTask?.(args) ?? null
+      const wait = expectedTaskId === null
+        ? { pageReady: await waitForPageReady(target), taskBound: true }
+        : await waitForTaskBound(target, expectedTaskId)
+      if (wait.pageReady && wait.taskBound) {
+        const bound = expectedTaskId === null ? '' : `，任务 #${expectedTaskId} 已绑定`
+        return {
+          ok: true,
+          availability: 'available',
+          result: `${outcome.message}（页面已就绪${bound}，可继续执行本页动作）`
+        }
+      }
+      if (wait.pageReady) {
+        // 页面已就绪却仍没绑定该任务 ⇒ 不是"还在加载"，再等也不会变：明确降级，不谎报成功
+        return {
+          ok: false,
+          availability: 'degraded',
+          result: `${outcome.message}，但任务 #${expectedTaskId} 的绑定没有完成（向导页已就绪，未绑定该任务）。`
+            + `请核对任务 #${expectedTaskId} 是否存在，或提示用户手动在任务中心打开该任务后重试。`
+        }
+      }
       return {
         ok: true,
         availability: 'available',
-        result: ready
-          ? `${outcome.message}（页面已就绪，可继续执行本页动作）`
-          : `${outcome.message}（页面仍在加载中；若要继续在该页动作，请稍后重试或提示用户手动操作）`
+        result: `${outcome.message}（页面${expectedTaskId === null ? '' : '与任务绑定'}仍在加载中；`
+          + '若要继续在该页动作，请稍后重试或提示用户手动操作）'
       }
     }
     return { ok: true, availability: 'available', result: outcome.message }

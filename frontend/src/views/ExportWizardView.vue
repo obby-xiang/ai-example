@@ -788,6 +788,30 @@ async function createAndBindTask(): Promise<void> {
   }
 }
 
+/**
+ * 契约联动（issue #1）：AI 侧 `navigate_to(page="export", taskId=N)` 经 `restore_task`
+ * **只改路由 query**；同一路由记录下本组件不会重建（onMounted 不再执行），于是任务绑定
+ * 必须由本页自己跟上 —— 否则 URL 已带 `?taskId=N` 而 `workspace.taskId` 仍是 null，
+ * 紧随的 `select_definitions` 会被 needsTask 判成"当前没有进行中的任务"（实测复现）。
+ *
+ * 先同步绑定 workspace（与 onMounted 同序），再拉任务详情：AI 侧的"绑定完成"判据因此立刻成立，
+ * 不必等 `/tasks/{id}` 回来（详情慢或失败时，向导自身的空/错误态照旧展示）。
+ * query 变为无 taskId 时不动绑定（导航回同一向导不该把已打开的任务清掉）。
+ */
+watch(
+  () => route.query.taskId,
+  async (raw) => {
+    const parsed = Number(raw)
+    const id = Number.isFinite(parsed) && parsed > 0 ? parsed : null
+    if (id === null || id === taskId.value) {
+      return
+    }
+    taskId.value = id
+    workspace.setTaskId(id, 'EXPORT', null)
+    await loadTask()
+  }
+)
+
 // 选中集变化时补齐条件模型（避免第 2 步出现未初始化卡片）
 watch(selectedDefs, (codes) => {
   for (const code of codes) {
