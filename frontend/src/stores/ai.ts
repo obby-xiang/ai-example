@@ -30,6 +30,14 @@ export const MIRROR_PREFIX = 'ai-mirror:'
 
 /** 当前轮的 AbortController（模块级：不进响应式状态）。 */
 let currentAbort: AbortController | null = null
+/**
+ * 当前轮的宿主助手消息 id（模块级：与 `currentAbort` 同为"这一轮"的身份判据）。
+ *
+ * issue#5 R2：终帧只允许复位**本轮**的轮次级状态 —— 旧轮迟到帧（`resetSession` 之后、
+ * 或新轮已起）不得把新轮标记成空闲。runId 不能单独做判据：新一轮 start 帧到达之前
+ * `activeRunId` 仍是上一轮的值，而宿主消息 id 在 send / reattachActive / 续收入口即已就位。
+ */
+let activeRoundHostId: string | null = null
 /** 生成式表单本地超时计时器（模块级：activeForm 被结局帧/新轮清掉时随之中和）。 */
 let formExpiryTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -444,9 +452,6 @@ export const useAiStore = defineStore('ai', {
      * 由本 action 在 loadHistory 完成后触发；历史/镜像既有的渲染形态一律兜底，不复制历史工具卡。
      */
     async restoreSuspendedSnapshot(): Promise<void> {
-      if (this.loading) {
-        return
-      }
       let current: AiRunCurrent
       try {
         current = await aiApi.runsCurrent(this.sessionId)
@@ -540,41 +545,70 @@ export const useAiStore = defineStore('ai', {
      * lastSeq = archiveMaxSeq：服务端只补发增量帧，禁全量回放（红队 A1/A3/B3）。
      */
     async resumeSnapshotStream(runId: string, lastSeq: number, hostMessageId: string): Promise<void> {
-      if (currentAbort) {
-        currentAbort.abort() // 防双连接
-      }
+      const previous = currentAbort
       this.runSeq[runId] = Math.max(this.runSeq[runId] ?? 0, lastSeq)
       this.loading = true
       this.streamInterrupted = false
-      currentAbort = new AbortController()
+      const controller = new AbortController()
+      currentAbort = controller
+      activeRoundHostId = hostMessageId
+      /** R6（issue#5）：续收连接是否仍是"当前轮"（旧连接的断流提示不写进新轮）。 */
+      const isCurrentRound = (): boolean => currentAbort === controller
+      // 防双连接：**先换身份再中止旧连接** —— 旧连接的收尾此时判定为"非本轮"，
+      // 其 onClose 的断流提示不会写脏新连接的现场
+      previous?.abort()
       try {
         await aiApi.reattachRun(
           runId,
           {
             onFrame: (frame) => this.handleFrame(frame, hostMessageId),
             onReconnect: (attempt, delayMs) => {
+              if (!isCurrentRound()) {
+                return
+              }
               this.notice = `续收中断，${Math.round(delayMs / 1000)} 秒后第 ${attempt} 次重试`
             },
             onClose: (info) => {
+              if (!isCurrentRound()) {
+                return
+              }
               if (!info.terminal) {
                 this.streamInterrupted = true
                 this.notice = `连接中断，结果可能不完整（${info.reason ?? '断流'}）。挂起卡保留，可刷新重试。`
               }
             }
           },
-          { signal: currentAbort.signal, lastSeq }
+          { signal: controller.signal, lastSeq }
         )
       } finally {
-        // 不置 suspended = false：挂起卡状态由帧/投影决定，done 帧的 handler 会自己清
-        this.loading = false
-        currentAbort = null
+        if (isCurrentRound()) {
+          // 不置 suspended = false：挂起卡状态由帧/投影决定，done 帧的 handler 会自己清
+          this.loading = false
+          currentAbort = null
+          activeRoundHostId = null
+        }
       }
+    },
+
+    /**
+     * R4（issue#5）：发送守卫命中的统一提示 —— 面板层与 store 层共用同一文案，避免两处漂移。
+     * 只写提示：**不动 `inputText`**（草稿保留），也不触碰 `send()` 里的清空逻辑。
+     */
+    noticeBusySend(): void {
+      this.notice = '本轮进行中：本条消息未发送，可等本轮结束后重发。'
     },
 
     /** 发一轮消息（含渐进披露上下文注入 + 工作区动作同步）。 */
     async send(text: string): Promise<void> {
       const content = text.trim()
-      if (!content || this.loading) {
+      if (!content) {
+        // 空内容依旧静默（面板层已用 trim 拦过，此处只是防御）
+        return
+      }
+      if (this.loading) {
+        // R4（issue#5）：守卫不再静默 —— 当前 UI 下真实 Enter 到不了这里（输入区 disabled），
+        // 但程序化调用与 loading/轮次失步窗口可达，必须给出可读反馈而不是丢弃用户输入
+        this.noticeBusySend()
         return
       }
       const workspace = useWorkspaceStore()
@@ -586,14 +620,24 @@ export const useAiStore = defineStore('ai', {
       this.streamInterrupted = false
       this.busyConflict = null
       this.poolSaturated = null
-      currentAbort = new AbortController()
+      const controller = new AbortController()
+      currentAbort = controller
+      activeRoundHostId = assistant.id
+      /** R1/R6（issue#5）：本轮是否仍是"当前轮" —— 以 AbortController 身份为准。 */
+      const isCurrentRound = (): boolean => currentAbort === controller
 
       const handlers: SseFrameHandlers = {
         onFrame: (frame) => this.handleFrame(frame, assistant.id),
         onReconnect: (attempt, delayMs) => {
+          if (!isCurrentRound()) {
+            return // R6：旧轮的迟到重连公告不写进新轮
+          }
           this.notice = `连接中断，${Math.round(delayMs / 1000)} 秒后重挂（第 ${attempt} 次）`
         },
         onClose: (info) => {
+          if (!isCurrentRound()) {
+            return // R6：旧轮断流提示不得覆盖新轮状态
+          }
           if (!info.terminal) {
             // ADR-6：缺 done/error 终帧 = 断流，必须显式提示"结果可能不完整"
             this.streamInterrupted = true
@@ -608,7 +652,7 @@ export const useAiStore = defineStore('ai', {
         }
       }
 
-      const options: SseStreamOptions = { signal: currentAbort.signal }
+      const options: SseStreamOptions = { signal: controller.signal }
       // 契约联动：上下文里带上"用户刚手点了什么"（buildContext 的 extra.recentActions）；
       // 动作只注入这一轮，构造完即清空，避免下一轮重复携带。
       const context = workspace.buildContext()
@@ -620,11 +664,18 @@ export const useAiStore = defineStore('ai', {
           options
         )
       } catch (error) {
-        this.handleChatError(error, assistant.id)
+        if (isCurrentRound()) {
+          this.handleChatError(error, assistant.id) // R6：旧轮的异常提示不写进新轮
+        }
       } finally {
-        this.loading = false
-        this.suspended = false
-        currentAbort = null
+        if (isCurrentRound()) {
+          // R1（issue#5）：只有"仍是本轮"时才复位轮次级状态 —— 否则旧轮的收尾会把新轮抹平
+          // （界面谎报空闲 + 新轮丢失本地取消句柄）
+          this.loading = false
+          this.suspended = false
+          currentAbort = null
+          activeRoundHostId = null
+        }
         const target = this.messages.find((message) => message.id === assistant.id)
         if (target && !target.done) {
           target.streaming = false
@@ -700,6 +751,7 @@ export const useAiStore = defineStore('ai', {
         this.notice = '没有可重挂的轮次（缺少 runId）'
         return
       }
+      const previous = currentAbort
       const lastSeq = this.runSeq[targetRunId]
       const assistant = this.appendAssistantMessage('（正在重挂进行中的轮次…）')
       this.loading = true
@@ -707,16 +759,30 @@ export const useAiStore = defineStore('ai', {
       this.notice = lastSeq === undefined
         ? '正在重挂该轮（先回放已产出的帧，再续收实时帧）…'
         : `正在重挂该轮（只补发第 ${lastSeq} 帧之后的增量）…`
-      currentAbort = new AbortController()
+      const controller = new AbortController()
+      currentAbort = controller
+      activeRoundHostId = assistant.id
+      /** R1/R6（issue#5）：本次重挂是否仍是"当前轮"（以 AbortController 身份为准）。 */
+      const isCurrentRound = (): boolean => currentAbort === controller
+      // R5②（issue#5）：连点/重复重挂先中止既有连接（与 resumeSnapshotStream#防双连接同款）——
+      // 否则两条 EventSource 同时往不同宿主消息写帧（双渲染），且两者 finally 互相覆盖轮次状态。
+      // **先换身份再中止**：旧连接的收尾据此判定"非本轮"，不会把断流/取消提示写脏新连接现场。
+      previous?.abort()
       try {
         await aiApi.reattachRun(
           targetRunId,
           {
             onFrame: (frame) => this.handleFrame(frame, assistant.id),
             onReconnect: (attempt, delayMs) => {
+              if (!isCurrentRound()) {
+                return
+              }
               this.notice = `重挂中断，${Math.round(delayMs / 1000)} 秒后第 ${attempt} 次重试`
             },
             onClose: (info) => {
+              if (!isCurrentRound()) {
+                return
+              }
               if (!info.terminal) {
                 this.streamInterrupted = true
                 this.notice = `连接中断，结果可能不完整（重挂未能收到完成帧：${info.reason ?? '断流'}）`
@@ -729,15 +795,21 @@ export const useAiStore = defineStore('ai', {
               }
             }
           },
-          { signal: currentAbort.signal, lastSeq }
+          { signal: controller.signal, lastSeq }
         )
         this.busyConflict = null
       } catch (error) {
-        this.notice = error instanceof Error ? error.message : '重挂失败'
+        if (isCurrentRound()) {
+          this.notice = error instanceof Error ? error.message : '重挂失败'
+        }
       } finally {
-        this.loading = false
-        this.suspended = false
-        currentAbort = null
+        if (isCurrentRound()) {
+          // R1 同型（issue#5）：被后一次重挂/新轮取代的旧连接，其收尾不得复位新轮状态
+          this.loading = false
+          this.suspended = false
+          currentAbort = null
+          activeRoundHostId = null
+        }
       }
     },
 
@@ -950,7 +1022,9 @@ export const useAiStore = defineStore('ai', {
         // 忽略：中止失败不影响后续取消请求
       }
       const runId = this.activeRunId
-      this.loading = false
+      // R3（issue#5）：**不在这里抢清 loading** —— 复位交给本轮自身的收尾（send 的 finally 里
+      // 按 AbortController 身份判定）。否则"停止后立刻发送"会让旧轮的收尾与 abort 提示
+      // 覆盖新轮（界面谎报空闲 + 新轮丢失取消句柄）。
       if (this.activeForm !== null) {
         // 用户停止本轮：表单随轮收起（后端取消会让挂起走 TIMEOUT/取消收尾）
         disarmFormExpiry()
@@ -969,6 +1043,16 @@ export const useAiStore = defineStore('ai', {
 
     /** 重置会话（新页签语义：清 sessionId 与镜像）。 */
     resetSession(): void {
+      // R5①（issue#5）：在跑的轮次先中止 —— 否则 loading 不复位（输入区一直禁用到流结束），
+      // 且后续帧会写进**已清空**的 messages（按 assistantId 找不到宿主 ⇒ 孤儿消息/孤儿帧）
+      try {
+        currentAbort?.abort()
+      } catch {
+        // 忽略：中止失败不影响重置
+      }
+      currentAbort = null
+      activeRoundHostId = null
+      this.loading = false
       try {
         sessionStorage.removeItem(MIRROR_PREFIX + this.sessionId)
         sessionStorage.setItem(SESSION_ID_KEY, createSessionId())
@@ -1033,9 +1117,21 @@ export const useAiStore = defineStore('ai', {
 
     /** SSE 帧 → store（判别联合 switch，覆盖后端全部帧类型）。 */
     handleFrame(frame: SseFrame, assistantId?: string): void {
+      /**
+       * R2/R6（issue#5）帧归属判定：只有"本轮"（宿主消息仍是当前轮的宿主）的帧才允许改写
+       * **轮次级**状态（activeRunId / loading / suspended / notice / activeForm）——旧轮迟到帧
+       * （resetSession 之后、或新轮已起）只收敛它自己那条消息，不能把新轮标记成空闲。
+       */
+      const ownedByActiveRound = assistantId === undefined || assistantId === activeRoundHostId
       const message = assistantId
-        ? this.messages.find((item) => item.id === assistantId) ?? this.currentAssistantMessage()
+        ? this.messages.find((item) => item.id === assistantId)
+          ?? (ownedByActiveRound ? this.currentAssistantMessage() : null)
         : this.currentAssistantMessage()
+      if (!message) {
+        // 宿主消息已不在（会话已重置/历史已整体替换）且该帧不属于当前轮 ⇒ 整帧丢弃，
+        // 不再凭空 append 一条孤儿助手消息（G5）
+        return
+      }
 
       // T6：按 runId 记录最大帧序号（reattach 时回传，服务端只补增量）
       const seq = frameSeq(frame)
@@ -1044,6 +1140,19 @@ export const useAiStore = defineStore('ai', {
         if (runId) {
           this.runSeq[runId] = Math.max(this.runSeq[runId] ?? 0, seq)
         }
+      }
+
+      if (!ownedByActiveRound) {
+        /**
+         * 旧轮迟到帧（R2/R6）：只收敛它自己那条消息的收尾，**一律不改写轮次级状态**
+         * （`loading`/`activeRunId`/`suspended`/`notice`/`activeForm`）——否则旧轮的 done/error
+         * 会把正在跑的新轮标记成空闲，旧轮的 retry/取消提示会覆盖新轮提示（G2/G3/G7）。
+         */
+        if (isTerminalFrame(frame)) {
+          message.streaming = false
+          message.done = true
+        }
+        return
       }
 
       switch (frame.type) {

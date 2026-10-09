@@ -509,7 +509,15 @@ function scrollBottom(): void {
 
 async function send(): Promise<void> {
   const text = inputText.value.trim()
-  if (!text || !ai.canSend) {
+  if (!text) {
+    // 空内容静默（用户没输入，不值得打扰）
+    return
+  }
+  if (!ai.canSend) {
+    // R4（issue#5）：面板层守卫同样不静默 —— **保留输入框内容**（不消费草稿），给出可读反馈。
+    // 当前 UI 下真实 Enter 到不了这里（输入区 disabled），这是纵深防御：一旦放开 disabled
+    // 或走到 loading/轮次失步窗口，用户不会"消息被静默丢弃"。
+    ai.noticeBusySend()
     return
   }
   inputText.value = ''
