@@ -1,47 +1,70 @@
-// M2-T2a 唯一投影化 CDP 冒烟（T2a-D#5：三断言清单脚本化，可重复执行）
+// M2-T2b 冒烟升级（T2a 唯一投影 CDP 冒烟 → 断言①真实挂起轮场景；断言②③回归原样）
 //
 // 用法（仓库根目录，Node ≥ 22 —— 仅用内置 WebSocket + fetch，零依赖安装）：
-//   0. 前置：Memurai 127.0.0.1:6379 在线；后端已起（默认 http://localhost:18318，
-//      与 frontend/.env.local 的 VITE_API_BASE 对齐）；前端 dev server 已起（默认 5202）。
+//   0. 前置：Memurai 127.0.0.1:6379 在线；后端已起；前端 dev server 已起。
 //   1. node scripts/m2t2a-smoke.mjs
 //   2. 可选环境变量：
-//      SMOKE_APP=http://localhost:5202/     前端地址
-//      SMOKE_CDP_PORT=9333                  Chrome 远程调试端口
-//      SMOKE_CHROME=<可执行文件>            Chrome 路径（缺省按 ProgramFiles 环境变量组装，源码不写死盘符）
-//      SMOKE_OUT=<dir>                      截图/结果输出目录（默认 <repo>/../m2t2a-smoke-out）
+//      SMOKE_API=http://localhost:18318       后端 base（默认 18318；真实验证用 18330）
+//      SMOKE_APP=http://localhost:5202/       前端地址
+//      SMOKE_CDP_PORT=9333                    Chrome 远程调试端口
+//      SMOKE_CHROME=<可执行文件>              Chrome 路径（缺省按 ProgramFiles 环境变量组装，源码不写死盘符）
+//      SMOKE_OUT=<dir>                        结果输出目录（默认 <repo>/../m2t2a-smoke-out）
+//      SMOKE_SKIP_MODEL=1                     零模型回归守卫模式：跳过阶段 3（真实模型挂起轮），
+//                                             断言① 记 skipped（不计 fail 也不计 pass），
+//                                             退出码仅由 ②③③b 决定（无 key / 无模型环境用）
 //   3. 产物分轮保留：结果写 result-<UTC 时间戳>.json，同一 SMOKE_OUT 重复执行不覆盖前一轮
 //
+// 零模型回归守卫模式（SMOKE_SKIP_MODEL=1）：无可用 AI key / 无真实模型的环境，只跑阶段 1/2 的
+// 零模型前端回归（断言②③③b），阶段 3 整段（3a 模型轮 / 3b 刷新重建 / 3d 收敛）跳过，
+// 断言① 在结果 JSON 中标记 skipped（不计 fail 也不计 pass），退出码仅由 ②③③b 决定。
+// 用途：CI / 本地无 key 环境的零模型回归守卫；默认（未设置）行为完全不变。
+//
 // 三断言（全部 PASS 退出码 0，任一 FAIL 退出码 1）：
-//   ① 挂起中刷新后页面只有一张表单卡（单卡）
-//      【T2b 占位】断言① 现为**回归守卫**——只断言"刷新后单卡 + 无 FormRenderer"，
-//      对 T2a 前后形态不判别（两形态在该计数口径下均呈单卡，仅卡内语义/续填不同）；
-//      T2b（快照重建 / 刷新续填）落地后须升级为**含后端历史/重放场景的形态**
-//      （按 runId 重放历史帧后再刷新复验）。来源：GLM 复核 F5 / 返修决策卡勘误 5。
+//   ① 真实挂起轮 → 刷新 → 快照重建语义（T2b 升级形态，取代 T2a 占位回归守卫；
+//      来源：GLM 复核 F5 / 返修决策卡勘误 5 —— 本形态落地后该遗留项关闭）
+//      a. Node 侧直连后端 POST /api/ai/chat（真实模型轮，诱导 generative_form），
+//         流式读到 frontend_tool_request 后保持连接不关（挂起轮活着）；
+//      b. 页面注入 sessionId + 清该 session 镜像键后整页刷新 → loadHistory →
+//         GET /api/ai/runs/current 命中 → 快照重建挂起卡；
+//      c. 断言：data-testid="pending-card-<toolCallId>" 恰好 1 张、
+//         data-testid="gf-submit"（FormRenderer）恰好 1 个（真实重建，与旧守卫
+//         "无 FormRenderer" 相反）、全消息 toolRuns 中该 toolCallId 恰好 1 条（无重复工具卡）；
+//      d. 收敛退出：按 activeForm 实际 schema 合成值 submitGenerativeForm 提交（被 400 拒则
+//         降级点 gf-cancel 取消，detail 记录走的哪条路径）；Node 侧原连接须收到
+//         frontend_tool_result 与 done 帧（计入① detail）。
 //   ② 同一 toolCallId 不出现双份 FormRenderer（同 toolCallId 至多一个表单实例）
 //   ③ 取消后所有持该 toolCallId 的消息 pendingCall.status 收敛为 cancelled
 //
-// 方法：CDP 直连独立 Chrome（独立 user-data-dir），经 Pinia store 注入
-// frontend_tool_request 帧复现挂起形态（与 GFd 冒烟同法，无模型参与）。
+// 定位口径（T2b 顺手项④，S7 红队建议落地）：断言①②③ 的按钮/tag/卡片计数一律走
+// data-testid（gf-submit / gf-cancel / pending-card-<toolCallId> / tag-form-cancelled），
+// 不再耦合 UI 文案 —— 文案改动不再造成静默误判。
+//
+// 方法：断言②③ 经 Pinia store 注入 frontend_tool_request 帧复现挂起形态（与 GFd 冒烟同法，
+// 无模型参与）；断言① 为真实后端挂起轮（需可用 AI key + 后端 + Redis）。
 // 本脚本只驱动自己启动的 Chrome，不触碰用户浏览器。
 import { spawn } from 'node:child_process'
 import { writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
-// ── S7（红队建议）：断言②③ 的计数与点击依赖 UI **文案**，属已知的脆弱耦合 —— 集中在此处 ──
-// 来源：FormRenderer.vue 的两个操作按钮（"取消"/"提交"）、AiPanel.vue 表单卡的取消终态 tag
-//       （"表单已取消"）。任一处文案变更而未同步本表，冒烟会静默误报（计不到 = 断言误判）。
-// T2b 候选改造：按 data-testid / 组件实例定位，解掉文案耦合（本轮不做，仅集中 + 注释）。
-const TEXT_SUBMIT = '提交'
-const TEXT_CANCEL = '取消'
-const TEXT_FORM_CANCELLED = '表单已取消'
+// data-testid 定位（T2b 顺手项④）：FormRenderer 提交/取消按钮、表单已取消 tag、挂起卡根 div
+const TESTID_SUBMIT = 'gf-submit'
+const TESTID_CANCEL = 'gf-cancel'
+const TESTID_TAG_CANCELLED = 'tag-form-cancelled'
+
+// 诱导 generative_form 的已验证提示词（scripts/verify-e2e.ps1:1478 $promptGf1 原文）：
+// 四字段 keyword/minRows/effectiveDate/scope；verify-e2e 发 /chat 时 context 为 @{ page = 'tasks' }，此处照搬
+const PROMPT_GF1 = '请调用 generative_form 工具（scenario=FILTER）出一张收集导出筛选条件的表单，字段就用这四个，key 和类型必须一致：keyword（文本，必填，占位提示"编码或名称关键字"）、minRows（数字，非必填）、effectiveDate（日期，格式 yyyy-MM-dd，非必填）、scope（下拉单选，选项 XN 和 HD）。不要用文字向我提问，也不要调用 generative_form 以外的任何工具，不会出现确认卡片。我填完后，请把每个字段按 key=值 原样逐行回报。'
 
 const OUT = process.env.SMOKE_OUT ?? new URL('../../m2t2a-smoke-out', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')
 // Chrome 可执行文件不写死盘符：SMOKE_CHROME 优先，缺省按 ProgramFiles 环境变量组装
 const CHROME = process.env.SMOKE_CHROME
   ?? join(process.env.ProgramFiles || '', 'Google/Chrome/Application/chrome.exe')
 const PORT = Number(process.env.SMOKE_CDP_PORT ?? 9333)
+const API = process.env.SMOKE_API ?? 'http://localhost:18318'
 const URL_APP = process.env.SMOKE_APP ?? 'http://localhost:5202/'
+// 零模型回归守卫模式（SMOKE_SKIP_MODEL=1）：跳过阶段 3 真实模型挂起轮，断言① 记 skipped
+const SKIP_MODEL = process.env.SMOKE_SKIP_MODEL === '1'
 // 分轮保留：每轮写独立结果文件（UTC 时间戳），复跑不覆盖上一轮证据
 const STAMP = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')
 const RESULT_FILE = `${OUT}/result-${STAMP}.json`
@@ -139,15 +162,19 @@ function injectExpr(runId, toolCallId, n) {
   })()`
 }
 
+// 定位一律 data-testid（顺手项④）：gf-submit/gf-cancel 计数、pending-card-<toolCallId> DOM 计数、
+// tag-form-cancelled 计数；store 侧 pendingStatuses 仅供 detail；toolRunCount 判无重复工具卡
 const countExpr = (toolCallId) => `(() => {
   const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
   return {
-    formRendererCount: [...document.querySelectorAll('button')].filter(b => b.textContent.trim() === '${TEXT_SUBMIT}').length,
-    cancelButtons: [...document.querySelectorAll('button')].filter(b => b.textContent.trim() === '${TEXT_CANCEL}').length,
-    pendingCards: ai.messages.filter(m => m.pendingCall && m.pendingCall.toolCallId === '${toolCallId}').length,
+    formRendererCount: document.querySelectorAll('[data-testid="${TESTID_SUBMIT}"]').length,
+    cancelButtons: document.querySelectorAll('[data-testid="${TESTID_CANCEL}"]').length,
+    pendingCards: [...document.querySelectorAll('[data-testid^="pending-card-"]')]
+      .filter(e => e.getAttribute('data-testid') === 'pending-card-${toolCallId}').length,
     pendingStatuses: ai.messages.filter(m => m.pendingCall && m.pendingCall.toolCallId === '${toolCallId}').map(m => m.pendingCall.status),
     activeFormStatus: ai.activeForm ? ai.activeForm.status : null,
-    cancelledTags: [...document.querySelectorAll('.el-tag')].filter(e => e.textContent.trim() === '${TEXT_FORM_CANCELLED}').length
+    cancelledTags: document.querySelectorAll('[data-testid="${TESTID_TAG_CANCELLED}"]').length,
+    toolRunCount: ai.messages.reduce((n, m) => n + m.toolRuns.filter(r => r.toolCallId === '${toolCallId}').length, 0)
   }
 })()`
 
@@ -157,6 +184,34 @@ function assert(name, cond, detail) {
   RESULT.assertions[name] = { pass: !!cond, detail }
   console.log(`[断言${name}] ${cond ? 'PASS' : 'FAIL'} ${JSON.stringify(detail)}`)
   if (!cond) failures.push(name)
+}
+
+/**
+ * 流式读 SSE（data: 行 JSON）。onFrame 返回 true 时停读并保持连接不关（由调用方继续读或取消）；
+ * 返回 { reader, seenTypes, stopped, frame }，frame 为触发停读的那一帧。
+ */
+async function readSse(response, onFrame, deadlineMs) {
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  const seenTypes = []
+  let buf = ''
+  try {
+    while (Date.now() < deadlineMs) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+      const lines = buf.split('\n')
+      buf = lines.pop()
+      for (const line of lines) {
+        if (!line.startsWith('data:')) continue
+        let frame
+        try { frame = JSON.parse(line.slice(5).trim()) } catch { continue }
+        seenTypes.push(frame.type)
+        if (onFrame(frame)) return { reader, seenTypes, stopped: true, frame }
+      }
+    }
+  } catch { /* 超时/对端断开：按停读处理 */ }
+  return { reader, seenTypes, stopped: false, frame: null }
 }
 
 try {
@@ -177,7 +232,7 @@ try {
 
   // ── 阶段 2：取消 → 断言③所有消息 pendingCall.status 收敛 cancelled ──────
   await evaluate(`(() => {
-    const btn = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === '${TEXT_CANCEL}')
+    const btn = document.querySelector('[data-testid="${TESTID_CANCEL}"]')
     btn.click(); return !!btn
   })()`)
   let c2 = null
@@ -189,27 +244,161 @@ try {
   assert('③b', c2.formRendererCount === 0 && c2.cancelledTags === 2,
     { formRendererCount: c2.formRendererCount, cancelledTags: c2.cancelledTags })
 
-  // ── 阶段 3：单消息挂起 → 刷新 → 断言①单卡 ─────────────────────────────
-  // 注意：不用 resetSession（它只写新 sessionId 进 storage、不改 store.sessionId，
-  // 与刷新恢复路径无关）；改用新 toolCallId 注入第三条消息，旧卡保留不影响计数。
-  const R3 = crypto.randomUUID(), T3 = crypto.randomUUID()
-  await evaluate(injectExpr(R3, T3, 1))
-  await sleep(800) // 等镜像防抖（300ms）落盘
-  const preRefresh = await evaluate(countExpr(T3))
-  console.log('[阶段3 刷新前]', JSON.stringify(preRefresh))
-  await send('Page.navigate', { url: URL_APP }) // 整页刷新（镜像经 sessionStorage 恢复）
-  if (!await waitAppReady()) { console.error('FATAL: 刷新后应用未就绪'); process.exit(3) }
-  await sleep(800)
-  const postRefresh = await evaluate(countExpr(T3))
-  RESULT.phases.refresh = { runId: R3, toolCallId: T3, preRefresh, postRefresh }
-  console.log('[阶段3 刷新后]', JSON.stringify(postRefresh))
-  // 刷新后 activeForm 不进镜像（T2a 范围外，T2b 刷新续填）：卡应为单张挂起卡
-  // （后端历史为空 → pending 按既有规则降级 expired 展示，仍只此一张）
-  // 【T2b 占位·GLM 复核 F5 / 勘误 5】断言① 现为回归守卫（对 T2a 前后形态不判别：后端历史为空，
-  // 两形态同落"单卡 + 无 FormRenderer"）；T2b 落地后须升级为含后端历史/重放场景的形态——
-  // 先按 runId 注入/重放历史帧再刷新，断言续填语义（而非仅计数）。
-  assert('①', postRefresh.pendingCards === 1 && postRefresh.formRendererCount === 0,
-    { pendingCards: postRefresh.pendingCards, formRendererCount: postRefresh.formRendererCount, pendingStatuses: postRefresh.pendingStatuses })
+  // ── 阶段 3（断言① 升级形态）：真实挂起轮 → 刷新快照重建 → 收敛退出 ─────
+  // SMOKE_SKIP_MODEL=1（零模型回归守卫模式）：阶段 3 整段跳过 —— 3a 模型轮 / 3b 刷新重建 /
+  // 3d 收敛一律不执行（不发 /chat、不需 key），断言① 记 skipped（不计 fail 也不计 pass），
+  // 退出码仅由 ②③③b 决定；默认（未设置）行为完全不变。
+  if (SKIP_MODEL) {
+    console.log('[阶段3] SMOKE_SKIP_MODEL=1，跳过真实模型挂起轮（断言① skipped）')
+    RESULT.assertions['①'] = {
+      pass: null,
+      skipped: true,
+      detail: 'SMOKE_SKIP_MODEL=1：零模型回归守卫模式，跳过阶段 3（3a 模型轮 / 3b 刷新重建 / 3d 收敛），不计 fail 也不计 pass，退出码仅由 ②③③b 决定'
+    }
+  }
+  else {
+    const S = 'm2t2b-' + crypto.randomUUID()
+    console.log('[阶段3] 真实挂起轮 session =', S, 'api =', API)
+
+    // a. 造真实挂起轮：Node 侧直连后端 /chat（真实模型），读到 frontend_tool_request 为止，
+    //    连接保持不关（挂起轮活着）；超时（240s）未等到 → 断言① FAIL（detail 记帧类型序列）
+    const chatRes = await fetch(`${API}/api/ai/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+      body: JSON.stringify({ sessionId: S, message: PROMPT_GF1, context: { page: 'tasks' } })
+    })
+    if (!chatRes.ok || !chatRes.body) {
+      throw new Error(`POST /chat 失败：HTTP ${chatRes.status}`)
+    }
+    const AWAIT_MS = 240_000
+    const awaited = await readSse(chatRes,
+      f => f.type === 'frontend_tool_request' && f.name === 'generative_form',
+      Date.now() + AWAIT_MS)
+    console.log('[阶段3a] await stopped =', awaited.stopped, 'seen =', JSON.stringify(awaited.seenTypes))
+    if (!awaited.stopped || !awaited.frame) {
+      try { await awaited.reader.cancel() } catch { /* 忽略 */ }
+      RESULT.phases.realRound = { sessionId: S, stage: 'a-await', seenTypes: awaited.seenTypes }
+      assert('①', false, { stage: 'a-await-frontend_tool_request', timeoutMs: AWAIT_MS, seenTypes: awaited.seenTypes })
+      throw new Error('阶段3a 超时未收到 frontend_tool_request')
+    }
+    const realRunId = awaited.frame.runId
+    const realToolCallId = awaited.frame.toolCallId
+    RESULT.phases.realRound = {
+      sessionId: S, runId: realRunId, toolCallId: realToolCallId,
+      awaitSeenTypes: awaited.seenTypes
+    }
+
+    // b. 刷新重建：注入 sessionId + 清该 session 镜像键 → 整页刷新 →
+    //    loadHistory → runs/current 命中 → 快照重建（挂起轮在后台保持活着）
+    await evaluate(`(() => {
+      sessionStorage.setItem('ai-session-id', '${S}')
+      sessionStorage.removeItem('ai-mirror:${S}')
+      return true
+    })()`)
+    await send('Page.navigate', { url: URL_APP })
+    if (!await waitAppReady()) { console.error('FATAL: 刷新后应用未就绪'); process.exit(3) }
+    // 轮询等快照重建落地（loadHistory + runs/current 均异步）
+    let rebuilt = null
+    for (let i = 0; i < 30; i++) {
+      await sleep(500)
+      rebuilt = await evaluate(countExpr(realToolCallId))
+      if (rebuilt.pendingCards >= 1 && rebuilt.formRendererCount >= 1) break
+    }
+    RESULT.phases.rebuild = { count: rebuilt }
+    console.log('[阶段3b 刷新重建]', JSON.stringify(rebuilt))
+
+    // c. 断言①（升级形态）：单挂起卡 + FormRenderer 真实重建（与旧守卫"无 FormRenderer"相反）
+    //    + 无重复工具卡（toolRunCount 恰好 1）
+    // d. 收敛退出：按 activeForm 实际 schema 合成值提交；被 400 拒则降级取消；
+    //    Node 侧原连接须收到 frontend_tool_result 与 done 帧（计入① detail）
+    let converge = { path: 'not-attempted' }
+    if (rebuilt.pendingCards === 1 && rebuilt.formRendererCount === 1) {
+      converge = await evaluate(`(async () => {
+        const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+        if (!ai.activeForm || ai.activeForm.status !== 'filling') {
+          return { path: 'no-active-form', activeFormStatus: ai.activeForm ? ai.activeForm.status : null }
+        }
+        const spec = ai.activeForm.form
+        const values = {}
+        for (const f of spec.fields) {
+          switch (f.type) {
+            case 'number': values[f.key] = 1; break
+            case 'boolean': values[f.key] = true; break
+            case 'date': values[f.key] = '2026-10-08'; break
+            case 'enum': values[f.key] = (f.options && f.options[0]) ? f.options[0].value : 'XN'; break
+            case 'multi_select': values[f.key] = (f.options && f.options[0]) ? [f.options[0].value] : []; break
+            default: values[f.key] = 'smoke'
+          }
+        }
+        await ai.submitGenerativeForm(values)
+        // 结局帧可能比 POST 回执更快到达（页面 reattach 也订阅着本轮）：activeForm 翻 submitted
+        // 或被结局帧清空都算提交路径已收敛；只有表单回到 filling（被拒/失败）才走取消降级
+        let status = ai.activeForm ? ai.activeForm.status : null
+        for (let i = 0; i < 8 && status === 'submitting'; i++) {
+          await new Promise(r => setTimeout(r, 500))
+          status = ai.activeForm ? ai.activeForm.status : null
+        }
+        if (status === 'submitted' || ai.activeForm === null) {
+          return { path: 'submit', values, finalFormStatus: status }
+        }
+        // 提交被拒/失败 → 降级取消路径收敛（store 直调，等价于点 gf-cancel）
+        const formError = ai.activeForm ? ai.activeForm.error : null
+        await ai.cancelGenerativeForm()
+        await new Promise(r => setTimeout(r, 1500))
+        return { path: 'submit-rejected-then-cancel', values, rejectedFormStatus: status, formError,
+          finalFormStatus: ai.activeForm ? ai.activeForm.status : null }
+      })()`)
+    }
+    console.log('[阶段3d 收敛]', JSON.stringify(converge))
+    RESULT.phases.converge = converge
+
+    // Node 侧原挂起连接：读 frontend_tool_result 与 done 帧后关闭（两条收敛路径后端都会发）
+    const tail = await (async () => {
+      const reader = awaited.reader
+      const decoder = new TextDecoder()
+      const seenTypes = []
+      const got = { frontendToolResult: false, done: false }
+      let buf = ''
+      const deadline = Date.now() + 150_000
+      try {
+        while (Date.now() < deadline && !(got.frontendToolResult && got.done)) {
+          const { done: rd, value } = await reader.read()
+          if (rd) break
+          buf += decoder.decode(value, { stream: true })
+          const lines = buf.split('\n')
+          buf = lines.pop()
+          for (const line of lines) {
+            if (!line.startsWith('data:')) continue
+            let frame
+            try { frame = JSON.parse(line.slice(5).trim()) } catch { continue }
+            seenTypes.push(frame.type)
+            if (frame.type === 'frontend_tool_result' && frame.toolCallId === realToolCallId) {
+              got.frontendToolResult = true
+            }
+            if (frame.type === 'done') got.done = true
+          }
+        }
+      } catch { /* 超时/断开：按已收帧判定 */ }
+      try { await reader.cancel() } catch { /* 忽略 */ }
+      return { ...got, seenTypes }
+    })()
+    console.log('[阶段3d 结局帧]', JSON.stringify({ ftr: tail.frontendToolResult, done: tail.done }))
+    RESULT.phases.settleFrames = { frontendToolResult: tail.frontendToolResult, done: tail.done, seenTypes: tail.seenTypes }
+
+    assert('①',
+      rebuilt.pendingCards === 1 && rebuilt.formRendererCount === 1 && rebuilt.toolRunCount === 1
+        && tail.frontendToolResult && tail.done,
+      {
+        pendingCards: rebuilt.pendingCards,
+        formRendererCount: rebuilt.formRendererCount,
+        toolRunCount: rebuilt.toolRunCount,
+        pendingStatuses: rebuilt.pendingStatuses,
+        activeFormStatus: rebuilt.activeFormStatus,
+        convergePath: converge.path,
+        frontendToolResult: tail.frontendToolResult,
+        done: tail.done
+      })
+  }
 
   // ── 收尾清理 ──────────────────────────────────────────────────────────
   await evaluate(`(() => {
@@ -220,7 +409,7 @@ try {
   console.error('FATAL:', err)
   failures.push('exception')
 } finally {
-  RESULT.round = { startedAt: STAMP, outDir: OUT, chrome: CHROME, resultFile: RESULT_FILE }
+  RESULT.round = { startedAt: STAMP, outDir: OUT, chrome: CHROME, api: API, resultFile: RESULT_FILE }
   writeFileSync(RESULT_FILE, JSON.stringify(RESULT, null, 2))
   console.log('[done] result written to', RESULT_FILE)
   ws.close()
