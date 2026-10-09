@@ -49,10 +49,10 @@ import java.util.concurrent.atomic.AtomicLong;
  * <h2>T3-1 慢订阅者隔离（R1 裁决 + 施工注记 R2/R3）</h2>
  * {@code emitLock} 内只保留：取号、落归档、{@code touchActivity}（S3-9：必须留锁内同步，
  * 否则僵尸判定输入随投递延迟漂移）、<b>帧入各订阅者队列</b>。网络写出全部走
- * <b>共享有界投递池</b>（工作线程数初值 4，{@code app.ai.sse.delivery-pool-size} 可配，
+ * <b>共享有界投递池</b>（工作线程数 T3-5 定值 8，{@code app.ai.sse.delivery-pool-size} 可配，
  * T3-5 压测定值）：
  * <ul>
- * <li>每订阅者一条队列（实时段容量初值 256，{@code app.ai.sse.delivery-queue-capacity}
+ * <li>每订阅者一条队列（实时段容量 T3-5 定值 256，{@code app.ai.sse.delivery-queue-capacity}
  * 可配；生产者在 {@code emitLock} 内串行入队、单消费者摘除，故容量判定精确）
  * + 一个 CAS drain 独占标志：入队后 CAS 抢占 drain 权，抢不到说明在跑的 drain 会带走新帧
  * —— 单订阅者 FIFO 且一条慢连接至多占一个工作线程，慢订阅者的 TCP 背压不再阻塞整轮

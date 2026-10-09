@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.config;
 
+import jakarta.annotation.PostConstruct;
 import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
@@ -41,6 +42,25 @@ public class AiProperties {
 	private Resume resume = new Resume();
 
 	private ToolResult toolResult = new ToolResult();
+
+	/**
+	 * 启动期容量联动校验（T3-5 定值回灌，2026-10-09）。
+	 *
+	 * <p>
+	 * 校验 {@code 挂起专用池 × 2 + 投递池 ≤ boundedElastic 缺省容量（= 10 × CPU）}：该式右侧是
+	 * {@code 10 × CPU} 的<b>线性函数</b>，低核数部署机上会不成立（4 核 ⇒ 40 &lt; 48），故不能再
+	 * 当作恒真不变量，改以"启动期 WARN + 明示建议最低核数"承载（判据见
+	 * {@code docs/evidence/M2-T3-5-压测证据-DS-V4-Flash.md} §S1.5 与 §【待裁决】3）。
+	 *
+	 * <p>
+	 * <b>不 fail-fast</b>：容量不足的后果是 boundedElastic 排队、拖慢全部 AI 流式（含无关会话），
+	 * 属性能降级而非正确性破坏；此处只告警，是否下调池容量/换部署机由运维按告警决策。
+	 */
+	@PostConstruct
+	void verifyBoundedElasticCapacityBudget() {
+		AiPoolCapacityBudget.verify(this.suspend.getPoolSize(), this.sse.getDeliveryPoolSize(),
+				Runtime.getRuntime().availableProcessors());
+	}
 
 	@Data
 	public static class Memory {
@@ -166,9 +186,15 @@ public class AiProperties {
 		 * 每订阅者一条<b>实时段有界</b>队列（回放初始批豁免，闸按实时段计数判定）+ CAS drain
 		 * 独占标志，一条慢连接至多占一个工作线程；
 		 * 池任务队列满时提交被拒 ⇒ 摘除触发本次提交的订阅者（显式 complete，前端重挂补帧）。
-		 * 初值 4 —— <b>待 §13.2 #2 压测裁决</b>（T3-5 定值）。
+		 *
+		 * <p>
+		 * <b>T3-5 压测定值（2026-10-09）：8</b>；依据
+		 * {@code docs/evidence/M2-T3-5-压测证据-DS-V4-Flash.md} §S1.2/S5；判定等式为
+		 * <b>不被饿死 ⟺ 慢连接数 &lt; 池容量</b>（{@code M == 池容量} 时全部工作线程被慢连接占满，
+		 * 同轮健康订阅者含心跳一并停投）。原初值 4 的边界：同轮出现 ≥ 4 条慢连接即饿死全部
+		 * 健康订阅者；8 在该矩阵（M ∈ {1,4}）全绿，且 20×2 + 8 = 48 ≤ 160 仍成立。
 		 */
-		private int deliveryPoolSize = 4;
+		private int deliveryPoolSize = 8;
 
 		/**
 		 * 每订阅者<b>实时</b>投递队列容量的缺省值（<b>单一事实源</b>）。
@@ -177,7 +203,11 @@ public class AiProperties {
 		 * 写出器与注册表都引用本常量（S3-1 修复批：此前 256 同时写在本类与 {@code SseChatEmitter}
 		 * 两处，改坏一处不必然变红）。R1 不变量：本值 &lt; 归档窗口
 		 * {@code RunStore#EVENT_WINDOW}（只约束实时段，回放初始批豁免）。
-		 * 初值 256 —— <b>待 §13.2 #2 压测裁决</b>（T3-5 定值）。
+		 *
+		 * <p>
+		 * <b>T3-5 压测定值（2026-10-09）：维持 256</b>；双向实测依据见
+		 * {@code docs/evidence/M2-T3-5-压测证据-DS-V4-Flash.md} §S5.2（不误摘：3000 帧回放 backlog
+		 * 在队 + 100 条实时心跳不摘除，第 257 条才摘；及时摘：真实 TCP 背压下慢客户端 414 ms 内摘除）。
 		 */
 		public static final int DEFAULT_DELIVERY_QUEUE_CAPACITY = 256;
 
