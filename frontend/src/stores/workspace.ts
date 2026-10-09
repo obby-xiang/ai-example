@@ -57,7 +57,12 @@ export const useWorkspaceStore = defineStore('workspace', {
   state: () => ({
     /** 契约版本号：两侧按此判定兼容性 */
     contractVersion: WORKSPACE_CONTRACT_VERSION,
-    /** 页面标签（ToolScope 的 page:* 口径：tasks / definitions / data；向导页由 taskType+step 接管） */
+    /**
+     * 页面标签（ToolScope 的 page:* 口径）：**与 pageId 同值**，即路由页 id 的镜像 ——
+     * tasks / export / import / definitions / data。
+     * 向导页的披露权威是 taskType+step（ToolScope.java 的 `task:*`）；
+     * `page:export` / `page:import` 是保留粒度，当前无任何工具使用。
+     */
     page: 'tasks' as string,
     /** 路由级页面 id */
     pageId: 'tasks' as WorkspacePageId,
@@ -146,18 +151,6 @@ export const useWorkspaceStore = defineStore('workspace', {
         this.importMode = init.importMode
       }
       this.touch(`进入${PAGE_LABELS[this.pageId] ?? this.page}`)
-    },
-
-    /** 回到任务中心口径（离开向导时清掉 task 维度，避免披露错误的工具子集）。 */
-    leaveWizard(): void {
-      this.taskType = null
-      this.step = null
-      this.taskId = null
-      this.taskStatus = null
-      this.selectedDefs = []
-      this.queryConditions = {}
-      this.importMode = null
-      this.touch('离开向导，回到任务中心')
     },
 
     setStep(step: string | null): void {

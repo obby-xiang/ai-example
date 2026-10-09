@@ -65,7 +65,9 @@ export function unregisterFrontendToolExecutor(name: FrontendToolName | string):
   executors.delete(name)
 }
 
-/** @ToolScope 标签匹配（'*' / 'page:tasks' / 'task:EXPORT' / 'task:EXPORT/EXPORT' / 'task:*'）。 */
+/** @ToolScope 标签匹配（'*' / 'page:tasks' / 'task:EXPORT' / 'task:EXPORT/EXPORT' / 'task:*'）。
+ *  page:* 的合法值域 = 路由页 id 镜像（tasks / export / import / definitions / data）；
+ *  `page:export` / `page:import` 为保留粒度，当前无任何工具使用（向导页披露由 taskType+step 承担）。 */
 export function matchesScope(patterns: readonly string[], scope: { page: string; taskType: string | null; step: string | null }): boolean {
   const page = scope.page
   const taskType = scope.taskType ?? ''

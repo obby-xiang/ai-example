@@ -29,9 +29,13 @@ export type PageHandler = (payload: Record<string, unknown>) => unknown | Promis
 
 /** 工作区状态快照（AI 侧可读的摘要，raw 化前）。 */
 export interface WorkspaceSnapshot {
-  /** 当前页面标签（ToolScope 的 page:* 口径） */
+  /**
+   * 当前页面标签（ToolScope 的 page:* 口径）：上报给后端的页面维度，
+   * **实现上与 `pageId` 同值**（路由页 id 的镜像，见 `stores/workspace.ts#enterPage` 的回退）；
+   * 合法值域 = tasks / export / import / definitions / data。
+   */
   page: string
-  /** 页面 id（路由级） */
+  /** 页面 id（路由级）；AI 侧判定"在哪个页面"请用本字段（`page` 只是它的镜像） */
   pageId: WorkspacePageId
   /** 任务类型 */
   taskType: TaskType | null
