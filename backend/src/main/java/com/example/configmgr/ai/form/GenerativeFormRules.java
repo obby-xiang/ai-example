@@ -54,7 +54,13 @@ import java.util.regex.Pattern;
  */
 public final class GenerativeFormRules {
 
-	/** 工具名（与 {@code AiTools#generativeForm} 的 {@code @Tool(name)} 一致，由用例对账锁定）。 */
+	/**
+	 * 工具名（与 {@code AiTools#generativeForm} 的 {@code @Tool(name)} 一致，由用例对账锁定）。
+	 * <p>
+	 * <b>双侧同步约束（T2b 顺手项⑤）</b>：前端判定同一字面量用的是
+	 * {@code frontend/src/types/ai.ts} 的 {@code GENERATIVE_FORM_TOOL} 常量 ——
+	 * 本值变更必须同步改该常量（前端不从后端接口读工具名，字面量漂移会导致挂起卡/守卫判定失灵）。
+	 */
 	public static final String TOOL_NAME = "generative_form";
 
 	/** schema 级拒绝码（下发前端之前，工具错误结果）。 */

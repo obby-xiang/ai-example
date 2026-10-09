@@ -52,6 +52,9 @@ public final class InMemoryRunStore extends RunStore {
 
 	private final Map<String, Long> beats = new ConcurrentHashMap<>();
 
+	/** session → 当前挂起轮（T2b-D#1 索引的进程内替身；无 TTL）。 */
+	private final Map<String, String> sessionCurrent = new ConcurrentHashMap<>();
+
 	public InMemoryRunStore() {
 		super(null, new ObjectMapper(), new AiProperties());
 	}
@@ -113,6 +116,15 @@ public final class InMemoryRunStore extends RunStore {
 	public void save(RunSnapshot snapshot) {
 		snapshot.setUpdatedAtMs(System.currentTimeMillis());
 		this.runs.put(snapshot.getRunId(), snapshot);
+		// 与真实实现同一联动口径（T2b-D#1）：SUSPENDED 建索引、终态清索引、RUNNING 保留
+		String status = snapshot.getStatus();
+		if (RunSnapshot.SUSPENDED.equals(status)) {
+			markSessionCurrent(snapshot.getSessionId(), snapshot.getRunId());
+		}
+		else if (RunSnapshot.DONE.equals(status) || RunSnapshot.FAILED.equals(status)
+				|| RunSnapshot.CANCELLED.equals(status)) {
+			clearSessionCurrent(snapshot.getSessionId(), snapshot.getRunId());
+		}
 	}
 
 	@Override
@@ -163,6 +175,35 @@ public final class InMemoryRunStore extends RunStore {
 	@Override
 	public List<PendingToolCall> pendings(String runId) {
 		return new ArrayList<>(pendingTable(runId).values());
+	}
+
+	// ── session → current 轮索引（T2b-D#1 的进程内替身，语义与真实实现一致） ──
+
+	@Override
+	public void markSessionCurrent(String sessionId, String runId) {
+		if (sessionId != null && runId != null) {
+			this.sessionCurrent.put(sessionId, runId);
+		}
+	}
+
+	@Override
+	public void renewSessionCurrent(String sessionId, String runId) {
+		// 无 TTL 可续；值匹配校验保留（语义对齐：不属于自己的轮不动作）
+		if (runId != null && runId.equals(this.sessionCurrent.get(sessionId))) {
+			this.sessionCurrent.put(sessionId, runId);
+		}
+	}
+
+	@Override
+	public void clearSessionCurrent(String sessionId, String runId) {
+		if (runId != null && runId.equals(this.sessionCurrent.get(sessionId))) {
+			this.sessionCurrent.remove(sessionId, runId);
+		}
+	}
+
+	@Override
+	public String sessionCurrentRunId(String sessionId) {
+		return sessionId == null ? null : this.sessionCurrent.get(sessionId);
 	}
 
 	@Override

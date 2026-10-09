@@ -40,7 +40,10 @@ import java.util.UUID;
  * 供 {@code GET /api/ai/events/{runId}} 重挂时回放）；每帧带单调 {@code seq}（T6 的差量补发判据），
  * <b>心跳帧不入本归档</b>（T7，改记 {@code ai:beat:<runId>}）；</li>
  * <li>{@code ai:beat:<runId>} STRING —— 心跳活动戳（毫秒时刻，TTL 随心跳续期）：
- * 心跳不占归档窗口，但"这一轮最近有过活动"仍可跨进程判定（僵尸判据的输入之一）。</li>
+ * 心跳不占归档窗口，但"这一轮最近有过活动"仍可跨进程判定（僵尸判据的输入之一）；</li>
+ * <li>{@code ai:session:current:<sessionId>} STRING（value=runId，T2b-D#1）——
+ * session → 当前挂起轮的索引：挂起写入、轮终态清除、TTL 对齐会话锁 watchdog；
+ * 仅供 {@code GET /api/ai/runs/current} 重建挂起态，<b>不承诺同 session 多页签共享</b>。</li>
  * </ul>
  *
  * <h2>硬规范①（外置先于阻塞）</h2>
@@ -66,6 +69,13 @@ public class RunStore {
 
 	/** 心跳活动戳键前缀（T7：心跳不入归档，但活动证据必须留痕）。 */
 	public static final String BEAT_PREFIX = "ai:beat:";
+
+	/**
+	 * session → 当前挂起轮的索引键前缀（T2b-D#1）：{@code ai:session:current:<sessionId>}
+	 * STRING（value = runId）。挂起写入、轮终态清除、TTL 对齐会话锁 watchdog
+	 * （{@code app.ai.session.lock.ttl}），O(1) 读写。
+	 */
+	public static final String SESSION_CURRENT_PREFIX = "ai:session:current:";
 
 	/** 心跳帧的类型名（T7：唯一不落归档的帧类型）。 */
 	public static final String HEARTBEAT_TYPE = "heartbeat";
@@ -148,6 +158,103 @@ public class RunStore {
 		catch (Exception ex) {
 			throw new IllegalStateException("无法写入轮次快照 " + snapshot.getRunId(), ex);
 		}
+		// T2b-D#1：快照持久化成功后联动 session → current 轮索引（全部走本方法这一唯一通道，
+		// 不会漏分支）。RUNNING 不动 —— settle 期间轮仍是 current，索引必须保留。
+		String status = snapshot.getStatus();
+		if (RunSnapshot.SUSPENDED.equals(status)) {
+			markSessionCurrent(snapshot.getSessionId(), snapshot.getRunId());
+		}
+		else if (RunSnapshot.DONE.equals(status) || RunSnapshot.FAILED.equals(status)
+				|| RunSnapshot.CANCELLED.equals(status)) {
+			clearSessionCurrent(snapshot.getSessionId(), snapshot.getRunId());
+		}
+	}
+
+	// ── session → current 轮索引（T2b-D#1；体验优化，不是正确性依赖） ─────────
+
+	/**
+	 * 记录"该 session 当前挂起可重建的轮"：{@code SET ai:session:current:<sessionId> <runId>}，
+	 * TTL 对齐会话锁 watchdog（{@code app.ai.session.lock.ttl}，当前 10m）——
+	 * 挂起期由 {@code ConfirmGate} 心跳续期（与锁同寿），进程死亡后键随 TTL 过期，
+	 * {@code GET /api/ai/runs/current} 据此返回明确空态（三分支语义之一）。
+	 *
+	 * <p>
+	 * <b>约束（红队 B2）</b>：不承诺同 session 多页签共享 —— 索引只覆盖
+	 * "挂起可重建"场景，且以"最后一次挂起"为准。
+	 */
+	public void markSessionCurrent(String sessionId, String runId) {
+		if (sessionId == null || runId == null) {
+			return;
+		}
+		try {
+			this.redis.opsForValue().set(sessionCurrentKey(sessionId), runId, sessionCurrentTtl());
+		}
+		catch (Exception ex) {
+			log.warn("写入 session→current 索引失败 sessionId={} runId={}：{}", sessionId, runId, ex.getMessage());
+		}
+	}
+
+	/** 索引键名（诊断/取证可直读）。 */
+	public String sessionCurrentKey(String sessionId) {
+		return SESSION_CURRENT_PREFIX + sessionId;
+	}
+
+	/** 续期：仅当值仍是自己这一轮的 runId 才 {@code EXPIRE}（同会话锁 watchdog 语义）。 */
+	public void renewSessionCurrent(String sessionId, String runId) {
+		if (sessionId == null || runId == null) {
+			return;
+		}
+		try {
+			String value = this.redis.opsForValue().get(sessionCurrentKey(sessionId));
+			if (runId.equals(value)) {
+				this.redis.expire(sessionCurrentKey(sessionId), sessionCurrentTtl());
+			}
+		}
+		catch (Exception ex) {
+			log.debug("续期 session→current 索引失败 sessionId={} runId={}：{}", sessionId, runId, ex.getMessage());
+		}
+	}
+
+	/** 清除：仅当值仍是自己这一轮的 runId 才 {@code DEL}（同 {@code SessionGate.release} 口径）。 */
+	public void clearSessionCurrent(String sessionId, String runId) {
+		if (sessionId == null || runId == null) {
+			return;
+		}
+		try {
+			String value = this.redis.opsForValue().get(sessionCurrentKey(sessionId));
+			if (runId.equals(value)) {
+				this.redis.delete(sessionCurrentKey(sessionId));
+			}
+		}
+		catch (Exception ex) {
+			log.debug("清除 session→current 索引失败 sessionId={} runId={}：{}", sessionId, runId, ex.getMessage());
+		}
+	}
+
+	/** 该 session 当前挂起轮的 runId（null = 无索引：从未挂起 / 已终态清除 / TTL 过期）。 */
+	public String sessionCurrentRunId(String sessionId) {
+		if (sessionId == null) {
+			return null;
+		}
+		try {
+			return this.redis.opsForValue().get(sessionCurrentKey(sessionId));
+		}
+		catch (Exception ex) {
+			log.debug("读取 session→current 索引失败 sessionId={}：{}", sessionId, ex.getMessage());
+			return null;
+		}
+	}
+
+	/**
+	 * 索引 TTL（T2b-D#1，不用快照的 session-ttl）：来源分两层看 —— <b>取值</b>取自配置项
+	 * {@code app.ai.session.lock.ttl}（{@code properties.getSession().getLock().getTtl()}，
+	 * 与会话锁 watchdog 共用同一配置）；<b>续期</b>与会话锁 watchdog 无关，而是由
+	 * {@code ConfirmGate} 挂起等待循环的心跳分支每拍调用
+	 * {@link #renewSessionCurrent(String, String)} 刷新为同一 TTL，轮落到终态则由
+	 * {@link #clearSessionCurrent(String, String)} 主动删除（红队 S3-3 措辞修正）。
+	 */
+	private Duration sessionCurrentTtl() {
+		return this.properties.getSession().getLock().getTtl();
 	}
 
 	public RunSnapshot get(String runId) {

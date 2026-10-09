@@ -386,6 +386,79 @@ public class AiController {
 		return ApiResponse.ok(service.describe(runId));
 	}
 
+	/**
+	 * session 当前挂起轮的快照（T2b-D#2）：{@code GET /api/ai/runs/current?sessionId=}。
+	 *
+	 * <h2>三分支语义（红队 D1）</h2>
+	 * <ul>
+	 * <li><b>已超时</b>：等待循环把仍 PENDING 的条目标成 {@code TIMEOUT} → 条目
+	 * {@code entryStatus=TIMEOUT}、{@code awaitingExternal=false}；</li>
+	 * <li><b>他端已提交</b>：回灌/决策已落库 → 条目 {@code entryStatus=FRONTEND_RESULT} 等
+	 * 决态、{@code awaitingExternal=false}；</li>
+	 * <li><b>进程已死</b>：索引键 TTL 过期缺失（与会话锁同寿）→ 明确空态
+	 * （{@code found:false}）。</li>
+	 * </ul>
+	 *
+	 * <p>
+	 * {@code unresolvedExternal} 口径对齐 {@code ResumeService}（status==PENDING 且
+	 * kind!=BACKEND 的 toolCallId 列表），据此计算 {@code awaitingExternal}：
+	 * 快照 SUSPENDED 但条目全决的"中间态"（D1）不会误判为仍在等待。
+	 *
+	 * <p>
+	 * <b>约束（红队 B2）</b>：索引不承诺同 session 多页签共享 —— 只覆盖
+	 * "挂起可重建"场景，以最后一次挂起为准。
+	 */
+	@GetMapping("/runs/current")
+	public ResponseEntity<?> runsCurrent(@RequestParam(required = false) String sessionId) {
+		if (!StringUtils.hasText(sessionId)) {
+			return json(HttpStatus.BAD_REQUEST, Map.of("code", "BAD_REQUEST", "message", "sessionId 为必填"));
+		}
+		String runId = this.runStore.sessionCurrentRunId(sessionId);
+		RunSnapshot snapshot = runId == null ? null : this.runStore.get(runId);
+		if (runId == null || snapshot == null) {
+			// 索引缺失（TTL 过期=进程已死）或索引残留但快照已消失：明确空态
+			return ResponseEntity.ok(ApiResponse.ok(emptyCurrentRun()));
+		}
+		Map<String, Object> body = new LinkedHashMap<>();
+		body.put("found", true);
+		body.put("runId", runId);
+		body.put("snapshotStatus", snapshot.getStatus());
+		List<PendingToolCall> pendings = this.runStore.pendings(runId);
+		List<Map<String, Object>> pendingEntries = new ArrayList<>();
+		List<String> unresolvedExternal = new ArrayList<>();
+		for (PendingToolCall pending : pendings) {
+			Map<String, Object> entry = new LinkedHashMap<>();
+			entry.put("toolCallId", pending.getToolCallId());
+			entry.put("entryStatus", pending.getStatus());
+			entry.put("kind", pending.getKind());
+			entry.put("name", pending.getName());
+			entry.put("arguments", pending.getArguments());
+			pendingEntries.add(entry);
+			if (PendingToolCall.PENDING.equals(pending.getStatus())
+					&& !PendingToolCall.KIND_BACKEND.equals(pending.getKind())) {
+				unresolvedExternal.add(pending.getToolCallId());
+			}
+		}
+		body.put("pendingEntries", pendingEntries);
+		body.put("unresolvedExternal", unresolvedExternal);
+		body.put("awaitingExternal", RunSnapshot.SUSPENDED.equals(snapshot.getStatus()) && !unresolvedExternal.isEmpty());
+		body.put("archiveMaxSeq", this.runStore.lastEventSeq(runId));
+		return ResponseEntity.ok(ApiResponse.ok(body));
+	}
+
+	/** 索引缺失/快照消失时的明确空态（进程已死分支）。 */
+	private static Map<String, Object> emptyCurrentRun() {
+		Map<String, Object> body = new LinkedHashMap<>();
+		body.put("found", false);
+		body.put("runId", null);
+		body.put("snapshotStatus", null);
+		body.put("pendingEntries", List.of());
+		body.put("unresolvedExternal", List.of());
+		body.put("awaitingExternal", false);
+		body.put("archiveMaxSeq", 0L);
+		return body;
+	}
+
 	@PostMapping(value = "/runs/{runId}/resume", produces = MediaType.APPLICATION_JSON_VALUE)
 	public ResponseEntity<?> resume(@PathVariable String runId) {
 		ResumeService service = this.resumeService.getIfAvailable();

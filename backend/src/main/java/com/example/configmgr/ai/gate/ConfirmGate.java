@@ -4,6 +4,7 @@ import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.RunRegistry;
+import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
@@ -108,6 +109,20 @@ public class ConfirmGate {
 		this.frontendGuards = frontendGuards == null ? List.of() : List.copyOf(frontendGuards);
 	}
 
+	/**
+	 * 轮快照的 sessionId（索引续期用；快照缺失返回 null，调用方据此跳过续期）。
+	 */
+	private String snapshotSessionId(String runId) {
+		try {
+			RunSnapshot snapshot = this.store.get(runId);
+			return snapshot == null ? null : snapshot.getSessionId();
+		}
+		catch (Exception ex) {
+			log.debug("读取轮快照 sessionId 失败 runId={}：{}", runId, ex.getMessage());
+			return null;
+		}
+	}
+
 	/** 确认门等待上限（秒）：{@code app.ai.hitl.timeout}。 */
 	public int confirmTimeoutSeconds() {
 		Duration timeout = this.properties.getHitl().getTimeout();
@@ -147,6 +162,8 @@ public class ConfirmGate {
 		}
 		long startedAt = System.currentTimeMillis();
 		long deadline = startedAt + timeoutSeconds * 1000L;
+		// T2b-D#1：挂起期续期 session→current 索引用的 sessionId（快照可能缺失，取一次缓存并判空）
+		String sessionId = snapshotSessionId(runId);
 		try {
 			while (true) {
 				if (this.cancellations.isCancelled(runId)) {
@@ -170,6 +187,10 @@ public class ConfirmGate {
 				if (!signalled) {
 					// 工具活动脉冲（韧性看门狗据此在挂起期不计静默，硬规范①）
 					this.beacon.pulse(runId);
+					// T2b-D#1：与心跳同节拍续期 session→current 索引（TTL 对齐会话锁 watchdog）
+					if (sessionId != null) {
+						this.store.renewSessionCurrent(sessionId, runId);
+					}
 					out.heartbeat(heartbeatData(runId, pending, confirm, timeoutSeconds,
 							(System.currentTimeMillis() - startedAt) / 1000));
 				}
