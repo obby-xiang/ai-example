@@ -166,7 +166,7 @@
           </div>
 
           <!-- 挂起卡片：HITL 确认（确认/拒绝双路径）或待前端执行 -->
-          <div v-if="m.pendingCall" class="mt-2 border border-solid border-[#dcdfe6] rounded-md p-2 bg-white">
+          <div v-if="m.pendingCall" :data-testid="'pending-card-' + m.pendingCall.toolCallId" class="mt-2 border border-solid border-[#dcdfe6] rounded-md p-2 bg-white">
             <div class="flex items-center gap-1.5 font-semibold text-[13px] flex-wrap">
               <el-icon color="#409EFF"><Operation /></el-icon>
               <span>{{ toolLabel(m.pendingCall.name) }}</span>
@@ -199,7 +199,7 @@
               </div>
             </template>
 
-            <div v-else-if="m.pendingCall.kind === 'FRONTEND' && m.pendingCall.name === 'generative_form'" class="mt-2">
+            <div v-else-if="m.pendingCall.kind === 'FRONTEND' && m.pendingCall.name === GENERATIVE_FORM_TOOL" class="mt-2">
               <!-- GF-B：生成式表单挂起 —— 渲染 FormRenderer 等用户填写（同 toolCallId 可重发/取消） -->
               <!-- T2a-D#3：同 toolCallId 至多一个 FormRenderer —— 只渲染在宿主消息（最后一条
                 持该挂起调用的消息）上，其余消息的挂起卡只出卡头/终态 tag -->
@@ -215,7 +215,7 @@
               />
               <div v-else class="flex flex-col items-end gap-1">
                 <!-- T2a-D#2：帧终态由 pendingCall 投影承载（含刷新后镜像里的终态残留），按终态展示 -->
-                <el-tag v-if="m.pendingCall.status === 'cancelled'" size="small" type="info">表单已取消</el-tag>
+                <el-tag v-if="m.pendingCall.status === 'cancelled'" data-testid="tag-form-cancelled" size="small" type="info">表单已取消</el-tag>
                 <el-tag v-else-if="m.pendingCall.status === 'succeeded'" size="small" type="success">表单已提交</el-tag>
                 <el-tag v-else-if="m.pendingCall.status === 'expired'" size="small" type="info">会话已失效</el-tag>
                 <el-tag v-else-if="m.pendingCall.status === 'rejected' || m.pendingCall.status === 'blocked'" size="small" type="warning">表单未提交</el-tag>
@@ -239,6 +239,9 @@
                    不得落 else 的"已执行"（与 generative_form 分支的 rejected||blocked 口径对齐） -->
               <el-tag v-else-if="m.pendingCall.status === 'succeeded'" size="small" type="success">已执行</el-tag>
               <el-tag v-else-if="m.pendingCall.status === 'blocked'" size="small" type="warning">未执行（超出范围）</el-tag>
+              <!-- T2b 顺手项②（GLM 复核 F1）：approved 显式分支，原落 else"已执行"；
+                   当前无 FRONTEND+approved 写入路径，属口径修正防未来误标 -->
+              <el-tag v-else-if="m.pendingCall.status === 'approved'" size="small" type="success">已放行</el-tag>
               <el-tag v-else size="small" type="success">已执行</el-tag>
             </div>
 
@@ -307,7 +310,7 @@ import { useAiStore } from '@/stores/ai'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { formatCountdown } from '@/utils/format'
 import FormRenderer from '@/components/AiPanel/FormRenderer.vue'
-import type { PendingToolCall, ToolRunStatus } from '@/types/ai'
+import { GENERATIVE_FORM_TOOL, type PendingToolCall, type ToolRunStatus } from '@/types/ai'
 
 const ai = useAiStore()
 const workspace = useWorkspaceStore()
@@ -337,7 +340,7 @@ const TOOL_LABELS: Record<string, string> = {
   open_export_file_editor: '打开导出文件在线编辑器',
   download_export_file: '下载导出文件',
   navigate_to: '跳转页面',
-  generative_form: '生成式表单',
+  [GENERATIVE_FORM_TOOL]: '生成式表单',
   select_config_defs: '选择配置项',
   set_query_conditions: '设置查询条件',
   download_templates: '下载模板',

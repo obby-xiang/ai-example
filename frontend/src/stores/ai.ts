@@ -19,15 +19,7 @@ import { onWorkspaceEvent, useWorkspaceStore } from '@/stores/workspace'
 import { executeFrontendTool, parseToolArgs } from '@/utils/frontend-tools'
 import { ErrorCode, type SessionBusyConflict, type SuspendPoolSaturated } from '@/types/api'
 import { frameSeq, isTerminalFrame } from '@/types/sse'
-import type {
-  ActiveGenerativeForm,
-  AiHealth,
-  AiHistory,
-  AiSessionMirror,
-  ChatMessage,
-  PendingToolCall,
-  ToolRun
-} from '@/types/ai'
+import { GENERATIVE_FORM_TOOL, type ActiveGenerativeForm, type AiHealth, type AiHistory, type AiRunCurrent, type AiSessionMirror, type ChatMessage, type PendingToolCall, type ToolRun } from '@/types/ai'
 import { parseFormSchema, checkFormValues } from '@/types/form-schema'
 import type { SseConfirmRequestFrame, SseFrame } from '@/types/sse'
 import type { WorkspaceActionRecord } from '@/types/tools'
@@ -412,6 +404,9 @@ export const useAiStore = defineStore('ai', {
           }
         }
         this.historyLoaded = true
+        // T2b-D#3：historyLoaded 先行置位后再触发快照重建（loadHistory 先行完成，
+        // 消除镜像/历史写入与挂起重建之间的写后写竞态）；后端不可达的 catch 分支不重建
+        await this.restoreSuspendedSnapshot()
         return
       }
 
@@ -438,6 +433,142 @@ export const useAiStore = defineStore('ai', {
       })
       // 历史里若存在未决挂起，补一张待处理卡片（前端工具/确认门都可能出现在这里）
       this.historyLoaded = true
+      // T2b-D#3：historyLoaded 先行置位后再触发快照重建（loadHistory 先行完成，
+      // 消除历史整体替换与挂起重建之间的写后写竞态）
+      await this.restoreSuspendedSnapshot()
+    },
+
+    /**
+     * T2b-D#3（红队 A1/A3/B3）：刷新后的挂起卡走"快照重建 + 增量续收"，禁止全量回放重建
+     * （防双重渲染/孤儿过滤失效/死卡复活）。数据源为后端 runs/current 的 pendingEntries 快照，
+     * 由本 action 在 loadHistory 完成后触发；历史/镜像既有的渲染形态一律兜底，不复制历史工具卡。
+     */
+    async restoreSuspendedSnapshot(): Promise<void> {
+      if (this.loading) {
+        return
+      }
+      let current: AiRunCurrent
+      try {
+        current = await aiApi.runsCurrent(this.sessionId)
+      } catch {
+        // 该路径不可用时刷新体验降级为既有镜像/历史形态（空历史的 expired 降级规则兜底）
+        return
+      }
+      if (!current.found || !current.runId || !current.awaitingExternal) {
+        // 已决/空态：不重建挂起卡，既有历史渲染与空历史 expired 降级规则兜底
+        return
+      }
+
+      // 已决条目收敛（不留 pending 残留）：快照里非 PENDING 的条目若本地仍有 pending/乐观
+      // cancelled 残留，按 frameStatusToPendingStatus 同口径就地收敛。applyFrontendToolTerminal
+      // 内部已做 kind/name 判定与 first-wins 单调，直接调即可
+      for (const entry of current.pendingEntries) {
+        if (entry.entryStatus === 'PENDING') {
+          continue
+        }
+        const mapped = frameStatusToPendingStatus(entry.entryStatus)
+        if (mapped && this.hasDecidedPendingResidue(entry.toolCallId)) {
+          this.applyFrontendToolTerminal(entry.toolCallId, mapped)
+        }
+      }
+
+      // 重建：仅 entryStatus === 'PENDING' 的条目，已决条目不重建挂起卡
+      // （勘误 4 同口径：hasDecidedPendingResidue / isFrameDecidedPendingStatus）
+      let host: ChatMessage | null = null
+      for (const entry of current.pendingEntries) {
+        if (entry.entryStatus !== 'PENDING') {
+          continue
+        }
+        if (this.hasDecidedPendingResidue(entry.toolCallId)) {
+          continue
+        }
+        const kind = entry.kind === 'CONFIRM' ? 'CONFIRM' : 'FRONTEND'
+        // 宿主消息：优先镜像/历史里已持该工具卡的消息；否则最后一条助手消息；都没有才
+        // append 一条空助手消息作宿主 —— 唯一允许的新消息形态（历史/镜像皆无宿主），
+        // 不复制历史工具卡、无双渲染
+        host = this.messages.find((item) => item.toolRuns.some((run) => run.toolCallId === entry.toolCallId))
+          ?? [...this.messages].reverse().find((item) => item.role === 'assistant')
+          ?? null
+        if (!host) {
+          host = this.appendAssistantMessage('')
+          host.streaming = false
+          host.done = true
+        }
+        // 就地写唯一投影（复用 T2a 的 pendingCall/toolRun 形态），唯一 upsert 不新增重复工具卡
+        host.pendingCall = {
+          toolCallId: entry.toolCallId,
+          name: entry.name,
+          kind,
+          args: parseToolArgs(entry.arguments),
+          rawArgs: entry.arguments ?? undefined,
+          status: 'pending'
+        }
+        this.upsertToolRun(host, {
+          toolCallId: entry.toolCallId,
+          name: entry.name,
+          kind,
+          status: 'pending',
+          args: entry.arguments ?? undefined
+        })
+        if (entry.name === GENERATIVE_FORM_TOOL && !this.activeForm) {
+          // deadline = null：不武装本地计时器，后端权威超时收敛（快照路径无 expiresAt 折算依据）
+          const spec = parseFormSchema(parseToolArgs(entry.arguments)?.form)
+          if (spec) {
+            this.activeForm = {
+              toolCallId: entry.toolCallId,
+              runId: current.runId,
+              form: spec,
+              status: 'filling',
+              error: null,
+              deadline: null
+            }
+          }
+          // schema 非法：只留挂起卡（用户可取消），不武装表单态
+        }
+        this.suspended = true
+        this.activeRunId = current.runId
+      }
+
+      if (host) {
+        // 增量续收：lastSeq = archiveMaxSeq 只收新帧（见 resumeSnapshotStream）
+        void this.resumeSnapshotStream(current.runId, current.archiveMaxSeq, host.id)
+      }
+    },
+
+    /**
+     * T2b-D#3 增量续收（仿 reattachActive，但不新起消息 —— 挂起卡宿主已由快照重建就地就位）。
+     * lastSeq = archiveMaxSeq：服务端只补发增量帧，禁全量回放（红队 A1/A3/B3）。
+     */
+    async resumeSnapshotStream(runId: string, lastSeq: number, hostMessageId: string): Promise<void> {
+      if (currentAbort) {
+        currentAbort.abort() // 防双连接
+      }
+      this.runSeq[runId] = Math.max(this.runSeq[runId] ?? 0, lastSeq)
+      this.loading = true
+      this.streamInterrupted = false
+      currentAbort = new AbortController()
+      try {
+        await aiApi.reattachRun(
+          runId,
+          {
+            onFrame: (frame) => this.handleFrame(frame, hostMessageId),
+            onReconnect: (attempt, delayMs) => {
+              this.notice = `续收中断，${Math.round(delayMs / 1000)} 秒后第 ${attempt} 次重试`
+            },
+            onClose: (info) => {
+              if (!info.terminal) {
+                this.streamInterrupted = true
+                this.notice = `连接中断，结果可能不完整（${info.reason ?? '断流'}）。挂起卡保留，可刷新重试。`
+              }
+            }
+          },
+          { signal: currentAbort.signal, lastSeq }
+        )
+      } finally {
+        // 不置 suspended = false：挂起卡状态由帧/投影决定，done 帧的 handler 会自己清
+        this.loading = false
+        currentAbort = null
+      }
     },
 
     /** 发一轮消息（含渐进披露上下文注入 + 工作区动作同步）。 */
@@ -1008,7 +1139,7 @@ export const useAiStore = defineStore('ai', {
           break
         }
         case 'frontend_tool_request': {
-          if (frame.name === 'generative_form' && this.hasDecidedPendingResidue(frame.toolCallId)) {
+          if (frame.name === GENERATIVE_FORM_TOOL && this.hasDecidedPendingResidue(frame.toolCallId)) {
             // T2a 返修（S3）：守卫前移到挂起投影写入**之前** —— 已决 toolCallId 不产生任何新
             // pending 投影（不写 message.pendingCall、不置 suspended、不武装 activeForm），
             // 防 reattach 回放先渲染一张瞬时挂起卡、再等后续结局帧收敛
@@ -1016,7 +1147,7 @@ export const useAiStore = defineStore('ai', {
           }
           this.suspended = true
           message.pendingCall = this.toPendingCall(frame, 'FRONTEND')
-          if (frame.name === 'generative_form') {
+          if (frame.name === GENERATIVE_FORM_TOOL) {
             // GF-B：表单挂起走渲染器通道等用户填写 —— 绝不能让通用执行器兜底
             // （那段说明文本不是值 JSON，会被闸门 400 拒、挂起拖到超时，GFa §8.3）
             this.openGenerativeForm(message, frame)
@@ -1068,6 +1199,11 @@ export const useAiStore = defineStore('ai', {
           // 不该被判成"挂起等待"（否则运行状态与输入区提示会误报）。
           const waiting = frame.toolCalls.find((call) => call.kind === 'CONFIRM' || call.kind === 'FRONTEND')
           if (waiting) {
+            if (waiting.name === GENERATIVE_FORM_TOOL && this.hasDecidedPendingResidue(waiting.toolCallId)) {
+              // T2b 顺手项③（GLM 复核 F4）：与 frontend_tool_request case 同款的 residue 守卫 —
+              // 已决 toolCallId 不产生新挂起投影（对齐 isFrameDecidedPendingStatus 口径，勘误 4）
+              break
+            }
             this.suspended = true
             message.pendingCall = {
               toolCallId: waiting.toolCallId,
@@ -1168,7 +1304,7 @@ export const useAiStore = defineStore('ai', {
         if (!pending || pending.toolCallId !== toolCallId) {
           continue
         }
-        if (pending.kind !== 'FRONTEND' || pending.name !== 'generative_form') {
+        if (pending.kind !== 'FRONTEND' || pending.name !== GENERATIVE_FORM_TOOL) {
           // 通用 FRONTEND 工具：基线语义 —— 收掉挂起投影（终态由 toolRun 卡展示）
           item.pendingCall = null
           continue

@@ -284,3 +284,35 @@ export function summarizeHistory(history: AiHistory): AiHistorySnapshot {
 
 /** 待决条目的固定键（供工具卡与确认卡复用）。 */
 export type PendingSnapshotKey = keyof PendingToolCallSnapshot
+
+/**
+ * T2b 顺手项⑤：生成式表单工具名的唯一字面量来源。
+ * 与后端 GenerativeFormRules.TOOL_NAME（backend/.../ai/form/GenerativeFormRules.java）同步 ——
+ * 改值需双侧同步，单侧改会断判定。
+ */
+export const GENERATIVE_FORM_TOOL = 'generative_form'
+
+/** GET /api/ai/runs/current 单条挂起条目快照（后端 PendingToolCall 条目原文）。 */
+export interface AiRunCurrentEntry {
+  toolCallId: string
+  /** 后端条目状态原文：PENDING / TIMEOUT / FRONTEND_RESULT / FRONTEND_CANCELLED /
+   * CANCELLED / REJECTED / BLOCKED / APPROVED / EXECUTED */
+  entryStatus: string
+  kind: string
+  name: string
+  /** 入参 JSON 字符串（原样，展示/解析由前端做） */
+  arguments?: string | null
+}
+
+/** GET /api/ai/runs/current?sessionId= 的 data：当前会话进行中的 run 挂起快照（T2b-D#3）。 */
+export interface AiRunCurrent {
+  /** 空态（索引缺失/进程已死/快照已清）：仅 found=false，其余为默认值 */
+  found: boolean
+  runId: string | null
+  snapshotStatus: string | null
+  pendingEntries: AiRunCurrentEntry[]
+  unresolvedExternal: string[]
+  awaitingExternal: boolean
+  /** 归档流最大帧序号：增量续收（lastSeq）的锚点 */
+  archiveMaxSeq: number
+}

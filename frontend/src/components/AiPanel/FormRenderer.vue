@@ -94,8 +94,8 @@
 
     <!-- 操作区：显式取消入口 + 提交 -->
     <div class="mt-3 flex justify-end gap-2">
-      <el-button size="small" :disabled="submitting" @click="emit('cancel')">取消</el-button>
-      <el-button size="small" type="primary" :loading="submitting" :disabled="disabled" @click="onSubmit">
+      <el-button size="small" data-testid="gf-cancel" :disabled="submitting" @click="emit('cancel')">取消</el-button>
+      <el-button size="small" type="primary" data-testid="gf-submit" :loading="submitting" :disabled="disabled" @click="onSubmit">
         提交
       </el-button>
     </div>

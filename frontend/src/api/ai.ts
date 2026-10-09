@@ -13,6 +13,7 @@ import type {
   AiChatRequest,
   AiHealth,
   AiHistory,
+  AiRunCurrent,
   ConfirmRequest,
   ConfirmResult,
   FrontendToolResultAck,
@@ -107,6 +108,14 @@ export function pending(runId: string): Promise<PendingSnapshot[]> {
 /** 挂起项快照的宽松形态（后端为 PendingToolCall#asMap）。 */
 export type PendingSnapshot = Record<string, unknown>
 
+/**
+ * GET /api/ai/runs/current?sessionId=（T2b-D#3：刷新后挂起快照重建的数据源）。
+ * 空态（索引缺失/进程已死/快照已清）为 found=false 的同一个体。
+ */
+export function runsCurrent(sessionId: string): Promise<AiRunCurrent> {
+  return get<AiRunCurrent>(`/ai/runs/current?sessionId=${encodeURIComponent(sessionId)}`)
+}
+
 export const aiApi = {
   chat,
   reattachRun,
@@ -119,5 +128,6 @@ export const aiApi = {
   runs,
   run,
   resume,
-  pending
+  pending,
+  runsCurrent
 }
