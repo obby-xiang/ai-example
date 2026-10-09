@@ -48,6 +48,17 @@ public class ContextBuilder {
      */
     public static final List<String> SELECTION_PAGE_IDS = List.of("export", "import");
 
+    /**
+     * 页面 id 的中文名（提示词的 {@code 页面} 行文案用）——与前端
+     * {@code frontend/src/stores/workspace.ts#PAGE_LABELS} 逐项镜像，改动必须两侧同改。
+     */
+    public static final Map<String, String> PAGE_LABELS = Map.of(
+            "tasks", "任务中心",
+            "export", "导出向导",
+            "import", "导入向导",
+            "definitions", "配置定义",
+            "data", "数据浏览");
+
     /** 单个 extra 值序列化后的上限（字符）。 */
     public static final int EXTRA_VALUE_MAX_CHARS = 300;
 
@@ -64,7 +75,7 @@ public class ContextBuilder {
     public String buildContextMessage(AiContext ctx) {
         StringBuilder sb = new StringBuilder();
         sb.append("## 当前工作区状态\n");
-        sb.append("页面: ").append(ctx.getPage() != null && !ctx.getPage().isBlank() ? ctx.getPage() : "任务中心").append("\n");
+        sb.append("页面：").append(pageLabel(ctx.getPage())).append("\n");
 
         if (ctx.getTaskId() != null) {
             try {
@@ -98,6 +109,21 @@ public class ContextBuilder {
         }
 
         return sb.toString();
+    }
+
+    /**
+     * 页面行的中文渲染：已知 id → {@code 中文名（id）}；空/未上报 → {@code 任务中心}（既有回落，
+     * 保持"没有页面信息时按任务中心呈现"的口径）；未知 id → 原样回显（不猜中文名）。
+     *
+     * <p>裸 id（旧形态 {@code 页面: export}）对模型没有语义，故与 {@link #PAGE_LABELS} 同步露出中文名；
+     * 同时保留括号里的 id，避免"文案变了但排查口径跟着变"。
+     */
+    static String pageLabel(String page) {
+        if (page == null || page.isBlank()) {
+            return "任务中心";
+        }
+        String label = PAGE_LABELS.get(page);
+        return label == null ? page : label + "（" + page + "）";
     }
 
     /**

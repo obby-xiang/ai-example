@@ -71,7 +71,21 @@ class ContextBuilderExtraTest {
         assertThat(this.builder.renderExtra(Map.of("unknownKey", "v"))).isEmpty();
 
         String message = this.builder.buildContextMessage(AiContext.of("tasks", null, null, null, Map.of()));
-        assertThat(message).contains("页面: tasks").doesNotContain("额外上下文");
+        assertThat(message).contains("页面：任务中心（tasks）").doesNotContain("额外上下文");
+    }
+
+    @Test
+    void pageLabelMirrorsFrontendLabels() {
+        // 与 frontend/src/stores/workspace.ts#PAGE_LABELS 逐项镜像：中文名 + 括号里的裸 id
+        assertThat(ContextBuilder.pageLabel("tasks")).isEqualTo("任务中心（tasks）");
+        assertThat(ContextBuilder.pageLabel("export")).isEqualTo("导出向导（export）");
+        assertThat(ContextBuilder.pageLabel("import")).isEqualTo("导入向导（import）");
+        assertThat(ContextBuilder.pageLabel("definitions")).isEqualTo("配置定义（definitions）");
+        assertThat(ContextBuilder.pageLabel("data")).isEqualTo("数据浏览（data）");
+        // 空/未上报 → 既有回落文案（不带 id）；未知 id → 原样回显
+        assertThat(ContextBuilder.pageLabel(null)).isEqualTo("任务中心");
+        assertThat(ContextBuilder.pageLabel("  ")).isEqualTo("任务中心");
+        assertThat(ContextBuilder.pageLabel("reports")).isEqualTo("reports");
     }
 
     @Test
