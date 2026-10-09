@@ -273,21 +273,33 @@ async function loadDefinitions(): Promise<void> {
   }
 }
 
-async function loadTask(): Promise<void> {
+/** 任务详情与导出结果的加载结局（issue #2：跨任务执行器据此区分失败类型，给出不同文案）。 */
+interface TaskLoadOutcome {
+  /** 任务详情已加载（false ⇒ 任务不存在 / 请求失败） */
+  taskOk: boolean
+  /** 导出文件列表已读取（false ⇒ 列表请求失败；注意与"列表为空"是两回事） */
+  filesOk: boolean
+}
+
+async function loadTask(preloaded?: Task): Promise<TaskLoadOutcome> {
   if (taskId.value === null) {
-    return
+    return { taskOk: false, filesOk: false }
   }
-  try {
-    task.value = await tasksApi.getTask(taskId.value)
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '任务加载失败')
-    return
+  let loaded = preloaded ?? null
+  if (loaded === null) {
+    try {
+      loaded = await tasksApi.getTask(taskId.value)
+    } catch (error) {
+      ElMessage.error(error instanceof Error ? error.message : '任务加载失败')
+      return { taskOk: false, filesOk: false }
+    }
   }
-  selectedDefs.value = (task.value.items ?? []).map((item) => item.defCode)
-  for (const item of task.value.items ?? []) {
+  task.value = loaded
+  selectedDefs.value = (loaded.items ?? []).map((item) => item.defCode)
+  for (const item of loaded.items ?? []) {
     draftModels[item.defCode] = draftModelFromCondition(parseConditionJson(item.conditionJson))
   }
-  const restoredStep = STEP_KEYS.indexOf(task.value.currentStep as (typeof STEP_KEYS)[number])
+  const restoredStep = STEP_KEYS.indexOf(loaded.currentStep as (typeof STEP_KEYS)[number])
   stepIndex.value = restoredStep >= 0 ? restoredStep : 0
   workspace.enterPage({
     pageId: 'export',
@@ -295,16 +307,22 @@ async function loadTask(): Promise<void> {
     taskType: 'EXPORT',
     step: STEP_KEYS[stepIndex.value],
     taskId: taskId.value,
-    taskStatus: task.value.status,
+    taskStatus: loaded.status,
     selectedDefs: [...selectedDefs.value]
   })
-  await loadExistingResults()
+  return { taskOk: true, filesOk: await loadExistingResults() }
 }
 
-/** 恢复：任务里已存在的 EXPORT 文件即导出结果（刷新不丢）。 */
-async function loadExistingResults(): Promise<void> {
+/**
+ * 恢复：任务里已存在的 EXPORT 文件即导出结果（刷新不丢）。
+ *
+ * @returns true = 文件列表已成功读取（列表为空也算成功）；false = 未绑定任务或读取失败。
+ *   issue #2：调用方必须分清"目标任务确实没有导出文件"与"文件列表根本没读到"——
+ *   后者若被当成空列表，就会给出假阴性（"暂无导出结果文件"）；沿用它任务的旧列表，则更糟。
+ */
+async function loadExistingResults(): Promise<boolean> {
   if (taskId.value === null) {
-    return
+    return false
   }
   try {
     const files: TaskFile[] = await tasksApi.getFiles(taskId.value)
@@ -320,8 +338,87 @@ async function loadExistingResults(): Promise<void> {
       await nextTick()
       await ensureGridLoaded(activeTab.value)
     }
+    return true
   } catch {
     // 文件列表失败不影响向导本身（可能只是还没导出过）
+    return false
+  }
+}
+
+/**
+ * 换任务时的页面态清理（issue #2）：上一个任务的导出结果/勾选/激活标签/表格缓存一律不带到目标任务上。
+ *
+ * `loadedGrids` 必须清：`ensureGridLoaded` 拿它当"已加载"判据，跨任务遇到同名 defCode
+ * （如两个任务都有 CURRENCY）时会直接跳过加载，编辑器里就还是**上一个任务**的字节
+ * —— 与 issue 同源的"说 A 实际给 B"。
+ *
+ * R2（红队 S2）：清之前先看 `gridDirty` —— 未保存的在线编辑会随本次切换**丢弃**，
+ * 必须显式提醒（READ 风险级的 open/download 不该静默吃掉用户数据）；只提醒、不阻断
+ * （README 语义：READ 工具不加阻断门）。提醒后把 `gridDirty` 归零：内容确实已被丢弃，
+ * 留着它只会在组件卸载时再报一次"有未保存编辑"的假警报。
+ */
+function resetTaskScopedState(): void {
+  if (gridDirty) {
+    ElMessage.warning('表格有未保存的在线编辑内容，本次切换任务已丢弃这些改动（可先用「保存编辑到服务端」写回再切换）')
+    gridDirty = false
+  }
+  exportResults.value = []
+  checkedDefs.value = []
+  activeTab.value = ''
+  loadedGrids.clear()
+}
+
+/**
+ * R3（红队 S3）：改绑时停掉**上一个任务**的作业跟踪并清空作业面板。
+ *
+ * 为什么必须做：`stopWatchJob` 原先只在组件卸载或新作业启动时调用，旧 watcher 会跨改绑继续
+ * 轮询旧作业，其 `onFinal → refreshResults` 还会按**新** taskId 重载并 `loadedGrids.clear()`
+ * ——既把新任务的未保存编辑冲掉，又在界面上显示另一个任务的作业号/进度。
+ */
+function stopJobWatchForTaskSwitch(): void {
+  stopWatchJob?.()
+  stopWatchJob = null
+  exportJob.value = null
+  currentIssues.value = []
+  channelState.value = null
+}
+
+/**
+ * 在途任务绑定记录（R1，红队 S2）。
+ *
+ * 为什么需要：绑定的"完成"由两方各自判据。`navigate_to` 侧等的是 `waitForTaskBound`
+ * （只认 `workspace.taskId`），它在**同步绑定的那一刻**就放行；而本页的 `loadTask` /
+ * `loadExistingResults` 还在路上。此窗口内同任务的 `open`/`download` 若因
+ * `target === taskId.value` 直接放行，读到的就是刚被清空的 `exportResults=[]` ——
+ * 报出"该任务现有导出结果：（无）"这种**带着任务号、更具误导性的假阴性**（探针实测）。
+ */
+let inFlightBinding: { taskId: number; promise: Promise<TaskLoadOutcome> } | null = null
+
+/**
+ * 绑定目标任务并**等详情与导出结果加载完**（issue #1 的 watch 与 issue #2 的跨任务执行器共用这一条链路）。
+ *
+ * 顺序与 `onMounted` 一致：先同步改绑（workspace + 路由 query），再拉详情与文件列表。
+ * 返回加载结局供调用方判定（执行器在读 `exportResults` 之前必须拿到这个结论）；
+ * 同时把"在途"登记进 {@link inFlightBinding}，供**由他人发起**绑定的场景（watch 路径）
+ * 在紧随的动作里等待（R1）。
+ */
+async function applyTaskBinding(id: number, preloaded?: Task): Promise<TaskLoadOutcome> {
+  resetTaskScopedState()
+  stopJobWatchForTaskSwitch()
+  taskId.value = id
+  workspace.setTaskId(id, 'EXPORT', null)
+  const promise = (async (): Promise<TaskLoadOutcome> => {
+    await router.replace({ name: 'export-wizard', query: { taskId: String(id) } })
+    return await loadTask(preloaded)
+  })()
+  inFlightBinding = { taskId: id, promise }
+  try {
+    return await promise
+  } finally {
+    // 只清理自己那一次登记（交错时会话已被后一次覆盖，不能误清别人）
+    if (inFlightBinding?.promise === promise) {
+      inFlightBinding = null
+    }
   }
 }
 
@@ -671,6 +768,78 @@ const HANDLER_NAMES = [
   PAGE_HANDLER_OPEN_EXPORT_EDITOR
 ]
 
+/** 跨任务绑定的结局（供两个执行器给出互相可区分、对 AI 可行动的文案）。 */
+type ToolTaskGate = { ok: true; switched: boolean } | { ok: false; message: string }
+
+/**
+ * issue #2：AI 传进来的 `taskId` 可能**不是**当前页面绑定的任务（"帮我打开任务 1 的导出文件编辑器"）。
+ *
+ * 执行器若直接读 `exportResults`，读到的永远是**当前任务**的页面状态，于是同一句调用有两种坏结局
+ * （均已在真实浏览器探针里复现）：
+ * - 目标任务有文件、当前任务没有 ⇒ 假阴性："暂无导出结果文件，请先完成导出"（issue 原文）；
+ * - 当前任务恰好有**同名配置**的导出文件 ⇒ 张冠李戴：打开了另一个任务的同名文件却回灌成功。
+ *
+ * 因此：不一致时先完成绑定与导出结果加载（复用 issue #1 的绑定链路 {@link applyTaskBinding}），
+ * 再做 `exportResults` 检查。三类失败互不相同：
+ * 1. 未提供有效 taskId ⇒ 沿用当前绑定（与改动前一致，不误伤只传 defCode 的调用）；
+ * 2. 任务不存在/加载不了 ⇒ **不改绑、不改路由**，向导停在原任务，AI 应改用 list_tasks 核对；
+ * 3. 已切换但文件列表读取失败 ⇒ 已改绑，但结论不可用，AI 应稍后重试或让用户在界面上确认。
+ *
+ * R1（红队 S2）：`target === taskId.value` **不代表加载已完成** —— 同一 id 的绑定可能是
+ * 由 watch（`navigate_to`）刚发起的、仍在途；此处先 `await` 那次在途绑定再放行。
+ * 异 id 的在途绑定按既有竞态口径处理（本批不新增序号守卫，R5 已合并 issue #1 遗留排期）。
+ */
+async function ensureTaskBoundForTool(rawTaskId: unknown): Promise<ToolTaskGate> {
+  const parsed = typeof rawTaskId === 'number' ? rawTaskId : Number(rawTaskId)
+  const target = Number.isFinite(parsed) && Math.trunc(parsed) > 0 ? Math.trunc(parsed) : null
+  if (target === null || target === taskId.value) {
+    const pending = inFlightBinding
+    if (pending !== null && pending.taskId === target) {
+      const outcome = await pending.promise
+      if (!outcome.taskOk) {
+        return {
+          ok: false,
+          message: `任务 #${target} 的绑定没有完成（任务不可加载）：未执行本动作`
+            + `。请用 list_tasks 核对任务号后重试，或提示用户在任务中心打开目标任务`
+        }
+      }
+      if (!outcome.filesOk) {
+        return { ok: false, message: filesLoadFailedMessage(target) }
+      }
+    }
+    return { ok: true, switched: false }
+  }
+  let preloaded: Task
+  try {
+    preloaded = await tasksApi.getTask(target)
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    const current = taskId.value === null ? '未绑定任务' : `绑定任务 #${taskId.value}`
+    return {
+      ok: false,
+      message: `任务 #${target} 无法加载（${reason}）：未切换向导，当前仍${current}。`
+        + `请用 list_tasks 核对任务号后重试，或提示用户在任务中心打开目标任务`
+    }
+  }
+  const outcome = await applyTaskBinding(target, preloaded)
+  if (!outcome.filesOk) {
+    return { ok: false, message: filesLoadFailedMessage(target) }
+  }
+  return { ok: true, switched: true }
+}
+
+/** 文件列表读取失败（"已切换但结论不可用"）的统一文案。 */
+function filesLoadFailedMessage(taskId: number): string {
+  return `已切换到任务 #${taskId}，但它的导出文件列表读取失败（无法确认文件是否就绪）`
+    + '。请稍后重试，或提示用户在任务中心打开该任务确认导出结果'
+}
+
+/** 目标任务里没有该配置的导出结果时的可区分文案（带上究竟是哪个任务、现有结果有哪些）。 */
+function noResultMessage(defCode: string): string {
+  const existing = exportResults.value.map((item) => item.defCode).join('、')
+  return `任务 #${taskId.value} 里没有 ${defCode} 的导出结果文件（该任务现有导出结果：${existing || '（无）'}）`
+}
+
 function registerHandlers(): void {
   // 补丁②：AI 工作区动作 confirm_step 的页面实现（推进到下一步；与用户点「下一步」同路径）
   registerPageHandler('export.nextStep', (payload) => {
@@ -729,8 +898,13 @@ function registerHandlers(): void {
     if (!defCode) {
       return '缺少 defCode，无法打开在线编辑器'
     }
+    // issue #2：payload.taskId 可能不是当前绑定的任务，先把目标任务绑定好再读 exportResults
+    const gate = await ensureTaskBoundForTool(payload.taskId)
+    if (!gate.ok) {
+      throw new Error(`${gate.message}。${defCode} 的在线编辑器未打开`)
+    }
     if (!exportResults.value.some((item) => item.defCode === defCode)) {
-      return `${defCode} 暂无导出结果文件，请先完成导出`
+      throw new Error(`${noResultMessage(defCode)}。请在任务 #${taskId.value} 上完成 ${defCode} 的导出后重试，或核对传入的 taskId 与 defCode；本次未打开在线编辑器`)
     }
     if (stepIndex.value !== 2) {
       goStep(2)
@@ -738,7 +912,7 @@ function registerHandlers(): void {
     activeTab.value = defCode
     await nextTick()
     await ensureGridLoaded(defCode)
-    return `已打开 ${defCode} 的在线编辑器（导出结果表格）`
+    return `已打开任务 #${taskId.value} 的 ${defCode} 在线编辑器（导出结果表格）`
   })
 
   // 前端工具 download_export_file：副作用在浏览器，必须由页面执行器完成
@@ -747,11 +921,19 @@ function registerHandlers(): void {
     if (!defCode) {
       throw new Error('缺少 defCode')
     }
+    // issue #2：与 open 执行器同因同修 —— 否则会拿**当前任务**（或当前任务里同名配置）的文件去下载
+    const gate = await ensureTaskBoundForTool(call.args.taskId)
+    if (!gate.ok) {
+      throw new Error(`${gate.message}。${defCode} 的导出文件未下载`)
+    }
+    if (!exportResults.value.some((item) => item.defCode === defCode)) {
+      throw new Error(`${noResultMessage(defCode)}。请在任务 #${taskId.value} 上完成 ${defCode} 的导出后重试，或核对传入的 taskId 与 defCode；本次未触发下载`)
+    }
     if (stepIndex.value !== 2) {
       goStep(2)
     }
     await downloadOne(defCode)
-    return `已触发下载 ${defCode} 的导出文件（在线编辑后的内容）`
+    return `已触发下载任务 #${taskId.value} 的 ${defCode} 导出文件（在线编辑后的内容）`
   })
 }
 
@@ -794,7 +976,8 @@ async function createAndBindTask(): Promise<void> {
  * 必须由本页自己跟上 —— 否则 URL 已带 `?taskId=N` 而 `workspace.taskId` 仍是 null，
  * 紧随的 `select_definitions` 会被 needsTask 判成"当前没有进行中的任务"（实测复现）。
  *
- * 先同步绑定 workspace（与 onMounted 同序），再拉任务详情：AI 侧的"绑定完成"判据因此立刻成立，
+ * 绑定走 {@link applyTaskBinding}（与 issue #2 的跨任务执行器同一条链路）：先同步绑 workspace
+ * （与 onMounted 同序），再拉详情与导出结果；AI 侧的"绑定完成"判据因此立刻成立，
  * 不必等 `/tasks/{id}` 回来（详情慢或失败时，向导自身的空/错误态照旧展示）。
  * query 变为无 taskId 时不动绑定（导航回同一向导不该把已打开的任务清掉）。
  */
@@ -806,9 +989,7 @@ watch(
     if (id === null || id === taskId.value) {
       return
     }
-    taskId.value = id
-    workspace.setTaskId(id, 'EXPORT', null)
-    await loadTask()
+    await applyTaskBinding(id)
   }
 )
 
