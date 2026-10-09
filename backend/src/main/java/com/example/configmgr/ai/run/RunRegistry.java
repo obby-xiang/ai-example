@@ -69,8 +69,10 @@ public class RunRegistry {
 	public SseChatEmitter of(String runId) {
 		int queueCapacity = this.properties != null ? this.properties.getSse().getDeliveryQueueCapacity()
 				: AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY;
+		int maxFrameBytes = this.properties != null ? this.properties.getFrame().getMaxBytes()
+				: AiProperties.Frame.DEFAULT_MAX_BYTES;
 		return this.emitters.computeIfAbsent(runId, id -> new SseChatEmitter(id, this.store, this.objectMapper,
-				this.deliveryExecutor, queueCapacity));
+				this.deliveryExecutor, queueCapacity, maxFrameBytes));
 	}
 
 	/** 只在已有写出器时返回（避免"查一下"就凭空造出一个）。 */

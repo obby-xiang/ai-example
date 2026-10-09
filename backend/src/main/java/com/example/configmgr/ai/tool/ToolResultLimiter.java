@@ -14,8 +14,12 @@ import org.springframework.stereotype.Component;
  * {@code run/ResumeService}（续跑重建历史时按台账 {@code resultText} 重建），
  * 两处同源，不会出现"续跑后的历史比首轮长/短"的口径分叉；</li>
  * <li><b>给前端看的</b>：SSE {@code tool_result} 帧与 Redis 台账的 {@code resultText} ——
- * <b>全文不裁剪</b>（前端要展示完整结果、账本是"结果的事实源"；模型侧上限是上下文成本问题，
- * 不是数据完备性问题）。</li>
+ * 本类<b>不裁剪</b>（模型侧上限是上下文成本问题，不是数据完备性问题）。
+ * <b>T3-10 起该承诺有上限</b>：前端帧受<b>单帧字节上限</b>
+ * （{@code app.ai.frame.max-bytes}，裁定 64KB）约束 —— 超限时由
+ * {@link com.example.configmgr.ai.run.FrameSizeLimiter} 对 {@code text}/{@code result}
+ * 做<b>字段级</b>截断并挂 {@code truncated}/{@code truncatedReason} 标记
+ * （仍绝不整帧字段丢失、绝不字节级截断）；台账 {@code resultText} 不受该上限约束（账本仍是全文事实源）。</li>
  * </ul>
  *
  * <h2>截断必须可被模型看见</h2>
@@ -66,7 +70,8 @@ public class ToolResultLimiter {
 
 	private static String marker(int rows, int chars, String kept) {
 		return TRUNCATION_MARKER + "原 " + rows + " 行 / " + chars + " 字符，" + kept
-				+ "；完整结果见本轮工具调用记录（前端帧与台账不截断）。如需更多细节，请缩小查询范围或分页获取。]";
+				+ "；完整结果见本轮工具调用记录（前端帧受单帧字节上限约束、台账为全文；"
+				+ "T3-10 口径）。如需更多细节，请缩小查询范围或分页获取。]";
 	}
 
 	/**

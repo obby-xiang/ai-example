@@ -110,6 +110,15 @@ public class SseChatEmitter {
 	/** T3-1：每订阅者实时队列容量（回放批豁免，见类注）。 */
 	private final int queueCapacity;
 
+	/**
+	 * T3-10：单帧 JSON 的 UTF-8 字节上限（{@code app.ai.frame.max-bytes}，裁定 64KB）。
+	 *
+	 * <p>出帧路径在"取号 → 落档 → 入队"之前调用 {@link FrameSizeLimiter#apply}：
+	 * 超限帧按<b>字段级</b>截断并挂 {@code truncated}/{@code truncatedReason}，
+	 * 归档与投递拿到的是同一份截断后帧（重挂回放与实时流不会分叉）。
+	 */
+	private final int maxFrameBytes;
+
 	/** T3-1：订阅者 = emitter + 有界队列 + CAS drain 独占标志。 */
 	private final List<Subscription> subscribers = new CopyOnWriteArrayList<>();
 
@@ -164,17 +173,29 @@ public class SseChatEmitter {
 	private final AtomicBoolean terminating = new AtomicBoolean(false);
 
 	public SseChatEmitter(String runId, RunStore store, ObjectMapper objectMapper) {
-		this(runId, store, objectMapper, Runnable::run, AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY);
+		this(runId, store, objectMapper, Runnable::run, AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY,
+				AiProperties.Frame.DEFAULT_MAX_BYTES);
 	}
 
 	public SseChatEmitter(String runId, RunStore store, ObjectMapper objectMapper, Executor deliveryExecutor,
 			int queueCapacity) {
+		this(runId, store, objectMapper, deliveryExecutor, queueCapacity, AiProperties.Frame.DEFAULT_MAX_BYTES);
+	}
+
+	public SseChatEmitter(String runId, RunStore store, ObjectMapper objectMapper, Executor deliveryExecutor,
+			int queueCapacity, int maxFrameBytes) {
 		this.runId = runId;
 		this.store = store;
 		this.objectMapper = objectMapper;
 		this.deliveryExecutor = deliveryExecutor;
 		this.queueCapacity = queueCapacity;
+		this.maxFrameBytes = maxFrameBytes;
 		this.assistantMessageId = "assistant-" + runId;
+	}
+
+	/** 本写出器的单帧字节上限（供断言与诊断；单一事实源 = {@code app.ai.frame.max-bytes}）。 */
+	int maxFrameBytes() {
+		return this.maxFrameBytes;
 	}
 
 	/**
@@ -636,6 +657,7 @@ public class SseChatEmitter {
 		// 决策与回灌）并发出帧时，订阅者队列里的先后与 seq 的先后必然一致；网络写出在锁外
 		// 由投递池异步完成（T3-1 慢订阅者隔离），单订阅者 FIFO 由 CAS drain 独占标志保证。
 		synchronized (this.emitLock) {
+			final byte[] payloadBytes;
 			if (RunStore.HEARTBEAT_TYPE.equals(String.valueOf(frame.get("type")))) {
 				// T7：心跳照常广播（下面的 subscribers），但不进归档窗口 —— 只留一个轻量活动戳，
 				// 让"这轮最近有过活动"仍可跨进程判定（僵尸判据的输入）。归档侧的同类跳过见
@@ -644,9 +666,27 @@ public class SseChatEmitter {
 				// （跨进程续号锚点）恒等于已发放过的最大业务号，心跳永远不会把它顶到前面去。
 				frame.put("heartbeatSeq", this.heartbeatSeq.incrementAndGet());
 				this.store.touchActivity(this.runId);
+				try {
+					payloadBytes = this.objectMapper.writeValueAsBytes(frame);
+				}
+				catch (Exception ex) {
+					log.error("SSE 帧序列化失败 runId={} type={}: {}", this.runId, frame.get("type"), ex.getMessage());
+					return;
+				}
 			}
 			else {
 				frame.put("seq", nextSeq());
+				// T3-10：单帧上限的字段级截断在"取号<b>之后</b>、落档与入队之前"——
+				// 判定口径是<b>整帧</b>（含 seq）的 UTF-8 字节数（A19），故必须先补 seq 再判；
+				// 归档与投递据此拿到同一份帧（否则重挂回放与实时流会分叉）。
+				// 返回值即最终负载（未超限时复用同一次序列化，不重复算）。
+				// 心跳帧不在此列：它没有 text/result，负载由常量字段构成（事件载荷固定小）。
+				payloadBytes = FrameSizeLimiter.apply(frame, this.objectMapper, this.maxFrameBytes);
+				if (payloadBytes == null) {
+					// 序列化失败：帧不进归档、不发订阅者（与 T3-1"锁内只做取号/落档/入队"同口径）
+					log.error("SSE 帧序列化失败 runId={} type={}（本帧已跳过）", this.runId, frame.get("type"));
+					return;
+				}
 				this.store.appendEvent(this.runId, frame);
 			}
 			if (this.subscribers.isEmpty() || this.terminating.get()) {
@@ -654,15 +694,7 @@ public class SseChatEmitter {
 				// 否则终态之后的新帧会把各 drain 的"排空"无限推迟，收尾永远等不到队空。
 				return;
 			}
-			final String payload;
-			try {
-				payload = this.objectMapper.writeValueAsString(frame);
-			}
-			catch (Exception ex) {
-				// 序列化失败不再阻断其他订阅者（T3-1：锁内只做取号/落档/入队）
-				log.error("SSE 帧序列化失败 runId={} type={}: {}", this.runId, frame.get("type"), ex.getMessage());
-				return;
-			}
+			final String payload = new String(payloadBytes, java.nio.charset.StandardCharsets.UTF_8);
 			for (Subscription sub : this.subscribers) {
 				if (sub.closed) {
 					// S3-1：生命周期回调已清理该订阅者（COW 快照与摘除的窄窗）—— 不再入队、不再抢 drain
