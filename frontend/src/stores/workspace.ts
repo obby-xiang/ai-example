@@ -172,13 +172,20 @@ export const useWorkspaceStore = defineStore('workspace', {
       this.touch(taskId === null ? '解除任务绑定' : `绑定任务 #${taskId}`)
     },
 
-    setSelectedDefs(codes: string[], mode: 'REPLACE' | 'ADD' = 'REPLACE'): void {
+    /**
+     * 选中集写入（唯一写入口）。
+     *
+     * @param source 动作来源：页面把用户手点记为「界面」（默认，与改动前一致），
+     *   AI 经页面 handler 驱动的写入记「AI」—— 面板 chip 与 `recentActions` 展示该来源，
+     *   标错会让模型以为"用户自己点的"。可选参数，既有 3 个调用点无需改动。
+     */
+    setSelectedDefs(codes: string[], mode: 'REPLACE' | 'ADD' = 'REPLACE', source: WorkspaceActionSource = '界面'): void {
       if (mode === 'ADD') {
         this.selectedDefs = Array.from(new Set([...this.selectedDefs, ...codes]))
       } else {
         this.selectedDefs = [...codes]
       }
-      this.touch(`已选择配置项：${this.selectedDefs.join('、') || '（空）'}`)
+      this.touch(`已选择配置项：${this.selectedDefs.join('、') || '（空）'}`, source)
     },
 
     setQueryConditions(defCode: string, conditions: QueryCondition | unknown): void {

@@ -150,6 +150,7 @@ import {
 import type { ConfigDefinition, ConfigField } from '@/types/definition'
 import type { Job, ValidationIssue } from '@/types/job'
 import { TaskSteps, type Task, type TaskFile } from '@/types/task'
+import type { WorkspaceActionSource } from '@/types/tools'
 import {
   downloadBlob,
   xlsxFileName,
@@ -234,6 +235,33 @@ const jobErrorMessage = computed(() => {
   const first = currentIssues.value.find((issue) => issue.severity === 'ERROR')
   return first ? first.message : `导出作业失败（错误 ${exportJob.value.errorCount} 条），请查看下方明细`
 })
+
+// ── 选中集 → 工作区（issue #3：本页唯一写入口） ────────────────────────────────
+
+/**
+ * 把页面选中集收敛进 workspace（AI 上下文 `extra.selectedDefs` 的唯一来源）。
+ *
+ * 为什么需要：手动勾选（`DefSelector` 的 v-model）与 AI 的 `select_definitions` 页面 handler
+ * 此前都只改本页 `selectedDefs` ref，`workspace.selectedDefs` 仍停在 `enterPage` 时的值 ⇒
+ * `buildContext().extra.selectedDefs` 永远滞后，模型看不到"用户刚勾了什么"（issue #3 根因）。
+ *
+ * **相等短路**（幂等收敛）：程序性恢复时 `loadTask` 在同一同步块内先赋 ref、紧接着
+ * `enterPage({selectedDefs})`，watch 回调（flush: 'pre'）必然在其之后执行 ⇒ 此时工作区已等于
+ * 页面值 ⇒ 短路，不重复 touch（否则每次恢复任务都会多记一条"界面"假动作、版本多 +1）。
+ * 真实变化（手动勾选/减选、AI handler）才写入，并记入 `recentActions` 供模型感知。
+ *
+ * 比较按**集合**（顺序不敏感，裁决⑤）：同一集合仅顺序不同（表格行序 vs 任务 items 序）不算变化。
+ * 本函数**不**调 `tasksApi.selectDefs`：逐个勾选都落库会把后端 `currentStep` 强制回退到
+ * 选择步（遗留 L-1，已登记），落库仍只发生在切步/开始导出时的 `persistStepData`。
+ */
+function syncSelectedDefsToWorkspace(source: WorkspaceActionSource = '界面'): void {
+  const codes = [...selectedDefs.value]
+  const current = new Set(workspace.selectedDefs)
+  if (current.size === codes.length && codes.every((code) => current.has(code))) {
+    return
+  }
+  workspace.setSelectedDefs(codes, 'REPLACE', source)
+}
 
 function readTaskId(): number | null {
   const raw = Number(route.query.taskId)
@@ -483,7 +511,8 @@ async function persistStepData(): Promise<void> {
       await tasksApi.setCondition(taskId.value, code, stringifyCondition(condition))
     }
     task.value = await tasksApi.getTask(taskId.value)
-    workspace.setSelectedDefs([...selectedDefs.value])
+    // issue #3：与 watch / AI handler 共用同一收敛点（此处落库后工作区通常已相等 ⇒ 短路，不重复记动作）
+    syncSelectedDefsToWorkspace()
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '保存选择与条件失败')
   } finally {
@@ -858,6 +887,9 @@ function registerHandlers(): void {
     for (const code of codes) {
       draftModels[code] = draftModels[code] ?? emptyDraftModel()
     }
+    // issue #3：AI 走的是 handler 分支（`runPageHandler` 无 store 副作用），必须显式收敛；
+    // 用 'AI' 保住来源（watch 随后比较已相等 ⇒ 短路，不会多记一条"界面"假动作）。
+    syncSelectedDefsToWorkspace('AI')
     return `已选择配置项：${selectedDefs.value.join('、') || '（空）'}`
   })
 
@@ -993,11 +1025,12 @@ watch(
   }
 )
 
-// 选中集变化时补齐条件模型（避免第 2 步出现未初始化卡片）
+// 选中集变化：补齐条件模型（避免第 2 步出现未初始化卡片）+ 收敛进工作区（issue #3）
 watch(selectedDefs, (codes) => {
   for (const code of codes) {
     draftModels[code] = draftModels[code] ?? emptyDraftModel()
   }
+  syncSelectedDefsToWorkspace()
 })
 
 /**
