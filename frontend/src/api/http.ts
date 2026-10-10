@@ -80,9 +80,31 @@ function normalizeError(error: unknown): ApiError {
   return new ApiError('未知错误', 0, FRONTEND_ERROR_CODES.UNKNOWN_ERROR, error)
 }
 
+/**
+ * 全部 axios 请求的单次上限（毫秒）。
+ *
+ * 取值依据（业界依据 §1「HTTP 客户端超时（connect / read / write）」）：axios 官方源码缺省
+ * `timeout: 0` = **不超时**（`lib/defaults/index.js`，是所有主流客户端里唯一"必须显式设置"的），
+ * 故本值不可省；同节对内网企业应用给出的推荐区间是**整体 callTimeout 60–120s**
+ * （对照：OkHttp 缺省 10/10/10s、AWS SDK for Java 2.x 官方示例 connect 5s / socket 30s、
+ * OpenAI/Anthropic SDK 整体 600s）。本项目取区间**下限 60s**：内网直连、响应短，
+ * 长响应走 SSE 通道（`api/sse.ts` 自有 90s 帧间静默 + 15s 建连看门狗），不占本上限。
+ *
+ * **本值不是新值**：原为 create 配置里的内联字面量 `timeout: 60000`，取值零变化；2026-10-10 数字规格
+ * 清点裁决① 对它只做"值保留 + 命名常量化 + 补本注释"，故不属行为变更。
+ *
+ * 它同时是另外三个前端超时常量的**对齐根**：回灌 POST 的最坏耗时
+ * （`utils/frontend-tools.ts` 的 `FRONTEND_TOOL_RESULT_HEADROOM_MS`）、表格引擎就绪
+ * （`components/SpreadGrid.vue` 的 `READY_TIMEOUT_MS`）、下载拉取
+ * （`stores/workspace.ts` 的 `DOWNLOAD_FETCH_TIMEOUT_MS`）。**改本值须同批复核这三处**
+ * —— 三者目前仍是各自独立的常量、仅在注释里与本值对齐；改成 `import { HTTP_TIMEOUT_MS }` 的
+ * 代码同源形态是下一步候选，2026-10-10 已按裁决登记，本批不做（那两个文件本批不在改动面）。
+ */
+export const HTTP_TIMEOUT_MS = 60_000
+
 export const http: AxiosInstance = axios.create({
   baseURL: '/api',
-  timeout: 60000
+  timeout: HTTP_TIMEOUT_MS
 })
 
 http.interceptors.response.use(
