@@ -46,6 +46,12 @@ import java.util.concurrent.atomic.AtomicLong;
  * <b>出帧串行（S5c-3）</b>：取号、落归档、入队在同一 {@code emitLock} 内完成，
  * 多线程出帧的到达顺序与 seq 顺序一致。
  *
+ * <p>
+ * <b>帧时间戳口径（T4-3 后半）</b>：每帧在 {@link #frame} 构造时就带 {@code atMs}
+ * （服务端钟 epoch 毫秒），因此<b>实时投递帧与归档帧都含</b> {@code atMs}；挂起类的
+ * {@code expiresAt} 与同一帧的 {@code atMs} 同钟单点取值，二者之差恒等于 {@code timeoutSeconds}
+ * —— 前端据此按"服务端剩余时长"折算本地倒计时，免疫客户端钟漂移。
+ *
  * <h2>T3-1 慢订阅者隔离（R1 裁决 + 施工注记 R2/R3）</h2>
  * {@code emitLock} 内只保留：取号、落归档、{@code touchActivity}（S3-9：必须留锁内同步，
  * 否则僵尸判定输入随投递延迟漂移）、<b>帧入各订阅者队列</b>。网络写出全部走
@@ -522,7 +528,7 @@ public class SseChatEmitter {
 		frame.put("args", pending.getArguments());
 		frame.put("summary", pending.getArguments());
 		frame.put("timeoutSeconds", timeoutSeconds);
-		frame.put("expiresAt", expiresAtEpochMs(timeoutSeconds));
+		frame.put("expiresAt", expiresAtEpochMs(frame, timeoutSeconds));
 		frame.put("callback", "POST /api/ai/confirm {runId, toolCallId, approved, reason}");
 		emit(frame);
 	}
@@ -546,8 +552,9 @@ public class SseChatEmitter {
 		frame.put("args", pending.getArguments());
 		frame.put("timeoutSeconds", timeoutSeconds);
 		// T4 同口径（纯增量）：前端工具挂起与确认门共用同一个等待上限，绝对时钟一并给出，
-		// 前端不必用本地 "120s 常量" 推断到期时刻。
-		frame.put("expiresAt", expiresAtEpochMs(timeoutSeconds));
+		// 前端不必用本地 "120s 常量" 推断到期时刻。T4-3 后半起与帧内 atMs 同钟取值（见
+		// expiresAtEpochMs）：expiresAt − atMs 精确等于 timeoutSeconds * 1000L。
+		frame.put("expiresAt", expiresAtEpochMs(frame, timeoutSeconds));
 		frame.put("callback", "POST /api/ai/frontend-tool-result {runId, toolCallId, result}");
 		emit(frame);
 	}
@@ -607,9 +614,19 @@ public class SseChatEmitter {
 
 	// ── 内部 ────────────────────────────────────────────────────────────────
 
+	/**
+	 * 帧骨架：{@code type} + {@code atMs}（T4-3 后半）。
+	 *
+	 * <p>
+	 * {@code atMs} 在<b>帧构造时刻</b>取值 —— 帧一出生就带，故实时投递（{@link #emit} 里的
+	 * 序列化）与归档（{@link RunStore#appendEvent}）拿到的是同一个值；与 {@code expiresAt}
+	 * 同一取钟口径（见 {@link #expiresAtEpochMs}），二者之差恒等于 {@code timeoutSeconds}。
+	 * {@code RunStore#appendEvent} 的 {@code putIfAbsent} 自此只是兜底（旧格式帧/直接落档方）。
+	 */
 	private Map<String, Object> frame(String type) {
 		Map<String, Object> frame = new LinkedHashMap<>();
 		frame.put("type", type);
+		frame.put("atMs", System.currentTimeMillis());
 		return frame;
 	}
 
@@ -653,6 +670,8 @@ public class SseChatEmitter {
 
 	private void emit(Map<String, Object> frame) {
 		frame.putIfAbsent("runId", this.runId);
+		// T4-3 后半：atMs 已在 frame() 里定型（帧构造时刻），故这一份帧的序列化原文与落档副本
+		// atMs 同值；RunStore#appendEvent 的 putIfAbsent 只对"绕过 frame() 的直塞帧"生效（兜底）。
 		// S5c-3：取号 → 落归档 → 入队在同一把锁内完成 —— 多线程（运行线程的心跳 / HTTP 线程的
 		// 决策与回灌）并发出帧时，订阅者队列里的先后与 seq 的先后必然一致；网络写出在锁外
 		// 由投递池异步完成（T3-1 慢订阅者隔离），单订阅者 FIFO 由 CAS drain 独占标志保证。
@@ -873,9 +892,18 @@ public class SseChatEmitter {
 		}
 	}
 
-	/** T4：挂起等待的绝对到期时刻（= 本帧生成时刻 + 等待上限）。 */
-	private static long expiresAtEpochMs(int timeoutSeconds) {
-		return System.currentTimeMillis() + Math.max(0, timeoutSeconds) * 1000L;
+	/**
+	 * T4/T4-3：挂起等待的绝对到期时刻 = <b>本帧构造时刻的 {@code atMs}</b> + 等待上限。
+	 *
+	 * <p>
+	 * 与 {@code atMs} 同钟单点取值（不另取 {@code System.currentTimeMillis()}），故对任意
+	 * TOCTOU 都恒有 {@code expiresAt - atMs == timeoutSeconds * 1000L}（long 精确等式），
+	 * 前端 {@code expiresAt - atMs} 折算的剩余时长不会被帧内两次取钟的毫秒差污染。
+	 */
+	private static long expiresAtEpochMs(Map<String, Object> frame, int timeoutSeconds) {
+		Object atMs = frame.get("atMs");
+		long base = atMs instanceof Number number ? number.longValue() : System.currentTimeMillis();
+		return base + Math.max(0, timeoutSeconds) * 1000L;
 	}
 
 	/** T5：工具结果消息的身份（结果铸为消息）—— 由 toolCallId 确定性派生，重放/重挂不变。 */

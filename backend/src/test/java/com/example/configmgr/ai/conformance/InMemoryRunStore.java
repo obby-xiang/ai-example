@@ -327,6 +327,8 @@ public class InMemoryRunStore extends RunStore {
 			return;
 		}
 		Map<String, Object> copy = new LinkedHashMap<>(frame);
+		// T4-3 后半：atMs 主赋值在 SseChatEmitter#frame（帧构造时刻），此处 putIfAbsent 仅为
+		// 与真实 RunStore#appendEvent 的兜底语义保持镜像（直塞帧才走这里）。
 		copy.putIfAbsent("atMs", System.currentTimeMillis());
 		eventList(runId).add(copy);
 	}
