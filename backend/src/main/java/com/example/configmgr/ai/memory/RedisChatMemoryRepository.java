@@ -32,8 +32,8 @@ import org.springframework.data.redis.core.StringRedisTemplate;
  * <ul>
  * <li>{@code chat:mem:<conversationId>} — Redis LIST，每个元素是一条 JSON 消息
  * （格式见 {@link MessageJsonCodec}）。</li>
- * <li>{@code chat:mem:__ids__} — Redis SET，会话 id 索引，供 {@link #findConversationIds()} 使用；
- * 读取时惰性剔除已过期的会话 id（见 {@link #findConversationIds()}）。</li>
+ * <li>{@code chat:mem:__ids__} — Redis SET，会话 id 索引，供 {@link #findConversationIds()}（列全部 +
+ * 惰性剔除已过期者）与 {@link #isConversationIndexed(String)}（单点判存）使用。</li>
  * </ul>
  *
  * <h2>语义</h2>
@@ -104,6 +104,19 @@ public class RedisChatMemoryRepository implements ChatMemoryRepository {
 			this.redis.opsForSet().remove(CONVERSATION_IDS_KEY, expired.toArray());
 		}
 		return live;
+	}
+
+	/**
+	 * 该会话 id 是否仍在本仓储的会话 id 索引（{@code chat:mem:__ids__}）内 —— 单次 {@code SISMEMBER}。
+	 *
+	 * <p>
+	 * 存在的理由：{@link #findConversationIds()} 是 SPI 契约「列出**全部**存活 id」，实现是
+	 * {@code SMEMBERS} + 逐 id 一次 {@code EXISTS} 的惰性清理；调用方若只想判定**某一个** id
+	 * （如 {@code DELETE /api/ai/history/{sessionId}} 的 {@code removedFromIndex}），
+	 * 用它会带来 N 倍 Redis 往返。本方法是那种"单点判定"的正解，不触发任何清理副作用。
+	 */
+	public boolean isConversationIndexed(String conversationId) {
+		return Boolean.TRUE.equals(this.redis.opsForSet().isMember(CONVERSATION_IDS_KEY, conversationId));
 	}
 
 	@Override

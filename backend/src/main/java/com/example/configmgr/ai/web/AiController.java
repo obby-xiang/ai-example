@@ -6,6 +6,7 @@ import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.RedisAvailability;
 import com.example.configmgr.ai.gate.ConfirmGate;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
+import com.example.configmgr.ai.memory.RedisChatMemoryRepository;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.ResilientChatService;
@@ -33,6 +34,7 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.util.StringUtils;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -69,12 +71,15 @@ import java.util.concurrent.RejectedExecutionException;
  * "发现待续跑轮次"与单轮明细（台账/待决/历史角色）</td></tr>
  * <tr><td>{@code POST /api/ai/runs/{runId}/resume}</td><td>续跑（重建完整历史 → 官方循环）</td></tr>
  * <tr><td>{@code GET /api/ai/history/{sessionId}}</td><td>记忆窗口原文</td></tr>
+ * <tr><td>{@code DELETE /api/ai/history/{sessionId}}</td><td>删该会话的记忆面（前端「新建对话」）；
+ * <b>幂等</b>：不存在也 200；不查 AI key，Redis 不可用 503；会话在跑时只报告 {@code runActive}，
+ * <b>不 409</b></td></tr>
  * <tr><td>{@code GET /api/ai/health}</td><td>AI 可用性/模型名/记忆后端（供前端降级提示）</td></tr>
  * </table>
  *
  * <p>
  * Q2：无 key 时模型侧 bean 不存在，{@code /chat} 与 {@code /resume} 在<b>开流之前</b>返回
- * 503 {@code AI_UNAVAILABLE}；{@code /health} 亦然。历史的读、确认/回灌的写入不依赖 key，
+ * 503 {@code AI_UNAVAILABLE}；{@code /health} 亦然。历史的读与删除、确认/回灌的写入不依赖 key，
  * 因此保持可用（它们只读写 Redis）。
  */
 @Slf4j
@@ -521,6 +526,96 @@ public class AiController {
 		body.put("count", items.size());
 		body.put("messages", items);
 		return ApiResponse.ok(body);
+	}
+
+	/**
+	 * 删除该会话的记忆窗口（前端「新建对话」：把旧会话的服务端记忆清掉）。
+	 *
+	 * <h2>语义（R-100 裁决：与读侧同资源异动词）</h2>
+	 * <ul>
+	 * <li><b>幂等且不 404</b>：删除不存在的会话、或重复删除，都返回 <b>200</b> —— 键本来就会自然
+	 * TTL 过期，"已不存在"是正常终态而非错误（对齐 {@code /cancel} 的 {@code runExists} 风格）；
+	 * 前端「新建对话」绝不能因为旧键已过期而报错。</li>
+	 * <li><b>不加鉴权</b>（DC-10：本期无认证鉴权，与全仓 AI 端点一致）；<b>不查 AI key</b>
+	 * （与 {@code /history} 同类：记忆是纯 Redis 操作，无 key 时 {@code chatMemory} bean 依然存在）。</li>
+	 * <li><b>Redis 不可用 → 503</b> {@code AI_REDIS_UNAVAILABLE}（R4 口径：删不掉就如实失败，
+	 * 不假装成功）。</li>
+	 * <li><b>删除范围 = 只删记忆面</b>：走官方 {@code ChatMemory#clear}（DC-05），
+	 * {@code MessageWindowChatMemory} 落到仓储的 {@code deleteByConversationId}
+	 * = {@code DEL chat:mem:<id>} + {@code SREM chat:mem:__ids__}。
+	 * <b>不删</b> {@code ai:session:<sessionId>}（会话滑动 TTL，{@code AiSessionService} 维护）
+	 * 与 {@code ai:run:*}（轮次台账/快照，删了会让重启续跑与取证失去依据）—— 两者各有自己的 TTL。</li>
+	 * </ul>
+	 *
+	 * <h2>会话门：只报告，不阻塞</h2>
+	 * 该会话若仍有在跑轮次，该轮终局会做记忆收敛（{@code ResilientChatService#convergeMemory}
+	 * 的 {@code clear + add}）把窗口整体写回，故本次删除可能被覆盖。这个事实以
+	 * {@code runActive} / {@code activeRunId} 报告并留 WARN 日志，
+	 * <b>不返回 409</b> —— 硬拒绝会把「新建对话」变成可能失败的动作，破坏「点了就干净」的心智。
+	 * <b>前端顺序不关闭该覆盖</b>（口径订正：复核 F2）：{@code cancel} 只是置取消标志 + 唤醒收尾，
+	 * 轮次收盘是异步的 ⇒ 在飞路径下本 DELETE <b>必然先于</b>收盘重写（不是概率竞态，顺序收口
+	 * 也缩不小该窗口）；残留由会话 TTL 约束，且旧 id 已被前端丢弃（用户不可见）。
+	 *
+	 * @param sessionId 会话 id（前端页签级；路径参数，与 {@code GET /history/{sessionId}} 同资源）
+	 * @return 裸 {@code Map}（不套 {@code ApiResponse} 信封，与最近的幂等先例 {@code /cancel} 同族）
+	 */
+	@DeleteMapping("/history/{sessionId}")
+	public ResponseEntity<Map<String, Object>> deleteHistory(@PathVariable String sessionId) {
+		if (!StringUtils.hasText(sessionId)) {
+			return json(HttpStatus.BAD_REQUEST, Map.of("code", "BAD_REQUEST", "message", "sessionId 必填"));
+		}
+		if (!this.redisAvailability.isAvailable()) {
+			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
+		}
+		// 会话门只读一次：只用于报告（不 acquire、不拒绝）
+		String activeRunId = this.sessionGate.currentRunId(sessionId);
+		List<Message> existing = this.chatMemory.get(sessionId);
+		boolean existed = existing != null && !existing.isEmpty();
+		if (activeRunId != null) {
+			log.warn("删除会话记忆时该会话仍有在跑轮次（记忆可能被该轮收尾的收敛写回）sessionId={} activeRunId={}",
+					sessionId, activeRunId);
+		}
+		this.chatMemory.clear(sessionId);
+		Map<String, Object> body = new LinkedHashMap<>();
+		body.put("sessionId", sessionId);
+		// deleted 恒为 true：幂等语义 = "已处于删除状态"（上面已 clear，故不再复核一次读取）
+		body.put("deleted", true);
+		body.put("existed", existed);
+		body.put("memoryKey", RedisChatMemoryRepository.KEY_PREFIX + sessionId);
+		// 判存量只问"这一个 id 在不在索引里"：单次 SISMEMBER（复核 F4），不拉全量索引
+		body.put("removedFromIndex", !isConversationIndexed(sessionId));
+		body.put("runActive", activeRunId != null);
+		body.put("activeRunId", activeRunId);
+		body.put("storedBy", this.runStore.instanceId());
+		body.put("note", "只删记忆面（chat:mem:<sessionId> 与其会话 id 索引）；不删 ai:session:<sessionId> 与 ai:run:*（两者各有自己的 TTL）。"
+				+ "删除不存在的会话同样 200（幂等）。runActive=true 表示该会话仍有在跑轮次，"
+				+ "该轮收尾的记忆收敛可能把窗口重新写回同名键。");
+		return ResponseEntity.ok(body);
+	}
+
+	/**
+	 * 该会话 id 是否仍在记忆仓储的会话 id 索引内 —— {@code removedFromIndex} 的唯一判据。
+	 *
+	 * <p>
+	 * 生产装配是 {@link RedisChatMemoryRepository}（索引键 {@code chat:mem:__ids__}），走单次
+	 * {@code SISMEMBER}。此前的写法是 {@code findConversationIds().contains(sessionId)}，而那个 SPI
+	 * 方法的语义面是"列出**全部**存活 id"（{@code SMEMBERS} + 逐 id 一次 {@code EXISTS} + 惰性清理），
+	 * 拿它做单点判定会引入 N 倍 Redis 往返（复核 F4）。语义等价：本端点在上面刚做过
+	 * {@code chatMemory.clear()}（= {@code DEL} + {@code SREM}），故此刻成员只可能被在跑轮次收尾的
+	 * {@code clear + add} 重新写回（那个 {@code add} 同时建数据键），两种写法在此处判定一致。
+	 *
+	 * <p>
+	 * 非 {@link RedisChatMemoryRepository} 的实现（测试桩 / 将来换实现）回落到 SPI 的通用契约面。
+	 *
+	 * <p>
+	 * 口径（复核 F3，登记知悉）：本字段是<b>响应时点</b>事实 —— {@code true} 只表示"此刻已不在索引里"，
+	 * 不保证随后不被在跑轮次的收盘重写。
+	 */
+	private boolean isConversationIndexed(String sessionId) {
+		if (this.chatMemoryRepository instanceof RedisChatMemoryRepository redisRepository) {
+			return redisRepository.isConversationIndexed(sessionId);
+		}
+		return this.chatMemoryRepository.findConversationIds().contains(sessionId);
 	}
 
 	/** AI 可用性（N5）：前端据此决定 AI 面板启用/降级提示，无需先发一次对话才知道。 */
