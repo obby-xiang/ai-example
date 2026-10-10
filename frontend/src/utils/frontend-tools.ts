@@ -337,9 +337,10 @@ export async function executeFrontendTool(call: FrontendToolCall): Promise<Front
  * `timeout.elapsedMs` 会明显大于预算，正是"执行器内主线程被长时间阻塞"的信号，
  * 也被如实写进超时文案的"已等待 N 秒"。
  *
- * 超时分支**只依赖计时器**：不依赖执行器 settle，也不依赖它 reject —— 这对
- * `download_export_file` 是必需的（`ExportWizardView#downloadOne` 把自身异常吞进
- * `ElMessage` 后 void 返回、从不 rethrow，所以"等它 reject"永远不会发生）。
+ * 超时分支**只依赖计时器**：不依赖执行器 settle，也不依赖它 reject。这条性质在批 A
+ * （W-01 即发即回）之后依然是必需的：`download_export_file` 的执行器只等前置校验
+ * （`ExportWizardView#ensureTaskBoundForTool` 的串行 HTTP 可以很长），而"等它 settle"
+ * 或"等它 reject"都不能当作超时判定的依据 —— 计时器到点即产出超时结局，回灌才不会迟到。
  *
  * **计时器 delay 的上界**：`budgetMs` 已由 {@link normalizeBudgetMs} 收口在
  * {@link TIMER_MAX_DELAY_MS}（`2^31 − 1` ms ≈ 24.86 天）—— `setTimeout` 的 delay 按 32 位
@@ -398,9 +399,13 @@ const DOWNLOAD_TOOL_NAMES: readonly string[] = ['download_export_file', 'downloa
  * 与"确定性失败"（执行器/ handler 抛错 → `执行失败：<原因>。请提示用户手动重试`）的差别在
  * 于：那条有明确原因、可判定未完成；本条只说明**没有拿到回执**。
  *
- * 注意（吞异常的现状）：`downloadOne` 吞掉自身异常 ⇒ 该执行器**从不 reject**，"下载失败却
- * 回灌成功"是同一处的另一个面（谎报成功，P1），不在本预算职责内 —— 本函数只负责"没拿到
- * 回执"这一种结局。
+ * 注意（批 A 后的口径）：`downloadOne` 曾吞掉自身异常 ⇒ 该执行器**从不 reject**、"下载失败却
+ * 回灌成功"（W-02）是同一处的另一个面。批 A 已改：前置校验失败即 reject（确定性失败、卡片
+ * failed），浏览器侧结局不再回灌（`download_export_file` 即发即回）—— 故"谎报成功"这一面
+ * 不再存在；本函数只负责"没拿到回执"这一种结局。
+ * **已知过度保守（登记不修）**：即发即回后，该工具的超时只可能落在**前置校验**期间（尚未发起
+ * 下载），故下方下载类文案的"文件也许已落盘、请勿重复触发"偏保守 —— 方向安全（不谎报、
+ * 不诱导重复触发），是否收窄留待卡片态设计（R-84）时一并裁决。
  */
 function timeoutOutcome(call: FrontendToolCall, budgetMs: number, elapsedMs: number): FrontendToolExecution {
   const label = toolDisplayName(call.name)

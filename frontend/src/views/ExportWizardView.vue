@@ -216,6 +216,14 @@ const activeTab = ref('')
 
 const gridRefs: Record<string, GridApi> = {}
 const loadedGrids = new Set<string>()
+/**
+ * 在途下载的配置编码（批 A 补：同码并发防重）。
+ *
+ * `downloading` 是**单值**（页面态，只能表示"当前哪一个在下载"），挡不住"同一次工具调用
+ * 被重复投递 / 用户连点"这类**同码**并发 —— 后者在即发即回后必须挡住：同一文件被触发两次
+ * 会弹出两次保存框。用户点击侧（`downloadOne`）与 AI 侧（`startDownloadInBackground`）共用本集合。
+ */
+const inFlightDownloads = new Set<string>()
 let stopWatchJob: (() => void) | null = null
 let gridDirty = false
 
@@ -374,7 +382,7 @@ async function loadExistingResults(): Promise<boolean> {
 }
 
 /**
- * 换任务时的页面态清理（issue #2）：上一个任务的导出结果/勾选/激活标签/表格缓存一律不带到目标任务上。
+ * 换任务时的页面态清理（issue #2）：上一个任务的导出结果/勾选/激活标签/表格缓存/在途下载集合一律不带到目标任务上。
  *
  * `loadedGrids` 必须清：`ensureGridLoaded` 拿它当"已加载"判据，跨任务遇到同名 defCode
  * （如两个任务都有 CURRENCY）时会直接跳过加载，编辑器里就还是**上一个任务**的字节
@@ -394,6 +402,12 @@ function resetTaskScopedState(): void {
   checkedDefs.value = []
   activeTab.value = ''
   loadedGrids.clear()
+  // 在途集合也是任务级状态：跨任务改绑后残留的是**旧任务**的编码，AI 侧 preflight 读到它会把
+  // 「旧任务在途的同码下载」当成新任务的在途，回灌 ack 分支②的"无需重试"（issue #2 的同源失真），
+  // 用户侧 downloadOne 也会被误拦。复位安全：在途 promise 的 finally 有 `downloading.value === code`
+  // 守卫、`Set.delete` 幂等，中途清空不会误改新任务的状态。
+  inFlightDownloads.clear()
+  downloading.value = null
 }
 
 /**
@@ -707,21 +721,82 @@ async function buildXlsx(code: string): Promise<{ blob: Blob; fileName: string }
   return { blob: await tasksApi.downloadFile(taskId.value, code), fileName }
 }
 
-async function downloadOne(code: string): Promise<void> {
+/** 一次下载的结局（确定性面：字节构建 + 交给浏览器下载链路这一步是否成功）。 */
+type DownloadOutcome = { ok: true; fileName: string } | { ok: false; reason: string }
+
+/**
+ * 「发起」一次下载（**不吞异常**）：取该配置项的当前内容并交给浏览器下载链路。
+ *
+ * 与 {@link downloadOne} 的分工：本函数不捕获任何异常（`buildXlsx` 的引擎/网络错误、
+ * 未绑定任务一律向调用方传播），页面态与 toast 由调用方决定 —— 因此既能支撑用户点击侧的
+ * 结局 toast，也能支撑 AI 侧「即发即回」（{@link startDownloadInBackground}）。
+ */
+async function startDownload(code: string): Promise<{ fileName: string }> {
+  const { blob, fileName } = await buildXlsx(code)
+  downloadBlob(blob, fileName)
+  return { fileName }
+}
+
+/**
+ * 用户侧下载入口（按钮 / 勾选下载 / 全部下载）：在途防重 + 结局 toast。
+ *
+ * 结局以 {@link DownloadOutcome} 如实捎回 —— 失败不再只是"一条 toast"，而是可被调用方
+ * 判读的结构化结局（旧版返回 `void` + 只 toast，是"下载失败却回灌成功"的一半成因，见 W-02）。
+ */
+async function downloadOne(code: string): Promise<DownloadOutcome> {
   if (!code) {
     ElMessage.warning('请选择要下载的配置项')
-    return
+    return { ok: false, reason: '未提供配置编码' }
   }
+  if (inFlightDownloads.has(code)) {
+    ElMessage.info(`${code} 的下载已在进行中，本次未重复发起`)
+    return { ok: false, reason: `${code} 的下载已在进行中` }
+  }
+  inFlightDownloads.add(code)
   downloading.value = code
   try {
-    const { blob, fileName } = await buildXlsx(code)
-    downloadBlob(blob, fileName)
+    const { fileName } = await startDownload(code)
     ElMessage.success(`已下载 ${fileName}`)
+    return { ok: true, fileName }
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '下载失败')
+    const reason = error instanceof Error ? error.message : '下载失败'
+    ElMessage.error(reason)
+    return { ok: false, reason }
   } finally {
-    downloading.value = null
+    inFlightDownloads.delete(code)
+    if (downloading.value === code) {
+      downloading.value = null
+    }
   }
+}
+
+/**
+ * AI 侧「即发即回」（批 A = W-01 + W-02）：发起下载后**不等**浏览器下载链路的结局。
+ *
+ * 为什么可以不等：AI 不消费这个结局（`download_export_file` 的回灌只需"已发起"这一事实），
+ * 而 `await` 它的代价是回灌被链路拖住 —— issue#6 实测：宿主浏览器弹出保存框时回灌 POST
+ * 130 秒仍未发出，后端按超时收尾并回"本次调用未获得数据"（假失败，文件其实已落盘）。
+ *
+ * 迟到的结局只落在**用户侧**：toast + `downloading` 复位 + 在途集合清理。本批**不新增
+ * "迟到结局二次回灌"通道**（`ConfirmGate#submitFrontendResult` 对已决条目一律 409 幂等丢弃），
+ * 故下面的 `.catch` 只把真实原因 toast 给用户，绝不再产出一份回执。
+ */
+function startDownloadInBackground(code: string): void {
+  inFlightDownloads.add(code)
+  downloading.value = code
+  startDownload(code)
+    .then(({ fileName }) => {
+      ElMessage.success(`已下载 ${fileName}`)
+    })
+    .catch((error: unknown) => {
+      ElMessage.error(error instanceof Error ? error.message : '下载失败')
+    })
+    .finally(() => {
+      inFlightDownloads.delete(code)
+      if (downloading.value === code) {
+        downloading.value = null
+      }
+    })
 }
 
 async function downloadChecked(): Promise<void> {
@@ -732,6 +807,7 @@ async function downloadChecked(): Promise<void> {
   downloading.value = 'checked'
   try {
     if (checkedDefs.value.length === 1) {
+      // 单文件：结局（含失败原因）由 `downloadOne` 自己 toast，此处不判读返回值、也不重复报错
       await downloadOne(checkedDefs.value[0] ?? '')
       return
     }
@@ -744,7 +820,9 @@ async function downloadChecked(): Promise<void> {
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '打包下载失败')
   } finally {
-    downloading.value = null
+    if (downloading.value === 'checked') {
+      downloading.value = null
+    }
   }
 }
 
@@ -756,6 +834,7 @@ async function downloadAll(): Promise<void> {
   downloading.value = 'all'
   try {
     if (exportResults.value.length === 1) {
+      // 单文件：结局（含失败原因）由 `downloadOne` 自己 toast，此处不判读返回值、也不重复报错
       await downloadOne(exportResults.value[0]?.defCode ?? '')
       return
     }
@@ -768,7 +847,9 @@ async function downloadAll(): Promise<void> {
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '打包下载失败')
   } finally {
-    downloading.value = null
+    if (downloading.value === 'all') {
+      downloading.value = null
+    }
   }
 }
 
@@ -890,6 +971,51 @@ function noResultMessage(defCode: string): string {
   return `任务 #${taskId.value} 里没有 ${defCode} 的导出结果文件（该任务现有导出结果：${existing || '（无）'}）`
 }
 
+/** `downloading` 单值/在途编码的中文口径（'checked' / 'all' 是打包下载的哨兵值，其余是配置编码）。 */
+function downloadingLabel(value: string): string {
+  if (value === 'checked') {
+    return '勾选项打包下载'
+  }
+  if (value === 'all') {
+    return '全部打包下载'
+  }
+  return `${value} 的下载`
+}
+
+/**
+ * `download_export_file` 的前置校验（方案 A 的"AI 真正该等的那一段"）：参数 → 任务绑定
+ * 闸门 → 结果存在性，外加切页（让用户看到下载发生的位置）。
+ *
+ * 为什么这一段必须 `await` 且必须失败即回灌失败：三者任一不成立都**确定"未触发下载"**，
+ * 可以如实回灌 `failed`（卡片显示原因）；而浏览器侧下载链路的结局是"可能已发生但不可知"，
+ * 不在这段里等（见执行器与 {@link startDownloadInBackground}）。
+ *
+ * 切页（`goStep(2)`）同步失败的面（W-06/W-07）属批次 C，本批不改。
+ */
+async function preflightDownload(
+  args: Record<string, unknown>
+): Promise<{ ok: true; defCode: string } | { ok: false; message: string }> {
+  const defCode = String(args.defCode ?? '')
+  if (!defCode) {
+    return { ok: false, message: '缺少 defCode' }
+  }
+  // issue #2：与 open 执行器同因同修 —— 否则会拿**当前任务**（或当前任务里同名配置）的文件去下载
+  const gate = await ensureTaskBoundForTool(args.taskId)
+  if (!gate.ok) {
+    return { ok: false, message: `${gate.message}。${defCode} 的导出文件未下载` }
+  }
+  if (!exportResults.value.some((item) => item.defCode === defCode)) {
+    return {
+      ok: false,
+      message: `${noResultMessage(defCode)}。请在任务 #${taskId.value} 上完成 ${defCode} 的导出后重试，或核对传入的 taskId 与 defCode；本次未触发下载`
+    }
+  }
+  if (stepIndex.value !== 2) {
+    goStep(2)
+  }
+  return { ok: true, defCode }
+}
+
 function registerHandlers(): void {
   // 补丁②：AI 工作区动作 confirm_step 的页面实现（推进到下一步；与用户点「下一步」同路径）
   registerPageHandler('export.nextStep', (payload) => {
@@ -978,24 +1104,39 @@ function registerHandlers(): void {
   })
 
   // 前端工具 download_export_file：副作用在浏览器，必须由页面执行器完成
+  //
+  // 即发即回（批 A = W-01 + W-02，方案 A）：AI 侧只等**前置校验**（{@link preflightDownload}：
+  // 参数 / 任务绑定 / 结果存在性 / 切页）—— 校验失败 ⇒ 抛错（回灌确定性失败、卡片 failed）；
+  // 校验通过 ⇒ **发起下载后立即返回**，不再 `await` 浏览器下载链路。旧写法
+  // `await downloadOne(defCode)` 的代价：宿主浏览器拖住链路时回灌迟到 ⇒ 后端按超时收尾并回
+  // "本次调用未获得数据"（假失败，而文件其实已落盘，issue#6 实测 120,004ms）。
+  //
+  // 回灌文案口径（只陈述已发生的事 + 显式交代浏览器侧不确定性）—— 分三种场景，措辞不得互相串用：
+  // ① 发起成功 ⇒ 「已发起下载…无需重试」；② 在途目标就是本次请求的编码 ⇒ 「本次未重复发起…无需重试」；
+  // ③ 在途目标是**别的**文件/打包 ⇒ 本次从未发起，必须如实说「本次未发起 <编码> 的下载」并允许
+  // 「可稍后重试本项」—— 否则模型会以为该文件已在下载、不再补发，而用户实际拿不到它（复核 N-1）。
+  // 三处共同纪律：**禁止失败暗示**（不得读作「下载成功」或「下载失败」）。
   registerFrontendToolExecutor('download_export_file', async (call) => {
-    const defCode = String(call.args.defCode ?? '')
-    if (!defCode) {
-      throw new Error('缺少 defCode')
+    const preflight = await preflightDownload(call.args)
+    if (!preflight.ok) {
+      throw new Error(preflight.message)
     }
-    // issue #2：与 open 执行器同因同修 —— 否则会拿**当前任务**（或当前任务里同名配置）的文件去下载
-    const gate = await ensureTaskBoundForTool(call.args.taskId)
-    if (!gate.ok) {
-      throw new Error(`${gate.message}。${defCode} 的导出文件未下载`)
+    const { defCode } = preflight
+    const busy = downloading.value
+    const requestedInFlight = inFlightDownloads.has(defCode)
+    if (requestedInFlight || busy === defCode) {
+      return `任务 #${taskId.value} 的 ${defCode} 导出文件：页面上已有一次下载在进行中`
+        + `（${downloadingLabel(busy ?? defCode)}），本次未重复发起。`
+        + '下载由浏览器执行，文件落盘以浏览器下载目录为准；本次调用到此结束，无需重试。'
     }
-    if (!exportResults.value.some((item) => item.defCode === defCode)) {
-      throw new Error(`${noResultMessage(defCode)}。请在任务 #${taskId.value} 上完成 ${defCode} 的导出后重试，或核对传入的 taskId 与 defCode；本次未触发下载`)
+    if (busy !== null) {
+      return `任务 #${taskId.value} 的 ${defCode} 导出文件：本次未发起 ${defCode} 的下载`
+        + `（页面正有 ${downloadingLabel(busy)}在进行中），可稍后重试本项。`
     }
-    if (stepIndex.value !== 2) {
-      goStep(2)
-    }
-    await downloadOne(defCode)
-    return `已触发下载任务 #${taskId.value} 的 ${defCode} 导出文件（在线编辑后的内容）`
+    startDownloadInBackground(defCode)
+    return `已发起下载：任务 #${taskId.value} 的 ${defCode} 导出文件（内容为在线编辑后的当前表格）。`
+      + '下载由浏览器执行 —— 若弹出保存位置选择框或提示被拦截，请让用户在浏览器侧放行并确认；'
+      + '文件落盘以浏览器下载目录为准。本次调用到此结束，无需重试。'
   })
 }
 

@@ -316,6 +316,16 @@ export function notifyWorkspaceChanged(summary: string): void {
 
 // ── ui_event 统一分发（AI → 业务，与用户点击同一套 action） ───────────────────
 
+/**
+ * `ui_event download` 的下载请求上限（毫秒）：与 `api/http.ts` 的 axios 单请求上限同值
+ * （`timeout: 60000`）—— 两者都是"拉字节"类请求，延迟分布同类，故沿用同一口径。
+ *
+ * 为什么必须有（R-11）：本分支此前是**无 signal、无上限**的裸 `fetch`，上游不响应时
+ * 这一步会永久挂住 —— 它在 `dispatchUiEvent` 的 await 链上，于是"回灌给模型的结果"
+ * 也一起被拖住（与本批 W-01 同族：等待没有上界、结局没人消费）。
+ */
+const DOWNLOAD_FETCH_TIMEOUT_MS = 60_000
+
 function ok(message: string): UiEventResult {
   return { handled: true, message }
 }
@@ -422,20 +432,40 @@ async function runUiEvent(event: UiEvent): Promise<UiEventResult> {
         return ok(`已打开导入向导，请执行：${event.action}`)
       }
       case 'download': {
-        const response = await fetch(event.url)
-        if (!response.ok) {
-          return fail(`下载失败：HTTP ${response.status}`)
+        // R-11：补上"无 signal、无上限"的缺口 —— 到点 abort ⇒ 走下方 catch 如实回 fail，
+        // 而不是永远等（该 await 在 `dispatchUiEvent` 链上，等下去连回灌都发不出去）。
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), DOWNLOAD_FETCH_TIMEOUT_MS)
+        try {
+          const response = await fetch(event.url, { signal: controller.signal })
+          if (!response.ok) {
+            return fail(`下载失败：HTTP ${response.status}`)
+          }
+          saveBlob(await response.blob(), event.filename ?? 'download')
+          return ok(`已触发下载 ${event.filename ?? event.url}`)
+        } catch (error) {
+          if (controller.signal.aborted) {
+            return fail(`下载失败：${DOWNLOAD_FETCH_TIMEOUT_MS / 1000} 秒内未取回文件（已中止本次请求），未写入任何文件`)
+          }
+          throw error
+        } finally {
+          clearTimeout(timer)
         }
-        saveBlob(await response.blob(), event.filename ?? 'download')
-        return ok(`已触发下载 ${event.filename ?? event.url}`)
       }
       case 'refresh_defs': {
+        // W-09（文案改实）：本动作只发工作区事件，而 `workspace_changed` 的**唯一订阅者**是
+        // AI 面板的上下文 chip（`stores/ai.ts`），**没有任何页面订阅它去重新拉取数据**
+        // —— 故"已通知配置定义页刷新"是空回执（数据不会变）。这里改为如实陈述。
         notifyWorkspaceChanged('AI 请求刷新配置定义')
-        return ok('已通知配置定义页刷新')
+        return ok('已记录刷新意图（AI 请求刷新配置定义）：当前没有任何页面订阅该事件并重新拉取数据，配置定义页的数据不会因此变化；'
+          + '如需最新定义，请让用户在界面上重新打开该页，或稍后重新查询。')
       }
       case 'refresh_data': {
+        // W-09（文案改实）：同 `refresh_defs` —— 空回执改为如实陈述（无页面订阅者）。
         notifyWorkspaceChanged('AI 请求刷新数据浏览')
-        return ok(`已通知数据浏览页刷新${event.defCode ? `（${event.defCode}）` : ''}`)
+        return ok(`已记录刷新意图（AI 请求刷新数据浏览${event.defCode ? `：${event.defCode}` : ''}）：`
+          + '当前没有任何页面订阅该事件并重新拉取数据，数据浏览页的数据不会因此变化；'
+          + '如需最新数据，请让用户在界面上重新打开该页，或稍后重新查询。')
       }
       case 'refresh_tasks': {
         await taskStore.load()
