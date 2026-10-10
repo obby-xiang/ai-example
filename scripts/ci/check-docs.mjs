@@ -11,9 +11,13 @@
  *   ③ 导航/口径文档引用的仓库内文件存在
  *   ④ 端口表与 application.yml / vite.config.ts 一致（且默认值三方对齐：vite / .env.example / 文档）
  *   ⑤ 命名纪律禁则（按 git ls-files 口径全量逐文件；不得 grep 工作树）
- *      —— 匹配前做 NFKC 折叠 + 零宽字符双态归一（删除态抓词内藏形 / 分隔态抓零宽作分隔）+ Unicode
- *         连字符族分隔符（T4-S2 强化、T4-S2-R1 补全双态），使全角形态、U+2010-U+2015/U+2212 等
- *         "粘贴破折号"与零宽分隔形态都无法绕过本断言（口径详见断言 ⑤ 段注释）
+ *      —— 匹配前做 NFKC 折叠 + 隐形/零宽字符双态归一（删除态抓词内藏形 / 分隔态抓隐形字符作分隔）+
+ *         Unicode 连字符族分隔符 + **词首守卫**（T4-S2 强化、T4-S2-R1 补全双态），并追加第三态
+ *         **去分隔符连写**（分隔符零个或多个 → 抓零分隔连写形态；DC-08 补强，2026-10-10 裁决），
+ *         覆盖全角/兼容折叠形态、U+2010-U+2015/U+2212 等"粘贴破折号"、隐形字符分隔与零分隔连写形态；
+ *         **该覆盖不等于"无法绕过"**：NFKC 不折叠的同形字母（西里尔/希腊等）与本断言注释末尾登记的
+ *         其他已知缺口仍可穿过（详见断言 ⑤ 段注释；⑤ 自带正向种子/负对照自检，且连写组种子断言
+ *         「仅第三态可捕获」，防规则被改窄后静默失效）
  *   ⑥ docs/evidence/probes/ 的 .java 探针不参与构建
  *
  * 范围边界（裁决 7，重要）：①②③④ 的扫描范围是下面的 NAV_DOCS 显式清单 ——
@@ -265,29 +269,170 @@ function assertPortsMatch() {
 
 // ── ⑤ 命名纪律禁则（git ls-files 全量） ──────────────────────────────────────
 // 规则字面量按 DC-08 拼接构造（不在源码里写出完整禁用字面量）：
-//   前缀 + 分隔符（连字符/下划线/空格/点，可重复）+ 后缀，任意大小写组合。
+//   词首守卫 + 前缀 + 分隔符（连字符/下划线/空格/点，可重复**或零个**）+ 后缀，任意大小写组合。
 //
-// 归一化口径（T4-S2 强化、T4-S2-R1 补全，防"同形字符绕过"）：分隔符类只含 ASCII + \s 时，普通粘贴
-// 一枚 Unicode 连字符（U+2011 等）或全角输入即可让禁词在门禁下隐形。故匹配前对文本做三步归一：
+// 归一化口径（T4-S2 强化、T4-S2-R1 补全双态、DC-08 补强第三态、DC-08-R2 扩字符类，防"拆形绕过"）：
+// 分隔符类只含 ASCII + \s 时，普通粘贴一枚 Unicode 连字符（U+2011 等）或全角输入即可让禁词在门禁下隐形。
+// 故匹配前对文本做归一，并按三态分别匹配、任一命中即红：
 //   ① NFKC 折叠 —— 全角字母与全角连字符（U+FF0D）等兼容字符折回 ASCII 形态；
 //      （本注释自身即受断言 ⑤ 约束：禁用字面量按 DC-08 拼接写，不在此写出实例。）
-//   ② 零宽字符（U+200B-200D / U+2060 / U+FEFF）**双态**归一，两态分别匹配、任一命中即红：
-//      删除态 = 替换为空串（拼合相邻片段），抓"零宽藏在词内"；
-//      分隔态 = 替换为单个空格（视作分隔符），抓"零宽充当分隔"。
-//      只做删除态是不够的：它会把"零宽作分隔"退化成"相邻连写"（连写是既定反例、不报红），
-//      并丢掉 JS \s 原本覆盖 U+FEFF 的能力（T4-S2-R1 打回原因）；双态不动判定边界。
+//   ② 隐形/零宽字符（字符面 = INVISIBLE_RE，见其定义处）**双态**归一：
+//      删除态 = 替换为空串（拼合相邻片段），抓"隐形字符藏在词内"；
+//      分隔态 = 替换为单个空格（视作分隔符），抓"隐形字符充当分隔"。
+//      只做删除态是不够的：它丢掉 JS \s 原本覆盖 U+FEFF 的能力（T4-S2-R1 打回原因）。
 //   ③ 分隔符类补 Unicode 连字符族（U+2010-U+2015 / U+2043 / U+2212 / U+FE58 / U+FE63 / U+FF0D）。
-// 归一化只作用于匹配，不改文件内容，也不改变行号（两态都不增删换行）。
+// **② 的字符面扩容（DC-08-R2，2026-10-10；GLM 红队 UI 包评审 MAJOR-2）**：原类只含
+//   U+200B-200D / U+2060 / U+FEFF，红队实测另有 10 例隐形字符形态可全绿入库 —— U+00AD（软连字符，
+//   复制粘贴最常见）、U+180E、U+2061-U+2064、U+206A（同族 U+206B-U+206F）、U+3164、U+FFA0。故字符面
+//   扩至「零宽 / 方向格式 / 不可见算符 / 填充符 / 变体选择符」全族。两个实现要点：**NFKC 先于隐形字符
+//   归一**，故 U+FFA0 会先折成 U+1160，U+115F/U+1160 必须同时在类内才拦得住；两个归一态共用同一字符面，
+//   故只改一处即可同时覆盖删除态与分隔态（漏改一族另一态会静默失效）。
+// 归一化只作用于匹配，不改文件内容，也不改变行号（各态都不增删换行）。
+//
+// **第三态 = 去分隔符连写（DC-08 补强，2026-10-10 裁决）**：①② 的分隔符量词是"一个或多个"，故
+//   **零分隔连写**形态（前缀与后缀之间一个分隔符也没有）在双态下隐形、全绿入库。补 NAME_CONCAT_RE：
+//   分隔符量词改"零个或多个"，在删除态归一文本上匹配 —— 等价于"把 - _ 空格 点 去掉后按前缀+后缀
+//   匹配"，并入①的覆盖，且顺带覆盖"零宽既藏词内又作分隔"的组合形态。
+// **词首守卫 NAME_GUARD**：禁词前一个字符不得是 ASCII 字母/数字。这是"去掉分隔符后匹配"的必然配套
+//   —— 若不做守卫，域名/长单词尾部（如 *domain* 后缀 `v2` 这类写法去掉分隔符后与禁词尾部逐字符
+//   重合）会被逐字符匹配误伤。真实指代（仓库目录名/分支名/路径段/代码字符串）恒由 `/\<>-`、空格、
+//   引号或行首等非字母数字字符定界，故守卫不削弱本禁则的判定面（本批全仓实测：加守卫前后全仓命中
+//   集合完全一致，收窄的只是域名/长单词尾部的假阳性）。附：负对照中能写出域名样本本身，也依赖该守卫。
+// **已知缺口（如实登记：本断言不声称穷尽绕过面；2026-10-10 GLM 红队 UI 包评审 MAJOR-2 实测 3 例）**：
+//   NFKC 不折叠的**同形字母**可穿过本断言 —— 把禁词里的 ASCII 字母换成视觉酷似的西里尔/希腊字母
+//   （例如用小写西里尔 a 顶替 ASCII a、或用希腊 ν 顶替 ASCII n），门禁判绿而人眼读作禁词。本批**不修**：
+//   同形折叠须一张全字母表级映射表，漏一个字母即等于没折叠，且折叠后与真实英文标识符的判定面互相
+//   污染（含同名 ASCII 字母的普通单词会被折成禁词），须连同负对照集单独立项评估。同族未覆盖的还有
+//   「以分隔符类之外的字符充当分隔」的形态（例如以 `/` 充当分隔的路径式写法）。
+//   → 本断言的覆盖口径以本条为准：**覆盖「NFKC 可折叠 + 隐形字符 + 分隔符量化（零个或多个）」三类
+//   绕过面，不等于"无法绕过"，也不等于"全部拆形手法"。**
+const NAME_GUARD = '(^|[^A-Za-z0-9])'
 const NAME_PREFIX = 'ma' + 'in'
 const NAME_SUFFIX = 'v' + '2'
-const NAME_SEP = '[\\s\\-_.\\u2010-\\u2015\\u2043\\u2212\\uFE58\\uFE63\\uFF0D]+'
-const NAME_RE = new RegExp(NAME_PREFIX + NAME_SEP + NAME_SUFFIX, 'i')
-const ZERO_WIDTH_RE = /[\u200B-\u200D\u2060\uFEFF]/g
-const normalizeName = (text) => text.normalize('NFKC').replace(ZERO_WIDTH_RE, '')
-const separateName = (text) => text.normalize('NFKC').replace(ZERO_WIDTH_RE, ' ')
-const hitsName = (text) => NAME_RE.test(normalizeName(text)) || NAME_RE.test(separateName(text))
+const NAME_SEP_CLASS = '\\s\\-_.\\u2010-\\u2015\\u2043\\u2212\\uFE58\\uFE63\\uFF0D'
+const NAME_SEP = `[${NAME_SEP_CLASS}]+`
+const NAME_SEP_OPT = `[${NAME_SEP_CLASS}]*`
+const NAME_RE = new RegExp(NAME_GUARD + NAME_PREFIX + NAME_SEP + NAME_SUFFIX, 'i')
+const NAME_CONCAT_RE = new RegExp(NAME_GUARD + NAME_PREFIX + NAME_SEP_OPT + NAME_SUFFIX, 'i')
+// 隐形/零宽字符面（DC-08-R2 扩字符类）：零宽（U+200B-200D 空格/连接符/不连接符 + U+2060 词连接符）、
+//   方向标记与嵌入（U+200E-200F / U+202A-202E / U+2066-2069）、不可见算符（U+2061-2064）、弃用格式字符
+//   （U+206A-206F）、填充符（U+115F-1160 / U+3164 / U+FFA0，后两者经 NFKC 亦落 U+1160）、变体选择符
+//   （U+FE00-FE0F）、BOM（U+FEFF）、软连字符（U+00AD）、蒙古元音分隔（U+180E）。
+const INVISIBLE_RE = /[\u00AD\u115F\u1160\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\u3164\uFE00-\uFE0F\uFEFF\uFFA0]/g
+const normalizeName = (text) => text.normalize('NFKC').replace(INVISIBLE_RE, '')
+const separateName = (text) => text.normalize('NFKC').replace(INVISIBLE_RE, ' ')
+const hitsName = (text) =>
+  NAME_RE.test(normalizeName(text)) || NAME_RE.test(separateName(text)) || NAME_CONCAT_RE.test(normalizeName(text))
+
+// ── ⑤-a 规则自检（植入对照；DC-08 补强、DC-08-R2 严格化）：正向种子必命中、负对照必不误伤 ────
+// 种子/对照同样按 DC-08 拼接构造（本文件自身在断言 ⑤ 的扫描面内，源码里不得出现禁用字面量）。
+// **拆两组断言（2026-10-10，GLM 红队 UI 包评审 MINOR-1）**：原实现只统计「种子是否经 NAME_CONCAT_RE
+// 命中」并设下限 6，而该正则的分隔符量词是"零个或多个" ⇒ 含分隔符的种子**必然**也命中它（13/13 是数学
+// 必然），下限形同虚设；红队实测「删掉第三态 + 删掉 5 个连写种子」后自检仍全绿、违禁文本可放行。现改为：
+//   ① CONCAT 组（连写组）：种子的命中**只允许**来自第三态连写规则 —— 断言 hitsName 为真，且前两态
+//      （NFKC 折叠态 / 隐形字符分隔态）都不命中。第三态一旦被删或量词被改回"一个或多个"，本组立即红。
+//   ② SEPARATED 组（分隔组）：种子的命中必须来自前两态之一（NFKC 折叠态或隐形字符分隔态）—— 含 DC-08-R2
+//      收编的红队隐形字符绕过样本；本组不得退回"仅第三态可捕获"，否则等于隐形字符面被改窄而无人察觉。
+// 两组各设**数量下限常量**（与数组长度解耦，见下）：删掉种子行会被下限抓住（若下限写成数组长度，删行后
+// 下限会静默跟随、永不报红），追加样本不受影响。
+const NAMING_SEEDS_CONCAT_MIN = 5
+const NAMING_SEEDS_SEPARATED_MIN = 24
+const NAMING_SEEDS_CONCAT = [
+  ['零分隔连写', NAME_PREFIX + NAME_SUFFIX],
+  ['零分隔连写·全大写', (NAME_PREFIX + NAME_SUFFIX).toUpperCase()],
+  ['零分隔连写·路径形态', '<TEMP_ROOT>/' + NAME_PREFIX + NAME_SUFFIX + '-db-backup.mv.db'],
+  ['零分隔连写·中文紧邻', '本机' + NAME_PREFIX + NAME_SUFFIX + '仓'],
+  ['零分隔连写·前缀为分隔符', 'kimi' + '_' + NAME_PREFIX + NAME_SUFFIX]
+]
+const NAMING_SEEDS_SEPARATED = [
+  ['分隔符·连字符', NAME_PREFIX + '-' + NAME_SUFFIX],
+  ['分隔符·下划线', NAME_PREFIX + '_' + NAME_SUFFIX],
+  ['分隔符·空格', NAME_PREFIX + ' ' + NAME_SUFFIX],
+  ['分隔符·点', NAME_PREFIX + '.' + NAME_SUFFIX],
+  ['分隔符·全角连字符（NFKC）', NAME_PREFIX + '\uFF0D' + NAME_SUFFIX],
+  ['分隔符·Unicode 连字符 U+2011', NAME_PREFIX + '\u2011' + NAME_SUFFIX],
+  ['隐形字符·零宽藏词内（删除态）', NAME_PREFIX + '\u200B' + NAME_SUFFIX],
+  ['隐形字符·零宽作分隔（分隔态）', NAME_PREFIX + '\u200B' + NAME_SUFFIX + '\u200B' + 'path'],
+  ['隐形字符·软连字符 U+00AD（红队 MAJOR-2）', NAME_PREFIX + '\u00AD' + NAME_SUFFIX],
+  ['隐形字符·软连字符+连字符 U+00AD（红队 MAJOR-2）', NAME_PREFIX + '\u00AD' + '-' + NAME_SUFFIX],
+  ['隐形字符·蒙古元音分隔 U+180E（红队 MAJOR-2）', NAME_PREFIX + '\u180E' + NAME_SUFFIX],
+  ['隐形字符·不可见算符 U+2061（红队 MAJOR-2）', NAME_PREFIX + '\u2061' + NAME_SUFFIX],
+  ['隐形字符·不可见算符 U+2062（红队 MAJOR-2）', NAME_PREFIX + '\u2062' + NAME_SUFFIX],
+  ['隐形字符·不可见分隔 U+2063（红队 MAJOR-2）', NAME_PREFIX + '\u2063' + NAME_SUFFIX],
+  ['隐形字符·加号算符 U+2064（红队 MAJOR-2）', NAME_PREFIX + '\u2064' + NAME_SUFFIX],
+  ['隐形字符·弃用格式 U+206A（红队 MAJOR-2）', NAME_PREFIX + '\u206A' + NAME_SUFFIX],
+  ['隐形字符·弃用格式落点 U+206F（同族补样）', NAME_PREFIX + '\u206F' + NAME_SUFFIX],
+  ['隐形字符·Hangul filler U+3164（红队 MAJOR-2）', NAME_PREFIX + '\u3164' + NAME_SUFFIX],
+  ['隐形字符·半角 Hangul filler U+FFA0（红队 MAJOR-2；NFKC 先折 U+1160）', NAME_PREFIX + '\uFFA0' + NAME_SUFFIX],
+  ['隐形字符·Hangul filler U+115F（同族补样，U+FFA0 折叠落点家族）', NAME_PREFIX + '\u115F' + NAME_SUFFIX],
+  ['隐形字符·方向标记 U+200E（同族补样）', NAME_PREFIX + '\u200E' + NAME_SUFFIX],
+  ['隐形字符·方向嵌入 U+202B（同族补样）', NAME_PREFIX + '\u202B' + NAME_SUFFIX],
+  ['隐形字符·方向隔离 U+2066（同族补样）', NAME_PREFIX + '\u2066' + NAME_SUFFIX],
+  ['隐形字符·变体选择符 U+FE00（同族补样）', NAME_PREFIX + '\uFE00' + NAME_SUFFIX]
+]
+const NAMING_CONTROLS = [
+  ['单词单独出现', '分支 ' + 'main' + ' 与 ' + NAME_SUFFIX + ' 版本'],
+  ['域名类·空格', 'domain' + ' ' + NAME_SUFFIX],
+  ['域名类·连字符', 'domain' + '-' + NAME_SUFFIX],
+  ['域名类·连写', 'domain' + NAME_SUFFIX],
+  ['域名类·URL', 'https://example.com/domain' + NAME_SUFFIX],
+  ['文件名主干', 'src/' + 'main' + '.ts'],
+  ['文件名主干+版本词', 'src/' + 'main' + '.ts ' + NAME_SUFFIX + ' 未涉及'],
+  ['占位符惯例', '<MAIN_REPO>-db-backup'],
+  ['占位符惯例·紧凑', '<REPO_ROOT>/<TEMP_ROOT>'],
+  ['无关英文词', 'derivative'],
+  ['无关标识符', 'mainFrame component']
+]
+
+function selfCheckNamingRule() {
+  // 连写组：命中必须且只能来自第三态 —— 前两态（NFKC 折叠态 / 隐形字符分隔态）双双不命中才算"仅第三态可捕获"
+  let seedsConcat = 0
+  for (const [label, sample] of NAMING_SEEDS_CONCAT) {
+    if (!hitsName(sample)) {
+      fail('scripts/ci/check-docs.mjs', `命名纪律规则自检：连写组种子未被捕获（第三态连写规则失效或量词被改窄？）（${label}）`)
+      continue
+    }
+    if (NAME_RE.test(normalizeName(sample)) || NAME_RE.test(separateName(sample))) {
+      fail('scripts/ci/check-docs.mjs', `命名纪律规则自检：连写组种子被前两态命中（第三态严格性失效：命中不再唯一来自连写规则）（${label}）`)
+      continue
+    }
+    seedsConcat++
+  }
+  if (seedsConcat < NAMING_SEEDS_CONCAT_MIN) {
+    fail(
+      'scripts/ci/check-docs.mjs',
+      `命名纪律规则自检：连写组"仅第三态可捕获"的种子不足（${seedsConcat} < 下限 ${NAMING_SEEDS_CONCAT_MIN}；种子行被删或被改宽）`
+    )
+  }
+  // 分隔组：命中必须来自前两态之一（隐形字符面被改窄时，本组会退化为"仅第三态可捕获"而报红）
+  let seedsSeparated = 0
+  for (const [label, sample] of NAMING_SEEDS_SEPARATED) {
+    if (!NAME_RE.test(normalizeName(sample)) && !NAME_RE.test(separateName(sample))) {
+      fail('scripts/ci/check-docs.mjs', `命名纪律规则自检：分隔组种子未经前两态捕获（NFKC 折叠 / 隐形字符分隔面被改窄？）（${label}）`)
+      continue
+    }
+    seedsSeparated++
+  }
+  if (seedsSeparated < NAMING_SEEDS_SEPARATED_MIN) {
+    fail(
+      'scripts/ci/check-docs.mjs',
+      `命名纪律规则自检：分隔组正向种子不足（${seedsSeparated} < 下限 ${NAMING_SEEDS_SEPARATED_MIN}；种子行被删）`
+    )
+  }
+  for (const [label, sample] of NAMING_CONTROLS) {
+    if (hitsName(sample)) fail('scripts/ci/check-docs.mjs', `命名纪律规则自检：负对照被误伤（${label}）`)
+  }
+  return {
+    concat: NAMING_SEEDS_CONCAT.length,
+    separated: NAMING_SEEDS_SEPARATED.length,
+    seedsConcat,
+    seedsSeparated,
+    controls: NAMING_CONTROLS.length
+  }
+}
 
 function assertNamingDiscipline() {
+  const selfCheck = selfCheckNamingRule()
   for (const exempt of NAMING_EXEMPT) {
     if (!exists(exempt)) {
       fail(exempt, '命名纪律豁免清单中的文件不存在（豁免面与 docs/README.md §命名纪律不一致）')
@@ -315,10 +460,11 @@ function assertNamingDiscipline() {
     const text = buf.toString('utf8')
     if (!hitsName(text)) continue
     for (const { no, text: line } of text.split(/\r?\n/).map((t, i) => ({ no: i + 1, text: t }))) {
-      if (hitsName(line)) fail(`${relPath}:${no}`, '命中命名纪律禁则（旧主仓目录名/同名分支名；指代一律用占位符）')
+      if (hitsName(line)) fail(`${relPath}:${no}`, '命中命名纪律禁则（旧主仓目录名/同名分支名，含零分隔连写形态；指代一律用占位符）')
     }
   }
   console.log(`         （命名纪律扫描：git ls-files ${gitLsFiles().length} 个路径，实扫文本 ${scanned} 个；豁免 ${exemptSet.size} 个）`)
+  console.log(`         （规则自检：连写组 ${selfCheck.seedsConcat}/${selfCheck.concat} 例「仅第三态可捕获」（下限 ${NAMING_SEEDS_CONCAT_MIN}）；分隔组 ${selfCheck.seedsSeparated}/${selfCheck.separated} 例经前两态捕获（下限 ${NAMING_SEEDS_SEPARATED_MIN}）；负对照 ${selfCheck.controls} 全不误伤）`)
 }
 
 // ── ⑥ .java 探针不参与构建 ──────────────────────────────────────────────────
@@ -361,7 +507,10 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
   ② 技术栈版本与 backend/pom.xml、frontend/package.json 一致
   ③ 导航/口径文档引用的仓库内文件存在
   ④ 端口表与 application.yml / vite.config.ts 一致（含默认值三方对齐与端口唯一事实源）
-  ⑤ 命名纪律禁则（git ls-files 全量；唯一豁免 = 3 个 spike 脱敏脚本的匹配源正则）
+  ⑤ 命名纪律禁则（git ls-files 全量；匹配三态 = NFKC + 隐形/零宽字符双态 + 去分隔符连写，带词首守卫，
+     断言内自带正向种子/负对照自检，种子拆「连写组 / 分隔组」两组并各设数量下限；唯一豁免 = 3 个
+     spike 脱敏脚本的匹配源正则。**已知缺口**：NFKC 不折叠的同形字母（西里尔/希腊等）可穿过，详见
+     scripts/ci/check-docs.mjs 断言 ⑤ 段注释末尾的缺口登记）
   ⑥ docs/evidence/probes/ 的 .java 探针不参与构建
 
 扫描范围：①②③④ 只扫导航/口径文档（${NAV_DOCS.join(' / ')}），
