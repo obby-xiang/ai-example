@@ -4,7 +4,7 @@
 
 - 需求基线：`docs/02-需求设计文档-v2.2-冻结版.md`
 - 技术方案：`docs/03-技术方案文档-v2.1.md`
-- 决策登记：`docs/adr/DECISION-REGISTER.md`（DC-01~16）
+- 决策登记：`docs/adr/DECISION-REGISTER.md`（DC-01~18）
 - 全部文档导航：`docs/README.md`
 
 ---
