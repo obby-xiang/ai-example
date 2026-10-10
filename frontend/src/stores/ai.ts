@@ -16,7 +16,7 @@ import { ApiError } from '@/api/http'
 import { aiApi } from '@/api/ai'
 import type { SseFrameHandlers, SseStreamOptions } from '@/api/sse'
 import { onWorkspaceEvent, useWorkspaceStore } from '@/stores/workspace'
-import { executeFrontendTool, parseToolArgs } from '@/utils/frontend-tools'
+import { deriveFrontendToolBudgetMs, executeFrontendTool, parseToolArgs } from '@/utils/frontend-tools'
 import { ErrorCode, type SessionBusyConflict, type SuspendPoolSaturated } from '@/types/api'
 import { frameSeq, isTerminalFrame } from '@/types/sse'
 import { GENERATIVE_FORM_TOOL, type ActiveGenerativeForm, type AiHealth, type AiHistory, type AiRunCurrent, type AiSessionMirror, type ChatMessage, type PendingToolCall, type ToolRun } from '@/types/ai'
@@ -1477,7 +1477,15 @@ export const useAiStore = defineStore('ai', {
       message.toolRuns.push(run)
     },
 
-    /** 执行前端工具并把结果回灌（三级可用性兜底在 utils/frontend-tools.ts）。 */
+    /**
+     * 执行前端工具并把结果回灌（三级可用性兜底 + **统一超时预算**在 utils/frontend-tools.ts）。
+     *
+     * 预算由帧里的**服务端**挂起上限折算（`timeoutSeconds`，默认 120s → 90s），
+     * 理由与取值见 `FRONTEND_TOOL_TIMEOUT_BUDGET_MS`：本函数必须等 `executeFrontendTool`
+     * 返回才发 POST，因此预算是"回灌一定发出"的保障（issue#6）。
+     * `generative_form` 不走本函数（帧 handler 特判 `openGenerativeForm`），其挂起等的是
+     * 用户填写，不受本预算影响。
+     */
     async runFrontendTool(
       message: ChatMessage,
       frame: Extract<SseFrame, { type: 'frontend_tool_request' }>
@@ -1485,7 +1493,8 @@ export const useAiStore = defineStore('ai', {
       const execution = await executeFrontendTool({
         name: frame.name,
         toolCallId: frame.toolCallId,
-        args: parseToolArgs(frame.args)
+        args: parseToolArgs(frame.args),
+        budgetMs: deriveFrontendToolBudgetMs(frame.timeoutSeconds)
       })
       this.upsertToolRun(message, {
         toolCallId: frame.toolCallId,

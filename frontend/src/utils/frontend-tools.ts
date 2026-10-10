@@ -8,25 +8,37 @@
  * 在 main 里都是 BACKEND，不再像旧基座那样挂起等前端）。所以：
  * - 路由 1 覆盖 `FRONTEND_TOOLS` 登记的前端工具（2 个：`open_export_file_editor` / `download_export_file`），
  *   完整实现；
- * - 路由 2/3 是**补丁②**：把蓝本形态的工作区动作（`navigate_to` / `select_definitions` /
- *   `set_condition` / `confirm_step` 及蓝本别名）做成可执行能力表 —— 这 4 个后端已标为 FRONTEND
- *   并披露，故今天经任何 `frontend_tool_request` 帧或契约层驱动即可生效，前端零改动（见 `WORKSPACE_ACTIONS`）；
+ * - 路由 2（兜底直调 `dispatchUiEvent`，与路由 3 是**同一落点**，并非"落回路由 3"）是**补丁②**：把蓝本形态的工作区动作（`navigate_to` /
+ *   `select_definitions` / `set_condition` / `confirm_step` 及蓝本别名）做成可执行能力表 ——
+ *   这 4 个后端已标为 FRONTEND 并披露，故今天经任何 `frontend_tool_request` 帧或契约层驱动
+ *   即可生效，前端零改动（见 `WORKSPACE_ACTIONS`）；
  * - `generative_form` 前端执行接入已落地（GF-B）：`stores/ai.ts` 对 `frontend_tool_request` 特判 +
  *   AiPanel 渲染 `FormRenderer`，**不走本文件通用执行器**。
  *
- * 三条路由（AI 经 frontend_tool 帧驱动工作区的统一入口）：
+ * 四条路由（AI 经 frontend_tool 帧驱动工作区的统一入口；编号与 `dispatchFrontendTool`
+ * 内的分支注释一致，实读该方法确认共 4 条）：
  * 1. **后端披露的前端工具**（`FRONTEND_TOOLS`）：参数校验 + @ToolScope 校验 + 执行器/默认执行器；
  * 2. **工作区动作表**（`WORKSPACE_ACTIONS`：navigate_to / select_definitions / set_condition /
- *    confirm_step + 蓝本别名 select_config_defs / set_query_conditions / download_export_files …）：
+ *    confirm_step；别名经 `WORKSPACE_ACTION_ALIASES` 归一：select_config_defs /
+ *    set_query_conditions / goto_step / advance_step / restore_task / open_page）：
  *    先找页面能力 handler，再落契约层 `dispatchUiEvent`（与用户点击**同一套** action）；
  * 3. **ui_event 同名动作**（`select_defs` / `set_conditions` / `goto_step` / `open_page` /
- *    `download` / `run_job` …）：直接经契约层分发。
+ *    `download` / `run_job` …）：直接经契约层分发；
+ * 4. **页面能力 handler**（页面经 `registerPageHandler` 反向暴露，名字即 handler 名；
+ *    该页未登记时本分支走不到）。
  *
  * 三级可用性兜底（kimi 蓝本实践，TS 化）：
  * - available：默认执行器、页面 handler 或契约层动作可直接完成；
  * - degraded：能力当前不可用（页面未注册 handler），返回说明文本让模型改走别的路径，
  *   **不静默失败**，也不把异常抛回模型；
  * - unavailable：工具名未知 / 参数非法 / 当前上下文不该出现该工具（明确说明原因）。
+ *
+ * 统一超时预算（issue#6 根治面）：本文件是**回灌的唯一前置**（`useAiStore#runFrontendTool`
+ * 必须等 `executeFrontendTool` 返回才发 `POST /api/ai/frontend-tool-result`），故这里是
+ * "回灌不被无限拖住"的唯一可加缝点。`executeFrontendTool` 因此对**所有**路由统一加一层
+ * 预算（{@link FRONTEND_TOOL_TIMEOUT_BUDGET_MS}，默认 90s < 后端挂起上限 120s）：
+ * 预算到期即产出"结局未知"的结构化失败结局，回灌 POST 随之发出（**异步挂起类**不再迟到 /
+ * 丢失；**同步阻塞主线程类**的边界见 `runWithBudget` 的说明）。
  */
 
 import {
@@ -45,6 +57,12 @@ export interface FrontendToolCall {
   name: string
   toolCallId?: string
   args: Record<string, unknown>
+  /**
+   * 本次执行的自有超时预算（毫秒）；缺省用 {@link FRONTEND_TOOL_TIMEOUT_BUDGET_MS}。
+   * 调用方（`useAiStore#runFrontendTool`）由帧里的**服务端**挂起上限折算：
+   * `deriveFrontendToolBudgetMs(frame.timeoutSeconds)` —— 服务端改配置时预算自动跟随。
+   */
+  budgetMs?: number
 }
 
 /** 执行器签名：返回回灌给模型的结果文本。 */
@@ -140,12 +158,211 @@ export function parseToolArgs(raw: string | undefined | null): Record<string, un
 }
 
 /**
- * 执行前端工具（三级兜底 + 三条路由）。
+ * 前端工具执行器的统一超时预算（毫秒，默认 **90s**）—— 必须**小于**后端的前端工具挂起上限。
+ *
+ * **为什么要有**：后端对前端工具挂起的等待上限是 `app.ai.hitl.timeout`（默认 **120s**，
+ * 与确认门共用，见 backend `AiProperties$Hitl#timeout`），前端此前**没有任何自有预算**：
+ * 执行器一旦迟迟不返回（宿主浏览器的下载链路把页面拖住、或 `ensureTaskBoundForTool`
+ * 串行 HTTP 叠加吃满 axios 60s 上限），回灌 POST 就发不出去，后端在 120s 判前端超时，
+ * 模型与用户拿到的是"本次调用未获得数据"这种既非成功也非失败的空结局。
+ * 实测（issue#6，Kimi Code 自带浏览器）：回灌 POST 两轮 **>120s 未发出**（结局帧 120,004 /
+ * 120,007 ms），同一链路在自动化 Chromium 上仅 25~41 ms。
+ *
+ * **为什么是 90s**（而不是别的值）：
+ * - **上界**：必须 < 120s，且要给"超时结局 → 回灌 POST → 后端受理与判定"留够余量，
+ *   故取值 = 120s − {@link FRONTEND_TOOL_RESULT_HEADROOM_MS}（30s）。实测该链路正常耗时
+ *   合计 < 1s（POST 3.1ms + 后端受理回帧 25ms），30s 是"慢网络也不至于迟到"的保守余量。
+ * - **下界**：不能太小 —— 本预算不得把"慢但会成功"的执行掐掉。实测最慢的一次**成功**
+ *   回灌发生在 **30.6s**（issue#6 run3：下载被宿主浏览器拖住 30.1s 后才解析），
+ *   90s 覆盖这类慢成功，同时把 issue 那两轮失败从 120s 提前到 90s 收口。
+ * - **与服务端同源**：帧带 `timeoutSeconds`/`expiresAt`，调用方经
+ *   {@link deriveFrontendToolBudgetMs} 由服务端值折算，本常量即该折算的缺省上界。
+ */
+export const FRONTEND_TOOL_TIMEOUT_BUDGET_MS = 90_000
+
+/**
+ * 预算到期后留给"回灌 POST 发出 + 后端受理与判定"的余量（毫秒）。
+ *
+ * 取值依据见 {@link FRONTEND_TOOL_TIMEOUT_BUDGET_MS}：服务端上限（120s）− 本余量 = 前端预算。
+ */
+export const FRONTEND_TOOL_RESULT_HEADROOM_MS = 30_000
+
+/**
+ * 折算预算的下限（毫秒）：服务端上限被配得过小时，仍给执行器一点起码的完成时间。
+ *
+ * 与 {@link deriveFrontendToolBudgetMs} 的上限钳制冲突时以**上限为准**：服务端上限本身
+ * ≤ 本值时（病态配置），预算取服务端上限而非本值 —— 宁可无余量，也不倒挂。
+ */
+const MIN_FRONTEND_TOOL_TIMEOUT_BUDGET_MS = 5_000
+
+/**
+ * 由服务端帧的挂起上限折算出执行器预算：`服务端上限 − 余量`，先夹在
+ * `[MIN, FRONTEND_TOOL_TIMEOUT_BUDGET_MS]` 之间，**再以服务端上限本身为上界收口**
+ * （双钳制）；上限缺失 / 非法时回落默认值。
+ *
+ * 为什么以服务端值为准而不是写死 120s：帧里的 `timeoutSeconds` 就是后端真实等待上限
+ * （`app.ai.hitl.timeout`，可在配置里改）。以后端值为基算出预算，后端调整上限时前端无需
+ * 同步改常量。
+ *
+ * 为什么要叠第二道（服务端上限）钳制：上限 ≤ 5s 时 `服务端上限 − 余量 ≤ 0`，只夹下限会让
+ * 预算落到 5s 反而**反超**服务端上限（`timeoutSeconds=3` → 5000ms > 3000ms），与"预算必须
+ * 小于服务端挂起上限"的前提矛盾。故最终预算 = `min(上面的折算结果, timeoutSeconds × 1000)`：
+ * - 下限 5s 防"预算过短"，上限 `timeoutSeconds × 1000` 防"预算倒挂"，两者冲突时上限优先；
+ * - 该分支下预算 == 服务端上限、回灌余量被压到 0。上限 ≤5s 属**病态配置**（实践中服务端
+ *   默认 120s），此分支只是"不倒挂"的兜底：到点即回灌，仍比"什么都不发、坐等后端判超时"
+ *   多一次如实回执。
+ */
+export function deriveFrontendToolBudgetMs(timeoutSeconds?: number | null): number {
+  const serverBudgetMs = typeof timeoutSeconds === 'number' && Number.isFinite(timeoutSeconds) && timeoutSeconds > 0
+    ? timeoutSeconds * 1000
+    : null
+  if (serverBudgetMs === null) {
+    return FRONTEND_TOOL_TIMEOUT_BUDGET_MS
+  }
+  const usableMs = serverBudgetMs - FRONTEND_TOOL_RESULT_HEADROOM_MS
+  const clampedMs = Math.max(MIN_FRONTEND_TOOL_TIMEOUT_BUDGET_MS, Math.min(FRONTEND_TOOL_TIMEOUT_BUDGET_MS, usableMs))
+  // 第二道钳制：小上限场景（≤5s）下上面的下限会反超上限，故以服务端上限收口（见上方注释）。
+  return Math.min(clampedMs, serverBudgetMs)
+}
+
+/** 预算取整：非法值一律回落默认值（预算不允许被调用方"关掉"）。 */
+function normalizeBudgetMs(value?: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? value
+    : FRONTEND_TOOL_TIMEOUT_BUDGET_MS
+}
+
+/**
+ * 预算包装的结局（内部判别联合，不对外暴露）：`settled` = 执行器给了结局；
+ * `timeout` = 预算先到（`elapsedMs` 是**实际**等待时长，可能远大于预算，见下）。
+ */
+type BudgetOutcome =
+  | { kind: 'settled'; execution: FrontendToolExecution }
+  | { kind: 'timeout'; elapsedMs: number }
+
+/**
+ * 执行前端工具（三级兜底 + 四条路由 + 统一超时预算）。
  *
  * 返回的 `result` 文本会被原样回灌给模型（POST /api/ai/frontend-tool-result），
  * 因此失败时也要给**可读、可行动**的说明，而不是抛异常。
+ *
+ * 预算只包**本层**、不包 `generative_form`：后者的挂起等的是**用户填写**（`stores/ai.ts`
+ * 的 `openGenerativeForm` 特判，自己按帧时限收敛，不进本函数），因此不存在"用户还在填表、
+ * 前端预算先把工具判成超时"的风险。
  */
 export async function executeFrontendTool(call: FrontendToolCall): Promise<FrontendToolExecution> {
+  const budgetMs = normalizeBudgetMs(call.budgetMs)
+  const startedAt = Date.now()
+  const outcome = await runWithBudget(dispatchFrontendTool(call), budgetMs, startedAt)
+  return outcome.kind === 'timeout'
+    ? timeoutOutcome(call, budgetMs, outcome.elapsedMs)
+    : outcome.execution
+}
+
+/**
+ * 预算包装：执行器结局 vs 计时器，先到者胜。
+ *
+ * **硬保证（异步挂起类）**：执行器只要不 settle（promise 永不落地、串行 HTTP 叠加等），
+ * 计时器到点即产出超时结局 → `executeFrontendTool` 返回 → 回灌 POST 发出。
+ *
+ * **本层做不到的事（诚实边界）**：计时器是宏任务，**无法打断同步阻塞主线程的执行器**。
+ * 阻塞结束后的两条分支（node 侧逻辑验证脚本 §⑧a/⑧b 实证）：
+ * - 执行器随即给出结局 → 微任务先于"已过期的宏任务"，按**真实结局**回灌（慢成功仍报成功：
+ *   不把已有确定结局的执行谎报成超时）；此时回灌时刻 = 阻塞结束时刻，若阻塞在 120s 内结束，
+ *   回灌仍赶得及被后端受理；
+ * - 执行器仍未给出结局 → 过期计时器**立刻补触发**，回灌超时结局（不丢结局、不悬挂）。
+ * 若阻塞本身超过后端 120s 上限（issue#6 两轮实测即此形态），则当次回灌必然迟到 ——
+ * 页面内任何计时器都做不到更早（该限制与证据见施工报告"遗留风险"）。此时
+ * `timeout.elapsedMs` 会明显大于预算，正是"执行器内主线程被长时间阻塞"的信号，
+ * 也被如实写进超时文案的"已等待 N 秒"。
+ *
+ * 超时分支**只依赖计时器**：不依赖执行器 settle，也不依赖它 reject —— 这对
+ * `download_export_file` 是必需的（`ExportWizardView#downloadOne` 把自身异常吞进
+ * `ElMessage` 后 void 返回、从不 rethrow，所以"等它 reject"永远不会发生）。
+ */
+async function runWithBudget(
+  task: Promise<FrontendToolExecution>,
+  budgetMs: number,
+  startedAt: number
+): Promise<BudgetOutcome> {
+  let timer: ReturnType<typeof setTimeout> | null = null
+  const expired = new Promise<BudgetOutcome>((resolve) => {
+    timer = setTimeout(() => resolve({ kind: 'timeout', elapsedMs: Date.now() - startedAt }), budgetMs)
+  })
+  try {
+    // dispatchFrontendTool 按契约不 reject（每条路由内部都把异常翻成结局文本：见
+    // runRegisteredTool / runPageHandler 的 try-catch、dispatchUiEvent → runUiEvent 的
+    // try-catch、emitWorkspaceEvent 逐订阅者 try-catch），故 race 的败者不会因 reject
+    // 变成未处理拒绝。
+    return await Promise.race([
+      task.then((execution): BudgetOutcome => ({ kind: 'settled', execution })),
+      expired
+    ])
+  } finally {
+    if (timer !== null) {
+      clearTimeout(timer)
+    }
+  }
+}
+
+/**
+ * "下载类"前端工具名 —— 超时文案要按结局区分：下载是本包里唯一"副作用可能已发生、
+ * 只是回执没回来"的动作，措辞必须与确定性失败分开（否则模型会去重复触发下载）。
+ *
+ * 名单对应两条**实际可达**的路由命名面：登记工具 `download_export_file`（路由 1）与
+ * ui_event 同名动作 `download`（路由 3）。
+ *
+ * `download_export_files` 是蓝本（旧基座）名，当前**未登记**于任何路由：既不在
+ * `FRONTEND_TOOLS`，也不在 `WORKSPACE_ACTION_ALIASES`（该表只归一 select_config_defs /
+ * set_query_conditions / goto_step / advance_step / restore_task / open_page）。故它送进来会
+ * 立刻落到"未知前端工具"的 unavailable 结局、预算不介入，**达不成超时文案**；保留是为了
+ * 防御性的口径一致 —— 若该蓝本名日后被登记（或经别的通道到达并触发超时），仍按下载类收口。
+ */
+const DOWNLOAD_TOOL_NAMES: readonly string[] = ['download_export_file', 'download_export_files', 'download']
+
+/**
+ * 超时结局文案（结局驱动，中文，**不谎报**）：说明"结局未知"，并按工具类型给出可行动指引。
+ *
+ * - 下载类：如实说"可能仍在后台继续 / 请到下载目录确认"（实测确有"拖了 30.6s 仍成功落盘"
+ *   的轮次），并明确要求**不要重复触发下载**；
+ * - 其余工具：如实说"结局未知"，请用户核对界面实际状态，不替用户判定成功或失败。
+ *
+ * 与"确定性失败"（执行器/ handler 抛错 → `执行失败：<原因>。请提示用户手动重试`）的差别在
+ * 于：那条有明确原因、可判定未完成；本条只说明**没有拿到回执**。
+ *
+ * 注意（吞异常的现状）：`downloadOne` 吞掉自身异常 ⇒ 该执行器**从不 reject**，"下载失败却
+ * 回灌成功"是同一处的另一个面（谎报成功，P1），不在本预算职责内 —— 本函数只负责"没拿到
+ * 回执"这一种结局。
+ */
+function timeoutOutcome(call: FrontendToolCall, budgetMs: number, elapsedMs: number): FrontendToolExecution {
+  const label = toolDisplayName(call.name)
+  // 两个秒数都写进文案：`waitedSeconds` 是**实际**等待（正常情况下 ≈ 预算；明显大于预算时，
+  // 说明执行器内主线程被长时间阻塞，见 runWithBudget 的分支说明），`budgetSeconds` 是预算本身。
+  const waitedSeconds = Math.round(elapsedMs / 1000)
+  const budgetSeconds = Math.round(budgetMs / 1000)
+  const result = DOWNLOAD_TOOL_NAMES.includes(call.name)
+    ? `${label}（${call.name}）前端超时：等待 ${waitedSeconds} 秒仍未收到浏览器的完成回执（执行器预算 ${budgetSeconds} 秒）。`
+      + '该操作可能仍在后台继续，文件也许已经下载到浏览器的下载目录。'
+      + '请让用户先到下载目录确认文件是否已落盘，再决定是否需要重试；不要直接重复触发下载。'
+      + '本次调用结局未知 —— 既未确认成功，也未确认失败。'
+    : `${label}（${call.name}）前端超时：等待 ${waitedSeconds} 秒仍未返回执行结果（执行器预算 ${budgetSeconds} 秒）。`
+      + '本次调用结局未知 —— 既未确认成功，也未确认失败。'
+      + '请提示用户核对界面上的实际状态（相关卡片、列表或表格，以及数据是否已变化），确认后再决定是否重试。'
+  return { ok: false, availability: 'degraded', result }
+}
+
+/** 工具中文名（回灌文案用）：登记工具 / 工作区动作表优先，未知工具回落原始名。 */
+function toolDisplayName(name: string): string {
+  const descriptor = findFrontendTool(name)
+  if (descriptor) {
+    return descriptor.displayName
+  }
+  const action = findWorkspaceAction(name)
+  return action ? action.displayName : name
+}
+
+/** 四条路由的统一派发（不含预算；预算包在 {@link executeFrontendTool} 外层）。 */
+async function dispatchFrontendTool(call: FrontendToolCall): Promise<FrontendToolExecution> {
   const descriptor = findFrontendTool(call.name)
   if (descriptor) {
     return await runRegisteredTool(descriptor, call)
@@ -558,7 +775,7 @@ async function runRegisteredTool(
   }
 }
 
-/** 路由 2：ui_event 同名动作 → 契约层统一分发（与用户点击同一套 action）。 */
+/** 路由 3：ui_event 同名动作 → 契约层统一分发（与用户点击同一套 action）。 */
 async function runUiEventAction(name: UiEvent['type'], args: Record<string, unknown>): Promise<FrontendToolExecution> {
   const event = toUiEvent(name, args)
   if (!event) {
@@ -580,7 +797,7 @@ async function runUiEventAction(name: UiEvent['type'], args: Record<string, unkn
   }
 }
 
-/** 路由 3：页面 handler（页面未注册时该分支不会被走到）。 */
+/** 路由 4：页面 handler（页面未注册时该分支不会被走到）。 */
 async function runPageHandler(
   name: string,
   handler: (payload: Record<string, unknown>) => unknown | Promise<unknown>,
