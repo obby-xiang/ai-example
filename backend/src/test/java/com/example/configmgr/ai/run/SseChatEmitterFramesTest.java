@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.run;
 
+import com.example.configmgr.ai.conformance.FrameWire;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -32,6 +33,9 @@ import static org.mockito.Mockito.when;
  * S5c-1 起<b>业务帧</b>才占 {@code seq}，心跳走独立的 {@code heartbeatSeq}（见下条）；</li>
  * <li><b>T7</b>：心跳帧不入 {@code ai:events} 归档，但仍推给在线订阅者，并留下活动戳；
  * 它同时<b>不占业务序号</b>（S5c-1：否则跨进程续号会重用前端已覆盖的号 ⇒ 差量重挂静默丢帧）。</li>
+ * <li><b>T4-3 后半</b>：<b>实时</b>帧（含心跳）在帧构造点就带 {@code atMs}，与归档副本同值；
+ * 挂起类的 {@code expiresAt} 与同一帧 {@code atMs} 同钟单点取值 ⇒
+ * {@code expiresAt - atMs == timeoutSeconds * 1000L} 精确成立。</li>
  * </ul>
  */
 class SseChatEmitterFramesTest {
@@ -139,6 +143,70 @@ class SseChatEmitterFramesTest {
         // ③ 非心跳帧照旧归档，且序号是 1（心跳没有偷走一个业务号）
         this.emitter.delta("正文");
         assertThat(archivedFrames().get(0)).containsEntry("seq", 1L);
+    }
+
+    // ── T4-3 后半：实时帧 atMs 覆盖 ──────────────────────────────────────────
+
+    @Test
+    void liveFramesCarryAtMsFromEmission() {
+        FrameWire wire = FrameWire.attachTo(this.emitter);
+        long before = System.currentTimeMillis();
+        this.emitter.start("s-1");
+        this.emitter.delta("正文");
+        this.emitter.confirmRequest(pending("call-1"), 120);
+        this.emitter.heartbeat(Map.of("suspendKind", "confirm", "waitedSeconds", 4));
+        this.emitter.done(Map.of(), "deepseek-flash", Map.of("cancelled", false));
+        long after = System.currentTimeMillis();
+
+        List<Map<String, Object>> live = wire.frames();
+        assertThat(live).extracting(frame -> frame.get("type"))
+                .containsExactly("start", "delta", "confirm_request", "heartbeat", "done");
+        // 覆盖含心跳/正文在内的一切帧：atMs 在帧构造点即定型，故实时投递原文里必须逐帧可见
+        for (Map<String, Object> frame : live) {
+            Object atMs = frame.get("atMs");
+            assertThat(atMs).as("实时帧 %s 必须带 atMs", frame.get("type")).isInstanceOf(Number.class);
+            assertThat(((Number) atMs).longValue()).as("实时帧 %s 的 atMs 落在发射窗口内", frame.get("type"))
+                    .isPositive()
+                    .isBetween(before, after);
+        }
+    }
+
+    @Test
+    void confirmRequestsShareOneClockBetweenAtMsAndExpiry() {
+        FrameWire wire = FrameWire.attachTo(this.emitter);
+
+        this.emitter.confirmRequest(pending("call-1"), 120);
+        this.emitter.frontendToolRequest(pending("call-2"), 30);
+
+        List<Map<String, Object>> live = wire.frames();
+        assertThat(live).extracting(frame -> frame.get("type"))
+                .containsExactly("confirm_request", "frontend_tool_request");
+        // 精确等式（long 运算，无容差）：expiresAt 与 atMs 必须同一取钟点，否则折算剩余时长会被毫秒差污染
+        for (Map<String, Object> frame : live) {
+            long atMs = ((Number) frame.get("atMs")).longValue();
+            long expiresAt = ((Number) frame.get("expiresAt")).longValue();
+            long timeoutSeconds = ((Number) frame.get("timeoutSeconds")).longValue();
+            assertThat(expiresAt - atMs).as("帧 %s 的 expiresAt − atMs", frame.get("type"))
+                    .isEqualTo(timeoutSeconds * 1000L);
+        }
+    }
+
+    @Test
+    void archivedAtMsMatchesLiveAtMs() {
+        FrameWire wire = FrameWire.attachTo(this.emitter);
+
+        this.emitter.start("s-1");
+        this.emitter.confirmRequest(pending("call-1"), 120);
+        this.emitter.done(Map.of(), "deepseek-flash", Map.of());
+
+        List<Map<String, Object>> live = wire.frames();
+        List<Map<String, Object>> archived = archivedFrames();
+        // "归档 = 投递同一份帧"（T3-10 口径）不被 atMs 前移破坏：两者逐帧同值
+        assertThat(archived).hasSameSizeAs(live);
+        for (int i = 0; i < live.size(); i++) {
+            assertThat(archived.get(i).get("atMs")).as("第 %d 帧归档 atMs 与实时投递原文", i)
+                    .isEqualTo(live.get(i).get("atMs"));
+        }
     }
 
     // ── T6：reattach 增量补发 + 孤儿过滤 ─────────────────────────────────────

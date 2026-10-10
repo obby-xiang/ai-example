@@ -152,10 +152,17 @@ class SseFrameSizeLimitTest {
 
 	// ───────────────────────── 辅助 ─────────────────────────
 
-	/** delta 帧的骨架（text 为空）——用来精确算"恰好到上限"的字符数。 */
+	/**
+	 * delta 帧的骨架（text 为空）——用来精确算"恰好到上限"的字符数。
+	 *
+	 * <p>
+	 * 必须与 {@code SseChatEmitter#frame} 的骨架逐字段同形（T4-3 后半起该骨架含 {@code atMs}，
+	 * 服务端钟 13 位毫秒）；少一个字段就会把"恰好等于上限"算小，边界用例误判为超限。
+	 */
 	private Map<String, Object> emptyTextFrame() {
 		Map<String, Object> frame = new LinkedHashMap<>();
 		frame.put("type", "delta");
+		frame.put("atMs", System.currentTimeMillis());
 		frame.put("messageId", "assistant-" + RUN_ID);
 		frame.put("text", "");
 		frame.put("runId", RUN_ID);
