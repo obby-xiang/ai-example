@@ -88,10 +88,11 @@ export interface SseFrameBase {
    */
   seq?: number
   /**
-   * T4-3：帧**落档**时刻（epoch 毫秒；后端 `RunStore#appendEvent` 落档时 `putIfAbsent` 补入）。
-   * 仅**归档 / 回放**帧带本字段 —— 实时帧在补 `atMs` 之前就已序列化发出（`SseChatEmitter#emit`
-   * 的 `payloadBytes` 早于落档），故前端必须按可选字段处理、缺字段时走回落分支。
-   * 与 `expiresAt` 同源（同一服务端钟基准）⇒ 二者之差 = 服务端给出的**剩余时长**。
+   * T4-3：帧的**服务端构造时刻**（epoch 毫秒；后端帧构造点 `SseChatEmitter#frame` 取值）。
+   * **实时帧与归档 / 回放帧都带本字段**（同一份帧：`RunStore#appendEvent` 的补入只是兜底），
+   * 故前端按可选字段处理即可 —— 仅旧格式帧 / 损坏数据缺失。
+   * 与 `expiresAt` 同一服务端钟、同一帧内单点取值 ⇒ 二者之差精确等于 `timeoutSeconds * 1000`，
+   * 即服务端给出的**剩余时长**（T4-3 后半）。
    */
   atMs?: number
 }
@@ -163,10 +164,11 @@ export interface SseConfirmRequestFrame extends SseFrameBase {
   summary?: string
   timeoutSeconds: number
   /**
-   * DC-14 T4：挂起等待的**绝对**到期时刻（epoch 毫秒 = 挂起时刻 + timeoutSeconds）。
-   * T4-3 起倒计时口径改为：帧带 `atMs`（仅归档 / 回放帧）时按**服务端剩余时长**
-   * `expiresAt − atMs` 折算（免疫客户端钟漂移）；缺 `atMs`（实时帧）才退回用本绝对值直接
-   * 对本地钟；两者皆缺再回落 `timeoutSeconds`。折算实现见 `stores/ai.ts` 的 `foldDeadline`。
+   * DC-14 T4：挂起等待的**绝对**到期时刻（epoch 毫秒 = 帧内 `atMs` + timeoutSeconds，服务端单点取钟）。
+   * T4-3 后半起倒计时口径为：帧带 `atMs`（实时 / 归档帧均带）时按**服务端剩余时长**
+   * `expiresAt − atMs` 折算（免疫客户端钟漂移）；缺 `atMs` 或 `atMs ≤ 0`（旧格式 / 损坏数据）才
+   * 退回用本绝对值直接对本地钟；两者皆缺再回落 `timeoutSeconds`。折算实现见 `stores/ai.ts`
+   * 的 `foldDeadline`。
    */
   expiresAt?: number
   /** 回调端点说明文本：POST /api/ai/confirm {runId, toolCallId, approved, reason} */
@@ -193,7 +195,7 @@ export interface SseFrontendToolRequestFrame extends SseFrameBase {
   name: string
   args?: string
   timeoutSeconds: number
-  /** DC-14 T4 同口径：绝对到期时刻（epoch 毫秒）；T4-3 起帧带 `atMs` 时按剩余时长折算，见 `SseConfirmRequestFrame.expiresAt` */
+  /** DC-14 T4 同口径：绝对到期时刻（epoch 毫秒）；T4-3 后半起帧恒带 `atMs`，按 `expiresAt − atMs` 剩余时长折算，见 `SseConfirmRequestFrame.expiresAt` */
   expiresAt?: number
   /** 回调端点说明文本：POST /api/ai/frontend-tool-result {runId, toolCallId, result} */
   callback?: string

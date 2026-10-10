@@ -207,13 +207,14 @@ export interface PendingToolCall {
   timeoutSeconds?: number
   /**
    * DC-14 T4：挂起等待的绝对到期时刻（epoch 毫秒，服务端给的 `expiresAt`）。
-   * T4-3 起倒计时按**服务端剩余时长**折算（见 `atMs`）：`atMs` 可用时用 `expiresAt − atMs`，
-   * 不可用（实时帧）才用本绝对值直接对本地钟；两者皆缺再回落 `timeoutSeconds`。
+   * T4-3 后半起倒计时按**服务端剩余时长**折算（见 `atMs`）：`atMs` 可用（> 0）时用
+   * `expiresAt − atMs`；不可用（旧格式 / 损坏数据）才用本绝对值直接对本地钟。
    */
   expiresAt?: number
   /**
-   * T4-3：帧落档时刻（epoch 毫秒；仅归档 / 回放帧带，实时帧无）—— 与 `expiresAt` 同为
-   * 服务端钟，二者之差即服务端给出的剩余时长（折算见 `stores/ai.ts` 的 `foldDeadline`）。
+   * T4-3：帧的**服务端构造时刻**（epoch 毫秒；实时 / 归档帧均带）—— 与 `expiresAt` 同为
+   * 服务端钟、同帧单点取值，故二者之差即服务端给出的剩余时长（折算见 `stores/ai.ts` 的
+   * `foldDeadline`；`atMs ≤ 0` 视为不可用）。
    */
   atMs?: number
   /**
@@ -248,7 +249,7 @@ export interface ActiveGenerativeForm {
   status: GenerativeFormStatus
   /** 客户端复核 / 后端 FORM_RESULT_REJECTED 的提示（null = 无） */
   error: string | null
-  /** 本地判超时的绝对时刻（epoch 毫秒；服务端剩余时长折算 `expiresAt − atMs` 优先，缺 `atMs` 回落 `expiresAt` 绝对值、再缺回落 `timeoutSeconds`；null = 不限） */
+  /** 本地判超时的绝对时刻（epoch 毫秒；服务端剩余时长折算 `expiresAt − atMs` 优先（`atMs > 0`），缺 `atMs` 回落 `expiresAt` 绝对值、再缺回落 `timeoutSeconds`；null = 不限） */
   deadline: number | null
 }
 

@@ -561,10 +561,11 @@ function resetPendingWatch(pending: PendingToolCall | null): void {
     confirmDeadline.value = null
     return
   }
-  // T4-3（落点②，裁决 3）：按**服务端剩余时长**折算本地 deadline —— 帧带 `atMs`（仅归档 / 回放帧）
-  // 时取 `expiresAt − atMs`（两者同为服务端钟）再加本地 now，故客户端钟漂移 X 不再整段偏移倒计时
-  // （GFb 问题 7）；`atMs` 缺失（实时帧）回落绝对 `expiresAt` 对本地钟、再缺回落 timeoutSeconds。
-  // 口径与「重挂按帧落档时剩余时长重新起算」的代价说明见 `foldDeadline` 的注释。
+  // T4-3（落点②，裁决 3）：按**服务端剩余时长**折算本地 deadline —— 帧带 `atMs`（实时 / 归档帧
+  // 均带，后端帧构造点取值）时取 `expiresAt − atMs`（两者同为服务端钟）再加本地 now，故客户端钟
+  // 漂移 X 不再整段偏移倒计时（GFb 问题 7）；`atMs` 缺失或 ≤ 0（旧格式 / 损坏数据）回落绝对
+  // `expiresAt` 对本地钟、再缺回落 timeoutSeconds。
+  // 口径与「重挂按帧构造时剩余时长重新起算」的代价说明见 `foldDeadline` 的注释。
   confirmDeadline.value = foldDeadline(pending.expiresAt, pending.atMs, pending.timeoutSeconds)
 }
 
