@@ -4,7 +4,7 @@
 
 import dayjs from 'dayjs'
 import type { TaskStatus, TaskType } from '@/types/task'
-import type { JobType, ProgressView, Severity } from '@/types/job'
+import type { ProgressView } from '@/types/job'
 import { formatJobProgress } from '@/types/job'
 
 /**
@@ -68,19 +68,6 @@ export const TASK_STATUS_LABELS: Record<TaskStatus, string> = {
   COMPLETED: '已完成',
   CANCELLED: '已取消',
   FAILED: '已失败'
-}
-
-export const JOB_TYPE_LABELS: Record<JobType, string> = {
-  EXPORT: '导出',
-  PRECHECK: '预检查',
-  IMPORT: '导入',
-  PUBLISH: '发布'
-}
-
-export const SEVERITY_LABELS: Record<Severity, string> = {
-  ERROR: '错误',
-  WARNING: '警告',
-  INFO: '提示'
 }
 
 /** 步骤 key → 中文（与后端 @ToolScope 标签一致）。 */
