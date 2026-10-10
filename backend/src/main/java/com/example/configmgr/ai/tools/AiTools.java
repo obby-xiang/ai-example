@@ -130,16 +130,34 @@ public class AiTools {
 
     // ==================== 只读：任务与作业 ====================
 
-    @Tool(name = "list_tasks", description = "列出最近的任务列表（含类型/步骤/状态）")
+    /**
+     * {@code list_tasks} 一轮最多回填给模型的任务条数。
+     *
+     * <p>取值依据（业界依据 §8「分页大小主流默认」）：GitHub 默认 30 / 上限 100，Stripe 默认 10，
+     * 内网小数据量场景推荐<b>默认 20</b> —— 本值即该推荐值。且必须
+     * <b>&lt; {@code app.ai.tool-result.max-rows}</b>（200，见 application.yml），
+     * 否则二次截断会先于本上限生效，下方"共 N 条仅显示前 M 条"的告知就成了假话。
+     *
+     * <p>为什么必须带告知：本工具是模型判断"任务是否存在、处于哪一步"的入口；静默截断会让模型把
+     * 不完整清单当完整清单（2026-10-10 数字规格清点裁决②：原值 10 无注释、无告知、无截断标记）。
+     */
+    static final int LIST_TASKS_MAX_ROWS = 20;
+
+    // 上限的**调用前**告知：模型据此知道本工具不是"全量返回"，避免把截断后的列表当成任务的完整集合
+    // （消除谎报族；数字规格清点 B-1.4）。描述里的"前 20 条"与"超出时给出总条数"是
+    // 下方 limit(LIST_TASKS_MAX_ROWS) 与截断告知的现态口径 —— 三者必须同改（改值即改描述）。
+    @Tool(name = "list_tasks", description = "列出最近的任务列表（含类型/步骤/状态），最多返回前 20 条，超出时给出总条数")
     @ToolScope({"*", "page:tasks"})
     @ToolRisk(ToolMeta.RiskLevel.READ)
     public String listTasks() {
         List<Task> tasks = taskService.findAll();
         if (tasks.isEmpty()) return "当前没有任务，可以创建一个新任务";
-        return tasks.stream().limit(10).map(t ->
+        String rows = tasks.stream().limit(LIST_TASKS_MAX_ROWS).map(t ->
                 String.format("- #%d [%s] %s 步骤:%s 状态:%s",
                         t.getId(), t.getType(), t.getTitle(), t.getCurrentStep(), t.getStatus()))
                 .collect(Collectors.joining("\n"));
+        if (tasks.size() <= LIST_TASKS_MAX_ROWS) return rows;
+        return rows + "\n（共 " + tasks.size() + " 条，仅显示前 " + LIST_TASKS_MAX_ROWS + " 条）";
     }
 
     @Tool(name = "get_workspace_state", description = "获取当前工作区的任务状态快照")
@@ -480,7 +498,7 @@ public class AiTools {
      * 回灌，待决条目落 {@code FRONTEND_CANCELLED}（明确终态，不会无限悬置），模型收到
      * "用户取消，未获得数据"后自行收尾。</li>
      * </ol>
-     * 时间上限沿用既有前端通道口径（{@code app.ai.hitl.timeout}，默认 120s）：用户长时间不提交即
+     * 时间上限沿用既有前端通道口径（{@code app.ai.hitl.frontend-tool-timeout}，默认 120s）：用户长时间不提交即
      * {@code FRONTEND_TIMEOUT}。但<b>不能</b>把它读成"工具未执行"—— 超时的结局语义由挂起的
      * <b>类型</b>决定（见 {@code ConfirmGate#expire}）：确认门等的是人的决策，超时 = 确定未执行；
      * 前端工具等的是<b>前端回执</b>，超时只说明"回执没回来"，<b>结局未知</b>（副作用可能已经发生，
