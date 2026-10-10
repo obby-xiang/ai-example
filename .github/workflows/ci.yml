@@ -1,11 +1,19 @@
 name: CI 门禁
 
 # S5.d：门禁骨架 = 后端编译 + 后端单测 + 前端类型检查/构建。
-# M2-T1.2：新增 e2e job（桩上游 + services:redis 容器，跑满 28 用例）。
+# M2-T1.2：新增 e2e job（桩上游 + services:redis 容器，跑满 29 用例）。
 #   口径补注（设计草案 §4.3，只补注不改判定）：CI 内的 GFSKIP=0 由构造保证——桩按路由表下发
 #   生成式表单，"模型未触发/schema 漂移"两条 SKIP 分支不可达，故它只证明"桩给出的表单被产品链路
 #   正确消费"，不证明"模型服从率"。真模型的 E2E 维持本地手动（S5d 裁决 #3）；
 #   真实模型证据线的归属见 M2 排期 T4（nightly 真 key job 评估项）。
+#   M2-T4 T4-4（裁决 4）：GF6 入参闸门用例在桩模式启用并进主计数（29 用例），其非法 schema 由
+#   桩的 --violate-form-type（请求级，仅 GF6 提示词触发）构造保证 —— 故"桩模式零容忍"口径不变：
+#   GF6 的 SKIP 分支在桩下不可达（未产出即 FAIL），GFSKIP=0 仍由构造保证。
+# M2-T4 补充批（裁决①，2026-10-09）：**脱敏扫描分口径** ——
+#   历史 blob 扫描（scan-history job）降级为**报告制非阻断**（命中照常全量输出 + 上传 artifact +
+#   step summary 标注，但 job 不让 CI 红；历史命中无法靠改工作树消除，改写历史需用户专项授权）；
+#   工作树口径的阻断面不变 = docs job（断言 ⑤ 命名纪律按 git ls-files 全量扫描；断言 ① 盘符路径
+#   只覆盖 4 个导航/口径入口文档）与 pre-commit（本机暂存区）—— 各 job 的门禁/报告属性见各自节头标注。
 on:
   push:
     branches: [main]
@@ -92,7 +100,7 @@ jobs:
   #     （2026-10-09 实证：命令行含该 flag 即 exit 125）。
   # ============================================================
   e2e:
-    name: E2E 全流程（28 用例 · 桩上游 + redis）
+    name: E2E 全流程（29 用例 · 桩上游 + redis）
     runs-on: ubuntu-latest
     timeout-minutes: 25
     needs: backend
@@ -145,7 +153,7 @@ jobs:
           # 崩溃栈保证落盘（红队问题 2）：tee 双写——既进 stub.log（artifact），也进作业控制台（首屏可见）。
           # 用进程替换而非 `node … | tee`，是为了让 `$!` 仍是 node 的 PID（管道形式下 $! 会是 tee 的 PID，
           # 收尾 kill 会杀错进程）。桩内部另有 fs.writeSync 同步兜底，两道保险互为补充。
-          nohup node scripts/ci/stub-upstream.mjs --port 18399 \
+          nohup node scripts/ci/stub-upstream.mjs --port 18399 --violate-form-type \
             --dir "$GITHUB_WORKSPACE/backend/target/e2e-artifacts/stub" \
             > >(tee -a backend/target/e2e-artifacts/stub.log) 2>&1 &
           echo $! > backend/target/e2e-artifacts/stub.pid
@@ -169,7 +177,7 @@ jobs:
           echo $! > "$GITHUB_WORKSPACE/backend/target/e2e-artifacts/backend.pid"
 
       # 把"环境坏"与"用例失败"分开：无 key 时 /health 回 503 AI_UNAVAILABLE、
-      # Redis 不可用时回 503 AI_REDIS_UNAVAILABLE；本步不过就直接失败，不让 28 个用例全红。
+      # Redis 不可用时回 503 AI_REDIS_UNAVAILABLE；本步不过就直接失败，不让 29 个用例全红。
       - name: 就绪等待（/api/ai/health：available + redis.available）
         working-directory: ${{ github.workspace }}
         run: |
@@ -196,16 +204,19 @@ jobs:
           done
           echo "::error::60s 内 /api/definitions 未达 15（基座 7 + glm 8），种子播种未完成"; tail -n 40 backend/target/e2e-artifacts/boot.log; exit 1
 
-      - name: 运行 E2E（28 用例）
+      - name: 运行 E2E（29 用例）
         # 去掉 run 内的 `pwsh -NoProfile -File` 双层调用（红队问题 6①）：step 已经声明 shell: pwsh，
         # 直接以 pwsh 原生方式调用脚本；脚本内的 `exit N` 会成为 pwsh 进程退出码并被 shell 模板透传为 step 退出码。
+        # -EnableGf6（M2-T4 T4-4 裁决 4）：桩模式下 GF6 入参闸门用例启用并计入主计数；
+        #   底座是桩的 --violate-form-type（请求级，只在 GF6 提示词上触发，GF1/GF3/GF4 不受影响）。
         shell: pwsh
         working-directory: ${{ github.workspace }}
         run: |
           ./scripts/verify-e2e.ps1 `
             -Base http://127.0.0.1:18330 `
             -BackendLog "$env:GITHUB_WORKSPACE/backend/target/e2e-artifacts/boot.log" `
-            -ArtifactDir "$env:GITHUB_WORKSPACE/backend/target/e2e-artifacts/gfc"
+            -ArtifactDir "$env:GITHUB_WORKSPACE/backend/target/e2e-artifacts/gfc" `
+            -EnableGf6
 
       # 失败归因三件套：boot.log（产品日志）+ stub/req-*.json（桩收到的原请求与判定）+ gfc-*（脚本实收帧）。
       # 与 S5d 裁决 #2"CI 运行日志不归档"的对象不同（那是匿名取作业日志需 admin 权限），不构成翻案。
@@ -229,3 +240,107 @@ jobs:
           for f in "$dir/backend.pid" "$dir/stub.pid"; do
             if [ -f "$f" ]; then kill "$(cat "$f")" 2>/dev/null || true; fi
           done
+
+  # ============================================================
+  # 文档一致性门禁（DOC#5 / M2 排期条目 18；M2-T4 T4-7a-2 接线）
+  #   **本 job = 阻断门禁**（含工作树口径的阻断面：断言 ⑤ 命名纪律按 `git ls-files` 全量逐文件；
+  #   断言 ① 盘符路径只覆盖 4 个导航/口径入口文档 —— 与"历史 blob 扫描"的报告制口径相区分，见 scan-history job）。
+  #   scripts/ci/check-docs.mjs 的 6 条断言：① 导航文档无盘符路径 ② 技术栈版本与
+  #   pom.xml/package.json 一致 ③ README 引用文件存在 ④ 端口表与 application.yml/
+  #   vite.config.ts 一致 ⑤ 命名纪律禁则（git ls-files 全量）⑥ .java 探针不参与构建。
+  #   零第三方依赖（Node 内置模块），故无需安装依赖步骤。
+  #   断言 ①②③④ 只扫导航/口径文档（4 个，见脚本内 NAV_DOCS 清单），明确排除 docs/evidence/ 历史证据文档（裁决 7）。
+  # ============================================================
+  docs:
+    name: 文档一致性门禁（check-docs）｜阻断
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: 安装 Node 22
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: 文档一致性门禁（6 条断言）
+        run: node scripts/ci/check-docs.mjs
+
+  # ============================================================
+  # 全历史脱敏扫描（DC-08 兜底；M2-T4 T4-7a-3 接线）
+  #   scripts/githooks/scan-history.sh 扫 git rev-list --objects --all 可达的全部唯一 blob
+  #   （含历史版本中被改掉/删掉的内容），与 pre-commit 共用 scan-lib.sh 的 SECRET/PATH/USER 规则。
+  #
+  #   ★ 口径（裁决①，2026-10-09）｜**本 job = 报告制，不计门禁**：
+  #     - 首跑实测：工作树/暂存区口径 0 命中，但**历史 blob** 有 278 处 PATH 命中（CI 模拟口径）。
+  #     - ★ 两口径换算（勿混读）：278 = CI 模拟时点实测（施工报告 §14#1；其 USER 规则未生效，含仅存于
+  #       历史的 9 个路径）；302 = 当前 HEAD 全量实跑（红队复核 §d / T4-S2 复跑：302 处 / 40 个历史路径
+  #       = 278 PATH + 24 USER，其中 10 个路径仅存于历史、不在工作树）。
+  #     - 历史内容删不掉 —— 唯一手段是历史改写（filter-repo/BFG + 凭据轮换评估），该专项需用户专项授权
+  #       → 本周期不动，已在排期去向表登记为观察项。
+  #     - 故"命中"（脚本退出码 1）**不使本 job 红**：报告全量输出、上传 artifact、写 step summary，
+  #       另留 `::warning::` 标注；而"扫描器未完成"（退出码 2 = 环境/参数错误，非命中）仍为红
+  #       —— 那是门禁失效而非命中，不能静默放过。
+  #     - **工作树口径的阻断面不在本 job**：由 `docs` job（断言 ⑤ 命名纪律按 `git ls-files` 全量；
+  #       断言 ① 盘符路径只覆盖 4 个导航/口径入口文档）与 `pre-commit`（本机暂存区）承担，二者保持阻断（口径未削弱）。
+  #     - 独立 job、不 needs、不阻塞主路径；触发面随 workflow 现有 push(main) + pull_request
+  #       （脱敏是入库前纪律，PR 仍要留证）；fetch-depth: 0 保证 rev-list --all 拿到完整历史。
+  # ============================================================
+  scan-history:
+    name: 全历史脱敏扫描（报告制 · 不计门禁）
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # 全历史扫描必须拿到完整历史（默认 fetch-depth: 1 只取单个提交，
+          # rev-list --objects --all 会退化，扫不到历史 blob）。
+          fetch-depth: 0
+
+      # `set +e` + 显式取退出码：命中（1）不阻断本 step；只有扫描器未完成（2）才让 job 红。
+      # 报告落在 backend/target/（.gitignore 已排除 → 运行后工作区不留未跟踪文件），
+      # 且路径在 workspace 内（upload-artifact 只能归档 workspace 内文件）。
+      - name: 全历史脱敏扫描（--files-only · 报告制不计门禁）
+        id: scan
+        run: |
+          set +e
+          mkdir -p backend/target
+          sh scripts/githooks/scan-history.sh --files-only > backend/target/scan-history-report.txt 2>&1
+          code=$?
+          cat backend/target/scan-history-report.txt
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          {
+            echo "## 全历史脱敏扫描（报告制 · 不计门禁）"
+            echo ""
+            if [ "$code" = "0" ]; then
+              echo "- 结果：**0 命中**（历史 blob 亦干净）"
+            elif [ "$code" = "1" ]; then
+              echo "- 结果：**有命中（历史 blob）—— 报告制，不使 CI 红**（裁决①，2026-10-09）"
+              echo "- 去向：历史改写专项（filter-repo/BFG + 凭据轮换评估），需用户专项授权；本周期不动"
+              echo "- 命中摘要（仅路径与条数，不含命中内容）："
+              echo ""
+              echo '```'
+              sed -n '/命中路径清单/,/^$/p' backend/target/scan-history-report.txt
+              echo '```'
+            else
+              echo "- 结果：**扫描器未完成（退出码 $code = 环境/参数错误，非命中）—— 本 job 为红**"
+            fi
+            echo ""
+            echo "> 工作树口径的阻断面在 \`docs\` job（断言 ⑤ 命名纪律按 \`git ls-files\` 全量；断言 ① 盘符路径只覆盖 4 个导航/口径入口文档）与 \`pre-commit\`；本 job 只报告历史 blob。"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$code" != "0" ] && [ "$code" != "1" ]; then
+            echo "::error::scan-history 未完成（退出码 $code）：环境/参数错误，非命中（命中为 1，报告制不阻断）"
+            exit 1
+          fi
+          if [ "$code" = "1" ]; then
+            echo "::warning::历史 blob 存在脱敏命中（报告制，不计门禁）；详见 job summary 与 artifact scan-history-report"
+          fi
+
+      - name: 归档历史扫描报告（失败也归档，保留 7 天）
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: scan-history-report
+          path: backend/target/scan-history-report.txt
+          retention-days: 7
+          if-no-files-found: warn
