@@ -27,7 +27,7 @@
 
 **SSE 通道本体** — `task/service/TaskSseService.java`
 - `:23` 状态只有一张在线表：`Map<Long, List<SseEmitter>> emitters`（内存、按 taskId 分组）；**没有事件缓冲、没有事件序号、没有 lastEventId、没有持久化**。
-- `:25-36` `subscribe(taskId)`：新建 `SseEmitter(0L)`（永不超时）→ 加入在线表 → 注册 `onCompletion/onTimeout/onError` 清理（:29-31）→ **立刻只发一条 `HEARTBEAT`**（:34）→ 返回。**订阅动作本身不回放任何历史事件、也不带终态快照**。
+- `:25-36` `subscribe(taskId)`：新建 `SseEmitter(0L)`（永不超时）→ 加入在线表 → 注册 `onCompletion/onTimeout/onError` 清理（:29-31）→ **立刻只发一条 `HEARTBEAT`**（:34）→ 返回。**订阅动作本身不回放任何历史事件、也不带终态快照**。 —— 口径回灌（2026-10-10，本仓）：本行「`SseEmitter(0L)`（永不超时）」及同型「SSE 写侧无上界」口径已修正为**实测上界 ≈120s**（= Tomcat 容器写超时 ≈ `server.tomcat.connection-timeout` 120000ms 量级，随其配置漂移）；本仓「包②」（`3227b8b`+`4b1c6ec`）已把单帧写预算收紧至 **15s**，并把 emitter 生命周期超时由 `0L` 改为非零 **5m** + 缺省/0s 启动 fail-fast 守卫。本条属被核验分支的时点记录，按只追加纪律不回改原文；同文档 §4 的 B3 行（`:150`）含同型表述，本批未动、建议同款回灌。
 - `:49-65` `publish(taskId,type,data)`：`emitters.get(taskId)` 为空即**直接 return（事件被丢弃）**（:50-51）；有订阅者时逐条 `send`，把 IO 异常的 emitter 收进 `dead` 并移除（:53-63）。即"只在订阅者在线时送达"。
 - 事件类型共 4 种：`HEARTBEAT`（:34）、`TASK_CHANGED`（:39-47，`@EventListener TaskChangedEvent`）、`JOB_PROGRESS`、`JOB_DONE`。
 - 发布点（全仓 grep）：`ImportJobRunner.java:182-184`(JOB_DONE) / `:198-203`(JOB_PROGRESS)、`ExportJobRunner.java:160-162` / `:165-170`、`PrecheckJobRunner.java:247` / `:291`、`PublishJobRunner.java:209` / `:272`、`JobService.java:74-75`（取消时 JOB_DONE CANCELLED）。
