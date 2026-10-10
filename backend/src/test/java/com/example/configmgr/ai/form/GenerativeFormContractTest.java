@@ -8,8 +8,16 @@ import org.junit.jupiter.api.Test;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.method.MethodToolCallbackProvider;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -25,6 +33,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * （改 record 忘改白名单 / 反之，都会让"模型看到的形状"与"闸门接受的形状"分叉）；</li>
  * <li>复核器只认领自己的工具（不误伤既有前端工具）。</li>
  * </ol>
+ *
+ * <p>另含一条跨端锚定：{@link #forbiddenFieldKeysMatchAcrossEnds} 锁"原型键黑名单三键"在后端事实源
+ * （{@link GenerativeFormRules#FORBIDDEN_FIELD_KEYS}）、前端副本（`frontend/src/types/form-schema.ts`）、
+ * 桩副本（`scripts/ci/stub-upstream.mjs`）三处的逐键相等（排期条目 16 / M2-T4 T4-5）。
  *
  * <p>不启 Spring：{@code MethodToolCallbackProvider} 直接对 {@code AiTools} 实例生成回调，
  * 与运行时（{@code ToolRegistry} 扫描得到的）是同一份生成逻辑。
@@ -49,6 +61,35 @@ class GenerativeFormContractTest {
 		assertThat(this.guard.supports("navigate_to")).isFalse();
 		assertThat(this.guard.supports("set_condition")).isFalse();
 		assertThat(this.guard.supports(null)).isFalse();
+	}
+
+	// ── 跨端契约锚定：原型键黑名单（排期条目 16 / M2-T4 T4-5） ───────────────────
+
+	/**
+	 * 原型键三键在后端事实源、前端副本、桩副本之间<b>逐键相等</b>。
+	 *
+	 * <p>排期条目 16 的实现形态（裁决 5 = Java 用例读仓库相对路径）：本类原有的三例锁的是
+	 * 工具名 / 生成的 JSON Schema / 白名单属性，"原型键黑名单"不在其中，本用例补上该缺口。
+	 *
+	 * <p><b>文件位置依赖属期望行为</b>：本用例以仓库相对路径读
+	 * {@code ../frontend/src/types/form-schema.ts} 与 {@code ../scripts/ci/stub-upstream.mjs}
+	 * （工作目录 = {@code backend}，本地与 CI 一致）。这两个副本被移动/改名导致本用例红，
+	 * 正是"跨端契约漂移可见"的设计意图，不是环境问题。
+	 */
+	@Test
+	void forbiddenFieldKeysMatchAcrossEnds() throws IOException {
+		Set<String> backend = GenerativeFormRules.FORBIDDEN_FIELD_KEYS;
+		Set<String> frontend = quotedValuesOf(readDeclaration(
+				Path.of("..", "frontend", "src", "types", "form-schema.ts"),
+				"const FORBIDDEN_FIELD_KEYS = new Set\\(\\[([^\\]]*)\\]\\)"));
+		Set<String> stub = quotedValuesOf(readDeclaration(
+				Path.of("..", "scripts", "ci", "stub-upstream.mjs"),
+				"const FORBIDDEN_KEYS = \\[([^\\]]*)\\]"));
+
+		// 反例守卫：三键缺一即红 —— 防"空集对空集"式的恒真断言
+		assertThat(backend).containsExactlyInAnyOrder("__proto__", "constructor", "prototype");
+		assertThat(frontend).containsExactlyInAnyOrderElementsOf(backend);
+		assertThat(stub).containsExactlyInAnyOrderElementsOf(backend);
 	}
 
 	@Test
@@ -119,6 +160,28 @@ class GenerativeFormContractTest {
 	}
 
 	// ── 夹具 ────────────────────────────────────────────────────────────────
+
+	/** 读跨端副本里的常量声明（工作目录 = {@code backend}，路径为仓库相对）；取不到即断言失败。 */
+	private static String readDeclaration(Path relative, String declaration) throws IOException {
+		assertThat(Files.exists(relative))
+			.as("跨端副本必须存在（工作目录 = backend）：%s", relative.toAbsolutePath())
+			.isTrue();
+		Matcher matcher = Pattern.compile(declaration).matcher(Files.readString(relative, StandardCharsets.UTF_8));
+		assertThat(matcher.find())
+			.as("未在 %s 中找到声明 %s", relative, declaration)
+			.isTrue();
+		return matcher.group(1);
+	}
+
+	/** 声明片段里的单引号字面量集合（顺序保持）。 */
+	private static Set<String> quotedValuesOf(String literalList) {
+		Set<String> values = new LinkedHashSet<>();
+		Matcher matcher = Pattern.compile("'([^']+)'").matcher(literalList);
+		while (matcher.find()) {
+			values.add(matcher.group(1));
+		}
+		return values;
+	}
 
 	private ToolCallback callback() {
 		for (ToolCallback callback : MethodToolCallbackProvider.builder()
