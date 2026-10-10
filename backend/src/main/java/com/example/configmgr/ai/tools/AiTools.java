@@ -481,7 +481,10 @@ public class AiTools {
      * "用户取消，未获得数据"后自行收尾。</li>
      * </ol>
      * 时间上限沿用既有前端通道口径（{@code app.ai.hitl.timeout}，默认 120s）：用户长时间不提交即
-     * {@code FRONTEND_TIMEOUT}（同一条"未执行"语义）。
+     * {@code FRONTEND_TIMEOUT}。但<b>不能</b>把它读成"工具未执行"—— 超时的结局语义由挂起的
+     * <b>类型</b>决定（见 {@code ConfirmGate#expire}）：确认门等的是人的决策，超时 = 确定未执行；
+     * 前端工具等的是<b>前端回执</b>，超时只说明"回执没回来"，<b>结局未知</b>（副作用可能已经发生，
+     * 例如表单已提交、文件已落盘）。
      *
      * <p><b>方法体是哨兵桩</b>（{@link #FRONTEND_STUB}）：副作用（渲染表单、收集值）在前端，
      * 后端只挂起与回灌；schema 与回灌的校验在挂起机制里（{@code SpToolCallingManager}/

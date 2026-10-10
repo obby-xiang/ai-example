@@ -36,7 +36,8 @@ import java.util.concurrent.TimeUnit;
  * <li><b>拒绝</b>：{@code status=REJECTED}，结果文本回填"用户拒绝 + 原因"，<b>不执行</b>，
  * 官方循环照常继续（模型如实解释）；</li>
  * <li><b>超时</b>：等待超过 {@code app.ai.hitl.timeout}（默认 120s，ADR-2 上限约束）
- * 自动取消：{@code status=TIMEOUT, executed=false}，同样以"未执行"语义回填。</li>
+ * 自动取消：{@code status=TIMEOUT, executed=false}；结果文本按<b>挂起类型</b>分场景（见 {@link #expire}）——
+ * 确认门 = "工具未执行"（确定未发生），前端工具 = "回执没回来、结局未知"（副作用可能已发生）。</li>
  * </ul>
  *
  * <h2>状态在哪、唤醒在哪（硬规范①）</h2>
@@ -282,7 +283,17 @@ public class ConfirmGate {
 		return fresh;
 	}
 
-	/** 超时自动取消：把"未执行"这一结局也写进外置状态（重启后仍可读）。 */
+	/**
+	 * 超时收口：把结局也写进外置状态（重启后仍可读）。
+	 *
+	 * <p>两个分支的结局语义**不同**，文案必须分开：
+	 * <ul>
+	 * <li>确认门：等待的是人的决策 ⇒ 超时 = "未执行"（确定未发生，{@code CONFIRM_TIMEOUT}）；</li>
+	 * <li>前端工具：等待的是前端的回执 ⇒ 超时只说明"回执没回来"，**结局未知**
+	 * （{@code FRONTEND_TIMEOUT}）—— 副作用可能已经发生（如文件已落盘），故不再写
+	 * "本次调用未获得数据"这种会被读成"什么都没发生"的措辞。</li>
+	 * </ul>
+	 */
 	private PendingToolCall expire(String runId, PendingToolCall pending, int timeoutSeconds, boolean confirm) {
 		PendingToolCall fresh = this.store.pending(runId, pending.getToolCallId());
 		if (fresh == null) {
@@ -297,7 +308,7 @@ public class ConfirmGate {
 		fresh.setResolvedAtMs(System.currentTimeMillis());
 		fresh.setResultText(confirm
 				? "确认等待超过 " + timeoutSeconds + " 秒，系统已自动取消该操作（工具未执行）。"
-				: "前端工具 " + fresh.getName() + " 未在 " + timeoutSeconds + " 秒内回传执行结果（前端超时），本次调用未获得数据。");
+				: "前端工具 " + fresh.getName() + " 未在 " + timeoutSeconds + " 秒内收到前端回执，本次调用结局未知（不表示未发生）。");
 		this.store.putPending(runId, fresh);
 		// 超时的结局帧与人工决策同形（SP-01ab 实测形态：confirm_decision 的 decision=timeout），
 		// 前端不必区分"人拒绝"与"等超时"两套解析路径。

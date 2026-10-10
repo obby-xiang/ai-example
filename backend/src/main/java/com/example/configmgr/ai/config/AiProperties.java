@@ -117,7 +117,12 @@ public class AiProperties {
 
 		/**
 		 * 挂起等待上限（ADR-2 上限约束）：确认门与前端工具挂起共用。
-		 * 超过本上限即自动取消（{@code status=TIMEOUT}，工具未执行），循环继续。
+		 *
+		 * <p>超过本上限即收口（{@code status=TIMEOUT}），但两个场景的**结局语义不同**，文案也分开：
+		 * 确认门等的是人的决策 ⇒ "工具未执行"（确定未发生）；前端工具等的是前端的回执 ⇒
+		 * 只说明"回执没回来"、**结局未知**（副作用可能已经发生，如文件已落盘）。详见
+		 * {@code ConfirmGate#expire} 的分支文案与
+		 * {@code ConfirmGateFrontendTimeoutTextTest} 的回归锁。
 		 */
 		private Duration timeout = Duration.ofSeconds(120);
 	}
