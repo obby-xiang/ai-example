@@ -638,13 +638,31 @@ async function cancelJob(): Promise<void> {
 
 // ── 结果表格（懒加载 + 编辑） ──────────────────────────────────────────────────
 
-async function ensureGridLoaded(code: string): Promise<void> {
-  if (!code || loadedGrids.has(code) || taskId.value === null) {
-    return
+/**
+ * S2-1：本函数**返回真实结局**，不再把失败只吞进 `ElMessage` —— 调用方
+ * `PAGE_HANDLER_OPEN_EXPORT_EDITOR` 的 handler 必须据此回灌，否则引擎加载失败时会向模型
+ * 谎报"已打开在线编辑器"（B-07 让 `waitForReady` 必结算后，这条吞错路径由不可达变可达）。
+ * `error` 用 `error.message` 原文（`SpreadGrid#waitForReady` 已把引擎失败原文抛出）。
+ * `ElMessage.error`（用户可见）与 `loadedGrids` 回滚（允许重试）保留不变。
+ *
+ * 与预算的关系（S2-2 后同值，如实登记）：`SpreadGrid` 的就绪看门狗同为 60s
+ * （`READY_TIMEOUT_MS`），而前端工具预算折算后也是 60s（120s − 60s）——两者同值时预算可能
+ * 先到，那次回灌会是**通用超时文案**（同样声明"结局未知"、不谎报），本函数的失败结局来不及
+ * 被回灌；只有预算后到时才会回灌下面 handler 产出的"表格未就绪 + 引擎原文"。
+ */
+async function ensureGridLoaded(code: string): Promise<{ ok: boolean; error: string }> {
+  if (!code) {
+    return { ok: false, error: '缺少配置编码' }
+  }
+  if (loadedGrids.has(code)) {
+    return { ok: true, error: '' }
+  }
+  if (taskId.value === null) {
+    return { ok: false, error: '当前未绑定任务，无法读取结果文件' }
   }
   const grid = gridRefs[code]
   if (!grid) {
-    return
+    return { ok: false, error: `${code} 的结果表格组件未挂载（请重开该标签页重试）` }
   }
   loadedGrids.add(code)
   try {
@@ -653,9 +671,12 @@ async function ensureGridLoaded(code: string): Promise<void> {
     if (missingHeaders.length > 0) {
       ElMessage.warning(`${code} 的文件缺少字段列：${missingHeaders.join('、')}`)
     }
+    return { ok: true, error: '' }
   } catch (error) {
     loadedGrids.delete(code)
-    ElMessage.error(error instanceof Error ? error.message : `${code} 结果文件加载失败`)
+    const reason = error instanceof Error ? error.message : `${code} 结果文件加载失败`
+    ElMessage.error(reason)
+    return { ok: false, error: reason }
   }
 }
 
@@ -943,7 +964,16 @@ function registerHandlers(): void {
     }
     activeTab.value = defCode
     await nextTick()
-    await ensureGridLoaded(defCode)
+    // S2-1：回灌前校验真实结局 —— 引擎加载失败时 `ensureGridLoaded` 如实返回失败，
+    // 不能再无条件回灌"已打开在线编辑器"（B-07 让 `waitForReady` 必结算后，这条吞错路径
+    // 由不可达变为可达）。`loadedGrids` 命中即"此前已加载成功"的等价判据：引擎一旦失败过，
+    // 再要成功必须重挂组件，而重挂会重建本页状态、`loadedGrids` 随之清空。
+    const loaded = await ensureGridLoaded(defCode)
+    if (!loaded.ok) {
+      return `${defCode} 的在线编辑器表格未就绪（任务 #${taskId.value}）：${loaded.error}。`
+        + '导出结果步骤与该配置标签已切到前台，但表格位置是加载错误提示，没有可编辑的数据；'
+        + '请提示用户核对网络后重试，在此之前不要假设编辑器可用。'
+    }
     return `已打开任务 #${taskId.value} 的 ${defCode} 在线编辑器（导出结果表格）`
   })
 

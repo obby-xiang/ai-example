@@ -1480,8 +1480,9 @@ export const useAiStore = defineStore('ai', {
     /**
      * 执行前端工具并把结果回灌（三级可用性兜底 + **统一超时预算**在 utils/frontend-tools.ts）。
      *
-     * 预算由帧里的**服务端**挂起上限折算（`timeoutSeconds`，默认 120s → 90s），
-     * 理由与取值见 `FRONTEND_TOOL_TIMEOUT_BUDGET_MS`：本函数必须等 `executeFrontendTool`
+     * 预算由帧里的**服务端**挂起上限折算（`timeoutSeconds`，默认 120s → 60s = 上限 −
+     * 回灌 POST 的 axios 上限 60s），理由与取值见 `FRONTEND_TOOL_TIMEOUT_BUDGET_MS` /
+     * `deriveFrontendToolBudgetMs`：本函数必须等 `executeFrontendTool`
      * 返回才发 POST，因此预算是"回灌一定发出"的保障（issue#6）。
      * `generative_form` 不走本函数（帧 handler 特判 `openGenerativeForm`），其挂起等的是
      * 用户填写，不受本预算影响。

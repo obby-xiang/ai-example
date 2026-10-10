@@ -36,7 +36,7 @@
  * 统一超时预算（issue#6 根治面）：本文件是**回灌的唯一前置**（`useAiStore#runFrontendTool`
  * 必须等 `executeFrontendTool` 返回才发 `POST /api/ai/frontend-tool-result`），故这里是
  * "回灌不被无限拖住"的唯一可加缝点。`executeFrontendTool` 因此对**所有**路由统一加一层
- * 预算（{@link FRONTEND_TOOL_TIMEOUT_BUDGET_MS}，默认 90s < 后端挂起上限 120s）：
+ * 预算（{@link FRONTEND_TOOL_TIMEOUT_BUDGET_MS}，默认 60s = 后端挂起上限 120s − 回灌 POST 上限 60s）：
  * 预算到期即产出"结局未知"的结构化失败结局，回灌 POST 随之发出（**异步挂起类**不再迟到 /
  * 丢失；**同步阻塞主线程类**的边界见 `runWithBudget` 的说明）。
  */
@@ -158,7 +158,9 @@ export function parseToolArgs(raw: string | undefined | null): Record<string, un
 }
 
 /**
- * 前端工具执行器的统一超时预算（毫秒，默认 **90s**）—— 必须**小于**后端的前端工具挂起上限。
+ * 前端工具执行器的统一超时预算缺省值（毫秒，默认 **60s**）—— 帧里没带合法 `timeoutSeconds`
+ * 时的回落值，也是"服务端上限 120s − 回灌 POST 上限 60s"这一折算在默认配置下的取值
+ * （折算见 {@link deriveFrontendToolBudgetMs}）。
  *
  * **为什么要有**：后端对前端工具挂起的等待上限是 `app.ai.hitl.timeout`（默认 **120s**，
  * 与确认门共用，见 backend `AiProperties$Hitl#timeout`），前端此前**没有任何自有预算**：
@@ -168,24 +170,34 @@ export function parseToolArgs(raw: string | undefined | null): Record<string, un
  * 实测（issue#6，Kimi Code 自带浏览器）：回灌 POST 两轮 **>120s 未发出**（结局帧 120,004 /
  * 120,007 ms），同一链路在自动化 Chromium 上仅 25~41 ms。
  *
- * **为什么是 90s**（而不是别的值）：
- * - **上界**：必须 < 120s，且要给"超时结局 → 回灌 POST → 后端受理与判定"留够余量，
- *   故取值 = 120s − {@link FRONTEND_TOOL_RESULT_HEADROOM_MS}（30s）。实测该链路正常耗时
- *   合计 < 1s（POST 3.1ms + 后端受理回帧 25ms），30s 是"慢网络也不至于迟到"的保守余量。
+ * **为什么是"服务端上限 − 60s"**（S2-2，取代旧的"−30s 余量"论证）：
+ * - **硬约束来自回灌 POST 自身**：预算到期后必须先发 `POST /api/ai/frontend-tool-result`
+ *   （走 `api/http.ts` 的 axios 实例，**单请求上限 60s** —— `http.ts:85` `timeout: 60000`），
+ *   后端再受理与判定。故"回灌必在服务端判超时前到达"的数学保证是
+ *   `预算 + 60000 ≤ 服务端上限`，即 `预算 ≤ 服务端上限 − 60000`；默认 120s 上限即 **60s**。
+ *   旧的 30s 余量只在"POST 耗时 <30s"时成立（POST 拖到 31~60s 就会迟到、被幂等 409 拒），
+ *   现在按 POST 的最坏耗时取值，不再依赖"实测正常 <1s"的外推。
  * - **下界**：不能太小 —— 本预算不得把"慢但会成功"的执行掐掉。实测最慢的一次**成功**
  *   回灌发生在 **30.6s**（issue#6 run3：下载被宿主浏览器拖住 30.1s 后才解析），
- *   90s 覆盖这类慢成功，同时把 issue 那两轮失败从 120s 提前到 90s 收口。
+ *   60s 覆盖这类慢成功，同时把 issue 那两轮失败从 120s 提前到 60s 收口。
  * - **与服务端同源**：帧带 `timeoutSeconds`/`expiresAt`，调用方经
- *   {@link deriveFrontendToolBudgetMs} 由服务端值折算，本常量即该折算的缺省上界。
+ *   {@link deriveFrontendToolBudgetMs} 由服务端值折算；本常量即"上限缺失"时的回落值
+ *   （折算结果本身不再是常量，而是随服务端上限平移，见 {@link deriveFrontendToolBudgetMs}）。
+ *
+ * **已知迟到源（S4-2，登记不修）**：Chrome 后台页的计时器节流（隐藏页 1min 粒度）会让本预算
+ * **晚于**标称时刻触发；后台 tab 下回灌仍可能落在服务端 120s 判定之后，呈"迟到但不丢"
+ * （409 幂等拒绝 + notice 提示 + `elapsedMs` 如实）。方向安全（不误杀活连接），登记备查。
  */
-export const FRONTEND_TOOL_TIMEOUT_BUDGET_MS = 90_000
+export const FRONTEND_TOOL_TIMEOUT_BUDGET_MS = 60_000
 
 /**
- * 预算到期后留给"回灌 POST 发出 + 后端受理与判定"的余量（毫秒）。
+ * 回灌 POST 的最坏耗时（毫秒）= 预算必须让出的余量。
  *
- * 取值依据见 {@link FRONTEND_TOOL_TIMEOUT_BUDGET_MS}：服务端上限（120s）− 本余量 = 前端预算。
+ * 取值 = `api/http.ts` 的 axios 单请求上限（60s，`http.ts:85`）—— 回灌 POST 自己最多能花
+ * 这么久，不是"经验留白"。折算式见 {@link deriveFrontendToolBudgetMs}：
+ * `预算 = min(max(服务端上限 − 本余量, 5s 下限), 服务端上限)`。
  */
-export const FRONTEND_TOOL_RESULT_HEADROOM_MS = 30_000
+export const FRONTEND_TOOL_RESULT_HEADROOM_MS = 60_000
 
 /**
  * 折算预算的下限（毫秒）：服务端上限被配得过小时，仍给执行器一点起码的完成时间。
@@ -196,40 +208,89 @@ export const FRONTEND_TOOL_RESULT_HEADROOM_MS = 30_000
 const MIN_FRONTEND_TOOL_TIMEOUT_BUDGET_MS = 5_000
 
 /**
- * 由服务端帧的挂起上限折算出执行器预算：`服务端上限 − 余量`，先夹在
- * `[MIN, FRONTEND_TOOL_TIMEOUT_BUDGET_MS]` 之间，**再以服务端上限本身为上界收口**
- * （双钳制）；上限缺失 / 非法时回落默认值。
+ * 由服务端帧的挂起上限折算出执行器预算（S2-2 严格化后的唯一折算式）：
+ * `min(max(服务端上限 − {@link FRONTEND_TOOL_RESULT_HEADROOM_MS}, MIN), 服务端上限)`；
+ * 上限缺失 / 非法 / 溢出时回落 {@link FRONTEND_TOOL_TIMEOUT_BUDGET_MS}。
+ *
+ * 默认 120s 上限 → **60s**；90s → 30s；65s → 5s（≈上限，余量被压到 0）。
  *
  * 为什么以服务端值为准而不是写死 120s：帧里的 `timeoutSeconds` 就是后端真实等待上限
  * （`app.ai.hitl.timeout`，可在配置里改）。以后端值为基算出预算，后端调整上限时前端无需
- * 同步改常量。
+ * 同步改常量；余量取回灌 POST 自身的 axios 上限（60s），于是
+ * `预算 + 60000 ≤ 服务端上限` 对 `服务端上限 ≥ 65s` 的一切取值成立 —— 这才是注释里可自称
+ * "保证"的数学口径（旧式 `服务端上限 − 30s` 只在 POST <30s 时成立，见 S2-2）。
+ * >120s 的上限不再被常量封顶（150s → 90s、300s → 240s），保证式随服务端值平移。
  *
- * 为什么要叠第二道（服务端上限）钳制：上限 ≤ 5s 时 `服务端上限 − 余量 ≤ 0`，只夹下限会让
- * 预算落到 5s 反而**反超**服务端上限（`timeoutSeconds=3` → 5000ms > 3000ms），与"预算必须
- * 小于服务端挂起上限"的前提矛盾。故最终预算 = `min(上面的折算结果, timeoutSeconds × 1000)`：
- * - 下限 5s 防"预算过短"，上限 `timeoutSeconds × 1000` 防"预算倒挂"，两者冲突时上限优先；
- * - 该分支下预算 == 服务端上限、回灌余量被压到 0。上限 ≤5s 属**病态配置**（实践中服务端
- *   默认 120s），此分支只是"不倒挂"的兜底：到点即回灌，仍比"什么都不发、坐等后端判超时"
- *   多一次如实回执。
+ * 两道钳制（既有逻辑，取值随 S2-2 平移）：
+ * - **下限** `MIN`（5s）防"预算过短"：`服务端上限 − 60s ≤ 5s` 的配置（≤65s）由它兜底
+ *   （上限 ≤60s 时 `usableMs` 已 ≤0，同落此下限、再被上界收口）；
+ * - **上界** `timeoutSeconds × 1000` 防"预算倒挂"：上限 ≤5s 时下限会反超上限
+ *   （`timeoutSeconds=3` → 5000ms > 3000ms），故以服务端上限收口；两者冲突时**上限优先**。
+ * - 病态区（上限 ≤65s，即下限生效区）于是落在"预算 == 服务端上限、回灌余量为 0"（≤5s）或
+ *   "预算 == 5s 下限、余量不足 60s"：此处上述数学保证必然失效，只能退化为"到点即回灌"。
+ *   上限 ≤65s 属**病态配置**（实践中服务端默认 120s），该分支只是"不倒挂"的兜底：到点即回灌，
+ *   仍比"什么都不发、坐等后端判超时"多一次如实回执。
  */
 export function deriveFrontendToolBudgetMs(timeoutSeconds?: number | null): number {
   const serverBudgetMs = typeof timeoutSeconds === 'number' && Number.isFinite(timeoutSeconds) && timeoutSeconds > 0
     ? timeoutSeconds * 1000
     : null
-  if (serverBudgetMs === null) {
+  // 溢出防线：`timeoutSeconds` 有限但 ×1000 溢出为 Infinity（如 1e307）时同样判非法 ——
+  // 否则预算 = Infinity，`setTimeout(Infinity)` 被引擎钳到 ~1ms，等于**瞬间判超时（假超时）**。
+  if (serverBudgetMs === null || !Number.isFinite(serverBudgetMs)) {
     return FRONTEND_TOOL_TIMEOUT_BUDGET_MS
   }
+  // 折算 = 服务端上限 − 回灌 POST 最坏耗时（60s）：先夹 5s 下限，再以服务端上限收口防倒挂。
   const usableMs = serverBudgetMs - FRONTEND_TOOL_RESULT_HEADROOM_MS
-  const clampedMs = Math.max(MIN_FRONTEND_TOOL_TIMEOUT_BUDGET_MS, Math.min(FRONTEND_TOOL_TIMEOUT_BUDGET_MS, usableMs))
-  // 第二道钳制：小上限场景（≤5s）下上面的下限会反超上限，故以服务端上限收口（见上方注释）。
+  const clampedMs = Math.max(MIN_FRONTEND_TOOL_TIMEOUT_BUDGET_MS, usableMs)
   return Math.min(clampedMs, serverBudgetMs)
 }
 
-/** 预算取整：非法值一律回落默认值（预算不允许被调用方"关掉"）。 */
+/**
+ * 计时器 delay 的可表示上限（毫秒）= `2^31 − 1` ≈ 24.86 天。
+ *
+ * **来源（引擎约束，不是经验值）**：`setTimeout` 的 `delay` 实参被转换为**32 位有符号整数**，
+ * 超过本值即整数溢出。MDN `Window.setTimeout` 的 "Maximum delay value" 一节写明
+ * *the delay argument is converted to a signed 32-bit integer, which limits the value to
+ * 2147483647 ms, or roughly 24.8 days. Delays of more than this value will cause an integer
+ * overflow*，并给出 `2 ** 32 - 5000` **立即执行**（溢出为负数）、`2 ** 32 + 5000` 约 5 秒后
+ * 执行的例子；同页另注 *In Node.js, any timeout larger than 2,147,483,647 ms results in
+ * immediate execution*。本机实测（Node v22，与浏览器同属 V8 计时器实现）：
+ * `setTimeout(fn, 2 ** 31)` 与 `setTimeout(fn, 1e10)` 均报
+ * `TimeoutOverflowWarning ... Timeout duration was set to 1`，回调 **3ms 内**即触发 ——
+ * 即"越界 delay 退化成秒级假超时"。
+ *
+ * **为什么本预算会越过它**：预算随服务端上限平移（{@link deriveFrontendToolBudgetMs}：
+ * 150s → 90s、300s → 240s，不再被默认常量封顶），而服务端上限来自 `app.ai.hitl.timeout`
+ * （`Duration`，取值上界受帧里的 int 秒约束 ≈ 68 年），故病态配置下预算会 > 本值。
+ * 把越界值直接喂给 `setTimeout`，"病态地长"的预算就变成**瞬间假超时**——正是本预算最不该
+ * 有的误差方向（宁可永不超时，也不能把活执行器谎报成超时）。
+ *
+ * **钳制口径**：计时器是 `runWithBudget` 里**唯一**的超时判定源（race 只有"执行器 settle"
+ * 与"计时器到点"两支，见其文档），故在 {@link normalizeBudgetMs} 一次性收口 —— 收口后的值
+ * 既是计时器 delay，也是超时文案里报的"执行器预算"（同源，不会出现
+ * "已等待 N 秒 < 执行器预算 M 秒却判超时"的自相矛盾）。
+ *
+ * **诚实的退化登记**：预算 > 24.86 天属**病态配置**（后端默认 120s，与该值差 5 个数量级）：
+ * 该场景的超时判定实际退化为**本次会话内不超时**，由服务端上限判定兜底 —— 属**可接受退化**，
+ * 远优于"秒级假超时"。合法域（预算 ≤ 24.86 天，含默认 60s 与一切可配置取值）不受影响。
+ */
+const TIMER_MAX_DELAY_MS = 2_147_483_647
+
+/**
+ * 预算归一：非法值一律回落默认值（预算不允许被调用方"关掉"），并把上界收口到
+ * {@link TIMER_MAX_DELAY_MS}（`setTimeout` 可表示的 delay 上限）。
+ *
+ * 两道处理放在同一处，因为本返回值**就是**喂给 `setTimeout` 的 delay
+ * （`executeFrontendTool` → `runWithBudget`）：越界值会被引擎折返成 ~1ms 的 delay
+ * → 瞬间假超时（证据与退化说明见 {@link TIMER_MAX_DELAY_MS}）；而计时器是本层唯一超时
+ * 判定源，故收口后的值**就是**有效预算，超时文案亦报该值。
+ */
 function normalizeBudgetMs(value?: number): number {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0
+  const requestedMs = typeof value === 'number' && Number.isFinite(value) && value > 0
     ? value
     : FRONTEND_TOOL_TIMEOUT_BUDGET_MS
+  return Math.min(requestedMs, TIMER_MAX_DELAY_MS)
 }
 
 /**
@@ -268,8 +329,8 @@ export async function executeFrontendTool(call: FrontendToolCall): Promise<Front
  * **本层做不到的事（诚实边界）**：计时器是宏任务，**无法打断同步阻塞主线程的执行器**。
  * 阻塞结束后的两条分支（node 侧逻辑验证脚本 §⑧a/⑧b 实证）：
  * - 执行器随即给出结局 → 微任务先于"已过期的宏任务"，按**真实结局**回灌（慢成功仍报成功：
- *   不把已有确定结局的执行谎报成超时）；此时回灌时刻 = 阻塞结束时刻，若阻塞在 120s 内结束，
- *   回灌仍赶得及被后端受理；
+ *   不把已有确定结局的执行谎报成超时）；此时回灌时刻 = 阻塞结束时刻，若"阻塞结束 + 回灌
+ *   POST"仍 ≤ 服务端 120s 上限，回灌赶得及被后端受理；
  * - 执行器仍未给出结局 → 过期计时器**立刻补触发**，回灌超时结局（不丢结局、不悬挂）。
  * 若阻塞本身超过后端 120s 上限（issue#6 两轮实测即此形态），则当次回灌必然迟到 ——
  * 页面内任何计时器都做不到更早（该限制与证据见施工报告"遗留风险"）。此时
@@ -279,6 +340,11 @@ export async function executeFrontendTool(call: FrontendToolCall): Promise<Front
  * 超时分支**只依赖计时器**：不依赖执行器 settle，也不依赖它 reject —— 这对
  * `download_export_file` 是必需的（`ExportWizardView#downloadOne` 把自身异常吞进
  * `ElMessage` 后 void 返回、从不 rethrow，所以"等它 reject"永远不会发生）。
+ *
+ * **计时器 delay 的上界**：`budgetMs` 已由 {@link normalizeBudgetMs} 收口在
+ * {@link TIMER_MAX_DELAY_MS}（`2^31 − 1` ms ≈ 24.86 天）—— `setTimeout` 的 delay 按 32 位
+ * 有符号整型处理，越界值会被折返成 ~1ms 的 delay，把病态长预算变成**瞬间假超时**。计时器是
+ * 本层唯一超时判定源，故收口后的值**就是**有效预算，也随超时结局用于文案。
  */
 async function runWithBudget(
   task: Promise<FrontendToolExecution>,
@@ -287,6 +353,8 @@ async function runWithBudget(
 ): Promise<BudgetOutcome> {
   let timer: ReturnType<typeof setTimeout> | null = null
   const expired = new Promise<BudgetOutcome>((resolve) => {
+    // budgetMs 已收口在 TIMER_MAX_DELAY_MS 内（见该常量与 normalizeBudgetMs）；越界 delay
+    // 会被引擎折返成 ~1ms，等于把"病态长预算"变成瞬间假超时。
     timer = setTimeout(() => resolve({ kind: 'timeout', elapsedMs: Date.now() - startedAt }), budgetMs)
   })
   try {
