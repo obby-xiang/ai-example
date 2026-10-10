@@ -27,6 +27,21 @@ export const DEFAULT_MAX_RECONNECTS = 2
 /** 首次重连等待（后续指数退避）。 */
 export const DEFAULT_RECONNECT_DELAY_MS = 1_000
 
+/**
+ * reattach **建连**（`onopen` 之前）的看门狗上限（R-03 / 前端篇 B-03）。
+ *
+ * 为什么不能复用 `DEFAULT_IDLE_TIMEOUT_MS`：帧间静默是"连上了但没数据"，建连超时是"根本没连上"
+ * —— 后者判死的证据更强（reattach 是 GET + SseEmitter，响应头应立即 commit，且后端有心跳），
+ * 预算理应显著更短。取值论证（对齐既有常量）：
+ * - 落在审计建议的 10~15s（`blocking-audit/frontend.md` §S1-2 修法方向）**上界**，把"活但慢的
+ *   连接被误判为死"的假阳性压到最低（一次 TCP/TLS 握手 + 代理首包 + 服务端排队都要放得下）；
+ * - 三轮建连预算合计 15 + 1(退避) + 15 + 2(退避) + 15 = 48s，**不超过** `DEFAULT_IDLE_TIMEOUT_MS`
+ *   （90s）这条既有"单条流允许的最长无进展等待"，整段 reattach 仍落在同一量级内；
+ * - 远小于 `api/http.ts` 的 axios 单请求上限（60s）与后端 `ConfirmGate` 挂起超时（120s）⇒
+ *   前端先失败、先复位 `loading`、先出提示，不再沉默到后端超时才收尾。
+ */
+export const DEFAULT_CONNECT_TIMEOUT_MS = 15_000
+
 export const SSE_PATHS = {
   chat: '/api/ai/chat',
   /**
@@ -397,6 +412,14 @@ async function tryReattach(
  *
  * EventSource 会在连接断开时自行重连，这里接管该行为以便：限制重连次数、
  * 走指数退避、并在收到终帧或重连耗尽时明确收尾（避免"静默重连"把断流掩盖成挂起）。
+ *
+ * 两只看门狗（缺一不可）：
+ * - **建连看门狗**（`connectTimer`，R-03）：覆盖 `open()` 到 `onopen` 之间的窗口 —— 原生
+ *   `EventSource` 在这段没有任何计时器，连接迟迟不 open 也不 error 时 `settle` 原本无可达路径；
+ * - **帧间看门狗**（`idleTimer`）：原有行为，`onopen` / 每帧刷新，静默超过 `idleTimeoutMs` 判断流。
+ *
+ * 本函数**只 resolve、不 reject**（错误一律经 `onClose` 的 `terminal=false` + `reason` 表达），
+ * 调用方的 `finally`（复位 `loading`）因此必然执行。
  */
 export async function reattach(
   runId: string,
@@ -413,6 +436,7 @@ export async function reattach(
   return await new Promise<StreamCloseInfo>((resolve) => {
     let source: EventSource | null = null
     let idleTimer: ReturnType<typeof setTimeout> | null = null
+    let connectTimer: ReturnType<typeof setTimeout> | null = null
     let attempts = 0
     let settled = false
 
@@ -423,12 +447,27 @@ export async function reattach(
       idleTimer = null
     }
 
+    /**
+     * 清建连看门狗（R-03）。
+     *
+     * 不变量：任一时刻**只武装一个**看门狗 —— 建连看门狗在 `onopen`（或首个帧）让位给帧间
+     * 看门狗，退避期间两个都清（避免上一只残留计时器在退避中途再次 `scheduleReconnect`，
+     * 造成次数重复计数 / 双连接）。
+     */
+    const clearConnect = (): void => {
+      if (connectTimer !== null) {
+        clearTimeout(connectTimer)
+      }
+      connectTimer = null
+    }
+
     const settle = (terminal: boolean, reason?: string): void => {
       if (settled) {
         return
       }
       settled = true
       clearIdle()
+      clearConnect()
       source?.close()
       source = null
       options.signal?.removeEventListener('abort', onAbort)
@@ -441,6 +480,8 @@ export async function reattach(
 
     const startIdle = (): void => {
       clearIdle()
+      // 连接已被证明活着（onopen / 收到帧），建连看门狗让位
+      clearConnect()
       idleTimer = setTimeout(() => {
         if (state.terminal) {
           settle(true)
@@ -452,10 +493,40 @@ export async function reattach(
       }, idleTimeoutMs)
     }
 
+    /**
+     * 建连看门狗（R-03 / 前端篇 B-03）：覆盖 `open()` 之后到 `onopen` 之间的窗口。
+     *
+     * 修掉的缺陷：`EventSource` 从构造到 `onopen` 之间原本**没有任何计时器**，
+     * `idleTimer` 只在 `onopen` 里 `startIdle()` 才武装 ⇒ 连接迟迟不 open 也不 error 时
+     * （TCP 已建但响应头不 commit / 代理黑洞 / 静默挂起），`settle` 无可达路径，promise 永不
+     * settle，调用方（`stores/ai.ts` 的 send / reattachActive / resumeSnapshotStream）的
+     * `finally` 不执行 ⇒ `loading` 永不复位、输入区假死。超时后走既有收尾路径
+     * （`scheduleReconnect` → 退避重试 → 次数耗尽后 `settle(false, …)` → `onClose` 提示）。
+     */
+    const startConnect = (): void => {
+      clearConnect()
+      connectTimer = setTimeout(() => {
+        connectTimer = null
+        if (settled) {
+          return
+        }
+        if (state.terminal) {
+          settle(true)
+          return
+        }
+        source?.close()
+        source = null
+        scheduleReconnect('重挂连接建立超时（未收到 onopen）')
+      }, DEFAULT_CONNECT_TIMEOUT_MS)
+    }
+
     const scheduleReconnect = (reason: string): void => {
       if (settled) {
         return
       }
+      // 退避期间不保留任何看门狗：重试由下面的 delay 计时器负责，open() 会重新武装建连看门狗
+      clearIdle()
+      clearConnect()
       if (options.signal?.aborted) {
         settle(state.terminal, '连接已取消')
         return
@@ -479,6 +550,9 @@ export async function reattach(
       // T6：优先用"本连接已收到的最大序号"（增量重连），退回调用方给的 lastSeq
       const since = state.lastSeq ?? options.lastSeq
       source = new EventSource(SSE_PATHS.events(runId, since ?? undefined))
+      // R-03：看门狗必须在 onopen 之前武装（构造是同步的，首个事件只会在此后的任务里派发，
+      // 故此处与构造之间没有可丢失事件的窗口）
+      startConnect()
       source.onopen = () => {
         handlers.onOpen?.()
         startIdle()

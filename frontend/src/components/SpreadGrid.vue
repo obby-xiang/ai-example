@@ -29,6 +29,9 @@
  *   写进列头区的做法不同，见证据文档 V6 差异表：功能差异，理由=后端 ExcelIO/ExcelReader 往返）；
  * - 动态校验器（ENUM 下拉/数值/日期/布尔）由 `applyColumnsToSheet` 挂到整列；
  * - 上传的 xlsx 用 ExcelIO 打开后按表头映射回字段行，读回用 `readRows`。
+ *
+ * 就绪等待契约（B-07）：`readyPromise` 在**成功 / 加载失败 / 超时 / 卸载**四条路径上都结算，
+ * 调用方不会无限悬挂；失败时 `loadFromJson` 抛出可展示的错误文本（含引擎失败原文）。
  */
 import { onBeforeUnmount, onMounted, ref, shallowRef } from 'vue'
 import type GC from '@grapecity/spread-sheets'
@@ -83,15 +86,61 @@ let resizeObserver: ResizeObserver | null = null
 let resizeTimer: ReturnType<typeof setTimeout> | null = null
 /** 引擎就绪前到来的载入请求（el-tabs 懒渲染时很常见） */
 let pendingLoad: { fields: readonly ConfigField[]; rows: readonly Record<string, unknown>[] } | null = null
+
+/**
+ * 等待引擎就绪的兜底上限（B-07 双侧兜底）。
+ *
+ * 论证（对齐既有常量，非拍脑袋）：这里的等待实质是"同一条网络栈上拉一个 ~4.7MB 的
+ * spreadjs chunk（`vite.config.ts` 懒加载口径）+ 模块求值"，与一次 REST 请求同族，故取
+ * `api/http.ts` 的 axios 单请求上限同值（60s）；超过它仍未就绪即判卡死。同时 60s 明显小于
+ * 后端 `ConfirmGate` 的挂起超时（120s），保证"前端先失败、先给出可读错误"，不再退化成
+ * "沉默到后端超时才收尾"。
+ */
+const READY_TIMEOUT_MS = 60_000
+
 let readyResolve: (() => void) | null = null
+let readyTimer: ReturnType<typeof setTimeout> | null = null
+
+/** 唤醒所有 `await readyPromise` 的等待者（B-07：成功/失败/超时/卸载四条路径都必须走这里）。 */
+function settleReady(): void {
+  if (readyTimer !== null) {
+    clearTimeout(readyTimer)
+    readyTimer = null
+  }
+  readyResolve?.()
+  readyResolve = null
+}
+
+/**
+ * 失败收尾：置可见错误 + 唤醒等待者。
+ *
+ * 注意 `readyPromise` 只承担"等待结束"的**唤醒**语义，不代表引擎就绪 —— 就绪与否由调用时的
+ * `workbook.value` / `spreadNs` 实况判定（见 {@link waitForReady}）。故失败唤醒后若引擎又补上了
+ * （`loadSpreadCore` 不缓存失败，可重试），后续调用仍能走通。
+ */
+function failReady(message: string): void {
+  engineState.value = 'failed'
+  engineError.value = message
+  settleReady()
+}
+
 const readyPromise = new Promise<void>((resolve) => {
   readyResolve = resolve
 })
+
+// 看门狗与 promise 同点武装：chunk 拉取没有原生超时，挂起时只能由这里唤醒等待者
+readyTimer = setTimeout(() => {
+  readyTimer = null
+  failReady(`表格引擎加载超时（超过 ${READY_TIMEOUT_MS / 1000} 秒未就绪），请检查网络后重试`)
+}, READY_TIMEOUT_MS)
 
 onMounted(async () => {
   try {
     const gs: SpreadSheets = await loadSpreadCore()
     if (!host.value) {
+      // 宿主已卸载（与 onBeforeUnmount 的竞态，红队 RR1 场景）：实例无从创建，必须显式结算，
+      // 否则 `await readyPromise` 的调用方永久悬挂 —— 整条回灌链（loadTask → 工具执行器）不 settle
+      failReady('表格引擎未挂载（组件已卸载），请重新打开在线编辑')
       return
     }
     const instance = new gs.Spread.Sheets.Workbook(host.value)
@@ -115,8 +164,7 @@ onMounted(async () => {
       pendingLoad = null
       applyLoad(request.fields, request.rows)
     }
-    readyResolve?.()
-    readyResolve = null
+    settleReady()
     emit('ready')
 
     // 宿主尺寸从 0 变为有效值（el-tabs 懒渲染）时需要一次 refresh
@@ -130,12 +178,19 @@ onMounted(async () => {
     })
     resizeObserver.observe(host.value)
   } catch (error) {
-    engineState.value = 'failed'
-    engineError.value = `表格引擎加载失败：${error instanceof Error ? error.message : String(error)}`
+    // 引擎不可用也必须唤醒等待者（B-07）：否则调用方永久悬挂，回灌链不 settle
+    failReady(`表格引擎加载失败：${error instanceof Error ? error.message : String(error)}`)
   }
 })
 
 onBeforeUnmount(() => {
+  // 卸载竞态兜底（B-07）：此刻起宿主必然消失，再等引擎已无意义 —— 立即结算，
+  // 让在途的 `await readyPromise` 在 `waitForReady` 处抛出可读错误（调用方已 try/catch）
+  if (engineState.value === 'loading') {
+    failReady('表格引擎未就绪（组件已卸载），请重新打开在线编辑')
+  } else {
+    settleReady()
+  }
   if (resizeTimer !== null) {
     clearTimeout(resizeTimer)
   }
@@ -198,9 +253,21 @@ function loadData(fieldDefs: readonly ConfigField[], rows: readonly Record<strin
   applyLoad(fieldDefs, rows)
 }
 
+/**
+ * 等引擎可用（B-07）：`readyPromise` 已在成功/失败/超时/卸载四条路径上结算，
+ * 这里再按**活体状态**判定一次 —— 失败/超时唤醒时把引擎错误原文抛给调用方，
+ * 调用方（`ensureGridLoaded` / `loadEditors`）既有 `try/catch` 会展示并允许重试。
+ */
+async function waitForReady(): Promise<void> {
+  await readyPromise
+  if (!workbook.value || !spreadNs) {
+    throw new Error(engineError.value || '表格引擎尚未就绪')
+  }
+}
+
 /** 从工作簿 JSON 载入（模板 JSON / 已保存的编辑结果）。 */
 async function loadFromJson(json: string, fieldDefs: readonly ConfigField[]): Promise<void> {
-  await readyPromise
+  await waitForReady()
   const instance = workbook.value
   if (!instance || !spreadNs) {
     throw new Error('表格引擎尚未就绪')
