@@ -40,6 +40,26 @@ public class DataController {
      * <p>S4.4b 遗留 3 修复：新增 {@code conditions} 入参（{@link QueryCondition} 的 JSON），
      * 与 {@code /count}、导出作业同构 —— 无条件时走 DB 分页（scopeType + scopeKey 收窄），
      * 有条件时按同口径逐行求值后再分页，故前端不再需要"只筛当前页"的镜像求值器。
+     *
+     * <p><b>分页缺省值 20（2026-10-10 数字规格清点裁决⑥：前后端统一为 20）</b>：本端点缺省页大小
+     * 原为 50，与数据浏览器（{@code frontend/src/views/DataBrowserView.vue} 的
+     * {@code const size = ref(20)}）不一致 —— 同一资源两套默认（前端总显式传参故未爆，但口径已分叉）。
+     * 统一取 <b>20</b>，依据业界依据 §8「分页大小主流默认」：GitHub 默认 30 / 上限 100、
+     * Stripe 默认 10 / 范围 1–100；内网小数据量场景推荐"默认 20，前端提供 20/50/100 切换，
+     * 后端硬上限 100"。
+     *
+     * <p><b>本值是变更值（50 → 20）</b>：影响面仅"不传 {@code size} 的直连调用"（curl / 集成测试 /
+     * 将来的第三方消费方）；前端数据浏览器与 E2E 脚本均显式传参，行为面零回归。
+     * <b>改本值须连带复核</b>：{@code frontend/src/views/DataBrowserView.vue} 的
+     * {@code const size = ref(20)} 与同页 {@code :page-sizes} 选项表（20/50/100）—— 三者须同口径，
+     * 否则同一资源再次分叉。
+     *
+     * <p>同批登记（不在本步改动面）：作业问题列表 {@code JobController} 缺省 50 ↔
+     * {@code stores/task.ts} 缺省 50（同源一致）、任务列表 {@code TaskController} 缺省 10 ↔
+     * {@code stores/task.ts} 缺省 10（同源一致）、{@code views/ImportWizardView.vue} 拉问题列表
+     * {@code getIssues(jobId, 0, 200)}（与 {@code app.ai.tool-result.max-rows} 的 200
+     * <b>同值不同义</b>）。是否把 {@code JobController} 的 50 也统一为 20 属新决策，
+     * 2026-10-10 已登记为待裁决项，本步不动。
      */
     @GetMapping("/{defCode}")
     public ApiResponse<Page<ConfigDataRow>> list(@PathVariable String defCode,
@@ -47,7 +67,7 @@ public class DataController {
                                                    @RequestParam(required = false) String scopeKey,
                                                    @RequestParam(required = false) String conditions,
                                                    @RequestParam(defaultValue = "0") int page,
-                                                   @RequestParam(defaultValue = "50") int size) {
+                                                   @RequestParam(defaultValue = "20") int size) {
         QueryCondition cond = configDataService.parseCondition(conditions);
         if (cond != null) {
             return ApiResponse.ok(configDataService.findPagedFiltered(defCode, scopeKey, cond, page, size));

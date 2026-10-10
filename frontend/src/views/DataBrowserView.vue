@@ -182,6 +182,10 @@ const projects = ref<Project[]>([])
 const rows = ref<ConfigDataRow[]>([])
 const total = ref(0)
 const page = ref(0)
+// 默认页大小 20。依据 = 业界依据 §8「分页大小主流默认」：GitHub 默认 30/上限 100、Stripe 默认 10/上限 100，
+// 内网小数据量场景推荐"默认 20，可选 20/50/100"；与后端 DataController 的缺省页大小同值
+// （该端点原缺省 50，2026-10-10 数字规格清点裁决⑥ 把前后端统一为 20）。
+// 本值不是新值（前端一直是 20）；改本值须连带改后端 DataController 的 defaultValue 与上方 :page-sizes 选项表。
 const size = ref(20)
 const loading = ref(false)
 const counting = ref(false)
