@@ -5,7 +5,7 @@
  * http.ts 的 post/get，由拦截器原样放行。
  */
 
-import { ApiError, get, post } from './http'
+import { ApiError, del, get, post } from './http'
 import { reattach, streamChat } from './sse'
 import type { SseFrameHandlers, SseStreamOptions } from './sse'
 import type {
@@ -63,6 +63,17 @@ export function cancelStatus(runId: string): Promise<Record<string, unknown>> {
 /** GET /api/ai/history/{sessionId}（刷新恢复用的会话记忆原文）。 */
 export function history(sessionId: string): Promise<AiHistory> {
   return get<AiHistory>(`/ai/history/${encodeURIComponent(sessionId)}`)
+}
+
+/**
+ * DELETE /api/ai/history/{sessionId}（「新建对话」：删该会话的服务端记忆）。
+ *
+ * 幂等：会话不存在 / 重复删除也返回 200（裸 Map，不套 ApiResponse 信封），故调用方不需要
+ * 区分"删过没删过"，也不需要处理 404。响应体字段（sessionId/deleted/existed/memoryKey/
+ * removedFromIndex/runActive/activeRunId/storedBy/note）供诊断与取证用，前端不依赖。
+ */
+export function deleteHistory(sessionId: string): Promise<Record<string, unknown>> {
+  return del<Record<string, unknown>>(`/ai/history/${encodeURIComponent(sessionId)}`)
 }
 
 /**
@@ -124,6 +135,7 @@ export const aiApi = {
   cancel,
   cancelStatus,
   history,
+  deleteHistory,
   health,
   runs,
   run,

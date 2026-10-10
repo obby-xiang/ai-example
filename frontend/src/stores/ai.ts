@@ -263,7 +263,13 @@ export const useAiStore = defineStore('ai', {
     healthError: null as string | null,
     /** 历史对账是否完成（UI 可用它做骨架屏） */
     historyLoaded: false,
-    /** 本轮是否已被用户停止 */
+    /**
+     * 本轮是否已被用户停止。
+     * 只由 `stop()` 置位；复位点在「新连接建立处」—— `send()` / `reattachActive()` /
+     * `resumeSnapshotStream()`（新连接 ≠ 被停止的那条连接，红队 MINOR-1 收口）—— 与 `resetSession()`。
+     * 用途**仅限**抑制"主动停止轮"的断流提示 —— abort 会让 `onClose(terminal=false)` 到达，
+     * 那是停止的正常收尾而非断流。新增调用方直接改写它会稀释该语义，请勿在其它地方置位。
+     */
     stopped: false,
     /**
      * 断流标志（ADR-6）：本轮结束时没收到 done/error 终帧 → 提示"连接中断，结果可能不完整"。
@@ -417,8 +423,14 @@ export const useAiStore = defineStore('ai', {
      * 2) 再与 `GET /api/ai/history/{sessionId}` 对账 —— 后端有内容以后端为准，
      *    后端为空（重启/TTL 过期）则保留镜像，但把挂起的工具调用降级为 expired
      *    （旧会话已无法回灌续跑，用户发新消息即自动按新会话重建）。
+     *
+     * 红队 MAJOR-1 收口（会话身份守卫）：本 action 跨越 await 取历史，期间用户可能新建对话 ——
+     * `resetSession()` 会换 `sessionId` 并清空 messages/轮次状态。故发起时先记下会话身份，
+     * 完成路径每次落盘（写 `messages`、触发 `restoreSuspendedSnapshot`）前对账：身份已变即整体
+     * 丢弃，不让旧会话的历史/挂起卡写进新会话（写后写竞态）。守卫口径同本文件 isCurrentRound 同族。
      */
     async loadHistory(): Promise<void> {
+      const sid = this.sessionId
       this.startMirror()
       const mirror = readMirror(this.sessionId)
       if (mirror && Array.isArray(mirror.messages) && mirror.messages.length > 0) {
@@ -434,8 +446,17 @@ export const useAiStore = defineStore('ai', {
       try {
         history = await aiApi.history(this.sessionId)
       } catch {
+        if (this.sessionId !== sid) {
+          return // 会话已换：过期失败不落任何状态（新会话的 historyLoaded 由新会话自己落）
+        }
         this.historyLoaded = true
         return // 后端不可达：保留镜像展示
+      }
+
+      // 会话身份对账（红队 MAJOR-1）：不匹配则整体丢弃 —— 下面的 messages 写入与
+      // restoreSuspendedSnapshot（读 this.sessionId 拉 runs/current、就地重建挂起卡）都不得落进新会话
+      if (this.sessionId !== sid) {
+        return
       }
 
       if (!history.messages || history.messages.length === 0) {
@@ -582,6 +603,10 @@ export const useAiStore = defineStore('ai', {
       this.runSeq[runId] = Math.max(this.runSeq[runId] ?? 0, lastSeq)
       this.loading = true
       this.streamInterrupted = false
+      // 红队 MINOR-1 收口：新连接 ≠ 被停止的那条连接 —— `stop()` 留下的 stopped 置位只该
+      // 作用于被中止的那一轮，不能跨连接生效（否则本连接断流时 onClose 会误判"用户主动停止"
+      // 而不报"结果可能不完整"）。复位点与 send() / resetSession() 对齐。
+      this.stopped = false
       const controller = new AbortController()
       currentAbort = controller
       activeRoundHostId = hostMessageId
@@ -605,7 +630,8 @@ export const useAiStore = defineStore('ai', {
               if (!isCurrentRound()) {
                 return
               }
-              if (!info.terminal) {
+              // 苞 B 项 3：用户主动停止不报断流（同 send 的守卫；重挂/续收路径同样适用）
+              if (!info.terminal && !this.stopped) {
                 this.streamInterrupted = true
                 this.notice = `连接中断，结果可能不完整（${info.reason ?? '断流'}）。挂起卡保留，可刷新重试。`
               }
@@ -671,7 +697,10 @@ export const useAiStore = defineStore('ai', {
           if (!isCurrentRound()) {
             return // R6：旧轮断流提示不得覆盖新轮状态
           }
-          if (!info.terminal) {
+          // 苞 B 项 3：用户主动停止的轮次不报断流 —— abort → terminal=false 是停止的**正常**收尾，
+          // 不是断流。`stopped` 只在 stop() 置位，在每次新连接建立处（send/reattachActive/
+          // resumeSnapshotStream）与 resetSession 复位 ⇒ 只影响被停止的那一轮。
+          if (!info.terminal && !this.stopped) {
             // ADR-6：缺 done/error 终帧 = 断流，必须显式提示"结果可能不完整"
             this.streamInterrupted = true
             this.notice = `连接中断，结果可能不完整（${info.reason ?? '未收到完成帧'}）。已生成的内容保留，可重新发送或一键重挂该轮。`
@@ -789,6 +818,10 @@ export const useAiStore = defineStore('ai', {
       const assistant = this.appendAssistantMessage('（正在重挂进行中的轮次…）')
       this.loading = true
       this.streamInterrupted = false
+      // 红队 MINOR-1 收口：新连接 ≠ 被停止的那条连接 —— `stop()` 留下的 stopped 置位只该
+      // 作用于被中止的那一轮，不能跨连接生效（否则重挂后的断流会被 onClose 误判成"用户主动
+      // 停止"而吞掉"结果可能不完整"提示）。复位点与 send() / resetSession() 对齐。
+      this.stopped = false
       this.notice = lastSeq === undefined
         ? '正在重挂该轮（先回放已产出的帧，再续收实时帧）…'
         : `正在重挂该轮（只补发第 ${lastSeq} 帧之后的增量）…`
@@ -816,7 +849,8 @@ export const useAiStore = defineStore('ai', {
               if (!isCurrentRound()) {
                 return
               }
-              if (!info.terminal) {
+              // 苞 B 项 3：用户主动停止不报断流（同 send 的守卫；重挂/续收路径同样适用）
+              if (!info.terminal && !this.stopped) {
                 this.streamInterrupted = true
                 this.notice = `连接中断，结果可能不完整（重挂未能收到完成帧：${info.reason ?? '断流'}）`
                 if (this.activeForm !== null) {
@@ -1073,8 +1107,27 @@ export const useAiStore = defineStore('ai', {
       }
     },
 
-    /** 重置会话（新页签语义：清 sessionId 与镜像）。 */
-    resetSession(): void {
+    /**
+     * 新建对话（页签内重置会话）：立即清屏 + 换新 sessionId + 删旧会话的服务端记忆。
+     *
+     * 顺序（苞 A 项 1 裁决）：
+     * 1. 先在跑的轮次 `abort`（R5①）——否则 loading 不复位、后续帧会写进已清空的 messages；
+     * 2. 立刻换 id 并清状态（**同步完成**：点击=立即清屏，不等后端）；
+     * 3. 再 best-effort `POST /api/ai/cancel/{oldRunId}` 通知后端停旧轮（后端不可达不阻断本地重置，
+     *    口径同 `stop()`）；
+     * 4. **最后** `DELETE /api/ai/history/{oldSessionId}` 删旧记忆（失败只提示，不影响新对话；
+     *    提示带「仍是本轮」守卫，见函数末尾与复核 F5）。
+     *
+     * 已知代价（施工卡 §5.2，登记；口径按复核 F2 订正为如实版）：旧轮终局的记忆收敛（`clear + add`）
+     * 会把窗口整体写回同名键，而 `cancel` 只是「置取消标志 + 唤醒收尾」、轮次收盘是异步的
+     * ⇒ **在飞路径下 DELETE 必然先于收盘重写**（顺序必然，不是概率竞态；先 cancel 再 delete 也
+     * 缩不小这个窗口），即旧键必被写回、残留至 TTL 到期。旧 id 已被前端丢弃，故残留期间无人读取
+     * （用户不可见）。更强的保证（端点 409 硬拒）已被明确否掉 —— 「新建对话」不能变成可能失败的动作。
+     */
+    async resetSession(): Promise<void> {
+      // 两个旧值必须在清状态之前取：oldRunId 用于取消旧轮，oldSessionId 用于删旧记忆与删旧镜像
+      const oldSessionId = this.sessionId
+      const oldRunId = this.activeRunId
       // R5①（issue#5）：在跑的轮次先中止 —— 否则 loading 不复位（输入区一直禁用到流结束），
       // 且后续帧会写进**已清空**的 messages（按 assistantId 找不到宿主 ⇒ 孤儿消息/孤儿帧）
       try {
@@ -1085,12 +1138,17 @@ export const useAiStore = defineStore('ai', {
       currentAbort = null
       activeRoundHostId = null
       this.loading = false
+      // 换 id：**同一个** nextId 双写 sessionStorage 与响应式 state。
+      // 修复（苞 A 必修）：此前只写 sessionStorage、从不写 this.sessionId ⇒ `send` 仍带旧 id
+      // 请求、"新建对话"实际继承旧会话的服务端记忆（实测缺陷，见施工报告「必修前置缺陷」）。
+      const nextId = createSessionId()
       try {
-        sessionStorage.removeItem(MIRROR_PREFIX + this.sessionId)
-        sessionStorage.setItem(SESSION_ID_KEY, createSessionId())
+        sessionStorage.removeItem(MIRROR_PREFIX + oldSessionId)
+        sessionStorage.setItem(SESSION_ID_KEY, nextId)
       } catch {
-        // 隐私模式下忽略
+        // 隐私模式/配额：持久化失败不阻断本次重置（本页签内照常换 id）
       }
+      this.sessionId = nextId
       this.messages = []
       this.activeRunId = null
       this.notice = null
@@ -1099,6 +1157,34 @@ export const useAiStore = defineStore('ai', {
       this.suspended = false
       disarmFormExpiry()
       this.activeForm = null
+      // 轮次级标志一并复位：新会话不该继承上一轮的停止/断流事实（骨架屏见 historyLoaded）
+      this.stopped = false
+      this.streamInterrupted = false
+      this.historyLoaded = true
+      // best-effort 停掉后端仍在跑的旧轮（只断本地连接不停后端，故必须显式 POST）
+      if (oldRunId) {
+        try {
+          await aiApi.cancel(oldRunId)
+        } catch {
+          // 忽略：取消请求失败只意味着后端可能多跑一轮，不影响新建对话
+        }
+      }
+      // 删除放最后：**顺序不缩小复活窗口**（口径订正：复核 F2）—— `cancel` 只置取消标志 + 唤醒收尾，
+      // 轮次收盘异步 ⇒ 在飞路径下本 DELETE 必然先于收盘重写；此处的顺序只为"尽量早地把旧记忆清掉"。
+      // F5（复核收口）：失败提示是**异步落地**的（后端不可达时最坏要等到 HTTP 超时），故必须带
+      // 「仍是本轮」守卫 —— 这只在本次新建对话换出的会话里、且其间没有发生任何轮次时才允许写提示；
+      // 否则这条过期提示会盖掉新会话/新轮的 notice（store 其余异步落盘点都用 isCurrentRound 同族守卫，
+      // 本处"当前轮"的判据 = 会话 id 仍是 nextId（未被再次新建对话换掉）且 messages 仍为空
+      // （send 会同步 record 用户消息，故 messages 非空 ⇔ 新会话里已经起过轮次）。
+      const isCurrentRound = (): boolean => this.sessionId === nextId && this.messages.length === 0
+      try {
+        await aiApi.deleteHistory(oldSessionId)
+      } catch {
+        // 删除失败不阻断新对话（旧会话记忆到期自然清理）
+        if (isCurrentRound()) {
+          this.notice = '旧会话记忆删除失败（不影响新对话）'
+        }
+      }
     },
 
     // ── 内部：消息与帧处理 ─────────────────────────────────────────────────

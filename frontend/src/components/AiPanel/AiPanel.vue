@@ -17,6 +17,16 @@
         <div class="text-sm font-semibold text-[#303133]">实施助手</div>
         <div class="text-xs text-[#909399]">流式对话 · 工具调用</div>
       </div>
+      <el-button
+        size="small"
+        text
+        data-testid="new-chat"
+        title="新建对话"
+        :disabled="!ai.messages.length"
+        @click="newChat"
+      >
+        新建对话
+      </el-button>
       <el-button size="small" text title="收起" @click="ai.toggleExpand()">
         <el-icon><ArrowRight /></el-icon>
       </el-button>
@@ -105,7 +115,16 @@
 
     <!-- 消息流（蓝本 AiPanel.vue:21-89） -->
     <div ref="msgWrapRef" class="flex-1 overflow-y-auto p-3">
-      <el-empty v-if="!ai.messages.length" :image-size="60">
+      <!-- 历史对账期骨架屏（苞 B 项 4）：消费 store 的 historyLoaded —— 与空态互斥
+           （无消息且对账未完 → 骨架屏；对账完成后才轮到空态/消息流）。 -->
+      <el-skeleton
+        v-if="!ai.messages.length && !ai.historyLoaded"
+        data-testid="history-skeleton"
+        :rows="4"
+        animated
+        class="p-2"
+      />
+      <el-empty v-else-if="!ai.messages.length" :image-size="60">
         <template #image>
           <el-icon :size="36" color="#409EFF"><Promotion /></el-icon>
         </template>
@@ -115,13 +134,14 @@
             我可以帮您查询配置项与字段、查看任务、预估数据行数、<br />
             打开导出结果在线编辑器、下载导出文件，<br />并启动导出/预检查/导入/发布作业。
           </div>
+          <div class="mt-2 text-xs text-[#c0c4cc]">对话保存在当前浏览器页签中，关闭页签即结束。</div>
         </template>
       </el-empty>
 
       <div
         v-for="m in ai.messages"
         :key="m.id"
-        class="flex gap-2 mb-3.5"
+        class="group flex gap-2 mb-3.5"
         :class="m.role === 'user' ? 'flex-row-reverse' : ''"
       >
         <div
@@ -146,6 +166,30 @@
           </details>
 
           <div v-if="m.content" class="whitespace-pre-wrap">{{ m.content }}</div>
+
+          <!-- 逐条复制（苞 B 项 2）：hover 或键盘聚焦时显现；正文为空（流式空气泡）不出按钮。
+               "已复制"反馈走组件局部状态（下面的 copyState），不占用单槽位的 ai.notice。 -->
+          <div v-if="m.content" class="mt-1 flex items-center justify-end gap-1.5">
+            <span
+              v-if="copyState && copyState.id === m.id"
+              :data-testid="'copy-hint-' + m.id"
+              class="text-xs"
+              :class="copyState.ok ? 'text-[#67c23a]' : 'text-[#f56c6c]'"
+            >
+              {{ copyState.ok ? '已复制' : '复制失败，请手动选中文本复制' }}
+            </span>
+            <el-button
+              link
+              size="small"
+              class="opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity"
+              :data-testid="'copy-msg-' + m.id"
+              title="复制该条消息正文"
+              aria-label="复制该条消息正文"
+              @click="copyMessage(m)"
+            >
+              复制
+            </el-button>
+          </div>
 
           <!-- 工具卡（四态 + 参数 + 结果） -->
           <div v-for="run in m.toolRuns" :key="run.toolCallId" class="mt-1.5 border border-solid border-[#dcdfe6] rounded-md p-2 bg-white">
@@ -296,13 +340,20 @@
  * - 生成式表单挂起卡（GF-B）：generative_form 帧渲染 FormRenderer 等用户填写，取消/超时带
  *   cancelled:true 回灌 —— 蓝本无此前端工具通道；
  * - HITL 卡片：确认/拒绝双路径 + 拒绝原因输入 + 超时倒计时置灰 —— 蓝本有双按钮但无原因与倒计时；
- * - 409/503/断流三类降级提示（EP Alert）与一键重挂 —— 蓝本是蓝本后端（无 SESSION_BUSY/挂起池）。
+ * - 409/503/断流三类降级提示（EP Alert）与一键重挂 —— 蓝本是蓝本后端（无 SESSION_BUSY/挂起池）；
+ * - 头部「新建对话」文字按钮 + 空态页签语义小字（苞 A 项 1）：清空当前会话并换新 sessionId
+ *   （旧会话的服务端记忆由 `DELETE /api/ai/history/{sessionId}` 删除）—— 蓝本无"重开"入口；
+ * - 逐条复制（苞 B 项 2）：消息 hover/聚焦时显现「复制」，复制正文纯文本（不含思考链与工具卡）；
+ *   因 `vite.config.ts` 的 `host: '0.0.0.0'` 存在经内网 http 访问的**非安全上下文**面
+ *   （`navigator.clipboard` 为 undefined），保留 `document.execCommand('copy')` 回退；
+ * - 历史对账期骨架屏（苞 B 项 4）：消费 store 的 `historyLoaded`，与空态互斥 —— 蓝本无骨架屏。
  *
  * 裁剪性：本组件只依赖 stores/ai 与 stores/workspace 的窄接口；App.vue 收起 AI 栏
  * （48px 竖排条）或整体移除本组件后，五页业务功能全部照常可用。
  *
  * 样式纪律：模板全部用 Element Plus + 内联 Tailwind 工具类；唯一的 scoped CSS 是
  * 蓝本确有的 18 行打字机动画（`.typing .dot` + `@keyframes blink`，Tailwind 无对应工具类）。
+ * 项 2 的 hover 显现用 Tailwind 默认 core plugin 的 `group` / `group-hover`（本仓首用）。
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ArrowRight, ChatDotRound, Operation, Promotion } from '@element-plus/icons-vue'
@@ -310,7 +361,7 @@ import { useAiStore, foldDeadline } from '@/stores/ai'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { formatCountdown } from '@/utils/format'
 import FormRenderer from '@/components/AiPanel/FormRenderer.vue'
-import { GENERATIVE_FORM_TOOL, type PendingToolCall, type ToolRunStatus } from '@/types/ai'
+import { GENERATIVE_FORM_TOOL, type ChatMessage, type PendingToolCall, type ToolRunStatus } from '@/types/ai'
 
 const ai = useAiStore()
 const workspace = useWorkspaceStore()
@@ -319,6 +370,14 @@ const inputText = ref('')
 const rejectReason = ref('')
 const deciding = ref(false)
 const msgWrapRef = ref<HTMLElement | null>(null)
+
+/**
+ * 逐条复制的反馈（苞 B 项 2）：**组件局部状态**，生命周期 2s。
+ * 为什么不复用 `ai.notice`：它是单槽位（一次只承载一条提示），"已复制"会把并发的
+ * 断流/取消等提示挤掉 —— 局部状态只作用于被点的那条消息。
+ */
+const copyState = ref<{ id: string; ok: boolean } | null>(null)
+let copyTimer: ReturnType<typeof setTimeout> | null = null
 
 /** 倒计时节拍（每秒推进一次；确认卡据此置灰）。 */
 const now = ref(Date.now())
@@ -528,6 +587,79 @@ function stop(): void {
   void ai.stop()
 }
 
+/**
+ * `document.execCommand('copy')` 回退（苞 B 项 2）。
+ *
+ * 为什么需要：`navigator.clipboard` 只在**安全上下文**（https / localhost）可用，而
+ * `vite.config.ts` 的 `host: '0.0.0.0'` 让本仓存在「经内网 IP + http 访问」的真实面，
+ * 那里 `navigator.clipboard` 是 `undefined`；没有回退就是"点了没反应"的静默失败。
+ * 走临时 textarea（只读、离屏）+ `select()` + `execCommand`，结束即移除。
+ *
+ * @returns 是否复制成功（失败必须有可见反馈，见 `copyMessage`）。
+ */
+function legacyCopy(text: string): boolean {
+  const area = document.createElement('textarea')
+  area.value = text
+  area.setAttribute('readonly', '')
+  area.style.position = 'fixed'
+  area.style.top = '-1000px'
+  area.style.opacity = '0'
+  document.body.appendChild(area)
+  try {
+    area.select()
+    area.setSelectionRange(0, text.length)
+    return document.execCommand('copy')
+  } catch {
+    return false
+  } finally {
+    document.body.removeChild(area)
+  }
+}
+
+/**
+ * 复制一条消息的正文（苞 B 项 2）。
+ *
+ * 内容口径 = `m.content`（渲染点同源）**原样**：不含思考链 `m.reasoning`、不含工具卡
+ * `m.toolRuns` / `m.pendingCall`，**不做 trim**（正文按 `whitespace-pre-wrap` 渲染，
+ * 缩进是可见语义，trim 会让"复制结果 ≠ 看到的内容"）。
+ *
+ * 路径：优先 `navigator.clipboard.writeText`；不可用或**被拒**（权限/非聚焦/非安全上下文）
+ * 时落 `legacyCopy`。反馈写在组件局部 `copyState`，2s 后自清。
+ */
+async function copyMessage(m: ChatMessage): Promise<void> {
+  const text = m.content
+  if (!text) {
+    return
+  }
+  let ok: boolean
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text)
+      ok = true
+    } catch {
+      ok = legacyCopy(text)
+    }
+  } else {
+    ok = legacyCopy(text)
+  }
+  copyState.value = { id: m.id, ok }
+  if (copyTimer !== null) {
+    clearTimeout(copyTimer)
+  }
+  copyTimer = setTimeout(() => {
+    copyState.value = null
+    copyTimer = null
+  }, 2000)
+}
+
+/**
+ * 新建对话（苞 A 项 1）：立即清屏 + 换新 sessionId + 删旧会话的服务端记忆。
+ * 无二次确认（裁决）：点了就干净；进行中的轮次由 store 内先 abort + POST cancel 收口。
+ */
+function newChat(): void {
+  void ai.resetSession()
+}
+
 function reattach(runId?: unknown): void {
   // 传进来的可能是点击事件对象（模板里若漏写括号），一律只接受字符串
   void ai.reattachActive(typeof runId === 'string' ? runId : undefined)
@@ -606,6 +738,10 @@ onBeforeUnmount(() => {
   if (tickTimer !== null) {
     clearInterval(tickTimer)
     tickTimer = null
+  }
+  if (copyTimer !== null) {
+    clearTimeout(copyTimer)
+    copyTimer = null
   }
   ai.stopWorkspaceSync()
 })
