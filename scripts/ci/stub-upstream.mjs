@@ -2,7 +2,7 @@
 /**
  * E2E 门禁专用「上游替身」（M2-T1.2；设计草案 §3.2/§5.1/§5.2）。
  *
- * 作用：CI 内替代真实模型，让 `scripts/verify-e2e.ps1` 的 27 个用例在**零密钥、零外网**下确定性通过。
+ * 作用：CI 内替代真实模型，让 `scripts/verify-e2e.ps1` 的 29 个用例在**零密钥、零外网**下确定性通过。
  * 后端只需 `AI_BASE_URL=http://127.0.0.1:<port>` + 任意非空 `AI_API_KEY` 占位串即可把上游整体指向本桩
  * （后端的可用性判据只看 key 是否非空，不看 key 真假，见 ai/config/AiAvailability）。
  *
@@ -28,7 +28,10 @@
  * 用法：
  *   node scripts/ci/stub-upstream.mjs --port 18399 --dir <dir> [--routes <stub-routes.json>]
  *   node scripts/ci/stub-upstream.mjs --self-check [--routes <stub-routes.json>]
- *   [--violate-form-keys | --violate-form-type]   # 违规模式，默认关闭（裁决 #8，仅缺陷注入时开启）
+ *   [--violate-form-keys | --violate-form-type]   # 违规模式，默认关闭（裁决 #8，仅缺陷注入与 GF6 用例开启）
+ *     --violate-form-keys：全局（S7 缺陷注入口径不变）；
+ *     --violate-form-type：**请求级**——只有提示词明写"把字段 type 故意写成 html"的用例（GF6）触发，
+ *       不连带污染共用 GF-FILTER 路由的 GF1/GF3/GF4（T4-4 裁决 4）。
  */
 
 import http from 'node:http'
@@ -58,7 +61,7 @@ const SELF_CHECK = flag('self-check')
 const VIOLATE_FORM_KEYS = flag('violate-form-keys')
 const VIOLATE_FORM_TYPE = flag('violate-form-type')
 
-// ── 生成式表单白名单：以下 8 组常量 + 5 项上限是产品事实源的【手工副本】───────────
+// ── 生成式表单白名单：以下 8 组常量 + 5 项上限是产品事实源的【桩内副本】───────────
 // 事实源：backend/src/main/java/com/example/configmgr/ai/form/GenerativeFormRules.java
 //   （常量见该类 :57-115；上限 MAX_FIELDS/MAX_OPTIONS/MAX_TITLE_CHARS/MAX_LABEL_CHARS/
 //     MAX_KEY_CHARS/MAX_OPTION_TEXT_CHARS/MAX_PLACEHOLDER_CHARS/MAX_FORM_CHARS）
@@ -66,9 +69,11 @@ const VIOLATE_FORM_TYPE = flag('violate-form-type')
 //   OPTION_ATTRIBUTES / PLACEHOLDER_TYPES / FORBIDDEN_KEYS / KEY_PATTERN
 // 副本清单（5 项上限）：MAX_TITLE_CHARS=100 / MAX_OPTIONS=50 / MAX_OPTION_TEXT_CHARS=100（且选项值不得重复）
 //   / MAX_PLACEHOLDER_CHARS=100 / MAX_FORM_CHARS=8000（form 序列化长度）
-// ⚠ 产品侧收紧/改动白名单（新增禁属性、改正则、调上限）时，必须同步对账本副本，否则
-//   自检③仍绿而桩在运行期才以 FORM_SCHEMA_REJECTED → SKIP → 门禁红的形式暴露失配
-//   （设计草案 R5/R9；事实源自动对账列为 M2-T4 子项）。
+// T4-5（M2 排期条目 16 子项，2026-10-09 落地，裁决 5）：`--self-check` 的自检③已改为**读事实源
+//   逐值对账**上面这 8 组常量 + 5 项上限 + 原型三键（不新增端点、不新增生成步骤）——产品侧收紧/
+//   改动白名单而桩未同步时自检即红、e2e job 即红，不再有"副本自证仍绿"的漂移窗口。
+// 残留观察项（见 M2-T4 施工报告 §观察项）：③-b 模板校验里的 fields 数量上限（1..20）与 label
+//   长度上限（100）仍是**行内字面量**，未纳入本次逐值对账集合。
 const FORBIDDEN_KEYS = ['__proto__', 'constructor', 'prototype']
 const FIELD_TYPES = ['text', 'number', 'boolean', 'date', 'enum', 'multi_select']
 const SCENARIOS = ['FILTER', 'CLARIFY']
@@ -104,31 +109,45 @@ function forbiddenKeyPaths(value, trail = '$', out = []) {
 }
 
 /**
- * 违规模式（默认关闭）：故意把合法桩改成"坏桩"，用于 S7 的归因链路验证。
+ * 违规模式（默认关闭）：故意把合法桩改成"坏桩"，用于归因链路验证与 GF6 用例。
  * 两种形态刻意对应两条不同的产品侧分支：
- *   - `--violate-form-keys`：FILTER 模板缺字段（schema 漂移）→ 脚本记 SKIP；
+ *   - `--violate-form-keys`：FILTER 模板缺字段（schema 漂移）→ 脚本记 SKIP。**全局生效**（S7 缺陷注入口径不变）。
  *   - `--violate-form-type`：字段类型越白名单（html）→ 产品入参闸门拒绝（REJECTED_ARGUMENTS）。
+ *     **请求级生效**（T4-4 裁决 4）：违规注入只在"提示词本身要求违规"的用例路径上触发（见
+ *     {@link VIOLATION_REQUEST_MARKER}），不连带污染 GF1/GF3/GF4 —— 它们与 GF6 共用 GF-FILTER
+ *     路由，若在进程启动期全局改模板，这几个用例会一起被注入而整棒红。
  */
 function applyViolation(routes) {
-  if (!VIOLATE_FORM_KEYS && !VIOLATE_FORM_TYPE) return []
+  if (!VIOLATE_FORM_KEYS) return []
   const applied = []
   for (const route of routes.routes || []) {
     if (route.id !== 'GF-FILTER') continue
     const fields = route.arguments?.form?.fields
     if (!Array.isArray(fields)) continue
-    if (VIOLATE_FORM_KEYS) {
-      route.arguments.form.fields = fields.filter((f) => f.key === 'keyword' || f.key === 'scope')
-      applied.push('violate-form-keys：GF-FILTER 丢弃 minRows/effectiveDate/amount')
-    }
-    if (VIOLATE_FORM_TYPE) {
-      const target = fields.find((f) => f.key === 'scope')
-      if (target) {
-        target.type = 'html'
-        applied.push('violate-form-type：GF-FILTER 的 scope 字段类型改为 html（越白名单）')
-      }
-    }
+    route.arguments.form.fields = fields.filter((f) => f.key === 'keyword' || f.key === 'scope')
+    applied.push('violate-form-keys：GF-FILTER 丢弃 minRows/effectiveDate/amount')
   }
   return applied
+}
+
+/**
+ * `--violate-form-type` 的请求级开关：命中该标记的请求才注入"字段类型越白名单"。
+ * GF6（`verify-e2e.ps1` 的入参闸门用例）的提示词明写"把其中一个字段的 type 故意写成 html"，
+ * 其余 GF 用例的提示词不含该字样 —— 于是"用例级开关"由提示词本身承担（桩不猜调用方身份）。
+ */
+const VIOLATION_REQUEST_MARKER = /故意写成\s*html/
+
+/** 命中则就地改 decision.args 里的 scope 字段类型（args 是 route.arguments 的深拷贝，不改路由表）。 */
+function applyRequestViolation(decision, body) {
+  if (!VIOLATE_FORM_TYPE || decision.kind !== 'tool_call' || decision.route !== 'GF-FILTER') return null
+  const asked = messagesOf(body).some(
+    (m) => m?.role === 'user' && VIOLATION_REQUEST_MARKER.test(textOf(m) || '')
+  )
+  if (!asked) return null
+  const target = (decision.args?.form?.fields || []).find((f) => f.key === 'scope')
+  if (!target) return null
+  target.type = 'html'
+  return 'violate-form-type（请求级）：GF-FILTER 的 scope 字段类型改为 html（越白名单）'
 }
 
 // ── 请求解析辅助 ───────────────────────────────────────────────────────────
@@ -432,6 +451,11 @@ function handleChat(req, res, raw) {
       decision = { kind: 'text', text: CLOSING_TEXT, reason: `判定异常：${err.message}` }
     }
   }
+  // 注入必须先于落盘（T4-S2-6）：`record` 会把 decision **立即** 序列化进 req-NN.decision.json，
+  // 它自称"桩收到的原请求与判定"的失败归因三件套之一 —— 若先落盘再注入，GF6 失败时落盘的判定
+  // 是注入前的合法 schema，与 SSE 实际回帧（注入后的 html）相反，会把排查方向引偏。
+  const violationNote = applyRequestViolation(decision, body ?? {})
+  if (violationNote) console.log(`[违规模式] ${violationNote}`)
   record(index, raw, body ?? {}, decision)
 
   res.writeHead(200, {
@@ -517,10 +541,77 @@ function startServer() {
   server.listen(PORT, '127.0.0.1', () => {
     console.log(`stub-upstream 已就绪 http://127.0.0.1:${PORT} dir=${DIR} routes=${ROUTES_PATH} maxCallsPerTurn=${ROUTES.convergence?.maxCallsPerTurn ?? 6}`)
     for (const note of violations) console.log(`[违规模式] ${note}`)
+    if (VIOLATE_FORM_TYPE) {
+      console.log(`[违规模式] violate-form-type（请求级）：仅命中 ${VIOLATION_REQUEST_MARKER} 的请求注入越白名单类型（GF6 用例；GF1/GF3/GF4 不受影响）`)
+    }
   })
 }
 
 // ── 自检（--self-check：契约校验 + 收敛自证，不启动服务） ─────────────────────
+
+// ── 产品事实源逐值对账（T4-5 裁决 5：自检期读 GenerativeFormRules.java，不新增端点/生成步骤） ──
+//   事实源 = 后端白名单规则本体；本步读它的常量声明，对桩内 8 组常量 + 5 项上限 + 原型三键逐值比对，
+//   使"产品侧收紧白名单而桩自检仍绿"的漂移窗口关闭（对账红 → 自检红 → e2e job 红，不再静默）。
+//   依赖面：对 Java 源**文本格式**（常量声明的书写形态）有依赖 —— 采用宽松解析，解析失败即红并打印原文位置。
+const FORM_RULES_REL = 'backend/src/main/java/com/example/configmgr/ai/form/GenerativeFormRules.java'
+const FORM_RULES_PATH = path.resolve(HERE, '..', '..', FORM_RULES_REL)
+
+/** Java 源里 `NAME = Set.of(…)` / `List.of(…)` 的字面量清单；解析失败返回 null。 */
+function javaStringList(src, name) {
+  const m = new RegExp(`\\b${name}\\s*=\\s*(?:Set|List)\\.of\\(([^)]*)\\)`).exec(src)
+  return m ? [...m[1].matchAll(/"([^"]*)"/g)].map((x) => x[1]) : null
+}
+
+/** Java 源里 `NAME = 数字;` 的取值；解析失败返回 null。 */
+function javaInt(src, name) {
+  const m = new RegExp(`\\b${name}\\s*=\\s*(\\d+)\\s*;`).exec(src)
+  return m ? Number(m[1]) : null
+}
+
+/** Java 源里 `NAME = Pattern.compile("…")` 的正则源串；解析失败返回 null。 */
+function javaPatternSource(src, name) {
+  const m = new RegExp(`\\b${name}\\s*=\\s*Pattern\\.compile\\("([^"]*)"\\)`).exec(src)
+  return m ? m[1].replace(/\\\\/g, '\\') : null
+}
+
+const sortedJoin = (values) => [...values].sort().join('|')
+
+function checkConstantsAgainstSource(src, bad) {
+  const lists = [
+    ['FIELD_TYPES', FIELD_TYPES],
+    ['SCENARIOS', SCENARIOS],
+    ['FORM_ATTRIBUTES', FORM_ATTRIBUTES],
+    ['FIELD_ATTRIBUTES', FIELD_ATTRIBUTES],
+    ['OPTION_ATTRIBUTES', OPTION_ATTRIBUTES],
+    ['PLACEHOLDER_TYPES', PLACEHOLDER_TYPES],
+    ['FORBIDDEN_FIELD_KEYS', FORBIDDEN_KEYS]
+  ]
+  for (const [javaName, local] of lists) {
+    const fromSource = javaStringList(src, javaName)
+    if (fromSource === null) {
+      bad(`事实源未解析到常量 ${javaName}（宽松解析失败：${FORM_RULES_REL} 的声明形态已变，需人工核对并同步本解析器）`)
+    } else if (sortedJoin(fromSource) !== sortedJoin(local)) {
+      bad(`常量 ${javaName} 与事实源不一致：桩 [${[...local].sort().join(', ')}] vs 事实源 [${fromSource.sort().join(', ')}]`)
+    }
+  }
+  const sourcePattern = javaPatternSource(src, 'KEY_PATTERN')
+  if (sourcePattern === null) bad('事实源未解析到 KEY_PATTERN（宽松解析失败）')
+  else if (sourcePattern !== KEY_PATTERN.source) {
+    bad(`KEY_PATTERN 与事实源不一致：桩 /${KEY_PATTERN.source}/ vs 事实源 /${sourcePattern}/`)
+  }
+  const limits = [
+    ['MAX_TITLE_CHARS', MAX_TITLE_CHARS],
+    ['MAX_OPTIONS', MAX_OPTIONS],
+    ['MAX_OPTION_TEXT_CHARS', MAX_OPTION_TEXT_CHARS],
+    ['MAX_PLACEHOLDER_CHARS', MAX_PLACEHOLDER_CHARS],
+    ['MAX_FORM_CHARS', MAX_FORM_CHARS]
+  ]
+  for (const [name, local] of limits) {
+    const value = javaInt(src, name)
+    if (value === null) bad(`事实源未解析到上限 ${name}（宽松解析失败）`)
+    else if (value !== local) bad(`上限 ${name} 与事实源不一致：桩 ${local} vs 事实源 ${value}`)
+  }
+}
 
 function selfCheck() {
   const problems = []
@@ -566,7 +657,17 @@ function selfCheck() {
   ok(`路由表结构自洽（${(ROUTES.routes || []).length} 条路由，均含非空 requiresTools）`)
 
   section()
-  // ③ 生成式表单模板与产品白名单逐字段对账（GenerativeFormRules）
+  // ③ 生成式表单白名单：先与产品事实源 GenerativeFormRules.java 逐值对账（T4-5 裁决 5），
+  //    再用对账过的常量校验路由表模板 —— 不再是"只核桩内副本"（那是产品侧收紧白名单时
+  //    自检仍绿的漂移窗口）。
+  const rulesSrc = fs.existsSync(FORM_RULES_PATH) ? fs.readFileSync(FORM_RULES_PATH, 'utf8') : null
+  if (rulesSrc === null) {
+    bad(`产品事实源不可读：${FORM_RULES_REL}（自检已改为事实源对账，缺文件即红）`)
+  } else {
+    checkConstantsAgainstSource(rulesSrc, bad)
+    ok(`生成式表单白名单与产品事实源逐值对账通过（事实源：${FORM_RULES_REL}；8 组常量 + 5 项上限 + 原型三键）`)
+  }
+  // ③-b 路由表模板逐字段校验（用上面已对账过的常量）
   for (const route of (ROUTES.routes || []).filter((r) => r.tool === 'generative_form')) {
     const form = route.arguments?.form
     const at = `路由 ${route.id}.form`
@@ -628,7 +729,7 @@ function selfCheck() {
       }
     }
   }
-  ok('生成式表单模板与 GenerativeFormRules 白名单逐字段对账通过（经桩内副本；含 5 项上限：title/options/option 文本与去重/placeholder/form 序列化）')
+  ok(`生成式表单模板逐字段校验通过（白名单形状取自事实源对账结果；含 5 项上限：title/options/option 文本与去重/placeholder/form 序列化）`)
 
   section()
   // ④ 收敛自证：逐路由跑"首轮→工具调用、续轮→文本"的模拟循环（长度递增形态）
