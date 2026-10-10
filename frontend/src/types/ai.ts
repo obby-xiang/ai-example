@@ -207,9 +207,15 @@ export interface PendingToolCall {
   timeoutSeconds?: number
   /**
    * DC-14 T4：挂起等待的绝对到期时刻（epoch 毫秒，服务端给的 `expiresAt`）。
-   * 倒计时优先用它（不受本地时钟漂移/重挂延迟影响）；缺字段才回落到 timeoutSeconds。
+   * T4-3 起倒计时按**服务端剩余时长**折算（见 `atMs`）：`atMs` 可用时用 `expiresAt − atMs`，
+   * 不可用（实时帧）才用本绝对值直接对本地钟；两者皆缺再回落 `timeoutSeconds`。
    */
   expiresAt?: number
+  /**
+   * T4-3：帧落档时刻（epoch 毫秒；仅归档 / 回放帧带，实时帧无）—— 与 `expiresAt` 同为
+   * 服务端钟，二者之差即服务端给出的剩余时长（折算见 `stores/ai.ts` 的 `foldDeadline`）。
+   */
+  atMs?: number
   /**
    * T2a-D#2：帧 status → pendingCall.status 终态映射的落点（FRONTEND_RESULT→succeeded /
    * FRONTEND_CANCELLED→cancelled / TIMEOUT→expired / REJECTED→rejected / BLOCKED→blocked），
@@ -242,7 +248,7 @@ export interface ActiveGenerativeForm {
   status: GenerativeFormStatus
   /** 客户端复核 / 后端 FORM_RESULT_REJECTED 的提示（null = 无） */
   error: string | null
-  /** 本地判超时的绝对时刻（epoch 毫秒；expiresAt 优先，缺省按 timeoutSeconds 折算；null = 不限） */
+  /** 本地判超时的绝对时刻（epoch 毫秒；服务端剩余时长折算 `expiresAt − atMs` 优先，缺 `atMs` 回落 `expiresAt` 绝对值、再缺回落 `timeoutSeconds`；null = 不限） */
   deadline: number | null
 }
 

@@ -66,6 +66,37 @@ export function createSessionId(): string {
   return `s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
 }
 
+/**
+ * T4-3（裁决 3，选项 a）：把服务端到期信息折算成本地倒计时 deadline。
+ *
+ * 口径：`expiresAt` 与 `atMs` 同为**服务端钟**的 epoch 毫秒（前者 = 服务端给的绝对到期时刻，
+ * 后者 = 帧落档时刻），故 `expiresAt − atMs` 就是服务端给出的**剩余时长** —— 本地取
+ * 「本地 now + 剩余时长」，倒计时便不因客户端钟漂移 X 而整段偏移 X（GFb 红队问题 7）。
+ *
+ * 回落（保持既有口径，不换语义）：`atMs` 缺失 / 非法、或 `expiresAt < atMs` 时按绝对
+ * `expiresAt` 对本地钟 —— **实时帧即走此分支**（实时帧在落档补 `atMs` 之前已序列化发出）；
+ * 再缺 `expiresAt` 才按 `timeoutSeconds` 相对秒折算；三者皆无 → `null`（不武装本地计时器）。
+ *
+ * 已知代价（本批口径，登记于排期去向表观察项）：回放 / 重挂帧按**帧落档时**的剩余时长重新起算，
+ * 不扣减 `atMs` 之后已流逝的等待时间 ⇒ 重挂后本地倒计时可能偏长。后端 `ConfirmGate` /
+ * 结局帧仍是权威超时判据（本地先到 → 取消；后端先到 → 结局帧收敛），故本批以「免疫钟漂移」
+ * 换「重挂重起算」。`nowMs` 参数仅为可复算 / 走查留口，业务调用一律用默认值。
+ */
+export function foldDeadline(
+  expiresAt?: number,
+  atMs?: number,
+  timeoutSeconds?: number,
+  nowMs: number = Date.now()
+): number | null {
+  if (typeof expiresAt === 'number' && Number.isFinite(expiresAt)) {
+    if (typeof atMs === 'number' && Number.isFinite(atMs) && expiresAt >= atMs) {
+      return nowMs + (expiresAt - atMs)
+    }
+    return expiresAt
+  }
+  return timeoutSeconds ? nowMs + timeoutSeconds * 1000 : null
+}
+
 /** 取/建页签会话 id。 */
 function initSessionId(): string {
   try {
@@ -935,11 +966,9 @@ export const useAiStore = defineStore('ai', {
         void this.submitFrontendToolResult(frame.toolCallId, '', 'frontend-executor', true, runId ?? undefined)
         return
       }
-      const deadline = typeof frame.expiresAt === 'number' && Number.isFinite(frame.expiresAt)
-        ? frame.expiresAt
-        : frame.timeoutSeconds
-          ? Date.now() + frame.timeoutSeconds * 1000
-          : null
+      // T4-3 落点①：本地 deadline 按服务端剩余时长折算（`expiresAt − atMs`），缺 `atMs` 回落原口径
+      // —— 口径与回落分支的说明见 `foldDeadline` 的注释（重挂 / 回放帧带 `atMs`，实时帧不带）。
+      const deadline = foldDeadline(frame.expiresAt, frame.atMs, frame.timeoutSeconds)
       this.activeForm = {
         toolCallId: frame.toolCallId,
         runId,
@@ -1380,6 +1409,8 @@ export const useAiStore = defineStore('ai', {
         timeoutSeconds: frame.timeoutSeconds,
         // T4：绝对到期时刻（服务端给）；缺字段时由倒计时组件回落到 timeoutSeconds
         expiresAt: frame.expiresAt,
+        // T4-3：帧落档时刻（仅归档 / 回放帧带）—— 倒计时据此按服务端剩余时长折算（见 foldDeadline）
+        atMs: frame.atMs,
         status: 'pending'
       }
     },
