@@ -71,7 +71,7 @@ scripts/githooks/scan-history.sh --max-size 512   # 跳过 >512KB 的 blob（默
 
 实现要点：`git rev-list --objects --all` 枚举全部可达对象 → 按 sha 取首个可见路径 → 只保留 blob 类型且体积达标的对象 → 逐个 `git cat-file blob` 读内容跑同样三条规则。因为是 blob 粒度，**历史中被删除或改写掉的内容同样会被发现**。
 
-输出中每条命中附该历史版本的 blob 短 sha，可用 `git cat-file blob <sha>` 复核；行号对应该 blob 内容，与当前工作树行号可能不同。命中退出码为 1（便于 CI 门禁）。
+输出中每条命中附该历史版本的 blob 短 sha，可用 `git cat-file blob <sha>` 复核；行号对应该 blob 内容，与当前工作树行号可能不同。命中退出码为 1（脚本自身语义不变；CI 侧按**报告制**解读，见第 6 节）。
 
 性能：串行逐个 blob 读取，本仓库唯一 blob 约 2000 个（2026-10-08 实测：`git rev-list --objects --all` 可达对象 4172 个 —— blob 1987 / tree 1939 / commit 246；1987 个 blob 全部在默认 2048KB 体积上限内），需数分钟；`--files-only` 不改变扫描耗时，`--max-size` 调小可跳过体积较大的文档快照。
 
@@ -90,7 +90,7 @@ scripts/githooks/scan-history.sh --max-size 512   # 跳过 >512KB 的 blob（默
 - 环境变量写法：Git Bash 用 `AI_SECRETS_ALLOW=1 git commit ...`；PowerShell 用 `$env:AI_SECRETS_ALLOW=1; git commit ...`（仅当前会话有效）；
 - `user.name` 取的是本地配置；一台机器上有多个身份时，确认取到的是需要保护的那个用户名（可用 `git config --show-origin user.name` 核对）；
 - 路径规则同时覆盖盘符写法与 Git Bash 挂载写法，因此同一台机器上两种写法都拦得住；
-- IDE/图形客户端可能自动附加 `--no-verify`，不要依赖钩子作为唯一防线；CI 侧再跑一次 `scan-history.sh` 兜底——**该建议已升级为待实施项**：见 `docs/M2-排期计划.md` T4「文档一致性门禁」子项（把 `scan-history.sh` 接进 CI）。在该项落地之前，CI 侧没有全历史扫描的自动门禁，只有本地手动跑法。
+- IDE/图形客户端可能自动附加 `--no-verify`，不要依赖钩子作为唯一防线；CI 侧再跑一次 `scan-history.sh` 兜底——**已落地**：`.github/workflows/ci.yml` 的 `scan-history` job（`--files-only`、10 分钟上限、`fetch-depth: 0`）。**口径（裁决①，2026-10-09）：该 job 为报告制非阻断** —— 历史 blob 命中（退出码 1）照常全量输出 + 上传 artifact + job summary 标注，但不使 CI 红（唯一手段是历史改写，需用户专项授权）；仅"扫描器未完成"（退出码 2，环境/参数错误）为红。**工作树口径的阻断面不在该 job**：`pre-commit`（本机暂存区）与 CI 的 `docs` job（`check-docs.mjs` 断言 ⑤ 按 `git ls-files` 全量；断言 ① 只覆盖 4 个导航/口径入口文档）继续阻断。
 
 ## 7. 维护与自测
 

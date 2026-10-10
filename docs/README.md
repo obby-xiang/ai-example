@@ -38,8 +38,10 @@
 | 生成式表单 GF | 后端工具（GFa）、复核与红队（GFb）、E2E 用例设计与端到端执行（GFc）、双 FormRenderer 冒烟（GFd） | `GFa-*.md` ~ `GFd-*.md` |
 | M1/M2 里程碑 | M1 出口复核与 E2E 复跑；M2 E2E 门禁设计草案、实施、独立复现、红队审查与修复复核 | `M1-*.md`、`M2-*.md` |
 | 决策落地与衍生问题 | DC-14 微调实施验证、前端三蓝本侦察、基座构建与并集移植、核验衍生问题清单 Q1~Q11 | `DC14-*.md`、`FE-1-*.md`、`G1-*.md`、`G2-*.md`、`核验衍生问题清单.md` |
+| 探针源码 | 随证留档的探针源码（`.java`）：**仓库外编译运行、不参与构建与测试计数** | `docs/evidence/probes/`（来源：`M2-T3a-验收盘点-DS-V4-Flash.md`、`M2-T3-5-压测证据-DS-V4-Flash.md`） |
 
 > 附件约定：证据文档的原始材料（`.log` / `.json` / `.txt`）与被引文档同目录、同前缀（如 `V3-附件-e2e-run1-原始输出.txt`）。按 DC-08，入库产物一律用 `<REPO_ROOT>` / `<MAVEN_HOME>` 等占位符；个别为保存原始命令行/日志而保留了本机路径的附件，按 `scripts/githooks/README.md` 第 5.1 节的既定处理（占位符改写，或留痕放行并登记待清理）对待，**不要以它们为写作范例**。
+> 附件约定（探针）：`probes/` 子目录放随证探针 `.java` 源码——**仓库外编译运行、不参与构建与测试计数**；`backend/pom.xml` 未声明任何指向 `docs/` 的 `sourceDirectory`/`testSourceDirectory`/`includes`，该形状由文档门禁 `scripts/ci/check-docs.mjs` 断言。
 
 ## legacy 参考件区（源分支遗留参考，勿当现行设计）
 
@@ -50,7 +52,7 @@
 | `docs/requirements.md` | 需求规格说明书（源分支 v1.0） | `docs/02-需求设计文档-v2.2-冻结版.md` |
 | `docs/technical-design.md` | 技术方案文档（源分支 v1.0） | `docs/03-技术方案文档-v2.1.md` + `docs/adr/DECISION-CARDS.md` |
 | `docs/implementation-plan.md` | 实现方案文档（源分支 v1.0） | `docs/M2-排期计划.md`（批次与状态）+ `docs/s4/`（施工级规格） |
-| `docs/test-cases.md` | 测试用例文档（源分支 v1.0） | 后端 `backend/src/test/`、`scripts/verify-e2e.ps1`（27 用例）、`docs/evidence/S5*` |
+| `docs/test-cases.md` | 测试用例文档（源分支 v1.0） | 后端 `backend/src/test/`、`scripts/verify-e2e.ps1`（29 用例）、`docs/evidence/S5*` |
 | `docs/verification-results.md` | 验证结果文档（源分支 v1.1） | `docs/evidence/` 全量证据文档 |
 
 ## 阅读顺序建议
@@ -65,3 +67,5 @@
 - 唯一豁免：`spike/sp01ab`、`spike/sp02`、`spike/sp01d` 三处脱敏脚本内**作为脱敏匹配源而功能必需**的本仓路径正则（DOC#5 裁决）—— 不改写其匹配串，仅在脚本头部注明豁免依据；其输出占位符统一为 `<MAIN_REPO>`。
 - 门禁留痕（DOC#5 / T4 条目 18）：未来文档一致性门禁 `scripts/ci/check-docs.mjs` 落地时须加入本禁则断言，且门禁取文件清单按 `git ls-files` 口径，不得直接 grep 工作树（避免 `.gitignore` 排除的构建产物目录误报）。
 - 边界说明：本机磁盘上的检出目录名维持现状不改 —— 重命名属仓库外事项，且上述三处脱敏匹配源依赖该磁盘名。
+- **门禁已落地（T4-7a-1，2026-10-09）**：`scripts/ci/check-docs.mjs` 已实现并接线（CI `docs` job），上面第三条的"落地时须加入本禁则断言"已满足——断言 ⑤ 即本禁则，按 `git ls-files` 口径全量扫描（豁免仍是上一条的三个 spike 脚本，且对豁免文件断言其头部豁免注释存在）；`docs/evidence/` 历史证据文档同样受该禁则约束（断言 ⑤ 不排除它们）。另含断言 ⑥「`.java` 探针不参与构建」（对 `docs/evidence/probes/` 的索引见上文「证据分区」的「探针源码」行）。
+- **CI 脱敏扫描分口径（裁决①，2026-10-09）**：两个新 job 的门禁属性不同，勿混读 —— `docs` job（文档一致性门禁）**阻断**，它同时承担**工作树口径**的阻断面（断言 ⑤ 本禁则按 `git ls-files` 全量逐文件；断言 ① 盘符路径只覆盖 4 个导航/口径入口文档，二者均非 grep 工作树）；`pre-commit` 钩子（本机暂存区）同样**阻断**；`scan-history` job（全历史 blob）为**报告制非阻断** —— 其命中全部落在历史 blob（工作树 / 暂存区口径 0 命中），删工作树文件消除不了，唯一手段是历史改写（需用户专项授权，本周期不动，见 `docs/M2-排期计划.md` 去向表观察项），故命中照常全量输出 + 上传 artifact + job summary 标注，但不使 CI 红；仅"扫描器未完成"（退出码 2）为红。

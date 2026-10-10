@@ -83,8 +83,8 @@ cd frontend
 # 1) 首次：从示例生成本地环境变量文件（.env.local 已被 .gitignore 排除）
 Copy-Item .env.example .env.local
 
-# 2) 编辑 .env.local —— 关键一项：后端在 8081，而前端 dev 代理默认指向 8080，必须覆盖
-#    VITE_API_BASE=http://localhost:8081
+# 2) 编辑 .env.local —— 前端 dev 代理默认值已与后端（8081）对齐，开箱可用；
+#    后端不在 8081 时才需要覆盖：VITE_API_BASE=http://localhost:8081
 
 yarn install
 yarn dev
@@ -111,7 +111,7 @@ yarn dev
 
 | 变量 | 作用 | 默认 | 注意 |
 | --- | --- | --- | --- |
-| `VITE_API_BASE` | dev server 的 `/api` 代理目标 | `http://localhost:8080` | **默认值与后端端口（8081）错位**，本地开发必须在 `.env.local` 覆盖为 `http://localhost:8081`，否则所有接口 404/连接失败 |
+| `VITE_API_BASE` | dev server 的 `/api` 代理目标 | `http://localhost:8081` | **默认值已与后端端口（8081）对齐**，开箱即可用；后端换地址时在此覆盖（`vite.config.ts` 的 `DEFAULT_API_BASE` 只作 dev 便利默认，不构成对"禁止硬编码端口"口径的翻案——禁止的是组件/业务源码内不可覆盖的硬编码） |
 | `VITE_DEV_PORT` | dev server 端口 | `5200` | 端口被占用时改这里（配置了 `strictPort`，不会自动顺延） |
 | `VITE_SPREADJS_KEY` | SpreadJS 授权 Key | 空 | 留空为评估模式：仅显示水印，功能可用 |
 
@@ -119,10 +119,14 @@ yarn dev
 
 ## 端口一览
 
+> **端口唯一事实源**：后端只用 `backend/src/main/resources/application.yml` 的 `server.port`；前端 dev 只用 `frontend/vite.config.ts` 的 `DEFAULT_DEV_PORT`。配置树里**不存在** `app.server.backend-port` / `app.server.frontend-port` 之类无绑定死键（已于 M2-T4 整块删除）。下表四个端口由文档门禁 `scripts/ci/check-docs.mjs` 与这两个事实源逐值对账，改端口必须同批改表。
+
 | 服务 | 端口 | 事实源 |
 | --- | --- | --- |
 | 后端 | 8081 | `backend/src/main/resources/application.yml` 的 `server.port` |
 | 前端 dev server | 5200（可用 `VITE_DEV_PORT` 覆盖） | `frontend/vite.config.ts` 的 `DEFAULT_DEV_PORT` |
+| E2E 后端 | 18330 | `scripts/verify-e2e.ps1` 的 `-Base` 默认值 |
+| 上游桩（E2E/CI） | 18399 | `scripts/ci/stub-upstream.mjs` 的 `--port` 默认值 |
 | H2 Console | `http://localhost:8081/h2-console` | `spring.h2.console.path` |
 
 ---
@@ -187,22 +191,24 @@ cd frontend
 yarn typecheck      # vue-tsc --noEmit
 yarn build          # 含 vue-tsc + vite build
 
-# 端到端（需后端已启动 + Redis + AI key；27 用例）
+# 端到端（需后端已启动 + Redis + AI key；29 用例 —— 桩模式加 -EnableGf6 启用 GF6 入参闸门用例）
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify-e2e.ps1 `
     -Base http://127.0.0.1:18330 -BackendLog <后端 stdout 日志路径> -ArtifactDir <证据落盘目录>
 ```
 
 E2E 脚本的参数、退出码口径、桩模式（`E2E_STUB_MODE=1` 零容忍）与证据落盘规则见 **`scripts/README.md`**。
 
-### CI 三 job（`.github/workflows/ci.yml`）
+### CI 五 job（`.github/workflows/ci.yml`）
 
 | job | 内容 | 依赖 |
 | --- | --- | --- |
 | `backend` | JDK 21 + `mvn -B test`（全量单测） | — |
 | `frontend` | Node 22 + `yarn install --frozen-lockfile` + `yarn typecheck` + `yarn build` | — |
-| `e2e` | Redis service 容器 + 桩上游（`scripts/ci/stub-upstream.mjs`）+ `scripts/verify-e2e.ps1` 27 用例 | `backend` |
+| `e2e` | Redis service 容器 + 桩上游（`scripts/ci/stub-upstream.mjs --violate-form-type`）+ `scripts/verify-e2e.ps1` 29 用例（`-EnableGf6`） | `backend` |
+| `docs` | 文档一致性门禁（`node scripts/ci/check-docs.mjs`，6 条断言）｜**阻断** | — |
+| `scan-history` | 全历史脱敏扫描（`scripts/githooks/scan-history.sh --files-only`，独立 job、10 分钟上限）｜**报告制不计门禁** | — |
 
-触发条件为 `push` / `pull_request` 到 `main`，三个 job 均为阻塞门禁。
+触发条件为 `push` / `pull_request` 到 `main`。门禁属性（裁决①，2026-10-09 口径调整）：`backend` / `frontend` / `e2e` / `docs` 为**阻塞门禁**；`scan-history` 为**报告制非阻断** —— 它的命中全部落在**历史 blob**（当前工作树 / 暂存区口径 0 命中；当前 HEAD 全量实跑 302 处 / 40 个历史路径，其中 **10 个**路径仅存于历史、不在工作树。口径换算：278 = CI 模拟时点实测（施工报告 §14#1，其 USER 规则未生效，含仅存于历史的 9 个路径），302 = 当前 HEAD 全量实跑（红队复核 §d），两数勿混读），删工作树文件消除不了，唯一手段是历史改写（需用户专项授权，本周期不动），故不以「失败即红」接线：命中照常全量输出 + 上传 artifact + job summary 标注，但不使 CI 红（"扫描器未完成"这类环境/参数错误仍为红）。**工作树口径的阻断面不在该 job**：由 `docs` job（断言 ⑤ 命名纪律按 `git ls-files` 全量扫描；断言 ① 盘符路径只覆盖 4 个导航/口径入口文档）与 `pre-commit` 钩子（本机暂存区）承担，二者保持阻断。`scan-history` 仍不设 `needs`、不阻塞主路径。
 
 > **桩的口径（不得扩大解释）**：CI 的 E2E 跑在**上游替身**上，它只证明"桩给出的表单/工具调用被产品链路正确消费"，**不证明模型服从率**；真模型的 E2E 维持本地手动跑。
 
