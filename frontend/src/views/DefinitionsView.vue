@@ -89,24 +89,24 @@
 
         <div class="mb-2 text-[13px] text-[#303133]">字段清单（按 sortOrder）</div>
         <el-table :data="detail.fields ?? []" size="small" border>
-          <el-table-column prop="sortOrder" label="排序" width="70" />
-          <el-table-column prop="code" label="字段编码" width="150" />
-          <el-table-column prop="label" label="字段名称（表头）" min-width="140" />
-          <el-table-column label="类型" width="110">
+          <el-table-column prop="sortOrder" label="排序" min-width="48" />
+          <el-table-column prop="code" label="字段编码" min-width="120" />
+          <el-table-column prop="label" label="字段名称（表头）" min-width="134" />
+          <el-table-column label="类型" min-width="120">
             <template #default="{ row }: { row: ConfigField }">
               <el-tag size="small">{{ typeLabel(row.fieldType) }}</el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="必填" width="70">
+          <el-table-column label="必填" min-width="48">
             <template #default="{ row }: { row: ConfigField }">{{ row.required ? '是' : '否' }}</template>
           </el-table-column>
-          <el-table-column label="主键" width="70">
+          <el-table-column label="主键" min-width="58">
             <template #default="{ row }: { row: ConfigField }">
               <el-tag v-if="row.key" size="small" type="danger">主键</el-tag>
               <span v-else>—</span>
             </template>
           </el-table-column>
-          <el-table-column label="选项 / 引用" min-width="200">
+          <el-table-column label="选项 / 引用" min-width="184">
             <template #default="{ row }: { row: ConfigField }">
               <span v-if="row.fieldType === 'ENUM'">
                 {{ parseFieldOptions(row).map((option) => `${option.value}=${option.label}`).join('、') || '—' }}
@@ -129,7 +129,7 @@
 
     <!-- 定义 / 字段编辑 -->
     <el-drawer v-model="editorVisible" size="82%" :title="editingCode ? `编辑配置定义 - ${editingCode}` : '新建配置定义'">
-      <el-form label-width="110px" size="small">
+      <el-form label-width="auto" size="small">
         <div class="grid grid-cols-2 gap-x-6">
           <el-form-item label="配置编码" required>
             <el-input v-model="form.code" :disabled="editingCode !== null" placeholder="如 TAX_RATE（唯一，用于文件名匹配）" />

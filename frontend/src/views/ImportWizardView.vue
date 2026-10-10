@@ -140,12 +140,11 @@
         </template>
         <el-empty v-if="!staging.length" description="暂存区暂无数据，请先完成导入" :image-size="60" />
         <el-collapse v-else v-model="stagingOpen">
-          <el-collapse-item
-            v-for="group in staging"
-            :key="group.defCode"
-            :name="group.defCode"
-            :title="`${defName(group.defCode)}（${group.defCode}）— ${group.rowCount} 行`"
-          >
+          <el-collapse-item v-for="group in staging" :key="group.defCode" :name="group.defCode">
+            <template #title>
+              <!-- 行高必须落在这个块级元素上：inline 子元素的小 line-height 会被 el-collapse-item__title 的 48px 行高「撑」回去 -->
+              <span class="block whitespace-normal leading-snug">{{ `${defName(group.defCode)}（${group.defCode}）— ${group.rowCount} 行` }}</span>
+            </template>
             <el-table :data="group.rows.slice(0, 100)" size="small" border max-height="300">
               <el-table-column prop="rowKey" label="业务键" width="150" />
               <el-table-column prop="opType" label="操作" width="90">
@@ -212,7 +211,7 @@
  *    `GET /jobs/{id}/issues` 文案 —— 前端只盯作业终态，绝不按同步错误判错；
  * 3. 进度通道 SSE（JOB_PROGRESS/JOB_DONE）+ 轮询兜底；蓝本是纯轮询。
  */
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, type UploadFile } from 'element-plus'
 import DefSelector from '@/components/wizard/DefSelector.vue'
@@ -536,7 +535,12 @@ async function handleUpload(uploadFile: UploadFile): Promise<void> {
       editorLoaded.delete(item.defCode)
     }
     if (result.unmatchedFiles && result.unmatchedFiles.length > 0) {
-      await ElMessageBox.alert(result.unmatchedFiles.join('\n'), '以下文件未匹配到配置项', { type: 'warning' })
+      // 多条目须换行展示：ElMessageBox 的 message 支持 VNode，用 Tailwind whitespace-pre-line 还原 \n
+      await ElMessageBox.alert(
+        h('span', { class: 'whitespace-pre-line' }, result.unmatchedFiles.join('\n')),
+        '以下文件未匹配到配置项',
+        { type: 'warning' }
+      )
     }
     ElMessage.success(`已上传并匹配 ${matched.length} 个文件`)
     // 用服务端刚存下的文件刷新编辑区（保证"所见即服务端所有"）

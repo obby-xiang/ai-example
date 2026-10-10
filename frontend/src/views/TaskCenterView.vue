@@ -119,21 +119,21 @@
     </div>
 
     <el-dialog v-model="createDialogVisible" title="创建任务" width="440px">
-      <el-form label-width="80px">
+      <el-form label-width="auto">
         <el-form-item label="任务类型" required>
-          <el-radio-group v-model="createForm.type">
-            <el-radio value="EXPORT">
+          <el-radio-group v-model="createForm.type" class="flex flex-col items-start gap-1">
+            <el-radio value="EXPORT" class="!h-auto !whitespace-normal !items-start !mr-0">
               导出配置
               <div class="text-xs text-[#909399] font-normal">选择配置项 → 设置查询条件 → 导出 Excel</div>
             </el-radio>
-            <el-radio value="IMPORT">
+            <el-radio value="IMPORT" class="!h-auto !whitespace-normal !items-start !mr-0">
               导入配置
               <div class="text-xs text-[#909399] font-normal">上传/编辑 → 检查 → 导入暂存 → 发布生效</div>
             </el-radio>
           </el-radio-group>
         </el-form-item>
-        <el-form-item label="任务名称" required>
-          <el-input v-model="createForm.title" maxlength="60" placeholder="例如：Q4 税率批量导入" />
+        <el-form-item label="任务名称">
+          <el-input v-model="createForm.title" maxlength="60" placeholder="例如：Q4 税率批量导入（留空则自动命名）" />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -167,24 +167,24 @@
 
         <div class="mb-2 text-[13px] text-[#303133]">作业</div>
         <el-table :data="taskStore.currentJobs" size="small" border class="mb-4">
-          <el-table-column prop="id" label="作业" width="80" />
-          <el-table-column label="类型" width="100">
+          <el-table-column prop="id" label="作业" min-width="56" />
+          <el-table-column label="类型" min-width="60">
             <template #default="{ row }: { row: Job }">{{ JOB_TYPE_LABELS[row.jobType] }}</template>
           </el-table-column>
-          <el-table-column label="状态" width="100">
+          <el-table-column label="状态" min-width="80">
             <template #default="{ row }: { row: Job }">
               <el-tag size="small" :type="jobTagType(row.status)">{{ jobStatusLabel(row.status) }}</el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="行级进度" min-width="140">
+          <el-table-column label="行级进度" min-width="108">
             <template #default="{ row }: { row: Job }">{{ row.progress }} / {{ row.total > 0 ? row.total : '处理中' }}</template>
           </el-table-column>
-          <el-table-column prop="errorCount" label="错误" width="70" />
-          <el-table-column prop="warningCount" label="警告" width="70" />
-          <el-table-column label="开始" width="160">
+          <el-table-column prop="errorCount" label="错误" min-width="48" />
+          <el-table-column prop="warningCount" label="警告" min-width="48" />
+          <el-table-column label="开始" min-width="138">
             <template #default="{ row }: { row: Job }">{{ formatDateTime(row.startedAt) }}</template>
           </el-table-column>
-          <el-table-column label="结束" width="160">
+          <el-table-column label="结束" min-width="138">
             <template #default="{ row }: { row: Job }">{{ formatDateTime(row.finishedAt) }}</template>
           </el-table-column>
         </el-table>
@@ -427,12 +427,17 @@ async function removeTask(row: TaskSummary): Promise<void> {
   }
 }
 
+/**
+ * 名称留空时的默认任务名：`<类型名>任务 <本地时间>`。
+ * 口径与两处向导的自动建任务一致（ExportWizardView/ImportWizardView 的 createAndBindTask）。
+ */
+function defaultTaskTitle(type: TaskType): string {
+  return `${TASK_TYPE_LABELS[type]}任务 ${new Date().toLocaleString('zh-CN')}`
+}
+
 async function createTask(): Promise<void> {
-  const title = createForm.title.trim()
-  if (!title) {
-    ElMessage.warning('请输入任务名称')
-    return
-  }
+  // 名称非必填：留空取默认名；title 恒为非空字符串（后端列为 NOT NULL，传 null 会 500）
+  const title = createForm.title.trim() || defaultTaskTitle(createForm.type)
   creating.value = true
   try {
     const task = await taskStore.createTask(createForm.type, title)
