@@ -3,10 +3,11 @@ import vue from '@vitejs/plugin-vue'
 import { fileURLToPath, URL } from 'node:url'
 
 /**
- * /api 代理目标一律走环境变量 VITE_API_BASE（默认 http://localhost:8080）。
- * 禁止把端口硬编码进源码：基座前端硬编码 8081 已被 G5 实测判为缺陷。
+ * /api 代理目标一律走环境变量 VITE_API_BASE（默认 http://localhost:8081，与后端 server.port 对齐）。
+ * 口径：默认值须与后端实际端口对齐、**必须可被 VITE_API_BASE 覆盖**、禁止在组件/业务源码内另行硬编码端口。
+ * （G5 实测判为缺陷的是基座前端"硬编码且不可覆盖"的 8081，不是默认值本身对齐后端。）
  */
-const DEFAULT_API_BASE = 'http://localhost:8080'
+const DEFAULT_API_BASE = 'http://localhost:8081'
 const DEFAULT_DEV_PORT = 5200
 
 export default defineConfig(({ mode }) => {

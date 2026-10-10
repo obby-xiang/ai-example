@@ -4,7 +4,7 @@
 declare module '@grapecity/spread-sheets-resources-zh'
 
 interface ImportMetaEnv {
-  /** /api 代理目标（默认 http://localhost:8080） */
+  /** /api 代理目标（默认 http://localhost:8081） */
   readonly VITE_API_BASE?: string
   /** dev server 端口（默认 5200） */
   readonly VITE_DEV_PORT?: string
