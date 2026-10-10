@@ -11,8 +11,6 @@
           class="!border-b-0"
         >
           <el-menu-item :index="ROUTE_NAMES.taskCenter" :route="{ name: ROUTE_NAMES.taskCenter }">任务中心</el-menu-item>
-          <el-menu-item :index="ROUTE_NAMES.exportWizard" :route="{ name: ROUTE_NAMES.exportWizard }">导出向导</el-menu-item>
-          <el-menu-item :index="ROUTE_NAMES.importWizard" :route="{ name: ROUTE_NAMES.importWizard }">导入向导</el-menu-item>
           <el-menu-item :index="ROUTE_NAMES.definitions" :route="{ name: ROUTE_NAMES.definitions }">配置定义</el-menu-item>
           <el-menu-item :index="ROUTE_NAMES.dataBrowser" :route="{ name: ROUTE_NAMES.dataBrowser }">数据浏览</el-menu-item>
         </el-menu>
@@ -61,7 +59,12 @@ const ai = useAiStore()
 const workspace = useWorkspaceStore()
 const route = useRoute()
 
-const activeRoute = computed(() => String(route.name ?? ROUTE_NAMES.taskCenter))
+/** 菜单项只有 3 条（任务中心/配置定义/数据浏览）：两向导页无独立菜单项，高亮归算到任务中心。 */
+const MENU_FALLBACK_NAMES: string[] = [ROUTE_NAMES.exportWizard, ROUTE_NAMES.importWizard]
+const activeRoute = computed(() => {
+  const name = String(route.name ?? ROUTE_NAMES.taskCenter)
+  return MENU_FALLBACK_NAMES.includes(name) ? ROUTE_NAMES.taskCenter : name
+})
 
 /** AI 栏宽度：蓝本 400px 展开 / 48px 收起。 */
 const panelWidth = computed(() => (ai.expanded ? '400px' : '48px'))

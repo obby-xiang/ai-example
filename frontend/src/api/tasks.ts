@@ -16,7 +16,7 @@ export function getTask(id: number): Promise<Task> {
   return get<Task>(`/tasks/${id}`)
 }
 
-/** 任务概览：任务 + 全部作业 + 文件（详情抽屉用）。 */
+/** 任务概览：任务 + 全部作业 + 文件（refreshCurrent 读取当前任务快照用）。 */
 export function getTaskOverview(id: number): Promise<TaskOverview> {
   return get<TaskOverview>(`/tasks/${id}/overview`)
 }

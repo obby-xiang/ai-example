@@ -44,7 +44,7 @@
         <template #default="{ row }: { row: TaskSummary }">
           <div class="flex items-center gap-2">
             <span class="text-[#c0c4cc]">#{{ row.task.id }}</span>
-            <el-button link type="primary" @click="openDetail(row)">{{ row.task.title }}</el-button>
+            <el-button link type="primary" @click="restoreWizard(row)">{{ row.task.title }}</el-button>
           </div>
         </template>
       </el-table-column>
@@ -85,9 +85,8 @@
       <el-table-column label="更新时间" width="170">
         <template #default="{ row }: { row: TaskSummary }">{{ formatDateTime(row.task.updatedAt) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="200" fixed="right">
+      <el-table-column label="操作" width="160" fixed="right">
         <template #default="{ row }: { row: TaskSummary }">
-          <el-button size="small" type="primary" link @click="restoreWizard(row)">打开</el-button>
           <el-button
             size="small"
             type="warning"
@@ -141,83 +140,6 @@
         <el-button type="primary" :loading="creating" @click="createTask">创建</el-button>
       </template>
     </el-dialog>
-
-    <el-drawer v-model="detailVisible" size="720px" :title="detailTitle">
-      <div v-loading="taskStore.detailLoading">
-        <el-alert
-          v-if="taskStore.publishConflict"
-          type="error"
-          :closable="false"
-          show-icon
-          class="mb-3"
-          :title="`发布失败（异步形态）：${taskStore.publishConflict.message}`"
-          description="发布请求本身成功（201），冲突以作业终态 FAILED + 校验问题清单呈现；请查看下方问题明细后重新导入再发布。"
-        />
-
-        <el-descriptions v-if="currentTask" :column="2" border size="small" class="mb-4">
-          <el-descriptions-item label="任务编号">#{{ currentTask.id }}</el-descriptions-item>
-          <el-descriptions-item label="名称">{{ currentTask.title }}</el-descriptions-item>
-          <el-descriptions-item label="类型">{{ TASK_TYPE_LABELS[currentTask.type] }}</el-descriptions-item>
-          <el-descriptions-item label="状态">{{ statusLabel(currentTask.status) }}</el-descriptions-item>
-          <el-descriptions-item label="当前步骤">{{ stepLabel(currentTask.currentStep) }}</el-descriptions-item>
-          <el-descriptions-item label="导入模式">{{ currentTask.type === 'IMPORT' ? importModeLabel : '—' }}</el-descriptions-item>
-          <el-descriptions-item label="创建时间">{{ formatDateTime(currentTask.createdAt) }}</el-descriptions-item>
-          <el-descriptions-item label="更新时间">{{ formatDateTime(currentTask.updatedAt) }}</el-descriptions-item>
-        </el-descriptions>
-
-        <div class="mb-2 text-[13px] text-[#303133]">作业</div>
-        <el-table :data="taskStore.currentJobs" size="small" border class="mb-4">
-          <el-table-column prop="id" label="作业" min-width="56" />
-          <el-table-column label="类型" min-width="60">
-            <template #default="{ row }: { row: Job }">{{ JOB_TYPE_LABELS[row.jobType] }}</template>
-          </el-table-column>
-          <el-table-column label="状态" min-width="80">
-            <template #default="{ row }: { row: Job }">
-              <el-tag size="small" :type="jobTagType(row.status)">{{ jobStatusLabel(row.status) }}</el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="行级进度" min-width="108">
-            <template #default="{ row }: { row: Job }">{{ row.progress }} / {{ row.total > 0 ? row.total : '处理中' }}</template>
-          </el-table-column>
-          <el-table-column prop="errorCount" label="错误" min-width="48" />
-          <el-table-column prop="warningCount" label="警告" min-width="48" />
-          <el-table-column label="开始" min-width="138">
-            <template #default="{ row }: { row: Job }">{{ formatDateTime(row.startedAt) }}</template>
-          </el-table-column>
-          <el-table-column label="结束" min-width="138">
-            <template #default="{ row }: { row: Job }">{{ formatDateTime(row.finishedAt) }}</template>
-          </el-table-column>
-        </el-table>
-
-        <div class="mb-2 text-[13px] text-[#303133]">文件</div>
-        <el-table :data="taskStore.currentFiles" size="small" border class="mb-4">
-          <el-table-column prop="defCode" label="配置项" width="160" />
-          <el-table-column prop="fileName" label="文件名" min-width="200" show-overflow-tooltip />
-          <el-table-column prop="fileType" label="类型" width="100" />
-          <el-table-column label="行数" width="80">
-            <template #default="{ row }: { row: TaskFile }">{{ row.rowCount ?? '—' }}</template>
-          </el-table-column>
-        </el-table>
-
-        <div class="mb-2 text-[13px] text-[#303133]">校验问题（行级明细）</div>
-        <el-table v-loading="taskStore.issuesLoading" :data="taskStore.issues" size="small" border>
-          <el-table-column prop="defCode" label="配置项" width="140" />
-          <el-table-column prop="rowIndex" label="行号" width="70" />
-          <el-table-column prop="fieldCode" label="字段" width="140" />
-          <el-table-column label="级别" width="80">
-            <template #default="{ row }: { row: ValidationIssue }">
-              <el-tag size="small" :type="row.severity === 'ERROR' ? 'danger' : row.severity === 'WARNING' ? 'warning' : 'info'">
-                {{ SEVERITY_LABELS[row.severity] }}
-              </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column prop="message" label="说明" min-width="240" show-overflow-tooltip />
-          <template #empty>
-            <el-empty description="无校验问题" :image-size="60" />
-          </template>
-        </el-table>
-      </div>
-    </el-drawer>
   </div>
 </template>
 
@@ -227,6 +149,7 @@
  *
  * - 过滤（类型/状态/关键词）+ 分页：参数原样交后端（key 排序与 LIKE 转义后端已处理）；
  * - 4s 自刷：store 的 setInterval，tick 前查 loading 防重叠（deepseek 蓝本形态）；
+ * - 点任务标题 = 一键恢复向导（`restoreWizard` 按任务类型跳对应向导页，与创建任务后跳转同口径）；
  * - 「取消」取消的是该任务最新作业（后端只有 DELETE /api/jobs/{id}；作业已终态 →
  *   409 JOB_ALREADY_FINAL，按码给中文提示，不当普通错误弹）；
  * - 「删除」级联清理作业/条目/问题/暂存/文件（S4.3b⑦）；
@@ -236,11 +159,11 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh } from '@element-plus/icons-vue'
-import { useTaskStore, jobStatusLabel } from '@/stores/task'
+import { useTaskStore } from '@/stores/task'
 import { useWorkspaceStore } from '@/stores/workspace'
-import { formatDateTime, JOB_TYPE_LABELS, progressView, SEVERITY_LABELS, stepLabel, TASK_TYPE_LABELS } from '@/utils/format'
-import { readImportMode, type TaskFile, type TaskStatus, type TaskSummary, type TaskType } from '@/types/task'
-import type { Job, JobStatus, ValidationIssue } from '@/types/job'
+import { formatDateTime, progressView, stepLabel, TASK_TYPE_LABELS } from '@/utils/format'
+import type { TaskStatus, TaskSummary, TaskType } from '@/types/task'
+import type { Job } from '@/types/job'
 
 const taskStore = useTaskStore()
 const workspace = useWorkspaceStore()
@@ -254,7 +177,6 @@ const createDialogVisible = ref(false)
 const creating = ref(false)
 const createForm = reactive<{ type: TaskType; title: string }>({ type: 'EXPORT', title: '' })
 
-const detailVisible = ref(false)
 const cancellingId = ref<number | null>(null)
 
 const lastLoadedText = computed(() => {
@@ -262,13 +184,6 @@ const lastLoadedText = computed(() => {
     return ''
   }
   return `（最近 ${formatDateTime(new Date(taskStore.lastLoadedAt).toISOString())}）`
-})
-
-const currentTask = computed(() => taskStore.currentTask)
-const detailTitle = computed(() => (currentTask.value ? `任务详情 · ${currentTask.value.title}` : '任务详情'))
-const importModeLabel = computed(() => {
-  const mode = currentTask.value ? readImportMode(currentTask.value) : null
-  return mode === 'MERGE' ? '增量合并（MERGE）' : mode === 'REPLACE' ? '整体替换（REPLACE）' : '未设置'
 })
 
 function applyFilters(): void {
@@ -322,21 +237,6 @@ function statusLabel(status: TaskStatus): string {
   }
 }
 
-function jobTagType(status: JobStatus): 'success' | 'danger' | 'info' | 'warning' | 'primary' {
-  switch (status) {
-    case 'COMPLETED':
-      return 'success'
-    case 'FAILED':
-      return 'danger'
-    case 'CANCELLED':
-      return 'warning'
-    case 'RUNNING':
-      return 'primary'
-    default:
-      return 'info'
-  }
-}
-
 /** 进度百分比：total 未知时返回 0（配合 indeterminate 不显示假百分比）。 */
 function progressOf(job: Job): number {
   return progressView(job.progress, job.total).percent ?? 0
@@ -368,15 +268,6 @@ function canCancel(row: TaskSummary): boolean {
 async function restoreWizard(row: TaskSummary): Promise<void> {
   const target = await taskStore.restoreWizard(row.task.id ?? 0, row.task.type)
   await router.push(target)
-}
-
-async function openDetail(row: TaskSummary): Promise<void> {
-  if (row.task.id === undefined) {
-    return
-  }
-  detailVisible.value = true
-  taskStore.closeTask()
-  await taskStore.openTask(row.task.id)
 }
 
 async function cancelTask(row: TaskSummary): Promise<void> {

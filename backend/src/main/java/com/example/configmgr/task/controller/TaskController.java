@@ -51,7 +51,7 @@ public class TaskController {
     }
 
     /**
-     * 任务详情概览：任务 + 全部作业 + 文件，供详情抽屉使用。
+     * 任务详情概览：任务 + 全部作业 + 文件。
      */
     @GetMapping("/{id}/overview")
     public ApiResponse<Map<String, Object>> overview(@PathVariable Long id) {

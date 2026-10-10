@@ -19,7 +19,7 @@
         :closable="false"
         show-icon
         title="尚未绑定任务"
-        description="导出向导需要挂在一条导出任务上（作业结果按任务存储）。可直接创建任务进入，或从任务中心点「打开」。"
+        description="导出向导需要挂在一条导出任务上（作业结果按任务存储）。可直接创建任务进入，或从任务中心点任务标题进入。"
         class="mb-3"
       >
         <el-button size="small" type="primary" :loading="creatingTask" class="mt-2" @click="createAndBindTask">

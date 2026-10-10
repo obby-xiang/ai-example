@@ -54,24 +54,6 @@ export function mapTaskStatusToStep(status: TaskStatus | null): StepStateView {
   }
 }
 
-/** 作业状态 → 中文标签。 */
-export function jobStatusLabel(status: JobStatus | string): string {
-  switch (status) {
-    case 'PENDING':
-      return '待执行'
-    case 'RUNNING':
-      return '执行中'
-    case 'COMPLETED':
-      return '已完成'
-    case 'FAILED':
-      return '已失败'
-    case 'CANCELLED':
-      return '已取消'
-    default:
-      return String(status)
-  }
-}
-
 /** 自刷定时器放模块级：同一时刻只允许一个，切页/隐藏 AI 栏都不影响业务可用性。 */
 let autoRefreshTimer: ReturnType<typeof setInterval> | null = null
 
@@ -91,7 +73,7 @@ export const useTaskStore = defineStore('task', {
     autoRefresh: false,
     lastLoadedAt: 0 as number,
 
-    /** 当前任务（详情抽屉/向导共用） */
+    /** 当前任务（向导与 ui_event 刷新链路共用） */
     currentTaskId: null as number | null,
     currentTask: null as Task | null,
     currentJobs: [] as Job[],
@@ -107,13 +89,6 @@ export const useTaskStore = defineStore('task', {
   }),
 
   getters: {
-    /** 最新作业（行级进度展示用）。 */
-    latestJob(state): Job | null {
-      return state.currentJobs[0] ?? state.items[0]?.latestJob ?? null
-    },
-    hasRunningJob(state): boolean {
-      return state.currentJobs.some((job) => job.status === 'RUNNING' || job.status === 'PENDING')
-    },
     /** 任务中心的筛选参数（拉取时用）。 */
     queryParams(state): { type?: TaskType; status?: TaskStatus; keyword?: string; page: number; size: number } {
       const params: { type?: TaskType; status?: TaskStatus; keyword?: string; page: number; size: number } = {
@@ -198,12 +173,6 @@ export const useTaskStore = defineStore('task', {
         autoRefreshTimer = null
       }
       this.autoRefresh = false
-    },
-
-    /** 打开任务详情（任务 + 全部作业 + 文件）。 */
-    async openTask(taskId: number): Promise<void> {
-      this.currentTaskId = taskId
-      await this.refreshCurrent()
     },
 
     /** 刷新当前任务详情与其最新作业的问题。 */
