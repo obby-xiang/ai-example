@@ -1,5 +1,5 @@
 # ============================================================
-# E2E 验证脚本（main 版）：动态配置管理系统 全流程 28 用例
+# E2E 验证脚本（main 版）：动态配置管理系统 全流程 29 用例
 #
 # 移植来源：<REPO_ROOT>/ai-example-code/ai-example-deepseek-v4-pro/scripts/verify-e2e.ps1
 #           （685 行 / TC1–TC22 共 22 用例）。用例编号与源脚本一一对照，
@@ -17,7 +17,8 @@
 #       -Base http://127.0.0.1:18330 -BackendLog <后端 stdout 日志路径> `
 #       [-ArtifactDir <GF 证据落盘目录>] [-EnableGf6]
 #   -ArtifactDir 指定后，每个 GF 用例把实收 SSE 帧与回灌 POST 原文落 gfc-<case>.sse.txt /
-#     gfc-<case>.http.txt；-EnableGf6 启用可选观察用例 GF6（不计入主计数）。
+#     gfc-<case>.http.txt；-EnableGf6 启用 GF6 入参闸门用例（**桩模式启用并计入主计数**；
+#     真模型模式默认关——诱导非法 schema 的服从率不可控）。
 #
 # 桩模式（CI 路线，M2-T1.2）：先置 E2E_STUB_MODE=1 再用同一脚本调用——上游换成
 #   scripts/ci/stub-upstream.mjs 确定性替身，此时 GFSKIP≥1 即整棒 FAIL（零容忍：桩下任何
@@ -37,11 +38,12 @@
 # 数据面安全：本脚本只创建/删除自己的 S5B-* 任务与 E2E_TEMP 定义；
 #   CURRENCY 演示数据在 TC13 会被替换为 3 行，TC19 用全量导出件恢复为 5 行。
 #
-# 结果口径：28 个用例计入 PASS/FAIL 与退出码（有失败即 exit 1）——TC1–TC22 共 22 个
+# 结果口径：29 个用例计入 PASS/FAIL 与退出码（有失败即 exit 1）——TC1–TC22 共 22 个
 #   + TC23（T3b 收尾：CONFIRM 卡快照重建，T3-6b）
 #   （由源脚本移植而来）+ GF1–GF5 共 5 个（生成式表单端到端，设计稿 docs/evidence/
-#   GFc-E2E用例设计-GLM-5.3.md）；GF6 为可选观察用例（-EnableGf6），不计入主计数；
-#   移植期缺陷清单（Q8）的两项断言单列计数（Q8 项 PASS/FAIL），不计入 28 用例与退出码
+#   GFc-E2E用例设计-GLM-5.3.md）；+ GF6（入参闸门，-EnableGf6，桩模式启用并计入主计数，
+#   底座为桩的确定性违规模式 --violate-form-type）共 1 个；
+#   移植期缺陷清单（Q8）的两项断言单列计数（Q8 项 PASS/FAIL），不计入 29 用例与退出码
 #   —— Q8② 属日志质量问题，具体残留见 docs/evidence/S5b-deepseek-E2E移植验证.md
 # 退出码：任一主用例 FAIL ⇒ exit 1；GF1–GF4 全部 SKIP（本棒零有效验证，硬底线）⇒ exit 1；
 #   E2E_STUB_MODE=1 且 GFSKIP≥1 ⇒ exit 1（桩模式零容忍）
@@ -49,7 +51,8 @@
 param(
     [string]$Base = 'http://127.0.0.1:18330',
     [string]$BackendLog = '',
-    [switch]$EnableGf6,  # GF6 可选观察用例（入参闸门），默认关闭（设计稿 §4 GF6）
+    # GF6 入参闸门用例：桩模式（CI）启用并计入主计数；真模型模式默认关（服从率不可控，见设计稿 §4 GF6）
+    [switch]$EnableGf6,
     # GF 证据落盘目录（裁决 #4 / 设计稿 §6）：每个 GF 用例把 SSE 帧与回灌请求/响应原文写到
     # gfc-<case>.sse.txt / gfc-<case>.http.txt。默认在系统临时目录下新建 gfc-artifacts-<guid>（仓库外）
     [string]$ArtifactDir = ''
@@ -1209,7 +1212,8 @@ try {
 # GF1–GF6 生成式表单 E2E 用例（设计稿 docs/evidence/GFc-E2E用例设计-GLM-5.3.md）
 #   - GF1–GF5 计入主 PASS/FAIL 与退出码；模型未触发记 SKIP（GFSKIP=n 单列，不计退出码；
 #     GF1–GF4 全部 SKIP 触发硬底线整棒 FAIL，裁决 #1）
-#   - GF6 为可选观察用例（-EnableGf6，默认关闭），不计入主计数
+#   - GF6（入参闸门）需 -EnableGf6：**桩模式启用并计入主计数**（底座 = 桩的确定性违规模式
+#     --violate-form-type，请求级只在 GF6 提示词上触发）；真模型模式默认关（服从率不可控）
 #   - 会话统一 gfc-<guid> 前缀；GF2 fixture 任务 GFC-* 用例内自删 + 预清理追加段双保险
 # ============================================================
 
@@ -1885,13 +1889,16 @@ try {
 }
 
 # ============================================================
-# GF6（可选，-EnableGf6，默认关闭）入参闸门（设计稿 §4 GF6）
-#   诱导非法 schema → 不挂起 + REJECTED_ARGUMENTS 结局帧；模型服从率不可控，不计入主计数
+# GF6（-EnableGf6）入参闸门（设计稿 §4 GF6；M2-T4 T4-4 裁决 4）
+#   诱导非法 schema → 不挂起 + REJECTED_ARGUMENTS 结局帧。
+#   桩模式启用并**计入主计数**（底座 = 桩的确定性违规模式 --violate-form-type：请求级，
+#   只在 GF6 提示词上触发，GF1/GF3/GF4 不受影响）；真模型模式默认关（服从率不可控）。
 # ============================================================
 if ($EnableGf6) {
-    Say '--- GF6 生成式表单：入参闸门（可选观察用例，不计入主计数） ---'
+    Say '--- GF6 生成式表单：入参闸门（主用例，计入主计数） ---'
     $gf6Rejected = $false
     $gf6Attempt = 0
+    $gf6Frames = $null
     while ($gf6Attempt -lt 3 -and -not $gf6Rejected) {
         $gf6Attempt++
         $sessionGf6 = 'gfc-' + [Guid]::NewGuid().ToString('N')
@@ -1906,23 +1913,29 @@ if ($EnableGf6) {
             }
             return @{ payload = @{ result = '{"ok":true,"source":"e2e"}' } }
         }
-        # 独立提示词（红队低-10 修复）：不再引用 GF1 try 块内的 $promptGf1，消除跨用例隐式耦合
+        # 独立提示词（红队低-10 修复）：不再引用 GF1 try 块内的 $promptGf1，消除跨用例隐式耦合；
+        # 末句"type 故意写成 html"同时是桩侧请求级违规注入的开关（--violate-form-type）
         $promptGf6 = '请调用 generative_form 工具（scenario=FILTER）出一张收集导出筛选条件的表单，字段就用这四个，key 和类型必须一致：keyword（文本，必填，占位提示"编码或名称关键字"）、minRows（数字，非必填）、effectiveDate（日期，格式 yyyy-MM-dd，非必填）、scope（下拉单选，选项 XN 和 HD）。不要用文字向我提问，也不要调用 generative_form 以外的任何工具，不会出现确认卡片。为了演示安全闸，请把其中一个字段的 type 故意写成 html。'
         $turn6 = Invoke-FormTurn $sessionGf6 $promptGf6 @{ page = 'tasks' } $handlerGf6 4
+        $gf6Frames = $turn6.frames
         $gf6Req = @($turn6.frames | Where-Object { $_.type -eq 'frontend_tool_request' -and $_.name -eq 'generative_form' })
         $gf6Rej = @($turn6.frames | Where-Object { $_.type -eq 'frontend_tool_result' -and $_.name -eq 'generative_form' -and $_.ok -eq $false -and $_.status -eq 'REJECTED_ARGUMENTS' })
         if ($gf6Req.Count -eq 0 -and $gf6Rej.Count -ge 1) { $gf6Rejected = $true }
         Start-Sleep -Seconds 2
     }
+    Gf-Dump 'GF6' $gf6Frames
     if ($gf6Rejected) {
         $logGf6 = Get-LogText
         if ($logGf6 -like '*前端工具入参被安全闸拒绝*') {
-            Write-Host '  [PASS] GF6 入参闸门：非法 schema 不挂起 + REJECTED_ARGUMENTS 结局帧 + 闸门日志' -ForegroundColor Green
+            Ok 'GF6 入参闸门：非法 schema 不挂起 + REJECTED_ARGUMENTS 结局帧 + 闸门日志'
         } else {
-            Write-Host '  [FAIL] GF6 入参闸门 => 日志缺"前端工具入参被安全闸拒绝"行' -ForegroundColor Red
+            No 'GF6 入参闸门' '日志缺"前端工具入参被安全闸拒绝"行'
         }
+    } elseif ($env:E2E_STUB_MODE -eq '1') {
+        # 桩是确定性替身：非法 schema 由 --violate-form-type 构造保证 ⇒ 未产出即桩/产品链路异常
+        No 'GF6 入参闸门' '桩模式 3 次均未产出非法 schema（应由 --violate-form-type 构造保证，属桩路由或产品链路异常）'
     } else {
-        Write-Host '  [SKIP] GF6 入参闸门 => 模型 3 次均未产出非法 schema（服从率不可控，观察项）' -ForegroundColor Yellow
+        Gf-Skip 'GF6' '模型 3 次均未产出非法 schema（真模型服从率不可控，观察项；桩模式下该分支不可达）'
     }
 }
 
@@ -2315,7 +2328,7 @@ try {
 } catch { Q8-No 'Q8 项回归' $_.Exception.Message }
 
 Say '============================================================'
-Say (" 结果：PASS={0}  FAIL={1}  （主用例计数，含 TC1–TC22 与 GF1–GF5；基数不写死，随用例演进）" -f $script:passed, $script:failed)
+Say (" 结果：PASS={0}  FAIL={1}  （主用例计数，含 TC1–TC22、TC23 与 GF1–GF6（GF6 需 -EnableGf6）；基数不写死，随用例演进）" -f $script:passed, $script:failed)
 # GFSKIP 摘要口径（红队问题 5）：文案随模式分支，与下方判定分支保持一致（纯文案，不改判定）
 $gfskipNote = if ($env:E2E_STUB_MODE -eq '1') {
     '桩模式零容忍：GFSKIP≥1 即整棒 FAIL（上游是确定性替身，任何 SKIP 都属桩路由或产品链路异常）'
