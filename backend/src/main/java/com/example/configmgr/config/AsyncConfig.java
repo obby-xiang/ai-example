@@ -30,6 +30,24 @@ import java.util.concurrent.ThreadPoolExecutor;
  * "一个任务中心点几下一键导出"的真实并发，同时把"无限线程"的可能性彻底关掉。
  * 该取值与 AI 侧 {@code app.ai.suspend.pool-size} 相互独立（两套负载不互相抢占）。
  *
+ * <p><b>取值依据补充（2026-10-10 数字规格清点裁决④：值不动、补依据）</b>：业界依据 §7
+ * 「数据库连接池（HikariCP）」明确官方反对"按并发数放大池子"（原文："too many connections have
+ * a clear and demonstrable negative impact on performance"），内网小用户量单实例下默认值即可用；
+ * 同节 §12「任务看门狗 / 僵尸任务判定超时」的横向对照（Quartz 60s / Hangfire 30min / Celery 1h /
+ * K8s {@code periodSeconds} 10s × {@code failureThreshold} 3 = 约 30s）说明本项目这类内部批处理的
+ * 并发量级远低于需要放大池子的规模。故本类四个数（core 4 / max 16 / queue 200 / 关停等待 30s）
+ * <b>维持现值</b>：<b>本值不是新值</b>，本苞只补依据注释，未改任何数值。
+ *
+ * <p><b>改本值须连带看哪里</b>：{@code corePoolSize} / {@code maxPoolSize} / {@code queueCapacity}
+ * 是一套（放大量级会同时抬高对数据库连接的需求，见下条"已知张力"）；{@code awaitTerminationSeconds}
+ * 与 {@code waitForTasksToCompleteOnShutdown} 配套，改它等于改"关停时最长阻塞时间"（影响滚动发布与
+ * 停机窗口）；另须与 AI 侧 {@code app.ai.suspend.pool-size} 一并复核（两套池共享机器但不共享线程）。
+ *
+ * <p><b>已知张力（如实登记，不在本批改动面）</b>：本池上限 16 <b>大于</b> Hikari 的连接上限 10
+ * （见 {@code application.yml} 的 {@code spring.datasource.hikari} 注释）—— 16 条作业线程中最多
+ * 10 条能同时持有连接，其余在 Hikari {@code connectionTimeout} 内排队。内网小并发下接受；若作业
+ * 并发实测逼近上限，这两个数须一并重审（等待治理排查已登记为 R-68 同面）。
+ *
  * <p>
  * {@code @EnableAsync} 由主类 {@code ConfigMgrApplication} 开启，这里只提供执行器。
  */

@@ -21,6 +21,17 @@ spring:
     driver-class-name: org.h2.Driver
     username: sa
     password:
+    hikari:
+      # 连接池上限维持 10（2026-10-10 数字规格清点裁决④：值不动、补依据）—— 本值不是新值。
+      # 依据 = 业界依据 §7「数据库连接池（HikariCP）」：官方默认 maximumPoolSize = 10，
+      # 且官方明确"不要按并发数放大池子"（连接多了会可测量地拖慢性能）；内网小用户量、
+      # 单实例下默认值即推荐值。
+      # 改本值须知连带看：config/AsyncConfig 的业务作业池上限（16）大于本上限时，超出的作业线程
+      # 会在 Hikari connectionTimeout 内排队；两个数须一并复核（见该类"已知张力"注释）。
+      # minimumIdle 刻意不设 —— 同节官方建议不设（默认 = maximum-pool-size，让池表现为固定大小）。
+      # 此前本项在仓内完全未出现（取框架缺省值），显式写出只为"口径可见 + 可调剂"
+      # （同 app.ai.sse 的 delivery-pool-size 先例）。
+      maximum-pool-size: 10
 
   h2:
     console:
