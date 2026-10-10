@@ -144,6 +144,38 @@ app:
       # 该上限**优先于** T2"给前端看的帧全文不裁剪"的承诺（A21 口径变更），
       # 修订落在 ToolResultLimiter javadoc 与 com.example.configmgr.ai.run.FrameSizeLimiter。
       max-bytes: 65536
+    sse:
+      # 包②：SSE 写侧超时预算（ai/run/SseChatEmitter + common/sse/SseWriteBudget）。
+      #   delivery-pool-size / delivery-queue-capacity：T3-1 的投递池与每订阅者实时队列
+      #     （缺省 8 / 256；此处显式写出只为"口径可见"，值取自代码缺省）。
+      #   write-timeout：**单帧写出**的超时预算 —— 写出挪到弹性写出池（sse-write-*），
+      #     投递池线程最多等本值；超预算即摘除该订阅者（主动断连，前端 onerror/onclose
+      #     带 lastSeq 重挂差量补发，不静默丢帧）。整条流的寿命由 emitter 生命周期承载
+      #     （AiController 用轮次总预算 total-budget=300s 构造 emitter）。
+      #     **必须 > 0**（启动期 fail-fast 校验，见 AiProperties）：0/负值会被 SseWriteBudget
+      #     静默回落成缺省 15s（配置面与运行面说两套话），故启动期直接失败 —— 与任务通道
+      #     app.task.sse.write-timeout 同款守卫。
+      #   实测依据（18330 本机 + tomcat-embed-core 10.1.54 字节码反证；2026-10-10 复核后更正口径）：
+      #     写侧**并非无超时** —— NioEndpoint#setSocketOptions 会 setWriteTimeout(getConnectionTimeout())，
+      #     即写超时 = server.tomcat.connection-timeout（本配置 120s），实测不读的客户端 ≈116s 才被这条
+      #     写超时以 SocketTimeoutException 释放；它随连接配置漂移，是 15s 预算的 ≈8 倍宽。
+      #     故本包的价值 = 把写侧预算收紧到 15s + 消除锁内写 + 消除投递池/调用线程占用（详见包②施工报告 §实测）。
+      delivery-pool-size: 8
+      delivery-queue-capacity: 256
+      write-timeout: 15s
+  task:
+    sse:
+      # 包②：任务级 SSE 通道（GET /api/tasks/{id}/events）的写侧预算，与 app.ai.sse 同口径。
+      #   write-timeout：单帧写出预算（15s，与 AI 通道同一缺省来源 SseWriteBudget#DEFAULT_TIMEOUT_MILLIS）；
+      #     **必须 > 0**（启动期 fail-fast 校验，见 AppProperties）：0/负值会被 SseWriteBudget
+      #     静默回落成缺省 15s（配置面与运行面说两套话），故启动期直接失败。
+      #   emitter-timeout：订阅者生命周期超时，**必须 > 0**（启动期 fail-fast 校验，见 AppProperties）。
+      #     原为 SseEmitter(0L) = 该 emitter 没有生命周期超时 —— 但这不等于"连接没有释放手段"：
+      #     上面那条 120s 容器写超时仍在，只是它随连接配置漂移、通常比生命周期超时更早到。
+      #     5m 与 AI 通道的 emitter 生命周期同量级。
+      #     前端 EventSource 会按 retry 自动重连，job-watch 的快照轮询兜底。
+      write-timeout: 15s
+      emitter-timeout: 5m
   job:
     demo-batch-delay-ms: 300
     batch-size: 100

@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.config;
 
+import com.example.configmgr.common.sse.SseWriteBudget;
 import jakarta.annotation.PostConstruct;
 import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -62,6 +63,32 @@ public class AiProperties {
 	void verifyBoundedElasticCapacityBudget() {
 		AiPoolCapacityBudget.verify(this.suspend.getPoolSize(), this.sse.getDeliveryPoolSize(),
 				Runtime.getRuntime().availableProcessors());
+	}
+
+	/**
+	 * 启动期校验 {@code app.ai.sse.write-timeout} 必须为正（2026-10-10 复核 S3-1 收口：守卫对称化）。
+	 *
+	 * <p>
+	 * {@code SseWriteBudget.on} 对<b>非正</b>预算会<b>静默回落</b>缺省 15s：运维显式配
+	 * {@code write-timeout: 0s}（意图"取消写预算"）或负值/笔误，都不会有任何告警，运行行为与配置文件
+	 * 不符 —— 而本键的取值论证（{@link Sse#getWriteTimeout()} 与
+	 * {@link com.example.configmgr.common.sse.SseWriteBudget} 的类注）全是按"真的有一个 15s 预算"
+	 * 展开的，静默变值等于让配置面说谎。
+	 *
+	 * <p>
+	 * 读的是<b>绑定后</b>的值（绑定先于 {@code @PostConstruct}），与任务通道
+	 * {@code app.task.sse.write-timeout} 的守卫（{@code com.example.configmgr.config.AppProperties}）
+	 * 对称：两条通道都是"非正即启动失败"。这里 <b>fail-fast</b>（不是像上面的容量联动那样只 WARN）：
+	 * 本项配错没有"性能降级"这种解释空间，它只会让配置面与运行面说两套话。
+	 */
+	@PostConstruct
+	void verifySseWriteTimeout() {
+		Duration writeTimeout = this.sse.getWriteTimeout();
+		if (writeTimeout == null || writeTimeout.isZero() || writeTimeout.isNegative()) {
+			throw new IllegalStateException("app.ai.sse.write-timeout 必须 > 0（当前 = " + writeTimeout
+					+ "）：0/负值会被 SseWriteBudget 静默回落为缺省 15s，运行行为与配置文件不符"
+					+ "（排障误导）；收紧写侧释放只需配一个更小的正值");
+		}
 	}
 
 	@Data
@@ -240,6 +267,25 @@ public class AiProperties {
 		 * 回放帧不计入本容量。
 		 */
 		private int deliveryQueueCapacity = DEFAULT_DELIVERY_QUEUE_CAPACITY;
+
+		/**
+		 * 单帧 SSE 写出的<b>超时预算</b>（包②：SSE 写侧超时预算；缺省
+		 * {@link com.example.configmgr.common.sse.SseWriteBudget#DEFAULT_TIMEOUT_MILLIS}）。
+		 *
+		 * <p>
+		 * 语义与选型见 {@link com.example.configmgr.common.sse.SseWriteBudget}：它约束的是
+		 * <b>单帧写出</b>的时长（写出挪到弹性写出池，投递池工作线程最多等本预算），
+		 * 而不是整条流的寿命（后者由 {@code app.ai.resilience.total-budget} 决定的 emitter
+		 * 生命周期超时承载 —— 请求侧 {@code AiController} 用 {@code budgetMillis()} 建 emitter）。
+		 * 超预算即摘除该订阅者（主动断连，前端 onerror/onclose 带 lastSeq 重挂差量补发），
+		 * 不静默丢帧（与 S2-1 溢出摘除同口径）。
+		 *
+		 * <p>
+		 * <b>必须 &gt; 0</b>：非正值会被 {@code SseWriteBudget.on} 静默回落成缺省 15s，
+		 * 故改由启动期 {@link AiProperties#verifySseWriteTimeout()} 拦下（与任务通道
+		 * {@code app.task.sse.write-timeout} 同一 fail-fast 姿态）。
+		 */
+		private Duration writeTimeout = Duration.ofMillis(SseWriteBudget.DEFAULT_TIMEOUT_MILLIS);
 	}
 
 	/**

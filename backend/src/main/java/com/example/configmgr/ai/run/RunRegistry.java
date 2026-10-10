@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.common.sse.SseWriteBudget;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
@@ -48,6 +49,16 @@ public class RunRegistry {
 	 */
 	private final Executor deliveryExecutor;
 
+	/**
+	 * 写出<b>超时预算</b>（包②：SSE 写侧超时预算）。
+	 *
+	 * <p>
+	 * 口径与投递执行器一致（S2-1）：Spring 三参装配路径用<b>进程级弹性写出池</b> +
+	 * {@code app.ai.sse.write-timeout}；两参构造（单测 / 非 Spring）固定 {@link SseWriteBudget#direct()}
+	 * —— 不读进程静态池，避免"同一 JVM 内测试顺序相关"（理由同 {@link #deliveryExecutor}）。
+	 */
+	private final SseWriteBudget writeBudget;
+
 	public RunRegistry(RunStore store, ObjectMapper objectMapper) {
 		this(store, objectMapper, null);
 	}
@@ -63,6 +74,10 @@ public class RunRegistry {
 		}
 		// 池必须先装配再取用（configureSharedDeliveryPool 幂等，首装配者胜）
 		this.deliveryExecutor = properties != null ? SseChatEmitter.sharedDeliveryExecutorOrDirect() : Runnable::run;
+		this.writeBudget = properties != null
+				? SseWriteBudget.on(SseWriteBudget.sharedElasticWriterPool(),
+						properties.getSse().getWriteTimeout().toMillis())
+				: SseWriteBudget.direct();
 	}
 
 	/** 取（必要时新建）本轮的写出器。 */
@@ -72,7 +87,7 @@ public class RunRegistry {
 		int maxFrameBytes = this.properties != null ? this.properties.getFrame().getMaxBytes()
 				: AiProperties.Frame.DEFAULT_MAX_BYTES;
 		return this.emitters.computeIfAbsent(runId, id -> new SseChatEmitter(id, this.store, this.objectMapper,
-				this.deliveryExecutor, queueCapacity, maxFrameBytes));
+				this.deliveryExecutor, queueCapacity, maxFrameBytes, this.writeBudget));
 	}
 
 	/** 只在已有写出器时返回（避免"查一下"就凭空造出一个）。 */

@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.common.sse.SseWriteBudget;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
@@ -89,6 +90,30 @@ import java.util.concurrent.atomic.AtomicLong;
  * （3000，{@code RunStore#events} 天然裁剪）——"队列容量 &lt; 归档窗口"不变量只约束实时段。</li>
  * </ul>
  *
+ * <h2>包②：SSE 写侧超时预算（{@link SseWriteBudget}）</h2>
+ * T3-1 解决了"慢订阅者不阻塞整轮"，但没有解决"慢订阅者占住投递池线程" ——
+ * {@code SseEmitter.send} 的阻塞式 socket 写，写侧超时只有容器兜底的一条：由
+ * {@code server.tomcat.connection-timeout}（本配置 120s）派生（钉住版本 tomcat-embed-core
+ * 10.1.54 的 {@code NioEndpoint#setSocketOptions} 会 {@code setWriteTimeout(getConnectionTimeout())}，
+ * 字节码实测；判据与实测见 {@link SseWriteBudget}），是 15s 预算的 ≈8 倍宽且随连接配置漂移 ——
+ * 于是 <b>M ≥ 池容量</b> 条"不读也不断开"的连接即可让全进程 SSE 停投，且在 120s 兜底到来前不自愈。
+ * 本包补齐写侧预算：
+ * <ul>
+ * <li><b>写出移出投递池</b>：{@link #writeFrame} 把单帧 {@code send} 提到弹性写出池，
+ * 本线程（投递池工作线程）最多等 {@code app.ai.sse.write-timeout}（缺省 15s，取值论证见
+ * {@link SseWriteBudget#DEFAULT_TIMEOUT_MILLIS}）⇒ 投递池不再因慢连接而饱和；</li>
+ * <li><b>超时处置 = 主动断连</b>：超预算即 {@link #evictOnWriteTimeout}（摘表 + 清队列 + WARN + 计数），
+ * 不静默丢帧 —— 前端 reattach 看门狗（{@code frontend/src/api/sse.ts} 的 onerror/onclose →
+ * 带 lastSeq 重挂，ADR-5 通道）把断点之后的帧补回来；delta 不入归档，静默丢帧是补不回来的永久缺失，
+ * 故"丢弃+继续投"被排除；</li>
+ * <li><b>收尾不跨线程 complete</b>：{@code send}/{@code complete} 同为 {@code synchronized}，
+ * 写卡住时从别的线程 complete 只会一起挂住 —— 写在飞期间的收尾请求由写出线程在 {@code send}
+ * 返回后补做（{@link #completeOne} 的交接 + {@link Subscription#writeInFlight}）；</li>
+ * <li><b>残留</b>：被卡住的那一次写仍占 1 个写出池线程（每条订阅者至多 1 个），最终由客户端断开、
+ * 容器写超时（{@code connection-timeout}=120s）或 emitter 生命周期超时（AI 通道 = 轮次总预算
+ * {@code app.ai.resilience.total-budget}，300s，通常最晚）三者先到者释放。</li>
+ * </ul>
+ *
  * <p>
  * 写出失败（客户端断开）只记日志、摘除该订阅者，不打断运行线程；终帧与
  * {@code emitter.complete()} 由调用方（{@code AiController} / {@code ResumeService}）保证。
@@ -112,6 +137,16 @@ public class SseChatEmitter {
 
 	/** T3-1：本写出器的投递执行器。生产 = 共享有界投递池；三参构造（测试/非 Spring）= 同步直执。 */
 	private final Executor deliveryExecutor;
+
+	/**
+	 * 包②：单帧写出的<b>超时预算</b>（{@link SseWriteBudget}）。
+	 *
+	 * <p>
+	 * 生产装配（{@link RunRegistry}）给的是"弹性写出池 + {@code app.ai.sse.write-timeout}"；
+	 * 未显式给出时回落 {@link SseWriteBudget#direct()}（调用线程内写出、无预算），
+	 * 与修复前的行为逐字等价 —— 既有单测的确定性不受影响。
+	 */
+	private final SseWriteBudget writeBudget;
 
 	/** T3-1：每订阅者实时队列容量（回放批豁免，见类注）。 */
 	private final int queueCapacity;
@@ -190,12 +225,25 @@ public class SseChatEmitter {
 
 	public SseChatEmitter(String runId, RunStore store, ObjectMapper objectMapper, Executor deliveryExecutor,
 			int queueCapacity, int maxFrameBytes) {
+		this(runId, store, objectMapper, deliveryExecutor, queueCapacity, maxFrameBytes, SseWriteBudget.direct());
+	}
+
+	/**
+	 * 全参构造（包②：显式注入写超时预算）。
+	 *
+	 * <p>
+	 * 与投递执行器同口径（S2-1）：预算必须<b>显式传入</b>，绝不隐式读进程静态池 ——
+	 * 否则同一 JVM 内测试顺序会让"直执"悄悄变异步投递（帧序用例要求"发完即到"）。
+	 */
+	public SseChatEmitter(String runId, RunStore store, ObjectMapper objectMapper, Executor deliveryExecutor,
+			int queueCapacity, int maxFrameBytes, SseWriteBudget writeBudget) {
 		this.runId = runId;
 		this.store = store;
 		this.objectMapper = objectMapper;
 		this.deliveryExecutor = deliveryExecutor;
 		this.queueCapacity = queueCapacity;
 		this.maxFrameBytes = maxFrameBytes;
+		this.writeBudget = writeBudget != null ? writeBudget : SseWriteBudget.direct();
 		this.assistantMessageId = "assistant-" + runId;
 	}
 
@@ -243,7 +291,7 @@ public class SseChatEmitter {
 		return pool != null ? pool : Runnable::run;
 	}
 
-	/** 投递池指标（供 {@code GET /api/ai/health}）：poolSize / active / queueDepth / evicted。 */
+	/** 投递池指标（供 {@code GET /api/ai/health}）：poolSize / active / queueDepth / evicted / 写超时预算。 */
 	public static Map<String, Object> deliveryPoolMetrics() {
 		ThreadPoolExecutor pool = sharedDeliveryPool;
 		Map<String, Object> metrics = new LinkedHashMap<>();
@@ -251,6 +299,9 @@ public class SseChatEmitter {
 		metrics.put("active", pool == null ? 0 : pool.getActiveCount());
 		metrics.put("queueDepth", pool == null ? 0 : pool.getQueue().size());
 		metrics.put("evicted", EVICTED_TOTAL.get());
+		// 包②（纯增量键）：写侧超时预算与其命中次数 —— 写超时是"慢客户端"的直接观测面。
+		metrics.put("writeTimeoutMs", SseWriteBudget.DEFAULT_TIMEOUT_MILLIS);
+		metrics.put("writeTimeouts", SseWriteBudget.writeTimeouts());
 		return metrics;
 	}
 
@@ -811,16 +862,7 @@ public class SseChatEmitter {
 				if (frame.live) {
 					liveDequeued(sub);
 				}
-				try {
-					sub.emitter.send(frame.payload);
-				}
-				catch (Exception ex) {
-					// Q8② 第二层防护：对端断开的写失败（IOException / AsyncRequestNotUsableException /
-					// IllegalStateException: 已完成的 emitter）一律吞没在这里 —— 它是"这一个订阅者没了"，
-					// 不是本轮失败。若让它冒泡到 HTTP 栈，全局异常处理器会对一个内容类型已固定为
-					// text/event-stream 的响应再写一次 JSON，抛 HttpMessageNotWritableException（日志噪音）。
-					log.debug("SSE 写出失败（客户端断开？）runId={}: {}", this.runId, ex.getMessage());
-					evict(sub, "写出失败（客户端断开）");
+				if (!writeFrame(sub, frame.payload)) {
 					return;
 				}
 			}
@@ -836,6 +878,110 @@ public class SseChatEmitter {
 				completeOne(sub);
 			}
 		}
+	}
+
+	/**
+	 * <b>包②核心</b>：单帧写出（写超时预算的唯一落点）。返回 false = 本订阅者已终结，drain 立即退出。
+	 *
+	 * <p>
+	 * 预算是<b>直执</b>（{@link SseWriteBudget#direct()}，单测/非 Spring）时逐字等价于修复前：
+	 * 调用线程内 {@code send}，异常吞在这里（客户端断开不是本轮失败，见下）。
+	 *
+	 * <p>
+	 * 预算是<b>真实预算</b>时（生产装配），写出挪到弹性写出池，本线程最多等
+	 * {@code app.ai.sse.write-timeout}：
+	 * <ul>
+	 * <li>{@code SENT}：照常续投下一帧；</li>
+	 * <li>{@code FAILED}：口径与修复前一致 —— 只记 DEBUG + 摘除该订阅者（前端带 lastSeq 重挂补帧）；</li>
+	 * <li>{@code TIMED_OUT}：<b>摘除（主动断连）+ 计数 + WARN</b>，见 {@link #evictOnWriteTimeout}。
+	 * 处置选择"断开让前端重连"而不是"丢弃该帧继续投"：与既有 S2-1"溢出摘除=主动断连，不静默丢帧"
+	 * 同口径 —— delta 帧按 T3-2 不入归档，静默丢一帧正文是<b>重挂也补不回来</b>的永久缺失，
+	 * 而断连有 ADR-5/re-attach 通道（前端 onerror/onclose 带 lastSeq 差量补发，seq 无洞）；</li>
+	 * <li>{@code INTERRUPTED}：调用线程被中断（本线程中断位已复位）。与 {@code TIMED_OUT} <b>同走摘除路径</b>
+	 * —— 该帧已被 {@code drain} 弹出，中断后不会有补投接住它（{@code canTakeOverDrain} 还要求队列非空），
+	 * 只"让出 drain"就是静默丢帧（2026-10-10 复核 S3-② 收口）。</li>
+	 * </ul>
+	 */
+	private boolean writeFrame(Subscription sub, String payload) {
+		if (!this.writeBudget.budgeted()) {
+			try {
+				sub.emitter.send(payload);
+				return true;
+			}
+			catch (Exception ex) {
+				logWriteFailure(ex);
+				evict(sub, "写出失败（客户端断开）");
+				return false;
+			}
+		}
+		// 先置"写在飞"：此后任何线程的 completeOne 都不会去碰 emitter 监视器（写线程正持有它），
+		// 而是把收尾交接给本 lambda 的 finally（那时 send 已返回/抛出，监视器已释放）。
+		sub.completePending = false;
+		sub.writeInFlight.set(true);
+		SseWriteBudget.Result result = this.writeBudget.write(() -> {
+			try {
+				sub.emitter.send(payload);
+			}
+			finally {
+				sub.writeInFlight.set(false);
+				if (sub.completePending) {
+					// 写在飞期间出现的收尾请求（溢出摘除 / 写超时摘除 / 轮终态）：由写出线程补做。
+					// 此刻 send 已返回或抛出 ⇒ emitter 监视器已释放 ⇒ complete 不会挂住。
+					completeOne(sub);
+				}
+			}
+		});
+		return switch (result.outcome()) {
+			case SENT -> true;
+			case FAILED -> {
+				logWriteFailure(result.failure());
+				evict(sub, "写出失败（客户端断开）");
+				yield false;
+			}
+			case TIMED_OUT -> {
+				evictOnWriteTimeout(sub);
+				yield false;
+			}
+			// 帧已被 drain 从队列弹出：中断后 finally 的补投接不住它（canTakeOverDrain 还要求队列非空），
+			// 只"让出 drain"就是静默丢帧 —— 违背 S2-1"不静默丢帧"政策（2026-10-10 复核 S3-② 收口）。
+			// 故与 TIMED_OUT 同出口：摘除订阅者（主动断连），前端 onerror/onclose 带 lastSeq 重挂对账
+			// （差量补发，seq 无洞）。中断位由 SseWriteBudget.write 复位（interrupt()），语义不变。
+			case INTERRUPTED -> {
+				evict(sub, "写出被中断（调用线程中断）");
+				yield false;
+			}
+		};
+	}
+
+	/** 写出失败的统一日志口径（修复前与修复后同文本；Q8②：它是"这一个订阅者没了"，不是本轮失败）。 */
+	private void logWriteFailure(Exception ex) {
+		log.debug("SSE 写出失败（客户端断开？）runId={}: {}", this.runId, ex == null ? "写超时" : ex.getMessage());
+	}
+
+	/**
+	 * 包②：写超时 ⇒ 摘除该订阅者（主动断连），<b>但不在此处 complete</b>。
+	 *
+	 * <p>
+	 * 为什么不能顺手 complete：写线程仍卡在这次写出里并<b>持有 emitter 监视器</b>
+	 * （{@code ResponseBodyEmitter#send} 与 {@code #complete} 同为 {@code synchronized}），
+	 * 从本线程调用只会把自己一起挂住 —— 那正是本包要消除的形态。于是这里只做三件事：
+	 * 计数、日志、关闭投递上下文（摘表 + 清队列 + 计数归零 + 复位标志）；emitter 的收尾交给
+	 * "卡住的那次写出返回时"的写出线程（{@link #writeFrame} 的 finally 分支）。
+	 *
+	 * <p>
+	 * 与 {@link #evict} 的分工：本方法不动 {@code evicted} 去重标志，也不碰 emitter ——
+	 * 若随后既有的失败/溢出路径再来一次 {@code evict}，其 {@code completeOne} 会因
+	 * {@code completed} CAS 而去重，语义不变（前端只看到一次断连）。
+	 */
+	private void evictOnWriteTimeout(Subscription sub) {
+		boolean first = sub.writeTimedOut.compareAndSet(false, true);
+		closeSubscription(sub, "写超时（>" + this.writeBudget.timeoutMillis() + "ms）");
+		if (first) {
+			EVICTED_TOTAL.incrementAndGet();
+			log.warn("写超时摘除订阅者 runId={} budget={}ms writeTimeouts={}（前端按 onerror/onclose 重挂差量补发）",
+					this.runId, this.writeBudget.timeoutMillis(), SseWriteBudget.writeTimeouts());
+		}
+		completeOne(sub);
 	}
 
 	/**
@@ -876,8 +1022,26 @@ public class SseChatEmitter {
 	 * 与 {@link #closeSubscription} 的分工：本方法只负责"终结 emitter"（{@code completed} 是它的
 	 * 去重标志），投递上下文的清理由 {@code closeSubscription} 负责 —— 这里补一次清队列与计数归零，
 	 * 使"收尾 ⇒ 队列空、实时段计数 0"成为结构性事实（所有调用点的队列本已空，故不丢帧）。
+	 *
+	 * <p>
+	 * <b>包②：写在飞时不得在此 complete</b>。{@code ResponseBodyEmitter#send} 与 {@code #complete}
+	 * 同为 {@code synchronized} ⇒ 写线程卡在 {@code send} 里时持有 emitter 监视器，
+	 * 任何别的线程直接 {@code complete()} 都会<b>阻塞在监视器上</b>（慢客户端场景下 = 又挂一个线程：
+	 * 修复前反映为"投递池线程卡在 socket 写、出帧线程/运行线程卡在 complete"）。故此处只在
+	 * {@link Subscription#writeInFlight} 为真时把收尾<b>交接</b>给写出线程
+	 * （{@link #writeFrame} 的 finally），由它在 {@code send} 返回/抛出之后补做。
+	 * 两次交接之间用"置位 → 复查"消掉丢唤醒窗口：任一侧判定"写在飞已结束"就由它立即收尾，
+	 * 两侧都走到时由 {@code completed} 的 CAS 去重。
 	 */
 	private void completeOne(Subscription sub) {
+		if (sub.writeInFlight.get()) {
+			sub.completePending = true;
+			if (sub.writeInFlight.get()) {
+				// 交接给写出线程（它返回时会看到 completePending）
+				return;
+			}
+			sub.completePending = false;
+		}
 		// 幂等去重（S1-1）：轮终态排空、drain 队空、摘除三条路径可能并发命中同一个订阅者，
 		// 重复 complete 会二次触发前端 onCompletion/onError。
 		if (!sub.completed.compareAndSet(false, true)) {
@@ -1009,6 +1173,23 @@ public class SseChatEmitter {
 
 		/** 收尾去重（轮终态排空 / drain 队空 / 摘除三条路径可能并发命中同一个订阅者）。 */
 		final AtomicBoolean completed = new AtomicBoolean(false);
+
+		/**
+		 * 包②：本订阅者有<b>一次写出正在别的线程里飞</b>（{@link #writeFrame} 的预算模式）。
+		 *
+		 * <p>
+		 * 它是"能否就地 {@code emitter.complete()}"的判据：写线程卡在 {@code send} 时持有
+		 * emitter 监视器（{@code send}/{@code complete} 同为 {@code synchronized}），
+		 * 此时任何别的线程 complete 都会挂在监视器上 —— 见 {@link #completeOne} 的交接逻辑。
+		 * 直执模式（无预算）不置位：写出就是本线程，无跨线程交叠。
+		 */
+		final AtomicBoolean writeInFlight = new AtomicBoolean(false);
+
+		/** 写在飞期间产生的收尾请求：由写出线程在 {@code send} 返回后补做（见 {@link #completeOne}）。 */
+		volatile boolean completePending;
+
+		/** 包②：本订阅者是否因<b>写超时</b>被摘除（去重日志/计数用；与 {@link #evicted} 分开口径）。 */
+		final AtomicBoolean writeTimedOut = new AtomicBoolean(false);
 
 		/** true = 终态回放订阅（不入订阅表，回放发完即 complete）。 */
 		final boolean terminal;
