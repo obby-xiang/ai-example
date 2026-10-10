@@ -149,9 +149,6 @@ app:
     batch-size: 100
   file:
     storage-path: ./data/files
-  server:
-    backend-port: 8081
-    frontend-port: 5173
 
 logging:
   level:
