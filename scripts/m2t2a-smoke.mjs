@@ -186,11 +186,63 @@ function assert(name, cond, detail) {
   if (!cond) failures.push(name)
 }
 
+// 等待上界不写死：由服务端自报的轮次预算（/api/ai/health 的 resilience.totalBudget）
+// 推导为 budgetMs + 30s（余量 = 一个心跳周期 + 抖动）。写死 240s 的问题是它**大于**后端
+// app.ai.hitl 的挂起上限（原 120s 单键三场景共用；拆键后等人 240s 过渡值 / 等机器 120s）——
+// 任何"后端根本没给帧"的失败都要先烧满窗才报出，而期间后端早已给出终帧（done / error），
+// 断言于是退化为"等超时"而非"看事件"。
+// 回落值 = app.ai.resilience.total-budget 缺省 300s + 30s 余量；解析成功时以服务端值为准。
+// 2026-10-10 数字规格清点裁决⑤（小批苞 F）：改事件驱动（早停于 done / error，硬上限由事实源推导）。
+const FALLBACK_AWAIT_MS = 330_000
+
+/** 解析 ISO-8601 时长（如 PT5M）为毫秒；非时长或非正值返回 null（由调用方回落具名常量）。 */
+function parseIsoDurationMs(raw) {
+  if (typeof raw !== 'string') return null
+  const m = raw.trim().match(/^P(?:(\d+(?:\.\d+)?)D)?(?:T(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?)?$/)
+  if (!m || !m[0]) return null
+  const [d, h, mi, s] = m.slice(1).map(v => Number(v ?? 0))
+  if (![d, h, mi, s].some(v => v > 0)) return null
+  return ((d * 24 + h) * 60 + mi) * 60_000 + s * 1000
+}
+
+/** 事实源 = 已在跑的服务端 /api/ai/health：读 resilience.totalBudget（不依赖任何新增端点）。 */
+async function deriveAwaitCap() {
+  const fallbackSource = 'FALLBACK_AWAIT_MS（app.ai.resilience.total-budget 缺省 300s + 30s 余量）'
+  try {
+    const r = await fetch(`${API}/api/ai/health`, { headers: { Accept: 'application/json' } })
+    if (!r.ok) {
+      console.warn('[阶段3a] /health 非 2xx（HTTP ' + r.status + '），等待上界回落具名常量')
+      return { capMs: FALLBACK_AWAIT_MS, capSource: fallbackSource }
+    }
+    const body = await r.json()
+    const raw = body?.resilience?.totalBudget
+    const budgetMs = parseIsoDurationMs(raw)
+    if (!budgetMs) {
+      console.warn('[阶段3a] /health 的 resilience.totalBudget 无法解析（' + JSON.stringify(raw) + '），等待上界回落具名常量')
+      return { capMs: FALLBACK_AWAIT_MS, capSource: fallbackSource }
+    }
+    return { capMs: budgetMs + 30_000, capSource: `/api/ai/health resilience.totalBudget=${raw}` }
+  } catch (e) {
+    console.warn('[阶段3a] /health 读取失败（' + e.message + '），等待上界回落具名常量')
+    return { capMs: FALLBACK_AWAIT_MS, capSource: fallbackSource }
+  }
+}
+
 /**
  * 流式读 SSE（data: 行 JSON）。onFrame 返回 true 时停读并保持连接不关（由调用方继续读或取消）；
- * 返回 { reader, seenTypes, stopped, frame }，frame 为触发停读的那一帧。
+ * 返回 { reader, seenTypes, stopped, frame, stopReason }，frame 为触发停读的那一帧。
+ *
+ * 第三参兼容两种形态：数字 = 绝对截止时刻（旧签名，等价 { deadlineMs }）；
+ * 对象 = { deadlineMs, until, label } —— until 是"终止帧"谓词（done / error 任一命中即停读，
+ * 事件驱动早停，不必烧满整窗）。stopReason 取值：
+ *   matched         = onFrame 命中（调用方要等的帧到了）
+ *   terminal:done / terminal:error = until 命中（后端已给终帧，结局可判）
+ *   window          = 窗口到点 / 对端关闭（窗内什么都没读到 —— 环境或超时面）
+ * 有了 stopReason，失败即可区分"后端给了终帧（问题在业务）"与"窗内空读（问题在环境/超时）"。
  */
-async function readSse(response, onFrame, deadlineMs) {
+async function readSse(response, onFrame, opts = {}) {
+  const cfg = typeof opts === 'number' ? { deadlineMs: opts } : opts
+  const deadlineMs = typeof cfg.deadlineMs === 'number' ? cfg.deadlineMs : Infinity
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   const seenTypes = []
@@ -207,11 +259,14 @@ async function readSse(response, onFrame, deadlineMs) {
         let frame
         try { frame = JSON.parse(line.slice(5).trim()) } catch { continue }
         seenTypes.push(frame.type)
-        if (onFrame(frame)) return { reader, seenTypes, stopped: true, frame }
+        if (onFrame(frame)) return { reader, seenTypes, stopped: true, frame, stopReason: 'matched', label: cfg.label ?? null }
+        if (cfg.until && cfg.until(frame)) {
+          return { reader, seenTypes, stopped: true, frame, stopReason: `terminal:${frame.type}`, label: cfg.label ?? null }
+        }
       }
     }
   } catch { /* 超时/对端断开：按停读处理 */ }
-  return { reader, seenTypes, stopped: false, frame: null }
+  return { reader, seenTypes, stopped: false, frame: null, stopReason: 'window', label: cfg.label ?? null }
 }
 
 try {
@@ -261,7 +316,9 @@ try {
     console.log('[阶段3] 真实挂起轮 session =', S, 'api =', API)
 
     // a. 造真实挂起轮：Node 侧直连后端 /chat（真实模型），读到 frontend_tool_request 为止，
-    //    连接保持不关（挂起轮活着）；超时（240s）未等到 → 断言① FAIL（detail 记帧类型序列）
+    //    连接保持不关（挂起轮活着）。事件驱动等待：读到 done / error 任一终止帧立即早停，
+    //    硬上限由服务端自报的轮次预算推导（见 deriveAwaitCap），不再写死 240s；
+    //    未等到 → 断言① FAIL（detail 记 stopReason + 帧类型序列，可区分"后端给了终帧"与"窗内空读"）
     const chatRes = await fetch(`${API}/api/ai/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
@@ -270,21 +327,33 @@ try {
     if (!chatRes.ok || !chatRes.body) {
       throw new Error(`POST /chat 失败：HTTP ${chatRes.status}`)
     }
-    const AWAIT_MS = 240_000
+    const { capMs: AWAIT_CAP_MS, capSource: AWAIT_CAP_SOURCE } = await deriveAwaitCap()
     const awaited = await readSse(chatRes,
       f => f.type === 'frontend_tool_request' && f.name === 'generative_form',
-      Date.now() + AWAIT_MS)
-    console.log('[阶段3a] await stopped =', awaited.stopped, 'seen =', JSON.stringify(awaited.seenTypes))
-    if (!awaited.stopped || !awaited.frame) {
+      {
+        deadlineMs: Date.now() + AWAIT_CAP_MS,
+        until: f => f.type === 'done' || f.type === 'error',
+        label: 'a-await-frontend_tool_request'
+      })
+    console.log('[阶段3a] await stopReason =', awaited.stopReason, 'stopped =', awaited.stopped,
+      'capMs =', AWAIT_CAP_MS, 'capSource =', AWAIT_CAP_SOURCE, 'seen =', JSON.stringify(awaited.seenTypes))
+    if (awaited.stopReason !== 'matched' || !awaited.frame) {
       try { await awaited.reader.cancel() } catch { /* 忽略 */ }
-      RESULT.phases.realRound = { sessionId: S, stage: 'a-await', seenTypes: awaited.seenTypes }
-      assert('①', false, { stage: 'a-await-frontend_tool_request', timeoutMs: AWAIT_MS, seenTypes: awaited.seenTypes })
-      throw new Error('阶段3a 超时未收到 frontend_tool_request')
+      RESULT.phases.realRound = {
+        sessionId: S, stage: 'a-await', awaitStopReason: awaited.stopReason,
+        awaitCapMs: AWAIT_CAP_MS, awaitCapSource: AWAIT_CAP_SOURCE, seenTypes: awaited.seenTypes
+      }
+      assert('①', false, {
+        stage: 'a-await-frontend_tool_request', awaitStopReason: awaited.stopReason,
+        awaitCapMs: AWAIT_CAP_MS, awaitCapSource: AWAIT_CAP_SOURCE, seenTypes: awaited.seenTypes
+      })
+      throw new Error(`阶段3a 未收到 frontend_tool_request（awaitStopReason=${awaited.stopReason}，capMs=${AWAIT_CAP_MS}）`)
     }
     const realRunId = awaited.frame.runId
     const realToolCallId = awaited.frame.toolCallId
     RESULT.phases.realRound = {
       sessionId: S, runId: realRunId, toolCallId: realToolCallId,
+      awaitStopReason: awaited.stopReason, awaitCapMs: AWAIT_CAP_MS, awaitCapSource: AWAIT_CAP_SOURCE,
       awaitSeenTypes: awaited.seenTypes
     }
 

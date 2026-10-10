@@ -1304,6 +1304,14 @@ function New-FormValues($form, $prefer = @{}, [string[]]$includeOptional = @()) 
 # 短窗读流：$millis 毫秒窗口内能读到的帧全部收集后返回（设计稿 GF4-A3 / GF5-A4 的"无新帧"检查窗）
 # 真正时间有界（红队高-2 修复）：读循环以 Stopwatch 定截止，每行用 ReadLineAsync 等待剩余窗口，
 # 到点主动断开——挂起 run 的流不关闭（仅心跳）也能自行结束，不会阻塞到 HITL 超时/HttpClient 超时。
+#
+# 读窗下界由**被观察方的节拍**决定，不是随手取的整数：挂起期心跳每 2s 一帧
+# （ConfirmGate.HEARTBEAT_SECONDS = 2），故 3000ms 窗口只兜得住 1 个心跳周期，抖动一次即漏帧
+# （漏帧会让"无新帧"断言假绿）。判据取「窗口 ≥ 2 个心跳周期 + 抖动余量」，即 2s × 2 + 1s = 5000ms；
+# 参照业界依据 §2（heartbeat < min(代理超时) 实践公式）与 §12（K8s periodSeconds ×
+# failureThreshold 的"连续 N 次失败才判死"模式）。2026-10-10 数字规格清点裁决⑤：3000 → 5000。
+# 三处调用点本轮一律取 5000（GF4-A3 / GF5-A4 / TC23④）—— 原 3500ms 同样不达标（1.75 个心跳周期），
+# 按同一判据同改（2026-10-10 小批苞 F，登记见 docs/M2-排期计划.md 去向表 R-104）。
 function Read-Sse-Brief($path, $millis) {
     $frames = New-Object System.Collections.ArrayList
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -1384,7 +1392,7 @@ function Gf-Skip($name, $why) {
 # 挂起帧的通用契约断言（设计稿 GF1-A1，GF2/GF3/GF4 同构复用）
 function Gf-Assert-FrameContract($f) {
     if (-not $f.toolCallId) { throw 'frontend_tool_request 缺 toolCallId' }
-    if ([int]$f.timeoutSeconds -le 0) { throw "frontend_tool_request timeoutSeconds=$($f.timeoutSeconds)，期望 > 0（不硬编码 120，与 app.ai.hitl.timeout 解耦）" }
+    if ([int]$f.timeoutSeconds -le 0) { throw "frontend_tool_request timeoutSeconds=$($f.timeoutSeconds)，期望 > 0（不硬编码 120，与 app.ai.hitl.frontend-tool-timeout 解耦）" }
     if (-not ($f.expiresAt -match '^\d+$')) { throw 'frontend_tool_request expiresAt 非数字' }
 }
 
@@ -1805,10 +1813,10 @@ try {
     # A2 挂起未被消费：pending 仍 PENDING
     $entryP = Gf-PendingEntry $script:gf4Run $script:gf4Call
     if ($entryP.status -ne 'PENDING') { throw "400 后 pending 状态 $($entryP.status)，期望仍 PENDING" }
-    # A3 拒绝路径不发帧不唤醒：3s 窗口内重挂 events 无 frontend_tool_result
+    # A3 拒绝路径不发帧不唤醒：5000ms（5s）窗口内重挂 events 无 frontend_tool_result
     # （裁决 #3：该窗口读失败会显式抛出，不再退化为空集让本断言空转）
-    $win = Read-Sse-Brief "/api/ai/events/$($script:gf4Run)?lastSeq=$lastSeqGf4" 3500
-    if (@($win | Where-Object { $_.type -eq 'frontend_tool_result' }).Count -gt 0) { throw '400 后 3s 窗口内出现 frontend_tool_result（拒绝路径不应发帧）' }
+    $win = Read-Sse-Brief "/api/ai/events/$($script:gf4Run)?lastSeq=$lastSeqGf4" 5000
+    if (@($win | Where-Object { $_.type -eq 'frontend_tool_result' }).Count -gt 0) { throw '400 后 5s 窗口内出现 frontend_tool_result（拒绝路径不应发帧）' }
     # A4 同 toolCallId 改值重发：200 + FRONTEND_RESULT + accepted
     $good = Invoke-Api 'POST' '/api/ai/frontend-tool-result' @{ runId = $script:gf4Run; toolCallId = $script:gf4Call; result = '{"keyword":"E2EGFC","scope":"XN"}'; source = 'e2e-gf' }
     Gf-Http-Note 'A4 同 toolCallId 改值重发（期望 200）' 'POST' '/api/ai/frontend-tool-result' @{ runId = $script:gf4Run; toolCallId = $script:gf4Call; result = '{"keyword":"E2EGFC","scope":"XN"}'; source = 'e2e-gf' } $good
@@ -1840,7 +1848,7 @@ try {
         throw '日志缺"前端工具回灌被安全闸拒绝 … code=FORM_RESULT_REJECTED"行'
     }
     Gf-Dump 'GF4' (@($turn.frames) + @($cont))
-    Ok 'GF4 复核拒绝：违规值 400（PENDING 保持/3s 无帧）→同 toolCallId 改值重发 200→续跑回显'
+    Ok 'GF4 复核拒绝：违规值 400（PENDING 保持/5s 无帧）→同 toolCallId 改值重发 200→续跑回显'
 } catch {
     if ($_.Exception.Message -like 'GF-SKIP:*') { Gf-Skip 'GF4' $_.Exception.Message.Substring(8); Gf-Dump 'GF4' $turn.frames }
     else { Gf-Converge $script:gf4Run $script:gf4Call; Gf-Dump 'GF4' $turn.frames; No 'GF4' $_.Exception.Message }
@@ -1877,7 +1885,7 @@ try {
     # A4 两次 409 后 events 重挂无新帧（心跳帧除外）
     # （裁决 #3：窗口读失败会显式抛出，不再退化为空集让本断言空转）
     foreach ($pair in @(@($script:gf4Run, $script:gf4LastSeq), @($script:gf3Run, $script:gf3LastSeq))) {
-        $w = Read-Sse-Brief "/api/ai/events/$($pair[0])?lastSeq=$($pair[1])" 3000
+        $w = Read-Sse-Brief "/api/ai/events/$($pair[0])?lastSeq=$($pair[1])" 5000
         $badFrames = @($w | Where-Object { @('frontend_tool_request', 'frontend_tool_result', 'done', 'error') -contains $_.type })
         if ($badFrames.Count -gt 0) { throw "409 后重挂 $($pair[0]) 出现新帧: $($badFrames[0].type)" }
     }
@@ -2192,7 +2200,7 @@ try {
 
     # ④ 差量续收的孤儿过滤（前端 resumeSnapshotStream 的接口级等价）：lastSeq=archiveMaxSeq 时，
     #    重挂只收"新帧"，旧业务帧一律不重发（seq ≤ lastSeq 即孤儿）
-    $brief23 = Read-Sse-Brief "/api/ai/events/$run23`?lastSeq=$([int]$cur23.archiveMaxSeq)" 3000
+    $brief23 = Read-Sse-Brief "/api/ai/events/$run23`?lastSeq=$([int]$cur23.archiveMaxSeq)" 5000
     $orphans23 = @($brief23 | Where-Object { $null -ne $_.seq -and [int]$_.seq -le [int]$cur23.archiveMaxSeq })
     if ($orphans23.Count -gt 0) { throw "TC23 差量续收重发了 $($orphans23.Count) 个旧帧（孤儿过滤失效）" }
 
