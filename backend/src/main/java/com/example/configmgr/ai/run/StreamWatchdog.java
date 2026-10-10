@@ -18,9 +18,10 @@ import java.util.function.Consumer;
  * 四种"流已不再前进"的情形统一变成一次 {@link StreamViolationException}。
  *
  * <h2>为什么不直接用 {@code Flux.timeout(...)}</h2>
- * 官方 {@code timeout} 只有"距上一个事件多久"的概念，而挂起等待（确认门最长
- * {@code app.ai.hitl.timeout}）期间上游<b>本来就</b>是静默的 —— 用纯 timeout 会把
- * 一次 120s 的人工确认误判成断流（SM-02 的判据正是这一条）。因此本类把两个硬规范写进判定：
+ * 官方 {@code timeout} 只有"距上一个事件多久"的概念，而挂起等待（上限由
+ * {@code app.ai.hitl.confirm-timeout} 与 {@code app.ai.hitl.frontend-tool-timeout} 两键按场景给出：
+ * 确认门等人 240s / 前端工具等机器 120s）期间上游<b>本来就</b>是静默的 —— 用纯 timeout 会把
+ * 一次长达分钟级的人工确认误判成断流（SM-02 的判据正是这一条）。因此本类把两个硬规范写进判定：
  * <ol>
  * <li><b>超时阈值 &gt; 最长工具耗时</b>：{@link ToolActivityBeacon#isActive(String)} 为真时
  * <b>不参与静默判定</b>（工具执行期间不计数），工具退出后以退出时刻为新锚点重新计时 ——

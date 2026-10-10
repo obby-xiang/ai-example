@@ -766,7 +766,9 @@ public class ResilientChatService {
 		out.put("interEventTimeout", String.valueOf(config.getInterEventTimeout()));
 		out.put("maxAttempts", config.getMaxAttempts());
 		out.put("totalBudget", String.valueOf(config.getTotalBudget()));
-		out.put("hitlTimeout", String.valueOf(this.properties.getHitl().getTimeout()));
+		// 两个挂起键分场景（裁决③拆键）：诊断快照的键名与语义一对齐，不再用旧的合并键名
+		out.put("confirmTimeout", String.valueOf(this.properties.getHitl().getConfirmTimeout()));
+		out.put("frontendToolTimeout", String.valueOf(this.properties.getHitl().getFrontendToolTimeout()));
 		out.put("watchdogTickMillis", StreamWatchdog.TICK_MILLIS);
 		return out;
 	}

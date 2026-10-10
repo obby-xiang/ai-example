@@ -99,6 +99,8 @@ export interface AiHealth {
   memoryBackend: string
   sessionTtl: string
   confirmTimeoutSeconds: number
+  /** 前端工具挂起上限（秒；`app.ai.hitl.frontend-tool-timeout` 的折算值，与确认门键分场景） */
+  frontendToolTimeoutSeconds: number
   suspendPoolSize: number
   activeSuspendGates: number
   heldSessions: number

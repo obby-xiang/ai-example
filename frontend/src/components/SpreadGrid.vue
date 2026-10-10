@@ -92,9 +92,14 @@ let pendingLoad: { fields: readonly ConfigField[]; rows: readonly Record<string,
  *
  * 论证（对齐既有常量，非拍脑袋）：这里的等待实质是"同一条网络栈上拉一个 ~4.7MB 的
  * spreadjs chunk（`vite.config.ts` 懒加载口径）+ 模块求值"，与一次 REST 请求同族，故取
- * `api/http.ts` 的 axios 单请求上限同值（60s）；超过它仍未就绪即判卡死。同时 60s 明显小于
- * 后端 `ConfirmGate` 的挂起超时（120s），保证"前端先失败、先给出可读错误"，不再退化成
- * "沉默到后端超时才收尾"。
+ * `api/http.ts` 的 axios 单请求上限同值（60s）；超过它仍未就绪即判卡死。同时 60s 仍明显小于
+ * 后端"前端工具"挂起上限（`app.ai.hitl.frontend-tool-timeout`，默认 120s；裁决③拆键后与
+ * 确认门键 `app.ai.hitl.confirm-timeout` 240s 分场景），保证"前端先失败、先给出可读错误"，
+ * 不再退化成"沉默到后端超时才收尾"。
+ *
+ * 该论证只在取值面成立：本常量与服务端键无逻辑绑定（前端工具执行器的预算是另一条折算链，
+ * 见 `utils/frontend-tools.ts#deriveFrontendToolBudgetMs`）。若前端工具键下调（数字规格清点 P-1
+ * 的前端折算专项），本值与它的差距会同步收窄，须同批复核此处"明显小于"是否仍成立。
  */
 const READY_TIMEOUT_MS = 60_000
 

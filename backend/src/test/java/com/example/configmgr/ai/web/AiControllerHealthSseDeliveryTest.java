@@ -65,11 +65,30 @@ class AiControllerHealthSseDeliveryTest {
 					.value(ResilientChatService.STREAMING_HEARTBEAT_MILLIS));
 	}
 
+	/**
+	 * 拆键后的观测面（数字规格清点裁决③）：两个挂起键各自可观测，且各取各的取键方法。
+	 *
+	 * <p>两个 stub 值刻意取不同的数（240 / 120，即 {@code application.yml} 的现态值）——
+	 * 这样"两键写反/串读"（把前端工具键接到确认门方法上）会被本用例直接抓住；
+	 * 键的默认值与 {@code total-budget} 的上限关系由
+	 * {@code AiPropertiesT35DefaultsTest} 锚定，本用例只管端点回显的配对是否正确。
+	 */
+	@Test
+	void healthExposesBothSuspendTimeoutsAfterKeySplit() throws Exception {
+		mockMvc.perform(get("/api/ai/health"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.confirmTimeoutSeconds").value(240))
+			.andExpect(jsonPath("$.frontendToolTimeoutSeconds").value(120));
+	}
+
 	/** 只装配被测端点用得到的依赖（其余为桩：本用例不发模型请求、不读 Redis）。 */
 	private AiController controller() {
 		when(this.availability.isAvailable()).thenReturn(true);
+		ConfirmGate gate = mock(ConfirmGate.class);
+		when(gate.confirmTimeoutSeconds()).thenReturn(240);
+		when(gate.frontendToolTimeoutSeconds()).thenReturn(120);
 		return new AiController(this.availability, provider(), provider(), provider(), mock(ChatMemory.class),
-				mock(ChatMemoryRepository.class), mock(SessionGate.class), mock(ConfirmGate.class), mock(RunStore.class),
+				mock(ChatMemoryRepository.class), mock(SessionGate.class), gate, mock(RunStore.class),
 				mock(RunRegistry.class), mock(CancellationRegistry.class), mock(RedisAvailability.class),
 				mock(ThreadPoolTaskExecutor.class), new ObjectMapper(), new AiProperties(), mock(Environment.class));
 	}

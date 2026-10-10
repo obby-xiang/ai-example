@@ -162,8 +162,9 @@ export function parseToolArgs(raw: string | undefined | null): Record<string, un
  * 时的回落值，也是"服务端上限 120s − 回灌 POST 上限 60s"这一折算在默认配置下的取值
  * （折算见 {@link deriveFrontendToolBudgetMs}）。
  *
- * **为什么要有**：后端对前端工具挂起的等待上限是 `app.ai.hitl.timeout`（默认 **120s**，
- * 与确认门共用，见 backend `AiProperties$Hitl#timeout`），前端此前**没有任何自有预算**：
+ * **为什么要有**：后端对前端工具挂起的等待上限是 `app.ai.hitl.frontend-tool-timeout`
+ * （默认 **120s**，裁决③拆键后**只供前端工具**，与确认门键 `app.ai.hitl.confirm-timeout`
+ * 分场景，见 backend `AiProperties$Hitl#frontendToolTimeout`），前端此前**没有任何自有预算**：
  * 执行器一旦迟迟不返回（宿主浏览器的下载链路把页面拖住、或 `ensureTaskBoundForTool`
  * 串行 HTTP 叠加吃满 axios 60s 上限），回灌 POST 就发不出去，后端在 120s 判前端超时，
  * 模型与用户拿到的是"本次调用未获得数据"这种既非成功也非失败的空结局。
@@ -215,7 +216,7 @@ const MIN_FRONTEND_TOOL_TIMEOUT_BUDGET_MS = 5_000
  * 默认 120s 上限 → **60s**；90s → 30s；65s → 5s（≈上限，余量被压到 0）。
  *
  * 为什么以服务端值为准而不是写死 120s：帧里的 `timeoutSeconds` 就是后端真实等待上限
- * （`app.ai.hitl.timeout`，可在配置里改）。以后端值为基算出预算，后端调整上限时前端无需
+ * （`app.ai.hitl.frontend-tool-timeout`，可在配置里改）。以后端值为基算出预算，后端调整上限时前端无需
  * 同步改常量；余量取回灌 POST 自身的 axios 上限（60s），于是
  * `预算 + 60000 ≤ 服务端上限` 对 `服务端上限 ≥ 65s` 的一切取值成立 —— 这才是注释里可自称
  * "保证"的数学口径（旧式 `服务端上限 − 30s` 只在 POST <30s 时成立，见 S2-2）。
@@ -261,7 +262,7 @@ export function deriveFrontendToolBudgetMs(timeoutSeconds?: number | null): numb
  * 即"越界 delay 退化成秒级假超时"。
  *
  * **为什么本预算会越过它**：预算随服务端上限平移（{@link deriveFrontendToolBudgetMs}：
- * 150s → 90s、300s → 240s，不再被默认常量封顶），而服务端上限来自 `app.ai.hitl.timeout`
+ * 150s → 90s、300s → 240s，不再被默认常量封顶），而服务端上限来自 `app.ai.hitl.frontend-tool-timeout`
  * （`Duration`，取值上界受帧里的 int 秒约束 ≈ 68 年），故病态配置下预算会 > 本值。
  * 把越界值直接喂给 `setTimeout`，"病态地长"的预算就变成**瞬间假超时**——正是本预算最不该
  * 有的误差方向（宁可永不超时，也不能把活执行器谎报成超时）。

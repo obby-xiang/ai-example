@@ -534,6 +534,8 @@ public class AiController {
 		body.put("memoryBackend", this.chatMemoryRepository.getClass().getSimpleName());
 		body.put("sessionTtl", String.valueOf(this.properties.getSessionTtl()));
 		body.put("confirmTimeoutSeconds", this.confirmGate.confirmTimeoutSeconds());
+		// 与确认门键对称的观测面（裁决③拆键后的第二个挂起键）：值是前端工具键的折算秒
+		body.put("frontendToolTimeoutSeconds", this.confirmGate.frontendToolTimeoutSeconds());
 		body.put("suspendPoolSize", this.properties.getSuspend().getPoolSize());
 		body.put("sseDelivery", sseDeliverySnapshot());
 		body.put("activeSuspendGates", this.confirmGate.pendingGates());

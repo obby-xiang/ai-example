@@ -116,15 +116,48 @@ public class AiProperties {
 	public static class Hitl {
 
 		/**
-		 * 挂起等待上限（ADR-2 上限约束）：确认门与前端工具挂起共用。
+		 * 确认门等待上限（<b>等人</b>）：AI 请求人类对破坏性操作（导出/检查/导入/发布）作出决策。
 		 *
-		 * <p>超过本上限即收口（{@code status=TIMEOUT}），但两个场景的**结局语义不同**，文案也分开：
-		 * 确认门等的是人的决策 ⇒ "工具未执行"（确定未发生）；前端工具等的是前端的回执 ⇒
-		 * 只说明"回执没回来"、**结局未知**（副作用可能已经发生，如文件已落盘）。详见
-		 * {@code ConfirmGate#expire} 的分支文案与
-		 * {@code ConfirmGateFrontendTimeoutTextTest} 的回归锁。
+		 * <p>取值依据（业界依据 §5「人机确认门（HITL approval）超时」）：该节唯一有官方硬依据的结论是
+		 * "不设超时 = 永久卡死"（AWS Step Functions 官方最佳实践），取值本身业界无统一标准；同节对
+		 * "内网、用户量小、有明确操作人的交互式确认门"给出的推荐值是 <b>10 分钟</b>，超时后自动拒绝
+		 * 并释放锁（fail-closed，不自动放行）。本键当前取 <b>240s</b>（过渡值，见下）。
+		 *
+		 * <p>与前端工具键（{@link #frontendToolTimeout}）<b>刻意分开</b>：本键等的是<b>人</b>的决策延迟
+		 * （分钟级），那个键等的是<b>机器</b>的回执延迟（秒级），同值共用会让两者互相迁就
+		 * （2026-10-10 数字规格清点裁决③；登记见 {@code docs/M2-排期计划.md} 去向表 R-99①）。
+		 *
+		 * <p>超过本上限即收口（{@code status=TIMEOUT, executed=false}），结局语义为"工具未执行"
+		 * （确定未发生）—— 与前端工具键的"结局未知"**不同**，文案也分开（见 {@code ConfirmGate#expire}）。
+		 *
+		 * <p><b>取值可达性（过渡声明）</b>：裁决③的目标值是 600s，但本轮还受
+		 * {@link Resilience#getTotalBudget()}（默认 300s）约束 ——
+		 * {@code StreamWatchdog} 的总预算判据先于"工具活跃期不计静默"生效，{@code SseEmitter}
+		 * 寿命亦取该值。故本键本轮取 <b>240s</b>（&lt; 300s，留 60s 余量，值真实可达）；
+		 * 抬到 600s 须与"轮次预算 / emitter 寿命 / 兜底等待三语义拆分"（等待治理 R-99③）同批。
 		 */
-		private Duration timeout = Duration.ofSeconds(120);
+		private Duration confirmTimeout = Duration.ofSeconds(240);
+
+		/**
+		 * 前端工具（含 {@code generative_form}）回执等待上限（<b>等机器</b>）。
+		 *
+		 * <p>取值依据（业界依据 §6「前端工具调用超时（AI 工具调用执行预算）」）：MCP 规范只要求
+		 * SHOULD 设超时、不规定数值；实现层默认常见 <b>60s</b>，Vercel AI SDK 官方 {@code toolMs}
+		 * 区间为 5–60s（跨系统工具取 60s）。本键本轮<b>暂维现状 120s</b>，理由见下。
+		 *
+		 * <p>超过本上限即收口（{@code status=TIMEOUT, executed=false}），但结局语义只说明
+		 * "回执没回来"、<b>结局未知</b>（副作用可能已经发生，如文件已落盘）—— 与确认门键的
+		 * "工具未执行"**不同**（见 {@code ConfirmGate#expire} 的分支文案与
+		 * {@code ConfirmGateFrontendTimeoutTextTest} 的回归锁）。
+		 *
+		 * <p><b>已知约束（为什么暂维 120s）</b>：前端执行器预算由帧内 {@code timeoutSeconds} 折算
+		 * （{@code frontend/src/utils/frontend-tools.ts#deriveFrontendToolBudgetMs}，折算式
+		 * `预算 = 服务端上限 − 回灌 POST 上限(60s)`）；本键若降到 60s，该式即为 0、预算落 5s 下限 ——
+		 * 该文件自己把 ≤65s 列为病态配置，而实测最慢的一次**成功**回灌发生在 30.6s，5s 会掐掉
+		 * 已知会成功的路径。故降到 60s 的前置 = 前端折算面（回灌 POST 单独给更短上限）专项裁决
+		 * （数字规格清点 P-1 / 等待治理 R-99②），<b>本次不动</b>。
+		 */
+		private Duration frontendToolTimeout = Duration.ofSeconds(120);
 	}
 
 	@Data
@@ -143,10 +176,10 @@ public class AiProperties {
 		 *
 		 * <p>
 		 * 初值 90s —— <b>待 §13.2 #2 压测裁决</b>。注意它与硬规范①（阈值 &gt; 最长工具耗时）的
-		 * 关系：挂起等待（确认门默认 120s &gt; 90s）期间工具处于"活跃"，
+		 * 关系：挂起等待（确认门默认 240s、前端工具默认 120s）期间工具处于"活跃"，
 		 * {@link com.example.configmgr.ai.run.StreamWatchdog} 在工具执行期间<b>不计静默</b>、
-		 * 退出后以退出时刻重新计时，因此本值小挂起上限仍正确；但"配置值本身要不要直接
-		 * 大于 {@code app.ai.hitl.timeout}"列为【待裁决】。
+		 * 退出后以退出时刻重新计时，因此本值小于两个挂起上限仍正确（前端工具 120s &gt; 90s 同属此理）；
+		 * 但"配置值本身要不要直接大于确认门键 {@code app.ai.hitl.confirm-timeout}"列为【待裁决】。
 		 */
 		private Duration interEventTimeout = Duration.ofSeconds(90);
 

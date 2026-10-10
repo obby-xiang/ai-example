@@ -14,6 +14,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -47,12 +48,22 @@ import static org.mockito.Mockito.when;
  * 本类最初的写法是把上限压到 1s，并在断言里用**同一个常量**拼串
  * （{@code contains("未在 " + SECONDS + " 秒内…")}）：断言与实现同源，于是「把 N 硬编码成 1」
  * 的错误实现照样全绿，"N 用实际配置值"这条要求其实没被锁住（复核报告 S2-e 的破防项）。
- * 现在改为：① 注入 {@code 2} 与 {@code 3} 两个互不相同、既不是 1 也不是默认值 120 的上限
+ * 现在改为：① 注入 {@code 2} 与 {@code 3} 两个互不相同、既不是 1 也不是默认值（拆键后默认
+ * {@code confirm-timeout 240s} / {@code frontend-tool-timeout 120s}）的上限
  * （参数化，任一硬编码常量都只能巧合于其中一个值）；② 断言不拼串，而是用正则从**产出的文案里
- * 读回**秒数再与注入值比较（{@link #secondsInText}），断言不再与实现共享字面来源。
+ * 读回**秒数再与注入值比较（{@link #secondsInText} / {@link #confirmSecondsInText}），
+ * 断言不再与实现共享字面来源。
  *
- * <p>上限的注入走生产路径 {@code app.ai.hitl.timeout}，故每个用例真等到该秒数才收口
- * （{@code 2s + 3s + 1s}）—— 用"真到期"而非绕过等待的伪造路径。
+ * <h2>拆键后两条路径各自独立注入（数字规格清点裁决③）</h2>
+ * 本类原先两类用例共用同一个 helper（都注入那一个共用键）；拆成
+ * {@code app.ai.hitl.confirm-timeout}（等人）与 {@code app.ai.hitl.frontend-tool-timeout}
+ * （等机器）后，前端工具用例注入 {@code frontend-tool-timeout}、确认门用例注入
+ * {@code confirm-timeout}，未注入的那个键保持类默认值
+ * （240s / 120s，均远离 1s，不会让用例意外走另一条分支）。两条路径的"秒数随配置走"由各自的
+ * 参数化用例分别锁住。
+ *
+ * <p>上限的注入走生产路径（两个 {@code app.ai.hitl.*} 键），故每个用例真等到该秒数才收口
+ * （{@code 2s + 3s + 1s + 2s + 3s}）—— 用"真到期"而非绕过等待的伪造路径。
  */
 class ConfirmGateFrontendTimeoutTextTest {
 
@@ -61,13 +72,17 @@ class ConfirmGateFrontendTimeoutTextTest {
     private static final String TOOL_CALL_ID = "call-timeout-text";
 
     /**
-     * 确认门用例的上限：该用例锁的是"确认门分支的措辞不被连带改掉"，与 N 取何值无关，
-     * 故取允许的最小值 1s 省时（"N 随配置值走"由参数化的前端工具用例负责）。
+     * 确认门用例的上限：1s 的那条锁的是"确认门分支的措辞不被连带改掉"，与 N 取何值无关，
+     * 故取允许的最小值 1s 省时；"N 随配置值走"由下方 {@code 2/3s} 参数化用例负责
+     * （拆键后确认门与前端工具各自独立注入，两条路径都要各自锁住）。
      */
     private static final int CONFIRM_TIMEOUT_SECONDS = 1;
 
     /** 从文案里读秒（"未在 N 秒内收到前端回执"），只认产出物本身，不认注入值。 */
     private static final Pattern SECONDS_IN_TEXT = Pattern.compile("未在 (\\d+) 秒内收到前端回执");
+
+    /** 从确认门文案里读秒（"确认等待超过 N 秒"），同上。 */
+    private static final Pattern CONFIRM_SECONDS_IN_TEXT = Pattern.compile("确认等待超过 (\\d+) 秒");
 
     private final RunStore store = mock(RunStore.class);
 
@@ -83,7 +98,7 @@ class ConfirmGateFrontendTimeoutTextTest {
     @ValueSource(ints = { 2, 3 })
     @DisplayName("前端工具超时：文案里的秒数随注入的配置值走，不再说「未获得数据」")
     void frontendToolTimeoutTextFollowsConfiguredSeconds(int injectedSeconds) {
-        ConfirmGate gate = gateWithTimeoutSeconds(injectedSeconds);
+        ConfirmGate gate = gateWithFrontendTimeoutSeconds(injectedSeconds);
         PendingToolCall entry = pending(PendingToolCall.KIND_FRONTEND);
         stubCommon(entry);
 
@@ -93,7 +108,7 @@ class ConfirmGateFrontendTimeoutTextTest {
         assertThat(resolved.getReason()).isEqualTo("FRONTEND_TIMEOUT");
         assertThat(resolved.isExecuted()).as("超时不认领执行").isFalse();
         assertThat(secondsInText(resolved.getResultText()))
-                .as("文案秒数必须等于注入的 app.ai.hitl.timeout（硬编码常量过不了两个用例）")
+                .as("文案秒数必须等于注入的 app.ai.hitl.frontend-tool-timeout（硬编码常量过不了两个用例）")
                 .isEqualTo(injectedSeconds);
         assertThat(resolved.getResultText())
                 .contains("结局未知")
@@ -112,7 +127,7 @@ class ConfirmGateFrontendTimeoutTextTest {
     @Test
     @DisplayName("确认门超时：文案仍是「已自动取消该操作（工具未执行）」—— 该分支语义不同，不得被一并改掉")
     void confirmTimeoutKeepsNotExecutedWording() {
-        ConfirmGate gate = gateWithTimeoutSeconds(CONFIRM_TIMEOUT_SECONDS);
+        ConfirmGate gate = gateWithConfirmTimeoutSeconds(CONFIRM_TIMEOUT_SECONDS);
         PendingToolCall entry = pending(PendingToolCall.KIND_CONFIRM);
         stubCommon(entry);
 
@@ -129,11 +144,48 @@ class ConfirmGateFrontendTimeoutTextTest {
         verify(this.emitter).confirmDecision(resolved, "timeout", "CONFIRM_TIMEOUT", CONFIRM_TIMEOUT_SECONDS * 1000L);
     }
 
+    @ParameterizedTest(name = "确认门注入 {0} 秒 ⇒ 文案秒数为 {0}")
+    @ValueSource(ints = { 2, 3 })
+    @DisplayName("确认门超时：文案秒数同样随注入的配置值走（拆键后两条路径各自独立，须各自锁住）")
+    void confirmTimeoutTextFollowsConfiguredSeconds(int injectedSeconds) {
+        ConfirmGate gate = gateWithConfirmTimeoutSeconds(injectedSeconds);
+        PendingToolCall entry = pending(PendingToolCall.KIND_CONFIRM);
+        stubCommon(entry);
+
+        PendingToolCall resolved = gate.awaitDecision(RUN_ID, entry);
+
+        assertThat(resolved.getStatus()).isEqualTo(PendingToolCall.TIMEOUT);
+        assertThat(resolved.getReason()).isEqualTo("CONFIRM_TIMEOUT");
+        assertThat(resolved.isExecuted()).as("超时不认领执行").isFalse();
+        assertThat(confirmSecondsInText(resolved.getResultText()))
+                .as("文案秒数必须等于注入的 app.ai.hitl.confirm-timeout（硬编码常量过不了两个用例）")
+                .isEqualTo(injectedSeconds);
+        assertThat(resolved.getResultText())
+                .contains("系统已自动取消该操作（工具未执行）");
+        assertThat(resolved.getResultText())
+                .as("前端工具分支专属措辞不得串进确认门：确认门超时是「确定未执行」，不是「结局未知」")
+                .doesNotContain("结局未知");
+        assertThat(resolved.getResultText())
+                .as("注入的是确认门键，前端工具键保持默认，两键不得串读")
+                .doesNotContain("收到前端回执");
+        verify(this.emitter).confirmRequest(entry, injectedSeconds);
+        verify(this.emitter).confirmDecision(resolved, "timeout", "CONFIRM_TIMEOUT", injectedSeconds * 1000L);
+    }
+
     // ───────────────────────── helpers ─────────────────────────
 
-    private ConfirmGate gateWithTimeoutSeconds(int seconds) {
+    private ConfirmGate gateWithFrontendTimeoutSeconds(int seconds) {
+        return gate(properties -> properties.getHitl().setFrontendToolTimeout(Duration.ofSeconds(seconds)));
+    }
+
+    private ConfirmGate gateWithConfirmTimeoutSeconds(int seconds) {
+        return gate(properties -> properties.getHitl().setConfirmTimeout(Duration.ofSeconds(seconds)));
+    }
+
+    /** 只注入被测那条路径的键，另一个键保持类默认值（240s / 120s，均远离 1s ⇒ 不会意外走另一分支）。 */
+    private ConfirmGate gate(Consumer<AiProperties> tune) {
         AiProperties properties = new AiProperties();
-        properties.getHitl().setTimeout(Duration.ofSeconds(seconds));
+        tune.accept(properties);
         return new ConfirmGate(this.store, this.registry, properties, this.cancellations, this.beacon, List.of());
     }
 
@@ -151,6 +203,13 @@ class ConfirmGateFrontendTimeoutTextTest {
     private static int secondsInText(String text) {
         Matcher matcher = SECONDS_IN_TEXT.matcher(text == null ? "" : text);
         assertThat(matcher.find()).as("文案里应出现「未在 N 秒内收到前端回执」").isTrue();
+        return Integer.parseInt(matcher.group(1));
+    }
+
+    /** 从产出物读回确认门文案的秒数，口径同 {@link #secondsInText}。 */
+    private static int confirmSecondsInText(String text) {
+        Matcher matcher = CONFIRM_SECONDS_IN_TEXT.matcher(text == null ? "" : text);
+        assertThat(matcher.find()).as("文案里应出现「确认等待超过 N 秒」").isTrue();
         return Integer.parseInt(matcher.group(1));
     }
 

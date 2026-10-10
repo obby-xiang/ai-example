@@ -15,8 +15,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  * AI 运行线程模型（S4.2 §2 exec/AiExecutorConfig + DC-12：禁用虚拟线程）。
  *
  * <h2>挂起专用有界平台线程池</h2>
- * 一轮对话占用一条线程直至终帧 —— 挂起等待（确认门 ≤ {@code app.ai.hitl.timeout}）
- * 就是在这一条线程上阻塞的。因此：
+ * 一轮对话占用一条线程直至终帧 —— 挂起等待（确认门 ≤ {@code app.ai.hitl.confirm-timeout}，
+ * 默认 240s）就是在这一条线程上阻塞的。因此：
  * <ul>
  * <li>池容量 = {@code app.ai.suspend.pool-size}（默认 20）= <b>挂起并发上限</b>
  * （ADR-2 重审 N1：BLOCKING 形态每次挂起实占本池 1 条 + 官方硬编码 boundedElastic 1 条）；</li>
@@ -27,6 +27,11 @@ import java.util.concurrent.atomic.AtomicInteger;
  * {@code SUSPEND_POOL_SATURATED}</b>（与技术方案 v2.1.2 状态码口径统一；与 ADR-5 的
  * <b>409</b> 会话并发区分：409 = 同一 sessionId 已有轮次，503 = 全局挂起容量用尽）。</li>
  * </ul>
+ *
+ * <p><b>登记（数字规格清点裁决③的连带面，关联等待治理 R-41「多挂起累计预算」）</b>：确认门上限由
+ * 120s 抬到 240s 后，池满（20 条全被挂起占住、队列 0）时的 503 饱和窗口同比例翻倍 ——
+ * 单次挂起 2 分钟级 → 4 分钟级，池级最坏累计 40 分钟级 → 80 分钟级；若日后按裁决③抬到 600s，
+ * 单次即 10 分钟级。本项登记备查，本批不动容量。
  *
  * <p>
  * 基座原先用 {@code Thread.ofVirtual()} 起运行线程，本棒改为平台线程池以满足 DC-12。

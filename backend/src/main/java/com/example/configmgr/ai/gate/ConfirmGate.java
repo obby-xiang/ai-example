@@ -35,7 +35,8 @@ import java.util.concurrent.TimeUnit;
  * {@code status=APPROVED, executed=false} → 唤醒循环内的等待 → 由循环执行工具并记台账；</li>
  * <li><b>拒绝</b>：{@code status=REJECTED}，结果文本回填"用户拒绝 + 原因"，<b>不执行</b>，
  * 官方循环照常继续（模型如实解释）；</li>
- * <li><b>超时</b>：等待超过 {@code app.ai.hitl.timeout}（默认 120s，ADR-2 上限约束）
+ * <li><b>超时</b>：等待超过 {@code app.ai.hitl.confirm-timeout}（确认门，默认 240s）
+ * 或 {@code app.ai.hitl.frontend-tool-timeout}（前端工具，默认 120s）（ADR-2 上限约束）
  * 自动取消：{@code status=TIMEOUT, executed=false}；结果文本按<b>挂起类型</b>分场景（见 {@link #expire}）——
  * 确认门 = "工具未执行"（确定未发生），前端工具 = "回执没回来、结局未知"（副作用可能已发生）。</li>
  * </ul>
@@ -164,9 +165,20 @@ public class ConfirmGate {
 		}
 	}
 
-	/** 确认门等待上限（秒）：{@code app.ai.hitl.timeout}。 */
+	/** 确认门等待上限（秒）：{@code app.ai.hitl.confirm-timeout}（等人，默认 240s）。 */
 	public int confirmTimeoutSeconds() {
-		Duration timeout = this.properties.getHitl().getTimeout();
+		Duration timeout = this.properties.getHitl().getConfirmTimeout();
+		return (int) Math.max(1, timeout.toSeconds());
+	}
+
+	/**
+	 * 前端工具回执等待上限（秒）：{@code app.ai.hitl.frontend-tool-timeout}（等机器）。
+	 *
+	 * <p>与确认门键（{@code confirm-timeout}）<b>刻意分开</b>：两者等的对象不同（机器回执 vs 人的决策），
+	 * 延迟分布差一个数量级，共用一个键会使"人等得起的时长"被迫压成"机器回执的时长"（裁决③）。
+	 */
+	public int frontendToolTimeoutSeconds() {
+		Duration timeout = this.properties.getHitl().getFrontendToolTimeout();
 		return (int) Math.max(1, timeout.toSeconds());
 	}
 
@@ -180,11 +192,12 @@ public class ConfirmGate {
 	}
 
 	/**
-	 * 前端工具：阻塞等前端回灌结果。等待上限与确认门同用一个键
-	 * （{@code app.ai.hitl.timeout}）—— 规格 §4 只定义了这一个"挂起等待上限"键。
+	 * 前端工具：阻塞等前端回灌结果。等待上限 = {@code app.ai.hitl.frontend-tool-timeout}
+	 * （等机器，默认 120s），与确认门键（{@code confirm-timeout}，等人，默认 240s）<b>分场景</b>各自取值
+	 * —— 原单键 {@code app.ai.hitl.timeout} 同供三场景已按裁决③拆分。
 	 */
 	public PendingToolCall awaitFrontendResult(String runId, PendingToolCall pending) {
-		return await(runId, pending, confirmTimeoutSeconds(), false);
+		return await(runId, pending, frontendToolTimeoutSeconds(), false);
 	}
 
 	private PendingToolCall await(String runId, PendingToolCall pending, int timeoutSeconds, boolean confirm) {
@@ -495,7 +508,7 @@ public class ConfirmGate {
 	 * 用户主动放弃（关闭/取消表单）：与决策写入同一套次序（落库 → 发结局帧 → 唤醒）。
 	 *
 	 * <p>为什么要有这个终态：前端工具此前只有"回灌结果"与"超时/整轮取消"三个出口 ——
-	 * 用户关掉表单时前端<b>没有合法动作</b>，挂起只能悬到 {@code app.ai.hitl.timeout} 才由
+	 * 用户关掉表单时前端<b>没有合法动作</b>，挂起只能悬到 {@code app.ai.hitl.frontend-tool-timeout} 才由
 	 * {@code FRONTEND_TIMEOUT} 收摊。取消终态把"用户不打算填了"变成一次明确的、立刻的收敛
 	 * （且与"没人响应"的超时语义分开，排障时看得清）。
 	 */
