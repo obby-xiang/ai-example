@@ -1,0 +1,176 @@
+/**
+ * 对话时序包 批1（R-130 / R-132）：`restoreSuspendedSnapshot` 取数窗口的对账回归锁。
+ *
+ * 该 action 内部自带一个 await（`GET /api/ai/runs/current`），窗口内可能发生两种身份变更：
+ * ① 换会话（`resetSession`）—— 旧快照的挂起卡 / activeForm / activeRunId 不得写进新会话；
+ * ② 同会话起新轮（`currentAbort` 句柄被新连接替换）—— 旧快照一律不得写回，尤其不得用
+ *    旧快照 runId 覆盖在跑轮的 `activeRunId`（否则续收连接会 abort 掉在跑轮自己的连接）。
+ *
+ * 观测面说明：`currentAbort` 是 `stores/ai.ts` 的**模块级私有句柄**，测试无法直接读取，
+ * 故负例②以「最终 messages / activeRunId / suspended 未被旧快照污染」＋「未起旧快照的
+ * 续收连接（reattachRun 只被新轮自己调用）」作为等价观测面。
+ */
+import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { createPinia, setActivePinia } from 'pinia'
+import type { AiRunCurrent, ChatMessage } from '@/types/ai'
+
+const api = vi.hoisted(() => ({
+  history: vi.fn(),
+  runsCurrent: vi.fn(),
+  reattachRun: vi.fn(),
+  chat: vi.fn(),
+  cancel: vi.fn(),
+  deleteHistory: vi.fn(),
+  frontendToolResult: vi.fn(),
+  confirm: vi.fn()
+}))
+
+vi.mock('@/api/ai', () => ({ aiApi: api }))
+
+/** 手控 deferred：把 store 停在 runs/current 的 await 上，测试独占该窗口。 */
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((res) => {
+    resolve = res
+  })
+  return { promise, resolve }
+}
+
+/** 后端 runs/current 的"有一轮挂起等待"快照（单条 CONFIRM 待确认）。 */
+function suspendedSnapshot(overrides: Partial<AiRunCurrent> = {}): AiRunCurrent {
+  return {
+    found: true,
+    runId: 'run-old',
+    snapshotStatus: 'PENDING',
+    pendingEntries: [
+      { toolCallId: 't-old', entryStatus: 'PENDING', kind: 'CONFIRM', name: 'danger_tool', arguments: '{"x":1}' }
+    ],
+    unresolvedExternal: [],
+    awaitingExternal: true,
+    archiveMaxSeq: 7,
+    ...overrides
+  }
+}
+
+async function freshStore() {
+  // 模块级状态（currentAbort / mirrorStarted）随 resetModules 归零：每个用例从干净现场起跑
+  vi.resetModules()
+  const mod = await import('@/stores/ai')
+  return mod.useAiStore()
+}
+
+function pendingCallHosts(messages: ChatMessage[]): ChatMessage[] {
+  return messages.filter((message) => message.pendingCall !== null)
+}
+
+beforeEach(() => {
+  sessionStorage.clear()
+  setActivePinia(createPinia())
+  api.history.mockReset()
+  api.runsCurrent.mockReset()
+  api.reattachRun.mockReset()
+  api.chat.mockReset()
+  api.cancel.mockReset()
+  api.deleteHistory.mockReset()
+  // 连接保持"在跑"（永不结算）：不触发各轮 finally 里的轮次复位，句柄不被清空
+  api.reattachRun.mockImplementation(() => new Promise(() => {}))
+  api.chat.mockImplementation(() => new Promise(() => {}))
+  api.cancel.mockResolvedValue({})
+  api.deleteHistory.mockResolvedValue({})
+})
+
+describe('restoreSuspendedSnapshot 的 await 后二次对账', () => {
+  it('负例①：取数期间换会话（resetSession）→ 旧快照整体丢弃，不污染新会话', async () => {
+    const store = await freshStore()
+    store.sessionId = 'sess-a'
+    api.history.mockResolvedValue({ sessionId: 'sess-a', count: 0, messages: [] })
+    const gate = deferred<AiRunCurrent>()
+    api.runsCurrent.mockReturnValue(gate.promise)
+
+    const load = store.loadHistory()
+    // 取数用**入口捕获**的会话 id（意图显式化），而非写回时的 this.sessionId
+    await vi.waitFor(() => expect(api.runsCurrent).toHaveBeenCalledWith('sess-a'))
+
+    await store.resetSession() // 会话身份在 runs/current 未决期间被换掉
+    gate.resolve(suspendedSnapshot())
+    await load
+
+    expect(store.messages).toHaveLength(0)
+    expect(pendingCallHosts(store.messages)).toHaveLength(0)
+    expect(store.activeRunId).toBeNull()
+    expect(store.suspended).toBe(false)
+    expect(store.activeForm).toBeNull()
+    expect(api.reattachRun).not.toHaveBeenCalled()
+  })
+
+  it('负例②：取数期间同会话起新轮 → 旧快照写回被丢弃，在跑轮的 runId 与连接不被顶替', async () => {
+    const store = await freshStore()
+    store.sessionId = 'sess-b'
+    api.history.mockResolvedValue({ sessionId: 'sess-b', count: 0, messages: [] })
+    const gate = deferred<AiRunCurrent>()
+    api.runsCurrent.mockReturnValue(gate.promise)
+
+    const load = store.loadHistory()
+    await vi.waitFor(() => expect(api.runsCurrent).toHaveBeenCalledWith('sess-b'))
+
+    // 同会话起新轮：send() 同步换掉 currentAbort 句柄（新轮连接由 mock 保持在跑）
+    const round = store.send('新轮消息')
+    await vi.waitFor(() => expect(api.chat).toHaveBeenCalled())
+    store.activeRunId = 'run-live'
+
+    gate.resolve(suspendedSnapshot())
+    await load
+    await Promise.resolve()
+
+    expect(store.messages).toHaveLength(2) // 新轮自己的 user + assistant 两条
+    const assistant = store.messages[1]
+    expect(assistant?.pendingCall).toBeNull()
+    expect(assistant?.toolRuns).toHaveLength(0)
+    expect(assistant?.parts.every((part) => part.kind === 'text')).toBe(true)
+    expect(store.suspended).toBe(false)
+    expect(store.activeRunId).toBe('run-live') // 旧快照 runId 未覆盖在跑轮
+    // 等价观测面：旧快照的续收连接未起（否则 resumeSnapshotStream 会 abort 掉在跑轮自己的连接）
+    expect(api.reattachRun).not.toHaveBeenCalled()
+
+    void round // 新轮连接保持未决（本用例不需要它收尾）
+  })
+
+  it('正例：无干扰时挂起卡正常重建（快照口径不变）', async () => {
+    const store = await freshStore()
+    store.sessionId = 'sess-c'
+    api.history.mockResolvedValue({ sessionId: 'sess-c', count: 0, messages: [] })
+    api.runsCurrent.mockResolvedValue(suspendedSnapshot())
+
+    await store.loadHistory()
+
+    expect(store.messages).toHaveLength(1)
+    const host = store.messages[0]
+    expect(host?.role).toBe('assistant')
+    expect(host?.pendingCall).toMatchObject({
+      toolCallId: 't-old',
+      name: 'danger_tool',
+      kind: 'CONFIRM',
+      status: 'pending',
+      rawArgs: '{"x":1}'
+    })
+    expect(store.suspended).toBe(true)
+    expect(store.activeRunId).toBe('run-old')
+    // 双写：宿主消息上同步落 ToolPart（requiresAction 依帧为真）
+    expect(host?.toolRuns).toHaveLength(1)
+    expect(host?.parts.map((part) => part.kind)).toEqual(['text', 'tool'])
+    expect(host?.parts[1]).toMatchObject({
+      kind: 'tool',
+      seg: 1,
+      toolCallId: 't-old',
+      name: 'danger_tool',
+      kind2: 'CONFIRM',
+      status: 'pending',
+      args: '{"x":1}',
+      requiresAction: true
+    })
+    // 增量续收：lastSeq 取快照的 archiveMaxSeq
+    expect(api.reattachRun).toHaveBeenCalledTimes(1)
+    expect(api.reattachRun.mock.calls[0]?.[0]).toBe('run-old')
+    expect(api.reattachRun.mock.calls[0]?.[2]).toMatchObject({ lastSeq: 7 })
+  })
+})

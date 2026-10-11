@@ -158,9 +158,11 @@ export type RunDescription = Record<string, unknown>
  * 工具卡状态：
  * pending=待人确认或待前端执行，running=执行中，succeeded/failed=已结束，
  * rejected=人工拒绝，expired=会话已失效（后端历史为空，挂起态无法续跑），
- * blocked=被渐进披露防线③拦下（DC-14 T1：越 scope 的调用未执行 —— 与"执行失败"不是一回事）。
+ * blocked=被渐进披露防线③拦下（DC-14 T1：越 scope 的调用未执行 —— 与"执行失败"不是一回事），
+ * unknown=结局未知（未确认成功/失败；前端执行器超时等"无法判定成败"的收尾），
+ * cancelled=已取消（用户放弃 / 渲染器不可用 / 整轮取消）。
  */
-export type ToolRunStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'rejected' | 'expired' | 'blocked'
+export type ToolRunStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'rejected' | 'expired' | 'blocked' | 'unknown' | 'cancelled'
 
 /** 工具卡的一次执行记录（同一轮可多次工具调用）。 */
 export interface ToolRun {
@@ -185,6 +187,17 @@ export interface ChatMessage {
   /** DC-14 T5：服务端给的消息身份（message_start/end 与 delta 帧的 messageId） */
   messageId?: string
   content: string
+  /**
+   * 消息的**段序列**（对话时序包 批1 的双写旁路）：带顺序信息的判别联合 ——
+   * 文本段 / 思考段 / 工具段按真实时序交错，弥补 content + toolRuns + pendingCall 三字段
+   * 并列、字段间无顺序信息的缺口。
+   *
+   * 本批口径（过渡态，务必按此理解）：`parts` 是**旁路真值**，`content` / `toolRuns` /
+   * `pendingCall` 仍是**渲染真值**（面板不读 parts），两侧由写入侧双写保证逐字一致
+   * （视觉零变化）；权威翻转（渲染改读 parts）是后续批的事。因此任何写入旁路数据的调用点，
+   * 都必须同时按同一字面量写旧投影 —— 单侧写会立刻造成两侧漂移。
+   */
+  parts: MessagePart[]
   /** 思考链文本（当前后端不产 reasoning 帧，留字段供 b 棒按需填充） */
   reasoning: string
   toolRuns: ToolRun[]
@@ -194,6 +207,70 @@ export interface ChatMessage {
   streaming: boolean
   /** 已收到终帧 */
   done: boolean
+}
+
+/** 消息段序号：同一消息内单调递增（封口后另起的段不复用编号）。 */
+interface MessagePartBase {
+  seg: number
+}
+
+/** 正文段（一次连续输出；被工具段/思考段打断即封口，后续正文另起一段）。 */
+export interface TextPart extends MessagePartBase {
+  kind: 'text'
+  text: string
+  /** 该段是否仍在接收增量（封口后为 false） */
+  streaming: boolean
+}
+
+/** 思考段（reasoning 帧；后端当前不产出，照帧结构预留）。 */
+export interface ReasoningPart extends MessagePartBase {
+  kind: 'reasoning'
+  text: string
+  streaming: boolean
+}
+
+/**
+ * 工具段（一次工具调用的时序占位，字段与旧投影 `ToolRun` 对齐 + 挂起语义）。
+ * `kind2` 避开判别字段 `kind:'tool'` 的命名冲突，取值口径同 `ToolRun.kind`。
+ */
+export interface ToolPart extends MessagePartBase {
+  kind: 'tool'
+  toolCallId: string
+  name: string
+  kind2: ToolKind | 'UNKNOWN'
+  status: ToolRunStatus
+  /** 入参 JSON 字符串（原样展示，可折叠） */
+  args?: string
+  /** 结果文本摘要 */
+  result?: string | null
+  /** 拒绝原因 / 失败原因 */
+  reason?: string | null
+  /** DC-14 T5：结果铸为消息后的消息 id（`tool-<toolCallId>`） */
+  messageId?: string
+  /** 该工具段当前是否在等人工/前端动作（确认门待放行、前端工具待执行） */
+  requiresAction: boolean
+}
+
+/** 消息段判别联合（按 `kind` 判别）。 */
+export type MessagePart = TextPart | ReasoningPart | ToolPart
+
+/**
+ * `upsertToolPart` 的补丁口径：前三项定位与建立段所需，其余为可选就地更新字段。
+ * 字段名与 `ToolRun` 同名，便于"同一帧同时写两侧"时逐字段对齐。
+ *
+ * `status` 可选：**只更新**语义的调用点（如 suspended 帧，它不写 toolRuns 投影）不提供 status，
+ * 就地合并时保留段上原值 —— 若给成新值就会与同帧没被改写的旧投影对不上。
+ */
+export interface ToolPartPatch {
+  toolCallId: string
+  name: string
+  kind2: ToolKind | 'UNKNOWN'
+  requiresAction: boolean
+  status?: ToolRunStatus
+  args?: string
+  result?: string | null
+  reason?: string | null
+  messageId?: string
 }
 
 /** 展示态的挂起调用（由 SSE 帧聚合而来）。 */
@@ -227,13 +304,28 @@ export interface PendingToolCall {
   status: 'pending' | 'running' | 'approved' | 'rejected' | 'expired' | 'cancelled' | 'succeeded' | 'blocked'
 }
 
-/** 页签级会话镜像（sessionStorage）写入形态。 */
+/**
+ * 页签级会话镜像（sessionStorage）写入形态。
+ *
+ * 版本（`v`，对话时序包 批1 起）：当前为 {@link MIRROR_VERSION}。旧镜像（缺 `v` 或 `v < 2`）
+ * 由读取侧 `migrateMirror` 迁移出 `parts` 后立即回写；写入侧一律带 `v` 与 `parts`
+ * （双写口径：`content` 与 text 段并存 —— 旧字段仍是渲染真值，parts 是旁路真值）。
+ */
 export interface AiSessionMirror {
+  /** 镜像结构版本（缺省 = v1 旧镜像，需迁移） */
+  v?: number
   savedAt: number
-  messages: Array<Pick<ChatMessage, 'id' | 'role' | 'content' | 'reasoning' | 'toolRuns' | 'pendingCall'>>
+  messages: Array<Pick<ChatMessage, 'id' | 'role' | 'content' | 'parts' | 'reasoning' | 'toolRuns' | 'pendingCall'>>
   /** 已结束轮的 runId（供 reattach 提示） */
   lastRunId?: string | null
 }
+
+/**
+ * 当前镜像结构版本：
+ * - v1（隐式）：只有 `content` / `toolRuns` / `pendingCall`，无 `parts`；
+ * - v2（对话时序包 批1）：新增 `parts` 段序列双写。
+ */
+export const MIRROR_VERSION = 2
 
 /** 生成式表单（generative_form）的会话态生命周期。 */
 export type GenerativeFormStatus = 'filling' | 'submitting' | 'submitted' | 'cancelled'

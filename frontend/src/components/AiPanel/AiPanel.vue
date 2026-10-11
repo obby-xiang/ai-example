@@ -522,7 +522,14 @@ function toolTagType(status: ToolRunStatus): 'info' | 'warning' | 'success' | 'd
     case 'blocked':
       return 'warning'
     case 'expired':
+    // 对话时序包 批1：取消终态与"会话已失效"同族（info）—— 都不是执行成功/失败，
+    // 只是这一轮没走完（用户取消 / 渲染器不可用 / 整轮取消）
+    case 'cancelled':
       return 'info'
+    case 'unknown':
+      // 对话时序包 批1：结局未知（未确认成功/失败，如前端执行器超时）—— 提示级 warning，
+      // 与"执行失败/已拒绝"同色的待人工判断，不落 danger
+      return 'warning'
     default:
       return 'primary'
   }
@@ -537,7 +544,11 @@ function toolStatusLabel(status: ToolRunStatus): string {
     rejected: '已拒绝',
     // DC-14 T1：越出当前披露范围（防线③），工具未执行
     blocked: '超出当前范围',
-    expired: '会话已失效'
+    expired: '会话已失效',
+    // 对话时序包 批1：取消终态（用户放弃 / 渲染器不可用 / 整轮取消）
+    cancelled: '已取消',
+    // 对话时序包 批1：结局未知 —— 未确认成功/失败，需人工再确认
+    unknown: '结局未知（未确认成功/失败）'
   }
   return labels[status]
 }
