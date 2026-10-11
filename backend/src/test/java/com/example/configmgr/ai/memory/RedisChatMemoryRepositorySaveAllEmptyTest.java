@@ -86,6 +86,12 @@ class RedisChatMemoryRepositorySaveAllEmptyTest {
 
 	// ── 真 Redis 行为实证（本机 Memurai 127.0.0.1:6379；不可用时跳过，不算失败） ──
 
+	// 端点默认同本机 Memurai（127.0.0.1:6379）；可被系统属性覆盖（-Dtest.redis.host / -Dtest.redis.port），
+	// 使"Redis 不可达"可被实测复现（CI 后端 job 即无 services.redis）。
+	private static final String REDIS_HOST = System.getProperty("test.redis.host", "127.0.0.1");
+
+	private static final int REDIS_PORT = Integer.parseInt(System.getProperty("test.redis.port", "6379"));
+
 	private LettuceConnectionFactory connectionFactory;
 
 	private StringRedisTemplate template;
@@ -95,19 +101,32 @@ class RedisChatMemoryRepositorySaveAllEmptyTest {
 	@AfterEach
 	void cleanup() {
 		if (this.template != null) {
-			this.template.delete("chat:mem:" + this.conversationId);
-			this.template.opsForSet().remove(IDS_KEY, this.conversationId);
+			try {
+				this.template.delete("chat:mem:" + this.conversationId);
+				this.template.opsForSet().remove(IDS_KEY, this.conversationId);
+			} catch (Exception ignore) {
+				// 不可达态：用例已被 assumeTrue 跳过，清理同样无从执行 —— 不得因此把 SKIP 变成 ERROR
+			}
 			this.connectionFactory.destroy();
 		}
 	}
 
 	@Test
 	void emptySaveAllOnRealRedisRemovesDataAndIndex() {
-		this.connectionFactory = new LettuceConnectionFactory("127.0.0.1", 6379);
+		this.connectionFactory = new LettuceConnectionFactory(REDIS_HOST, REDIS_PORT);
 		this.connectionFactory.afterPropertiesSet();
 		this.template = new StringRedisTemplate(this.connectionFactory);
-		String pong = this.template.getConnectionFactory().getConnection().ping();
-		Assumptions.assumeTrue("PONG".equalsIgnoreCase(pong), "本机 Redis 不可达（ping=" + pong + "），跳过真 Redis 实证");
+		// 探活必须先于任何 Redis 调用：不可达时 ping() 直接抛 RedisConnectionFailureException
+		// （非返回非 PONG 字符串），若把 assumeTrue 放在抛点之后则守卫永不生效 ——
+		// 无 Redis 环境下该用例是 ERROR 而非 SKIP（CI 后端 job 实测红因）。
+		boolean reachable;
+		try {
+			reachable = "PONG".equalsIgnoreCase(this.template.getConnectionFactory().getConnection().ping());
+		} catch (Exception e) {
+			reachable = false;
+		}
+		Assumptions.assumeTrue(reachable,
+				"Redis 不可达（" + REDIS_HOST + ":" + REDIS_PORT + "），跳过真 Redis 实证");
 
 		RedisChatMemoryRepository repository = new RedisChatMemoryRepository(this.template,
 				new MessageJsonCodec(new ObjectMapper()), Duration.ofHours(6));
