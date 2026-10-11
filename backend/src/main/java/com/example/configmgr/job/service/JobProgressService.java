@@ -45,18 +45,28 @@ public class JobProgressService {
     private final JobRepository jobRepository;
     private final JobItemRepository jobItemRepository;
     private final TransactionTemplate requiresNew;
+    private final JobHeartbeatRegistry heartbeatRegistry;
 
     public JobProgressService(JobRepository jobRepository,
                               JobItemRepository jobItemRepository,
-                              PlatformTransactionManager transactionManager) {
+                              PlatformTransactionManager transactionManager,
+                              JobHeartbeatRegistry heartbeatRegistry) {
         this.jobRepository = jobRepository;
         this.jobItemRepository = jobItemRepository;
         this.requiresNew = new TransactionTemplate(transactionManager);
         this.requiresNew.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        this.heartbeatRegistry = heartbeatRegistry;
     }
 
-    /** 作业开工：状态 RUNNING + startedAt（独立事务，快照立刻可见）。 */
+    /**
+     * 作业开工：状态 RUNNING + startedAt（独立事务，快照立刻可见）。
+     *
+     * <p>心跳（R-96 批 B）：三个写方法入口各续期一次 {@link JobHeartbeatRegistry} 心跳
+     * （<b>REQUIRES_NEW 事务外</b>，纯内存无 I/O），覆盖全部四个 Runner 的分片边界节拍，
+     * 供 {@link JobWatchdog} 按「心跳 ×3 判死」收敛失联作业。
+     */
     public void markRunning(Long jobId, int totalRows) {
+        heartbeatRegistry.beat(jobId);
         requiresNew.executeWithoutResult(status -> jobRepository.findById(jobId).ifPresent(job -> {
             if (job.getStatus() != Job.JobStatus.PENDING) {
                 // 已被取消（或已是终态）：开工写入退让，避免把取消态改回运行态
@@ -72,21 +82,52 @@ public class JobProgressService {
 
     /** 分片边界：回写行级 processed/total（独立事务，只写这两列）。 */
     public void snapshot(Long jobId, int processed, int total) {
+        heartbeatRegistry.beat(jobId);
         requiresNew.executeWithoutResult(status -> jobRepository.updateProgress(jobId, processed, total));
     }
 
-    /** 作业终态：状态 + 计数 + 行级进度（独立事务）。 */
+    /**
+     * 作业终态：状态 + 计数 + 行级进度（独立事务）。
+     *
+     * <p>终态守卫（R-96 批 B 收口修，红队 M2/m2）：仅当作业当前仍为 PENDING/RUNNING 才写入
+     * （与 {@link #markRunning} 的守卫同姿态）。本批引入的看门狗是第二个并发 finish 调用方，
+     * 判死 FAILED 与作业自然完成 COMPLETED 之间存在 TOCTOU 窗口 —— 守卫保证先到者胜、
+     * 后到者不覆盖（被判死的慢作业也不再自我覆盖回 CANCELLED）；
+     * 终态作业再被 finish 调用 = 静默忽略（debug 留痕）。
+     *
+     * <p>写入成功后清理 {@link JobHeartbeatRegistry} 条目（红队 m1）：自然完成的作业同样清，
+     * 登记簿不随历史作业无界增长。
+     *
+     * <p>被守卫拦下的调用同样清理（终审微补丁 F1b，红队 m1 残余）：入口的无条件 beat 会把
+     * 已终态作业的条目重新塞回登记簿，该路径若不清则条目永无人清理（终态作业不再有
+     * 后续分片边界 beat，其唯一清理点是本方法）—— 作业已是终态，清理语义与写入成功路径一致。
+     */
     public void finish(Long jobId, Job.JobStatus jobStatus, int errorCount, int warningCount,
                        int processed, int total) {
-        requiresNew.executeWithoutResult(status -> jobRepository.findById(jobId).ifPresent(job -> {
-            job.setStatus(jobStatus);
-            job.setErrorCount(errorCount);
-            job.setWarningCount(warningCount);
-            job.setProgress(processed);
-            job.setTotal(total);
-            job.setFinishedAt(LocalDateTime.now());
-            jobRepository.save(job);
-        }));
+        heartbeatRegistry.beat(jobId);
+        boolean wroteTerminal = Boolean.TRUE.equals(requiresNew.execute(status -> jobRepository.findById(jobId)
+                .map(job -> {
+                    if (job.getStatus() != Job.JobStatus.PENDING && job.getStatus() != Job.JobStatus.RUNNING) {
+                        return false;
+                    }
+                    job.setStatus(jobStatus);
+                    job.setErrorCount(errorCount);
+                    job.setWarningCount(warningCount);
+                    job.setProgress(processed);
+                    job.setTotal(total);
+                    job.setFinishedAt(LocalDateTime.now());
+                    jobRepository.save(job);
+                    return true;
+                })
+                .orElse(false)));
+        if (!wroteTerminal) {
+            log.debug("作业 #{} 已收终态，忽略本次 finish({}) 调用（先到者胜，后到者不覆盖）",
+                    jobId, jobStatus);
+            // 终审微补丁 F1b：入口 beat 已把条目写回登记簿，被拦路径必须同清（否则无清理点）
+            heartbeatRegistry.clear(jobId);
+            return;
+        }
+        heartbeatRegistry.clear(jobId);
     }
 
     // ── 作业条目（job_items）：同一独立事务口径，供详情抽屉逐配置项实时进度 ──────────

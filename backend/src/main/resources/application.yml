@@ -204,6 +204,24 @@ app:
   job:
     demo-batch-delay-ms: 300
     batch-size: 100
+    # ── 作业看门狗（R-96 批 B 新建，用户裁决 Q1~Q6，2026-10-11）────────────────
+    # heartbeat-interval：作业心跳间隔（分片边界续期，生产口径不含 demo 装饰节拍）。
+    #   依据 = 业界依据 §12「心跳 30–60s」下沿（K8s 缺省 periodSeconds 10s ×
+    #   failureThreshold 3 ≈ 30s 同量级；裁决 Q4 取 30s ⇒ 判死窗 90s）。
+    # watchdog.scan-period：看门狗扫描周期 10s（业界依据 §12 的「1 分钟扫表」对本项目
+    #   极小表规模偏保守）；判死最坏发现延迟 = 判死窗 + 一个扫描周期 ≈ 100s，
+    #   E2E Wait-Job 窗口 120s = 90s + 10s + 20s 余量由此派生（总账 S-10）。
+    # watchdog.dead-multiplier：判死倍数 3 —— K8s failureThreshold 缺省 3 /
+    #   TIBCO「约 3.5×心跳」（业界依据 §12；裁决 Q4）。
+    # max-execution-time：作业绝对上限 30m —— Hangfire InvisibilityTimeout 官方缺省
+    #   30min、§12 推荐 30–60min 下沿（裁决 Q3；demo-batch-delay-ms 装饰节拍不计入）。
+    # 启动期 fail-fast（AppProperties#verifyJobWatchdogKeys）：四项必须 > 0 且
+    #   heartbeat-interval × dead-multiplier < max-execution-time。
+    heartbeat-interval: 30s
+    watchdog:
+      scan-period: 10s
+      dead-multiplier: 3
+    max-execution-time: 30m
   file:
     storage-path: ./data/files
 

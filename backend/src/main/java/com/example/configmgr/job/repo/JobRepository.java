@@ -25,6 +25,9 @@ public interface JobRepository extends JpaRepository<Job, Long> {
 
     List<Job> findByTaskId(Long taskId);
 
+    /** 在途作业（看门狗扫描面，R-96 批 B）：只取指定状态，不 findAll() 全表。 */
+    List<Job> findByStatusIn(Collection<Job.JobStatus> statuses);
+
     @Modifying
     @Query("DELETE FROM Job j WHERE j.taskId = :taskId")
     void deleteByTaskId(@Param("taskId") Long taskId);

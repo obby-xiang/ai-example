@@ -37,7 +37,7 @@ import java.util.*;
  * <li>已存在行：更新字段值、<b>保留行 id</b>、版本递增（{@code OPTIMISTIC_FORCE_INCREMENT} 原语义）；</li>
  * <li>新业务键行：插入，版本从 1 起；</li>
  * <li>范围差集删除：本次导入覆盖范围内、未出现在导入数据中的旧 PUBLISHED 行删除
- *     （按导入模式执行，见 {@link #isReplaceMode}；MERGE 为纯增量 upsert）；</li>
+ *     （按导入模式执行，见 {@link #resolveImportMode}；MERGE 为纯增量 upsert）；</li>
  * <li>baseVersion 快照比对：导入时记快照，发布前比对当前版本，不一致 → 行级 issue + 作业 FAILED，
  *     文案沿用基座"发布冲突：行 X 在导入后被其他操作修改（快照版本 n，当前版本 m），请重新导入后再发布"；</li>
  * <li>事务边界：整个发布（upsert + 差集删除 + 暂存/任务状态推进）在<b>单个事务</b>内完成 —— 见 {@link #run}。</li>
@@ -76,12 +76,16 @@ public class PublishJobRunner {
     private final TransactionTemplate transactionTemplate;
     private final JobProgressService progressService;
     private final JobTerminalWriter terminalWriter;
+    private final JobHeartbeatRegistry heartbeatRegistry;
 
     /** 发布入口：作业状态在数据面事务外编排（RUNNING 独立事务 + 失败补记 + 终态）。 */
     public void run(Job job) {
         progressService.markRunning(job.getId(), 0);
 
         PublishOutcome outcome = null;
+        // 慢临界段，红队 M1/C2：整个发布数据面事务（REPLACE 差集删除 + upsert，单事务无分片心跳）
+        // 可能远超 90s 判死窗 —— hold 豁免心跳判死，finally 释放（幂等）；30min 绝对上限不受影响
+        heartbeatRegistry.hold(job.getId());
         try {
             outcome = transactionTemplate.execute(status -> doPublish(job));
         } catch (RuntimeException e) {
@@ -90,6 +94,8 @@ public class PublishJobRunner {
                     job.getId(), defCode, e.getMessage(), e);
             recordFailure(job, defCode, e);
             return;
+        } finally {
+            heartbeatRegistry.release(job.getId());
         }
 
         PublishOutcome finalOutcome = outcome != null ? outcome : new PublishOutcome(false, 0, 0, 0);
@@ -117,8 +123,16 @@ public class PublishJobRunner {
 
         issueRepository.deleteByJobId(jobId);
 
-        // 导入模式：MERGE=增量合并（纯 upsert）；REPLACE=范围内替换（范围内未被本次导入覆盖的旧行删除）
-        boolean replaceMode = isReplaceMode(taskId);
+        // 导入模式：MERGE=增量合并（纯 upsert）；REPLACE=范围内替换（范围内未被本次导入覆盖的旧行删除）。
+        // W-04 fail-fast（R-96 批 B）：settings_json 是坏 JSON ⇒ UNPARSEABLE，此处抛异常走整批回滚 +
+        // 作业 FAILED + 作业级 issue（recordFailure 的 defCode=null 哨兵 "-" 路径）；
+        // 「未配置」回落 MERGE 是正常语义，不在此列。
+        ImportMode importMode = resolveImportMode(taskId);
+        if (importMode == ImportMode.UNPARSEABLE) {
+            throw new IllegalStateException("任务导入模式 settings_json 解析失败（importMode 不可读）"
+                    + "——不静默降级 REPLACE→MERGE（W-04 fail-fast，R-96 批 B）");
+        }
+        boolean replaceMode = importMode == ImportMode.REPLACE;
 
         boolean cancelled = false;
         int totalErrors = 0;
@@ -306,19 +320,42 @@ public class PublishJobRunner {
                         "status", Job.JobStatus.FAILED, "errors", errors));
     }
 
-    private boolean isReplaceMode(Long taskId) {
+    /**
+     * 导入模式三态（W-04，R-96 批 B）：REPLACE=整体替换 / MERGE=增量合并 /
+     * UNPARSEABLE=settings_json 解析失败（脏数据显式化，不静默降级 REPLACE→MERGE）。
+     */
+    private enum ImportMode { REPLACE, MERGE, UNPARSEABLE }
+
+    /**
+     * 任务导入模式解析（三态）：
+     * <ul>
+     * <li>{@code settings_json == null/blank} ⇒ {@link ImportMode#MERGE}
+     *     （未配置 ⇒ 回落 MERGE 是<b>正常语义</b>，不可 fail-fast）；</li>
+     * <li>{@code importMode == "REPLACE"}（忽略大小写）⇒ {@link ImportMode#REPLACE}；
+     *     其余值（含 {@code "MERGE"}）⇒ {@link ImportMode#MERGE}；</li>
+     * <li>settings 不可解析 ⇒ {@link ImportMode#UNPARSEABLE}，由调用方（{@link #doPublish}）
+     *     抛异常走整批回滚 + 作业 FAILED + 作业级 issue（用户/AI 明确选的"整体替换"
+     *     不得静默降级为"增量合并"）。</li>
+     * </ul>
+     * 任务行不存在 ⇒ MERGE（与旧行为一致）。
+     */
+    private ImportMode resolveImportMode(Long taskId) {
         return taskRepository.findById(taskId)
                 .map(t -> {
                     String settings = t.getSettingsJson();
-                    if (settings == null || settings.isBlank()) return false;
+                    if (settings == null || settings.isBlank()) {
+                        return ImportMode.MERGE;
+                    }
                     try {
                         return "REPLACE".equalsIgnoreCase(
-                                objectMapper.readTree(settings).path("importMode").asText("MERGE"));
+                                objectMapper.readTree(settings).path("importMode").asText("MERGE"))
+                                ? ImportMode.REPLACE
+                                : ImportMode.MERGE;
                     } catch (Exception e) {
-                        return false;
+                        return ImportMode.UNPARSEABLE;
                     }
                 })
-                .orElse(false);
+                .orElse(ImportMode.MERGE);
     }
 
     /** 行级进度事件：与 {@link JobProgressService#snapshot} 同一对数字，并携当前处理项（④ 纯增量字段）。 */

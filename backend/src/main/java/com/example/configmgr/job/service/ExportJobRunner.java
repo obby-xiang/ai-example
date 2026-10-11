@@ -4,6 +4,7 @@ import com.example.configmgr.config.AppProperties;
 import com.example.configmgr.data.entity.ConfigDataRow;
 import com.example.configmgr.data.repo.ConfigDataRowRepository;
 import com.example.configmgr.data.service.ConditionEvaluator;
+import com.example.configmgr.data.service.ConfigDataService;
 import com.example.configmgr.data.service.QueryCondition;
 import com.example.configmgr.definition.entity.ConfigDefinition;
 import com.example.configmgr.definition.service.DefinitionService;
@@ -53,6 +54,8 @@ public class ExportJobRunner {
     private final JobProgressService progressService;
     private final JobTerminalWriter terminalWriter;
     private final ValidationIssueRepository issueRepository;
+    private final ConfigDataService configDataService;
+    private final JobHeartbeatRegistry heartbeatRegistry;
 
     /**
      * 作业级 issue 的 {@code def_code} 哨兵值（{@code validation_issues.def_code} 为 NOT NULL，
@@ -110,57 +113,69 @@ public class ExportJobRunner {
 
                 try {
                     ConfigDefinition def = definitionService.findByCode(defCode);
-                    QueryCondition cond = parseCondition(item.getConditionJson());
-                    // M1 收尾守卫③：操作符白名单在此早失败（即便本次一行都没扫到），
-                    // 由下面的 catch 转成"该配置项 FAILED + 作业 FAILED"，绝不产出"更宽"的导出件
-                    ConditionEvaluator.validate(cond);
+                    // W-03 fail-fast（R-96 批 B）：条件解析统一走数据面同义的
+                    // ConfigDataService#parseCondition —— 解析失败抛 IllegalArgumentException、
+                    // 未知操作符在其内的 ConditionEvaluator.validate 早失败（与 /api/data/** 的 400
+                    // 同一口径），由下面 catch 转成"该配置项 FAILED + 作业 FAILED"，
+                    // 绝不静默放宽为全量导出（原私有 parseCondition 吞异常 return null 是病灶本体）。
+                    QueryCondition cond = configDataService.parseCondition(item.getConditionJson());
 
-                    // Load all rows matching condition（范围过滤 + 字段级过滤统一由 ConditionEvaluator 处理）
-                    List<ConfigDataRow> allRows = dataRowRepository.findByDefCodeOrderByRowKey(defCode);
-                    defTotal = allRows.size();
-                    discoveredRows += defTotal;
-                    totalRows = JobProgressTotals.denominator(estimatedRows, discoveredRows,
-                            items.size() - startedItems);
-                    progressService.updateItem(itemId, 0, defTotal);
-                    progressService.snapshot(jobId, processedRows, totalRows);
-
+                    // 慢临界段（红队 M1/C2，终审微补丁 F2b）：起点上移到本配置项重活区段开头 ——
+                    // 全表载入 + 逐行过滤 + 单配置项大 sheet 写整段都无分片边界可续期心跳，大配置项
+                    // 任一段都可能远超 90s 判死窗 —— hold 覆盖「载入→过滤→finishItem/snapshot→写」，
+                    // finally 释放（幂等）；区段内的 snapshot/finishItem 是快 DB 写，被 hold 覆盖无副作用。
+                    // 30min 绝对上限不受影响，泄漏也有上限兜底；项级 catch 在更外层，异常语义不变。
+                    String storagePath = fileStorage.newPath(".xlsx");
                     List<Map<String, Object>> filtered = new ArrayList<>();
-                    for (ConfigDataRow r : allRows) {
-                        rowsSeen++;
-                        Map<String, Object> data = objectMapper.readValue(r.getDataJson(), new TypeReference<>() {});
-                        if (!ConditionEvaluator.matches(data, cond)) {
-                            continue;
-                        }
-                        filtered.add(data);
-                        // Demo delay per batch
-                        if (filtered.size() % appProperties.getJob().getBatchSize() == 0) {
-                            Thread.sleep(appProperties.getJob().getDemoBatchDelayMs());
-                            processedRows = finishedDefRows + rowsSeen;
-                            // ⑤ 先落库再推送：快照与事件同一对数字
-                            progressService.updateItem(itemId, rowsSeen, defTotal);
-                            progressService.snapshot(jobId, processedRows, totalRows);
-                            publishProgress(job, def, processedRows, totalRows);
-                            if (cancellationRegistry.isCancelled(jobId)) {
-                                cancelled = true;
-                                progressService.finishItem(itemId, "CANCELLED", rowsSeen, defTotal);
-                                break;
+                    heartbeatRegistry.hold(jobId);
+                    try {
+                        // Load all rows matching condition（范围过滤 + 字段级过滤统一由 ConditionEvaluator 处理）
+                        List<ConfigDataRow> allRows = dataRowRepository.findByDefCodeOrderByRowKey(defCode);
+                        defTotal = allRows.size();
+                        discoveredRows += defTotal;
+                        totalRows = JobProgressTotals.denominator(estimatedRows, discoveredRows,
+                                items.size() - startedItems);
+                        progressService.updateItem(itemId, 0, defTotal);
+                        progressService.snapshot(jobId, processedRows, totalRows);
+
+                        for (ConfigDataRow r : allRows) {
+                            rowsSeen++;
+                            Map<String, Object> data = objectMapper.readValue(r.getDataJson(), new TypeReference<>() {});
+                            if (!ConditionEvaluator.matches(data, cond)) {
+                                continue;
+                            }
+                            filtered.add(data);
+                            // Demo delay per batch
+                            if (filtered.size() % appProperties.getJob().getBatchSize() == 0) {
+                                Thread.sleep(appProperties.getJob().getDemoBatchDelayMs());
+                                processedRows = finishedDefRows + rowsSeen;
+                                // ⑤ 先落库再推送：快照与事件同一对数字
+                                progressService.updateItem(itemId, rowsSeen, defTotal);
+                                progressService.snapshot(jobId, processedRows, totalRows);
+                                publishProgress(job, def, processedRows, totalRows);
+                                if (cancellationRegistry.isCancelled(jobId)) {
+                                    cancelled = true;
+                                    progressService.finishItem(itemId, "CANCELLED", rowsSeen, defTotal);
+                                    break;
+                                }
                             }
                         }
+                        if (cancelled) break;
+
+                        // 本配置项扫描完毕（无论命中多少行）
+                        rowsSeen = defTotal;
+                        processedRows = finishedDefRows + rowsSeen;
+                        finishedDefRows += defTotal;
+                        totalRows = JobProgressTotals.denominator(estimatedRows, discoveredRows,
+                                items.size() - startedItems);
+                        progressService.finishItem(itemId, "COMPLETED", defTotal, defTotal);
+                        progressService.snapshot(jobId, processedRows, totalRows);
+
+                        // Write Excel（本慢临界段的尾段）
+                        excelWriter.write(def, filtered, storagePath);
+                    } finally {
+                        heartbeatRegistry.release(jobId);
                     }
-                    if (cancelled) break;
-
-                    // 本配置项扫描完毕（无论命中多少行）
-                    rowsSeen = defTotal;
-                    processedRows = finishedDefRows + rowsSeen;
-                    finishedDefRows += defTotal;
-                    totalRows = JobProgressTotals.denominator(estimatedRows, discoveredRows,
-                            items.size() - startedItems);
-                    progressService.finishItem(itemId, "COMPLETED", defTotal, defTotal);
-                    progressService.snapshot(jobId, processedRows, totalRows);
-
-                    // Write Excel
-                    String storagePath = fileStorage.newPath(".xlsx");
-                    excelWriter.write(def, filtered, storagePath);
 
                     // Save TaskFile
                     Optional<TaskFile> existing = taskFileRepository
@@ -257,14 +272,5 @@ public class ExportJobRunner {
                 "jobId", job.getId(), "jobType", job.getJobType(), "defCode", def.getCode(),
                 "currentItem", def.getCode(), "currentItemName", def.getName(),
                 "processed", processed, "total", total, "pct", pct));
-    }
-
-    private QueryCondition parseCondition(String json) {
-        if (json == null || json.isBlank()) return null;
-        try {
-            return objectMapper.readValue(json, QueryCondition.class);
-        } catch (Exception e) {
-            return null;
-        }
     }
 }

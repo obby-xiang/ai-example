@@ -19,6 +19,7 @@ import com.example.configmgr.ai.run.StartupResumeRunner;
 import com.example.configmgr.ai.session.SessionGate;
 import com.example.configmgr.ai.tool.FrontendToolGuard;
 import com.example.configmgr.common.ApiResponse;
+import com.example.configmgr.job.service.JobWatchdog;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.memory.ChatMemory;
@@ -119,13 +120,15 @@ public class AiController {
 
 	private final Environment environment;
 
+	private final JobWatchdog jobWatchdog;
+
 	public AiController(AiAvailability availability, ObjectProvider<ResilientChatService> chatService,
 			ObjectProvider<ResumeService> resumeService, ObjectProvider<StartupResumeRunner> startupResumeRunner,
 			ChatMemory chatMemory, ChatMemoryRepository chatMemoryRepository, SessionGate sessionGate,
 			ConfirmGate confirmGate, RunStore runStore, RunRegistry runRegistry, CancellationRegistry cancellations,
 			RedisAvailability redisAvailability,
 			@Qualifier("aiRunExecutor") ThreadPoolTaskExecutor aiRunExecutor, ObjectMapper objectMapper,
-			AiProperties properties, Environment environment) {
+			AiProperties properties, Environment environment, JobWatchdog jobWatchdog) {
 		this.availability = availability;
 		this.chatService = chatService;
 		this.resumeService = resumeService;
@@ -142,6 +145,7 @@ public class AiController {
 		this.objectMapper = objectMapper;
 		this.properties = properties;
 		this.environment = environment;
+		this.jobWatchdog = jobWatchdog;
 	}
 
 	// ── 一轮对话 ────────────────────────────────────────────────────────────
@@ -650,6 +654,9 @@ public class AiController {
 				"redisPolls", this.cancellations.polls(), "degraded", this.cancellations.degraded()));
 		body.put("instanceId", this.runStore.instanceId());
 		body.put("checkedAt", Instant.now().toString());
+		// 作业看门狗观测面（R-96 批 B，Q1）：tracked / judgedDeadTotal / judgedTimeoutTotal / lastScanAt，
+		// 与上面 AI 通道的投递池指标同一姿态 —— 作业侧失联/超时收敛在 /health 可观测。
+		body.put("jobWatchdog", this.jobWatchdog.metrics());
 		if (!this.availability.isAvailable()) {
 			body.put("message", this.availability.reason());
 			return json(HttpStatus.SERVICE_UNAVAILABLE, body);

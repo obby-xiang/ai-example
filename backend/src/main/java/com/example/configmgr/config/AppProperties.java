@@ -3,10 +3,12 @@ package com.example.configmgr.config;
 import com.example.configmgr.common.sse.SseWriteBudget;
 import jakarta.annotation.PostConstruct;
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.convert.DurationUnit;
 import org.springframework.stereotype.Component;
 import lombok.Data;
 
 import java.time.Duration;
+import java.time.temporal.ChronoUnit;
 
 /**
  * 基座业务配置（{@code app.*}）。
@@ -76,10 +78,111 @@ public class AppProperties {
         }
     }
 
+    /**
+     * 启动期校验作业看门狗四键（R-96 批 B，Q3/Q4 裁决）：{@code app.job.heartbeat-interval} /
+     * {@code app.job.watchdog.scan-period} / {@code app.job.watchdog.dead-multiplier} /
+     * {@code app.job.max-execution-time} 必须<b>均为正</b>，且满足上限关系
+     * {@code heartbeat-interval × dead-multiplier < max-execution-time}
+     * （判死窗必须显著小于绝对上限，否则所有作业都会在"心跳失联"之前先被判超时，
+     * dead-multiplier 形同虚设）。
+     *
+     * <p>
+     * 与 {@link #verifyTaskSseEmitterTimeout()} 同姿态、同失败面：{@code ConfigurationProperties}
+     * 绑定先于 {@code @PostConstruct}，读的是绑定后的值；0/负值没有"性能降级"的解释空间 ——
+     * 心跳间隔为 0 等于"每个分片边界都失联"，绝对上限为 0 等于"一切作业立刻判超时" ——
+     * 故<b>fail-fast</b>（{@link IllegalStateException}），不让配置面与运行面说两套话。
+     */
+    @PostConstruct
+    void verifyJobWatchdogKeys() {
+        Duration heartbeatInterval = this.job.getHeartbeatInterval();
+        Duration scanPeriod = this.job.getWatchdog().getScanPeriod();
+        int deadMultiplier = this.job.getWatchdog().getDeadMultiplier();
+        Duration maxExecutionTime = this.job.getMaxExecutionTime();
+        if (heartbeatInterval == null || heartbeatInterval.isZero() || heartbeatInterval.isNegative()) {
+            throw new IllegalStateException("app.job.heartbeat-interval 必须 > 0（当前 = " + heartbeatInterval
+                    + "）：非正值会让作业在第一个分片边界就被看门狗判死");
+        }
+        if (scanPeriod == null || scanPeriod.isZero() || scanPeriod.isNegative()) {
+            throw new IllegalStateException("app.job.watchdog.scan-period 必须 > 0（当前 = " + scanPeriod
+                    + "）：非正值等于关闭看门狗扫描，运行期作业失联无任何收敛手段");
+        }
+        if (deadMultiplier <= 0) {
+            throw new IllegalStateException("app.job.watchdog.dead-multiplier 必须 > 0（当前 = " + deadMultiplier
+                    + "）：非正值会让任何一次心跳间隔即判死，正常作业被误杀");
+        }
+        if (maxExecutionTime == null || maxExecutionTime.isZero() || maxExecutionTime.isNegative()) {
+            throw new IllegalStateException("app.job.max-execution-time 必须 > 0（当前 = " + maxExecutionTime
+                    + "）：非正值等于一切作业立刻判超时，作业体系不可用");
+        }
+        Duration deadWindow;
+        try {
+            deadWindow = heartbeatInterval.multipliedBy(deadMultiplier);
+        } catch (ArithmeticException ex) {
+            // 溢出守卫（收口修，红队 m6）：极大家 × dead-multiplier 溢出时统一 fail-fast 面
+            // （IllegalStateException 含当前值回显），不让裸 ArithmeticException 逃出启动校验
+            throw new IllegalStateException("app.job 看门狗配置溢出：heartbeat-interval(" + heartbeatInterval
+                    + ") × dead-multiplier(" + deadMultiplier + ") 超出 Duration 可表示范围（当前值见前），"
+                    + "请调小 app.job.heartbeat-interval 或 app.job.watchdog.dead-multiplier", ex);
+        }
+        if (deadWindow.compareTo(maxExecutionTime) >= 0) {
+            throw new IllegalStateException("app.job 看门狗上限关系不成立：heartbeat-interval(" + heartbeatInterval
+                    + ") × dead-multiplier(" + deadMultiplier + ") = " + deadWindow
+                    + " 必须 < max-execution-time(" + maxExecutionTime + ")"
+                    + "（判死窗必须显著小于绝对上限，否则 dead-multiplier 形同虚设）");
+        }
+    }
+
     @Data
     public static class Job {
         private int demoBatchDelayMs = 300;
         private int batchSize = 100;
+
+        /**
+         * 作业心跳间隔（{@code app.job.heartbeat-interval}，缺省 30s）：作业执行器在
+         * {@link com.example.configmgr.job.service.JobProgressService} 的每个分片边界续期一次。
+         * 取值依据 = 业界依据 §12「心跳 30–60s」下沿（K8s 缺省 periodSeconds 10s × failureThreshold 3
+         * ≈ 30s 同量级；裁决 Q4 取 30s，判死窗 90s）。
+         *
+         * <p>{@code @DurationUnit(SECONDS)}（收口修，红队 m3）：裸数字按<b>秒</b>解释
+         * （{@code heartbeat-interval: 30} = 30s），不带后缀的运维覆盖不会退化成毫秒级误杀；
+         * 带后缀写法（{@code 30s} / {@code 500ms}）行为不变。
+         */
+        @DurationUnit(ChronoUnit.SECONDS)
+        private Duration heartbeatInterval = Duration.ofSeconds(30);
+
+        /** 看门狗配置（{@code app.job.watchdog.*}）；判死最坏发现延迟 = 阈值 + 一个扫描周期。 */
+        private Watchdog watchdog = new Watchdog();
+
+        /**
+         * 作业绝对上限（{@code app.job.max-execution-time}，缺省 30m）：到点即判超时 FAILED。
+         * 取值依据 = Hangfire {@code InvisibilityTimeout} 官方缺省 30min、业界依据 §12 推荐 30–60min
+         * 下沿（裁决 Q3）；{@code demo-batch-delay-ms} 装饰节拍不计入（生产口径）。
+         *
+         * <p>{@code @DurationUnit(SECONDS)}（收口修，红队 m3）：裸数字按<b>秒</b>解释。
+         */
+        @DurationUnit(ChronoUnit.SECONDS)
+        private Duration maxExecutionTime = Duration.ofMinutes(30);
+
+        @Data
+        public static class Watchdog {
+            /**
+             * 扫描周期（{@code app.job.watchdog.scan-period}，缺省 10s）：看门狗每周期扫一遍
+             * PENDING/RUNNING 作业。判死窗 90s 需可被 E2E/前端在秒级观测（业界依据 §12 的
+             * 「1 分钟扫表」对本项目极小表规模偏保守；E2E {@code Wait-Job} 窗口 120s =
+             * 90s + 10s + 20s 余量由此派生）。
+             *
+             * <p>{@code @DurationUnit(SECONDS)}（收口修，红队 m3）：裸数字按<b>秒</b>解释。
+             */
+            @DurationUnit(ChronoUnit.SECONDS)
+            private Duration scanPeriod = Duration.ofSeconds(10);
+
+            /**
+             * 判死倍数（{@code app.job.watchdog.dead-multiplier}，缺省 3）：失联超过
+             * {@code heartbeat-interval × dead-multiplier} 判死。取值依据 = K8s
+             * {@code failureThreshold} 缺省 3 / TIBCO「约 3.5×心跳」（业界依据 §12；裁决 Q4）。
+             */
+            private int deadMultiplier = 3;
+        }
     }
 
     @Data
