@@ -8,6 +8,8 @@ import java.util.Set;
 import org.springframework.ai.chat.memory.ChatMemoryRepository;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
+import org.springframework.data.redis.core.script.RedisScript;
 
 /**
  * 基于 Spring Data Redis 普通数据结构实现的官方 {@link ChatMemoryRepository} SPI 扩展（SP-01c）。
@@ -42,17 +44,34 @@ import org.springframework.data.redis.core.StringRedisTemplate;
  * 与官方 2.0 实现 {@code saveAll}（内部 clear + add）的"整窗口覆盖写"语义一致；
  * 每次写入刷新 TTL，即滑动过期。</li>
  * <li>{@link #findByConversationId} = {@code LRANGE 0 -1} + 反序列化。</li>
- * <li>{@link #deleteByConversationId} = {@code DEL} + 索引 {@code SREM}。</li>
+ * <li>{@link #deleteByConversationId} 单次 Lua 脚本原子完成 {@code DEL} + 索引 {@code SREM}
+ * （消除崩溃窗口与并发交错失配）。</li>
  * </ul>
  *
  * <h2>已知未覆盖（见决策卡）</h2>
- * 无跨实例互斥：同一 conversationId 的并发写是"最后写入者胜"，未做乐观锁 / 分布式锁。
+ * <ul>
+ * <li>无跨实例互斥：同一 conversationId 的并发写是"最后写入者胜"，未做乐观锁 / 分布式锁。</li>
+ * <li><b>Redis Cluster 约束</b>：{@link #deleteByConversationId} 的 Lua 脚本涉及两个不同 key
+ * （数据键与 {@code chat:mem:__ids__}），Cluster 模式下多 key 脚本要求所有 key 落在同一 hash slot
+ * （需 hash tag 改造）。本仓为单实例部署，迁移 Cluster 前必须处理。</li>
+ * </ul>
  */
 public class RedisChatMemoryRepository implements ChatMemoryRepository {
 
 	public static final String KEY_PREFIX = "chat:mem:";
 
 	static final String CONVERSATION_IDS_KEY = "chat:mem:__ids__";
+
+	/**
+	 * 会话记忆删除脚本：{@code DEL} 数据键 + {@code SREM} 会话 id 索引，一次往返原子完成。
+	 *
+	 * <p>拆成两次往返时，两步之间崩溃会留下 stale 索引成员，并发 {@link #saveAll} 的
+	 * {@code SADD} 插在中间又会被迟到的 {@code SREM} 抹掉 —— 两条都源于非原子。
+	 */
+	private static final RedisScript<Long> DELETE_WITH_INDEX = new DefaultRedisScript<>(
+			"local removed = redis.call('DEL', KEYS[1]) " + "redis.call('SREM', KEYS[2], ARGV[1]) "
+					+ "return removed",
+			Long.class);
 
 	private final StringRedisTemplate redis;
 
@@ -143,8 +162,7 @@ public class RedisChatMemoryRepository implements ChatMemoryRepository {
 
 	@Override
 	public void deleteByConversationId(String conversationId) {
-		this.redis.delete(key(conversationId));
-		this.redis.opsForSet().remove(CONVERSATION_IDS_KEY, conversationId);
+		this.redis.execute(DELETE_WITH_INDEX, List.of(key(conversationId), CONVERSATION_IDS_KEY), conversationId);
 	}
 
 	private void applyTtl(String redisKey) {
