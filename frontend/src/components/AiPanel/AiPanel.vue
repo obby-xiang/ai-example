@@ -203,7 +203,6 @@
                   <el-icon color="#409EFF"><Operation /></el-icon>
                   <span>{{ toolLabel(m.pendingCall.name) }}</span>
                   <el-tag v-if="m.pendingCall.kind === 'CONFIRM'" size="small" type="warning">需确认</el-tag>
-                  <el-tag v-else size="small" type="success">自动</el-tag>
                   <el-tag v-if="m.pendingCall.status === 'expired'" size="small" type="info">会话已失效</el-tag>
                 </div>
                 <div v-if="argsText(m.pendingCall.args)" class="mt-1.5 text-xs text-[#909399] break-all">
@@ -246,12 +245,10 @@
                     @cancel="onFormCancel"
                   />
                   <div v-else class="flex flex-col items-end gap-1">
-                    <!-- T2a-D#2：帧终态由 pendingCall 投影承载（含刷新后镜像里的终态残留），按终态展示 -->
-                    <el-tag v-if="m.pendingCall.status === 'cancelled'" data-testid="tag-form-cancelled" size="small" type="info">表单已取消</el-tag>
-                    <el-tag v-else-if="m.pendingCall.status === 'succeeded'" size="small" type="success">表单已提交</el-tag>
-                    <el-tag v-else-if="m.pendingCall.status === 'expired'" size="small" type="info">会话已失效</el-tag>
-                    <el-tag v-else-if="m.pendingCall.status === 'rejected' || m.pendingCall.status === 'blocked'" size="small" type="warning">表单未提交</el-tag>
-                    <el-tag v-else-if="ai.activeForm?.status === 'cancelled'" size="small" type="info">表单已取消</el-tag>
+                    <!-- 批3③b D2（R-139③）：帧终态 tag 分支（原 :250-253）在 D8 关旁路后为不可达
+                         死码，删除；活分支只剩 activeForm 提交窗口（:254-256，排除项）。链头由
+                         v-else-if 收拢为 v-if（不得留悬空 v-else-if）。 -->
+                    <el-tag v-if="ai.activeForm?.status === 'cancelled'" size="small" type="info">表单已取消</el-tag>
                     <el-tag v-else-if="ai.activeForm?.status === 'submitted'" size="small" type="success">表单已提交，等待回执</el-tag>
                     <el-tag v-else size="small" type="info">表单状态已丢失（刷新后无法续填），等待后端超时收敛</el-tag>
                     <!-- 红队问题 5：取消回灌失败的提示在 cancelled 态下也要可见 -->
@@ -261,29 +258,10 @@
                   </div>
                 </div>
 
-                <div v-else-if="m.pendingCall.kind === 'FRONTEND'" class="mt-2 flex justify-end">
-                  <el-tag v-if="m.pendingCall.status === 'pending'" size="small" type="info">待浏览器自动执行</el-tag>
-                  <el-tag v-else-if="m.pendingCall.status === 'running'" size="small" type="success" effect="dark">执行中…</el-tag>
-                  <el-tag v-else-if="m.pendingCall.status === 'rejected'" size="small" type="info">已拒绝</el-tag>
-                  <el-tag v-else-if="m.pendingCall.status === 'expired'" size="small" type="info">会话已失效</el-tag>
-                  <el-tag v-else-if="m.pendingCall.status === 'cancelled'" size="small" type="info">已取消</el-tag>
-                  <!-- T2a 返修（S6）：新增 status 显式给口径 —— blocked 是"越 scope 未执行"，
-                       不得落 else 的"已执行"（与 generative_form 分支的 rejected||blocked 口径对齐） -->
-                  <el-tag v-else-if="m.pendingCall.status === 'succeeded'" size="small" type="success">已执行</el-tag>
-                  <el-tag v-else-if="m.pendingCall.status === 'blocked'" size="small" type="warning">未执行（超出范围）</el-tag>
-                  <!-- T2b 顺手项②（GLM 复核 F1）：approved 显式分支，原落 else"已执行"；
-                       当前无 FRONTEND+approved 写入路径，属口径修正防未来误标 -->
-                  <el-tag v-else-if="m.pendingCall.status === 'approved'" size="small" type="success">已放行</el-tag>
-                  <el-tag v-else size="small" type="success">已执行</el-tag>
-                </div>
-
-                <div v-else class="mt-2 flex justify-end">
-                  <el-tag v-if="m.pendingCall.status === 'running'" size="small" type="success" effect="dark">执行中…</el-tag>
-                  <el-tag v-else-if="m.pendingCall.status === 'approved'" size="small" type="success">已放行</el-tag>
-                  <el-tag v-else-if="m.pendingCall.status === 'rejected'" size="small" type="warning">已拒绝</el-tag>
-                  <el-tag v-else-if="m.pendingCall.status === 'expired'" size="small" type="info">会话已失效</el-tag>
-                  <el-tag v-else size="small" type="danger">执行失败</el-tag>
-                </div>
+                <!-- 批3③b D2（R-139③）：通用 FRONTEND 终态 tag 列（原 :264-277）与 CONFIRM 终态 tag 列
+                     （原 :280-286）在 D8 关旁路后均不可达（终态段 requiresAction=false ⇒ pendingCall
+                     为 null ⇒ 挂起卡整块不渲染），按 §5 清单整列删除；排除项 :213-232（CONFIRM 待决
+                     确认按钮，restoreSuspendedSnapshot 重建路可达）与 :254-256（GF 提交窗口）保留。 -->
               </div>
             </template>
           </template>

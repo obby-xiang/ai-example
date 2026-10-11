@@ -18,7 +18,8 @@ const api = vi.hoisted(() => ({
   health: vi.fn(),
   history: vi.fn(),
   runsCurrent: vi.fn(),
-  frontendToolResult: vi.fn()
+  frontendToolResult: vi.fn(),
+  reattachRun: vi.fn()
 }))
 
 vi.mock('@/api/ai', () => ({ aiApi: api }))
@@ -40,6 +41,7 @@ beforeEach(() => {
   api.health.mockReset()
   api.history.mockReset()
   api.runsCurrent.mockReset()
+  api.reattachRun.mockReset()
   api.health.mockResolvedValue({ available: true, code: 'OK', model: 'm', baseUrl: 'b', memoryBackend: 'redis', sessionTtl: '1h', confirmTimeoutSeconds: 120, frontendToolTimeoutSeconds: 120, suspendPoolSize: 4, activeSuspendGates: 0, heldSessions: 0, sessionLockRenewals: 0, resumeOnStartup: false, instanceId: 'i', checkedAt: '2026-01-01T00:00:00Z' })
 })
 
@@ -139,6 +141,103 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转）', () => {
     expect(wrapper.findAll('.typing')).toHaveLength(1)
     // 工具段已到、正文还没来时三点仍在（与批1 的 content 判据同语义）
     expect(wrapper.text()).toContain('正在说')
+    wrapper.unmount()
+  })
+})
+
+/**
+ * 对话时序包 批3③b（D6/D7/D8）：「同一 toolCallId 全局唯一一张卡」渲染面三路锁。
+ * 计数口径：pending-card-*（挂起卡）+ 全消息域同 id 工具段数 —— **锁单卡，不锁状态正确**
+ * （历史整替路的 succeeded 是 D7(B) 登记的占位失真，R-144 修复前不得以状态断言此路）。
+ */
+describe('批3③b：一卡全生命周期 —— 重投 / 新宿主 / 历史整替 三路单卡锁', () => {
+  /** 带一个已决（unknown）FRONTEND 工具段的旧消息。 */
+  function messageWithDecidedTool(): ChatMessage {
+    return buildMessage([
+      { kind: 'text', seg: 0, text: '上一轮正文', streaming: false },
+      {
+        kind: 'tool', seg: 1, toolCallId: 'r1', name: 'probe.tool', kind2: 'FRONTEND',
+        status: 'unknown', args: '{}', result: '本次调用结局未知', reason: null, requiresAction: false
+      }
+    ])
+  }
+
+  it('重投路：已决段重投 frontend_tool_request ⇒ 无挂起卡复活、同 id 仍只有旧卡一张', async () => {
+    const store = useAiStore()
+    const old = messageWithDecidedTool()
+    store.messages = [old]
+    store.historyLoaded = true
+    const { default: AiPanel } = await import('@/components/AiPanel/AiPanel.vue')
+    const wrapper = mount(AiPanel, { global: { stubs } })
+    await wrapper.vm.$nextTick()
+
+    store.handleFrame({
+      type: 'frontend_tool_request', toolCallId: 'r1', name: 'probe.tool', args: '{}',
+      timeoutSeconds: 120, runId: 'run-1', seq: 2
+    }, old.id)
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.findAll('[data-testid^="pending-card-"]')).toHaveLength(0)
+    const segments = store.messages.flatMap((m) => m.parts.filter((p) => p.kind === 'tool' && p.toolCallId === 'r1'))
+    expect(segments).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('新宿主路：re-attach 回放（挂起语义帧 + 终态帧）⇒ 全消息域仍只有旧卡一张（D6 已决面）', async () => {
+    const store = useAiStore()
+    store.messages = [messageWithDecidedTool()]
+    store.historyLoaded = true
+    api.reattachRun.mockImplementation((_runId: string, options: { onFrame: (frame: never) => void }) => {
+      // 全量回放现场：request / suspended / 终态帧都到达新宿主
+      options.onFrame({
+        type: 'frontend_tool_request', toolCallId: 'r1', name: 'probe.tool', args: '{}',
+        timeoutSeconds: 120, runId: 'run-x', seq: 11
+      } as never)
+      options.onFrame({
+        type: 'suspended', runId: 'run-x', seq: 12,
+        toolCalls: [{ toolCallId: 'r1', name: 'probe.tool', type: 'function', kind: 'FRONTEND', arguments: '{}', status: 'PENDING', executed: false }]
+      } as never)
+      options.onFrame({
+        type: 'frontend_tool_result', toolCallId: 'r1', name: 'probe.tool',
+        ok: true, executed: true, status: 'FRONTEND_RESULT', result: 'ok', runId: 'run-x', seq: 13
+      } as never)
+      return new Promise(() => {})
+    })
+
+    void store.reattachActive('run-x')
+    const wrapper = await mountPanel(store.messages)
+
+    expect(wrapper.findAll('[data-testid^="pending-card-"]')).toHaveLength(0)
+    const segments = store.messages.flatMap((m) => m.parts.filter((p) => p.kind === 'tool' && p.toolCallId === 'r1'))
+    expect(segments).toHaveLength(1)
+    expect(segments[0]).toMatchObject({ status: 'unknown' })
+    wrapper.unmount()
+  })
+
+  it('历史整替路（§6(c) 口径）：整替后同 id 单卡、无挂起卡 —— 锁单卡不锁状态', async () => {
+    const store = useAiStore()
+    api.history.mockResolvedValue({
+      sessionId: store.sessionId,
+      count: 1,
+      messages: [
+        {
+          type: 'ASSISTANT',
+          text: '历史正文',
+          toolCalls: [{ id: 'h1', name: 'probe.tool', arguments: '{}' }],
+          toolResponses: [],
+          timestamp: '2026-01-01T00:00:00Z'
+        }
+      ]
+    })
+    api.runsCurrent.mockResolvedValue({ found: false, runId: null, snapshotStatus: null, pendingEntries: [], unresolvedExternal: [], awaitingExternal: false, archiveMaxSeq: 0 })
+
+    await store.loadHistory()
+    const wrapper = await mountPanel(store.messages)
+
+    // D7(B)：h1 的 succeeded 是载荷缺状态的占位值（R-144 承接）——本锁只数卡数
+    expect(wrapper.findAll('[data-testid^="pending-card-"]')).toHaveLength(0)
+    const segments = store.messages.flatMap((m) => m.parts.filter((p) => p.kind === 'tool' && p.toolCallId === 'h1'))
+    expect(segments).toHaveLength(1)
     wrapper.unmount()
   })
 })

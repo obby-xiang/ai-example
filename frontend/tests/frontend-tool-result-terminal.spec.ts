@@ -21,8 +21,8 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import type { AiRunCurrent, ChatMessage, ToolPart, ToolRunStatus } from '@/types/ai'
-import { applyFrameToParts, deriveProjections, upsertToolPart } from '@/utils/parts'
-import { useAiStore } from '@/stores/ai'
+import { applyFrameToParts, deriveProjections, frontendResultStatus, upsertToolPart } from '@/utils/parts'
+import { frameStatusToPendingStatus, useAiStore } from '@/stores/ai'
 
 const api = vi.hoisted(() => ({
   history: vi.fn(),
@@ -35,7 +35,14 @@ const api = vi.hoisted(() => ({
   confirm: vi.fn()
 }))
 
+// 批3③b D8/D10：执行器调用计数与晚到结算由本桩接管（其余导出保持真实 —— parseToolArgs 等）。
+const frontendTools = vi.hoisted(() => ({ executeFrontendTool: vi.fn() }))
+
 vi.mock('@/api/ai', () => ({ aiApi: api }))
+vi.mock('@/utils/frontend-tools', async (importOriginal) => ({
+  ...(await importOriginal<object>()) as object,
+  executeFrontendTool: frontendTools.executeFrontendTool
+}))
 
 beforeEach(() => {
   sessionStorage.clear()
@@ -48,6 +55,9 @@ beforeEach(() => {
   api.deleteHistory.mockReset()
   api.frontendToolResult.mockReset()
   api.confirm.mockReset()
+  // 批3③b D8/D10：执行器默认立即成功结算（各用例可自行 mockImplementation 接管）
+  frontendTools.executeFrontendTool.mockReset()
+  frontendTools.executeFrontendTool.mockResolvedValue({ ok: true, outcome: 'ok', availability: 'available', result: '执行完成' })
   // 续收连接保持"在跑"（永不结算）：不触发各轮 finally 里的轮次复位
   api.reattachRun.mockImplementation(() => new Promise(() => {}))
   api.chat.mockImplementation(() => new Promise(() => {}))
@@ -430,5 +440,227 @@ describe('批3③a T3：hasDecidedPendingResidue 对 unknown / failed 段的拦�
     store.messages.push(withUnknown, withFailed)
     expect(store.hasDecidedPendingResidue('u1')).toBe(true)
     expect(store.hasDecidedPendingResidue('f1')).toBe(true)
+  })
+})
+
+/**
+ * 对话时序包 批3③b D8（R-141③）：挂起语义帧的"已决不重投"闸 —— 守卫去 GF 前缀、
+ * 扩到全部工具（confirm_request / frontend_tool_request / suspended 各 case 内），
+ * 判据统一 7 态（isFrameDecidedPendingStatus，含 unknown / failed）。
+ * 终态帧 case 不入本闸（③a E17 回归锁不破）；已决面的"跨宿主段重建"由 D6(B) 店级守卫承接
+ * （见 ai-panel-parts-render.spec.ts 新宿主路渲染锁）。
+ */
+describe('批3③b D8：已决 toolCallId 的重投帧闸（R-141③，通用 FRONTEND 工具重投不重执行）', () => {
+  it('frontend_tool_request 重投（已决 succeeded）：执行器不被二次调用、段不被改回 pending', async () => {
+    const store = useAiStore()
+    store.handleFrame({ type: 'start', runId: 'run-1', sessionId: store.sessionId, seq: 1 })
+    const assistant = store.appendAssistantMessage()
+    store.handleFrame({
+      type: 'frontend_tool_request', toolCallId: 'r1', name: 'probe.tool', args: '{}',
+      timeoutSeconds: 120, runId: 'run-1', seq: 2
+    })
+    await vi.waitFor(() => expect(frontendTools.executeFrontendTool).toHaveBeenCalledTimes(1))
+    expect(soleToolPart(assistant)).toMatchObject({ status: 'succeeded', requiresAction: false })
+
+    // 重投（新 seq）：已决守卫必须拦截 —— 不二次执行、终态不被改写、挂起语义不复活
+    store.handleFrame({
+      type: 'frontend_tool_request', toolCallId: 'r1', name: 'probe.tool', args: '{}',
+      timeoutSeconds: 120, runId: 'run-1', seq: 3
+    })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(frontendTools.executeFrontendTool).toHaveBeenCalledTimes(1)
+    expect(soleToolPart(assistant)).toMatchObject({ status: 'succeeded', requiresAction: false })
+    expect(assistant.pendingCall).toBeNull()
+  })
+
+  it('frontend_tool_request 重投（已决 unknown，③a 新引入面的已知代价）：同拦', async () => {
+    const store = useAiStore()
+    const assistant = store.appendAssistantMessage()
+    upsertToolPart(assistant, {
+      toolCallId: 'u1', name: 'probe.tool', kind2: 'FRONTEND', status: 'unknown',
+      result: '本次调用结局未知', requiresAction: false
+    })
+    deriveProjections(assistant)
+
+    store.handleFrame({
+      type: 'frontend_tool_request', toolCallId: 'u1', name: 'probe.tool', args: '{}',
+      timeoutSeconds: 120, runId: 'run-1', seq: 2
+    })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(frontendTools.executeFrontendTool).not.toHaveBeenCalled()
+    expect(soleToolPart(assistant)).toMatchObject({ status: 'unknown', requiresAction: false })
+    expect(assistant.pendingCall).toBeNull()
+  })
+
+  it('suspended 重投：遍历 toolCalls[] 判已决（failed 段），requiresAction 不复活', () => {
+    const store = useAiStore()
+    const assistant = store.appendAssistantMessage()
+    upsertToolPart(assistant, {
+      toolCallId: 'f1', name: 'probe.tool', kind2: 'FRONTEND', status: 'failed', requiresAction: false
+    })
+    deriveProjections(assistant)
+
+    // rogue 面（R-141③ 行尾注记 / DS Pro O-5）：failed + requiresAction=true 经 suspended 支
+    // ⇒ pendingStatusOf 折 pending 复活挂起卡 —— 闸拦后该旁路不可达
+    store.handleFrame({
+      type: 'suspended',
+      runId: 'run-1',
+      seq: 2,
+      toolCalls: [{ toolCallId: 'f1', name: 'probe.tool', type: 'function', kind: 'FRONTEND', arguments: '{}', status: 'PENDING', executed: false }]
+    })
+    expect(soleToolPart(assistant)).toMatchObject({ status: 'failed', requiresAction: false })
+    expect(assistant.pendingCall).toBeNull()
+  })
+
+  it('confirm_request 重投（已决 cancelled）：不复活挂起卡', () => {
+    const store = useAiStore()
+    const assistant = store.appendAssistantMessage()
+    upsertToolPart(assistant, {
+      toolCallId: 'c1', name: 'danger_tool', kind2: 'CONFIRM', status: 'cancelled', requiresAction: false
+    })
+    deriveProjections(assistant)
+
+    store.handleFrame({
+      type: 'confirm_request', toolCallId: 'c1', name: 'danger_tool',
+      args: '{}', timeoutSeconds: 120, seq: 2
+    })
+    expect(soleToolPart(assistant)).toMatchObject({ status: 'cancelled', requiresAction: false })
+    expect(assistant.pendingCall).toBeNull()
+  })
+
+  it('GF 回归锁（去 GF 前缀后既有行为不变）：已决 GF toolCallId 重投不重新武装 activeForm', () => {
+    const store = useAiStore()
+    const assistant = armGenerativeForm(store, 'g1')
+    store.handleFrame({
+      type: 'frontend_tool_result', toolCallId: 'g1', name: 'generative_form',
+      ok: false, executed: false, status: 'FRONTEND_CANCELLED', result: '用户取消了该前端操作', seq: 3
+    })
+    expect(soleToolPart(assistant)).toMatchObject({ status: 'cancelled', requiresAction: false })
+    expect(store.activeForm).toBeNull()
+
+    // 重投 request 帧：守卫仍拦（前缀去掉后 GF 路径口径不变）
+    store.handleFrame({
+      type: 'frontend_tool_request', toolCallId: 'g1', name: 'generative_form',
+      args: JSON.stringify({ form: { scenario: 'demo', fields: [{ key: 'k', label: 'K', type: 'text' }] } }),
+      timeoutSeconds: 120, runId: 'run-1', seq: 4
+    })
+    expect(store.activeForm).toBeNull()
+    expect(soleToolPart(assistant)).toMatchObject({ status: 'cancelled', requiresAction: false })
+  })
+
+  it('收窄面：未决 toolCallId 的首轮 frontend_tool_request 照常执行（闸不误拦）', async () => {
+    const store = useAiStore()
+    store.handleFrame({ type: 'start', runId: 'run-1', sessionId: store.sessionId, seq: 1 })
+    const assistant = store.appendAssistantMessage()
+    store.handleFrame({
+      type: 'frontend_tool_request', toolCallId: 'n1', name: 'probe.tool', args: '{}',
+      timeoutSeconds: 120, runId: 'run-1', seq: 2
+    })
+    await vi.waitFor(() => expect(frontendTools.executeFrontendTool).toHaveBeenCalledTimes(1))
+    expect(soleToolPart(assistant)).toMatchObject({ status: 'succeeded', requiresAction: false })
+  })
+})
+
+/** 批3③b D10（R-142）：stop()/换轮后在途执行器晚到 —— 段写与回灌丢弃（入口捕获轮次句柄）。 */
+describe('批3③b D10：轮次失配丢弃（stop 后在途 executeFrontendTool 不写段、不回灌）', () => {
+  it('执行器晚于轮次句柄替换返回 ⇒ 段不被终态覆盖、回灌 POST 不发', async () => {
+    const store = useAiStore()
+    store.handleFrame({ type: 'start', runId: 'run-1', sessionId: store.sessionId, seq: 1 })
+    const assistant = store.appendAssistantMessage()
+    let resolveExecution!: (value: unknown) => void
+    frontendTools.executeFrontendTool.mockImplementation(() => new Promise((resolve) => {
+      resolveExecution = resolve
+    }))
+    store.handleFrame({
+      type: 'frontend_tool_request', toolCallId: 'r1', name: 'probe.tool', args: '{}',
+      timeoutSeconds: 120, runId: 'run-1', seq: 2
+    })
+    // 开跑落 running 属正常（校验点只在 await 返回之后）
+    await vi.waitFor(() => expect(soleToolPart(assistant).status).toBe('running'))
+
+    // 轮次句柄被替换（重挂/新轮同口径；stop() 触发的本轮 finally 复位同效）：
+    // 执行器从此是"旧轮在途" —— reattachActive 的首个 await 之前同步完成换句柄
+    void store.reattachActive('run-2')
+
+    resolveExecution({ ok: true, outcome: 'ok', availability: 'available', result: '晚到的旧轮结果' })
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    const seg = assistant.parts.find((part) => part.kind === 'tool' && part.toolCallId === 'r1')
+    expect(seg).toMatchObject({ status: 'running' })
+    expect(api.frontendToolResult).not.toHaveBeenCalled()
+  })
+})
+
+/** 批3③b D12（R-143③）：assertUnknownTerminalInvariant 补 import.meta.env.DEV 门（口径如实）。 */
+describe('批3③b D12：X1 dev 断言的 DEV 门', () => {
+  it('DEV=false（生产形态）：违例段不 console.error，投影行为不变（挂起卡仍被跳过）', () => {
+    vi.stubEnv('DEV', false)
+    const message = makeMessage()
+    upsertToolPart(message, {
+      toolCallId: 'r1', name: 'probe.tool', kind2: 'FRONTEND', status: 'unknown', requiresAction: true
+    })
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    deriveProjections(message)
+    expect(message.pendingCall).toBeNull()
+    expect(message.toolRuns[0]).toMatchObject({ toolCallId: 'r1', status: 'unknown' })
+    expect(spy).not.toHaveBeenCalled()
+    spy.mockRestore()
+    vi.unstubAllEnvs()
+  })
+})
+
+/**
+ * 批3③b D9（R-141④）：两翻译表 / 两终态枚举的防漂移一致性锁。
+ * 唯一真实分叉 = SUCCEEDED（仅帧路表收录；响应体表不翻译 ⇒ null），显式登记。
+ */
+describe('批3③b D9：两表 / 两枚举防漂移一致性锁', () => {
+  it('两枚举成员集合一致（7 态）：段侧 localTerminal == store 侧 isFrameDecidedPendingStatus', () => {
+    const CANDIDATES: ToolRunStatus[] = ['pending', 'running', 'succeeded', 'rejected', 'blocked', 'expired', 'cancelled', 'unknown', 'failed']
+    // 段侧 localTerminal（parts.ts）行为枚举：已终态段 first-wins 不被 FRONTEND_RESULT 翻写
+    const partSide = CANDIDATES.filter((status) => {
+      const message = messageWithToolPart('r1', status)
+      applyFrameToParts(message, resultFrame({ ok: true, status: 'FRONTEND_RESULT' }))
+      return soleToolPart(message).status === status
+    })
+    // store 侧 isFrameDecidedPendingStatus（ai.ts）行为枚举：经公开的 hasDecidedPendingResidue
+    const store = useAiStore()
+    const storeSide = CANDIDATES.filter((status) => {
+      const message = makeMessage()
+      upsertToolPart(message, {
+        toolCallId: `probe-${status}`, name: 'probe.tool', kind2: 'FRONTEND', status, requiresAction: false
+      })
+      store.messages.push(message)
+      return store.hasDecidedPendingResidue(`probe-${status}`)
+    })
+    expect(partSide).toHaveLength(7)
+    expect(storeSide).toHaveLength(7)
+    expect([...partSide].sort()).toEqual([...storeSide].sort())
+  })
+
+  it('两翻译表逐一对账 + 唯一真实分叉 SUCCEEDED 显式登记（CANCELLED 依据注释实存，两表同收 cancelled）', () => {
+    const SHARED: Array<[string, ToolRunStatus]> = [
+      ['FRONTEND_RESULT', 'succeeded'],
+      ['FRONTEND_CANCELLED', 'cancelled'],
+      ['CANCELLED', 'cancelled'],
+      ['TIMEOUT', 'expired'],
+      ['REJECTED_ARGUMENTS', 'rejected'],
+      ['REJECTED', 'rejected'],
+      ['BLOCKED', 'blocked']
+    ]
+    for (const [frameStatus, expected] of SHARED) {
+      const message = messageWithToolPart('r1', 'running')
+      applyFrameToParts(message, resultFrame({ ok: expected === 'succeeded', status: frameStatus }))
+      expect(soleToolPart(message).status).toBe(expected)
+      expect(frontendResultStatus(frameStatus)).toBe(expected)
+      expect(frameStatusToPendingStatus(frameStatus)).toBe(expected)
+    }
+    // 唯一真实分叉（R-141④ 台账误述订正后剩下的全部差异）：
+    // 帧路表收录 SUCCEEDED（ConfirmGate#cancel 竞态带出的已决值同形映射）；响应体表不翻译。
+    expect(frontendResultStatus('SUCCEEDED')).toBe('succeeded')
+    expect(frameStatusToPendingStatus('SUCCEEDED')).toBeNull()
   })
 })

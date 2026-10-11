@@ -84,8 +84,8 @@ export function findToolPart(message: ChatMessage, toolCallId: string): ToolPart
  * （按 toolCallId 就地 spread 合并，不产生重复段）。
  *
  * 新建时先**封口末尾的流式段**（工具调用之后到达的正文属于新的一段，seg 单调递增）；
- * `createIfMissing=false` = 只更新语义（suspended 帧不写旧投影时用，避免凭空多出一段
- * 只有 parts 有的卡）。status 省略时保留段上原值，理由见 {@link ToolPartPatch}。
+ * `createIfMissing=false` = 只更新语义（段已存在才写；③b D5 起 suspended 帧不再用此形态），
+ * status 省略时保留段上原值，理由见 {@link ToolPartPatch}。
  */
 export function upsertToolPart(message: ChatMessage, patch: ToolPartPatch, createIfMissing = true): void {
   const index = message.parts.findIndex((part) => part.kind === 'tool' && part.toolCallId === patch.toolCallId)
@@ -130,8 +130,14 @@ function pendingStatusOf(status: ToolRunStatus): PendingToolCall['status'] {
  * 批3③a X1 dev 断言：`unknown` 段与 `requiresAction === false` 互锁。
  * 违例（unknown + requiresAction=true，只能来自镜像迁移或未来写点的缺陷）在此留痕，
  * 但**不阻断**投影 —— 挂起卡被 deriveProjections 跳过，工具卡仍如实显示 unknown。
+ *
+ * 批3③b D12（R-143③）：补 `import.meta.env.DEV` 门 —— 本断言是 dev 诊断口径，生产不留痕。
+ * vitest 环境 DEV=true ⇒ ③a 既有测试锁行为不变（守卫 + 测试锁双保护不因此削弱）。
  */
 function assertUnknownTerminalInvariant(part: ToolPart): void {
+  if (!import.meta.env.DEV) {
+    return
+  }
   console.error(
     `[批3③a X1] unknown 工具段不允许 requiresAction=true（toolCallId=${part.toolCallId}），`
     + '挂起投影已忽略该段'
@@ -228,8 +234,20 @@ export function deriveProjections(message: ChatMessage): void {
  * "发帧不受 PENDING 守卫"的竞态（条目已被他端落定时会带出已决状态）。
  *
  * 返回 null = 帧未给可翻译终态（status 缺失/未知），由调用方按 ok 兜底。
+ *
+ * 导出仅为批3③b D9 防漂移一致性锁（表驱动单测直译两表，见 frontend-tool-result-terminal.spec.ts）；
+ * 生产调用点仍只有 applyFrameToParts 一处。
+ *
+ * 批3③b D9（R-141④）防漂移注记（三对，不得擅自"对齐"）：
+ * ① 本表 vs `frameStatusToPendingStatus`（stores/ai.ts）——**唯一真实分叉 = `SUCCEEDED`**
+ *   （本表收录：覆盖 ConfirmGate#cancel 竞态带出的已决值；响应体表不翻译 ⇒ null。实发交集
+ *   FRONTEND_RESULT/FRONTEND_CANCELLED/CANCELLED/TIMEOUT/REJECTED_ARGUMENTS/REJECTED/BLOCKED
+ *   两表同映射）；台账原"后者缺 CANCELLED 依据注释"系误述（ai.ts:347-349 注释实存）。
+ * ② 段侧终态枚举 `localTerminal`（本文件 `frontend_tool_result` case 内）vs store 侧 `isFrameDecidedPendingStatus`
+ *   （ai.ts）——同 7 态（succeeded/rejected/blocked/expired/cancelled/unknown/failed）、
+ *   **无共享常量**（parts.ts 不依赖 store 的纯函数层约束），漂移由 D9 表驱动一致性锁兜底。
  */
-function frontendResultStatus(status: unknown): ToolRunStatus | null {
+export function frontendResultStatus(status: unknown): ToolRunStatus | null {
   switch (status) {
     case 'FRONTEND_RESULT':
     case 'SUCCEEDED':
@@ -401,16 +419,20 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
     }
     case 'suspended': {
       // 后端对**每一批工具调用**都会先发 suspended，其中只有 CONFIRM/FRONTEND 需要人工或浏览器
-      // 介入。本帧不写旧投影，故**只更新已存在的工具段**（requiresAction=true，status 不改）；
-      // 段尚不存在则留给紧随其后的 confirm_request / frontend_tool_request 建立。
+      // 介入。批3③b D5（R-140①-2）："只发 suspended"路径可达（SpToolCallingManager 取消竞态：
+      // out.suspended 先发、checkCancelled 可让整轮在 toolStart 前终止）——段尚不存在时**建占位段**
+      // （status='pending' + requiresAction=true），不再什么都不写；生命周期双兜底：
+      // ① 轮终态 expireResidueToolParts（pending ⇒ expired）；② 快照恢复路非 PENDING 收敛。
+      // 已决 toolCallId 的建段拦截在 store 侧 handleFrame 的 D8 守卫（建段前过闸，防跨消息双段）。
       const waiting = frame.toolCalls.find((call) => call.kind === 'CONFIRM' || call.kind === 'FRONTEND')
       if (waiting) {
         upsertToolPart(message, {
           toolCallId: waiting.toolCallId,
           name: waiting.name,
           kind2: waiting.kind,
+          status: 'pending',
           requiresAction: true
-        }, false)
+        })
       }
       break
     }

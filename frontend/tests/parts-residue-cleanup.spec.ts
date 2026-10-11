@@ -462,7 +462,7 @@ describe('施工项3：m-R2 六写点回归锁', () => {
     }
   })
 
-  it('写点③ suspended（createIfMissing=false）：已存在段被更新（requiresAction 复位、status/seg 不变），未知 toolCallId 不建段', () => {
+  it('写点③ suspended（批3③b D5 createIfMissing=true）：已存在段被更新（requiresAction 复位、status/seg 不变），未知 toolCallId 建段', () => {
     const store = useAiStore()
     const assistant = store.appendAssistantMessage()
     store.handleFrame({
@@ -488,15 +488,38 @@ describe('施工项3：m-R2 六写点回归锁', () => {
     expect(assistant.parts.map((part) => part.kind)).toEqual(['text', 'tool'])
     expect(assistant.parts[1]).toMatchObject({ kind: 'tool', seg: 1, toolCallId: 's1', status: 'pending', requiresAction: true })
 
-    // 未知 toolCallId：不凭空建段
+    // 未知 toolCallId（③b D5）：suspended 帧建占位段（status='pending' + requiresAction=true）
     const other = store.appendAssistantMessage()
     store.handleFrame({
       type: 'suspended',
       runId: 'run-9',
-      toolCalls: [{ toolCallId: 's-unknown', name: 'danger_tool', type: 'function', kind: 'CONFIRM', arguments: '{}', status: 'PENDING', executed: false }],
+      toolCalls: [{ toolCallId: 's-new', name: 'probe.auto', type: 'function', kind: 'FRONTEND', arguments: '{}', status: 'PENDING', executed: false }],
       seq: 3
     })
-    expect(other.parts.every((part) => part.kind === 'text')).toBe(true)
+    expect(other.parts.some((part) => part.kind === 'tool' && part.toolCallId === 's-new')).toBe(true)
+    const created = other.parts.find((part) => part.kind === 'tool' && part.toolCallId === 's-new')
+    expect(created).toMatchObject({ kind: 'tool', status: 'pending', requiresAction: true, kind2: 'FRONTEND' })
+  })
+
+  it('批3③b D5 生命周期锁：suspended 建段 → 轮终态 done 帧 ⇒ 段收敛为 expired（轮终态兜底①）', () => {
+    const store = useAiStore()
+    const assistant = store.appendAssistantMessage()
+
+    store.handleFrame({
+      type: 'suspended',
+      runId: 'run-9',
+      toolCalls: [{ toolCallId: 's2', name: 'danger_tool', type: 'function', kind: 'CONFIRM', arguments: '{}', status: 'PENDING', executed: false }],
+      seq: 1
+    })
+    // "只发 suspended"的现场：段已建（占位 pending + requiresAction）
+    expect(soleToolPart(assistant)).toMatchObject({ toolCallId: 's2', status: 'pending', requiresAction: true })
+    expect(assistant.pendingCall).toMatchObject({ toolCallId: 's2', status: 'pending' })
+
+    // 后端最终发出轮终态（done 帧；error 帧同口径）—— 占位段不得永久 pending
+    store.handleFrame({ type: 'done', runId: 'run-9', seq: 2 })
+
+    expect(soleToolPart(assistant)).toMatchObject({ toolCallId: 's2', status: 'expired', requiresAction: false })
+    expect(assistant.pendingCall).toBeNull()
   })
 
   it('写点④ openGenerativeForm 失败收尾：本地 failed 段 + requiresAction=false（表单不武装）', async () => {

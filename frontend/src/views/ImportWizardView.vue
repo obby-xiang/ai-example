@@ -711,27 +711,40 @@ async function ensureStepLoaded(index: number): Promise<void> {
  * （不推进步骤），而 AI 侧 handler 此前无条件回"已推进到…" —— 于是模型收到成功语义、
  * 用户看到的却是没动的界面（S4.4d/f 实测的"报已推进但步骤未推进"）。
  */
-async function goStep(next: number): Promise<boolean> {
+/** goStep 推进结局（批3③b D15 对齐导出侧 StepAdvanceOutcome，原 boolean 形态升级）。 */
+interface StepAdvanceOutcome {
+  /** 是否真的推进了步骤 */
+  ok: boolean
+  /** 未推进的原因（越界 / 第 1 步 flushEditors 失败） */
+  reason?: string
+  /** syncStepToBackend 失败 ⇒ 不阻断，调用方须把该警告带进回灌/界面 */
+  syncWarning?: string
+}
+
+async function goStep(next: number): Promise<StepAdvanceOutcome> {
   if (next < 0 || next >= STEP_KEYS.length) {
-    return false
+    return { ok: false, reason: `目标步骤 ${next} 不在导入向导范围内` }
   }
   if (next > stepIndex.value && stepIndex.value === 0) {
     const saved = await flushEditors()
     if (!saved) {
       ElMessage.warning('存在未写回的编辑内容，请先修正后再继续')
-      return false
+      return { ok: false, reason: '存在未写回的编辑内容（保存草稿失败），已中止推进' }
     }
   }
   stepIndex.value = next
   workspace.setStep(STEP_KEYS[next] ?? null)
-  // 批3③a D9（D7 同款语义最小接入）：服务端步骤同步失败**不阻断**推进，但警告必须可见 ——
-  // 与导出侧同口径（网络抖动不得卡死向导；后端 currentStep 滞后由下次切步重试补偿）。
+  // 批3③a D9（D7 同款语义最小接入）/ 批3③b D15（对齐导出侧）：服务端步骤同步失败**不阻断**
+  // 推进，但警告必须可见（单点 warning 在本函数弹）且**带进 AI 回灌** —— 原实现只弹
+  // ElMessage、回灌文本仍是干净成功文案（与导出侧不对称，M6 承接项）。
   const synced = await syncStepToBackend()
+  let syncWarning: string | undefined
   if (!synced.ok) {
-    ElMessage.warning('步骤已推进但服务端步骤同步失败，下次切步会重试')
+    syncWarning = '步骤已推进但服务端步骤同步失败，下次切步会重试'
+    ElMessage.warning(syncWarning)
   }
   await ensureStepLoaded(next)
-  return true
+  return { ok: true, syncWarning }
 }
 
 /**
@@ -767,10 +780,10 @@ async function syncStepToBackend(): Promise<{ ok: boolean; reason?: string }> {
     task.value = await tasksApi.goToStep(taskId.value, step)
     return { ok: true }
   } catch (error) {
-    // 批3③a D9（D8(A) 同法）：不再整段静默 —— 结构化失败 + 页面可见警告（同导出侧范式）；
-    // 任何非 2xx（含未来 R-137 守卫 4xx）都落此处。不阻塞界面，由 goStep 带警告推进。
+    // 批3③b D11（R-143①）：单点提示 —— 本函数**不自弹**（原 ElMessage.error 删除），由调用方
+    // goStep 只弹一条 warning（与导出侧同改；全仓仅两个调用方，不留静默路径）。
+    // 结构化失败结局照常返回，由 goStep 带进回灌。
     const reason = error instanceof Error ? error.message : String(error)
-    ElMessage.error(`步骤同步到服务端失败：${reason}（不阻塞界面，下次切步会重试）`)
     return { ok: false, reason }
   }
 }
@@ -1026,10 +1039,14 @@ function registerHandlers(): void {
     // F2（DC-14）：回灌文本必须与真实结局一致 —— 未推进就如实说"未推进 + 为什么"，
     // 否则模型会基于假的成功语义继续往下走（例如直接 start_import，而用户还停在第一步）。
     const advanced = await goStep(index)
-    if (!advanced) {
+    if (!advanced.ok) {
       return `步骤未推进：当前仍在「${stepLabel(STEP_KEYS[stepIndex.value] ?? '')}」。`
         + '第 1 步离开前会把在线编辑内容写回服务端文件，存在本地校验问题或保存失败时会中止。'
         + '请提示用户修正编辑区数据（或先点「保存草稿到服务端」）后重试。'
+    }
+    // 批3③b D15（M6）：同步失败警告带进回灌（对齐导出侧 :1202-1203 口径）
+    if (advanced.syncWarning) {
+      return `已推进到导入向导步骤「${stepLabel(STEP_KEYS[index])}」（${advanced.syncWarning}）。`
     }
     return `已推进到导入向导步骤「${stepLabel(STEP_KEYS[index])}」`
   })

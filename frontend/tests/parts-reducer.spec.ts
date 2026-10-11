@@ -181,7 +181,7 @@ describe('①③④⑤ applyFrameToParts：段写入（纯函数层）', () => {
     expect(message.parts[0]).toMatchObject({ kind: 'text', streaming: false })
   })
 
-  it('suspended 帧：只更新已存在的段（requiresAction 复位、status/seg 不变），未知 toolCallId 不建段', () => {
+  it('suspended 帧：已存在段更新（requiresAction 复位、status/seg 不变）；未知 toolCallId 建段（批3③b D5：status=pending）', () => {
     const message = makeMessage()
     applyFrameToParts(message, { type: 'confirm_request', toolCallId: 's1', name: 'danger_tool', args: '{"x":1}', timeoutSeconds: 120 })
     // 模拟段曾被收口过的现场
@@ -199,11 +199,16 @@ describe('①③④⑤ applyFrameToParts：段写入（纯函数层）', () => {
     applyFrameToParts(message, {
       type: 'suspended',
       runId: 'run-1',
-      toolCalls: [{ toolCallId: 's-unknown', name: 'danger_tool', type: 'function', kind: 'CONFIRM', arguments: '{}', status: 'PENDING', executed: false }]
+      toolCalls: [{ toolCallId: 's-new', name: 'probe.auto', type: 'function', kind: 'FRONTEND', arguments: '{}', status: 'PENDING', executed: false }]
     })
-    // 未知 toolCallId：不凭空建段（仍是 text + s1 两段）
-    expect(message.parts).toHaveLength(2)
-    expect(message.parts.some((part) => part.kind === 'tool' && part.toolCallId === 's-unknown')).toBe(false)
+    // 批3③b D5（R-140①-2）："只发 suspended"路径可达（SpToolCallingManager 取消竞态）——
+    // 未知 toolCallId 不再"什么都不写"，而是建占位段（status='pending' + requiresAction=true），
+    // 生命周期由紧随的 confirm_request/frontend_tool_request 或轮终态 expireResidueToolParts 兜底
+    expect(message.parts).toHaveLength(3)
+    expect(toolPart(message, 's-new')).toMatchObject({
+      kind: 'tool', seg: 2, toolCallId: 's-new', name: 'probe.auto', kind2: 'FRONTEND',
+      status: 'pending', requiresAction: true
+    })
   })
 })
 

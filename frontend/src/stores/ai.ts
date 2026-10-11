@@ -21,6 +21,7 @@ import {
   alreadyApplied,
   applyFrameToParts,
   deriveProjections,
+  findToolPart,
   markApplied,
   openStreamPart,
   sealTrailingStreamPart,
@@ -215,16 +216,17 @@ function migrateMirror(mirror: AiSessionMirror): { messages: AiSessionMirror['me
  * 故在读取侧（loadHistory 镜像分支）收口，且必须发生在 writeMirror 回写**之前**：
  * 仅对 done 的消息，把仍挂 requiresAction 的工具段降级（requiresAction=false；段 status
  * 仍 pending 的一并降为 expired，与 loadHistory 空历史的 expired 降级惯例一致）。
- * 幂等（二次执行无变化）；进行中轮（done!==true，如 suspended 快照）不触碰 —— 存活挂起由
- * 同一次 loadHistory 里的 restoreSuspendedSnapshot 重建路径重新置真。返回是否有改动
- * （供调用方决定是否需要回写镜像）。
+ * 幂等（二次执行无变化）；返回是否有改动（供调用方决定是否需要回写镜像）。
+ *
+ * 批3③b D3（R-139①）死码清除：**入参契约 = 调用方须已归一 `done`**（loadHistory 镜像分支在
+ * 调用本函数之前已强制 `{ ...message, streaming:false, done:true }`，writeMirror 落镜像的 7
+ * 字段本就不含 done）——原"进行中轮（done!==true）不触碰"守卫因此**永不触发**，删除。
+ * ⚠️ 反向风险（保留警示）：若未来直调镜像**原始**数据（done 为 undefined），`undefined !== true`
+ *  ⇒ 全段跳过（守卫方向反了：本该收口却整段罢工）——届时须在调用点先归一，不得恢复本守卫。
  */
 function sanitizeMirrorResidues(messages: ChatMessage[]): boolean {
   let changed = false
   for (const message of messages) {
-    if (message.done !== true) {
-      continue
-    }
     message.parts.forEach((part, index) => {
       if (part.kind === 'tool' && part.requiresAction) {
         message.parts.splice(index, 1, {
@@ -336,8 +338,13 @@ function readActionRecord(payload: unknown): WorkspaceActionRecord | null {
  * T2a-D#2（C2）：帧/响应体 status（后端 PendingStatus 大写口径）→ pendingCall.status（小写展示态）。
  * 映射必须穷举后端经 `frontend_tool_result` / 409 响应体**实发**的 status：本函数是帧/响应体
  * status 到 pendingCall 终态的唯一翻译层，漏一支就会被 handler 的兜底（置 null）吞成"卡片消失"。
+ * 导出仅为批3③b D9 防漂移一致性锁（表驱动单测与 parts.ts#frontendResultStatus 对账）。
+ *
+ * 批3③b D9（R-141④）防漂移注记：与 parts.ts `frontendResultStatus` 的**唯一真实分叉 =
+ * `SUCCEEDED`**（本表不收录、返回 null —— SUCCEEDED 非本响应体实发值；帧路表收录以覆盖
+ * ConfirmGate#cancel 竞态）。实发交集七值两表同映射；`CANCELLED` 的 run-cancel 依据注释见下。
  */
-function frameStatusToPendingStatus(status: unknown): PendingToolCall['status'] | null {
+export function frameStatusToPendingStatus(status: unknown): PendingToolCall['status'] | null {
   switch (status) {
     case 'FRONTEND_RESULT':
       return 'succeeded'
@@ -377,6 +384,11 @@ function frameStatusToPendingStatus(status: unknown): PendingToolCall['status'] 
  *
  * 批2（权威翻转）：入参同时接受段侧 `ToolRunStatus` —— 判据改读段（`hasDecidedPendingResidue`
  * 读 `part.status`），两个枚举的终态集合在这里取并集。
+ *
+ * 批3③b D9（R-141④）防漂移注记：本枚举（7 态：succeeded/rejected/blocked/expired/cancelled/
+ * unknown/failed）与段侧 `localTerminal`（parts.ts 的 `frontend_tool_result` case 内）**同 7 态、无共享常量**
+ * （parts.ts 不依赖 store 的纯函数层约束）——漂移由 frontend-tool-result-terminal.spec.ts
+ * 的 D9 表驱动一致性锁兜底，不得为"消除重复"抽公共表。
  *
  * 批3③a D6(A)：集合纳入 `unknown` 和 `failed`（两者均为终态）—— 否则 unknown 段不被视为
  * 已决，重投帧可再次挂起（挂起卡复活）。
@@ -593,7 +605,12 @@ export const useAiStore = defineStore('ai', {
         this.messages = migrated.messages.map((message) => ({
           ...message,
           streaming: false,
-          done: true
+          done: true,
+          // 批3③b D4（R-140①-4）：存量 v2 镜像把 message.parts 原样入镜像（writeMirror 不做
+          // 段级归一），段级 streaming=true 假态随镜像存活；消费侧 openStreamPart /
+          // sealTrailingStreamPart 读段 streaming（段边界假态）—— 与上一行消息级归一同口径，
+          // 读取侧逐段归一。parts 是数组须逐段 map；**不收进** sanitizeMirrorResidues（防职责扩大）。
+          parts: message.parts.map((part) => ('streaming' in part && part.streaming ? { ...part, streaming: false } : part))
         }))
         this.activeRunId = mirror.lastRunId ?? null
         // 批2 前置（GLM o1）：存量镜像残留的 requiresAction=true 在读取侧收口（v1 迁移结果与
@@ -643,6 +660,14 @@ export const useAiStore = defineStore('ai', {
         return
       }
 
+      // 批3③b D7(B)（R-141②，定案注记 —— 任何后续批次不得把本注记解读为"丢 unknown 可以接受"）：
+      // 本历史整替的工具段 status:'succeeded'（下）与 kind2:'UNKNOWN' 是**展示占位值，不是事实
+      // 断言**：后端历史载荷（AiHistory / AiHistoryMessage，types/ai.ts:133-150）只有 type / text /
+      // toolCalls / toolResponses / timestamp 五类字段，**不携带任何工具执行状态**，前端无从判定
+      // 成败。因此本地已落的 unknown / failed 终态在整替后**必然丢失并显示为「已成功」——这是
+      // 已申报的已知失真（R-141②），不是可接受行为**；修复属后端面（历史携带状态），已登记立项
+      // （R-144），③b 不含后端。在后者落地前，「UNKNOWN + succeeded」组合 = 载荷缺状态的占位
+      // 口径，**任何消费方不得以该 succeeded 值做业务判定**。
       this.messages = history.messages.map((item, index) => {
         const role = roleOf(item.type)
         // 批2：历史整体替换的分支同样**只建段**（正文段 + 按 toolCalls 顺序的工具段，
@@ -1535,6 +1560,19 @@ export const useAiStore = defineStore('ai', {
         return
       }
 
+      // 批3③b D6(B)（R-141①，店级守卫）：跨宿主"已决"终帧守卫 —— 重挂/续收回放时，若帧的
+      // toolCallId 已在**其他消息**上持有已决段（hasDecidedPendingResidue，统一 7 态），且当前
+      // 宿主消息没有它的段，则整帧跳过：不得在新宿主重建同 id 段（旧卡 unknown/failed/cancelled
+      // 仍在 ⇒ 第二张状态矛盾卡）。当前宿主已持段的正常收敛不受影响（含 T1 生死线的 first-wins）。
+      // 挂起语义帧（request/suspended/confirm_request）的拦截由 D8 各 case 守卫承担；本守卫只覆盖
+      // 工具终态/起始帧。契约前提：后端不重发已终态 toolCallId、toolCallId 跨轮不复用（UUID）。
+      if ((frame.type === 'tool_start' || frame.type === 'tool_result'
+        || frame.type === 'frontend_tool_result' || frame.type === 'confirm_decision')
+        && this.hasDecidedPendingResidue(frame.toolCallId)
+        && !findToolPart(message, frame.toolCallId)) {
+        return
+      }
+
       switch (frame.type) {
         case 'start':
           this.activeRunId = frame.runId
@@ -1571,6 +1609,12 @@ export const useAiStore = defineStore('ai', {
           break
         }
         case 'confirm_request': {
+          // 批3③b D8（R-141③）：已决 toolCallId 的重投帧不产生新挂起语义 —— 守卫去 GF 前缀、
+          // 扩到全部工具（判据统一 7 态）。实现取 break：seq 记账与 markApplied（switch 后统一
+          // 收口）照常执行，**语义再投以本闸兜底**（与 seq 幂等的职责分界：闸管语义、seq 管重复）。
+          if (this.hasDecidedPendingResidue(frame.toolCallId)) {
+            break
+          }
           this.suspended = true
           // 工具卡四态之"等待确认"：确认门未决期间该工具卡显示为等待确认（段 status=pending +
           // requiresAction=true ⇒ 派生出挂起卡）；倒计时元数据随段持久化
@@ -1585,7 +1629,11 @@ export const useAiStore = defineStore('ai', {
           break
         }
         case 'frontend_tool_request': {
-          if (frame.name === GENERATIVE_FORM_TOOL && this.hasDecidedPendingResidue(frame.toolCallId)) {
+          // 批3③b D8（R-141③）：守卫**去 GF 前缀** —— 通用 FRONTEND 工具的重投帧同样被拦：
+          // 不再触发第二次 runFrontendTool（二次浏览器副作用）、不把已终态段改回
+          // pending+requiresAction（挂起卡复活）。已决判据统一 7 态（含 unknown/failed）。
+          // 原 GF 前缀守卫的行为对 GF 用例不变（回归锁见 frontend-tool-result-terminal.spec.ts）。
+          if (this.hasDecidedPendingResidue(frame.toolCallId)) {
             // T2a 返修（S3）：守卫前移到**写段之前** —— 已决 toolCallId 不产生任何新挂起语义
             //（不落 requiresAction 段、不置 suspended、不武装 activeForm），
             // 防 reattach 回放先渲染一张瞬时挂起卡、再等后续结局帧收敛
@@ -1630,16 +1678,20 @@ export const useAiStore = defineStore('ai', {
           // 后端对**每一批工具调用**都会先发 suspended（把挂起态外置，见 SpToolCallingManager），
           // 其中只有 CONFIRM/FRONTEND 两类需要人工或浏览器介入：BACKEND 工具随即执行完毕，
           // 不该被判成"挂起等待"（否则运行状态与输入区提示会误报）。
+          // 批3③b D8 遍历口径：suspended 帧**没有单数 toolCallId 字段**（types/sse.ts
+          // SseSuspendedFrame.toolCalls 是复数数组）——判据钉在写面条目（parts.ts 同口径：
+          // find 首个 CONFIRM/FRONTEND）的 toolCallId 上，逐条目遍历判已决；已决 ⇒ 不建段 /
+          // 不写 requiresAction / 不置 suspended（防 failed+requiresAction rogue 面经
+          // pendingStatusOf 折 pending 复活挂起卡，R-141③ 行尾注记 / DS Pro O-5）。
           const waiting = frame.toolCalls.find((call) => call.kind === 'CONFIRM' || call.kind === 'FRONTEND')
           if (waiting) {
-            if (waiting.name === GENERATIVE_FORM_TOOL && this.hasDecidedPendingResidue(waiting.toolCallId)) {
-              // T2b 顺手项③（GLM 复核 F4）：与 frontend_tool_request case 同款的 residue 守卫 —
-              // 已决 toolCallId 不产生新挂起语义（对齐 isFrameDecidedPendingStatus 口径，勘误 4）
+            if (this.hasDecidedPendingResidue(waiting.toolCallId)) {
               break
             }
             this.suspended = true
-            // 本帧**只更新已存在的工具段**（requiresAction=true，status 不改；createIfMissing=false）
-            // —— 段尚不存在则留给紧随其后的 confirm_request / frontend_tool_request 建立
+            // 本帧更新已存在的工具段（requiresAction=true）；段尚不存在时由 applyFrameToParts
+            // 建占位段（③b D5：createIfMissing=true + status='pending'）——"只发 suspended"路径
+            // （取消竞态，SpToolCallingManager）不再整轮无声丢失
             applyFrameToParts(message, frame)
           }
           break
@@ -1780,8 +1832,8 @@ export const useAiStore = defineStore('ai', {
      * 测试沿用 action 形态，纯函数层可独立单测）。
      *
      * 新建时先**封口末尾的流式段**（工具调用之后到达的正文属于新的一段，seg 单调递增）；
-     * `createIfMissing=false` = 只更新语义（suspended 帧用，避免凭空多出一段只有 parts 有的卡）。
-     * status 省略时保留段上原值，理由见 {@link ToolPartPatch}。
+     * `createIfMissing=false` = 只更新语义（段已存在才写；③b D5 起 suspended 帧不再用此形态，
+     * 见 utils/parts.ts 的 suspended 支）。status 省略时保留段上原值，理由见 {@link ToolPartPatch}。
      */
     upsertToolPart(message: ChatMessage, patch: ToolPartPatch, createIfMissing = true): void {
       writeToolPart(message, patch, createIfMissing)
@@ -1801,6 +1853,10 @@ export const useAiStore = defineStore('ai', {
       message: ChatMessage,
       frame: Extract<SseFrame, { type: 'frontend_tool_request' }>
     ): Promise<void> {
+      // 批3③b D10（R-142）：入口捕获轮次句柄 —— `isCurrentRound` 是 send / reattachActive /
+      // resumeSnapshotStream / resetSession 内的局部闭包（非 drop-in），此处以模块级
+      // currentAbort 的身份比对为准（与 :811/:883/:1037 同族口径）。
+      const controllerAtStart = currentAbort
       // 批2：本地执行开跑即落 running（只更新语义 —— 段由 frontend_tool_request 帧建好；
       // 段不再等动作）——前端工具段生命周期 pending→running→终态，与确认门放行同口径。
       // 先让出同步窗口：request 帧的 pending 段必须先落盘（m-R2 写点①的同步可观测语义）
@@ -1819,6 +1875,14 @@ export const useAiStore = defineStore('ai', {
         args: parseToolArgs(frame.args),
         budgetMs: deriveFrontendToolBudgetMs(frame.timeoutSeconds)
       })
+      // 批3③b D10（R-142）：await 返回后比对轮次句柄 —— stop()/新轮/重挂已把 currentAbort
+      // 复位（finally）或换成新句柄 ⇒ 本执行器已是"旧轮在途"：段终态写（:1829-1836 区）与
+      // 回灌 POST（submitFrontendToolResult）整体丢弃，防晚到结局覆盖已收尾现场/向已取消轮回灌。
+      // 窗口残留如实申报（施工报告 §8.4-6）：stop() 至本轮 finally 复位之间返回的执行器
+      // 仍正常写段（当时仍是当前轮），只有"返回晚于收尾"才被丢弃。
+      if (currentAbort !== controllerAtStart) {
+        return
+      }
       // 批3③a A8：三态落卡（execution.ok 已 @deprecated，改读 outcome）——
       // unknown（预算到期 / 等待上界耗尽）如实落 'unknown'，卡面显示「结局未知」且
       // 回灌文本与卡面不再自相矛盾；unknown 段的回执帧翻写防护在 parts.ts localTerminal。

@@ -617,11 +617,10 @@ async function syncStepToBackend(): Promise<{ ok: boolean; reason?: string }> {
     task.value = await tasksApi.goToStep(taskId.value, step)
     return { ok: true }
   } catch (error) {
-    // 批3③a D8(A)：不再整段静默 —— 结构化失败 + 页面可见警告（同 persistStepData 的
-    // ElMessage 范式）。任何非 2xx（含未来 R-137 守卫 4xx）经 axios reject 都落此处；
-    // 不阻塞界面（下次切步会重试），由调用方把结局/警告带进回灌。
+    // 批3③b D11（R-143①）：单点提示 —— 本函数**不自弹**（原 ElMessage.error 删除），由调用方
+    // goStep 只弹一条 warning（全仓仅两个调用方：Export/Import 向导的 goStep，不留静默路径）。
+    // 结构化失败结局照常返回，由 goStep 带进回灌/界面。
     const reason = error instanceof Error ? error.message : String(error)
-    ElMessage.error(`步骤同步到服务端失败：${reason}（不阻塞界面，下次切步会重试）`)
     return { ok: false, reason }
   }
 }

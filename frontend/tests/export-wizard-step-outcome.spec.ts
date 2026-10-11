@@ -13,6 +13,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { flushPromises, shallowMount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
+import { ElMessage } from 'element-plus'
 import ExportWizardView from '@/views/ExportWizardView.vue'
 import { executeFrontendTool } from '@/utils/frontend-tools'
 import { PAGE_HANDLER_OPEN_EXPORT_EDITOR } from '@/utils/frontend-tools'
@@ -129,6 +130,16 @@ describe('批3③a T7②：export.nextStep + goToStep reject 注入 ⇒ 回灌�
     const execution = await executeFrontendTool({ name: 'export.nextStep', args: {}, budgetMs: 5_000 })
     expect(execution.result).toContain('已推进')
     expect(execution.result).toContain('服务端步骤同步失败')
+  })
+
+  it('批3③b D11（R-143①）单点提示锁：同步失败只弹一条 warning，不再 error+warning 双弹', async () => {
+    await mountWizard()
+    api.goToStep.mockRejectedValue(new Error('goToStep 注入 5xx'))
+
+    await executeFrontendTool({ name: 'export.nextStep', args: {}, budgetMs: 5_000 })
+    // syncStepToBackend 不自弹（error 0 次）；goStep 单点 warning 恰一次
+    expect(ElMessage.error).not.toHaveBeenCalled()
+    expect(ElMessage.warning).toHaveBeenCalledTimes(1)
   })
 })
 
