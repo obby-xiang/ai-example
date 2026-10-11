@@ -154,8 +154,13 @@ function Expect-Fail($method, $path, $body, $what) {
     return $r
 }
 
+# Wait-Job 作业终态等待窗口（总账 S-10；2026-10-11 批 B / R-96 由隐式 96s 显式化为 120s）。
+# = heartbeat-interval(30s) × dead-multiplier(3) + scan-period(10s) + margin(20s)，与 application.yml 四键对应，键值调整时须同步本式
+$script:JobWaitTimeoutMs = ((30*3)+10+20)*1000
+
 function Wait-Job($jobId, [string[]]$terminal = @('COMPLETED', 'FAILED', 'CANCELLED')) {
-    for ($i = 0; $i -lt 240; $i++) {
+    $deadline = (Get-Date).AddMilliseconds($script:JobWaitTimeoutMs)
+    while ((Get-Date) -lt $deadline) {
         Start-Sleep -Milliseconds 400
         $j = GetJson "/api/jobs/$jobId"
         if ($terminal -contains $j.status) { return $j }

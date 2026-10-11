@@ -73,6 +73,7 @@
 - **门禁已落地（T4-7a-1，2026-10-09）**：`scripts/ci/check-docs.mjs` 已实现并接线（CI `docs` job），上面第三条的"落地时须加入本禁则断言"已满足——断言 ⑤ 即本禁则，按 `git ls-files` 口径全量扫描（豁免仍是上一条的三个 spike 脚本，且对豁免文件断言其头部豁免注释存在）；`docs/evidence/` 历史证据文档同样受该禁则约束（断言 ⑤ 不排除它们）。另含断言 ⑥「`.java` 探针不参与构建」（对 `docs/evidence/probes/` 的索引见上文「证据分区」的「探针源码」行）。
 - **CI 脱敏扫描分口径（裁决①，2026-10-09）**：两个新 job 的门禁属性不同，勿混读 —— `docs` job（文档一致性门禁）**阻断**，它同时承担**工作树口径**的阻断面（断言 ⑤ 本禁则按 `git ls-files` 全量逐文件；断言 ① 盘符路径只覆盖 4 个导航/口径入口文档，二者均非 grep 工作树）；`pre-commit` 钩子（本机暂存区）同样**阻断**；`scan-history` job（全历史 blob）为**报告制非阻断** —— 其命中全部落在历史 blob（工作树 / 暂存区口径 0 命中），删工作树文件消除不了，唯一手段是历史改写（需用户专项授权，本周期不动，见 `docs/M2-排期计划.md` 去向表观察项），故命中照常全量输出 + 上传 artifact + job summary 标注，但不使 CI 红；仅"扫描器未完成"（退出码 2）为红。
 - **数字纪律（DC-16）**：新增/变更数值型规格（超时/重试/退避/轮询/池/分页/缓冲/心跳/TTL/阈值）必须在引入处写明取值依据（业界来源/实测/裁定编号）；用户可感知且跨层共享的数字须配置键化；同值不同义禁止共用一个键；既有裸数字不返工、随包顺手补注释。全文见 `docs/adr/DECISION-REGISTER.md` DC-16。
+- **作业看门狗配置键（批 B / R-96，2026-10-11）**：新增 `app.job.*` 四键 —— `heartbeat-interval`（30s，作业心跳间隔，依据业界依据 §12「心跳 30–60s」下沿 = K8s periodSeconds 10s × failureThreshold 3 同量级）/ `watchdog.scan-period`（10s，扫描周期）/ `watchdog.dead-multiplier`（3，K8s failureThreshold 缺省 / TIBCO ≈3.5×）/ `max-execution-time`（30m，Hangfire `InvisibilityTimeout` 官方缺省，§12 推荐 30–60min 下沿）；绑定 `AppProperties.Job`，启动期 fail-fast 校验四项 > 0 且 `heartbeat-interval × dead-multiplier < max-execution-time`；`/api/ai/health` 增 `jobWatchdog` 四指标；E2E `Wait-Job` 窗口 120s = 判死窗 90s + 扫描周期 10s + 余量 20s（总账 S-10 行尾注记）。判死口径：心跳 ×3 判死 + 绝对上限，判死后 FAILED + cancel、不自动重排队；`demo-batch-delay-ms` 装饰节拍不计入（生产口径）。
 
 ## 过程纪律
 

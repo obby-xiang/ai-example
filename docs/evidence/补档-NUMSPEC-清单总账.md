@@ -187,7 +187,7 @@ wait-audit §3 已列：后端 18 组超时/预算键 + 前端 13 组 + 7 项「
 | S-07 | 其他 | `.github/workflows/ci.yml:111-112 / :156 / :172` | 端口 `6379 / 18399 / 18330` | 容器/桩/后端端口分配 | 硬编码 | 部分依据（脚本与文档多处口径一致，但无端口规划说明） |
 | S-08 | 其他 | `.github/workflows/ci.yml:174-175` | `--app.job.batch-size=10` / `--app.job.demo-batch-delay-ms=150` | E2E 覆写作业分片参数（1/10 / 1/2 of 默认） | 硬编码 | 部分依据（`verify-e2e.ps1:31-32` 注「TC11 断言需分片边界」；150 无独立论证） |
 | S-09 | 其他 | `.github/workflows/ci.yml:232 / :345`（upload-artifact ×2） | `retention-days: 7` | 证据归档保留 | 硬编码 | **裸数字** |
-| S-10 | 超时 | `scripts/verify-e2e.ps1:157-164` | `for ($i=0; $i -lt 240)` × `400ms` = **96s** | `Wait-Job` 作业终态等待上限（**隐式**，无注释） | 硬编码 | **裸数字**（🔴 与后端 `total-budget` 300s / 前端 `waitForJobFinal` 300s 口径不一致的三套上限） |
+| S-10 | 超时 | `scripts/verify-e2e.ps1:157-164` | `for ($i=0; $i -lt 240)` × `400ms` = **96s** | `Wait-Job` 作业终态等待上限（**隐式**，无注释） | 硬编码 | **裸数字**（🔴 与后端 `total-budget` 300s / 前端 `waitForJobFinal` 300s 口径不一致的三套上限）**→ 行尾注记（2026-10-11 批 B / R-96，只追加）**：已改 **120s 显式常量** `$script:JobWaitTimeoutMs`（`Wait-Job` 函数上方，29 处调用零改动）。派生关系（写成关系而非裸数字）：后端看门狗判死窗 = `app.job.heartbeat-interval`(30s) × `watchdog.dead-multiplier`(3) = **90s**；最坏发现延迟 = 判死窗 + `watchdog.scan-period`(10s) ≈ **100s**；本窗口 = 100s + 20s 余量 = **120s ≥ dead-timeout + scan-period + 余量** —— 保证「看门狗判死」新行为在 E2E 内可观测（依据业界依据 §12 心跳 30–60s ×3 / Hangfire 30min，裁决 Q4/Q5）。 |
 | S-11 | 超时 | `scripts/verify-e2e.ps1:1181 / :2020 / :2236` | `Wait-Until … 60` = **60s** ×3 | 确认后等待作业创建 | 硬编码 | **裸数字** |
 | S-12 | 轮询 | `scripts/verify-e2e.ps1:166-174` | `Start-Sleep -Milliseconds 500` | `Wait-Until` 轮询节拍 | 硬编码 | **裸数字** |
 | S-13 | 超时 | `scripts/verify-e2e.ps1:236` | `$cts.CancelAfter(180000)` | `Read-Sse` 读流总预算（未读到终帧也让读循环收摊） | 硬编码 | 部分依据（`GFc-端到端执行验证` 提过「原流 180s 预算」口径；120s 挂起 < 180s 的制约关系成立） |
@@ -374,7 +374,7 @@ wait-audit §3 已列：后端 18 组超时/预算键 + 前端 13 组 + 7 项「
 | 项 | 前端 | 后端 | 冲突 |
 |---|---|---|---|
 | 数据浏览器页大小 | `DataBrowserView.vue:185 size=20`（F2-01） | `DataController` 默认 `size=50`（B2-31） | **同一个资源两套默认页大小**（前端总显式传参故未爆，但口径已分叉） |
-| 作业等待上限 | `api/jobs.ts timeoutMs=300_000`（F1-08） | 无对应（作业侧无超时） | 前端 300s vs E2E `Wait-Job` 96s（S-10）—— **同一场景三个上限：96s / 300s / 后端无** |
+| 作业等待上限 | `api/jobs.ts timeoutMs=300_000`（F1-08） | 无对应（作业侧无超时） | 前端 300s vs E2E `Wait-Job` 96s（S-10）—— **同一场景三个上限：96s / 300s / 后端无** → **批 B 更新（2026-10-11 R-96，只追加）**：三上限已变为 **E2E 120s（显式派生：判死窗 90s + 扫描周期 10s + 余量 20s，见 S-10 行尾注记）/ 前端 300s（维持，`api/jobs.ts` 未动）/ 后端作业看门狗（新：`app.job.heartbeat-interval` 30s × `dead-multiplier` 3 = 90s 判死窗 + `max-execution-time` 30m 绝对上限，四键启动期 fail-fast 校验）** —— 「后端无」终结，口径闭环 |
 | 任务通道重连 | `api/tasks.ts` 无（F1-09） | 无 | AI 通道有 `maxReconnects=2`+退避+建连看门狗；任务通道什么都没有 |
 | 前端工具预算来源 | `timeoutSeconds` 帧值（F1-19/20） | `app.ai.hitl.timeout` 120s（B1-09） | E2E 已用「断言 >0 而非 ==120」解耦（S-17），smoke 却写死 120（S-31） |
 | 会话锁 TTL | — | `lock.ttl=10m`（B1-20）自称「= 轮上限」，轮上限实为 `total-budget=300s`（B1-14） | **同一仓内两个「轮上限」口径**（wait-audit §3.3 第 7 项） |
