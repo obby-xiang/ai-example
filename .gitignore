@@ -17,6 +17,8 @@ frontend/node_modules/
 frontend/dist/
 frontend/.env.local
 frontend/.tmp-esbuild/
+frontend/.vitest/
+frontend/coverage/
 
 # Secrets (never commit)
 # 只排除目录内容，保留示例文件（注意：不能直接写 backend/config/，否则示例也无法追踪）

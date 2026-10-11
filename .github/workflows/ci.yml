@@ -75,6 +75,11 @@ jobs:
       - name: 类型检查（vue-tsc --noEmit）
         run: yarn typecheck
 
+      # 单元测试（vitest run，阻断；实测 29 用例秒级完成）。
+      # 与相邻步共用 working-directory: frontend 与 yarn 缓存，不新立 job。
+      - name: 单元测试（vitest run）
+        run: yarn test
+
       - name: 生产构建（vue-tsc + vite build）
         run: yarn build
 
