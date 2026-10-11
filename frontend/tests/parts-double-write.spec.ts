@@ -1,9 +1,11 @@
 /**
- * 对话时序包 批1（双写过渡）：`ChatMessage.parts` 与旧投影（content / toolRuns / pendingCall）
- * 的一致性回归锁 —— 帧序列经 store.handleFrame 送进真实 store，逐帧核对两侧口径。
+ * 对话时序包 批1（双写过渡）建立、批2（权威翻转）后仍成立的一致性回归锁：
+ * `ChatMessage.parts` 与旧投影（content / toolRuns / pendingCall）逐帧核对。
  *
- * 本批口径：`parts` 是**旁路真值**（带顺序信息的判别联合），旧字段仍是渲染真值；
- * 两侧必须逐字一致（视觉零变化）。测试只断言纯逻辑层，不挂载面板。
+ * 本批（批2）口径：`parts` 是**唯一真值**（带顺序信息的判别联合），旧字段是
+ * `utils/parts.ts` 的 `deriveProjections` 派生出来的投影 —— 二者仍必须逐字一致，
+ * 但"保留终态挂起投影"类的双写期细节断言已随翻转改写（见文件内批2 注释）。
+ * 测试只断言纯逻辑层，不挂载面板（渲染层见 ai-panel-parts-render.spec.ts）。
  */
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
@@ -134,7 +136,7 @@ describe('parts 双写：文本 / 工具段的顺序与封口', () => {
     store.handleFrame({ type: 'done', runId: 'run-1', seq: 7 })
     expect(store.messages[0]?.parts.map((part) => part.kind)).toEqual(['text', 'tool', 'text'])
 
-    // ② 旧投影与双写前逐字一致
+    // ② 旧投影由段派生，与段逐字一致
     expect(assistant.content).toBe('你好后续')
     const textParts = assistant.parts.filter((part) => part.kind === 'text')
     expect(assistant.content).toBe(textParts.map((part) => (part.kind === 'text' ? part.text : '')).join(''))
@@ -145,7 +147,7 @@ describe('parts 双写：文本 / 工具段的顺序与封口', () => {
     expect(assistant.done).toBe(true)
   })
 
-  it('确认门：pendingCall 与工具段对账一致，pending→rejected 两侧同步且不新建段', () => {
+  it('确认门：pending 段派生挂起卡，rejected 后挂起卡收掉且不新建段', () => {
     const store = useAiStore()
     const assistant = store.appendAssistantMessage()
 
@@ -185,7 +187,9 @@ describe('parts 双写：文本 / 工具段的顺序与封口', () => {
       seq: 2
     })
 
-    expect(assistant.pendingCall?.status).toBe('rejected')
+    // 批2（权威翻转）：段转 rejected 且离开"等动作"态 ⇒ 派生出的挂起卡为 null（结局由工具卡承载）；
+    // 翻转前这里断言的是双写期"终态仍保留挂起投影"的旧口径（两侧同步的表述随之作废）
+    expect(assistant.pendingCall).toBeNull()
     expect(assistant.parts.filter((part) => part.kind === 'tool')).toHaveLength(1)
     expect(assistant.parts[1]).toMatchObject({
       kind: 'tool',
@@ -266,11 +270,12 @@ describe('parts 双写：文本 / 工具段的顺序与封口', () => {
       seg: 1,
       toolCallId: 'k1',
       name: 'probe_tool',
-      // 待决条目并入：kind→kind2、requiresAction 依"仍在等动作"置真；
-      // status 以 toolRun 为权威（存量 v1 镜像 toolRun 已终态时不得被待决口径覆盖）
+      // 待决条目并入：kind→kind2；status 以 toolRun 为权威（存量 v1 镜像 toolRun 已终态时
+      // 不得被待决口径覆盖）；requiresAction 并入时为真，但批2 前置（GLM o1）的镜像读取侧
+      // 残留收口会在回写前降级为 false（done 消息 + 段已终态 → 只收 requiresAction）
       kind2: 'CONFIRM',
       status: 'succeeded',
-      requiresAction: true,
+      requiresAction: false,
       // 原工具卡的字段保留（合并是就地 spread）
       args: '{"a":1}',
       result: 'ok',
@@ -281,6 +286,8 @@ describe('parts 双写：文本 / 工具段的顺序与封口', () => {
     const written = JSON.parse(sessionStorage.getItem(MIRROR_PREFIX + sid) ?? '{}')
     expect(written.v).toBe(2)
     expect(written.messages[1].parts).toHaveLength(2)
+    // 批2：appliedSeqs（seq 幂等记账）是内部字段，writeMirror 的 Pick 不含它 —— 不入镜像
+    expect(written.messages[1].appliedSeqs).toBeUndefined()
     const savedAt = written.savedAt
     expect(typeof savedAt).toBe('number')
 

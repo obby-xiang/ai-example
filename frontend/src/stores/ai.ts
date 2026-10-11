@@ -17,11 +17,20 @@ import { aiApi } from '@/api/ai'
 import type { SseFrameHandlers, SseStreamOptions } from '@/api/sse'
 import { onWorkspaceEvent, useWorkspaceStore } from '@/stores/workspace'
 import { deriveFrontendToolBudgetMs, executeFrontendTool, parseToolArgs } from '@/utils/frontend-tools'
+import {
+  alreadyApplied,
+  applyFrameToParts,
+  deriveProjections,
+  markApplied,
+  openStreamPart,
+  sealTrailingStreamPart,
+  upsertToolPart as writeToolPart
+} from '@/utils/parts'
 import { ErrorCode, type SessionBusyConflict, type SuspendPoolSaturated } from '@/types/api'
 import { frameSeq, isTerminalFrame } from '@/types/sse'
-import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiHealth, type AiHistory, type AiRunCurrent, type AiSessionMirror, type ChatMessage, type MessagePart, type PendingToolCall, type ReasoningPart, type TextPart, type ToolPartPatch, type ToolRun, type ToolRunStatus } from '@/types/ai'
+import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiHealth, type AiHistory, type AiRunCurrent, type AiSessionMirror, type ChatMessage, type MessagePart, type PendingToolCall, type ToolPartPatch, type ToolRunStatus } from '@/types/ai'
 import { parseFormSchema, checkFormValues } from '@/types/form-schema'
-import type { SseConfirmRequestFrame, SseFrame } from '@/types/sse'
+import type { SseFrame } from '@/types/sse'
 import type { WorkspaceActionRecord } from '@/types/tools'
 
 /** sessionStorage 键：会话 id 与镜像前缀。 */
@@ -199,15 +208,78 @@ function migrateMirror(mirror: AiSessionMirror): { messages: AiSessionMirror['me
   return { messages, migrated: true }
 }
 
+/**
+ * 对话时序包 批2 前置（GLM o1）：镜像读取侧的 requiresAction 残留收口。
+ *
+ * 存量 v2 镜像里已持久化的 requiresAction=true 不会被迁移幂等修正，刷新即复活挂起语义 ——
+ * 故在读取侧（loadHistory 镜像分支）收口，且必须发生在 writeMirror 回写**之前**：
+ * 仅对 done 的消息，把仍挂 requiresAction 的工具段降级（requiresAction=false；段 status
+ * 仍 pending 的一并降为 expired，与 loadHistory 空历史的 expired 降级惯例一致）。
+ * 幂等（二次执行无变化）；进行中轮（done!==true，如 suspended 快照）不触碰 —— 存活挂起由
+ * 同一次 loadHistory 里的 restoreSuspendedSnapshot 重建路径重新置真。返回是否有改动
+ * （供调用方决定是否需要回写镜像）。
+ */
+function sanitizeMirrorResidues(messages: ChatMessage[]): boolean {
+  let changed = false
+  for (const message of messages) {
+    if (message.done !== true) {
+      continue
+    }
+    message.parts.forEach((part, index) => {
+      if (part.kind === 'tool' && part.requiresAction) {
+        message.parts.splice(index, 1, {
+          ...part,
+          requiresAction: false,
+          status: part.status === 'pending' ? 'expired' : part.status
+        })
+        changed = true
+      }
+    })
+  }
+  return changed
+}
+
+/** 批2 前置：轮次收尾（done / error 帧）时，消息上仍在等动作的工具段全部过期降级。 */
+function expireResidueToolParts(message: ChatMessage): void {
+  message.parts.forEach((part, index) => {
+    if (part.kind === 'tool' && part.requiresAction) {
+      message.parts.splice(index, 1, { ...part, requiresAction: false, status: 'expired' })
+    }
+  })
+}
+
+/**
+ * 需要"整帧处理完后全量重算派生投影"的帧类型（§6.1 性能注）。
+ *
+ * 收录口径：可能改动**段结构**或**段状态**的帧（工具类帧、段边界帧、轮终态帧）。
+ * `delta` / `reasoning` 是每 token 一帧的高频路径 —— 它们在 case 内与段文本**锁步**维护
+ * `content` / `reasoning`，不触发全量重算（否则每 token 替换 `toolRuns` 数组 ⇒ 工具卡重渲染）。
+ */
+const DERIVE_FRAME_TYPES: ReadonlySet<string> = new Set([
+  'message_start',
+  'message_end',
+  'tool_start',
+  'tool_result',
+  'confirm_request',
+  'confirm_decision',
+  'frontend_tool_request',
+  'frontend_tool_result',
+  'suspended',
+  'done',
+  'error'
+])
+
 function writeMirror(sessionId: string, messages: ChatMessage[], lastRunId: string | null): void {
   try {
     const mirror: AiSessionMirror = {
-      // 双写口径：content 与 text 段并存 —— 旧字段仍是渲染真值（面板不读 parts），
-      // parts 是旁路真值；两者由写入侧保持一致，故镜像里两份都留（读取侧兼容 v1 迁移）
+      // 批2 权威翻转后口径：parts 是**唯一真值**，content/reasoning/toolRuns/pendingCall 是同一次
+      // 写入前由 `deriveProjections` 派生的投影。镜像里两份都留 —— 只为回滚（旧版前端读镜像）与
+      // 外部读（调试/对账脚本直接看 JSON）不必自行派生；权威口径与迁移说明见 types/ai.ts。
       v: MIRROR_VERSION,
       savedAt: Date.now(),
       lastRunId,
-      // 镜像只留展示所需字段（pendingCall 内嵌其中，刷新后可重建确认卡）
+      // 镜像只留展示所需字段（pendingCall 内嵌其中，刷新后可重建确认卡）；
+      // `appliedSeqs` 是内部幂等记账，**不入镜像**（Pick 不含它）
       messages: messages.map((message) => ({
         id: message.id,
         role: message.role,
@@ -221,40 +293,6 @@ function writeMirror(sessionId: string, messages: ChatMessage[], lastRunId: stri
     sessionStorage.setItem(MIRROR_PREFIX + sessionId, JSON.stringify(mirror))
   } catch {
     // 配额/隐私模式等场景忽略：镜像是刷新体验优化，不是正确性依赖
-  }
-}
-
-/** 段序列的下一个 seg（单调递增：封口后另起的段不复用旧编号）。 */
-function nextSeg(parts: MessagePart[]): number {
-  return parts.reduce((max, part) => Math.max(max, part.seg), -1) + 1
-}
-
-/**
- * 取"当前可续写的同类段"，没有则另起一段（seg 递增，streaming=true）。
- * 口径：只有**末尾**且**同类型且未封口**的段才续写 —— 中间夹了工具段/思考段即视为新段
- * （这正是 parts 相对 content 单字段要多记的顺序信息）。
- */
-function openStreamPart(message: ChatMessage, kind: 'text' | 'reasoning'): TextPart | ReasoningPart {
-  const last = message.parts[message.parts.length - 1]
-  if (last && last.kind === kind && last.streaming) {
-    return last
-  }
-  const seg = nextSeg(message.parts)
-  if (kind === 'reasoning') {
-    const part: ReasoningPart = { kind: 'reasoning', seg, text: '', streaming: true }
-    message.parts.push(part)
-    return part
-  }
-  const part: TextPart = { kind: 'text', seg, text: '', streaming: true }
-  message.parts.push(part)
-  return part
-}
-
-/** 封口末尾的流式段（工具段插入前调用：工具调用之后到达的正文属于新的一段）。 */
-function sealTrailingStreamPart(message: ChatMessage): void {
-  const last = message.parts[message.parts.length - 1]
-  if (last && (last.kind === 'text' || last.kind === 'reasoning') && last.streaming) {
-    last.streaming = false
   }
 }
 
@@ -323,10 +361,17 @@ function frameStatusToPendingStatus(status: unknown): PendingToolCall['status'] 
  * 也算终态：用户取消后同一 toolCallId 不应再被重新挂起，`frontend_tool_request` case 的入口
  * 守卫（`hasDecidedPendingResidue`）据此把后到的同 toolCallId 帧挡在**任何新挂起投影**之外，
  * 防"取消竞态重挂"成一张 filling 死卡。
- * 帧终态覆盖乐观 cancelled 属**写入路径**（`applyFrontendToolTerminal` 只覆盖 pending/cancelled
- * 条目），与本函数的**入口拦截**语义互不冲突。
+ * 帧终态覆盖乐观 cancelled 属**写入路径**，两条路各自的口径（F1/F2 收口修后）：
+ * - `frontend_tool_result` 帧路：`applyFrameToParts` 把乐观 cancelled 一并算作本地终态
+ *   （first-wins），帧 status 只改非终态段；
+ * - 非帧路（409 响应体 / 续收快照）：`applyFrontendToolTerminal` 仍按后端终态覆盖
+ *   pending/cancelled 段。
+ * 两者都与本函数的**入口拦截**语义互不冲突（入口拦截在 `frontend_tool_request` / `suspended`）。
+ *
+ * 批2（权威翻转）：入参同时接受段侧 `ToolRunStatus` —— 判据改读段（`hasDecidedPendingResidue`
+ * 读 `part.status`），两个枚举的终态集合在这里取并集。
  */
-function isFrameDecidedPendingStatus(status: PendingToolCall['status']): boolean {
+function isFrameDecidedPendingStatus(status: PendingToolCall['status'] | ToolRunStatus): boolean {
   return status === 'succeeded' || status === 'rejected' || status === 'blocked'
     || status === 'expired' || status === 'cancelled'
 }
@@ -536,7 +581,15 @@ export const useAiStore = defineStore('ai', {
           done: true
         }))
         this.activeRunId = mirror.lastRunId ?? null
-        if (migrated.migrated) {
+        // 批2 前置（GLM o1）：存量镜像残留的 requiresAction=true 在读取侧收口（v1 迁移结果与
+        // v2 intact 都生效），须在 writeMirror 回写之前完成 —— 否则刷新复活挂起语义
+        const sanitized = sanitizeMirrorResidues(this.messages)
+        // 批2（权威翻转）：镜像里的旧投影一律按段重算（存量 v2 镜像可能是双写期的产物，
+        // 投影里仍留着"已终态但挂起卡不消失"的旧口径）—— 落展示态前先归一到段口径
+        this.messages.forEach((message) => deriveProjections(message))
+        if (migrated.migrated || sanitized) {
+          // 只在"迁移过 / 收口过"时回写：无变化时回写会让每次刷新都写盘
+          // （既有幂等断言 `savedAt` 不变即锁这一口径），派生本身是幂等纯函数
           writeMirror(this.sessionId, this.messages, this.activeRunId)
         }
       }
@@ -559,10 +612,14 @@ export const useAiStore = defineStore('ai', {
       }
 
       if (!history.messages || history.messages.length === 0) {
+        // 后端历史为空（重启/TTL 过期）：镜像里的挂起已无法回灌续跑 —— 待决工具段过期降级
+        // （与 loadHistory 空历史的 expired 降级惯例一致）。批2：降级写**段**，投影随之派生。
         for (const message of this.messages) {
-          if (message.pendingCall && message.pendingCall.status === 'pending') {
-            message.pendingCall = { ...message.pendingCall, status: 'expired' }
+          if (!message.parts.some((part) => part.kind === 'tool' && part.requiresAction)) {
+            continue
           }
+          expireResidueToolParts(message)
+          deriveProjections(message)
         }
         this.historyLoaded = true
         // T2b-D#3：historyLoaded 先行置位后再触发快照重建（loadHistory 先行完成，
@@ -573,42 +630,36 @@ export const useAiStore = defineStore('ai', {
 
       this.messages = history.messages.map((item, index) => {
         const role = roleOf(item.type)
-        const toolRuns: ToolRun[] = (item.toolCalls ?? []).map((call) => ({
-          toolCallId: call.id ?? `history-${index}-${call.name ?? 'tool'}`,
-          name: call.name ?? '未知工具',
-          kind: 'UNKNOWN',
-          status: 'succeeded',
-          args: call.arguments,
-          result: (item.toolResponses ?? []).find((response) => response.id === call.id)?.responseData ?? null
-        }))
-        // 双写：历史整体替换的分支同样补 parts（正文段 + 按 toolCalls 顺序的工具段，
-        // result 由 toolResponses 按 id 回填；历史条目没有待决语义，故 requiresAction=false）
+        // 批2：历史整体替换的分支同样**只建段**（正文段 + 按 toolCalls 顺序的工具段，
+        // result 由 toolResponses 按 id 回填；历史条目没有待决语义，故 requiresAction=false），
+        // 旧投影由 deriveProjections 一次产出，不再手工拼 content / toolRuns
         const parts: MessagePart[] = [
           { kind: 'text', seg: 0, text: item.text ?? '', streaming: false },
-          ...toolRuns.map((run, toolIndex): MessagePart => ({
+          ...(item.toolCalls ?? []).map((call, toolIndex): MessagePart => ({
             kind: 'tool',
             seg: toolIndex + 1,
-            toolCallId: run.toolCallId,
-            name: run.name,
-            kind2: run.kind,
-            status: run.status,
-            args: run.args,
-            result: run.result ?? null,
-            messageId: run.messageId,
+            toolCallId: call.id ?? `history-${index}-${call.name ?? 'tool'}`,
+            name: call.name ?? '未知工具',
+            kind2: 'UNKNOWN',
+            status: 'succeeded',
+            args: call.arguments,
+            result: (item.toolResponses ?? []).find((response) => response.id === call.id)?.responseData ?? null,
             requiresAction: false
           }))
         ]
-        return {
+        const message: ChatMessage = {
           id: `history-${index}`,
           role,
-          content: item.text ?? '',
+          content: '',
           parts,
           reasoning: '',
-          toolRuns,
+          toolRuns: [],
           pendingCall: null,
           streaming: false,
           done: true
         }
+        deriveProjections(message)
+        return message
       })
       // 历史里若存在未决挂起，补一张待处理卡片（前端工具/确认门都可能出现在这里）
       this.historyLoaded = true
@@ -675,10 +726,13 @@ export const useAiStore = defineStore('ai', {
           continue
         }
         const kind = entry.kind === 'CONFIRM' ? 'CONFIRM' : 'FRONTEND'
-        // 宿主消息：优先镜像/历史里已持该工具卡的消息；否则最后一条助手消息；都没有才
+        // 宿主消息：优先镜像/历史里已持该工具**段**的消息；否则最后一条助手消息；都没有才
         // append 一条空助手消息作宿主 —— 唯一允许的新消息形态（历史/镜像皆无宿主），
-        // 不复制历史工具卡、无双渲染
-        host = this.messages.find((item) => item.toolRuns.some((run) => run.toolCallId === entry.toolCallId))
+        // 不复制历史工具卡、无双渲染。
+        // 批2（权威翻转）：判据由 `toolRuns.some` 改读 `parts`（段是唯一真值，语义等价）
+        host = this.messages.find((item) => item.parts.some(
+          (part): boolean => part.kind === 'tool' && part.toolCallId === entry.toolCallId
+        ))
           ?? [...this.messages].reverse().find((item) => item.role === 'assistant')
           ?? null
         if (!host) {
@@ -686,24 +740,8 @@ export const useAiStore = defineStore('ai', {
           host.streaming = false
           host.done = true
         }
-        // 就地写唯一投影（复用 T2a 的 pendingCall/toolRun 形态），唯一 upsert 不新增重复工具卡
-        host.pendingCall = {
-          toolCallId: entry.toolCallId,
-          name: entry.name,
-          kind,
-          args: parseToolArgs(entry.arguments),
-          rawArgs: entry.arguments ?? undefined,
-          status: 'pending'
-        }
-        this.upsertToolRun(host, {
-          toolCallId: entry.toolCallId,
-          name: entry.name,
-          kind,
-          status: 'pending',
-          args: entry.arguments ?? undefined
-        })
-        // 双写：宿主消息上同步落工具段（宿主口径不变 —— 仍是"就地唯一投影"，不新增卡片；
-        // 段侧 requiresAction=true 因为该条目正是"等人工/前端动作"的那一个）
+        // 批2：挂起卡不再是"就地写独立投影"，而是**落段再派生** —— 段侧 requiresAction=true
+        // 因为该条目正是"等人工/前端动作"的那一个（派生出唯一 pendingCall，不新增重复工具卡）
         this.upsertToolPart(host, {
           toolCallId: entry.toolCallId,
           name: entry.name,
@@ -712,6 +750,7 @@ export const useAiStore = defineStore('ai', {
           args: entry.arguments ?? undefined,
           requiresAction: true
         })
+        deriveProjections(host)
         if (entry.name === GENERATIVE_FORM_TOOL && !this.activeForm) {
           // deadline = null：不武装本地计时器，后端权威超时收敛（快照路径无 expiresAt 折算依据）
           const spec = parseFormSchema(parseToolArgs(entry.arguments)?.form)
@@ -896,11 +935,19 @@ export const useAiStore = defineStore('ai', {
         if (message) {
           message.streaming = false
           message.done = true
-          // 本轮压根没开始：给占位助手消息一个可读的收尾，避免留空气泡
-          if (error instanceof ApiError && error.code === ErrorCode.SESSION_BUSY) {
-            message.content = message.content || '（本轮未开始：该会话已有一轮正在进行，可一键重挂接收它）'
-          } else if (message.content === '' && error instanceof Error) {
-            message.content = `（本轮未开始：${error.message}）`
+          // 本轮压根没开始：给占位助手消息一个可读的收尾，避免留空气泡。
+          // 批2：正文不再直写 `content` —— 文案写进 text 段（同段口径），投影由 derive 产出。
+          // SESSION_BUSY 用 `||`（正文已有内容则不覆盖），其余错误只在正文为空时补文案；
+          // "正文已有内容"的判据取 **parts**（渲染真值），不读派生投影（同 §6.3 的消费点口径）。
+          const hasText = message.parts.some((part) => part.kind === 'text' && part.text !== '')
+          const literal = error instanceof ApiError && error.code === ErrorCode.SESSION_BUSY
+            ? '（本轮未开始：该会话已有一轮正在进行，可一键重挂接收它）'
+            : error instanceof Error ? `（本轮未开始：${error.message}）` : null
+          if (literal !== null && !hasText) {
+            const part = openStreamPart(message, 'text')
+            part.text = literal
+            part.streaming = false
+            deriveProjections(message)
           }
         }
       }
@@ -1031,17 +1078,51 @@ export const useAiStore = defineStore('ai', {
         this.notice = '没有待处理的确认请求'
         return
       }
-      pending.status = approved ? 'running' : 'rejected'
+      // 批2（权威翻转）：确认门的乐观置位只写**段** —— 挂起卡与运行态全部由段派生。
+      // 宿主 = 持该 toolCallId 工具段的消息（段由 confirm_request 帧建好；缺失时不新建）
+      const host = this.messages.find((item) => item.parts.some(
+        (part): boolean => part.kind === 'tool' && part.toolCallId === pending.toolCallId
+      ))
+      if (host) {
+        this.upsertToolPart(host, {
+          toolCallId: pending.toolCallId,
+          name: pending.name,
+          kind2: pending.kind,
+          status: approved ? 'running' : 'rejected',
+          requiresAction: false
+        })
+        deriveProjections(host)
+      }
       try {
         await aiApi.confirm({ runId, toolCallId: pending.toolCallId, approved, reason: reason ?? null })
         this.suspended = false
       } catch (error) {
         if (error instanceof ApiError && error.code === ErrorCode.DUPLICATE_TOOL_CALL_ID) {
           this.notice = '该确认已提交过（幂等拒绝），无需重复操作'
-          pending.status = 'approved'
+          // approved 并入 running 落段（approved 不是 ToolRunStatus 合法值，与 m-R1 同口径）
+          if (host) {
+            this.upsertToolPart(host, {
+              toolCallId: pending.toolCallId,
+              name: pending.name,
+              kind2: pending.kind,
+              status: 'running',
+              requiresAction: false
+            })
+            deriveProjections(host)
+          }
           return
         }
-        pending.status = 'pending'
+        // 提交失败回退：段回到待决（requiresAction=true），派生出的挂起卡随之复现
+        if (host) {
+          this.upsertToolPart(host, {
+            toolCallId: pending.toolCallId,
+            name: pending.name,
+            kind2: pending.kind,
+            status: 'pending',
+            requiresAction: true
+          })
+          deriveProjections(host)
+        }
         this.notice = error instanceof Error ? error.message : '确认提交失败'
       }
     },
@@ -1105,14 +1186,20 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
-     * T2a-D#3（B3 防御守卫）/ T2a 返修（S3）：该 toolCallId 是否已有**已决**的 pendingCall 投影
-     * （终态判定看全部消息，含本次帧即将写入的那条）。调用方必须在写入新挂起投影**之前**用它判定
-     * —— 已决 toolCallId 不得产生任何新 pending 投影（含 message.pendingCall / suspended / activeForm）。
+     * T2a-D#3（B3 防御守卫）/ T2a 返修（S3）：该 toolCallId 是否已有**已决**的工具段
+     * （终态判定看全部消息，含本次帧即将写入的那条）。调用方必须在写入新挂起语义**之前**用它判定
+     * —— 已决 toolCallId 不得产生任何新挂起段（含 requiresAction 段 / suspended / activeForm）。
+     *
+     * 批2（权威翻转）：判据从 `pendingCall` 投影改读**段**（见下方实现注释）。
      */
     hasDecidedPendingResidue(toolCallId: string): boolean {
+      // 批2（权威翻转）：判据改读**段** —— 挂起投影不再保留终态（终态段 requiresAction=false，
+      // 派生出的 pendingCall 为 null），若继续读投影这个守卫会静默失效（取消竞态重挂复活）。
       return this.messages.some(
-        (item) => item.pendingCall?.toolCallId === toolCallId
-          && isFrameDecidedPendingStatus(item.pendingCall.status)
+        (item) => item.parts.some(
+          (part): boolean => part.kind === 'tool' && part.toolCallId === toolCallId
+            && isFrameDecidedPendingStatus(part.status)
+        )
       )
     },
 
@@ -1127,23 +1214,16 @@ export const useAiStore = defineStore('ai', {
       frame: Extract<SseFrame, { type: 'frontend_tool_request' }>
     ): void {
       // T2a-D#3（B3 防御守卫）/ T2a 返修（S3）："已决 toolCallId 不挂起"的守卫由**调用方**在
-      // 写入 message.pendingCall **之前**前置执行（`hasDecidedPendingResidue`，见
-      // frontend_tool_request case）—— 放在这里会太晚：投影已被写成 'pending'，
+      // 写段（requiresAction=true）**之前**前置执行（`hasDecidedPendingResidue`，见
+      // frontend_tool_request case）—— 放在这里会太晚：段已落 requiresAction，
       // reattach 回放会先渲染一张瞬时"表单状态已丢失"卡，再等后续结局帧收敛。
       disarmFormExpiry()
+      // 批2：挂起投影由段派生，args 取调用方已派生好的 pendingCall（同帧的 frontend_tool_request）
       const args = message.pendingCall?.args ?? parseToolArgs(frame.args)
       const spec = parseFormSchema(args?.form)
       const runId = frame.runId ?? this.activeRunId
       if (!spec || !runId) {
         const result = '表单 schema 解析失败（或缺少 runId），前端无法渲染，已带 cancelled:true 回灌收敛（GFa §8.3）'
-        this.upsertToolRun(message, {
-          toolCallId: frame.toolCallId,
-          name: frame.name,
-          kind: 'FRONTEND',
-          status: 'failed',
-          result
-        })
-        // 双写：本地收尾同样落段（与上面同一字面量）
         this.upsertToolPart(message, {
           toolCallId: frame.toolCallId,
           name: frame.name,
@@ -1152,6 +1232,7 @@ export const useAiStore = defineStore('ai', {
           result,
           requiresAction: false
         })
+        deriveProjections(message)
         void this.submitFrontendToolResult(frame.toolCallId, '', 'frontend-executor', true, runId ?? undefined)
         return
       }
@@ -1346,8 +1427,8 @@ export const useAiStore = defineStore('ai', {
       const message: ChatMessage = {
         id: `u-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         role: 'user',
-        content,
-        // 用户消息一次性成文：单段文本、非流式（双写口径见 ChatMessage.parts）
+        content: '',
+        // 用户消息一次性成文：单段文本、非流式（批2：段是唯一真值，投影建段后派生）
         parts: [{ kind: 'text', seg: 0, text: content, streaming: false }],
         reasoning: '',
         toolRuns: [],
@@ -1355,6 +1436,7 @@ export const useAiStore = defineStore('ai', {
         streaming: false,
         done: true
       }
+      deriveProjections(message)
       this.messages.push(message)
       return message
     },
@@ -1363,7 +1445,7 @@ export const useAiStore = defineStore('ai', {
       const message: ChatMessage = {
         id: `a-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         role: 'assistant',
-        content: initial,
+        content: '',
         // 新助手消息以"流式空文本段"起头：delta 帧直接续写该段（工具段插入时才封口）
         parts: [{ kind: 'text', seg: 0, text: initial, streaming: true }],
         reasoning: '',
@@ -1372,6 +1454,7 @@ export const useAiStore = defineStore('ai', {
         streaming: true,
         done: false
       }
+      deriveProjections(message)
       this.messages.push(message)
       return message
     },
@@ -1430,172 +1513,73 @@ export const useAiStore = defineStore('ai', {
         return
       }
 
+      // R2-1（批2）：seq 幂等 —— 同一帧被重复投递（reattach 全量回放 / 双连接竞态）时整帧跳过：
+      // 不重复累加文本、不重建段、不重放工具卡。只做"同序号去重"，**不做连续性判定** ——
+      // 心跳不占业务 seq、归档续收本就会跳号，序号断层是正常现象（R2-3）。
+      if (seq !== null && alreadyApplied(message, seq)) {
+        return
+      }
+
       switch (frame.type) {
         case 'start':
           this.activeRunId = frame.runId
           this.notice = null
           break
         case 'message_start':
-          // T5 三段式的 start：本条消息的边界开始了（正文/思考段共用同一套帧）
-          message.messageId = frame.messageId
-          message.streaming = true
-          break
         case 'message_end':
-          // T5 三段式的 end：本段内容到此为止（段末不关整条消息 —— 工具调用后可能还有下一段）
-          message.messageId = frame.messageId
+          // T5 三段式的 start/end：本段边界（正文/思考段共用同一套帧）—— 只写消息身份与段边界
+          // （message_end 顺带封口末尾流式段，o-R1），**不改段结构**（R2-2：段收口只发生在工具类帧
+          // 与轮终态）。批2：写入统一走 applyFrameToParts。
+          applyFrameToParts(message, frame)
           break
         case 'delta': {
+          // 高频路径（§6.1 性能注）：段文本与派生投影 content **锁步** `+=`，不调 deriveProjections
+          //（全量重算会每 token 替换 toolRuns 数组 ⇒ 工具卡列表整列重渲染）
           message.content += frame.text
-          // 双写：追加到"末尾未封口的文本段"，被工具段/思考段打断后自动另起新段（seg 递增）。
-          // 高频路径只做这一件事，不再加其它重活
-          const part = openStreamPart(message, 'text')
-          part.text += frame.text
-          part.streaming = true
-          message.streaming = true
+          applyFrameToParts(message, frame)
           break
         }
         case 'reasoning': {
-          // 裁决⑦：有 reasoning 帧才渲染思考链（无帧则 message.reasoning 恒空 → 面板不显示折叠块）
+          // 裁决⑦：有 reasoning 帧才渲染思考链（无帧则 reasoning 恒空 → 面板不显示折叠块）
           message.reasoning += frame.text
-          const part = openStreamPart(message, 'reasoning')
-          part.text += frame.text
-          part.streaming = true
+          applyFrameToParts(message, frame)
           break
         }
         case 'tool_start': {
-          message.toolRuns.push({
-            toolCallId: frame.toolCallId,
-            name: frame.name,
-            kind: frame.kind,
-            status: 'running',
-            args: frame.args
-          })
-          this.upsertToolPart(message, {
-            toolCallId: frame.toolCallId,
-            name: frame.name,
-            kind2: frame.kind,
-            status: 'running',
-            args: frame.args,
-            requiresAction: false
-          })
+          applyFrameToParts(message, frame)
           break
         }
         case 'tool_result': {
-          // 补丁③：终态区分显示 —— 被人工拒绝（REJECTED）保持「已拒绝」（warning 色），
-          // 不让紧随其后的 tool_result(ok=false) 把它覆盖成「执行失败」（danger 色）；
-          // 真失败（后端执行异常）才落 failed。
-          const existing = message.toolRuns.find((run) => run.toolCallId === frame.toolCallId)
-          const rejected = existing?.status === 'rejected'
-          // DC-14 T1：防线③拦截（BLOCKED）也是"未执行"，展示口径与"被拒绝"同类（warning 色 +
-          // 说明原因），不与后端执行失败（danger 色）混用 —— 三者语义不同，用户要能一眼分清。
-          const blocked = frame.status === 'BLOCKED' || existing?.status === 'blocked'
-          // 双写：同一 status 字面量同时写两侧（旧投影 toolRuns 与 parts 的工具段）
-          const status: ToolRunStatus = blocked ? 'blocked' : rejected ? 'rejected' : frame.ok ? 'succeeded' : 'failed'
-          const reason = blocked
-            ? '该工具不在当前工作区上下文的披露范围内，未执行'
-            : rejected ? (existing?.reason ?? '用户拒绝执行') : null
-          this.upsertToolRun(message, {
-            toolCallId: frame.toolCallId,
-            name: frame.name,
-            kind: frame.kind,
-            status,
-            messageId: frame.messageId,
-            result: frame.result ?? null,
-            reason
-          })
-          this.upsertToolPart(message, {
-            toolCallId: frame.toolCallId,
-            name: frame.name,
-            kind2: frame.kind,
-            status,
-            messageId: frame.messageId,
-            result: frame.result ?? null,
-            reason,
-            requiresAction: false
-          })
+          // 补丁③ / DC-14 T1 的终态裁决口径（BLOCKED > REJECTED > ok 三元）落在段上，见
+          // utils/parts.ts 的 applyFrameToParts —— 本 case 不再有任何投影直写
+          applyFrameToParts(message, frame)
           break
         }
         case 'confirm_request': {
           this.suspended = true
-          message.pendingCall = this.toPendingCall(frame, 'CONFIRM')
-          // 工具卡四态之"等待确认"：确认门未决期间，该工具卡显示为等待确认
-          this.upsertToolRun(message, {
-            toolCallId: frame.toolCallId,
-            name: frame.name,
-            kind: 'CONFIRM',
-            status: 'pending',
-            args: frame.args
-          })
-          this.upsertToolPart(message, {
-            toolCallId: frame.toolCallId,
-            name: frame.name,
-            kind2: 'CONFIRM',
-            status: 'pending',
-            args: frame.args,
-            // 待确认 = 等人工动作（该段此刻正在等用户）
-            requiresAction: true
-          })
+          // 工具卡四态之"等待确认"：确认门未决期间该工具卡显示为等待确认（段 status=pending +
+          // requiresAction=true ⇒ 派生出挂起卡）；倒计时元数据随段持久化
+          applyFrameToParts(message, frame)
           break
         }
         case 'confirm_decision': {
-          const pending = message.pendingCall
-          if (pending && pending.toolCallId === frame.toolCallId) {
-            pending.status = frame.approved ? 'approved' : 'rejected'
-          }
-          if (frame.approved) {
-            // 放行后工具立刻进入执行（工具卡转"调用中"，结果帧随后落定）
-            this.upsertToolRun(message, {
-              toolCallId: frame.toolCallId,
-              name: frame.name,
-              kind: 'CONFIRM',
-              status: 'running'
-            })
-            this.upsertToolPart(message, {
-              toolCallId: frame.toolCallId,
-              name: frame.name,
-              kind2: 'CONFIRM',
-              status: 'running',
-              requiresAction: false
-            })
-          } else {
-            const reason = frame.reason ?? '用户拒绝'
-            this.upsertToolRun(message, {
-              toolCallId: frame.toolCallId,
-              name: frame.name,
-              kind: 'CONFIRM',
-              status: 'rejected',
-              reason
-            })
-            this.upsertToolPart(message, {
-              toolCallId: frame.toolCallId,
-              name: frame.name,
-              kind2: 'CONFIRM',
-              status: 'rejected',
-              reason,
-              requiresAction: false
-            })
-          }
+          // approved → running、rejected → rejected 的段裁决在 applyFrameToParts；
+          // 挂起卡随 requiresAction=false 派生为 null（结局由工具卡承载）
+          applyFrameToParts(message, frame)
           this.suspended = false
           break
         }
         case 'frontend_tool_request': {
           if (frame.name === GENERATIVE_FORM_TOOL && this.hasDecidedPendingResidue(frame.toolCallId)) {
-            // T2a 返修（S3）：守卫前移到挂起投影写入**之前** —— 已决 toolCallId 不产生任何新
-            // pending 投影（不写 message.pendingCall、不置 suspended、不武装 activeForm），
+            // T2a 返修（S3）：守卫前移到**写段之前** —— 已决 toolCallId 不产生任何新挂起语义
+            //（不落 requiresAction 段、不置 suspended、不武装 activeForm），
             // 防 reattach 回放先渲染一张瞬时挂起卡、再等后续结局帧收敛
             break
           }
           this.suspended = true
-          message.pendingCall = this.toPendingCall(frame, 'FRONTEND')
-          this.upsertToolPart(message, {
-            toolCallId: frame.toolCallId,
-            name: frame.name,
-            kind2: 'FRONTEND',
-            status: 'pending',
-            args: frame.args,
-            // 待前端执行（含等用户填写的生成式表单）= 等前端动作
-            requiresAction: true
-          })
+          applyFrameToParts(message, frame)
+          // 表单武装前先派生：openGenerativeForm 读派生出的 pendingCall.args
+          deriveProjections(message)
           if (frame.name === GENERATIVE_FORM_TOOL) {
             // GF-B：表单挂起走渲染器通道等用户填写 —— 绝不能让通用执行器兜底
             // （那段说明文本不是值 JSON，会被闸门 400 拒、挂起拖到超时，GFa §8.3）
@@ -1607,40 +1591,14 @@ export const useAiStore = defineStore('ai', {
           break
         }
         case 'frontend_tool_result': {
-          // 前端工具的真执行者就是浏览器：后端这帧只是"前端回灌已收到"的回执
-          // （ok 恒由后端按"收到回灌"置 true），因此**不能**用它把前端自己判定的失败
-          // 改写成"已成功"（补丁③配套：本地已失败/已拒绝则保持原终态）。
-          // T2a-D#1（C1 守卫）：localTerminal 集合含 succeeded/expired —— 已终态的 toolRun
-          // 投影不被帧回执改写（目标 toolRun 已终态不改写）。
-          const existing = message.toolRuns.find((run) => run.toolCallId === frame.toolCallId)
-          const localTerminal = existing?.status === 'failed' || existing?.status === 'rejected'
-            || existing?.status === 'blocked' || existing?.status === 'succeeded'
-            || existing?.status === 'expired'
-          // 双写：同一 status 字面量同时写两侧
-          const status: ToolRunStatus = localTerminal ? (existing?.status ?? 'failed') : frame.ok ? 'succeeded' : 'failed'
-          this.upsertToolRun(message, {
-            toolCallId: frame.toolCallId,
-            name: frame.name,
-            kind: 'FRONTEND',
-            status,
-            messageId: frame.messageId,
-            result: frame.result ?? null
-          })
-          this.upsertToolPart(message, {
-            toolCallId: frame.toolCallId,
-            name: frame.name,
-            kind2: 'FRONTEND',
-            status,
-            messageId: frame.messageId,
-            result: frame.result ?? null,
-            requiresAction: false
-          })
-          // T2a-D#1/D#2：帧 status 广播**只作用 pendingCall 投影**，且只覆盖仍处
-          // pending/乐观 cancelled 的条目（广播域守卫）；帧终态为最终裁决（A2）。
-          // T2a 返修（S2）：终态**保留**只限 generative_form —— 通用 FRONTEND 工具
-          // （navigate_to 等）维持基线"收掉挂起卡"语义（结局由 toolRun 卡承载，留着会多一张卡）。
-          const terminal = frameStatusToPendingStatus(frame.status) ?? (frame.ok ? 'succeeded' : null)
-          this.applyFrontendToolTerminal(frame.toolCallId, terminal)
+          // 段侧终态裁决（帧 status 优先 → ok 兜底，本地已终态 first-wins）与 requiresAction 收口
+          // 全在 applyFrameToParts —— 它是本帧型**唯一**的段写点（F2 收口修：此处原先还二次调用
+          // applyFrontendToolTerminal。F1 之后该调用对绝大多数段是空写（段早已非 pending/cancelled），
+          // 唯一不空的是本地乐观 cancelled 段：applyFrameToParts 的 first-wins 保留了 'cancelled'，
+          // 二次调用却按帧 status 把它翻成另一种终态 —— 同一段两个写点给出不同裁决，正是要收掉的
+          // 双写口径分裂面）。挂起卡随 requiresAction=false 由派生抽掉。
+          // 非帧路径（409 响应体 / 续收快照）仍用 applyFrontendToolTerminal 就地收敛，见其注释。
+          applyFrameToParts(message, frame)
           if (this.activeForm?.toolCallId === frame.toolCallId) {
             // 结局帧已到：表单收敛（提交/取消/超时皆自此收尾）。
             // T2a-D#2（B2 缓释）：帧到达时本地仍在填写（未在提交在途）→ 该表单已被他端提交/处理
@@ -1661,27 +1619,13 @@ export const useAiStore = defineStore('ai', {
           if (waiting) {
             if (waiting.name === GENERATIVE_FORM_TOOL && this.hasDecidedPendingResidue(waiting.toolCallId)) {
               // T2b 顺手项③（GLM 复核 F4）：与 frontend_tool_request case 同款的 residue 守卫 —
-              // 已决 toolCallId 不产生新挂起投影（对齐 isFrameDecidedPendingStatus 口径，勘误 4）
+              // 已决 toolCallId 不产生新挂起语义（对齐 isFrameDecidedPendingStatus 口径，勘误 4）
               break
             }
             this.suspended = true
-            message.pendingCall = {
-              toolCallId: waiting.toolCallId,
-              name: waiting.name,
-              kind: waiting.kind === 'FRONTEND' ? 'FRONTEND' : 'CONFIRM',
-              args: parseToolArgs(waiting.arguments),
-              rawArgs: waiting.arguments,
-              status: 'pending'
-            }
-            // 双写（更新语义）：本帧不写 toolRuns 投影，故**只更新已存在的工具段**
-            // （requiresAction=true，status 不改 —— 与旧投影保持同名同值）；
-            // 段尚不存在则留给紧随其后的 confirm_request / frontend_tool_request 建立
-            this.upsertToolPart(message, {
-              toolCallId: waiting.toolCallId,
-              name: waiting.name,
-              kind2: waiting.kind,
-              requiresAction: true
-            }, false)
+            // 本帧**只更新已存在的工具段**（requiresAction=true，status 不改；createIfMissing=false）
+            // —— 段尚不存在则留给紧随其后的 confirm_request / frontend_tool_request 建立
+            applyFrameToParts(message, frame)
           }
           break
         }
@@ -1694,7 +1638,12 @@ export const useAiStore = defineStore('ai', {
         case 'done': {
           message.streaming = false
           message.done = true
-          message.pendingCall = message.pendingCall?.status === 'pending' ? null : message.pendingCall
+          // o-R1：轮终态封口末尾流式段（否则已完成的消息里仍留着 streaming 段的假态，且会被
+          // 镜像持久化）+ 批2 前置：仍在等动作的工具段一并过期降级（与空历史 expired 降级惯例一致）。
+          // 旧口径的 `message.pendingCall = pendingCall?.status === 'pending' ? null : ...` 直写
+          // 已删除 —— 挂起卡由段派生（requiresAction=false ⇒ 派生为 null）
+          sealTrailingStreamPart(message)
+          expireResidueToolParts(message)
           if (this.activeForm !== null) {
             // 轮次收尾时表单未决（如后端侧超时/放弃）：本地一并收起，计时器随之中和
             disarmFormExpiry()
@@ -1709,6 +1658,9 @@ export const useAiStore = defineStore('ai', {
         case 'error': {
           message.streaming = false
           message.done = true
+          // 出错收尾与 done 同口径：封口末尾流式段 + 待决工具段过期降级
+          sealTrailingStreamPart(message)
+          expireResidueToolParts(message)
           if (this.activeForm !== null) {
             disarmFormExpiry()
             this.activeForm = null
@@ -1721,111 +1673,100 @@ export const useAiStore = defineStore('ai', {
           break
       }
 
+      // 工具类帧 / 段边界帧 / 轮终态帧到达后：段是唯一真值 ⇒ 全量重算派生投影（§6.1）。
+      // delta / reasoning 已在各自 case 里与段文本锁步维护，故不在此列（高频路径不重算）。
+      if (DERIVE_FRAME_TYPES.has(frame.type)) {
+        deriveProjections(message)
+      }
+      // R2-1：记账"已应用"（放在 case 处理之后 —— 半途 break 的帧同样算处理过，不被重放）
+      if (seq !== null) {
+        markApplied(message, seq)
+      }
+
       if (isTerminalFrame(frame)) {
         this.loading = false
       }
     },
 
-    /** 把挂起请求帧转成展示态挂起调用。 */
-    toPendingCall(
-      frame: SseConfirmRequestFrame | Extract<SseFrame, { type: 'frontend_tool_request' }>,
-      kind: 'CONFIRM' | 'FRONTEND'
-    ): PendingToolCall {
-      return {
-        toolCallId: frame.toolCallId,
-        name: frame.name,
-        kind,
-        args: parseToolArgs(frame.args),
-        rawArgs: frame.args,
-        timeoutSeconds: frame.timeoutSeconds,
-        // T4：绝对到期时刻（服务端给）；缺字段时由倒计时组件回落到 timeoutSeconds
-        expiresAt: frame.expiresAt,
-        // T4-3：帧构造时刻（实时 / 归档帧都带）—— 倒计时据此按服务端剩余时长折算（见 foldDeadline）
-        atMs: frame.atMs,
-        status: 'pending'
-      }
-    },
-
     /**
-     * T2a-D#1/D#2：把帧裁决的终态广播到 pendingCall 投影 —— 全部持该 toolCallId 且
-     * 仍处 pending/乐观 cancelled 的消息就地置终态；toolRun 投影由各自帧写入、这里不改写
-     * （C1 双守卫之一：广播只作用 pendingCall 投影；之二的 toolRun 侧守卫在帧 handler 内）。
+     * T2a-D#1/D#2：把帧裁决的终态广播到**段**（挂起投影由其派生）—— 全部持该 toolCallId 且
+     * 仍处 pending / 乐观 cancelled / 仍挂 requiresAction 的段就地置终态（已终态段 first-wins 不动）。
+     *
+     * 批2（权威翻转）：原先把终态广播到 `pendingCall` 的那一半已删除 —— 挂起卡是段的派生结果，
+     * 「段收口 ⇒ 挂起卡消失」由 deriveProjections 保证。
      */
     applyPendingTerminal(toolCallId: string, status: PendingToolCall['status']): void {
+      // 段侧终态映射（approved 并入 running —— approved 不是 ToolRunStatus 合法值）
+      const mapped: ToolRunStatus = status === 'approved' ? 'running' : status
       for (const item of this.messages) {
-        const pending = item.pendingCall
-        if (pending && pending.toolCallId === toolCallId
-          && (pending.status === 'pending' || pending.status === 'cancelled')) {
-          pending.status = status
+        const index = item.parts.findIndex((part) => part.kind === 'tool' && part.toolCallId === toolCallId)
+        const part = index >= 0 ? item.parts[index] : undefined
+        if (part && part.kind === 'tool'
+          && (part.status === 'pending' || part.status === 'cancelled' || part.requiresAction)) {
+          item.parts.splice(index, 1, { ...part, requiresAction: false, status: mapped })
+          deriveProjections(item)
         }
       }
     },
 
     /**
-     * T2a 返修（S2）：`frontend_tool_result` 帧 / 409 响应体的终态投影。与
-     * {@link applyPendingTerminal} 的差别是**只对 generative_form 保留终态卡**：通用 FRONTEND
-     * 工具（navigate_to / download_export_file 等）的结局由 toolRun 卡承载，基线语义是
-     * "收掉挂起投影"（pendingCall = null），保留会与 toolRun 卡叠成一张冗余"已执行"卡。
-     * 判定依据取投影自身的既有字段（kind + name），不依赖帧字段（帧缺 name 也不误判）。
-     * `status === null` = 帧未给可翻译终态且 ok=false（旧后端口径）：沿用基线收卡。
+     * 前端工具结局的**段级**终态收口。与 {@link applyPendingTerminal} 的差别是**只对
+     * generative_form 落终态**：通用 FRONTEND 工具（navigate_to / download_export_file 等）
+     * 只收 requiresAction（结局由结果帧承载），因为它的挂起卡本来就该收掉（留着会与工具卡
+     * 叠成一张冗余"已执行"卡）。判定依据取段自身的既有字段（kind2 + name），不依赖帧字段。
+     * `status === null` = 未给可翻译终态（旧后端口径）：只收 requiresAction。
+     *
+     * 调用点（F2 收口修后**只剩非帧路径**）：
+     * - 409 DUPLICATE 响应体的条目 status（{@link submitFrontendToolResult}）；
+     * - 续收快照里非 PENDING 条目对本地残留的就地收敛（{@link restoreSuspendedSnapshot}）。
+     * `frontend_tool_result` 帧路径**不再调用本 action** —— 该帧型的段写点是唯一的
+     * `applyFrameToParts`（F1 起它同时承载 status 与 requiresAction；原先这里被二次调用，
+     * 在帧序下恒为空写，构成双写口径分裂面）。
+     *
+     * 因此下面 GF 分支的"仍处 pending/cancelled 才写 status"守卫**不是死分支**：它服务的正是
+     * 上述两条没有结果帧的收敛路径（有帧时段早已终态，条件自然为假 —— 两种情形同一条守卫覆盖）。
+     *
+     * 批2（权威翻转）：原先直接改 `item.pendingCall` 的那一半已删除 —— 挂起卡是段的派生结果。
      */
     applyFrontendToolTerminal(toolCallId: string, status: PendingToolCall['status'] | null): void {
+      // approved 并入 running（同 applyPendingTerminal 映射）
+      const mapped: ToolRunStatus | null = status === null ? null : status === 'approved' ? 'running' : status
       for (const item of this.messages) {
-        const pending = item.pendingCall
-        if (!pending || pending.toolCallId !== toolCallId) {
+        const partIndex = item.parts.findIndex((part) => part.kind === 'tool' && part.toolCallId === toolCallId)
+        const part = partIndex >= 0 ? item.parts[partIndex] : undefined
+        if (!part || part.kind !== 'tool') {
           continue
         }
-        if (pending.kind !== 'FRONTEND' || pending.name !== GENERATIVE_FORM_TOOL) {
-          // 通用 FRONTEND 工具：基线语义 —— 收掉挂起投影（终态由 toolRun 卡展示）
-          item.pendingCall = null
-          continue
+        const generative = part.kind2 === 'FRONTEND' && part.name === GENERATIVE_FORM_TOOL
+        if (!generative) {
+          // 通用 FRONTEND：只收 requiresAction；终态段状态由结果帧 / 本地结局的写点承载，不动
+          if (part.requiresAction) {
+            item.parts.splice(partIndex, 1, { ...part, requiresAction: false })
+            deriveProjections(item)
+          }
+        } else if (part.status === 'pending' || part.status === 'cancelled') {
+          // GF 仍处待决：status===null 只收 requiresAction（status 不动），否则落映射终态
+          item.parts.splice(partIndex, 1, mapped === null
+            ? { ...part, requiresAction: false }
+            : { ...part, requiresAction: false, status: mapped })
+          deriveProjections(item)
         }
-        if (pending.status !== 'pending' && pending.status !== 'cancelled') {
-          // 已落定的终态不被后续帧改写（first-wins 单调）
-          continue
-        }
-        if (status === null) {
-          item.pendingCall = null
-          continue
-        }
-        pending.status = status
+        // GF 已终态段：first-wins 单调，跳过
       }
-    },
-
-    /** 同一 toolCallId 的工具卡就地更新，避免重复卡片。 */
-    upsertToolRun(message: ChatMessage, run: ToolRun): void {
-      const index = message.toolRuns.findIndex((item) => item.toolCallId === run.toolCallId)
-      if (index >= 0) {
-        const existing = message.toolRuns[index]
-        if (existing) {
-          message.toolRuns.splice(index, 1, { ...existing, ...run })
-        }
-        return
-      }
-      message.toolRuns.push(run)
     },
 
     /**
-     * 工具帧 → `parts` 双写的**唯一写点**（对话时序包 批1）：与 {@link upsertToolRun} 同语义
-     * （按 toolCallId 就地 spread 合并，不产生重复段），差别只在写的是段序列。
+     * 工具帧 → `parts` 的唯一写点（对话时序包 批1 建立、批2 起是权威写口）：
+     * 与批1 的 `upsertToolRun` 同语义（按 toolCallId 就地 spread 合并，不产生重复段），
+     * 差别只在写的是段序列。本 action 是 `utils/parts.ts` 纯函数的**薄包装**（既有调用点与
+     * 测试沿用 action 形态，纯函数层可独立单测）。
      *
      * 新建时先**封口末尾的流式段**（工具调用之后到达的正文属于新的一段，seg 单调递增）；
-     * `createIfMissing=false` = 只更新语义（调用点同帧未写 toolRuns 投影时用，避免凭空多出一段
-     * 只有 parts 有的卡）。status 省略时保留段上原值，理由见 {@link ToolPartPatch}。
+     * `createIfMissing=false` = 只更新语义（suspended 帧用，避免凭空多出一段只有 parts 有的卡）。
+     * status 省略时保留段上原值，理由见 {@link ToolPartPatch}。
      */
     upsertToolPart(message: ChatMessage, patch: ToolPartPatch, createIfMissing = true): void {
-      const index = message.parts.findIndex((part) => part.kind === 'tool' && part.toolCallId === patch.toolCallId)
-      const existing = index >= 0 ? message.parts[index] : undefined
-      if (existing && existing.kind === 'tool') {
-        message.parts.splice(index, 1, { ...existing, ...patch })
-        return
-      }
-      const status = patch.status
-      if (!createIfMissing || status === undefined) {
-        return
-      }
-      sealTrailingStreamPart(message)
-      message.parts.push({ kind: 'tool', seg: nextSeg(message.parts), ...patch, status })
+      writeToolPart(message, patch, createIfMissing)
     },
 
     /**
@@ -1842,6 +1783,18 @@ export const useAiStore = defineStore('ai', {
       message: ChatMessage,
       frame: Extract<SseFrame, { type: 'frontend_tool_request' }>
     ): Promise<void> {
+      // 批2：本地执行开跑即落 running（只更新语义 —— 段由 frontend_tool_request 帧建好；
+      // 段不再等动作）——前端工具段生命周期 pending→running→终态，与确认门放行同口径。
+      // 先让出同步窗口：request 帧的 pending 段必须先落盘（m-R2 写点①的同步可观测语义）
+      await Promise.resolve()
+      this.upsertToolPart(message, {
+        toolCallId: frame.toolCallId,
+        name: frame.name,
+        kind2: 'FRONTEND',
+        status: 'running',
+        requiresAction: false
+      }, false)
+      deriveProjections(message)
       const execution = await executeFrontendTool({
         name: frame.name,
         toolCallId: frame.toolCallId,
@@ -1849,14 +1802,7 @@ export const useAiStore = defineStore('ai', {
         budgetMs: deriveFrontendToolBudgetMs(frame.timeoutSeconds)
       })
       const status: ToolRunStatus = execution.ok ? 'succeeded' : 'failed'
-      this.upsertToolRun(message, {
-        toolCallId: frame.toolCallId,
-        name: frame.name,
-        kind: 'FRONTEND',
-        status,
-        result: execution.result
-      })
-      // 双写：浏览器侧执行结局同样落段（工具段在此之前由 frontend_tool_request 建好）
+      // 批2：浏览器侧执行结局落段（工具段在此之前由 frontend_tool_request 建好），投影随段派生
       this.upsertToolPart(message, {
         toolCallId: frame.toolCallId,
         name: frame.name,
@@ -1865,6 +1811,7 @@ export const useAiStore = defineStore('ai', {
         result: execution.result,
         requiresAction: false
       })
+      deriveProjections(message)
       if (execution.availability === 'degraded' || execution.availability === 'unavailable') {
         this.notice = execution.result
       }

@@ -188,25 +188,32 @@ export interface ChatMessage {
   messageId?: string
   content: string
   /**
-   * 消息的**段序列**（对话时序包 批1 的双写旁路）：带顺序信息的判别联合 ——
-   * 文本段 / 思考段 / 工具段按真实时序交错，弥补 content + toolRuns + pendingCall 三字段
-   * 并列、字段间无顺序信息的缺口。
+   * 消息的**段序列**：带顺序信息的判别联合 —— 文本段 / 思考段 / 工具段按真实时序交错，
+   * 弥补 content + toolRuns + pendingCall 三字段并列、字段间无顺序信息的缺口。
    *
-   * 本批口径（过渡态，务必按此理解）：`parts` 是**旁路真值**，`content` / `toolRuns` /
-   * `pendingCall` 仍是**渲染真值**（面板不读 parts），两侧由写入侧双写保证逐字一致
-   * （视觉零变化）；权威翻转（渲染改读 parts）是后续批的事。因此任何写入旁路数据的调用点，
-   * 都必须同时按同一字面量写旧投影 —— 单侧写会立刻造成两侧漂移。
+   * 本批口径（**权威翻转后**，对话时序包 批2）：`parts` 是**唯一真值**（面板按它渲染，
+   * 帧只写它）；下方 `content` / `reasoning` / `toolRuns` / `pendingCall` 四个字段是同一份
+   * 数据的**派生投影**（`utils/parts.ts` 的 `deriveProjections` 是唯一写口，delta / reasoning
+   * 高频路径由 store 与段文本锁步 `+=`），保留它们只为存量读点（getter / 镜像 / 外部读）零改动。
+   * 任何新写入点都必须写段、再派生 —— 直接写旧字段会与段漂移。
    */
   parts: MessagePart[]
-  /** 思考链文本（当前后端不产 reasoning 帧，留字段供 b 棒按需填充） */
+  /** 思考链文本（= reasoning 段 join；后端当前不产 reasoning 帧，留字段供前向兼容） */
   reasoning: string
   toolRuns: ToolRun[]
-  /** 当前挂起（待确认 / 待前端执行）的工具调用 */
+  /** 当前挂起（待确认 / 待前端执行）的工具调用：= 最后一个 requiresAction 的工具段派生 */
   pendingCall: PendingToolCall | null
   /** 正文生成中 */
   streaming: boolean
   /** 已收到终帧 */
   done: boolean
+  /**
+   * 已应用过的帧序号（`types/sse.ts` 的 `frameSeq`；R2-1 的重复投递幂等记账）。
+   *
+   * **内部幂等记账，不入镜像**：`writeMirror` 的 `Pick` 不含本字段（刷新后新消息从空集合起算，
+   * 旧帧的"已应用"事实不必跨刷新保留 —— 重挂以 `runSeq.lastSeq` 为准）。
+   */
+  appliedSeqs?: number[]
 }
 
 /** 消息段序号：同一消息内单调递增（封口后另起的段不复用编号）。 */
@@ -249,6 +256,15 @@ export interface ToolPart extends MessagePartBase {
   messageId?: string
   /** 该工具段当前是否在等人工/前端动作（确认门待放行、前端工具待执行） */
   requiresAction: boolean
+  /**
+   * 确认门 / 前端工具的等待上限与到期口径（T4 / T4-3 原文，仅 CONFIRM / FRONTEND 段有）。
+   *
+   * 为什么落在段上（批2 起）：`message.pendingCall` 已改为由段派生，若这几个字段不随段持久化，
+   * 派生出的挂起卡就丢了倒计时口径（确认卡会从"剩余 N 秒"退化成"等待人工确认"）。
+   */
+  timeoutSeconds?: number
+  expiresAt?: number
+  atMs?: number
 }
 
 /** 消息段判别联合（按 `kind` 判别）。 */
@@ -256,9 +272,9 @@ export type MessagePart = TextPart | ReasoningPart | ToolPart
 
 /**
  * `upsertToolPart` 的补丁口径：前三项定位与建立段所需，其余为可选就地更新字段。
- * 字段名与 `ToolRun` 同名，便于"同一帧同时写两侧"时逐字段对齐。
+ * 字段名与 `ToolPart` / `ToolRun` 同名，便于"同一帧同时写两侧"时逐字段对齐。
  *
- * `status` 可选：**只更新**语义的调用点（如 suspended 帧，它不写 toolRuns 投影）不提供 status，
+ * `status` 可选：**只更新**语义的调用点（如 suspended 帧，它不写工具投影）不提供 status，
  * 就地合并时保留段上原值 —— 若给成新值就会与同帧没被改写的旧投影对不上。
  */
 export interface ToolPartPatch {
@@ -271,6 +287,10 @@ export interface ToolPartPatch {
   result?: string | null
   reason?: string | null
   messageId?: string
+  /** 见 {@link ToolPart.timeoutSeconds}（确认门/前端工具的等待口径，随段持久化） */
+  timeoutSeconds?: number
+  expiresAt?: number
+  atMs?: number
 }
 
 /** 展示态的挂起调用（由 SSE 帧聚合而来）。 */
@@ -308,8 +328,11 @@ export interface PendingToolCall {
  * 页签级会话镜像（sessionStorage）写入形态。
  *
  * 版本（`v`，对话时序包 批1 起）：当前为 {@link MIRROR_VERSION}。旧镜像（缺 `v` 或 `v < 2`）
- * 由读取侧 `migrateMirror` 迁移出 `parts` 后立即回写；写入侧一律带 `v` 与 `parts`
- * （双写口径：`content` 与 text 段并存 —— 旧字段仍是渲染真值，parts 是旁路真值）。
+ * 由读取侧 `migrateMirror` 迁移出 `parts` 后立即回写；写入侧一律带 `v` 与 `parts`。
+ *
+ * 批2（权威翻转）起：`parts` 是唯一真值，`content` / `reasoning` / `toolRuns` / `pendingCall`
+ * 是同一次写入前由段派生出的投影 —— 镜像里**仍双存**两份，为的是回滚（旧版前端读镜像）与
+ * 外部读（调试/对账脚本直接看 JSON）不需要自行派生。
  */
 export interface AiSessionMirror {
   /** 镜像结构版本（缺省 = v1 旧镜像，需迁移） */
@@ -323,7 +346,7 @@ export interface AiSessionMirror {
 /**
  * 当前镜像结构版本：
  * - v1（隐式）：只有 `content` / `toolRuns` / `pendingCall`，无 `parts`；
- * - v2（对话时序包 批1）：新增 `parts` 段序列双写。
+ * - v2（对话时序包 批1，批2 沿用）：新增 `parts` 段序列（批2 起为唯一真值，旧字段为派生投影）。
  */
 export const MIRROR_VERSION = 2
 

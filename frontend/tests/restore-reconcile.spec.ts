@@ -155,7 +155,7 @@ describe('restoreSuspendedSnapshot 的 await 后二次对账', () => {
     })
     expect(store.suspended).toBe(true)
     expect(store.activeRunId).toBe('run-old')
-    // 双写：宿主消息上同步落 ToolPart（requiresAction 依帧为真）
+    // 批2：宿主消息上落 ToolPart（requiresAction 依帧为真），挂起卡由段派生（不再独立写投影）
     expect(host?.toolRuns).toHaveLength(1)
     expect(host?.parts.map((part) => part.kind)).toEqual(['text', 'tool'])
     expect(host?.parts[1]).toMatchObject({

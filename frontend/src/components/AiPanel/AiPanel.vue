@@ -159,17 +159,140 @@
             <i class="dot"></i><i class="dot"></i><i class="dot"></i>
           </span>
 
-          <!-- 思考链折叠：**有 reasoning 帧才渲染**（裁决⑦，无帧则整块不出现） -->
-          <details v-if="m.reasoning" class="mb-1.5 text-xs text-[#909399]">
-            <summary class="cursor-pointer">思考过程</summary>
-            <div class="mt-1 px-2 py-1.5 bg-[#fafafa] border-l-2 border-solid border-[#dcdfe6] whitespace-pre-wrap max-h-40 overflow-y-auto">{{ m.reasoning }}</div>
-          </details>
+          <!-- 消息体：按 parts 段序列渲染（对话时序包 批2 权威翻转）——
+               文本 / 思考 / 工具三类段按真实时序自上而下排列（工具夹在正文中间即出现
+               "正文 → 工具卡 → 正文"的真实顺序）。key 用业务稳定 id（toolCallId / kind-seg），
+               禁用数组下标（§7 R4-3）。 -->
+          <template
+            v-for="part in m.parts"
+            :key="part.kind === 'tool' ? part.toolCallId : part.kind + '-' + part.seg"
+          >
+            <!-- 正文段（原 v-if="m.content" 的正文块，改按段渲染） -->
+            <div v-if="part.kind === 'text' && part.text" class="whitespace-pre-wrap">{{ part.text }}</div>
 
-          <div v-if="m.content" class="whitespace-pre-wrap">{{ m.content }}</div>
+            <!-- 思考链折叠：**有 reasoning 段才渲染**（裁决⑦，无帧则整块不出现） -->
+            <details v-else-if="part.kind === 'reasoning' && part.text" class="mb-1.5 text-xs text-[#909399]">
+              <summary class="cursor-pointer">思考过程</summary>
+              <div class="mt-1 px-2 py-1.5 bg-[#fafafa] border-l-2 border-solid border-[#dcdfe6] whitespace-pre-wrap max-h-40 overflow-y-auto">{{ part.text }}</div>
+            </details>
 
-          <!-- 逐条复制（苞 B 项 2）：hover 或键盘聚焦时显现；正文为空（流式空气泡）不出按钮。
-               "已复制"反馈走组件局部状态（下面的 copyState），不占用单槽位的 ai.notice。 -->
-          <div v-if="m.content" class="mt-1 flex items-center justify-end gap-1.5">
+            <template v-else-if="part.kind === 'tool'">
+              <!-- 工具卡（四态 + 参数 + 结果）：内容沿用批1，位置改由段决定 -->
+              <div class="mt-1.5 border border-solid border-[#dcdfe6] rounded-md p-2 bg-white">
+                <div class="flex items-center gap-1.5 font-semibold text-[13px] flex-wrap">
+                  <el-icon color="#409EFF"><Operation /></el-icon>
+                  <span>{{ toolLabel(part.name) }}</span>
+                  <el-tag v-if="part.kind2 === 'FRONTEND'" size="small" effect="plain">前端工具</el-tag>
+                  <el-tag v-else-if="part.kind2 === 'CONFIRM'" size="small" type="warning" effect="plain">确认门</el-tag>
+                  <el-tag :size="'small'" :type="toolTagType(part.status)" :effect="part.status === 'running' ? 'dark' : 'light'">
+                    {{ toolStatusLabel(part.status) }}
+                  </el-tag>
+                </div>
+                <div v-if="part.args" class="mt-1.5 text-xs text-[#909399] break-all">
+                  <code>{{ part.args }}</code>
+                </div>
+                <div v-if="part.result" class="mt-1.5 px-2 py-1 text-xs text-[#606266] bg-[#fafafa] rounded max-h-24 overflow-y-auto whitespace-pre-wrap">{{ part.result }}</div>
+                <div v-if="part.reason" class="mt-1 text-xs text-[#f56c6c]">原因：{{ part.reason }}</div>
+              </div>
+
+              <!-- 挂起卡片：HITL 确认（确认/拒绝双路径）或待前端执行。
+                   批2 过渡形态：挂起卡跟随其工具段位置（③b 把两者合并成一卡之前）；
+                   单槽 pendingCall 保证每条消息至多一张挂起卡。 -->
+              <div v-if="m.pendingCall && m.pendingCall.toolCallId === part.toolCallId" :data-testid="'pending-card-' + m.pendingCall.toolCallId" class="mt-2 border border-solid border-[#dcdfe6] rounded-md p-2 bg-white">
+                <div class="flex items-center gap-1.5 font-semibold text-[13px] flex-wrap">
+                  <el-icon color="#409EFF"><Operation /></el-icon>
+                  <span>{{ toolLabel(m.pendingCall.name) }}</span>
+                  <el-tag v-if="m.pendingCall.kind === 'CONFIRM'" size="small" type="warning">需确认</el-tag>
+                  <el-tag v-else size="small" type="success">自动</el-tag>
+                  <el-tag v-if="m.pendingCall.status === 'expired'" size="small" type="info">会话已失效</el-tag>
+                </div>
+                <div v-if="argsText(m.pendingCall.args)" class="mt-1.5 text-xs text-[#909399] break-all">
+                  <code>{{ argsText(m.pendingCall.args) }}</code>
+                </div>
+
+                <template v-if="m.pendingCall.kind === 'CONFIRM' && m.pendingCall.status === 'pending'">
+                  <div class="mt-1.5 flex items-center gap-2 text-xs">
+                    <span v-if="remainingSeconds !== null" :class="confirmExpired ? 'text-[#c0c4cc]' : 'text-[#e6a23c]'">
+                      {{ confirmExpired ? '确认已超时（按钮已置灰），本轮将按拒绝/超时收尾' : `剩余确认时间 ${formatCountdown(remainingSeconds)}` }}
+                    </span>
+                    <span v-else class="text-[#909399]">等待人工确认</span>
+                  </div>
+                  <el-input
+                    v-model="rejectReason"
+                    type="textarea"
+                    :rows="2"
+                    resize="none"
+                    class="mt-2"
+                    placeholder="拒绝原因（可选，填了会原样回填给模型）"
+                  />
+                  <div class="mt-2 flex gap-2 justify-end">
+                    <el-button size="small" :disabled="confirmExpired || deciding" @click="decide(false)">拒绝</el-button>
+                    <el-button size="small" type="primary" :disabled="confirmExpired || deciding" @click="decide(true)">确认执行</el-button>
+                  </div>
+                </template>
+
+                <div v-else-if="m.pendingCall.kind === 'FRONTEND' && m.pendingCall.name === GENERATIVE_FORM_TOOL" class="mt-2">
+                  <!-- GF-B：生成式表单挂起 —— 渲染 FormRenderer 等用户填写（同 toolCallId 可重发/取消） -->
+                  <!-- T2a-D#3：同 toolCallId 至多一个 FormRenderer —— 只渲染在宿主消息（最后一条
+                    持该挂起调用的消息）上，其余消息的挂起卡只出卡头/终态 tag -->
+                  <FormRenderer
+                    v-if="liveForm && liveForm.toolCallId === m.pendingCall.toolCallId && m.id === formHostMessageId"
+                    :key="liveForm.toolCallId"
+                    :schema="liveForm.form"
+                    :submitting="liveForm.status === 'submitting'"
+                    :error="liveForm.error"
+                    :remaining-seconds="formRemainingSeconds"
+                    @submit="onFormSubmit"
+                    @cancel="onFormCancel"
+                  />
+                  <div v-else class="flex flex-col items-end gap-1">
+                    <!-- T2a-D#2：帧终态由 pendingCall 投影承载（含刷新后镜像里的终态残留），按终态展示 -->
+                    <el-tag v-if="m.pendingCall.status === 'cancelled'" data-testid="tag-form-cancelled" size="small" type="info">表单已取消</el-tag>
+                    <el-tag v-else-if="m.pendingCall.status === 'succeeded'" size="small" type="success">表单已提交</el-tag>
+                    <el-tag v-else-if="m.pendingCall.status === 'expired'" size="small" type="info">会话已失效</el-tag>
+                    <el-tag v-else-if="m.pendingCall.status === 'rejected' || m.pendingCall.status === 'blocked'" size="small" type="warning">表单未提交</el-tag>
+                    <el-tag v-else-if="ai.activeForm?.status === 'cancelled'" size="small" type="info">表单已取消</el-tag>
+                    <el-tag v-else-if="ai.activeForm?.status === 'submitted'" size="small" type="success">表单已提交，等待回执</el-tag>
+                    <el-tag v-else size="small" type="info">表单状态已丢失（刷新后无法续填），等待后端超时收敛</el-tag>
+                    <!-- 红队问题 5：取消回灌失败的提示在 cancelled 态下也要可见 -->
+                    <div v-if="ai.activeForm?.status === 'cancelled' && ai.activeForm.error" class="text-xs text-[#f56c6c]">
+                      {{ ai.activeForm.error }}
+                    </div>
+                  </div>
+                </div>
+
+                <div v-else-if="m.pendingCall.kind === 'FRONTEND'" class="mt-2 flex justify-end">
+                  <el-tag v-if="m.pendingCall.status === 'pending'" size="small" type="info">待浏览器自动执行</el-tag>
+                  <el-tag v-else-if="m.pendingCall.status === 'running'" size="small" type="success" effect="dark">执行中…</el-tag>
+                  <el-tag v-else-if="m.pendingCall.status === 'rejected'" size="small" type="info">已拒绝</el-tag>
+                  <el-tag v-else-if="m.pendingCall.status === 'expired'" size="small" type="info">会话已失效</el-tag>
+                  <el-tag v-else-if="m.pendingCall.status === 'cancelled'" size="small" type="info">已取消</el-tag>
+                  <!-- T2a 返修（S6）：新增 status 显式给口径 —— blocked 是"越 scope 未执行"，
+                       不得落 else 的"已执行"（与 generative_form 分支的 rejected||blocked 口径对齐） -->
+                  <el-tag v-else-if="m.pendingCall.status === 'succeeded'" size="small" type="success">已执行</el-tag>
+                  <el-tag v-else-if="m.pendingCall.status === 'blocked'" size="small" type="warning">未执行（超出范围）</el-tag>
+                  <!-- T2b 顺手项②（GLM 复核 F1）：approved 显式分支，原落 else"已执行"；
+                       当前无 FRONTEND+approved 写入路径，属口径修正防未来误标 -->
+                  <el-tag v-else-if="m.pendingCall.status === 'approved'" size="small" type="success">已放行</el-tag>
+                  <el-tag v-else size="small" type="success">已执行</el-tag>
+                </div>
+
+                <div v-else class="mt-2 flex justify-end">
+                  <el-tag v-if="m.pendingCall.status === 'running'" size="small" type="success" effect="dark">执行中…</el-tag>
+                  <el-tag v-else-if="m.pendingCall.status === 'approved'" size="small" type="success">已放行</el-tag>
+                  <el-tag v-else-if="m.pendingCall.status === 'rejected'" size="small" type="warning">已拒绝</el-tag>
+                  <el-tag v-else-if="m.pendingCall.status === 'expired'" size="small" type="info">会话已失效</el-tag>
+                  <el-tag v-else size="small" type="danger">执行失败</el-tag>
+                </div>
+              </div>
+            </template>
+          </template>
+
+          <!-- 逐条复制（苞 B 项 2；N10：判据改 parts —— 渲染真值已是 parts，不得再留 v-if="m.content"
+               造成"有段渲染但按钮不出现"的发散）。复制内容仍取 m.content（text 段 join 派生，同源），
+               hover 或键盘聚焦时显现；正文为空（流式空气泡）不出按钮。"已复制"反馈走组件局部状态
+               （下面的 copyState），不占用单槽位的 ai.notice。 -->
+          <div v-if="m.parts.some((part) => part.kind === 'text' && part.text)" class="mt-1 flex items-center justify-end gap-1.5">
             <span
               v-if="copyState && copyState.id === m.id"
               :data-testid="'copy-hint-' + m.id"
@@ -189,113 +312,6 @@
             >
               复制
             </el-button>
-          </div>
-
-          <!-- 工具卡（四态 + 参数 + 结果） -->
-          <div v-for="run in m.toolRuns" :key="run.toolCallId" class="mt-1.5 border border-solid border-[#dcdfe6] rounded-md p-2 bg-white">
-            <div class="flex items-center gap-1.5 font-semibold text-[13px] flex-wrap">
-              <el-icon color="#409EFF"><Operation /></el-icon>
-              <span>{{ toolLabel(run.name) }}</span>
-              <el-tag v-if="run.kind === 'FRONTEND'" size="small" effect="plain">前端工具</el-tag>
-              <el-tag v-else-if="run.kind === 'CONFIRM'" size="small" type="warning" effect="plain">确认门</el-tag>
-              <el-tag :size="'small'" :type="toolTagType(run.status)" :effect="run.status === 'running' ? 'dark' : 'light'">
-                {{ toolStatusLabel(run.status) }}
-              </el-tag>
-            </div>
-            <div v-if="run.args" class="mt-1.5 text-xs text-[#909399] break-all">
-              <code>{{ run.args }}</code>
-            </div>
-            <div v-if="run.result" class="mt-1.5 px-2 py-1 text-xs text-[#606266] bg-[#fafafa] rounded max-h-24 overflow-y-auto whitespace-pre-wrap">{{ run.result }}</div>
-            <div v-if="run.reason" class="mt-1 text-xs text-[#f56c6c]">原因：{{ run.reason }}</div>
-          </div>
-
-          <!-- 挂起卡片：HITL 确认（确认/拒绝双路径）或待前端执行 -->
-          <div v-if="m.pendingCall" :data-testid="'pending-card-' + m.pendingCall.toolCallId" class="mt-2 border border-solid border-[#dcdfe6] rounded-md p-2 bg-white">
-            <div class="flex items-center gap-1.5 font-semibold text-[13px] flex-wrap">
-              <el-icon color="#409EFF"><Operation /></el-icon>
-              <span>{{ toolLabel(m.pendingCall.name) }}</span>
-              <el-tag v-if="m.pendingCall.kind === 'CONFIRM'" size="small" type="warning">需确认</el-tag>
-              <el-tag v-else size="small" type="success">自动</el-tag>
-              <el-tag v-if="m.pendingCall.status === 'expired'" size="small" type="info">会话已失效</el-tag>
-            </div>
-            <div v-if="argsText(m.pendingCall.args)" class="mt-1.5 text-xs text-[#909399] break-all">
-              <code>{{ argsText(m.pendingCall.args) }}</code>
-            </div>
-
-            <template v-if="m.pendingCall.kind === 'CONFIRM' && m.pendingCall.status === 'pending'">
-              <div class="mt-1.5 flex items-center gap-2 text-xs">
-                <span v-if="remainingSeconds !== null" :class="confirmExpired ? 'text-[#c0c4cc]' : 'text-[#e6a23c]'">
-                  {{ confirmExpired ? '确认已超时（按钮已置灰），本轮将按拒绝/超时收尾' : `剩余确认时间 ${formatCountdown(remainingSeconds)}` }}
-                </span>
-                <span v-else class="text-[#909399]">等待人工确认</span>
-              </div>
-              <el-input
-                v-model="rejectReason"
-                type="textarea"
-                :rows="2"
-                resize="none"
-                class="mt-2"
-                placeholder="拒绝原因（可选，填了会原样回填给模型）"
-              />
-              <div class="mt-2 flex gap-2 justify-end">
-                <el-button size="small" :disabled="confirmExpired || deciding" @click="decide(false)">拒绝</el-button>
-                <el-button size="small" type="primary" :disabled="confirmExpired || deciding" @click="decide(true)">确认执行</el-button>
-              </div>
-            </template>
-
-            <div v-else-if="m.pendingCall.kind === 'FRONTEND' && m.pendingCall.name === GENERATIVE_FORM_TOOL" class="mt-2">
-              <!-- GF-B：生成式表单挂起 —— 渲染 FormRenderer 等用户填写（同 toolCallId 可重发/取消） -->
-              <!-- T2a-D#3：同 toolCallId 至多一个 FormRenderer —— 只渲染在宿主消息（最后一条
-                持该挂起调用的消息）上，其余消息的挂起卡只出卡头/终态 tag -->
-              <FormRenderer
-                v-if="liveForm && liveForm.toolCallId === m.pendingCall.toolCallId && m.id === formHostMessageId"
-                :key="liveForm.toolCallId"
-                :schema="liveForm.form"
-                :submitting="liveForm.status === 'submitting'"
-                :error="liveForm.error"
-                :remaining-seconds="formRemainingSeconds"
-                @submit="onFormSubmit"
-                @cancel="onFormCancel"
-              />
-              <div v-else class="flex flex-col items-end gap-1">
-                <!-- T2a-D#2：帧终态由 pendingCall 投影承载（含刷新后镜像里的终态残留），按终态展示 -->
-                <el-tag v-if="m.pendingCall.status === 'cancelled'" data-testid="tag-form-cancelled" size="small" type="info">表单已取消</el-tag>
-                <el-tag v-else-if="m.pendingCall.status === 'succeeded'" size="small" type="success">表单已提交</el-tag>
-                <el-tag v-else-if="m.pendingCall.status === 'expired'" size="small" type="info">会话已失效</el-tag>
-                <el-tag v-else-if="m.pendingCall.status === 'rejected' || m.pendingCall.status === 'blocked'" size="small" type="warning">表单未提交</el-tag>
-                <el-tag v-else-if="ai.activeForm?.status === 'cancelled'" size="small" type="info">表单已取消</el-tag>
-                <el-tag v-else-if="ai.activeForm?.status === 'submitted'" size="small" type="success">表单已提交，等待回执</el-tag>
-                <el-tag v-else size="small" type="info">表单状态已丢失（刷新后无法续填），等待后端超时收敛</el-tag>
-                <!-- 红队问题 5：取消回灌失败的提示在 cancelled 态下也要可见 -->
-                <div v-if="ai.activeForm?.status === 'cancelled' && ai.activeForm.error" class="text-xs text-[#f56c6c]">
-                  {{ ai.activeForm.error }}
-                </div>
-              </div>
-            </div>
-
-            <div v-else-if="m.pendingCall.kind === 'FRONTEND'" class="mt-2 flex justify-end">
-              <el-tag v-if="m.pendingCall.status === 'pending'" size="small" type="info">待浏览器自动执行</el-tag>
-              <el-tag v-else-if="m.pendingCall.status === 'running'" size="small" type="success" effect="dark">执行中…</el-tag>
-              <el-tag v-else-if="m.pendingCall.status === 'rejected'" size="small" type="info">已拒绝</el-tag>
-              <el-tag v-else-if="m.pendingCall.status === 'expired'" size="small" type="info">会话已失效</el-tag>
-              <el-tag v-else-if="m.pendingCall.status === 'cancelled'" size="small" type="info">已取消</el-tag>
-              <!-- T2a 返修（S6）：新增 status 显式给口径 —— blocked 是"越 scope 未执行"，
-                   不得落 else 的"已执行"（与 generative_form 分支的 rejected||blocked 口径对齐） -->
-              <el-tag v-else-if="m.pendingCall.status === 'succeeded'" size="small" type="success">已执行</el-tag>
-              <el-tag v-else-if="m.pendingCall.status === 'blocked'" size="small" type="warning">未执行（超出范围）</el-tag>
-              <!-- T2b 顺手项②（GLM 复核 F1）：approved 显式分支，原落 else"已执行"；
-                   当前无 FRONTEND+approved 写入路径，属口径修正防未来误标 -->
-              <el-tag v-else-if="m.pendingCall.status === 'approved'" size="small" type="success">已放行</el-tag>
-              <el-tag v-else size="small" type="success">已执行</el-tag>
-            </div>
-
-            <div v-else class="mt-2 flex justify-end">
-              <el-tag v-if="m.pendingCall.status === 'running'" size="small" type="success" effect="dark">执行中…</el-tag>
-              <el-tag v-else-if="m.pendingCall.status === 'approved'" size="small" type="success">已放行</el-tag>
-              <el-tag v-else-if="m.pendingCall.status === 'rejected'" size="small" type="warning">已拒绝</el-tag>
-              <el-tag v-else-if="m.pendingCall.status === 'expired'" size="small" type="info">会话已失效</el-tag>
-              <el-tag v-else size="small" type="danger">执行失败</el-tag>
-            </div>
           </div>
         </div>
       </div>
@@ -334,6 +350,10 @@
  * 输入区 textarea 与发送/停止按钮、等待回复的三点闪烁动画。
  *
  * 本仓功能增量（逐条理由，均属"功能差异"）：
+ * - **消息体按段渲染（对话时序包 批2 权威翻转）**：`parts` 段序列（text / reasoning / tool）
+ *   是渲染唯一真值，按真实时序自上而下排列 —— "正文 → 工具卡 → 正文"夹心轮次才显出真实顺序；
+ *   挂起卡跟随其工具段位置（③b 把两者并成一卡前的过渡形态）；复制的显示判据同取 parts，
+ *   复制内容仍取 `m.content`（text 段 join 的派生投影，同源）；
  * - 上下文条：会话 id / 工作区上下文 / 数据版本 / 可用性 tag / 契约同步 chip —— 蓝本无
  *   `/api/ai/health`、无契约事件，本仓需要可视化"刷新恢复"与"工作区已同步"的状态；
  * - 工具卡四态（调用中/成功/失败/等待确认）并展示参数与结果 —— 蓝本是"已执行工具 X"单标签；
@@ -499,9 +519,14 @@ const formRemainingSeconds = computed(() => {
   return Math.max(0, Math.ceil((form.deadline - now.value) / 1000))
 })
 
-/** 等待回复：正文与工具卡都还没产出时的三点闪烁。 */
-function isTyping(message: { streaming: boolean; content: string }): boolean {
-  return message.streaming && message.content.length === 0
+/**
+ * 等待回复：正文（text 段）还没产出时的三点闪烁。
+ *
+ * 批2（权威翻转）：判据从 `content.length === 0` 改为"无任何非空 text 段" —— 渲染真值已是
+ * `parts`，`content` 只是同一份数据的派生投影，直接读它会与渲染口径分家（§6.3 清单）。
+ */
+function isTyping(message: ChatMessage): boolean {
+  return message.streaming && !message.parts.some((part) => part.kind === 'text' && part.text.length > 0)
 }
 
 function toolLabel(name: string): string {
@@ -630,9 +655,9 @@ function legacyCopy(text: string): boolean {
 /**
  * 复制一条消息的正文（苞 B 项 2）。
  *
- * 内容口径 = `m.content`（渲染点同源）**原样**：不含思考链 `m.reasoning`、不含工具卡
- * `m.toolRuns` / `m.pendingCall`，**不做 trim**（正文按 `whitespace-pre-wrap` 渲染，
- * 缩进是可见语义，trim 会让"复制结果 ≠ 看到的内容"）。
+ * 内容口径 = `m.content`（**text 段 join 的派生投影**，与渲染同源）**原样**：不含思考链
+ * （reasoning 段）、不含工具卡（tool 段 / pendingCall），**不做 trim**（正文按
+ * `whitespace-pre-wrap` 渲染，缩进是可见语义，trim 会让"复制结果 ≠ 看到的内容"）。
  *
  * 路径：优先 `navigator.clipboard.writeText`；不可用或**被拒**（权限/非聚焦/非安全上下文）
  * 时落 `legacyCopy`。反馈写在组件局部 `copyState`，2s 后自清。
@@ -712,10 +737,16 @@ function resetPendingWatch(pending: PendingToolCall | null): void {
   confirmDeadline.value = foldDeadline(pending.expiresAt, pending.atMs, pending.timeoutSeconds)
 }
 
+// 批2（权威翻转）：滚动指纹改为 **parts 口径**（§6.3 清单）—— messages.length + 末消息段数 +
+// 末段的 kind/文本长度/段状态 + 末消息挂起卡状态。内容增量都体现在"末段文本长度"上，
+// 工具帧的状态变化体现在"末段 status"，故无需读旧投影（content/toolRuns）即可触发跟随。
 watch(
   () => {
     const last = ai.messages[ai.messages.length - 1]
-    return `${ai.messages.length}|${last ? last.content.length : 0}|${last && last.pendingCall ? last.pendingCall.status : ''}|${last ? last.toolRuns.length : 0}`
+    const tail = last ? last.parts[last.parts.length - 1] : undefined
+    const tailText = tail && (tail.kind === 'text' || tail.kind === 'reasoning') ? tail.text.length : 0
+    const tailStatus = tail && tail.kind === 'tool' ? tail.status : ''
+    return `${ai.messages.length}|${last ? last.parts.length : 0}|${tail ? tail.kind : ''}|${tailText}|${tailStatus}|${last && last.pendingCall ? last.pendingCall.status : ''}`
   },
   () => scrollBottom()
 )
