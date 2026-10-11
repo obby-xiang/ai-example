@@ -74,7 +74,9 @@ class ExportJobRunnerJobLevelIssueTest {
     private final ExportJobRunner runner = new ExportJobRunner(this.definitionService, this.dataRowRepository,
             this.taskItemRepository, this.taskService, this.taskFileRepository, this.excelWriter, this.fileStorage,
             this.taskSseService, this.appProperties, this.objectMapper, this.cancellationRegistry,
-            this.progressService, this.terminalWriter, this.issueRepository);
+            this.progressService, this.terminalWriter, this.issueRepository,
+            mock(com.example.configmgr.data.service.ConfigDataService.class),
+            new JobHeartbeatRegistry());
 
     @Test
     void outerFailureWritesJobLevelIssueWithSentinelDefCode() {

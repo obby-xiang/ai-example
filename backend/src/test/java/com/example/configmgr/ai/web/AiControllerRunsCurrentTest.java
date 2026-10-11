@@ -165,7 +165,8 @@ class AiControllerRunsCurrentTest {
 		return new AiController(mock(AiAvailability.class), provider(), provider(), provider(), mock(ChatMemory.class),
 				mock(ChatMemoryRepository.class), mock(SessionGate.class), mock(ConfirmGate.class), this.runStore,
 				mock(RunRegistry.class), mock(CancellationRegistry.class), mock(RedisAvailability.class),
-				mock(ThreadPoolTaskExecutor.class), new ObjectMapper(), new AiProperties(), mock(Environment.class));
+				mock(ThreadPoolTaskExecutor.class), new ObjectMapper(), new AiProperties(), mock(Environment.class),
+				mock(com.example.configmgr.job.service.JobWatchdog.class));
 	}
 
 	@SuppressWarnings("unchecked")

@@ -102,7 +102,7 @@ class SessionBusyFrameIsolationConformanceTest {
 				providerOf((com.example.configmgr.ai.run.StartupResumeRunner) null), mock(ChatMemory.class),
 				mock(ChatMemoryRepository.class), this.sessionGate, mock(ConfirmGate.class), this.store, this.registry,
 				mock(CancellationRegistry.class), redisAvailability, this.aiRunExecutor, this.mapper, this.properties,
-				mock(Environment.class));
+				mock(Environment.class), mock(com.example.configmgr.job.service.JobWatchdog.class));
 	}
 
 	@AfterEach

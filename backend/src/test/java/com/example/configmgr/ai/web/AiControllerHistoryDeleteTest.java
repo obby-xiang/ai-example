@@ -315,7 +315,8 @@ class AiControllerHistoryDeleteTest {
 		return new AiController(availability, provider(), provider(), provider(), this.chatMemory,
 				repository, this.sessionGate, mock(ConfirmGate.class), this.runStore,
 				mock(RunRegistry.class), mock(CancellationRegistry.class), this.redisAvailability,
-				mock(ThreadPoolTaskExecutor.class), new ObjectMapper(), new AiProperties(), mock(Environment.class));
+				mock(ThreadPoolTaskExecutor.class), new ObjectMapper(), new AiProperties(), mock(Environment.class),
+				mock(com.example.configmgr.job.service.JobWatchdog.class));
 	}
 
 	/** 真仓储（生产装配类型）+ 桩 Redis：只用到判存那一次往返。 */

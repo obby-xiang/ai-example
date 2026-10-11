@@ -140,7 +140,8 @@ class AiControllerFrontendResultTest {
 		return new AiController(mock(AiAvailability.class), provider(), provider(), provider(), mock(ChatMemory.class),
 				mock(ChatMemoryRepository.class), mock(SessionGate.class), this.gate, this.runStore,
 				mock(RunRegistry.class), mock(CancellationRegistry.class), mock(RedisAvailability.class),
-				mock(ThreadPoolTaskExecutor.class), this.objectMapper, new AiProperties(), mock(Environment.class));
+				mock(ThreadPoolTaskExecutor.class), this.objectMapper, new AiProperties(), mock(Environment.class),
+				mock(com.example.configmgr.job.service.JobWatchdog.class));
 	}
 
 	@SuppressWarnings("unchecked")

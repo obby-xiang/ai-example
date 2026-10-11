@@ -9,6 +9,7 @@ import com.example.configmgr.ai.run.ResilientChatService;
 import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.session.SessionGate;
+import com.example.configmgr.job.service.JobWatchdog;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.memory.ChatMemory;
@@ -81,16 +82,35 @@ class AiControllerHealthSseDeliveryTest {
 			.andExpect(jsonPath("$.frontendToolTimeoutSeconds").value(120));
 	}
 
+	/**
+	 * 作业看门狗观测面（R-96 批 B）：tracked / judgedDeadTotal / judgedTimeoutTotal / lastScanAt
+	 * 四键（值由桩钉死，断回显配对，与 confirmTimeout 拆键用例同姿态）。
+	 */
+	@Test
+	void healthExposesJobWatchdogMetrics() throws Exception {
+		mockMvc.perform(get("/api/ai/health"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.jobWatchdog.tracked").value(0))
+			.andExpect(jsonPath("$.jobWatchdog.judgedDeadTotal").value(0))
+			.andExpect(jsonPath("$.jobWatchdog.judgedTimeoutTotal").value(0))
+			.andExpect(jsonPath("$.jobWatchdog.lastScanAt").value("2026-10-11T00:00:00Z"));
+	}
+
 	/** 只装配被测端点用得到的依赖（其余为桩：本用例不发模型请求、不读 Redis）。 */
 	private AiController controller() {
 		when(this.availability.isAvailable()).thenReturn(true);
 		ConfirmGate gate = mock(ConfirmGate.class);
 		when(gate.confirmTimeoutSeconds()).thenReturn(240);
 		when(gate.frontendToolTimeoutSeconds()).thenReturn(120);
+		JobWatchdog jobWatchdog = mock(JobWatchdog.class);
+		when(jobWatchdog.metrics()).thenReturn(java.util.Map.of(
+				"tracked", 0, "judgedDeadTotal", 0L,
+				"judgedTimeoutTotal", 0L, "lastScanAt", "2026-10-11T00:00:00Z"));
 		return new AiController(this.availability, provider(), provider(), provider(), mock(ChatMemory.class),
 				mock(ChatMemoryRepository.class), mock(SessionGate.class), gate, mock(RunStore.class),
 				mock(RunRegistry.class), mock(CancellationRegistry.class), mock(RedisAvailability.class),
-				mock(ThreadPoolTaskExecutor.class), new ObjectMapper(), new AiProperties(), mock(Environment.class));
+				mock(ThreadPoolTaskExecutor.class), new ObjectMapper(), new AiProperties(), mock(Environment.class),
+				jobWatchdog);
 	}
 
 	@SuppressWarnings("unchecked")
