@@ -535,7 +535,12 @@ function toolLabel(name: string): string {
 
 /** 工具卡状态色（补丁③：REJECTED=warning「已拒绝」，FAILED=danger「执行失败」，互不混用）。 */
 function toolTagType(status: ToolRunStatus): 'info' | 'warning' | 'success' | 'danger' | 'primary' {
+  // 批3③a D10(A)：九态全部显式 case + 去 default（原先 pending 由 default 兜底，非纯死码）——
+  // 形式对齐下方 toolStatusLabel 的 Record<ToolRunStatus, …> 穷尽闸：未来新增态编译期即报错，
+  // 不再被 default 静默误标。
   switch (status) {
+    case 'pending':
+      return 'primary'
     case 'running':
     case 'succeeded':
       return 'success'
@@ -555,8 +560,6 @@ function toolTagType(status: ToolRunStatus): 'info' | 'warning' | 'success' | 'd
       // 对话时序包 批1：结局未知（未确认成功/失败，如前端执行器超时）—— 提示级 warning，
       // 与"执行失败/已拒绝"同色的待人工判断，不落 danger
       return 'warning'
-    default:
-      return 'primary'
   }
 }
 

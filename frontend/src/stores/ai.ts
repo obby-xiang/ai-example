@@ -239,11 +239,18 @@ function sanitizeMirrorResidues(messages: ChatMessage[]): boolean {
   return changed
 }
 
-/** 批2 前置：轮次收尾（done / error 帧）时，消息上仍在等动作的工具段全部过期降级。 */
+/** 批2 前置 + 批3③a D5③：轮次收尾（done / error 帧）时，消息上仍在等动作的工具段收口——
+ * pending 段落 `expired`；非 pending 段（含 unknown 违例段）保持原终态、只收 requiresAction。 */
 function expireResidueToolParts(message: ChatMessage): void {
   message.parts.forEach((part, index) => {
     if (part.kind === 'tool' && part.requiresAction) {
-      message.parts.splice(index, 1, { ...part, requiresAction: false, status: 'expired' })
+      // 批3③a D5③：与 :233 对齐 —— 非 pending 的残留段（含 unknown 违例段）保持原终态，
+      // 只收 requiresAction；不得把 unknown 翻成 expired。
+      message.parts.splice(index, 1, {
+        ...part,
+        requiresAction: false,
+        status: part.status === 'pending' ? 'expired' : part.status
+      })
     }
   })
 }
@@ -370,10 +377,18 @@ function frameStatusToPendingStatus(status: unknown): PendingToolCall['status'] 
  *
  * 批2（权威翻转）：入参同时接受段侧 `ToolRunStatus` —— 判据改读段（`hasDecidedPendingResidue`
  * 读 `part.status`），两个枚举的终态集合在这里取并集。
+ *
+ * 批3③a D6(A)：集合纳入 `unknown` 和 `failed`（两者均为终态）—— 否则 unknown 段不被视为
+ * 已决，重投帧可再次挂起（挂起卡复活）。
+ * **保护面如实申报（不得写成"全覆盖"）**：两条帧路守卫（frontend_tool_request / suspended）
+ * 均带 GENERATIVE_FORM_TOOL 前缀，故本扩充实际保护 = ①快照恢复路（restoreSuspendedSnapshot
+ * 全条目）+ ②GF 帧路；**通用 FRONTEND 工具的重投帧现状不经本守卫**（handleFrame 直跑
+ * runFrontendTool）—— 既有缺口归 ③b（R-141③），本批不闭合。
  */
 function isFrameDecidedPendingStatus(status: PendingToolCall['status'] | ToolRunStatus): boolean {
   return status === 'succeeded' || status === 'rejected' || status === 'blocked'
     || status === 'expired' || status === 'cancelled'
+    || status === 'unknown' || status === 'failed'
 }
 
 export const useAiStore = defineStore('ai', {
@@ -1702,6 +1717,9 @@ export const useAiStore = defineStore('ai', {
         const index = item.parts.findIndex((part) => part.kind === 'tool' && part.toolCallId === toolCallId)
         const part = index >= 0 ? item.parts[index] : undefined
         if (part && part.kind === 'tool'
+          // 批3③a D5②：覆盖域显式排除 unknown / failed —— 本地已落的终态（含"结局未知"）
+          // first-wins，不得被 409 响应体 / 续收快照的二次收敛改写成别的终态。
+          && part.status !== 'unknown' && part.status !== 'failed'
           && (part.status === 'pending' || part.status === 'cancelled' || part.requiresAction)) {
           item.parts.splice(index, 1, { ...part, requiresAction: false, status: mapped })
           deriveProjections(item)
@@ -1801,7 +1819,12 @@ export const useAiStore = defineStore('ai', {
         args: parseToolArgs(frame.args),
         budgetMs: deriveFrontendToolBudgetMs(frame.timeoutSeconds)
       })
-      const status: ToolRunStatus = execution.ok ? 'succeeded' : 'failed'
+      // 批3③a A8：三态落卡（execution.ok 已 @deprecated，改读 outcome）——
+      // unknown（预算到期 / 等待上界耗尽）如实落 'unknown'，卡面显示「结局未知」且
+      // 回灌文本与卡面不再自相矛盾；unknown 段的回执帧翻写防护在 parts.ts localTerminal。
+      const status: ToolRunStatus = execution.outcome === 'ok'
+        ? 'succeeded'
+        : execution.outcome === 'unknown' ? 'unknown' : 'failed'
       // 批2：浏览器侧执行结局落段（工具段在此之前由 frontend_tool_request 建好），投影随段派生
       this.upsertToolPart(message, {
         toolCallId: frame.toolCallId,

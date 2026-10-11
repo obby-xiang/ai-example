@@ -357,3 +357,78 @@ describe('F2：帧路径段终态的单写点（applyFrameToParts）与终态收
     expect(assistant.toolRuns[0]).toMatchObject({ toolCallId: 'g1', status: 'cancelled' })
   })
 })
+
+/**
+ * 对话时序包 批3③a：unknown 三态收口的段侧锁（T1 生死线 / T2 X1 不变式 / T3 已决守卫扩充）。
+ *
+ * T1 是生死线用例：`submitFrontendToolResult` 的 POST payload 不带 status/ok
+ * （types/ai.ts FrontendToolResultRequest 仅 runId/toolCallId/result/source/cancelled），
+ * 后端回帧恒为 FRONTEND_RESULT —— `localTerminal`（parts.ts）是本地 unknown 段
+ * 不被回执帧翻成 succeeded 的**唯一机制**。
+ */
+describe('批3③a T1：本地 unknown 段的 first-wins 存活（生死线）', () => {
+  it('本地 unknown 段收 FRONTEND_RESULT 回执帧后仍是 unknown（不被翻成 succeeded）', () => {
+    const message = makeMessage()
+    upsertToolPart(message, {
+      toolCallId: 'r1',
+      name: 'probe.tool',
+      kind2: 'FRONTEND',
+      status: 'unknown',
+      result: '本次调用结局未知 —— 既未确认成功，也未确认失败',
+      requiresAction: false
+    })
+    applyFrameToParts(message, resultFrame({ ok: true, status: 'FRONTEND_RESULT' }))
+    expect(soleToolPart(message)).toMatchObject({ status: 'unknown', requiresAction: false })
+  })
+
+  it('本地 unknown 段收 TIMEOUT 回执帧后仍是 unknown（first-wins 单调）', () => {
+    const message = makeMessage()
+    upsertToolPart(message, {
+      toolCallId: 'r1',
+      name: 'probe.tool',
+      kind2: 'FRONTEND',
+      status: 'unknown',
+      requiresAction: false
+    })
+    applyFrameToParts(message, resultFrame({ ok: false, status: 'TIMEOUT' }))
+    expect(soleToolPart(message)).toMatchObject({ status: 'unknown', requiresAction: false })
+  })
+})
+
+describe('批3③a T2：unknown ⇒ requiresAction === false 不变式（X1）', () => {
+  it('违例段（unknown + requiresAction=true，镜像/未来写点的 rogue 形态）不产出挂起卡', () => {
+    const message = makeMessage()
+    upsertToolPart(message, {
+      toolCallId: 'r1',
+      name: 'probe.tool',
+      kind2: 'FRONTEND',
+      status: 'unknown',
+      requiresAction: true
+    })
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    deriveProjections(message)
+    // 不变式：unknown 段永不复活为挂起卡
+    expect(message.pendingCall).toBeNull()
+    expect(message.toolRuns[0]).toMatchObject({ toolCallId: 'r1', status: 'unknown' })
+    // dev 断言双落（断言存在但不阻断投影）
+    expect(spy).toHaveBeenCalled()
+    spy.mockRestore()
+  })
+})
+
+describe('批3③a T3：hasDecidedPendingResidue 对 unknown / failed 段的拦截（D6(A)）', () => {
+  it('unknown 段与 failed 段均视为已决（快照恢复路可测口径）', () => {
+    const store = useAiStore()
+    const withUnknown = makeMessage()
+    upsertToolPart(withUnknown, {
+      toolCallId: 'u1', name: 'probe.tool', kind2: 'FRONTEND', status: 'unknown', requiresAction: false
+    })
+    const withFailed = makeMessage()
+    upsertToolPart(withFailed, {
+      toolCallId: 'f1', name: 'probe.tool', kind2: 'FRONTEND', status: 'failed', requiresAction: false
+    })
+    store.messages.push(withUnknown, withFailed)
+    expect(store.hasDecidedPendingResidue('u1')).toBe(true)
+    expect(store.hasDecidedPendingResidue('f1')).toBe(true)
+  })
+})

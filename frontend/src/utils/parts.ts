@@ -118,9 +118,24 @@ function pendingStatusOf(status: ToolRunStatus): PendingToolCall['status'] {
     case 'cancelled':
       return 'cancelled'
     default:
-      // pending / failed / unknown：仍在等动作的段只可能是 pending；后两者无挂起语义
+      // pending / failed / unknown：仍在等动作的段只可能是 pending；后两者无挂起语义。
+      // 批3③a X1：unknown 段连"等动作"语义都不允许携带（requiresAction 必须 false），
+      // deriveProjections 在调用本函数之前已按不变式拦截违例段 —— 本 default 折 unknown
+      // 仅为类型穷尽兜底，正常数据流不可达。
       return 'pending'
   }
+}
+
+/**
+ * 批3③a X1 dev 断言：`unknown` 段与 `requiresAction === false` 互锁。
+ * 违例（unknown + requiresAction=true，只能来自镜像迁移或未来写点的缺陷）在此留痕，
+ * 但**不阻断**投影 —— 挂起卡被 deriveProjections 跳过，工具卡仍如实显示 unknown。
+ */
+function assertUnknownTerminalInvariant(part: ToolPart): void {
+  console.error(
+    `[批3③a X1] unknown 工具段不允许 requiresAction=true（toolCallId=${part.toolCallId}），`
+    + '挂起投影已忽略该段'
+  )
 }
 
 /**
@@ -179,7 +194,14 @@ export function deriveProjections(message: ChatMessage): void {
       messageId: part.messageId
     })
     if (part.requiresAction) {
-      pending = toPendingCallProjection(part)
+      // 批3③a X1 不变式：unknown 段永不复活为挂起卡（unknown ⇒ requiresAction === false）。
+      // 镜像/未来写点若产出 unknown+requiresAction:true 的违例段，这里显式跳过挂起投影并
+      // 触发 dev 断言（不阻断投影 —— 工具卡仍如实显示 unknown）。
+      if (part.status === 'unknown') {
+        assertUnknownTerminalInvariant(part)
+      } else {
+        pending = toPendingCallProjection(part)
+      }
     }
   }
   message.content = texts.join('')
@@ -237,7 +259,7 @@ function frontendResultStatus(status: unknown): ToolRunStatus | null {
  *
  * 裁决口径逐条照抄翻转前的 case 分支：
  * - `tool_result`：BLOCKED（防线③未执行）> 已被拒（REJECTED）> ok 三元；
- * - `frontend_tool_result`：本地已终态（failed/rejected/blocked/succeeded/expired/cancelled）first-wins，
+ * - `frontend_tool_result`：本地已终态（failed/rejected/blocked/succeeded/expired/cancelled/unknown）first-wins，
  *   否则按帧 `status`（后端 PendingToolCall 大写实发值）映射终态，`status` 缺失/未知才退回 ok 三元
  *   （F1 收口修：原先不读 `status`，四类非失败终态全被落成 failed）；
  * - `confirm_decision`：approved → running、rejected → rejected（reason 原样）。
@@ -352,12 +374,16 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
       // F1（收口修）：帧的 `status` 是后端对该次调用的**终态裁决**（实发值见 frontendResultStatus
       // 的注释），必须优先于 ok 三元 —— ok 只表示"回灌已收到"，把它当成功/失败判据会让
       // 取消/超时/入参被拒四类终态全落成"执行失败"（红队 MAJOR-1）。
-      // 本地已终态的段（含乐观 cancelled）first-wins：不得被回执帧改写成另一种终态，
-      // 也不得把前端自己判定的失败改写成成功。
+      // 本地已终态的段（含乐观 cancelled 与批3③a 的 unknown）first-wins：不得被回执帧改写成
+      // 另一种终态，也不得把前端自己判定的失败/结局未知改写成成功。
+      // 批3③a D5(甲)：'unknown' 纳入 localTerminal —— 回灌 payload 不带 status/ok
+      // （types/ai.ts FrontendToolResultRequest），后端回帧恒为 FRONTEND_RESULT，若 unknown
+      // 不在此集合，回执帧会把它翻成 succeeded（T1 生死线用例锁定）。
       const existing = findToolPart(message, frame.toolCallId)
       const localTerminal = existing?.status === 'failed' || existing?.status === 'rejected'
         || existing?.status === 'blocked' || existing?.status === 'succeeded'
         || existing?.status === 'expired' || existing?.status === 'cancelled'
+        || existing?.status === 'unknown'
       const fromFrame = frontendResultStatus(frame.status)
       const status: ToolRunStatus = localTerminal
         ? (existing?.status ?? 'failed')

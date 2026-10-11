@@ -724,7 +724,12 @@ async function goStep(next: number): Promise<boolean> {
   }
   stepIndex.value = next
   workspace.setStep(STEP_KEYS[next] ?? null)
-  await syncStepToBackend()
+  // 批3③a D9（D7 同款语义最小接入）：服务端步骤同步失败**不阻断**推进，但警告必须可见 ——
+  // 与导出侧同口径（网络抖动不得卡死向导；后端 currentStep 滞后由下次切步重试补偿）。
+  const synced = await syncStepToBackend()
+  if (!synced.ok) {
+    ElMessage.warning('步骤已推进但服务端步骤同步失败，下次切步会重试')
+  }
   await ensureStepLoaded(next)
   return true
 }
@@ -750,18 +755,23 @@ async function viewStep(index: number): Promise<void> {
  * 后端 `currentStep` 是刷新恢复与 AI 上下文（`task:IMPORT/<step>` 的渐进披露子集）
  * 的唯一权威：只在前端切步不进后端，刷新会退回首步，模型也会读到旧步骤。
  */
-async function syncStepToBackend(): Promise<void> {
+async function syncStepToBackend(): Promise<{ ok: boolean; reason?: string }> {
   if (taskId.value === null) {
-    return
+    return { ok: true }
   }
   const step = STEP_KEYS[stepIndex.value]
   if (!step) {
-    return
+    return { ok: true }
   }
   try {
     task.value = await tasksApi.goToStep(taskId.value, step)
-  } catch {
-    // 步骤同步失败不阻塞界面操作（下次切步会重试）
+    return { ok: true }
+  } catch (error) {
+    // 批3③a D9（D8(A) 同法）：不再整段静默 —— 结构化失败 + 页面可见警告（同导出侧范式）；
+    // 任何非 2xx（含未来 R-137 守卫 4xx）都落此处。不阻塞界面，由 goStep 带警告推进。
+    const reason = error instanceof Error ? error.message : String(error)
+    ElMessage.error(`步骤同步到服务端失败：${reason}（不阻塞界面，下次切步会重试）`)
+    return { ok: false, reason }
   }
 }
 

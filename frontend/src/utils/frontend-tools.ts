@@ -47,6 +47,8 @@ import {
   type FrontendToolDescriptor,
   type FrontendToolExecution,
   type FrontendToolName,
+  type FrontendToolOutcome,
+  type ToolAvailability,
   type UiEvent,
   type WorkspacePageId
 } from '@/types/tools'
@@ -65,8 +67,12 @@ export interface FrontendToolCall {
   budgetMs?: number
 }
 
-/** 执行器签名：返回回灌给模型的结果文本。 */
-export type FrontendToolExecutor = (call: FrontendToolCall) => Promise<string> | string
+/**
+ * 执行器签名：返回回灌给模型的结果文本，或结构化的 {@link FrontendToolExecution}
+ * （批3③a A4：执行器想如实报失败不必再 throw —— 可直接返回结构化结局，由
+ * runRegisteredTool 按结构化解读；字符串返回值保持"成功 + 该文本"的兼容解读）。
+ */
+export type FrontendToolExecutor = (call: FrontendToolCall) => Promise<string | FrontendToolExecution> | string | FrontendToolExecution
 
 /** 页面 handler 名：打开导出文件在线编辑器（由导出向导页面注册）。 */
 export const PAGE_HANDLER_OPEN_EXPORT_EDITOR = 'export.openEditor'
@@ -81,6 +87,32 @@ export function registerFrontendToolExecutor(name: FrontendToolName | string, ex
 /** 注销执行器（页面卸载时调用，回到"能力不可用"态）。 */
 export function unregisterFrontendToolExecutor(name: FrontendToolName | string): void {
   executors.delete(name)
+}
+
+/**
+ * `FrontendToolExecution` 的**唯一生产工厂**（批3③a D1 终裁）：`ok` 由 `outcome` 单点推导
+ * （`ok === (outcome === 'ok')`，故 "结局未知" 恒 `ok:false`），一致性断言随工厂单点化 ——
+ * 不得在任何路由里手写 `{ ok, availability, result }` 字面量（T8 锁工厂行为）。
+ *
+ * 为什么必须收口而不是逐点手写：21 处生产点若各自维护 ok/outcome 两份真源，任一点漂移都会
+ * 让卡面与回灌文本自相矛盾（本包要根治的正是这类谎报）。
+ */
+export function makeExecution(input: {
+  outcome: FrontendToolOutcome
+  availability: ToolAvailability
+  result: string
+  reason?: string
+}): FrontendToolExecution {
+  const execution: FrontendToolExecution = {
+    ok: input.outcome === 'ok',
+    availability: input.availability,
+    outcome: input.outcome,
+    result: input.result
+  }
+  if (input.reason !== undefined) {
+    execution.reason = input.reason
+  }
+  return execution
 }
 
 /** @ToolScope 标签匹配（'*' / 'page:tasks' / 'task:EXPORT' / 'task:EXPORT/EXPORT' / 'task:*'）。
@@ -422,7 +454,9 @@ function timeoutOutcome(call: FrontendToolCall, budgetMs: number, elapsedMs: num
     : `${label}（${call.name}）前端超时：等待 ${waitedSeconds} 秒仍未返回执行结果（执行器预算 ${budgetSeconds} 秒）。`
       + '本次调用结局未知 —— 既未确认成功，也未确认失败。'
       + '请提示用户核对界面上的实际状态（相关卡片、列表或表格，以及数据是否已变化），确认后再决定是否重试。'
-  return { ok: false, availability: 'degraded', result }
+  // 批3③a A2：预算到期 = "结局未知"（已发起但时限内无法确认真实结局）——文本早已如实，
+  // 卡面维度在此补齐：outcome 'unknown'（ok:false 由工厂推导），文案一字不动。
+  return makeExecution({ outcome: 'unknown', availability: 'degraded', result })
 }
 
 /** 工具中文名（回灌文案用）：登记工具 / 工作区动作表优先，未知工具回落原始名。 */
@@ -455,11 +489,11 @@ async function dispatchFrontendTool(call: FrontendToolCall): Promise<FrontendToo
   if (handler) {
     return await runPageHandler(call.name, handler, call.args)
   }
-  return {
-    ok: false,
+  return makeExecution({
+    outcome: 'failed',
     availability: 'unavailable',
     result: `未知前端工具 ${call.name}：该工具没有浏览器侧执行器，请改用后端工具完成。`
-  }
+  })
 }
 
 // ── 路由 2：工作区动作表（补丁②） ────────────────────────────────────────────────
@@ -700,25 +734,25 @@ async function runWorkspaceAction(
   const workspace = useWorkspaceStore()
   const context = workspace.snapshot()
   if (!action.allowPages.includes(context.pageId)) {
-    return {
-      ok: false,
+    return makeExecution({
+      outcome: 'failed',
       availability: 'unavailable',
       result: `当前页面为${context.pageId}，${action.displayName}只支持：${action.allowPages.join('、')}。请先导航到目标页面再执行。`
-    }
+    })
   }
   if (action.allowSteps.length > 0 && !action.allowSteps.includes(context.step ?? '')) {
-    return {
-      ok: false,
+    return makeExecution({
+      outcome: 'failed',
       availability: 'unavailable',
       result: `当前步骤为${context.step ?? '未进入向导'}，${action.displayName}只支持：${action.allowSteps.join('、')}。请先推进到可用步骤。`
-    }
+    })
   }
   if (action.needsTask && context.taskId === null) {
-    return {
-      ok: false,
+    return makeExecution({
+      outcome: 'failed',
       availability: 'unavailable',
       result: `${action.displayName}需要绑定任务：当前没有进行中的任务，请先在任务中心创建或打开一条任务。`
-    }
+    })
   }
 
   for (const handlerName of action.handlerNames) {
@@ -730,11 +764,11 @@ async function runWorkspaceAction(
 
   const event = action.toUiEvent?.(args) ?? null
   if (!event) {
-    return {
-      ok: false,
+    return makeExecution({
+      outcome: 'failed',
       availability: 'unavailable',
       result: `${action.displayName}的参数不完整：${JSON.stringify(args)}`
-    }
+    })
   }
   const outcome = await dispatchUiEvent(event)
   if (outcome.handled) {
@@ -749,36 +783,39 @@ async function runWorkspaceAction(
         : await waitForTaskBound(target, expectedTaskId)
       if (wait.pageReady && wait.taskBound) {
         const bound = expectedTaskId === null ? '' : `，任务 #${expectedTaskId} 已绑定`
-        return {
-          ok: true,
+        return makeExecution({
+          outcome: 'ok',
           availability: 'available',
           result: `${outcome.message}（页面已就绪${bound}，可继续执行本页动作）`
-        }
+        })
       }
       if (wait.pageReady) {
         // 页面已就绪却仍没绑定该任务 ⇒ 不是"还在加载"，再等也不会变：明确降级，不谎报成功
-        return {
-          ok: false,
+        return makeExecution({
+          outcome: 'failed',
           availability: 'degraded',
           result: `${outcome.message}，但任务 #${expectedTaskId} 的绑定没有完成（向导页已就绪，未绑定该任务）。`
             + `请核对任务 #${expectedTaskId} 是否存在，或提示用户手动在任务中心打开该任务后重试。`
-        }
+        })
       }
-      return {
-        ok: true,
-        availability: 'available',
+      // 批3③a D4(a)：等待上界（PAGE_READY_TIMEOUT_MS）内没等到目标页就绪 —— 不是失败
+      // （页面可能只是慢），按"结局未知"如实回灌：outcome 'unknown' + 降 'degraded'
+      // （触发 stores/ai.ts 降级 notice）；文案一字不动，保留"稍后重试/手动操作"指引（R-c）。
+      return makeExecution({
+        outcome: 'unknown',
+        availability: 'degraded',
         result: `${outcome.message}（页面${expectedTaskId === null ? '' : '与任务绑定'}仍在加载中；`
           + '若要继续在该页动作，请稍后重试或提示用户手动操作）'
-      }
+      })
     }
-    return { ok: true, availability: 'available', result: outcome.message }
+    return makeExecution({ outcome: 'ok', availability: 'available', result: outcome.message })
   }
   // 契约层拒绝（缺任务/缺 handler）→ degraded：给出可行动说明，不静默
-  return {
-    ok: false,
+  return makeExecution({
+    outcome: 'failed',
     availability: 'degraded',
     result: `${action.displayName}未完成（${outcome.message}）。请提示用户在界面上手动完成该动作。`
-  }
+  })
 }
 
 /** 动作 args → 页面 handler 载荷（把别名参数归一，handler 只需认识一套字段名）。 */
@@ -811,63 +848,87 @@ async function runRegisteredTool(
 ): Promise<FrontendToolExecution> {
   const validated = validateArgs(descriptor, call.args)
   if (!validated.ok) {
-    return {
-      ok: false,
+    return makeExecution({
+      outcome: 'failed',
       availability: 'unavailable',
       result: `参数不合法，${descriptor.displayName}未执行：${validated.reason}`
-    }
+    })
   }
 
   const workspace = useWorkspaceStore()
   const context = workspace.snapshot()
   if (!matchesScope(descriptor.scopePatterns, { page: context.page, taskType: context.taskType, step: context.step })) {
-    return {
-      ok: false,
+    return makeExecution({
+      outcome: 'failed',
       availability: 'unavailable',
       result: `当前上下文（页面=${context.page}，步骤=${context.step ?? '未进入向导'}）不支持${descriptor.displayName}。`
-    }
+    })
   }
 
   const executor = executors.get(descriptor.name) ?? defaultExecutor(descriptor.name)
   if (!executor) {
-    return {
-      ok: false,
+    return makeExecution({
+      outcome: 'failed',
       availability: 'degraded',
       result: `${descriptor.displayName}当前不可用（本页未注册该能力）。请改用其他方式：由用户手动操作，或使用后端工具完成任务。`
-    }
+    })
   }
 
   try {
-    const result = await executor({ ...call, args: validated.coerced })
-    return { ok: true, availability: 'available', result }
+    const value = await executor({ ...call, args: validated.coerced })
+    // 批3③a A4：执行器可返回结构化结局（如实报失败不必 throw）；字符串保持成功兼容解读。
+    return normalizeExecutorReturn(value)
   } catch (error) {
-    return {
-      ok: false,
+    return makeExecution({
+      outcome: 'failed',
       availability: 'degraded',
       result: `${descriptor.displayName}执行失败：${error instanceof Error ? error.message : String(error)}。请提示用户手动重试。`
-    }
+    })
   }
+}
+
+/**
+ * 执行器返回值解读（批3③a A4）：字符串 = 成功 + 该文本（兼容旧执行器）；
+ * 结构化 {@link FrontendToolExecution} = 按其 outcome 语义原样落（经工厂重推导 ok，
+ * 一致性仍单点化）；历史遗留的"只带 ok 不带 outcome"对象按 ok 三元推导。
+ */
+function normalizeExecutorReturn(value: string | FrontendToolExecution): FrontendToolExecution {
+  if (typeof value === 'string') {
+    return makeExecution({ outcome: 'ok', availability: 'available', result: value })
+  }
+  return makeExecution({
+    outcome: value.outcome ?? (value.ok ? 'ok' : 'failed'),
+    availability: value.availability,
+    result: value.result,
+    reason: value.reason
+  })
 }
 
 /** 路由 3：ui_event 同名动作 → 契约层统一分发（与用户点击同一套 action）。 */
 async function runUiEventAction(name: UiEvent['type'], args: Record<string, unknown>): Promise<FrontendToolExecution> {
   const event = toUiEvent(name, args)
   if (!event) {
-    return {
-      ok: false,
+    return makeExecution({
+      outcome: 'failed',
       availability: 'unavailable',
       result: `${name} 的参数不完整或类型不符，未驱动工作区：${JSON.stringify(args)}`
-    }
+    })
   }
   try {
     const outcome = await dispatchUiEvent(event)
-    return { ok: outcome.handled, availability: 'available', result: outcome.message }
+    // 批3③a D1：handled:true 且副作用已 await ⇒ 'ok'；契约层未受理（fail）⇒ 确定性 'failed'
+    // —— 不再让"未受理"戴着 ok:true 出去。
+    return makeExecution({
+      outcome: outcome.handled ? 'ok' : 'failed',
+      availability: 'available',
+      result: outcome.message
+    })
   } catch (error) {
-    return {
-      ok: false,
+    return makeExecution({
+      outcome: 'failed',
       availability: 'degraded',
       result: `工作区动作 ${name} 执行失败：${error instanceof Error ? error.message : String(error)}`
-    }
+    })
   }
 }
 
@@ -881,18 +942,50 @@ async function runPageHandler(
   const label = displayName ?? name
   try {
     const outcome = await handler(args)
-    return {
-      ok: true,
-      availability: 'available',
-      result: typeof outcome === 'string' ? outcome : `${label}已执行`
-    }
+    // 批3③a A3：handler 可返回结构化 `{ ok:false, reason }` 如实报失败（D2：确定性失败，
+    // 不得再包成 ok:true）；字符串保持成功兼容解读（D3(iii) 登记面不动）。
+    const interpreted = interpretHandlerOutcome(outcome, label)
+    return makeExecution({
+      outcome: interpreted.outcome,
+      availability: interpreted.outcome === 'ok' ? 'available' : 'degraded',
+      result: interpreted.result,
+      reason: interpreted.reason
+    })
   } catch (error) {
-    return {
-      ok: false,
+    return makeExecution({
+      outcome: 'failed',
       availability: 'degraded',
       result: `${label}执行失败：${error instanceof Error ? error.message : String(error)}。请提示用户手动重试。`
-    }
+    })
   }
+}
+
+/**
+ * 页面 handler 返回值解读（批3③a A3/A5 共用）：
+ * - 字符串 = 成功 + 该文本（兼容解读不变）；
+ * - 结构化 `{ ok:false, reason }` = **确定性失败**（D2：如编辑器引擎加载失败 —— 落 failed，
+ *   不得误入 unknown，也不得被包装层折回成功）；
+ * - `{ ok:true, result? }` = 成功；其它非字符串值保持旧兜底「<label>已执行」。
+ */
+function interpretHandlerOutcome(
+  outcome: unknown,
+  label: string
+): { result: string; outcome: FrontendToolOutcome; reason?: string } {
+  if (typeof outcome === 'string') {
+    return { result: outcome, outcome: 'ok' }
+  }
+  if (outcome !== null && typeof outcome === 'object' && 'ok' in outcome) {
+    const structured = outcome as { ok: unknown; reason?: unknown; result?: unknown }
+    if (structured.ok === false) {
+      const reason = typeof structured.reason === 'string' && structured.reason !== ''
+        ? structured.reason
+        : `${label}执行失败`
+      return { result: reason, outcome: 'failed', reason }
+    }
+    const result = typeof structured.result === 'string' ? structured.result : `${label}已执行`
+    return { result, outcome: 'ok' }
+  }
+  return { result: `${label}已执行`, outcome: 'ok' }
 }
 
 function isUiEventType(name: string): name is UiEvent['type'] {
@@ -987,7 +1080,18 @@ function defaultExecutor(name: FrontendToolName): FrontendToolExecutor | null {
         throw new Error('导出向导未注册在线编辑器能力')
       }
       const outcome = await handler({ taskId: call.args.taskId, defCode: call.args.defCode })
-      return typeof outcome === 'string' ? outcome : `已请求打开 ${String(call.args.defCode)} 的在线编辑器`
+      // 批3③a A5：不再自吞 handler 结局 —— 结构化失败原样透传（由 runRegisteredTool 的
+      // normalizeExecutorReturn 落 failed）；字符串保持成功兼容解读。
+      const interpreted = interpretHandlerOutcome(outcome, `已请求打开 ${String(call.args.defCode)} 的在线编辑器`)
+      if (interpreted.outcome === 'failed') {
+        return makeExecution({
+          outcome: 'failed',
+          availability: 'degraded',
+          result: interpreted.result,
+          reason: interpreted.reason
+        })
+      }
+      return interpreted.result
     }
   }
   return null

@@ -542,15 +542,44 @@ async function ensureStepLoaded(index: number): Promise<void> {
   }
 }
 
-function goStep(next: number): void {
+/**
+ * 步骤推进的结构化结局（批3③a D7）：goStep **永不 reject**（失败也 resolve，模板 `:14`
+ * 直接绑定 `@prev`，reject 会变未处理拒绝）。
+ * - persistStepData 失败 ⇒ **阻断推进**（勾选集/条件未落库，W-06 根面："AI 说设了条件、
+ *   导出却是全量"）；
+ * - syncStepToBackend 失败 ⇒ **不阻断**，但回灌/界面附带警告（网络抖动不得卡死向导，R-d）。
+ */
+interface StepAdvanceOutcome {
+  /** 界面步骤是否真的推进了 */
+  ok: boolean
+  /** persistStepData 失败 ⇒ 阻断推进的原因 */
+  reason?: string
+  /** syncStepToBackend 失败 ⇒ 不阻断，调用方须把该警告带进回灌/界面 */
+  syncWarning?: string
+}
+
+async function goStep(next: number): Promise<StepAdvanceOutcome> {
   if (next < 0 || next >= STEP_KEYS.length) {
-    return
+    return { ok: false, reason: `目标步骤 ${next} 不在导出向导范围内` }
+  }
+  // D7：先落库当前步数据再切步 —— persist 失败时界面必须停在原步（阻断推进）。
+  const persisted = await persistStepData()
+  if (!persisted.ok) {
+    return { ok: false, reason: persisted.reason ?? '保存选择与条件失败' }
   }
   stepIndex.value = next
   workspace.setStep(STEP_KEYS[next] ?? null)
-  void persistStepData()
-  void syncStepToBackend()
+  // ensureStepLoaded 不纳入结局（D7）：懒加载/结果刷新失败不改变"步骤已推进"的事实，
+  // 由页面自身错误提示承载，发后不管。
   void ensureStepLoaded(next)
+  // D7/D8：服务端 currentStep 同步失败不阻断界面，但警告必须可见、可回灌。
+  const synced = await syncStepToBackend()
+  if (!synced.ok) {
+    const syncWarning = '步骤已推进但服务端步骤同步失败，下次切步会重试'
+    ElMessage.warning(syncWarning)
+    return { ok: true, syncWarning }
+  }
+  return { ok: true }
 }
 
 /**
@@ -576,18 +605,24 @@ async function viewStep(index: number): Promise<void> {
  * 为什么必须有这一步：后端 `currentStep` 是刷新恢复与 AI 上下文（`task:EXPORT/<step>` 的
  * 渐进披露子集）的唯一权威；只在前端切步不进后端，刷新会退回首步、且模型拿到的是旧步骤。
  */
-async function syncStepToBackend(): Promise<void> {
+async function syncStepToBackend(): Promise<{ ok: boolean; reason?: string }> {
   if (taskId.value === null) {
-    return
+    return { ok: true }
   }
   const step = STEP_KEYS[stepIndex.value]
   if (!step) {
-    return
+    return { ok: true }
   }
   try {
     task.value = await tasksApi.goToStep(taskId.value, step)
-  } catch {
-    // 步骤同步失败不阻塞界面操作（下次切步会重试）
+    return { ok: true }
+  } catch (error) {
+    // 批3③a D8(A)：不再整段静默 —— 结构化失败 + 页面可见警告（同 persistStepData 的
+    // ElMessage 范式）。任何非 2xx（含未来 R-137 守卫 4xx）经 axios reject 都落此处；
+    // 不阻塞界面（下次切步会重试），由调用方把结局/警告带进回灌。
+    const reason = error instanceof Error ? error.message : String(error)
+    ElMessage.error(`步骤同步到服务端失败：${reason}（不阻塞界面，下次切步会重试）`)
+    return { ok: false, reason }
   }
 }
 
@@ -596,13 +631,14 @@ function nextStep(): void {
     ElMessage.warning('请先选择至少一个配置项')
     return
   }
-  goStep(stepIndex.value + 1)
+  // 批3③a D7：goStep 永不 reject，结局由回灌/界面消费
+  void goStep(stepIndex.value + 1)
 }
 
-/** 选中集与查询条件落库（后端是这两者的权威存储）。 */
-async function persistStepData(): Promise<void> {
+/** 选中集与查询条件落库（后端是这两者的权威存储）。返回结构化结局（批3③a D7 阻断判据）。 */
+async function persistStepData(): Promise<{ ok: boolean; reason?: string }> {
   if (taskId.value === null) {
-    return
+    return { ok: true }
   }
   persisting.value = true
   try {
@@ -618,8 +654,11 @@ async function persistStepData(): Promise<void> {
     task.value = await tasksApi.getTask(taskId.value)
     // issue #3：与 watch / AI handler 共用同一收敛点（此处落库后工作区通常已相等 ⇒ 短路，不重复记动作）
     syncSelectedDefsToWorkspace()
+    return { ok: true }
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '保存选择与条件失败')
+    const reason = error instanceof Error ? error.message : '保存选择与条件失败'
+    ElMessage.error(reason)
+    return { ok: false, reason }
   } finally {
     persisting.value = false
   }
@@ -1125,7 +1164,12 @@ async function preflightDownload(
     if (isReadOnly.value) {
       await viewStep(2)
     } else {
-      goStep(2)
+      // 批3③a D7：W-06 残余入口收口 —— persist 失败阻断推进时必须如实上报，不得照旧
+      // 无条件回 { ok:true }（那会让执行器继续触发下载，而用户根本看不到导出结果页）。
+      const advanced = await goStep(2)
+      if (!advanced.ok) {
+        return { ok: false, message: `已预检通过，但无法切换到导出结果步骤：${advanced.reason}。本次未触发下载` }
+      }
     }
   }
   return { ok: true, defCode }
@@ -1133,7 +1177,7 @@ async function preflightDownload(
 
 function registerHandlers(): void {
   // 补丁②：AI 工作区动作 confirm_step 的页面实现（推进到下一步；与用户点「下一步」同路径）
-  registerPageHandler('export.nextStep', (payload) => {
+  registerPageHandler('export.nextStep', async (payload) => {
     // 施工卡 §S3e：只读态拦在 goStep 之前 —— 已结束任务不得借 AI 通道推进步骤（零写）
     if (isReadOnly.value) {
       return '任务已结束，仅供查看，不能推进步骤'
@@ -1143,10 +1187,23 @@ function registerHandlers(): void {
     if (index < 0 || index >= STEP_KEYS.length) {
       return `步骤 ${payload.step ?? index} 不在导出向导范围内（可选：${STEP_KEYS.join('、')}）`
     }
-    goStep(index)
+    // W-06 撒谎点本体收口（批3③a D7）：取 goStep 真实结局再回灌 —— persist 失败阻断推进
+    // 时必须如实说"未推进"，否则模型会带着假的成功语义继续往下走。
+    const advanced = await goStep(index)
+    if (!advanced.ok) {
+      // 结构化失败原样上报（A3 解读支）——不得返回字符串：字符串走「兼容⇒ok」会让卡面 tag
+      // 显示「已成功」而卡内文写「步骤未推进」，卡面与回灌自相矛盾（复核 I1）。
+      return {
+        ok: false,
+        reason: `步骤未推进：${advanced.reason ?? '保存当前步骤数据失败'}。界面仍停在「${stepLabel(STEP_KEYS[stepIndex.value] ?? '')}」，`
+          + '请提示用户核对网络后重试，或手动在界面上操作。'
+      }
+    }
+    if (advanced.syncWarning) {
+      return `已推进到导出向导步骤「${stepLabel(STEP_KEYS[index])}」（${advanced.syncWarning}）。`
+    }
     return `已推进到导出向导步骤「${stepLabel(STEP_KEYS[index])}」`
   })
-
   registerPageHandler('export.selectDefs', (payload) => {
     // 施工卡 §S3e（收口修 F4，复核 minor-2）：只读态不改变所选配置项 —— 与导入侧
     // import.selectDefs 守卫对称（本批 10 处守卫的最后一块拼图）
@@ -1217,12 +1274,20 @@ function registerHandlers(): void {
     if (!exportResults.value.some((item) => item.defCode === defCode)) {
       throw new Error(`${noResultMessage(defCode)}。请在任务 #${taskId.value} 上完成 ${defCode} 的导出后重试，或核对传入的 taskId 与 defCode；本次未打开在线编辑器`)
     }
-    // 施工卡 §S3e：切页同 `preflightDownload` —— 只读态走零写的 `viewStep`，非只读态逐字不动
+    // 施工卡 §S3e：切页同 `preflightDownload` —— 只读态走零写的 `viewStep`，非只读态取 goStep 结局
     if (stepIndex.value !== 2) {
       if (isReadOnly.value) {
         await viewStep(2)
       } else {
-        goStep(2)
+        // 批3③a D7：W-06 残余入口收口 —— persist 失败阻断推进时结构化如实上报（A3 解读支），
+        // 不得谎报"已打开在线编辑器"。
+        const advanced = await goStep(2)
+        if (!advanced.ok) {
+          return {
+            ok: false,
+            reason: `无法推进到导出结果步骤：${advanced.reason}。${defCode} 的在线编辑器未打开。`
+          }
+        }
       }
     }
     activeTab.value = defCode
@@ -1233,9 +1298,14 @@ function registerHandlers(): void {
     // 再要成功必须重挂组件，而重挂会重建本页状态、`loadedGrids` 随之清空。
     const loaded = await ensureGridLoaded(defCode)
     if (!loaded.ok) {
-      return `${defCode} 的在线编辑器表格未就绪（任务 #${taskId.value}）：${loaded.error}。`
-        + '导出结果步骤与该配置标签已切到前台，但表格位置是加载错误提示，没有可编辑的数据；'
-        + '请提示用户核对网络后重试，在此之前不要假设编辑器可用。'
+      // 批3③a D2 点名：这是**确定性失败**（引擎加载失败，可判定未完成）——结构化 {ok:false}
+      // 原样上报（文案逐字保留），不得再经字符串兼容支被包装层折成"已成功"。
+      return {
+        ok: false,
+        reason: `${defCode} 的在线编辑器表格未就绪（任务 #${taskId.value}）：${loaded.error}。`
+          + '导出结果步骤与该配置标签已切到前台，但表格位置是加载错误提示，没有可编辑的数据；'
+          + '请提示用户核对网络后重试，在此之前不要假设编辑器可用。'
+      }
     }
     return `已打开任务 #${taskId.value} 的 ${defCode} 在线编辑器（导出结果表格）`
   })

@@ -111,11 +111,39 @@ export function findFrontendTool(name: string): FrontendToolDescriptor | null {
   return FRONTEND_TOOLS.find((tool) => tool.name === name) ?? null
 }
 
-/** 前端工具的执行结果（回灌给后端的文本 + 本地痕迹）。 */
+/**
+ * 前端工具执行结局三态（批3③a「工具结局不得谎报」）：真实结局维度，与
+ * `ToolAvailability`（可用性：available/degraded/unavailable）**正交** —— degraded 既可承载
+ * 确定性失败（failed）也可承载"结局未知"（unknown）。
+ * - ok：已确认成功（执行器给出成功结局 / handler 返回成功字符串）；
+ * - failed：**确定性失败** —— 执行器 throw、handler 结构化 `{ok:false}`、契约层/守卫拒绝
+ *   （有明确原因，可判定未完成，如 D2 点名的编辑器引擎加载失败）；
+ * - unknown：**结局未知** —— 已发起/已受理但时限内无法确认真实结局（执行器预算到期、
+ *   等待页面就绪超出上界）。回灌文本如实说"既未确认成功，也未确认失败"。
+ */
+export type FrontendToolOutcome = 'ok' | 'failed' | 'unknown'
+
+/**
+ * 前端工具的执行结果（回灌给后端的文本 + 本地痕迹）。
+ *
+ * 批3③a：`outcome` 是结局的权威维度；`ok` 语义收窄为 `ok === (outcome === 'ok')`
+ * （预算到期等"结局未知"恒为 false），由 `makeExecution`（utils/frontend-tools.ts）单点推导。
+ */
 export interface FrontendToolExecution {
+  /**
+   * @deprecated 批3③a 起读 `outcome`；本字段仅兼容保留，由 makeExecution 依据 outcome 推导，
+   * 不得再作为结局判据（`unknown ⇒ ok:false`）。
+   */
   ok: boolean
   availability: ToolAvailability
-  /** 回灌给模型的说明文本（POST /api/ai/frontend-tool-result 的 result） */
+  /** 执行结局（三态，批3③a 新增的真实结局维度）。 */
+  outcome: FrontendToolOutcome
+  /** 结局补充说明（unknown 的原因 / failed 的原因），可选。 */
+  reason?: string
+  /**
+   * 回灌给模型的说明文本（POST /api/ai/frontend-tool-result 的 result）。
+   * 结局信息走 `outcome` 字段而非文本编码（D11：不加 `[unknown]` 类机器前缀）。
+   */
   result: string
 }
 
