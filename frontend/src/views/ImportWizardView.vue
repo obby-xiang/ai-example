@@ -4,12 +4,16 @@
     :subtitle="taskSubtitle"
     :steps="WIZARD_STEPS"
     :active-index="stepIndex"
+    :step-statuses="stepStatuses"
+    :read-only="isReadOnly"
     :task-status="task?.status ?? null"
     :prev-disabled="stepIndex === 0"
-    :show-next="stepIndex < 3"
+    :show-prev="!isReadOnly"
+    :show-next="!isReadOnly && stepIndex < 3"
     :next-loading="busy === 'persist'"
     @prev="goPrev"
     @next="nextStep"
+    @step-click="viewStep"
   >
     <!-- ============ 第 1 步：上传配置 ============ -->
     <div v-show="stepIndex === 0">
@@ -27,13 +31,14 @@
         </el-button>
       </el-alert>
 
-      <DefSelector v-model="selectedDefs" :defs="defs" :loading="defsLoading" />
+      <DefSelector v-model="selectedDefs" :defs="defs" :loading="defsLoading" :disabled="isReadOnly" />
 
       <div class="flex items-center gap-3 my-3">
-        <el-button size="small" :disabled="!selectedDefs.length" :loading="busy === 'templates'" @click="downloadTemplates">
+        <el-button v-if="!isReadOnly" size="small" :disabled="!selectedDefs.length" :loading="busy === 'templates'" @click="downloadTemplates">
           下载模板（{{ selectedDefs.length > 1 ? 'zip' : 'xlsx' }}）
         </el-button>
         <el-upload
+          v-if="!isReadOnly"
           :auto-upload="false"
           :show-file-list="false"
           accept=".xlsx,.zip"
@@ -44,7 +49,7 @@
             上传 xlsx / zip
           </el-button>
         </el-upload>
-        <el-button size="small" :disabled="!selectedDefs.length" :loading="busy === 'flush'" @click="flushEditors">
+        <el-button v-if="!isReadOnly" size="small" :disabled="!selectedDefs.length" :loading="busy === 'flush'" @click="flushEditors">
           保存草稿到服务端
         </el-button>
         <span class="text-xs text-[#909399]">
@@ -63,6 +68,7 @@
             <SpreadGrid
               :ref="(el) => setGridRef(def.code, el)"
               height="380px"
+              :read-only="isReadOnly"
               :def-code="def.code"
               :sheet-name="def.name"
               @data-changed="onGridChanged"
@@ -76,7 +82,7 @@
     <!-- ============ 第 2 步：检查配置 ============ -->
     <div v-show="stepIndex === 1">
       <div class="flex items-center gap-3 mb-3">
-        <el-button type="primary" :loading="busy === 'check'" :disabled="jobRunning(checkJob)" @click="startCheck">
+        <el-button v-if="!isReadOnly" type="primary" :loading="busy === 'check'" :disabled="jobRunning(checkJob)" @click="startCheck">
           启动预检查
         </el-button>
         <span class="text-xs text-[#909399]">校验必填、类型、枚举与跨配置项引用；不写入任何数据。</span>
@@ -86,6 +92,7 @@
         :issues="checkIssues"
         :channel="checkChannel"
         :error-message="errorMessageOf(checkJob, checkIssues)"
+        :read-only="isReadOnly"
         @cancel="cancelJob(checkJob)"
       />
       <el-alert
@@ -109,7 +116,7 @@
     <!-- ============ 第 3 步：导入配置 ============ -->
     <div v-show="stepIndex === 2">
       <div class="flex items-center gap-3 mb-3">
-        <el-button type="primary" :loading="busy === 'import'" :disabled="jobRunning(importJob)" @click="startImport">
+        <el-button v-if="!isReadOnly" type="primary" :loading="busy === 'import'" :disabled="jobRunning(importJob)" @click="startImport">
           启动导入
         </el-button>
         <span class="text-xs text-[#909399]">再次校验后写入暂存区（暂不发布）；有错误的配置项其下游依赖将被跳过。</span>
@@ -119,6 +126,7 @@
         :issues="importIssues"
         :channel="importChannel"
         :error-message="errorMessageOf(importJob, importIssues)"
+        :read-only="isReadOnly"
         @cancel="cancelJob(importJob)"
       />
     </div>
@@ -130,7 +138,7 @@
           <div class="flex justify-between items-center">
             <span>暂存数据核查</span>
             <div class="flex items-center gap-2">
-              <el-radio-group v-model="importMode" size="small" @change="onImportModeChange">
+              <el-radio-group v-model="importMode" size="small" :disabled="isReadOnly" @change="onImportModeChange">
                 <el-radio-button value="MERGE">增量合并</el-radio-button>
                 <el-radio-button value="REPLACE">范围内替换</el-radio-button>
               </el-radio-group>
@@ -169,7 +177,7 @@
       </el-card>
 
       <div class="flex items-center gap-3 mb-3">
-        <el-button type="primary" :loading="busy === 'publish'" :disabled="jobRunning(publishJob)" @click="startPublish">
+        <el-button v-if="!isReadOnly" type="primary" :loading="busy === 'publish'" :disabled="jobRunning(publishJob)" @click="startPublish">
           确认发布
         </el-button>
         <span class="text-xs text-[#909399]">
@@ -193,6 +201,7 @@
         :issues="publishIssues"
         :channel="publishChannel"
         :error-message="errorMessageOf(publishJob, publishIssues)"
+        :read-only="isReadOnly"
         @cancel="cancelJob(publishJob)"
       />
     </div>
@@ -308,6 +317,37 @@ const taskSubtitle = computed(() => {
   }
   return `#${task.value.id} · ${task.value.title}`
 })
+
+/**
+ * 步骤条节点级状态（下标与 `WIZARD_STEPS` 对齐）：按**该步作业的终态**逐节点给色，
+ * 与当前浏览到哪一步无关。失败步红 + 「（失败）」文字；取消步中性灰（`el-step`
+ * 无 cancelled 档，用 'wait' 表达）—— 第 1 步是纯页面步骤、无作业，恒为 ''。
+ */
+const stepStatuses = computed<('' | 'error' | 'wait')[]>(() => [
+  '',
+  checkJob.value?.status === 'FAILED' ? 'error' : checkJob.value?.status === 'CANCELLED' ? 'wait' : '',
+  importJob.value?.status === 'FAILED' ? 'error' : importJob.value?.status === 'CANCELLED' ? 'wait' : '',
+  publishJob.value?.status === 'FAILED' ? 'error' : publishJob.value?.status === 'CANCELLED' ? 'wait' : ''
+])
+
+/**
+ * 只读态判定（施工卡 §2.2-A）：终案「COMPLETED / CANCELLED 即结束」**不能照字面实现** ——
+ * 后端 `JobTerminalWriter` 对**任何**作业终态都调 `TaskService.applyJobOutcome`，`PrecheckJobRunner`
+ * 预检查 0 错误即把作业置 COMPLETED ⇒ 任务当场变 COMPLETED。照字面实现会在预检查通过瞬间进入只读、
+ * 页脚「下一步 / 启动导入 / 确认发布」全消失，**导入主流程死锁**。
+ *
+ * 因此"已结束"取「该类型的**最终作业**已成功」为收口判据：导入流程走完 = 最新 PUBLISH 作业 COMPLETED。
+ * `publishJob` 为 null（作业未恢复 / 绑定的是导出任务）时 `=== 'COMPLETED'` 天然为 false ⇒ 仍视为进行中。
+ * `currentStep` 不能当判据：`TaskService.complete()`（唯一写 `DONE` 的方法）在仓内无调用点，
+ * `currentStep` 实测永不为 `DONE`。
+ */
+const isReadOnly = computed(
+  () =>
+    task.value?.status === 'CANCELLED' ||
+    (task.value?.type === 'IMPORT' &&
+      task.value?.status === 'COMPLETED' &&
+      publishJob.value?.status === 'COMPLETED')
+)
 
 function readTaskId(): number | null {
   const raw = Number(route.query.taskId)
@@ -446,7 +486,7 @@ async function resumeJobs(): Promise<void> {
   }
   const jobs = await jobsApi.listJobs(taskId.value).catch(() => [])
   const latest = (type: 'PRECHECK' | 'IMPORT' | 'PUBLISH'): Job | undefined =>
-    jobs.filter((job) => job.jobType === type).slice(-1)[0]
+    jobs.filter((job) => job.jobType === type)[0]
   const check = latest('PRECHECK')
   if (check) {
     await attachJob('check', check)
@@ -648,6 +688,22 @@ async function flushEditors(): Promise<boolean> {
 // ── 步骤导航 ──────────────────────────────────────────────────────────────────
 
 /**
+ * 按步骤下标补齐该步的懒加载数据（写侧切步 `goStep` 与只读查看 `viewStep` 共用同一个钩子）。
+ *
+ * <b>顺序纪律</b>：调用方必须**先**改 `stepIndex.value` 再调本函数 —— `loadEditors` 在
+ * `stepIndex.value !== 0` 时提前 return，顺序反了第 1 步的编辑区就是空白（数据空洞）。
+ */
+async function ensureStepLoaded(index: number): Promise<void> {
+  await nextTick()
+  if (index === 0) {
+    await loadEditors()
+  }
+  if (index === 3) {
+    await loadStaging()
+  }
+}
+
+/**
  * 步骤导航（返回"是否真的推进了"）。
  *
  * <p>
@@ -669,14 +725,23 @@ async function goStep(next: number): Promise<boolean> {
   stepIndex.value = next
   workspace.setStep(STEP_KEYS[next] ?? null)
   await syncStepToBackend()
-  await nextTick()
-  if (next === 0) {
-    await loadEditors()
-  }
-  if (next === 3) {
-    await loadStaging()
-  }
+  await ensureStepLoaded(next)
   return true
+}
+
+/**
+ * 只读态点节点查看（施工卡 §S3b）：只切本地步骤 + 补齐该步数据，**零服务端写入**。
+ *
+ * 与 `goStep` 的分工（终案"点节点 = 查看，不是编辑"）：
+ * 不调 `flushEditors`（不写文件）、不调 `workspace.setStep`（不把浏览动作写进 AI 渐进披露集）、
+ * 不调 `syncStepToBackend`（不发 `PUT /step`）—— 刷新后浏览位置仍以后端 `currentStep` 为准。
+ */
+async function viewStep(index: number): Promise<void> {
+  if (index < 0 || index >= STEP_KEYS.length) {
+    return
+  }
+  stepIndex.value = index
+  await ensureStepLoaded(index)
 }
 
 /**
@@ -865,6 +930,12 @@ async function buildPublishConflict(job: Job): Promise<void> {
 }
 
 async function cancelJob(job: Job | null): Promise<void> {
+  // R-136 收口修 F1（复核 MAJOR-1，红队修正版）：只读态守卫。任务 CANCELLED 后 IMPORT/PUBLISH
+  // 等异类型作业可同时在途（后端在途互斥按作业类型），只读壳内「取消作业」仍可发出 DELETE —— 拦在此。
+  if (isReadOnly.value) {
+    ElMessage.info('任务已结束，仅供查看，未取消作业')
+    return
+  }
   if (!job?.id) {
     return
   }
@@ -933,6 +1004,10 @@ const HANDLER_NAMES = [
 function registerHandlers(): void {
   // 补丁②：AI 工作区动作 confirm_step 的页面实现（推进到下一步；与用户点「下一步」同路径）
   registerPageHandler('import.nextStep', async (payload) => {
+    // 施工卡 §S3e：只读态拦在 goStep 之前 —— 已结束任务不得借 AI 通道推进步骤（零写）
+    if (isReadOnly.value) {
+      return '任务已结束，仅供查看，不能推进步骤'
+    }
     const target = typeof payload.step === 'string' && payload.step !== '' ? payload.step : null
     const index = target ? STEP_KEYS.indexOf(target as (typeof STEP_KEYS)[number]) : stepIndex.value + 1
     if (index < 0 || index >= STEP_KEYS.length) {
@@ -950,6 +1025,10 @@ function registerHandlers(): void {
   })
 
   registerPageHandler('import.selectDefs', (payload) => {
+    // 施工卡 §S3e：只读态不改变所选配置项（含收敛工作区与重载编辑区一并短路）
+    if (isReadOnly.value) {
+      return '任务已结束，仅供查看，未变更所选配置项'
+    }
     const codes = Array.isArray(payload.defCodes) ? payload.defCodes.map((item) => String(item)) : []
     selectedDefs.value = payload.mode === 'ADD' ? [...new Set([...selectedDefs.value, ...codes])] : codes
     // issue #3：AI handler 分支同样要显式收敛（来源记 'AI'；watch 随后比较已相等 ⇒ 短路）
@@ -960,20 +1039,37 @@ function registerHandlers(): void {
   })
 
   registerPageHandler('import.upload', () => {
+    // 收口修 F5（红队 minor-3）：只读态如实回灌 —— 上传入口在只读页已隐藏（v-if="!isReadOnly"），
+    // 若仍引导用户去点「上传 xlsx / zip」就是指向一个不存在的按钮（违反 DC-14 回灌与真实结局一致）。
+    if (isReadOnly.value) {
+      return '任务已结束，仅供查看；上传入口在只读页面不可用，本次未执行上传。'
+    }
     return '上传文件需要浏览器文件句柄：请提示用户点击「上传 xlsx / zip」选择文件（文件名需包含配置项编码）。'
   })
 
   registerPageHandler('import.startPrecheck', async () => {
+    // 施工卡 §S3e：只读态不得 createJob（不许在已结束任务上建新作业）
+    if (isReadOnly.value) {
+      return '任务已结束，仅供查看，未启动预检查作业'
+    }
     await startJob('check')
     return checkJob.value ? `预检查作业 #${checkJob.value.id} 已启动` : '预检查未启动'
   })
 
   registerPageHandler('import.startImport', async () => {
+    // 施工卡 §S3e：只读态不得 createJob
+    if (isReadOnly.value) {
+      return '任务已结束，仅供查看，未启动导入作业'
+    }
     await startJob('import')
     return importJob.value ? `导入作业 #${importJob.value.id} 已启动` : '导入未启动'
   })
 
   registerPageHandler('import.startPublish', async () => {
+    // 施工卡 §S3e：只读态不得 createJob
+    if (isReadOnly.value) {
+      return '任务已结束，仅供查看，未启动发布作业'
+    }
     await startJob('publish')
     return publishJob.value
       ? `发布作业 #${publishJob.value.id} 已启动；发布结果按异步形态给出（作业终态 + 问题清单）`

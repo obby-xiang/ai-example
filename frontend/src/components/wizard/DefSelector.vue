@@ -1,13 +1,13 @@
 <template>
   <div>
     <div class="flex gap-3 mb-2.5">
-      <el-radio-group v-model="levelFilter" size="small">
+      <el-radio-group v-model="levelFilter" size="small" :disabled="props.disabled">
         <el-radio-button value="">全部层级</el-radio-button>
         <el-radio-button value="GLOBAL">全局</el-radio-button>
         <el-radio-button value="REGION">地区</el-radio-button>
         <el-radio-button value="PROJECT">项目</el-radio-button>
       </el-radio-group>
-      <el-input v-model="keyword" size="small" placeholder="搜索编码 / 名称" clearable class="w-[220px]" />
+      <el-input v-model="keyword" size="small" placeholder="搜索编码 / 名称" clearable class="w-[220px]" :disabled="props.disabled" />
     </div>
     <el-table
       ref="tableRef"
@@ -18,7 +18,7 @@
       :height="height"
       @selection-change="onSelectionChange"
     >
-      <el-table-column type="selection" width="48" />
+      <el-table-column type="selection" width="48" :selectable="() => !props.disabled" />
       <el-table-column prop="code" label="编码" width="160" />
       <el-table-column prop="name" label="名称" min-width="140" />
       <el-table-column label="层级" width="90">
@@ -62,10 +62,13 @@ const props = withDefaults(
     modelValue: readonly string[]
     loading?: boolean
     height?: string | number
+    /** 只读态：禁止改选与筛选（只读查看用） */
+    disabled?: boolean
   }>(),
   {
     loading: false,
-    height: 380
+    height: 380,
+    disabled: false
   }
 )
 

@@ -33,7 +33,7 @@
  * 就绪等待契约（B-07）：`readyPromise` 在**成功 / 加载失败 / 超时 / 卸载**四条路径上都结算，
  * 调用方不会无限悬挂；失败时 `loadFromJson` 抛出可展示的错误文本（含引擎失败原文）。
  */
-import { onBeforeUnmount, onMounted, ref, shallowRef } from 'vue'
+import { onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import type GC from '@grapecity/spread-sheets'
 import {
   applyColumnsToSheet,
@@ -219,6 +219,10 @@ function applyReadOnly(): void {
     sheet.options.isProtected = props.readOnly
   }
 }
+
+// R-136 收口修 F2（红队 MAJOR-3）：只读态**场内翻转**（导出完成 ⟹ isReadOnly false→true）时
+// 已加载的工作表须即时重保护，否则第 3 步结果表格在只读壳内仍可键盘编辑（内存态，零落库）。
+watch(() => props.readOnly, applyReadOnly)
 
 /** 建列（表头 + 校验器 + 冻结）并写数据行（引擎已就绪时调用）。 */
 function applyLoad(fieldDefs: readonly ConfigField[], rows: readonly Record<string, unknown>[]): void {

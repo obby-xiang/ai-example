@@ -5,7 +5,9 @@
       <span v-if="running && currentDefCode" class="text-[#606266] text-[13px]">正在处理：{{ currentDefCode }}</span>
       <span v-if="channelHint" class="text-[#909399] text-xs">{{ channelHint }}</span>
       <span class="ml-auto text-[#909399] text-[13px]">{{ progressText }}</span>
-      <el-button v-if="running" size="small" type="danger" plain @click="emit('cancel')">取消作业</el-button>
+      <!-- R-136 收口修 F1（复核 MAJOR-1）：只读壳内「取消作业」一律隐藏 —— 异类型作业并发态下
+           任务 CANCELLED 时本组件仍可能有 PENDING/RUNNING 作业，按钮可见性只看作业态不够 -->
+      <el-button v-if="running && !readOnly" size="small" type="danger" plain @click="emit('cancel')">取消作业</el-button>
     </div>
     <el-progress
       v-if="job"
@@ -90,11 +92,14 @@ const props = withDefaults(
     channel?: JobChannelState | null
     /** 作业失败时的错误文案（无 issue 时兜底） */
     errorMessage?: string | null
+    /** 只读壳（任务已终态）：隐藏「取消作业」，与两向导「仅供查看」口径一致（收口修 F1） */
+    readOnly?: boolean
   }>(),
   {
     issues: () => [],
     channel: null,
-    errorMessage: null
+    errorMessage: null,
+    readOnly: false
   }
 )
 

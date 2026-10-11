@@ -335,6 +335,28 @@ function fail(message: string): UiEventResult {
 }
 
 /**
+ * 只读态公共判据（收口修 F6，红队 minor-4）：与两向导 `isReadOnly` 同口径的契约层版，
+ * 供 ui_event 写事件共用（守卫逻辑只此一份，各分支只传文案）。
+ *
+ * CANCELLED 必为只读；COMPLETED 须按类型核「最终作业」——导入侧预检查 0 错误即置 COMPLETED、
+ * 但流程仍可继续，单看任务状态会把「预检查后继续导入」误判为只读而误伤 AI 驱动，故拉一次
+ * 作业列表复核（GET，非写；仅在任务已 COMPLETED/CANCELLED 时才会触发这一跳）。
+ */
+async function isCurrentTaskReadOnly(workspace: ReturnType<typeof useWorkspaceStore>): Promise<boolean> {
+  const status = workspace.taskStatus
+  if (status === 'CANCELLED') {
+    return true
+  }
+  if (status !== 'COMPLETED' || workspace.taskId === null || workspace.taskType === null) {
+    return false
+  }
+  const finalJobType = workspace.taskType === 'IMPORT' ? 'PUBLISH' : 'EXPORT'
+  const jobs = await jobsApi.listJobs(workspace.taskId).catch(() => null)
+  const latest = jobs?.filter((job) => job.jobType === finalJobType)[0]
+  return latest?.status === 'COMPLETED'
+}
+
+/**
  * 分发 AI 侧发来的 ui_event。
  *
  * 每个分支都落到**与用户手点相同**的 API/action 上，因此 AI 驱动与手工操作
@@ -382,6 +404,10 @@ async function runUiEvent(event: UiEvent): Promise<UiEventResult> {
         if (taskId === null) {
           return fail('当前没有进行中的任务，无法选择配置项')
         }
+        // 收口修 F6（红队 minor-4）：只读态守卫，与页面 handler 同口径
+        if (await isCurrentTaskReadOnly(workspace)) {
+          return fail('任务已结束，仅供查看，未变更所选配置项')
+        }
         await tasksApi.selectDefs(taskId, event.defCodes)
         workspace.setSelectedDefs(event.defCodes)
         await taskStore.refreshCurrent()
@@ -392,6 +418,10 @@ async function runUiEvent(event: UiEvent): Promise<UiEventResult> {
         if (taskId === null) {
           return fail('当前没有进行中的任务，无法设置查询条件')
         }
+        // 收口修 F6（红队 minor-4）：只读态守卫，与页面 handler 同口径
+        if (await isCurrentTaskReadOnly(workspace)) {
+          return fail('任务已结束，仅供查看，未设置查询条件')
+        }
         await tasksApi.setCondition(taskId, event.defCode, event.conditions)
         workspace.setQueryConditions(event.defCode, event.conditions)
         return ok(`已设置 ${event.defCode} 的查询条件`)
@@ -401,11 +431,20 @@ async function runUiEvent(event: UiEvent): Promise<UiEventResult> {
         if (taskId === null) {
           return fail('当前没有进行中的任务，无法设置导入模式')
         }
+        // 收口修 F6（红队 minor-4）：只读态守卫，与页面 handler 同口径
+        if (await isCurrentTaskReadOnly(workspace)) {
+          return fail('任务已结束，仅供查看，未变更导入模式')
+        }
         await tasksApi.setImportMode(taskId, event.mode)
         workspace.setImportMode(event.mode)
         return ok(`导入模式已设为 ${event.mode === 'MERGE' ? '增量合并' : '整体替换'}`)
       }
       case 'run_job': {
+        // 收口修 F6（红队 minor-4）：目标任务是当前只读任务时拒绝（与页面 start 系 handler 同口径）；
+        // 其余任务 id 不在当前只读壳语义内，按原路径放行（后端终态守卫另见 R-137 登记）。
+        if (event.taskId === workspace.taskId && (await isCurrentTaskReadOnly(workspace))) {
+          return fail('任务已结束，仅供查看，未启动作业')
+        }
         const job = await jobsApi.createJob(event.taskId, event.jobType)
         await taskStore.refreshCurrent()
         if (event.jobType === 'PUBLISH') {
@@ -416,6 +455,11 @@ async function runUiEvent(event: UiEvent): Promise<UiEventResult> {
         return ok(`作业已启动：${event.jobType}（作业 #${job.id}）`)
       }
       case 'cancel_job': {
+        // 收口修 F6（红队 minor-4）：只读态守卫 —— 与 F1 页面侧「取消作业」守卫同根同口径
+        // （异类型并发态下任务 CANCELLED 仍可能有在途作业，只读壳内不得再发取消）。
+        if (await isCurrentTaskReadOnly(workspace)) {
+          return fail('任务已结束，仅供查看，未取消作业')
+        }
         const outcome = await taskStore.cancelJob(event.jobId)
         return outcome.handled ? ok(outcome.message) : fail(outcome.message)
       }

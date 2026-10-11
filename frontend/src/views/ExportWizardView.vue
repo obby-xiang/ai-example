@@ -4,12 +4,16 @@
     :subtitle="taskSubtitle"
     :steps="WIZARD_STEPS"
     :active-index="stepIndex"
+    :step-statuses="stepStatuses"
+    :read-only="isReadOnly"
     :task-status="task?.status ?? null"
     :prev-disabled="stepIndex === 0"
-    :show-next="stepIndex < 2"
+    :show-prev="!isReadOnly"
+    :show-next="!isReadOnly && stepIndex < 2"
     :next-loading="persisting"
     @prev="goStep(stepIndex - 1)"
     @next="nextStep"
+    @step-click="viewStep"
   >
     <!-- ============ 第 1 步：选择配置 ============ -->
     <div v-show="stepIndex === 0">
@@ -26,7 +30,7 @@
           创建导出任务并进入
         </el-button>
       </el-alert>
-      <DefSelector v-model="selectedDefs" :defs="defs" :loading="defsLoading" />
+      <DefSelector v-model="selectedDefs" :defs="defs" :loading="defsLoading" :disabled="isReadOnly" />
       <div class="mt-2.5 text-[13px] text-[#909399]">
         已选 {{ selectedDefs.length }} 个配置项；存在依赖关系的配置项将按依赖顺序导出。
       </div>
@@ -39,13 +43,14 @@
         <template #header>
           <div class="flex items-center gap-3">
             <span class="font-semibold mr-auto">{{ defName(code) }}（{{ code }}）</span>
-            <el-button size="small" :loading="countLoading[code] === true" @click="previewCount(code)">预览行数</el-button>
+            <el-button v-if="!isReadOnly" size="small" :loading="countLoading[code] === true" @click="previewCount(code)">预览行数</el-button>
             <el-tag v-if="counts[code] !== undefined" size="small" type="success">命中 {{ counts[code] }} 行</el-tag>
           </div>
         </template>
         <ConditionForm
           :fields="fieldsOf(code)"
           :model-value="draftModels[code] ?? emptyDraftModel()"
+          :disabled="isReadOnly"
           @update:model-value="(value) => (draftModels[code] = value)"
         />
       </el-card>
@@ -54,7 +59,7 @@
     <!-- ============ 第 3 步：导出 ============ -->
     <div v-show="stepIndex === 2">
       <div class="flex items-center mb-3">
-        <el-button type="primary" :loading="startingExport" :disabled="jobRunning" @click="startExport">
+        <el-button v-if="!isReadOnly" type="primary" :loading="startingExport" :disabled="jobRunning" @click="startExport">
           {{ exportJob ? '重新导出' : '开始导出' }}
         </el-button>
         <template v-if="exportResults.length">
@@ -66,7 +71,7 @@
             打包下载勾选（{{ checkedDefs.length }}）
           </el-button>
           <el-button size="small" :loading="downloading === 'all'" @click="downloadAll">全部打包 zip</el-button>
-          <el-button size="small" :loading="savingFiles" @click="saveEdits">保存编辑到服务端</el-button>
+          <el-button v-if="!isReadOnly" size="small" :loading="savingFiles" @click="saveEdits">保存编辑到服务端</el-button>
         </template>
       </div>
 
@@ -75,6 +80,7 @@
         :issues="currentIssues"
         :channel="channelState"
         :error-message="jobErrorMessage"
+        :read-only="isReadOnly"
         @cancel="cancelJob"
       />
 
@@ -101,6 +107,7 @@
             <SpreadGrid
               :ref="(el) => setGridRef(item.defCode, el)"
               height="440px"
+              :read-only="isReadOnly"
               :def-code="item.defCode"
               :sheet-name="defName(item.defCode)"
               @data-changed="onGridChanged"
@@ -236,6 +243,35 @@ const taskSubtitle = computed(() => {
   return `#${task.value.id} · ${task.value.title}`
 })
 
+/**
+ * 步骤条节点级状态（下标与 `WIZARD_STEPS` 对齐）：只有第 3 步（导出）有作业，
+ * 按该作业终态给色 —— 失败红 + 「（失败）」文字；取消中性灰（`el-step` 无
+ * cancelled 档，用 'wait' 表达）。前两步是纯页面步骤，恒为 ''。
+ */
+const stepStatuses = computed<('' | 'error' | 'wait')[]>(() => [
+  '',
+  '',
+  exportJob.value?.status === 'FAILED' ? 'error' : exportJob.value?.status === 'CANCELLED' ? 'wait' : ''
+])
+
+/**
+ * 只读态判定（施工卡 §2.2-A）：终案「COMPLETED / CANCELLED 即结束」**不能照字面实现** ——
+ * 后端 `JobTerminalWriter` 对**任何**作业终态都调 `TaskService.applyJobOutcome`，
+ * 导入侧预检查 0 错误即把任务置 COMPLETED（同仓 `docs/evidence/S44d` 实测）。导出侧只有 EXPORT
+ * 一种作业，故照字面实现与本口径同值，但仍统一取「该类型的**最终作业**已成功」为收口判据：
+ * 导出流程走完 = 最新 EXPORT 作业 COMPLETED。
+ *
+ * `exportJob` 为 null（作业未恢复 / 绑定的是导入任务）时 `=== 'COMPLETED'` 天然为 false ⇒ 仍视为进行中。
+ * `currentStep` 不能当判据：`TaskService.complete()`（唯一写 `DONE` 的方法）在仓内无调用点。
+ */
+const isReadOnly = computed(
+  () =>
+    task.value?.status === 'CANCELLED' ||
+    (task.value?.type === 'EXPORT' &&
+      task.value?.status === 'COMPLETED' &&
+      exportJob.value?.status === 'COMPLETED')
+)
+
 const jobErrorMessage = computed(() => {
   if (!exportJob.value || exportJob.value.status !== 'FAILED') {
     return null
@@ -346,7 +382,40 @@ async function loadTask(preloaded?: Task): Promise<TaskLoadOutcome> {
     taskStatus: loaded.status,
     selectedDefs: [...selectedDefs.value]
   })
+  await resumeJobs()
   return { taskOk: true, filesOk: await loadExistingResults() }
+}
+
+/**
+ * 恢复未完成的导出作业（刷新页面后仍能看到进度与明细）。
+ *
+ * 镜像 `ImportWizardView.vue` 的 `resumeJobs`（O-3）：`listJobs` 是后端 `createdAt DESC, id DESC`
+ * 序 ⇒ 取 `[0]` 即**最近一次** EXPORT 作业。只挂在 `loadTask` 上，**不进** `loadExistingResults`
+ * （后者被 `refreshResults()` 反复调用，否则每次导出完成都会重挂一轮 watcher）。
+ * 终态作业不再 `beginWatchJob`：结果已由 `loadExistingResults` 铺开，重复 watch 只会多一轮轮询。
+ */
+async function resumeJobs(): Promise<void> {
+  if (taskId.value === null) {
+    return
+  }
+  const jobs = await jobsApi.listJobs(taskId.value).catch(() => [])
+  const job = jobs.filter((item) => item.jobType === 'EXPORT')[0]
+  if (!job) {
+    return
+  }
+  exportJob.value = job
+  const jobId = job.id
+  if (jobId === undefined) {
+    return
+  }
+  try {
+    currentIssues.value = (await jobsApi.getIssues(jobId)).content ?? []
+  } catch {
+    // 问题清单拉取失败不阻断主流程（同导入页 refreshIssues 的兜底口径）
+  }
+  if (job.status === 'PENDING' || job.status === 'RUNNING') {
+    beginWatchJob(jobId)
+  }
 }
 
 /**
@@ -466,6 +535,13 @@ async function applyTaskBinding(id: number, preloaded?: Task): Promise<TaskLoadO
 
 // ── 步骤导航与持久化 ───────────────────────────────────────────────────────────
 
+/** 按步骤下标补齐该步的懒加载数据（写侧切步 `goStep` 与只读查看 `viewStep` 共用同一个钩子）。 */
+async function ensureStepLoaded(index: number): Promise<void> {
+  if (index === 2) {
+    await refreshResults()
+  }
+}
+
 function goStep(next: number): void {
   if (next < 0 || next >= STEP_KEYS.length) {
     return
@@ -474,9 +550,24 @@ function goStep(next: number): void {
   workspace.setStep(STEP_KEYS[next] ?? null)
   void persistStepData()
   void syncStepToBackend()
-  if (next === 2) {
-    void refreshResults()
+  void ensureStepLoaded(next)
+}
+
+/**
+ * 只读态点节点查看（施工卡 §S3b）：只切本地步骤 + 补齐该步数据，**零服务端写入**。
+ *
+ * 与 `goStep` 的分工（终案"点节点 = 查看，不是编辑"）：不调 `persistStepData`（不落库选中集与条件）、
+ * 不调 `workspace.setStep`（不把浏览动作写进 AI 渐进披露集）、不调 `syncStepToBackend`（不发 `PUT /step`）
+ * —— 刷新后浏览位置仍以后端 `currentStep` 为准。
+ * 第 3 步的标签懒加载仍走 `onTabChange → ensureGridLoaded`（`ensureStepLoaded(2)` 只负责刷结果与首个标签）。
+ */
+async function viewStep(index: number): Promise<void> {
+  if (index < 0 || index >= STEP_KEYS.length) {
+    return
   }
+  stepIndex.value = index
+  await nextTick()
+  await ensureStepLoaded(index)
 }
 
 /**
@@ -622,6 +713,17 @@ function beginWatchJob(jobId: number): void {
       } else {
         ElMessage.info('导出作业已取消')
       }
+      // 任务状态由后端 JobTerminalWriter 联动作业终态，这里一律刷新快照（失败也要显示 FAILED），
+      // 与导入页 refreshTaskSnapshot 同口径（收口修 F3：补上 workspace.setTaskId 状态同步与
+      // try/catch 兜底 —— getTask 失败时不再裸 reject）；刷新后 isReadOnly 才能在场内随导出成功翻为 true。
+      if (taskId.value !== null) {
+        try {
+          task.value = await tasksApi.getTask(taskId.value)
+          workspace.setTaskId(taskId.value, 'EXPORT', task.value.status)
+        } catch {
+          // 任务快照刷新失败不阻断作业结果的展示（同导入页 refreshTaskSnapshot 口径）
+        }
+      }
     }
   })
 }
@@ -638,6 +740,13 @@ async function refreshResults(): Promise<void> {
 }
 
 async function cancelJob(): Promise<void> {
+  // R-136 收口修 F1（红队 MAJOR-1 修正版）：纵深防御 —— 红队已证导出侧不可达
+  // （EXPORT 单作业类型，任务 CANCELLED ⟹ 该作业同事务 CANCELLED，无「在途残留」窗口），
+  // 本守卫与同形未守卫代码对称收口，非「修复可达漏洞」。
+  if (isReadOnly.value) {
+    ElMessage.info('任务已结束，仅供查看，未取消作业')
+    return
+  }
   const jobId = exportJob.value?.id
   if (jobId === undefined) {
     return
@@ -984,13 +1093,14 @@ function downloadingLabel(value: string): string {
 
 /**
  * `download_export_file` 的前置校验（方案 A 的"AI 真正该等的那一段"）：参数 → 任务绑定
- * 闸门 → 结果存在性，外加切页（让用户看到下载发生的位置）。
+ * 闸门 → 结果存在性，外加切页（让用户看到下载发生的位置；只读态走零写的 `viewStep`，
+ * 非只读态 `goStep` —— 见 §S3e）。
  *
  * 为什么这一段必须 `await` 且必须失败即回灌失败：三者任一不成立都**确定"未触发下载"**，
  * 可以如实回灌 `failed`（卡片显示原因）；而浏览器侧下载链路的结局是"可能已发生但不可知"，
  * 不在这段里等（见执行器与 {@link startDownloadInBackground}）。
  *
- * 切页（`goStep(2)`）同步失败的面（W-06/W-07）属批次 C，本批不改。
+ * 切页（非只读态 `goStep(2)`）同步失败的面（W-06/W-07）属批次 C，本批不改。
  */
 async function preflightDownload(
   args: Record<string, unknown>
@@ -1010,8 +1120,13 @@ async function preflightDownload(
       message: `${noResultMessage(defCode)}。请在任务 #${taskId.value} 上完成 ${defCode} 的导出后重试，或核对传入的 taskId 与 defCode；本次未触发下载`
     }
   }
+  // 施工卡 §S3e：切页属"让用户看到下载发生的位置"，只读态（任务已结束）必须走零写的 `viewStep`
   if (stepIndex.value !== 2) {
-    goStep(2)
+    if (isReadOnly.value) {
+      await viewStep(2)
+    } else {
+      goStep(2)
+    }
   }
   return { ok: true, defCode }
 }
@@ -1019,6 +1134,10 @@ async function preflightDownload(
 function registerHandlers(): void {
   // 补丁②：AI 工作区动作 confirm_step 的页面实现（推进到下一步；与用户点「下一步」同路径）
   registerPageHandler('export.nextStep', (payload) => {
+    // 施工卡 §S3e：只读态拦在 goStep 之前 —— 已结束任务不得借 AI 通道推进步骤（零写）
+    if (isReadOnly.value) {
+      return '任务已结束，仅供查看，不能推进步骤'
+    }
     const target = typeof payload.step === 'string' && payload.step !== '' ? payload.step : null
     const index = target ? STEP_KEYS.indexOf(target as (typeof STEP_KEYS)[number]) : stepIndex.value + 1
     if (index < 0 || index >= STEP_KEYS.length) {
@@ -1029,6 +1148,11 @@ function registerHandlers(): void {
   })
 
   registerPageHandler('export.selectDefs', (payload) => {
+    // 施工卡 §S3e（收口修 F4，复核 minor-2）：只读态不改变所选配置项 —— 与导入侧
+    // import.selectDefs 守卫对称（本批 10 处守卫的最后一块拼图）
+    if (isReadOnly.value) {
+      return '任务已结束，仅供查看，未变更所选配置项'
+    }
     const codes = Array.isArray(payload.defCodes) ? payload.defCodes.map((item) => String(item)) : []
     selectedDefs.value = payload.mode === 'ADD' ? [...new Set([...selectedDefs.value, ...codes])] : codes
     for (const code of codes) {
@@ -1041,6 +1165,10 @@ function registerHandlers(): void {
   })
 
   registerPageHandler('export.setConditions', async (payload) => {
+    // 施工卡 §S3e（§2.4 零写清单：setCondition 页面 + AI handler 两处）：只读态拦在落库之前
+    if (isReadOnly.value) {
+      return '任务已结束，仅供查看，未设置查询条件'
+    }
     const defCode = String(payload.defCode ?? '')
     if (!defCode) {
       return '缺少 defCode，未设置条件'
@@ -1068,6 +1196,10 @@ function registerHandlers(): void {
   })
 
   registerPageHandler('export.start', async () => {
+    // 施工卡 §S3e（§2.4 零写清单：createJob 在列）：只读态不得借 AI 通道新建导出作业
+    if (isReadOnly.value) {
+      return '任务已结束，仅供查看，未启动导出作业'
+    }
     await startExport()
     return exportJob.value ? `导出作业 #${exportJob.value.id} 已启动` : '导出未启动（请检查配置项选择）'
   })
@@ -1085,8 +1217,13 @@ function registerHandlers(): void {
     if (!exportResults.value.some((item) => item.defCode === defCode)) {
       throw new Error(`${noResultMessage(defCode)}。请在任务 #${taskId.value} 上完成 ${defCode} 的导出后重试，或核对传入的 taskId 与 defCode；本次未打开在线编辑器`)
     }
+    // 施工卡 §S3e：切页同 `preflightDownload` —— 只读态走零写的 `viewStep`，非只读态逐字不动
     if (stepIndex.value !== 2) {
-      goStep(2)
+      if (isReadOnly.value) {
+        await viewStep(2)
+      } else {
+        goStep(2)
+      }
     }
     activeTab.value = defCode
     await nextTick()

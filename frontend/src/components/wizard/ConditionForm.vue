@@ -3,6 +3,7 @@
     <div v-for="(row, index) in rows" :key="index" class="flex gap-2 mb-2 items-center">
       <el-select
         v-model="row.field"
+        :disabled="props.disabled"
         placeholder="字段"
         class="w-[180px]"
         @change="onFieldChange(row)"
@@ -14,7 +15,7 @@
           :value="field.code"
         />
       </el-select>
-      <el-select v-model="row.operator" placeholder="操作符" class="w-[130px]">
+      <el-select v-model="row.operator" :disabled="props.disabled" placeholder="操作符" class="w-[130px]">
         <el-option
           v-for="option in operatorsOf(row.field)"
           :key="option.value"
@@ -24,7 +25,7 @@
       </el-select>
 
       <template v-if="typeOf(row.field) === 'ENUM'">
-        <el-select v-model="row.value" placeholder="选项" class="w-[180px]" clearable filterable>
+        <el-select v-model="row.value" :disabled="props.disabled" placeholder="选项" class="w-[180px]" clearable filterable>
           <el-option
             v-for="option in optionsOf(row.field)"
             :key="option.value"
@@ -34,7 +35,7 @@
         </el-select>
       </template>
       <template v-else-if="typeOf(row.field) === 'BOOLEAN'">
-        <el-select v-model="row.value" placeholder="取值" class="w-[180px]" clearable>
+        <el-select v-model="row.value" :disabled="props.disabled" placeholder="取值" class="w-[180px]" clearable>
           <el-option label="是（true）" value="true" />
           <el-option label="否（false）" value="false" />
         </el-select>
@@ -42,6 +43,7 @@
       <template v-else-if="typeOf(row.field) === 'DATE'">
         <el-date-picker
           v-model="row.value"
+          :disabled="props.disabled"
           type="date"
           value-format="YYYY-MM-DD"
           placeholder="日期"
@@ -51,7 +53,7 @@
       <template v-else>
         <el-input
           v-model="row.value"
-          :disabled="!operatorNeedsValue(row.operator)"
+          :disabled="props.disabled || !operatorNeedsValue(row.operator)"
           :placeholder="valuePlaceholder(row)"
           class="w-[180px]"
         />
@@ -60,14 +62,15 @@
       <el-input
         v-if="row.operator === 'BETWEEN'"
         v-model="row.value2"
+        :disabled="props.disabled"
         placeholder="至"
         class="w-[140px]"
       />
-      <el-button :icon="Delete" circle size="small" @click="removeRow(index)" />
+      <el-button :icon="Delete" circle size="small" :disabled="props.disabled" @click="removeRow(index)" />
     </div>
 
     <div class="flex items-center gap-2">
-      <el-button size="small" :icon="Plus" :disabled="fields.length === 0" @click="addRow">添加条件</el-button>
+      <el-button size="small" :icon="Plus" :disabled="props.disabled || fields.length === 0" @click="addRow">添加条件</el-button>
       <span class="text-xs text-[#c0c4cc]">{{ hint }}</span>
     </div>
   </div>
@@ -101,9 +104,12 @@ const props = withDefaults(
     fields: readonly ConfigField[]
     modelValue: ConditionDraftModel
     hint?: string
+    /** 只读态：逐控件禁用（只读查看用）；与既有 disabled 条件取「或」，不覆盖 */
+    disabled?: boolean
   }>(),
   {
-    hint: '不设置条件表示导出全部数据'
+    hint: '不设置条件表示导出全部数据',
+    disabled: false
   }
 )
 
