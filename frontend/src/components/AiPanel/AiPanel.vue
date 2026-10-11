@@ -159,110 +159,180 @@
             <i class="dot"></i><i class="dot"></i><i class="dot"></i>
           </span>
 
-          <!-- 消息体：按 parts 段序列渲染（对话时序包 批2 权威翻转）——
-               文本 / 思考 / 工具三类段按真实时序自上而下排列（工具夹在正文中间即出现
-               "正文 → 工具卡 → 正文"的真实顺序）。key 用业务稳定 id（toolCallId / kind-seg），
-               禁用数组下标（§7 R4-3）。 -->
-          <template
-            v-for="part in m.parts"
-            :key="part.kind === 'tool' ? part.toolCallId : part.kind + '-' + part.seg"
-          >
-            <!-- 正文段（原 v-if="m.content" 的正文块，改按段渲染） -->
-            <div v-if="part.kind === 'text' && part.text" class="whitespace-pre-wrap">{{ part.text }}</div>
+          <!-- 消息体：块分派（批4④ A5'）——groupParts 把段序列分派为 text/activity 块；活动组可折叠，
+               展开态读 store 三态（expandedBlocks ?? defaultExpanded，D4/D6/D-C6）；key 用块稳定 id
+               （组首成员 toolCallId / kind-seg，加消息命名空间前缀，收口修 F1/红队 M-1），禁用数组下标（§7 R4-3 / D5）。 -->
+          <template v-for="block in blocksOf(m)" :key="block.id">
+            <!-- 正文块：单段正文，永不进折叠组（A5' 规则③） -->
+            <div v-if="block.kind === 'text'" class="whitespace-pre-wrap">{{ textOf(block) }}</div>
 
-            <!-- 思考链折叠：**有 reasoning 段才渲染**（裁决⑦，无帧则整块不出现） -->
-            <details v-else-if="part.kind === 'reasoning' && part.text" class="mb-1.5 text-xs text-[#909399]">
-              <summary class="cursor-pointer">思考过程</summary>
-              <div class="mt-1 px-2 py-1.5 bg-[#fafafa] border-l-2 border-solid border-[#dcdfe6] whitespace-pre-wrap max-h-40 overflow-y-auto">{{ part.text }}</div>
-            </details>
-
-            <template v-else-if="part.kind === 'tool'">
-              <!-- 工具卡（四态 + 参数 + 结果）：内容沿用批1，位置改由段决定 -->
-              <div class="mt-1.5 border border-solid border-[#dcdfe6] rounded-md p-2 bg-white">
-                <div class="flex items-center gap-1.5 font-semibold text-[13px] flex-wrap">
-                  <el-icon color="#409EFF"><Operation /></el-icon>
-                  <span>{{ toolLabel(part.name) }}</span>
-                  <el-tag v-if="part.kind2 === 'FRONTEND'" size="small" effect="plain">前端工具</el-tag>
-                  <el-tag v-else-if="part.kind2 === 'CONFIRM'" size="small" type="warning" effect="plain">确认门</el-tag>
-                  <el-tag :size="'small'" :type="toolTagType(part.status)" :effect="part.status === 'running' ? 'dark' : 'light'">
-                    {{ toolStatusLabel(part.status) }}
-                  </el-tag>
-                </div>
-                <div v-if="part.args" class="mt-1.5 text-xs text-[#909399] break-all">
-                  <code>{{ part.args }}</code>
-                </div>
-                <div v-if="part.result" class="mt-1.5 px-2 py-1 text-xs text-[#606266] bg-[#fafafa] rounded max-h-24 overflow-y-auto whitespace-pre-wrap">{{ part.result }}</div>
-                <div v-if="part.reason" class="mt-1 text-xs text-[#f56c6c]">原因：{{ part.reason }}</div>
-              </div>
-
-              <!-- 挂起卡片：HITL 确认（确认/拒绝双路径）或待前端执行。
-                   批2 过渡形态：挂起卡跟随其工具段位置（③b 把两者合并成一卡之前）；
-                   单槽 pendingCall 保证每条消息至多一张挂起卡。 -->
-              <div v-if="m.pendingCall && m.pendingCall.toolCallId === part.toolCallId" :data-testid="'pending-card-' + m.pendingCall.toolCallId" class="mt-2 border border-solid border-[#dcdfe6] rounded-md p-2 bg-white">
-                <div class="flex items-center gap-1.5 font-semibold text-[13px] flex-wrap">
-                  <el-icon color="#409EFF"><Operation /></el-icon>
-                  <span>{{ toolLabel(m.pendingCall.name) }}</span>
-                  <el-tag v-if="m.pendingCall.kind === 'CONFIRM'" size="small" type="warning">需确认</el-tag>
-                  <el-tag v-if="m.pendingCall.status === 'expired'" size="small" type="info">会话已失效</el-tag>
-                </div>
-                <div v-if="argsText(m.pendingCall.args)" class="mt-1.5 text-xs text-[#909399] break-all">
-                  <code>{{ argsText(m.pendingCall.args) }}</code>
-                </div>
-
-                <template v-if="m.pendingCall.kind === 'CONFIRM' && m.pendingCall.status === 'pending'">
-                  <div class="mt-1.5 flex items-center gap-2 text-xs">
-                    <span v-if="remainingSeconds !== null" :class="confirmExpired ? 'text-[#c0c4cc]' : 'text-[#e6a23c]'">
-                      {{ confirmExpired ? '确认已超时（按钮已置灰），本轮将按拒绝/超时收尾' : `剩余确认时间 ${formatCountdown(remainingSeconds)}` }}
-                    </span>
-                    <span v-else class="text-[#909399]">等待人工确认</span>
-                  </div>
-                  <el-input
-                    v-model="rejectReason"
-                    type="textarea"
-                    :rows="2"
-                    resize="none"
-                    class="mt-2"
-                    placeholder="拒绝原因（可选，填了会原样回填给模型）"
-                  />
-                  <div class="mt-2 flex gap-2 justify-end">
-                    <el-button size="small" :disabled="confirmExpired || deciding" @click="decide(false)">拒绝</el-button>
-                    <el-button size="small" type="primary" :disabled="confirmExpired || deciding" @click="decide(true)">确认执行</el-button>
-                  </div>
-                </template>
-
-                <div v-else-if="m.pendingCall.kind === 'FRONTEND' && m.pendingCall.name === GENERATIVE_FORM_TOOL" class="mt-2">
-                  <!-- GF-B：生成式表单挂起 —— 渲染 FormRenderer 等用户填写（同 toolCallId 可重发/取消） -->
-                  <!-- T2a-D#3：同 toolCallId 至多一个 FormRenderer —— 只渲染在宿主消息（最后一条
-                    持该挂起调用的消息）上，其余消息的挂起卡只出卡头/终态 tag -->
-                  <FormRenderer
-                    v-if="liveForm && liveForm.toolCallId === m.pendingCall.toolCallId && m.id === formHostMessageId"
-                    :key="liveForm.toolCallId"
-                    :schema="liveForm.form"
-                    :submitting="liveForm.status === 'submitting'"
-                    :error="liveForm.error"
-                    :remaining-seconds="formRemainingSeconds"
-                    @submit="onFormSubmit"
-                    @cancel="onFormCancel"
-                  />
-                  <div v-else class="flex flex-col items-end gap-1">
-                    <!-- 批3③b D2（R-139③）：帧终态 tag 分支（原 :250-253）在 D8 关旁路后为不可达
-                         死码，删除；活分支只剩 activeForm 提交窗口（:254-256，排除项）。链头由
-                         v-else-if 收拢为 v-if（不得留悬空 v-else-if）。 -->
-                    <el-tag v-if="ai.activeForm?.status === 'cancelled'" size="small" type="info">表单已取消</el-tag>
-                    <el-tag v-else-if="ai.activeForm?.status === 'submitted'" size="small" type="success">表单已提交，等待回执</el-tag>
-                    <el-tag v-else size="small" type="info">表单状态已丢失（刷新后无法续填），等待后端超时收敛</el-tag>
-                    <!-- 红队问题 5：取消回灌失败的提示在 cancelled 态下也要可见 -->
-                    <div v-if="ai.activeForm?.status === 'cancelled' && ai.activeForm.error" class="text-xs text-[#f56c6c]">
-                      {{ ai.activeForm.error }}
+            <template v-else>
+              <!-- 活动组（多成员）：可折叠壳 + 组头 + 受控展开区（v-show：DOM 恒在，testid/可见性稳定） -->
+              <div v-if="!block.bare" class="mt-1.5 border border-solid border-[#dcdfe6] rounded-md" data-activity-group>
+                <button
+                  type="button"
+                  class="w-full flex items-center justify-between gap-2 px-2 py-1.5 text-left"
+                  :data-testid="'block-toggle-' + block.id"
+                  @click="toggleBlock(block)"
+                >
+                  <span class="flex items-center gap-1.5 font-semibold text-[13px] text-[#303133]">
+                    <el-icon color="#409EFF"><Operation /></el-icon>
+                    {{ blockHeader(block) }}
+                  </span>
+                  <span class="text-xs text-[#909399]">{{ isBlockExpanded(block) ? '收起' : '展开' }}</span>
+                </button>
+                <div v-show="isBlockExpanded(block)" class="p-2 pt-1 flex flex-col gap-1.5" :data-testid="'block-body-' + block.id">
+                  <template v-for="part in block.parts" :key="part.kind === 'tool' ? part.toolCallId : part.kind + '-' + part.seg">
+                    <!-- 组内思考链：组头已控折叠，内容随组展开可见（D-C8：组默认折叠） -->
+                    <div v-if="part.kind === 'reasoning' && part.text" class="text-xs text-[#909399]">
+                      <div class="text-xs text-[#909399]">思考过程</div>
+                      <div class="mt-1 px-2 py-1.5 bg-[#fafafa] border-l-2 border-solid border-[#dcdfe6] whitespace-pre-wrap max-h-40 overflow-y-auto">{{ part.text }}</div>
                     </div>
-                  </div>
-                </div>
+                    <template v-else-if="part.kind === 'tool'">
+                      <div
+                        class="border border-solid border-[#dcdfe6] rounded-md p-2 bg-white"
+                        :data-testid="part.requiresAction ? 'pending-card-' + part.toolCallId : undefined"
+                      >
+                        <div class="flex items-center gap-1.5 font-semibold text-[13px] flex-wrap">
+                          <el-icon color="#409EFF"><Operation /></el-icon>
+                          <span>{{ toolLabel(part.name) }}</span>
+                          <el-tag v-if="part.kind2 === 'FRONTEND'" size="small" effect="plain">前端工具</el-tag>
+                          <el-tag v-else-if="part.kind2 === 'CONFIRM'" size="small" type="warning" effect="plain">确认门</el-tag>
+                          <el-tag :size="'small'" :type="toolTagType(part.status)" :effect="part.status === 'running' ? 'dark' : 'light'">
+                            {{ toolStatusLabel(part.status) }}
+                          </el-tag>
+                        </div>
+                        <div v-if="part.args" class="mt-1.5 text-xs text-[#909399] break-all">
+                          <code>{{ part.args }}</code>
+                        </div>
+                        <div v-if="part.result" class="mt-1.5 px-2 py-1 text-xs text-[#606266] bg-[#fafafa] rounded max-h-24 overflow-y-auto whitespace-pre-wrap">{{ part.result }}</div>
+                        <div v-if="part.reason" class="mt-1 text-xs text-[#f56c6c]">原因：{{ part.reason }}</div>
 
-                <!-- 批3③b D2（R-139③）：通用 FRONTEND 终态 tag 列（原 :264-277）与 CONFIRM 终态 tag 列
-                     （原 :280-286）在 D8 关旁路后均不可达（终态段 requiresAction=false ⇒ pendingCall
-                     为 null ⇒ 挂起卡整块不渲染），按 §5 清单整列删除；排除项 :213-232（CONFIRM 待决
-                     确认按钮，restoreSuspendedSnapshot 重建路可达）与 :254-256（GF 提交窗口）保留。 -->
+                        <!-- 挂起子块（段判据，A1'③）：CONFIRM 待决 → 确认块；GF → FormRenderer（宿主条件
+                             逐字保留，D10）；其余通用 FRONTEND 待执行/已决态 → 无子块（消 A9'⑤ 空壳卡）。
+                             D-C7：旧投影挂起卡的「会话已失效」tag（原 :206）与 GF 非宿主 v-else 三 tag
+                             （原 :251-253）/ activeForm 错误位（原 :254-257）随合并整列删除——语义由段状态
+                             tag（toolStatusLabel，expired→「会话已失效」）与段 reason 位（A4'，D11）承接。 -->
+                        <template v-if="part.requiresAction">
+                          <template v-if="part.kind2 === 'CONFIRM' && part.status === 'pending'">
+                            <div class="mt-1.5 flex items-center gap-2 text-xs">
+                              <span v-if="remainingSeconds !== null" :class="confirmExpired ? 'text-[#c0c4cc]' : 'text-[#e6a23c]'">
+                                {{ confirmExpired ? '确认已超时（按钮已置灰），本轮将按拒绝/超时收尾' : `剩余确认时间 ${formatCountdown(remainingSeconds)}` }}
+                              </span>
+                              <span v-else class="text-[#909399]">等待人工确认</span>
+                            </div>
+                            <el-input
+                              v-model="rejectReason"
+                              type="textarea"
+                              :rows="2"
+                              resize="none"
+                              class="mt-2"
+                              placeholder="拒绝原因（可选，填了会原样回填给模型）"
+                            />
+                            <div class="mt-2 flex gap-2 justify-end">
+                              <el-button size="small" :disabled="confirmExpired || deciding" @click="decide(false)">拒绝</el-button>
+                              <el-button size="small" type="primary" :disabled="confirmExpired || deciding" @click="decide(true)">确认执行</el-button>
+                            </div>
+                          </template>
+
+                          <div v-else-if="part.kind2 === 'FRONTEND' && part.name === GENERATIVE_FORM_TOOL" class="mt-2">
+                            <!-- GF-B：生成式表单挂起 —— 渲染 FormRenderer 等用户填写（同 toolCallId 可重发/取消） -->
+                            <!-- T2a-D#3（D10 不扩判据）：同 toolCallId 至多一个 FormRenderer —— 只渲染在宿主
+                                 消息（最后一条持该挂起调用的消息）上；非宿主消息不再出独立 tag 列（D-C7 已删） -->
+                            <FormRenderer
+                              v-if="liveForm && liveForm.toolCallId === part.toolCallId && m.id === formHostMessageId"
+                              :key="liveForm.toolCallId"
+                              :schema="liveForm.form"
+                              :submitting="liveForm.status === 'submitting'"
+                              :error="liveForm.error"
+                              :remaining-seconds="formRemainingSeconds"
+                              @submit="onFormSubmit"
+                              @cancel="onFormCancel"
+                            />
+                          </div>
+                        </template>
+                      </div>
+                    </template>
+                  </template>
+                </div>
               </div>
+
+              <!-- bare 组（D7）：单成员组不套壳，直渲成员（工具卡 / 思考链受控折叠块） -->
+              <template v-else>
+                <template v-for="part in block.parts" :key="part.kind === 'tool' ? part.toolCallId : part.kind + '-' + part.seg">
+                  <!-- 思考链（A6'）：原生 <details> 改受控折叠块 —— 展开态读 store
+                       （expandedBlocks[id] ?? defaultExpanded），DOM 重建不丢（原 E6/R-140①-6）；
+                       D-C8：reasoning 无状态概念，默认折叠；用户手动展开后永不自动收起（D6②） -->
+                  <div v-if="part.kind === 'reasoning' && part.text" class="mb-1.5 text-xs text-[#909399]">
+                    <button
+                      type="button"
+                      class="cursor-pointer"
+                      :data-testid="'reasoning-toggle-' + block.id"
+                      @click="toggleBlock(block)"
+                    >
+                      思考过程 {{ isBlockExpanded(block) ? '▾' : '▸' }}
+                    </button>
+                    <div v-show="isBlockExpanded(block)" class="mt-1 px-2 py-1.5 bg-[#fafafa] border-l-2 border-solid border-[#dcdfe6] whitespace-pre-wrap max-h-40 overflow-y-auto" :data-testid="'reasoning-body-' + block.id">{{ part.text }}</div>
+                  </div>
+                  <template v-else-if="part.kind === 'tool'">
+                    <div
+                      class="mt-1.5 border border-solid border-[#dcdfe6] rounded-md p-2 bg-white"
+                      :data-testid="part.requiresAction ? 'pending-card-' + part.toolCallId : undefined"
+                    >
+                      <div class="flex items-center gap-1.5 font-semibold text-[13px] flex-wrap">
+                        <el-icon color="#409EFF"><Operation /></el-icon>
+                        <span>{{ toolLabel(part.name) }}</span>
+                        <el-tag v-if="part.kind2 === 'FRONTEND'" size="small" effect="plain">前端工具</el-tag>
+                        <el-tag v-else-if="part.kind2 === 'CONFIRM'" size="small" type="warning" effect="plain">确认门</el-tag>
+                        <el-tag :size="'small'" :type="toolTagType(part.status)" :effect="part.status === 'running' ? 'dark' : 'light'">
+                          {{ toolStatusLabel(part.status) }}
+                        </el-tag>
+                      </div>
+                      <div v-if="part.args" class="mt-1.5 text-xs text-[#909399] break-all">
+                        <code>{{ part.args }}</code>
+                      </div>
+                      <div v-if="part.result" class="mt-1.5 px-2 py-1 text-xs text-[#606266] bg-[#fafafa] rounded max-h-24 overflow-y-auto whitespace-pre-wrap">{{ part.result }}</div>
+                      <div v-if="part.reason" class="mt-1 text-xs text-[#f56c6c]">原因：{{ part.reason }}</div>
+
+                      <template v-if="part.requiresAction">
+                        <template v-if="part.kind2 === 'CONFIRM' && part.status === 'pending'">
+                          <div class="mt-1.5 flex items-center gap-2 text-xs">
+                            <span v-if="remainingSeconds !== null" :class="confirmExpired ? 'text-[#c0c4cc]' : 'text-[#e6a23c]'">
+                              {{ confirmExpired ? '确认已超时（按钮已置灰），本轮将按拒绝/超时收尾' : `剩余确认时间 ${formatCountdown(remainingSeconds)}` }}
+                            </span>
+                            <span v-else class="text-[#909399]">等待人工确认</span>
+                          </div>
+                          <el-input
+                            v-model="rejectReason"
+                            type="textarea"
+                            :rows="2"
+                            resize="none"
+                            class="mt-2"
+                            placeholder="拒绝原因（可选，填了会原样回填给模型）"
+                          />
+                          <div class="mt-2 flex gap-2 justify-end">
+                            <el-button size="small" :disabled="confirmExpired || deciding" @click="decide(false)">拒绝</el-button>
+                            <el-button size="small" type="primary" :disabled="confirmExpired || deciding" @click="decide(true)">确认执行</el-button>
+                          </div>
+                        </template>
+
+                        <div v-else-if="part.kind2 === 'FRONTEND' && part.name === GENERATIVE_FORM_TOOL" class="mt-2">
+                          <FormRenderer
+                            v-if="liveForm && liveForm.toolCallId === part.toolCallId && m.id === formHostMessageId"
+                            :key="liveForm.toolCallId"
+                            :schema="liveForm.form"
+                            :submitting="liveForm.status === 'submitting'"
+                            :error="liveForm.error"
+                            :remaining-seconds="formRemainingSeconds"
+                            @submit="onFormSubmit"
+                            @cancel="onFormCancel"
+                          />
+                        </div>
+                      </template>
+                    </div>
+                  </template>
+                </template>
+              </template>
             </template>
           </template>
 
@@ -358,6 +428,7 @@ import { ArrowRight, ChatDotRound, Operation, Promotion } from '@element-plus/ic
 import { useAiStore, foldDeadline } from '@/stores/ai'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { formatCountdown } from '@/utils/format'
+import { blockHeader, groupParts, resolveBlockExpanded, type Block } from '@/utils/blocks'
 import FormRenderer from '@/components/AiPanel/FormRenderer.vue'
 import { GENERATIVE_FORM_TOOL, type ChatMessage, type PendingToolCall, type ToolRunStatus } from '@/types/ai'
 
@@ -507,6 +578,32 @@ function isTyping(message: ChatMessage): boolean {
   return message.streaming && !message.parts.some((part) => part.kind === 'text' && part.text.length > 0)
 }
 
+/** 批4④ A5'：消息 → 渲染块序列（groupParts 纯函数；parts 为响应式数组，帧到达即重算）。
+ *  收口修 F1：传 m.id 作消息命名空间前缀，防跨消息 blockId 碰撞（红队 M-1）。 */
+function blocksOf(message: ChatMessage): Block[] {
+  return groupParts(message.parts, message.id)
+}
+
+/** 正文块文本（类型收窄：text 块首成员恒为 text 段）。 */
+function textOf(block: Block): string {
+  const part = block.parts[0]
+  return part.kind === 'text' ? part.text : ''
+}
+
+/**
+ * 块展开态三态判定（D4/D6/D-C6）：requiresAction 组强制展开（手动收起不生效）；
+ * 否则 expandedBlocks[id] 显式值优先（用户手动展开永不自动收起 / 手动收起不被自动打开）；
+ * 未触碰（键缺省）回落 defaultExpanded。
+ */
+function isBlockExpanded(block: Block): boolean {
+  return resolveBlockExpanded(block, ai.expandedBlocks[block.id])
+}
+
+/** 组头/思考链头点击：写 store 显式态（三态记录；requiresAction 组的强制展开由 resolveBlockExpanded 兜底）。 */
+function toggleBlock(block: Block): void {
+  ai.setBlockExpanded(block.id, !isBlockExpanded(block))
+}
+
 function toolLabel(name: string): string {
   return TOOL_LABELS[name] ?? name
 }
@@ -557,17 +654,6 @@ function toolStatusLabel(status: ToolRunStatus): string {
     unknown: '结局未知（未确认成功/失败）'
   }
   return labels[status]
-}
-
-function argsText(args: Record<string, unknown> | null): string {
-  if (!args || Object.keys(args).length === 0) {
-    return ''
-  }
-  try {
-    return JSON.stringify(args)
-  } catch {
-    return String(args)
-  }
 }
 
 function probe(): void {
@@ -718,9 +804,12 @@ function resetPendingWatch(pending: PendingToolCall | null): void {
   confirmDeadline.value = foldDeadline(pending.expiresAt, pending.atMs, pending.timeoutSeconds)
 }
 
-// 批2（权威翻转）：滚动指纹改为 **parts 口径**（§6.3 清单）—— messages.length + 末消息段数 +
-// 末段的 kind/文本长度/段状态 + 末消息挂起卡状态。内容增量都体现在"末段文本长度"上，
-// 工具帧的状态变化体现在"末段 status"，故无需读旧投影（content/toolRuns）即可触发跟随。
+// 批2（权威翻转）：滚动指纹基本为 **parts 口径**（§6.3 清单）—— messages.length + 末消息段数 +
+// 末段的 kind/文本长度/段状态。内容增量都体现在"末段文本长度"上，工具帧的状态变化体现在"末段 status"。
+// 收口修 F8（红队 O-2，注释级订正）：末项**仍读旧投影** `last.pendingCall.status` —— 挂起段的
+// requiresAction 翻转/收敛只改派生投影、未必改末段自身 status，故保留投影读点兜底触发跟随；
+// 原注释「无需读旧投影（content/toolRuns）即可触发跟随」与实现不符，按实现残留如实对齐（读点属
+// D2 明确保留面，逻辑不动）。
 watch(
   () => {
     const last = ai.messages[ai.messages.length - 1]

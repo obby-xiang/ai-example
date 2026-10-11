@@ -453,7 +453,14 @@ export const useAiStore = defineStore('ai', {
      * 已收到的最大帧序号（DC-14 T6）：reattach 时回传，服务端只补增量。
      * 按 runId 记录 —— 换轮次（新 runId）即从零开始，不跨轮混用序号。
      */
-    runSeq: {} as Record<string, number>
+    runSeq: {} as Record<string, number>,
+    /**
+     * 批4④ A5'/D4：折叠块展开态（**会话内内存态**：不进镜像、不做 sessionStorage）。
+     * 三态（D-C6）：true = 显式展开 / false = 显式收起 / 键缺省（undefined）= 未触碰 ——
+     * 自动逻辑（defaultExpanded）只作用于未触碰组；requiresAction 组强制展开（resolveBlockExpanded，
+     * 手动收起不生效）。resetSession / 新建会话须清空（防跨会话串味）。
+     */
+    expandedBlocks: {} as Record<string, boolean>
   }),
 
   getters: {
@@ -1350,6 +1357,38 @@ export const useAiStore = defineStore('ai', {
       }
       if (!outcome.ok && !outcome.duplicate) {
         form.error = `${auto ? '表单已超时，' : ''}取消回灌未送达（${outcome.message ?? '网络异常'}），后端将在超时后自动收尾`
+        // 批4④ A4'（D3/D11）：同一份文案（同源自 form.error，不两处各写字面量）落段 reason ——
+        // 段持久（activeForm 七处清空不影响可见性），卡内 reason 位渲染；不经 applyPendingTerminal
+        // （防污染 confirm 路径 reason 语义）。D-C2 钉死形状：requiresAction 显式 false（必填字段，
+        // 误置 true 会把刚收口的终态段重挂回 requiresAction，破 ③b D8 闸）；
+        // createIfMissing=false：段不存在时静默丢写（不新建段）+ DEV 警告（须含 toolCallId）。
+        const reason = form.error
+        // 收口修 F5（红队 m-3）：reason 单落点 = **末条**持该 toolCallId 的宿主消息 —— 与
+        // formHostMessageId（AiPanel.vue 倒序扫末条，D2 保留面）同口径。误取首条时，双卡/重投
+        // 场景下用户在末条宿主卡上取消，reason 会落到首条消息卡上，与操作位错位。
+        let host: ChatMessage | undefined
+        for (let i = this.messages.length - 1; i >= 0; i--) {
+          const message = this.messages[i]
+          if (message && message.parts.some((part) => part.kind === 'tool' && part.toolCallId === form.toolCallId)) {
+            host = message
+            break
+          }
+        }
+        const existing = host?.parts.find((part) => part.kind === 'tool' && part.toolCallId === form.toolCallId)
+        if (host && existing && existing.kind === 'tool') {
+          this.upsertToolPart(host, {
+            toolCallId: form.toolCallId,
+            name: existing.name,
+            kind2: existing.kind2,
+            requiresAction: false,
+            reason
+          }, false)
+          // 收口修 F4（红队 m-2）：段 reason 落段后同步派生投影 —— 否则 toolRuns[].reason
+          // （parts.ts:199 投影含 reason）滞留旧值，违背「parts 唯一真值、投影由 deriveProjections 派生」契约。
+          deriveProjections(host)
+        } else if (import.meta.env.DEV) {
+          console.warn(`[批4④ A4'] 取消回灌失败：未找到 toolCallId=${form.toolCallId} 的工具段，reason 未落段（不新建段）`)
+        }
       }
     },
 
@@ -1431,6 +1470,8 @@ export const useAiStore = defineStore('ai', {
       this.suspended = false
       disarmFormExpiry()
       this.activeForm = null
+      // 批4④ A5'/D4：折叠展开态随会话清空（防跨会话串味；会话内内存态，不进镜像）
+      this.expandedBlocks = {}
       // 轮次级标志一并复位：新会话不该继承上一轮的停止/断流事实（骨架屏见 historyLoaded）
       this.stopped = false
       this.streamInterrupted = false
@@ -1835,6 +1876,15 @@ export const useAiStore = defineStore('ai', {
      * `createIfMissing=false` = 只更新语义（段已存在才写；③b D5 起 suspended 帧不再用此形态，
      * 见 utils/parts.ts 的 suspended 支）。status 省略时保留段上原值，理由见 {@link ToolPartPatch}。
      */
+    /**
+     * 批4④ A5'/D4：折叠块展开态写动作。blockId = groupParts 产出的稳定组 id
+     * （`${messageId}:${toolCallId}` / `${messageId}:reasoning-${seg}`，收口修 F1 命名空间）；expanded 为显式三态值（D-C6），
+     * 由 AiPanel 经 resolveBlockExpanded 与 defaultExpanded 合成最终展开态。
+     */
+    setBlockExpanded(blockId: string, expanded: boolean): void {
+      this.expandedBlocks[blockId] = expanded
+    },
+
     upsertToolPart(message: ChatMessage, patch: ToolPartPatch, createIfMissing = true): void {
       writeToolPart(message, patch, createIfMissing)
     },

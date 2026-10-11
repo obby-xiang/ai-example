@@ -1,9 +1,10 @@
 /**
- * 对话时序包 批2（子包②权威翻转）：`AiPanel.vue` 渲染层的回归锁。
+ * 对话时序包 批2（子包②权威翻转）→ 批4④（A1' 模板合并 / D-C7 死位清除 / A4' reason 落点 / D-C9 多挂起段）：
+ * `AiPanel.vue` 渲染层的回归锁。
  *
- * 这一层的风险不在纯函数（parts-reducer.spec.ts 已覆盖），而在**模板本身**：
- * `v-for="part in m.parts"` 的三类段分派顺序、挂起卡跟随其工具段的位置（③b 合并前的过渡形态）、
- * 以及 N10（复制按钮的显示判据改 parts，不得再读 `m.content`，防"有段渲染但按钮不出现"的发散）。
+ * 这一层的风险不在纯函数（parts-reducer.spec.ts / blocks.spec.ts 已覆盖），而在**模板本身**：
+ * 块分派顺序、挂起卡并入工具卡后的单卡结构（A1'）、死位文案零命中（A9'）、
+ * N10（复制按钮的显示判据改 parts，不得再读 `m.content`，防"有段渲染但按钮不出现"的发散）。
  *
  * 挂载方式：Element Plus 组件全部用轻量 stub（本用例只关心段序与出现与否，不测视觉）；
  * `onMounted` 的 health/loadHistory 取数用 `@/api/ai` 桩屏蔽。
@@ -11,7 +12,7 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import type { ChatMessage, MessagePart, PendingToolCall } from '@/types/ai'
+import type { ActiveGenerativeForm, ChatMessage, MessagePart, PendingToolCall, ToolPart } from '@/types/ai'
 import { useAiStore } from '@/stores/ai'
 
 const api = vi.hoisted(() => ({
@@ -61,6 +62,11 @@ function buildMessage(parts: MessagePart[], pendingCall: PendingToolCall | null 
   }
 }
 
+/** A4' 夹具：造一个指定状态的 activeForm（form schema 本体与本锁无关，走 never 桩）。 */
+function makeActiveForm(toolCallId: string, status: ActiveGenerativeForm['status']): ActiveGenerativeForm {
+  return { toolCallId, runId: 'run-1', form: {} as never, status, error: null, deadline: null }
+}
+
 async function mountPanel(messages: ChatMessage[]): Promise<ReturnType<typeof mount>> {
   const store = useAiStore()
   store.messages = messages
@@ -71,7 +77,7 @@ async function mountPanel(messages: ChatMessage[]): Promise<ReturnType<typeof mo
   return wrapper
 }
 
-describe('AiPanel 按 parts 渲染（批2 权威翻转）', () => {
+describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）', () => {
   it('text → tool → text 的段序在 DOM 里保持一致（工具夹在正文中间不再沉底）', async () => {
     const wrapper = await mountPanel([
       buildMessage([
@@ -91,7 +97,7 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转）', () => {
     wrapper.unmount()
   })
 
-  it('挂起卡跟随其工具段位置，且每条消息至多一张（单槽 pendingCall）', async () => {
+  it("A1'：挂起卡并入工具卡（单卡段驱动）——工具名全 DOM 只出一次、确认子块在持 testid 的同一张卡内", async () => {
     const wrapper = await mountPanel([
       buildMessage(
         [
@@ -107,12 +113,123 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转）', () => {
     expect(cards).toHaveLength(1)
     expect(cards[0]?.attributes('data-testid')).toBe('pending-card-c1')
 
-    // 位置：在 c1 工具卡之后、c2 工具卡之前（挂起卡不下沉到消息末尾）
-    const confirmTool = html.indexOf('启动导出作业')
+    // A1'②：卡头统一为段单一来源 —— 旧结构（工具卡 + 投影挂起卡并列）工具名出现两次，合并后恰一次
+    expect(html.split('启动导出作业').length - 1).toBe(1)
+    // 确认子块（CONFIRM pending）在持 testid 的同一张卡内
+    expect(cards[0]!.html()).toContain('确认执行')
+
+    // D-C10（原 :106-115 位置断言改写）：块分派下挂起卡（含确认子块）仍在 c2 工具卡之前
     const pendingCard = html.indexOf('pending-card-c1')
     const otherTool = html.indexOf('列出任务')
-    expect(pendingCard).toBeGreaterThan(confirmTool)
+    expect(pendingCard).toBeGreaterThanOrEqual(0)
     expect(otherTool).toBeGreaterThan(pendingCard)
+    wrapper.unmount()
+  })
+
+  it('D-C9：同一消息复数 requiresAction 段逐段各出一卡（旧模板单槽只出末段卡）', async () => {
+    const wrapper = await mountPanel([
+      buildMessage(
+        [
+          { kind: 'text', seg: 0, text: '', streaming: false },
+          { kind: 'tool', seg: 1, toolCallId: 'p1', name: 'start_export', kind2: 'CONFIRM', status: 'pending', args: '{}', timeoutSeconds: 120, requiresAction: true },
+          { kind: 'tool', seg: 2, toolCallId: 'p2', name: 'delete_job', kind2: 'CONFIRM', status: 'pending', args: '{}', timeoutSeconds: 120, requiresAction: true }
+        ]
+      )
+    ])
+    const cards = wrapper.findAll('[data-testid^="pending-card-"]')
+    expect(cards).toHaveLength(2)
+    const testids = cards.map((c) => c.attributes('data-testid')).sort()
+    expect(testids).toEqual(['pending-card-p1', 'pending-card-p2'])
+    wrapper.unmount()
+  })
+
+  it("A9'①③：GF 非宿主 v-else 三 tag（表单已取消 / 表单已提交 / 表单状态已丢失）整列删除（D-C7）", async () => {
+    // 夹具：GF 挂起段 + 宿主条件不成立（activeForm = null ⇒ liveForm = null ⇒ 旧结构走 v-else 出三 tag）
+    const wrapper = await mountPanel([
+      buildMessage(
+        [
+          { kind: 'tool', seg: 0, toolCallId: 'g1', name: 'generative_form', kind2: 'FRONTEND', status: 'pending', args: '{}', timeoutSeconds: 120, requiresAction: true }
+        ],
+        { toolCallId: 'g1', name: 'generative_form', kind: 'FRONTEND', args: {}, rawArgs: '{}', timeoutSeconds: 120, status: 'pending' }
+      )
+    ])
+    const text = wrapper.text()
+    expect(text).not.toContain('表单已取消')
+    expect(text).not.toContain('表单已提交，等待回执')
+    expect(text).not.toContain('表单状态已丢失')
+    wrapper.unmount()
+  })
+
+  it("A9'①（cancelled 变体）：activeForm=cancelled 时旧位「表单已取消」tag 不再出现", async () => {
+    const store = useAiStore()
+    store.messages = [
+      buildMessage(
+        [
+          { kind: 'tool', seg: 0, toolCallId: 'g1', name: 'generative_form', kind2: 'FRONTEND', status: 'pending', args: '{}', timeoutSeconds: 120, requiresAction: true }
+        ],
+        { toolCallId: 'g1', name: 'generative_form', kind: 'FRONTEND', args: {}, rawArgs: '{}', timeoutSeconds: 120, status: 'pending' }
+      )
+    ]
+    store.historyLoaded = true
+    store.activeForm = makeActiveForm('g1', 'cancelled')
+    const { default: AiPanel } = await import('@/components/AiPanel/AiPanel.vue')
+    const wrapper = mount(AiPanel, { global: { stubs } })
+    await wrapper.vm.$nextTick()
+    expect(wrapper.text()).not.toContain('表单已取消')
+    wrapper.unmount()
+  })
+
+  it("A9'⑤：通用 FRONTEND 挂起段不再出空壳挂起卡（合并后单卡无子块）", async () => {
+    // probe.tool 非 GF：旧结构 = 工具卡 + 空壳挂起卡（卡头重复）；合并后工具名恰出现一次
+    const wrapper = await mountPanel([
+      buildMessage(
+        [
+          { kind: 'tool', seg: 0, toolCallId: 'f1', name: 'probe.tool', kind2: 'FRONTEND', status: 'pending', args: '{}', timeoutSeconds: 120, requiresAction: true }
+        ],
+        { toolCallId: 'f1', name: 'probe.tool', kind: 'FRONTEND', args: {}, rawArgs: '{}', timeoutSeconds: 120, status: 'pending' }
+      )
+    ])
+    expect(wrapper.html().split('probe.tool').length - 1).toBe(1)
+    wrapper.unmount()
+  })
+
+  it("A9'④：v1 镜像组合面（pendingCall=pending × 段 status=expired）卡面仍显示「会话已失效」（段状态 tag 承接）", async () => {
+    const wrapper = await mountPanel([
+      buildMessage(
+        [
+          { kind: 'tool', seg: 0, toolCallId: 'e1', name: 'probe.tool', kind2: 'FRONTEND', status: 'expired', args: '{}', requiresAction: true }
+        ],
+        { toolCallId: 'e1', name: 'probe.tool', kind: 'FRONTEND', args: {}, rawArgs: '{}', timeoutSeconds: 120, status: 'pending' }
+      )
+    ])
+    expect(wrapper.text()).toContain('会话已失效')
+    wrapper.unmount()
+  })
+
+  it("TS-3 / A4'：GF 取消回灌失败文案落段 reason 位（G-C2 语境文案可见，D11 文案钉死）", async () => {
+    const store = useAiStore()
+    store.messages = [
+      buildMessage([
+        { kind: 'text', seg: 0, text: '表单轮', streaming: false },
+        { kind: 'tool', seg: 1, toolCallId: 'g1', name: 'generative_form', kind2: 'FRONTEND', status: 'cancelled', args: '{}', requiresAction: false }
+      ])
+    ]
+    store.historyLoaded = true
+    store.activeForm = makeActiveForm('g1', 'filling')
+    api.frontendToolResult.mockReset()
+    api.frontendToolResult.mockRejectedValue(new Error('网络异常'))
+    const { default: AiPanel } = await import('@/components/AiPanel/AiPanel.vue')
+    const wrapper = mount(AiPanel, { global: { stubs } })
+    await wrapper.vm.$nextTick()
+
+    await store.cancelGenerativeForm(false)
+    await wrapper.vm.$nextTick()
+
+    // D-C2 形状：段 reason 写入（同源自 form.error，D11 文案逐字）
+    const segment = store.messages[0]!.parts.find((p) => p.kind === 'tool' && p.toolCallId === 'g1')
+    expect(segment).toMatchObject({ reason: '取消回灌未送达（网络异常），后端将在超时后自动收尾' })
+    // G-C2：语境文案对用户可见（段 reason 位渲染，非 notice 单槽位）
+    expect(wrapper.text()).toContain('取消回灌未送达（网络异常），后端将在超时后自动收尾')
     wrapper.unmount()
   })
 
@@ -146,8 +263,132 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转）', () => {
 })
 
 /**
- * 对话时序包 批3③b（D6/D7/D8）：「同一 toolCallId 全局唯一一张卡」渲染面三路锁。
- * 计数口径：pending-card-*（挂起卡）+ 全消息域同 id 工具段数 —— **锁单卡，不锁状态正确**
+ * 批4④ A5'/D4/D6/D-C6：块分派渲染与展开态三态（TS-2）。
+ */
+describe('批4④：折叠块渲染与展开态三态承诺', () => {
+  it('块分派形态：正文 → 3 个连续工具 → 正文 ⇒ 一个「3 段工具活动组」，正文永不进组', async () => {
+    const wrapper = await mountPanel([
+      buildMessage([
+        { kind: 'text', seg: 0, text: '前言', streaming: false },
+        { kind: 'tool', seg: 1, toolCallId: 'a', name: 'list_tasks', kind2: 'BACKEND', status: 'succeeded', requiresAction: false },
+        { kind: 'tool', seg: 2, toolCallId: 'b', name: 'list_config_defs', kind2: 'BACKEND', status: 'succeeded', requiresAction: false },
+        { kind: 'tool', seg: 3, toolCallId: 'c', name: 'read_job', kind2: 'BACKEND', status: 'succeeded', requiresAction: false },
+        { kind: 'text', seg: 4, text: '后语', streaming: false }
+      ])
+    ])
+    const groups = wrapper.findAll('[data-activity-group]')
+    expect(groups).toHaveLength(1)
+    expect(groups[0].text()).toContain('工具活动 · 3 段')
+    // 正文永不进组：组内不含前言/后语文案
+    expect(groups[0].text()).not.toContain('前言')
+    expect(groups[0].text()).not.toContain('后语')
+    // 全部已终态 ⇒ 组默认折叠（v-show 隐藏）
+    expect(groups[0].find('[data-testid="block-toggle-a-1:a"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('D6②：用户手动收起后，后续帧（成员状态变化）不得使其自动打开', async () => {
+    const store = useAiStore()
+    const message = buildMessage([
+      { kind: 'tool', seg: 0, toolCallId: 'run1', name: 'list_tasks', kind2: 'BACKEND', status: 'running', requiresAction: false },
+      { kind: 'tool', seg: 1, toolCallId: 'run2', name: 'read_job', kind2: 'BACKEND', status: 'running', requiresAction: false }
+    ])
+    store.messages = [message]
+    store.historyLoaded = true
+    const { default: AiPanel } = await import('@/components/AiPanel/AiPanel.vue')
+    const wrapper = mount(AiPanel, { global: { stubs } })
+    await wrapper.vm.$nextTick()
+
+    // 先手动收起（进行中组默认展开）
+    const toggle = wrapper.find('[data-testid="block-toggle-a-1:run1"]')
+    await toggle.trigger('click')
+    expect(store.expandedBlocks['a-1:run1']).toBe(false)
+    expect(wrapper.find('[data-testid="block-body-a-1:run1"]').attributes('style')).toContain('display: none')
+    // 帧到达：running → succeeded（未触碰展开态，手动收起必须保持）
+    const segment = message.parts.find((p) => p.kind === 'tool' && p.toolCallId === 'run1') as ToolPart
+    const updated: MessagePart = { ...segment, status: 'succeeded' }
+    message.parts.splice(message.parts.indexOf(segment), 1, updated)
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-testid="block-body-a-1:run1"]').attributes('style')).toContain('display: none')
+    wrapper.unmount()
+  })
+
+  it('D6②反向：用户手动展开已终态组后，后续帧不得使其自动折叠', async () => {
+    const store = useAiStore()
+    const message = buildMessage([
+      { kind: 'tool', seg: 0, toolCallId: 'done1', name: 'list_tasks', kind2: 'BACKEND', status: 'succeeded', requiresAction: false },
+      { kind: 'tool', seg: 1, toolCallId: 'done2', name: 'read_job', kind2: 'BACKEND', status: 'succeeded', requiresAction: false }
+    ])
+    store.messages = [message]
+    store.historyLoaded = true
+    const { default: AiPanel } = await import('@/components/AiPanel/AiPanel.vue')
+    const wrapper = mount(AiPanel, { global: { stubs } })
+    await wrapper.vm.$nextTick()
+
+    const toggle = wrapper.find('[data-testid="block-toggle-a-1:done1"]')
+    await toggle.trigger('click')
+    expect(store.expandedBlocks['a-1:done1']).toBe(true)
+    const group = wrapper.find('[data-testid="block-body-a-1:done1"]')
+    expect(group.attributes('style') ?? '').not.toContain('display: none')
+    // 再来一个成员加入组（帧到达）——组保持展开
+    message.parts.push({ kind: 'tool', seg: 2, toolCallId: 'done3', name: 'list_config_defs', kind2: 'BACKEND', status: 'succeeded', requiresAction: false })
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-testid="block-body-a-1:done1"]').attributes('style') ?? '').not.toContain('display: none')
+    wrapper.unmount()
+  })
+
+  it("A6'/D4：思考链受控折叠 —— 默认折叠、手动展开后 DOM 重建（重挂载）不丢（R-140①-6 消解）", async () => {
+    const store = useAiStore()
+    store.messages = [
+      buildMessage([{ kind: 'reasoning', seg: 0, text: ' lengthy 思考内容', streaming: false }])
+    ]
+    store.historyLoaded = true
+    const { default: AiPanel } = await import('@/components/AiPanel/AiPanel.vue')
+    const wrapper = mount(AiPanel, { global: { stubs } })
+    await wrapper.vm.$nextTick()
+    // D-C8：默认折叠（v-show 隐藏；wrapper.text() 含隐藏文本，须看 style）
+    expect(wrapper.find('[data-testid="reasoning-body-a-1:reasoning-0"]').attributes('style')).toContain('display: none')
+    const toggle = wrapper.find('[data-testid="reasoning-toggle-a-1:reasoning-0"]')
+    await toggle.trigger('click')
+    expect(wrapper.find('[data-testid="reasoning-body-a-1:reasoning-0"]').attributes('style') ?? '').not.toContain('display: none')
+    wrapper.unmount()
+
+    // DOM 重建：同 store 重挂载 —— 展开态来自 store，不丢
+    const wrapper2 = mount(AiPanel, { global: { stubs } })
+    await wrapper2.vm.$nextTick()
+    expect(wrapper2.find('[data-testid="reasoning-body-a-1:reasoning-0"]').attributes('style') ?? '').not.toContain('display: none')
+    wrapper2.unmount()
+  })
+
+  it('D-C1：组内成员段 reason 非空 ⇒ 组默认展开（取消回灌失败文案在折叠组内恒可见）', async () => {
+    const wrapper = await mountPanel([
+      buildMessage([
+        { kind: 'tool', seg: 0, toolCallId: 'x1', name: 'list_tasks', kind2: 'BACKEND', status: 'succeeded', requiresAction: false },
+        { kind: 'tool', seg: 1, toolCallId: 'g1', name: 'generative_form', kind2: 'FRONTEND', status: 'cancelled', requiresAction: false, reason: '取消回灌未送达（网络异常），后端将在超时后自动收尾' },
+        { kind: 'tool', seg: 2, toolCallId: 'x2', name: 'read_job', kind2: 'BACKEND', status: 'succeeded', requiresAction: false }
+      ])
+    ])
+    const group = wrapper.find('[data-activity-group]')
+    expect(group.exists()).toBe(true)
+    // 默认展开（非 display:none）⇒ reason 文案在页面上可见
+    expect(wrapper.find('[data-testid="block-body-a-1:x1"]').attributes('style') ?? '').not.toContain('display: none')
+    expect(wrapper.text()).toContain('取消回灌未送达（网络异常），后端将在超时后自动收尾')
+    wrapper.unmount()
+  })
+
+  it("D4：expandedBlocks 三态写读 + resetSession 清空（跨会话不串味；会话内内存态，不进镜像）", async () => {
+    const store = useAiStore()
+    store.setBlockExpanded('g1', true)
+    store.setBlockExpanded('g2', false)
+    expect(store.expandedBlocks).toEqual({ g1: true, g2: false })
+    await store.resetSession()
+    expect(store.expandedBlocks).toEqual({})
+  })
+})
+
+/**
+ * 对话时序包 批3③b（D6/D7/D8）→ 批4④（A1' 合并后结构适配 + G-C5 卡内容断言）：「同一 toolCallId 全局唯一一张卡」渲染面三路锁。
+ * 计数口径：pending-card-*（挂起卡，A1' 后 = requiresAction 段的单卡 testid）+ 全消息域同 id 工具段数 —— **锁单卡，不锁状态正确**
  * （历史整替路的 succeeded 是 D7(B) 登记的占位失真，R-144 修复前不得以状态断言此路）。
  */
 describe('批3③b：一卡全生命周期 —— 重投 / 新宿主 / 历史整替 三路单卡锁', () => {
@@ -180,6 +421,8 @@ describe('批3③b：一卡全生命周期 —— 重投 / 新宿主 / 历史整
     expect(wrapper.findAll('[data-testid^="pending-card-"]')).toHaveLength(0)
     const segments = store.messages.flatMap((m) => m.parts.filter((p) => p.kind === 'tool' && p.toolCallId === 'r1'))
     expect(segments).toHaveLength(1)
+    // G-C5：卡内容断言（防空转假绿）——旧卡仍在 DOM 且带工具名
+    expect(wrapper.text()).toContain('probe.tool')
     wrapper.unmount()
   })
 
@@ -229,7 +472,7 @@ describe('批3③b：一卡全生命周期 —— 重投 / 新宿主 / 历史整
         }
       ]
     })
-    api.runsCurrent.mockResolvedValue({ found: false, runId: null, snapshotStatus: null, pendingEntries: [], unresolvedExternal: [], awaitingExternal: false, archiveMaxSeq: 0 })
+    api.runsCurrent.mockResolvedValue({ found: false, runId: null, snapshotStatus: null, pendingEntries: [], unresolvedExternal: [], archiveMaxSeq: 0 })
 
     await store.loadHistory()
     const wrapper = await mountPanel(store.messages)
