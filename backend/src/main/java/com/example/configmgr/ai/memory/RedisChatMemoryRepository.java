@@ -147,14 +147,20 @@ public class RedisChatMemoryRepository implements ChatMemoryRepository {
 		return this.codec.deserializeAll(rawMessages);
 	}
 
+	/**
+	 * 整窗口覆盖写。空（或 null，防御）列表等价于"清空该会话记忆"：委托
+	 * {@link #deleteByConversationId}（单次 Lua 原子完成 {@code DEL} + {@code SREM}），
+	 * 不再拆成 {@code delete} + {@code SREM} 两次往返 —— 两步之间崩溃/并发交错会留下 stale
+	 * 索引成员或抹掉迟到的 {@code SADD}（与 {@code deleteByConversationId} 修复前同构的漏洞）。
+	 */
 	@Override
 	public void saveAll(String conversationId, List<Message> messages) {
-		String redisKey = key(conversationId);
-		this.redis.delete(redisKey);
 		if (messages == null || messages.isEmpty()) {
-			this.redis.opsForSet().remove(CONVERSATION_IDS_KEY, conversationId);
+			deleteByConversationId(conversationId);
 			return;
 		}
+		String redisKey = key(conversationId);
+		this.redis.delete(redisKey);
 		this.redis.opsForList().rightPushAll(redisKey, this.codec.serializeAll(messages));
 		applyTtl(redisKey);
 		this.redis.opsForSet().add(CONVERSATION_IDS_KEY, conversationId);
