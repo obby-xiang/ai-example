@@ -33,11 +33,14 @@
 //         降级点 gf-cancel 取消，detail 记录走的哪条路径）；Node 侧原连接须收到
 //         frontend_tool_result 与 done 帧（计入① detail）。
 //   ② 同一 toolCallId 不出现双份 FormRenderer（同 toolCallId 至多一个表单实例）
-//   ③ 取消后所有持该 toolCallId 的消息 pendingCall.status 收敛为 cancelled
+//   ③ 取消后该 toolCallId 的段收敛：全消息域 cancelledSegments === 2 且 hangingSegments === 0
+//      （③b）FormRenderer 消失、无挂起段残留、DOM「已取消」状态 tag ≥ 1
 //
-// 定位口径（T2b 顺手项④，S7 红队建议落地）：断言①②③ 的按钮/tag/卡片计数一律走
-// data-testid（gf-submit / gf-cancel / pending-card-<toolCallId> / tag-form-cancelled），
-// 不再耦合 UI 文案 —— 文案改动不再造成静默误判。
+// 定位口径（T2b 顺手项④ → 批4④ D8 改写）：断言①② 的按钮/卡片计数一律走
+// data-testid（gf-submit / gf-cancel / pending-card-<toolCallId>），
+// 不再耦合 UI 文案 —— 文案改动不再造成静默误判。断言③/③b 判据 = 段态
+// （cancelledSegments / hangingSegments，工具段 kind==='tool' 全消息域聚合）+
+// DOM 强判据 cancelledStatusTags（文本恰为「已取消」的叶元素数，防"段态对但卡面错"漏网）。
 //
 // 方法：断言②③ 经 Pinia store 注入 frontend_tool_request 帧复现挂起形态（与 GFd 冒烟同法，
 // 无模型参与）；断言① 为真实后端挂起轮（需可用 AI key + 后端 + Redis）。
@@ -47,10 +50,9 @@ import { writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
-// data-testid 定位（T2b 顺手项④）：FormRenderer 提交/取消按钮、表单已取消 tag、挂起卡根 div
+// data-testid 定位（T2b 顺手项④）：FormRenderer 提交/取消按钮、挂起卡根 div
 const TESTID_SUBMIT = 'gf-submit'
 const TESTID_CANCEL = 'gf-cancel'
-const TESTID_TAG_CANCELLED = 'tag-form-cancelled'
 
 // 诱导 generative_form 的已验证提示词（scripts/verify-e2e.ps1:1478 $promptGf1 原文）：
 // 四字段 keyword/minRows/effectiveDate/scope；verify-e2e 发 /chat 时 context 为 @{ page = 'tasks' }，此处照搬
@@ -146,11 +148,14 @@ function frameExpr(runId, toolCallId) {
     ]}})}`
 }
 
-/** 注入 n 条助手消息、各挂同一 toolCallId 的 generative_form 帧；返回消息 id 列表。 */
+/** 注入 n 条助手消息、各挂同一 toolCallId 的 generative_form 帧；返回消息 id 列表。
+ *  注帧**不传 assistantId**：R2/R6 轮次归属下 assistantId === undefined ⇒ 帧归当前轮，
+ *  handleFrame 落到"最后一条未完成的助手消息" —— 逐条 append 后立即注帧即保证落到刚建的那条
+ *  （传 m.id 反而因 activeRoundHostId 未登记被判旧轮迟到帧丢弃，T2b 时代注入法已失效）。 */
 function injectExpr(runId, toolCallId, n) {
   const lines = []
   for (let i = 1; i <= n; i++) {
-    lines.push(`const m${i} = ai.appendAssistantMessage('（T2a冒烟${i}）'); ai.handleFrame(FRAME, m${i}.id)`)
+    lines.push(`const m${i} = ai.appendAssistantMessage('（T2a冒烟${i}）'); ai.handleFrame(FRAME)`)
   }
   return `(async () => {
     const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
@@ -162,8 +167,9 @@ function injectExpr(runId, toolCallId, n) {
   })()`
 }
 
-// 定位一律 data-testid（顺手项④）：gf-submit/gf-cancel 计数、pending-card-<toolCallId> DOM 计数、
-// tag-form-cancelled 计数；store 侧 pendingStatuses 仅供 detail；toolRunCount 判无重复工具卡
+// 定位一律 data-testid（顺手项④）+ 批4④ D8 段态判据：gf-submit/gf-cancel 计数、pending-card-<toolCallId>
+// DOM 计数、cancelledSegments/hangingSegments（工具段全消息域聚合）、cancelledStatusTags（DOM 强判据）；
+// toolRunCount 判无重复工具卡；pendingStatuses 保留但改段来源（pendingCall 投影在取消链恒 null，旧读法失效）
 const countExpr = (toolCallId) => `(() => {
   const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
   return {
@@ -171,9 +177,17 @@ const countExpr = (toolCallId) => `(() => {
     cancelButtons: document.querySelectorAll('[data-testid="${TESTID_CANCEL}"]').length,
     pendingCards: [...document.querySelectorAll('[data-testid^="pending-card-"]')]
       .filter(e => e.getAttribute('data-testid') === 'pending-card-${toolCallId}').length,
-    pendingStatuses: ai.messages.filter(m => m.pendingCall && m.pendingCall.toolCallId === '${toolCallId}').map(m => m.pendingCall.status),
+    pendingStatuses: ai.messages.flatMap(m => m.parts
+      .filter(p => p.kind === 'tool' && p.toolCallId === '${toolCallId}').map(p => p.status)),
+    cancelledSegments: ai.messages.reduce((n, m) => n + m.parts.filter(
+      p => p.kind === 'tool' && p.toolCallId === '${toolCallId}' && p.status === 'cancelled').length, 0),
+    hangingSegments: ai.messages.reduce((n, m) => n + m.parts.filter(
+      p => p.kind === 'tool' && p.toolCallId === '${toolCallId}' && p.requiresAction === true).length, 0),
+    // 批4④ D8 强判据：DOM 中文本恰为「已取消」的叶元素数（段状态 tag toolStatusLabel('cancelled')，
+    // 全文档范围取法）——底线 >= 1；逐段出卡形态下期望 >= 2。防"段态对但卡面错"的漏网。
+    cancelledStatusTags: [...document.querySelectorAll('body *')]
+      .filter(e => e.children.length === 0 && e.textContent.trim() === '已取消').length,
     activeFormStatus: ai.activeForm ? ai.activeForm.status : null,
-    cancelledTags: document.querySelectorAll('[data-testid="${TESTID_TAG_CANCELLED}"]').length,
     toolRunCount: ai.messages.reduce((n, m) => n + m.toolRuns.filter(r => r.toolCallId === '${toolCallId}').length, 0)
   }
 })()`
@@ -285,19 +299,19 @@ try {
   assert('②', c1.formRendererCount === 1 && c1.cancelButtons === 1,
     { formRendererCount: c1.formRendererCount, cancelButtons: c1.cancelButtons, expect: 1 })
 
-  // ── 阶段 2：取消 → 断言③所有消息 pendingCall.status 收敛 cancelled ──────
+  // ── 阶段 2：取消 → 断言③段态收敛 cancelled / 断言③b FormRenderer 消失 + DOM「已取消」tag ──
   await evaluate(`(() => {
     const btn = document.querySelector('[data-testid="${TESTID_CANCEL}"]')
     btn.click(); return !!btn
   })()`)
   let c2 = null
-  for (let i = 0; i < 12; i++) { await sleep(500); c2 = await evaluate(countExpr(T1)); if (c2.pendingStatuses.every(s => s === 'cancelled')) break }
+  for (let i = 0; i < 12; i++) { await sleep(500); c2 = await evaluate(countExpr(T1)); if (c2.cancelledSegments >= 2 && c2.hangingSegments === 0) break }
   RESULT.phases.cancelDual = { count: c2 }
   console.log('[阶段2 取消]', JSON.stringify(c2))
-  assert('③', c2.pendingStatuses.length === 2 && c2.pendingStatuses.every(s => s === 'cancelled'),
-    { pendingStatuses: c2.pendingStatuses })
-  assert('③b', c2.formRendererCount === 0 && c2.cancelledTags === 2,
-    { formRendererCount: c2.formRendererCount, cancelledTags: c2.cancelledTags })
+  assert('③', c2.cancelledSegments === 2 && c2.hangingSegments === 0,
+    { cancelledSegments: c2.cancelledSegments, hangingSegments: c2.hangingSegments, pendingStatuses: c2.pendingStatuses })
+  assert('③b', c2.formRendererCount === 0 && c2.hangingSegments === 0 && c2.cancelledStatusTags >= 1,
+    { formRendererCount: c2.formRendererCount, hangingSegments: c2.hangingSegments, cancelledStatusTags: c2.cancelledStatusTags })
 
   // ── 阶段 3（断言① 升级形态）：真实挂起轮 → 刷新快照重建 → 收敛退出 ─────
   // SMOKE_SKIP_MODEL=1（零模型回归守卫模式）：阶段 3 整段跳过 —— 3a 模型轮 / 3b 刷新重建 /
