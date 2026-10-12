@@ -5,7 +5,7 @@
         <h2 class="m-0 text-xl text-[#303133]">任务中心</h2>
         <div class="mt-1 text-[13px] text-[#909399]">
           导出配置 / 导入配置 任务管理
-          <span class="ml-1">· 列表每 4 秒自动刷新{{ lastLoadedText }}</span>
+          <span class="ml-1">· 有进行中作业时每 4 秒自动刷新；其余每 30 秒兜底刷新{{ lastLoadedText }}</span>
         </div>
       </div>
       <div>
@@ -148,12 +148,17 @@
  * 任务中心（五页之①）。
  *
  * - 过滤（类型/状态/关键词）+ 分页：参数原样交后端（key 排序与 LIKE 转义后端已处理）；
- * - 4s 自刷：store 的 setInterval，tick 前查 loading 防重叠（deepseek 蓝本形态）；
+ * - 自刷口径（轮询治理步1）：有在跑作业（store 的 hasActiveJob）时每 4s 一次，
+ *   闲置时每 30s 兜底一次；两个 tick 都在进 load() 前查 loading 防重叠（deepseek 蓝本形态）；
  * - 点任务标题 = 一键恢复向导（`restoreWizard` 按任务类型跳对应向导页，与创建任务后跳转同口径）；
  * - 「取消」取消的是该任务最新作业（后端只有 DELETE /api/jobs/{id}；作业已终态 →
  *   409 JOB_ALREADY_FINAL，按码给中文提示，不当普通错误弹）；
  * - 「删除」级联清理作业/条目/问题/暂存/文件（S4.3b⑦）；
- * - 进度列是**行级**口径：total 未知（-1）时显示"处理中"而不是百分比。
+ * - 进度列是**行级**口径：total 未知（-1）时显示"处理中"而不是百分比；
+ * - 任务级事件订阅（轮询治理步3）：当前页有在跑作业的任务订阅 `GET /api/tasks/{id}/events`
+ *   （上限 3、按 taskId 降序取前 3 保最新行，见 utils/task-events.ts）。订阅随本页生命周期开关——
+ *   onMounted 起、onBeforeUnmount **显式**调 store 的 closeTaskEvents 关闭（订阅状态挂 store、
+ *   跨路由存活，不能依赖组件自动清理）。
  */
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
@@ -349,9 +354,12 @@ onMounted(() => {
   workspace.enterPage({ pageId: 'tasks', page: 'tasks', taskType: null, step: null, taskId: null })
   void taskStore.load()
   taskStore.startAutoRefresh()
+  taskStore.startTaskEvents()
 })
 
 onBeforeUnmount(() => {
   taskStore.stopAutoRefresh()
+  // 显式出口：订阅状态挂 store（跨路由存活），必须在这里关掉全部任务级 EventSource
+  taskStore.closeTaskEvents()
 })
 </script>

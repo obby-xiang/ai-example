@@ -233,7 +233,7 @@ import { tasksApi } from '@/api/tasks'
 import { useTaskStore } from '@/stores/task'
 import { registerPageHandler, unregisterPageHandler, useWorkspaceStore } from '@/stores/workspace'
 import { buildTemplateWorkbookJson, downloadBlob, xlsxFileName, type ExcelRowIssue } from '@/utils/excel'
-import { watchJob, type JobChannelState } from '@/utils/job-watch'
+import { watchJob, createJobWatcherRegistry, type JobChannelState } from '@/utils/job-watch'
 import { stepLabel } from '@/utils/format'
 import type { PublishConflictAsync } from '@/types/api'
 import { parseRowData, type ConfigStagingRow } from '@/types/data'
@@ -303,7 +303,15 @@ const importMode = ref<ImportMode>('MERGE')
 
 const gridRefs: Record<string, GridApi> = {}
 const editorLoaded = new Set<string>()
-let stopWatchers: Array<() => void> = []
+/**
+ * 作业跟踪回收表（check / import / publish 三个 kind 可并存）。
+ *
+ * 为什么不是裸数组：同 kind 重跑（例如再次「预检查」）时旧 watcher 必须被回收 ——
+ * 否则它继续按旧 jobId 打后端，且在途快照会把**上一个作业**的状态写回新作业位
+ * （蓝本：ExportWizardView 改绑时的 stopJobWatchForTaskSwitch + beginWatchJob 首行 stopWatchJob?.()）。
+ * 回收表本身在 utils/job-watch.ts（模块可导出位置，便于直测语义）。
+ */
+const jobWatchers = createJobWatcherRegistry()
 
 const editorDefs = computed(() =>
   selectedDefs.value
@@ -841,9 +849,14 @@ function beginWatchJob(kind: 'check' | 'import' | 'publish', jobId: number): voi
   if (taskId.value === null) {
     return
   }
+  // 同 kind 重跑：先回收旧 watcher（不同 kind 互不回收，三者可并存）
+  jobWatchers.recycle(kind)
   const dispose = watchJob({
     taskId: taskId.value,
     jobId,
+    // F10：跟踪器自制 dispose（终态）不经注册表入口 —— 结束时同步注销，has()/size() 不失真。
+    // recycle 对已注销 kind 是幂等空操作，外部回收路径不会双 dispose。
+    onDisposed: () => jobWatchers.recycle(kind),
     onProgress: (payload) => {
       const current = jobOf(kind)
       if (current) {
@@ -884,7 +897,7 @@ function beginWatchJob(kind: 'check' | 'import' | 'publish', jobId: number): voi
       await refreshTaskSnapshot()
     }
   })
-  stopWatchers.push(dispose)
+  jobWatchers.register(kind, dispose)
 }
 
 /** 刷新任务快照（状态/步骤），失败时不让页面停在旧状态上。 */
@@ -1112,8 +1125,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
-  stopWatchers.forEach((dispose) => dispose())
-  stopWatchers = []
+  jobWatchers.disposeAll()
   HANDLER_NAMES.forEach(unregisterPageHandler)
 })
 

@@ -429,6 +429,7 @@ import { useAiStore, foldDeadline } from '@/stores/ai'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { formatCountdown } from '@/utils/format'
 import { blockHeader, groupParts, resolveBlockExpanded, type Block } from '@/utils/blocks'
+import { createPollingController, type PollingController } from '@/utils/polling'
 import FormRenderer from '@/components/AiPanel/FormRenderer.vue'
 import { GENERATIVE_FORM_TOOL, type ChatMessage, type PendingToolCall, type ToolRunStatus } from '@/types/ai'
 
@@ -451,7 +452,14 @@ let copyTimer: ReturnType<typeof setTimeout> | null = null
 /** 倒计时节拍（每秒推进一次；确认卡据此置灰）。 */
 const now = ref(Date.now())
 const confirmDeadline = ref<number | null>(null)
-let tickTimer: ReturnType<typeof setInterval> | null = null
+/** 节拍间隔（规格：1s）。 */
+const TICK_MS = 1000
+/**
+ * 节拍器（步2 接入可见性纪律 controller，节奏 1s/1s ⇒ 单节奏）。
+ * 回可见时 controller 会错峰补刷一次，run 本身即"重写 now" ⇒ 倒计时**立即重算**，
+ * 不会停在已过期的假倒计时上。
+ */
+let tickController: PollingController | null = null
 
 /** 工具名 → 中文（后端工具全集 + 前端工具/页面能力的可读名）。 */
 const TOOL_LABELS: Record<string, string> = {
@@ -836,9 +844,14 @@ watch(
 onMounted(async () => {
   ai.startMirror()
   ai.startWorkspaceSync()
-  tickTimer = setInterval(() => {
-    now.value = Date.now()
-  }, 1000)
+  tickController = createPollingController({
+    intervalMs: TICK_MS,
+    fallbackIntervalMs: TICK_MS,
+    run: () => {
+      now.value = Date.now()
+    }
+  })
+  tickController.start()
   void ai.probeHealth()
   if (!ai.messages.length) {
     await ai.loadHistory()
@@ -847,10 +860,8 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
-  if (tickTimer !== null) {
-    clearInterval(tickTimer)
-    tickTimer = null
-  }
+  tickController?.stop()
+  tickController = null
   if (copyTimer !== null) {
     clearTimeout(copyTimer)
     copyTimer = null

@@ -47,21 +47,45 @@ export interface WaitJobOptions {
   onTick?: (job: Job) => void
 }
 
-export async function waitForJobFinal(jobId: number, options: WaitJobOptions = {}): Promise<Job> {
+/**
+ * 等待结局：**终态到达**与**超时兜底**必须可判别。
+ *
+ * 原先超时走 `return job` —— 返回的是非终态 Job，调用方读到的"结局"和真终态无从区分，
+ * 于是「等超时」被当成「拿到终态」，静默地把发布冲突态清成 null。
+ */
+export type WaitJobFinalOutcome =
+  | { status: 'final'; job: Job }
+  | { status: 'timeout'; job: Job }
+
+/**
+ * 等待被 signal 取消（文案与原先一致，仅补类名以便调用方按类型收口，不必猜文案）。
+ *
+ * 消费者是 stores/task.ts 的 watchPublishOutcome，其调用点（stores/workspace.ts 的 void 调用）
+ * 不接 rejection，只能靠类型判别把这个错误收成一次提示。
+ */
+export class JobWaitAbortedError extends Error {
+  constructor(message = '等待作业终态已被取消') {
+    super(message)
+    this.name = 'JobWaitAbortedError'
+  }
+}
+
+export async function waitForJobFinal(jobId: number, options: WaitJobOptions = {}): Promise<WaitJobFinalOutcome> {
   const intervalMs = options.intervalMs ?? 1000
   const timeoutMs = options.timeoutMs ?? 300_000
   const startedAt = Date.now()
   for (;;) {
     if (options.signal?.aborted) {
-      throw new Error('等待作业终态已被取消')
+      throw new JobWaitAbortedError()
     }
     const job = await getJob(jobId)
     options.onTick?.(job)
     if (isJobFinal(job.status)) {
-      return job
+      return { status: 'final', job }
     }
     if (Date.now() - startedAt > timeoutMs) {
-      return job
+      // 超时不是终态：显式标注，交由调用方决定"提示 + 保留现场"还是继续等
+      return { status: 'timeout', job }
     }
     await new Promise<void>((resolve) => setTimeout(resolve, intervalMs))
   }
