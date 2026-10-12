@@ -102,7 +102,7 @@ public class JobProgressService {
      * 已终态作业的条目重新塞回登记簿，该路径若不清则条目永无人清理（终态作业不再有
      * 后续分片边界 beat，其唯一清理点是本方法）—— 作业已是终态，清理语义与写入成功路径一致。
      */
-    public void finish(Long jobId, Job.JobStatus jobStatus, int errorCount, int warningCount,
+    public boolean finish(Long jobId, Job.JobStatus jobStatus, int errorCount, int warningCount,
                        int processed, int total) {
         heartbeatRegistry.beat(jobId);
         boolean wroteTerminal = Boolean.TRUE.equals(requiresNew.execute(status -> jobRepository.findById(jobId)
@@ -120,14 +120,15 @@ public class JobProgressService {
                     return true;
                 })
                 .orElse(false)));
+        // 入口 beat 已把条目写回登记簿：写入成功与被拦路径都必须清（F1b，否则条目无清理点）
+        heartbeatRegistry.clear(jobId);
         if (!wroteTerminal) {
             log.debug("作业 #{} 已收终态，忽略本次 finish({}) 调用（先到者胜，后到者不覆盖）",
                     jobId, jobStatus);
-            // 终审微补丁 F1b：入口 beat 已把条目写回登记簿，被拦路径必须同清（否则无清理点）
-            heartbeatRegistry.clear(jobId);
-            return;
         }
-        heartbeatRegistry.clear(jobId);
+        // R-152：返回「本次是否实际落写终态」，供 JobTerminalWriter 据此决定是否联动任务态——
+        // 迟到终态写被守卫拦下时（作业已 CANCELLED/终态），返回 false，调用方不得再 applyJobOutcome
+        return wroteTerminal;
     }
 
     // ── 作业条目（job_items）：同一独立事务口径，供详情抽屉逐配置项实时进度 ──────────

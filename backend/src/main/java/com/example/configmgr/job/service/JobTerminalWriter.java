@@ -79,11 +79,23 @@ public class JobTerminalWriter {
     private void apply(Job job, Job.JobStatus jobStatus, int errorCount, int warningCount,
                        int processed, int total, Map<String, Object> doneEvent) {
         try {
-            requiresNew.executeWithoutResult(status -> {
-                progressService.finish(job.getId(), jobStatus, errorCount, warningCount, processed, total);
-                taskService.applyJobOutcome(job.getTaskId(), jobStatus);
-            });
-            taskSseService.publish(job.getTaskId(), "JOB_DONE", doneEvent);
+            // R-152：仅当 finish 实际落写终态（作业仍 PENDING/RUNNING）才联动任务态并推 JOB_DONE。
+            // 迟到终态写被先到者胜守卫拦下时（作业已 CANCELLED/其它终态），不得 applyJobOutcome——
+            // 否则任务行会被执行器迟到的 COMPLETED 翻回、破坏取消语义，终态守卫随之放行（CI MAJOR-2 根因）。
+            boolean wroteTerminal = Boolean.TRUE.equals(requiresNew.execute(status -> {
+                boolean wrote = progressService.finish(job.getId(), jobStatus, errorCount, warningCount,
+                        processed, total);
+                if (wrote) {
+                    taskService.applyJobOutcome(job.getTaskId(), jobStatus);
+                }
+                return wrote;
+            }));
+            if (wroteTerminal) {
+                taskSseService.publish(job.getTaskId(), "JOB_DONE", doneEvent);
+            } else {
+                log.info("作业 #{} 终态写入被丢弃（已收终态，先到者胜），不联动任务态、不发 JOB_DONE：taskId={}，预期结局={}",
+                        job.getId(), job.getTaskId(), jobStatus);
+            }
         } catch (Exception e) {
             // 终态补记失败不能让作业线程崩掉：日志留痕，快照下一次读取仍能修正
             log.error("作业 {} 终态写入失败: {}", job.getId(), e.getMessage(), e);
