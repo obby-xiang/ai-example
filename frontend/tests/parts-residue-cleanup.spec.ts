@@ -719,7 +719,7 @@ describe('R-149：loadHistory 双条目合并（TOOL 响应并入 ASSISTANT 工�
     ])
   })
 
-  it('② 连续多轮工具：各 TOOL 只吃自己那份，不串结果', async () => {
+  it('② 连续多轮工具：各 TOOL 只吃自己那份，不串结果（R-150：同一用户轮内两条 A(T) 合并为一条）', async () => {
     const store = useAiStore()
     const sid = store.sessionId
     api.history.mockResolvedValue({
@@ -745,10 +745,20 @@ describe('R-149：loadHistory 双条目合并（TOOL 响应并入 ASSISTANT 工�
 
     await store.loadHistory()
 
-    expect(store.messages).toHaveLength(3) // USER + 两条 ASSISTANT；两条 TOOL 消 blank
-    const [first, second] = [store.messages[1], store.messages[2]] as ChatMessage[]
-    expect(soleToolPart(first).result).toBe('ra')
-    expect(soleToolPart(second).result).toBe('rb')
+    // R-150：同一用户轮内连续 ASSISTANT（中间仅夹 TOOL）合并为一条 → USER + 1 条合并消息
+    expect(store.messages).toHaveLength(2)
+    expect(store.messages[1]?.id).toBe('history-1') // 合并消息 id = 首条原始 index
+    const merged = store.messages[1] as ChatMessage
+    expect(merged.parts.map((part) => part.kind)).toEqual(['text', 'tool', 'text', 'tool'])
+    expect(merged.parts.map((part) => part.seg)).toEqual([0, 1, 2, 3]) // seg 全局单调重排
+    const tools = toolPartsOf(merged)
+    expect(tools.map((part) => [part.toolCallId, part.result])).toEqual([
+      ['a1', 'ra'],
+      ['b1', 'rb']
+    ]) // 各 TOOL 只吃自己那份
+    expect(merged.content).toBe('第一轮第二轮') // 空段保留、正文顺次拼接
+    // 一轮一头像（store 层条数锁）：该用户轮 assistant 消息数 = 1
+    expect(store.messages.filter((message) => message.role === 'assistant')).toHaveLength(1)
   })
 
   it('③ id 缺失序位兜底 + name 闸：同 name 才按序互配，name 不同 result=null 但卡片保留', async () => {
@@ -815,11 +825,15 @@ describe('R-149：loadHistory 双条目合并（TOOL 响应并入 ASSISTANT 工�
 
     await store.loadHistory()
 
-    const [first, second] = [store.messages[0], store.messages[1]] as ChatMessage[]
+    // R-150：无 USER 夹断 → 同一用户轮内两条 A(T) 合并为一条（两个 toolCallId 均为 'dup' 的段共存于合并消息）
+    expect(store.messages).toHaveLength(1)
+    const merged = store.messages[0] as ChatMessage
+    expect(merged.parts.map((part) => part.kind)).toEqual(['text', 'tool', 'text', 'tool'])
+    const tools = toolPartsOf(merged)
     // 防御性 tie-break（C2，红队 O-1）：后端 toolCallId 唯一、实际不产重复 id；
     // 以下断言只锁"实现确定性"，不宣称符合后端实际产出序
-    expect(soleToolPart(first).result).toBe('second') // 重复 id：后出现覆盖（确定性兜底）
-    expect(soleToolPart(second).result).toBe('first') // 索引已摘 → 序位兜底拿先出现者
+    expect(tools.map((part) => part.result)).toEqual(['second', 'first']) // 后出现覆盖 + 序位兜底
+    expect(tools.map((part) => part.toolCallId)).toEqual(['dup', 'dup'])
   })
 
   it('⑤ responseData=null：result=null 但工具卡片仍在', async () => {
@@ -961,10 +975,12 @@ describe('R-149 收口修 C3：两遍扫描序无关性补测', () => {
 
     await store.loadHistory()
 
-    expect(store.messages).toHaveLength(2) // 三条 TOOL 零消息产出
-    expect(store.messages.map((message) => message.id)).toEqual(['history-1', 'history-3']) // 原始下标含空洞
-    expect(soleToolPart(store.messages[0] as ChatMessage).result).toBe('rc1') // 前置于调用的响应照样配对
-    expect((store.messages[1] as ChatMessage).parts.map((part) => part.kind)).toEqual(['text']) // 纯文本 ASSISTANT 照旧
+    // R-150：无 USER/SYSTEM 夹断 → 两条 ASSISTANT（含纯文本条）合并为一条，id = 首条原始 index
+    expect(store.messages).toHaveLength(1) // 三条 TOOL 零消息产出 + 两条 ASSISTANT 合并
+    expect(store.messages.map((message) => message.id)).toEqual(['history-1']) // 原始下标含空洞
+    const merged = store.messages[0] as ChatMessage
+    expect(merged.parts.map((part) => part.kind)).toEqual(['text', 'tool', 'text'])
+    expect(soleToolPart(merged).result).toBe('rc1') // 前置于调用的响应照样配对
   })
 
   it('全 TOOL 历史：零消息、不抛异常（残缺历史兜底丢弃）', async () => {
@@ -983,5 +999,278 @@ describe('R-149 收口修 C3：两遍扫描序无关性补测', () => {
     await store.loadHistory() // 不抛即过
 
     expect(store.messages).toHaveLength(0)
+  })
+})
+
+
+describe('R-150：loadHistory 连续 ASSISTANT 合并（同一用户轮内，遇 USER/SYSTEM 即断）', () => {
+  it('真形状基准：USER + A(T) + TOOL + A(text) → 合并为一条，parts 顺次拼接、seg 全局重排、空段保留', async () => {
+    const store = useAiStore()
+    const sid = store.sessionId
+    api.history.mockResolvedValue({
+      sessionId: sid,
+      count: 4,
+      messages: [
+        { type: 'USER', text: '问题' },
+        {
+          type: 'ASSISTANT',
+          text: '', // 空 text 段须保留（与实时路径同构）
+          toolCalls: [{ id: 'h1', type: 'function', name: 'probe_tool', arguments: '{"a":1}' }]
+        },
+        { type: 'TOOL', text: '', toolResponses: [{ id: 'h1', name: 'probe_tool', responseData: 'ok' }] },
+        { type: 'ASSISTANT', text: '补充结论' }
+      ]
+    })
+    api.runsCurrent.mockResolvedValue(noSuspension())
+
+    await store.loadHistory()
+
+    expect(store.messages).toHaveLength(2) // USER + 合并消息（一轮一头像：assistant 条数 = 1）
+    const merged = store.messages[1] as ChatMessage
+    expect(merged.id).toBe('history-1') // 合并消息 id = 首条原始 index
+    expect(merged.parts.map((part) => part.kind)).toEqual(['text', 'tool', 'text'])
+    expect(merged.parts.map((part) => part.seg)).toEqual([0, 1, 2]) // seg 全局单调重排（渲染 key = kind+'-'+seg）
+    expect((merged.parts[0] as { text: string }).text).toBe('') // 空 text 段保留
+    expect(toolPartsOf(merged)[0]?.result).toBe('ok')
+    expect(merged.content).toBe('补充结论') // 正文 = 各条目 text 顺次拼接
+  })
+
+  it('夹 USER 不误并：两个用户轮各自成窗，assistant 条数 = 2', async () => {
+    const store = useAiStore()
+    const sid = store.sessionId
+    api.history.mockResolvedValue({
+      sessionId: sid,
+      count: 6,
+      messages: [
+        { type: 'USER', text: '第一问' },
+        {
+          type: 'ASSISTANT',
+          text: '答一',
+          toolCalls: [{ id: 'a1', type: 'function', name: 'probe_tool', arguments: '{}' }]
+        },
+        { type: 'TOOL', text: '', toolResponses: [{ id: 'a1', name: 'probe_tool', responseData: 'ra' }] },
+        { type: 'USER', text: '第二问' },
+        {
+          type: 'ASSISTANT',
+          text: '答二',
+          toolCalls: [{ id: 'b1', type: 'function', name: 'probe_tool', arguments: '{}' }]
+        },
+        { type: 'TOOL', text: '', toolResponses: [{ id: 'b1', name: 'probe_tool', responseData: 'rb' }] }
+      ]
+    })
+    api.runsCurrent.mockResolvedValue(noSuspension())
+
+    await store.loadHistory()
+
+    expect(store.messages).toHaveLength(4) // USER/A/USER/A：遇 USER 即断，不成窗
+    expect(store.messages.filter((message) => message.role === 'assistant')).toHaveLength(2)
+    expect(toolPartsOf(store.messages[1] as ChatMessage)[0]?.result).toBe('ra')
+    expect(toolPartsOf(store.messages[3] as ChatMessage)[0]?.result).toBe('rb')
+  })
+
+  it('responseData=null 仍并：TOOL 条目存在即算有回应（闸按结构性判据，不看响应内容）', async () => {
+    const store = useAiStore()
+    const sid = store.sessionId
+    api.history.mockResolvedValue({
+      sessionId: sid,
+      count: 4,
+      messages: [
+        { type: 'USER', text: '问题' },
+        {
+          type: 'ASSISTANT',
+          text: '',
+          toolCalls: [{ id: 'n1', type: 'function', name: 'probe_tool', arguments: '{}' }]
+        },
+        { type: 'TOOL', text: '', toolResponses: [{ id: 'n1', name: 'probe_tool', responseData: null }] },
+        { type: 'ASSISTANT', text: '收尾' }
+      ]
+    })
+    api.runsCurrent.mockResolvedValue(noSuspension())
+
+    await store.loadHistory()
+
+    expect(store.messages).toHaveLength(2)
+    expect(toolPartsOf(store.messages[1] as ChatMessage)[0]?.result).toBeNull() // 配对成功但响应为 null
+  })
+
+  it('有 TOOL 回应但前端配对失败仍并：同 name 无 id 多 call 只配中其一，闸不看配对成败', async () => {
+    const store = useAiStore()
+    const sid = store.sessionId
+    api.history.mockResolvedValue({
+      sessionId: sid,
+      count: 4,
+      messages: [
+        { type: 'USER', text: '问题' },
+        {
+          type: 'ASSISTANT',
+          text: '',
+          toolCalls: [
+            { type: 'function', name: 'probe_tool', arguments: '{"x":1}' },
+            { type: 'function', name: 'probe_tool', arguments: '{"y":2}' }
+          ]
+        },
+        { type: 'TOOL', text: '', toolResponses: [{ id: '', name: 'probe_tool', responseData: 'only-one' }] },
+        { type: 'ASSISTANT', text: '收尾' }
+      ]
+    })
+    api.runsCurrent.mockResolvedValue(noSuspension())
+
+    await store.loadHistory()
+
+    expect(store.messages).toHaveLength(2) // 仍合并：窗口内存在可配对 TOOL 条目
+    const tools = toolPartsOf(store.messages[1] as ChatMessage)
+    expect(tools.map((part) => part.result)).toEqual(['only-one', null]) // 第二个 call 配对失败 result=null，卡片仍在
+  })
+
+  it('悬空 A(T) + 下轮 USER：不并不吞——悬空卡独立成消息且保留到下轮之后', async () => {
+    const store = useAiStore()
+    const sid = store.sessionId
+    api.history.mockResolvedValue({
+      sessionId: sid,
+      count: 5,
+      messages: [
+        { type: 'USER', text: '问题' },
+        {
+          type: 'ASSISTANT',
+          text: '调用工具',
+          toolCalls: [{ id: 'd1', type: 'function', name: 'probe_tool', arguments: '{}' }]
+          // 无 TOOL 条目：悬空 A(T)
+        },
+        { type: 'USER', text: '追一问' },
+        { type: 'ASSISTANT', text: '追一答' }
+      ]
+    })
+    api.runsCurrent.mockResolvedValue(noSuspension())
+
+    await store.loadHistory()
+
+    expect(store.messages).toHaveLength(4) // USER/A(悬空)/USER/A：无任何合并或吞并
+    const dangling = store.messages[1] as ChatMessage
+    expect(dangling.parts.map((part) => part.kind)).toEqual(['text', 'tool']) // 卡片保留不丢
+    expect(toolPartsOf(dangling)[0]?.result).toBeNull()
+  })
+
+  it('drop 规则正例：无 toolCalls 且 text 空的 ASSISTANT 直接丢弃（不产生空白块）', async () => {
+    const store = useAiStore()
+    const sid = store.sessionId
+    api.history.mockResolvedValue({
+      sessionId: sid,
+      count: 4,
+      messages: [
+        { type: 'USER', text: '问题' },
+        { type: 'ASSISTANT', text: '' }, // 应被 drop
+        { type: 'ASSISTANT', text: '有内容' },
+        { type: 'USER', text: '下一句' }
+      ]
+    })
+    api.runsCurrent.mockResolvedValue(noSuspension())
+
+    await store.loadHistory()
+
+    expect(store.messages).toHaveLength(3) // USER/A(有内容)/USER
+    expect(store.messages.map((message) => message.id)).toEqual(['history-0', 'history-2', 'history-3'])
+    expect((store.messages[1] as ChatMessage).content).toBe('有内容')
+  })
+
+  it('⑦ 式镜像深度相等：合并形态经镜像写盘后再走 loadHistory，parts 深度相等', async () => {
+    const store = useAiStore()
+    const sid = store.sessionId
+    api.history.mockResolvedValue({
+      sessionId: sid,
+      count: 4,
+      messages: [
+        { type: 'USER', text: '问题' },
+        {
+          type: 'ASSISTANT',
+          text: '',
+          toolCalls: [{ id: 'h1', type: 'function', name: 'probe_tool', arguments: '{"a":1}' }]
+        },
+        { type: 'TOOL', text: '', toolResponses: [{ id: 'h1', name: 'probe_tool', responseData: 'ok' }] },
+        { type: 'ASSISTANT', text: '补充' }
+      ]
+    })
+    api.runsCurrent.mockResolvedValue(noSuspension())
+
+    await store.loadHistory()
+    const viaBackend = JSON.parse(JSON.stringify(store.messages.map((message) => message.parts)))
+    expect(store.messages).toHaveLength(2) // 合并已发生
+
+    sessionStorage.setItem(MIRROR_PREFIX + sid, JSON.stringify({
+      v: 2,
+      savedAt: 1,
+      lastRunId: null,
+      messages: store.messages
+    }))
+    await store.loadHistory()
+
+    expect(JSON.parse(JSON.stringify(store.messages.map((message) => message.parts)))).toEqual(viaBackend)
+  })
+
+  it('merged id 与兜底 namespace：被并条目无 id call 的序位兜底 toolCallId 用其自身原始 index', async () => {
+    const store = useAiStore()
+    const sid = store.sessionId
+    api.history.mockResolvedValue({
+      sessionId: sid,
+      count: 4,
+      messages: [
+        { type: 'USER', text: '问题' },
+        {
+          type: 'ASSISTANT',
+          text: '',
+          toolCalls: [{ type: 'function', name: 'alpha', arguments: '{}' }] // 原始 index 1，无 id
+        },
+        { type: 'TOOL', text: '', toolResponses: [{ id: '', name: 'alpha', responseData: 'ra' }] },
+        { type: 'ASSISTANT', text: '收尾' }
+      ]
+    })
+    api.runsCurrent.mockResolvedValue(noSuspension())
+
+    await store.loadHistory()
+
+    expect(store.messages).toHaveLength(2)
+    const merged = store.messages[1] as ChatMessage
+    expect(merged.id).toBe('history-1') // 合并消息 id = 首条原始 index
+    // 被并条目的兜底 toolCallId 不得漂到首条 index（防同 name 无 id 多 call 撞号）
+    expect(toolPartsOf(merged)[0]?.toolCallId).toBe('history-1-alpha')
+  })
+
+  it('多轮工具同轮合并（R-150 主形态）：A(T)+TOOL+A(T)+TOOL 一轮四段、两条工具结果各归其位', async () => {
+    const store = useAiStore()
+    const sid = store.sessionId
+    api.history.mockResolvedValue({
+      sessionId: sid,
+      count: 5,
+      messages: [
+        { type: 'USER', text: '问' },
+        {
+          type: 'ASSISTANT',
+          text: '先查',
+          toolCalls: [{ id: 'q1', type: 'function', name: 'lookup', arguments: '{}' }]
+        },
+        { type: 'TOOL', text: '', toolResponses: [{ id: 'q1', name: 'lookup', responseData: 'rq' }] },
+        {
+          type: 'ASSISTANT',
+          text: '再写',
+          toolCalls: [{ id: 'w1', type: 'function', name: 'writer', arguments: '{}' }]
+        },
+        { type: 'TOOL', text: '', toolResponses: [{ id: 'w1', name: 'writer', responseData: 'rw' }] }
+      ]
+    })
+    api.runsCurrent.mockResolvedValue(noSuspension())
+
+    await store.loadHistory()
+
+    expect(store.messages).toHaveLength(2)
+    const merged = store.messages[1] as ChatMessage
+    expect(merged.parts.map((part) => [part.kind, part.seg])).toEqual([
+      ['text', 0],
+      ['tool', 1],
+      ['text', 2],
+      ['tool', 3]
+    ])
+    expect(toolPartsOf(merged).map((part) => [part.name, part.result])).toEqual([
+      ['lookup', 'rq'],
+      ['writer', 'rw']
+    ])
   })
 })

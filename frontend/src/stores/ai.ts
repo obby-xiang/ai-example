@@ -773,6 +773,74 @@ export const useAiStore = defineStore('ai', {
           deriveProjections(message)
         }
       })
+      // ── R-150 后置 pass：同一用户轮内连续 ASSISTANT 合并（中间仅夹被跳过的 TOOL，遇 USER/SYSTEM 即断）──
+      // 位置钉死在 R-149 配对 + 序位兜底 + C1 重派生**全部完成之后**（GLM C1：兜底在 flatMap 后才
+      // 回填 result，遍历内联判定必误判）。闸（结构性判据）：被并条目的每个 toolCall 在原始历史窗口内
+      // 存在可配对 TOOL 条目（id 相等；call.id 缺失时 name 相等；responseData=null 也算有回应）——
+      // 与前端配对启发成败无关。悬空 A(T)（无任何可配对 TOOL）不并不吞、也不开窗（纵深防御，
+      // S0 实证该形态后端不可达，闸保留防旧镜像/未来形态）。drop：无 toolCalls 且 text 空的
+      // ASSISTANT 直接丢弃（防旧镜像空白块复活），丢弃同时断窗。
+      const toolWindowEntries = history.messages.filter((item) => (item.type || '').toUpperCase() === 'TOOL')
+      const hasPairableResponse = (call: { id?: string | null; name?: string }): boolean => {
+        const callId = call.id ?? null
+        return toolWindowEntries.some((entry) =>
+          (entry.toolResponses ?? []).some((response) => {
+            if (callId !== null && callId !== undefined && callId !== '') {
+              return response.id === callId
+            }
+            return (response.name ?? '未知工具') === (call.name ?? '未知工具')
+          })
+        )
+      }
+      const builtMessages = this.messages
+      const mergedMessages: ChatMessage[] = []
+      let builtCursor = 0
+      let group: ChatMessage[] = []
+      const flushGroup = (): void => {
+        if (group.length === 0) {
+          return
+        }
+        if (group.length === 1) {
+          mergedMessages.push(group[0] as ChatMessage)
+        } else {
+          // 合并：parts 顺次拼接（保留空 text 段），seg 全局单调重排（渲染 key = kind+'-'+seg）；
+          // id 取首条（history-{首条原始 index}，flatMap 时已钉）；被并条目的序位兜底 toolCallId
+          // 用其自身原始 index（flatMap 时已钉，此处不触碰）
+          const head = group[0] as ChatMessage
+          head.parts = group.flatMap((member) => (member as ChatMessage).parts)
+            .map((part, seg) => ({ ...part, seg })) as MessagePart[]
+          deriveProjections(head) // 拼接 + 重 seg 后重派生投影（content/toolRuns 随 parts）
+          mergedMessages.push(head)
+        }
+        group = []
+      }
+      for (const item of history.messages) {
+        const type = (item.type || '').toUpperCase()
+        if (type === 'TOOL') {
+          continue // 无消息产出（R-149 已跳过），不断窗
+        }
+        const message = builtMessages[builtCursor] as ChatMessage
+        builtCursor += 1
+        if (type === 'USER' || type === 'SYSTEM') {
+          flushGroup()
+          mergedMessages.push(message)
+          continue
+        }
+        const calls = item.toolCalls ?? []
+        if (calls.length === 0 && (item.text ?? '').trim().length === 0) {
+          flushGroup() // drop 规则：空白 ASSISTANT 丢弃且断窗
+          continue
+        }
+        // 闸：被并条目的每个 toolCall 须存在可配对 TOOL 条目（无 toolCalls 时恒真）
+        if (!calls.every((call) => hasPairableResponse(call))) {
+          flushGroup() // 悬空 A(T)：不并、不吞、不开窗
+          mergedMessages.push(message)
+          continue
+        }
+        group.push(message)
+      }
+      flushGroup()
+      this.messages = mergedMessages
       // 历史里若存在未决挂起，补一张待处理卡片（前端工具/确认门都可能出现在这里）
       this.historyLoaded = true
       // T2b-D#3：historyLoaded 先行置位后再触发快照重建（loadHistory 先行完成，
