@@ -74,9 +74,6 @@ export interface SseFrameHandlers {
 export interface SseStreamOptions {
   /** 外部取消（用户点"停止"）：abort 后不再重连 */
   signal?: AbortSignal
-  idleTimeoutMs?: number
-  maxReconnects?: number
-  reconnectDelayMs?: number
   /**
    * reattach 专用（DC-14 T6）：前端已收到的最大帧序号 —— 服务端据此只补发增量。
    * 不传 = 全量回放（与 S4.2 时期行为一致）。
@@ -329,7 +326,7 @@ export async function streamChat(
   handlers: SseFrameHandlers = {},
   options: SseStreamOptions = {}
 ): Promise<StreamCloseInfo> {
-  const idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS
+  const idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS
   const state = newState()
   const controller = new AbortController()
   const unlink = linkAbort(options.signal, controller)
@@ -393,7 +390,7 @@ async function tryReattach(
   handlers: SseFrameHandlers,
   options: SseStreamOptions
 ): Promise<{ terminal: boolean; reason?: string }> {
-  const maxReconnects = options.maxReconnects ?? DEFAULT_MAX_RECONNECTS
+  const maxReconnects = DEFAULT_MAX_RECONNECTS
   if (!state.runId) {
     return { terminal: false, reason: '未收到 start 帧（无 runId 可重挂），判定断流' }
   }
@@ -429,9 +426,9 @@ export async function reattach(
 ): Promise<StreamCloseInfo> {
   const state = existing ?? newState()
   state.runId = runId
-  const maxReconnects = options.maxReconnects ?? DEFAULT_MAX_RECONNECTS
-  const baseDelay = options.reconnectDelayMs ?? DEFAULT_RECONNECT_DELAY_MS
-  const idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS
+  const maxReconnects = DEFAULT_MAX_RECONNECTS
+  const baseDelay = DEFAULT_RECONNECT_DELAY_MS
+  const idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS
 
   return await new Promise<StreamCloseInfo>((resolve) => {
     let source: EventSource | null = null

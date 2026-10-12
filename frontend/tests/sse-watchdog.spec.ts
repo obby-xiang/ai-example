@@ -44,7 +44,7 @@ describe('reattach 双看门狗', () => {
 
   it('建连黑洞（既不 onopen 也不 error）：三轮 15s + 退避 1s/2s = 48s 内必收敛，不留计时器', async () => {
     let settled: { terminal: boolean; reason?: string } | null = null
-    const pending = reattach('run-1', {}, { maxReconnects: 2 }).then((info) => {
+    const pending = reattach('run-1', {}).then((info) => {
       settled = info
       return info
     })
@@ -62,7 +62,7 @@ describe('reattach 双看门狗', () => {
 
   it('onopen 后建连看门狗让位：不再因 15s 到点而误判断流（只留 90s 帧间看门狗）', async () => {
     let settled: unknown = null
-    void reattach('run-2', {}, { maxReconnects: 0 }).then((info) => {
+    void reattach('run-2', {}).then((info) => {
       settled = info
     })
     FakeEventSource.instances[0]?.fireOpen()

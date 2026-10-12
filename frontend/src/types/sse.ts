@@ -295,13 +295,6 @@ export function isTerminalFrame(frame: SseFrame): frame is SseDoneFrame | SseErr
   return frame.type === 'done' || frame.type === 'error'
 }
 
-/** 帧是否属于"挂起等待"口径（N6 裁决：suspended/confirm_request=挂起等待）。 */
-export function isSuspendedFrame(frame: SseFrame): boolean {
-  return frame.type === 'suspended'
-    || frame.type === 'confirm_request'
-    || frame.type === 'frontend_tool_request'
-}
-
 /** 运行时校验：把任意 JSON 值收窄为 SseFrame（type 命中后端白名单或前向兼容帧）。 */
 export function toSseFrame(value: unknown): SseFrame | null {
   if (!value || typeof value !== 'object') {

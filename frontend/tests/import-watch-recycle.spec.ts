@@ -7,11 +7,17 @@
  *  ② 更糟的是 `syncSnapshot` 拿到的**旧作业**快照会写回**新作业**的展示位，
  *    甚至按旧作业的终态弹提示 / 触发 onFinal（"上个作业的结局盖掉这个作业"）。
  *
- * 步1 的修法：
- *  - 回收表（createJobWatcherRegistry）挂在模块可导出位置：同 kind register 先回收旧的，
- *    不同 kind 互不回收（三条可并存）；
- *  - job-watch.ts 的 syncSnapshot 在 `await getJob` 之后复检 `disposed`，
- *    保证 dispose 后的在途快照既不写回 onSnapshot 也不触发 onFinal。
+ * R-148（B2 收窄）：`createJobWatcherRegistry` 已删（唯一生产消费者 = ImportWizardView，
+ * 已改直调：模块级 `Map<kind, dispose>`，同 kind 先释放旧柄再登记，卸载全释放）。
+ * 本 spec 改写为锁**直调形态背后的契约**：
+ *  - 同 kind 重跑先释放旧柄（测试内以与视图同构的三行 wiring 驱动）⇒ 旧 watcher 停止取数；
+ *  - dispose 后的在途快照既不写回 onSnapshot 也不触发 onFinal（job-watch.ts 的 disposed 复检，
+ *    与注册表时代同一道闸）；
+ *  - 卸载全释放 ⇒ 无残留计时器与取数；
+ *  - 终态自制 dispose ⇒ onDisposed 回调链路（一次性、幂等）。
+ * 登记（语义收窄说明）：原注册表的 has()/size() 簿记面随抽象一并删除，无生产消费者，
+ * 「同 kind 先释放」的原子性现由视图 wiring 的 get→delete→dispose 顺序承载（dispose 期间
+ * 重入 beginWatchJob 在单线程事件模型下不成立，无并发窗口）。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -20,7 +26,7 @@ const api = vi.hoisted(() => ({ getJob: vi.fn(), openTaskEvents: vi.fn() }))
 vi.mock('@/api/jobs', () => ({ jobsApi: { getJob: api.getJob } }))
 vi.mock('@/api/tasks', () => ({ tasksApi: { openTaskEvents: api.openTaskEvents } }))
 
-import { createJobWatcherRegistry, watchJob, JOB_FALLBACK_POLL_MS } from '@/utils/job-watch'
+import { watchJob, JOB_FALLBACK_POLL_MS } from '@/utils/job-watch'
 import type { Job, JobStatus } from '@/types/job'
 
 function makeJob(id: number, status: JobStatus): Job {
@@ -52,32 +58,42 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reje
   return { promise, resolve, reject }
 }
 
-let registry: ReturnType<typeof createJobWatcherRegistry>
+/** 与 ImportWizardView 改直调后同构的最小 wiring：同 kind 先释放旧柄再登记。 */
+const handles = new Map<string, () => void>()
+function beginDirect(kind: string, dispose: () => void): void {
+  handles.get(kind)?.()
+  handles.delete(kind)
+  handles.set(kind, dispose)
+}
+function disposeAllDirect(): void {
+  for (const dispose of [...handles.values()]) {
+    dispose()
+  }
+  handles.clear()
+}
 
 beforeEach(() => {
-  registry = createJobWatcherRegistry()
   api.getJob.mockReset()
   api.openTaskEvents.mockReset().mockImplementation(() => fakeSource())
   vi.useFakeTimers()
 })
 
 afterEach(() => {
-  registry.disposeAll()
+  disposeAllDirect()
   vi.useRealTimers()
 })
 
-describe('job-watch 回收表 · 同 kind 回收 / 不同 kind 并存', () => {
+describe('job-watch 直调回收 · 同 kind 回收 / 不同 kind 并存（R-148 B2 收窄后形态）', () => {
   it('same-kind-old-disposed：同 kind 连启 2 次 ⇒ 旧 dispose 被调用，且旧 watcher 不再取数', async () => {
     api.getJob.mockResolvedValue(makeJob(101, 'RUNNING'))
 
     const disposeA = vi.fn(watchJob({ taskId: 1, jobId: 101 }))
-    registry.register('check', disposeA)
+    beginDirect('check', disposeA)
     const disposeB = vi.fn(watchJob({ taskId: 1, jobId: 102 }))
-    registry.register('check', disposeB)
+    beginDirect('check', disposeB) // 同 kind 重跑：先释放 A 再登记 B
 
     expect(disposeA).toHaveBeenCalledTimes(1)
     expect(disposeB).not.toHaveBeenCalled()
-    expect(registry.size()).toBe(1)
 
     api.getJob.mockClear()
     await vi.advanceTimersByTimeAsync(JOB_FALLBACK_POLL_MS * 3)
@@ -94,11 +110,12 @@ describe('job-watch 回收表 · 同 kind 回收 / 不同 kind 并存', () => {
     const onSnapshotA = vi.fn()
     const onFinalA = vi.fn()
     // watcher A：getJob 挂住（在途）
-    registry.register('import', watchJob({ taskId: 1, jobId: 201, onSnapshot: onSnapshotA, onFinal: onFinalA }))
+    const disposeA = watchJob({ taskId: 1, jobId: 201, onSnapshot: onSnapshotA, onFinal: onFinalA })
     expect(api.getJob).toHaveBeenCalledWith(201)
 
     const onSnapshotB = vi.fn()
-    registry.register('import', watchJob({ taskId: 1, jobId: 202, onSnapshot: onSnapshotB }))
+    beginDirect('import', disposeA)
+    beginDirect('import', watchJob({ taskId: 1, jobId: 202, onSnapshot: onSnapshotB }))
 
     // A 已随同 kind 回收；此刻它的在途快照才回来（终态 COMPLETED —— 若不复检 disposed 就会写回并弹旧终态）
     slowA.resolve(makeJob(201, 'COMPLETED'))
@@ -117,14 +134,13 @@ describe('job-watch 回收表 · 同 kind 回收 / 不同 kind 并存', () => {
     const disposeCheck = vi.fn(watchJob({ taskId: 1, jobId: 301 }))
     const disposeImport = vi.fn(watchJob({ taskId: 1, jobId: 302 }))
     const disposePublish = vi.fn(watchJob({ taskId: 1, jobId: 303 }))
-    registry.register('check', disposeCheck)
-    registry.register('import', disposeImport)
-    registry.register('publish', disposePublish)
+    beginDirect('check', disposeCheck)
+    beginDirect('import', disposeImport)
+    beginDirect('publish', disposePublish)
 
     expect(disposeCheck).not.toHaveBeenCalled()
     expect(disposeImport).not.toHaveBeenCalled()
     expect(disposePublish).not.toHaveBeenCalled()
-    expect(registry.size()).toBe(3)
 
     api.getJob.mockClear()
     await vi.advanceTimersByTimeAsync(JOB_FALLBACK_POLL_MS * 2)
@@ -137,15 +153,15 @@ describe('job-watch 回收表 · 同 kind 回收 / 不同 kind 并存', () => {
 
     const disposeCheck = vi.fn(watchJob({ taskId: 1, jobId: 401 }))
     const disposeImport = vi.fn(watchJob({ taskId: 1, jobId: 402 }))
-    registry.register('check', disposeCheck)
-    registry.register('import', disposeImport)
+    beginDirect('check', disposeCheck)
+    beginDirect('import', disposeImport)
     await vi.advanceTimersByTimeAsync(0)
 
-    registry.disposeAll()
+    disposeAllDirect()
 
     expect(disposeCheck).toHaveBeenCalledTimes(1)
     expect(disposeImport).toHaveBeenCalledTimes(1)
-    expect(registry.size()).toBe(0)
+    expect(handles.size).toBe(0)
     expect(vi.getTimerCount()).toBe(0)
 
     api.getJob.mockClear()
@@ -153,26 +169,37 @@ describe('job-watch 回收表 · 同 kind 回收 / 不同 kind 并存', () => {
     expect(api.getJob).not.toHaveBeenCalled()
   })
 
-  it('self-dispose-syncs-registry：watcher 自制 dispose（终态）后注册表同步注销（F10：has()/size() 不失真）', async () => {
+  it('self-dispose-syncs-and-idempotent：watcher 自制 dispose（终态）触发 onDisposed 同步摘柄，重复回收幂等不双 dispose', async () => {
     api.getJob.mockResolvedValue(makeJob(501, 'RUNNING'))
-    // 与 ImportWizardView.beginWatchJob 同口径接线：onDisposed 同步回收注册表
-    const dispose = watchJob({ taskId: 1, jobId: 501, onDisposed: () => registry.recycle('check') })
-    registry.register('check', dispose)
-    expect(registry.has('check')).toBe(true)
-    expect(registry.size()).toBe(1)
+    const onDisposed = vi.fn()
+    // 与 ImportWizardView.beginWatchJob 同口径接线：onDisposed 同步摘柄
+    const dispose = watchJob({
+      taskId: 1,
+      jobId: 501,
+      onDisposed: () => {
+        onDisposed()
+        if (handles.get('check') === dispose) {
+          handles.delete('check')
+        }
+      }
+    })
+    const kind = 'check'
+    handles.set(kind, dispose)
+    expect(handles.get(kind)).toBe(dispose)
 
-    // 跟踪器自制终态：快照说终态 ⇒ 内部 dispose（不经注册表）
+    // 跟踪器自制终态：快照说终态 ⇒ 内部 dispose（不经登记入口）
     api.getJob.mockResolvedValue(makeJob(501, 'COMPLETED'))
     await vi.advanceTimersByTimeAsync(JOB_FALLBACK_POLL_MS)
     await vi.advanceTimersByTimeAsync(0)
 
-    expect(registry.has('check')).toBe(false) // 自制 dispose 后注册表同步注销
-    expect(registry.size()).toBe(0)
+    expect(onDisposed).toHaveBeenCalledTimes(1) // 自制 dispose 后 onDisposed 恰好一次
+    expect(handles.get(kind)).toBeUndefined()
 
     // 用户侧再回收/卸载：幂等，不重复调用、不报错
-    registry.recycle('check')
-    registry.disposeAll()
-    expect(registry.size()).toBe(0)
+    handles.get(kind)?.()
+    handles.delete(kind)
+    dispose()
+    expect(onDisposed).toHaveBeenCalledTimes(1)
   })
 
   it('onerror-not-fired-after-dispose：dispose 后在途快照失败的 catch 面不得再触 onError（F8：与 resolve 面的 disposed 复检对称）', async () => {
@@ -181,7 +208,6 @@ describe('job-watch 回收表 · 同 kind 回收 / 不同 kind 并存', () => {
     const onError = vi.fn()
     const onSnapshot = vi.fn()
     const dispose = watchJob({ taskId: 1, jobId: 601, onError, onSnapshot })
-    registry.register('check', dispose)
     expect(api.getJob).toHaveBeenCalledWith(601)
 
     dispose() // 在途期间被回收（同 kind 重跑/卸载）

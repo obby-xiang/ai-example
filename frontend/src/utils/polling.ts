@@ -3,7 +3,8 @@
  *
  * 瘦身（本批口径）：任务中心的条件自刷（hasActiveJob 4s / 30s 双速）随 M1 整体摘除后，
  * 控制器的**双速语义全部失去消费者** ⇒ 删除 `shouldRun` 谓词 / `desiredIntervalMs` 变节奏 /
- * `resync`（F2 冷进入升级）/ `isPaused`（hidden 停表状态无读取方）/ 导出的 `CATCHUP_JITTER_MS`。
+ * `resync`（F2 冷进入升级）/ `isPaused`（hidden 停表状态无读取方）；`CATCHUP_JITTER_MS` 改为
+ * 内部常量、不再导出（**不可删**：仍是回可见错峰补刷的唯一取值来源，见 `:26` 定义 / 使用点）。
  *
  * 保留（现存两个消费方依赖）：
  * - **单节奏**：`intervalMs` + `run`，每次到点即跑；
