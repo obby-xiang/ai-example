@@ -14,6 +14,7 @@ import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.memory.ChatMemoryRepository;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
+import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.core.env.Environment;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
@@ -121,6 +122,88 @@ class AiControllerHistoryPayloadTest {
 			.andExpect(jsonPath("$.data.messages[1].toolResponses[0].name").value("start_publish"))
 			.andExpect(jsonPath("$.data.messages[1].toolResponses[0].responseData").value("OK"))
 			.andExpect(jsonPath("$.data.messages[1].timestamp").value("ts-2"));
+	}
+
+	// ── R-154 #16 分页参数 ──
+
+	@Test
+	void paginationDefaultsToFullSemantics() throws Exception {
+		when(this.chatMemory.get("s-1")).thenReturn(List.of(new UserMessage("m0"), new UserMessage("m1"),
+				new UserMessage("m2")));
+
+		this.mockMvc.perform(get("/api/ai/history/s-1"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.count").value(3))
+			.andExpect(jsonPath("$.data.total").value(3))
+			.andExpect(jsonPath("$.data.hasMore").value(false))
+			.andExpect(jsonPath("$.data.messages.length()").value(3))
+			.andExpect(jsonPath("$.data.messages[0].text").value("m0"))
+			.andExpect(jsonPath("$.data.messages[2].text").value("m2"));
+	}
+
+	@Test
+	void paginationOffsetLimitSlicesWindowInOrder() throws Exception {
+		when(this.chatMemory.get("s-1")).thenReturn(List.of(new UserMessage("m0"), new UserMessage("m1"),
+				new UserMessage("m2"), new UserMessage("m3"), new UserMessage("m4")));
+
+		this.mockMvc.perform(get("/api/ai/history/s-1").param("offset", "1").param("limit", "2"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.count").value(2))
+			.andExpect(jsonPath("$.data.total").value(5))
+			.andExpect(jsonPath("$.data.hasMore").value(true))
+			.andExpect(jsonPath("$.data.messages.length()").value(2))
+			.andExpect(jsonPath("$.data.messages[0].text").value("m1"))
+			.andExpect(jsonPath("$.data.messages[1].text").value("m2"));
+	}
+
+	@Test
+	void paginationHasMoreReflectsOlderMessagesBeforeSlice() throws Exception {
+		when(this.chatMemory.get("s-1")).thenReturn(List.of(new UserMessage("m0"), new UserMessage("m1"),
+				new UserMessage("m2"), new UserMessage("m3"), new UserMessage("m4")));
+
+		this.mockMvc.perform(get("/api/ai/history/s-1").param("offset", "3"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.count").value(2))
+			.andExpect(jsonPath("$.data.total").value(5))
+			.andExpect(jsonPath("$.data.hasMore").value(true))
+			.andExpect(jsonPath("$.data.messages[0].text").value("m3"))
+			.andExpect(jsonPath("$.data.messages[1].text").value("m4"));
+	}
+
+	@Test
+	void paginationLimitZeroReturnsEmptySliceWithTotal() throws Exception {
+		when(this.chatMemory.get("s-1")).thenReturn(List.of(new UserMessage("m0"), new UserMessage("m1")));
+
+		this.mockMvc.perform(get("/api/ai/history/s-1").param("limit", "0"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.count").value(0))
+			.andExpect(jsonPath("$.data.total").value(2))
+			.andExpect(jsonPath("$.data.hasMore").value(false))
+			.andExpect(jsonPath("$.data.messages.length()").value(0));
+	}
+
+	@Test
+	void paginationNegativeOffsetAndLimitClampToZero() throws Exception {
+		when(this.chatMemory.get("s-1")).thenReturn(List.of(new UserMessage("m0"), new UserMessage("m1")));
+
+		this.mockMvc.perform(get("/api/ai/history/s-1").param("offset", "-1").param("limit", "-1"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.count").value(0))
+			.andExpect(jsonPath("$.data.total").value(2))
+			.andExpect(jsonPath("$.data.hasMore").value(false))
+			.andExpect(jsonPath("$.data.messages.length()").value(0));
+	}
+
+	@Test
+	void paginationOffsetBeyondTotalReturnsEmptySliceWithTotal() throws Exception {
+		when(this.chatMemory.get("s-1")).thenReturn(List.of(new UserMessage("m0"), new UserMessage("m1")));
+
+		this.mockMvc.perform(get("/api/ai/history/s-1").param("offset", "5"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.count").value(0))
+			.andExpect(jsonPath("$.data.total").value(2))
+			.andExpect(jsonPath("$.data.hasMore").value(false))
+			.andExpect(jsonPath("$.data.messages.length()").value(0));
 	}
 
 	@SuppressWarnings("unchecked")

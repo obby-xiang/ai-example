@@ -328,6 +328,10 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
     case 'message_start':
       message.messageId = frame.messageId
       message.streaming = true
+      // R-154 #17：实时路时间戳 = 帧的服务端构造时刻（atMs 与 messageId 同帧单点取值）
+      if (message.timestamp === undefined && frame.atMs !== undefined) {
+        message.timestamp = frame.atMs
+      }
       break
     case 'message_end':
       // 段边界：只封口末尾流式段 + 记身份，不改段结构（R2-2）
@@ -374,6 +378,10 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
         status,
         messageId: frame.messageId,
         result: frame.result ?? null,
+        // R-154 #2：消费帧侧截断标记（FrameSizeLimiter TRUNCATED_FIELD/TRUNCATED_REASON_FIELD），
+        // 随段持久化供卡面「已截断」角标渲染；缺省 = 未截断
+        truncated: frame.truncated ?? false,
+        truncatedReason: frame.truncatedReason ?? null,
         reason,
         requiresAction: false
       })

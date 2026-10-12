@@ -761,7 +761,9 @@ export const useAiStore = defineStore('ai', {
           toolRuns: [],
           pendingCall: null,
           streaming: false,
-          done: true
+          done: true,
+          // R-154 #17：历史路时间戳 = 后端条目 metadata.timestamp（原样透传，仅展示用途）
+          timestamp: item.timestamp
         }
         deriveProjections(message)
         return [message]
@@ -1662,7 +1664,9 @@ export const useAiStore = defineStore('ai', {
         toolRuns: [],
         pendingCall: null,
         streaming: false,
-        done: true
+        done: true,
+        // R-154 #17：用户消息时间戳 = 本地发送时刻
+        timestamp: Date.now()
       }
       deriveProjections(message)
       this.messages.push(message)

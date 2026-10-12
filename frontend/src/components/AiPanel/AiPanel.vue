@@ -113,8 +113,9 @@
       :title="`AI 驱动工作区：${ai.lastUiEventResult.message}`"
     />
 
-    <!-- 消息流（蓝本 AiPanel.vue:21-89） -->
-    <div ref="msgWrapRef" class="flex-1 overflow-y-auto p-3">
+    <!-- 消息流（蓝本 AiPanel.vue:21-89）；R-154 #5：外层 relative 壳承载「回到底部」浮钮 -->
+    <div class="flex-1 relative min-h-0 flex flex-col">
+      <div ref="msgWrapRef" class="flex-1 overflow-y-auto p-3" @scroll.passive="onMsgScroll">
       <!-- 历史对账期骨架屏（苞 B 项 4）：消费 store 的 historyLoaded —— 与空态互斥
            （无消息且对账未完 → 骨架屏；对账完成后才轮到空态/消息流）。 -->
       <el-skeleton
@@ -135,6 +136,20 @@
             打开导出结果在线编辑器、下载导出文件，<br />并启动导出/预检查/导入/发布作业。
           </div>
           <div class="mt-2 text-xs text-[#c0c4cc]">对话保存在当前浏览器页签中，关闭页签即结束。</div>
+          <!-- R-154 #12：空态静态建议提示词（runtime 驱动建议词登记挂账，本批不做）——点击回填输入框 -->
+          <div class="mt-3 flex flex-wrap justify-center gap-2">
+            <el-button
+              v-for="suggestion in SUGGESTIONS"
+              :key="suggestion"
+              size="small"
+              round
+              plain
+              data-testid="suggestion-chip"
+              @click="useSuggestion(suggestion)"
+            >
+              {{ suggestion }}
+            </el-button>
+          </div>
         </template>
       </el-empty>
 
@@ -144,11 +159,23 @@
         class="group flex gap-2 mb-3.5"
         :class="m.role === 'user' ? 'flex-row-reverse' : ''"
       >
-        <div
-          class="w-7 h-7 rounded-full text-xs flex items-center justify-center shrink-0"
-          :class="m.role === 'user' ? 'bg-[#409eff] text-white' : 'bg-[#e4e7ed] text-[#606266]'"
-        >
-          {{ m.role === 'user' ? '我' : 'AI' }}
+        <div class="flex flex-col items-center gap-1 shrink-0">
+          <div
+            class="w-7 h-7 rounded-full text-xs flex items-center justify-center"
+            :class="m.role === 'user' ? 'bg-[#409eff] text-white' : 'bg-[#e4e7ed] text-[#606266]'"
+          >
+            {{ m.role === 'user' ? '我' : 'AI' }}
+          </div>
+          <!-- R-154 #7：流式「生成中」标识 —— 承载点 = 消息头 tag（正文产出后仍保留，直到终帧封口） -->
+          <el-tag
+            v-if="m.streaming && m.role === 'assistant'"
+            size="small"
+            type="primary"
+            effect="dark"
+            data-testid="streaming-tag"
+          >
+            生成中
+          </el-tag>
         </div>
         <div
           class="max-w-[82%] rounded-lg px-2.5 py-2 text-[13px] text-[#303133] leading-[1.6] break-words"
@@ -159,141 +186,91 @@
             <i class="dot"></i><i class="dot"></i><i class="dot"></i>
           </span>
 
-          <!-- 消息体：块分派（批4④ A5'）——groupParts 把段序列分派为 text/activity 块；活动组可折叠，
-               展开态读 store 三态（expandedBlocks ?? defaultExpanded，D4/D6/D-C6）；key 用块稳定 id
-               （组首成员 toolCallId / kind-seg，加消息命名空间前缀，收口修 F1/红队 M-1），禁用数组下标（§7 R4-3 / D5）。 -->
+          <!-- 消息体：块分派（批4④ A5' → R-154 单卡化）——groupParts 把段序列分派为 text/activity 块；
+               R-154 #13+14 起 activity 恒为单段卡（组壳已拆），展开态读 store 三态
+               （expandedBlocks ?? defaultExpanded，D4/D6/D-C6）；key 用块稳定 id
+               （成员 toolCallId / kind-seg，加消息命名空间前缀，收口修 F1/红队 M-1），禁用数组下标（§7 R4-3 / D5）。 -->
           <template v-for="block in blocksOf(m)" :key="block.id">
             <!-- 正文块：单段正文，永不进折叠组（A5' 规则③） -->
             <div v-if="block.kind === 'text'" class="whitespace-pre-wrap">{{ textOf(block) }}</div>
 
             <template v-else>
-              <!-- 活动组（多成员）：可折叠壳 + 组头 + 受控展开区（v-show：DOM 恒在，testid/可见性稳定） -->
-              <div v-if="!block.bare" class="mt-1.5 border border-solid border-[#dcdfe6] rounded-md" data-activity-group>
-                <button
-                  type="button"
-                  class="w-full flex items-center justify-between gap-2 px-2 py-1.5 text-left"
-                  :data-testid="'block-toggle-' + block.id"
-                  @click="toggleBlock(block)"
-                >
-                  <span class="flex items-center gap-1.5 font-semibold text-[13px] text-[#303133]">
-                    <el-icon color="#409EFF"><Operation /></el-icon>
-                    {{ blockHeader(block) }}
-                  </span>
-                  <span class="text-xs text-[#909399]">{{ isBlockExpanded(block) ? '收起' : '展开' }}</span>
-                </button>
-                <div v-show="isBlockExpanded(block)" class="p-2 pt-1 flex flex-col gap-1.5" :data-testid="'block-body-' + block.id">
-                  <template v-for="part in block.parts" :key="part.kind === 'tool' ? part.toolCallId : part.kind + '-' + part.seg">
-                    <!-- 组内思考链：组头已控折叠，内容随组展开可见（D-C8：组默认折叠） -->
-                    <div v-if="part.kind === 'reasoning' && part.text" class="text-xs text-[#909399]">
-                      <div class="text-xs text-[#909399]">思考过程</div>
-                      <div class="mt-1 px-2 py-1.5 bg-[#fafafa] border-l-2 border-solid border-[#dcdfe6] whitespace-pre-wrap max-h-40 overflow-y-auto">{{ part.text }}</div>
-                    </div>
-                    <template v-else-if="part.kind === 'tool'">
-                      <div
-                        class="border border-solid border-[#dcdfe6] rounded-md p-2 bg-white"
-                        :data-testid="part.requiresAction ? 'pending-card-' + part.toolCallId : undefined"
-                      >
-                        <div class="flex items-center gap-1.5 font-semibold text-[13px] flex-wrap">
-                          <el-icon color="#409EFF"><Operation /></el-icon>
-                          <span>{{ toolLabel(part.name) }}</span>
-                          <el-tag v-if="part.kind2 === 'FRONTEND'" size="small" effect="plain">前端工具</el-tag>
-                          <el-tag v-else-if="part.kind2 === 'CONFIRM'" size="small" type="warning" effect="plain">确认门</el-tag>
-                          <el-tag :size="'small'" :type="toolTagType(part.status)" :effect="part.status === 'running' ? 'dark' : 'light'">
-                            {{ toolStatusLabel(part.status) }}
-                          </el-tag>
-                        </div>
-                        <div v-if="part.args" class="mt-1.5 text-xs text-[#909399] break-all">
-                          <code>{{ part.args }}</code>
-                        </div>
-                        <div v-if="part.result" class="mt-1.5 px-2 py-1 text-xs text-[#606266] bg-[#fafafa] rounded max-h-24 overflow-y-auto whitespace-pre-wrap">{{ part.result }}</div>
-                        <div v-if="part.reason" class="mt-1 text-xs text-[#f56c6c]">原因：{{ part.reason }}</div>
-
-                        <!-- 挂起子块（段判据，A1'③）：CONFIRM 待决 → 确认块；GF → FormRenderer（宿主条件
-                             逐字保留，D10）；其余通用 FRONTEND 待执行/已决态 → 无子块（消 A9'⑤ 空壳卡）。
-                             D-C7：旧投影挂起卡的「会话已失效」tag（原 :206）与 GF 非宿主 v-else 三 tag
-                             （原 :251-253）/ activeForm 错误位（原 :254-257）随合并整列删除——语义由段状态
-                             tag（toolStatusLabel，expired→「会话已失效」）与段 reason 位（A4'，D11）承接。 -->
-                        <template v-if="part.requiresAction">
-                          <template v-if="part.kind2 === 'CONFIRM' && part.status === 'pending'">
-                            <div class="mt-1.5 flex items-center gap-2 text-xs">
-                              <span v-if="remainingSeconds !== null" :class="confirmExpired ? 'text-[#c0c4cc]' : 'text-[#e6a23c]'">
-                                {{ confirmExpired ? '确认已超时（按钮已置灰），本轮将按拒绝/超时收尾' : `剩余确认时间 ${formatCountdown(remainingSeconds)}` }}
-                              </span>
-                              <span v-else class="text-[#909399]">等待人工确认</span>
-                            </div>
-                            <el-input
-                              v-model="rejectReason"
-                              type="textarea"
-                              :rows="2"
-                              resize="none"
-                              class="mt-2"
-                              placeholder="拒绝原因（可选，填了会原样回填给模型）"
-                            />
-                            <div class="mt-2 flex gap-2 justify-end">
-                              <el-button size="small" :disabled="confirmExpired || deciding" @click="decide(false)">拒绝</el-button>
-                              <el-button size="small" type="primary" :disabled="confirmExpired || deciding" @click="decide(true)">确认执行</el-button>
-                            </div>
-                          </template>
-
-                          <div v-else-if="part.kind2 === 'FRONTEND' && part.name === GENERATIVE_FORM_TOOL" class="mt-2">
-                            <!-- GF-B：生成式表单挂起 —— 渲染 FormRenderer 等用户填写（同 toolCallId 可重发/取消） -->
-                            <!-- T2a-D#3（D10 不扩判据）：同 toolCallId 至多一个 FormRenderer —— 只渲染在宿主
-                                 消息（最后一条持该挂起调用的消息）上；非宿主消息不再出独立 tag 列（D-C7 已删） -->
-                            <FormRenderer
-                              v-if="liveForm && liveForm.toolCallId === part.toolCallId && m.id === formHostMessageId"
-                              :key="liveForm.toolCallId"
-                              :schema="liveForm.form"
-                              :submitting="liveForm.status === 'submitting'"
-                              :error="liveForm.error"
-                              :remaining-seconds="formRemainingSeconds"
-                              @submit="onFormSubmit"
-                              @cancel="onFormCancel"
-                            />
-                          </div>
-                        </template>
-                      </div>
-                    </template>
-                  </template>
+              <!-- R-154 #13+14（用户直裁「彻底拆除」）：组壳退役 —— 每段恒一张卡。
+                   卡头折叠单行 = 工具名 + kind tag + 状态 tag（折叠态即可辨识工具与进展）；
+                   点击卡头展开/收起 args/result/错误位（v-show：DOM 恒在，testid/可见性稳定）；
+                   requiresAction 审批卡强制展开（卡头禁点，resolveBlockExpanded 兜底）。 -->
+              <template v-for="part in block.parts" :key="part.kind === 'tool' ? part.toolCallId : part.kind + '-' + part.seg">
+                <!-- 思考链（A6'）：受控折叠块，口径不变（默认折叠；展开态存 store，DOM 重建不丢） -->
+                <div v-if="part.kind === 'reasoning' && part.text" class="mb-1.5 text-xs text-[#909399]">
+                  <button
+                    type="button"
+                    class="cursor-pointer"
+                    :data-testid="'reasoning-toggle-' + block.id"
+                    @click="toggleBlock(block)"
+                  >
+                    思考过程 {{ isBlockExpanded(block) ? '▾' : '▸' }}
+                  </button>
+                  <div v-show="isBlockExpanded(block)" class="mt-1 px-2 py-1.5 bg-[#fafafa] border-l-2 border-solid border-[#dcdfe6] whitespace-pre-wrap max-h-40 overflow-y-auto" :data-testid="'reasoning-body-' + block.id">{{ part.text }}</div>
                 </div>
-              </div>
-
-              <!-- bare 组（D7）：单成员组不套壳，直渲成员（工具卡 / 思考链受控折叠块） -->
-              <template v-else>
-                <template v-for="part in block.parts" :key="part.kind === 'tool' ? part.toolCallId : part.kind + '-' + part.seg">
-                  <!-- 思考链（A6'）：原生 <details> 改受控折叠块 —— 展开态读 store
-                       （expandedBlocks[id] ?? defaultExpanded），DOM 重建不丢（原 E6/R-140①-6）；
-                       D-C8：reasoning 无状态概念，默认折叠；用户手动展开后永不自动收起（D6②） -->
-                  <div v-if="part.kind === 'reasoning' && part.text" class="mb-1.5 text-xs text-[#909399]">
+                <template v-else-if="part.kind === 'tool'">
+                  <div
+                    class="mt-1.5 border border-solid border-[#dcdfe6] rounded-md bg-white"
+                    :data-testid="part.requiresAction ? 'pending-card-' + part.toolCallId : 'tool-card-' + part.toolCallId"
+                  >
                     <button
                       type="button"
-                      class="cursor-pointer"
-                      :data-testid="'reasoning-toggle-' + block.id"
+                      class="w-full flex items-center gap-1.5 p-2 text-left font-semibold text-[13px] flex-wrap"
+                      :class="part.requiresAction ? 'cursor-default' : 'cursor-pointer'"
+                      :data-testid="'block-toggle-' + block.id"
+                      :disabled="part.requiresAction"
                       @click="toggleBlock(block)"
                     >
-                      思考过程 {{ isBlockExpanded(block) ? '▾' : '▸' }}
+                      <el-icon color="#409EFF"><Operation /></el-icon>
+                      <span>{{ toolLabel(part.name) }}</span>
+                      <el-tag v-if="part.kind2 === 'FRONTEND'" size="small" effect="plain">前端工具</el-tag>
+                      <el-tag v-else-if="part.kind2 === 'CONFIRM'" size="small" type="warning" effect="plain">确认门</el-tag>
+                      <el-tag :size="'small'" :type="toolTagType(part.status)" :effect="part.status === 'running' ? 'dark' : 'light'">
+                        {{ toolStatusLabel(part.status) }}
+                      </el-tag>
                     </button>
-                    <div v-show="isBlockExpanded(block)" class="mt-1 px-2 py-1.5 bg-[#fafafa] border-l-2 border-solid border-[#dcdfe6] whitespace-pre-wrap max-h-40 overflow-y-auto" :data-testid="'reasoning-body-' + block.id">{{ part.text }}</div>
-                  </div>
-                  <template v-else-if="part.kind === 'tool'">
-                    <div
-                      class="mt-1.5 border border-solid border-[#dcdfe6] rounded-md p-2 bg-white"
-                      :data-testid="part.requiresAction ? 'pending-card-' + part.toolCallId : undefined"
-                    >
-                      <div class="flex items-center gap-1.5 font-semibold text-[13px] flex-wrap">
-                        <el-icon color="#409EFF"><Operation /></el-icon>
-                        <span>{{ toolLabel(part.name) }}</span>
-                        <el-tag v-if="part.kind2 === 'FRONTEND'" size="small" effect="plain">前端工具</el-tag>
-                        <el-tag v-else-if="part.kind2 === 'CONFIRM'" size="small" type="warning" effect="plain">确认门</el-tag>
-                        <el-tag :size="'small'" :type="toolTagType(part.status)" :effect="part.status === 'running' ? 'dark' : 'light'">
-                          {{ toolStatusLabel(part.status) }}
-                        </el-tag>
-                      </div>
-                      <div v-if="part.args" class="mt-1.5 text-xs text-[#909399] break-all">
+                    <div v-show="isBlockExpanded(block)" class="px-2 pb-2 pt-0 flex flex-col gap-1.5" :data-testid="'block-body-' + block.id">
+                      <div v-if="part.args" class="text-xs text-[#909399] break-all">
                         <code>{{ part.args }}</code>
                       </div>
-                      <div v-if="part.result" class="mt-1.5 px-2 py-1 text-xs text-[#606266] bg-[#fafafa] rounded max-h-24 overflow-y-auto whitespace-pre-wrap">{{ part.result }}</div>
-                      <div v-if="part.reason" class="mt-1 text-xs text-[#f56c6c]">原因：{{ part.reason }}</div>
+                      <!-- R-154 #2：结果被帧预算截断（FrameSizeLimiter）⇒ 灰底区带「已截断」角标
+                           （hover 见 truncatedReason）+ Show more 展开入口（本地去帽 max-h，组件局部态） -->
+                      <div
+                        v-if="part.result"
+                        class="px-2 py-1 text-xs text-[#606266] bg-[#fafafa] rounded whitespace-pre-wrap"
+                        :class="isResultExpanded(part.toolCallId) ? '' : 'max-h-24 overflow-y-auto'"
+                      >
+                        {{ part.result }}<span
+                          v-if="part.truncated"
+                          class="inline-block ml-1 px-1 rounded text-[10px] leading-4 bg-[#e6a23c] text-white align-middle"
+                          :title="part.truncatedReason ?? '结果被截断'"
+                          data-testid="truncated-badge"
+                        >已截断</span>
+                      </div>
+                      <button
+                        v-if="part.truncated"
+                        type="button"
+                        class="self-start text-xs text-[#409eff]"
+                        :data-testid="'show-more-' + part.toolCallId"
+                        @click="toggleResultExpanded(part.toolCallId)"
+                      >
+                        {{ isResultExpanded(part.toolCallId) ? '收起' : '显示更多' }}
+                      </button>
+                      <!-- R-154 #6：卡内错误位（图标 + 红底 + 文案）——错误就地呈现，不再全堆顶部 Alert -->
+                      <div v-if="part.reason" class="flex items-start gap-1 px-2 py-1 text-xs text-[#f56c6c] bg-[#fef0f0] rounded" data-testid="tool-error">
+                        <el-icon class="mt-px shrink-0" color="#f56c6c"><WarningFilled /></el-icon>
+                        <span>原因：{{ part.reason }}</span>
+                      </div>
 
+                      <!-- 挂起子块（段判据，A1'③）：CONFIRM 待决 → 确认块；GF → FormRenderer（宿主条件
+                           逐字保留，D10）；其余通用 FRONTEND 待执行/已决态 → 无子块（消 A9'⑤ 空壳卡）。
+                           D-C7：旧投影挂起卡的「会话已失效」tag（原 :206）与 GF 非宿主 v-else 三 tag
+                           （原 :251-253）/ activeForm 错误位（原 :254-257）随合并整列删除——语义由段状态
+                           tag（toolStatusLabel，expired→「会话已失效」）与段 reason 位（A4'，D11）承接。 -->
                       <template v-if="part.requiresAction">
                         <template v-if="part.kind2 === 'CONFIRM' && part.status === 'pending'">
                           <div class="mt-1.5 flex items-center gap-2 text-xs">
@@ -317,6 +294,9 @@
                         </template>
 
                         <div v-else-if="part.kind2 === 'FRONTEND' && part.name === GENERATIVE_FORM_TOOL" class="mt-2">
+                          <!-- GF-B：生成式表单挂起 —— 渲染 FormRenderer 等用户填写（同 toolCallId 可重发/取消） -->
+                          <!-- T2a-D#3（D10 不扩判据）：同 toolCallId 至多一个 FormRenderer —— 只渲染在宿主
+                               消息（最后一条持该挂起调用的消息）上；非宿主消息不再出独立 tag 列（D-C7 已删） -->
                           <FormRenderer
                             v-if="liveForm && liveForm.toolCallId === part.toolCallId && m.id === formHostMessageId"
                             :key="liveForm.toolCallId"
@@ -330,17 +310,19 @@
                         </div>
                       </template>
                     </div>
-                  </template>
+                  </div>
                 </template>
               </template>
             </template>
           </template>
 
-          <!-- 逐条复制（苞 B 项 2；N10：判据改 parts —— 渲染真值已是 parts，不得再留 v-if="m.content"
-               造成"有段渲染但按钮不出现"的发散）。复制内容仍取 m.content（text 段 join 派生，同源），
-               hover 或键盘聚焦时显现；正文为空（流式空气泡）不出按钮。"已复制"反馈走组件局部状态
-               （下面的 copyState），不占用单槽位的 ai.notice。 -->
+          <!-- 消息级操作行（苞 B 项 2 → R-154 #9 扩为 复制 + 编辑）：判据 parts（N10）——
+               渲染真值已是 parts，不得再留 v-if="m.content" 造成"有段渲染但按钮不出现"的发散。
+               复制内容仍取 m.content（text 段 join 派生，同源）；编辑 = 回填输入框（不截断会话、
+               不分支、不改 store 消息数组）；时间戳（R-154 #17）居左，无戳不渲染。
+               hover 或键盘聚焦时显现；"已复制"反馈走组件局部状态（copyState），不占 ai.notice。 -->
           <div v-if="m.parts.some((part) => part.kind === 'text' && part.text)" class="mt-1 flex items-center justify-end gap-1.5">
+            <span v-if="formatTimestamp(m)" class="mr-auto text-xs text-[#c0c4cc]" data-testid="msg-timestamp">{{ formatTimestamp(m) }}</span>
             <span
               v-if="copyState && copyState.id === m.id"
               :data-testid="'copy-hint-' + m.id"
@@ -349,6 +331,17 @@
             >
               {{ copyState.ok ? '已复制' : '复制失败，请手动选中文本复制' }}
             </span>
+            <el-button
+              link
+              size="small"
+              class="opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity"
+              :data-testid="'edit-msg-' + m.id"
+              title="编辑该条消息（回填到输入框）"
+              aria-label="编辑该条消息（回填到输入框）"
+              @click="editMessage(m)"
+            >
+              编辑
+            </el-button>
             <el-button
               link
               size="small"
@@ -363,6 +356,18 @@
           </div>
         </div>
       </div>
+      </div>
+
+      <!-- R-154 #5：上滑暂停跟随后浮出的「回到底部」——点击恢复跟随并滚底 -->
+      <button
+        v-if="showBackToBottom"
+        type="button"
+        data-testid="back-to-bottom"
+        class="absolute bottom-3 left-1/2 -translate-x-1/2 px-3 py-1.5 text-xs rounded-full bg-white border border-solid border-[#dcdfe6] shadow-md text-[#606266] hover:text-[#409eff]"
+        @click="backToBottom"
+      >
+        回到底部
+      </button>
     </div>
 
     <!-- 输入区（蓝本 AiPanel.vue:91-109） -->
@@ -424,11 +429,12 @@
  * 项 2 的 hover 显现用 Tailwind 默认 core plugin 的 `group` / `group-hover`（本仓首用）。
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { ArrowRight, ChatDotRound, Operation, Promotion } from '@element-plus/icons-vue'
+import { ArrowRight, ChatDotRound, Operation, Promotion, WarningFilled } from '@element-plus/icons-vue'
+import dayjs from 'dayjs'
 import { useAiStore, foldDeadline } from '@/stores/ai'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { formatCountdown } from '@/utils/format'
-import { blockHeader, groupParts, resolveBlockExpanded, type Block } from '@/utils/blocks'
+import { groupParts, resolveBlockExpanded, type Block } from '@/utils/blocks'
 import { createPollingController, type PollingController } from '@/utils/polling'
 import FormRenderer from '@/components/AiPanel/FormRenderer.vue'
 import { GENERATIVE_FORM_TOOL, type ChatMessage, type PendingToolCall, type ToolRunStatus } from '@/types/ai'
@@ -440,6 +446,52 @@ const inputText = ref('')
 const rejectReason = ref('')
 const deciding = ref(false)
 const msgWrapRef = ref<HTMLElement | null>(null)
+
+/**
+ * R-154 #5：钉底跟随的「用户上滑即暂停」策略。
+ * followBottom = 自动钉底开关：容器 @scroll 离底判定 —— 用户上滑（离底超过阈值）置 false
+ * 暂停自动跟随，回到底部附近自动恢复；唯一点「回到底部」浮钮 = 强制恢复并滚底。
+ * 渲染真值仍为 parts（与自动滚动指纹 watch 同源），禁读 content。
+ */
+const followBottom = ref(true)
+/** 离底阈值（px）：scrollHeight − scrollTop − clientHeight 小于它即视为贴底。 */
+const BOTTOM_THRESHOLD_PX = 32
+
+function onMsgScroll(): void {
+  const wrap = msgWrapRef.value
+  if (!wrap) {
+    return
+  }
+  followBottom.value = wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight < BOTTOM_THRESHOLD_PX
+}
+
+const showBackToBottom = computed(() => !followBottom.value && ai.messages.length > 0)
+
+/** 「回到底部」浮钮：恢复跟随 + 强制滚底（不论文本是否在增量）。 */
+function backToBottom(): void {
+  followBottom.value = true
+  scrollBottom(true)
+}
+
+/**
+ * R-154 #2：截断结果的「显示更多」本地展开态（组件局部、按 toolCallId 记账；
+ * 只去帽 max-h 让框内全文可见 —— 帧内即截断后全文，无二次取数路径）。
+ */
+const expandedResults = ref<Set<string>>(new Set())
+
+function isResultExpanded(toolCallId: string): boolean {
+  return expandedResults.value.has(toolCallId)
+}
+
+function toggleResultExpanded(toolCallId: string): void {
+  const nextSet = new Set(expandedResults.value)
+  if (nextSet.has(toolCallId)) {
+    nextSet.delete(toolCallId)
+  } else {
+    nextSet.add(toolCallId)
+  }
+  expandedResults.value = nextSet
+}
 
 /**
  * 逐条复制的反馈（苞 B 项 2）：**组件局部状态**，生命周期 2s。
@@ -492,6 +544,13 @@ const TOOL_LABELS: Record<string, string> = {
 }
 
 const shortSessionId = computed(() => ai.sessionId.slice(0, 8))
+
+/** R-154 #12：空态静态建议提示词（点击回填输入框；runtime 驱动建议词登记挂账，本批不做）。 */
+const SUGGESTIONS = ['列出全部配置定义', '查看当前工作区状态', '预估导出数据行数', '启动导出作业']
+
+function useSuggestion(text: string): void {
+  inputText.value = text
+}
 
 const healthLabel = computed(() => {
   if (ai.health === null && ai.healthError === null) {
@@ -668,13 +727,39 @@ function probe(): void {
   void ai.probeHealth()
 }
 
-function scrollBottom(): void {
+function scrollBottom(force = false): void {
+  // R-154 #5：自动钉底须尊重跟随开关 —— 用户上滑暂停后，帧增量的滚动指纹不得把视图拽回底部
+  if (!force && !followBottom.value) {
+    return
+  }
   void nextTick(() => {
     const wrap = msgWrapRef.value
     if (wrap) {
       wrap.scrollTop = wrap.scrollHeight
     }
   })
+}
+
+/**
+ * R-154 #17：消息时间戳渲染（仅展示、可选）。历史路 = 后端条目 metadata.timestamp
+ * （epoch 毫秒或 ISO 字符串，原样透传）；实时路 = message_start 帧 atMs。
+ * 无法解析 / 缺失 ⇒ 空串（操作行不渲染时间位）。
+ */
+function formatTimestamp(message: ChatMessage): string {
+  const ts = message.timestamp
+  if (ts === undefined || ts === null) {
+    return ''
+  }
+  const parsed = typeof ts === 'number' ? dayjs(ts) : dayjs(String(ts))
+  return parsed.isValid() ? parsed.format('MM-DD HH:mm') : ''
+}
+
+/**
+ * R-154 #9：编辑 = 把该条消息正文回填输入框 —— **只回填**：不截断会话、不分支、
+ * 不改 store 消息数组；后续发送走既有 send 守卫（空输入静默 / busy 保草稿）。
+ */
+function editMessage(m: ChatMessage): void {
+  inputText.value = m.content
 }
 
 async function send(): Promise<void> {

@@ -152,6 +152,12 @@ export interface SseToolResultFrame extends SseFrameBase {
   /** DC-14 T5：结果铸为消息后的消息 id（`tool-<toolCallId>`，重放/重挂不变） */
   messageId?: string
   result?: string | null
+  /**
+   * R-154 #2：单帧 64KB 字段级截断标记（后端 FrameSizeLimiter 的 TRUNCATED_FIELD /
+   * TRUNCATED_REASON_FIELD）——result 被帧预算截断时挂 true 与原因；缺省 = 未截断（全文）。
+   */
+  truncated?: boolean
+  truncatedReason?: string | null
 }
 
 /** HITL 确认请求（挂起等待口径）。 */

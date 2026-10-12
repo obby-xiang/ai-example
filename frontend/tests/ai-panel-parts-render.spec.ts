@@ -279,7 +279,7 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
  * 批4④ A5'/D4/D6/D-C6：块分派渲染与展开态三态（TS-2）。
  */
 describe('批4④：折叠块渲染与展开态三态承诺', () => {
-  it('块分派形态：正文 → 3 个连续工具 → 正文 ⇒ 一个「3 段工具活动组」，正文永不进组', async () => {
+  it('R-154 单卡形态：正文 → 3 个连续工具 → 正文 ⇒ 三张独立工具卡（组壳已拆），正文永不进卡', async () => {
     const wrapper = await mountPanel([
       buildMessage([
         { kind: 'text', seg: 0, text: '前言', streaming: false },
@@ -289,18 +289,26 @@ describe('批4④：折叠块渲染与展开态三态承诺', () => {
         { kind: 'text', seg: 4, text: '后语', streaming: false }
       ])
     ])
-    const groups = wrapper.findAll('[data-activity-group]')
-    expect(groups).toHaveLength(1)
-    expect(groups[0].text()).toContain('工具活动 · 3 段')
-    // 正文永不进组：组内不含前言/后语文案
-    expect(groups[0].text()).not.toContain('前言')
-    expect(groups[0].text()).not.toContain('后语')
-    // 全部已终态 ⇒ 组默认折叠（v-show 隐藏）
-    expect(groups[0].find('[data-testid="block-toggle-a-1:a"]').exists()).toBe(true)
+    // 组壳形态彻底拆除：data-activity-group 零命中；一卡一 testid
+    expect(wrapper.findAll('[data-activity-group]')).toHaveLength(0)
+    const cards = wrapper.findAll('[data-testid^="tool-card-"]')
+    expect(cards).toHaveLength(3)
+    expect(cards.map((c) => c.attributes('data-testid'))).toEqual(['tool-card-a', 'tool-card-b', 'tool-card-c'])
+    // 卡头折叠单行 = 工具名 + 状态 tag（「已成功」在折叠行可见）
+    expect(cards[0].text()).toContain('列出任务')
+    expect(cards[0].text()).toContain('已成功')
+    // 正文永不进卡：卡内不含前言/后语文案；段序保持（a 卡在两段正文之间）
+    expect(cards[0].text()).not.toContain('前言')
+    expect(cards[0].text()).not.toContain('后语')
+    const rendered = wrapper.text()
+    expect(rendered.indexOf('后语')).toBeGreaterThan(rendered.indexOf('列出任务'))
+    // 全部已终态 ⇒ 每卡默认折叠（v-show 隐藏）
+    expect(wrapper.find('[data-testid="block-toggle-a-1:a"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="block-body-a-1:a"]').attributes('style')).toContain('display: none')
     wrapper.unmount()
   })
 
-  it('D6②：用户手动收起后，后续帧（成员状态变化）不得使其自动打开', async () => {
+  it('D6②改判（R-154）：手动展开的卡，后续帧使其 defaultExpanded 转折叠（running→succeeded）也不得自动收起', async () => {
     const store = useAiStore()
     const message = buildMessage([
       { kind: 'tool', seg: 0, toolCallId: 'run1', name: 'list_tasks', kind2: 'BACKEND', status: 'running', requiresAction: false },
@@ -312,17 +320,17 @@ describe('批4④：折叠块渲染与展开态三态承诺', () => {
     const wrapper = mount(AiPanel, { global: { stubs } })
     await wrapper.vm.$nextTick()
 
-    // 先手动收起（进行中组默认展开）
+    // R-154：running 卡默认折叠 —— 手动展开写入显式态
     const toggle = wrapper.find('[data-testid="block-toggle-a-1:run1"]')
     await toggle.trigger('click')
-    expect(store.expandedBlocks['a-1:run1']).toBe(false)
-    expect(wrapper.find('[data-testid="block-body-a-1:run1"]').attributes('style')).toContain('display: none')
-    // 帧到达：running → succeeded（未触碰展开态，手动收起必须保持）
+    expect(store.expandedBlocks['a-1:run1']).toBe(true)
+    expect(wrapper.find('[data-testid="block-body-a-1:run1"]').attributes('style') ?? '').not.toContain('display: none')
+    // 帧到达：running → succeeded（未触碰卡将回落默认折叠；本卡手动展开必须保持）
     const segment = message.parts.find((p) => p.kind === 'tool' && p.toolCallId === 'run1') as ToolPart
     const updated: MessagePart = { ...segment, status: 'succeeded' }
     message.parts.splice(message.parts.indexOf(segment), 1, updated)
     await wrapper.vm.$nextTick()
-    expect(wrapper.find('[data-testid="block-body-a-1:run1"]').attributes('style')).toContain('display: none')
+    expect(wrapper.find('[data-testid="block-body-a-1:run1"]').attributes('style') ?? '').not.toContain('display: none')
     wrapper.unmount()
   })
 
@@ -343,7 +351,7 @@ describe('批4④：折叠块渲染与展开态三态承诺', () => {
     expect(store.expandedBlocks['a-1:done1']).toBe(true)
     const group = wrapper.find('[data-testid="block-body-a-1:done1"]')
     expect(group.attributes('style') ?? '').not.toContain('display: none')
-    // 再来一个成员加入组（帧到达）——组保持展开
+    // 帧到达：新工具段追加 —— R-154 单卡化下它是第三张独立卡，done1 卡保持展开
     message.parts.push({ kind: 'tool', seg: 2, toolCallId: 'done3', name: 'list_config_defs', kind2: 'BACKEND', status: 'succeeded', requiresAction: false })
     await wrapper.vm.$nextTick()
     expect(wrapper.find('[data-testid="block-body-a-1:done1"]').attributes('style') ?? '').not.toContain('display: none')
@@ -373,7 +381,7 @@ describe('批4④：折叠块渲染与展开态三态承诺', () => {
     wrapper2.unmount()
   })
 
-  it('D-C1：组内成员段 reason 非空 ⇒ 组默认展开（取消回灌失败文案在折叠组内恒可见）', async () => {
+  it('R-154 改判：段 reason 非空的卡也默认折叠（D-C1 档退役）；展开后 reason 文案可见（v-show DOM 恒在）', async () => {
     const wrapper = await mountPanel([
       buildMessage([
         { kind: 'tool', seg: 0, toolCallId: 'x1', name: 'list_tasks', kind2: 'BACKEND', status: 'succeeded', requiresAction: false },
@@ -381,11 +389,15 @@ describe('批4④：折叠块渲染与展开态三态承诺', () => {
         { kind: 'tool', seg: 2, toolCallId: 'x2', name: 'read_job', kind2: 'BACKEND', status: 'succeeded', requiresAction: false }
       ])
     ])
-    const group = wrapper.find('[data-activity-group]')
-    expect(group.exists()).toBe(true)
-    // 默认展开（非 display:none）⇒ reason 文案在页面上可见
-    expect(wrapper.find('[data-testid="block-body-a-1:x1"]').attributes('style') ?? '').not.toContain('display: none')
+    // R-154：reason 非空不再是默认展开判据 —— 三张卡各自独立、均默认折叠
+    expect(wrapper.findAll('[data-testid^="tool-card-"]')).toHaveLength(3)
+    expect(wrapper.find('[data-testid="block-body-a-1:g1"]').attributes('style')).toContain('display: none')
+    // 错误位（R-154 #6）DOM 恒在：文案可见性经展开达成，text() 含隐藏文本
     expect(wrapper.text()).toContain('取消回灌未送达（网络异常），后端将在超时后自动收尾')
+    // 点击卡头展开 ⇒ reason 错误位露出（卡内错误态：图标 + 红底 + 文案）
+    await wrapper.find('[data-testid="block-toggle-a-1:g1"]').trigger('click')
+    expect(wrapper.find('[data-testid="block-body-a-1:g1"]').attributes('style') ?? '').not.toContain('display: none')
+    expect(wrapper.find('[data-testid="tool-error"]').exists()).toBe(true)
     wrapper.unmount()
   })
 
@@ -495,5 +507,180 @@ describe('批3③b：一卡全生命周期 —— 重投 / 新宿主 / 历史整
     const segments = store.messages.flatMap((m) => m.parts.filter((p) => p.kind === 'tool' && p.toolCallId === 'h1'))
     expect(segments).toHaveLength(1)
     wrapper.unmount()
+  })
+})
+
+/**
+ * R-154 前端面新增（归因：前端面施工方 K2.8）——九项裁决的组件层锁：
+ *   #2 截断角标 + Show more；#5 上滑暂停跟随 + 回到底部浮钮；#7 生成中标识；
+ *   #9 编辑回填；#12 空态建议词；#17 时间戳渲染 + 历史映射透传。
+ */
+describe('R-154：截断角标 / 跟随暂停 / 生成中 / 编辑回填 / 建议词 / 时间戳', () => {
+  /** 可写 el-input 桩（回填类断言要观测 v-model 值）；el-empty 显式渲 description 槽（建议词挂在其中）。 */
+  const stubsWithInput = {
+    ...stubs,
+    'el-input': {
+      props: ['modelValue'],
+      template: '<textarea class="stub-input" :value="modelValue" @input="$emit(\'update:modelValue\', $event.target.value)" />'
+    },
+    'el-empty': { template: '<div class="stub-empty"><slot name="image" /><slot name="description" /></div>' }
+  }
+
+  async function mountPanelWith(messages: ChatMessage[]): Promise<ReturnType<typeof mount>> {
+    const store = useAiStore()
+    store.messages = messages
+    store.historyLoaded = true
+    const { default: AiPanel } = await import('@/components/AiPanel/AiPanel.vue')
+    const wrapper = mount(AiPanel, { global: { stubs: stubsWithInput } })
+    await wrapper.vm.$nextTick()
+    return wrapper
+  }
+
+  it('#2：工具段 truncated ⇒ 「已截断」角标（hover 带原因）+ Show more 展开/收起入口', async () => {
+    const wrapper = await mountPanel([
+      buildMessage([
+        { kind: 'tool', seg: 0, toolCallId: 'c1', name: 'get_row_count', kind2: 'BACKEND', status: 'succeeded', args: '{}', result: '前 64KB 内容…', truncated: true, truncatedReason: '单帧 64KB 预算超限，结果字段被截断', requiresAction: false }
+      ])
+    ])
+    const badge = wrapper.find('[data-testid="truncated-badge"]')
+    expect(badge.exists()).toBe(true)
+    expect(badge.text()).toContain('已截断')
+    expect(badge.attributes('title')).toContain('单帧 64KB 预算超限')
+    // Show more 入口在卡内（折叠态随卡体 v-show 隐藏但 DOM 恒在）
+    const showMore = wrapper.find('[data-testid="show-more-c1"]')
+    expect(showMore.exists()).toBe(true)
+    expect(showMore.text()).toBe('显示更多')
+    // 展开卡 → 点 Show more → 文案切「收起」
+    await wrapper.find('[data-testid="block-toggle-a-1:c1"]').trigger('click')
+    await showMore.trigger('click')
+    expect(wrapper.find('[data-testid="show-more-c1"]').text()).toBe('收起')
+    await wrapper.find('[data-testid="show-more-c1"]').trigger('click')
+    expect(wrapper.find('[data-testid="show-more-c1"]').text()).toBe('显示更多')
+    wrapper.unmount()
+  })
+
+  it('#2 负例：未截断段不出角标与展开入口', async () => {
+    const wrapper = await mountPanel([
+      buildMessage([
+        { kind: 'tool', seg: 0, toolCallId: 'c2', name: 'get_row_count', kind2: 'BACKEND', status: 'succeeded', args: '{}', result: '完整结果', requiresAction: false }
+      ])
+    ])
+    expect(wrapper.find('[data-testid="truncated-badge"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="show-more-c2"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('#5：上滑（离底）暂停跟随出浮钮，点「回到底部」恢复跟随并滚底', async () => {
+    const wrapper = await mountPanel([
+      buildMessage([{ kind: 'text', seg: 0, text: '长文', streaming: false }])
+    ])
+    const wrap = wrapper.find('.overflow-y-auto').element as HTMLElement
+    Object.defineProperty(wrap, 'scrollHeight', { value: 1000, configurable: true })
+    Object.defineProperty(wrap, 'clientHeight', { value: 500, configurable: true })
+    wrap.scrollTop = 100 // 离底 500px > 阈值
+    wrap.dispatchEvent(new Event('scroll'))
+    await wrapper.vm.$nextTick()
+
+    const backBtn = wrapper.find('[data-testid="back-to-bottom"]')
+    expect(backBtn.exists()).toBe(true)
+    expect(backBtn.text()).toContain('回到底部')
+
+    await backBtn.trigger('click')
+    await wrapper.vm.$nextTick()
+    expect(wrap.scrollTop).toBe(1000) // 已滚底
+    expect(wrapper.find('[data-testid="back-to-bottom"]').exists()).toBe(false) // 跟随恢复，浮钮消失
+    wrapper.unmount()
+  })
+
+  it('#5 负例：贴底滚动不出浮钮', async () => {
+    const wrapper = await mountPanel([
+      buildMessage([{ kind: 'text', seg: 0, text: '长文', streaming: false }])
+    ])
+    const wrap = wrapper.find('.overflow-y-auto').element as HTMLElement
+    Object.defineProperty(wrap, 'scrollHeight', { value: 1000, configurable: true })
+    Object.defineProperty(wrap, 'clientHeight', { value: 500, configurable: true })
+    wrap.scrollTop = 980 // 离底 20px < 阈值
+    wrap.dispatchEvent(new Event('scroll'))
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-testid="back-to-bottom"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('#7：流式「生成中」标识 —— 正文产出后仍在（直至 streaming=false）', async () => {
+    const speaking = buildMessage([{ kind: 'text', seg: 0, text: '正在说', streaming: true }], null, true)
+    speaking.id = 'a-speaking'
+    const settled = buildMessage([{ kind: 'text', seg: 0, text: '说完了', streaming: false }], null, false)
+    settled.id = 'a-settled'
+
+    const wrapper = await mountPanel([speaking, settled])
+    const tags = wrapper.findAll('[data-testid="streaming-tag"]')
+    expect(tags).toHaveLength(1)
+    expect(tags[0].text()).toContain('生成中')
+    wrapper.unmount()
+  })
+
+  it('#9：编辑 = 回填输入框（消息正文入输入区，不改消息数组、不截断会话）', async () => {
+    const message = buildMessage([{ kind: 'text', seg: 0, text: '用户原话', streaming: false }])
+    const wrapper = await mountPanelWith([message])
+    await wrapper.find('[data-testid="edit-msg-a-1"]').trigger('click')
+    await wrapper.vm.$nextTick()
+    expect((wrapper.find('.stub-input').element as HTMLTextAreaElement).value).toBe('用户原话')
+    // 边界：store 消息数组不被编辑动作改动
+    expect(message.parts).toHaveLength(1)
+    expect(message.content).toBe('用户原话')
+    wrapper.unmount()
+  })
+
+  it('#12：空态出静态建议词列表，点击回填输入框', async () => {
+    // 空态挂载会触发 onMounted 的 loadHistory（messages 为空）：桩掉后端历史，避免未处理拒绝
+    const store = useAiStore()
+    api.history.mockResolvedValue({ sessionId: store.sessionId, count: 0, messages: [] })
+    api.runsCurrent.mockResolvedValue({ found: false, runId: null, snapshotStatus: null, pendingEntries: [], unresolvedExternal: [], archiveMaxSeq: 0 })
+    const wrapper = await mountPanelWith([])
+    const chips = wrapper.findAll('[data-testid="suggestion-chip"]')
+    expect(chips.length).toBeGreaterThanOrEqual(4)
+    expect(chips[0].text()).toContain('列出全部配置定义')
+    await chips[0].trigger('click')
+    await wrapper.vm.$nextTick()
+    expect((wrapper.find('.stub-input').element as HTMLTextAreaElement).value).toBe('列出全部配置定义')
+    wrapper.unmount()
+  })
+
+  it('#17：时间戳渲染（epoch 毫秒与 ISO 字符串均可解析；缺失/坏值不渲染）', async () => {
+    const numeric = buildMessage([{ kind: 'text', seg: 0, text: '数字戳', streaming: false }])
+    numeric.id = 'a-numeric'
+    numeric.timestamp = 1_700_000_000_000
+    const iso = buildMessage([{ kind: 'text', seg: 0, text: 'ISO 戳', streaming: false }])
+    iso.id = 'a-iso'
+    iso.timestamp = '2026-01-01T00:00:00Z'
+    const none = buildMessage([{ kind: 'text', seg: 0, text: '无戳', streaming: false }])
+    none.id = 'a-none'
+    const broken = buildMessage([{ kind: 'text', seg: 0, text: '坏戳', streaming: false }])
+    broken.id = 'a-broken'
+    broken.timestamp = 'not-a-date'
+
+    const wrapper = await mountPanel([numeric, iso, none, broken])
+    const stamps = wrapper.findAll('[data-testid="msg-timestamp"]')
+    expect(stamps).toHaveLength(2)
+    expect(stamps[0].text()).toMatch(/^\d{2}-\d{2} \d{2}:\d{2}$/)
+    expect(stamps[1].text()).toMatch(/^\d{2}-\d{2} \d{2}:\d{2}$/)
+    wrapper.unmount()
+  })
+
+  it('#17 历史路：loadHistory 整替映射透传后端条目 timestamp', async () => {
+    const store = useAiStore()
+    api.history.mockResolvedValue({
+      sessionId: store.sessionId,
+      count: 2,
+      messages: [
+        { type: 'USER', text: '历史提问', timestamp: 1_700_000_000_000 },
+        { type: 'ASSISTANT', text: '历史回答', timestamp: '2026-01-01T00:00:00Z' }
+      ]
+    })
+    api.runsCurrent.mockResolvedValue({ found: false, runId: null, snapshotStatus: null, pendingEntries: [], unresolvedExternal: [], archiveMaxSeq: 0 })
+
+    await store.loadHistory()
+    expect(store.messages[0].timestamp).toBe(1_700_000_000_000)
+    expect(store.messages[1].timestamp).toBe('2026-01-01T00:00:00Z')
   })
 })

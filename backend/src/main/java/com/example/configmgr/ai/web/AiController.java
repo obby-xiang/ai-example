@@ -508,35 +508,54 @@ public class AiController {
 	/**
 	 * 记忆窗口原文（R-144 起：带 {@code toolCalls} 的 ASSISTANT 条目增透 {@code toolCallStates}
 	 * 段级状态映射 —— 旧载荷可缺该字段；缺字段 ⇒ 前端占位兜底，后端只保证「缺字段语义」）。
+	 *
+	 * <p>R-154 #16 分页：新增 {@code offset}/{@code limit} 可选参数，语义 = <b>记忆窗口内切片</b>
+	 * （窗口上限 {@code memory.maxMessages=40}，非无限历史）。默认（不传参）保持全量语义
+	 * （{@code count}=总条数、{@code hasMore}=false），不误伤 mirror/reattach 全量路径；
+	 * {@code messages} 按窗口序（旧→新）切片，{@code total}=窗口总条数、{@code hasMore}=
+	 * 切片之前还有更早条目（offset 越界则空片、hasMore=false）。既有字段 {@code sessionId}/{@code count}/{@code messages} 形状不变。
 	 */
 	@GetMapping("/history/{sessionId}")
-	public ApiResponse<Map<String, Object>> history(@PathVariable String sessionId) {
+	public ApiResponse<Map<String, Object>> history(@PathVariable String sessionId,
+			@RequestParam(name = "offset", required = false) Integer offset,
+			@RequestParam(name = "limit", required = false) Integer limit) {
 		List<Map<String, Object>> items = new ArrayList<>();
 		for (Message message : this.chatMemory.get(sessionId)) {
-			Map<String, Object> item = new LinkedHashMap<>();
-			item.put("type", message.getMessageType().name());
-			item.put("text", message.getText());
-			if (message instanceof AssistantMessage assistant && assistant.hasToolCalls()) {
-				item.put("toolCalls", assistant.getToolCalls());
-				Object toolCallStates = assistant.getMetadata().get(ResilientChatService.TOOL_CALL_STATES_KEY);
-				if (toolCallStates != null) {
-					item.put("toolCallStates", toolCallStates);
-				}
-			}
-			if (message instanceof ToolResponseMessage toolResponse) {
-				item.put("toolResponses", toolResponse.getResponses());
-			}
-			Object timestamp = message.getMetadata().get(MessageJsonCodec.FIELD_TIMESTAMP);
-			if (timestamp != null) {
-				item.put("timestamp", timestamp);
-			}
-			items.add(item);
+			items.add(toHistoryItem(message));
 		}
+		int total = items.size();
+		int from = Math.min(total, Math.max(0, offset == null ? 0 : offset));
+		int to = limit == null ? total : (int) Math.min((long) total, (long) from + Math.max(0, limit));
+		List<Map<String, Object>> page = new ArrayList<>(items.subList(from, to));
 		Map<String, Object> body = new LinkedHashMap<>();
 		body.put("sessionId", sessionId);
-		body.put("count", items.size());
-		body.put("messages", items);
+		body.put("count", page.size());
+		body.put("messages", page);
+		body.put("total", total);
+		body.put("hasMore", from > 0 && from < total);
 		return ApiResponse.ok(body);
+	}
+
+	/** R-154：把单条 {@link Message} 拼成 history 载荷条目（R-144 携 toolCallStates，纯附加）。 */
+	private Map<String, Object> toHistoryItem(Message message) {
+		Map<String, Object> item = new LinkedHashMap<>();
+		item.put("type", message.getMessageType().name());
+		item.put("text", message.getText());
+		if (message instanceof AssistantMessage assistant && assistant.hasToolCalls()) {
+			item.put("toolCalls", assistant.getToolCalls());
+			Object toolCallStates = assistant.getMetadata().get(ResilientChatService.TOOL_CALL_STATES_KEY);
+			if (toolCallStates != null) {
+				item.put("toolCallStates", toolCallStates);
+			}
+		}
+		if (message instanceof ToolResponseMessage toolResponse) {
+			item.put("toolResponses", toolResponse.getResponses());
+		}
+		Object timestamp = message.getMetadata().get(MessageJsonCodec.FIELD_TIMESTAMP);
+		if (timestamp != null) {
+			item.put("timestamp", timestamp);
+		}
+		return item;
 	}
 
 	/**

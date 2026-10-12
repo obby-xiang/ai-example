@@ -214,6 +214,12 @@ export interface ChatMessage {
   /** 已收到终帧 */
   done: boolean
   /**
+   * R-154 #17：消息时间戳（epoch 毫秒或 ISO 字符串，载荷原样透传）。历史路 = 后端历史条目
+   * metadata 的 timestamp（AiHistoryMessage.timestamp，后端已回传）；实时路 = message_start 帧的
+   * 服务端构造时刻 atMs。仅展示用途，可选、不参与任何判定；不入镜像（历史重载即恢复）。
+   */
+  timestamp?: unknown
+  /**
    * 已应用过的帧序号（`types/sse.ts` 的 `frameSeq`；R2-1 的重复投递幂等记账）。
    *
    * **内部幂等记账，不入镜像**：`writeMirror` 的 `Pick` 不含本字段（刷新后新消息从空集合起算，
@@ -260,6 +266,12 @@ export interface ToolPart extends MessagePartBase {
   reason?: string | null
   /** DC-14 T5：结果铸为消息后的消息 id（`tool-<toolCallId>`） */
   messageId?: string
+  /**
+   * R-154 #2：帧侧截断标记（FrameSizeLimiter 64KB 字段级截断）——true = result 被截断、
+   * truncatedReason 带原因；缺省 = 全文。历史侧 ToolResultLimiter 内嵌文本标记不在本字段范围。
+   */
+  truncated?: boolean
+  truncatedReason?: string | null
   /** 该工具段当前是否在等人工/前端动作（确认门待放行、前端工具待执行） */
   requiresAction: boolean
   /**
@@ -293,6 +305,9 @@ export interface ToolPartPatch {
   result?: string | null
   reason?: string | null
   messageId?: string
+  /** 见 {@link ToolPart.truncated}（R-154 #2 帧侧截断标记，随段持久化） */
+  truncated?: boolean
+  truncatedReason?: string | null
   /** 见 {@link ToolPart.timeoutSeconds}（确认门/前端工具的等待口径，随段持久化） */
   timeoutSeconds?: number
   expiresAt?: number

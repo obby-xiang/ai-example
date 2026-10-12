@@ -462,3 +462,62 @@ describe('handleFrame 集成：seq 幂等 / 乱序兜底 / derive 时机', () =>
     expect(assistant.pendingCall).toBeNull()
   })
 })
+
+/**
+ * R-154 #2 / #17 新增（归因：前端面施工方 K2.8）：
+ *   ⑨ tool_result 帧侧截断标记（FrameSizeLimiter TRUNCATED_FIELD/TRUNCATED_REASON_FIELD）落段；
+ *   ⑩ message_start 帧 atMs → 消息时间戳（实时路；历史路见 ai-panel-parts-render.spec.ts）。
+ */
+describe('R-154 ⑨⑩：截断标记落段 + message_start 时间戳（纯函数层）', () => {
+  it('⑨ tool_result 带 truncated/truncatedReason ⇒ 段原样携带（缺省帧 ⇒ 未截断缺省值）', () => {
+    const message = makeMessage()
+    applyFrameToParts(message, { type: 'tool_start', toolCallId: 'c1', name: 'probe_tool', kind: 'BACKEND', args: '{}' })
+    applyFrameToParts(message, {
+      type: 'tool_result',
+      toolCallId: 'c1',
+      name: 'probe_tool',
+      kind: 'BACKEND',
+      ok: true,
+      executed: true,
+      result: '前 64KB…',
+      truncated: true,
+      truncatedReason: '单帧 64KB 预算超限，结果字段被截断'
+    })
+
+    expect(toolPart(message, 'c1')).toMatchObject({
+      status: 'succeeded',
+      result: '前 64KB…',
+      truncated: true,
+      truncatedReason: '单帧 64KB 预算超限，结果字段被截断'
+    })
+
+    // 缺省帧（旧格式 / 未截断）⇒ 显式 false / null，卡面角标判据稳定
+    const plain = makeMessage()
+    applyFrameToParts(plain, { type: 'tool_start', toolCallId: 'c2', name: 'probe_tool', kind: 'BACKEND', args: '{}' })
+    applyFrameToParts(plain, {
+      type: 'tool_result',
+      toolCallId: 'c2',
+      name: 'probe_tool',
+      kind: 'BACKEND',
+      ok: true,
+      executed: true,
+      result: '全文'
+    })
+    expect(toolPart(plain, 'c2')).toMatchObject({ truncated: false, truncatedReason: null })
+  })
+
+  it('⑩ message_start 帧 atMs ⇒ 消息时间戳（已有值不回填覆盖）', () => {
+    const message = makeMessage()
+    applyFrameToParts(message, { type: 'message_start', messageId: 'm1', kind: 'text', atMs: 1_700_000_000_000 })
+    expect(message.timestamp).toBe(1_700_000_000_000)
+
+    // 后续 message_start（同消息重放 / 第二段）不覆盖既有时间戳
+    applyFrameToParts(message, { type: 'message_start', messageId: 'm1', kind: 'text', atMs: 1_700_000_099_000 })
+    expect(message.timestamp).toBe(1_700_000_000_000)
+
+    // atMs 缺失（旧格式帧）⇒ 时间戳保持 undefined
+    const legacy = makeMessage()
+    applyFrameToParts(legacy, { type: 'message_start', messageId: 'm2', kind: 'text' })
+    expect(legacy.timestamp).toBeUndefined()
+  })
+})
