@@ -574,18 +574,22 @@ describe('施工项3：m-R2 六写点回归锁', () => {
     }
   })
 
-  it('写点⑥ loadHistory 后端历史分支：text 段 + 工具段按序构造（result 按 id 回填、requiresAction=false）', async () => {
+  it('写点⑥ loadHistory 后端历史分支：text 段 + 工具段按序构造（TOOL 双条目 result 按 id 回填、requiresAction=false）', async () => {
     const store = useAiStore()
     const sid = store.sessionId
     api.history.mockResolvedValue({
       sessionId: sid,
-      count: 2,
+      count: 3,
       messages: [
         { type: 'USER', text: '问题' },
         {
           type: 'ASSISTANT',
           text: '回答',
-          toolCalls: [{ id: 'h1', type: 'function', name: 'probe_tool', arguments: '{"a":1}' }],
+          toolCalls: [{ id: 'h1', type: 'function', name: 'probe_tool', arguments: '{"a":1}' }]
+        },
+        {
+          type: 'TOOL',
+          text: '',
           toolResponses: [{ id: 'h1', name: 'probe_tool', responseData: 'ok' }]
         }
       ]
@@ -594,6 +598,8 @@ describe('施工项3：m-R2 六写点回归锁', () => {
 
     await store.loadHistory()
 
+    // R-149：TOOL 条目不产生 ChatMessage（消空白块），消息条数 = 非 TOOL 条目数
+    expect(store.messages).toHaveLength(2)
     const user = store.messages[0] as ChatMessage
     const assistant = store.messages[1] as ChatMessage
     expect(user.parts).toEqual([{ kind: 'text', seg: 0, text: '问题', streaming: false }])
@@ -671,5 +677,311 @@ describe('施工项3：m-R2 六写点回归锁', () => {
     } finally {
       unregisterPageHandler('probe.e2e-tool')
     }
+  })
+})
+
+
+describe('R-149：loadHistory 双条目合并（TOOL 响应并入 ASSISTANT 工具段）', () => {
+  it('① 一对多：一条 ASSISTANT 多 call ↔ 一条 TOOL 多 response（consume-on-match 逐个摘）', async () => {
+    const store = useAiStore()
+    const sid = store.sessionId
+    api.history.mockResolvedValue({
+      sessionId: sid,
+      count: 2,
+      messages: [
+        {
+          type: 'ASSISTANT',
+          text: '双工具回答',
+          toolCalls: [
+            { id: 'c1', type: 'function', name: 'tool_a', arguments: '{"a":1}' },
+            { id: 'c2', type: 'function', name: 'tool_b', arguments: '{"b":2}' }
+          ]
+        },
+        {
+          type: 'TOOL',
+          text: '',
+          toolResponses: [
+            { id: 'c1', name: 'tool_a', responseData: 'ra' },
+            { id: 'c2', name: 'tool_b', responseData: 'rb' }
+          ]
+        }
+      ]
+    })
+    api.runsCurrent.mockResolvedValue(noSuspension())
+
+    await store.loadHistory()
+
+    expect(store.messages).toHaveLength(1)
+    const parts = toolPartsOf(store.messages[0] as ChatMessage)
+    expect(parts.map((part) => [part.toolCallId, part.result])).toEqual([
+      ['c1', 'ra'],
+      ['c2', 'rb']
+    ])
+  })
+
+  it('② 连续多轮工具：各 TOOL 只吃自己那份，不串结果', async () => {
+    const store = useAiStore()
+    const sid = store.sessionId
+    api.history.mockResolvedValue({
+      sessionId: sid,
+      count: 4,
+      messages: [
+        { type: 'USER', text: '开工' },
+        {
+          type: 'ASSISTANT',
+          text: '第一轮',
+          toolCalls: [{ id: 'a1', type: 'function', name: 'probe_tool', arguments: '{}' }]
+        },
+        { type: 'TOOL', text: '', toolResponses: [{ id: 'a1', name: 'probe_tool', responseData: 'ra' }] },
+        {
+          type: 'ASSISTANT',
+          text: '第二轮',
+          toolCalls: [{ id: 'b1', type: 'function', name: 'probe_tool', arguments: '{}' }]
+        },
+        { type: 'TOOL', text: '', toolResponses: [{ id: 'b1', name: 'probe_tool', responseData: 'rb' }] }
+      ]
+    })
+    api.runsCurrent.mockResolvedValue(noSuspension())
+
+    await store.loadHistory()
+
+    expect(store.messages).toHaveLength(3) // USER + 两条 ASSISTANT；两条 TOOL 消 blank
+    const [first, second] = [store.messages[1], store.messages[2]] as ChatMessage[]
+    expect(soleToolPart(first).result).toBe('ra')
+    expect(soleToolPart(second).result).toBe('rb')
+  })
+
+  it('③ id 缺失序位兜底 + name 闸：同 name 才按序互配，name 不同 result=null 但卡片保留', async () => {
+    const store = useAiStore()
+    const sid = store.sessionId
+    api.history.mockResolvedValue({
+      sessionId: sid,
+      count: 2,
+      messages: [
+        {
+          type: 'ASSISTANT',
+          text: '无 id 调用',
+          toolCalls: [
+            { type: 'function', name: 'alpha', arguments: '{"x":1}' },
+            { type: 'function', name: 'beta', arguments: '{"y":2}' }
+          ]
+        },
+        {
+          type: 'TOOL',
+          text: '',
+          toolResponses: [
+            { id: '', name: 'alpha', responseData: 'ra' },
+            { id: '', name: 'gamma', responseData: 'rg' }
+          ]
+        }
+      ]
+    })
+    api.runsCurrent.mockResolvedValue(noSuspension())
+
+    await store.loadHistory()
+
+    const parts = toolPartsOf(store.messages[0] as ChatMessage)
+    expect(parts[0]?.result).toBe('ra') // alpha ↔ alpha 序位配中
+    expect(parts[1]?.result).toBeNull() // beta vs gamma：name 闸拦截
+    expect(parts[1]).toMatchObject({ kind: 'tool', name: 'beta', status: 'succeeded' }) // 卡片保留不丢
+    // C1（复核 m-1）：序位兜底命中后投影须同步 —— toolRuns[].result 非 null 且与 parts 一致
+    // （旧实现下本断言为红：兜底在 deriveProjections 之后写 part.result，投影按值快照滞留 null）
+    const runs = (store.messages[0] as ChatMessage).toolRuns
+    expect(runs.map((run) => run.result)).toEqual(['ra', null])
+  })
+
+  it('④ 重复 id consume-on-match：防御性 tie-break（后出现覆盖仅为确定性兜底），索引摘除后后来者退序位兜底', async () => {
+    const store = useAiStore()
+    const sid = store.sessionId
+    api.history.mockResolvedValue({
+      sessionId: sid,
+      count: 4,
+      messages: [
+        {
+          type: 'ASSISTANT',
+          text: '一轮',
+          toolCalls: [{ id: 'dup', type: 'function', name: 'probe_tool', arguments: '{}' }]
+        },
+        { type: 'TOOL', text: '', toolResponses: [{ id: 'dup', name: 'probe_tool', responseData: 'first' }] },
+        {
+          type: 'ASSISTANT',
+          text: '二轮',
+          toolCalls: [{ id: 'dup', type: 'function', name: 'probe_tool', arguments: '{}' }]
+        },
+        { type: 'TOOL', text: '', toolResponses: [{ id: 'dup', name: 'probe_tool', responseData: 'second' }] }
+      ]
+    })
+    api.runsCurrent.mockResolvedValue(noSuspension())
+
+    await store.loadHistory()
+
+    const [first, second] = [store.messages[0], store.messages[1]] as ChatMessage[]
+    // 防御性 tie-break（C2，红队 O-1）：后端 toolCallId 唯一、实际不产重复 id；
+    // 以下断言只锁"实现确定性"，不宣称符合后端实际产出序
+    expect(soleToolPart(first).result).toBe('second') // 重复 id：后出现覆盖（确定性兜底）
+    expect(soleToolPart(second).result).toBe('first') // 索引已摘 → 序位兜底拿先出现者
+  })
+
+  it('⑤ responseData=null：result=null 但工具卡片仍在', async () => {
+    const store = useAiStore()
+    const sid = store.sessionId
+    api.history.mockResolvedValue({
+      sessionId: sid,
+      count: 2,
+      messages: [
+        {
+          type: 'ASSISTANT',
+          text: '空结果',
+          toolCalls: [{ id: 'n1', type: 'function', name: 'probe_tool', arguments: '{}' }]
+        },
+        { type: 'TOOL', text: '', toolResponses: [{ id: 'n1', name: 'probe_tool', responseData: null }] }
+      ]
+    })
+    api.runsCurrent.mockResolvedValue(noSuspension())
+
+    await store.loadHistory()
+
+    const part = soleToolPart(store.messages[0] as ChatMessage)
+    expect(part).toMatchObject({ toolCallId: 'n1', result: null, status: 'succeeded', requiresAction: false })
+  })
+
+  it('⑥ 残缺无主 response：无主 TOOL 响应兜底丢弃，不报错不抛异常', async () => {
+    const store = useAiStore()
+    const sid = store.sessionId
+    api.history.mockResolvedValue({
+      sessionId: sid,
+      count: 2,
+      messages: [
+        { type: 'USER', text: '问题' },
+        { type: 'TOOL', text: '', toolResponses: [{ id: 'orphan', name: 'probe_tool', responseData: 'ro' }] }
+      ]
+    })
+    api.runsCurrent.mockResolvedValue(noSuspension())
+
+    await store.loadHistory() // 不抛即过
+
+    expect(store.messages).toHaveLength(1) // 孤儿 TOOL 不产生消息
+    expect((store.messages[0] as ChatMessage).role).toBe('user')
+  })
+
+  it('⑦ 镜像路径回归：同一历史经"后端合并 → 镜像写盘 → 再走 loadHistory"，parts 深度相等（结果不丢）', async () => {
+    const store = useAiStore()
+    const sid = store.sessionId
+    api.history.mockResolvedValue({
+      sessionId: sid,
+      count: 3,
+      messages: [
+        { type: 'USER', text: '问题' },
+        {
+          type: 'ASSISTANT',
+          text: '回答',
+          toolCalls: [{ id: 'h1', type: 'function', name: 'probe_tool', arguments: '{"a":1}' }]
+        },
+        { type: 'TOOL', text: '', toolResponses: [{ id: 'h1', name: 'probe_tool', responseData: 'ok' }] }
+      ]
+    })
+    api.runsCurrent.mockResolvedValue(noSuspension())
+
+    await store.loadHistory()
+    const viaBackend = JSON.parse(JSON.stringify(store.messages.map((message) => message.parts)))
+    expect(soleToolPart(store.messages[1] as ChatMessage).result).toBe('ok')
+
+    // 模拟"刷新前镜像已写盘"（v2 形态 = 合并后的 ChatMessage），再走一遍 loadHistory：
+    // 镜像分支先水合、后端分支再整替 —— 两遍产物必须逐段一致
+    sessionStorage.setItem(MIRROR_PREFIX + sid, JSON.stringify({
+      v: 2,
+      savedAt: 1,
+      lastRunId: null,
+      messages: store.messages
+    }))
+    await store.loadHistory()
+
+    const viaMirrorRoundTrip = store.messages.map((message) => message.parts)
+    expect(JSON.parse(JSON.stringify(viaMirrorRoundTrip))).toEqual(viaBackend)
+    expect(soleToolPart(store.messages[1] as ChatMessage).result).toBe('ok')
+  })
+
+  it('⑧ 空白块消除：TOOL 条目零消息产出，id 锁死原始数组下标（含被跳过条目的空洞）', async () => {
+    const store = useAiStore()
+    const sid = store.sessionId
+    api.history.mockResolvedValue({
+      sessionId: sid,
+      count: 5,
+      messages: [
+        { type: 'USER', text: '问题' },
+        {
+          type: 'ASSISTANT',
+          text: '回答',
+          toolCalls: [{ id: 'h1', type: 'function', name: 'probe_tool', arguments: '{}' }]
+        },
+        { type: 'TOOL', text: '', toolResponses: [{ id: 'h1', name: 'probe_tool', responseData: 'ok' }] },
+        { type: 'TOOL', text: '', toolResponses: [{ id: 'orphan', name: 'probe_tool', responseData: 'ro' }] },
+        { type: 'SYSTEM', text: '系统提示' }
+      ]
+    })
+    api.runsCurrent.mockResolvedValue(noSuspension())
+
+    await store.loadHistory()
+
+    expect(store.messages).toHaveLength(3) // 两条 TOOL 都不产生消息
+    expect(store.messages.map((message) => message.id)).toEqual(['history-0', 'history-1', 'history-4'])
+    // 无任何"TOOL 条目落成的空白 assistant 块"（空 text 段 + 无工具段）
+    for (const message of store.messages) {
+      const isBlankToolBlock = message.parts.length === 1
+        && message.parts[0]?.kind === 'text'
+        && message.parts[0].text === ''
+        && message.role === 'assistant'
+      expect(isBlankToolBlock).toBe(false)
+    }
+  })
+})
+
+
+describe('R-149 收口修 C3：两遍扫描序无关性补测', () => {
+  it('TOOL 在 ASSISTANT 前 + 多 TOOL 夹一条 ASSISTANT：配对正确、无主响应丢弃、零空白块', async () => {
+    const store = useAiStore()
+    const sid = store.sessionId
+    api.history.mockResolvedValue({
+      sessionId: sid,
+      count: 5,
+      messages: [
+        // 响应先于调用出现（序无关判据①）
+        { type: 'TOOL', text: '', toolResponses: [{ id: 'c1', name: 'probe_tool', responseData: 'rc1' }] },
+        {
+          type: 'ASSISTANT',
+          text: '回答',
+          toolCalls: [{ id: 'c1', type: 'function', name: 'probe_tool', arguments: '{"a":1}' }]
+        },
+        { type: 'TOOL', text: '', toolResponses: [{ id: 'orphan', name: 'probe_tool', responseData: 'ro' }] },
+        { type: 'ASSISTANT', text: '补充' },
+        { type: 'TOOL', text: '', toolResponses: [{ id: 'orphan2', name: 'probe_tool', responseData: 'ro2' }] }
+      ]
+    })
+    api.runsCurrent.mockResolvedValue(noSuspension())
+
+    await store.loadHistory()
+
+    expect(store.messages).toHaveLength(2) // 三条 TOOL 零消息产出
+    expect(store.messages.map((message) => message.id)).toEqual(['history-1', 'history-3']) // 原始下标含空洞
+    expect(soleToolPart(store.messages[0] as ChatMessage).result).toBe('rc1') // 前置于调用的响应照样配对
+    expect((store.messages[1] as ChatMessage).parts.map((part) => part.kind)).toEqual(['text']) // 纯文本 ASSISTANT 照旧
+  })
+
+  it('全 TOOL 历史：零消息、不抛异常（残缺历史兜底丢弃）', async () => {
+    const store = useAiStore()
+    const sid = store.sessionId
+    api.history.mockResolvedValue({
+      sessionId: sid,
+      count: 2,
+      messages: [
+        { type: 'TOOL', text: '', toolResponses: [{ id: 'o1', name: 'probe_tool', responseData: 'r1' }] },
+        { type: 'TOOL', text: '', toolResponses: [{ id: 'o2', name: 'probe_tool', responseData: 'r2' }] }
+      ]
+    })
+    api.runsCurrent.mockResolvedValue(noSuspension())
+
+    await store.loadHistory() // 不抛即过
+
+    expect(store.messages).toHaveLength(0)
   })
 })

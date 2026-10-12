@@ -29,7 +29,7 @@ import {
 } from '@/utils/parts'
 import { ErrorCode, type SessionBusyConflict, type SuspendPoolSaturated } from '@/types/api'
 import { frameSeq, isTerminalFrame } from '@/types/sse'
-import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiHealth, type AiHistory, type AiRunCurrent, type AiSessionMirror, type ChatMessage, type MessagePart, type PendingToolCall, type ToolPartPatch, type ToolRunStatus } from '@/types/ai'
+import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiHealth, type AiHistory, type AiHistoryMessage, type AiRunCurrent, type AiSessionMirror, type ChatMessage, type MessagePart, type PendingToolCall, type ToolPart, type ToolPartPatch, type ToolRunStatus } from '@/types/ai'
 import { parseFormSchema, checkFormValues } from '@/types/form-schema'
 import type { SseFrame } from '@/types/sse'
 import type { WorkspaceActionRecord } from '@/types/tools'
@@ -675,26 +675,70 @@ export const useAiStore = defineStore('ai', {
       // 已申报的已知失真（R-141②），不是可接受行为**；修复属后端面（历史携带状态），已登记立项
       // （R-144），③b 不含后端。在后者落地前，「UNKNOWN + succeeded」组合 = 载荷缺状态的占位
       // 口径，**任何消费方不得以该 succeeded 值做业务判定**。
-      this.messages = history.messages.map((item, index) => {
+      // R-149 双条目合并：后端历史里工具结果是**独立 TOOL 条目**（Spring AI 形态），
+      // 第一遍遍历建响应索引，第二遍构建 ChatMessage；TOOL 条目跳过（不生成消息，杜绝空白块）。
+      // 配对规则：① call.id 三态为真按 id 匹配（consume-on-match：命中即从索引摘除）；
+      // ② 未中退序位兜底：未配对 call × 未消费 response 按序互配 + name 相等闸；
+      // ③ 混排先 id 后序位；④ 仍不中 result=null（卡片保留不丢）。
+      const responsePool: NonNullable<AiHistoryMessage['toolResponses']>[number][] = []
+      const responseIndex = new Map<string, NonNullable<AiHistoryMessage['toolResponses']>[number]>()
+      for (const item of history.messages) {
+        if ((item.type || '').toUpperCase() !== 'TOOL') {
+          continue
+        }
+        for (const response of item.toolResponses ?? []) {
+          responsePool.push(response)
+          // 防御性 tie-break（C2，红队 O-1）：后端 Spring AI 的 toolCallId 唯一、实际不产重复 id；
+          // 万一载荷出现重复 id，后出现覆盖先出现仅作**确定性兜底**，不宣称符合后端实际产出序
+          if (response.id !== null && response.id !== undefined && response.id !== '') {
+            responseIndex.set(response.id, response)
+          }
+        }
+      }
+      const consumedResponses = new Set<object>()
+      const unmatchedCalls: Array<{ name: string; part: ToolPart }> = []
+      this.messages = history.messages.flatMap((item, index) => {
+        if ((item.type || '').toUpperCase() === 'TOOL') {
+          return [] // TOOL 条目：响应已并入 ASSISTANT 工具段，本身不再产生消息
+        }
         const role = roleOf(item.type)
         // 批2：历史整体替换的分支同样**只建段**（正文段 + 按 toolCalls 顺序的工具段，
-        // result 由 toolResponses 按 id 回填；历史条目没有待决语义，故 requiresAction=false），
-        // 旧投影由 deriveProjections 一次产出，不再手工拼 content / toolRuns
+        // result 由 TOOL 条目的 toolResponses 回填（id 优先、序位兜底）；历史条目没有待决语义，
+        // 故 requiresAction=false），旧投影由 deriveProjections 一次产出，不手工拼 content / toolRuns
         const parts: MessagePart[] = [
           { kind: 'text', seg: 0, text: item.text ?? '', streaming: false },
-          ...(item.toolCalls ?? []).map((call, toolIndex): MessagePart => ({
-            kind: 'tool',
-            seg: toolIndex + 1,
-            toolCallId: call.id ?? `history-${index}-${call.name ?? 'tool'}`,
-            name: call.name ?? '未知工具',
-            kind2: 'UNKNOWN',
-            status: 'succeeded',
-            args: call.arguments,
-            result: (item.toolResponses ?? []).find((response) => response.id === call.id)?.responseData ?? null,
-            requiresAction: false
-          }))
+          ...(item.toolCalls ?? []).map((call, toolIndex): ToolPart => {
+            const name = call.name ?? '未知工具'
+            let matched: NonNullable<AiHistoryMessage['toolResponses']>[number] | undefined
+            if (call.id !== null && call.id !== undefined && call.id !== '') {
+              const hit = responseIndex.get(call.id)
+              if (hit) {
+                responseIndex.delete(call.id) // consume-on-match：命中即从索引摘除
+                matched = hit
+              }
+            }
+            const part: ToolPart = {
+              kind: 'tool',
+              seg: toolIndex + 1,
+              toolCallId: call.id ?? `history-${index}-${call.name ?? 'tool'}`,
+              name,
+              kind2: 'UNKNOWN',
+              status: 'succeeded',
+              args: call.arguments,
+              result: null,
+              requiresAction: false
+            }
+            if (matched) {
+              consumedResponses.add(matched)
+              part.result = matched.responseData ?? null
+            } else {
+              unmatchedCalls.push({ name, part }) // 序位兜底候选（见下方统一互配）
+            }
+            return part
+          })
         ]
         const message: ChatMessage = {
+          // R-149：index 锁死 = 原始数组下标（含被跳过 TOOL 条目的空洞，不用合并后下标）
           id: `history-${index}`,
           role,
           content: '',
@@ -706,7 +750,28 @@ export const useAiStore = defineStore('ai', {
           done: true
         }
         deriveProjections(message)
-        return message
+        return [message]
+      })
+      // 序位兜底（R-149②）：未配对 call × 未消费 response 按序互配，name 相等才配；
+      // 仍不中的 call 保持 result=null —— 卡片保留不丢（残缺历史无主 response 在此一并兜底丢弃）
+      for (const unmatched of unmatchedCalls) {
+        const hitIndex = responsePool.findIndex(
+          (response) => !consumedResponses.has(response) && (response.name ?? '未知工具') === unmatched.name
+        )
+        if (hitIndex < 0) {
+          continue
+        }
+        const hit = responsePool[hitIndex] as NonNullable<AiHistoryMessage['toolResponses']>[number]
+        consumedResponses.add(hit)
+        unmatched.part.result = hit.responseData ?? null
+      }
+      // C1（复核 m-1）：序位兜底在 deriveProjections（flatMap 内）**之后**才写 part.result ——
+      // 投影按值快照（parts.ts）会滞留 null。对含工具段的受影响消息重跑 deriveProjections
+      // （幂等纯函数；契约：段字段落段后须同步派生投影），兜底命中的 toolRuns[].result 随之就位。
+      this.messages.forEach((message) => {
+        if (message.parts.some((part) => part.kind === 'tool')) {
+          deriveProjections(message)
+        }
       })
       // 历史里若存在未决挂起，补一张待处理卡片（前端工具/确认门都可能出现在这里）
       this.historyLoaded = true
