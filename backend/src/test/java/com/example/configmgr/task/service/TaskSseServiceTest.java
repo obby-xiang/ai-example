@@ -158,12 +158,13 @@ class TaskSseServiceTest {
         RecordingEmitter healthy = new RecordingEmitter();
         subscribersOf(service, TASK_ID).add(healthy);
 
-        service.publish(TASK_ID, "TASK_CHANGED", Map.of("taskId", TASK_ID, "status", "ACTIVE"));
+        // 手动刷新批（S5）：TASK_CHANGED 发布链已摘除，帧形态契约改用活类型 JOB_PROGRESS 锁。
+        service.publish(TASK_ID, "JOB_PROGRESS", Map.of("taskId", TASK_ID, "status", "ACTIVE"));
 
         assertThat(healthy.awaitPayloads(1, 5L)).isTrue();
         @SuppressWarnings("unchecked")
         Map<String, Object> parsed = MAPPER.readValue(healthy.payloads().get(0), Map.class);
-        assertThat(parsed).as("帧体形态不变：{\"type\":..,\"data\":..}").containsEntry("type", "TASK_CHANGED");
+        assertThat(parsed).as("帧体形态不变：{\"type\":..,\"data\":..}").containsEntry("type", "JOB_PROGRESS");
         assertThat(parsed.get("data"))
                 .as("data 原样透传（前端契约）")
                 .isInstanceOf(Map.class);

@@ -18,7 +18,6 @@ import jakarta.persistence.EntityManager;
 import jakarta.persistence.PersistenceContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
@@ -47,7 +46,6 @@ public class TaskService {
     private final ValidationIssueRepository issueRepository;
     private final ConfigStagingRowRepository stagingRowRepository;
     private final FileStorageService fileStorage;
-    private final ApplicationEventPublisher eventPublisher;
     private final ObjectMapper objectMapper;
 
     public List<Task> findAll() {
@@ -87,7 +85,6 @@ public class TaskService {
         task.setTitle(title);
         task.setCurrentStep(type == Task.TaskType.EXPORT ? "SELECT_DEFS" : "UPLOAD");
         task = taskRepository.save(task);
-        publishTaskChanged(task, "创建任务");
         return task;
     }
 
@@ -122,7 +119,6 @@ public class TaskService {
         // EAGER 集合在方法入口 findById 时已快照；一级缓存里还是旧对象，
         // 用 refresh 强制从数据库重读，保证返回的 items 包含刚保存的条目。
         entityManager.refresh(task);
-        publishTaskChanged(task, "更新配置项选择");
         return task;
     }
 
@@ -136,7 +132,6 @@ public class TaskService {
 
         Task task = taskRepository.findById(taskId)
                 .orElseThrow(() -> ResourceNotFoundException.of("任务", taskId));
-        publishTaskChanged(task, "更新查询条件: " + defCode);
     }
 
     @Transactional
@@ -145,7 +140,6 @@ public class TaskService {
                 .orElseThrow(() -> ResourceNotFoundException.of("任务", taskId));
         task.setCurrentStep(step);
         task = taskRepository.save(task);
-        publishTaskChanged(task, "跳转到步骤: " + step);
         return task;
     }
 
@@ -177,7 +171,6 @@ public class TaskService {
             throw new IllegalStateException("任务设置序列化失败: " + e.getMessage(), e);
         }
         task = taskRepository.save(task);
-        publishTaskChanged(task, "设置导入模式: " + mode);
         return task;
     }
 
@@ -188,7 +181,6 @@ public class TaskService {
         task.setStatus(Task.TaskStatus.COMPLETED);
         task.setCurrentStep("DONE");
         taskRepository.save(task);
-        publishTaskChanged(task, "任务完成");
     }
 
     /**
@@ -200,7 +192,6 @@ public class TaskService {
                 .orElseThrow(() -> ResourceNotFoundException.of("任务", taskId));
         task.setStatus(status);
         taskRepository.save(task);
-        publishTaskChanged(task, "任务状态更新: " + status);
     }
 
     /**
@@ -229,7 +220,6 @@ public class TaskService {
             }
             task.setStatus(target);
             taskRepository.save(task);
-            publishTaskChanged(task, "任务状态联动作业终态: " + jobStatus);
         });
     }
 
@@ -252,8 +242,8 @@ public class TaskService {
      * + 任务本体。物理文件（上传件/导出结果）在事务提交后再删盘，
      * 避免事务回滚后库里还有行、盘上文件已丢。
      *
-     * <p>删除动作的操作流水（无主体操作流水，ADR-11b）见本类 {@link #publishTaskChanged}
-     * ——删除前发一条 TASK_CHANGED（含动作摘要），流水记录不含主体维度。
+     * <p>删除动作的操作流水（无主体操作流水，ADR-11b）：删除前落一条结构化流水行
+     * （动作/对象/前值摘要/来源/时间），流水记录不含主体维度；落库的 AuditLog 表属 DC-10 的 P2。
      */
     @Transactional
     public void delete(Long taskId) {
@@ -264,9 +254,8 @@ public class TaskService {
         List<Long> jobIds = jobRepository.findByTaskId(taskId).stream().map(Job::getId).toList();
         long stagingRows = stagingRowRepository.findByTaskId(taskId).size();
 
-        publishTaskChanged(task, "删除任务（级联清理作业/暂存/导出结果）");
         // FR-4.4「删除动作入操作流水」本期落地形态：结构化流水行（动作/对象/前值摘要/来源/时间，
-        // 无主体维度，ADR-11b）+ TASK_CHANGED 事件；落库的 AuditLog 表属 DC-10 的 P2，见证据文档【待裁决】。
+        // 无主体维度，ADR-11b）；落库的 AuditLog 表属 DC-10 的 P2，见证据文档【待裁决】。
         log.info("操作流水: 动作=DELETE_TASK 对象=task#{} 前值摘要=type={},status={},jobs={},stagingRows={},files={} 来源=界面/API 时间={}",
                 taskId, task.getType(), task.getStatus(), jobIds.size(), stagingRows, files.size(), LocalDateTime.now());
 
@@ -294,9 +283,5 @@ public class TaskService {
 
     public List<TaskFile> getFiles(Long taskId) {
         return taskFileRepository.findByTaskId(taskId);
-    }
-
-    public void publishTaskChanged(Task task, String summary) {
-        eventPublisher.publishEvent(new TaskChangedEvent(this, task, summary));
     }
 }

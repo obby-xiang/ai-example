@@ -4,7 +4,6 @@ import com.example.configmgr.common.sse.SseWriteBudget;
 import com.example.configmgr.config.AppProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
@@ -87,17 +86,6 @@ public class TaskSseService {
         // Send initial heartbeat
         sendEvent(taskId, emitter, "HEARTBEAT", Map.of());
         return emitter;
-    }
-
-    @EventListener
-    public void onTaskChanged(TaskChangedEvent event) {
-        publish(event.getTask().getId(), "TASK_CHANGED", Map.of(
-                "taskId", event.getTask().getId(),
-                "version", event.getTask().getVersion(),
-                "currentStep", event.getTask().getCurrentStep(),
-                "status", event.getTask().getStatus(),
-                "summary", event.getSummary()
-        ));
     }
 
     /**
@@ -195,8 +183,8 @@ public class TaskSseService {
      *
      * <p>
      * 超时（{@link SseWriteBudget.Outcome#TIMED_OUT}）与写出失败同判"不可用"并摘除：任务级帧
-     * （JOB_PROGRESS / JOB_DONE / TASK_CHANGED）都是"状态投影"，前端 EventSource 重连后会重新拉
-     * 快照（{@code job-watch} 的固定间隔轮询）与订阅（订阅时补发 HEARTBEAT），因此摘除是可自愈的；
+     * （JOB_PROGRESS / JOB_DONE）都是"状态投影"，前端 EventSource 重连后会重新拉
+     * 快照（{@code job-watch} 的 3s 兜底轮询）与订阅（订阅时补发 HEARTBEAT），因此摘除是可自愈的；
      * 而把调用线程拖在这里（作业线程 + 事务 + DB 连接）是不可自愈的。
      *
      * <p>
