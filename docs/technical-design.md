@@ -182,9 +182,10 @@ UPLOAD → PRECHECK → IMPORT → PUBLISH
   └── DELETE /api/ai/sessions/{sid}/runs/current      (取消本轮)
 
 任务/作业进度走另一条流：
-  GET /api/tasks/{id}/events → TASK_CHANGED / JOB_PROGRESS / JOB_DONE
-  （后端已实现 SSE 推送；前端作业进度当前采用 1.5s 轮询 GET /api/jobs/{id}，
-    二者并存，互不冲突）
+  GET /api/tasks/{id}/events → JOB_PROGRESS / JOB_DONE / HEARTBEAT
+  （手动刷新批 S5 起 TASK_CHANGED 发布链已摘除：TaskChangedEvent/TaskService.publishTaskChanged/
+    TaskSseService.onTaskChanged 均删除，本通道只剩作业进度/终态帧 + 订阅首帧心跳；
+    通道当前唯一消费方是前端 job-watch 作业跟踪，任务中心不自刷不订阅）
 ```
 
 #### AgentRuntime 主循环（虚拟线程）
@@ -275,7 +276,8 @@ void runAgentLoop(RunInput input, SseRunEmitter emitter) {
 #### 状态同步
 
 - 前端路由变化 → `PUT /api/ai/sessions/{sid}/context`
-- AI 工具修改业务数据 → `TaskChangedEvent` → `GET /api/tasks/{id}/events` SSE 推送
+- AI 工具修改业务数据 → 后端落库 + 结构化操作流水（手动刷新批 S5 起 `TaskChangedEvent` 事件链已摘除，
+  该流不再产生 TASK_CHANGED 帧；作业进度/终态仍经 `GET /api/tasks/{id}/events` SSE 推送，消费方为前端 job-watch）
 - AI 下发的导航/编辑器指令 → UI_COMMAND（见上）
 
 #### 联动而不耦合（关键架构原则）
