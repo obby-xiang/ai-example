@@ -948,26 +948,27 @@ try {
     }
     if ($afterMap.ContainsKey('JPY') -or $afterMap.ContainsKey('GBP')) { throw '范围内未出现的旧行未被差集删除' }
 
-    # 重复发布同一份暂存 → 被"导入快照版本比对"拦住（作业 FAILED + 行级发布冲突文案），
-    # 且生效数据零变化。这是 main 相对源脚本"重复发布未拦截"更强的守卫：
-    # 暂存行记录了导入时刻的行版本（baseVersion），发布后版本已递增，故再次发布即判定冲突。
-    $jPub2 = Start-JobOf $script:t12 'PUBLISH'
-    $sPub2 = Wait-Job $jPub2.id
-    if ($sPub2.status -ne 'FAILED') { throw "二次发布应因快照冲突 FAILED，实际 $($sPub2.status)" }
-    $issPub2 = GetJson "/api/jobs/$($jPub2.id)/issues?page=0&size=50"
-    if (@($issPub2.content | Where-Object { $_.message -like '*发布冲突*' }).Count -lt 1) { throw '二次发布未给出发布冲突明细' }
+    # 重复发布同一份暂存 → R-137 终态守卫（COMPLETED+最终作业成功）在**建作业之前**即 409 TASK_FINALIZED
+    # （原断言链"启动成功→作业 FAILED+发布冲突明细"依赖守卫前的旧契约，新契约下拿不到作业 id）。
+    # 快照冲突（发布冲突/乐观锁）面改由后端单测 PublishSemanticsTest.snapshotMismatchFailsJobWithBaselineMessage
+    # 锁定；E2E 面覆盖归零挂账（R-134 族，见热修报告）。终态作业取消幂等子例改用首次成功的 $jPub。
+    $r2 = Expect-Fail 'POST' "/api/tasks/$($script:t12)/jobs" @{ jobType = 'PUBLISH' } '二次发布未被终态守卫拒绝'
+    if ($r2.status -ne 409 -or $r2.json.code -ne 'TASK_FINALIZED') {
+        throw "二次发布响应 HTTP $($r2.status)/code=$($r2.json.code)，期望 409/TASK_FINALIZED"
+    }
+    if ("$($r2.json.message)" -notlike '*TASK_FINALIZED*') { throw "二次发布文案缺 TASK_FINALIZED：$($r2.json.message)" }
     $again = GetJson '/api/data/CURRENCY?page=0&size=50'
     if ($again.content.Count -ne 3) { throw "二次发布后行数 $($again.content.Count)" }
     foreach ($r in $again.content) {
         if ($r.id -ne $afterMap[$r.rowKey].id) { throw "二次发布后 $($r.rowKey) 行 id 变化" }
     }
 
-    # 终态作业取消 → 409 JOB_ALREADY_FINAL（机器可读码）
-    $c = Expect-Fail 'DELETE' "/api/jobs/$($jPub2.id)" $null '终态作业取消未被拒'
+    # 终态作业取消 → 409 JOB_ALREADY_FINAL（机器可读码；终态作业 = 首次成功的 $jPub）
+    $c = Expect-Fail 'DELETE' "/api/jobs/$($jPub.id)" $null '终态作业取消未被拒'
     if ($c.status -ne 409 -or $c.json.code -ne 'JOB_ALREADY_FINAL') {
         throw "终态取消响应 HTTP $($c.status)/code=$($c.json.code)，期望 409/JOB_ALREADY_FINAL"
     }
-    Ok 'TC13 范围替换（5→3 行、upsert 保 id 递增版本、差集删除）+ 快照冲突拦截重复发布 + 409 JOB_ALREADY_FINAL'
+    Ok 'TC13 范围替换（5→3 行、upsert 保 id 递增版本、差集删除）+ 终态守卫拦截二次发布 409 TASK_FINALIZED + 409 JOB_ALREADY_FINAL'
 } catch { No 'TC13' $_.Exception.Message }
 
 # ============================================================
@@ -2308,8 +2309,8 @@ try {
 # R-137 红队补测桩（MAJOR-2/MAJOR-3，step-wizard-pkg\红队报告.md :48-64 原案）
 #   MAJOR-2 = 后端高危工具绕行只读：终态任务上 start_* 必须拒建作业（TASK_FINALIZED 409）
 #   MAJOR-3 = SpreadGrid 只读态单元格不可编辑（F2 修复的运行期锁：isProtected 生效）
-#   口径注记（R-137 收口修 C-3/R-2）：以下两块的 Ok/No 仅做插入校验输出，不计入主用例计数
-#   （主用例基数不含此 2 项，与施工报告申报口径一致，分账口径同 Q8 块）
+#   口径注记（R-137 E2E 热修项 3，改如实）：MAJOR-2/3 为守卫断言，走主计数器 Ok()/No()，
+#   PASS/FAIL 计入主用例计数（口径 29+2），任一失败即扛 exit 1（与 TC 用例同门禁属性）。
 # ============================================================
 Say '--- R-137 红队补测（MAJOR-2/MAJOR-3） ---'
 try {
@@ -2345,15 +2346,33 @@ try {
     DeleteJson "/api/jobs/$($fj.id)" | Out-Null  # 取消联动 ⇒ 任务 CANCELLED；再手置 FAILED 模拟僵尸恢复面
     $m2failObj = GetJson "/api/tasks/$m2fail"
     # FAILED 任务只能经作业失败联动产生，此处改用 REST 直接构造：跳过（H2 FAILED 放行已由后端单测锁定），仅清场
-    DeleteJson "/api/tasks/$m2task" | Out-Null
-    DeleteJson "/api/tasks/$m2done" | Out-Null
-    DeleteJson "/api/tasks/$m2fail" | Out-Null
+    # 清场竞态修复（热修卡项 2）：取消后立即 DELETE 任务会与异步终态写在 Task 行上并发（乐观锁 500，
+    # 复现报告 §4.2，产品侧挂账 R-152）。此处加有界等待：轮询取消作业的终态落定再删，上限 5s。
+    foreach ($t in @($m2task, $m2done, $m2fail)) {
+        $tJobs = @(GetJson "/api/tasks/$t/jobs")
+        $settled = $true
+        $deadline = (Get-Date).AddSeconds(5)
+        foreach ($j in $tJobs) {
+            $st = $j.status
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            while ($st -eq 'PENDING' -or $st -eq 'RUNNING') {
+                if ((Get-Date) -gt $deadline -or $sw.ElapsedMilliseconds -gt 5000) { break }
+                Start-Sleep -Milliseconds 200
+                try { $st = (GetJson "/api/jobs/$($j.id)").status } catch { $st = 'GONE' }
+            }
+            if ($st -eq 'PENDING' -or $st -eq 'RUNNING') {
+                Write-Host ("  [WARN] MAJOR-2 清场：任务 {0} 作业 {1} {2}ms 未落终态，仍执行删除" -f $t, $j.id, $sw.ElapsedMilliseconds) -ForegroundColor Yellow
+                $settled = $false
+            }
+        }
+        DeleteJson "/api/tasks/$t" | Out-Null
+    }
     Ok 'MAJOR-2 终态任务上 start_* 拒建作业（CANCELLED/COMPLETED+终作业 409 TASK_FINALIZED、不留行）'
 } catch { No 'MAJOR-2' $_.Exception.Message }
 try {
     # MAJOR-3：SpreadGrid 只读态单元格不可编辑（isProtected 由 readOnly 驱动，F2 已修 watch；此处锁运行期契约）
     # 桩形态：直接断言组件源内的 watch(readOnly) → applyReadOnly 联动与 isProtected 赋值仍在位（红队 :57-64 原案的代码面锁 + CDP 运行期断言属 E2E 真跑面，此处用源断言兜底）
-    $sg = Get-Content -Raw (Join-Path $PSScriptRoot '..\frontend\src\components\SpreadGrid.vue')
+    $sg = Get-Content -Raw (Join-Path $PSScriptRoot '../frontend/src/components/SpreadGrid.vue')
     if ($sg -notmatch 'watch\(\(\) => props\.readOnly,\s*applyReadOnly\)') { throw 'MAJOR-3：watch(readOnly) 不在位（F2 修复缺失）' }
     if ($sg -notmatch 'isProtected = props\.readOnly') { throw 'MAJOR-3：isProtected 由 readOnly 驱动的赋值不在位' }
     Ok 'MAJOR-3 SpreadGrid 只读联动在位（watch(readOnly)→applyReadOnly→isProtected）'
