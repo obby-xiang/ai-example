@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.tools;
 
+import com.example.configmgr.common.ConflictException;
 import com.example.configmgr.data.repo.ConfigDataRowRepository;
 import com.example.configmgr.definition.entity.ConfigDefinition;
 import com.example.configmgr.definition.service.DefinitionService;
@@ -24,6 +25,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * S5.a 用例（移植自 glm-5.3 {@code AiToolsTest}）：AI 工具<b>直调</b>（不经过模型），
@@ -191,17 +193,22 @@ class AiToolsInvocationTest {
     }
 
     // ── 用例 7（M1 收尾守卫①的 AI 通道回归）：预检查未通过 → 工具如实回报失败，不起作业 ──
+    // R-137（T6 重抛面）：start_import/start_publish 失败不再以字符串回填（那会让 ok=true
+    // 与失败文案自相矛盾），改为抛出 ConflictException，由 SpToolCallingManager.executeOnce
+    // 捕获置 ok=false 呈给模型（"工具执行失败：<文案>"）。直调断言从 contains 改为异常形态。
 
     @Test
     void startImportReportsGuardWhenPrecheckNotPassed() {
         long taskId = firstId(aiTools.createTask("IMPORT", "S5F-AI-守卫"));
         taskService.selectDefs(taskId, List.of(ROLE_DICT));
 
-        assertThat(aiTools.startImport(taskId))
-                .as("无预检查记录时，工具文本必须含机器可读码，模型才能据实回答")
-                .contains("启动导入失败")
-                .contains("PRECHECK_NOT_PASSED");
-        assertThat(aiTools.startPublish(taskId)).contains("启动发布失败").contains("PRECHECK_NOT_PASSED");
+        assertThatThrownBy(() -> aiTools.startImport(taskId))
+                .as("无预检查记录时，守卫异常必须带机器可读码（executeOnce 置 ok=false 呈给模型）")
+                .isInstanceOf(ConflictException.class)
+                .hasMessageContaining("PRECHECK_NOT_PASSED");
+        assertThatThrownBy(() -> aiTools.startPublish(taskId))
+                .isInstanceOf(ConflictException.class)
+                .hasMessageContaining("PRECHECK_NOT_PASSED");
         assertThat(jobRepository.findByTaskId(taskId))
                 .as("被守卫拒绝时不得落作业行").isEmpty();
     }

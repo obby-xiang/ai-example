@@ -1,5 +1,6 @@
 package com.example.configmgr.task.service;
 
+import com.example.configmgr.common.ConflictException;
 import com.example.configmgr.common.ResourceNotFoundException;
 import com.example.configmgr.data.repo.ConfigStagingRowRepository;
 import com.example.configmgr.file.FileStorageService;
@@ -78,6 +79,14 @@ public class TaskService {
         return task;
     }
 
+    /**
+     * R-137：仅供状态判定的裸取（不水合 items）—— 守卫只读 status/type，
+     * 不该为一次布尔判定拉整份任务条目集合。
+     */
+    public java.util.Optional<Task> findByIdRaw(Long id) {
+        return taskRepository.findById(id);
+    }
+
     @Transactional
     public Task create(Task.TaskType type, String title) {
         Task task = new Task();
@@ -134,13 +143,66 @@ public class TaskService {
                 .orElseThrow(() -> ResourceNotFoundException.of("任务", taskId));
     }
 
+    /**
+     * R-137（T4）步骤白名单（单处集中定义）：与前端 {@code types/task.ts#TaskSteps} 同构
+     * （注释明示"与后端 @ToolScope 的 task:&lt;type&gt;/&lt;step&gt; 标签一致"），完成态 DONE 通用。
+     * ExportJobRunner 写 "EXPORT"、PublishJobRunner 写 "PUBLISH"，均在各自序列内。
+     */
+    private static final Map<Task.TaskType, List<String>> STEP_WHITELIST = Map.of(
+            Task.TaskType.EXPORT, List.of("SELECT_DEFS", "QUERY_COND", "EXPORT"),
+            Task.TaskType.IMPORT, List.of("UPLOAD", "PRECHECK", "IMPORT", "PUBLISH"));
+    private static final String STEP_DONE = "DONE";
+    private static final java.util.regex.Pattern STEP_FORMAT = java.util.regex.Pattern.compile("^[A-Z][A-Z0-9_]*$");
+
     @Transactional
     public Task goToStep(Long taskId, String step) {
         Task task = taskRepository.findById(taskId)
                 .orElseThrow(() -> ResourceNotFoundException.of("任务", taskId));
-        task.setCurrentStep(step);
+        // R-137 双守卫：①终态守卫（与 JobService.assertTaskNotFinalized / 前端 isCurrentTaskReadOnly 同口径）
+        assertTaskNotFinalized(task);
+        // ②step 校验：非空 + 格式 + 按任务类型白名单（非法 → IllegalArgumentException → 400）
+        if (step == null || step.isBlank()) {
+            throw new IllegalArgumentException("目标步骤不得为空");
+        }
+        String normalized = step.trim();
+        if (!STEP_FORMAT.matcher(normalized).matches()) {
+            throw new IllegalArgumentException("目标步骤格式不合法：" + step
+                    + "（应为全大写字母/数字/下划线，如 SELECT_DEFS、QUERY_COND）");
+        }
+        if (!STEP_DONE.equals(normalized)
+                && !STEP_WHITELIST.getOrDefault(task.getType(), List.of()).contains(normalized)) {
+            throw new IllegalArgumentException("目标步骤不在该任务类型的步骤序列内：" + step
+                    + "（" + task.getType() + " 可选：" + STEP_WHITELIST.get(task.getType()) + "）");
+        }
+        task.setCurrentStep(normalized);
         task = taskRepository.save(task);
         return task;
+    }
+
+    /**
+     * R-137 终态守卫（goToStep 版，口径与 {@code JobService#createAndStart} 的
+     * {@code assertTaskNotFinalized} 同构）：CANCELLED 恒拒；COMPLETED 按类型核最终作业
+     * （IMPORT→PUBLISH 成功、EXPORT→EXPORT 成功）；FAILED 放行。预检查 0 错误即置
+     * COMPLETED 的导入任务跳步是主路径，不得误杀。
+     */
+    private void assertTaskNotFinalized(Task task) {
+        if (task.getStatus() == Task.TaskStatus.CANCELLED) {
+            throw new ConflictException("TASK_FINALIZED",
+                    "任务 #" + task.getId() + " 已 CANCELLED，禁止跳转步骤（TASK_FINALIZED）");
+        }
+        if (task.getStatus() != Task.TaskStatus.COMPLETED) {
+            return;
+        }
+        Job.JobType finalJobType = task.getType() == Task.TaskType.IMPORT
+                ? Job.JobType.PUBLISH : Job.JobType.EXPORT;
+        boolean hasFinalJob = jobRepository
+                .findFirstByTaskIdAndJobTypeAndStatusInOrderByIdDesc(task.getId(), finalJobType,
+                        java.util.Set.of(Job.JobStatus.COMPLETED))
+                .isPresent();
+        if (hasFinalJob) {
+            throw new ConflictException("TASK_FINALIZED",
+                    "任务 #" + task.getId() + " 已 COMPLETED（" + finalJobType + " 作业成功），禁止跳转步骤（TASK_FINALIZED）");
+        }
     }
 
     /**

@@ -252,8 +252,11 @@ public class AiTools {
                     export ? "export" : "import", task.getId());
         } catch (IllegalArgumentException e) {
             return "任务类型不合法：" + type + "（只支持 EXPORT / IMPORT）";
-        } catch (Exception e) {
-            return "创建任务失败: " + e.getMessage();
+        }
+        // R-137（T6 重抛面）：写路径失败不再以字符串回填 —— 抛出后由
+        // SpToolCallingManager.executeOnce 捕获置 ok=false 呈给模型（恢复框架既有失败通道）
+        catch (Exception e) {
+            throw new IllegalStateException("创建任务失败: " + e.getMessage(), e);
         }
     }
 
@@ -282,12 +285,11 @@ public class AiTools {
     @ToolRisk(ToolMeta.RiskLevel.DANGER)
     public String startExport(
             @ToolParam(description = "任务ID") Long taskId) {
-        try {
-            Job job = jobService.createAndStart(taskId, Job.JobType.EXPORT);
-            return String.format("导出作业已启动（作业 #%d），请稍后查看进度", job.getId());
-        } catch (Exception e) {
-            return "启动导出失败: " + e.getMessage();
-        }
+        // R-137（T6 重抛面）：作业发起失败/被守卫拒绝（含 TASK_FINALIZED 409）不再吞成字符串 ——
+        // 抛出后由 SpToolCallingManager.executeOnce 捕获置 ok=false（框架既有通道），
+        // 模型看到"工具执行失败：<中文文案>"，工具卡不再出现"ok=true 但卡面写失败"的自相矛盾
+        Job job = jobService.createAndStart(taskId, Job.JobType.EXPORT);
+        return String.format("导出作业已启动（作业 #%d），请稍后查看进度", job.getId());
     }
 
     /**
@@ -302,12 +304,9 @@ public class AiTools {
     @ToolRisk(ToolMeta.RiskLevel.DANGER)
     public String startPrecheck(
             @ToolParam(description = "任务ID") Long taskId) {
-        try {
-            Job job = jobService.createAndStart(taskId, Job.JobType.PRECHECK);
-            return String.format("预检查已启动（作业 #%d），正在检查数据格式和依赖关系…", job.getId());
-        } catch (Exception e) {
-            return "启动预检查失败: " + e.getMessage();
-        }
+        // R-137（T6 重抛面）：同 startExport —— 失败/被守卫拒绝抛出，恢复 ok=false 通道
+        Job job = jobService.createAndStart(taskId, Job.JobType.PRECHECK);
+        return String.format("预检查已启动（作业 #%d），正在检查数据格式和依赖关系…", job.getId());
     }
 
     /**
@@ -320,12 +319,9 @@ public class AiTools {
     @ToolRisk(ToolMeta.RiskLevel.DANGER)
     public String startImport(
             @ToolParam(description = "任务ID") Long taskId) {
-        try {
-            Job job = jobService.createAndStart(taskId, Job.JobType.IMPORT);
-            return String.format("导入作业已启动（作业 #%d），数据将写入暂存区，发布前可预览", job.getId());
-        } catch (Exception e) {
-            return "启动导入失败: " + e.getMessage();
-        }
+        // R-137（T6 重抛面）：同 startExport —— 失败/被守卫拒绝抛出，恢复 ok=false 通道
+        Job job = jobService.createAndStart(taskId, Job.JobType.IMPORT);
+        return String.format("导入作业已启动（作业 #%d），数据将写入暂存区，发布前可预览", job.getId());
     }
 
     @Tool(name = "start_publish", description = "启动发布作业，将暂存数据正式发布到生产数据（高风险，需要用户确认）")
@@ -333,12 +329,9 @@ public class AiTools {
     @ToolRisk(ToolMeta.RiskLevel.DANGER)
     public String startPublish(
             @ToolParam(description = "任务ID") Long taskId) {
-        try {
-            Job job = jobService.createAndStart(taskId, Job.JobType.PUBLISH);
-            return String.format("发布作业已启动（作业 #%d），正在将数据写入正式库…", job.getId());
-        } catch (Exception e) {
-            return "启动发布失败: " + e.getMessage();
-        }
+        // R-137（T6 重抛面）：同 startExport —— 失败/被守卫拒绝抛出，恢复 ok=false 通道
+        Job job = jobService.createAndStart(taskId, Job.JobType.PUBLISH);
+        return String.format("发布作业已启动（作业 #%d），正在将数据写入正式库…", job.getId());
     }
 
     // ==================== 前端指令（副作用在浏览器，后端桩体永不执行） ====================

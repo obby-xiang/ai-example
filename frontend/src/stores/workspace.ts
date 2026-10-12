@@ -353,6 +353,11 @@ async function isCurrentTaskReadOnly(workspace: ReturnType<typeof useWorkspaceSt
   if (status !== 'COMPLETED' || workspace.taskId === null || workspace.taskType === null) {
     return false
   }
+  // R-137 收口修 R-1（口径差明示）：此处判「该类型**最近一条**作业 COMPLETED」；后端终态守卫
+  // （JobService/TaskService 的 assertTaskNotFinalized）判「**存在任一** COMPLETED 最终作业」。
+  // 发散方向仅「后端拒而前端放行」，且该状态在终态机下不可达（最终作业成功后任务即 COMPLETED、
+  // 守卫拒新建；失败/取消均经 applyJobOutcome 联动改任务态），实际影响仅限遗留脏数据窗口。
+  // 统一 finder 口径留待后续清理批（红队 R-1 / 复核 F-1 登记），本注释不改判定逻辑。
   const finalJobType = workspace.taskType === 'IMPORT' ? 'PUBLISH' : 'EXPORT'
   const jobs = await jobsApi.listJobs(workspace.taskId).catch(() => null)
   const latest = jobs?.filter((job) => job.jobType === finalJobType)[0]
@@ -396,6 +401,10 @@ async function runUiEvent(event: UiEvent): Promise<UiEventResult> {
         const taskId = workspace.taskId
         if (taskId === null) {
           return fail('当前没有进行中的任务，无法跳转步骤')
+        }
+        // R-137（T5）：只读态守卫，与 F6 五处同构 —— 终态任务的 currentStep 不得再动
+        if (await isCurrentTaskReadOnly(workspace)) {
+          return fail('任务已结束，无法跳转步骤')
         }
         await tasksApi.goToStep(taskId, event.step)
         workspace.setStep(event.step)

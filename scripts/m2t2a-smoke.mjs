@@ -67,6 +67,17 @@ const API = process.env.SMOKE_API ?? 'http://localhost:18318'
 const URL_APP = process.env.SMOKE_APP ?? 'http://localhost:5202/'
 // 零模型回归守卫模式（SMOKE_SKIP_MODEL=1）：跳过阶段 3 真实模型挂起轮，断言① 记 skipped
 const SKIP_MODEL = process.env.SMOKE_SKIP_MODEL === '1'
+
+// ── R-137（T7/N-6 收编）：合成帧与收敛轮询的集中常量 ──────────────────────────
+// timeoutSeconds 不再裸写 120：脚本侧与 app.ai.hitl.frontend-tool-timeout（现值 120s，
+// 生产侧经 ConfirmGate.frontendToolTimeoutSeconds() 单点取值、无硬编码——本批前置复核结论）
+// 语义对齐；改配置时此处同改（N-6 收缩为脚本侧收编，生产面无硬编码可改）。
+const FRAME_TIMEOUT_SECONDS = Number(process.env.SMOKE_FRAME_TIMEOUT_SECONDS ?? 120)
+// 阶段 2 取消收敛轮询：12 次 × 500ms（合计 6s 上限）—— 与挂起超时无语义关系，
+// 是“前端状态机把取消终态收敛到 DOM”的观察窗口，集中常量 + 注释即满足 N-6 收编口径
+// （会审一致：不挂配置键）。
+const CONVERGE_POLLS = 12
+const CONVERGE_POLL_INTERVAL_MS = 500
 // 分轮保留：每轮写独立结果文件（UTC 时间戳），复跑不覆盖上一轮证据
 const STAMP = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')
 const RESULT_FILE = `${OUT}/result-${STAMP}.json`
@@ -142,7 +153,7 @@ async function waitAppReady() {
 
 function frameExpr(runId, toolCallId) {
   return `{ type:'frontend_tool_request', runId:'${runId}', toolCallId:'${toolCallId}',
-    name:'generative_form', timeoutSeconds:120, expiresAt:Date.now()+120000,
+    name:'generative_form', timeoutSeconds:${FRAME_TIMEOUT_SECONDS}, expiresAt:Date.now()+${FRAME_TIMEOUT_SECONDS * 1000},
     args: JSON.stringify({ form:{ scenario:'FILTER', title:'导出筛选条件', fields:[
       {key:'keyword',label:'配置编码关键词',type:'text',required:true}
     ]}})}`
@@ -305,7 +316,7 @@ try {
     btn.click(); return !!btn
   })()`)
   let c2 = null
-  for (let i = 0; i < 12; i++) { await sleep(500); c2 = await evaluate(countExpr(T1)); if (c2.cancelledSegments >= 2 && c2.hangingSegments === 0) break }
+  for (let i = 0; i < CONVERGE_POLLS; i++) { await sleep(CONVERGE_POLL_INTERVAL_MS); c2 = await evaluate(countExpr(T1)); if (c2.cancelledSegments >= 2 && c2.hangingSegments === 0) break }
   RESULT.phases.cancelDual = { count: c2 }
   console.log('[阶段2 取消]', JSON.stringify(c2))
   assert('③', c2.cancelledSegments === 2 && c2.hangingSegments === 0,

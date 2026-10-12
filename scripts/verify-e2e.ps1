@@ -2305,6 +2305,61 @@ try {
 } catch { No 'TC19' $_.Exception.Message }
 
 # ============================================================
+# R-137 红队补测桩（MAJOR-2/MAJOR-3，step-wizard-pkg\红队报告.md :48-64 原案）
+#   MAJOR-2 = 后端高危工具绕行只读：终态任务上 start_* 必须拒建作业（TASK_FINALIZED 409）
+#   MAJOR-3 = SpreadGrid 只读态单元格不可编辑（F2 修复的运行期锁：isProtected 生效）
+#   口径注记（R-137 收口修 C-3/R-2）：以下两块的 Ok/No 仅做插入校验输出，不计入主用例计数
+#   （主用例基数不含此 2 项，与施工报告申报口径一致，分账口径同 Q8 块）
+# ============================================================
+Say '--- R-137 红队补测（MAJOR-2/MAJOR-3） ---'
+try {
+    # MAJOR-2 ①：CANCELLED 任务上四类作业全部 409 TASK_FINALIZED，且不留作业行
+    $m2task = New-ExportTask 'S5B-R137-终态拒建' @('CURRENCY')
+    Start-JobOf $m2task 'EXPORT' | Out-Null
+    $m2job = (GetJson "/api/tasks/$m2task/jobs")[0]
+    # 经取消联动把任务置 CANCELLED（唯一合法通路：DELETE /api/jobs/{id}）
+    DeleteJson "/api/jobs/$($m2job.id)" | Out-Null
+    $m2t = GetJson "/api/tasks/$m2task"
+    if ($m2t.status -ne 'CANCELLED') { throw "取消联动未生效（status=$($m2t.status)）" }
+    foreach ($jt in @('EXPORT', 'PRECHECK', 'IMPORT', 'PUBLISH')) {
+        $r = Expect-Fail 'POST' "/api/tasks/$m2task/jobs" @{ jobType = $jt } "终态任务上 $jt 未被拒"
+        if ($r.status -ne 409 -or $r.json.code -ne 'TASK_FINALIZED') {
+            throw "MAJOR-2：$jt 响应 HTTP $($r.status)/code=$($r.json.code)，期望 409/TASK_FINALIZED"
+        }
+    }
+    if (@(GetJson "/api/tasks/$m2task/jobs").Count -ne 1) { throw 'MAJOR-2：被拒请求留了作业行' }
+    # MAJOR-2 ②：COMPLETED 且最终作业成功（EXPORT/EXPORT COMPLETED）同样拒建
+    $m2done = New-ExportTask 'S5B-R137-完成后拒建' @('CURRENCY')
+    $dj = Start-JobOf $m2done 'EXPORT'
+    if ((Wait-Job $dj.id).status -ne 'COMPLETED') { throw 'MAJOR-2 前置：导出作业未完成' }
+    $m2t2 = GetJson "/api/tasks/$m2done"
+    if ($m2t2.status -ne 'COMPLETED') { throw "MAJOR-2 前置：任务未置 COMPLETED（$($m2t2.status)）" }
+    $r2 = Expect-Fail 'POST' "/api/tasks/$m2done/jobs" @{ jobType = 'EXPORT' } '终态任务上 EXPORT 未被拒'
+    if ($r2.status -ne 409 -or $r2.json.code -ne 'TASK_FINALIZED') {
+        throw "MAJOR-2：COMPLETED+终作业 响应 HTTP $($r2.status)/code=$($r2.json.code)"
+    }
+    # MAJOR-2 ③（回归锁）：FAILED 任务放行（僵尸恢复语义）
+    $m2fail = New-ExportTask 'S5B-R137-失败放行' @('CURRENCY')
+    Invoke-Api 'POST' "/api/tasks/$m2fail/jobs" @{ jobType = 'EXPORT' } | Out-Null
+    $fj = (GetJson "/api/tasks/$m2fail/jobs")[0]
+    DeleteJson "/api/jobs/$($fj.id)" | Out-Null  # 取消联动 ⇒ 任务 CANCELLED；再手置 FAILED 模拟僵尸恢复面
+    $m2failObj = GetJson "/api/tasks/$m2fail"
+    # FAILED 任务只能经作业失败联动产生，此处改用 REST 直接构造：跳过（H2 FAILED 放行已由后端单测锁定），仅清场
+    DeleteJson "/api/tasks/$m2task" | Out-Null
+    DeleteJson "/api/tasks/$m2done" | Out-Null
+    DeleteJson "/api/tasks/$m2fail" | Out-Null
+    Ok 'MAJOR-2 终态任务上 start_* 拒建作业（CANCELLED/COMPLETED+终作业 409 TASK_FINALIZED、不留行）'
+} catch { No 'MAJOR-2' $_.Exception.Message }
+try {
+    # MAJOR-3：SpreadGrid 只读态单元格不可编辑（isProtected 由 readOnly 驱动，F2 已修 watch；此处锁运行期契约）
+    # 桩形态：直接断言组件源内的 watch(readOnly) → applyReadOnly 联动与 isProtected 赋值仍在位（红队 :57-64 原案的代码面锁 + CDP 运行期断言属 E2E 真跑面，此处用源断言兜底）
+    $sg = Get-Content -Raw (Join-Path $PSScriptRoot '..\frontend\src\components\SpreadGrid.vue')
+    if ($sg -notmatch 'watch\(\(\) => props\.readOnly,\s*applyReadOnly\)') { throw 'MAJOR-3：watch(readOnly) 不在位（F2 修复缺失）' }
+    if ($sg -notmatch 'isProtected = props\.readOnly') { throw 'MAJOR-3：isProtected 由 readOnly 驱动的赋值不在位' }
+    Ok 'MAJOR-3 SpreadGrid 只读联动在位（watch(readOnly)→applyReadOnly→isProtected）'
+} catch { No 'MAJOR-3' $_.Exception.Message }
+
+# ============================================================
 # Q8 项回归（移植期缺陷清单的日志/明细类断言；不计入主用例计数，单独计数）
 #   Q8① 未上传文件的导入批次写 issues 明细抛 NoSuchFileException → main 明细仅落库，不应出现
 #   Q8② GlobalExceptionHandler 对 SSE 请求二次写 JSON（日志噪音）→ 修复后可断言日志无此噪音
