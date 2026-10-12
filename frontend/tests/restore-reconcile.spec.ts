@@ -85,11 +85,16 @@ describe('restoreSuspendedSnapshot 的 await 后二次对账', () => {
     store.sessionId = 'sess-a'
     api.history.mockResolvedValue({ sessionId: 'sess-a', count: 0, messages: [] })
     const gate = deferred<AiRunCurrent>()
-    api.runsCurrent.mockReturnValue(gate.promise)
+    const called = deferred<string>()
+    api.runsCurrent.mockImplementation((sid: string) => {
+      called.resolve(sid)
+      return gate.promise
+    })
 
     const load = store.loadHistory()
-    // 取数用**入口捕获**的会话 id（意图显式化），而非写回时的 this.sessionId
-    await vi.waitFor(() => expect(api.runsCurrent).toHaveBeenCalledWith('sess-a'))
+    // R-153 卡③：确定性屏障（复用文件内 deferred 体例）——等 runsCurrent 真实发起且会话 id 正确，
+    // 替代 vi.waitFor 轮询（消除其超窗/竞态残差），断言（下方 :98-103 等价块）零改动
+    expect(await called.promise).toBe('sess-a')
 
     await store.resetSession() // 会话身份在 runs/current 未决期间被换掉
     gate.resolve(suspendedSnapshot())
