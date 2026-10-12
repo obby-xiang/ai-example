@@ -3,7 +3,7 @@
 import { del, get, getBlob, post, put, upload } from './http'
 import type { PageResult } from '@/types/api'
 import type { Job, JobType } from '@/types/job'
-import type { TaskListQuery, Task, TaskFile, TaskOverview, TaskSummary } from '@/types/task'
+import type { TaskListQuery, Task, TaskFile, TaskSummary } from '@/types/task'
 import type { TaskEventFrame } from '@/types/sse'
 
 /** 任务列表：type/status/keyword 过滤 + 分页（后端 createdAt DESC, id DESC）。 */
@@ -14,11 +14,6 @@ export function listTasks(params: TaskListQuery = {}): Promise<PageResult<TaskSu
 /** 任务详情（含 items）。 */
 export function getTask(id: number): Promise<Task> {
   return get<Task>(`/tasks/${id}`)
-}
-
-/** 任务概览：任务 + 全部作业 + 文件（refreshCurrent 读取当前任务快照用）。 */
-export function getTaskOverview(id: number): Promise<TaskOverview> {
-  return get<TaskOverview>(`/tasks/${id}/overview`)
 }
 
 /** 创建任务（201；默认步骤 EXPORT→SELECT_DEFS / IMPORT→UPLOAD）。 */
@@ -141,7 +136,6 @@ export function openTaskEvents(
 export const tasksApi = {
   listTasks,
   getTask,
-  getTaskOverview,
   createTask,
   deleteTask,
   selectDefs,
@@ -159,4 +153,4 @@ export const tasksApi = {
 }
 
 /** 便捷类型出口（供 store 使用）。 */
-export type { Job, JobType, Task, TaskFile, TaskOverview, TaskSummary }
+export type { Job, JobType, Task, TaskFile, TaskSummary }

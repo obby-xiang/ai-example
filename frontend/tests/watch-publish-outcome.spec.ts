@@ -1,17 +1,16 @@
 /**
- * 手动刷新批（S4，M4 + F4）：`watchPublishOutcome` 复用 `utils/job-watch.ts`，
- * 消灭 `api/jobs.ts` 的 1s 裸轮询 `waitForJobFinal`。
+ * 手动刷新批（S4，M4 + F4）→ R-94 范围 B：`watchPublishOutcome` 复用 `utils/job-watch.ts`，
+ * 原 Q4 `publishConflict/issues` 死字段族清除，发布冲突改走双通道落点。
  *
  * 本 spec 锁的契约（假时钟 + 受控 http.get + EventSource 全局桩）：
- * - **事件驱动替代裸轮询**：发布跟踪 = watchJob（SSE 主通道 + 3s 兜底 + 帧空闲看门狗），
- *   终态判定以快照为准（watchJob onFinal 内做）；onSnapshot 接替旧 onTick 直更 currentJobs；
- * - **300s 墙钟 = 独立定时器**：非终态到达 ⇒ 提示恰好 1 次 + 保留现场 + 收摊；
- *   终态到达 ⇒ 墙钟**即清**（推进再久也不超时）；
- * - **watchingJobId 闸（F4）移植进 onFinal**：旧作业晚到的终态不覆盖/清空新冲突；
- * - **注册表归属单一**：同 taskId+jobId 的 publish watcher 不得双开（第二次调用返回同一 dispose）；
- * - **取消链路 = dispose 形态（C1 收口修，唯一机制）**：调用方持有 dispose，轮次收尾调用即静默
- *   收摊（不弹提示、不上抛、void 调用点安全）——生产可达路径即此，spec 用例直接锁它；
- * - FAILED 终态 ⇒ issues 拉取与 Q4 冲突组装落 onFinal 内，单次提示（F5 纪律不变）。
+ * - **事件驱动**：发布跟踪 = watchJob（SSE 主通道 + 3s 兜底 + 帧空闲看门狗），终态判定以快照为准；
+ * - **300s 墙钟 = 独立定时器**：非终态到达 ⇒ 提示恰好 1 次 + 收摊；终态到达 ⇒ 墙钟**即清**；
+ * - **watchingJobId 闸（F4）**：旧作业晚到的终态不覆盖/清空新作业的冲突出口；
+ * - **注册表归属单一**：同 taskId+jobId 的 publish watcher 不得双开；
+ * - **取消链路 = dispose 形态（C1，唯一机制）**：轮次收尾调用即静默收摊（不弹提示、不上抛）；
+ * - **R-94 双通道**：FAILED 终态 ⇒ 拉 issues 组明细摘要 —— ① onConflict 回调（AI 保证通道，
+ *   run_job 分支注入，UiEventResult 同形回灌）；② ElMessage 瞬时提示（不承载明细）；
+ *   摘要逐条列前 5 条 + 「共 N 处」。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
@@ -25,7 +24,6 @@ const toast = vi.hoisted(() => ({
 }))
 const tasksApiMock = vi.hoisted(() => ({
   listTasks: vi.fn(),
-  getTaskOverview: vi.fn(),
   getTask: vi.fn()
 }))
 
@@ -43,7 +41,6 @@ vi.mock('element-plus', () => ({ ElMessage: toast }))
 
 import { PUBLISH_WATCH_WALL_CLOCK_MS, useTaskStore } from '@/stores/task'
 import type { Job, JobStatus } from '@/types/job'
-import type { PublishConflictAsync } from '@/types/api'
 
 /** EventSource 全局桩（watchJob 构造时 new；本批多数用例不需要帧，终态靠开局快照）。 */
 class EventSourceStub {
@@ -86,13 +83,6 @@ function makeJob(status: JobStatus, id = 9): Job {
   }
 }
 
-const OLD_CONFLICT: PublishConflictAsync = {
-  jobId: 9,
-  jobStatus: 'FAILED',
-  issueKeys: ['DEF_A#1'],
-  message: '上次发布的版本冲突'
-}
-
 function jobPollCount(): number {
   return http.get.mock.calls.filter(([url]) => String(url).startsWith('/jobs/')).length
 }
@@ -108,8 +98,6 @@ beforeEach(() => {
   setActivePinia(createPinia())
   http.get.mockReset()
   Object.values(toast).forEach((spy) => spy.mockReset())
-  tasksApiMock.getTaskOverview.mockReset()
-  tasksApiMock.getTaskOverview.mockResolvedValue({ task: {}, jobs: [], files: [] })
   tasksApiMock.getTask.mockReset()
   tasksApiMock.getTask.mockResolvedValue({ type: 'EXPORT' })
   tasksApiMock.listTasks.mockReset()
@@ -124,12 +112,12 @@ afterEach(() => {
   delete (globalThis as unknown as { EventSource?: unknown }).EventSource
 })
 
-describe('stores/task.ts · watchPublishOutcome 复用 watchJob（M4：无 1s 裸轮询）', () => {
+describe('stores/task.ts · watchPublishOutcome 复用 watchJob（M4：无裸轮询）→ R-94 双通道出口', () => {
   it('wall-clock-const-300s：发布跟踪墙钟 = 300_000ms（独立定时器口径）', () => {
     expect(PUBLISH_WATCH_WALL_CLOCK_MS).toBe(300_000)
   })
 
-  it('failed-writes-conflict-once：开局快照即 FAILED ⇒ onFinal 内拉 issues 组装 Q4 冲突，提示恰好 1 次', async () => {
+  it('failed-dual-channel：开局快照即 FAILED ⇒ 单次 ElMessage + onConflict 收明细摘要（共 N 处）', async () => {
     http.get.mockImplementation((url: string) => {
       if (url.includes('/issues')) {
         return Promise.resolve({
@@ -140,43 +128,70 @@ describe('stores/task.ts · watchPublishOutcome 复用 watchJob（M4：无 1s �
       return Promise.resolve(makeJob('FAILED'))
     })
     const store = useTaskStore()
+    const onConflict = vi.fn()
 
-    const dispose = store.watchPublishOutcome(3, 9)
+    const dispose = store.watchPublishOutcome(3, 9, { onConflict })
     await vi.advanceTimersByTimeAsync(0)
     await vi.advanceTimersByTimeAsync(0)
 
-    expect(store.publishConflict).not.toBeNull()
-    expect(store.publishConflict?.jobId).toBe(9)
-    expect(store.publishConflict?.jobStatus).toBe('FAILED')
-    expect(store.publishConflict?.message).toBe('发布冲突明细')
-    expect(toast.warning).toHaveBeenCalledTimes(1) // F5：失败分支单次提示
+    // 用户瞬时通道：单次提示（F5），文案不承载明细（R-94 范围 B ②）
+    expect(toast.warning).toHaveBeenCalledTimes(1)
+    expect(toast.warning).toHaveBeenCalledWith('发布冲突：1 处，明细见 AI 面板回执')
+    // AI 保证通道：明细摘要（逐条 + 共 N 处）经 onConflict 出口
+    expect(onConflict).toHaveBeenCalledTimes(1)
+    const summary = onConflict.mock.calls[0][0] as string
+    expect(summary).toContain('发布作业 #9 校验冲突明细')
+    expect(summary).toContain('1. DEF_A#R1：发布冲突明细')
+    expect(summary).toContain('（共 1 处）')
     expect(typeof dispose).toBe('function') // 返回 dispose（调用方持有）
   })
 
-  it('completed-clears-conflict：非 FAILED 终态 ⇒ 清冲突态、零提示', async () => {
-    http.get.mockResolvedValue(makeJob('COMPLETED'))
+  it('conflict-summary-truncates-at-5：明细摘要只列前 5 条 + 「共 N 处」截断标注', async () => {
+    const issues = Array.from({ length: 7 }, (_, i) => ({
+      severity: 'ERROR', defCode: `DEF_${i + 1}`, rowKey: `R${i + 1}`, message: `冲突 ${i + 1}`
+    }))
+    http.get.mockImplementation((url: string) => {
+      if (url.includes('/issues')) {
+        return Promise.resolve({ content: issues, totalElements: 7 })
+      }
+      return Promise.resolve(makeJob('FAILED'))
+    })
     const store = useTaskStore()
-    store.publishConflict = { ...OLD_CONFLICT }
+    const onConflict = vi.fn()
 
-    store.watchPublishOutcome(3, 9)
+    store.watchPublishOutcome(3, 9, { onConflict })
     await vi.advanceTimersByTimeAsync(0)
     await vi.advanceTimersByTimeAsync(0)
 
-    expect(store.publishConflict).toBeNull()
-    expect(toast.warning).not.toHaveBeenCalled()
+    expect(toast.warning).toHaveBeenCalledWith('发布冲突：7 处，明细见 AI 面板回执')
+    const summary = onConflict.mock.calls[0][0] as string
+    expect(summary).toContain('5. DEF_5#R5：冲突 5')
+    expect(summary).not.toContain('6. DEF_6')
+    expect(summary).toContain('（仅列前 5 条，共 7 处）')
   })
 
-  it('wall-clock-300s-exit：300s 未终态 ⇒ 超时提示恰好 1 次、保留现场、watcher 收摊', async () => {
+  it('completed-no-prompt：非 FAILED 终态 ⇒ 零提示、onConflict 不出', async () => {
+    http.get.mockResolvedValue(makeJob('COMPLETED'))
+    const store = useTaskStore()
+    const onConflict = vi.fn()
+
+    store.watchPublishOutcome(3, 9, { onConflict })
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(toast.warning).not.toHaveBeenCalled()
+    expect(onConflict).not.toHaveBeenCalled()
+  })
+
+  it('wall-clock-300s-exit：300s 未终态 ⇒ 超时提示恰好 1 次、watcher 收摊（帧不再驱动取数）', async () => {
     http.get.mockResolvedValue(makeJob('RUNNING'))
     const store = useTaskStore()
-    store.publishConflict = { ...OLD_CONFLICT }
 
     store.watchPublishOutcome(3, 9)
     await vi.advanceTimersByTimeAsync(0)
     await advancePastWallClock()
     await vi.advanceTimersByTimeAsync(0)
 
-    expect(store.publishConflict?.message).toBe(OLD_CONFLICT.message) // 不静默清冲突
     expect(toast.warning).toHaveBeenCalledTimes(1)
     expect(toast.warning).toHaveBeenCalledWith(expect.stringContaining('等待超时'))
 
@@ -186,7 +201,7 @@ describe('stores/task.ts · watchPublishOutcome 复用 watchJob（M4：无 1s �
     expect(jobPollCount()).toBe(pollsAtExit)
   })
 
-  it('wall-clock-cleared-on-final：终态到达即清墙钟 —— 之后再推进超 300s 也不报超时', async () => {
+  it('wall-clock-cleared-on-final：FAILED 终态到达即清墙钟 —— 之后再推进超 300s 也不重复提示', async () => {
     let calls = 0
     http.get.mockImplementation((url: string) => {
       if (url.includes('/issues')) {
@@ -200,8 +215,8 @@ describe('stores/task.ts · watchPublishOutcome 复用 watchJob（M4：无 1s �
     store.watchPublishOutcome(3, 9)
     await vi.advanceTimersByTimeAsync(10_000) // 第二拉在 3s 兜底：FAILED 终态到达
     await vi.advanceTimersByTimeAsync(0)
-    expect(store.publishConflict).not.toBeNull() // FAILED 且零 ERROR issues ⇒ 组装默认文案冲突
-    expect(toast.warning).toHaveBeenCalledTimes(1) // 失败提示（非超时）
+    expect(toast.warning).toHaveBeenCalledTimes(1) // 失败提示恰好 1 次（空清单 ⇒ 0 处形态）
+    expect(toast.warning).toHaveBeenCalledWith(expect.stringContaining('发布冲突'))
 
     await advancePastWallClock() // 远超 300s：墙钟已清 ⇒ 不再超时提示
     expect(toast.warning).toHaveBeenCalledTimes(1)
@@ -236,7 +251,7 @@ describe('stores/task.ts · watchPublishOutcome 复用 watchJob（M4：无 1s �
     }
   })
 
-  it('stale-outcome-gated（F4）：并发两条跟踪，旧作业晚到终态不覆盖/清空新冲突（闸移植进 onFinal）', async () => {
+  it('stale-outcome-gated（F4）：并发两条跟踪，旧作业晚到终态不得再走冲突出口（闸在 onFinal 内）', async () => {
     let job9Calls = 0
     http.get.mockImplementation((url: string) => {
       if (url.includes('/issues')) {
@@ -252,16 +267,22 @@ describe('stores/task.ts · watchPublishOutcome 复用 watchJob（M4：无 1s �
       return Promise.resolve(makeJob('FAILED', 10)) // 快：开局即终态
     })
     const store = useTaskStore()
+    const staleConflict = vi.fn()
+    const currentConflict = vi.fn()
 
-    const stale = store.watchPublishOutcome(3, 9) // 旧作业（慢）
-    const current = store.watchPublishOutcome(3, 10) // 新作业（快）—— 占据 watchingJobId 闸位
+    const stale = store.watchPublishOutcome(3, 9, { onConflict: staleConflict }) // 旧作业（慢）
+    const current = store.watchPublishOutcome(3, 10, { onConflict: currentConflict }) // 新作业（快）—— 占据闸位
     await vi.advanceTimersByTimeAsync(0)
     await vi.advanceTimersByTimeAsync(0)
-    expect(store.publishConflict?.jobId).toBe(10) // 新冲突已落位
+    // 新作业冲突已走出口（明细摘要 + 单次提示）
+    expect(currentConflict).toHaveBeenCalledTimes(1)
+    expect(currentConflict.mock.calls[0][0]).toContain('DEF_X')
+    expect(toast.warning).toHaveBeenCalledTimes(1)
 
     await vi.advanceTimersByTimeAsync(10_000) // 旧作业兜底 tick 拉到终态（晚到结局）
     await vi.advanceTimersByTimeAsync(0)
-    expect(store.publishConflict?.jobId).toBe(10) // 闸生效：旧结局不得覆盖/清空
+    expect(staleConflict).not.toHaveBeenCalled() // 闸生效：旧结局不得再走冲突出口
+    expect(toast.warning).toHaveBeenCalledTimes(1) // 提示仍只 1 次
     stale()
     current()
   })
@@ -278,22 +299,6 @@ describe('stores/task.ts · watchPublishOutcome 复用 watchJob（M4：无 1s �
     expect(EventSourceStub.instances).toHaveLength(1)
     expect(jobPollCount()).toBe(1) // 只有一份开局快照
     first()
-  })
-
-  it('snapshot-updates-currentJobs：onSnapshot 接替旧 onTick 直更当前作业行', async () => {
-    const running = { ...makeJob('RUNNING', 77), progress: 7, total: 10 }
-    http.get.mockResolvedValue(running)
-    const store = useTaskStore()
-    store.currentTaskId = 3
-    store.currentJobs = [{ ...makeJob('RUNNING', 77), progress: 1, total: 10 }]
-
-    const dispose = store.watchPublishOutcome(3, 77) // 唯一键：不与前用例遗留注册项撞车
-    await vi.advanceTimersByTimeAsync(0)
-    await vi.advanceTimersByTimeAsync(0)
-
-    expect(store.currentJobs[0]?.progress).toBe(7)
-    expect(store.currentJobs[0]?.id).toBe(77)
-    dispose()
   })
 })
 

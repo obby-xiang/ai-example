@@ -1,7 +1,9 @@
 /**
- * 任务中心 store：列表/分页/筛选 + 手动刷新通道 + 当前任务与作业/问题状态。
+ * 任务中心 store：列表/分页/筛选 + 手动刷新通道。
  *
- * 形态来源：deepseek-v4-pro `views/TasksView.vue:154`（TS 化并补上 Q4 的**发布冲突异步形态**）。
+ * 形态来源：deepseek-v4-pro `views/TasksView.vue:154`（TS 化；原 Q4 发布冲突异步形态
+ * `publishConflict/issues` 一族死字段随 R-94 清除，冲突明细改走双通道落点，见
+ * {@link applyPublishOutcome}）。
  *
  * 刷新口径（手动刷新批，M1 + F2）：任务中心**不再有任何周期自刷**（步1/步2 的
  * 4s 条件 + 30s 兜底两张表、步3 的任务级 SSE 订阅池整体摘除 —— 页面静止时对后端零请求）。
@@ -22,10 +24,10 @@ import { ApiError } from '@/api/http'
 import { jobsApi } from '@/api/jobs'
 import { tasksApi } from '@/api/tasks'
 import { ROUTE_NAMES } from '@/router'
-import { ErrorCode, type PageResult, type PublishConflictAsync } from '@/types/api'
+import { ErrorCode, type PageResult } from '@/types/api'
 import { isJobFinal } from '@/types/job'
-import { TaskSteps, type ImportMode, type Task, type TaskFile, type TaskStatus, type TaskSummary, type TaskType } from '@/types/task'
-import type { Job, JobStatus, JobType, ValidationIssue } from '@/types/job'
+import { TaskSteps, type Task, type TaskStatus, type TaskSummary, type TaskType } from '@/types/task'
+import type { Job, JobStatus, ValidationIssue } from '@/types/job'
 import { watchJob } from '@/utils/job-watch'
 import type { RouteLocationRaw } from 'vue-router'
 
@@ -65,8 +67,7 @@ export function mapTaskStatusToStep(status: TaskStatus | null): StepStateView {
 let refreshPending = false
 
 /**
- * 发布跟踪的 300s 墙钟（M4）：独立定时器，**终态到达即清**。非终态到达 ⇒ 提示恰好 1 次 +
- * 保留现场（不清 publishConflict）+ 收摊。取代旧 waitForJobFinal 内嵌的 timeoutMs 轮询判据。
+ * 发布跟踪的 300s 墙钟（M4）：独立定时器，**终态到达即清**。非终态到达 ⇒ 提示恰好 1 次 + 收摊。
  */
 export const PUBLISH_WATCH_WALL_CLOCK_MS = 300_000
 
@@ -88,6 +89,17 @@ function notifyJobWatch(message: string): void {
 }
 
 /**
+ * R-94 范围 B：冲突明细摘要组装（逐条列出，截断前 5 条 + 「共 N 处」）。
+ * 文本即 Ai 保证通道的 message 载荷（回灌模型）与人读明细。
+ */
+function formatPublishConflictSummary(jobId: number, issues: ValidationIssue[]): string {
+  const lines = issues.slice(0, 5).map((issue, index) =>
+    `${index + 1}. ${issue.defCode}#${issue.rowKey ?? '-'}：${issue.message}`)
+  const tail = issues.length > 5 ? `（仅列前 5 条，共 ${issues.length} 处）` : `（共 ${issues.length} 处）`
+  return [`发布作业 #${jobId} 校验冲突明细：`, ...lines, tail].join('\n')
+}
+
+/**
  * 发布跟踪的 jobId 闸（F4，红队 M4）：`watchPublishOutcome` 的结局只在 jobId 匹配**当前跟踪**时
  * 生效。并发两条跟踪时后发起者占据闸位 —— 旧作业晚到的结局不得覆盖/清空新作业已落位的冲突态。
  */
@@ -105,21 +117,7 @@ export const useTaskStore = defineStore('task', {
     filterKeyword: '',
     loading: false,
     error: null as string | null,
-    lastLoadedAt: 0 as number,
-
-    /** 当前任务（向导与 ui_event 刷新链路共用） */
-    currentTaskId: null as number | null,
-    currentTask: null as Task | null,
-    currentJobs: [] as Job[],
-    currentFiles: [] as TaskFile[],
-    /** 当前任务最新作业的校验问题 */
-    issues: [] as ValidationIssue[],
-    issuesTotal: 0,
-    issuesLoading: false,
-    detailLoading: false,
-
-    /** Q4 发布冲突的异步形态（作业 FAILED + issues 文案） */
-    publishConflict: null as PublishConflictAsync | null
+    lastLoadedAt: 0 as number
   }),
 
   getters: {
@@ -216,39 +214,6 @@ export const useTaskStore = defineStore('task', {
       void this.load()
     },
 
-    /** 刷新当前任务详情与其最新作业的问题。 */
-    async refreshCurrent(): Promise<void> {
-      const taskId = this.currentTaskId
-      if (taskId === null) {
-        return
-      }
-      this.detailLoading = true
-      try {
-        const overview = await tasksApi.getTaskOverview(taskId)
-        this.currentTask = overview.task
-        this.currentJobs = overview.jobs ?? []
-        this.currentFiles = overview.files ?? []
-        const latest = this.currentJobs[0]
-        if (latest?.id !== undefined && latest.status === 'FAILED') {
-          await this.loadIssues(latest.id)
-        }
-      } catch (error) {
-        this.error = error instanceof Error ? error.message : '任务详情加载失败'
-      } finally {
-        this.detailLoading = false
-      }
-    },
-
-    closeTask(): void {
-      this.currentTaskId = null
-      this.currentTask = null
-      this.currentJobs = []
-      this.currentFiles = []
-      this.issues = []
-      this.issuesTotal = 0
-      this.publishConflict = null
-    },
-
     async createTask(type: TaskType, title?: string): Promise<Task | null> {
       try {
         const task = await tasksApi.createTask(type, title)
@@ -263,9 +228,6 @@ export const useTaskStore = defineStore('task', {
     async removeTask(taskId: number): Promise<boolean> {
       try {
         await tasksApi.deleteTask(taskId)
-        if (this.currentTaskId === taskId) {
-          this.closeTask()
-        }
         await this.load()
         return true
       } catch (error) {
@@ -274,35 +236,10 @@ export const useTaskStore = defineStore('task', {
       }
     },
 
-    async setImportMode(taskId: number, mode: ImportMode): Promise<boolean> {
-      try {
-        await tasksApi.setImportMode(taskId, mode)
-        await this.refreshCurrent()
-        return true
-      } catch (error) {
-        this.error = error instanceof Error ? error.message : '设置导入模式失败'
-        return false
-      }
-    },
-
-    /** 启动作业并刷新快照。 */
-    async startJob(taskId: number, jobType: JobType): Promise<Job | null> {
-      try {
-        const job = await jobsApi.createJob(taskId, jobType)
-        await this.refreshCurrent()
-        await this.load()
-        return job
-      } catch (error) {
-        this.error = error instanceof Error ? error.message : '启动作业失败'
-        return null
-      }
-    },
-
     /** 取消作业：终态 409 按码给提示（不当普通错误）。 */
     async cancelJob(jobId: number): Promise<{ handled: boolean; message: string }> {
       try {
         await jobsApi.cancelJob(jobId)
-        await this.refreshCurrent()
         return { handled: true, message: `已请求取消作业 #${jobId}` }
       } catch (error) {
         if (error instanceof ApiError && error.code === ErrorCode.JOB_ALREADY_FINAL) {
@@ -312,23 +249,8 @@ export const useTaskStore = defineStore('task', {
       }
     },
 
-    /** 加载某作业的校验问题（Q4 冲突文案来源）。 */
-    async loadIssues(jobId: number, page = 0, size = 50): Promise<void> {
-      this.issuesLoading = true
-      try {
-        const result = await jobsApi.getIssues(jobId, page, size)
-        this.issues = result.content ?? []
-        this.issuesTotal = result.totalElements ?? 0
-      } catch (error) {
-        this.error = error instanceof Error ? error.message : '校验问题加载失败'
-      } finally {
-        this.issuesLoading = false
-      }
-    },
-
     /**
-     * 跟踪发布作业终态：FAILED 时查 issues 并组装 Q4 的冲突形态（M4：复用 watchJob，
-     * 消灭 waitForJobFinal 的 1s 裸轮询 —— 终态判定走 SSE 主通道 + 3s 兜底 + 帧空闲看门狗）。
+     * 一键恢复向导：按任务类型与当前步骤跳到对应向导页。
      *
      * 前端**禁止**把发布当成同步请求判错：POST /api/tasks/{id}/jobs 恒 201，
      * 冲突只能从作业终态 + issues 文案读出。
@@ -336,12 +258,18 @@ export const useTaskStore = defineStore('task', {
      * 出口语义（调用点是 stores/workspace.ts 的 `void` 调用，不接 rejection）：
      * - **取消链路 = dispose 形态（唯一机制，C1 收口修对齐 M4）**：调用方持有返回的 dispose，
      *   轮次收尾/新一轮发起时调用即静默收摊（不弹提示）；不上抛（上抛即 unhandled rejection）；
-     * - 300s 墙钟（独立定时器，终态到达即清）→ 非终态到达：保留现场 + 提示恰好 1 次 + 收摊；
-     * - 失败/成功终态 → onFinal 内收口（issues 拉取与 Q4 组装都在那里）。
+     * - 300s 墙钟（独立定时器，终态到达即清）→ 非终态到达：提示恰好 1 次 + 收摊；
+     * - 失败/成功终态 → onFinal 内收口（R-94 范围 B 双通道：ElMessage 瞬时提示 +
+     *   onConflict 明细摘要回灌，见 {@link applyPublishOutcome}）。
      *
+     * @param handlers.onConflict 冲突明细摘要的出口回调（AI 保证通道缝点，run_job 分支注入）
      * @returns dispose —— 调用方持有；组件卸载/轮次收尾调用。
      */
-    watchPublishOutcome(taskId: number, jobId: number): () => void {
+    watchPublishOutcome(
+      taskId: number,
+      jobId: number,
+      handlers: { onConflict?: (summary: string) => void } = {}
+    ): () => void {
       if (!jobId) {
         return () => {}
       }
@@ -370,17 +298,10 @@ export const useTaskStore = defineStore('task', {
       disposeWatched = watchJob({
         taskId,
         jobId,
-        // onSnapshot 接替旧 onTick：每份快照直更当前作业行（原 waitForJobFinal 的 onTick 语义）
-        onSnapshot: (job) => {
-          const index = this.currentJobs.findIndex((item) => item.id === jobId)
-          if (index >= 0) {
-            this.currentJobs.splice(index, 1, job)
-          }
-        },
         onFinal: (job) => {
           clearWallClock() // 终态到达即清墙钟（300s 出口只在"没等到终态"时发生）
           dispose()
-          void this.applyPublishOutcome(jobId, job)
+          void this.applyPublishOutcome(jobId, job, handlers)
         },
         onError: (error) => {
           dispose()
@@ -398,39 +319,49 @@ export const useTaskStore = defineStore('task', {
     },
 
     /**
-     * 发布终态收口（onFinal 内调用）：F4 jobId 闸 → 刷新当前任务 → FAILED 时拉 issues 组装冲突。
-     * 提示与组装都只做一次。
+     * 发布终态收口（onFinal 内调用，R-94 范围 B）：F4 jobId 闸 → 非 FAILED 直接收；
+     * FAILED 时拉 issues 组明细摘要，双通道落点（不复活 store 字段、不建视图渲染位）：
+     * ① `handlers.onConflict`（AI 保证通道 —— run_job 分支注入，明细摘要经 UiEventResult
+     *   同形通道回灌模型 + 面板回执位）；② `notifyJobWatch` ElMessage 瞬时提示。提示只做一次。
      */
-    async applyPublishOutcome(jobId: number, job: Job): Promise<void> {
+    async applyPublishOutcome(
+      jobId: number,
+      job: Job,
+      handlers: { onConflict?: (summary: string) => void } = {}
+    ): Promise<void> {
       if (watchingJobId !== jobId) {
         // F4：旧作业晚到终态 —— 闸位已被更新的跟踪占据，不覆盖/清空新冲突
         return
       }
-      await this.refreshCurrent()
       if (job.status !== 'FAILED') {
-        this.publishConflict = null
         return
       }
-      // F5：FAILED 结局与 abort/timeout 同出口纪律 —— 单次提示（此前独漏失败分支）；
-      // 不重建 publishConflict 渲染位（归 R-94 批）。
-      notifyJobWatch(`发布作业 #${jobId} 失败，请查看校验问题清单`)
-      await this.loadIssues(jobId)
-      const errorIssues = this.issues.filter((issue) => issue.severity === 'ERROR')
-      const first = errorIssues[0]
-      this.publishConflict = {
-        jobId,
-        jobStatus: 'FAILED',
-        issueKeys: errorIssues.map((issue) => `${issue.defCode}#${issue.rowKey ?? '-'}`),
-        message: first?.message ?? '发布作业失败，请查看校验问题清单'
+      let issues: ValidationIssue[] | null = null
+      try {
+        const result = await jobsApi.getIssues(jobId, 0, 50)
+        issues = result.content ?? []
+      } catch {
+        issues = null // 明细拉取失败：提示纪律不变（F5），明细通道降级为无清单形态
       }
+      if (issues === null) {
+        notifyJobWatch(`发布作业 #${jobId} 失败，校验问题清单拉取失败，请在任务中心查看`)
+        handlers.onConflict?.(`发布作业 #${jobId} 失败（发布冲突），校验问题明细拉取失败`)
+        return
+      }
+      // 冲突项 = ERROR 级（沿袭原 publishConflict.issueKeys 口径）；无 ERROR 条目时降级用全量清单
+      const conflictIssues = issues.filter((issue) => issue.severity === 'ERROR')
+      const counted = conflictIssues.length > 0 ? conflictIssues : issues
+      notifyJobWatch(`发布冲突：${counted.length} 处，明细见 AI 面板回执`)
+      handlers.onConflict?.(formatPublishConflictSummary(jobId, counted))
     },
 
     /**
-     * 一键恢复向导：按任务类型与当前步骤跳到对应向导页。
+     * 一键恢复向导：按任务类型跳到对应向导页。
      * 类型未知时按提交的 taskType 兜底，仍未知则先拉一次任务详情再定。
+     * （R-94：原 `currentTask?.type` 读点随死字段删除 —— 该值恒 null 恒走兜底，功能等效死码。）
      */
     async restoreWizard(taskId: number, taskType?: TaskType): Promise<RouteLocationRaw> {
-      const type = taskType ?? this.currentTask?.type ?? (await this.fetchTaskType(taskId))
+      const type = taskType ?? (await this.fetchTaskType(taskId))
       if (type === 'IMPORT') {
         return { name: ROUTE_NAMES.importWizard, query: { taskId: String(taskId) } }
       }
@@ -440,7 +371,6 @@ export const useTaskStore = defineStore('task', {
     /** 同步版的向导目标（供 ui_event 分发使用，命中缓存即回声，不回则按 EXPORT 兜底）。 */
     resolveWizardRoute(taskId: number, taskType?: TaskType): WizardRouteTarget {
       const cached = taskType
-        ?? this.currentTask?.type
         ?? this.items.find((item) => item.task.id === taskId)?.task.type
         ?? 'EXPORT'
       if (cached === 'IMPORT') {

@@ -257,15 +257,6 @@ public class TaskService {
         return task;
     }
 
-    @Transactional
-    public void complete(Long taskId) {
-        Task task = taskRepository.findById(taskId)
-                .orElseThrow(() -> ResourceNotFoundException.of("任务", taskId));
-        task.setStatus(Task.TaskStatus.COMPLETED);
-        task.setCurrentStep("DONE");
-        taskRepository.save(task);
-    }
-
     /**
      * 只更新任务状态（不改步骤），供作业完成/失败时流转。
      *

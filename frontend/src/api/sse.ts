@@ -390,15 +390,11 @@ async function tryReattach(
   handlers: SseFrameHandlers,
   options: SseStreamOptions
 ): Promise<{ terminal: boolean; reason?: string }> {
-  const maxReconnects = DEFAULT_MAX_RECONNECTS
   if (!state.runId) {
     return { terminal: false, reason: '未收到 start 帧（无 runId 可重挂），判定断流' }
   }
   if (options.signal?.aborted) {
     return { terminal: false, reason: '连接已取消' }
-  }
-  if (maxReconnects <= 0) {
-    return { terminal: false, reason: '未收到终帧（已禁用自动重挂）' }
   }
   const info = await reattach(state.runId, handlers, options, state)
   return info.terminal ? { terminal: true } : { terminal: false, reason: info.reason ?? '重挂未能收到终帧' }

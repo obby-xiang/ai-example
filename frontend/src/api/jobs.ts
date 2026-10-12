@@ -38,12 +38,6 @@ export function getDiff(jobId: number): Promise<ConfigStagingRow[]> {
 /** 作业终态集合（与 isJobFinal 同源，导出便于 store 判定）。 */
 export const JOB_FINAL_STATUSES: readonly JobStatus[] = ['COMPLETED', 'FAILED', 'CANCELLED']
 
-/**
- * 注：原 `waitForJobFinal`（1s 裸轮询循环）已在手动刷新批（S4，M4）摘除 ——
- * 发布终态跟踪改复用 `utils/job-watch.ts` 的 watchJob（SSE 主通道 + 3s 兜底 + 帧空闲看门狗），
- * 终态判定以快照为准，见 stores/task.ts 的 watchPublishOutcome。
- */
-
 export const jobsApi = {
   createJob,
   listJobs,

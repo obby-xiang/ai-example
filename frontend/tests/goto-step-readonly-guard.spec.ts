@@ -12,15 +12,14 @@ import { createPinia, setActivePinia } from 'pinia'
 
 const api = vi.hoisted(() => ({
   goToStep: vi.fn(),
-  listJobs: vi.fn(),
-  refreshCurrent: vi.fn()
+  listJobs: vi.fn()
 }))
 
 vi.mock('@/api/tasks', () => ({ tasksApi: { goToStep: api.goToStep } }))
 vi.mock('@/api/jobs', () => ({ jobsApi: { listJobs: api.listJobs } }))
 vi.mock('@/router', () => ({ default: { push: vi.fn() }, ROUTE_NAMES: { exportWizard: 'export', importWizard: 'import' } }))
 vi.mock('@/stores/task', () => ({
-  useTaskStore: () => ({ refreshCurrent: api.refreshCurrent, resolveWizardRoute: () => ({ name: 'export' }) })
+  useTaskStore: () => ({ resolveWizardRoute: () => ({ name: 'export' }) })
 }))
 
 import { dispatchUiEvent, useWorkspaceStore } from '@/stores/workspace'
@@ -36,7 +35,6 @@ describe('R-137 · goto_step 只读守卫（workspace.ts dispatchUiEvent）', ()
     setActivePinia(createPinia())
     api.goToStep.mockReset()
     api.listJobs.mockReset()
-    api.refreshCurrent.mockReset()
   })
 
   it('CANCELLED 任务：goto_step 被 fail，不触达 goToStep API', async () => {

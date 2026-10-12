@@ -338,6 +338,20 @@ function fail(message: string): UiEventResult {
 }
 
 /**
+ * R-94 范围 B：异步终态结果（发布冲突明细）的回灌出口，与 {@link dispatchUiEvent} 同形同通道：
+ * (1) 记入工作区动作（source=AI，随下一轮请求回到模型 = AI 保证通道）；
+ * (2) `ui_event_result` 事件广播（AI 面板回执位，既有渲染位）。
+ *
+ * 为什么不在 run_job 的同步返回里等明细：发布作业分钟级才出终态，而 dispatch 链上有界等待
+ * 是既有红线（R-11 / download 分支同族），故冲突检出时（终态后）经本出口异步回灌。
+ */
+export function reportUiEventResult(event: string, message: string): void {
+  const workspace = useWorkspaceStore()
+  workspace.touch(message, 'AI')
+  emitWorkspaceEvent('ui_event_result', { event, handled: true, message })
+}
+
+/**
  * 只读态公共判据（收口修 F6，红队 minor-4）：与两向导 `isReadOnly` 同口径的契约层版，
  * 供 ui_event 写事件共用（守卫逻辑只此一份，各分支只传文案）。
  *
@@ -408,7 +422,6 @@ async function runUiEvent(event: UiEvent): Promise<UiEventResult> {
         }
         await tasksApi.goToStep(taskId, event.step)
         workspace.setStep(event.step)
-        await taskStore.refreshCurrent()
         return ok(`已跳转到步骤 ${event.step}`)
       }
       case 'select_defs': {
@@ -422,7 +435,6 @@ async function runUiEvent(event: UiEvent): Promise<UiEventResult> {
         }
         await tasksApi.selectDefs(taskId, event.defCodes)
         workspace.setSelectedDefs(event.defCodes)
-        await taskStore.refreshCurrent()
         return ok(`已选择配置项：${event.defCodes.join('、') || '（空）'}`)
       }
       case 'set_conditions': {
@@ -458,13 +470,15 @@ async function runUiEvent(event: UiEvent): Promise<UiEventResult> {
           return fail('任务已结束，仅供查看，未启动作业')
         }
         const job = await jobsApi.createJob(event.taskId, event.jobType)
-        await taskStore.refreshCurrent()
         if (event.jobType === 'PUBLISH') {
-          // Q4：发布冲突是**异步形态**（恒 201），必须等作业终态后查 issues。
+          // Q4 / R-94 范围 B：发布冲突是**异步形态**（恒 201），必须等作业终态后查 issues 组明细摘要。
           // 取消链路 = dispose 形态（C1 收口修对齐 M4，唯一机制）：持有 dispose，
           // 新一轮 publish 发起时先收旧跟踪（轮次收尾），静默、不弹提示。
           publishWatcherDispose?.()
-          publishWatcherDispose = taskStore.watchPublishOutcome(event.taskId, job.id ?? 0)
+          publishWatcherDispose = taskStore.watchPublishOutcome(event.taskId, job.id ?? 0, {
+            // AI 保证通道：明细摘要经 reportUiEventResult（UiEventResult 同形）回灌模型 + 面板回执位
+            onConflict: (summary) => reportUiEventResult('run_job', summary)
+          })
           return ok(`发布作业已启动（作业 #${job.id}），冲突会在完成后以作业失败 + 问题清单呈现`)
         }
         return ok(`作业已启动：${event.jobType}（作业 #${job.id}）`)
