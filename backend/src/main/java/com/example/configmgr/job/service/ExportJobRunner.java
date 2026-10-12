@@ -13,7 +13,6 @@ import com.example.configmgr.file.FileStorageService;
 import com.example.configmgr.job.entity.Job;
 import com.example.configmgr.job.entity.ValidationIssue;
 import com.example.configmgr.job.repo.ValidationIssueRepository;
-import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.entity.TaskFile;
 import com.example.configmgr.task.repo.TaskFileRepository;
 import com.example.configmgr.task.repo.TaskItemRepository;
@@ -215,15 +214,12 @@ public class ExportJobRunner {
 
         Job.JobStatus status = cancelled ? Job.JobStatus.CANCELLED
                 : (errorCount > 0 ? Job.JobStatus.FAILED : Job.JobStatus.COMPLETED);
-        if (!cancelled && errorCount == 0) {
-            // 导出全部成功 → 任务完成，步骤同步到最终步骤（列表点击标题可直接查看结果）
-            taskService.updateStatus(taskId, Task.TaskStatus.COMPLETED);
-            taskService.goToStep(taskId, "EXPORT");
-        }
+        // R-153 B1：任务 COMPLETED/步骤联动收编进 terminalWriter 的落写成功分支（原先在此处
+        // 无条件直写 updateStatus(COMPLETED)+goToStep 是取消竞态翻写点——取消胜出时这里仍会执行）。
         // 终态分母回归"真实工作量"（= 预估/已发现行数，未开工预留清零）：全部扫完时 processed==total→100%
         totalRows = JobProgressTotals.denominator(estimatedRows, discoveredRows, 0);
         terminalWriter.complete(job, status, errorCount, 0, processedRows, totalRows,
-                doneEvent(job, status));
+                doneEvent(job, status), "EXPORT");
     }
 
     private Map<String, Object> doneEvent(Job job, Job.JobStatus status) {

@@ -180,6 +180,27 @@ public class TaskService {
     }
 
     /**
+     * R-153 B1：作业完成链的步骤收口（仅供 {@code JobTerminalWriter} 落写成功分支调用）。
+     *
+     * <p>与 {@link #goToStep} 的差别 = <b>不走终态守卫</b>：完成链里本作业刚刚落成 COMPLETED，
+     * 「任务 COMPLETED + 最终作业成功」的守卫形态在此恒成立（先 finish 后联动，作业终态已先行
+     * 可见——IMPORT→PUBLISH 链上任务在 IMPORT 完成时即已 COMPLETED），外部跳步守卫会把主路径
+     * 误杀；完成步骤是本作业自身的收口写，属守卫的非目标面。CANCELLED 吸收态仍拒（B2 双入口之外的
+     * 第三写面同口径）；step 为内部常量（EXPORT/PUBLISH），不经外部输入。
+     */
+    @Transactional
+    public void writeCompletionStep(Long taskId, String step) {
+        Task task = taskRepository.findById(taskId)
+                .orElseThrow(() -> ResourceNotFoundException.of("任务", taskId));
+        if (task.getStatus() == Task.TaskStatus.CANCELLED) {
+            log.info("任务 #{} 已 CANCELLED（吸收态单调闸），拒绝完成步骤 {} 写入", taskId, step);
+            return;
+        }
+        task.setCurrentStep(step);
+        taskRepository.save(task);
+    }
+
+    /**
      * R-137 终态守卫（goToStep 版，口径与 {@code JobService#createAndStart} 的
      * {@code assertTaskNotFinalized} 同构）：CANCELLED 恒拒；COMPLETED 按类型核最终作业
      * （IMPORT→PUBLISH 成功、EXPORT→EXPORT 成功）；FAILED 放行。预检查 0 错误即置
@@ -247,11 +268,20 @@ public class TaskService {
 
     /**
      * 只更新任务状态（不改步骤），供作业完成/失败时流转。
+     *
+     * <p>R-153 B2：CANCELLED 为<b>吸收态</b>——COMPLETED/FAILED 不得覆写（含执行器迟到写、
+     * 僵尸恢复联动等任何路径），拒绝写入并留日志；FAILED↔COMPLETED 既有流转保留
+     * （{@code JobService.assertTaskNotFinalized} 的「COMPLETED 但无成功终作业」放行分支依赖它）。
      */
     @Transactional
     public void updateStatus(Long taskId, Task.TaskStatus status) {
         Task task = taskRepository.findById(taskId)
                 .orElseThrow(() -> ResourceNotFoundException.of("任务", taskId));
+        if (task.getStatus() == Task.TaskStatus.CANCELLED
+                && (status == Task.TaskStatus.COMPLETED || status == Task.TaskStatus.FAILED)) {
+            log.info("任务 #{} 已 CANCELLED（吸收态单调闸），拒绝 {} 覆写", taskId, status);
+            return;
+        }
         task.setStatus(status);
         taskRepository.save(task);
     }
@@ -278,6 +308,13 @@ public class TaskService {
         }
         taskRepository.findById(taskId).ifPresent(task -> {
             if (task.getStatus() == target) {
+                return;
+            }
+            // R-153 B2：CANCELLED 吸收态单调闸（双入口之二）——COMPLETED/FAILED 不得覆写已取消任务
+            //（覆盖 StaleJobRecoveryRunner:68 等残余无守卫联动写点）；CANCELLED→CANCELLED 已被上方幂等短路放行。
+            if (task.getStatus() == Task.TaskStatus.CANCELLED
+                    && (target == Task.TaskStatus.COMPLETED || target == Task.TaskStatus.FAILED)) {
+                log.info("任务 #{} 已 CANCELLED（吸收态单调闸），拒绝联动目标 {} 覆写", taskId, target);
                 return;
             }
             task.setStatus(target);

@@ -16,8 +16,10 @@ import org.springframework.beans.factory.ObjectProvider;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -116,14 +118,17 @@ class ConfirmGateDeadlockResumeTest {
         stubCommon();
         when(this.store.get(RUN_ID)).thenReturn(snapshot(RunSnapshot.SUSPENDED));
         PendingToolCall entry = pending(PendingToolCall.PENDING);
-        when(this.store.pending(RUN_ID, TOOL_CALL_ID)).thenReturn(entry);
+        // R-153 卡②(a)：mock 每次返回语义等价新副本（对齐真实 RunStore.pending 的反序列化行为）——
+        // 旧 thenReturn(entry) 让提交/等待两侧共享同一可变对象，锁外改状态对等待方可见 ⇒ 间歇 woke=false。
+        CountDownLatch firstRead = new CountDownLatch(1);
+        stubPendingFreshCopy(TOOL_CALL_ID, entry, firstRead);
         when(this.cancellations.onCancel(anyString(), any())).thenReturn(() -> {
         });
 
         Thread waiter = new Thread(() -> this.gate.awaitDecision(RUN_ID, entry), "t3b-await");
         waiter.setDaemon(true);
         waiter.start();
-        awaitLatchRegistered(RUN_ID);
+        awaitWaiterInPendingRead(RUN_ID, firstRead);
 
         ConfirmGate.Submission submission = this.gate.submitDecision(RUN_ID, TOOL_CALL_ID, true, "同意");
 
@@ -156,16 +161,19 @@ class ConfirmGateDeadlockResumeTest {
     void doesNotTriggerWhenAnotherLatchForSameRunIsActive() throws Exception {
         stubCommon();
         when(this.store.get(RUN_ID)).thenReturn(snapshot(RunSnapshot.SUSPENDED));
-        when(this.store.pending(RUN_ID, TOOL_CALL_ID)).thenReturn(pending(PendingToolCall.PENDING));
+        // R-153 卡②(a)：同款对象同一性收口（本用例与 ① 同构——等待线程 + 共享可变 stub），副本化等价改写
+        PendingToolCall main = pending(PendingToolCall.PENDING);
+        stubPendingFreshCopy(TOOL_CALL_ID, main, new CountDownLatch(1));
         PendingToolCall other = pendingFor(OTHER_TOOL_CALL_ID, PendingToolCall.PENDING);
-        when(this.store.pending(RUN_ID, OTHER_TOOL_CALL_ID)).thenReturn(other);
+        CountDownLatch firstReadOther = new CountDownLatch(1);
+        stubPendingFreshCopy(OTHER_TOOL_CALL_ID, other, firstReadOther);
         when(this.cancellations.onCancel(anyString(), any())).thenReturn(() -> {
         });
 
         Thread otherWaiter = new Thread(() -> this.gate.awaitDecision(RUN_ID, other), "t3b-await-other");
         otherWaiter.setDaemon(true);
         otherWaiter.start();
-        awaitLatchRegistered(RUN_ID);
+        awaitWaiterInPendingRead(RUN_ID, firstReadOther);
 
         ConfirmGate.Submission submission = this.gate.submitDecision(RUN_ID, TOOL_CALL_ID, true, "同意");
 
@@ -289,6 +297,37 @@ class ConfirmGateDeadlockResumeTest {
             Thread.sleep(10);
         }
         assertThat(this.gate.hasActiveLatch(runId)).as("等待侧闸门已登记").isTrue();
+    }
+
+    /**
+     * R-153 卡②(a)：mock 每次返回语义等价的<b>新副本</b>（对齐真实 {@code RunStore.pending} 的
+     * 反序列化行为）——等待方无法绕开 {@code signal} 直接观察到提交侧的决策改写。
+     */
+    private void stubPendingFreshCopy(String toolCallId, PendingToolCall template, CountDownLatch firstRead) {
+        when(this.store.pending(RUN_ID, toolCallId)).thenAnswer(inv -> {
+            if (firstRead != null) {
+                firstRead.countDown();
+            }
+            PendingToolCall copy = new PendingToolCall();
+            copy.setToolCallId(template.getToolCallId());
+            copy.setName(template.getName());
+            copy.setKind(template.getKind());
+            copy.setStatus(template.getStatus());
+            copy.setReason(template.getReason());
+            return copy;
+        });
+    }
+
+    /**
+     * R-153 卡②(b)：屏障升级 —— 闸门已登记<b>且</b>等待方已做首次 {@code store.pending} 读
+     * （有界 5s，超时显式失败，不得无限等待）。消「提交线程停顿 &gt;2s ⇒ 等待方先超时」残窗。
+     */
+    private void awaitWaiterInPendingRead(String runId, CountDownLatch firstPendingRead)
+            throws InterruptedException {
+        awaitLatchRegistered(runId);
+        if (!firstPendingRead.await(5, TimeUnit.SECONDS)) {
+            throw new AssertionError("等待方 5s 内未完成首次 store.pending 读（屏障失效）");
+        }
     }
 
     private static RunSnapshot snapshot(String status) {

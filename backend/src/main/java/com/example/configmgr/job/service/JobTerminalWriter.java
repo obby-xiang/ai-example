@@ -56,7 +56,7 @@ public class JobTerminalWriter {
     }
 
     /**
-     * 写作业终态 + 联动任务态 + 推送 JOB_DONE。
+     * 写作业终态 + 联动任务态 + 推送 JOB_DONE（无成功步骤联动的历史形态，等价于 successStep=null）。
      *
      * @param job             作业（只用其 id/taskId，不写实体）
      * @param jobStatus       终态
@@ -64,28 +64,49 @@ public class JobTerminalWriter {
      */
     public void complete(Job job, Job.JobStatus jobStatus, int errorCount, int warningCount,
                          int processed, int total, Map<String, Object> doneEvent) {
+        complete(job, jobStatus, errorCount, warningCount, processed, total, doneEvent, null);
+    }
+
+    /**
+     * R-153 B1：带成功步骤联动的终态写入。仅当终态<b>实际落写</b>（finish 先到者胜返回 true）
+     * 且 jobStatus 为 COMPLETED 时，才在同一个 REQUIRES_NEW 事务内联动
+     * {@code goToStep(successStep)} —— 原先 ExportJobRunner/PublishJobRunner 在执行器事务内
+     * 无条件直写任务 COMPLETED 的路径（取消竞态翻写点，CI MAJOR-2 根因）由此收编：
+     * 取消胜出时 finish 被丢弃 ⇒ 任务态/步骤零联动。
+     *
+     * @param successStep 成功步骤名（EXPORT/PUBLISH）；null = 不做步骤联动
+     */
+    public void complete(Job job, Job.JobStatus jobStatus, int errorCount, int warningCount,
+                         int processed, int total, Map<String, Object> doneEvent, String successStep) {
         if (TransactionSynchronizationManager.isSynchronizationActive()) {
             TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
                 @Override
                 public void afterCommit() {
-                    apply(job, jobStatus, errorCount, warningCount, processed, total, doneEvent);
+                    apply(job, jobStatus, errorCount, warningCount, processed, total, doneEvent, successStep);
                 }
             });
         } else {
-            apply(job, jobStatus, errorCount, warningCount, processed, total, doneEvent);
+            apply(job, jobStatus, errorCount, warningCount, processed, total, doneEvent, successStep);
         }
     }
 
     private void apply(Job job, Job.JobStatus jobStatus, int errorCount, int warningCount,
-                       int processed, int total, Map<String, Object> doneEvent) {
+                       int processed, int total, Map<String, Object> doneEvent, String successStep) {
         try {
             // R-152：仅当 finish 实际落写终态（作业仍 PENDING/RUNNING）才联动任务态并推 JOB_DONE。
             // 迟到终态写被先到者胜守卫拦下时（作业已 CANCELLED/其它终态），不得 applyJobOutcome——
             // 否则任务行会被执行器迟到的 COMPLETED 翻回、破坏取消语义，终态守卫随之放行（CI MAJOR-2 根因）。
+            // R-153 B1：goToStep 的终态守卫（goToStep 版）对「任务 COMPLETED + 最终作业成功」恒抛
+            // TASK_FINALIZED——finish 落写后（独立事务，作业终态先行可见）该形态恒成立（IMPORT→PUBLISH
+            // 链上任务在 IMPORT 完成时即已 COMPLETED），故完成步骤走专用收口 writeCompletionStep
+            // （不走外部跳步守卫、CANCELLED 仍拒）；任务态写统一走 applyJobOutcome（受 B2 吸收态闸保护）。
             boolean wroteTerminal = Boolean.TRUE.equals(requiresNew.execute(status -> {
                 boolean wrote = progressService.finish(job.getId(), jobStatus, errorCount, warningCount,
                         processed, total);
                 if (wrote) {
+                    if (jobStatus == Job.JobStatus.COMPLETED && successStep != null) {
+                        taskService.writeCompletionStep(job.getTaskId(), successStep);
+                    }
                     taskService.applyJobOutcome(job.getTaskId(), jobStatus);
                 }
                 return wrote;

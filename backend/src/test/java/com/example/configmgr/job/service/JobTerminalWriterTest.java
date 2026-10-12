@@ -16,6 +16,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -55,6 +56,7 @@ class JobTerminalWriterTest {
         this.writer.complete(job, Job.JobStatus.COMPLETED, 0, 0, 10, 10, Map.of());
 
         verify(this.taskService, never()).applyJobOutcome(anyLong(), any());
+        verify(this.taskService, never()).writeCompletionStep(anyLong(), anyString());
         verify(this.taskSseService, never()).publish(anyLong(), anyString(), any());
     }
 
@@ -70,5 +72,55 @@ class JobTerminalWriterTest {
 
         verify(this.taskService).applyJobOutcome(20L, Job.JobStatus.COMPLETED);
         verify(this.taskSseService).publish(20L, "JOB_DONE", Map.of());
+    }
+
+    // ── R-153 B1/H-2 回归锚（三条）──
+
+    /** 锚 1（成功态 step 仍落）：EXPORT 成功 ⇒ 完成步骤 writeCompletionStep("EXPORT") 在落写成功分支内仍生效，JOB_DONE 恰一次。 */
+    @Test
+    void writtenCompletedStillLinksSuccessStepAndPublishesExactlyOnce() {
+        Job job = new Job();
+        job.setId(3L);
+        job.setTaskId(30L);
+        when(this.progressService.finish(anyLong(), any(), anyInt(), anyInt(), anyInt(), anyInt()))
+                .thenReturn(true);
+
+        this.writer.complete(job, Job.JobStatus.COMPLETED, 0, 0, 10, 10, Map.of(), "EXPORT");
+
+        verify(this.taskService).applyJobOutcome(30L, Job.JobStatus.COMPLETED);
+        verify(this.taskService, times(1)).writeCompletionStep(30L, "EXPORT");
+        verify(this.taskSseService, times(1)).publish(30L, "JOB_DONE", Map.of());
+    }
+
+    /** 锚 2（取消态 step 不动）：非 COMPLETED 终态（CANCELLED/FAILED）即使落写也不得触碰完成步骤写。 */
+    @Test
+    void nonCompletedOutcomeNeverTouchesSuccessStep() {
+        Job job = new Job();
+        job.setId(4L);
+        job.setTaskId(40L);
+        when(this.progressService.finish(anyLong(), any(), anyInt(), anyInt(), anyInt(), anyInt()))
+                .thenReturn(true);
+
+        this.writer.complete(job, Job.JobStatus.CANCELLED, 0, 0, 10, 10, Map.of(), "EXPORT");
+
+        verify(this.taskService).applyJobOutcome(40L, Job.JobStatus.CANCELLED);
+        verify(this.taskService, never()).writeCompletionStep(anyLong(), anyString());
+        verify(this.taskSseService, times(1)).publish(40L, "JOB_DONE", Map.of());
+    }
+
+    /** 锚 3（历史形态保持）：无 successStep 的重载（Import/Precheck/Watchdog 路径）行为与 B1 前一致。 */
+    @Test
+    void legacyOverloadWithoutStepKeepsOldShape() {
+        Job job = new Job();
+        job.setId(5L);
+        job.setTaskId(50L);
+        when(this.progressService.finish(anyLong(), any(), anyInt(), anyInt(), anyInt(), anyInt()))
+                .thenReturn(true);
+
+        this.writer.complete(job, Job.JobStatus.COMPLETED, 0, 0, 10, 10, Map.of());
+
+        verify(this.taskService).applyJobOutcome(50L, Job.JobStatus.COMPLETED);
+        verify(this.taskService, never()).writeCompletionStep(anyLong(), anyString());
+        verify(this.taskSseService, times(1)).publish(50L, "JOB_DONE", Map.of());
     }
 }

@@ -2346,24 +2346,23 @@ try {
     DeleteJson "/api/jobs/$($fj.id)" | Out-Null  # 取消联动 ⇒ 任务 CANCELLED；再手置 FAILED 模拟僵尸恢复面
     $m2failObj = GetJson "/api/tasks/$m2fail"
     # FAILED 任务只能经作业失败联动产生，此处改用 REST 直接构造：跳过（H2 FAILED 放行已由后端单测锁定），仅清场
-    # 清场竞态修复（热修卡项 2）：取消后立即 DELETE 任务会与异步终态写在 Task 行上并发（乐观锁 500，
-    # 复现报告 §4.2，产品侧挂账 R-152）。此处加有界等待：轮询取消作业的终态落定再删，上限 5s。
+    # 清场竞态修复（R-153 顺带①）：取消后立即 DELETE 任务会与执行器迟到终态链并发（乐观锁 500，
+    # 复现报告 §4.2）。旧等待轮询的是作业行 —— 取消已同步把作业行置 CANCELLED，while(PENDING/RUNNING)
+    # 首判即假、循环零次进入，形同无等待。改按「任务行 version 稳定」重设信号：执行器侧 afterCommit
+    # 链路（REQUIRES_NEW 终态+联动）若发生会推进任务行 version；连续两次读数相同（间隔 400ms）即视为
+    # 落定。上限 5s，超时保留 WARN 语义仍执行删除。不碰 MAJOR-2 严判断言（409/TASK_FINALIZED 保持）。
     foreach ($t in @($m2task, $m2done, $m2fail)) {
-        $tJobs = @(GetJson "/api/tasks/$t/jobs")
-        $settled = $true
-        $deadline = (Get-Date).AddSeconds(5)
-        foreach ($j in $tJobs) {
-            $st = $j.status
-            $sw = [Diagnostics.Stopwatch]::StartNew()
-            while ($st -eq 'PENDING' -or $st -eq 'RUNNING') {
-                if ((Get-Date) -gt $deadline -or $sw.ElapsedMilliseconds -gt 5000) { break }
-                Start-Sleep -Milliseconds 200
-                try { $st = (GetJson "/api/jobs/$($j.id)").status } catch { $st = 'GONE' }
-            }
-            if ($st -eq 'PENDING' -or $st -eq 'RUNNING') {
-                Write-Host ("  [WARN] MAJOR-2 清场：任务 {0} 作业 {1} {2}ms 未落终态，仍执行删除" -f $t, $j.id, $sw.ElapsedMilliseconds) -ForegroundColor Yellow
-                $settled = $false
-            }
+        $prevVer = $null
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $stable = $false
+        while (-not $stable) {
+            if ($sw.ElapsedMilliseconds -gt 5000) { break }
+            Start-Sleep -Milliseconds 400
+            try { $ver = (GetJson "/api/tasks/$t").version } catch { $ver = $null }
+            if ($null -ne $ver -and $ver -eq $prevVer) { $stable = $true } else { $prevVer = $ver }
+        }
+        if (-not $stable) {
+            Write-Host ("  [WARN] MAJOR-2 清场：任务 {0} {1}ms 任务行 version 未稳定，仍执行删除" -f $t, $sw.ElapsedMilliseconds) -ForegroundColor Yellow
         }
         DeleteJson "/api/tasks/$t" | Out-Null
     }

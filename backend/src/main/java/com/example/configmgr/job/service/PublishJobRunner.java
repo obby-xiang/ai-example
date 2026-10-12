@@ -12,7 +12,6 @@ import com.example.configmgr.definition.service.DependencyResolver;
 import com.example.configmgr.job.entity.Job;
 import com.example.configmgr.job.entity.ValidationIssue;
 import com.example.configmgr.job.repo.ValidationIssueRepository;
-import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.entity.TaskItem;
 import com.example.configmgr.task.repo.TaskItemRepository;
 import com.example.configmgr.task.repo.TaskRepository;
@@ -101,15 +100,12 @@ public class PublishJobRunner {
         PublishOutcome finalOutcome = outcome != null ? outcome : new PublishOutcome(false, 0, 0, 0);
         Job.JobStatus status = finalOutcome.cancelled() ? Job.JobStatus.CANCELLED
                 : (finalOutcome.totalErrors() > 0 ? Job.JobStatus.FAILED : Job.JobStatus.COMPLETED);
-        if (status == Job.JobStatus.COMPLETED) {
-            // 发布成功 → 任务完成，步骤同步到最终步骤（列表点击标题可直接查看结果）
-            taskService.updateStatus(job.getTaskId(), Task.TaskStatus.COMPLETED);
-            taskService.goToStep(job.getTaskId(), "PUBLISH");
-        }
+        // R-153 B1：任务 COMPLETED/步骤联动收编进 terminalWriter 落写成功分支（孪生翻写点同 Export）。
         terminalWriter.complete(job, status, finalOutcome.totalErrors(), 0,
                 finalOutcome.processedRows(), finalOutcome.totalRows(),
                 Map.of("jobId", job.getId(), "jobType", "PUBLISH",
-                        "status", status, "errors", finalOutcome.totalErrors()));
+                        "status", status, "errors", finalOutcome.totalErrors()),
+                "PUBLISH");
     }
 
     /**
