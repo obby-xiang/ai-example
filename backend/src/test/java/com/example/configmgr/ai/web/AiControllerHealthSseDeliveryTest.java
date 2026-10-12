@@ -30,8 +30,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * {@code GET /api/ai/health} 的 SSE 投递观测面补口（T3-5 定值回灌，2026-10-09）。
  *
  * <p>
- * 三键的补口依据是压测证据文档 §S2.4 与 §【待裁决】6a：此前投递队列容量 256、
- * boundedElastic 容量（当时只能在 JVM 侧反射实读）与心跳 2s/5s 在 {@code /health} 均不可观测，
+ * 两键的补口依据是压测证据文档 §S2.4 与 §【待裁决】6a：此前投递队列容量 256 与
+ * 心跳 2s/5s 在 {@code /health} 均不可观测，
  * 排障只能靠现场推断。本用例只锚<b>存在性与定值</b>（观测面契约），不锚动态量（active/queueDepth）。
  */
 class AiControllerHealthSseDeliveryTest {
@@ -41,13 +41,11 @@ class AiControllerHealthSseDeliveryTest {
 	private final MockMvc mockMvc = MockMvcBuilders.standaloneSetup(controller()).build();
 
 	@Test
-	void healthExposesQueueCapacityBoundedElasticAndHeartbeatUnderSseDelivery() throws Exception {
+	void healthExposesQueueCapacityAndHeartbeatUnderSseDelivery() throws Exception {
 		mockMvc.perform(get("/api/ai/health"))
 			.andExpect(status().isOk())
 			.andExpect(jsonPath("$.sseDelivery.queueCapacity")
 					.value(AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY))
-			.andExpect(jsonPath("$.sseDelivery.boundedElasticCapacity")
-					.value(10 * Runtime.getRuntime().availableProcessors()))
 			.andExpect(jsonPath("$.sseDelivery.heartbeatIntervalMs.suspend").value(2000))
 			.andExpect(jsonPath("$.sseDelivery.heartbeatIntervalMs.streaming").value(5000))
 			// 既有四键不回归（动态量的值随执行顺序漂移，只断存在性）

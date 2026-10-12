@@ -47,25 +47,6 @@ public class AiProperties {
 	private Frame frame = new Frame();
 
 	/**
-	 * 启动期容量联动校验（T3-5 定值回灌，2026-10-09）。
-	 *
-	 * <p>
-	 * 校验 {@code 挂起专用池 × 2 + 投递池 ≤ boundedElastic 缺省容量（= 10 × CPU）}：该式右侧是
-	 * {@code 10 × CPU} 的<b>线性函数</b>，低核数部署机上会不成立（4 核 ⇒ 40 &lt; 48），故不能再
-	 * 当作恒真不变量，改以"启动期 WARN + 明示建议最低核数"承载（判据见
-	 * {@code docs/evidence/M2-T3-5-压测证据-DS-V4-Flash.md} §S1.5 与 §【待裁决】3）。
-	 *
-	 * <p>
-	 * <b>不 fail-fast</b>：容量不足的后果是 boundedElastic 排队、拖慢全部 AI 流式（含无关会话），
-	 * 属性能降级而非正确性破坏；此处只告警，是否下调池容量/换部署机由运维按告警决策。
-	 */
-	@PostConstruct
-	void verifyBoundedElasticCapacityBudget() {
-		AiPoolCapacityBudget.verify(this.suspend.getPoolSize(), this.sse.getDeliveryPoolSize(),
-				Runtime.getRuntime().availableProcessors());
-	}
-
-	/**
 	 * 启动期校验 {@code app.ai.sse.write-timeout} 必须为正（2026-10-10 复核 S3-1 收口：守卫对称化）。
 	 *
 	 * <p>
@@ -78,7 +59,7 @@ public class AiProperties {
 	 * <p>
 	 * 读的是<b>绑定后</b>的值（绑定先于 {@code @PostConstruct}），与任务通道
 	 * {@code app.task.sse.write-timeout} 的守卫（{@code com.example.configmgr.config.AppProperties}）
-	 * 对称：两条通道都是"非正即启动失败"。这里 <b>fail-fast</b>（不是像上面的容量联动那样只 WARN）：
+	 * 对称：两条通道都是"非正即启动失败"。这里 <b>fail-fast</b>：
 	 * 本项配错没有"性能降级"这种解释空间，它只会让配置面与运行面说两套话。
 	 */
 	@PostConstruct

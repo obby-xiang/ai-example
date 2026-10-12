@@ -25,7 +25,7 @@ import java.util.concurrent.Executor;
  *
  * <p>
  * T3-1：持有 AiProperties 的构造（Spring 装配路径）会用 {@code app.ai.sse.*} 配置并启用
- * 进程级共享有界投递池；两参构造（单测/非 Spring）保持同步直执，帧序用例的确定性不受影响。
+ * 进程级共享有界投递池；显式传 {@code null} properties 的非 Spring/单测路径保持同步直执，帧序用例的确定性不受影响。
  */
 @Component
 public class RunRegistry {
@@ -43,8 +43,8 @@ public class RunRegistry {
 	 *
 	 * <p>
 	 * <b>口径（S2-1 修复批）</b>：Spring 三参装配路径（{@code properties != null}）用进程级共享
-	 * 有界投递池（异步，快慢订阅者隔离）；两参构造（单测 / 非 Spring）<b>固定同步直执</b>，
-	 * 不读进程静态池 —— 静态池一旦被 {@code @SpringBootTest} 装配，两参路径就会由"同步直执"
+	 * 有界投递池（异步，快慢订阅者隔离）；显式传 {@code null} 的非 Spring/单测路径<b>固定同步直执</b>，
+	 * 不读进程静态池 —— 静态池一旦被 {@code @SpringBootTest} 装配，该路径就会由"同步直执"
 	 * 悄悄变异步投递，同一 JVM 内出现测试顺序相关竞态（帧序用例要求"发完即到"）。
 	 */
 	private final Executor deliveryExecutor;
@@ -54,14 +54,10 @@ public class RunRegistry {
 	 *
 	 * <p>
 	 * 口径与投递执行器一致（S2-1）：Spring 三参装配路径用<b>进程级弹性写出池</b> +
-	 * {@code app.ai.sse.write-timeout}；两参构造（单测 / 非 Spring）固定 {@link SseWriteBudget#direct()}
+	 * {@code app.ai.sse.write-timeout}；显式传 {@code null} 的非 Spring/单测路径固定 {@link SseWriteBudget#direct()}
 	 * —— 不读进程静态池，避免"同一 JVM 内测试顺序相关"（理由同 {@link #deliveryExecutor}）。
 	 */
 	private final SseWriteBudget writeBudget;
-
-	public RunRegistry(RunStore store, ObjectMapper objectMapper) {
-		this(store, objectMapper, null);
-	}
 
 	@Autowired
 	public RunRegistry(RunStore store, ObjectMapper objectMapper, AiProperties properties) {

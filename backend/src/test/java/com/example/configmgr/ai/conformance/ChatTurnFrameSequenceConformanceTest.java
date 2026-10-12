@@ -70,7 +70,7 @@ class ChatTurnFrameSequenceConformanceTest {
 
 	private final MessageJsonCodec codec = new MessageJsonCodec(this.mapper);
 
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper);
+	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
 
 	private final AiProperties properties = new AiProperties();
 

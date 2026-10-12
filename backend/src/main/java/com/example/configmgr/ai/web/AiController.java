@@ -1,7 +1,6 @@
 package com.example.configmgr.ai.web;
 
 import com.example.configmgr.ai.config.AiAvailability;
-import com.example.configmgr.ai.config.AiPoolCapacityBudget;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.RedisAvailability;
 import com.example.configmgr.ai.gate.ConfirmGate;
@@ -669,15 +668,12 @@ public class AiController {
 	 *
 	 * <p>
 	 * 在 {@link SseChatEmitter#deliveryPoolMetrics()} 的 poolSize/active/queueDepth/evicted 之上
-	 * 补三个 T3-5 定值对象（补口依据：`docs/evidence/M2-T3-5-压测证据-DS-V4-Flash.md`
-	 * §S2.4 与 §【待裁决】6a —— 此前投递队列容量 256、boundedElastic 容量与心跳 2s/5s 在
+	 * 补两个 T3-5 定值对象（补口依据：`docs/evidence/M2-T3-5-压测证据-DS-V4-Flash.md`
+	 * §S2.4 与 §【待裁决】6a —— 此前投递队列容量 256 与心跳 2s/5s 在
 	 * {@code /health} 均不可观测）：
 	 * <ul>
 	 * <li>{@code queueCapacity}：每订阅者<b>实时</b>投递队列容量（单一事实源 =
 	 * {@code app.ai.sse.delivery-queue-capacity}；T3-5 定值 256，回放初始批豁免）；</li>
-	 * <li>{@code boundedElasticCapacity}：reactor boundedElastic 缺省容量（反射实读
-	 * {@code Schedulers#DEFAULT_BOUNDED_ELASTIC_SIZE}；反射失败回落 {@code 10 × availableProcessors()}
-	 * 并在日志标注推导口径）；</li>
 	 * <li>{@code heartbeatIntervalMs}：心跳间隔两值（挂起期 / 流式期），按各自唯一来源常量读出
 	 * ——{@code ConfirmGate#HEARTBEAT_SECONDS} = 2s、{@code ResilientChatService
 	 * #STREAMING_HEARTBEAT_MILLIS} = 5s（T3-5 维持现值，未改）。</li>
@@ -686,7 +682,6 @@ public class AiController {
 	private Map<String, Object> sseDeliverySnapshot() {
 		Map<String, Object> snapshot = new LinkedHashMap<>(SseChatEmitter.deliveryPoolMetrics());
 		snapshot.put("queueCapacity", this.properties.getSse().getDeliveryQueueCapacity());
-		snapshot.put("boundedElasticCapacity", AiPoolCapacityBudget.boundedElasticCapacity());
 		snapshot.put("heartbeatIntervalMs", Map.of(
 				"suspend", ConfirmGate.HEARTBEAT_SECONDS * 1000L,
 				"streaming", ResilientChatService.STREAMING_HEARTBEAT_MILLIS));

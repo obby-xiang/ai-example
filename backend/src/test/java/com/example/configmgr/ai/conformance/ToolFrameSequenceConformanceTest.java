@@ -84,7 +84,7 @@ class ToolFrameSequenceConformanceTest {
 
 	private final ObjectMapper mapper = new ObjectMapper();
 
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper);
+	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
 
 	private final AiProperties properties = new AiProperties();
 

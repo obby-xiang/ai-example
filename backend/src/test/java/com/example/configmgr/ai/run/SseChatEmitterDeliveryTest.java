@@ -453,7 +453,7 @@ class SseChatEmitterDeliveryTest {
 				.as("前置：进程级静态池已装配（修复前的两参路径会读到它）").isInstanceOf(ThreadPoolExecutor.class);
 
 		InMemoryRunStore store = new InMemoryRunStore();
-		SseChatEmitter out = new RunRegistry(store, new ObjectMapper()).of(RUN_ID);
+		SseChatEmitter out = new RunRegistry(store, new ObjectMapper(), null).of(RUN_ID);
 		TerminalSemanticsEmitter wire = new TerminalSemanticsEmitter(false);
 		out.attach(wire.emitter());
 
@@ -480,7 +480,7 @@ class SseChatEmitterDeliveryTest {
 		// 两条装配路径（写出器缺省 / 注册表缺省）必须落在同一处缺省：无第二处字面量
 		assertThat(new SseChatEmitter(RUN_ID, store, new ObjectMapper()).queueCapacity())
 				.as("写出器缺省容量 = 配置缺省").isEqualTo(AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY);
-		assertThat(new RunRegistry(store, new ObjectMapper()).of("run-capacity-default").queueCapacity())
+		assertThat(new RunRegistry(store, new ObjectMapper(), null).of("run-capacity-default").queueCapacity())
 				.as("注册表（无配置路径）容量 = 配置缺省").isEqualTo(AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY);
 
 		AiProperties custom = new AiProperties();

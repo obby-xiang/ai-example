@@ -106,7 +106,7 @@ class ThreeArgAssemblyConformanceTest {
 		assertThat(SseChatEmitter.sharedDeliveryExecutorOrDirect())
 				.as("前置：进程级静态池已装配").isInstanceOf(ThreadPoolExecutor.class);
 
-		SseChatEmitter out = new RunRegistry(new InMemoryRunStore(), new ObjectMapper()).of(RUN_ID);
+		SseChatEmitter out = new RunRegistry(new InMemoryRunStore(), new ObjectMapper(), null).of(RUN_ID);
 		assertThat((Executor) fieldOf(out, "deliveryExecutor"))
 				.as("两参装配固定同步直执，不受静态池已装配影响").isNotInstanceOf(ThreadPoolExecutor.class);
 		assertThat(queueCapacityOf(out)).as("两参装配回落配置缺省容量")
@@ -117,7 +117,7 @@ class ThreeArgAssemblyConformanceTest {
 
 	@Test
 	void staticPoolIsNotConfiguredByTheTwoArgPathAndEvictedTotalIsOnlyMonotonic() throws Exception {
-		new RunRegistry(new InMemoryRunStore(), new ObjectMapper()).of("run-two-arg-static");
+		new RunRegistry(new InMemoryRunStore(), new ObjectMapper(), null).of("run-two-arg-static");
 		assertThat(SseChatEmitter.sharedDeliveryExecutorOrDirect())
 				.as("两参装配绝不装配进程静态池（否则同 JVM 内后续用例被悄悄变异步）")
 				.isNotInstanceOf(ThreadPoolExecutor.class);
