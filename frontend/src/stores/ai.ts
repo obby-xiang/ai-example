@@ -22,6 +22,7 @@ import {
   applyFrameToParts,
   deriveProjections,
   findToolPart,
+  historyToolCallStatus,
   markApplied,
   openStreamPart,
   sealTrailingStreamPart,
@@ -667,14 +668,13 @@ export const useAiStore = defineStore('ai', {
         return
       }
 
-      // 批3③b D7(B)（R-141②，定案注记 —— 任何后续批次不得把本注记解读为"丢 unknown 可以接受"）：
-      // 本历史整替的工具段 status:'succeeded'（下）与 kind2:'UNKNOWN' 是**展示占位值，不是事实
-      // 断言**：后端历史载荷（AiHistory / AiHistoryMessage，types/ai.ts:133-150）只有 type / text /
-      // toolCalls / toolResponses / timestamp 五类字段，**不携带任何工具执行状态**，前端无从判定
-      // 成败。因此本地已落的 unknown / failed 终态在整替后**必然丢失并显示为「已成功」——这是
-      // 已申报的已知失真（R-141②），不是可接受行为**；修复属后端面（历史携带状态），已登记立项
-      // （R-144），③b 不含后端。在后者落地前，「UNKNOWN + succeeded」组合 = 载荷缺状态的占位
-      // 口径，**任何消费方不得以该 succeeded 值做业务判定**。
+      // 批3③b D7(B)（R-141②）注记 **R-144 改判 (A)**（依据 = docs/evidence/补档-CHATTIMELINE-批3③b-决策卡-K3.md:180
+      // 「R-144 落地 ⇒ 本项必须改判 (A)（读真实状态）」）：后端历史载荷按 toolCallId 携载
+      // `toolCallStates`（types/ai.ts AiHistoryMessage），下方段构造**有状态 ⇒ 经词表单表
+      // `historyToolCallStatus`（parts.ts）读真态**。双口径并存：① 有状态 ⇒ 读真态；② 无状态
+      //（旧载荷存量 / resume 重建轮（T4 第二来源，ResumeService 重建消息不带状态））⇒ 维持占位
+      // 值 status:'succeeded' / kind2:'UNKNOWN'（**非事实断言**）——占位口径下禁令照旧有效：
+      // **任何消费方不得以该 succeeded 值做业务判定**。词表与两帧面表的有意分叉见 D9 注记第③对。
       // R-149 双条目合并：后端历史里工具结果是**独立 TOOL 条目**（Spring AI 形态），
       // 第一遍遍历建响应索引，第二遍构建 ChatMessage；TOOL 条目跳过（不生成消息，杜绝空白块）。
       // 配对规则：① call.id 三态为真按 id 匹配（consume-on-match：命中即从索引摘除）；
@@ -704,11 +704,25 @@ export const useAiStore = defineStore('ai', {
         const role = roleOf(item.type)
         // 批2：历史整体替换的分支同样**只建段**（正文段 + 按 toolCalls 顺序的工具段，
         // result 由 TOOL 条目的 toolResponses 回填（id 优先、序位兜底）；历史条目没有待决语义，
-        // 故 requiresAction=false），旧投影由 deriveProjections 一次产出，不手工拼 content / toolRuns
+        // 故 requiresAction=false），旧投影由 deriveProjections 一次产出，不手工拼 content / toolRuns。
+        // R-144（C-3）：status/kind2 双口径——载荷 `toolCallStates[call.id]` 有 status ⇒ 经词表单表
+        // `historyToolCallStatus` 读真态；缺（旧载荷 / resume 重建轮 T4）⇒ 占位 'succeeded'。kind 有
+        // 数据 ⇒ 还原（CONFIRM/FRONTEND/BACKEND），缺 ⇒ 'UNKNOWN'（不臆造默认值）。
+        // R-144（C-6）保序：text 空白且 toolCalls ≥ 1 ⇒ **不产空前导 text 段**（载荷无段序字段，
+        // 同条目 text↔toolCalls 相对序不可知，消「空 text 段打头」渲染面）；工具段 seg = 构造后
+        // 数组下标（有 text 段时 = toolIndex+1，无 = toolIndex；R-150 合并 pass 仍全局重排）。
+        const calls = item.toolCalls ?? []
+        const blankText = (item.text ?? '').trim() === ''
+        const hasTextPart = !blankText || calls.length === 0
         const parts: MessagePart[] = [
-          { kind: 'text', seg: 0, text: item.text ?? '', streaming: false },
-          ...(item.toolCalls ?? []).map((call, toolIndex): ToolPart => {
+          ...(hasTextPart ? [{ kind: 'text', seg: 0, text: item.text ?? '', streaming: false } as MessagePart] : []),
+          ...calls.map((call, toolIndex): ToolPart => {
             const name = call.name ?? '未知工具'
+            const state = call.id !== null && call.id !== undefined && call.id !== ''
+              ? item.toolCallStates?.[call.id]
+              : undefined
+            const mappedStatus = state?.status !== undefined ? historyToolCallStatus(state.status) : null
+            const kind = state?.kind
             let matched: NonNullable<AiHistoryMessage['toolResponses']>[number] | undefined
             if (call.id !== null && call.id !== undefined && call.id !== '') {
               const hit = responseIndex.get(call.id)
@@ -719,11 +733,11 @@ export const useAiStore = defineStore('ai', {
             }
             const part: ToolPart = {
               kind: 'tool',
-              seg: toolIndex + 1,
+              seg: hasTextPart ? toolIndex + 1 : toolIndex,
               toolCallId: call.id ?? `history-${index}-${call.name ?? 'tool'}`,
               name,
-              kind2: 'UNKNOWN',
-              status: 'succeeded',
+              kind2: kind === 'CONFIRM' || kind === 'FRONTEND' || kind === 'BACKEND' ? kind : 'UNKNOWN',
+              status: mappedStatus ?? 'succeeded',
               args: call.arguments,
               result: null,
               requiresAction: false

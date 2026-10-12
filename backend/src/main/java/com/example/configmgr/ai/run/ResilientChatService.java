@@ -464,7 +464,7 @@ public class ResilientChatService {
 			snapshot.setCancelled(false);
 			snapshot.setAttempts(attempts);
 			this.store.save(snapshot);
-			convergeMemory(sessionId, history);
+			convergeMemory(runId, sessionId, history);
 			log.debug("AI 轮次结束 runId={} sessionId={} 历史条数={} 尝试次数={} 终帧=done 末帧序列=[{}]", runId, sessionId,
 					history.size(), attempts, accumulator.tailSummary());
 		}
@@ -505,7 +505,7 @@ public class ResilientChatService {
 			snapshot.setAttempts(attempts);
 			snapshot.setError(EMPTY_REPLY_CODE + "：" + message);
 			this.store.save(snapshot);
-			convergeMemory(sessionId, history);
+			convergeMemory(runId, sessionId, history);
 		}
 		out.textEnd(text.length());
 		out.error(EMPTY_REPLY_CODE, message);
@@ -527,7 +527,7 @@ public class ResilientChatService {
 			snapshot.setAttempts(attempts);
 			snapshot.setError("AI_RUN_CANCELLED：本轮由用户取消（上游连接已断开，工具未再继续）");
 			this.store.save(snapshot);
-			convergeMemory(sessionId, history);
+			convergeMemory(runId, sessionId, history);
 		}
 		this.store.cancelPendings(runId);
 		log.info("AI 轮次取消 runId={} sessionId={} 尝试次数={} 已收上游事件={} 末帧序列=[{}]", runId, sessionId, attempts,
@@ -569,18 +569,43 @@ public class ResilientChatService {
 		out.error(code, message);
 	}
 
+	/** 历史载荷里段级工具状态映射的键名（R-144）：挂在带 {@code toolCalls} 的 ASSISTANT 消息 metadata 上。 */
+	public static final String TOOL_CALL_STATES_KEY = "toolCallStates";
+
 	/**
 	 * 记忆收敛（规格 §3 末段）：以本轮完整历史整体覆盖写回记忆窗口（去掉两条 system 提示 ——
 	 * 系统提示每轮由请求侧重新拼装，写进记忆会导致下一轮重复叠加）。
+	 *
+	 * <p>R-144：收敛前把 {@code ai:pending:<runId>} 与 {@code ai:ledger:<runId>} 的条目真态按
+	 * {@link #TOOL_CALL_STATES_KEY} 携进带 {@code toolCalls} 的 ASSISTANT 消息 metadata
+	 * （T1 形态 = 按 toolCallId 的映射，非消息级标量）；只写 history 里真实存在的消息，
+	 * 不凭 pendings 凭空造（禁悬空段）。
 	 */
-	private void convergeMemory(String sessionId, List<Message> history) {
+	private void convergeMemory(String runId, String sessionId, List<Message> history) {
 		List<Message> memoryPortion = history.stream()
 			.filter(message -> message.getMessageType() != MessageType.SYSTEM)
 			.toList();
 		if (memoryPortion.isEmpty()) {
 			return;
 		}
-		List<Message> windowed = trimKeepingToolPairs(memoryPortion,
+		RunSnapshot snapshot = this.store.get(runId);
+		String snapshotStatus = snapshot == null ? null : snapshot.getStatus();
+		Map<String, PendingToolCall> pendingsById = new LinkedHashMap<>();
+		for (PendingToolCall pending : this.store.pendings(runId)) {
+			if (pending.getToolCallId() != null) {
+				pendingsById.put(pending.getToolCallId(), pending);
+			}
+		}
+		List<Message> withStates = new ArrayList<>(memoryPortion.size());
+		for (Message message : memoryPortion) {
+			if (message instanceof AssistantMessage assistant && assistant.hasToolCalls()) {
+				withStates.add(attachToolCallStates(runId, assistant, pendingsById, snapshotStatus));
+			}
+			else {
+				withStates.add(message);
+			}
+		}
+		List<Message> windowed = trimKeepingToolPairs(withStates,
 				this.properties.getMemory().getMaxMessages());
 		try {
 			this.chatMemory.clear(sessionId);
@@ -589,6 +614,108 @@ public class ResilientChatService {
 		catch (Exception ex) {
 			log.warn("记忆收敛失败 sessionId={}：{}", sessionId, ex.getMessage());
 		}
+	}
+
+	/**
+	 * R-144：把该 ASSISTANT 消息各 toolCall 的条目真态写成 {@code toolCallStates} 映射并重建消息
+	 * （{@link AssistantMessage} 的 metadata 槽为 final 且无 setter ⇒ 用 builder 逐字段保真重建）。
+	 * 无任何可写状态的 toolCallId 时原样返回（不产 {@code toolCallStates} 键 —— 旧载荷/无数据语义）。
+	 */
+	private Message attachToolCallStates(String runId, AssistantMessage assistant,
+			Map<String, PendingToolCall> pendingsById, String snapshotStatus) {
+		Map<String, Object> states = new LinkedHashMap<>();
+		for (AssistantMessage.ToolCall call : assistant.getToolCalls()) {
+			PendingToolCall pending = pendingsById.get(call.id());
+			Map<String, Object> state = resolveToolCallState(runId, pending, snapshotStatus, call.id());
+			if (state != null) {
+				states.put(call.id(), state);
+			}
+		}
+		if (states.isEmpty()) {
+			return assistant;
+		}
+		Map<String, Object> metadata = new LinkedHashMap<>();
+		if (assistant.getMetadata() != null) {
+			metadata.putAll(assistant.getMetadata());
+		}
+		metadata.put(TOOL_CALL_STATES_KEY, states);
+		return AssistantMessage.builder()
+			.content(assistant.getText())
+			.properties(metadata)
+			.toolCalls(assistant.getToolCalls())
+			.build();
+	}
+
+	/**
+	 * R-144：单个 toolCallId 的段级状态解析（两状态源定序 + T2 升格判据 + T3 kind 携载）。
+	 * 返回 {@code {status, kind?}}；无 pendings 条目时返回 null（不写该 toolCallId 项）。
+	 */
+	Map<String, Object> resolveToolCallState(String runId, PendingToolCall pending,
+			String snapshotStatus, String toolCallId) {
+		if (pending == null) {
+			return null;
+		}
+		String status = pending.getStatus();
+		String kind = pending.getKind();
+		if (isTerminalEntryStatus(status)) {
+			return toolCallState(status, kind);
+		}
+		if (PendingToolCall.APPROVED.equals(status)
+				&& (pending.isExecuted() || this.store.ledgerFor(runId, toolCallId) != null)) {
+			// T2 升格判据：KIND_CONFIRM 的 DANGER 工具执行后条目态永久停留 APPROVED（executeOnce 仅对
+			// KIND_BACKEND 置 EXECUTED），但「已批准且已执行」等价于 EXECUTED（executed 标志或台账命中即已执行）。
+			return toolCallState(PendingToolCall.EXECUTED, kind);
+		}
+		if (PendingToolCall.PENDING.equals(status) || PendingToolCall.APPROVED.equals(status)) {
+			if (RunSnapshot.isTerminal(snapshotStatus)) {
+				String snapshotCode = snapshotTerminalCode(snapshotStatus);
+				if (snapshotCode != null) {
+					log.warn("历史段状态以轮次终态为准 runId={} toolCallId={} 条目态={} 轮次态={}",
+							runId, toolCallId, status, snapshotStatus);
+					return toolCallState(snapshotCode, kind);
+				}
+				log.warn("轮次终态不参与段态推导，回落条目态 runId={} toolCallId={} 条目态={} 轮次态={}",
+						runId, toolCallId, status, snapshotStatus);
+				return toolCallState(status, kind);
+			}
+		}
+		return toolCallState(status, kind);
+	}
+
+	/** 条目级终态（非 PENDING / APPROVED 的 8 个状态码）判定。 */
+	private static boolean isTerminalEntryStatus(String status) {
+		return PendingToolCall.EXECUTED.equals(status)
+			|| PendingToolCall.REJECTED.equals(status)
+			|| PendingToolCall.REJECTED_ARGUMENTS.equals(status)
+			|| PendingToolCall.TIMEOUT.equals(status)
+			|| PendingToolCall.FRONTEND_RESULT.equals(status)
+			|| PendingToolCall.FRONTEND_CANCELLED.equals(status)
+			|| PendingToolCall.CANCELLED.equals(status)
+			|| PendingToolCall.BLOCKED.equals(status);
+	}
+
+	/**
+	 * 轮次终态 → 段级载荷码的最小面映射（决策卡 §1-2 未定义快照→段态表，本卡按最小面写死）：
+	 * CANCELLED → cancelled、DONE → succeeded；FAILED / REJECTED 别名不参与段态推导（返回 null）。
+	 */
+	private static String snapshotTerminalCode(String snapshotStatus) {
+		if (RunSnapshot.CANCELLED.equals(snapshotStatus)) {
+			return PendingToolCall.CANCELLED;
+		}
+		if (RunSnapshot.DONE.equals(snapshotStatus)) {
+			return RunSnapshot.DONE;
+		}
+		return null;
+	}
+
+	/** R-144 T1/T3：{@code {status, kind?}} 载荷映射；kind 无数据不写（禁臆造默认值）。 */
+	private static Map<String, Object> toolCallState(String status, String kind) {
+		Map<String, Object> state = new LinkedHashMap<>();
+		state.put("status", status);
+		if (kind != null && !kind.isBlank()) {
+			state.put("kind", kind);
+		}
+		return state;
 	}
 
 	/**

@@ -505,6 +505,10 @@ public class AiController {
 		return ResponseEntity.status(status).contentType(MediaType.APPLICATION_JSON).body(body);
 	}
 
+	/**
+	 * 记忆窗口原文（R-144 起：带 {@code toolCalls} 的 ASSISTANT 条目增透 {@code toolCallStates}
+	 * 段级状态映射 —— 旧载荷可缺该字段；缺字段 ⇒ 前端占位兜底，后端只保证「缺字段语义」）。
+	 */
 	@GetMapping("/history/{sessionId}")
 	public ApiResponse<Map<String, Object>> history(@PathVariable String sessionId) {
 		List<Map<String, Object>> items = new ArrayList<>();
@@ -514,6 +518,10 @@ public class AiController {
 			item.put("text", message.getText());
 			if (message instanceof AssistantMessage assistant && assistant.hasToolCalls()) {
 				item.put("toolCalls", assistant.getToolCalls());
+				Object toolCallStates = assistant.getMetadata().get(ResilientChatService.TOOL_CALL_STATES_KEY);
+				if (toolCallStates != null) {
+					item.put("toolCallStates", toolCallStates);
+				}
 			}
 			if (message instanceof ToolResponseMessage toolResponse) {
 				item.put("toolResponses", toolResponse.getResponses());

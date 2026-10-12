@@ -139,6 +139,12 @@ export interface AiHistoryMessage {
   toolCalls?: Array<{ id?: string; type?: string; name?: string; arguments?: string }>
   /** tool 消息的响应（ToolResponseMessage.ToolResponse 列表） */
   toolResponses?: Array<{ id?: string; name?: string; responseData?: string }>
+  /**
+   * R-144（后端历史携带状态）：按 toolCallId 映射的段级真态（挂在带 toolCalls 的 ASSISTANT 消息
+   * metadata 上随载荷透出）。旧载荷缺该字段 ⇒ 前端占位兜底（status 'succeeded' / kind2 'UNKNOWN'）；
+   * `kind` 缺数据 ⇒ 保持 'UNKNOWN'（不臆造默认值）；resume 重建轮（T4）同样无状态，共用该兜底。
+   */
+  toolCallStates?: Record<string, { status?: string; kind?: string }>
   timestamp?: unknown
 }
 

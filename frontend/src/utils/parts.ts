@@ -238,7 +238,7 @@ export function deriveProjections(message: ChatMessage): void {
  * 导出仅为批3③b D9 防漂移一致性锁（表驱动单测直译两表，见 frontend-tool-result-terminal.spec.ts）；
  * 生产调用点仍只有 applyFrameToParts 一处。
  *
- * 批3③b D9（R-141④）防漂移注记（三对，不得擅自"对齐"）：
+ * 批3③b D9（R-141④）防漂移注记（**四对**，不得擅自"对齐"；第③对为 R-144 增表后补）：
  * ① 本表 vs `frameStatusToPendingStatus`（stores/ai.ts）——**唯一真实分叉 = `SUCCEEDED`**
  *   （本表收录：覆盖 ConfirmGate#cancel 竞态带出的已决值；响应体表不翻译 ⇒ null。实发交集
  *   FRONTEND_RESULT/FRONTEND_CANCELLED/CANCELLED/TIMEOUT/REJECTED_ARGUMENTS/REJECTED/BLOCKED
@@ -246,6 +246,10 @@ export function deriveProjections(message: ChatMessage): void {
  * ② 段侧终态枚举 `localTerminal`（本文件 `frontend_tool_result` case 内）vs store 侧 `isFrameDecidedPendingStatus`
  *   （ai.ts）——同 7 态（succeeded/rejected/blocked/expired/cancelled/unknown/failed）、
  *   **无共享常量**（parts.ts 不依赖 store 的纯函数层约束），漂移由 D9 表驱动一致性锁兜底。
+ * ③ 本表 + `historyToolCallStatus`（下方，R-144 history 载荷面单表）——分叉逐条见
+ *   `historyToolCallStatus` 头注（EXECUTED / APPROVED·PENDING→pending / DONE / 不收录 SUCCEEDED 四条），
+ *   有意分叉、禁对齐；两表实发交集（FRONTEND_RESULT/FRONTEND_CANCELLED/CANCELLED/TIMEOUT/
+ *   REJECTED_ARGUMENTS/REJECTED/BLOCKED）同映射，漂移由 D9 表驱动一致性锁兜底。
  */
 export function frontendResultStatus(status: unknown): ToolRunStatus | null {
   switch (status) {
@@ -262,6 +266,43 @@ export function frontendResultStatus(status: unknown): ToolRunStatus | null {
       return 'rejected'
     case 'BLOCKED':
       return 'blocked'
+    default:
+      return null
+  }
+}
+
+/**
+ * R-144（history 载荷状态码 → 段状态，单表单一事实源）：唯一消费方 = `loadHistory` 历史整替。
+ * 载荷码 = 后端 `PendingToolCall` 10 码（T2 升格判据落地后 APPROVED∧已执行 已归 EXECUTED）+
+ * 快照态兜底（CANCELLED/DONE；FAILED 不参与段态推导 ⇒ null，与 A-1-4 判据序同源）。
+ * 与 `frontendResultStatus` 的有意分叉（D9 注记第③对逐条点名，禁擅自"对齐"）：
+ * ① `EXECUTED → succeeded`（本表独有：T2 升格判据的目标码；帧/响应面无此码）；
+ * ② `APPROVED` / `PENDING → pending`（定稿修正：兜底取 pending **不取 expired**；
+ *    `frontendResultStatus` 对这两码返回 null —— 响应面它们瞬态不存在，历史面是合法兜底态）；
+ * ③ `DONE → succeeded`（快照态兜底落点；帧/响应面无此码）；
+ * ④ 本表**不收录** `SUCCEEDED`（后端 10 码无此值，旧载荷兜底不走本表）。
+ * `FRONTEND_RESULT → succeeded` 为**定稿修正**（已回灌结果即成功终码，非瞬态）——
+ * 与 `frontendResultStatus` 同映射，非分叉。
+ */
+export function historyToolCallStatus(status: unknown): ToolRunStatus | null {
+  switch (status) {
+    case 'EXECUTED':
+    case 'FRONTEND_RESULT':
+    case 'DONE':
+      return 'succeeded'
+    case 'REJECTED':
+    case 'REJECTED_ARGUMENTS':
+      return 'rejected'
+    case 'TIMEOUT':
+      return 'expired'
+    case 'CANCELLED':
+    case 'FRONTEND_CANCELLED':
+      return 'cancelled'
+    case 'BLOCKED':
+      return 'blocked'
+    case 'APPROVED':
+    case 'PENDING':
+      return 'pending'
     default:
       return null
   }

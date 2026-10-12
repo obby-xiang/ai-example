@@ -206,6 +206,19 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
     wrapper.unmount()
   })
 
+  it("R-144 还原锚：段 status=blocked ⇒ 渲染「超出当前范围」（tag 色 warning 由 toolTagType 承担，文案面锁定）", async () => {
+    const wrapper = await mountPanel([
+      buildMessage(
+        [
+          { kind: 'tool', seg: 0, toolCallId: 'b1', name: 'probe.tool', kind2: 'CONFIRM', status: 'blocked', args: '{}', requiresAction: false }
+        ],
+        null
+      )
+    ])
+    expect(wrapper.text()).toContain('超出当前范围')
+    wrapper.unmount()
+  })
+
   it("TS-3 / A4'：GF 取消回灌失败文案落段 reason 位（G-C2 语境文案可见，D11 文案钉死）", async () => {
     const store = useAiStore()
     store.messages = [
