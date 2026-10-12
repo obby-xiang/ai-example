@@ -108,14 +108,13 @@ export interface TaskEventsOptions {
 /**
  * 任务级事件流（GET /api/tasks/{id}/events）。
  *
- * 该通道帧形态与 AI 帧不同（大写 type + 包一层 data）。列表自刷口径见 stores/task.ts
- * （有在跑作业时 4s，闲置时 30s 兜底）；作业页进度通道见 utils/job-watch.ts
- * （SSE 主通道 + 3000ms 兜底轮询，与任务中心不是同一套 cadence）。
- * 本函数留给需要事件驱动的场景（作业终态即时报、任务中心订阅池 utils/task-events.ts）。
+ * 该通道帧形态与 AI 帧不同（大写 type + 包一层 data）。当前唯一消费方是作业跟踪
+ * `utils/job-watch.ts`（SSE 主通道 + 3s 兜底轮询）；任务中心不自刷、不订阅本通道
+ * （手动刷新批 M1 已摘除订阅池，列表更新只走 store 的 refreshNow 手动通道）。
  *
  * 步3 的挂具（`options`，可选、向后兼容）：`onerror`
- * —— 任务级通道**无周期心跳**，"长时间无帧"是正常态，故降级只能由 onerror/readyState
- * 驱动（调用方判 `readyState`），不做帧新鲜度判定。
+ * —— 通道**无周期心跳**，"长时间无帧"本身不判死（帧空闲看门狗的口径见 job-watch.ts），
+ * 通道降级的直接驱动是 onerror/readyState。
  */
 export function openTaskEvents(
   taskId: number,

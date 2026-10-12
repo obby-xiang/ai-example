@@ -122,9 +122,9 @@ export interface PublishConflictAsync {
 /**
  * 操作流水（FR-4.4 前端形态）。
  *
- * 后端现状：无 AuditLog 表，删除等动作以结构化日志行 + TASK_CHANGED 事件（summary）落地
- * （TaskService#delete 注释与 ADR-11b）。此处定义前端展示用的流水条目形态，
- * 落库的 AuditLog 表属 DC-10 P2 —— 见证据文档【待裁决】。
+ * 后端现状：无 AuditLog 表，删除等动作以结构化日志行落地（TaskService#delete 注释与 ADR-11b；
+ * 手动刷新批 S5 起 TASK_CHANGED 事件链已摘除，流水不再伴随事件推送）。此处定义前端展示用的
+ * 流水条目形态，落库的 AuditLog 表属 DC-10 P2 —— 见证据文档【待裁决】。
  */
 export interface OperationLogEntry {
   /** 动作，如 CREATE_TASK / DELETE_TASK / START_JOB / PUBLISH */

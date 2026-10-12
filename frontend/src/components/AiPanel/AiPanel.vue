@@ -845,8 +845,7 @@ onMounted(async () => {
   ai.startMirror()
   ai.startWorkspaceSync()
   tickController = createPollingController({
-    intervalMs: TICK_MS,
-    fallbackIntervalMs: TICK_MS,
+    intervalMs: TICK_MS, // 单节奏（S2 起无 fallbackIntervalMs：双速语义已随任务中心自刷摘除）
     run: () => {
       now.value = Date.now()
     }

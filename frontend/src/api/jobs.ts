@@ -4,7 +4,6 @@ import { del, get, post } from './http'
 import type { PageResult } from '@/types/api'
 import type { ConfigStagingRow } from '@/types/data'
 import type { Job, JobCancelResult, JobStatus, JobType, ValidationIssue } from '@/types/job'
-import { isJobFinal } from '@/types/job'
 
 /** 创建并启动作业（201；执行在事务提交后异步开始）。 */
 export function createJob(taskId: number, jobType: JobType): Promise<Job> {
@@ -39,57 +38,11 @@ export function getDiff(jobId: number): Promise<ConfigStagingRow[]> {
 /** 作业终态集合（与 isJobFinal 同源，导出便于 store 判定）。 */
 export const JOB_FINAL_STATUSES: readonly JobStatus[] = ['COMPLETED', 'FAILED', 'CANCELLED']
 
-/** 等待作业进入终态（轮询快照；发布冲突必须先等 FAILED 再查 issues，Q4）。 */
-export interface WaitJobOptions {
-  intervalMs?: number
-  timeoutMs?: number
-  signal?: AbortSignal
-  onTick?: (job: Job) => void
-}
-
 /**
- * 等待结局：**终态到达**与**超时兜底**必须可判别。
- *
- * 原先超时走 `return job` —— 返回的是非终态 Job，调用方读到的"结局"和真终态无从区分，
- * 于是「等超时」被当成「拿到终态」，静默地把发布冲突态清成 null。
+ * 注：原 `waitForJobFinal`（1s 裸轮询循环）已在手动刷新批（S4，M4）摘除 ——
+ * 发布终态跟踪改复用 `utils/job-watch.ts` 的 watchJob（SSE 主通道 + 3s 兜底 + 帧空闲看门狗），
+ * 终态判定以快照为准，见 stores/task.ts 的 watchPublishOutcome。
  */
-export type WaitJobFinalOutcome =
-  | { status: 'final'; job: Job }
-  | { status: 'timeout'; job: Job }
-
-/**
- * 等待被 signal 取消（文案与原先一致，仅补类名以便调用方按类型收口，不必猜文案）。
- *
- * 消费者是 stores/task.ts 的 watchPublishOutcome，其调用点（stores/workspace.ts 的 void 调用）
- * 不接 rejection，只能靠类型判别把这个错误收成一次提示。
- */
-export class JobWaitAbortedError extends Error {
-  constructor(message = '等待作业终态已被取消') {
-    super(message)
-    this.name = 'JobWaitAbortedError'
-  }
-}
-
-export async function waitForJobFinal(jobId: number, options: WaitJobOptions = {}): Promise<WaitJobFinalOutcome> {
-  const intervalMs = options.intervalMs ?? 1000
-  const timeoutMs = options.timeoutMs ?? 300_000
-  const startedAt = Date.now()
-  for (;;) {
-    if (options.signal?.aborted) {
-      throw new JobWaitAbortedError()
-    }
-    const job = await getJob(jobId)
-    options.onTick?.(job)
-    if (isJobFinal(job.status)) {
-      return { status: 'final', job }
-    }
-    if (Date.now() - startedAt > timeoutMs) {
-      // 超时不是终态：显式标注，交由调用方决定"提示 + 保留现场"还是继续等
-      return { status: 'timeout', job }
-    }
-    await new Promise<void>((resolve) => setTimeout(resolve, intervalMs))
-  }
-}
 
 export const jobsApi = {
   createJob,
@@ -97,6 +50,5 @@ export const jobsApi = {
   getJob,
   cancelJob,
   getIssues,
-  getDiff,
-  waitForJobFinal
+  getDiff
 }

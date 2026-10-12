@@ -854,7 +854,7 @@ try {
 # TC11 SSE 进度事件流（任务级事件通道）
 #   源断言：订阅导出任务事件流收到 progress/done
 #   main 适配：GET /api/tasks/{id}/events（无名事件的 data 帧，type 在帧内），
-#   帧类型为 JOB_PROGRESS / JOB_DONE / TASK_CHANGED / HEARTBEAT；
+#   帧类型为 JOB_PROGRESS / JOB_DONE / HEARTBEAT（TASK_CHANGED 发布链已随手动刷新批 S5 摘除）；
 #   后端需以 --app.job.batch-size=10 启动（默认 100 时小配置项不跨分片边界，无进度帧）
 # ============================================================
 Say '--- TC11 SSE 进度事件流 ---'

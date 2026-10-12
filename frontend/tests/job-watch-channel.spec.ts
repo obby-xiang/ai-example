@@ -1,20 +1,18 @@
 /**
- * 轮询治理一期 · 步3（第二个 spec）：`utils/job-watch.ts` 的**通道降级切换**（D6）+ 权威快照（D6）
- * + dirty flag 三路径收尾补发（D9 口径②）。
+ * 手动刷新批（S3，M3 + F3）：`utils/job-watch.ts` **帧空闲看门狗** + 触发源收敛。
  *
- * 现状问题：SSE 连上后 3s 兜底轮询照旧跑 —— 任务级通道**无周期心跳**（§0-7），
- * 正常态是"长时间无帧"，于是"双通道 3s 并行"里那 3s 轮询全是浪费；反过来，
- * 因为长期无帧是正常态，**不能**设"帧新鲜度阈值"（D8），降级只能由 `onerror`/`readyState` 驱动。
- * 另一处静默丢弃：`JOB_DONE` 帧触发的刷新撞上 `inFlight` 时，`syncSnapshot` 直接被守卫吞掉
- * （`run` 返回已 resolve 的 promise ⇒ controller 的 dirty flag 根本没机会置位），
- * 于是"事件说完了"这次刷新**无声消失**（D9：本控制器没有静默丢弃路径）。
+ * 口径反转（有意为之，替代一期 D8"无帧是正常态"）：
+ * - **删除** realtime 30s 保底（`JOB_REALTIME_FALLBACK_POLL_MS`）：SSE 连上后兜底表**停表**，
+ *   不再有任何低频周期快照（触发源收敛为三类：SSE 帧 / onopen 一发 / 3s 兜底表）；
+ * - **新增帧空闲看门狗** `FRAME_IDLE_WATCHDOG_MS = 90_000`（可注入，测试/E2E 注小值）：
+ *   连续 90s 无 SSE 帧 ⇒ 判通道死亡 ⇒ 降 3s polling；此后任意新帧到达 ⇒ 回事件驱动
+ *   （realtime：兜底表停 + 重新武装看门狗）；
+ * - **复位源只有两个**：SSE 帧到达与 onopen —— **polling 快照落地不复位**（F3：
+ *   兜底 tick 是"通道已死"期间的自愈手段，不能反过来给死通道续命）；
+ * - 其余保留：首帧/onopen 各拉一次权威快照、JOB_PROGRESS 直驱进度、JOB_DONE 走 refreshNow
+ *   （撞在途守卫由 dirty flag 收尾补发，不丢弃）、同态短路、inflight 守卫、终态自收。
  *
- * 本 spec 锁的契约（全部用假时钟 + 受控 promise）：
- * - `realtime` → 30s **保底**（不停表、不清零）；`onerror` 且 `readyState !== OPEN` → 回 3s；
- * - 切换瞬间旧 timer 必清（切换后首个 tick 是一个完整新周期）；
- * - `onopen` 与**首帧**各拉一次权威快照（合计恰好 2 次，非首帧不再拉）；
- * - 任意长无帧**不触发降级/关闭**；
- * - 三路径撞在途守卫都**不丢弃**：收尾补发**恰好 1 次**、多次叠加**合并 1 次**。
+ * 全部用假时钟 + 受控 promise；EventSource 走全局桩（jsdom 无内置）。
  */
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 
@@ -22,17 +20,20 @@ const api = vi.hoisted(() => ({ getJob: vi.fn() }))
 
 vi.mock('@/api/jobs', () => ({ jobsApi: { getJob: api.getJob } }))
 
-import { JOB_FALLBACK_POLL_MS, watchJob } from '@/utils/job-watch'
+import { FRAME_IDLE_WATCHDOG_MS, JOB_FALLBACK_POLL_MS, watchJob } from '@/utils/job-watch'
 import type { Job, JobStatus } from '@/types/job'
 
-/** 实时通道下的保底间隔（30s：不停表，只降频 —— 保底 tick 是唯一假死发现面）。 */
-const REALTIME_FALLBACK_MS = 30_000
+/** 兜底轮询间隔（3s：看门狗降级后的自愈节奏）。 */
+const POLL_MS = JOB_FALLBACK_POLL_MS // 3000
+
+/** 看门狗测试阈值：注入小值（默认 90s  production 常量另行断言）。 */
+const WATCHDOG_MS = 10_000
 
 /** 错峰桩默认值：0.5 ⇒ 125ms（与 utils/polling.ts 的 0~250ms 窗口同口径）。 */
 const RANDOM_STUB = 0.5
 const JITTER_MS = RANDOM_STUB * 250
 
-/** EventSource 自写桩（jsdom 30 无内置；api/tasks.ts:106 内部直接 new，只能挂全局）。 */
+/** EventSource 自写桩（jsdom 无内置；api/tasks.ts 内部直接 new，只能挂全局）。 */
 class EventSourceStub {
   static instances: EventSourceStub[] = []
   static readonly OPEN = 1
@@ -131,10 +132,20 @@ function lastSource(): EventSourceStub {
   return source
 }
 
-/** 起一个跟踪器：桩已就绪（首拉在 watchJob 内同步发出）。 */
-function startWatch(): { source: EventSourceStub; onChannel: Mock; stop: () => void } {
+/** 起一个跟踪器：桩已就绪（首拉在 watchJob 内同步发出）；默认注入小阈值看门狗。 */
+function startWatch(overrides: { watchdogMs?: number } = {}): {
+  source: EventSourceStub
+  onChannel: Mock
+  stop: () => void
+} {
   const onChannel = vi.fn()
-  const stop = watchJob({ taskId: 1, jobId: 101, onChannel, onSnapshot: vi.fn() })
+  const stop = watchJob({
+    taskId: 1,
+    jobId: 101,
+    onChannel,
+    onSnapshot: vi.fn(),
+    frameIdleWatchdogMs: overrides.watchdogMs ?? WATCHDOG_MS
+  })
   live.push(stop)
   return { source: lastSource(), onChannel, stop }
 }
@@ -159,69 +170,127 @@ afterEach(() => {
   delete (globalThis as unknown as { EventSource?: unknown }).EventSource
 })
 
-describe('utils/job-watch.ts · 通道降级切换（D6）', () => {
-  it('realtime-switch-to-30s：onopen ⇒ realtime 兜底降为 30s 保底（不是清零）：30s 内只多打 1 次', async () => {
-    const { source, onChannel } = startWatch()
+describe('utils/job-watch.ts · 帧空闲看门狗（M3：90s 无帧即判通道死亡降级）', () => {
+  it('watchdog-default-90s：生产缺省阈值 = 90_000（可注入面之外的真实常量）', () => {
+    expect(FRAME_IDLE_WATCHDOG_MS).toBe(90_000)
+    expect(JOB_FALLBACK_POLL_MS).toBe(3000)
+  })
+
+  it('realtime-no-base-poll：onopen ⇒ realtime 兜底表停表 —— 远超旧 30s 保底的时长内 0 次快照（只要未触看门狗）', async () => {
+    const { source, onChannel } = startWatch({ watchdogMs: 60_000 })
     await flush()
     expect(pollCount()).toBe(1) // 开局首拉
 
     source.fireOpen()
     await flush()
     expect(onChannel).toHaveBeenLastCalledWith('realtime')
-    const afterOpen = pollCount()
-    expect(afterOpen).toBe(2) // onopen 后的权威快照（恰好 1 次）
+    expect(pollCount()).toBe(2) // onopen 权威快照（恰好 1 次）
 
-    await vi.advanceTimersByTimeAsync(REALTIME_FALLBACK_MS - 1)
-    expect(pollCount()).toBe(afterOpen) // 若是 3s 节奏，这里早该多出 9 次
-
-    await vi.advanceTimersByTimeAsync(1)
-    expect(pollCount()).toBe(afterOpen + 1) // 30s 保底恰好 1 次（不清零 ⇒ 假死仍可发现）
+    await vi.advanceTimersByTimeAsync(45_000) // 远超旧 30s 保底周期
+    expect(pollCount()).toBe(2) // 无 30s 保底：realtime 期间零周期快照
+    expect(onChannel).toHaveBeenCalledTimes(1)
   })
 
-  it('onerror-back-to-3s：onerror 且 readyState !== OPEN ⇒ 回 polling 且恢复 3s 节奏', async () => {
+  it('watchdog-degrades-to-polling：realtime 连续无帧达阈值 ⇒ 判死降 3s polling（onChannel 通知 + 兜底 tick 恢复）', async () => {
     const { source, onChannel } = startWatch()
     await flush()
     source.fireOpen()
     await flush()
     expect(onChannel).toHaveBeenLastCalledWith('realtime')
 
-    source.fireError() // readyState = CONNECTING（≠ OPEN）
+    await vi.advanceTimersByTimeAsync(WATCHDOG_MS - 1)
+    expect(onChannel).toHaveBeenCalledTimes(1) // 阈值内不降级
+    await vi.advanceTimersByTimeAsync(1)
+    expect(onChannel).toHaveBeenLastCalledWith('polling') // 看门狗触发：通道判死
+
+    const base = pollCount()
+    await vi.advanceTimersByTimeAsync(POLL_MS - 1)
+    expect(pollCount()).toBe(base)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(pollCount()).toBe(base + 1) // 3s 兜底恢复
+    await vi.advanceTimersByTimeAsync(POLL_MS)
+    expect(pollCount()).toBe(base + 2)
+    expect(source.closed).toBe(false) // 通道仍在（EventSource 自身重连语义不变）
+  })
+
+  it('watchdog-not-reset-by-polling-snapshot（F3）：降级后的 3s 兜底快照落地不复位看门狗 —— 无新帧则保持 polling，不自回升', async () => {
+    const { source, onChannel } = startWatch()
     await flush()
+    source.fireOpen()
+    await flush()
+    source.emit('HEARTBEAT', {}) // 帧 ⇒ 复位看门狗（此时 realtime）
+    await flush()
+
+    await vi.advanceTimersByTimeAsync(WATCHDOG_MS)
+    expect(onChannel).toHaveBeenLastCalledWith('polling') // 判死降级
+
+    const callsAtDegrade = onChannel.mock.calls.length
+    await vi.advanceTimersByTimeAsync(5 * POLL_MS) // 兜底 tick 快照不断落地
+    expect(onChannel.mock.calls.length).toBe(callsAtDegrade) // 快照不复位 ⇒ 无 realtime 回升
+    expect(onChannel).toHaveBeenLastCalledWith('polling')
+    expect(pollCount()).toBeGreaterThan(2) // 兜底表确在跑
+    expect(source.closed).toBe(false)
+  })
+
+  it('frame-restores-realtime：降级后任意新 SSE 帧到达 ⇒ 回事件驱动（realtime 通知 + 权威快照 1 次 + 看门狗重新武装）', async () => {
+    const { source, onChannel } = startWatch()
+    await flush()
+    source.fireOpen()
+    await flush()
+
+    await vi.advanceTimersByTimeAsync(WATCHDOG_MS)
     expect(onChannel).toHaveBeenLastCalledWith('polling')
 
     const base = pollCount()
-    await vi.advanceTimersByTimeAsync(JOB_FALLBACK_POLL_MS - 1)
-    expect(pollCount()).toBe(base)
-    await vi.advanceTimersByTimeAsync(1)
-    expect(pollCount()).toBe(base + 1)
-    await vi.advanceTimersByTimeAsync(JOB_FALLBACK_POLL_MS)
-    expect(pollCount()).toBe(base + 2) // 3s 节奏恢复
+    source.emit('HEARTBEAT', {}) // 死通道复活的第一帧
+    await flush()
+    expect(onChannel).toHaveBeenLastCalledWith('realtime')
+    expect(pollCount()).toBe(base + 1) // 回事件驱动时拉一次权威快照
+
+    // 看门狗重新武装：再次无帧达阈值 ⇒ 二次降级
+    await vi.advanceTimersByTimeAsync(WATCHDOG_MS)
+    expect(onChannel).toHaveBeenLastCalledWith('polling')
+    await vi.advanceTimersByTimeAsync(POLL_MS)
+    expect(pollCount()).toBeGreaterThan(base + 1) // 二次降级后兜底恢复
   })
 
-  it('old-timer-cleared-on-switch：3s→30s 切换瞬间旧 timer 清除，切换后首个 tick 距切换为一个完整新周期（不因旧 timer 多打一次）', async () => {
-    const { source } = startWatch()
+  it('onopen-resets-watchdog：onopen 复位看门狗（重连后计时重新开始，不在旧计时上累积触发）', async () => {
+    const { source, onChannel } = startWatch()
+    await flush()
+    source.fireOpen()
     await flush()
 
-    await vi.advanceTimersByTimeAsync(2000) // 距旧 3s 表的首跳还差 1s
-    const beforeSwitch = pollCount()
-    source.fireOpen() // t=2000：切到 30s
+    await vi.advanceTimersByTimeAsync(WATCHDOG_MS - 1000) // 距触发还差 1s
+    source.fireOpen() // 重连 onopen：计时归零
     await flush()
-    const afterSwitch = pollCount() // onopen 权威快照 +1
+    await vi.advanceTimersByTimeAsync(WATCHDOG_MS - 1000)
+    expect(onChannel).not.toHaveBeenCalledWith('polling') // 旧计时应触发而未触发 ⇒ 确被复位
+    expect(onChannel).toHaveBeenLastCalledWith('realtime')
 
-    await vi.advanceTimersByTimeAsync(1001) // t=3001：旧 timer 若残留，此刻会多打一次
-    expect(pollCount()).toBe(afterSwitch)
-    expect(beforeSwitch).toBe(afterSwitch - 1)
-
-    await vi.advanceTimersByTimeAsync(REALTIME_FALLBACK_MS - 1001 - 1) // t=31999
-    expect(pollCount()).toBe(afterSwitch)
-    await vi.advanceTimersByTimeAsync(1) // t=32000 = 切换时刻 + 30s
-    expect(pollCount()).toBe(afterSwitch + 1)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(onChannel).toHaveBeenLastCalledWith('polling') // 新计时到点照常降级
   })
 
-  it('authoritative-snapshot-twice：onopen 与首帧后各拉一次权威快照（合计恰好 2 次），非首帧不再拉', async () => {
+  it('frame-during-polling-resets-then-restores：polling 期间的帧先复位看门狗再回升 —— 帧本身就是复位源', async () => {
+    const { source, onChannel } = startWatch()
+    await flush()
+    source.fireOpen()
+    await flush()
+    await vi.advanceTimersByTimeAsync(WATCHDOG_MS)
+    expect(onChannel).toHaveBeenLastCalledWith('polling')
+
+    source.emit('HEARTBEAT', {})
+    await flush()
+    expect(onChannel).toHaveBeenLastCalledWith('realtime')
+    // 帧复位 ⇒ 此看门狗周期内不再触发；polling 快照（若有）不得续命 —— 已由 F3 用例锁定
+  })
+})
+
+describe('utils/job-watch.ts · 触发源收敛与快照纪律（保留面）', () => {
+  it('authoritative-snapshot-twice：onopen 与首帧各拉一次权威快照（合计恰好 2 次），非首帧不再拉', async () => {
     const { source } = startWatch()
     await flush()
-    const initial = pollCount() // 开局首拉（步1 既有语义）
+    const initial = pollCount() // 开局首拉
     expect(initial).toBe(1)
 
     source.fireOpen()
@@ -238,28 +307,31 @@ describe('utils/job-watch.ts · 通道降级切换（D6）', () => {
     expect(pollCount()).toBe(initial + 2) // 非首帧不再拉权威快照
   })
 
-  it('no-frame-freshness-threshold：任意长无帧（远超 30s）不触发降级/关闭，通道保持', async () => {
+  it('onerror-back-to-3s：onerror 且 readyState !== OPEN ⇒ 立即回 polling（不等看门狗），3s 兜底接管', async () => {
     const { source, onChannel } = startWatch()
     await flush()
     source.fireOpen()
     await flush()
-    const base = pollCount()
+    expect(onChannel).toHaveBeenLastCalledWith('realtime')
 
-    await vi.advanceTimersByTimeAsync(10 * REALTIME_FALLBACK_MS) // 5 分钟无任何帧
-    expect(onChannel).toHaveBeenCalledTimes(1) // 只报过一次 realtime
-    expect(onChannel).toHaveBeenCalledWith('realtime')
-    expect(onChannel).not.toHaveBeenCalledWith('polling')
-    expect(source.closed).toBe(false)
-    expect(pollCount()).toBe(base + 10) // 30s 保底照常推进（降级不由"无帧"驱动）
+    source.fireError() // 断线事件：即时降级（看门狗是"连而无帧"的补充判死面）
+    await flush()
+    expect(onChannel).toHaveBeenLastCalledWith('polling')
+
+    const base = pollCount()
+    await vi.advanceTimersByTimeAsync(POLL_MS - 1)
+    expect(pollCount()).toBe(base)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(pollCount()).toBe(base + 1)
+    await vi.advanceTimersByTimeAsync(POLL_MS)
+    expect(pollCount()).toBe(base + 2) // 3s 兜底接管
   })
 
-  it('same-state-onerror-short-circuit：通道已是 polling 时再收 onerror 不重置 arm 起点（F3：连续 onerror×3 后 3s 兜底仍按原节拍发请求）', async () => {
+  it('same-state-onerror-short-circuit：通道已是 polling 时再收 onerror 不重置兜底表起点（F3：连续 onerror×3 后 3s 兜底仍按原节拍发）', async () => {
     const { source } = startWatch()
     await flush()
     expect(pollCount()).toBe(1) // 开局首拉；3s 兜底表武装于 t=0（初始通道态 = polling，无通知事件）
 
-    // 连续 onerror×3：若每次 error 都无条件 emitChannel('polling') 重排 arm 起点，
-    // 错误节拍 ≲3s 时兜底 poll 将永远一发不出（断线自愈饿死）。
     source.fireError() // t≈0
     await flush()
     await vi.advanceTimersByTimeAsync(1000)
@@ -273,10 +345,10 @@ describe('utils/job-watch.ts · 通道降级切换（D6）', () => {
     await vi.advanceTimersByTimeAsync(999)
     expect(pollCount()).toBe(1)
     await vi.advanceTimersByTimeAsync(1)
-    expect(pollCount()).toBe(2) // 3s 兜底按原节拍发出（同态短路 ⇒ 起点不被 error 拖动）
+    expect(pollCount()).toBe(2)
 
-    // 第三次 error 之后节奏仍不被拖：下一个 tick 在 t=6000（而非 t=2000+ 某次新起点）
-    await vi.advanceTimersByTimeAsync(JOB_FALLBACK_POLL_MS - 1)
+    // 第三次 error 之后节奏仍不被拖：下一个 tick 在 t=6000
+    await vi.advanceTimersByTimeAsync(POLL_MS - 1)
     expect(pollCount()).toBe(2)
     await vi.advanceTimersByTimeAsync(1)
     expect(pollCount()).toBe(3)
@@ -297,15 +369,19 @@ describe('utils/job-watch.ts · 通道降级切换（D6）', () => {
   })
 })
 
-describe('utils/job-watch.ts · 终态释放与 dirty flag 收尾补发（口径②）', () => {
-  it('final-disposes-both：onFinal 后 timer 与 source 同时释放，且不再取数', async () => {
+describe('utils/job-watch.ts · 终态释放与 dirty flag 收尾补发（口径②，保留面）', () => {
+  it('final-disposes-all：onFinal 后 timer / source / 看门狗同时释放，且不再取数', async () => {
     const onFinal = vi.fn()
-    const stop = watchJob({ taskId: 1, jobId: 101, onFinal })
+    const stop = watchJob({ taskId: 1, jobId: 101, onFinal, frameIdleWatchdogMs: WATCHDOG_MS })
     live.push(stop)
     const source = lastSource()
     await flush()
     expect(onFinal).not.toHaveBeenCalled()
-    expect(vi.getTimerCount()).toBeGreaterThan(0) // 兜底 timer 在册
+    expect(vi.getTimerCount()).toBeGreaterThan(0) // 兜底 timer + 看门狗在册
+
+    source.fireOpen()
+    await flush()
+    expect(vi.getTimerCount()).toBeGreaterThan(0)
 
     api.getJob.mockResolvedValue(makeJob('COMPLETED'))
     source.emit('JOB_DONE', { jobId: 101, status: 'COMPLETED' })
@@ -314,10 +390,10 @@ describe('utils/job-watch.ts · 终态释放与 dirty flag 收尾补发（口径
     expect(onFinal).toHaveBeenCalledTimes(1)
     expect(onFinal.mock.calls[0]?.[0]?.status).toBe('COMPLETED')
     expect(source.closed).toBe(true)
-    expect(vi.getTimerCount()).toBe(0) // 兜底 timer 随 source 一起释放
+    expect(vi.getTimerCount()).toBe(0) // 兜底 timer 与看门狗随 source 一起释放
 
     const after = pollCount()
-    await vi.advanceTimersByTimeAsync(5 * REALTIME_FALLBACK_MS)
+    await vi.advanceTimersByTimeAsync(5 * WATCHDOG_MS)
     expect(pollCount()).toBe(after)
   })
 

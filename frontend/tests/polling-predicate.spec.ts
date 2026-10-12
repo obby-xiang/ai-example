@@ -1,12 +1,8 @@
 /**
- * 轮询治理一期 · 步1（RED 先行的第一个 spec）：锁 stores/task.ts 的条件轮询口径。
- *
- * 现状问题：任务中心 `startAutoRefresh` 每 4s **无条件** load()，页面开着就在持续打后端；
- * 步1 把口径改成「有在跑作业（RUNNING/PENDING）才 4s 刷」，并为事件驱动/手动刷新补一个
- * `refreshNow()`（绕过谓词，且被 loading 挡住时合并补发恰好 1 次）。
- *
- * 谓词口径的关键：以**当前 items**为准（后端已按筛选条件分页返回），
- * 所以"构造时全量有在跑行、筛选后当前页没有"必须判为 false —— 否则筛选视图会继续 4s 空转。
+ * 手动刷新批（S1）：任务中心的**条件自刷谓词（hasActiveJob）与订阅池一并摘除**（M1）后，
+ * 本文件不再锁谓词口径，只锁 `refreshNow()` **手动刷新通道**（F2 保留面）：
+ * - 闲置状态也照拉一次（绕过任何谓词 —— 现在根本不存在谓词）；
+ * - 被 loading 挡住的 refreshNow 合并为恰好 1 次补发（在途那次 load 的 finally 收口）。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
@@ -69,44 +65,10 @@ beforeEach(() => {
   api.listTasks.mockReset()
 })
 
-describe('stores/task.ts · hasActiveJob 谓词（以当前 items 为准）', () => {
-  it('predicate-all-idle：全部行 latestJob 为 COMPLETED 或 null ⇒ false', () => {
-    const store = useTaskStore()
-    store.items = [makeSummary(1, null), makeSummary(2, 'COMPLETED'), makeSummary(3, 'FAILED'), makeSummary(4, 'CANCELLED')]
-
-    expect(store.hasActiveJob).toBe(false)
-  })
-
-  it('predicate-running-or-pending：任一行 RUNNING 或 PENDING ⇒ true', () => {
-    const store = useTaskStore()
-    store.items = [makeSummary(1, 'COMPLETED'), makeSummary(2, 'RUNNING')]
-    expect(store.hasActiveJob).toBe(true)
-
-    store.items = [makeSummary(1, null), makeSummary(2, 'PENDING')]
-    expect(store.hasActiveJob).toBe(true)
-  })
-
-  it('predicate-filtered-scope：筛选后当前 items 无在跑行 ⇒ false（即使构造时全量有在跑行）', async () => {
-    const store = useTaskStore()
-    // 全量视图：任务 2 有 RUNNING 作业
-    api.listTasks.mockResolvedValueOnce(pageOf([makeSummary(1, null), makeSummary(2, 'RUNNING')]))
-    await store.load()
-    expect(store.hasActiveJob).toBe(true)
-
-    // 筛选视图（后端按 status=COMPLETED 过滤后返回）：当前页没有任何在跑行
-    api.listTasks.mockResolvedValueOnce(pageOf([makeSummary(1, 'COMPLETED')]))
-    store.applyFilters({ status: 'COMPLETED' })
-    await vi.waitFor(() => expect(api.listTasks).toHaveBeenCalledTimes(2))
-    await vi.waitFor(() => expect(store.hasActiveJob).toBe(false))
-    expect(store.items.map((item) => item.task.id)).toEqual([1])
-  })
-})
-
-describe('stores/task.ts · refreshNow()（绕过谓词 + dirty 合并补发）', () => {
+describe('stores/task.ts · refreshNow()（手动刷新通道：绕过一切周期机制 + loading 合并补发）', () => {
   it('refresh-now-bypasses-idle-predicate：全程闲置也照拉一次', async () => {
     const store = useTaskStore()
     store.items = [makeSummary(1, 'COMPLETED')]
-    expect(store.hasActiveJob).toBe(false)
 
     api.listTasks.mockResolvedValueOnce(pageOf([makeSummary(1, 'COMPLETED'), makeSummary(2, 'COMPLETED')]))
     await store.refreshNow()

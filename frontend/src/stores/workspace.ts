@@ -53,6 +53,9 @@ const PAGE_LABELS: Record<WorkspacePageId, string> = {
   data: '数据浏览'
 }
 
+/** 发布跟踪的轮次 dispose（S4）：run_job 每发起一轮 publish 跟踪先收上一轮，卸载/收尾不留活口。 */
+let publishWatcherDispose: (() => void) | null = null
+
 export const useWorkspaceStore = defineStore('workspace', {
   state: () => ({
     /** 契约版本号：两侧按此判定兼容性 */
@@ -448,8 +451,11 @@ async function runUiEvent(event: UiEvent): Promise<UiEventResult> {
         const job = await jobsApi.createJob(event.taskId, event.jobType)
         await taskStore.refreshCurrent()
         if (event.jobType === 'PUBLISH') {
-          // Q4：发布冲突是**异步形态**（恒 201），必须等作业终态后查 issues
-          void taskStore.watchPublishOutcome(job.id ?? 0)
+          // Q4：发布冲突是**异步形态**（恒 201），必须等作业终态后查 issues。
+          // 取消链路 = dispose 形态（C1 收口修对齐 M4，唯一机制）：持有 dispose，
+          // 新一轮 publish 发起时先收旧跟踪（轮次收尾），静默、不弹提示。
+          publishWatcherDispose?.()
+          publishWatcherDispose = taskStore.watchPublishOutcome(event.taskId, job.id ?? 0)
           return ok(`发布作业已启动（作业 #${job.id}），冲突会在完成后以作业失败 + 问题清单呈现`)
         }
         return ok(`作业已启动：${event.jobType}（作业 #${job.id}）`)

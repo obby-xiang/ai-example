@@ -5,11 +5,11 @@
         <h2 class="m-0 text-xl text-[#303133]">任务中心</h2>
         <div class="mt-1 text-[13px] text-[#909399]">
           导出配置 / 导入配置 任务管理
-          <span class="ml-1">· 有进行中作业时每 4 秒自动刷新；其余每 30 秒兜底刷新{{ lastLoadedText }}</span>
+          <span class="ml-1">· 手动刷新（右上角），操作成功后自动更新{{ lastLoadedText }}</span>
         </div>
       </div>
       <div>
-        <el-button :icon="Refresh" circle title="刷新" @click="taskStore.load()" />
+        <el-button :icon="Refresh" circle title="刷新" @click="taskStore.refreshNow()" />
         <el-button type="primary" :icon="Plus" @click="createDialogVisible = true">创建任务</el-button>
       </div>
     </div>
@@ -148,19 +148,16 @@
  * 任务中心（五页之①）。
  *
  * - 过滤（类型/状态/关键词）+ 分页：参数原样交后端（key 排序与 LIKE 转义后端已处理）；
- * - 自刷口径（轮询治理步1）：有在跑作业（store 的 hasActiveJob）时每 4s 一次，
- *   闲置时每 30s 兜底一次；两个 tick 都在进 load() 前查 loading 防重叠（deepseek 蓝本形态）；
+ * - 刷新口径（手动刷新批，M1 + F2）：**无任何周期自刷、零 EventSource 连接** ——
+ *   挂载只拉一次列表，此后静止对后端零请求；右上角刷新按钮与写操作成功后的本地 refreshNow()
+ *   是唯一更新入口（轮询治理一期步1~步3 的条件自刷与任务级 SSE 订阅池已整体摘除）；
  * - 点任务标题 = 一键恢复向导（`restoreWizard` 按任务类型跳对应向导页，与创建任务后跳转同口径）；
  * - 「取消」取消的是该任务最新作业（后端只有 DELETE /api/jobs/{id}；作业已终态 →
- *   409 JOB_ALREADY_FINAL，按码给中文提示，不当普通错误弹）；
+ *   409 JOB_ALREADY_FINAL，按码给中文提示，不当普通错误弹）；取消成功后本地 refreshNow() 一次；
  * - 「删除」级联清理作业/条目/问题/暂存/文件（S4.3b⑦）；
- * - 进度列是**行级**口径：total 未知（-1）时显示"处理中"而不是百分比；
- * - 任务级事件订阅（轮询治理步3）：当前页有在跑作业的任务订阅 `GET /api/tasks/{id}/events`
- *   （上限 3、按 taskId 降序取前 3 保最新行，见 utils/task-events.ts）。订阅随本页生命周期开关——
- *   onMounted 起、onBeforeUnmount **显式**调 store 的 closeTaskEvents 关闭（订阅状态挂 store、
- *   跨路由存活，不能依赖组件自动清理）。
+ * - 进度列是**行级**口径：total 未知（-1）时显示"处理中"而不是百分比。
  */
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh } from '@element-plus/icons-vue'
@@ -294,6 +291,8 @@ async function cancelTask(row: TaskSummary): Promise<void> {
     const outcome = await taskStore.cancelJob(jobId)
     if (outcome.handled) {
       ElMessage.success(outcome.message)
+      // 写操作成功后本地刷新一次（F2 手动刷新通道；任务中心无周期表，不刷就看不到取消落地）
+      void taskStore.refreshNow()
     } else {
       ElMessage.warning(outcome.message)
     }
@@ -352,14 +351,7 @@ async function createTask(): Promise<void> {
 
 onMounted(() => {
   workspace.enterPage({ pageId: 'tasks', page: 'tasks', taskType: null, step: null, taskId: null })
+  // 手动刷新批（M1）：只拉一次列表 —— 不起周期表、不开任务级事件订阅
   void taskStore.load()
-  taskStore.startAutoRefresh()
-  taskStore.startTaskEvents()
-})
-
-onBeforeUnmount(() => {
-  taskStore.stopAutoRefresh()
-  // 显式出口：订阅状态挂 store（跨路由存活），必须在这里关掉全部任务级 EventSource
-  taskStore.closeTaskEvents()
 })
 </script>

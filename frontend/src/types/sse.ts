@@ -334,17 +334,7 @@ export function frameSeq(frame: SseFrame): number | null {
  * （ExportJobRunner/ImportJobRunner/PrecheckJobRunner/PublishJobRunner#publishProgress），
  * 载荷是**行级** processed/total + defCode + 百分比，是向导"SSE 进度"的数据来源。
  */
-export type TaskEventType = 'HEARTBEAT' | 'TASK_CHANGED' | 'JOB_PROGRESS' | 'JOB_DONE'
-
-/** TASK_CHANGED 的 data（TaskSseService#onTaskChanged）。 */
-export interface TaskChangedPayload {
-  taskId: number
-  version: number
-  currentStep: string
-  status: string
-  /** 动作摘要（如"跳转到步骤: EXPORT"）—— 前端操作流水的来源 */
-  summary: string
-}
+export type TaskEventType = 'HEARTBEAT' | 'JOB_PROGRESS' | 'JOB_DONE'
 
 /** JOB_DONE 的 data（JobService#cancel 等发布点）。 */
 export interface JobDonePayload {
@@ -366,5 +356,5 @@ export interface JobProgressPayload {
 /** 任务级 SSE 帧。 */
 export interface TaskEventFrame {
   type: TaskEventType
-  data: TaskChangedPayload | JobProgressPayload | JobDonePayload | Record<string, never>
+  data: JobProgressPayload | JobDonePayload | Record<string, never>
 }
