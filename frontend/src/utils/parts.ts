@@ -491,6 +491,20 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
   }
 }
 
+/**
+ * R-158 #11：复制文本 = 全部 text 段 `join('\n\n')`（段间空行，单一事实源）。
+ *
+ * 为什么独立纯函数：复制口径与 `deriveProjections` 的 content 契约（逐字一致，parts.ts:167
+ * 红线）分家——content 按"到达顺序拼接无间隔"服务渲染/历史，复制按业界惯例段间空行。
+ * **不碰** deriveProjections / 镜像 / delta 路径。
+ */
+export function deriveCopyText(message: ChatMessage): string {
+  return message.parts
+    .filter((part): part is TextPart => part.kind === 'text')
+    .map((part) => part.text)
+    .join('\n\n')
+}
+
 /** 该帧是否已应用过（消息级幂等记账，R2-1：只去重、不做连续性判定）。 */
 export function alreadyApplied(message: ChatMessage, seq: number): boolean {
   return Array.isArray(message.appliedSeqs) && message.appliedSeqs.includes(seq)

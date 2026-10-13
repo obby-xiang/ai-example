@@ -24,6 +24,17 @@ const api = vi.hoisted(() => ({
   chat: vi.fn()
 }))
 
+/** R-158 #12：ResizeObserver 测试桩 —— jsdom 无 RO；用模块级开关控制「溢出/不溢出」回调。 */
+const roState = vi.hoisted(() => ({ overflow: true }))
+class ResizeObserverStub {
+  constructor(private readonly cb: ResizeObserverCallback) {}
+  observe(el: Element): void {
+    this.cb([{ target: el, contentRect: { height: roState.overflow ? 500 : 0 } } as unknown as ResizeObserverEntry], {} as ResizeObserver)
+  }
+  unobserve(): void {}
+  disconnect(): void {}
+}
+
 vi.mock('@/api/ai', () => ({ aiApi: api }))
 
 const stubs = {
@@ -40,6 +51,8 @@ const stubs = {
 beforeEach(() => {
   sessionStorage.clear()
   setActivePinia(createPinia())
+  vi.stubGlobal('ResizeObserver', ResizeObserverStub)
+  roState.overflow = true
   api.health.mockReset()
   api.history.mockReset()
   api.runsCurrent.mockReset()
@@ -571,7 +584,9 @@ describe('R-154：截断角标 / 跟随暂停 / 生成中 / 编辑回填 / 建�
     wrapper.unmount()
   })
 
-  it('#2 负例：未截断段不出角标与展开入口', async () => {
+  it('#2 负例：未截断段不出角标；真溢出归展示层判据（不溢出 ⇒ 无 show-more）', async () => {
+    // R-158 #12 语义：show-more 由真溢出（RO）派生，不再由 truncated 标记派生 —— 关溢出桩验证
+    roState.overflow = false
     const wrapper = await mountPanel([
       buildMessage([
         { kind: 'tool', seg: 0, toolCallId: 'c2', name: 'get_row_count', kind2: 'BACKEND', status: 'succeeded', args: '{}', result: '完整结果', requiresAction: false }
@@ -745,13 +760,15 @@ describe('R-157：操作行外置 + role 过滤 + 编辑重跑 + 发送滚底 + 
     wrapper.unmount()
   })
 
-  it('#2 role 过滤：仅用户消息可编辑；AI 回复无编辑、有重试', async () => {
+  it('#2 role 过滤：仅用户消息可编辑；AI 回复无编辑、仅复制（R-158 #4 重试已去除）', async () => {
     const [user, reply] = pair()
     const wrapper = await mountPanel([user, reply])
     expect(wrapper.find('[data-testid="edit-msg-u-1"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="retry-msg-u-1"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="edit-msg-a-1"]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="retry-msg-a-1"]').exists()).toBe(true)
+    // R-158 #4：用户直裁去除重试 —— AI 回复操作行仅剩复制（skipUserRecord 通道在 store 层保留）
+    expect(wrapper.find('[data-testid="retry-msg-a-1"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="copy-msg-a-1"]').exists()).toBe(true)
     // 图标化：复制按钮内是 SVG，无「复制」文字按钮
     expect(wrapper.find('[data-testid="copy-msg-u-1"] svg').exists()).toBe(true)
     wrapper.unmount()
@@ -778,26 +795,6 @@ describe('R-157：操作行外置 + role 过滤 + 编辑重跑 + 发送滚底 + 
     expect(store.messages[0]?.content).toBe('改写后的提问')
     expect(api.chat).toHaveBeenCalledTimes(1)
     expect(api.chat.mock.calls[0][0].message).toBe('改写后的提问')
-    wrapper.unmount()
-  })
-
-  it('#2 重试（MAJOR-1 语义版）：提问原地保留不重复，截断其后并从原提问重跑', async () => {
-    const store = useAiStore()
-    store.messages = pair()
-    store.historyLoaded = true
-    api.chat.mockReset()
-    api.chat.mockResolvedValue(undefined)
-    const { default: AiPanel } = await import('@/components/AiPanel/AiPanel.vue')
-    const wrapper = mount(AiPanel, { global: { stubs: stubsWithInput } })
-    await wrapper.vm.$nextTick()
-
-    await wrapper.find('[data-testid="retry-msg-a-1"]').trigger('click')
-    await wrapper.vm.$nextTick()
-
-    // 语义：提问只出现一次（u-1 原地保留），a-1/u-2 截断，重发只起新助手消息
-    expect(store.messages.map((m) => m.id)).toEqual(['u-1', expect.stringMatching(/^a-/)])
-    expect(api.chat).toHaveBeenCalledTimes(1)
-    expect(api.chat.mock.calls[0][0].message).toBe('原始提问')
     wrapper.unmount()
   })
 
@@ -837,6 +834,149 @@ describe('R-157：操作行外置 + role 过滤 + 编辑重跑 + 发送滚底 + 
       expect(avatar.find('svg').exists()).toBe(true)
       expect(avatar.text()).toBe('')
     }
+    wrapper.unmount()
+  })
+})
+
+/**
+ * R-158：#10 HITL 只读回执 / #12 CollapsibleText 真溢出 / #11 复制段间换行（UI 面锁）。
+ */
+describe('R-158：HITL 只读回执 / CollapsibleText / 复制换行', () => {
+  it('#10：CONFIRM 已决段出只读回执卡（状态徽标 + 参数自然语言摘要 + 可展开原始 args）', async () => {
+    const msg = buildMessage([
+      { kind: 'text', seg: 0, text: '', streaming: false },
+      {
+        kind: 'tool', seg: 1, toolCallId: 'p1', name: 'start_publish', kind2: 'CONFIRM',
+        status: 'succeeded', args: '{"taskId":3}', requiresAction: false,
+        decision: 'approved', decidedAt: 1_700_000_000_000
+      }
+    ])
+    const wrapper = await mountPanel([msg])
+    await wrapper.find('[data-testid="block-toggle-a-1:p1"]').trigger('click')
+    const receipt = wrapper.find('[data-testid="hitl-receipt"]')
+    expect(receipt.exists()).toBe(true)
+    expect(receipt.text()).toContain('已确认')
+    expect(receipt.text()).toContain('启动发布作业')
+    expect(receipt.text()).toContain('taskId=3')
+    expect(receipt.text()).toMatch(/\d{2}-\d{2} \d{2}:\d{2}/) // decidedAt 回显
+    // 原始参数可展开（默认收起）
+    const argsMore = wrapper.find('[data-testid="receipt-args-more-p1"]')
+    expect(argsMore.exists()).toBe(true)
+    expect(argsMore.attributes('style')).toContain('display: none')
+    await wrapper.find('[data-testid="receipt-args-toggle-p1"]').trigger('click')
+    expect(wrapper.find('[data-testid="receipt-args-more-p1"]').attributes('style') ?? '').not.toContain('display: none')
+    wrapper.unmount()
+  })
+
+  it('#10：已过期 / GF 已提交值回执（徽标区分 + submittedValues 可回溯）', async () => {
+    const expired = buildMessage([
+      { kind: 'tool', seg: 0, toolCallId: 'e1', name: 'start_export', kind2: 'CONFIRM', status: 'expired', args: '{}', requiresAction: false }
+    ])
+    expired.id = 'a-expired'
+    const gf = buildMessage([
+      { kind: 'tool', seg: 0, toolCallId: 'g1', name: 'generative_form', kind2: 'FRONTEND', status: 'succeeded', args: '{}', requiresAction: false, submittedValues: { region: 'HB' } }
+    ])
+    gf.id = 'a-gf'
+    const plain = buildMessage([
+      { kind: 'tool', seg: 0, toolCallId: 't1', name: 'list_tasks', kind2: 'BACKEND', status: 'succeeded', args: '{}', requiresAction: false }
+    ])
+    plain.id = 'a-plain'
+
+    const wrapper = await mountPanel([expired, gf, plain])
+    await wrapper.find('[data-testid="block-toggle-a-expired:e1"]').trigger('click')
+    expect(wrapper.find('[data-testid="hitl-receipt"]').text()).toContain('已过期')
+    await wrapper.find('[data-testid="block-toggle-a-gf:g1"]').trigger('click')
+    const gfReceipt = wrapper.findAll('[data-testid="hitl-receipt"]')[1]
+    expect(gfReceipt.text()).toContain('已确认')
+    expect(wrapper.find('[data-testid="receipt-values"]').text()).toContain('已提交')
+    expect(wrapper.find('[data-testid="receipt-values"]').text()).toContain('HB')
+    // 普通 BACKEND 工具卡无回执卡
+    await wrapper.find('[data-testid="block-toggle-a-plain:t1"]').trigger('click')
+    expect(wrapper.findAll('[data-testid="hitl-receipt"]')).toHaveLength(2)
+    wrapper.unmount()
+  })
+
+  it('#10：回执徽标系决策态（收口 MINOR-1）——approved 即显已确认（running/失败均不改判），缺省回退 status', async () => {
+    const running = buildMessage([
+      { kind: 'tool', seg: 0, toolCallId: 'r1', name: 'start_publish', kind2: 'CONFIRM', status: 'running', args: '{}', requiresAction: false, decision: 'approved', decidedAt: 1_700_000_000_000 }
+    ])
+    running.id = 'a-running'
+    const failedAfterApprove = buildMessage([
+      { kind: 'tool', seg: 0, toolCallId: 'f1', name: 'start_publish', kind2: 'CONFIRM', status: 'failed', args: '{}', requiresAction: false, decision: 'approved' }
+    ])
+    failedAfterApprove.id = 'a-failed'
+    const rejected = buildMessage([
+      { kind: 'tool', seg: 0, toolCallId: 'x1', name: 'start_publish', kind2: 'CONFIRM', status: 'rejected', args: '{}', requiresAction: false, decision: 'rejected', decidedAt: 1_700_000_000_000 }
+    ])
+    rejected.id = 'a-rejected'
+    const legacyExpired = buildMessage([
+      { kind: 'tool', seg: 0, toolCallId: 'l1', name: 'start_export', kind2: 'CONFIRM', status: 'expired', args: '{}', requiresAction: false }
+    ])
+    legacyExpired.id = 'a-legacy'
+
+    const wrapper = await mountPanel([running, failedAfterApprove, rejected, legacyExpired])
+    const receiptAt = async (prefix: string, id: string): Promise<string> => {
+      await wrapper.find(`[data-testid="block-toggle-${id}:${prefix}"]`).trigger('click')
+      return wrapper.find(`[data-testid="msg-bubble-${id}"]`).find('[data-testid="hitl-receipt"]').text()
+    }
+    // approve 即显「已确认」——running 期间不等 succeeded
+    expect(await receiptAt('r1', 'a-running')).toContain('已确认')
+    // 已确认但执行失败：徽标仍「已确认」（决策态 ≠ 执行态）
+    expect(await receiptAt('f1', 'a-failed')).toContain('已确认')
+    expect(await receiptAt('x1', 'a-rejected')).toContain('已拒绝')
+    // decision 缺省（历史/过期）回退 status 派生
+    expect(await receiptAt('l1', 'a-legacy')).toContain('已过期')
+    wrapper.unmount()
+  })
+
+  it('#12：真溢出才渐隐 + 显示更多；不溢出零副作用（无按钮无 mask）', async () => {
+    const longArgs = JSON.stringify({ a: 1, b: 2 })
+    const mk = (): ChatMessage => buildMessage([
+      { kind: 'tool', seg: 0, toolCallId: 'c1', name: 'probe.tool', kind2: 'BACKEND', status: 'succeeded', args: longArgs, result: '结果', requiresAction: false }
+    ])
+    // 不溢出：零副作用
+    roState.overflow = false
+    const w1 = await mountPanel([mk()])
+    await w1.find('[data-testid="block-toggle-a-1:c1"]').trigger('click')
+    expect(w1.find('[data-testid="args-more-c1"]').exists()).toBe(false)
+    w1.unmount()
+    // 真溢出：渐隐（mask + 限高）+ 显示更多，点击展开
+    roState.overflow = true
+    const w2 = await mountPanel([mk()])
+    await w2.find('[data-testid="block-toggle-a-1:c1"]').trigger('click')
+    const wrap = w2.find('[data-testid="args-more-c1"]').element.parentElement!.firstElementChild as HTMLElement
+    expect(w2.find('[data-testid="args-more-c1"]').exists()).toBe(true)
+    expect(wrap.style.maskImage).toContain('linear-gradient')
+    expect(wrap.style.maxHeight).toBe('96px')
+    await w2.find('[data-testid="args-more-c1"]').trigger('click')
+    expect(w2.find('[data-testid="args-more-c1"]').text()).toBe('收起')
+    expect((w2.find('[data-testid="args-more-c1"]').element.parentElement!.firstElementChild as HTMLElement).style.maxHeight).toBe('')
+    w2.unmount()
+  })
+
+  it('#12：args pretty-print（JSON 解析成功缩进格式化）', async () => {
+    const msg = buildMessage([
+      { kind: 'tool', seg: 0, toolCallId: 'j1', name: 'probe.tool', kind2: 'BACKEND', status: 'succeeded', args: '{"a":1,"b":{"c":2}}', requiresAction: false }
+    ])
+    const wrapper = await mountPanel([msg])
+    await wrapper.find('[data-testid="block-toggle-a-1:j1"]').trigger('click')
+    const argsRegion = wrapper.find('[data-testid="args-more-j1"]').element.parentElement!
+    expect(argsRegion.textContent).toContain('"a": 1')
+    expect(argsRegion.textContent).toContain('"c": 2')
+    wrapper.unmount()
+  })
+
+  it('#11：复制两段 text（R-150 合并轮）含段间换行', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    const merged = buildMessage([
+      { kind: 'text', seg: 0, text: '第一段', streaming: false },
+      { kind: 'text', seg: 1, text: '第二段', streaming: false }
+    ])
+    const wrapper = await mountPanel([merged])
+    await wrapper.find('[data-testid="copy-msg-a-1"]').trigger('click')
+    await wrapper.vm.$nextTick()
+    expect(writeText).toHaveBeenCalledWith('第一段\n\n第二段')
     wrapper.unmount()
   })
 })

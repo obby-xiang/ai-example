@@ -267,6 +267,14 @@ export interface ToolPart extends MessagePartBase {
   /** DC-14 T5：结果铸为消息后的消息 id（`tool-<toolCallId>`） */
   messageId?: string
   /**
+   * R-158 #10：HITL 只读回执元数据（confirm()/submitGenerativeForm 写回，随段持久化，
+   * 历史/镜像/过期降级的 spread 重建语义下保留；旧数据缺省 ⇒ 徽标从 status 派生）。
+   */
+  decision?: 'approved' | 'rejected'
+  decidedAt?: number
+  /** R-158 #10：generative_form 提交值回执（提交成功时写入，刷新后可回溯已填值） */
+  submittedValues?: Record<string, unknown>
+  /**
    * R-154 #2：帧侧截断标记（FrameSizeLimiter 64KB 字段级截断）——true = result 被截断、
    * truncatedReason 带原因；缺省 = 全文。历史侧 ToolResultLimiter 内嵌文本标记不在本字段范围。
    */
@@ -305,6 +313,10 @@ export interface ToolPartPatch {
   result?: string | null
   reason?: string | null
   messageId?: string
+  /** 见 {@link ToolPart.decision} / {@link ToolPart.submittedValues}（R-158 #10 回执元数据） */
+  decision?: 'approved' | 'rejected'
+  decidedAt?: number
+  submittedValues?: Record<string, unknown>
   /** 见 {@link ToolPart.truncated}（R-154 #2 帧侧截断标记，随段持久化） */
   truncated?: boolean
   truncatedReason?: string | null

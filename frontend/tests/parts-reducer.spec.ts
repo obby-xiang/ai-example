@@ -18,6 +18,7 @@ import { GENERATIVE_FORM_TOOL } from '@/types/ai'
 import {
   alreadyApplied,
   applyFrameToParts,
+  deriveCopyText,
   deriveProjections,
   markApplied,
   openStreamPart,
@@ -519,5 +520,30 @@ describe('R-154 ⑨⑩：截断标记落段 + message_start 时间戳（纯函�
     const legacy = makeMessage()
     applyFrameToParts(legacy, { type: 'message_start', messageId: 'm2', kind: 'text' })
     expect(legacy.timestamp).toBeUndefined()
+  })
+})
+
+/**
+ * R-158 #11 新增（归因：前端面施工方 K2.8）：deriveCopyText 复制口径 —— text 段 join('\n\n')。
+ * 红线：deriveProjections 的 content 逐字一致契约不动（复制口径独立，见函数头注）。
+ */
+describe('R-158 ⑪：deriveCopyText 复制口径（段间换行）', () => {
+  it('单段原样 / R-150 合并两段 join \\n\\n / 无 text 段空串', () => {
+    const single = makeMessage()
+    applyFrameToParts(single, { type: 'delta', text: '只有一段', messageId: 'm1' })
+    expect(deriveCopyText(single)).toBe('只有一段')
+
+    // R-150 合并形态：段边界后另起的第二段 text（message_end 封口 → 新段）
+    const merged = makeMessage()
+    applyFrameToParts(merged, { type: 'delta', text: '第一段', messageId: 'm1' })
+    applyFrameToParts(merged, { type: 'message_end', messageId: 'm1', kind: 'text', chars: 3 })
+    applyFrameToParts(merged, { type: 'delta', text: '第二段', messageId: 'm1' })
+    expect(deriveCopyText(merged)).toBe('第一段\n\n第二段')
+    // content 契约不动（无间隔拼接，红线面）
+    expect(merged.content).toBe('')
+
+    const toolOnly = makeMessage()
+    applyFrameToParts(toolOnly, { type: 'tool_start', toolCallId: 'c1', name: 'probe_tool', kind: 'BACKEND', args: '{}' })
+    expect(deriveCopyText(toolOnly)).toBe('')
   })
 })

@@ -1289,11 +1289,14 @@ export const useAiStore = defineStore('ai', {
         (part): boolean => part.kind === 'tool' && part.toolCallId === pending.toolCallId
       ))
       if (host) {
+        // R-158 #10：决策元数据随段写回（回执卡徽标/时刻展示；乐观写，帧终态后为最终裁决）
         this.upsertToolPart(host, {
           toolCallId: pending.toolCallId,
           name: pending.name,
           kind2: pending.kind,
           status: approved ? 'running' : 'rejected',
+          decision: approved ? 'approved' : 'rejected',
+          decidedAt: Date.now(),
           requiresAction: false
         })
         deriveProjections(host)
@@ -1311,19 +1314,24 @@ export const useAiStore = defineStore('ai', {
               name: pending.name,
               kind2: pending.kind,
               status: 'running',
+              decision: 'approved',
+              decidedAt: Date.now(),
               requiresAction: false
             })
             deriveProjections(host)
           }
           return
         }
-        // 提交失败回退：段回到待决（requiresAction=true），派生出的挂起卡随之复现
+        // 提交失败回退：段回到待决（requiresAction=true），派生出的挂起卡随之复现；
+        // 决策元数据一并清回缺省（未形成有效决策，防回执卡误显）
         if (host) {
           this.upsertToolPart(host, {
             toolCallId: pending.toolCallId,
             name: pending.name,
             kind2: pending.kind,
             status: 'pending',
+            decision: undefined,
+            decidedAt: undefined,
             requiresAction: true
           })
           deriveProjections(host)
@@ -1482,6 +1490,20 @@ export const useAiStore = defineStore('ai', {
       }
       if (outcome.ok || outcome.duplicate) {
         form.status = 'submitted'
+        // R-158 #10：提交值回执写回工具段（随段持久化，刷新后可回溯已填值）
+        const host = this.messages.find((item) => item.parts.some(
+          (part): boolean => part.kind === 'tool' && part.toolCallId === form.toolCallId
+        ))
+        const segment = host?.parts.find((part) => part.kind === 'tool' && part.toolCallId === form.toolCallId)
+        if (host && segment && segment.kind === 'tool') {
+          this.upsertToolPart(host, {
+            toolCallId: form.toolCallId,
+            name: segment.name,
+            kind2: segment.kind2,
+            submittedValues: values,
+            requiresAction: false
+          })
+        }
         return
       }
       if (outcome.rejected) {

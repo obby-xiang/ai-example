@@ -203,7 +203,10 @@
                   >
                     思考过程 {{ isBlockExpanded(block) ? '▾' : '▸' }}
                   </button>
-                  <div v-show="isBlockExpanded(block)" class="mt-1 px-2 py-1.5 bg-[#fafafa] border-l-2 border-solid border-[#dcdfe6] whitespace-pre-wrap max-h-40 overflow-y-auto" :data-testid="'reasoning-body-' + block.id">{{ part.text }}</div>
+                  <div v-show="isBlockExpanded(block)" class="mt-1 px-2 py-1.5 bg-[#fafafa] border-l-2 border-solid border-[#dcdfe6]" :data-testid="'reasoning-body-' + block.id">
+                    <!-- R-158 #12：思考区同款 CollapsibleText（真溢出才渐隐+显示更多） -->
+                    <CollapsibleText :text="part.text" :max-height="160" :testid="'reasoning-more-' + block.id" class="text-xs text-[#909399]" />
+                  </div>
                 </div>
                 <template v-else-if="part.kind === 'tool'">
                   <div
@@ -227,33 +230,23 @@
                       </el-tag>
                     </button>
                     <div v-show="isBlockExpanded(block)" class="px-2 pb-2 pt-0 flex flex-col gap-1.5" :data-testid="'block-body-' + block.id">
+                      <!-- R-158 #12：args pretty-print + 真溢出渐隐（CollapsibleText） -->
                       <div v-if="part.args" class="text-xs text-[#909399] break-all">
-                        <code>{{ part.args }}</code>
+                        <CollapsibleText :text="part.args" pretty :testid="'args-more-' + part.toolCallId" />
                       </div>
-                      <!-- R-154 #2：结果被帧预算截断（FrameSizeLimiter）⇒ 灰底区带「已截断」角标
-                           （hover 见 truncatedReason）+ Show more 展开入口（本地去帽 max-h，组件局部态） -->
-                      <div
-                        v-if="part.result"
-                        class="px-2 py-1 text-xs text-[#606266] bg-[#fafafa] rounded whitespace-pre-wrap"
-                        :class="isResultExpanded(part.toolCallId) ? '' : 'max-h-24 overflow-y-auto'"
-                      >
-                        {{ part.result }}<span
-                          v-if="part.truncated"
-                          class="inline-block ml-1 px-1 rounded text-[10px] leading-4 bg-[#e6a23c] text-white align-middle"
-                          :title="part.truncatedReason ?? '结果被截断'"
-                          data-testid="truncated-badge"
-                        >已截断</span>
+                      <!-- R-154 #2 角标（帧侧截断标记）保留 + R-158 #12 展示层移交 CollapsibleText：
+                           真溢出才渐隐 + 「显示更多」（原本地去帽 max-h 组件态随之退役） -->
+                      <div v-if="part.result" class="px-2 py-1 text-xs text-[#606266] bg-[#fafafa] rounded">
+                        <CollapsibleText :text="part.result" :testid="'show-more-' + part.toolCallId">
+                          {{ part.result }}<span
+                            v-if="part.truncated"
+                            class="inline-block ml-1 px-1 rounded text-[10px] leading-4 bg-[#e6a23c] text-white align-middle"
+                            :title="part.truncatedReason ?? '结果被截断'"
+                            data-testid="truncated-badge"
+                          >已截断</span>
+                        </CollapsibleText>
                       </div>
-                      <button
-                        v-if="part.truncated"
-                        type="button"
-                        class="self-start text-xs text-[#409eff]"
-                        :data-testid="'show-more-' + part.toolCallId"
-                        @click="toggleResultExpanded(part.toolCallId)"
-                      >
-                        {{ isResultExpanded(part.toolCallId) ? '收起' : '显示更多' }}
-                      </button>
-                      <!-- R-154 #6：卡内错误位（图标 + 红底 + 文案）——错误就地呈现，不再全堆顶部 Alert -->
+                      <!-- R-158 #6：卡内错误位（图标 + 红底 + 文案）——错误就地呈现，不再全堆顶部 Alert -->
                       <div v-if="part.reason" class="flex items-start gap-1 px-2 py-1 text-xs text-[#f56c6c] bg-[#fef0f0] rounded" data-testid="tool-error">
                         <el-icon class="mt-px shrink-0" color="#f56c6c"><WarningFilled /></el-icon>
                         <span>原因：{{ part.reason }}</span>
@@ -300,6 +293,35 @@
                             @submit="onFormSubmit"
                             @cancel="onFormCancel"
                           />
+                        </div>
+                      </template>
+
+                      <!-- R-158 #10：HITL 只读回执卡（方案 B）——交互完成后不再消失，刷新可回溯。
+                           判据 = 确认门/GF 工具的已决段（requiresAction=false）；徽标按段终态派生，
+                           decision/decidedAt/submittedValues 为写回元数据。 -->
+                      <template v-else-if="isHitlReceiptPart(part)">
+                        <div class="mt-1.5 px-2 py-1.5 bg-[#f0f9ff] border border-solid border-[#d9ecff] rounded" data-testid="hitl-receipt">
+                          <div class="flex items-center gap-1.5 flex-wrap">
+                            <el-tag size="small" :type="hitlReceiptTagType(part.status)" effect="light">{{ hitlReceiptLabel(part) }}</el-tag>
+                            <span class="text-[#606266]">{{ hitlReceiptSummary(part) }}</span>
+                            <span v-if="part.decidedAt" class="text-[#c0c4cc]">{{ formatTs(part.decidedAt) }}</span>
+                          </div>
+                          <div v-if="part.submittedValues" class="mt-1 text-[#909399]" data-testid="receipt-values">
+                            已提交：{{ submittedValuesSummary(part.submittedValues) }}
+                          </div>
+                          <div v-if="part.args" class="mt-1">
+                            <button
+                              type="button"
+                              class="text-[#409eff]"
+                              :data-testid="'receipt-args-toggle-' + part.toolCallId"
+                              @click="toggleReceiptArgs(part.toolCallId)"
+                            >
+                              原始参数 {{ receiptArgsOpen.has(part.toolCallId) ? '▾' : '▸' }}
+                            </button>
+                            <div v-show="receiptArgsOpen.has(part.toolCallId)" class="mt-0.5" :data-testid="'receipt-args-more-' + part.toolCallId">
+                              <CollapsibleText :text="part.args" pretty />
+                            </div>
+                          </div>
                         </div>
                       </template>
                     </div>
@@ -358,18 +380,6 @@
               @click="copyMessage(m)"
             >
               <svg viewBox="0 0 24 24" fill="currentColor" class="w-3 h-3" aria-hidden="true"><path d="M16 1H4a2 2 0 0 0-2 2v14h2V3h12zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16H8V7h11z" /></svg>
-            </el-button>
-            <el-button
-              v-if="m.role === 'assistant'"
-              link
-              size="small"
-              class="px-1"
-              :data-testid="'retry-msg-' + m.id"
-              title="重试该条回复（从对应提问重跑）"
-              aria-label="重试该条回复（从对应提问重跑）"
-              @click="retryMessage(m)"
-            >
-              <svg viewBox="0 0 24 24" fill="currentColor" class="w-3 h-3" aria-hidden="true"><path d="M17.6 6.4A8 8 0 1 0 20 12h-2a6 6 0 1 1-1.8-4.3L13 11h7V4z" /></svg>
             </el-button>
           </div>
         </div>
@@ -454,10 +464,11 @@ import { useAiStore, foldDeadline } from '@/stores/ai'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { formatCountdown } from '@/utils/format'
 import { groupParts, resolveBlockExpanded, type Block } from '@/utils/blocks'
-import { deriveProjections } from '@/utils/parts'
+import { deriveCopyText, deriveProjections } from '@/utils/parts'
 import { createPollingController, type PollingController } from '@/utils/polling'
 import FormRenderer from '@/components/AiPanel/FormRenderer.vue'
-import { GENERATIVE_FORM_TOOL, type ChatMessage, type PendingToolCall, type ToolRunStatus } from '@/types/ai'
+import CollapsibleText from '@/components/AiPanel/CollapsibleText.vue'
+import { GENERATIVE_FORM_TOOL, type ChatMessage, type PendingToolCall, type ToolPart, type ToolRunStatus } from '@/types/ai'
 
 const ai = useAiStore()
 const workspace = useWorkspaceStore()
@@ -491,26 +502,6 @@ const showBackToBottom = computed(() => !followBottom.value && ai.messages.lengt
 function backToBottom(): void {
   followBottom.value = true
   scrollBottom(true)
-}
-
-/**
- * R-154 #2：截断结果的「显示更多」本地展开态（组件局部、按 toolCallId 记账；
- * 只去帽 max-h 让框内全文可见 —— 帧内即截断后全文，无二次取数路径）。
- */
-const expandedResults = ref<Set<string>>(new Set())
-
-function isResultExpanded(toolCallId: string): boolean {
-  return expandedResults.value.has(toolCallId)
-}
-
-function toggleResultExpanded(toolCallId: string): void {
-  const nextSet = new Set(expandedResults.value)
-  if (nextSet.has(toolCallId)) {
-    nextSet.delete(toolCallId)
-  } else {
-    nextSet.add(toolCallId)
-  }
-  expandedResults.value = nextSet
 }
 
 /**
@@ -763,15 +754,18 @@ function scrollBottom(force = false): void {
 /**
  * R-154 #17：消息时间戳渲染（仅展示、可选）。历史路 = 后端条目 metadata.timestamp
  * （epoch 毫秒或 ISO 字符串，原样透传）；实时路 = message_start 帧 atMs。
- * 无法解析 / 缺失 ⇒ 空串（操作行不渲染时间位）。
+ * 无法解析 / 缺失 ⇒ 空串（操作行不渲染时间位）。R-158 #10 复用于回执决策时刻。
  */
-function formatTimestamp(message: ChatMessage): string {
-  const ts = message.timestamp
+function formatTs(ts: unknown): string {
   if (ts === undefined || ts === null) {
     return ''
   }
   const parsed = typeof ts === 'number' ? dayjs(ts) : dayjs(String(ts))
   return parsed.isValid() ? parsed.format('MM-DD HH:mm') : ''
+}
+
+function formatTimestamp(message: ChatMessage): string {
+  return formatTs(message.timestamp)
 }
 
 /**
@@ -786,35 +780,101 @@ function editMessage(m: ChatMessage): void {
 }
 
 /**
- * R-157 #2（收口 MAJOR-1 语义版）：重试（AI 回复操作行）= 业界「regenerate」——找到该回复
- * 对应的提问（前向最近一条用户消息），截断其后消息并从该提问重跑：提问原地保留、
- * 不重复追加（skipUserRecord 通道）。
- */
-function retryMessage(m: ChatMessage): void {
-  if (!ai.canSend) {
-    ai.noticeBusySend()
-    return
-  }
-  const index = ai.messages.findIndex((item) => item.id === m.id)
-  for (let i = index - 1; i >= 0; i -= 1) {
-    const prev = ai.messages[i]
-    if (prev && prev.role === 'user') {
-      followBottom.value = true
-      ai.messages.splice(i + 1)
-      scrollBottom(true)
-      void ai.send(prev.content, { skipUserRecord: true })
-      return
-    }
-  }
-}
-
-/** R-157 #3：打字机光标显示判据 —— 消息流式中且该正文块是末尾块（与呼吸点接力）。 */
+ * R-157 #3：打字机光标显示判据 —— 消息流式中且该正文块是末尾块（与呼吸点接力）。 */
 function showCaret(message: ChatMessage, blockIndex: number): boolean {
   if (!message.streaming) {
     return false
   }
   const blocks = blocksOf(message)
   return blockIndex === blocks.length - 1 && blocks[blockIndex]?.kind === 'text'
+}
+
+/**
+ * R-158 #10：HITL 只读回执 —— 回执卡的段判据（确认门 / 生成式表单工具的已决段）。
+ */
+function isHitlReceiptPart(part: ToolPart): boolean {
+  return part.kind2 === 'CONFIRM' || part.name === GENERATIVE_FORM_TOOL
+}
+
+/** 回执状态徽标文案：决策态优先（收口 MINOR-1）——已确认须 approve 即显、不等 succeeded；
+ *  已确认但执行失败仍显「已确认」（徽标系决策态，非工具执行态）；decision 缺省（历史数据/
+ *  过期态/取消）回退 status 派生。 */
+function hitlReceiptLabel(part: ToolPart): string {
+  if (part.decision === 'approved') {
+    return '已确认'
+  }
+  if (part.decision === 'rejected') {
+    return '已拒绝'
+  }
+  switch (part.status) {
+    case 'succeeded':
+      return '已确认'
+    case 'rejected':
+      return '已拒绝'
+    case 'expired':
+      return '已过期'
+    case 'cancelled':
+      return '已取消'
+    case 'running':
+      return '执行中'
+    case 'failed':
+      return '执行失败'
+    default:
+      return '已处理'
+  }
+}
+
+function hitlReceiptTagType(status: ToolRunStatus): 'success' | 'info' | 'warning' | 'danger' | 'primary' {
+  switch (status) {
+    case 'succeeded':
+      return 'success'
+    case 'rejected':
+    case 'cancelled':
+      return 'info'
+    case 'expired':
+      return 'warning'
+    case 'failed':
+      return 'danger'
+    case 'running':
+      return 'primary'
+    default:
+      return 'info'
+  }
+}
+
+/** 参数自然语言摘要：工具中文名 + args 前三键值（工具名映射表口径，非 LLM 生成） */
+function hitlReceiptSummary(part: ToolPart): string {
+  const label = toolLabel(part.name)
+  if (!part.args) {
+    return label
+  }
+  try {
+    const parsed = JSON.parse(part.args) as Record<string, unknown>
+    const pairs = Object.entries(parsed).slice(0, 3)
+      .map(([key, value]) => `${key}=${typeof value === 'object' ? JSON.stringify(value) : String(value)}`)
+    return pairs.length > 0 ? `${label} · ${pairs.join('，')}` : label
+  } catch {
+    return label
+  }
+}
+
+/** GF 提交值回执摘要（截断防长行） */
+function submittedValuesSummary(values: Record<string, unknown>): string {
+  const text = JSON.stringify(values)
+  return text.length > 80 ? `${text.slice(0, 80)}…` : text
+}
+
+/** 回执卡「原始参数」展开态（组件局部，按 toolCallId 记账） */
+const receiptArgsOpen = ref<Set<string>>(new Set())
+
+function toggleReceiptArgs(toolCallId: string): void {
+  const next = new Set(receiptArgsOpen.value)
+  if (next.has(toolCallId)) {
+    next.delete(toolCallId)
+  } else {
+    next.add(toolCallId)
+  }
+  receiptArgsOpen.value = next
 }
 
 async function send(): Promise<void> {
@@ -888,17 +948,17 @@ function legacyCopy(text: string): boolean {
 }
 
 /**
- * 复制一条消息的正文（苞 B 项 2）。
+ * 复制一条消息的正文（苞 B 项 2 → R-158 #11 改口径）。
  *
- * 内容口径 = `m.content`（**text 段 join 的派生投影**，与渲染同源）**原样**：不含思考链
- * （reasoning 段）、不含工具卡（tool 段 / pendingCall），**不做 trim**（正文按
- * `whitespace-pre-wrap` 渲染，缩进是可见语义，trim 会让"复制结果 ≠ 看到的内容"）。
+ * 内容口径 = `deriveCopyText`（parts 的 text 段 `join('\n\n')`，段间空行）——与渲染同源
+ * （parts 是唯一真值），段间换行对齐业界惯例（R-150 合并轮的两段正文复制后仍分段）；
+ * 不含思考链 / 工具卡 / 挂起卡，**不做 trim**。
  *
  * 路径：优先 `navigator.clipboard.writeText`；不可用或**被拒**（权限/非聚焦/非安全上下文）
  * 时落 `legacyCopy`。反馈写在组件局部 `copyState`，2s 后自清。
  */
 async function copyMessage(m: ChatMessage): Promise<void> {
-  const text = m.content
+  const text = deriveCopyText(m)
   if (!text) {
     return
   }
