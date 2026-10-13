@@ -115,7 +115,8 @@
 
     <!-- 消息流（蓝本 AiPanel.vue:21-89）；R-154 #5：外层 relative 壳承载「回到底部」浮钮 -->
     <div class="flex-1 relative min-h-0 flex flex-col">
-      <div ref="msgWrapRef" class="flex-1 overflow-y-auto p-3" @scroll.passive="onMsgScroll">
+      <!-- R-161：role="log" 补滚动容器（无障碍，无视觉影响） -->
+      <div ref="msgWrapRef" role="log" class="flex-1 overflow-y-auto p-3" @scroll.passive="onMsgScroll">
       <!-- 历史对账期骨架屏（苞 B 项 4）：消费 store 的 historyLoaded —— 与空态互斥
            （无消息且对账未完 → 骨架屏；对账完成后才轮到空态/消息流）。 -->
       <el-skeleton
@@ -401,7 +402,7 @@
 
       <!-- R-154 #5：上滑暂停跟随后浮出的「回到底部」——点击恢复跟随并滚底 -->
       <button
-        v-if="showBackToBottom"
+        v-if="showBackToBottom && ai.messages.length > 0"
         type="button"
         data-testid="back-to-bottom"
         class="absolute bottom-3 left-1/2 -translate-x-1/2 px-3 py-1.5 text-xs rounded-full bg-white border border-solid border-[#dcdfe6] shadow-md text-[#606266] hover:text-[#409eff]"
@@ -469,7 +470,7 @@
  * 蓝本确有的 18 行打字机动画（`.typing .dot` + `@keyframes blink`，Tailwind 无对应工具类）。
  * 项 2 的 hover 显现用 Tailwind 默认 core plugin 的 `group` / `group-hover`（本仓首用）。
  */
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ArrowRight, ChatDotRound, Operation, Promotion, WarningFilled } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import { useAiStore, foldDeadline } from '@/stores/ai'
@@ -491,29 +492,82 @@ const deciding = ref(false)
 const msgWrapRef = ref<HTMLElement | null>(null)
 
 /**
- * R-154 #5：钉底跟随的「用户上滑即暂停」策略。
+ * R-154 #5 → R-161：钉底跟随的「用户上滑即暂停」策略。
  * followBottom = 自动钉底开关：容器 @scroll 离底判定 —— 用户上滑（离底超过阈值）置 false
  * 暂停自动跟随，回到底部附近自动恢复；唯一点「回到底部」浮钮 = 强制恢复并滚底。
  * 渲染真值仍为 parts（与自动滚动指纹 watch 同源），禁读 content。
+ * R-161 阈值拆分：一值双用是「上滚一点就出钮」的根因 —— 跟随闸 32px 保留，
+ * 浮钮显隐走独立滞回带（离底 >64 显 / <24 隐，常量化与 clientHeight 无关）。
  */
 const followBottom = ref(true)
-/** 离底阈值（px）：scrollHeight − scrollTop − clientHeight 小于它即视为贴底。 */
-const BOTTOM_THRESHOLD_PX = 32
+/** 跟随解除/恢复闸（px）：离底小于它即视为贴底。 */
+const FOLLOW_THRESHOLD_PX = 32
+/** R-161 浮钮滞回：离底大于它才显示（业界主流口径）。 */
+const SHOW_BACK_TO_BOTTOM_PX = 64
+/** R-161 浮钮滞回：离底小于它才隐藏。 */
+const HIDE_BACK_TO_BOTTOM_PX = 24
+
+/** R-161：pinBottom() 的落点。程序化钉底后浏览器异步派发的 scroll 回声按落点识别
+ *  （容差 ≤1px，会审 M1）：回声只刷浮钮显隐，不动跟随闸 —— 否则「已在底部时内容插入」
+ *  把 scrollHeight 顶高后回声读中间态离底（demo 打点实证 42px）会误锁跟随。 */
+let pinGuardTop: number | null = null
+
+/** 离底距离（px）。 */
+function bottomDist(wrap: HTMLElement): number {
+  return wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight
+}
 
 function onMsgScroll(): void {
   const wrap = msgWrapRef.value
   if (!wrap) {
     return
   }
-  followBottom.value = wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight < BOTTOM_THRESHOLD_PX
+  // 回声闸：|scrollTop − 落点| ≤ 1px ⇒ 程序化钉底的回声，跳过跟随闸
+  if (pinGuardTop !== null && Math.abs(wrap.scrollTop - pinGuardTop) <= 1) {
+    updateBackToBottom(bottomDist(wrap))
+    return
+  }
+  pinGuardTop = null
+  followBottom.value = bottomDist(wrap) < FOLLOW_THRESHOLD_PX
+  updateBackToBottom(bottomDist(wrap))
 }
 
-const showBackToBottom = computed(() => !followBottom.value && ai.messages.length > 0)
+/** R-161 滞回带显隐：带内（24~64）保持原状，防边界抖动；非 !followBottom 纯计算（会审 M3）。 */
+function updateBackToBottom(dist: number): void {
+  if (dist > SHOW_BACK_TO_BOTTOM_PX) {
+    showBackToBottom.value = true
+  } else if (dist < HIDE_BACK_TO_BOTTOM_PX) {
+    showBackToBottom.value = false
+  }
+}
 
-/** 「回到底部」浮钮：恢复跟随 + 强制滚底（不论文本是否在增量）。 */
+const showBackToBottom = ref(false)
+
+/** R-161 平滑回底时长（demo 口径）：CSS scroll-behavior:smooth 类挂 ~600ms 后移除。 */
+const SMOOTH_BACK_MS = 600
+let smoothBackTimer: ReturnType<typeof setTimeout> | null = null
+
+/**
+ * 「回到底部」浮钮：加 CSS scroll-behavior:smooth 类 + pinBottom（会审 M2：禁
+ * scrollTo({behavior:'smooth'})，jsdom 不同步更新 scrollTop，保既有同步断言）；
+ * 显式收钮（会审 M3：滞回态非纯计算，否则「点击后钮消失」不成立）；约 600ms 后移除类，
+ * 期间用户滚动可打断（浏览器语义）；流式期 pinBottom 恒瞬跳，不走 smooth。
+ */
 function backToBottom(): void {
-  followBottom.value = true
-  scrollBottom(true)
+  const wrap = msgWrapRef.value
+  if (!wrap) {
+    return
+  }
+  wrap.classList.add('scroll-smooth')
+  if (smoothBackTimer !== null) {
+    clearTimeout(smoothBackTimer)
+  }
+  smoothBackTimer = setTimeout(() => {
+    wrap.classList.remove('scroll-smooth')
+    smoothBackTimer = null
+  }, SMOOTH_BACK_MS)
+  pinBottom()
+  showBackToBottom.value = false
 }
 
 /**
@@ -820,17 +874,28 @@ function probe(): void {
   void ai.probeHealth()
 }
 
+/**
+ * R-161：统一程序化钉底入口 —— 设 scrollTop=scrollHeight + 记落点 pinGuardTop + 置
+ * followBottom=true。一切钉底（scrollBottom / 发送 force / 回到底部 / RO 内容重钉）必经
+ * 此口；渲染滞后（watch 先于 DOM 补丁触发）导致的「钉到旧底」由 RO 回调重钉兜底。
+ */
+function pinBottom(): void {
+  const wrap = msgWrapRef.value
+  if (!wrap) {
+    return
+  }
+  wrap.scrollTop = wrap.scrollHeight
+  pinGuardTop = wrap.scrollTop
+  followBottom.value = true
+  updateBackToBottom(bottomDist(wrap))
+}
+
 function scrollBottom(force = false): void {
   // R-154 #5：自动钉底须尊重跟随开关 —— 用户上滑暂停后，帧增量的滚动指纹不得把视图拽回底部
   if (!force && !followBottom.value) {
     return
   }
-  void nextTick(() => {
-    const wrap = msgWrapRef.value
-    if (wrap) {
-      wrap.scrollTop = wrap.scrollHeight
-    }
-  })
+  pinBottom()
 }
 
 /**
@@ -972,8 +1037,8 @@ async function send(): Promise<void> {
     ai.noticeBusySend()
     return
   }
-  // R-157 #4：发送即恢复跟随并强制滚底（上滑暂停不挡住主动发送）。
-  followBottom.value = true
+  // R-157 #4 → R-161：发送即统一 pinBottom 强制钉底（上滑暂停不挡住主动发送）。
+  pinBottom()
   // R-157 #2（收口 MAJOR-1 语义版）：编辑锚点在 ⇒ 「改完从该条重跑」——该条文本原地更新为
   // 输入框新文本、截断其后消息、从该条重跑（skipUserRecord：不另起新用户消息）。
   const editId = editingMessageId.value
@@ -985,13 +1050,13 @@ async function send(): Promise<void> {
       target.parts = [{ kind: 'text', seg: 0, text, streaming: false }]
       deriveProjections(target)
       ai.messages.splice(cut + 1)
-      scrollBottom(true)
+      pinBottom()
       inputText.value = ''
       await ai.send(text, { skipUserRecord: true })
       return
     }
   }
-  scrollBottom(true)
+  pinBottom()
   inputText.value = ''
   await ai.send(text)
 }
@@ -1133,7 +1198,9 @@ watch(
 
 watch(() => ai.expanded, (expanded) => {
   if (expanded) {
-    setTimeout(scrollBottom, 60)
+    // R-161：撤 :1052 setTimeout hack —— RO 不覆盖「容器自身尺寸变」的时序（面板展开/收起
+    // 导致 clientHeight 变、内容相对底部位置漂移），expanded watch 保留但改走统一 pinBottom()。
+    pinBottom()
   }
 })
 
@@ -1142,6 +1209,26 @@ watch(
   (pending) => resetPendingWatch(pending),
   { immediate: true }
 )
+
+/**
+ * R-161（RC-1/2 修复）：RO 内容重钉底 —— 确认门 / 生成式表单 / 工具卡 / 折叠展开等
+ * 「只增高度、不进滚动指纹」的内容插入（指纹 watch 盲区）由 ResizeObserver 兜底：
+ * msgWrapRef 的 scrollHeight 增大且处于跟随态 ⇒ pinBottom()；高度减小的回调不动作。
+ */
+let msgResizeObserver: ResizeObserver | null = null
+let lastMsgScrollHeight = 0
+
+function onMsgWrapResized(): void {
+  const wrap = msgWrapRef.value
+  if (!wrap) {
+    return
+  }
+  const height = wrap.scrollHeight
+  if (height > lastMsgScrollHeight && followBottom.value) {
+    pinBottom()
+  }
+  lastMsgScrollHeight = height
+}
 
 onMounted(async () => {
   ai.startMirror()
@@ -1157,6 +1244,12 @@ onMounted(async () => {
   if (!ai.messages.length) {
     await ai.loadHistory()
   }
+  const wrap = msgWrapRef.value
+  if (wrap && typeof ResizeObserver !== 'undefined') {
+    lastMsgScrollHeight = wrap.scrollHeight
+    msgResizeObserver = new ResizeObserver(onMsgWrapResized)
+    msgResizeObserver.observe(wrap)
+  }
   scrollBottom()
 })
 
@@ -1171,6 +1264,13 @@ onBeforeUnmount(() => {
     clearTimeout(timer)
   }
   fadeTimers.clear()
+  // R-161：RO disconnect（照上件纪律）+ 平滑回底类计时器收尾
+  msgResizeObserver?.disconnect()
+  msgResizeObserver = null
+  if (smoothBackTimer !== null) {
+    clearTimeout(smoothBackTimer)
+    smoothBackTimer = null
+  }
   ai.stopWorkspaceSync()
 })
 </script>
@@ -1234,15 +1334,16 @@ onBeforeUnmount(() => {
 @keyframes caretOut {
   to { opacity: 0; }
 }
+/* R-161：平滑回底 = CSS scroll-behavior:smooth 类切换（会审 M2：禁 scrollTo({behavior:'smooth'})，
+   浮钮点击时挂上、~600ms 后移除；流式期 pinBottom 恒瞬跳不加本类）。 */
+.scroll-smooth {
+  scroll-behavior: smooth;
+}
+/* R-161（用户实测回归）：reduced-motion 豁免呼吸动画 —— 呼吸 = 生成中状态语义（非纯装饰），
+   豁免后律动照常 1.4s；`.caret` 纯装饰抑制保留。 */
 @media (prefers-reduced-motion: reduce) {
-  .loading-breath .dot,
-  .loading-breath .txt,
   .caret {
     animation: none;
-  }
-  .loading-breath .dot,
-  .loading-breath .txt {
-    opacity: 1;
   }
 }
 </style>

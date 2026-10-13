@@ -1095,3 +1095,164 @@ describe('R-159：流式回复体验六项', () => {
     wrapper2.unmount()
   })
 })
+
+/**
+ * R-161（AI 面板滚动行为专项，决策卡定稿 + 会审 6 MINOR 并入）：
+ * 阈值拆分（跟随闸 32 / 浮钮滞回 64-24）/ RO 内容重钉底（confirm_request 帧增高）/
+ * 平滑回底 CSS 类 / reduced-motion 呼吸豁免。回声闸（落点容差 ≤1px）由 demo _trace
+ * CDP 打点实证（施工报告 M1 留证），jsdom 不派发真实 scroll 回声，不设例。
+ */
+describe('R-161：阈值拆分滞回 / RO 内容重钉 / 平滑回底 / reduced-motion 豁免', () => {
+  /** 可滚动夹具：scrollHeight=1000 / clientHeight=500，scrollTop 直写后经 onMsgScroll 驱动。 */
+  async function mountScrolled(): Promise<{ wrapper: ReturnType<typeof mount>; wrap: HTMLElement }> {
+    const wrapper = await mountPanel([
+      buildMessage([{ kind: 'text', seg: 0, text: '长文', streaming: false }])
+    ])
+    const wrap = wrapper.find('.overflow-y-auto').element as HTMLElement
+    Object.defineProperty(wrap, 'scrollHeight', { value: 1000, configurable: true })
+    Object.defineProperty(wrap, 'clientHeight', { value: 500, configurable: true })
+    return { wrapper, wrap }
+  }
+
+  function scrollToDist(wrap: HTMLElement, dist: number, wrapper: ReturnType<typeof mount>): void {
+    wrap.scrollTop = 1000 - 500 - dist
+    wrap.dispatchEvent(new Event('scroll'))
+    void wrapper.vm.$nextTick()
+  }
+
+  it('阈值拆分①：离底 60px（≤64）不出浮钮（钉死 64 下侧；旧一值双用 32 会误出）', async () => {
+    const { wrapper, wrap } = await mountScrolled()
+    scrollToDist(wrap, 60, wrapper)
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-testid="back-to-bottom"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('阈值拆分②：离底 100px（>64）出浮钮（钉死 64 上侧）', async () => {
+    const { wrapper, wrap } = await mountScrolled()
+    scrollToDist(wrap, 100, wrapper)
+    await wrapper.vm.$nextTick()
+    const backBtn = wrapper.find('[data-testid="back-to-bottom"]')
+    expect(backBtn.exists()).toBe(true)
+    expect(backBtn.text()).toContain('回到底部')
+    wrapper.unmount()
+  })
+
+  it('滞回带：出钮后回滚到离底 50px（带内）仍显；回近底 <24px 才隐（会审 M4）', async () => {
+    const { wrapper, wrap } = await mountScrolled()
+    scrollToDist(wrap, 100, wrapper)
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-testid="back-to-bottom"]').exists()).toBe(true)
+    // 回滚 50px：滞回带（24~64）内保持原状，不闪隐
+    scrollToDist(wrap, 50, wrapper)
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-testid="back-to-bottom"]').exists()).toBe(true)
+    // 回近底 20px（<24）：隐藏
+    scrollToDist(wrap, 20, wrapper)
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-testid="back-to-bottom"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('平滑回底：浮钮点击 = 挂 scroll-behavior:smooth 类 + 瞬跳钉底 + 显式收钮（会审 M2/M3）', async () => {
+    vi.useFakeTimers()
+    try {
+      const { wrapper, wrap } = await mountScrolled()
+      scrollToDist(wrap, 100, wrapper)
+      await wrapper.vm.$nextTick()
+      const backBtn = wrapper.find('[data-testid="back-to-bottom"]')
+      await backBtn.trigger('click')
+      await wrapper.vm.$nextTick()
+      expect(wrap.scrollTop).toBe(1000) // jsdom 下 CSS 类不同步动画，scrollTop 由 pinBottom 瞬跳
+      expect(wrap.classList.contains('scroll-smooth')).toBe(true) // CSS 类已挂（禁 scrollTo smooth）
+      expect(wrapper.find('[data-testid="back-to-bottom"]').exists()).toBe(false) // 显式收钮
+      vi.advanceTimersByTime(600)
+      expect(wrap.classList.contains('scroll-smooth')).toBe(false) // ~600ms 后移除类
+      wrapper.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  /** R-161 可控 RO 桩：捕获回调由测试手动触发（jsdom 无真实 RO；setup.ts 全局桩为 no-op）。 */
+  function useCapturedRO(): { cb: ResizeObserverCallback | null } {
+    const captured: { cb: ResizeObserverCallback | null } = { cb: null }
+    class CaptureRO {
+      constructor(cb: ResizeObserverCallback) {
+        captured.cb = cb
+      }
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    }
+    vi.stubGlobal('ResizeObserver', CaptureRO)
+    return captured
+  }
+
+  it('RO 重钉正例：confirm_request 帧插入后 scrollHeight 增量 ⇒ 跟随态重钉到底（RC-1/2 修复）', async () => {
+    const captured = useCapturedRO()
+    const store = useAiStore()
+    const message = buildMessage([{ kind: 'text', seg: 0, text: '前置正文', streaming: true }], null, true)
+    store.messages = [message]
+    store.historyLoaded = true
+    const { default: AiPanel } = await import('@/components/AiPanel/AiPanel.vue')
+    const wrapper = mount(AiPanel, { global: { stubs } })
+    await wrapper.vm.$nextTick()
+    const wrap = wrapper.find('.overflow-y-auto').element as HTMLElement
+    Object.defineProperty(wrap, 'scrollHeight', { value: 1000, configurable: true })
+    Object.defineProperty(wrap, 'clientHeight', { value: 500, configurable: true })
+    wrap.scrollTop = 1000 // 贴底（跟随态）
+    // 确认门帧到达（工具段插入 = 卡体增高前兆；指纹 watch 只盯末段，RO 接管钉底）
+    store.handleFrame(
+      { type: 'confirm_request', toolCallId: 'c1', name: 'start_export', args: '{"taskId":1}', timeoutSeconds: 120, runId: 'run-1', seq: 2 },
+      message.id
+    )
+    await wrapper.vm.$nextTick()
+    // 卡体展开：scrollHeight 1000 → 1300，RO 回调触发
+    Object.defineProperty(wrap, 'scrollHeight', { value: 1300, configurable: true })
+    captured.cb?.([] as unknown as ResizeObserverEntry[], {} as ResizeObserver)
+    await wrapper.vm.$nextTick()
+    expect(wrap.scrollTop).toBe(1300) // 已重钉到新底部
+    wrapper.unmount()
+  })
+
+  it('RO 重钉负例：用户已上滑暂停跟随（followBottom=false）⇒ 内容增高不钉底（补 R-154 复核登记缺口）', async () => {
+    const captured = useCapturedRO()
+    const store = useAiStore()
+    const message = buildMessage([{ kind: 'text', seg: 0, text: '前置正文', streaming: true }], null, true)
+    store.messages = [message]
+    store.historyLoaded = true
+    const { default: AiPanel } = await import('@/components/AiPanel/AiPanel.vue')
+    const wrapper = mount(AiPanel, { global: { stubs } })
+    await wrapper.vm.$nextTick()
+    const wrap = wrapper.find('.overflow-y-auto').element as HTMLElement
+    Object.defineProperty(wrap, 'scrollHeight', { value: 1000, configurable: true })
+    Object.defineProperty(wrap, 'clientHeight', { value: 500, configurable: true })
+    scrollToDist(wrap, 100, wrapper) // 用户上滑：followBottom=false
+    store.handleFrame(
+      { type: 'confirm_request', toolCallId: 'c1', name: 'start_export', args: '{"taskId":1}', timeoutSeconds: 120, runId: 'run-1', seq: 2 },
+      message.id
+    )
+    await wrapper.vm.$nextTick()
+    Object.defineProperty(wrap, 'scrollHeight', { value: 1300, configurable: true })
+    captured.cb?.([] as unknown as ResizeObserverEntry[], {} as ResizeObserver)
+    await wrapper.vm.$nextTick()
+    expect(wrap.scrollTop).toBe(400) // 视口原地不动（用户上滑不打扰）
+    wrapper.unmount()
+  })
+
+  it('reduced-motion 豁免：media 块不再抑制呼吸节点（.caret 抑制保留）——呼吸=状态语义非纯装饰', async () => {
+    const source = (await import('@/components/AiPanel/AiPanel.vue?raw')).default
+    const media = source.slice(source.indexOf('@media (prefers-reduced-motion: reduce)'))
+    const mediaBlock = media.slice(0, media.indexOf('</style>'))
+    expect(mediaBlock).not.toContain('.loading-breath') // 呼吸 dot/txt 移出 animation:none 抑制
+    expect(mediaBlock).toContain('.caret') // 光标纯装饰抑制保留
+    expect(source).toContain('animation: breath 1.4s ease-in-out infinite') // 豁免后律动照常
+  })
+
+  it('role="log"：滚动容器补无障碍语义（无视觉影响）', async () => {
+    const { wrapper } = await mountScrolled()
+    expect(wrapper.find('.overflow-y-auto').attributes('role')).toBe('log')
+    wrapper.unmount()
+  })
+})
