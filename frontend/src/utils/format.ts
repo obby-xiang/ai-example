@@ -58,6 +58,43 @@ export function formatCountdown(seconds: number): string {
   return minutes > 0 ? `${minutes}:${String(rest).padStart(2, '0')}` : `${rest} 秒`
 }
 
+/** 星期中文标签（渐进时间格式用，dayjs.day()：0=周日 … 6=周六）。 */
+const WEEKDAY_LABELS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+
+/**
+ * R-162 M2：AI 面板的渐进时间格式（元信息行时间戳 / HITL 回执 decidedAt；纯展示层）。
+ * 判级**先 diff 后年**，切分一律本地自然日 0 点（startOf('day') 差值，不受时分秒影响）：
+ * - diff=0（今天）⇒ `HH:mm`
+ * - diff=1（昨天）⇒ `昨天 HH:mm`
+ * - 2≤diff≤6（近 7 自然日）⇒ `周X HH:mm`
+ * - diff≥7 且同年 ⇒ `M月D日 HH:mm`
+ * - 跨年 ⇒ `YYYY年M月D日 HH:mm`
+ *
+ * `now` 注入可测（epoch 毫秒或 Date；缺省取当前时刻）。未来时刻/无法解析 ⇒ `HH:mm` / 空串。
+ */
+export function formatProgressiveTs(ts: unknown, now?: number | Date): string {
+  const parsed = typeof ts === 'number' ? dayjs(ts) : dayjs(String(ts ?? ''))
+  if (!parsed.isValid()) {
+    return ''
+  }
+  const ref = now === undefined ? dayjs() : typeof now === 'number' ? dayjs(now) : dayjs(now)
+  const time = parsed.format('HH:mm')
+  const diff = ref.startOf('day').diff(parsed.startOf('day'), 'day')
+  if (diff <= 0) {
+    return time
+  }
+  if (diff === 1) {
+    return `昨天 ${time}`
+  }
+  if (diff <= 6) {
+    return `${WEEKDAY_LABELS[parsed.day()]} ${time}`
+  }
+  if (parsed.year() === ref.year()) {
+    return `${parsed.month() + 1}月${parsed.date()}日 ${time}`
+  }
+  return `${parsed.year()}年${parsed.month() + 1}月${parsed.date()}日 ${time}`
+}
+
 export const TASK_TYPE_LABELS: Record<TaskType, string> = {
   EXPORT: '导出',
   IMPORT: '导入'

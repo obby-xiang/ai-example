@@ -201,7 +201,7 @@
                   <div class="flex items-center gap-1.5 flex-wrap">
                     <el-tag size="small" :type="hitlReceiptTagType(part.status)" effect="light">{{ hitlReceiptLabel(part) }}</el-tag>
                     <span class="text-[#606266]">{{ hitlReceiptSummary(part) }}</span>
-                    <span v-if="part.decidedAt" class="text-[#c0c4cc]">{{ formatTs(part.decidedAt) }}</span>
+                    <span v-if="part.decidedAt" class="text-[#c0c4cc]">{{ formatProgressiveTs(part.decidedAt) }}</span>
                   </div>
                   <div v-if="part.submittedValues" class="mt-1 text-[#909399]" data-testid="receipt-values">
                     已提交：{{ submittedValuesSummary(part.submittedValues) }}
@@ -341,12 +341,14 @@
         </div>
 
         <!-- R-159 #2/#3/#4：单一元信息行（demo aiShell(fix) 结构）——左位 = 流式期「工作中…」呼吸
-             常驻（发出即现，首字符不消失；完成时淡出换时间戳）/ 完成后时间戳；右位 = 操作
-             （流式期 visibility:hidden 占位，完成换入；hover/focus-within 浮出）。
+             常驻（发出即现，首字符不消失；完成时淡出换时间戳）/ 完成后时间戳；按钮组紧邻时间戳
+             （R-162 M1：删 justify-between 两端分置改左对齐紧邻 —— AI 行 [呼吸/时间戳|按钮] 左起左排；
+             用户行 row-reverse 容器内同 DOM 序，渲染为按钮贴时间戳左侧、整簇靠右内聚，行尾无孤立按钮；
+             R-159 语义全保留：流式期 visibility:hidden 占位、互斥换入、淡出、hover/focus-within 浮出）。
              行判据：有正文 或 助手消息流式中（发出即现，无正文也要能呼吸）。 -->
         <div
           v-if="showMetaRow(m)"
-          class="mt-1 flex items-center justify-between gap-2 text-xs text-[#a8abb2] w-full max-w-[82%]"
+          class="mt-1 flex items-center gap-2 text-xs text-[#a8abb2] w-full max-w-[82%]"
           :class="m.role === 'user' ? 'flex-row-reverse' : ''"
           :data-testid="'msg-ops-' + m.id"
         >
@@ -360,7 +362,7 @@
             >
               <span class="dot"></span><span class="txt">工作中…</span>
             </span>
-            <span v-else-if="formatTimestamp(m)" class="text-[#c0c4cc]" data-testid="msg-timestamp">{{ formatTimestamp(m) }}</span>
+            <span v-else-if="formatProgressiveTs(m.timestamp)" class="text-[#c0c4cc]" data-testid="msg-timestamp">{{ formatProgressiveTs(m.timestamp) }}</span>
           </span>
           <div
             class="flex items-center gap-1 transition-opacity"
@@ -476,10 +478,9 @@
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ArrowRight, ChatDotRound, Operation, Promotion, WarningFilled } from '@element-plus/icons-vue'
-import dayjs from 'dayjs'
 import { useAiStore, foldDeadline } from '@/stores/ai'
 import { useWorkspaceStore } from '@/stores/workspace'
-import { formatCountdown } from '@/utils/format'
+import { formatCountdown, formatProgressiveTs } from '@/utils/format'
 import { groupParts, resolveBlockExpanded, type Block } from '@/utils/blocks'
 import { deriveCopyText, deriveProjections } from '@/utils/parts'
 import { createPollingController, type PollingController } from '@/utils/polling'
@@ -903,21 +904,10 @@ function scrollBottom(force = false): void {
 }
 
 /**
- * R-154 #17：消息时间戳渲染（仅展示、可选）。历史路 = 后端条目 metadata.timestamp
- * （epoch 毫秒或 ISO 字符串，原样透传）；实时路 = message_start 帧 atMs。
- * 无法解析 / 缺失 ⇒ 空串（操作行不渲染时间位）。R-158 #10 复用于回执决策时刻。
+ * R-154 #17 → R-162 M2：消息时间戳渲染（仅展示、可选）改走 `formatProgressiveTs`
+ * （utils/format.ts 集中来源；历史路 = 后端条目 metadata.timestamp，实时路 = message_start 帧
+ * atMs；无法解析 / 缺失 ⇒ 空串不渲染时间位）。R-158 #10 回执决策时刻同口径。
  */
-function formatTs(ts: unknown): string {
-  if (ts === undefined || ts === null) {
-    return ''
-  }
-  const parsed = typeof ts === 'number' ? dayjs(ts) : dayjs(String(ts))
-  return parsed.isValid() ? parsed.format('MM-DD HH:mm') : ''
-}
-
-function formatTimestamp(message: ChatMessage): string {
-  return formatTs(message.timestamp)
-}
 
 /**
  * R-157 #2：编辑 = 「改完从该条重跑」——回填该条正文并记住锚点；发送时（send）截断

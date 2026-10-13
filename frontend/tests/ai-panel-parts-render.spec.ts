@@ -700,7 +700,7 @@ describe('R-154：截断角标 / 跟随暂停 / 生成中 / 编辑回填 / 建�
     numeric.timestamp = 1_700_000_000_000
     const iso = buildMessage([{ kind: 'text', seg: 0, text: 'ISO 戳', streaming: false }])
     iso.id = 'a-iso'
-    iso.timestamp = '2026-01-01T00:00:00Z'
+    iso.timestamp = '2026-01-01T12:00:00Z' // 正午 UTC：任意时区都落在 2026-01-01/02，同年档断言时区安全
     const none = buildMessage([{ kind: 'text', seg: 0, text: '无戳', streaming: false }])
     none.id = 'a-none'
     const broken = buildMessage([{ kind: 'text', seg: 0, text: '坏戳', streaming: false }])
@@ -710,8 +710,9 @@ describe('R-154：截断角标 / 跟随暂停 / 生成中 / 编辑回填 / 建�
     const wrapper = await mountPanel([numeric, iso, none, broken])
     const stamps = wrapper.findAll('[data-testid="msg-timestamp"]')
     expect(stamps).toHaveLength(2)
-    expect(stamps[0].text()).toMatch(/^\d{2}-\d{2} \d{2}:\d{2}$/)
-    expect(stamps[1].text()).toMatch(/^\d{2}-\d{2} \d{2}:\d{2}$/)
+    // R-162 M2 渐进格式：1.7e12=2023 年 ⇒ 跨年档；2026-01-01（距今 ≥7 自然日且同年）⇒ M月D日 档
+    expect(stamps[0].text()).toMatch(/^\d{4}年\d{1,2}月\d{1,2}日 \d{2}:\d{2}$/)
+    expect(stamps[1].text()).toMatch(/^\d{1,2}月\d{1,2}日 \d{2}:\d{2}$/)
     wrapper.unmount()
   })
 
@@ -770,9 +771,12 @@ describe('R-157：操作行外置 + role 过滤 + 编辑重跑 + 发送滚底 + 
     }
     // 时间戳在操作行内（仅 u-1 带戳）
     expect(wrapper.find('[data-testid="msg-ops-u-1"]').find('[data-testid="msg-timestamp"]').exists()).toBe(true)
-    // 时间戳与操作两端分置（R-159 单一元信息行）：行 = justify-between，左位容器含时间戳、末子 = 操作容器
+    // R-162 M1 紧邻布局（删 justify-between 两端分置）：行 = [时间戳容器 | 按钮组容器] 两子紧邻，
+    // 按钮组即末子（无行尾孤立按钮）；用户行 row-reverse 渲染为按钮贴时间戳左侧、整簇靠右
     const rowEl = wrapper.find('[data-testid="msg-ops-u-1"]').element
-    expect(rowEl.className).toContain('justify-between')
+    expect(rowEl.className).not.toContain('justify-between')
+    expect(rowEl.className).toContain('flex-row-reverse')
+    expect(rowEl.children).toHaveLength(2)
     expect(rowEl.children[0].querySelector('[data-testid="msg-timestamp"]')).not.toBeNull()
     expect(rowEl.children[rowEl.children.length - 1].className).toContain('opacity-0')
     // hover/focus-within 浮出口径：操作容器默认透明（group-hover 浮现，键盘 focus-within 可达）
@@ -878,7 +882,7 @@ describe('R-158：HITL 只读回执 / CollapsibleText / 复制换行', () => {
     expect(receipt.text()).toContain('已确认')
     expect(receipt.text()).toContain('启动发布作业')
     expect(receipt.text()).toContain('taskId=3')
-    expect(receipt.text()).toMatch(/\d{2}-\d{2} \d{2}:\d{2}/) // decidedAt 回显
+    expect(receipt.text()).toMatch(/\d{4}年\d{1,2}月\d{1,2}日 \d{2}:\d{2}/) // decidedAt 回显（R-162 渐进格式：1.7e12=2023 跨年档）
     // 原始参数可展开（默认收起）
     const argsMore = wrapper.find('[data-testid="receipt-args-more-p1"]')
     expect(argsMore.exists()).toBe(true)
@@ -1311,7 +1315,7 @@ describe('R-160：HITL 三缺陷（回读恢复 / 回执独立块 / 倒计时续
     const receipt = wrapper.find('[data-testid="hitl-receipt"]')
     expect(receipt.exists()).toBe(true)
     expect(receipt.text()).toContain('已确认')
-    expect(receipt.text()).toMatch(/\d{2}-\d{2} \d{2}:\d{2}/) // decidedAt 回显
+    expect(receipt.text()).toMatch(/\d{4}年\d{1,2}月\d{1,2}日 \d{2}:\d{2}/) // decidedAt 回显（R-162 渐进格式：1.7e12=2023 跨年档）
     // 紧随源工具卡（DOM 序：tool-card 在前，hitl-receipt 在后）
     const html = wrapper.html()
     expect(html.indexOf('tool-card-tc-1')).toBeGreaterThanOrEqual(0)
@@ -1414,5 +1418,67 @@ describe('R-160：HITL 三缺陷（回读恢复 / 回执独立块 / 倒计时续
     expect(source).not.toContain('ResizeObserver')
     expect(source).toContain('scrollHeight')
     expect(source).toContain('nextTick')
+  })
+})
+
+/**
+ * R-162（元信息行布局 + 渐进时间格式，决策卡定稿 + 会审 4 MINOR 并入）：
+ * M1 按钮紧邻时间戳（删 justify-between；用户行 row-reverse 同簇靠右）；
+ * M2 formatProgressiveTs 五级渐进（now 注入可测）。
+ */
+describe('R-162：元信息行紧邻布局 + 渐进时间格式', () => {
+  it('M1：AI 行 + 用户行按钮均紧邻时间戳，无行尾孤立按钮', async () => {
+    const ai = buildMessage([{ kind: 'text', seg: 0, text: 'AI 回复', streaming: false }])
+    ai.id = 'a-x'
+    ai.timestamp = 1_700_000_000_000
+    const user = buildMessage([{ kind: 'text', seg: 0, text: '用户提问', streaming: false }])
+    user.id = 'u-x'
+    user.role = 'user'
+    user.timestamp = 1_700_000_000_000
+    const wrapper = await mountPanel([user, ai])
+
+    // AI 行：左对齐紧邻 [时间戳容器 | 按钮组容器]，两子无间隔元素
+    const aiRow = wrapper.find('[data-testid="msg-ops-a-x"]')
+    expect(aiRow.classes()).not.toContain('justify-between')
+    expect(aiRow.classes()).not.toContain('flex-row-reverse')
+    expect(aiRow.element.children).toHaveLength(2)
+    expect(aiRow.element.children[0].querySelector('[data-testid="msg-timestamp"]')).not.toBeNull()
+    expect((aiRow.element.children[1] as HTMLElement).className).toContain('opacity-0')
+    expect(aiRow.element.lastElementChild).toBe(aiRow.element.children[1]) // 末子 = 按钮组（无行尾孤立）
+
+    // 用户行：row-reverse 保留（渲染为按钮贴时间戳左侧、整簇靠右内聚），DOM 序与结构不变
+    const userRow = wrapper.find('[data-testid="msg-ops-u-x"]')
+    expect(userRow.classes()).not.toContain('justify-between')
+    expect(userRow.classes()).toContain('flex-row-reverse')
+    expect(userRow.element.children).toHaveLength(2)
+    expect(userRow.element.children[0].querySelector('[data-testid="msg-timestamp"]')).not.toBeNull()
+    expect(userRow.element.lastElementChild).toBe(userRow.element.children[1])
+    wrapper.unmount()
+  })
+
+  it('M2：formatProgressiveTs 五级边界（now 注入；自然日 0 点切分，先 diff 后年）', async () => {
+    const { formatProgressiveTs } = await import('@/utils/format')
+    // 固定 now = 2026-10-13（周二）12:00 本地
+    const now = new Date(2026, 9, 13, 12, 0, 0).getTime()
+    const at = (m: number, d: number, h: number, mi: number): number => new Date(2026, m - 1, d, h, mi).getTime()
+
+    expect(formatProgressiveTs(at(10, 13, 8, 30), now)).toBe('08:30') // diff=0 今天
+    expect(formatProgressiveTs(at(10, 12, 23, 59), now)).toBe('昨天 23:59') // diff=1 跨 0 点
+    expect(formatProgressiveTs(at(10, 11, 9, 5), now)).toMatch(/^周. 09:05$/) // diff=2（2026-10-11=周日）
+    expect(formatProgressiveTs(at(10, 7, 9, 5), now)).toMatch(/^周. 09:05$/) // diff=6 档内
+    expect(formatProgressiveTs(at(10, 6, 9, 5), now)).toBe('10月6日 09:05') // diff=7 同年
+    expect(formatProgressiveTs(new Date(2025, 11, 31, 23, 0).getTime(), now)).toBe('2025年12月31日 23:00') // 跨年
+    // ISO 字符串输入 / 未来时刻回落 HH:mm / 非法值空串
+    expect(formatProgressiveTs('2026-10-13T08:30:00', now)).toBe('08:30')
+    expect(formatProgressiveTs(at(10, 14, 9, 0), now)).toBe('09:00')
+    expect(formatProgressiveTs('not-a-date', now)).toBe('')
+  })
+
+  it('M2：formatProgressiveTs 同刻边界（diff=0 与时区无关；now 缺省取当前时刻不抛错）', async () => {
+    const { formatProgressiveTs } = await import('@/utils/format')
+    const noon = new Date(2026, 9, 13, 12, 0, 0).getTime()
+    expect(formatProgressiveTs(noon, noon)).toBe('12:00') // 同刻 diff=0
+    expect(formatProgressiveTs(undefined, noon)).toBe('')
+    expect(typeof formatProgressiveTs(noon)).toBe('string') // now 缺省
   })
 })
