@@ -175,8 +175,10 @@
         </div>
         <!-- 内容列：气泡 + 指示器 + 操作行（R-157 #1：操作行挪气泡外、卡片下沿独立行） -->
         <div class="min-w-0 flex-1 flex flex-col" :class="m.role === 'user' ? 'items-end' : 'items-start'">
+        <!-- R-160 M4（issue #14③ 方案 A）：气泡容器层一刀切 —— overflow:hidden + min-width:0，
+             长串（无空白可断）不再越出气泡；不铺分块规则（Markdown 重做时整体替换） -->
         <div
-          class="max-w-[82%] rounded-lg px-2.5 py-2 text-[13px] text-[#303133] leading-[1.6] break-words"
+          class="max-w-[82%] min-w-0 overflow-hidden rounded-lg px-2.5 py-2 text-[13px] text-[#303133] leading-[1.6] break-words"
           :class="m.role === 'user' ? 'bg-[#d9ecff]' : 'bg-[#f4f4f5]'"
           :data-testid="'msg-bubble-' + m.id"
         >
@@ -189,6 +191,37 @@
                  R-157 #3：流式中正文末尾打字机光标；R-159 #6：末尾 CH_TAIL 字符包 span.ch 渐显（新字符 chIn）；
                  R-159 #4：完成时光标同帧淡出（fade-out，300ms 后随 isFading 退役）。 -->
             <div v-if="block.kind === 'text'" class="whitespace-pre-wrap">{{ chSplit(m, block).head }}<span v-for="(ch, ci) in chSplit(m, block).tail" :key="ci" class="ch">{{ ch }}</span><span v-if="showCaret(m, bi) || isFading(m)" class="caret" :class="{ 'fade-out': isFading(m) }" data-testid="stream-caret"></span></div>
+
+            <!-- R-160 M2：HITL 只读回执**独立块**（R-158 #10 判据随块层判，块 = 已决确认门/GF 段）——
+                 紧随源工具卡渲染，恒可见（不参与 expandedBlocks，无折叠卡头），刷新/历史恢复后可回溯。
+                 徽标按段终态派生，decision/decidedAt/submittedValues 为回读/写回元数据。 -->
+            <template v-else-if="block.kind === 'receipt'">
+              <template v-for="part in block.parts" :key="'receipt-' + (part.kind === 'tool' ? part.toolCallId : part.kind + '-' + part.seg)">
+                <div v-if="part.kind === 'tool'" class="mt-1.5 px-2 py-1.5 bg-[#f0f9ff] border border-solid border-[#d9ecff] rounded" data-testid="hitl-receipt">
+                  <div class="flex items-center gap-1.5 flex-wrap">
+                    <el-tag size="small" :type="hitlReceiptTagType(part.status)" effect="light">{{ hitlReceiptLabel(part) }}</el-tag>
+                    <span class="text-[#606266]">{{ hitlReceiptSummary(part) }}</span>
+                    <span v-if="part.decidedAt" class="text-[#c0c4cc]">{{ formatTs(part.decidedAt) }}</span>
+                  </div>
+                  <div v-if="part.submittedValues" class="mt-1 text-[#909399]" data-testid="receipt-values">
+                    已提交：{{ submittedValuesSummary(part.submittedValues) }}
+                  </div>
+                  <div v-if="part.args" class="mt-1">
+                    <button
+                      type="button"
+                      class="text-[#409eff]"
+                      :data-testid="'receipt-args-toggle-' + part.toolCallId"
+                      @click="toggleReceiptArgs(part.toolCallId)"
+                    >
+                      原始参数 {{ receiptArgsOpen.has(part.toolCallId) ? '▾' : '▸' }}
+                    </button>
+                    <div v-show="receiptArgsOpen.has(part.toolCallId)" class="mt-0.5" :data-testid="'receipt-args-more-' + part.toolCallId">
+                      <CollapsibleText :text="part.args" pretty />
+                    </div>
+                  </div>
+                </div>
+              </template>
+            </template>
 
             <template v-else>
               <!-- R-154 #13+14（用户直裁「彻底拆除」）：组壳退役 —— 每段恒一张卡。
@@ -296,35 +329,6 @@
                             @submit="onFormSubmit"
                             @cancel="onFormCancel"
                           />
-                        </div>
-                      </template>
-
-                      <!-- R-158 #10：HITL 只读回执卡（方案 B）——交互完成后不再消失，刷新可回溯。
-                           判据 = 确认门/GF 工具的已决段（requiresAction=false）；徽标按段终态派生，
-                           decision/decidedAt/submittedValues 为写回元数据。 -->
-                      <template v-else-if="isHitlReceiptPart(part)">
-                        <div class="mt-1.5 px-2 py-1.5 bg-[#f0f9ff] border border-solid border-[#d9ecff] rounded" data-testid="hitl-receipt">
-                          <div class="flex items-center gap-1.5 flex-wrap">
-                            <el-tag size="small" :type="hitlReceiptTagType(part.status)" effect="light">{{ hitlReceiptLabel(part) }}</el-tag>
-                            <span class="text-[#606266]">{{ hitlReceiptSummary(part) }}</span>
-                            <span v-if="part.decidedAt" class="text-[#c0c4cc]">{{ formatTs(part.decidedAt) }}</span>
-                          </div>
-                          <div v-if="part.submittedValues" class="mt-1 text-[#909399]" data-testid="receipt-values">
-                            已提交：{{ submittedValuesSummary(part.submittedValues) }}
-                          </div>
-                          <div v-if="part.args" class="mt-1">
-                            <button
-                              type="button"
-                              class="text-[#409eff]"
-                              :data-testid="'receipt-args-toggle-' + part.toolCallId"
-                              @click="toggleReceiptArgs(part.toolCallId)"
-                            >
-                              原始参数 {{ receiptArgsOpen.has(part.toolCallId) ? '▾' : '▸' }}
-                            </button>
-                            <div v-show="receiptArgsOpen.has(part.toolCallId)" class="mt-0.5" :data-testid="'receipt-args-more-' + part.toolCallId">
-                              <CollapsibleText :text="part.args" pretty />
-                            </div>
-                          </div>
                         </div>
                       </template>
                     </div>
@@ -937,11 +941,9 @@ function showCaret(message: ChatMessage, blockIndex: number): boolean {
 }
 
 /**
- * R-158 #10：HITL 只读回执 —— 回执卡的段判据（确认门 / 生成式表单工具的已决段）。
+ * R-158 #10 → R-160 M2：回执判据上移块层（utils/blocks.ts isReceiptPart —— 判据不变：
+ * 确认门 / 生成式表单工具的已决段），AiPanel 只负责渲染回执块内容。
  */
-function isHitlReceiptPart(part: ToolPart): boolean {
-  return part.kind2 === 'CONFIRM' || part.name === GENERATIVE_FORM_TOOL
-}
 
 /** 回执状态徽标文案：决策态优先（收口 MINOR-1）——已确认须 approve 即显、不等 succeeded；
  *  已确认但执行失败仍显「已确认」（徽标系决策态，非工具执行态）；decision 缺省（历史数据/

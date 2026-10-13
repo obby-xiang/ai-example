@@ -104,6 +104,15 @@ public class PendingToolCall {
 
 	private long resolvedAtMs;
 
+	/**
+	 * R-160 M3：挂起等待的绝对到期时刻（epoch 毫秒，登记挂起时用 gate timeout 算定）。
+	 * 包装类型：旧数据无该字段反序列化为 null ⇒ 前端「等待人工确认」静态兜底，不伪造倒计时。
+	 */
+	private Long expiresAt;
+
+	/** R-160 M3：算定 expiresAt 的构造时刻（同帧单点取值；前端按 {@code expiresAt − atMs} 续算剩余）。 */
+	private Long atMs;
+
 	public boolean resolved() {
 		return !PENDING.equals(this.status);
 	}
@@ -124,6 +133,8 @@ public class PendingToolCall {
 		out.put("executedAtMs", this.executedAtMs);
 		out.put("requestedAtMs", this.requestedAtMs);
 		out.put("resolvedAtMs", this.resolvedAtMs);
+		out.put("expiresAt", this.expiresAt);
+		out.put("atMs", this.atMs);
 		return out;
 	}
 

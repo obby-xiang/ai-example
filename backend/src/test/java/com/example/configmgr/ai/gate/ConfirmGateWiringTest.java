@@ -31,6 +31,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -210,6 +211,40 @@ class ConfirmGateWiringTest {
         verify(this.store, never()).claimExecution(anyString(), anyString(), anyString());
         verify(this.store, never()).appendLedger(anyString(), any(PendingToolCall.class), anyString());
         assertThat(toolText(result)).contains("系统已自动取消该操作（工具未执行）");
+    }
+
+    /**
+     * R-160 M3：挂起登记处用 gate timeout 算定 expiresAt/atMs —— 顺序红线（saveSuspended
+     * 先于 confirmRequest 发帧，发帧后 set 不落库）⇒ 算定必须发生在 saveSuspended 之前，
+     * 落库条目与外置帧条目同一份引用带到期口径；剩余时长 = gate timeout 精确折算。
+     */
+    @Test
+    void suspensionRegistersExpiresAtFromGateTimeoutBeforePersisting() {
+        stubCommon();
+        when(this.toolRegistry.channelOf("start_import")).thenReturn(ToolMeta.Channel.BACKEND);
+        when(this.toolRegistry.riskOf("start_import")).thenReturn(ToolMeta.RiskLevel.DANGER);
+        when(this.gate.confirmTimeoutSeconds()).thenReturn(120);
+        when(this.gate.awaitDecision(eq(RUN_ID), any(PendingToolCall.class))).thenAnswer(invocation -> {
+            PendingToolCall pending = invocation.getArgument(1);
+            pending.setStatus(PendingToolCall.REJECTED);
+            return pending;
+        });
+
+        this.manager.executeToolCalls(prompt("start_import", "{\"taskId\":7}"),
+                response("start_import", "{\"taskId\":7}"));
+
+        // ① 落库条目（saveSuspended）已带 expiresAt/atMs —— 算定先于持久化
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<PendingToolCall>> persisted = ArgumentCaptor.forClass(List.class);
+        verify(this.store).saveSuspended(eq(RUN_ID), nullable(String.class), persisted.capture(),
+                any(List.class), any(MessageJsonCodec.class));
+        PendingToolCall suspended = persisted.getValue().get(0);
+        assertThat(suspended.getAtMs()).isNotNull();
+        assertThat(suspended.getExpiresAt()).isNotNull();
+        assertThat(suspended.getExpiresAt() - suspended.getAtMs()).isEqualTo(120_000L);
+        // ② 外置帧（suspended 事件）与外发请求帧同一份条目：前端续收/刷新同源
+        assertThat(pendingsToldToFrontend()).extracting(PendingToolCall::getExpiresAt)
+            .containsExactly(suspended.getExpiresAt());
     }
 
     /** 三种结局共用的桩（外置状态/帧出口/取消标志）。 */

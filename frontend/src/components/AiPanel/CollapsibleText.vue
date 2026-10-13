@@ -1,17 +1,21 @@
 <script setup lang="ts">
 /**
- * CollapsibleText（R-158 #12）：真溢出才渐隐 + 「显示更多」的截断展示组件。
+ * CollapsibleText（R-158 #12 → R-160 M4/M5）：真溢出才渐隐 + 「显示更多」的截断展示组件。
  *
  * 口径（决策卡方案 B，业界锚 Vercel ai-elements `Tool` / shadcn scroll-fade）：
- * - 收起态限高 `maxHeight`（px，默认 96 = 原 result 区 max-h-24 口径）； ResizeObserver 测
- *   **真溢出**（内容高 > 限高）才渲染底部渐隐（mask-image）+「显示更多」按钮；
+ * - 收起态限高 `maxHeight`（px，默认 96 = 原 result 区 max-h-24 口径）；**真溢出**（内容高 > 限高）
+ *   才渲染底部渐隐（mask-image）+「显示更多」按钮；
  * - 短内容零副作用：无溢出 ⇒ 无渐隐、无按钮（高度自适应，不撑高卡片的反面 = 也不留白）；
  * - 点「显示更多」放开限高（按钮变「收起」）；`pretty` = JSON 解析成功则缩进格式化、失败原样。
  *
- * 溢出判据用 `entry.contentRect.height`（RO 回调携带的内容盒真实高度）与 `scrollHeight`
- * 取大——测试桩可向 RO 回调注入 contentRect，无 RO 环境（旧浏览器/测试）视为不溢出。
+ * R-160 M5（显示更多兜底）：抽**单一 measure** —— onMounted 无观测器早退改 `nextTick` 直读
+ * `scrollHeight > maxHeight`，toggle（展开/收起）同回落同一 measure；整组件不再依赖
+ * 外部尺寸观测（jsdom / 旧环境行为一致，删早退的"无观测器恒不溢出"盲区一并退役）。
+ *
+ * R-160 M4（issue #14③ 方案 A）：容器 `min-width:0` + `overflow-wrap:anywhere` —— 长串
+ * 在容器层可断行，配合 AiPanel 气泡 `overflow:hidden` 不再越界；不铺分块规则。
  */
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 
 const props = withDefaults(defineProps<{
   text: string
@@ -24,7 +28,7 @@ const props = withDefaults(defineProps<{
 }>(), { pretty: false, maxHeight: 96, testid: 'collapsible-show-more' })
 
 const expanded = ref(false)
-/** 真溢出才可展开（RO 观测结果；无 RO 环境恒 false） */
+/** 真溢出才可展开（单一 measure 的读数；jsdom 等零高环境恒 false = 不溢出） */
 const overflowed = ref(false)
 
 const displayText = computed(() => {
@@ -39,47 +43,34 @@ const displayText = computed(() => {
 })
 
 const wrapRef = ref<HTMLElement | null>(null)
-let observer: ResizeObserver | null = null
 
-function applyObservation(el: HTMLElement): void {
-  observer = new ResizeObserver((entries) => {
-    const entry = entries[0]
-    const contentHeight = entry ? Math.max(entry.contentRect.height, el.scrollHeight) : el.scrollHeight
-    overflowed.value = contentHeight > props.maxHeight
-  })
-  observer.observe(el)
+/** R-160 M5：单一 measure —— 直读 scrollHeight 与限高比较（无 RO 早退分支）。 */
+function measure(): void {
+  const el = wrapRef.value
+  if (!el) {
+    return
+  }
+  overflowed.value = el.scrollHeight > props.maxHeight
 }
 
 onMounted(() => {
-  const el = wrapRef.value
-  if (!el || typeof ResizeObserver === 'undefined') {
-    return
-  }
-  applyObservation(el)
-})
-
-onBeforeUnmount(() => {
-  observer?.disconnect()
-  observer = null
+  // nextTick 等首渲落地后读真实 scrollHeight（DOM 挂载即量，无 RO 异步观测窗）
+  void nextTick(measure)
 })
 
 function toggle(): void {
   expanded.value = !expanded.value
-  if (expanded.value) {
-    // 展开后停止观测（限高已放开，溢出概念不再适用）
-    observer?.disconnect()
-    observer = null
-  } else if (wrapRef.value && typeof ResizeObserver !== 'undefined' && !observer) {
-    // 收起：重挂观测（裸 measure 读 scrollHeight 会把 stub/零值环境误判为不溢出）
-    applyObservation(wrapRef.value)
-  }
+  // 同回落单一 measure：展开/收起都重读 scrollHeight（收起恢复限高后必须重判溢出；
+  // 展开后若内容变化同样以读数为准）
+  void nextTick(measure)
 }
 
 const collapsed = computed(() => overflowed.value && !expanded.value)
 </script>
 
 <template>
-  <div>
+  <!-- R-160 M4：容器层方案 A —— min-width:0 + overflow-wrap:anywhere（长串可断行不越界） -->
+  <div class="min-w-0 [overflow-wrap:anywhere]">
     <div
       ref="wrapRef"
       class="whitespace-pre-wrap"

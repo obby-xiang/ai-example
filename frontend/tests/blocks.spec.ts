@@ -202,3 +202,26 @@ describe('R-154 收口修 F1/F2 兼容面：跨消息 blockId 命名空间 + 单
     expect(resolveBlockExpanded(decidedBlock, true)).toBe(true)
   })
 })
+
+describe('R-160 M2：回执独立块（groupParts 派生，恒可见不参与 expandedBlocks）', () => {
+  it('已决 CONFIRM 段 ⇒ 工具卡 + 紧随 receipt 块（id = `${msg}:receipt:${toolCallId}`，与工具卡不撞）', () => {
+    const decided = makeTool({ toolCallId: 'p1', kind2: 'CONFIRM', status: 'succeeded', requiresAction: false, decision: 'approved' })
+    const blocks = groupParts([decided], 'm-1')
+    expect(blocks.map((b) => b.id)).toEqual(['m-1:p1', 'm-1:receipt:p1'])
+    expect(blocks.map((b) => b.kind)).toEqual(['activity', 'receipt'])
+    expect(blocks[1]!.defaultExpanded).toBe(true) // 恒可见口径（模板直渲，不走三态展开判定）
+  })
+
+  it('负例：BACKEND 段 / 待决 CONFIRM 段（requiresAction）⇒ 无 receipt 块', () => {
+    expect(groupParts([makeTool({ toolCallId: 'b1' })], 'm-1').map((b) => b.kind)).toEqual(['activity'])
+    const pending = makeTool({ toolCallId: 'p1', kind2: 'CONFIRM', status: 'pending', requiresAction: true })
+    expect(groupParts([pending], 'm-1').map((b) => b.kind)).toEqual(['activity'])
+  })
+
+  it('kind2 名兜底仅 GF：kind2=UNKNOWN 的 generative_form 按名出块；其余 UNKNOWN 工具不出', () => {
+    const gf = makeTool({ toolCallId: 'g1', name: 'generative_form', kind2: 'UNKNOWN', status: 'succeeded' })
+    expect(groupParts([gf], 'm-1').map((b) => b.id)).toEqual(['m-1:g1', 'm-1:receipt:g1'])
+    const other = makeTool({ toolCallId: 'x1', kind2: 'UNKNOWN', status: 'succeeded' })
+    expect(groupParts([other], 'm-1').map((b) => b.id)).toEqual(['m-1:x1'])
+  })
+})

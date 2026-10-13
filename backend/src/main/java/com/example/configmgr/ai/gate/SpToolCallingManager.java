@@ -158,6 +158,23 @@ public class SpToolCallingManager implements ToolCallingManager {
 		// 见 RunStore#create 写下的 snapshot.context），因此复查不会因上下文漂移而误判。
 		AiContext context = AiContext.fromMap(snapshot.getContext());
 
+		// ===== R-160 M3：挂起登记处用 gate timeout 算定 expiresAt（先 set 再落库）=====
+		// 顺序红线：saveSuspended 先于下方 awaitConfirm/awaitFrontend 发帧（confirmRequest /
+		// frontendToolRequest），若等发帧后再 set 则不落库 —— 此处算定并 set 后随 saveSuspended
+		// 一并持久化；atMs 与 expiresAt 同帧单点取值，前端按 expiresAt − atMs 续算剩余时长。
+		long suspendedAtMs = System.currentTimeMillis();
+		for (PendingToolCall pending : pendings) {
+			int timeoutSeconds = switch (pending.getKind()) {
+				case PendingToolCall.KIND_CONFIRM -> this.gate.confirmTimeoutSeconds();
+				case PendingToolCall.KIND_FRONTEND -> this.gate.frontendToolTimeoutSeconds();
+				default -> 0;
+			};
+			if (timeoutSeconds > 0) {
+				pending.setAtMs(suspendedAtMs);
+				pending.setExpiresAt(suspendedAtMs + timeoutSeconds * 1000L);
+			}
+		}
+
 		// ===== 硬规范①：先把 assistant(tool_calls) 与待决条目外置，再进入任何等待 =====
 		this.store.saveSuspended(runId, assistant.getText(), pendings, prompt.getInstructions(), this.codec);
 		out.suspended(pendings, this.store.runKey(runId), this.store.pendingKey(runId), this.store.instanceId());

@@ -11,18 +11,23 @@
  * 本文件**不依赖 store**（纯函数层，循 utils/parts.ts 分层自述）；展开态三态判定在
  * {@link resolveBlockExpanded}，用户触碰记录存 store 的 `expandedBlocks`（D4：会话内内存态）。
  */
-import type { MessagePart, ReasoningPart, ToolPart } from '@/types/ai'
+import { GENERATIVE_FORM_TOOL, type MessagePart, type ReasoningPart, type ToolPart } from '@/types/ai'
 
 export type ActivityPart = ToolPart | ReasoningPart
 
-/** 渲染块：text = 单段正文；activity = 单段 reasoning/tool 卡（R-154 起恒 1 段，组壳已拆）。 */
+/**
+ * 渲染块：text = 单段正文；activity = 单段 reasoning/tool 卡（R-154 起恒 1 段，组壳已拆）；
+ * receipt = R-160 M2 回执独立块（已决 HITL 段紧随源工具卡，恒可见，不参与 expandedBlocks）。
+ */
 export interface Block {
-  /** 成员稳定 id（加消息命名空间前缀，F1）：`${messageId}:${toolCallId}` 或 `${messageId}:reasoning-${seg}`（D5） */
+  /** 成员稳定 id（加消息命名空间前缀，F1）：`${messageId}:${toolCallId}` / `${messageId}:reasoning-${seg}`（D5）；
+   *   receipt 块 = `${messageId}:receipt:${toolCallId}`（与工具卡 id 不撞，F1 消解） */
   id: string
-  kind: 'text' | 'activity'
-  /** 恒 1 个元素（R-154 #13+14：每段一卡）；成员 kind ∈ {'reasoning','tool'} */
+  kind: 'text' | 'activity' | 'receipt'
+  /** 恒 1 个元素（R-154 #13+14：每段一卡）；成员 kind ∈ {'reasoning','tool'}（receipt 块成员 = 源 tool 段） */
   parts: MessagePart[]
-  /** R-154 重定义：requiresAction 段 true（强制展开）；其余一律 false（每卡默认折叠，单行摘要） */
+  /** R-154 重定义：requiresAction 段 true（强制展开）；其余一律 false（每卡默认折叠，单行摘要）；
+   *   receipt 块恒 true（不参与三态展开判定，模板直渲恒可见） */
   defaultExpanded: boolean
 }
 
@@ -63,8 +68,20 @@ export function resolveBlockExpanded(block: Block, manual: boolean | undefined):
 }
 
 /**
+ * R-160 M2：回执块判据 —— 确认门/GF 工具的**已决**段（requiresAction=false）出独立回执块。
+ * kind2 口径：CONFIRM 按 kind2 判；name 兜底**仅** GENERATIVE_FORM_TOOL（旧数据 kind2=UNKNOWN
+ * 时 GF 仍认名，其余工具不认名 —— 不凭工具名臆造回执）。
+ */
+function isReceiptPart(part: ToolPart): boolean {
+  return !part.requiresAction
+    && (part.kind2 === 'CONFIRM' || part.name === GENERATIVE_FORM_TOOL)
+}
+
+/**
  * 段序列 → 渲染块序列（纯函数，不改段）。
  * R-154 #13+14：每个 activity 段独立成块（恒 1 段）；DEV 下断言 activity 成员 kind ∈ {'reasoning','tool'}。
+ * R-160 M2：已决 HITL 工具段除工具卡外**紧随**派生 receipt 回执块（id = `${messageId}:receipt:${toolCallId}`，
+ * 恒可见，不参与 expandedBlocks —— 刷新/历史恢复后回执不随卡折叠而隐藏）。
  */
 export function groupParts(parts: MessagePart[], messageId: string): Block[] {
   const blocks: Block[] = []
@@ -88,6 +105,14 @@ export function groupParts(parts: MessagePart[], messageId: string): Block[] {
       parts: [part],
       defaultExpanded: defaultExpandedOf([part])
     })
+    if (part.kind === 'tool' && isReceiptPart(part)) {
+      blocks.push({
+        id: `${messageId}:receipt:${part.toolCallId}`,
+        kind: 'receipt',
+        parts: [part],
+        defaultExpanded: true
+      })
+    }
   }
   return blocks
 }

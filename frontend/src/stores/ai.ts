@@ -744,6 +744,26 @@ export const useAiStore = defineStore('ai', {
               result: null,
               requiresAction: false
             }
+            // R-160 M2/M1：回读决策元数据三字段（写口 R-158 #10 已成，历史路此前丢失 ⇒
+            // 刷新回执卡不渲染）。decision 仅认词表两值；decidedAt 仅认数值；
+            // submittedValues 为后端 resultText 原文（限 FRONTEND），JSON.parse 失败兜底 null。
+            if (state) {
+              if (state.decision === 'approved' || state.decision === 'rejected') {
+                part.decision = state.decision
+              }
+              if (typeof state.decidedAt === 'number') {
+                part.decidedAt = state.decidedAt
+              }
+              if (kind === 'FRONTEND' && typeof state.submittedValues === 'string') {
+                let submitted: Record<string, unknown> | null = null
+                try {
+                  submitted = JSON.parse(state.submittedValues) as Record<string, unknown>
+                } catch {
+                  submitted = null // 兜底 null（不伪造提交值；徽标/回执从 status 派生）
+                }
+                part.submittedValues = (submitted ?? undefined) as Record<string, unknown>
+              }
+            }
             if (matched) {
               consumedResponses.add(matched)
               part.result = matched.responseData ?? null
@@ -940,13 +960,17 @@ export const useAiStore = defineStore('ai', {
         }
         // 批2：挂起卡不再是"就地写独立投影"，而是**落段再派生** —— 段侧 requiresAction=true
         // 因为该条目正是"等人工/前端动作"的那一个（派生出唯一 pendingCall，不新增重复工具卡）
+        // R-160 M3：快照路续走倒计时 —— entry.expiresAt（服务端钟）随段持久化，AiPanel 的
+        // resetPendingWatch 经 foldDeadline(pending.expiresAt, pending.atMs, ...) 折算；
+        // 旧数据无 expiresAt（null）⇒ 不写入，倒计时呈「等待人工确认」静态态（不伪造）。
         this.upsertToolPart(host, {
           toolCallId: entry.toolCallId,
           name: entry.name,
           kind2: kind,
           status: 'pending',
           args: entry.arguments ?? undefined,
-          requiresAction: true
+          requiresAction: true,
+          ...(entry.expiresAt != null ? { expiresAt: entry.expiresAt, atMs: entry.atMs ?? undefined } : {})
         })
         deriveProjections(host)
         if (entry.name === GENERATIVE_FORM_TOOL && !this.activeForm) {

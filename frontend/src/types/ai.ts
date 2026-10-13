@@ -143,8 +143,16 @@ export interface AiHistoryMessage {
    * R-144（后端历史携带状态）：按 toolCallId 映射的段级真态（挂在带 toolCalls 的 ASSISTANT 消息
    * metadata 上随载荷透出）。旧载荷缺该字段 ⇒ 前端占位兜底（status 'succeeded' / kind2 'UNKNOWN'）；
    * `kind` 缺数据 ⇒ 保持 'UNKNOWN'（不臆造默认值）；resume 重建轮（T4）同样无状态，共用该兜底。
+   * R-160 M1：已决条目增透决策元数据 —— decision（approved/rejected，条目态派生）/ decidedAt
+   * （epoch 毫秒）/ submittedValues（FRONTEND 的 resultText 原文，前端 JSON.parse、失败兜底 null）。
    */
-  toolCallStates?: Record<string, { status?: string; kind?: string }>
+  toolCallStates?: Record<string, {
+    status?: string
+    kind?: string
+    decision?: string
+    decidedAt?: number
+    submittedValues?: string
+  }>
   timestamp?: unknown
 }
 
@@ -459,6 +467,10 @@ export interface AiRunCurrentEntry {
   name: string
   /** 入参 JSON 字符串（原样，展示/解析由前端做） */
   arguments?: string | null
+  /** R-160 M3：挂起到期口径（服务端钟；旧数据缺省 = null ⇒ 「等待人工确认」静态兜底） */
+  expiresAt?: number | null
+  /** R-160 M3：expiresAt 的构造时刻（同帧单点；续算剩余 = expiresAt − atMs，见 foldDeadline） */
+  atMs?: number | null
 }
 
 /** GET /api/ai/runs/current?sessionId= 的 data：当前会话进行中的 run 挂起快照（T2b-D#3）。 */

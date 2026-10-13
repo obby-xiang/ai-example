@@ -656,15 +656,14 @@ public class ResilientChatService {
 			return null;
 		}
 		String status = pending.getStatus();
-		String kind = pending.getKind();
 		if (isTerminalEntryStatus(status)) {
-			return toolCallState(status, kind);
+			return toolCallState(pending, status);
 		}
 		if (PendingToolCall.APPROVED.equals(status)
 				&& (pending.isExecuted() || this.store.ledgerFor(runId, toolCallId) != null)) {
 			// T2 升格判据：KIND_CONFIRM 的 DANGER 工具执行后条目态永久停留 APPROVED（executeOnce 仅对
 			// KIND_BACKEND 置 EXECUTED），但「已批准且已执行」等价于 EXECUTED（executed 标志或台账命中即已执行）。
-			return toolCallState(PendingToolCall.EXECUTED, kind);
+			return toolCallState(pending, PendingToolCall.EXECUTED);
 		}
 		if (PendingToolCall.PENDING.equals(status) || PendingToolCall.APPROVED.equals(status)) {
 			if (RunSnapshot.isTerminal(snapshotStatus)) {
@@ -672,14 +671,14 @@ public class ResilientChatService {
 				if (snapshotCode != null) {
 					log.warn("历史段状态以轮次终态为准 runId={} toolCallId={} 条目态={} 轮次态={}",
 							runId, toolCallId, status, snapshotStatus);
-					return toolCallState(snapshotCode, kind);
+					return toolCallState(pending, snapshotCode);
 				}
 				log.warn("轮次终态不参与段态推导，回落条目态 runId={} toolCallId={} 条目态={} 轮次态={}",
 						runId, toolCallId, status, snapshotStatus);
-				return toolCallState(status, kind);
+				return toolCallState(pending, status);
 			}
 		}
-		return toolCallState(status, kind);
+		return toolCallState(pending, status);
 	}
 
 	/** 条目级终态（非 PENDING / APPROVED 的 8 个状态码）判定。 */
@@ -708,12 +707,35 @@ public class ResilientChatService {
 		return null;
 	}
 
-	/** R-144 T1/T3：{@code {status, kind?}} 载荷映射；kind 无数据不写（禁臆造默认值）。 */
-	private static Map<String, Object> toolCallState(String status, String kind) {
+	/**
+	 * R-144 T1/T3 → R-160 M1：{@code {status, kind?, decision?, decidedAt?, submittedValues?}} 载荷映射。
+	 * R-160 M1：决策元数据三字段随历史载荷透传（前端刷新回执卡渲染真值）—— decision 由
+	 * <b>条目态</b>派生（APPROVED → approved / REJECTED、REJECTED_ARGUMENTS → rejected；T2 升格
+	 * EXECUTED 不抹掉已发生的决策）；decidedAt ← resolvedAtMs；submittedValues ← resultText 原文
+	 * （限 kind==FRONTEND；前端 JSON.parse，失败兜底 null）。kind 无数据不写（禁臆造默认值）。
+	 */
+	private static Map<String, Object> toolCallState(PendingToolCall pending, String status) {
 		Map<String, Object> state = new LinkedHashMap<>();
 		state.put("status", status);
+		String kind = pending.getKind();
 		if (kind != null && !kind.isBlank()) {
 			state.put("kind", kind);
+		}
+		String entryStatus = pending.getStatus();
+		if (PendingToolCall.APPROVED.equals(entryStatus)) {
+			state.put("decision", "approved");
+		}
+		else if (PendingToolCall.REJECTED.equals(entryStatus)
+				|| PendingToolCall.REJECTED_ARGUMENTS.equals(entryStatus)) {
+			state.put("decision", "rejected");
+		}
+		if (pending.getResolvedAtMs() > 0) {
+			state.put("decidedAt", pending.getResolvedAtMs());
+		}
+		if (PendingToolCall.KIND_FRONTEND.equals(kind) && pending.getResultText() != null
+				&& !pending.getResultText().isBlank()) {
+			// 原文透传（非解析后对象）：解析与失败兜底在前端（R-160 M1 口径）
+			state.put("submittedValues", pending.getResultText());
 		}
 		return state;
 	}

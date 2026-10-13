@@ -448,6 +448,9 @@ public class AiController {
 			entry.put("kind", pending.getKind());
 			entry.put("name", pending.getName());
 			entry.put("arguments", pending.getArguments());
+			// R-160 M3：透出到期口径（旧数据为 null ⇒ 前端「等待人工确认」静态兜底，不伪造倒计时）
+			entry.put("expiresAt", pending.getExpiresAt());
+			entry.put("atMs", pending.getAtMs());
 			pendingEntries.add(entry);
 			if (PendingToolCall.PENDING.equals(pending.getStatus())
 					&& !PendingToolCall.KIND_BACKEND.equals(pending.getKind())) {

@@ -14,6 +14,7 @@ import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import type { ActiveGenerativeForm, ChatMessage, MessagePart, PendingToolCall, ToolPart } from '@/types/ai'
 import { useAiStore } from '@/stores/ai'
+import CollapsibleText from '@/components/AiPanel/CollapsibleText.vue'
 
 const api = vi.hoisted(() => ({
   health: vi.fn(),
@@ -87,6 +88,25 @@ async function mountPanel(messages: ChatMessage[]): Promise<ReturnType<typeof mo
   store.historyLoaded = true
   const { default: AiPanel } = await import('@/components/AiPanel/AiPanel.vue')
   const wrapper = mount(AiPanel, { global: { stubs } })
+  await wrapper.vm.$nextTick()
+  return wrapper
+}
+
+/**
+ * R-160 M5：CollapsibleText 注高法 —— 删 RO 后溢出由 onMounted 的 nextTick(measure) 直读
+ * scrollHeight；mount 返回后**同步**给全部 CollapsibleText 注高（赶在 queued measure flush
+ * 之前），再 nextTick 落定（原 RO 桩向回调注 contentRect 的口径退役）。
+ */
+async function mountWithOverflow(messages: ChatMessage[]): Promise<ReturnType<typeof mount>> {
+  const store = useAiStore()
+  store.messages = messages
+  store.historyLoaded = true
+  const { default: AiPanel } = await import('@/components/AiPanel/AiPanel.vue')
+  const wrapper = mount(AiPanel, { global: { stubs } })
+  for (const item of wrapper.findAllComponents(CollapsibleText)) {
+    const el = item.find('.whitespace-pre-wrap').element as HTMLElement
+    Object.defineProperty(el, 'scrollHeight', { value: 500, configurable: true })
+  }
   await wrapper.vm.$nextTick()
   return wrapper
 }
@@ -561,7 +581,8 @@ describe('R-154：截断角标 / 跟随暂停 / 生成中 / 编辑回填 / 建�
   }
 
   it('#2：工具段 truncated ⇒ 「已截断」角标（hover 带原因）+ Show more 展开/收起入口', async () => {
-    const wrapper = await mountPanel([
+    // R-160 M5：真溢出改单一 measure（onMounted nextTick 读 scrollHeight）—— 注高法触发
+    const wrapper = await mountWithOverflow([
       buildMessage([
         { kind: 'tool', seg: 0, toolCallId: 'c1', name: 'get_row_count', kind2: 'BACKEND', status: 'succeeded', args: '{}', result: '前 64KB 内容…', truncated: true, truncatedReason: '单帧 64KB 预算超限，结果字段被截断', requiresAction: false }
       ])
@@ -584,8 +605,8 @@ describe('R-154：截断角标 / 跟随暂停 / 生成中 / 编辑回填 / 建�
   })
 
   it('#2 负例：未截断段不出角标；真溢出归展示层判据（不溢出 ⇒ 无 show-more）', async () => {
-    // R-158 #12 语义：show-more 由真溢出（RO）派生，不再由 truncated 标记派生 —— 关溢出桩验证
-    roState.overflow = false
+    // R-160 M5 语义：show-more 由真溢出（单一 measure 读 scrollHeight）派生，不由 truncated
+    // 标记派生 —— 不注高（scrollHeight 0）即不溢出
     const wrapper = await mountPanel([
       buildMessage([
         { kind: 'tool', seg: 0, toolCallId: 'c2', name: 'get_row_count', kind2: 'BACKEND', status: 'succeeded', args: '{}', result: '完整结果', requiresAction: false }
@@ -933,15 +954,13 @@ describe('R-158：HITL 只读回执 / CollapsibleText / 复制换行', () => {
     const mk = (): ChatMessage => buildMessage([
       { kind: 'tool', seg: 0, toolCallId: 'c1', name: 'probe.tool', kind2: 'BACKEND', status: 'succeeded', args: longArgs, result: '结果', requiresAction: false }
     ])
-    // 不溢出：零副作用
-    roState.overflow = false
+    // 不溢出：零副作用（R-160 M5：不注高 = scrollHeight 0 ⇒ 单一 measure 判不溢出）
     const w1 = await mountPanel([mk()])
     await w1.find('[data-testid="block-toggle-a-1:c1"]').trigger('click')
     expect(w1.find('[data-testid="args-more-c1"]').exists()).toBe(false)
     w1.unmount()
-    // 真溢出：渐隐（mask + 限高）+ 显示更多，点击展开
-    roState.overflow = true
-    const w2 = await mountPanel([mk()])
+    // 真溢出：渐隐（mask + 限高）+ 显示更多，点击展开（R-160 M5 注高法，原 RO 桩口径退役）
+    const w2 = await mountWithOverflow([mk()])
     await w2.find('[data-testid="block-toggle-a-1:c1"]').trigger('click')
     const wrap = w2.find('[data-testid="args-more-c1"]').element.parentElement!.firstElementChild as HTMLElement
     expect(w2.find('[data-testid="args-more-c1"]').exists()).toBe(true)
@@ -957,7 +976,8 @@ describe('R-158：HITL 只读回执 / CollapsibleText / 复制换行', () => {
     const msg = buildMessage([
       { kind: 'tool', seg: 0, toolCallId: 'j1', name: 'probe.tool', kind2: 'BACKEND', status: 'succeeded', args: '{"a":1,"b":{"c":2}}', requiresAction: false }
     ])
-    const wrapper = await mountPanel([msg])
+    // R-160 M5：注高法触发单一 measure（原 RO 桩向回调注 contentRect 的口径退役）
+    const wrapper = await mountWithOverflow([msg])
     await wrapper.find('[data-testid="block-toggle-a-1:j1"]').trigger('click')
     const argsRegion = wrapper.find('[data-testid="args-more-j1"]').element.parentElement!
     expect(argsRegion.textContent).toContain('"a": 1')
@@ -1254,5 +1274,145 @@ describe('R-161：阈值拆分滞回 / RO 内容重钉 / 平滑回底 / reduced-
     const { wrapper } = await mountScrolled()
     expect(wrapper.find('.overflow-y-auto').attributes('role')).toBe('log')
     wrapper.unmount()
+  })
+})
+
+/**
+ * R-160（issue #14 HITL 三缺陷，决策卡定稿 + 三审 4 MINOR 并入）：
+ * M1 历史回读决策元数据 / M2 回执独立块（恒可见）/ M3 快照路 expiresAt 续走 + 旧数据静态兜底 /
+ * M4 方案 A 容器层 / M5 删 RO 单一 measure。
+ */
+describe('R-160：HITL 三缺陷（回读恢复 / 回执独立块 / 倒计时续走 / 溢出方案 A / 删 RO）', () => {
+  /** 历史整替夹具：一条 ASSISTANT 带 toolCalls + toolCallStates（R-144 载荷面）。 */
+  function historyWith(states: Record<string, unknown>, calls: Array<{ id: string; name: string; arguments: string }>) {
+    const store = useAiStore()
+    api.history.mockResolvedValue({
+      sessionId: store.sessionId,
+      count: 1,
+      messages: [
+        { type: 'ASSISTANT', text: '历史正文', toolCalls: calls, toolResponses: [], toolCallStates: states }
+      ]
+    })
+    api.runsCurrent.mockResolvedValue({ found: false, runId: null, snapshotStatus: null, pendingEntries: [], unresolvedExternal: [], archiveMaxSeq: 0 })
+    return store
+  }
+
+  it('M2/M1：loadHistory 回读决策元数据 ⇒ 回执独立块恒可见（无需展开卡）+ 三字段落段', async () => {
+    const store = historyWith(
+      { 'tc-1': { status: 'EXECUTED', kind: 'CONFIRM', decision: 'approved', decidedAt: 1_700_000_000_000 } },
+      [{ id: 'tc-1', name: 'start_export', arguments: '{"taskId":3}' }]
+    )
+    await store.loadHistory()
+    const part = store.messages[0]!.parts.find((p) => p.kind === 'tool' && p.toolCallId === 'tc-1') as ToolPart
+    expect(part).toMatchObject({ decision: 'approved', decidedAt: 1_700_000_000_000, kind2: 'CONFIRM', status: 'succeeded' })
+
+    const wrapper = await mountPanel(store.messages)
+    // 回执独立块：不点任何卡展开即恒可见（旧行为：回执藏在卡体内，默认折叠不可见）
+    const receipt = wrapper.find('[data-testid="hitl-receipt"]')
+    expect(receipt.exists()).toBe(true)
+    expect(receipt.text()).toContain('已确认')
+    expect(receipt.text()).toMatch(/\d{2}-\d{2} \d{2}:\d{2}/) // decidedAt 回显
+    // 紧随源工具卡（DOM 序：tool-card 在前，hitl-receipt 在后）
+    const html = wrapper.html()
+    expect(html.indexOf('tool-card-tc-1')).toBeGreaterThanOrEqual(0)
+    expect(html.indexOf('hitl-receipt')).toBeGreaterThan(html.indexOf('tool-card-tc-1'))
+    wrapper.unmount()
+  })
+
+  it('M1：submittedValues 限 FRONTEND 回读 —— GF 提交值可回溯；坏 JSON 兜底不伪造；CONFIRM 不读', async () => {
+    const store = historyWith(
+      {
+        'g1': { status: 'FRONTEND_RESULT', kind: 'FRONTEND', decision: 'approved', submittedValues: '{"region":"HB"}' },
+        'g2': { status: 'FRONTEND_RESULT', kind: 'FRONTEND', submittedValues: 'not-json{' },
+        'c1': { status: 'EXECUTED', kind: 'CONFIRM', decision: 'approved', submittedValues: '{"taskId":3}' }
+      },
+      [
+        { id: 'g1', name: 'generative_form', arguments: '{}' },
+        { id: 'g2', name: 'generative_form', arguments: '{}' },
+        { id: 'c1', name: 'start_export', arguments: '{"taskId":3}' }
+      ]
+    )
+    await store.loadHistory()
+    const parts = store.messages[0]!.parts.filter((p) => p.kind === 'tool') as ToolPart[]
+    const g1 = parts.find((p) => p.toolCallId === 'g1')!
+    const g2 = parts.find((p) => p.toolCallId === 'g2')!
+    const c1 = parts.find((p) => p.toolCallId === 'c1')!
+    expect(g1.submittedValues).toEqual({ region: 'HB' }) // JSON.parse 成功
+    expect(g2.submittedValues).toBeUndefined() // 坏 JSON 兜底（不伪造提交值）
+    expect(c1.submittedValues).toBeUndefined() // 限 FRONTEND：CONFIRM 的 submittedValues 不回读
+
+    const wrapper = await mountPanel(store.messages)
+    const values = wrapper.findAll('[data-testid="receipt-values"]')
+    expect(values).toHaveLength(1) // 仅 g1 出「已提交」位
+    expect(values[0]!.text()).toContain('HB')
+    expect(wrapper.findAll('[data-testid="hitl-receipt"]')).toHaveLength(3)
+    wrapper.unmount()
+  })
+
+  it('M3：runsCurrent 透出 expiresAt/atMs ⇒ 快照重建续走倒计时（剩余确认时间）', async () => {
+    const store = useAiStore()
+    store.historyLoaded = true
+    const atMs = Date.now()
+    const expiresAt = atMs + 60_000
+    api.runsCurrent.mockResolvedValue({
+      found: true, runId: 'run-1', snapshotStatus: 'SUSPENDED',
+      pendingEntries: [{ toolCallId: 'c1', entryStatus: 'PENDING', kind: 'CONFIRM', name: 'start_export', arguments: '{"taskId":1}', expiresAt, atMs }],
+      unresolvedExternal: ['c1'], awaitingExternal: true, archiveMaxSeq: 0
+    })
+    api.reattachRun.mockImplementation(() => new Promise(() => {}))
+    await store.restoreSuspendedSnapshot()
+    const part = store.messages.flatMap((m) => m.parts).find((p) => p.kind === 'tool' && p.toolCallId === 'c1') as ToolPart
+    expect(part).toMatchObject({ requiresAction: true, status: 'pending', expiresAt, atMs })
+    // 派生挂起投影带到期口径（AiPanel foldDeadline 的倒计时真值）
+    expect(store.pendingConfirm).toMatchObject({ toolCallId: 'c1', expiresAt, atMs })
+
+    const wrapper = await mountPanel(store.messages)
+    const card = wrapper.find('[data-testid="pending-card-c1"]')
+    expect(card.exists()).toBe(true)
+    expect(card.text()).toContain('剩余确认时间')
+    wrapper.unmount()
+  })
+
+  it('M3：旧数据无 expiresAt ⇒ 不伪造倒计时，静态「等待人工确认」', async () => {
+    const store = useAiStore()
+    store.historyLoaded = true
+    api.runsCurrent.mockResolvedValue({
+      found: true, runId: 'run-1', snapshotStatus: 'SUSPENDED',
+      pendingEntries: [{ toolCallId: 'c1', entryStatus: 'PENDING', kind: 'CONFIRM', name: 'start_export', arguments: '{"taskId":1}' }],
+      unresolvedExternal: ['c1'], awaitingExternal: true, archiveMaxSeq: 0
+    })
+    api.reattachRun.mockImplementation(() => new Promise(() => {}))
+    await store.restoreSuspendedSnapshot()
+    const part = store.messages.flatMap((m) => m.parts).find((p) => p.kind === 'tool' && p.toolCallId === 'c1') as ToolPart
+    expect(part.requiresAction).toBe(true)
+    expect(part.expiresAt).toBeUndefined() // 旧数据：不写入口径
+
+    const wrapper = await mountPanel(store.messages)
+    const card = wrapper.find('[data-testid="pending-card-c1"]')
+    expect(card.text()).toContain('等待人工确认')
+    expect(card.text()).not.toContain('剩余确认时间')
+    wrapper.unmount()
+  })
+
+  it('M4：方案 A 容器层一刀切 —— 气泡 overflow:hidden + min-w-0；CollapsibleText 容器 anywhere 断行', async () => {
+    const wrapper = await mountPanel([
+      buildMessage([
+        { kind: 'tool', seg: 0, toolCallId: 'c1', name: 'probe.tool', kind2: 'BACKEND', status: 'succeeded', args: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', requiresAction: false }
+      ])
+    ])
+    const bubble = wrapper.find('[data-testid="msg-bubble-a-1"]').element as HTMLElement
+    expect(bubble.className).toContain('overflow-hidden')
+    expect(bubble.className).toContain('min-w-0')
+    const root = wrapper.findComponent(CollapsibleText).find('.min-w-0').element as HTMLElement
+    expect(root.className).toContain('min-w-0')
+    expect(root.className).toContain('[overflow-wrap:anywhere]')
+    wrapper.unmount()
+  })
+
+  it('M5：CollapsibleText 删 RO —— 单一 measure（nextTick 读 scrollHeight），源码零 ResizeObserver', async () => {
+    const source = (await import('@/components/AiPanel/CollapsibleText.vue?raw')).default
+    expect(source).not.toContain('ResizeObserver')
+    expect(source).toContain('scrollHeight')
+    expect(source).toContain('nextTick')
   })
 })
