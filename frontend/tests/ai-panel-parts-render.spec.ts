@@ -275,7 +275,7 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
     wrapper.unmount()
   })
 
-  it('R-157 #3：生成中指示器接力 —— 首 token 前呼吸点+「工作中…」，流式中打字机光标', async () => {
+  it('R-159 #2：呼吸全程常驻 —— 流式期有无正文呼吸都在（首字符不消失），光标同存；终态两者皆无', async () => {
     const typing = buildMessage([{ kind: 'text', seg: 0, text: '', streaming: true }], null, true)
     typing.id = 'a-typing'
     const speaking = buildMessage([{ kind: 'text', seg: 0, text: '正在说', streaming: true }], null, true)
@@ -284,12 +284,11 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
     settled.id = 'a-settled'
 
     const wrapper = await mountPanel([typing, speaking, settled])
-    // 首 token 前：卡片下方呼吸点（一点 + 工作中…），无打字机光标
+    // R-159 #2 常驻：无正文（a-typing）与有正文（a-speaking）两条流式消息都呼吸 —— 首字符不消失
     const breath = wrapper.findAll('[data-testid="loading-breath"]')
-    expect(breath).toHaveLength(1)
-    expect(breath[0].text()).toContain('工作中…')
-    expect(breath[0].find('.dot').exists()).toBe(true)
-    // 流式中有正文：末尾打字机光标，无呼吸点、无旧三点动画
+    expect(breath).toHaveLength(2)
+    expect(breath[1].text()).toContain('工作中…')
+    // 光标与呼吸同存（不再互斥接力）
     expect(wrapper.findAll('[data-testid="stream-caret"]')).toHaveLength(1)
     expect(wrapper.findAll('.typing')).toHaveLength(0)
     expect(wrapper.text()).toContain('正在说')
@@ -750,10 +749,10 @@ describe('R-157：操作行外置 + role 过滤 + 编辑重跑 + 发送滚底 + 
     }
     // 时间戳在操作行内（仅 u-1 带戳）
     expect(wrapper.find('[data-testid="msg-ops-u-1"]').find('[data-testid="msg-timestamp"]').exists()).toBe(true)
-    // 时间戳与操作两端分置（MINOR-3）：行 = justify-between，时间戳为首子、操作容器为末子
+    // 时间戳与操作两端分置（R-159 单一元信息行）：行 = justify-between，左位容器含时间戳、末子 = 操作容器
     const rowEl = wrapper.find('[data-testid="msg-ops-u-1"]').element
     expect(rowEl.className).toContain('justify-between')
-    expect(rowEl.children[0].getAttribute('data-testid')).toBe('msg-timestamp')
+    expect(rowEl.children[0].querySelector('[data-testid="msg-timestamp"]')).not.toBeNull()
     expect(rowEl.children[rowEl.children.length - 1].className).toContain('opacity-0')
     // hover/focus-within 浮出口径：操作容器默认透明（group-hover 浮现，键盘 focus-within 可达）
     expect(wrapper.find('[data-testid="msg-ops-u-1"]').find('[class*="opacity-0"]').exists()).toBe(true)
@@ -978,5 +977,121 @@ describe('R-158：HITL 只读回执 / CollapsibleText / 复制换行', () => {
     await wrapper.vm.$nextTick()
     expect(writeText).toHaveBeenCalledWith('第一段\n\n第二段')
     wrapper.unmount()
+  })
+})
+
+/**
+ * R-159（issue #13 流式回复体验）：B1 光标 / 呼吸全程常驻 / 元信息行流式遮蔽 /
+ * 完成 300ms 淡出换入 / 工具期光标收起归位（S0-b 时序证据）/ span.ch 渐显包裹。
+ */
+describe('R-159：流式回复体验六项', () => {
+  it('#1：B1 光标在流式正文末尾（class caret，随 ch spans 之后）', async () => {
+    const speaking = buildMessage([{ kind: 'text', seg: 0, text: '正在输出的一段文字', streaming: true }], null, true)
+    speaking.id = 'a-b1'
+    const wrapper = await mountPanel([speaking])
+    const caret = wrapper.find('[data-testid="stream-caret"]')
+    expect(caret.exists()).toBe(true)
+    expect(caret.classes()).toContain('caret')
+    // 光标是正文块最后一个子元素（B1 粗块随文尾）
+    const bubble = wrapper.find('[data-testid="msg-bubble-a-b1"]')
+    expect(bubble.find('.whitespace-pre-wrap').element.lastElementChild!.className).toContain('caret')
+    wrapper.unmount()
+  })
+
+  it('#3：流式期元行右位复制 visibility:hidden 占位，无时间戳；完成后换入', async () => {
+    const msg = buildMessage([{ kind: 'text', seg: 0, text: '流式中', streaming: true }], null, true)
+    msg.id = 'a-meta'
+    msg.timestamp = 1_700_000_000_000
+    const wrapper = await mountPanel([msg])
+    const ops = wrapper.find('[data-testid="msg-ops-a-meta"]')
+    // 流式期：左位呼吸（无时间戳），右位 visibility:hidden
+    expect(ops.find('[data-testid="loading-breath"]').exists()).toBe(true)
+    expect(ops.find('[data-testid="msg-timestamp"]').exists()).toBe(false)
+    expect((ops.element.lastElementChild as HTMLElement).style.visibility).toBe('hidden')
+    wrapper.unmount()
+  })
+
+  it('#4：完成淡出 —— streaming=false 同帧起 fade-out（呼吸+光标），300ms 后换时间戳+复制', async () => {
+    const msg = buildMessage([{ kind: 'text', seg: 0, text: '已完成的回复', streaming: true }], null, true)
+    msg.id = 'a-fade'
+    msg.timestamp = 1_700_000_000_000
+    const wrapper = await mountPanel([msg])
+    // 经 store 代理写入（裸引用写入不触发响应式 —— 实测结论）
+    const store = useAiStore()
+    store.messages[0]!.streaming = false
+    await wrapper.vm.$nextTick()
+    // 同帧淡出：呼吸与光标挂 fade-out（jsdom 无动画计时，class 断言）
+    expect(wrapper.find('[data-testid="loading-breath"]').classes()).toContain('fade-out')
+    expect(wrapper.find('[data-testid="stream-caret"]').classes()).toContain('fade-out')
+
+    await new Promise((resolve) => setTimeout(resolve, 350))
+    await wrapper.vm.$nextTick()
+    // 淡出退役：呼吸/光标消失，元行换时间戳（左）+ 复制（右，visibility 恢复）
+    expect(wrapper.find('[data-testid="loading-breath"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="stream-caret"]').exists()).toBe(false)
+    const ops = wrapper.find('[data-testid="msg-ops-a-fade"]')
+    expect(ops.find('[data-testid="msg-timestamp"]').exists()).toBe(true)
+    expect((ops.element.lastElementChild as HTMLElement).style.visibility).toBe('')
+    wrapper.unmount()
+  })
+
+  it('风险3：快速连发 —— 完成后再来 delta 打断淡出（fade-out 撤除、呼吸常驻恢复）', async () => {
+    const msg = buildMessage([{ kind: 'text', seg: 0, text: '第一轮', streaming: true }], null, true)
+    msg.id = 'a-race'
+    const wrapper = await mountPanel([msg])
+    const store = useAiStore()
+
+    store.messages[0]!.streaming = false
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-testid="loading-breath"]').classes()).toContain('fade-out')
+    // 新 delta 到达（streaming 复 true）——打断
+    store.messages[0]!.streaming = true
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-testid="loading-breath"]').classes()).not.toContain('fade-out')
+    await new Promise((resolve) => setTimeout(resolve, 350))
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-testid="loading-breath"]').exists()).toBe(true) // 未误清
+    wrapper.unmount()
+  })
+
+  it('#5/S0-b：工具卡为末块期间光标收起；工具收口后新 text 段成末块自然归位', async () => {
+    const msg = buildMessage(
+      [
+        { kind: 'text', seg: 0, text: '先读文件', streaming: true },
+        { kind: 'tool', seg: 1, toolCallId: 'w1', name: 'open_export_file_editor', kind2: 'FRONTEND', status: 'running', requiresAction: false }
+      ],
+      null,
+      true
+    )
+    msg.id = 'a-tool'
+    const wrapper = await mountPanel([msg])
+    // 工具为末块且流未收口 ⇒ 光标恒 false（执行期零指示根因修复：收起）
+    expect(wrapper.find('[data-testid="stream-caret"]').exists()).toBe(false)
+    // 时序：message_end 未到（streaming 仍 true）、工具仍在 running —— 期间无光标
+    expect(msg.streaming).toBe(true)
+    // 归位：工具收口后正文继续（新 text 段成为末块）⇒ 光标即刻归位（不依赖 streaming=false）——经代理 push 触发响应式
+    const store = useAiStore()
+    ;(store.messages[0]!.parts as MessagePart[]).push({ kind: 'text', seg: 2, text: '继续输出', streaming: true })
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-testid="stream-caret"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('#6：新字符渐显 —— 流式正文末尾 8 字符包 span.ch，前缀为稳定文本', async () => {
+    const msg = buildMessage([{ kind: 'text', seg: 0, text: 'abcdefghijkl', streaming: true }], null, true)
+    msg.id = 'a-ch'
+    const wrapper = await mountPanel([msg])
+    const bubble = wrapper.find('[data-testid="msg-bubble-a-ch"]')
+    const chSpans = bubble.findAll('span.ch')
+    expect(chSpans).toHaveLength(8)
+    expect(chSpans.map((s) => s.text()).join('')).toBe('efghijkl')
+    expect(bubble.text()).toContain('abcd')
+    // 终态消息零 ch 包裹（纯文本一次成型）
+    const done = buildMessage([{ kind: 'text', seg: 0, text: 'abcdefghijkl', streaming: false }], null, false)
+    done.id = 'a-done'
+    const wrapper2 = await mountPanel([done])
+    expect(wrapper2.find('[data-testid="msg-bubble-a-done"]').findAll('span.ch')).toHaveLength(0)
+    wrapper.unmount()
+    wrapper2.unmount()
   })
 })

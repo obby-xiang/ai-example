@@ -184,8 +184,10 @@
                （expandedBlocks ?? defaultExpanded，D4/D6/D-C6）；key 用块稳定 id
                （成员 toolCallId / kind-seg，加消息命名空间前缀，收口修 F1/红队 M-1），禁用数组下标（§7 R4-3 / D5）。 -->
           <template v-for="(block, bi) in blocksOf(m)" :key="block.id">
-            <!-- 正文块：单段正文，永不进折叠组（A5' 规则③）；R-157 #3：流式中正文末尾打字机光标 -->
-            <div v-if="block.kind === 'text'" class="whitespace-pre-wrap">{{ textOf(block) }}<span v-if="showCaret(m, bi)" class="caret" data-testid="stream-caret"></span></div>
+            <!-- 正文块：单段正文，永不进折叠组（A5' 规则③）；
+                 R-157 #3：流式中正文末尾打字机光标；R-159 #6：末尾 CH_TAIL 字符包 span.ch 渐显（新字符 chIn）；
+                 R-159 #4：完成时光标同帧淡出（fade-out，300ms 后随 isFading 退役）。 -->
+            <div v-if="block.kind === 'text'" class="whitespace-pre-wrap">{{ chSplit(m, block).head }}<span v-for="(ch, ci) in chSplit(m, block).tail" :key="ci" class="ch">{{ ch }}</span><span v-if="showCaret(m, bi) || isFading(m)" class="caret" :class="{ 'fade-out': isFading(m) }" data-testid="stream-caret"></span></div>
 
             <template v-else>
               <!-- R-154 #13+14（用户直裁「彻底拆除」）：组壳退役 —— 每段恒一张卡。
@@ -333,23 +335,33 @@
 
         </div>
 
-        <!-- R-157 #3①：首 token 前 = 卡片下方呼吸点 + 「工作中…」（与打字机光标接力） -->
-        <div v-if="isTyping(m)" class="loading-breath mt-1.5 pl-0.5" data-testid="loading-breath">
-          <span class="dot"></span><span class="txt">工作中…</span>
-        </div>
-
-        <!-- R-157 #1：消息级操作行挪气泡外、卡片下沿独立行 —— 时间戳左置、操作右置
-             （用户消息整行右反，时间戳贴卡片侧）；桌面 hover/focus-within 浮出（保留键盘可达）。
-             判据仍取 parts（N10）；「已复制」反馈走组件局部状态（copyState），不占 ai.notice。
-             R-157 #2：role 过滤 —— 仅用户消息可编辑（改完从该条重跑）；AI 回复仅复制/重试。 -->
+        <!-- R-159 #2/#3/#4：单一元信息行（demo aiShell(fix) 结构）——左位 = 流式期「工作中…」呼吸
+             常驻（发出即现，首字符不消失；完成时淡出换时间戳）/ 完成后时间戳；右位 = 操作
+             （流式期 visibility:hidden 占位，完成换入；hover/focus-within 浮出）。
+             行判据：有正文 或 助手消息流式中（发出即现，无正文也要能呼吸）。 -->
         <div
-          v-if="m.parts.some((part) => part.kind === 'text' && part.text)"
-          class="mt-1 flex items-center justify-between gap-2 text-xs text-[#a8abb2]"
+          v-if="showMetaRow(m)"
+          class="mt-1 flex items-center justify-between gap-2 text-xs text-[#a8abb2] w-full max-w-[82%]"
           :class="m.role === 'user' ? 'flex-row-reverse' : ''"
           :data-testid="'msg-ops-' + m.id"
         >
-          <span v-if="formatTimestamp(m)" class="text-[#c0c4cc]" data-testid="msg-timestamp">{{ formatTimestamp(m) }}</span>
-          <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+          <span class="flex items-center gap-1 min-h-[18px]">
+            <span
+              v-if="isBreathing(m) || isFading(m)"
+              class="loading-breath"
+              :class="{ 'fade-out': isFading(m) }"
+              style="margin:0;padding-left:2px"
+              data-testid="loading-breath"
+            >
+              <span class="dot"></span><span class="txt">工作中…</span>
+            </span>
+            <span v-else-if="formatTimestamp(m)" class="text-[#c0c4cc]" data-testid="msg-timestamp">{{ formatTimestamp(m) }}</span>
+          </span>
+          <div
+            class="flex items-center gap-1 transition-opacity"
+            :class="m.streaming ? '' : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100'"
+            :style="m.streaming && m.role === 'assistant' ? 'visibility: hidden' : ''"
+          >
             <span
               v-if="copyState && copyState.id === m.id"
               :data-testid="'copy-hint-' + m.id"
@@ -647,13 +659,83 @@ const formRemainingSeconds = computed(() => {
 })
 
 /**
- * 等待回复：正文（text 段）还没产出时的三点闪烁。
- *
- * 批2（权威翻转）：判据从 `content.length === 0` 改为"无任何非空 text 段" —— 渲染真值已是
- * `parts`，`content` 只是同一份数据的派生投影，直接读它会与渲染口径分家（§6.3 清单）。
+ * R-159 #2：「工作中…」呼吸全程常驻判据 —— 助手消息 streaming 全期成立（发出即现，
+ * 首字符上屏不消失；原 isTyping 的「无正文」判据退役，消费点仅元信息行左位一处）。
  */
-function isTyping(message: ChatMessage): boolean {
-  return message.streaming && !message.parts.some((part) => part.kind === 'text' && part.text.length > 0)
+function isBreathing(message: ChatMessage): boolean {
+  return message.role === 'assistant' && message.streaming
+}
+
+/** R-159 #2/#3：元信息行判据 = 有正文（N10 操作行判据沿用）或助手流式中（无正文也要能呼吸）。 */
+function showMetaRow(message: ChatMessage): boolean {
+  return message.parts.some((part) => part.kind === 'text' && part.text)
+    || isBreathing(message)
+}
+
+/** R-159 #4：完成淡出记账 —— streaming true→false 时该消息进 300ms 淡出（caretOut），
+ *  新 delta 到达（false→true）立即打断撤出；超时清账后元行换时间戳+复制。 */
+const fadingIds = ref<Set<string>>(new Set())
+const fadeTimers = new Map<string, ReturnType<typeof setTimeout>>()
+/** 基线快照：setup 时播种一次（首见只记账不判迁移），防「首个迁移即首见」丢基线。 */
+let prevStreaming = new Map<string, boolean>(ai.messages.map((m) => [m.id, m.streaming]))
+
+function setFading(id: string, on: boolean): void {
+  if (fadingIds.value.has(id) === on) {
+    return
+  }
+  const next = new Set(fadingIds.value)
+  if (on) {
+    next.add(id)
+  } else {
+    next.delete(id)
+  }
+  fadingIds.value = next
+}
+
+function isFading(message: ChatMessage): boolean {
+  return fadingIds.value.has(message.id)
+}
+
+watch(
+  () => ai.messages.map((m) => [m.id, m.streaming] as const),
+  (list) => {
+    const next = new Map(list)
+    for (const [id, streaming] of next) {
+      const was = prevStreaming.get(id)
+      if (was && !streaming) {
+        // 完成：同帧起 300ms 淡出，然后清账
+        setFading(id, true)
+        fadeTimers.set(id, setTimeout(() => {
+          fadeTimers.delete(id)
+          setFading(id, false)
+        }, 300))
+      } else if (!was && streaming && fadingIds.value.has(id)) {
+        // 风险 3：快速连发 —— 新 delta 打断淡出
+        const timer = fadeTimers.get(id)
+        if (timer !== undefined) {
+          clearTimeout(timer)
+          fadeTimers.delete(id)
+        }
+        setFading(id, false)
+      }
+    }
+    prevStreaming = next
+  }
+)
+
+/** R-159 #6：新字符渐显 —— 末尾 CH_TAIL 字符包 span.ch（chIn .18s），其余为稳定前缀文本。
+ *  纯展示切分，不写段、不调 deriveProjections（delta 性能锁步零触碰，S0-a 实证见报告）。 */
+const CH_TAIL = 8
+
+function chSplit(message: ChatMessage, block: Block): { head: string; tail: string[] } {
+  if (!message.streaming) {
+    return { head: textOf(block), tail: [] }
+  }
+  const text = textOf(block)
+  if (text.length <= CH_TAIL) {
+    return { head: '', tail: [...text] }
+  }
+  return { head: text.slice(0, -CH_TAIL), tail: [...text.slice(-CH_TAIL)] }
 }
 
 /** 批4④ A5'：消息 → 渲染块序列（groupParts 纯函数；parts 为响应式数组，帧到达即重算）。
@@ -1085,6 +1167,10 @@ onBeforeUnmount(() => {
     clearTimeout(copyTimer)
     copyTimer = null
   }
+  for (const timer of fadeTimers.values()) {
+    clearTimeout(timer)
+  }
+  fadeTimers.clear()
   ai.stopWorkspaceSync()
 })
 </script>
@@ -1120,15 +1206,33 @@ onBeforeUnmount(() => {
 }
 .caret {
   display: inline-block;
-  width: 2px;
-  height: 14px;
-  background: #409eff;
-  margin-left: 2px;
+  width: 8px;
+  height: 1em;
+  background: #303133;
+  border-radius: 2px;
+  margin-left: 1px;
   vertical-align: -2px;
   animation: caretBlink 1s steps(1) infinite;
 }
+/* R-159 #1：0–55% 显（demo caretBlink 口径） */
 @keyframes caretBlink {
-  50% { opacity: 0; }
+  0%, 55% { opacity: 1; }
+  56%, 100% { opacity: 0; }
+}
+/* R-159 #6：新字符渐显（opacity .1→1） */
+.ch {
+  animation: chIn 0.18s ease-out;
+}
+@keyframes chIn {
+  from { opacity: 0.1; }
+  to { opacity: 1; }
+}
+/* R-159 #4：完成优雅淡出 300ms（光标 + 「工作中…」同帧） */
+.fade-out {
+  animation: caretOut 0.3s ease forwards;
+}
+@keyframes caretOut {
+  to { opacity: 0; }
 }
 @media (prefers-reduced-motion: reduce) {
   .loading-breath .dot,
