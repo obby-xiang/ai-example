@@ -231,6 +231,13 @@ const loadedGrids = new Set<string>()
  * 会弹出两次保存框。用户点击侧（`downloadOne`）与 AI 侧（`startDownloadInBackground`）共用本集合。
  */
 const inFlightDownloads = new Set<string>()
+/**
+ * AI 批量打包中的页面态哨兵（R-156 `download_export_files` ≥2 码）。
+ *
+ * 与用户侧打包的两个哨兵（`'checked'` / `'all'`）区分开：它们的语义是"哪一批用户勾选"，
+ * 而本哨兵表示"AI 发起的一笔多文件打包"—— 两者在途时互不冒充（`downloadingLabel` 也各给文案）。
+ */
+const AI_BATCH_DOWNLOADING = 'ai-batch'
 let stopWatchJob: (() => void) | null = null
 let gridDirty = false
 
@@ -920,7 +927,7 @@ async function downloadOne(code: string): Promise<DownloadOutcome> {
 /**
  * AI 侧「即发即回」（批 A = W-01 + W-02）：发起下载后**不等**浏览器下载链路的结局。
  *
- * 为什么可以不等：AI 不消费这个结局（`download_export_file` 的回灌只需"已发起"这一事实），
+ * 为什么可以不等：AI 不消费这个结局（`download_export_files` 的回灌只需"已发起"这一事实），
  * 而 `await` 它的代价是回灌被链路拖住 —— issue#6 实测：宿主浏览器弹出保存框时回灌 POST
  * 130 秒仍未发出，后端按超时收尾并回"本次调用未获得数据"（假失败，文件其实已落盘）。
  *
@@ -941,6 +948,44 @@ function startDownloadInBackground(code: string): void {
     .finally(() => {
       inFlightDownloads.delete(code)
       if (downloading.value === code) {
+        downloading.value = null
+      }
+    })
+}
+
+/**
+ * AI 侧批量打包（R-156，`download_export_files` 的 ≥2 码分支）：逐码取当前表格字节 →
+ * `zipBlobs` 合成**一个** zip → `downloadBlob` **单次**浏览器下载。
+ *
+ * 与 {@link startDownloadInBackground} 同一条「即发即回」口径：本函数不 `await`（调用方
+ * 立即回灌 ack），落盘成败只落在用户侧（toast + 在途集合清理）—— 即 N 个文件也只产生
+ * 一次下载，绕过浏览器对"自动连续下载"的拦截（issue #9 的根因）。打包链路与用户侧
+ * 「全部打包 zip」完全同源（`buildXlsx` 取在线编辑后的表格 + `zipBlobs`），未保存的编辑不丢。
+ */
+function startBatchDownloadInBackground(codes: readonly string[]): void {
+  const batch = [...codes]
+  const task = taskId.value ?? 0
+  for (const code of batch) {
+    inFlightDownloads.add(code)
+  }
+  downloading.value = AI_BATCH_DOWNLOADING
+  Promise.all(batch.map(async (code) => {
+    const { blob, fileName } = await buildXlsx(code)
+    return { name: fileName, blob }
+  }))
+    .then((entries) => zipBlobs(entries))
+    .then((zipped) => {
+      downloadBlob(zipped, `export-${task}.zip`)
+      ElMessage.success(`已打包下载 ${batch.length} 个文件`)
+    })
+    .catch((error: unknown) => {
+      ElMessage.error(error instanceof Error ? error.message : '打包下载失败')
+    })
+    .finally(() => {
+      for (const code of batch) {
+        inFlightDownloads.delete(code)
+      }
+      if (downloading.value === AI_BATCH_DOWNLOADING) {
         downloading.value = null
       }
     })
@@ -1118,7 +1163,7 @@ function noResultMessage(defCode: string): string {
   return `任务 #${taskId.value} 里没有 ${defCode} 的导出结果文件（该任务现有导出结果：${existing || '（无）'}）`
 }
 
-/** `downloading` 单值/在途编码的中文口径（'checked' / 'all' 是打包下载的哨兵值，其余是配置编码）。 */
+/** `downloading` 单值/在途编码的中文口径（'checked' / 'all' / 'ai-batch' 是打包下载的哨兵值，其余是配置编码）。 */
 function downloadingLabel(value: string): string {
   if (value === 'checked') {
     return '勾选项打包下载'
@@ -1126,36 +1171,51 @@ function downloadingLabel(value: string): string {
   if (value === 'all') {
     return '全部打包下载'
   }
+  if (value === AI_BATCH_DOWNLOADING) {
+    return 'AI 批量打包下载'
+  }
   return `${value} 的下载`
 }
 
 /**
- * `download_export_file` 的前置校验（方案 A 的"AI 真正该等的那一段"）：参数 → 任务绑定
- * 闸门 → 结果存在性，外加切页（让用户看到下载发生的位置；只读态走零写的 `viewStep`，
+ * `download_export_files` 的前置校验（方案 A 的"AI 真正该等的那一段"，**逐码**）：参数 →
+ * 任务绑定闸门 → 结果存在性，外加切页（让用户看到下载发生的位置；只读态走零写的 `viewStep`，
  * 非只读态 `goStep` —— 见 §S3e）。
  *
  * 为什么这一段必须 `await` 且必须失败即回灌失败：三者任一不成立都**确定"未触发下载"**，
  * 可以如实回灌 `failed`（卡片显示原因）；而浏览器侧下载链路的结局是"可能已发生但不可知"，
  * 不在这段里等（见执行器与 {@link startDownloadInBackground}）。
  *
+ * 无效码**整体失败**（R-156 会审 DS-6）：只要有一个码不在当前可导出清单里就整批不下，
+ * 回执点名无效码并给出可用码清单 —— 只下"能下的那几个"会让模型以为整批都已完成，
+ * 而用户拿到的文件不全（静默丢弃）。
+ *
  * 切页（非只读态 `goStep(2)`）同步失败的面（W-06/W-07）属批次 C，本批不改。
  */
 async function preflightDownload(
   args: Record<string, unknown>
-): Promise<{ ok: true; defCode: string } | { ok: false; message: string }> {
-  const defCode = String(args.defCode ?? '')
-  if (!defCode) {
-    return { ok: false, message: '缺少 defCode' }
+): Promise<{ ok: true; defCodes: string[] } | { ok: false; message: string }> {
+  const rawCodes = Array.isArray(args.defCodes)
+    ? args.defCodes.map((item) => String(item)).filter((item) => item !== '')
+    : []
+  // 去重：同一编码重复传入（模型抖动）不该退化成"2 个码"的 zip 分支，更不该在 zip 里出现
+  // DEMO.xlsx / DEMO(2).xlsx 两份同源文件。
+  const defCodes = [...new Set(rawCodes)]
+  if (defCodes.length === 0) {
+    return { ok: false, message: '缺少 defCodes（本工具必填非空）：请传入至少一个配置定义编码' }
   }
   // issue #2：与 open 执行器同因同修 —— 否则会拿**当前任务**（或当前任务里同名配置）的文件去下载
   const gate = await ensureTaskBoundForTool(args.taskId)
   if (!gate.ok) {
-    return { ok: false, message: `${gate.message}。${defCode} 的导出文件未下载` }
+    return { ok: false, message: `${gate.message}。${defCodes.join('、')} 的导出文件未下载` }
   }
-  if (!exportResults.value.some((item) => item.defCode === defCode)) {
+  const available = exportResults.value.map((item) => item.defCode)
+  const invalid = defCodes.filter((code) => !available.includes(code))
+  if (invalid.length > 0) {
     return {
       ok: false,
-      message: `${noResultMessage(defCode)}。请在任务 #${taskId.value} 上完成 ${defCode} 的导出后重试，或核对传入的 taskId 与 defCode；本次未触发下载`
+      message: `无效码 ${invalid.join('、')}；可用码清单 = ${available.join('、') || '（无）'}。`
+        + `请在任务 #${taskId.value} 上完成上述配置的导出后重试，或核对传入的 taskId 与 defCodes；本次未触发下载`
     }
   }
   // 施工卡 §S3e：切页属"让用户看到下载发生的位置"，只读态（任务已结束）必须走零写的 `viewStep`
@@ -1171,7 +1231,7 @@ async function preflightDownload(
       }
     }
   }
-  return { ok: true, defCode }
+  return { ok: true, defCodes }
 }
 
 function registerHandlers(): void {
@@ -1309,7 +1369,7 @@ function registerHandlers(): void {
     return `已打开任务 #${taskId.value} 的 ${defCode} 在线编辑器（导出结果表格）`
   })
 
-  // 前端工具 download_export_file：副作用在浏览器，必须由页面执行器完成
+  // 前端工具 download_export_files：副作用在浏览器，必须由页面执行器完成（R-156 单工具按数量分流）
   //
   // 即发即回（批 A = W-01 + W-02，方案 A）：AI 侧只等**前置校验**（{@link preflightDownload}：
   // 参数 / 任务绑定 / 结果存在性 / 切页）—— 校验失败 ⇒ 抛错（回灌确定性失败、卡片 failed）；
@@ -1317,30 +1377,57 @@ function registerHandlers(): void {
   // `await downloadOne(defCode)` 的代价：宿主浏览器拖住链路时回灌迟到 ⇒ 后端按超时收尾并回
   // "本次调用未获得数据"（假失败，而文件其实已落盘，issue#6 实测 120,004ms）。
   //
+  // 数量分流（issue #9 的根因：逐个调用单文件工具 = N 次独立浏览器下载，会被浏览器的连续
+  // 下载拦截挡掉）：**1 个码**走既有单文件 xlsx 路径（与换名前同一条路径、同文案）；**≥2 个码**
+  // 逐码 `buildXlsx` → `zipBlobs` → **单次 zip 下载**（复用用户侧「全部打包 zip」链路，
+  // 字节同样取自在线编辑后的表格，未保存的编辑不丢）。
+  //
   // 回灌文案口径（只陈述已发生的事 + 显式交代浏览器侧不确定性）—— 分三种场景，措辞不得互相串用：
   // ① 发起成功 ⇒ 「已发起下载…无需重试」；② 在途目标就是本次请求的编码 ⇒ 「本次未重复发起…无需重试」；
   // ③ 在途目标是**别的**文件/打包 ⇒ 本次从未发起，必须如实说「本次未发起 <编码> 的下载」并允许
   // 「可稍后重试本项」—— 否则模型会以为该文件已在下载、不再补发，而用户实际拿不到它（复核 N-1）。
   // 三处共同纪律：**禁止失败暗示**（不得读作「下载成功」或「下载失败」）。
-  registerFrontendToolExecutor('download_export_file', async (call) => {
+  registerFrontendToolExecutor('download_export_files', async (call) => {
     const preflight = await preflightDownload(call.args)
     if (!preflight.ok) {
       throw new Error(preflight.message)
     }
-    const { defCode } = preflight
+    const { defCodes } = preflight
     const busy = downloading.value
-    const requestedInFlight = inFlightDownloads.has(defCode)
-    if (requestedInFlight || busy === defCode) {
-      return `任务 #${taskId.value} 的 ${defCode} 导出文件：页面上已有一次下载在进行中`
-        + `（${downloadingLabel(busy ?? defCode)}），本次未重复发起。`
+    if (defCodes.length === 1) {
+      const defCode = defCodes[0] ?? ''
+      const requestedInFlight = inFlightDownloads.has(defCode)
+      if (requestedInFlight || busy === defCode) {
+        return `任务 #${taskId.value} 的 ${defCode} 导出文件：页面上已有一次下载在进行中`
+          + `（${downloadingLabel(busy ?? defCode)}），本次未重复发起。`
+          + '下载由浏览器执行，文件落盘以浏览器下载目录为准；本次调用到此结束，无需重试。'
+      }
+      if (busy !== null) {
+        return `任务 #${taskId.value} 的 ${defCode} 导出文件：本次未发起 ${defCode} 的下载`
+          + `（页面正有 ${downloadingLabel(busy)}在进行中），可稍后重试本项。`
+      }
+      startDownloadInBackground(defCode)
+      return `已发起下载：任务 #${taskId.value} 的 ${defCode} 导出文件（内容为在线编辑后的当前表格）。`
+        + '下载由浏览器执行 —— 若弹出保存位置选择框或提示被拦截，请让用户在浏览器侧放行并确认；'
+        + '文件落盘以浏览器下载目录为准。本次调用到此结束，无需重试。'
+    }
+    const codeList = defCodes.join('、')
+    // 场景②的判据：**本次请求的每个码都已在途**才算"重复投递"（同一笔打包被投递两次）。
+    // 只重叠一部分（或页面上在途的是别的打包）走场景③ —— 否则会把"没在下的那几个"也说成
+    // "已在下载"，模型随即不再补发，而用户实际拿不到它们（复核 N-1 的同型失真）。
+    const requestedInFlight = defCodes.every((code) => inFlightDownloads.has(code))
+    if (requestedInFlight) {
+      return `任务 #${taskId.value} 的 ${codeList} 导出文件（共 ${defCodes.length} 个）：页面上已有一次下载在进行中`
+        + `（${downloadingLabel(busy ?? defCodes[0] ?? '')}），本次未重复发起。`
         + '下载由浏览器执行，文件落盘以浏览器下载目录为准；本次调用到此结束，无需重试。'
     }
     if (busy !== null) {
-      return `任务 #${taskId.value} 的 ${defCode} 导出文件：本次未发起 ${defCode} 的下载`
+      return `任务 #${taskId.value} 的 ${codeList} 导出文件（共 ${defCodes.length} 个）：本次未发起这笔打包下载`
         + `（页面正有 ${downloadingLabel(busy)}在进行中），可稍后重试本项。`
     }
-    startDownloadInBackground(defCode)
-    return `已发起下载：任务 #${taskId.value} 的 ${defCode} 导出文件（内容为在线编辑后的当前表格）。`
+    startBatchDownloadInBackground(defCodes)
+    return `已发起打包下载：任务 #${taskId.value} 的 ${defCodes.length} 个导出文件（${codeList}）`
+      + '将合并为单个 zip（内容为在线编辑后的当前表格）。'
       + '下载由浏览器执行 —— 若弹出保存位置选择框或提示被拦截，请让用户在浏览器侧放行并确认；'
       + '文件落盘以浏览器下载目录为准。本次调用到此结束，无需重试。'
   })
@@ -1356,7 +1443,7 @@ onBeforeUnmount(() => {
   stopWatchJob?.()
   stopWatchJob = null
   HANDLER_NAMES.forEach(unregisterPageHandler)
-  unregisterFrontendToolExecutor('download_export_file')
+  unregisterFrontendToolExecutor('download_export_files')
   if (gridDirty) {
     ElMessage.warning('表格有未保存的在线编辑内容（可用「保存编辑到服务端」写回）')
   }

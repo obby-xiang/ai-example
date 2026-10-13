@@ -2,11 +2,11 @@
  * 前端工具执行器（规格 §2「契约窄接口」/ §3 前端工具回灌）。
  *
  * **后端口径核对（本棒实测，勿凭蓝本臆造）**：main 后端 `AiTools` 共 18 个 `@Tool`，
- * 其中带 `@ToolChannel(FRONTEND)` 的**有 7 个**：`open_export_file_editor`、`download_export_file`、
+ * 其中带 `@ToolChannel(FRONTEND)` 的**有 7 个**：`open_export_file_editor`、`download_export_files`、
  * `navigate_to`、`select_definitions`、`set_condition`、`confirm_step`、`generative_form`
  * （其余 11 个是 BACKEND 通道，由后端自己执行；`start_export/start_precheck/start_import/start_publish`
  * 在 main 里都是 BACKEND，不再像旧基座那样挂起等前端）。所以：
- * - 路由 1 覆盖 `FRONTEND_TOOLS` 登记的前端工具（2 个：`open_export_file_editor` / `download_export_file`），
+ * - 路由 1 覆盖 `FRONTEND_TOOLS` 登记的前端工具（2 个：`open_export_file_editor` / `download_export_files`），
  *   完整实现；
  * - 路由 2（兜底直调 `dispatchUiEvent`，与路由 3 是**同一落点**，并非"落回路由 3"）是**补丁②**：把蓝本形态的工作区动作（`navigate_to` /
  *   `select_definitions` / `set_condition` / `confirm_step` 及蓝本别名）做成可执行能力表 ——
@@ -166,6 +166,17 @@ function validateArgs(
       coerced[spec.name] = num
     } else if (spec.type === 'string') {
       coerced[spec.name] = String(value)
+    } else if (spec.type === 'string[]') {
+      // 列表参数（后端 `String[]`）：必填的语义是**必填非空** —— 空数组等于没给，
+      // 缺参不猜即失败；顺带滤掉空串项（后端 `[]` 与 `[""]` 都不是合法的编码列表）。
+      if (!Array.isArray(value)) {
+        return { ok: false, reason: `参数 ${spec.name} 应为字符串数组，实际为 ${String(value)}` }
+      }
+      const list = value.map((item) => String(item)).filter((item) => item !== '')
+      if (spec.required && list.length === 0) {
+        return { ok: false, reason: `参数 ${spec.name} 不能为空（${spec.description}）` }
+      }
+      coerced[spec.name] = list
     } else if (typeof value !== 'boolean') {
       return { ok: false, reason: `参数 ${spec.name} 应为布尔值` }
     }
@@ -371,7 +382,7 @@ export async function executeFrontendTool(call: FrontendToolCall): Promise<Front
  * 也被如实写进超时文案的"已等待 N 秒"。
  *
  * 超时分支**只依赖计时器**：不依赖执行器 settle，也不依赖它 reject。这条性质在批 A
- * （W-01 即发即回）之后依然是必需的：`download_export_file` 的执行器只等前置校验
+ * （W-01 即发即回）之后依然是必需的：`download_export_files` 的执行器只等前置校验
  * （`ExportWizardView#ensureTaskBoundForTool` 的串行 HTTP 可以很长），而"等它 settle"
  * 或"等它 reject"都不能当作超时判定的依据 —— 计时器到点即产出超时结局，回灌才不会迟到。
  *
@@ -411,16 +422,16 @@ async function runWithBudget(
  * "下载类"前端工具名 —— 超时文案要按结局区分：下载是本包里唯一"副作用可能已发生、
  * 只是回执没回来"的动作，措辞必须与确定性失败分开（否则模型会去重复触发下载）。
  *
- * 名单对应两条**实际可达**的路由命名面：登记工具 `download_export_file`（路由 1）与
+ * 名单对应两条**实际可达**的路由命名面：登记工具 `download_export_files`（路由 1）与
  * ui_event 同名动作 `download`（路由 3）。
  *
- * `download_export_files` 是蓝本（旧基座）名，当前**未登记**于任何路由：既不在
- * `FRONTEND_TOOLS`，也不在 `WORKSPACE_ACTION_ALIASES`（该表只归一 select_config_defs /
- * set_query_conditions / goto_step / advance_step / restore_task / open_page）。故它送进来会
- * 立刻落到"未知前端工具"的 unavailable 结局、预算不介入，**达不成超时文案**；保留是为了
- * 防御性的口径一致 —— 若该蓝本名日后被登记（或经别的通道到达并触发超时），仍按下载类收口。
+ * R-156 换名（`download_export_file` → `download_export_files`，1 码 xlsx / ≥2 码 zip 单工具）
+ * 后，**旧名已从本名单移除**：它不再登记于 `FRONTEND_TOOLS`，也不在 `WORKSPACE_ACTION_ALIASES`
+ * （该表只归一 select_config_defs / set_query_conditions / goto_step / advance_step /
+ * restore_task / open_page），送进来会立刻落到"未知前端工具"的 unavailable 结局、预算不介入，
+ * **达不成超时文案** —— 保留旧名只会让"工具面唯一"的硬保证在文案层留一条不可能命中的分支。
  */
-const DOWNLOAD_TOOL_NAMES: readonly string[] = ['download_export_file', 'download_export_files', 'download']
+const DOWNLOAD_TOOL_NAMES: readonly string[] = ['download_export_files', 'download']
 
 /**
  * 超时结局文案（结局驱动，中文，**不谎报**）：说明"结局未知"，并按工具类型给出可行动指引。
@@ -434,7 +445,7 @@ const DOWNLOAD_TOOL_NAMES: readonly string[] = ['download_export_file', 'downloa
  *
  * 注意（批 A 后的口径）：`downloadOne` 曾吞掉自身异常 ⇒ 该执行器**从不 reject**、"下载失败却
  * 回灌成功"（W-02）是同一处的另一个面。批 A 已改：前置校验失败即 reject（确定性失败、卡片
- * failed），浏览器侧结局不再回灌（`download_export_file` 即发即回）—— 故"谎报成功"这一面
+ * failed），浏览器侧结局不再回灌（`download_export_files` 即发即回）—— 故"谎报成功"这一面
  * 不再存在；本函数只负责"没拿到回执"这一种结局。
  * **已知过度保守（登记不修）**：即发即回后，该工具的超时只可能落在**前置校验**期间（尚未发起
  * 下载），故下方下载类文案的"文件也许已落盘、请勿重复触发"偏保守 —— 方向安全（不谎报、

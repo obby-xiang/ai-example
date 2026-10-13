@@ -537,7 +537,7 @@ const TOOL_LABELS: Record<string, string> = {
   start_import: '启动导入作业',
   start_publish: '启动发布作业',
   open_export_file_editor: '打开导出文件在线编辑器',
-  download_export_file: '下载导出文件',
+  download_export_files: '下载导出文件',
   navigate_to: '跳转页面',
   [GENERATIVE_FORM_TOOL]: '生成式表单',
   select_config_defs: '选择配置项',

@@ -20,7 +20,7 @@
  * | start_import | `task:IMPORT/IMPORT` | **DANGER**（确认门） | BACKEND |
  * | start_publish | `task:IMPORT/PUBLISH` | **DANGER**（确认门） | BACKEND |
  * | open_export_file_editor | `task:EXPORT/EXPORT` | READ | FRONTEND |
- * | download_export_file | `task:EXPORT/EXPORT` | READ | FRONTEND |
+ * | download_export_files | `task:EXPORT/EXPORT` | READ | FRONTEND |
  * | navigate_to | `*` | READ | FRONTEND |
  * | select_definitions | `page:tasks`, `task:EXPORT`, `task:IMPORT` | READ | FRONTEND |
  * | set_condition | `page:tasks`, `task:EXPORT` | READ | FRONTEND |
@@ -29,7 +29,7 @@
  *
  * 两处**已过期的旧口径**（勿再沿用）：① 四个 `start_*` 曾标 WRITE/BACKEND 且不进确认门，
  * S4.4e 裁决⑥ 已全部升为 `DANGER`（执行前挂起、前端渲染确认卡片，FR-5.3）；
- * ② `open_export_file_editor`/`download_export_file` 曾被写成"唯一两个 FRONTEND 工具"，
+ * ② `open_export_file_editor`/`download_export_files` 曾被写成"唯一两个 FRONTEND 工具"，
  * S4.4d 起 `navigate_to`/`select_definitions`/`set_condition`/`confirm_step` 也是 FRONTEND，
  * DC-15 起 `generative_form` 亦然（前端接入已落地：GF-B 在 `stores/ai.ts` 对 `frontend_tool_request`
  * 特判 + AiPanel 的 `FormRenderer` 渲染）。
@@ -57,8 +57,8 @@ export type ToolAvailability = 'available' | 'degraded' | 'unavailable'
 /** 工具参数声明（用于执行前校验与说明文本生成）。 */
 export interface ToolArgSpec {
   name: string
-  /** 与后端 @ToolParam 一致的基本类型 */
-  type: 'string' | 'number' | 'boolean'
+  /** 与后端 @ToolParam 一致的基本类型（`string[]` = 后端 `String[]` 列表参数） */
+  type: 'string' | 'number' | 'boolean' | 'string[]'
   required: boolean
   description: string
 }
@@ -76,7 +76,7 @@ export interface FrontendToolDescriptor {
 }
 
 /** 前端工具名（与后端 @Tool(name=...) 严格同名）。 */
-export type FrontendToolName = 'open_export_file_editor' | 'download_export_file'
+export type FrontendToolName = 'open_export_file_editor' | 'download_export_files'
 
 /** 前端工具注册表。 */
 export const FRONTEND_TOOLS: readonly FrontendToolDescriptor[] = [
@@ -93,15 +93,15 @@ export const FRONTEND_TOOLS: readonly FrontendToolDescriptor[] = [
     ]
   },
   {
-    name: 'download_export_file',
+    name: 'download_export_files',
     displayName: '下载导出文件',
-    description: '触发浏览器下载指定配置的导出文件',
+    description: '触发浏览器下载导出文件：1 个码 = 直出单文件 xlsx；≥2 个码 = 打包为单个 zip 下载',
     channel: 'FRONTEND',
     riskLevel: 'READ',
     scopePatterns: ['task:EXPORT/EXPORT'],
     args: [
       { name: 'taskId', type: 'number', required: true, description: '任务ID' },
-      { name: 'defCode', type: 'string', required: true, description: '配置定义编码' }
+      { name: 'defCodes', type: 'string[]', required: true, description: '配置定义编码列表（必填非空）' }
     ]
   }
 ] as const

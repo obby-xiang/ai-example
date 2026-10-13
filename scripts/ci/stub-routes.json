@@ -14,7 +14,7 @@
     "start_import",
     "start_publish",
     "open_export_file_editor",
-    "download_export_file",
+    "download_export_files",
     "navigate_to",
     "select_definitions",
     "set_condition",

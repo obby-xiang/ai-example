@@ -2008,7 +2008,7 @@ export const useAiStore = defineStore('ai', {
 
     /**
      * 前端工具结局的**段级**终态收口。与 {@link applyPendingTerminal} 的差别是**只对
-     * generative_form 落终态**：通用 FRONTEND 工具（navigate_to / download_export_file 等）
+     * generative_form 落终态**：通用 FRONTEND 工具（navigate_to / download_export_files 等）
      * 只收 requiresAction（结局由结果帧承载），因为它的挂起卡本来就该收掉（留着会与工具卡
      * 叠成一张冗余"已执行"卡）。判定依据取段自身的既有字段（kind2 + name），不依赖帧字段。
      * `status === null` = 未给可翻译终态（旧后端口径）：只收 requiresAction。

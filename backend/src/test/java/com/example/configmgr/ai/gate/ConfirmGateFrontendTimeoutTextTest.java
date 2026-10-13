@@ -216,7 +216,7 @@ class ConfirmGateFrontendTimeoutTextTest {
     private static PendingToolCall pending(String kind) {
         PendingToolCall pending = new PendingToolCall();
         pending.setToolCallId(TOOL_CALL_ID);
-        pending.setName(kind.equals(PendingToolCall.KIND_CONFIRM) ? "start_publish" : "download_export_file");
+        pending.setName(kind.equals(PendingToolCall.KIND_CONFIRM) ? "start_publish" : "download_export_files");
         pending.setKind(kind);
         pending.setStatus(PendingToolCall.PENDING);
         return pending;

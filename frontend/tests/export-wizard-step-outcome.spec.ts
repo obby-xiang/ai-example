@@ -4,7 +4,7 @@
  * 三个用例对应三条真实入口（不注入失败则空转，故全部注入）：
  *  ① export.nextStep handler + persistStepData 失败注入 ⇒ 回灌如实"未推进"（撒谎点本体）；
  *  ② export.nextStep handler + syncStepToBackend(goToStep) reject 注入 ⇒ 回灌含同步失败警告；
- *  ③ download_export_file 执行器（preflightDownload 残余入口 :1128）+ persist 失败注入 ⇒ 确定性失败；
+ *  ③ download_export_files 执行器（preflightDownload 残余入口）+ persist 失败注入 ⇒ 确定性失败；
  *  ④ export.openEditor handler（残余入口 :1225）+ persist 失败注入 ⇒ 结构化失败（不得谎报成功）。
  *
  * 挂载真实 ExportWizardView（shallowMount + 子组件/路由/API 全桩），经
@@ -143,7 +143,7 @@ describe('批3③a T7②：export.nextStep + goToStep reject 注入 ⇒ 回灌�
   })
 })
 
-describe('批3③a T7③：download_export_file 执行器（preflight 残余入口）+ persist 失败注入 ⇒ 确定性失败', () => {
+describe('批3③a T7③：download_export_files 执行器（preflight 残余入口）+ persist 失败注入 ⇒ 确定性失败', () => {
   it('goStep(2) 被 persist 阻断 ⇒ 不发起下载，回灌失败语义', async () => {
     api.getFiles.mockImplementation((id: number) => Promise.resolve(
       id === 8
@@ -151,7 +151,7 @@ describe('批3③a T7③：download_export_file 执行器（preflight 残余入�
         : []
     ))
     await mountWizard()
-    // download_export_file 的 @ToolScope 是 task:EXPORT/EXPORT —— 把工作区步骤拨到 EXPORT 让
+    // download_export_files 的 @ToolScope 是 task:EXPORT/EXPORT —— 把工作区步骤拨到 EXPORT 让
     // scope 校验通过。preflight 以 args.taskId=8 ≠ 绑定任务 7 走"切换绑定"真实路径：绑定会把
     // 向导恢复到任务 8 的首步（workspace.step 回落 SELECT_DEFS、stepIndex 归 0），于是
     // preflight 的 goStep(2) 分支真实可达（issue #2 场景：payload.taskId 与绑定任务不同）。
@@ -160,8 +160,8 @@ describe('批3③a T7③：download_export_file 执行器（preflight 残余入�
     api.selectDefs.mockRejectedValue(new Error('selectDefs 注入失败'))
 
     const execution = await executeFrontendTool({
-      name: 'download_export_file',
-      args: { taskId: 8, defCode: 'DEMO' },
+      name: 'download_export_files',
+      args: { taskId: 8, defCodes: ['DEMO'] },
       budgetMs: 5_000
     })
     expect(execution.result).toContain('无法切换')

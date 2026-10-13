@@ -89,7 +89,7 @@ describe('批3③a T5：runPageHandler 结局解读（A3）+ defaultExecutor 结
 
 describe('批3③a T6：执行器返回 FrontendToolExecution 的结构化解读（A4）', () => {
   it('执行器返回结构化失败 ⇒ 按结构化落 failed（不被成功支包成 ok:true）', async () => {
-    registerFrontendToolExecutor('download_export_file', () => ({
+    registerFrontendToolExecutor('download_export_files', () => ({
       ok: false,
       availability: 'degraded',
       outcome: 'failed',
@@ -98,40 +98,54 @@ describe('批3③a T6：执行器返回 FrontendToolExecution 的结构化解读
     const workspace = useWorkspaceStore()
     workspace.enterPage({ pageId: 'export', page: 'export', taskType: 'EXPORT', step: 'EXPORT', taskId: 7 })
     const execution = await executeFrontendTool({
-      name: 'download_export_file',
-      args: { taskId: 7, defCode: 'DEMO' },
+      name: 'download_export_files',
+      args: { taskId: 7, defCodes: ['DEMO'] },
       budgetMs: 5_000
     })
     expect(execution).toMatchObject({ ok: false, outcome: 'failed', availability: 'degraded' })
-    unregisterFrontendToolExecutor('download_export_file')
+    unregisterFrontendToolExecutor('download_export_files')
   })
 
   it('执行器返回字符串 ⇒ ok（兼容）', async () => {
-    registerFrontendToolExecutor('download_export_file', () => '已发起下载')
+    registerFrontendToolExecutor('download_export_files', () => '已发起下载')
     const workspace = useWorkspaceStore()
     workspace.enterPage({ pageId: 'export', page: 'export', taskType: 'EXPORT', step: 'EXPORT', taskId: 7 })
     const execution = await executeFrontendTool({
-      name: 'download_export_file',
-      args: { taskId: 7, defCode: 'DEMO' },
+      name: 'download_export_files',
+      args: { taskId: 7, defCodes: ['DEMO'] },
       budgetMs: 5_000
     })
     expect(execution).toMatchObject({ ok: true, outcome: 'ok' })
-    unregisterFrontendToolExecutor('download_export_file')
+    unregisterFrontendToolExecutor('download_export_files')
   })
 
   it('执行器 throw ⇒ failed（负例，既有 catch 路径不变）', async () => {
-    registerFrontendToolExecutor('download_export_file', () => {
+    registerFrontendToolExecutor('download_export_files', () => {
       throw new Error('前置校验未通过')
     })
     const workspace = useWorkspaceStore()
     workspace.enterPage({ pageId: 'export', page: 'export', taskType: 'EXPORT', step: 'EXPORT', taskId: 7 })
     const execution = await executeFrontendTool({
-      name: 'download_export_file',
-      args: { taskId: 7, defCode: 'DEMO' },
+      name: 'download_export_files',
+      args: { taskId: 7, defCodes: ['DEMO'] },
       budgetMs: 5_000
     })
     expect(execution).toMatchObject({ ok: false, outcome: 'failed', availability: 'degraded' })
-    unregisterFrontendToolExecutor('download_export_file')
+    unregisterFrontendToolExecutor('download_export_files')
+  })
+
+  it('R-156 必填非空：defCodes 为空数组 ⇒ 参数校验期即不可用（执行器根本不被调用）', async () => {
+    const call = vi.fn(() => '不应被执行')
+    registerFrontendToolExecutor('download_export_files', call)
+    const execution = await executeFrontendTool({
+      name: 'download_export_files',
+      args: { taskId: 7, defCodes: [] },
+      budgetMs: 5_000
+    })
+    expect(execution).toMatchObject({ ok: false, outcome: 'failed', availability: 'unavailable' })
+    expect(execution.result).toContain('defCodes')
+    expect(call).not.toHaveBeenCalled()
+    unregisterFrontendToolExecutor('download_export_files')
   })
 })
 

@@ -53,7 +53,7 @@ class ToolRegistryDisclosureTest {
             "confirm_step");
 
     /** 全部前端通道工具（2 个既有 + 4 个工作区动作 + DC-15 的 generative_form）。 */
-    private static final List<String> FRONTEND_TOOLS = List.of("open_export_file_editor", "download_export_file",
+    private static final List<String> FRONTEND_TOOLS = List.of("open_export_file_editor", "download_export_files",
             "navigate_to", "select_definitions", "set_condition", "confirm_step",
             com.example.configmgr.ai.form.GenerativeFormRules.TOOL_NAME);
 
@@ -145,6 +145,7 @@ class ToolRegistryDisclosureTest {
     void wizardToolBodiesAreSentinelStubs() {
         // 后端桩体永不执行：任何直接调用都只能拿到哨兵文本，绝不产生副作用
         assertThat(aiTools.navigateTo("export", 1L)).isEqualTo(AiTools.FRONTEND_STUB);
+        assertThat(aiTools.downloadExportFiles(1L, new String[] { "CURRENCY" })).isEqualTo(AiTools.FRONTEND_STUB);
         assertThat(aiTools.selectDefinitions(new String[] { "CURRENCY" }, "REPLACE")).isEqualTo(AiTools.FRONTEND_STUB);
         assertThat(aiTools.setCondition("CURRENCY", new AiTools.FieldQueryCondition(List.of("XN"),
                 List.of(new AiTools.FieldCondition("code", "EQ", "CNY"))))).isEqualTo(AiTools.FRONTEND_STUB);
@@ -233,7 +234,7 @@ class ToolRegistryDisclosureTest {
                 AiContext.of("import", "IMPORT", "PUBLISH", 1L, Map.of()));
         List<String> allTools = List.of("list_config_defs", "get_config_def", "list_tasks", "get_workspace_state",
                 "check_job_status", "get_row_count", "create_task", "start_export", "start_precheck", "start_import",
-                "start_publish", "open_export_file_editor", "download_export_file", "navigate_to",
+                "start_publish", "open_export_file_editor", "download_export_files", "navigate_to",
                 "select_definitions", "set_condition", "confirm_step",
                 com.example.configmgr.ai.form.GenerativeFormRules.TOOL_NAME);
 

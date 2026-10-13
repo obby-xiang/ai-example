@@ -65,7 +65,7 @@ class AiControllerHistoryPayloadTest {
 			.content("")
 			.toolCalls(List.of(
 					new AssistantMessage.ToolCall("tc-1", "function", "start_publish", "{}"),
-					new AssistantMessage.ToolCall("tc-2", "function", "download_export_file", "{}")))
+					new AssistantMessage.ToolCall("tc-2", "function", "download_export_files", "{}")))
 			.properties(Map.of("toolCallStates", Map.of(
 					"tc-1", Map.of("status", "EXECUTED", "kind", "CONFIRM"),
 					"tc-2", Map.of("status", "BLOCKED", "kind", "FRONTEND"))))

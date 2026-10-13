@@ -161,7 +161,7 @@ export async function upload<T>(url: string, form: FormData): Promise<T> {
 /**
  * 触发浏览器下载。
  *
- * 用途有两处：用户点击下载，以及 AI 前端工具 `download_export_file` 的回灌路径
+ * 用途有两处：用户点击下载，以及 AI 前端工具 `download_export_files` 的回灌路径
  * （副作用发生在浏览器里，故必须由前端工具执行器调用本函数）。
  */
 export function saveBlob(blob: Blob, filename: string): void {

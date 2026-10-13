@@ -38,7 +38,7 @@ import java.util.stream.Collectors;
  * {@code start_publish} 四个工具统一为 {@code @ToolRisk(DANGER)} —— 执行前挂起、渲染确认卡片，
  * 放行才创建作业，拒绝/超时以"未执行"语义回填（FR-5.3 明文，S4.4e 裁决⑥，
  * 机制见 {@code gate/ConfirmGate}，无需工具名清单）；</li>
- * <li><b>前端指令</b>：{@code open_export_file_editor} / {@code download_export_file} /
+ * <li><b>前端指令</b>：{@code open_export_file_editor} / {@code download_export_files} /
  * {@code navigate_to} / {@code select_definitions} / {@code set_condition} / {@code confirm_step} /
  * {@code generative_form}
  * （{@code @ToolChannel(FRONTEND)}）—— 副作用在浏览器里，后端方法体是哨兵桩，
@@ -354,13 +354,22 @@ public class AiTools {
         return FRONTEND_STUB;
     }
 
-    @Tool(name = "download_export_file", description = "触发浏览器下载指定配置的导出文件")
+    /**
+     * 批量下载（R-156 / issue #9）。**单工具按数量分流**，避免模型逐个调用触发浏览器的
+     * 连续下载拦截（Chrome/Edge 默认阻止自动连续下载）：
+     * <ul>
+     * <li>1 个码 ⇒ 直出单文件 xlsx（与旧单文件工具行为一致）；</li>
+     * <li>≥2 个码 ⇒ 客户端打包，**单次 zip 浏览器下载**；</li>
+     * <li>码不在当前可导出清单里 ⇒ 整体失败并回执可用码清单，不静默丢弃。</li>
+     * </ul>
+     */
+    @Tool(name = "download_export_files", description = "触发浏览器下载导出文件：1 个码 = 直出单文件 xlsx；≥2 个码 = 打包为单个 zip 下载")
     @ToolScope("task:EXPORT/EXPORT")
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolChannel(ToolMeta.Channel.FRONTEND)
-    public String downloadExportFile(
+    public String downloadExportFiles(
             @ToolParam(description = "任务ID") Long taskId,
-            @ToolParam(description = "配置定义编码") String defCode) {
+            @ToolParam(description = "配置定义编码列表（必填非空），例如 [\"CURRENCY\"]") String[] defCodes) {
         return FRONTEND_STUB;
     }
 
