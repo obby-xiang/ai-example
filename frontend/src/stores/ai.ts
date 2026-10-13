@@ -1038,7 +1038,12 @@ export const useAiStore = defineStore('ai', {
     },
 
     /** 发一轮消息（含渐进披露上下文注入 + 工作区动作同步）。 */
-    async send(text: string): Promise<void> {
+    /**
+     * @param resend.skipUserRecord 截断后重发通道（R-157 收口 MAJOR-1）：调用方已把用户消息
+     *   原地保留/更新并截断其后消息（编辑重跑 / 重试 regenerate），send 不得再追加新用户消息 ——
+     *   否则旧文本与新文本并存（编辑）或同一提问重复两次（重试）。
+     */
+    async send(text: string, resend: { skipUserRecord?: boolean } = {}): Promise<void> {
       const content = text.trim()
       if (!content) {
         // 空内容依旧静默（面板层已用 trim 拦过，此处只是防御）
@@ -1051,7 +1056,9 @@ export const useAiStore = defineStore('ai', {
         return
       }
       const workspace = useWorkspaceStore()
-      this.recordUserMessage(content)
+      if (!resend.skipUserRecord) {
+        this.recordUserMessage(content)
+      }
       const assistant = this.appendAssistantMessage()
       this.loading = true
       this.stopped = false

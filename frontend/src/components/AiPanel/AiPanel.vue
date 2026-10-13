@@ -159,40 +159,33 @@
         class="group flex gap-2 mb-3.5"
         :class="m.role === 'user' ? 'flex-row-reverse' : ''"
       >
-        <div class="flex flex-col items-center gap-1 shrink-0">
-          <div
-            class="w-7 h-7 rounded-full text-xs flex items-center justify-center"
-            :class="m.role === 'user' ? 'bg-[#409eff] text-white' : 'bg-[#e4e7ed] text-[#606266]'"
-          >
-            {{ m.role === 'user' ? '我' : 'AI' }}
-          </div>
-          <!-- R-154 #7：流式「生成中」标识 —— 承载点 = 消息头 tag（正文产出后仍保留，直到终帧封口） -->
-          <el-tag
-            v-if="m.streaming && m.role === 'assistant'"
-            size="small"
-            type="primary"
-            effect="dark"
-            data-testid="streaming-tag"
-          >
-            生成中
-          </el-tag>
+        <div
+          class="w-7 h-7 rounded-full flex items-center justify-center shrink-0"
+          :class="m.role === 'user' ? 'bg-[#e4e7ed]' : 'bg-gradient-to-br from-[#409eff] to-[#7b61ff]'"
+          :data-testid="'msg-avatar-' + m.id"
+        >
+          <!-- R-157 #5：头像去文字 —— AI = 蓝紫渐变四角星（复用头部渐变语言），用户 = 灰色人形 -->
+          <svg v-if="m.role === 'user'" viewBox="0 0 24 24" fill="#909399" class="w-4 h-4" aria-hidden="true">
+            <path d="M12 12a5 5 0 1 0-5-5 5 5 0 0 0 5 5zm0 2c-4 0-8 2-8 5v2h16v-2c0-3-4-5-8-5z" />
+          </svg>
+          <svg v-else viewBox="0 0 24 24" fill="none" class="w-4 h-4" aria-hidden="true">
+            <path d="M12 2l2.4 7.6L22 12l-7.6 2.4L12 22l-2.4-7.6L2 12l7.6-2.4z" fill="#fff" />
+          </svg>
         </div>
+        <!-- 内容列：气泡 + 指示器 + 操作行（R-157 #1：操作行挪气泡外、卡片下沿独立行） -->
+        <div class="min-w-0 flex-1 flex flex-col" :class="m.role === 'user' ? 'items-end' : 'items-start'">
         <div
           class="max-w-[82%] rounded-lg px-2.5 py-2 text-[13px] text-[#303133] leading-[1.6] break-words"
           :class="m.role === 'user' ? 'bg-[#d9ecff]' : 'bg-[#f4f4f5]'"
+          :data-testid="'msg-bubble-' + m.id"
         >
-          <!-- 等待回复的三点闪烁（仅在正文尚未产出时） -->
-          <span v-if="isTyping(m)" class="typing">
-            <i class="dot"></i><i class="dot"></i><i class="dot"></i>
-          </span>
-
           <!-- 消息体：块分派（批4④ A5' → R-154 单卡化）——groupParts 把段序列分派为 text/activity 块；
                R-154 #13+14 起 activity 恒为单段卡（组壳已拆），展开态读 store 三态
                （expandedBlocks ?? defaultExpanded，D4/D6/D-C6）；key 用块稳定 id
                （成员 toolCallId / kind-seg，加消息命名空间前缀，收口修 F1/红队 M-1），禁用数组下标（§7 R4-3 / D5）。 -->
-          <template v-for="block in blocksOf(m)" :key="block.id">
-            <!-- 正文块：单段正文，永不进折叠组（A5' 规则③） -->
-            <div v-if="block.kind === 'text'" class="whitespace-pre-wrap">{{ textOf(block) }}</div>
+          <template v-for="(block, bi) in blocksOf(m)" :key="block.id">
+            <!-- 正文块：单段正文，永不进折叠组（A5' 规则③）；R-157 #3：流式中正文末尾打字机光标 -->
+            <div v-if="block.kind === 'text'" class="whitespace-pre-wrap">{{ textOf(block) }}<span v-if="showCaret(m, bi)" class="caret" data-testid="stream-caret"></span></div>
 
             <template v-else>
               <!-- R-154 #13+14（用户直裁「彻底拆除」）：组壳退役 —— 每段恒一张卡。
@@ -316,13 +309,25 @@
             </template>
           </template>
 
-          <!-- 消息级操作行（苞 B 项 2 → R-154 #9 扩为 复制 + 编辑）：判据 parts（N10）——
-               渲染真值已是 parts，不得再留 v-if="m.content" 造成"有段渲染但按钮不出现"的发散。
-               复制内容仍取 m.content（text 段 join 派生，同源）；编辑 = 回填输入框（不截断会话、
-               不分支、不改 store 消息数组）；时间戳（R-154 #17）居左，无戳不渲染。
-               hover 或键盘聚焦时显现；"已复制"反馈走组件局部状态（copyState），不占 ai.notice。 -->
-          <div v-if="m.parts.some((part) => part.kind === 'text' && part.text)" class="mt-1 flex items-center justify-end gap-1.5">
-            <span v-if="formatTimestamp(m)" class="mr-auto text-xs text-[#c0c4cc]" data-testid="msg-timestamp">{{ formatTimestamp(m) }}</span>
+        </div>
+
+        <!-- R-157 #3①：首 token 前 = 卡片下方呼吸点 + 「工作中…」（与打字机光标接力） -->
+        <div v-if="isTyping(m)" class="loading-breath mt-1.5 pl-0.5" data-testid="loading-breath">
+          <span class="dot"></span><span class="txt">工作中…</span>
+        </div>
+
+        <!-- R-157 #1：消息级操作行挪气泡外、卡片下沿独立行 —— 时间戳左置、操作右置
+             （用户消息整行右反，时间戳贴卡片侧）；桌面 hover/focus-within 浮出（保留键盘可达）。
+             判据仍取 parts（N10）；「已复制」反馈走组件局部状态（copyState），不占 ai.notice。
+             R-157 #2：role 过滤 —— 仅用户消息可编辑（改完从该条重跑）；AI 回复仅复制/重试。 -->
+        <div
+          v-if="m.parts.some((part) => part.kind === 'text' && part.text)"
+          class="mt-1 flex items-center justify-between gap-2 text-xs text-[#a8abb2]"
+          :class="m.role === 'user' ? 'flex-row-reverse' : ''"
+          :data-testid="'msg-ops-' + m.id"
+        >
+          <span v-if="formatTimestamp(m)" class="text-[#c0c4cc]" data-testid="msg-timestamp">{{ formatTimestamp(m) }}</span>
+          <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
             <span
               v-if="copyState && copyState.id === m.id"
               :data-testid="'copy-hint-' + m.id"
@@ -332,28 +337,42 @@
               {{ copyState.ok ? '已复制' : '复制失败，请手动选中文本复制' }}
             </span>
             <el-button
+              v-if="m.role === 'user'"
               link
               size="small"
-              class="opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity"
+              class="px-1"
               :data-testid="'edit-msg-' + m.id"
-              title="编辑该条消息（回填到输入框）"
-              aria-label="编辑该条消息（回填到输入框）"
+              title="编辑该条消息（改完从该条重跑）"
+              aria-label="编辑该条消息（改完从该条重跑）"
               @click="editMessage(m)"
             >
-              编辑
+              <svg viewBox="0 0 24 24" fill="currentColor" class="w-3 h-3" aria-hidden="true"><path d="M3 17.2V21h3.8l11-11-3.8-3.8zM20.7 7a1 1 0 0 0 0-1.4l-2.3-2.3a1 1 0 0 0-1.4 0l-1.8 1.8 3.7 3.7z" /></svg>
             </el-button>
             <el-button
               link
               size="small"
-              class="opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity"
+              class="px-1"
               :data-testid="'copy-msg-' + m.id"
               title="复制该条消息正文"
               aria-label="复制该条消息正文"
               @click="copyMessage(m)"
             >
-              复制
+              <svg viewBox="0 0 24 24" fill="currentColor" class="w-3 h-3" aria-hidden="true"><path d="M16 1H4a2 2 0 0 0-2 2v14h2V3h12zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16H8V7h11z" /></svg>
+            </el-button>
+            <el-button
+              v-if="m.role === 'assistant'"
+              link
+              size="small"
+              class="px-1"
+              :data-testid="'retry-msg-' + m.id"
+              title="重试该条回复（从对应提问重跑）"
+              aria-label="重试该条回复（从对应提问重跑）"
+              @click="retryMessage(m)"
+            >
+              <svg viewBox="0 0 24 24" fill="currentColor" class="w-3 h-3" aria-hidden="true"><path d="M17.6 6.4A8 8 0 1 0 20 12h-2a6 6 0 1 1-1.8-4.3L13 11h7V4z" /></svg>
             </el-button>
           </div>
+        </div>
         </div>
       </div>
       </div>
@@ -387,7 +406,7 @@
         </span>
         <div>
           <el-button v-if="ai.loading" size="small" type="danger" plain @click="stop">停止</el-button>
-          <el-button size="small" type="primary" :loading="ai.loading" :disabled="!canSubmit" @click="send">发送</el-button>
+          <el-button size="small" type="primary" data-testid="send-btn" :loading="ai.loading" :disabled="!canSubmit" @click="send">发送</el-button>
         </div>
       </div>
     </div>
@@ -435,6 +454,7 @@ import { useAiStore, foldDeadline } from '@/stores/ai'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { formatCountdown } from '@/utils/format'
 import { groupParts, resolveBlockExpanded, type Block } from '@/utils/blocks'
+import { deriveProjections } from '@/utils/parts'
 import { createPollingController, type PollingController } from '@/utils/polling'
 import FormRenderer from '@/components/AiPanel/FormRenderer.vue'
 import { GENERATIVE_FORM_TOOL, type ChatMessage, type PendingToolCall, type ToolRunStatus } from '@/types/ai'
@@ -755,11 +775,46 @@ function formatTimestamp(message: ChatMessage): string {
 }
 
 /**
- * R-154 #9：编辑 = 把该条消息正文回填输入框 —— **只回填**：不截断会话、不分支、
- * 不改 store 消息数组；后续发送走既有 send 守卫（空输入静默 / busy 保草稿）。
+ * R-157 #2：编辑 = 「改完从该条重跑」——回填该条正文并记住锚点；发送时（send）截断
+ * 该条之后的消息、以输入框新文本重发。仅用户消息可编辑（模板 v-if role 过滤）。
  */
+const editingMessageId = ref<string | null>(null)
+
 function editMessage(m: ChatMessage): void {
   inputText.value = m.content
+  editingMessageId.value = m.id
+}
+
+/**
+ * R-157 #2（收口 MAJOR-1 语义版）：重试（AI 回复操作行）= 业界「regenerate」——找到该回复
+ * 对应的提问（前向最近一条用户消息），截断其后消息并从该提问重跑：提问原地保留、
+ * 不重复追加（skipUserRecord 通道）。
+ */
+function retryMessage(m: ChatMessage): void {
+  if (!ai.canSend) {
+    ai.noticeBusySend()
+    return
+  }
+  const index = ai.messages.findIndex((item) => item.id === m.id)
+  for (let i = index - 1; i >= 0; i -= 1) {
+    const prev = ai.messages[i]
+    if (prev && prev.role === 'user') {
+      followBottom.value = true
+      ai.messages.splice(i + 1)
+      scrollBottom(true)
+      void ai.send(prev.content, { skipUserRecord: true })
+      return
+    }
+  }
+}
+
+/** R-157 #3：打字机光标显示判据 —— 消息流式中且该正文块是末尾块（与呼吸点接力）。 */
+function showCaret(message: ChatMessage, blockIndex: number): boolean {
+  if (!message.streaming) {
+    return false
+  }
+  const blocks = blocksOf(message)
+  return blockIndex === blocks.length - 1 && blocks[blockIndex]?.kind === 'text'
 }
 
 async function send(): Promise<void> {
@@ -775,6 +830,26 @@ async function send(): Promise<void> {
     ai.noticeBusySend()
     return
   }
+  // R-157 #4：发送即恢复跟随并强制滚底（上滑暂停不挡住主动发送）。
+  followBottom.value = true
+  // R-157 #2（收口 MAJOR-1 语义版）：编辑锚点在 ⇒ 「改完从该条重跑」——该条文本原地更新为
+  // 输入框新文本、截断其后消息、从该条重跑（skipUserRecord：不另起新用户消息）。
+  const editId = editingMessageId.value
+  if (editId) {
+    editingMessageId.value = null
+    const cut = ai.messages.findIndex((item) => item.id === editId)
+    if (cut >= 0) {
+      const target = ai.messages[cut] as ChatMessage
+      target.parts = [{ kind: 'text', seg: 0, text, streaming: false }]
+      deriveProjections(target)
+      ai.messages.splice(cut + 1)
+      scrollBottom(true)
+      inputText.value = ''
+      await ai.send(text, { skipUserRecord: true })
+      return
+    }
+  }
+  scrollBottom(true)
   inputText.value = ''
   await ai.send(text)
 }
@@ -955,21 +1030,55 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-/* 等待回复的三点闪烁动画：蓝本 AiPanel.vue 第 186-202 行原样保留
-   （Tailwind v3 无 animation/关键帧工具类，属规格 §1.1 允许的唯一 scoped CSS）。 */
-.typing .dot {
-  display: inline-block;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #a8abb2;
-  margin-right: 4px;
-  animation: blink 1.2s infinite;
+/* R-157 #3：生成中指示器（动画照效果基准 指示器预览.html 口径）——
+   首 token 前 = 呼吸点 + 「工作中…」（卡片下方），流式中 = 正文末尾打字机光标，两者接力。 */
+.loading-breath {
+  display: flex;
+  align-items: center;
+  gap: 7px;
 }
-.typing .dot:nth-child(2) { animation-delay: 0.2s; }
-.typing .dot:nth-child(3) { animation-delay: 0.4s; }
-@keyframes blink {
-  0%, 80%, 100% { opacity: 0.3; }
-  40% { opacity: 1; }
+.loading-breath .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #409eff, #7b61ff);
+  animation: breath 1.4s ease-in-out infinite;
+}
+.loading-breath .txt {
+  font-size: 12px;
+  color: #909399;
+  letter-spacing: 1px;
+  animation: breathTxt 1.4s ease-in-out infinite;
+}
+@keyframes breath {
+  0%, 100% { transform: scale(0.7); opacity: 0.45; }
+  50% { transform: scale(1.15); opacity: 1; }
+}
+@keyframes breathTxt {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 0.95; }
+}
+.caret {
+  display: inline-block;
+  width: 2px;
+  height: 14px;
+  background: #409eff;
+  margin-left: 2px;
+  vertical-align: -2px;
+  animation: caretBlink 1s steps(1) infinite;
+}
+@keyframes caretBlink {
+  50% { opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .loading-breath .dot,
+  .loading-breath .txt,
+  .caret {
+    animation: none;
+  }
+  .loading-breath .dot,
+  .loading-breath .txt {
+    opacity: 1;
+  }
 }
 </style>

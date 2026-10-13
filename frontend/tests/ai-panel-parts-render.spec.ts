@@ -20,7 +20,8 @@ const api = vi.hoisted(() => ({
   history: vi.fn(),
   runsCurrent: vi.fn(),
   frontendToolResult: vi.fn(),
-  reattachRun: vi.fn()
+  reattachRun: vi.fn(),
+  chat: vi.fn()
 }))
 
 vi.mock('@/api/ai', () => ({ aiApi: api }))
@@ -261,16 +262,27 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
     wrapper.unmount()
   })
 
-  it('三点闪烁（isTyping）按 parts 判据：流式中且无任何非空 text 段才显示', async () => {
+  it('R-157 #3：生成中指示器接力 —— 首 token 前呼吸点+「工作中…」，流式中打字机光标', async () => {
     const typing = buildMessage([{ kind: 'text', seg: 0, text: '', streaming: true }], null, true)
     typing.id = 'a-typing'
     const speaking = buildMessage([{ kind: 'text', seg: 0, text: '正在说', streaming: true }], null, true)
     speaking.id = 'a-speaking'
+    const settled = buildMessage([{ kind: 'text', seg: 0, text: '说完了', streaming: false }], null, false)
+    settled.id = 'a-settled'
 
-    const wrapper = await mountPanel([typing, speaking])
-    expect(wrapper.findAll('.typing')).toHaveLength(1)
-    // 工具段已到、正文还没来时三点仍在（与批1 的 content 判据同语义）
+    const wrapper = await mountPanel([typing, speaking, settled])
+    // 首 token 前：卡片下方呼吸点（一点 + 工作中…），无打字机光标
+    const breath = wrapper.findAll('[data-testid="loading-breath"]')
+    expect(breath).toHaveLength(1)
+    expect(breath[0].text()).toContain('工作中…')
+    expect(breath[0].find('.dot').exists()).toBe(true)
+    // 流式中有正文：末尾打字机光标，无呼吸点、无旧三点动画
+    expect(wrapper.findAll('[data-testid="stream-caret"]')).toHaveLength(1)
+    expect(wrapper.findAll('.typing')).toHaveLength(0)
     expect(wrapper.text()).toContain('正在说')
+    // 终态：两者皆无
+    const settledHtml = wrapper.find('[data-testid="msg-bubble-a-settled"]').html()
+    expect(settledHtml).not.toContain('caret')
     wrapper.unmount()
   })
 })
@@ -606,26 +618,27 @@ describe('R-154：截断角标 / 跟随暂停 / 生成中 / 编辑回填 / 建�
     wrapper.unmount()
   })
 
-  it('#7：流式「生成中」标识 —— 正文产出后仍在（直至 streaming=false）', async () => {
+  it('#7/#3 语义延续（R-157 改承载）：流式标识正文产出后仍在，撤 el-tag 改呼吸点/光标', async () => {
     const speaking = buildMessage([{ kind: 'text', seg: 0, text: '正在说', streaming: true }], null, true)
     speaking.id = 'a-speaking'
     const settled = buildMessage([{ kind: 'text', seg: 0, text: '说完了', streaming: false }], null, false)
     settled.id = 'a-settled'
 
     const wrapper = await mountPanel([speaking, settled])
-    const tags = wrapper.findAll('[data-testid="streaming-tag"]')
-    expect(tags).toHaveLength(1)
-    expect(tags[0].text()).toContain('生成中')
+    // R-154 的 el-tag「生成中」已撤（R-157 #3 直裁方案一）；流式标识 = 打字机光标
+    expect(wrapper.findAll('[data-testid="streaming-tag"]')).toHaveLength(0)
+    expect(wrapper.findAll('[data-testid="stream-caret"]')).toHaveLength(1)
     wrapper.unmount()
   })
 
-  it('#9：编辑 = 回填输入框（消息正文入输入区，不改消息数组、不截断会话）', async () => {
+  it('#9：编辑（R-157 #2 收窄为用户消息）= 回填输入框并记住锚点；发送时才截断重跑', async () => {
     const message = buildMessage([{ kind: 'text', seg: 0, text: '用户原话', streaming: false }])
+    message.role = 'user'
     const wrapper = await mountPanelWith([message])
     await wrapper.find('[data-testid="edit-msg-a-1"]').trigger('click')
     await wrapper.vm.$nextTick()
     expect((wrapper.find('.stub-input').element as HTMLTextAreaElement).value).toBe('用户原话')
-    // 边界：store 消息数组不被编辑动作改动
+    // 编辑动作本身不截断/不改消息数组（截断发生在发送，见 R-157 编辑重跑用例）
     expect(message.parts).toHaveLength(1)
     expect(message.content).toBe('用户原话')
     wrapper.unmount()
@@ -682,5 +695,148 @@ describe('R-154：截断角标 / 跟随暂停 / 生成中 / 编辑回填 / 建�
     await store.loadHistory()
     expect(store.messages[0].timestamp).toBe(1_700_000_000_000)
     expect(store.messages[1].timestamp).toBe('2026-01-01T00:00:00Z')
+  })
+})
+
+/**
+ * R-157 前端面（用户直裁五点）：操作行挪卡片下方 / 编辑收窄+重跑 / 呼吸点+光标接力 / 发送滚底 / 头像去文字。
+ */
+describe('R-157：操作行外置 + role 过滤 + 编辑重跑 + 发送滚底 + 新头像', () => {
+  const stubsWithInput = {
+    ...stubs,
+    'el-input': {
+      props: ['modelValue'],
+      template: '<textarea class="stub-input" :value="modelValue" @input="$emit(\'update:modelValue\', $event.target.value)" />'
+    },
+    'el-empty': { template: '<div class="stub-empty"><slot name="image" /><slot name="description" /></div>' }
+  }
+
+  function pair(): ChatMessage[] {
+    const user = buildMessage([{ kind: 'text', seg: 0, text: '原始提问', streaming: false }])
+    user.id = 'u-1'
+    user.role = 'user'
+    user.timestamp = 1_700_000_000_000
+    const reply = buildMessage([{ kind: 'text', seg: 0, text: '原始回答', streaming: false }])
+    reply.id = 'a-1'
+    const extra = buildMessage([{ kind: 'text', seg: 0, text: '后续追问', streaming: false }])
+    extra.id = 'u-2'
+    extra.role = 'user'
+    return [user, reply, extra]
+  }
+
+  it('#1：操作行在气泡外（卡片下沿独立行），气泡内零操作元素', async () => {
+    const [user, reply] = pair()
+    const wrapper = await mountPanel([user, reply])
+    for (const id of ['u-1', 'a-1']) {
+      const ops = wrapper.find(`[data-testid="msg-ops-${id}"]`)
+      expect(ops.exists()).toBe(true)
+      // 操作行不是气泡的后代（气泡内零操作元素）
+      expect(wrapper.find(`[data-testid="msg-bubble-${id}"]`).find('[data-testid^="msg-ops-"]').exists()).toBe(false)
+    }
+    // 时间戳在操作行内（仅 u-1 带戳）
+    expect(wrapper.find('[data-testid="msg-ops-u-1"]').find('[data-testid="msg-timestamp"]').exists()).toBe(true)
+    // 时间戳与操作两端分置（MINOR-3）：行 = justify-between，时间戳为首子、操作容器为末子
+    const rowEl = wrapper.find('[data-testid="msg-ops-u-1"]').element
+    expect(rowEl.className).toContain('justify-between')
+    expect(rowEl.children[0].getAttribute('data-testid')).toBe('msg-timestamp')
+    expect(rowEl.children[rowEl.children.length - 1].className).toContain('opacity-0')
+    // hover/focus-within 浮出口径：操作容器默认透明（group-hover 浮现，键盘 focus-within 可达）
+    expect(wrapper.find('[data-testid="msg-ops-u-1"]').find('[class*="opacity-0"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('#2 role 过滤：仅用户消息可编辑；AI 回复无编辑、有重试', async () => {
+    const [user, reply] = pair()
+    const wrapper = await mountPanel([user, reply])
+    expect(wrapper.find('[data-testid="edit-msg-u-1"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="retry-msg-u-1"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="edit-msg-a-1"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="retry-msg-a-1"]').exists()).toBe(true)
+    // 图标化：复制按钮内是 SVG，无「复制」文字按钮
+    expect(wrapper.find('[data-testid="copy-msg-u-1"] svg').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('#2 编辑重跑（MAJOR-1 语义版）：该条文本原地更新 + 截断其后 + 不重复追加用户消息', async () => {
+    const store = useAiStore()
+    store.messages = pair()
+    store.historyLoaded = true
+    api.chat.mockReset()
+    api.chat.mockResolvedValue(undefined)
+    const { default: AiPanel } = await import('@/components/AiPanel/AiPanel.vue')
+    const wrapper = mount(AiPanel, { global: { stubs: stubsWithInput } })
+    await wrapper.vm.$nextTick()
+
+    await wrapper.find('[data-testid="edit-msg-u-1"]').trigger('click')
+    const input = wrapper.find('.stub-input')
+    await input.setValue('改写后的提问')
+    await wrapper.find('[data-testid="send-btn"]').trigger('click')
+    await wrapper.vm.$nextTick()
+
+    // 语义：u-1 文本原地更新（旧文本不残留），其后截断，重发只起新助手消息（不追加第二条用户消息）
+    expect(store.messages.map((m) => m.id)).toEqual(['u-1', expect.stringMatching(/^a-/)])
+    expect(store.messages[0]?.content).toBe('改写后的提问')
+    expect(api.chat).toHaveBeenCalledTimes(1)
+    expect(api.chat.mock.calls[0][0].message).toBe('改写后的提问')
+    wrapper.unmount()
+  })
+
+  it('#2 重试（MAJOR-1 语义版）：提问原地保留不重复，截断其后并从原提问重跑', async () => {
+    const store = useAiStore()
+    store.messages = pair()
+    store.historyLoaded = true
+    api.chat.mockReset()
+    api.chat.mockResolvedValue(undefined)
+    const { default: AiPanel } = await import('@/components/AiPanel/AiPanel.vue')
+    const wrapper = mount(AiPanel, { global: { stubs: stubsWithInput } })
+    await wrapper.vm.$nextTick()
+
+    await wrapper.find('[data-testid="retry-msg-a-1"]').trigger('click')
+    await wrapper.vm.$nextTick()
+
+    // 语义：提问只出现一次（u-1 原地保留），a-1/u-2 截断，重发只起新助手消息
+    expect(store.messages.map((m) => m.id)).toEqual(['u-1', expect.stringMatching(/^a-/)])
+    expect(api.chat).toHaveBeenCalledTimes(1)
+    expect(api.chat.mock.calls[0][0].message).toBe('原始提问')
+    wrapper.unmount()
+  })
+
+  it('#4：发送即恢复跟随并强制滚底（上滑暂停态下也生效）', async () => {
+    const store = useAiStore()
+    store.messages = pair()
+    store.historyLoaded = true
+    api.chat.mockReset()
+    api.chat.mockResolvedValue(undefined)
+    const { default: AiPanel } = await import('@/components/AiPanel/AiPanel.vue')
+    const wrapper = mount(AiPanel, { global: { stubs: stubsWithInput } })
+    await wrapper.vm.$nextTick()
+
+    const wrap = wrapper.find('.overflow-y-auto').element as HTMLElement
+    Object.defineProperty(wrap, 'scrollHeight', { value: 1000, configurable: true })
+    Object.defineProperty(wrap, 'clientHeight', { value: 500, configurable: true })
+    wrap.scrollTop = 100
+    wrap.dispatchEvent(new Event('scroll'))
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-testid="back-to-bottom"]').exists()).toBe(true) // 已暂停跟随
+
+    await wrapper.find('.stub-input').setValue('新问题')
+    await wrapper.find('[data-testid="send-btn"]').trigger('click')
+    await wrapper.vm.$nextTick()
+    await wrapper.vm.$nextTick()
+
+    expect(wrap.scrollTop).toBe(1000) // 发送即强制滚底
+    wrapper.unmount()
+  })
+
+  it('#5：头像去文字 —— AI 四角星 / 用户人形 SVG，头像内零文字', async () => {
+    const [user, reply] = pair()
+    const wrapper = await mountPanel([user, reply])
+    for (const id of ['u-1', 'a-1']) {
+      const avatar = wrapper.find(`[data-testid="msg-avatar-${id}"]`)
+      expect(avatar.exists()).toBe(true)
+      expect(avatar.find('svg').exists()).toBe(true)
+      expect(avatar.text()).toBe('')
+    }
+    wrapper.unmount()
   })
 })
