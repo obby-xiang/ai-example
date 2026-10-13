@@ -15,7 +15,8 @@ import { defineStore } from 'pinia'
 import { ApiError } from '@/api/http'
 import { aiApi } from '@/api/ai'
 import type { SseFrameHandlers, SseStreamOptions } from '@/api/sse'
-import { onWorkspaceEvent, useWorkspaceStore } from '@/stores/workspace'
+import { onWorkspaceEvent, reportUiEventResult, useWorkspaceStore } from '@/stores/workspace'
+import { useTaskStore } from '@/stores/task'
 import { deriveFrontendToolBudgetMs, executeFrontendTool, parseToolArgs } from '@/utils/frontend-tools'
 import {
   alreadyApplied,
@@ -34,6 +35,7 @@ import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type A
 import { parseFormSchema, checkFormValues } from '@/types/form-schema'
 import type { SseFrame } from '@/types/sse'
 import type { WorkspaceActionRecord } from '@/types/tools'
+import { clearPublishToolLinks, findPublishTool, linkPublishTool, unlinkPublishTool } from '@/utils/publish-links'
 
 /** sessionStorage 键：会话 id 与镜像前缀。 */
 export const SESSION_ID_KEY = 'ai-session-id'
@@ -1621,6 +1623,8 @@ export const useAiStore = defineStore('ai', {
       this.activeForm = null
       // 批4④ A5'/D4：折叠展开态随会话清空（防跨会话串味；会话内内存态，不进镜像）
       this.expandedBlocks = {}
+      // R-155：发布冲突 jobId→工具段注册表随会话清空（内存态，与折叠展开态同生命周期口径）
+      clearPublishToolLinks()
       // 轮次级标志一并复位：新会话不该继承上一轮的停止/断流事实（骨架屏见 historyLoaded）
       this.stopped = false
       this.streamInterrupted = false
@@ -1798,6 +1802,8 @@ export const useAiStore = defineStore('ai', {
           // 补丁③ / DC-14 T1 的终态裁决口径（BLOCKED > REJECTED > ok 三元）落在段上，见
           // utils/parts.ts 的 applyFrameToParts —— 本 case 不再有任何投影直写
           applyFrameToParts(message, frame)
+          // R-155：start_publish 工具结果取号 jobId → 登记并武装发布冲突跟踪
+          this.armPublishConflictWatch(message, frame)
           break
         }
         case 'confirm_request': {
@@ -2038,6 +2044,72 @@ export const useAiStore = defineStore('ai', {
 
     upsertToolPart(message: ChatMessage, patch: ToolPartPatch, createIfMissing = true): void {
       writeToolPart(message, patch, createIfMissing)
+    },
+
+    /**
+     * R-155：start_publish 工具结果帧取号 jobId（结果文本「作业 #N」），登记 jobId→toolCallId
+     * 并武装发布冲突跟踪（复用 task store watchPublishOutcome，终态冲突经 onConflict 回此）。
+     * 任一环取不到号（非 start_publish / 未执行 / 无 jobId / 无 taskId）静默跳过。
+     */
+    armPublishConflictWatch(message: ChatMessage, frame: Extract<SseFrame, { type: 'tool_result' }>): void {
+      if (frame.name !== 'start_publish' || !frame.ok || typeof frame.result !== 'string') {
+        return
+      }
+      const matched = /作业 #(\d+)/.exec(frame.result)
+      const jobId = matched ? Number(matched[1]) : Number.NaN
+      if (!Number.isInteger(jobId)) {
+        return
+      }
+      const part = findToolPart(message, frame.toolCallId)
+      const args = part ? parseToolArgs(part.args) : null
+      const taskId = args ? Number(args.taskId) : Number.NaN
+      if (!Number.isInteger(taskId)) {
+        return
+      }
+      linkPublishTool(jobId, { toolCallId: frame.toolCallId, sessionId: this.sessionId })
+      useTaskStore().watchPublishOutcome(taskId, jobId, {
+        onConflict: (summary) => {
+          this.attachPublishConflict(jobId, summary)
+          reportUiEventResult('start_publish', summary)
+        }
+      })
+    },
+
+    /**
+     * R-155：把发布冲突明细摘要写入该 jobId 关联的 start_publish 工具段 reason（卡面红字行）。
+     * 仿 A4' 收口范式：段唯一写口 upsertToolPart（createIfMissing=false 不新建段）+ 同步派生投影；
+     * reason 单落点 = 末条持该 toolCallId 的宿主消息。命中即注销注册项。
+     * @returns 是否落段；查无关联 / 会话已切换 / 段不存在 ⇒ false（调用方静默走原通道）
+     */
+    attachPublishConflict(jobId: number, summary: string): boolean {
+      const link = findPublishTool(jobId)
+      if (!link) {
+        return false
+      }
+      if (link.sessionId !== this.sessionId) {
+        unlinkPublishTool(jobId)
+        return false
+      }
+      for (let i = this.messages.length - 1; i >= 0; i -= 1) {
+        const message = this.messages[i]
+        if (!message) {
+          continue
+        }
+        const part = findToolPart(message, link.toolCallId)
+        if (part) {
+          this.upsertToolPart(message, {
+            toolCallId: link.toolCallId,
+            name: part.name,
+            kind2: part.kind2,
+            requiresAction: false,
+            reason: summary
+          }, false)
+          deriveProjections(message)
+          unlinkPublishTool(jobId)
+          return true
+        }
+      }
+      return false
     },
 
     /**

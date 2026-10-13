@@ -243,7 +243,8 @@ export function watchJob(options: JobWatchOptions): () => void {
     clearWatchdog() // 看门狗随跟踪一起收摊（F10 口径：终态自收同样要清）
     poller.stop() // 同时清 interval 与卸载 visibilitychange 监听
     source.close()
-    // F10：通知注册表同步注销（终态自收的场景 dispose 不经注册表入口，has()/size() 才不失真）
+    // F10：通知注册表同步注销（终态自收时 dispose 不经注册表入口，靠本回调同步清理；
+    // onDisposed 接线方 = 页面轮次收尾处，见 ImportWizardView）
     options.onDisposed?.()
   }
 

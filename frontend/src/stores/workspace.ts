@@ -22,6 +22,7 @@ import { tasksApi } from '@/api/tasks'
 import { jobsApi } from '@/api/jobs'
 import { useTaskStore } from '@/stores/task'
 import { stepLabel } from '@/utils/format'
+import { findPublishTool } from '@/utils/publish-links'
 import {
   WORKSPACE_ACTION_LIMIT,
   WORKSPACE_CONTRACT_VERSION,
@@ -477,7 +478,16 @@ async function runUiEvent(event: UiEvent): Promise<UiEventResult> {
           publishWatcherDispose?.()
           publishWatcherDispose = taskStore.watchPublishOutcome(event.taskId, job.id ?? 0, {
             // AI 保证通道：明细摘要经 reportUiEventResult（UiEventResult 同形）回灌模型 + 面板回执位
-            onConflict: (summary) => reportUiEventResult('run_job', summary)
+            onConflict: (summary) => {
+              // R-155：注册表命中（该 jobId 有 start_publish 工具段关联）时把明细写回工具卡 reason；
+              // 查无关联（run_job 自建作业等）静默走原回执条通道，不报错、不阻断
+              if (findPublishTool(job.id ?? 0)) {
+                void import('@/stores/ai').then(({ useAiStore }) => {
+                  useAiStore().attachPublishConflict(job.id ?? 0, summary)
+                })
+              }
+              reportUiEventResult('run_job', summary)
+            }
           })
           return ok(`发布作业已启动（作业 #${job.id}），冲突会在完成后以作业失败 + 问题清单呈现`)
         }
