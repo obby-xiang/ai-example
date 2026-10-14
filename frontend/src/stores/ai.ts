@@ -443,6 +443,11 @@ export const useAiStore = defineStore('ai', {
      * 与 notice 分开，便于面板用不同级别的 Alert 呈现（notice 覆盖更多降级场景）。
      */
     streamInterrupted: false,
+    /**
+     * R-163 T4：最近一轮结局（内存态，不进镜像/持久化）——error/断流/取消后最后一条助手消息
+     * 出「继续」入口；新轮发送时复位 'ok'。
+     */
+    lastRoundOutcome: 'ok' as 'ok' | 'error' | 'interrupted' | 'cancelled',
     /** 最近一次工作区契约事件（面板"工作区已同步"chip 的数据源） */
     contextSync: null as WorkspaceActionRecord | null,
     /** 最近一次 ui_event 分发结果（AI 驱动工作区的回执展示） */
@@ -1037,6 +1042,7 @@ export const useAiStore = defineStore('ai', {
               // 苞 B 项 3：用户主动停止不报断流（同 send 的守卫；重挂/续收路径同样适用）
               if (!info.terminal && !this.stopped) {
                 this.streamInterrupted = true
+                this.lastRoundOutcome = 'interrupted'
                 this.notice = `连接中断，结果可能不完整（${info.reason ?? '断流'}）。挂起卡保留，可刷新重试。`
               }
             }
@@ -1088,6 +1094,7 @@ export const useAiStore = defineStore('ai', {
       this.stopped = false
       this.notice = null
       this.streamInterrupted = false
+      this.lastRoundOutcome = 'ok' // R-163 T4：新轮复位「继续」入口判据
       this.busyConflict = null
       this.poolSaturated = null
       const controller = new AbortController()
@@ -1114,6 +1121,7 @@ export const useAiStore = defineStore('ai', {
           if (!info.terminal && !this.stopped) {
             // ADR-6：缺 done/error 终帧 = 断流，必须显式提示"结果可能不完整"
             this.streamInterrupted = true
+            this.lastRoundOutcome = 'interrupted'
             this.notice = `连接中断，结果可能不完整（${info.reason ?? '未收到完成帧'}）。已生成的内容保留，可重新发送或一键重挂该轮。`
             if (this.activeForm !== null) {
               // 红队问题 2：断流是第五个收尾出口 —— 与 done/error/stop/resetSession 对齐，
@@ -1271,6 +1279,7 @@ export const useAiStore = defineStore('ai', {
               // 苞 B 项 3：用户主动停止不报断流（同 send 的守卫；重挂/续收路径同样适用）
               if (!info.terminal && !this.stopped) {
                 this.streamInterrupted = true
+                this.lastRoundOutcome = 'interrupted'
                 this.notice = `连接中断，结果可能不完整（重挂未能收到完成帧：${info.reason ?? '断流'}）`
                 if (this.activeForm !== null) {
                   // 与红队问题 2 同构：重挂断流同样是收尾出口，不能只置通知而漏收表单态
@@ -1599,6 +1608,7 @@ export const useAiStore = defineStore('ai', {
     /** 停止本轮：先断本地连接，再通知后端取消（后端不可达也不影响本地停止）。 */
     async stop(): Promise<void> {
       this.stopped = true
+      this.lastRoundOutcome = 'cancelled'
       try {
         currentAbort?.abort()
       } catch {
@@ -1621,6 +1631,18 @@ export const useAiStore = defineStore('ai', {
         this.notice = '已请求取消本轮对话'
       } catch (error) {
         this.notice = error instanceof Error ? `取消请求失败：${error.message}` : '取消请求失败'
+      }
+    },
+
+    /** R-163 T3/T5：赞踩上报（本地态在面板；上报失败静默——不打扰主对话流）。携正文快照 excerpt（F2）。 */
+    async submitFeedback(messageId: string, rating: 1 | -1 | 0, excerpt?: string): Promise<void> {
+      if (rating !== 1 && rating !== -1 && rating !== 0) {
+        return
+      }
+      try {
+        await aiApi.feedbackSubmit({ messageId, sessionId: this.sessionId, rating, excerpt })
+      } catch {
+        // 静默：反馈上报失败不打断对话（人工复盘数据，非关键链路）
       }
     },
 
@@ -1984,6 +2006,7 @@ export const useAiStore = defineStore('ai', {
             this.activeForm = null
           }
           this.notice = `本轮出错（${frame.code}）：${frame.message}`
+          this.lastRoundOutcome = 'error'
           break
         }
         default:

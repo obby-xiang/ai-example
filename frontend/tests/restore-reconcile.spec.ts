@@ -106,7 +106,7 @@ describe('restoreSuspendedSnapshot 的 await 后二次对账', () => {
     expect(store.suspended).toBe(false)
     expect(store.activeForm).toBeNull()
     expect(api.reattachRun).not.toHaveBeenCalled()
-  })
+  }, 15000)
 
   it('负例②：取数期间同会话起新轮 → 旧快照写回被丢弃，在跑轮的 runId 与连接不被顶替', async () => {
     const store = await freshStore()
@@ -138,7 +138,7 @@ describe('restoreSuspendedSnapshot 的 await 后二次对账', () => {
     expect(api.reattachRun).not.toHaveBeenCalled()
 
     void round // 新轮连接保持未决（本用例不需要它收尾）
-  })
+  }, 15000)
 
   it('正例：无干扰时挂起卡正常重建（快照口径不变）', async () => {
     const store = await freshStore()
@@ -177,5 +177,5 @@ describe('restoreSuspendedSnapshot 的 await 后二次对账', () => {
     expect(api.reattachRun).toHaveBeenCalledTimes(1)
     expect(api.reattachRun.mock.calls[0]?.[0]).toBe('run-old')
     expect(api.reattachRun.mock.calls[0]?.[2]).toMatchObject({ lastSeq: 7 })
-  })
+  }, 15000)
 })

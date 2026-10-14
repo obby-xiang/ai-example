@@ -4,6 +4,8 @@ import com.example.configmgr.ai.config.AiAvailability;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.RedisAvailability;
 import com.example.configmgr.ai.gate.ConfirmGate;
+import com.example.configmgr.ai.feedback.AiFeedback;
+import com.example.configmgr.ai.feedback.AiFeedbackRepository;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.memory.RedisChatMemoryRepository;
 import com.example.configmgr.ai.run.CancellationRegistry;
@@ -27,6 +29,7 @@ import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.env.Environment;
 import org.springframework.http.HttpStatus;
@@ -43,7 +46,6 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
-
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -120,6 +122,13 @@ public class AiController {
 	private final Environment environment;
 
 	private final JobWatchdog jobWatchdog;
+
+	/**
+	 * R-163 T5：赞踩反馈仓储。**字段注入**（非构造器）——本批后端红线仅限赞踩端点，
+	 * 构造器签名不变 ⇒ 既有 AiController 全部测试（@WebMvcTest 等）零触碰。
+	 */
+	@Autowired
+	private AiFeedbackRepository aiFeedbackRepository;
 
 	public AiController(AiAvailability availability, ObjectProvider<ResilientChatService> chatService,
 			ObjectProvider<ResumeService> resumeService, ObjectProvider<StartupResumeRunner> startupResumeRunner,
@@ -802,6 +811,85 @@ public class AiController {
 			items.add(pending.asMap());
 		}
 		return ApiResponse.ok(items);
+	}
+
+	// ── R-163 T5：赞踩反馈（本批唯一后端面；ai_feedback net-new 表，parts[] 持久化不动） ──
+
+	/**
+	 * POST /api/ai/feedback —— 赞踩上报（幂等 upsert：message_id 唯一；rating=0 = 取消=删行）。
+	 * 请求体 {@code {messageId, sessionId, rating∈1/-1/0, reason?}}；校验失败 400 携可读 message。
+	 * 单用户本地应用（无登录体系），created_by 预留隔离位。
+	 */
+	@PostMapping("/feedback")
+	public ResponseEntity<?> feedback(@RequestBody Map<String, Object> body) {
+		String messageId = stringOf(body.get("messageId"));
+		String sessionId = stringOf(body.get("sessionId"));
+		Object ratingRaw = body.get("rating");
+		Integer rating = ratingRaw instanceof Number number ? number.intValue() : null;
+		String reason = stringOf(body.get("reason"));
+		// R-163 收口修 F2：被评价消息正文快照（前 200 字符，人工复盘可读摘要）
+		String excerpt = stringOf(body.get("excerpt"));
+		if (messageId == null || sessionId == null || rating == null
+				|| (rating != 1 && rating != -1 && rating != 0)) {
+			return json(HttpStatus.BAD_REQUEST,
+					Map.of("code", "BAD_REQUEST", "message", "messageId/sessionId 必填，rating ∈ 1/-1/0"));
+		}
+		if (rating == 0) {
+			AiFeedback existing = this.aiFeedbackRepository.findByMessageId(messageId);
+			if (existing != null) {
+				this.aiFeedbackRepository.delete(existing);
+			}
+			return ResponseEntity.ok(ApiResponse.ok(Map.of("saved", false, "cancelled", existing != null)));
+		}
+		AiFeedback entry = this.aiFeedbackRepository.findByMessageId(messageId);
+		boolean saved;
+		if (entry == null) {
+			entry = new AiFeedback();
+			entry.setMessageId(messageId);
+			saved = true;
+		}
+		else {
+			saved = false;
+		}
+		entry.setSessionId(sessionId);
+		entry.setRating(rating);
+		if (reason != null) {
+			entry.setReason(reason.length() > 1024 ? reason.substring(0, 1024) : reason);
+		}
+		if (excerpt != null) {
+			entry.setMessageExcerpt(excerpt.length() > 200 ? excerpt.substring(0, 200) : excerpt);
+		}
+		this.aiFeedbackRepository.save(entry);
+		return ResponseEntity.ok(ApiResponse.ok(Map.of("saved", saved, "cancelled", false)));
+	}
+
+	/**
+	 * GET /api/ai/feedback —— 设置页「AI 反馈」查看列表（时间/消息摘要/rating/reason，
+	 * 仅当前用户=单用户应用全表；上限 100 条，按更新时间倒序）。
+	 */
+	@GetMapping("/feedback")
+	public ApiResponse<List<Map<String, Object>>> feedbackList() {
+		List<Map<String, Object>> items = new ArrayList<>();
+		for (AiFeedback entry : this.aiFeedbackRepository.findTop100ByOrderByUpdatedAtDesc()) {
+			Map<String, Object> item = new LinkedHashMap<>();
+			item.put("messageId", entry.getMessageId());
+			item.put("sessionId", entry.getSessionId());
+			item.put("rating", entry.getRating());
+			item.put("reason", entry.getReason());
+			item.put("excerpt", entry.getMessageExcerpt());
+			item.put("createdAt", entry.getCreatedAt());
+			item.put("updatedAt", entry.getUpdatedAt());
+			items.add(item);
+		}
+		return ApiResponse.ok(items);
+	}
+
+	private static String stringOf(Object value) {
+		if (value == null) {
+			return null;
+		}
+		String s = String.valueOf(value).trim();
+		return s.isEmpty() ? null : s;
 	}
 
 }

@@ -141,5 +141,39 @@ export const aiApi = {
   run,
   resume,
   pending,
-  runsCurrent
+  runsCurrent,
+  feedbackSubmit,
+  feedbackList
+}
+
+/** R-163 T5：赞踩上报（rating ∈ 1/-1/0，0=取消；后端幂等 upsert）。 */
+export interface AiFeedbackRequest {
+  messageId: string
+  sessionId: string
+  rating: 1 | -1 | 0
+  reason?: string
+  /** R-163 收口修 F2：被评价消息正文前 200 字符快照（人工复盘可读摘要）。 */
+  excerpt?: string
+}
+
+/** R-163 T5：反馈查看列表条目（设置页「AI 反馈」）。 */
+export interface AiFeedbackEntry {
+  messageId: string
+  sessionId: string
+  rating: 1 | -1
+  reason: string | null
+  /** F2：正文快照（旧数据/未携时为 null）。 */
+  excerpt?: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+/** POST /api/ai/feedback（幂等 upsert；message_id 唯一）。 */
+export function feedbackSubmit(request: AiFeedbackRequest): Promise<{ saved: boolean; cancelled: boolean }> {
+  return post<{ saved: boolean; cancelled: boolean }>('/ai/feedback', request)
+}
+
+/** GET /api/ai/feedback（设置页「AI 反馈」查看列表，固定上限 100 倒序——后端硬编码，前端不传参）。 */
+export function feedbackList(): Promise<AiFeedbackEntry[]> {
+  return get<AiFeedbackEntry[]>('/ai/feedback')
 }

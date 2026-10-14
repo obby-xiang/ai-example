@@ -18,8 +18,12 @@
     "@grapecity/spread-sheets-resources-zh": "17.1.5",
     "axios": "^1.7.9",
     "dayjs": "^1.11.13",
+    "dompurify": "3.4.14",
     "element-plus": "^2.9.3",
+    "highlight.js": "11.11.1",
     "jszip": "^3.10.1",
+    "markdown-it": "15.0.0",
+    "mermaid": "11.16.1",
     "pinia": "^2.3.0",
     "vue": "^3.5.13",
     "vue-router": "^4.5.0"

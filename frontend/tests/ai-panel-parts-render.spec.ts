@@ -22,7 +22,8 @@ const api = vi.hoisted(() => ({
   runsCurrent: vi.fn(),
   frontendToolResult: vi.fn(),
   reattachRun: vi.fn(),
-  chat: vi.fn()
+  chat: vi.fn(),
+  feedbackSubmit: vi.fn()
 }))
 
 /** R-158 #12：ResizeObserver 测试桩 —— jsdom 无 RO；用模块级开关控制「溢出/不溢出」回调。 */
@@ -58,6 +59,8 @@ beforeEach(() => {
   api.history.mockReset()
   api.runsCurrent.mockReset()
   api.reattachRun.mockReset()
+  api.feedbackSubmit.mockReset()
+  api.feedbackSubmit.mockResolvedValue({ saved: true, cancelled: false })
   api.health.mockResolvedValue({ available: true, code: 'OK', model: 'm', baseUrl: 'b', memoryBackend: 'redis', sessionTtl: '1h', confirmTimeoutSeconds: 120, frontendToolTimeoutSeconds: 120, suspendPoolSize: 4, activeSuspendGates: 0, heldSessions: 0, sessionLockRenewals: 0, resumeOnStartup: false, instanceId: 'i', checkedAt: '2026-01-01T00:00:00Z' })
 })
 
@@ -147,8 +150,12 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
     expect(cards).toHaveLength(1)
     expect(cards[0]?.attributes('data-testid')).toBe('pending-card-c1')
 
-    // A1'②：卡头统一为段单一来源 —— 旧结构（工具卡 + 投影挂起卡并列）工具名出现两次，合并后恰一次
-    expect(html.split('启动导出作业').length - 1).toBe(1)
+    // A1'②：卡头统一为段单一来源 —— 旧结构（工具卡 + 投影挂起卡并列）工具名出现两次，合并后恰一次。
+    // R-163 T2 口径：卡头另有摘要行（「启动导出作业（任务 #1）」），工具名仍只标签一次
+    // （按标签边界计数，摘要行的含名摘要不混入）。
+    expect(html.split('>启动导出作业<').length - 1).toBe(1)
+    // R-163 T2 摘要行入卡头（T0 静态映射）
+    expect(wrapper.find('[data-testid="tool-summary-c1"]').exists()).toBe(true)
     // 确认子块（CONFIRM pending）在持 testid 的同一张卡内
     expect(cards[0]!.html()).toContain('确认执行')
 
@@ -223,7 +230,10 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
         { toolCallId: 'f1', name: 'probe.tool', kind: 'FRONTEND', args: {}, rawArgs: '{}', timeoutSeconds: 120, status: 'pending' }
       )
     ])
-    expect(wrapper.html().split('probe.tool').length - 1).toBe(1)
+    // R-163 T2 口径：无映射工具的摘要兜底 = 「工具名 · 状态」，工具名标签本体仍恰一次
+    // （按标签边界计数，摘要行兜底文本不混入）
+    expect(wrapper.html().split('>probe.tool<').length - 1).toBe(1)
+    expect(wrapper.find('[data-testid="tool-summary-f1"]').text()).toContain('probe.tool')
     wrapper.unmount()
   })
 
@@ -849,15 +859,14 @@ describe('R-157：操作行外置 + role 过滤 + 编辑重跑 + 发送滚底 + 
     wrapper.unmount()
   })
 
-  it('#5：头像去文字 —— AI 四角星 / 用户人形 SVG，头像内零文字', async () => {
+  it('#5：双侧去头像（R-163 T3 口径改写）—— 消息行无头像列、头像 testid 零命中', async () => {
     const [user, reply] = pair()
     const wrapper = await mountPanel([user, reply])
-    for (const id of ['u-1', 'a-1']) {
-      const avatar = wrapper.find(`[data-testid="msg-avatar-${id}"]`)
-      expect(avatar.exists()).toBe(true)
-      expect(avatar.find('svg').exists()).toBe(true)
-      expect(avatar.text()).toBe('')
-    }
+    // R-157 #5 原判据（头像存在 + 零文字）随 R-163 T3「双侧去头像」退役：断言头像整列移除
+    expect(wrapper.find('[data-testid^="msg-avatar-"]').exists()).toBe(false)
+    // 消息行内容直出：用户卡片与助手全文仍在
+    expect(wrapper.find('[data-testid="msg-bubble-u-1"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="msg-bubble-a-1"]').exists()).toBe(true)
     wrapper.unmount()
   })
 })
@@ -1009,16 +1018,19 @@ describe('R-158：HITL 只读回执 / CollapsibleText / 复制换行', () => {
  * 完成 300ms 淡出换入 / 工具期光标收起归位（S0-b 时序证据）/ span.ch 渐显包裹。
  */
 describe('R-159：流式回复体验六项', () => {
-  it('#1：B1 光标在流式正文末尾（class caret，随 ch spans 之后）', async () => {
+  it('#1：B1 光标在流式正文末尾（R-163 T1 口径：caret 为 md-body 之后紧邻兄弟）', async () => {
     const speaking = buildMessage([{ kind: 'text', seg: 0, text: '正在输出的一段文字', streaming: true }], null, true)
     speaking.id = 'a-b1'
     const wrapper = await mountPanel([speaking])
     const caret = wrapper.find('[data-testid="stream-caret"]')
     expect(caret.exists()).toBe(true)
     expect(caret.classes()).toContain('caret')
-    // 光标是正文块最后一个子元素（B1 粗块随文尾）
+    // R-163 T1：正文走 markdown-it → DOMPurify → v-html（md-body），光标移出正文 div，
+    // 为其后紧邻兄弟（B1 粗块随文尾的视觉语义不变）
     const bubble = wrapper.find('[data-testid="msg-bubble-a-b1"]')
-    expect(bubble.find('.whitespace-pre-wrap').element.lastElementChild!.className).toContain('caret')
+    const mdBody = bubble.find('.md-body')
+    expect(mdBody.exists()).toBe(true)
+    expect(caret.element.previousElementSibling).toBe(mdBody.element)
     wrapper.unmount()
   })
 
@@ -1101,20 +1113,21 @@ describe('R-159：流式回复体验六项', () => {
     wrapper.unmount()
   })
 
-  it('#6：新字符渐显 —— 流式正文末尾 8 字符包 span.ch，前缀为稳定文本', async () => {
+  it('#6：R-163 T1 口径改写 —— span.ch 逐字符渐显退役（语义被 Markdown 渲染取代），正文走 md-body 唯一链路', async () => {
     const msg = buildMessage([{ kind: 'text', seg: 0, text: 'abcdefghijkl', streaming: true }], null, true)
     msg.id = 'a-ch'
     const wrapper = await mountPanel([msg])
     const bubble = wrapper.find('[data-testid="msg-bubble-a-ch"]')
-    const chSpans = bubble.findAll('span.ch')
-    expect(chSpans).toHaveLength(8)
-    expect(chSpans.map((s) => s.text()).join('')).toBe('efghijkl')
-    expect(bubble.text()).toContain('abcd')
-    // 终态消息零 ch 包裹（纯文本一次成型）
+    // chSplit/CH_TAIL 已退役：零 span.ch 包裹，全文经 markdown-it → DOMPurify 出 md-body
+    expect(bubble.findAll('span.ch')).toHaveLength(0)
+    expect(bubble.find('.md-body').exists()).toBe(true)
+    expect(bubble.find('.md-body').text()).toContain('abcdefghijkl')
+    // 终态消息同链路（纯文本经 markdown 渲染一次成型，无 ch 包裹）
     const done = buildMessage([{ kind: 'text', seg: 0, text: 'abcdefghijkl', streaming: false }], null, false)
     done.id = 'a-done'
     const wrapper2 = await mountPanel([done])
     expect(wrapper2.find('[data-testid="msg-bubble-a-done"]').findAll('span.ch')).toHaveLength(0)
+    expect(wrapper2.find('[data-testid="msg-bubble-a-done"]').find('.md-body').exists()).toBe(true)
     wrapper.unmount()
     wrapper2.unmount()
   })
@@ -1480,5 +1493,245 @@ describe('R-162：元信息行紧邻布局 + 渐进时间格式', () => {
     expect(formatProgressiveTs(noon, noon)).toBe('12:00') // 同刻 diff=0
     expect(formatProgressiveTs(undefined, noon)).toBe('')
     expect(typeof formatProgressiveTs(noon)).toBe('string') // now 缺省
+  })
+})
+
+
+/**
+ * R-163（AI 对话体验专项，K2.8 施工）：T1 Markdown 唯一链路 + XSS 白名单 + 流式围栏降级 +
+ * mermaid 占位 / T0+T2 工具摘要映射 / T3 赞踩本地态 / T4 编辑确认 + 继续按钮。
+ */
+describe('R-163：Markdown 正文链路 / 白名单 / 工具摘要 / 赞踩 / 编辑确认 / 继续', () => {
+  /** 可写 el-input 桩（编辑回填断言要观测 v-model 值）。 */
+  const stubsWithInput = {
+    ...stubs,
+    'el-input': {
+      props: ['modelValue'],
+      template: '<textarea class="stub-input" :value="modelValue" @input="$emit(\'update:modelValue\', $event.target.value)" />'
+    }
+  }
+
+  it('T1：正文 Markdown 渲染 —— 加粗/列表/表格经 markdown-it 出真实标签（md-body v-html）', async () => {
+    const msg = buildMessage([
+      { kind: 'text', seg: 0, text: '**加粗** 与 `code`\n\n- 项一\n- 项二\n\n| A | B |\n| - | - |\n| 1 | 2 |', streaming: false }
+    ])
+    msg.id = 'a-md'
+    const wrapper = await mountPanel([msg])
+    const md = wrapper.find('[data-testid="msg-bubble-a-md"] .md-body')
+    expect(md.exists()).toBe(true)
+    expect(md.html()).toContain('<strong>加粗</strong>')
+    expect(md.findAll('li')).toHaveLength(2)
+    expect(md.findAll('td')).toHaveLength(2)
+    wrapper.unmount()
+  })
+
+  it('T1 白名单：script/onerror/iframe 净化零命中；a.href 保留但 javascript: 协议被剥', async () => {
+    const { renderMarkdown } = await import('@/utils/markdown')
+    const { html } = renderMarkdown(
+      '[正常](https://example.com) [恶意](javascript:alert(1))\n\n<script>alert(1)</script><img src="x" onerror="alert(1)"><iframe src="https://evil"></iframe>',
+      false
+    )
+    expect(html).not.toContain('<script')
+    expect(html).not.toContain('onerror')
+    expect(html).not.toContain('iframe')
+    expect(html).toContain('href="https://example.com"')
+    expect(html).not.toContain('href="javascript:') // markdown-it validateLink 拒链（残留仅为惰性文本）
+  })
+
+  it('T1 流式围栏：未闭合尾围栏渲染纯文本（无高亮 class），闭合后二次渲染才 language-*', async () => {
+    const { renderMarkdown } = await import('@/utils/markdown')
+    const open = renderMarkdown('```js\nconst a = 1\nconst b', true)
+    expect(open.html).not.toContain('language-js')
+    expect(open.html).toContain('const b')
+    const closed = renderMarkdown('```js\nconst a = 1\n```\n\n完成', false)
+    expect(closed.html).toContain('language-js')
+    expect(closed.html).toContain('hljs')
+  })
+
+  it('T1 mermaid：闭合围栏抽占位 div（异步渲染回填），流式未闭合保持源码块', async () => {
+    const { renderMarkdown } = await import('@/utils/markdown')
+    const stream = renderMarkdown('```mermaid\ngraph TD; A-->B', true)
+    expect(stream.mermaid).toHaveLength(0)
+    expect(stream.html).toContain('graph TD')
+    const closed = renderMarkdown('```mermaid\ngraph TD; A-->B;\n```\n\n说明文字', false)
+    expect(closed.mermaid).toHaveLength(1)
+    expect(closed.mermaid[0].source).toContain('graph TD')
+    expect(closed.html).toContain('language-mermaid') // 闭合后保留源码块（渲染回填/失败兜底同体）
+  })
+
+  it('T1 降级：>10k 长文结构照渲但无高亮/mermaid（DEGRADE_AT_CHARS 阈值）', async () => {
+    const { renderMarkdown, DEGRADE_AT_CHARS } = await import('@/utils/markdown')
+    expect(DEGRADE_AT_CHARS).toBe(10_000)
+    const long = `# 标题\n\n${'x'.repeat(DEGRADE_AT_CHARS + 100)}`
+    const { html } = renderMarkdown(long, false)
+    expect(html).toContain('<h1>') // 结构照渲
+    expect(html).not.toContain('language-') // 高亮降级（阈值实例无 highlight）
+    expect(html).not.toContain('hljs')
+  })
+
+  it('T0/T2：工具摘要映射 —— start_export 按 args 出「启动导出作业（任务 #7）」，未知工具兜底 名+状态', async () => {
+    const { toolSummary } = await import('@/utils/tool-summaries')
+    const mk = (name: string, args: string, status: ToolPart['status']): ToolPart =>
+      ({ kind: 'tool', seg: 0, toolCallId: 't1', name, kind2: 'BACKEND', status, args, requiresAction: false }) as ToolPart
+    expect(toolSummary(mk('start_export', '{"taskId":7}', 'running'))).toBe('启动导出作业（任务 #7）')
+    expect(toolSummary(mk('create_task', '{"type":"EXPORT","title":"月报"}', 'running'))).toBe('创建导出任务「月报」')
+    expect(toolSummary(mk('mystery_tool', '{}', 'failed'))).toBe('mystery_tool · 失败')
+    const wrapper = await mountPanel([
+      buildMessage([{ kind: 'tool', seg: 0, toolCallId: 's1', name: 'start_export', kind2: 'CONFIRM', status: 'pending', args: '{"taskId":7}', timeoutSeconds: 120, requiresAction: true }])
+    ])
+    expect(wrapper.find('[data-testid="tool-summary-s1"]').text()).toBe('启动导出作业（任务 #7）')
+    wrapper.unmount()
+  })
+
+  it('T2：9 态工具卡状态 tag 全出（等待确认/调用中/已成功/执行失败/已拒绝/超出当前范围/会话已失效/已取消/结局未知）', async () => {
+    const parts: ToolPart[] = [
+      { kind: 'tool', seg: 0, toolCallId: 't1', name: 'probe.tool', kind2: 'BACKEND', status: 'pending', args: '{}', requiresAction: true },
+      { kind: 'tool', seg: 1, toolCallId: 't2', name: 'probe.tool', kind2: 'BACKEND', status: 'running', args: '{}', requiresAction: false },
+      { kind: 'tool', seg: 2, toolCallId: 't3', name: 'probe.tool', kind2: 'BACKEND', status: 'succeeded', args: '{}', requiresAction: false },
+      { kind: 'tool', seg: 3, toolCallId: 't4', name: 'probe.tool', kind2: 'BACKEND', status: 'failed', args: '{}', requiresAction: false },
+      { kind: 'tool', seg: 4, toolCallId: 't5', name: 'probe.tool', kind2: 'BACKEND', status: 'rejected', args: '{}', requiresAction: false },
+      { kind: 'tool', seg: 5, toolCallId: 't6', name: 'probe.tool', kind2: 'BACKEND', status: 'blocked', args: '{}', requiresAction: false },
+      { kind: 'tool', seg: 6, toolCallId: 't7', name: 'probe.tool', kind2: 'BACKEND', status: 'expired', args: '{}', requiresAction: false },
+      { kind: 'tool', seg: 7, toolCallId: 't8', name: 'probe.tool', kind2: 'BACKEND', status: 'cancelled', args: '{}', requiresAction: false },
+      { kind: 'tool', seg: 8, toolCallId: 't9', name: 'probe.tool', kind2: 'BACKEND', status: 'unknown', args: '{}', requiresAction: false }
+    ]
+    const wrapper = await mountPanel([buildMessage(parts)])
+    for (const label of ['等待确认', '调用中', '已成功', '执行失败', '已拒绝', '超出当前范围', '会话已失效', '已取消', '结局未知']) {
+      expect(wrapper.text()).toContain(label)
+    }
+    // 展开体 input/output 标签（T2 裸 JSON 墙消除的结构性锁）
+    await wrapper.find('[data-testid="block-toggle-a-1:t3"]').trigger('click')
+    expect(wrapper.find('[data-testid="block-body-a-1:t3"]').text()).toContain('输入')
+    wrapper.unmount()
+  })
+
+  it('T3：赞踩本地态 —— 选中互斥、再点取消、上报 rating 序列（1 → -1 → 0）', async () => {
+    const msg = buildMessage([{ kind: 'text', seg: 0, text: '回答', streaming: false }])
+    msg.id = 'a-fb'
+    const wrapper = await mountPanel([msg])
+    const up = wrapper.find('[data-testid="feedback-up-a-fb"]')
+    const down = wrapper.find('[data-testid="feedback-down-a-fb"]')
+    expect(up.exists()).toBe(true)
+    expect(down.exists()).toBe(true)
+    await up.trigger('click')
+    expect(up.attributes('aria-pressed')).toBe('true')
+    expect(api.feedbackSubmit).toHaveBeenLastCalledWith(expect.objectContaining({ messageId: 'a-fb', rating: 1 }))
+    // 互斥：赞后点踩 ⇒ 踩选中、赞取消（rating -1）
+    await down.trigger('click')
+    expect(down.attributes('aria-pressed')).toBe('true')
+    expect(up.attributes('aria-pressed')).toBe('false')
+    expect(api.feedbackSubmit).toHaveBeenLastCalledWith(expect.objectContaining({ rating: -1 }))
+    // 再点踩 ⇒ 取消（rating 0）
+    await down.trigger('click')
+    expect(down.attributes('aria-pressed')).toBe('false')
+    expect(api.feedbackSubmit).toHaveBeenLastCalledWith(expect.objectContaining({ rating: 0 }))
+    wrapper.unmount()
+  })
+
+  it('T3：操作行 28×28 热区 + gap≥8（w-7 h-7 / gap-2）', async () => {
+    const msg = buildMessage([{ kind: 'text', seg: 0, text: '回答', streaming: false }])
+    msg.id = 'a-hit'
+    const wrapper = await mountPanel([msg])
+    const btn = wrapper.find('[data-testid="feedback-up-a-hit"]')
+    expect(btn.classes()).toContain('w-7')
+    expect(btn.classes()).toContain('h-7')
+    const row = wrapper.find('[data-testid="msg-ops-a-hit"] > div:last-child')
+    expect(row.classes()).toContain('gap-2')
+    wrapper.unmount()
+  })
+
+  it('T4：编辑防覆盖 —— 输入框非空白先弹确认（确认才回填，取消不覆盖）', async () => {
+    const store = useAiStore()
+    const user = buildMessage([{ kind: 'text', seg: 0, text: '用户原话', streaming: false }])
+    user.id = 'u-edit'
+    user.role = 'user'
+    store.messages = [user]
+    store.historyLoaded = true
+    const { default: AiPanel } = await import('@/components/AiPanel/AiPanel.vue')
+    const wrapper = mount(AiPanel, { global: { stubs: stubsWithInput } })
+    await wrapper.vm.$nextTick()
+    const input = wrapper.find('textarea')
+    await input.setValue('草稿内容')
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    await wrapper.find('[data-testid="edit-msg-u-edit"]').trigger('click')
+    expect(confirmSpy).toHaveBeenCalled()
+    expect((wrapper.find('textarea').element as HTMLTextAreaElement).value).toBe('草稿内容') // 未覆盖
+    confirmSpy.mockReturnValue(true)
+    await wrapper.find('[data-testid="edit-msg-u-edit"]').trigger('click')
+    expect((wrapper.find('textarea').element as HTMLTextAreaElement).value).toBe('用户原话') // 确认后回填
+    confirmSpy.mockRestore()
+    wrapper.unmount()
+  })
+
+  it('T4：「继续」按钮 —— 断流态最后一条助手消息出入口，点击直发「继续」', async () => {
+    const store = useAiStore()
+    const reply = buildMessage([{ kind: 'text', seg: 0, text: '部分回答', streaming: false }])
+    reply.id = 'a-cont'
+    store.messages = [reply]
+    store.historyLoaded = true
+    store.lastRoundOutcome = 'interrupted'
+    api.chat.mockReset()
+    api.chat.mockResolvedValue(undefined)
+    const { default: AiPanel } = await import('@/components/AiPanel/AiPanel.vue')
+    const wrapper = mount(AiPanel, { global: { stubs: stubsWithInput } })
+    await wrapper.vm.$nextTick()
+    const cont = wrapper.find('[data-testid="continue-round"]')
+    expect(cont.exists()).toBe(true)
+    await cont.trigger('click')
+    await wrapper.vm.$nextTick()
+    expect(api.chat).toHaveBeenCalledTimes(1)
+    expect(api.chat.mock.calls[0][0].message).toBe('继续')
+    wrapper.unmount()
+  })
+
+  it('T4：「继续」按钮负例 —— 正常收官（ok）不出入口；仅末条助手消息出', async () => {
+    const store = useAiStore()
+    const older = buildMessage([{ kind: 'text', seg: 0, text: '旧回答', streaming: false }])
+    older.id = 'a-old'
+    const last = buildMessage([{ kind: 'text', seg: 0, text: '新回答', streaming: false }])
+    last.id = 'a-new'
+    store.messages = [older, last]
+    store.historyLoaded = true
+    store.lastRoundOutcome = 'ok'
+    const { default: AiPanel } = await import('@/components/AiPanel/AiPanel.vue')
+    const wrapper = mount(AiPanel, { global: { stubs } })
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-testid="continue-round"]').exists()).toBe(false)
+    store.lastRoundOutcome = 'cancelled'
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-testid="msg-ops-a-new"]').find('[data-testid="continue-round"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="msg-ops-a-old"]').find('[data-testid="continue-round"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+})
+
+/** F1（复核 MAJOR 收口修）回归锁：断流置位 → 断流 Alert 渲染（error 档）+「继续」入口同帧。 */
+describe('R-163 收口修 F1：断流置位 → Alert 渲染回归', () => {
+  it('streamInterrupted=true ⇒ 断流 Alert（error 档）渲染；false 则不渲染', async () => {
+    const store = useAiStore()
+    const reply = buildMessage([{ kind: 'text', seg: 0, text: '部分回答', streaming: false }])
+    reply.id = 'a-f1'
+    store.messages = [reply]
+    store.historyLoaded = true
+
+    // 断流现场（onClose 非终帧路径的置位结果）
+    store.streamInterrupted = true
+    store.lastRoundOutcome = 'interrupted'
+    const wrapper = await mountPanel(store.messages)
+    const alert = wrapper.find('el-alert-stub')
+    expect(alert.exists()).toBe(true)
+    expect(alert.attributes('type')).toBe('error') // noticeType 的 error 档同源驱动
+    expect(alert.attributes('title')).toContain('连接中断')
+    // 与「继续」入口同帧出现（lastRoundOutcome 并列置位的另一面）
+    expect(wrapper.find('[data-testid="continue-round"]').exists()).toBe(true)
+    wrapper.unmount()
+
+    // 负例：正常收官不断流 ⇒ Alert 不渲染
+    store.streamInterrupted = false
+    store.lastRoundOutcome = 'ok'
+    const wrapper2 = await mountPanel(store.messages)
+    expect(wrapper2.find('el-alert-stub').exists()).toBe(false)
+    expect(wrapper2.find('[data-testid="continue-round"]').exists()).toBe(false)
+    wrapper2.unmount()
   })
 })

@@ -13,6 +13,7 @@
           <el-menu-item :index="ROUTE_NAMES.taskCenter" :route="{ name: ROUTE_NAMES.taskCenter }">任务中心</el-menu-item>
           <el-menu-item :index="ROUTE_NAMES.definitions" :route="{ name: ROUTE_NAMES.definitions }">配置定义</el-menu-item>
           <el-menu-item :index="ROUTE_NAMES.dataBrowser" :route="{ name: ROUTE_NAMES.dataBrowser }">数据浏览</el-menu-item>
+          <el-menu-item :index="ROUTE_NAMES.aiFeedback" :route="{ name: ROUTE_NAMES.aiFeedback }">AI 反馈</el-menu-item>
         </el-menu>
       </div>
       <el-button link @click="ai.toggleExpand()">

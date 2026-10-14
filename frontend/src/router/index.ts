@@ -12,7 +12,8 @@ export const ROUTE_NAMES = {
   exportWizard: 'export-wizard',
   importWizard: 'import-wizard',
   definitions: 'definitions',
-  dataBrowser: 'data-browser'
+  dataBrowser: 'data-browser',
+  aiFeedback: 'ai-feedback'
 } as const
 
 export type RouteName = (typeof ROUTE_NAMES)[keyof typeof ROUTE_NAMES]
@@ -48,6 +49,12 @@ const routes: RouteRecordRaw[] = [
     name: ROUTE_NAMES.dataBrowser,
     component: () => import('@/views/DataBrowserView.vue'),
     meta: { title: '数据浏览', pageId: 'data' }
+  },
+  {
+    path: '/settings/ai-feedback',
+    name: ROUTE_NAMES.aiFeedback,
+    component: () => import('@/views/AiFeedbackView.vue'),
+    meta: { title: 'AI 反馈', pageId: 'settings' }
   },
   { path: '/:pathMatch(.*)*', redirect: { name: ROUTE_NAMES.taskCenter } }
 ]

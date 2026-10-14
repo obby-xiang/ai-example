@@ -157,29 +157,17 @@
       <div
         v-for="m in ai.messages"
         :key="m.id"
-        class="group flex gap-2 mb-3.5"
+        class="group flex mb-3.5"
         :class="m.role === 'user' ? 'flex-row-reverse' : ''"
       >
-        <div
-          class="w-7 h-7 rounded-full flex items-center justify-center shrink-0"
-          :class="m.role === 'user' ? 'bg-[#e4e7ed]' : 'bg-gradient-to-br from-[#409eff] to-[#7b61ff]'"
-          :data-testid="'msg-avatar-' + m.id"
-        >
-          <!-- R-157 #5：头像去文字 —— AI = 蓝紫渐变四角星（复用头部渐变语言），用户 = 灰色人形 -->
-          <svg v-if="m.role === 'user'" viewBox="0 0 24 24" fill="#909399" class="w-4 h-4" aria-hidden="true">
-            <path d="M12 12a5 5 0 1 0-5-5 5 5 0 0 0 5 5zm0 2c-4 0-8 2-8 5v2h16v-2c0-3-4-5-8-5z" />
-          </svg>
-          <svg v-else viewBox="0 0 24 24" fill="none" class="w-4 h-4" aria-hidden="true">
-            <path d="M12 2l2.4 7.6L22 12l-7.6 2.4L12 22l-2.4-7.6L2 12l7.6-2.4z" fill="#fff" />
-          </svg>
-        </div>
-        <!-- 内容列：气泡 + 指示器 + 操作行（R-157 #1：操作行挪气泡外、卡片下沿独立行） -->
+        <!-- R-163 T3：双侧去头像（demo v6 场景 2）——消息行 = 内容 + 元信息行，无头像列 -->
+        <!-- 内容列：正文/卡片 + 元信息行（R-157 #1：操作行挪气泡外、卡片下沿独立行） -->
         <div class="min-w-0 flex-1 flex flex-col" :class="m.role === 'user' ? 'items-end' : 'items-start'">
-        <!-- R-160 M4（issue #14③ 方案 A）：气泡容器层一刀切 —— overflow:hidden + min-width:0，
-             长串（无空白可断）不再越出气泡；不铺分块规则（Markdown 重做时整体替换） -->
+        <!-- R-160 M4（issue #14③ 方案 A）：容器层一刀切 —— overflow:hidden + min-width:0；
+             R-163 T3：用户消息 = 内容-only 卡片；助手回复 = 无气泡全宽（透明底）。 -->
         <div
-          class="max-w-[82%] min-w-0 overflow-hidden rounded-lg px-2.5 py-2 text-[13px] text-[#303133] leading-[1.6] break-words"
-          :class="m.role === 'user' ? 'bg-[#d9ecff]' : 'bg-[#f4f4f5]'"
+          class="min-w-0 overflow-hidden w-full px-2.5 py-2 text-[14px] text-[#303133] leading-[1.7]"
+          :class="m.role === 'user' ? 'max-w-[82%] rounded-lg bg-[#d9ecff] break-words' : ''"
           :data-testid="'msg-bubble-' + m.id"
         >
           <!-- 消息体：块分派（批4④ A5' → R-154 单卡化）——groupParts 把段序列分派为 text/activity 块；
@@ -187,10 +175,11 @@
                （expandedBlocks ?? defaultExpanded，D4/D6/D-C6）；key 用块稳定 id
                （成员 toolCallId / kind-seg，加消息命名空间前缀，收口修 F1/红队 M-1），禁用数组下标（§7 R4-3 / D5）。 -->
           <template v-for="(block, bi) in blocksOf(m)" :key="block.id">
-            <!-- 正文块：单段正文，永不进折叠组（A5' 规则③）；
-                 R-157 #3：流式中正文末尾打字机光标；R-159 #6：末尾 CH_TAIL 字符包 span.ch 渐显（新字符 chIn）；
-                 R-159 #4：完成时光标同帧淡出（fade-out，300ms 后随 isFading 退役）。 -->
-            <div v-if="block.kind === 'text'" class="whitespace-pre-wrap">{{ chSplit(m, block).head }}<span v-for="(ch, ci) in chSplit(m, block).tail" :key="ci" class="ch">{{ ch }}</span><span v-if="showCaret(m, bi) || isFading(m)" class="caret" :class="{ 'fade-out': isFading(m) }" data-testid="stream-caret"></span></div>
+            <!-- R-163 T1 正文块：markdown-it → DOMPurify 白名单 → v-html 唯一链路
+                 （chSplit/CH_TAIL 逐字符渐显退役——R-159 该语义被 Markdown 渲染取代，spec 口径同步改写）；
+                 R-159 #3：流式正文末尾打字机光标保留（移出正文 div，随块同帧淡出）。 -->
+            <div v-if="block.kind === 'text'" class="md-body" v-html="markdownHtml(m, block)"></div>
+            <span v-if="block.kind === 'text' && (showCaret(m, bi) || isFading(m))" class="caret" :class="{ 'fade-out': isFading(m) }" data-testid="stream-caret"></span>
 
             <!-- R-160 M2：HITL 只读回执**独立块**（R-158 #10 判据随块层判，块 = 已决确认门/GF 段）——
                  紧随源工具卡渲染，恒可见（不参与 expandedBlocks，无折叠卡头），刷新/历史恢复后可回溯。
@@ -249,6 +238,8 @@
                     class="mt-1.5 border border-solid border-[#dcdfe6] rounded-md bg-white"
                     :data-testid="part.requiresAction ? 'pending-card-' + part.toolCallId : 'tool-card-' + part.toolCallId"
                   >
+                    <!-- R-163 T2 卡头折叠单行 = 状态 tag + 工具名 + 一行自然语言摘要（T0 静态映射）；
+                         点击卡头展开/收起 input/output（v-show：DOM 恒在）；requiresAction 卡强制展开。 -->
                     <button
                       type="button"
                       class="w-full flex items-center gap-1.5 p-2 text-left font-semibold text-[13px] flex-wrap"
@@ -259,6 +250,7 @@
                     >
                       <el-icon color="#409EFF"><Operation /></el-icon>
                       <span>{{ toolLabel(part.name) }}</span>
+                      <span class="font-normal text-xs text-[#909399] truncate min-w-0 flex-1" :data-testid="'tool-summary-' + part.toolCallId">{{ toolSummary(part) }}</span>
                       <el-tag v-if="part.kind2 === 'FRONTEND'" size="small" effect="plain">前端工具</el-tag>
                       <el-tag v-else-if="part.kind2 === 'CONFIRM'" size="small" type="warning" effect="plain">确认门</el-tag>
                       <el-tag :size="'small'" :type="toolTagType(part.status)" :effect="part.status === 'running' ? 'dark' : 'light'">
@@ -266,21 +258,25 @@
                       </el-tag>
                     </button>
                     <div v-show="isBlockExpanded(block)" class="px-2 pb-2 pt-0 flex flex-col gap-1.5" :data-testid="'block-body-' + block.id">
-                      <!-- R-158 #12：args pretty-print + 真溢出渐隐（CollapsibleText） -->
-                      <div v-if="part.args" class="text-xs text-[#909399] break-all">
-                        <CollapsibleText :text="part.args" pretty :testid="'args-more-' + part.toolCallId" />
+                      <!-- R-163 T2：展开体 input/output 格式化 JSON（pretty 解析成功缩进 / 失败原样）——裸 JSON 墙消除 -->
+                      <div v-if="part.args">
+                        <div class="text-[11px] text-[#c0c4cc] mb-0.5">输入</div>
+                        <div class="text-xs text-[#909399] break-all">
+                          <CollapsibleText :text="part.args" pretty :testid="'args-more-' + part.toolCallId" />
+                        </div>
                       </div>
-                      <!-- R-154 #2 角标（帧侧截断标记）保留 + R-158 #12 展示层移交 CollapsibleText：
-                           真溢出才渐隐 + 「显示更多」（原本地去帽 max-h 组件态随之退役） -->
-                      <div v-if="part.result" class="px-2 py-1 text-xs text-[#606266] bg-[#fafafa] rounded">
-                        <CollapsibleText :text="part.result" :testid="'show-more-' + part.toolCallId">
-                          {{ part.result }}<span
-                            v-if="part.truncated"
-                            class="inline-block ml-1 px-1 rounded text-[10px] leading-4 bg-[#e6a23c] text-white align-middle"
-                            :title="part.truncatedReason ?? '结果被截断'"
-                            data-testid="truncated-badge"
-                          >已截断</span>
-                        </CollapsibleText>
+                      <div v-if="part.result">
+                        <div class="text-[11px] text-[#c0c4cc] mb-0.5">输出</div>
+                        <div class="px-2 py-1 text-xs text-[#606266] bg-[#fafafa] rounded">
+                          <CollapsibleText :text="part.result" :testid="'show-more-' + part.toolCallId">
+                            {{ part.result }}<span
+                              v-if="part.truncated"
+                              class="inline-block ml-1 px-1 rounded text-[10px] leading-4 bg-[#e6a23c] text-white align-middle"
+                              :title="part.truncatedReason ?? '结果被截断'"
+                              data-testid="truncated-badge"
+                            >已截断</span>
+                          </CollapsibleText>
+                        </div>
                       </div>
                       <!-- R-158 #6：卡内错误位（图标 + 红底 + 文案）——错误就地呈现，不再全堆顶部 Alert -->
                       <div v-if="part.reason" class="flex items-start gap-1 px-2 py-1 text-xs text-[#f56c6c] bg-[#fef0f0] rounded" data-testid="tool-error">
@@ -365,7 +361,7 @@
             <span v-else-if="formatProgressiveTs(m.timestamp)" class="text-[#c0c4cc]" data-testid="msg-timestamp">{{ formatProgressiveTs(m.timestamp) }}</span>
           </span>
           <div
-            class="flex items-center gap-1 transition-opacity"
+            class="flex items-center gap-2 transition-opacity"
             :class="m.streaming ? '' : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100'"
             :style="m.streaming && m.role === 'assistant' ? 'visibility: hidden' : ''"
           >
@@ -377,29 +373,63 @@
             >
               {{ copyState.ok ? '已复制' : '复制失败，请手动选中文本复制' }}
             </span>
-            <el-button
+            <!-- R-163 T4：「继续」入口（error/断流/取消后，最后一条助手消息）——点击直发「继续」 -->
+            <button
+              v-if="showContinue(m)"
+              type="button"
+              data-testid="continue-round"
+              title="继续本轮对话"
+              class="w-7 h-7 inline-flex items-center justify-center rounded text-xs text-[#409eff] hover:bg-[#ecf5ff]"
+              @click="continueRound"
+            >
+              继续
+            </button>
+            <!-- R-163 T3：赞踩（仅助手行）——28×28 热区、本地态、选中互斥可取消、title 气泡提示不挤布局 -->
+            <button
+              v-if="m.role === 'assistant'"
+              type="button"
+              :data-testid="'feedback-up-' + m.id"
+              :title="feedbackOf(m.id) === 1 ? '取消赞' : '赞'"
+              :aria-pressed="feedbackOf(m.id) === 1"
+              class="w-7 h-7 inline-flex items-center justify-center rounded hover:bg-[#f4f4f5]"
+              :class="feedbackOf(m.id) === 1 ? 'text-[#409eff]' : 'text-[#a8abb2]'"
+              @click="rateMessage(m, 1)"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-3.5 h-3.5" aria-hidden="true"><path d="M7 10v12M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z"/></svg>
+            </button>
+            <button
+              v-if="m.role === 'assistant'"
+              type="button"
+              :data-testid="'feedback-down-' + m.id"
+              :title="feedbackOf(m.id) === -1 ? '取消踩' : '踩'"
+              :aria-pressed="feedbackOf(m.id) === -1"
+              class="w-7 h-7 inline-flex items-center justify-center rounded hover:bg-[#f4f4f5]"
+              :class="feedbackOf(m.id) === -1 ? 'text-[#f56c6c]' : 'text-[#a8abb2]'"
+              @click="rateMessage(m, -1)"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-3.5 h-3.5" aria-hidden="true"><path d="M17 14V2M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2h13.5a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22a3.13 3.13 0 0 1-3-3.88Z"/></svg>
+            </button>
+            <button
               v-if="m.role === 'user'"
-              link
-              size="small"
-              class="px-1"
+              type="button"
+              class="w-7 h-7 inline-flex items-center justify-center rounded hover:bg-[#f4f4f5] text-[#a8abb2]"
               :data-testid="'edit-msg-' + m.id"
               title="编辑该条消息（改完从该条重跑）"
               aria-label="编辑该条消息（改完从该条重跑）"
               @click="editMessage(m)"
             >
-              <svg viewBox="0 0 24 24" fill="currentColor" class="w-3 h-3" aria-hidden="true"><path d="M3 17.2V21h3.8l11-11-3.8-3.8zM20.7 7a1 1 0 0 0 0-1.4l-2.3-2.3a1 1 0 0 0-1.4 0l-1.8 1.8 3.7 3.7z" /></svg>
-            </el-button>
-            <el-button
-              link
-              size="small"
-              class="px-1"
+              <svg viewBox="0 0 24 24" fill="currentColor" class="w-3.5 h-3.5" aria-hidden="true"><path d="M3 17.2V21h3.8l11-11-3.8-3.8zM20.7 7a1 1 0 0 0 0-1.4l-2.3-2.3a1 1 0 0 0-1.4 0l-1.8 1.8 3.7 3.7z" /></svg>
+            </button>
+            <button
+              type="button"
+              class="w-7 h-7 inline-flex items-center justify-center rounded hover:bg-[#f4f4f5] text-[#a8abb2]"
               :data-testid="'copy-msg-' + m.id"
               title="复制该条消息正文"
               aria-label="复制该条消息正文"
               @click="copyMessage(m)"
             >
-              <svg viewBox="0 0 24 24" fill="currentColor" class="w-3 h-3" aria-hidden="true"><path d="M16 1H4a2 2 0 0 0-2 2v14h2V3h12zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16H8V7h11z" /></svg>
-            </el-button>
+              <svg viewBox="0 0 24 24" fill="currentColor" class="w-3.5 h-3.5" aria-hidden="true"><path d="M16 1H4a2 2 0 0 0-2 2v14h2V3h12zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16H8V7h11z" /></svg>
+            </button>
           </div>
         </div>
         </div>
@@ -476,11 +506,13 @@
  * 蓝本确有的 18 行打字机动画（`.typing .dot` + `@keyframes blink`，Tailwind 无对应工具类）。
  * 项 2 的 hover 显现用 Tailwind 默认 core plugin 的 `group` / `group-hover`（本仓首用）。
  */
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ArrowRight, ChatDotRound, Operation, Promotion, WarningFilled } from '@element-plus/icons-vue'
 import { useAiStore, foldDeadline } from '@/stores/ai'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { formatCountdown, formatProgressiveTs } from '@/utils/format'
+import { renderMarkdown, renderMermaidSvg } from '@/utils/markdown'
+import { toolSummary } from '@/utils/tool-summaries'
 import { groupParts, resolveBlockExpanded, type Block } from '@/utils/blocks'
 import { deriveCopyText, deriveProjections } from '@/utils/parts'
 import { createPollingController, type PollingController } from '@/utils/polling'
@@ -782,31 +814,64 @@ watch(
   }
 )
 
-/** R-159 #6：新字符渐显 —— 末尾 CH_TAIL 字符包 span.ch（chIn .18s），其余为稳定前缀文本。
- *  纯展示切分，不写段、不调 deriveProjections（delta 性能锁步零触碰，S0-a 实证见报告）。 */
-const CH_TAIL = 8
+/**
+ * R-163 T1：正文 Markdown 渲染（markdown-it → DOMPurify → v-html 唯一链路的组件侧）——
+ * 结果 memo（键 = 消息 + 段 + 文本长度 + 流式态）；mermaid 闭合围栏占位 div 在 nextTick
+ * 后异步渲染 SVG 回填（失败保留源码块）。R-159 #6 逐字符渐显（chSplit/CH_TAIL）按决策卡
+ * §三.1 显式退役：其语义被 Markdown 渲染取代。
+ */
+const mdCache = new Map<string, { html: string }>()
+const MD_CACHE_MAX = 128
 
-function chSplit(message: ChatMessage, block: Block): { head: string; tail: string[] } {
-  if (!message.streaming) {
-    return { head: textOf(block), tail: [] }
+function markdownHtml(message: ChatMessage, block: Block): string {
+  const part = block.parts[0]
+  const text = part.kind === 'text' ? part.text : ''
+  const key = `${message.id}:${part.seg}:${text.length}:${message.streaming ? 's' : 'f'}`
+  const hit = mdCache.get(key)
+  if (hit) {
+    return hit.html
   }
-  const text = textOf(block)
-  if (text.length <= CH_TAIL) {
-    return { head: '', tail: [...text] }
+  const { html, mermaid } = renderMarkdown(text, message.streaming)
+  if (mermaid.length > 0) {
+    void nextTick(() => hydrateMermaid(message.id, mermaid))
   }
-  return { head: text.slice(0, -CH_TAIL), tail: [...text.slice(-CH_TAIL)] }
+  if (mdCache.size >= MD_CACHE_MAX) {
+    const first = mdCache.keys().next().value
+    if (first !== undefined) {
+      mdCache.delete(first)
+    }
+  }
+  mdCache.set(key, { html })
+  return html
+}
+
+async function hydrateMermaid(messageId: string, blocks: Array<{ index: number; source: string }>): Promise<void> {
+  const bubble = msgWrapRef.value?.querySelector(`[data-testid="msg-bubble-${messageId}"]`)
+  if (!bubble) {
+    return
+  }
+  // 闭合 mermaid 围栏以 `pre > code.language-mermaid` 源码块形态留在净化 HTML 里（查看源码同体）；
+  // 渲染成功 → 整 pre 换 SVG；失败 → 保留源码块（§三.7 兜底）。
+  const slots = Array.from(bubble.querySelectorAll('pre > code.language-mermaid'))
+  for (const item of blocks) {
+    const code = slots[item.index]
+    if (!code) {
+      continue
+    }
+    const svg = await renderMermaidSvg(item.source)
+    if (svg) {
+      const host = document.createElement('div')
+      host.className = 'mermaid-diagram'
+      host.innerHTML = svg
+      code.parentElement?.replaceWith(host)
+    }
+  }
 }
 
 /** 批4④ A5'：消息 → 渲染块序列（groupParts 纯函数；parts 为响应式数组，帧到达即重算）。
  *  收口修 F1：传 m.id 作消息命名空间前缀，防跨消息 blockId 碰撞（红队 M-1）。 */
 function blocksOf(message: ChatMessage): Block[] {
   return groupParts(message.parts, message.id)
-}
-
-/** 正文块文本（类型收窄：text 块首成员恒为 text 段）。 */
-function textOf(block: Block): string {
-  const part = block.parts[0]
-  return part.kind === 'text' ? part.text : ''
 }
 
 /**
@@ -910,14 +975,55 @@ function scrollBottom(force = false): void {
  */
 
 /**
- * R-157 #2：编辑 = 「改完从该条重跑」——回填该条正文并记住锚点；发送时（send）截断
+ * R-157 #2 → R-163 T4：编辑 = 「改完从该条重跑」——回填该条正文并记住锚点；发送时（send）截断
  * 该条之后的消息、以输入框新文本重发。仅用户消息可编辑（模板 v-if role 过滤）。
+ * T4：输入框**非空白**（非全空白字符）时先弹确认防覆盖（window.confirm，spec 桩断言）。
  */
 const editingMessageId = ref<string | null>(null)
 
 function editMessage(m: ChatMessage): void {
+  if (inputText.value.trim() !== '') {
+    const confirmed = window.confirm('输入框已有内容，继续编辑将覆盖现有输入。是否覆盖？')
+    if (!confirmed) {
+      return
+    }
+  }
   inputText.value = m.content
   editingMessageId.value = m.id
+}
+
+/** R-163 T4：「继续」按钮判据 —— error/断流/取消后，最后一条助手消息给出消息级入口。 */
+function showContinue(message: ChatMessage): boolean {
+  const last = ai.messages[ai.messages.length - 1]
+  return message.role === 'assistant'
+    && last === message
+    && (ai.lastRoundOutcome === 'error' || ai.lastRoundOutcome === 'interrupted' || ai.lastRoundOutcome === 'cancelled')
+}
+
+/** 「继续」= 把「继续」当作用户消息直接发送（参考 Kimi）。 */
+function continueRound(): void {
+  void ai.send('继续')
+}
+
+/** R-163 T3：赞踩本地态（选中互斥、可取消）+ 上报（ rating=0=取消，幂等 upsert 在后端）。 */
+const feedbackState = ref<Map<string, 1 | -1>>(new Map())
+
+function feedbackOf(messageId: string): 1 | -1 | 0 {
+  return feedbackState.value.get(messageId) ?? 0
+}
+
+function rateMessage(m: ChatMessage, rating: 1 | -1): void {
+  const next = new Map(feedbackState.value)
+  const current = next.get(m.id)
+  const finalRating = current === rating ? 0 : rating // 选中互斥 + 再点取消
+  if (finalRating === 0) {
+    next.delete(m.id)
+  } else {
+    next.set(m.id, finalRating)
+  }
+  feedbackState.value = next
+  // R-163 收口修 F2：上报携被评价消息正文前 200 字符快照（人工复盘可读摘要）
+  void ai.submitFeedback(m.id, finalRating, m.content.slice(0, 200))
 }
 
 /**
@@ -1311,20 +1417,72 @@ onBeforeUnmount(() => {
   0%, 55% { opacity: 1; }
   56%, 100% { opacity: 0; }
 }
-/* R-159 #6：新字符渐显（opacity .1→1） */
-.ch {
-  animation: chIn 0.18s ease-out;
-}
-@keyframes chIn {
-  from { opacity: 0.1; }
-  to { opacity: 1; }
-}
 /* R-159 #4：完成优雅淡出 300ms（光标 + 「工作中…」同帧） */
 .fade-out {
   animation: caretOut 0.3s ease forwards;
 }
 @keyframes caretOut {
   to { opacity: 0; }
+}
+/* R-163 T1：Markdown 正文排版基线（决策卡 §二.3：13.5-14px/1.7、段间距、列表缩进、
+   中性灰代码底；色彩收敛 = 中性灰 + 品牌蓝 + 语义色仅状态）。 */
+.md-body {
+  font-size: 14px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.md-body > :first-child { margin-top: 0; }
+.md-body p { margin: 0.45em 0; }
+.md-body h1, .md-body h2, .md-body h3, .md-body h4, .md-body h5, .md-body h6 {
+  margin: 0.8em 0 0.4em;
+  font-weight: 600;
+  line-height: 1.4;
+}
+.md-body h1 { font-size: 17px; }
+.md-body h2 { font-size: 16px; }
+.md-body h3 { font-size: 15px; }
+.md-body h4, .md-body h5, .md-body h6 { font-size: 14px; }
+.md-body ul, .md-body ol { margin: 0.45em 0; padding-left: 1.4em; }
+.md-body li { margin: 0.2em 0; }
+.md-body blockquote {
+  margin: 0.6em 0;
+  padding: 0.2em 0.9em;
+  border-left: 3px solid #dcdfe6;
+  color: #909399;
+}
+.md-body code:not(pre code) {
+  background: #f4f4f5;
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+  font-size: 13px;
+}
+.md-body pre {
+  margin: 0.6em 0;
+  padding: 0.7em 0.9em;
+  background: #f8f8f9;
+  border: 1px solid #ebeef5;
+  border-radius: 6px;
+  overflow-x: auto;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.md-body pre code { background: transparent; padding: 0; }
+.md-body table { border-collapse: collapse; margin: 0.6em 0; width: 100%; font-size: 13px; }
+.md-body th, .md-body td { border: 1px solid #ebeef5; padding: 0.35em 0.7em; text-align: left; }
+.md-body th { background: #f8f8f9; font-weight: 600; }
+.md-body a { color: #409eff; }
+.md-body hr { border: none; border-top: 1px solid #ebeef5; margin: 0.9em 0; }
+.md-body img { max-width: 100%; }
+.md-body .mermaid-diagram { margin: 0.6em 0; overflow-x: auto; }
+.md-body .mermaid-fallback {
+  margin: 0.6em 0;
+  padding: 0.7em 0.9em;
+  background: #f8f8f9;
+  border: 1px solid #ebeef5;
+  border-radius: 6px;
+  font-size: 13px;
+  white-space: pre-wrap;
 }
 /* R-161：平滑回底 = CSS scroll-behavior:smooth 类切换（会审 M2：禁 scrollTo({behavior:'smooth'})，
    浮钮点击时挂上、~600ms 后移除；流式期 pinBottom 恒瞬跳不加本类）。 */
