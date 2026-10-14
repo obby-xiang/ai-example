@@ -67,11 +67,11 @@ function summaryFor(name: string, args: ToolArgs): string | null {
   switch (name) {
     case 'list_config_defs': {
       const level = str(args, 'level')
-      return level ? `列出配置定义（${level} 层）` : '列出全部配置定义'
+      return level ? `返回 ${level} 层配置定义清单` : '返回全部配置定义清单'
     }
     case 'get_config_def': {
       const code = str(args, 'code')
-      return code ? `读取配置定义 ${code}` : '读取配置定义详情'
+      return code ? `读取配置定义 ${code} 的完整字段` : '读取单个配置定义的完整字段'
     }
     case 'list_tasks':
       return '列出最近的任务'

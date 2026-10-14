@@ -2,14 +2,14 @@
   <!-- 收起态：48px 竖排条（蓝本 AiPanel.vue:2-7） -->
   <div
     v-if="!ai.expanded"
-    class="h-full flex flex-col items-center pt-4 gap-2 cursor-pointer text-[#409eff]"
+    class="h-full flex flex-col items-center pt-4 gap-2 cursor-pointer text-[#57606a]"
     @click="ai.toggleExpand()"
   >
     <el-icon><ChatDotRound /></el-icon>
     <span class="writing-vertical text-[13px]">AI 助手</span>
   </div>
 
-  <div v-else class="h-full flex flex-col">
+  <div v-else class="ai-chat h-full flex flex-col">
     <!-- 头部（蓝本 AiPanel.vue:10-19） -->
     <div class="flex items-center gap-2.5 px-3 py-2.5 border-b border-solid border-[#ebeef5]">
       <div class="w-[34px] h-[34px] rounded-lg bg-gradient-to-br from-[#409eff] to-[#7b61ff] text-white flex items-center justify-center font-bold">AI</div>
@@ -115,8 +115,8 @@
 
     <!-- 消息流（蓝本 AiPanel.vue:21-89）；R-154 #5：外层 relative 壳承载「回到底部」浮钮 -->
     <div class="flex-1 relative min-h-0 flex flex-col">
-      <!-- R-161：role="log" 补滚动容器（无障碍，无视觉影响） -->
-      <div ref="msgWrapRef" role="log" class="flex-1 overflow-y-auto p-3" @scroll.passive="onMsgScroll">
+      <!-- R-161：role="log" 补滚动容器（无障碍，无视觉影响）；R-163B G2：overflow-x-hidden 止血横滚条 -->
+      <div ref="msgWrapRef" role="log" class="flex-1 overflow-y-auto overflow-x-hidden p-3" @scroll.passive="onMsgScroll">
       <!-- 历史对账期骨架屏（苞 B 项 4）：消费 store 的 historyLoaded —— 与空态互斥
            （无消息且对账未完 → 骨架屏；对账完成后才轮到空态/消息流）。 -->
       <el-skeleton
@@ -128,7 +128,7 @@
       />
       <el-empty v-else-if="!ai.messages.length" :image-size="60">
         <template #image>
-          <el-icon :size="36" color="#409EFF"><Promotion /></el-icon>
+          <el-icon :size="36" color="#2563eb"><Promotion /></el-icon>
         </template>
         <template #description>
           <div class="mb-1 text-sm font-semibold text-[#606266]">您好，我是实施助手</div>
@@ -164,10 +164,14 @@
         <!-- 内容列：正文/卡片 + 元信息行（R-157 #1：操作行挪气泡外、卡片下沿独立行） -->
         <div class="min-w-0 flex-1 flex flex-col" :class="m.role === 'user' ? 'items-end' : 'items-start'">
         <!-- R-160 M4（issue #14③ 方案 A）：容器层一刀切 —— overflow:hidden + min-width:0；
-             R-163 T3：用户消息 = 内容-only 卡片；助手回复 = 无气泡全宽（透明底）。 -->
+             R-163 T3：用户消息 = 内容-only 卡片；助手回复 = 无气泡全宽（透明底）。
+             R-163B G3：用户气泡对齐 demo v6 —— 中性灰 #f6f7f9 + 1px #eef0f3 边框 +
+             圆角 12/12/3/12 + max-width 86% + 13.5px（色彩纪律：蓝只用于状态）。 -->
         <div
-          class="min-w-0 overflow-hidden w-full px-2.5 py-2 text-[14px] text-[#303133] leading-[1.7]"
-          :class="m.role === 'user' ? 'max-w-[82%] rounded-lg bg-[#d9ecff] break-words' : ''"
+          class="min-w-0 overflow-hidden w-full px-2.5 py-2 text-[13.8px] leading-[1.7]"
+          :class="m.role === 'user'
+            ? 'max-w-[86%] rounded-[12px_12px_3px_12px] bg-[#f6f7f9] border border-solid border-[#eef0f3] break-words text-[13.5px]'
+            : ''"
           :data-testid="'msg-bubble-' + m.id"
         >
           <!-- 消息体：块分派（批4④ A5' → R-154 单卡化）——groupParts 把段序列分派为 text/activity 块；
@@ -178,7 +182,9 @@
             <!-- R-163 T1 正文块：markdown-it → DOMPurify 白名单 → v-html 唯一链路
                  （chSplit/CH_TAIL 逐字符渐显退役——R-159 该语义被 Markdown 渲染取代，spec 口径同步改写）；
                  R-159 #3：流式正文末尾打字机光标保留（移出正文 div，随块同帧淡出）。 -->
-            <div v-if="block.kind === 'text'" class="md-body" v-html="markdownHtml(m, block)"></div>
+            <!-- R-163B G4：v-html 内交互（代码块复制 / mermaid 查看源码）走事件委托（onMdBodyClick），
+                 不在注入 HTML 内联任何脚本。 -->
+            <div v-if="block.kind === 'text'" class="md-body" v-html="markdownHtml(m, block)" @click="onMdBodyClick"></div>
             <span v-if="block.kind === 'text' && (showCaret(m, bi) || isFading(m))" class="caret" :class="{ 'fade-out': isFading(m) }" data-testid="stream-caret"></span>
 
             <!-- R-160 M2：HITL 只读回执**独立块**（R-158 #10 判据随块层判，块 = 已决确认门/GF 段）——
@@ -186,19 +192,17 @@
                  徽标按段终态派生，decision/decidedAt/submittedValues 为回读/写回元数据。 -->
             <template v-else-if="block.kind === 'receipt'">
               <template v-for="part in block.parts" :key="'receipt-' + (part.kind === 'tool' ? part.toolCallId : part.kind + '-' + part.seg)">
-                <div v-if="part.kind === 'tool'" class="mt-1.5 px-2 py-1.5 bg-[#f0f9ff] border border-solid border-[#d9ecff] rounded" data-testid="hitl-receipt">
-                  <div class="flex items-center gap-1.5 flex-wrap">
-                    <el-tag size="small" :type="hitlReceiptTagType(part.status)" effect="light">{{ hitlReceiptLabel(part) }}</el-tag>
-                    <span class="text-[#606266]">{{ hitlReceiptSummary(part) }}</span>
-                    <span v-if="part.decidedAt" class="text-[#c0c4cc]">{{ formatProgressiveTs(part.decidedAt) }}</span>
-                  </div>
-                  <div v-if="part.submittedValues" class="mt-1 text-[#909399]" data-testid="receipt-values">
+                <div v-if="part.kind === 'tool'" class="hitl-receipt" data-testid="hitl-receipt">
+                  <el-tag size="small" :type="hitlReceiptTagType(part.status)" effect="light">{{ hitlReceiptLabel(part) }}</el-tag>
+                  <span class="flex-1 min-w-0">{{ hitlReceiptSummary(part) }}</span>
+                  <span v-if="part.decidedAt" class="rt">{{ formatProgressiveTs(part.decidedAt) }}</span>
+                  <div v-if="part.submittedValues" class="w-full text-[12.2px] text-[#8b949e]" data-testid="receipt-values">
                     已提交：{{ submittedValuesSummary(part.submittedValues) }}
                   </div>
-                  <div v-if="part.args" class="mt-1">
+                  <div v-if="part.args" class="w-full mt-0.5">
                     <button
                       type="button"
-                      class="text-[#409eff]"
+                      class="text-[11.5px] text-[#57606a] border-b border-solid border-[#e3e6ea]"
                       :data-testid="'receipt-args-toggle-' + part.toolCallId"
                       @click="toggleReceiptArgs(part.toolCallId)"
                     >
@@ -228,34 +232,36 @@
                   >
                     思考过程 {{ isBlockExpanded(block) ? '▾' : '▸' }}
                   </button>
-                  <div v-show="isBlockExpanded(block)" class="mt-1 px-2 py-1.5 bg-[#fafafa] border-l-2 border-solid border-[#dcdfe6]" :data-testid="'reasoning-body-' + block.id">
+                  <div v-show="isBlockExpanded(block)" class="mt-1 px-2.5 py-2 bg-[#f6f7f9] border border-solid border-[#e3e6ea] rounded-[10px]" :data-testid="'reasoning-body-' + block.id">
                     <!-- R-158 #12：思考区同款 CollapsibleText（真溢出才渐隐+显示更多） -->
                     <CollapsibleText :text="part.text" :max-height="160" :testid="'reasoning-more-' + block.id" class="text-xs text-[#909399]" />
                   </div>
                 </div>
                 <template v-else-if="part.kind === 'tool'">
                   <div
-                    class="mt-1.5 border border-solid border-[#dcdfe6] rounded-md bg-white"
+                    class="mt-1.5 border border-solid border-[#e3e6ea] rounded-[10px] bg-white overflow-hidden"
                     :data-testid="part.requiresAction ? 'pending-card-' + part.toolCallId : 'tool-card-' + part.toolCallId"
                   >
-                    <!-- R-163 T2 卡头折叠单行 = 状态 tag + 工具名 + 一行自然语言摘要（T0 静态映射）；
-                         点击卡头展开/收起 input/output（v-show：DOM 恒在）；requiresAction 卡强制展开。 -->
+                    <!-- R-163B G5 卡头对齐 demo v6（.tcard-hd 8px 10px / 名称 mono 11.4px / chevron 旋转）；
+                         摘要与工具名文案重复时去重（只显一行，见 toolSummaryOrNull）。 -->
                     <button
                       type="button"
-                      class="w-full flex items-center gap-1.5 p-2 text-left font-semibold text-[13px] flex-wrap"
-                      :class="part.requiresAction ? 'cursor-default' : 'cursor-pointer'"
+                      class="w-full flex items-center gap-1.5 py-[8px] px-[10px] text-left"
+                      :class="part.requiresAction ? 'cursor-default' : 'cursor-pointer hover:bg-[#f6f7f9]'"
                       :data-testid="'block-toggle-' + block.id"
                       :disabled="part.requiresAction"
                       @click="toggleBlock(block)"
                     >
-                      <el-icon color="#409EFF"><Operation /></el-icon>
-                      <span>{{ toolLabel(part.name) }}</span>
-                      <span class="font-normal text-xs text-[#909399] truncate min-w-0 flex-1" :data-testid="'tool-summary-' + part.toolCallId">{{ toolSummary(part) }}</span>
+                      <el-icon color="#2563eb" class="shrink-0"><Operation /></el-icon>
+                      <span class="font-mono font-semibold text-[11.4px] max-w-[128px] truncate shrink-0">{{ toolLabel(part.name) }}</span>
+                      <span v-if="toolSummaryOrNull(part)" class="font-normal text-[12px] text-[#57606a] truncate min-w-0 flex-1" :data-testid="'tool-summary-' + part.toolCallId">{{ toolSummaryOrNull(part) }}</span>
+                      <span v-else class="flex-1 min-w-0" :data-testid="'tool-summary-' + part.toolCallId"></span>
                       <el-tag v-if="part.kind2 === 'FRONTEND'" size="small" effect="plain">前端工具</el-tag>
                       <el-tag v-else-if="part.kind2 === 'CONFIRM'" size="small" type="warning" effect="plain">确认门</el-tag>
                       <el-tag :size="'small'" :type="toolTagType(part.status)" :effect="part.status === 'running' ? 'dark' : 'light'">
                         {{ toolStatusLabel(part.status) }}
                       </el-tag>
+                      <span class="tchev" :class="{ 'is-open': isBlockExpanded(block) }">›</span>
                     </button>
                     <div v-show="isBlockExpanded(block)" class="px-2 pb-2 pt-0 flex flex-col gap-1.5" :data-testid="'block-body-' + block.id">
                       <!-- R-163 T2：展开体 input/output 格式化 JSON（pretty 解析成功缩进 / 失败原样）——裸 JSON 墙消除 -->
@@ -271,7 +277,7 @@
                           <CollapsibleText :text="part.result" :testid="'show-more-' + part.toolCallId">
                             {{ part.result }}<span
                               v-if="part.truncated"
-                              class="inline-block ml-1 px-1 rounded text-[10px] leading-4 bg-[#e6a23c] text-white align-middle"
+                              class="inline-block ml-1 px-1 rounded text-[10px] leading-4 bg-[#8b949e] text-white align-middle"
                               :title="part.truncatedReason ?? '结果被截断'"
                               data-testid="truncated-badge"
                             >已截断</span>
@@ -279,8 +285,8 @@
                         </div>
                       </div>
                       <!-- R-158 #6：卡内错误位（图标 + 红底 + 文案）——错误就地呈现，不再全堆顶部 Alert -->
-                      <div v-if="part.reason" class="flex items-start gap-1 px-2 py-1 text-xs text-[#f56c6c] bg-[#fef0f0] rounded" data-testid="tool-error">
-                        <el-icon class="mt-px shrink-0" color="#f56c6c"><WarningFilled /></el-icon>
+                      <div v-if="part.reason" class="flex items-start gap-1 px-2 py-1 text-xs text-[#c0392b] bg-[#fdf1ef] rounded" data-testid="tool-error">
+                        <el-icon class="mt-px shrink-0" color="#c0392b"><WarningFilled /></el-icon>
                         <span>原因：{{ part.reason }}</span>
                       </div>
 
@@ -291,23 +297,29 @@
                            tag（toolStatusLabel，expired→「会话已失效」）与段 reason 位（A4'，D11）承接。 -->
                       <template v-if="part.requiresAction">
                         <template v-if="part.kind2 === 'CONFIRM' && part.status === 'pending'">
-                          <div class="mt-1.5 flex items-center gap-2 text-xs">
-                            <span v-if="remainingSeconds !== null" :class="confirmExpired ? 'text-[#c0c4cc]' : 'text-[#e6a23c]'">
+                          <!-- R-163D D5：确认门按 demo .gate 结构（蓝底门卡：卡头 + 倒计时 + 拒绝原因 + 操作位）。 -->
+                          <div class="gate">
+                            <div class="gate-hd"><span class="ic">✋</span>需要人工确认</div>
+                            <span
+                              v-if="remainingSeconds !== null"
+                              class="cd"
+                              :class="confirmExpired ? 'opacity-60' : ''"
+                            >
                               {{ confirmExpired ? '确认已超时（按钮已置灰），本轮将按拒绝/超时收尾' : `剩余确认时间 ${formatCountdown(remainingSeconds)}` }}
                             </span>
-                            <span v-else class="text-[#909399]">等待人工确认</span>
-                          </div>
-                          <el-input
-                            v-model="rejectReason"
-                            type="textarea"
-                            :rows="2"
-                            resize="none"
-                            class="mt-2"
-                            placeholder="拒绝原因（可选，填了会原样回填给模型）"
-                          />
-                          <div class="mt-2 flex gap-2 justify-end">
-                            <el-button size="small" :disabled="confirmExpired || deciding" @click="decide(false)">拒绝</el-button>
-                            <el-button size="small" type="primary" :disabled="confirmExpired || deciding" @click="decide(true)">确认执行</el-button>
+                            <span v-else class="cd">等待人工确认</span>
+                            <el-input
+                              v-model="rejectReason"
+                              type="textarea"
+                              :rows="2"
+                              resize="none"
+                              class="mt-2"
+                              placeholder="拒绝原因（可选，填了会原样回填给模型）"
+                            />
+                            <div class="gate-ft">
+                              <el-button size="small" class="ml-auto" :disabled="confirmExpired || deciding" @click="decide(false)">拒绝</el-button>
+                              <el-button size="small" type="primary" :disabled="confirmExpired || deciding" @click="decide(true)">确认执行</el-button>
+                            </div>
                           </div>
                         </template>
 
@@ -344,7 +356,7 @@
              行判据：有正文 或 助手消息流式中（发出即现，无正文也要能呼吸）。 -->
         <div
           v-if="showMetaRow(m)"
-          class="mt-1 flex items-center gap-2 text-xs text-[#a8abb2] w-full max-w-[82%]"
+          class="mt-1 flex items-center gap-2 text-xs text-[#8b949e] w-full max-w-[82%]"
           :class="m.role === 'user' ? 'flex-row-reverse' : ''"
           :data-testid="'msg-ops-' + m.id"
         >
@@ -358,7 +370,7 @@
             >
               <span class="dot"></span><span class="txt">工作中…</span>
             </span>
-            <span v-else-if="formatProgressiveTs(m.timestamp)" class="text-[#c0c4cc]" data-testid="msg-timestamp">{{ formatProgressiveTs(m.timestamp) }}</span>
+            <span v-else-if="formatProgressiveTs(m.timestamp)" class="text-[#8b949e]" data-testid="msg-timestamp">{{ formatProgressiveTs(m.timestamp) }}</span>
           </span>
           <div
             class="flex items-center gap-2 transition-opacity"
@@ -369,7 +381,7 @@
               v-if="copyState && copyState.id === m.id"
               :data-testid="'copy-hint-' + m.id"
               class="text-xs"
-              :class="copyState.ok ? 'text-[#67c23a]' : 'text-[#f56c6c]'"
+              :class="copyState.ok ? 'text-[#1a7f45]' : 'text-[#c0392b]'"
             >
               {{ copyState.ok ? '已复制' : '复制失败，请手动选中文本复制' }}
             </span>
@@ -379,7 +391,7 @@
               type="button"
               data-testid="continue-round"
               title="继续本轮对话"
-              class="w-7 h-7 inline-flex items-center justify-center rounded text-xs text-[#409eff] hover:bg-[#ecf5ff]"
+              class="w-7 h-7 inline-flex items-center justify-center rounded text-xs text-[#2563eb] hover:bg-[#eff4ff]"
               @click="continueRound"
             >
               继续
@@ -391,8 +403,8 @@
               :data-testid="'feedback-up-' + m.id"
               :title="feedbackOf(m.id) === 1 ? '取消赞' : '赞'"
               :aria-pressed="feedbackOf(m.id) === 1"
-              class="w-7 h-7 inline-flex items-center justify-center rounded hover:bg-[#f4f4f5]"
-              :class="feedbackOf(m.id) === 1 ? 'text-[#409eff]' : 'text-[#a8abb2]'"
+              class="w-7 h-7 inline-flex items-center justify-center rounded hover:bg-[#eaecf0]"
+              :class="feedbackOf(m.id) === 1 ? 'text-[#2563eb]' : 'text-[#8b949e]'"
               @click="rateMessage(m, 1)"
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-3.5 h-3.5" aria-hidden="true"><path d="M7 10v12M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z"/></svg>
@@ -403,8 +415,8 @@
               :data-testid="'feedback-down-' + m.id"
               :title="feedbackOf(m.id) === -1 ? '取消踩' : '踩'"
               :aria-pressed="feedbackOf(m.id) === -1"
-              class="w-7 h-7 inline-flex items-center justify-center rounded hover:bg-[#f4f4f5]"
-              :class="feedbackOf(m.id) === -1 ? 'text-[#f56c6c]' : 'text-[#a8abb2]'"
+              class="w-7 h-7 inline-flex items-center justify-center rounded hover:bg-[#eaecf0]"
+              :class="feedbackOf(m.id) === -1 ? 'text-[#c0392b]' : 'text-[#8b949e]'"
               @click="rateMessage(m, -1)"
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-3.5 h-3.5" aria-hidden="true"><path d="M17 14V2M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2h13.5a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22a3.13 3.13 0 0 1-3-3.88Z"/></svg>
@@ -412,7 +424,7 @@
             <button
               v-if="m.role === 'user'"
               type="button"
-              class="w-7 h-7 inline-flex items-center justify-center rounded hover:bg-[#f4f4f5] text-[#a8abb2]"
+              class="w-7 h-7 inline-flex items-center justify-center rounded hover:bg-[#eaecf0] text-[#8b949e]"
               :data-testid="'edit-msg-' + m.id"
               title="编辑该条消息（改完从该条重跑）"
               aria-label="编辑该条消息（改完从该条重跑）"
@@ -422,7 +434,7 @@
             </button>
             <button
               type="button"
-              class="w-7 h-7 inline-flex items-center justify-center rounded hover:bg-[#f4f4f5] text-[#a8abb2]"
+              class="w-7 h-7 inline-flex items-center justify-center rounded hover:bg-[#eaecf0] text-[#8b949e]"
               :data-testid="'copy-msg-' + m.id"
               title="复制该条消息正文"
               aria-label="复制该条消息正文"
@@ -436,20 +448,22 @@
       </div>
       </div>
 
-      <!-- R-154 #5：上滑暂停跟随后浮出的「回到底部」——点击恢复跟随并滚底 -->
+      <!-- R-154 #5：上滑暂停跟随后浮出的「回到底部」——点击恢复跟随并滚底；
+           R-163D D5：demo .fab 同款圆钮（36×36 圆形白底阴影，右下定位）。 -->
       <button
         v-if="showBackToBottom && ai.messages.length > 0"
         type="button"
         data-testid="back-to-bottom"
-        class="absolute bottom-3 left-1/2 -translate-x-1/2 px-3 py-1.5 text-xs rounded-full bg-white border border-solid border-[#dcdfe6] shadow-md text-[#606266] hover:text-[#409eff]"
+        title="回到底部"
+        class="absolute bottom-3 right-3 w-9 h-9 rounded-full bg-white border border-solid border-[#e3e6ea] shadow-[0_2px_8px_rgba(0,0,0,0.13)] text-[15px] text-[#57606a] hover:text-[#1f2328] hover:border-[#8b949e] flex items-center justify-center"
         @click="backToBottom"
       >
-        回到底部
+        ↓<span class="sr-only">回到底部</span>
       </button>
     </div>
 
     <!-- 输入区（蓝本 AiPanel.vue:91-109） -->
-    <div class="border-t border-solid border-[#ebeef5] px-3 py-2.5">
+    <div class="border-t border-solid border-[#eef0f3] px-3 py-2.5">
       <el-input
         v-model="inputText"
         type="textarea"
@@ -460,7 +474,7 @@
         @keydown.enter.exact.prevent="send"
       />
       <div class="mt-2 flex items-center justify-between">
-        <span class="text-xs" :class="ai.loading ? 'text-[#e6a23c]' : 'text-[#c0c4cc]'">
+        <span class="text-xs" :class="ai.loading ? 'text-[#2563eb]' : 'text-[#8b949e]'">
           {{ ai.loading ? ai.runStateLabel : 'Enter 发送 · Shift+Enter 换行' }}
         </span>
         <div>
@@ -845,13 +859,47 @@ function markdownHtml(message: ChatMessage, block: Block): string {
   return html
 }
 
+/** R-163B G5 摘要去重：映射值与工具名（TOOL_LABELS 口径）相同 ⇒ 只显一行（返回 null 藏摘要位）。 */
+function toolSummaryOrNull(part: ToolPart): string | null {
+  const summary = toolSummary(part)
+  return summary === toolLabel(part.name) ? null : summary
+}
+
+/**
+ * R-163B G4：v-html 注入内容的点击委托 —— 代码块复制按钮 / mermaid「查看源码」切换。
+ * 不在注入 HTML 内联脚本；剪贴板走既有 legacyCopy 回退链（含 execCommand 降级）。
+ */
+function onMdBodyClick(event: MouseEvent): void {
+  const target = event.target as HTMLElement | null
+  if (!target) {
+    return
+  }
+  const copyBtn = target.closest('figure.code .copy')
+  if (copyBtn) {
+    const pre = copyBtn.parentElement?.parentElement?.querySelector('pre')
+    const text = pre?.textContent ?? ''
+    const ok = legacyCopy(text)
+    copyBtn.textContent = ok ? '已复制' : '复制失败'
+    setTimeout(() => {
+      copyBtn.textContent = '复制'
+    }, 1200)
+    return
+  }
+  const toggle = target.closest('.mmd .mmd-toggle')
+  if (toggle) {
+    toggle.closest('.mmd')?.classList.toggle('is-open')
+  }
+}
+
+/**
+ * R-163B G4：mermaid 卡片化（demo :237-251）——卡头（◈ 流程图 + mermaid 标签）+ 图体 +
+ * 「查看源码」切换（源码随卡携带，render 失败亦保留）。SVG max-width:100% 随容器缩放。
+ */
 async function hydrateMermaid(messageId: string, blocks: Array<{ index: number; source: string }>): Promise<void> {
   const bubble = msgWrapRef.value?.querySelector(`[data-testid="msg-bubble-${messageId}"]`)
   if (!bubble) {
     return
   }
-  // 闭合 mermaid 围栏以 `pre > code.language-mermaid` 源码块形态留在净化 HTML 里（查看源码同体）；
-  // 渲染成功 → 整 pre 换 SVG；失败 → 保留源码块（§三.7 兜底）。
   const slots = Array.from(bubble.querySelectorAll('pre > code.language-mermaid'))
   for (const item of blocks) {
     const code = slots[item.index]
@@ -859,12 +907,26 @@ async function hydrateMermaid(messageId: string, blocks: Array<{ index: number; 
       continue
     }
     const svg = await renderMermaidSvg(item.source)
-    if (svg) {
-      const host = document.createElement('div')
-      host.className = 'mermaid-diagram'
-      host.innerHTML = svg
-      code.parentElement?.replaceWith(host)
+    const card = document.createElement('div')
+    card.className = 'mmd'
+    card.innerHTML =
+      '<div class="mmd-hd"><span class="mi">◈</span><span class="mt">流程图</span>' +
+      '<span class="mlib">mermaid</span></div>' +
+      `<div class="mmd-fig">${svg ?? ''}</div>` +
+      '<div class="mmd-foot"><button type="button" class="mmd-toggle">查看源码</button>' +
+      `<div class="mmd-code"></div></div>`
+    const codeBox = card.querySelector('.mmd-code')
+    if (codeBox) {
+      codeBox.textContent = item.source // textContent 赋值 = 纯文本，零 HTML 注入面
     }
+    if (!svg) {
+      card.classList.add('is-open') // render 失败：直接展开源码兜底（§三.7 口径）
+      const toggle = card.querySelector('.mmd-toggle')
+      if (toggle) {
+        toggle.textContent = '收起源码'
+      }
+    }
+    code.parentElement?.replaceWith(card)
   }
 }
 
@@ -1373,124 +1435,20 @@ onBeforeUnmount(() => {
 })
 </script>
 
+<!-- R-163D：.md-body 排版 / 光标 / 呼吸 / chevron 全部迁入 src/styles/ai-chat.css
+     （main.css 全局 @import；v-html 节点无 scope 属性——R-163B G1 根因教训；
+     令牌与样式收口 .ai-chat 域，值逐字取自 demo v6 / 移植映射-R163D.md）。 -->
+
+
+<!-- R-161 余下规则（scroll-smooth 类挂于模板节点 / .caret 抑制）保持 scoped。 -->
 <style scoped>
-/* R-157 #3：生成中指示器（动画照效果基准 指示器预览.html 口径）——
-   首 token 前 = 呼吸点 + 「工作中…」（卡片下方），流式中 = 正文末尾打字机光标，两者接力。 */
-.loading-breath {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-}
-.loading-breath .dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: linear-gradient(135deg, #409eff, #7b61ff);
-  animation: breath 1.4s ease-in-out infinite;
-}
-.loading-breath .txt {
-  font-size: 12px;
-  color: #909399;
-  letter-spacing: 1px;
-  animation: breathTxt 1.4s ease-in-out infinite;
-}
-@keyframes breath {
-  0%, 100% { transform: scale(0.7); opacity: 0.45; }
-  50% { transform: scale(1.15); opacity: 1; }
-}
-@keyframes breathTxt {
-  0%, 100% { opacity: 0.45; }
-  50% { opacity: 0.95; }
-}
-.caret {
-  display: inline-block;
-  width: 8px;
-  height: 1em;
-  background: #303133;
-  border-radius: 2px;
-  margin-left: 1px;
-  vertical-align: -2px;
-  animation: caretBlink 1s steps(1) infinite;
-}
-/* R-159 #1：0–55% 显（demo caretBlink 口径） */
-@keyframes caretBlink {
-  0%, 55% { opacity: 1; }
-  56%, 100% { opacity: 0; }
-}
-/* R-159 #4：完成优雅淡出 300ms（光标 + 「工作中…」同帧） */
-.fade-out {
-  animation: caretOut 0.3s ease forwards;
-}
-@keyframes caretOut {
-  to { opacity: 0; }
-}
-/* R-163 T1：Markdown 正文排版基线（决策卡 §二.3：13.5-14px/1.7、段间距、列表缩进、
-   中性灰代码底；色彩收敛 = 中性灰 + 品牌蓝 + 语义色仅状态）。 */
-.md-body {
-  font-size: 14px;
-  line-height: 1.7;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-}
-.md-body > :first-child { margin-top: 0; }
-.md-body p { margin: 0.45em 0; }
-.md-body h1, .md-body h2, .md-body h3, .md-body h4, .md-body h5, .md-body h6 {
-  margin: 0.8em 0 0.4em;
-  font-weight: 600;
-  line-height: 1.4;
-}
-.md-body h1 { font-size: 17px; }
-.md-body h2 { font-size: 16px; }
-.md-body h3 { font-size: 15px; }
-.md-body h4, .md-body h5, .md-body h6 { font-size: 14px; }
-.md-body ul, .md-body ol { margin: 0.45em 0; padding-left: 1.4em; }
-.md-body li { margin: 0.2em 0; }
-.md-body blockquote {
-  margin: 0.6em 0;
-  padding: 0.2em 0.9em;
-  border-left: 3px solid #dcdfe6;
-  color: #909399;
-}
-.md-body code:not(pre code) {
-  background: #f4f4f5;
-  border-radius: 4px;
-  padding: 0.1em 0.35em;
-  font-size: 13px;
-}
-.md-body pre {
-  margin: 0.6em 0;
-  padding: 0.7em 0.9em;
-  background: #f8f8f9;
-  border: 1px solid #ebeef5;
-  border-radius: 6px;
-  overflow-x: auto;
-  font-size: 13px;
-  line-height: 1.6;
-}
-.md-body pre code { background: transparent; padding: 0; }
-.md-body table { border-collapse: collapse; margin: 0.6em 0; width: 100%; font-size: 13px; }
-.md-body th, .md-body td { border: 1px solid #ebeef5; padding: 0.35em 0.7em; text-align: left; }
-.md-body th { background: #f8f8f9; font-weight: 600; }
-.md-body a { color: #409eff; }
-.md-body hr { border: none; border-top: 1px solid #ebeef5; margin: 0.9em 0; }
-.md-body img { max-width: 100%; }
-.md-body .mermaid-diagram { margin: 0.6em 0; overflow-x: auto; }
-.md-body .mermaid-fallback {
-  margin: 0.6em 0;
-  padding: 0.7em 0.9em;
-  background: #f8f8f9;
-  border: 1px solid #ebeef5;
-  border-radius: 6px;
-  font-size: 13px;
-  white-space: pre-wrap;
-}
 /* R-161：平滑回底 = CSS scroll-behavior:smooth 类切换（会审 M2：禁 scrollTo({behavior:'smooth'})，
    浮钮点击时挂上、~600ms 后移除；流式期 pinBottom 恒瞬跳不加本类）。 */
 .scroll-smooth {
   scroll-behavior: smooth;
 }
 /* R-161（用户实测回归）：reduced-motion 豁免呼吸动画 —— 呼吸 = 生成中状态语义（非纯装饰），
-   豁免后律动照常 1.4s；`.caret` 纯装饰抑制保留。 */
+   豁免后律动照常 1.5s（R-163B G6 对齐 demo）；`.caret` 纯装饰抑制保留。 */
 @media (prefers-reduced-motion: reduce) {
   .caret {
     animation: none;

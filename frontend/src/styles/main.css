@@ -1,3 +1,7 @@
+/* R-163D：AI 对话框视觉重做（demo v6 1:1 移植，令牌/样式收口在 .ai-chat 域）。
+   必须全局引入：v-html 注入节点不带 scope 属性（R-163B G1 根因教训）。 */
+@import './ai-chat.css';
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -10,6 +14,14 @@ body,
   height: 100%;
   margin: 0;
   padding: 0;
+}
+
+/* R-163C H1：preflight 关闭后全局无 box-sizing 兜底（CU 复测实测 content-box，
+   w-full + 左右 padding 外溢 20px）。补 border-box 全局兜底（demo v6 :18 同款）。 */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
 }
 
 body {

@@ -6,8 +6,9 @@
  *   （mermaid@11.16.1 deps dompurify ^3.3.3，接受 3.4.14 —— 施工前兼容已核）。
  * - 白名单（§三.3 实际集合）：标签 p/h1-6/ul/ol/li/table/thead/tbody/tr/th/td/code/pre/
  *   blockquote/em/strong/del/a/hr/br/img；span 仅 class="hljs-*"、code 仅 class="language-*"（+hljs）；
- *   mermaid 输出 SVG 走独立 SVG profile 净化。属性仅 a.href（DOMPurify 默认协议过滤）/class/src/alt；
- *   禁 style / on* 事件 / iframe / script / 表单控件。
+ *   figure/figcaption/button（代码块图容器，button 仅 type="button"）、div 仅 class="md-table-scroll"
+ *   （表格滚动 wrapper，R-163D D1）；mermaid 输出 SVG 走独立 SVG profile 净化。属性仅 a.href
+ *   （DOMPurify 默认协议过滤）/class/src/alt；禁 style / on* 事件 / iframe / script / 表单控件。
  * - 流式策略（§三.2 + m1）：hljs 高亮 memo（已完成围栏不重解析高亮 = 块级 memo 的落点）；
  *   未闭合围栏（流式尾块）渲染为纯文本规避闪烁，闭合后二次渲染才高亮/进 mermaid；
  *   长文 >10k 字符降级（关高亮与 mermaid，结构照渲）；单次渲染超耗时预算（24ms）后续渲染同降级。
@@ -31,13 +32,16 @@ export const RENDER_BUDGET_MS = 24
 /** mermaid 单次渲染超时（ms），超时按失败兜底（源码块保留）。 */
 const MERMAID_TIMEOUT_MS = 3_000
 
-/** DOMPurify 白名单（§三.3）。span 仅限 class="hljs-*"（下方 hook 收窄）。 */
+/** DOMPurify 白名单（§三.3）。span 仅限 class="hljs-*"（下方 hook 收窄）；
+ *  R-163B G4：figure/figcaption/button 为代码块图容器（button 仅 type="button"，hook 强制）；
+ *  R-163D D1：div 为表格滚动 wrapper（仅限 class="md-table-scroll"，渲染层生成，hook 收窄）。 */
 const ALLOWED_TAGS = [
   'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
   'ul', 'ol', 'li', 'table', 'thead', 'tbody', 'tr', 'th', 'td',
-  'code', 'pre', 'blockquote', 'em', 'strong', 'del', 'a', 'hr', 'br', 'img', 'span'
+  'code', 'pre', 'blockquote', 'em', 'strong', 'del', 'a', 'hr', 'br', 'img', 'span',
+  'figure', 'figcaption', 'button', 'div'
 ]
-const ALLOWED_ATTR = ['class', 'href', 'src', 'alt']
+const ALLOWED_ATTR = ['class', 'href', 'src', 'alt', 'type']
 
 /** 尾块未闭合围栏判据：``` 围栏标记数为奇 ⇒ 流式尾块在围栏内。 */
 export function hasUnclosedFence(text: string): boolean {
@@ -119,7 +123,9 @@ DOMPurify.addHook('afterSanitizeAttributes', (node) => {
     const cls = node.getAttribute('class') ?? ''
     node.setAttribute(
       'class',
-      cls.split(/\s+/).filter((c) => c.startsWith('hljs-') || c === 'hljs').join(' ')
+      cls.split(/\s+/)
+        .filter((c) => c.startsWith('hljs-') || c === 'hljs' || c === 'lg' || c === 'hlib')
+        .join(' ')
     )
   }
   if (node.tagName === 'CODE' || node.tagName === 'PRE') {
@@ -129,8 +135,18 @@ DOMPurify.addHook('afterSanitizeAttributes', (node) => {
       cls.split(/\s+/).filter((c) => c.startsWith('language-') || c.startsWith('hljs')).join(' ')
     )
   }
-  if (node.tagName === 'DIV' && node.getAttribute('class') === '') {
-    node.removeAttribute('class')
+  if (node.tagName === 'DIV') {
+    // R-163D D1：div 仅限表格滚动 wrapper（markdown-it 正文渲染不产出其他 div）
+    const cls = node.getAttribute('class') ?? ''
+    if (cls !== 'md-table-scroll') {
+      node.removeAttribute('class')
+    }
+  }
+  // R-163B G4：figure.code 复制按钮只允许 type="button"（禁表单控件混入）
+  if (node.tagName === 'BUTTON') {
+    if (node.getAttribute('type') !== 'button') {
+      node.setAttribute('type', 'button')
+    }
   }
 })
 
@@ -157,10 +173,37 @@ export interface MarkdownRender {
 const mermaidIndexRe = /<pre><code class="language-mermaid">([\s\S]*?)<\/code><\/pre>/g
 
 /**
+ * R-163B G4：围栏 → 代码块图容器（demo :133-139）——figcaption（语言名 + highlight.js +
+ * 复制按钮）+ pre 内部横滚。闭合 mermaid 围栏除外（保留裸源码块，由 mermaid 卡接管）。
+ */
+const fenceFigureRe = /<pre( class="[^"]*")?><code class="language-(?!mermaid)([^"]*)">([\s\S]*?)<\/code><\/pre>/g
+
+function wrapFenceFigures(html: string): string {
+  return html.replace(
+    fenceFigureRe,
+    (_m, preCls: string | undefined, lang: string, code: string) =>
+      `<figure class="code"><figcaption><span class="lg">${escapeHtml(lang)}</span>` +
+      `<span class="hlib">highlight.js</span><button type="button" class="copy">复制</button></figcaption>` +
+      `<pre${preCls ?? ''}><code class="language-${lang}">${code}</code></pre></figure>`
+  )
+}
+
+/**
+ * R-163D D1：表格包滚动 wrapper（推翻 R-163C H2 的 table{display:block} 方案——块盒宽恒=容器宽，
+ * 滚动永不触发）。table 回 display:table + width:max-content;min-width:100%：窄表撑满、
+ * 宽表列宽随内容，超宽仅在 wrapper 内横滚，不撑爆消息容器（映射表 §五「超 demo」方案）。
+ */
+function wrapTables(html: string): string {
+  return html
+    .replace(/<table>/g, '<div class="md-table-scroll"><table>')
+    .replace(/<\/table>/g, '</table></div>')
+}
+
+/**
  * AI 正文渲染唯一入口。`streaming` = 该正文块仍处流式（未闭合围栏按纯文本、不进 mermaid）。
  * 结果已 DOMPurify 净化，调用方直接 v-html。
  * 闭合 mermaid 围栏：**保留** `language-mermaid` 源码块（= 失败兜底与「查看源码」同体），
- * 同时在返回值的 mermaid 列表登记源码——组件异步渲染 SVG 成功后替换该源码块。
+ * 同时在返回值的 mermaid 列表登记源码——组件异步渲染 SVG 成功后替换为 mermaid 卡。
  */
 export function renderMarkdown(text: string, streaming: boolean): MarkdownRender {
   const fenceOpen = streaming && hasUnclosedFence(text)
@@ -176,6 +219,7 @@ export function renderMarkdown(text: string, streaming: boolean): MarkdownRender
     const useDegraded = degraded || text.length > DEGRADE_AT_CHARS
     const started = performance.now()
     let html = (useDegraded ? mdDegraded : md).render(text)
+    html = wrapTables(html)
     const mermaid: Array<{ index: number; source: string }> = []
     if (!useDegraded && !streaming) {
       // 登记闭合 mermaid 围栏（按出现序）；源码块本身留在净化后 HTML 里
@@ -185,6 +229,8 @@ export function renderMarkdown(text: string, streaming: boolean): MarkdownRender
       while ((match = mermaidIndexRe.exec(html)) !== null) {
         mermaid.push({ index: index++, source: unescapeHtml(match[1]) })
       }
+      // G4：非 mermaid 围栏包成图容器（语言标签 + 复制按钮）
+      html = wrapFenceFigures(html)
     }
     if (fenceOpen) {
       // 未闭合尾围栏：剥掉尾块 language-* class（纯文本口径，闭合后二次渲染才恢复高亮）

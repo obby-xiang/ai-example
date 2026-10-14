@@ -1284,7 +1284,9 @@ describe('R-161：阈值拆分滞回 / RO 内容重钉 / 平滑回底 / reduced-
     const mediaBlock = media.slice(0, media.indexOf('</style>'))
     expect(mediaBlock).not.toContain('.loading-breath') // 呼吸 dot/txt 移出 animation:none 抑制
     expect(mediaBlock).toContain('.caret') // 光标纯装饰抑制保留
-    expect(source).toContain('animation: breath 1.4s ease-in-out infinite') // 豁免后律动照常
+    // 豁免后律动照常（R-163D 起呼吸样式本体在 ai-chat.css，keyframes 改名 aiBreathe 防全局撞名）
+    const { readFileSync } = await import('node:fs')
+    expect(readFileSync('src/styles/ai-chat.css', 'utf8')).toContain('animation: aiBreathe 1.5s ease-in-out infinite')
   })
 
   it('role="log"：滚动容器补无障碍语义（无视觉影响）', async () => {
@@ -1733,5 +1735,145 @@ describe('R-163 收口修 F1：断流置位 → Alert 渲染回归', () => {
     expect(wrapper2.find('el-alert-stub').exists()).toBe(false)
     expect(wrapper2.find('[data-testid="continue-round"]').exists()).toBe(false)
     wrapper2.unmount()
+  })
+})
+
+/**
+ * R-163B（视觉对齐 demo v6 + 横滚条止血，CU 实测定根因后补修）：
+ * G1 .md-body 移出 scoped（防 v-html 选择器失效回归）/ G2 容器横滚止血 / G3 用户气泡 demo 灰 /
+ * G4 代码块图容器 / G5 工具卡 hd 对齐 + 摘要去重 / G6 呼吸 demo 参数。
+ */
+describe('R-163B：视觉对齐 demo v6（样式生效 + 横滚止血）', () => {
+  /** 拆样式源（R-163D：.md-body/呼吸/光标/chevron 已迁 src/styles/ai-chat.css）：
+   *  非 scoped = ai-chat.css 全文；scoped = AiPanel.vue 剩余 scoped 块（scroll-smooth/reduced-motion）。 */
+  async function styleBlocks(): Promise<Array<{ scoped: boolean; css: string }>> {
+    const { readFileSync } = await import('node:fs')
+    const out: Array<{ scoped: boolean; css: string }> = [
+      { scoped: false, css: readFileSync('src/styles/ai-chat.css', 'utf8') }
+    ]
+    const source = (await import('@/components/AiPanel/AiPanel.vue?raw')).default
+    const re = /<style( scoped)?>([\s\S]*?)<\/style>/g
+    let m: RegExpExecArray | null
+    while ((m = re.exec(source)) !== null) {
+      out.push({ scoped: m[1] === ' scoped', css: m[2] })
+    }
+    return out
+  }
+
+  it('G1：.md-body 整套规则在 ai-chat.css 非 scoped 源（AiPanel.vue scoped 块零 .md-body 选择器）——防 v-html scope 失效回归', async () => {
+    const blocks = await styleBlocks()
+    const scopedCss = blocks.filter((b) => b.scoped).map((b) => b.css).join('\n')
+    const globalCss = blocks.filter((b) => !b.scoped).map((b) => b.css).join('\n')
+    expect(scopedCss).not.toContain('.md-body') // scoped 内零 .md-body 规则（G1 根因锁）
+    expect(globalCss).toContain('.md-body h1')
+    expect(globalCss).toContain('font-size: 16.5px') // D3 标题阶梯
+    expect(globalCss).toContain('width: max-content') // D1 宽表列宽随内容（wrapper 方案）
+    expect(globalCss).toContain('.md-table-scroll')
+    expect(globalCss).toContain('white-space: nowrap') // th 单行
+    expect(globalCss).toContain('figure.code') // D2 代码块图容器
+    // D1：.md-body 根容器的 overflow-wrap/word-break 已撤（长英文标识符被任意断开的元凶）
+    const mdRoot = globalCss.match(/\.ai-chat \.md-body \{[^}]*\}/)?.[0] ?? ''
+    expect(mdRoot).not.toContain('overflow-wrap')
+    expect(mdRoot).not.toContain('word-break')
+  })
+
+  it('G2：消息容器 overflow-x-hidden（AiPanel :119）+ 业务区 y-auto/x-hidden（App.vue :26）', async () => {
+    const store = useAiStore()
+    const msg = buildMessage([{ kind: 'text', seg: 0, text: '正文', streaming: false }])
+    msg.id = 'a-g2'
+    store.messages = [msg]
+    store.historyLoaded = true
+    const { default: AiPanel } = await import('@/components/AiPanel/AiPanel.vue')
+    const wrapper = mount(AiPanel, { global: { stubs } })
+    await wrapper.vm.$nextTick()
+    const wrap = wrapper.find('[role="log"]').element as HTMLElement
+    expect(wrap.className).toContain('overflow-y-auto')
+    expect(wrap.className).toContain('overflow-x-hidden') // 横滚条止血：容器层裁而不滚
+    wrapper.unmount()
+    const appSource = (await import('@/App.vue?raw')).default
+    expect(appSource).toContain('overflow-y-auto overflow-x-hidden') // App.vue 业务区
+  })
+
+  it('G3：用户气泡对齐 demo —— 灰底 #f6f7f9 + 细边框 + 12/12/3/12 圆角 + max-w-86% + 13.5px；助手无气泡底', async () => {
+    const user = buildMessage([{ kind: 'text', seg: 0, text: '用户提问', streaming: false }])
+    user.id = 'u-g3'
+    user.role = 'user'
+    const ai = buildMessage([{ kind: 'text', seg: 0, text: '助手回答', streaming: false }])
+    ai.id = 'a-g3'
+    const wrapper = await mountPanel([user, ai])
+    const userBubble = wrapper.find('[data-testid="msg-bubble-u-g3"]').element as HTMLElement
+    expect(userBubble.className).toContain('bg-[#f6f7f9]')
+    expect(userBubble.className).toContain('border-[#eef0f3]')
+    expect(userBubble.className).toContain('rounded-[12px_12px_3px_12px]')
+    expect(userBubble.className).toContain('max-w-[86%]')
+    expect(userBubble.className).toContain('text-[13.5px]')
+    const aiBubble = wrapper.find('[data-testid="msg-bubble-a-g3"]').element as HTMLElement
+    expect(aiBubble.className).not.toContain('bg-[#f6f7f9]') // 助手全宽无气泡底
+    wrapper.unmount()
+  })
+
+  it('G4：闭合围栏渲染代码块图容器（figcaption 语言标签 + type=button 复制按钮，过 DOMPurify）', async () => {
+    const { renderMarkdown } = await import('@/utils/markdown')
+    const { html } = renderMarkdown('```js\nconst a = 1\n```\n\n完成', false)
+    expect(html).toContain('<figure class="code">')
+    expect(html).toContain('<figcaption>')
+    expect(html).toContain('class="lg">js<')
+    expect(html).toContain('class="copy"')
+    expect(html).toContain('type="button"')
+    expect(html).toContain('<pre') // 图容器内 pre 保留（内部横滚）
+  })
+
+  it('G5：工具卡头对齐 demo（8px 10px / mono 名 / chevron）+ 摘要去重（映射值=工具名则只显一行）', async () => {
+    // start_import 不带 taskId ⇒ 摘要 =「启动导入作业」= 工具名 ⇒ 去重（摘要位空）
+    const wrapper = await mountPanel([
+      buildMessage([
+        { kind: 'tool', seg: 0, toolCallId: 'i1', name: 'start_import', kind2: 'BACKEND', status: 'succeeded', args: '{}', requiresAction: false },
+        { kind: 'tool', seg: 1, toolCallId: 'e1', name: 'start_export', kind2: 'BACKEND', status: 'succeeded', args: '{"taskId":7}', requiresAction: false }
+      ])
+    ])
+    const head = wrapper.find('[data-testid="block-toggle-a-1:i1"]')
+    expect(head.classes()).toContain('py-[8px]')
+    expect(head.classes()).toContain('px-[10px]')
+    expect(head.find('.font-mono').exists()).toBe(true) // 名称 mono
+    expect(head.find('.tchev').exists()).toBe(true) // chevron
+    expect(wrapper.find('[data-testid="tool-summary-i1"]').text()).toBe('') // 去重：与工具名相同 ⇒ 不重复显
+    expect(wrapper.find('[data-testid="tool-summary-e1"]').text()).toBe('启动导出作业（任务 #7）') // 互补摘要正常显
+    wrapper.unmount()
+  })
+
+  it('G6：呼吸对齐 demo —— 1.5s / 7px 纯色 --blue / 旧 1.4s 口径清零（R-163D 起样式源在 ai-chat.css）', async () => {
+    const blocks = await styleBlocks()
+    const globalCss = blocks.filter((b) => !b.scoped).map((b) => b.css).join('\n')
+    expect(globalCss).toContain('animation: aiBreathe 1.5s ease-in-out infinite')
+    expect(globalCss).toContain('background: var(--blue)')
+    expect(globalCss).toContain('width: 7px')
+    expect(globalCss).not.toContain('1.4s') // 旧 breath/breathTxt 口径已清除
+    expect(globalCss).not.toContain('breathTxt')
+  })
+
+  it('H1：全局 box-sizing:border-box 兜底（main.css，防 w-full+padding 外溢 20px 回归）', async () => {
+    // css?raw 在 vitest 下被 CSS 插件截胡返回空串，走 fs 直读（G1/G2 的 vue?raw 不受影响）
+    const { readFileSync } = await import('node:fs')
+    const css = readFileSync('src/styles/main.css', 'utf8')
+    expect(css).toContain('box-sizing: border-box')
+    expect(css).toContain('*::before')
+    expect(css).toContain('*::after')
+  })
+
+  it('D1：表格 wrapper 方案 —— md-table-scroll 唯一横滚容器 + table max-content + th nowrap（推翻 R-163C H2 块级方案）', async () => {
+    const blocks = await styleBlocks()
+    const globalCss = blocks.filter((b) => !b.scoped).map((b) => b.css).join('\n')
+    expect(globalCss).toContain('.md-table-scroll')
+    expect(globalCss).toContain('overflow-x: auto') // 滚动只发生在 wrapper 内（消息容器守 sw===cw）
+    expect(globalCss).toContain('width: max-content')
+    expect(globalCss).toContain('min-width: 100%') // 窄表撑满
+    expect(globalCss).toMatch(/\.md-body th\s*\{[^}]*white-space: nowrap/)
+  })
+
+  it('D1：renderMarkdown 输出表格包 md-table-scroll wrapper（DOMPurify div 白名单不回归）', async () => {
+    const { renderMarkdown } = await import('@/utils/markdown')
+    const { html } = renderMarkdown('| 配置编码 | 说明 |\n| --- | --- |\n| PROJ_PARAM | 项目参数 |\n\n完成', false)
+    expect(html).toContain('<div class="md-table-scroll"><table>')
+    expect(html).toContain('</table></div>')
   })
 })

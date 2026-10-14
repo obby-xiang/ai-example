@@ -23,7 +23,8 @@
 
     <!-- 左右双栏：左工作区（业务），右 AI 栏（400px 展开 / 48px 收起，蓝本 App.vue:6-12 同款） -->
     <main class="flex-1 flex min-h-0">
-      <section class="flex-1 min-w-0 min-h-0 overflow-auto p-4">
+      <!-- R-163B G2：业务区只纵滚、横向 hidden 止血（宽表交 el-table 自带横滚），同 demo 裁而不滚口径 -->
+      <section class="flex-1 min-w-0 min-h-0 overflow-y-auto overflow-x-hidden p-4">
         <router-view />
       </section>
       <el-aside

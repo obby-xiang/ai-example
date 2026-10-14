@@ -1,0 +1,362 @@
+/* ==========================================================================
+   R-163D：AI 对话框视觉重做 —— demo v6（r163-demo/index.html）1:1 移植。
+   唯一口径 = r163-chat-ui/移植映射-R163D.md（含指挥官裁决 C1-C5）。
+   - 全局引入（main.css @import）：v-html 注入节点不带 scope 属性（R-163B G1 根因教训）。
+   - 选择器一律 .ai-chat 前缀（令牌定义在 .ai-chat 上）⇒ 不污染非 AiPanel 域。
+   - 令牌挂 .ai-chat 而非 :root：值逐字取自 demo，宿主收敛到 AI 面板域内（避免污染业务域）。
+   ========================================================================== */
+
+/* ---------- 设计令牌（demo :8-17，17 令牌 + 双字体栈，逐字移植） ---------- */
+.ai-chat {
+  --ink: #1f2328;
+  --ink2: #57606a;
+  --ink3: #8b949e;
+  --line: #e3e6ea;
+  --line2: #eef0f3;
+  --bg: #fff;
+  --bg2: #f6f7f9;
+  --blue: #2563eb;
+  --blue-bg: #eff4ff;
+  --blue-line: #cddcff;
+  --green: #1a7f45;
+  --green-bg: #edf7f0;
+  --green-line: #cbe7d6;
+  --red: #c0392b;
+  --red-bg: #fdf1ef;
+  --red-line: #f0d5d0;
+  --r: 10px;
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", sans-serif;
+  --mono: "Cascadia Mono", "Cascadia Code", Consolas, "SF Mono", Menlo, monospace;
+}
+
+/* ---------- 光标（demo :113-114） ---------- */
+.ai-chat .caret {
+  display: inline-block;
+  width: 6px;
+  height: 14px;
+  background: var(--ink2);
+  vertical-align: -2px;
+  border-radius: 1px;
+  animation: aiBlink 1s steps(1) infinite;
+}
+@keyframes aiBlink {
+  0%, 68% { opacity: 1; }
+  69%, 100% { opacity: 0; }
+}
+
+/* ---------- 呼吸（demo :94-96；C1 裁决：reduced-motion 下呼吸豁免保留，不抄 demo 停动画） ---------- */
+.ai-chat .loading-breath {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.2px;
+  color: var(--ink2);
+}
+.ai-chat .loading-breath .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--blue);
+  animation: aiBreathe 1.5s ease-in-out infinite;
+}
+.ai-chat .loading-breath .txt {
+  font-size: 12.2px;
+  color: var(--ink2);
+  letter-spacing: 0.5px;
+}
+@keyframes aiBreathe {
+  0%, 100% { opacity: 0.25; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1); }
+}
+/* 完成淡出（R-163 T0 既有语义，保留） */
+.ai-chat .fade-out {
+  animation: aiFadeOut 0.3s ease forwards;
+}
+@keyframes aiFadeOut {
+  to { opacity: 0; }
+}
+
+/* ---------- 工具卡 chevron（demo :166-167） ---------- */
+.ai-chat .tchev {
+  flex: 0 0 auto;
+  color: var(--ink3);
+  font-size: 12px;
+  transition: transform 0.18s;
+  display: inline-block;
+}
+.ai-chat .is-open > .tchev,
+.ai-chat .tchev.is-open {
+  transform: rotate(90deg);
+}
+
+/* ---------- Markdown 正文（demo :117-130 + C5 补全；D3 逐值对齐） ---------- */
+/* D1：根容器的 overflow-wrap/word-break 已撤（长英文标识符被任意断开的元凶，映射表 §五）。 */
+.ai-chat .md-body {
+  font-size: 13.8px;
+  line-height: 1.7;
+  color: var(--ink);
+}
+.ai-chat .md-body > :first-child { margin-top: 0; }
+/* 标题阶梯（demo :119-120；C5：h5=14.2px、h6=13.8px） */
+.ai-chat .md-body h1, .ai-chat .md-body h2, .ai-chat .md-body h3, .ai-chat .md-body h4,
+.ai-chat .md-body h5, .ai-chat .md-body h6 {
+  margin: 18px 0 9px;
+  line-height: 1.5;
+  font-weight: 650;
+}
+.ai-chat .md-body h1 { font-size: 16.5px; }
+.ai-chat .md-body h2 { font-size: 15.5px; }
+.ai-chat .md-body h3, .ai-chat .md-body h4, .ai-chat .md-body h5 { font-size: 14.2px; }
+.ai-chat .md-body h6 { font-size: 13.8px; }
+.ai-chat .md-body strong { font-weight: 650; }
+/* 段落（demo :121） */
+.ai-chat .md-body p { margin: 0 0 12px; }
+/* 列表（demo :122-123；C5：ol 同 ul 值） */
+.ai-chat .md-body ul, .ai-chat .md-body ol { margin: 0 0 12px; padding-left: 19px; }
+.ai-chat .md-body li { margin: 3px 0; }
+.ai-chat .md-body li::marker { color: var(--ink3); }
+/* 引用块（demo :127） */
+.ai-chat .md-body blockquote {
+  margin: 0 0 12px;
+  padding: 2px 0 2px 11px;
+  border-left: 2px solid var(--blue-line);
+  color: var(--ink3);
+  font-size: 12.6px;
+  line-height: 1.65;
+}
+/* 行内 code chip（demo :126） */
+.ai-chat .md-body code:not(pre code) {
+  font-family: var(--mono);
+  font-size: 12.4px;
+  background: var(--bg2);
+  border: 1px solid var(--line2);
+  border-radius: 4px;
+  padding: 1px 4px;
+  white-space: nowrap;
+}
+/* C5 补全（demo 无值项，裁决定标） */
+.ai-chat .md-body a { color: var(--blue); }
+.ai-chat .md-body hr { border: none; border-top: 1px solid var(--line2); margin: 0.9em 0; }
+.ai-chat .md-body img { max-width: 100%; }
+
+/* ---------- 表格（D1 方案，映射表 §五「超 demo」点：推翻 R-163C H2 与 demo 的 table-layout:fixed） ---------- */
+/* wrapper：唯一滚动容器——超宽仅 wrapper 内横滚，消息容器与页面守 sw===cw。 */
+.ai-chat .md-table-scroll {
+  overflow-x: auto;
+  margin: 0 0 14px;
+}
+.ai-chat .md-table-scroll table {
+  display: table;
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+  margin: 0;
+  font-size: 13.2px;
+}
+/* th 保留 nowrap（R-163C 唯一有效改进，映射表 §五）；td 偏离 demo 的 break-word 改
+   word-break:normal;overflow-wrap:anywhere（有意偏离，理由=长 token 兜底，报告注明）。 */
+.ai-chat .md-body th, .ai-chat .md-body td {
+  border: 1px solid var(--line);
+  padding: 6px 8px;
+  text-align: left;
+}
+.ai-chat .md-body th {
+  white-space: nowrap;
+  background: var(--bg2);
+  font-weight: 600;
+  color: var(--ink2);
+}
+.ai-chat .md-body td {
+  word-break: normal;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- 代码块图容器（demo :133-150；D2 逐值对齐；C4 圆角统一 10px） ---------- */
+.ai-chat .md-body figure.code {
+  margin: 0 0 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  overflow: hidden;
+  background: var(--bg);
+}
+.ai-chat .md-body figure.code figcaption {
+  display: flex;
+  align-items: center;
+  padding: 5px 8px 5px 11px;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--line2);
+  font-size: 11.5px;
+  color: var(--ink2);
+}
+.ai-chat .md-body figure.code figcaption .lg {
+  font-family: var(--mono);
+  letter-spacing: 0.4px;
+}
+.ai-chat .md-body figure.code figcaption .hlib {
+  margin-left: auto;
+  font-size: 10.5px;
+  color: var(--ink3);
+  font-family: var(--mono);
+}
+.ai-chat .md-body figure.code .copy {
+  margin-left: 8px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--ink2);
+  border-radius: 6px;
+  padding: 2px 9px;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.ai-chat .md-body figure.code .copy:hover { border-color: var(--ink3); color: var(--ink); }
+.ai-chat .md-body pre {
+  margin: 0;
+  padding: 10px 11px;
+  overflow-x: auto;
+  background: #f8f8f8;
+  color: #333;
+  font-family: var(--mono);
+  font-size: 12.3px;
+  line-height: 1.62;
+}
+.ai-chat .md-body pre code { background: transparent; padding: 0; border: 0; white-space: pre; }
+/* hljs token 配色（demo :142-150，github 浅色 = 库默认主题色，不计入 UI 用色收敛） */
+.ai-chat .md-body .hljs-comment { color: #998; font-style: italic; }
+.ai-chat .md-body .hljs-keyword { color: #333; font-weight: 700; }
+.ai-chat .md-body .hljs-string { color: #d14; }
+.ai-chat .md-body .hljs-number, .ai-chat .md-body .hljs-literal { color: #008080; }
+.ai-chat .md-body .hljs-attr { color: #000080; }
+.ai-chat .md-body .hljs-built_in { color: #0086b3; }
+.ai-chat .md-body .hljs-title { color: #900; font-weight: 700; }
+.ai-chat .md-body .hljs-meta { color: #999; font-weight: 700; }
+
+/* ---------- mermaid 卡（demo :237-251；C4 卡壳圆角统一 10px） ---------- */
+.ai-chat .md-body .mmd {
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--bg);
+  margin: 0 0 14px;
+  overflow: hidden;
+}
+.ai-chat .md-body .mmd-hd {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--line2);
+  background: var(--bg2);
+  font-size: 12.4px;
+}
+.ai-chat .md-body .mmd-hd .mi { color: #9370db; font-size: 11px; }
+.ai-chat .md-body .mmd-hd .mt { font-weight: 650; color: var(--ink); }
+.ai-chat .md-body .mmd-hd .mlib {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--ink3);
+}
+.ai-chat .md-body .mmd-fig { padding: 10px 8px; background: var(--bg); }
+.ai-chat .md-body .mmd-fig svg {
+  display: block;
+  width: 100%;
+  max-width: 320px;
+  height: auto;
+  margin: 0 auto;
+}
+.ai-chat .md-body .mmd-foot { padding: 0 10px 10px; }
+.ai-chat .md-body .mmd-toggle {
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--ink2);
+  border-radius: 8px;
+  padding: 3px 11px;
+  font-size: 11.8px;
+  cursor: pointer;
+}
+.ai-chat .md-body .mmd-toggle:hover { border-color: var(--ink3); color: var(--ink); }
+.ai-chat .md-body .mmd-code {
+  display: none;
+  margin: 8px 0 0;
+  background: #f8f8f8;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.6;
+  color: #333;
+  white-space: pre-wrap;
+}
+.ai-chat .md-body .mmd.is-open .mmd-code { display: block; }
+
+/* ---------- HITL 确认门卡（demo :194-211；D5） ---------- */
+.ai-chat .gate {
+  border: 1px solid var(--blue-line);
+  background: var(--blue-bg);
+  border-radius: var(--r);
+  padding: 12px;
+  margin: 12px 0 0;
+}
+.ai-chat .gate-hd {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-weight: 650;
+  font-size: 13.2px;
+  margin-bottom: 9px;
+}
+.ai-chat .gate-hd .ic {
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  border: 1.4px solid var(--blue);
+  color: var(--blue);
+  font-size: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.ai-chat .gate .cd { font-size: 12.2px; color: var(--ink2); }
+.ai-chat .gate .cd b { font-variant-numeric: tabular-nums; color: var(--ink); font-weight: 650; }
+.ai-chat .gate-ft { display: flex; align-items: center; gap: 9px; margin-top: 11px; }
+
+/* ---------- 回执卡（demo :214-219；D5） ---------- */
+.ai-chat .hitl-receipt {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  border-radius: var(--r);
+  padding: 8px 11px;
+  font-size: 12.6px;
+  color: var(--ink2);
+  margin: 6px 0 0;
+}
+.ai-chat .hitl-receipt .rt { color: var(--ink3); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+
+/* ---------- C2 裁决：AI 面板内状态色收敛 demo 四族（不动 EP 主题变量，仅 .ai-chat 域内覆写） ---------- */
+.ai-chat .el-tag--primary { --el-tag-text-color: var(--blue); --el-tag-border-color: var(--blue-line); --el-tag-bg-color: var(--blue-bg); }
+.ai-chat .el-tag--success { --el-tag-text-color: var(--green); --el-tag-border-color: var(--green-line); --el-tag-bg-color: var(--green-bg); }
+/* demo 无橙族：warning 收敛中性灰族（--ink2/--line/--bg2） */
+.ai-chat .el-tag--warning { --el-tag-text-color: var(--ink2); --el-tag-border-color: var(--line); --el-tag-bg-color: var(--bg2); }
+.ai-chat .el-tag--danger { --el-tag-text-color: var(--red); --el-tag-border-color: var(--red-line); --el-tag-bg-color: var(--red-bg); }
+.ai-chat .el-tag--info { --el-tag-text-color: var(--ink2); --el-tag-border-color: var(--line); --el-tag-bg-color: var(--bg2); }
+.ai-chat .el-button--primary {
+  --el-button-bg-color: var(--blue);
+  --el-button-border-color: var(--blue);
+  --el-button-hover-bg-color: var(--blue);
+  --el-button-hover-border-color: var(--blue);
+  --el-button-active-bg-color: var(--blue);
+  --el-button-active-border-color: var(--blue);
+}
+.ai-chat .el-button--danger {
+  --el-button-bg-color: var(--red);
+  --el-button-border-color: var(--red);
+  --el-button-hover-bg-color: var(--red);
+  --el-button-hover-border-color: var(--red);
+  --el-button-active-bg-color: var(--red);
+  --el-button-active-border-color: var(--red);
+}
