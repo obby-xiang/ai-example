@@ -1,0 +1,1119 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ai-example · AI 对话体验改造 v4（R-163 候选）</title>
+<style>
+:root{
+  --ink:#1f2328; --ink2:#57606a; --ink3:#8b949e;
+  --line:#e3e6ea; --line2:#eef0f3; --bg:#fff; --bg2:#f6f7f9;
+  --blue:#2563eb; --blue-bg:#eff4ff; --blue-line:#cddcff;
+  --green:#1a7f45; --green-bg:#edf7f0; --green-line:#cbe7d6;
+  --red:#c0392b; --red-bg:#fdf1ef; --red-line:#f0d5d0;
+  --r:10px;
+  --font:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei","PingFang SC","Hiragino Sans GB","Noto Sans CJK SC",sans-serif;
+  --mono:"Cascadia Mono","Cascadia Code",Consolas,"SF Mono",Menlo,monospace;
+}
+*{box-sizing:border-box}
+[hidden]{display:none !important}
+html,body{margin:0;padding:0}
+body{background:#f1f2f4;color:var(--ink);font:13.8px/1.7 var(--font);-webkit-font-smoothing:antialiased}
+button{font:inherit;color:inherit;cursor:pointer}
+
+/* ---------- top bar ---------- */
+.topbar{position:sticky;top:0;z-index:30;display:flex;align-items:center;gap:16px;padding:12px 22px;background:var(--bg);border-bottom:1px solid var(--line)}
+.brand{font-weight:600;font-size:14px;letter-spacing:.2px}
+.brand .sub{color:var(--ink2);font-weight:400;margin-left:8px;font-size:12.5px}
+.seg{display:flex;margin-left:auto;background:var(--bg2);border:1px solid var(--line);border-radius:999px;padding:3px;gap:2px}
+.seg-btn{border:0;background:transparent;color:var(--ink2);padding:5px 18px;border-radius:999px;font-size:13px;transition:.15s}
+.seg-btn.is-on{background:var(--bg);color:var(--ink);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.08)}
+
+/* ---------- stage ---------- */
+.stage{display:flex;justify-content:center;flex-wrap:wrap;align-items:flex-start;gap:26px;padding:26px 22px 8px}
+.view{display:none;gap:26px;align-items:flex-start;flex-wrap:wrap;justify-content:center}
+.view.is-on{display:flex}
+.col{flex:0 0 400px;width:400px;max-width:100%}
+.cap{margin-top:9px;font-size:12px;color:var(--ink3);text-align:center}
+.bottom{display:flex;justify-content:center;flex-wrap:wrap;gap:26px;padding:8px 22px 70px}
+.bcol{flex:0 0 400px;width:400px;max-width:100%}
+
+/* ---------- panel shell ---------- */
+.panel{width:400px;background:var(--bg);border:1px solid var(--line);border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.05)}
+.panel-hd{display:flex;align-items:center;gap:8px;padding:11px 14px;border-bottom:1px solid var(--line2);background:var(--bg)}
+.panel-hd .dot{width:7px;height:7px;border-radius:50%;background:var(--green);flex:0 0 7px}
+.panel-hd .t{font-weight:600;font-size:13px}
+.panel-hd .m{margin-left:auto;font-size:11.5px;color:var(--ink3)}
+.panel-bd{padding:14px 14px 10px}
+
+/* ---------- generic bits ---------- */
+.time{font-size:11.5px;color:var(--ink3);font-variant-numeric:tabular-nums}
+.lnk{border:0;background:transparent;padding:0;font-size:11.5px;color:var(--ink2);transition:color .15s}
+.lnk:hover{color:var(--blue)}
+.sep{color:var(--line);font-size:11px}
+.btn{border-radius:8px;padding:5px 13px;font-size:12.6px;border:1px solid transparent;transition:.15s}
+.btn-ghost{background:var(--bg);border-color:var(--line);color:var(--ink2)}
+.btn-ghost:hover{border-color:var(--ink3);color:var(--ink)}
+.btn-primary{background:var(--blue);color:#fff;font-weight:600}
+.btn-primary:hover{filter:brightness(1.08)}
+.btn-sm{padding:3px 10px;font-size:11.5px}
+.ghost-btn{border:1px solid var(--line);background:var(--bg);color:var(--ink2);border-radius:6px;padding:2px 9px;font-size:11.5px}
+.ghost-btn:hover{border-color:var(--ink3);color:var(--ink)}
+.stchip{flex:0 0 auto;font-size:9.5px;line-height:1.7;padding:0 5px;border-radius:5px;white-space:nowrap}
+.chip-run{color:var(--blue);background:var(--blue-bg)}
+.chip-ok{color:var(--green);background:var(--green-bg)}
+.chip-bad{color:var(--red);background:var(--red-bg)}
+.chip-idle{color:var(--ink2);background:var(--bg2)}
+
+/* ---------- alert（断流） ---------- */
+.alert{display:flex;align-items:flex-start;gap:9px;border:1px solid var(--red-line);background:var(--red-bg);border-radius:var(--r);padding:9px 11px;margin:0 0 16px}
+.alert .aic{flex:0 0 15px;width:15px;height:15px;border-radius:50%;border:1.4px solid var(--red);color:var(--red);font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;margin-top:2px}
+.alert .ab{flex:1;min-width:0}
+.alert .ab b{display:block;font-size:12.6px;font-weight:650;color:var(--ink)}
+.alert .ab span{font-size:11.8px;color:var(--ink2)}
+
+/* ---------- 用户消息（无头像 / 无角色名） ---------- */
+.umsg{display:flex;flex-direction:column;align-items:flex-end;margin:0 0 18px}
+.umsg .ucard{max-width:86%;background:var(--bg2);border:1px solid var(--line2);border-radius:12px 12px 3px 12px;padding:8px 11px;font-size:13.5px}
+.umsg .uft{display:flex;align-items:center;gap:7px;margin-top:5px}
+
+/* ---------- 操作行：统一 hover 浮现（图标化） ---------- */
+.hoverable .acts{opacity:0;transition:opacity .15s}
+.hoverable:hover .acts,.hoverable:focus-within .acts,.hoverable.demo-hover .acts{opacity:1}
+.acts{display:flex;align-items:center;gap:2px}
+.icon-btn{width:22px;height:22px;border:0;background:transparent;padding:0;display:inline-flex;align-items:center;justify-content:center;border-radius:5px;color:var(--ink3);transition:color .15s,background .15s}
+.icon-btn:hover{color:var(--ink);background:var(--bg2)}
+.icon-btn svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+
+/* ---------- 工作中（呼吸） ---------- */
+.working{display:inline-flex;align-items:center;gap:6px;font-size:12.2px;color:var(--ink2)}
+.working .wdot{width:7px;height:7px;border-radius:50%;background:var(--blue);animation:breathe 1.5s ease-in-out infinite}
+@keyframes breathe{0%,100%{opacity:.25;transform:scale(.8)}50%{opacity:1;transform:scale(1)}}
+@media (prefers-reduced-motion: reduce){
+  .working .wdot{animation:none;opacity:.85;transform:none}
+  .cursor{animation:none}
+  .ti.run{animation:none}
+  .sk{animation:none}
+}
+
+/* ---------- turn 容器（AI 回复） ---------- */
+.turn{margin:0 0 6px}
+.afoot{display:flex;align-items:center;gap:7px;margin:6px 0 18px;min-height:22px}
+.aside-note{font-size:11.5px;color:var(--ink3)}
+
+/* ---------- AI 流式段 ---------- */
+.aseg{margin:0 0 14px}
+.aseg p{margin:0;font-size:13.8px;line-height:1.7}
+.cursor{display:inline-block;width:6px;height:14px;background:var(--ink2);vertical-align:-2px;border-radius:1px;animation:blink 1s steps(1) infinite}
+@keyframes blink{0%,68%{opacity:1}69%,100%{opacity:0}}
+
+/* ---------- Markdown ---------- */
+.md{font-size:13.8px;line-height:1.7;color:var(--ink)}
+.md>*:first-child{margin-top:0}
+.md h1,.md h2,.md h3,.md h4{margin:18px 0 9px;line-height:1.5;font-weight:650}
+.md h1{font-size:16.5px}.md h2{font-size:15.5px}.md h3{font-size:14.2px}
+.md p{margin:0 0 12px}
+.md ul{margin:0 0 12px;padding-left:19px}
+.md li{margin:3px 0}
+.md li::marker{color:var(--ink3)}
+.md strong{font-weight:650}
+.md .ic{font-family:var(--mono);font-size:12.4px;background:var(--bg2);border:1px solid var(--line2);border-radius:4px;padding:1px 4px;white-space:nowrap}
+.md blockquote{margin:0 0 12px;padding:2px 0 2px 11px;border-left:2px solid var(--blue-line);color:var(--ink3);font-size:12.6px;line-height:1.65}
+.md table{width:100%;border-collapse:collapse;margin:0 0 14px;font-size:13.2px;table-layout:fixed}
+.md th,.md td{border:1px solid var(--line);padding:6px 8px;text-align:left;word-break:break-word}
+.md th{background:var(--bg2);font-weight:600;color:var(--ink2)}
+
+/* ---------- 代码块 ---------- */
+.code{margin:0 0 14px;border:1px solid var(--line);border-radius:var(--r);overflow:hidden;background:var(--bg)}
+.code figcaption{display:flex;align-items:center;padding:5px 8px 5px 11px;background:var(--bg2);border-bottom:1px solid var(--line2);font-size:11.5px;color:var(--ink2)}
+.code figcaption .lg{font-family:var(--mono);letter-spacing:.4px}
+.code figcaption .hlib{margin-left:auto;font-size:10.5px;color:var(--ink3);font-family:var(--mono)}
+.code .copy{margin-left:8px;border:1px solid var(--line);background:var(--bg);color:var(--ink2);border-radius:6px;padding:2px 9px;font-size:11.5px}
+.code .copy:hover{border-color:var(--ink3);color:var(--ink)}
+.code pre{margin:0;padding:10px 11px;overflow-x:auto;font-family:var(--mono);font-size:12.3px;line-height:1.62}
+/* highlight.js · github 浅色主题配色（库默认 token 色，不计入 UI 用色） */
+.code pre{background:#f8f8f8;color:#333}
+.hljs-comment{color:#998;font-style:italic}
+.hljs-keyword{color:#333;font-weight:700}
+.hljs-string{color:#d14}
+.hljs-number{color:#008080}
+.hljs-literal{color:#008080}
+.hljs-attr{color:#000080}
+.hljs-built_in{color:#0086b3}
+.hljs-title{color:#900;font-weight:700}
+.hljs-meta{color:#999;font-weight:700}
+
+/* ---------- 工具卡 ---------- */
+.tcard{border:1px solid var(--line);border-radius:var(--r);background:var(--bg);overflow:hidden;margin:0 0 8px}
+.tcard-hd{display:flex;align-items:center;gap:6px;width:100%;border:0;background:transparent;padding:8px 10px;text-align:left;transition:background .15s}
+.tcard-hd:hover{background:var(--bg2)}
+.tcard.is-open .tcard-hd{border-bottom:1px solid var(--line2)}
+.ti{flex:0 0 15px;width:15px;height:15px;display:flex;align-items:center;justify-content:center;font-size:11px;line-height:1;color:var(--ink3)}
+.ti.ok{color:var(--green);border:1.2px solid var(--green);border-radius:50%}
+.ti.bad{color:var(--red);border:1.2px solid var(--red);border-radius:50%}
+.ti.run{border:1.6px solid var(--blue-line);border-top-color:var(--blue);border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.tname{flex:0 1 auto;max-width:128px;font-family:var(--mono);font-size:11.4px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tsum{flex:1;min-width:0;font-size:12px;color:var(--ink2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tcard.st-running .tsum{color:var(--blue)}
+.tcard.st-failed .tsum{color:var(--red)}
+.tchev{flex:0 0 auto;color:var(--ink3);font-size:12px;transition:transform .18s}
+.tcard.is-open .tchev{transform:rotate(90deg)}
+.tcard-bd{display:none;padding:10px}
+.tcard.is-open .tcard-bd{display:block}
+.kv{margin-bottom:9px}
+.kv:last-child{margin-bottom:0}
+.kv .k{display:block;font-size:11px;letter-spacing:.5px;text-transform:uppercase;color:var(--ink3);margin-bottom:4px}
+.kv pre{margin:0;background:var(--bg2);border:1px solid var(--line2);border-radius:8px;padding:8px 9px;overflow-x:auto;font-family:var(--mono);font-size:12.1px;line-height:1.6}
+.tact{display:flex;gap:14px;margin-top:10px;opacity:0;transition:opacity .15s}
+.tcard:hover .tact,.tact:focus-within{opacity:1}
+.tact button{border:0;background:transparent;color:var(--ink2);padding:0;font-size:12px;border-bottom:1px solid var(--line)}
+.tact button:hover{color:var(--blue);border-color:var(--blue-line)}
+
+/* ---------- 思考过程 ---------- */
+.reason{border:1px solid var(--line);border-radius:var(--r);background:var(--bg2);overflow:hidden;margin:0 0 14px}
+.reason-hd{display:flex;align-items:center;gap:8px;width:100%;border:0;background:transparent;padding:7px 10px;text-align:left}
+.reason-hd:hover{background:var(--bg)}
+.rh-ic{flex:0 0 15px;width:15px;height:15px;border-radius:50%;border:1.2px solid var(--line);color:var(--ink3);font-size:9px;display:flex;align-items:center;justify-content:center}
+.rname{font-size:12.4px;color:var(--ink2)}
+.rsum{flex:1;font-size:11.5px;color:var(--ink3)}
+.reason.is-open .tchev{transform:rotate(90deg)}
+.reason-bd{display:none;padding:0 11px 10px 33px}
+.reason.is-open .reason-bd{display:block}
+.reason-bd p{margin:0 0 7px;font-size:12.6px;line-height:1.7;color:var(--ink2)}
+.reason-bd p:last-child{margin:0}
+.reason-line{border-left:2px solid var(--line);padding-left:10px}
+
+/* ---------- HITL 门卡 ---------- */
+.gate{border:1px solid var(--blue-line);background:var(--blue-bg);border-radius:var(--r);padding:12px;margin:0 0 10px}
+.gate-hd{display:flex;align-items:center;gap:7px;font-weight:650;font-size:13.2px;margin-bottom:9px}
+.gate-hd .ic{width:15px;height:15px;border-radius:50%;border:1.4px solid var(--blue);color:var(--blue);font-size:10px;display:flex;align-items:center;justify-content:center}
+.gate-hd .stchip{margin-left:auto;font-weight:400}
+.grows{background:var(--bg);border:1px solid var(--line2);border-radius:8px;padding:2px 10px}
+.grow{display:flex;gap:10px;padding:7px 0;border-bottom:1px solid var(--line2);font-size:13px;line-height:1.5}
+.grow:last-child{border-bottom:0}
+.gk{flex:0 0 58px;color:var(--ink3);font-size:12.4px}
+.gv{flex:1;min-width:0;word-break:break-word}
+.gv b{font-weight:650}
+.gate-ft{display:flex;align-items:center;gap:9px;margin-top:11px}
+.ring{flex:0 0 30px}
+.ring circle{transition:stroke-dashoffset 1s linear}
+.cd{font-size:12.2px;color:var(--ink2)}
+.cd b{font-variant-numeric:tabular-nums;color:var(--ink);font-weight:650}
+.gate-ft .btn{margin-left:auto}
+.gate-ft .btn+.btn{margin-left:0}
+.btn-primary:disabled{background:var(--ink3);cursor:default;font-weight:400}
+
+/* ---------- 回执卡 ---------- */
+.receipt{display:flex;align-items:center;gap:7px;border:1px solid var(--line);background:var(--bg);border-radius:var(--r);padding:8px 11px;font-size:12.6px;color:var(--ink2);margin:0 0 14px}
+.receipt .ck{flex:0 0 auto;color:var(--green);font-weight:700;font-size:12.5px}
+.receipt .rtxt{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.receipt b{color:var(--ink);font-weight:600}
+.receipt .sep{color:var(--line)}
+.receipt .rt{flex:0 0 auto;color:var(--ink3);font-size:11.5px;font-variant-numeric:tabular-nums}
+
+/* ---------- generative_form ---------- */
+.gf{border:1px solid var(--line);border-radius:var(--r);background:var(--bg);margin:0 0 10px;overflow:hidden}
+.gf-hd{display:flex;align-items:center;gap:7px;padding:9px 11px;border-bottom:1px solid var(--line2);background:var(--bg2);font-size:12.8px;font-weight:650}
+.gf-hd .gic{color:var(--ink3);font-size:11px}
+.gf-hd .stchip{margin-left:auto;font-weight:400}
+.gf-body{padding:11px}
+.fld{display:block;margin-bottom:11px}
+.fld .fl{display:block;font-size:12.2px;color:var(--ink2);margin-bottom:4px}
+.fi{width:100%;border:1px solid var(--line);border-radius:8px;padding:6px 9px;font-family:var(--font);font-size:13px;color:var(--ink);background:var(--bg);outline:none}
+.fld.is-err .fi{border-color:var(--red);background:var(--red-bg)}
+.fld.is-err .fl{color:var(--red)}
+.fmsg{display:block;margin-top:5px;font-size:11.8px;line-height:1.5;color:var(--red);background:var(--red-bg);border:1px solid var(--red-line);border-radius:6px;padding:5px 8px}
+.gf-ft{display:flex;gap:8px;margin-top:2px}
+.gf-ft .btn-primary{margin-left:auto}
+
+/* ---------- mermaid 图表 ---------- */
+.mmd{border:1px solid var(--line);border-radius:var(--r);background:var(--bg);margin:0 0 14px;overflow:hidden}
+.mmd-hd{display:flex;align-items:center;gap:7px;padding:7px 10px;border-bottom:1px solid var(--line2);background:var(--bg2);font-size:12.4px}
+.mmd-hd .mi{color:#9370DB;font-size:11px}
+.mmd-hd .mt{font-weight:650}
+.mmd-hd .mlib{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--ink3)}
+.mmd-fig{padding:10px 8px;background:var(--bg)}
+.mmd-svg{display:block;width:100%;max-width:320px;height:auto;margin:0 auto}
+.mmd-node{fill:#ECECFF;stroke:#9370DB;stroke-width:1px}
+.mmd-edge{fill:none;stroke:#333;stroke-width:1px}
+.mmd-text{font-family:var(--font);font-size:12px;fill:#333;text-anchor:middle}
+.mmd-foot{padding:0 10px 10px}
+.mmd-toggle{border:1px solid var(--line);background:var(--bg);color:var(--ink2);border-radius:8px;padding:3px 11px;font-size:11.8px}
+.mmd-toggle:hover{border-color:var(--ink3);color:var(--ink)}
+.mmd-code{display:none;margin:8px 0 0;background:#f8f8f8;border:1px solid var(--line);border-radius:8px;padding:8px 10px;overflow-x:auto;font-family:var(--mono);font-size:12px;line-height:1.6;color:#333}
+.mmd.is-open .mmd-code{display:block}
+
+/* ---------- CollapsibleText ---------- */
+/* ---------- 长文段（不折叠，正文自由展开） ---------- */
+.longtext{margin:0 0 8px;font-size:13.8px;line-height:1.7}
+.longtext p{margin:0 0 12px}
+.decnote{margin:0 0 12px;font-size:11.6px;color:var(--ink3);border-left:2px solid var(--line);padding-left:9px;line-height:1.6}
+
+/* ---------- 本轮已取消 ---------- */
+.notice{display:flex;align-items:center;gap:8px;border:1px dashed var(--line);background:var(--bg2);border-radius:var(--r);padding:8px 11px;font-size:12.6px;color:var(--ink2);margin:0 0 14px}
+.notice .ni{flex:0 0 15px;width:15px;height:15px;border-radius:50%;border:1.2px solid var(--ink3);color:var(--ink3);font-size:9px;display:flex;align-items:center;justify-content:center}
+
+/* ---------- composer ---------- */
+.composer{display:flex;align-items:center;gap:8px;padding:10px 14px;border-top:1px solid var(--line2);background:var(--bg)}
+.composer .box{flex:1;border:1px solid var(--line);border-radius:9px;padding:7px 10px;color:var(--ink3);font-size:13px;background:var(--bg2)}
+.composer .send{width:28px;height:28px;border-radius:8px;background:var(--blue);color:#fff;border:0;font-size:13px;display:flex;align-items:center;justify-content:center}
+
+/* ---------- side / bottom cards ---------- */
+.card{border:1px solid var(--line);border-radius:12px;background:var(--bg);padding:13px 15px;margin-bottom:18px}
+.card h4{margin:0 0 3px;font-size:12.8px;letter-spacing:.2px}
+.card .hint{margin:0 0 11px;font-size:11.5px;color:var(--ink3)}
+.srow{display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--line2);font-size:12.6px}
+.srow:last-child{border-bottom:0}
+.slabel{flex:0 0 76px;font-size:12.3px}
+.sdesc{flex:1;min-width:0;color:var(--ink3);font-size:11.8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tsrow{display:flex;align-items:baseline;gap:10px;padding:5px 0;border-bottom:1px solid var(--line2);font-size:12.6px}
+.tsrow:last-child{border-bottom:0}
+.tsrow .tv{font-variant-numeric:tabular-nums}
+.tsrow .td{color:var(--ink3);font-size:11.5px;margin-left:auto}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{border:1px solid var(--line);background:var(--bg);border-radius:999px;padding:4px 11px;font-size:12.2px;color:var(--ink2)}
+.chip:hover{border-color:var(--blue-line);color:var(--blue)}
+.mini{width:400px;max-width:100%;background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:14px}
+.sk{background:linear-gradient(90deg,var(--bg2) 0,var(--line2) 40%,var(--bg2) 80%);background-size:220% 100%;animation:sh 1.4s linear infinite;border-radius:6px}
+@keyframes sh{0%{background-position:120% 0}100%{background-position:-120% 0}}
+.sk-line{height:11px;margin-bottom:9px}
+.sk-card{border:1px solid var(--line2);border-radius:10px;padding:9px 10px;display:flex;align-items:center;gap:8px;margin-top:12px}
+.sk-dot{flex:0 0 13px;width:13px;height:13px;border-radius:50%}
+.mt10{margin-top:10px}
+
+/* ---------- notes list ---------- */
+.notes li{list-style:none;margin:0 0 9px;font-size:12.4px;line-height:1.6}
+.notes ul{margin:0;padding:0}
+.notes .n{display:inline-block;width:17px;color:var(--ink3);font-variant-numeric:tabular-nums}
+.notes .good{color:var(--ink)}
+
+/* ================= 现状（丑点示意，同 v1） ================= */
+.lg{font-size:13px;line-height:1.35;color:var(--ink)}
+.lg-text{white-space:pre-wrap;margin:0 0 2px;font-size:13px;line-height:1.3}
+.lg-tags{display:flex;flex-wrap:wrap;gap:3px;margin:4px 0}
+.lg-tag{font-size:10.5px;padding:1px 5px;border-radius:3px;color:#fff}
+.lg-json{font-family:var(--mono);font-size:11px;line-height:1.35;background:#fbfbfc;border:1px solid #d7d7d7;border-radius:2px;padding:4px 6px;white-space:pre-wrap;word-break:break-all;margin:2px 0 4px}
+.lg-clip{border:1px solid var(--red);background:#fff5f4;height:38px;overflow:hidden;padding:2px 5px;font-size:11px;line-height:1.3;font-family:var(--mono);border-radius:2px}
+.lg-hitl{border:1px solid #e0a800;background:#fffbe6;border-radius:2px;padding:4px 6px;font-family:var(--mono);font-size:11px;margin:2px 0}
+.lg-fab{position:absolute;right:18px;bottom:34px;width:40px;height:40px;border-radius:50%;background:#1f2328;color:#fff;font-size:11px;display:flex;align-items:center;justify-content:center;box-shadow:0 3px 10px rgba(0,0,0,.28);z-index:5}
+.lg-wrap{position:relative}
+.lg-sec{border-top:1px dashed #d7d7d7;padding-top:6px;margin-top:6px}
+.lg-note{font-size:10.5px;color:#9a9a9a;margin:0 0 3px}
+.cap-old{color:#b04a3c}
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">ai-example · AI 对话体验改造 <span class="sub">R-163 候选 · v4 全场景 demo</span></div>
+  <div class="seg" role="tablist" aria-label="视图切换">
+    <button class="seg-btn" data-view="old" role="tab" aria-selected="false">现状</button>
+    <button class="seg-btn is-on" data-view="new" role="tab" aria-selected="true">新设计</button>
+  </div>
+</header>
+
+<main class="stage">
+
+  <!-- ============ 新设计：一条完整对话时间线 ============ -->
+  <section id="view-new" class="view is-on">
+    <div class="col">
+      <div class="panel">
+        <div class="panel-hd">
+          <span class="dot"></span><span class="t">AI 助手</span>
+          <span class="m">deepseek-chat</span>
+          <button class="ghost-btn" id="replay" style="margin-left:8px">⟲ 重播流式</button>
+        </div>
+
+        <div class="panel-bd">
+
+          <!-- 断流 Alert -->
+          <div class="alert">
+            <span class="aic">!</span>
+            <div class="ab"><b>连接已断开</b><span>本次回复可能不完整 · 正在重连…</span></div>
+            <button class="btn btn-ghost btn-sm">重试</button>
+          </div>
+
+          <!-- ① 用户消息（无头像 / 无角色名；下方「图标操作 + 时间」同行，右对齐） -->
+          <div class="umsg hoverable">
+            <div class="ucard">帮我看下同步任务为什么一直失败，配置在 sync.config.json</div>
+            <div class="uft">
+              <span class="acts">
+                <button class="icon-btn" title="编辑" aria-label="编辑">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"></path><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"></path></svg>
+                </button>
+                <button class="icon-btn" title="复制" aria-label="复制" data-copy="1">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                </button>
+              </span>
+              <span class="time">今天 14:29</span>
+            </div>
+          </div>
+
+          <!-- ② AI 回复 turn：严格时序交错 -->
+          <div class="turn" id="turn1">
+
+            <!-- ②-a 流式 text 段（末尾光标；状态行在 turn 末尾的 afoot） -->
+            <div class="aseg">
+              <p><span id="streamText"></span><span class="cursor" id="streamCursor"></span></p>
+            </div>
+
+            <!-- ②-b 工具卡 running -->
+            <div class="tcard st-running">
+              <button class="tcard-hd" type="button" aria-expanded="false">
+                <span class="ti run"></span>
+                <span class="tname">web_search</span>
+                <span class="tsum">正在搜索 5 个站点…</span>
+                <span class="stchip chip-run">调用中</span>
+                <span class="tchev">›</span>
+              </button>
+              <div class="tcard-bd">
+                <div class="kv"><span class="k">input</span><pre data-json>{
+  "query": "ai-example 同步任务 失败 原因",
+  "topK": 5
+}</pre></div>
+                <div class="kv"><span class="k">output</span><pre data-json>{
+  "status": "running",
+  "progress": { "sites": 5, "done": 2 }
+}</pre></div>
+                <div class="tact"><button type="button">复制结果</button><button type="button">查看原始日志</button></div>
+              </div>
+            </div>
+
+            <!-- ②-c 工具卡 done（默认展开，展示格式化 JSON） -->
+            <div class="tcard st-done is-open">
+              <button class="tcard-hd" type="button" aria-expanded="true">
+                <span class="ti ok">✓</span>
+                <span class="tname">str_replace_editor</span>
+                <span class="tsum">已编辑 5 个文件 +27 −23</span>
+                <span class="stchip chip-ok">已成功</span>
+                <span class="tchev">›</span>
+              </button>
+              <div class="tcard-bd">
+                <div class="kv"><span class="k">input</span><pre data-json>{
+  "command": "edit",
+  "files": [
+    "sync.config.json",
+    "sync/runner.ts",
+    "sync/ignore.ts",
+    "sync/retry.ts",
+    "package.json"
+  ]
+}</pre></div>
+                <div class="kv"><span class="k">output</span><pre data-json>{
+  "ok": true,
+  "filesEdited": 5,
+  "added": 27,
+  "removed": 23,
+  "durationMs": 412
+}</pre></div>
+                <div class="tact"><button type="button">复制结果</button><button type="button">查看原始日志</button></div>
+              </div>
+            </div>
+
+            <!-- ②-d 流式完成的 text 段（Markdown 渲染） -->
+            <div class="md" id="mdHost"></div>
+
+            <!-- ②-d2 mermaid 排查流程图 -->
+            <div class="mmd" id="mmd">
+              <div class="mmd-hd"><span class="mi">◈</span><span class="mt">排查流程</span><span class="mlib">mermaid</span></div>
+              <div class="mmd-fig">
+                <svg class="mmd-svg" viewBox="0 0 320 304" role="img" aria-label="排查流程图">
+                  <defs>
+                    <marker id="mmdArrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                      <path d="M 0 0 L 10 5 L 0 10 z" fill="#333"></path>
+                    </marker>
+                  </defs>
+                  <path class="mmd-edge" d="M160,44 L160,64" marker-end="url(#mmdArrow)"></path>
+                  <path class="mmd-edge" d="M160,100 L160,120" marker-end="url(#mmdArrow)"></path>
+                  <path class="mmd-edge" d="M160,156 L160,176" marker-end="url(#mmdArrow)"></path>
+                  <path class="mmd-edge" d="M160,212 L160,232" marker-end="url(#mmdArrow)"></path>
+                  <rect class="mmd-node" x="118" y="10" width="84" height="34" rx="17"></rect>
+                  <text class="mmd-text" x="160" y="32">开始</text>
+                  <rect class="mmd-node" x="52" y="64" width="216" height="36" rx="4"></rect>
+                  <text class="mmd-text" x="160" y="87">读取 sync.config.json</text>
+                  <rect class="mmd-node" x="52" y="120" width="216" height="36" rx="4"></rect>
+                  <text class="mmd-text" x="160" y="143">补全忽略规则</text>
+                  <rect class="mmd-node" x="52" y="176" width="216" height="36" rx="4"></rect>
+                  <text class="mmd-text" x="160" y="199">重跑同步任务</text>
+                  <polygon class="mmd-node" points="160,232 240,268 160,304 80,268"></polygon>
+                  <text class="mmd-text" x="160" y="272">校验通过？</text>
+                </svg>
+              </div>
+              <div class="mmd-foot">
+                <button class="mmd-toggle" id="mmdToggle" type="button" aria-expanded="false">查看源码</button>
+                <pre class="mmd-code">graph TD
+  A[开始] --&gt; B[读取 sync.config.json]
+  B --&gt; C[补全忽略规则]
+  C --&gt; D[重跑同步任务]
+  D --&gt; E{校验通过}</pre>
+              </div>
+            </div>
+
+            <!-- ②-e 思考过程（默认折叠） -->
+            <div class="reason">
+              <button class="reason-hd" type="button" aria-expanded="false">
+                <span class="rh-ic">✦</span>
+                <span class="rname">思考过程</span>
+                <span class="rsum">已用 3 秒 · 点击展开</span>
+                <span class="tchev">›</span>
+              </button>
+              <div class="reason-bd reason-line">
+                <p>先确认调度间隔：interval 为 0 时调度器按“立即重试”处理，会与速率限制互相放大。</p>
+                <p>再看忽略规则，只有 <code class="ic">**/.git/**</code>，缺少临时目录，导致同一批文件被反复上传。</p>
+                <p>最后核对重试策略，max 为 null 即无上限，与观测到的 217 次连续尝试吻合。</p>
+              </div>
+            </div>
+
+            <!-- ②-f 工具卡 failed -->
+            <div class="tcard st-failed">
+              <button class="tcard-hd" type="button" aria-expanded="false">
+                <span class="ti bad">✗</span>
+                <span class="tname">write_file</span>
+                <span class="tsum">写入失败：权限不足</span>
+                <span class="stchip chip-bad">执行失败</span>
+                <span class="tchev">›</span>
+              </button>
+              <div class="tcard-bd">
+                <div class="kv"><span class="k">input</span><pre data-json>{
+  "path": "src/config/sync.json",
+  "mode": "overwrite"
+}</pre></div>
+                <div class="kv"><span class="k">output</span><pre data-json>{
+  "error": {
+    "code": "EACCES",
+    "message": "permission denied",
+    "path": "src/config/sync.json"
+  }
+}</pre></div>
+                <div class="tact"><button type="button">复制结果</button><button type="button">以管理员重试</button></div>
+              </div>
+            </div>
+
+            <!-- ②-g HITL 确认门（待批） -->
+            <div class="gate">
+              <div class="gate-hd"><span class="ic">!</span>需要你确认后才能继续<span class="stchip chip-run">等待确认</span></div>
+              <div class="grows">
+                <div class="grow"><span class="gk">任务名</span><span class="gv"><b>数据同步</b></span></div>
+                <div class="grow"><span class="gk">操作</span><span class="gv">创建定时任务（每 5 分钟执行一次）</span></div>
+                <div class="grow"><span class="gk">影响面</span><span class="gv">写入 <code class="ic">sync.config.json</code> · 影响 1 个仓库 · 不涉及删除</span></div>
+              </div>
+              <div class="gate-ft">
+                <svg class="ring" viewBox="0 0 36 36" width="30" height="30" aria-hidden="true">
+                  <circle cx="18" cy="18" r="15.5" fill="none" stroke="var(--line)" stroke-width="3"></circle>
+                  <circle id="ringArc" cx="18" cy="18" r="15.5" fill="none" stroke="var(--blue)" stroke-width="3" stroke-linecap="round"
+                          stroke-dasharray="97.4" stroke-dashoffset="29.2" transform="rotate(-90 18 18)"></circle>
+                </svg>
+                <span class="cd"><b id="cdNum">21</b> 秒后自动拒绝</span>
+                <button class="btn btn-ghost">拒绝</button>
+                <button class="btn btn-primary" id="btnApprove">批准</button>
+              </div>
+            </div>
+
+            <!-- ②-h HITL 回执（一行自然语言） -->
+            <div class="receipt">
+              <span class="ck">✓</span>
+              <span class="rtxt">已确认 <span class="sep">·</span> 创建任务<b>「数据同步」</b></span>
+              <span class="rt">今天 14:32</span>
+            </div>
+
+            <!-- ②-i generative_form 表单卡（两控件 + 一处校验错误） -->
+            <div class="gf">
+              <div class="gf-hd"><span class="gic">▤</span>需要你补充两个参数<span class="stchip chip-run">等待填写</span></div>
+              <div class="gf-body">
+                <label class="fld">
+                  <span class="fl">任务名</span>
+                  <input class="fi" value="数据同步" readonly>
+                </label>
+                <label class="fld is-err">
+                  <span class="fl">执行间隔（秒）</span>
+                  <input class="fi" value="0" readonly>
+                  <span class="fmsg">校验失败：必须 ≥ 300 秒，当前值为 0，无法生成合法的重试策略。</span>
+                </label>
+                <div class="gf-ft">
+                  <button class="btn btn-ghost">取消</button>
+                  <button class="btn btn-primary">提交</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- ②-j GF 回执（一行自然语言） -->
+            <div class="receipt">
+              <span class="ck">✓</span>
+              <span class="rtxt">已提交 <span class="sep">·</span> 执行间隔 <b>300 秒</b></span>
+              <span class="rt">今天 14:33</span>
+            </div>
+
+            <!-- ②-k 长文段（不折叠：正文自由展开滚动） -->
+            <div class="longtext">
+              <p>整体来看，这次故障不是单点问题，而是三处配置互相放大：调度间隔 0 秒让任务进入立即重试，缺少临时目录忽略规则让同一批文件被反复上传，重试上限为 null 又让失败请求无限堆积，三者叠加才触发了速率限制与写入失败。</p>
+              <p>修复顺序建议从忽略规则开始，因为它的改动成本最低、风险最小；随后把调度间隔调到 300 秒，给下游留出处理窗口；最后补上重试上限 5 次，并观察一轮完整周期的日志。</p>
+              <p>如果重跑后仍有失败，请把 <code class="ic">sync.log</code> 里最近 200 行发我，我再从写入权限这条路径继续排查。</p>
+            </div>
+            <p class="decnote">决策：AI 正文不做渐隐截断，长文自由展开滚动；折叠只保留在「思考过程」与工具卡展开体内的长 output。</p>
+
+            <!-- ②-l AI 回复底部：状态行（工作中 ↔ 时间戳 + 图标操作行） -->
+            <div class="afoot hoverable" id="foot1">
+              <span class="working" id="footWork"><span class="wdot"></span>工作中…</span>
+              <span class="time" id="footTime" hidden>今天 14:33</span>
+              <span class="acts" id="footActs" hidden>
+                <button class="icon-btn" title="复制" aria-label="复制" data-copy="1">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                </button>
+                <button class="icon-btn" title="赞" aria-label="赞">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3H14z"></path><path d="M7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"></path></svg>
+                </button>
+                <button class="icon-btn" title="踩" aria-label="踩">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3H10z"></path><path d="M17 2h2.67A2.31 2.31 0 0 1 22 4v7a2.31 2.31 0 0 1-2.33 2H17"></path></svg>
+                </button>
+              </span>
+            </div>
+          </div>
+
+          <!-- ③ 第二轮：本条消息被取消（本条与下方 AI 操作行强制呈现 hover 激活态，供截图留证） -->
+          <div class="umsg hoverable demo-hover">
+            <div class="ucard">顺便把重试上限也改成 5 次</div>
+            <div class="uft">
+              <span class="acts">
+                <button class="icon-btn" title="编辑" aria-label="编辑">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"></path><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"></path></svg>
+                </button>
+                <button class="icon-btn" title="复制" aria-label="复制" data-copy="1">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                </button>
+              </span>
+              <span class="time">今天 14:35</span>
+            </div>
+          </div>
+
+          <div class="turn">
+            <div class="notice"><span class="ni">—</span>本轮已取消 · 已停止生成，未产生任何文件改动</div>
+            <div class="afoot hoverable demo-hover">
+              <span class="time">今天 14:35</span>
+              <span class="acts">
+                <button class="icon-btn" title="复制" aria-label="复制" data-copy="1">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                </button>
+                <button class="icon-btn" title="赞" aria-label="赞">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3H14z"></path><path d="M7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"></path></svg>
+                </button>
+                <button class="icon-btn" title="踩" aria-label="踩">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3H10z"></path><path d="M17 2h2.67A2.31 2.31 0 0 1 22 4v7a2.31 2.31 0 0 1-2.33 2H17"></path></svg>
+                </button>
+              </span>
+            </div>
+          </div>
+
+        </div>
+
+        <div class="composer">
+          <div class="box">继续输入，或按 ⌘K 查看命令…</div>
+          <button class="send" aria-label="发送">↑</button>
+        </div>
+      </div>
+      <div class="cap">400px 侧边栏真实宽度 · 为便于裁决，本页展开全部内容（真实面板内为滚动区）</div>
+    </div>
+
+    <aside class="col">
+      <div class="card notes">
+        <h4>场景覆盖清单</h4>
+        <p class="hint">按真实发生顺序排列，同类不堆叠分组。</p>
+        <ul>
+          <li><span class="n">1</span><span class="good">断流 Alert</span></li>
+          <li><span class="n">2</span><span class="good">用户消息 · 无头像 · 图标操作 + 时间（右对齐）</span></li>
+          <li><span class="n">3</span><span class="good">AI 流式 text 段（末尾光标）</span></li>
+          <li><span class="n">4</span><span class="good">工具卡 调用中 / 已成功</span></li>
+          <li><span class="n">5</span><span class="good">text 段 · Markdown 完成态</span></li>
+          <li><span class="n">6</span><span class="good">mermaid 排查流程图 + 查看源码</span></li>
+          <li><span class="n">7</span><span class="good">思考过程 · 默认折叠</span></li>
+          <li><span class="n">8</span><span class="good">工具卡 执行失败</span></li>
+          <li><span class="n">9</span><span class="good">HITL 待批卡（字段+倒计时+批准/拒绝）</span></li>
+          <li><span class="n">10</span><span class="good">回执卡 · 一行自然语言</span></li>
+          <li><span class="n">11</span><span class="good">generative_form 表单卡（校验红框完整）</span></li>
+          <li><span class="n">12</span><span class="good">GF 回执卡</span></li>
+          <li><span class="n">13</span><span class="good">长文段 · 不折叠，正文自由展开</span></li>
+          <li><span class="n">14</span><span class="good">AI 状态行：工作中… ↔ 时间 + 图标操作行（hover）</span></li>
+          <li><span class="n">15</span><span class="good">本轮已取消</span></li>
+        </ul>
+      </div>
+      <div class="card">
+        <h4>合规栈（v3 定稿）</h4>
+        <p class="hint">代码高亮与图表使用库默认主题色，不计入 UI 用色。</p>
+        <div class="srow"><span class="slabel" style="flex:0 0 130px">markdown-it</span><span class="sdesc">15.0.0 · Markdown 渲染</span></div>
+        <div class="srow"><span class="slabel" style="flex:0 0 130px">dompurify</span><span class="sdesc">3.4.14 · HTML 净化</span></div>
+        <div class="srow"><span class="slabel" style="flex:0 0 130px">highlight.js</span><span class="sdesc">11.11.1 · 代码块高亮</span></div>
+        <div class="srow"><span class="slabel" style="flex:0 0 130px">mermaid</span><span class="sdesc">11.16.1 · 流程图渲染</span></div>
+        <div class="srow"><span class="slabel" style="flex:0 0 130px;color:var(--ink3)">markdown-it-task-lists</span><span class="sdesc">不合规 · 已排除，按普通列表显示</span></div>
+      </div>
+
+      <div class="card">
+        <h4>色彩纪律</h4>
+        <p class="hint">UI 中性灰为主 · 1 个品牌蓝 · 语义色仅用于状态，4 族色；代码与图表沿用库主题色。</p>
+        <div class="chips" style="margin-top:2px">
+          <span class="chip" style="border-color:var(--line);color:var(--ink2)">灰 · 中性</span>
+          <span class="chip" style="border-color:var(--blue-line);color:var(--blue)">蓝 · 品牌/进行中</span>
+          <span class="chip" style="border-color:var(--green-line);color:var(--green)">绿 · 成功</span>
+          <span class="chip" style="border-color:var(--red-line);color:var(--red)">红 · 失败/校验</span>
+        </div>
+      </div>
+    </aside>
+  </section>
+
+  <!-- ============ 现状（丑点示意，同 v1） ============ -->
+  <section id="view-old" class="view">
+    <div class="col">
+      <div class="panel lg-wrap">
+        <div class="panel-hd">
+          <span class="dot" style="background:#e0a800"></span><span class="t">AI 助手</span>
+          <span class="m">deepseek-chat</span>
+        </div>
+        <div class="panel-bd lg">
+          <p class="lg-note">AI 回复（Markdown 原样输出）</p>
+          <div class="lg-text">## 数据同步任务排查
+已定位到 **3 个** 问题点，其中一项与 `sync.config.json` 的忽略规则冲突。
+### 关键发现
+- 调度间隔被设为 `0`，任务会立即重试形成风暴
+- 忽略规则缺少 `**/tmp/**`，临时文件被反复上传
+> 建议先修复忽略规则再重新运行。
+| 检查项 | 现状 | 建议 |
+| --- | --- | --- |
+| 调度间隔 | 0 秒 | 300 秒 |
+| 忽略规则 | 1 条 | 3 条 |</div>
+
+          <div class="lg-tags">
+            <span class="lg-tag" style="background:#e11d48">tool_call</span>
+            <span class="lg-tag" style="background:#f97316">web_search</span>
+            <span class="lg-tag" style="background:#a855f7">pending</span>
+            <span class="lg-tag" style="background:#14b8a6">cache_hit</span>
+            <span class="lg-tag" style="background:#22c55e">ok</span>
+            <span class="lg-tag" style="background:#3b82f6">run_1</span>
+            <span class="lg-tag" style="background:#ec4899">retry</span>
+            <span class="lg-tag" style="background:#eab308">warn</span>
+          </div>
+
+          <div class="lg-sec">
+            <p class="lg-note">工具卡（裸 JSON，含字面 \n）</p>
+            <div class="lg-json">{"name":"web_search","tag":"tool_call","input":"{\"query\":\"ai-example\",\"topK\":5}\n","output":"{\"results\":[{\"title\":\"a\"},{\"title\":\"b\"}],\"count\":5}\n","status":"done"}</div>
+            <div class="lg-json">{"name":"str_replace_editor","tag":"edit","input":"{\"file\":\"sync.config.json\"}\n","output":"{\"ok\":true}\n","diff":"+27 -23"}</div>
+          </div>
+
+          <div class="lg-sec">
+            <p class="lg-note">HITL 确认门（裸 JSON）</p>
+            <div class="lg-hitl">{"taskId":123,"action":"create_task","autoRejectIn":21}</div>
+            <div style="display:flex;gap:4px;font-size:11px">
+              <span style="border:1px solid #999;padding:1px 8px;border-radius:2px">确定</span>
+              <span style="border:1px solid #999;padding:1px 8px;border-radius:2px">取消</span>
+            </div>
+          </div>
+
+          <div class="lg-sec">
+            <p class="lg-note">校验失败（红框被截断）</p>
+            <div class="lg-clip">{"errors":[{"field":"interval","message":"must be &gt;= 300","received":0},{"field":"retry.max","message":"required 且必须为正整数，当前值为 null，无法生成重试策略"}]}</div>
+          </div>
+
+          <div class="lg-sec">
+            <p class="lg-note">GF 回执（10 行 JSON 墙）</p>
+            <div class="lg-json">{
+  "gateId": 91,
+  "status": "approved",
+  "user": "demo-user",
+  "at": "2026-10-14T14:32:06+08:00",
+  "task": { "id": 123, "name": "数据同步" },
+  "effect": "create_task",
+  "ttl": 300,
+  "result": { "ok": true, "code": 0 },
+  "traceId": "c1f4-88aa-90bb",
+  "raw": "{\"accepted\":true}\n"
+}</div>
+          </div>
+
+        </div>
+        <div class="composer">
+          <div class="box">继续输入…</div>
+          <button class="send" style="background:#8b949e" aria-label="发送">↑</button>
+        </div>
+        <div class="lg-fab">回到底部</div>
+      </div>
+      <div class="cap cap-old">现状复刻（示意） · 同屏 8 种颜色 · 13px · 段距 0</div>
+    </div>
+  </section>
+
+</main>
+
+<!-- ============ 页面底部独立小节 ============ -->
+<section class="bottom">
+  <div class="bcol">
+    <div class="card">
+      <h4>工具卡 · 状态标签 9 态口径</h4>
+      <p class="hint">语义色只给 4 个真正需要区分的状态，其余为中性灰。</p>
+      <div class="srow"><span class="ti">○</span><span class="slabel">等待确认</span><span class="sdesc">调用等待用户批准，尚未发出</span></div>
+      <div class="srow"><span class="ti run"></span><span class="slabel" style="color:var(--blue)">调用中</span><span class="sdesc">正在执行，显示转圈与进度</span></div>
+      <div class="srow"><span class="ti ok">✓</span><span class="slabel" style="color:var(--green)">已成功</span><span class="sdesc">执行完成并返回结构化结果</span></div>
+      <div class="srow"><span class="ti bad">✗</span><span class="slabel" style="color:var(--red)">执行失败</span><span class="sdesc">执行报错，附错误码与原因</span></div>
+      <div class="srow"><span class="ti">✕</span><span class="slabel">已拒绝</span><span class="sdesc">用户在确认门里点了拒绝</span></div>
+      <div class="srow"><span class="ti">⊘</span><span class="slabel">超出当前范围</span><span class="sdesc">不在本轮允许的授权范围内</span></div>
+      <div class="srow"><span class="ti">∅</span><span class="slabel">会话已失效</span><span class="sdesc">会话过期，结果不再回填</span></div>
+      <div class="srow"><span class="ti">⊗</span><span class="slabel">已取消</span><span class="sdesc">用户中途取消本轮生成</span></div>
+      <div class="srow"><span class="ti">?</span><span class="slabel">结局未知</span><span class="sdesc">连接中断，无法确认是否执行</span></div>
+    </div>
+
+    <div class="card">
+      <h4>时间戳 · 渐进格式</h4>
+      <p class="hint">同一位置按时间远近自动切换粒度，均为 5 例。</p>
+      <div class="tsrow"><span class="tv">今天 14:32</span><span class="td">1 行内 · 精确到分</span></div>
+      <div class="tsrow"><span class="tv">昨天 09:05</span><span class="td">1 天内 · 带昨天</span></div>
+      <div class="tsrow"><span class="tv">周三 18:40</span><span class="td">7 天内 · 星期 + 时刻</span></div>
+      <div class="tsrow"><span class="tv">10月8日</span><span class="td">同年 · 月日</span></div>
+      <div class="tsrow"><span class="tv">2025年3月2日</span><span class="td">跨年 · 完整日期</span></div>
+    </div>
+  </div>
+
+  <div class="bcol">
+    <div class="card">
+      <h4>空态 · 建议词</h4>
+      <p class="hint">无对话时给出可点击的起点，不做纯空白。</p>
+      <div class="mini" style="border-radius:10px;padding:16px 14px">
+        <div style="font-weight:650;font-size:13.2px;margin-bottom:3px">开始一段新对话</div>
+        <div style="font-size:12.2px;color:var(--ink3);margin-bottom:11px">可以让我读代码、改配置或跑一次任务。</div>
+        <div class="chips">
+          <button class="chip">分析这个仓库的结构</button>
+          <button class="chip">解释 sync/runner.ts</button>
+          <button class="chip">为忽略规则写单测</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h4>骨架屏</h4>
+      <p class="hint">等待首字时占位，避免整块空白与跳动。</p>
+      <div class="mini" style="border-radius:10px">
+        <div class="sk sk-line" style="width:72%"></div>
+        <div class="sk sk-line" style="width:92%"></div>
+        <div class="sk sk-line" style="width:58%"></div>
+        <div class="sk-card">
+          <span class="sk sk-dot"></span>
+          <span class="sk" style="height:10px;flex:0 0 86px"></span>
+          <span class="sk" style="height:10px;flex:1"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<script type="text/markdown" id="md-src">
+### 关键发现
+
+问题集中在 `sync.config.json` 的 **忽略规则** 与重试上限：
+
+- 调度间隔被设为 `0`，任务会立即重试并形成风暴
+- 忽略规则缺少 `**/tmp/**`，临时文件被反复上传
+
+> 建议先修复忽略规则再重新运行，否则会继续触发速率限制。
+
+修复清单：
+
+- [x] 补齐 `**/tmp/**` 忽略规则
+- [ ] 把调度间隔改为 300 秒
+- [ ] 为重试策略设置上限
+
+> 任务清单插件不在合规清单，按普通列表显示。
+
+```json
+{
+  "taskId": 123,
+  "interval": 0,
+  "retry": { "max": null }
+}
+```
+
+```ts
+// 忽略规则补齐临时目录
+export const ignore = ['**/.git/**', '**/tmp/**'];
+```
+
+| 检查项 | 现状 | 建议 |
+| --- | --- | --- |
+| 调度间隔 | 0 秒 | 300 秒 |
+| 重试上限 | 无 | 5 次 |
+</script>
+
+<script>
+(function(){
+  'use strict';
+
+  /* ---------------- 视图切换（支持 ?view=old 深链） ---------------- */
+  var btns = document.querySelectorAll('.seg-btn');
+
+  function showView(v){
+    Array.prototype.forEach.call(btns, function(x){
+      var on = x.getAttribute('data-view') === v;
+      x.classList.toggle('is-on', on);
+      x.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    document.getElementById('view-new').classList.toggle('is-on', v === 'new');
+    document.getElementById('view-old').classList.toggle('is-on', v === 'old');
+  }
+
+  Array.prototype.forEach.call(btns, function(b){
+    b.addEventListener('click', function(){ showView(b.getAttribute('data-view')); });
+  });
+
+  /* ---------------- Markdown 渲染（极简） ---------------- */
+  function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+  function inline(s){
+    var codes = [];
+    var t = esc(s).replace(/`([^`]+)`/g, function(m, p1){
+      codes.push(p1); return '\u0001' + (codes.length - 1) + '\u0001';
+    });
+    t = t.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    t = t.replace(/\u0001(\d+)\u0001/g, function(m, i){
+      return '<code class="ic">' + codes[+i] + '</code>';
+    });
+    return t;
+  }
+
+  /* ---------------- highlight.js 风格 token 着色（github 主题类名） ---------------- */
+  function hljsJson(src){
+    return esc(src).replace(
+      /(\/\/[^\n]*)|("(?:\\.|[^"\\])*")(\s*:)?|(-?\b\d+(?:\.\d+)?\b)|\b(true|false|null)\b/g,
+      function(m, cm, str, colon, num, kw){
+        if(cm){ return '<span class="hljs-comment">'+cm+'</span>'; }
+        if(str){ return colon ? '<span class="hljs-attr">'+str+'</span>'+colon : '<span class="hljs-string">'+str+'</span>'; }
+        if(num){ return '<span class="hljs-number">'+num+'</span>'; }
+        if(kw){ return '<span class="hljs-literal">'+kw+'</span>'; }
+        return m;
+      });
+  }
+
+  function hljsTs(src){
+    var store = [];
+    var t = esc(src).replace(/(\/\/[^\n]*)|('(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*")/g, function(m){
+      store.push(m.slice(0, 2) === '//'
+        ? '<span class="hljs-comment">' + m + '</span>'
+        : '<span class="hljs-string">' + m + '</span>');
+      return '\u0001' + String.fromCharCode(0xE000 + store.length - 1) + '\u0001';
+    });
+    t = t.replace(/\b(export|import|from|const|let|var|function|return|if|else|for|of|new|await|async|class|interface|type)\b/g,
+      '<span class="hljs-keyword">$1</span>');
+    t = t.replace(/-?\b\d+(?:\.\d+)?\b/g, '<span class="hljs-number">$&</span>');
+    return t.replace(/\u0001([\uE000-\uF8FF])\u0001/g, function(m, ch){
+      return store[ch.charCodeAt(0) - 0xE000];
+    });
+  }
+
+  function hljsCode(src, lang){
+    return lang === 'ts' ? hljsTs(src) : hljsJson(src);
+  }
+
+  function cells(row){
+    return row.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(function(c){ return c.trim(); });
+  }
+
+  function mdToHtml(src){
+    var lines = src.split('\n'), out = [], i = 0, m;
+    while(i < lines.length){
+      var ln = lines[i];
+      if(/^\s*$/.test(ln)){ i++; continue; }
+
+      m = ln.match(/^```(\w*)/);
+      if(m){
+        var lang = m[1], buf = []; i++;
+        while(i < lines.length && !/^```/.test(lines[i])){ buf.push(lines[i]); i++; }
+        var open = (i >= lines.length);
+        if(!open){ i++; }
+        out.push('<figure class="code"><figcaption><span class="lg">' + esc(lang || 'text') +
+          '</span><span class="hlib">highlight.js</span><button class="copy" data-copy="1">复制</button></figcaption><pre><code>' +
+          hljsCode(buf.join('\n'), lang) + (open ? '<span class="cursor"></span>' : '') + '</code></pre></figure>');
+        continue;
+      }
+
+      m = ln.match(/^(#{1,4})\s+(.*)$/);
+      if(m){
+        var lv = m[1].length;
+        out.push('<h' + lv + '>' + inline(m[2]) + '</h' + lv + '>');
+        i++; continue;
+      }
+
+      if(/^\s*\|/.test(ln) && i + 1 < lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i+1])){
+        var head = cells(ln); i += 2;
+        var rows = [];
+        while(i < lines.length && /^\s*\|/.test(lines[i])){ rows.push(cells(lines[i])); i++; }
+        var th = head.map(function(c){ return '<th>' + inline(c) + '</th>'; }).join('');
+        var tb = rows.map(function(r){
+          return '<tr>' + head.map(function(_, k){ return '<td>' + inline(r[k] || '') + '</td>'; }).join('') + '</tr>';
+        }).join('');
+        out.push('<table><thead><tr>' + th + '</tr></thead><tbody>' + tb + '</tbody></table>');
+        continue;
+      }
+
+      if(/^\s*>\s?/.test(ln)){
+        var q = [];
+        while(i < lines.length && /^\s*>\s?/.test(lines[i])){ q.push(lines[i].replace(/^\s*>\s?/, '')); i++; }
+        out.push('<blockquote>' + inline(q.join(' ')) + '</blockquote>');
+        continue;
+      }
+
+      if(/^\s*[-*]\s+/.test(ln)){
+        var items = [];
+        while(i < lines.length && /^\s*[-*]\s+/.test(lines[i])){
+          items.push('<li>' + inline(lines[i].replace(/^\s*[-*]\s+/, '')) + '</li>'); i++;
+        }
+        out.push('<ul>' + items.join('') + '</ul>');
+        continue;
+      }
+
+      var para = [ln]; i++;
+      while(i < lines.length && !/^\s*$/.test(lines[i]) &&
+            !/^(#{1,4}\s|```|\s*\||\s*>|\s*[-*]\s)/.test(lines[i])){
+        para.push(lines[i]); i++;
+      }
+      out.push('<p>' + inline(para.join(' ')) + '</p>');
+    }
+    return out.join('');
+  }
+
+  /* ---------------- 工具卡 / 思考块 展开 ---------------- */
+  document.addEventListener('click', function(e){
+    var t = e.target;
+    if(!t.closest) return;
+    var hd = t.closest('.tcard-hd');
+    if(hd){
+      var card = hd.parentNode;
+      var on = card.classList.toggle('is-open');
+      hd.setAttribute('aria-expanded', on ? 'true' : 'false');
+      return;
+    }
+    var rh = t.closest('.reason-hd');
+    if(rh){
+      var box = rh.parentNode;
+      var o2 = box.classList.toggle('is-open');
+      rh.setAttribute('aria-expanded', o2 ? 'true' : 'false');
+    }
+  });
+
+  /* ---------------- 复制 ---------------- */
+  document.addEventListener('click', function(e){
+    var b = e.target.closest && e.target.closest('[data-copy]');
+    if(!b) return;
+    var fig = b.closest('figure');
+    var box = b.closest('.umsg') || b.closest('.turn');
+    var txt = fig ? fig.querySelector('pre').innerText : (box ? box.innerText : '');
+    var label = b.textContent;
+    var done = function(){ b.textContent = '已复制'; setTimeout(function(){ b.textContent = label; }, 1200); };
+    if(navigator.clipboard && navigator.clipboard.writeText && txt){
+      navigator.clipboard.writeText(txt).then(done, done);
+    } else { done(); }
+  });
+
+  /* ---------------- JSON 语法着色（工具卡 input/output） ---------------- */
+  Array.prototype.forEach.call(document.querySelectorAll('pre[data-json]'), function(pre){
+    pre.innerHTML = hljsJson(pre.textContent);
+  });
+
+  /* ---------------- mermaid 源码折叠 ---------------- */
+  var mmd = document.getElementById('mmd');
+  var mmdToggle = document.getElementById('mmdToggle');
+  mmdToggle.addEventListener('click', function(){
+    var open = mmd.classList.toggle('is-open');
+    this.setAttribute('aria-expanded', open ? 'true' : 'false');
+    this.textContent = open ? '收起源码' : '查看源码';
+  });
+
+  /* ---------------- 流式段（循环演示：工作中呼吸 ↔ 完成后时间戳+操作行） ---------------- */
+  var SRCTEXT = '已定位到 3 个问题点，其中一项与 sync.config.json 的忽略规则冲突。';
+  var MIN = 14;
+  var streamText = document.getElementById('streamText');
+  var streamTimer = null, holdTimer = null;
+  var footWork = document.getElementById('footWork');
+  var footTime = document.getElementById('footTime');
+  var footActs = document.getElementById('footActs');
+
+  function setWorking(on){
+    footWork.hidden = !on;
+    footTime.hidden = on;
+    footActs.hidden = on;
+  }
+
+  function playStream(){
+    if(streamTimer) clearInterval(streamTimer);
+    if(holdTimer) clearTimeout(holdTimer);
+    setWorking(true);
+    var n = MIN;
+    streamText.textContent = SRCTEXT.slice(0, n);
+    streamTimer = setInterval(function(){
+      n++;
+      if(n > SRCTEXT.length){
+        clearInterval(streamTimer); streamTimer = null;
+        streamText.textContent = SRCTEXT;
+        setWorking(false);
+        holdTimer = setTimeout(playStream, 2600);
+        return;
+      }
+      streamText.textContent = SRCTEXT.slice(0, n);
+    }, 55);
+  }
+  document.getElementById('replay').addEventListener('click', playStream);
+
+  /* ---------------- 完成态 Markdown 段 ---------------- */
+  var SRC = document.getElementById('md-src').textContent.replace(/^\n+/, '');
+  var mdHost = document.getElementById('mdHost');
+  var mdTimer = null, mdN = 0;
+
+  function mdFrame(){
+    mdHost.innerHTML = mdToHtml(SRC.slice(0, mdN));
+    var nodes = mdHost.querySelectorAll('p,h1,h2,h3,h4,li,blockquote,td');
+    var last = nodes[nodes.length - 1];
+    if(last && mdN < SRC.length){
+      var cur = document.createElement('span');
+      cur.className = 'cursor';
+      last.appendChild(cur);
+    }
+  }
+
+  function playMd(){
+    if(mdTimer) clearInterval(mdTimer);
+    mdN = 0;
+    mdFrame();
+    mdTimer = setInterval(function(){
+      mdN += 4;
+      if(mdN >= SRC.length){
+        clearInterval(mdTimer); mdTimer = null;
+        mdHost.innerHTML = mdToHtml(SRC);
+        return;
+      }
+      mdFrame();
+    }, 16);
+  }
+  document.getElementById('replay').addEventListener('click', playMd);
+
+  /* ---------------- 倒计时环 ---------------- */
+  var C = 2 * Math.PI * 15.5;
+  var arc = document.getElementById('ringArc');
+  var num = document.getElementById('cdNum');
+  var okBtn = document.getElementById('btnApprove');
+  var left = 21, total = 21;
+  setInterval(function(){
+    if(okBtn.disabled) return;
+    left = left <= 1 ? total : left - 1;
+    num.textContent = left;
+    arc.setAttribute('stroke-dashoffset', (C * (1 - left / total)).toFixed(1));
+  }, 1000);
+
+  okBtn.addEventListener('click', function(){
+    okBtn.disabled = true;
+    okBtn.textContent = '已批准';
+    num.parentNode.innerHTML = '已批准 · 14:32';
+    left = total;
+    arc.setAttribute('stroke-dashoffset', 0);
+  });
+
+  playStream();
+  playMd();
+
+  var q = /[?&#](?:view=)?(old|new)\b/.exec(location.search + location.hash);
+  if(q && q[1] === 'old'){ showView('old'); }
+})();
+</script>
+</body>
+</html>

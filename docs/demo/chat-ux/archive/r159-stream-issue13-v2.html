@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>issue #13 流式回复体验 · 方案 demo v2（操作按钮紧邻时间戳，确认用，非实现）</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: "PingFang SC","Microsoft YaHei",sans-serif; background:#fff; color:#1f2329; padding:32px; }
+  h1 { font-size:18px; margin-bottom:4px; }
+  .sub { color:#6b7280; font-size:13px; margin-bottom:20px; }
+  .controls { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:18px; }
+  button.ctl { padding:8px 16px; border:1px solid #dcdfe6; border-radius:6px; background:#fff; cursor:pointer; font-size:14px; }
+  button.ctl.primary { background:#409eff; color:#fff; border-color:#409eff; }
+  button.ctl:hover { opacity:.85; }
+  .radio-group { font-size:13px; color:#4b5563; display:flex; gap:10px; align-items:center; }
+  .stage { border:1px solid #e4e7ed; border-radius:10px; padding:20px 16px; min-height:420px; background:#fafafa; max-width:760px; }
+
+  /* ===== 消息行（1:1 复刻 AiPanel 结构） ===== */
+  .msg-row { display:flex; gap:8px; margin-bottom:16px; }
+  .msg-row.user { flex-direction:row-reverse; }
+  .avatar { width:28px; height:28px; border-radius:50%; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+  .avatar.ai { background:linear-gradient(135deg,#409eff,#7b61ff); }
+  .avatar.user { background:#e4e7ed; }
+  .msg-col { min-width:0; flex:1; display:flex; flex-direction:column; align-items:flex-start; }
+  .msg-row.user .msg-col { align-items:flex-end; }
+  .bubble { max-width:82%; border-radius:8px; padding:8px 10px; font-size:13px; color:#303133; line-height:1.6; word-break:break-word; white-space:pre-wrap; }
+  .bubble.ai { background:#f4f4f5; }
+  .bubble.user { background:#d9ecff; }
+
+  /* 操作行 v2：所有消息行（AI+用户）——呼吸/时间戳与按钮组同侧紧邻，行尾不再右置按钮 */
+  .ops { margin-top:4px; display:flex; align-items:center; gap:8px; font-size:12px; color:#a8abb2; width:82%; }
+  .msg-row.user .ops { flex-direction:row-reverse; }
+  /* ops-inline：按钮组紧贴时间戳（AI 行左起左排 / 用户行 row-reverse 下贴时间戳左侧） */
+  .ops.ops-inline { justify-content:flex-start; }
+  .ts { color:#c0c4cc; }
+  .ops-btns { display:flex; align-items:center; gap:4px; opacity:0; transition:opacity .15s; }
+  .msg-row:hover .ops-btns { opacity:1; }
+  .icon-btn { border:none; background:none; cursor:pointer; padding:2px 4px; color:#909399; display:inline-flex; }
+  .icon-btn:hover { color:#409eff; }
+  .copy-hint { font-size:12px; color:#67c23a; }
+
+  /* 呼吸行（卡片下方）：现状=loading-breath 同款 */
+  .breath { margin-top:6px; padding-left:2px; display:inline-flex; align-items:center; gap:6px; font-size:12px; color:#909399; }
+  .breath .dot { width:6px; height:6px; border-radius:50%; background:#409eff; animation:breathDot 1.2s ease-in-out infinite; }
+  @keyframes breathDot { 0%,100%{opacity:.25; transform:scale(.8);} 50%{opacity:1; transform:scale(1.2);} }
+
+  /* 工具卡（1:1 复刻 AiPanel.vue:211-230 真实样式） */
+  .tool-card { margin-top:6px; border:1px solid #dcdfe6; border-radius:6px; background:#fff; }
+  .tc-hd { display:flex; align-items:center; gap:6px; padding:8px; font-weight:600; font-size:13px; color:#303133; }
+  .etag { display:inline-block; height:20px; line-height:18px; padding:0 5px; border-radius:4px; font-size:12px; font-weight:400; border:1px solid transparent; }
+  .etag.plain { background:#f4f4f5; border-color:#e9e9eb; color:#909399; }
+  .etag.run-dark { background:#67c23a; border-color:#67c23a; color:#fff; }   /* running = success dark */
+  .etag.ok-light { background:#f0f9eb; border-color:#e1f3d8; color:#67c23a; } /* succeeded = success light */
+
+  /* 光标 */
+  .caret { display:inline-block; vertical-align:-2px; margin-left:1px; animation:caretBlink 1s steps(1) infinite; }
+  @keyframes caretBlink { 0%,55%{opacity:1;} 56%,100%{opacity:0;} }
+  .caret.now { width:2px; height:14px; background:#409eff; }              /* 现状：细蓝线（会审 M1 修正实测色） */
+  .caret.b1 { width:8px; height:1em; background:#303133; border-radius:2px; vertical-align:-2px; }
+  .caret.b2 { width:3px; height:1.05em; background:#303133; border-radius:1.5px; }
+  .caret.b3 { width:4px; height:1em; background:#2563eb; border-radius:2px; box-shadow:0 0 4px rgba(37,99,235,.35); }
+  .caret.fade { animation:caretOut .3s ease forwards; }
+  .breath.fade { animation:caretOut .3s ease forwards; }
+  @keyframes caretOut { to { opacity:0; } }
+
+  /* 平滑吐字：新字符渐显 */
+  .bubble span.ch { animation:chIn .18s ease-out; }
+  @keyframes chIn { from { opacity:.1; } to { opacity:1; } }
+
+  .legend { margin-top:14px; font-size:12px; color:#909399; line-height:1.8; max-width:760px; }
+</style>
+</head>
+<body>
+<h1>issue #13 流式回复体验 · 修复方案 demo v2（操作按钮紧邻时间戳）</h1>
+<div class="sub">完整消息行：头像 / 气泡 / 工作中呼吸 / 时间戳 + 复制（同侧紧邻，hover 浮出可点）/ 工具卡。「播放现状」对照复现四个症状。</div>
+
+<div class="controls">
+  <button class="ctl" onclick="play('now')">▶ 播放现状</button>
+  <button class="ctl primary" onclick="play('fix')">▶ 播放方案</button>
+  <span class="radio-group">方案光标：
+    <label><input type="radio" name="caret" value="b1" checked> B1 粗块</label>
+    <label><input type="radio" name="caret" value="b2"> B2 细竖线</label>
+    <label><input type="radio" name="caret" value="b3"> B3 主题色</label>
+  </span>
+  <span class="radio-group">吐字速度：
+    <input id="speed" type="range" min="10" max="120" value="45" style="width:110px"> <span id="speedLabel">中</span>
+  </span>
+</div>
+
+<div class="stage" id="stage"></div>
+
+<div class="legend">
+方案要点：①**流式期只有「工作中…」**——元信息行左位呼吸常驻（发出即现），时间戳/复制一律不显示；②**收尾对齐业界主流**：回复完成 → 光标与「工作中…」立即同帧淡出（300ms，无拖尾）→ 元行换入时间戳 + 复制（紧邻时间戳右侧同侧左排，hover 浮出可点；按钮不再右置行尾）；③工具执行期正文光标收起、工具卡「执行中」tag（1:1 项目真实样式：齿轮 + 前端工具 plain tag + 深绿实心执行中 / 浅绿已完成）；④队列匀速吐字 + 新字符渐显（现状：整块硬跳）。对照现状：呼吸首字符即消失、光标 2px 细蓝线近隐形、工具期零指示。
+</div>
+
+<script>
+const stage = document.getElementById('stage');
+const speedEl = document.getElementById('speed');
+const speedLabel = document.getElementById('speedLabel');
+speedEl.oninput = () => { const v = +speedEl.value; speedLabel.textContent = v < 35 ? '慢' : v > 80 ? '快' : '中'; };
+
+const USER_TEXT = '帮我把这个文件读一下，看看结构怎么样';
+const TEXT1 = '好的，我先读取一下这个文件的内容，看看里面的结构。';
+const TEXT2 = '文件已经读取完成。整体来看结构清晰，主要包含三个部分：\n\n1. 头部定义了全局配置；\n2. 中部是核心业务逻辑；\n3. 尾部是导出入口。\n\n你可以告诉我要改哪一部分。';
+let timer = null, timeouts = [];
+
+function later(fn, ms){ timeouts.push(setTimeout(fn, ms)); }
+function stopAll(){ if (timer){ clearInterval(timer); timer = null; } timeouts.forEach(clearTimeout); timeouts = []; }
+
+const STAR = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M12 2l2.4 7.6L22 12l-7.6 2.4L12 22l-2.4-7.6L2 12l7.6-2.4z" fill="#fff"/></svg>';
+const PERSON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="#909399" aria-hidden="true"><path d="M12 12a5 5 0 1 0-5-5 5 5 0 0 0 5 5zm0 2c-4 0-8 2-8 5v2h16v-2c0-3-4-5-8-5z"/></svg>';
+const COPY = '<svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" aria-hidden="true"><path d="M16 1H4a2 2 0 0 0-2 2v14h2V3h12zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16H8V7h11z"/></svg>';
+const EDIT = '<svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" aria-hidden="true"><path d="M3 17.2V21h3.8l11-11-3.8-3.8zM20.7 7a1 1 0 0 0 0-1.4l-2.3-2.3a1 1 0 0 0-1.4 0l-1.8 1.8 3.7 3.7z"/></svg>';
+
+function nowTs(){ const d = new Date(); return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`; }
+function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
+
+function opsRow(role, id){
+  const editBtn = role === 'user' ? `<button class="icon-btn" title="编辑该条消息（改完从该条重跑）">${EDIT}</button>` : '';
+  return `<div class="ops ops-inline" id="ops-${id}">
+    <span class="ts">${nowTs()}</span>
+    <div class="ops-btns">
+      <span class="copy-hint" id="copyhint-${id}" style="display:none">已复制</span>
+      ${editBtn}
+      <button class="icon-btn" title="复制该条消息正文" onclick="copyMsg('${id}')">${COPY}</button>
+    </div>
+  </div>`;
+}
+
+let aiTextBuf = '';
+window.copyMsg = function(id){
+  const text = id === 'u1' ? USER_TEXT : aiTextBuf;
+  const hint = document.getElementById('copyhint-' + id);
+  const done = () => { hint.style.display = 'inline'; setTimeout(() => hint.style.display = 'none', 2000); };
+  if (navigator.clipboard) navigator.clipboard.writeText(text).then(done, done); else done();
+};
+
+function userRow(){
+  return `<div class="msg-row user">
+    <div class="avatar user">${PERSON}</div>
+    <div class="msg-col">
+      <div class="bubble user">${esc(USER_TEXT)}</div>
+      ${opsRow('user', 'u1')}
+    </div>
+  </div>`;
+}
+
+function aiShell(mode){
+  if (mode === 'fix') {
+    // 方案：单一元信息行（v2 左对齐）—— 流式期=「工作中…」呼吸 / 完成后=时间戳，按钮组紧邻其后（有文本后可用）
+    return `<div class="msg-row" id="airow">
+    <div class="avatar ai">${STAR}</div>
+    <div class="msg-col">
+      <div class="bubble ai" id="bubble"></div>
+      <div class="ops ops-inline" id="metaRow">
+        <span id="metaSlot"></span>
+        <div class="ops-btns" id="fixBtns" style="visibility:hidden">
+          <span class="copy-hint" id="copyhint-a1" style="display:none">已复制</span>
+          <button class="icon-btn" title="复制该条消息正文" onclick="copyMsg('a1')">${COPY}</button>
+        </div>
+      </div>
+    </div>
+  </div>`;
+  }
+  return `<div class="msg-row" id="airow">
+    <div class="avatar ai">${STAR}</div>
+    <div class="msg-col">
+      <div class="bubble ai" id="bubble"></div>
+      <div class="breath" id="breath" style="display:none"><span class="dot"></span><span>工作中…</span></div>
+      <div id="opsSlot"></div>
+    </div>
+  </div>`;
+}
+
+const GEAR = '<svg viewBox="0 0 24 24" width="14" height="14" fill="#409EFF" aria-hidden="true"><path d="M12 8.6A3.4 3.4 0 1 0 12 15.4 3.4 3.4 0 0 0 12 8.6zm0 5.2a1.8 1.8 0 1 1 0-3.6 1.8 1.8 0 0 1 0 3.6z"/><path d="M21.5 13.4v-2.8l-2.5-.5a7.5 7.5 0 0 0-.6-1.4l1.4-2.1-2-2-2.1 1.4a7.5 7.5 0 0 0-1.4-.6L13.9 3h-2.8l-.5 2.5a7.5 7.5 0 0 0-1.4.6L7.1 4.7l-2 2L6.5 8.8a7.5 7.5 0 0 0-.6 1.4l-2.5.4v2.8l2.5.5c.14.5.34.97.6 1.4l-1.4 2.1 2 2 2.1-1.4c.43.26.9.46 1.4.6l.4 2.4h2.8l.5-2.5a7.5 7.5 0 0 0 1.4-.6l2.1 1.4 2-2-1.4-2.1c.26-.43.46-.9.6-1.4z"/></svg>';
+function caretHtml(cls){ return `<span class="caret ${cls}" id="caret"></span>`; }
+function toolCard(live){
+  return `<div class="tool-card"><div class="tc-hd">${GEAR}读取文件 <span class="etag plain">前端工具</span>
+    ${live ? '<span class="etag run-dark">执行中</span>' : '<span class="etag ok-light">已完成</span>'}</div></div>`;
+}
+
+function play(mode){
+  stopAll();
+  aiTextBuf = '';
+  const caretCls = mode === 'now' ? 'now' : document.querySelector('input[name=caret]:checked').value;
+  const interval = +speedEl.value;
+  stage.innerHTML = userRow() + aiShell(mode);
+  const bubble = document.getElementById('bubble');
+  const breath = document.getElementById('breath');
+  const metaSlot = document.getElementById('metaSlot');
+  const opsSlot = document.getElementById('opsSlot');
+  let phase = 'breath', opsShown = false;
+
+  if (mode === 'fix') {
+    later(() => {
+      metaSlot.innerHTML = '<span class="breath" style="margin:0;padding:0"><span class="dot"></span><span>工作中…</span></span>';
+    }, 300);
+  } else {
+    later(() => { breath.style.display = 'inline-flex'; }, 300); // 发送后微延迟出现
+  }
+
+  later(() => {
+    const segs = [{ t: TEXT1 }, { chip: true }, { t: TEXT2 }];
+    let segIdx = 0, pos = 0;
+    timer = setInterval(() => {
+      if (phase === 'chip') return; // 工具卡期间暂停吐字
+      const seg = segs[segIdx];
+      if (!seg) { finish(); return; }
+      if (seg.chip) { segIdx++; showChip(); return; }
+      const n = 1 + Math.floor(Math.random() * 5);
+      appendText(seg.t.slice(pos, pos + n)); pos += n;
+      if (pos >= seg.t.length) { segIdx++; pos = 0; }
+      // 现状：首字符上屏呼吸即消失
+      if (mode === 'now' && aiTextBuf.length > 0) breath.style.display = 'none';
+    }, interval);
+
+    function ensureOps(){
+      // 方案：流式期不出时间戳/复制，只留「工作中…」；操作行在完成时整行换入（见 finish）
+      if (opsShown || mode === 'fix') return;
+      opsShown = true;
+      opsSlot.innerHTML = opsRow('assistant', 'a1');
+    }
+    function startStream(){
+      if (phase === 'breath') {
+        phase = 'text1';
+        if (mode === 'fix') { placeCaret(); } // 呼吸常驻与光标并存
+      }
+    }
+    function appendText(s){
+      startStream();
+      aiTextBuf += s; ensureOps();
+      if (mode === 'now') {
+        bubble.innerHTML = esc(aiTextBuf) + caretHtml('now'); // 整块硬跳
+      } else {
+        const caret = document.getElementById('caret'); if (caret) caret.remove();
+        const span = document.createElement('span'); span.className = 'ch'; span.textContent = s;
+        bubble.appendChild(span); placeCaret();
+      }
+      if (segIdx >= segs.length && phase === 'text1') finish();
+    }
+    function placeCaret(){ bubble.insertAdjacentHTML('beforeend', caretHtml(caretCls)); }
+    function showChip(){
+      if (mode === 'now') {
+        phase = 'chip';
+        // 现状：工具卡成末块 → 光标消失；执行中 tag 静态无呼吸
+        bubble.innerHTML = esc(aiTextBuf) + toolCard(true);
+        later(() => { phase = 'text1'; bubble.innerHTML = esc(aiTextBuf) + toolCard(false) + caretHtml('now'); }, 1600);
+      } else {
+        phase = 'chip';
+        const caret = document.getElementById('caret'); if (caret) caret.remove();
+        bubble.insertAdjacentHTML('beforeend', toolCard(true)); // 执行中 tag 带呼吸点
+        later(() => {
+          const card = bubble.querySelector('.tool-card');
+          if (card) card.outerHTML = toolCard(false);
+          phase = 'text1';
+          // 文本恢复时光标在下一个 chunk 归位；若已无后续文本则立即归位
+          if (segIdx >= segs.length) { placeCaret(); finish(); }
+        }, 1600);
+      }
+    }
+    function finish(){
+      if (phase === 'done') return;
+      phase = 'done'; clearInterval(timer); timer = null;
+      const caret = document.getElementById('caret');
+      if (mode === 'fix') {
+        // 收尾对齐业界主流（完成即消，无拖尾）：光标+「工作中…」立即同帧淡出 300ms → 元行换时间戳+复制
+        const b = metaSlot.querySelector('.breath');
+        if (caret) caret.classList.add('fade'); if (b) b.classList.add('fade');
+        later(() => {
+          metaSlot.innerHTML = `<span class="ts">${nowTs()}</span>`;
+          document.getElementById('fixBtns').style.visibility = 'visible';
+        }, 350);
+      } else if (caret) later(() => caret.classList.add('fade'), 1500);
+    }
+  }, mode === 'now' ? 1500 : 1700); // 首 token 前停顿
+}
+</script>
+</body>
+</html>

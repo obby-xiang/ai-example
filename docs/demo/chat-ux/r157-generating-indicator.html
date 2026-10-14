@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>R-157 生成中指示器 · 效果预览（待审视）</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; font-family:"Microsoft YaHei",-apple-system,"Segoe UI",sans-serif; }
+  body { background:#e8eaee; padding:24px; display:flex; flex-direction:column; align-items:center; gap:28px; }
+  h1 { font-size:17px; color:#303133; }
+  .note { font-size:12px; color:#909399; max-width:420px; text-align:center; line-height:1.7; }
+  .panel { width:400px; background:#fff; border-radius:10px; box-shadow:0 2px 12px rgba(0,0,0,.10); overflow:hidden; }
+  .panel-head { padding:10px 14px; border-bottom:1px solid #ebeef5; display:flex; align-items:center; gap:8px; font-size:14px; font-weight:600; color:#303133; }
+  .panel-logo { width:22px; height:22px; border-radius:6px; background:linear-gradient(135deg,#409eff,#7b61ff); display:flex; align-items:center; justify-content:center; }
+  .panel-logo svg { width:13px; height:13px; }
+  .variant-tag { margin-left:auto; font-size:11px; font-weight:400; color:#fff; background:#409eff; border-radius:4px; padding:2px 8px; }
+  .msgs { padding:14px 14px 18px; display:flex; flex-direction:column; gap:14px; min-height:180px; }
+
+  /* —— 新头像：AI 渐变徽标（无文字） / 用户人形图标 —— */
+  .avatar { width:28px; height:28px; border-radius:50%; flex-shrink:0; display:flex; align-items:center; justify-content:center; }
+  .avatar.ai { background:linear-gradient(135deg,#409eff,#7b61ff); }
+  .avatar.user { background:#e4e7ed; }
+  .avatar svg { width:16px; height:16px; }
+
+  .row { display:flex; gap:8px; }
+  .row.user { flex-direction:row-reverse; }
+  .bubble { max-width:82%; font-size:13px; line-height:1.65; padding:8px 12px; border-radius:8px; }
+  .row.ai .bubble { background:#f4f4f5; color:#303133; }
+  .row.user .bubble { background:#409eff; color:#fff; }
+
+  /* —— 操作行：卡片下方独立行（hover 浮出）—— */
+  .oprow { display:flex; align-items:center; gap:10px; margin-top:4px; font-size:11px; color:#a8abb2; }
+  .row.user .oprow { flex-direction:row-reverse; }
+  .oprow .ops { display:flex; gap:8px; opacity:0; transition:opacity .15s; }
+  .row:hover .oprow .ops { opacity:1; }
+  .oprow .ops span { cursor:pointer; display:flex; align-items:center; gap:2px; }
+  .oprow .ops span:hover { color:#409eff; }
+  .oprow svg { width:12px; height:12px; }
+
+  /* —— 方案一：呼吸点 + 文字（卡片下方） —— */
+  .loading-breath { display:flex; align-items:center; gap:7px; margin-top:6px; padding-left:2px; }
+  .loading-breath .dot { width:8px; height:8px; border-radius:50%; background:linear-gradient(135deg,#409eff,#7b61ff); animation:breath 1.4s ease-in-out infinite; }
+  .loading-breath .txt { font-size:12px; color:#909399; letter-spacing:1px; animation:breathTxt 1.4s ease-in-out infinite; }
+  @keyframes breath { 0%,100%{transform:scale(.7);opacity:.45} 50%{transform:scale(1.15);opacity:1} }
+  @keyframes breathTxt { 0%,100%{opacity:.45} 50%{opacity:.95} }
+
+  /* —— 方案二：shimmer 流光占位条 —— */
+  .loading-shimmer { margin-top:8px; display:flex; flex-direction:column; gap:7px; }
+  .loading-shimmer .bar { height:12px; border-radius:6px; background:linear-gradient(90deg,#f0f2f5 25%,#e0e6f5 50%,#f0f2f5 75%); background-size:200% 100%; animation:shimmer 1.5s linear infinite; }
+  .loading-shimmer .bar.w60 { width:60%; } .loading-shimmer .bar.w85 { width:85%; }
+  @keyframes shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
+
+  /* —— 方案三：三点跳动（代码库现成动画） —— */
+  .loading-dots { display:flex; align-items:center; gap:7px; margin-top:6px; padding-left:2px; }
+  .loading-dots .trio { display:flex; gap:4px; }
+  .loading-dots .trio i { width:6px; height:6px; border-radius:50%; background:#409eff; animation:bounceDot 1.2s ease-in-out infinite; }
+  .loading-dots .trio i:nth-child(2){ animation-delay:.15s; } .loading-dots .trio i:nth-child(3){ animation-delay:.3s; }
+  .loading-dots .txt { font-size:12px; color:#909399; letter-spacing:1px; }
+  @keyframes bounceDot { 0%,60%,100%{transform:translateY(0);opacity:.5} 30%{transform:translateY(-4px);opacity:1} }
+
+  /* —— 打字机光标（流式输出中） —— */
+  .caret { display:inline-block; width:2px; height:14px; background:#409eff; margin-left:2px; vertical-align:-2px; animation:blink 1s steps(1) infinite; }
+  @keyframes blink { 50%{opacity:0} }
+  .caption { font-size:12px; color:#606266; background:#fff; border-radius:8px; padding:8px 14px; box-shadow:0 1px 6px rgba(0,0,0,.06); max-width:400px; text-align:center; line-height:1.7; }
+</style>
+</head>
+<body>
+<h1>R-157 · 「生成中」指示器三方案 + 配套改动预览</h1>
+<p class="note">每个面板左上角是新头像（AI = 蓝紫渐变徽标、用户 = 人形图标，均无文字）；气泡下方是新的卡片外操作行（时间戳左置，复制等按钮 hover 才浮现——把鼠标移上去试试）。差异只在 AI 卡片下方的加载指示器。</p>
+
+<!-- 方案一：呼吸点 -->
+<div class="panel">
+  <div class="panel-head">
+    <div class="panel-logo"><svg viewBox="0 0 24 24" fill="none"><path d="M12 2l2.4 7.6L22 12l-7.6 2.4L12 22l-2.4-7.6L2 12l7.6-2.4z" fill="#fff"/></svg></div>
+    实施助手 <span class="variant-tag">方案一 · 呼吸点</span>
+  </div>
+  <div class="msgs">
+    <div class="row user">
+      <div class="avatar user"><svg viewBox="0 0 24 24" fill="#909399"><path d="M12 12a5 5 0 1 0-5-5 5 5 0 0 0 5 5zm0 2c-4 0-8 2-8 5v2h16v-2c0-3-4-5-8-5z"/></svg></div>
+      <div>
+        <div class="bubble">把 CURRENCY 的配置发布一下</div>
+        <div class="oprow"><span>09:46</span><span class="ops"><span><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 17.2V21h3.8l11-11-3.8-3.8zM20.7 7a1 1 0 0 0 0-1.4l-2.3-2.3a1 1 0 0 0-1.4 0l-1.8 1.8 3.7 3.7z"/></svg>编辑</span><span><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 1H4a2 2 0 0 0-2 2v14h2V3h12zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16H8V7h11z"/></svg>复制</span></span></div>
+      </div>
+    </div>
+    <div class="row ai">
+      <div class="avatar ai"><svg viewBox="0 0 24 24" fill="none"><path d="M12 2l2.4 7.6L22 12l-7.6 2.4L12 22l-2.4-7.6L2 12l7.6-2.4z" fill="#fff"/></svg></div>
+      <div>
+        <div class="bubble">好的，我先检查暂存区数据，然后启动发布作业。</div>
+        <div class="loading-breath"><span class="dot"></span><span class="txt">工作中…</span></div>
+        <div class="oprow"><span>09:46</span><span class="ops"><span><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 1H4a2 2 0 0 0-2 2v14h2V3h12zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16H8V7h11z"/></svg>复制</span><span><svg viewBox="0 0 24 24" fill="currentColor"><path d="M17.6 6.4A8 8 0 1 0 20 12h-2a6 6 0 1 1-1.8-4.3L13 11h7V4z"/></svg>重试</span></span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 方案二：shimmer 流光 -->
+<div class="panel">
+  <div class="panel-head">
+    <div class="panel-logo"><svg viewBox="0 0 24 24" fill="none"><path d="M12 2l2.4 7.6L22 12l-7.6 2.4L12 22l-2.4-7.6L2 12l7.6-2.4z" fill="#fff"/></svg></div>
+    实施助手 <span class="variant-tag">方案二 · 流光占位</span>
+  </div>
+  <div class="msgs">
+    <div class="row user">
+      <div class="avatar user"><svg viewBox="0 0 24 24" fill="#909399"><path d="M12 12a5 5 0 1 0-5-5 5 5 0 0 0 5 5zm0 2c-4 0-8 2-8 5v2h16v-2c0-3-4-5-8-5z"/></svg></div>
+      <div>
+        <div class="bubble">把 CURRENCY 的配置发布一下</div>
+        <div class="oprow"><span>09:46</span><span class="ops"><span><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 17.2V21h3.8l11-11-3.8-3.8zM20.7 7a1 1 0 0 0 0-1.4l-2.3-2.3a1 1 0 0 0-1.4 0l-1.8 1.8 3.7 3.7z"/></svg>编辑</span><span><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 1H4a2 2 0 0 0-2 2v14h2V3h12zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16H8V7h11z"/></svg>复制</span></span></div>
+      </div>
+    </div>
+    <div class="row ai">
+      <div class="avatar ai"><svg viewBox="0 0 24 24" fill="none"><path d="M12 2l2.4 7.6L22 12l-7.6 2.4L12 22l-2.4-7.6L2 12l7.6-2.4z" fill="#fff"/></svg></div>
+      <div>
+        <div class="bubble">好的，我先检查暂存区数据，然后启动发布作业。</div>
+        <div class="loading-shimmer"><div class="bar w85"></div><div class="bar w60"></div></div>
+        <div class="oprow"><span>09:46</span><span class="ops"><span><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 1H4a2 2 0 0 0-2 2v14h2V3h12zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16H8V7h11z"/></svg>复制</span></span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 方案三：三点跳动 -->
+<div class="panel">
+  <div class="panel-head">
+    <div class="panel-logo"><svg viewBox="0 0 24 24" fill="none"><path d="M12 2l2.4 7.6L22 12l-7.6 2.4L12 22l-2.4-7.6L2 12l7.6-2.4z" fill="#fff"/></svg></div>
+    实施助手 <span class="variant-tag">方案三 · 三点跳动</span>
+  </div>
+  <div class="msgs">
+    <div class="row user">
+      <div class="avatar user"><svg viewBox="0 0 24 24" fill="#909399"><path d="M12 12a5 5 0 1 0-5-5 5 5 0 0 0 5 5zm0 2c-4 0-8 2-8 5v2h16v-2c0-3-4-5-8-5z"/></svg></div>
+      <div>
+        <div class="bubble">把 CURRENCY 的配置发布一下</div>
+        <div class="oprow"><span>09:46</span><span class="ops"><span><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 17.2V21h3.8l11-11-3.8-3.8zM20.7 7a1 1 0 0 0 0-1.4l-2.3-2.3a1 1 0 0 0-1.4 0l-1.8 1.8 3.7 3.7z"/></svg>编辑</span><span><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 1H4a2 2 0 0 0-2 2v14h2V3h12zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16H8V7h11z"/></svg>复制</span></span></div>
+      </div>
+    </div>
+    <div class="row ai">
+      <div class="avatar ai"><svg viewBox="0 0 24 24" fill="none"><path d="M12 2l2.4 7.6L22 12l-7.6 2.4L12 22l-2.4-7.6L2 12l7.6-2.4z" fill="#fff"/></svg></div>
+      <div>
+        <div class="bubble">好的，我先检查暂存区数据，然后启动发布作业。</div>
+        <div class="loading-dots"><span class="trio"><i></i><i></i><i></i></span><span class="txt">工作中…</span></div>
+        <div class="oprow"><span>09:46</span><span class="ops"><span><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 1H4a2 2 0 0 0-2 2v14h2V3h12zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16H8V7h11z"/></svg>复制</span></span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 流式输出中：打字机光标 -->
+<div class="panel">
+  <div class="panel-head">
+    <div class="panel-logo"><svg viewBox="0 0 24 24" fill="none"><path d="M12 2l2.4 7.6L22 12l-7.6 2.4L12 22l-2.4-7.6L2 12l7.6-2.4z" fill="#fff"/></svg></div>
+    实施助手 <span class="variant-tag">流式中 · 打字机光标</span>
+  </div>
+  <div class="msgs">
+    <div class="row ai">
+      <div class="avatar ai"><svg viewBox="0 0 24 24" fill="none"><path d="M12 2l2.4 7.6L22 12l-7.6 2.4L12 22l-2.4-7.6L2 12l7.6-2.4z" fill="#fff"/></svg></div>
+      <div>
+        <div class="bubble">好的，我先检查暂存区数据，然后启动发布作业。发布前会先做预检<span class="caret"></span></div>
+        <div class="oprow"><span>09:46</span><span class="ops"><span><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 1H4a2 2 0 0 0-2 2v14h2V3h12zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16H8V7h11z"/></svg>复制</span></span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<p class="caption">业界惯例（ChatGPT / Claude / Kimi / Cursor 调研结论）：首字出现前用「呼吸点 / 流光占位」，流式输出中用「打字机光标」。即：方案一/二/三选一个做<b>首字前</b>的等待指示，打字机光标做<b>输出中</b>的跟随指示，两者是接力关系不是二选一。</p>
+</body>
+</html>

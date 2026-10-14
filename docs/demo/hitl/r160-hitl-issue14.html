@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>issue #14 HITL 持久化与溢出 · 方案 demo（确认用，非实现）</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: "PingFang SC","Microsoft YaHei",sans-serif; background:#fff; color:#1f2329; padding:32px; }
+  h1 { font-size:18px; margin-bottom:4px; }
+  .sub { color:#6b7280; font-size:13px; margin-bottom:16px; max-width:820px; line-height:1.7; }
+  .controls { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:16px; }
+  button.ctl { padding:7px 14px; border:1px solid #dcdfe6; border-radius:6px; background:#fff; cursor:pointer; font-size:13px; }
+  button.ctl.primary { background:#409eff; color:#fff; border-color:#409eff; }
+  button.ctl:hover { opacity:.85; }
+  button.ctl:disabled { opacity:.4; cursor:not-allowed; }
+  .radio-group { font-size:13px; color:#4b5563; display:flex; gap:10px; align-items:center; }
+  .stage { border:1px solid #e4e7ed; border-radius:10px; padding:20px 16px; min-height:380px; background:#fafafa; max-width:820px; position:relative; }
+  .mode-banner { position:absolute; top:8px; right:12px; font-size:11px; color:#c0c4cc; }
+
+  /* ===== 消息行（1:1 复刻 AiPanel 结构） ===== */
+  .msg-row { display:flex; gap:8px; margin-bottom:14px; }
+  .msg-row.user { flex-direction:row-reverse; }
+  .avatar { width:28px; height:28px; border-radius:50%; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+  .avatar.ai { background:linear-gradient(135deg,#409eff,#7b61ff); }
+  .avatar.user { background:#e4e7ed; }
+  .msg-col { min-width:0; flex:1; display:flex; flex-direction:column; align-items:flex-start; }
+  .msg-row.user .msg-col { align-items:flex-end; }
+  .bubble { max-width:82%; border-radius:8px; padding:8px 10px; font-size:13px; color:#303133; line-height:1.6; word-break:break-word; white-space:pre-wrap; }
+  .bubble.ai { background:#f4f4f5; }
+  .bubble.user { background:#d9ecff; }
+  /* 修复面：气泡截断溢出 */
+  .bubble.fix { overflow:hidden; }
+
+  /* 工具卡（1:1 AiPanel 现行样式） */
+  .tool-card { margin-top:6px; border:1px solid #dcdfe6; border-radius:6px; background:#fff; width:100%; }
+  .tc-hd { display:flex; align-items:center; gap:6px; padding:8px; font-weight:600; font-size:13px; color:#303133; cursor:pointer; flex-wrap:wrap; }
+  .tc-hd .arrow { color:#909399; font-size:11px; }
+  .tc-body { padding:0 8px 8px; border-top:1px dashed #ebeef5; }
+  .etag { display:inline-block; height:20px; line-height:18px; padding:0 5px; border-radius:4px; font-size:12px; font-weight:400; border:1px solid transparent; }
+  .etag.plain { background:#f4f4f5; border-color:#e9e9eb; color:#909399; }
+  .etag.run-dark { background:#67c23a; border-color:#67c23a; color:#fff; }
+  .etag.ok-light { background:#f0f9eb; border-color:#e1f3d8; color:#67c23a; }
+  .etag.warn-light { background:#fdf6ec; border-color:#faecd8; color:#e6a23c; }
+  .etag.danger-light { background:#fef0f0; border-color:#fde2e2; color:#f56c6c; }
+  .args { font-size:12px; color:#909399; word-break:break-all; margin-top:6px; font-family:Consolas,monospace; }
+
+  /* 确认门按钮区 */
+  .gate { margin-top:8px; padding:8px; background:#fdf6ec; border:1px solid #faecd8; border-radius:6px; }
+  .gate .q { font-size:13px; color:#606266; margin-bottom:8px; }
+  .gate .btns { display:flex; gap:8px; align-items:center; }
+  .gate .btns button { padding:5px 14px; border-radius:4px; font-size:12px; cursor:pointer; border:1px solid #dcdfe6; background:#fff; }
+  .gate .btns .ok { background:#409eff; border-color:#409eff; color:#fff; }
+  .countdown { font-size:12px; color:#e6a23c; margin-left:auto; }
+
+  /* 回执卡（1:1 AiPanel :303-307） */
+  .receipt { margin-top:6px; padding:6px 8px; background:#f0f9ff; border:1px solid #d9ecff; border-radius:6px; font-size:12px; display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+  .receipt .sum { color:#606266; }
+  .receipt .ts { color:#c0c4cc; }
+  .receipt .submitted { width:100%; color:#909399; }
+  .receipt .raw { width:100%; color:#c0c4cc; cursor:pointer; }
+  /* 修复面：回执独立卡 + 完成态默认折叠为一行 */
+  .receipt.standalone { width:100%; cursor:pointer; }
+  .receipt.standalone .arrow { color:#909399; font-size:11px; }
+  .receipt-detail { width:100%; margin-top:4px; padding-top:4px; border-top:1px dashed #d9ecff; }
+
+  /* 刷新标记 */
+  .refresh-mark { text-align:center; font-size:11px; color:#c0c4cc; margin:10px 0; position:relative; }
+  .refresh-mark::before,.refresh-mark::after { content:""; position:absolute; top:50%; width:38%; height:1px; background:#e4e7ed; }
+  .refresh-mark::before { left:0; } .refresh-mark::after { right:0; }
+
+  /* 溢出样例 */
+  .md-table { font-family:Consolas,monospace; font-size:12px; }
+  .scroll-x { overflow-x:auto; }
+  .scroll-x::-webkit-scrollbar { height:6px; }
+  .scroll-x::-webkit-scrollbar-thumb { background:#dcdfe6; border-radius:3px; }
+  .boundary-note { font-size:11px; color:#f56c6c; margin-top:4px; }
+  .fake-form { margin-top:6px; border:1px solid #dcdfe6; border-radius:6px; background:#fff; padding:8px; width:100%; }
+  .fake-form .fld { margin-top:8px; }
+  .fake-form label { display:block; font-size:12px; color:#606266; margin-bottom:4px; }
+  .fake-form .el { border:1px solid #dcdfe6; border-radius:4px; padding:5px 8px; font-size:12px; color:#909399; background:#fff; }
+  .fake-form .el.wide { width:100%; }
+  .fake-form .el.fixed-w { width:220px; } /* Element Plus 组件默认最小宽度 */
+
+  .legend { margin-top:14px; font-size:12px; color:#909399; line-height:1.9; max-width:820px; }
+  .legend b { color:#606266; }
+  .legend .miss { color:#e6a23c; }
+</style>
+</head>
+<body>
+<h1>issue #14 HITL 组件刷新后不渲染 + 决策元数据丢失 + 文本溢出 · 方案 demo</h1>
+<div class="sub">四个场景：A 确认门完成后刷新 ｜ B 生成式表单提交后刷新 ｜ C 确认门 pending 中刷新（倒计时恢复，本 demo 新增口径）｜ D 文本/组件溢出。每场景先播「交互过程」，点「模拟刷新 F5」对比刷新后差异。</div>
+
+<div class="controls">
+  <span class="radio-group">模式：
+    <label><input type="radio" name="mode" value="now" checked> 现状</label>
+    <label><input type="radio" name="mode" value="fix"> 修复后</label>
+  </span>
+  <button class="ctl" onclick="play('A')">A 确认门→刷新</button>
+  <button class="ctl" onclick="play('B')">B 表单→刷新</button>
+  <button class="ctl" onclick="play('C')">C pending→刷新</button>
+  <button class="ctl" onclick="play('D')">D 溢出样例</button>
+  <button class="ctl primary" id="refreshBtn" onclick="doRefresh()" disabled>⟳ 模拟刷新 F5</button>
+</div>
+
+<div class="stage" id="stage"><div class="mode-banner" id="banner"></div></div>
+
+<div class="legend">
+<b>修复口径（本 demo 提案）：</b>
+①回执卡<b>移出工具卡折叠体</b>，提升为消息内独立块（NN/G 渐进式披露：折叠体内不嵌套关键回执）——运行中 pending = 可编辑+默认展开；完成 = 只读+默认折叠为一行摘要（标签+时间戳+参数），点击展开详情；
+②决策元数据 <b>decision / decidedAt / submittedValues 后端持久化</b>（toolCallStates 载荷 {status,kind} → 扩三字段 + 白名单透传），loadHistory 重建时恢复——刷新后徽标/时间戳/已提交值全保留；
+③kind2 双保险：后端补 kind + 前端判据加 name 兜底，缺项不再降级 UNKNOWN 致整卡消失；
+④溢出：气泡加 overflow-hidden、表格/JSON 块 overflow-x-auto 横向滚动、表单组件 max-width:100%。
+<br><b class="miss">遗漏点（issue 未覆盖，本 demo 补充）：</b>
+Ⓐpending 门刷新恢复：倒计时按服务端 expiresAt 剩余秒继续，不重置不丢失（场景 C）；
+ⒷAiController 透传字段白名单需同步扩三字段（否则后端存了也到不了前端）；
+ⒸCollapsibleText 的 ResizeObserver 缺失环境恒不展开（无「显示更多」兜底）一并修；
+Ⓕargs 区 break-all 与 CollapsibleText 无换行控制的两处口径不统一，一并收敛。
+</div>
+
+<script>
+const stage = document.getElementById('stage');
+const refreshBtn = document.getElementById('refreshBtn');
+const banner = document.getElementById('banner');
+let cur = null, phase = 'live';
+const mode = () => document.querySelector('input[name=mode]:checked').value;
+const STAR = '<svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 2l2.4 7.6L22 12l-7.6 2.4L12 22l-2.4-7.6L2 12l7.6-2.4z" fill="#fff"/></svg>';
+const PERSON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="#909399"><path d="M12 12a5 5 0 1 0-5-5 5 5 0 0 0 5 5zm0 2c-4 0-8 2-8 5v2h16v-2c0-3-4-5-8-5z"/></svg>';
+
+function userRow(t){ return `<div class="msg-row user"><div class="avatar user">${PERSON}</div><div class="msg-col"><div class="bubble user">${t}</div></div></div>`; }
+function aiOpen(){ return `<div class="msg-row"><div class="avatar ai">${STAR}</div><div class="msg-col"><div class="bubble ai ${mode()==='fix'?'fix':''}" style="width:82%">`; }
+const aiClose = `</div></div></div>`;
+
+function toolCard(name, statusTag, bodyHtml, expanded){
+  return `<div class="tool-card">
+    <div class="tc-hd" onclick="toggleTc(this)"><span class="arrow">${expanded?'▾':'▸'}</span>⚙ ${name} <span class="etag plain">前端工具</span> ${statusTag}</div>
+    <div class="tc-body" style="display:${expanded?'block':'none'}">${bodyHtml}</div>
+  </div>`;
+}
+window.toggleTc = function(el){
+  const body = el.nextElementSibling, arrow = el.querySelector('.arrow');
+  const open = body.style.display !== 'none';
+  body.style.display = open ? 'none' : 'block'; arrow.textContent = open ? '▸' : '▾';
+};
+
+function gateHtml(leftSec, disabled){
+  const mm = String(Math.floor(leftSec/60)).padStart(2,'0'), ss = String(leftSec%60).padStart(2,'0');
+  return `<div class="gate"><div class="q">即将创建导出任务（taskType=export, defCode=CURRENCY），是否确认执行？</div>
+    <div class="btns"><button class="ok" ${disabled?'disabled':''} onclick="approve()">确认执行</button><button ${disabled?'disabled':''}>取消</button>
+    <span class="countdown">⏳ ${mm}:${ss}</span></div></div>`;
+}
+
+function receiptHtml(opts){
+  // opts: {decision, decidedAt, submitted, standalone, collapsed, tagOverride}
+  const tag = opts.tagOverride || (opts.decision==='approved' ? '<span class="etag ok-light">已确认</span>' : '<span class="etag danger-light">已拒绝</span>');
+  const ts = opts.decidedAt ? `<span class="ts">${opts.decidedAt}</span>` : '';
+  const sum = `<span class="sum">创建任务 · taskType=export, defCode=CURRENCY</span>`;
+  if (opts.standalone){
+    const arrow = opts.collapsed ? '▸' : '▾';
+    let detail = '';
+    if (!opts.collapsed){
+      detail = `<div class="receipt-detail">
+        ${opts.submitted ? `<div class="submitted">已提交：{"taskType":"export","defCode":"CURRENCY"}</div>` : ''}
+        <div class="raw" onclick="event.stopPropagation();this.textContent=this.textContent.startsWith('原始参数 ▾')?'原始参数 ▸':'原始参数 ▾'">原始参数 ▸</div>
+      </div>`;
+    }
+    return `<div class="receipt standalone" onclick="toggleReceipt(this)" data-collapsed="${opts.collapsed?1:0}">${tag} ${sum} ${ts} <span class="arrow" style="margin-left:auto">${arrow}</span>${detail}</div>`;
+  }
+  return `<div class="receipt">${tag} ${sum} ${ts}
+    ${opts.submitted ? `<div class="submitted">已提交：{"taskType":"export","defCode":"CURRENCY"}</div>` : ''}
+    <div class="raw">原始参数 ▸</div></div>`;
+}
+window.toggleReceipt = function(el){
+  const collapsed = el.dataset.collapsed === '1';
+  el.outerHTML = receiptHtml({decision:'approved', decidedAt:'10-13 16:05', submitted:true, standalone:true, collapsed:!collapsed});
+};
+
+/* ---------- 场景 A：确认门完成 → 刷新 ---------- */
+window.play = function(sc){
+  cur = sc; phase = 'live'; refreshBtn.disabled = true;
+  banner.textContent = mode()==='fix' ? '修复后' : '现状';
+  if (sc==='A') playA();
+  else if (sc==='B') playB();
+  else if (sc==='C') playC();
+  else playD();
+};
+
+function playA(){
+  stage.innerHTML = userRow('创建一个导出任务，选择 CURRENCY') + aiOpen()
+    + '好的，我来创建导出任务。请确认以下参数：'
+    + toolCard('create_task', '<span class="etag warn-light">待确认</span>',
+        `<div class="args">{"taskType":"export","defCode":"CURRENCY"}</div>` + gateHtml(240,false), true)
+    + aiClose;
+  window.approve = function(){
+    if (mode()==='now'){
+      // 现状：回执渲染在工具卡折叠体内，确认后 requiresAction=false → 卡自动折叠 → 回执被藏
+      stage.innerHTML = userRow('创建一个导出任务，选择 CURRENCY') + aiOpen()
+        + '好的，我来创建导出任务。请确认以下参数：'
+        + toolCard('create_task', '<span class="etag ok-light">已完成</span>',
+            `<div class="args">{"taskType":"export","defCode":"CURRENCY"}</div>` + receiptHtml({decision:'approved', decidedAt:'10-13 16:05', submitted:false}), false)
+        + aiClose
+        + '<div class="refresh-mark">已确认 ✅ —— 但回执被折进工具卡（点卡头 ▸ 才能看见）</div>';
+    } else {
+      // 修复：回执独立块，先展开 1.2s 后自动收成一行（渐进式披露）
+      stage.innerHTML = userRow('创建一个导出任务，选择 CURRENCY') + aiOpen()
+        + '好的，我来创建导出任务。请确认以下参数：'
+        + toolCard('create_task', '<span class="etag ok-light">已完成</span>',
+            `<div class="args">{"taskType":"export","defCode":"CURRENCY"}</div>`, false)
+        + receiptHtml({decision:'approved', decidedAt:'10-13 16:05', submitted:true, standalone:true, collapsed:false})
+        + aiClose
+        + '<div class="refresh-mark">已确认 ✅ —— 回执独立成块，稍后自动折叠为一行</div>';
+      const r0 = stage.querySelector('.receipt.standalone');
+      setTimeout(() => {
+        if (r0 && r0.isConnected) toggleReceipt(r0);
+      }, 1200);
+    }
+    phase = 'done'; refreshBtn.disabled = false;
+  };
+}
+
+/* ---------- 场景 B：生成式表单提交 → 刷新 ---------- */
+function playB(){
+  stage.innerHTML = userRow('帮我补全这个任务的调度信息') + aiOpen()
+    + '需要补充几个字段：'
+    + `<div class="fake-form">
+        <div style="font-weight:600;font-size:13px">调度信息 <span class="etag plain">生成式表单</span> <span class="etag warn-light">待填写</span></div>
+        <div class="fld"><label>cron 表达式</label><div class="el wide" contenteditable>0 0 2 * * ?</div></div>
+        <div class="fld"><label>生效日期</label><div class="el wide">2026-10-14 📅</div></div>
+        <div class="fld"><label>时区</label><div class="el wide">Asia/Shanghai ▾</div></div>
+        <div class="fld"><button class="ctl primary" onclick="submitForm()">提交</button></div>
+      </div>` + aiClose;
+  window.submitForm = function(){
+    if (mode()==='now'){
+      stage.innerHTML = userRow('帮我补全这个任务的调度信息') + aiOpen()
+        + '需要补充几个字段：'
+        + toolCard('ask_generative_form', '<span class="etag ok-light">已完成</span>',
+            `<div class="args">{"fields":["cron","effectiveDate","timezone"]}</div>` + receiptHtml({decision:'approved', decidedAt:'10-13 16:07', submitted:true}), false)
+        + aiClose
+        + '<div class="refresh-mark">已提交 ✅ —— 回执折叠在工具卡内</div>';
+    } else {
+      stage.innerHTML = userRow('帮我补全这个任务的调度信息') + aiOpen()
+        + '需要补充几个字段：'
+        + `<div class="fake-form">
+            <div style="font-weight:600;font-size:13px">调度信息 <span class="etag plain">生成式表单</span> <span class="etag ok-light">已提交</span> <span class="ts" style="font-weight:400;font-size:12px">10-13 16:07</span></div>
+            <div class="fld"><label>cron 表达式</label><div class="el wide" style="background:#f4f4f5">0 0 2 * * ?</div></div>
+            <div class="fld"><label>生效日期</label><div class="el wide" style="background:#f4f4f5">2026-10-14 📅</div></div>
+            <div class="fld"><label>时区</label><div class="el wide" style="background:#f4f4f5">Asia/Shanghai ▾</div></div>
+          </div>`
+        + aiClose
+        + '<div class="refresh-mark">已提交 ✅ —— 表单只读+值保留（修复面：表单卡即回执，不另起卡）</div>';
+    }
+    phase = 'done'; refreshBtn.disabled = false;
+  };
+}
+
+/* ---------- 场景 C：pending 中刷新（本 demo 新增口径） ---------- */
+let countdownTimer = null;
+function playC(){
+  let left = 240;
+  stage.innerHTML = userRow('创建一个导出任务，选择 CURRENCY') + aiOpen()
+    + '好的，请确认：'
+    + toolCard('create_task', '<span class="etag warn-light">待确认</span>',
+        `<div class="args">{"taskType":"export","defCode":"CURRENCY"}</div>` + gateHtml(left,false), true)
+    + aiClose
+    + '<div class="refresh-mark">门还 pending（倒计时 04:00）—— 此时点「模拟刷新」看差异</div>';
+  clearInterval(countdownTimer);
+  countdownTimer = setInterval(() => {
+    left = Math.max(0, left-1);
+    const cd = stage.querySelector('.countdown');
+    if (cd){ const mm=String(Math.floor(left/60)).padStart(2,'0'), ss=String(left%60).padStart(2,'0'); cd.textContent = `⏳ ${mm}:${ss}`; }
+    cur = {sc:'C', left};
+  }, 1000);
+  phase = 'done'; refreshBtn.disabled = false;
+}
+
+/* ---------- 场景 D：溢出 ---------- */
+const LONG_JSON = '{"taskId":"a1b2c3d4e5f6","result":{"rows":[1,2,3],"meta":{"source":"system","traceId":"9f8e7d6c5b4a39281706ffeeddccbbaa99887766554433221100"}}}';
+const LONG_TABLE = '| 配置码 | 名称 | 类型 | 是否启用 | 默认值 | 备注 |\n|---|---|---|---|---|---|\n| CURRENCY | 币种基础档案 | dictionary | true | CNY | 全局共享，导入前必须存在，否则整批失败 |\n| DOC_TYPE | 单据类型 | dictionary | true | INV | 与流程引擎联动 |\n| TAX_RATE | 税率 | dictionary | false | 0.13 | 按地区覆盖 |';
+const LONG_URL = 'https://example.internal.com/very/long/path/to/resource?param1=value1&param2=value2&param3=value3&session=abcdef1234567890abcdef1234567890';
+function playD(){
+  const fix = mode()==='fix';
+  const wrapTable = fix ? `<div class="scroll-x md-table">${LONG_TABLE.replace(/\n/g,'<br>')}</div>` : `<div class="md-table">${LONG_TABLE.replace(/\n/g,'<br>')}</div>`;
+  const wrapJson = fix ? `<div class="scroll-x"><code style="white-space:nowrap;font-size:12px">${LONG_JSON}</code></div>` : `<code style="white-space:nowrap;font-size:12px">${LONG_JSON}</code>`;
+  const formW = fix ? 'el wide' : 'el fixed-w';
+  stage.innerHTML = aiOpen()
+    + '已读取，结构如下：\n'
+    + wrapTable
+    + '\n原始返回：\n'
+    + wrapJson
+    + '\n链接：' + (fix ? `<span style="word-break:break-all">${LONG_URL}</span>` : `<span style="white-space:nowrap">${LONG_URL}</span>`)
+    + `<div class="fake-form">
+        <div style="font-weight:600;font-size:13px">补充信息 <span class="etag plain">生成式表单</span></div>
+        <div class="fld"><label>生效日期（Element Plus date-picker 默认最小宽 220px）</label><div class="${formW}">2026-10-14 📅</div></div>
+        <div class="fld"><label>范围（el-select 多选）</label><div class="${formW}">CURRENCY × DOC_TYPE × TAX_RATE ▾</div></div>
+      </div>`
+    + (fix ? '' : '<div class="boundary-note">↑ 现状：长表/长 JSON/长 URL/宽组件超出气泡右缘（气泡无 overflow-hidden）</div>')
+    + aiClose;
+  phase = 'done'; refreshBtn.disabled = true;
+}
+
+/* ---------- 模拟刷新 ---------- */
+window.doRefresh = function(){
+  if (phase !== 'done') return;
+  clearInterval(countdownTimer);
+  const sc = typeof cur === 'object' ? 'C' : cur;
+  const left = typeof cur === 'object' ? cur.left : 0;
+  if (sc==='A'){
+    if (mode()==='now'){
+      // 刷新后：toolCallStates 只回 {status:'success'}，kind 缺 → kind2=UNKNOWN → 回执卡整卡不渲染；只剩折叠工具卡
+      stage.innerHTML = userRow('创建一个导出任务，选择 CURRENCY') + aiOpen()
+        + '好的，我来创建导出任务。请确认以下参数：'
+        + toolCard('create_task', '<span class="etag ok-light">已完成</span>',
+            `<div class="args">{"taskType":"export","defCode":"CURRENCY"}</div><div style="font-size:12px;color:#f56c6c;margin-top:6px">（回执卡未渲染：kind2=UNKNOWN，isHitlReceiptPart 判据不成立）</div>`, false)
+        + aiClose
+        + '<div class="refresh-mark">⟳ 刷新后（现状）：回执卡消失；即便强行渲染，徽标也退化为 status 派生、无时间戳、无已提交值</div>';
+    } else {
+      stage.innerHTML = userRow('创建一个导出任务，选择 CURRENCY') + aiOpen()
+        + '好的，我来创建导出任务。请确认以下参数：'
+        + toolCard('create_task', '<span class="etag ok-light">已完成</span>',
+            `<div class="args">{"taskType":"export","defCode":"CURRENCY"}</div>`, false)
+        + receiptHtml({decision:'approved', decidedAt:'10-13 16:05', submitted:true, standalone:true, collapsed:true})
+        + aiClose
+        + '<div class="refresh-mark">⟳ 刷新后（修复）：回执独立渲染、默认折叠一行 = 已确认+时间戳+摘要；点击展开已提交值与原始参数；decision/decidedAt/submittedValues 全部来自后端持久化</div>';
+    }
+  } else if (sc==='B'){
+    if (mode()==='now'){
+      stage.innerHTML = userRow('帮我补全这个任务的调度信息') + aiOpen()
+        + '需要补充几个字段：'
+        + toolCard('ask_generative_form', '<span class="etag ok-light">已完成</span>',
+            `<div class="args">{"fields":["cron","effectiveDate","timezone"]}</div><div class="receipt"><span class="etag ok-light">已完成</span><span class="sum">生成式表单</span><span class="submitted" style="color:#f56c6c">（无「已提交」行：submittedValues 未持久化，刷新即丢）</span></div>`, false)
+        + aiClose
+        + '<div class="refresh-mark">⟳ 刷新后（现状）：表单靠 name 兜底勉强出卡，但徽标退化、无时间戳、已填值全丢</div>';
+    } else {
+      stage.innerHTML = userRow('帮我补全这个任务的调度信息') + aiOpen()
+        + '需要补充几个字段：'
+        + `<div class="fake-form">
+            <div style="font-weight:600;font-size:13px">调度信息 <span class="etag plain">生成式表单</span> <span class="etag ok-light">已提交</span> <span class="ts" style="font-weight:400;font-size:12px">10-13 16:07</span></div>
+            <div class="fld"><label>cron 表达式</label><div class="el wide" style="background:#f4f4f5">0 0 2 * * ?</div></div>
+            <div class="fld"><label>生效日期</label><div class="el wide" style="background:#f4f4f5">2026-10-14 📅</div></div>
+            <div class="fld"><label>时区</label><div class="el wide" style="background:#f4f4f5">Asia/Shanghai ▾</div></div>
+          </div>`
+        + aiClose
+        + '<div class="refresh-mark">⟳ 刷新后（修复）：表单只读 + 已填值 + 时间戳全保留（submittedValues/decidedAt 持久化恢复）</div>';
+    }
+  } else if (sc==='C'){
+    if (mode()==='now'){
+      stage.innerHTML = userRow('创建一个导出任务，选择 CURRENCY') + aiOpen()
+        + '好的，请确认：'
+        + toolCard('create_task', '<span class="etag warn-light">待确认</span>',
+            `<div class="args">{"taskType":"export","defCode":"CURRENCY"}</div>` + gateHtml(240,false), false)
+        + aiClose
+        + '<div class="refresh-mark">⟳ 刷新后（现状）：卡默认折叠藏住确认按钮；倒计时重置回 04:00（前端内存态，无 expiresAt 持久化）</div>';
+    } else {
+      stage.innerHTML = userRow('创建一个导出任务，选择 CURRENCY') + aiOpen()
+        + '好的，请确认：'
+        + toolCard('create_task', '<span class="etag warn-light">待确认</span>',
+            `<div class="args">{"taskType":"export","defCode":"CURRENCY"}</div>` + gateHtml(left,true), true)
+        + aiClose
+        + '<div class="refresh-mark">⟳ 刷新后（修复）：pending 门恒展开可编辑；倒计时按服务端 expiresAt 剩余 ' + Math.floor(left/60) + ':' + String(left%60).padStart(2,'0') + ' 继续（不重置）——按钮 demo 内禁用示意</div>';
+    }
+  }
+};
+play('A');
+</script>
+</body>
+</html>

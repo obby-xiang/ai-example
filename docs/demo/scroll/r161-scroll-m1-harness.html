@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>滚动行为专项 · 方案 demo（确认用，非实现）</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: "PingFang SC","Microsoft YaHei",sans-serif; background:#fff; color:#1f2329; padding:32px; }
+  h1 { font-size:18px; margin-bottom:4px; }
+  .sub { color:#6b7280; font-size:13px; margin-bottom:16px; max-width:860px; line-height:1.7; }
+  .controls { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
+  button.ctl { padding:7px 14px; border:1px solid #dcdfe6; border-radius:6px; background:#fff; cursor:pointer; font-size:13px; }
+  button.ctl.primary { background:#409eff; color:#fff; border-color:#409eff; }
+  button.ctl:hover { opacity:.85; }
+  .radio-group { font-size:13px; color:#4b5563; display:flex; gap:10px; align-items:center; }
+  .readout { font-family:Consolas,monospace; font-size:12px; color:#909399; margin-bottom:8px; }
+  .readout b { color:#303133; }
+
+  .pane-wrap { max-width:640px; position:relative; }
+  .pane { height:420px; overflow-y:auto; border:1px solid #e4e7ed; border-radius:10px; background:#fafafa; padding:16px 14px; scroll-behavior:auto; }
+  .pane.smooth { scroll-behavior:smooth; }
+
+  .msg-row { display:flex; gap:8px; margin-bottom:14px; }
+  .msg-row.user { flex-direction:row-reverse; }
+  .avatar { width:28px; height:28px; border-radius:50%; display:flex; align-items:center; justify-content:center; flex-shrink:0; font-size:12px; color:#fff; }
+  .avatar.ai { background:linear-gradient(135deg,#409eff,#7b61ff); }
+  .avatar.user { background:#e4e7ed; }
+  .msg-col { min-width:0; flex:1; display:flex; flex-direction:column; align-items:flex-start; }
+  .msg-row.user .msg-col { align-items:flex-end; }
+  .bubble { max-width:82%; border-radius:8px; padding:8px 10px; font-size:13px; color:#303133; line-height:1.6; word-break:break-word; white-space:pre-wrap; }
+  .bubble.ai { background:#f4f4f5; }
+  .bubble.user { background:#d9ecff; }
+
+  .tool-card { margin-top:6px; border:1px solid #dcdfe6; border-radius:6px; background:#fff; width:100%; }
+  .tc-hd { display:flex; align-items:center; gap:6px; padding:8px; font-weight:600; font-size:13px; color:#303133; }
+  .tc-body { padding:0 8px 8px; border-top:1px dashed #ebeef5; font-size:12px; color:#909399; }
+  .etag { display:inline-block; height:20px; line-height:18px; padding:0 5px; border-radius:4px; font-size:12px; border:1px solid transparent; }
+  .etag.plain { background:#f4f4f5; border-color:#e9e9eb; color:#909399; }
+  .etag.warn-light { background:#fdf6ec; border-color:#faecd8; color:#e6a23c; }
+  .etag.ok-light { background:#f0f9eb; border-color:#e1f3d8; color:#67c23a; }
+  .gate { margin-top:8px; padding:8px; background:#fdf6ec; border:1px solid #faecd8; border-radius:6px; }
+  .gate .btns { display:flex; gap:8px; margin-top:8px; }
+  .gate button { padding:5px 14px; border-radius:4px; font-size:12px; cursor:pointer; border:1px solid #dcdfe6; background:#fff; }
+  .gate button.ok { background:#409eff; border-color:#409eff; color:#fff; }
+  .fake-form { margin-top:6px; border:1px solid #dcdfe6; border-radius:6px; background:#fff; padding:8px; width:100%; }
+  .fake-form .fld { margin-top:8px; }
+  .fake-form label { display:block; font-size:12px; color:#606266; margin-bottom:4px; }
+  .fake-form .el { border:1px solid #dcdfe6; border-radius:4px; padding:5px 8px; font-size:12px; color:#909399; }
+
+  /* 回到底部浮钮（1:1 现行形态：居中胶囊） */
+  .b2b { position:absolute; bottom:12px; left:50%; transform:translateX(-50%); padding:6px 14px; border-radius:999px; background:#fff; border:1px solid #dcdfe6; box-shadow:0 2px 8px rgba(0,0,0,.12); font-size:12px; color:#409eff; cursor:pointer; display:none; align-items:center; gap:4px; }
+  .b2b.show { display:inline-flex; }
+  .b2b .cnt { color:#e6a23c; font-weight:600; }
+
+  .legend { margin-top:14px; font-size:12px; color:#909399; line-height:1.9; max-width:860px; }
+  .legend b { color:#606266; }
+  .legend .opt { color:#e6a23c; }
+</style>
+</head>
+<body>
+<h1>自动钉底 + 回到底部按钮 · 方案 demo</h1>
+<div class="sub">左侧窗格是真实可滚动的消息流。点「▶ 播放回复」模拟一条含<b>确认门 + 生成式表单</b>的流式回复。对照两模式：①工具卡插入时是否自动钉底；②向上滚一点（20px）是否就出「回到底部」。</div>
+
+<div class="controls">
+  <span class="radio-group">模式：
+    <label><input type="radio" name="mode" value="now"> 现状</label>
+    <label><input type="radio" name="mode" value="fix" checked> 修复后</label>
+  </span>
+  <button class="ctl primary" onclick="play()">▶ 播放回复（文本→确认门→文本→表单）</button>
+  <button class="ctl" onclick="scrollUp(20)">↑ 上滚一点（20px）</button>
+  <button class="ctl" onclick="scrollUpHalf()">↑ 上滚半屏</button>
+  <button class="ctl" onclick="injectNew()">✉ 上滚中来新消息</button>
+  <button class="ctl" onclick="insertAbove(300)">✚ 上方插入 300px（overflow-anchor 场景）</button>
+  <span class="radio-group" title="待裁可选项"><label><input type="checkbox" id="optPill" checked> 「↓ N 条新消息」pill（待裁）</label>
+  <label><input type="checkbox" id="optSmooth" checked> 平滑回底（待裁）</label></span>
+</div>
+<div class="readout" id="readout">离底 0px ｜ 跟随=true ｜ 浮钮=隐</div>
+
+<div class="pane-wrap">
+  <div class="pane" id="pane"></div>
+  <div class="b2b" id="b2b" onclick="backToBottom()">↓ <span id="b2bLabel">回到底部</span></div>
+</div>
+
+<div class="legend">
+<b>修复口径（本 demo 提案，锚点 = AiPanel.vue）：</b>
+①<b>ResizeObserver 内容重钉底</b>：消息容器挂 RO，内容任何增高（工具卡/确认门/表单/折叠展开）只要处于跟随态即重钉到底——覆盖现状「指纹 watch 只盯末段文本」盲区（:1041-1047）与「nextTick 单次快照」缺口（:741-752），取代 :1052 的 setTimeout hack；
+②<b>阈值拆分</b>（:489 一值双用是「上滚一点就出钮」的根因）：跟随解除闸保留 32px；<b>浮钮显示 = 离底 &gt;64px、&lt;24px 隐藏（滞回，业界主流口径）</b>——本 demo 修复模式按此实现；
+③<b>回归保护</b>（用户要求「后续调整不受影响」）：施工必带 spec 断言钉死新阈值与 RO 重钉行为（钉点清单见排查报告 §4）；
+④<b>程序化钉底保护</b>：所有程序化钉底统一走 <code>pinBottom()</code>，其 scroll 事件回声按落点识别并跳过跟随闸——否则「已在底部时点播放」会被开场新增空行把 scrollHeight 顶高造成的中间态离底（实测 42px）误判成用户上滚，跟随闸被锁死、整条回复不再钉底。
+<br><b class="opt">待裁可选项（demo 右上角开关）：</b>Ⓐ上滚期间来新内容，浮钮变「↓ N 条新消息」计数 pill（Vercel/OmniGrid 主流形态）；Ⓑ点击回底改平滑滚动（behavior:smooth，可被用户滚动打断）。另：滚动容器补 role="log"（无障碍，无视觉影响）。
+<br><b>现状模式复现的逻辑缺陷：</b>文本 delta 走指纹 watch 会滚；确认门/表单插入与确认后卡体展开只增高度、不进指纹 ⇒ 视口原地不动、底部内容被顶出视野；且任一离底 ≥32px 的 scroll 事件即把跟随闸锁死（:496），本轮后续全部不滚。
+</div>
+
+<script>
+const pane = document.getElementById('pane');
+const b2b = document.getElementById('b2b');
+const b2bLabel = document.getElementById('b2bLabel');
+const readout = document.getElementById('readout');
+const mode = () => document.querySelector('input[name=mode]:checked').value;
+
+const FOLLOW_PX = 32;                 // 跟随解除/恢复闸（两模式同）
+const SHOW_PX = 64;                   // 修复面浮钮出钮阈值：离底 >64px 显示（业界主流滞回口径）
+const HIDE_PX = 24;                   // 修复面浮钮隐藏阈值：离底 <24px 隐藏
+const showThreshold = () => SHOW_PX;
+let followBottom = true, newCount = 0, playing = false, timers = [];
+
+const STAR = '✦';
+function aiMsg(html){ return `<div class="msg-row"><div class="avatar ai">${STAR}</div><div class="msg-col"><div class="bubble ai" style="width:82%">${html}</div></div></div>`; }
+function userMsg(t){ return `<div class="msg-row user"><div class="avatar user"></div><div class="msg-col"><div class="bubble user">${t}</div></div></div>`; }
+
+// 预填历史消息（撑出滚动条）
+function seed(){
+  pane.innerHTML = '';
+  for (let i = 1; i <= 8; i++){
+    pane.innerHTML += userMsg(`历史问题 ${i}：帮我检查一下配置`) + aiMsg(`历史回答 ${i}：已检查，配置项均正常。这是第 ${i} 条历史回复，用于撑开滚动区域，让窗格出现真实的滚动条。`);
+  }
+}
+
+const dist = () => pane.scrollHeight - pane.scrollTop - pane.clientHeight;
+
+// 统一「程序化钉底」入口。程序化改 scrollTop 会在下一帧派发 scroll 事件，而那时
+// 本次新增内容（如播放开头 appendChild 的空行）已把 scrollHeight 顶高，回调读到
+// 中间态离底 >32px 就会把跟随闸误锁死。故钉底后记录落点作 guard，onScroll 凭
+// 落点识别「自己派发的回声」并跳过闸逻辑。
+let pinGuardTop = null;
+// M1 复验 _trace：打点 pinBottom / onScroll 全字段（回声判定的原始证据）
+window._trace = [];
+function trace(rec){ rec.t = Math.round(performance.now()); window._trace.push(rec); }
+function pinBottom(){
+  pane.scrollTop = pane.scrollHeight;
+  pinGuardTop = pane.scrollTop;
+  followBottom = true;
+  trace({ ev:'pin', scrollTop: pane.scrollTop, guard: pinGuardTop });
+}
+
+function updateReadout(){
+  readout.innerHTML = `离底 <b>${Math.round(dist())}px</b> ｜ 跟随=<b>${followBottom}</b> ｜ 浮钮=<b>${b2b.classList.contains('show') ? '显' : '隐'}</b>${mode()==='fix' ? `（出钮阈值 ${Math.round(showThreshold())}px）` : '（现状阈值 32px）'}`;
+}
+
+function onScroll(e){
+  const selfEcho = e && e.type === 'scroll' && pinGuardTop !== null && Math.abs(pane.scrollTop - pinGuardTop) < 1;
+  const d0 = dist();
+  trace({ ev:'scroll', scrollTop: pane.scrollTop, guard: pinGuardTop, dist: Math.round(d0), selfEcho, followBefore: followBottom });
+  if (selfEcho){ updateReadout(); return; }      // 程序化钉底的回声：只刷读数，不动跟随闸
+  if (e && e.type === 'scroll') pinGuardTop = null; // 真实滚动：解除保护
+  const d = dist();
+  followBottom = d < FOLLOW_PX;
+  if (mode() === 'now'){
+    // 现状：一值双用——离底 ≥32px 即出钮
+    if (d >= FOLLOW_PX) { b2b.classList.add('show'); } else { b2b.classList.remove('show'); }
+  } else {
+    // 修复：滞回——离底 >64px 显示，回近底（<24px）才隐藏
+    if (d > showThreshold()) b2b.classList.add('show');
+    else if (d < HIDE_PX) { b2b.classList.remove('show'); newCount = 0; renderB2b(); }
+  }
+  updateReadout();
+}
+pane.addEventListener('scroll', onScroll);
+
+function renderB2b(){
+  const pill = document.getElementById('optPill').checked;
+  b2bLabel.innerHTML = (mode()==='fix' && pill && newCount > 0) ? `<span class="cnt">${newCount} 条新消息</span>` : '回到底部';
+}
+
+window.backToBottom = function(){
+  const smooth = mode()==='fix' && document.getElementById('optSmooth').checked;
+  if (smooth){ pane.classList.add('smooth'); pinBottom(); setTimeout(()=>pane.classList.remove('smooth'), 600); }
+  else pinBottom();
+  newCount = 0; renderB2b();
+  b2b.classList.remove('show'); updateReadout();
+};
+
+window.scrollUp = function(px){ pane.scrollTop -= px; onScroll(); };
+window.scrollUpHalf = function(){ pane.scrollTop -= pane.clientHeight * 0.6; onScroll(); };
+
+// M1 overflow-anchor 场景：视口上方插入内容 —— 浏览器锚点调整会自行微调 scrollTop 并派发 scroll 事件
+window.insertAbove = function(px){
+  const block = document.createElement('div');
+  block.style.height = px + 'px';
+  block.style.background = '#fde2e2';
+  block.textContent = '（上方插入 ' + px + 'px 内容）';
+  pane.insertBefore(block, pane.firstChild);
+  trace({ ev:'insertAbove', px, scrollTop: pane.scrollTop, scrollHeight: pane.scrollHeight, guard: pinGuardTop });
+};
+
+// 关键差异点：内容追加后的钉底策略
+function afterAppend(){
+  if (mode() === 'fix' && followBottom) pinBottom(); // 修复 = RO 重钉（任何增高）
+  // 现状 = 仅文本 delta 走指纹 watch 才滚（见 play() 内逐chunk处理），工具卡/表单插入不滚
+  onScroll();
+}
+
+const TOOL_GATE = `<div class="tool-card"><div class="tc-hd">⚙ create_task <span class="etag plain">前端工具</span> <span class="etag warn-light">待确认</span></div>
+  <div class="tc-body"><div style="margin-top:6px">{"taskType":"export","defCode":"CURRENCY"}</div>
+  <div class="gate"><div>即将创建导出任务，是否确认执行？</div><div class="btns"><button class="ok">确认执行</button><button>取消</button></div></div></div></div>`;
+const TOOL_FORM = `<div class="fake-form"><div style="font-weight:600;font-size:13px">调度信息 <span class="etag plain">生成式表单</span> <span class="etag warn-light">待填写</span></div>
+  <div class="fld"><label>cron 表达式</label><div class="el">0 0 2 * * ?</div></div>
+  <div class="fld"><label>生效日期</label><div class="el">2026-10-14 📅</div></div>
+  <div class="fld"><label>时区</label><div class="el">Asia/Shanghai ▾</div></div></div>`;
+
+window.play = function(){
+  if (playing) return; playing = true;
+  timers.forEach(clearTimeout); timers = [];
+  seed();
+  pane.innerHTML += userMsg('创建一个导出任务，选择 CURRENCY，顺便补全调度信息');
+  pinBottom(); newCount = 0; renderB2b();
+
+  const row = document.createElement('div'); row.className = 'msg-row';
+  row.innerHTML = `<div class="avatar ai">${STAR}</div><div class="msg-col"><div class="bubble ai" style="width:82%"><span class="txt"></span></div></div>`;
+  pane.appendChild(row);
+  const txt = row.querySelector('.txt');
+  const T1 = '好的，我来创建导出任务。请确认以下参数：';
+
+  // ① 文本流式（两模式都会滚：现状走指纹 watch，修复走 RO）
+  let i = 0;
+  const t1 = setInterval(() => {
+    txt.textContent = T1.slice(0, ++i * 2);
+    if (mode() === 'now' && followBottom) pinBottom(); // 现状：文本 delta 触发
+    afterAppend();
+    if (i * 2 >= T1.length){
+      clearInterval(t1);
+      // ② 确认门插入（高 ~150px）——现状不滚（指纹不含、单次快照过期），修复 RO 重钉
+      timers.push(setTimeout(() => {
+        row.querySelector('.bubble').insertAdjacentHTML('beforeend', TOOL_GATE);
+        afterAppend(); // 现状：此函数在 now 模式不钉底 ⇒ 确认门被顶出视野
+        // ③ 后续文本
+        const T2 = '\n确认后我将开始执行，同时需要补全调度信息：';
+        let j = 0;
+        const t2 = setInterval(() => {
+          txt.textContent += T2[j++] || '';
+          if (mode() === 'now' && followBottom) pinBottom();
+          afterAppend();
+          if (j >= T2.length){
+            clearInterval(t2);
+            // ④ 生成式表单插入（高 ~200px）——现状同样不滚
+            timers.push(setTimeout(() => {
+              row.querySelector('.bubble').insertAdjacentHTML('beforeend', TOOL_FORM);
+              afterAppend();
+              playing = false;
+            }, 600));
+          }
+        }, 60);
+      }, 600));
+    }
+  }, 60);
+};
+
+window.injectNew = function(){
+  pane.innerHTML += aiMsg('（上滚期间到达的新消息）这是一条新的 AI 回复内容。');
+  if (mode() === 'fix'){
+    newCount++; renderB2b();
+    if (followBottom) pinBottom();
+    onScroll();
+  } else {
+    // 现状：无计数概念，跟随态则滚、否则无提示
+    if (followBottom) pinBottom();
+    onScroll();
+  }
+};
+
+seed();
+pinBottom(); onScroll();
+</script>
+</body>
+</html>
