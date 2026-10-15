@@ -1,0 +1,3014 @@
+diff --git a/backend/src/main/java/com/example/configmgr/ai/feedback/AiFeedback.java b/backend/src/main/java/com/example/configmgr/ai/feedback/AiFeedback.java
+new file mode 100644
+index 0000000..a3744a9
+--- /dev/null
++++ b/backend/src/main/java/com/example/configmgr/ai/feedback/AiFeedback.java
+@@ -0,0 +1,51 @@
++package com.example.configmgr.ai.feedback;
++
++import jakarta.persistence.*;
++import lombok.Data;
++import org.hibernate.annotations.CreationTimestamp;
++import org.hibernate.annotations.UpdateTimestamp;
++
++import java.time.LocalDateTime;
++
++/**
++ * R-163 T5：AI 回复赞踩反馈条目（ai_feedback，net-new 表——parts[] 持久化不动的并列面）。
++ * message_id 全局唯一 ⇒ 同一消息反复上报 = 幂等 upsert；rating=0（取消）在端点层翻译为删行。
++ */
++@Data
++@Entity
++@Table(name = "ai_feedback", uniqueConstraints = @UniqueConstraint(columnNames = "message_id"))
++public class AiFeedback {
++
++    @Id
++    @GeneratedValue(strategy = GenerationType.IDENTITY)
++    private Long id;
++
++    @Column(name = "message_id", nullable = false, length = 64)
++    private String messageId;
++
++    @Column(name = "session_id", nullable = false, length = 64)
++    private String sessionId;
++
++    /** 1=赞 / -1=踩（0=取消不落库）。 */
++    @Column(name = "rating", nullable = false)
++    private Integer rating;
++
++    @Column(name = "reason", length = 1024)
++    private String reason;
++
++    /** R-163 收口修 F2：被评价消息正文前 200 字符快照（人工复盘的可读摘要；缺省 null）。 */
++    @Column(name = "message_excerpt", length = 400)
++    private String messageExcerpt;
++
++    /** 单用户本地应用暂无登录体系，预留隔离位（未来多用户直接生效）。 */
++    @Column(name = "created_by", length = 64)
++    private String createdBy;
++
++    @CreationTimestamp
++    @Column(name = "created_at", updatable = false)
++    private LocalDateTime createdAt;
++
++    @UpdateTimestamp
++    @Column(name = "updated_at")
++    private LocalDateTime updatedAt;
++}
+diff --git a/backend/src/main/java/com/example/configmgr/ai/feedback/AiFeedbackRepository.java b/backend/src/main/java/com/example/configmgr/ai/feedback/AiFeedbackRepository.java
+new file mode 100644
+index 0000000..1d38701
+--- /dev/null
++++ b/backend/src/main/java/com/example/configmgr/ai/feedback/AiFeedbackRepository.java
+@@ -0,0 +1,14 @@
++package com.example.configmgr.ai.feedback;
++
++import org.springframework.data.jpa.repository.JpaRepository;
++
++import java.util.List;
++
++/** R-163 T5：赞踩反馈仓储——message_id 唯一支撑幂等 upsert。 */
++public interface AiFeedbackRepository extends JpaRepository<AiFeedback, Long> {
++
++    AiFeedback findByMessageId(String messageId);
++
++    /** 设置页「AI 反馈」查看列表：按更新时间倒序（仅当前用户——单用户应用即全表）。 */
++    List<AiFeedback> findTop100ByOrderByUpdatedAtDesc();
++}
+diff --git a/backend/src/main/java/com/example/configmgr/ai/web/AiController.java b/backend/src/main/java/com/example/configmgr/ai/web/AiController.java
+index 5db13a1..c1d82af 100644
+--- a/backend/src/main/java/com/example/configmgr/ai/web/AiController.java
++++ b/backend/src/main/java/com/example/configmgr/ai/web/AiController.java
+@@ -4,6 +4,8 @@ import com.example.configmgr.ai.config.AiAvailability;
+ import com.example.configmgr.ai.config.AiProperties;
+ import com.example.configmgr.ai.config.RedisAvailability;
+ import com.example.configmgr.ai.gate.ConfirmGate;
++import com.example.configmgr.ai.feedback.AiFeedback;
++import com.example.configmgr.ai.feedback.AiFeedbackRepository;
+ import com.example.configmgr.ai.memory.MessageJsonCodec;
+ import com.example.configmgr.ai.memory.RedisChatMemoryRepository;
+ import com.example.configmgr.ai.run.CancellationRegistry;
+@@ -27,6 +29,7 @@ import org.springframework.ai.chat.messages.AssistantMessage;
+ import org.springframework.ai.chat.messages.Message;
+ import org.springframework.ai.chat.messages.ToolResponseMessage;
+ import org.springframework.beans.factory.ObjectProvider;
++import org.springframework.beans.factory.annotation.Autowired;
+ import org.springframework.beans.factory.annotation.Qualifier;
+ import org.springframework.core.env.Environment;
+ import org.springframework.http.HttpStatus;
+@@ -43,7 +46,6 @@ import org.springframework.web.bind.annotation.RequestMapping;
+ import org.springframework.web.bind.annotation.RequestParam;
+ import org.springframework.web.bind.annotation.RestController;
+ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+-
+ import java.time.Instant;
+ import java.util.ArrayList;
+ import java.util.LinkedHashMap;
+@@ -121,6 +123,13 @@ public class AiController {
+ 
+ 	private final JobWatchdog jobWatchdog;
+ 
++	/**
++	 * R-163 T5：赞踩反馈仓储。**字段注入**（非构造器）——本批后端红线仅限赞踩端点，
++	 * 构造器签名不变 ⇒ 既有 AiController 全部测试（@WebMvcTest 等）零触碰。
++	 */
++	@Autowired
++	private AiFeedbackRepository aiFeedbackRepository;
++
+ 	public AiController(AiAvailability availability, ObjectProvider<ResilientChatService> chatService,
+ 			ObjectProvider<ResumeService> resumeService, ObjectProvider<StartupResumeRunner> startupResumeRunner,
+ 			ChatMemory chatMemory, ChatMemoryRepository chatMemoryRepository, SessionGate sessionGate,
+@@ -804,4 +813,83 @@ public class AiController {
+ 		return ApiResponse.ok(items);
+ 	}
+ 
++	// ── R-163 T5：赞踩反馈（本批唯一后端面；ai_feedback net-new 表，parts[] 持久化不动） ──
++
++	/**
++	 * POST /api/ai/feedback —— 赞踩上报（幂等 upsert：message_id 唯一；rating=0 = 取消=删行）。
++	 * 请求体 {@code {messageId, sessionId, rating∈1/-1/0, reason?}}；校验失败 400 携可读 message。
++	 * 单用户本地应用（无登录体系），created_by 预留隔离位。
++	 */
++	@PostMapping("/feedback")
++	public ResponseEntity<?> feedback(@RequestBody Map<String, Object> body) {
++		String messageId = stringOf(body.get("messageId"));
++		String sessionId = stringOf(body.get("sessionId"));
++		Object ratingRaw = body.get("rating");
++		Integer rating = ratingRaw instanceof Number number ? number.intValue() : null;
++		String reason = stringOf(body.get("reason"));
++		// R-163 收口修 F2：被评价消息正文快照（前 200 字符，人工复盘可读摘要）
++		String excerpt = stringOf(body.get("excerpt"));
++		if (messageId == null || sessionId == null || rating == null
++				|| (rating != 1 && rating != -1 && rating != 0)) {
++			return json(HttpStatus.BAD_REQUEST,
++					Map.of("code", "BAD_REQUEST", "message", "messageId/sessionId 必填，rating ∈ 1/-1/0"));
++		}
++		if (rating == 0) {
++			AiFeedback existing = this.aiFeedbackRepository.findByMessageId(messageId);
++			if (existing != null) {
++				this.aiFeedbackRepository.delete(existing);
++			}
++			return ResponseEntity.ok(ApiResponse.ok(Map.of("saved", false, "cancelled", existing != null)));
++		}
++		AiFeedback entry = this.aiFeedbackRepository.findByMessageId(messageId);
++		boolean saved;
++		if (entry == null) {
++			entry = new AiFeedback();
++			entry.setMessageId(messageId);
++			saved = true;
++		}
++		else {
++			saved = false;
++		}
++		entry.setSessionId(sessionId);
++		entry.setRating(rating);
++		if (reason != null) {
++			entry.setReason(reason.length() > 1024 ? reason.substring(0, 1024) : reason);
++		}
++		if (excerpt != null) {
++			entry.setMessageExcerpt(excerpt.length() > 200 ? excerpt.substring(0, 200) : excerpt);
++		}
++		this.aiFeedbackRepository.save(entry);
++		return ResponseEntity.ok(ApiResponse.ok(Map.of("saved", saved, "cancelled", false)));
++	}
++
++	/**
++	 * GET /api/ai/feedback —— 设置页「AI 反馈」查看列表（时间/消息摘要/rating/reason，
++	 * 仅当前用户=单用户应用全表；上限 100 条，按更新时间倒序）。
++	 */
++	@GetMapping("/feedback")
++	public ApiResponse<List<Map<String, Object>>> feedbackList() {
++		List<Map<String, Object>> items = new ArrayList<>();
++		for (AiFeedback entry : this.aiFeedbackRepository.findTop100ByOrderByUpdatedAtDesc()) {
++			Map<String, Object> item = new LinkedHashMap<>();
++			item.put("messageId", entry.getMessageId());
++			item.put("sessionId", entry.getSessionId());
++			item.put("rating", entry.getRating());
++			item.put("reason", entry.getReason());
++			item.put("excerpt", entry.getMessageExcerpt());
++			item.put("createdAt", entry.getCreatedAt());
++			item.put("updatedAt", entry.getUpdatedAt());
++			items.add(item);
++		}
++		return ApiResponse.ok(items);
++	}
++
++	private static String stringOf(Object value) {
++		if (value == null) {
++			return null;
++		}
++		String s = String.valueOf(value).trim();
++		return s.isEmpty() ? null : s;
++	}
++
+ }
+diff --git a/backend/src/main/resources/db/migration/V3__ai_feedback.sql b/backend/src/main/resources/db/migration/V3__ai_feedback.sql
+new file mode 100644
+index 0000000..1243fea
+--- /dev/null
++++ b/backend/src/main/resources/db/migration/V3__ai_feedback.sql
+@@ -0,0 +1,16 @@
++-- R-163 T5：AI 回复赞踩反馈（net-new 持久化面，与 parts[] 持久化无关）。
++-- message_id 唯一 ⇒ 幂等 upsert（rating=0 = 取消，删行）。
++-- 单用户本地应用（无登录体系），created_by 预留。
++
++CREATE TABLE ai_feedback (
++    id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
++    message_id      VARCHAR(64)  NOT NULL,
++    session_id      VARCHAR(64)  NOT NULL,
++    rating          INT          NOT NULL, -- 1=赞 / -1=踩（0=取消不落库，落库前删行）
++    reason          VARCHAR(1024),
++    message_excerpt VARCHAR(400),          -- R-163 收口修 F2：被评价消息正文前 200 字符快照（人工复盘可读摘要）
++    created_by      VARCHAR(64),
++    created_at      TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    updated_at      TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    CONSTRAINT uq_ai_feedback_message UNIQUE (message_id)
++);
+diff --git a/backend/src/test/java/com/example/configmgr/ai/web/AiControllerFeedbackTest.java b/backend/src/test/java/com/example/configmgr/ai/web/AiControllerFeedbackTest.java
+new file mode 100644
+index 0000000..222346e
+--- /dev/null
++++ b/backend/src/test/java/com/example/configmgr/ai/web/AiControllerFeedbackTest.java
+@@ -0,0 +1,151 @@
++package com.example.configmgr.ai.web;
++
++import com.example.configmgr.ai.config.AiAvailability;
++import com.example.configmgr.ai.config.AiProperties;
++import com.example.configmgr.ai.config.RedisAvailability;
++import com.example.configmgr.ai.feedback.AiFeedback;
++import com.example.configmgr.ai.feedback.AiFeedbackRepository;
++import com.example.configmgr.ai.gate.ConfirmGate;
++import com.example.configmgr.ai.run.CancellationRegistry;
++import com.example.configmgr.ai.run.RunRegistry;
++import com.example.configmgr.ai.run.RunStore;
++import com.example.configmgr.ai.session.SessionGate;
++import com.fasterxml.jackson.databind.ObjectMapper;
++import org.junit.jupiter.api.Test;
++import org.mockito.ArgumentCaptor;
++import org.springframework.ai.chat.memory.ChatMemory;
++import org.springframework.ai.chat.memory.ChatMemoryRepository;
++import org.springframework.beans.factory.ObjectProvider;
++import org.springframework.core.env.Environment;
++import org.springframework.http.MediaType;
++import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
++import org.springframework.test.util.ReflectionTestUtils;
++import org.springframework.test.web.servlet.MockMvc;
++import org.springframework.test.web.servlet.setup.MockMvcBuilders;
++
++import java.time.LocalDateTime;
++import java.util.List;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.never;
++import static org.mockito.Mockito.times;
++import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.when;
++import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
++import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
++import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
++import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
++
++/**
++ * R-163 T5：赞踩端点 {@code POST/GET /api/ai/feedback}（幂等 upsert / 取消=删行 / 校验 400 / 查看列表）。
++ * 仓储为字段注入（本批后端红线仅限赞踩），standaloneSetup 用 ReflectionTestUtils 灌入。
++ */
++class AiControllerFeedbackTest {
++
++	private final AiFeedbackRepository feedbackRepository = mock(AiFeedbackRepository.class);
++
++	private final MockMvc mockMvc = MockMvcBuilders.standaloneSetup(controller()).build();
++
++	@Test
++	void firstUpsertCreatesAndSecondUpsertUpdatesSameMessage() throws Exception {
++		when(this.feedbackRepository.findByMessageId("m-1")).thenReturn(null);
++
++		this.mockMvc.perform(post("/api/ai/feedback").contentType(MediaType.APPLICATION_JSON)
++				.content("{\"messageId\":\"m-1\",\"sessionId\":\"s-1\",\"rating\":1}"))
++			.andExpect(status().isOk())
++			.andExpect(jsonPath("$.data.saved").value(true))
++			.andExpect(jsonPath("$.data.cancelled").value(false));
++
++		ArgumentCaptor<AiFeedback> captor = ArgumentCaptor.forClass(AiFeedback.class);
++		verify(this.feedbackRepository).save(captor.capture());
++		assertThat(captor.getValue().getMessageId()).isEqualTo("m-1");
++		assertThat(captor.getValue().getRating()).isEqualTo(1);
++
++		// 幂等 upsert：同 messageId 二次上报 = 更新同一条（saved=false）；携正文快照 excerpt（收口修 F2）
++		AiFeedback existing = captor.getValue();
++		when(this.feedbackRepository.findByMessageId("m-1")).thenReturn(existing);
++		this.mockMvc.perform(post("/api/ai/feedback").contentType(MediaType.APPLICATION_JSON)
++				.content("{\"messageId\":\"m-1\",\"sessionId\":\"s-1\",\"rating\":-1,\"reason\":\"答非所问\",\"excerpt\":\"被评价消息正文快照\"}"))
++			.andExpect(status().isOk())
++			.andExpect(jsonPath("$.data.saved").value(false));
++		verify(this.feedbackRepository, times(2)).save(existing);
++		assertThat(existing.getRating()).isEqualTo(-1);
++		assertThat(existing.getReason()).isEqualTo("答非所问");
++		assertThat(existing.getMessageExcerpt()).isEqualTo("被评价消息正文快照");
++	}
++
++	@Test
++	void ratingZeroCancelsByDeletingRow() throws Exception {
++		AiFeedback existing = new AiFeedback();
++		existing.setMessageId("m-2");
++		when(this.feedbackRepository.findByMessageId("m-2")).thenReturn(existing);
++
++		this.mockMvc.perform(post("/api/ai/feedback").contentType(MediaType.APPLICATION_JSON)
++				.content("{\"messageId\":\"m-2\",\"sessionId\":\"s-1\",\"rating\":0}"))
++			.andExpect(status().isOk())
++			.andExpect(jsonPath("$.data.saved").value(false))
++			.andExpect(jsonPath("$.data.cancelled").value(true));
++		verify(this.feedbackRepository).delete(existing);
++
++		// 取消幂等：无该行时取消 = 空操作（不报错、不删）——先清调用记录再断负例
++		org.mockito.Mockito.clearInvocations(this.feedbackRepository);
++		when(this.feedbackRepository.findByMessageId("m-3")).thenReturn(null);
++		this.mockMvc.perform(post("/api/ai/feedback").contentType(MediaType.APPLICATION_JSON)
++				.content("{\"messageId\":\"m-3\",\"sessionId\":\"s-1\",\"rating\":0}"))
++			.andExpect(status().isOk())
++			.andExpect(jsonPath("$.data.cancelled").value(false));
++		verify(this.feedbackRepository, never()).delete(any());
++	}
++
++	@Test
++	void invalidPayloadRejectedWith400() throws Exception {
++		this.mockMvc.perform(post("/api/ai/feedback").contentType(MediaType.APPLICATION_JSON)
++				.content("{\"messageId\":\"m-1\",\"sessionId\":\"s-1\",\"rating\":5}"))
++			.andExpect(status().isBadRequest())
++			.andExpect(jsonPath("$.code").value("BAD_REQUEST"));
++
++		this.mockMvc.perform(post("/api/ai/feedback").contentType(MediaType.APPLICATION_JSON)
++				.content("{\"sessionId\":\"s-1\",\"rating\":1}"))
++			.andExpect(status().isBadRequest());
++	}
++
++	@Test
++	void feedbackListExposesTimeSummaryRatingReason() throws Exception {
++		AiFeedback entry = new AiFeedback();
++		entry.setMessageId("msg-abc-12345");
++		entry.setSessionId("session-xyz-678");
++		entry.setRating(-1);
++		entry.setReason("结果有误");
++		entry.setMessageExcerpt("被评价消息正文快照");
++		entry.setCreatedAt(LocalDateTime.of(2026, 10, 14, 10, 30));
++		entry.setUpdatedAt(LocalDateTime.of(2026, 10, 14, 10, 30));
++		when(this.feedbackRepository.findTop100ByOrderByUpdatedAtDesc()).thenReturn(List.of(entry));
++
++		this.mockMvc.perform(get("/api/ai/feedback"))
++			.andExpect(status().isOk())
++			.andExpect(jsonPath("$.data[0].messageId").value("msg-abc-12345"))
++			.andExpect(jsonPath("$.data[0].sessionId").value("session-xyz-678"))
++			.andExpect(jsonPath("$.data[0].rating").value(-1))
++			.andExpect(jsonPath("$.data[0].reason").value("结果有误"))
++			.andExpect(jsonPath("$.data[0].excerpt").value("被评价消息正文快照"));
++	}
++
++	private AiController controller() {
++		AiController controller = new AiController(mock(AiAvailability.class), provider(), provider(), provider(),
++				mock(ChatMemory.class), mock(ChatMemoryRepository.class), mock(SessionGate.class),
++				mock(ConfirmGate.class), mock(RunStore.class), mock(RunRegistry.class),
++				mock(CancellationRegistry.class), mock(RedisAvailability.class),
++				mock(ThreadPoolTaskExecutor.class), new ObjectMapper(), new AiProperties(),
++				mock(Environment.class), mock(com.example.configmgr.job.service.JobWatchdog.class));
++		ReflectionTestUtils.setField(controller, "aiFeedbackRepository", this.feedbackRepository);
++		return controller;
++	}
++
++	private static <T> ObjectProvider<T> provider() {
++		@SuppressWarnings("unchecked")
++		ObjectProvider<T> provider = mock(ObjectProvider.class);
++		return provider;
++	}
++}
+diff --git a/frontend/package.json b/frontend/package.json
+index 7c6d618..9aa3b44 100644
+--- a/frontend/package.json
++++ b/frontend/package.json
+@@ -18,8 +18,12 @@
+     "@grapecity/spread-sheets-resources-zh": "17.1.5",
+     "axios": "^1.7.9",
+     "dayjs": "^1.11.13",
++    "dompurify": "3.4.14",
+     "element-plus": "^2.9.3",
++    "highlight.js": "11.11.1",
+     "jszip": "^3.10.1",
++    "markdown-it": "15.0.0",
++    "mermaid": "11.16.1",
+     "pinia": "^2.3.0",
+     "vue": "^3.5.13",
+     "vue-router": "^4.5.0"
+diff --git a/frontend/src/App.vue b/frontend/src/App.vue
+index faee3fa..0296cac 100644
+--- a/frontend/src/App.vue
++++ b/frontend/src/App.vue
+@@ -13,6 +13,7 @@
+           <el-menu-item :index="ROUTE_NAMES.taskCenter" :route="{ name: ROUTE_NAMES.taskCenter }">任务中心</el-menu-item>
+           <el-menu-item :index="ROUTE_NAMES.definitions" :route="{ name: ROUTE_NAMES.definitions }">配置定义</el-menu-item>
+           <el-menu-item :index="ROUTE_NAMES.dataBrowser" :route="{ name: ROUTE_NAMES.dataBrowser }">数据浏览</el-menu-item>
++          <el-menu-item :index="ROUTE_NAMES.aiFeedback" :route="{ name: ROUTE_NAMES.aiFeedback }">AI 反馈</el-menu-item>
+         </el-menu>
+       </div>
+       <el-button link @click="ai.toggleExpand()">
+diff --git a/frontend/src/api/ai.ts b/frontend/src/api/ai.ts
+index 2843136..9cc21d2 100644
+--- a/frontend/src/api/ai.ts
++++ b/frontend/src/api/ai.ts
+@@ -141,5 +141,39 @@ export const aiApi = {
+   run,
+   resume,
+   pending,
+-  runsCurrent
++  runsCurrent,
++  feedbackSubmit,
++  feedbackList
++}
++
++/** R-163 T5：赞踩上报（rating ∈ 1/-1/0，0=取消；后端幂等 upsert）。 */
++export interface AiFeedbackRequest {
++  messageId: string
++  sessionId: string
++  rating: 1 | -1 | 0
++  reason?: string
++  /** R-163 收口修 F2：被评价消息正文前 200 字符快照（人工复盘可读摘要）。 */
++  excerpt?: string
++}
++
++/** R-163 T5：反馈查看列表条目（设置页「AI 反馈」）。 */
++export interface AiFeedbackEntry {
++  messageId: string
++  sessionId: string
++  rating: 1 | -1
++  reason: string | null
++  /** F2：正文快照（旧数据/未携时为 null）。 */
++  excerpt?: string | null
++  createdAt: string
++  updatedAt: string
++}
++
++/** POST /api/ai/feedback（幂等 upsert；message_id 唯一）。 */
++export function feedbackSubmit(request: AiFeedbackRequest): Promise<{ saved: boolean; cancelled: boolean }> {
++  return post<{ saved: boolean; cancelled: boolean }>('/ai/feedback', request)
++}
++
++/** GET /api/ai/feedback（设置页「AI 反馈」查看列表，固定上限 100 倒序——后端硬编码，前端不传参）。 */
++export function feedbackList(): Promise<AiFeedbackEntry[]> {
++  return get<AiFeedbackEntry[]>('/ai/feedback')
+ }
+diff --git a/frontend/src/components/AiPanel/AiPanel.vue b/frontend/src/components/AiPanel/AiPanel.vue
+index 6010ee1..21b5679 100644
+--- a/frontend/src/components/AiPanel/AiPanel.vue
++++ b/frontend/src/components/AiPanel/AiPanel.vue
+@@ -157,29 +157,17 @@
+       <div
+         v-for="m in ai.messages"
+         :key="m.id"
+-        class="group flex gap-2 mb-3.5"
++        class="group flex mb-3.5"
+         :class="m.role === 'user' ? 'flex-row-reverse' : ''"
+       >
+-        <div
+-          class="w-7 h-7 rounded-full flex items-center justify-center shrink-0"
+-          :class="m.role === 'user' ? 'bg-[#e4e7ed]' : 'bg-gradient-to-br from-[#409eff] to-[#7b61ff]'"
+-          :data-testid="'msg-avatar-' + m.id"
+-        >
+-          <!-- R-157 #5：头像去文字 —— AI = 蓝紫渐变四角星（复用头部渐变语言），用户 = 灰色人形 -->
+-          <svg v-if="m.role === 'user'" viewBox="0 0 24 24" fill="#909399" class="w-4 h-4" aria-hidden="true">
+-            <path d="M12 12a5 5 0 1 0-5-5 5 5 0 0 0 5 5zm0 2c-4 0-8 2-8 5v2h16v-2c0-3-4-5-8-5z" />
+-          </svg>
+-          <svg v-else viewBox="0 0 24 24" fill="none" class="w-4 h-4" aria-hidden="true">
+-            <path d="M12 2l2.4 7.6L22 12l-7.6 2.4L12 22l-2.4-7.6L2 12l7.6-2.4z" fill="#fff" />
+-          </svg>
+-        </div>
+-        <!-- 内容列：气泡 + 指示器 + 操作行（R-157 #1：操作行挪气泡外、卡片下沿独立行） -->
++        <!-- R-163 T3：双侧去头像（demo v6 场景 2）——消息行 = 内容 + 元信息行，无头像列 -->
++        <!-- 内容列：正文/卡片 + 元信息行（R-157 #1：操作行挪气泡外、卡片下沿独立行） -->
+         <div class="min-w-0 flex-1 flex flex-col" :class="m.role === 'user' ? 'items-end' : 'items-start'">
+-        <!-- R-160 M4（issue #14③ 方案 A）：气泡容器层一刀切 —— overflow:hidden + min-width:0，
+-             长串（无空白可断）不再越出气泡；不铺分块规则（Markdown 重做时整体替换） -->
++        <!-- R-160 M4（issue #14③ 方案 A）：容器层一刀切 —— overflow:hidden + min-width:0；
++             R-163 T3：用户消息 = 内容-only 卡片；助手回复 = 无气泡全宽（透明底）。 -->
+         <div
+-          class="max-w-[82%] min-w-0 overflow-hidden rounded-lg px-2.5 py-2 text-[13px] text-[#303133] leading-[1.6] break-words"
+-          :class="m.role === 'user' ? 'bg-[#d9ecff]' : 'bg-[#f4f4f5]'"
++          class="min-w-0 overflow-hidden w-full px-2.5 py-2 text-[14px] text-[#303133] leading-[1.7]"
++          :class="m.role === 'user' ? 'max-w-[82%] rounded-lg bg-[#d9ecff] break-words' : ''"
+           :data-testid="'msg-bubble-' + m.id"
+         >
+           <!-- 消息体：块分派（批4④ A5' → R-154 单卡化）——groupParts 把段序列分派为 text/activity 块；
+@@ -187,10 +175,11 @@
+                （expandedBlocks ?? defaultExpanded，D4/D6/D-C6）；key 用块稳定 id
+                （成员 toolCallId / kind-seg，加消息命名空间前缀，收口修 F1/红队 M-1），禁用数组下标（§7 R4-3 / D5）。 -->
+           <template v-for="(block, bi) in blocksOf(m)" :key="block.id">
+-            <!-- 正文块：单段正文，永不进折叠组（A5' 规则③）；
+-                 R-157 #3：流式中正文末尾打字机光标；R-159 #6：末尾 CH_TAIL 字符包 span.ch 渐显（新字符 chIn）；
+-                 R-159 #4：完成时光标同帧淡出（fade-out，300ms 后随 isFading 退役）。 -->
+-            <div v-if="block.kind === 'text'" class="whitespace-pre-wrap">{{ chSplit(m, block).head }}<span v-for="(ch, ci) in chSplit(m, block).tail" :key="ci" class="ch">{{ ch }}</span><span v-if="showCaret(m, bi) || isFading(m)" class="caret" :class="{ 'fade-out': isFading(m) }" data-testid="stream-caret"></span></div>
++            <!-- R-163 T1 正文块：markdown-it → DOMPurify 白名单 → v-html 唯一链路
++                 （chSplit/CH_TAIL 逐字符渐显退役——R-159 该语义被 Markdown 渲染取代，spec 口径同步改写）；
++                 R-159 #3：流式正文末尾打字机光标保留（移出正文 div，随块同帧淡出）。 -->
++            <div v-if="block.kind === 'text'" class="md-body" v-html="markdownHtml(m, block)"></div>
++            <span v-if="block.kind === 'text' && (showCaret(m, bi) || isFading(m))" class="caret" :class="{ 'fade-out': isFading(m) }" data-testid="stream-caret"></span>
+ 
+             <!-- R-160 M2：HITL 只读回执**独立块**（R-158 #10 判据随块层判，块 = 已决确认门/GF 段）——
+                  紧随源工具卡渲染，恒可见（不参与 expandedBlocks，无折叠卡头），刷新/历史恢复后可回溯。
+@@ -249,6 +238,8 @@
+                     class="mt-1.5 border border-solid border-[#dcdfe6] rounded-md bg-white"
+                     :data-testid="part.requiresAction ? 'pending-card-' + part.toolCallId : 'tool-card-' + part.toolCallId"
+                   >
++                    <!-- R-163 T2 卡头折叠单行 = 状态 tag + 工具名 + 一行自然语言摘要（T0 静态映射）；
++                         点击卡头展开/收起 input/output（v-show：DOM 恒在）；requiresAction 卡强制展开。 -->
+                     <button
+                       type="button"
+                       class="w-full flex items-center gap-1.5 p-2 text-left font-semibold text-[13px] flex-wrap"
+@@ -259,6 +250,7 @@
+                     >
+                       <el-icon color="#409EFF"><Operation /></el-icon>
+                       <span>{{ toolLabel(part.name) }}</span>
++                      <span class="font-normal text-xs text-[#909399] truncate min-w-0 flex-1" :data-testid="'tool-summary-' + part.toolCallId">{{ toolSummary(part) }}</span>
+                       <el-tag v-if="part.kind2 === 'FRONTEND'" size="small" effect="plain">前端工具</el-tag>
+                       <el-tag v-else-if="part.kind2 === 'CONFIRM'" size="small" type="warning" effect="plain">确认门</el-tag>
+                       <el-tag :size="'small'" :type="toolTagType(part.status)" :effect="part.status === 'running' ? 'dark' : 'light'">
+@@ -266,21 +258,25 @@
+                       </el-tag>
+                     </button>
+                     <div v-show="isBlockExpanded(block)" class="px-2 pb-2 pt-0 flex flex-col gap-1.5" :data-testid="'block-body-' + block.id">
+-                      <!-- R-158 #12：args pretty-print + 真溢出渐隐（CollapsibleText） -->
+-                      <div v-if="part.args" class="text-xs text-[#909399] break-all">
+-                        <CollapsibleText :text="part.args" pretty :testid="'args-more-' + part.toolCallId" />
++                      <!-- R-163 T2：展开体 input/output 格式化 JSON（pretty 解析成功缩进 / 失败原样）——裸 JSON 墙消除 -->
++                      <div v-if="part.args">
++                        <div class="text-[11px] text-[#c0c4cc] mb-0.5">输入</div>
++                        <div class="text-xs text-[#909399] break-all">
++                          <CollapsibleText :text="part.args" pretty :testid="'args-more-' + part.toolCallId" />
++                        </div>
+                       </div>
+-                      <!-- R-154 #2 角标（帧侧截断标记）保留 + R-158 #12 展示层移交 CollapsibleText：
+-                           真溢出才渐隐 + 「显示更多」（原本地去帽 max-h 组件态随之退役） -->
+-                      <div v-if="part.result" class="px-2 py-1 text-xs text-[#606266] bg-[#fafafa] rounded">
+-                        <CollapsibleText :text="part.result" :testid="'show-more-' + part.toolCallId">
+-                          {{ part.result }}<span
+-                            v-if="part.truncated"
+-                            class="inline-block ml-1 px-1 rounded text-[10px] leading-4 bg-[#e6a23c] text-white align-middle"
+-                            :title="part.truncatedReason ?? '结果被截断'"
+-                            data-testid="truncated-badge"
+-                          >已截断</span>
+-                        </CollapsibleText>
++                      <div v-if="part.result">
++                        <div class="text-[11px] text-[#c0c4cc] mb-0.5">输出</div>
++                        <div class="px-2 py-1 text-xs text-[#606266] bg-[#fafafa] rounded">
++                          <CollapsibleText :text="part.result" :testid="'show-more-' + part.toolCallId">
++                            {{ part.result }}<span
++                              v-if="part.truncated"
++                              class="inline-block ml-1 px-1 rounded text-[10px] leading-4 bg-[#e6a23c] text-white align-middle"
++                              :title="part.truncatedReason ?? '结果被截断'"
++                              data-testid="truncated-badge"
++                            >已截断</span>
++                          </CollapsibleText>
++                        </div>
+                       </div>
+                       <!-- R-158 #6：卡内错误位（图标 + 红底 + 文案）——错误就地呈现，不再全堆顶部 Alert -->
+                       <div v-if="part.reason" class="flex items-start gap-1 px-2 py-1 text-xs text-[#f56c6c] bg-[#fef0f0] rounded" data-testid="tool-error">
+@@ -365,7 +361,7 @@
+             <span v-else-if="formatProgressiveTs(m.timestamp)" class="text-[#c0c4cc]" data-testid="msg-timestamp">{{ formatProgressiveTs(m.timestamp) }}</span>
+           </span>
+           <div
+-            class="flex items-center gap-1 transition-opacity"
++            class="flex items-center gap-2 transition-opacity"
+             :class="m.streaming ? '' : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100'"
+             :style="m.streaming && m.role === 'assistant' ? 'visibility: hidden' : ''"
+           >
+@@ -377,29 +373,63 @@
+             >
+               {{ copyState.ok ? '已复制' : '复制失败，请手动选中文本复制' }}
+             </span>
+-            <el-button
++            <!-- R-163 T4：「继续」入口（error/断流/取消后，最后一条助手消息）——点击直发「继续」 -->
++            <button
++              v-if="showContinue(m)"
++              type="button"
++              data-testid="continue-round"
++              title="继续本轮对话"
++              class="w-7 h-7 inline-flex items-center justify-center rounded text-xs text-[#409eff] hover:bg-[#ecf5ff]"
++              @click="continueRound"
++            >
++              继续
++            </button>
++            <!-- R-163 T3：赞踩（仅助手行）——28×28 热区、本地态、选中互斥可取消、title 气泡提示不挤布局 -->
++            <button
++              v-if="m.role === 'assistant'"
++              type="button"
++              :data-testid="'feedback-up-' + m.id"
++              :title="feedbackOf(m.id) === 1 ? '取消赞' : '赞'"
++              :aria-pressed="feedbackOf(m.id) === 1"
++              class="w-7 h-7 inline-flex items-center justify-center rounded hover:bg-[#f4f4f5]"
++              :class="feedbackOf(m.id) === 1 ? 'text-[#409eff]' : 'text-[#a8abb2]'"
++              @click="rateMessage(m, 1)"
++            >
++              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-3.5 h-3.5" aria-hidden="true"><path d="M7 10v12M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z"/></svg>
++            </button>
++            <button
++              v-if="m.role === 'assistant'"
++              type="button"
++              :data-testid="'feedback-down-' + m.id"
++              :title="feedbackOf(m.id) === -1 ? '取消踩' : '踩'"
++              :aria-pressed="feedbackOf(m.id) === -1"
++              class="w-7 h-7 inline-flex items-center justify-center rounded hover:bg-[#f4f4f5]"
++              :class="feedbackOf(m.id) === -1 ? 'text-[#f56c6c]' : 'text-[#a8abb2]'"
++              @click="rateMessage(m, -1)"
++            >
++              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-3.5 h-3.5" aria-hidden="true"><path d="M17 14V2M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2h13.5a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22a3.13 3.13 0 0 1-3-3.88Z"/></svg>
++            </button>
++            <button
+               v-if="m.role === 'user'"
+-              link
+-              size="small"
+-              class="px-1"
++              type="button"
++              class="w-7 h-7 inline-flex items-center justify-center rounded hover:bg-[#f4f4f5] text-[#a8abb2]"
+               :data-testid="'edit-msg-' + m.id"
+               title="编辑该条消息（改完从该条重跑）"
+               aria-label="编辑该条消息（改完从该条重跑）"
+               @click="editMessage(m)"
+             >
+-              <svg viewBox="0 0 24 24" fill="currentColor" class="w-3 h-3" aria-hidden="true"><path d="M3 17.2V21h3.8l11-11-3.8-3.8zM20.7 7a1 1 0 0 0 0-1.4l-2.3-2.3a1 1 0 0 0-1.4 0l-1.8 1.8 3.7 3.7z" /></svg>
+-            </el-button>
+-            <el-button
+-              link
+-              size="small"
+-              class="px-1"
++              <svg viewBox="0 0 24 24" fill="currentColor" class="w-3.5 h-3.5" aria-hidden="true"><path d="M3 17.2V21h3.8l11-11-3.8-3.8zM20.7 7a1 1 0 0 0 0-1.4l-2.3-2.3a1 1 0 0 0-1.4 0l-1.8 1.8 3.7 3.7z" /></svg>
++            </button>
++            <button
++              type="button"
++              class="w-7 h-7 inline-flex items-center justify-center rounded hover:bg-[#f4f4f5] text-[#a8abb2]"
+               :data-testid="'copy-msg-' + m.id"
+               title="复制该条消息正文"
+               aria-label="复制该条消息正文"
+               @click="copyMessage(m)"
+             >
+-              <svg viewBox="0 0 24 24" fill="currentColor" class="w-3 h-3" aria-hidden="true"><path d="M16 1H4a2 2 0 0 0-2 2v14h2V3h12zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16H8V7h11z" /></svg>
+-            </el-button>
++              <svg viewBox="0 0 24 24" fill="currentColor" class="w-3.5 h-3.5" aria-hidden="true"><path d="M16 1H4a2 2 0 0 0-2 2v14h2V3h12zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16H8V7h11z" /></svg>
++            </button>
+           </div>
+         </div>
+         </div>
+@@ -476,11 +506,13 @@
+  * 蓝本确有的 18 行打字机动画（`.typing .dot` + `@keyframes blink`，Tailwind 无对应工具类）。
+  * 项 2 的 hover 显现用 Tailwind 默认 core plugin 的 `group` / `group-hover`（本仓首用）。
+  */
+-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
++import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+ import { ArrowRight, ChatDotRound, Operation, Promotion, WarningFilled } from '@element-plus/icons-vue'
+ import { useAiStore, foldDeadline } from '@/stores/ai'
+ import { useWorkspaceStore } from '@/stores/workspace'
+ import { formatCountdown, formatProgressiveTs } from '@/utils/format'
++import { renderMarkdown, renderMermaidSvg } from '@/utils/markdown'
++import { toolSummary } from '@/utils/tool-summaries'
+ import { groupParts, resolveBlockExpanded, type Block } from '@/utils/blocks'
+ import { deriveCopyText, deriveProjections } from '@/utils/parts'
+ import { createPollingController, type PollingController } from '@/utils/polling'
+@@ -782,19 +814,58 @@ watch(
+   }
+ )
+ 
+-/** R-159 #6：新字符渐显 —— 末尾 CH_TAIL 字符包 span.ch（chIn .18s），其余为稳定前缀文本。
+- *  纯展示切分，不写段、不调 deriveProjections（delta 性能锁步零触碰，S0-a 实证见报告）。 */
+-const CH_TAIL = 8
++/**
++ * R-163 T1：正文 Markdown 渲染（markdown-it → DOMPurify → v-html 唯一链路的组件侧）——
++ * 结果 memo（键 = 消息 + 段 + 文本长度 + 流式态）；mermaid 闭合围栏占位 div 在 nextTick
++ * 后异步渲染 SVG 回填（失败保留源码块）。R-159 #6 逐字符渐显（chSplit/CH_TAIL）按决策卡
++ * §三.1 显式退役：其语义被 Markdown 渲染取代。
++ */
++const mdCache = new Map<string, { html: string }>()
++const MD_CACHE_MAX = 128
+ 
+-function chSplit(message: ChatMessage, block: Block): { head: string; tail: string[] } {
+-  if (!message.streaming) {
+-    return { head: textOf(block), tail: [] }
++function markdownHtml(message: ChatMessage, block: Block): string {
++  const part = block.parts[0]
++  const text = part.kind === 'text' ? part.text : ''
++  const key = `${message.id}:${part.seg}:${text.length}:${message.streaming ? 's' : 'f'}`
++  const hit = mdCache.get(key)
++  if (hit) {
++    return hit.html
++  }
++  const { html, mermaid } = renderMarkdown(text, message.streaming)
++  if (mermaid.length > 0) {
++    void nextTick(() => hydrateMermaid(message.id, mermaid))
++  }
++  if (mdCache.size >= MD_CACHE_MAX) {
++    const first = mdCache.keys().next().value
++    if (first !== undefined) {
++      mdCache.delete(first)
++    }
+   }
+-  const text = textOf(block)
+-  if (text.length <= CH_TAIL) {
+-    return { head: '', tail: [...text] }
++  mdCache.set(key, { html })
++  return html
++}
++
++async function hydrateMermaid(messageId: string, blocks: Array<{ index: number; source: string }>): Promise<void> {
++  const bubble = msgWrapRef.value?.querySelector(`[data-testid="msg-bubble-${messageId}"]`)
++  if (!bubble) {
++    return
++  }
++  // 闭合 mermaid 围栏以 `pre > code.language-mermaid` 源码块形态留在净化 HTML 里（查看源码同体）；
++  // 渲染成功 → 整 pre 换 SVG；失败 → 保留源码块（§三.7 兜底）。
++  const slots = Array.from(bubble.querySelectorAll('pre > code.language-mermaid'))
++  for (const item of blocks) {
++    const code = slots[item.index]
++    if (!code) {
++      continue
++    }
++    const svg = await renderMermaidSvg(item.source)
++    if (svg) {
++      const host = document.createElement('div')
++      host.className = 'mermaid-diagram'
++      host.innerHTML = svg
++      code.parentElement?.replaceWith(host)
++    }
+   }
+-  return { head: text.slice(0, -CH_TAIL), tail: [...text.slice(-CH_TAIL)] }
+ }
+ 
+ /** 批4④ A5'：消息 → 渲染块序列（groupParts 纯函数；parts 为响应式数组，帧到达即重算）。
+@@ -803,12 +874,6 @@ function blocksOf(message: ChatMessage): Block[] {
+   return groupParts(message.parts, message.id)
+ }
+ 
+-/** 正文块文本（类型收窄：text 块首成员恒为 text 段）。 */
+-function textOf(block: Block): string {
+-  const part = block.parts[0]
+-  return part.kind === 'text' ? part.text : ''
+-}
+-
+ /**
+  * 块展开态三态判定（D4/D6/D-C6）：requiresAction 组强制展开（手动收起不生效）；
+  * 否则 expandedBlocks[id] 显式值优先（用户手动展开永不自动收起 / 手动收起不被自动打开）；
+@@ -910,16 +975,57 @@ function scrollBottom(force = false): void {
+  */
+ 
+ /**
+- * R-157 #2：编辑 = 「改完从该条重跑」——回填该条正文并记住锚点；发送时（send）截断
++ * R-157 #2 → R-163 T4：编辑 = 「改完从该条重跑」——回填该条正文并记住锚点；发送时（send）截断
+  * 该条之后的消息、以输入框新文本重发。仅用户消息可编辑（模板 v-if role 过滤）。
++ * T4：输入框**非空白**（非全空白字符）时先弹确认防覆盖（window.confirm，spec 桩断言）。
+  */
+ const editingMessageId = ref<string | null>(null)
+ 
+ function editMessage(m: ChatMessage): void {
++  if (inputText.value.trim() !== '') {
++    const confirmed = window.confirm('输入框已有内容，继续编辑将覆盖现有输入。是否覆盖？')
++    if (!confirmed) {
++      return
++    }
++  }
+   inputText.value = m.content
+   editingMessageId.value = m.id
+ }
+ 
++/** R-163 T4：「继续」按钮判据 —— error/断流/取消后，最后一条助手消息给出消息级入口。 */
++function showContinue(message: ChatMessage): boolean {
++  const last = ai.messages[ai.messages.length - 1]
++  return message.role === 'assistant'
++    && last === message
++    && (ai.lastRoundOutcome === 'error' || ai.lastRoundOutcome === 'interrupted' || ai.lastRoundOutcome === 'cancelled')
++}
++
++/** 「继续」= 把「继续」当作用户消息直接发送（参考 Kimi）。 */
++function continueRound(): void {
++  void ai.send('继续')
++}
++
++/** R-163 T3：赞踩本地态（选中互斥、可取消）+ 上报（ rating=0=取消，幂等 upsert 在后端）。 */
++const feedbackState = ref<Map<string, 1 | -1>>(new Map())
++
++function feedbackOf(messageId: string): 1 | -1 | 0 {
++  return feedbackState.value.get(messageId) ?? 0
++}
++
++function rateMessage(m: ChatMessage, rating: 1 | -1): void {
++  const next = new Map(feedbackState.value)
++  const current = next.get(m.id)
++  const finalRating = current === rating ? 0 : rating // 选中互斥 + 再点取消
++  if (finalRating === 0) {
++    next.delete(m.id)
++  } else {
++    next.set(m.id, finalRating)
++  }
++  feedbackState.value = next
++  // R-163 收口修 F2：上报携被评价消息正文前 200 字符快照（人工复盘可读摘要）
++  void ai.submitFeedback(m.id, finalRating, m.content.slice(0, 200))
++}
++
+ /**
+  * R-157 #3：打字机光标显示判据 —— 消息流式中且该正文块是末尾块（与呼吸点接力）。 */
+ function showCaret(message: ChatMessage, blockIndex: number): boolean {
+@@ -1311,14 +1417,6 @@ onBeforeUnmount(() => {
+   0%, 55% { opacity: 1; }
+   56%, 100% { opacity: 0; }
+ }
+-/* R-159 #6：新字符渐显（opacity .1→1） */
+-.ch {
+-  animation: chIn 0.18s ease-out;
+-}
+-@keyframes chIn {
+-  from { opacity: 0.1; }
+-  to { opacity: 1; }
+-}
+ /* R-159 #4：完成优雅淡出 300ms（光标 + 「工作中…」同帧） */
+ .fade-out {
+   animation: caretOut 0.3s ease forwards;
+@@ -1326,6 +1424,66 @@ onBeforeUnmount(() => {
+ @keyframes caretOut {
+   to { opacity: 0; }
+ }
++/* R-163 T1：Markdown 正文排版基线（决策卡 §二.3：13.5-14px/1.7、段间距、列表缩进、
++   中性灰代码底；色彩收敛 = 中性灰 + 品牌蓝 + 语义色仅状态）。 */
++.md-body {
++  font-size: 14px;
++  line-height: 1.7;
++  overflow-wrap: anywhere;
++  word-break: break-word;
++}
++.md-body > :first-child { margin-top: 0; }
++.md-body p { margin: 0.45em 0; }
++.md-body h1, .md-body h2, .md-body h3, .md-body h4, .md-body h5, .md-body h6 {
++  margin: 0.8em 0 0.4em;
++  font-weight: 600;
++  line-height: 1.4;
++}
++.md-body h1 { font-size: 17px; }
++.md-body h2 { font-size: 16px; }
++.md-body h3 { font-size: 15px; }
++.md-body h4, .md-body h5, .md-body h6 { font-size: 14px; }
++.md-body ul, .md-body ol { margin: 0.45em 0; padding-left: 1.4em; }
++.md-body li { margin: 0.2em 0; }
++.md-body blockquote {
++  margin: 0.6em 0;
++  padding: 0.2em 0.9em;
++  border-left: 3px solid #dcdfe6;
++  color: #909399;
++}
++.md-body code:not(pre code) {
++  background: #f4f4f5;
++  border-radius: 4px;
++  padding: 0.1em 0.35em;
++  font-size: 13px;
++}
++.md-body pre {
++  margin: 0.6em 0;
++  padding: 0.7em 0.9em;
++  background: #f8f8f9;
++  border: 1px solid #ebeef5;
++  border-radius: 6px;
++  overflow-x: auto;
++  font-size: 13px;
++  line-height: 1.6;
++}
++.md-body pre code { background: transparent; padding: 0; }
++.md-body table { border-collapse: collapse; margin: 0.6em 0; width: 100%; font-size: 13px; }
++.md-body th, .md-body td { border: 1px solid #ebeef5; padding: 0.35em 0.7em; text-align: left; }
++.md-body th { background: #f8f8f9; font-weight: 600; }
++.md-body a { color: #409eff; }
++.md-body hr { border: none; border-top: 1px solid #ebeef5; margin: 0.9em 0; }
++.md-body img { max-width: 100%; }
++.md-body .mermaid-diagram { margin: 0.6em 0; overflow-x: auto; }
++.md-body .mermaid-fallback {
++  margin: 0.6em 0;
++  padding: 0.7em 0.9em;
++  background: #f8f8f9;
++  border: 1px solid #ebeef5;
++  border-radius: 6px;
++  font-size: 13px;
++  white-space: pre-wrap;
++}
+ /* R-161：平滑回底 = CSS scroll-behavior:smooth 类切换（会审 M2：禁 scrollTo({behavior:'smooth'})，
+    浮钮点击时挂上、~600ms 后移除；流式期 pinBottom 恒瞬跳不加本类）。 */
+ .scroll-smooth {
+diff --git a/frontend/src/router/index.ts b/frontend/src/router/index.ts
+index 881c7ce..a5173ec 100644
+--- a/frontend/src/router/index.ts
++++ b/frontend/src/router/index.ts
+@@ -12,7 +12,8 @@ export const ROUTE_NAMES = {
+   exportWizard: 'export-wizard',
+   importWizard: 'import-wizard',
+   definitions: 'definitions',
+-  dataBrowser: 'data-browser'
++  dataBrowser: 'data-browser',
++  aiFeedback: 'ai-feedback'
+ } as const
+ 
+ export type RouteName = (typeof ROUTE_NAMES)[keyof typeof ROUTE_NAMES]
+@@ -49,6 +50,12 @@ const routes: RouteRecordRaw[] = [
+     component: () => import('@/views/DataBrowserView.vue'),
+     meta: { title: '数据浏览', pageId: 'data' }
+   },
++  {
++    path: '/settings/ai-feedback',
++    name: ROUTE_NAMES.aiFeedback,
++    component: () => import('@/views/AiFeedbackView.vue'),
++    meta: { title: 'AI 反馈', pageId: 'settings' }
++  },
+   { path: '/:pathMatch(.*)*', redirect: { name: ROUTE_NAMES.taskCenter } }
+ ]
+ 
+diff --git a/frontend/src/stores/ai.ts b/frontend/src/stores/ai.ts
+index 11389f2..dd52efd 100644
+--- a/frontend/src/stores/ai.ts
++++ b/frontend/src/stores/ai.ts
+@@ -443,6 +443,11 @@ export const useAiStore = defineStore('ai', {
+      * 与 notice 分开，便于面板用不同级别的 Alert 呈现（notice 覆盖更多降级场景）。
+      */
+     streamInterrupted: false,
++    /**
++     * R-163 T4：最近一轮结局（内存态，不进镜像/持久化）——error/断流/取消后最后一条助手消息
++     * 出「继续」入口；新轮发送时复位 'ok'。
++     */
++    lastRoundOutcome: 'ok' as 'ok' | 'error' | 'interrupted' | 'cancelled',
+     /** 最近一次工作区契约事件（面板"工作区已同步"chip 的数据源） */
+     contextSync: null as WorkspaceActionRecord | null,
+     /** 最近一次 ui_event 分发结果（AI 驱动工作区的回执展示） */
+@@ -1037,6 +1042,7 @@ export const useAiStore = defineStore('ai', {
+               // 苞 B 项 3：用户主动停止不报断流（同 send 的守卫；重挂/续收路径同样适用）
+               if (!info.terminal && !this.stopped) {
+                 this.streamInterrupted = true
++                this.lastRoundOutcome = 'interrupted'
+                 this.notice = `连接中断，结果可能不完整（${info.reason ?? '断流'}）。挂起卡保留，可刷新重试。`
+               }
+             }
+@@ -1088,6 +1094,7 @@ export const useAiStore = defineStore('ai', {
+       this.stopped = false
+       this.notice = null
+       this.streamInterrupted = false
++      this.lastRoundOutcome = 'ok' // R-163 T4：新轮复位「继续」入口判据
+       this.busyConflict = null
+       this.poolSaturated = null
+       const controller = new AbortController()
+@@ -1114,6 +1121,7 @@ export const useAiStore = defineStore('ai', {
+           if (!info.terminal && !this.stopped) {
+             // ADR-6：缺 done/error 终帧 = 断流，必须显式提示"结果可能不完整"
+             this.streamInterrupted = true
++            this.lastRoundOutcome = 'interrupted'
+             this.notice = `连接中断，结果可能不完整（${info.reason ?? '未收到完成帧'}）。已生成的内容保留，可重新发送或一键重挂该轮。`
+             if (this.activeForm !== null) {
+               // 红队问题 2：断流是第五个收尾出口 —— 与 done/error/stop/resetSession 对齐，
+@@ -1271,6 +1279,7 @@ export const useAiStore = defineStore('ai', {
+               // 苞 B 项 3：用户主动停止不报断流（同 send 的守卫；重挂/续收路径同样适用）
+               if (!info.terminal && !this.stopped) {
+                 this.streamInterrupted = true
++                this.lastRoundOutcome = 'interrupted'
+                 this.notice = `连接中断，结果可能不完整（重挂未能收到完成帧：${info.reason ?? '断流'}）`
+                 if (this.activeForm !== null) {
+                   // 与红队问题 2 同构：重挂断流同样是收尾出口，不能只置通知而漏收表单态
+@@ -1599,6 +1608,7 @@ export const useAiStore = defineStore('ai', {
+     /** 停止本轮：先断本地连接，再通知后端取消（后端不可达也不影响本地停止）。 */
+     async stop(): Promise<void> {
+       this.stopped = true
++      this.lastRoundOutcome = 'cancelled'
+       try {
+         currentAbort?.abort()
+       } catch {
+@@ -1624,6 +1634,18 @@ export const useAiStore = defineStore('ai', {
+       }
+     },
+ 
++    /** R-163 T3/T5：赞踩上报（本地态在面板；上报失败静默——不打扰主对话流）。携正文快照 excerpt（F2）。 */
++    async submitFeedback(messageId: string, rating: 1 | -1 | 0, excerpt?: string): Promise<void> {
++      if (rating !== 1 && rating !== -1 && rating !== 0) {
++        return
++      }
++      try {
++        await aiApi.feedbackSubmit({ messageId, sessionId: this.sessionId, rating, excerpt })
++      } catch {
++        // 静默：反馈上报失败不打断对话（人工复盘数据，非关键链路）
++      }
++    },
++
+     /**
+      * 新建对话（页签内重置会话）：立即清屏 + 换新 sessionId + 删旧会话的服务端记忆。
+      *
+@@ -1984,6 +2006,7 @@ export const useAiStore = defineStore('ai', {
+             this.activeForm = null
+           }
+           this.notice = `本轮出错（${frame.code}）：${frame.message}`
++          this.lastRoundOutcome = 'error'
+           break
+         }
+         default:
+diff --git a/frontend/src/utils/markdown.ts b/frontend/src/utils/markdown.ts
+new file mode 100644
+index 0000000..fad56d5
+--- /dev/null
++++ b/frontend/src/utils/markdown.ts
+@@ -0,0 +1,274 @@
++/**
++ * R-163 T1：AI 正文唯一渲染链路 —— markdown-it → DOMPurify 白名单净化 → v-html
++ * （决策卡 §三.1/§三.3，XSS 口径变更的安全面仅限本链路；FormRenderer 永不 v-html 不变）。
++ *
++ * - 合规四件套（锁定）：markdown-it@15.0.0 / dompurify@3.4.14 / highlight.js@11.11.1 / mermaid@11.16.1
++ *   （mermaid@11.16.1 deps dompurify ^3.3.3，接受 3.4.14 —— 施工前兼容已核）。
++ * - 白名单（§三.3 实际集合）：标签 p/h1-6/ul/ol/li/table/thead/tbody/tr/th/td/code/pre/
++ *   blockquote/em/strong/del/a/hr/br/img；span 仅 class="hljs-*"、code 仅 class="language-*"（+hljs）；
++ *   mermaid 输出 SVG 走独立 SVG profile 净化。属性仅 a.href（DOMPurify 默认协议过滤）/class/src/alt；
++ *   禁 style / on* 事件 / iframe / script / 表单控件。
++ * - 流式策略（§三.2 + m1）：hljs 高亮 memo（已完成围栏不重解析高亮 = 块级 memo 的落点）；
++ *   未闭合围栏（流式尾块）渲染为纯文本规避闪烁，闭合后二次渲染才高亮/进 mermaid；
++ *   长文 >10k 字符降级（关高亮与 mermaid，结构照渲）；单次渲染超耗时预算（24ms）后续渲染同降级。
++ * - mermaid（§三.7）：securityLevel:'strict' + htmlLabels:false + suppressErrorRendering:true，
++ *   渲染产物 SVG 过 DOMPurify SVG profile；失败（render error/超时 3s）保留源码块。
++ */
++import MarkdownIt from 'markdown-it'
++import DOMPurify from 'dompurify'
++import * as hljsNs from 'highlight.js'
++import type HljsType from 'highlight.js'
++// hljs 库默认主题（决策卡 §二.2：高亮用库默认主题色，不计入 UI 用色收敛）
++import 'highlight.js/styles/github.css'
++
++// vitest/vite 下 default 互operability 兜底：命名空间与 default 两个形态取有 getLanguage 的那个
++const hljs: typeof HljsType = ((hljsNs as unknown as { default?: typeof HljsType }).default ?? hljsNs) as typeof HljsType
++
++/** 长文降级阈值（字符数，决策卡 §三.2「>10k」）。 */
++export const DEGRADE_AT_CHARS = 10_000
++/** 单次渲染耗时预算（ms）——超出即后续渲染降级（m1 耗时预算）。 */
++export const RENDER_BUDGET_MS = 24
++/** mermaid 单次渲染超时（ms），超时按失败兜底（源码块保留）。 */
++const MERMAID_TIMEOUT_MS = 3_000
++
++/** DOMPurify 白名单（§三.3）。span 仅限 class="hljs-*"（下方 hook 收窄）。 */
++const ALLOWED_TAGS = [
++  'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
++  'ul', 'ol', 'li', 'table', 'thead', 'tbody', 'tr', 'th', 'td',
++  'code', 'pre', 'blockquote', 'em', 'strong', 'del', 'a', 'hr', 'br', 'img', 'span'
++]
++const ALLOWED_ATTR = ['class', 'href', 'src', 'alt']
++
++/** 尾块未闭合围栏判据：``` 围栏标记数为奇 ⇒ 流式尾块在围栏内。 */
++export function hasUnclosedFence(text: string): boolean {
++  const matches = text.match(/^```/gm)
++  return matches !== null && matches.length % 2 === 1
++}
++
++/** hljs 高亮 memo：已完成围栏的高亮结果缓存（块级 memo——已完成块不重解析）。 */
++const highlightCache = new Map<string, string>()
++const HIGHLIGHT_CACHE_MAX = 200
++
++function highlightCode(lang: string, code: string): string {
++  const key = `${lang}${code}`
++  const hit = highlightCache.get(key)
++  if (hit !== undefined) {
++    return hit
++  }
++  let out: string
++  try {
++    if (lang && hljs.getLanguage(lang)) {
++      out = hljs.highlight(code, { language: lang }).value
++    } else {
++      out = escapeHtml(code)
++    }
++  } catch {
++    out = escapeHtml(code)
++  }
++  if (highlightCache.size >= HIGHLIGHT_CACHE_MAX) {
++    const first = highlightCache.keys().next().value
++    if (first !== undefined) {
++      highlightCache.delete(first)
++    }
++  }
++  highlightCache.set(key, out)
++  return out
++}
++
++/** 降级开关：长文阈值或耗时预算触发后，后续渲染关高亮/mermaid（结构照渲）。 */
++let degraded = false
++
++export function isDegraded(): boolean {
++  return degraded
++}
++
++/**
++ * markdown-it 实例：`html: true` —— 原生 HTML 由 markdown-it 透传、统一交由下游 DOMPurify
++ * 白名单净化（唯一链路的安全面不在解析层双保险，而在净化层单点收口；复核 F3 更正 stale 注释）。
++ */
++const md = new MarkdownIt({
++  html: true, // 原生 HTML 经 markdown-it 透传，统一由 DOMPurify 白名单净化（唯一链路的本意）
++  linkify: true,
++  breaks: false,
++  highlight: (code, lang) => {
++    // 未闭合尾围栏（流式）：纯文本转义 —— 规避高亮闪烁，闭合后二次渲染才高亮
++    if (tailFenceFingerprint !== null && code === tailFenceFingerprint) {
++      return escapeHtml(code)
++    }
++    return highlightCode(lang, code)
++  }
++})
++
++/** 降级实例：无 highlight（围栏内纯文本转义），markdown 结构照渲。 */
++const mdDegraded = new MarkdownIt({
++  html: true, // 原生 HTML 经 markdown-it 透传，统一由 DOMPurify 白名单净化（唯一链路的本意）
++  linkify: true,
++  breaks: false,
++  highlight: (code) => escapeHtml(code)
++})
++
++/**
++ * 流式尾围栏的高亮抑制（决策卡 §三.2「围栏闭合前纯文本规避闪烁」）：
++ * 渲染前置入"尾围栏内容指纹"，highlight 回调命中该指纹即返回纯文本（不高亮）；
++ * mermaid 尾围栏同理保持源码块，闭合后才进 mermaid 渲染管线。
++ */
++let tailFenceFingerprint: string | null = null
++
++DOMPurify.addHook('afterSanitizeAttributes', (node) => {
++  if (node.tagName === 'SPAN') {
++    const cls = node.getAttribute('class') ?? ''
++    node.setAttribute(
++      'class',
++      cls.split(/\s+/).filter((c) => c.startsWith('hljs-') || c === 'hljs').join(' ')
++    )
++  }
++  if (node.tagName === 'CODE' || node.tagName === 'PRE') {
++    const cls = node.getAttribute('class') ?? ''
++    node.setAttribute(
++      'class',
++      cls.split(/\s+/).filter((c) => c.startsWith('language-') || c.startsWith('hljs')).join(' ')
++    )
++  }
++  if (node.tagName === 'DIV' && node.getAttribute('class') === '') {
++    node.removeAttribute('class')
++  }
++})
++
++function sanitizeHtml(html: string): string {
++  return DOMPurify.sanitize(html, {
++    ALLOWED_TAGS,
++    ALLOWED_ATTR,
++    ALLOW_DATA_ATTR: false
++  })
++}
++
++/** mermaid 渲染产物 SVG 净化（SVG profile，§三.7）。 */
++export function sanitizeSvg(html: string): string {
++  return DOMPurify.sanitize(html, { USE_PROFILES: { svg: true, svgFilters: true } })
++}
++
++/** 渲染结果：净化后 HTML + 待渲染 mermaid 源码块（闭合围栏才出现）。 */
++export interface MarkdownRender {
++  html: string
++  /** 闭合 mermaid 围栏（降流/降级期为空数组，保持源码块）。 */
++  mermaid: Array<{ index: number; source: string }>
++}
++
++const mermaidIndexRe = /<pre><code class="language-mermaid">([\s\S]*?)<\/code><\/pre>/g
++
++/**
++ * AI 正文渲染唯一入口。`streaming` = 该正文块仍处流式（未闭合围栏按纯文本、不进 mermaid）。
++ * 结果已 DOMPurify 净化，调用方直接 v-html。
++ * 闭合 mermaid 围栏：**保留** `language-mermaid` 源码块（= 失败兜底与「查看源码」同体），
++ * 同时在返回值的 mermaid 列表登记源码——组件异步渲染 SVG 成功后替换该源码块。
++ */
++export function renderMarkdown(text: string, streaming: boolean): MarkdownRender {
++  const fenceOpen = streaming && hasUnclosedFence(text)
++  // 指纹 = 尾围栏 info 行之后的代码体（与 markdown-it 传给 highlight 的 code 逐字相等）
++  let tailSource: string | null = null
++  if (fenceOpen) {
++    const tailRaw = text.slice(text.lastIndexOf('```') + 3)
++    const nl = tailRaw.indexOf('\n')
++    tailSource = nl >= 0 ? tailRaw.slice(nl + 1) : ''
++  }
++  tailFenceFingerprint = tailSource
++  try {
++    const useDegraded = degraded || text.length > DEGRADE_AT_CHARS
++    const started = performance.now()
++    let html = (useDegraded ? mdDegraded : md).render(text)
++    const mermaid: Array<{ index: number; source: string }> = []
++    if (!useDegraded && !streaming) {
++      // 登记闭合 mermaid 围栏（按出现序）；源码块本身留在净化后 HTML 里
++      let match: RegExpExecArray | null
++      let index = 0
++      mermaidIndexRe.lastIndex = 0
++      while ((match = mermaidIndexRe.exec(html)) !== null) {
++        mermaid.push({ index: index++, source: unescapeHtml(match[1]) })
++      }
++    }
++    if (fenceOpen) {
++      // 未闭合尾围栏：剥掉尾块 language-* class（纯文本口径，闭合后二次渲染才恢复高亮）
++      const at = html.lastIndexOf('class="language-')
++      if (at >= 0) {
++        html = html.slice(0, at) + html.slice(at).replace(/class="language-[^"]*"/, 'class=""')
++      }
++    }
++    if (performance.now() - started > RENDER_BUDGET_MS) {
++      degraded = true
++    }
++    return { html: sanitizeHtml(html), mermaid }
++  } finally {
++    tailFenceFingerprint = null
++  }
++}
++
++function escapeHtml(s: string): string {
++  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
++}
++
++function unescapeHtml(s: string): string {
++  return s
++    .replace(/&lt;/g, '<')
++    .replace(/&gt;/g, '>')
++    .replace(/&quot;/g, '"')
++    .replace(/&#39;/g, "'")
++    .replace(/&amp;/g, '&')
++}
++
++/** mermaid 模块惰性初始化（securityLevel:'strict' / htmlLabels:false / suppressErrorRendering:true）。 */
++let mermaidPromise: Promise<typeof import('mermaid')> | null = null
++
++function loadMermaid(): Promise<typeof import('mermaid')> {
++  mermaidPromise ??= import('mermaid').then((mod) => {
++    mod.default.initialize({
++      startOnLoad: false,
++      securityLevel: 'strict',
++      htmlLabels: false,
++      suppressErrorRendering: true
++    })
++    return mod
++  })
++  return mermaidPromise
++}
++
++/** mermaid 渲染缓存（源码指纹 → 净化后 SVG），失败不缓存。 */
++const mermaidCache = new Map<string, string>()
++
++/**
++ * 渲染单个 mermaid 图源（围栏闭合后一次性调用；render error/超时 ⇒ 返回 null，
++ * 调用方保留源码块——§三.7 失败兜底）。返回净化后 SVG 字符串。
++ */
++export async function renderMermaidSvg(source: string): Promise<string | null> {
++  const key = source
++  const hit = mermaidCache.get(key)
++  if (hit !== undefined) {
++    return hit
++  }
++  try {
++    const mod = await loadMermaid()
++    const id = `mmd-${Math.abs(hashCode(key)).toString(36)}`
++    const timeout = new Promise<never>((_resolve, reject) =>
++      setTimeout(() => reject(new Error('mermaid timeout')), MERMAID_TIMEOUT_MS)
++    )
++    const result = (await Promise.race([mod.default.render(id, source), timeout])) as { svg: string }
++    const svg = sanitizeSvg(result.svg)
++    if (mermaidCache.size >= 20) {
++      const first = mermaidCache.keys().next().value
++      if (first !== undefined) {
++        mermaidCache.delete(first)
++      }
++    }
++    mermaidCache.set(key, svg)
++    return svg
++  } catch {
++    return null
++  }
++}
++
++function hashCode(s: string): number {
++  let h = 0
++  for (let i = 0; i < s.length; i++) {
++    h = (h * 31 + s.charCodeAt(i)) | 0
++  }
++  return h
++}
+diff --git a/frontend/src/utils/tool-summaries.ts b/frontend/src/utils/tool-summaries.ts
+new file mode 100644
+index 0000000..7719305
+--- /dev/null
++++ b/frontend/src/utils/tool-summaries.ts
+@@ -0,0 +1,171 @@
++/**
++ * R-163 T0：工具卡一行摘要的**静态映射表**（决策卡 §三.6）——
++ * 工具名 → 中文动宾模板（args 确定性填充，前端静态生成，禁模型写文案）；
++ * 失败/未知兜底 = 工具名 + 状态词。全集来源（逐个核名，非凭猜）：
++ * - 后端 @Tool（AiTools.java）：list_config_defs / get_config_def / list_tasks /
++ *   get_workspace_state / check_job_status / get_row_count / create_task /
++ *   start_export / start_precheck / start_import / start_publish / download_export_files /
++ *   navigate_to / open_export_file_editor / generative_form
++ * - 前端工具（utils/frontend-tools.ts 执行器）：navigate_to（别名 open_page / restore_task /
++ *   goto_step）、open_export_file_editor、download_export_files、generative_form、
++ *   select_definitions（别名 select_defs）、set_condition（别名 set_conditions）、
++ *   confirm_step、set_import_mode、run_job、cancel_job、download、
++ *   refresh_defs / refresh_data / refresh_tasks
++ */
++
++import type { ToolPart, ToolRunStatus } from '@/types/ai'
++
++/** 状态词表（9 态，与 AiPanel toolStatusLabel 同口径的简短版，供兜底行）。 */
++const STATUS_WORDS: Record<ToolRunStatus, string> = {
++  pending: '等待确认',
++  running: '调用中',
++  succeeded: '已完成',
++  failed: '失败',
++  rejected: '已拒绝',
++  blocked: '超出范围',
++  expired: '已失效',
++  cancelled: '已取消',
++  unknown: '结局未知'
++}
++
++type ToolArgs = Record<string, unknown>
++
++function str(args: ToolArgs, key: string): string {
++  const value = args[key]
++  return typeof value === 'string' && value ? value : ''
++}
++
++function num(args: ToolArgs, key: string): string {
++  const value = args[key]
++  return typeof value === 'number' ? String(value) : typeof value === 'string' && value ? value : ''
++}
++
++function taskTypeLabel(args: ToolArgs): string {
++  const type = str(args, 'type').toUpperCase()
++  return type === 'IMPORT' ? '导入' : type === 'EXPORT' ? '导出' : type
++}
++
++function toolArgsOf(part: ToolPart): ToolArgs {
++  if (!part.args) {
++    return {}
++  }
++  try {
++    const parsed: unknown = JSON.parse(part.args)
++    return parsed && typeof parsed === 'object' ? (parsed as ToolArgs) : {}
++  } catch {
++    return {}
++  }
++}
++
++/**
++ * 工具名 → 摘要模板。返回 null = 无静态映射（走兜底）。
++ * 每个模板一行自然语言，参数缺失时省略该片段（不臆造）。
++ */
++function summaryFor(name: string, args: ToolArgs): string | null {
++  const taskId = num(args, 'taskId')
++  const taskSuffix = taskId ? `（任务 #${taskId}）` : ''
++  switch (name) {
++    case 'list_config_defs': {
++      const level = str(args, 'level')
++      return level ? `列出配置定义（${level} 层）` : '列出全部配置定义'
++    }
++    case 'get_config_def': {
++      const code = str(args, 'code')
++      return code ? `读取配置定义 ${code}` : '读取配置定义详情'
++    }
++    case 'list_tasks':
++      return '列出最近的任务'
++    case 'get_workspace_state':
++      return '读取工作区状态快照'
++    case 'check_job_status': {
++      const jobId = num(args, 'jobId')
++      return jobId ? `查询作业 #${jobId} 的状态与进度` : '查询作业状态与进度'
++    }
++    case 'get_row_count': {
++      const defCode = str(args, 'defCode')
++      const scope = str(args, 'scopeType')
++      return `预估${defCode ? ` ${defCode} ` : ' '}数据行数${scope ? `（${scope}）` : ''}`
++    }
++    case 'create_task': {
++      const label = taskTypeLabel(args)
++      const title = str(args, 'title')
++      return `创建${label || ''}任务${title ? `「${title}」` : ''}`
++    }
++    case 'start_export':
++      return `启动导出作业${taskSuffix}`
++    case 'start_precheck':
++      return `启动预检查作业${taskSuffix}`
++    case 'start_import':
++      return `启动导入作业${taskSuffix}`
++    case 'start_publish':
++      return `启动发布作业${taskSuffix}`
++    case 'navigate_to':
++    case 'open_page': {
++      const page = str(args, 'page')
++      return page ? `跳转到页面 ${page}` : '跳转页面'
++    }
++    case 'restore_task':
++      return taskId ? `恢复任务 #${taskId}` : '恢复任务'
++    case 'goto_step': {
++      const step = str(args, 'step')
++      return step ? `跳转到步骤 ${step}` : '跳转向导步骤'
++    }
++    case 'open_export_file_editor':
++      return '打开导出文件在线编辑器'
++    case 'download_export_files': {
++      const codes = args['defCodes']
++      const count = Array.isArray(codes) ? codes.length : 0
++      return `下载导出文件${count > 0 ? `（${count} 个配置项）` : ''}`
++    }
++    case 'download': {
++      const filename = str(args, 'filename')
++      return filename ? `下载文件 ${filename}` : '下载文件'
++    }
++    case 'generative_form':
++      return '生成式表单（待填写）'
++    case 'select_definitions':
++    case 'select_defs': {
++      const codes = args['codes'] ?? args['defCodes']
++      const count = Array.isArray(codes) ? codes.length : 0
++      return `选择配置项${count > 0 ? `（${count} 项）` : ''}`
++    }
++    case 'set_condition':
++    case 'set_conditions':
++      return '设置查询条件'
++    case 'set_import_mode': {
++      const mode = str(args, 'mode')
++      return mode ? `设置导入方式（${mode}）` : '设置导入方式'
++    }
++    case 'confirm_step': {
++      const step = str(args, 'step')
++      return step ? `确认步骤 ${step}` : '确认当前步骤'
++    }
++    case 'run_job':
++      return taskId ? `启动作业（任务 #${taskId}）` : '启动作业'
++    case 'cancel_job': {
++      const jobId = num(args, 'jobId')
++      return jobId ? `取消作业 #${jobId}` : '取消作业'
++    }
++    case 'refresh_defs':
++      return '刷新配置定义列表'
++    case 'refresh_data':
++      return '刷新配置数据'
++    case 'refresh_tasks':
++      return '刷新任务列表'
++    default:
++      return null
++  }
++}
++
++/**
++ * 工具卡折叠态一行摘要（T0 交付）。已决失败/未知态也走具体模板（args 仍是事实），
++ * 无映射工具与解析失败态兜底「工具名 + 状态词」。
++ */
++export function toolSummary(part: ToolPart): string {
++  const args = toolArgsOf(part)
++  const mapped = summaryFor(part.name, args)
++  if (mapped) {
++    return mapped
++  }
++  return `${part.name} · ${STATUS_WORDS[part.status] ?? part.status}`
++}
+diff --git a/frontend/src/views/AiFeedbackView.vue b/frontend/src/views/AiFeedbackView.vue
+new file mode 100644
+index 0000000..1564870
+--- /dev/null
++++ b/frontend/src/views/AiFeedbackView.vue
+@@ -0,0 +1,66 @@
++<script setup lang="ts">
++/**
++ * R-163 T5：设置页「AI 反馈」查看界面（闭环四要素 ③）——
++ * 时间 / 消息摘要（messageId+sessionId）/ rating（赞/踩）/ reason，仅当前用户（单用户应用全表）。
++ * 数据消费方 = 人工复盘，无自动回流；列表只读。
++ */
++import { onMounted, ref } from 'vue'
++import { aiApi, type AiFeedbackEntry } from '@/api/ai'
++
++const items = ref<AiFeedbackEntry[]>([])
++const loading = ref(true)
++const error = ref<string | null>(null)
++
++onMounted(async () => {
++  try {
++    items.value = await aiApi.feedbackList()
++  } catch (e) {
++    error.value = e instanceof Error ? e.message : '加载失败'
++  } finally {
++    loading.value = false
++  }
++})
++
++function ratingLabel(rating: number): { text: string; cls: string } {
++  return rating === 1
++    ? { text: '赞', cls: 'text-[#409eff]' }
++    : { text: '踩', cls: 'text-[#f56c6c]' }
++}
++
++/**
++ * R-163 收口修 F2：消息摘要 = 正文快照（excerpt，人工复盘可读）；旧数据/未携时回退 ID 片段。
++ */
++function summaryOf(item: AiFeedbackEntry): string {
++  return item.excerpt && item.excerpt.trim() !== ''
++    ? item.excerpt
++    : `会话 ${item.sessionId.slice(0, 8)} · 消息 ${item.messageId.slice(0, 8)}`
++}
++</script>
++
++<template>
++  <div class="p-4 max-w-3xl" data-testid="ai-feedback-view">
++    <h3 class="text-base font-semibold mb-3">AI 反馈</h3>
++    <p class="text-xs text-[#909399] mb-3">赞踩上报记录（最近 100 条，仅当前用户可见），用于人工复盘。</p>
++    <div v-if="loading" class="text-sm text-[#909399]">加载中…</div>
++    <el-alert v-else-if="error" type="error" :closable="false" :title="`加载失败：${error}`" />
++    <el-empty v-else-if="items.length === 0" description="暂无反馈记录" />
++    <table v-else class="w-full text-[13px] border-collapse" data-testid="ai-feedback-table">
++      <thead>
++        <tr class="text-left text-[#909399]">
++          <th class="py-1.5 pr-3 font-normal">时间</th>
++          <th class="py-1.5 pr-3 font-normal">消息摘要</th>
++          <th class="py-1.5 pr-3 font-normal">评价</th>
++          <th class="py-1.5 font-normal">原因</th>
++        </tr>
++      </thead>
++      <tbody>
++        <tr v-for="item in items" :key="item.messageId" class="border-t border-solid border-[#ebeef5]" data-testid="ai-feedback-row">
++          <td class="py-1.5 pr-3 text-[#606266] whitespace-nowrap">{{ item.updatedAt?.replace('T', ' ').slice(0, 19) }}</td>
++          <td class="py-1.5 pr-3 text-[#606266] max-w-[280px] truncate" :title="summaryOf(item)">{{ summaryOf(item) }}</td>
++          <td class="py-1.5 pr-3" :class="ratingLabel(item.rating).cls">{{ ratingLabel(item.rating).text }}</td>
++          <td class="py-1.5 text-[#909399]">{{ item.reason ?? '—' }}</td>
++        </tr>
++      </tbody>
++    </table>
++  </div>
++</template>
+diff --git a/frontend/tests/ai-panel-parts-render.spec.ts b/frontend/tests/ai-panel-parts-render.spec.ts
+index 6d3ce2b..31d6501 100644
+--- a/frontend/tests/ai-panel-parts-render.spec.ts
++++ b/frontend/tests/ai-panel-parts-render.spec.ts
+@@ -22,7 +22,8 @@ const api = vi.hoisted(() => ({
+   runsCurrent: vi.fn(),
+   frontendToolResult: vi.fn(),
+   reattachRun: vi.fn(),
+-  chat: vi.fn()
++  chat: vi.fn(),
++  feedbackSubmit: vi.fn()
+ }))
+ 
+ /** R-158 #12：ResizeObserver 测试桩 —— jsdom 无 RO；用模块级开关控制「溢出/不溢出」回调。 */
+@@ -58,6 +59,8 @@ beforeEach(() => {
+   api.history.mockReset()
+   api.runsCurrent.mockReset()
+   api.reattachRun.mockReset()
++  api.feedbackSubmit.mockReset()
++  api.feedbackSubmit.mockResolvedValue({ saved: true, cancelled: false })
+   api.health.mockResolvedValue({ available: true, code: 'OK', model: 'm', baseUrl: 'b', memoryBackend: 'redis', sessionTtl: '1h', confirmTimeoutSeconds: 120, frontendToolTimeoutSeconds: 120, suspendPoolSize: 4, activeSuspendGates: 0, heldSessions: 0, sessionLockRenewals: 0, resumeOnStartup: false, instanceId: 'i', checkedAt: '2026-01-01T00:00:00Z' })
+ })
+ 
+@@ -147,8 +150,12 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
+     expect(cards).toHaveLength(1)
+     expect(cards[0]?.attributes('data-testid')).toBe('pending-card-c1')
+ 
+-    // A1'②：卡头统一为段单一来源 —— 旧结构（工具卡 + 投影挂起卡并列）工具名出现两次，合并后恰一次
+-    expect(html.split('启动导出作业').length - 1).toBe(1)
++    // A1'②：卡头统一为段单一来源 —— 旧结构（工具卡 + 投影挂起卡并列）工具名出现两次，合并后恰一次。
++    // R-163 T2 口径：卡头另有摘要行（「启动导出作业（任务 #1）」），工具名仍只标签一次
++    // （按标签边界计数，摘要行的含名摘要不混入）。
++    expect(html.split('>启动导出作业<').length - 1).toBe(1)
++    // R-163 T2 摘要行入卡头（T0 静态映射）
++    expect(wrapper.find('[data-testid="tool-summary-c1"]').exists()).toBe(true)
+     // 确认子块（CONFIRM pending）在持 testid 的同一张卡内
+     expect(cards[0]!.html()).toContain('确认执行')
+ 
+@@ -223,7 +230,10 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
+         { toolCallId: 'f1', name: 'probe.tool', kind: 'FRONTEND', args: {}, rawArgs: '{}', timeoutSeconds: 120, status: 'pending' }
+       )
+     ])
+-    expect(wrapper.html().split('probe.tool').length - 1).toBe(1)
++    // R-163 T2 口径：无映射工具的摘要兜底 = 「工具名 · 状态」，工具名标签本体仍恰一次
++    // （按标签边界计数，摘要行兜底文本不混入）
++    expect(wrapper.html().split('>probe.tool<').length - 1).toBe(1)
++    expect(wrapper.find('[data-testid="tool-summary-f1"]').text()).toContain('probe.tool')
+     wrapper.unmount()
+   })
+ 
+@@ -849,15 +859,14 @@ describe('R-157：操作行外置 + role 过滤 + 编辑重跑 + 发送滚底 +
+     wrapper.unmount()
+   })
+ 
+-  it('#5：头像去文字 —— AI 四角星 / 用户人形 SVG，头像内零文字', async () => {
++  it('#5：双侧去头像（R-163 T3 口径改写）—— 消息行无头像列、头像 testid 零命中', async () => {
+     const [user, reply] = pair()
+     const wrapper = await mountPanel([user, reply])
+-    for (const id of ['u-1', 'a-1']) {
+-      const avatar = wrapper.find(`[data-testid="msg-avatar-${id}"]`)
+-      expect(avatar.exists()).toBe(true)
+-      expect(avatar.find('svg').exists()).toBe(true)
+-      expect(avatar.text()).toBe('')
+-    }
++    // R-157 #5 原判据（头像存在 + 零文字）随 R-163 T3「双侧去头像」退役：断言头像整列移除
++    expect(wrapper.find('[data-testid^="msg-avatar-"]').exists()).toBe(false)
++    // 消息行内容直出：用户卡片与助手全文仍在
++    expect(wrapper.find('[data-testid="msg-bubble-u-1"]').exists()).toBe(true)
++    expect(wrapper.find('[data-testid="msg-bubble-a-1"]').exists()).toBe(true)
+     wrapper.unmount()
+   })
+ })
+@@ -1009,16 +1018,19 @@ describe('R-158：HITL 只读回执 / CollapsibleText / 复制换行', () => {
+  * 完成 300ms 淡出换入 / 工具期光标收起归位（S0-b 时序证据）/ span.ch 渐显包裹。
+  */
+ describe('R-159：流式回复体验六项', () => {
+-  it('#1：B1 光标在流式正文末尾（class caret，随 ch spans 之后）', async () => {
++  it('#1：B1 光标在流式正文末尾（R-163 T1 口径：caret 为 md-body 之后紧邻兄弟）', async () => {
+     const speaking = buildMessage([{ kind: 'text', seg: 0, text: '正在输出的一段文字', streaming: true }], null, true)
+     speaking.id = 'a-b1'
+     const wrapper = await mountPanel([speaking])
+     const caret = wrapper.find('[data-testid="stream-caret"]')
+     expect(caret.exists()).toBe(true)
+     expect(caret.classes()).toContain('caret')
+-    // 光标是正文块最后一个子元素（B1 粗块随文尾）
++    // R-163 T1：正文走 markdown-it → DOMPurify → v-html（md-body），光标移出正文 div，
++    // 为其后紧邻兄弟（B1 粗块随文尾的视觉语义不变）
+     const bubble = wrapper.find('[data-testid="msg-bubble-a-b1"]')
+-    expect(bubble.find('.whitespace-pre-wrap').element.lastElementChild!.className).toContain('caret')
++    const mdBody = bubble.find('.md-body')
++    expect(mdBody.exists()).toBe(true)
++    expect(caret.element.previousElementSibling).toBe(mdBody.element)
+     wrapper.unmount()
+   })
+ 
+@@ -1101,20 +1113,21 @@ describe('R-159：流式回复体验六项', () => {
+     wrapper.unmount()
+   })
+ 
+-  it('#6：新字符渐显 —— 流式正文末尾 8 字符包 span.ch，前缀为稳定文本', async () => {
++  it('#6：R-163 T1 口径改写 —— span.ch 逐字符渐显退役（语义被 Markdown 渲染取代），正文走 md-body 唯一链路', async () => {
+     const msg = buildMessage([{ kind: 'text', seg: 0, text: 'abcdefghijkl', streaming: true }], null, true)
+     msg.id = 'a-ch'
+     const wrapper = await mountPanel([msg])
+     const bubble = wrapper.find('[data-testid="msg-bubble-a-ch"]')
+-    const chSpans = bubble.findAll('span.ch')
+-    expect(chSpans).toHaveLength(8)
+-    expect(chSpans.map((s) => s.text()).join('')).toBe('efghijkl')
+-    expect(bubble.text()).toContain('abcd')
+-    // 终态消息零 ch 包裹（纯文本一次成型）
++    // chSplit/CH_TAIL 已退役：零 span.ch 包裹，全文经 markdown-it → DOMPurify 出 md-body
++    expect(bubble.findAll('span.ch')).toHaveLength(0)
++    expect(bubble.find('.md-body').exists()).toBe(true)
++    expect(bubble.find('.md-body').text()).toContain('abcdefghijkl')
++    // 终态消息同链路（纯文本经 markdown 渲染一次成型，无 ch 包裹）
+     const done = buildMessage([{ kind: 'text', seg: 0, text: 'abcdefghijkl', streaming: false }], null, false)
+     done.id = 'a-done'
+     const wrapper2 = await mountPanel([done])
+     expect(wrapper2.find('[data-testid="msg-bubble-a-done"]').findAll('span.ch')).toHaveLength(0)
++    expect(wrapper2.find('[data-testid="msg-bubble-a-done"]').find('.md-body').exists()).toBe(true)
+     wrapper.unmount()
+     wrapper2.unmount()
+   })
+@@ -1482,3 +1495,243 @@ describe('R-162：元信息行紧邻布局 + 渐进时间格式', () => {
+     expect(typeof formatProgressiveTs(noon)).toBe('string') // now 缺省
+   })
+ })
++
++
++/**
++ * R-163（AI 对话体验专项，K2.8 施工）：T1 Markdown 唯一链路 + XSS 白名单 + 流式围栏降级 +
++ * mermaid 占位 / T0+T2 工具摘要映射 / T3 赞踩本地态 / T4 编辑确认 + 继续按钮。
++ */
++describe('R-163：Markdown 正文链路 / 白名单 / 工具摘要 / 赞踩 / 编辑确认 / 继续', () => {
++  /** 可写 el-input 桩（编辑回填断言要观测 v-model 值）。 */
++  const stubsWithInput = {
++    ...stubs,
++    'el-input': {
++      props: ['modelValue'],
++      template: '<textarea class="stub-input" :value="modelValue" @input="$emit(\'update:modelValue\', $event.target.value)" />'
++    }
++  }
++
++  it('T1：正文 Markdown 渲染 —— 加粗/列表/表格经 markdown-it 出真实标签（md-body v-html）', async () => {
++    const msg = buildMessage([
++      { kind: 'text', seg: 0, text: '**加粗** 与 `code`\n\n- 项一\n- 项二\n\n| A | B |\n| - | - |\n| 1 | 2 |', streaming: false }
++    ])
++    msg.id = 'a-md'
++    const wrapper = await mountPanel([msg])
++    const md = wrapper.find('[data-testid="msg-bubble-a-md"] .md-body')
++    expect(md.exists()).toBe(true)
++    expect(md.html()).toContain('<strong>加粗</strong>')
++    expect(md.findAll('li')).toHaveLength(2)
++    expect(md.findAll('td')).toHaveLength(2)
++    wrapper.unmount()
++  })
++
++  it('T1 白名单：script/onerror/iframe 净化零命中；a.href 保留但 javascript: 协议被剥', async () => {
++    const { renderMarkdown } = await import('@/utils/markdown')
++    const { html } = renderMarkdown(
++      '[正常](https://example.com) [恶意](javascript:alert(1))\n\n<script>alert(1)</script><img src="x" onerror="alert(1)"><iframe src="https://evil"></iframe>',
++      false
++    )
++    expect(html).not.toContain('<script')
++    expect(html).not.toContain('onerror')
++    expect(html).not.toContain('iframe')
++    expect(html).toContain('href="https://example.com"')
++    expect(html).not.toContain('href="javascript:') // markdown-it validateLink 拒链（残留仅为惰性文本）
++  })
++
++  it('T1 流式围栏：未闭合尾围栏渲染纯文本（无高亮 class），闭合后二次渲染才 language-*', async () => {
++    const { renderMarkdown } = await import('@/utils/markdown')
++    const open = renderMarkdown('```js\nconst a = 1\nconst b', true)
++    expect(open.html).not.toContain('language-js')
++    expect(open.html).toContain('const b')
++    const closed = renderMarkdown('```js\nconst a = 1\n```\n\n完成', false)
++    expect(closed.html).toContain('language-js')
++    expect(closed.html).toContain('hljs')
++  })
++
++  it('T1 mermaid：闭合围栏抽占位 div（异步渲染回填），流式未闭合保持源码块', async () => {
++    const { renderMarkdown } = await import('@/utils/markdown')
++    const stream = renderMarkdown('```mermaid\ngraph TD; A-->B', true)
++    expect(stream.mermaid).toHaveLength(0)
++    expect(stream.html).toContain('graph TD')
++    const closed = renderMarkdown('```mermaid\ngraph TD; A-->B;\n```\n\n说明文字', false)
++    expect(closed.mermaid).toHaveLength(1)
++    expect(closed.mermaid[0].source).toContain('graph TD')
++    expect(closed.html).toContain('language-mermaid') // 闭合后保留源码块（渲染回填/失败兜底同体）
++  })
++
++  it('T1 降级：>10k 长文结构照渲但无高亮/mermaid（DEGRADE_AT_CHARS 阈值）', async () => {
++    const { renderMarkdown, DEGRADE_AT_CHARS } = await import('@/utils/markdown')
++    expect(DEGRADE_AT_CHARS).toBe(10_000)
++    const long = `# 标题\n\n${'x'.repeat(DEGRADE_AT_CHARS + 100)}`
++    const { html } = renderMarkdown(long, false)
++    expect(html).toContain('<h1>') // 结构照渲
++    expect(html).not.toContain('language-') // 高亮降级（阈值实例无 highlight）
++    expect(html).not.toContain('hljs')
++  })
++
++  it('T0/T2：工具摘要映射 —— start_export 按 args 出「启动导出作业（任务 #7）」，未知工具兜底 名+状态', async () => {
++    const { toolSummary } = await import('@/utils/tool-summaries')
++    const mk = (name: string, args: string, status: ToolPart['status']): ToolPart =>
++      ({ kind: 'tool', seg: 0, toolCallId: 't1', name, kind2: 'BACKEND', status, args, requiresAction: false }) as ToolPart
++    expect(toolSummary(mk('start_export', '{"taskId":7}', 'running'))).toBe('启动导出作业（任务 #7）')
++    expect(toolSummary(mk('create_task', '{"type":"EXPORT","title":"月报"}', 'running'))).toBe('创建导出任务「月报」')
++    expect(toolSummary(mk('mystery_tool', '{}', 'failed'))).toBe('mystery_tool · 失败')
++    const wrapper = await mountPanel([
++      buildMessage([{ kind: 'tool', seg: 0, toolCallId: 's1', name: 'start_export', kind2: 'CONFIRM', status: 'pending', args: '{"taskId":7}', timeoutSeconds: 120, requiresAction: true }])
++    ])
++    expect(wrapper.find('[data-testid="tool-summary-s1"]').text()).toBe('启动导出作业（任务 #7）')
++    wrapper.unmount()
++  })
++
++  it('T2：9 态工具卡状态 tag 全出（等待确认/调用中/已成功/执行失败/已拒绝/超出当前范围/会话已失效/已取消/结局未知）', async () => {
++    const parts: ToolPart[] = [
++      { kind: 'tool', seg: 0, toolCallId: 't1', name: 'probe.tool', kind2: 'BACKEND', status: 'pending', args: '{}', requiresAction: true },
++      { kind: 'tool', seg: 1, toolCallId: 't2', name: 'probe.tool', kind2: 'BACKEND', status: 'running', args: '{}', requiresAction: false },
++      { kind: 'tool', seg: 2, toolCallId: 't3', name: 'probe.tool', kind2: 'BACKEND', status: 'succeeded', args: '{}', requiresAction: false },
++      { kind: 'tool', seg: 3, toolCallId: 't4', name: 'probe.tool', kind2: 'BACKEND', status: 'failed', args: '{}', requiresAction: false },
++      { kind: 'tool', seg: 4, toolCallId: 't5', name: 'probe.tool', kind2: 'BACKEND', status: 'rejected', args: '{}', requiresAction: false },
++      { kind: 'tool', seg: 5, toolCallId: 't6', name: 'probe.tool', kind2: 'BACKEND', status: 'blocked', args: '{}', requiresAction: false },
++      { kind: 'tool', seg: 6, toolCallId: 't7', name: 'probe.tool', kind2: 'BACKEND', status: 'expired', args: '{}', requiresAction: false },
++      { kind: 'tool', seg: 7, toolCallId: 't8', name: 'probe.tool', kind2: 'BACKEND', status: 'cancelled', args: '{}', requiresAction: false },
++      { kind: 'tool', seg: 8, toolCallId: 't9', name: 'probe.tool', kind2: 'BACKEND', status: 'unknown', args: '{}', requiresAction: false }
++    ]
++    const wrapper = await mountPanel([buildMessage(parts)])
++    for (const label of ['等待确认', '调用中', '已成功', '执行失败', '已拒绝', '超出当前范围', '会话已失效', '已取消', '结局未知']) {
++      expect(wrapper.text()).toContain(label)
++    }
++    // 展开体 input/output 标签（T2 裸 JSON 墙消除的结构性锁）
++    await wrapper.find('[data-testid="block-toggle-a-1:t3"]').trigger('click')
++    expect(wrapper.find('[data-testid="block-body-a-1:t3"]').text()).toContain('输入')
++    wrapper.unmount()
++  })
++
++  it('T3：赞踩本地态 —— 选中互斥、再点取消、上报 rating 序列（1 → -1 → 0）', async () => {
++    const msg = buildMessage([{ kind: 'text', seg: 0, text: '回答', streaming: false }])
++    msg.id = 'a-fb'
++    const wrapper = await mountPanel([msg])
++    const up = wrapper.find('[data-testid="feedback-up-a-fb"]')
++    const down = wrapper.find('[data-testid="feedback-down-a-fb"]')
++    expect(up.exists()).toBe(true)
++    expect(down.exists()).toBe(true)
++    await up.trigger('click')
++    expect(up.attributes('aria-pressed')).toBe('true')
++    expect(api.feedbackSubmit).toHaveBeenLastCalledWith(expect.objectContaining({ messageId: 'a-fb', rating: 1 }))
++    // 互斥：赞后点踩 ⇒ 踩选中、赞取消（rating -1）
++    await down.trigger('click')
++    expect(down.attributes('aria-pressed')).toBe('true')
++    expect(up.attributes('aria-pressed')).toBe('false')
++    expect(api.feedbackSubmit).toHaveBeenLastCalledWith(expect.objectContaining({ rating: -1 }))
++    // 再点踩 ⇒ 取消（rating 0）
++    await down.trigger('click')
++    expect(down.attributes('aria-pressed')).toBe('false')
++    expect(api.feedbackSubmit).toHaveBeenLastCalledWith(expect.objectContaining({ rating: 0 }))
++    wrapper.unmount()
++  })
++
++  it('T3：操作行 28×28 热区 + gap≥8（w-7 h-7 / gap-2）', async () => {
++    const msg = buildMessage([{ kind: 'text', seg: 0, text: '回答', streaming: false }])
++    msg.id = 'a-hit'
++    const wrapper = await mountPanel([msg])
++    const btn = wrapper.find('[data-testid="feedback-up-a-hit"]')
++    expect(btn.classes()).toContain('w-7')
++    expect(btn.classes()).toContain('h-7')
++    const row = wrapper.find('[data-testid="msg-ops-a-hit"] > div:last-child')
++    expect(row.classes()).toContain('gap-2')
++    wrapper.unmount()
++  })
++
++  it('T4：编辑防覆盖 —— 输入框非空白先弹确认（确认才回填，取消不覆盖）', async () => {
++    const store = useAiStore()
++    const user = buildMessage([{ kind: 'text', seg: 0, text: '用户原话', streaming: false }])
++    user.id = 'u-edit'
++    user.role = 'user'
++    store.messages = [user]
++    store.historyLoaded = true
++    const { default: AiPanel } = await import('@/components/AiPanel/AiPanel.vue')
++    const wrapper = mount(AiPanel, { global: { stubs: stubsWithInput } })
++    await wrapper.vm.$nextTick()
++    const input = wrapper.find('textarea')
++    await input.setValue('草稿内容')
++    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
++    await wrapper.find('[data-testid="edit-msg-u-edit"]').trigger('click')
++    expect(confirmSpy).toHaveBeenCalled()
++    expect((wrapper.find('textarea').element as HTMLTextAreaElement).value).toBe('草稿内容') // 未覆盖
++    confirmSpy.mockReturnValue(true)
++    await wrapper.find('[data-testid="edit-msg-u-edit"]').trigger('click')
++    expect((wrapper.find('textarea').element as HTMLTextAreaElement).value).toBe('用户原话') // 确认后回填
++    confirmSpy.mockRestore()
++    wrapper.unmount()
++  })
++
++  it('T4：「继续」按钮 —— 断流态最后一条助手消息出入口，点击直发「继续」', async () => {
++    const store = useAiStore()
++    const reply = buildMessage([{ kind: 'text', seg: 0, text: '部分回答', streaming: false }])
++    reply.id = 'a-cont'
++    store.messages = [reply]
++    store.historyLoaded = true
++    store.lastRoundOutcome = 'interrupted'
++    api.chat.mockReset()
++    api.chat.mockResolvedValue(undefined)
++    const { default: AiPanel } = await import('@/components/AiPanel/AiPanel.vue')
++    const wrapper = mount(AiPanel, { global: { stubs: stubsWithInput } })
++    await wrapper.vm.$nextTick()
++    const cont = wrapper.find('[data-testid="continue-round"]')
++    expect(cont.exists()).toBe(true)
++    await cont.trigger('click')
++    await wrapper.vm.$nextTick()
++    expect(api.chat).toHaveBeenCalledTimes(1)
++    expect(api.chat.mock.calls[0][0].message).toBe('继续')
++    wrapper.unmount()
++  })
++
++  it('T4：「继续」按钮负例 —— 正常收官（ok）不出入口；仅末条助手消息出', async () => {
++    const store = useAiStore()
++    const older = buildMessage([{ kind: 'text', seg: 0, text: '旧回答', streaming: false }])
++    older.id = 'a-old'
++    const last = buildMessage([{ kind: 'text', seg: 0, text: '新回答', streaming: false }])
++    last.id = 'a-new'
++    store.messages = [older, last]
++    store.historyLoaded = true
++    store.lastRoundOutcome = 'ok'
++    const { default: AiPanel } = await import('@/components/AiPanel/AiPanel.vue')
++    const wrapper = mount(AiPanel, { global: { stubs } })
++    await wrapper.vm.$nextTick()
++    expect(wrapper.find('[data-testid="continue-round"]').exists()).toBe(false)
++    store.lastRoundOutcome = 'cancelled'
++    await wrapper.vm.$nextTick()
++    expect(wrapper.find('[data-testid="msg-ops-a-new"]').find('[data-testid="continue-round"]').exists()).toBe(true)
++    expect(wrapper.find('[data-testid="msg-ops-a-old"]').find('[data-testid="continue-round"]').exists()).toBe(false)
++    wrapper.unmount()
++  })
++})
++
++/** F1（复核 MAJOR 收口修）回归锁：断流置位 → 断流 Alert 渲染（error 档）+「继续」入口同帧。 */
++describe('R-163 收口修 F1：断流置位 → Alert 渲染回归', () => {
++  it('streamInterrupted=true ⇒ 断流 Alert（error 档）渲染；false 则不渲染', async () => {
++    const store = useAiStore()
++    const reply = buildMessage([{ kind: 'text', seg: 0, text: '部分回答', streaming: false }])
++    reply.id = 'a-f1'
++    store.messages = [reply]
++    store.historyLoaded = true
++
++    // 断流现场（onClose 非终帧路径的置位结果）
++    store.streamInterrupted = true
++    store.lastRoundOutcome = 'interrupted'
++    const wrapper = await mountPanel(store.messages)
++    const alert = wrapper.find('el-alert-stub')
++    expect(alert.exists()).toBe(true)
++    expect(alert.attributes('type')).toBe('error') // noticeType 的 error 档同源驱动
++    expect(alert.attributes('title')).toContain('连接中断')
++    // 与「继续」入口同帧出现（lastRoundOutcome 并列置位的另一面）
++    expect(wrapper.find('[data-testid="continue-round"]').exists()).toBe(true)
++    wrapper.unmount()
++
++    // 负例：正常收官不断流 ⇒ Alert 不渲染
++    store.streamInterrupted = false
++    store.lastRoundOutcome = 'ok'
++    const wrapper2 = await mountPanel(store.messages)
++    expect(wrapper2.find('el-alert-stub').exists()).toBe(false)
++    expect(wrapper2.find('[data-testid="continue-round"]').exists()).toBe(false)
++    wrapper2.unmount()
++  })
++})
+diff --git a/frontend/tests/restore-reconcile.spec.ts b/frontend/tests/restore-reconcile.spec.ts
+index 0842dd9..5761f03 100644
+--- a/frontend/tests/restore-reconcile.spec.ts
++++ b/frontend/tests/restore-reconcile.spec.ts
+@@ -106,7 +106,7 @@ describe('restoreSuspendedSnapshot 的 await 后二次对账', () => {
+     expect(store.suspended).toBe(false)
+     expect(store.activeForm).toBeNull()
+     expect(api.reattachRun).not.toHaveBeenCalled()
+-  })
++  }, 15000)
+ 
+   it('负例②：取数期间同会话起新轮 → 旧快照写回被丢弃，在跑轮的 runId 与连接不被顶替', async () => {
+     const store = await freshStore()
+@@ -138,7 +138,7 @@ describe('restoreSuspendedSnapshot 的 await 后二次对账', () => {
+     expect(api.reattachRun).not.toHaveBeenCalled()
+ 
+     void round // 新轮连接保持未决（本用例不需要它收尾）
+-  })
++  }, 15000)
+ 
+   it('正例：无干扰时挂起卡正常重建（快照口径不变）', async () => {
+     const store = await freshStore()
+@@ -177,5 +177,5 @@ describe('restoreSuspendedSnapshot 的 await 后二次对账', () => {
+     expect(api.reattachRun).toHaveBeenCalledTimes(1)
+     expect(api.reattachRun.mock.calls[0]?.[0]).toBe('run-old')
+     expect(api.reattachRun.mock.calls[0]?.[2]).toMatchObject({ lastSeq: 7 })
+-  })
++  }, 15000)
+ })
+diff --git a/frontend/yarn.lock b/frontend/yarn.lock
+index 59ebd77..c803e68 100644
+--- a/frontend/yarn.lock
++++ b/frontend/yarn.lock
+@@ -7,6 +7,14 @@
+   resolved "https://mirrors.huaweicloud.com/repository/npm/@alloc/quick-lru/-/quick-lru-5.3.0.tgz#9073d52ad3cebbedd0d8c9f3e65aa5527fabd1e0"
+   integrity sha512-U4+70Pc5ZS9osnCBCE5Jha/ciHM+Yp+CNMNC/7HvYbNRk1Ldd+f7qO65W5qfhu/TCv+/ozljlXXe9Nj8419DMA==
+ 
++"@antfu/install-pkg@^2.0.1":
++  version "2.1.0"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@antfu/install-pkg/-/install-pkg-2.1.0.tgz#0e227e9161f8c9821b1a8944ff26366be929a519"
++  integrity sha512-sdg9NxU3zR4Mnawfbc/x6GB5Wf17WYud5qOuEuxXjaKpYpMkISSJEjItGebXJ2bQ4DIcly4NYH23mtkGJjvKUw==
++  dependencies:
++    package-manager-detector "^1.8.0"
++    tinyexec "^1.3.1"
++
+ "@asamuzakjp/css-color@^7.1.3":
+   version "7.1.5"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/@asamuzakjp/css-color/-/css-color-7.1.5.tgz#b4737f7c567078f0301d0d824ea3c979914041de"
+@@ -53,6 +61,11 @@
+     "@babel/helper-string-parser" "^7.29.7"
+     "@babel/helper-validator-identifier" "^7.29.7"
+ 
++"@braintree/sanitize-url@^7.1.2":
++  version "7.1.2"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@braintree/sanitize-url/-/sanitize-url-7.1.2.tgz#ca2035b0fefe956a8676ff0c69af73e605fcd81f"
++  integrity sha512-jigsZK+sMF/cuiB7sERuo9V7N9jx+dhmHHnQyDSVdpZwVutaBu7WvNYqMDLSgFgfB30n452TP3vjDAvFC973mA==
++
+ "@bramus/specificity@^2.4.2":
+   version "2.4.3"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/@bramus/specificity/-/specificity-2.4.3.tgz#66586208e89e37327e509a94eef6545d76915db8"
+@@ -60,6 +73,11 @@
+   dependencies:
+     css-tree "^3.2.1"
+ 
++"@chevrotain/types@~11.1.2":
++  version "11.1.2"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@chevrotain/types/-/types-11.1.2.tgz#e83a1a2704f0c5e49e7592b214031a0f4a34d7e5"
++  integrity sha512-U+HFai5+zmJCkK86QsaJtoITlboZHBqrVketcO2ROv865xfCMSFpELQoz1GkX5GzME8pTa+3kbKrZHQtI0gdbw==
++
+ "@csstools/color-helpers@^6.1.2":
+   version "6.1.2"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/@csstools/color-helpers/-/color-helpers-6.1.2.tgz#41d1c66d9e5885a750d6512c786b3c45d5de3034"
+@@ -277,6 +295,20 @@
+   resolved "https://mirrors.huaweicloud.com/repository/npm/@grapecity/spread-sheets/-/spread-sheets-17.1.5.tgz#49214986663a46e98869c41ca66796a50409f771"
+   integrity sha512-2QCKRa/qaAkcZktrkJqjCY9QWQIZAtH1xR4adAeei3NS8cTyMGqAFcV6q8R6Kh84iiZf769aL0sg3pRkL9QDfg==
+ 
++"@iconify/types@^2.0.0":
++  version "2.0.0"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@iconify/types/-/types-2.0.0.tgz#ab0e9ea681d6c8a1214f30cd741fe3a20cc57f57"
++  integrity sha512-+wluvCrRhXrhyOmRDJ3q8mux9JkKy5SJ/v8ol2tu4FVjyYvtEzkc/3pK15ET6RKg4b4w4BmTk1+gsCUhf21Ykg==
++
++"@iconify/utils@^3.0.2":
++  version "3.1.7"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@iconify/utils/-/utils-3.1.7.tgz#fff11c528490b119a250ace3cf35a0a78e182317"
++  integrity sha512-JZHlwdID+dy+lTgbYC8NEC4zeugqeYsc6jewvzb4c58kHauJn+X7rNwQjxz5p2qSjqaEeQoLkCIQ9v/H4PK0/w==
++  dependencies:
++    "@antfu/install-pkg" "^2.0.1"
++    "@iconify/types" "^2.0.0"
++    import-meta-resolve "^4.2.0"
++
+ "@jridgewell/gen-mapping@^0.3.2":
+   version "0.3.13"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/@jridgewell/gen-mapping/-/gen-mapping-0.3.13.tgz#6342a19f44347518c93e43b1ac69deb3c4656a1f"
+@@ -303,6 +335,13 @@
+     "@jridgewell/resolve-uri" "^3.1.0"
+     "@jridgewell/sourcemap-codec" "^1.4.14"
+ 
++"@mermaid-js/parser@^1.2.0":
++  version "1.2.1"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@mermaid-js/parser/-/parser-1.2.1.tgz#94cc40416137bb10d2bc1b0a49c623d716e76233"
++  integrity sha512-n12NohV3mrUyUL2o93IgG/ifeW9FTyeJn3zDxkhwa8MJ9Fxg3HQMlA3RiGmD/3UnJvheztkjjQAjA2T4LmUcpw==
++  dependencies:
++    "@chevrotain/types" "~11.1.2"
++
+ "@napi-rs/lzma-linux-x64-gnu@1.5.1":
+   version "1.5.1"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/@napi-rs/lzma-linux-x64-gnu/-/lzma-linux-x64-gnu-1.5.1.tgz#e57d4306966078662038094fb38eb9146dc3aea9"
+@@ -477,6 +516,216 @@
+     "@types/deep-eql" "*"
+     assertion-error "^2.0.1"
+ 
++"@types/d3-array@*":
++  version "3.2.2"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@types/d3-array/-/d3-array-3.2.2.tgz#e02151464d02d4a1b44646d0fcdb93faf88fde8c"
++  integrity sha512-hOLWVbm7uRza0BYXpIIW5pxfrKe0W+D5lrFiAEYR+pb6w3N2SwSMaJbXdUfSEv+dT4MfHBLtn5js0LAWaO6otw==
++
++"@types/d3-axis@*":
++  version "3.0.6"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@types/d3-axis/-/d3-axis-3.0.6.tgz#e760e5765b8188b1defa32bc8bb6062f81e4c795"
++  integrity sha512-pYeijfZuBd87T0hGn0FO1vQ/cgLk6E1ALJjfkC0oJ8cbwkZl3TpgS8bVBLZN+2jjGgg38epgxb2zmoGtSfvgMw==
++  dependencies:
++    "@types/d3-selection" "*"
++
++"@types/d3-brush@*":
++  version "3.0.6"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@types/d3-brush/-/d3-brush-3.0.6.tgz#c2f4362b045d472e1b186cdbec329ba52bdaee6c"
++  integrity sha512-nH60IZNNxEcrh6L1ZSMNA28rj27ut/2ZmI3r96Zd+1jrZD++zD3LsMIjWlvg4AYrHn/Pqz4CF3veCxGjtbqt7A==
++  dependencies:
++    "@types/d3-selection" "*"
++
++"@types/d3-chord@*":
++  version "3.0.6"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@types/d3-chord/-/d3-chord-3.0.6.tgz#1706ca40cf7ea59a0add8f4456efff8f8775793d"
++  integrity sha512-LFYWWd8nwfwEmTZG9PfQxd17HbNPksHBiJHaKuY1XeqscXacsS2tyoo6OdRsjf+NQYeB6XrNL3a25E3gH69lcg==
++
++"@types/d3-color@*":
++  version "3.1.3"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@types/d3-color/-/d3-color-3.1.3.tgz#368c961a18de721da8200e80bf3943fb53136af2"
++  integrity sha512-iO90scth9WAbmgv7ogoq57O9YpKmFBbmoEoCHDB2xMBY0+/KVrqAaCDyCE16dUspeOvIxFFRI+0sEtqDqy2b4A==
++
++"@types/d3-contour@*":
++  version "3.0.6"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@types/d3-contour/-/d3-contour-3.0.6.tgz#9ada3fa9c4d00e3a5093fed0356c7ab929604231"
++  integrity sha512-BjzLgXGnCWjUSYGfH1cpdo41/hgdWETu4YxpezoztawmqsvCeep+8QGfiY6YbDvfgHz/DkjeIkkZVJavB4a3rg==
++  dependencies:
++    "@types/d3-array" "*"
++    "@types/geojson" "*"
++
++"@types/d3-delaunay@*":
++  version "6.0.4"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@types/d3-delaunay/-/d3-delaunay-6.0.4.tgz#185c1a80cc807fdda2a3fe960f7c11c4a27952e1"
++  integrity sha512-ZMaSKu4THYCU6sV64Lhg6qjf1orxBthaC161plr5KuPHo3CNm8DTHiLw/5Eq2b6TsNP0W0iJrUOFscY6Q450Hw==
++
++"@types/d3-dispatch@*":
++  version "3.0.7"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@types/d3-dispatch/-/d3-dispatch-3.0.7.tgz#ef004d8a128046cfce434d17182f834e44ef95b2"
++  integrity sha512-5o9OIAdKkhN1QItV2oqaE5KMIiXAvDWBDPrD85e58Qlz1c1kI/J0NcqbEG88CoTwJrYe7ntUCVfeUl2UJKbWgA==
++
++"@types/d3-drag@*":
++  version "3.0.7"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@types/d3-drag/-/d3-drag-3.0.7.tgz#b13aba8b2442b4068c9a9e6d1d82f8bcea77fc02"
++  integrity sha512-HE3jVKlzU9AaMazNufooRJ5ZpWmLIoc90A37WU2JMmeq28w1FQqCZswHZ3xR+SuxYftzHq6WU6KJHvqxKzTxxQ==
++  dependencies:
++    "@types/d3-selection" "*"
++
++"@types/d3-dsv@*":
++  version "3.0.7"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@types/d3-dsv/-/d3-dsv-3.0.7.tgz#0a351f996dc99b37f4fa58b492c2d1c04e3dac17"
++  integrity sha512-n6QBF9/+XASqcKK6waudgL0pf/S5XHPPI8APyMLLUHd8NqouBGLsU8MgtO7NINGtPBtk9Kko/W4ea0oAspwh9g==
++
++"@types/d3-ease@*":
++  version "3.0.2"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@types/d3-ease/-/d3-ease-3.0.2.tgz#e28db1bfbfa617076f7770dd1d9a48eaa3b6c51b"
++  integrity sha512-NcV1JjO5oDzoK26oMzbILE6HW7uVXOHLQvHshBUW4UMdZGfiY6v5BeQwh9a9tCzv+CeefZQHJt5SRgK154RtiA==
++
++"@types/d3-fetch@*":
++  version "3.0.7"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@types/d3-fetch/-/d3-fetch-3.0.7.tgz#c04a2b4f23181aa376f30af0283dbc7b3b569980"
++  integrity sha512-fTAfNmxSb9SOWNB9IoG5c8Hg6R+AzUHDRlsXsDZsNp6sxAEOP0tkP3gKkNSO/qmHPoBFTxNrjDprVHDQDvo5aA==
++  dependencies:
++    "@types/d3-dsv" "*"
++
++"@types/d3-force@*":
++  version "3.0.10"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@types/d3-force/-/d3-force-3.0.10.tgz#6dc8fc6e1f35704f3b057090beeeb7ac674bff1a"
++  integrity sha512-ZYeSaCF3p73RdOKcjj+swRlZfnYpK1EbaDiYICEEp5Q6sUiqFaFQ9qgoshp5CzIyyb/yD09kD9o2zEltCexlgw==
++
++"@types/d3-format@*":
++  version "3.0.4"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@types/d3-format/-/d3-format-3.0.4.tgz#b1e4465644ddb3fdf3a263febb240a6cd616de90"
++  integrity sha512-fALi2aI6shfg7vM5KiR1wNJnZ7r6UuggVqtDA+xiEdPZQwy/trcQaHnwShLuLdta2rTymCNpxYTiMZX/e09F4g==
++
++"@types/d3-geo@*":
++  version "3.1.1"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@types/d3-geo/-/d3-geo-3.1.1.tgz#9e283af179601c549581600b3fec25941911329d"
++  integrity sha512-65Emv9fQiQQqphLlRkuQ5ypPsOmWPhtBGCMv61JDPEPMvsx+gzhGf74yw1a78xFKPj6zw4AgQICJoQv0vK9M2w==
++  dependencies:
++    "@types/geojson" "*"
++
++"@types/d3-hierarchy@*":
++  version "3.1.7"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@types/d3-hierarchy/-/d3-hierarchy-3.1.7.tgz#6023fb3b2d463229f2d680f9ac4b47466f71f17b"
++  integrity sha512-tJFtNoYBtRtkNysX1Xq4sxtjK8YgoWUNpIiUee0/jHGRwqvzYxkq0hGVbbOGSz+JgFxxRu4K8nb3YpG3CMARtg==
++
++"@types/d3-interpolate@*":
++  version "3.0.4"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@types/d3-interpolate/-/d3-interpolate-3.0.4.tgz#412b90e84870285f2ff8a846c6eb60344f12a41c"
++  integrity sha512-mgLPETlrpVV1YRJIglr4Ez47g7Yxjl1lj7YKsiMCb27VJH9W8NVM6Bb9d8kkpG/uAQS5AmbA48q2IAolKKo1MA==
++  dependencies:
++    "@types/d3-color" "*"
++
++"@types/d3-path@*":
++  version "3.1.1"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@types/d3-path/-/d3-path-3.1.1.tgz#f632b380c3aca1dba8e34aa049bcd6a4af23df8a"
++  integrity sha512-VMZBYyQvbGmWyWVea0EHs/BwLgxc+MKi1zLDCONksozI4YJMcTt8ZEuIR4Sb1MMTE8MMW49v0IwI5+b7RmfWlg==
++
++"@types/d3-polygon@*":
++  version "3.0.2"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@types/d3-polygon/-/d3-polygon-3.0.2.tgz#dfae54a6d35d19e76ac9565bcb32a8e54693189c"
++  integrity sha512-ZuWOtMaHCkN9xoeEMr1ubW2nGWsp4nIql+OPQRstu4ypeZ+zk3YKqQT0CXVe/PYqrKpZAi+J9mTs05TKwjXSRA==
++
++"@types/d3-quadtree@*":
++  version "3.0.6"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@types/d3-quadtree/-/d3-quadtree-3.0.6.tgz#d4740b0fe35b1c58b66e1488f4e7ed02952f570f"
++  integrity sha512-oUzyO1/Zm6rsxKRHA1vH0NEDG58HrT5icx/azi9MF1TWdtttWl0UIUsjEQBBh+SIkrpd21ZjEv7ptxWys1ncsg==
++
++"@types/d3-random@*":
++  version "3.0.4"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@types/d3-random/-/d3-random-3.0.4.tgz#6bd3683b8332fc0f01e7059b7636bc5c7ede7337"
++  integrity sha512-UHYId5WTCx4L4YNel7NU00XUXXgvgpgZOvp10PuvsQENjMDXhh2RyFc0KBjO7B45ne4Ha1yVH7ii0vnzKkuzWA==
++
++"@types/d3-scale-chromatic@*":
++  version "3.1.0"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@types/d3-scale-chromatic/-/d3-scale-chromatic-3.1.0.tgz#dc6d4f9a98376f18ea50bad6c39537f1b5463c39"
++  integrity sha512-iWMJgwkK7yTRmWqRB5plb1kadXyQ5Sj8V/zYlFGMUBbIPKQScw+Dku9cAAMgJG+z5GYDoMjWGLVOvjghDEFnKQ==
++
++"@types/d3-scale@*":
++  version "4.0.9"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@types/d3-scale/-/d3-scale-4.0.9.tgz#57a2f707242e6fe1de81ad7bfcccaaf606179afb"
++  integrity sha512-dLmtwB8zkAeO/juAMfnV+sItKjlsw2lKdZVVy6LRr0cBmegxSABiLEpGVmSJJ8O08i4+sGR6qQtb6WtuwJdvVw==
++  dependencies:
++    "@types/d3-time" "*"
++
++"@types/d3-selection@*":
++  version "3.0.12"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@types/d3-selection/-/d3-selection-3.0.12.tgz#bb207aec0b20bbe62466781c07e74212e9f5c0b1"
++  integrity sha512-Qe/KWYhEiIIxGs7HrAAjMfShxKldx19SJtr5zu53f3afPsdZNz7HHtdTLXo/kqeiWNXVycI24kSnfzBYkTzpgw==
++
++"@types/d3-shape@*":
++  version "3.2.0"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@types/d3-shape/-/d3-shape-3.2.0.tgz#66ff342011dc243c6c20e6b899523d148aca412d"
++  integrity sha512-kVd74ta9eof3eJOvbNd1vGKS/XERRyQbT26Og63hIsvDO84cjD5gEOhsXf26w3FSoNlPVz84DOFcKv/oou+fMw==
++  dependencies:
++    "@types/d3-path" "*"
++
++"@types/d3-time-format@*":
++  version "4.0.3"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@types/d3-time-format/-/d3-time-format-4.0.3.tgz#d6bc1e6b6a7db69cccfbbdd4c34b70632d9e9db2"
++  integrity sha512-5xg9rC+wWL8kdDj153qZcsJ0FWiFt0J5RB6LYUNZjwSnesfblqrI/bJ1wBdJ8OQfncgbJG5+2F+qfqnqyzYxyg==
++
++"@types/d3-time@*":
++  version "3.0.4"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@types/d3-time/-/d3-time-3.0.4.tgz#8472feecd639691450dd8000eb33edd444e1323f"
++  integrity sha512-yuzZug1nkAAaBlBBikKZTgzCeA+k1uy4ZFwWANOfKw5z5LRhV0gNA7gNkKm7HoK+HRN0wX3EkxGk0fpbWhmB7g==
++
++"@types/d3-timer@*":
++  version "3.0.2"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@types/d3-timer/-/d3-timer-3.0.2.tgz#70bbda77dc23aa727413e22e214afa3f0e852f70"
++  integrity sha512-Ps3T8E8dZDam6fUyNiMkekK3XUsaUEik+idO9/YjPtfj2qruF8tFBXS7XhtE4iIXBLxhmLjP3SXpLhVf21I9Lw==
++
++"@types/d3-transition@*":
++  version "3.0.9"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@types/d3-transition/-/d3-transition-3.0.9.tgz#1136bc57e9ddb3c390dccc9b5ff3b7d2b8d94706"
++  integrity sha512-uZS5shfxzO3rGlu0cC3bjmMFKsXv+SmZZcgp0KD22ts4uGXp5EVYGzu/0YdwZeKmddhcAccYtREJKkPfXkZuCg==
++  dependencies:
++    "@types/d3-selection" "*"
++
++"@types/d3-zoom@*":
++  version "3.0.9"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@types/d3-zoom/-/d3-zoom-3.0.9.tgz#22beb547522f579cf39dbe04be9e0abce2bc7bdf"
++  integrity sha512-0sE1406XBYJGiqD3AusTl9ZqC//2mIXix51tbom25gDCA8ri4xnSZg28CaSE8Srl6FClqABUKfsn0qghgdepMA==
++  dependencies:
++    "@types/d3-interpolate" "*"
++    "@types/d3-selection" "*"
++
++"@types/d3@^7.4.3":
++  version "7.4.3"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@types/d3/-/d3-7.4.3.tgz#d4550a85d08f4978faf0a4c36b848c61eaac07e2"
++  integrity sha512-lZXZ9ckh5R8uiFVt8ogUNf+pIrK4EsWrx2Np75WvF/eTpJ0FMHNhjXk8CKEx/+gpHbNQyJWehbFaTvqmHWB3ww==
++  dependencies:
++    "@types/d3-array" "*"
++    "@types/d3-axis" "*"
++    "@types/d3-brush" "*"
++    "@types/d3-chord" "*"
++    "@types/d3-color" "*"
++    "@types/d3-contour" "*"
++    "@types/d3-delaunay" "*"
++    "@types/d3-dispatch" "*"
++    "@types/d3-drag" "*"
++    "@types/d3-dsv" "*"
++    "@types/d3-ease" "*"
++    "@types/d3-fetch" "*"
++    "@types/d3-force" "*"
++    "@types/d3-format" "*"
++    "@types/d3-geo" "*"
++    "@types/d3-hierarchy" "*"
++    "@types/d3-interpolate" "*"
++    "@types/d3-path" "*"
++    "@types/d3-polygon" "*"
++    "@types/d3-quadtree" "*"
++    "@types/d3-random" "*"
++    "@types/d3-scale" "*"
++    "@types/d3-scale-chromatic" "*"
++    "@types/d3-selection" "*"
++    "@types/d3-shape" "*"
++    "@types/d3-time" "*"
++    "@types/d3-time-format" "*"
++    "@types/d3-timer" "*"
++    "@types/d3-transition" "*"
++    "@types/d3-zoom" "*"
++
+ "@types/deep-eql@*":
+   version "4.0.2"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/@types/deep-eql/-/deep-eql-4.0.2.tgz#334311971d3a07121e7eb91b684a605e7eea9cbd"
+@@ -487,6 +736,11 @@
+   resolved "https://mirrors.huaweicloud.com/repository/npm/@types/estree/-/estree-1.0.9.tgz#cf3f0e876d7bee15a93ab925b82bf570a3904a24"
+   integrity sha512-GhdPgy1el4/ImP05X05Uw4cw2/M93BCUmnEvWZNStlCzEKME4Fkk+YpoA5OiHNQmoS7Cafb8Xa3Pya8m1Qrzeg==
+ 
++"@types/geojson@*":
++  version "7946.0.16"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@types/geojson/-/geojson-7946.0.16.tgz#8ebe53d69efada7044454e3305c19017d97ced2a"
++  integrity sha512-6C8nqWur3j98U6+lXDfTUWIfgvZU+EumvpHKcYjujKH7woYyLj2sUmff0tRhrqM7BohUw7Pz3ZB1jj2gW9Fvmg==
++
+ "@types/lodash-es@^4.17.12":
+   version "4.17.12"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/@types/lodash-es/-/lodash-es-4.17.12.tgz#65f6d1e5f80539aa7cfbfc962de5def0cf4f341b"
+@@ -506,11 +760,24 @@
+   dependencies:
+     undici-types "~6.21.0"
+ 
++"@types/trusted-types@^2.0.7":
++  version "2.0.7"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@types/trusted-types/-/trusted-types-2.0.7.tgz#baccb07a970b91707df3a3e8ba6896c57ead2d11"
++  integrity sha512-ScaPdn1dQczgbl0QFTeTOmVHFULt394XJgOQNoyVhZ6r2vLnMLJfBPd53SB52T/3G36VI1/g2MZaX0cwDuXsfw==
++
+ "@types/web-bluetooth@^0.0.21":
+   version "0.0.21"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/@types/web-bluetooth/-/web-bluetooth-0.0.21.tgz#525433c784aed9b457aaa0ee3d92aeb71f346b63"
+   integrity sha512-oIQLCGWtcFZy2JW77j9k8nHzAOpqMHLQejDA48XXMWH6tjCQHz5RCFz1bzsmROyL6PUm+LLnUiI4BCn221inxA==
+ 
++"@upsetjs/venn.js@^2.0.0":
++  version "2.0.0"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/@upsetjs/venn.js/-/venn.js-2.0.0.tgz#3be192038cdda927aa4f8b22ab51af82abf47f34"
++  integrity sha512-WbBhLrooyePuQ1VZxrJjtLvTc4NVfpOyKx0sKqioq9bX1C1m7Jgykkn8gLrtwumBioXIqam8DLxp88Adbue6Hw==
++  optionalDependencies:
++    d3-selection "^3.0.0"
++    d3-transition "^3.0.1"
++
+ "@vitejs/plugin-vue@^5.2.1":
+   version "5.2.4"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/@vitejs/plugin-vue/-/plugin-vue-5.2.4.tgz#9e8a512eb174bfc2a333ba959bbf9de428d89ad8"
+@@ -767,6 +1034,11 @@ arg@^5.0.2:
+   resolved "https://mirrors.huaweicloud.com/repository/npm/arg/-/arg-5.0.2.tgz#c81433cc427c92c4dcf4865142dbca6f15acd59c"
+   integrity sha512-PYjyFOLKQ9y57JvQ6QLo8dAgNqswh8M1RMJYdQduT6xbWSgK36P/Z/v+p888pM69jMMfS8Xd8F6I1kQ/I9HUGg==
+ 
++argparse@^3.0.0:
++  version "3.0.2"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/argparse/-/argparse-3.0.2.tgz#6d0ad05840b8aa929fb2cc22936926f3ef04fbe8"
++  integrity sha512-mFdDM6WqWKraGLsVb+C9CahPnzTXOefAOLq3jYcca2YZ8bEWpr++Tzj+zSaKW9+X9L5uSxcm1AZ3Y6aZJ09OhQ==
++
+ assertion-error@^2.0.1:
+   version "2.0.1"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/assertion-error/-/assertion-error-2.0.1.tgz#f641a196b335690b1070bf00b6e7593fec190bf7"
+@@ -907,6 +1179,11 @@ combined-stream@^1.0.8:
+   dependencies:
+     delayed-stream "~1.0.0"
+ 
++commander@7:
++  version "7.2.0"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/commander/-/commander-7.2.0.tgz#a36cb57d0b501ce108e4d20559a150a391d97ab7"
++  integrity sha512-QrWXB+ZQSVPmIWIhtEO9H+gwHaMGYiF5ChvoJ+K9ZGHG/sVsa6yiesAD1GC/x46sET00Xlwo1u49RVVVzvcSkw==
++
+ commander@^14.0.3:
+   version "14.0.3"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/commander/-/commander-14.0.3.tgz#425d79b48f9af82fcd9e4fc1ea8af6c5ec07bbc2"
+@@ -917,6 +1194,11 @@ commander@^4.0.0:
+   resolved "https://mirrors.huaweicloud.com/repository/npm/commander/-/commander-4.1.1.tgz#9fd602bd936294e9e9ef46a3f4d6964044b18068"
+   integrity sha512-NOKm8xhkzAjzFx8B2v5OAHT+u5pRQc2UCa2Vq9jYL/31o2wi9mxBA7LIFs3sV5VSC49z6pEhfbMULvShKj26WA==
+ 
++commander@^8.3.0:
++  version "8.3.0"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/commander/-/commander-8.3.0.tgz#4837ea1b2da67b9c616a67afbb0fafee567bca66"
++  integrity sha512-OkTL9umf+He2DZkUq8f8J9of7yL6RJKI24dVITBmNfZBmri9zYZQrKkuXiKhyfPSu8tUhnVBB1iKXevvnlR4Ww==
++
+ config-chain@^1.1.13:
+   version "1.1.13"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/config-chain/-/config-chain-1.1.13.tgz#fad0795aa6a6cdaff9ed1b68e9dff94372c232f4"
+@@ -935,6 +1217,20 @@ core-util-is@~1.0.0:
+   resolved "https://mirrors.huaweicloud.com/repository/npm/core-util-is/-/core-util-is-1.0.3.tgz#a6042d3634c2b27e9328f837b965fac83808db85"
+   integrity sha512-ZQBvi1DcpJ4GDqanjucZ2Hj3wEO5pZDS89BWbkcrvdxksJorwUDDZamX9ldFkp9aw2lmBDLgkObEA4DWNJ9FYQ==
+ 
++cose-base@^1.0.0:
++  version "1.0.3"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/cose-base/-/cose-base-1.0.3.tgz#650334b41b869578a543358b80cda7e0abe0a60a"
++  integrity sha512-s9whTXInMSgAp/NVXVNuVxVKzGH2qck3aQlVHxDCdAEPgtMKwc4Wq6/QKhgdEdgbLSi9rBTAcPoRa6JpiG4ksg==
++  dependencies:
++    layout-base "^1.0.0"
++
++cose-base@^2.2.0:
++  version "2.2.0"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/cose-base/-/cose-base-2.2.0.tgz#1c395c35b6e10bb83f9769ca8b817d614add5c01"
++  integrity sha512-AzlgcsCbUMymkADOJtQm3wO9S3ltPfYOFD5033keQn9NJzIbtnZj+UdBJe7DYml/8TdbtHJW3j58SOnKhWY/5g==
++  dependencies:
++    layout-base "^2.0.0"
++
+ css-tree@^3.2.1:
+   version "3.2.1"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/css-tree/-/css-tree-3.2.1.tgz#86cac7011561272b30e6b1e042ba6ce047aa7518"
+@@ -953,6 +1249,304 @@ csstype@^3.2.3:
+   resolved "https://mirrors.huaweicloud.com/repository/npm/csstype/-/csstype-3.2.3.tgz#ec48c0f3e993e50648c86da559e2610995cf989a"
+   integrity sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==
+ 
++cytoscape-cose-bilkent@^4.1.0:
++  version "4.1.0"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/cytoscape-cose-bilkent/-/cytoscape-cose-bilkent-4.1.0.tgz#762fa121df9930ffeb51a495d87917c570ac209b"
++  integrity sha512-wgQlVIUJF13Quxiv5e1gstZ08rnZj2XaLHGoFMYXz7SkNfCDOOteKBE6SYRfA9WxxI/iBc3ajfDoc6hb/MRAHQ==
++  dependencies:
++    cose-base "^1.0.0"
++
++cytoscape-fcose@^2.2.0:
++  version "2.2.0"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/cytoscape-fcose/-/cytoscape-fcose-2.2.0.tgz#e4d6f6490df4fab58ae9cea9e5c3ab8d7472f471"
++  integrity sha512-ki1/VuRIHFCzxWNrsshHYPs6L7TvLu3DL+TyIGEsRcvVERmxokbf5Gdk7mFxZnTdiGtnA4cfSmjZJMviqSuZrQ==
++  dependencies:
++    cose-base "^2.2.0"
++
++cytoscape@^3.33.3:
++  version "3.34.3"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/cytoscape/-/cytoscape-3.34.3.tgz#1503996ba0b59b901d86310a1f612e92dc464f51"
++  integrity sha512-yfYGhRcGAntq6YBD583j4n0Eg3jIxvWmZtz/5uz9UYkeIStSlMxuUja+ec5j3iBD8nv1rwaOAYMW09tBdkSeaQ==
++
++"d3-array@1 - 2":
++  version "2.12.1"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/d3-array/-/d3-array-2.12.1.tgz#e20b41aafcdffdf5d50928004ececf815a465e81"
++  integrity sha512-B0ErZK/66mHtEsR1TkPEEkwdy+WDesimkM5gpZr5Dsg54BiTA5RXtYW5qTLIAcekaS9xfZrzBLF/OAkB3Qn1YQ==
++  dependencies:
++    internmap "^1.0.0"
++
++"d3-array@2 - 3", "d3-array@2.10.0 - 3", "d3-array@2.5.0 - 3", d3-array@3, d3-array@^3.2.0:
++  version "3.2.4"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/d3-array/-/d3-array-3.2.4.tgz#15fec33b237f97ac5d7c986dc77da273a8ed0bb5"
++  integrity sha512-tdQAmyA18i4J7wprpYq8ClcxZy3SC31QMeByyCFyRt7BVHdREQZ5lpzoe5mFEYZUWe+oq8HBvk9JjpibyEV4Jg==
++  dependencies:
++    internmap "1 - 2"
++
++d3-axis@3:
++  version "3.0.0"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/d3-axis/-/d3-axis-3.0.0.tgz#c42a4a13e8131d637b745fc2973824cfeaf93322"
++  integrity sha512-IH5tgjV4jE/GhHkRV0HiVYPDtvfjHQlQfJHs0usq7M30XcSBvOotpmH1IgkcXsO/5gEQZD43B//fc7SRT5S+xw==
++
++d3-brush@3:
++  version "3.0.0"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/d3-brush/-/d3-brush-3.0.0.tgz#6f767c4ed8dcb79de7ede3e1c0f89e63ef64d31c"
++  integrity sha512-ALnjWlVYkXsVIGlOsuWH1+3udkYFI48Ljihfnh8FZPF2QS9o+PzGLBslO0PjzVoHLZ2KCVgAM8NVkXPJB2aNnQ==
++  dependencies:
++    d3-dispatch "1 - 3"
++    d3-drag "2 - 3"
++    d3-interpolate "1 - 3"
++    d3-selection "3"
++    d3-transition "3"
++
++d3-chord@3:
++  version "3.0.1"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/d3-chord/-/d3-chord-3.0.1.tgz#d156d61f485fce8327e6abf339cb41d8cbba6966"
++  integrity sha512-VE5S6TNa+j8msksl7HwjxMHDM2yNK3XCkusIlpX5kwauBfXuyLAtNg9jCp/iHH61tgI4sb6R/EIMWCqEIdjT/g==
++  dependencies:
++    d3-path "1 - 3"
++
++"d3-color@1 - 3", d3-color@3:
++  version "3.1.0"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/d3-color/-/d3-color-3.1.0.tgz#395b2833dfac71507f12ac2f7af23bf819de24e2"
++  integrity sha512-zg/chbXyeBtMQ1LbD/WSoW2DpC3I0mpmPdW+ynRTj/x2DAWYrIY7qeZIHidozwV24m4iavr15lNwIwLxRmOxhA==
++
++d3-contour@4:
++  version "4.0.2"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/d3-contour/-/d3-contour-4.0.2.tgz#bb92063bc8c5663acb2422f99c73cbb6c6ae3bcc"
++  integrity sha512-4EzFTRIikzs47RGmdxbeUvLWtGedDUNkTcmzoeyg4sP/dvCexO47AaQL7VKy/gul85TOxw+IBgA8US2xwbToNA==
++  dependencies:
++    d3-array "^3.2.0"
++
++d3-delaunay@6:
++  version "6.0.4"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/d3-delaunay/-/d3-delaunay-6.0.4.tgz#98169038733a0a5babbeda55054f795bb9e4a58b"
++  integrity sha512-mdjtIZ1XLAM8bm/hx3WwjfHt6Sggek7qH043O8KEjDXN40xi3vx/6pYSVTwLjEgiXQTbvaouWKynLBiUZ6SK6A==
++  dependencies:
++    delaunator "5"
++
++"d3-dispatch@1 - 3", d3-dispatch@3:
++  version "3.0.1"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/d3-dispatch/-/d3-dispatch-3.0.1.tgz#5fc75284e9c2375c36c839411a0cf550cbfc4d5e"
++  integrity sha512-rzUyPU/S7rwUflMyLc1ETDeBj0NRuHKKAcvukozwhshr6g6c5d8zh4c2gQjY2bZ0dXeGLWc1PF174P2tVvKhfg==
++
++"d3-drag@2 - 3", d3-drag@3:
++  version "3.0.0"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/d3-drag/-/d3-drag-3.0.0.tgz#994aae9cd23c719f53b5e10e3a0a6108c69607ba"
++  integrity sha512-pWbUJLdETVA8lQNJecMxoXfH6x+mO2UQo8rSmZ+QqxcbyA3hfeprFgIT//HW2nlHChWeIIMwS2Fq+gEARkhTkg==
++  dependencies:
++    d3-dispatch "1 - 3"
++    d3-selection "3"
++
++"d3-dsv@1 - 3", d3-dsv@3:
++  version "3.0.1"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/d3-dsv/-/d3-dsv-3.0.1.tgz#c63af978f4d6a0d084a52a673922be2160789b73"
++  integrity sha512-UG6OvdI5afDIFP9w4G0mNq50dSOsXHJaRE8arAS5o9ApWnIElp8GZw1Dun8vP8OyHOZ/QJUKUJwxiiCCnUwm+Q==
++  dependencies:
++    commander "7"
++    iconv-lite "0.6"
++    rw "1"
++
++"d3-ease@1 - 3", d3-ease@3:
++  version "3.0.1"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/d3-ease/-/d3-ease-3.0.1.tgz#9658ac38a2140d59d346160f1f6c30fda0bd12f4"
++  integrity sha512-wR/XK3D3XcLIZwpbvQwQ5fK+8Ykds1ip7A2Txe0yxncXSdq1L9skcG7blcedkOX+ZcgxGAmLX1FrRGbADwzi0w==
++
++d3-fetch@3:
++  version "3.0.1"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/d3-fetch/-/d3-fetch-3.0.1.tgz#83141bff9856a0edb5e38de89cdcfe63d0a60a22"
++  integrity sha512-kpkQIM20n3oLVBKGg6oHrUchHM3xODkTzjMoj7aWQFq5QEM+R6E4WkzT5+tojDY7yjez8KgCBRoj4aEr99Fdqw==
++  dependencies:
++    d3-dsv "1 - 3"
++
++d3-force@3:
++  version "3.0.0"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/d3-force/-/d3-force-3.0.0.tgz#3e2ba1a61e70888fe3d9194e30d6d14eece155c4"
++  integrity sha512-zxV/SsA+U4yte8051P4ECydjD/S+qeYtnaIyAs9tgHCqfguma/aAQDjo85A9Z6EKhBirHRJHXIgJUlffT4wdLg==
++  dependencies:
++    d3-dispatch "1 - 3"
++    d3-quadtree "1 - 3"
++    d3-timer "1 - 3"
++
++"d3-format@1 - 3", d3-format@3:
++  version "3.1.2"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/d3-format/-/d3-format-3.1.2.tgz#01fdb46b58beb1f55b10b42ad70b6e344d5eb2ae"
++  integrity sha512-AJDdYOdnyRDV5b6ArilzCPPwc1ejkHcoyFarqlPqT7zRYjhavcT3uSrqcMvsgh2CgoPbK3RCwyHaVyxYcP2Arg==
++
++d3-geo@3:
++  version "3.1.1"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/d3-geo/-/d3-geo-3.1.1.tgz#6027cf51246f9b2ebd64f99e01dc7c3364033a4d"
++  integrity sha512-637ln3gXKXOwhalDzinUgY83KzNWZRKbYubaG+fGVuc/dxO64RRljtCTnf5ecMyE1RIdtqpkVcq0IbtU2S8j2Q==
++  dependencies:
++    d3-array "2.5.0 - 3"
++
++d3-hierarchy@3:
++  version "3.1.2"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/d3-hierarchy/-/d3-hierarchy-3.1.2.tgz#b01cd42c1eed3d46db77a5966cf726f8c09160c6"
++  integrity sha512-FX/9frcub54beBdugHjDCdikxThEqjnR93Qt7PvQTOHxyiNCAlvMrHhclk3cD5VeAaq9fxmfRp+CnWw9rEMBuA==
++
++"d3-interpolate@1 - 3", "d3-interpolate@1.2.0 - 3", d3-interpolate@3:
++  version "3.0.1"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/d3-interpolate/-/d3-interpolate-3.0.1.tgz#3c47aa5b32c5b3dfb56ef3fd4342078a632b400d"
++  integrity sha512-3bYs1rOD33uo8aqJfKP3JWPAibgw8Zm2+L9vBKEHJ2Rg+viTR7o5Mmv5mZcieN+FRYaAOWX5SJATX6k1PWz72g==
++  dependencies:
++    d3-color "1 - 3"
++
++d3-path@1:
++  version "1.0.9"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/d3-path/-/d3-path-1.0.9.tgz#48c050bb1fe8c262493a8caf5524e3e9591701cf"
++  integrity sha512-VLaYcn81dtHVTjEHd8B+pbe9yHWpXKZUC87PzoFmsFrJqgFwDe/qxfp5MlfsfM1V5E/iVt0MmEbWQ7FVIXh/bg==
++
++"d3-path@1 - 3", d3-path@3, d3-path@^3.1.0:
++  version "3.1.0"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/d3-path/-/d3-path-3.1.0.tgz#22df939032fb5a71ae8b1800d61ddb7851c42526"
++  integrity sha512-p3KP5HCf/bvjBSSKuXid6Zqijx7wIfNW+J/maPs+iwR35at5JCbLUT0LzF1cnjbCHWhqzQTIN2Jpe8pRebIEFQ==
++
++d3-polygon@3:
++  version "3.0.1"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/d3-polygon/-/d3-polygon-3.0.1.tgz#0b45d3dd1c48a29c8e057e6135693ec80bf16398"
++  integrity sha512-3vbA7vXYwfe1SYhED++fPUQlWSYTTGmFmQiany/gdbiWgU/iEyQzyymwL9SkJjFFuCS4902BSzewVGsHHmHtXg==
++
++"d3-quadtree@1 - 3", d3-quadtree@3:
++  version "3.0.1"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/d3-quadtree/-/d3-quadtree-3.0.1.tgz#6dca3e8be2b393c9a9d514dabbd80a92deef1a4f"
++  integrity sha512-04xDrxQTDTCFwP5H6hRhsRcb9xxv2RzkcsygFzmkSIOJy3PeRJP7sNk3VRIbKXcog561P9oU0/rVH6vDROAgUw==
++
++d3-random@3:
++  version "3.0.1"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/d3-random/-/d3-random-3.0.1.tgz#d4926378d333d9c0bfd1e6fa0194d30aebaa20f4"
++  integrity sha512-FXMe9GfxTxqd5D6jFsQ+DJ8BJS4E/fT5mqqdjovykEB2oFbTMDVdg1MGFxfQW+FBOGoB++k8swBrgwSHT1cUXQ==
++
++d3-sankey@^0.12.3:
++  version "0.12.3"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/d3-sankey/-/d3-sankey-0.12.3.tgz#b3c268627bd72e5d80336e8de6acbfec9d15d01d"
++  integrity sha512-nQhsBRmM19Ax5xEIPLMY9ZmJ/cDvd1BG3UVvt5h3WRxKg5zGRbvnteTyWAbzeSvlh3tW7ZEmq4VwR5mB3tutmQ==
++  dependencies:
++    d3-array "1 - 2"
++    d3-shape "^1.2.0"
++
++d3-scale-chromatic@3:
++  version "3.1.0"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/d3-scale-chromatic/-/d3-scale-chromatic-3.1.0.tgz#34c39da298b23c20e02f1a4b239bd0f22e7f1314"
++  integrity sha512-A3s5PWiZ9YCXFye1o246KoscMWqf8BsD9eRiJ3He7C9OBaxKhAd5TFCdEx/7VbKtxxTsu//1mMJFrEt572cEyQ==
++  dependencies:
++    d3-color "1 - 3"
++    d3-interpolate "1 - 3"
++
++d3-scale@4:
++  version "4.0.2"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/d3-scale/-/d3-scale-4.0.2.tgz#82b38e8e8ff7080764f8dcec77bd4be393689396"
++  integrity sha512-GZW464g1SH7ag3Y7hXjf8RoUuAFIqklOAq3MRl4OaWabTFJY9PN/E1YklhXLh+OQ3fM9yS2nOkCoS+WLZ6kvxQ==
++  dependencies:
++    d3-array "2.10.0 - 3"
++    d3-format "1 - 3"
++    d3-interpolate "1.2.0 - 3"
++    d3-time "2.1.1 - 3"
++    d3-time-format "2 - 4"
++
++"d3-selection@2 - 3", d3-selection@3, d3-selection@^3.0.0:
++  version "3.0.0"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/d3-selection/-/d3-selection-3.0.0.tgz#c25338207efa72cc5b9bd1458a1a41901f1e1b31"
++  integrity sha512-fmTRWbNMmsmWq6xJV8D19U/gw/bwrHfNXxrIN+HfZgnzqTHp9jOmKMhsTUjXOJnZOdZY9Q28y4yebKzqDKlxlQ==
++
++d3-shape@3:
++  version "3.2.0"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/d3-shape/-/d3-shape-3.2.0.tgz#a1a839cbd9ba45f28674c69d7f855bcf91dfc6a5"
++  integrity sha512-SaLBuwGm3MOViRq2ABk3eLoxwZELpH6zhl3FbAoJ7Vm1gofKx6El1Ib5z23NUEhF9AsGl7y+dzLe5Cw2AArGTA==
++  dependencies:
++    d3-path "^3.1.0"
++
++d3-shape@^1.2.0:
++  version "1.3.7"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/d3-shape/-/d3-shape-1.3.7.tgz#df63801be07bc986bc54f63789b4fe502992b5d7"
++  integrity sha512-EUkvKjqPFUAZyOlhY5gzCxCeI0Aep04LwIRpsZ/mLFelJiUfnK56jo5JMDSE7yyP2kLSb6LtF+S5chMk7uqPqw==
++  dependencies:
++    d3-path "1"
++
++"d3-time-format@2 - 4", d3-time-format@4:
++  version "4.1.0"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/d3-time-format/-/d3-time-format-4.1.0.tgz#7ab5257a5041d11ecb4fe70a5c7d16a195bb408a"
++  integrity sha512-dJxPBlzC7NugB2PDLwo9Q8JiTR3M3e4/XANkreKSUxF8vvXKqm1Yfq4Q5dl8budlunRVlUUaDUgFt7eA8D6NLg==
++  dependencies:
++    d3-time "1 - 3"
++
++"d3-time@1 - 3", "d3-time@2.1.1 - 3", d3-time@3:
++  version "3.1.0"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/d3-time/-/d3-time-3.1.0.tgz#9310db56e992e3c0175e1ef385e545e48a9bb5c7"
++  integrity sha512-VqKjzBLejbSMT4IgbmVgDjpkYrNWUYJnbCGo874u7MMKIWsILRX+OpX/gTk8MqjpT1A/c6HY2dCA77ZN0lkQ2Q==
++  dependencies:
++    d3-array "2 - 3"
++
++"d3-timer@1 - 3", d3-timer@3:
++  version "3.0.1"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/d3-timer/-/d3-timer-3.0.1.tgz#6284d2a2708285b1abb7e201eda4380af35e63b0"
++  integrity sha512-ndfJ/JxxMd3nw31uyKoY2naivF+r29V+Lc0svZxe1JvvIRmi8hUsrMvdOwgS1o6uBHmiz91geQ0ylPP0aj1VUA==
++
++"d3-transition@2 - 3", d3-transition@3, d3-transition@^3.0.1:
++  version "3.0.1"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/d3-transition/-/d3-transition-3.0.1.tgz#6869fdde1448868077fdd5989200cb61b2a1645f"
++  integrity sha512-ApKvfjsSR6tg06xrL434C0WydLr7JewBB3V+/39RMHsaXTOG0zmt/OAXeng5M5LBm0ojmxJrpomQVZ1aPvBL4w==
++  dependencies:
++    d3-color "1 - 3"
++    d3-dispatch "1 - 3"
++    d3-ease "1 - 3"
++    d3-interpolate "1 - 3"
++    d3-timer "1 - 3"
++
++d3-zoom@3:
++  version "3.0.0"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/d3-zoom/-/d3-zoom-3.0.0.tgz#d13f4165c73217ffeaa54295cd6969b3e7aee8f3"
++  integrity sha512-b8AmV3kfQaqWAuacbPuNbL6vahnOJflOhexLzMMNLga62+/nh0JzvJ0aO/5a5MVgUFGS7Hu1P9P03o3fJkDCyw==
++  dependencies:
++    d3-dispatch "1 - 3"
++    d3-drag "2 - 3"
++    d3-interpolate "1 - 3"
++    d3-selection "2 - 3"
++    d3-transition "2 - 3"
++
++d3@^7.9.0:
++  version "7.9.0"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/d3/-/d3-7.9.0.tgz#579e7acb3d749caf8860bd1741ae8d371070cd5d"
++  integrity sha512-e1U46jVP+w7Iut8Jt8ri1YsPOvFpg46k+K8TpCb0P+zjCkjkPnV7WzfDJzMHy1LnA+wj5pLT1wjO901gLXeEhA==
++  dependencies:
++    d3-array "3"
++    d3-axis "3"
++    d3-brush "3"
++    d3-chord "3"
++    d3-color "3"
++    d3-contour "4"
++    d3-delaunay "6"
++    d3-dispatch "3"
++    d3-drag "3"
++    d3-dsv "3"
++    d3-ease "3"
++    d3-fetch "3"
++    d3-force "3"
++    d3-format "3"
++    d3-geo "3"
++    d3-hierarchy "3"
++    d3-interpolate "3"
++    d3-path "3"
++    d3-polygon "3"
++    d3-quadtree "3"
++    d3-random "3"
++    d3-scale "4"
++    d3-scale-chromatic "3"
++    d3-selection "3"
++    d3-shape "3"
++    d3-time "3"
++    d3-time-format "4"
++    d3-timer "3"
++    d3-transition "3"
++    d3-zoom "3"
++
++dagre-d3-es@7.0.14:
++  version "7.0.14"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/dagre-d3-es/-/dagre-d3-es-7.0.14.tgz#1272276e26457cf3b97dac569f8f0531ec33c377"
++  integrity sha512-P4rFMVq9ESWqmOgK+dlXvOtLwYg0i7u0HBGJER0LZDJT2VHIPAMZ/riPxqJceWMStH5+E61QxFra9kIS3AqdMg==
++  dependencies:
++    d3 "^7.9.0"
++    lodash-es "^4.17.21"
++
+ data-urls@^8.0.0:
+   version "8.0.0"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/data-urls/-/data-urls-8.0.0.tgz#d4e925beae8249dbe99a1defed36cebb9cc7a84c"
+@@ -983,6 +1577,13 @@ decimal.js@^10.6.0:
+   resolved "https://mirrors.huaweicloud.com/repository/npm/decimal.js/-/decimal.js-10.6.0.tgz#e649a43e3ab953a72192ff5983865e509f37ed9a"
+   integrity sha512-YpgQiITW3JXGntzdUmyUR1V812Hn8T1YVXhCu+wO3OpS4eU9l4YdD3qjyiKdV6mvV29zapkMeD390UVEf2lkUg==
+ 
++delaunator@5:
++  version "5.1.0"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/delaunator/-/delaunator-5.1.0.tgz#d13271fbf3aff6753f9ea6e235557f20901046ea"
++  integrity sha512-AGrQ4QSgssa1NGmWmLPqN5NY2KajF5MqxetNEO+o0n3ZwZZeTmt7bBnvzHWrmkZFxGgr4HdyFgelzgi06otLuQ==
++  dependencies:
++    robust-predicates "^3.0.2"
++
+ delayed-stream@~1.0.0:
+   version "1.0.0"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/delayed-stream/-/delayed-stream-1.0.0.tgz#df3ae199acadfb7d440aaae0b29e2272b24ec619"
+@@ -998,6 +1599,20 @@ dlv@^1.1.3:
+   resolved "https://mirrors.huaweicloud.com/repository/npm/dlv/-/dlv-1.1.3.tgz#5c198a8a11453596e751494d49874bc7732f2e79"
+   integrity sha512-+HlytyjlPKnIG8XuRG8WvmBP8xs8P71y+SKKS6ZXWoEgLuePxtDoUEiH7WkdePWrQ5JBpE6aoVqfZfJUQkjXwA==
+ 
++dompurify@3.4.14:
++  version "3.4.14"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/dompurify/-/dompurify-3.4.14.tgz#a789edb2c7bcdb69a93713a34edb7e0a5245d8c9"
++  integrity sha512-dVoH9z+MY+C9IilgGCk3YfFqjLi3fChm2OiKJMzh6axrJ5qwxqWaZamgmHrpv22CN/KdbZJuGEGgfQoL00LTdg==
++  optionalDependencies:
++    "@types/trusted-types" "^2.0.7"
++
++dompurify@^3.3.3:
++  version "3.4.17"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/dompurify/-/dompurify-3.4.17.tgz#074bbb24eaa419535ac19ffe7f663104b0e1543d"
++  integrity sha512-B/pSlYVHQ58kqISD/yDjuJ1yfzI34m1gF4lAod2bwSRhiN4K5Cl3H8Af7hqB2PmTL911tdEudnnXn5FnhRoz0w==
++  optionalDependencies:
++    "@types/trusted-types" "^2.0.7"
++
+ dunder-proto@^1.0.1:
+   version "1.0.1"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/dunder-proto/-/dunder-proto-1.0.1.tgz#d7ae667e1dc83482f8b70fd0f6eefc50da30f58a"
+@@ -1085,6 +1700,11 @@ es-set-tostringtag@^2.1.0:
+     has-tostringtag "^1.0.2"
+     hasown "^2.0.2"
+ 
++es-toolkit@^1.45.1:
++  version "1.52.0"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/es-toolkit/-/es-toolkit-1.52.0.tgz#71eaf1a8b18834ef77637eccbb885ba4c03cd6dd"
++  integrity sha512-XTNEJQh1tY1ZJVcf6ayP/2n4ZPyaHlW2FWs7xvw5ddPuhUVjLD3olQVQS7kf58JbAB48iL0uL/jerTrjtV3lDA==
++
+ esbuild@^0.25.0:
+   version "0.25.12"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/esbuild/-/esbuild-0.25.12.tgz#97a1d041f4ab00c2fce2f838d2b9969a2d2a97a5"
+@@ -1252,6 +1872,11 @@ gopd@^1.2.0:
+   resolved "https://mirrors.huaweicloud.com/repository/npm/gopd/-/gopd-1.2.0.tgz#89f56b8217bdbc8802bd299df6d7f1081d7e51a1"
+   integrity sha512-ZUKRh6/kUFoAiTAtTYPZJ3hw9wNxx+BIBOijnlG9PnrJsCcSjs1wyyD6vJpaYtgnzDrKYRSqf3OO6Rfa93xsRg==
+ 
++hachure-fill@^0.5.2:
++  version "0.5.2"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/hachure-fill/-/hachure-fill-0.5.2.tgz#d19bc4cc8750a5962b47fb1300557a85fcf934cc"
++  integrity sha512-3GKBOn+m2LX9iq+JC1064cSFprJY4jL1jCXTcpnfER5HYE2l/4EfWSGzkPa/ZDBmYI0ZOEj5VHV/eKnPGkHuOg==
++
+ has-symbols@^1.0.3, has-symbols@^1.1.0:
+   version "1.1.0"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/has-symbols/-/has-symbols-1.1.0.tgz#fc9c6a783a084951d0b971fe1018de813707a338"
+@@ -1276,6 +1901,11 @@ he@^1.2.0:
+   resolved "https://mirrors.huaweicloud.com/repository/npm/he/-/he-1.2.0.tgz#84ae65fa7eafb165fddb61566ae14baf05664f0f"
+   integrity sha512-F/1DnUGPopORZi0ni+CvrCgHQ5FyEAHRLSApuYWMmrbSwoN2Mn/7k+Gl38gJnR7yyDZk6WLXwiGod1JOWNDKGw==
+ 
++highlight.js@11.11.1:
++  version "11.11.1"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/highlight.js/-/highlight.js-11.11.1.tgz#fca06fa0e5aeecf6c4d437239135fabc15213585"
++  integrity sha512-Xwwo44whKBVCYoliBQwaPvtd/2tYFkRQtXDWj1nackaV2JPXx3L0+Jvd8/qCJ2p+ML0/XVkJ2q+Mr+UVdpJK5w==
++
+ html-encoding-sniffer@^7.0.0:
+   version "7.0.0"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/html-encoding-sniffer/-/html-encoding-sniffer-7.0.0.tgz#cf995009e50fa6f90d74906ab5137f8ee9b7c9d8"
+@@ -1291,11 +1921,23 @@ https-proxy-agent@^5.0.1:
+     agent-base "6"
+     debug "4"
+ 
++iconv-lite@0.6:
++  version "0.6.3"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/iconv-lite/-/iconv-lite-0.6.3.tgz#a52f80bf38da1952eb5c681790719871a1a72501"
++  integrity sha512-4fCk79wshMdzMp2rH06qWrJE4iolqLhCUH+OiuIgU++RB0+94NlDL81atO7GX55uUKueo0txHNtvEyI6D7WdMw==
++  dependencies:
++    safer-buffer ">= 2.1.2 < 3.0.0"
++
+ immediate@~3.0.5:
+   version "3.0.6"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/immediate/-/immediate-3.0.6.tgz#9db1dbd0faf8de6fbe0f5dd5e56bb606280de69b"
+   integrity sha512-XXOFtyqDjNDAQxVfYxuF7g9Il/IbWmmlQg2MYKOH8ExIT1qg6xc4zyS3HaEEATgs1btfzxq15ciUiY7gjSXRGQ==
+ 
++import-meta-resolve@^4.2.0:
++  version "4.2.0"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/import-meta-resolve/-/import-meta-resolve-4.2.0.tgz#08cb85b5bd37ecc8eb1e0f670dc2767002d43734"
++  integrity sha512-Iqv2fzaTQN28s/FwZAoFq0ZSs/7hMAHJVX+w8PZl3cY19Pxk6jFFalxQoIfW2826i/fDLXv8IiEZRIT0lDuWcg==
++
+ inherits@~2.0.3:
+   version "2.0.4"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/inherits/-/inherits-2.0.4.tgz#0fa2c64f932917c3433a0ded55363aae37416b7c"
+@@ -1306,6 +1948,16 @@ ini@^1.3.4:
+   resolved "https://mirrors.huaweicloud.com/repository/npm/ini/-/ini-1.3.8.tgz#a29da425b48806f34767a4efce397269af28432c"
+   integrity sha512-JV/yugV2uzW5iMRSiZAyDtQd+nxtUnjeLt0acNdw98kKLrvuRVyB80tsREOE7yvGVgalhZ6RNXCmEHkUKBKxew==
+ 
++"internmap@1 - 2":
++  version "2.0.3"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/internmap/-/internmap-2.0.3.tgz#6685f23755e43c524e251d29cbc97248e3061009"
++  integrity sha512-5Hh7Y1wQbvY5ooGgPbDaL5iYLAPzMTUrjMulskHLH6wnv/A+1q5rgEaiuqEjB+oxGXIVZs1FF+R/KPN3ZSQYYg==
++
++internmap@^1.0.0:
++  version "1.0.1"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/internmap/-/internmap-1.0.1.tgz#0017cc8a3b99605f0302f2b198d272e015e5df95"
++  integrity sha512-lDB5YccMydFBtasVtxnZ3MRBHuaoE8GKsppq+EchKL2U4nK/DmEpPHNH8MZe5HkMtpSiTSOZwfN0tzYjO/lJEw==
++
+ is-binary-path@~2.1.0:
+   version "2.1.0"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/is-binary-path/-/is-binary-path-2.1.0.tgz#ea1f7f3b80f064236e83470f86c09c254fb45b09"
+@@ -1404,6 +2056,28 @@ jszip@^3.10.1:
+     readable-stream "~2.3.6"
+     setimmediate "^1.0.5"
+ 
++katex@^0.16.45:
++  version "0.16.47"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/katex/-/katex-0.16.47.tgz#0a13a42c2deb4f74e61f162d440b9165a548030f"
++  integrity sha512-Eeo8Ys1doU1z+x8AZsPpQu+p/QcZBI5PeOo7QGQdy2x2m0MU/hYagBbGOmXwr5KVbEfVuWv9LpnQWeehogurjg==
++  dependencies:
++    commander "^8.3.0"
++
++khroma@^2.1.0:
++  version "2.1.0"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/khroma/-/khroma-2.1.0.tgz#45f2ce94ce231a437cf5b63c2e886e6eb42bbbb1"
++  integrity sha512-Ls993zuzfayK269Svk9hzpeGUKob/sIgZzyHYdjQoAdQetRKpOLj+k/QQQ/6Qi0Yz65mlROrfd+Ev+1+7dz9Kw==
++
++layout-base@^1.0.0:
++  version "1.0.2"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/layout-base/-/layout-base-1.0.2.tgz#1291e296883c322a9dd4c5dd82063721b53e26e2"
++  integrity sha512-8h2oVEZNktL4BH2JCOI90iD1yXwL6iNW7KcCKT2QZgQJR2vbqDsldCTPRU9NifTCqHZci57XvQQ15YTu+sTYPg==
++
++layout-base@^2.0.0:
++  version "2.0.1"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/layout-base/-/layout-base-2.0.1.tgz#d0337913586c90f9c2c075292069f5c2da5dd285"
++  integrity sha512-dp3s92+uNI1hWIpPGH3jK2kxE2lMjdXdr+DH8ynZHpd6PUlH6x6cbuXnoMmiNumznqaNO31xu9e79F0uuZ0JFg==
++
+ lie@~3.3.0:
+   version "3.3.0"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/lie/-/lie-3.3.0.tgz#dcf82dee545f46074daf200c7c1c5a08e0f40f6a"
+@@ -1421,7 +2095,14 @@ lines-and-columns@^1.1.6:
+   resolved "https://mirrors.huaweicloud.com/repository/npm/lines-and-columns/-/lines-and-columns-1.2.4.tgz#eca284f75d2965079309dc0ad9255abb2ebc1632"
+   integrity sha512-7ylylesZQ/PV29jhEDl3Ufjo6ZX7gCqJr5F7PKrqc93v7fzSymt1BpwEU8nAUXs8qzzvqhbjhK5QZg6Mt/HkBg==
+ 
+-lodash-es@^4.18.1:
++linkify-it@^6.0.0:
++  version "6.1.0"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/linkify-it/-/linkify-it-6.1.0.tgz#cd750d70fe9295eb7169e632ee67a4ff43e7f62d"
++  integrity sha512-wJ/TwpSDTLepCrQoYWYIExIKg5Zchex2Nn5yk2mFnB+6PtdkHtyLx742md9csRjjOnGkKIS/RrbY7l8D6gT9Vw==
++  dependencies:
++    uc.micro "^3.0.0"
++
++lodash-es@^4.17.21, lodash-es@^4.18.1:
+   version "4.18.1"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/lodash-es/-/lodash-es-4.18.1.tgz#b962eeb80d9d983a900bf342961fb7418ca10b1d"
+   integrity sha512-J8xewKD/Gk22OZbhpOVSwcs60zhd95ESDwezOFuA3/099925PdHJ7OFHNTGtajL3AlZkykD32HykiMo+BIBI8A==
+@@ -1448,6 +2129,23 @@ magic-string@^0.30.21:
+   dependencies:
+     "@jridgewell/sourcemap-codec" "^1.5.5"
+ 
++markdown-it@15.0.0:
++  version "15.0.0"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/markdown-it/-/markdown-it-15.0.0.tgz#dc199771f75b01d792316e5b524855b3973868e2"
++  integrity sha512-Lf8ajvVNdRpzSNB4VegxNy7gjs8gU35l4b4+ET49LrQC5PKYwLZ72u60LeJ9gv3qiaesuYjJWCyVeQmv/QWKQw==
++  dependencies:
++    argparse "^3.0.0"
++    entities "^8.0.0"
++    linkify-it "^6.0.0"
++    mdurl "^2.1.0"
++    punycode.js "^2.3.1"
++    uc.micro "^3.0.0"
++
++marked@^16.3.0:
++  version "16.4.2"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/marked/-/marked-16.4.2.tgz#4959a64be6c486f0db7467ead7ce288de54290a3"
++  integrity sha512-TI3V8YYWvkVf3KJe1dRkpnjs68JUPyEa5vjKrp1XEEJUAOaQc+Qj+L1qWbPd0SJuAdQkFU0h73sXXqwDYxsiDA==
++
+ math-intrinsics@^1.1.0:
+   version "1.1.0"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/math-intrinsics/-/math-intrinsics-1.1.0.tgz#a0dd74be81e2aa5c2f27e65ce283605ee4e2b7f9"
+@@ -1458,6 +2156,11 @@ mdn-data@2.27.1:
+   resolved "https://mirrors.huaweicloud.com/repository/npm/mdn-data/-/mdn-data-2.27.1.tgz#e37b9c50880b75366c4d40ac63d9bbcacdb61f0e"
+   integrity sha512-9Yubnt3e8A0OKwxYSXyhLymGW4sCufcLG6VdiDdUGVkPhpqLxlvP5vl1983gQjJl3tqbrM731mjaZaP68AgosQ==
+ 
++mdurl@^2.1.0:
++  version "2.1.0"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/mdurl/-/mdurl-2.1.0.tgz#d711d3f7bce7f22c487c91be78545f356fa96573"
++  integrity sha512-1+HBaOx0zi/dQWht8rNv9MYf9qqpqL/kxI0hXImU6Y547zM6Sni8BQibt7ifgMcYtQg41ao3Ivd6cnSM86inpg==
++
+ memoize-one@^6.0.0:
+   version "6.0.0"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/memoize-one/-/memoize-one-6.0.0.tgz#b2591b871ed82948aee4727dc6abceeeac8c1045"
+@@ -1468,6 +2171,33 @@ merge2@^1.3.0:
+   resolved "https://mirrors.huaweicloud.com/repository/npm/merge2/-/merge2-1.4.1.tgz#4368892f885e907455a6fd7dc55c0c9d404990ae"
+   integrity sha512-8q7VEgMJW4J8tcfVPy8g09NcQwZdbwFEqhe/WZkoIzjn/3TGDwtOCYtXGxA3O8tPzpczCCDgv+P2P5y00ZJOOg==
+ 
++mermaid@11.16.1:
++  version "11.16.1"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/mermaid/-/mermaid-11.16.1.tgz#57ae2342f6c45b967113b04c9258430bdd057ee8"
++  integrity sha512-TQsq6u22fAn3rek5VOubrhKPo1g5hwC3FXUN9hiyupTckcYiGuuKGkNQrKYwGJkXUxZdojwRG46gsSCFZMDp4g==
++  dependencies:
++    "@braintree/sanitize-url" "^7.1.2"
++    "@iconify/utils" "^3.0.2"
++    "@mermaid-js/parser" "^1.2.0"
++    "@types/d3" "^7.4.3"
++    "@upsetjs/venn.js" "^2.0.0"
++    cytoscape "^3.33.3"
++    cytoscape-cose-bilkent "^4.1.0"
++    cytoscape-fcose "^2.2.0"
++    d3 "^7.9.0"
++    d3-sankey "^0.12.3"
++    dagre-d3-es "7.0.14"
++    dayjs "^1.11.20"
++    dompurify "^3.3.3"
++    es-toolkit "^1.45.1"
++    katex "^0.16.45"
++    khroma "^2.1.0"
++    marked "^16.3.0"
++    roughjs "^4.6.6"
++    stylis "^4.3.6"
++    ts-dedent "^2.2.0"
++    uuid "^11.1.0 || ^12 || ^13 || ^14.0.0"
++
+ micromatch@^4.0.8:
+   version "4.0.8"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/micromatch/-/micromatch-4.0.8.tgz#d66fa18f3a47076789320b9b1af32bd86d9fa202"
+@@ -1568,6 +2298,11 @@ obug@^2.1.1:
+   resolved "https://mirrors.huaweicloud.com/repository/npm/obug/-/obug-2.2.1.tgz#9c453efeeda822050eb9774242e969c784d64d78"
+   integrity sha512-XrsrhT5sybtKI6wakr2SPOlGZWWYbUXZ7a0jT8/QOeAPau+1X/bSegNe5YR75oJmEZQbKningirmGOEJCIk61Q==
+ 
++package-manager-detector@^1.8.0:
++  version "1.9.0"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/package-manager-detector/-/package-manager-detector-1.9.0.tgz#217ed03645bfeb563e9efce4c5bbbfbb652754ab"
++  integrity sha512-zAMfbta9nPA8AKkA4WdmNAT8R8s6Dk0/xwPsqNnRidMFcLo1YkLuPDTgs2f64XdzS8vbLNnoJ+uUIkgbz7oRHA==
++
+ pako@~1.0.2:
+   version "1.0.11"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/pako/-/pako-1.0.11.tgz#6c9599d340d54dfd3946380252a35705a6b992bf"
+@@ -1585,6 +2320,11 @@ path-browserify@^1.0.1:
+   resolved "https://mirrors.huaweicloud.com/repository/npm/path-browserify/-/path-browserify-1.0.1.tgz#d98454a9c3753d5790860f16f68867b9e46be1fd"
+   integrity sha512-b7uo2UCUOYZcnF/3ID0lulOJi/bafxa1xPe7ZPsammBSpjSWQkjNxlt635YGS2MiR9GjvuXCtz2emr3jbsz98g==
+ 
++path-data-parser@0.1.0, path-data-parser@^0.1.0:
++  version "0.1.0"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/path-data-parser/-/path-data-parser-0.1.0.tgz#8f5ba5cc70fc7becb3dcefaea08e2659aba60b8c"
++  integrity sha512-NOnmBpt5Y2RWbuv0LMzsayp3lVylAHLPUTut412ZA3l+C4uw4ZVkQbjShYCQ8TCpUMdPapr4YjUqLYD6v68j+w==
++
+ path-parse@^1.0.7:
+   version "1.0.7"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/path-parse/-/path-parse-1.0.7.tgz#fbc114b60ca42b30d9daf5858e4bd68bbedb6735"
+@@ -1631,6 +2371,19 @@ pirates@^4.0.1:
+   resolved "https://mirrors.huaweicloud.com/repository/npm/pirates/-/pirates-4.0.7.tgz#643b4a18c4257c8a65104b73f3049ce9a0a15e22"
+   integrity sha512-TfySrs/5nm8fQJDcBDuUng3VOUKsd7S+zqvbOTiGXHfxX4wK31ard+hoNuvkicM/2YFzlpDgABOevKSsB4G/FA==
+ 
++points-on-curve@0.2.0, points-on-curve@^0.2.0:
++  version "0.2.0"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/points-on-curve/-/points-on-curve-0.2.0.tgz#7dbb98c43791859434284761330fa893cb81b4d1"
++  integrity sha512-0mYKnYYe9ZcqMCWhUjItv/oHjvgEsfKvnUTg8sAtnHr3GVy7rGkXCb6d5cSyqrWqL4k81b9CPg3urd+T7aop3A==
++
++points-on-path@^0.2.1:
++  version "0.2.1"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/points-on-path/-/points-on-path-0.2.1.tgz#553202b5424c53bed37135b318858eacff85dd52"
++  integrity sha512-25ClnWWuw7JbWZcgqY/gJ4FQWadKxGWk+3kR/7kD0tCaDtPPMj7oHu2ToLaVhfpnHrZzYby2w6tUA0eOIuUg8g==
++  dependencies:
++    path-data-parser "0.1.0"
++    points-on-curve "0.2.0"
++
+ postcss-import@^15.1.0:
+   version "15.1.0"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/postcss-import/-/postcss-import-15.1.0.tgz#41c64ed8cc0e23735a9698b3249ffdbf704adc70"
+@@ -1698,6 +2451,11 @@ proxy-from-env@^2.1.0:
+   resolved "https://mirrors.huaweicloud.com/repository/npm/proxy-from-env/-/proxy-from-env-2.1.0.tgz#a7487568adad577cfaaa7e88c49cab3ab3081aba"
+   integrity sha512-cJ+oHTW1VAEa8cJslgmUZrc+sjRKgAKl3Zyse6+PV38hZe/V6Z14TbCuXcan9F9ghlz4QrFr2c92TNF82UkYHA==
+ 
++punycode.js@^2.3.1:
++  version "2.3.1"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/punycode.js/-/punycode.js-2.3.1.tgz#6b53e56ad75588234e79f4affa90972c7dd8cdb7"
++  integrity sha512-uxFIHU0YlHYhDQtV4R9J6a52SLx28BCjT+4ieh7IGbgwVJWO+km431c4yRlREUAsAmt/uMjQUyQHNEPf0M39CA==
++
+ punycode@^2.3.1:
+   version "2.3.1"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/punycode/-/punycode-2.3.1.tgz#027422e2faec0b25e1549c3e1bd8309b9133b6e5"
+@@ -1753,6 +2511,11 @@ reusify@^1.0.4:
+   resolved "https://mirrors.huaweicloud.com/repository/npm/reusify/-/reusify-1.1.0.tgz#0fe13b9522e1473f51b558ee796e08f11f9b489f"
+   integrity sha512-g6QUff04oZpHs0eG5p83rFLhHeV00ug/Yf9nZM6fLeUrPguBTkTQOdpAWWspMh55TZfVQDPaN3NQJfbVRAxdIw==
+ 
++robust-predicates@^3.0.2:
++  version "3.0.3"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/robust-predicates/-/robust-predicates-3.0.3.tgz#1099061b3349e2c5abec6c2ab0acd440d24d4062"
++  integrity sha512-NS3levdsRIUOmiJ8FZWCP7LG3QpJyrs/TE0Zpf1yvZu8cAJJ6QMW92H1c7kWpdIHo8RvmLxN/o2JXTKHp74lUA==
++
+ rollup@^4.34.9:
+   version "4.64.0"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/rollup/-/rollup-4.64.0.tgz#3a003154b9172d04499c5cfad12592d6efe3b1cc"
+@@ -1788,6 +2551,16 @@ rollup@^4.34.9:
+     "@rollup/rollup-win32-x64-msvc" "4.64.0"
+     fsevents "~2.3.2"
+ 
++roughjs@^4.6.6:
++  version "4.6.6"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/roughjs/-/roughjs-4.6.6.tgz#1059f49a5e0c80dee541a005b20cc322b222158b"
++  integrity sha512-ZUz/69+SYpFN/g/lUlo2FXcIjRkSu3nDarreVdGGndHEBJ6cXPdKguS8JGxwj5HA5xIbVKSmLgr5b3AWxtRfvQ==
++  dependencies:
++    hachure-fill "^0.5.2"
++    path-data-parser "^0.1.0"
++    points-on-curve "^0.2.0"
++    points-on-path "^0.2.1"
++
+ run-parallel@^1.1.9:
+   version "1.2.0"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/run-parallel/-/run-parallel-1.2.0.tgz#66d1368da7bdf921eb9d95bd1a9229e7f21a43ee"
+@@ -1795,11 +2568,21 @@ run-parallel@^1.1.9:
+   dependencies:
+     queue-microtask "^1.2.2"
+ 
++rw@1:
++  version "1.3.3"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/rw/-/rw-1.3.3.tgz#3f862dfa91ab766b14885ef4d01124bfda074fb4"
++  integrity sha512-PdhdWy89SiZogBLaw42zdeqtRJ//zFd2PgQavcICDUgJT5oW10QCRKbJ6bg4r0/UY2M6BWd5tkxuGFRvCkgfHQ==
++
+ safe-buffer@~5.1.0, safe-buffer@~5.1.1:
+   version "5.1.2"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/safe-buffer/-/safe-buffer-5.1.2.tgz#991ec69d296e0313747d59bdfd2b745c35f8828d"
+   integrity sha512-Gd2UZBJDkXlY7GbJxfsE8/nvKkUEU1G38c1siN6QP6a9PT9MmHB8GnpscSmMJSoF8LOIrt8ud/wPtojys4G6+g==
+ 
++"safer-buffer@>= 2.1.2 < 3.0.0":
++  version "2.1.2"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/safer-buffer/-/safer-buffer-2.1.2.tgz#44fa161b0187b9549dd84bb91802f9bd8385cd6a"
++  integrity sha512-YZo3K82SD7Riyi0E1EQPojLz7kpepnSQI9IyPbHHg1XXXevb5dJI7tpyN2ADxGcQbHG7vcyRHk0cbwqcQriUtg==
++
+ saxes@^6.0.0:
+   version "6.0.0"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/saxes/-/saxes-6.0.0.tgz#fe5b4a4768df4f14a201b1ba6a65c1f3d9988cc5"
+@@ -1844,6 +2627,11 @@ string_decoder@~1.1.1:
+   dependencies:
+     safe-buffer "~5.1.0"
+ 
++stylis@^4.3.6:
++  version "4.4.0"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/stylis/-/stylis-4.4.0.tgz#c5846c9345f4bfc51bd0cbd7ca35a0744f485a5d"
++  integrity sha512-5Z9ZpRzfuH6l/UAvCPAPUo3665Nk2wLaZU3x+TLHKVzIz33+sbJqbtrYoC3KD4/uVOr2Zp+L0LySezP9OHV9yA==
++
+ sucrase@^3.35.0:
+   version "3.35.1"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/sucrase/-/sucrase-3.35.1.tgz#4619ea50393fe8bd0ae5071c26abd9b2e346bfe1"
+@@ -1909,7 +2697,7 @@ tinybench@^2.9.0:
+   resolved "https://mirrors.huaweicloud.com/repository/npm/tinybench/-/tinybench-2.9.0.tgz#103c9f8ba6d7237a47ab6dd1dcff77251863426b"
+   integrity sha512-0+DUvqWMValLmha6lr4kD8iAMK1HzV0/aKnCtWb9v9641TnP/MFb7Pc2bxoxQjTXAErryXVgUOfv2YqNllqGeg==
+ 
+-tinyexec@^1.0.2:
++tinyexec@^1.0.2, tinyexec@^1.3.1:
+   version "1.3.1"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/tinyexec/-/tinyexec-1.3.1.tgz#16a2e3c6e23fafce72640e678e651db36145b9c6"
+   integrity sha512-GCvB3aoys96IuDFBMcTB46JOR6mdMtAToqwiW8JlWhsoh1mhHi/xn9ss/Dg7N555GiJyEt2qzoG/NHCwM6h1EA==
+@@ -1960,6 +2748,11 @@ tr46@^7.0.0:
+   dependencies:
+     punycode "^2.3.1"
+ 
++ts-dedent@^2.2.0:
++  version "2.3.0"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/ts-dedent/-/ts-dedent-2.3.0.tgz#8fac36c7902b541c154ac13a27ac467997af11f8"
++  integrity sha512-JfJeIHke7y2egdGGgRAvpCwYFUsHlM2gPcrVOxFkznt/4uzQ7HFmvE63iFHVLBJNDuyDOQgijDK/tXH/f6Msjg==
++
+ ts-interface-checker@^0.1.9:
+   version "0.1.13"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/ts-interface-checker/-/ts-interface-checker-0.1.13.tgz#784fd3d679722bc103b1b4b8030bcddb5db2a699"
+@@ -1970,6 +2763,11 @@ typescript@^5.7.2:
+   resolved "https://mirrors.huaweicloud.com/repository/npm/typescript/-/typescript-5.9.3.tgz#5b4f59e15310ab17a216f5d6cf53ee476ede670f"
+   integrity sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==
+ 
++uc.micro@^3.0.0:
++  version "3.0.0"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/uc.micro/-/uc.micro-3.0.0.tgz#64d6cb0bfe2a558ce0ec7c8c0dc88a02d898f506"
++  integrity sha512-U3PppEkleoTnIfi8BozMx3yju3qc/L6SwqWo2Sw+54PX+PX0q9I+r1Um5HCmqD7n9VDX5/v3vQH/AjA6deDdtw==
++
+ undici-types@~6.21.0:
+   version "6.21.0"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/undici-types/-/undici-types-6.21.0.tgz#691d00af3909be93a7faa13be61b3a5b50ef12cb"
+@@ -1993,6 +2791,11 @@ util-deprecate@^1.0.2, util-deprecate@~1.0.1:
+   resolved "https://mirrors.huaweicloud.com/repository/npm/util-deprecate/-/util-deprecate-1.0.2.tgz#450d4dc9fa70de732762fbd2d4a28981419a0ccf"
+   integrity sha512-EPD5q1uXyFxJpCrLnCc1nHnq3gOa6DZBocAIiI2TaSCA7VCJ1UJDMagCzIkXNsUYfD1daK//LTEQ8xiIbrHtcw==
+ 
++"uuid@^11.1.0 || ^12 || ^13 || ^14.0.0":
++  version "14.0.3"
++  resolved "https://mirrors.huaweicloud.com/repository/npm/uuid/-/uuid-14.0.3.tgz#48c9b0dcf5a42d983c23162399eeb9af8b2cc617"
++  integrity sha512-Sc5u1VVln93y1Xnz4R+CunOZc7R9LUcTmhj7Rc7Eg3HVcf7rVn2FOoa812fe0W8p3jD7xeoGSYbfqCGGH2B6xw==
++
+ "vite@^6.0.0 || ^7.0.0 || ^8.0.0", vite@^6.0.7:
+   version "6.4.4"
+   resolved "https://mirrors.huaweicloud.com/repository/npm/vite/-/vite-6.4.4.tgz#ddcfd2e568dd4904a9154d8763f2d78a3e9bf443"

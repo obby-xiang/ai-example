@@ -1,0 +1,367 @@
+diff --git a/frontend/src/components/AiPanel/AiPanel.vue b/frontend/src/components/AiPanel/AiPanel.vue
+index cb5c68b..f39b0f8 100644
+--- a/frontend/src/components/AiPanel/AiPanel.vue
++++ b/frontend/src/components/AiPanel/AiPanel.vue
+@@ -184,8 +184,10 @@
+                （expandedBlocks ?? defaultExpanded，D4/D6/D-C6）；key 用块稳定 id
+                （成员 toolCallId / kind-seg，加消息命名空间前缀，收口修 F1/红队 M-1），禁用数组下标（§7 R4-3 / D5）。 -->
+           <template v-for="(block, bi) in blocksOf(m)" :key="block.id">
+-            <!-- 正文块：单段正文，永不进折叠组（A5' 规则③）；R-157 #3：流式中正文末尾打字机光标 -->
+-            <div v-if="block.kind === 'text'" class="whitespace-pre-wrap">{{ textOf(block) }}<span v-if="showCaret(m, bi)" class="caret" data-testid="stream-caret"></span></div>
++            <!-- 正文块：单段正文，永不进折叠组（A5' 规则③）；
++                 R-157 #3：流式中正文末尾打字机光标；R-159 #6：末尾 CH_TAIL 字符包 span.ch 渐显（新字符 chIn）；
++                 R-159 #4：完成时光标同帧淡出（fade-out，300ms 后随 isFading 退役）。 -->
++            <div v-if="block.kind === 'text'" class="whitespace-pre-wrap">{{ chSplit(m, block).head }}<span v-for="(ch, ci) in chSplit(m, block).tail" :key="ci" class="ch">{{ ch }}</span><span v-if="showCaret(m, bi) || isFading(m)" class="caret" :class="{ 'fade-out': isFading(m) }" data-testid="stream-caret"></span></div>
+ 
+             <template v-else>
+               <!-- R-154 #13+14（用户直裁「彻底拆除」）：组壳退役 —— 每段恒一张卡。
+@@ -333,23 +335,33 @@
+ 
+         </div>
+ 
+-        <!-- R-157 #3①：首 token 前 = 卡片下方呼吸点 + 「工作中…」（与打字机光标接力） -->
+-        <div v-if="isTyping(m)" class="loading-breath mt-1.5 pl-0.5" data-testid="loading-breath">
+-          <span class="dot"></span><span class="txt">工作中…</span>
+-        </div>
+-
+-        <!-- R-157 #1：消息级操作行挪气泡外、卡片下沿独立行 —— 时间戳左置、操作右置
+-             （用户消息整行右反，时间戳贴卡片侧）；桌面 hover/focus-within 浮出（保留键盘可达）。
+-             判据仍取 parts（N10）；「已复制」反馈走组件局部状态（copyState），不占 ai.notice。
+-             R-157 #2：role 过滤 —— 仅用户消息可编辑（改完从该条重跑）；AI 回复仅复制/重试。 -->
++        <!-- R-159 #2/#3/#4：单一元信息行（demo aiShell(fix) 结构）——左位 = 流式期「工作中…」呼吸
++             常驻（发出即现，首字符不消失；完成时淡出换时间戳）/ 完成后时间戳；右位 = 操作
++             （流式期 visibility:hidden 占位，完成换入；hover/focus-within 浮出）。
++             行判据：有正文 或 助手消息流式中（发出即现，无正文也要能呼吸）。 -->
+         <div
+-          v-if="m.parts.some((part) => part.kind === 'text' && part.text)"
+-          class="mt-1 flex items-center justify-between gap-2 text-xs text-[#a8abb2]"
++          v-if="showMetaRow(m)"
++          class="mt-1 flex items-center justify-between gap-2 text-xs text-[#a8abb2] w-full max-w-[82%]"
+           :class="m.role === 'user' ? 'flex-row-reverse' : ''"
+           :data-testid="'msg-ops-' + m.id"
+         >
+-          <span v-if="formatTimestamp(m)" class="text-[#c0c4cc]" data-testid="msg-timestamp">{{ formatTimestamp(m) }}</span>
+-          <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
++          <span class="flex items-center gap-1 min-h-[18px]">
++            <span
++              v-if="isBreathing(m) || isFading(m)"
++              class="loading-breath"
++              :class="{ 'fade-out': isFading(m) }"
++              style="margin:0;padding-left:2px"
++              data-testid="loading-breath"
++            >
++              <span class="dot"></span><span class="txt">工作中…</span>
++            </span>
++            <span v-else-if="formatTimestamp(m)" class="text-[#c0c4cc]" data-testid="msg-timestamp">{{ formatTimestamp(m) }}</span>
++          </span>
++          <div
++            class="flex items-center gap-1 transition-opacity"
++            :class="m.streaming ? '' : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100'"
++            :style="m.streaming && m.role === 'assistant' ? 'visibility: hidden' : ''"
++          >
+             <span
+               v-if="copyState && copyState.id === m.id"
+               :data-testid="'copy-hint-' + m.id"
+@@ -647,13 +659,83 @@ const formRemainingSeconds = computed(() => {
+ })
+ 
+ /**
+- * 等待回复：正文（text 段）还没产出时的三点闪烁。
+- *
+- * 批2（权威翻转）：判据从 `content.length === 0` 改为"无任何非空 text 段" —— 渲染真值已是
+- * `parts`，`content` 只是同一份数据的派生投影，直接读它会与渲染口径分家（§6.3 清单）。
++ * R-159 #2：「工作中…」呼吸全程常驻判据 —— 助手消息 streaming 全期成立（发出即现，
++ * 首字符上屏不消失；原 isTyping 的「无正文」判据退役，消费点仅元信息行左位一处）。
+  */
+-function isTyping(message: ChatMessage): boolean {
+-  return message.streaming && !message.parts.some((part) => part.kind === 'text' && part.text.length > 0)
++function isBreathing(message: ChatMessage): boolean {
++  return message.role === 'assistant' && message.streaming
++}
++
++/** R-159 #2/#3：元信息行判据 = 有正文（N10 操作行判据沿用）或助手流式中（无正文也要能呼吸）。 */
++function showMetaRow(message: ChatMessage): boolean {
++  return message.parts.some((part) => part.kind === 'text' && part.text)
++    || isBreathing(message)
++}
++
++/** R-159 #4：完成淡出记账 —— streaming true→false 时该消息进 300ms 淡出（caretOut），
++ *  新 delta 到达（false→true）立即打断撤出；超时清账后元行换时间戳+复制。 */
++const fadingIds = ref<Set<string>>(new Set())
++const fadeTimers = new Map<string, ReturnType<typeof setTimeout>>()
++/** 基线快照：setup 时播种一次（首见只记账不判迁移），防「首个迁移即首见」丢基线。 */
++let prevStreaming = new Map<string, boolean>(ai.messages.map((m) => [m.id, m.streaming]))
++
++function setFading(id: string, on: boolean): void {
++  if (fadingIds.value.has(id) === on) {
++    return
++  }
++  const next = new Set(fadingIds.value)
++  if (on) {
++    next.add(id)
++  } else {
++    next.delete(id)
++  }
++  fadingIds.value = next
++}
++
++function isFading(message: ChatMessage): boolean {
++  return fadingIds.value.has(message.id)
++}
++
++watch(
++  () => ai.messages.map((m) => [m.id, m.streaming] as const),
++  (list) => {
++    const next = new Map(list)
++    for (const [id, streaming] of next) {
++      const was = prevStreaming.get(id)
++      if (was && !streaming) {
++        // 完成：同帧起 300ms 淡出，然后清账
++        setFading(id, true)
++        fadeTimers.set(id, setTimeout(() => {
++          fadeTimers.delete(id)
++          setFading(id, false)
++        }, 300))
++      } else if (!was && streaming && fadingIds.value.has(id)) {
++        // 风险 3：快速连发 —— 新 delta 打断淡出
++        const timer = fadeTimers.get(id)
++        if (timer !== undefined) {
++          clearTimeout(timer)
++          fadeTimers.delete(id)
++        }
++        setFading(id, false)
++      }
++    }
++    prevStreaming = next
++  }
++)
++
++/** R-159 #6：新字符渐显 —— 末尾 CH_TAIL 字符包 span.ch（chIn .18s），其余为稳定前缀文本。
++ *  纯展示切分，不写段、不调 deriveProjections（delta 性能锁步零触碰，S0-a 实证见报告）。 */
++const CH_TAIL = 8
++
++function chSplit(message: ChatMessage, block: Block): { head: string; tail: string[] } {
++  if (!message.streaming) {
++    return { head: textOf(block), tail: [] }
++  }
++  const text = textOf(block)
++  if (text.length <= CH_TAIL) {
++    return { head: '', tail: [...text] }
++  }
++  return { head: text.slice(0, -CH_TAIL), tail: [...text.slice(-CH_TAIL)] }
+ }
+ 
+ /** 批4④ A5'：消息 → 渲染块序列（groupParts 纯函数；parts 为响应式数组，帧到达即重算）。
+@@ -1085,6 +1167,10 @@ onBeforeUnmount(() => {
+     clearTimeout(copyTimer)
+     copyTimer = null
+   }
++  for (const timer of fadeTimers.values()) {
++    clearTimeout(timer)
++  }
++  fadeTimers.clear()
+   ai.stopWorkspaceSync()
+ })
+ </script>
+@@ -1120,15 +1206,33 @@ onBeforeUnmount(() => {
+ }
+ .caret {
+   display: inline-block;
+-  width: 2px;
+-  height: 14px;
+-  background: #409eff;
+-  margin-left: 2px;
++  width: 8px;
++  height: 1em;
++  background: #303133;
++  border-radius: 2px;
++  margin-left: 1px;
+   vertical-align: -2px;
+   animation: caretBlink 1s steps(1) infinite;
+ }
++/* R-159 #1：0–55% 显（demo caretBlink 口径） */
+ @keyframes caretBlink {
+-  50% { opacity: 0; }
++  0%, 55% { opacity: 1; }
++  56%, 100% { opacity: 0; }
++}
++/* R-159 #6：新字符渐显（opacity .1→1） */
++.ch {
++  animation: chIn 0.18s ease-out;
++}
++@keyframes chIn {
++  from { opacity: 0.1; }
++  to { opacity: 1; }
++}
++/* R-159 #4：完成优雅淡出 300ms（光标 + 「工作中…」同帧） */
++.fade-out {
++  animation: caretOut 0.3s ease forwards;
++}
++@keyframes caretOut {
++  to { opacity: 0; }
+ }
+ @media (prefers-reduced-motion: reduce) {
+   .loading-breath .dot,
+diff --git a/frontend/tests/ai-panel-parts-render.spec.ts b/frontend/tests/ai-panel-parts-render.spec.ts
+index 4b41709..5491939 100644
+--- a/frontend/tests/ai-panel-parts-render.spec.ts
++++ b/frontend/tests/ai-panel-parts-render.spec.ts
+@@ -275,7 +275,7 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
+     wrapper.unmount()
+   })
+ 
+-  it('R-157 #3：生成中指示器接力 —— 首 token 前呼吸点+「工作中…」，流式中打字机光标', async () => {
++  it('R-159 #2：呼吸全程常驻 —— 流式期有无正文呼吸都在（首字符不消失），光标同存；终态两者皆无', async () => {
+     const typing = buildMessage([{ kind: 'text', seg: 0, text: '', streaming: true }], null, true)
+     typing.id = 'a-typing'
+     const speaking = buildMessage([{ kind: 'text', seg: 0, text: '正在说', streaming: true }], null, true)
+@@ -284,12 +284,11 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
+     settled.id = 'a-settled'
+ 
+     const wrapper = await mountPanel([typing, speaking, settled])
+-    // 首 token 前：卡片下方呼吸点（一点 + 工作中…），无打字机光标
++    // R-159 #2 常驻：无正文（a-typing）与有正文（a-speaking）两条流式消息都呼吸 —— 首字符不消失
+     const breath = wrapper.findAll('[data-testid="loading-breath"]')
+-    expect(breath).toHaveLength(1)
+-    expect(breath[0].text()).toContain('工作中…')
+-    expect(breath[0].find('.dot').exists()).toBe(true)
+-    // 流式中有正文：末尾打字机光标，无呼吸点、无旧三点动画
++    expect(breath).toHaveLength(2)
++    expect(breath[1].text()).toContain('工作中…')
++    // 光标与呼吸同存（不再互斥接力）
+     expect(wrapper.findAll('[data-testid="stream-caret"]')).toHaveLength(1)
+     expect(wrapper.findAll('.typing')).toHaveLength(0)
+     expect(wrapper.text()).toContain('正在说')
+@@ -750,10 +749,10 @@ describe('R-157：操作行外置 + role 过滤 + 编辑重跑 + 发送滚底 +
+     }
+     // 时间戳在操作行内（仅 u-1 带戳）
+     expect(wrapper.find('[data-testid="msg-ops-u-1"]').find('[data-testid="msg-timestamp"]').exists()).toBe(true)
+-    // 时间戳与操作两端分置（MINOR-3）：行 = justify-between，时间戳为首子、操作容器为末子
++    // 时间戳与操作两端分置（R-159 单一元信息行）：行 = justify-between，左位容器含时间戳、末子 = 操作容器
+     const rowEl = wrapper.find('[data-testid="msg-ops-u-1"]').element
+     expect(rowEl.className).toContain('justify-between')
+-    expect(rowEl.children[0].getAttribute('data-testid')).toBe('msg-timestamp')
++    expect(rowEl.children[0].querySelector('[data-testid="msg-timestamp"]')).not.toBeNull()
+     expect(rowEl.children[rowEl.children.length - 1].className).toContain('opacity-0')
+     // hover/focus-within 浮出口径：操作容器默认透明（group-hover 浮现，键盘 focus-within 可达）
+     expect(wrapper.find('[data-testid="msg-ops-u-1"]').find('[class*="opacity-0"]').exists()).toBe(true)
+@@ -980,3 +979,119 @@ describe('R-158：HITL 只读回执 / CollapsibleText / 复制换行', () => {
+     wrapper.unmount()
+   })
+ })
++
++/**
++ * R-159（issue #13 流式回复体验）：B1 光标 / 呼吸全程常驻 / 元信息行流式遮蔽 /
++ * 完成 300ms 淡出换入 / 工具期光标收起归位（S0-b 时序证据）/ span.ch 渐显包裹。
++ */
++describe('R-159：流式回复体验六项', () => {
++  it('#1：B1 光标在流式正文末尾（class caret，随 ch spans 之后）', async () => {
++    const speaking = buildMessage([{ kind: 'text', seg: 0, text: '正在输出的一段文字', streaming: true }], null, true)
++    speaking.id = 'a-b1'
++    const wrapper = await mountPanel([speaking])
++    const caret = wrapper.find('[data-testid="stream-caret"]')
++    expect(caret.exists()).toBe(true)
++    expect(caret.classes()).toContain('caret')
++    // 光标是正文块最后一个子元素（B1 粗块随文尾）
++    const bubble = wrapper.find('[data-testid="msg-bubble-a-b1"]')
++    expect(bubble.find('.whitespace-pre-wrap').element.lastElementChild!.className).toContain('caret')
++    wrapper.unmount()
++  })
++
++  it('#3：流式期元行右位复制 visibility:hidden 占位，无时间戳；完成后换入', async () => {
++    const msg = buildMessage([{ kind: 'text', seg: 0, text: '流式中', streaming: true }], null, true)
++    msg.id = 'a-meta'
++    msg.timestamp = 1_700_000_000_000
++    const wrapper = await mountPanel([msg])
++    const ops = wrapper.find('[data-testid="msg-ops-a-meta"]')
++    // 流式期：左位呼吸（无时间戳），右位 visibility:hidden
++    expect(ops.find('[data-testid="loading-breath"]').exists()).toBe(true)
++    expect(ops.find('[data-testid="msg-timestamp"]').exists()).toBe(false)
++    expect((ops.element.lastElementChild as HTMLElement).style.visibility).toBe('hidden')
++    wrapper.unmount()
++  })
++
++  it('#4：完成淡出 —— streaming=false 同帧起 fade-out（呼吸+光标），300ms 后换时间戳+复制', async () => {
++    const msg = buildMessage([{ kind: 'text', seg: 0, text: '已完成的回复', streaming: true }], null, true)
++    msg.id = 'a-fade'
++    msg.timestamp = 1_700_000_000_000
++    const wrapper = await mountPanel([msg])
++    // 经 store 代理写入（裸引用写入不触发响应式 —— 实测结论）
++    const store = useAiStore()
++    store.messages[0]!.streaming = false
++    await wrapper.vm.$nextTick()
++    // 同帧淡出：呼吸与光标挂 fade-out（jsdom 无动画计时，class 断言）
++    expect(wrapper.find('[data-testid="loading-breath"]').classes()).toContain('fade-out')
++    expect(wrapper.find('[data-testid="stream-caret"]').classes()).toContain('fade-out')
++
++    await new Promise((resolve) => setTimeout(resolve, 350))
++    await wrapper.vm.$nextTick()
++    // 淡出退役：呼吸/光标消失，元行换时间戳（左）+ 复制（右，visibility 恢复）
++    expect(wrapper.find('[data-testid="loading-breath"]').exists()).toBe(false)
++    expect(wrapper.find('[data-testid="stream-caret"]').exists()).toBe(false)
++    const ops = wrapper.find('[data-testid="msg-ops-a-fade"]')
++    expect(ops.find('[data-testid="msg-timestamp"]').exists()).toBe(true)
++    expect((ops.element.lastElementChild as HTMLElement).style.visibility).toBe('')
++    wrapper.unmount()
++  })
++
++  it('风险3：快速连发 —— 完成后再来 delta 打断淡出（fade-out 撤除、呼吸常驻恢复）', async () => {
++    const msg = buildMessage([{ kind: 'text', seg: 0, text: '第一轮', streaming: true }], null, true)
++    msg.id = 'a-race'
++    const wrapper = await mountPanel([msg])
++    const store = useAiStore()
++
++    store.messages[0]!.streaming = false
++    await wrapper.vm.$nextTick()
++    expect(wrapper.find('[data-testid="loading-breath"]').classes()).toContain('fade-out')
++    // 新 delta 到达（streaming 复 true）——打断
++    store.messages[0]!.streaming = true
++    await wrapper.vm.$nextTick()
++    expect(wrapper.find('[data-testid="loading-breath"]').classes()).not.toContain('fade-out')
++    await new Promise((resolve) => setTimeout(resolve, 350))
++    await wrapper.vm.$nextTick()
++    expect(wrapper.find('[data-testid="loading-breath"]').exists()).toBe(true) // 未误清
++    wrapper.unmount()
++  })
++
++  it('#5/S0-b：工具卡为末块期间光标收起；工具收口后新 text 段成末块自然归位', async () => {
++    const msg = buildMessage(
++      [
++        { kind: 'text', seg: 0, text: '先读文件', streaming: true },
++        { kind: 'tool', seg: 1, toolCallId: 'w1', name: 'open_export_file_editor', kind2: 'FRONTEND', status: 'running', requiresAction: false }
++      ],
++      null,
++      true
++    )
++    msg.id = 'a-tool'
++    const wrapper = await mountPanel([msg])
++    // 工具为末块且流未收口 ⇒ 光标恒 false（执行期零指示根因修复：收起）
++    expect(wrapper.find('[data-testid="stream-caret"]').exists()).toBe(false)
++    // 时序：message_end 未到（streaming 仍 true）、工具仍在 running —— 期间无光标
++    expect(msg.streaming).toBe(true)
++    // 归位：工具收口后正文继续（新 text 段成为末块）⇒ 光标即刻归位（不依赖 streaming=false）——经代理 push 触发响应式
++    const store = useAiStore()
++    ;(store.messages[0]!.parts as MessagePart[]).push({ kind: 'text', seg: 2, text: '继续输出', streaming: true })
++    await wrapper.vm.$nextTick()
++    expect(wrapper.find('[data-testid="stream-caret"]').exists()).toBe(true)
++    wrapper.unmount()
++  })
++
++  it('#6：新字符渐显 —— 流式正文末尾 8 字符包 span.ch，前缀为稳定文本', async () => {
++    const msg = buildMessage([{ kind: 'text', seg: 0, text: 'abcdefghijkl', streaming: true }], null, true)
++    msg.id = 'a-ch'
++    const wrapper = await mountPanel([msg])
++    const bubble = wrapper.find('[data-testid="msg-bubble-a-ch"]')
++    const chSpans = bubble.findAll('span.ch')
++    expect(chSpans).toHaveLength(8)
++    expect(chSpans.map((s) => s.text()).join('')).toBe('efghijkl')
++    expect(bubble.text()).toContain('abcd')
++    // 终态消息零 ch 包裹（纯文本一次成型）
++    const done = buildMessage([{ kind: 'text', seg: 0, text: 'abcdefghijkl', streaming: false }], null, false)
++    done.id = 'a-done'
++    const wrapper2 = await mountPanel([done])
++    expect(wrapper2.find('[data-testid="msg-bubble-a-done"]').findAll('span.ch')).toHaveLength(0)
++    wrapper.unmount()
++    wrapper2.unmount()
++  })
++})
