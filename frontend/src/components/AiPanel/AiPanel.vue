@@ -9,9 +9,11 @@
     <span class="writing-vertical text-[13px]">AI 助手</span>
   </div>
 
-  <div v-else class="ai-chat h-full flex flex-col">
+  <!-- R-165 S5a 项 9：focus-visible 聚焦环（demo v7 14b 口径）——根容器一条任意变体覆盖面板内
+       **全部**原生 button（含 v-html 注入的代码块复制钮），无需逐钮挂类。 -->
+  <div v-else class="ai-chat h-full flex flex-col [&_button:focus-visible]:outline-none [&_button:focus-visible]:ring-2 [&_button:focus-visible]:ring-[#2563eb]/40">
     <!-- 头部（蓝本 AiPanel.vue:10-19） -->
-    <div class="flex items-center gap-2.5 px-3 py-2.5 border-b border-solid border-[#ebeef5]">
+    <div class="flex items-center gap-2.5 px-3 py-2.5 border-0 border-b border-solid border-[#ebeef5]">
       <div class="w-[34px] h-[34px] rounded-lg bg-gradient-to-br from-[#409eff] to-[#7b61ff] text-white flex items-center justify-center font-bold">AI</div>
       <div class="flex-1 min-w-0">
         <div class="text-sm font-semibold text-[#303133]">实施助手</div>
@@ -33,9 +35,9 @@
     </div>
 
     <!-- 会话 / 工作区上下文条（本仓差异：会话恢复与契约联动状态可视化，蓝本无此行） -->
-    <div class="px-3 py-1.5 text-xs text-[#909399] border-b border-solid border-[#ebeef5] bg-aiPanel">
+    <div class="px-3 py-1.5 text-xs text-[#909399] border-0 border-b border-solid border-[#ebeef5] bg-aiPanel">
       <div class="flex items-center gap-1.5 flex-wrap">
-        <el-tag size="small" :type="healthTagType" effect="plain">{{ healthLabel }}</el-tag>
+        <span :class="chipClass(healthTagType)">{{ healthLabel }}</span>
         <span>会话 {{ shortSessionId }}</span>
         <span>·</span>
         <span class="truncate">工作区 {{ workspace.contextSummary }}</span>
@@ -48,116 +50,126 @@
       </div>
     </div>
 
-    <!-- 降级与冲突提示（EP Alert；503/409 各有专属动作） -->
-    <el-alert
-      v-if="ai.busyConflict"
-      class="m-2"
-      type="error"
-      :closable="false"
-      show-icon
-      title="当前会话正在进行中"
-      :description="`该会话已有一轮在进行（runId=${ai.busyConflict.runId}），可一键重挂继续接收这一轮的输出。`"
-    >
-      <el-button size="small" type="primary" class="mt-1" @click="reattach()">一键重挂收流</el-button>
-    </el-alert>
+    <!-- 降级与冲突提示（R-165 S2：EP Alert 全退场 → 自绘 demo v7 `.alert` 结构 = 描边圆图标 + 标题 + 说明 + ghost 动作钮；
+         色族按 v7 语义表：故障红 / 并发·降级蓝 / 通知灰 / 结果绿；`.notice` 虚线灰底承接单行通知槽） -->
+    <div v-if="ai.busyConflict" :class="alertBox('primary')" data-testid="alert-busy-conflict">
+      <span :class="alertIcon('primary')" aria-hidden="true">⇄</span>
+      <div class="flex-1 min-w-0">
+        <b class="block text-[12.6px] [font-weight:650] text-[#1f2328]">当前会话正在进行中</b>
+        <span class="text-[11.8px] text-[#57606a]">该会话已有一轮在进行（runId={{ ai.busyConflict.runId }}），可一键重挂继续接收这一轮的输出。</span>
+      </div>
+      <button type="button" :class="ALERT_BTN" @click="reattach()">一键重挂收流</button>
+    </div>
 
-    <el-alert
-      v-if="ai.poolSaturated"
-      class="m-2"
-      type="error"
-      :closable="false"
-      show-icon
-      title="挂起池已饱和"
-      :description="`挂起专用线程池容量 ${ai.poolSaturated.poolSize} 已用满，请等当前挂起轮次确认/超时后再试。`"
-    />
+    <div v-if="ai.poolSaturated" :class="alertBox('primary')" data-testid="alert-pool-saturated">
+      <span :class="alertIcon('primary')" aria-hidden="true">▦</span>
+      <div class="flex-1 min-w-0">
+        <b class="block text-[12.6px] [font-weight:650] text-[#1f2328]">挂起池已饱和</b>
+        <span class="text-[11.8px] text-[#57606a]">挂起专用线程池容量 {{ ai.poolSaturated.poolSize }} 已用满，请等当前挂起轮次确认/超时后再试。</span>
+      </div>
+    </div>
 
-    <el-alert
-      v-if="!ai.available"
-      class="m-2"
-      type="warning"
-      :closable="false"
-      show-icon
-      title="AI 能力暂不可用（已降级，业务功能不受影响）"
-      :description="degradeReason"
-    />
+    <div v-if="!ai.available" :class="alertBox('primary')" data-testid="alert-degraded">
+      <span :class="alertIcon('primary')" aria-hidden="true">↓</span>
+      <div class="flex-1 min-w-0">
+        <b class="block text-[12.6px] [font-weight:650] text-[#1f2328]">AI 能力暂不可用（已降级，业务功能不受影响）</b>
+        <span class="text-[11.8px] text-[#57606a]">{{ degradeReason }}</span>
+      </div>
+    </div>
 
-    <el-alert
-      v-if="ai.streamInterrupted"
-      class="m-2"
-      type="error"
-      :closable="false"
-      show-icon
-      title="连接中断，结果可能不完整"
-      description="本轮没有收到完成帧（done/error）。已生成的内容保留在上方，可重新发送或一键重挂该轮。"
-    >
-      <el-button v-if="ai.activeRunId" size="small" type="primary" class="mt-1" @click="reattach(ai.activeRunId)">
+    <div v-if="ai.streamInterrupted" :class="alertBox('error')" data-testid="alert-interrupted">
+      <span :class="alertIcon('error')" aria-hidden="true">!</span>
+      <div class="flex-1 min-w-0">
+        <b class="block text-[12.6px] [font-weight:650] text-[#1f2328]">连接中断，结果可能不完整</b>
+        <span class="text-[11.8px] text-[#57606a]">本轮没有收到完成帧（done/error）。已生成的内容保留在上方，可重新发送或一键重挂该轮。</span>
+      </div>
+      <button v-if="ai.activeRunId" type="button" :class="ALERT_BTN" @click="reattach(ai.activeRunId)">
         一键重挂该轮
-      </el-button>
-    </el-alert>
+      </button>
+    </div>
 
-    <el-alert
+    <!-- 单行通知槽——普通通知 = demo v7 `.notice`（虚线灰底 + — 描边圆），取消 / 重试 / 幂等等通知的承载位；
+         R-165 S3a（R11 指挥官裁决）：error 级通知改走 v7 `.enotice` 红族（浅红底 + 浅红描边 + 圆角 9 + ! 圆标）。 -->
+    <div
       v-if="ai.notice"
-      class="m-2"
-      :type="noticeType"
-      :closable="false"
-      show-icon
-      :title="ai.notice"
-    />
+      class="m-2 flex items-center gap-[8px] border px-[11px] py-[8px] text-[12.6px]"
+      :class="noticeIsError
+        ? 'border-solid border-[#f0d5d0] bg-[#fdf1ef] text-[#1f2328] rounded-[9px]'
+        : 'border-dashed border-[#e3e6ea] bg-[#f6f7f9] text-[#57606a] rounded-[10px]'"
+      data-testid="notice-bar"
+    >
+      <span
+        v-if="noticeIsError"
+        class="flex-[0_0_14px] w-[14px] h-[14px] rounded-[50%] border-solid border-[1.3px] border-[#c0392b] text-[#c0392b] text-[9px] font-bold flex items-center justify-center"
+        aria-hidden="true"
+      >!</span>
+      <span v-else class="flex-[0_0_15px] w-[15px] h-[15px] rounded-[50%] border-solid border-[1.2px] border-[#8b949e] text-[#8b949e] text-[9px] flex items-center justify-center" aria-hidden="true">—</span>
+      {{ ai.notice }}
+    </div>
 
-    <el-alert
-      v-if="ai.lastUiEventResult"
-      class="m-2"
-      :type="ai.lastUiEventResult.handled ? 'info' : 'warning'"
-      :closable="false"
-      show-icon
-      :title="`AI 驱动工作区：${ai.lastUiEventResult.message}`"
-    />
+    <div v-if="ai.lastUiEventResult" :class="alertBox('gray')" data-testid="alert-ui-event">
+      <span :class="alertIcon('gray')" aria-hidden="true">i</span>
+      <div class="flex-1 min-w-0">
+        <b class="block text-[12.6px] [font-weight:650] text-[#1f2328]">AI 驱动工作区：{{ ai.lastUiEventResult.message }}</b>
+      </div>
+    </div>
 
     <!-- 消息流（蓝本 AiPanel.vue:21-89）；R-154 #5：外层 relative 壳承载「回到底部」浮钮 -->
     <div class="flex-1 relative min-h-0 flex flex-col">
-      <!-- R-161：role="log" 补滚动容器（无障碍，无视觉影响）；R-163B G2：overflow-x-hidden 止血横滚条 -->
-      <div ref="msgWrapRef" role="log" class="flex-1 overflow-y-auto overflow-x-hidden p-3" @scroll.passive="onMsgScroll">
+      <!-- R-161：role="log" 补滚动容器（无障碍，无视觉影响）；R-163B G2：overflow-x-hidden 止血横滚条。
+           R-165 S5a 项 8：滚动条细化 —— 6px 圆角半透明（demo 14a 口径），任意变体类写在模板类串上
+           （禁改 tailwind.config.js、禁手写 CSS）。 -->
+      <div
+        ref="msgWrapRef"
+        role="log"
+        class="flex-1 overflow-y-auto overflow-x-hidden p-3"
+        :class="SCROLLBAR_CLASS"
+        @scroll.passive="onMsgScroll"
+      >
       <!-- 历史对账期骨架屏（苞 B 项 4）：消费 store 的 historyLoaded —— 与空态互斥
-           （无消息且对账未完 → 骨架屏；对账完成后才轮到空态/消息流）。 -->
-      <el-skeleton
-        v-if="!ai.messages.length && !ai.historyLoaded"
-        data-testid="history-skeleton"
-        :rows="4"
-        animated
-        class="p-2"
-      />
-      <el-empty v-else-if="!ai.messages.length" :image-size="60">
-        <template #image>
-          <el-icon :size="36" color="#2563eb"><Promotion /></el-icon>
-        </template>
-        <template #description>
-          <div class="mb-1 text-sm font-semibold text-[#606266]">您好，我是实施助手</div>
-          <div class="text-[13px] text-[#909399] leading-[1.8]">
-            我可以帮您查询配置项与字段、查看任务、预估数据行数、<br />
-            打开导出结果在线编辑器、下载导出文件，<br />并启动导出/预检查/导入/发布作业。
-          </div>
-          <div class="mt-2 text-xs text-[#c0c4cc]">对话保存在当前浏览器页签中，关闭页签即结束。</div>
-          <!-- R-154 #12：空态静态建议提示词（runtime 驱动建议词登记挂账，本批不做）——点击回填输入框 -->
-          <div class="mt-3 flex flex-wrap justify-center gap-2">
-            <el-button
-              v-for="suggestion in SUGGESTIONS"
-              :key="suggestion"
-              size="small"
-              round
-              plain
-              data-testid="suggestion-chip"
-              @click="useSuggestion(suggestion)"
-            >
-              {{ suggestion }}
-            </el-button>
-          </div>
-        </template>
-      </el-empty>
+           （无消息且对账未完 → 骨架屏；对账完成后才轮到空态/消息流）。
+           R-165 S2：el-skeleton 退场 → 自绘 demo v7 `.sk` 渐变条（bg-[linear-gradient(...)] +
+           bg-[length:220%_100%]）。v7 的 `animate-shimmer` 是 demo 临时 config 的私有动画
+           （仓库 tailwind.config.js 禁改），改用内置 `animate-pulse`（同语义的无限循环渐隐，
+           仓库无 shimmer keyframes 可挂）。 -->
+      <div v-if="!ai.messages.length && !ai.historyLoaded" data-testid="history-skeleton" class="p-2" aria-hidden="true">
+        <div v-for="(bar, i) in SKELETON_BARS" :key="i" :class="bar"></div>
+      </div>
+      <!-- 空态（R-165 S2：el-empty + el-icon 退场 → 自绘 demo v7 `.mini`：标题 600 + 副文 + 胶囊建议词行） -->
+      <div
+        v-else-if="!ai.messages.length"
+        class="m-3 rounded-[10px] border border-solid border-[#e3e6ea] bg-white px-[14px] py-[16px]"
+        data-testid="empty-state"
+      >
+        <div class="[font-weight:650] text-[13.2px] mb-[3px]">您好，我是实施助手</div>
+        <div class="text-[12.4px] leading-[1.8] text-[#57606a]">
+          我可以帮您查询配置项与字段、查看任务、预估数据行数、<br />
+          打开导出结果在线编辑器、下载导出文件，<br />并启动导出/预检查/导入/发布作业。
+        </div>
+        <div class="mt-[6px] text-[11.8px] text-[#8b949e]">对话保存在当前浏览器页签中，关闭页签即结束。</div>
+        <!-- R-154 #12：空态静态建议提示词（runtime 驱动建议词登记挂账，本批不做）——点击回填输入框 -->
+        <div class="mt-[11px] flex flex-wrap gap-[6px]">
+          <button
+            v-for="suggestion in SUGGESTIONS"
+            :key="suggestion"
+            type="button"
+            :class="SUGGESTION_CHIP"
+            data-testid="suggestion-chip"
+            @click="useSuggestion(suggestion)"
+          >
+            {{ suggestion }}
+          </button>
+        </div>
+      </div>
 
+      <!-- R-165 S3a（R6 指挥官裁决）：消息行原 `mb-3.5`(=14px) 与末行元信息行 `mb-[18px]` 叠加成实测 32px，
+           与 v7 turn 间距（`.afoot` 单值 18px）不符 ⇒ 撤消息行下外边距，间距回归元信息行单值 18px。
+           （无元信息行的消息——仅工具卡无正文——仍由卡片自身下外边距兜底，不会贴死；
+           R-165 S5a 项 1：卡片下外边距体系 = 工具卡 mb-2 / 门卡·GF mb-2.5 / 回执·思考·流程图 mb-3.5。） -->
       <div
         v-for="m in ai.messages"
         :key="m.id"
-        class="group flex mb-3.5"
+        class="group flex"
         :class="m.role === 'user' ? 'flex-row-reverse' : ''"
       >
         <!-- R-163 T3：双侧去头像（demo v6 场景 2）——消息行 = 内容 + 元信息行，无头像列 -->
@@ -165,13 +177,19 @@
         <div class="min-w-0 flex-1 flex flex-col" :class="m.role === 'user' ? 'items-end' : 'items-start'">
         <!-- R-160 M4（issue #14③ 方案 A）：容器层一刀切 —— overflow:hidden + min-width:0；
              R-163 T3：用户消息 = 内容-only 卡片；助手回复 = 无气泡全宽（透明底）。
-             R-163B G3：用户气泡对齐 demo v6 —— 中性灰 #f6f7f9 + 1px #eef0f3 边框 +
-             圆角 12/12/3/12 + max-width 86% + 13.5px（色彩纪律：蓝只用于状态）。 -->
+             R-163B G3：用户气泡对齐 demo —— 中性灰 #f6f7f9 + 1px #eef0f3 边框 +
+             圆角 12/12/3/12 + max-width 86%（色彩纪律：蓝只用于状态）。
+             R-165 S2：字号改**按 role 分派**（原为同特异度两条 text-[*] 并存 —— 与 S1 §5② 同源风险：
+             两条任意值工具类同为 (0,1,0)，胜负由产出顺序决定；用户气泡必须恒 13.5px / 助手 13.8px）。
+             R-165 S4：① `w-full` 按 role 分派 —— 用户侧去掉后气泡按内容贴身收窄（`max-w-[86%]` 才真生效；
+             原 w-full 使短文本也恒占 86% 宽）；助手侧保留全宽。
+             ② 垂直内边距按 role 分派 —— 助手侧去 `py-2` 只留 `px-2.5`（v7 AI 正文无垂直内边距，
+             工具卡 `mt-1.5` 得以贴正文下沿；原 py-2 把「用户末行→AI 首行」多顶 8px）。 -->
         <div
-          class="min-w-0 overflow-hidden w-full px-2.5 py-2 text-[13.8px] leading-[1.7]"
+          class="min-w-0 overflow-hidden px-2.5 leading-[1.7]"
           :class="m.role === 'user'
-            ? 'max-w-[86%] rounded-[12px_12px_3px_12px] bg-[#f6f7f9] border border-solid border-[#eef0f3] break-words text-[13.5px]'
-            : ''"
+            ? 'max-w-[86%] rounded-[12px] bg-[#f6f7f9] border border-solid border-[#eef0f3] break-words text-[13.5px] py-2'
+            : 'text-[13.8px] w-full'"
           :data-testid="'msg-bubble-' + m.id"
         >
           <!-- 消息体：块分派（批4④ A5' → R-154 单卡化）——groupParts 把段序列分派为 text/activity 块；
@@ -182,34 +200,79 @@
             <!-- R-163 T1 正文块：markdown-it → DOMPurify 白名单 → v-html 唯一链路
                  （chSplit/CH_TAIL 逐字符渐显退役——R-159 该语义被 Markdown 渲染取代，spec 口径同步改写）；
                  R-159 #3：流式正文末尾打字机光标保留（移出正文 div，随块同帧淡出）。 -->
-            <!-- R-163B G4：v-html 内交互（代码块复制 / mermaid 查看源码）走事件委托（onMdBodyClick），
-                 不在注入 HTML 内联任何脚本。 -->
-            <div v-if="block.kind === 'text'" class="md-body" v-html="markdownHtml(m, block)" @click="onMdBodyClick"></div>
-            <span v-if="block.kind === 'text' && (showCaret(m, bi) || isFading(m))" class="caret" :class="{ 'fade-out': isFading(m) }" data-testid="stream-caret"></span>
+            <!-- R-163B G4 → R-165 S5b：v-html 内交互（代码块复制 / mermaid 卡四钮：复制源码 · tab 切换 ·
+                 复位 · 全屏）走事件委托（onMdBodyClick），不在注入 HTML 内联任何脚本。 -->
+            <!-- R-165 S4：md-body 容器按 role 挂两条修正类（全部走任意变体类）：
+                 ① `[&>*:last-child]:!mb-0` —— 压掉末段下外边距（用直接子选择器覆盖
+                    p/ul/ol/blockquote/pre/figure 全部末块形态。这是「用户末行→AI 首行」多出的
+                    12px 根因，S3a §5.4 光学间距偏差来源；S5c 起末块外边距的声明方已从
+                    ai-chat.css 换成 markdown.ts 注入的工具类，`!` 保留为双保险）。
+                 ② 用户侧 `[&_p]:text-[13.5px]`+`[&_li]:text-[13.5px]` —— 根容器自身声明 13.8px
+                    （MD_BODY_ROOT_CLASS）会压过气泡容器的继承值，改用内部选择器直接命中 p/li
+                    才真落地（`.md-body li` 无字号声明，13.5 经 ul 继承下游，同为直命中口径）。
+                 R-165 S5c：正文排版（13.8px / 1.7 / --ink）从 `.ai-chat .md-body`（ai-chat.css）
+                 改为根容器随行工具类 MD_BODY_ROOT_CLASS，层级元素由渲染层逐标签注入。 -->
+            <div
+              v-if="block.kind === 'text'"
+              :ref="(el) => setUserBodyRef(m.id, el)"
+              :class="[
+                'md-body',
+                MD_BODY_ROOT_CLASS,
+                m.role === 'user' ? MD_BODY_USER_CLASS : MD_BODY_AI_CLASS,
+                m.role === 'user' && isUserMsgCollapsed(m.id) ? USER_MSG_COLLAPSE_CLASS : ''
+              ]"
+              v-html="markdownHtml(m, block)"
+              @click="onMdBodyClick"
+            ></div>
+            <span
+              v-if="block.kind === 'text' && (showCaret(m, bi) || isFading(m))"
+              :class="[CARET_CLASS, isFading(m) ? FADE_OUT_CLASS : '']"
+              data-testid="stream-caret"
+            ></span>
 
             <!-- R-160 M2：HITL 只读回执**独立块**（R-158 #10 判据随块层判，块 = 已决确认门/GF 段）——
                  紧随源工具卡渲染，恒可见（不参与 expandedBlocks，无折叠卡头），刷新/历史恢复后可回溯。
                  徽标按段终态派生，decision/decidedAt/submittedValues 为回读/写回元数据。 -->
             <template v-else-if="block.kind === 'receipt'">
               <template v-for="part in block.parts" :key="'receipt-' + (part.kind === 'tool' ? part.toolCallId : part.kind + '-' + part.seg)">
-                <div v-if="part.kind === 'tool'" class="hitl-receipt" data-testid="hitl-receipt">
-                  <el-tag size="small" :type="hitlReceiptTagType(part.status)" effect="light">{{ hitlReceiptLabel(part) }}</el-tag>
-                  <span class="flex-1 min-w-0">{{ hitlReceiptSummary(part) }}</span>
-                  <span v-if="part.decidedAt" class="rt">{{ formatProgressiveTs(part.decidedAt) }}</span>
-                  <div v-if="part.submittedValues" class="w-full text-[12.2px] text-[#8b949e]" data-testid="receipt-values">
-                    已提交：{{ submittedValuesSummary(part.submittedValues) }}
+                <!-- R-165 S2：回执卡按 demo v7 `.receipt` 结构重排（rc-row 徽标/摘要/时间 + rc-toggle 折叠钮 +
+                     rc-detail 的 rc-kv 键值行）——原 `.hitl-receipt` / `.rt` 手写 CSS 类退场，改纯 Tailwind；
+                     行为面（testid / @click / v-show / 展开态记账）逐字保留。 -->
+                <div
+                  v-if="part.kind === 'tool'"
+                  class="border border-solid border-[#e3e6ea] bg-white rounded-[10px] px-[11px] py-[8px] text-[12.6px] text-[#57606a] mb-3.5"
+                  data-testid="hitl-receipt"
+                >
+                  <div class="flex items-center gap-[7px]">
+                    <span :class="receiptBadgeClass(part.status)">{{ hitlReceiptLabel(part) }}</span>
+                    <span class="flex-1 min-w-0 whitespace-nowrap overflow-hidden text-ellipsis">{{ hitlReceiptSummary(part) }}</span>
+                    <span v-if="part.decidedAt" class="flex-none text-[#8b949e] text-[11.5px] tabular-nums">{{ formatProgressiveTs(part.decidedAt) }}</span>
                   </div>
-                  <div v-if="part.args" class="w-full mt-0.5">
+                  <div v-if="part.submittedValues || part.args">
+                    <!-- R-165 S5a 项 2（demo v7.1 终裁）：折叠钮文案由两个键名「已提交值 / 原始参数」
+                         改单一可预期动作「查看详情 ⇄ 收起详情」；展开内容 = **单层 mono JSON 盒**
+                         （外层包裹盒 + 两个小节标签退役）。外层盒的 `border-t border-solid` 单边写法
+                         在 preflight 关闭下其余三边吃初始值 medium=3px，是实机「双层盒 + 左竖线」的唯一
+                         来源 —— 整块删除后两种渲染路径同时清零。 -->
                     <button
                       type="button"
-                      class="text-[11.5px] text-[#57606a] border-b border-solid border-[#e3e6ea]"
+                      class="border-0 bg-transparent p-0 mt-[5px] text-[11.5px] text-[#57606a] border-b border-solid border-[#e3e6ea] transition-colors duration-[150ms] hover:text-[#2563eb] hover:border-[#cddcff]"
                       :data-testid="'receipt-args-toggle-' + part.toolCallId"
+                      :aria-expanded="receiptArgsOpen.has(part.toolCallId)"
                       @click="toggleReceiptArgs(part.toolCallId)"
                     >
-                      原始参数 {{ receiptArgsOpen.has(part.toolCallId) ? '▾' : '▸' }}
+                      {{ receiptArgsOpen.has(part.toolCallId) ? '收起详情' : '查看详情' }}
                     </button>
-                    <div v-show="receiptArgsOpen.has(part.toolCallId)" class="mt-0.5" :data-testid="'receipt-args-more-' + part.toolCallId">
-                      <CollapsibleText :text="part.args" pretty />
+                    <div v-show="receiptArgsOpen.has(part.toolCallId)" class="mt-[8px]" :data-testid="'receipt-args-more-' + part.toolCallId">
+                      <!-- 单层 mono 盒（v7 `rc-detail pre` 形制）：GF 已提交值折进同一 JSON 盒的
+                           `values` 键（demo v7 ②-j 口径），键值行信息零净损失。`receipt-values`
+                           标记仍只落在真正带已提交值的回执上（GF 回读判据不回归）。 -->
+                      <div
+                        class="bg-[#f6f7f9] border border-solid border-[#eef0f3] rounded-[8px] px-[9px] py-[8px] overflow-x-auto font-mono text-[12.1px] leading-[1.6] text-[#57606a]"
+                        :data-testid="part.submittedValues ? 'receipt-values' : null"
+                      >
+                        <CollapsibleText :text="receiptDetailText(part)" pretty :testid="'receipt-more-' + part.toolCallId" />
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -222,71 +285,92 @@
                    点击卡头展开/收起 args/result/错误位（v-show：DOM 恒在，testid/可见性稳定）；
                    requiresAction 审批卡强制展开（卡头禁点，resolveBlockExpanded 兜底）。 -->
               <template v-for="part in block.parts" :key="part.kind === 'tool' ? part.toolCallId : part.kind + '-' + part.seg">
-                <!-- 思考链（A6'）：受控折叠块，口径不变（默认折叠；展开态存 store，DOM 重建不丢） -->
-                <div v-if="part.kind === 'reasoning' && part.text" class="mb-1.5 text-xs text-[#909399]">
+                <!-- 思考链（A6'）：受控折叠块，口径不变（默认折叠；展开态存 store，DOM 重建不丢）
+                     R-165 S2：思考卡按 demo v7 `.reason` 结构重写 —— 卡容器 bg-#f6f7f9 / 1px #e3e6ea /
+                     圆角 10；卡头 = 圆环⋆ 图标 + 「思考过程」12.4px#57606a + 摘要 11.5px#8b949e + chevron；
+                     R-166 口径⑦：图标字形由 demo 的 U+2726（四角星）改 U+22C6 —— demo 实字落在
+                     U+2600-27BF（本批 emoji 复扫的判废区间）内，改取同形的数学星号保住视觉且扫描 0 命中。
+                     展开体 = 左竖线（border-l-2 #e3e6ea）+ pl-10px/pr-11px/pb-10px 的 12.6px#57606a 正文。 -->
+                <div
+                  v-if="part.kind === 'reasoning' && part.text"
+                  class="border border-solid border-[#e3e6ea] rounded-[10px] bg-[#f6f7f9] overflow-hidden mb-3.5"
+                >
                   <button
                     type="button"
-                    class="cursor-pointer"
+                    class="flex items-center gap-[8px] w-full border-0 bg-transparent px-[10px] py-[7px] text-left transition-colors duration-[150ms] hover:bg-white"
                     :data-testid="'reasoning-toggle-' + block.id"
                     @click="toggleBlock(block)"
                   >
-                    思考过程 {{ isBlockExpanded(block) ? '▾' : '▸' }}
+                    <span class="flex-[0_0_15px] w-[15px] h-[15px] rounded-[50%] border-solid border-[1.2px] border-[#e3e6ea] text-[#8b949e] text-[9px] flex items-center justify-center" aria-hidden="true">⋆</span>
+                    <span class="text-[12.4px] text-[#57606a]">思考过程</span>
+                    <span class="flex-1 text-[11.5px] text-[#8b949e]">{{ reasoningSummary(part.text, isBlockExpanded(block)) }}</span>
+                    <span :class="[TCHEV_CLASS, isBlockExpanded(block) ? 'is-open' : '']">›</span>
                   </button>
-                  <div v-show="isBlockExpanded(block)" class="mt-1 px-2.5 py-2 bg-[#f6f7f9] border border-solid border-[#e3e6ea] rounded-[10px]" :data-testid="'reasoning-body-' + block.id">
-                    <!-- R-158 #12：思考区同款 CollapsibleText（真溢出才渐隐+显示更多） -->
-                    <CollapsibleText :text="part.text" :max-height="160" :testid="'reasoning-more-' + block.id" class="text-xs text-[#909399]" />
+                  <div v-show="isBlockExpanded(block)" class="pl-[10px] pr-[11px] pb-[10px] border-0 border-l-2 border-solid border-[#e3e6ea]" :data-testid="'reasoning-body-' + block.id">
+                    <!-- R-158 #12：思考区同款 CollapsibleText（真溢出才渐隐+显示更多；限高 160 为
+                         折叠卡口径，不在 S5a 项 4「纯限高内滚无钮」的四处之内）；
+                         R-165 S2 对齐 v7 正文口径 12.6px/1.7/#57606a -->
+                    <CollapsibleText :text="part.text" :max-height="160" :testid="'reasoning-more-' + block.id" class="text-[12.6px] leading-[1.7] text-[#57606a]" />
                   </div>
                 </div>
                 <template v-else-if="part.kind === 'tool'">
                   <div
-                    class="mt-1.5 border border-solid border-[#e3e6ea] rounded-[10px] bg-white overflow-hidden"
+                    class="mt-1.5 border border-solid border-[#e3e6ea] rounded-[10px] bg-white overflow-hidden mb-2"
                     :data-testid="part.requiresAction ? 'pending-card-' + part.toolCallId : 'tool-card-' + part.toolCallId"
                   >
-                    <!-- R-163B G5 卡头对齐 demo v6（.tcard-hd 8px 10px / 名称 mono 11.4px / chevron 旋转）；
-                         摘要与工具名文案重复时去重（只显一行，见 toolSummaryOrNull）。 -->
+                    <!-- R-165 S1 卡头对齐 demo v7（纯 Tailwind）：原生 button 显式复位 UA 面
+                         （bg-transparent border-0 font-[inherit] —— preflight 关闭下无此复位即为
+                         灰底+2px outset 描边+Arial 元凶）；状态图标三态自绘（见 toolIconClass）；
+                         状态/kind 胶囊自绘 span chip（chipClass）；摘要运行中蓝字/失败红字。 -->
                     <button
                       type="button"
-                      class="w-full flex items-center gap-1.5 py-[8px] px-[10px] text-left"
+                      class="w-full flex items-center gap-1.5 py-[8px] px-[10px] text-left bg-transparent border-0 font-[inherit] transition-colors duration-[150ms]"
                       :class="part.requiresAction ? 'cursor-default' : 'cursor-pointer hover:bg-[#f6f7f9]'"
                       :data-testid="'block-toggle-' + block.id"
                       :disabled="part.requiresAction"
                       @click="toggleBlock(block)"
                     >
-                      <el-icon color="#2563eb" class="shrink-0"><Operation /></el-icon>
+                      <span
+                        class="shrink-0 flex-[0_0_15px] w-[15px] h-[15px] flex items-center justify-center text-[11px] leading-none"
+                        :class="toolIconClass(part.status)"
+                        aria-hidden="true"
+                      >{{ toolIcon(part.status) }}</span>
                       <span class="font-mono font-semibold text-[11.4px] max-w-[128px] truncate shrink-0">{{ toolLabel(part.name) }}</span>
-                      <span v-if="toolSummaryOrNull(part)" class="font-normal text-[12px] text-[#57606a] truncate min-w-0 flex-1" :data-testid="'tool-summary-' + part.toolCallId">{{ toolSummaryOrNull(part) }}</span>
+                      <span v-if="toolSummaryOrNull(part)" class="font-normal text-[12px] truncate min-w-0 flex-1" :class="toolSummaryClass(part.status)" :data-testid="'tool-summary-' + part.toolCallId">{{ toolSummaryOrNull(part) }}</span>
                       <span v-else class="flex-1 min-w-0" :data-testid="'tool-summary-' + part.toolCallId"></span>
-                      <el-tag v-if="part.kind2 === 'FRONTEND'" size="small" effect="plain">前端工具</el-tag>
-                      <el-tag v-else-if="part.kind2 === 'CONFIRM'" size="small" type="warning" effect="plain">确认门</el-tag>
-                      <el-tag :size="'small'" :type="toolTagType(part.status)" :effect="part.status === 'running' ? 'dark' : 'light'">
-                        {{ toolStatusLabel(part.status) }}
-                      </el-tag>
-                      <span class="tchev" :class="{ 'is-open': isBlockExpanded(block) }">›</span>
+                      <span v-if="part.kind2 === 'FRONTEND'" :class="chipClass('primary')">前端工具</span>
+                      <span v-else-if="part.kind2 === 'CONFIRM'" :class="chipClass('warning')">确认门</span>
+                      <span :class="chipClass(toolTagType(part.status))">{{ toolStatusLabel(part) }}</span>
+                      <span :class="[TCHEV_CLASS, isBlockExpanded(block) ? 'is-open' : '']">›</span>
                     </button>
                     <div v-show="isBlockExpanded(block)" class="px-2 pb-2 pt-0 flex flex-col gap-1.5" :data-testid="'block-body-' + block.id">
                       <!-- R-163 T2：展开体 input/output 格式化 JSON（pretty 解析成功缩进 / 失败原样）——裸 JSON 墙消除 -->
+                      <!-- R-165 S1：kv 盒对齐 demo v7（标签 11px/#8b949e + 体 bg-#f6f7f9/1px #eef0f3/圆角8/
+                           padding 9·8/mono 12.1px·1.6）——原 #fafafa 4px 圆角无边框口径退役。 -->
                       <div v-if="part.args">
-                        <div class="text-[11px] text-[#c0c4cc] mb-0.5">输入</div>
-                        <div class="text-xs text-[#909399] break-all">
+                        <div class="block text-[11px] tracking-[.5px] uppercase text-[#8b949e] mb-[4px]">输入</div>
+                        <div class="text-[12.1px] leading-[1.6] font-mono text-[#909399] break-all bg-[#f6f7f9] border border-solid border-[#eef0f3] rounded-[8px] px-[9px] py-[8px]">
                           <CollapsibleText :text="part.args" pretty :testid="'args-more-' + part.toolCallId" />
                         </div>
                       </div>
                       <div v-if="part.result">
-                        <div class="text-[11px] text-[#c0c4cc] mb-0.5">输出</div>
-                        <div class="px-2 py-1 text-xs text-[#606266] bg-[#fafafa] rounded">
-                          <CollapsibleText :text="part.result" :testid="'show-more-' + part.toolCallId">
-                            {{ part.result }}<span
-                              v-if="part.truncated"
-                              class="inline-block ml-1 px-1 rounded text-[10px] leading-4 bg-[#8b949e] text-white align-middle"
-                              :title="part.truncatedReason ?? '结果被截断'"
-                              data-testid="truncated-badge"
-                            >已截断</span>
-                          </CollapsibleText>
+                        <div class="block text-[11px] tracking-[.5px] uppercase text-[#8b949e] mb-[4px]">输出</div>
+                        <!-- R-165 S5a 项 4：工具卡输出 = **纯限高内滚**（max-h-[160px]，demo v7 口径），
+                             原 CollapsibleText 的渐隐 + 「显示更多」钮退役（无展开钮）；截断徽标保留。
+                             滚动条同走 6px 圆角半透明任意变体类（项 8）。 -->
+                        <div :class="['text-[12.1px] leading-[1.6] font-mono text-[#606266] bg-[#f6f7f9] border border-solid border-[#eef0f3] rounded-[8px] px-[9px] py-[8px] max-h-[160px] overflow-y-auto whitespace-pre-wrap', SCROLLBAR_CLASS]">
+                          {{ part.result }}<span
+                            v-if="part.truncated"
+                            class="inline-block ml-1 px-1 rounded text-[10px] leading-4 bg-[#8b949e] text-white align-middle"
+                            :title="part.truncatedReason ?? '结果被截断'"
+                            data-testid="truncated-badge"
+                          >已截断</span>
                         </div>
                       </div>
-                      <!-- R-158 #6：卡内错误位（图标 + 红底 + 文案）——错误就地呈现，不再全堆顶部 Alert -->
-                      <div v-if="part.reason" class="flex items-start gap-1 px-2 py-1 text-xs text-[#c0392b] bg-[#fdf1ef] rounded" data-testid="tool-error">
-                        <el-icon class="mt-px shrink-0" color="#c0392b"><WarningFilled /></el-icon>
+                      <!-- R-158 #6：卡内错误位（自绘圆环 ! + 红底 + 文案）——错误就地呈现，不再全堆顶部 Alert；
+                           R-165 S1：el-icon 退场，圆环 ! 照搬 demo v7 行内错误通知形制。 -->
+                      <div v-if="part.reason" class="flex items-start gap-[7px] px-[10px] py-[7px] text-[12.4px] text-[#c0392b] bg-[#fdf1ef] border border-solid border-[#f0d5d0] rounded-[9px]" data-testid="tool-error">
+                        <span class="mt-px shrink-0 flex-[0_0_14px] w-[14px] h-[14px] flex items-center justify-center rounded-[50%] border-[1.3px] border-[#c0392b] text-[#c0392b] text-[9px] font-bold" aria-hidden="true">!</span>
                         <span>原因：{{ part.reason }}</span>
                       </div>
 
@@ -297,28 +381,76 @@
                            tag（toolStatusLabel，expired→「会话已失效」）与段 reason 位（A4'，D11）承接。 -->
                       <template v-if="part.requiresAction">
                         <template v-if="part.kind2 === 'CONFIRM' && part.status === 'pending'">
-                          <!-- R-163D D5：确认门按 demo .gate 结构（蓝底门卡：卡头 + 倒计时 + 拒绝原因 + 操作位）。 -->
-                          <div class="gate">
-                            <div class="gate-hd"><span class="ic">✋</span>需要人工确认</div>
-                            <span
-                              v-if="remainingSeconds !== null"
-                              class="cd"
-                              :class="confirmExpired ? 'opacity-60' : ''"
+                          <!-- R-163D D5 结构 → R-165 S2 纯 Tailwind 化：demo v7 `.gate` 全结构
+                               （蓝底门卡 = 卡头 + 字段表 grows + SVG 倒计时环 + 拒绝原因 + 双自绘按钮）；
+                               el-button / el-input / class="gate|gate-hd|cd|gate-ft" 手写 CSS 类全部退场，
+                               data-testid / @click / v-model / :disabled 判据逐字保留。 -->
+                          <div class="border border-solid border-[#cddcff] bg-[#eff4ff] rounded-[10px] p-[12px] mb-2.5" data-testid="hitl-gate">
+                            <div class="flex items-center gap-[7px] text-[13.2px] mb-[9px]">
+                              <span class="w-[15px] h-[15px] rounded-[50%] border-solid border-[1.4px] border-[#2563eb] text-[#2563eb] text-[10px] flex items-center justify-center" aria-hidden="true">!</span>
+                              <span class="[font-weight:650]">需要你确认后才能继续</span>
+                              <span class="ml-auto" :class="chipClass('primary')">等待确认</span>
+                            </div>
+                            <!-- R-165 S5a 项 4：门卡字段区 = 纯限高内滚 160px（v7 `.grows` 口径）；
+                                 按钮区（倒计时 + 拒绝/确认）在滚动区之外常驻。 -->
+                            <div
+                              class="bg-white border border-solid border-[#eef0f3] rounded-[8px] px-[10px] py-[2px] max-h-[160px] overflow-y-auto"
+                              :class="SCROLLBAR_CLASS"
+                              data-testid="gate-rows"
                             >
-                              {{ confirmExpired ? '确认已超时（按钮已置灰），本轮将按拒绝/超时收尾' : `剩余确认时间 ${formatCountdown(remainingSeconds)}` }}
-                            </span>
-                            <span v-else class="cd">等待人工确认</span>
-                            <el-input
+                              <div
+                                v-for="row in gateRows(part)"
+                                :key="row.key"
+                                class="flex gap-[10px] py-[7px] border-0 border-b border-solid border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"
+                              >
+                                <span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">{{ row.key }}</span>
+                                <span class="flex-1 min-w-0 break-words">{{ row.value }}</span>
+                              </div>
+                            </div>
+                            <!-- 拒绝原因：原生 textarea 自绘（preflight 关闭 ⇒ UA 底/字号/描边须显式复位） -->
+                            <textarea
                               v-model="rejectReason"
-                              type="textarea"
-                              :rows="2"
-                              resize="none"
-                              class="mt-2"
+                              rows="2"
+                              class="mt-[10px] w-full resize-none rounded-[8px] border border-solid border-[#e3e6ea] bg-white px-[9px] py-[6px] font-[inherit] text-[13px] leading-[1.5] text-[#1f2328] [outline:none] placeholder:text-[#8b949e]"
                               placeholder="拒绝原因（可选，填了会原样回填给模型）"
+                              data-testid="reject-reason"
                             />
-                            <div class="gate-ft">
-                              <el-button size="small" class="ml-auto" :disabled="confirmExpired || deciding" @click="decide(false)">拒绝</el-button>
-                              <el-button size="small" type="primary" :disabled="confirmExpired || deciding" @click="decide(true)">确认执行</el-button>
+                            <div class="flex items-center gap-[9px] mt-[11px]">
+                              <svg v-if="remainingSeconds !== null" class="flex-[0_0_30px]" viewBox="0 0 36 36" width="30" height="30" aria-hidden="true">
+                                <circle class="fill-none stroke-[#e3e6ea] [stroke-width:3]" cx="18" cy="18" r="15.5" stroke-width="3"></circle>
+                                <circle
+                                  class="fill-none stroke-[#2563eb] [stroke-width:3] transition-[stroke-dashoffset] duration-1000 ease-linear motion-reduce:transition-none"
+                                  cx="18" cy="18" r="15.5" stroke-width="3" stroke-linecap="round"
+                                  :stroke-dasharray="RING_CIRCUMFERENCE" :stroke-dashoffset="confirmRingOffset"
+                                  transform="rotate(-90 18 18)"
+                                ></circle>
+                              </svg>
+                              <!-- R-166 口径③：409 幂等拒绝后的「已提交，同步中…」瞬态（不写任何乐观裁决） -->
+                              <span
+                                v-if="gateSyncing(part.toolCallId)"
+                                class="text-[12.2px] text-[#57606a]"
+                                data-testid="gate-syncing"
+                              >已提交，同步中…</span>
+                              <span
+                                v-else-if="remainingSeconds !== null"
+                                class="text-[12.2px] text-[#57606a] tabular-nums"
+                                :class="confirmExpired ? 'opacity-60' : ''"
+                              >
+                                {{ confirmExpired ? '确认已超时（按钮已置灰），本轮将按拒绝/超时收尾' : `剩余确认时间 ${formatCountdown(remainingSeconds)}` }}
+                              </span>
+                              <span v-else class="text-[12.2px] text-[#57606a]">等待人工确认</span>
+                              <button
+                                type="button"
+                                class="ml-auto rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-[#e3e6ea] transition-all duration-[150ms] bg-white text-[#57606a] hover:border-[#8b949e] hover:text-[#1f2328] disabled:opacity-50 disabled:cursor-default"
+                                :disabled="confirmExpired || deciding || gateSubmitting(part.toolCallId)"
+                                @click="decide(false)"
+                              >拒绝</button>
+                              <button
+                                type="button"
+                                class="rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-transparent transition-all duration-[150ms] bg-[#2563eb] text-white font-semibold hover:brightness-[1.08] disabled:opacity-50 disabled:cursor-default disabled:bg-[#8b949e] disabled:font-normal"
+                                :disabled="confirmExpired || deciding || gateSubmitting(part.toolCallId)"
+                                @click="decide(true)"
+                              >确认执行</button>
                             </div>
                           </div>
                         </template>
@@ -346,140 +478,312 @@
             </template>
           </template>
 
+          <!-- R-165 S4 → S5a 项 6：用户长消息「展开/收起」—— 真溢出（正文高 > 184px = 8 行）才出；
+               折叠态 = 限高 + overflow:hidden + 底部渐隐（mask 任意值类），展开态为该消息本地态。
+               DOM 恒在（真溢出才渲染，与 CollapsibleText 的 `overflowed` 判据同源口径）。 -->
+          <button
+            v-if="m.role === 'user' && userMsgOverflowed.has(m.id)"
+            type="button"
+            class="mt-[6px] border-0 bg-transparent p-0 font-[inherit] text-[12.2px] text-[#2563eb] transition-colors duration-[150ms] hover:text-[#1f2328]"
+            :data-testid="'user-msg-more-' + m.id"
+            @click="toggleUserMsg(m.id)"
+          >
+            {{ userMsgExpanded.has(m.id) ? '收起' : '展开' }}
+          </button>
         </div>
 
         <!-- R-159 #2/#3/#4：单一元信息行（demo aiShell(fix) 结构）——左位 = 流式期「工作中…」呼吸
              常驻（发出即现，首字符不消失；完成时淡出换时间戳）/ 完成后时间戳；按钮组紧邻时间戳
              （R-162 M1：删 justify-between 两端分置改左对齐紧邻 —— AI 行 [呼吸/时间戳|按钮] 左起左排；
              用户行 row-reverse 容器内同 DOM 序，渲染为按钮贴时间戳左侧、整簇靠右内聚，行尾无孤立按钮；
-             R-159 语义全保留：流式期 visibility:hidden 占位、互斥换入、淡出、hover/focus-within 浮出）。
+             R-159 语义全保留：流式期 visibility:hidden 占位、互斥换入、淡出）。
+             R-165 S4 项 1（用户直裁）：操作按钮**常驻**——撤 opacity-0/group-hover/focus-within 浮出机制，
+             按钮组恒可见（hover 高亮保留在各按钮自身的 hover:* 里）。撤 `transition-opacity` 随之，
+             按钮组的 `visibility:hidden`（助手流式期占位不显）是 R-159 独立语义，不属浮出机制，保留。
              行判据：有正文 或 助手消息流式中（发出即现，无正文也要能呼吸）。 -->
         <div
           v-if="showMetaRow(m)"
-          class="mt-1 flex items-center gap-2 text-xs text-[#8b949e] w-full max-w-[82%]"
-          :class="m.role === 'user' ? 'flex-row-reverse' : ''"
+          class="mb-[18px] flex items-center gap-2 text-xs text-[#8b949e] w-full max-w-[82%]"
+          :class="m.role === 'user' ? 'mt-[6px] flex-row-reverse' : 'mt-[12px]'"
           :data-testid="'msg-ops-' + m.id"
         >
           <span class="flex items-center gap-1 min-h-[18px]">
             <span
               v-if="isBreathing(m) || isFading(m)"
-              class="loading-breath"
-              :class="{ 'fade-out': isFading(m) }"
-              style="margin:0;padding-left:2px"
+              :class="[BREATH_CLASS, isFading(m) ? FADE_OUT_CLASS : '']"
               data-testid="loading-breath"
             >
-              <span class="dot"></span><span class="txt">工作中…</span>
+              <span class="w-[7px] h-[7px] rounded-full bg-[#2563eb] animate-breathe"></span><span class="text-[12.2px] text-[#57606a] tracking-[.5px]">工作中…</span>
             </span>
             <span v-else-if="formatProgressiveTs(m.timestamp)" class="text-[#8b949e]" data-testid="msg-timestamp">{{ formatProgressiveTs(m.timestamp) }}</span>
           </span>
           <div
-            class="flex items-center gap-2 transition-opacity"
-            :class="m.streaming ? '' : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100'"
-            :style="m.streaming && m.role === 'assistant' ? 'visibility: hidden' : ''"
+            class="flex items-center gap-2"
+            :class="m.streaming && m.role === 'assistant' ? 'invisible' : ''"
           >
             <span
-              v-if="copyState && copyState.id === m.id"
+              v-if="copyState && copyState.id === m.id && !copyState.ok"
               :data-testid="'copy-hint-' + m.id"
-              class="text-xs"
-              :class="copyState.ok ? 'text-[#1a7f45]' : 'text-[#c0392b]'"
+              class="text-xs text-[#c0392b]"
             >
-              {{ copyState.ok ? '已复制' : '复制失败，请手动选中文本复制' }}
+              {{ '复制失败，请手动选中文本复制' }}
             </span>
             <!-- R-163 T4：「继续」入口（error/断流/取消后，最后一条助手消息）——点击直发「继续」 -->
             <button
               v-if="showContinue(m)"
               type="button"
               data-testid="continue-round"
-              title="继续本轮对话"
-              class="w-7 h-7 inline-flex items-center justify-center rounded text-xs text-[#2563eb] hover:bg-[#eff4ff]"
+              aria-label="继续本轮对话"
+              class="group/tip relative inline-flex items-center justify-center w-7 h-7 rounded-[8px] border-0 bg-transparent p-0 text-xs text-[#2563eb] transition hover:bg-[#eff4ff]"
               @click="continueRound"
             >
               继续
+              <span :class="TIP_CLASS">继续本轮对话<span :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
             </button>
-            <!-- R-163 T3：赞踩（仅助手行）——28×28 热区、本地态、选中互斥可取消、title 气泡提示不挤布局 -->
+            <!-- R-163 T3：赞踩（仅助手行）——28×28 热区、本地态、选中互斥可取消；
+                 R-165 S1：全 Tailwind 图标按钮（demo v7 `.icon-btn` 配方），SVG 照搬 v7（描边 1.6/15×15）；
+                 色板按态整体换（选中态不挂 hover:*，免与 hover 工具类争顺序），赞蓝族、踩红族
+                 （R-163 T3 语义保留）；`is-on` 只驱动 SVG 填充。
+                 R-165 S2：原生 title 换 demo v7 `.tip` 黑底气泡（见 TIP_CLASS）；无障碍名改由 aria-label 承载。 -->
             <button
               v-if="m.role === 'assistant'"
               type="button"
               :data-testid="'feedback-up-' + m.id"
-              :title="feedbackOf(m.id) === 1 ? '取消赞' : '赞'"
+              :aria-label="feedbackOf(m.id) === 1 ? '取消赞' : '赞'"
               :aria-pressed="feedbackOf(m.id) === 1"
-              class="w-7 h-7 inline-flex items-center justify-center rounded hover:bg-[#eaecf0]"
-              :class="feedbackOf(m.id) === 1 ? 'text-[#2563eb]' : 'text-[#8b949e]'"
+              :class="[ICON_BTN_CLASS, feedbackOf(m.id) === 1 ? ICON_BTN_ON_BLUE : ICON_BTN_IDLE]"
               @click="rateMessage(m, 1)"
             >
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-3.5 h-3.5" aria-hidden="true"><path d="M7 10v12M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z"/></svg>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3H14z"></path><path d="M7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"></path></svg>
+              <span :class="TIP_CLASS">{{ feedbackOf(m.id) === 1 ? '取消赞' : '赞' }}<span :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
             </button>
             <button
               v-if="m.role === 'assistant'"
               type="button"
               :data-testid="'feedback-down-' + m.id"
-              :title="feedbackOf(m.id) === -1 ? '取消踩' : '踩'"
+              :aria-label="feedbackOf(m.id) === -1 ? '取消踩' : '踩'"
               :aria-pressed="feedbackOf(m.id) === -1"
-              class="w-7 h-7 inline-flex items-center justify-center rounded hover:bg-[#eaecf0]"
-              :class="feedbackOf(m.id) === -1 ? 'text-[#c0392b]' : 'text-[#8b949e]'"
+              :class="[ICON_BTN_CLASS, feedbackOf(m.id) === -1 ? ICON_BTN_ON_RED : ICON_BTN_IDLE]"
               @click="rateMessage(m, -1)"
             >
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-3.5 h-3.5" aria-hidden="true"><path d="M17 14V2M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2h13.5a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22a3.13 3.13 0 0 1-3-3.88Z"/></svg>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3H10z"></path><path d="M17 2h2.67A2.31 2.31 0 0 1 22 4v7a2.31 2.31 0 0 1-2.33 2H17"></path></svg>
+              <span :class="TIP_CLASS">{{ feedbackOf(m.id) === -1 ? '取消踩' : '踩' }}<span :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
             </button>
             <button
               v-if="m.role === 'user'"
               type="button"
-              class="w-7 h-7 inline-flex items-center justify-center rounded hover:bg-[#eaecf0] text-[#8b949e]"
+              :class="[ICON_BTN_CLASS, ICON_BTN_IDLE]"
               :data-testid="'edit-msg-' + m.id"
-              title="编辑该条消息（改完从该条重跑）"
               aria-label="编辑该条消息（改完从该条重跑）"
               @click="editMessage(m)"
             >
-              <svg viewBox="0 0 24 24" fill="currentColor" class="w-3.5 h-3.5" aria-hidden="true"><path d="M3 17.2V21h3.8l11-11-3.8-3.8zM20.7 7a1 1 0 0 0 0-1.4l-2.3-2.3a1 1 0 0 0-1.4 0l-1.8 1.8 3.7 3.7z" /></svg>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"></path><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"></path></svg>
+              <span :class="TIP_CLASS">编辑该条消息（改完从该条重跑）<span :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
             </button>
             <button
               type="button"
-              class="w-7 h-7 inline-flex items-center justify-center rounded hover:bg-[#eaecf0] text-[#8b949e]"
+              :class="[ICON_BTN_CLASS, ICON_BTN_IDLE, COPY_STATE_CLASS, isMsgCopied(m.id) ? 'is-copied' : '']"
               :data-testid="'copy-msg-' + m.id"
-              title="复制该条消息正文"
               aria-label="复制该条消息正文"
               @click="copyMessage(m)"
             >
-              <svg viewBox="0 0 24 24" fill="currentColor" class="w-3.5 h-3.5" aria-hidden="true"><path d="M16 1H4a2 2 0 0 0-2 2v14h2V3h12zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16H8V7h11z" /></svg>
+              <svg viewBox="0 0 24 24" aria-hidden="true" class="i-copy"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+              <svg viewBox="0 0 24 24" aria-hidden="true" class="i-check"><polyline points="20 6 9 17 4 12"></polyline></svg>
+              <span :class="TIP_CLASS">复制该条消息正文<span :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
             </button>
           </div>
+        </div>
+
+        <!-- R-165 S5c：错误卡族（demo v7.7 裁决区 08 改后口径）。铁律 = **内联于对话流、按错误发生
+             的位置插入，绝不做顶部固定**（位置 static，非 fixed/sticky）——故挂在「出错那一轮」的
+             消息上（store 写 `m.errorCard`），紧随该轮元信息行渲染，与顶部 Alert 族互不替代：
+             409 SESSION_BUSY / 503 挂起池饱和 / 503 AI 不可用走各自的顶部 Alert（不重复出卡），
+             断流走 alert-interrupted，本卡只承载「本轮出错」的三变体分派（429 红 / 内容过滤灰 /
+             上下文超限蓝）+ 未分类故障的通用红卡。分类与文案见 utils/error-card.ts。 -->
+        <div
+          v-if="m.errorCard"
+          class="w-full flex items-start gap-[8px] border border-solid rounded-[10px] px-[10px] py-[8px] mb-2.5"
+          :class="ERROR_CARD_TONE[m.errorCard.variant].box"
+          :data-testid="'error-card-' + m.id"
+          :data-variant="m.errorCard.variant"
+        >
+          <span
+            class="flex-[0_0_15px] w-[15px] h-[15px] rounded-[50%] border-solid border-[1.3px] text-[9px] mt-[2px] flex items-center justify-center"
+            :class="ERROR_CARD_TONE[m.errorCard.variant].icon"
+            aria-hidden="true"
+          >{{ ERROR_CARD_TONE[m.errorCard.variant].glyph }}</span>
+          <div class="flex-1 min-w-0">
+            <b class="block text-[12.2px] [font-weight:650] text-[#1f2328]">{{ m.errorCard.title }}</b>
+            <span class="text-[11.6px] text-[#57606a] leading-[1.55]">{{ m.errorCard.detail }}</span>
+            <span v-if="m.errorCard.guide" class="block mt-[3px] text-[11.4px] text-[#57606a] leading-[1.55]">{{ m.errorCard.guide }}</span>
+          </div>
+          <button
+            v-if="m.errorCard.action"
+            type="button"
+            class="flex-none border-0 bg-transparent p-0 text-[11.5px]"
+            :class="ERROR_CARD_TONE[m.errorCard.variant].action"
+            :data-testid="'error-card-action-' + m.id"
+            @click="runErrorCardAction(m.errorCard)"
+          ><span class="border-b border-[#e3e6ea]">{{ m.errorCard.action }}</span></button>
         </div>
         </div>
       </div>
       </div>
 
-      <!-- R-154 #5：上滑暂停跟随后浮出的「回到底部」——点击恢复跟随并滚底；
-           R-163D D5：demo .fab 同款圆钮（36×36 圆形白底阴影，右下定位）。 -->
+      <!-- R-154 #5：上滑暂停跟随后浮出的「回到底部」——点击恢复跟随并滚底。
+           R-165 S4 项 5（用户直裁）：形态回「水平居中 + 常显文字胶囊」（旧形态见 70a8aa6，
+           圆钮 → 胶囊 + 字面文案「回到底部」，不再靠 sr-only 承载无障碍名 —— 可见文案即名字）。
+           色族按 demo 族收敛：描边 `#e3e6ea`、阴影取 v7 `.fab` 的 `0_2px_8px_rgba(0,0,0,.13)`、
+           字 `#57606a` / hover 深字 `#1f2328`（原 EP 系 #dcdfe6/#606266/#409eff 退役）。
+           定位仍 `bottom-3`（定位父级 = 消息滚动容器，下沿 = composer 顶，S3a 裁决保留）+
+           `left-1/2 -translate-x-1/2` 水平居中；z-[6] 同 v7 `.fab`。 -->
       <button
         v-if="showBackToBottom && ai.messages.length > 0"
         type="button"
         data-testid="back-to-bottom"
         title="回到底部"
-        class="absolute bottom-3 right-3 w-9 h-9 rounded-full bg-white border border-solid border-[#e3e6ea] shadow-[0_2px_8px_rgba(0,0,0,0.13)] text-[15px] text-[#57606a] hover:text-[#1f2328] hover:border-[#8b949e] flex items-center justify-center"
+        class="absolute bottom-3 left-1/2 -translate-x-1/2 z-[6] whitespace-nowrap rounded-full border border-solid border-[#e3e6ea] bg-white px-3 py-1.5 text-xs text-[#57606a] shadow-[0_2px_8px_rgba(0,0,0,0.13)] transition-colors duration-[150ms] hover:text-[#1f2328]"
         @click="backToBottom"
       >
-        ↓<span class="sr-only">回到底部</span>
+        回到底部
       </button>
     </div>
 
-    <!-- 输入区（蓝本 AiPanel.vue:91-109） -->
-    <div class="border-t border-solid border-[#eef0f3] px-3 py-2.5">
-      <el-input
+    <!-- 输入区（R-165 S3a：el-textarea / el-button 全退 → demo v7 composer 结构，见 v7.html:362-365、745-755）
+         单行起排 = flex-[1] 输入框 + 28×28 方钮；容器 10px 14px 内边距 + 顶细线 #eef0f3 + 白底。
+         行为面逐字保留：v-model="inputText" / :rows="3" / resize-none / :disabled="!ai.canSend" /
+         :placeholder="inputPlaceholder" / @keydown.enter.exact.prevent="send" /
+         v-if="ai.loading" 换入停止钮（v7 同款替换关系）/ data-testid="send-btn" / :disabled="!canSubmit"。
+         busy（= !canSend）态：输入框描边转虚线（v7 `.busy` 口径：dashed 边框 + 灰底）。 -->
+    <div class="flex items-end gap-[8px] border-0 border-t border-solid border-[#eef0f3] bg-white px-[14px] py-[10px]">
+      <textarea
+        ref="composerRef"
         v-model="inputText"
-        type="textarea"
-        :rows="3"
-        resize="none"
+        rows="3"
+        data-testid="composer-input"
+        class="flex-[1] min-w-0 resize-none rounded-[9px] border px-[10px] py-[7px] font-[inherit] text-[13px] leading-[1.6] text-[#1f2328] bg-[#f6f7f9] [outline:none] transition-colors duration-[150ms] placeholder:text-[#8b949e] focus:border-[#2563eb] disabled:cursor-default"
+        :class="ai.loading ? 'border-dashed border-[#e3e6ea]' : 'border-solid border-[#e3e6ea]'"
         :disabled="!ai.canSend"
         :placeholder="inputPlaceholder"
         @keydown.enter.exact.prevent="send"
       />
-      <div class="mt-2 flex items-center justify-between">
-        <span class="text-xs" :class="ai.loading ? 'text-[#2563eb]' : 'text-[#8b949e]'">
-          {{ ai.loading ? ai.runStateLabel : 'Enter 发送 · Shift+Enter 换行' }}
-        </span>
-        <div>
-          <el-button v-if="ai.loading" size="small" type="danger" plain @click="stop">停止</el-button>
-          <el-button size="small" type="primary" data-testid="send-btn" :loading="ai.loading" :disabled="!canSubmit" @click="send">发送</el-button>
+      <button
+        v-if="ai.loading"
+        type="button"
+        class="flex-none w-[28px] h-[28px] rounded-[8px] bg-[#1f2328] border-0 flex items-center justify-center transition-all duration-[150ms] hover:brightness-[1.15]"
+        title="停止生成"
+        aria-label="停止生成"
+        @click="stop"
+      >
+        <span class="w-[9px] h-[9px] bg-white rounded-[2px] block" aria-hidden="true"></span>
+      </button>
+      <button
+        v-else
+        type="button"
+        data-testid="send-btn"
+        class="flex-none w-[28px] h-[28px] rounded-[8px] bg-[#2563eb] text-white border-0 text-[13px] leading-none flex items-center justify-center transition-all duration-[150ms] hover:brightness-[1.08] disabled:bg-[#8b949e] disabled:cursor-default"
+        aria-label="发送"
+        :disabled="!canSubmit"
+        @click="send"
+      >↑</button>
+    </div>
+
+    <!-- R-165 S5b：mermaid 全屏查看器（demo v7.7 :1948-1964 重做口径）——
+         深色 scrim（bg-black/50）+ 居中白色圆角容器（圆角 10 · 边框 #e3e6ea · 工具条 #f6f7f9）；
+         滚轮以指针为锚点缩放 0.5×–4×、拖拽走 transform 平移（不用 overflow 滚动）；
+         工具条 −/+/百分比/复位/复制源码/下载 SVG/关闭 全为图标钮（aria-label + tip）；
+         Esc / 点 scrim 关闭；role=dialog + aria-modal；SVG 容器 select-text（图中文字可直接框选）。 -->
+    <div
+      v-if="mmdViewerOpen"
+      class="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-[22px]"
+      role="dialog"
+      aria-modal="true"
+      aria-label="mermaid 全屏查看器"
+      data-testid="mmd-viewer"
+      @click.self="closeMmdViewer"
+    >
+      <div class="flex h-[min(760px,88vh)] w-[min(1180px,94vw)] flex-col rounded-[10px] border border-solid border-[#e3e6ea] bg-white shadow-[0_18px_48px_rgba(0,0,0,.28)]">
+        <div class="flex flex-none items-center gap-[8px] rounded-t-[9px] border-0 border-b border-solid border-[#eef0f3] bg-[#f6f7f9] px-[12px] py-[8px] text-[12.4px]">
+          <span class="text-[#9370DB] text-[11px]">◈</span>
+          <b class="[font-weight:650]" data-testid="mmd-viewer-title">{{ mmdViewerTitle }}</b>
+          <span class="font-mono text-[10.5px] text-[#8b949e]">0.5×–4×</span>
+          <span class="ml-auto flex items-center gap-[6px]">
+            <button
+              type="button"
+              :class="MMD_ICON_BTN_CLASS"
+              data-testid="mmd-zoom-out"
+              aria-label="缩小"
+              @click="zoomMmdViewer(1 / 1.25)"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"></path></svg>
+              <span class="tip" :class="TIP_CLASS">缩小<span class="tip-arrow" :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
+            </button>
+            <span class="min-w-[46px] text-center font-mono text-[11.5px] tabular-nums text-[#57606a]" data-testid="mmd-zoom-pct">{{ mmdViewerPct }}%</span>
+            <button
+              type="button"
+              :class="MMD_ICON_BTN_CLASS"
+              data-testid="mmd-zoom-in"
+              aria-label="放大"
+              @click="zoomMmdViewer(1.25)"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>
+              <span class="tip" :class="TIP_CLASS">放大<span class="tip-arrow" :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
+            </button>
+            <span class="mx-[2px] h-[18px] w-[1px] bg-[#e3e6ea]"></span>
+            <button
+              type="button"
+              :class="MMD_ICON_BTN_CLASS"
+              data-testid="mmd-reset"
+              aria-label="复位到 100%"
+              @click="resetMmdViewer"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"></path><path d="M3 4v5h5"></path></svg>
+              <span class="tip" :class="TIP_CLASS">复位到 100%<span class="tip-arrow" :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
+            </button>
+            <button
+              type="button"
+              :class="[MMD_COPY_ICON_BTN_CLASS, mmdViewerCopied ? 'is-copied' : '']"
+              data-testid="mmd-copy"
+              aria-label="复制源码"
+              @click="copyMmdViewerSource"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true" class="i-copy"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+              <svg viewBox="0 0 24 24" aria-hidden="true" class="i-check"><polyline points="20 6 9 17 4 12"></polyline></svg>
+              <span class="tip" :class="TIP_CLASS">复制源码<span class="tip-arrow" :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
+            </button>
+            <button
+              type="button"
+              :class="MMD_ICON_BTN_CLASS"
+              data-testid="mmd-download"
+              aria-label="下载 SVG"
+              @click="downloadMmdViewerSvg"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"></path><path d="m7 10 5 5 5-5"></path><path d="M5 21h14"></path></svg>
+              <span class="tip" :class="TIP_CLASS">下载 SVG<span class="tip-arrow" :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
+            </button>
+            <button
+              type="button"
+              :class="MMD_ICON_BTN_CLASS"
+              data-testid="mmd-close"
+              aria-label="关闭全屏"
+              @click="closeMmdViewer"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg>
+              <span class="tip" :class="TIP_CLASS">关闭全屏<span class="tip-arrow" :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
+            </button>
+          </span>
+        </div>
+        <div
+          ref="mmdViewerStageRef"
+          tabindex="-1"
+          class="relative min-h-0 flex-1 cursor-grab select-none overflow-hidden rounded-b-[9px] bg-[#fbfbfc]"
+          data-testid="mmd-viewer-stage"
+          @wheel.prevent="onMmdViewerWheel"
+          @mousedown="onMmdViewerDragStart"
+        >
+          <div ref="mmdViewerPanRef" data-testid="mmd-viewer-pan" class="absolute inset-0 flex items-center justify-center [transform:translateX(var(--px,0px))_translateY(var(--py,0px))]">
+            <div ref="mmdViewerZoomRef" data-testid="mmd-viewer-zoom" v-html="mmdViewerSvg" class="origin-center select-text [transform:scale(var(--z,1))]"></div>
+          </div>
         </div>
       </div>
     </div>
@@ -505,7 +809,7 @@
  * - 生成式表单挂起卡（GF-B）：generative_form 帧渲染 FormRenderer 等用户填写，取消/超时带
  *   cancelled:true 回灌 —— 蓝本无此前端工具通道；
  * - HITL 卡片：确认/拒绝双路径 + 拒绝原因输入 + 超时倒计时置灰 —— 蓝本有双按钮但无原因与倒计时；
- * - 409/503/断流三类降级提示（EP Alert）与一键重挂 —— 蓝本是蓝本后端（无 SESSION_BUSY/挂起池）；
+ * - 409/503/断流三类降级提示与一键重挂 —— 蓝本是蓝本后端（无 SESSION_BUSY/挂起池）；
  * - 头部「新建对话」文字按钮 + 空态页签语义小字（苞 A 项 1）：清空当前会话并换新 sessionId
  *   （旧会话的服务端记忆由 `DELETE /api/ai/history/{sessionId}` 删除）—— 蓝本无"重开"入口；
  * - 逐条复制（苞 B 项 2）：消息 hover/聚焦时显现「复制」，复制正文纯文本（不含思考链与工具卡）；
@@ -516,16 +820,54 @@
  * 裁剪性：本组件只依赖 stores/ai 与 stores/workspace 的窄接口；App.vue 收起 AI 栏
  * （48px 竖排条）或整体移除本组件后，五页业务功能全部照常可用。
  *
- * 样式纪律：模板全部用 Element Plus + 内联 Tailwind 工具类；唯一的 scoped CSS 是
- * 蓝本确有的 18 行打字机动画（`.typing .dot` + `@keyframes blink`，Tailwind 无对应工具类）。
- * 项 2 的 hover 显现用 Tailwind 默认 core plugin 的 `group` / `group-hover`（本仓首用）。
+ * 样式纪律：模板用 Element Plus（未重构区）+ 内联 Tailwind 工具类；R-165 S1 起，
+ * **消息区三件套（工具卡 / 操作行 / 状态胶囊）零 EP 组件承载**，全部改原生元素 + Tailwind 工具类
+ * （demo v7 配方照搬，含 preflight 关闭下的 UA 复位 bg-transparent border-0 font-[inherit]）。
+ * R-165 S2 续作：**思考卡 / HITL 门卡 / 回执卡 / 6 处顶部提示（el-alert）/ 空态（el-empty）/
+ * 骨架屏（el-skeleton）/ 操作行 tip 气泡** 一并零 EP 承载，同口径纯 Tailwind；
+ * 门卡的 el-input/el-button 与空态的 el-button/el-icon 同步退场（原生 textarea/button/span）。
+ * R-165 S3a 收口：**输入区 composer**（el-textarea + el-button 全退）改 v7 单行结构——
+ * 原生 textarea（rows=3 保持现状逻辑）+ 28×28 方钮（停止 #1f2328 白方块 / 发送 #2563eb 白图标）；
+ * 同批按指挥官裁决收三项：R6 消息行撤 `mb-3.5`（间距回归元信息行单值 18px）、
+ * R7 fab 回 `bottom-3`、R11 error 级通知改 v7 `.enotice` 红族（普通通知保持灰底虚线）。
+ * R-165 S4（用户六项直裁）：① 操作行按钮**常驻**（撤 opacity-0/group-hover 浮出）；② 用户长消息
+ * 折叠/展开（>184px 限高 + 底部渐隐 + 「展开/收起」，本地态，全 Tailwind）；③ md-body 末块外边距
+ * 归零 + 用户侧字号 13.5px 真落地 + 气泡 `w-full` 按 role 分派；④ 间距对齐 v7（助手侧去 py-2、
+ * 助手元信息行 mt-[12px]）；⑤ 浮钮回「居中常显文字胶囊」+ 滞回带放宽至 160/32。
+ * 唯一的 scoped CSS 是蓝本确有的 18 行打字机动画（`.typing .dot` + `@keyframes blink`）
+ * 与 R-161 的 scroll-smooth/reduced-motion 两条；S2 的 tip 气泡用 Tailwind **具名组**写法 `group/tip`
+ * （S4 起消息行不再需要匿名 `group` 承载浮出，但辅助类与既有 DOM 语义保持不动）。
+ * S4 铁律：零手写 CSS、零行内 style、零 style 块新增，全部走 Tailwind 任意值/变体类。
+ * R-165 S5a（demo v7.7 终裁十项）：① 卡片堆叠下外边距体系（工具卡 mb-2 / 门卡·GF mb-2.5 /
+ * 回执·思考·流程图 mb-3.5）；② 回执卡折叠重设计（「查看详情 ⇄ 收起详情」+ 单层 mono JSON 盒，
+ * 外层包裹盒/小节标签退役，`border-t border-solid` 单边写法在 preflight 关闭下的 3px 伪影一并清）；
+ * ③ 用户气泡全圆角 12px；④ 限高族（工具输出 160 / 代码 pre 200 / 门卡字段 160 / GF 字段 240，
+ * 纯限高内滚无展开钮）；⑤ 长表格双区（表头不滚 + 表体 320 内滚 + 横滚联动）；⑥ 长消息折叠 184px
+ * + 遮罩绝对值写法；⑦ 复制全图标化 + 绿勾 2s 反馈（代码块 / mermaid 源码 / 消息复制）；
+ * ⑧ 6px 圆角半透明滚动条（任意变体类）；⑨ focus-visible 聚焦环；⑩ GF 取消钮聚拢右对齐。
+ * R-165 S5b（demo v7.7 裁决区 12 + 07 双态重做）：mermaid 卡改「卡头分段 tab 预览 | 源码」双态
+ * （底部「查看源码」钮退役）+ 卡头右端图标钮组（缩放读数 / 复位 / 全屏）；预览态 260px 限高内联
+ * 滚轮缩放（指针锚定 0.5×–4×）+ transform 拖拽平移 + 复位，超宽仍可内联横滚，两态各自记住滚动；
+ * 源码态 200px 内滚 mono 盒 + 复制源码图标钮（绿勾反馈沿用 S5a 统一机制）；全屏查看器重做
+ * （scrim + 白容器 · 指针锚定缩放 · transform 平移 · 6 钮工具条 · Esc/点 scrim 关闭 · role=dialog）。
+ * 结构类名换 `mmdc` 前缀（旧 `.mmd*` CSS 规则零引用但本批禁删禁改，S5c 统一拆）。
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { ArrowRight, ChatDotRound, Operation, Promotion, WarningFilled } from '@element-plus/icons-vue'
-import { useAiStore, foldDeadline } from '@/stores/ai'
+import { ArrowRight, ChatDotRound } from '@element-plus/icons-vue'
+import { useAiStore } from '@/stores/ai'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { formatCountdown, formatProgressiveTs } from '@/utils/format'
-import { renderMarkdown, renderMermaidSvg } from '@/utils/markdown'
+import {
+  COPY_ICON_BTN_CLASS,
+  COPY_ICON_SVGS,
+  COPY_STATE_CLASS,
+  MD_BODY_ROOT_CLASS,
+  SCROLLBAR_CLASS,
+  TIP_ARROW_CLASS,
+  TIP_CLASS,
+  renderMarkdown,
+  renderMermaidSvg
+} from '@/utils/markdown'
 import { toolSummary } from '@/utils/tool-summaries'
 import { groupParts, resolveBlockExpanded, type Block } from '@/utils/blocks'
 import { deriveCopyText, deriveProjections } from '@/utils/parts'
@@ -533,6 +875,7 @@ import { createPollingController, type PollingController } from '@/utils/polling
 import FormRenderer from '@/components/AiPanel/FormRenderer.vue'
 import CollapsibleText from '@/components/AiPanel/CollapsibleText.vue'
 import { GENERATIVE_FORM_TOOL, type ChatMessage, type PendingToolCall, type ToolPart, type ToolRunStatus } from '@/types/ai'
+import type { ErrorCard, ErrorCardVariant } from '@/utils/error-card'
 
 const ai = useAiStore()
 const workspace = useWorkspaceStore()
@@ -541,6 +884,8 @@ const inputText = ref('')
 const rejectReason = ref('')
 const deciding = ref(false)
 const msgWrapRef = ref<HTMLElement | null>(null)
+/** R-165 S5c：输入框 ref —— 错误卡「改写后重发」把焦点交回输入框（改写是用户动作）。 */
+const composerRef = ref<HTMLTextAreaElement | null>(null)
 
 /**
  * R-154 #5 → R-161：钉底跟随的「用户上滑即暂停」策略。
@@ -548,15 +893,17 @@ const msgWrapRef = ref<HTMLElement | null>(null)
  * 暂停自动跟随，回到底部附近自动恢复；唯一点「回到底部」浮钮 = 强制恢复并滚底。
  * 渲染真值仍为 parts（与自动滚动指纹 watch 同源），禁读 content。
  * R-161 阈值拆分：一值双用是「上滚一点就出钮」的根因 —— 跟随闸 32px 保留，
- * 浮钮显隐走独立滞回带（离底 >64 显 / <24 隐，常量化与 clientHeight 无关）。
+ * 浮钮显隐走独立滞回带（常量化与 clientHeight 无关）。
+ * R-165 S4 项 5（用户直裁）：滞回带放宽 —— 显阈 64 → **160**（一屏内的轻微上滑不再弹钮）、
+ * 隐阈 24 → **32**（回到贴底才收，与跟随闸同值）；FOLLOW_THRESHOLD_PX 32 不动。
  */
 const followBottom = ref(true)
 /** 跟随解除/恢复闸（px）：离底小于它即视为贴底。 */
 const FOLLOW_THRESHOLD_PX = 32
-/** R-161 浮钮滞回：离底大于它才显示（业界主流口径）。 */
-const SHOW_BACK_TO_BOTTOM_PX = 64
-/** R-161 浮钮滞回：离底小于它才隐藏。 */
-const HIDE_BACK_TO_BOTTOM_PX = 24
+/** R-161 浮钮滞回（R-165 S4 放宽）：离底大于它才显示。 */
+const SHOW_BACK_TO_BOTTOM_PX = 160
+/** R-161 浮钮滞回（R-165 S4 调整为 32）：离底小于它才隐藏。 */
+const HIDE_BACK_TO_BOTTOM_PX = 32
 
 /** R-161：pinBottom() 的落点。程序化钉底后浏览器异步派发的 scroll 回声按落点识别
  *  （容差 ≤1px，会审 M1）：回声只刷浮钮显隐，不动跟随闸 —— 否则「已在底部时内容插入」
@@ -583,7 +930,8 @@ function onMsgScroll(): void {
   updateBackToBottom(bottomDist(wrap))
 }
 
-/** R-161 滞回带显隐：带内（24~64）保持原状，防边界抖动；非 !followBottom 纯计算（会审 M3）。 */
+/** R-161 滞回带显隐：带内（HIDE ~ SHOW，R-165 S4 起 32~160）保持原状，防边界抖动；
+ *  非 !followBottom 纯计算（会审 M3）。 */
 function updateBackToBottom(dist: number): void {
   if (dist > SHOW_BACK_TO_BOTTOM_PX) {
     showBackToBottom.value = true
@@ -622,6 +970,122 @@ function backToBottom(): void {
 }
 
 /**
+ * R-165 S4 项 2（用户直裁）→ S5a 项 6（终裁 200 → 184px）：
+ * **用户长消息展开/折叠**。
+ * - 判据：用户消息正文（md-body）自然高 > 184px（= 8 行 @ 13.5px × 1.7 ≈ 23px/行；原 200px
+ *   ≈ 8.7 行会切在行半腰）⇒ 折叠态：限高 + 裁切 + 底部渐隐；
+ * - 「展开/收起」为**该消息本地态**（展开集 Set<消息 id>），不进 store、不写后端；
+ * - 溢出判定沿用 CollapsibleText 的单一 measure 口径（读 scrollHeight，无 RO 依赖）——
+ *   但**不复用内联 style 写法**（渐隐改任意值类 `[mask-image:...]`，S4 铁律：零行内 style）。
+ */
+const USER_MSG_MAX_HEIGHT_PX = 184
+
+/** S4 折叠态类 → S5a 项 6：限高 184px + 裁切 + 底部渐隐。
+ *  遮罩改**绝对值**写法 `calc(100% - 90px)`（末 90px 渐隐，与折叠高度解耦 —— 以后再调高度不必再
+ *  改百分比；v7.7 终裁口径）。 */
+const USER_MSG_COLLAPSE_CLASS = 'max-h-[184px] overflow-hidden [mask-image:linear-gradient(to_bottom,#000_calc(100%_-_90px),transparent)]'
+
+/** md-body 修正类（S4 项 3）：末块下外边距归零；用户侧另加字号直命中（根容器自身声明 13.8px
+ *  会压继承，S2 遗留 13.5px 未真生效 ⇒ 用内部选择器直命中 p/li）。
+ *  R-165 S5a 项 4：代码块 `pre` 纯限高内滚 200px（demo v7 口径）——`figure.code>pre` 的
+ *  任意变体特异度高于渲染层注入在 `pre` 自身上的排版类，故无需 `!`。
+ *  R-165 S5c：末块外边距的**声明方**已是渲染层注入的工具类（markdown.ts `MD_P_CLASS` 等），
+ *  这里的 `!` 从「压手写 CSS 的 (0,2,1)」变成「压渲染层同级工具类」的双保险，语义不变。 */
+const CODE_PRE_LIMIT_CLASS = '[&_figure.code>pre]:max-h-[200px] [&_figure.code>pre]:overflow-y-auto'
+const MD_BODY_USER_CLASS = `[&>*:last-child]:!mb-0 [&_p]:text-[13.5px] [&_li]:text-[13.5px] ${CODE_PRE_LIMIT_CLASS}`
+const MD_BODY_AI_CLASS = `[&>*:last-child]:!mb-0 ${CODE_PRE_LIMIT_CLASS}`
+
+/**
+ * R-165 S5c：三段状态动画/装饰元素的模板类串（原 ai-chat.css `.caret` / `.loading-breath` /
+ * `.fade-out` / `.tchev` 逐值迁移）。**语义标记类保留**（`caret` / `loading-breath` / `fade-out` /
+ * `tchev`）——它们与 `.md-body` / `cpbtn` / `mmdc-*` 同属「结构标记」命名法，既有断言（fade-out
+ * 两态、`.tchev` 存在）与外部探针靠它们定位；承载视觉的是随行的 Tailwind 工具类。
+ * keyframes 本体见 tailwind.config.js（aiBlink / aiBreathe / aiFadeOut）。
+ */
+const CARET_CLASS =
+  'caret inline-block w-[6px] h-[14px] bg-[#57606a] align-[-2px] rounded-[1px] animate-caret motion-reduce:animate-none'
+const BREATH_CLASS = 'loading-breath inline-flex items-center gap-[6px] m-0 pl-[2px] text-[12.2px] text-[#57606a]'
+/** 完成淡出：`fade-out` 为标记类（既有两态断言锚），`animate-fade-out` 承载 0.3s forwards。 */
+const FADE_OUT_CLASS = 'fade-out animate-fade-out'
+const TCHEV_CLASS =
+  'tchev flex-none inline-block text-[#8b949e] text-[12px] transition-transform duration-[180ms] [&.is-open]:rotate-90'
+
+/**
+ * R-165 S5c：错误卡三变体 + 通用红卡的配色/图标（demo v7.7 裁决区 08 改后 v7.4 定稿逐条照搬）：
+ * 429 红族（! 圆标）/ 内容过滤灰族（⊘）/ 上下文超限蓝族（i）/ 未分类故障沿用红卡。
+ * 卡壳与动作钮的色族同源，避免「红壳配蓝钮」这类跨族混搭。
+ */
+const ERROR_CARD_TONE: Record<ErrorCardVariant, { box: string; icon: string; glyph: string; action: string }> = {
+  quota: { box: 'border-[#f0d5d0] bg-[#fdf1ef]', icon: 'border-[#c0392b] text-[#c0392b] font-bold', glyph: '!', action: 'text-[#c0392b]' },
+  filter: { box: 'border-[#e3e6ea] bg-[#f6f7f9]', icon: 'border-[#8b949e] text-[#8b949e]', glyph: '⊘', action: 'text-[#57606a]' },
+  context: { box: 'border-[#cddcff] bg-[#eff4ff]', icon: 'border-[#2563eb] text-[#2563eb] font-bold', glyph: 'i', action: 'text-[#2563eb]' },
+  generic: { box: 'border-[#f0d5d0] bg-[#fdf1ef]', icon: 'border-[#c0392b] text-[#c0392b] font-bold', glyph: '!', action: 'text-[#c0392b]' }
+}
+
+/** 错误卡动作（= 三变体各自引导语的落点，全部复用本组件既有动作，不新增 store 出口）：
+ *  「稍后重试」= 重发本轮（`continueRound`，与「继续」同一条路）；「改写后重发」= 把焦点交回输入框
+ *  （改写是用户动作，面板只能把落点指过去）；「开新会话」= 既有 `newChat()`（与面板头「新建对话」同一出口）。 */
+function runErrorCardAction(card: ErrorCard): void {
+  if (card.action === '稍后重试') {
+    continueRound()
+    return
+  }
+  if (card.action === '改写后重发') {
+    composerRef.value?.focus()
+    return
+  }
+  if (card.action === '开新会话') {
+    newChat()
+  }
+}
+
+/** 用户消息 md-body 元素表（按消息 id 记，供单一 measure 读 scrollHeight）。 */
+const userBodyEls = new Map<string, HTMLElement>()
+/** 真溢出（正文高 > 184px）的用户消息 id 集 —— 只有它为真才渲染「展开/收起」。 */
+const userMsgOverflowed = ref<Set<string>>(new Set())
+/** 已展开的用户消息 id 集（默认收起 = 不在集内）。 */
+const userMsgExpanded = ref<Set<string>>(new Set())
+
+/** 模板函数 ref：用户消息正文元素登记/注销（收起态下 scrollHeight 仍为内容自然高，量取稳定）。 */
+function setUserBodyRef(id: string, el: Element | { $el?: Element } | null): void {
+  if (el instanceof HTMLElement) {
+    userBodyEls.set(id, el)
+    return
+  }
+  userBodyEls.delete(id)
+}
+
+/** 单一 measure：逐条读 scrollHeight 与限高比较，集合真变化才换引用（防无谓重渲）。 */
+function measureUserMsgOverflow(): void {
+  const next = new Set<string>()
+  for (const [id, el] of userBodyEls) {
+    if (el.scrollHeight > USER_MSG_MAX_HEIGHT_PX) {
+      next.add(id)
+    }
+  }
+  if (next.size !== userMsgOverflowed.value.size || [...next].some((id) => !userMsgOverflowed.value.has(id))) {
+    userMsgOverflowed.value = next
+  }
+}
+
+/** 折叠态判定：真溢出且未展开。 */
+function isUserMsgCollapsed(id: string): boolean {
+  return userMsgOverflowed.value.has(id) && !userMsgExpanded.value.has(id)
+}
+
+/** 展开/收起切换（同回落单一 measure：展开后字数变化同样以读数为准）。 */
+function toggleUserMsg(id: string): void {
+  const next = new Set(userMsgExpanded.value)
+  if (next.has(id)) {
+    next.delete(id)
+  } else {
+    next.add(id)
+  }
+  userMsgExpanded.value = next
+  void nextTick(measureUserMsgOverflow)
+}
+
+/**
  * 逐条复制的反馈（苞 B 项 2）：**组件局部状态**，生命周期 2s。
  * 为什么不复用 `ai.notice`：它是单槽位（一次只承载一条提示），"已复制"会把并发的
  * 断流/取消等提示挤掉 —— 局部状态只作用于被点的那条消息。
@@ -629,10 +1093,20 @@ function backToBottom(): void {
 const copyState = ref<{ id: string; ok: boolean } | null>(null)
 let copyTimer: ReturnType<typeof setTimeout> | null = null
 
+/** R-165 S5a 项 7：该消息此刻处于「复制成功」绿勾态（2s 窗口内）。 */
+function isMsgCopied(messageId: string): boolean {
+  return copyState.value !== null && copyState.value.id === messageId && copyState.value.ok
+}
+
 /** 倒计时节拍（每秒推进一次；确认卡据此置灰）。 */
 const now = ref(Date.now())
-const confirmDeadline = ref<number | null>(null)
-/** 节拍间隔（规格：1s）。 */
+/**
+ * R-166 口径①：倒数秒的**唯一来源** = store 的 `confirmClock`（帧/心跳锚定的本地绝对到期时刻）。
+ *
+ * 本组件**不再自行折算/不再持有 deadline** —— 旧口径把"帧差值折算"放在面板的重派生路径上，
+ * `pendingConfirm` 引用一变就把倒计时打回起点（症②）。现在面板只做 `deadlineMs − now` 的读取，
+ * 锚点由 store 在**收到实时帧 / 心跳**时写一次 ⇒ 重派生天然幂等。
+ */
 const TICK_MS = 1000
 /**
  * 节拍器（步2 接入可见性纪律 controller，节奏 1s/1s ⇒ 单节奏）。
@@ -696,13 +1170,6 @@ const healthTagType = computed<'success' | 'warning' | 'info'>(() => {
 
 const degradeReason = computed(() => ai.unavailableReason ?? '未检测到 AI 可用性，请点击「重新检测」。')
 
-const noticeType = computed<'info' | 'warning' | 'error'>(() => {
-  if (ai.streamInterrupted) {
-    return 'error'
-  }
-  return ai.loading ? 'info' : 'warning'
-})
-
 const canSubmit = computed(() => ai.canSend && ai.available && inputText.value.trim().length > 0)
 
 const inputPlaceholder = computed(() => {
@@ -715,14 +1182,51 @@ const inputPlaceholder = computed(() => {
   return '输入消息，Enter 发送，Shift+Enter 换行'
 })
 
+/**
+ * R-166 口径①：剩余秒 = 门卡时钟（帧/心跳锚定的本地绝对到期）− 本地 now。
+ *
+ * 时钟与门卡**必须同 id**：换挂起（toolCallId 变）时旧时钟不得给新卡读数；时钟未锚定
+ * （首心跳前的刷新恢复窗口 / 帧不带任何到期口径）→ null ⇒ 门卡显示静态「等待人工确认」
+ * （不伪造倒计时）。归零后由 `watch` 触发一次权威校正（口径④）。
+ */
 const remainingSeconds = computed(() => {
-  if (confirmDeadline.value === null) {
+  const clock = ai.confirmClock
+  const pending = ai.pendingConfirm
+  if (!clock || !pending || clock.toolCallId !== pending.toolCallId) {
     return null
   }
-  return Math.max(0, Math.ceil((confirmDeadline.value - now.value) / 1000))
+  return Math.max(0, Math.ceil((clock.deadlineMs - now.value) / 1000))
 })
 
 const confirmExpired = computed(() => remainingSeconds.value !== null && remainingSeconds.value <= 0)
+
+/**
+ * R-165 S2：门卡 SVG 倒计时环的**总量**（秒）—— R-166 起取自门卡时钟的同帧口径
+ * （帧/心跳的 `timeoutSeconds`），用于把「剩余/总量」折算成 stroke-dashoffset；
+ * 缺省时环按满弧呈现，不伪造比例。
+ */
+const confirmTotalSeconds = computed(() => {
+  const clock = ai.confirmClock
+  const pending = ai.pendingConfirm
+  if (!clock || !pending || clock.toolCallId !== pending.toolCallId) {
+    return null
+  }
+  return clock.totalSeconds
+})
+
+/** 环的 dashoffset：dasharray = 周长，offset = 周长 ×（1 − 剩余/总量）⇒ 蓝弧随时间线性退去（v7 同法）。 */
+const confirmRingOffset = computed(() => {
+  const remain = remainingSeconds.value
+  const total = confirmTotalSeconds.value
+  if (remain === null) {
+    return RING_CIRCUMFERENCE
+  }
+  if (!total || total <= 0) {
+    return 0
+  }
+  const ratio = Math.max(0, Math.min(1, remain / total))
+  return RING_CIRCUMFERENCE * (1 - ratio)
+})
 
 /**
  * GF-B：当前可交互的生成式表单（填写中/提交中才渲染 FormRenderer；
@@ -866,34 +1370,522 @@ function toolSummaryOrNull(part: ToolPart): string | null {
 }
 
 /**
- * R-163B G4：v-html 注入内容的点击委托 —— 代码块复制按钮 / mermaid「查看源码」切换。
- * 不在注入 HTML 内联脚本；剪贴板走既有 legacyCopy 回退链（含 execCommand 降级）。
+ * R-163B G4 → R-165 S5a 项 7 → S5b：v-html 注入内容的点击委托 —— 代码块复制图标钮 / mermaid 卡内
+ * 四钮（源码态复制源码、双态 tab 切换、预览复位、全屏查看）。不在注入 HTML 内联脚本；
+ * 剪贴板走既有 legacyCopy 回退链。复制成功反馈统一为 v7 口径：钮挂 `is-copied`（绿勾 + 绿字，
+ * 见 COPY_STATE_CLASS），2s 后复原。
  */
 function onMdBodyClick(event: MouseEvent): void {
   const target = event.target as HTMLElement | null
   if (!target) {
     return
   }
-  const copyBtn = target.closest('figure.code .copy')
+  const copyBtn = target.closest('figure.code .cpbtn')
   if (copyBtn) {
     const pre = copyBtn.parentElement?.parentElement?.querySelector('pre')
     const text = pre?.textContent ?? ''
     const ok = legacyCopy(text)
-    copyBtn.textContent = ok ? '已复制' : '复制失败'
-    setTimeout(() => {
-      copyBtn.textContent = '复制'
-    }, 1200)
+    flashCopied(copyBtn, ok)
     return
   }
-  const toggle = target.closest('.mmd .mmd-toggle')
-  if (toggle) {
-    toggle.closest('.mmd')?.classList.toggle('is-open')
+  // R-165 S5b：卡内四钮 —— 复制源码（源码态）/ tab 切换 / 复位 / 全屏（新类名 `mmdc*`，见卡配方）
+  const srcCopy = target.closest('.mmdc .mmdc-copy')
+  if (srcCopy) {
+    const code = srcCopy.closest('.mmdc')?.querySelector('.mmdc-src')
+    flashCopied(srcCopy, legacyCopy(code?.textContent ?? ''))
+    return
+  }
+  const tab = target.closest('.mmdc .mmdc-tab')
+  if (tab) {
+    switchMermaidTab(tab)
+    return
+  }
+  const reset = target.closest('.mmdc .mmdc-ireset')
+  if (reset) {
+    resetMermaidInline(reset.closest('.mmdc'))
+    return
+  }
+  const full = target.closest('.mmdc .mmdc-full')
+  if (full) {
+    openMmdViewer(full.closest('.mmdc'))
   }
 }
 
+/** 复制成功反馈（v7 `14c`）：成功挂 `is-copied` 换绿勾，2s 后复原；失败不挂（无绿勾即"没成功"）。 */
+function flashCopied(btn: Element, ok: boolean): void {
+  if (!(btn instanceof HTMLElement)) {
+    return
+  }
+  btn.classList.toggle('is-copied', ok)
+  const timer = window.setTimeout(() => btn.classList.remove('is-copied'), 2000)
+  copyFlashTimers.set(btn, timer)
+}
+/** 注入 DOM 的复制钮反馈计时器（节点随 v-html 重建，卸载时统一清理）。 */
+const copyFlashTimers = new Map<Element, number>()
+
+/* ---------- R-165 S5b：mermaid 卡双态（预览 | 源码）+ 全屏查看器 ----------
+   口径 = demo v7.7 终裁（裁决区 12：卡头分段 tab「预览 | 源码」+ 右端图标钮组；预览 260px 内联
+   滚轮缩放（指针锚定 0.5–4×）+ transform 拖拽平移 + 复位 + 缩放读数；源码 200px 内滚 + 复制源码钮；
+   裁决区 07：全屏查看器 scrim + 白容器 · 指针锚定缩放 0.5×–4× · transform 平移 · 6 钮工具条 ·
+   Esc/点 scrim 关闭）。两道缩放/平移数学同源（07 与 12 在 demo 里也是同一套）。
+   类名纪律：S5b 期 ai-chat.css 的 `.mmd*` 族 12 条规则是零引用存量、结构已整体换 `mmdc` 前缀；
+   R-165 S5c 后该文件已删除 ⇒ `mmdc-*` 是 mermaid 卡唯一类词条（`mmd` 前缀不再出现在任何样式源）。
+   缩放/平移的 CSS 只存在于 Tailwind 任意值类（`[transform:scale(var(--z,1))]` /
+   `[transform:translateX(var(--px,0px))_translateY(var(--py,0px))]`），JS 只写这三个变量值
+   （demo 同机制：样式声明在工具类里，运行期只喂变量）。 */
+
+/** 缩放范围（demo 07 / 12 同口径）。 */
+const MMD_Z_MIN = 0.5
+const MMD_Z_MAX = 4
+
+/** 卡壳（demo `data-mmd-card`：细描边 + 圆角 10 + 白底 + 裁切内滚区四角）。下外边距 mb-3.5 同 S5a 卡片节奏。 */
+const MMD_CARD_CLASS = 'mmdc mb-3.5 overflow-hidden rounded-[10px] border border-solid border-[#e3e6ea] bg-white'
+const MMD_HEAD_CLASS = 'relative flex items-center gap-[7px] border-0 border-b border-solid border-[#eef0f3] bg-[#f6f7f9] px-[10px] py-[7px] text-[12.4px]'
+const MMD_MARK_CLASS = 'text-[#9370DB] text-[11px]'
+const MMD_NAME_CLASS = 'mmdc-name [font-weight:650]'
+/** 卡头中段分段控件（demo：圆角 7 双层描边 + 选中态白底 600 阴影）。 */
+const MMD_TABS_CLASS = 'mmdc-tabs absolute left-1/2 -ml-[24px] -translate-x-1/2 flex gap-[2px] rounded-[7px] border border-solid border-[#e3e6ea] bg-[#f6f7f9] p-[2px]'
+const MMD_TAB_CLASS = 'mmdc-tab border-0 bg-transparent rounded-[5px] px-[11px] py-[3px] text-[11.5px] text-[#57606a] transition-all duration-[150ms] [&.is-on]:bg-white [&.is-on]:font-semibold [&.is-on]:text-[#1f2328] [&.is-on]:shadow-[0_1px_2px_rgba(0,0,0,.08)]'
+/** 卡头图标钮 = 13 图标钮白名单形态的 26px 档（demo 卡头/查看器工具条同档；24px 档见 COPY_ICON_BTN_CLASS）。 */
+const MMD_ICON_BTN_CLASS = 'group/tip relative inline-flex w-[26px] h-[26px] items-center justify-center rounded-[7px] border border-solid border-[#e3e6ea] bg-white p-0 text-[#57606a] transition-colors duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328] [&_svg]:w-[14px] [&_svg]:h-[14px] [&_svg]:fill-none [&_svg]:stroke-current [&_svg]:[stroke-width:1.7] [&_svg]:[stroke-linecap:round] [&_svg]:[stroke-linejoin:round]'
+const MMD_COPY_ICON_BTN_CLASS = `${MMD_ICON_BTN_CLASS} ${COPY_STATE_CLASS}`
+
+/** 预览态容器（demo：限高 260px + 内联横滚保留 + 拖拽手型；缩放/平移走 transform 层，不用 overflow 平移）。 */
+const MMD_PREVIEW_PANE_CLASS = `mmdc-pane mmdc-pv max-h-[260px] overflow-auto bg-white cursor-grab select-none ${SCROLLBAR_CLASS}`
+const MMD_PAN_CLASS = 'mmdc-pan [transform:translateX(var(--px,0px))_translateY(var(--py,0px))]'
+const MMD_STAGE_CLASS = 'mmdc-stage w-max origin-top-left [transform:scale(var(--z,1))]'
+const MMD_SOURCE_PANE_CLASS = 'mmdc-pane hidden'
+/** 源码态：小标题行 + 复制源码图标钮（24px 档）+ mono 盒 200px 内滚（与代码块限高同口径）。 */
+const MMD_SOURCE_BAR_CLASS = 'flex items-center gap-[6px] border-0 border-b border-solid border-[#eef0f3] bg-[#fbfbfc] px-[10px] py-[5px] text-[11px] text-[#8b949e]'
+/** mono 盒用 `div`（非 demo 的 `pre`）：preflight 关闭下 `<pre>` 吃 UA 默认外边距，且
+ *  `.ai-chat .md-body pre`(0,2,1) 会压过全部 Tailwind 版式类（padding/字号/行高需 5 个 `!`）；
+ *  内容由 `textContent` 赋值（纯文本、零注入面），div 的 box 行为与 pre 等价（`whitespace-pre`）。 */
+const MMD_SOURCE_BOX_CLASS = `mmdc-src max-h-[200px] overflow-auto whitespace-pre bg-[#f8f8f8] px-[10px] py-[8px] font-mono text-[12px] leading-[1.6] text-[#333] ${SCROLLBAR_CLASS}`
+
+/** 卡头图标钮的 tip 气泡翻到**钮下方**：卡壳 `overflow-hidden`（demo 同形）会把钮上方的气泡裁掉，
+ *  锚点翻转后气泡落在卡头内部、恒可见（其余钮仍用 TIP_CLASS 上方气泡）。 */
+const MMD_TIP_BELOW_CLASS = 'pointer-events-none absolute top-[calc(100%+7px)] left-1/2 -translate-x-1/2 z-[6] whitespace-nowrap rounded-[6px] bg-[#1f2328] px-[8px] py-[3px] text-[11px] leading-[1.5] text-white opacity-0 transition-opacity duration-[180ms] motion-reduce:transition-none group-hover/tip:opacity-100 group-focus-visible/tip:opacity-100'
+const MMD_TIP_ARROW_BELOW_CLASS = 'absolute bottom-full left-1/2 -ml-[4px] h-[8px] w-[8px] translate-y-1/2 rotate-45 rounded-[1px] bg-[#1f2328]'
+
+/** 图标（demo v7.7 逐字照搬：复位 / 全屏）。 */
+const MMD_ICON_RESET = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"></path><path d="M3 4v5h5"></path></svg>'
+const MMD_ICON_FULL = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5"></path><path d="M20 15v5h-5"></path><path d="M15 4h5v5"></path><path d="M9 20H4v-5"></path></svg>'
+
+/** tip 气泡（`below` = 锚点翻到钮下方，见 MMD_TIP_BELOW_CLASS）。 */
+function mmdTipSpan(label: string, below = false): string {
+  return `<span class="tip ${below ? MMD_TIP_BELOW_CLASS : TIP_CLASS}">${label}` +
+    `<span class="tip-arrow ${below ? MMD_TIP_ARROW_BELOW_CLASS : TIP_ARROW_CLASS}" aria-hidden="true"></span></span>`
+}
+
+/** mermaid 产物归一：剥掉 mermaid 自带的 `width="100%"` / `max-width`（会与缩放层、横滚层打架），
+ *  按 viewBox 宽高比取定宽（demo v7.7 `openOv` 口径：宽图 980px / 方图 560px）—— 超宽图因此在
+ *  260px 预览容器里恒可内联横滚，在查看器里也有一致的基准尺寸。 */
+function prepareMermaidSvg(svg: string, extra = ''): string {
+  const box = (/viewBox="([^"]*)"/.exec(svg)?.[1] ?? '0 0 10 10').split(/[\s,]+/)
+  const ratio = (parseFloat(box[2]) || 1) / (parseFloat(box[3]) || 1)
+  const cls = `block ${ratio >= 2 ? 'w-[980px]' : 'w-[560px]'} max-w-none h-auto${extra === '' ? '' : ` ${extra}`}`
+  return svg.replace(/<svg\b([^>]*)>/, (_match: string, attrs: string) =>
+    `<svg${attrs.replace(/\s(?:class|style|width|height)="[^"]*"/g, '')} class="${cls}">`
+  )
+}
+
+/** 卡结构（demo v7.7 裁决区 12 右栏逐条）：卡头 = ◈ + 名称 + 分段 tab + 右端图标钮组；
+ *  预览态 = 260px 限高横滚容器（pan/scale 两层 transform）；源码态 = 200px 内滚 mono 盒 + 复制源码钮。
+ *  `svg === null`（render error / 3s 超时）⇒ 降级为「源码态卡」：无 tab、无缩放钮（源码直显、复制可用），
+ *  不留任何无 handler 的钮。 */
+function buildMermaidCardHtml(svg: string | null): string {
+  const hasSvg = svg !== null
+  const head =
+    `<div class="${MMD_HEAD_CLASS}"><span class="${MMD_MARK_CLASS}">◈</span>` +
+    `<span class="${MMD_NAME_CLASS}">流程图</span>` +
+    (hasSvg
+      ? `<div class="${MMD_TABS_CLASS}" role="tablist" aria-label="流程图视图">` +
+        `<button type="button" class="${MMD_TAB_CLASS} is-on" role="tab" aria-selected="true" data-tab="preview">预览</button>` +
+        `<button type="button" class="${MMD_TAB_CLASS}" role="tab" aria-selected="false" data-tab="source">源码</button></div>`
+      : '') +
+    (hasSvg
+      ? '<span class="ml-auto flex items-center gap-[5px]">' +
+        '<span class="mmdc-ipct min-w-[36px] text-center font-mono text-[10.5px] tabular-nums text-[#8b949e]">100%</span>' +
+        `<button type="button" class="${MMD_ICON_BTN_CLASS} mmdc-ireset" aria-label="复位到 100%">${MMD_ICON_RESET}${mmdTipSpan('复位到 100%', true)}</button>` +
+        `<button type="button" class="${MMD_ICON_BTN_CLASS} mmdc-full" aria-label="全屏查看">${MMD_ICON_FULL}${mmdTipSpan('全屏查看', true)}</button>` +
+        '</span>'
+      : '') +
+    '</div>'
+  const preview = hasSvg
+    ? `<div class="${MMD_PREVIEW_PANE_CLASS}" data-pane="preview">` +
+      `<div class="${MMD_PAN_CLASS}"><div class="${MMD_STAGE_CLASS}">${svg}</div></div></div>`
+    : ''
+  const source =
+    `<div class="${hasSvg ? MMD_SOURCE_PANE_CLASS : 'mmdc-pane'}" data-pane="source">` +
+    `<div class="${MMD_SOURCE_BAR_CLASS}"><span>mermaid 源码</span><span class="ml-auto">` +
+    `<button type="button" class="${COPY_ICON_BTN_CLASS} mmdc-copy" aria-label="复制源码">${COPY_ICON_SVGS}${mmdTipSpan('复制源码')}</button>` +
+    '</span></div>' +
+    `<div class="${MMD_SOURCE_BOX_CLASS}"></div></div>`
+  return head + preview + source
+}
+
+/** 预览态内联交互 API（按卡记：复位钮在委托里取用；卡随 v-html 重建，用 WeakMap 免泄漏）。 */
+const mermaidInlineReset = new WeakMap<HTMLElement, () => void>()
+/** 两态各自记住的滚动位置（demo 口径：切回目标态时恢复该态自己的 scroll）。 */
+const mermaidPaneScroll = new WeakMap<HTMLElement, { left: number; top: number }>()
+
 /**
- * R-163B G4：mermaid 卡片化（demo :237-251）——卡头（◈ 流程图 + mermaid 标签）+ 图体 +
- * 「查看源码」切换（源码随卡携带，render 失败亦保留）。SVG max-width:100% 随容器缩放。
+ * 预览态内联交互（把 demo 07 那套搬到内联容器上）：
+ * - 滚轮缩放：锚定指针位置，0.5×–4×；
+ * - 拖拽平移：transform translate（mousedown 记起点 + 位移），不用 overflow 滚动；
+ * - 越界钳制：内容不得被推出左上角（px/py 合法区间 = [client − z×自然尺寸, 0]）；
+ * - 容器自身滚动折进 transform（视觉不变）⇒ 拖拽/缩放只有一个位置来源；
+ * - 每个 pane 的 scroll 实时记账，切 tab 时恢复目标态自己的位置。
+ */
+function initMermaidInline(card: HTMLElement): void {
+  for (const pane of card.querySelectorAll<HTMLElement>('.mmdc-pane')) {
+    pane.addEventListener('scroll', () => {
+      mermaidPaneScroll.set(pane, { left: pane.scrollLeft, top: pane.scrollTop })
+    })
+  }
+  const box = card.querySelector<HTMLElement>('.mmdc-pv')
+  const pan = card.querySelector<HTMLElement>('.mmdc-pan')
+  const stage = card.querySelector<HTMLElement>('.mmdc-stage')
+  if (!box || !pan || !stage) {
+    return
+  }
+  let naturalW = 0
+  let naturalH = 0
+  let z = 1
+  let px = 0
+  let py = 0
+  const measure = (): void => {
+    naturalW = stage.offsetWidth
+    naturalH = stage.offsetHeight
+  }
+  const apply = (): void => {
+    stage.style.setProperty('--z', String(z))
+    pan.style.setProperty('--px', `${px}px`)
+    pan.style.setProperty('--py', `${py}px`)
+    const readout = card.querySelector('.mmdc-ipct')
+    if (readout) {
+      readout.textContent = `${Math.round(z * 100)}%`
+    }
+  }
+  const clamp = (): void => {
+    let maxX = box.clientWidth - naturalW * z
+    let maxY = box.clientHeight - naturalH * z
+    if (maxX > 0) {
+      maxX = 0
+    }
+    if (maxY > 0) {
+      maxY = 0
+    }
+    px = px > 0 ? 0 : px < maxX ? maxX : px
+    py = py > 0 ? 0 : py < maxY ? maxY : py
+  }
+  const absorb = (): void => {
+    if (box.scrollLeft !== 0 || box.scrollTop !== 0) {
+      px -= box.scrollLeft
+      py -= box.scrollTop
+      box.scrollLeft = 0
+      box.scrollTop = 0
+    }
+  }
+  const setZoom = (next: number, vx: number, vy: number): void => {
+    absorb()
+    const target = Math.min(MMD_Z_MAX, Math.max(MMD_Z_MIN, next))
+    const sx = (vx - px) / z
+    const sy = (vy - py) / z
+    px = vx - target * sx
+    py = vy - target * sy
+    z = target
+    clamp()
+    apply()
+  }
+  measure()
+  apply()
+  mermaidInlineReset.set(card, () => {
+    z = 1
+    px = 0
+    py = 0
+    box.scrollLeft = 0
+    box.scrollTop = 0
+    apply()
+  })
+  box.addEventListener(
+    'wheel',
+    (event) => {
+      event.preventDefault()
+      measure()
+      const rect = box.getBoundingClientRect()
+      setZoom(z * Math.pow(1.0015, -event.deltaY), event.clientX - rect.left, event.clientY - rect.top)
+    },
+    { passive: false }
+  )
+  let dragging = false
+  let startX = 0
+  let startY = 0
+  let originX = 0
+  let originY = 0
+  // 拖动期间的 move/up 只在拖动中存在（卡随 v-html 重建，常驻 window 监听会随节点泄漏）
+  const onMove = (event: MouseEvent): void => {
+    if (!dragging) {
+      return
+    }
+    px = originX + (event.clientX - startX)
+    py = originY + (event.clientY - startY)
+    clamp()
+    apply()
+  }
+  const onUp = (): void => {
+    if (!dragging) {
+      return
+    }
+    dragging = false
+    box.classList.remove('cursor-grabbing')
+    box.classList.add('cursor-grab')
+    window.removeEventListener('mousemove', onMove)
+    window.removeEventListener('mouseup', onUp)
+  }
+  box.addEventListener('mousedown', (event) => {
+    if (event.button !== 0) {
+      return
+    }
+    event.preventDefault()
+    measure()
+    absorb()
+    clamp()
+    apply()
+    dragging = true
+    startX = event.clientX
+    startY = event.clientY
+    originX = px
+    originY = py
+    box.classList.remove('cursor-grab')
+    box.classList.add('cursor-grabbing')
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  })
+}
+
+/** tab 切换（两态互斥 + aria-selected 同步）→ 目标态恢复**自己**记住的滚动位置（demo 二选一登记的「各自记住」）。 */
+function switchMermaidTab(tab: Element): void {
+  const card = tab.closest<HTMLElement>('.mmdc')
+  const mode = tab.getAttribute('data-tab')
+  if (!card || mode === null) {
+    return
+  }
+  for (const item of card.querySelectorAll<HTMLElement>('.mmdc-tab')) {
+    const on = item.getAttribute('data-tab') === mode
+    item.classList.toggle('is-on', on)
+    item.setAttribute('aria-selected', on ? 'true' : 'false')
+  }
+  for (const pane of card.querySelectorAll<HTMLElement>('.mmdc-pane')) {
+    pane.classList.toggle('hidden', pane.getAttribute('data-pane') !== mode)
+  }
+  const pane = card.querySelector<HTMLElement>(`.mmdc-pane[data-pane="${mode}"]`)
+  if (!pane) {
+    return
+  }
+  const saved = mermaidPaneScroll.get(pane) ?? { left: 0, top: 0 }
+  requestAnimationFrame(() => {
+    pane.scrollLeft = saved.left
+    pane.scrollTop = saved.top
+  })
+}
+
+/** 复位（预览态卡头钮）：缩放 1× + 位移归零 + 两态滚动归零。 */
+function resetMermaidInline(card: Element | null): void {
+  if (!(card instanceof HTMLElement)) {
+    return
+  }
+  mermaidInlineReset.get(card)?.()
+  for (const pane of card.querySelectorAll<HTMLElement>('.mmdc-pane')) {
+    pane.scrollLeft = 0
+    pane.scrollTop = 0
+    mermaidPaneScroll.set(pane, { left: 0, top: 0 })
+  }
+}
+
+/* ----- 全屏查看器（demo 07 重做口径：scrim + 白容器 + 指针锚定缩放 + transform 平移） ----- */
+
+const mmdViewerOpen = ref(false)
+const mmdViewerSvg = ref('')
+const mmdViewerTitle = ref('mermaid')
+const mmdViewerSource = ref('')
+const mmdViewerPct = ref(100)
+const mmdViewerCopied = ref(false)
+const mmdViewerStageRef = ref<HTMLElement | null>(null)
+const mmdViewerPanRef = ref<HTMLElement | null>(null)
+const mmdViewerZoomRef = ref<HTMLElement | null>(null)
+let mmdViewerZ = 1
+let mmdViewerX = 0
+let mmdViewerY = 0
+let mmdViewerCopyTimer: number | null = null
+
+function applyMmdViewer(): void {
+  mmdViewerZoomRef.value?.style.setProperty('--z', String(mmdViewerZ))
+  const pan = mmdViewerPanRef.value
+  if (pan) {
+    pan.style.setProperty('--px', `${mmdViewerX}px`)
+    pan.style.setProperty('--py', `${mmdViewerY}px`)
+  }
+  mmdViewerPct.value = Math.round(mmdViewerZ * 100)
+}
+
+/** 指针锚定缩放（demo 07）：pan 层已居中 ⇒ 锚点坐标 = 指针相对 stage 中心的偏移。 */
+function setMmdViewerZoom(next: number, anchorX = 0, anchorY = 0): void {
+  const z = Math.min(MMD_Z_MAX, Math.max(MMD_Z_MIN, next))
+  const k = z / mmdViewerZ
+  mmdViewerX = anchorX - (anchorX - mmdViewerX) * k
+  mmdViewerY = anchorY - (anchorY - mmdViewerY) * k
+  mmdViewerZ = z
+  applyMmdViewer()
+}
+
+function zoomMmdViewer(factor: number): void {
+  setMmdViewerZoom(mmdViewerZ * factor)
+}
+
+function resetMmdViewer(): void {
+  mmdViewerZ = 1
+  mmdViewerX = 0
+  mmdViewerY = 0
+  applyMmdViewer()
+}
+
+function onMmdViewerWheel(event: WheelEvent): void {
+  const stage = mmdViewerStageRef.value
+  if (!stage) {
+    return
+  }
+  const rect = stage.getBoundingClientRect()
+  setMmdViewerZoom(
+    mmdViewerZ * Math.pow(1.0015, -event.deltaY),
+    event.clientX - (rect.left + rect.width / 2),
+    event.clientY - (rect.top + rect.height / 2)
+  )
+}
+
+function onMmdViewerDragStart(event: MouseEvent): void {
+  const stage = mmdViewerStageRef.value
+  if (!stage || event.button !== 0) {
+    return
+  }
+  event.preventDefault()
+  const startX = event.clientX
+  const startY = event.clientY
+  const originX = mmdViewerX
+  const originY = mmdViewerY
+  stage.classList.remove('cursor-grab')
+  stage.classList.add('cursor-grabbing')
+  const onMove = (move: MouseEvent): void => {
+    mmdViewerX = originX + (move.clientX - startX)
+    mmdViewerY = originY + (move.clientY - startY)
+    applyMmdViewer()
+  }
+  const onUp = (): void => {
+    stage.classList.remove('cursor-grabbing')
+    stage.classList.add('cursor-grab')
+    window.removeEventListener('mousemove', onMove)
+    window.removeEventListener('mouseup', onUp)
+  }
+  window.addEventListener('mousemove', onMove)
+  window.addEventListener('mouseup', onUp)
+}
+
+function openMmdViewer(card: Element | null): void {
+  if (!(card instanceof HTMLElement)) {
+    return
+  }
+  const svg = card.querySelector('.mmdc-stage svg')
+  if (!(svg instanceof SVGElement)) {
+    return
+  }
+  mmdViewerSvg.value = prepareMermaidSvg(svg.outerHTML, 'select-text')
+  mmdViewerTitle.value = card.querySelector('.mmdc-name')?.textContent?.trim() ?? 'mermaid'
+  mmdViewerSource.value = card.querySelector('.mmdc-src')?.textContent ?? ''
+  mmdViewerCopied.value = false
+  mmdViewerZ = 1
+  mmdViewerX = 0
+  mmdViewerY = 0
+  mmdViewerPct.value = 100
+  mmdViewerOpen.value = true
+  void nextTick(() => {
+    applyMmdViewer()
+    mmdViewerStageRef.value?.focus()
+  })
+}
+
+function closeMmdViewer(): void {
+  mmdViewerOpen.value = false
+}
+
+/** 查看器「复制源码」：绿勾反馈与卡内复制钮同一机制（`is-copied` + COPY_STATE_CLASS），状态走响应式。 */
+function copyMmdViewerSource(): void {
+  mmdViewerCopied.value = legacyCopy(mmdViewerSource.value)
+  if (mmdViewerCopyTimer !== null) {
+    clearTimeout(mmdViewerCopyTimer)
+  }
+  mmdViewerCopyTimer = window.setTimeout(() => {
+    mmdViewerCopied.value = false
+    mmdViewerCopyTimer = null
+  }, 2000)
+}
+
+/** 下载 SVG（demo 07）：把计算样式内联进克隆树（脱离页面仍可渲染）→ Blob + `<a download>` 落盘。 */
+function downloadMmdViewerSvg(): void {
+  const svg = mmdViewerZoomRef.value?.querySelector('svg')
+  if (!(svg instanceof SVGElement)) {
+    return
+  }
+  const clone = svg.cloneNode(true) as SVGElement
+  const from = svg.querySelectorAll('*')
+  const to = clone.querySelectorAll('*')
+  const props = ['fill', 'stroke', 'stroke-width', 'stroke-dasharray', 'font-size', 'font-family', 'font-weight', 'text-anchor']
+  for (let i = 0; i < from.length; i += 1) {
+    const computed = window.getComputedStyle(from[i])
+    for (const prop of props) {
+      const value = computed.getPropertyValue(prop)
+      if (value !== '' && value !== 'none' && value !== 'normal') {
+        to[i].setAttribute(prop, value)
+      }
+    }
+  }
+  const box = (svg.getAttribute('viewBox') ?? '0 0 980 240').split(/[\s,]+/)
+  clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg')
+  clone.setAttribute('width', box[2] ?? '980')
+  clone.setAttribute('height', box[3] ?? '240')
+  clone.removeAttribute('class')
+  const url = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(clone)], { type: 'image/svg+xml;charset=utf-8' }))
+  const link = document.createElement('a')
+  link.href = url
+  link.download = 'mermaid-flow.svg'
+  document.body.appendChild(link)
+  link.click()
+  window.setTimeout(() => {
+    URL.revokeObjectURL(url)
+    link.remove()
+  }, 0)
+}
+
+/** Esc 关闭（查看器打开期间才挂监听，见下方 watch）。 */
+function onMmdViewerKeydown(event: KeyboardEvent): void {
+  if (event.key === 'Escape') {
+    closeMmdViewer()
+  }
+}
+
+watch(mmdViewerOpen, (open) => {
+  if (open) {
+    window.addEventListener('keydown', onMmdViewerKeydown)
+    document.body.classList.add('overflow-hidden')
+    return
+  }
+  window.removeEventListener('keydown', onMmdViewerKeydown)
+  document.body.classList.remove('overflow-hidden')
+})
+
+/**
+ * R-163B G4 → R-165 S5a → S5b：mermaid 卡片化（demo v7.7 裁决区 12/07）——卡头双态 tab +
+ * 预览态内联缩放/平移 + 源码态 200px 内滚 + 卡头图标钮组（复位/全屏）。
+ * 卡片下外边距 `mb-3.5`（S5a 项 1 统一卡片节奏）。
  */
 async function hydrateMermaid(messageId: string, blocks: Array<{ index: number; source: string }>): Promise<void> {
   const bubble = msgWrapRef.value?.querySelector(`[data-testid="msg-bubble-${messageId}"]`)
@@ -908,25 +1900,31 @@ async function hydrateMermaid(messageId: string, blocks: Array<{ index: number; 
     }
     const svg = await renderMermaidSvg(item.source)
     const card = document.createElement('div')
-    card.className = 'mmd'
-    card.innerHTML =
-      '<div class="mmd-hd"><span class="mi">◈</span><span class="mt">流程图</span>' +
-      '<span class="mlib">mermaid</span></div>' +
-      `<div class="mmd-fig">${svg ?? ''}</div>` +
-      '<div class="mmd-foot"><button type="button" class="mmd-toggle">查看源码</button>' +
-      `<div class="mmd-code"></div></div>`
-    const codeBox = card.querySelector('.mmd-code')
+    card.className = MMD_CARD_CLASS
+    // svg === null（render error / 3s 超时）⇒ 源码态卡兜底（§三.7 口径；不留无 handler 的钮）
+    card.innerHTML = buildMermaidCardHtml(svg === null ? null : prepareMermaidSvg(svg))
+    const codeBox = card.querySelector('.mmdc-src')
     if (codeBox) {
       codeBox.textContent = item.source // textContent 赋值 = 纯文本，零 HTML 注入面
     }
-    if (!svg) {
-      card.classList.add('is-open') // render 失败：直接展开源码兜底（§三.7 口径）
-      const toggle = card.querySelector('.mmd-toggle')
-      if (toggle) {
-        toggle.textContent = '收起源码'
-      }
-    }
+    initMermaidInline(card)
     code.parentElement?.replaceWith(card)
+  }
+}
+
+/**
+ * R-165 S5a 项 5：长表格双区横滚联动 —— 表体区（唯一横滚容器）滚动时把 `scrollLeft` 同步给
+ * 同 wrapper 的表头区（表头区 `overflow-hidden`，靠程序化 scrollLeft 位移）。
+ * scroll 事件不冒泡 ⇒ 在消息容器上用**捕获**监听（捕获阶段可截到后代滚动）。
+ */
+function onTableScrollCapture(event: Event): void {
+  const el = event.target
+  if (!(el instanceof HTMLElement) || !el.classList.contains('md-table-bd')) {
+    return
+  }
+  const head = el.parentElement?.querySelector('.md-table-hd')
+  if (head instanceof HTMLElement) {
+    head.scrollLeft = el.scrollLeft
   }
 }
 
@@ -954,15 +1952,159 @@ function toolLabel(name: string): string {
   return TOOL_LABELS[name] ?? name
 }
 
-/** 工具卡状态色（补丁③：REJECTED=warning「已拒绝」，FAILED=danger「执行失败」，互不混用）。 */
+/**
+ * R-165 S1：demo v7 胶囊四族（`.stchip` + `chip-idle/run/ok/bad` 工具类配方照搬）——
+ * 底座与色族分离，状态胶囊/kind 胶囊/健康胶囊三处复用；承载件由 el-tag 换自绘 span。
+ */
+const CHIP_BASE = 'flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] whitespace-nowrap'
+const CHIP_TONE: Record<'info' | 'warning' | 'success' | 'danger' | 'primary', string> = {
+  primary: 'text-[#2563eb] bg-[#eff4ff]',
+  success: 'text-[#1a7f45] bg-[#edf7f0]',
+  danger: 'text-[#c0392b] bg-[#fdf1ef]',
+  // demo 无橙族：warning/info 收敛中性灰族（R-163 C2 状态色裁决口径不变）
+  warning: 'text-[#57606a] bg-[#f6f7f9]',
+  info: 'text-[#57606a] bg-[#f6f7f9]'
+}
+
+function chipClass(type: keyof typeof CHIP_TONE): string {
+  return `${CHIP_BASE} ${CHIP_TONE[type]}`
+}
+
+/**
+ * R-165 S2：顶部提示（demo v7 `.alert`）四族 —— 红=故障 / 蓝=并发·降级 / 绿=结果 / 灰=通知。
+ * 结构与 v7 逐条对齐：flex 起排 + gap 9px + 圆角 10 + padding 9px 11px + 15×15 描边圆图标
+ * + 标题 12.6px/650 + 正文 11.8px #57606a + ghost 动作钮。
+ * ⚠ preflight 关闭（tailwind.config.js corePlugins.preflight=false）⇒ 无全局 border-style:solid，
+ * 所有描边一律显式 `border-solid`（R-165 S1 §5① 实证：纯 border-* 只出 width、style 恒 none）。
+ */
+const ALERT_BOX_BASE = 'm-2 flex items-start gap-[9px] border rounded-[10px] px-[11px] py-[9px]'
+const ALERT_ICON_BASE = 'flex-[0_0_15px] w-[15px] h-[15px] rounded-[50%] border-solid border-[1.4px] text-[10px] font-bold flex items-center justify-center mt-[2px]'
+const ALERT_TONE: Record<'error' | 'primary' | 'success' | 'gray', { box: string; ic: string }> = {
+  error: { box: 'border-solid border-[#f0d5d0] bg-[#fdf1ef]', ic: 'border-[#c0392b] text-[#c0392b]' },
+  primary: { box: 'border-solid border-[#cddcff] bg-[#eff4ff]', ic: 'border-[#2563eb] text-[#2563eb]' },
+  success: { box: 'border-solid border-[#cbe7d6] bg-[#edf7f0]', ic: 'border-[#1a7f45] text-[#1a7f45]' },
+  gray: { box: 'border-solid border-[#e3e6ea] bg-[#f6f7f9]', ic: 'border-[#8b949e] text-[#8b949e]' }
+}
+/** ghost 动作钮（v7 提示内按钮形制：白底细描边小圆角，悬停加深描边与字色）。 */
+const ALERT_BTN = 'rounded-[8px] border border-solid border-[#e3e6ea] bg-white text-[#57606a] px-[10px] py-[3px] text-[11.5px] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]'
+
+/**
+ * R-165 S3a（R11 指挥官裁决）：error 级通知判据。
+ * store 的 `notice` 是**单槽纯字符串**（无级别字段），本轮以 error 帧收尾时 store 同时置
+ * `lastRoundOutcome = 'error'`（stores/ai.ts:2009）—— 这是"这条 notice 来自故障"在本仓
+ * 唯一可信的既有信号（S2 §4-R11 实测的上游 503 `UPSTREAM_STREAM_ERROR` 正走此路径）。
+ * 局限：HTTP/网络异常（catch 分支，如「对话请求失败」）不置 outcome，仍按普通通知呈现。
+ */
+const noticeIsError = computed(() => ai.notice !== null && ai.lastRoundOutcome === 'error')
+
+function alertBox(tone: keyof typeof ALERT_TONE): string {
+  return `${ALERT_BOX_BASE} ${ALERT_TONE[tone].box}`
+}
+
+function alertIcon(tone: keyof typeof ALERT_TONE): string {
+  return `${ALERT_ICON_BASE} ${ALERT_TONE[tone].ic}`
+}
+
+/**
+ * R-165 S2：思考卡摘要（v7 `.rsum` 位）。蓝本写「已用 N 秒 · 点击展开」——本仓 reasoning 段
+ * 无时长元数据（帧只带 text），故摘要取**字数 + 折叠动作**，不伪造时长。
+ */
+function reasoningSummary(text: string, expanded: boolean): string {
+  return `共 ${text.length} 字 · ${expanded ? '点击收起' : '点击展开'}`
+}
+
+/**
+ * R-165 S2：回执卡徽标（demo v7 `.rc-badge`：10.5px / px-6px / 圆角 5 / semibold，三族色）。
+ * 色族仍由既有 `hitlReceiptTagType` 派生（五档语义不变），此处只做**五档→三族**的呈现收敛：
+ * success→绿、danger→红、其余（info/warning/primary）→中性灰（v7 `.rc-badge` 只有 ok/bad/mute）。
+ */
+const RECEIPT_BADGE_BASE = 'flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold'
+const RECEIPT_BADGE_TONE: Record<'success' | 'danger' | 'mute', string> = {
+  success: 'text-[#1a7f45] bg-[#edf7f0]',
+  danger: 'text-[#c0392b] bg-[#fdf1ef]',
+  mute: 'text-[#57606a] bg-[#f6f7f9]'
+}
+
+function receiptBadgeClass(status: ToolRunStatus): string {
+  const tone = hitlReceiptTagType(status)
+  const family = tone === 'success' ? 'success' : tone === 'danger' ? 'danger' : 'mute'
+  return `${RECEIPT_BADGE_BASE} ${RECEIPT_BADGE_TONE[family]}`
+}
+
+/**
+ * R-165 S5a 项 2（demo v7.1 终裁）：回执折叠区的**单层 mono 盒**内容。
+ * - 仅 args ⇒ 原文（`pretty` 由 CollapsibleText 承担）；
+ * - 含 GF 已提交值 ⇒ 折进同一 JSON 盒的 `values` 键（demo v7 ②-j 口径：
+ *   `{ formId, values, valid, decision, decidedAt }`）——原「已提交值」键值行是该对象的可读投影，
+ *   合并后无信息净损失；args 非 JSON（历史脏数据）时回落 `{ args, values }` 两键。
+ */
+function receiptDetailText(part: ToolPart): string {
+  const args = part.args ?? ''
+  if (!part.submittedValues) {
+    return args
+  }
+  try {
+    const parsed = args ? (JSON.parse(args) as Record<string, unknown>) : {}
+    return JSON.stringify({ ...parsed, values: part.submittedValues }, null, 2)
+  } catch {
+    return JSON.stringify({ args, values: part.submittedValues }, null, 2)
+  }
+}
+
+/**
+ * R-165 S2：确认门字段表（v7 `.grows` 行）—— 首行恒为「操作」（工具中文名），
+ * 其后展开 args 的键值（非 JSON 参数只留「操作」行）；上限 5 行（1 + 4）防参数表压垮门卡。
+ */
+function gateRows(part: ToolPart): Array<{ key: string; value: string }> {
+  const rows: Array<{ key: string; value: string }> = [{ key: '操作', value: toolLabel(part.name) }]
+  if (!part.args) {
+    return rows
+  }
+  try {
+    const parsed = JSON.parse(part.args) as Record<string, unknown>
+    for (const [key, value] of Object.entries(parsed).slice(0, 4)) {
+      rows.push({ key, value: typeof value === 'object' && value !== null ? JSON.stringify(value) : String(value) })
+    }
+  } catch {
+    // 非 JSON 参数（历史脏数据）：只显「操作」行，不阻断门卡
+  }
+  return rows
+}
+
+/**
+ * R-165 S2：操作行 tip 气泡（demo v7 `.tip`：黑底 #1f2328 / 白字 11px / 圆角 6 / padding 3px 8px /
+ * bottom calc(100%+7px) / 居中）。触发用 Tailwind **具名组** `group/tip`（按钮自身声明，不与消息行
+ * 的 `group` 争用）；无 JS、无伪元素。v7 的 `::after` 小三角用**旋转方块 div** 复刻
+ * （8×8 rotate-45 置于气泡下沿中央，下半露出即下指三角；伪元素属手写 CSS，铁律禁用）。
+ * R-165 S5a：`TIP_CLASS` / `TIP_ARROW_CLASS` 字面量收归 `utils/markdown.ts` 单一来源
+ * （渲染层注入 HTML 里的代码块复制钮同用一套），本组件顶部 import 直接引入。
+ */
+
+/** R-165 S2：空态建议词胶囊（v7 `.mini` chips：999px 胶囊 + 细描边 + 悬停蓝）。 */
+const SUGGESTION_CHIP = 'rounded-[999px] border border-solid border-[#e3e6ea] bg-white px-[11px] py-[4px] text-[12.2px] text-[#57606a] transition-colors duration-[150ms] hover:border-[#cddcff] hover:text-[#2563eb]'
+
+/**
+ * R-165 S2：骨架屏渐变条（demo v7 `.sk`）。v7 的 `animate-shimmer` 是 demo 私有 config 的动画
+ * （仓库 tailwind.config.js 禁改、仓库 CSS 无 shimmer keyframes），改用内置 `animate-pulse`
+ * （同为无限循环的占位律动，语义等价、幅度略缓）。宽度**字面量**书写（禁运行期拼类名，否则 JIT 扫不到）。
+ */
+const SKELETON_BAR_BASE = 'bg-[linear-gradient(90deg,#f6f7f9_0,#eef0f3_40%,#f6f7f9_80%)] bg-[length:220%_100%] animate-pulse motion-reduce:animate-none rounded-[6px] h-[11px] mb-[9px]'
+const SKELETON_BARS = ['w-[72%]', 'w-[92%]', 'w-[58%]', 'w-[85%]'].map((w) => `${SKELETON_BAR_BASE} ${w}`)
+
+/** R-165 S2：倒计时环周长（v7 同值：2πr，r=15.5 ⇒ 97.4）。 */
+const RING_CIRCUMFERENCE = 97.4
+
+/** 工具卡状态色（补丁③：REJECTED=warning「已拒绝」，FAILED=danger「执行失败」，互不混用）。
+ *  R-165 S1：running 由 success 改 primary —— demo v7 在跑态整族取蓝（`.st-running` + chip-run），
+ *  绿族只属"已成功"；原口径把在跑染绿且 effect=dark 落成实心块，与 v7 相悖。 */
 function toolTagType(status: ToolRunStatus): 'info' | 'warning' | 'success' | 'danger' | 'primary' {
   // 批3③a D10(A)：九态全部显式 case + 去 default（原先 pending 由 default 兜底，非纯死码）——
   // 形式对齐下方 toolStatusLabel 的 Record<ToolRunStatus, …> 穷尽闸：未来新增态编译期即报错，
   // 不再被 default 静默误标。
   switch (status) {
     case 'pending':
-      return 'primary'
     case 'running':
+      return 'primary'
     case 'succeeded':
       return 'success'
     case 'failed':
@@ -984,7 +2126,15 @@ function toolTagType(status: ToolRunStatus): 'info' | 'warning' | 'success' | 'd
   }
 }
 
-function toolStatusLabel(status: ToolRunStatus): string {
+/**
+ * 工具卡状态 tag 文案（九态穷尽闸）。
+ *
+ * R-166 口径④：`expired` 一态承两种语义 ——
+ * ① 空历史降级 / 后端 TIMEOUT 沿用「会话已失效」；
+ * ② **本地判定的「已超时作废」**（倒计时归零 + 权威校正仍无结局）由段上的 `expiredLocally`
+ *    标记区分，卡片 tag 与回执徽标口径一致，不再被读成"会话失效"。
+ */
+function toolStatusLabel(part: ToolPart): string {
   const labels: Record<ToolRunStatus, string> = {
     pending: '等待确认',
     running: '调用中…',
@@ -993,13 +2143,60 @@ function toolStatusLabel(status: ToolRunStatus): string {
     rejected: '已拒绝',
     // DC-14 T1：越出当前披露范围（防线③），工具未执行
     blocked: '超出当前范围',
-    expired: '会话已失效',
+    expired: part.expiredLocally ? '已超时作废' : '会话已失效',
     // 对话时序包 批1：取消终态（用户放弃 / 渲染器不可用 / 整轮取消）
     cancelled: '已取消',
     // 对话时序包 批1：结局未知 —— 未确认成功/失败，需人工再确认
     unknown: '结局未知（未确认成功/失败）'
   }
-  return labels[status]
+  return labels[part.status]
+}
+
+/** R-165 S1：工具卡状态图标字符（demo v7 `.ti` 九态照搬；running 为空串，只留旋转环）。 */
+function toolIcon(status: ToolRunStatus): string {
+  const icons: Record<ToolRunStatus, string> = {
+    pending: '○',
+    running: '',
+    succeeded: '✓',
+    failed: '✗',
+    rejected: '✕',
+    blocked: '⊘',
+    expired: '∅',
+    cancelled: '⊗',
+    unknown: '?'
+  }
+  return icons[status]
+}
+
+/** R-165 S1：图标态类 —— 成功=绿圆环✓（1.2px 边）/ 失败=红圆环✗（1.2px 边）/
+ *  进行中=旋转环（1.6px 边，#cddcff 环 + #2563eb 顶弧）/ 其余中性字符（无环）。
+ *  ⚠ 本仓关闭 preflight（tailwind.config corePlugins.preflight=false）⇒ 无全局 `border-style:solid`，
+ *  纯 border-* 只出 border-width 而 style 恒 none（环不可见）；故所有环一律显式 `border-solid`
+ *  （同 v7.html 依赖 preflight 的差异点，实测 computed border-top-width 0px → 1.2px）。
+ *  v7 的 `animate-spin7` 是 demo 临时 config 的私有动画（仓库 config 禁改），
+ *  改用 Tailwind 内置 `animate-spin`（1s 线性无限；v7 为 .8s，同语义）。 */
+function toolIconClass(status: ToolRunStatus): string {
+  switch (status) {
+    case 'succeeded':
+      return 'border-solid border-[1.2px] border-[#1a7f45] text-[#1a7f45] rounded-[50%]'
+    case 'failed':
+      return 'border-solid border-[1.2px] border-[#c0392b] text-[#c0392b] rounded-[50%]'
+    case 'running':
+      return 'border-solid border-[1.6px] border-[#cddcff] border-t-[#2563eb] rounded-[50%] animate-spin motion-reduce:animate-none'
+    default:
+      return 'text-[#8b949e]'
+  }
+}
+
+/** R-165 S1：摘要变色（demo v7 `.st-running .tsum` 运行中蓝字 / `.st-failed .tsum` 失败红字）。 */
+function toolSummaryClass(status: ToolRunStatus): string {
+  if (status === 'running') {
+    return 'text-[#2563eb]'
+  }
+  if (status === 'failed') {
+    return 'text-[#c0392b]'
+  }
+  return 'text-[#57606a]'
 }
 
 function probe(): void {
@@ -1067,6 +2264,22 @@ function continueRound(): void {
   void ai.send('继续')
 }
 
+/** R-165 S1：操作行图标按钮配方 —— demo v7 `.icon-btn` 工具类逐条照搬（含 preflight 关闭下的
+ *  UA 复位 border-0 bg-transparent p-0；尺寸取等值别名 w-7 h-7 = 28×28，承既有热区断言锚）。
+ *  色板**按态整体换**（不靠 `[&.is-on]` 压 hover）：实测 hover 与任意变体同特异度时胜负由
+ *  Tailwind 产出顺序决定（该顺序随全仓候选集漂移，本地单文件构建与 dev server 已不一致），
+ *  故选中态直接不挂 `hover:*` —— 与 v7 `.is-on:hover` 同色表现，且零顺序依赖。
+ *  `is-on` 仅留给 SVG 填充（`[&.is-on_svg]:fill-current` 特异性 0,2,1 恒压 `[&_svg]` 0,1,1）。
+ *  R-165 S2：追加具名组 `group/tip` —— tip 气泡的显隐锚（`group-hover/tip`），
+ *  与消息行的匿名 `group`（hover 操作行浮出）互不串味。 */
+const ICON_BTN_CLASS = 'group/tip relative inline-flex items-center justify-center w-7 h-7 rounded-[8px] border-0 bg-transparent p-0 transition [&_svg]:w-[15px] [&_svg]:h-[15px] [&_svg]:fill-none [&_svg]:stroke-current [&_svg]:[stroke-width:1.6] [&_svg]:[stroke-linecap:round] [&_svg]:[stroke-linejoin:round] [&.is-on_svg]:fill-current'
+/** 常态（未选中）：灰字 + 悬停灰底深字（v7 `hover:text-[#1f2328] hover:bg-[#eaecf0]`）。 */
+const ICON_BTN_IDLE = 'text-[#8b949e] hover:text-[#1f2328] hover:bg-[#eaecf0]'
+/** 赞选中（蓝族；悬停保持蓝族 —— v7 `.is-on:hover` 口径）。 */
+const ICON_BTN_ON_BLUE = 'is-on text-[#2563eb] bg-[#eff4ff]'
+/** 踩选中（红族 —— R-163 T3 赞蓝/踩红语义保留，不随 v7 统一蓝）。 */
+const ICON_BTN_ON_RED = 'is-on text-[#c0392b] bg-[#fdf1ef]'
+
 /** R-163 T3：赞踩本地态（选中互斥、可取消）+ 上报（ rating=0=取消，幂等 upsert 在后端）。 */
 const feedbackState = ref<Map<string, 1 | -1>>(new Map())
 
@@ -1103,23 +2316,38 @@ function showCaret(message: ChatMessage, blockIndex: number): boolean {
  * 确认门 / 生成式表单工具的已决段），AiPanel 只负责渲染回执块内容。
  */
 
-/** 回执状态徽标文案：决策态优先（收口 MINOR-1）——已确认须 approve 即显、不等 succeeded；
- *  已确认但执行失败仍显「已确认」（徽标系决策态，非工具执行态）；decision 缺省（历史数据/
- *  过期态/取消）回退 status 派生。 */
+/**
+ * 回执状态徽标文案：决策态优先（收口 MINOR-1）——已确认须 approve 即显、不等 succeeded；
+ * 已确认但执行失败仍显「已确认」（徽标系决策态，非工具执行态）；decision 缺省（历史数据/
+ * 过期态/取消）回退 status 派生。
+ *
+ * R-166 口径⑥（**字形前缀**）：对齐 demo v7.7 回执区（`.receipt` 的「勾 + 已确认」/「叉 + 已拒绝」/
+ * 超时族）—— 已确认 `✓` / 已拒绝 `✗` / 已超时 `!`。
+ *
+ * 为什么超时用 `!` 而**不是** demo 的秒表字形：demo v7.7 回执区实字为「秒表 + 已超时」
+ * （源码第 1470 行核过），但该字形是 **U+23F1**，属 **emoji 码位**（Unicode Emoji=Yes），
+ * 与本批「界面禁 emoji」纪律冲突（故本注释亦不落该字形本身）；
+ * `✓`(U+2713) `✗`(U+2717) 是文本字形（非 emoji）故照 demo 保留。`!` 同时与本仓门卡/错误位的
+ * 告警字形同族（见 :388 与 tool-error 的 `!` 圆环），故取「`!` + 文案」保住 demo 的
+ * "字形 + 标签"节奏。
+ *
+ * R-166 口径④：本地判定的「已超时作废」（倒计时归零 + 权威校正仍无结局）与后端 TIMEOUT
+ * 同色同形，仅文案区分（段上 `expiredLocally` 标记为判据）。
+ */
 function hitlReceiptLabel(part: ToolPart): string {
   if (part.decision === 'approved') {
-    return '已确认'
+    return '✓ 已确认'
   }
   if (part.decision === 'rejected') {
-    return '已拒绝'
+    return '✗ 已拒绝'
   }
   switch (part.status) {
     case 'succeeded':
-      return '已确认'
+      return '✓ 已确认'
     case 'rejected':
-      return '已拒绝'
+      return '✗ 已拒绝'
     case 'expired':
-      return '已过期'
+      return part.expiredLocally ? '! 已超时作废' : '! 已超时'
     case 'cancelled':
       return '已取消'
     case 'running':
@@ -1165,13 +2393,12 @@ function hitlReceiptSummary(part: ToolPart): string {
   }
 }
 
-/** GF 提交值回执摘要（截断防长行） */
-function submittedValuesSummary(values: Record<string, unknown>): string {
-  const text = JSON.stringify(values)
-  return text.length > 80 ? `${text.slice(0, 80)}…` : text
-}
-
-/** 回执卡「原始参数」展开态（组件局部，按 toolCallId 记账） */
+/**
+ * 回执卡「查看详情 / 收起详情」展开态（组件局部，按 toolCallId 记账）。
+ * R-165 S2：原「GF 提交值回执摘要」单行函数（submittedValuesSummary）已退役。
+ * R-165 S5a 项 2：键值行（kvRows）+ 两个小节标签随外层包裹盒一并退役 —— 展开内容收敛为
+ * **单层 mono JSON 盒**（`receiptDetailText`），GF 提交值以 `values` 键折进同一 JSON。
+ */
 const receiptArgsOpen = ref<Set<string>>(new Set())
 
 function toggleReceiptArgs(toolCallId: string): void {
@@ -1303,6 +2530,25 @@ function reattach(runId?: unknown): void {
   void ai.reattachActive(typeof runId === 'string' ? runId : undefined)
 }
 
+/**
+ * R-166 口径③：该门卡是否**已提交**（在途 / 已提交待同步）—— 批准与拒绝双按钮据此一并
+ * 禁用（"点击即禁用"的按钮侧；store 侧另有同 toolCallId 的提交守卫兜底）。
+ */
+function gateSubmitting(toolCallId: string): boolean {
+  return ai.gateSubmissionOf(toolCallId) !== null
+}
+
+/** R-166 口径③：该门卡是否处于 409 之后的「已提交，同步中…」瞬态。 */
+function gateSyncing(toolCallId: string): boolean {
+  return ai.gateSubmissionOf(toolCallId)?.syncing === true
+}
+
+/**
+ * 提交一次人工裁决（放行 / 拒绝 + 原因）。
+ *
+ * R-166 口径②：**只有这里**（真正提交的那一刻）清拒绝原因输入框 —— 重派生 / 帧重投 /
+ * 重挂一律不动用户正在敲的内容（旧口径在每次 `pendingConfirm` 引用变化时清，会吃掉输入）。
+ */
 async function decide(approved: boolean): Promise<void> {
   const reason = approved ? undefined : (rejectReason.value.trim() || '用户拒绝执行')
   deciding.value = true
@@ -1324,20 +2570,24 @@ function onFormCancel(): void {
   void ai.cancelGenerativeForm()
 }
 
-/** 挂起调用换人即重置倒计时与拒绝原因。 */
+/**
+ * R-166 口径②（拒绝原因解耦）：**只有换人（toolCallId 变化）才清空拒绝原因输入框**。
+ *
+ * 旧口径在 `pendingConfirm` 的每一次引用变化上都清 —— 而引用会因**重派生 / 帧重投 / 重挂**
+ * 而变（段是唯一真值，每次 `deriveProjections` 都会重建投影对象），于是用户正在敲的拒绝原因
+ * 会被下一次重派生吃掉。倒计时也不再在此折算（R-166 口径①：时钟在 store，重派生只读）。
+ */
 function resetPendingWatch(pending: PendingToolCall | null): void {
-  rejectReason.value = ''
-  if (!pending || pending.status !== 'pending') {
-    confirmDeadline.value = null
+  const id = pending && pending.status === 'pending' ? pending.toolCallId : null
+  if (id === watchedGateId.value) {
     return
   }
-  // T4-3（落点②，裁决 3）：按**服务端剩余时长**折算本地 deadline —— 帧带 `atMs`（实时 / 归档帧
-  // 均带，后端帧构造点取值）时取 `expiresAt − atMs`（两者同为服务端钟）再加本地 now，故客户端钟
-  // 漂移 X 不再整段偏移倒计时（GFb 问题 7）；`atMs` 缺失或 ≤ 0（旧格式 / 损坏数据）回落绝对
-  // `expiresAt` 对本地钟、再缺回落 timeoutSeconds。
-  // 口径与「重挂按帧构造时剩余时长重新起算」的代价说明见 `foldDeadline` 的注释。
-  confirmDeadline.value = foldDeadline(pending.expiresAt, pending.atMs, pending.timeoutSeconds)
+  watchedGateId.value = id
+  rejectReason.value = ''
 }
+
+/** 当前门卡的 toolCallId（口径②的"换人"判据；null = 当前没有门卡）。 */
+const watchedGateId = ref<string | null>(null)
 
 // 批2（权威翻转）：滚动指纹基本为 **parts 口径**（§6.3 清单）—— messages.length + 末消息段数 +
 // 末段的 kind/文本长度/段状态。内容增量都体现在"末段文本长度"上，工具帧的状态变化体现在"末段 status"。
@@ -1353,7 +2603,12 @@ watch(
     const tailStatus = tail && tail.kind === 'tool' ? tail.status : ''
     return `${ai.messages.length}|${last ? last.parts.length : 0}|${tail ? tail.kind : ''}|${tailText}|${tailStatus}|${last && last.pendingCall ? last.pendingCall.status : ''}`
   },
-  () => scrollBottom()
+  () => {
+    scrollBottom()
+    // R-165 S4：用户消息长度也会随历史回读 / 编辑重跑变化 —— 同一帧后重跑单一 measure
+    // （内容变化不进滚动指纹的折叠判据，故在本 watch 内顺带兜底）。
+    void nextTick(measureUserMsgOverflow)
+  }
 )
 
 watch(() => ai.expanded, (expanded) => {
@@ -1369,6 +2624,17 @@ watch(
   (pending) => resetPendingWatch(pending),
   { immediate: true }
 )
+
+/**
+ * R-166 口径④：倒计时归零 ⇒ 主动拉一次权威状态校正（每 toolCallId 只做一次，去重在 store）。
+ * 后端真悬挂（无结局）时 store 落「已超时作废」回执态；有结局则按真实裁决收敛。
+ */
+watch(remainingSeconds, (remain) => {
+  const pending = ai.pendingConfirm
+  if (remain === 0 && pending) {
+    ai.noteGateCountdownExpired(pending.toolCallId)
+  }
+})
 
 /**
  * R-161（RC-1/2 修复）：RO 内容重钉底 —— 确认门 / 生成式表单 / 工具卡 / 折叠展开等
@@ -1410,6 +2676,11 @@ onMounted(async () => {
     msgResizeObserver = new ResizeObserver(onMsgWrapResized)
     msgResizeObserver.observe(wrap)
   }
+  // R-165 S5a 项 5：长表格双区横滚联动（scroll 不冒泡 ⇒ 消息容器上捕获监听）
+  wrap?.addEventListener('scroll', onTableScrollCapture, { capture: true, passive: true })
+  // R-165 S4：首渲落地后跑一次用户长消息 measure（历史回读路径；jsdom 零高环境恒不溢出）。
+  await nextTick()
+  measureUserMsgOverflow()
   scrollBottom()
 })
 
@@ -1427,31 +2698,31 @@ onBeforeUnmount(() => {
   // R-161：RO disconnect（照上件纪律）+ 平滑回底类计时器收尾
   msgResizeObserver?.disconnect()
   msgResizeObserver = null
+  msgWrapRef.value?.removeEventListener('scroll', onTableScrollCapture, { capture: true })
+  for (const timer of copyFlashTimers.values()) {
+    window.clearTimeout(timer)
+  }
+  copyFlashTimers.clear()
   if (smoothBackTimer !== null) {
     clearTimeout(smoothBackTimer)
     smoothBackTimer = null
+  }
+  // R-165 S5b：查看器若在打开态卸载 —— 摘掉 Esc 监听 + 解 body 滚动锁 + 收复制绿勾计时器
+  window.removeEventListener('keydown', onMmdViewerKeydown)
+  document.body.classList.remove('overflow-hidden')
+  if (mmdViewerCopyTimer !== null) {
+    clearTimeout(mmdViewerCopyTimer)
+    mmdViewerCopyTimer = null
   }
   ai.stopWorkspaceSync()
 })
 </script>
 
-<!-- R-163D：.md-body 排版 / 光标 / 呼吸 / chevron 全部迁入 src/styles/ai-chat.css
-     （main.css 全局 @import；v-html 节点无 scope 属性——R-163B G1 根因教训；
-     令牌与样式收口 .ai-chat 域，值逐字取自 demo v6 / 移植映射-R163D.md）。 -->
-
-
-<!-- R-161 余下规则（scroll-smooth 类挂于模板节点 / .caret 抑制）保持 scoped。 -->
-<style scoped>
-/* R-161：平滑回底 = CSS scroll-behavior:smooth 类切换（会审 M2：禁 scrollTo({behavior:'smooth'})，
-   浮钮点击时挂上、~600ms 后移除；流式期 pinBottom 恒瞬跳不加本类）。 */
-.scroll-smooth {
-  scroll-behavior: smooth;
-}
-/* R-161（用户实测回归）：reduced-motion 豁免呼吸动画 —— 呼吸 = 生成中状态语义（非纯装饰），
-   豁免后律动照常 1.5s（R-163B G6 对齐 demo）；`.caret` 纯装饰抑制保留。 */
-@media (prefers-reduced-motion: reduce) {
-  .caret {
-    animation: none;
-  }
-}
-</style>
+<!-- R-165 S5c：本组件不再持有任何 scoped 样式块（曾承载 .md-body 排版 / 光标 / 呼吸 / chevron /
+     scroll-smooth / reduced-motion 抑制）。全部改工具类：
+     - v-html 正文族 = 渲染层逐标签注入（utils/markdown.ts，故 v-html 节点无 scope 属性也不再是问题）；
+     - 光标 / 呼吸 / chevron = 模板类串（CARET_CLASS / BREATH_CLASS / TCHEV_CLASS）；
+     - 三个 keyframes = tailwind.config.js 的 theme.extend.keyframes/animation；
+     - 平滑回底 = Tailwind 内置 `scroll-smooth` 工具类（JS 只做 classList 切换，类名不变）；
+     - reduced-motion：呼吸**豁免**（= 生成中状态语义，非纯装饰，R-161 用户实测回归口径）
+       改在光标元素上写 `motion-reduce:animate-none`（纯装饰抑制保留），媒体查询不再手写。 -->

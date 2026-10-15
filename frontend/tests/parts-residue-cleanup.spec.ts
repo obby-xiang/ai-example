@@ -160,15 +160,45 @@ describe('施工项1：requiresAction 六残留点写段收口', () => {
     expect(soleToolPart(assistant)).toMatchObject({ status: 'rejected', requiresAction: false })
   })
 
-  it('confirm 提交撞 DUPLICATE：段并入 running（approved 非 ToolRunStatus 合法值），挂起卡收掉', async () => {
-    const store = useAiStore()
-    const assistant = armConfirm(store, 'c1')
-    api.confirm.mockRejectedValue(new ApiError('Conflict', 409, ErrorCode.DUPLICATE_TOOL_CALL_ID, null))
+  // R-166 口径③改写（原「段并入 running + 挂起卡收掉」是"硬写 approved"的诚实性缺陷）：
+  // 409 不写任何乐观裁决 —— 段回待决（挂起卡仍在）+ 提交态置 syncing + 3s 后拉 runs/current
+  // 落**真实裁决**（本用例后端真实状态是 REJECTED，旧口径会显示成「已确认」）。
+  it('confirm 提交撞 DUPLICATE（R-166 口径③）：不硬写 approved —— 瞬态「同步中」+ 3s 后按 runs/current 落真实裁决', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = useAiStore()
+      const assistant = armConfirm(store, 'c1')
+      api.confirm.mockRejectedValue(new ApiError('Conflict', 409, ErrorCode.DUPLICATE_TOOL_CALL_ID, null))
+      api.runsCurrent.mockResolvedValue({
+        found: true, runId: 'run-1', snapshotStatus: 'SUSPENDED',
+        pendingEntries: [{ toolCallId: 'c1', entryStatus: 'REJECTED', kind: 'CONFIRM', name: 'danger_tool' }],
+        unresolvedExternal: [], awaitingExternal: false, archiveMaxSeq: 0
+      } as AiRunCurrent)
 
-    await store.confirm(true)
+      await store.confirm(true)
 
-    expect(assistant.pendingCall).toBeNull()
-    expect(soleToolPart(assistant)).toMatchObject({ status: 'running', requiresAction: false })
+      // ① 不写乐观裁决：段回 pending 待决（挂起卡与双按钮仍在，等待真实结局）
+      expect(assistant.pendingCall?.status).toBe('pending')
+      expect(soleToolPart(assistant)).toMatchObject({ status: 'pending', requiresAction: true })
+      expect(soleToolPart(assistant).decision).toBeUndefined()
+      // ② 提交态 = syncing（面板显示「已提交，同步中…」且双按钮禁用）
+      expect(store.gateSubmissionOf('c1')).toMatchObject({ decision: 'approved', syncing: true })
+      // ③ 同 toolCallId 再点被源头防重短路（同一条最多提交一次）
+      api.confirm.mockResolvedValue({})
+      await store.confirm(true)
+      expect(api.confirm).toHaveBeenCalledTimes(1)
+      expect(api.runsCurrent).not.toHaveBeenCalled()
+
+      // ④ 3s 未达结局帧 ⇒ 拉 runs/current 校正为**真实裁决**（后端说 REJECTED，不是 approved）
+      await vi.advanceTimersByTimeAsync(3000)
+      await Promise.resolve()
+      expect(api.runsCurrent).toHaveBeenCalledTimes(1)
+      expect(assistant.pendingCall).toBeNull()
+      expect(soleToolPart(assistant)).toMatchObject({ status: 'rejected', decision: 'rejected', requiresAction: false })
+      expect(store.gateSubmissionOf('c1')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('confirm 提交失败回退：投影与段都回 pending（段恢复 requiresAction=true）', async () => {

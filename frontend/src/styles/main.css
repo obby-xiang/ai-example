@@ -1,6 +1,8 @@
-/* R-163D：AI 对话框视觉重做（demo v6 1:1 移植，令牌/样式收口在 .ai-chat 域）。
-   必须全局引入：v-html 注入节点不带 scope 属性（R-163B G1 根因教训）。 */
-@import './ai-chat.css';
+/* R-165 S5c：AI 面板样式已全量 Tailwind 化 —— 原 `@import './ai-chat.css'`（362 行手写，
+   含 .md-body 排版族 / 三个 keyframes / EP 覆写块）随文件一并拆除：
+   - v-html 正文族改由渲染层逐标签注入工具类（utils/markdown.ts，写在 .ts 源码即被 content 扫描），
+     故「v-html 节点不带 scope ⇒ 必须全局样式表」这条 R-163B G1 根因不再成立；
+   - 光标 / 呼吸 / 淡出 / chevron 改模板类串，三个 keyframes 落 tailwind.config.js。 */
 
 @tailwind base;
 @tailwind components;

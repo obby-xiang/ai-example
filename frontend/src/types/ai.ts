@@ -7,6 +7,7 @@
 
 import type { SseFrame, PendingToolCallSnapshot, PendingStatus, ToolKind } from './sse'
 import type { FormSpec } from './form-schema'
+import type { ErrorCard } from '@/utils/error-card'
 
 /**
  * 工作区上下文（AiChatRequest.Context）。
@@ -234,6 +235,12 @@ export interface ChatMessage {
    * 旧帧的"已应用"事实不必跨刷新保留 —— 重挂以 `runSeq.lastSeq` 为准）。
    */
   appliedSeqs?: number[]
+  /**
+   * R-165 S5c：错误卡（demo v7.7 裁决区 08）—— **内联于对话流、按发生位置插入，绝不做顶部固定**。
+   * 挂在本消息上（= 错误发生的那一轮），面板在元信息行之后渲染；分类口径见 `utils/error-card.ts`。
+   * 内存态、不入镜像（刷新后由历史重载消失；错误卡记录的是"本轮现场"，不属可回读的业务事实）。
+   */
+  errorCard?: ErrorCard | null
 }
 
 /** 消息段序号：同一消息内单调递增（封口后另起的段不复用编号）。 */
@@ -294,11 +301,21 @@ export interface ToolPart extends MessagePartBase {
    * 确认门 / 前端工具的等待上限与到期口径（T4 / T4-3 原文，仅 CONFIRM / FRONTEND 段有）。
    *
    * 为什么落在段上（批2 起）：`message.pendingCall` 已改为由段派生，若这几个字段不随段持久化，
-   * 派生出的挂起卡就丢了倒计时口径（确认卡会从"剩余 N 秒"退化成"等待人工确认"）。
+   * 派生的挂起卡就丢了原始等待口径。
+   *
+   * **R-166 口径变更（重要）**：这三个字段自本批起**不再驱动确认门倒计时**（原"帧差值折算"
+   * 在重派生/刷新时会闪回起点，见 `stores/ai.ts` 的 `frameDeadlineLocal` 头注）。倒计时的
+   * 唯一真值是 store 的 `confirmClock`（确认帧锚定 + 心跳校正，重派生只读不写）；
+   * 本组字段保留为**原始帧口径的对账/回滚依据**（镜像与快照重建仍照原样携带）。
    */
   timeoutSeconds?: number
   expiresAt?: number
   atMs?: number
+  /**
+   * R-166 口径④：本地判定"已超时作废"（倒计时归零 + 权威校正仍无结局）的标记。
+   * 灰族回执形态与后端 TIMEOUT 同族，靠本字段区分回执徽标文案（「已超时作废」/「已超时」）。
+   */
+  expiredLocally?: boolean
 }
 
 /** 消息段判别联合（按 `kind` 判别）。 */
@@ -332,6 +349,8 @@ export interface ToolPartPatch {
   timeoutSeconds?: number
   expiresAt?: number
   atMs?: number
+  /** 见 {@link ToolPart.expiredLocally}（R-166 本地"已超时作废"标记） */
+  expiredLocally?: boolean
 }
 
 /** 展示态的挂起调用（由 SSE 帧聚合而来）。 */
@@ -346,15 +365,14 @@ export interface PendingToolCall {
   /** 确认门倒计时（秒），来自 confirm_request 帧 */
   timeoutSeconds?: number
   /**
-   * DC-14 T4：挂起等待的绝对到期时刻（epoch 毫秒，服务端给的 `expiresAt`）。
-   * T4-3 后半起倒计时按**服务端剩余时长**折算（见 `atMs`）：`atMs` 可用（> 0）时用
-   * `expiresAt − atMs`；不可用（旧格式 / 损坏数据）才用本绝对值直接对本地钟。
+   * DC-14 T4：挂起等待的绝对到期时刻（epoch 毫秒，服务端钟）。
+   * **R-166 起不再参与倒计时折算**（原 `expiresAt − atMs` 折算会在重派生/刷新时闪回起点）——
+   * 现只随段原样透出以对账/回滚；倒计时读取 store 的 {@link ConfirmClock}。
    */
   expiresAt?: number
   /**
-   * T4-3：帧的**服务端构造时刻**（epoch 毫秒；实时 / 归档帧均带）—— 与 `expiresAt` 同为
-   * 服务端钟、同帧单点取值，故二者之差即服务端给出的剩余时长（折算见 `stores/ai.ts` 的
-   * `foldDeadline`；`atMs ≤ 0` 视为不可用）。
+   * T4-3：帧的**服务端构造时刻**（epoch 毫秒；实时 / 归档帧均带）。
+   * **R-166 起不再参与倒计时折算**（同上）；保留以对账。
    */
   atMs?: number
   /**
@@ -363,6 +381,44 @@ export interface PendingToolCall {
    * 另保留本地确认/执行过程的 running/approved。
    */
   status: 'pending' | 'running' | 'approved' | 'rejected' | 'expired' | 'cancelled' | 'succeeded' | 'blocked'
+}
+
+/**
+ * R-166（口径①/方案 A）：确认门倒计时时钟 —— **帧/心跳驱动、重派生只读**。
+ *
+ * 为什么单独立一个状态：倒计时原来的真值是"面板每次重派生时按帧差值现算"，于是
+ * `pendingCall` 引用一变（帧重投 / 重挂 / 任何重派生）就把倒计时打回起点（R-166 症②）。
+ * 现在锚点只在**收到实时帧**（或心跳）时写一次，落成**本地钟的绝对到期时刻**；
+ * 面板每秒 tick 只做 `deadlineMs − now` 的读取 ⇒ 重派生天然幂等（同 `expiresAt` 重算同值）。
+ */
+export interface ConfirmClock {
+  /** 时钟所属的挂起条目（换人即整体重建；并发挂起时别的心跳不得抢占本时钟） */
+  toolCallId: string
+  /** 本地钟的绝对到期时刻（epoch 毫秒）—— 锚定后不因重派生改变 */
+  deadlineMs: number
+  /** 倒计时环的折算分母（秒，取帧/心跳的 timeoutSeconds；缺省 = 环按满弧） */
+  totalSeconds: number | null
+  /** 锚来源：`frame` = 实时确认帧新鲜折算（首心跳前兜底）；`heartbeat` = 心跳剩余秒 */
+  anchor: 'frame' | 'heartbeat'
+  /** 最近一次心跳的已等待秒数（null = 尚未收到挂起期心跳） */
+  waitedSeconds: number | null
+}
+
+/**
+ * R-166（口径③）：确认门提交态（同 toolCallId **最多提交一次**）。
+ *
+ * 进表时机 = 点击批准/拒绝的同一刻（**点击即入表**，按钮与程序化入口皆据此禁用/短路）；
+ * 出表时机 = 结局帧到达 / 权威校正落定 / 提交失败回退。
+ */
+export interface GateSubmission {
+  /** 本次提交的裁决（若已知 —— 由 `confirm()` 落账；仅作诊断/对账，不参与任何判定） */
+  decision?: 'approved' | 'rejected'
+  submittedAt: number
+  /**
+   * true = 409 `DUPLICATE_TOOL_CALL_ID` 之后的**「已提交，同步中…」瞬态** ——
+   * 不写任何乐观裁决，等 SSE 结局帧落真实状态；3 秒未达则拉 `runs/current` 校正。
+   */
+  syncing: boolean
 }
 
 /**
@@ -469,7 +525,11 @@ export interface AiRunCurrentEntry {
   arguments?: string | null
   /** R-160 M3：挂起到期口径（服务端钟；旧数据缺省 = null ⇒ 「等待人工确认」静态兜底） */
   expiresAt?: number | null
-  /** R-160 M3：expiresAt 的构造时刻（同帧单点；续算剩余 = expiresAt − atMs，见 foldDeadline） */
+  /**
+   * R-160 M3：expiresAt 的构造时刻（帧内单点取值）。**R-166 起倒计时不再折算这对值**
+   * （原 `expiresAt − atMs` 的差值折算在重派生/刷新时会闪回起点，已废弃）——本字段保留供对账；
+   * 倒计时的唯一真值是 store 的 `ConfirmClock`（确认帧锚定 + 心跳校正，见 `stores/ai.ts`）。
+   */
   atMs?: number | null
 }
 

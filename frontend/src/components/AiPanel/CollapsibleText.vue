@@ -14,6 +14,11 @@
  *
  * R-160 M4（issue #14③ 方案 A）：容器 `min-width:0` + `overflow-wrap:anywhere` —— 长串
  * 在容器层可断行，配合 AiPanel 气泡 `overflow:hidden` 不再越界；不铺分块规则。
+ *
+ * R-165 S4（整改清单）：收起态的**行内 style 退役** —— 改任意值类
+ * `max-h-[<n>px] [mask-image:linear-gradient(to_bottom,#000_55%,transparent)]`
+ * （铁律：零手写 CSS、零行内 style）。限高只有 96/160 两个既有调用值，故用字面量表 + 联合
+ * 类型钉死（JIT 扫不到运行期拼出的类名，值域必须静态可见；新增值 = 编译期报错）。
  */
 import { computed, nextTick, onMounted, ref } from 'vue'
 
@@ -21,9 +26,10 @@ const props = withDefaults(defineProps<{
   text: string
   /** JSON pretty-print（args 区用：解析成功缩进 2 格，失败原样） */
   pretty?: boolean
-  /** 收起态限高（px）；思考区传 160（原 max-h-40 口径） */
-  maxHeight?: number
-  /** 「显示更多」按钮 testid 前缀（调用方传 `show-more-<toolCallId>` 兼容 R-154 断言） */
+  /** 收起态限高（px）；思考区传 160（原 max-h-40 口径）。值域钉死为字面量表键（S4 任意值类） */
+  maxHeight?: 96 | 160
+  /** 「显示更多」按钮 testid 前缀（调用方传实义 id：`args-more-<toolCallId>` / `reasoning-more-<blockId>`
+   *  / `receipt-more-<toolCallId>`；R-165 S5a 起工具卡**输出**区改纯限高内滚，不再传本参数） */
   testid?: string
 }>(), { pretty: false, maxHeight: 96, testid: 'collapsible-show-more' })
 
@@ -66,6 +72,13 @@ function toggle(): void {
 }
 
 const collapsed = computed(() => overflowed.value && !expanded.value)
+
+/** R-165 S4：收起态任意值类（原 `:style="{maxHeight, maskImage}"` 的逐条等价，见文件头 S4 注）。 */
+const COLLAPSED_CLASS: Record<96 | 160, string> = {
+  96: 'max-h-[96px] [mask-image:linear-gradient(to_bottom,#000_55%,transparent)]',
+  160: 'max-h-[160px] [mask-image:linear-gradient(to_bottom,#000_55%,transparent)]'
+}
+const collapsedClass = computed(() => (collapsed.value ? COLLAPSED_CLASS[props.maxHeight] : ''))
 </script>
 
 <template>
@@ -74,7 +87,7 @@ const collapsed = computed(() => overflowed.value && !expanded.value)
     <div
       ref="wrapRef"
       class="whitespace-pre-wrap"
-      :style="collapsed ? { maxHeight: maxHeight + 'px', maskImage: 'linear-gradient(to bottom, #000 55%, transparent)' } : {}"
+      :class="collapsedClass"
     >
       <slot>{{ displayText }}</slot>
     </div>

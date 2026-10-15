@@ -171,10 +171,11 @@ export interface SseConfirmRequestFrame extends SseFrameBase {
   timeoutSeconds: number
   /**
    * DC-14 T4：挂起等待的**绝对**到期时刻（epoch 毫秒 = 帧内 `atMs` + timeoutSeconds，服务端单点取钟）。
-   * T4-3 后半起倒计时口径为：帧带 `atMs`（实时 / 归档帧均带）时按**服务端剩余时长**
-   * `expiresAt − atMs` 折算（免疫客户端钟漂移）；缺 `atMs` 或 `atMs ≤ 0`（旧格式 / 损坏数据）才
-   * 退回用本绝对值直接对本地钟；两者皆缺再回落 `timeoutSeconds`。折算实现见 `stores/ai.ts`
-   * 的 `foldDeadline`。
+   *
+   * **R-166 口径变更**：本字段不再驱动门卡倒计时 —— 原 T4-3 的 `expiresAt − atMs` 差值折算在
+   * 重派生 / 刷新恢复时会给出"完整等待时长"从而把倒计时打回起点（本批修复的症②）。倒计时现由
+   * `stores/ai.ts` 的 `ConfirmClock` 承载：**实时帧新鲜时锚定一次**（折算实现 `frameDeadlineLocal`），
+   * 之后由挂起期心跳校正（`heartbeatDeadlineLocal`）。本字段随帧照原样透出，供对账 / 回滚。
    */
   expiresAt?: number
   /** 回调端点说明文本：POST /api/ai/confirm {runId, toolCallId, approved, reason} */
@@ -231,9 +232,24 @@ export interface SseSuspendedFrame extends SseFrameBase {
   writtenBy?: string
 }
 
-/** 挂起期心跳（证明连接存活 + 前端倒计时节拍）。键集不固定。 */
+/**
+ * 心跳帧（挂起期保活 + **R-166 起为门卡倒计时的主驱动**；流式期只保活）。键集不固定。
+ *
+ * 挂起期载荷见后端 `ConfirmGate.heartbeatData`（`runId` / `suspendKind` / `toolCallId` /
+ * `name` / `status` / `waitedSeconds` / `timeoutSeconds`）——**两个秒数同帧单点取值**，
+ * 故 `timeoutSeconds − waitedSeconds` 就是该帧时刻的服务端权威剩余秒。
+ * 流式期心跳（`ResilientChatService`）不带这四个键，前端据此区分两条心跳通道。
+ */
 export interface SseHeartbeatFrame extends SseFrameBase {
   type: 'heartbeat'
+  /** 挂起种类：`confirm`（确认门）/ `frontend-tool`（前端工具）；流式期心跳无此键 */
+  suspendKind?: string
+  /** 本条挂起条目的 toolCallId（流式期心跳无此键 ⇒ 不参与倒计时） */
+  toolCallId?: string
+  /** 挂起等待上限（秒） */
+  timeoutSeconds?: number
+  /** 已等待秒数（服务端钟，与 `timeoutSeconds` 同帧单点取值） */
+  waitedSeconds?: number
   [key: string]: unknown
 }
 
