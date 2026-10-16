@@ -172,7 +172,7 @@
            （无元信息行的消息——仅工具卡无正文——仍由卡片自身下外边距兜底，不会贴死；
            R-165 S5a 项 1：卡片下外边距体系 = 工具卡 mb-2 / 门卡·GF mb-2.5 / 回执·思考·流程图 mb-3.5。） -->
       <div
-        v-for="m in ai.messages"
+        v-for="(m, mi) in ai.messages"
         :key="m.id"
         class="group flex"
         :class="m.role === 'user' ? 'flex-row-reverse' : ''"
@@ -297,7 +297,7 @@
                       :data-testid="'ro-toggle-' + part.toolCallId"
                       @click="onCardHeadClick(block, part)"
                     >
-                      <span :class="receiptBadgeClass(part.status)" :data-testid="'ro-badge-' + part.toolCallId">{{ hitlReceiptLabel(part) }}</span>
+                      <span :class="receiptBadgeClass(part.status)" :title="hitlReceiptLabel(part)" :data-testid="'ro-badge-' + part.toolCallId">{{ hitlReceiptLabel(part) }}</span>
                       <span class="ro-sum flex-1 min-w-0 text-[12.2px] whitespace-nowrap overflow-hidden text-ellipsis" :data-testid="'ro-summary-' + part.toolCallId">{{ hitlReceiptSummary(part) }}</span>
                       <span v-if="part.decidedAt" class="flex-none text-[#8b949e] text-[11.5px] tabular-nums">{{ formatProgressiveTs(part.decidedAt) }}</span>
                       <span v-if="hasBodyRows(part)" :class="[TCHEV_CLASS, isBlockExpanded(block) ? 'is-open' : '']">›</span>
@@ -316,7 +316,12 @@
                             :key="row.key"
                             class="flex gap-[10px] py-[6px] border-0 border-b border-solid border-[#eef0f3] text-[12.6px] leading-[1.5] last:border-b-0"
                           >
-                            <span class="flex-[0_0_72px] break-words text-[#8b949e] text-[12px]">{{ row.key }}</span>
+                            <!-- 问题1 偏差修正批（用户实报 GF 只读卡字段行排版）：键列由定宽 72px + break-words
+                                 改**自适应内容宽**（flex-basis auto + min-w-0、上限 40%）+ `truncate` + `title` ——
+                                 后端 label 允许 100 字符（GenerativeFormRules.MAX_LABEL_CHARS），定宽键列遇真实
+                                 长 label（如「执行间隔（秒）」）会折行占两行、值贴首行 ⇒ 视觉即「串行折行」。
+                                 长标签现在单行省略、悬浮看全；值列 flex-1 min-w-0 break-words 不动。 -->
+                            <span class="flex-[0_1_auto] min-w-0 max-w-[40%] truncate text-[#8b949e] text-[12px]" :title="row.key">{{ row.key }}</span>
                             <span class="flex-1 min-w-0 break-words">{{ row.value }}</span>
                           </div>
                         </div>
@@ -452,9 +457,10 @@
                                 :key="row.key"
                                 class="flex gap-[10px] py-[7px] border-0 border-b border-solid border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"
                               >
-                                <!-- S6 批1（长内容审计：门卡英文字段 key 挤压）：字段名可换行（break-words），
-                                     长英文键（notifyOnFail 等）在自己的 58px 列内折行，不挤压右侧值列。 -->
-                                <span class="flex-[0_0_58px] break-words text-[#8b949e] text-[12.4px]">{{ row.key }}</span>
+                                <!-- 问题1 偏差修正批（同族：门卡字段表键列）：原 58px 定宽 + break-words 装不下
+                                     长英文键（notifyOnFail ≈80px）⇒ 折行、值贴首行。改自适应内容宽
+                                     （min-w-0 + 上限 40%）+ truncate + title 看全，与只读卡键列同口径。 -->
+                                <span class="flex-[0_1_auto] min-w-0 max-w-[40%] truncate text-[#8b949e] text-[12.4px]" :title="row.key">{{ row.key }}</span>
                                 <span class="flex-1 min-w-0 break-words">{{ row.value }}</span>
                               </div>
                             </div>
@@ -532,15 +538,19 @@
 
           <!-- R-165 S4 → S5a 项 6：用户长消息「展开/收起」—— 真溢出（正文高 > 184px = 8 行）才出；
                折叠态 = 限高 + overflow:hidden + 底部渐隐（mask 任意值类），展开态为该消息本地态；
-               真溢出才渲染（单一 measure 读 scrollHeight 口径）。 -->
+               真溢出才渲染（单一 measure 读 scrollHeight 口径）。
+               问题1 偏差修正批 aj11（demo 该点改后样张）：钮形态由被裁决废掉的 v7.3 现状形态
+               （12.2px 蓝字 / 贴内容 6px / 「展开」）改终裁形态 —— 11.5px #57606a（hover 转蓝）·
+               底部左对齐（block text-left）· 距内容 8px · 文案「展开 ▾ / 收起 ▴」+ aria-expanded。 -->
           <button
             v-if="m.role === 'user' && userMsgOverflowed.has(m.id)"
             type="button"
-            class="mt-[6px] border-0 bg-transparent p-0 font-[inherit] text-[12.2px] text-[#2563eb] transition-colors duration-[150ms] hover:text-[#1f2328]"
+            class="mt-[8px] block text-left border-0 bg-transparent p-0 font-[inherit] text-[11.5px] text-[#57606a] transition-colors duration-[150ms] hover:text-[#2563eb]"
             :data-testid="'user-msg-more-' + m.id"
+            :aria-expanded="userMsgExpanded.has(m.id)"
             @click="toggleUserMsg(m.id)"
           >
-            {{ userMsgExpanded.has(m.id) ? '收起' : '展开' }}
+            {{ userMsgExpanded.has(m.id) ? '收起 ▴' : '展开 ▾' }}
           </button>
         </div>
 
@@ -555,8 +565,8 @@
              行判据：有正文 或 助手消息流式中（发出即现，无正文也要能呼吸）。 -->
         <div
           v-if="showMetaRow(m)"
-          class="mb-[18px] flex items-center gap-2 text-xs text-[#8b949e] w-full max-w-[82%]"
-          :class="m.role === 'user' ? 'mt-[6px] flex-row-reverse' : 'mt-[12px]'"
+          class="flex items-center gap-2 text-xs text-[#8b949e] w-full max-w-[82%]"
+          :class="[msgGapClass(mi), m.role === 'user' ? 'mt-[6px] flex-row-reverse' : 'mt-[12px]']"
           :data-testid="'msg-ops-' + m.id"
         >
           <span class="flex items-center gap-1 min-h-[18px]">
@@ -933,9 +943,10 @@ import {
   TIP_ARROW_CLASS,
   TIP_CLASS,
   renderMarkdown,
-  renderMermaidSvg
+  renderMermaidSvg,
+  setStreamFlushHandler
 } from '@/utils/markdown'
-import { toolSummary } from '@/utils/tool-summaries'
+import { toolSummary, TOOL_SUMMARY_STATUS_WORDS } from '@/utils/tool-summaries'
 import {
   argRows,
   hasBodyRows,
@@ -1363,6 +1374,24 @@ function showMetaRow(message: ChatMessage): boolean {
     || isBreathing(message)
 }
 
+/**
+ * 问题1 偏差修正批（aj10 同发送者间距，demo v7.4 十点锁定项）：消息容器下外边距由「全站一刀切
+ * 18px」改为**按上一条发送者判定** —— 同角色相邻（同人分次补话 / AI 分段输出）10px、换人 18px。
+ * 同类相邻自动成组，换人才留呼吸位；主面板消息严格交替时本判据恒取 18px（视觉量值不变）。
+ * 类名走常量字面量（JIT 扫字面类名，禁运行期拼类名）。
+ */
+const MSG_GAP_SAME_SENDER = 'mb-[10px]'
+const MSG_GAP_OTHER_SENDER = 'mb-[18px]'
+
+function msgGapClass(index: number): string {
+  const messages = ai.messages
+  const prev = index > 0 ? messages[index - 1] : undefined
+  const self = messages[index]
+  return prev !== undefined && self !== undefined && prev.role === self.role
+    ? MSG_GAP_SAME_SENDER
+    : MSG_GAP_OTHER_SENDER
+}
+
 /** R-159 #4：完成淡出记账 —— streaming true→false 时该消息进 300ms 淡出（caretOut），
  *  新 delta 到达（false→true）立即打断撤出；超时清账后元行换时间戳+复制。 */
 const fadingIds = ref<Set<string>>(new Set())
@@ -1423,15 +1452,27 @@ watch(
 const mdCache = new Map<string, { html: string }>()
 const MD_CACHE_MAX = 128
 
+/**
+ * 问题1 偏差修正批 aj14d ②：流式块防抖的「落地」信号 —— 75ms 窗口内被合并掉的增量由
+ * `setStreamFlushHandler` 回调（静默满窗后触发）bump 本计数，令 markdownHtml 重入一次真渲染。
+ * 只有流式块把本计数并进 memo key（非流式块 cache 键仍是 `...:f`，不被本计数搅动）。
+ */
+const mdStreamTick = ref(0)
+setStreamFlushHandler(() => {
+  mdStreamTick.value += 1
+})
+
 function markdownHtml(message: ChatMessage, block: Block): string {
   const part = block.parts[0]
   const text = part.kind === 'text' ? part.text : ''
-  const key = `${message.id}:${part.seg}:${text.length}:${message.streaming ? 's' : 'f'}`
+  // aj14d ③：块级稳定 key = 消息 + 段（与文本长度/流式态解耦，作防抖记账与围栏身份的命名空间）
+  const blockKey = `${message.id}:${part.seg}`
+  const key = `${blockKey}:${text.length}:${message.streaming ? `s${mdStreamTick.value}` : 'f'}`
   const hit = mdCache.get(key)
   if (hit) {
     return hit.html
   }
-  const { html, mermaid } = renderMarkdown(text, message.streaming)
+  const { html, mermaid } = renderMarkdown(text, message.streaming, blockKey)
   if (mermaid.length > 0) {
     void nextTick(() => hydrateMermaid(message.id, mermaid))
   }
@@ -1445,10 +1486,33 @@ function markdownHtml(message: ChatMessage, block: Block): string {
   return html
 }
 
-/** R-163B G5 摘要去重：映射值与工具名（TOOL_LABELS 口径）相同 ⇒ 只显一行（返回 null 藏摘要位）。 */
+/**
+ * R-163B G5 摘要去重（问题1 偏差修正批项 3「工具卡头重名」：去重判据由「全等」扩为「前缀」）。
+ *
+ * 背景：卡头 mono 槽渲的是**工具中文名**（`toolLabel`），摘要模板（`utils/tool-summaries.ts`）
+ * 的前缀往往与它同义/同形 ⇒ 卡头读作「启动导出作业　启动导出作业（任务 #12）」。原判据只挡
+ * 「完全相等」，挡不住「同义打头」。
+ *
+ * 现判据：摘要以工具名为**前缀**时剥掉该前缀（连同紧随的分隔符 `·、，:：` 与空白）；
+ * 剥后为空 ⇒ 返回 null（摘要位不渲，只留工具名一行）；剥后非空 ⇒ 渲剩余部分（信息不丢）。
+ * 同义族的模板本身也已按同口径收敛（`list_config_defs` / `list_tasks` / `get_workspace_state`
+ * 三个模板的「首词 = 工具名」措辞改由参数部分承载），故这三者的摘要只剩参数信息或为空。
+ */
+const SUMMARY_PREFIX_SEP = /^[\s·、，,:：\-—]+/
+/** 状态词全集（兜底摘要剥掉工具名后只剩状态词 ⇒ 状态胶囊已同屏承担，摘要位不再重复）。 */
+const STATUS_WORD_SET = new Set(Object.values(TOOL_SUMMARY_STATUS_WORDS))
+
 function toolSummaryOrNull(part: ToolPart): string | null {
   const summary = toolSummary(part)
-  return summary === toolLabel(part.name) ? null : summary
+  const label = toolLabel(part.name)
+  if (summary === label) {
+    return null
+  }
+  if (summary.startsWith(label)) {
+    const rest = summary.slice(label.length).replace(SUMMARY_PREFIX_SEP, '')
+    return rest === '' || STATUS_WORD_SET.has(rest) ? null : rest
+  }
+  return summary
 }
 
 /**
@@ -1969,14 +2033,23 @@ watch(mmdViewerOpen, (open) => {
  * 预览态内联缩放/平移 + 源码态 200px 内滚 + 卡头图标钮组（复位/全屏）。
  * 卡片下外边距 `mb-3.5`（S5a 项 1 统一卡片节奏）。
  */
-async function hydrateMermaid(messageId: string, blocks: Array<{ index: number; source: string }>): Promise<void> {
+async function hydrateMermaid(messageId: string, blocks: Array<{ index: number; key: string; source: string }>): Promise<void> {
   const bubble = msgWrapRef.value?.querySelector(`[data-testid="msg-bubble-${messageId}"]`)
   if (!bubble) {
     return
   }
   const slots = Array.from(bubble.querySelectorAll('pre > code.language-mermaid'))
+  // 问题1 偏差修正批 aj14d ③：按稳定 key（`data-fence-key`）绑槽位 —— 位置下标只作兜底
+  // （渲染与 hydrate 之间若又来一帧，位置会漂移，key 不会）。
+  const byKey = new Map<string, Element>()
+  for (const slot of slots) {
+    const key = slot.parentElement?.getAttribute('data-fence-key') ?? ''
+    if (key !== '') {
+      byKey.set(key, slot)
+    }
+  }
   for (const item of blocks) {
-    const code = slots[item.index]
+    const code = byKey.get(item.key) ?? slots[item.index]
     if (!code) {
       continue
     }
@@ -2004,7 +2077,9 @@ function onTableScrollCapture(event: Event): void {
   if (!(el instanceof HTMLElement) || !el.classList.contains('md-table-bd')) {
     return
   }
-  const head = el.parentElement?.querySelector('.md-table-hd')
+  // 问题1 偏差修正批 aj04：表头行改「flex 行 = 表头区 + gutter 格」⇒ 可程序化 scrollLeft 的
+  // 容器是表头区（.md-table-hdscroll），不再是表头行自身。
+  const head = el.parentElement?.querySelector('.md-table-hdscroll')
   if (head instanceof HTMLElement) {
     head.scrollLeft = el.scrollLeft
   }
@@ -2151,8 +2226,12 @@ function reasoningSummary(text: string, expanded: boolean): string {
  * R-165 S2：回执卡徽标（demo v7 `.rc-badge`：10.5px / px-6px / 圆角 5 / semibold，三族色）。
  * 色族仍由既有 `hitlReceiptTagType` 派生（五档语义不变），此处只做**五档→三族**的呈现收敛：
  * success→绿、danger→红、其余（info/warning/primary）→中性灰（v7 `.rc-badge` 只有 ok/bad/mute）。
+ *
+ * 问题1 偏差修正批（用户实报 `unknown` 徽标长文案）：文案最长 = `unknown`「结局未知（未确认成功/失败）」
+ * （≈134px）；卡头是 flex 行，徽标 `flex-none` 无 cap 时会直接挤占摘要。对齐工具卡状态胶囊
+ * （`max-w-[104px] truncate`）口径补 cap，并给徽标挂 `title`（全称悬浮可回看）。
  */
-const RECEIPT_BADGE_BASE = 'flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold'
+const RECEIPT_BADGE_BASE = 'flex-none max-w-[104px] truncate text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold'
 const RECEIPT_BADGE_TONE: Record<'success' | 'danger' | 'mute', string> = {
   success: 'text-[#1a7f45] bg-[#edf7f0]',
   danger: 'text-[#c0392b] bg-[#fdf1ef]',
@@ -2836,6 +2915,8 @@ onBeforeUnmount(() => {
     clearTimeout(mmdViewerCopyTimer)
     mmdViewerCopyTimer = null
   }
+  // 问题1 偏差修正批 aj14d ②：注销流式防抖 flush 回调（面板卸载后不再重入渲染）
+  setStreamFlushHandler(null)
   ai.stopWorkspaceSync()
 })
 </script>

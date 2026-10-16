@@ -30,9 +30,20 @@ const api = vi.hoisted(() => ({
 /** R-165 S5b：mermaid 渲染出口桩 —— 真 mermaid 不在 jsdom 跑（几何/真渲染在实机取证）；
  *  桩值可逐用例改写（`null` = render 失败路径）。模块其余导出走 importOriginal 原样透出。 */
 const mmdRender = vi.hoisted(() => ({ svg: '' as string | null }))
+/** 问题1 偏差修正批 aj14d ②：流式防抖 flush 回调的登记记账（面板挂载即注册 ⇒ 装配可断言）。 */
+const streamFlush = vi.hoisted(() => ({ handlers: [] as Array<() => void> }))
 vi.mock('@/utils/markdown', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/utils/markdown')>()
-  return { ...actual, renderMermaidSvg: () => Promise.resolve(mmdRender.svg) }
+  return {
+    ...actual,
+    renderMermaidSvg: () => Promise.resolve(mmdRender.svg),
+    setStreamFlushHandler: (handler: (() => void) | null) => {
+      if (handler !== null) {
+        streamFlush.handlers.push(handler)
+      }
+      actual.setStreamFlushHandler(handler)
+    }
+  }
 })
 
 /** R-158 #12：ResizeObserver 测试桩 —— jsdom 无 RO；用模块级开关控制「溢出/不溢出」回调。 */
@@ -266,10 +277,11 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
         { toolCallId: 'f1', name: 'probe.tool', kind: 'FRONTEND', args: {}, rawArgs: '{}', timeoutSeconds: 120, status: 'pending' }
       )
     ])
-    // R-163 T2 口径：无映射工具的摘要兜底 = 「工具名 · 状态」，工具名标签本体仍恰一次
-    // （按标签边界计数，摘要行兜底文本不混入）
+    // R-163 T2 口径：无映射工具的摘要兜底 = 「工具名 · 状态」；问题1 偏差修正批项 3 起，
+    // 显示层按前缀剥掉工具名 —— 剥后只剩状态词（状态胶囊已同屏承担）⇒ 摘要位不渲，
+    // 工具名标签本体仍恰一次（按标签边界计数）。
     expect(wrapper.html().split('>probe.tool<').length - 1).toBe(1)
-    expect(wrapper.find('[data-testid="tool-summary-f1"]').text()).toContain('probe.tool')
+    expect(wrapper.find('[data-testid="tool-summary-f1"]').text()).toBe('')
     wrapper.unmount()
   })
 
@@ -2059,17 +2071,19 @@ describe('R-163：Markdown 正文链路 / 白名单 / 工具摘要 / 赞踩 / �
     expect(code![1]).toContain('[overflow-wrap:anywhere]')
   })
 
-  it('T0/T2：工具摘要映射 —— start_export 按 args 出「启动导出作业（任务 #7）」，未知工具兜底 名+状态', async () => {
+  it('T0/T2：工具摘要映射 —— start_export 按 args 出「（任务 #7）」（问题1 起卡头按前缀剥名），未知工具兜底 名+状态', async () => {
     const { toolSummary } = await import('@/utils/tool-summaries')
     const mk = (name: string, args: string, status: ToolPart['status']): ToolPart =>
       ({ kind: 'tool', seg: 0, toolCallId: 't1', name, kind2: 'BACKEND', status, args, requiresAction: false }) as ToolPart
+    // `toolSummary` 仍是「工具名 + 参数信息」的完整摘要（前一层的口径不变）
     expect(toolSummary(mk('start_export', '{"taskId":7}', 'running'))).toBe('启动导出作业（任务 #7）')
     expect(toolSummary(mk('create_task', '{"type":"EXPORT","title":"月报"}', 'running'))).toBe('创建导出任务「月报」')
     expect(toolSummary(mk('mystery_tool', '{}', 'failed'))).toBe('mystery_tool · 失败')
     const wrapper = await mountPanel([
       buildMessage([{ kind: 'tool', seg: 0, toolCallId: 's1', name: 'start_export', kind2: 'CONFIRM', status: 'pending', args: '{"taskId":7}', timeoutSeconds: 120, requiresAction: true }])
     ])
-    expect(wrapper.find('[data-testid="tool-summary-s1"]').text()).toBe('启动导出作业（任务 #7）')
+    // 卡头显示层：工具名只在 mono 槽一次，摘要位只剩参数信息（去重判据 全等 → 前缀）
+    expect(wrapper.find('[data-testid="tool-summary-s1"]').text()).toBe('（任务 #7）')
     wrapper.unmount()
   })
 
@@ -2433,7 +2447,8 @@ describe('R-163B：视觉对齐 demo v6（样式生效 + 横滚止血）', () =>
     const { renderMarkdown } = await import('@/utils/markdown')
     const { html } = renderMarkdown('```js\nconst a = 1\n```\n\n完成', false)
     // R-165 S5c：图容器/图题/语言名三处改渲染层注入的工具类（标记类 `code` / `lg` / `hlib` 保留）
-    expect(html).toMatch(/<figure class="code [^"]*">/)
+    // 问题1 偏差修正批 aj14d ③：图容器另带 `data-fence-key="f1-js"`（块序号 + 语言的稳定身份）
+    expect(html).toMatch(/<figure class="code [^"]*" data-fence-key="f1-js">/)
     expect(html).toMatch(/<figcaption class="flex items-center[^"]*">/)
     expect(html).toMatch(/<span class="lg [^"]*">js<\/span>/)
     // R-165 S5a 项 7：文字钮「复制」→ v7 图标钮（cpbtn + 两枚叠放 svg + tip 气泡），
@@ -2471,7 +2486,7 @@ describe('R-163B：视觉对齐 demo v6（样式生效 + 横滚止血）', () =>
     // 摘要运行中蓝字 / 失败红字（v7 .st-running/.st-failed 的 tsum 口径）；未态回落 --ink2 灰
     expect(wrapper.find('[data-testid="tool-summary-e1"]').classes()).toContain('text-[#57606a]')
     expect(wrapper.find('[data-testid="tool-summary-i1"]').text()).toBe('') // 去重：与工具名相同 ⇒ 不重复显
-    expect(wrapper.find('[data-testid="tool-summary-e1"]').text()).toBe('启动导出作业（任务 #7）') // 互补摘要正常显
+    expect(wrapper.find('[data-testid="tool-summary-e1"]').text()).toBe('（任务 #7）') // 剥掉同名前缀，只剩互补信息
     wrapper.unmount()
   })
 
@@ -2523,8 +2538,13 @@ describe('R-163B：视觉对齐 demo v6（样式生效 + 横滚止血）', () =>
     expect(html).toContain('md-table-bd')
     // R-165 S5a：旧单容器类零残留（滚动条只贴表体右缘）
     expect(html).not.toContain('md-table-scroll')
-    // 表头区：不滚（overflow-hidden + 6px gutter 抵消）；表体区：限高 320 + 内滚 + gutter stable
-    expect(html).toMatch(/md-table-hd[^"]*overflow-hidden/)
+    // 表头行：问题1 偏差修正批 aj04（v7.8 终裁）—— flex 行 = 可横滚表头区 + 6px gutter 占位格；
+    // 旧 v7.6 的 `pr-[6px]` 内边距补偿条零残留（补偿条没有下边框 ⇒ 窄表档「断头」）。
+    expect(html).toMatch(/md-table-hd flex bg-\[#f6f7f9\]/)
+    expect(html).toMatch(/md-table-hdscroll flex-1 min-w-0 overflow-hidden/)
+    expect(html).toMatch(/md-table-gutter flex-none w-\[6px\] bg-\[#f6f7f9\] border-0 border-b border-solid border-\[#e3e6ea\]/)
+    expect(html).not.toContain('pr-[6px]')
+    // 表体区：限高 320 + 内滚 + gutter stable（唯一滚动容器）
     expect(html).toMatch(/md-table-bd[^"]*max-h-\[320px\]/)
     expect(html).toMatch(/md-table-bd[^"]*scrollbar-gutter:stable/)
     // 两区各一张表（等分列宽口径：w-full + table-fixed）
@@ -2803,22 +2823,28 @@ describe('R-165 S4：常驻操作行 / 用户长消息折叠 / 间距分派 / �
     wrapper.unmount()
   })
 
-  it('项2：用户长消息折叠两态（>184px ⇒ 限高+裁切+渐隐+「展开」；展开解除；再点回折叠）', async () => {
+  it('项2：用户长消息折叠两态（>184px ⇒ 限高+裁切+渐隐+「展开 ▾」；展开解除；再点回折叠）', async () => {
     const { wrapper, body } = await mountLongUser('很长的用户提问'.repeat(60), 600)
     const more = wrapper.find('[data-testid="user-msg-more-u-long"]')
     expect(more.exists()).toBe(true)
-    expect(more.text()).toBe('展开')
+    // 问题1 偏差修正批 aj11：文案带方向标；形态 = 11.5px #57606a（hover 蓝）· 底部左对齐 · mt-[8px]
+    expect(more.text()).toBe('展开 ▾')
+    expect(more.classes()).toEqual(expect.arrayContaining(['mt-[8px]', 'block', 'text-left', 'text-[11.5px]', 'text-[#57606a]', 'hover:text-[#2563eb]']))
+    expect(more.classes()).not.toContain('text-[12.2px]')
+    expect(more.classes()).not.toContain('text-[#2563eb]')
+    expect(more.attributes('aria-expanded')).toBe('false')
     expect(body.className).toContain('max-h-[184px]')
     expect(body.className).toContain('overflow-hidden')
     expect(body.className).toContain('[mask-image:linear-gradient(to_bottom,#000_calc(100%_-_90px),transparent)]')
     expect(body.getAttribute('style')).toBeNull() // 铁律：全 Tailwind，零行内 style
     await more.trigger('click')
-    expect(wrapper.find('[data-testid="user-msg-more-u-long"]').text()).toBe('收起')
+    expect(wrapper.find('[data-testid="user-msg-more-u-long"]').text()).toBe('收起 ▴')
+    expect(wrapper.find('[data-testid="user-msg-more-u-long"]').attributes('aria-expanded')).toBe('true')
     expect(body.className).not.toContain('max-h-[184px]')
     expect(body.className).not.toContain('[mask-image:')
     // 再点回折叠：本地态翻转（该消息维度，不进 store）
     await wrapper.find('[data-testid="user-msg-more-u-long"]').trigger('click')
-    expect(wrapper.find('[data-testid="user-msg-more-u-long"]').text()).toBe('展开')
+    expect(wrapper.find('[data-testid="user-msg-more-u-long"]').text()).toBe('展开 ▾')
     expect(body.className).toContain('max-h-[184px]')
     wrapper.unmount()
   })
@@ -3456,5 +3482,213 @@ describe('R-165 S5c：错误卡族（三变体分派 + 内联位置 + 动作钮�
     expect(buildErrorCard('429', 'Too Many Requests')).toMatchObject({ variant: 'quota' })
     expect(buildErrorCard('', '对话请求失败')).toMatchObject({ variant: 'generic' })
     expect(buildErrorCard('SESSION_BUSY', '进行中')).toBeNull()
+  })
+})
+
+/**
+ * 问题1 偏差修正批（对账审计 2026-10-16 认定的 7 项「裁决/demo 已定但施工走样」收口；纯前端）。
+ * 蓝本 = 仓外 `r163-demo/v7.11.html` 的各裁决点改后样张（aj04 / aj10 / aj11 / aj14d + 用户实报 3 条）。
+ * 本组逐项各一例，锁的是「形态与裁决一致」本身（旧形态断言已在各自既有用例里同步改写）。
+ */
+describe('问题1 偏差修正批：7 项走样补齐', () => {
+  it('项1（aj04）：长表格表头 = flex 行 + 6px gutter 占位格（表头底边收口；旧 pr-[6px] 补偿条零残留）', async () => {
+    const { renderMarkdown } = await import('@/utils/markdown')
+    const { html } = renderMarkdown('| 配置编码 | 说明 |\n| --- | --- |\n| PROJ_PARAM | 项目参数 |\n', false)
+    // 表头行容器 = flex 行（背景与表头同色）
+    expect(html).toMatch(/<div class="md-table-hd flex bg-\[#f6f7f9\]">/)
+    // 表头区 = 可横滚表头区（overflow-hidden 供程序化 scrollLeft）
+    expect(html).toMatch(/<div class="md-table-hdscroll flex-1 min-w-0 overflow-hidden">/)
+    // gutter 占位格 = 6px 宽 + 表头同色背景 + 下边框（demo aj04 改后样张类名 + 本仓 border-solid 复位）
+    expect(html).toMatch(/<div class="md-table-gutter flex-none w-\[6px\] bg-\[#f6f7f9\] border-0 border-b border-solid border-\[#e3e6ea\]"><\/div>/)
+    // 两格次序：表头区在前、占位格在后（表头底边连续到最右）
+    expect(html.indexOf('md-table-hdscroll')).toBeLessThan(html.indexOf('md-table-gutter'))
+    // 旧 v7.6 形态（内边距补偿条）零残留：markdown.ts 源码与产物双面
+    expect(html).not.toContain('pr-[6px]')
+    // 源码面：旧类常量（内边距补偿条）零残留、新三格常量在位（注释里的历史说明不算）
+    const { readFileSync } = await import('node:fs')
+    const source = readFileSync('src/utils/markdown.ts', 'utf8')
+    expect(source).not.toContain("md-table-hd overflow-hidden pr-[6px]")
+    expect(source).toContain("const TABLE_HD_CLASS = 'md-table-hd flex bg-[#f6f7f9]'")
+    expect(source).toContain('const TABLE_GUTTER_CLASS =')
+    expect(source).toContain('const TABLE_HD_SCROLL_CLASS =')
+    // 横滚联动改指表头区（可程序化 scrollLeft 的容器换了，选择器必须跟着换）
+    const template = (await import('@/components/AiPanel/AiPanel.vue?raw')).default
+    expect(template).toContain("querySelector('.md-table-hdscroll')")
+  })
+
+  it('项2（aj11）：长消息折叠钮 = 11.5px 灰字（hover 蓝）· 底部左对齐 · 距内容 8px · 「展开 ▾ / 收起 ▴」', async () => {
+    const msg = buildMessage([{ kind: 'text', seg: 0, text: '很长的用户提问'.repeat(60), streaming: false }])
+    msg.id = 'u-aj11'
+    msg.role = 'user'
+    const store = useAiStore()
+    store.messages = [msg]
+    store.historyLoaded = true
+    const { default: AiPanel } = await import('@/components/AiPanel/AiPanel.vue')
+    const wrapper = mount(AiPanel, { global: { stubs } })
+    const body = wrapper.find('[data-testid="msg-bubble-u-aj11"] .md-body').element as HTMLElement
+    Object.defineProperty(body, 'scrollHeight', { value: 600, configurable: true })
+    await wrapper.vm.$nextTick()
+    // 读数落地后再取钮（measure 在 onMounted 的 nextTick 里跑，注高须早于它）
+    await wrapper.vm.$nextTick()
+    const btn = wrapper.find('[data-testid="user-msg-more-u-aj11"]')
+    expect(btn.exists()).toBe(true)
+    expect(btn.text()).toBe('展开 ▾')
+    expect(btn.classes()).toEqual(expect.arrayContaining([
+      'mt-[8px]', 'block', 'text-left', 'text-[11.5px]', 'text-[#57606a]', 'hover:text-[#2563eb]'
+    ]))
+    wrapper.unmount()
+  })
+
+  it('项3：工具卡头重名收敛 —— 摘要以工具名打头即剥前缀（剥后为空/只剩状态词则不渲摘要位）', async () => {
+    const wrapper = await mountPanel([
+      buildMessage([
+        // 无参数映射族：摘要 = 工具名本身 ⇒ 剥后为空、摘要位不渲（卡头只读作一次工具名）
+        { kind: 'tool', seg: 0, toolCallId: 'c1', name: 'list_config_defs', kind2: 'BACKEND', status: 'succeeded', args: '{}', result: 'ok', requiresAction: false },
+        { kind: 'tool', seg: 1, toolCallId: 'c2', name: 'list_tasks', kind2: 'BACKEND', status: 'succeeded', args: '{}', result: 'ok', requiresAction: false },
+        { kind: 'tool', seg: 2, toolCallId: 'c3', name: 'get_workspace_state', kind2: 'BACKEND', status: 'succeeded', args: '{}', result: 'ok', requiresAction: false },
+        // 参数族：剥掉同名前缀后只剩参数信息（信息不丢）
+        { kind: 'tool', seg: 3, toolCallId: 'c4', name: 'start_export', kind2: 'BACKEND', status: 'succeeded', args: '{"taskId":12}', result: 'ok', requiresAction: false },
+        { kind: 'tool', seg: 4, toolCallId: 'c5', name: 'get_row_count', kind2: 'BACKEND', status: 'succeeded', args: '{"defCode":"CURRENCY"}', result: 'ok', requiresAction: false }
+      ])
+    ])
+    const summary = (id: string) => wrapper.find(`[data-testid="tool-summary-${id}"]`).text()
+    expect(summary('c1')).toBe('')
+    expect(summary('c2')).toBe('')
+    expect(summary('c3')).toBe('')
+    expect(summary('c4')).toBe('（任务 #12）')
+    expect(summary('c5')).toBe('（CURRENCY）')
+    // 卡头整行不再出现「工具名 + 同义摘要」两段：每张卡头里工具名恰一次
+    const head = wrapper.find('[data-testid="block-toggle-a-1:c4"]')
+    expect(head.text().split('启动导出作业').length - 1).toBe(1)
+    expect(head.text()).toContain('（任务 #12）')
+    wrapper.unmount()
+  })
+
+  it('项4：只读卡 / 门卡字段表键列自适应内容宽（min-w-0 + 40% 上限 + truncate + title），值列不动', async () => {
+    const msg = buildMessage([
+      { kind: 'text', seg: 0, text: '', streaming: false },
+      {
+        kind: 'tool', seg: 1, toolCallId: 'p1', name: 'start_publish', kind2: 'CONFIRM',
+        status: 'succeeded', args: '{"taskId":3,"notifyOnFail":true}', requiresAction: false,
+        decision: 'approved', decidedAt: 1_700_000_000_000
+      },
+      {
+        kind: 'tool', seg: 2, toolCallId: 'g1', name: 'start_export', kind2: 'CONFIRM',
+        status: 'pending', args: '{"notifyOnFail":true,"taskId":4}', timeoutSeconds: 120, requiresAction: true
+      }
+    ])
+    const wrapper = await mountPanel([msg])
+    const readOnlyRow = wrapper.find('[data-testid="ro-body-p1"] div > div')
+    const readOnlyKey = readOnlyRow.findAll('span')[0]!
+    expect(readOnlyKey.classes()).toEqual(expect.arrayContaining(['flex-[0_1_auto]', 'min-w-0', 'max-w-[40%]', 'truncate']))
+    expect(readOnlyKey.classes()).not.toContain('flex-[0_0_72px]')
+    expect(readOnlyKey.classes()).not.toContain('break-words')
+    expect(readOnlyKey.attributes('title')).toBe(readOnlyKey.text()) // 长键截断后悬浮看全
+    expect(readOnlyRow.findAll('span')[1]!.classes()).toEqual(expect.arrayContaining(['flex-1', 'min-w-0', 'break-words']))
+    // 门卡字段表同族（原 58px 定宽 + break-words）
+    const gateRow = wrapper.find('[data-testid="gate-rows"] div')
+    const gateKey = gateRow.findAll('span')[0]!
+    expect(gateKey.classes()).toEqual(expect.arrayContaining(['flex-[0_1_auto]', 'min-w-0', 'max-w-[40%]', 'truncate']))
+    expect(gateKey.classes()).not.toContain('flex-[0_0_58px]')
+    expect(gateKey.classes()).not.toContain('break-words')
+    expect(gateKey.attributes('title')).toBe(gateKey.text())
+    wrapper.unmount()
+  })
+
+  it('项5：只读卡徽标补限宽截断（max-w-[104px] truncate，与工具卡状态胶囊同口径）+ title 全称', async () => {
+    const msg = buildMessage([
+      {
+        kind: 'tool', seg: 0, toolCallId: 'u1', name: 'start_publish', kind2: 'CONFIRM',
+        status: 'unknown', args: '{"taskId":3}', requiresAction: false
+      }
+    ])
+    const wrapper = await mountPanel([msg])
+    const badge = wrapper.find('[data-testid="ro-badge-u1"]')
+    expect(badge.text()).toBe('结局未知（未确认成功/失败）')
+    expect(badge.classes()).toEqual(expect.arrayContaining(['flex-none', 'max-w-[104px]', 'truncate']))
+    expect(badge.attributes('title')).toBe('结局未知（未确认成功/失败）')
+    wrapper.unmount()
+  })
+
+  it('项6（aj10）：消息下外边距按上一条发送者 —— 同角色相邻 10px / 换人 18px', async () => {
+    const mk = (id: string, role: ChatMessage['role']): ChatMessage => {
+      const message = buildMessage([{ kind: 'text', seg: 0, text: `${id} 正文`, streaming: false }])
+      message.id = id
+      message.role = role
+      return message
+    }
+    // 序列：user(user 相邻) assistant(assistant 相邻) user
+    const wrapper = await mountPanel([
+      mk('g0', 'user'), mk('g1', 'user'), mk('g2', 'assistant'), mk('g3', 'assistant'), mk('g4', 'user')
+    ])
+    const gap = (id: string) => (wrapper.find(`[data-testid="msg-ops-${id}"]`).element as HTMLElement).className
+    expect(gap('g0')).toContain('mb-[18px]') // 首条无上一条 ⇒ 换人档
+    expect(gap('g1')).toContain('mb-[10px]') // 同角色相邻 ⇒ 紧凑档
+    expect(gap('g2')).toContain('mb-[18px]') // 换人
+    expect(gap('g3')).toContain('mb-[10px]') // 同角色相邻
+    expect(gap('g4')).toContain('mb-[18px]') // 换人
+    expect(gap('g4')).not.toContain('mb-[10px]')
+    wrapper.unmount()
+  })
+
+  it('项7（aj14d）：流式块 75ms 防抖（首帧立即 + 窗口内合并 + 静默满窗落地）+ 块级稳定 key 跨闭合不变', async () => {
+    const mod = await import('@/utils/markdown')
+    expect(mod.STREAM_DEBOUNCE_MS).toBe(75)
+    // ③ 块级稳定 key = 块序号（本次渲染的出现序）+ 语言；流式未闭合阶段与闭合之后同值
+    const openFence = mod.renderMarkdown('```js\nconst a = 1', true, 'k-0').html
+    const closedFence = mod.renderMarkdown('```js\nconst a = 1\n```\n\n完成', false, 'k-0').html
+    expect(openFence).toContain('data-fence-key="f1-js"')
+    expect(closedFence).toContain('data-fence-key="f1-js"') // 尾块被剥 language class ⇒ key 仍不变
+    const multi = mod.renderMarkdown('```ts\nconst x = 1\n```\n\n```js\nconst y = 2\n```\n', false).html
+    expect(multi).toContain('data-fence-key="f1-ts"')
+    expect(multi).toContain('data-fence-key="f2-js"')
+    // mermaid 围栏同源带 key（面板 hydrate 按该 key 绑槽位，位置下标只作兜底）
+    const mermaidFence = mod.renderMarkdown('```mermaid\nflowchart TD\nA-->B\n```\n', false).html
+    expect(mermaidFence).toContain('data-fence-key="f1-mermaid"')
+    // ② 防抖：首帧立即落地；窗口内的增量合并为一次（沿用上一帧 HTML）
+    mod.resetStreamDebounce()
+    const flushes: number[] = []
+    mod.setStreamFlushHandler(() => flushes.push(1))
+    const first = mod.renderMarkdown('第一段', true, 'k-deb')
+    expect(first.html).toContain('第一段')
+    const merged = mod.renderMarkdown('第一段 + 第二段', true, 'k-deb')
+    expect(merged.html).toBe(first.html) // 同一份结果：窗口内未重绘
+    expect(merged.html).not.toContain('第二段')
+    await new Promise((resolve) => setTimeout(resolve, mod.STREAM_DEBOUNCE_MS + 25))
+    expect(flushes.length).toBeGreaterThan(0) // 静默满窗 ⇒ flush 回调落地（上游停吐也不丢末帧）
+    const landed = mod.renderMarkdown('第一段 + 第二段', true, 'k-deb')
+    expect(landed.html).toContain('第二段') // 窗口外：真渲染
+    // 窗口外首帧对照：不同块互不影响（防抖记账按块 key 独立）
+    expect(mod.renderMarkdown('另一块', true, 'k-other').html).toContain('另一块')
+    mod.setStreamFlushHandler(null)
+    mod.resetStreamDebounce()
+
+    // 组件装配面：面板挂载即注册 flush 回调；75ms 窗口内的增量不重绘（DOM 不进中间态），
+    // 静默满窗后一次落地到最新增量（内容不丢）。时钟钉住 ⇒ 窗口判据确定性（不靠机器快慢）。
+    const streamMsg = buildMessage([{ kind: 'text', seg: 0, text: '首帧输出', streaming: true }], null, true)
+    streamMsg.id = 's-deb'
+    const before = streamFlush.handlers.length
+    const nowSpy = vi.spyOn(performance, 'now').mockReturnValue(1_000)
+    try {
+      const wrapper = await mountPanel([streamMsg])
+      expect(streamFlush.handlers.length).toBeGreaterThan(before)
+      const bubble = () => wrapper.find('[data-testid="msg-bubble-s-deb"]')
+      expect(bubble().text()).toContain('首帧输出')
+      // 经 store 的响应式代理写回增量（直接改本地对象不触发响应式依赖）
+      const live = useAiStore().messages[0]!.parts[0]!
+      if (live.kind === 'text') {
+        live.text = '首帧输出 + 增量'
+      }
+      await wrapper.vm.$nextTick()
+      expect(bubble().text()).toContain('首帧输出') // 窗口内：沿用上一帧（不重绘到中间态）
+      expect(bubble().text()).not.toContain('增量')
+      nowSpy.mockReturnValue(2_000) // 推过 75ms 窗口；flush 回调落地
+      await new Promise((resolve) => setTimeout(resolve, mod.STREAM_DEBOUNCE_MS + 50))
+      await wrapper.vm.$nextTick()
+      expect(bubble().text()).toContain('首帧输出 + 增量')
+      wrapper.unmount()
+    } finally {
+      nowSpy.mockRestore()
+    }
   })
 })

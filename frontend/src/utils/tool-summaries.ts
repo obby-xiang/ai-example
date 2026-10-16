@@ -15,8 +15,10 @@
 
 import type { ToolPart, ToolRunStatus } from '@/types/ai'
 
-/** 状态词表（9 态，与 AiPanel toolStatusLabel 同口径的简短版，供兜底行）。 */
-const STATUS_WORDS: Record<ToolRunStatus, string> = {
+/** 状态词表（9 态，与 AiPanel toolStatusLabel 同口径的简短版，供兜底行）。
+ *  问题1 偏差修正批项 3：导出给面板的摘要去重判据用 —— 无映射工具的兜底摘要按前缀剥掉工具名后
+ *  只剩状态词，而状态词已由同屏的状态胶囊承担 ⇒ 摘要位不再重复渲一次。 */
+export const TOOL_SUMMARY_STATUS_WORDS: Record<ToolRunStatus, string> = {
   pending: '等待确认',
   running: '调用中',
   succeeded: '已完成',
@@ -60,6 +62,13 @@ function toolArgsOf(part: ToolPart): ToolArgs {
 /**
  * 工具名 → 摘要模板。返回 null = 无静态映射（走兜底）。
  * 每个模板一行自然语言，参数缺失时省略该片段（不臆造）。
+ *
+ * 问题1 偏差修正批项 3（工具卡头重名）：卡头 mono 槽渲**工具中文名**（`TOOL_LABELS`），而模板的
+ * 首词常与它同义 ⇒ 卡头读作「启动导出作业　启动导出作业（任务 #12）」两段同义相邻。
+ * 口径统一为：**模板以工具中文名打头**，接在名字后的是「参数信息」；渲染侧
+ * （`AiPanel.toolSummaryOrNull`）按前缀剥掉名字 —— 剥后为空则不渲摘要位（只留工具名一行）。
+ * 本文件里打头的措辞因此逐条改写成自己标签（如 `列出任务` / `读取工作区状态` / `预估数据行数`），
+ * 名字不再由模板重复承担（demo 样张里 `.tname` 渲英文工具名、`.tsum` 渲参数摘要，同一分工）。
  */
 function summaryFor(name: string, args: ToolArgs): string | null {
   const taskId = num(args, 'taskId')
@@ -67,24 +76,24 @@ function summaryFor(name: string, args: ToolArgs): string | null {
   switch (name) {
     case 'list_config_defs': {
       const level = str(args, 'level')
-      return level ? `返回 ${level} 层配置定义清单` : '返回全部配置定义清单'
+      return level ? `列出配置定义（${level} 层）` : '列出配置定义'
     }
     case 'get_config_def': {
       const code = str(args, 'code')
-      return code ? `读取配置定义 ${code} 的完整字段` : '读取单个配置定义的完整字段'
+      return code ? `读取配置定义 ${code} 的完整字段` : '读取配置定义'
     }
     case 'list_tasks':
-      return '列出最近的任务'
+      return '列出任务'
     case 'get_workspace_state':
-      return '读取工作区状态快照'
+      return '读取工作区状态'
     case 'check_job_status': {
       const jobId = num(args, 'jobId')
-      return jobId ? `查询作业 #${jobId} 的状态与进度` : '查询作业状态与进度'
+      return jobId ? `查询作业状态（作业 #${jobId}）` : '查询作业状态'
     }
     case 'get_row_count': {
       const defCode = str(args, 'defCode')
       const scope = str(args, 'scopeType')
-      return `预估${defCode ? ` ${defCode} ` : ' '}数据行数${scope ? `（${scope}）` : ''}`
+      return `预估数据行数${defCode ? `（${defCode}${scope ? ` · ${scope}` : ''}）` : scope ? `（${scope}）` : ''}`
     }
     case 'create_task': {
       const label = taskTypeLabel(args)
@@ -102,7 +111,7 @@ function summaryFor(name: string, args: ToolArgs): string | null {
     case 'navigate_to':
     case 'open_page': {
       const page = str(args, 'page')
-      return page ? `跳转到页面 ${page}` : '跳转页面'
+      return page ? `跳转页面（${page}）` : '跳转页面'
     }
     case 'restore_task':
       return taskId ? `恢复任务 #${taskId}` : '恢复任务'
@@ -167,5 +176,5 @@ export function toolSummary(part: ToolPart): string {
   if (mapped) {
     return mapped
   }
-  return `${part.name} · ${STATUS_WORDS[part.status] ?? part.status}`
+  return `${part.name} · ${TOOL_SUMMARY_STATUS_WORDS[part.status] ?? part.status}`
 }

@@ -8,21 +8,24 @@
  *   blockquote/em/strong/del/a/hr/br/img；span 仅 class="hljs-*"（tip 气泡/箭头按标记类整条放行）、
  *   code 仅 class="language-*"（+hljs）；
  *   figure/figcaption/button（代码块图容器，button 仅 type="button"）、div 仅表格双区 wrapper
- *   （R-165 S5a：md-table-wrap / md-table-hd / md-table-bd 三区，见 RENDER_MARKER_CLASSES）；
+ *   （R-165 S5a：md-table-wrap / md-table-hd / md-table-bd 三区 + 问题1 偏差修正批 aj04：
+ *   md-table-hdscroll / md-table-gutter 两格，见 RENDER_MARKER_CLASSES）；
  *   svg/path/rect/polyline 仅复制图标钮的自绘图标（R-165 S5a，属性收窄为几何集合）；
  *   mermaid 输出 SVG 走独立 SVG profile 净化。属性仅 a.href
  *   （DOMPurify 默认协议过滤）/class/src/alt 与图标几何集合；禁 style / on* 事件 / iframe / script / 表单控件。
  * - 流式策略（§三.2 + m1）：hljs 高亮 memo（已完成围栏不重解析高亮 = 块级 memo 的落点）；
  *   未闭合围栏（流式尾块）渲染为纯文本规避闪烁，闭合后二次渲染才高亮/进 mermaid；
  *   长文 >10k 字符降级（关高亮与 mermaid，结构照渲）；单次渲染超耗时预算（24ms）后续渲染同降级。
- * - **流式代码块防抖口径（R-165 S5c 登记，本批不改渲染逻辑、实现另立小批）**：
+ * - **流式代码块防抖口径（问题1 偏差修正批 aj14d 落地：立即渲染 + 75ms 防抖 + 块级稳定 key）**：
  *   ① **未闭合 fence 立即渲染**（纯文本、不高亮、不折叠）—— 防抖目标是「高亮闪烁」而非「结构出现」，
  *      让未闭合块延后出现只会让流式观感变空；
- *   ② 闭合后的**高亮/进 mermaid 二次渲染加 75ms 防抖**（闭合瞬间起算，75ms 内若又收到增量则丢弃该次
- *      二次渲染，静默满 75ms 才一次性落地高亮/mermaid）—— 上游常在闭合后立刻继续吐下一块，
- *      防抖把「闭合→高亮→又变文本→再高亮」的抖动收敛成一次；
- *   ③ **稳定 key**：围栏按首次出现序分配序号（现有 `mermaid` 列表的 `index` 同源），闭合前后序号不变，
- *      避免 Vue 列表复用把「代码块 → mermaid 卡」的替换打到错误的兄弟节点上。
+ *   ② **75ms 防抖**：同一正文块（`blockKey`）在窗口内的连续增量合并为一次重绘（`renderMarkdown`
+ *      的准入 + 静默满窗后的 flush 回调），把逐 token 重排压到 ≤14 次/秒 —— 块的**首次**渲染恒立即
+ *      落地（不延后首帧），窗口外的增量也恒立即落地；窗口内沿用上一帧结果（调用方据 flush 回调重入）；
+ *   ③ **块级稳定 key**：每个围栏按「**块序号（本次渲染的出现序）+ 语言**」生成
+ *      `data-fence-key="f{n}-{lang}"`（fence 规则内自增，见 `nextFenceKey`），
+ *      流式未闭合阶段与闭合之后序号/语言均不变 ⇒ 渲染产物带稳定身份，
+ *      mermaid 卡按该 key 绑定槽位（不再靠位置下标），「代码块 → mermaid 卡」的替换不会打到别的块上。
  * - mermaid（§三.7）：securityLevel:'strict' + htmlLabels:false + suppressErrorRendering:true，
  *   渲染产物 SVG 过 DOMPurify SVG profile；失败（render error/超时 3s）保留源码块。
  */
@@ -58,12 +61,24 @@ const ALLOWED_TAGS = [
 const ALLOWED_ATTR = [
   'class', 'href', 'src', 'alt', 'type',
   // svg 图标几何属性（复制图标：rect 的 x/y/width/height/rx、path 的 d、polyline 的 points、svg 的 viewBox）
-  'viewBox', 'd', 'points', 'x', 'y', 'width', 'height', 'rx'
+  'viewBox', 'd', 'points', 'x', 'y', 'width', 'height', 'rx',
+  // 问题1 偏差修正批 aj14d ③：围栏块稳定身份（渲染层注入，`f{序号}-{语言}`）；显式单条放行
+  // —— `ALLOW_DATA_ATTR: false` 不变（任意 data-* 仍被剥），此处只开这一枚惰性标记属性。
+  'data-fence-key'
 ]
 
 /** 表格双区三区标记类（R-165 S5a，渲染层 wrapTables 生成）——hook 只认这三个标记类，
- *  div 上随行的 Tailwind 工具类同 div 保留（表格版式全在工具类里，不能被净化剥掉）。 */
-const TABLE_DIV_CLASSES = new Set(['md-table-wrap', 'md-table-hd', 'md-table-bd'])
+ *  div 上随行的 Tailwind 工具类同 div 保留（表格版式全在工具类里，不能被净化剥掉）。
+ *  问题1 偏差修正批（aj04）：表头行由「单容器 + pr-[6px] 补偿条」改为
+ *  「flex 行 = 可横滚表头区（md-table-hdscroll）+ 6px gutter 占位格（md-table-gutter）」
+ *  ⇒ 两个新格同样必须是标记类，否则其工具类会被 hook 剥掉（版式塌）。 */
+const TABLE_DIV_CLASSES = new Set([
+  'md-table-wrap',
+  'md-table-hd',
+  'md-table-hdscroll',
+  'md-table-gutter',
+  'md-table-bd'
+])
 /** R-165 S5c：`<code>`/`<pre>` 的排版工具类标记（渲染层注入，见 MD_CODE_INLINE_CLASS /
  *  MD_FENCE_PRE_CLASS）——hook 命中即整条保留（否则会被下面「只留 language- 与 hljs 前缀」的收窄剥掉）。
  *  注：class 属性在 span/code/pre/div 之外的标签上本就整条放行（仅这几类做收窄），
@@ -230,11 +245,14 @@ function applyTypographyRules(instance: MarkdownItInstance): void {
   wrap('th_open', MD_TH_CLASS)
   wrap('td_open', MD_TD_CLASS)
   wrap('code_inline', MD_CODE_INLINE_CLASS)
-  // fence：默认规则把语言 class 挂在 <code> 上、<pre> 是裸标签 ⇒ 这里给 <pre> 补上排版类。
+  // fence：默认规则把语言 class 挂在 <code> 上、<pre> 是裸标签 ⇒ 这里给 <pre> 补上排版类，
+  // 并盖稳定身份（aj14d ③：`data-fence-key="f{序号}-{语言}"`，序号本次渲染内自增 = 围栏出现序）。
   const fence = rules.fence
   rules.fence = (tokens, idx, options, env, self) => {
     const out = fence ? fence(tokens, idx, options, env, self) : ''
-    return out.startsWith('<pre>') ? `<pre class="${escapeHtml(MD_FENCE_PRE_CLASS)}">${out.slice(5)}` : out
+    return out.startsWith('<pre>')
+      ? `<pre class="${escapeHtml(MD_FENCE_PRE_CLASS)}" data-fence-key="${escapeHtml(nextFenceKey(tokens[idx].info))}">${out.slice(5)}`
+      : out
   }
 }
 
@@ -329,12 +347,52 @@ export function sanitizeSvg(html: string): string {
 /** 渲染结果：净化后 HTML + 待渲染 mermaid 源码块（闭合围栏才出现）。 */
 export interface MarkdownRender {
   html: string
-  /** 闭合 mermaid 围栏（降流/降级期为空数组，保持源码块）。 */
-  mermaid: Array<{ index: number; source: string }>
+  /** 闭合 mermaid 围栏（降流/降级期为空数组，保持源码块）；`key` = 稳定身份（aj14d ③）。 */
+  mermaid: Array<{ index: number; key: string; source: string }>
 }
 
-/** R-165 S5c：`<pre>` 现带排版工具类（见 MD_FENCE_PRE_CLASS）⇒ 属性段不再可为空。 */
-const mermaidIndexRe = /<pre[^>]*><code class="language-mermaid">([\s\S]*?)<\/code><\/pre>/g
+/* ---------- 问题1 偏差修正批 aj14d ②：流式块重绘防抖（75ms 合并一次） ---------- */
+
+/** 防抖窗口（ms）：同一正文块的连续增量在窗口内合并为一次重绘（≈14 次/秒上限）。 */
+export const STREAM_DEBOUNCE_MS = 75
+/** 防抖记账上限（块数）——防长会话下无限增长（与高亮 memo 同族的 FIFO 淘汰）。 */
+const STREAM_RENDER_MAX = 64
+
+/** 每块的防抖记账：上次真渲染的文本 / 时刻 / 结果。 */
+const streamRenders = new Map<string, { text: string; renderedAt: number; render: MarkdownRender }>()
+
+/** flush 回调（调用方注册：窗口静默满后重入渲染一次）；null = 无消费者（测试/纯函数场景）。 */
+let streamFlushHandler: (() => void) | null = null
+const streamFlushTimers = new Set<ReturnType<typeof setTimeout>>()
+
+/**
+ * 注册「防抖窗口静默满」回调。窗口内被合并掉的增量靠它落地 —— 否则上游停吐（未闭合围栏中途停顿）
+ * 时最后一帧内容会一直不现身。调用方在卸载时传 null 注销。
+ */
+export function setStreamFlushHandler(handler: (() => void) | null): void {
+  streamFlushHandler = handler
+}
+
+function scheduleStreamFlush(delay: number): void {
+  const timer = setTimeout(() => {
+    streamFlushTimers.delete(timer)
+    streamFlushHandler?.()
+  }, Math.max(1, delay))
+  streamFlushTimers.add(timer)
+}
+
+/** 清空防抖记账与挂起定时器（测试用；不触发 flush）。 */
+export function resetStreamDebounce(): void {
+  for (const timer of streamFlushTimers) {
+    clearTimeout(timer)
+  }
+  streamFlushTimers.clear()
+  streamRenders.clear()
+}
+
+/** R-165 S5c：`<pre>` 现带排版工具类（见 MD_FENCE_PRE_CLASS）⇒ 属性段不再可为空。
+ *  aj14d ③：属性段另带 `data-fence-key`（稳定身份），登记 mermaid 时一并取用。 */
+const mermaidIndexRe = /<pre([^>]*)><code class="language-mermaid">([\s\S]*?)<\/code><\/pre>/g
 
 /* ---------- R-165 S5a：共享配方常量（demo v7.7 `.icbtn` / `.tip` / 6px 滚动条口径逐条照搬） ---------- */
 
@@ -359,12 +417,26 @@ export const COPY_ICON_SVGS =
  *  v7 走 config plugin 的 addBase，本仓禁改 tailwind.config.js ⇒ 改任意变体类写在模板/渲染层类串里。 */
 export const SCROLLBAR_CLASS = '[&::-webkit-scrollbar]:w-[6px] [&::-webkit-scrollbar]:h-[6px] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[#1f2328]/30 [&::-webkit-scrollbar-thumb:hover]:bg-[#1f2328]/50 [&::-webkit-scrollbar-track]:bg-transparent'
 
-/** 表格双区（R-165 S5a，v7.6/v7.7 修法）：表头区不滚（programmatic scrollLeft 由 JS 同步）+
- *  表体区 `max-h-[320px]` 内滚（6px 圆角滚动条只贴表体右缘）。两表同 `w-full table-fixed`
- *  （等分列宽 ⇒ 两表逐列对齐，`table-fixed` 的适用边界见 v7.6 口径登记：宽表/内容驱动列宽需
- *  JS 列宽同步，本场景不做）。表头区 `pr-[6px]` 抵消表体区竖滚动条占位，保证两区可视宽相等。 */
+/** 表格双区（R-165 S5a 双区骨架 → 问题1 偏差修正批 aj04 改 v7.8 终裁右栏）：表头区不滚
+ *  （programmatic scrollLeft 由 JS 同步）+ 表体区 `max-h-[320px]` 内滚（6px 圆角滚动条只贴表体右缘）。
+ *  两表同 `w-full table-fixed`（等分列宽 ⇒ 两表逐列对齐，`table-fixed` 的适用边界见 v7.6 口径登记：
+ *  宽表/内容驱动列宽需 JS 列宽同步，本场景不做）。
+ *
+ *  aj04 改后（v7.8 终裁）：表头行 = `flex` 行 = [可横滚表头区 `md-table-hdscroll`] + [6px gutter 占位格]。
+ *  原 v7.6 口径用 `pr-[6px]` 让表头内容给滚动条让位 —— 那 6px 是**内边距**：没有单元格边界、
+ *  不参与表头行边框绘制 ⇒ 窄表档下表头底边止步于内容盒右缘，右端 6px 只剩底色（实机 =「一截断了头的
+ *  竖条挂在表头右端」）。改成**真实占位格**后，表头下边框由这一格补齐（背景与表头同色、下边框对齐），
+ *  表头底边连续收口、滚动条只出现在表体右缘；宽度 6px 恰等于表体 `[scrollbar-gutter:stable]`
+ *  预留的竖滚动条宽度 ⇒ 两表可视宽相等、列边界严格对齐（短表不溢出时亦同，列宽不跳动）。 */
 const TABLE_WRAP_CLASS = 'md-table-wrap mb-3.5 w-full overflow-hidden rounded-[8px] border border-solid border-[#eef0f3]'
-const TABLE_HD_CLASS = 'md-table-hd overflow-hidden pr-[6px] bg-[#f6f7f9]'
+/** 表头行容器：`flex` 行（背景与表头同色，承载「表头区 + gutter 格」两格）。 */
+const TABLE_HD_CLASS = 'md-table-hd flex bg-[#f6f7f9]'
+/** 表头区（可程序化 scrollLeft 的容器，仍 `overflow-hidden`）：`flex-1 min-w-0` 吃掉除 gutter 外的全宽。 */
+const TABLE_HD_SCROLL_CLASS = 'md-table-hdscroll flex-1 min-w-0 overflow-hidden'
+/** gutter 占位格（demo aj04 改后样张类名逐字 + 本仓 preflight 关闭所需的两条复位：
+ *  `border-0` 归零其余三边、`border-solid` 给 `border-b` 补边框样式 —— demo 靠 preflight 的
+ *  全局 `border-style: solid`，本仓 `corePlugins.preflight=false`，缺它则下边框恒 none/不可见）。 */
+const TABLE_GUTTER_CLASS = 'md-table-gutter flex-none w-[6px] bg-[#f6f7f9] border-0 border-b border-solid border-[#e3e6ea]'
 const TABLE_BD_CLASS = `md-table-bd max-h-[320px] overflow-auto [scrollbar-gutter:stable] ${SCROLLBAR_CLASS}`
 /** 两区共用表体配方：等分列 + 表头 nowrap 截断（th 的 nowrap 由 MD_TH_CLASS 注入，固定布局下
  *  必须自解 `overflow:hidden + text-ellipsis` 才不会溢出压到邻列）。 */
@@ -404,18 +476,19 @@ function tableMinWidthClass(headHtml: string): string {
  * 由 mermaid 卡接管）。复制钮由「文字钮」改 v7 图标钮（两枚同尺寸叠放 svg + tip 气泡，
  * 成功态换绿勾，见 COPY_ICON_BTN_CLASS）。
  */
-const fenceFigureRe = /<pre( class="[^"]*")?><code class="language-(?!mermaid)([^"]*)">([\s\S]*?)<\/code><\/pre>/g
+const fenceFigureRe = /<pre([^>]*)><code class="language-(?!mermaid)([^"]*)">([\s\S]*?)<\/code><\/pre>/g
 
 function wrapFenceFigures(html: string): string {
   return html.replace(
     fenceFigureRe,
-    (_m, preCls: string | undefined, lang: string, code: string) =>
-      `<figure class="${FIGURE_CODE_CLASS}"><figcaption class="${FIGCAPTION_CLASS}"><span class="${FIG_LANG_CLASS}">${escapeHtml(lang)}</span>` +
+    (_m, preAttrs: string, lang: string, code: string) =>
+      // aj14d ③：稳定身份随容器改写原样带到 figure 上（同一块的 key 不因「裸 pre → 图容器」而变）
+      `<figure class="${FIGURE_CODE_CLASS}"${fenceKeyAttr(preAttrs)}><figcaption class="${FIGCAPTION_CLASS}"><span class="${FIG_LANG_CLASS}">${escapeHtml(lang)}</span>` +
       `<span class="${FIG_HLIB_CLASS}">highlight.js</span>` +
       `<button type="button" class="${COPY_ICON_BTN_CLASS}" aria-label="复制代码">${COPY_ICON_SVGS}` +
       `<span class="tip ${TIP_CLASS}">复制代码<span class="tip-arrow ${TIP_ARROW_CLASS}" aria-hidden="true"></span></span>` +
       `</button></figcaption>` +
-      `<pre${preCls ?? ''}><code class="language-${lang}">${code}</code></pre></figure>`
+      `<pre${preAttrs}><code class="language-${lang}">${code}</code></pre></figure>`
   )
 }
 
@@ -428,7 +501,10 @@ function wrapFenceFigures(html: string): string {
  * 表体区横滚时由 AiPanel 同步表头区 `scrollLeft`（scroll 事件代理）。
  *
  * 边界（终裁给定）：行数在渲染期不可知 ⇒ 一律套双区结构；表体不超 320px 时无滚动条、
- * 表头区 `pr-[6px]` 与 `[scrollbar-gutter:stable]` 同步抵消 ⇒ 与单区形态视觉一致。
+ *  gutter 格与 `[scrollbar-gutter:stable]` 同步抵消 ⇒ 与单区形态视觉一致（列宽不跳动）。
+ *
+ *  问题1 偏差修正批 aj04：表头行改「flex 行 = 表头区 + gutter 占位格」（v7.8 终裁右栏），
+ *  不再是「单容器 + `pr-[6px]` 补偿条」。
  */
 function wrapTables(html: string): string {
   return html.replace(/<table>([\s\S]*?)<\/table>/g, (_m, inner: string) => {
@@ -438,13 +514,36 @@ function wrapTables(html: string): string {
     const cls = `${TABLE_CLASS} ${tableMinWidthClass(head)}`
     const headZone = head === ''
       ? ''
-      : `<div class="${TABLE_HD_CLASS}"><table class="${cls}">${head}</table></div>`
+      : `<div class="${TABLE_HD_CLASS}"><div class="${TABLE_HD_SCROLL_CLASS}"><table class="${cls}">${head}</table></div>` +
+        `<div class="${TABLE_GUTTER_CLASS}"></div></div>`
     return (
       `<div class="${TABLE_WRAP_CLASS}">${headZone}` +
       `<div class="${TABLE_BD_CLASS}"><table class="${cls}">${body}</table></div>` +
       `</div>`
     )
   })
+}
+
+/**
+ * 问题1 偏差修正批 aj14d ③：围栏块稳定身份 —— 每个围栏按「**块序号（出现序）+ 语言**」生成
+ * `data-fence-key="f{n}-{lang}"`，序号在一次渲染内由 fence 规则自增（= 围栏 token 的出现序，
+ * 与产物文档序恒等；缩进/引用块里的围栏同样计入，不靠源码行扫描猜）。
+ * 流式未闭合阶段与闭合之后同一块的序号/语言都不变（语言取 token 的 info 首词 —— 尾块被剥
+ * `language-*` class 后仍拿得到）⇒ 「代码块 → mermaid 卡」的替换按 key 绑定，不靠位置下标。
+ */
+let fenceRenderSeq = 0
+
+/** 当前围栏块的稳定身份（fence 规则内取值；`renderNow` 每次渲染前归零）。 */
+function nextFenceKey(info: string | undefined): string {
+  fenceRenderSeq += 1
+  const lang = (info ?? '').trim().split(/\s+/)[0] ?? ''
+  return `f${fenceRenderSeq}-${lang}`
+}
+
+/** 从属性串里取稳定身份（图容器改写 / mermaid 登记时沿用原始 pre 上的那一枚）。 */
+function fenceKeyAttr(attrs: string): string {
+  const key = /data-fence-key="([^"]*)"/.exec(attrs)?.[1] ?? ''
+  return key === '' ? '' : ` data-fence-key="${escapeHtml(key)}"`
 }
 
 /**
@@ -456,9 +555,37 @@ function wrapTables(html: string): string {
  *
  * R-165 S5a：非 mermaid 围栏包成 `figure.code`（figcaption 带复制**图标**钮 + tip 气泡）；
  * 表格包成双区 wrapper（表头不滚 / 表体 320px 内滚）。两处都在**净化前**改写，
- * 产物一律经白名单（新增 svg 图标与表格三区标记类已登记在 ALLOWED_TAGS / RENDER_MARKER_CLASSES）。
+ * 产物一律经白名单（新增 svg 图标与表格区标记类已登记在 ALLOWED_TAGS / RENDER_MARKER_CLASSES）。
+ *
+ * 问题1 偏差修正批 aj14d：`blockKey` 给定时，流式块走 75ms 防抖准入（见 `STREAM_DEBOUNCE_MS`）。
  */
-export function renderMarkdown(text: string, streaming: boolean): MarkdownRender {
+export function renderMarkdown(text: string, streaming: boolean, blockKey?: string): MarkdownRender {
+  if (streaming && blockKey !== undefined) {
+    const prev = streamRenders.get(blockKey)
+    if (prev !== undefined && prev.text !== text) {
+      const now = performance.now()
+      if (now - prev.renderedAt < STREAM_DEBOUNCE_MS) {
+        // 窗口内：本次增量并入下一次重绘（沿用上一帧结果），并保证静默满窗后有一次落地
+        scheduleStreamFlush(STREAM_DEBOUNCE_MS - (now - prev.renderedAt))
+        return prev.render
+      }
+    }
+  }
+  const render = renderNow(text, streaming)
+  if (streaming && blockKey !== undefined) {
+    if (streamRenders.size >= STREAM_RENDER_MAX) {
+      const first = streamRenders.keys().next().value
+      if (first !== undefined) {
+        streamRenders.delete(first)
+      }
+    }
+    streamRenders.set(blockKey, { text, renderedAt: performance.now(), render })
+  }
+  return render
+}
+
+/** 单块渲染本体（防抖准入之外的全部逻辑，含降级判定与耗时预算记账）。 */
+function renderNow(text: string, streaming: boolean): MarkdownRender {
   const fenceOpen = streaming && hasUnclosedFence(text)
   // 指纹 = 尾围栏 info 行之后的代码体（与 markdown-it 传给 highlight 的 code 逐字相等）
   let tailSource: string | null = null
@@ -471,16 +598,19 @@ export function renderMarkdown(text: string, streaming: boolean): MarkdownRender
   try {
     const useDegraded = degraded || text.length > DEGRADE_AT_CHARS
     const started = performance.now()
+    fenceRenderSeq = 0 // aj14d ③：本次渲染的围栏序号归零（key 恒为「本次渲染内出现序」）
     let html = (useDegraded ? mdDegraded : md).render(text)
     html = wrapTables(html)
-    const mermaid: Array<{ index: number; source: string }> = []
+    const mermaid: Array<{ index: number; key: string; source: string }> = []
     if (!useDegraded && !streaming) {
-      // 登记闭合 mermaid 围栏（按出现序）；源码块本身留在净化后 HTML 里
+      // 登记闭合 mermaid 围栏（按出现序）；源码块本身留在净化后 HTML 里。
+      // aj14d ③：key 直接读该围栏 pre 上的稳定身份（渲染期已盖，不另算序号）。
       let match: RegExpExecArray | null
       let index = 0
       mermaidIndexRe.lastIndex = 0
       while ((match = mermaidIndexRe.exec(html)) !== null) {
-        mermaid.push({ index: index++, source: unescapeHtml(match[1]) })
+        mermaid.push({ index, key: /data-fence-key="([^"]*)"/.exec(match[1])?.[1] ?? '', source: unescapeHtml(match[2]) })
+        index++
       }
       // G4：非 mermaid 围栏包成图容器（语言标签 + 复制按钮）
       html = wrapFenceFigures(html)
