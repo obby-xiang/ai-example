@@ -167,7 +167,8 @@ describe('stores/task.ts · watchPublishOutcome 复用 watchJob（M4：无裸轮
     const summary = onConflict.mock.calls[0][0] as string
     expect(summary).toContain('5. DEF_5#R5：冲突 5')
     expect(summary).not.toContain('6. DEF_6')
-    expect(summary).toContain('（仅列前 5 条，共 7 处）')
+    // S6 批1（v7.10 N8）：首行 = 人话摘要（卡面 reason 行只显这一句），明细仍在字符串里供表格解析
+    expect(summary.split('\n')[0]).toBe('发布作业 #9 校验冲突明细（共 7 处，仅列前 5 条）')
   })
 
   it('completed-no-prompt：非 FAILED 终态 ⇒ 零提示、onConflict 不出', async () => {

@@ -8,7 +8,18 @@
  */
 import { describe, expect, it } from 'vitest'
 import type { MessagePart, ReasoningPart, ToolPart } from '@/types/ai'
-import { groupParts, resolveBlockExpanded } from '@/utils/blocks'
+import {
+  MASKED_VALUE,
+  argRows,
+  groupParts,
+  hasReadOnlyBody,
+  hasToolBody,
+  isReadOnlyCard,
+  parsePublishConflicts,
+  readableValue,
+  reasonHeadline,
+  resolveBlockExpanded
+} from '@/utils/blocks'
 
 let seq = 0
 function makeTool(overrides: Partial<ToolPart> = {}): ToolPart {
@@ -203,25 +214,82 @@ describe('R-154 收口修 F1/F2 兼容面：跨消息 blockId 命名空间 + 单
   })
 })
 
-describe('R-160 M2：回执独立块（groupParts 派生，恒可见不参与 expandedBlocks）', () => {
-  it('已决 CONFIRM 段 ⇒ 工具卡 + 紧随 receipt 块（id = `${msg}:receipt:${toolCallId}`，与工具卡不撞）', () => {
+describe('S6 批1：回执独立块退役（groupParts 不再派生第二块）+ 只读态/行数判据', () => {
+  it('已决 CONFIRM 段 ⇒ 恒一张 activity 卡（receipt 块整体删除，只读态由该卡承担）', () => {
     const decided = makeTool({ toolCallId: 'p1', kind2: 'CONFIRM', status: 'succeeded', requiresAction: false, decision: 'approved' })
     const blocks = groupParts([decided], 'm-1')
-    expect(blocks.map((b) => b.id)).toEqual(['m-1:p1', 'm-1:receipt:p1'])
-    expect(blocks.map((b) => b.kind)).toEqual(['activity', 'receipt'])
-    expect(blocks[1]!.defaultExpanded).toBe(true) // 恒可见口径（模板直渲，不走三态展开判定）
+    expect(blocks.map((b) => b.id)).toEqual(['m-1:p1'])
+    expect(blocks.map((b) => b.kind)).toEqual(['activity'])
+    // 已决段默认折叠（卡头恒显行承载徽标/摘要；展开体走三态判定）
+    expect(blocks[0]!.defaultExpanded).toBe(false)
+    expect(isReadOnlyCard(decided)).toBe(true)
   })
 
-  it('负例：BACKEND 段 / 待决 CONFIRM 段（requiresAction）⇒ 无 receipt 块', () => {
-    expect(groupParts([makeTool({ toolCallId: 'b1' })], 'm-1').map((b) => b.kind)).toEqual(['activity'])
+  it('负例：BACKEND 段 / 待决 CONFIRM 段（requiresAction）⇒ 不是只读态卡', () => {
+    const backend = makeTool({ toolCallId: 'b1' })
+    expect(groupParts([backend], 'm-1').map((b) => b.kind)).toEqual(['activity'])
+    expect(isReadOnlyCard(backend)).toBe(false)
     const pending = makeTool({ toolCallId: 'p1', kind2: 'CONFIRM', status: 'pending', requiresAction: true })
     expect(groupParts([pending], 'm-1').map((b) => b.kind)).toEqual(['activity'])
+    expect(isReadOnlyCard(pending)).toBe(false)
   })
 
-  it('kind2 名兜底仅 GF：kind2=UNKNOWN 的 generative_form 按名出块；其余 UNKNOWN 工具不出', () => {
+  it('kind2 名兜底仅 GF：kind2=UNKNOWN 的 generative_form 按名认只读态；其余 UNKNOWN 工具不认', () => {
     const gf = makeTool({ toolCallId: 'g1', name: 'generative_form', kind2: 'UNKNOWN', status: 'succeeded' })
-    expect(groupParts([gf], 'm-1').map((b) => b.id)).toEqual(['m-1:g1', 'm-1:receipt:g1'])
+    expect(groupParts([gf], 'm-1').map((b) => b.id)).toEqual(['m-1:g1'])
+    expect(isReadOnlyCard(gf)).toBe(true)
     const other = makeTool({ toolCallId: 'x1', kind2: 'UNKNOWN', status: 'succeeded' })
     expect(groupParts([other], 'm-1').map((b) => b.id)).toEqual(['m-1:x1'])
+    expect(isReadOnlyCard(other)).toBe(false)
+  })
+
+  it('hasBodyRows：0 行卡不给入口（两种空都算空）；requiresAction 例外恒 true', () => {
+    // args 的 '{}' / 空串 / 全空白 + result/reason 全空 ⇒ false
+    for (const args of ['{}', '', '   ', 'not-json{']) {
+      expect(hasToolBody(makeTool({ toolCallId: 'e1', args, result: '', reason: '  ' }))).toBe(false)
+    }
+    // 任一非空 ⇒ true
+    expect(hasToolBody(makeTool({ toolCallId: 'e2', args: '{"taskId":1}' }))).toBe(true)
+    expect(hasToolBody(makeTool({ toolCallId: 'e3', args: '{}', result: 'ok' }))).toBe(true)
+    expect(hasToolBody(makeTool({ toolCallId: 'e4', args: '{}', reason: '失败' }))).toBe(true)
+    // requiresAction 待动作卡例外（门卡 / GF 强制展开）
+    expect(hasToolBody(makeTool({ toolCallId: 'e5', kind2: 'CONFIRM', status: 'pending', requiresAction: true, args: '{}' }))).toBe(true)
+    // 只读态卡走只读表判据
+    expect(hasReadOnlyBody(makeTool({ toolCallId: 'e6', kind2: 'CONFIRM', status: 'succeeded', requiresAction: false, args: '{}' }))).toBe(false)
+    expect(hasReadOnlyBody(makeTool({ toolCallId: 'e7', kind2: 'CONFIRM', status: 'succeeded', requiresAction: false, args: '{"taskId":1}' }))).toBe(true)
+  })
+
+  it('值可读化：布尔 / 数组 / 空值 / 文件路径 / 对象 / 敏感键掩码（门卡口径）', () => {
+    expect(readableValue(true)).toBe('是')
+    expect(readableValue(false)).toBe('否')
+    expect(readableValue(['A', 'B'])).toBe('A、B')
+    expect(readableValue([])).toBe('（空）')
+    expect(readableValue(null)).toBe('（空）')
+    expect(readableValue('')).toBe('（空）')
+    expect(readableValue('/srv/app/exports/report.json')).toBe('report.json')
+    expect(readableValue('/srv/app/src')).toBe('/srv/app/src') // 无扩展名 ⇒ 路径原样
+    expect(readableValue({ a: 1 })).toBe('（复杂值）')
+    // 门卡：敏感键掩码（定长圆点，不泄值不泄长度）；普通键照常
+    expect(argRows('{"password":"p@ss","apiKey":"k-123","taskId":7}', true)).toEqual([
+      { key: 'password', value: MASKED_VALUE },
+      { key: 'apiKey', value: MASKED_VALUE },
+      { key: 'taskId', value: '7' }
+    ])
+    expect(argRows('{"password":"p@ss"}', false)).toEqual([{ key: 'password', value: 'p@ss' }])
+  })
+
+  it('parsePublishConflicts / reasonHeadline：明细行解析成表格数据，首行为摘要', () => {
+    const reason = [
+      '发布作业 #317 校验冲突明细（共 2 处）',
+      '1. CURRENCY#GLOBAL：币种精度与主数据不一致',
+      '2. TAX_RULE#PRJ-07：税率区间重叠'
+    ].join('\n')
+    expect(reasonHeadline(reason)).toBe('发布作业 #317 校验冲突明细（共 2 处）')
+    expect(parsePublishConflicts(reason)).toEqual([
+      { defCode: 'CURRENCY', rowKey: 'GLOBAL', message: '币种精度与主数据不一致' },
+      { defCode: 'TAX_RULE', rowKey: 'PRJ-07', message: '税率区间重叠' }
+    ])
+    expect(parsePublishConflicts('作业冲突：请先取消在途作业')).toEqual([])
+    expect(parsePublishConflicts(undefined)).toEqual([])
   })
 })

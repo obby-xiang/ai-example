@@ -89,14 +89,21 @@ function notifyJobWatch(message: string): void {
 }
 
 /**
- * R-94 范围 B：冲突明细摘要组装（逐条列出，截断前 5 条 + 「共 N 处」）。
- * 文本即 Ai 保证通道的 message 载荷（回灌模型）与人读明细。
+ * R-94 范围 B → S6 批1（v7.10 N8）：冲突明细摘要组装。
+ *
+ * 形态：**首行 = 人话摘要**（`发布作业 #N 校验冲突明细（共 M 处）`），其后逐条编号明细
+ * （`N. defCode#rowKey：message`，截断前 5 条）。首行即卡面 reason 红底行的**唯一**文案
+ * （「原因：<首行>」），编号明细由前端解析成表格卡渲染（列 = 配置 / 行键 / 原因）——
+ * 两种形态不同屏重复报同一份明细（N8 判据）。
+ * 文本同时是 Ai 保证通道的 message 载荷（回灌模型），故明细本身保留在字符串里。
  */
 function formatPublishConflictSummary(jobId: number, issues: ValidationIssue[]): string {
   const lines = issues.slice(0, 5).map((issue, index) =>
     `${index + 1}. ${issue.defCode}#${issue.rowKey ?? '-'}：${issue.message}`)
-  const tail = issues.length > 5 ? `（仅列前 5 条，共 ${issues.length} 处）` : `（共 ${issues.length} 处）`
-  return [`发布作业 #${jobId} 校验冲突明细：`, ...lines, tail].join('\n')
+  const head = issues.length > 5
+    ? `发布作业 #${jobId} 校验冲突明细（共 ${issues.length} 处，仅列前 5 条）`
+    : `发布作业 #${jobId} 校验冲突明细（共 ${issues.length} 处）`
+  return [head, ...lines].join('\n')
 }
 
 /**

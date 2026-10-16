@@ -160,12 +160,17 @@ const MD_LI_CLASS = 'my-[3px] marker:text-[#8b949e]'
  *  漏掉横向归零会让 UA 的 `blockquote { margin: 1em 40px }` 露出 40px 左右内缩（实测抓到）。 */
 const MD_BLOCKQUOTE_CLASS =
   'm-0 mb-[12px] py-[2px] pl-[11px] border-0 border-l-2 border-solid border-[#cddcff] text-[#8b949e] text-[12.6px] leading-[1.65]'
-/** 行内 code chip（原 `code:not(pre code)`）——`md-code` 为 hook 放行标记（见 RENDER_MARKER_CLASSES）。 */
+/** 行内 code chip（原 `code:not(pre code)`）——`md-code` 为 hook 放行标记（见 RENDER_MARKER_CLASSES）。
+ *  S6 批1（长内容审计清零项「行内 code nowrap 吞内容」）：撤 `whitespace-nowrap`，补 `break-words`
+ *  + `[overflow-wrap:anywhere]` —— 长串（token / 长路径）在自身容器内折行，不再撑破气泡或右侧被裁。 */
 const MD_CODE_INLINE_CLASS =
-  `md-code ${MONO_STACK} text-[12.4px] bg-[#f6f7f9] border border-solid border-[#eef0f3] rounded-[4px] px-[4px] py-[1px] whitespace-nowrap`
-/** 围栏 pre（原 `.ai-chat .md-body pre` + `pre code` 两条）——`md-pre` 为 hook 放行标记。 */
+  `md-code ${MONO_STACK} text-[12.4px] bg-[#f6f7f9] border border-solid border-[#eef0f3] rounded-[4px] px-[4px] py-[1px] whitespace-normal break-words [overflow-wrap:anywhere]`
+/** 围栏 pre（原 `.ai-chat .md-body pre` + `pre code` 两条）——`md-pre` 为 hook 放行标记。
+ *  S6 批1（长内容审计清零项「degraded 期代码块限高失效」）：限高类**落在这里**（而不是只挂在
+ *  AiPanel 的 `[&_figure.code>pre]` 变体上）—— 降级分支不包 `figure.code`（`wrapFenceFigures` 只在
+ *  非降级路径跑），此前降级期代码块高度不设上限。同值 200px（与 S5a 代码块口径一致，不新增数值）。 */
 const MD_FENCE_PRE_CLASS =
-  `md-pre m-0 py-[10px] px-[11px] overflow-x-auto bg-[#f8f8f8] text-[#333] ${MONO_STACK} text-[12.3px] leading-[1.62] ` +
+  `md-pre m-0 py-[10px] px-[11px] max-h-[200px] overflow-auto bg-[#f8f8f8] text-[#333] ${MONO_STACK} text-[12.3px] leading-[1.62] ` +
   '[&_code]:bg-transparent [&_code]:p-0 [&_code]:border-0 [&_code]:whitespace-pre'
 const MD_A_CLASS = 'text-[#2563eb]'
 const MD_HR_CLASS = 'mx-0 my-[0.9em] border-0 border-t border-solid border-[#eef0f3]'

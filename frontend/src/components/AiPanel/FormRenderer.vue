@@ -20,7 +20,9 @@
            移出滚动区常驻（v7 `.gf` 口径：`max-h-[240px] overflow-y-auto` + 操作行在其下）。 -->
       <div :class="['min-w-0 max-h-[240px] overflow-y-auto pr-[4px]', SCROLLBAR_CLASS]" data-testid="gf-fields">
       <div v-for="field in schema.fields" :key="field.key" class="mb-[11px]">
-        <span class="block text-[12.2px] mb-[4px]" :class="fieldProblem(field) ? 'text-[#c0392b]' : 'text-[#57606a]'">
+        <!-- S6 批1（长内容审计 #12）：字段 label 由模型生成，可长且无空格 ⇒ 补 break-words
+             （原无断词类，长 label 靠字段区 `overflow-y-auto` 溢出，横条或被卡 overflow-hidden 裁）。 -->
+        <span class="block text-[12.2px] mb-[4px] break-words [overflow-wrap:anywhere]" :class="fieldProblem(field) ? 'text-[#c0392b]' : 'text-[#57606a]'">
           {{ field.label }}<span v-if="field.required" class="text-[#c0392b]"> *</span>
         </span>
         <input

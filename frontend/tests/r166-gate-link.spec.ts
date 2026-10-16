@@ -269,10 +269,10 @@ describe('R-166 口径④：超时悬挂兜底（倒计时归零 ⇒ 权威校�
     // 段侧标记：本地作废（与后端 TIMEOUT 同形不同因）
     const part = store.messages.flatMap((m) => m.parts).find((p) => p.kind === 'tool' && p.toolCallId === 'c1')
     expect(part).toMatchObject({ status: 'expired', expiredLocally: true, requiresAction: false })
-    // 工具卡 tag 与回执徽标口径一致（不落「会话已失效」）
-    const toolCard = wrapper.find('[data-testid="tool-card-c1"]')
-    expect(toolCard.text()).toContain('已超时作废')
-    expect(toolCard.text()).not.toContain('会话已失效')
+    // 工具卡 tag 与回执徽标口径一致（不落「会话已失效」）——S6 起已决段只有一张只读卡
+    const readOnly = wrapper.find('[data-testid="hitl-receipt"]')
+    expect(readOnly.text()).toContain('已超时作废')
+    expect(readOnly.text()).not.toContain('会话已失效')
     wrapper.unmount()
   })
 
