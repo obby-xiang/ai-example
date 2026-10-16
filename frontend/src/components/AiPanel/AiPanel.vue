@@ -2377,9 +2377,94 @@ function hitlReceiptTagType(status: ToolRunStatus): 'success' | 'info' | 'warnin
   }
 }
 
-/** 参数自然语言摘要：工具中文名 + args 前三键值（工具名映射表口径，非 LLM 生成） */
+/**
+ * 回执摘要里的**表单字段表**（RC-1）：`args.form.fields[]` 的 `key → label`，**保持 schema 序**。
+ * 取不到（args 非 JSON / 非 GF 形状 / 历史脏数据）⇒ 空数组，摘要回落字段 key。
+ */
+function formFields(args: string | undefined): Array<{ key: string; label: string }> {
+  if (!args) {
+    return []
+  }
+  try {
+    const parsed = JSON.parse(args) as { form?: { fields?: unknown } }
+    const raw = parsed?.form?.fields
+    if (!Array.isArray(raw)) {
+      return []
+    }
+    const fields: Array<{ key: string; label: string }> = []
+    for (const item of raw) {
+      if (!item || typeof item !== 'object') {
+        continue
+      }
+      const key = (item as { key?: unknown }).key
+      const label = (item as { label?: unknown }).label
+      if (typeof key === 'string' && key !== '' && typeof label === 'string' && label !== '') {
+        fields.push({ key, label })
+      }
+    }
+    return fields
+  } catch {
+    return []
+  }
+}
+
+/** 提交值可读化（RC-1）：布尔 → 是/否；数组 → 顿号列表；空值 → （空）；其余原样。 */
+function readableFormValue(value: unknown): string {
+  if (typeof value === 'boolean') {
+    return value ? '是' : '否'
+  }
+  if (Array.isArray(value)) {
+    return value.length > 0 ? value.map((item) => readableFormValue(item)).join('、') : '（空）'
+  }
+  if (value === null || value === undefined || value === '') {
+    return '（空）'
+  }
+  if (typeof value === 'number' || typeof value === 'string') {
+    return String(value)
+  }
+  // 表单字段六型（form-schema.ts）里不存在对象值 —— 脏数据只报"有值"，不把 JSON 泄进摘要
+  return '（复杂值）'
+}
+
+/**
+ * 生成式表单回执摘要（RC-1）：**只读 `submittedValues`**（用户这次实际提交的值），
+ * 字段名走 schema 的 `label`（`args.form.fields[].label`）。
+ *
+ * 为什么不能沿用"args 前三键值"：GF 的 `args` 是**表单定义**（`form.scenario/title/fields`），
+ * 照搬会把 schema 结构当摘要（用户看到的是一串定义键，不是自己填了什么）。
+ * 无 `submittedValues`（他端提交/取消/超时等无本地值的收口）⇒ 降级为「表单已提交」。
+ */
+function generativeFormSummary(part: ToolPart, label: string): string {
+  const values = part.submittedValues
+  if (!values || Object.keys(values).length === 0) {
+    return `${label} · 表单已提交`
+  }
+  const shown: Array<{ label: string; value: unknown }> = []
+  const seen = new Set<string>()
+  for (const field of formFields(part.args)) {
+    if (Object.prototype.hasOwnProperty.call(values, field.key)) {
+      shown.push({ label: field.label, value: values[field.key] })
+      seen.add(field.key)
+    }
+  }
+  for (const [key, value] of Object.entries(values)) {
+    if (!seen.has(key)) {
+      shown.push({ label: key, value })
+    }
+  }
+  const items = shown.slice(0, 3).map((item) => `${item.label} ${readableFormValue(item.value)}`)
+  if (items.length === 0) {
+    return `${label} · 表单已提交`
+  }
+  return `${label} · ${items.join('，')}${shown.length > items.length ? '…' : ''}`
+}
+
+/** 参数自然语言摘要：工具中文名 + args 前三键值（工具名映射表口径，非 LLM 生成）。 */
 function hitlReceiptSummary(part: ToolPart): string {
   const label = toolLabel(part.name)
+  if (part.name === GENERATIVE_FORM_TOOL) {
+    return generativeFormSummary(part, label)
+  }
   if (!part.args) {
     return label
   }
@@ -2667,6 +2752,14 @@ onMounted(async () => {
   })
   tickController.start()
   void ai.probeHealth()
+  // RC-4：先判本页签是不是**复制页签**（Web Locks 探活）再读历史 —— 复制页签会发现场换新会话，
+  // 不能把原页签的历史/挂起卡读进复制页签里。
+  // 返回 null = 环境无 Web Locks（判定按恢复同步收口）⇒ **不额外 await**，onMounted 既有
+  // 时序（RO 观测 + nextTick 后的长消息测量）一格不动。
+  const ownership = ai.ensureTabOwnership()
+  if (ownership !== null) {
+    await ownership
+  }
   if (!ai.messages.length) {
     await ai.loadHistory()
   }

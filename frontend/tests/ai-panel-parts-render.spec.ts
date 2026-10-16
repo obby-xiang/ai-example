@@ -1071,6 +1071,55 @@ describe('R-158：HITL 只读回执 / CollapsibleText / 复制换行', () => {
     wrapper.unmount()
   })
 
+  it('R-166B RC-1：GF 回执摘要取 submittedValues（字段 label + 可读值），不出现表单 schema 键', async () => {
+    const withValues = buildMessage([
+      {
+        kind: 'tool', seg: 0, toolCallId: 'g1', name: 'generative_form', kind2: 'FRONTEND', status: 'succeeded', requiresAction: false,
+        args: JSON.stringify({
+          form: {
+            scenario: 'export_query',
+            title: '导出参数',
+            fields: [
+              { key: 'region', label: '导出范围', type: 'enum', required: true },
+              { key: 'compress', label: '是否压缩', type: 'boolean', required: false },
+              { key: 'tags', label: '标签', type: 'multi_select', required: false },
+              { key: 'note', label: '备注', type: 'text', required: false }
+            ]
+          }
+        }),
+        submittedValues: { region: 'HB', compress: true, tags: ['A', 'B'], note: '备注文本' }
+      }
+    ])
+    withValues.id = 'a-gf-r166b'
+    // 无本地提交值（他端提交/超时收口）⇒ 降级为「表单已提交」，仍不得回落到 schema 键
+    const noValues = buildMessage([
+      {
+        kind: 'tool', seg: 0, toolCallId: 'g2', name: 'generative_form', kind2: 'FRONTEND', status: 'succeeded', requiresAction: false,
+        args: JSON.stringify({ form: { scenario: 'export_query', fields: [{ key: 'region', label: '导出范围', type: 'enum', required: true }] } })
+      }
+    ])
+    noValues.id = 'a-gf-r166b-empty'
+
+    const wrapper = await mountPanel([withValues, noValues])
+    await wrapper.find('[data-testid="block-toggle-a-gf-r166b:g1"]').trigger('click')
+    await wrapper.find('[data-testid="block-toggle-a-gf-r166b-empty:g2"]').trigger('click')
+    const receipts = wrapper.findAll('[data-testid="hitl-receipt"]')
+    expect(receipts).toHaveLength(2)
+
+    // 前三项「字段label 值」：布尔→是/否、数组→顿号列表，尾部省略号示意还有更多项
+    const summary = receipts[0]!.find('div:nth-child(1) span:nth-child(2)').text()
+    expect(summary).toBe('生成式表单 · 导出范围 HB，是否压缩 是，标签 A、B…')
+    // 任何路径不得把表单定义（scenario / title / fields / form）当摘要内容
+    for (const key of ['scenario', 'title', 'fields', 'form', 'enum', 'multi_select']) {
+      expect(summary).not.toContain(key)
+    }
+    expect(summary).not.toContain('=')
+
+    // 无本地提交值（他端提交/超时收口）⇒ 降级为「表单已提交」
+    expect(receipts[1]!.find('div:nth-child(1) span:nth-child(2)').text()).toBe('生成式表单 · 表单已提交')
+    wrapper.unmount()
+  })
+
   it('#10：回执徽标系决策态（收口 MINOR-1）——approved 即显已确认（running/失败均不改判），缺省回退 status', async () => {
     const running = buildMessage([
       { kind: 'tool', seg: 0, toolCallId: 'r1', name: 'start_publish', kind2: 'CONFIRM', status: 'running', args: '{}', requiresAction: false, decision: 'approved', decidedAt: 1_700_000_000_000 }

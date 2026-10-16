@@ -1,12 +1,14 @@
 /**
- * R-166 门卡链路修复批：口径①~⑤的回归锁。
+ * R-166 门卡链路修复批：口径①~④的回归锁。
  *
  * 覆盖（逐条对应用户裁决口径）：
  * ① 倒计时接心跳（方案 A）：心跳驱动 + 陈旧帧不锚 + 同 id 只许更早 ⇒ **不闪回**；
  * ② 拒绝原因解耦：重派生/帧重投不动输入框，只有换 toolCallId 才清；
  * ③ 409 幂等拒绝后不写乐观裁决，SSE 结局帧到达即落真实状态并撤瞬态；
- * ④ 超时悬挂兜底：倒计时归零拉一次 runs/current 校正，无结局 ⇒ 「已超时作废」回执；
- * ⑤ 复制页签隔离：navigate 起新会话 / reload·back_forward 恢复。
+ * ④ 超时悬挂兜底：倒计时归零拉一次 runs/current 校正，无结局 ⇒ 「已超时作废」回执。
+ *
+ * 口径⑤（复制页签隔离）原判据 = navigation type，**R-166B 已整体替换**为三层握手
+ * （pageId + Web Locks + BroadcastChannel）——回归锁随迁至 tests/r166b-fixes.spec.ts。
  *
  * 口径③ 的 409 主流程（瞬态 + 3s 校正）另有锁：tests/parts-residue-cleanup.spec.ts。
  * 挂载方式与 stubs 口径照抄 tests/ai-panel-parts-render.spec.ts（同一个 jsdom + Pinia 面）。
@@ -15,7 +17,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import type { ChatMessage, PendingToolCall } from '@/types/ai'
-import { MIRROR_PREFIX, SESSION_ID_KEY, useAiStore } from '@/stores/ai'
+import { SESSION_ID_KEY, useAiStore } from '@/stores/ai'
 import { nextTick } from 'vue'
 
 const api = vi.hoisted(() => ({
@@ -30,9 +32,6 @@ const api = vi.hoisted(() => ({
 }))
 
 vi.mock('@/api/ai', () => ({ aiApi: api }))
-
-/** 导航类型注入位（口径⑤：`performance.getEntriesByType('navigation')[0].type`）。 */
-const navType = vi.hoisted(() => ({ value: null as string | null }))
 
 const stubs = {
   'el-alert': true,
@@ -55,10 +54,6 @@ beforeEach(() => {
   sessionStorage.clear()
   setActivePinia(createPinia())
   vi.stubGlobal('ResizeObserver', ResizeObserverStub)
-  navType.value = null
-  vi.spyOn(performance, 'getEntriesByType').mockImplementation(((type: string) => (
-    type === 'navigation' && navType.value !== null ? [{ type: navType.value }] : []
-  )) as never)
   api.health.mockReset()
   api.history.mockReset()
   api.runsCurrent.mockReset()
@@ -352,43 +347,13 @@ describe('R-166 口径③：409 之后的瞬态与结局帧收敛', () => {
   })
 })
 
-describe('R-166 口径⑤：复制页签隔离（navigate vs reload）', () => {
-  function seedTab(sessionId = 'tab-original'): void {
-    sessionStorage.setItem(SESSION_ID_KEY, sessionId)
-    sessionStorage.setItem(MIRROR_PREFIX + sessionId, JSON.stringify({ v: 2, savedAt: 1, messages: [] }))
-  }
-
-  it('navigate（新页签/复制页签/手输地址）⇒ 起新会话：换 id + 清 SESSION_ID_KEY 与镜像引用', () => {
-    seedTab()
-    navType.value = 'navigate'
-    const store = useAiStore()
-    expect(store.sessionId).not.toBe('tab-original')
-    expect(sessionStorage.getItem(SESSION_ID_KEY)).toBe(store.sessionId)
-    expect(sessionStorage.getItem(MIRROR_PREFIX + 'tab-original')).toBeNull()
+describe('RC-4 口径⑤（R-166B 替换后）：本文件的页签判据锁已迁出', () => {
+  it('存量会话 id 一律先按恢复取用（复制品判定交给 Web Locks 三层握手）', () => {
+    sessionStorage.setItem(SESSION_ID_KEY, 'tab-kept')
+    expect(useAiStore().sessionId).toBe('tab-kept')
   })
 
-  it('reload（本页签刷新）⇒ 恢复原会话与镜像', () => {
-    seedTab('tab-reload')
-    navType.value = 'reload'
-    const store = useAiStore()
-    expect(store.sessionId).toBe('tab-reload')
-    expect(sessionStorage.getItem(MIRROR_PREFIX + 'tab-reload')).not.toBeNull()
-  })
-
-  it('back_forward（历史前后退）⇒ 按恢复处理', () => {
-    seedTab('tab-back')
-    navType.value = 'back_forward'
-    expect(useAiStore().sessionId).toBe('tab-back')
-  })
-
-  it('导航类型读不到（环境不支持/条目缺失）⇒ 保守按恢复处理（不丢现场）', () => {
-    seedTab('tab-unknown')
-    navType.value = null
-    expect(useAiStore().sessionId).toBe('tab-unknown')
-  })
-
-  it('无存量 id 时 navigate/reload 都是"建新 id + 写盘"', () => {
-    navType.value = 'navigate'
+  it('无存量 id ⇒ 建新 id 并写盘', () => {
     const created = useAiStore().sessionId
     expect(created.length).toBeGreaterThan(0)
     expect(sessionStorage.getItem(SESSION_ID_KEY)).toBe(created)

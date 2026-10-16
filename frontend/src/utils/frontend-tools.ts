@@ -737,6 +737,44 @@ function findWorkspaceAction(name: string): WorkspaceAction | null {
   return WORKSPACE_ACTIONS.find((action) => action.name === target) ?? null
 }
 
+/**
+ * RC-3：工作区动作的**参数要求**（缺参文案单点）。
+ *
+ * 用户口径（2026-10-16 裁决②/③）：前端工具的**参数错误文案不得内嵌 `JSON.stringify(args)`**
+ * ——原文示范「设置查询条件的参数不完整：缺少 defCode 或 conditions.fields」。故本表逐动作把
+ * "缺什么"写成自然语言；表外动作回落一句不指名字段但可行动的话（仍不含任何 JSON 特征）。
+ */
+const WORKSPACE_ACTION_REQUIRED_ARGS: Readonly<Record<string, string>> = {
+  navigate_to: '缺少 page（页面标识：tasks / export / import / definitions / data）',
+  select_definitions: '缺少 codes（配置项编码列表，不能为空）',
+  set_condition: '缺少 defCode 或 conditions.fields',
+  confirm_step: '缺少 step（目标步骤标识）'
+}
+
+/**
+ * RC-3：ui_event 动作的**参数要求**（同上表口径，覆盖 `toUiEvent` 的必填分支）。
+ * `refresh_*` 三个动作 `toUiEvent` 恒有值，只会因类型不符走到这里。
+ */
+const UI_EVENT_REQUIRED_ARGS: Readonly<Record<string, string>> = {
+  open_page: '缺少 page（页面标识：tasks / export / import / definitions / data）',
+  restore_task: '缺少 taskId 或它不是数字',
+  goto_step: '缺少 step 或它是空串',
+  select_defs: '缺少 defCodes 或它不是数组',
+  set_conditions: '缺少 defCode 或它是空串',
+  set_import_mode: '缺少 mode 或它不是 MERGE / REPLACE',
+  run_job: '缺少 taskId 或 jobType（EXPORT / PRECHECK / IMPORT / PUBLISH）',
+  cancel_job: '缺少 jobId 或它不是数字',
+  download: '缺少 url 或它是空串',
+  refresh_defs: '参数类型不符',
+  refresh_data: 'defCode 不是字符串',
+  refresh_tasks: '参数类型不符'
+}
+
+/** 缺参提示（RC-3）：命中表即指名道姓，未登记的动作给一句可行动的兜底（无 JSON）。 */
+function missingArgsHint(name: string, table: Readonly<Record<string, string>>): string {
+  return table[name] ?? '缺少必要字段，请核对工具参数后重试'
+}
+
 /** 动作执行：可用性（unavailable）→ 页面 handler（available）→ 契约层（available/degraded）。 */
 async function runWorkspaceAction(
   action: WorkspaceAction,
@@ -778,7 +816,7 @@ async function runWorkspaceAction(
     return makeExecution({
       outcome: 'failed',
       availability: 'unavailable',
-      result: `${action.displayName}的参数不完整：${JSON.stringify(args)}`
+      result: `${action.displayName}的参数不完整：${missingArgsHint(action.name, WORKSPACE_ACTION_REQUIRED_ARGS)}`
     })
   }
   const outcome = await dispatchUiEvent(event)
@@ -922,7 +960,7 @@ async function runUiEventAction(name: UiEvent['type'], args: Record<string, unkn
     return makeExecution({
       outcome: 'failed',
       availability: 'unavailable',
-      result: `${name} 的参数不完整或类型不符，未驱动工作区：${JSON.stringify(args)}`
+      result: `${name} 的参数不完整或类型不符，未驱动工作区：${missingArgsHint(name, UI_EVENT_REQUIRED_ARGS)}`
     })
   }
   try {

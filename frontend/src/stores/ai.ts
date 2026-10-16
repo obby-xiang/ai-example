@@ -235,29 +235,236 @@ function gateReceiptOfStatus(status: unknown): { decision?: 'approved' | 'reject
 }
 
 /**
- * R-166 口径⑤：读本次**页面加载**的导航类型（`performance.getEntriesByType('navigation')`）。
+ * ── RC-4：复制页签会话隔离（三层握手，**替换** R-166 口径⑤的 navigation type 判据）─────────
  *
- * 为什么要它：`sessionStorage` 是页签级的，但**复制页签会把 sessionStorage 一并复制**
- * ——只读键会让"复制页签"继承原页签的会话 id 与镜像（两页签共写同一后端会话）。
- * `navigate` = 新页签 / 复制页签 / 手输地址 / 首次进入 ⇒ 起新会话；
- * `reload` = 本页签刷新 ⇒ 恢复；`back_forward` = 历史前后退 ⇒ 按恢复处理（同一页签的旅程）。
+ * <h3>为什么换判据</h3>
+ * R-166 用 `performance.getEntriesByType('navigation')[0].type` 判页签旅程：`navigate` 判
+ * "新页签 / 复制页签 / 手输地址"、`reload` 与 `back_forward` 判"同一页签"。真机实测
+ * **复制页签 = `back_forward`**（浏览器按历史恢复复制）⇒ 判据整个作废：复制页签会连
+ * `sessionStorage` 一起继承，两页签共写同一后端会话，正是本项要修的场景。
  *
- * 读不到（环境不支持 / 条目缺失，如 jsdom）⇒ 返回 null，调用方按**恢复**处理（保守：不丢现场）。
+ * <h3>三层握手（业界口径）</h3>
+ * ① **pageId**：每页签一个 `crypto.randomUUID()` 存 `sessionStorage`（`ai-tab-page-id`）——
+ *    本页签身份，随刷新保持；复制页签会继承原值，故**判为复制品时轮换**。
+ * ② **Web Locks 探活**（决定性判据）：`navigator.locks.request('ai-session-<sessionId>',
+ *    { ifAvailable: true })` —— 拿到锁 ⇒ 本页签是原页签（持锁到文档销毁）；回调收到 `null`
+ *    ⇒ 该会话已被另一页签持有 ⇒ **本页签是复制品** ⇒ 起新会话，不接管原会话。
+ *    锁是浏览器按**文档（页签）**维护的资源，不依赖任何前端启发式。
+ * ③ **BroadcastChannel**（`ai-session-ownership`）：`claim` / `released` 两种广播 ——
+ *    原页签 `pagehide` 时广播 `released` 并释放锁，被判为复制品的**空白**页签接手该会话。
+ *
+ * 环境不支持 Web Locks（旧浏览器 / jsdom）⇒ 判 'unsupported'，按**恢复**处理（保守：不丢现场，
+ * 与 R-166 时代"读不到导航条目按恢复"同一兜底方向）。
  */
-export function navigationType(): 'navigate' | 'reload' | 'back_forward' | null {
+
+/** 本页签 pageId 的 sessionStorage 键（RC-4 ①）。 */
+export const PAGE_ID_KEY = 'ai-tab-page-id'
+/** 会话所有权锁名前缀（RC-4 ②）：`ai-session-<sessionId>`。 */
+export const SESSION_LOCK_PREFIX = 'ai-session-'
+/** 所有权广播通道名（RC-4 ③）。 */
+export const OWNERSHIP_CHANNEL_NAME = 'ai-session-ownership'
+/** 锁探活次数与间隔（RC-4 ②）：刷新时旧文档的锁可能尚未随文档销毁释放，限次重试再判"被占"。 */
+export const LOCK_PROBE_ATTEMPTS = 3
+export const LOCK_PROBE_RETRY_MS = 150
+
+/** 本页签的会话所有权角色（RC-4）：'duplicate' = 由复制产生、已换新会话且尚未接手原会话；
+ *  'unsupported' = 环境无 Web Locks（旧浏览器）⇒ 按恢复处理（终态，不再探活）。 */
+export type TabOwnership = 'unknown' | 'owner' | 'duplicate' | 'unsupported'
+
+/** 所有权通道的最小面（环境无 `BroadcastChannel` 时为 null）。 */
+interface OwnershipChannel {
+  postMessage(data: unknown): void
+  close(): void
+  onmessage: ((event: { data: unknown }) => void) | null
+}
+
+/** 通道消息（RC-4 ③）：`claim` = 认领 / `released` = 原页签离开、所有权让渡。 */
+export interface OwnershipMessage {
+  kind: 'claim' | 'released'
+  sessionId: string
+  pageId: string
+}
+
+/** 本页签持有的会话锁与自有会话 id（模块级：文档级资源，不进响应式状态）。 */
+let heldLock: { name: string; release: () => void } | null = null
+let ownedSessionId: string | null = null
+let ownershipChannel: OwnershipChannel | null = null
+let pageHideBound = false
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function readPageId(): string {
   try {
-    const entries = typeof performance !== 'undefined' && typeof performance.getEntriesByType === 'function'
-      ? performance.getEntriesByType('navigation') as PerformanceNavigationTiming[]
-      : []
-    const entry = entries[0]
-    const type = entry?.type
-    if (type === 'navigate' || type === 'reload' || type === 'back_forward') {
-      return type
+    return sessionStorage.getItem(PAGE_ID_KEY) ?? ''
+  } catch {
+    return ''
+  }
+}
+
+/** 本页签 pageId（RC-4 ①）：缺失即生成落盘；复制页签继承原值，判为复制品时由调用方轮换。 */
+function ensurePageId(): string {
+  const stored = readPageId()
+  return stored !== '' ? stored : rotatePageId()
+}
+
+function rotatePageId(): string {
+  const created = createSessionId()
+  try {
+    sessionStorage.setItem(PAGE_ID_KEY, created)
+  } catch {
+    // 隐私模式/配额：落不了盘不影响本页签内存里的身份
+  }
+  return created
+}
+
+function channelCtor(): (new (name: string) => OwnershipChannel) | null {
+  const ctor = (globalThis as { BroadcastChannel?: new (name: string) => OwnershipChannel }).BroadcastChannel
+  return typeof ctor === 'function' ? ctor : null
+}
+
+/** 关掉旧通道再开新的（RC-4 ③）：同一文档只留一条所有权通道，重复初始化不叠加监听。 */
+function openOwnershipChannel(onMessage: (message: OwnershipMessage) => void): void {
+  closeOwnershipChannel()
+  const ctor = channelCtor()
+  if (!ctor) {
+    return
+  }
+  try {
+    const channel = new ctor(OWNERSHIP_CHANNEL_NAME)
+    channel.onmessage = (event) => {
+      const data = event.data as Partial<OwnershipMessage> | null
+      if (!data || (data.kind !== 'claim' && data.kind !== 'released') || typeof data.sessionId !== 'string') {
+        return
+      }
+      onMessage({
+        kind: data.kind,
+        sessionId: data.sessionId,
+        pageId: typeof data.pageId === 'string' ? data.pageId : ''
+      })
     }
-    return null
+    ownershipChannel = channel
+  } catch {
+    ownershipChannel = null
+  }
+}
+
+function closeOwnershipChannel(): void {
+  try {
+    ownershipChannel?.close()
+  } catch {
+    // 关不掉只影响本页签的广播能力，不影响所有权判定
+  }
+  ownershipChannel = null
+}
+
+function postOwnership(kind: OwnershipMessage['kind'], sessionId: string): void {
+  const message: OwnershipMessage = { kind, sessionId, pageId: readPageId() }
+  try {
+    ownershipChannel?.postMessage(message)
+  } catch {
+    // 广播失败只影响让渡，不影响本页签继续用当前会话
+  }
+}
+
+/** Web Locks 面（RC-4 ②）：环境不支持时为 null ⇒ 判 'unknown' 走恢复兜底。 */
+function lockManager(): LockManager | null {
+  try {
+    const locks = typeof navigator === 'undefined' ? undefined : navigator.locks
+    return locks && typeof locks.request === 'function' ? locks : null
   } catch {
     return null
   }
+}
+
+/**
+ * 会话锁探活（RC-4 ②）：'granted' = 锁到手（本页签是原页签，持锁至文档销毁）；
+ * 回调收到 `null` = 'occupied'（别的页签持着该会话 ⇒ 本页签是复制品）；无锁能力 = 'unsupported'。
+ * 调用入口已先判锁能力（`ensureTabOwnership`），这里的 'unsupported' 只服务认领/让渡两个补路。
+ */
+async function probeSessionLock(sessionId: string): Promise<'granted' | 'occupied' | 'unsupported'> {
+  const locks = lockManager()
+  if (!locks) {
+    return 'unsupported'
+  }
+  const name = SESSION_LOCK_PREFIX + sessionId
+  if (heldLock?.name === name) {
+    // 同一文档重复探活：锁已在手（自持锁的 ifAvailable 请求会被判"不可用"）
+    return 'granted'
+  }
+  return await new Promise<'granted' | 'occupied' | 'unsupported'>((resolve) => {
+    let settled = false
+    const settle = (verdict: 'granted' | 'occupied' | 'unsupported'): void => {
+      if (!settled) {
+        settled = true
+        resolve(verdict)
+      }
+    }
+    try {
+      void locks.request(name, { ifAvailable: true }, (lock) => {
+        if (!lock) {
+          settle('occupied')
+          return undefined
+        }
+        ownedSessionId = sessionId
+        settle('granted')
+        // 常挂 promise = 持锁到文档销毁（释放由浏览器负责；让渡/离开时显式释放）
+        return new Promise<void>((release) => {
+          heldLock = { name, release }
+        })
+      }).catch(() => settle('occupied'))
+    } catch {
+      settle('unsupported')
+    }
+  })
+}
+
+/** 释放本页签持有的会话锁（让渡 / 离开页面时用；文档销毁时浏览器自会释放）。 */
+function releaseSessionLock(): void {
+  const held = heldLock
+  heldLock = null
+  ownedSessionId = null
+  try {
+    held?.release()
+  } catch {
+    // 释放失败只影响让渡时序
+  }
+}
+
+/**
+ * 三层握手的判定入口（RC-4）：锁被占**限次重试**（`LOCK_PROBE_ATTEMPTS` × `LOCK_PROBE_RETRY_MS`）
+ * —— 刷新场景里旧文档的锁可能尚未随文档销毁释放，早判会把刷新误判成复制品。
+ */
+async function resolveTabOwnership(sessionId: string): Promise<TabOwnership> {
+  for (let attempt = 1; attempt <= LOCK_PROBE_ATTEMPTS; attempt += 1) {
+    const verdict = await probeSessionLock(sessionId)
+    if (verdict === 'unsupported') {
+      return 'unknown'
+    }
+    if (verdict === 'granted') {
+      return 'owner'
+    }
+    if (attempt < LOCK_PROBE_ATTEMPTS) {
+      await sleep(LOCK_PROBE_RETRY_MS)
+    }
+  }
+  return 'duplicate'
+}
+
+/** 离开页面时广播让渡 + 释放锁（RC-4 ③）。只绑一次；`pagehide` 覆盖关闭/刷新/前后退。 */
+function bindOwnershipRelease(): void {
+  if (pageHideBound) {
+    return
+  }
+  pageHideBound = true
+  window.addEventListener('pagehide', () => {
+    if (ownedSessionId === null) {
+      return
+    }
+    postOwnership('released', ownedSessionId)
+    releaseSessionLock()
+  })
 }
 
 /** R-166 口径⑤：清掉本页签全部镜像引用（键前缀口径，不依赖当前 sessionId）。 */
@@ -276,15 +483,15 @@ function clearMirrorRefs(): void {
   }
 }
 
-/** 取/建页签会话 id（R-166 口径⑤：新页签/复制页签起新会话，刷新/前后退恢复）。 */
+/**
+ * 取/建页签会话 id。
+ *
+ * RC-4：**不再**用导航类型判"新页签 / 复制页签"（真机复制页签 = `back_forward`，判据作废）——
+ * 存量 id 一律先按**恢复**取用，是否复制品由 {@link resolveTabOwnership} 在面板挂载后用
+ * Web Locks 判定，判为复制品再就地换新 id（见 store 的 `ensureTabOwnership`）。
+ */
 function initSessionId(): string {
   try {
-    if (navigationType() === 'navigate') {
-      // 新页签 / 复制页签 / 手输地址：本页签起**新会话** —— 清 id 与镜像引用。
-      // 注意：这不是"清空后端会话"，只是本页签换用新 id（旧会话记忆由其 TTL / 显式删除收口）。
-      sessionStorage.removeItem(SESSION_ID_KEY)
-      clearMirrorRefs()
-    }
     const stored = sessionStorage.getItem(SESSION_ID_KEY)
     if (stored) {
       return stored
@@ -580,6 +787,12 @@ export const useAiStore = defineStore('ai', {
   state: () => ({
     /** 页签级会话 id（记忆窗口 CONVERSATION_ID） */
     sessionId: initSessionId(),
+    /**
+     * 本页签的会话所有权角色（RC-4）：'unknown' = 尚未判定；'owner' = 本页签持有会话锁；
+     * 'duplicate' = 由复制产生、已就地换新会话且**尚未**接手原会话（让渡判据）；
+     * 'unsupported' = 环境无 Web Locks，按恢复处理（终态）。
+     */
+    tabOwnership: 'unknown' as TabOwnership,
     /** AI 面板是否展开（裁剪性：收起后业务照常；页签级记忆，刷新后保持用户的选择） */
     expanded: initExpanded(),
     messages: [] as ChatMessage[],
@@ -1964,6 +2177,30 @@ export const useAiStore = defineStore('ai', {
       }
     },
 
+    /**
+     * RC-2：GF 提交值写回工具段（**按 toolCallId 直接定位，不依赖 `activeForm` 身份**）。
+     *
+     * 为什么要独立于 activeForm：结局帧（`frontend_tool_result`）可能先于
+     * `POST /frontend-tool-result` 的应答到达，`handleFrame` 会把 `activeForm` 置 null
+     * （`:2764`）——旧写法把写回挂在 `activeForm` 身份守卫之后，值就随守卫一起丢掉
+     * （只读渲染吃 `submittedValues`：本会话内值缺失，要等刷新才由后端 resultText 补回）。
+     */
+    writeSubmittedValues(toolCallId: string, values: Record<string, unknown>): void {
+      const host = this.messages.find((item) => item.parts.some(
+        (part): boolean => part.kind === 'tool' && part.toolCallId === toolCallId
+      ))
+      const segment = host?.parts.find((part) => part.kind === 'tool' && part.toolCallId === toolCallId)
+      if (host && segment && segment.kind === 'tool') {
+        this.upsertToolPart(host, {
+          toolCallId,
+          name: segment.name,
+          kind2: segment.kind2,
+          submittedValues: values,
+          requiresAction: false
+        })
+      }
+    },
+
     /** GF-B：提交表单值 —— result 为字段 key→值的 JSON 字符串；客户端复核不过就地提示不发出。 */
     async submitGenerativeForm(values: Record<string, unknown>): Promise<void> {
       const form = this.activeForm
@@ -1978,26 +2215,17 @@ export const useAiStore = defineStore('ai', {
       form.status = 'submitting'
       form.error = null
       const outcome = await this.submitFrontendToolResult(form.toolCallId, JSON.stringify(values), 'http-post', false, form.runId)
-      if (this.activeForm?.toolCallId !== form.toolCallId) {
-        // 结局帧/新表单已收敛：不写回过期状态（红队问题 6，防瞬时覆写）
+      if (outcome.ok || outcome.duplicate) {
+        // RC-2：值写回**先于** activeForm 身份守卫 —— 结局帧先到（activeForm 已 null）也要落值；
+        // 守卫只留给"回填 form.status/error"这类必须择主的本地态（防瞬时覆写，红队问题 6）。
+        this.writeSubmittedValues(form.toolCallId, values)
+        if (this.activeForm?.toolCallId === form.toolCallId) {
+          form.status = 'submitted'
+        }
         return
       }
-      if (outcome.ok || outcome.duplicate) {
-        form.status = 'submitted'
-        // R-158 #10：提交值回执写回工具段（随段持久化，刷新后可回溯已填值）
-        const host = this.messages.find((item) => item.parts.some(
-          (part): boolean => part.kind === 'tool' && part.toolCallId === form.toolCallId
-        ))
-        const segment = host?.parts.find((part) => part.kind === 'tool' && part.toolCallId === form.toolCallId)
-        if (host && segment && segment.kind === 'tool') {
-          this.upsertToolPart(host, {
-            toolCallId: form.toolCallId,
-            name: segment.name,
-            kind2: segment.kind2,
-            submittedValues: values,
-            requiresAction: false
-          })
-        }
+      if (this.activeForm?.toolCallId !== form.toolCallId) {
+        // 结局帧/新表单已收敛：失败提示不写回过期表单（红队问题 6，防瞬时覆写）
         return
       }
       if (outcome.rejected) {
@@ -2108,26 +2336,14 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
-     * 新建对话（页签内重置会话）：立即清屏 + 换新 sessionId + 删旧会话的服务端记忆。
+     * RC-4：会话本地重置 —— 换新 id + 清屏 + 复位轮次/挂起/时钟，**不碰后端**。
      *
-     * 顺序（苞 A 项 1 裁决）：
-     * 1. 先在跑的轮次 `abort`（R5①）——否则 loading 不复位、后续帧会写进已清空的 messages；
-     * 2. 立刻换 id 并清状态（**同步完成**：点击=立即清屏，不等后端）；
-     * 3. 再 best-effort `POST /api/ai/cancel/{oldRunId}` 通知后端停旧轮（后端不可达不阻断本地重置，
-     *    口径同 `stop()`）；
-     * 4. **最后** `DELETE /api/ai/history/{oldSessionId}` 删旧记忆（失败只提示，不影响新对话；
-     *    提示带「仍是本轮」守卫，见函数末尾与复核 F5）。
-     *
-     * 已知代价（施工卡 §5.2，登记；口径按复核 F2 订正为如实版）：旧轮终局的记忆收敛（`clear + add`）
-     * 会把窗口整体写回同名键，而 `cancel` 只是「置取消标志 + 唤醒收尾」、轮次收盘是异步的
-     * ⇒ **在飞路径下 DELETE 必然先于收盘重写**（顺序必然，不是概率竞态；先 cancel 再 delete 也
-     * 缩不小这个窗口），即旧键必被写回、残留至 TTL 到期。旧 id 已被前端丢弃，故残留期间无人读取
-     * （用户不可见）。更强的保证（端点 409 硬拒）已被明确否掉 —— 「新建对话」不能变成可能失败的动作。
+     * 抽取自「新建对话」（`resetSession`）：复制页签判定（`ensureTabOwnership`）与用户新建对话
+     * 走**同一段**本地重置，差别只在后端收尾 —— 复制页签**不得**删旧会话的后端记忆
+     * （那是原页签的会话），故本段独立出来只管本页签。
      */
-    async resetSession(): Promise<void> {
-      // 两个旧值必须在清状态之前取：oldRunId 用于取消旧轮，oldSessionId 用于删旧记忆与删旧镜像
+    adoptFreshSession(): string {
       const oldSessionId = this.sessionId
-      const oldRunId = this.activeRunId
       // R5①（issue#5）：在跑的轮次先中止 —— 否则 loading 不复位（输入区一直禁用到流结束），
       // 且后续帧会写进**已清空**的 messages（按 assistantId 找不到宿主 ⇒ 孤儿消息/孤儿帧）
       try {
@@ -2169,6 +2385,145 @@ export const useAiStore = defineStore('ai', {
       this.stopped = false
       this.streamInterrupted = false
       this.historyLoaded = true
+      return nextId
+    },
+
+    /**
+     * RC-4：解析本页签的会话所有权（三层握手入口，面板挂载时调用一次）。
+     *
+     * - **原页签**（锁到手）⇒ 沿用会话 id，广播 `claim`；
+     * - **环境无 Web Locks**（旧浏览器 / jsdom）⇒ 'unsupported'，按**恢复**处理（保守）：
+     *   这一段**同步**收口并返回 `null` —— 调用方（面板 onMounted）不必为一次空判定多等
+     *   一个 microtask，既有挂载时序一格不动；
+     * - **复制页签**（锁被原页签持有）⇒ `adoptFreshSession()` 起新会话 + 轮换 pageId：
+     *   **不接管**原会话、**不删**原会话的后端记忆；让渡监听随之装上（原页签关闭后由
+     *   `onOwnershipMessage` 决定是否接手）。
+     *
+     * 幂等：判定过一次（角色非 'unknown'）即不再重复探活。
+     *
+     * @returns 需要等待的判定 promise；`null` = 已同步判定完（无锁能力），调用方无需 await
+     */
+    ensureTabOwnership(): Promise<void> | null {
+      if (this.tabOwnership !== 'unknown') {
+        return null
+      }
+      ensurePageId()
+      openOwnershipChannel((message) => this.onOwnershipMessage(message))
+      bindOwnershipRelease()
+      if (!lockManager()) {
+        this.tabOwnership = 'unsupported'
+        return null
+      }
+      const sid = this.sessionId
+      return (async (): Promise<void> => {
+        const role = await resolveTabOwnership(sid)
+        if (this.sessionId !== sid) {
+          // 探活在途期间会话已被换掉（新建对话 / 让渡）：不为旧会话落任何角色
+          return
+        }
+        this.tabOwnership = role
+        if (role === 'owner') {
+          ownedSessionId = sid
+          postOwnership('claim', sid)
+          return
+        }
+        if (role === 'duplicate') {
+          // 复制页签：先清掉从原页签**继承**来的镜像引用，再起新会话；pageId 轮换（同源广播里
+          // 两个页签的 pageId 必须可区分）。
+          clearMirrorRefs()
+          this.adoptFreshSession()
+          rotatePageId()
+          await this.claimSessionOwnership(this.sessionId)
+        }
+      })()
+    },
+
+    /** RC-4 ②：为本页签会话认领所有权锁（新会话 id 必然空闲），拿到后广播 `claim`。 */
+    async claimSessionOwnership(sessionId: string): Promise<void> {
+      const verdict = await probeSessionLock(sessionId)
+      if (verdict !== 'granted' || this.sessionId !== sessionId) {
+        return
+      }
+      ownedSessionId = sessionId
+      postOwnership('claim', sessionId)
+    },
+
+    /**
+     * RC-4 ③：所有权广播处理。
+     *
+     * 只有"被判为复制品、且自己这边**还没产生任何内容**"的页签接手让渡（`released`）——
+     * 已经在自己会话里说过话的页签不换会话（换掉会让用户眼前内容跳变）。
+     * 其余消息（自己的 `claim` 回声 / 别人的会话 id）一律忽略。
+     */
+    onOwnershipMessage(message: OwnershipMessage): void {
+      if (message.kind !== 'released' || message.sessionId === this.sessionId) {
+        return
+      }
+      if (this.tabOwnership !== 'duplicate') {
+        return
+      }
+      if (this.messages.length > 0 || this.loading || this.activeRunId !== null) {
+        return
+      }
+      void this.takeOverSession(message.sessionId)
+    },
+
+    /**
+     * RC-4 ③：接手让渡过来的会话 —— **以锁为准**：先探活（原页签的锁随文档销毁释放，探到才认账），
+     * 再换 id + 读回该会话历史。二次判据同 `onOwnershipMessage`（探活是异步的，期间可能已说话）。
+     */
+    async takeOverSession(sessionId: string): Promise<void> {
+      const verdict = await probeSessionLock(sessionId)
+      if (verdict !== 'granted') {
+        return
+      }
+      if (this.messages.length > 0 || this.loading || this.activeRunId !== null) {
+        return
+      }
+      const previous = this.sessionId
+      if (ownedSessionId === previous) {
+        // 放弃本页签那个空白会话：把它的所有权一并让出去（不占着不再使用的锁）
+        postOwnership('released', previous)
+        releaseSessionLock()
+      }
+      this.sessionId = sessionId
+      try {
+        sessionStorage.setItem(SESSION_ID_KEY, sessionId)
+        sessionStorage.removeItem(MIRROR_PREFIX + previous)
+      } catch {
+        // 持久化失败：本页签内存里仍按接手后的会话走
+      }
+      this.tabOwnership = 'owner'
+      ownedSessionId = sessionId
+      postOwnership('claim', sessionId)
+      await this.loadHistory()
+    },
+
+    /**
+     * 新建对话（页签内重置会话）：立即清屏 + 换新 sessionId + 删旧会话的服务端记忆。
+     *
+     * 顺序（苞 A 项 1 裁决）：
+     * 1. 先在跑的轮次 `abort`（R5①）——否则 loading 不复位、后续帧会写进已清空的 messages；
+     * 2. 立刻换 id 并清状态（**同步完成**：点击=立即清屏，不等后端）；
+     * 3. 再 best-effort `POST /api/ai/cancel/{oldRunId}` 通知后端停旧轮（后端不可达不阻断本地重置，
+     *    口径同 `stop()`）；
+     * 4. **最后** `DELETE /api/ai/history/{oldSessionId}` 删旧记忆（失败只提示，不影响新对话；
+     *    提示带「仍是本轮」守卫，见函数末尾与复核 F5）。
+     *
+     * 已知代价（施工卡 §5.2，登记；口径按复核 F2 订正为如实版）：旧轮终局的记忆收敛（`clear + add`）
+     * 会把窗口整体写回同名键，而 `cancel` 只是「置取消标志 + 唤醒收尾」、轮次收盘是异步的
+     * ⇒ **在飞路径下 DELETE 必然先于收盘重写**（顺序必然，不是概率竞态；先 cancel 再 delete 也
+     * 缩不小这个窗口），即旧键必被写回、残留至 TTL 到期。旧 id 已被前端丢弃，故残留期间无人读取
+     * （用户不可见）。更强的保证（端点 409 硬拒）已被明确否掉 —— 「新建对话」不能变成可能失败的动作。
+     */
+    async resetSession(): Promise<void> {
+      // 两个旧值必须在清状态之前取：oldRunId 用于取消旧轮，oldSessionId 用于删旧记忆与删旧镜像
+      const oldSessionId = this.sessionId
+      const oldRunId = this.activeRunId
+      const nextId = this.adoptFreshSession()
+      // RC-4：新会话的锁归本页签（随机新 id 必然空闲）；用户显式新建对话后不再算"待接手的复制品"
+      this.tabOwnership = 'owner'
+      void this.claimSessionOwnership(nextId)
       // best-effort 停掉后端仍在跑的旧轮（只断本地连接不停后端，故必须显式 POST）
       if (oldRunId) {
         try {
