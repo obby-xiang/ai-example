@@ -1885,12 +1885,13 @@ export const useAiStore = defineStore('ai', {
     /**
      * 拉权威状态校正门卡（口径③/④的唯一校正口）。
      *
-     * 数据源 = `GET /api/ai/runs/current`，落**真实裁决回执**（APPROVED→已确认 / EXECUTED→
-     * 已确认已执行 / REJECTED→已拒绝 / TIMEOUT→已超时 / CANCELLED→已取消 / BLOCKED→越界）。
+     * 数据源 = `GET /api/ai/runs/current`，落**真实裁决回执**（APPROVED→已批准 / EXECUTED→
+     * 已批准（执行成功） / REJECTED→已拒绝 / TIMEOUT→已超时 / CANCELLED→未批准收尾（已超时） /
+     * BLOCKED→越界，不进审批只读卡 —— 2A 批裁决 §9 K2：门卡只读四态、无已取消）。
      *
      * 条目仍未定（PENDING）、条目缺失、或轮次已不存在时：
-     * - `voidOnNoOutcome = true`（**倒计时归零路径**，口径④）⇒ 落「已超时作废」回执态
-     *   （灰族，与 demo 的已超时同形态，**不设重试钮**）；后端结局帧若随后到达，仍按既有
+     * - `voidOnNoOutcome = true`（**倒计时归零路径**，口径④）⇒ 落「已超时」回执态
+     *   （灰族，与 demo 的已超时同形态，**不设重试钮**；段侧 expiredLocally 标记保留）；后端结局帧若随后到达，仍按既有
      *   收敛路径覆盖为真实终态；
      * - 否则（409 路径）⇒ **绝不伪造裁决**：保留提交态（按钮继续禁用，同 id 不再提交），
      *   只给一条提示。
@@ -2018,7 +2019,7 @@ export const useAiStore = defineStore('ai', {
       } catch (error) {
         if (error instanceof ApiError && error.code === ErrorCode.DUPLICATE_TOOL_CALL_ID) {
           // R-166 口径③：409 只说"这条已有决策"，**不说是哪一个** —— 旧口径一律硬写
-          // `approved`+`running`，于是"其实已被拒/已超时"也会被显示成「已确认」（诚实性缺陷）。
+          // `approved`+`running`，于是"其实已被拒/已超时"也会被显示成「已批准」（诚实性缺陷）。
           // 改为不写任何乐观裁决：撤乐观写 → 置「已提交，同步中…」瞬态 → 等 SSE 结局帧 →
           // 3 秒未达则拉 runs/current 落真实裁决回执。
           this.markGateSyncing(toolCallId, pending)
@@ -2196,9 +2197,34 @@ export const useAiStore = defineStore('ai', {
           name: segment.name,
           kind2: segment.kind2,
           submittedValues: values,
+          // 2A 批（裁决 §3 缺陷①）：GF 提交同样记 `decidedAt`（**数据层记录，卡面不渲染** ——
+          // r10 起卡头只留状态徽标 + 摘要 + chevron，时间不上卡面）。
+          ...(segment.decidedAt === undefined ? { decidedAt: Date.now() } : {}),
           requiresAction: false
         })
       }
+    },
+
+    /**
+     * 2A 批（裁决 §3 缺陷①）：表单系取消 / 超时收尾记 `decidedAt`（**数据层记录，卡面不渲染**）。
+     * 只写第一次决策时刻（重入 / 帧后到不覆盖）；段不存在时静默跳过（与 cancel 回灌同口径）。
+     */
+    markFormDecided(toolCallId: string): void {
+      const host = this.messages.find((item) => item.parts.some(
+        (part): boolean => part.kind === 'tool' && part.toolCallId === toolCallId
+      ))
+      const segment = host?.parts.find((part) => part.kind === 'tool' && part.toolCallId === toolCallId)
+      if (!host || !segment || segment.kind !== 'tool' || segment.decidedAt !== undefined) {
+        return
+      }
+      this.upsertToolPart(host, {
+        toolCallId,
+        name: segment.name,
+        kind2: segment.kind2,
+        decidedAt: Date.now(),
+        requiresAction: false
+      })
+      deriveProjections(host)
     },
 
     /** GF-B：提交表单值 —— result 为字段 key→值的 JSON 字符串；客户端复核不过就地提示不发出。 */
@@ -2251,6 +2277,8 @@ export const useAiStore = defineStore('ai', {
       // T2a-D#2（A2）：本地 cancel 仅乐观置位 —— 只收敛仍处 pending 的 pendingCall 投影；
       // 帧终态为最终裁决，后到帧可覆盖此乐观 cancelled（他端先提交时翻为 succeeded，不降级）
       this.applyPendingTerminal(form.toolCallId, 'cancelled')
+      // 2A 批（裁决 §3 缺陷①）：取消 / 超时收尾记决策时刻（数据层记录，卡面不渲染）
+      this.markFormDecided(form.toolCallId)
       disarmFormExpiry()
       const outcome = await this.submitFrontendToolResult(form.toolCallId, '', 'http-post', true, form.runId)
       if (this.activeForm?.toolCallId !== form.toolCallId) {

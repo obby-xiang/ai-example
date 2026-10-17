@@ -209,6 +209,18 @@ describe('RC-2：GF submittedValues 写回不依赖 activeForm 身份（结局�
       requiresAction: false,
       submittedValues: { region: 'HB' }
     })
+    // 2A 批（裁决 §3 缺陷①）：GF 提交同样落 decidedAt（数据层记录；卡面不渲染由 AI 面板断言锁）
+    expect(typeof part.decidedAt).toBe('number')
+  })
+
+  it('2A：GF 取消 / 超时收尾同样落 decidedAt（且不写提交值）', async () => {
+    const store = useAiStore()
+    const assistant = armGenerativeForm(store, 'g1')
+    await store.cancelGenerativeForm()
+    const part = toolPartsOf(assistant)[0]!
+    expect(part.status).toBe('cancelled')
+    expect(typeof part.decidedAt).toBe('number')
+    expect(part.submittedValues).toBeUndefined()
   })
 
   it('正常时序（POST 先应答、结局帧后到）⇒ 提交值照旧写回且不被终帧抹掉', async () => {

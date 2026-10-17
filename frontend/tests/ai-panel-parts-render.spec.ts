@@ -105,12 +105,18 @@ function makeActiveForm(toolCallId: string, status: ActiveGenerativeForm['status
   return { toolCallId, runId: 'run-1', form: {} as never, status, error: null, deadline: null }
 }
 
-async function mountPanel(messages: ChatMessage[]): Promise<ReturnType<typeof mount>> {
+async function mountPanel(
+  messages: ChatMessage[],
+  options: { realForm?: boolean } = {}
+): Promise<ReturnType<typeof mount>> {
   const store = useAiStore()
   store.messages = messages
   store.historyLoaded = true
   const { default: AiPanel } = await import('@/components/AiPanel/AiPanel.vue')
-  const wrapper = mount(AiPanel, { global: { stubs } })
+  const global = options.realForm
+    ? { stubs: { ...stubs, FormRenderer: false } }
+    : { stubs }
+  const wrapper = mount(AiPanel, { global })
   await wrapper.vm.$nextTick()
   return wrapper
 }
@@ -196,15 +202,23 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
     expect(ring.exists()).toBe(true)
     expect(ring.attributes('viewBox')).toBe('0 0 36 36')
     expect(ring.find('circle').exists()).toBe(true) // 两枚描边圆（底环 + 蓝弧）
-    // el-input/el-button 退场：拒绝原因 = 原生 textarea，双按钮 = 原生 button
+    // el-input/el-button 退场：双按钮 = 原生 button
     // （R-165 S3a 续：输入区 composer 亦已退 EP，断言改挂 [data-testid="composer-input"] 原生 textarea）
-    const reason = gate.find('textarea')
-    expect(reason.exists()).toBe(true)
-    expect(reason.attributes('placeholder')).toContain('拒绝原因')
+    // 2A 批（裁决 §3 缺陷④ / §9 K1）：H1 无理由框 —— 拒因输入框零残留
+    expect(gate.find('textarea').exists()).toBe(false)
+    expect(gate.find('[data-testid="reject-reason"]').exists()).toBe(false)
     const gateBtns = gate.findAll('button')
     expect(gateBtns.map((b) => b.text())).toEqual(['拒绝', '确认执行'])
-    expect(gateBtns[1]!.classes()).toEqual(expect.arrayContaining(['bg-[#2563eb]', 'text-white', 'font-semibold', 'rounded-[8px]', 'px-[13px]', 'py-[5px]', 'text-[12.6px]', 'disabled:bg-[#8b949e]']))
-    expect(gateBtns[0]!.classes()).toEqual(expect.arrayContaining(['bg-white', 'text-[#57606a]', 'border-[#e3e6ea]']))
+    // 2A 批（裁决 §3 缺陷③）：按钮防折行 —— whitespace-nowrap + flex-none + min-w
+    for (const btn of gateBtns) {
+      expect(btn.classes()).toEqual(expect.arrayContaining(['whitespace-nowrap', 'flex-none']))
+    }
+    expect(gateBtns[1]!.classes()).toEqual(expect.arrayContaining(['bg-[#2563eb]', 'text-white', 'font-semibold', 'rounded-[8px]', 'px-[13px]', 'py-[5px]', 'text-[12.6px]', 'disabled:bg-[#8b949e]', 'min-w-[72px]']))
+    expect(gateBtns[0]!.classes()).toEqual(expect.arrayContaining(['bg-white', 'text-[#57606a]', 'border-[#e3e6ea]', 'min-w-[56px]']))
+    // 按钮组整行可下移（行 flex-wrap），组内不换行
+    const actRow = gateBtns[0]!.element.parentElement as HTMLElement
+    expect(actRow.className).toContain('whitespace-nowrap')
+    expect(actRow.parentElement?.className).toContain('flex-wrap')
 
     // D-C10（原 :106-115 位置断言改写）：块分派下挂起卡（含确认子块）仍在 c2 工具卡之前
     const pendingCard = html.indexOf('pending-card-c1')
@@ -680,7 +694,7 @@ describe('R-154：截断角标 / 跟随暂停 / 生成中 / 编辑回填 / 建�
     expect(wrapper.find('[data-testid="show-more-c1"]').exists()).toBe(false)
     await wrapper.find('[data-testid="block-toggle-a-1:c1"]').trigger('click')
     const outBox = wrapper.find('[data-testid="block-body-a-1:c1"] > div:last-child > div:last-child').element as HTMLElement
-    expect(outBox.className).toContain('max-h-[160px]')
+    expect(outBox.className).toContain('max-h-[min(280px,35vh)]')
     expect(outBox.className).toContain('overflow-y-auto')
     expect(outBox.textContent).toContain('前 64KB 内容…')
     wrapper.unmount()
@@ -989,8 +1003,8 @@ describe('R-157：操作行外置 + role 过滤 + 编辑重跑 + 发送滚底 + 
  * 空内容卡不给展开入口，发布冲突明细收敛为表格。
  * R-158 旧面（#11 复制段间换行）保留在同一 describe 内。
  */
-describe('S6 批1：原卡只读态 / 空卡无入口 / 冲突表格（R-158 复制换行顺带）', () => {
-  it('#10→S6：CONFIRM 已决段原地切只读态（徽标 + 摘要 + 时间 + chevron + args 只读表；无「查看详情」钮）', async () => {
+describe('2A 批：已决原样 UI 只读态 / 折叠时序 / 冲突表格（R-158 复制换行顺带）', () => {
+  it('2A：CONFIRM 已决 = 原样只读（卡头裸行 + 门卡字段表原样 + 零按钮 + 无时间）', async () => {
     const msg = buildMessage([
       { kind: 'text', seg: 0, text: '', streaming: false },
       {
@@ -1004,38 +1018,52 @@ describe('S6 批1：原卡只读态 / 空卡无入口 / 冲突表格（R-158 复
     expect(receipt.exists()).toBe(true)
     // 单一元素 = 工具段自己的卡（不再有独立的第二张回执卡 / 也不再是 tool-card-*）
     expect(wrapper.find('[data-testid="tool-card-p1"]').exists()).toBe(false)
-    // 卡头恒显行：徽标 + 摘要 + 时间戳 + chevron（不展开也可见）
-    expect(receipt.text()).toContain('✓ 已确认')
-    expect(receipt.text()).toContain('启动发布作业')
+    // 卡头：状态徽标 + 人话摘要（成功终态默认折叠 ⇒ 摘要可见）；**时间不上卡面**（M1）
+    expect(receipt.text()).toContain('✓ 已批准')
+    expect(receipt.text()).toContain('已批准 · 启动发布作业')
     expect(receipt.text()).toContain('taskId=3')
-    expect(receipt.text()).toMatch(/\d{4}年\d{1,2}月\d{1,2}日 \d{2}:\d{2}/) // decidedAt 回显（R-162 渐进格式）
+    expect(receipt.text()).not.toMatch(/\d{4}年\d{1,2}月\d{1,2}日 \d{2}:\d{2}/)
+    expect(receipt.text()).not.toMatch(/\d{2}:\d{2}/)
     expect(receipt.find('[data-testid="ro-badge-p1"]').exists()).toBe(true)
     expect(receipt.find('[data-testid="ro-summary-p1"]').exists()).toBe(true)
-    // demo v7.9 `.rocard` 形制：卡容器 + 卡头 button + 只读表（.ro-bd）
-    expect(receipt.classes()).toEqual(expect.arrayContaining(['rocard', 'border-[#e3e6ea]', 'bg-white', 'rounded-[10px]', 'px-[11px]', 'py-[8px]', 'text-[12.6px]', 'text-[#57606a]', 'border-solid']))
+    // 卡容器 = 原卡壳（无只读专用底色 / 无只读 chip，H1）
+    expect(receipt.classes()).toEqual(expect.arrayContaining(['rocard', 'border-[#e3e6ea]', 'bg-white', 'rounded-[10px]', 'overflow-hidden', 'border-solid']))
+    // 卡头 = 裸文字行：无底色 / 无分隔线，px-10 / py-8 / gap-6（36.4px 同工具卡规格）
     const head = receipt.find('[data-testid="ro-toggle-p1"]')
-    expect(head.classes()).toEqual(expect.arrayContaining(['ro-hd', 'flex', 'items-center', 'gap-[6px]', 'w-full', 'border-0', 'bg-transparent', 'p-0', 'text-left']))
+    expect(head.classes()).toEqual(expect.arrayContaining(['ro-hd', 'flex', 'items-center', 'gap-[6px]', 'w-full', 'px-[10px]', 'py-[8px]', 'border-0', 'bg-transparent', 'text-left']))
+    expect(head.classes()).not.toContain('border-b')
+    // chevron：文字 ›、12px、ml-auto 靠右、展开 rotate-90；无 SVG / 无「只读」chip
+    const chev = head.findAll('span').at(-1)!
+    expect(chev.text()).toBe('›')
+    expect(chev.classes()).toEqual(expect.arrayContaining(['ml-auto', 'text-[12px]', 'tchev']))
+    expect(receipt.find('svg').exists()).toBe(false)
+    expect(receipt.text()).not.toContain('只读')
     // 「查看详情 / 收起详情」文字钮全稿退役（裁决 2026-10-16 第 2 条）
     expect(wrapper.text()).not.toContain('查看详情')
     expect(wrapper.find('[data-testid^="receipt-args-toggle-"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid^="receipt-args-more-"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid^="receipt-more-"]').exists()).toBe(false)
-    // 展开体 = 只读 label-value 表（CONFIRM 渲 args），160px 内滚；点卡头开合（默认收起）
+    // 成功终态默认折叠（回合已结束）⇒ 卡体隐藏；点卡头展开 = 原样门卡字段表（gateRows 同源）
     const body = receipt.find('[data-testid="ro-body-p1"]')
     expect(body.exists()).toBe(true)
     expect(body.attributes('style') ?? '').toContain('display: none')
-    expect(body.text()).toContain('taskId')
-    expect(body.text()).toContain('3')
-    const table = body.find('div')
-    expect(table.classes()).toEqual(expect.arrayContaining(['max-h-[160px]', 'overflow-y-auto', 'bg-[#f6f7f9]', 'rounded-[8px]']))
-    expect(table.text()).not.toContain('{') // 零 JSON 字符（裁决 20 裁 B）
     await head.trigger('click')
-    expect(receipt.find('[data-testid="ro-body-p1"]').attributes('style') ?? '').not.toContain('display: none')
+    const shown = receipt.find('[data-testid="ro-body-p1"]')
+    expect(shown.attributes('style') ?? '').not.toContain('display: none')
     expect(receipt.find('[data-testid="ro-toggle-p1"]').attributes('aria-expanded')).toBe('true')
+    expect(shown.text()).toContain('启动发布作业')
+    expect(shown.text()).toContain('taskId')
+    expect(shown.text()).toContain('3')
+    // 参数区字段表原样（字段族双约束 min(280px,35vh)）；零操作按钮；零 JSON 字符
+    const table = shown.find('[data-testid="ro-rows-p1"]')
+    expect(table.classes()).toEqual(expect.arrayContaining(['max-h-[min(280px,35vh)]', 'overflow-y-auto', 'bg-white', 'rounded-[8px]']))
+    expect(shown.findAll('button')).toHaveLength(0)
+    expect(shown.text()).not.toContain('{')
+    expect(receipt.text()).not.toContain('查看详情')
     wrapper.unmount()
   })
 
-  it('19-e：无参数纯确认 ⇒ 展开体 0 行 ⇒ 不给 chevron、卡头 disabled 不可点、点击 no-op', async () => {
+  it('2A：无参数纯确认 ⇒ 卡体仍有「操作」行原样；卡头可折叠（不再有 0 行无入口）', async () => {
     const msg = buildMessage([
       {
         kind: 'tool', seg: 0, toolCallId: 'e9', name: 'confirm_step', kind2: 'CONFIRM',
@@ -1045,19 +1073,21 @@ describe('S6 批1：原卡只读态 / 空卡无入口 / 冲突表格（R-158 复
     const wrapper = await mountPanel([msg])
     const head = wrapper.find('[data-testid="ro-toggle-e9"]')
     expect(head.exists()).toBe(true)
-    expect(head.attributes('disabled')).toBeDefined()
-    expect(head.classes()).toContain('cursor-default')
-    expect(head.find('.ro-chev').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="ro-body-e9"]').exists()).toBe(false)
-    // 程序化点击也 no-op（原生态 disabled 已拦真实点击，纵深一道）
+    expect(head.attributes('disabled')).toBeUndefined()
+    expect(head.classes()).toContain('cursor-pointer')
+    expect(head.findAll('span').at(-1)!.text()).toBe('›')
+    const body = wrapper.find('[data-testid="ro-body-e9"]')
+    expect(body.exists()).toBe(true)
     await head.trigger('click')
-    expect(wrapper.find('[data-testid="ro-body-e9"]').exists()).toBe(false)
-    // 卡头恒显行仍在（徽标 + 摘要 + 时间）
-    expect(wrapper.find('[data-testid="ro-summary-e9"]').text()).toContain('确认步骤')
+    expect(wrapper.find('[data-testid="ro-body-e9"]').attributes('style') ?? '').not.toContain('display: none')
+    expect(wrapper.find('[data-testid="ro-rows-e9"]').text()).toContain('操作')
+    expect(wrapper.find('[data-testid="ro-rows-e9"]').text()).toContain('确认步骤')
+    // 成功终态摘要仍在（折叠 / 展开都不改摘要文本）
+    expect(wrapper.find('[data-testid="ro-summary-e9"]').text()).toContain('已批准 · 确认步骤')
     wrapper.unmount()
   })
 
-  it('#10：GF 已决段只读表渲染**实际提交值**（label 取自 schema；枚举中文 / 布尔是否 / 数组顿号 / 文件取文件名）', async () => {
+  it('2A：GF 已决 = 同一张表单原生 disabled 值回填（枚举中文 / 布尔是否 / 多选 / 文本；零按钮）', async () => {
     const gf = buildMessage([
       {
         kind: 'tool', seg: 0, toolCallId: 'g1', name: 'generative_form', kind2: 'FRONTEND', status: 'succeeded',
@@ -1083,28 +1113,99 @@ describe('S6 批1：原卡只读态 / 空卡无入口 / 冲突表格（R-158 复
     ])
     plain.id = 'a-plain'
 
-    const wrapper = await mountPanel([gf, plain])
+    const wrapper = await mountPanel([gf, plain], { realForm: true })
     const receipt = wrapper.find('[data-testid="hitl-receipt"]')
-    expect(receipt.text()).toContain('✓ 已确认')
+    expect(receipt.text()).toContain('✓ 已提交')
+    expect(receipt.text()).toContain('已提交 · 导出范围 华北')
     const head = wrapper.find('[data-testid="ro-toggle-g1"]')
     await head.trigger('click')
     const body = wrapper.find('[data-testid="ro-body-g1"]')
-    const text = body.text()
-    // 字段 label 序 = schema 序；值可读化：枚举→中文、布尔→是、多选→顿号列表、路径→文件名
-    expect(text).toContain('导出范围')
-    expect(text).toContain('华北')
-    expect(text).toContain('是否压缩')
-    expect(text).toContain('是')
-    expect(text).toContain('标签')
-    expect(text).toContain('甲、乙')
-    expect(text).toContain('结果文件')
-    expect(text).toContain('sync-report-2026-10-15.json')
-    // 任何路径不展示 JSON / 表单定义键
-    for (const key of ['scenario', 'fields', 'form', '{', '[', 'multi_select']) {
-      expect(text).not.toContain(key)
+    // 同一张表单：标题 + 六型控件原样（值回填），全部原生 disabled
+    expect(body.text()).toContain('导出参数')
+    expect(body.find('[data-testid="gf-fields"]').exists()).toBe(true)
+    const select = body.find('select')
+    expect(select.element.value).toBe('HB')
+    expect(select.attributes('disabled')).toBeDefined()
+    expect(body.text()).toContain('华北')
+    const checkboxes = body.findAll('input[type="checkbox"]')
+    expect(checkboxes).toHaveLength(3) // 1 布尔 + 2 多选
+    expect(checkboxes.every((box) => box.attributes('disabled') !== undefined)).toBe(true)
+    const checkedStates = checkboxes.map((box) => (box.element as HTMLInputElement).checked)
+    expect(checkedStates).toEqual([true, true, true]) // compress=true / tags=[A,B]
+    const textInput = body.find('input[type="text"]')
+    expect((textInput.element as HTMLInputElement).value).toBe('/srv/app/exports/sync-report-2026-10-15.json')
+    // 已决分支零操作按钮（K1：不是置灰、不是隐藏节点）
+    expect(body.findAll('button')).toHaveLength(0)
+    expect(wrapper.find('[data-testid="gf-submit"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="gf-cancel"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="gf-deadline"]').exists()).toBe(false)
+    // 任何路径不展示 JSON / 表单定义键（正文文本）
+    for (const key of ['scenario', 'fields', '{', '[', 'multi_select']) {
+      expect(body.text()).not.toContain(key)
     }
     // 普通 BACKEND 工具卡不出只读卡（本消息域恰有 1 张只读卡）
     expect(wrapper.findAll('[data-testid="hitl-receipt"]')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('2A：折叠时机 = 回合结束才收（决策当下不折叠；本轮收尾后自动折叠）', async () => {
+    const msg = buildMessage([
+      {
+        kind: 'tool', seg: 0, toolCallId: 't1', name: 'start_publish', kind2: 'CONFIRM',
+        status: 'succeeded', args: '{"taskId":3}', requiresAction: false, decision: 'approved', decidedAt: 1_700_000_000_000
+      }
+    ])
+    const store = useAiStore()
+    const wrapper = await mountPanel([msg])
+    // 回合仍在进行（loading + 末条消息）⇒ 成功卡保持展开（不把刚做的决定秒收）
+    store.loading = true
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-testid="ro-body-t1"]').attributes('style') ?? '').not.toContain('display: none')
+    // 回合结束（loading=false）⇒ 收成卡头行
+    store.loading = false
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-testid="ro-body-t1"]').attributes('style') ?? '').toContain('display: none')
+    wrapper.unmount()
+
+    // 手动收起优先于「回合未结束」时序（用户点了就听用户的）
+    const w2 = await mountPanel([msg])
+    useAiStore().loading = true
+    await w2.vm.$nextTick()
+    await w2.find('[data-testid="ro-toggle-t1"]').trigger('click')
+    expect(w2.find('[data-testid="ro-body-t1"]').attributes('style') ?? '').toContain('display: none')
+    w2.unmount()
+  })
+
+  it('2A/F9：未提交不记录 —— GF 取消收尾回初始空态（残留提交值也不回填）', async () => {
+    const msg = buildMessage([
+      {
+        kind: 'tool', seg: 0, toolCallId: 'g9', name: 'generative_form', kind2: 'FRONTEND',
+        status: 'cancelled', requiresAction: false,
+        // 段上纵有残留值（异常/竞态），未提交收尾一律不记录
+        submittedValues: { note: '半成品内容', mode: 'safe' },
+        args: JSON.stringify({
+          form: {
+            scenario: 'CONFIRM',
+            title: '补充发布说明',
+            fields: [
+              { key: 'note', label: '说明', type: 'text', required: false },
+              { key: 'mode', label: '模式', type: 'enum', required: false, options: [{ value: 'fast', label: '快速' }, { value: 'safe', label: '安全' }] }
+            ]
+          }
+        })
+      }
+    ])
+    const wrapper = await mountPanel([msg], { realForm: true })
+    expect(wrapper.find('[data-testid="ro-badge-g9"]').text()).toBe('✗ 已取消')
+    // 例外态默认展开
+    const body = wrapper.find('[data-testid="ro-body-g9"]')
+    expect(body.attributes('style') ?? '').not.toContain('display: none')
+    expect((body.find('input[type="text"]').element as HTMLInputElement).value).toBe('')
+    // 枚举回合法默认（首个选项），不是当时选中的 safe
+    expect((body.find('select').element as HTMLSelectElement).value).toBe('fast')
+    expect(body.text()).not.toContain('半成品内容')
+    // 只读态零按钮
+    expect(body.findAll('button')).toHaveLength(0)
     wrapper.unmount()
   })
 
@@ -1127,7 +1228,7 @@ describe('S6 批1：原卡只读态 / 空卡无入口 / 冲突表格（R-158 复
     expect(rows.text()).toContain('是')
     expect(rows.text()).toContain('/a/x、/b/y')
     expect(rows.text()).not.toContain('{')
-    expect(rows.classes()).toEqual(expect.arrayContaining(['max-h-[160px]', 'overflow-y-auto']))
+    expect(rows.classes()).toEqual(expect.arrayContaining(['max-h-[min(280px,35vh)]', 'overflow-y-auto']))
     // 无参（`'{}'`）⇒ 整块参数区不渲染（不渲空盒、不露 raw 文本）；输出仍在
     await wrapper.find('[data-testid="block-toggle-a-noargs:c2"]').trigger('click')
     expect(wrapper.find('[data-testid="args-rows-c2"]').exists()).toBe(false)
@@ -1208,7 +1309,7 @@ describe('S6 批1：原卡只读态 / 空卡无入口 / 冲突表格（R-158 复
     }
     // 门卡字段区仍 160px 内滚（新增键不压垮卡）；同卡 args JSON 盒零命中（裁决 2026-10-16 第 2 条）
     const box = wrapper.find('[data-testid="gate-rows"]').element as HTMLElement
-    expect(box.className).toContain('max-h-[160px]')
+    expect(box.className).toContain('max-h-[min(280px,35vh)]')
     expect(box.className).toContain('overflow-y-auto')
     expect(wrapper.find('[data-testid="args-rows-g1"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="hitl-gate"]').text()).not.toContain('{')
@@ -1236,7 +1337,7 @@ describe('S6 批1：原卡只读态 / 空卡无入口 / 冲突表格（R-158 复
     const header = table.find('div').text()
     expect(header).toBe('配置行键原因')
     const body = table.find('div:nth-child(2)')
-    expect(body.classes()).toEqual(expect.arrayContaining(['max-h-[320px]', 'overflow-y-auto']))
+    expect(body.classes()).toEqual(expect.arrayContaining(['max-h-[min(480px,60vh)]', 'overflow-y-auto']))
     const text = table.text()
     expect(text).toContain('CURRENCY')
     expect(text).toContain('GLOBAL')
@@ -1256,7 +1357,7 @@ describe('S6 批1：原卡只读态 / 空卡无入口 / 冲突表格（R-158 复
     wrapper.unmount()
   })
 
-  it('#10→S6：五态徽标（已确认 / 已拒绝 / 已超时 / 已超时作废 / 已取消）——卡头恒显行，展开体 0 行也不给入口', async () => {
+  it('2A：门卡四态徽标（已批准 / 已拒绝 / 已超时 / 已批准·执行失败；无已取消）+ 例外默认展开', async () => {
     const expired = buildMessage([
       { kind: 'tool', seg: 0, toolCallId: 'e1', name: 'start_export', kind2: 'CONFIRM', status: 'expired', args: '{}', requiresAction: false }
     ])
@@ -1277,25 +1378,46 @@ describe('S6 批1：原卡只读态 / 空卡无入口 / 冲突表格（R-158 复
       { kind: 'tool', seg: 0, toolCallId: 'e5', name: 'start_publish', kind2: 'CONFIRM', status: 'failed', args: '{"taskId":3}', requiresAction: false, decision: 'approved', reason: '发布失败：目标库不可写' }
     ])
     failed.id = 'a-failed'
+    const approved = buildMessage([
+      { kind: 'tool', seg: 0, toolCallId: 'e6', name: 'start_publish', kind2: 'CONFIRM', status: 'succeeded', args: '{"taskId":3}', requiresAction: false, decision: 'approved', decidedAt: 1_700_000_000_000 }
+    ])
+    approved.id = 'a-approved'
 
-    const wrapper = await mountPanel([expired, expiredLocal, cancelled, rejected, failed])
+    const wrapper = await mountPanel([expired, expiredLocal, cancelled, rejected, failed, approved])
     const cardText = (id: string): string => wrapper.find(`[data-testid="msg-bubble-${id}"]`).find('[data-testid="hitl-receipt"]').text()
-    // R-166 口径⑥：徽标带字形前缀；超时族文案由「已过期」改「已超时」
+    // 徽标字形前缀保留（✓ / ✗ / !，均文本字形）
     expect(cardText('a-expired')).toContain('! 已超时')
     expect(cardText('a-expired')).not.toContain('已过期')
-    // R-166 口径④：expiredLocally ⇒「已超时作废」（同一 status 两文案）
-    expect(cardText('a-expired-local')).toContain('! 已超时作废')
-    expect(cardText('a-cancelled')).toContain('已取消')
+    // 本地作废不再单列文案（F6：超时徽标仅「已超时」）
+    expect(cardText('a-expired-local')).toContain('! 已超时')
+    expect(cardText('a-expired-local')).not.toContain('作废')
+    // 门卡没有「已取消」（K2）：cancelled 归未批准收尾 —— 已取消字样零残留
+    expect(cardText('a-cancelled')).toContain('! 已超时')
+    expect(cardText('a-cancelled')).not.toContain('已取消')
     expect(cardText('a-rejected')).toContain('✗ 已拒绝')
-    expect(cardText('a-failed')).toContain('✓ 已确认') // 决策态 ≠ 执行态
-    // 拒因 / 失败原因单独一行常驻卡面（demo 19-b）
+    // 执行失败 = 已批准之后工具失败（K3）：复合终态徽标
+    expect(cardText('a-failed')).toContain('! 已批准 · 执行失败')
+    expect(cardText('a-approved')).toContain('✓ 已批准')
+    // 旧字样零残留（全 DOM）
+    for (const old of ['已不执行', '不批准', '已确认']) {
+      expect(wrapper.text()).not.toContain(old)
+    }
+    // 失败原因单独一行常驻卡面（K3）
     expect(wrapper.find('[data-testid="ro-reason-e5"]').text()).toContain('发布失败：目标库不可写')
-    // 无参数卡（'{}'）展开体 0 行 ⇒ 不给 chevron、不可点
-    expect(wrapper.find('[data-testid="ro-toggle-e1"]').attributes('disabled')).toBeDefined()
-    expect(wrapper.find('[data-testid="ro-body-e1"]').exists()).toBe(false)
-    // 有参数卡（{"taskId":3}）⇒ 给 chevron + 可点
-    expect(wrapper.find('[data-testid="ro-toggle-e4"]').attributes('disabled')).toBeUndefined()
-    expect(wrapper.find('[data-testid="ro-body-e4"]').exists()).toBe(true)
+    // 四类例外默认展开（回合已结束也不收）；成功终态默认折叠
+    for (const [prefix, id] of [['e1', 'a-expired'], ['e4', 'a-rejected'], ['e5', 'a-failed'], ['e3', 'a-cancelled']] as const) {
+      const body = wrapper.find(`[data-testid="msg-bubble-${id}"]`).find(`[data-testid="ro-body-${prefix}"]`)
+      expect(body.attributes('style') ?? '').not.toContain('display: none')
+    }
+    const approvedBody = wrapper.find('[data-testid="msg-bubble-a-approved"]').find('[data-testid="ro-body-e6"]')
+    expect(approvedBody.attributes('style') ?? '').toContain('display: none')
+    // 卡头恒可聚焦（aria-expanded；原生 button 自带 Enter/Space）
+    for (const prefix of ['e1', 'e2', 'e3', 'e4', 'e5', 'e6']) {
+      const head = wrapper.find(`[data-testid="ro-toggle-${prefix}"]`)
+      expect(head.element.tagName).toBe('BUTTON')
+      expect(head.attributes('aria-expanded')).toBeDefined()
+      expect(head.attributes('disabled')).toBeUndefined()
+    }
     wrapper.unmount()
   })
 
@@ -1334,21 +1456,21 @@ describe('S6 批1：原卡只读态 / 空卡无入口 / 冲突表格（R-158 复
 
     // 前三项「字段label 值」：布尔→是/否、数组→顿号列表，尾部省略号示意还有更多项
     const summary = receipts[0]!.find('[data-testid="ro-summary-g1"]').text()
-    expect(summary).toBe('生成式表单 · 导出范围 HB，是否压缩 是，标签 A、B…')
+    expect(summary).toBe('已提交 · 导出范围 HB，是否压缩 是，标签 A、B…')
     // 任何路径不得把表单定义（scenario / title / fields / form）当摘要内容
     for (const key of ['scenario', 'title', 'fields', 'form', 'enum', 'multi_select']) {
       expect(summary).not.toContain(key)
     }
     expect(summary).not.toContain('=')
 
-    // 无本地提交值（他端提交/超时收口）⇒ 降级为「表单已提交」，且展开体 0 行 ⇒ 不给入口
-    expect(receipts[1]!.find('[data-testid="ro-summary-g2"]').text()).toBe('生成式表单 · 表单已提交')
-    expect(wrapper.find('[data-testid="ro-toggle-g2"]').attributes('disabled')).toBeDefined()
-    expect(wrapper.find('[data-testid="ro-body-g2"]').exists()).toBe(false)
+    // 无本地提交值（他端提交/超时收口）⇒ 摘要只留「已提交」；卡体仍为原样只读（可展开）
+    expect(receipts[1]!.find('[data-testid="ro-summary-g2"]').text()).toBe('已提交')
+    expect(wrapper.find('[data-testid="ro-toggle-g2"]').attributes('disabled')).toBeUndefined()
+    expect(wrapper.find('[data-testid="ro-body-g2"]').exists()).toBe(true)
     wrapper.unmount()
   })
 
-  it('#10→S6：回执徽标系决策态（收口 MINOR-1）——approved 即显已确认（running/失败均不改判），缺省回退 status', async () => {
+  it('2A：徽标系决策态——approve 即显「已批准」；失败落复合终态；缺省回退 status', async () => {
     const running = buildMessage([
       { kind: 'tool', seg: 0, toolCallId: 'r1', name: 'start_publish', kind2: 'CONFIRM', status: 'running', args: '{"taskId":3}', requiresAction: false, decision: 'approved', decidedAt: 1_700_000_000_000 }
     ])
@@ -1367,18 +1489,15 @@ describe('S6 批1：原卡只读态 / 空卡无入口 / 冲突表格（R-158 复
     legacyExpired.id = 'a-legacy'
 
     const wrapper = await mountPanel([running, failedAfterApprove, rejected, legacyExpired])
-    const receiptAt = async (prefix: string, id: string): Promise<string> => {
-      await wrapper.find(`[data-testid="ro-toggle-${prefix}"]`).trigger('click')
-      return wrapper.find(`[data-testid="msg-bubble-${id}"]`).find('[data-testid="hitl-receipt"]').text()
-    }
-    // approve 即显「已确认」——running 期间不等 succeeded（R-166 口径⑥：带 ✓ 字形前缀）
-    expect(await receiptAt('r1', 'a-running')).toContain('✓ 已确认')
-    // 已确认但执行失败：徽标仍「已确认」（决策态 ≠ 执行态）
-    expect(await receiptAt('f1', 'a-failed')).toContain('✓ 已确认')
-    expect(await receiptAt('x1', 'a-rejected')).toContain('✗ 已拒绝')
-    // decision 缺省（历史/超时）回退 status 派生（R-166：`! 已超时`，非本地作废 ⇒ 不带「作废」）
-    expect(await receiptAt('l1', 'a-legacy')).toContain('! 已超时')
-    expect(await receiptAt('l1', 'a-legacy')).not.toContain('作废')
+    const cardText = (id: string): string => wrapper.find(`[data-testid="msg-bubble-${id}"]`).find('[data-testid="hitl-receipt"]').text()
+    // approve 即显「已批准」——running 期间不等 succeeded
+    expect(cardText('a-running')).toContain('✓ 已批准')
+    // 已批准后执行失败：复合终态徽标（K3）
+    expect(cardText('a-failed')).toContain('! 已批准 · 执行失败')
+    expect(cardText('a-rejected')).toContain('✗ 已拒绝')
+    // decision 缺省（历史/超时）回退 status 派生（`! 已超时`，不带「作废」）
+    expect(cardText('a-legacy')).toContain('! 已超时')
+    expect(cardText('a-legacy')).not.toContain('作废')
     wrapper.unmount()
   })
 
@@ -1390,7 +1509,7 @@ describe('S6 批1：原卡只读态 / 空卡无入口 / 冲突表格（R-158 复
     await wrapper.find('[data-testid="block-toggle-a-1:c1"]').trigger('click')
     const rows = wrapper.find('[data-testid="args-rows-c1"]')
     expect(rows.exists()).toBe(true)
-    expect(rows.classes()).toEqual(expect.arrayContaining(['max-h-[160px]', 'overflow-y-auto', 'bg-[#f6f7f9]', 'rounded-[8px]']))
+    expect(rows.classes()).toEqual(expect.arrayContaining(['max-h-[min(280px,35vh)]', 'overflow-y-auto', 'bg-[#f6f7f9]', 'rounded-[8px]']))
     const text = rows.text()
     // 键值行（非 JSON）：键名 + 可读化值；对象值只报「（复杂值）」
     expect(text).toContain('a')
@@ -1754,12 +1873,15 @@ describe('R-160：HITL 三缺陷（回读恢复 / 回执独立块 / 倒计时续
     expect(part).toMatchObject({ decision: 'approved', decidedAt: 1_700_000_000_000, kind2: 'CONFIRM', status: 'succeeded' })
 
     const wrapper = await mountPanel(store.messages)
-    // 原卡只读态：不点任何卡展开，卡头恒显行（徽标 + 摘要 + 时间）即可见 —— R-160 兼容条件
+    // 原卡只读态：卡头恒显行（徽标 + 摘要）即可见 —— R-160 兼容条件；**卡面不渲染 decidedAt**（M1）
     const receipt = wrapper.find('[data-testid="hitl-receipt"]')
     expect(receipt.exists()).toBe(true)
-    expect(receipt.text()).toContain('已确认')
-    expect(receipt.text()).toMatch(/\d{4}年\d{1,2}月\d{1,2}日 \d{2}:\d{2}/) // decidedAt 回显（R-162 渐进格式）
+    expect(receipt.text()).toContain('✓ 已批准')
+    expect(receipt.text()).not.toMatch(/\d{4}年\d{1,2}月\d{1,2}日 \d{2}:\d{2}/)
+    expect(receipt.text()).not.toMatch(/\d{2}:\d{2}/)
     expect(wrapper.find('[data-testid="ro-summary-tc-1"]').exists()).toBe(true)
+    // 成功终态默认折叠（历史卡回合已结束）
+    expect(wrapper.find('[data-testid="ro-body-tc-1"]').attributes('style') ?? '').toContain('display: none')
     // 回执独立块退役：DOM 里只有这一张卡（不再有 tool-card + 紧随的第二张回执卡）
     expect(wrapper.findAll('[data-testid="hitl-receipt"]')).toHaveLength(1)
     expect(wrapper.find('[data-testid="tool-card-tc-1"]').exists()).toBe(false)
@@ -1767,6 +1889,13 @@ describe('R-160：HITL 三缺陷（回读恢复 / 回执独立块 / 倒计时续
   })
 
   it('M1：submittedValues 限 FRONTEND 回读 —— GF 提交值可回溯；坏 JSON 兜底不伪造；CONFIRM 不读', async () => {
+    const gfArgs = JSON.stringify({
+      form: {
+        scenario: 'export_query',
+        title: '导出参数',
+        fields: [{ key: 'region', label: '导出范围', type: 'enum', required: true, options: [{ value: 'HB', label: '华北' }] }]
+      }
+    })
     const store = historyWith(
       {
         'g1': { status: 'FRONTEND_RESULT', kind: 'FRONTEND', decision: 'approved', submittedValues: '{"region":"HB"}' },
@@ -1774,8 +1903,8 @@ describe('R-160：HITL 三缺陷（回读恢复 / 回执独立块 / 倒计时续
         'c1': { status: 'EXECUTED', kind: 'CONFIRM', decision: 'approved', submittedValues: '{"taskId":3}' }
       },
       [
-        { id: 'g1', name: 'generative_form', arguments: '{}' },
-        { id: 'g2', name: 'generative_form', arguments: '{}' },
+        { id: 'g1', name: 'generative_form', arguments: gfArgs },
+        { id: 'g2', name: 'generative_form', arguments: gfArgs },
         { id: 'c1', name: 'start_export', arguments: '{"taskId":3}' }
       ]
     )
@@ -1788,16 +1917,22 @@ describe('R-160：HITL 三缺陷（回读恢复 / 回执独立块 / 倒计时续
     expect(g2.submittedValues).toBeUndefined() // 坏 JSON 兜底（不伪造提交值）
     expect(c1.submittedValues).toBeUndefined() // 限 FRONTEND：CONFIRM 的 submittedValues 不回读
 
-    const wrapper = await mountPanel(store.messages)
+    const wrapper = await mountPanel(store.messages, { realForm: true })
     expect(wrapper.findAll('[data-testid="hitl-receipt"]')).toHaveLength(3)
-    // g1：有提交值 ⇒ 只读表渲染实际提交值（字段 key 无 label 兜底时回落 key）
+    // g1：有提交值 ⇒ 同一张表单值回填（只读 select 选中 HB）
     await wrapper.find('[data-testid="ro-toggle-g1"]').trigger('click')
-    expect(wrapper.find('[data-testid="ro-body-g1"]').text()).toContain('HB')
-    // g2：提交值解析失败 ⇒ 展开体 0 行 ⇒ 不给入口（19-e 同句）
-    expect(wrapper.find('[data-testid="ro-toggle-g2"]').attributes('disabled')).toBeDefined()
-    expect(wrapper.find('[data-testid="ro-body-g2"]').exists()).toBe(false)
-    // c1：CONFIRM 只读表渲 args（不读 submittedValues）
+    const g1Body = wrapper.find('[data-testid="ro-body-g1"]')
+    expect((g1Body.find('select').element as HTMLSelectElement).value).toBe('HB')
+    expect(g1Body.find('select').attributes('disabled')).toBeDefined()
+    // g2：提交值解析失败 ⇒ 仍渲同一张表单（回落初始态），不伪造提交值
+    await wrapper.find('[data-testid="ro-toggle-g2"]').trigger('click')
+    const g2Body = wrapper.find('[data-testid="ro-body-g2"]')
+    expect(g2Body.find('[data-testid="gf-fields"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="ro-toggle-g2"]').attributes('disabled')).toBeUndefined()
+    // c1：CONFIRM 只读体渲 args（不读 submittedValues）；成功终态默认折叠 ⇒ 点击展开
+    await wrapper.find('[data-testid="ro-toggle-c1"]').trigger('click')
     expect(wrapper.find('[data-testid="ro-body-c1"]').text()).toContain('taskId')
+    expect(wrapper.find('[data-testid="ro-body-c1"]').text()).not.toContain('HB')
     wrapper.unmount()
   })
 
@@ -2059,7 +2194,7 @@ describe('R-163：Markdown 正文链路 / 白名单 / 工具摘要 / 赞踩 / �
     const degradedFence = renderMarkdown('```js\nconst a = 1\n```\n\n' + 'x'.repeat(DEGRADE_AT_CHARS), false)
     const pre = /<pre class="([^"]*)"/.exec(degradedFence.html)
     expect(pre).not.toBeNull()
-    expect(pre![1]).toContain('max-h-[200px]')
+    expect(pre![1]).toContain('max-h-[min(280px,35vh)]')
     expect(pre![1]).toContain('overflow-auto')
     expect(degradedFence.html).not.toContain('figure') // 降级路径无图容器（限高靠 pre 自身）
     // 长行内 code 不再 nowrap 吞内容（可折行）
@@ -2367,7 +2502,7 @@ describe('R-163B：视觉对齐 demo v6（样式生效 + 横滚止血）', () =>
     expect(render).toContain("font-['Cascadia_Mono','Cascadia_Code',Consolas,'SF_Mono',Menlo,monospace]") // --mono 逐字
     expect(render).toContain('border border-solid border-[#e3e6ea] rounded-[10px] overflow-hidden bg-white') // D2 figure.code
     expect(render).toContain('bg-[#f8f8f8] text-[#333]') // pre 底色/字色
-    expect(render).toContain('max-h-[200px] overflow-auto') // S6 批1：围栏 pre 自带限高（degraded 期同生效）
+    expect(render).toContain('max-h-[min(280px,35vh)] overflow-auto') // S6 批1：围栏 pre 自带限高（degraded 期同生效）
     expect(render).toContain('[word-break:normal] [overflow-wrap:anywhere]') // td 长 token 兜底（有意偏离 demo）
     expect(render).toContain('text-left whitespace-nowrap bg-[#f6f7f9] font-semibold text-[#57606a]') // th 单行
     // ③ 根容器的 overflow-wrap/word-break 仍未声明（长英文标识符被任意断开的元凶）
@@ -2522,7 +2657,7 @@ describe('R-163B：视觉对齐 demo v6（样式生效 + 横滚止血）', () =>
     // 滚动条只属表体区（项目与渲染层双源都不得再出现单容器类）
     expect(all).not.toContain('md-table-scroll')
     // 表体区 = 唯一横滚容器（overflow-auto 写在 TABLE_BD_CLASS 上，消息容器仍守 sw===cw）
-    expect(render).toContain('md-table-bd max-h-[320px] overflow-auto')
+    expect(render).toContain('md-table-bd max-h-[min(480px,60vh)] overflow-auto')
     // th 单行（原 `.md-body th { white-space: nowrap }` 改工具类注入）
     expect(render).toContain('whitespace-nowrap')
     // 两表列宽锁定（table-fixed + 等分），窄表不给最小宽度
@@ -2545,7 +2680,7 @@ describe('R-163B：视觉对齐 demo v6（样式生效 + 横滚止血）', () =>
     expect(html).toMatch(/md-table-gutter flex-none w-\[6px\] bg-\[#f6f7f9\] border-0 border-b border-solid border-\[#e3e6ea\]/)
     expect(html).not.toContain('pr-[6px]')
     // 表体区：限高 320 + 内滚 + gutter stable（唯一滚动容器）
-    expect(html).toMatch(/md-table-bd[^"]*max-h-\[320px\]/)
+    expect(html).toMatch(/md-table-bd[^"]*max-h-\[min\(480px,60vh\)\]/)
     expect(html).toMatch(/md-table-bd[^"]*scrollbar-gutter:stable/)
     // 两区各一张表（等分列宽口径：w-full + table-fixed）
     expect(html.match(/table-fixed/g)).toHaveLength(2)
@@ -2746,6 +2881,36 @@ describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 �
     expired.unmount()
   })
 
+  it('2A 缺陷②：enum 初值合法默认（缺省 / 非法 defaultValue ⇒ 首个选项；合法 defaultValue 保留）', () => {
+    const schemaWith = (extra: Record<string, unknown>): FormSpec => ({
+      scenario: 'CONFIRM',
+      title: '枚举初值',
+      fields: [{
+        key: 'mode',
+        label: '执行模式',
+        type: 'enum',
+        required: true,
+        options: [{ value: 'fast', label: '快速' }, { value: 'safe', label: '安全' }],
+        ...extra
+      }]
+    })
+    const mountWith = (schema: FormSpec) => mount(FormRenderer, {
+      props: { schema, submitting: false, error: null, remainingSeconds: null }
+    })
+    // 缺省 ⇒ 首个选项（不落空串 / 不落「请选择…」非法初态）
+    const none = mountWith(schemaWith({}))
+    expect((none.find('select').element as HTMLSelectElement).value).toBe('fast')
+    none.unmount()
+    // 非法 defaultValue ⇒ 首个选项
+    const illegal = mountWith(schemaWith({ defaultValue: 'nope' }))
+    expect((illegal.find('select').element as HTMLSelectElement).value).toBe('fast')
+    illegal.unmount()
+    // 合法 defaultValue 照原样保留
+    const legal = mountWith(schemaWith({ defaultValue: 'safe' }))
+    expect((legal.find('select').element as HTMLSelectElement).value).toBe('safe')
+    legal.unmount()
+  })
+
   it('R6/R7：消息间距不再叠加（行无 mb-3.5、元信息行单值 mb-18px）；fab 回 bottom-3', async () => {
     const store = useAiStore()
     const first = buildMessage([{ kind: 'text', seg: 0, text: '甲', streaming: false }])
@@ -2938,7 +3103,7 @@ describe('R-165 S4：常驻操作行 / 用户长消息折叠 / 间距分派 / �
     expect(body.exists()).toBe(true)
     const scroll = wrapper.find('[data-testid="reasoning-scroll-a-1:reasoning-0"]')
     expect(scroll.exists()).toBe(true)
-    expect(scroll.classes()).toEqual(expect.arrayContaining(['max-h-[160px]', 'overflow-y-auto', 'whitespace-pre-wrap', 'break-words']))
+    expect(scroll.classes()).toEqual(expect.arrayContaining(['max-h-[min(280px,35vh)]', 'overflow-y-auto', 'whitespace-pre-wrap', 'break-words']))
     expect(scroll.classes()).not.toContain('whitespace-nowrap')
     expect(scroll.attributes('style')).toBeUndefined() // 零行内 style
     expect(scroll.text()).toContain('想很久')
@@ -3023,7 +3188,7 @@ describe('R-165 S5a：复制两态反馈 / 滚动条 / 聚焦环 / 表格双区�
     const gate = wrapper.find('[data-testid="hitl-gate"]').element as HTMLElement
     expect(gate.className).toContain('mb-2.5')
     const gateRows = wrapper.find('[data-testid="gate-rows"]').element as HTMLElement
-    expect(gateRows.className).toContain('max-h-[160px]')
+    expect(gateRows.className).toContain('max-h-[min(280px,35vh)]')
     expect(gateRows.className).toContain('overflow-y-auto')
     const reasonToggle = wrapper.find('[data-testid^="reasoning-toggle-"]')
     expect(reasonToggle.element.parentElement!.className).toContain('mb-3.5')
@@ -3102,7 +3267,7 @@ describe('R-165 S5b：mermaid 卡双态（预览 | 源码）+ 全屏查看器', 
     }
     // 预览态：260px 限高 + 内联横滚保留 + 两层 transform（scale / translate，无 overflow 平移）
     const preview = card.querySelector('.mmdc-pv') as HTMLElement
-    expect(preview.className).toContain('max-h-[260px]')
+    expect(preview.className).toContain('max-h-[min(320px,45vh)]')
     expect(preview.className).toContain('overflow-auto')
     expect(preview.className).toContain('cursor-grab')
     expect(preview.getAttribute('style')).toBeNull() // 零行内 style（变量由 JS 写给子层）
@@ -3123,7 +3288,7 @@ describe('R-165 S5b：mermaid 卡双态（预览 | 源码）+ 全屏查看器', 
     const source = card.querySelector('.mmdc-pane[data-pane="source"]') as HTMLElement
     expect(source.className).toContain('hidden')
     const box = card.querySelector('.mmdc-src') as HTMLElement
-    expect(box.className).toContain('max-h-[200px]')
+    expect(box.className).toContain('max-h-[min(280px,35vh)]')
     expect(box.className).toContain('whitespace-pre')
     expect(box.textContent).toContain('graph LR')
     const copy = card.querySelector('.mmdc-copy') as HTMLElement
@@ -3595,18 +3760,27 @@ describe('问题1 偏差修正批：7 项走样补齐', () => {
     wrapper.unmount()
   })
 
-  it('项5：只读卡徽标补限宽截断（max-w-[104px] truncate，与工具卡状态胶囊同口径）+ title 全称', async () => {
+  it('2A：只读卡徽标规格（9.5px / leading 1.7 / px-5 / 圆角 5，与工具卡胶囊同档）+ 复合终态文案', async () => {
     const msg = buildMessage([
       {
         kind: 'tool', seg: 0, toolCallId: 'u1', name: 'start_publish', kind2: 'CONFIRM',
-        status: 'unknown', args: '{"taskId":3}', requiresAction: false
+        status: 'failed', args: '{"taskId":3}', requiresAction: false, decision: 'approved'
       }
     ])
     const wrapper = await mountPanel([msg])
     const badge = wrapper.find('[data-testid="ro-badge-u1"]')
-    expect(badge.text()).toBe('结局未知（未确认成功/失败）')
-    expect(badge.classes()).toEqual(expect.arrayContaining(['flex-none', 'max-w-[104px]', 'truncate']))
-    expect(badge.attributes('title')).toBe('结局未知（未确认成功/失败）')
+    expect(badge.text()).toBe('! 已批准 · 执行失败')
+    expect(badge.classes()).toEqual(expect.arrayContaining(['text-[9.5px]', 'leading-[1.7]', 'px-[5px]', 'rounded-[5px]', 'font-semibold', 'flex-none']))
+    expect(badge.attributes('data-state')).toBe('failed')
+    // 非决策态（unknown）不进审批只读卡 —— 不渲染 ro 徽标（改由普通工具卡状态胶囊承接）
+    const unknown = buildMessage([
+      { kind: 'tool', seg: 0, toolCallId: 'u2', name: 'start_publish', kind2: 'CONFIRM', status: 'unknown', args: '{"taskId":3}', requiresAction: false }
+    ])
+    unknown.id = 'a-unknown'
+    const w2 = await mountPanel([unknown])
+    expect(w2.find('[data-testid="ro-badge-u2"]').exists()).toBe(false)
+    expect(w2.find('[data-testid="tool-card-u2"]').exists()).toBe(true)
+    w2.unmount()
     wrapper.unmount()
   })
 

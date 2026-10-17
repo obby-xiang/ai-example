@@ -183,9 +183,11 @@ const MD_CODE_INLINE_CLASS =
 /** 围栏 pre（原 `.ai-chat .md-body pre` + `pre code` 两条）——`md-pre` 为 hook 放行标记。
  *  S6 批1（长内容审计清零项「degraded 期代码块限高失效」）：限高类**落在这里**（而不是只挂在
  *  AiPanel 的 `[&_figure.code>pre]` 变体上）—— 降级分支不包 `figure.code`（`wrapFenceFigures` 只在
- *  非降级路径跑），此前降级期代码块高度不设上限。同值 200px（与 S5a 代码块口径一致，不新增数值）。 */
+ *  非降级路径跑），此前降级期代码块高度不设上限。
+ *  2A 批（裁决 §14.4 代码族）：限高改**双约束** `min(280px,35vh)` —— 正常窗口取 280px 上限，
+ *  矮窗口按视口比例收紧。 */
 const MD_FENCE_PRE_CLASS =
-  `md-pre m-0 py-[10px] px-[11px] max-h-[200px] overflow-auto bg-[#f8f8f8] text-[#333] ${MONO_STACK} text-[12.3px] leading-[1.62] ` +
+  `md-pre m-0 py-[10px] px-[11px] max-h-[min(280px,35vh)] overflow-auto bg-[#f8f8f8] text-[#333] ${MONO_STACK} text-[12.3px] leading-[1.62] ` +
   '[&_code]:bg-transparent [&_code]:p-0 [&_code]:border-0 [&_code]:whitespace-pre'
 const MD_A_CLASS = 'text-[#2563eb]'
 const MD_HR_CLASS = 'mx-0 my-[0.9em] border-0 border-t border-solid border-[#eef0f3]'
@@ -418,7 +420,8 @@ export const COPY_ICON_SVGS =
 export const SCROLLBAR_CLASS = '[&::-webkit-scrollbar]:w-[6px] [&::-webkit-scrollbar]:h-[6px] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[#1f2328]/30 [&::-webkit-scrollbar-thumb:hover]:bg-[#1f2328]/50 [&::-webkit-scrollbar-track]:bg-transparent'
 
 /** 表格双区（R-165 S5a 双区骨架 → 问题1 偏差修正批 aj04 改 v7.8 终裁右栏）：表头区不滚
- *  （programmatic scrollLeft 由 JS 同步）+ 表体区 `max-h-[320px]` 内滚（6px 圆角滚动条只贴表体右缘）。
+ *  （programmatic scrollLeft 由 JS 同步）+ 表体区**长表格族**限高内滚（6px 圆角滚动条只贴表体右缘）。
+ *  2A 批（裁决 §14.4）：表体限高改双约束 `min(480px,60vh)` —— 长表格族给高一档，矮窗口按视口收紧。
  *  两表同 `w-full table-fixed`（等分列宽 ⇒ 两表逐列对齐，`table-fixed` 的适用边界见 v7.6 口径登记：
  *  宽表/内容驱动列宽需 JS 列宽同步，本场景不做）。
  *
@@ -437,7 +440,7 @@ const TABLE_HD_SCROLL_CLASS = 'md-table-hdscroll flex-1 min-w-0 overflow-hidden'
  *  `border-0` 归零其余三边、`border-solid` 给 `border-b` 补边框样式 —— demo 靠 preflight 的
  *  全局 `border-style: solid`，本仓 `corePlugins.preflight=false`，缺它则下边框恒 none/不可见）。 */
 const TABLE_GUTTER_CLASS = 'md-table-gutter flex-none w-[6px] bg-[#f6f7f9] border-0 border-b border-solid border-[#e3e6ea]'
-const TABLE_BD_CLASS = `md-table-bd max-h-[320px] overflow-auto [scrollbar-gutter:stable] ${SCROLLBAR_CLASS}`
+const TABLE_BD_CLASS = `md-table-bd max-h-[min(480px,60vh)] overflow-auto [scrollbar-gutter:stable] ${SCROLLBAR_CLASS}`
 /** 两区共用表体配方：等分列 + 表头 nowrap 截断（th 的 nowrap 由 MD_TH_CLASS 注入，固定布局下
  *  必须自解 `overflow:hidden + text-ellipsis` 才不会溢出压到邻列）。 */
 const TABLE_CLASS = 'w-full table-fixed border-separate border-spacing-0 [&_th]:overflow-hidden [&_th]:text-ellipsis'

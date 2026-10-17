@@ -11,7 +11,8 @@
  * 本文件**不依赖 store**（纯函数层，循 utils/parts.ts 分层自述）；展开态三态判定在
  * {@link resolveBlockExpanded}，用户触碰记录存 store 的 `expandedBlocks`（D4：会话内内存态）。
  */
-import { GENERATIVE_FORM_TOOL, type MessagePart, type ReasoningPart, type ToolPart } from '@/types/ai'
+import { GENERATIVE_FORM_TOOL, type MessagePart, type ReasoningPart, type ToolPart, type ToolRunStatus } from '@/types/ai'
+import { parseFormSchema, type FormSpec } from '@/types/form-schema'
 
 export type ActivityPart = ToolPart | ReasoningPart
 
@@ -19,17 +20,23 @@ export type ActivityPart = ToolPart | ReasoningPart
  * 渲染块：text = 单段正文；activity = 单段 reasoning/tool 卡（R-154 起恒 1 段，组壳已拆）。
  *
  * S6 应用批·批1（裁决 2026-10-15 第 3 条「回执卡独立块退役」）：**receipt 块整体删除** ——
- * 已决 HITL（确认门/GF）不再派生第二块，改由**该工具段自己的卡**原地切只读态渲染
- * （卡头恒显行 = 状态徽标 + 人话摘要 + 时间戳 + chevron，见 {@link isReadOnlyCard}）。
- * R-160 兼容条件（摘要/徽标恒可见）由「卡头恒显行」承接：卡体折叠与否都可见。
+ * 已决 HITL（确认门/GF）不再派生第二块，改由**该工具段自己的卡**原地切只读态渲染。
+ *
+ * 2A 批（裁决 2026-10-17 §9 K1 + §10 F9 + §15 K12）：只读态 = **原样 UI 只读渲染**（门卡参数区
+ * 字段表原样 / GF 同一张表单控件原生 disabled 值回填 / 零操作按钮），卡头 = 状态徽标 + 人话摘要 +
+ * chevron 的裸文字单行；成功终态（已批准 / 已提交）回合结束后默认折叠，四类例外
+ * （已拒绝 / 已超时 / 已批准·执行失败 / 已取消）默认展开。卡面不渲染 decidedAt（§16 M1：后端照记、
+ * 不上卡面）—— 摘要/徽标由卡头恒显行承接 R-160 兼容条件。
  */
 export interface Block {
   /** 成员稳定 id（加消息命名空间前缀，F1）：`${messageId}:${toolCallId}` / `${messageId}:reasoning-${seg}`（D5） */
   id: string
+  /** 所属消息 id（消息命名空间前缀的原文）——「回合是否仍在进行」判据用（成功卡决策当下不折叠）。 */
+  messageId: string
   kind: 'text' | 'activity'
   /** 恒 1 个元素（R-154 #13+14：每段一卡）；成员 kind ∈ {'reasoning','tool'} */
   parts: MessagePart[]
-  /** R-154 重定义：requiresAction 段 true（强制展开）；其余一律 false（每卡默认折叠，单行摘要） */
+  /** requiresAction 段 true（强制展开）；已决 HITL 按终态（成功折叠 / 例外展开，见 {@link readOnlyDefaultExpanded}）；其余 false */
   defaultExpanded: boolean
 }
 
@@ -44,14 +51,15 @@ function isActivityPart(part: MessagePart): part is ActivityPart {
 }
 
 /**
- * defaultExpanded 判定（R-154 #13+14 重定义，用户直裁「每卡默认折叠（单行摘要）」）：
- * 唯 requiresAction === true ⇒ true（强制展开，R4-5 + D-C6，手动收起不生效）；
- * 其余（含 reason 非空、pending/running 进行中、纯 reasoning 段）一律 false。
- * 原 D6 四档短路判定序随组壳整体退役 —— 卡面折叠单行已带状态 tag（toolStatusLabel），
- * 进行中/失败态在折叠行即可辨识，详情点击展开。
+ * defaultExpanded 判定（R-154 #13+14 → 2A 批裁决 §15 K12）：
+ * ① requiresAction === true ⇒ true（强制展开，R4-5 + D-C6，手动收起不生效）；
+ * ② 已决 HITL 段按终态（{@link readOnlyDefaultExpanded}）：成功终态折叠、四类例外展开；
+ * ③ 其余（含 reason 非空、pending/running 进行中、纯 reasoning 段）一律 false。
+ * 决策瞬间「不折叠」的时序不在这里判 —— 那是回合级时序（见 AiPanel 的 turnStillOpen）。
  */
 export function defaultExpandedOf(parts: ActivityPart[]): boolean {
-  return parts.some((part) => part.kind === 'tool' && part.requiresAction)
+  return parts.some((part) => part.kind === 'tool'
+    && (part.requiresAction || (isReadOnlyCard(part) && readOnlyDefaultExpanded(part))))
 }
 
 /**
@@ -83,7 +91,7 @@ export function groupParts(parts: MessagePart[], messageId: string): Block[] {
         // 空正文段不渲染（模板 v-if="part.text"），不成块
         continue
       }
-      blocks.push({ id: stablePartId(part, messageId), kind: 'text', parts: [part], defaultExpanded: true })
+      blocks.push({ id: stablePartId(part, messageId), messageId, kind: 'text', parts: [part], defaultExpanded: true })
       continue
     }
     if (!isActivityPart(part)) {
@@ -92,6 +100,7 @@ export function groupParts(parts: MessagePart[], messageId: string): Block[] {
     // R-154：每段一卡 —— requiresAction 段不再需要"独立成组"特判（天然独立）
     blocks.push({
       id: stablePartId(part, messageId),
+      messageId,
       kind: 'activity',
       parts: [part],
       defaultExpanded: defaultExpandedOf([part])
@@ -107,7 +116,7 @@ export function groupParts(parts: MessagePart[], messageId: string): Block[] {
  * 全部为纯函数（无 store 依赖），供 AiPanel 模板与测试同源取用。
  * ================================================================================== */
 
-/** 单行字段（label-value 只读表 / 参数表）：key = 字段名或人话标签，value = 可读化后的值。 */
+/** 单行字段（参数字段表 / GF 提交摘要）：key = 字段名或人话标签，value = 可读化后的值。 */
 export interface FieldRow {
   key: string
   value: string
@@ -293,15 +302,79 @@ function optionLabel(field: FormFieldLite, value: unknown): string {
  * 已决 HITL 段判据（R-160 M2 判据原样保留，S6 起驱动**原卡只读态**而非独立回执块）：
  * 确认门/GF 的**已决**段（requiresAction=false）。kind2 口径：CONFIRM 按 kind2 判；
  * name 兜底**仅** GENERATIVE_FORM_TOOL（旧数据 kind2=UNKNOWN 时 GF 仍认名，其余工具不认名）。
+ *
+ * 2A 批（裁决 §9 K2）：`blocked` / `unknown` / `pending` **不是决策态** —— 它们是工具运行侧
+ * 的「未形成裁决」（越 scope 拦下 / 结局未知 / 仍在途），继续走普通工具卡（状态胶囊承接
+ * 「超出当前范围 / 结局未知 / 等待确认」），不进审批卡的只读四态，避免把非决策读成超时。
  */
+const NON_DECISION_STATUSES: ReadonlySet<ToolRunStatus> = new Set(['pending', 'blocked', 'unknown'])
+
 export function isReadOnlyCard(part: ToolPart): boolean {
   return !part.requiresAction
     && (part.kind2 === 'CONFIRM' || part.name === GENERATIVE_FORM_TOOL)
+    && !NON_DECISION_STATUSES.has(part.status)
 }
 
-/** 原卡只读态展开体（只读 label-value 表）：CONFIRM 渲 args；GF 渲 submittedValues。 */
-export function readOnlyRows(part: ToolPart): FieldRow[] {
-  return part.name === GENERATIVE_FORM_TOOL ? submitRows(part) : argRows(part.args)
+/**
+ * 已决只读态（2A 批裁决 §9 K2 + §10 F6 + §15 K12 定名）：
+ * - 门卡（H1）恰四态：已批准 / 已拒绝 / 已超时 / 已批准·执行失败 —— **没有已取消**；
+ * - 表单系（GF）两态：已提交 / 已取消。
+ *
+ * 判定序 = 决策元数据优先、段状态兜底（与 R-160 M2「decision 缺省回退 status」同源）：
+ * - decision=approved：status=failed ⇒ 执行失败（K3：失败是执行结果，不是决策结果）；
+ * - decision=rejected ⇒ 已拒绝；
+ * - 无 decision 的历史段：succeeded/running ⇒ 已批准、failed ⇒ 执行失败、rejected ⇒ 已拒绝、
+ *   其余（expired / cancelled）⇒ 已超时。
+ *   `cancelled` 归入「已超时」是 K2「审批卡没有已取消」的落点：两者同属**未批准收尾**
+ *   （闸门未开、本次操作未执行），闸门侧不得出现「已取消」字样。
+ *   `blocked` / `unknown` / `pending` 不属决策态，已由 {@link isReadOnlyCard} 挡在只读卡之外。
+ */
+export type ReadOnlyState = 'approved' | 'rejected' | 'expired' | 'failed' | 'submitted' | 'cancelled'
+
+export function readOnlyStateOf(part: ToolPart): ReadOnlyState {
+  if (part.name === GENERATIVE_FORM_TOOL) {
+    return part.status === 'succeeded' ? 'submitted' : 'cancelled'
+  }
+  if (part.decision === 'approved') {
+    return part.status === 'failed' ? 'failed' : 'approved'
+  }
+  if (part.decision === 'rejected') {
+    return 'rejected'
+  }
+  switch (part.status) {
+    case 'succeeded':
+    case 'running':
+      return 'approved'
+    case 'failed':
+      return 'failed'
+    case 'rejected':
+      return 'rejected'
+    default:
+      return 'expired'
+  }
+}
+
+/**
+ * 已决只读卡的默认展开态（裁决 §15 K12）：
+ * - 成功终态（已批准 / 已提交）⇒ 折叠（回合结束后收成卡头摘要行）；
+ * - 四类例外（已拒绝 / 已超时 / 已批准·执行失败 / 已取消）⇒ 展开。
+ * 「决策瞬间不折叠」属回合时序，由 AiPanel 的 turnStillOpen 承担（不写进纯函数）。
+ */
+export function readOnlyDefaultExpanded(part: ToolPart): boolean {
+  const state = readOnlyStateOf(part)
+  return state === 'rejected' || state === 'expired' || state === 'failed' || state === 'cancelled'
+}
+
+/**
+ * GF 表单定义（`args.form` 的防御性解析）—— 已决只读态要复用**同一张表单**（K1），
+ * 六型控件与字段序都取自这里；解析失败返回 null（卡面只留兜底文案，不臆造控件）。
+ */
+export function formSpecOf(part: ToolPart): FormSpec | null {
+  const parsed = parseArgObject(part.args)
+  if (parsed === null) {
+    return null
+  }
+  return parseFormSchema((parsed as { form?: unknown }).form)
 }
 
 /**
@@ -322,17 +395,12 @@ export function hasToolBody(part: ToolPart): boolean {
   return !isBlankText(part.reason)
 }
 
-/** 原卡只读态展开体行数 ≥ 1 判据（19-e：0 行不给 chevron、整卡不可点）。 */
-export function hasReadOnlyBody(part: ToolPart): boolean {
-  return readOnlyRows(part).length > 0
-}
-
 /**
- * 卡头行数判据（模板唯一入口）：已决 HITL 走只读表判据；普通工具卡走展开体判据。
- * 卡头 `disabled` / chevron / hover 三者同源本判据（0 行 ⇒ 三者全无）。
+ * 卡体判据（普通工具卡唯一入口）：渲染后 0 行 ⇒ 不渲展开体 / chevron / 卡头 disabled。
+ * 已决 HITL 卡不走本判据 —— 只读态卡体**恒在**（门卡字段表 / GF 同一张表单），卡头恒可折叠。
  */
 export function hasBodyRows(part: ToolPart): boolean {
-  return isReadOnlyCard(part) ? hasReadOnlyBody(part) : hasToolBody(part)
+  return hasToolBody(part)
 }
 
 /**

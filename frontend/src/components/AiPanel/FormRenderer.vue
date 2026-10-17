@@ -1,5 +1,5 @@
 <template>
-  <div class="border border-solid border-[#e3e6ea] rounded-[10px] bg-white overflow-hidden mb-2.5">
+  <div :class="readonly ? 'min-w-0' : 'border border-solid border-[#e3e6ea] rounded-[10px] bg-white overflow-hidden mb-2.5'">
     <!-- R-165 S3a：GF 表单卡 = demo v7 `.gf` 结构（v7.html:255-272）
          容器细描边 + 圆角 10 + overflow-hidden ｜ 卡头 ▤+标题+胶囊（9px 11px / 底细线 / #f6f7f9 / 12.8px/650）
          ｜ 字段体 p-[11px] ｜ footer 时间行（9px 11px / 顶细线 / 11.8px #57606a / #f6f7f9）。
@@ -7,18 +7,29 @@
          el-tag / el-alert ⇒ 原生 input / select / checkbox / button + Tailwind 工具类）。
          行为面逐字保留：setValue / checkFormValues 复核 / emit('submit'|'cancel') /
          data-testid="gf-cancel|gf-submit" / :disabled="submitting|disabled" 的禁用语义。 -->
-    <!-- 卡头（v7 `.gf-hd`）：▤ + 标题 + 场景胶囊（右贴） -->
-    <div class="flex items-center gap-[7px] px-[11px] py-[9px] border-0 border-b border-solid border-[#eef0f3] bg-[#f6f7f9] text-[12.8px] [font-weight:650]">
+    <!-- 卡头（v7 `.gf-hd`）：▤ + 标题 + 场景胶囊（右贴）。
+         2A 批（裁决 2026-10-17 §9 K1）：已决只读态**不渲染本卡头** —— 状态徽标 + 人话摘要 + chevron
+         由外层 HITL 卡头承担，卡体 = 同一张表单（标题 + 字段）原样锁定。 -->
+    <div
+      v-if="!readonly"
+      class="flex items-center gap-[7px] px-[11px] py-[9px] border-0 border-b border-solid border-[#eef0f3] bg-[#f6f7f9] text-[12.8px] [font-weight:650]"
+    >
       <span class="flex-none text-[#8b949e] text-[11px]" aria-hidden="true">▤</span>
       <span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{{ schema.title ?? '请填写以下信息' }}</span>
       <span class="flex-none ml-auto text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] whitespace-nowrap font-normal text-[#2563eb] bg-[#eff4ff]">{{ scenarioLabel }}</span>
     </div>
 
-    <div class="p-[11px]">
+    <div :class="readonly ? '' : 'p-[11px]'">
+      <!-- 已决只读态：同一张表单的业务标题（无 ▤ / 无场景胶囊，与 demo 只读样张一致） -->
+      <div v-if="readonly" class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">
+        {{ schema.title ?? '请填写以下信息' }}
+      </div>
       <!-- 字段区：六型白名单控件，文案一律文本插值，永不 v-html。
-           R-165 S5a 项 4：字段区 = **纯限高内滚 240px**（demo v7.7 终裁），按钮行与卡级错误条
-           移出滚动区常驻（v7 `.gf` 口径：`max-h-[240px] overflow-y-auto` + 操作行在其下）。 -->
-      <div :class="['min-w-0 max-h-[240px] overflow-y-auto pr-[4px]', SCROLLBAR_CLASS]" data-testid="gf-fields">
+           R-165 S5a 项 4：字段区 = **纯限高内滚**，按钮行与卡级错误条移出滚动区常驻
+           （v7 `.gf` 口径：max-h + overflow-y-auto + 操作行在其下）。
+           2A 批（裁决 §14.4）：表单 / 组合族限高改**双约束** `min(320px,45vh)` —— 正常窗口取
+           320px 上限，矮窗口按视口比例收紧。 -->
+      <div :class="['min-w-0 max-h-[min(320px,45vh)] overflow-y-auto', readonly ? 'mx-[11px] mt-[9px]' : 'pr-[4px]', SCROLLBAR_CLASS]" data-testid="gf-fields">
       <div v-for="field in schema.fields" :key="field.key" class="mb-[11px]">
         <!-- S6 批1（长内容审计 #12）：字段 label 由模型生成，可长且无空格 ⇒ 补 break-words
              （原无断词类，长 label 靠字段区 `overflow-y-auto` 溢出，横条或被卡 overflow-hidden 裁）。 -->
@@ -88,10 +99,13 @@
           <label
             v-for="option in field.options ?? []"
             :key="option.value"
-            class="inline-flex items-center gap-[5px] cursor-pointer rounded-[999px] border border-solid px-[11px] py-[4px] text-[12.2px] transition-colors duration-[150ms]"
-            :class="multiChecked(field, option.value)
-              ? 'border-[#cddcff] bg-[#eff4ff] text-[#2563eb]'
-              : 'border-[#e3e6ea] bg-white text-[#57606a]'"
+            class="inline-flex items-center gap-[5px] rounded-[999px] border border-solid px-[11px] py-[4px] text-[12.2px] transition-colors duration-[150ms]"
+            :class="[
+              multiChecked(field, option.value)
+                ? 'border-[#cddcff] bg-[#eff4ff] text-[#2563eb]'
+                : 'border-[#e3e6ea] bg-white text-[#57606a]',
+              readonly ? 'cursor-default' : 'cursor-pointer'
+            ]"
           >
             <input
               type="checkbox"
@@ -113,12 +127,14 @@
       </div>
 
       <!-- 卡级错误条：schema 之外字段等无法归属到单字段的问题 + 后端 FORM_RESULT_REJECTED 的拒绝说明
-           （R-165 S5a：移出字段滚动区，与操作行一同常驻） -->
-      <span v-if="cardError" :class="[FMSG, 'mt-[11px]']" data-testid="gf-error">{{ cardError }}</span>
+           （R-165 S5a：移出字段滚动区，与操作行一同常驻）。已决只读态不渲染（无提交动作）。 -->
+      <span v-if="!readonly && cardError" :class="[FMSG, 'mt-[11px]']" data-testid="gf-error">{{ cardError }}</span>
 
       <!-- 操作区：显式取消入口 + 提交（R-165 S5a 项 10：取消 + 提交**相邻右对齐** gap-2，
-           不再左右分置；v7 `.gf` 操作行口径） -->
-      <div class="flex items-center justify-end gap-2 mt-[10px] pt-[10px] border-0 border-t border-solid border-[#eef0f3]">
+           不再左右分置；v7 `.gf` 操作行口径）。
+           2A 批（裁决 §3）：按钮防折行 —— 按钮 `whitespace-nowrap + flex-none`，行 `flex-wrap`
+           （空间不足时按钮组整行下移）；已决只读态**整块不渲染**（K1：零操作按钮）。 -->
+      <div v-if="!readonly" class="flex flex-wrap items-center justify-end gap-2 mt-[10px] pt-[10px] border-0 border-t border-solid border-[#eef0f3]">
         <button
           type="button"
           data-testid="gf-cancel"
@@ -142,9 +158,10 @@
       </div>
     </div>
 
-    <!-- footer 时间行（形制照 v7.html:685 的表单脚注行：顶细线 + 9px 11px + 11.8px #57606a + #f6f7f9 底） -->
+    <!-- footer 时间行（形制照 v7.html:685 的表单脚注行：顶细线 + 9px 11px + 11.8px #57606a + #f6f7f9 底）
+         已决只读态不渲染（时限已结束、表单已锁定）。 -->
     <p
-      v-if="remainingSeconds !== null"
+      v-if="!readonly && remainingSeconds !== null"
       data-testid="gf-deadline"
       class="m-0 px-[11px] py-[9px] border-0 border-t border-solid border-[#eef0f3] text-[11.8px] text-[#57606a] bg-[#f6f7f9]"
     >
@@ -182,6 +199,16 @@ const props = defineProps<{
   error: string | null
   /** 剩余填写秒数（null = 帧未带时限） */
   remainingSeconds: number | null
+  /**
+   * 2A 批（裁决 2026-10-17 §9 K1 / §10 F9）：**已决只读态** —— 同一张表单原样锁定：
+   * 六型控件全部原生 `disabled`、值回填、操作按钮行与时限脚注整块不渲染、卡级错误条不渲染。
+   */
+  readonly?: boolean
+  /**
+   * 只读态回填值（GF 提交回执的 `submittedValues`）。`null`/缺省 ⇒ 回落 `buildInitialValues`
+   * 的初始态 —— 取消 / 超时收尾按 F9「未提交不记录」不保留任何填写内容。
+   */
+  initialValues?: Record<string, unknown> | null
 }>()
 
 const emit = defineEmits<{
@@ -195,17 +222,67 @@ const emit = defineEmits<{
  * （R-165 S1 §5① 实证：纯 `border-*` 只出 width、style 恒 none）。
  * focus 态走 `focus:` 变体（伪类抬升特异度，稳定压过静/错两态的底色）。
  */
-const FI_BASE = 'w-full border rounded-[8px] px-[9px] py-[6px] font-[inherit] text-[13px] leading-[normal] text-[#1f2328] [outline:none] transition-colors duration-[150ms] focus:border-[#2563eb] disabled:bg-[#f6f7f9] disabled:text-[#8b949e] disabled:cursor-default'
+const FI_BASE = 'w-full border rounded-[8px] px-[9px] py-[6px] font-[inherit] text-[13px] leading-[normal] text-[#1f2328] [outline:none] transition-colors duration-[150ms] focus:border-[#2563eb] disabled:cursor-default'
+/**
+ * 待决态禁用观感（提交中 / 超时）：灰底灰字。
+ * 2A 批（裁决 §11 G3 → §12 H2）：已决只读态只保留 `disabled:text-[#57606a]` 一条可读性灰字，
+ * 底色与边框与待决态完全一致（「锁定不降对比度」），故与下面一条分开声明。
+ */
+const FI_DISABLED = 'disabled:bg-[#f6f7f9] disabled:text-[#8b949e]'
+const FI_READONLY = 'disabled:bg-white disabled:text-[#57606a]'
 const FI_IDLE = 'border-solid border-[#e3e6ea] bg-white'
 const FI_BAD = 'border-solid border-[#c0392b] bg-[#fdf1ef]'
 /** v7 校验错误条 `.fmsg`（11.8px 红字 + 红底 + 浅红描边 + 圆角 6 + padding 5px 8px）。 */
 const FMSG = 'block text-[11.8px] leading-[1.5] text-[#c0392b] bg-[#fdf1ef] border border-solid border-[#f0d5d0] rounded-[6px] px-[8px] py-[5px]'
 /** 双钮（同 R-165 S2 门卡口径：取消 = 白底细描边；提交 = 蓝底白字 semibold）。
  *  R-165 S5a 项 10：提交钮撤 `ml-auto` —— 操作行改 `justify-end gap-2`，取消与提交**相邻右对齐**。 */
-const GF_CANCEL = 'rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-[#e3e6ea] transition-all duration-[150ms] bg-white text-[#57606a] hover:border-[#8b949e] hover:text-[#1f2328] disabled:opacity-50 disabled:cursor-default'
-const GF_SUBMIT = 'rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-transparent transition-all duration-[150ms] bg-[#2563eb] text-white font-semibold hover:brightness-[1.08] disabled:opacity-50 disabled:cursor-default disabled:bg-[#8b949e] disabled:font-normal'
+const GF_CANCEL = 'flex-none whitespace-nowrap min-w-[56px] rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-[#e3e6ea] transition-all duration-[150ms] bg-white text-[#57606a] hover:border-[#8b949e] hover:text-[#1f2328] disabled:opacity-50 disabled:cursor-default'
+const GF_SUBMIT = 'flex-none whitespace-nowrap min-w-[56px] rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-transparent transition-all duration-[150ms] bg-[#2563eb] text-white font-semibold hover:brightness-[1.08] disabled:opacity-50 disabled:cursor-default disabled:bg-[#8b949e] disabled:font-normal'
 
-const model = ref<Record<string, FormModelValue>>(buildInitialValues(props.schema) as Record<string, FormModelValue>)
+/**
+ * 初始模型：待决态走 `buildInitialValues`（枚举初值已合法默认，见 types/form-schema.ts）；
+ * 已决只读态额外合并 `initialValues`（`submittedValues`）—— 只接受与字段类型形状相符的值，
+ * 形状不符的键回落初始态（不把脏数据塞进受控控件）。
+ */
+function initialModel(): Record<string, FormModelValue> {
+  const base = buildInitialValues(props.schema) as Record<string, FormModelValue>
+  const values = props.initialValues
+  if (!values) {
+    return base
+  }
+  for (const field of props.schema.fields) {
+    if (!Object.prototype.hasOwnProperty.call(values, field.key)) {
+      continue
+    }
+    const value = values[field.key]
+    if (field.type === 'text' || field.type === 'date') {
+      if (typeof value === 'string') {
+        base[field.key] = value
+      }
+    } else if (field.type === 'enum') {
+      // 枚举只接受落在 options 内的值（非法值回落初值，不把脏值塞进 select）
+      if (typeof value === 'string' && (field.options ?? []).some((option) => option.value === value)) {
+        base[field.key] = value
+      }
+    } else if (field.type === 'number') {
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        base[field.key] = value
+      }
+    } else if (field.type === 'boolean') {
+      if (typeof value === 'boolean') {
+        base[field.key] = value
+      }
+    } else if (field.type === 'multi_select') {
+      if (Array.isArray(value)) {
+        const allowed = new Set((field.options ?? []).map((option) => option.value))
+        base[field.key] = value.filter((item): item is string => typeof item === 'string' && allowed.has(item))
+      }
+    }
+  }
+  return base
+}
+
+const model = ref<Record<string, FormModelValue>>(initialModel())
 /**
  * 本次提交前复核的问题清单。原实现是单串 `localError` —— 错态要落到**具体字段**
  * （v7 红框 + 字段下 `.fmsg`），故改存数组、按 checkFormValues 的 `「label」` 前缀归属。
@@ -213,8 +290,11 @@ const model = ref<Record<string, FormModelValue>>(buildInitialValues(props.schem
 const localProblems = ref<string[]>([])
 
 const expired = computed(() => props.remainingSeconds !== null && props.remainingSeconds <= 0)
-/** 超时后禁用控件与提交（本地判过期后 store 会收起表单并带 cancelled:true 回灌） */
-const disabled = computed(() => props.submitting || expired.value)
+/**
+ * 禁用判据：提交中 / 已超时 / **已决只读**（K1：同一张表单控件原生 disabled 锁定）。
+ * 只读态下不再有提交动作，置 disabled 纯属控件锁定。
+ */
+const disabled = computed(() => props.readonly === true || props.submitting || expired.value)
 
 const scenarioLabel = computed(() => (props.schema.scenario === 'FILTER' ? '筛选条件' : '信息确认'))
 
@@ -273,7 +353,8 @@ const cardError = computed(() => {
 })
 
 function fieldClass(field: FormFieldSpec): string {
-  return `${FI_BASE} ${fieldProblem(field) ? FI_BAD : FI_IDLE}`
+  const disabledTone = props.readonly === true ? FI_READONLY : FI_DISABLED
+  return `${FI_BASE} ${disabledTone} ${fieldProblem(field) ? FI_BAD : FI_IDLE}`
 }
 
 function onSubmit(): void {

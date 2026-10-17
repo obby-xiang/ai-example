@@ -271,62 +271,90 @@
                   </button>
                   <div v-show="isBlockExpanded(block)" class="pl-[10px] pr-[11px] pb-[10px] border-0 border-l-2 border-solid border-[#e3e6ea]" :data-testid="'reasoning-body-' + block.id">
                     <!-- S6 批1（demo v7.9 裁决点 21 · 2026-10-16 用户直裁通过）：思考过程展开体改
-                         **纯限高内滚**（max-h-[160px]，与工具卡 input / output 同口径）——
+                         **纯限高内滚**（2A 批裁决 §14.4 字段 / 文本块族：双约束 `min(280px,35vh)`）——
                          CollapsibleText 的「渐隐 + 显示更多」钮退役；卡头折叠机制（.is-open）逐字不动。
-                         短思考（≤160px）零副作用，不出现滚动条。 -->
-                    <div :class="['max-h-[160px] overflow-y-auto whitespace-pre-wrap break-words text-[12.6px] leading-[1.7] text-[#57606a]', SCROLLBAR_CLASS]" :data-testid="'reasoning-scroll-' + block.id">{{ part.text }}</div>
+                         短思考（≤ 视口收紧后的上限）零副作用，不出现滚动条。 -->
+                    <div :class="['max-h-[min(280px,35vh)] overflow-y-auto whitespace-pre-wrap break-words text-[12.6px] leading-[1.7] text-[#57606a]', SCROLLBAR_CLASS]" :data-testid="'reasoning-scroll-' + block.id">{{ part.text }}</div>
                   </div>
                 </div>
                 <template v-else-if="part.kind === 'tool'">
-                  <!-- S6 批1（demo v7.9 场景 19 / 19-f 口径表 1:1）：**已决 HITL（确认门 / GF）原卡只读态** ——
-                       动作后按钮全消失、原地切只读 UI。卡头恒显行 = 状态徽标 + 人话摘要 + 渐进时间戳 + chevron
-                       （徽标与摘要不由 expandedBlocks 控制，卡体折叠与否都可见 = R-160 兼容条件）；
-                       展开体 = 只读 label-value 表（CONFIRM 渲 args / GF 渲 submittedValues，160px 内滚）。
-                       19-e 判据：展开体渲染后 0 行 ⇒ 不渲 chevron、卡头 disabled 不可点、无 hover。 -->
+                  <!-- 2A 批（裁决 2026-10-17 §9 K1 / §10 F9 / §12 H2 / §15 K12 / §16 M1 / §20）：
+                       **已决 HITL（确认门 / GF）原样 UI 只读态** ——
+                       ① 卡体 = 原卡原样锁定：门卡参数区字段表（gateRows，与待决态同源）原样；
+                          GF 复用**同一张表单**（FormRenderer readonly：六型控件原生 disabled、值回填、
+                          操作行整块不渲染）；未提交收尾（取消 / 超时）不保留任何填写内容（F9）。
+                       ② 卡头 = 状态徽标 + 人话摘要 + chevron 的单行**裸文字行**（无底色 / 无分隔线、
+                          px-10 / py-8 / gap-6、行高 36.4px 与工具卡同规格；chevron ml-auto 靠右、
+                          展开 rotate-90）。徽标 / 摘要恒在（折叠与否都可见 = R-160 兼容条件）。
+                       ③ 按钮零渲染（K1）：卡体里不存在任何操作按钮（批准 / 拒绝 / 提交 / 取消）。
+                       ④ 卡面不渲染 decidedAt（M1：后端照记、不上卡面）。
+                       ⑤ 成功终态（已批准 / 已提交）回合结束后默认折叠；四类例外（已拒绝 / 已超时 /
+                          已批准·执行失败 / 已取消）默认展开；「决策当下不收」由 turnStillOpen 承担。 -->
                   <div
                     v-if="isReadOnlyCard(part)"
-                    class="rocard block border border-solid border-[#e3e6ea] bg-white rounded-[10px] px-[11px] py-[8px] text-[12.6px] text-[#57606a] mb-3.5"
+                    class="rocard block border border-solid border-[#e3e6ea] bg-white rounded-[10px] overflow-hidden mb-3.5"
                     data-testid="hitl-receipt"
                   >
                     <button
                       type="button"
-                      class="ro-hd flex items-center gap-[6px] w-full border-0 bg-transparent p-0 text-left font-[inherit] transition-colors duration-[150ms]"
-                      :class="hasBodyRows(part) ? 'cursor-pointer' : 'cursor-default'"
-                      :disabled="!hasBodyRows(part)"
+                      class="ro-hd flex items-center gap-[6px] w-full px-[10px] py-[8px] border-0 bg-transparent text-left font-[inherit] cursor-pointer"
                       :aria-expanded="isBlockExpanded(block)"
+                      :aria-label="'展开或收起决策详情'"
                       :data-testid="'ro-toggle-' + part.toolCallId"
-                      @click="onCardHeadClick(block, part)"
+                      @click="toggleBlock(block)"
                     >
-                      <span :class="receiptBadgeClass(part.status)" :title="hitlReceiptLabel(part)" :data-testid="'ro-badge-' + part.toolCallId">{{ hitlReceiptLabel(part) }}</span>
-                      <span class="ro-sum flex-1 min-w-0 text-[12.2px] whitespace-nowrap overflow-hidden text-ellipsis" :data-testid="'ro-summary-' + part.toolCallId">{{ hitlReceiptSummary(part) }}</span>
-                      <span v-if="part.decidedAt" class="flex-none text-[#8b949e] text-[11.5px] tabular-nums">{{ formatProgressiveTs(part.decidedAt) }}</span>
-                      <span v-if="hasBodyRows(part)" :class="[TCHEV_CLASS, isBlockExpanded(block) ? 'is-open' : '']">›</span>
+                      <span
+                        :class="[readOnlyBadgeClass(part), 'flex-none']"
+                        :data-testid="'ro-badge-' + part.toolCallId"
+                        :data-state="readOnlyStateOf(part)"
+                      >{{ readOnlyBadgeLabel(part) }}</span>
+                      <span
+                        v-show="!isBlockExpanded(block)"
+                        class="ro-sum flex min-w-0 flex-1 items-center gap-[6px] text-[12.4px] leading-[1.6] text-[#57606a] whitespace-nowrap"
+                        :data-testid="'ro-summary-' + part.toolCallId"
+                      ><span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{{ readOnlySummary(part) }}</span></span>
+                      <span :class="[TCHEV_CLASS, 'ml-auto leading-[1.7]', isBlockExpanded(block) ? 'is-open' : '']">›</span>
                     </button>
-                    <!-- 拒因 / 失败原因单独一行常驻卡面（demo 19-b：用户当下最需要知道的就是「为什么被拒」） -->
-                    <div
-                      v-if="!isBlankText(part.reason)"
-                      class="ro-reason mt-[5px] text-[11.8px] leading-[1.6] text-[#c0392b] whitespace-pre-wrap break-words"
-                      :data-testid="'ro-reason-' + part.toolCallId"
-                    >{{ part.reason }}</div>
-                    <template v-if="hasBodyRows(part)">
-                      <div v-show="isBlockExpanded(block)" class="ro-bd mt-[8px]" :data-testid="'ro-body-' + part.toolCallId">
-                        <div :class="['max-h-[160px] overflow-y-auto bg-[#f6f7f9] border border-solid border-[#eef0f3] rounded-[8px] px-[10px] py-[2px]', SCROLLBAR_CLASS]">
+                    <div v-show="isBlockExpanded(block)" class="pb-[11px]" :data-testid="'ro-body-' + part.toolCallId">
+                      <!-- 门卡：参数区字段表原样（与待决态同一份 gateRows：操作 + args 全键 + 敏感掩码）；
+                           字段区限高 = 字段族双约束 min(280px,35vh)（裁决 §14.4）。 -->
+                      <template v-if="part.name !== GENERATIVE_FORM_TOOL">
+                        <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">{{ hitlReceiptSummary(part) }}</div>
+                        <div
+                          :class="['mx-[11px] mt-[9px] bg-white border border-solid border-[#eef0f3] rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto', SCROLLBAR_CLASS]"
+                          :data-testid="'ro-rows-' + part.toolCallId"
+                        >
                           <div
-                            v-for="row in readOnlyRows(part)"
+                            v-for="row in gateRows(part)"
                             :key="row.key"
-                            class="flex gap-[10px] py-[6px] border-0 border-b border-solid border-[#eef0f3] text-[12.6px] leading-[1.5] last:border-b-0"
+                            class="flex gap-[10px] py-[7px] border-0 border-b border-solid border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"
                           >
-                            <!-- 问题1 偏差修正批（用户实报 GF 只读卡字段行排版）：键列由定宽 72px + break-words
-                                 改**自适应内容宽**（flex-basis auto + min-w-0、上限 40%）+ `truncate` + `title` ——
-                                 后端 label 允许 100 字符（GenerativeFormRules.MAX_LABEL_CHARS），定宽键列遇真实
-                                 长 label（如「执行间隔（秒）」）会折行占两行、值贴首行 ⇒ 视觉即「串行折行」。
-                                 长标签现在单行省略、悬浮看全；值列 flex-1 min-w-0 break-words 不动。 -->
-                            <span class="flex-[0_1_auto] min-w-0 max-w-[40%] truncate text-[#8b949e] text-[12px]" :title="row.key">{{ row.key }}</span>
+                            <!-- 键列口径同待决门卡（自适应内容宽 + 上限 40% + truncate + title 看全） -->
+                            <span class="flex-[0_1_auto] min-w-0 max-w-[40%] truncate text-[#8b949e] text-[12.4px]" :title="row.key">{{ row.key }}</span>
                             <span class="flex-1 min-w-0 break-words">{{ row.value }}</span>
                           </div>
                         </div>
-                      </div>
-                    </template>
+                      </template>
+                      <!-- GF：同一张表单原样锁定（readonly 模式复用 FormRenderer，零操作按钮） -->
+                      <template v-else>
+                        <FormRenderer
+                          v-if="readOnlyFormSpec(part)"
+                          :schema="(readOnlyFormSpec(part) as FormSpec)"
+                          readonly
+                          :submitting="false"
+                          :error="null"
+                          :remaining-seconds="null"
+                          :initial-values="readOnlyFormValues(part)"
+                        />
+                        <div v-else class="px-[11px] pt-[10px] text-[12.6px] text-[#57606a]">表单定义不可用，无法还原原卡</div>
+                      </template>
+                      <!-- 失败 / 拒绝 / 取消收尾的原因单独一行常驻卡面（K3：执行失败原因常驻；F9 同源） -->
+                      <div
+                        v-if="!isBlankText(part.reason)"
+                        class="mx-[11px] mt-[9px] rounded-[8px] border border-solid border-[#f0d5d0] bg-[#fdf1ef] px-[10px] py-[7px] text-[11.9px] leading-[1.6] text-[#c0392b] whitespace-pre-wrap break-words"
+                        :data-testid="'ro-reason-' + part.toolCallId"
+                      >{{ part.reason }}</div>
+                    </div>
                   </div>
 
                   <div
@@ -374,9 +402,10 @@
                            值可读化：布尔 是/否、数组 顿号、文件路径 文件名）。
                            无参（`'{}'` / 空串 / 非 JSON 脏数据）⇒ 整个参数区不渲染（不渲空盒、不露 raw 文本）。
                            requiresAction 待动作卡不渲参数区 —— 门卡字段表 / GF 表单本身就是待填内容（消双份）。 -->
+                      <!-- 2A 批（裁决 §14.4 字段族）：参数字段表限高改双约束 `min(280px,35vh)`。 -->
                       <div v-if="!part.requiresAction && paramRows(part).length">
                         <div class="block text-[11px] tracking-[.5px] uppercase text-[#8b949e] mb-[4px]">参数</div>
-                        <div :class="['bg-[#f6f7f9] border border-solid border-[#eef0f3] rounded-[8px] px-[10px] py-[2px] max-h-[160px] overflow-y-auto', SCROLLBAR_CLASS]" :data-testid="'args-rows-' + part.toolCallId">
+                        <div :class="['bg-[#f6f7f9] border border-solid border-[#eef0f3] rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto', SCROLLBAR_CLASS]" :data-testid="'args-rows-' + part.toolCallId">
                           <div
                             v-for="row in paramRows(part)"
                             :key="row.key"
@@ -389,11 +418,12 @@
                       </div>
                       <div v-if="!isBlankText(part.result)">
                         <div class="block text-[11px] tracking-[.5px] uppercase text-[#8b949e] mb-[4px]">输出</div>
-                        <!-- R-165 S5a 项 4：工具卡输出 = **纯限高内滚**（max-h-[160px]，demo v7 口径），
-                             原 CollapsibleText 的渐隐 + 「显示更多」钮退役（无展开钮）；截断徽标保留。
+                        <!-- R-165 S5a 项 4：工具卡输出 = **纯限高内滚**，原 CollapsibleText 的渐隐 +
+                             「显示更多」钮退役（无展开钮）；截断徽标保留。
                              滚动条同走 6px 圆角半透明任意变体类（项 8）。
-                             S6 批1 长内容审计清零项：补 break-all + overflow-wrap:anywhere（长串不越界）。 -->
-                        <div :class="['text-[12.1px] leading-[1.6] font-mono text-[#606266] bg-[#f6f7f9] border border-solid border-[#eef0f3] rounded-[8px] px-[9px] py-[8px] max-h-[160px] overflow-y-auto whitespace-pre-wrap break-all [overflow-wrap:anywhere]', SCROLLBAR_CLASS]">
+                             S6 批1 长内容审计清零项：补 break-all + overflow-wrap:anywhere（长串不越界）。
+                             2A 批（裁决 §14.4 代码 / 详情族）：限高改双约束 `min(280px,35vh)`。 -->
+                        <div :class="['text-[12.1px] leading-[1.6] font-mono text-[#606266] bg-[#f6f7f9] border border-solid border-[#eef0f3] rounded-[8px] px-[9px] py-[8px] max-h-[min(280px,35vh)] overflow-y-auto whitespace-pre-wrap break-all [overflow-wrap:anywhere]', SCROLLBAR_CLASS]">
                           {{ part.result }}<span
                             v-if="part.truncated"
                             class="inline-block ml-1 px-1 rounded text-[10px] leading-4 bg-[#8b949e] text-white align-middle"
@@ -405,17 +435,18 @@
                       <!-- R-158 #6：卡内错误位（自绘圆环 ! + 红底 + 文案）——错误就地呈现，不再全堆顶部 Alert；
                            R-165 S1：el-icon 退场，圆环 ! 照搬 demo v7 行内错误通知形制。
                            S6 批1（v7.10 N8）：发布冲突明细收敛 —— 红底行只留一句人话摘要（reason 首行），
-                           明细解析成表格（列 = 配置 / 行键 / 原因，超 8 行表体 320px 内滚），
-                           两种形态不同屏重复报同一份明细。 -->
+                           明细解析成表格（列 = 配置 / 行键 / 原因；表体长表格族双约束 min(480px,60vh) 内滚），
+                           两种形态不同屏重复报同一份明细。
+                           2A 批（裁决 §14.4 回执 / 文本族）：原因行限高改 `min(280px,35vh)`。 -->
                       <div v-if="!isBlankText(part.reason)" class="flex items-start gap-[7px] px-[10px] py-[7px] text-[12.4px] text-[#c0392b] bg-[#fdf1ef] border border-solid border-[#f0d5d0] rounded-[9px]" data-testid="tool-error">
                         <span class="mt-px shrink-0 flex-[0_0_14px] w-[14px] h-[14px] flex items-center justify-center rounded-[50%] border-[1.3px] border-[#c0392b] text-[#c0392b] text-[9px] font-bold" aria-hidden="true">!</span>
-                        <span class="flex-1 min-w-0 whitespace-pre-wrap break-words max-h-[240px] overflow-y-auto">原因：{{ reasonText(part) }}</span>
+                        <span class="flex-1 min-w-0 whitespace-pre-wrap break-words max-h-[min(280px,35vh)] overflow-y-auto">原因：{{ reasonText(part) }}</span>
                       </div>
                       <div v-if="conflictRows(part).length" class="border border-solid border-[#eef0f3] rounded-[8px] overflow-hidden" data-testid="conflict-table">
                         <div class="px-[9px] py-[5px] bg-[#f6f7f9] border-0 border-b border-solid border-[#e3e6ea] text-[11.4px] [font-weight:650] text-[#57606a]">
                           <span class="inline-block w-[34%]">配置</span><span class="inline-block w-[26%]">行键</span><span class="inline-block w-[40%]">原因</span>
                         </div>
-                        <div :class="['max-h-[320px] overflow-y-auto', SCROLLBAR_CLASS]">
+                        <div :class="['max-h-[min(480px,60vh)] overflow-y-auto', SCROLLBAR_CLASS]">
                           <div
                             v-for="row in conflictRows(part)"
                             :key="row.defCode + '#' + row.rowKey"
@@ -436,19 +467,21 @@
                       <template v-if="part.requiresAction">
                         <template v-if="part.kind2 === 'CONFIRM' && part.status === 'pending'">
                           <!-- R-163D D5 结构 → R-165 S2 纯 Tailwind 化：demo v7 `.gate` 全结构
-                               （蓝底门卡 = 卡头 + 字段表 grows + SVG 倒计时环 + 拒绝原因 + 双自绘按钮）；
+                               （蓝底门卡 = 卡头 + 字段表 grows + SVG 倒计时环 + 双自绘按钮）；
                                el-button / el-input / class="gate|gate-hd|cd|gate-ft" 手写 CSS 类全部退场，
-                               data-testid / @click / v-model / :disabled 判据逐字保留。 -->
+                               data-testid / @click / :disabled 判据逐字保留。
+                               2A 批（裁决 §3 缺陷④ / §9 K1）：**拒绝原因输入框整段删除** —— H1 只问
+                               批不批、无理由框（「修正走会话」）；批准 / 拒绝按钮口径不变。 -->
                           <div class="border border-solid border-[#cddcff] bg-[#eff4ff] rounded-[10px] p-[12px] mb-2.5" data-testid="hitl-gate">
                             <div class="flex items-center gap-[7px] text-[13.2px] mb-[9px]">
                               <span class="w-[15px] h-[15px] rounded-[50%] border-solid border-[1.4px] border-[#2563eb] text-[#2563eb] text-[10px] flex items-center justify-center" aria-hidden="true">!</span>
                               <span class="[font-weight:650]">需要你确认后才能继续</span>
                               <span class="ml-auto" :class="chipClass('primary')">等待确认</span>
                             </div>
-                            <!-- R-165 S5a 项 4：门卡字段区 = 纯限高内滚 160px（v7 `.grows` 口径）；
+                            <!-- 门卡字段区 = 纯限高内滚（字段族双约束 min(280px,35vh)，裁决 §14.4）；
                                  按钮区（倒计时 + 拒绝/确认）在滚动区之外常驻。 -->
                             <div
-                              class="bg-white border border-solid border-[#eef0f3] rounded-[8px] px-[10px] py-[2px] max-h-[160px] overflow-y-auto"
+                              class="bg-white border border-solid border-[#eef0f3] rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto"
                               :class="SCROLLBAR_CLASS"
                               data-testid="gate-rows"
                             >
@@ -464,15 +497,9 @@
                                 <span class="flex-1 min-w-0 break-words">{{ row.value }}</span>
                               </div>
                             </div>
-                            <!-- 拒绝原因：原生 textarea 自绘（preflight 关闭 ⇒ UA 底/字号/描边须显式复位） -->
-                            <textarea
-                              v-model="rejectReason"
-                              rows="2"
-                              class="mt-[10px] w-full resize-none rounded-[8px] border border-solid border-[#e3e6ea] bg-white px-[9px] py-[6px] font-[inherit] text-[13px] leading-[1.5] text-[#1f2328] [outline:none] placeholder:text-[#8b949e]"
-                              placeholder="拒绝原因（可选，填了会原样回填给模型）"
-                              data-testid="reject-reason"
-                            />
-                            <div class="flex items-center gap-[9px] mt-[11px]">
+                            <!-- 2A 批（裁决 §3 缺陷③）：按钮防折行 —— 行 flex-wrap（空间不足时按钮组整行
+                                 下移）、按钮组 flex-none、按钮 whitespace-nowrap + min-w；组内不再换行。 -->
+                            <div class="flex flex-wrap items-center gap-[9px] mt-[11px]">
                               <svg v-if="remainingSeconds !== null" class="flex-[0_0_30px]" viewBox="0 0 36 36" width="30" height="30" aria-hidden="true">
                                 <circle class="fill-none stroke-[#e3e6ea] [stroke-width:3]" cx="18" cy="18" r="15.5" stroke-width="3"></circle>
                                 <circle
@@ -490,24 +517,26 @@
                               >已提交，同步中…</span>
                               <span
                                 v-else-if="remainingSeconds !== null"
-                                class="text-[12.2px] text-[#57606a] tabular-nums"
+                                class="min-w-0 text-[12.2px] text-[#57606a] tabular-nums"
                                 :class="confirmExpired ? 'opacity-60' : ''"
                               >
                                 {{ confirmExpired ? '确认已超时（按钮已置灰），本轮将按拒绝/超时收尾' : `剩余确认时间 ${formatCountdown(remainingSeconds)}` }}
                               </span>
-                              <span v-else class="text-[12.2px] text-[#57606a]">等待人工确认</span>
-                              <button
-                                type="button"
-                                class="ml-auto rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-[#e3e6ea] transition-all duration-[150ms] bg-white text-[#57606a] hover:border-[#8b949e] hover:text-[#1f2328] disabled:opacity-50 disabled:cursor-default"
-                                :disabled="confirmExpired || deciding || gateSubmitting(part.toolCallId)"
-                                @click="decide(false)"
-                              >拒绝</button>
-                              <button
-                                type="button"
-                                class="rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-transparent transition-all duration-[150ms] bg-[#2563eb] text-white font-semibold hover:brightness-[1.08] disabled:opacity-50 disabled:cursor-default disabled:bg-[#8b949e] disabled:font-normal"
-                                :disabled="confirmExpired || deciding || gateSubmitting(part.toolCallId)"
-                                @click="decide(true)"
-                              >确认执行</button>
+                              <span v-else class="min-w-0 text-[12.2px] text-[#57606a]">等待人工确认</span>
+                              <span class="ml-auto flex flex-none items-center gap-[8px] whitespace-nowrap">
+                                <button
+                                  type="button"
+                                  class="flex-none whitespace-nowrap min-w-[56px] rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-[#e3e6ea] transition-all duration-[150ms] bg-white text-[#57606a] hover:border-[#8b949e] hover:text-[#1f2328] disabled:opacity-50 disabled:cursor-default"
+                                  :disabled="confirmExpired || deciding || gateSubmitting(part.toolCallId)"
+                                  @click="decide(false)"
+                                >拒绝</button>
+                                <button
+                                  type="button"
+                                  class="flex-none whitespace-nowrap min-w-[72px] rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-transparent transition-all duration-[150ms] bg-[#2563eb] text-white font-semibold hover:brightness-[1.08] disabled:opacity-50 disabled:cursor-default disabled:bg-[#8b949e] disabled:font-normal"
+                                  :disabled="confirmExpired || deciding || gateSubmitting(part.toolCallId)"
+                                  @click="decide(true)"
+                                >确认执行</button>
+                              </span>
                             </div>
                           </div>
                         </template>
@@ -676,9 +705,9 @@
           >{{ ERROR_CARD_TONE[m.errorCard.variant].glyph }}</span>
           <div class="flex-1 min-w-0">
             <b class="block text-[12.2px] [font-weight:650] text-[#1f2328]">{{ m.errorCard.title }}</b>
-            <!-- S6 批1（长内容审计清零项：错误卡 detail 无 cap）：detail 加限高内滚 max-h-[200px]
-                 （与代码块 / 回执详情同口径，不新增第三套数值）——长错误文案不再把会话顶开。 -->
-            <span :class="['block max-h-[200px] overflow-y-auto text-[11.6px] text-[#57606a] leading-[1.55] whitespace-pre-wrap break-words', SCROLLBAR_CLASS]" :data-testid="'error-card-detail-' + m.id">{{ m.errorCard.detail }}</span>
+            <!-- S6 批1（长内容审计清零项：错误卡 detail 无 cap）：detail 加限高内滚。
+                 2A 批（裁决 §14.4 文本块族）：限高改双约束 `min(280px,35vh)` —— 长错误文案不再把会话顶开。 -->
+            <span :class="['block max-h-[min(280px,35vh)] overflow-y-auto text-[11.6px] text-[#57606a] leading-[1.55] whitespace-pre-wrap break-words', SCROLLBAR_CLASS]" :data-testid="'error-card-detail-' + m.id">{{ m.errorCard.detail }}</span>
             <span v-if="m.errorCard.guide" class="block mt-[3px] text-[11.4px] text-[#57606a] leading-[1.55]">{{ m.errorCard.guide }}</span>
           </div>
           <button
@@ -905,29 +934,42 @@
  * R-165 S5a（demo v7.7 终裁十项）：① 卡片堆叠下外边距体系（工具卡 mb-2 / 门卡·GF mb-2.5 /
  * 回执·思考·流程图 mb-3.5）；② 回执卡折叠重设计（「查看详情 ⇄ 收起详情」+ 单层 mono JSON 盒，
  * 外层包裹盒/小节标签退役，`border-t border-solid` 单边写法在 preflight 关闭下的 3px 伪影一并清）；
- * ③ 用户气泡全圆角 12px；④ 限高族（工具输出 160 / 代码 pre 200 / 门卡字段 160 / GF 字段 240，
- * 纯限高内滚无展开钮）；⑤ 长表格双区（表头不滚 + 表体 320 内滚 + 横滚联动）；⑥ 长消息折叠 184px
+ * ③ 用户气泡全圆角 12px；④ 限高族（纯限高内滚无展开钮；2A 批起统一双约束，见下）；
+ * ⑤ 长表格双区（表头不滚 + 表体内滚 + 横滚联动）；⑥ 长消息折叠 184px
  * + 遮罩绝对值写法；⑦ 复制全图标化 + 绿勾 2s 反馈（代码块 / mermaid 源码 / 消息复制）；
  * ⑧ 6px 圆角半透明滚动条（任意变体类）；⑨ focus-visible 聚焦环；⑩ GF 取消钮聚拢右对齐。
  * R-165 S5b（demo v7.7 裁决区 12 + 07 双态重做）：mermaid 卡改「卡头分段 tab 预览 | 源码」双态
- * （底部「查看源码」钮退役）+ 卡头右端图标钮组（缩放读数 / 复位 / 全屏）；预览态 260px 限高内联
+ * （底部「查看源码」钮退役）+ 卡头右端图标钮组（缩放读数 / 复位 / 全屏）；预览态限高内联
  * 滚轮缩放（指针锚定 0.5×–4×）+ transform 拖拽平移 + 复位，超宽仍可内联横滚，两态各自记住滚动；
- * 源码态 200px 内滚 mono 盒 + 复制源码图标钮（绿勾反馈沿用 S5a 统一机制）；全屏查看器重做
+ * 源码态限高内滚 mono 盒 + 复制源码图标钮（绿勾反馈沿用 S5a 统一机制）；全屏查看器重做
  * （scrim + 白容器 · 指针锚定缩放 · transform 平移 · 6 钮工具条 · Esc/点 scrim 关闭 · role=dialog）。
  * 结构类名换 `mmdc` 前缀（旧 `.mmd*` CSS 规则零引用但本批禁删禁改，S5c 统一拆）。
  *
  * S6 应用批·批1（用户已裁决项，纯前端；蓝本 = demo v7.9 定稿 + v7.10 规则表）：
  * ① **回执卡独立块退役**（`utils/blocks.ts` 的 receipt 块 + 本组件回执渲染段整体删除）——已决
- *    确认门 / GF 段由**自己的卡**原地切只读态（`.rocard`：徽标 + 人话摘要 + 渐进时间戳 + chevron，
- *    展开体 = 只读 label-value 表，160px 内滚）；「查看详情 / 收起详情」文字钮全稿删除；
+ *    确认门 / GF 段由**自己的卡**原地切只读态；「查看详情 / 收起详情」文字钮全稿删除；
  * ② **JSON 展示全面清零**：门卡删 args JSON 盒（字段表改全键 + 敏感值掩码）、普通工具卡参数改
  *    折叠区字段表、发布冲突明细收敛（reason 只留一句摘要 + 明细渲表格卡）；
  * ③ **空内容工具卡不给展开入口**（v7.10 ajv11 / 场景 19-e）：展开体渲染后 0 行 ⇒ 不渲 chevron、
  *    卡头 disabled 无 hover、点击 no-op；
- * ④ 思考过程展开体改 `max-h-[160px]` 纯限高内滚（裁决点 21），`CollapsibleText` 组件整体退役
+ * ④ 思考过程展开体改纯限高内滚（裁决点 21），`CollapsibleText` 组件整体退役
  *    （思考 / 参数 / 输出 / 回执详情四处全部「纯限高内滚、无展开钮」）；
- * ⑤ 长内容审计清零项：错误卡 detail 限高 200px、行内 code 撤 nowrap 改 anytime 折行（markdown.ts）、
- *    工具输出盒补 break-all、门卡英文字段 key 可换行、degraded 期代码块同挂 200px 限高。
+ * ⑤ 长内容审计清零项：错误卡 detail 限高、行内 code 撤 nowrap 改 anytime 折行（markdown.ts）、
+ *    工具输出盒补 break-all、门卡英文字段 key 可换行、degraded 期代码块同挂限高。
+ *
+ * 2A 批（2026-10-17 用户裁决 §9 K1 / §10 F9 / §12 H2 / §14.4 / §15 K12 / §16 M1 / §20）：
+ * ① **已决只读 = 原样 UI 锁定渲染**（纠偏 label-value 摘要式）：门卡参数区字段表原样、
+ *    GF 复用同一张表单（FormRenderer readonly：原生 disabled + 值回填）、操作按钮整块不渲染；
+ * ② 卡头 = 状态徽标 + 人话摘要 + chevron 的单行裸文字行（无底色 / 无分隔线、36.4px、chevron
+ *    ml-auto 靠右）；decidedAt 数据层照记、**卡面不渲染**；
+ * ③ 成功终态（已批准 / 已提交）回合结束后默认折叠，四类例外（已拒绝 / 已超时 /
+ *    已批准·执行失败 / 已取消）默认展开；决策当下不折叠（turnStillOpen）；
+ * ④ 状态全集：门卡 = 已批准 / 已拒绝 / 已超时 / 已批准·执行失败（无已取消）；
+ *    表单系 = 已提交 / 已取消；审批卡旧字样（含被 R5 / §10 F6 废止的两枚）零残留；
+ * ⑤ 未提交不记录：取消 / 超时收尾回初始空态再锁定（F9）；
+ * ⑥ **限高新尺度（§14.4）**：字段族 `min(280px,35vh)` / 表单·组合族 `min(320px,45vh)` /
+ *    长表格族 `min(480px,60vh)` / 代码·详情族 `min(280px,35vh)` / 用户长消息 184px 不动 /
+ *    mermaid 预览 `min(320px,45vh)` / 源码盒 `min(280px,35vh)`；纯限高内滚、无展开钮不变。
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ArrowRight, ChatDotRound } from '@element-plus/icons-vue'
@@ -949,11 +991,13 @@ import {
 import { toolSummary, TOOL_SUMMARY_STATUS_WORDS } from '@/utils/tool-summaries'
 import {
   argRows,
+  formSpecOf,
   hasBodyRows,
   isBlankText,
   isReadOnlyCard,
   parsePublishConflicts,
-  readOnlyRows,
+  readOnlyDefaultExpanded,
+  readOnlyStateOf,
   reasonHeadline,
   submitRows,
   type ConflictRow,
@@ -965,14 +1009,14 @@ import {
 import { deriveCopyText, deriveProjections } from '@/utils/parts'
 import { createPollingController, type PollingController } from '@/utils/polling'
 import FormRenderer from '@/components/AiPanel/FormRenderer.vue'
-import { GENERATIVE_FORM_TOOL, type ChatMessage, type PendingToolCall, type ToolPart, type ToolRunStatus } from '@/types/ai'
+import { GENERATIVE_FORM_TOOL, type ChatMessage, type ToolPart, type ToolRunStatus } from '@/types/ai'
+import type { FormSpec } from '@/types/form-schema'
 import type { ErrorCard, ErrorCardVariant } from '@/utils/error-card'
 
 const ai = useAiStore()
 const workspace = useWorkspaceStore()
 
 const inputText = ref('')
-const rejectReason = ref('')
 const deciding = ref(false)
 const msgWrapRef = ref<HTMLElement | null>(null)
 /** R-165 S5c：输入框 ref —— 错误卡「改写后重发」把焦点交回输入框（改写是用户动作）。 */
@@ -1073,17 +1117,19 @@ function backToBottom(): void {
 const USER_MSG_MAX_HEIGHT_PX = 184
 
 /** S4 折叠态类 → S5a 项 6：限高 184px + 裁切 + 底部渐隐。
+ *  2A 批（裁决 §14.4）：**用户长消息折叠 184px / 8 行维持不变**（本轮唯一不加双约束的限高族）。
  *  遮罩改**绝对值**写法 `calc(100% - 90px)`（末 90px 渐隐，与折叠高度解耦 —— 以后再调高度不必再
  *  改百分比；v7.7 终裁口径）。 */
 const USER_MSG_COLLAPSE_CLASS = 'max-h-[184px] overflow-hidden [mask-image:linear-gradient(to_bottom,#000_calc(100%_-_90px),transparent)]'
 
 /** md-body 修正类（S4 项 3）：末块下外边距归零；用户侧另加字号直命中（根容器自身声明 13.8px
  *  会压继承，S2 遗留 13.5px 未真生效 ⇒ 用内部选择器直命中 p/li）。
- *  R-165 S5a 项 4：代码块 `pre` 纯限高内滚 200px（demo v7 口径）——`figure.code>pre` 的
- *  任意变体特异度高于渲染层注入在 `pre` 自身上的排版类，故无需 `!`。
+ *  R-165 S5a 项 4：代码块 `pre` 纯限高内滚；2A 批（裁决 §14.4 代码族）改双约束
+ *  `min(280px,35vh)` ——`figure.code>pre` 的任意变体特异度高于渲染层注入在 `pre` 自身上的
+ *  排版类，故无需 `!`（同值也保证 degraded 路与正常路一致）。
  *  R-165 S5c：末块外边距的**声明方**已是渲染层注入的工具类（markdown.ts `MD_P_CLASS` 等），
  *  这里的 `!` 从「压手写 CSS 的 (0,2,1)」变成「压渲染层同级工具类」的双保险，语义不变。 */
-const CODE_PRE_LIMIT_CLASS = '[&_figure.code>pre]:max-h-[200px] [&_figure.code>pre]:overflow-y-auto'
+const CODE_PRE_LIMIT_CLASS = '[&_figure.code>pre]:max-h-[min(280px,35vh)] [&_figure.code>pre]:overflow-y-auto'
 const MD_BODY_USER_CLASS = `[&>*:last-child]:!mb-0 [&_p]:text-[13.5px] [&_li]:text-[13.5px] ${CODE_PRE_LIMIT_CLASS}`
 const MD_BODY_AI_CLASS = `[&>*:last-child]:!mb-0 ${CODE_PRE_LIMIT_CLASS}`
 
@@ -1596,17 +1642,19 @@ const MMD_TAB_CLASS = 'mmdc-tab border-0 bg-transparent rounded-[5px] px-[11px] 
 const MMD_ICON_BTN_CLASS = 'group/tip relative inline-flex w-[26px] h-[26px] items-center justify-center rounded-[7px] border border-solid border-[#e3e6ea] bg-white p-0 text-[#57606a] transition-colors duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328] [&_svg]:w-[14px] [&_svg]:h-[14px] [&_svg]:fill-none [&_svg]:stroke-current [&_svg]:[stroke-width:1.7] [&_svg]:[stroke-linecap:round] [&_svg]:[stroke-linejoin:round]'
 const MMD_COPY_ICON_BTN_CLASS = `${MMD_ICON_BTN_CLASS} ${COPY_STATE_CLASS}`
 
-/** 预览态容器（demo：限高 260px + 内联横滚保留 + 拖拽手型；缩放/平移走 transform 层，不用 overflow 平移）。 */
-const MMD_PREVIEW_PANE_CLASS = `mmdc-pane mmdc-pv max-h-[260px] overflow-auto bg-white cursor-grab select-none ${SCROLLBAR_CLASS}`
+/** 预览态容器（demo：内联横滚保留 + 拖拽手型；缩放/平移走 transform 层，不用 overflow 平移）。
+ *  2A 批（裁决 §14.4 表单 / 组合族）：限高改双约束 `min(320px,45vh)`（可视图给高一档）。 */
+const MMD_PREVIEW_PANE_CLASS = `mmdc-pane mmdc-pv max-h-[min(320px,45vh)] overflow-auto bg-white cursor-grab select-none ${SCROLLBAR_CLASS}`
 const MMD_PAN_CLASS = 'mmdc-pan [transform:translateX(var(--px,0px))_translateY(var(--py,0px))]'
 const MMD_STAGE_CLASS = 'mmdc-stage w-max origin-top-left [transform:scale(var(--z,1))]'
 const MMD_SOURCE_PANE_CLASS = 'mmdc-pane hidden'
-/** 源码态：小标题行 + 复制源码图标钮（24px 档）+ mono 盒 200px 内滚（与代码块限高同口径）。 */
+/** 源码态：小标题行 + 复制源码图标钮（24px 档）+ mono 盒双约束 `min(280px,35vh)` 内滚
+ *  （2A 批裁决 §14.4 代码族，与代码块限高同口径）。 */
 const MMD_SOURCE_BAR_CLASS = 'flex items-center gap-[6px] border-0 border-b border-solid border-[#eef0f3] bg-[#fbfbfc] px-[10px] py-[5px] text-[11px] text-[#8b949e]'
 /** mono 盒用 `div`（非 demo 的 `pre`）：preflight 关闭下 `<pre>` 吃 UA 默认外边距，且
  *  `.ai-chat .md-body pre`(0,2,1) 会压过全部 Tailwind 版式类（padding/字号/行高需 5 个 `!`）；
  *  内容由 `textContent` 赋值（纯文本、零注入面），div 的 box 行为与 pre 等价（`whitespace-pre`）。 */
-const MMD_SOURCE_BOX_CLASS = `mmdc-src max-h-[200px] overflow-auto whitespace-pre bg-[#f8f8f8] px-[10px] py-[8px] font-mono text-[12px] leading-[1.6] text-[#333] ${SCROLLBAR_CLASS}`
+const MMD_SOURCE_BOX_CLASS = `mmdc-src max-h-[min(280px,35vh)] overflow-auto whitespace-pre bg-[#f8f8f8] px-[10px] py-[8px] font-mono text-[12px] leading-[1.6] text-[#333] ${SCROLLBAR_CLASS}`
 
 /** 卡头图标钮的 tip 气泡翻到**钮下方**：卡壳 `overflow-hidden`（demo 同形）会把钮上方的气泡裁掉，
  *  锚点翻转后气泡落在卡头内部、恒可见（其余钮仍用 TIP_CLASS 上方气泡）。 */
@@ -2095,9 +2143,33 @@ function blocksOf(message: ChatMessage): Block[] {
  * 块展开态三态判定（D4/D6/D-C6）：requiresAction 组强制展开（手动收起不生效）；
  * 否则 expandedBlocks[id] 显式值优先（用户手动展开永不自动收起 / 手动收起不被自动打开）；
  * 未触碰（键缺省）回落 defaultExpanded。
+ *
+ * 2A 批（裁决 2026-10-17 §15 K12：「回合结束才收」）：已决成功卡（已批准 / 已提交）的折叠是
+ * **回合级时序** —— 决策瞬间不折叠，等本轮结束（新建消息 / 回合文本收尾）后才收成卡头行。
+ * 判据 = `turnStillOpen`：本轮 loading 仍在，且该卡属于**末条消息**；不满足才走 defaultExpanded
+ * （成功 → 折叠）。用户手动触碰过的卡（expandedBlocks 有显式值）永远优先，不受时序影响。
  */
 function isBlockExpanded(block: Block): boolean {
-  return resolveBlockExpanded(block, ai.expandedBlocks[block.id])
+  const manual = ai.expandedBlocks[block.id]
+  if (manual === undefined && turnStillOpen(block) && readOnlySuccessCard(block)) {
+    return true
+  }
+  return resolveBlockExpanded(block, manual)
+}
+
+/** 回合是否仍在进行中（末条消息 + 本轮 loading）：成功只读卡据此保持展开到回合结束。 */
+function turnStillOpen(block: Block): boolean {
+  if (!ai.loading) {
+    return false
+  }
+  const last = ai.messages[ai.messages.length - 1]
+  return last !== undefined && last.id === block.messageId
+}
+
+/** 成功终态只读卡（已批准 / 已提交）—— 唯一受「回合结束才收」时序影响的卡型。 */
+function readOnlySuccessCard(block: Block): boolean {
+  return block.parts.some((part) => part.kind === 'tool' && isReadOnlyCard(part)
+    && !readOnlyDefaultExpanded(part))
 }
 
 /** 组头/思考链头点击：写 store 显式态（三态记录；requiresAction 组的强制展开由 resolveBlockExpanded 兜底）。 */
@@ -2223,32 +2295,11 @@ function reasoningSummary(text: string, expanded: boolean): string {
 }
 
 /**
- * R-165 S2：回执卡徽标（demo v7 `.rc-badge`：10.5px / px-6px / 圆角 5 / semibold，三族色）。
- * 色族仍由既有 `hitlReceiptTagType` 派生（五档语义不变），此处只做**五档→三族**的呈现收敛：
- * success→绿、danger→红、其余（info/warning/primary）→中性灰（v7 `.rc-badge` 只有 ok/bad/mute）。
- *
- * 问题1 偏差修正批（用户实报 `unknown` 徽标长文案）：文案最长 = `unknown`「结局未知（未确认成功/失败）」
- * （≈134px）；卡头是 flex 行，徽标 `flex-none` 无 cap 时会直接挤占摘要。对齐工具卡状态胶囊
- * （`max-w-[104px] truncate`）口径补 cap，并给徽标挂 `title`（全称悬浮可回看）。
- */
-const RECEIPT_BADGE_BASE = 'flex-none max-w-[104px] truncate text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold'
-const RECEIPT_BADGE_TONE: Record<'success' | 'danger' | 'mute', string> = {
-  success: 'text-[#1a7f45] bg-[#edf7f0]',
-  danger: 'text-[#c0392b] bg-[#fdf1ef]',
-  mute: 'text-[#57606a] bg-[#f6f7f9]'
-}
-
-function receiptBadgeClass(status: ToolRunStatus): string {
-  const tone = hitlReceiptTagType(status)
-  const family = tone === 'success' ? 'success' : tone === 'danger' ? 'danger' : 'mute'
-  return `${RECEIPT_BADGE_BASE} ${RECEIPT_BADGE_TONE[family]}`
-}
-
-/**
- * S6 批1（v7.9 场景 19-b/19-f + v7.10 规则 7）：确认门字段表（v7 `.grows` 行）。
+ * S6 批1（v7.9 场景 19-b/19-f + v7.10 规则 7）→ 2A 批：确认门字段表（v7 `.grows` 行）。
  * - 首行恒为「操作」（工具中文名）；
- * - 其后渲染 **args 全键**（原上限 5 行 = 1 + 4 防压垮门卡的旧口径退役 —— 门卡字段区已限高 160px
- *   内滚，参数表压不垮卡，「看不到的参数」才是缺陷；裁决 2026-10-16 第 3 条点名此项）；
+ * - 其后渲染 **args 全键**（原上限 5 行 = 1 + 4 防压垮门卡的旧口径退役 —— 门卡字段区已限高
+ *   `min(280px,35vh)` 双约束内滚，参数表压不垮卡，「看不到的参数」才是缺陷；裁决 2026-10-16 第 3 条）；
+ * - 待决门卡与已决只读卡**同源**（K1「参数区字段表原样」：只读体直接复用本函数）；
  * - **敏感值掩码**：键名命中 /pass(word)?|secret|token|api_?key/i 的值显示定长圆点（不泄值、不泄长度）；
  * - 值可读化：布尔 → 是/否、数组 → 顿号、文件路径 → 文件名、对象 →（复杂值）—— 不渲 raw JSON。
  */
@@ -2498,103 +2549,68 @@ function showCaret(message: ChatMessage, blockIndex: number): boolean {
 }
 
 /**
- * R-158 #10 → R-160 M2 → S6 批1：回执判据在块层（`utils/blocks.ts isReadOnlyCard` —— 判据不变：
- * 确认门 / 生成式表单工具的已决段），本组件只负责把该段渲染成**原卡只读态**
- * （模板 `v-if="isReadOnlyCard(part)"` 分支）；receipt 独立块与其渲染段已整体删除。
+ * 2A 批（裁决 2026-10-17 §9 K1 / §10 F6 / §15 K12 / §16 M1）：已决只读卡呈现层。
+ *
+ * 徽标（两套，§2）：门卡 = 已批准 / 已拒绝 / 已超时 / 已批准·执行失败（**无已取消**）；
+ * 表单系 = 已提交 / 已取消。审批卡旧字样（含被 R5 / §10 F6 废止的两枚与旧「已确认」）零残留。
+ *
+ * 字形前缀沿用 R-166 口径⑥（`✓` U+2713 / `✗` U+2717 / `!` 均文本字形、非 emoji）。
+ * 徽标规格对齐 demo r13/r14：9.5px / leading 1.7 / px-5 / 圆角 5 / semibold（与工具卡胶囊同档，
+ * 不撑高 36.4px 卡头行）。
  */
+const READONLY_BADGE_BASE = 'text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold border border-solid'
+const READONLY_BADGE_TONE: Record<ReturnType<typeof readOnlyStateOf>, string> = {
+  approved: 'text-[#1a7f45] bg-[#edf7f0] border-[#bfe3cd]',
+  rejected: 'text-[#c0392b] bg-[#fdf1ef] border-[#e3e6ea]',
+  expired: 'text-[#b45309] bg-[#fffbeb] border-[#fde68a]',
+  failed: 'text-[#c0392b] bg-[#fdf1ef] border-[#e3e6ea]',
+  submitted: 'text-[#1a7f45] bg-[#edf7f0] border-[#bfe3cd]',
+  cancelled: 'text-[#c0392b] bg-[#fdf1ef] border-[#e3e6ea]'
+}
 
-/**
- * 回执状态徽标文案：决策态优先（收口 MINOR-1）——已确认须 approve 即显、不等 succeeded；
- * 已确认但执行失败仍显「已确认」（徽标系决策态，非工具执行态）；decision 缺省（历史数据/
- * 过期态/取消）回退 status 派生。
- *
- * R-166 口径⑥（**字形前缀**）：对齐 demo v7.7 回执区（`.receipt` 的「勾 + 已确认」/「叉 + 已拒绝」/
- * 超时族）—— 已确认 `✓` / 已拒绝 `✗` / 已超时 `!`。
- *
- * 为什么超时用 `!` 而**不是** demo 的秒表字形：demo v7.7 回执区实字为「秒表 + 已超时」
- * （源码第 1470 行核过），但该字形是 **U+23F1**，属 **emoji 码位**（Unicode Emoji=Yes），
- * 与本批「界面禁 emoji」纪律冲突（故本注释亦不落该字形本身）；
- * `✓`(U+2713) `✗`(U+2717) 是文本字形（非 emoji）故照 demo 保留。`!` 同时与本仓门卡/错误位的
- * 告警字形同族（见 :388 与 tool-error 的 `!` 圆环），故取「`!` + 文案」保住 demo 的
- * "字形 + 标签"节奏。
- *
- * R-166 口径④：本地判定的「已超时作废」（倒计时归零 + 权威校正仍无结局）与后端 TIMEOUT
- * 同色同形，仅文案区分（段上 `expiredLocally` 标记为判据）。
- *
- * S6 批1：兜底分支不再一律「已处理」（blocked「超出当前范围」/ unknown「结局未知」被读成
- * 「已处理」= 不诚实）—— 改为复用 `toolStatusLabel`（九态穷尽表的同一份文案）。
- */
-function hitlReceiptLabel(part: ToolPart): string {
-  if (part.decision === 'approved') {
-    return '✓ 已确认'
-  }
-  if (part.decision === 'rejected') {
-    return '✗ 已拒绝'
-  }
-  switch (part.status) {
-    case 'succeeded':
-      return '✓ 已确认'
+function readOnlyBadgeClass(part: ToolPart): string {
+  return `${READONLY_BADGE_BASE} ${READONLY_BADGE_TONE[readOnlyStateOf(part)]}`
+}
+
+/** 徽标文案：门卡四态 / 表单系两态（K2 + §10 F6；「已超时」不再带「作废」后缀）。 */
+function readOnlyBadgeLabel(part: ToolPart): string {
+  switch (readOnlyStateOf(part)) {
+    case 'approved':
+      return '✓ 已批准'
     case 'rejected':
       return '✗ 已拒绝'
     case 'expired':
-      return part.expiredLocally ? '! 已超时作废' : '! 已超时'
-    case 'cancelled':
-      return '已取消'
-    case 'running':
-      return '执行中'
+      return '! 已超时'
     case 'failed':
-      return '执行失败'
-    default:
-      return toolStatusLabel(part)
-  }
-}
-
-function hitlReceiptTagType(status: ToolRunStatus): 'success' | 'info' | 'warning' | 'danger' | 'primary' {
-  switch (status) {
-    case 'succeeded':
-      return 'success'
-    case 'rejected':
+      return '! 已批准 · 执行失败'
+    case 'submitted':
+      return '✓ 已提交'
     case 'cancelled':
-      return 'info'
-    case 'expired':
-      return 'warning'
-    case 'failed':
-      return 'danger'
-    case 'running':
-      return 'primary'
-    default:
-      return 'info'
+      return '✗ 已取消'
   }
 }
 
 /**
- * 生成式表单回执摘要（RC-1）：**只读 `submittedValues`**（用户这次实际提交的值），
- * 字段名走 schema 的 `label`（`args.form.fields[].label`）。
- *
- * 为什么不能沿用"args 前三键值"：GF 的 `args` 是**表单定义**（`form.scenario/title/fields`），
- * 照搬会把 schema 结构当摘要（用户看到的是一串定义键，不是自己填了什么）。
- * 无 `submittedValues`（他端提交/取消/超时等无本地值的收口）⇒ 降级为「表单已提交」。
- *
- * S6 批1：字段行组装改由 blocks.ts 的 `submitRows` 单点承担（只读表与摘要同源，不再各写一份
- * label 映射与可读化），摘要取前 3 行。
+ * 生成式表单已提交摘要（RC-1 → 2A）：**只读 `submittedValues`**（用户这次实际提交的值），
+ * 字段名走 schema 的 `label`；无本地提交值（他端提交）⇒ 空串（卡头只留「已提交」）。
  */
-function generativeFormSummary(part: ToolPart, label: string): string {
+function generativeFormSummary(part: ToolPart): string {
   const rows = submitRows(part)
   if (rows.length === 0) {
-    return `${label} · 表单已提交`
+    return ''
   }
   const items = rows.slice(0, 3).map((row) => `${row.key} ${row.value}`)
-  return `${label} · ${items.join('，')}${rows.length > items.length ? '…' : ''}`
+  return `${items.join('，')}${rows.length > items.length ? '…' : ''}`
 }
 
 /**
- * 参数自然语言摘要：工具中文名 + args 前三键值（工具名映射表口径，非 LLM 生成）。
+ * 门卡人话摘要（卡体标题 + 成功卡折叠摘要共用）：工具中文名 + args 前三键值。
  * S6 批1：值走 `readableValue`（布尔 是/否、数组 顿号、对象（复杂值））—— 摘要里不出现 JSON 片段。
  */
 function hitlReceiptSummary(part: ToolPart): string {
   const label = toolLabel(part.name)
   if (part.name === GENERATIVE_FORM_TOOL) {
-    return generativeFormSummary(part, label)
+    return generativeFormSummary(part)
   }
   const rows = argRows(part.args)
   if (rows.length === 0) {
@@ -2602,6 +2618,47 @@ function hitlReceiptSummary(part: ToolPart): string {
   }
   const pairs = rows.slice(0, 3).map((row) => `${row.key}=${row.value}`)
   return `${label} · ${pairs.join('，')}`
+}
+
+/**
+ * 折叠卡头摘要（仅成功终态且折叠时显示，demo r13/r14）：`已批准 · …` / `已提交 · …`。
+ * 例外态（已拒绝 / 已超时 / 已批准·执行失败 / 已取消）不写摘要 —— 卡头只留徽标 + chevron
+ * （默认展开态摘要隐藏，与 demo 一致）。
+ */
+function readOnlySummary(part: ToolPart): string {
+  switch (readOnlyStateOf(part)) {
+    case 'approved':
+      return `已批准 · ${hitlReceiptSummary(part)}`
+    case 'submitted': {
+      const detail = generativeFormSummary(part)
+      return detail === '' ? '已提交' : `已提交 · ${detail}`
+    }
+    default:
+      return ''
+  }
+}
+
+/**
+ * 已决 GF 的原卡 schema（K1：同一张表单）—— 按段缓存，模板里会取两次（v-if + :schema）。
+ */
+const readOnlySpecCache = new WeakMap<ToolPart, FormSpec | null>()
+
+function readOnlyFormSpec(part: ToolPart): FormSpec | null {
+  const cached = readOnlySpecCache.get(part)
+  if (cached !== undefined) {
+    return cached
+  }
+  const spec = formSpecOf(part)
+  readOnlySpecCache.set(part, spec)
+  return spec
+}
+
+/**
+ * 已决 GF 的回填值（K1 + F9）：**只有提交收尾**才回填 `submittedValues`；
+ * 取消 / 超时（未提交）一律 null ⇒ FormRenderer 回落初始空态（不保留半成品值）。
+ */
+function readOnlyFormValues(part: ToolPart): Record<string, unknown> | null {
+  return readOnlyStateOf(part) === 'submitted' ? (part.submittedValues ?? null) : null
 }
 
 async function send(): Promise<void> {
@@ -2737,16 +2794,15 @@ function gateSyncing(toolCallId: string): boolean {
 }
 
 /**
- * 提交一次人工裁决（放行 / 拒绝 + 原因）。
+ * 提交一次人工裁决（放行 / 拒绝）。
  *
- * R-166 口径②：**只有这里**（真正提交的那一刻）清拒绝原因输入框 —— 重派生 / 帧重投 /
- * 重挂一律不动用户正在敲的内容（旧口径在每次 `pendingConfirm` 引用变化时清，会吃掉输入）。
+ * 2A 批（裁决 §3 缺陷④ / §9 K1）：H1 **无理由框** —— 拒因输入框整段删除，拒绝只提交
+ * 固定口径 `用户拒绝执行`（后端 reason 字段仍为可选，契约不变；「修正走会话」）。
  */
 async function decide(approved: boolean): Promise<void> {
-  const reason = approved ? undefined : (rejectReason.value.trim() || '用户拒绝执行')
+  const reason = approved ? undefined : '用户拒绝执行'
   deciding.value = true
   try {
-    rejectReason.value = ''
     await ai.confirm(approved, reason)
   } finally {
     deciding.value = false
@@ -2762,25 +2818,6 @@ function onFormSubmit(values: Record<string, unknown>): void {
 function onFormCancel(): void {
   void ai.cancelGenerativeForm()
 }
-
-/**
- * R-166 口径②（拒绝原因解耦）：**只有换人（toolCallId 变化）才清空拒绝原因输入框**。
- *
- * 旧口径在 `pendingConfirm` 的每一次引用变化上都清 —— 而引用会因**重派生 / 帧重投 / 重挂**
- * 而变（段是唯一真值，每次 `deriveProjections` 都会重建投影对象），于是用户正在敲的拒绝原因
- * 会被下一次重派生吃掉。倒计时也不再在此折算（R-166 口径①：时钟在 store，重派生只读）。
- */
-function resetPendingWatch(pending: PendingToolCall | null): void {
-  const id = pending && pending.status === 'pending' ? pending.toolCallId : null
-  if (id === watchedGateId.value) {
-    return
-  }
-  watchedGateId.value = id
-  rejectReason.value = ''
-}
-
-/** 当前门卡的 toolCallId（口径②的"换人"判据；null = 当前没有门卡）。 */
-const watchedGateId = ref<string | null>(null)
 
 // 批2（权威翻转）：滚动指纹基本为 **parts 口径**（§6.3 清单）—— messages.length + 末消息段数 +
 // 末段的 kind/文本长度/段状态。内容增量都体现在"末段文本长度"上，工具帧的状态变化体现在"末段 status"。
@@ -2811,12 +2848,6 @@ watch(() => ai.expanded, (expanded) => {
     pinBottom()
   }
 })
-
-watch(
-  () => ai.pendingConfirm,
-  (pending) => resetPendingWatch(pending),
-  { immediate: true }
-)
 
 /**
  * R-166 口径④：倒计时归零 ⇒ 主动拉一次权威状态校正（每 toolCallId 只做一次，去重在 store）。

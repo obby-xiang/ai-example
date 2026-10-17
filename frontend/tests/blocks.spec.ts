@@ -11,12 +11,14 @@ import type { MessagePart, ReasoningPart, ToolPart } from '@/types/ai'
 import {
   MASKED_VALUE,
   argRows,
+  formSpecOf,
   groupParts,
-  hasReadOnlyBody,
   hasToolBody,
   isReadOnlyCard,
   parsePublishConflicts,
   readableValue,
+  readOnlyDefaultExpanded,
+  readOnlyStateOf,
   reasonHeadline,
   resolveBlockExpanded
 } from '@/utils/blocks'
@@ -254,9 +256,61 @@ describe('S6 批1：回执独立块退役（groupParts 不再派生第二块）+
     expect(hasToolBody(makeTool({ toolCallId: 'e4', args: '{}', reason: '失败' }))).toBe(true)
     // requiresAction 待动作卡例外（门卡 / GF 强制展开）
     expect(hasToolBody(makeTool({ toolCallId: 'e5', kind2: 'CONFIRM', status: 'pending', requiresAction: true, args: '{}' }))).toBe(true)
-    // 只读态卡走只读表判据
-    expect(hasReadOnlyBody(makeTool({ toolCallId: 'e6', kind2: 'CONFIRM', status: 'succeeded', requiresAction: false, args: '{}' }))).toBe(false)
-    expect(hasReadOnlyBody(makeTool({ toolCallId: 'e7', kind2: 'CONFIRM', status: 'succeeded', requiresAction: false, args: '{"taskId":1}' }))).toBe(true)
+  })
+
+  it('2A：已决只读态全集与默认展开（门卡四态 / 表单两态；成功折叠、例外展开）', () => {
+    // 门卡：decision 优先，failed 落「已批准·执行失败」
+    expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'running', decision: 'approved' }))).toBe('approved')
+    expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'succeeded', decision: 'approved' }))).toBe('approved')
+    expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'failed', decision: 'approved' }))).toBe('failed')
+    expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'rejected', decision: 'rejected' }))).toBe('rejected')
+    expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'expired' }))).toBe('expired')
+    // 门卡没有「已取消」（K2）：cancelled 归未批准收尾（已超时）
+    expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'cancelled' }))).toBe('expired')
+    // blocked / unknown / pending 不是决策态 ⇒ 不进只读卡（继续走普通工具卡）
+    for (const status of ['blocked', 'unknown', 'pending'] as const) {
+      expect(isReadOnlyCard(makeTool({ kind2: 'CONFIRM', status, requiresAction: false }))).toBe(false)
+    }
+    // 无 decision 的历史段回退 status
+    expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'succeeded' }))).toBe('approved')
+    expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'failed' }))).toBe('failed')
+    // 表单系两态：succeeded ⇒ 已提交，其余 ⇒ 已取消
+    expect(readOnlyStateOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'succeeded' }))).toBe('submitted')
+    expect(readOnlyStateOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'cancelled' }))).toBe('cancelled')
+    expect(readOnlyStateOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'failed' }))).toBe('cancelled')
+    // 默认展开：成功折叠；四类例外展开
+    expect(readOnlyDefaultExpanded(makeTool({ kind2: 'CONFIRM', status: 'succeeded', decision: 'approved' }))).toBe(false)
+    expect(readOnlyDefaultExpanded(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'succeeded' }))).toBe(false)
+    for (const part of [
+      makeTool({ kind2: 'CONFIRM', status: 'rejected', decision: 'rejected' }),
+      makeTool({ kind2: 'CONFIRM', status: 'expired' }),
+      makeTool({ kind2: 'CONFIRM', status: 'failed', decision: 'approved' }),
+      makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'cancelled' })
+    ]) {
+      expect(readOnlyDefaultExpanded(part)).toBe(true)
+    }
+  })
+
+  it('2A：groupParts 的 defaultExpanded 按只读终态分派（成功折叠 / 例外展开 / 待决强制展开）', () => {
+    const approved = groupParts([makeTool({ toolCallId: 'ok', kind2: 'CONFIRM', status: 'succeeded', decision: 'approved' })], 'm')
+    expect(approved[0]!.defaultExpanded).toBe(false)
+    const rejected = groupParts([makeTool({ toolCallId: 'no', kind2: 'CONFIRM', status: 'rejected', decision: 'rejected' })], 'm')
+    expect(rejected[0]!.defaultExpanded).toBe(true)
+    const failed = groupParts([makeTool({ toolCallId: 'bad', kind2: 'CONFIRM', status: 'failed', decision: 'approved' })], 'm')
+    expect(failed[0]!.defaultExpanded).toBe(true)
+    const submitting = groupParts([makeTool({ toolCallId: 'sub', name: 'generative_form', kind2: 'FRONTEND', status: 'cancelled' })], 'm')
+    expect(submitting[0]!.defaultExpanded).toBe(true)
+  })
+
+  it('2A：formSpecOf 解析 args.form（非法 / 缺省 ⇒ null，不臆造控件）', () => {
+    const part = makeTool({
+      name: 'generative_form',
+      kind2: 'FRONTEND',
+      args: JSON.stringify({ form: { scenario: 'FILTER', title: '导出参数', fields: [{ key: 'q', label: '关键字', type: 'text', required: false }] } })
+    })
+    expect(formSpecOf(part)).toMatchObject({ scenario: 'FILTER', title: '导出参数' })
+    expect(formSpecOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', args: '{}' }))).toBeNull()
+    expect(formSpecOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', args: 'not-json{' }))).toBeNull()
   })
 
   it('值可读化：布尔 / 数组 / 空值 / 文件路径 / 对象 / 敏感键掩码（门卡口径）', () => {

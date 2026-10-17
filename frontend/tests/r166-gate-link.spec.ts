@@ -5,7 +5,8 @@
  * ① 倒计时接心跳（方案 A）：心跳驱动 + 陈旧帧不锚 + 同 id 只许更早 ⇒ **不闪回**；
  * ② 拒绝原因解耦：重派生/帧重投不动输入框，只有换 toolCallId 才清；
  * ③ 409 幂等拒绝后不写乐观裁决，SSE 结局帧到达即落真实状态并撤瞬态；
- * ④ 超时悬挂兜底：倒计时归零拉一次 runs/current 校正，无结局 ⇒ 「已超时作废」回执。
+ * ④ 超时悬挂兜底：倒计时归零拉一次 runs/current 校正，无结局 ⇒ 「已超时」回执（2A 批：
+ *    裁决 §10 F6「超时徽标仅『已超时』」，不再带「作废」后缀；段侧 expiredLocally 标记保留）。
  *
  * 口径⑤（复制页签隔离）原判据 = navigation type，**R-166B 已整体替换**为三层握手
  * （pageId + Web Locks + BroadcastChannel）——回归锁随迁至 tests/r166b-fixes.spec.ts。
@@ -203,21 +204,21 @@ describe('R-166 口径①：倒计时接心跳（帧锚定 + 心跳驱动 + 不�
   })
 })
 
-describe('R-166 口径②：拒绝原因解耦（重派生不动输入框）', () => {
-  it('帧重投/重派生不丢用户输入；只有换 toolCallId 才清空', async () => {
+describe('R-166 口径② + 2A 缺陷④：拒绝原因输入框已删除（H1 无理由框）', () => {
+  it('门卡无拒因输入框；帧重投 / 重派生 / 换门卡都不会复活它', async () => {
     const store = useAiStore()
     const first = armGate(store, 'c1')
     const wrapper = await mountPanel(store.messages)
-    const reason = wrapper.find('[data-testid="reject-reason"]')
-    expect(reason.exists()).toBe(true)
-    await reason.setValue('这个参数不对，请改 taskId')
+    expect(wrapper.find('[data-testid="hitl-gate"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="reject-reason"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="hitl-gate"] textarea').exists()).toBe(false)
 
     // 重派生①：另起一个工具段（tool_start 帧 ⇒ DERIVE_FRAME_TYPES ⇒ 全量重算派生投影）
     store.handleFrame({ type: 'tool_start', toolCallId: 'x9', name: 'list_tasks', kind: 'BACKEND', runId: 'run-1', seq: 3 })
     await nextTick()
-    expect((wrapper.find('[data-testid="reject-reason"]').element as HTMLTextAreaElement).value).toBe('这个参数不对，请改 taskId')
+    expect(wrapper.find('[data-testid="reject-reason"]').exists()).toBe(false)
 
-    // 重派生②：同一挂起调用的**帧重投**（seq 前进；语义闸用"已决"判据兜底，本帧照常重放）
+    // 重派生②：同一挂起调用的帧重投（seq 前进；语义闸用"已决"判据兜底，本帧照常重放）
     store.handleFrame({
       type: 'confirm_request',
       toolCallId: 'c1',
@@ -230,20 +231,20 @@ describe('R-166 口径②：拒绝原因解耦（重派生不动输入框）', (
       seq: 4
     })
     await nextTick()
-    expect((wrapper.find('[data-testid="reject-reason"]').element as HTMLTextAreaElement).value).toBe('这个参数不对，请改 taskId')
+    expect(wrapper.find('[data-testid="reject-reason"]').exists()).toBe(false)
 
-    // 换人（新门卡 toolCallId=c2）才清空
+    // 换人（新门卡 toolCallId=c2）同样不宣回输入框
     first.done = true
     armGate(store, 'c2')
     await nextTick()
     expect(store.pendingConfirm?.toolCallId).toBe('c2')
-    expect((wrapper.find('[data-testid="reject-reason"]').element as HTMLTextAreaElement).value).toBe('')
+    expect(wrapper.find('[data-testid="reject-reason"]').exists()).toBe(false)
     wrapper.unmount()
   })
 })
 
-describe('R-166 口径④：超时悬挂兜底（倒计时归零 ⇒ 权威校正 ⇒ 已超时作废）', () => {
-  it('归零 + runs/current 无结局（真悬挂）⇒ 灰族「已超时作废」回执，不设重试钮', async () => {
+describe('R-166 口径④：超时悬挂兜底（倒计时归零 ⇒ 权威校正 ⇒ 已超时）', () => {
+  it('归零 + runs/current 无结局（真悬挂）⇒ 灰族「已超时」回执，不设重试钮', async () => {
     vi.useFakeTimers({ now: 1_700_000_000_000 })
     const store = useAiStore()
     armGate(store, 'c1', { atMs: 1_700_000_000_000, timeoutSeconds: 2 })
@@ -262,7 +263,7 @@ describe('R-166 口径④：超时悬挂兜底（倒计时归零 ⇒ 权威校�
     expect(api.runsCurrent).toHaveBeenCalled()
     const receipt = wrapper.find('[data-testid="hitl-receipt"]')
     expect(receipt.exists()).toBe(true)
-    expect(receipt.text()).toContain('! 已超时作废')
+    expect(receipt.text()).toContain('! 已超时')
     // 门卡与重试钮都不在（requiresAction 收口 ⇒ 挂起卡由派生抽掉）
     expect(wrapper.find('[data-testid="hitl-gate"]').exists()).toBe(false)
     expect(receipt.text()).not.toContain('重试')
@@ -271,12 +272,12 @@ describe('R-166 口径④：超时悬挂兜底（倒计时归零 ⇒ 权威校�
     expect(part).toMatchObject({ status: 'expired', expiredLocally: true, requiresAction: false })
     // 工具卡 tag 与回执徽标口径一致（不落「会话已失效」）——S6 起已决段只有一张只读卡
     const readOnly = wrapper.find('[data-testid="hitl-receipt"]')
-    expect(readOnly.text()).toContain('已超时作废')
+    expect(readOnly.text()).toContain('已超时')
     expect(readOnly.text()).not.toContain('会话已失效')
     wrapper.unmount()
   })
 
-  it('归零 + runs/current 有结局 ⇒ 按**真实裁决**收敛（不写"已超时作废"）', async () => {
+  it('归零 + runs/current 有结局 ⇒ 按**真实裁决**收敛（不写"已超时"）', async () => {
     vi.useFakeTimers({ now: 1_700_000_000_000 })
     const store = useAiStore()
     armGate(store, 'c1', { atMs: 1_700_000_000_000, timeoutSeconds: 2 })
@@ -292,7 +293,7 @@ describe('R-166 口径④：超时悬挂兜底（倒计时归零 ⇒ 权威校�
     await nextTick()
 
     const receipt = wrapper.find('[data-testid="hitl-receipt"]')
-    expect(receipt.text()).toContain('✓ 已确认')
+    expect(receipt.text()).toContain('✓ 已批准')
     expect(receipt.text()).not.toContain('已超时')
     const part = store.messages.flatMap((m) => m.parts).find((p) => p.kind === 'tool' && p.toolCallId === 'c1')
     expect(part).toMatchObject({ status: 'running', decision: 'approved', requiresAction: false })

@@ -157,8 +157,14 @@ function initialValueOf(field: FormFieldSpec): unknown {
       return typeof candidate === 'boolean' ? candidate : false
     case 'date':
       return typeof candidate === 'string' ? candidate : ''
+    // 2A 批（裁决 §1.4 / §3「枚举初值合法默认」）：enum 的初值必须落在合法枚举内 ——
+    // defaultValue 缺省 / 非法（不在 options 内）时取**首个选项**，不再回落空串。
+    // 这样提交前的 required 校验面对的是合法值，也避免原生 select 停在「请选择…」的非法初态。
     case 'enum':
-      return typeof candidate === 'string' && inOptions(field, candidate) ? candidate : ''
+      if (typeof candidate === 'string' && inOptions(field, candidate)) {
+        return candidate
+      }
+      return field.options?.[0]?.value ?? ''
     case 'multi_select':
       return Array.isArray(candidate)
         ? candidate.filter((item): item is string => typeof item === 'string' && inOptions(field, item))
