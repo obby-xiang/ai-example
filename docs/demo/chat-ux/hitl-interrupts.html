@@ -3,17 +3,17 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ai-example · 主题 demo：HITL 中断场景廊（用户裁决 r12 · 卡头对齐工具卡）</title>
+<title>ai-example · 主题 demo：HITL 中断场景廊（用户裁决 r13 · 折叠卡头与工具卡同尺寸）</title>
 <link rel="stylesheet" href="hitl-interrupts.css">
 </head>
-<body class="m-0 p-0 bg-[#f1f2f4] text-[#1f2328] font-sans text-[13.8px] leading-[1.7] antialiased [&_button:focus-visible]:outline-none [&_button:focus-visible]:ring-2 [&_button:focus-visible]:ring-[#2563eb]/40" data-hitl-final="2026-10-17-r12">
+<body class="m-0 p-0 bg-[#f1f2f4] text-[#1f2328] font-sans text-[13.8px] leading-[1.7] antialiased [&_button:focus-visible]:outline-none [&_button:focus-visible]:ring-2 [&_button:focus-visible]:ring-[#2563eb]/40" data-hitl-final="2026-10-17-r13">
 
 <header class="sticky top-0 z-30 flex items-center gap-[16px] px-[22px] py-[12px] bg-white border-b border-[#e3e6ea]">
-  <div class="font-semibold text-[14px] tracking-[.2px]">ai-example · 主题 demo <span class="text-[#57606a] font-normal ml-[8px] text-[12.5px]">HITL 中断场景廊 · 卡头对齐工具卡（用户 2026-10-17 裁决 r12）</span></div>
+  <div class="font-semibold text-[14px] tracking-[.2px]">ai-example · 主题 demo <span class="text-[#57606a] font-normal ml-[8px] text-[12.5px]">HITL 中断场景廊 · 折叠卡头与工具卡同尺寸（用户 2026-10-17 裁决 r13）</span></div>
   <span class="ml-auto flex items-center gap-[6px]">
     <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">现役</span>
     <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#1f2328] text-white">单主题</span>
-    <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#edf7f0] text-[#1a7f45] border border-[#bfe3cd]">r12 · 2026-10-17</span>
+    <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#edf7f0] text-[#1a7f45] border border-[#bfe3cd]">r13 · 2026-10-17</span>
   </span>
 </header>
 
@@ -28,7 +28,7 @@
         <span class="ml-auto flex-none font-mono text-[11px] text-[#8b949e]">场景廊 · A1–A6 可交互 + B1–B7 样张</span>
       </div>
       <div class="px-[13px] pt-[9px] pb-[11px]">
-        <p class="m-0 text-[12.2px] leading-[1.6] text-[#57606a]">r11 把 demo 当正式产品做：卡片本体内不再出现任何 demo 注解——类型/规格徽标、日期时间、卡内说明脚注、评审辅助入口全部移出或删除；场景标题行（卡外脚手架）保留。此前 r10 两件事：①卡头减肥——撤掉风险徽标 / 决策时间 / 「只读」chip，卡头只留类型徽标 + 状态徽标（折叠态再加摘要与 chevron，单行紧凑、摘要省略号）；②新增 T1 工具卡对照场景，照 AiPanel 工具卡形态做折叠 / 展开可切换样张，便于与 HITL / GF 折叠同屏比对。此前 r9 落「已决默认折叠」：成功终态（已批准 / 已提交）在**回合结束**（后续 AI 消息出现）后收成卡头摘要行——徽标 + 一句话决策摘要 + 决策时间 + chevron，点卡头（或 Enter / Space）展开看原样只读内容；已拒绝 / 已超时 / 已批准·执行失败 / 已取消四类保持默认展开。决策瞬间不立即收，避免把用户刚做的决定「秒收」。</p>
+        <p class="m-0 text-[12.2px] leading-[1.6] text-[#57606a]">r13 把 HITL/GF 的折叠卡头逐项对齐 T1 工具卡收起态（padding 8/10、间距 6、状态胶囊收到 9.5px 同高、chevron 与工具卡同款同字号），折叠行高与工具卡同为 36.4px；展开态同一卡头、chevron 转动 90°。此前 r11 把 demo 当正式产品做：卡片本体内不再出现任何 demo 注解——类型/规格徽标、日期时间、卡内说明脚注、评审辅助入口全部移出或删除；场景标题行（卡外脚手架）保留。此前 r10 两件事：①卡头减肥——撤掉风险徽标 / 决策时间 / 「只读」chip，卡头只留类型徽标 + 状态徽标（折叠态再加摘要与 chevron，单行紧凑、摘要省略号）；②新增 T1 工具卡对照场景，照 AiPanel 工具卡形态做折叠 / 展开可切换样张，便于与 HITL / GF 折叠同屏比对。此前 r9 落「已决默认折叠」：成功终态（已批准 / 已提交）在**回合结束**（后续 AI 消息出现）后收成卡头摘要行——徽标 + 一句话决策摘要 + 决策时间 + chevron，点卡头（或 Enter / Space）展开看原样只读内容；已拒绝 / 已超时 / 已批准·执行失败 / 已取消四类保持默认展开。决策瞬间不立即收，避免把用户刚做的决定「秒收」。</p>
         <div class="mt-[9px] flex flex-col gap-[6px]">
           <div class="flex items-start gap-[8px] border-b border-[#eef0f3] py-[6px] last:border-b-0">
             <span class="flex-none w-[24px] flex items-center justify-center rounded-[5px] border border-[#cddcff] bg-[#eff4ff] text-[#2563eb] text-[10.5px] font-semibold tabular-nums">K1</span>
@@ -105,12 +105,12 @@
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
           <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-card="a1" data-status="pending">
-            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] hidden" data-card-head>
+            <div class="flex items-center gap-[6px] px-[10px] py-[8px] hidden" data-card-head>
               
-              <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]" data-decided-badge data-state="approved">✓ 已批准</span>
-              <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]" data-decided-badge data-state="rejected">✗ 已拒绝</span>
-              <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#b45309] bg-[#fffbeb] border border-[#fde68a]" data-decided-badge data-state="timeout">! 已超时</span>
-              <span class="hidden flex min-w-0 flex-1 items-center gap-[6px] text-[12.4px] leading-[1.6] text-[#57606a] whitespace-nowrap" data-collapse-summary><span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" data-collapse-text></span><svg class="ml-auto flex-none text-[#8b949e] transition-transform duration-[150ms]" data-collapse-chev width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"></path></svg></span>
+              <span class="hidden flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]" data-decided-badge data-state="approved">✓ 已批准</span>
+              <span class="hidden flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]" data-decided-badge data-state="rejected">✗ 已拒绝</span>
+              <span class="hidden flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#b45309] bg-[#fffbeb] border border-[#fde68a]" data-decided-badge data-state="timeout">! 已超时</span>
+              <span class="hidden flex min-w-0 flex-1 items-center gap-[6px] text-[12.4px] leading-[1.6] text-[#57606a] whitespace-nowrap" data-collapse-summary><span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" data-collapse-text></span></span><span class="hidden flex-none text-[#8b949e] text-[12px] transition-transform duration-[180ms]" data-collapse-chev>›</span>
             </div>
             <div data-form-body>
               <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">待你确认：删除生产数据库 orders_prod</div>
@@ -154,13 +154,13 @@
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
           <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-card="a2" data-status="editing">
-            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] hidden" data-card-head>
+            <div class="flex items-center gap-[6px] px-[10px] py-[8px] hidden" data-card-head>
               
-              <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]" data-decided-badge data-state="submitted">✓ 已提交</span>
-              <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]" data-decided-badge data-state="cancelled">✗ 已取消</span>
+              <span class="hidden flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]" data-decided-badge data-state="submitted">✓ 已提交</span>
+              <span class="hidden flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]" data-decided-badge data-state="cancelled">✗ 已取消</span>
               
               
-              <span class="hidden flex min-w-0 flex-1 items-center gap-[6px] text-[12.4px] leading-[1.6] text-[#57606a] whitespace-nowrap" data-collapse-summary><span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" data-collapse-text></span><svg class="ml-auto flex-none text-[#8b949e] transition-transform duration-[150ms]" data-collapse-chev width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"></path></svg></span>
+              <span class="hidden flex min-w-0 flex-1 items-center gap-[6px] text-[12.4px] leading-[1.6] text-[#57606a] whitespace-nowrap" data-collapse-summary><span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" data-collapse-text></span></span><span class="hidden flex-none text-[#8b949e] text-[12px] transition-transform duration-[180ms]" data-collapse-chev>›</span>
             </div>
             <div data-form-body>
               <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">选择本次发布范围（单选）</div>
@@ -259,12 +259,12 @@
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
           <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-card="a3" data-status="editing">
-            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] hidden" data-card-head>
+            <div class="flex items-center gap-[6px] px-[10px] py-[8px] hidden" data-card-head>
               
-              <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]" data-decided-badge data-state="submitted">✓ 已提交</span>
-              <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]" data-decided-badge data-state="cancelled">✗ 已取消</span>
+              <span class="hidden flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]" data-decided-badge data-state="submitted">✓ 已提交</span>
+              <span class="hidden flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]" data-decided-badge data-state="cancelled">✗ 已取消</span>
               
-              <span class="hidden flex min-w-0 flex-1 items-center gap-[6px] text-[12.4px] leading-[1.6] text-[#57606a] whitespace-nowrap" data-collapse-summary><span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" data-collapse-text></span><svg class="ml-auto flex-none text-[#8b949e] transition-transform duration-[150ms]" data-collapse-chev width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"></path></svg></span>
+              <span class="hidden flex min-w-0 flex-1 items-center gap-[6px] text-[12.4px] leading-[1.6] text-[#57606a] whitespace-nowrap" data-collapse-summary><span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" data-collapse-text></span></span><span class="hidden flex-none text-[#8b949e] text-[12px] transition-transform duration-[180ms]" data-collapse-chev>›</span>
             </div>
             <div data-form-body>
               <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">勾选发布前确认项（多选）</div>
@@ -336,12 +336,12 @@
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
           <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-card="a4" data-status="editing">
-            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] hidden" data-card-head>
+            <div class="flex items-center gap-[6px] px-[10px] py-[8px] hidden" data-card-head>
               
-              <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]" data-decided-badge data-state="submitted">✓ 已提交</span>
-              <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]" data-decided-badge data-state="cancelled">✗ 已取消</span>
+              <span class="hidden flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]" data-decided-badge data-state="submitted">✓ 已提交</span>
+              <span class="hidden flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]" data-decided-badge data-state="cancelled">✗ 已取消</span>
               
-              <span class="hidden flex min-w-0 flex-1 items-center gap-[6px] text-[12.4px] leading-[1.6] text-[#57606a] whitespace-nowrap" data-collapse-summary><span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" data-collapse-text></span><svg class="ml-auto flex-none text-[#8b949e] transition-transform duration-[150ms]" data-collapse-chev width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"></path></svg></span>
+              <span class="hidden flex min-w-0 flex-1 items-center gap-[6px] text-[12.4px] leading-[1.6] text-[#57606a] whitespace-nowrap" data-collapse-summary><span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" data-collapse-text></span></span><span class="hidden flex-none text-[#8b949e] text-[12px] transition-transform duration-[180ms]" data-collapse-chev>›</span>
             </div>
             <div data-form-body>
               <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">补充变更单号</div>
@@ -378,7 +378,7 @@
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
           <div class="w-[440px] max-w-full mx-auto flex flex-col gap-[10px]" data-card="a5" data-status="step-1">
             <div data-a5-live class="bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden">
-              <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] " data-card-head>
+              <div class="flex items-center gap-[6px] px-[10px] py-[8px] " data-card-head>
                 <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">发布前参数确认</span>
                 <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#f6f7f9] text-[#57606a] border-[#e3e6ea] tabular-nums" data-a5-progress>步骤 1/2</span>
                 
@@ -440,11 +440,11 @@
             </div>
             <div class="hidden" data-a5-ro>
               <div class="bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-a5-card="1">
-                <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] " data-card-head>
+                <div class="flex items-center gap-[6px] px-[10px] py-[8px] " data-card-head>
                   <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">发布前参数确认</span>
-                  <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]" data-a5-badge="submitted">✓ 已提交</span>
-                  <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]" data-a5-badge="cancelled">✗ 已取消</span>
-                  <span class="hidden flex min-w-0 flex-1 items-center gap-[6px] text-[12.4px] leading-[1.6] text-[#57606a] whitespace-nowrap" data-collapse-summary><span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" data-collapse-text></span><svg class="ml-auto flex-none text-[#8b949e] transition-transform duration-[150ms]" data-collapse-chev width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"></path></svg></span>
+                  <span class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]" data-a5-badge="submitted">✓ 已提交</span>
+                  <span class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]" data-a5-badge="cancelled">✗ 已取消</span>
+                  <span class="hidden flex min-w-0 flex-1 items-center gap-[6px] text-[12.4px] leading-[1.6] text-[#57606a] whitespace-nowrap" data-collapse-summary><span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" data-collapse-text></span></span><span class="hidden flex-none text-[#8b949e] text-[12px] transition-transform duration-[180ms]" data-collapse-chev>›</span>
                 </div>
                 <div class="max-h-[min(320px,45vh)] overflow-y-auto" data-scroll-region data-limit="min(320px,45vh)" data-locked>
                   <div data-a5-slot="1"></div>
@@ -472,12 +472,12 @@
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
           <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-card="a6" data-status="editing">
-            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] hidden" data-card-head>
+            <div class="flex items-center gap-[6px] px-[10px] py-[8px] hidden" data-card-head>
               
-              <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]" data-decided-badge data-state="submitted">✓ 已提交</span>
-              <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]" data-decided-badge data-state="cancelled">✗ 已取消</span>
+              <span class="hidden flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]" data-decided-badge data-state="submitted">✓ 已提交</span>
+              <span class="hidden flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]" data-decided-badge data-state="cancelled">✗ 已取消</span>
               
-              <span class="hidden flex min-w-0 flex-1 items-center gap-[6px] text-[12.4px] leading-[1.6] text-[#57606a] whitespace-nowrap" data-collapse-summary><span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" data-collapse-text></span><svg class="ml-auto flex-none text-[#8b949e] transition-transform duration-[150ms]" data-collapse-chev width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"></path></svg></span>
+              <span class="hidden flex min-w-0 flex-1 items-center gap-[6px] text-[12.4px] leading-[1.6] text-[#57606a] whitespace-nowrap" data-collapse-summary><span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" data-collapse-text></span></span><span class="hidden flex-none text-[#8b949e] text-[12px] transition-transform duration-[180ms]" data-collapse-chev>›</span>
             </div>
             <div data-form-body>
               <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">发布配置（请填写以下信息）</div>
@@ -637,10 +637,10 @@ publish_config done in 20.4s, 3/3 targets</div>
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
           <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-sample="b1" data-collapse="success" data-collapsed="1">
-            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] cursor-pointer" data-card-head role="button" tabindex="0" aria-expanded="false" aria-label="展开或收起决策详情">
+            <div class="flex items-center gap-[6px] px-[10px] py-[8px] cursor-pointer" data-card-head role="button" tabindex="0" aria-expanded="false" aria-label="展开或收起决策详情">
               
-              <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]">✓ 已批准</span>
-              <span class="flex min-w-0 flex-1 items-center gap-[6px] text-[12.4px] leading-[1.6] text-[#57606a] whitespace-nowrap" data-collapse-summary><span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" data-collapse-text>已批准 · 重启支付网关 gateway-prod-03</span><svg class="ml-auto flex-none rotate-180 text-[#8b949e] transition-transform duration-[150ms]" data-collapse-chev width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"></path></svg></span>
+              <span class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]">✓ 已批准</span>
+              <span class="flex min-w-0 flex-1 items-center gap-[6px] text-[12.4px] leading-[1.6] text-[#57606a] whitespace-nowrap" data-collapse-summary><span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" data-collapse-text>已批准 · 重启支付网关 gateway-prod-03</span></span><span class="hidden flex-none text-[#8b949e] text-[12px] transition-transform duration-[180ms]" data-collapse-chev>›</span>
             </div>
             <div data-locked class="hidden pb-[11px]" data-collapse-body>
               <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">重启支付网关 gateway-prod-03</div>
@@ -670,9 +670,9 @@ publish_config done in 20.4s, 3/3 targets</div>
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
           <div class="w-[440px] max-w-full mx-auto flex flex-col gap-[10px]">
             <div class="bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-sample="b2">
-              <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] " data-card-head>
+              <div class="flex items-center gap-[6px] px-[10px] py-[8px] " data-card-head>
                 
-                <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]">✗ 已拒绝</span>
+                <span class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]">✗ 已拒绝</span>
               </div>
               <div data-locked class="pb-[11px]">
                 <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">清空 Redis 缓存 cluster-a</div>
@@ -701,9 +701,9 @@ publish_config done in 20.4s, 3/3 targets</div>
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
           <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-sample="b3">
-            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] " data-card-head>
+            <div class="flex items-center gap-[6px] px-[10px] py-[8px] " data-card-head>
               
-              <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#b45309] bg-[#fffbeb] border border-[#fde68a]">! 已超时</span>
+              <span class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#b45309] bg-[#fffbeb] border border-[#fde68a]">! 已超时</span>
             </div>
             <div data-locked class="pb-[11px]">
               <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">升级计费服务至 2.4.0</div>
@@ -732,9 +732,9 @@ publish_config done in 20.4s, 3/3 targets</div>
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
           <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-sample="b4">
-            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] " data-card-head>
+            <div class="flex items-center gap-[6px] px-[10px] py-[8px] " data-card-head>
               
-              <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]">! 已批准 · 执行失败</span>
+              <span class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]">! 已批准 · 执行失败</span>
             </div>
             <div data-locked class="pb-[11px]">
               <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">缩容订单服务 order-svc 6 副本 → 2 副本</div>
@@ -764,10 +764,10 @@ publish_config done in 20.4s, 3/3 targets</div>
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
           <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-sample="b5" data-collapse="success" data-collapsed="1">
-            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] cursor-pointer" data-card-head role="button" tabindex="0" aria-expanded="false" aria-label="展开或收起决策详情">
+            <div class="flex items-center gap-[6px] px-[10px] py-[8px] cursor-pointer" data-card-head role="button" tabindex="0" aria-expanded="false" aria-label="展开或收起决策详情">
               
-              <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]">✓ 已提交</span>
-              <span class="flex min-w-0 flex-1 items-center gap-[6px] text-[12.4px] leading-[1.6] text-[#57606a] whitespace-nowrap" data-collapse-summary><span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" data-collapse-text>已提交 · 已勾选 3 项发布前确认</span><svg class="ml-auto flex-none rotate-180 text-[#8b949e] transition-transform duration-[150ms]" data-collapse-chev width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"></path></svg></span>
+              <span class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]">✓ 已提交</span>
+              <span class="flex min-w-0 flex-1 items-center gap-[6px] text-[12.4px] leading-[1.6] text-[#57606a] whitespace-nowrap" data-collapse-summary><span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" data-collapse-text>已提交 · 已勾选 3 项发布前确认</span></span><span class="hidden flex-none text-[#8b949e] text-[12px] transition-transform duration-[180ms]" data-collapse-chev>›</span>
             </div>
             <div data-locked class="hidden pb-[11px]" data-collapse-body>
               <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">勾选发布前确认项（多选）</div>
@@ -823,9 +823,9 @@ publish_config done in 20.4s, 3/3 targets</div>
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
           <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-sample="b6">
-            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] " data-card-head>
+            <div class="flex items-center gap-[6px] px-[10px] py-[8px] " data-card-head>
               
-              <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]">✗ 已取消</span>
+              <span class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]">✗ 已取消</span>
             </div>
             <div data-locked class="pb-[11px]">
               <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">补充变更单号</div>
@@ -855,10 +855,10 @@ publish_config done in 20.4s, 3/3 targets</div>
         <div class="mt-[10px] rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
           <div class="w-[440px] max-w-full mx-auto flex flex-col gap-[10px]" data-sample="b7">
             <div class="bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-collapse="success" data-collapsed="1">
-              <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] cursor-pointer" data-card-head role="button" tabindex="0" aria-expanded="false" aria-label="展开或收起决策详情">
+              <div class="flex items-center gap-[6px] px-[10px] py-[8px] cursor-pointer" data-card-head role="button" tabindex="0" aria-expanded="false" aria-label="展开或收起决策详情">
                 
-                <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]">✓ 已批准</span>
-                <span class="flex min-w-0 flex-1 items-center gap-[6px] text-[12.4px] leading-[1.6] text-[#57606a] whitespace-nowrap" data-collapse-summary><span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" data-collapse-text>已批准 · 发布配置到生产（3 项）</span><svg class="ml-auto flex-none rotate-180 text-[#8b949e] transition-transform duration-[150ms]" data-collapse-chev width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"></path></svg></span>
+                <span class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]">✓ 已批准</span>
+                <span class="flex min-w-0 flex-1 items-center gap-[6px] text-[12.4px] leading-[1.6] text-[#57606a] whitespace-nowrap" data-collapse-summary><span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" data-collapse-text>已批准 · 发布配置到生产（3 项）</span></span><span class="hidden flex-none text-[#8b949e] text-[12px] transition-transform duration-[180ms]" data-collapse-chev>›</span>
               </div>
               <div class="hidden pb-[11px]" data-locked data-collapse-body>
                 <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">发布配置到生产（3 项）</div>
@@ -871,9 +871,9 @@ publish_config done in 20.4s, 3/3 targets</div>
               </div>
             </div>
             <div class="bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden">
-              <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] " data-card-head>
+              <div class="flex items-center gap-[6px] px-[10px] py-[8px] " data-card-head>
                 
-                <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]">✗ 已取消</span>
+                <span class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]">✗ 已取消</span>
               </div>
               <div class="pb-[11px]" data-locked>
                 <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">补充本次发布的变更单号</div>
@@ -885,9 +885,9 @@ publish_config done in 20.4s, 3/3 targets</div>
               </div>
             </div>
             <div class="bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden">
-              <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] " data-card-head>
+              <div class="flex items-center gap-[6px] px-[10px] py-[8px] " data-card-head>
                 
-                <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#b45309] bg-[#fffbeb] border border-[#fde68a]">! 已超时</span>
+                <span class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#b45309] bg-[#fffbeb] border border-[#fde68a]">! 已超时</span>
               </div>
               <div class="pb-[11px]" data-locked>
                 <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">清理过期导出文件（bucket 保留 7 天）</div>
@@ -1003,6 +1003,7 @@ publish_config done in 20.4s, 3/3 targets</div>
     head.setAttribute('aria-expanded', 'true');
     head.setAttribute('aria-label', '展开或收起决策详情');
     head.classList.add('cursor-pointer');
+    show(head.querySelector('[data-collapse-chev]'), true);
     var t = head.querySelector('[data-collapse-text]');
     if(t) t.textContent = summary || '';
   }
@@ -1017,7 +1018,7 @@ publish_config done in 20.4s, 3/3 targets</div>
     show(body, !on);
     show(head.querySelector('[data-collapse-summary]'), on);
     var chev = head.querySelector('[data-collapse-chev]');
-    if(chev) chev.classList.toggle('rotate-180', !on);
+    if(chev) chev.classList.toggle('rotate-90', !on);
   }
 
   function scheduleCollapse(card, summary){
@@ -1197,6 +1198,10 @@ publish_config done in 20.4s, 3/3 targets</div>
     if(!head) return;
     e.preventDefault();
     toggleToolCard(head.closest('[data-tool-card]'));
+  });
+
+  $$('[data-card-head]').forEach(function(h){
+    show(h.querySelector('[data-collapse-chev]'), !!h.closest('[data-collapse]'));
   });
 
   /* ---- 事件 ---- */
