@@ -3,8 +3,10 @@
 > 调研问题：CopilotKit 的 HITL（human-in-the-loop）在**实现层**是怎么做的？三个 HITL API 的语义分野、agent 暂停到前端挂起到回传恢复的**逐跳报文与状态机**、多 interrupt 并发与刷新恢复机制，以及这些机制映射到本仓（确认门 / GF 表单，目标五类打断）要做什么。
 > 来源①**源码**：`<REPO-URL_COPILOTKIT>` 即 `CopilotKit/CopilotKit`，本地克隆于**仓外** `_cpk-src/repo`（`blob:none` 部分克隆）。锚定 commit `ff1178a6a08ec9cc55dd2cce678e27d07e26a27a`（提交时间 2026-10-16T18:59:45Z），包版本 `1.79.1`。**本件所有行号均以该 commit 的工作树为准**；`@copilotkit/*` 源码路径一律写作仓库内相对路径 `packages/…`。
 > 来源②**协议依赖**：`@ag-ui/client` / `@ag-ui/core` / `@ag-ui/encoder` 均 `1.0.2`（取自 `packages/core/package.json` 等四处 `dependencies`）。这三个包在克隆中不入工作树，故本次以 **npm 发布产物的 dist 实际类型与实现**取证（压缩单文件，以「函数名 + 字节偏移」标注），凡不能反查 TypeScript 源之处均如实标注为「发布产物口径」。
-> 来源③**官方文档**：`docs.copilotkit.ai`（Mintlify，任意页 URL 后加 `.md` 直取源文）、`docs.ag-ui.com`（同法）、`www.copilotkit.ai/learning/*`（**营销/学习站，非 docs 站**，但它是「五类打断」分类法的**一手出处**，见下文订正 1）。
+> 来源③**官方文档**：`docs.copilotkit.ai`（Mintlify，任意页 URL 后加 `.md` 直取源文）、`docs.ag-ui.com`（同法）、`www.copilotkit.ai/learning/*`（**营销/学习站，非 docs 站**，但它是「五类打断」分类法的**一手出处**，见下文订正 1）。**`reference/hooks/<name>` 与 `reference/v2/hooks/<name>` 是同一页的两个路径（逐字节相同）**，见「取证基线」的路径别名核验。
+> 核验轮次：首轮取证（2026-10-17，commit `b6a88b2`）→ **第二轮核验（2026-10-17）**：按用户指认的 `/reference/v2/hooks/useHumanInTheLoop` 复核路径别名（结论：同一页）；并借此发现首轮的 **3 处缺口/误记** —— ①`packages/react-ui` 是独立包（首轮误记为「无」）；②漏读 `useInterrupt` 的 reference 页与 Vue / React Native 两页（后者揭示 **Vue 版只有 legacy 流**）；③v2 reference 页的 `available` 类型与源码不符。三处均已在本件就地更正/补写，并在「与既有件的差异订正」表登记（第 2、5、6、7 行）。
 > 结论：**CopilotKit 的 HITL 只有一条底层机制 —— 前端工具 handler 返回一个「悬挂的 Promise」，或后端 run 以 `RUN_FINISHED{outcome:{type:"interrupt",interrupts}}` 终止；三个 HITL API 是这条机制上的三种薄封装**。`useCopilotAction(renderAndWaitForResponse)` 在 1.79.1 里已**被源码改写为 `useHumanInTheLoop` 的调用**，v1 与 v2 共用同一条实现；`useInterrupt` 是唯一走 AG-UI 标准 interrupt 通道的那一个。恢复（resume）在协议层是**同一 thread 上的新一轮 run**，携带 `resume[]`；刷新后的卡面**不靠任何前端持久化**，而靠「`connectAgent` 重放线程事件 → 前端以 `restore` 模式**只重跑 HITL handler**」重建。
+> **第二条要紧结论（第二轮新增，见 §2.5）**：这套能力**只在 React / React Native 上是全量的**。**Vue 版的 `useInterrupt` 只有 legacy 流**（无 `interrupts[]`、无 `cancel`、无 `expiresAt`），恢复走 `command.resume` 而非标准 `resume[]`。本仓是 Vue 3，因此**参照系应取 React 契约 + AG-UI 协议，而不是 CopilotKit 的 Vue 面**。
 > **对本仓最要紧的一条推论**（见 §2.1 末段）：CopilotKit 用它自己的二分法（暂停由 LLM 决定 = 链 A；由代码路径决定 = 链 B）把「确定性闸门」归入 `useInterrupt`/链 B。本仓确认门正是**代码路径确定性**的闸门，因此要抄的是**链 B**——而现有 `SpToolCallingManager` 实现形似链 A。**这是一个需要显式选定并写下理由的路线归属问题，不是必须立即改代码的问题。**
 > 入库脱敏：本机路径按既有体例写作仓外相对口径；第三方仓库指代用 `<REPO-URL_…>` 占位；无 API Key。
 
@@ -19,7 +21,7 @@
 | `@ag-ui/client` | `1.0.2` | `Interrupt` / `ResumeEntry` / `buildResumeArray` / `pendingInterrupts` |
 | `@ag-ui/core` | `1.0.2` | `RunFinishedOutcome` 判别联合类型 |
 | `@ag-ui/encoder` | `1.0.2` | SSE 出帧格式（`EventEncoder`） |
-| 仓库工作区 | `packages/{core,react-core,runtime,shared}` —— **无独立 `react-ui` 包** | 纠正「react-core / react-ui / runtime 三分」的直觉 |
+| 仓库工作区 | `packages/{core,react-core,react-ui,runtime,shared}`（**5 个**）—— `react-ui` **是**独立包，但其 v2 面是**零导出的样式壳**，HITL 实现在 `react-core` | 见 §1.2 更正记录（本条在首轮普查时曾误记为「无 react-ui」） |
 
 **官方文档出处一览（本次逐页直取 `.md` 源文，全部 HTTP 200）**
 
@@ -32,6 +34,22 @@
 | D5 | `https://docs.ag-ui.com/concepts/interrupts.md` | `RunFinishedOutcome` / `Interrupt` / `resume` 结构、contract rules 8 条、reason taxonomy、`editedArgs` 能力信号、framework integrations 表 |
 | D6 | `https://www.copilotkit.ai/learning/what-is-human-in-the-loop` | **五类打断分类法的一手出处**、界面三职责、HITL vs HOTL 对照 |
 | D7（旁证） | `https://docs.ag-ui.com/sdk/js/core/events` | `EventType` 全表、`BaseEvent` 三字段、各事件字段表；**该页 `RunFinishedEvent` 缺 `outcome`，见 §3.5 不一致登记** |
+| D8（核验） | `https://docs.copilotkit.ai/reference/v2/hooks/useHumanInTheLoop{,.md}`（含不带后缀变体） | **路径别名核验**：与 D3 **逐字节相同**（sha256 `b78fe4f3…`，11590 B），见下方「路径别名」 |
+| D9 | `https://docs.copilotkit.ai/reference/hooks/useInterrupt.md`（别名 `/reference/v2/hooks/useInterrupt.md`，逐字节相同，sha256 `aed38beb…`，6822 B） | **`useInterrupt` 的 reference 页**（与 D2 的 guide 页不同页）：参数逐条语义、`renderInChat` 返回型表、handler 错误边界、expired 行为；首轮遗漏，本次补 |
+| D10 | `https://docs.copilotkit.ai/reference/vue/hooks/useInterrupt.md` | **Vue 版只有 legacy 流**（无 `interrupts[]`、无 `cancel`、无 `expiresAt`），见 §2.5 |
+| D11 | `https://docs.copilotkit.ai/reference/react-native/hooks/useInterrupt.md` | RN 版自述「Re-exported from `@copilotkit/react-core/v2`，identical … only the import path differs」；并给 legacy `cancel()` 的语义 |
+
+**路径别名核验（本次专项，2026-10-17）**：`docs.copilotkit.ai` 上 `reference/hooks/<name>` 与 `reference/v2/hooks/<name>` **是同一页的两个可访问路径**，字节级一致：
+
+| 路径对 | HTTP | 字节数 | sha256 |
+|---|---|---|---|
+| `…/reference/hooks/useHumanInTheLoop.md` ↔ `…/reference/v2/hooks/useHumanInTheLoop.md` | 200 / 200 | 11590 / 11590 | 双路径同为 `b78fe4f3f7d9ab739409c08351643e9717f47aa91a7a8a31f5d4574b96df23e4` |
+| `…/reference/hooks/useInterrupt.md` ↔ `…/reference/v2/hooks/useInterrupt.md` | 200 / 200 | 6822 / 6822 | 双路径同为 `aed38beba2e74183d561fe830f74d1a7ea61e4a074734111c6836804bf4f8480` |
+
+不带 `.md` 的两个变体均返回 `200 text/html`（295853 / 295862 B、204863 / 204872 B，差值 9 B 即 HTML 内 canonical 路径里多出的 `/v2` 字样），**正文内容无差异**；`/v2/` 页只是同一文档的别名，**不含任何 v2 特有段落**（无额外参数、无额外示例、无版本说明）。
+
+**canonical 判定**：`sitemap.xml`（533892 B）里 `reference/hooks/useInterrupt` 与 `reference/hooks/useHumanInTheLoop` **在列**，而 `reference/v2/hooks/*` **不在列**；但 CopilotKit 文档自身的站内链接（v1 `useHumanInTheLoop` 页的 Callout、RN 页的 Callout）**写的是 `/reference/v2/hooks/…`**。即：**sitemap 认非 `/v2/` 为 canonical，站内链接认 `/v2/` 为推荐路径，两者同页**。**结论：本件首轮引用的 D3 与用户指认的 `/reference/v2/…` 是同一份内容，引用无误差。**
+**另核**：`sitemap.xml` 中 `reference/v2/` 全量 19 条 URL，**除 `useCapabilities`（各框架镜像）外无任何其它页面** —— 故 `reference/v2/` 下**不存在**被漏掉的 HITL 页；本次新增的 D9–D11 三页都在 `reference/hooks/`（非 `/v2/`）路径下。
 
 ---
 
@@ -66,6 +84,28 @@ export * from "./v1-deprecated/langgraph";
 ```
 
 **对本仓含义**：CopilotKit 用「同包双目录 + 根导出重定向」承载 v1→v2 迁移，而不是发两个包。这是它敢把 v1 API 与 v2 API 并列讲「三个 HITL API」的结构前提。
+
+**更正记录（2026-10-17 二次核验）**：本件首轮普查时把工作区记为「4 个包、无独立 `react-ui`」，**该记录有误**。二次核验实测为 **5 个包**：
+
+```
+packages/
+├── core        @copilotkit/core        1.79.1
+├── react-core  @copilotkit/react-core  1.79.1
+├── react-ui    @copilotkit/react-ui    1.79.1   ← 首轮漏记
+├── runtime     @copilotkit/runtime     1.79.1
+└── shared      @copilotkit/shared      1.79.1
+```
+
+首轮漏记的原因：本次 CopilotKit 克隆是 `blob:none` 部分克隆，`packages/react-ui/` 的目录树（mtime 晚于其它四个包）在首轮 `ls packages/` 时尚未落盘。**但首轮那条「v2 HITL 实现不在 react-ui」的判断仍然成立**，二次核验逐条确认：
+
+- `packages/react-ui/src/v2/index.ts` **全文只有一行** `import "./styles.css";` —— **零导出**，只是个样式壳；
+- `packages/react-ui/src/index.tsx` 头部自述逐字：*"V1 SDK DEPRECATED. USE V2 INSTEAD. This is the deprecated v1 entrypoint `@copilotkit/react-ui`. … This entrypoint currently exposes 38 deprecated public exports. **V2 source entrypoint: packages/react-core/src/v2/index.ts**"*；
+- v2 的 HITL 实现确实全在 `packages/react-core/src/v2/**`（`hooks/use-human-in-the-loop.tsx`、`hooks/use-interrupt.tsx`、`lib/react-core.ts` 的 `setInterruptElement`）与 `packages/core/**`（`interrupt-state.ts`、`core/run-handler.ts`）。
+
+**react-ui 里唯一与中断有关的、值得记录的实现**在于它的 **v1** 聊天组件，且它补上了本件 §4.4 缺的**前端一侧**的「挂起阻塞新输入」证据：
+
+- `packages/react-ui/src/components/chat/Input.tsx:95` `const { interrupt } = useCopilotChatInternal();`，紧接 `:97-104` 的 `canSend` 计算里含 `!interrupt` —— **有挂起时发送钮被禁用**（这是 UI 层；`@ag-ui/client` 里的 `onInitialize` 抛错是同一规则的运行时层，见 §4.4）。
+- `packages/react-ui/src/components/chat/Messages.tsx:33` 取同一个 `interrupt`，`:118` 直接 `{interrupt}` 渲染进消息列表 —— **中断是一个「React 节点槽位」**，与 v2 的 `copilotkit.setInterruptElement(element)` 是同一设计（§2.4），只是 v1 用 context 传递、v2 用 Core 订阅发布。
 
 ### 1.3 通道：SSE 出帧的确切格式
 
@@ -221,6 +261,33 @@ export function useHumanInTheLoop<
 
 **对本仓含义**：HITL 卡渲染器的**注册/注销次序**是竞态源，且 CopilotKit 的结论是「注册与注销必须同相（layout）」。本仓 `AiPanel.vue` 用单文件内 `activeForm`/`pendingHitl` 身份管理而非插件式注册，不直接吃这个坑，但**一旦未来把卡注册改成可插拔组件**，这条注释就是先例依据。
 
+#### 2.2.1 `deps` 的刷新语义（D3 = D8 逐字）
+
+> An optional dependency array. When provided, the tool registration is refreshed whenever any value in the array changes.
+
+即 `deps` 变化 = **重新注册**（不是更新已有注册）。这与源码一致：`use-human-in-the-loop.tsx:124` 把 `deps` 原样转交 `useFrontendTool(frontendTool, deps)`。
+
+#### 2.2.2 **文档与源码的一处类型不一致（本次核验新发现）**
+
+D3 / D8（`reference/hooks/useHumanInTheLoop`，即 `/reference/v2/…` 别名）的参数表逐字把 `available` 记为：
+
+> `available` type `'"enabled" | "disabled" | "remote"'` default `'"enabled"'` — Controls tool availability. Set to `"disabled"` to temporarily prevent the agent from requesting human input through this tool.
+
+但 **v2 源码里 `available` 是 `boolean`，且语义不同**。`packages/core/src/types.ts:124-130` 逐字：
+
+```ts
+  /**
+   * Whether this tool is available to the agent.
+   * Set to false to hide the tool from the agent without unregistering it.
+   * Defaults to true when not specified.
+   */
+  available?: boolean;
+```
+
+字符串三值 `'enabled' | 'disabled' | 'remote'` 是 **v1** 的形状（`use-copilot-action.ts:215-227` 里正是按这三个字符串分支的）。**结论：v2 reference 页在 `available` 这一条上写的是 v1 的类型与语义**——这是本件登记的**第二处文档滞后**（第一处见 §3.5）。对本仓的直接提示：**照 v2 reference 页抄 `available: "disabled"` 会拿到 `boolean` 类型的工具，字符串值在 v2 下不等于「禁用」**；v2 的正确写法是 `available: false`。
+
+（注：本件首轮已从既有件 `raw-copilotkit.md` 转述过 v1 的一处同类缺口——*"`available` … is currently non-functional in this v1 hook. The value is accepted for API compatibility but ignored"*。两处合并看：**`available` 这个字段在 CopilotKit 的文档里跨 v1/v2 一直不够准**。）
+
 ### 2.3 `useCopilotAction(renderAndWaitForResponse)`（v1）—— 迁移期语法糖
 
 官方 v1 参考页（`https://docs.copilotkit.ai/reference/v1/hooks/useCopilotAction.md`）对 `renderAndWaitForResponse` 的逐字定义：
@@ -282,6 +349,51 @@ props 里 `respond` 的可用性约束逐字：
 > The `Interrupt` type exposes a `responseSchema` field (a JSON Schema object) that the agent can use to describe the expected payload shape. `useInterrupt` surfaces this field on `interrupt.responseSchema` for your UI to read (e.g. to drive a form), but it does **not** validate `resolve` payloads against it. Validation is the agent's responsibility on resume.
 
 **对本仓含义（重要且正向）**：本仓 `FrontendToolGuard.inspectResult` **服务端复核回灌结果、不合法即 400 且状态不变**，与 AG-UI 的「验证是 agent 的职责」完全同向；而 AG-UI 明确要求**客户端也应该先验**（`docs.ag-ui.com` contract rule 6 逐字：*"Clients should validate before submitting."*）。本仓现在是「客户端少验、服务端硬验」，缺口见 §5.3。
+
+#### 2.4.1 补：`useInterrupt` 的 **reference 页**增量（来源 D9，首轮遗漏）
+
+本件首轮只读了 **guide 页**（D2，`human-in-the-loop/useInterrupt`），漏了 `useInterrupt` 的 **reference 页**（D9，`reference/hooks/useInterrupt`，与 `/reference/v2/hooks/useInterrupt` 同页）。D9 与 D2 是**不同页面**，前者是参数/返回值参考，本件此前未引用。逐条增量（除注明外均为 D9 逐字原文，每一项均已回源码或回到本件已有章节交叉确认）：
+
+| # | D9 增量 | 源码交叉确认 |
+|---|---|---|
+| 1 | **`handler` 的错误边界**："Optional preprocessing callback. Runs before rendering and can return sync or async data that is exposed as `result` in `render`. `TResult` is automatically inferred from the handler's return type. **If the handler throws/rejects, `result` is `null`.**" | ✅ `use-interrupt.tsx:416-425`（同步 throw → `console.error` + `setHandlerResult(null)`）、`:427-438`（Promise reject → `console.error` + `null`） |
+| 2 | **`enabled` 的作用域**："Optional filter. Return `false` to ignore matching interrupts **for this hook instance**." | ✅ 谓词与 `render` 都按 hook 实例各自求值（`use-interrupt.tsx:376-388` `isEnabled`，`enabled` 抛异常按「禁用」处理并 `console.error`） |
+| 3 | **`result` 的静态类型**："`result` is inferred from `handler` return type and is always `TResult \| null`." | ✅ `use-interrupt.tsx:54-59` 的 `UseInterruptReturn` 与 `:179-181` 的 state 初值 `null` |
+| 4 | **`renderInChat` 的返回型表**（D9 §Return Value 逐字）：`renderInChat: false` → `React.ReactElement \| null`；`true` 或省略 → `void`；动态 boolean → `React.ReactElement \| null \| void` | ✅ `use-interrupt.tsx:480-484`（`false` 分支 `return element`，否则 `return undefined`）；本件 §2.4 已引源码 |
+| 5 | **`event.value` 的静态类型**："`event.value` is typed as `any` since the interrupt payload shape depends on your agent. Type-narrow it in your callbacks (e.g. `handler`, `enabled`, `render`) as needed." | ✅ `types/interrupt.ts:15-19` `InterruptEvent<TValue = unknown>`，React 侧实例化到 `any` |
+| 6 | **过期行为**："Expired interrupts (past `expiresAt`) **are not resumed** — the hook logs an error and clears pending state." | ✅ `use-interrupt.tsx:268-275`（`console.error` + `interruptState.clear()` + `setPending(null)`，**不 resume**）；协议侧同义见 §4.4 |
+| 7 | **legacy 的 `cancel()` 语义**（来源 D11，RN 页逐字）："`cancel(interruptId?)`: … **Not supported for legacy interrupts (dismisses without resuming)**." | ✅ `use-interrupt.tsx:318-326` `decision.kind === "dismiss"` → `console.warn` + 清 pending，**不发 run** |
+| 8 | **legacy 载荷是「不透明字符串」的实证示例**（D9 §Usage）：`enabled: (event) => event.value.startsWith("approval:")`、`render` 里 `{event.value.question}` / `{event.value}` 直出 —— 即 **legacy 流的 `event.value` 可能只是个字符串**，前端不能假定它是结构体 | 与本件既有结论同向（D2 逐字：LangGraph 桥会把 interrupt value **JSON 字符串化**，前端需按需 `JSON.parse`），并解释了为什么 `useInterrupt` 的 legacy 分支不做任何解析 |
+
+**对本仓含义**：第 1、6、7 条各有直接施工价值 ——（1）本仓 `ConfirmGate` 的**服务端复核失败**对应 CopilotKit 的「handler reject → result=null」这一「静默降级」路径；CopilotKit 选择**降级为 `null` 并继续渲染**，而不是卡死或抛到 UI，本仓的 `REJECTED`（400 + 状态不变 + 可修正重试）比它更强，**不需要向它对齐**；（6）「过期不 resume」与我们「超时作废」同向，差别只在**谁判过期**（AG-UI 客户端据 `expiresAt` 自判，本仓服务端定时器判）；（7）「legacy 无 cancel」提醒我们：**若走 legacy 式单事件通道，就没有「取消」这个语义位**，本仓的 `FRONTEND_CANCELLED` 是属于标准流的能力，别在退化实现里丢掉。
+
+### 2.5 **跨框架分歧（本次核验新发现）：React / React Native 全量，Vue 只有 legacy**
+
+这条对**本项目（Vue 3 前端）**有直接决策价值，故单列。
+
+| 维度 | React（D9） | React Native（D11） | **Vue（D10）** |
+|---|---|---|---|
+| 标准 AG-UI 流（`RUN_FINISHED` + `outcome.interrupts`） | ✅ 支持 | ✅ 支持（D11 自述：*"Re-exported from `@copilotkit/react-core/v2`. It is identical to the React (V2) `useInterrupt`; only the import path differs."*） | ❌ **不支持** |
+| `interrupts[]`（多中断） | ✅ | ✅ | ❌ 无此字段 |
+| `cancel()` / `{status:"cancelled"}` | ✅ | ✅ | ❌ **无 `cancel`** |
+| `expiresAt` 过期判定 | ✅ | ✅ | ❌ 未提 |
+| 恢复机制 | `runAgent({resume:[…]})` | 同 React | **`forwardedProps.command.resume = response`**（D10 逐字：*"Resumes the agent, forwarding `command.resume = response` (along with the originating `interruptEvent`)"*） |
+| 暂停感知来源 | `RUN_FINISHED` 或 `on_interrupt` | 同 React | **仅 `on_interrupt` 自定义事件** |
+| API 形状 | `render` 渲染回调 | 同 React | **返回响应式状态**（`interrupt` / `result` / `hasInterrupt` / `slotProps`）+ `resolveInterrupt`，经 `<CopilotChat>` 的 `#interrupt` **slot** 渲染 |
+
+D10（Vue）Overview 逐字，是最关键的一句：
+
+> `useInterrupt` is a Vue 3 composable that **listens for agent custom events named `on_interrupt`**, captures the latest interrupt payload for a run, and surfaces it once the run finalizes. Your UI calls `resolveInterrupt(response)` to resume the agent with a resume payload.
+
+D10 的 Behavior 全列（逐字摘要）只有四条：interrupts 来自 `on_interrupt`；`onRunFinalized` 才浮现；`onRunStartedEvent` 清场、`onRunFailed` 丢弃；`resolveInterrupt` 走 `command.resume` —— **通篇没有 `RUN_FINISHED`、`outcome`、`interrupts[]`、`cancel`、`expiresAt`**。
+
+D10 另有一条比 React 更详细的 `result` 边界（逐字）：
+
+> `result` … or `null` when there is no handler, the handler returned a rejected promise, or `enabled` filtered the interrupt out. (A **synchronous `throw` in the handler is not caught and leaves `result` unchanged**.)
+
+**对本仓含义（两条，都很实）**：
+1. **不要把「CopilotKit 的 Vue 版」当成可对照的实现**。它是**仅有 legacy 通道的退化实现**：没有多中断、没有取消、没有 `expiresAt`。本项目若参考 CopilotKit，能对照的是**React 的契约（D9）与 AG-UI 协议（D5）**，Vue 侧只宜作为「同一契约在弱实现下的最小可行面」参照——恰好也说明：**标准 interrupt 流的能力（`interrupts[]` / `cancel` / `expiresAt`）需要自己建，Vue 生态里没有现成的**。
+2. **`slotProps` 的设计值得抄一处细节**：Vue 版把中断 UI 做成 `<CopilotChat>` 的具名 slot（`#interrupt`）并暴露 `{ event, result, resolve }`，与 React 的 `setInterruptElement`（§2.4）、v1 react-ui 的 `{interrupt}` 节点（§1.2）**三处同构**——即 CopilotKit 在三种前端里都把「中断渲染」收敛为**一个可注入的 UI 槽位**，而不是让调用方自己在消息流里找位置。这支持本件 §5.3 ② 的建议：**本仓挂起态应是一个独立可注入的槽位 + 状态机，而不是散在组件内的条件分支**。
 
 ---
 
@@ -1112,8 +1224,10 @@ CopilotKit：`POST /agent/:id/connect` → 重放 thread 事件（`compactEvents
 | P1 | 无重试次数断路器 | `MAX_FOLLOW_UP_DEPTH`（`run-handler.ts:1081`） | 同类询问连续重复 N 次后改终态 |
 | P2 | 客户端不校验回灌载荷 | AG-UI rule 6「Clients should validate before submitting」 | 前端按 `responseSchema` 先验，服务端仍硬验（保持双向） |
 | P2 | 无「挂起前补快照」帧 | AG-UI "State at the interrupt boundary" | 挂起前显式发 `MESSAGES_SNAPSHOT`/`STATE_SNAPSHOT` 等价物，换端恢复更自洽 |
-| P2 | 客户端无「有挂起时禁发新输入」守卫 | `@ag-ui/client@1.0.2` `onInitialize` 抛错 | 前端在有挂起时禁用输入框/给出提示（现由后端兜底） |
+| P2 | 客户端无「有挂起时禁发新输入」守卫 | `@ag-ui/client@1.0.2` `onInitialize` 抛错 + react-ui `Input.tsx:97-104` `canSend` 含 `!interrupt` | 前端在有挂起时禁用输入框/给出提示（现由后端兜底） |
+| P2 | **「中断渲染槽位」未显式化** | 三个前端同构：v2 `setInterruptElement`（§2.4）/ v1 react-ui `{interrupt}` 节点（§1.2）/ Vue `#interrupt` slot（§2.5） | 把挂起 UI 收敛为一个可注入槽位，而不是散在消息流里的条件分支 |
 | P3 | 超时出口只有「作废」，无「显式取消以继续轮次」 | `Cancel it to continue the thread.` | 补「取消并继续」的显式动作（与「不执行」区分展示） |
+| P3 | 若参考 CopilotKit 的 **Vue** 面，会丢掉标准流的三个能力 | §2.5：Vue 版仅 legacy（无 `interrupts[]` / 无 `cancel` / 无 `expiresAt`） | 对照面取 **React 契约（D9）+ AG-UI 协议（D5）**；Vue 只作「弱实现最小面」参照。**本仓是 Vue 3，这一点必须显式写在选型依据里** |
 
 ---
 
@@ -1122,9 +1236,12 @@ CopilotKit：`POST /agent/:id/connect` → 重放 thread 事件（`compactEvents
 | # | 既有口径 | 本次取证 | 处置 |
 |---|---|---|---|
 | 1 | `调研-HITL交互型谱-2026-10-16.md`：五类打断「来源：CopilotKit（经分享会话转述）」 | 一手源为 `www.copilotkit.ai/learning/what-is-human-in-the-loop`，「Nearly every human-in-the-loop interaction is one of five patterns」 | **升级为一手引用**，五类清单与原表逐条一致，无需改内容 |
-| 2 | 直觉口径「react-core / react-ui / runtime 三包」 | 实测 `packages/` 仅 `core / react-core / runtime / shared`，**没有独立 react-ui 包**（Chat 组件在 `react-core/src/v2/components/chat/`） | 本件 §1.2 更正 |
+| 2 | 直觉口径「react-core / react-ui / runtime 三包」；本件**首轮**记为「实测 `packages/` 仅 `core / react-core / runtime / shared`，没有独立 react-ui 包」 | **首轮记录有误，二次核验更正**：实测 **5 个包**，`react-ui` 是独立包（`@copilotkit/react-ui` 1.79.1）。但「v2 HITL 实现不在 react-ui」的实质判断成立 —— `react-ui/src/v2/index.ts` 全文只有 `import "./styles.css";`（零导出），`react-ui/src/index.tsx` 自述为 v1 弃用入口，v2 实现入口是 `react-core/src/v2/index.ts` | 本件 §1.2 已改写并附「更正记录」（含漏记原因：`blob:none` 部分克隆的 `react-ui` 树晚落盘） |
 | 3 | 既有件只说「`useInterrupt` 支持 standard 与 legacy 两条流」 | **源码证实** legacy 是 LangGraph 桥的**默认**，standard 需显式 `emitInterruptOutcome` 开关（AG-UI 集成表逐字） | 本件 §3.6 补证：自建桥可直接只走 standard |
 | 4 | 既有件 `raw-copilotkit.md` 的 AG-UI 事件口径取自 `docs.ag-ui.com` 的 `sdk/js/core/events`（本地快照 `sdk_js_core_events.md`）与 `concepts/interrupts` | 该 SDK 参考页的 `RunFinishedEvent` **缺 `outcome`**，与同站 `concepts/interrupts` 及 `@ag-ui/core@1.0.2` dist 类型**不一致**（2026-10-17 线上复核确认）；dist 还多一个文档未列的 `outcome:{type:"cancelled"}` | 本件 §3.5 登记为「文档未同步」，以发布产物为准 |
+| 5 | 本件**首轮**只引 `reference/hooks/useHumanInTheLoop.md`，未验 `/reference/v2/…` 路径 | **核验为路径别名、逐字节相同**（sha256 `b78fe4f3…`）；`sitemap.xml` 里 `/v2/` 不在列（canonical 是非 `/v2/`），而 CopilotKit 站内链接写的是 `/v2/`；`reference/v2/` 全量 19 条 URL 除 `useCapabilities` 外无其它页面 | 本件「取证基线」新增「路径别名核验」小节；**D3 引用无误差** |
+| 6 | **首轮遗漏**：`useInterrupt` 的 **reference 页**（D9）与 **Vue（D10）/ React Native（D11）** 两页 | D9 是参数/返回值参考页（与 D2 guide 页不同页），补出 handler 错误边界、`enabled` 实例作用域、返回型表、过期不 resume、legacy 无 cancel 等 8 条增量；**D10 揭示 Vue 版只有 legacy 流**（无 `interrupts[]` / 无 `cancel` / 无 `expiresAt`）—— 因本仓是 Vue 3，此条对选型有直接影响 | 本件新增 §2.4.1、§2.5，并在 §5.4 补两条差距（槽位显式化、Vue 参照面选择） |
+| 7 | 直觉口径「v2 `available` 沿用 v1 的三值字符串」 | **新发现的文档滞后（本件登记第 2 处）**：v2 reference 页把 `available` 记为 `'"enabled" \| "disabled" \| "remote"'` default `'"enabled"'`，但 v2 源码是 `available?: boolean`（`packages/core/src/types.ts:130`，语义为「置 false 以对 agent 隐藏但不注销」） | 本件新增 §2.2.2 并给出正确写法（v2 用 `available: false`） |
 
 ---
 
@@ -1137,6 +1254,7 @@ CopilotKit：`POST /agent/:id/connect` → 重放 thread 事件（`compactEvents
 | `packages/react-core/src/v2/headless.ts` 的完整手写 headless 范式 | 既有件 `raw-copilotkit.md` §1.5 已抄录官方手写实现；本件只取「四个订阅回调 + 提交时机」的纪律口径 |
 | CopilotKit 的 `humanInTheLoop` 静态 prop 与 hook 版的**逐行差异** | 已确认二者 handler 语义相同（`CopilotKitProvider.tsx:673-700` 注释逐字：*"Park the tool call until the render calls `respond`, matching `useHumanInTheLoop`."*），差异在注册渠道而非行为，未逐行比对 |
 | `@ag-ui/*` 的 TypeScript 源（非 dist） | 三个包均不在克隆工作树内，且其仓库不在本次取证范围；dist 类型与实现足以支撑全部结论，凡引用均标注为「发布产物口径」 |
+| **`@copilotkit/vue` / `@copilotkit/angular` / `@copilotkit/react-native` 的源码** | 这三个包**均不在**本仓 `packages/`（实测只有 `core / react-core / react-ui / runtime / shared`），是**独立发布的包**。故 §2.5 对 Vue 版「只有 legacy 流」的判断是**文档级证据**（D10 逐字），**未经源码复核** —— 已在该节标注来源；若本仓要正式依赖 Vue 侧结论，须另行取包核验 |
 | CopilotKit 的 `intelligence-*`（线程平台）与 Channels（Slack/Teams）的 HITL 面 | 属商业平台独立能力域，不在本次问题清单 |
 
-**取证方式记录（供复现）**：CopilotKit 源码取自仓外本地克隆 `_cpk-src/repo`（`git log -1` 得 commit 与时间，`git remote -v` 得来源）；`@ag-ui/*` 三个包以 `npm pack @ag-ui/{client,core,encoder}@1.0.2` 取发布产物后解包读 `dist`（类型取自 `.d.mts` 行号，实现取自压缩 `.mjs` 的字节偏移）；文档以 `curl`-等价方式直取 `docs.copilotkit.ai/<path>.md`、`docs.ag-ui.com/<path>.md`，营销站口径取自 `www.copilotkit.ai/learning/what-is-human-in-the-loop`。**未遇到 404、登录墙或反爬。**
+**取证方式记录（供复现）**：CopilotKit 源码取自仓外本地克隆 `_cpk-src/repo`（`git log -1` 得 commit 与时间，`git remote -v` 得来源；**注意该克隆为 `blob:none` 部分克隆，首次 `ls packages/` 可能因目录树尚未落盘而少列 —— 本件首轮即因此漏记 `react-ui`，见 §1.2 更正记录**）；`@ag-ui/*` 三个包以 `npm pack @ag-ui/{client,core,encoder}@1.0.2` 取发布产物后解包读 `dist`（类型取自 `.d.mts` 行号，实现取自压缩 `.mjs` 的字节偏移）；文档以 `curl -sL` 直取 `docs.copilotkit.ai/<path>.md` 与 `docs.ag-ui.com/<path>.md` 并做 **sha256 + 字节数 + `diff`** 三重比对（路径别名核验即用此法）；站点 canonical 判定用 `docs.copilotkit.ai/sitemap.xml`（533892 B）逐 URL 过滤；营销站口径取自 `www.copilotkit.ai/learning/what-is-human-in-the-loop`。**未遇到 404、登录墙或反爬。**
