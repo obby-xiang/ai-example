@@ -3,17 +3,17 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ai-example · 主题 demo：HITL 中断场景廊（用户裁决 r14 · chevron 靠右 + 系统终检）</title>
+<title>ai-example · 主题 demo：HITL 中断场景廊（用户裁决 r15 · 所有已决终态默认折叠）</title>
 <link rel="stylesheet" href="hitl-interrupts.css">
 </head>
-<body class="m-0 p-0 bg-[#f1f2f4] text-[#1f2328] font-sans text-[13.8px] leading-[1.7] antialiased [&_button:focus-visible]:outline-none [&_button:focus-visible]:ring-2 [&_button:focus-visible]:ring-[#2563eb]/40" data-hitl-final="2026-10-17-r14">
+<body class="m-0 p-0 bg-[#f1f2f4] text-[#1f2328] font-sans text-[13.8px] leading-[1.7] antialiased [&_button:focus-visible]:outline-none [&_button:focus-visible]:ring-2 [&_button:focus-visible]:ring-[#2563eb]/40" data-hitl-final="2026-10-17-r15">
 
 <header class="sticky top-0 z-30 flex items-center gap-[16px] px-[22px] py-[12px] bg-white border-b border-[#e3e6ea]">
-  <div class="font-semibold text-[14px] tracking-[.2px]">ai-example · 主题 demo <span class="text-[#57606a] font-normal ml-[8px] text-[12.5px]">HITL 中断场景廊 · chevron 靠右 + 系统终检（用户 2026-10-17 裁决 r14）</span></div>
+  <div class="font-semibold text-[14px] tracking-[.2px]">ai-example · 主题 demo <span class="text-[#57606a] font-normal ml-[8px] text-[12.5px]">HITL 中断场景廊 · 所有已决终态默认折叠（用户 2026-10-17 裁决 r15）</span></div>
   <span class="ml-auto flex items-center gap-[6px]">
     <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">现役</span>
     <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#1f2328] text-white">单主题</span>
-    <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#edf7f0] text-[#1a7f45] border border-[#bfe3cd]">r14 · 2026-10-17</span>
+    <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#edf7f0] text-[#1a7f45] border border-[#bfe3cd]">r15 · 2026-10-17</span>
   </span>
 </header>
 
@@ -24,15 +24,15 @@
     <section id="s0" data-scene="s0" class="mt-[16px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden">
       <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[13px] py-[9px] border-b border-[#eef0f3] bg-[#f5f8ff]">
         <span class="flex-none w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#2563eb] text-white text-[11px] font-semibold tabular-nums">0</span>
-        <h3 class="m-0 text-[13.6px] [font-weight:650]">本轮口径 K1~K14（用户 2026-10-17 已批准，逐条执行零偏差）</h3>
+        <h3 class="m-0 text-[13.6px] [font-weight:650]">本轮口径 K1~K14 + r15（用户 2026-10-17 已批准，逐条执行零偏差）</h3>
         <span class="ml-auto flex-none font-mono text-[11px] text-[#8b949e]">场景廊 · A1–A6 可交互 + B1–B7 样张</span>
       </div>
       <div class="px-[13px] pt-[9px] pb-[11px]">
-        <p class="m-0 text-[12.2px] leading-[1.6] text-[#57606a]">r13 把 HITL/GF 的折叠卡头逐项对齐 T1 工具卡收起态（padding 8/10、间距 6、状态胶囊收到 9.5px 同高、chevron 与工具卡同款同字号），折叠行高与工具卡同为 36.4px；展开态同一卡头、chevron 转动 90°。此前 r11 把 demo 当正式产品做：卡片本体内不再出现任何 demo 注解——类型/规格徽标、日期时间、卡内说明脚注、评审辅助入口全部移出或删除；场景标题行（卡外脚手架）保留。此前 r10 两件事：①卡头减肥——撤掉风险徽标 / 决策时间 / 「只读」chip，卡头只留类型徽标 + 状态徽标（折叠态再加摘要与 chevron，单行紧凑、摘要省略号）；②新增 T1 工具卡对照场景，照 AiPanel 工具卡形态做折叠 / 展开可切换样张，便于与 HITL / GF 折叠同屏比对。此前 r9 落「已决默认折叠」：成功终态（已批准 / 已提交）在**回合结束**（后续 AI 消息出现）后收成卡头摘要行——徽标 + 一句话决策摘要 + 决策时间 + chevron，点卡头（或 Enter / Space）展开看原样只读内容；已拒绝 / 已超时 / 已批准·执行失败 / 已取消四类保持默认展开。决策瞬间不立即收，避免把用户刚做的决定「秒收」。</p>
+        <p class="m-0 text-[12.2px] leading-[1.6] text-[#57606a]">r15 把「已决默认折叠」扩到**全部终态**：HITL / 生成式表单 / 同类已决只读卡的已批准 / 已提交 / 已拒绝 / 已超时 / 已批准·执行失败 / 已取消六态，在**回合结束**（后续 AI 消息出现）后统一收成卡头摘要行（徽标 + 一句话摘要 + chevron）；回合未结束仍展开（不把刚做的决定秒收），pending / blocked / unknown 与 requiresAction 待决门卡不受影响，用户手动展开 / 收起始终优先。r13 把 HITL/GF 的折叠卡头逐项对齐 T1 工具卡收起态（padding 8/10、间距 6、状态胶囊收到 9.5px 同高、chevron 与工具卡同款同字号），折叠行高与工具卡同为 36.4px；展开态同一卡头、chevron 转动 90°。此前 r11 把 demo 当正式产品做：卡片本体内不再出现任何 demo 注解——类型/规格徽标、日期时间、卡内说明脚注、评审辅助入口全部移出或删除；场景标题行（卡外脚手架）保留。此前 r10 两件事：①卡头减肥——撤掉风险徽标 / 决策时间 / 「只读」chip，卡头只留类型徽标 + 状态徽标（折叠态再加摘要与 chevron，单行紧凑、摘要省略号）；②新增 T1 工具卡对照场景，照 AiPanel 工具卡形态做折叠 / 展开可切换样张，便于与 HITL / GF 折叠同屏比对。</p>
         <div class="mt-[9px] flex flex-col gap-[6px]">
           <div class="flex items-start gap-[8px] border-b border-[#eef0f3] py-[6px] last:border-b-0">
             <span class="flex-none w-[24px] flex items-center justify-center rounded-[5px] border border-[#cddcff] bg-[#eff4ff] text-[#2563eb] text-[10.5px] font-semibold tabular-nums">K1</span>
-            <span class="flex-1 min-w-0 text-[12.2px] leading-[1.6] text-[#57606a]"><b class="text-[#1f2328] [font-weight:650]">已决统一原样 UI 只读渲染</b>：任何结束场景（已批准 / 已拒绝 / 已超时 / 已取消 / 已提交 / 执行失败）都保留原卡——选项按当时勾选态保留、输入按当时所填保留、参数区字段表原样；操作按钮在已决分支里整块不渲染；状态徽标 + 决策时间（decidedAt）+ 只读标记固定在卡头；卡永久留在消息流，锁定不降对比度。</span>
+            <span class="flex-1 min-w-0 text-[12.2px] leading-[1.6] text-[#57606a]"><b class="text-[#1f2328] [font-weight:650]">已决统一原样 UI 只读渲染</b>：任何结束场景（已批准 / 已拒绝 / 已超时 / 已取消 / 已提交 / 执行失败）都保留原卡——选项按当时勾选态保留、输入按当时所填保留、参数区字段表原样；操作按钮在已决分支里整块不渲染；状态徽标 + 人话摘要 + chevron 固定在卡头；卡永久留在消息流，锁定不降对比度。</span>
           </div>
           <div class="flex items-start gap-[8px] border-b border-[#eef0f3] py-[6px] last:border-b-0">
             <span class="flex-none w-[24px] flex items-center justify-center rounded-[5px] border border-[#cddcff] bg-[#eff4ff] text-[#2563eb] text-[10.5px] font-semibold tabular-nums">K2</span>
@@ -56,7 +56,7 @@
           </div>
           <div class="flex items-start gap-[8px] border-b border-[#eef0f3] py-[6px] last:border-b-0">
             <span class="flex-none w-[24px] flex items-center justify-center rounded-[5px] border border-[#cddcff] bg-[#eff4ff] text-[#2563eb] text-[10.5px] font-semibold tabular-nums">K7</span>
-            <span class="flex-1 min-w-0 text-[12.2px] leading-[1.6] text-[#57606a]"><b class="text-[#1f2328] [font-weight:650]">拒绝不改写旧卡</b>：拒绝只落徽标与决策时间，卡体原样留证、默认展开；「修正走会话」属产品口径，本 demo 不演该闭环，也不设拒因输入或常驻理由行。</span>
+            <span class="flex-1 min-w-0 text-[12.2px] leading-[1.6] text-[#57606a]"><b class="text-[#1f2328] [font-weight:650]">拒绝不改写旧卡</b>：拒绝只落徽标与决策时间，卡体原样留证、默认折叠（点卡头可展开）；「修正走会话」属产品口径，本 demo 不演该闭环，也不设拒因输入或常驻理由行。</span>
           </div>
           <div class="flex items-start gap-[8px] border-b border-[#eef0f3] py-[6px] last:border-b-0">
             <span class="flex-none w-[24px] flex items-center justify-center rounded-[5px] border border-[#cddcff] bg-[#eff4ff] text-[#2563eb] text-[10.5px] font-semibold tabular-nums">K8</span>
@@ -76,7 +76,7 @@
           </div>
           <div class="flex items-start gap-[8px] py-[6px]">
             <span class="flex-none w-[24px] flex items-center justify-center rounded-[5px] border border-[#cddcff] bg-[#eff4ff] text-[#2563eb] text-[10.5px] font-semibold tabular-nums">K12</span>
-            <span class="flex-1 min-w-0 text-[12.2px] leading-[1.6] text-[#57606a]"><b class="text-[#1f2328] [font-weight:650]">已决默认折叠</b>：成功终态（已批准 / 已提交）在**回合结束**（后续 AI 消息出现）后收成卡头摘要行（徽标 + 一句话摘要 + 决策时间 + chevron），卡头可聚焦（aria-expanded）、Enter / Space 展开；已拒绝 / 已超时 / 已批准·执行失败 / 已取消四类默认展开。</span>
+            <span class="flex-1 min-w-0 text-[12.2px] leading-[1.6] text-[#57606a]"><b class="text-[#1f2328] [font-weight:650]">已决默认折叠</b>：已决六态（已批准 / 已提交 / 已拒绝 / 已超时 / 已批准·执行失败 / 已取消）在**回合结束**（后续 AI 消息出现）后一律收成卡头摘要行（徽标 + 一句话摘要 + chevron），卡头可聚焦（aria-expanded）、Enter / Space 展开；回合未结束仍展开，pending / blocked / unknown 与 requiresAction 待决门卡不折，用户手动展开 / 收起始终优先；只有已批准 / 已提交插入「继续执行」后续消息，已拒绝 / 已超时 / 已批准·执行失败 / 已取消未执行，静默收起。</span>
           </div>
           <div class="flex items-start gap-[8px] border-b border-[#eef0f3] py-[6px]">
             <span class="flex-none w-[24px] flex items-center justify-center rounded-[5px] border border-[#cddcff] bg-[#eff4ff] text-[#2563eb] text-[10.5px] font-semibold tabular-nums">K13</span>
@@ -99,6 +99,7 @@
         <span class="ml-auto flex items-center gap-[6px]">
           <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#fffbeb] text-[#b45309] border border-[#fde68a]">仅两钮</span>
           <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#edf7f0] text-[#1a7f45] border border-[#bfe3cd]">可交互</span>
+          <button type="button" data-act="a1-failed" class="flex-none whitespace-nowrap border-0 bg-transparent p-0 text-[11px] text-[#57606a] underline decoration-[#e3e6ea] underline-offset-[3px] transition-colors duration-[150ms] hover:text-[#2563eb]">演示：触发执行失败</button>
           <button type="button" data-act="a1-timeout" class="flex-none whitespace-nowrap border-0 bg-transparent p-0 text-[11px] text-[#57606a] underline decoration-[#e3e6ea] underline-offset-[3px] transition-colors duration-[150ms] hover:text-[#2563eb]">演示：触发超时</button>
         </span>
       </div>
@@ -110,6 +111,7 @@
               <span class="hidden flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]" data-decided-badge data-state="approved">✓ 已批准</span>
               <span class="hidden flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]" data-decided-badge data-state="rejected">✗ 已拒绝</span>
               <span class="hidden flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#b45309] bg-[#fffbeb] border border-[#fde68a]" data-decided-badge data-state="timeout">! 已超时</span>
+              <span class="hidden flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]" data-decided-badge data-state="failed">! 已批准 · 执行失败</span>
               <span class="hidden flex min-w-0 flex-1 items-center gap-[6px] text-[12.4px] leading-[1.6] text-[#57606a] whitespace-nowrap" data-collapse-summary><span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" data-collapse-text></span></span><span class="hidden ml-auto flex-none text-[#8b949e] text-[12px] transition-transform duration-[180ms]" data-collapse-chev>›</span>
             </div>
             <div data-form-body>
@@ -153,7 +155,7 @@
       </div>
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
-          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-card="a2" data-status="editing">
+          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-card="a2" data-status="editing" data-cancel-summary="选择本次发布范围（单选）">
             <div class="flex items-center gap-[6px] px-[10px] py-[8px] hidden" data-card-head>
               
               <span class="hidden flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]" data-decided-badge data-state="submitted">✓ 已提交</span>
@@ -258,7 +260,7 @@
       </div>
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
-          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-card="a3" data-status="editing">
+          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-card="a3" data-status="editing" data-cancel-summary="勾选发布前确认项（多选）">
             <div class="flex items-center gap-[6px] px-[10px] py-[8px] hidden" data-card-head>
               
               <span class="hidden flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]" data-decided-badge data-state="submitted">✓ 已提交</span>
@@ -335,7 +337,7 @@
       </div>
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
-          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-card="a4" data-status="editing">
+          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-card="a4" data-status="editing" data-cancel-summary="补充变更单号">
             <div class="flex items-center gap-[6px] px-[10px] py-[8px] hidden" data-card-head>
               
               <span class="hidden flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]" data-decided-badge data-state="submitted">✓ 已提交</span>
@@ -376,7 +378,7 @@
       </div>
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
-          <div class="w-[440px] max-w-full mx-auto flex flex-col gap-[10px]" data-card="a5" data-status="step-1">
+          <div class="w-[440px] max-w-full mx-auto flex flex-col gap-[10px]" data-card="a5" data-status="step-1" data-cancel-summary="确认发布前置条件（多选）">
             <div data-a5-live class="bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden">
               <div class="flex items-center gap-[6px] px-[10px] py-[8px] " data-card-head>
                 <span class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">发布前参数确认</span>
@@ -471,7 +473,7 @@
       </div>
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
-          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-card="a6" data-status="editing">
+          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-card="a6" data-status="editing" data-cancel-summary="发布配置（请填写以下信息）">
             <div class="flex items-center gap-[6px] px-[10px] py-[8px] hidden" data-card-head>
               
               <span class="hidden flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]" data-decided-badge data-state="submitted">✓ 已提交</span>
@@ -636,7 +638,7 @@ publish_config done in 20.4s, 3/3 targets</div>
       </div>
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
-          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-sample="b1" data-collapse="success" data-collapsed="1">
+          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-sample="b1" data-collapse="decided" data-collapsed="1">
             <div class="flex items-center gap-[6px] px-[10px] py-[8px] cursor-pointer" data-card-head role="button" tabindex="0" aria-expanded="false" aria-label="展开或收起决策详情">
               
               <span class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]">✓ 已批准</span>
@@ -661,7 +663,7 @@ publish_config done in 20.4s, 3/3 targets</div>
       <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[13px] py-[9px] border-b border-[#eef0f3] bg-[#f5f8ff]">
         <span class="flex-none w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#1f2328] text-white text-[11px] font-semibold tabular-nums">B2</span>
         <h3 class="m-0 text-[13.6px] [font-weight:650]">已拒绝（H1 终态二）</h3>
-        <span class="text-[11.5px] text-[#57606a]">用于拒绝留证：拒绝不改写旧卡，卡体默认展开、参数区与决策时间可逐项追溯。</span>
+        <span class="text-[11.5px] text-[#57606a]">用于拒绝留证：拒绝不改写旧卡，卡体默认折叠、点卡头展开后参数区可逐项追溯。</span>
         <span class="ml-auto flex items-center gap-[6px]">
           <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#f6f7f9] text-[#57606a] border border-[#e3e6ea]">只读样张</span>
         </span>
@@ -669,12 +671,13 @@ publish_config done in 20.4s, 3/3 targets</div>
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
           <div class="w-[440px] max-w-full mx-auto flex flex-col gap-[10px]">
-            <div class="bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-sample="b2">
-              <div class="flex items-center gap-[6px] px-[10px] py-[8px] " data-card-head>
+            <div class="bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-sample="b2" data-collapse="decided" data-collapsed="1">
+              <div class="flex items-center gap-[6px] px-[10px] py-[8px] cursor-pointer" data-card-head role="button" tabindex="0" aria-expanded="false" aria-label="展开或收起决策详情">
                 
                 <span class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]">✗ 已拒绝</span>
+                <span class="flex min-w-0 flex-1 items-center gap-[6px] text-[12.4px] leading-[1.6] text-[#57606a] whitespace-nowrap" data-collapse-summary><span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" data-collapse-text>已拒绝 · 清空 Redis 缓存 cluster-a</span></span><span class="hidden ml-auto flex-none text-[#8b949e] text-[12px] transition-transform duration-[180ms]" data-collapse-chev>›</span>
               </div>
-              <div data-locked class="pb-[11px]">
+              <div data-locked class="hidden pb-[11px]" data-collapse-body>
                 <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">清空 Redis 缓存 cluster-a</div>
                 <div class="mx-[11px] mt-[9px] bg-white border-0 rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto" data-scroll-region data-limit="min(280px,35vh)">
                   <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">FLUSHDB cluster-a（6 个分片全量清空）</span></div>
@@ -700,12 +703,13 @@ publish_config done in 20.4s, 3/3 targets</div>
       </div>
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
-          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-sample="b3">
-            <div class="flex items-center gap-[6px] px-[10px] py-[8px] " data-card-head>
+          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-sample="b3" data-collapse="decided" data-collapsed="1">
+            <div class="flex items-center gap-[6px] px-[10px] py-[8px] cursor-pointer" data-card-head role="button" tabindex="0" aria-expanded="false" aria-label="展开或收起决策详情">
               
               <span class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#b45309] bg-[#fffbeb] border border-[#fde68a]">! 已超时</span>
+              <span class="flex min-w-0 flex-1 items-center gap-[6px] text-[12.4px] leading-[1.6] text-[#57606a] whitespace-nowrap" data-collapse-summary><span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" data-collapse-text>已超时 · 升级计费服务至 2.4.0</span></span><span class="hidden ml-auto flex-none text-[#8b949e] text-[12px] transition-transform duration-[180ms]" data-collapse-chev>›</span>
             </div>
-            <div data-locked class="pb-[11px]">
+            <div data-locked class="hidden pb-[11px]" data-collapse-body>
               <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">升级计费服务至 2.4.0</div>
               <div class="mx-[11px] mt-[9px] bg-white border-0 rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto" data-scroll-region data-limit="min(280px,35vh)">
                 <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">滚动升级 billing-svc 至 2.4.0（6 副本）</span></div>
@@ -731,12 +735,13 @@ publish_config done in 20.4s, 3/3 targets</div>
       </div>
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
-          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-sample="b4">
-            <div class="flex items-center gap-[6px] px-[10px] py-[8px] " data-card-head>
+          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-sample="b4" data-collapse="decided" data-collapsed="1">
+            <div class="flex items-center gap-[6px] px-[10px] py-[8px] cursor-pointer" data-card-head role="button" tabindex="0" aria-expanded="false" aria-label="展开或收起决策详情">
               
               <span class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]">! 已批准 · 执行失败</span>
+              <span class="flex min-w-0 flex-1 items-center gap-[6px] text-[12.4px] leading-[1.6] text-[#57606a] whitespace-nowrap" data-collapse-summary><span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" data-collapse-text>已批准 · 执行失败 · 缩容订单服务 order-svc 6 副本 → 2 副本</span></span><span class="hidden ml-auto flex-none text-[#8b949e] text-[12px] transition-transform duration-[180ms]" data-collapse-chev>›</span>
             </div>
-            <div data-locked class="pb-[11px]">
+            <div data-locked class="hidden pb-[11px]" data-collapse-body>
               <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">缩容订单服务 order-svc 6 副本 → 2 副本</div>
               <div class="mx-[11px] mt-[9px] bg-white border-0 rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto" data-scroll-region data-limit="min(280px,35vh)">
                 <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">scale deployment order-svc --replicas=2</span></div>
@@ -763,7 +768,7 @@ publish_config done in 20.4s, 3/3 targets</div>
       </div>
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
-          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-sample="b5" data-collapse="success" data-collapsed="1">
+          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-sample="b5" data-collapse="decided" data-collapsed="1">
             <div class="flex items-center gap-[6px] px-[10px] py-[8px] cursor-pointer" data-card-head role="button" tabindex="0" aria-expanded="false" aria-label="展开或收起决策详情">
               
               <span class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]">✓ 已提交</span>
@@ -822,12 +827,13 @@ publish_config done in 20.4s, 3/3 targets</div>
       </div>
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
-          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-sample="b6">
-            <div class="flex items-center gap-[6px] px-[10px] py-[8px] " data-card-head>
+          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-sample="b6" data-collapse="decided" data-collapsed="1">
+            <div class="flex items-center gap-[6px] px-[10px] py-[8px] cursor-pointer" data-card-head role="button" tabindex="0" aria-expanded="false" aria-label="展开或收起决策详情">
               
               <span class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]">✗ 已取消</span>
+              <span class="flex min-w-0 flex-1 items-center gap-[6px] text-[12.4px] leading-[1.6] text-[#57606a] whitespace-nowrap" data-collapse-summary><span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" data-collapse-text>已取消 · 补充变更单号（未提交）</span></span><span class="hidden ml-auto flex-none text-[#8b949e] text-[12px] transition-transform duration-[180ms]" data-collapse-chev>›</span>
             </div>
-            <div data-locked class="pb-[11px]">
+            <div data-locked class="hidden pb-[11px]" data-collapse-body>
               <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">补充变更单号</div>
               <div class="mx-[11px] mt-[9px] bg-white border-0 rounded-[8px] px-[10px] py-[9px] max-h-[min(280px,35vh)] overflow-y-auto" data-scroll-region data-limit="min(280px,35vh)">
                 <span class="block text-[12.2px] text-[#57606a] mb-[5px]">变更单号（必填）</span>
@@ -854,7 +860,7 @@ publish_config done in 20.4s, 3/3 targets</div>
         <p class="m-0 text-[12.2px] leading-[1.6] text-[#57606a]">同一会话的消息流片段：三次打断的已决卡按时间顺序永存——已批准（放行）→ 已取消（改主意，未提交不留内容）→ 已超时（无人应答），每张都是当时的原卡。</p>
         <div class="mt-[10px] rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
           <div class="w-[440px] max-w-full mx-auto flex flex-col gap-[10px]" data-sample="b7">
-            <div class="bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-collapse="success" data-collapsed="1">
+            <div class="bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-collapse="decided" data-collapsed="1">
               <div class="flex items-center gap-[6px] px-[10px] py-[8px] cursor-pointer" data-card-head role="button" tabindex="0" aria-expanded="false" aria-label="展开或收起决策详情">
                 
                 <span class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]">✓ 已批准</span>
@@ -870,12 +876,13 @@ publish_config done in 20.4s, 3/3 targets</div>
                 <div class="mx-[11px] mt-[7px] text-[11.5px] text-[#57606a] leading-[1.6]">决策人 demo-user · 已留痕。</div>
               </div>
             </div>
-            <div class="bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden">
-              <div class="flex items-center gap-[6px] px-[10px] py-[8px] " data-card-head>
+            <div class="bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-collapse="decided" data-collapsed="1">
+              <div class="flex items-center gap-[6px] px-[10px] py-[8px] cursor-pointer" data-card-head role="button" tabindex="0" aria-expanded="false" aria-label="展开或收起决策详情">
                 
                 <span class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]">✗ 已取消</span>
+                <span class="flex min-w-0 flex-1 items-center gap-[6px] text-[12.4px] leading-[1.6] text-[#57606a] whitespace-nowrap" data-collapse-summary><span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" data-collapse-text>已取消 · 补充本次发布的变更单号（未提交）</span></span><span class="hidden ml-auto flex-none text-[#8b949e] text-[12px] transition-transform duration-[180ms]" data-collapse-chev>›</span>
               </div>
-              <div class="pb-[11px]" data-locked>
+              <div class="hidden pb-[11px]" data-locked data-collapse-body>
                 <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">补充本次发布的变更单号</div>
                 <div class="mx-[11px] mt-[9px] bg-white border-0 rounded-[8px] px-[10px] py-[9px] max-h-[min(280px,35vh)] overflow-y-auto" data-scroll-region data-limit="min(280px,35vh)">
                   <span class="block text-[12.2px] text-[#57606a] mb-[5px]">变更单号（必填）</span>
@@ -884,12 +891,13 @@ publish_config done in 20.4s, 3/3 targets</div>
                 <div class="mx-[11px] mt-[7px] text-[11.5px] text-[#57606a] leading-[1.6]">未提交，填写内容不作记录 · AI 收到「已取消」· 已留痕。</div>
               </div>
             </div>
-            <div class="bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden">
-              <div class="flex items-center gap-[6px] px-[10px] py-[8px] " data-card-head>
+            <div class="bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-collapse="decided" data-collapsed="1">
+              <div class="flex items-center gap-[6px] px-[10px] py-[8px] cursor-pointer" data-card-head role="button" tabindex="0" aria-expanded="false" aria-label="展开或收起决策详情">
                 
                 <span class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#b45309] bg-[#fffbeb] border border-[#fde68a]">! 已超时</span>
+                <span class="flex min-w-0 flex-1 items-center gap-[6px] text-[12.4px] leading-[1.6] text-[#57606a] whitespace-nowrap" data-collapse-summary><span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" data-collapse-text>已超时 · 清理过期导出文件（bucket 保留 7 天）</span></span><span class="hidden ml-auto flex-none text-[#8b949e] text-[12px] transition-transform duration-[180ms]" data-collapse-chev>›</span>
               </div>
-              <div class="pb-[11px]" data-locked>
+              <div class="hidden pb-[11px]" data-locked data-collapse-body>
                 <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">清理过期导出文件（bucket 保留 7 天）</div>
                 <div class="mx-[11px] mt-[9px] bg-white border-0 rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto" data-scroll-region data-limit="min(280px,35vh)">
                   <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">rm s3://export/* --older-than 7d</span></div>
@@ -969,6 +977,22 @@ publish_config done in 20.4s, 3/3 targets</div>
     });
   }
 
+  /* r15：已决六态一律可折叠（回合结束后收成卡头摘要行，用户可手动展开） */
+  var TERMINAL_STATES = { approved: 1, submitted: 1, rejected: 1, timeout: 1, cancelled: 1, failed: 1 };
+  /* 只有「放行 / 提交」会真正继续执行；其余终态（拒绝 / 超时 / 失败 / 取消）未执行，不得出现「继续执行」 */
+  var CONTINUABLE_STATES = { approved: 1, submitted: 1 };
+
+  function terminalSummary(state, card){
+    if(state === 'rejected') return '已拒绝';
+    if(state === 'timeout') return '已超时';
+    if(state === 'cancelled'){
+      var title = card ? (card.getAttribute('data-cancel-summary') || '') : '';
+      return title ? '已取消 · ' + title : '已取消 · 未提交，填写内容不作记录';
+    }
+    if(state === 'failed') return '已批准 · 执行失败';
+    return state === 'submitted' ? '已提交' : '已批准';
+  }
+
   function decide(name, state, clearForm, summary){
     var card = $('[data-card="' + name + '"]');
     if(!card || card.hasAttribute('data-decided')) return null;
@@ -983,20 +1007,21 @@ publish_config done in 20.4s, 3/3 targets</div>
     show(card.querySelector('[data-card-head]'), true);
     $$('[data-decided-badge]', card).forEach(function(b){ show(b, b.getAttribute('data-state') === state); });
     card.setAttribute('data-status', state);
-    if(state === 'approved' || state === 'submitted'){
-      makeCollapsible(card, summary);
-      scheduleCollapse(card, summary);
+    if(TERMINAL_STATES[state]){
+      var text = summary || terminalSummary(state, card);
+      makeCollapsible(card, text);
+      scheduleCollapse(card, text, state);
     }
     return card;
   }
 
-  /* ---- N1：成功终态默认折叠（回合结束才收） ---- */
+  /* ---- N1：已决终态默认折叠（回合结束才收；r15 六态全覆盖） ---- */
   function headOf(card){ return card.querySelector('[data-card-head]'); }
 
   function makeCollapsible(card, summary){
     var head = headOf(card);
     if(!head || card.getAttribute('data-collapse')) return;
-    card.setAttribute('data-collapse', 'success');
+    card.setAttribute('data-collapse', 'decided');
     card.setAttribute('data-collapsed', '0');
     head.setAttribute('role', 'button');
     head.setAttribute('tabindex', '0');
@@ -1021,16 +1046,19 @@ publish_config done in 20.4s, 3/3 targets</div>
     if(chev) chev.classList.toggle('rotate-90', !on);
   }
 
-  function scheduleCollapse(card, summary){
+  function scheduleCollapse(card, summary, state){
     setTimeout(function(){
-      if(!document.body.contains(card) || card.getAttribute('data-collapse') !== 'success') return;
+      if(!document.body.contains(card) || card.getAttribute('data-collapse') !== 'decided') return;
       if(card.getAttribute('data-collapsed') === '1') return;
-      var tpl = $('[data-followup-tpl]');
-      if(tpl && card.parentElement && !card.parentElement.querySelector('[data-followup]')){
-        var frag = tpl.content.cloneNode(true);
-        var tx = frag.querySelector('[data-followup-text]');
-        if(tx) tx.textContent = '继续执行：' + (summary || '按你的决策继续后续步骤');
-        card.parentElement.insertBefore(frag, card.nextSibling);
+      // 仅放行 / 提交插入「继续执行」后续消息；拒绝 / 超时 / 失败 / 取消未执行，保持静默收起
+      if(CONTINUABLE_STATES[state]){
+        var tpl = $('[data-followup-tpl]');
+        if(tpl && card.parentElement && !card.parentElement.querySelector('[data-followup]')){
+          var frag = tpl.content.cloneNode(true);
+          var tx = frag.querySelector('[data-followup-text]');
+          if(tx) tx.textContent = '继续执行：' + (summary || '按你的决策继续后续步骤');
+          card.parentElement.insertBefore(frag, card.nextSibling);
+        }
       }
       setCollapsed(card, true);
     }, 900);
@@ -1049,8 +1077,9 @@ publish_config done in 20.4s, 3/3 targets</div>
     a1.left = 0;
     var c = $('[data-a1-count]'); if(c) c.textContent = '0';
     var r = $('[data-a1-ring]'); if(r) r.setAttribute('stroke-dashoffset', String(A1_C));
-    decide('a1', state, state === 'timeout', state === 'approved' ? '已批准 · 删除生产数据库 orders_prod' : '');
+    decide('a1', state, state === 'timeout', terminalSummary(state) + ' · 删除生产数据库 orders_prod');
     var h = $('[data-act="a1-timeout"]'); if(h) h.remove();
+    var f = $('[data-act="a1-failed"]'); if(f) f.remove();
   }
   setInterval(function(){
     if(a1.state !== 'pending' || !a1.seen || a1.left <= 0) return;
@@ -1131,10 +1160,10 @@ publish_config done in 20.4s, 3/3 targets</div>
     var live = $('[data-a5-live]'); if(live) live.remove();
     show($('[data-a5-ro]'), true);
     card.setAttribute('data-status', state);
-    if(state === 'submitted'){
-      var a5sum = '已提交 · 发布窗口已确认';
+    if(TERMINAL_STATES[state]){
+      var a5sum = state === 'submitted' ? '已提交 · 发布窗口已确认' : terminalSummary(state, card);
       makeCollapsible(card, a5sum);
-      scheduleCollapse(card, a5sum);
+      scheduleCollapse(card, a5sum, state);
     }
   }
 
@@ -1212,6 +1241,7 @@ publish_config done in 20.4s, 3/3 targets</div>
 
     if(act === 'a1-approve'){ a1Finish('approved'); return; }
     if(act === 'a1-reject'){ a1Finish('rejected'); return; }
+    if(act === 'a1-failed'){ a1Finish('failed'); return; }
     if(act === 'a1-timeout'){ a1Finish('timeout'); return; }
 
     if(act === 'a2-submit'){ if(a2Valid()) decide('a2', 'submitted', false, '已提交 · 发布范围=' + labelOf($('[data-a2-opt]:checked'))); return; }

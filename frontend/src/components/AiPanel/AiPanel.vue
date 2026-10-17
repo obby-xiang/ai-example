@@ -288,8 +288,9 @@
                           展开 rotate-90）。徽标 / 摘要恒在（折叠与否都可见 = R-160 兼容条件）。
                        ③ 按钮零渲染（K1）：卡体里不存在任何操作按钮（批准 / 拒绝 / 提交 / 取消）。
                        ④ 卡面不渲染 decidedAt（M1：后端照记、不上卡面）。
-                       ⑤ 成功终态（已批准 / 已提交）回合结束后默认折叠；四类例外（已拒绝 / 已超时 /
-                          已批准·执行失败 / 已取消）默认展开；「决策当下不收」由 turnStillOpen 承担。 -->
+                       ⑤ 已决六态（已批准 / 已拒绝 / 已超时 / 已批准·执行失败 / 已提交 / 已取消）
+                          回合结束后一律默认折叠，卡头摘要行保留可辨识信息；「回合未结束仍展开」
+                          由 turnStillOpen 承担。 -->
                   <div
                     v-if="isReadOnlyCard(part)"
                     class="rocard block border border-solid border-[#e3e6ea] bg-white rounded-[10px] overflow-hidden mb-3.5"
@@ -962,8 +963,8 @@
  *    GF 复用同一张表单（FormRenderer readonly：原生 disabled + 值回填）、操作按钮整块不渲染；
  * ② 卡头 = 状态徽标 + 人话摘要 + chevron 的单行裸文字行（无底色 / 无分隔线、36.4px、chevron
  *    ml-auto 靠右）；decidedAt 数据层照记、**卡面不渲染**；
- * ③ 成功终态（已批准 / 已提交）回合结束后默认折叠，四类例外（已拒绝 / 已超时 /
- *    已批准·执行失败 / 已取消）默认展开；决策当下不折叠（turnStillOpen）；
+ * ③ 已决六态（已批准 / 已拒绝 / 已超时 / 已批准·执行失败 / 已提交 / 已取消）回合结束后
+ *    一律默认折叠，卡头摘要行保留可辨识信息；决策当下不折叠（turnStillOpen）；
  * ④ 状态全集：门卡 = 已批准 / 已拒绝 / 已超时 / 已批准·执行失败（无已取消）；
  *    表单系 = 已提交 / 已取消；审批卡旧字样（含被 R5 / §10 F6 废止的两枚）零残留；
  * ⑤ 未提交不记录：取消 / 超时收尾回初始空态再锁定（F9）；
@@ -996,7 +997,6 @@ import {
   isBlankText,
   isReadOnlyCard,
   parsePublishConflicts,
-  readOnlyDefaultExpanded,
   readOnlyStateOf,
   reasonHeadline,
   submitRows,
@@ -2144,20 +2144,20 @@ function blocksOf(message: ChatMessage): Block[] {
  * 否则 expandedBlocks[id] 显式值优先（用户手动展开永不自动收起 / 手动收起不被自动打开）；
  * 未触碰（键缺省）回落 defaultExpanded。
  *
- * 2A 批（裁决 2026-10-17 §15 K12：「回合结束才收」）：已决成功卡（已批准 / 已提交）的折叠是
+ * 2A 批（裁决 2026-10-17 §15 K12：「回合结束才收」）：已决只读卡（六态全集）的折叠是
  * **回合级时序** —— 决策瞬间不折叠，等本轮结束（新建消息 / 回合文本收尾）后才收成卡头行。
  * 判据 = `turnStillOpen`：本轮 loading 仍在，且该卡属于**末条消息**；不满足才走 defaultExpanded
- * （成功 → 折叠）。用户手动触碰过的卡（expandedBlocks 有显式值）永远优先，不受时序影响。
+ * （r15：六态 → 折叠）。用户手动触碰过的卡（expandedBlocks 有显式值）永远优先，不受时序影响。
  */
 function isBlockExpanded(block: Block): boolean {
   const manual = ai.expandedBlocks[block.id]
-  if (manual === undefined && turnStillOpen(block) && readOnlySuccessCard(block)) {
+  if (manual === undefined && turnStillOpen(block) && readOnlyTerminalCard(block)) {
     return true
   }
   return resolveBlockExpanded(block, manual)
 }
 
-/** 回合是否仍在进行中（末条消息 + 本轮 loading）：成功只读卡据此保持展开到回合结束。 */
+/** 回合是否仍在进行中（末条消息 + 本轮 loading）：已决只读卡据此保持展开到回合结束。 */
 function turnStillOpen(block: Block): boolean {
   if (!ai.loading) {
     return false
@@ -2166,10 +2166,9 @@ function turnStillOpen(block: Block): boolean {
   return last !== undefined && last.id === block.messageId
 }
 
-/** 成功终态只读卡（已批准 / 已提交）—— 唯一受「回合结束才收」时序影响的卡型。 */
-function readOnlySuccessCard(block: Block): boolean {
-  return block.parts.some((part) => part.kind === 'tool' && isReadOnlyCard(part)
-    && !readOnlyDefaultExpanded(part))
+/** 已决只读卡（六态全集）—— 唯一受「回合结束才收」时序影响的卡型。 */
+function readOnlyTerminalCard(block: Block): boolean {
+  return block.parts.some((part) => part.kind === 'tool' && isReadOnlyCard(part))
 }
 
 /** 组头/思考链头点击：写 store 显式态（三态记录；requiresAction 组的强制展开由 resolveBlockExpanded 兜底）。 */
@@ -2604,7 +2603,7 @@ function generativeFormSummary(part: ToolPart): string {
 }
 
 /**
- * 门卡人话摘要（卡体标题 + 成功卡折叠摘要共用）：工具中文名 + args 前三键值。
+ * 门卡人话摘要（卡体标题 + 已决折叠摘要共用）：工具中文名 + args 前三键值。
  * S6 批1：值走 `readableValue`（布尔 是/否、数组 顿号、对象（复杂值））—— 摘要里不出现 JSON 片段。
  */
 function hitlReceiptSummary(part: ToolPart): string {
@@ -2621,20 +2620,28 @@ function hitlReceiptSummary(part: ToolPart): string {
 }
 
 /**
- * 折叠卡头摘要（仅成功终态且折叠时显示，demo r13/r14）：`已批准 · …` / `已提交 · …`。
- * 例外态（已拒绝 / 已超时 / 已批准·执行失败 / 已取消）不写摘要 —— 卡头只留徽标 + chevron
- * （默认展开态摘要隐藏，与 demo 一致）。
+ * 折叠卡头摘要（r15：六态均折叠，摘要恒可辨识；demo r13/r14 文案延续）：
+ * `已批准 / 已拒绝 / 已超时 / 已批准·执行失败 / 已提交 / 已取消 · <人话摘要>`。
+ * 取消 = 未提交：GF 摘要只取表单标题（无标题给固定文案），绝不拼接或回读 submittedValues（F9）。
  */
 function readOnlySummary(part: ToolPart): string {
   switch (readOnlyStateOf(part)) {
     case 'approved':
       return `已批准 · ${hitlReceiptSummary(part)}`
+    case 'rejected':
+      return `已拒绝 · ${hitlReceiptSummary(part)}`
+    case 'expired':
+      return `已超时 · ${hitlReceiptSummary(part)}`
+    case 'failed':
+      return `已批准 · 执行失败 · ${hitlReceiptSummary(part)}`
     case 'submitted': {
       const detail = generativeFormSummary(part)
       return detail === '' ? '已提交' : `已提交 · ${detail}`
     }
-    default:
-      return ''
+    case 'cancelled': {
+      const title = formSpecOf(part)?.title?.trim() ?? ''
+      return title === '' ? '已取消 · 未提交，填写内容不作记录' : `已取消 · ${title}`
+    }
   }
 }
 

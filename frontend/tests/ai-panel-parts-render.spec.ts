@@ -1176,6 +1176,82 @@ describe('2A 批：已决原样 UI 只读态 / 折叠时序 / 冲突表格（R-1
     w2.unmount()
   })
 
+  it('r15：六态矩阵 —— 回合未结束时全部展开；loading 结束后全部折叠（aria-expanded=false）+ 摘要非空', async () => {
+    const formArgs = JSON.stringify({
+      form: {
+        scenario: 'CONFIRM',
+        title: '补充发布说明',
+        fields: [{ key: 'note', label: '说明', type: 'text', required: false }]
+      }
+    })
+    const msg = buildMessage([
+      { kind: 'tool', seg: 0, toolCallId: 't-ok', name: 'start_publish', kind2: 'CONFIRM', status: 'succeeded', args: '{"taskId":3}', requiresAction: false, decision: 'approved' },
+      { kind: 'tool', seg: 1, toolCallId: 't-no', name: 'start_publish', kind2: 'CONFIRM', status: 'rejected', args: '{"taskId":4}', requiresAction: false, decision: 'rejected' },
+      { kind: 'tool', seg: 2, toolCallId: 't-exp', name: 'start_export', kind2: 'CONFIRM', status: 'expired', args: '{"taskId":5}', requiresAction: false },
+      { kind: 'tool', seg: 3, toolCallId: 't-bad', name: 'start_publish', kind2: 'CONFIRM', status: 'failed', args: '{"taskId":6}', requiresAction: false, decision: 'approved', reason: '发布失败：目标库不可写' },
+      { kind: 'tool', seg: 4, toolCallId: 'g-ok', name: 'generative_form', kind2: 'FRONTEND', status: 'succeeded', args: formArgs, requiresAction: false, submittedValues: { note: '已提交内容' } },
+      { kind: 'tool', seg: 5, toolCallId: 'g-no', name: 'generative_form', kind2: 'FRONTEND', status: 'cancelled', args: formArgs, requiresAction: false, submittedValues: { note: '半成品内容' } }
+    ])
+    const ids = ['t-ok', 't-no', 't-exp', 't-bad', 'g-ok', 'g-no']
+    const store = useAiStore()
+    const wrapper = await mountPanel([msg])
+    store.loading = true
+    await wrapper.vm.$nextTick()
+    // 回合未结束（loading + 末条消息）⇒ 六态均保持展开（等回合收尾再收）
+    for (const id of ids) {
+      expect(wrapper.find(`[data-testid="ro-body-${id}"]`).attributes('style') ?? '').not.toContain('display: none')
+      expect(wrapper.find(`[data-testid="ro-toggle-${id}"]`).attributes('aria-expanded')).toBe('true')
+    }
+    store.loading = false
+    await wrapper.vm.$nextTick()
+    const keywords: Record<string, string> = {
+      't-ok': '已批准', 't-no': '已拒绝', 't-exp': '已超时', 't-bad': '已批准 · 执行失败',
+      'g-ok': '已提交', 'g-no': '已取消'
+    }
+    for (const id of ids) {
+      expect(wrapper.find(`[data-testid="ro-body-${id}"]`).attributes('style') ?? '').toContain('display: none')
+      expect(wrapper.find(`[data-testid="ro-toggle-${id}"]`).attributes('aria-expanded')).toBe('false')
+      const summary = wrapper.find(`[data-testid="ro-summary-${id}"]`).text().trim()
+      expect(summary).not.toBe('')
+      expect(summary).toContain(keywords[id]!)
+    }
+    // 取消不拼接 / 不恢复未提交值（即使段上残留 submittedValues）
+    expect(wrapper.find('[data-testid="ro-summary-g-no"]').text()).not.toContain('半成品内容')
+    expect(wrapper.find('[data-testid="ro-summary-g-no"]').text()).not.toContain('说明 半成品')
+    // 手动点击展开 / 再收起（已决卡用户优先）
+    await wrapper.find('[data-testid="ro-toggle-t-no"]').trigger('click')
+    expect(wrapper.find('[data-testid="ro-body-t-no"]').attributes('style') ?? '').not.toContain('display: none')
+    expect(wrapper.find('[data-testid="ro-toggle-t-no"]').attributes('aria-expanded')).toBe('true')
+    await wrapper.find('[data-testid="ro-toggle-t-no"]').trigger('click')
+    expect(wrapper.find('[data-testid="ro-body-t-no"]').attributes('style') ?? '').toContain('display: none')
+    expect(wrapper.find('[data-testid="ro-toggle-t-no"]').attributes('aria-expanded')).toBe('false')
+    wrapper.unmount()
+  })
+
+  it('r15 负控制：pending / blocked / unknown 与非决策待决门卡不得被只读折叠策略误收', async () => {
+    const msg = buildMessage([
+      { kind: 'tool', seg: 0, toolCallId: 'p1', name: 'start_export', kind2: 'CONFIRM', status: 'pending', args: '{"taskId":1}', requiresAction: false },
+      { kind: 'tool', seg: 1, toolCallId: 'b1', name: 'start_export', kind2: 'CONFIRM', status: 'blocked', args: '{"taskId":2}', requiresAction: false },
+      { kind: 'tool', seg: 2, toolCallId: 'u1', name: 'start_export', kind2: 'CONFIRM', status: 'unknown', args: '{"taskId":3}', requiresAction: false },
+      { kind: 'tool', seg: 3, toolCallId: 'gate', name: 'confirm_step', kind2: 'CONFIRM', status: 'pending', args: '{}', requiresAction: true }
+    ])
+    const store = useAiStore()
+    const wrapper = await mountPanel([msg])
+    store.loading = true
+    await wrapper.vm.$nextTick()
+    // 非决策态：继续走普通工具卡，不生成只读卡
+    expect(wrapper.findAll('[data-testid="hitl-receipt"]')).toHaveLength(0)
+    for (const id of ['p1', 'b1', 'u1']) {
+      expect(wrapper.find(`[data-testid="tool-card-${id}"]`).exists()).toBe(true)
+      expect(wrapper.find(`[data-testid="block-body-a-1:${id}"]`).attributes('style') ?? '').toContain('display: none')
+    }
+    // requiresAction 待决门卡：强制展开（不受「六态折叠」影响）
+    const gateBody = wrapper.find('[data-testid="block-body-a-1:gate"]')
+    expect(wrapper.find('[data-testid="pending-card-gate"]').exists()).toBe(true)
+    expect(gateBody.attributes('style') ?? '').not.toContain('display: none')
+    wrapper.unmount()
+  })
+
   it('2A/F9：未提交不记录 —— GF 取消收尾回初始空态（残留提交值也不回填）', async () => {
     const msg = buildMessage([
       {
@@ -1197,8 +1273,18 @@ describe('2A 批：已决原样 UI 只读态 / 折叠时序 / 冲突表格（R-1
     ])
     const wrapper = await mountPanel([msg], { realForm: true })
     expect(wrapper.find('[data-testid="ro-badge-g9"]').text()).toBe('✗ 已取消')
-    // 例外态默认展开
+    // r15：取消终态同样默认折叠（回合已结束）；摘要非空且不拼接任何未提交值
+    expect(wrapper.find('[data-testid="ro-body-g9"]').attributes('style') ?? '').toContain('display: none')
+    expect(wrapper.find('[data-testid="ro-toggle-g9"]').attributes('aria-expanded')).toBe('false')
+    const summary = wrapper.find('[data-testid="ro-summary-g9"]').text().trim()
+    expect(summary).not.toBe('')
+    expect(summary).toContain('已取消')
+    expect(summary).not.toContain('半成品内容')
+    expect(summary).not.toContain('安全')
+    // 手动展开：同一张表单回初始空态（残留提交值也不回填）
+    await wrapper.find('[data-testid="ro-toggle-g9"]').trigger('click')
     const body = wrapper.find('[data-testid="ro-body-g9"]')
+    expect(wrapper.find('[data-testid="ro-toggle-g9"]').attributes('aria-expanded')).toBe('true')
     expect(body.attributes('style') ?? '').not.toContain('display: none')
     expect((body.find('input[type="text"]').element as HTMLInputElement).value).toBe('')
     // 枚举回合法默认（首个选项），不是当时选中的 safe
@@ -1357,7 +1443,7 @@ describe('2A 批：已决原样 UI 只读态 / 折叠时序 / 冲突表格（R-1
     wrapper.unmount()
   })
 
-  it('2A：门卡四态徽标（已批准 / 已拒绝 / 已超时 / 已批准·执行失败；无已取消）+ 例外默认展开', async () => {
+  it('2A/r15：门卡四态徽标（已批准 / 已拒绝 / 已超时 / 已批准·执行失败；无已取消）+ 六态一律折叠', async () => {
     const expired = buildMessage([
       { kind: 'tool', seg: 0, toolCallId: 'e1', name: 'start_export', kind2: 'CONFIRM', status: 'expired', args: '{}', requiresAction: false }
     ])
@@ -1404,10 +1490,19 @@ describe('2A 批：已决原样 UI 只读态 / 折叠时序 / 冲突表格（R-1
     }
     // 失败原因单独一行常驻卡面（K3）
     expect(wrapper.find('[data-testid="ro-reason-e5"]').text()).toContain('发布失败：目标库不可写')
-    // 四类例外默认展开（回合已结束也不收）；成功终态默认折叠
-    for (const [prefix, id] of [['e1', 'a-expired'], ['e4', 'a-rejected'], ['e5', 'a-failed'], ['e3', 'a-cancelled']] as const) {
-      const body = wrapper.find(`[data-testid="msg-bubble-${id}"]`).find(`[data-testid="ro-body-${prefix}"]`)
-      expect(body.attributes('style') ?? '').not.toContain('display: none')
+    // r15：六态一律默认折叠（回合已结束），卡头摘要非空可辨识
+    for (const [prefix, id, keyword] of [
+      ['e1', 'a-expired', '已超时'],
+      ['e4', 'a-rejected', '已拒绝'],
+      ['e5', 'a-failed', '已批准 · 执行失败'],
+      ['e3', 'a-cancelled', '已超时']
+    ] as const) {
+      const card = wrapper.find(`[data-testid="msg-bubble-${id}"]`)
+      expect(card.find(`[data-testid="ro-body-${prefix}"]`).attributes('style') ?? '').toContain('display: none')
+      expect(card.find(`[data-testid="ro-toggle-${prefix}"]`).attributes('aria-expanded')).toBe('false')
+      const summary = card.find(`[data-testid="ro-summary-${prefix}"]`).text().trim()
+      expect(summary).not.toBe('')
+      expect(summary).toContain(keyword)
     }
     const approvedBody = wrapper.find('[data-testid="msg-bubble-a-approved"]').find('[data-testid="ro-body-e6"]')
     expect(approvedBody.attributes('style') ?? '').toContain('display: none')

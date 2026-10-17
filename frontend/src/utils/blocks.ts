@@ -24,19 +24,19 @@ export type ActivityPart = ToolPart | ReasoningPart
  *
  * 2A 批（裁决 2026-10-17 §9 K1 + §10 F9 + §15 K12）：只读态 = **原样 UI 只读渲染**（门卡参数区
  * 字段表原样 / GF 同一张表单控件原生 disabled 值回填 / 零操作按钮），卡头 = 状态徽标 + 人话摘要 +
- * chevron 的裸文字单行；成功终态（已批准 / 已提交）回合结束后默认折叠，四类例外
- * （已拒绝 / 已超时 / 已批准·执行失败 / 已取消）默认展开。卡面不渲染 decidedAt（§16 M1：后端照记、
+ * chevron 的裸文字单行；已决六态（已批准 / 已拒绝 / 已超时 / 已批准·执行失败 / 已提交 / 已取消）
+ * 回合结束后**一律默认折叠**，卡头摘要行保留可辨识信息。卡面不渲染 decidedAt（§16 M1：后端照记、
  * 不上卡面）—— 摘要/徽标由卡头恒显行承接 R-160 兼容条件。
  */
 export interface Block {
   /** 成员稳定 id（加消息命名空间前缀，F1）：`${messageId}:${toolCallId}` / `${messageId}:reasoning-${seg}`（D5） */
   id: string
-  /** 所属消息 id（消息命名空间前缀的原文）——「回合是否仍在进行」判据用（成功卡决策当下不折叠）。 */
+  /** 所属消息 id（消息命名空间前缀的原文）——「回合是否仍在进行」判据用（已决终态回合未结束时保持展开）。 */
   messageId: string
   kind: 'text' | 'activity'
   /** 恒 1 个元素（R-154 #13+14：每段一卡）；成员 kind ∈ {'reasoning','tool'} */
   parts: MessagePart[]
-  /** requiresAction 段 true（强制展开）；已决 HITL 按终态（成功折叠 / 例外展开，见 {@link readOnlyDefaultExpanded}）；其余 false */
+  /** requiresAction 段 true（强制展开）；已决 HITL 六态一律折叠（见 {@link readOnlyDefaultExpanded}）；其余 false */
   defaultExpanded: boolean
 }
 
@@ -51,9 +51,9 @@ function isActivityPart(part: MessagePart): part is ActivityPart {
 }
 
 /**
- * defaultExpanded 判定（R-154 #13+14 → 2A 批裁决 §15 K12）：
+ * defaultExpanded 判定（R-154 #13+14 → 2A 批裁决 §15 K12 → r15 直裁）：
  * ① requiresAction === true ⇒ true（强制展开，R4-5 + D-C6，手动收起不生效）；
- * ② 已决 HITL 段按终态（{@link readOnlyDefaultExpanded}）：成功终态折叠、四类例外展开；
+ * ② 已决 HITL 段（{@link readOnlyDefaultExpanded}）⇒ 六态一律折叠；
  * ③ 其余（含 reason 非空、pending/running 进行中、纯 reasoning 段）一律 false。
  * 决策瞬间「不折叠」的时序不在这里判 —— 那是回合级时序（见 AiPanel 的 turnStillOpen）。
  */
@@ -355,14 +355,14 @@ export function readOnlyStateOf(part: ToolPart): ReadOnlyState {
 }
 
 /**
- * 已决只读卡的默认展开态（裁决 §15 K12）：
- * - 成功终态（已批准 / 已提交）⇒ 折叠（回合结束后收成卡头摘要行）；
- * - 四类例外（已拒绝 / 已超时 / 已批准·执行失败 / 已取消）⇒ 展开。
- * 「决策瞬间不折叠」属回合时序，由 AiPanel 的 turnStillOpen 承担（不写进纯函数）。
+ * 已决只读卡的默认展开态（§15 K12 → r15 直裁）：**六态一律折叠** ——
+ * 回合结束后统一收成卡头摘要行（徽标 + 摘要 + chevron），由用户手动展开回溯。
+ * `pending` / `blocked` / `unknown` 与 requiresAction 待决门卡不属已决只读态（{@link isReadOnlyCard}
+ * 挡在门外），本函数不承担它们的展开判定。
+ * 「回合未结束仍展开」属回合时序，由 AiPanel 的 turnStillOpen 承担（不写进纯函数）。
  */
-export function readOnlyDefaultExpanded(part: ToolPart): boolean {
-  const state = readOnlyStateOf(part)
-  return state === 'rejected' || state === 'expired' || state === 'failed' || state === 'cancelled'
+export function readOnlyDefaultExpanded(_part: ToolPart): boolean {
+  return false
 }
 
 /**

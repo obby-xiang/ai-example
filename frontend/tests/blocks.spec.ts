@@ -258,7 +258,7 @@ describe('S6 批1：回执独立块退役（groupParts 不再派生第二块）+
     expect(hasToolBody(makeTool({ toolCallId: 'e5', kind2: 'CONFIRM', status: 'pending', requiresAction: true, args: '{}' }))).toBe(true)
   })
 
-  it('2A：已决只读态全集与默认展开（门卡四态 / 表单两态；成功折叠、例外展开）', () => {
+  it('2A/r15：已决只读态全集与默认展开（门卡四态 / 表单两态；六态一律折叠）', () => {
     // 门卡：decision 优先，failed 落「已批准·执行失败」
     expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'running', decision: 'approved' }))).toBe('approved')
     expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'succeeded', decision: 'approved' }))).toBe('approved')
@@ -278,7 +278,7 @@ describe('S6 批1：回执独立块退役（groupParts 不再派生第二块）+
     expect(readOnlyStateOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'succeeded' }))).toBe('submitted')
     expect(readOnlyStateOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'cancelled' }))).toBe('cancelled')
     expect(readOnlyStateOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'failed' }))).toBe('cancelled')
-    // 默认展开：成功折叠；四类例外展开
+    // 默认展开：r15 裁决 —— 六态一律折叠（回合结束后只留卡头摘要行）
     expect(readOnlyDefaultExpanded(makeTool({ kind2: 'CONFIRM', status: 'succeeded', decision: 'approved' }))).toBe(false)
     expect(readOnlyDefaultExpanded(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'succeeded' }))).toBe(false)
     for (const part of [
@@ -287,19 +287,54 @@ describe('S6 批1：回执独立块退役（groupParts 不再派生第二块）+
       makeTool({ kind2: 'CONFIRM', status: 'failed', decision: 'approved' }),
       makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'cancelled' })
     ]) {
-      expect(readOnlyDefaultExpanded(part)).toBe(true)
+      expect(readOnlyDefaultExpanded(part)).toBe(false)
     }
   })
 
-  it('2A：groupParts 的 defaultExpanded 按只读终态分派（成功折叠 / 例外展开 / 待决强制展开）', () => {
+  it('r15：六态矩阵 —— 每态只读卡 groupParts 默认折叠，手动展开 / 收起优先', () => {
+    const matrix: Array<[string, ToolPart]> = [
+      ['approved', makeTool({ kind2: 'CONFIRM', status: 'succeeded', decision: 'approved' })],
+      ['rejected', makeTool({ kind2: 'CONFIRM', status: 'rejected', decision: 'rejected' })],
+      ['expired', makeTool({ kind2: 'CONFIRM', status: 'expired' })],
+      ['failed', makeTool({ kind2: 'CONFIRM', status: 'failed', decision: 'approved' })],
+      ['submitted', makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'succeeded' })],
+      ['cancelled', makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'cancelled' })]
+    ]
+    for (const [state, part] of matrix) {
+      expect(readOnlyStateOf(part)).toBe(state)
+      expect(isReadOnlyCard(part)).toBe(true)
+      const block = groupParts([part], 'm')[0]!
+      expect(block.defaultExpanded).toBe(false)
+      expect(resolveBlockExpanded(block, undefined)).toBe(false)
+      expect(resolveBlockExpanded(block, true)).toBe(true)
+      expect(resolveBlockExpanded(block, false)).toBe(false)
+    }
+  })
+
+  it('r15 负控制：pending / blocked / unknown 与 requiresAction 待决门卡不走只读折叠策略', () => {
+    for (const status of ['pending', 'blocked', 'unknown'] as const) {
+      const part = makeTool({ kind2: 'CONFIRM', status, requiresAction: false })
+      expect(isReadOnlyCard(part)).toBe(false)
+      expect(readOnlyDefaultExpanded(part)).toBe(false)
+    }
+    const gate = makeTool({ kind2: 'CONFIRM', status: 'pending', requiresAction: true })
+    expect(isReadOnlyCard(gate)).toBe(false)
+    expect(groupParts([gate], 'm')[0]!.defaultExpanded).toBe(true)
+    // 待决门卡强制展开：手动收起不生效（与已决终态的「用户优先」划清）
+    expect(resolveBlockExpanded(groupParts([gate], 'm')[0]!, false)).toBe(true)
+  })
+
+  it('r15：groupParts 的 defaultExpanded 六态一律折叠 / 待决强制展开', () => {
     const approved = groupParts([makeTool({ toolCallId: 'ok', kind2: 'CONFIRM', status: 'succeeded', decision: 'approved' })], 'm')
     expect(approved[0]!.defaultExpanded).toBe(false)
     const rejected = groupParts([makeTool({ toolCallId: 'no', kind2: 'CONFIRM', status: 'rejected', decision: 'rejected' })], 'm')
-    expect(rejected[0]!.defaultExpanded).toBe(true)
+    expect(rejected[0]!.defaultExpanded).toBe(false)
     const failed = groupParts([makeTool({ toolCallId: 'bad', kind2: 'CONFIRM', status: 'failed', decision: 'approved' })], 'm')
-    expect(failed[0]!.defaultExpanded).toBe(true)
+    expect(failed[0]!.defaultExpanded).toBe(false)
     const submitting = groupParts([makeTool({ toolCallId: 'sub', name: 'generative_form', kind2: 'FRONTEND', status: 'cancelled' })], 'm')
-    expect(submitting[0]!.defaultExpanded).toBe(true)
+    expect(submitting[0]!.defaultExpanded).toBe(false)
+    const pendingGate = groupParts([makeTool({ toolCallId: 'gate', kind2: 'CONFIRM', status: 'pending', requiresAction: true })], 'm')
+    expect(pendingGate[0]!.defaultExpanded).toBe(true)
   })
 
   it('2A：formSpecOf 解析 args.form（非法 / 缺省 ⇒ null，不臆造控件）', () => {
