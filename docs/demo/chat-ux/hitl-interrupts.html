@@ -3,48 +3,75 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ai-example · 主题 demo：HITL 中断场景廊（用户裁决 r2）</title>
+<title>ai-example · 主题 demo：HITL 中断场景廊（用户裁决 r3 · 全场景返工）</title>
 <link rel="stylesheet" href="hitl-interrupts.css">
 </head>
-<body class="m-0 p-0 bg-[#f1f2f4] text-[#1f2328] font-sans text-[13.8px] leading-[1.7] antialiased [&_button:focus-visible]:outline-none [&_button:focus-visible]:ring-2 [&_button:focus-visible]:ring-[#2563eb]/40" data-hitl-final="2026-10-17-r2">
+<body class="m-0 p-0 bg-[#f1f2f4] text-[#1f2328] font-sans text-[13.8px] leading-[1.7] antialiased [&_button:focus-visible]:outline-none [&_button:focus-visible]:ring-2 [&_button:focus-visible]:ring-[#2563eb]/40" data-hitl-final="2026-10-17-r3">
 
 <header class="sticky top-0 z-30 flex items-center gap-[16px] px-[22px] py-[12px] bg-white border-b border-[#e3e6ea]">
-  <div class="font-semibold text-[14px] tracking-[.2px]">ai-example · 主题 demo <span class="text-[#57606a] font-normal ml-[8px] text-[12.5px]">HITL 中断场景廊（用户 2026-10-17 五条裁决返工）</span></div>
+  <div class="font-semibold text-[14px] tracking-[.2px]">ai-example · 主题 demo <span class="text-[#57606a] font-normal ml-[8px] text-[12.5px]">HITL 中断场景廊 · 全场景返工（用户 2026-10-17 已决口径 K1~K8）</span></div>
   <span class="ml-auto flex items-center gap-[6px]">
     <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">现役</span>
     <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#1f2328] text-white">单主题</span>
-    <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#edf7f0] text-[#1a7f45] border border-[#bfe3cd]">r2 · 2026-10-17</span>
+    <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#edf7f0] text-[#1a7f45] border border-[#bfe3cd]">r3 · 2026-10-17</span>
   </span>
 </header>
 
 <main class="px-[22px] pt-[16px] pb-[60px]">
   <div class="max-w-[1460px] mx-auto flex flex-col gap-[16px]">
 
-    <!-- ================= 口径 ================= -->
+    <!-- ================= S0 口径 ================= -->
     <section id="s0" data-scene="s0" class="mt-[16px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden">
       <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[13px] py-[9px] border-b border-[#eef0f3] bg-[#f5f8ff]">
-        <span class="flex-[0_0_24px] w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#2563eb] text-white text-[11px] font-semibold tabular-nums">0</span>
-        <h3 class="m-0 text-[13.6px] [font-weight:650]">本轮口径（用户 2026-10-17 口头裁决，优先级最高）</h3>
-        <span class="ml-auto flex-none font-mono text-[11px] text-[#8b949e]">场景廊 · S1–S7 全部可交互</span>
+        <span class="flex-none w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#2563eb] text-white text-[11px] font-semibold tabular-nums">0</span>
+        <h3 class="m-0 text-[13.6px] [font-weight:650]">本轮口径 K1~K8（用户 2026-10-17 已批准，逐条执行零偏差）</h3>
+        <span class="ml-auto flex-none font-mono text-[11px] text-[#8b949e]">场景廊 · A1–A6 可交互 + B1–B7 样张</span>
       </div>
       <div class="px-[13px] pt-[9px] pb-[11px]">
-        <p class="m-0 text-[12.2px] leading-[1.6] text-[#57606a]">上一版把审批塞进多步向导、并保留第三种审批结果，均被否决。本页重排为七个互相独立的场景：审批只以单步卡存在，多步向导里只有选择与输入；操作按钮一律底部靠右；当前不可用的动作直接不渲染。</p>
-        <div class="mt-[9px] flex flex-wrap items-center gap-[6px]">
-          <span class="flex-none text-[11.5px] leading-[1.6] px-[6px] rounded-[6px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">R1 批准 / 拒绝只以单步卡存在，绝不入多步流</span>
-          <span class="flex-none text-[11.5px] leading-[1.6] px-[6px] rounded-[6px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">R2 不可用即不渲染，无灰钮</span>
-          <span class="flex-none text-[11.5px] leading-[1.6] px-[6px] rounded-[6px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">R3 操作按钮底部靠右成一行，主钮最右</span>
-          <span class="flex-none text-[11.5px] leading-[1.6] px-[6px] rounded-[6px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">R4 多选用复选框、一行一个，「其它」也是一行</span>
-          <span class="flex-none text-[11.5px] leading-[1.6] px-[6px] rounded-[6px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">R5 审批结果仅 已批准 / 已拒绝，另有 已超时 / 已取消</span>
+        <p class="m-0 text-[12.2px] leading-[1.6] text-[#57606a]">上一版把「已决」写成了摘要式（几行纯文本替代原卡），场景覆盖也不足。本版按已批准口径整体返工：已决 = 原样 UI 只读渲染，待决侧八条口径逐条落卡；场景分为「待决活卡区」（A1–A6，可交互，决策后原地转只读）与「已决样张区」（B1–B7，静态样张）。</p>
+        <div class="mt-[9px] flex flex-col gap-[6px]">
+          <div class="flex items-start gap-[8px] border-b border-[#eef0f3] py-[6px] last:border-b-0">
+            <span class="flex-none w-[24px] flex items-center justify-center rounded-[5px] border border-[#cddcff] bg-[#eff4ff] text-[#2563eb] text-[10.5px] font-semibold tabular-nums">K1</span>
+            <span class="flex-1 min-w-0 text-[12.2px] leading-[1.6] text-[#57606a]"><b class="text-[#1f2328] [font-weight:650]">已决统一原样 UI 只读渲染</b>：任何结束场景（已批准 / 已拒绝 / 已超时 / 已取消 / 已提交 / 执行失败）都保留原卡——选项按当时勾选态保留、输入按当时所填保留、参数区字段表原样；操作按钮在已决分支里整块不渲染；状态徽标 + 决策时间（decidedAt）固定在卡头；卡永久留在消息流，锁定不降对比度。</span>
+          </div>
+          <div class="flex items-start gap-[8px] border-b border-[#eef0f3] py-[6px] last:border-b-0">
+            <span class="flex-none w-[24px] flex items-center justify-center rounded-[5px] border border-[#cddcff] bg-[#eff4ff] text-[#2563eb] text-[10.5px] font-semibold tabular-nums">K2</span>
+            <span class="flex-1 min-w-0 text-[12.2px] leading-[1.6] text-[#57606a]"><b class="text-[#1f2328] [font-weight:650]">H1 审批卡独立存在</b>：绝不进多步流；终态恰四态——已批准 / 已拒绝 / 已超时 / 已批准·执行失败，<b class="text-[#1f2328] [font-weight:650]">没有已取消</b>。</span>
+          </div>
+          <div class="flex items-start gap-[8px] border-b border-[#eef0f3] py-[6px] last:border-b-0">
+            <span class="flex-none w-[24px] flex items-center justify-center rounded-[5px] border border-[#cddcff] bg-[#eff4ff] text-[#2563eb] text-[10.5px] font-semibold tabular-nums">K3</span>
+            <span class="flex-1 min-w-0 text-[12.2px] leading-[1.6] text-[#57606a]"><b class="text-[#1f2328] [font-weight:650]">「执行失败」= 已批准后工具执行失败</b>：卡头徽标「已批准 · 执行失败」，参数区原样（记录批了什么），失败原因单独一行常驻卡面。</span>
+          </div>
+          <div class="flex items-start gap-[8px] border-b border-[#eef0f3] py-[6px] last:border-b-0">
+            <span class="flex-none w-[24px] flex items-center justify-center rounded-[5px] border border-[#cddcff] bg-[#eff4ff] text-[#2563eb] text-[10.5px] font-semibold tabular-nums">K4</span>
+            <span class="flex-1 min-w-0 text-[12.2px] leading-[1.6] text-[#57606a]"><b class="text-[#1f2328] [font-weight:650]">已取消只属于非审批类</b>：H2 单选 / H2 多选 / H3 输入 / 多步组合流 / GF 生成式表单可以取消；审批卡（H1）没有这个出口。</span>
+          </div>
+          <div class="flex items-start gap-[8px] border-b border-[#eef0f3] py-[6px] last:border-b-0">
+            <span class="flex-none w-[24px] flex items-center justify-center rounded-[5px] border border-[#cddcff] bg-[#eff4ff] text-[#2563eb] text-[10.5px] font-semibold tabular-nums">K5</span>
+            <span class="flex-1 min-w-0 text-[12.2px] leading-[1.6] text-[#57606a]"><b class="text-[#1f2328] [font-weight:650]">待决侧无禁用态</b>：不可用的按钮不渲染（无灰钮、无占位）；按钮一律底部靠右，flex-1 占位右排、主钮最右，禁止居中。</span>
+          </div>
+          <div class="flex items-start gap-[8px] border-b border-[#eef0f3] py-[6px] last:border-b-0">
+            <span class="flex-none w-[24px] flex items-center justify-center rounded-[5px] border border-[#cddcff] bg-[#eff4ff] text-[#2563eb] text-[10.5px] font-semibold tabular-nums">K6</span>
+            <span class="flex-1 min-w-0 text-[12.2px] leading-[1.6] text-[#57606a]"><b class="text-[#1f2328] [font-weight:650]">多选 = 复选框一行一个</b>，「其它」也是一行复选框（勾选展开文字输入，未填字不渲染提交钮）；单选同样一行一个，禁止一行多个、禁止胶囊横排。</span>
+          </div>
+          <div class="flex items-start gap-[8px] border-b border-[#eef0f3] py-[6px] last:border-b-0">
+            <span class="flex-none w-[24px] flex items-center justify-center rounded-[5px] border border-[#cddcff] bg-[#eff4ff] text-[#2563eb] text-[10.5px] font-semibold tabular-nums">K7</span>
+            <span class="flex-1 min-w-0 text-[12.2px] leading-[1.6] text-[#57606a]"><b class="text-[#1f2328] [font-weight:650]">拒绝后「修正走会话」</b>：拒绝不改写旧卡——AI 在消息流按反馈重新提案，出现一张新的待决审批卡，旧卡原样留证（见 B2）。</span>
+          </div>
+          <div class="flex items-start gap-[8px] py-[6px]">
+            <span class="flex-none w-[24px] flex items-center justify-center rounded-[5px] border border-[#cddcff] bg-[#eff4ff] text-[#2563eb] text-[10.5px] font-semibold tabular-nums">K8</span>
+            <span class="flex-1 min-w-0 text-[12.2px] leading-[1.6] text-[#57606a]"><b class="text-[#1f2328] [font-weight:650]">全 Tailwind</b>：只用 hitl-interrupts.css 预编译产物内的类（或任意值类），禁手写 CSS、禁 style 标签、禁行内样式；界面禁 emoji（✓ / ✗ / ! 字形可用）；单文件制。</span>
+          </div>
         </div>
       </div>
     </section>
 
-    <!-- ================= S1 单步审批卡 ================= -->
-    <section id="s1" data-scene="s1" class="mt-[14px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden">
+    <!-- ================= A1 H1 审批卡 ================= -->
+    <section id="a1" data-scene="a1" class="mt-[14px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden">
       <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[13px] py-[9px] border-b border-[#eef0f3] bg-[#f5f8ff]">
-        <span class="flex-[0_0_24px] w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#2563eb] text-white text-[11px] font-semibold tabular-nums">1</span>
-        <h3 class="m-0 text-[13.6px] [font-weight:650]">单步审批卡（H1 独立存在）</h3>
-        <span class="text-[11.5px] text-[#57606a]">用于危险或不可逆操作的请示：只问批不批，不夹带任何表单。</span>
+        <span class="flex-none w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#2563eb] text-white text-[11px] font-semibold tabular-nums">A1</span>
+        <h3 class="m-0 text-[13.6px] [font-weight:650]">单步审批卡（H1 · 独立存在）</h3>
+        <span class="text-[11.5px] text-[#57606a]">用于危险或不可逆操作的请示：只问批不批，不夹带任何表单；60 秒无应答按不批准收尾。</span>
         <span class="ml-auto flex items-center gap-[6px]">
           <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#fffbeb] text-[#b45309] border border-[#fde68a]">仅两钮</span>
           <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#edf7f0] text-[#1a7f45] border border-[#bfe3cd]">可交互</span>
@@ -52,87 +79,76 @@
       </div>
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
-          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-card="s1" data-status="pending">
-
-            <div data-s1-live>
-              <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
-                <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">H1 · 单步审批</span>
-                <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#fffbeb] text-[#b45309] border-[#fde68a]">风险 HIGH</span>
-                <span class="ml-auto flex-none text-[10.5px] text-[#8b949e]">决策将写入审计日志</span>
-              </div>
+          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-card="a1" data-status="pending">
+            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
+              <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">H1 · 单步审批</span>
+              <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]" data-decided-badge data-state="approved">✓ 已批准</span>
+              <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]" data-decided-badge data-state="rejected">✗ 已拒绝</span>
+              <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#b45309] bg-[#fffbeb] border border-[#fde68a]" data-decided-badge data-state="timeout">! 已超时（按不批准处理）</span>
+              <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#fffbeb] text-[#b45309] border-[#fde68a]">风险 HIGH</span>
+              <span class="hidden ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums" data-decided-time>--:--</span>
+            </div>
+            <div data-form-body>
               <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">待你确认：删除生产数据库 orders_prod</div>
               <div class="px-[11px] pt-[6px] text-[11.9px] text-[#57606a] leading-[1.6]">删除后不可恢复，依赖该库的 3 个服务会立即报错。只有「批准 / 拒绝」两种处置，没有附加理由框，也没有其它出口。</div>
-              <div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px]">
+              <div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px]" data-a1-params>
                 <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">DROP DATABASE orders_prod（含 41 张表）</span></div>
                 <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">影响面</span><span class="flex-1 min-w-0 break-words">生产读写下线 · 3 个服务报错 · 不可回滚</span></div>
                 <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">回滚</span><span class="flex-1 min-w-0 break-words">无自动回滚，仅能靠 02:00 的全量备份人工恢复</span></div>
               </div>
-              <div class="flex items-center gap-[9px] mx-[11px] mt-[9px]">
+              <div class="flex items-center gap-[9px] mx-[11px] mt-[9px]" data-live-only>
                 <svg class="flex-[0_0_30px]" viewBox="0 0 36 36" width="30" height="30" aria-hidden="true">
                   <circle class="fill-none stroke-[#e3e6ea] [stroke-width:3]" cx="18" cy="18" r="15.5" stroke-width="3"></circle>
-                  <circle class="fill-none stroke-[#2563eb] [stroke-width:3] transition-[stroke-dashoffset] duration-1000 ease-linear" cx="18" cy="18" r="15.5" stroke-width="3" stroke-linecap="round" stroke-dasharray="97.4" stroke-dashoffset="0" transform="rotate(-90 18 18)" data-s1-ring></circle>
+                  <circle class="fill-none stroke-[#2563eb] [stroke-width:3] transition-[stroke-dashoffset] duration-1000 ease-linear" cx="18" cy="18" r="15.5" stroke-width="3" stroke-linecap="round" stroke-dasharray="97.4" stroke-dashoffset="0" transform="rotate(-90 18 18)" data-a1-ring></circle>
                 </svg>
-                <span class="text-[12.2px] text-[#57606a]"><b class="tabular-nums text-[#1f2328] [font-weight:650]" data-s1-count>60</b> 秒后按不批准处理并自动收尾（滚出视口暂停计时）</span>
+                <span class="text-[12.2px] text-[#57606a]"><b class="tabular-nums text-[#1f2328] [font-weight:650]" data-a1-count>60</b> 秒后按不批准处理并自动收尾（滚出视口暂停计时）</span>
               </div>
-              <div class="flex items-center gap-[8px] px-[11px] pt-[11px] pb-[10px]">
+              <div class="flex items-center gap-[8px] px-[11px] pt-[11px] pb-[10px]" data-live-only>
                 <span class="flex-1"></span>
-                <button type="button" data-act="s1-reject" class="flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-[#e3e6ea] bg-white text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]">拒绝</button>
-                <button type="button" data-act="s1-approve" class="flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-transparent bg-[#2563eb] text-white font-semibold transition-all duration-[150ms] hover:brightness-[1.08]">批准</button>
+                <button type="button" data-act="a1-reject" class="flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-[#e3e6ea] bg-white text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]">拒绝</button>
+                <button type="button" data-act="a1-approve" class="flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-transparent bg-[#2563eb] text-white font-semibold transition-all duration-[150ms] hover:brightness-[1.08]">批准</button>
               </div>
             </div>
-
-            <div class="hidden pb-[10px]" data-s1-ro>
-              <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
-                <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]" data-s1-badge="approved">✓ 已批准</span>
-                <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]" data-s1-badge="rejected">✗ 已拒绝</span>
-                <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#b45309] bg-[#fffbeb] border border-[#fde68a]" data-s1-badge="timeout">! 已超时（按不批准处理）</span>
-                <span class="ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums" data-s1-time>--:--</span>
-              </div>
-              <div class="px-[11px] pt-[9px] text-[13.2px] [font-weight:650] text-[#1f2328]">删除生产数据库 orders_prod</div>
-              <div class="mx-[11px] mt-[7px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px]">
-                <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[12.4px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e]">决策</span><span class="flex-1 min-w-0 break-words" data-s1-decision>—</span></div>
-                <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[12.4px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e]">影响面</span><span class="flex-1 min-w-0 break-words">生产读写下线 · 3 个服务报错 · 不可回滚</span></div>
-              </div>
-              <p class="m-0 px-[11px] pt-[6px] text-[11.5px] text-[#57606a] leading-[1.6]">只读凭证：参数锁定、按钮整块消失，不可再操作。</p>
-            </div>
-
           </div>
-          <div class="w-[440px] max-w-full mx-auto mt-[10px] flex items-center gap-[8px] rounded-[8px] border border-[#eef0f3] bg-white px-[10px] py-[7px]">
+          <div class="w-[440px] max-w-full mx-auto mt-[10px] flex items-center gap-[8px] rounded-[8px] border border-[#eef0f3] bg-white px-[10px] py-[7px]" data-a1-helper>
             <span class="text-[11px] text-[#8b949e]">评审辅助（产品 UI 不存在）</span>
             <span class="flex-1"></span>
-            <button type="button" data-act="s1-force-timeout" class="flex-none whitespace-nowrap border-0 bg-transparent p-0 text-[11.5px] text-[#57606a] underline decoration-[#e3e6ea] underline-offset-[3px] transition-colors duration-[150ms] hover:text-[#2563eb]">立即触发超时</button>
+            <button type="button" data-act="a1-timeout" class="flex-none whitespace-nowrap border-0 bg-transparent p-0 text-[11.5px] text-[#57606a] underline decoration-[#e3e6ea] underline-offset-[3px] transition-colors duration-[150ms] hover:text-[#2563eb]">立即触发超时</button>
           </div>
         </div>
-        <p class="m-0 mt-[8px] text-[11.5px] text-[#57606a] leading-[1.6]">口径：批准 / 拒绝只在这张卡上；超时按不批准处理，同样固化为只读凭证。</p>
+        <p class="m-0 mt-[8px] text-[11.5px] text-[#57606a] leading-[1.6]">口径：批准 / 拒绝只在这张卡上；超时按不批准处理。三种收尾都原地转只读——参数区三行原样、按钮整块消失、徽标与决策时间落卡头；第四态「已批准 · 执行失败」见 B4。</p>
       </div>
     </section>
 
-    <!-- ================= S2 单选卡 ================= -->
-    <section id="s2" data-scene="s2" class="mt-[14px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden">
+    <!-- ================= A2 H2 单选卡 ================= -->
+    <section id="a2" data-scene="a2" class="mt-[14px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden">
       <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[13px] py-[9px] border-b border-[#eef0f3] bg-[#f5f8ff]">
-        <span class="flex-[0_0_24px] w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#2563eb] text-white text-[11px] font-semibold tabular-nums">2</span>
-        <h3 class="m-0 text-[13.6px] [font-weight:650]">单选卡（H2 单选）</h3>
-        <span class="text-[11.5px] text-[#57606a]">用于在有限方案里挑一条：选项一行一个，选定才出现提交。</span>
+        <span class="flex-none w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#2563eb] text-white text-[11px] font-semibold tabular-nums">A2</span>
+        <h3 class="m-0 text-[13.6px] [font-weight:650]">单选卡（H2 · 单选）</h3>
+        <span class="text-[11.5px] text-[#57606a]">用于在有限方案里挑一条：选项一行一个、整行可点，选定才出现提交。</span>
         <span class="ml-auto flex items-center gap-[6px]">
-          <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">单选</span>
+          <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">4 + 其它</span>
           <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#edf7f0] text-[#1a7f45] border border-[#bfe3cd]">可交互</span>
         </span>
       </div>
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
-          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-card="s2" data-status="editing">
-            <div data-s2-live>
-              <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
-                <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">H2 · 单选</span>
-                <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#f6f7f9] text-[#57606a] border-[#e3e6ea]">轻审计</span>
-                <span class="ml-auto flex-none text-[10.5px] text-[#8b949e]">选项 4 + 其它</span>
-              </div>
+          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-card="a2" data-status="editing">
+            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
+              <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">H2 · 单选</span>
+              <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]" data-decided-badge data-state="submitted">✓ 已提交</span>
+              <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]" data-decided-badge data-state="cancelled">✗ 已取消</span>
+              <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#f6f7f9] text-[#57606a] border-[#e3e6ea]">轻审计</span>
+              <span class="flex-none text-[10.5px] text-[#8b949e]">选项 4 + 其它</span>
+              <span class="hidden ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums" data-decided-time>--:--</span>
+            </div>
+            <div data-form-body>
               <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">选择本次发布范围（单选）</div>
               <div class="px-[11px] pt-[6px] text-[11.9px] text-[#57606a] leading-[1.6]">选项一行一个、整行可点；「其它」同样是列表里的一行，选中后展开文字输入。</div>
               <div class="mx-[11px] mt-[9px] flex flex-col gap-[7px]">
                 <div class="rounded-[9px] border border-[#e3e6ea] bg-white transition-colors duration-[150ms] hover:border-[#cddcff]" data-opt-row>
                   <label class="flex items-start gap-[9px] px-[10px] py-[8px] cursor-pointer">
-                    <input type="radio" name="s2opt" value="noconflict" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-s2-opt>
+                    <input type="radio" name="a2opt" value="noconflict" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-a2-opt>
                     <span class="flex-1 min-w-0">
                       <b class="block text-[12.8px] [font-weight:650] text-[#1f2328]" data-opt-label>仅发布无冲突项</b>
                       <span class="block text-[11.5px] text-[#57606a] leading-[1.5]">3 处冲突留待下轮，其余配置正常写入（推荐）</span>
@@ -141,7 +157,7 @@
                 </div>
                 <div class="rounded-[9px] border border-[#e3e6ea] bg-white transition-colors duration-[150ms] hover:border-[#cddcff]" data-opt-row>
                   <label class="flex items-start gap-[9px] px-[10px] py-[8px] cursor-pointer">
-                    <input type="radio" name="s2opt" value="per-conflict" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-s2-opt>
+                    <input type="radio" name="a2opt" value="per-conflict" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-a2-opt>
                     <span class="flex-1 min-w-0">
                       <b class="block text-[12.8px] [font-weight:650] text-[#1f2328]" data-opt-label>逐条确认冲突项</b>
                       <span class="block text-[11.5px] text-[#57606a] leading-[1.5]">对 3 处冲突各出一次独立审批卡，逐个放行</span>
@@ -150,7 +166,7 @@
                 </div>
                 <div class="rounded-[9px] border border-[#e3e6ea] bg-white transition-colors duration-[150ms] hover:border-[#cddcff]" data-opt-row>
                   <label class="flex items-start gap-[9px] px-[10px] py-[8px] cursor-pointer">
-                    <input type="radio" name="s2opt" value="report-only" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-s2-opt>
+                    <input type="radio" name="a2opt" value="report-only" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-a2-opt>
                     <span class="flex-1 min-w-0">
                       <b class="block text-[12.8px] [font-weight:650] text-[#1f2328]" data-opt-label>只出冲突报告</b>
                       <span class="block text-[11.5px] text-[#57606a] leading-[1.5]">生成 xlsx 不改配置，本轮发布整体转下轮</span>
@@ -159,7 +175,7 @@
                 </div>
                 <div class="rounded-[9px] border border-[#e3e6ea] bg-white transition-colors duration-[150ms] hover:border-[#cddcff]" data-opt-row>
                   <label class="flex items-start gap-[9px] px-[10px] py-[8px] cursor-pointer">
-                    <input type="radio" name="s2opt" value="pause-region" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-s2-opt>
+                    <input type="radio" name="a2opt" value="pause-region" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-a2-opt>
                     <span class="flex-1 min-w-0">
                       <b class="block text-[12.8px] [font-weight:650] text-[#1f2328]" data-opt-label>只暂停受影响区域</b>
                       <span class="block text-[11.5px] text-[#57606a] leading-[1.5]">CURRENCY#GLOBAL 与 TAX_RULE#PRJ-07 挂起，其余照发</span>
@@ -168,63 +184,57 @@
                 </div>
                 <div class="rounded-[9px] border border-[#e3e6ea] bg-white transition-colors duration-[150ms] hover:border-[#cddcff]" data-opt-row>
                   <label class="flex items-start gap-[9px] px-[10px] py-[8px] cursor-pointer">
-                    <input type="radio" name="s2opt" value="other" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-s2-opt>
+                    <input type="radio" name="a2opt" value="other" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-a2-opt>
                     <span class="flex-1 min-w-0">
                       <b class="block text-[12.8px] [font-weight:650] text-[#1f2328]" data-opt-label>其它（自定义处理说明）</b>
                       <span class="block text-[11.5px] text-[#57606a] leading-[1.5]">选中后必须写明处理方式，才算有效选择</span>
                     </span>
                   </label>
-                  <div class="hidden px-[10px] pb-[6px]" data-s2-other-wrap>
-                    <input type="text" data-s2-other placeholder="如：只覆盖 CURRENCY，其余跳过" class="w-full rounded-[8px] border border-[#e3e6ea] bg-white px-[9px] py-[6px] font-sans text-[13px] text-[#1f2328] [outline:none] placeholder:text-[#8b949e] focus:border-[#2563eb]">
+                  <div class="hidden px-[10px] pb-[6px]" data-a2-other-wrap>
+                    <input type="text" data-a2-other placeholder="如：只覆盖 CURRENCY，其余跳过" class="w-full rounded-[8px] border border-[#e3e6ea] bg-white px-[9px] py-[6px] font-sans text-[13px] text-[#1f2328] [outline:none] placeholder:text-[#8b949e] focus:border-[#2563eb]">
                   </div>
                 </div>
               </div>
-              <div class="flex items-center gap-[8px] px-[11px] pt-[11px] pb-[10px]">
+              <div class="flex items-center gap-[8px] px-[11px] pt-[11px] pb-[10px]" data-live-only>
                 <span class="text-[11.5px] text-[#8b949e]">有效选择后才出现「提交」</span>
                 <span class="flex-1"></span>
-                <button type="button" data-act="s2-submit" class="hidden flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-transparent bg-[#2563eb] text-white font-semibold transition-all duration-[150ms] hover:brightness-[1.08]">提交</button>
+                <button type="button" data-act="a2-submit" class="hidden flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-transparent bg-[#2563eb] text-white font-semibold transition-all duration-[150ms] hover:brightness-[1.08]">提交</button>
               </div>
-            </div>
-            <div class="hidden pb-[10px]" data-s2-ro>
-              <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
-                <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]">✓ 已提交</span>
-                <span class="ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums" data-s2-ro-time>--:--</span>
-              </div>
-              <div class="px-[11px] pt-[9px] text-[13.2px] [font-weight:650] text-[#1f2328]">发布范围已确认</div>
-              <p class="m-0 px-[11px] pt-[6px] pb-[10px] text-[12.4px] leading-[1.6] text-[#57606a] break-words" data-s2-ro-sum>—</p>
             </div>
           </div>
         </div>
-        <p class="m-0 mt-[8px] text-[11.5px] text-[#57606a] leading-[1.6]">口径：未选、或选了「其它」却没填字，都不渲染提交钮。</p>
+        <p class="m-0 mt-[8px] text-[11.5px] text-[#57606a] leading-[1.6]">口径：未选、或选了「其它」却没填字，都不渲染提交钮；提交后还是这张卡——被选项保持勾选、其它输入保持所填、提交钮消失。</p>
       </div>
     </section>
 
-    <!-- ================= S3 多选卡 ================= -->
-    <section id="s3" data-scene="s3" class="mt-[14px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden">
+    <!-- ================= A3 H2 多选卡 ================= -->
+    <section id="a3" data-scene="a3" class="mt-[14px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden">
       <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[13px] py-[9px] border-b border-[#eef0f3] bg-[#f5f8ff]">
-        <span class="flex-[0_0_24px] w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#2563eb] text-white text-[11px] font-semibold tabular-nums">3</span>
-        <h3 class="m-0 text-[13.6px] [font-weight:650]">多选卡（H2 多选）</h3>
-        <span class="text-[11.5px] text-[#57606a]">用于一次确认多项前置条件：复选框一行一个，勾够才出现提交。</span>
+        <span class="flex-none w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#2563eb] text-white text-[11px] font-semibold tabular-nums">A3</span>
+        <h3 class="m-0 text-[13.6px] [font-weight:650]">多选卡（H2 · 多选）</h3>
+        <span class="text-[11.5px] text-[#57606a]">用于一次确认多项前置条件：复选框一行一个，勾够并填完「其它」才出现提交。</span>
         <span class="ml-auto flex items-center gap-[6px]">
-          <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">多选</span>
+          <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">3 + 其它</span>
           <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#edf7f0] text-[#1a7f45] border border-[#bfe3cd]">可交互</span>
         </span>
       </div>
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
-          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-card="s3" data-status="editing">
-            <div data-s3-live>
-              <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
-                <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">H2 · 多选</span>
-                <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#f6f7f9] text-[#57606a] border-[#e3e6ea]">轻审计</span>
-                <span class="ml-auto flex-none text-[10.5px] text-[#8b949e]">选项 3 + 其它</span>
-              </div>
+          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-card="a3" data-status="editing">
+            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
+              <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">H2 · 多选</span>
+              <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]" data-decided-badge data-state="submitted">✓ 已提交</span>
+              <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]" data-decided-badge data-state="cancelled">✗ 已取消</span>
+              <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#f6f7f9] text-[#57606a] border-[#e3e6ea]">轻审计</span>
+              <span class="hidden ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums" data-decided-time>--:--</span>
+            </div>
+            <div data-form-body>
               <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">勾选发布前确认项（多选）</div>
               <div class="px-[11px] pt-[6px] text-[11.9px] text-[#57606a] leading-[1.6]">复选框一行一个、整行可点；「其它」也是一行复选框，勾选后展开文字输入。</div>
               <div class="mx-[11px] mt-[9px] flex flex-col gap-[7px]">
                 <div class="rounded-[9px] border border-[#e3e6ea] bg-white transition-colors duration-[150ms] hover:border-[#cddcff]" data-opt-row>
                   <label class="flex items-start gap-[9px] px-[10px] py-[8px] cursor-pointer">
-                    <input type="checkbox" value="checklist" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-s3-opt>
+                    <input type="checkbox" value="checklist" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-a3-opt>
                     <span class="flex-1 min-w-0">
                       <b class="block text-[12.8px] [font-weight:650] text-[#1f2328]" data-opt-label>已核对发布清单</b>
                       <span class="block text-[11.5px] text-[#57606a] leading-[1.5]">12 项逐条过审，无遗漏项</span>
@@ -233,7 +243,7 @@
                 </div>
                 <div class="rounded-[9px] border border-[#e3e6ea] bg-white transition-colors duration-[150ms] hover:border-[#cddcff]" data-opt-row>
                   <label class="flex items-start gap-[9px] px-[10px] py-[8px] cursor-pointer">
-                    <input type="checkbox" value="rollback" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-s3-opt>
+                    <input type="checkbox" value="rollback" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-a3-opt>
                     <span class="flex-1 min-w-0">
                       <b class="block text-[12.8px] [font-weight:650] text-[#1f2328]" data-opt-label>已确认回滚快照可用</b>
                       <span class="block text-[11.5px] text-[#57606a] leading-[1.5]">snapshot-20261017-0210，校验通过</span>
@@ -242,7 +252,7 @@
                 </div>
                 <div class="rounded-[9px] border border-[#e3e6ea] bg-white transition-colors duration-[150ms] hover:border-[#cddcff]" data-opt-row>
                   <label class="flex items-start gap-[9px] px-[10px] py-[8px] cursor-pointer">
-                    <input type="checkbox" value="oncall" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-s3-opt>
+                    <input type="checkbox" value="oncall" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-a3-opt>
                     <span class="flex-1 min-w-0">
                       <b class="block text-[12.8px] [font-weight:650] text-[#1f2328]" data-opt-label>已通知值守同学</b>
                       <span class="block text-[11.5px] text-[#57606a] leading-[1.5]">oncall-demo 已入群并确认在线</span>
@@ -251,43 +261,35 @@
                 </div>
                 <div class="rounded-[9px] border border-[#e3e6ea] bg-white transition-colors duration-[150ms] hover:border-[#cddcff]" data-opt-row>
                   <label class="flex items-start gap-[9px] px-[10px] py-[8px] cursor-pointer">
-                    <input type="checkbox" value="other" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-s3-opt>
+                    <input type="checkbox" value="other" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-a3-opt>
                     <span class="flex-1 min-w-0">
                       <b class="block text-[12.8px] [font-weight:650] text-[#1f2328]" data-opt-label>其它（补充确认项）</b>
                       <span class="block text-[11.5px] text-[#57606a] leading-[1.5]">勾选后必须写明补充内容</span>
                     </span>
                   </label>
-                  <div class="hidden px-[10px] pb-[6px]" data-s3-other-wrap>
-                    <input type="text" data-s3-other placeholder="如：已确认第三方回调地址已切流" class="w-full rounded-[8px] border border-[#e3e6ea] bg-white px-[9px] py-[6px] font-sans text-[13px] text-[#1f2328] [outline:none] placeholder:text-[#8b949e] focus:border-[#2563eb]">
+                  <div class="hidden px-[10px] pb-[6px]" data-a3-other-wrap>
+                    <input type="text" data-a3-other placeholder="如：已确认第三方回调地址已切流" class="w-full rounded-[8px] border border-[#e3e6ea] bg-white px-[9px] py-[6px] font-sans text-[13px] text-[#1f2328] [outline:none] placeholder:text-[#8b949e] focus:border-[#2563eb]">
                   </div>
                 </div>
               </div>
               <div class="flex items-center gap-[8px] px-[11px] pt-[11px] pb-[10px]">
-                <span class="text-[11.5px] text-[#57606a] tabular-nums" data-s3-count>已选 0 项</span>
+                <span class="text-[11.5px] text-[#57606a] tabular-nums" data-a3-count>已选 0 项</span>
                 <span class="flex-1"></span>
-                <button type="button" data-act="s3-submit" class="hidden flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-transparent bg-[#2563eb] text-white font-semibold transition-all duration-[150ms] hover:brightness-[1.08]">提交</button>
+                <button type="button" data-act="a3-submit" data-live-only class="hidden flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-transparent bg-[#2563eb] text-white font-semibold transition-all duration-[150ms] hover:brightness-[1.08]">提交</button>
               </div>
-            </div>
-            <div class="hidden pb-[10px]" data-s3-ro>
-              <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
-                <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]">✓ 已提交</span>
-                <span class="ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums" data-s3-ro-time>--:--</span>
-              </div>
-              <div class="px-[11px] pt-[9px] text-[13.2px] [font-weight:650] text-[#1f2328]">发布前确认项已记录</div>
-              <p class="m-0 px-[11px] pt-[6px] pb-[10px] text-[12.4px] leading-[1.6] text-[#57606a] break-words" data-s3-ro-sum>—</p>
             </div>
           </div>
         </div>
-        <p class="m-0 mt-[8px] text-[11.5px] text-[#57606a] leading-[1.6]">口径：一项没勾、或勾了「其它」却没填字，都不渲染提交钮；计数按已勾项实时更新。</p>
+        <p class="m-0 mt-[8px] text-[11.5px] text-[#57606a] leading-[1.6]">口径：一项没勾、或勾了「其它」却没填字，都不渲染提交钮；计数按已勾项实时更新。提交后逐行复选框按勾选态原样锁定，计数照旧留在卡面。</p>
       </div>
     </section>
 
-    <!-- ================= S4 输入卡 ================= -->
-    <section id="s4" data-scene="s4" class="mt-[14px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden">
+    <!-- ================= A4 H3 输入卡 ================= -->
+    <section id="a4" data-scene="a4" class="mt-[14px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden">
       <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[13px] py-[9px] border-b border-[#eef0f3] bg-[#f5f8ff]">
-        <span class="flex-[0_0_24px] w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#2563eb] text-white text-[11px] font-semibold tabular-nums">4</span>
-        <h3 class="m-0 text-[13.6px] [font-weight:650]">输入卡（H3）</h3>
-        <span class="text-[11.5px] text-[#57606a]">用于补一个必填事实（单号、工单、窗口）：空着就不能提交。</span>
+        <span class="flex-none w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#2563eb] text-white text-[11px] font-semibold tabular-nums">A4</span>
+        <h3 class="m-0 text-[13.6px] [font-weight:650]">输入卡（H3 · 必填文本）</h3>
+        <span class="text-[11.5px] text-[#57606a]">用于补一个必填事实（单号、工单）：空白不给提交，另有取消出口。</span>
         <span class="ml-auto flex items-center gap-[6px]">
           <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">必填</span>
           <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#edf7f0] text-[#1a7f45] border border-[#bfe3cd]">可交互</span>
@@ -295,57 +297,41 @@
       </div>
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
-          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-card="s4" data-status="editing">
-            <div data-s4-live>
-              <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
-                <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">H3 · 输入</span>
-                <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#fffbeb] text-[#b45309] border border-[#fde68a]">必填</span>
-                <span class="ml-auto flex-none text-[10.5px] text-[#8b949e]">只校验非空</span>
-              </div>
+          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-card="a4" data-status="editing">
+            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
+              <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">H3 · 输入</span>
+              <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]" data-decided-badge data-state="submitted">✓ 已提交</span>
+              <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]" data-decided-badge data-state="cancelled">✗ 已取消</span>
+              <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#fffbeb] text-[#b45309] border-[#fde68a]">必填</span>
+              <span class="hidden ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums" data-decided-time>--:--</span>
+            </div>
+            <div data-form-body>
               <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">补充变更单号</div>
               <div class="px-[11px] pt-[6px] text-[11.9px] text-[#57606a] leading-[1.6]">单项必填文本，没有附加选项；留空时「提交」不出现，放弃请用「取消」。</div>
               <div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[9px]">
                 <label class="block">
                   <span class="block text-[12.2px] text-[#57606a] mb-[5px]">变更单号（必填）</span>
-                  <input type="text" data-s4-input placeholder="如 CHG-2026-0417" class="w-full rounded-[8px] border border-[#e3e6ea] bg-white px-[9px] py-[6px] font-sans text-[13px] text-[#1f2328] [outline:none] placeholder:text-[#8b949e] focus:border-[#2563eb]">
+                  <input type="text" data-a4-input placeholder="如 CHG-2026-0417" class="w-full rounded-[8px] border border-[#e3e6ea] bg-white px-[9px] py-[6px] font-sans text-[13px] text-[#1f2328] [outline:none] placeholder:text-[#8b949e] focus:border-[#2563eb]">
                 </label>
               </div>
-              <div class="flex items-center gap-[8px] px-[11px] pt-[11px] pb-[10px]">
+              <div class="flex items-center gap-[8px] px-[11px] pt-[11px] pb-[10px]" data-live-only>
                 <span class="flex-1"></span>
-                <button type="button" data-act="s4-cancel" class="flex-none whitespace-nowrap border-0 bg-transparent p-0 text-[11.5px] text-[#57606a] underline decoration-[#e3e6ea] underline-offset-[3px] transition-colors duration-[150ms] hover:text-[#2563eb]">取消</button>
-                <button type="button" data-act="s4-submit" class="hidden flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-transparent bg-[#2563eb] text-white font-semibold transition-all duration-[150ms] hover:brightness-[1.08]">提交</button>
-              </div>
-            </div>
-            <div class="hidden pb-[10px]" data-s4-ro>
-              <div class="hidden" data-s4-ro-submitted>
-                <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
-                  <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]">✓ 已提交</span>
-                  <span class="ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums" data-s4-ro-time>--:--</span>
-                </div>
-                <div class="px-[11px] pt-[9px] text-[13.2px] [font-weight:650] text-[#1f2328]">变更单号已提交</div>
-                <p class="m-0 px-[11px] pt-[6px] pb-[10px] text-[12.4px] leading-[1.6] text-[#57606a] break-words" data-s4-ro-sum>—</p>
-              </div>
-              <div class="hidden" data-s4-ro-cancelled>
-                <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
-                  <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]">✗ 已取消</span>
-                  <span class="ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums" data-s4-cancel-time>--:--</span>
-                </div>
-                <div class="px-[11px] pt-[9px] text-[13.2px] [font-weight:650] text-[#1f2328]">变更单号未提交</div>
-                <p class="m-0 px-[11px] pt-[6px] pb-[10px] text-[11.9px] leading-[1.6] text-[#57606a]">输入作废 · AI 收到「已取消」· 审计留痕 · run 保持挂起直到重新发起。</p>
+                <button type="button" data-act="a4-cancel" class="flex-none whitespace-nowrap border-0 bg-transparent p-0 text-[11.5px] text-[#57606a] underline decoration-[#e3e6ea] underline-offset-[3px] transition-colors duration-[150ms] hover:text-[#2563eb]">取消</button>
+                <button type="button" data-act="a4-submit" class="hidden flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-transparent bg-[#2563eb] text-white font-semibold transition-all duration-[150ms] hover:brightness-[1.08]">提交</button>
               </div>
             </div>
           </div>
         </div>
-        <p class="m-0 mt-[8px] text-[11.5px] text-[#57606a] leading-[1.6]">口径：输入为空（含纯空白）不渲染提交钮；取消是文字钮，与提交同处底部靠右一行。</p>
+        <p class="m-0 mt-[8px] text-[11.5px] text-[#57606a] leading-[1.6]">口径：输入为空（含纯空白）不渲染提交钮；取消是文字钮，与提交同处底部靠右一行。提交后输入框保留所填并锁定；取消后同样保留已填半成品值（见 B6）。</p>
       </div>
     </section>
 
-    <!-- ================= S5 多步组合流 ================= -->
-    <section id="s5" data-scene="s5" class="mt-[14px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden">
+    <!-- ================= A5 多步组合流 ================= -->
+    <section id="a5" data-scene="a5" class="mt-[14px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden">
       <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[13px] py-[9px] border-b border-[#eef0f3] bg-[#f5f8ff]">
-        <span class="flex-[0_0_24px] w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#2563eb] text-white text-[11px] font-semibold tabular-nums">5</span>
+        <span class="flex-none w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#2563eb] text-white text-[11px] font-semibold tabular-nums">A5</span>
         <h3 class="m-0 text-[13.6px] [font-weight:650]">多步组合流（步进向导）</h3>
-        <span class="text-[11.5px] text-[#57606a]">用于发布前把多件事问完：步骤内只有选择与输入，全程没有批准 / 拒绝。</span>
+        <span class="text-[11.5px] text-[#57606a]">用于发布前把多件事问完：步骤内只有选择与输入，提交后每步各自留一张只读卡。</span>
         <span class="ml-auto flex items-center gap-[6px]">
           <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">2 步</span>
           <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#edf7f0] text-[#1a7f45] border border-[#bfe3cd]">可交互</span>
@@ -353,20 +339,20 @@
       </div>
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
-          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-card="s5" data-status="step-1">
-            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
-              <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">发布前参数确认</span>
-              <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#f6f7f9] text-[#57606a] border-[#e3e6ea] tabular-nums" data-s5-progress>步骤 1/2</span>
-              <span class="ml-auto flex-none text-[10.5px] text-[#8b949e]">仅选择与输入</span>
-            </div>
-            <div data-s5-live>
-              <div data-s5-step="1">
+          <div class="w-[440px] max-w-full mx-auto flex flex-col gap-[10px]" data-card="a5" data-status="step-1">
+            <div data-a5-live class="bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden">
+              <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
+                <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">发布前参数确认</span>
+                <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#f6f7f9] text-[#57606a] border-[#e3e6ea] tabular-nums" data-a5-progress>步骤 1/2</span>
+                <span class="flex-none text-[10.5px] text-[#8b949e]">仅选择与输入</span>
+              </div>
+              <div data-a5-pane="1">
                 <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">确认发布前置条件（多选）</div>
                 <div class="px-[11px] pt-[6px] text-[11.9px] text-[#57606a] leading-[1.6]">复选框一行一个；至少勾 1 项才出现「下一步」，首步没有「上一步」。</div>
                 <div class="mx-[11px] mt-[9px] flex flex-col gap-[7px]">
                   <div class="rounded-[9px] border border-[#e3e6ea] bg-white transition-colors duration-[150ms] hover:border-[#cddcff]" data-opt-row>
                     <label class="flex items-start gap-[9px] px-[10px] py-[8px] cursor-pointer">
-                      <input type="checkbox" value="offpeak" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-s5-opt>
+                      <input type="checkbox" value="offpeak" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-a5-opt>
                       <span class="flex-1 min-w-0">
                         <b class="block text-[12.8px] [font-weight:650] text-[#1f2328]" data-opt-label>已确认处于流量低峰窗口</b>
                         <span class="block text-[11.5px] text-[#57606a] leading-[1.5]">当前 QPS 为日均的 21%</span>
@@ -375,7 +361,7 @@
                   </div>
                   <div class="rounded-[9px] border border-[#e3e6ea] bg-white transition-colors duration-[150ms] hover:border-[#cddcff]" data-opt-row>
                     <label class="flex items-start gap-[9px] px-[10px] py-[8px] cursor-pointer">
-                      <input type="checkbox" value="snapshot" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-s5-opt>
+                      <input type="checkbox" value="snapshot" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-a5-opt>
                       <span class="flex-1 min-w-0">
                         <b class="block text-[12.8px] [font-weight:650] text-[#1f2328]" data-opt-label>已确认回滚快照可用</b>
                         <span class="block text-[11.5px] text-[#57606a] leading-[1.5]">snapshot-20261017-0210 校验通过</span>
@@ -384,7 +370,7 @@
                   </div>
                   <div class="rounded-[9px] border border-[#e3e6ea] bg-white transition-colors duration-[150ms] hover:border-[#cddcff]" data-opt-row>
                     <label class="flex items-start gap-[9px] px-[10px] py-[8px] cursor-pointer">
-                      <input type="checkbox" value="oncall" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-s5-opt>
+                      <input type="checkbox" value="oncall" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-a5-opt>
                       <span class="flex-1 min-w-0">
                         <b class="block text-[12.8px] [font-weight:650] text-[#1f2328]" data-opt-label>已通知值守同学并入群</b>
                         <span class="block text-[11.5px] text-[#57606a] leading-[1.5]">oncall-demo 已确认在线</span>
@@ -393,126 +379,473 @@
                   </div>
                 </div>
               </div>
-              <div data-s5-step="2" class="hidden">
+              <div data-a5-pane="2" class="hidden">
                 <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">填写发布窗口（输入）</div>
                 <div class="px-[11px] pt-[6px] text-[11.9px] text-[#57606a] leading-[1.6]">末步内联摘要：提交前可回看已勾选项；填写窗口才出现「提交」，本步没有「下一步」。</div>
                 <div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[9px]">
                   <label class="block">
                     <span class="block text-[12.2px] text-[#57606a] mb-[5px]">发布窗口（必填）</span>
-                    <input type="text" data-s5-window placeholder="如 2026-10-18 02:00–04:00" class="w-full rounded-[8px] border border-[#e3e6ea] bg-white px-[9px] py-[6px] font-sans text-[13px] text-[#1f2328] [outline:none] placeholder:text-[#8b949e] focus:border-[#2563eb]">
+                    <input type="text" data-a5-window placeholder="如 2026-10-18 02:00–04:00" class="w-full rounded-[8px] border border-[#e3e6ea] bg-white px-[9px] py-[6px] font-sans text-[13px] text-[#1f2328] [outline:none] placeholder:text-[#8b949e] focus:border-[#2563eb]">
                   </label>
                 </div>
                 <div class="mx-[11px] mt-[9px] rounded-[8px] border border-[#eef0f3] bg-[#f6f7f9] px-[10px] py-[7px]">
                   <span class="block text-[11.2px] text-[#8b949e]">已勾选的前置条件</span>
-                  <span class="block mt-[2px] text-[12.2px] leading-[1.6] text-[#57606a] break-words" data-s5-summary>—</span>
+                  <span class="block mt-[2px] text-[12.2px] leading-[1.6] text-[#57606a] break-words" data-a5-summary>—</span>
                 </div>
               </div>
-              <div class="flex items-center gap-[8px] px-[11px] pt-[11px] pb-[10px]">
+              <div class="flex items-center gap-[8px] px-[11px] pt-[11px] pb-[10px]" data-live-only>
                 <span class="flex-1"></span>
-                <button type="button" data-act="s5-cancel" class="flex-none whitespace-nowrap border-0 bg-transparent p-0 text-[11.5px] text-[#57606a] underline decoration-[#e3e6ea] underline-offset-[3px] transition-colors duration-[150ms] hover:text-[#2563eb]">取消</button>
-                <button type="button" data-act="s5-back" class="hidden flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-[#e3e6ea] bg-white text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]">上一步</button>
-                <button type="button" data-act="s5-next" class="hidden flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-transparent bg-[#2563eb] text-white font-semibold transition-all duration-[150ms] hover:brightness-[1.08]">下一步</button>
-                <button type="button" data-act="s5-submit" class="hidden flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-transparent bg-[#2563eb] text-white font-semibold transition-all duration-[150ms] hover:brightness-[1.08]">提交</button>
+                <button type="button" data-act="a5-cancel" class="flex-none whitespace-nowrap border-0 bg-transparent p-0 text-[11.5px] text-[#57606a] underline decoration-[#e3e6ea] underline-offset-[3px] transition-colors duration-[150ms] hover:text-[#2563eb]">取消</button>
+                <button type="button" data-act="a5-back" class="hidden flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-[#e3e6ea] bg-white text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]">上一步</button>
+                <button type="button" data-act="a5-next" class="hidden flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-transparent bg-[#2563eb] text-white font-semibold transition-all duration-[150ms] hover:brightness-[1.08]">下一步</button>
+                <button type="button" data-act="a5-submit" class="hidden flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-transparent bg-[#2563eb] text-white font-semibold transition-all duration-[150ms] hover:brightness-[1.08]">提交</button>
               </div>
             </div>
-            <div class="hidden pb-[10px]" data-s5-ro>
-              <div class="hidden" data-s5-ro-submitted>
+            <div class="hidden flex flex-col gap-[10px]" data-a5-ro>
+              <div class="bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-a5-card="1">
                 <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
-                  <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]">✓ 已提交</span>
-                  <span class="ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums" data-s5-ro-time>--:--</span>
+                  <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff] tabular-nums">发布前参数确认 · 第 1/2 步</span>
+                  <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]" data-a5-badge="submitted">✓ 已提交</span>
+                  <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]" data-a5-badge="cancelled">✗ 已取消</span>
+                  <span class="ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums" data-a5-time>--:--</span>
                 </div>
-                <div class="px-[11px] pt-[9px] text-[13.2px] [font-weight:650] text-[#1f2328]">发布前参数已确认</div>
-                <div class="mx-[11px] mt-[7px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px]">
-                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[12.4px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e]">确认项</span><span class="flex-1 min-w-0 break-words" data-s5-ro-picks>—</span></div>
-                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[12.4px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e]">发布窗口</span><span class="flex-1 min-w-0 break-words" data-s5-ro-window>—</span></div>
-                </div>
-                <p class="m-0 px-[11px] pt-[6px] text-[11.5px] text-[#57606a] leading-[1.6]">提交后固化为只读凭证，步进控件整块消失。</p>
+                <div data-a5-slot="1"></div>
               </div>
-              <div class="hidden" data-s5-ro-cancelled>
+              <div class="bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-a5-card="2">
                 <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
-                  <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]">✗ 已取消</span>
-                  <span class="ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums" data-s5-cancel-time>--:--</span>
+                  <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff] tabular-nums">发布前参数确认 · 第 2/2 步</span>
+                  <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]" data-a5-badge="submitted">✓ 已提交</span>
+                  <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]" data-a5-badge="cancelled">✗ 已取消</span>
+                  <span class="ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums" data-a5-time>--:--</span>
                 </div>
-                <div class="px-[11px] pt-[9px] text-[13.2px] [font-weight:650] text-[#1f2328]">发布前参数确认已取消</div>
-                <p class="m-0 px-[11px] pt-[6px] pb-[10px] text-[11.9px] leading-[1.6] text-[#57606a]">已勾选项作废 · AI 收到「已取消」· 审计留痕 · run 保持挂起直到重新发起。</p>
+                <div data-a5-slot="2"></div>
               </div>
             </div>
           </div>
         </div>
-        <p class="m-0 mt-[8px] text-[11.5px] text-[#57606a] leading-[1.6]">口径：上一步 / 下一步 / 取消 / 提交全部底部靠右；首步不渲染上一步，末步不渲染下一步而渲染提交，提交或取消后四个控件全部不渲染。</p>
+        <p class="m-0 mt-[8px] text-[11.5px] text-[#57606a] leading-[1.6]">口径：上一步 / 下一步 / 取消 / 提交全部底部靠右，首步不渲染上一步、末步不渲染下一步而渲染提交；提交或取消后四控件整组消失，已走到的每一步各留一张只读卡（勾选态与输入原样，首步取消只留第 1 步卡）。</p>
       </div>
     </section>
 
-    <!-- ================= S6 已决只读卡 ================= -->
-    <section id="s6" data-scene="s6" class="mt-[14px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden">
+    <!-- ================= A6 GF 生成式表单 ================= -->
+    <section id="a6" data-scene="a6" class="mt-[14px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden">
       <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[13px] py-[9px] border-b border-[#eef0f3] bg-[#f5f8ff]">
-        <span class="flex-[0_0_24px] w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#2563eb] text-white text-[11px] font-semibold tabular-nums">6</span>
-        <h3 class="m-0 text-[13.6px] [font-weight:650]">已决只读卡（历史追溯）</h3>
-        <span class="text-[11.5px] text-[#57606a]">用于事后审计：决策留在消息流里，形状固定、不可再操作。</span>
+        <span class="flex-none w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#2563eb] text-white text-[11px] font-semibold tabular-nums">A6</span>
+        <h3 class="m-0 text-[13.6px] [font-weight:650]">生成式表单卡（GF · 六型控件）</h3>
+        <span class="text-[11.5px] text-[#57606a]">用于结构化采集：六型控件同卡（文本 / 数字 / 日期 / 单选 / 多选 / 开关），提交后同一张表单原样切只读。</span>
         <span class="ml-auto flex items-center gap-[6px]">
-          <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#f6f7f9] text-[#57606a] border border-[#e3e6ea]">只读</span>
-        </span>
-      </div>
-      <div class="px-[13px] pt-[9px] pb-[11px]">
-        <p class="m-0 text-[12.2px] leading-[1.6] text-[#57606a]">已完成的打断决策作为消息流中的只读凭证永久保留，供事后追溯审计，不可再操作。</p>
-        <div class="mt-[10px] rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
-          <div class="w-[440px] max-w-full mx-auto flex flex-col gap-[10px]">
-
-            <div class="bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-sample="approved">
-              <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
-                <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]">✓ 已批准</span>
-                <span class="ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums">10-16 15:02</span>
-              </div>
-              <div class="px-[11px] pt-[9px] text-[13.2px] [font-weight:650] text-[#1f2328]">重启支付网关 gateway-prod-03</div>
-              <p class="m-0 px-[11px] pt-[6px] pb-[10px] text-[11.9px] leading-[1.6] text-[#57606a]">决策人 demo-user · 依据变更单 CHG-2026-0416 · 已写入审计日志。</p>
-            </div>
-
-            <div class="bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-sample="rejected">
-              <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
-                <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]">✗ 已拒绝</span>
-                <span class="ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums">10-16 16:40</span>
-              </div>
-              <div class="px-[11px] pt-[9px] text-[13.2px] [font-weight:650] text-[#1f2328]">清空 Redis 缓存 cluster-a</div>
-              <p class="m-0 px-[11px] pt-[6px] pb-[10px] text-[11.9px] leading-[1.6] text-[#57606a]">决策人 demo-user · 拒绝后由 AI 重新提案：改为按 key 前缀分批淘汰。</p>
-            </div>
-
-            <div class="bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-sample="timeout">
-              <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
-                <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#b45309] bg-[#fffbeb] border border-[#fde68a]">! 已超时（按不批准处理）</span>
-                <span class="ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums">10-16 18:15</span>
-              </div>
-              <div class="px-[11px] pt-[9px] text-[13.2px] [font-weight:650] text-[#1f2328]">升级计费服务至 2.4.0</div>
-              <p class="m-0 px-[11px] pt-[6px] pb-[10px] text-[11.9px] leading-[1.6] text-[#57606a]">60 秒内无决策 · 系统按不批准处理并收尾 · 未改动任何实例。</p>
-            </div>
-
-          </div>
-        </div>
-        <p class="m-0 mt-[8px] text-[11.5px] text-[#57606a] leading-[1.6]">口径：卡头只有徽标与决策时间，正文只有决策内容摘要；没有任何按钮、输入框或可点区域。</p>
-      </div>
-    </section>
-
-    <!-- ================= S7 取消态 ================= -->
-    <section id="s7" data-scene="s7" class="mt-[14px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden">
-      <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[13px] py-[9px] border-b border-[#eef0f3] bg-[#f5f8ff]">
-        <span class="flex-[0_0_24px] w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#2563eb] text-white text-[11px] font-semibold tabular-nums">7</span>
-        <h3 class="m-0 text-[13.6px] [font-weight:650]">取消态（样张）</h3>
-        <span class="text-[11.5px] text-[#57606a]">用于中途放弃：多步流或输入卡被取消后的只读凭证。</span>
-        <span class="ml-auto flex items-center gap-[6px]">
-          <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#f6f7f9] text-[#57606a] border border-[#e3e6ea]">只读</span>
+          <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">六型</span>
+          <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#edf7f0] text-[#1a7f45] border border-[#bfe3cd]">可交互</span>
         </span>
       </div>
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
-          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-sample="cancelled">
+          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-card="a6" data-status="editing">
             <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
-              <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]">✗ 已取消</span>
-              <span class="ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums">10-17 14:26</span>
+              <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">GF · 生成式表单</span>
+              <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]" data-decided-badge data-state="submitted">✓ 已提交</span>
+              <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]" data-decided-badge data-state="cancelled">✗ 已取消</span>
+              <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#f6f7f9] text-[#57606a] border-[#e3e6ea]">schema 驱动</span>
+              <span class="hidden ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums" data-decided-time>--:--</span>
             </div>
-            <div class="px-[11px] pt-[9px] text-[13.2px] [font-weight:650] text-[#1f2328]">发布前参数确认（第 2/2 步取消）</div>
-            <p class="m-0 px-[11px] pt-[6px] pb-[10px] text-[11.9px] leading-[1.6] text-[#57606a]">已勾选项作废 · AI 收到「已取消」· 审计留痕 · run 保持挂起直到重新发起。</p>
+            <div data-form-body>
+              <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">发布配置（请填写以下信息）</div>
+              <div class="px-[11px] pt-[6px] text-[11.9px] text-[#57606a] leading-[1.6]">六型控件同卡：文本 / 数字 / 日期 / 单选 / 多选 / 开关。必填项未填时不渲染提交钮。</div>
+              <div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[9px]">
+                <div class="mb-[8px]">
+                  <span class="block text-[12.2px] text-[#57606a] mb-[4px]">变更标题 <span class="text-[#c0392b]">*</span><span class="ml-[6px] font-mono text-[9.5px] text-[#8b949e]">text</span></span>
+                  <input type="text" data-a6-title placeholder="如：spring 配置发布（华东）" class="w-full rounded-[8px] border border-[#e3e6ea] bg-white px-[9px] py-[6px] font-sans text-[13px] text-[#1f2328] [outline:none] placeholder:text-[#8b949e] focus:border-[#2563eb]">
+                </div>
+                <div class="mb-[8px]">
+                  <span class="block text-[12.2px] text-[#57606a] mb-[4px]">实例数量<span class="ml-[6px] font-mono text-[9.5px] text-[#8b949e]">number</span></span>
+                  <input type="number" data-a6-count-input placeholder="3" class="w-full rounded-[8px] border border-[#e3e6ea] bg-white px-[9px] py-[6px] font-sans text-[13px] text-[#1f2328] [outline:none] placeholder:text-[#8b949e] focus:border-[#2563eb]">
+                </div>
+                <div class="mb-[8px]">
+                  <span class="block text-[12.2px] text-[#57606a] mb-[4px]">计划执行日期 <span class="text-[#c0392b]">*</span><span class="ml-[6px] font-mono text-[9.5px] text-[#8b949e]">date</span></span>
+                  <input type="date" data-a6-date class="w-full rounded-[8px] border border-[#e3e6ea] bg-white px-[9px] py-[6px] font-sans text-[13px] text-[#1f2328] [outline:none] focus:border-[#2563eb]">
+                </div>
+                <div class="mb-[8px]">
+                  <span class="block text-[12.2px] text-[#57606a] mb-[4px]">变更级别<span class="ml-[6px] font-mono text-[9.5px] text-[#8b949e]">enum</span></span>
+                  <div class="flex flex-col gap-[6px]">
+                    <div class="rounded-[9px] border border-[#e3e6ea] bg-white transition-colors duration-[150ms] hover:border-[#cddcff]" data-opt-row>
+                      <label class="flex items-center gap-[9px] px-[10px] py-[7px] cursor-pointer">
+                        <input type="radio" name="a6level" value="normal" class="m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-a6-level>
+                        <span class="text-[12.8px] text-[#1f2328]" data-opt-label>常规（随发布窗口执行）</span>
+                      </label>
+                    </div>
+                    <div class="rounded-[9px] border border-[#e3e6ea] bg-white transition-colors duration-[150ms] hover:border-[#cddcff]" data-opt-row>
+                      <label class="flex items-center gap-[9px] px-[10px] py-[7px] cursor-pointer">
+                        <input type="radio" name="a6level" value="major" class="m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-a6-level>
+                        <span class="text-[12.8px] text-[#1f2328]" data-opt-label>重要（需值守同学在线）</span>
+                      </label>
+                    </div>
+                    <div class="rounded-[9px] border border-[#e3e6ea] bg-white transition-colors duration-[150ms] hover:border-[#cddcff]" data-opt-row>
+                      <label class="flex items-center gap-[9px] px-[10px] py-[7px] cursor-pointer">
+                        <input type="radio" name="a6level" value="urgent" class="m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-a6-level>
+                        <span class="text-[12.8px] text-[#1f2328]" data-opt-label>紧急（走应急通道）</span>
+                      </label>
+                    </div>
+                  </div>
+                </div>
+                <div class="mb-[8px]">
+                  <span class="block text-[12.2px] text-[#57606a] mb-[4px]">涉及服务<span class="ml-[6px] font-mono text-[9.5px] text-[#8b949e]">multi_select</span></span>
+                  <div class="flex flex-col gap-[6px]">
+                    <div class="rounded-[9px] border border-[#e3e6ea] bg-white transition-colors duration-[150ms] hover:border-[#cddcff]" data-opt-row>
+                      <label class="flex items-center gap-[9px] px-[10px] py-[7px] cursor-pointer">
+                        <input type="checkbox" value="order-svc" class="m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-a6-svc>
+                        <span class="text-[12.8px] text-[#1f2328]" data-opt-label>order-svc（订单）</span>
+                      </label>
+                    </div>
+                    <div class="rounded-[9px] border border-[#e3e6ea] bg-white transition-colors duration-[150ms] hover:border-[#cddcff]" data-opt-row>
+                      <label class="flex items-center gap-[9px] px-[10px] py-[7px] cursor-pointer">
+                        <input type="checkbox" value="pay-gw" class="m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-a6-svc>
+                        <span class="text-[12.8px] text-[#1f2328]" data-opt-label>pay-gw（支付网关）</span>
+                      </label>
+                    </div>
+                    <div class="rounded-[9px] border border-[#e3e6ea] bg-white transition-colors duration-[150ms] hover:border-[#cddcff]" data-opt-row>
+                      <label class="flex items-center gap-[9px] px-[10px] py-[7px] cursor-pointer">
+                        <input type="checkbox" value="notify" class="m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-a6-svc>
+                        <span class="text-[12.8px] text-[#1f2328]" data-opt-label>notify（消息通知）</span>
+                      </label>
+                    </div>
+                  </div>
+                </div>
+                <div>
+                  <span class="block text-[12.2px] text-[#57606a] mb-[4px]">完成后自动通知值守群<span class="ml-[6px] font-mono text-[9.5px] text-[#8b949e]">boolean</span></span>
+                  <span class="relative inline-flex flex-none w-[34px] h-[18px] align-middle">
+                    <input type="checkbox" data-a6-flag class="absolute inset-0 m-0 w-full h-full appearance-none rounded-full bg-[#8b949e] cursor-pointer transition-colors duration-[150ms]" aria-label="完成后自动通知值守群">
+                    <span class="pointer-events-none absolute top-[2px] left-[2px] w-[14px] h-[14px] rounded-[50%] bg-white transition-transform duration-[150ms]" data-a6-knob></span>
+                  </span>
+                  <span class="ml-[8px] text-[11.5px] text-[#8b949e]">默认关；提交后开关按当时态锁定</span>
+                </div>
+              </div>
+              <div class="flex items-center gap-[8px] px-[11px] pt-[11px] pb-[10px]" data-live-only>
+                <span class="flex-1"></span>
+                <button type="button" data-act="a6-cancel" class="flex-none whitespace-nowrap border-0 bg-transparent p-0 text-[11.5px] text-[#57606a] underline decoration-[#e3e6ea] underline-offset-[3px] transition-colors duration-[150ms] hover:text-[#2563eb]">取消</button>
+                <button type="button" data-act="a6-submit" class="hidden flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-transparent bg-[#2563eb] text-white font-semibold transition-all duration-[150ms] hover:brightness-[1.08]">提交</button>
+              </div>
+            </div>
           </div>
         </div>
-        <p class="m-0 mt-[8px] text-[11.5px] text-[#57606a] leading-[1.6]">口径：取消与超时都不算审批结果，只作为事件态保留；同样不可再操作。</p>
+        <p class="m-0 mt-[8px] text-[11.5px] text-[#57606a] leading-[1.6]">口径：六型控件同卡；标题与日期为必填，未填完不渲染提交钮。提交后是同一张表单——六型控件原样即可、值回填、全部锁定、不降对比度，按钮整组消失（K1 / §2 既有裁决）。</p>
+      </div>
+    </section>
+
+    <!-- ================= B1 已批准 ================= -->
+    <section id="b1" data-scene="b1" class="mt-[14px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden">
+      <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[13px] py-[9px] border-b border-[#eef0f3] bg-[#f5f8ff]">
+        <span class="flex-none w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#1f2328] text-white text-[11px] font-semibold tabular-nums">B1</span>
+        <h3 class="m-0 text-[13.6px] [font-weight:650]">已批准（H1 终态一）</h3>
+        <span class="text-[11.5px] text-[#57606a]">用于危险操作被放行后的留证：参数区字段表原样、行数与批准前一致，按钮整块消失。</span>
+        <span class="ml-auto flex items-center gap-[6px]">
+          <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#f6f7f9] text-[#57606a] border border-[#e3e6ea]">只读样张</span>
+        </span>
+      </div>
+      <div class="px-[13px] pt-[9px] pb-[11px]">
+        <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
+          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-sample="b1">
+            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
+              <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">H1 · 单步审批</span>
+              <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]">✓ 已批准</span>
+              <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#fffbeb] text-[#b45309] border-[#fde68a]">风险 HIGH</span>
+              <span class="ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums">2026-10-16 15:02</span>
+            </div>
+            <div data-locked class="pointer-events-none">
+              <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">重启支付网关 gateway-prod-03</div>
+              <div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px]">
+                <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">restart 服务 gateway-prod-03（滚动重启）</span></div>
+                <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">影响面</span><span class="flex-1 min-w-0 break-words">支付链路约 8 秒抖动 · 客户端自动重连</span></div>
+                <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">回滚</span><span class="flex-1 min-w-0 break-words">无需回滚，失败自动切回旧实例</span></div>
+              </div>
+              <div class="mx-[11px] mt-[7px] pb-[10px] text-[11.5px] text-[#57606a] leading-[1.6]">决策人 demo-user · 依据变更单 CHG-2026-0416 · 已写入审计日志。</div>
+            </div>
+          </div>
+        </div>
+        <p class="m-0 mt-[8px] text-[11.5px] text-[#57606a] leading-[1.6]">口径：徽标与决策时间在卡头；正文就是批准前那张卡，字段表三行一行不少。</p>
+      </div>
+    </section>
+
+    <!-- ================= B2 已拒绝 + 重新提案 ================= -->
+    <section id="b2" data-scene="b2" class="mt-[14px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden">
+      <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[13px] py-[9px] border-b border-[#eef0f3] bg-[#f5f8ff]">
+        <span class="flex-none w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#1f2328] text-white text-[11px] font-semibold tabular-nums">B2</span>
+        <h3 class="m-0 text-[13.6px] [font-weight:650]">已拒绝 + AI 重新提案（K7 修正走会话）</h3>
+        <span class="text-[11.5px] text-[#57606a]">用于拒绝后的闭环：旧卡原样留证，AI 在消息流按反馈重新提案，出现一张新的待决审批卡。</span>
+        <span class="ml-auto flex items-center gap-[6px]">
+          <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#f6f7f9] text-[#57606a] border border-[#e3e6ea]">只读 + 新待决</span>
+        </span>
+      </div>
+      <div class="px-[13px] pt-[9px] pb-[11px]">
+        <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
+          <div class="w-[440px] max-w-full mx-auto flex flex-col gap-[10px]">
+            <div class="bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-sample="b2">
+              <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
+                <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">H1 · 单步审批</span>
+                <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]">✗ 已拒绝</span>
+                <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#fffbeb] text-[#b45309] border-[#fde68a]">风险 HIGH</span>
+                <span class="ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums">2026-10-16 16:40</span>
+              </div>
+              <div data-locked class="pointer-events-none">
+                <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">清空 Redis 缓存 cluster-a</div>
+                <div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px]">
+                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">FLUSHDB cluster-a（6 个分片全量清空）</span></div>
+                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">影响面</span><span class="flex-1 min-w-0 break-words">会话全量失效 · 登录态全部重来</span></div>
+                </div>
+                <div class="mx-[11px] mt-[7px] pb-[10px] text-[11.5px] text-[#57606a] leading-[1.6]">决策人 demo-user · 拒绝理由留在会话里，不改写本卡。</div>
+              </div>
+            </div>
+            <div class="bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-card="b2-reproposal" data-status="pending">
+              <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
+                <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">H1 · 单步审批</span>
+                <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#f6f7f9] text-[#57606a] border-[#e3e6ea]">AI 重新提案</span>
+                <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]" data-decided-badge data-state="approved">✓ 已批准</span>
+                <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]" data-decided-badge data-state="rejected">✗ 已拒绝</span>
+                <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#fffbeb] text-[#b45309] border-[#fde68a]">风险 MEDIUM</span>
+                <span class="hidden ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums" data-decided-time>--:--</span>
+              </div>
+              <div data-form-body>
+                <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">已按反馈修正：按 key 前缀分批淘汰缓存</div>
+                <div class="px-[11px] pt-[6px] text-[11.9px] text-[#57606a] leading-[1.6]">不再全量清空：只淘汰 session:* 与 cart:* 两类前缀，保留 idem:* 幂等键；分批 1 万条、间隔 200ms，可随时中断。</div>
+                <div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px]">
+                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">SCAN + UNLINK session:* / cart:*（分批 1 万）</span></div>
+                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">影响面</span><span class="flex-1 min-w-0 break-words">仅会话与购物车重登 · 幂等键保留</span></div>
+                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">回滚</span><span class="flex-1 min-w-0 break-words">无需回滚，可中断</span></div>
+                </div>
+                <div class="flex items-center gap-[8px] px-[11px] pt-[11px] pb-[10px]" data-live-only>
+                  <span class="flex-1"></span>
+                  <button type="button" data-act="b2-reject" class="flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-[#e3e6ea] bg-white text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]">拒绝</button>
+                  <button type="button" data-act="b2-approve" class="flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-transparent bg-[#2563eb] text-white font-semibold transition-all duration-[150ms] hover:brightness-[1.08]">批准</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <p class="m-0 mt-[8px] text-[11.5px] text-[#57606a] leading-[1.6]">口径：拒绝不改写旧卡（旧卡永久留证）；修正走会话——下面这张是 AI 按反馈重新提案的新卡，可继续决策，决策后同样原地转只读。</p>
+      </div>
+    </section>
+
+    <!-- ================= B3 已超时 ================= -->
+    <section id="b3" data-scene="b3" class="mt-[14px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden">
+      <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[13px] py-[9px] border-b border-[#eef0f3] bg-[#f5f8ff]">
+        <span class="flex-none w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#1f2328] text-white text-[11px] font-semibold tabular-nums">B3</span>
+        <h3 class="m-0 text-[13.6px] [font-weight:650]">已超时（按不批准处理）</h3>
+        <span class="text-[11.5px] text-[#57606a]">用于无人应答的兜底：超时即已决，不挂「等待确认」，按不批准收尾并固化。</span>
+        <span class="ml-auto flex items-center gap-[6px]">
+          <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#f6f7f9] text-[#57606a] border border-[#e3e6ea]">只读样张</span>
+        </span>
+      </div>
+      <div class="px-[13px] pt-[9px] pb-[11px]">
+        <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
+          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-sample="b3">
+            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
+              <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">H1 · 单步审批</span>
+              <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#b45309] bg-[#fffbeb] border border-[#fde68a]">! 已超时（按不批准处理）</span>
+              <span class="ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums">2026-10-16 18:15</span>
+            </div>
+            <div data-locked class="pointer-events-none">
+              <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">升级计费服务至 2.4.0</div>
+              <div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px]">
+                <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">滚动升级 billing-svc 至 2.4.0（6 副本）</span></div>
+                <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">影响面</span><span class="flex-1 min-w-0 break-words">账单出数延后约 2 分钟 · 不丢单</span></div>
+                <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">回滚</span><span class="flex-1 min-w-0 break-words">镜像回退 2.3.7，约 90 秒</span></div>
+              </div>
+              <div class="mx-[11px] mt-[7px] pb-[10px] text-[11.5px] text-[#57606a] leading-[1.6]">60 秒内无决策 · 系统按不批准处理并收尾 · 未改动任何实例。</div>
+            </div>
+          </div>
+        </div>
+        <p class="m-0 mt-[8px] text-[11.5px] text-[#57606a] leading-[1.6]">口径：超时是事件态不是审批结果，但同样按 K1 原样锁定、按钮不渲染。</p>
+      </div>
+    </section>
+
+    <!-- ================= B4 已批准 · 执行失败 ================= -->
+    <section id="b4" data-scene="b4" class="mt-[14px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden">
+      <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[13px] py-[9px] border-b border-[#eef0f3] bg-[#f5f8ff]">
+        <span class="flex-none w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#1f2328] text-white text-[11px] font-semibold tabular-nums">B4</span>
+        <h3 class="m-0 text-[13.6px] [font-weight:650]">已批准 · 执行失败（H1 终态四 / K3）</h3>
+        <span class="text-[11.5px] text-[#57606a]">用于批准后工具执行失败的记录：参数区原样留存批了什么，失败原因单独一行常驻卡面。</span>
+        <span class="ml-auto flex items-center gap-[6px]">
+          <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#f6f7f9] text-[#57606a] border border-[#e3e6ea]">只读样张</span>
+        </span>
+      </div>
+      <div class="px-[13px] pt-[9px] pb-[11px]">
+        <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
+          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-sample="b4">
+            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
+              <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">H1 · 单步审批</span>
+              <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]">! 已批准 · 执行失败</span>
+              <span class="ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums">2026-10-16 21:07</span>
+            </div>
+            <div data-locked class="pointer-events-none">
+              <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">缩容订单服务 order-svc 6 副本 → 2 副本</div>
+              <div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px]">
+                <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">scale deployment order-svc --replicas=2</span></div>
+                <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">影响面</span><span class="flex-1 min-w-0 break-words">订单写入并发下降 · 峰值可能排队</span></div>
+                <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">回滚</span><span class="flex-1 min-w-0 break-words">扩回 6 副本，约 40 秒</span></div>
+              </div>
+              <div class="mx-[11px] mt-[9px] rounded-[8px] border border-[#e3e6ea] bg-[#fdf1ef] px-[10px] py-[7px] text-[11.9px] leading-[1.6] text-[#c0392b]">执行失败：目标实例 order-svc-04 拒绝连接（ECONNREFUSED），缩容未生效，已自动扩回 6 副本。</div>
+              <div class="mx-[11px] mt-[7px] pb-[10px] text-[11.5px] text-[#57606a] leading-[1.6]">决策人 demo-user · 批准已生效并写入审计日志；失败由工具回执上报，不重开决策。</div>
+            </div>
+          </div>
+        </div>
+        <p class="m-0 mt-[8px] text-[11.5px] text-[#57606a] leading-[1.6]">口径：第四态不是新的审批结果，而是「已批准 + 执行失败」的复合终态；参数区三行原样保留，失败原因常驻，不折叠。</p>
+      </div>
+    </section>
+
+    <!-- ================= B5 多选已提交 ================= -->
+    <section id="b5" data-scene="b5" class="mt-[14px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden">
+      <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[13px] py-[9px] border-b border-[#eef0f3] bg-[#f5f8ff]">
+        <span class="flex-none w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#1f2328] text-white text-[11px] font-semibold tabular-nums">B5</span>
+        <h3 class="m-0 text-[13.6px] [font-weight:650]">多选已提交（复选框按勾选态锁定）</h3>
+        <span class="text-[11.5px] text-[#57606a]">用于事后核对勾了哪几项：复选框逐行原样锁定，「其它」的文字输入保留当时所填。</span>
+        <span class="ml-auto flex items-center gap-[6px]">
+          <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#f6f7f9] text-[#57606a] border border-[#e3e6ea]">只读样张</span>
+        </span>
+      </div>
+      <div class="px-[13px] pt-[9px] pb-[11px]">
+        <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
+          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-sample="b5">
+            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
+              <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">H2 · 多选</span>
+              <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]">✓ 已提交</span>
+              <span class="ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums">2026-10-17 09:41</span>
+            </div>
+            <div data-locked class="pointer-events-none">
+              <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">勾选发布前确认项（多选）</div>
+              <div class="mx-[11px] mt-[9px] flex flex-col gap-[7px]">
+                <div class="rounded-[9px] border border-[#e3e6ea] bg-white" data-opt-row>
+                  <label class="flex items-start gap-[9px] px-[10px] py-[8px]">
+                    <input type="checkbox" checked tabindex="-1" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]">
+                    <span class="flex-1 min-w-0"><b class="block text-[12.8px] [font-weight:650] text-[#1f2328]" data-opt-label>已核对发布清单</b><span class="block text-[11.5px] text-[#57606a] leading-[1.5]">12 项逐条过审，无遗漏项</span></span>
+                  </label>
+                </div>
+                <div class="rounded-[9px] border border-[#e3e6ea] bg-white" data-opt-row>
+                  <label class="flex items-start gap-[9px] px-[10px] py-[8px]">
+                    <input type="checkbox" checked tabindex="-1" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]">
+                    <span class="flex-1 min-w-0"><b class="block text-[12.8px] [font-weight:650] text-[#1f2328]" data-opt-label>已确认回滚快照可用</b><span class="block text-[11.5px] text-[#57606a] leading-[1.5]">snapshot-20261017-0210，校验通过</span></span>
+                  </label>
+                </div>
+                <div class="rounded-[9px] border border-[#e3e6ea] bg-white" data-opt-row>
+                  <label class="flex items-start gap-[9px] px-[10px] py-[8px]">
+                    <input type="checkbox" tabindex="-1" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]">
+                    <span class="flex-1 min-w-0"><b class="block text-[12.8px] [font-weight:650] text-[#1f2328]" data-opt-label>已通知值守同学</b><span class="block text-[11.5px] text-[#57606a] leading-[1.5]">oncall-demo 已入群并确认在线</span></span>
+                  </label>
+                </div>
+                <div class="rounded-[9px] border border-[#e3e6ea] bg-white" data-opt-row>
+                  <label class="flex items-start gap-[9px] px-[10px] py-[8px]">
+                    <input type="checkbox" checked tabindex="-1" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]">
+                    <span class="flex-1 min-w-0"><b class="block text-[12.8px] [font-weight:650] text-[#1f2328]" data-opt-label>其它（补充确认项）</b><span class="block text-[11.5px] text-[#57606a] leading-[1.5]">勾选后必须写明补充内容</span></span>
+                  </label>
+                  <div class="px-[10px] pb-[6px]">
+                    <input type="text" readonly tabindex="-1" value="已确认第三方回调地址已切流" class="w-full rounded-[8px] border border-[#e3e6ea] bg-white px-[9px] py-[6px] font-sans text-[13px] text-[#1f2328] [outline:none]">
+                  </div>
+                </div>
+              </div>
+              <div class="flex items-center gap-[8px] px-[11px] pt-[11px] pb-[10px]">
+                <span class="text-[11.5px] text-[#57606a] tabular-nums">已选 3 项</span>
+                <span class="flex-1"></span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <p class="m-0 mt-[8px] text-[11.5px] text-[#57606a] leading-[1.6]">口径：三行勾选态原样保留（含「其它」的已填文字），未勾的那行仍是不勾；提交钮在已决分支里不存在。</p>
+      </div>
+    </section>
+
+    <!-- ================= B6 H3 已取消 ================= -->
+    <section id="b6" data-scene="b6" class="mt-[14px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden">
+      <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[13px] py-[9px] border-b border-[#eef0f3] bg-[#f5f8ff]">
+        <span class="flex-none w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#1f2328] text-white text-[11px] font-semibold tabular-nums">B6</span>
+        <h3 class="m-0 text-[13.6px] [font-weight:650]">输入已取消（半成品值保留）</h3>
+        <span class="text-[11.5px] text-[#57606a]">用于中途放弃：输入框保留当时已填的半成品值并锁定，不算提交也不算审批结果。</span>
+        <span class="ml-auto flex items-center gap-[6px]">
+          <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#f6f7f9] text-[#57606a] border border-[#e3e6ea]">只读样张</span>
+        </span>
+      </div>
+      <div class="px-[13px] pt-[9px] pb-[11px]">
+        <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
+          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-sample="b6">
+            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
+              <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">H3 · 输入</span>
+              <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]">✗ 已取消</span>
+              <span class="ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums">2026-10-17 14:26</span>
+            </div>
+            <div data-locked class="pointer-events-none">
+              <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">补充变更单号</div>
+              <div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[9px]">
+                <span class="block text-[12.2px] text-[#57606a] mb-[5px]">变更单号（必填）</span>
+                <input type="text" readonly tabindex="-1" value="CHG-2026-04" class="w-full rounded-[8px] border border-[#e3e6ea] bg-white px-[9px] py-[6px] font-sans text-[13px] text-[#1f2328] [outline:none]">
+              </div>
+              <div class="mx-[11px] mt-[7px] pb-[10px] text-[11.5px] text-[#57606a] leading-[1.6]">只填到一半即取消 · AI 收到「已取消」· 审计留痕 · run 保持挂起直到重新发起。</div>
+            </div>
+          </div>
+        </div>
+        <p class="m-0 mt-[8px] text-[11.5px] text-[#57606a] leading-[1.6]">口径：取消同样原样锁定——半成品值照留，字段标签与边框保持原样，取消 / 提交两个按钮都不在已决分支里。</p>
+      </div>
+    </section>
+
+    <!-- ================= B7 历史追溯 ================= -->
+    <section id="b7" data-scene="b7" class="mt-[14px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden">
+      <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[13px] py-[9px] border-b border-[#eef0f3] bg-[#f5f8ff]">
+        <span class="flex-none w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#1f2328] text-white text-[11px] font-semibold tabular-nums">B7</span>
+        <h3 class="m-0 text-[13.6px] [font-weight:650]">历史追溯（消息流中串联多终态）</h3>
+        <span class="text-[11.5px] text-[#57606a]">用于事后审计整段会话：不同终态的已决卡按时间串在消息流里，永久保留、可逐张回溯。</span>
+        <span class="ml-auto flex items-center gap-[6px]">
+          <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#f6f7f9] text-[#57606a] border border-[#e3e6ea]">只读样张</span>
+        </span>
+      </div>
+      <div class="px-[13px] pt-[9px] pb-[11px]">
+        <p class="m-0 text-[12.2px] leading-[1.6] text-[#57606a]">同一会话的消息流片段：三次打断的已决卡按时间顺序永存——已批准（放行）→ 已取消（改主意）→ 已超时（无人应答），每张都是当时的原卡。</p>
+        <div class="mt-[10px] rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
+          <div class="w-[440px] max-w-full mx-auto flex flex-col gap-[10px]" data-sample="b7">
+            <div class="bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden">
+              <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
+                <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">H1 · 单步审批</span>
+                <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]">✓ 已批准</span>
+                <span class="ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums">2026-10-17 10:12</span>
+              </div>
+              <div class="pointer-events-none" data-locked>
+                <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">发布配置到生产（3 项）</div>
+                <div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px]">
+                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">publish --profile prod --items 3</span></div>
+                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">影响面</span><span class="flex-1 min-w-0 break-words">CURRENCY / TAX_RULE / PRICING 三域生效</span></div>
+                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">回滚</span><span class="flex-1 min-w-0 break-words">一键回滚上一版本，约 20 秒</span></div>
+                </div>
+                <div class="mx-[11px] mt-[7px] pb-[10px] text-[11.5px] text-[#57606a] leading-[1.6]">决策人 demo-user · 已写入审计日志。</div>
+              </div>
+            </div>
+            <div class="bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden">
+              <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
+                <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">H3 · 输入</span>
+                <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]">✗ 已取消</span>
+                <span class="ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums">2026-10-17 10:25</span>
+              </div>
+              <div class="pointer-events-none" data-locked>
+                <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">补充本次发布的变更单号</div>
+                <div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[9px]">
+                  <span class="block text-[12.2px] text-[#57606a] mb-[5px]">变更单号（必填）</span>
+                  <input type="text" readonly tabindex="-1" value="CHG-2026-10" class="w-full rounded-[8px] border border-[#e3e6ea] bg-white px-[9px] py-[6px] font-sans text-[13px] text-[#1f2328] [outline:none]">
+                </div>
+                <div class="mx-[11px] mt-[7px] pb-[10px] text-[11.5px] text-[#57606a] leading-[1.6]">填到一半改主意 · AI 收到「已取消」· 审计留痕。</div>
+              </div>
+            </div>
+            <div class="bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden">
+              <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
+                <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">H1 · 单步审批</span>
+                <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#b45309] bg-[#fffbeb] border border-[#fde68a]">! 已超时（按不批准处理）</span>
+                <span class="ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums">2026-10-17 11:03</span>
+              </div>
+              <div class="pointer-events-none" data-locked>
+                <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">清理过期导出文件（bucket 保留 7 天）</div>
+                <div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px]">
+                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">rm s3://export/* --older-than 7d</span></div>
+                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">影响面</span><span class="flex-1 min-w-0 break-words">历史导出不可下载 · 已下载的不受影响</span></div>
+                </div>
+                <div class="mx-[11px] mt-[7px] pb-[10px] text-[11.5px] text-[#57606a] leading-[1.6]">60 秒内无决策 · 系统按不批准处理 · 未删除任何对象。</div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <p class="m-0 mt-[8px] text-[11.5px] text-[#57606a] leading-[1.6]">口径：已决卡不折叠、不销毁、不合并成摘要行；三张卡各自带徽标与决策时间，任何时刻都能逐张回溯当时看到的那张卡。</p>
       </div>
     </section>
 
@@ -524,7 +857,11 @@
   var $ = function(s, r){ return (r || document).querySelector(s); };
   var $$ = function(s, r){ return Array.prototype.slice.call((r || document).querySelectorAll(s)); };
   function show(el, on){ if(el) el.classList.toggle('hidden', !on); }
-  function clock(){ var d = new Date(); return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2); }
+  function pad(n){ return ('0' + n).slice(-2); }
+  function stamp(){
+    var d = new Date();
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+  }
   function status(name, v){ var c = $('[data-card="' + name + '"]'); if(c) c.setAttribute('data-status', v); }
   function labelOf(input){
     if(!input) return '';
@@ -533,104 +870,147 @@
     return lab ? lab.textContent.trim() : input.value;
   }
 
-  /* ---- S1 单步审批卡 ---- */
-  var S1_TOTAL = 60, S1_C = 97.4;
-  var s1 = { state: 'pending', left: S1_TOTAL, time: '' };
+  /* ---- 已决 = 原样 UI 只读：去按钮 / 去活控件 / 值原样，不再可交互 ---- */
+  function lock(root){
+    $$('[data-live-only]', root).forEach(function(n){ n.remove(); });
+    $$('.hidden', root).forEach(function(n){ n.remove(); });
+    $$('button', root).forEach(function(n){ n.remove(); });
+    $$('input,textarea,select', root).forEach(function(c){
+      c.setAttribute('tabindex', '-1');
+      if(c.tagName === 'TEXTAREA' || (c.tagName === 'INPUT' && ['text', 'number', 'date'].indexOf(c.type) >= 0)) c.setAttribute('readonly', '');
+    });
+    root.classList.add('pointer-events-none');
+    root.setAttribute('data-locked', '');
+  }
 
-  function s1Render(){
-    var open = s1.state === 'pending';
-    show($('[data-s1-live]'), open);
-    show($('[data-s1-ro]'), !open);
-    show($('[data-act="s1-force-timeout"]'), open);
-    $$('[data-s1-badge]').forEach(function(b){ show(b, b.getAttribute('data-s1-badge') === s1.state); });
-    status('s1', s1.state);
-    if(!open){
-      $('[data-s1-time]').textContent = s1.time;
-      $('[data-s1-decision]').textContent = s1.state === 'approved' ? '已批准 · demo-user'
-        : s1.state === 'rejected' ? '已拒绝 · demo-user'
-        : '已超时 · 系统按不批准处理';
+  function decide(name, state){
+    var card = $('[data-card="' + name + '"]');
+    if(!card || card.hasAttribute('data-decided')) return;
+    card.setAttribute('data-decided', '1');
+    var body = card.querySelector('[data-form-body]');
+    if(body){
+      var clone = body.cloneNode(true);
+      lock(clone);
+      body.replaceWith(clone);
     }
+    $$('[data-decided-badge]', card).forEach(function(b){ show(b, b.getAttribute('data-state') === state); });
+    var t = card.querySelector('[data-decided-time]');
+    if(t){ show(t, true); t.textContent = stamp(); }
+    card.setAttribute('data-status', state);
   }
 
-  function s1Decide(next){
-    if(s1.state !== 'pending') return;
-    s1.state = next;
-    s1.left = 0;
-    s1.time = clock();
-    $('[data-s1-count]').textContent = '0';
-    $('[data-s1-ring]').setAttribute('stroke-dashoffset', String(S1_C));
-    s1Render();
-  }
+  /* 兜底：已决区内的控件即使被点击/按键也不改变（pointer-events-none 之外的保险） */
+  document.addEventListener('click', function(e){
+    var locked = e.target.closest('[data-locked]');
+    if(locked){ e.preventDefault(); e.stopPropagation(); }
+  }, true);
+  document.addEventListener('keydown', function(e){
+    if(!e.target.closest('[data-locked]')) return;
+    if(e.key === ' ' || e.key === 'Enter'){ e.preventDefault(); }
+  }, true);
 
-  var s1Seen = true;
+  /* ---- A1 审批卡 ---- */
+  var A1_TOTAL = 60, A1_C = 97.4;
+  var a1 = { state: 'pending', left: A1_TOTAL, seen: true };
   if(window.IntersectionObserver){
-    var live1 = $('[data-s1-live]');
-    if(live1) new IntersectionObserver(function(es){ s1Seen = es[0].isIntersecting; }, { threshold: 0.25 }).observe(live1);
+    var live1 = $('[data-card="a1"]');
+    if(live1) new IntersectionObserver(function(es){ a1.seen = es[0].isIntersecting; }, { threshold: 0.25 }).observe(live1);
+  }
+  function a1Finish(state){
+    if(a1.state !== 'pending') return;
+    a1.state = state;
+    a1.left = 0;
+    var c = $('[data-a1-count]'); if(c) c.textContent = '0';
+    var r = $('[data-a1-ring]'); if(r) r.setAttribute('stroke-dashoffset', String(A1_C));
+    decide('a1', state);
+    var h = $('[data-a1-helper]'); if(h) h.remove();
   }
   setInterval(function(){
-    if(s1.state !== 'pending' || !s1Seen || s1.left <= 0) return;
-    s1.left -= 1;
-    $('[data-s1-count]').textContent = String(s1.left);
-    $('[data-s1-ring]').setAttribute('stroke-dashoffset', (S1_C * (1 - s1.left / S1_TOTAL)).toFixed(1));
-    if(s1.left === 0) s1Decide('timeout');
+    if(a1.state !== 'pending' || !a1.seen || a1.left <= 0) return;
+    a1.left -= 1;
+    var c = $('[data-a1-count]'); if(c) c.textContent = String(a1.left);
+    var r = $('[data-a1-ring]'); if(r) r.setAttribute('stroke-dashoffset', (A1_C * (1 - a1.left / A1_TOTAL)).toFixed(1));
+    if(a1.left === 0) a1Finish('timeout');
   }, 1000);
 
-  /* ---- S2 单选卡 ---- */
-  var s2 = { choice: '', other: '' };
-  function s2Valid(){ return !!s2.choice && (s2.choice !== 'other' || s2.other.trim().length > 0); }
-  function s2Render(){
-    show($('[data-s2-other-wrap]'), s2.choice === 'other');
-    show($('[data-act="s2-submit"]'), s2Valid());
-  }
-  function s2Label(){
-    var input = $('[data-s2-opt][value="' + s2.choice + '"]');
-    var base = labelOf(input);
-    return s2.choice === 'other' ? base + '：' + s2.other.trim() : base;
+  /* ---- A2 单选 ---- */
+  var a2 = { choice: '', other: '' };
+  function a2Valid(){ return !!a2.choice && (a2.choice !== 'other' || a2.other.trim().length > 0); }
+  function a2Render(){
+    show($('[data-a2-other-wrap]'), a2.choice === 'other');
+    show($('[data-act="a2-submit"]'), a2Valid());
   }
 
-  /* ---- S3 多选卡 ---- */
-  var s3 = { other: '' };
-  function s3Picked(){ return $$('[data-s3-opt]:checked').map(function(i){ return i.value; }); }
-  function s3Valid(){
-    var p = s3Picked();
-    return p.length > 0 && (p.indexOf('other') < 0 || s3.other.trim().length > 0);
+  /* ---- A3 多选 ---- */
+  var a3 = { other: '' };
+  function a3Picked(){ return $$('[data-a3-opt]:checked').map(function(i){ return i.value; }); }
+  function a3Valid(){
+    var p = a3Picked();
+    return p.length > 0 && (p.indexOf('other') < 0 || a3.other.trim().length > 0);
   }
-  function s3LabelOf(v){
-    var base = labelOf($('[data-s3-opt][value="' + v + '"]'));
-    return v === 'other' ? base + '：' + s3.other.trim() : base;
-  }
-  function s3Render(){
-    var p = s3Picked();
-    show($('[data-s3-other-wrap]'), p.indexOf('other') >= 0);
-    show($('[data-act="s3-submit"]'), s3Valid());
-    $('[data-s3-count]').textContent = '已选 ' + p.length + ' 项';
+  function a3Render(){
+    var p = a3Picked();
+    show($('[data-a3-other-wrap]'), p.indexOf('other') >= 0);
+    show($('[data-act="a3-submit"]'), a3Valid());
+    $('[data-a3-count]').textContent = '已选 ' + p.length + ' 项';
   }
 
-  /* ---- S4 输入卡 ---- */
-  var s4 = { value: '' };
-  function s4Render(){ show($('[data-act="s4-submit"]'), s4.value.trim().length > 0); }
+  /* ---- A4 输入 ---- */
+  var a4 = { value: '' };
+  function a4Render(){ show($('[data-act="a4-submit"]'), a4.value.trim().length > 0); }
 
-  /* ---- S5 多步组合流 ---- */
-  var s5 = { step: 1, win: '', state: 'editing' };
-  function s5Picked(){ return $$('[data-s5-opt]:checked').map(function(i){ return i.value; }); }
-  function s5LabelOf(v){ return labelOf($('[data-s5-opt][value="' + v + '"]')); }
-  function s5Render(){
-    var editing = s5.state === 'editing';
-    var picks = s5Picked();
-    show($('[data-s5-live]'), editing);
-    show($('[data-s5-ro]'), !editing);
-    show($('[data-s5-ro-submitted]'), s5.state === 'submitted');
-    show($('[data-s5-ro-cancelled]'), s5.state === 'cancelled');
-    show($('[data-s5-step="1"]'), editing && s5.step === 1);
-    show($('[data-s5-step="2"]'), editing && s5.step === 2);
-    show($('[data-act="s5-cancel"]'), editing);
-    show($('[data-act="s5-back"]'), editing && s5.step === 2);
-    show($('[data-act="s5-next"]'), editing && s5.step === 1 && picks.length > 0);
-    show($('[data-act="s5-submit"]'), editing && s5.step === 2 && s5.win.trim().length > 0);
-    $('[data-s5-progress]').textContent = editing ? '步骤 ' + s5.step + '/2' : '已结束';
-    $('[data-s5-summary]').textContent = picks.length ? picks.map(s5LabelOf).join('、') : '—';
-    status('s5', editing ? 'step-' + s5.step : s5.state);
+  /* ---- A5 多步 ---- */
+  var a5 = { step: 1, win: '', finished: false };
+  function a5Picked(){ return $$('[data-a5-opt]:checked').map(function(i){ return i.value; }); }
+  function a5LabelOf(v){ return labelOf($('[data-a5-opt][value="' + v + '"]')); }
+  function a5Render(){
+    var picks = a5Picked();
+    show($('[data-a5-pane="1"]'), a5.step === 1);
+    show($('[data-a5-pane="2"]'), a5.step === 2);
+    show($('[data-act="a5-cancel"]'), true);
+    show($('[data-act="a5-back"]'), a5.step === 2);
+    show($('[data-act="a5-next"]'), a5.step === 1 && picks.length > 0);
+    show($('[data-act="a5-submit"]'), a5.step === 2 && a5.win.trim().length > 0);
+    $('[data-a5-progress]').textContent = '步骤 ' + a5.step + '/2';
+    $('[data-a5-summary]').textContent = picks.length ? picks.map(a5LabelOf).join('、') : '—';
+    status('a5', 'step-' + a5.step);
   }
+  function a5Finish(state){
+    var card = $('[data-card="a5"]');
+    if(!card || card.hasAttribute('data-decided')) return;
+    card.setAttribute('data-decided', '1');
+    var reach = state === 'submitted' ? 2 : a5.step;
+    var t = stamp();
+    for(var i = 1; i <= reach; i++){
+      var pane = $('[data-a5-pane="' + i + '"]');
+      var clone = pane.cloneNode(true);
+      clone.classList.remove('hidden');
+      lock(clone);
+      $('[data-a5-slot="' + i + '"]').appendChild(clone);
+    }
+    if(reach < 2){ var second = $('[data-a5-card="2"]'); if(second) second.remove(); }
+    $$('[data-a5-badge]').forEach(function(b){ show(b, b.getAttribute('data-a5-badge') === state); });
+    $$('[data-a5-time]').forEach(function(x){ x.textContent = t; });
+    var live = $('[data-a5-live]'); if(live) live.remove();
+    show($('[data-a5-ro]'), true);
+    card.setAttribute('data-status', state);
+  }
+
+  /* ---- A6 GF ---- */
+  var a6 = {};
+  function a6Sync(){
+    var flag = $('[data-a6-flag]');
+    var knob = $('[data-a6-knob]');
+    var on = !!(flag && flag.checked);
+    if(flag){ flag.classList.toggle('bg-[#2563eb]', on); flag.classList.toggle('bg-[#8b949e]', !on); }
+    if(knob) knob.classList.toggle('translate-x-[16px]', on);
+  }
+  function a6Valid(){
+    var title = $('[data-a6-title]');
+    var date = $('[data-a6-date]');
+    return !!(title && title.value.trim().length > 0 && date && date.value.length > 0);
+  }
+  function a6Render(){ show($('[data-act="a6-submit"]'), a6Valid()); }
 
   /* ---- 事件 ---- */
   document.addEventListener('click', function(e){
@@ -638,100 +1018,49 @@
     if(!t) return;
     var act = t.getAttribute('data-act');
 
-    if(act === 's1-approve' || act === 's1-reject' || act === 's1-force-timeout'){
-      s1Decide(act === 's1-approve' ? 'approved' : act === 's1-reject' ? 'rejected' : 'timeout');
-      return;
-    }
+    if(act === 'a1-approve'){ a1Finish('approved'); return; }
+    if(act === 'a1-reject'){ a1Finish('rejected'); return; }
+    if(act === 'a1-timeout'){ a1Finish('timeout'); return; }
+    if(act === 'b2-approve'){ decide('b2-reproposal', 'approved'); return; }
+    if(act === 'b2-reject'){ decide('b2-reproposal', 'rejected'); return; }
 
-    if(act === 's2-submit'){
-      if(!s2Valid()) return;
-      status('s2', 'submitted');
-      show($('[data-s2-live]'), false);
-      show($('[data-s2-ro]'), true);
-      $('[data-s2-ro-time]').textContent = clock();
-      $('[data-s2-ro-sum]').textContent = '发布范围「' + s2Label() + '」';
-      return;
-    }
+    if(act === 'a2-submit'){ if(a2Valid()) decide('a2', 'submitted'); return; }
+    if(act === 'a3-submit'){ if(a3Valid()) decide('a3', 'submitted'); return; }
+    if(act === 'a4-submit'){ if(a4.value.trim()) decide('a4', 'submitted'); return; }
+    if(act === 'a4-cancel'){ decide('a4', 'cancelled'); return; }
 
-    if(act === 's3-submit'){
-      if(!s3Valid()) return;
-      status('s3', 'submitted');
-      show($('[data-s3-live]'), false);
-      show($('[data-s3-ro]'), true);
-      $('[data-s3-ro-time]').textContent = clock();
-      $('[data-s3-ro-sum]').textContent = '已记录 ' + s3Picked().length + ' 项：' + s3Picked().map(s3LabelOf).join('、');
-      return;
-    }
+    if(act === 'a5-next'){ if(a5Picked().length === 0) return; a5.step = 2; a5Render(); return; }
+    if(act === 'a5-back'){ if(a5.step !== 2) return; a5.step = 1; a5Render(); return; }
+    if(act === 'a5-cancel'){ a5Finish('cancelled'); return; }
+    if(act === 'a5-submit'){ if(a5.step !== 2 || !a5.win.trim()) return; a5Finish('submitted'); return; }
 
-    if(act === 's4-submit'){
-      if(!s4.value.trim()) return;
-      status('s4', 'submitted');
-      show($('[data-s4-live]'), false);
-      show($('[data-s4-ro]'), true);
-      show($('[data-s4-ro-submitted]'), true);
-      show($('[data-s4-ro-cancelled]'), false);
-      $('[data-s4-ro-time]').textContent = clock();
-      $('[data-s4-ro-sum]').textContent = '变更单号「' + s4.value.trim() + '」';
-      return;
-    }
-    if(act === 's4-cancel'){
-      status('s4', 'cancelled');
-      show($('[data-s4-live]'), false);
-      show($('[data-s4-ro]'), true);
-      show($('[data-s4-ro-submitted]'), false);
-      show($('[data-s4-ro-cancelled]'), true);
-      $('[data-s4-cancel-time]').textContent = clock();
-      return;
-    }
-
-    if(act === 's5-next'){
-      if(s5Picked().length === 0) return;
-      s5.step = 2;
-      s5Render();
-      return;
-    }
-    if(act === 's5-back'){
-      if(s5.state !== 'editing' || s5.step !== 2) return;
-      s5.step = 1;
-      s5Render();
-      return;
-    }
-    if(act === 's5-cancel'){
-      if(s5.state !== 'editing') return;
-      s5.state = 'cancelled';
-      s5Render();
-      $('[data-s5-cancel-time]').textContent = clock();
-      return;
-    }
-    if(act === 's5-submit'){
-      if(s5.state !== 'editing' || s5.step !== 2 || !s5.win.trim()) return;
-      s5.state = 'submitted';
-      s5Render();
-      $('[data-s5-ro-time]').textContent = clock();
-      $('[data-s5-ro-picks]').textContent = s5Picked().map(s5LabelOf).join('、');
-      $('[data-s5-ro-window]').textContent = s5.win.trim();
-      return;
-    }
+    if(act === 'a6-submit'){ if(a6Valid()) decide('a6', 'submitted'); return; }
+    if(act === 'a6-cancel'){ decide('a6', 'cancelled'); return; }
   });
 
   document.addEventListener('change', function(e){
-    if(e.target.matches('[data-s2-opt]')){ s2.choice = e.target.value; s2Render(); return; }
-    if(e.target.matches('[data-s3-opt]')){ s3Render(); return; }
-    if(e.target.matches('[data-s5-opt]')){ s5Render(); }
+    if(e.target.matches('[data-a2-opt]')){ a2.choice = e.target.value; a2Render(); return; }
+    if(e.target.matches('[data-a3-opt]')){ a3Render(); return; }
+    if(e.target.matches('[data-a5-opt]')){ a5Render(); return; }
+    if(e.target.matches('[data-a6-flag]')){ a6Sync(); return; }
+    if(e.target.matches('[data-a6-level],[data-a6-svc]')) return;
+    if(e.target.matches('[data-a6-date]')){ a6Render(); }
   });
 
   document.addEventListener('input', function(e){
-    if(e.target.matches('[data-s2-other]')){ s2.other = e.target.value; s2Render(); return; }
-    if(e.target.matches('[data-s3-other]')){ s3.other = e.target.value; s3Render(); return; }
-    if(e.target.matches('[data-s4-input]')){ s4.value = e.target.value; s4Render(); return; }
-    if(e.target.matches('[data-s5-window]')){ s5.win = e.target.value; s5Render(); }
+    if(e.target.matches('[data-a2-other]')){ a2.other = e.target.value; a2Render(); return; }
+    if(e.target.matches('[data-a3-other]')){ a3.other = e.target.value; a3Render(); return; }
+    if(e.target.matches('[data-a4-input]')){ a4.value = e.target.value; a4Render(); return; }
+    if(e.target.matches('[data-a5-window]')){ a5.win = e.target.value; a5Render(); return; }
+    if(e.target.matches('[data-a6-title],[data-a6-date]')){ a6Render(); }
   });
 
-  s1Render();
-  s2Render();
-  s3Render();
-  s4Render();
-  s5Render();
+  a2Render();
+  a3Render();
+  a4Render();
+  a5Render();
+  a6Sync();
+  a6Render();
 })();
 </script>
 </body>
