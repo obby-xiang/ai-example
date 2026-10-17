@@ -3,64 +3,626 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ai-example · 主题 demo：HITL 五类打断卡（CopilotKit 口径 · 现役单文件）</title>
+<title>ai-example · 主题 demo：HITL 三步中断流（型谱终裁口径 · 现役单文件）</title>
 <link rel="stylesheet" href="hitl-interrupts.css">
 </head>
-<body class="m-0 p-0 bg-[#f1f2f4] text-[#1f2328] font-sans text-[13.8px] leading-[1.7] antialiased [&_button:focus-visible]:outline-none [&_button:focus-visible]:ring-2 [&_button:focus-visible]:ring-[#2563eb]/40">
+<body class="m-0 p-0 bg-[#f1f2f4] text-[#1f2328] font-sans text-[13.8px] leading-[1.7] antialiased [&_button:focus-visible]:outline-none [&_button:focus-visible]:ring-2 [&_button:focus-visible]:ring-[#2563eb]/40" data-hitl-final="2026-10-17-r1">
 
 <header class="sticky top-0 z-30 flex items-center gap-[16px] px-[22px] py-[12px] bg-white border-b border-[#e3e6ea]">
-  <div class="font-semibold text-[14px] tracking-[.2px]">ai-example · 主题 demo <span class="text-[#57606a] font-normal ml-[8px] text-[12.5px]">HITL 五类打断卡（CopilotKit 口径）· 现役单文件（累积归档版见 v7.12.html，版本登记见 INDEX.md）</span></div>
-  <span class="ml-auto flex items-center gap-[6px]"><span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">现役</span><span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#1f2328] text-white">单主题</span><span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">五类 × 成对样张</span></span>
+  <div class="font-semibold text-[14px] tracking-[.2px]">ai-example · 主题 demo <span class="text-[#57606a] font-normal ml-[8px] text-[12.5px]">HITL 三步中断流（2026-10-17 型谱终裁口径 · 现役单文件）</span></div>
+  <span class="ml-auto flex items-center gap-[6px]"><span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">现役</span><span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#1f2328] text-white">单主题</span><span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#edf7f0] text-[#1a7f45] border border-[#bfe3cd]">按终裁改版 2026-10-17</span></span>
 </header>
 
 <main class="px-[22px] pt-[16px] pb-[60px]">
   <div class="max-w-[1460px] mx-auto">
 
-
-<section id="s0" class="mt-[16px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden"><div class="flex items-center gap-[9px] px-[13px] py-[9px] border-b border-[#eef0f3] bg-[#f5f8ff]"><span class="flex-[0_0_24px] w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#2563eb] text-white text-[11px] font-semibold tabular-nums">0</span><h3 class="m-0 text-[13.6px] [font-weight:650]">五类打断一览（型 / 触发 / 我们项目的触点 / 状态）</h3><span class="font-mono text-[11px] text-[#8b949e]">依据 = Kimi 分享会话 + 指挥官调研裁决</span><span class="ml-auto flex items-center gap-[6px]"><span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">口径</span></span></div><div class="px-[13px] pt-[9px] pb-[11px]"><div class="rounded-[8px] border border-[#eef0f3] overflow-hidden"><table class="w-full border-collapse text-[11.8px] leading-[1.55] table-fixed"><thead><tr><th class="border-b border-[#e3e6ea] bg-[#f6f7f9] px-[8px] py-[6px] text-left font-semibold text-[#57606a] break-words">型</th><th class="border-b border-[#e3e6ea] bg-[#f6f7f9] px-[8px] py-[6px] text-left font-semibold text-[#57606a] break-words">触发</th><th class="border-b border-[#e3e6ea] bg-[#f6f7f9] px-[8px] py-[6px] text-left font-semibold text-[#57606a] break-words">我们项目的触点</th><th class="border-b border-[#e3e6ea] bg-[#f6f7f9] px-[8px] py-[6px] text-left font-semibold text-[#57606a] break-words">状态</th></tr></thead><tbody><tr><td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words">① Approve / Reject</td><td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words">动作前挂起 · 需人放行</td><td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words">确认门（启动导出 / 预检查 / 导入 / 发布作业、创建任务）</td><td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words"><span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#edf7f0] text-[#1a7f45] border border-[#bfe3cd]">已实现</span></td></tr><tr><td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words">② Edit, then continue</td><td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words">提案可被局部修改后放行</td><td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words">导出范围 / 字段集选择（把「全量」改成 REGION=华东、去掉字段）</td><td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words"><span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#edf7f0] text-[#1a7f45] border border-[#bfe3cd]">已实现（本文件补样张）</span></td></tr><tr><td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words">③ Choose among options</td><td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words">候选策略需人挑选</td><td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words">发布预检冲突处理策略（覆盖 / 跳过 / 中止）</td><td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words"><span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">新触点</span></td></tr><tr><td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words">④ Provide missing input</td><td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words">缺字段才能继续</td><td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words">生成式表单（筛选条件 / 导出参数补齐）</td><td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words"><span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#edf7f0] text-[#1a7f45] border border-[#bfe3cd]">已实现（GF）</span></td></tr><tr><td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words">⑤ Retry with guidance</td><td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words">被否后带反馈重试</td><td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words">范围过大的提案被否 → 收敛重提案（12 配置集 → 3 配置集）</td><td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words"><span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">新触点 · 两幕叙事</span></td></tr></tbody></table></div><p class="mt-0 mb-[8px] text-[11.9px] text-[#57606a] leading-[1.65] mt-[9px] mb-0">统一中断卡结构（分享页口径）：<b class="[font-weight:650]">顶部 = 风险与 checkpoint 标识</b>（含「决策将写入审计日志」标注）/ <b class="[font-weight:650]">中部 = 拟执行动作 · 候选 · 缺字段</b> / <b class="[font-weight:650]">底部 = 可审计决策按钮行</b>。五类共用这套结构，差异只在中部与该类特有的动作。</p></div></section>
-
-<section id="s1" class="mt-[16px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden"><div class="flex items-center gap-[9px] px-[13px] py-[9px] border-b border-[#eef0f3] bg-[#f5f8ff]"><span class="flex-[0_0_24px] w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#2563eb] text-white text-[11px] font-semibold tabular-nums">1</span><h3 class="m-0 text-[13.6px] [font-weight:650]">① Approve / Reject（批准 / 否决）</h3><span class="font-mono text-[11px] text-[#8b949e]">进行态 → 决策后两态（已批准 / 已不执行）</span><span class="ml-auto flex items-center gap-[6px]"><span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">核心</span><span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#edf7f0] text-[#1a7f45] border border-[#bfe3cd]">已实现</span></span></div><div class="px-[13px] pt-[9px] pb-[11px]"><div class="grid grid-cols-2 gap-[14px] items-stretch"><div class="flex flex-col min-w-0 border rounded-[10px] overflow-hidden border-[#e3e6ea]"><div class="flex items-center gap-[6px] px-[10px] py-[6px] border-b border-[#eef0f3] bg-[#f6f7f9] text-[11.4px]"><span class="flex-[0_0_6px] w-[6px] h-[6px] rounded-[50%] bg-[#8b949e]"></span><span class="[font-weight:650]">① -a 进行态 · 待你确认</span></div><div class="flex-1 min-h-0 bg-[#fbfbfc] p-[11px]"><div class="panel relative w-[440px] max-w-full bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden"><div class="flex items-center gap-[8px] px-[14px] py-[11px] border-b border-[#eef0f3] bg-white"><span class="flex-[0_0_7px] w-[7px] h-[7px] rounded-[50%] bg-[#1a7f45]"></span><span class="font-semibold text-[13px]">AI 助手</span><span class="ml-auto text-[11.5px] text-[#8b949e]">deepseek-chat</span></div><div class="px-[14px] pt-[14px] pb-[10px]"><div class="rounded-[10px] bg-white border border-[#e3e6ea]" data-int="approve" data-int-live><div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]"><span class="flex-none text-[9.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">风险 MEDIUM</span><span class="flex-none font-mono text-[10.5px] text-[#57606a]">checkpoint: export-before-start</span><span class="ml-auto flex-none text-[10.5px] text-[#8b949e]" data-audit-note>决策将写入审计日志</span></div><div class="px-[11px] pt-[10px] pb-[2px] text-[13.2px] [font-weight:650] text-[#1f2328]">待你确认：启动导出作业（任务 #323）</div><div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px]" data-gate-params><div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">启动导出作业（任务 #323）</span></div><div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">影响面</span><span class="flex-1 min-w-0 break-words">只读导出 · 不修改任何文件 · 生成 1 个 xlsx</span></div><div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">范围</span><span class="flex-1 min-w-0 break-words">CURRENCY · <b class="[font-weight:650]">GLOBAL</b> · 预估 <span class="tabular-nums">2 184</span> 行</span></div></div><div class="flex items-center gap-[9px] mx-[11px] mt-[9px]"><svg class="flex-[0_0_30px]" viewBox="0 0 36 36" width="30" height="30" aria-hidden="true"><circle class="fill-none stroke-[#e3e6ea] [stroke-width:3]" cx="18" cy="18" r="15.5" stroke-width="3"></circle><circle class="fill-none stroke-[#2563eb] [stroke-width:3] transition-[stroke-dashoffset] duration-1000 ease-linear" cx="18" cy="18" r="15.5" stroke-width="3" stroke-linecap="round" stroke-dasharray="97.4" stroke-dashoffset="19.5" transform="rotate(-90 18 18)" data-ring></circle></svg><span class="text-[12.2px] text-[#57606a]"><b class="tabular-nums text-[#1f2328] [font-weight:650]" data-count>14</b> 秒后自动不执行</span></div><div class="hidden mx-[11px] mt-[10px]" data-reject-box><textarea rows="2" class="w-full resize-none rounded-[8px] border border-[#e3e6ea] bg-white px-[9px] py-[6px] font-sans text-[13px] leading-[1.5] text-[#1f2328] [outline:none] placeholder:text-[#8b949e] focus:border-[#2563eb]" placeholder="不执行的理由（必填，会原样回填给模型）" data-reject-text></textarea><div class="flex flex-wrap items-center gap-x-[9px] gap-y-[8px] mt-[8px]"><span class="text-[11.5px] text-[#8b949e] mr-auto">理由必填：填了才能确认不执行</span><button type="button" data-act="reject-cancel" class="flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-[#e3e6ea] bg-white text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328] disabled:opacity-50 disabled:cursor-default ">取消</button><button type="button" data-act="reject-confirm" class="flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-[#e3e6ea] bg-white text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328] disabled:opacity-50 disabled:cursor-default " disabled>确认不执行</button></div></div><div class="px-[11px] pb-[10px] pt-[2px]"><div class="flex flex-wrap items-center gap-x-[9px] gap-y-[8px] px-[11px] pt-[11px] pb-[1px]" data-decision-row><span class="text-[11.5px] text-[#8b949e] mr-auto">决策将写入审计日志 · 操作人 demo-user</span><button type="button" data-act="hold" class="flex-none whitespace-nowrap border-0 bg-transparent p-0 text-[11.5px] text-[#57606a] underline decoration-[#e3e6ea] underline-offset-[3px] transition-colors duration-[150ms] hover:text-[#2563eb] ">暂不处理</button><button type="button" data-act="reject" class="flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-[#e3e6ea] bg-white text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328] disabled:opacity-50 disabled:cursor-default ml-[6px]">不执行</button><button type="button" data-act="approve" class="flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-transparent bg-[#2563eb] text-white font-semibold transition-all duration-[150ms] hover:brightness-[1.08] disabled:bg-[#8b949e] disabled:font-normal disabled:cursor-default ">批准</button></div></div></div></div></div></div><div class="px-[10px] py-[6px] border-t border-[#eef0f3] bg-[#f6f7f9] text-[11px] text-[#57606a] leading-[1.55]">参数区 3 行 + 倒计时环 + 决策按钮行「批准（主）/ 不执行（必填理由）/ 暂不处理」。</div></div><div class="flex flex-col min-w-0 border rounded-[10px] overflow-hidden border-[#cddcff]"><div class="flex items-center gap-[6px] px-[10px] py-[6px] border-b border-[#eef0f3] bg-[#eff4ff] text-[11.4px]"><span class="flex-[0_0_6px] w-[6px] h-[6px] rounded-[50%] bg-[#2563eb]"></span><span class="[font-weight:650]">① -b 决策后 · 已批准</span></div><div class="flex-1 min-h-0 bg-[#fbfbfc] p-[11px]"><div class="panel relative w-[440px] max-w-full bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden"><div class="flex items-center gap-[8px] px-[14px] py-[11px] border-b border-[#eef0f3] bg-white"><span class="flex-[0_0_7px] w-[7px] h-[7px] rounded-[50%] bg-[#1a7f45]"></span><span class="font-semibold text-[13px]">AI 助手</span><span class="ml-auto text-[11.5px] text-[#8b949e]">deepseek-chat</span></div><div class="px-[14px] pt-[14px] pb-[10px]"><div class="rocard border border-[#e3e6ea] bg-white rounded-[10px] px-[11px] py-[8px] text-[12.6px] text-[#57606a] mb-3.5 is-open [&.is-open_.ro-bd]:block [&.is-open_.ro-chev]:rotate-90"><button class="ro-hd flex items-center gap-[6px] w-full border-0 bg-transparent p-0 text-left" type="button" aria-expanded="true"><span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0]">✓ 已批准</span><span class="ro-sum flex-1 min-w-0 text-[12.2px] whitespace-nowrap overflow-hidden text-ellipsis">启动导出作业<b class="text-[#1f2328] font-semibold">「任务 #323」</b></span><span class="flex-none text-[#8b949e] text-[11.5px] tabular-nums">今天 15:02</span><span class="ro-chev flex-none text-[#8b949e] text-[12px] transition-transform duration-[180ms]">›</span></button><div class="ro-bd hidden mt-[8px]"><div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px]" data-gate-params><div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">启动导出作业（任务 #323）</span></div><div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">影响面</span><span class="flex-1 min-w-0 break-words">只读导出 · 不修改任何文件 · 生成 1 个 xlsx</span></div><div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">范围</span><span class="flex-1 min-w-0 break-words">CURRENCY · <b class="[font-weight:650]">GLOBAL</b> · 预估 <span class="tabular-nums">2 184</span> 行</span></div></div><div class="mt-[7px] text-[11.8px] leading-[1.6] text-[#57606a]">审计行：决策 = 批准 · checkpoint = export-before-start · 操作人 demo-user · 今天 15:02。</div><p class="m-0 px-[11px] py-[7px] border-t border-[#eef0f3] text-[11.5px] text-[#57606a] bg-[#f6f7f9]">已批准 · 参数区锁定（控件原样、不可改）</p></div></div></div></div></div><div class="px-[10px] py-[6px] border-t border-[#eef0f3] bg-[#eff4ff] text-[11px] text-[#57606a] leading-[1.55]">徽标 + 摘要 + 时间 + chevron 恒显；参数区锁定；动作行消失。</div></div></div><div class="grid grid-cols-2 gap-[14px] items-stretch mt-[14px]"><div class="flex flex-col min-w-0 border rounded-[10px] overflow-hidden border-[#cddcff]"><div class="flex items-center gap-[6px] px-[10px] py-[6px] border-b border-[#eef0f3] bg-[#eff4ff] text-[11.4px]"><span class="flex-[0_0_6px] w-[6px] h-[6px] rounded-[50%] bg-[#2563eb]"></span><span class="[font-weight:650]">① -c 决策后 · 已不执行</span></div><div class="flex-1 min-h-0 bg-[#fbfbfc] p-[11px]"><div class="panel relative w-[440px] max-w-full bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden"><div class="flex items-center gap-[8px] px-[14px] py-[11px] border-b border-[#eef0f3] bg-white"><span class="flex-[0_0_7px] w-[7px] h-[7px] rounded-[50%] bg-[#1a7f45]"></span><span class="font-semibold text-[13px]">AI 助手</span><span class="ml-auto text-[11.5px] text-[#8b949e]">deepseek-chat</span></div><div class="px-[14px] pt-[14px] pb-[10px]"><div class="rocard border border-[#e3e6ea] bg-white rounded-[10px] px-[11px] py-[8px] text-[12.6px] text-[#57606a] mb-3.5 is-open [&.is-open_.ro-bd]:block [&.is-open_.ro-chev]:rotate-90"><button class="ro-hd flex items-center gap-[6px] w-full border-0 bg-transparent p-0 text-left" type="button" aria-expanded="true"><span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef]">✗ 已不执行</span><span class="ro-sum flex-1 min-w-0 text-[12.2px] whitespace-nowrap overflow-hidden text-ellipsis">启动导出作业<b class="text-[#1f2328] font-semibold">「任务 #323」</b></span><span class="flex-none text-[#8b949e] text-[11.5px] tabular-nums">今天 15:03</span><span class="ro-chev flex-none text-[#8b949e] text-[12px] transition-transform duration-[180ms]">›</span></button><div class="ro-bd hidden mt-[8px]"><div class="mt-[7px] text-[11.8px] leading-[1.6] text-[#c0392b]">不执行理由：导出跑在业务高峰，改到今晚维护窗口再执行</div><div class="mt-[7px]"><div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px]" data-gate-params><div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">启动导出作业（任务 #323）</span></div><div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">影响面</span><span class="flex-1 min-w-0 break-words">只读导出 · 不修改任何文件 · 生成 1 个 xlsx</span></div><div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">范围</span><span class="flex-1 min-w-0 break-words">CURRENCY · <b class="[font-weight:650]">GLOBAL</b> · 预估 <span class="tabular-nums">2 184</span> 行</span></div></div></div><div class="mt-[7px] text-[11.8px] leading-[1.6] text-[#57606a]">审计行：决策 = 不执行 · 理由随决策回传模型 · 操作人 demo-user · 今天 15:03。</div><p class="m-0 px-[11px] py-[7px] border-t border-[#eef0f3] text-[11.5px] text-[#57606a] bg-[#f6f7f9]">已不执行 · 理由常驻卡面一行，参数区锁定</p></div></div></div></div></div><div class="px-[10px] py-[6px] border-t border-[#eef0f3] bg-[#eff4ff] text-[11px] text-[#57606a] leading-[1.55]">理由常驻卡面一行（不藏进展开体）；参数区锁定；不可再改主意。</div></div><div class="flex flex-col min-w-0 border rounded-[10px] overflow-hidden border-[#cddcff]"><div class="flex items-center gap-[6px] px-[10px] py-[6px] border-b border-[#eef0f3] bg-[#eff4ff] text-[11.4px]"><span class="flex-[0_0_6px] w-[6px] h-[6px] rounded-[50%] bg-[#2563eb]"></span><span class="[font-weight:650]">① -d 倒计时归零后</span></div><div class="flex-1 min-h-0 bg-[#fbfbfc] p-[11px]"><div class="panel relative w-[440px] max-w-full bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden"><div class="flex items-center gap-[8px] px-[14px] py-[11px] border-b border-[#eef0f3] bg-white"><span class="flex-[0_0_7px] w-[7px] h-[7px] rounded-[50%] bg-[#1a7f45]"></span><span class="font-semibold text-[13px]">AI 助手</span><span class="ml-auto text-[11.5px] text-[#8b949e]">deepseek-chat</span></div><div class="px-[14px] pt-[14px] pb-[10px]"><div class="rocard border border-[#e3e6ea] bg-white rounded-[10px] px-[11px] py-[8px] text-[12.6px] text-[#57606a] mb-3.5 is-open [&.is-open_.ro-bd]:block [&.is-open_.ro-chev]:rotate-90"><button class="ro-hd flex items-center gap-[6px] w-full border-0 bg-transparent p-0 text-left" type="button" aria-expanded="true"><span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#57606a] bg-[#f6f7f9]">! 已超时（已置灰作废）</span><span class="ro-sum flex-1 min-w-0 text-[12.2px] whitespace-nowrap overflow-hidden text-ellipsis">启动导出作业<b class="text-[#1f2328] font-semibold">「任务 #323」</b>·超时未确认</span><span class="flex-none text-[#8b949e] text-[11.5px] tabular-nums">今天 15:04</span><span class="ro-chev flex-none text-[#8b949e] text-[12px] transition-transform duration-[180ms]">›</span></button><div class="ro-bd hidden mt-[8px]"><div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px]" data-gate-params><div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">启动导出作业（任务 #323）</span></div><div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">影响面</span><span class="flex-1 min-w-0 break-words">只读导出 · 不修改任何文件 · 生成 1 个 xlsx</span></div><div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">范围</span><span class="flex-1 min-w-0 break-words">CURRENCY · <b class="[font-weight:650]">GLOBAL</b> · 预估 <span class="tabular-nums">2 184</span> 行</span></div></div><div class="mt-[7px] text-[11.8px] leading-[1.6] text-[#57606a]">结局：等待超过 14 秒未收到决策，系统按默认策略自动不执行，未产生任何改动。</div><p class="m-0 px-[11px] py-[7px] border-t border-[#eef0f3] text-[11.5px] text-[#57606a] bg-[#f6f7f9]">已超时 · 动作行整块消失（置灰保留也算不合格）</p></div></div></div></div></div><div class="px-[10px] py-[6px] border-t border-[#eef0f3] bg-[#eff4ff] text-[11px] text-[#57606a] leading-[1.55]">超时 = 已决态：徽标改「已超时（已置灰作废）」，动作行整块消失（不保留置灰钮）。</div></div></div><div class="mt-[10px] border-t border-[#eef0f3] pt-[8px] text-[11.5px] text-[#57606a] leading-[1.65]"><b class="[font-weight:650]">落点：</b>① Approve / Reject = 现有确认门形态（<code class="font-mono text-[11.2px] bg-[#f6f7f9] border border-[#eef0f3] rounded-[4px] px-[4px] py-[1px]">risk=MEDIUM</code>）：进行态三动作 + 倒计时，决策后原地切只读回执，超时按已决处理。<b class="[font-weight:650]">量值：</b>动作 3 个 · 倒计时 14 秒起步（实测递减）· 决策后卡内动作钮 0 个<b class="[font-weight:650]">判据：</b>① 进行态动作 3 个（批准 / 不执行 / 暂不处理）且「不执行」点开理由框、理由为空时确认钮 <code class="font-mono text-[11.2px] bg-[#f6f7f9] border border-[#eef0f3] rounded-[4px] px-[4px] py-[1px]">disabled</code>；② 决策后三态卡内动作钮数 = 0；③ 倒计时数字随时间递减（实测 1.2 秒内减 1）；④ 卡头恒显「决策将写入审计日志」。</div></div></section>
-
-<section id="s2" class="mt-[16px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden"><div class="flex items-center gap-[9px] px-[13px] py-[9px] border-b border-[#eef0f3] bg-[#f5f8ff]"><span class="flex-[0_0_24px] w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#2563eb] text-white text-[11px] font-semibold tabular-nums">2</span><h3 class="m-0 text-[13.6px] [font-weight:650]">② Edit, then continue（修改后执行）</h3><span class="font-mono text-[11px] text-[#8b949e]">进行态可编辑 → 决策后锁定并保留改动标记</span><span class="ml-auto flex items-center gap-[6px]"><span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">核心</span><span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#edf7f0] text-[#1a7f45] border border-[#bfe3cd]">已实现</span></span></div><div class="px-[13px] pt-[9px] pb-[11px]"><div class="grid grid-cols-2 gap-[14px] items-stretch"><div class="flex flex-col min-w-0 border rounded-[10px] overflow-hidden border-[#e3e6ea]"><div class="flex items-center gap-[6px] px-[10px] py-[6px] border-b border-[#eef0f3] bg-[#f6f7f9] text-[11.4px]"><span class="flex-[0_0_6px] w-[6px] h-[6px] rounded-[50%] bg-[#8b949e]"></span><span class="[font-weight:650]">② -a 进行态 · 参数可编辑</span></div><div class="flex-1 min-h-0 bg-[#fbfbfc] p-[11px]"><div class="panel relative w-[440px] max-w-full bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden"><div class="flex items-center gap-[8px] px-[14px] py-[11px] border-b border-[#eef0f3] bg-white"><span class="flex-[0_0_7px] w-[7px] h-[7px] rounded-[50%] bg-[#1a7f45]"></span><span class="font-semibold text-[13px]">AI 助手</span><span class="ml-auto text-[11.5px] text-[#8b949e]">deepseek-chat</span></div><div class="px-[14px] pt-[14px] pb-[10px]"><div class="rounded-[10px] bg-white border border-[#e3e6ea]" data-int="edit" data-int-live><div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]"><span class="flex-none text-[9.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">风险 MEDIUM</span><span class="flex-none font-mono text-[10.5px] text-[#57606a]">checkpoint: export-before-start</span><span class="ml-auto flex-none text-[10.5px] text-[#8b949e]" data-audit-note>决策将写入审计日志</span></div><div class="px-[11px] pt-[10px] pb-[2px] text-[13.2px] [font-weight:650] text-[#1f2328]">AI 提议：导出 CURRENCY 全部 4 个字段 · 全量行</div><div class="px-[11px] pt-[6px] text-[11.9px] text-[#57606a] leading-[1.6]">你可以直接改这两处再放行 —— 改过的字段会标「已修改」，模型按改后的版本执行。</div><div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[9px] flex flex-col gap-[10px]"><div><span class="block text-[12.2px] text-[#57606a] mb-[5px]">导出范围<span class="hidden ml-[6px] inline-block text-[10.5px] leading-[1.6] px-[5px] rounded-[5px] text-[#b45309] bg-[#fffbeb] border border-[#fde68a]" data-amend-chip>已修改</span></span><select class="w-full rounded-[8px] border border-[#e3e6ea] bg-white px-[9px] py-[6px] font-sans text-[13px] text-[#1f2328] [outline:none] focus:border-[#2563eb]" data-amend-field data-amend-select><option value="all">全量（GLOBAL · 约 12 万行）</option><option value="east">REGION=华东（约 2 184 行）</option><option value="north">REGION=华北（约 1 930 行）</option></select></div><div><span class="block text-[12.2px] text-[#57606a] mb-[5px]">导出字段<span class="hidden ml-[6px] inline-block text-[10.5px] leading-[1.6] px-[5px] rounded-[5px] text-[#b45309] bg-[#fffbeb] border border-[#fde68a]" data-amend-chip>已修改</span></span><span class="flex flex-wrap gap-[6px]" data-amend-field><label class="inline-flex items-center gap-[5px] rounded-full border px-[11px] py-[4px] text-[12.2px] cursor-pointer border-[#cddcff] bg-[#eff4ff] text-[#2563eb]"><input type="checkbox" class="m-0" checked data-chip="code">配置编码 <span class="font-mono text-[11px] opacity-80">code</span></label><label class="inline-flex items-center gap-[5px] rounded-full border px-[11px] py-[4px] text-[12.2px] cursor-pointer border-[#cddcff] bg-[#eff4ff] text-[#2563eb]"><input type="checkbox" class="m-0" checked data-chip="name">配置名称 <span class="font-mono text-[11px] opacity-80">name</span></label><label class="inline-flex items-center gap-[5px] rounded-full border px-[11px] py-[4px] text-[12.2px] cursor-pointer border-[#e3e6ea] bg-white text-[#57606a]"><input type="checkbox" class="m-0" data-chip="precision">精度位数 <span class="font-mono text-[11px] opacity-80">precision</span></label><label class="inline-flex items-center gap-[5px] rounded-full border px-[11px] py-[4px] text-[12.2px] cursor-pointer border-[#cddcff] bg-[#eff4ff] text-[#2563eb]"><input type="checkbox" class="m-0" checked data-chip="rate">汇率值 <span class="font-mono text-[11px] opacity-80">rate</span></label></span></div></div><div class="px-[11px] pb-[10px] pt-[2px]"><div class="flex flex-wrap items-center gap-x-[9px] gap-y-[8px] px-[11px] pt-[11px] pb-[1px]" data-decision-row><span class="text-[11.5px] text-[#8b949e] mr-auto">改动会随决策一起写入审计日志（原文 + 改后值）</span><button type="button" data-act="hold" class="flex-none whitespace-nowrap border-0 bg-transparent p-0 text-[11.5px] text-[#57606a] underline decoration-[#e3e6ea] underline-offset-[3px] transition-colors duration-[150ms] hover:text-[#2563eb] ">暂不处理</button><button type="button" data-act="edit-cancel" class="flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-[#e3e6ea] bg-white text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328] disabled:opacity-50 disabled:cursor-default ml-[6px]">放弃修改</button><button type="button" data-act="approve-amended" class="flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-transparent bg-[#2563eb] text-white font-semibold transition-all duration-[150ms] hover:brightness-[1.08] disabled:bg-[#8b949e] disabled:font-normal disabled:cursor-default " disabled>批准修改后的方案</button></div></div></div></div></div></div><div class="px-[10px] py-[6px] border-t border-[#eef0f3] bg-[#f6f7f9] text-[11px] text-[#57606a] leading-[1.55]">改「范围」下拉或取消任一字段勾选 → 该处出现「已修改」标记；未改动时「批准修改后的方案」保持禁用。</div></div><div class="flex flex-col min-w-0 border rounded-[10px] overflow-hidden border-[#cddcff]"><div class="flex items-center gap-[6px] px-[10px] py-[6px] border-b border-[#eef0f3] bg-[#eff4ff] text-[11.4px]"><span class="flex-[0_0_6px] w-[6px] h-[6px] rounded-[50%] bg-[#2563eb]"></span><span class="[font-weight:650]">② -b 决策后 · 已批准（有修改）</span></div><div class="flex-1 min-h-0 bg-[#fbfbfc] p-[11px]"><div class="panel relative w-[440px] max-w-full bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden"><div class="flex items-center gap-[8px] px-[14px] py-[11px] border-b border-[#eef0f3] bg-white"><span class="flex-[0_0_7px] w-[7px] h-[7px] rounded-[50%] bg-[#1a7f45]"></span><span class="font-semibold text-[13px]">AI 助手</span><span class="ml-auto text-[11.5px] text-[#8b949e]">deepseek-chat</span></div><div class="px-[14px] pt-[14px] pb-[10px]"><div class="rocard border border-[#e3e6ea] bg-white rounded-[10px] px-[11px] py-[8px] text-[12.6px] text-[#57606a] mb-3.5 is-open [&.is-open_.ro-bd]:block [&.is-open_.ro-chev]:rotate-90"><button class="ro-hd flex items-center gap-[6px] w-full border-0 bg-transparent p-0 text-left" type="button" aria-expanded="true"><span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0]">✓ 已批准（有修改）</span><span class="ro-sum flex-1 min-w-0 text-[12.2px] whitespace-nowrap overflow-hidden text-ellipsis">导出 CURRENCY · <b class="text-[#1f2328] font-semibold">REGION=华东</b> · 3 个字段</span><span class="flex-none text-[#8b949e] text-[11.5px] tabular-nums">今天 15:08</span><span class="ro-chev flex-none text-[#8b949e] text-[12px] transition-transform duration-[180ms]">›</span></button><div class="ro-bd hidden mt-[8px]"><div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px]" data-gate-params><div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">启动导出作业（任务 #323）</span></div><div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">范围</span><span class="flex-1 min-w-0 break-words">REGION=华东 · 预估 <span class="tabular-nums">2 184</span> 行<span class="ml-[6px] inline-block text-[10.5px] leading-[1.6] px-[5px] rounded-[5px] text-[#b45309] bg-[#fffbeb] border border-[#fde68a]" data-amend-chip>已修改</span></span></div><div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">字段</span><span class="flex-1 min-w-0 break-words"><span class="font-mono text-[11.8px]">code · name · rate</span>（去掉 precision）<span class="ml-[6px] inline-block text-[10.5px] leading-[1.6] px-[5px] rounded-[5px] text-[#b45309] bg-[#fffbeb] border border-[#fde68a]" data-amend-chip>已修改</span></span></div></div><div class="mt-[7px] text-[11.8px] leading-[1.6] text-[#57606a]">审计行：<b class="[font-weight:650]">执行的是编辑后版本</b> —— 决策 = 批准（有修改）· 原文「全量 · 4 字段」→ 改后「REGION=华东 · 3 字段」· 操作人 demo-user · 今天 15:08。</div><p class="m-0 px-[11px] py-[7px] border-t border-[#eef0f3] text-[11.5px] text-[#57606a] bg-[#f6f7f9]">已批准（有修改）· 按改后值锁定；改动处保留「已修改」标记，可回溯批准的是哪一版</p></div></div></div></div></div><div class="px-[10px] py-[6px] border-t border-[#eef0f3] bg-[#eff4ff] text-[11px] text-[#57606a] leading-[1.55]">锁定 + 改动标记保留 + 审计行「执行的是编辑后版本」（原文 → 改后值都在）。</div></div></div><div class="mt-[10px] border-t border-[#eef0f3] pt-[8px] text-[11.5px] text-[#57606a] leading-[1.65]"><b class="[font-weight:650]">落点：</b>② Edit, then continue = 确认门的「可编辑放行」子型：修改走同一个 <code class="font-mono text-[11.2px] bg-[#f6f7f9] border border-[#eef0f3] rounded-[4px] px-[4px] py-[1px]">args</code> 通道，只把只读表换成可编辑控件；决策后按改后值渲染只读态。<b class="[font-weight:650]">量值：</b>可编辑点 2 处（范围下拉 + 4 字段勾选）· 决策后标记 2 处 · 审计行 1 行<b class="[font-weight:650]">判据：</b>① 未做任何改动时「批准修改后的方案」<code class="font-mono text-[11.2px] bg-[#f6f7f9] border border-[#eef0f3] rounded-[4px] px-[4px] py-[1px]">disabled</code> = true；② 改范围下拉或取消任一字段勾选后该处「已修改」标记可见、主钮解锁（实测）；③ 决策后只读态 input/select 数 = 0、「已修改」标记保留 2 处；④ 审计行含「执行的是编辑后版本」。</div></div></section>
-
-<section id="s3" class="mt-[16px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden"><div class="flex items-center gap-[9px] px-[13px] py-[9px] border-b border-[#eef0f3] bg-[#f5f8ff]"><span class="flex-[0_0_24px] w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#2563eb] text-white text-[11px] font-semibold tabular-nums">3</span><h3 class="m-0 text-[13.6px] [font-weight:650]">③ Choose among options（方案选择）</h3><span class="font-mono text-[11px] text-[#8b949e]">三选项卡单选 → 决策后锁定高亮</span><span class="ml-auto flex items-center gap-[6px]"><span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">核心</span><span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">新触点</span></span></div><div class="px-[13px] pt-[9px] pb-[11px]"><div class="grid grid-cols-2 gap-[14px] items-stretch"><div class="flex flex-col min-w-0 border rounded-[10px] overflow-hidden border-[#e3e6ea]"><div class="flex items-center gap-[6px] px-[10px] py-[6px] border-b border-[#eef0f3] bg-[#f6f7f9] text-[11.4px]"><span class="flex-[0_0_6px] w-[6px] h-[6px] rounded-[50%] bg-[#8b949e]"></span><span class="[font-weight:650]">③ -a 进行态 · 三选项卡</span></div><div class="flex-1 min-h-0 bg-[#fbfbfc] p-[11px]"><div class="panel relative w-[440px] max-w-full bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden"><div class="flex items-center gap-[8px] px-[14px] py-[11px] border-b border-[#eef0f3] bg-white"><span class="flex-[0_0_7px] w-[7px] h-[7px] rounded-[50%] bg-[#1a7f45]"></span><span class="font-semibold text-[13px]">AI 助手</span><span class="ml-auto text-[11.5px] text-[#8b949e]">deepseek-chat</span></div><div class="px-[14px] pt-[14px] pb-[10px]"><div class="rounded-[10px] bg-white border border-[#e3e6ea]" data-int="choose" data-int-live><div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]"><span class="flex-none text-[9.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">风险 MEDIUM</span><span class="flex-none font-mono text-[10.5px] text-[#57606a]">checkpoint: publish-before-conflicts</span><span class="ml-auto flex-none text-[10.5px] text-[#8b949e]" data-audit-note>决策将写入审计日志</span></div><div class="px-[11px] pt-[10px] pb-[2px] text-[13.2px] [font-weight:650] text-[#1f2328]">发布预检发现 3 处冲突，选择处理策略</div><div class="px-[11px] pt-[6px] text-[11.9px] text-[#57606a] leading-[1.6]">冲突明细：<code class="font-mono text-[11.2px] bg-[#f6f7f9] border border-[#eef0f3] rounded-[4px] px-[4px] py-[1px]">CURRENCY#GLOBAL</code> 精度不一致 · <code class="font-mono text-[11.2px] bg-[#f6f7f9] border border-[#eef0f3] rounded-[4px] px-[4px] py-[1px]">TAX_RULE#PRJ-07</code> 税率区间重叠 · <code class="font-mono text-[11.2px] bg-[#f6f7f9] border border-[#eef0f3] rounded-[4px] px-[4px] py-[1px]">REGION_MAP#EAST</code> 层级缺失。</div><div class="mx-[11px] mt-[9px] flex flex-col gap-[7px]" data-opt-list><label class="flex items-start gap-[9px] rounded-[9px] border border-[#e3e6ea] bg-white px-[10px] py-[8px] cursor-pointer transition-colors duration-[150ms] hover:border-[#cddcff]"><input type="radio" name="t3" value="overwrite" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-opt><span class="flex-1 min-w-0"><b class="block text-[12.8px] [font-weight:650] text-[#1f2328]">覆盖写入</b><span class="block text-[11.5px] text-[#57606a] leading-[1.5]">用导入件覆盖冲突行的现有值 · 冲突行数据会被改写（不可回滚）</span></span></label><label class="flex items-start gap-[9px] rounded-[9px] border border-[#e3e6ea] bg-white px-[10px] py-[8px] cursor-pointer transition-colors duration-[150ms] hover:border-[#cddcff]"><input type="radio" name="t3" value="skip" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-opt><span class="flex-1 min-w-0"><b class="block text-[12.8px] [font-weight:650] text-[#1f2328]">跳过冲突行</b><span class="block text-[11.5px] text-[#57606a] leading-[1.5]">保留现有值 · 冲突行不写入 · 其余行正常发布（推荐）</span></span></label><label class="flex items-start gap-[9px] rounded-[9px] border border-[#e3e6ea] bg-white px-[10px] py-[8px] cursor-pointer transition-colors duration-[150ms] hover:border-[#cddcff]"><input type="radio" name="t3" value="abort" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-opt><span class="flex-1 min-w-0"><b class="block text-[12.8px] [font-weight:650] text-[#1f2328]">中止发布</b><span class="block text-[11.5px] text-[#57606a] leading-[1.5]">本次发布整体作废 · 任务回退到「预检查完成」步骤</span></span></label></div><div class="px-[11px] pb-[10px] pt-[2px]"><div class="flex flex-wrap items-center gap-x-[9px] gap-y-[8px] px-[11px] pt-[11px] pb-[1px]" data-decision-row><span class="text-[11.5px] text-[#8b949e] mr-auto">策略选择会写入审计日志（含冲突明细快照）</span><button type="button" data-act="hold" class="flex-none whitespace-nowrap border-0 bg-transparent p-0 text-[11.5px] text-[#57606a] underline decoration-[#e3e6ea] underline-offset-[3px] transition-colors duration-[150ms] hover:text-[#2563eb] ">暂不处理</button><button type="button" data-act="opt-confirm" class="flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-transparent bg-[#2563eb] text-white font-semibold transition-all duration-[150ms] hover:brightness-[1.08] disabled:bg-[#8b949e] disabled:font-normal disabled:cursor-default " disabled>确认所选策略</button></div></div></div></div></div></div><div class="px-[10px] py-[6px] border-t border-[#eef0f3] bg-[#f6f7f9] text-[11px] text-[#57606a] leading-[1.55]">每项带后果说明一行；未选中时「确认所选策略」禁用，选中即解锁。</div></div><div class="flex flex-col min-w-0 border rounded-[10px] overflow-hidden border-[#cddcff]"><div class="flex items-center gap-[6px] px-[10px] py-[6px] border-b border-[#eef0f3] bg-[#eff4ff] text-[11.4px]"><span class="flex-[0_0_6px] w-[6px] h-[6px] rounded-[50%] bg-[#2563eb]"></span><span class="[font-weight:650]">③ -b 决策后 · 已选择（跳过冲突行）</span></div><div class="flex-1 min-h-0 bg-[#fbfbfc] p-[11px]"><div class="panel relative w-[440px] max-w-full bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden"><div class="flex items-center gap-[8px] px-[14px] py-[11px] border-b border-[#eef0f3] bg-white"><span class="flex-[0_0_7px] w-[7px] h-[7px] rounded-[50%] bg-[#1a7f45]"></span><span class="font-semibold text-[13px]">AI 助手</span><span class="ml-auto text-[11.5px] text-[#8b949e]">deepseek-chat</span></div><div class="px-[14px] pt-[14px] pb-[10px]"><div class="rocard border border-[#e3e6ea] bg-white rounded-[10px] px-[11px] py-[8px] text-[12.6px] text-[#57606a] mb-3.5 is-open [&.is-open_.ro-bd]:block [&.is-open_.ro-chev]:rotate-90"><button class="ro-hd flex items-center gap-[6px] w-full border-0 bg-transparent p-0 text-left" type="button" aria-expanded="true"><span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0]">✓ 已选择：跳过冲突行</span><span class="ro-sum flex-1 min-w-0 text-[12.2px] whitespace-nowrap overflow-hidden text-ellipsis">发布冲突策略<b class="text-[#1f2328] font-semibold">「跳过冲突行」</b></span><span class="flex-none text-[#8b949e] text-[11.5px] tabular-nums">今天 15:12</span><span class="ro-chev flex-none text-[#8b949e] text-[12px] transition-transform duration-[180ms]">›</span></button><div class="ro-bd hidden mt-[8px]"><div class="bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px]" data-ro-options><div class="flex items-start gap-[9px] py-[7px] border-b border-[#eef0f3] last:border-b-0 cursor-default opacity-[.55]"><span class="mt-[2px] flex-[0_0_14px] w-[14px] h-[14px] rounded-full border-[1.4px] border-[#e3e6ea] bg-[#f6f7f9] text-[9px] flex items-center justify-center" aria-hidden="true"></span><span class="flex-1 min-w-0"><b class="block text-[12.6px] [font-weight:650] text-[#57606a]">覆盖写入</b><span class="block text-[11.4px] text-[#57606a] leading-[1.5]">用导入件覆盖冲突行的现有值 · 冲突行数据会被改写（不可回滚）</span></span></div><div class="flex items-start gap-[9px] py-[7px] border-b border-[#eef0f3] last:border-b-0 cursor-default "><span class="mt-[2px] flex-[0_0_14px] w-[14px] h-[14px] rounded-full border-[1.4px] border-[#2563eb] bg-[#2563eb] text-white text-[9px] flex items-center justify-center" aria-hidden="true">✓</span><span class="flex-1 min-w-0"><b class="block text-[12.6px] [font-weight:650] text-[#1f2328]">跳过冲突行</b><span class="block text-[11.4px] text-[#57606a] leading-[1.5]">保留现有值 · 冲突行不写入 · 其余行正常发布（推荐）</span></span></div><div class="flex items-start gap-[9px] py-[7px] border-b border-[#eef0f3] last:border-b-0 cursor-default opacity-[.55]"><span class="mt-[2px] flex-[0_0_14px] w-[14px] h-[14px] rounded-full border-[1.4px] border-[#e3e6ea] bg-[#f6f7f9] text-[9px] flex items-center justify-center" aria-hidden="true"></span><span class="flex-1 min-w-0"><b class="block text-[12.6px] [font-weight:650] text-[#57606a]">中止发布</b><span class="block text-[11.4px] text-[#57606a] leading-[1.5]">本次发布整体作废 · 任务回退到「预检查完成」步骤</span></span></div></div><div class="mt-[7px] text-[11.8px] leading-[1.6] text-[#57606a]">审计行：决策 = 选择策略「跳过冲突行」· 冲突 3 处 · 未写入冲突行 · 操作人 demo-user · 今天 15:12。</div><p class="m-0 px-[11px] py-[7px] border-t border-[#eef0f3] text-[11.5px] text-[#57606a] bg-[#f6f7f9]">已选择 · 选项列表锁定：选中项高亮打勾、其余灰显不可点（列表内没有任何 input）</p></div></div></div></div></div><div class="px-[10px] py-[6px] border-t border-[#eef0f3] bg-[#eff4ff] text-[11px] text-[#57606a] leading-[1.55]">选项锁定：选中项高亮打勾、其余灰显；卡内无任何可点控件。</div></div></div><div class="mt-[10px] border-t border-[#eef0f3] pt-[8px] text-[11.5px] text-[#57606a] leading-[1.65]"><b class="[font-weight:650]">落点：</b>③ Choose among options = 候选策略型中断（<code class="font-mono text-[11.2px] bg-[#f6f7f9] border border-[#eef0f3] rounded-[4px] px-[4px] py-[1px]">risk=MEDIUM</code>）：中部从「拟执行动作」变为「候选列表」，底部按钮行收敛为一个确认钮。<b class="[font-weight:650]">量值：</b>候选 3 个 · 冲突明细 3 处 · 决策后可点控件 0 个<b class="[font-weight:650]">判据：</b>① 进行态选项 3 个且为单选（radio）；② 未选中时确认钮 <code class="font-mono text-[11.2px] bg-[#f6f7f9] border border-[#eef0f3] rounded-[4px] px-[4px] py-[1px]">disabled</code> = true，选中任一项后 = false（实测）；③ 决策后只读列表内 <code class="font-mono text-[11.2px] bg-[#f6f7f9] border border-[#eef0f3] rounded-[4px] px-[4px] py-[1px]">input</code> 数 = 0、选中项徽标含 ✓、其余项 <code class="font-mono text-[11.2px] bg-[#f6f7f9] border border-[#eef0f3] rounded-[4px] px-[4px] py-[1px]">opacity ≈ .55</code>；④ 徽标文案 = 「✓ 已选择：跳过冲突行」。</div></div></section>
-
-<section id="s4" class="mt-[16px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden"><div class="flex items-center gap-[9px] px-[13px] py-[9px] border-b border-[#eef0f3] bg-[#f5f8ff]"><span class="flex-[0_0_24px] w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#2563eb] text-white text-[11px] font-semibold tabular-nums">4</span><h3 class="m-0 text-[13.6px] [font-weight:650]">④ Provide missing input（补充缺失信息）</h3><span class="font-mono text-[11px] text-[#8b949e]">缺字段 GF 表单 → 决策后同表单锁定回填</span><span class="ml-auto flex items-center gap-[6px]"><span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">核心</span><span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#edf7f0] text-[#1a7f45] border border-[#bfe3cd]">已实现（GF）</span></span></div><div class="px-[13px] pt-[9px] pb-[11px]"><div class="grid grid-cols-2 gap-[14px] items-stretch"><div class="flex flex-col min-w-0 border rounded-[10px] overflow-hidden border-[#e3e6ea]"><div class="flex items-center gap-[6px] px-[10px] py-[6px] border-b border-[#eef0f3] bg-[#f6f7f9] text-[11.4px]"><span class="flex-[0_0_6px] w-[6px] h-[6px] rounded-[50%] bg-[#8b949e]"></span><span class="[font-weight:650]">④ -a 进行态 · 待补 4 字段</span></div><div class="flex-1 min-h-0 bg-[#fbfbfc] p-[11px]"><div class="panel relative w-[440px] max-w-full bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden"><div class="flex items-center gap-[8px] px-[14px] py-[11px] border-b border-[#eef0f3] bg-white"><span class="flex-[0_0_7px] w-[7px] h-[7px] rounded-[50%] bg-[#1a7f45]"></span><span class="font-semibold text-[13px]">AI 助手</span><span class="ml-auto text-[11.5px] text-[#8b949e]">deepseek-chat</span></div><div class="px-[14px] pt-[14px] pb-[10px]"><div class="rounded-[10px] bg-white border border-[#e3e6ea]" data-int="missing" data-int-live><div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]"><span class="flex-none text-[9.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">风险 MEDIUM</span><span class="flex-none font-mono text-[10.5px] text-[#57606a]">checkpoint: export-missing-filter</span><span class="ml-auto flex-none text-[10.5px] text-[#8b949e]" data-audit-note>决策将写入审计日志</span></div><div class="px-[11px] pt-[10px] pb-[2px] text-[13.2px] [font-weight:650] text-[#1f2328]">需要补充筛选条件才能继续</div><div class="px-[11px] pt-[6px] text-[11.9px] text-[#57606a] leading-[1.6]">缺 4 个字段：地区范围（多选）、精确匹配（下拉 + 文本）、行数上限、仅未发布。填完即可继续本轮导出。</div><div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[9px] flex flex-col gap-[10px]" data-missing-form><div><span class="block text-[12.2px] text-[#57606a] mb-[5px]">地区范围（多选）</span><span class="flex flex-wrap gap-[6px]" data-zone-group><label class="inline-flex items-center gap-[5px] rounded-full border border-[#e3e6ea] bg-white px-[11px] py-[4px] text-[12.2px] cursor-pointer"><input type="checkbox" class="m-0" data-zone>华东</label><label class="inline-flex items-center gap-[5px] rounded-full border border-[#e3e6ea] bg-white px-[11px] py-[4px] text-[12.2px] cursor-pointer"><input type="checkbox" class="m-0" data-zone>华北</label><label class="inline-flex items-center gap-[5px] rounded-full border border-[#e3e6ea] bg-white px-[11px] py-[4px] text-[12.2px] cursor-pointer"><input type="checkbox" class="m-0" data-zone>华南</label></span></div><div class="flex flex-wrap items-end gap-[8px]"><label class="flex-[0_0_120px]"><span class="block text-[12.2px] text-[#57606a] mb-[5px]">精确匹配</span><select class="w-full rounded-[8px] border border-[#e3e6ea] bg-white px-[9px] py-[6px] font-sans text-[13px] text-[#1f2328] [outline:none] focus:border-[#2563eb]"><option>前缀</option><option>后缀</option><option>包含</option></select></label><label class="flex-1 min-w-[120px]"><span class="block text-[12.2px] text-[#57606a] mb-[5px]">匹配文本</span><input type="text" class="w-full rounded-[8px] border border-[#e3e6ea] bg-white px-[9px] py-[6px] font-sans text-[13px] text-[#1f2328] [outline:none] placeholder:text-[#8b949e] focus:border-[#2563eb]" placeholder="如 CUR_"></label></div><div class="flex flex-wrap items-end gap-[8px]"><label class="flex-[0_0_120px]"><span class="block text-[12.2px] text-[#57606a] mb-[5px]">行数上限</span><input type="number" value="2000" class="w-full rounded-[8px] border border-[#e3e6ea] bg-white px-[9px] py-[6px] font-sans text-[13px] text-[#1f2328] [outline:none] focus:border-[#2563eb]" data-limit></label><label class="flex items-center gap-[7px] text-[12.2px] text-[#1f2328] cursor-pointer pb-[6px]"><input type="checkbox" class="m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-only-unpublished>仅未发布</label></div></div><div class="hidden mx-[11px] mt-[9px] text-[11.8px] text-[#57606a]" data-later-state>已稍后填写：本挂起保留在工作区（不超时作废），可随时回来继续；期间不执行任何导出。</div><div class="px-[11px] pb-[10px] pt-[2px]"><div class="flex flex-wrap items-center gap-x-[9px] gap-y-[8px] px-[11px] pt-[11px] pb-[1px]" data-decision-row><span class="text-[11.5px] text-[#8b949e] mr-auto">提交后会以同一 toolCallId 继续本轮（不新开一轮）</span><button type="button" data-act="later" class="flex-none whitespace-nowrap border-0 bg-transparent p-0 text-[11.5px] text-[#57606a] underline decoration-[#e3e6ea] underline-offset-[3px] transition-colors duration-[150ms] hover:text-[#2563eb] ">稍后填写</button><button type="button" data-act="missing-cancel" class="flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-[#e3e6ea] bg-white text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328] disabled:opacity-50 disabled:cursor-default ml-[6px]">取消本次导出</button><button type="button" data-act="missing-submit" class="flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-transparent bg-[#2563eb] text-white font-semibold transition-all duration-[150ms] hover:brightness-[1.08] disabled:bg-[#8b949e] disabled:font-normal disabled:cursor-default " disabled>提交</button></div></div></div></div></div></div><div class="px-[10px] py-[6px] border-t border-[#eef0f3] bg-[#f6f7f9] text-[11px] text-[#57606a] leading-[1.55]">地区多选 / 精确匹配（下拉+文本）/ 行数上限 / 仅未发布；未选地区时「提交」禁用；「稍后填写」给挂起保留态。</div></div><div class="flex flex-col min-w-0 border rounded-[10px] overflow-hidden border-[#cddcff]"><div class="flex items-center gap-[6px] px-[10px] py-[6px] border-b border-[#eef0f3] bg-[#eff4ff] text-[11.4px]"><span class="flex-[0_0_6px] w-[6px] h-[6px] rounded-[50%] bg-[#2563eb]"></span><span class="[font-weight:650]">④ -b 决策后 · 已提交（同表单锁定）</span></div><div class="flex-1 min-h-0 bg-[#fbfbfc] p-[11px]"><div class="panel relative w-[440px] max-w-full bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden"><div class="flex items-center gap-[8px] px-[14px] py-[11px] border-b border-[#eef0f3] bg-white"><span class="flex-[0_0_7px] w-[7px] h-[7px] rounded-[50%] bg-[#1a7f45]"></span><span class="font-semibold text-[13px]">AI 助手</span><span class="ml-auto text-[11.5px] text-[#8b949e]">deepseek-chat</span></div><div class="px-[14px] pt-[14px] pb-[10px]"><div class="rocard border border-[#e3e6ea] bg-white rounded-[10px] px-[11px] py-[8px] text-[12.6px] text-[#57606a] mb-3.5 is-open [&.is-open_.ro-bd]:block [&.is-open_.ro-chev]:rotate-90"><button class="ro-hd flex items-center gap-[6px] w-full border-0 bg-transparent p-0 text-left" type="button" aria-expanded="true"><span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0]">✓ 已提交</span><span class="ro-sum flex-1 min-w-0 text-[12.2px] whitespace-nowrap overflow-hidden text-ellipsis">筛选条件<b class="text-[#1f2328] font-semibold">「华东 · 前缀 CUR_ · ≤2000 行」</b></span><span class="flex-none text-[#8b949e] text-[11.5px] tabular-nums">今天 15:18</span><span class="ro-chev flex-none text-[#8b949e] text-[12px] transition-transform duration-[180ms]">›</span></button><div class="ro-bd hidden mt-[8px]"><div class="border border-[#e3e6ea] rounded-[10px] bg-white overflow-hidden" data-ro-form><div class="p-[11px] flex flex-col gap-[11px]"><label class="block mb-[11px] last:mb-0"><span class="block text-[12.2px] text-[#57606a] mb-[4px] break-words">地区范围（多选）</span><span class="flex flex-wrap gap-[6px]" data-ro-control="multi_select"><label class="inline-flex items-center gap-[5px] rounded-full border px-[11px] py-[4px] text-[12.2px] cursor-default border-[#cddcff] bg-[#eff4ff] text-[#2563eb]"><input type="checkbox" class="m-0 pointer-events-none" checked disabled aria-disabled="true">华东</label><label class="inline-flex items-center gap-[5px] rounded-full border px-[11px] py-[4px] text-[12.2px] cursor-default border-[#e3e6ea] bg-white text-[#57606a]"><input type="checkbox" class="m-0 pointer-events-none" disabled aria-disabled="true">华北</label><label class="inline-flex items-center gap-[5px] rounded-full border px-[11px] py-[4px] text-[12.2px] cursor-default border-[#e3e6ea] bg-white text-[#57606a]"><input type="checkbox" class="m-0 pointer-events-none" disabled aria-disabled="true">华南</label></span></label><label class="block mb-[11px] last:mb-0"><span class="block text-[12.2px] text-[#57606a] mb-[4px] break-words">精确匹配</span><select class="w-full border border-[#e3e6ea] rounded-[8px] px-[9px] py-[6px] font-sans text-[13px] leading-[normal] text-[#1f2328] bg-[#f6f7f9] cursor-default [outline:none] disabled:text-[#1f2328] disabled:opacity-100" disabled aria-disabled="true" data-ro-control="enum"><option value="prefix" selected>前缀</option><option value="suffix">后缀</option><option value="contains">包含</option></select></label><label class="block mb-[11px] last:mb-0"><span class="block text-[12.2px] text-[#57606a] mb-[4px] break-words">匹配文本</span><input class="w-full border border-[#e3e6ea] rounded-[8px] px-[9px] py-[6px] font-sans text-[13px] leading-[normal] text-[#1f2328] bg-[#f6f7f9] cursor-default [outline:none] disabled:text-[#1f2328] disabled:opacity-100" type="text" value="CUR_" disabled aria-disabled="true" data-ro-control="text"></label><label class="block mb-[11px] last:mb-0"><span class="block text-[12.2px] text-[#57606a] mb-[4px] break-words">行数上限</span><input class="w-full border border-[#e3e6ea] rounded-[8px] px-[9px] py-[6px] font-sans text-[13px] leading-[normal] text-[#1f2328] bg-[#f6f7f9] cursor-default [outline:none] disabled:text-[#1f2328] disabled:opacity-100" type="number" value="2000" disabled aria-disabled="true" data-ro-control="number"></label><label class="block mb-[11px] last:mb-0"><span class="block text-[12.2px] text-[#57606a] mb-[4px] break-words">仅未发布</span><span class="relative inline-flex w-[34px] h-[18px] align-middle" data-ro-control="boolean"><input type="checkbox" class="absolute inset-0 m-0 w-full h-full appearance-none rounded-full cursor-default [outline:none]" checked disabled aria-disabled="true"><span class="absolute inset-0 rounded-full bg-[#2563eb]" aria-hidden="true"></span><span class="absolute top-[2px] left-[2px] w-[14px] h-[14px] rounded-full bg-white translate-x-[16px]" aria-hidden="true"></span></span></label></div><p class="m-0 px-[11px] py-[7px] border-t border-[#eef0f3] text-[11.5px] text-[#57606a] bg-[#f6f7f9]">已提交 · 同表单切只读：控件原样、值回填、对比度不降（浅灰底 + 正文黑）</p></div></div></div></div></div></div><div class="px-[10px] py-[6px] border-t border-[#eef0f3] bg-[#eff4ff] text-[11px] text-[#57606a] leading-[1.55]">同一张表单切只读：五型控件原样（7 个 input/select）+ 值回填 + 全部 disabled（浅灰底 + 正文黑）。</div></div></div><div class="mt-[10px] border-t border-[#eef0f3] pt-[8px] text-[11.5px] text-[#57606a] leading-[1.65]"><b class="[font-weight:650]">落点：</b>④ Provide missing input = 生成式表单（<code class="font-mono text-[11.2px] bg-[#f6f7f9] border border-[#eef0f3] rounded-[4px] px-[4px] py-[1px]">kind2=FRONTEND</code> + <code class="font-mono text-[11.2px] bg-[#f6f7f9] border border-[#eef0f3] rounded-[4px] px-[4px] py-[1px]">generative_form</code>）：中断中部 = 缺字段表单，底部按钮行 = 提交 / 稍后填写 / 取消。<b class="[font-weight:650]">量值：</b>缺字段 4 个 · 决策后锁定控件 7 个（多选胶囊 3 + 下拉 1 + 文本 1 + 数字 1 + 开关 1）· 提交解锁判据 = 地区 ≥1<b class="[font-weight:650]">判据：</b>① 进行态缺字段 4 个（多选 / 下拉+文本 / 数字 / 开关）；② 未选地区时提交钮 <code class="font-mono text-[11.2px] bg-[#f6f7f9] border border-[#eef0f3] rounded-[4px] px-[4px] py-[1px]">disabled</code>，选任一地区后解锁（实测）；③ 点「稍后填写」出「已稍后填写…」保留态（挂起不作废）；④ 决策后表单内 <code class="font-mono text-[11.2px] bg-[#f6f7f9] border border-[#eef0f3] rounded-[4px] px-[4px] py-[1px]">input, select</code> 全部 <code class="font-mono text-[11.2px] bg-[#f6f7f9] border border-[#eef0f3] rounded-[4px] px-[4px] py-[1px]">disabled</code>、只读态与填写态控件数一致。</div></div></section>
-
-<section id="s5" class="mt-[16px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden"><div class="flex items-center gap-[9px] px-[13px] py-[9px] border-b border-[#eef0f3] bg-[#f5f8ff]"><span class="flex-[0_0_24px] w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#2563eb] text-white text-[11px] font-semibold tabular-nums">5</span><h3 class="m-0 text-[13.6px] [font-weight:650]">⑤ Retry with guidance（带反馈重试 · 两幕叙事）</h3><span class="font-mono text-[11px] text-[#8b949e]">幕 1 被否 → 幕 2 带反馈收敛重提案</span><span class="ml-auto flex items-center gap-[6px]"><span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">核心</span><span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">新触点</span><span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">两幕</span></span></div><div class="px-[13px] pt-[9px] pb-[11px]"><p class="mt-0 mb-[8px] text-[11.9px] text-[#57606a] leading-[1.65] "><b class="[font-weight:650]">叙事：</b>幕 1 AI 提案「导出全部 12 个配置集」→ 用户点「不执行」并填理由「范围太大，只要配置定义相关的」→ <b class="[font-weight:650]">反馈随决策回传，agent 据此收敛重试</b> → 幕 2 AI 重新提案「导出 3 个配置集（CONFIG_DEF / DICT / FIELD）」→ 用户批准。两幕卡都画出来，并可用页内交互走通（点幕 1「不执行」→ 填理由 → 确认 → 幕 2 激活）。</p><div class="grid grid-cols-2 gap-[14px] items-stretch"><div class="flex flex-col min-w-0 border rounded-[10px] overflow-hidden border-[#e3e6ea]"><div class="flex items-center gap-[6px] px-[10px] py-[6px] border-b border-[#eef0f3] bg-[#f6f7f9] text-[11.4px]"><span class="flex-[0_0_6px] w-[6px] h-[6px] rounded-[50%] bg-[#8b949e]"></span><span class="[font-weight:650]">⑤ -a 幕 1 · 提案（12 个配置集）</span></div><div class="flex-1 min-h-0 bg-[#fbfbfc] p-[11px]"><div class="panel relative w-[440px] max-w-full bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden"><div class="flex items-center gap-[8px] px-[14px] py-[11px] border-b border-[#eef0f3] bg-white"><span class="flex-[0_0_7px] w-[7px] h-[7px] rounded-[50%] bg-[#1a7f45]"></span><span class="font-semibold text-[13px]">AI 助手</span><span class="ml-auto text-[11.5px] text-[#8b949e]">deepseek-chat</span></div><div class="px-[14px] pt-[14px] pb-[10px]"><div class="rounded-[10px] bg-white border border-[#e3e6ea]" data-int="retry1" data-int-live><div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]"><span class="flex-none text-[9.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">风险 MEDIUM</span><span class="flex-none font-mono text-[10.5px] text-[#57606a]">checkpoint: export-before-start</span><span class="ml-auto flex-none text-[10.5px] text-[#8b949e]" data-audit-note>决策将写入审计日志</span></div><div class="px-[11px] pt-[10px] pb-[2px] text-[13.2px] [font-weight:650] text-[#1f2328]">幕 1 · AI 提案：导出全部 12 个配置集</div><div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px]" data-gate-params><div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">启动导出作业（任务 #323）</span></div><div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">影响面</span><span class="flex-1 min-w-0 break-words">全量导出 · 三层配置 · 预估 <span class="tabular-nums">12 万</span> 行</span></div><div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">范围</span><span class="flex-1 min-w-0 break-words">GLOBAL + REGION + PROJECT（12 个配置集）</span></div></div><div class="hidden mx-[11px] mt-[10px]" data-reject-box><textarea rows="2" class="w-full resize-none rounded-[8px] border border-[#e3e6ea] bg-white px-[9px] py-[6px] font-sans text-[13px] leading-[1.5] text-[#1f2328] [outline:none] placeholder:text-[#8b949e] focus:border-[#2563eb]" placeholder="不执行的理由（必填，会原样回填给模型）" data-reject-text>范围太大，只要配置定义相关的</textarea><div class="flex flex-wrap items-center gap-x-[9px] gap-y-[8px] mt-[8px]"><span class="text-[11.5px] text-[#8b949e] mr-auto">理由会随决策回传，agent 据此收敛重试</span><button type="button" data-act="reject-cancel" class="flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-[#e3e6ea] bg-white text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328] disabled:opacity-50 disabled:cursor-default ">取消</button><button type="button" data-act="retry-confirm" class="flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-[#e3e6ea] bg-white text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328] disabled:opacity-50 disabled:cursor-default ">确认不执行并回传理由</button></div></div><div class="px-[11px] pb-[10px] pt-[2px]"><div class="flex flex-wrap items-center gap-x-[9px] gap-y-[8px] px-[11px] pt-[11px] pb-[1px]" data-decision-row><span class="text-[11.5px] text-[#8b949e] mr-auto">幕 1 · 决策将写入审计日志</span><button type="button" data-act="hold" class="flex-none whitespace-nowrap border-0 bg-transparent p-0 text-[11.5px] text-[#57606a] underline decoration-[#e3e6ea] underline-offset-[3px] transition-colors duration-[150ms] hover:text-[#2563eb] ">暂不处理</button><button type="button" data-act="retry-reject" class="flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-[#e3e6ea] bg-white text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328] disabled:opacity-50 disabled:cursor-default ml-[6px]">不执行</button><button type="button" data-act="retry-approve-1" class="flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-transparent bg-[#2563eb] text-white font-semibold transition-all duration-[150ms] hover:brightness-[1.08] disabled:bg-[#8b949e] disabled:font-normal disabled:cursor-default ">批准</button></div></div></div></div></div></div><div class="px-[10px] py-[6px] border-t border-[#eef0f3] bg-[#f6f7f9] text-[11px] text-[#57606a] leading-[1.55]">用户点「不执行」→ 展开理由框（本例已填理由）→ 确认后幕 2 激活。</div></div><div class="flex flex-col min-w-0 border rounded-[10px] overflow-hidden border-[#cddcff]"><div class="flex items-center gap-[6px] px-[10px] py-[6px] border-b border-[#eef0f3] bg-[#eff4ff] text-[11.4px]"><span class="flex-[0_0_6px] w-[6px] h-[6px] rounded-[50%] bg-[#2563eb]"></span><span class="[font-weight:650]">⑤ -b 幕 2 · 带反馈重提案（3 个配置集）</span></div><div class="flex-1 min-h-0 bg-[#fbfbfc] p-[11px]"><div class="panel relative w-[440px] max-w-full bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden"><div class="flex items-center gap-[8px] px-[14px] py-[11px] border-b border-[#eef0f3] bg-white"><span class="flex-[0_0_7px] w-[7px] h-[7px] rounded-[50%] bg-[#1a7f45]"></span><span class="font-semibold text-[13px]">AI 助手</span><span class="ml-auto text-[11.5px] text-[#8b949e]">deepseek-chat</span></div><div class="px-[14px] pt-[14px] pb-[10px]"><div data-retry2-wrap data-state="waiting"><div class="rounded-[10px] bg-white border border-[#e3e6ea]" data-int="retry2" data-int-sub><div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]"><span class="flex-none text-[9.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">风险 MEDIUM</span><span class="flex-none font-mono text-[10.5px] text-[#57606a]">checkpoint: export-before-start-retry-1</span><span class="ml-auto flex-none text-[10.5px] text-[#8b949e]" data-audit-note>决策将写入审计日志</span></div><div class="px-[11px] pt-[10px] pb-[2px] text-[13.2px] [font-weight:650] text-[#1f2328]">幕 2 · AI 带反馈重新提案：导出 3 个配置集</div><div class="mx-[11px] mt-[8px] flex items-center gap-[7px] rounded-[9px] border border-[#e3e6ea] bg-[#f6f7f9] px-[10px] py-[6px] text-[11.5px] text-[#57606a]" data-waiting-hint><span class="flex-none text-[9.5px] leading-[1.7] px-[6px] rounded-[5px] border border-[#e3e6ea] bg-white text-[#57606a]">待触发</span><span class="flex-1 min-w-0">先在幕 1 点「不执行」并确认回传理由 —— 本幕随即激活，批准钮解锁。</span></div><div class="mx-[11px] mt-[8px] flex items-start gap-[8px] border border-[#cddcff] bg-[#eff4ff] rounded-[9px] px-[10px] py-[7px]" data-feedback-note><span class="mt-[1px] shrink-0 flex-[0_0_14px] w-[14px] h-[14px] flex items-center justify-center rounded-[50%] border-[1.3px] border-[#2563eb] text-[#2563eb] text-[9px] font-bold" aria-hidden="true">i</span><span class="flex-1 min-w-0 text-[11.8px] text-[#57606a] leading-[1.55]">已按你的反馈收敛：「范围太大，只要配置定义相关的」→ 只保留 CONFIG_DEF / DICT / FIELD 三个配置集（12 万行 → 1 860 行）。</span></div><div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px]" data-gate-params><div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">启动导出作业（任务 #323 · 第 2 次提案）</span></div><div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">影响面</span><span class="flex-1 min-w-0 break-words">导出 3 个配置集 · 预估 <span class="tabular-nums">1 860</span> 行</span></div><div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">范围</span><span class="flex-1 min-w-0 break-words"><span class="font-mono text-[11.8px]">CONFIG_DEF · DICT · FIELD</span></span></div></div><div class="px-[11px] pb-[10px] pt-[2px]"><div class="flex flex-wrap items-center gap-x-[9px] gap-y-[8px] px-[11px] pt-[11px] pb-[1px]" data-decision-row><span class="text-[11.5px] text-[#8b949e] mr-auto">幕 2 · checkpoint 已前移为 export-before-start-retry-1</span><button type="button" data-act="hold" class="flex-none whitespace-nowrap border-0 bg-transparent p-0 text-[11.5px] text-[#57606a] underline decoration-[#e3e6ea] underline-offset-[3px] transition-colors duration-[150ms] hover:text-[#2563eb] ">暂不处理</button><button type="button" data-act="retry-reject-2" class="flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-[#e3e6ea] bg-white text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328] disabled:opacity-50 disabled:cursor-default ml-[6px]">不执行</button><button type="button" data-act="retry-approve-2" class="flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-transparent bg-[#2563eb] text-white font-semibold transition-all duration-[150ms] hover:brightness-[1.08] disabled:bg-[#8b949e] disabled:font-normal disabled:cursor-default " disabled>批准</button></div></div></div></div></div></div></div><div class="px-[10px] py-[6px] border-t border-[#eef0f3] bg-[#eff4ff] text-[11px] text-[#57606a] leading-[1.55]">初始为「待触发」（卡面带「待触发」行、批准钮禁用）；幕 1 确认不执行后该行消失、本幕激活、批准钮解锁。</div></div></div><div class="grid grid-cols-2 gap-[14px] items-stretch mt-[14px]"><div class="flex flex-col min-w-0 border rounded-[10px] overflow-hidden border-[#cddcff]"><div class="flex items-center gap-[6px] px-[10px] py-[6px] border-b border-[#eef0f3] bg-[#eff4ff] text-[11.4px]"><span class="flex-[0_0_6px] w-[6px] h-[6px] rounded-[50%] bg-[#2563eb]"></span><span class="[font-weight:650]">⑤ -c 决策后 · 已批准（第 2 次提案）</span></div><div class="flex-1 min-h-0 bg-[#fbfbfc] p-[11px]"><div class="panel relative w-[440px] max-w-full bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden"><div class="flex items-center gap-[8px] px-[14px] py-[11px] border-b border-[#eef0f3] bg-white"><span class="flex-[0_0_7px] w-[7px] h-[7px] rounded-[50%] bg-[#1a7f45]"></span><span class="font-semibold text-[13px]">AI 助手</span><span class="ml-auto text-[11.5px] text-[#8b949e]">deepseek-chat</span></div><div class="px-[14px] pt-[14px] pb-[10px]"><div class="rocard border border-[#e3e6ea] bg-white rounded-[10px] px-[11px] py-[8px] text-[12.6px] text-[#57606a] mb-3.5 is-open [&.is-open_.ro-bd]:block [&.is-open_.ro-chev]:rotate-90"><button class="ro-hd flex items-center gap-[6px] w-full border-0 bg-transparent p-0 text-left" type="button" aria-expanded="true"><span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0]">✓ 已批准</span><span class="ro-sum flex-1 min-w-0 text-[12.2px] whitespace-nowrap overflow-hidden text-ellipsis">带反馈重提案<b class="text-[#1f2328] font-semibold">「3 个配置集 · 1 860 行」</b></span><span class="flex-none text-[#8b949e] text-[11.5px] tabular-nums">今天 15:26</span><span class="ro-chev flex-none text-[#8b949e] text-[12px] transition-transform duration-[180ms]">›</span></button><div class="ro-bd hidden mt-[8px]"><div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px]" data-gate-params><div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">启动导出作业（任务 #323 · 第 2 次提案）</span></div><div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">影响面</span><span class="flex-1 min-w-0 break-words">导出 3 个配置集 · 预估 <span class="tabular-nums">1 860</span> 行</span></div><div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">范围</span><span class="flex-1 min-w-0 break-words"><span class="font-mono text-[11.8px]">CONFIG_DEF · DICT · FIELD</span></span></div></div><div class="mt-[7px] text-[11.8px] leading-[1.6] text-[#57606a]">审计行：幕 1 = 不执行（理由「范围太大，只要配置定义相关的」）→ 幕 2 = 批准；feedback 随决策回传后 agent 收敛重试，checkpoint 由 export-before-start 前移到 export-before-start-retry-1。</div><p class="m-0 px-[11px] py-[7px] border-t border-[#eef0f3] text-[11.5px] text-[#57606a] bg-[#f6f7f9]">已批准 · 参数区锁定（记录「最终执行的是收敛后的第 2 次提案」）</p></div></div></div></div></div><div class="px-[10px] py-[6px] border-t border-[#eef0f3] bg-[#eff4ff] text-[11px] text-[#57606a] leading-[1.55]">两幕的审计行连成一条链路（幕 1 不执行 + 理由 → 幕 2 批准）。</div></div><div class="flex flex-col min-w-0 border rounded-[10px] overflow-hidden border-[#cddcff]"><div class="flex items-center gap-[6px] px-[10px] py-[6px] border-b border-[#eef0f3] bg-[#eff4ff] text-[11.4px]"><span class="flex-[0_0_6px] w-[6px] h-[6px] rounded-[50%] bg-[#2563eb]"></span><span class="[font-weight:650]">⑤ -d 反馈闭环口径</span></div><div class="flex-1 min-h-0 bg-[#fbfbfc] p-[11px]"><div class="bg-white border border-[#e3e6ea] rounded-[10px] p-[12px] text-[11.9px] text-[#57606a] leading-[1.7]"><b class="block text-[12.4px] [font-weight:650] text-[#1f2328] mb-[5px]">反馈随决策回传（本类与他类的差别）</b>① 「不执行」在其它四类只是终止；在本类它是<b class="[font-weight:650]">反馈通道</b> —— 理由不是备注，而是下一轮提案的输入；<br>② agent 收到理由后<b class="[font-weight:650]">收敛范围重试</b>（12 万行 → 1 860 行），而不是原样再问一次；<br>③ checkpoint 每轮前移（<span class="font-mono">export-before-start</span> → <span class="font-mono">export-before-start-retry-1</span>），审计可回溯「第几轮改了什么」；<br>④ 重试有上限（建议 2 轮）：仍被否则回落为「中止本轮 + 建议人工处置」，不无限循环。</div></div><div class="px-[10px] py-[6px] border-t border-[#eef0f3] bg-[#eff4ff] text-[11px] text-[#57606a] leading-[1.55]">本类特有：拒绝即反馈，重提案必须体现收敛。</div></div></div><div class="mt-[10px] border-t border-[#eef0f3] pt-[8px] text-[11.5px] text-[#57606a] leading-[1.65]"><b class="[font-weight:650]">落点：</b>⑤ Retry with guidance = 「被否 → 带反馈重提案」两幕链路：幕 1（本类的进行态，<code class="font-mono text-[11.2px] bg-[#f6f7f9] border border-[#eef0f3] rounded-[4px] px-[4px] py-[1px]">data-int="retry1" data-int-live</code>）与幕 2（决策后的后续态，<code class="font-mono text-[11.2px] bg-[#f6f7f9] border border-[#eef0f3] rounded-[4px] px-[4px] py-[1px]">data-int="retry2" data-int-sub</code>）各是一张完整中断卡，checkpoint 逐轮前移，反馈文本随决策回传。<b class="[font-weight:650]">量值：</b>幕数 2 · checkpoint 2 个（前移 1 次）· 反馈行 1 条 · 重试上限 2 轮（口径）<b class="[font-weight:650]">判据：</b>① 两幕卡都在页面上（各含风险 chip + checkpoint + 审计标注）；② 幕 2 初始 <code class="font-mono text-[11.2px] bg-[#f6f7f9] border border-[#eef0f3] rounded-[4px] px-[4px] py-[1px]">data-state="waiting"</code> 且批准钮 <code class="font-mono text-[11.2px] bg-[#f6f7f9] border border-[#eef0f3] rounded-[4px] px-[4px] py-[1px]">disabled</code>；③ 幕 1 点「不执行」→ 理由框可见，填写后点「确认不执行并回传理由」→ 幕 2 <code class="font-mono text-[11.2px] bg-[#f6f7f9] border border-[#eef0f3] rounded-[4px] px-[4px] py-[1px]">data-state="active"</code> 且批准钮解锁（实测）；④ 幕 2 的反馈行含用户原话与收敛量（12 万行 → 1 860 行）。</div></div></section>
-
-<div id="zone-vote-hitl5" class="mt-[16px] border border-[#cddcff] bg-[#f5f8ff] rounded-[12px] px-[13px] py-[12px]">
-  <div class="flex items-center gap-[9px] flex-wrap">
-    <span class="text-[12px] leading-[1.7] px-[8px] py-[1px] rounded-[6px] bg-[#2563eb] text-white">用户裁决勾位</span>
-    <span class="text-[11.6px] text-[#57606a]">五类各一 + 统一结构一条，共 6 个，各自独立可勾；本文件为现役主题单文件（新主题另起单文件，见 INDEX.md 规则）。</span>
+<section id="s0" class="mt-[16px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden">
+  <div class="flex items-center gap-[9px] px-[13px] py-[9px] border-b border-[#eef0f3] bg-[#f5f8ff]">
+    <span class="flex-[0_0_24px] w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#2563eb] text-white text-[11px] font-semibold tabular-nums">0</span>
+    <h3 class="m-0 text-[13.6px] [font-weight:650]">终裁型谱一览（H1 / H2 / H3 / GF / 步进）</h3>
+    <span class="font-mono text-[11px] text-[#8b949e]">依据 = 裁决-HITL型谱与问题2方案-2026-10-17</span>
+    <span class="ml-auto flex items-center gap-[6px]"><span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">口径</span></span>
   </div>
-  <div class="grid grid-cols-2 gap-[8px] mt-[10px]">
-    <label class="flex items-start gap-[8px] border border-[#cddcff] bg-white rounded-[9px] px-[10px] py-[8px] text-[12.2px] leading-[1.6] text-[#1f2328] cursor-pointer hover:border-[#2563eb]">
-      <input type="checkbox" class="mt-[3px] flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]">
-      <span><b class="[font-weight:650]">①</b> Approve / Reject（批准 / 否决）· 进行态三动作 + 决策后两态 + 超时归已决<span class="block text-[11.4px] text-[#57606a]">通过 / 打回</span></span>
-    </label>
-    <label class="flex items-start gap-[8px] border border-[#cddcff] bg-white rounded-[9px] px-[10px] py-[8px] text-[12.2px] leading-[1.6] text-[#1f2328] cursor-pointer hover:border-[#2563eb]">
-      <input type="checkbox" class="mt-[3px] flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]">
-      <span><b class="[font-weight:650]">②</b> Edit, then continue（修改后执行）· 可编辑放行 + 决策后保留改动标记<span class="block text-[11.4px] text-[#57606a]">通过 / 打回</span></span>
-    </label>
-    <label class="flex items-start gap-[8px] border border-[#cddcff] bg-white rounded-[9px] px-[10px] py-[8px] text-[12.2px] leading-[1.6] text-[#1f2328] cursor-pointer hover:border-[#2563eb]">
-      <input type="checkbox" class="mt-[3px] flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]">
-      <span><b class="[font-weight:650]">③</b> Choose among options（方案选择）· 三选项卡单选 + 决策后锁定高亮<span class="block text-[11.4px] text-[#57606a]">通过 / 打回</span></span>
-    </label>
-    <label class="flex items-start gap-[8px] border border-[#cddcff] bg-white rounded-[9px] px-[10px] py-[8px] text-[12.2px] leading-[1.6] text-[#1f2328] cursor-pointer hover:border-[#2563eb]">
-      <input type="checkbox" class="mt-[3px] flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]">
-      <span><b class="[font-weight:650]">④</b> Provide missing input（补充缺失信息）· 缺字段 GF 表单 + 决策后同表单锁定<span class="block text-[11.4px] text-[#57606a]">通过 / 打回</span></span>
-    </label>
-    <label class="flex items-start gap-[8px] border border-[#cddcff] bg-white rounded-[9px] px-[10px] py-[8px] text-[12.2px] leading-[1.6] text-[#1f2328] cursor-pointer hover:border-[#2563eb]">
-      <input type="checkbox" class="mt-[3px] flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]">
-      <span><b class="[font-weight:650]">⑤</b> Retry with guidance（带反馈重试）· 两幕叙事 + 反馈随决策回传 + checkpoint 前移<span class="block text-[11.4px] text-[#57606a]">通过 / 打回</span></span>
-    </label>
-    <label class="flex items-start gap-[8px] border border-[#cddcff] bg-white rounded-[9px] px-[10px] py-[8px] text-[12.2px] leading-[1.6] text-[#1f2328] cursor-pointer hover:border-[#2563eb]">
-      <input type="checkbox" class="mt-[3px] flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]">
-      <span><b class="[font-weight:650]">⑥</b> 中断卡统一结构 · 顶部风险+checkpoint（含「决策将写入审计日志」标注）/ 中部动作·候选·缺字段 / 底部可审计按钮行<span class="block text-[11.4px] text-[#57606a]">通过 / 打回</span></span>
-    </label>
+  <div class="px-[13px] pt-[9px] pb-[11px]">
+    <div class="rounded-[8px] border border-[#eef0f3] overflow-hidden">
+      <table class="w-full border-collapse text-[11.8px] leading-[1.55] table-fixed">
+        <thead><tr>
+          <th class="border-b border-[#e3e6ea] bg-[#f6f7f9] px-[8px] py-[6px] text-left font-semibold text-[#57606a] break-words">型</th>
+          <th class="border-b border-[#e3e6ea] bg-[#f6f7f9] px-[8px] py-[6px] text-left font-semibold text-[#57606a] break-words">终裁形态</th>
+          <th class="border-b border-[#e3e6ea] bg-[#f6f7f9] px-[8px] py-[6px] text-left font-semibold text-[#57606a] break-words">本 demo 落点</th>
+        </tr></thead>
+        <tbody>
+          <tr>
+            <td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words"><b class="[font-weight:650]">H1 批准 / 拒绝</b></td>
+            <td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words">仅两钮、无理由框、独立成步、超时兜底（超时即已决）、修正走会话由 AI 重新提案</td>
+            <td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words">§1 步骤 1/3；§3 已批准 / 已不执行 / 已超时 / 已取消四态</td>
+          </tr>
+          <tr>
+            <td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words"><b class="[font-weight:650]">H2 选择</b></td>
+            <td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words">单选 / 多选；选项 ≤ 5（不含「其它」）；「其它 + 输入框」为可配项；封闭策略集禁挂「其它」；审批选择重审计、参数选择轻审计</td>
+            <td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words">§1 步骤 2/3（参数单选 4 项 + 其它）；§2 两样张（封闭策略集 / 参数多选 5 + 其它）</td>
+          </tr>
+          <tr>
+            <td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words"><b class="[font-weight:650]">H3 缺失输入</b></td>
+            <td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words">仅输入框 + 必填校验 + 取消出口</td>
+            <td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words">§1 步骤 3/3（变更单号必填；未填时提交保持禁用）</td>
+          </tr>
+          <tr>
+            <td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words"><b class="[font-weight:650]">GF 表单系</b></td>
+            <td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words">多字段采集保留，不与 H2 / H3 合并；枚举初值必须落在合法枚举内</td>
+            <td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words">本件不展开（GF 只读态见 <code class="font-mono text-[11.2px] bg-[#f6f7f9] border border-[#eef0f3] rounded-[4px] px-[4px] py-[1px]">hitl-readonly.html</code> 主题件）</td>
+          </tr>
+          <tr>
+            <td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words"><b class="[font-weight:650]">步进</b></td>
+            <td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words">H1 独立成步、H2 / H3 可混排；四控件（上一步 / 下一步 / 取消 / 提交）；不设跳过；进度 N/M；双层摘要；只读卡永久保留；全部处理完才恢复运行</td>
+            <td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words">§1 左 = 消息流、右 = 步进面板；§3 只读卡永存样张</td>
+          </tr>
+          <tr>
+            <td class="px-[8px] py-[6px] align-top break-words"><b class="[font-weight:650]">不采纳（挂账）</b></td>
+            <td class="px-[8px] py-[6px] align-top break-words">「修改后批准（inline）」「暂不处理」不采纳、不施工；H1 拒因输入框随批删净</td>
+            <td class="px-[8px] py-[6px] align-top break-words">§4 删项登记（本件已无这三类交互）</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="mt-0 mb-[8px] text-[11.9px] text-[#57606a] leading-[1.65] mt-[9px] mb-0">统一中断卡结构保持不变：<b class="[font-weight:650]">顶部 = 步骤 / 风险 / checkpoint / 审计标注</b>，<b class="[font-weight:650]">中部 = 拟执行动作 · 候选 · 缺字段</b>，<b class="[font-weight:650]">底部 = 可审计决策按钮行</b>。本页所有卡片均为 Tailwind 工具类，图标为内联 SVG。</p>
   </div>
-</div>
+</section>
+
+<section id="s1" class="mt-[16px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden">
+  <div class="flex items-center gap-[9px] px-[13px] py-[9px] border-b border-[#eef0f3] bg-[#f5f8ff]">
+    <span class="flex-[0_0_24px] w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#2563eb] text-white text-[11px] font-semibold tabular-nums">1</span>
+    <h3 class="m-0 text-[13.6px] [font-weight:650]">三步中断流（可点通：H1 批准 / 拒绝 → H2 选择 ≤5 可配其它 → H3 输入）</h3>
+    <span class="font-mono text-[11px] text-[#8b949e]">左侧点决策 → 右侧步进 → 末步提交出复核汇总</span>
+    <span class="ml-auto flex items-center gap-[6px]"><span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">核心</span><span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#edf7f0] text-[#1a7f45] border border-[#bfe3cd]">可交互</span></span>
+  </div>
+  <div class="px-[13px] pt-[9px] pb-[11px]">
+
+    <div class="grid grid-cols-2 gap-[14px] items-start">
+
+      <div class="flex flex-col min-w-0 border rounded-[10px] overflow-hidden border-[#cddcff]">
+        <div class="flex items-center gap-[6px] px-[10px] py-[6px] border-b border-[#eef0f3] bg-[#eff4ff] text-[11.4px]">
+          <span class="flex-[0_0_6px] w-[6px] h-[6px] rounded-[50%] bg-[#2563eb]"></span>
+          <span class="[font-weight:650]">消息流 · 逐步决策与只读卡（永久保留）</span>
+          <span class="ml-auto font-mono text-[10.5px] text-[#57606a]" data-run-mini>run 挂起</span>
+        </div>
+        <div class="flex-1 min-h-0 bg-[#fbfbfc] p-[11px]">
+          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden">
+            <div class="flex items-center gap-[8px] px-[14px] py-[11px] border-b border-[#eef0f3] bg-white">
+              <span class="flex-[0_0_7px] w-[7px] h-[7px] rounded-[50%] bg-[#1a7f45]"></span>
+              <span class="font-semibold text-[13px]">AI 助手</span>
+              <span class="ml-auto text-[11.5px] text-[#8b949e]">deepseek-chat</span>
+            </div>
+            <div class="px-[14px] pt-[14px] pb-[10px]">
+
+              <p class="m-0 text-[12.8px] leading-[1.7] text-[#1f2328]">发布预检发现 3 处冲突。为避免误发布，我把确认拆成 3 步：先批准，再选范围，最后填变更单号。<span class="text-[#57606a]">全部走完我才会继续；中途取消则本次输入作废。</span></p>
+              <div class="mt-[9px] flex flex-wrap items-center gap-[6px]">
+                <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#fffbeb] text-[#b45309] border border-[#fde68a]">运行挂起</span>
+                <span class="text-[11.5px] text-[#57606a]">3 步未走完，run 不恢复（CopilotKit 语义）</span>
+              </div>
+
+              <!-- ============ 步骤 1 · 进行态（H1 两钮） ============ -->
+              <div class="mt-[14px] rounded-[10px] bg-white border border-[#e3e6ea]" data-step-live="1">
+                <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
+                  <span class="flex-none text-[9.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">步骤 1/3 · H1</span>
+                  <span class="flex-none text-[9.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#fffbeb] text-[#b45309] border-[#fde68a]">风险 MEDIUM</span>
+                  <span class="flex-none font-mono text-[10.5px] text-[#57606a]">publish-before-start</span>
+                  <span class="ml-auto flex-none text-[10.5px] text-[#8b949e]">决策将写入审计日志</span>
+                </div>
+                <div class="px-[11px] pt-[10px] pb-[2px] text-[13.2px] [font-weight:650] text-[#1f2328]">待你确认：启动发布作业（任务 #341）</div>
+                <div class="px-[11px] pt-[6px] text-[11.9px] text-[#57606a] leading-[1.6]">只读预检、不改任何配置。仅「批准 / 拒绝」两钮：没有理由框，也没有挂起态的第三种处置；拒绝后你直接在对话里说，我会重新提案。</div>
+                <div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px]">
+                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">启动发布作业（任务 #341）</span></div>
+                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">影响面</span><span class="flex-1 min-w-0 break-words">写 3 个配置集 · 冲突 3 处 · 可回滚至上一快照</span></div>
+                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">范围</span><span class="flex-1 min-w-0 break-words">CURRENCY · TAX_RULE · REGION_MAP</span></div>
+                </div>
+                <div class="flex items-center gap-[9px] mx-[11px] mt-[9px]">
+                  <svg class="flex-[0_0_30px]" viewBox="0 0 36 36" width="30" height="30" aria-hidden="true">
+                    <circle class="fill-none stroke-[#e3e6ea] [stroke-width:3]" cx="18" cy="18" r="15.5" stroke-width="3"></circle>
+                    <circle class="fill-none stroke-[#2563eb] [stroke-width:3] transition-[stroke-dashoffset] duration-1000 ease-linear" cx="18" cy="18" r="15.5" stroke-width="3" stroke-linecap="round" stroke-dasharray="97.4" stroke-dashoffset="0" transform="rotate(-90 18 18)" data-ring></circle>
+                  </svg>
+                  <span class="text-[12.2px] text-[#57606a]"><b class="tabular-nums text-[#1f2328] [font-weight:650]" data-count>60</b> 秒后自动不执行（超时即已决）</span>
+                </div>
+                <div class="flex flex-wrap items-center gap-x-[9px] gap-y-[8px] px-[11px] pt-[11px] pb-[10px]">
+                  <span class="text-[11.5px] text-[#8b949e] mr-auto">操作人 demo-user</span>
+                  <button type="button" data-act="reject-1" class="flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-[#e3e6ea] bg-white text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328] disabled:opacity-50 disabled:cursor-default">拒绝</button>
+                  <button type="button" data-act="approve-1" class="flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-transparent bg-[#2563eb] text-white font-semibold transition-all duration-[150ms] hover:brightness-[1.08] disabled:bg-[#8b949e] disabled:font-normal disabled:cursor-default">批准</button>
+                </div>
+              </div>
+
+              <!-- ============ 步骤 1 · 只读态（永存） ============ -->
+              <div class="hidden mt-[14px] border border-[#e3e6ea] bg-white rounded-[10px] px-[11px] py-[8px] text-[12.6px] text-[#57606a]" data-step-ro="1">
+                <div class="flex items-center gap-[6px]">
+                  <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0]" data-ro-badge="1">✓ 已批准</span>
+                  <span class="flex-1 min-w-0 text-[12.2px] whitespace-nowrap overflow-hidden text-ellipsis" data-ro-sum="1">启动发布作业「任务 #341」</span>
+                  <span class="flex-none text-[#8b949e] text-[11.5px] tabular-nums" data-ro-time="1">15:02</span>
+                </div>
+                <div class="mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px]">
+                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">启动发布作业（任务 #341）</span></div>
+                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">影响面</span><span class="flex-1 min-w-0 break-words">写 3 个配置集 · 冲突 3 处 · 可回滚至上一快照</span></div>
+                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">范围</span><span class="flex-1 min-w-0 break-words">CURRENCY · TAX_RULE · REGION_MAP</span></div>
+                </div>
+                <p class="m-0 mt-[7px] text-[11.5px] text-[#57606a] leading-[1.6]">只读卡永久保留在消息流 · 参数区原样锁定 · 决策按钮整块消失 · 徽标 / 摘要 / 时间上卡头</p>
+              </div>
+
+              <!-- ============ 步骤 2 · 进行态（H2 单选 + 其它） ============ -->
+              <div class="hidden mt-[14px] rounded-[10px] bg-white border border-[#e3e6ea]" data-step-live="2">
+                <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
+                  <span class="flex-none text-[9.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">步骤 2/3 · H2</span>
+                  <span class="flex-none text-[9.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">单选</span>
+                  <span class="flex-none text-[9.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#f6f7f9] text-[#57606a] border-[#e3e6ea]">轻审计</span>
+                  <span class="ml-auto flex-none text-[10.5px] text-[#8b949e]">选项 4 + 其它</span>
+                </div>
+                <div class="px-[11px] pt-[10px] pb-[2px] text-[13.2px] [font-weight:650] text-[#1f2328]">选择本次发布范围（单选）</div>
+                <div class="px-[11px] pt-[6px] text-[11.9px] text-[#57606a] leading-[1.6]">候选选项上限 5 个（不含「其它」）；「其它 + 输入框」按场景配置，这里开启。参数选择按轻审计记录。</div>
+                <div class="mx-[11px] mt-[9px] flex flex-col gap-[7px]" data-h2-list>
+                  <label class="flex items-start gap-[9px] rounded-[9px] border border-[#e3e6ea] bg-white px-[10px] py-[8px] cursor-pointer transition-colors duration-[150ms] hover:border-[#cddcff]">
+                    <input type="radio" name="h2opt" value="conflict-only" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-h2-opt>
+                    <span class="flex-1 min-w-0"><b class="block text-[12.8px] [font-weight:650] text-[#1f2328]">仅发布无冲突项</b><span class="block text-[11.5px] text-[#57606a] leading-[1.5]">3 处冲突留待下轮 · 其余配置正常写入（推荐）</span></span>
+                  </label>
+                  <label class="flex items-start gap-[9px] rounded-[9px] border border-[#e3e6ea] bg-white px-[10px] py-[8px] cursor-pointer transition-colors duration-[150ms] hover:border-[#cddcff]">
+                    <input type="radio" name="h2opt" value="per-conflict" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-h2-opt>
+                    <span class="flex-1 min-w-0"><b class="block text-[12.8px] [font-weight:650] text-[#1f2328]">逐条确认冲突项</b><span class="block text-[11.5px] text-[#57606a] leading-[1.5]">对 3 处冲突各出一次 H1 门 · 逐个放行或拒绝</span></span>
+                  </label>
+                  <label class="flex items-start gap-[9px] rounded-[9px] border border-[#e3e6ea] bg-white px-[10px] py-[8px] cursor-pointer transition-colors duration-[150ms] hover:border-[#cddcff]">
+                    <input type="radio" name="h2opt" value="report-only" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-h2-opt>
+                    <span class="flex-1 min-w-0"><b class="block text-[12.8px] [font-weight:650] text-[#1f2328]">只出冲突报告</b><span class="block text-[11.5px] text-[#57606a] leading-[1.5]">生成 xlsx 不改配置 · 本轮发布整体转下轮</span></span>
+                  </label>
+                  <label class="flex items-start gap-[9px] rounded-[9px] border border-[#e3e6ea] bg-white px-[10px] py-[8px] cursor-pointer transition-colors duration-[150ms] hover:border-[#cddcff]">
+                    <input type="radio" name="h2opt" value="pause-region" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-h2-opt>
+                    <span class="flex-1 min-w-0"><b class="block text-[12.8px] [font-weight:650] text-[#1f2328]">只暂停受影响区域</b><span class="block text-[11.5px] text-[#57606a] leading-[1.5]">CURRENCY#GLOBAL 与 TAX_RULE#PRJ-07 挂起 · 其余照发</span></span>
+                  </label>
+                  <label class="flex items-start gap-[9px] rounded-[9px] border border-[#e3e6ea] bg-white px-[10px] py-[8px] cursor-pointer transition-colors duration-[150ms] hover:border-[#cddcff]">
+                    <input type="radio" name="h2opt" value="other" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-h2-opt>
+                    <span class="flex-1 min-w-0"><b class="block text-[12.8px] [font-weight:650] text-[#1f2328]">其它（自定义处理说明）</b><span class="block text-[11.5px] text-[#57606a] leading-[1.5]">可配项 · 勾选后必须写明处理方式才算已处理</span><input type="text" data-h2-other placeholder="如：只覆盖 CURRENCY，其余跳过" class="hidden w-full mt-[7px] rounded-[8px] border border-[#e3e6ea] bg-white px-[9px] py-[6px] font-sans text-[13px] text-[#1f2328] [outline:none] placeholder:text-[#8b949e] focus:border-[#2563eb]"></span>
+                  </label>
+                </div>
+                <p class="m-0 px-[11px] pt-[8px] pb-[2px] text-[11.5px] text-[#57606a]" data-h2-hint>未选择时「下一步」保持禁用；选「其它」后需填一句处理说明。</p>
+                <div class="flex flex-wrap items-center gap-x-[9px] gap-y-[8px] px-[11px] pt-[6px] pb-[10px]">
+                  <span class="text-[11.5px] text-[#8b949e] mr-auto">这一步只记录选择，不动配置</span>
+                  <button type="button" data-act="h2-clear" class="flex-none whitespace-nowrap border-0 bg-transparent p-0 text-[11.5px] text-[#57606a] underline decoration-[#e3e6ea] underline-offset-[3px] transition-colors duration-[150ms] hover:text-[#2563eb]">清除选择</button>
+                </div>
+              </div>
+
+              <!-- ============ 步骤 2 · 只读态（永存） ============ -->
+              <div class="hidden mt-[14px] border border-[#e3e6ea] bg-white rounded-[10px] px-[11px] py-[8px] text-[12.6px] text-[#57606a]" data-step-ro="2">
+                <div class="flex items-center gap-[6px]">
+                  <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0]" data-ro-badge="2">✓ 已选择</span>
+                  <span class="flex-1 min-w-0 text-[12.2px] whitespace-nowrap overflow-hidden text-ellipsis" data-ro-sum="2">发布范围「仅发布无冲突项」</span>
+                  <span class="flex-none text-[#8b949e] text-[11.5px] tabular-nums" data-ro-time="2">15:04</span>
+                </div>
+                <div class="mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px]">
+                  <div class="flex items-start gap-[9px] py-[7px] border-b border-[#eef0f3] text-[12.4px] leading-[1.5] last:border-b-0" data-ro-opt="conflict-only">
+                    <span class="mt-[2px] flex-[0_0_14px] w-[14px] h-[14px] rounded-full border-[1.4px] border-[#e3e6ea] bg-[#f6f7f9] text-[9px] text-white flex items-center justify-center" data-ro-check>✓</span>
+                    <span class="flex-1 min-w-0">仅发布无冲突项</span>
+                  </div>
+                  <div class="flex items-start gap-[9px] py-[7px] border-b border-[#eef0f3] text-[12.4px] leading-[1.5] last:border-b-0" data-ro-opt="per-conflict">
+                    <span class="mt-[2px] flex-[0_0_14px] w-[14px] h-[14px] rounded-full border-[1.4px] border-[#e3e6ea] bg-[#f6f7f9] text-[9px] text-white flex items-center justify-center" data-ro-check>✓</span>
+                    <span class="flex-1 min-w-0">逐条确认冲突项</span>
+                  </div>
+                  <div class="flex items-start gap-[9px] py-[7px] border-b border-[#eef0f3] text-[12.4px] leading-[1.5] last:border-b-0" data-ro-opt="report-only">
+                    <span class="mt-[2px] flex-[0_0_14px] w-[14px] h-[14px] rounded-full border-[1.4px] border-[#e3e6ea] bg-[#f6f7f9] text-[9px] text-white flex items-center justify-center" data-ro-check>✓</span>
+                    <span class="flex-1 min-w-0">只出冲突报告</span>
+                  </div>
+                  <div class="flex items-start gap-[9px] py-[7px] border-b border-[#eef0f3] text-[12.4px] leading-[1.5] last:border-b-0" data-ro-opt="pause-region">
+                    <span class="mt-[2px] flex-[0_0_14px] w-[14px] h-[14px] rounded-full border-[1.4px] border-[#e3e6ea] bg-[#f6f7f9] text-[9px] text-white flex items-center justify-center" data-ro-check>✓</span>
+                    <span class="flex-1 min-w-0">只暂停受影响区域</span>
+                  </div>
+                  <div class="flex items-start gap-[9px] py-[7px] border-b border-[#eef0f3] text-[12.4px] leading-[1.5] last:border-b-0" data-ro-opt="other">
+                    <span class="mt-[2px] flex-[0_0_14px] w-[14px] h-[14px] rounded-full border-[1.4px] border-[#e3e6ea] bg-[#f6f7f9] text-[9px] text-white flex items-center justify-center" data-ro-check>✓</span>
+                    <span class="flex-1 min-w-0 break-words">其它：<span data-ro-other>—</span></span>
+                  </div>
+                </div>
+                <p class="m-0 mt-[7px] text-[11.5px] text-[#57606a] leading-[1.6]">选项列表锁定：选中项高亮打勾、其余灰显；列表内没有任何 input。只读卡永久保留。</p>
+              </div>
+
+              <!-- ============ 步骤 3 · 进行态（H3 输入） ============ -->
+              <div class="hidden mt-[14px] rounded-[10px] bg-white border border-[#e3e6ea]" data-step-live="3">
+                <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
+                  <span class="flex-none text-[9.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">步骤 3/3 · H3</span>
+                  <span class="flex-none text-[9.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">必填</span>
+                  <span class="ml-auto flex-none text-[10.5px] text-[#8b949e]">决策将写入审计日志</span>
+                </div>
+                <div class="px-[11px] pt-[10px] pb-[2px] text-[13.2px] [font-weight:650] text-[#1f2328]">补充变更单号</div>
+                <div class="px-[11px] pt-[6px] text-[11.9px] text-[#57606a] leading-[1.6]">H3 只有输入框：没有附加选项、没有旁路开关。留空即未处理，提交与下一步都保持禁用。</div>
+                <div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[9px]">
+                  <label class="block">
+                    <span class="block text-[12.2px] text-[#57606a] mb-[5px]">变更单号（必填）</span>
+                    <input type="text" data-h3-input placeholder="如 CHG-2026-0417" class="w-full rounded-[8px] border border-[#e3e6ea] bg-white px-[9px] py-[6px] font-sans text-[13px] text-[#1f2328] [outline:none] placeholder:text-[#8b949e] focus:border-[#2563eb]">
+                  </label>
+                  <p class="m-0 mt-[7px] text-[11.5px] text-[#57606a] hidden" data-h3-error>必填：请填写变更单号，否则无法提交（只校验非空，不做格式猜测）。</p>
+                </div>
+                <div class="flex flex-wrap items-center gap-x-[9px] gap-y-[8px] px-[11px] pt-[6px] pb-[10px]">
+                  <span class="text-[11.5px] text-[#8b949e] mr-auto">取消出口：放弃整个流程，输入作废</span>
+                  <button type="button" data-act="cancel" class="flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-[#e3e6ea] bg-white text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328] disabled:opacity-50 disabled:cursor-default">取消本次发布</button>
+                </div>
+              </div>
+
+              <!-- ============ 步骤 3 · 只读态（永存） ============ -->
+              <div class="hidden mt-[14px] border border-[#e3e6ea] bg-white rounded-[10px] px-[11px] py-[8px] text-[12.6px] text-[#57606a]" data-step-ro="3">
+                <div class="flex items-center gap-[6px]">
+                  <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0]" data-ro-badge="3">✓ 已提交</span>
+                  <span class="flex-1 min-w-0 text-[12.2px] whitespace-nowrap overflow-hidden text-ellipsis" data-ro-sum="3">变更单号「CHG-2026-0417」</span>
+                  <span class="flex-none text-[#8b949e] text-[11.5px] tabular-nums" data-ro-time="3">15:06</span>
+                </div>
+                <div class="mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[9px]">
+                  <label class="block">
+                    <span class="block text-[12.2px] text-[#57606a] mb-[5px]">变更单号（必填）</span>
+                    <input type="text" disabled class="w-full border border-[#e3e6ea] rounded-[8px] px-[9px] py-[6px] font-sans text-[13px] leading-[normal] text-[#1f2328] bg-[#f6f7f9] cursor-default [outline:none] disabled:text-[#1f2328] disabled:opacity-100" data-ro-h3>
+                  </label>
+                </div>
+                <p class="m-0 mt-[7px] text-[11.5px] text-[#57606a] leading-[1.6]">只读态：同一张卡、值回填、控件锁定不降对比度；决策按钮整块消失。</p>
+              </div>
+
+              <!-- ============ 取消提示 ============ -->
+              <div class="hidden mt-[14px] rounded-[10px] border border-[#e3e6ea] bg-[#fdf1ef] px-[11px] py-[8px]" data-cancel-note>
+                <div class="flex items-center gap-[6px]">
+                  <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-white">✗ 已取消</span>
+                  <span class="text-[12.2px] text-[#c0392b]">整个流程已放弃</span>
+                </div>
+                <p class="m-0 mt-[7px] text-[11.5px] text-[#57606a] leading-[1.6]">输入作废 · AI 收到「已取消」· 审计留痕 1 行 · run 保持挂起直到你重新发起（不恢复执行）。</p>
+              </div>
+
+              <!-- ============ 复核汇总（双层摘要 · 第二层） ============ -->
+              <div class="hidden mt-[14px] rounded-[10px] border border-[#bfe3cd] bg-white" data-review>
+                <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[10px] py-[7px] border-b border-[#eef0f3] bg-[#edf7f0]">
+                  <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-white">✓ 复核汇总</span>
+                  <span class="text-[11.4px] text-[#57606a]">双层摘要 · 第二层：只复述已知事实 · 可回改</span>
+                </div>
+                <div class="px-[10px] py-[2px]">
+                  <div class="flex items-center gap-[8px] py-[7px] border-b border-[#eef0f3] text-[12.2px]">
+                    <span class="flex-none text-[#8b949e] text-[11.4px] font-mono">01</span>
+                    <span class="flex-1 min-w-0 break-words" data-rev-text="1">已批准「任务 #341」</span>
+                    <button type="button" data-act="revise" data-n="1" class="flex-none whitespace-nowrap border-0 bg-transparent p-0 text-[11.5px] text-[#2563eb] underline decoration-[#e3e6ea] underline-offset-[3px] transition-colors duration-[150ms] hover:text-[#1f2328]">回改</button>
+                  </div>
+                  <div class="flex items-center gap-[8px] py-[7px] border-b border-[#eef0f3] text-[12.2px]">
+                    <span class="flex-none text-[#8b949e] text-[11.4px] font-mono">02</span>
+                    <span class="flex-1 min-w-0 break-words" data-rev-text="2">已选择「仅发布无冲突项」</span>
+                    <button type="button" data-act="revise" data-n="2" class="flex-none whitespace-nowrap border-0 bg-transparent p-0 text-[11.5px] text-[#2563eb] underline decoration-[#e3e6ea] underline-offset-[3px] transition-colors duration-[150ms] hover:text-[#1f2328]">回改</button>
+                  </div>
+                  <div class="flex items-center gap-[8px] py-[7px] border-b border-[#eef0f3] text-[12.2px] last:border-b-0">
+                    <span class="flex-none text-[#8b949e] text-[11.4px] font-mono">03</span>
+                    <span class="flex-1 min-w-0 break-words" data-rev-text="3">已填写「CHG-2026-0417」</span>
+                    <button type="button" data-act="revise" data-n="3" class="flex-none whitespace-nowrap border-0 bg-transparent p-0 text-[11.5px] text-[#2563eb] underline decoration-[#e3e6ea] underline-offset-[3px] transition-colors duration-[150ms] hover:text-[#1f2328]">回改</button>
+                  </div>
+                </div>
+                <p class="m-0 px-[10px] py-[7px] border-t border-[#eef0f3] text-[11.5px] text-[#57606a] bg-[#f6f7f9]">全部步序已完成 → 运行恢复 · 审计 3 行已写入 · 三张只读卡永久保留在消息流（不折叠、不销毁）</p>
+              </div>
+
+            </div>
+          </div>
+        </div>
+        <div class="px-[10px] py-[6px] border-t border-[#eef0f3] bg-[#eff4ff] text-[11px] text-[#57606a] leading-[1.55]">点「批准 / 拒绝」→ 步骤 1 只读卡上卡；「下一步」→ H2 选择；再下一步 → H3 输入；末步「提交」出复核汇总。</div>
+      </div>
+
+      <div class="flex flex-col min-w-0 border rounded-[10px] overflow-hidden border-[#cddcff]">
+        <div class="flex items-center gap-[6px] px-[10px] py-[6px] border-b border-[#eef0f3] bg-[#eff4ff] text-[11.4px]">
+          <span class="flex-[0_0_6px] w-[6px] h-[6px] rounded-[50%] bg-[#2563eb]"></span>
+          <span class="[font-weight:650]">步进面板 · 四控件（不设跳过）</span>
+          <span class="ml-auto font-mono text-[10.5px] text-[#57606a]">H1 独立成步</span>
+        </div>
+        <div class="flex-1 min-h-0 bg-[#fbfbfc] p-[11px]">
+
+          <div class="flex items-center gap-[8px]">
+            <span class="text-[12.6px] [font-weight:650] text-[#1f2328]">进度</span>
+            <span class="font-mono text-[12.6px] tabular-nums text-[#1f2328]" data-progress>1 / 3</span>
+            <span class="flex-none flex items-center gap-[5px] ml-[6px]">
+              <span class="flex-none w-[6px] h-[6px] rounded-[50%] bg-[#2563eb]" data-dot="1"></span>
+              <span class="flex-none w-[6px] h-[6px] rounded-[50%] bg-[#8b949e]" data-dot="2"></span>
+              <span class="flex-none w-[6px] h-[6px] rounded-[50%] bg-[#8b949e]" data-dot="3"></span>
+            </span>
+            <span class="ml-auto text-[11.5px] text-[#57606a]" data-current-label>当前：H1 批准 / 拒绝</span>
+          </div>
+
+          <div class="mt-[10px] text-[11.4px] text-[#57606a]">已完成步折叠为摘要行（第一层摘要），点行可回改（提交前）</div>
+          <div class="flex flex-col gap-[5px] mt-[7px]">
+            <button type="button" data-act="goto" data-n="1" class="flex items-center gap-[6px] w-full text-left border border-[#e3e6ea] bg-white rounded-[8px] px-[9px] py-[6px] transition-colors duration-[150ms] hover:border-[#cddcff] disabled:opacity-50 disabled:cursor-default">
+              <span class="flex-none font-mono text-[10.5px] text-[#8b949e]">01</span>
+              <span class="flex-none text-[11.4px] text-[#57606a]">H1 批准 / 拒绝</span>
+              <span class="flex-1 min-w-0 text-[11.5px] text-[#1f2328] whitespace-nowrap overflow-hidden text-ellipsis" data-sum="1">待处理</span>
+              <svg class="flex-none" width="12" height="12" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3l5 5-5 5" fill="none" stroke="#8b949e" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+            <button type="button" data-act="goto" data-n="2" class="flex items-center gap-[6px] w-full text-left border border-[#e3e6ea] bg-white rounded-[8px] px-[9px] py-[6px] transition-colors duration-[150ms] hover:border-[#cddcff] disabled:opacity-50 disabled:cursor-default">
+              <span class="flex-none font-mono text-[10.5px] text-[#8b949e]">02</span>
+              <span class="flex-none text-[11.4px] text-[#57606a]">H2 选择 ≤5 + 其它</span>
+              <span class="flex-1 min-w-0 text-[11.5px] text-[#1f2328] whitespace-nowrap overflow-hidden text-ellipsis" data-sum="2">待处理</span>
+              <svg class="flex-none" width="12" height="12" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3l5 5-5 5" fill="none" stroke="#8b949e" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+            <button type="button" data-act="goto" data-n="3" class="flex items-center gap-[6px] w-full text-left border border-[#e3e6ea] bg-white rounded-[8px] px-[9px] py-[6px] transition-colors duration-[150ms] hover:border-[#cddcff] disabled:opacity-50 disabled:cursor-default">
+              <span class="flex-none font-mono text-[10.5px] text-[#8b949e]">03</span>
+              <span class="flex-none text-[11.4px] text-[#57606a]">H3 输入（必填）</span>
+              <span class="flex-1 min-w-0 text-[11.5px] text-[#1f2328] whitespace-nowrap overflow-hidden text-ellipsis" data-sum="3">待处理</span>
+              <svg class="flex-none" width="12" height="12" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3l5 5-5 5" fill="none" stroke="#8b949e" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+          </div>
+
+          <div class="grid grid-cols-2 gap-[8px] mt-[10px]" data-controls>
+            <button type="button" data-act="back" class="whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-[#e3e6ea] bg-white text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328] disabled:opacity-50 disabled:cursor-default">上一步</button>
+            <button type="button" data-act="next" class="whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-[#e3e6ea] bg-white text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328] disabled:opacity-50 disabled:cursor-default">下一步</button>
+            <button type="button" data-act="cancel" class="whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-[#e3e6ea] bg-white text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328] disabled:opacity-50 disabled:cursor-default">取消</button>
+            <button type="button" data-act="submit" class="whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-transparent bg-[#2563eb] text-white font-semibold transition-all duration-[150ms] hover:brightness-[1.08] disabled:bg-[#8b949e] disabled:font-normal disabled:cursor-default">提交</button>
+          </div>
+
+          <p class="m-0 mt-[8px] text-[11px] text-[#57606a] leading-[1.6]">上一步 = 非首步可用；下一步 = 非末步且当前步已处理；取消 = 全程可用（输入作废 · AI 收「已取消」· 审计留痕）；提交 = 末步且已处理。<b class="[font-weight:650]">无「跳过」</b>，可选性下沉到字段级。</p>
+
+          <div class="mt-[10px] rounded-[8px] border border-[#fde68a] bg-[#fffbeb] px-[10px] py-[7px] text-[11.5px] leading-[1.6] text-[#b45309]" data-run>挂起中 · 第 1/3 步待处理，run 不恢复</div>
+
+          <div class="mt-[10px] border-t border-[#eef0f3] pt-[8px]">
+            <div class="text-[11px] text-[#8b949e]">审计留痕（demo 模拟）</div>
+            <div class="mt-[7px] flex flex-col gap-[5px] font-mono text-[10.5px] leading-[1.6] text-[#57606a]">
+              <div data-audit="1">01 · H1 · 未决</div>
+              <div data-audit="2">02 · H2 · 未决</div>
+              <div data-audit="3">03 · H3 · 未决</div>
+              <div class="hidden" data-audit-cancel>04 · 取消 · demo-user · 输入作废</div>
+            </div>
+          </div>
+
+          <div class="mt-[10px] flex flex-wrap items-center gap-[6px]">
+            <button type="button" data-act="reset" class="whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-[#e3e6ea] bg-white text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]">重新演示</button>
+            <button type="button" data-act="force-timeout" class="whitespace-nowrap border-0 bg-transparent p-0 text-[11.5px] text-[#57606a] underline decoration-[#e3e6ea] underline-offset-[3px] transition-colors duration-[150ms] hover:text-[#2563eb]">演示 H1 超时兜底</button>
+          </div>
+
+        </div>
+        <div class="px-[10px] py-[6px] border-t border-[#eef0f3] bg-[#eff4ff] text-[11px] text-[#57606a] leading-[1.55]">四控件状态随步骤实时变化；提交后在消息流底部生成复核汇总页。</div>
+      </div>
+
+    </div>
+
+    <div class="mt-[10px] border-t border-[#eef0f3] pt-[8px] text-[11.5px] text-[#57606a] leading-[1.65]">
+      <b class="[font-weight:650]">落点：</b>三步 = H1 独立成步（两钮）→ H2 选择（4 项 + 可配「其它」，未处理时「下一步」禁用）→ H3 输入（必填校验，留空即未处理）。<b class="[font-weight:650]">量值：</b>步数 3 · H1 动作钮 2 个（无「暂不」、无理由框）· H2 候选 4 + 其它 1 · 四控件 4 个 · 摘要两层。<b class="[font-weight:650]">判据：</b>① 步骤 1 只有「拒绝 / 批准」两钮且点任一即出只读卡；② 步骤 2 未选时「下一步」<code class="font-mono text-[11.2px] bg-[#f6f7f9] border border-[#eef0f3] rounded-[4px] px-[4px] py-[1px]">disabled</code>、选「其它」但未填时仍禁用；③ 步骤 3 空值时「提交」禁用；④ 提交后三张只读卡同时在场（按钮数 0、可点控件 0）；⑤ 取消后全部只读卡改「✗ 已取消」且输入作废。
+    </div>
+  </div>
+</section>
+
+<section id="s2" class="mt-[16px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden">
+  <div class="flex items-center gap-[9px] px-[13px] py-[9px] border-b border-[#eef0f3] bg-[#f5f8ff]">
+    <span class="flex-[0_0_24px] w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#2563eb] text-white text-[11px] font-semibold tabular-nums">2</span>
+    <h3 class="m-0 text-[13.6px] [font-weight:650]">H2 规则样张：选项 ≤ 5 · 可配其它 · 封闭策略集禁挂其它</h3>
+    <span class="font-mono text-[11px] text-[#8b949e]">审计两档：审批选择重审计 / 参数选择轻审计</span>
+    <span class="ml-auto flex items-center gap-[6px]"><span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">样张</span></span>
+  </div>
+  <div class="px-[13px] pt-[9px] pb-[11px]">
+    <div class="grid grid-cols-2 gap-[14px] items-stretch">
+
+      <div class="flex flex-col min-w-0 border rounded-[10px] overflow-hidden border-[#e3e6ea]">
+        <div class="flex items-center gap-[6px] px-[10px] py-[6px] border-b border-[#eef0f3] bg-[#f6f7f9] text-[11.4px]">
+          <span class="flex-[0_0_6px] w-[6px] h-[6px] rounded-[50%] bg-[#8b949e]"></span>
+          <span class="[font-weight:650]">样张 A · 封闭策略集（禁挂「其它」）</span>
+        </div>
+        <div class="flex-1 min-h-0 bg-[#fbfbfc] p-[11px]">
+          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[10px]">
+            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
+              <span class="flex-none text-[9.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#fffbeb] text-[#b45309] border-[#fde68a]">风险 MEDIUM</span>
+              <span class="flex-none text-[9.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#fdf1ef] text-[#c0392b] border-[#e3e6ea]">重审计</span>
+              <span class="ml-auto flex-none text-[10.5px] text-[#8b949e]">封闭集 · 三选一</span>
+            </div>
+            <div class="px-[11px] pt-[10px] pb-[2px] text-[13.2px] [font-weight:650] text-[#1f2328]">冲突处理策略（单选 · 三选一）</div>
+            <div class="mx-[11px] mt-[9px] flex flex-col gap-[7px]">
+              <label class="flex items-start gap-[9px] rounded-[9px] border border-[#e3e6ea] bg-white px-[10px] py-[8px] cursor-pointer transition-colors duration-[150ms] hover:border-[#cddcff]">
+                <input type="radio" name="closedset" value="overwrite" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]">
+                <span class="flex-1 min-w-0"><b class="block text-[12.8px] [font-weight:650] text-[#1f2328]">覆盖</b><span class="block text-[11.5px] text-[#57606a] leading-[1.5]">用导入件覆盖冲突行 · 不可回滚</span></span>
+              </label>
+              <label class="flex items-start gap-[9px] rounded-[9px] border border-[#e3e6ea] bg-white px-[10px] py-[8px] cursor-pointer transition-colors duration-[150ms] hover:border-[#cddcff]">
+                <input type="radio" name="closedset" value="skip" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]">
+                <span class="flex-1 min-w-0"><b class="block text-[12.8px] [font-weight:650] text-[#1f2328]">跳过</b><span class="block text-[11.5px] text-[#57606a] leading-[1.5]">保留现有值 · 冲突行不写入</span></span>
+              </label>
+              <label class="flex items-start gap-[9px] rounded-[9px] border border-[#e3e6ea] bg-white px-[10px] py-[8px] cursor-pointer transition-colors duration-[150ms] hover:border-[#cddcff]">
+                <input type="radio" name="closedset" value="abort" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]">
+                <span class="flex-1 min-w-0"><b class="block text-[12.8px] [font-weight:650] text-[#1f2328]">中止</b><span class="block text-[11.5px] text-[#57606a] leading-[1.5]">本次发布整体作废 · 回退到预检查完成</span></span>
+              </label>
+            </div>
+            <p class="m-0 mt-[8px] px-[11px] py-[6px] border-t border-[#eef0f3] text-[11.5px] text-[#57606a] bg-[#f6f7f9]">封闭策略集（覆盖 / 跳过 / 中止）边界已穷尽 —— 不设自定义入口，避免策略外溢。</p>
+          </div>
+        </div>
+        <div class="px-[10px] py-[6px] border-t border-[#eef0f3] bg-[#f6f7f9] text-[11px] text-[#57606a] leading-[1.55]">不挂自定义项 + 重审计：审批型选择逐条落审计，不做自由文本。</div>
+      </div>
+
+      <div class="flex flex-col min-w-0 border rounded-[10px] overflow-hidden border-[#e3e6ea]">
+        <div class="flex items-center gap-[6px] px-[10px] py-[6px] border-b border-[#eef0f3] bg-[#f6f7f9] text-[11.4px]">
+          <span class="flex-[0_0_6px] w-[6px] h-[6px] rounded-[50%] bg-[#8b949e]"></span>
+          <span class="[font-weight:650]">样张 B · 参数多选（5 项 + 可配「其它」）</span>
+        </div>
+        <div class="flex-1 min-h-0 bg-[#fbfbfc] p-[11px]">
+          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[10px]">
+            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
+              <span class="flex-none text-[9.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">参数选择</span>
+              <span class="flex-none text-[9.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#f6f7f9] text-[#57606a] border-[#e3e6ea]">轻审计</span>
+              <span class="ml-auto flex-none text-[10.5px] text-[#8b949e]">选项 5 + 其它</span>
+            </div>
+            <div class="px-[11px] pt-[10px] pb-[2px] text-[13.2px] [font-weight:650] text-[#1f2328]">导出字段（多选）</div>
+            <div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[9px]">
+              <span class="flex flex-wrap gap-[6px]">
+                <label class="inline-flex items-center gap-[5px] rounded-full border px-[11px] py-[4px] text-[12.2px] cursor-pointer border-[#cddcff] bg-[#eff4ff] text-[#2563eb]"><input type="checkbox" class="m-0" checked>配置编码</label>
+                <label class="inline-flex items-center gap-[5px] rounded-full border px-[11px] py-[4px] text-[12.2px] cursor-pointer border-[#cddcff] bg-[#eff4ff] text-[#2563eb]"><input type="checkbox" class="m-0" checked>配置名称</label>
+                <label class="inline-flex items-center gap-[5px] rounded-full border px-[11px] py-[4px] text-[12.2px] cursor-pointer border-[#e3e6ea] bg-white text-[#57606a]"><input type="checkbox" class="m-0">精度位数</label>
+                <label class="inline-flex items-center gap-[5px] rounded-full border px-[11px] py-[4px] text-[12.2px] cursor-pointer border-[#e3e6ea] bg-white text-[#57606a]"><input type="checkbox" class="m-0">汇率值</label>
+                <label class="inline-flex items-center gap-[5px] rounded-full border px-[11px] py-[4px] text-[12.2px] cursor-pointer border-[#e3e6ea] bg-white text-[#57606a]"><input type="checkbox" class="m-0">生效日期</label>
+                <label class="inline-flex items-center gap-[5px] rounded-full border border-[#e3e6ea] bg-white px-[11px] py-[4px] text-[12.2px] cursor-pointer text-[#1f2328]"><input type="checkbox" class="m-0">其它</label>
+              </span>
+              <input type="text" placeholder="其它字段名（可配项，勾选后填写）" class="mt-[7px] w-full rounded-[8px] border border-[#e3e6ea] bg-white px-[9px] py-[6px] font-sans text-[13px] text-[#1f2328] [outline:none] placeholder:text-[#8b949e] focus:border-[#2563eb]">
+            </div>
+            <p class="m-0 mt-[8px] px-[11px] py-[6px] border-t border-[#eef0f3] text-[11.5px] text-[#57606a] bg-[#f6f7f9]">常驻选项 5 个（不含「其它」）；「其它」是场景可配项，本样张开启，参数选择按轻审计记录。</p>
+          </div>
+        </div>
+        <div class="px-[10px] py-[6px] border-t border-[#eef0f3] bg-[#f6f7f9] text-[11px] text-[#57606a] leading-[1.55]">可配「其它」+ 轻审计：默认选中合法值，其它仅在配置开启时出现。</div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<section id="s3" class="mt-[16px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden">
+  <div class="flex items-center gap-[9px] px-[13px] py-[9px] border-b border-[#eef0f3] bg-[#f5f8ff]">
+    <span class="flex-[0_0_24px] w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#2563eb] text-white text-[11px] font-semibold tabular-nums">3</span>
+    <h3 class="m-0 text-[13.6px] [font-weight:650]">只读卡永久保留（已决四态 · 按钮整块消失 · 参数区原样）</h3>
+    <span class="font-mono text-[11px] text-[#8b949e]">不折叠 · 不销毁 · 随消息流长期留存</span>
+    <span class="ml-auto flex items-center gap-[6px]"><span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">口径</span></span>
+  </div>
+  <div class="px-[13px] pt-[9px] pb-[11px]">
+    <div class="grid grid-cols-2 gap-[14px] items-stretch">
+
+      <div class="flex flex-col min-w-0 border rounded-[10px] overflow-hidden border-[#e3e6ea]">
+        <div class="flex items-center gap-[6px] px-[10px] py-[6px] border-b border-[#eef0f3] bg-[#f6f7f9] text-[11.4px]">
+          <span class="flex-[0_0_6px] w-[6px] h-[6px] rounded-[50%] bg-[#8b949e]"></span>
+          <span class="[font-weight:650]">A · 已批准</span>
+        </div>
+        <div class="flex-1 min-h-0 bg-[#fbfbfc] p-[11px]">
+          <div class="w-[440px] max-w-full mx-auto border border-[#e3e6ea] bg-white rounded-[10px] px-[11px] py-[8px] text-[12.6px] text-[#57606a]">
+            <div class="flex items-center gap-[6px]">
+              <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0]">✓ 已批准</span>
+              <span class="flex-1 min-w-0 text-[12.2px] whitespace-nowrap overflow-hidden text-ellipsis">启动发布作业<b class="text-[#1f2328] font-semibold">「任务 #341」</b></span>
+              <span class="flex-none text-[#8b949e] text-[11.5px] tabular-nums">今天 15:02</span>
+            </div>
+            <div class="mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px]">
+              <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">启动发布作业（任务 #341）</span></div>
+              <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">范围</span><span class="flex-1 min-w-0 break-words">CURRENCY · TAX_RULE · REGION_MAP</span></div>
+            </div>
+            <p class="m-0 mt-[7px] text-[11.5px] text-[#57606a]">审计：决策 = 批准 · 操作人 demo-user · 按钮 0 个</p>
+          </div>
+        </div>
+        <div class="px-[10px] py-[6px] border-t border-[#eef0f3] bg-[#eff4ff] text-[11px] text-[#57606a] leading-[1.55]">徽标 + 摘要 + 时间上卡头；参数区原样；动作行整块消失。</div>
+      </div>
+
+      <div class="flex flex-col min-w-0 border rounded-[10px] overflow-hidden border-[#e3e6ea]">
+        <div class="flex items-center gap-[6px] px-[10px] py-[6px] border-b border-[#eef0f3] bg-[#f6f7f9] text-[11.4px]">
+          <span class="flex-[0_0_6px] w-[6px] h-[6px] rounded-[50%] bg-[#8b949e]"></span>
+          <span class="[font-weight:650]">B · 已不执行</span>
+        </div>
+        <div class="flex-1 min-h-0 bg-[#fbfbfc] p-[11px]">
+          <div class="w-[440px] max-w-full mx-auto border border-[#e3e6ea] bg-white rounded-[10px] px-[11px] py-[8px] text-[12.6px] text-[#57606a]">
+            <div class="flex items-center gap-[6px]">
+              <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef]">✗ 已不执行</span>
+              <span class="flex-1 min-w-0 text-[12.2px] whitespace-nowrap overflow-hidden text-ellipsis">启动发布作业<b class="text-[#1f2328] font-semibold">「任务 #341」</b></span>
+              <span class="flex-none text-[#8b949e] text-[11.5px] tabular-nums">今天 15:03</span>
+            </div>
+            <div class="mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px]">
+              <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">启动发布作业（任务 #341）</span></div>
+              <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">后续</span><span class="flex-1 min-w-0 break-words">无理由框：修正走会话，AI 重新提案</span></div>
+            </div>
+            <p class="m-0 mt-[7px] text-[11.5px] text-[#57606a]">审计：决策 = 不执行 · 理由不落卡面（H1 无理由框）</p>
+          </div>
+        </div>
+        <div class="px-[10px] py-[6px] border-t border-[#eef0f3] bg-[#eff4ff] text-[11px] text-[#57606a] leading-[1.55]">拒绝即刻生效；改主意只能回对话，不在卡上补理由。</div>
+      </div>
+
+      <div class="flex flex-col min-w-0 border rounded-[10px] overflow-hidden border-[#e3e6ea]">
+        <div class="flex items-center gap-[6px] px-[10px] py-[6px] border-b border-[#eef0f3] bg-[#f6f7f9] text-[11.4px]">
+          <span class="flex-[0_0_6px] w-[6px] h-[6px] rounded-[50%] bg-[#8b949e]"></span>
+          <span class="[font-weight:650]">C · 已超时（已决）</span>
+        </div>
+        <div class="flex-1 min-h-0 bg-[#fbfbfc] p-[11px]">
+          <div class="w-[440px] max-w-full mx-auto border border-[#e3e6ea] bg-white rounded-[10px] px-[11px] py-[8px] text-[12.6px] text-[#57606a]">
+            <div class="flex items-center gap-[6px]">
+              <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#57606a] bg-[#f6f7f9]">! 已超时</span>
+              <span class="flex-1 min-w-0 text-[12.2px] whitespace-nowrap overflow-hidden text-ellipsis">启动发布作业「任务 #341」<span class="text-[#8b949e]">·超时未确认</span></span>
+              <span class="flex-none text-[#8b949e] text-[11.5px] tabular-nums">今天 15:04</span>
+            </div>
+            <div class="mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px]">
+              <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">结局</span><span class="flex-1 min-w-0 break-words">按默认策略自动不执行 · 闸门未开</span></div>
+              <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">口径</span><span class="flex-1 min-w-0 break-words">超时即已决，不挂「等待确认」</span></div>
+            </div>
+            <p class="m-0 mt-[7px] text-[11.5px] text-[#57606a]">动作行整块消失（保留置灰钮不合格）</p>
+          </div>
+        </div>
+        <div class="px-[10px] py-[6px] border-t border-[#eef0f3] bg-[#eff4ff] text-[11px] text-[#57606a] leading-[1.55]">门卡超时 = 按拒绝收尾；表单超时仅置灰、不算否决。</div>
+      </div>
+
+      <div class="flex flex-col min-w-0 border rounded-[10px] overflow-hidden border-[#e3e6ea]">
+        <div class="flex items-center gap-[6px] px-[10px] py-[6px] border-b border-[#eef0f3] bg-[#f6f7f9] text-[11.4px]">
+          <span class="flex-[0_0_6px] w-[6px] h-[6px] rounded-[50%] bg-[#8b949e]"></span>
+          <span class="[font-weight:650]">D · 已取消</span>
+        </div>
+        <div class="flex-1 min-h-0 bg-[#fbfbfc] p-[11px]">
+          <div class="w-[440px] max-w-full mx-auto border border-[#e3e6ea] bg-white rounded-[10px] px-[11px] py-[8px] text-[12.6px] text-[#57606a]">
+            <div class="flex items-center gap-[6px]">
+              <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef]">✗ 已取消</span>
+              <span class="flex-1 min-w-0 text-[12.2px] whitespace-nowrap overflow-hidden text-ellipsis">三步确认流程<b class="text-[#1f2328] font-semibold">「整单放弃」</b></span>
+              <span class="flex-none text-[#8b949e] text-[11.5px] tabular-nums">今天 15:05</span>
+            </div>
+            <div class="mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px]">
+              <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">输入</span><span class="flex-1 min-w-0 break-words">作废（已填字段不再回传）</span></div>
+              <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">回传</span><span class="flex-1 min-w-0 break-words">AI 收「已取消」· 审计留痕 1 行</span></div>
+            </div>
+            <p class="m-0 mt-[7px] text-[11.5px] text-[#57606a]">run 保持挂起，等待用户重新发起</p>
+          </div>
+        </div>
+        <div class="px-[10px] py-[6px] border-t border-[#eef0f3] bg-[#eff4ff] text-[11px] text-[#57606a] leading-[1.55]">取消是全程可用出口，不是「终态可回头改」。</div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<section id="s4" class="mt-[16px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden">
+  <div class="flex items-center gap-[9px] px-[13px] py-[9px] border-b border-[#eef0f3] bg-[#f5f8ff]">
+    <span class="flex-[0_0_24px] w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#2563eb] text-white text-[11px] font-semibold tabular-nums">4</span>
+    <h3 class="m-0 text-[13.6px] [font-weight:650]">删项登记与用户勾位</h3>
+    <span class="font-mono text-[11px] text-[#8b949e]">三类不采纳交互已删净（明细见下表）</span>
+    <span class="ml-auto flex items-center gap-[6px]"><span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">裁决</span></span>
+  </div>
+  <div class="px-[13px] pt-[9px] pb-[11px]">
+    <div class="rounded-[8px] border border-[#eef0f3] overflow-hidden">
+      <table class="w-full border-collapse text-[11.8px] leading-[1.55] table-fixed">
+        <thead><tr>
+          <th class="border-b border-[#e3e6ea] bg-[#f6f7f9] px-[8px] py-[6px] text-left font-semibold text-[#57606a] break-words">原 demo 交互</th>
+          <th class="border-b border-[#e3e6ea] bg-[#f6f7f9] px-[8px] py-[6px] text-left font-semibold text-[#57606a] break-words">终裁处置</th>
+          <th class="border-b border-[#e3e6ea] bg-[#f6f7f9] px-[8px] py-[6px] text-left font-semibold text-[#57606a] break-words">本件落点</th>
+        </tr></thead>
+        <tbody>
+          <tr>
+            <td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words">② Edit, then continue 与「批准修改后的方案」</td>
+            <td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words">「修改后批准（inline）」不采纳 · 挂账不施工</td>
+            <td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words">已整节删除；修正改走会话（拒绝后 AI 重新提案）</td>
+          </tr>
+          <tr>
+            <td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words">「暂不处理」文字钮</td>
+            <td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words">「暂不处理」不采纳 · 挂账不施工</td>
+            <td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words">已全部删除，H1 仅「拒绝 / 批准」两钮</td>
+          </tr>
+          <tr>
+            <td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words">不执行理由框（必填 textarea）与「稍后填写」</td>
+            <td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words">H1 无理由框（随批删净）；挂起保留态不采纳</td>
+            <td class="border-b border-[#eef0f3] px-[8px] py-[6px] align-top break-words">已删除，无理由输入、无挂起保留分支</td>
+          </tr>
+          <tr>
+            <td class="px-[8px] py-[6px] align-top break-words">选卡 3 项、无「其它」入口</td>
+            <td class="px-[8px] py-[6px] align-top break-words">H2 选项 ≤ 5 + 「其它 + 输入框」可配项</td>
+            <td class="px-[8px] py-[6px] align-top break-words">§1 步骤 2（4 + 其它）、§2 样张 B（5 + 其它）</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div id="zone-vote-hitl-final" class="mt-[16px] border border-[#cddcff] bg-[#f5f8ff] rounded-[12px] px-[13px] py-[12px]">
+      <div class="flex items-center gap-[9px] flex-wrap">
+        <span class="text-[12px] leading-[1.7] px-[8px] py-[1px] rounded-[6px] bg-[#2563eb] text-white">用户裁决勾位</span>
+        <span class="text-[11.6px] text-[#57606a]">五项各自独立可勾；本件为现役主题单文件（新主题另起单文件，见 INDEX.md 规则）。</span>
+      </div>
+      <div class="grid grid-cols-2 gap-[8px] mt-[10px]">
+        <label class="flex items-start gap-[8px] border border-[#cddcff] bg-white rounded-[9px] px-[10px] py-[8px] text-[12.2px] leading-[1.6] text-[#1f2328] cursor-pointer hover:border-[#2563eb]">
+          <input type="checkbox" class="mt-[3px] flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]">
+          <span><b class="[font-weight:650]">①</b> H1 两钮独立成步 · 无理由框 · 超时即已决<span class="block text-[11.4px] text-[#57606a]">通过 / 打回</span></span>
+        </label>
+        <label class="flex items-start gap-[8px] border border-[#cddcff] bg-white rounded-[9px] px-[10px] py-[8px] text-[12.2px] leading-[1.6] text-[#1f2328] cursor-pointer hover:border-[#2563eb]">
+          <input type="checkbox" class="mt-[3px] flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]">
+          <span><b class="[font-weight:650]">②</b> H2 选项 ≤5 + 可配「其它 + 输入框」· 封闭策略集禁挂其它<span class="block text-[11.4px] text-[#57606a]">通过 / 打回</span></span>
+        </label>
+        <label class="flex items-start gap-[8px] border border-[#cddcff] bg-white rounded-[9px] px-[10px] py-[8px] text-[12.2px] leading-[1.6] text-[#1f2328] cursor-pointer hover:border-[#2563eb]">
+          <input type="checkbox" class="mt-[3px] flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]">
+          <span><b class="[font-weight:650]">③</b> H3 仅输入框 + 必填校验 + 取消出口<span class="block text-[11.4px] text-[#57606a]">通过 / 打回</span></span>
+        </label>
+        <label class="flex items-start gap-[8px] border border-[#cddcff] bg-white rounded-[9px] px-[10px] py-[8px] text-[12.2px] leading-[1.6] text-[#1f2328] cursor-pointer hover:border-[#2563eb]">
+          <input type="checkbox" class="mt-[3px] flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]">
+          <span><b class="[font-weight:650]">④</b> 步进四控件（上一步 / 下一步 / 取消 / 提交）· 无跳过 · 进度 N/M<span class="block text-[11.4px] text-[#57606a]">通过 / 打回</span></span>
+        </label>
+        <label class="flex items-start gap-[8px] border border-[#cddcff] bg-white rounded-[9px] px-[10px] py-[8px] text-[12.2px] leading-[1.6] text-[#1f2328] cursor-pointer hover:border-[#2563eb]">
+          <input type="checkbox" class="mt-[3px] flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]">
+          <span><b class="[font-weight:650]">⑤</b> 双层摘要（步骤摘要行 + 复核汇总页）· 已决只读卡永不折叠销毁<span class="block text-[11.4px] text-[#57606a]">通过 / 打回</span></span>
+        </label>
+      </div>
+    </div>
+  </div>
+</section>
 
   </div>
 </main>
@@ -68,108 +630,271 @@
 <script>
 (function(){
   'use strict';
-  /* 五类打断卡交互（真实 JS）：倒计时环 / 不执行理由框（必填）/ 编辑态改动标记与放行解锁 /
-     选项单选解锁 / 缺失信息「稍后填写」/ 幕1→幕2 连贯。 */
+  /* 三步中断流（H1 → H2 → H3）真实交互：
+     决策即切只读卡（永存）/ 步进四控件无跳过 / 双层摘要 / 取消即作废 / 提交出复核页。 */
+  var TOTAL = 60, C = 2 * Math.PI * 15.5;
+  var S = { step: 1, d: {}, h2: '', h2o: '', h3: '', cancelled: false, submitted: false, left: TOTAL, maxStep: 1, edit: null };
+
+  function $(sel, root){ return (root || document).querySelector(sel); }
+  function $$(sel, root){ return Array.prototype.slice.call((root || document).querySelectorAll(sel)); }
   function show(el, on){ if(el) el.classList.toggle('hidden', !on); }
-  function near(el, sel){ var r = el.closest('[data-int]') || document; return r.querySelector(sel); }
-  /* 倒计时环：进行态每秒递减，归零停住（静态样张，不触发真实决策） */
-  var LEFT = 14, TOTAL = 14, C = 2 * Math.PI * 15.5;
-  function tick(){
-    var ring = document.querySelector('[data-int="approve"] [data-ring]');
-    var num = document.querySelector('[data-int="approve"] [data-count]');
-    if(!ring || !num) return;
-    LEFT = LEFT <= 1 ? TOTAL : LEFT - 1;
-    num.textContent = String(LEFT);
-    ring.setAttribute('stroke-dashoffset', (C * (1 - LEFT / TOTAL)).toFixed(1));
+  function txt(el, t){ if(el) el.textContent = t; }
+
+  var BADGE = {
+    approve:   { t: '✓ 已批准',       cls: 'font-semibold text-[#1a7f45] bg-[#edf7f0]' },
+    reject:    { t: '✗ 已不执行',     cls: 'font-semibold text-[#c0392b] bg-[#fdf1ef]' },
+    timeout:   { t: '! 已超时（已决）', cls: 'font-semibold text-[#57606a] bg-[#f6f7f9]' },
+    choose:    { t: '✓ 已选择',       cls: 'font-semibold text-[#1a7f45] bg-[#edf7f0]' },
+    input:     { t: '✓ 已提交',       cls: 'font-semibold text-[#1a7f45] bg-[#edf7f0]' },
+    cancelled: { t: '✗ 已取消',       cls: 'font-semibold text-[#c0392b] bg-[#fdf1ef]' }
+  };
+  var H2_LABEL = {
+    'conflict-only': '仅发布无冲突项',
+    'per-conflict': '逐条确认冲突项',
+    'report-only': '只出冲突报告',
+    'pause-region': '只暂停受影响区域',
+    'other': '其它'
+  };
+  var STEP_NAME = { 1: 'H1 批准 / 拒绝', 2: 'H2 选择（≤5 + 其它）', 3: 'H3 输入（必填）' };
+
+  function h2Label(){
+    if(!S.h2) return '待处理';
+    if(S.h2 === 'other') return '其它：' + (S.h2o || '（未填说明）');
+    return H2_LABEL[S.h2] || S.h2;
   }
-  setInterval(tick, 1000);
-  /* 编辑态：改动 → 标「已修改」+ 解锁「批准修改后的方案」 */
-  function syncAmend(root){
-    var marks = 0;
-    Array.prototype.forEach.call(root.querySelectorAll('[data-amend-field]'), function(f){
-      var box = f.closest('div') || f.parentNode;
-      var chip = box.querySelector('[data-amend-chip]');
-      var changed = false;
-      if(f.tagName === 'SELECT') changed = f.value !== f.options[0].value;
-      else if(f.querySelector('input[type=checkbox]')) {
-        var boxes = Array.prototype.slice.call(f.querySelectorAll('input[type=checkbox]'));
-        changed = boxes.some(function(b){ return b.checked !== b.defaultChecked; });
-      } else if(f.matches('input')) changed = f.value !== f.defaultValue;
-      if(chip) chip.classList.toggle('hidden', !changed);
-      if(changed) marks++;
+  function dtext(n){
+    if(S.cancelled) return '已取消（输入作废）';
+    var d = S.d[n];
+    if(!d) return '待处理';
+    if(n === 1){
+      if(d === 'approve') return '已批准「任务 #341」';
+      if(d === 'reject') return '已拒绝（走会话修正后重新提案）';
+      return '超时未确认（按拒绝收尾）';
+    }
+    if(n === 2) return S.h2 ? '已选择「' + h2Label() + '」' : '待处理';
+    return S.h3 ? '已填写「' + S.h3 + '」' : '待处理';
+  }
+  function badgeKey(n){
+    if(S.cancelled) return 'cancelled';
+    if(!S.d[n]) return '';
+    if(n === 1) return S.d[1];
+    if(n === 2) return 'choose';
+    return 'input';
+  }
+  function reached(n){ return n <= S.maxStep; }
+
+  function render(){
+    // 步骤卡：进行态 / 只读态（修订中的步临时回到可交互态，决策后重新生成只读卡）
+    for(var n = 1; n <= 3; n++){
+      var editing = S.edit === n;
+      var roOn = S.cancelled ? reached(n) : (!!S.d[n] && !editing);
+      var liveOn = !S.cancelled && !S.submitted && S.step === n && (!S.d[n] || editing);
+      show($('[data-step-live="' + n + '"]'), liveOn);
+      show($('[data-step-ro="' + n + '"]'), roOn);
+    }
+
+    // 只读卡内容
+    var step1 = S.d[1] || (S.cancelled ? 'cancelled' : null);
+    if(step1){
+      var b1 = $('[data-ro-badge="1"]');
+      var key = S.cancelled ? 'cancelled' : (S.d[1] === 'approve' ? 'approve' : S.d[1] === 'reject' ? 'reject' : 'timeout');
+      if(b1){
+        b1.className = 'flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] ' + BADGE[key].cls;
+        b1.textContent = BADGE[key].t;
+      }
+      txt($('[data-ro-sum="1"]'), S.cancelled ? '启动发布作业「任务 #341」· 已取消' : (S.d[1] === 'approve' ? '启动发布作业「任务 #341」' : S.d[1] === 'reject' ? '启动发布作业「任务 #341」· 未执行' : '启动发布作业「任务 #341」· 超时未确认'));
+    }
+    if(S.d[2] || S.cancelled){
+      var key2 = S.cancelled ? 'cancelled' : 'choose';
+      var b2 = $('[data-ro-badge="2"]');
+      if(b2){ b2.className = 'flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] ' + BADGE[key2].cls; b2.textContent = BADGE[key2].t; }
+      txt($('[data-ro-sum="2"]'), S.cancelled ? '发布范围 · 已取消' : '发布范围「' + (S.h2 ? H2_LABEL[S.h2] : '—') + '」');
+      txt($('[data-ro-other]'), S.h2 === 'other' ? (S.h2o || '（未填）') : '未选用');
+      $$('[data-ro-opt]').forEach(function(row){
+        var v = row.getAttribute('data-ro-opt');
+        var picked = !S.cancelled && v === S.h2;
+        var box = $('[data-ro-check]', row);
+        row.classList.toggle('opacity-[.55]', !picked);
+        if(box){
+          box.classList.toggle('bg-[#2563eb]', picked);
+          box.classList.toggle('border-[#2563eb]', picked);
+          box.classList.toggle('bg-[#f6f7f9]', !picked);
+          box.textContent = picked ? '✓' : '';
+        }
+      });
+    }
+    if(S.d[3] || S.cancelled){
+      var key3 = S.cancelled ? 'cancelled' : 'input';
+      var b3 = $('[data-ro-badge="3"]');
+      if(b3){ b3.className = 'flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] ' + BADGE[key3].cls; b3.textContent = BADGE[key3].t; }
+      txt($('[data-ro-sum="3"]'), S.cancelled ? '变更单号 · 已取消（输入作废）' : '变更单号「' + S.h3 + '」');
+      var ro3 = $('[data-ro-h3]');
+      if(ro3) ro3.value = S.cancelled ? '' : S.h3;
+      if(ro3) ro3.placeholder = S.cancelled ? '输入已作废' : '';
+    }
+
+    // 复核汇总页
+    show($('[data-review]'), S.submitted && !S.cancelled);
+    for(var r = 1; r <= 3; r++) txt($('[data-rev-text="' + r + '"]'), dtext(r));
+
+    // 取消提示
+    show($('[data-cancel-note]'), S.cancelled);
+
+    // 倒计时数字与环（回改后重置时同步）
+    var cnt = $('[data-count]'), rng = $('[data-ring]');
+    if(cnt && S.step === 1 && !S.d[1] && !S.cancelled && !S.submitted){ cnt.textContent = String(S.left); }
+    if(rng && S.step === 1 && !S.d[1] && !S.cancelled && !S.submitted){ rng.setAttribute('stroke-dashoffset', (C * (1 - S.left / TOTAL)).toFixed(1)); }
+
+    // 进度与摘要行
+    txt($('[data-progress]'), S.step + ' / 3');
+    txt($('[data-current-label]'), '当前：' + STEP_NAME[S.step]);
+    for(var i = 1; i <= 3; i++){
+      txt($('[data-sum="' + i + '"]'), dtext(i));
+      var dot = $('[data-dot="' + i + '"]');
+      if(dot) dot.className = 'flex-none w-[6px] h-[6px] rounded-[50%] ' + (i <= S.step ? 'bg-[#2563eb]' : 'bg-[#8b949e]');
+    }
+
+    // 四控件（右侧步进面板，作用域 data-controls）
+    var bBack = $('[data-controls] [data-act="back"]'), bNext = $('[data-controls] [data-act="next"]'), bCancel = $('[data-controls] [data-act="cancel"]'), bSubmit = $('[data-controls] [data-act="submit"]');
+    if(bBack) bBack.disabled = S.cancelled || S.submitted || S.step <= 1;
+    if(bNext) bNext.disabled = S.cancelled || S.submitted || S.step >= 3 || !S.d[S.step];
+    if(bCancel) bCancel.disabled = S.cancelled || S.submitted;
+    if(bSubmit) bSubmit.disabled = S.cancelled || S.submitted || S.step !== 3 || !S.d[3];
+    $$('[data-act="goto"]').forEach(function(btn){
+      var n = Number(btn.getAttribute('data-n'));
+      btn.disabled = S.cancelled || S.submitted || !S.d[n];
     });
-    var btn = root.querySelector('[data-act="approve-amended"]');
-    if(btn) btn.disabled = marks === 0;
+    $$('[data-act="revise"]').forEach(function(btn){ btn.disabled = S.cancelled; });
+
+    // H3 必填提示（只校验非空；仅当用户填了纯空白时提示）
+    var err = $('[data-h3-error]'), h3in = $('[data-h3-input]');
+    if(err && h3in) show(err, !S.cancelled && S.step === 3 && !S.d[3] && h3in.value.length > 0 && !h3in.value.trim());
+
+    // 运行状态
+    var run = $('[data-run]');
+    if(run){
+      if(S.cancelled){
+        run.className = 'mt-[10px] rounded-[8px] border px-[10px] py-[7px] text-[11.5px] leading-[1.6] border-[#e3e6ea] bg-[#fdf1ef] text-[#c0392b]';
+        run.textContent = '已取消 · 输入作废 · AI 收「已取消」· 审计留痕 · run 未恢复';
+      }else if(S.submitted){
+        run.className = 'mt-[10px] rounded-[8px] border px-[10px] py-[7px] text-[11.5px] leading-[1.6] border-[#bfe3cd] bg-[#edf7f0] text-[#1a7f45]';
+        run.textContent = '已恢复运行 · 全部 3 步完成（CopilotKit 语义：走完全部步序才恢复）';
+      }else{
+        run.className = 'mt-[10px] rounded-[8px] border px-[10px] py-[7px] text-[11.5px] leading-[1.6] border-[#fde68a] bg-[#fffbeb] text-[#b45309]';
+        run.textContent = '挂起中 · 第 ' + S.step + '/3 步' + (S.d[S.step] ? '已处理，等待「下一步」' : '待处理') + '，run 不恢复';
+      }
+    }
+    txt($('[data-run-mini]'), S.cancelled ? 'run 已取消' : S.submitted ? 'run 已恢复' : 'run 挂起');
+
+    // 审计行
+    var a1 = $('[data-audit="1"]'), a2 = $('[data-audit="2"]'), a3 = $('[data-audit="3"]');
+    if(a1) a1.textContent = '01 · H1 · ' + (S.d[1] ? (S.d[1] === 'approve' ? '已批准 · demo-user' : S.d[1] === 'reject' ? '已不执行 · demo-user' : '已超时 · 系统') : '未决');
+    if(a2) a2.textContent = '02 · H2 · ' + (S.d[2] ? '已选择「' + H2_LABEL[S.h2] + '」· 轻审计 · demo-user' : '未决');
+    if(a3) a3.textContent = '03 · H3 · ' + (S.d[3] ? '已提交「' + S.h3 + '」· demo-user' : '未决');
+    show($('[data-audit-cancel]'), S.cancelled);
+
+    // H2 其它输入框显隐
+    var o = $('[data-h2-other]');
+    if(o) show(o, S.h2 === 'other');
   }
-  Array.prototype.forEach.call(document.querySelectorAll('[data-int="edit"]'), syncAmend);
-  /* 幕1→幕2 连贯 */
-  function activateRetry2(){
-    var w = document.querySelector('[data-retry2-wrap]');
-    if(!w) return;
-    w.setAttribute('data-state', 'active');
-    var h = w.querySelector('[data-waiting-hint]');
-    if(h) h.classList.add('hidden');
-    var b = w.querySelector('[data-act="retry-approve-2"]');
-    if(b) b.disabled = false;
+
+  function decideH2(){
+    var sel = document.querySelector('input[name="h2opt"]:checked');
+    S.h2 = sel ? sel.value : '';
+    if(S.h2 === 'other' && !S.h2o.trim()) S.d[2] = null;
+    else S.d[2] = S.h2 ? 'choose' : null;
+    if(S.d[2]) S.edit = null;
+    render();
   }
+
+  function resetAll(){
+    S = { step: 1, d: {}, h2: '', h2o: '', h3: '', cancelled: false, submitted: false, left: TOTAL, maxStep: 1, edit: null };
+    $$('input[name="h2opt"]').forEach(function(r){ r.checked = false; });
+    var o = $('[data-h2-other]'); if(o) o.value = '';
+    var h = $('[data-h3-input]'); if(h) h.value = '';
+    render();
+  }
+
   document.addEventListener('click', function(e){
     var t = e.target.closest('[data-act]');
     if(!t) return;
     var act = t.getAttribute('data-act');
-    if(act === 'reject' || act === 'retry-reject'){
-      var box = near(t, '[data-reject-box]'); show(box, true);
-      var ta = near(t, '[data-reject-text]'); if(ta) ta.focus();
-      var cf = near(t, '[data-act="reject-confirm"]') || near(t, '[data-act="retry-confirm"]');
-      if(cf && ta) cf.disabled = ta.value.trim() === '';
-      return;
+
+    if(act === 'approve-1'){ if(S.step !== 1 || S.d[1]) return; S.d[1] = 'approve'; S.edit = null; render(); return; }
+    if(act === 'reject-1'){ if(S.step !== 1 || S.d[1]) return; S.d[1] = 'reject'; S.edit = null; render(); return; }
+    if(act === 'force-timeout'){ if(S.step !== 1 || S.d[1]) return; S.d[1] = 'timeout'; S.left = 0; S.edit = null; render(); return; }
+
+    if(act === 'back'){
+      if(S.cancelled || S.submitted || S.step <= 1) return;
+      S.step -= 1; S.edit = null; render(); return;
     }
-    if(act === 'reject-cancel'){ show(near(t, '[data-reject-box]'), false); return; }
-    if(act === 'retry-confirm'){
-      show(near(t, '[data-reject-box]'), false);
-      activateRetry2();
-      return;
+    if(act === 'next'){
+      if(S.cancelled || S.submitted || S.step >= 3 || !S.d[S.step]) return;
+      S.step += 1; S.edit = null; if(S.step > S.maxStep) S.maxStep = S.step; render(); return;
     }
-    if(act === 'hold'){ return; }
-    if(act === 'later'){
-      var state = near(t, '[data-later-state]'); show(state, true);
-      var sub = near(t, '[data-act="missing-submit"]'); if(sub) sub.disabled = true;
-      return;
+    if(act === 'cancel'){
+      if(S.cancelled || S.submitted) return;
+      S.cancelled = true; S.edit = null;
+      for(var n = 1; n <= S.maxStep; n++) S.d[n] = 'cancelled';
+      render(); return;
     }
-    if(act === 'edit-cancel'){
-      var r = t.closest('[data-int="edit"]');
-      if(r){
-        var sel = r.querySelector('[data-amend-select]'); if(sel) sel.selectedIndex = 0;
-        Array.prototype.forEach.call(r.querySelectorAll('input[type=checkbox]'), function(b){ b.checked = b.defaultChecked; });
-        syncAmend(r);
-      }
-      return;
+    if(act === 'submit'){
+      if(S.cancelled || S.submitted || S.step !== 3 || !S.d[3]) return;
+      S.submitted = true; S.edit = null; render(); return;
     }
+    if(act === 'goto' || act === 'revise'){
+      var target = Number(t.getAttribute('data-n'));
+      if(S.cancelled) return;
+      if(!target || !S.d[target]) return;
+      if(S.submitted) S.submitted = false;
+      if(target === 1) S.d[1] = null;
+      S.edit = target;
+      S.step = target;
+      if(target === 1) S.left = TOTAL;
+      render(); return;
+    }
+    if(act === 'reset'){ resetAll(); return; }
+    if(act === 'h2-clear'){
+      if(S.cancelled || S.submitted) return;
+      $$('input[name="h2opt"]').forEach(function(r){ r.checked = false; });
+      S.h2 = ''; S.h2o = ''; S.d[2] = null;
+      var oo = $('[data-h2-other]'); if(oo) oo.value = '';
+      render(); return;
+    }
+  });
+
+  document.addEventListener('change', function(e){
+    if(e.target.matches('[data-h2-opt]')) decideH2();
   });
   document.addEventListener('input', function(e){
-    var t = e.target;
-    if(t.matches('[data-reject-text]')){
-      var cf = near(t, '[data-act="reject-confirm"]') || near(t, '[data-act="retry-confirm"]');
-      if(cf) cf.disabled = t.value.trim() === '';
+    if(e.target.matches('[data-h2-other]')){
+      S.h2o = e.target.value;
+      if(S.h2 === 'other') decideH2();
       return;
     }
-    if(t.closest && t.closest('[data-int="edit"]')) syncAmend(t.closest('[data-int="edit"]'));
-    if(t.matches('[data-zone]')){
-      var root = t.closest('[data-int="missing"]');
-      var any = root && Array.prototype.slice.call(root.querySelectorAll('[data-zone]')).some(function(x){ return x.checked; });
-      var sub = root ? root.querySelector('[data-act="missing-submit"]') : null;
-      if(sub) sub.disabled = !any;
+    if(e.target.matches('[data-h3-input]')){
+      S.h3 = e.target.value.trim();
+      S.d[3] = S.h3 ? 'input' : null;
+      if(S.d[3]) S.edit = null;
+      render();
     }
   });
-  document.addEventListener('change', function(e){
-    var t = e.target;
-    if(t.matches('[data-opt]')){
-      var root = t.closest('[data-int="choose"]');
-      var btn = root ? root.querySelector('[data-act="opt-confirm"]') : null;
-      if(btn) btn.disabled = !t.checked;
-      return;
-    }
-    if(t.matches('[data-zone]') || (t.closest && t.closest('[data-int="edit"]'))) return;
-  });
+
+  /* H1 倒计时：仅步骤 1 未决时走动，归零即按超时收尾（超时即已决） */
+  setInterval(function(){
+    if(S.cancelled || S.submitted || S.d[1] || S.step !== 1) return;
+    if(S.left <= 0) return;
+    S.left -= 1;
+    var num = $('[data-count]'), ring = $('[data-ring]');
+    if(num) num.textContent = String(S.left);
+    if(ring) ring.setAttribute('stroke-dashoffset', (C * (1 - S.left / TOTAL)).toFixed(1));
+    if(S.left === 0){ S.d[1] = 'timeout'; render(); }
+  }, 1000);
+
+  /* 初始化：H2 的「其它」输入框默认收起、步进按初始态渲染 */
+  var initOther = $('[data-h2-other]');
+  if(initOther) initOther.classList.add('hidden');
+  render();
 })();
 </script>
 </body>
