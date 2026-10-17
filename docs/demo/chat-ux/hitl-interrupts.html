@@ -121,7 +121,7 @@
                     <circle class="fill-none stroke-[#e3e6ea] [stroke-width:3]" cx="18" cy="18" r="15.5" stroke-width="3"></circle>
                     <circle class="fill-none stroke-[#2563eb] [stroke-width:3] transition-[stroke-dashoffset] duration-1000 ease-linear" cx="18" cy="18" r="15.5" stroke-width="3" stroke-linecap="round" stroke-dasharray="97.4" stroke-dashoffset="0" transform="rotate(-90 18 18)" data-ring></circle>
                   </svg>
-                  <span class="text-[12.2px] text-[#57606a]"><b class="tabular-nums text-[#1f2328] [font-weight:650]" data-count>60</b> 秒后自动不执行（超时即已决）</span>
+                  <span class="text-[12.2px] text-[#57606a]"><b class="tabular-nums text-[#1f2328] [font-weight:650]" data-count>60</b> 秒后自动不执行（超时即已决 · 演示计时，滚出视口暂停）</span>
                 </div>
                 <div class="flex flex-wrap items-center gap-x-[9px] gap-y-[8px] px-[11px] pt-[11px] pb-[10px]">
                   <span class="text-[11.5px] text-[#8b949e] mr-auto">操作人 demo-user</span>
@@ -880,9 +880,16 @@
     }
   });
 
-  /* H1 倒计时：仅步骤 1 未决时走动，归零即按超时收尾（超时即已决） */
+  /* H1 倒计时：仅步骤 1 未决且卡片在视口内时走动（滚出视口暂停，避免评审时误触发），归零即按超时收尾 */
+  var h1Visible = true;
+  if (window.IntersectionObserver) {
+    var io = new IntersectionObserver(function(entries){ h1Visible = entries[0].isIntersecting; }, { threshold: 0.25 });
+    var h1card = $('[data-step-live="1"]');
+    if (h1card) io.observe(h1card);
+  }
   setInterval(function(){
     if(S.cancelled || S.submitted || S.d[1] || S.step !== 1) return;
+    if(!h1Visible) return;
     if(S.left <= 0) return;
     S.left -= 1;
     var num = $('[data-count]'), ring = $('[data-ring]');
