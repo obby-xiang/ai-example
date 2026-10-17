@@ -3,17 +3,17 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ai-example · 主题 demo：HITL 中断场景廊（用户裁决 r7 · 两条修正）</title>
+<title>ai-example · 主题 demo：HITL 中断场景廊（用户裁决 r8 · 限高双约束）</title>
 <link rel="stylesheet" href="hitl-interrupts.css">
 </head>
-<body class="m-0 p-0 bg-[#f1f2f4] text-[#1f2328] font-sans text-[13.8px] leading-[1.7] antialiased [&_button:focus-visible]:outline-none [&_button:focus-visible]:ring-2 [&_button:focus-visible]:ring-[#2563eb]/40" data-hitl-final="2026-10-17-r7">
+<body class="m-0 p-0 bg-[#f1f2f4] text-[#1f2328] font-sans text-[13.8px] leading-[1.7] antialiased [&_button:focus-visible]:outline-none [&_button:focus-visible]:ring-2 [&_button:focus-visible]:ring-[#2563eb]/40" data-hitl-final="2026-10-17-r8">
 
 <header class="sticky top-0 z-30 flex items-center gap-[16px] px-[22px] py-[12px] bg-white border-b border-[#e3e6ea]">
-  <div class="font-semibold text-[14px] tracking-[.2px]">ai-example · 主题 demo <span class="text-[#57606a] font-normal ml-[8px] text-[12.5px]">HITL 中断场景廊 · 两条修正（用户 2026-10-17 裁决 J1~J2）</span></div>
+  <div class="font-semibold text-[14px] tracking-[.2px]">ai-example · 主题 demo <span class="text-[#57606a] font-normal ml-[8px] text-[12.5px]">HITL 中断场景廊 · 限高双约束（用户 2026-10-17 裁决 r8）</span></div>
   <span class="ml-auto flex items-center gap-[6px]">
     <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">现役</span>
     <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#1f2328] text-white">单主题</span>
-    <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#edf7f0] text-[#1a7f45] border border-[#bfe3cd]">r7 · 2026-10-17</span>
+    <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#edf7f0] text-[#1a7f45] border border-[#bfe3cd]">r8 · 2026-10-17</span>
   </span>
 </header>
 
@@ -28,7 +28,7 @@
         <span class="ml-auto flex-none font-mono text-[11px] text-[#8b949e]">场景廊 · A1–A6 可交互 + B1–B7 样张</span>
       </div>
       <div class="px-[13px] pt-[9px] pb-[11px]">
-        <p class="m-0 text-[12.2px] leading-[1.6] text-[#57606a]">r7 两件事：①**单层滚动**——同一视觉列只留内容区那一层内滚，卡片与外层包裹不再叠加第二条相邻滚动条（多步只读卡此前把步骤内的选项滚动区一起克隆进了外层滚动区，属嵌套双条）；②**限高上调**——字段类 280px、表单 / 组合类 320px，仍按历史裁决族取值、纯限高内滚无展开钮。</p>
+        <p class="m-0 text-[12.2px] leading-[1.6] text-[#57606a]">r8 把限高族改为**双约束** `min(Npx, Nvh)`（对齐 VS Code 的写法）：字段类 `min(280px,35vh)`、表单 / 组合类 `min(320px,45vh)`——正常窗口按像素上限，矮窗口按视口比例自动收紧，避免「一个内滚区就吃掉半屏」。纯限高内滚、无展开钮、同一视觉列只一层滚动的口径不变。</p>
         <div class="mt-[9px] flex flex-col gap-[6px]">
           <div class="flex items-start gap-[8px] border-b border-[#eef0f3] py-[6px] last:border-b-0">
             <span class="flex-none w-[24px] flex items-center justify-center rounded-[5px] border border-[#cddcff] bg-[#eff4ff] text-[#2563eb] text-[10.5px] font-semibold tabular-nums">K1</span>
@@ -72,7 +72,7 @@
           </div>
           <div class="flex items-start gap-[8px] py-[6px]">
             <span class="flex-none w-[24px] flex items-center justify-center rounded-[5px] border border-[#cddcff] bg-[#eff4ff] text-[#2563eb] text-[10.5px] font-semibold tabular-nums">K11</span>
-            <span class="flex-1 min-w-0 text-[12.2px] leading-[1.6] text-[#57606a]"><b class="text-[#1f2328] [font-weight:650]">内容区限高内滚按历史裁决族</b>：字段类（审批卡参数 / 选项列表 / 输入字段）280px、表单 / 组合类（GF 字段区 / 多步只读卡）320px，一律 max-h + overflow-y-auto、无展开钮；同一视觉列**只允许一层滚动**（内滚区之外，卡片与外层包裹不得再出滚动条）。</span>
+            <span class="flex-1 min-w-0 text-[12.2px] leading-[1.6] text-[#57606a]"><b class="text-[#1f2328] [font-weight:650]">内容区限高内滚按历史裁决族</b>：限高双约束：字段类（审批卡参数 / 选项列表 / 输入字段）`min(280px,35vh)`、表单 / 组合类（GF 字段区 / 多步只读卡）`min(320px,45vh)`——正常窗口取像素上限，矮窗口按视口比例收紧；一律 max-h + overflow-y-auto、无展开钮；同一视觉列**只允许一层滚动**（内滚区之外，卡片与外层包裹不得再出滚动条）。</span>
           </div>
         </div>
       </div>
@@ -109,7 +109,7 @@
             <div data-form-body>
               <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">待你确认：删除生产数据库 orders_prod</div>
               <div class="px-[11px] pt-[6px] text-[11.9px] text-[#57606a] leading-[1.6]">删除后不可恢复，依赖该库的 3 个服务会立即报错。只有「批准 / 拒绝」两种处置，没有附加理由框，也没有其他出口。</div>
-              <div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px] max-h-[280px] overflow-y-auto" data-scroll-region data-limit="280" data-a1-params>
+              <div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto" data-scroll-region data-limit="min(280px,35vh)" data-a1-params>
                 <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">DROP DATABASE orders_prod（含 41 张表）</span></div>
                 <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">影响面</span><span class="flex-1 min-w-0 break-words">生产读写下线 · 3 个服务报错 · 不可回滚</span></div>
                 <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">回滚</span><span class="flex-1 min-w-0 break-words">无自动回滚，仅能靠 02:00 的全量备份人工恢复</span></div>
@@ -171,7 +171,7 @@
             <div data-form-body>
               <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">选择本次发布范围（单选）</div>
               <div class="px-[11px] pt-[6px] text-[11.9px] text-[#57606a] leading-[1.6]">选项一行一个、整行可点；「其他」同样是列表里的一行，其文字输入框常驻显示。</div>
-              <div class="mx-[11px] mt-[9px] flex flex-col gap-[7px] max-h-[280px] overflow-y-auto" data-scroll-region data-limit="280">
+              <div class="mx-[11px] mt-[9px] flex flex-col gap-[7px] max-h-[min(280px,35vh)] overflow-y-auto" data-scroll-region data-limit="min(280px,35vh)">
                 <div class="rounded-[9px] border border-[#e3e6ea] bg-white transition-colors duration-[150ms] hover:border-[#cddcff]" data-opt-row>
                   <label class="flex items-start gap-[9px] px-[10px] py-[8px] cursor-pointer">
                     <input type="radio" name="a2opt" value="noconflict" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-a2-opt>
@@ -282,7 +282,7 @@
             <div data-form-body>
               <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">勾选发布前确认项（多选）</div>
               <div class="px-[11px] pt-[6px] text-[11.9px] text-[#57606a] leading-[1.6]">复选框一行一个、整行可点；「其他」也是一行复选框，其文字输入框常驻显示。</div>
-              <div class="mx-[11px] mt-[9px] flex flex-col gap-[7px] max-h-[280px] overflow-y-auto" data-scroll-region data-limit="280">
+              <div class="mx-[11px] mt-[9px] flex flex-col gap-[7px] max-h-[min(280px,35vh)] overflow-y-auto" data-scroll-region data-limit="min(280px,35vh)">
                 <div class="rounded-[9px] border border-[#e3e6ea] bg-white transition-colors duration-[150ms] hover:border-[#cddcff]" data-opt-row>
                   <label class="flex items-start gap-[9px] px-[10px] py-[8px] cursor-pointer">
                     <input type="checkbox" value="checklist" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-a3-opt>
@@ -366,7 +366,7 @@
             <div data-form-body>
               <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">补充变更单号</div>
               <div class="px-[11px] pt-[6px] text-[11.9px] text-[#57606a] leading-[1.6]">单项必填文本，没有附加选项；留空时提交钮禁用，放弃请用「取消」。</div>
-              <div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[9px] max-h-[280px] overflow-y-auto" data-scroll-region data-limit="280">
+              <div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[9px] max-h-[min(280px,35vh)] overflow-y-auto" data-scroll-region data-limit="min(280px,35vh)">
                 <label class="block">
                   <span class="block text-[12.2px] text-[#57606a] mb-[5px]">变更单号（必填）</span>
                   <input type="text" data-a4-input placeholder="如 CHG-2026-0417" class="w-full rounded-[8px] border border-[#e3e6ea] bg-white px-[9px] py-[6px] font-sans text-[13px] text-[#1f2328] [outline:none] placeholder:text-[#8b949e] focus:border-[#2563eb]">
@@ -407,7 +407,7 @@
               <div data-a5-pane="1">
                 <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">确认发布前置条件（多选）</div>
                 <div class="px-[11px] pt-[6px] text-[11.9px] text-[#57606a] leading-[1.6]">复选框一行一个；首步不显示「上一步」，勾选后「下一步」才可用。</div>
-                <div class="mx-[11px] mt-[9px] flex flex-col gap-[7px] max-h-[280px] overflow-y-auto" data-scroll-region data-limit="280">
+                <div class="mx-[11px] mt-[9px] flex flex-col gap-[7px] max-h-[min(280px,35vh)] overflow-y-auto" data-scroll-region data-limit="min(280px,35vh)">
                   <div class="rounded-[9px] border border-[#e3e6ea] bg-white transition-colors duration-[150ms] hover:border-[#cddcff]" data-opt-row>
                     <label class="flex items-start gap-[9px] px-[10px] py-[8px] cursor-pointer">
                       <input type="checkbox" value="offpeak" class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]" data-a5-opt>
@@ -473,7 +473,7 @@
                     </span>
                   </span>
                 </div>
-                <div class="max-h-[320px] overflow-y-auto" data-scroll-region data-limit="320" data-locked>
+                <div class="max-h-[min(320px,45vh)] overflow-y-auto" data-scroll-region data-limit="min(320px,45vh)" data-locked>
                   <div data-a5-slot="1"></div>
                   <div class="mx-[11px] border-t border-[#e3e6ea]" data-a5-divider></div>
                   <div data-a5-slot="2"></div>
@@ -516,7 +516,7 @@
             <div data-form-body>
               <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">发布配置（请填写以下信息）</div>
               <div class="px-[11px] pt-[6px] text-[11.9px] text-[#57606a] leading-[1.6]">六型控件同卡：文本 / 数字 / 日期 / 单选 / 多选 / 开关。必填项未填完时提交钮为禁用态。</div>
-              <div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[9px] max-h-[320px] overflow-y-auto" data-scroll-region data-limit="320">
+              <div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[9px] max-h-[min(320px,45vh)] overflow-y-auto" data-scroll-region data-limit="min(320px,45vh)">
                 <div class="mb-[8px]">
                   <span class="block text-[12.2px] text-[#57606a] mb-[4px]">变更标题 <span class="text-[#c0392b]">*</span><span class="ml-[6px] font-mono text-[9.5px] text-[#8b949e]">text</span></span>
                   <input type="text" data-a6-title placeholder="如：spring 配置发布（华东）" class="w-full rounded-[8px] border border-[#e3e6ea] bg-white px-[9px] py-[6px] font-sans text-[13px] text-[#1f2328] [outline:none] placeholder:text-[#8b949e] focus:border-[#2563eb]">
@@ -623,7 +623,7 @@
             </div>
             <div data-locked class="pb-[11px]">
               <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">重启支付网关 gateway-prod-03</div>
-              <div class="mx-[11px] mt-[9px] bg-white border-0 rounded-[8px] px-[10px] py-[2px] max-h-[280px] overflow-y-auto" data-scroll-region data-limit="280">
+              <div class="mx-[11px] mt-[9px] bg-white border-0 rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto" data-scroll-region data-limit="min(280px,35vh)">
                 <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">restart 服务 gateway-prod-03（滚动重启）</span></div>
                 <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">影响面</span><span class="flex-1 min-w-0 break-words">支付链路约 8 秒抖动 · 客户端自动重连</span></div>
                 <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">回滚</span><span class="flex-1 min-w-0 break-words">无需回滚，失败自动切回旧实例</span></div>
@@ -664,7 +664,7 @@
               </div>
               <div data-locked class="pb-[11px]">
                 <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">清空 Redis 缓存 cluster-a</div>
-                <div class="mx-[11px] mt-[9px] bg-white border-0 rounded-[8px] px-[10px] py-[2px] max-h-[280px] overflow-y-auto" data-scroll-region data-limit="280">
+                <div class="mx-[11px] mt-[9px] bg-white border-0 rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto" data-scroll-region data-limit="min(280px,35vh)">
                   <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">FLUSHDB cluster-a（6 个分片全量清空）</span></div>
                   <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">影响面</span><span class="flex-1 min-w-0 break-words">会话全量失效 · 登录态全部重来</span></div>
                 </div>
@@ -689,7 +689,7 @@
               <div data-form-body>
                 <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">已按反馈修正：按 key 前缀分批淘汰缓存</div>
                 <div class="px-[11px] pt-[6px] text-[11.9px] text-[#57606a] leading-[1.6]">不再全量清空：只淘汰 session:* 与 cart:* 两类前缀，保留 idem:* 幂等键；分批 1 万条、间隔 200ms，可随时中断。</div>
-                <div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px] max-h-[280px] overflow-y-auto" data-scroll-region data-limit="280">
+                <div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto" data-scroll-region data-limit="min(280px,35vh)">
                   <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">SCAN + UNLINK session:* / cart:*（分批 1 万）</span></div>
                   <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">影响面</span><span class="flex-1 min-w-0 break-words">仅会话与购物车重登 · 幂等键保留</span></div>
                   <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">回滚</span><span class="flex-1 min-w-0 break-words">无需回滚，可中断</span></div>
@@ -733,7 +733,7 @@
             </div>
             <div data-locked class="pb-[11px]">
               <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">升级计费服务至 2.4.0</div>
-              <div class="mx-[11px] mt-[9px] bg-white border-0 rounded-[8px] px-[10px] py-[2px] max-h-[280px] overflow-y-auto" data-scroll-region data-limit="280">
+              <div class="mx-[11px] mt-[9px] bg-white border-0 rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto" data-scroll-region data-limit="min(280px,35vh)">
                 <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">滚动升级 billing-svc 至 2.4.0（6 副本）</span></div>
                 <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">影响面</span><span class="flex-1 min-w-0 break-words">账单出数延后约 2 分钟 · 不丢单</span></div>
                 <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">回滚</span><span class="flex-1 min-w-0 break-words">镜像回退 2.3.7，约 90 秒</span></div>
@@ -772,7 +772,7 @@
             </div>
             <div data-locked class="pb-[11px]">
               <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">缩容订单服务 order-svc 6 副本 → 2 副本</div>
-              <div class="mx-[11px] mt-[9px] bg-white border-0 rounded-[8px] px-[10px] py-[2px] max-h-[280px] overflow-y-auto" data-scroll-region data-limit="280">
+              <div class="mx-[11px] mt-[9px] bg-white border-0 rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto" data-scroll-region data-limit="min(280px,35vh)">
                 <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">scale deployment order-svc --replicas=2</span></div>
                 <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">影响面</span><span class="flex-1 min-w-0 break-words">订单写入并发下降 · 峰值可能排队</span></div>
                 <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">回滚</span><span class="flex-1 min-w-0 break-words">扩回 6 副本，约 40 秒</span></div>
@@ -812,7 +812,7 @@
             </div>
             <div data-locked class="pb-[11px]">
               <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">勾选发布前确认项（多选）</div>
-              <div class="mx-[11px] mt-[9px] flex flex-col gap-[7px] max-h-[280px] overflow-y-auto" data-scroll-region data-limit="280">
+              <div class="mx-[11px] mt-[9px] flex flex-col gap-[7px] max-h-[min(280px,35vh)] overflow-y-auto" data-scroll-region data-limit="min(280px,35vh)">
                 <div class="rounded-[9px] border border-[#e3e6ea] bg-white" data-opt-row>
                   <label class="flex items-start gap-[9px] px-[10px] py-[8px]">
                     <input type="checkbox" checked disabled class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb]">
@@ -878,7 +878,7 @@
             </div>
             <div data-locked class="pb-[11px]">
               <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">补充变更单号</div>
-              <div class="mx-[11px] mt-[9px] bg-white border-0 rounded-[8px] px-[10px] py-[9px] max-h-[280px] overflow-y-auto" data-scroll-region data-limit="280">
+              <div class="mx-[11px] mt-[9px] bg-white border-0 rounded-[8px] px-[10px] py-[9px] max-h-[min(280px,35vh)] overflow-y-auto" data-scroll-region data-limit="min(280px,35vh)">
                 <span class="block text-[12.2px] text-[#57606a] mb-[5px]">变更单号（必填）</span>
                 <input type="text" disabled value="" placeholder="未填写" class="w-full rounded-[8px] border border-[#e3e6ea] bg-white px-[9px] py-[6px] font-sans text-[13px] text-[#1f2328] [outline:none] disabled:text-[#57606a] placeholder:text-[#8b949e]">
               </div>
@@ -918,7 +918,7 @@
               </div>
               <div class="pb-[11px]" data-locked>
                 <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">发布配置到生产（3 项）</div>
-                <div class="mx-[11px] mt-[9px] bg-white border-0 rounded-[8px] px-[10px] py-[2px] max-h-[280px] overflow-y-auto" data-scroll-region data-limit="280">
+                <div class="mx-[11px] mt-[9px] bg-white border-0 rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto" data-scroll-region data-limit="min(280px,35vh)">
                   <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">publish --profile prod --items 3</span></div>
                   <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">影响面</span><span class="flex-1 min-w-0 break-words">CURRENCY / TAX_RULE / PRICING 三域生效</span></div>
                   <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">回滚</span><span class="flex-1 min-w-0 break-words">一键回滚上一版本，约 20 秒</span></div>
@@ -940,7 +940,7 @@
               </div>
               <div class="pb-[11px]" data-locked>
                 <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">补充本次发布的变更单号</div>
-                <div class="mx-[11px] mt-[9px] bg-white border-0 rounded-[8px] px-[10px] py-[9px] max-h-[280px] overflow-y-auto" data-scroll-region data-limit="280">
+                <div class="mx-[11px] mt-[9px] bg-white border-0 rounded-[8px] px-[10px] py-[9px] max-h-[min(280px,35vh)] overflow-y-auto" data-scroll-region data-limit="min(280px,35vh)">
                   <span class="block text-[12.2px] text-[#57606a] mb-[5px]">变更单号（必填）</span>
                   <input type="text" disabled value="" placeholder="未填写" class="w-full rounded-[8px] border border-[#e3e6ea] bg-white px-[9px] py-[6px] font-sans text-[13px] text-[#1f2328] [outline:none] disabled:text-[#57606a] placeholder:text-[#8b949e]">
                 </div>
@@ -961,7 +961,7 @@
               </div>
               <div class="pb-[11px]" data-locked>
                 <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">清理过期导出文件（bucket 保留 7 天）</div>
-                <div class="mx-[11px] mt-[9px] bg-white border-0 rounded-[8px] px-[10px] py-[2px] max-h-[280px] overflow-y-auto" data-scroll-region data-limit="280">
+                <div class="mx-[11px] mt-[9px] bg-white border-0 rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto" data-scroll-region data-limit="min(280px,35vh)">
                   <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">rm s3://export/* --older-than 7d</span></div>
                   <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">影响面</span><span class="flex-1 min-w-0 break-words">历史导出不可下载 · 已下载的不受影响</span></div>
                 </div>
@@ -1032,7 +1032,7 @@
     $$('[data-scroll-region]', root).forEach(function(n){
       n.removeAttribute('data-scroll-region');
       n.removeAttribute('data-limit');
-      n.classList.remove('max-h-[160px]', 'max-h-[280px]', 'max-h-[320px]', 'overflow-y-auto');
+      n.classList.remove('max-h-[160px]', 'max-h-[280px]', 'max-h-[320px]', 'max-h-[min(280px,35vh)]', 'max-h-[min(320px,45vh)]', 'overflow-y-auto');
     });
   }
 
