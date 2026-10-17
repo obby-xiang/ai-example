@@ -3,17 +3,17 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ai-example · 主题 demo：HITL 中断场景廊（用户裁决 r8 · 限高双约束）</title>
+<title>ai-example · 主题 demo：HITL 中断场景廊（用户裁决 r9 · 已决默认折叠）</title>
 <link rel="stylesheet" href="hitl-interrupts.css">
 </head>
-<body class="m-0 p-0 bg-[#f1f2f4] text-[#1f2328] font-sans text-[13.8px] leading-[1.7] antialiased [&_button:focus-visible]:outline-none [&_button:focus-visible]:ring-2 [&_button:focus-visible]:ring-[#2563eb]/40" data-hitl-final="2026-10-17-r8">
+<body class="m-0 p-0 bg-[#f1f2f4] text-[#1f2328] font-sans text-[13.8px] leading-[1.7] antialiased [&_button:focus-visible]:outline-none [&_button:focus-visible]:ring-2 [&_button:focus-visible]:ring-[#2563eb]/40" data-hitl-final="2026-10-17-r9">
 
 <header class="sticky top-0 z-30 flex items-center gap-[16px] px-[22px] py-[12px] bg-white border-b border-[#e3e6ea]">
-  <div class="font-semibold text-[14px] tracking-[.2px]">ai-example · 主题 demo <span class="text-[#57606a] font-normal ml-[8px] text-[12.5px]">HITL 中断场景廊 · 限高双约束（用户 2026-10-17 裁决 r8）</span></div>
+  <div class="font-semibold text-[14px] tracking-[.2px]">ai-example · 主题 demo <span class="text-[#57606a] font-normal ml-[8px] text-[12.5px]">HITL 中断场景廊 · 已决默认折叠（用户 2026-10-17 裁决 r9）</span></div>
   <span class="ml-auto flex items-center gap-[6px]">
     <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">现役</span>
     <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#1f2328] text-white">单主题</span>
-    <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#edf7f0] text-[#1a7f45] border border-[#bfe3cd]">r8 · 2026-10-17</span>
+    <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#edf7f0] text-[#1a7f45] border border-[#bfe3cd]">r9 · 2026-10-17</span>
   </span>
 </header>
 
@@ -24,11 +24,11 @@
     <section id="s0" data-scene="s0" class="mt-[16px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden">
       <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[13px] py-[9px] border-b border-[#eef0f3] bg-[#f5f8ff]">
         <span class="flex-none w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#2563eb] text-white text-[11px] font-semibold tabular-nums">0</span>
-        <h3 class="m-0 text-[13.6px] [font-weight:650]">本轮口径 K1~K11（用户 2026-10-17 已批准，逐条执行零偏差）</h3>
+        <h3 class="m-0 text-[13.6px] [font-weight:650]">本轮口径 K1~K12（用户 2026-10-17 已批准，逐条执行零偏差）</h3>
         <span class="ml-auto flex-none font-mono text-[11px] text-[#8b949e]">场景廊 · A1–A6 可交互 + B1–B7 样张</span>
       </div>
       <div class="px-[13px] pt-[9px] pb-[11px]">
-        <p class="m-0 text-[12.2px] leading-[1.6] text-[#57606a]">r8 把限高族改为**双约束** `min(Npx, Nvh)`（对齐 VS Code 的写法）：字段类 `min(280px,35vh)`、表单 / 组合类 `min(320px,45vh)`——正常窗口按像素上限，矮窗口按视口比例自动收紧，避免「一个内滚区就吃掉半屏」。纯限高内滚、无展开钮、同一视觉列只一层滚动的口径不变。</p>
+        <p class="m-0 text-[12.2px] leading-[1.6] text-[#57606a]">r9 落「已决默认折叠」：成功终态（已批准 / 已提交）在**回合结束**（后续 AI 消息出现）后收成卡头摘要行——徽标 + 一句话决策摘要 + 决策时间 + chevron，点卡头（或 Enter / Space）展开看原样只读内容；已拒绝 / 已超时 / 已批准·执行失败 / 已取消四类保持默认展开。决策瞬间不立即收，避免把用户刚做的决定「秒收」。</p>
         <div class="mt-[9px] flex flex-col gap-[6px]">
           <div class="flex items-start gap-[8px] border-b border-[#eef0f3] py-[6px] last:border-b-0">
             <span class="flex-none w-[24px] flex items-center justify-center rounded-[5px] border border-[#cddcff] bg-[#eff4ff] text-[#2563eb] text-[10.5px] font-semibold tabular-nums">K1</span>
@@ -56,7 +56,7 @@
           </div>
           <div class="flex items-start gap-[8px] border-b border-[#eef0f3] py-[6px] last:border-b-0">
             <span class="flex-none w-[24px] flex items-center justify-center rounded-[5px] border border-[#cddcff] bg-[#eff4ff] text-[#2563eb] text-[10.5px] font-semibold tabular-nums">K7</span>
-            <span class="flex-1 min-w-0 text-[12.2px] leading-[1.6] text-[#57606a]"><b class="text-[#1f2328] [font-weight:650]">拒绝后「修正走会话」</b>：拒绝不改写旧卡——AI 在消息流按反馈重新提案，出现一张新的待决审批卡，旧卡原样留证（见 B2）。</span>
+            <span class="flex-1 min-w-0 text-[12.2px] leading-[1.6] text-[#57606a]"><b class="text-[#1f2328] [font-weight:650]">拒绝不改写旧卡</b>：拒绝只落徽标与决策时间，卡体原样留证、默认展开；「修正走会话」属产品口径，本 demo 不演该闭环，也不设拒因输入或常驻理由行。</span>
           </div>
           <div class="flex items-start gap-[8px] border-b border-[#eef0f3] py-[6px] last:border-b-0">
             <span class="flex-none w-[24px] flex items-center justify-center rounded-[5px] border border-[#cddcff] bg-[#eff4ff] text-[#2563eb] text-[10.5px] font-semibold tabular-nums">K8</span>
@@ -73,6 +73,10 @@
           <div class="flex items-start gap-[8px] py-[6px]">
             <span class="flex-none w-[24px] flex items-center justify-center rounded-[5px] border border-[#cddcff] bg-[#eff4ff] text-[#2563eb] text-[10.5px] font-semibold tabular-nums">K11</span>
             <span class="flex-1 min-w-0 text-[12.2px] leading-[1.6] text-[#57606a]"><b class="text-[#1f2328] [font-weight:650]">内容区限高内滚按历史裁决族</b>：限高双约束：字段类（审批卡参数 / 选项列表 / 输入字段）`min(280px,35vh)`、表单 / 组合类（GF 字段区 / 多步只读卡）`min(320px,45vh)`——正常窗口取像素上限，矮窗口按视口比例收紧；一律 max-h + overflow-y-auto、无展开钮；同一视觉列**只允许一层滚动**（内滚区之外，卡片与外层包裹不得再出滚动条）。</span>
+          </div>
+          <div class="flex items-start gap-[8px] py-[6px]">
+            <span class="flex-none w-[24px] flex items-center justify-center rounded-[5px] border border-[#cddcff] bg-[#eff4ff] text-[#2563eb] text-[10.5px] font-semibold tabular-nums">K12</span>
+            <span class="flex-1 min-w-0 text-[12.2px] leading-[1.6] text-[#57606a]"><b class="text-[#1f2328] [font-weight:650]">已决默认折叠</b>：成功终态（已批准 / 已提交）在**回合结束**（后续 AI 消息出现）后收成卡头摘要行（徽标 + 一句话摘要 + 决策时间 + chevron），卡头可聚焦（aria-expanded）、Enter / Space 展开；已拒绝 / 已超时 / 已批准·执行失败 / 已取消四类默认展开。</span>
           </div>
         </div>
       </div>
@@ -92,13 +96,13 @@
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
           <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-card="a1" data-status="pending">
-            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
+            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]" data-card-head>
               <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">H1 · 单步审批</span>
               <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]" data-decided-badge data-state="approved">✓ 已批准</span>
               <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]" data-decided-badge data-state="rejected">✗ 已拒绝</span>
               <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#b45309] bg-[#fffbeb] border border-[#fde68a]" data-decided-badge data-state="timeout">! 已超时</span>
               <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#fffbeb] text-[#b45309] border-[#fde68a]">风险 HIGH</span>
-              <span class="hidden ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums" data-decided-time>--:--</span>
+              <span class="hidden flex order-last w-full min-w-0 items-center gap-[6px] text-[12.4px] leading-[1.6] text-[#57606a] break-words" data-collapse-summary><span class="min-w-0 break-words" data-collapse-text></span><svg class="ml-auto flex-none text-[#8b949e] transition-transform duration-[150ms]" data-collapse-chev width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"></path></svg></span><span class="hidden ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums" data-decided-time>--:--</span>
               <span class="hidden" data-readonly-mark>
                 <span class="flex items-center gap-[6px]">
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="text-[#8b949e]" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>
@@ -154,13 +158,13 @@
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
           <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-card="a2" data-status="editing">
-            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
+            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]" data-card-head>
               <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">H2 · 单选</span>
               <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]" data-decided-badge data-state="submitted">✓ 已提交</span>
               <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]" data-decided-badge data-state="cancelled">✗ 已取消</span>
               <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#f6f7f9] text-[#57606a] border-[#e3e6ea]">轻审计</span>
               <span class="flex-none text-[10.5px] text-[#8b949e]">选项 6 + 其他</span>
-              <span class="hidden ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums" data-decided-time>--:--</span>
+              <span class="hidden flex order-last w-full min-w-0 items-center gap-[6px] text-[12.4px] leading-[1.6] text-[#57606a] break-words" data-collapse-summary><span class="min-w-0 break-words" data-collapse-text></span><svg class="ml-auto flex-none text-[#8b949e] transition-transform duration-[150ms]" data-collapse-chev width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"></path></svg></span><span class="hidden ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums" data-decided-time>--:--</span>
               <span class="hidden" data-readonly-mark>
                 <span class="flex items-center gap-[6px]">
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="text-[#8b949e]" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>
@@ -266,12 +270,12 @@
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
           <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-card="a3" data-status="editing">
-            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
+            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]" data-card-head>
               <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">H2 · 多选</span>
               <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]" data-decided-badge data-state="submitted">✓ 已提交</span>
               <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]" data-decided-badge data-state="cancelled">✗ 已取消</span>
               <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#f6f7f9] text-[#57606a] border-[#e3e6ea]">轻审计</span>
-              <span class="hidden ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums" data-decided-time>--:--</span>
+              <span class="hidden flex order-last w-full min-w-0 items-center gap-[6px] text-[12.4px] leading-[1.6] text-[#57606a] break-words" data-collapse-summary><span class="min-w-0 break-words" data-collapse-text></span><svg class="ml-auto flex-none text-[#8b949e] transition-transform duration-[150ms]" data-collapse-chev width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"></path></svg></span><span class="hidden ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums" data-decided-time>--:--</span>
               <span class="hidden" data-readonly-mark>
                 <span class="flex items-center gap-[6px]">
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="text-[#8b949e]" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>
@@ -350,12 +354,12 @@
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
           <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-card="a4" data-status="editing">
-            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
+            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]" data-card-head>
               <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">H3 · 输入</span>
               <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]" data-decided-badge data-state="submitted">✓ 已提交</span>
               <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]" data-decided-badge data-state="cancelled">✗ 已取消</span>
               <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#fffbeb] text-[#b45309] border-[#fde68a]">必填</span>
-              <span class="hidden ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums" data-decided-time>--:--</span>
+              <span class="hidden flex order-last w-full min-w-0 items-center gap-[6px] text-[12.4px] leading-[1.6] text-[#57606a] break-words" data-collapse-summary><span class="min-w-0 break-words" data-collapse-text></span><svg class="ml-auto flex-none text-[#8b949e] transition-transform duration-[150ms]" data-collapse-chev width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"></path></svg></span><span class="hidden ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums" data-decided-time>--:--</span>
               <span class="hidden" data-readonly-mark>
                 <span class="flex items-center gap-[6px]">
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="text-[#8b949e]" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>
@@ -399,7 +403,7 @@
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
           <div class="w-[440px] max-w-full mx-auto flex flex-col gap-[10px]" data-card="a5" data-status="step-1">
             <div data-a5-live class="bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden">
-              <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
+              <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]" data-card-head>
                 <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">发布前参数确认</span>
                 <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#f6f7f9] text-[#57606a] border-[#e3e6ea] tabular-nums" data-a5-progress>步骤 1/2</span>
                 <span class="flex-none text-[10.5px] text-[#8b949e]">仅选择与输入</span>
@@ -461,11 +465,11 @@
             </div>
             <div class="hidden" data-a5-ro>
               <div class="bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-a5-card="1">
-                <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
+                <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]" data-card-head>
                   <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff] tabular-nums">发布前参数确认 · 2 步</span>
                   <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]" data-a5-badge="submitted">✓ 已提交</span>
                   <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]" data-a5-badge="cancelled">✗ 已取消</span>
-                  <span class="ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums" data-a5-time>--:--</span>
+                  <span class="hidden flex order-last w-full min-w-0 items-center gap-[6px] text-[12.4px] leading-[1.6] text-[#57606a] break-words" data-collapse-summary><span class="min-w-0 break-words" data-collapse-text></span><svg class="ml-auto flex-none text-[#8b949e] transition-transform duration-[150ms]" data-collapse-chev width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"></path></svg></span><span class="ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums" data-a5-time>--:--</span>
                   <span data-readonly-mark>
                     <span class="flex items-center gap-[6px]">
                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="text-[#8b949e]" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>
@@ -500,12 +504,12 @@
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
           <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-card="a6" data-status="editing">
-            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
+            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]" data-card-head>
               <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">GF · 生成式表单</span>
               <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]" data-decided-badge data-state="submitted">✓ 已提交</span>
               <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]" data-decided-badge data-state="cancelled">✗ 已取消</span>
               <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#f6f7f9] text-[#57606a] border-[#e3e6ea]">schema 驱动</span>
-              <span class="hidden ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums" data-decided-time>--:--</span>
+              <span class="hidden flex order-last w-full min-w-0 items-center gap-[6px] text-[12.4px] leading-[1.6] text-[#57606a] break-words" data-collapse-summary><span class="min-w-0 break-words" data-collapse-text></span><svg class="ml-auto flex-none text-[#8b949e] transition-transform duration-[150ms]" data-collapse-chev width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"></path></svg></span><span class="hidden ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums" data-decided-time>--:--</span>
               <span class="hidden" data-readonly-mark>
                 <span class="flex items-center gap-[6px]">
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="text-[#8b949e]" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>
@@ -608,12 +612,12 @@
       </div>
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
-          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-sample="b1">
-            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
+          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-sample="b1" data-collapse="success" data-collapsed="1">
+            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9] cursor-pointer" data-card-head role="button" tabindex="0" aria-expanded="false" aria-label="展开或收起决策详情">
               <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">H1 · 单步审批</span>
               <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]">✓ 已批准</span>
               <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#fffbeb] text-[#b45309] border-[#fde68a]">风险 HIGH</span>
-              <span class="ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums">2026-10-16 15:02</span>
+              <span class="flex order-last w-full min-w-0 items-center gap-[6px] text-[12.4px] leading-[1.6] text-[#57606a] break-words" data-collapse-summary><span class="min-w-0 break-words" data-collapse-text>已批准 · 重启支付网关 gateway-prod-03</span><svg class="ml-auto flex-none rotate-180 text-[#8b949e] transition-transform duration-[150ms]" data-collapse-chev width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"></path></svg></span><span class="ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums">2026-10-16 15:02</span>
               <span data-readonly-mark>
                 <span class="flex items-center gap-[6px]">
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="text-[#8b949e]" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>
@@ -621,7 +625,7 @@
                 </span>
               </span>
             </div>
-            <div data-locked class="pb-[11px]">
+            <div data-locked class="hidden pb-[11px]" data-collapse-body>
               <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">重启支付网关 gateway-prod-03</div>
               <div class="mx-[11px] mt-[9px] bg-white border-0 rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto" data-scroll-region data-limit="min(280px,35vh)">
                 <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">restart 服务 gateway-prod-03（滚动重启）</span></div>
@@ -636,21 +640,21 @@
       </div>
     </section>
 
-    <!-- ================= B2 已拒绝 + 重新提案 ================= -->
+    <!-- ================= B2 已拒绝 ================= -->
     <section id="b2" data-scene="b2" class="mt-[14px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden">
       <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[13px] py-[9px] border-b border-[#eef0f3] bg-[#f5f8ff]">
         <span class="flex-none w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#1f2328] text-white text-[11px] font-semibold tabular-nums">B2</span>
-        <h3 class="m-0 text-[13.6px] [font-weight:650]">已拒绝 + AI 重新提案（K7 修正走会话）</h3>
-        <span class="text-[11.5px] text-[#57606a]">用于拒绝后的闭环：旧卡原样留证，AI 在消息流按反馈重新提案，出现一张新的待决审批卡。</span>
+        <h3 class="m-0 text-[13.6px] [font-weight:650]">已拒绝（H1 终态二）</h3>
+        <span class="text-[11.5px] text-[#57606a]">用于拒绝留证：拒绝不改写旧卡，卡体默认展开、参数区与决策时间可逐项追溯。</span>
         <span class="ml-auto flex items-center gap-[6px]">
-          <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#f6f7f9] text-[#57606a] border border-[#e3e6ea]">只读 + 新待决</span>
+          <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#f6f7f9] text-[#57606a] border border-[#e3e6ea]">只读样张</span>
         </span>
       </div>
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
           <div class="w-[440px] max-w-full mx-auto flex flex-col gap-[10px]">
             <div class="bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-sample="b2">
-              <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
+              <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]" data-card-head>
                 <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">H1 · 单步审批</span>
                 <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]">✗ 已拒绝</span>
                 <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#fffbeb] text-[#b45309] border-[#fde68a]">风险 HIGH</span>
@@ -668,42 +672,12 @@
                   <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">FLUSHDB cluster-a（6 个分片全量清空）</span></div>
                   <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">影响面</span><span class="flex-1 min-w-0 break-words">会话全量失效 · 登录态全部重来</span></div>
                 </div>
-                <div class="mx-[11px] mt-[7px] text-[11.5px] text-[#57606a] leading-[1.6]">决策人 demo-user · 拒绝理由留在会话里，不改写本卡。</div>
+                <div class="mx-[11px] mt-[7px] text-[11.5px] text-[#57606a] leading-[1.6]">决策人 demo-user · 拒绝未改动任何实例 · 已写入审计日志。</div>
               </div>
             </div>
-            <div class="bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-card="b2-reproposal" data-status="pending">
-              <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
-                <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">H1 · 单步审批</span>
-                <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#f6f7f9] text-[#57606a] border-[#e3e6ea]">AI 重新提案</span>
-                <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]" data-decided-badge data-state="approved">✓ 已批准</span>
-                <span class="hidden flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]" data-decided-badge data-state="rejected">✗ 已拒绝</span>
-                <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#fffbeb] text-[#b45309] border-[#fde68a]">风险 MEDIUM</span>
-                <span class="hidden ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums" data-decided-time>--:--</span>
-                <span class="hidden" data-readonly-mark>
-                  <span class="flex items-center gap-[6px]">
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="text-[#8b949e]" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>
-                    <span class="text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] bg-[#f1f2f4] text-[#57606a] border border-[#e3e6ea]">只读</span>
-                  </span>
-                </span>
-              </div>
-              <div data-form-body>
-                <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">已按反馈修正：按 key 前缀分批淘汰缓存</div>
-                <div class="px-[11px] pt-[6px] text-[11.9px] text-[#57606a] leading-[1.6]">不再全量清空：只淘汰 session:* 与 cart:* 两类前缀，保留 idem:* 幂等键；分批 1 万条、间隔 200ms，可随时中断。</div>
-                <div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto" data-scroll-region data-limit="min(280px,35vh)">
-                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">SCAN + UNLINK session:* / cart:*（分批 1 万）</span></div>
-                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">影响面</span><span class="flex-1 min-w-0 break-words">仅会话与购物车重登 · 幂等键保留</span></div>
-                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">回滚</span><span class="flex-1 min-w-0 break-words">无需回滚，可中断</span></div>
-                </div>
-                <div class="flex items-center gap-[8px] px-[11px] pt-[11px] pb-[10px]" data-live-only>
-                  <span class="flex-1"></span>
-                  <button type="button" data-act="b2-reject" class="flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-[#e3e6ea] bg-white text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]">拒绝</button>
-                  <button type="button" data-act="b2-approve" class="flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-transparent bg-[#2563eb] text-white font-semibold transition-all duration-[150ms] hover:brightness-[1.08]">批准</button>
-                </div>
-              </div>
-            </div>
-          </div>
+                      </div>
         </div>
-        <p class="m-0 mt-[8px] text-[11.5px] text-[#57606a] leading-[1.6]">口径：拒绝不改写旧卡（旧卡永久留证）；修正走会话——下面这张是 AI 按反馈重新提案的新卡，可继续决策，决策后同样原地转只读。</p>
+        <p class="m-0 mt-[8px] text-[11.5px] text-[#57606a] leading-[1.6]">口径：拒绝不改写旧卡，卡体默认展开（不折叠），参数区与决策时间原样留证；本页不演「重新提案」这一闭环，也不设拒因输入或常驻理由行。</p>
       </div>
     </section>
 
@@ -720,7 +694,7 @@
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
           <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-sample="b3">
-            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
+            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]" data-card-head>
               <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">H1 · 单步审批</span>
               <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#b45309] bg-[#fffbeb] border border-[#fde68a]">! 已超时</span>
               <span class="ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums">2026-10-16 18:15</span>
@@ -759,7 +733,7 @@
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
           <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-sample="b4">
-            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
+            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]" data-card-head>
               <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">H1 · 单步审批</span>
               <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]">! 已批准 · 执行失败</span>
               <span class="ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums">2026-10-16 21:07</span>
@@ -798,11 +772,11 @@
       </div>
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
-          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-sample="b5">
-            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
+          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-sample="b5" data-collapse="success" data-collapsed="1">
+            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9] cursor-pointer" data-card-head role="button" tabindex="0" aria-expanded="false" aria-label="展开或收起决策详情">
               <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">H2 · 多选</span>
               <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]">✓ 已提交</span>
-              <span class="ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums">2026-10-17 09:41</span>
+              <span class="flex order-last w-full min-w-0 items-center gap-[6px] text-[12.4px] leading-[1.6] text-[#57606a] break-words" data-collapse-summary><span class="min-w-0 break-words" data-collapse-text>已提交 · 已勾选 3 项发布前确认</span><svg class="ml-auto flex-none rotate-180 text-[#8b949e] transition-transform duration-[150ms]" data-collapse-chev width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"></path></svg></span><span class="ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums">2026-10-17 09:41</span>
               <span data-readonly-mark>
                 <span class="flex items-center gap-[6px]">
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="text-[#8b949e]" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>
@@ -810,7 +784,7 @@
                 </span>
               </span>
             </div>
-            <div data-locked class="pb-[11px]">
+            <div data-locked class="hidden pb-[11px]" data-collapse-body>
               <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">勾选发布前确认项（多选）</div>
               <div class="mx-[11px] mt-[9px] flex flex-col gap-[7px] max-h-[min(280px,35vh)] overflow-y-auto" data-scroll-region data-limit="min(280px,35vh)">
                 <div class="rounded-[9px] border border-[#e3e6ea] bg-white" data-opt-row>
@@ -865,7 +839,7 @@
       <div class="px-[13px] pt-[9px] pb-[11px]">
         <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
           <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-sample="b6">
-            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
+            <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]" data-card-head>
               <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">H3 · 输入</span>
               <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]">✗ 已取消</span>
               <span class="ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums">2026-10-17 14:26</span>
@@ -904,11 +878,11 @@
         <p class="m-0 text-[12.2px] leading-[1.6] text-[#57606a]">同一会话的消息流片段：三次打断的已决卡按时间顺序永存——已批准（放行）→ 已取消（改主意，未提交不留内容）→ 已超时（无人应答），每张都是当时的原卡。</p>
         <div class="mt-[10px] rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
           <div class="w-[440px] max-w-full mx-auto flex flex-col gap-[10px]" data-sample="b7">
-            <div class="bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden">
-              <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
+            <div class="bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-collapse="success" data-collapsed="1">
+              <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9] cursor-pointer" data-card-head role="button" tabindex="0" aria-expanded="false" aria-label="展开或收起决策详情">
                 <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">H1 · 单步审批</span>
                 <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]">✓ 已批准</span>
-                <span class="ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums">2026-10-17 10:12</span>
+                <span class="flex order-last w-full min-w-0 items-center gap-[6px] text-[12.4px] leading-[1.6] text-[#57606a] break-words" data-collapse-summary><span class="min-w-0 break-words" data-collapse-text>已批准 · 发布配置到生产（3 项）</span><svg class="ml-auto flex-none rotate-180 text-[#8b949e] transition-transform duration-[150ms]" data-collapse-chev width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"></path></svg></span><span class="ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums">2026-10-17 10:12</span>
                 <span data-readonly-mark>
                   <span class="flex items-center gap-[6px]">
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="text-[#8b949e]" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>
@@ -916,7 +890,7 @@
                   </span>
                 </span>
               </div>
-              <div class="pb-[11px]" data-locked>
+              <div class="hidden pb-[11px]" data-locked data-collapse-body>
                 <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">发布配置到生产（3 项）</div>
                 <div class="mx-[11px] mt-[9px] bg-white border-0 rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto" data-scroll-region data-limit="min(280px,35vh)">
                   <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">publish --profile prod --items 3</span></div>
@@ -927,11 +901,10 @@
               </div>
             </div>
             <div class="bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden">
-              <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
+              <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]" data-card-head>
                 <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">H3 · 输入</span>
                 <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#c0392b] bg-[#fdf1ef] border border-[#e3e6ea]">✗ 已取消</span>
-                <span class="ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums">2026-10-17 10:25</span>
-                <span data-readonly-mark>
+                                <span data-readonly-mark>
                   <span class="flex items-center gap-[6px]">
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="text-[#8b949e]" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>
                     <span class="text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] bg-[#f1f2f4] text-[#57606a] border border-[#e3e6ea]">只读</span>
@@ -948,7 +921,7 @@
               </div>
             </div>
             <div class="bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden">
-              <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]">
+              <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[11px] py-[7px] border-b border-[#eef0f3] bg-[#f6f7f9]" data-card-head>
                 <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] border bg-[#eff4ff] text-[#2563eb] border-[#cddcff]">H1 · 单步审批</span>
                 <span class="flex-none text-[10.5px] leading-[1.6] px-[6px] rounded-[5px] font-semibold text-[#b45309] bg-[#fffbeb] border border-[#fde68a]">! 已超时</span>
                 <span class="ml-auto flex-none text-[11.5px] text-[#8b949e] tabular-nums">2026-10-17 11:03</span>
@@ -976,6 +949,13 @@
 
   </div>
 </main>
+
+<template data-followup-tpl>
+  <div class="mt-[10px] flex items-start gap-[8px] rounded-[10px] border border-[#eef0f3] bg-white px-[10px] py-[7px]" data-followup>
+    <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">AI</span>
+    <span class="flex-1 min-w-0 text-[12.2px] leading-[1.6] text-[#57606a] break-words" data-followup-text></span>
+  </div>
+</template>
 
 <script>
 (function(){
@@ -1021,6 +1001,7 @@
       }
     });
     root.setAttribute('data-locked', '');
+    root.setAttribute('data-collapse-body', '');
     var spacer = document.createElement('div');
     spacer.className = 'pb-[11px]';
     spacer.setAttribute('data-lock-spacer', '');
@@ -1036,7 +1017,7 @@
     });
   }
 
-  function decide(name, state, clearForm){
+  function decide(name, state, clearForm, summary){
     var card = $('[data-card="' + name + '"]');
     if(!card || card.hasAttribute('data-decided')) return null;
     card.setAttribute('data-decided', '1');
@@ -1052,7 +1033,56 @@
     if(t){ show(t, true); t.textContent = stamp(); }
     show(card.querySelector('[data-readonly-mark]'), true);
     card.setAttribute('data-status', state);
+    if(state === 'approved' || state === 'submitted'){
+      makeCollapsible(card, summary);
+      scheduleCollapse(card, summary);
+    }
     return card;
+  }
+
+  /* ---- N1：成功终态默认折叠（回合结束才收） ---- */
+  function headOf(card){ return card.querySelector('[data-card-head]'); }
+
+  function makeCollapsible(card, summary){
+    var head = headOf(card);
+    if(!head || card.getAttribute('data-collapse')) return;
+    card.setAttribute('data-collapse', 'success');
+    card.setAttribute('data-collapsed', '0');
+    head.setAttribute('role', 'button');
+    head.setAttribute('tabindex', '0');
+    head.setAttribute('aria-expanded', 'true');
+    head.setAttribute('aria-label', '展开或收起决策详情');
+    head.classList.add('cursor-pointer');
+    var t = head.querySelector('[data-collapse-text]');
+    if(t) t.textContent = summary || '';
+  }
+
+  function setCollapsed(card, on){
+    if(!card) return;
+    var head = headOf(card);
+    var body = card.querySelector('[data-collapse-body]');
+    if(!head || !body) return;
+    card.setAttribute('data-collapsed', on ? '1' : '0');
+    head.setAttribute('aria-expanded', on ? 'false' : 'true');
+    show(body, !on);
+    show(head.querySelector('[data-collapse-summary]'), on);
+    var chev = head.querySelector('[data-collapse-chev]');
+    if(chev) chev.classList.toggle('rotate-180', !on);
+  }
+
+  function scheduleCollapse(card, summary){
+    setTimeout(function(){
+      if(!document.body.contains(card) || card.getAttribute('data-collapse') !== 'success') return;
+      if(card.getAttribute('data-collapsed') === '1') return;
+      var tpl = $('[data-followup-tpl]');
+      if(tpl && card.parentElement && !card.parentElement.querySelector('[data-followup]')){
+        var frag = tpl.content.cloneNode(true);
+        var tx = frag.querySelector('[data-followup-text]');
+        if(tx) tx.textContent = '继续执行：' + (summary || '按你的决策继续后续步骤');
+        card.parentElement.insertBefore(frag, card.nextSibling);
+      }
+      setCollapsed(card, true);
+    }, 900);
   }
 
   /* ---- A1 审批卡 ---- */
@@ -1068,7 +1098,7 @@
     a1.left = 0;
     var c = $('[data-a1-count]'); if(c) c.textContent = '0';
     var r = $('[data-a1-ring]'); if(r) r.setAttribute('stroke-dashoffset', String(A1_C));
-    decide('a1', state, state === 'timeout');
+    decide('a1', state, state === 'timeout', state === 'approved' ? '已批准 · 删除生产数据库 orders_prod' : '');
     var h = $('[data-a1-helper]'); if(h) h.remove();
   }
   setInterval(function(){
@@ -1145,11 +1175,18 @@
       var second = $('[data-a5-slot="2"]'); if(second) second.remove();
       var divider = $('[data-a5-divider]'); if(divider) divider.remove();
     }
+    var region = $('[data-a5-ro] [data-scroll-region]');
+    if(region) region.setAttribute('data-collapse-body', '');
     $$('[data-a5-badge]').forEach(function(b){ show(b, b.getAttribute('data-a5-badge') === state); });
     $$('[data-a5-time]').forEach(function(x){ x.textContent = t; });
     var live = $('[data-a5-live]'); if(live) live.remove();
     show($('[data-a5-ro]'), true);
     card.setAttribute('data-status', state);
+    if(state === 'submitted'){
+      var a5sum = '已提交 · 发布窗口 ' + a5.win.trim();
+      makeCollapsible(card, a5sum);
+      scheduleCollapse(card, a5sum);
+    }
   }
 
   /* ---- A6 GF ---- */
@@ -1167,6 +1204,29 @@
   }
   function a6Render(){ $('[data-act="a6-submit"]').disabled = !a6Valid(); }
 
+  /* ---- N1：卡头折叠交互（点击 / Enter / Space） ---- */
+  function toggleByHead(head){
+    var card = head.closest('[data-collapse]');
+    if(!card) return;
+    setCollapsed(card, card.getAttribute('data-collapsed') !== '1');
+  }
+  document.addEventListener('click', function(e){
+    var head = e.target.closest('[data-card-head]');
+    if(!head) return;
+    var card = head.closest('[data-collapse]');
+    if(!card) return;
+    toggleByHead(head);
+  });
+  document.addEventListener('keydown', function(e){
+    if(e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
+    var head = e.target.closest && e.target.closest('[data-card-head]');
+    if(!head) return;
+    var card = head.closest('[data-collapse]');
+    if(!card) return;
+    e.preventDefault();
+    toggleByHead(head);
+  });
+
   /* ---- 事件 ---- */
   document.addEventListener('click', function(e){
     var t = e.target.closest('[data-act]');
@@ -1176,14 +1236,12 @@
     if(act === 'a1-approve'){ a1Finish('approved'); return; }
     if(act === 'a1-reject'){ a1Finish('rejected'); return; }
     if(act === 'a1-timeout'){ a1Finish('timeout'); return; }
-    if(act === 'b2-approve'){ decide('b2-reproposal', 'approved'); return; }
-    if(act === 'b2-reject'){ decide('b2-reproposal', 'rejected'); return; }
 
-    if(act === 'a2-submit'){ if(a2Valid()) decide('a2', 'submitted'); return; }
+    if(act === 'a2-submit'){ if(a2Valid()) decide('a2', 'submitted', false, '已提交 · 发布范围=' + labelOf($('[data-a2-opt]:checked'))); return; }
     if(act === 'a2-cancel'){ a2.choice = ''; a2.other = ''; decide('a2', 'cancelled', true); return; }
-    if(act === 'a3-submit'){ if(a3Valid()) decide('a3', 'submitted'); return; }
+    if(act === 'a3-submit'){ if(a3Valid()) decide('a3', 'submitted', false, '已提交 · 已勾选 ' + a3Picked().length + ' 项前置确认'); return; }
     if(act === 'a3-cancel'){ a3.other = ''; decide('a3', 'cancelled', true); return; }
-    if(act === 'a4-submit'){ if(a4.value.trim()) decide('a4', 'submitted'); return; }
+    if(act === 'a4-submit'){ if(a4.value.trim()) decide('a4', 'submitted', false, '已提交 · 变更单号 ' + a4.value.trim()); return; }
     if(act === 'a4-cancel'){ a4.value = ''; decide('a4', 'cancelled', true); return; }
 
     if(act === 'a5-next'){ if(a5Picked().length === 0) return; a5.step = 2; a5Render(); return; }
@@ -1191,7 +1249,7 @@
     if(act === 'a5-cancel'){ a5Finish('cancelled'); return; }
     if(act === 'a5-submit'){ if(a5.step !== 2 || !a5.win.trim()) return; a5Finish('submitted'); return; }
 
-    if(act === 'a6-submit'){ if(a6Valid()) decide('a6', 'submitted'); return; }
+    if(act === 'a6-submit'){ if(a6Valid()) decide('a6', 'submitted', false, '已提交 · 发布配置：' + $('[data-a6-title]').value.trim()); return; }
     if(act === 'a6-cancel'){ decide('a6', 'cancelled', true); return; }
   });
 
