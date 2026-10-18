@@ -279,7 +279,7 @@
                 </div>
                 <template v-else-if="part.kind === 'tool'">
                   <!-- 卡片三类型统一卡头（tool / hitl / form 同一结构）：
-                       左 = 固定类型裸 SVG（扳手 / 盾牌 / 清单，`#57606a` 中性色，整生命周期不变）；
+                       左 = 固定类型裸 SVG（扳手 / 圆圈问号 / 清单，`#57606a` 中性色，整生命周期不变）；
                        中 = 标题 + 摘要（中性色，不随状态变色）；右 = 状态文字标签（唯一状态色承载）；
                        末尾 = chevron（可折叠时；待决 HITL/GF 强制展开且无 chevron）。
                        已决 HITL / GF 的卡体仍为原样 UI 只读态（2A 批 K1 / F9 / M1：门卡字段表原样、
@@ -304,7 +304,7 @@
                         aria-hidden="true"
                       >
                         <svg v-if="cardTypeOf(part) === 'tool'" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
-                        <svg v-else-if="cardTypeOf(part) === 'hitl'" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                        <svg v-else-if="cardTypeOf(part) === 'hitl'" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
                         <svg v-else width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M8 11h8"/><path d="M8 15h5"/></svg>
                       </span>
                       <span class="flex min-w-0 flex-1 items-center gap-[6px]">

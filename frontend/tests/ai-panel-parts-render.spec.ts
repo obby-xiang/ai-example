@@ -1734,12 +1734,18 @@ describe('卡片通道统一：三类型卡头（左裸 SVG / 中标题摘要 / 
         expect(iconOf(id).find('svg').exists()).toBe(true)
       }
     }
-    // 三种通道图标互不相同（扳手 / 盾牌 / 清单）
+    // 三种通道图标互不相同（扳手 / 圆圈问号 / 清单）
     expect(new Set([
       svgOf('tool-ok').element.outerHTML,
       svgOf('hitl-ok').element.outerHTML,
       svgOf('form-ok').element.outerHTML
     ]).size).toBe(3)
+    // HITL = Feather help-circle（G）：r10 圆圈 + 官方问号钩 + 底部圆点，旧盾牌图形不得残留
+    const hitlSvg = svgOf('hitl-ok')
+    expect(hitlSvg.find('circle').attributes()).toMatchObject({ cx: '12', cy: '12', r: '10' })
+    expect(hitlSvg.findAll('path').map((p) => p.attributes('d'))).toEqual(['M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3'])
+    expect(hitlSvg.find('line').attributes()).toMatchObject({ x1: '12', y1: '17', x2: '12.01', y2: '17' })
+    expect(hitlSvg.element.outerHTML).not.toContain('M12 22s8-4 8-10V5')
     expect(iconOf('tool-ok').attributes('data-icon-type')).toBe('tool')
     expect(iconOf('hitl-ok').attributes('data-icon-type')).toBe('hitl')
     expect(iconOf('form-ok').attributes('data-icon-type')).toBe('form')
