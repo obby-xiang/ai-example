@@ -7,10 +7,12 @@
  * - resolveBlockExpanded 三态不变：requiresAction 强制展开 > manual 显式值 > defaultExpanded。
  */
 import { describe, expect, it } from 'vitest'
-import type { MessagePart, ReasoningPart, ToolPart } from '@/types/ai'
+import type { MessagePart, ReasoningPart, ToolPart, ToolRunStatus } from '@/types/ai'
 import {
   MASKED_VALUE,
   argRows,
+  cardStatusOf,
+  cardTypeOf,
   formSpecOf,
   groupParts,
   hasToolBody,
@@ -20,7 +22,8 @@ import {
   readOnlyDefaultExpanded,
   readOnlyStateOf,
   reasonHeadline,
-  resolveBlockExpanded
+  resolveBlockExpanded,
+  type CardTone
 } from '@/utils/blocks'
 
 let seq = 0
@@ -380,5 +383,115 @@ describe('S6 批1：回执独立块退役（groupParts 不再派生第二块）+
     ])
     expect(parsePublishConflicts('作业冲突：请先取消在途作业')).toEqual([])
     expect(parsePublishConflicts(undefined)).toEqual([])
+  })
+})
+
+describe('卡片三类型统一判据（tool / hitl / form）', () => {
+  it('cardTypeOf：CONFIRM→hitl、generative_form→form（按名优先）、其余→tool；不存在第四类型', () => {
+    expect(cardTypeOf(makeTool({ kind2: 'CONFIRM', status: 'pending', requiresAction: true }))).toBe('hitl')
+    expect(cardTypeOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'pending', requiresAction: true }))).toBe('form')
+    // 名与 kind2 同时可判时按名 —— 表单永远不是 HITL
+    expect(cardTypeOf(makeTool({ name: 'generative_form', kind2: 'CONFIRM', status: 'pending', requiresAction: true }))).toBe('form')
+    expect(cardTypeOf(makeTool({ name: 'start_export', kind2: 'BACKEND' }))).toBe('tool')
+    expect(cardTypeOf(makeTool({ name: 'navigate_to', kind2: 'FRONTEND' }))).toBe('tool')
+    // 全状态扫描：类型只可能是三值，已决六态也不产生「decided」第四类型
+    const states: ToolPart[] = [
+      makeTool({ status: 'pending' }),
+      makeTool({ status: 'running' }),
+      makeTool({ status: 'succeeded' }),
+      makeTool({ status: 'failed' }),
+      makeTool({ status: 'rejected' }),
+      makeTool({ status: 'blocked' }),
+      makeTool({ status: 'expired' }),
+      makeTool({ status: 'cancelled' }),
+      makeTool({ status: 'unknown' }),
+      makeTool({ kind2: 'CONFIRM', status: 'succeeded', decision: 'approved' }),
+      makeTool({ kind2: 'CONFIRM', status: 'rejected', decision: 'rejected' }),
+      makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'succeeded' })
+    ]
+    for (const part of states) {
+      expect(['tool', 'hitl', 'form']).toContain(cardTypeOf(part))
+    }
+  })
+
+  it('cardStatusOf：pending 文案按类型分工（tool 待执行 / hitl 等待确认 / form 待填写），同取 primary', () => {
+    expect(cardStatusOf(makeTool({ status: 'pending', requiresAction: false }))).toEqual({
+      key: 'pending', label: '待执行', tone: 'primary'
+    })
+    expect(cardStatusOf(makeTool({ kind2: 'CONFIRM', status: 'pending', requiresAction: true }))).toEqual({
+      key: 'pending', label: '等待确认', tone: 'primary'
+    })
+    expect(cardStatusOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'pending', requiresAction: true }))).toEqual({
+      key: 'pending', label: '待填写', tone: 'primary'
+    })
+  })
+
+  it('cardStatusOf：普通工具九态文案 / 色族（仅 pending 改「待执行」，其余保持）', () => {
+    const matrix: Array<[ToolRunStatus, string, CardTone]> = [
+      ['pending', '待执行', 'primary'],
+      ['running', '调用中…', 'primary'],
+      ['succeeded', '已成功', 'success'],
+      ['failed', '执行失败', 'danger'],
+      ['rejected', '已拒绝', 'neutral'],
+      ['blocked', '超出当前范围', 'neutral'],
+      ['expired', '会话已失效', 'neutral'],
+      ['cancelled', '已取消', 'neutral'],
+      ['unknown', '结局未知（未确认成功/失败）', 'neutral']
+    ]
+    for (const [status, label, tone] of matrix) {
+      expect(cardStatusOf(makeTool({ status }))).toEqual({ key: status, label, tone })
+    }
+    // 本地判定的超时作废沿用段标记，不落「会话已失效」
+    expect(cardStatusOf(makeTool({ status: 'expired', expiredLocally: true }))).toEqual({
+      key: 'expired', label: '已超时作废', tone: 'neutral'
+    })
+  })
+
+  it('cardStatusOf：HITL 六态 = readOnlyStateOf 单一状态机（key / label / tone）', () => {
+    const matrix: Array<[ToolPart, { key: string; label: string; tone: CardTone }]> = [
+      [makeTool({ kind2: 'CONFIRM', status: 'succeeded', decision: 'approved' }), { key: 'approved', label: '✓ 已批准', tone: 'success' }],
+      [makeTool({ kind2: 'CONFIRM', status: 'rejected', decision: 'rejected' }), { key: 'rejected', label: '✗ 已拒绝', tone: 'danger' }],
+      [makeTool({ kind2: 'CONFIRM', status: 'expired' }), { key: 'expired', label: '! 已超时', tone: 'warning' }],
+      [makeTool({ kind2: 'CONFIRM', status: 'failed', decision: 'approved' }), { key: 'failed', label: '! 已批准 · 执行失败', tone: 'danger' }],
+      // 门卡没有「已取消」：cancelled 归未批准收尾（已超时）
+      [makeTool({ kind2: 'CONFIRM', status: 'cancelled' }), { key: 'expired', label: '! 已超时', tone: 'warning' }]
+    ]
+    for (const [part, expected] of matrix) {
+      expect(isReadOnlyCard(part)).toBe(true)
+      expect(cardTypeOf(part)).toBe('hitl')
+      expect(cardStatusOf(part)).toEqual(expected)
+      expect(cardStatusOf(part).key).toBe(readOnlyStateOf(part))
+    }
+  })
+
+  it('cardStatusOf：GF 两态（已提交 / 已取消）走同一只读状态机；待填写走 pending', () => {
+    expect(cardStatusOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'succeeded' }))).toEqual({
+      key: 'submitted', label: '✓ 已提交', tone: 'success'
+    })
+    expect(cardStatusOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'cancelled' }))).toEqual({
+      key: 'cancelled', label: '✗ 已取消', tone: 'danger'
+    })
+    // failed 收尾同样归「未提交」（readOnlyStateOf 单一判据）
+    expect(cardStatusOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'failed' }))).toEqual({
+      key: 'cancelled', label: '✗ 已取消', tone: 'danger'
+    })
+  })
+
+  it('负控制：blocked / unknown / 非决策 pending 不落只读六态（继续普通状态文案）', () => {
+    expect(cardStatusOf(makeTool({ kind2: 'CONFIRM', status: 'blocked' }))).toEqual({
+      key: 'blocked', label: '超出当前范围', tone: 'neutral'
+    })
+    expect(cardStatusOf(makeTool({ kind2: 'CONFIRM', status: 'unknown' }))).toEqual({
+      key: 'unknown', label: '结局未知（未确认成功/失败）', tone: 'neutral'
+    })
+    expect(cardStatusOf(makeTool({ kind2: 'CONFIRM', status: 'pending' }))).toEqual({
+      key: 'pending', label: '等待确认', tone: 'primary'
+    })
+    expect(cardStatusOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'blocked' }))).toEqual({
+      key: 'blocked', label: '超出当前范围', tone: 'neutral'
+    })
+    expect(cardStatusOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'unknown' }))).toEqual({
+      key: 'unknown', label: '结局未知（未确认成功/失败）', tone: 'neutral'
+    })
   })
 })

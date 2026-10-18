@@ -244,9 +244,9 @@
 
             <template v-else>
               <!-- R-154 #13+14（用户直裁「彻底拆除」）：组壳退役 —— 每段恒一张卡。
-                   卡头折叠单行 = 工具名 + kind tag + 状态 tag（折叠态即可辨识工具与进展）；
+                   卡头折叠单行 = 左类型裸 SVG + 标题/摘要 + 右状态标签 + chevron（可折叠时）；
                    点击卡头展开/收起 args/result/错误位（v-show：DOM 恒在，testid/可见性稳定）；
-                   requiresAction 审批卡强制展开（卡头禁点，resolveBlockExpanded 兜底）。 -->
+                   requiresAction 待决 HITL/GF 强制展开且无 chevron（卡头禁点，resolveBlockExpanded 兜底）。 -->
               <template v-for="part in block.parts" :key="part.kind === 'tool' ? part.toolCallId : part.kind + '-' + part.seg">
                 <!-- 思考链（A6'）：受控折叠块，口径不变（默认折叠；展开态存 store，DOM 重建不丢）
                      R-165 S2：思考卡按 demo v7 `.reason` 结构重写 —— 卡容器 bg-#f6f7f9 / 1px #e3e6ea /
@@ -278,45 +278,57 @@
                   </div>
                 </div>
                 <template v-else-if="part.kind === 'tool'">
-                  <!-- 2A 批（裁决 2026-10-17 §9 K1 / §10 F9 / §12 H2 / §15 K12 / §16 M1 / §20）：
-                       **已决 HITL（确认门 / GF）原样 UI 只读态** ——
-                       ① 卡体 = 原卡原样锁定：门卡参数区字段表（gateRows，与待决态同源）原样；
-                          GF 复用**同一张表单**（FormRenderer readonly：六型控件原生 disabled、值回填、
-                          操作行整块不渲染）；未提交收尾（取消 / 超时）不保留任何填写内容（F9）。
-                       ② 卡头 = 状态徽标 + 人话摘要 + chevron 的单行**裸文字行**（无底色 / 无分隔线、
-                          px-10 / py-8 / gap-6、行高 36.4px 与工具卡同规格；chevron ml-auto 靠右、
-                          展开 rotate-90）。徽标 / 摘要恒在（折叠与否都可见 = R-160 兼容条件）。
-                       ③ 按钮零渲染（K1）：卡体里不存在任何操作按钮（批准 / 拒绝 / 提交 / 取消）。
-                       ④ 卡面不渲染 decidedAt（M1：后端照记、不上卡面）。
-                       ⑤ 已决六态（已批准 / 已拒绝 / 已超时 / 已批准·执行失败 / 已提交 / 已取消）
-                          回合结束后一律默认折叠，卡头摘要行保留可辨识信息；「回合未结束仍展开」
-                          由 turnStillOpen 承担。 -->
+                  <!-- 卡片三类型统一卡头（tool / hitl / form 同一结构）：
+                       左 = 固定类型裸 SVG（扳手 / 盾牌 / 清单，`#57606a` 中性色，整生命周期不变）；
+                       中 = 标题 + 摘要（中性色，不随状态变色）；右 = 状态文字标签（唯一状态色承载）；
+                       末尾 = chevron（可折叠时；待决 HITL/GF 强制展开且无 chevron）。
+                       已决 HITL / GF 的卡体仍为原样 UI 只读态（2A 批 K1 / F9 / M1：门卡字段表原样、
+                       GF 同一张表单 readonly、零操作按钮、卡面不渲染 decidedAt）；六态回合结束后
+                       一律默认折叠，由 turnStillOpen 承担「回合未结束仍展开」。 -->
                   <div
-                    v-if="isReadOnlyCard(part)"
-                    class="rocard block border border-solid border-[#e3e6ea] bg-white rounded-[10px] overflow-hidden mb-3.5"
-                    data-testid="hitl-receipt"
+                    :class="cardShellClass(part)"
+                    :data-testid="cardTestId(part)"
                   >
                     <button
                       type="button"
-                      class="ro-hd flex items-center gap-[6px] w-full px-[10px] py-[8px] border-0 bg-transparent text-left font-[inherit] cursor-pointer"
+                      :class="cardHeadClass(part)"
                       :aria-expanded="isBlockExpanded(block)"
-                      :aria-label="'展开或收起决策详情'"
-                      :data-testid="'ro-toggle-' + part.toolCallId"
-                      @click="toggleBlock(block)"
+                      :data-testid="cardToggleTestId(part, block)"
+                      :disabled="cardHeadDisabled(part)"
+                      @click="onCardHeadClick(block, part)"
                     >
                       <span
-                        :class="[readOnlyBadgeClass(part), 'flex-none']"
-                        :data-testid="'ro-badge-' + part.toolCallId"
-                        :data-state="readOnlyStateOf(part)"
-                      >{{ readOnlyBadgeLabel(part) }}</span>
+                        class="flex-none flex items-center justify-center w-[24px] text-[#57606a]"
+                        :data-icon-type="cardTypeOf(part)"
+                        :data-testid="'card-icon-' + part.toolCallId"
+                        aria-hidden="true"
+                      >
+                        <svg v-if="cardTypeOf(part) === 'tool'" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+                        <svg v-else-if="cardTypeOf(part) === 'hitl'" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                        <svg v-else width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M8 11h8"/><path d="M8 15h5"/></svg>
+                      </span>
+                      <span class="flex min-w-0 flex-1 items-center gap-[6px]">
+                        <span
+                          :class="['min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[12px] leading-[1.7] [font-weight:650] text-[#1f2328]', cardTypeOf(part) === 'tool' ? 'font-mono' : '']"
+                          :data-testid="'card-title-' + part.toolCallId"
+                        >{{ cardTitle(part) }}</span>
+                        <span
+                          class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[11.5px] leading-[1.6] text-[#57606a]"
+                          :data-testid="cardSummaryTestId(part)"
+                        >{{ cardSummary(part) }}</span>
+                      </span>
                       <span
-                        v-show="!isBlockExpanded(block)"
-                        class="ro-sum flex min-w-0 flex-1 items-center gap-[6px] text-[12.4px] leading-[1.6] text-[#57606a] whitespace-nowrap"
-                        :data-testid="'ro-summary-' + part.toolCallId"
-                      ><span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{{ readOnlySummary(part) }}</span></span>
-                      <span :class="[TCHEV_CLASS, 'ml-auto leading-[1.7]', isBlockExpanded(block) ? 'is-open' : '']">›</span>
+                        :class="cardStatusClass(part)"
+                        :data-testid="cardStatusTestId(part)"
+                        :data-state="cardStatusOf(part).key"
+                        :title="cardStatusLabel(part)"
+                      >{{ cardStatusLabel(part) }}</span>
+                      <span
+                        v-if="cardChevronShown(part)"
+                        :class="[TCHEV_CLASS, 'ml-auto leading-[1.7]', isBlockExpanded(block) ? 'is-open' : '']"
+                      >›</span>
                     </button>
-                    <div v-show="isBlockExpanded(block)" class="pb-[11px]" :data-testid="'ro-body-' + part.toolCallId">
+                    <div v-if="isReadOnlyCard(part)" v-show="isBlockExpanded(block)" class="pb-[11px]" :data-testid="'ro-body-' + part.toolCallId">
                       <!-- 门卡：参数区字段表原样（与待决态同一份 gateRows：操作 + args 全键 + 敏感掩码）；
                            字段区限高 = 字段族双约束 min(280px,35vh)（裁决 §14.4）。 -->
                       <template v-if="part.name !== GENERATIVE_FORM_TOOL">
@@ -339,8 +351,8 @@
                       <!-- GF：同一张表单原样锁定（readonly 模式复用 FormRenderer，零操作按钮） -->
                       <template v-else>
                         <FormRenderer
-                          v-if="readOnlyFormSpec(part)"
-                          :schema="(readOnlyFormSpec(part) as FormSpec)"
+                          v-if="cardFormSpec(part)"
+                          :schema="(cardFormSpec(part) as FormSpec)"
                           readonly
                           :submitting="false"
                           :error="null"
@@ -356,47 +368,9 @@
                         :data-testid="'ro-reason-' + part.toolCallId"
                       >{{ part.reason }}</div>
                     </div>
-                  </div>
-
-                  <div
-                    v-else
-                    class="mt-1.5 border border-solid border-[#e3e6ea] rounded-[10px] bg-white overflow-hidden mb-2"
-                    :data-testid="part.requiresAction ? 'pending-card-' + part.toolCallId : 'tool-card-' + part.toolCallId"
-                  >
-                    <!-- R-165 S1 卡头对齐 demo v7（纯 Tailwind）：原生 button 显式复位 UA 面
-                         （bg-transparent border-0 font-[inherit] —— preflight 关闭下无此复位即为
-                         灰底+2px outset 描边+Arial 元凶）；状态图标三态自绘（见 toolIconClass）；
-                         状态/kind 胶囊自绘 span chip（chipClass）；摘要运行中蓝字/失败红字。
-                         S6 批1：卡头 disabled / hover / chevron 三者的条件由 requiresAction 扩为
-                         「requiresAction || 展开体 0 行」（v7.10 ajv11：空内容卡不给展开入口）。 -->
-                    <button
-                      type="button"
-                      class="w-full flex items-center gap-1.5 py-[8px] px-[10px] text-left bg-transparent border-0 font-[inherit] transition-colors duration-[150ms]"
-                      :class="cardHeadDisabled(part) ? 'cursor-default' : 'cursor-pointer hover:bg-[#f6f7f9]'"
-                      :data-testid="'block-toggle-' + block.id"
-                      :disabled="cardHeadDisabled(part)"
-                      @click="onCardHeadClick(block, part)"
-                    >
-                      <span
-                        class="shrink-0 flex-[0_0_15px] w-[15px] h-[15px] flex items-center justify-center text-[11px] leading-none"
-                        :class="toolIconClass(part.status)"
-                        aria-hidden="true"
-                      >{{ toolIcon(part.status) }}</span>
-                      <span class="font-mono font-semibold text-[11.4px] max-w-[128px] truncate shrink-0">{{ toolLabel(part.name) }}</span>
-                      <span v-if="toolSummaryOrNull(part)" class="font-normal text-[12px] truncate min-w-0 flex-1" :class="toolSummaryClass(part.status)" :data-testid="'tool-summary-' + part.toolCallId">{{ toolSummaryOrNull(part) }}</span>
-                      <span v-else class="flex-1 min-w-0" :data-testid="'tool-summary-' + part.toolCallId"></span>
-                      <span v-if="part.kind2 === 'FRONTEND'" :class="chipClass('primary')">前端工具</span>
-                      <span v-else-if="part.kind2 === 'CONFIRM'" :class="chipClass('warning')">确认门</span>
-                      <!-- S6 批1（长内容审计 #10）：状态胶囊文案最长 = `unknown`「结局未知（未确认成功/失败）」
-                           （≈134px，flex-none 不缩）—— 与 kind 胶囊同现时卡头固定件超宽，chevron 会被
-                           `overflow-hidden` 裁。加 `max-w-[104px] truncate` + `title` 全称：视觉不破版、
-                           悬浮可回看全文。 -->
-                      <span :class="[chipClass(toolTagType(part.status)), 'max-w-[104px] truncate']" :title="toolStatusLabel(part)">{{ toolStatusLabel(part) }}</span>
-                      <span v-if="cardBodyShown(part)" :class="[TCHEV_CLASS, isBlockExpanded(block) ? 'is-open' : '']">›</span>
-                    </button>
-                    <!-- S6 批1（v7.10 ajv11 · 19-e 同句）：展开体渲染后 0 行 ⇒ **不渲展开体**、不渲 chevron、
-                         卡头 disabled 无 hover（点击 no-op）——「点开是空」的假入口整体消失。 -->
-                    <template v-if="cardBodyShown(part)">
+                    <!-- 卡体分支保留（统一卡头之下）：已决只读态 → ro-body；普通工具 → 折叠展开体。
+                         展开体渲染后 0 行 ⇒ 不渲展开体 / 不渲 chevron / 卡头 disabled（v7.10 ajv11）。 -->
+                    <template v-else-if="cardBodyShown(part)">
                       <div v-show="isBlockExpanded(block)" class="px-2 pb-2 pt-0 flex flex-col gap-1.5" :data-testid="'block-body-' + block.id">
                       <!-- S6 批1（裁决 2026-10-16 第 2 条：面板 JSON 展示全面清零 / v7.9 场景 16 口径）：
                            工具卡**参数**由 mono JSON 盒改**折叠区 label-value 字段表**（解析 args JSON → 键值行，
@@ -464,7 +438,7 @@
                            逐字保留，D10）；其余通用 FRONTEND 待执行/已决态 → 无子块（消 A9'⑤ 空壳卡）。
                            D-C7：旧投影挂起卡的「会话已失效」tag（原 :206）与 GF 非宿主 v-else 三 tag
                            （原 :251-253）/ activeForm 错误位（原 :254-257）随合并整列删除——语义由段状态
-                           tag（toolStatusLabel，expired→「会话已失效」）与段 reason 位（A4'，D11）承接。 -->
+                           右状态标签（cardStatusOf，expired→「会话已失效」）与段 reason 位（A4'，D11）承接。 -->
                       <template v-if="part.requiresAction">
                         <template v-if="part.kind2 === 'CONFIRM' && part.status === 'pending'">
                           <!-- R-163D D5 结构 → R-165 S2 纯 Tailwind 化：demo v7 `.gate` 全结构
@@ -553,6 +527,7 @@
                             :submitting="liveForm.status === 'submitting'"
                             :error="liveForm.error"
                             :remaining-seconds="formRemainingSeconds"
+                            :show-header="false"
                             @submit="onFormSubmit"
                             @cancel="onFormCancel"
                           />
@@ -899,7 +874,7 @@
  *   复制内容仍取 `m.content`（text 段 join 的派生投影，同源）；
  * - 上下文条：会话 id / 工作区上下文 / 数据版本 / 可用性 tag / 契约同步 chip —— 蓝本无
  *   `/api/ai/health`、无契约事件，本仓需要可视化"刷新恢复"与"工作区已同步"的状态；
- * - 工具卡四态（调用中/成功/失败/等待确认）并展示参数与结果 —— 蓝本是"已执行工具 X"单标签；
+ * - 工具卡四态（调用中/成功/失败/待执行·等待确认按通道）并展示参数与结果 —— 蓝本是"已执行工具 X"单标签；
  * - 生成式表单挂起卡（GF-B）：generative_form 帧渲染 FormRenderer 等用户填写，取消/超时带
  *   cancelled:true 回灌 —— 蓝本无此前端工具通道；
  * - HITL 卡片：确认/拒绝双路径 + 拒绝原因输入 + 超时倒计时置灰 —— 蓝本有双按钮但无原因与倒计时；
@@ -915,7 +890,7 @@
  * （48px 竖排条）或整体移除本组件后，五页业务功能全部照常可用。
  *
  * 样式纪律：模板用 Element Plus（未重构区）+ 内联 Tailwind 工具类；R-165 S1 起，
- * **消息区三件套（工具卡 / 操作行 / 状态胶囊）零 EP 组件承载**，全部改原生元素 + Tailwind 工具类
+ * **消息区三件套（工具卡 / 操作行 / 状态标签）零 EP 组件承载**，全部改原生元素 + Tailwind 工具类
  * （demo v7 配方照搬，含 preflight 关闭下的 UA 复位 bg-transparent border-0 font-[inherit]）。
  * R-165 S2 续作：**思考卡 / HITL 门卡 / 回执卡 / 6 处顶部提示（el-alert）/ 空态（el-empty）/
  * 骨架屏（el-skeleton）/ 操作行 tip 气泡** 一并零 EP 承载，同口径纯 Tailwind；
@@ -961,10 +936,10 @@
  * 2A 批（2026-10-17 用户裁决 §9 K1 / §10 F9 / §12 H2 / §14.4 / §15 K12 / §16 M1 / §20）：
  * ① **已决只读 = 原样 UI 锁定渲染**（纠偏 label-value 摘要式）：门卡参数区字段表原样、
  *    GF 复用同一张表单（FormRenderer readonly：原生 disabled + 值回填）、操作按钮整块不渲染；
- * ② 卡头 = 状态徽标 + 人话摘要 + chevron 的单行裸文字行（无底色 / 无分隔线、36.4px、chevron
- *    ml-auto 靠右）；decidedAt 数据层照记、**卡面不渲染**；
+ * ② 卡头 = 三类型统一结构（左固定类型裸 SVG + 中性标题/摘要 + 右状态文字标签 + chevron；
+ *    36.4px、chevron ml-auto 靠右）；decidedAt 数据层照记、**卡面不渲染**；
  * ③ 已决六态（已批准 / 已拒绝 / 已超时 / 已批准·执行失败 / 已提交 / 已取消）回合结束后
- *    一律默认折叠，卡头摘要行保留可辨识信息；决策当下不折叠（turnStillOpen）；
+ *    一律默认折叠，卡头单行（标题/摘要/右状态标签）保留可辨识信息；决策当下不折叠（turnStillOpen）；
  * ④ 状态全集：门卡 = 已批准 / 已拒绝 / 已超时 / 已批准·执行失败（无已取消）；
  *    表单系 = 已提交 / 已取消；审批卡旧字样（含被 R5 / §10 F6 废止的两枚）零残留；
  * ⑤ 未提交不记录：取消 / 超时收尾回初始空态再锁定（F9）；
@@ -992,6 +967,8 @@ import {
 import { toolSummary, TOOL_SUMMARY_STATUS_WORDS } from '@/utils/tool-summaries'
 import {
   argRows,
+  cardStatusOf,
+  cardTypeOf,
   formSpecOf,
   hasBodyRows,
   isBlankText,
@@ -1000,6 +977,7 @@ import {
   readOnlyStateOf,
   reasonHeadline,
   submitRows,
+  type CardTone,
   type ConflictRow,
   type FieldRow,
   groupParts,
@@ -1009,7 +987,7 @@ import {
 import { deriveCopyText, deriveProjections } from '@/utils/parts'
 import { createPollingController, type PollingController } from '@/utils/polling'
 import FormRenderer from '@/components/AiPanel/FormRenderer.vue'
-import { GENERATIVE_FORM_TOOL, type ChatMessage, type ToolPart, type ToolRunStatus } from '@/types/ai'
+import { GENERATIVE_FORM_TOOL, type ChatMessage, type ToolPart } from '@/types/ai'
 import type { FormSpec } from '@/types/form-schema'
 import type { ErrorCard, ErrorCardVariant } from '@/utils/error-card'
 
@@ -1543,22 +1521,31 @@ function markdownHtml(message: ChatMessage, block: Block): string {
  * 剥后为空 ⇒ 返回 null（摘要位不渲，只留工具名一行）；剥后非空 ⇒ 渲剩余部分（信息不丢）。
  * 同义族的模板本身也已按同口径收敛（`list_config_defs` / `list_tasks` / `get_workspace_state`
  * 三个模板的「首词 = 工具名」措辞改由参数部分承载），故这三者的摘要只剩参数信息或为空。
+ *
+ * 修复轮 1（向导工具泄漏）：`export.start` / `download_templates` 等 10 个 FRONTEND 向导工具
+ * 有中文展示名（`toolLabel`）但 `tool-summaries.ts` 无 summaryFor 映射，兜底串为
+ * 「<原始 name> · <状态词>」—— 展示名前缀剥不到它。故展示名剥壳失败时**再按 part.name 剥一次**；
+ * 剥后只剩状态词（`STATUS_WORD_SET`，含兜底用的「等待确认」）⇒ 同样返回 null，
+ * 由右状态标签（普通 tool pending = 「待执行」）唯一承载状态。
  */
 const SUMMARY_PREFIX_SEP = /^[\s·、，,:：\-—]+/
-/** 状态词全集（兜底摘要剥掉工具名后只剩状态词 ⇒ 状态胶囊已同屏承担，摘要位不再重复）。 */
+/** 状态词全集（兜底摘要剥掉工具名后只剩状态词 ⇒ 右状态标签已同屏承担，摘要位不再重复）。 */
 const STATUS_WORD_SET = new Set(Object.values(TOOL_SUMMARY_STATUS_WORDS))
 
 function toolSummaryOrNull(part: ToolPart): string | null {
   const summary = toolSummary(part)
-  const label = toolLabel(part.name)
-  if (summary === label) {
-    return null
+  const stripPrefix = (prefix: string): string | null => {
+    if (prefix === '' || !summary.startsWith(prefix)) {
+      return null
+    }
+    return summary.slice(prefix.length).replace(SUMMARY_PREFIX_SEP, '').trim()
   }
-  if (summary.startsWith(label)) {
-    const rest = summary.slice(label.length).replace(SUMMARY_PREFIX_SEP, '')
-    return rest === '' || STATUS_WORD_SET.has(rest) ? null : rest
+  // 展示名优先；无 summaryFor 映射的向导工具再按原始 name 剥壳（兜底串以前者打头）。
+  const rest = stripPrefix(toolLabel(part.name)) ?? stripPrefix(part.name)
+  if (rest === null) {
+    return summary
   }
-  return summary
+  return rest === '' || STATUS_WORD_SET.has(rest) ? null : rest
 }
 
 /**
@@ -2177,12 +2164,15 @@ function toggleBlock(block: Block): void {
 }
 
 /**
- * S6 批1（v7.10 ajv11 / 场景 19-e）：卡头可点判据 —— 展开体渲染后行数 ≥ 1 才可点；
- * 0 行（无参数 / 无输出 / 无原因 / 无提交值）⇒ 卡头 disabled、不渲 chevron、无 hover、点击 no-op。
- * requiresAction 待动作卡例外：展开体恒在（门卡 / GF 表单就是待填内容），chevron 照旧渲染，
- * 但卡头**仍禁点**（放行/拒绝走门卡双钮，折叠动作对用户无意义 —— 原口径逐字保留）。
+ * S6 批1（v7.10 ajv11 / 场景 19-e）→ 卡片三类型统一：
+ * - 已决 HITL / GF 卡体恒在（门卡字段表 / GF 同一张表单），卡头恒可折叠；
+ * - 普通工具卡：展开体渲染后 ≥ 1 行才可点；0 行 ⇒ disabled、无 chevron、无 hover、点击 no-op；
+ * - requiresAction 待决 HITL/GF：强制展开、无 chevron，卡头**仍禁点**（放行/拒绝走门内双钮）。
  */
 function cardHeadEnabled(part: ToolPart): boolean {
+  if (isReadOnlyCard(part)) {
+    return true
+  }
   return !part.requiresAction && hasBodyRows(part)
 }
 
@@ -2191,9 +2181,103 @@ function cardHeadDisabled(part: ToolPart): boolean {
   return !cardHeadEnabled(part)
 }
 
-/** 展开体是否渲染：有内容（或待动作卡强制展开）才渲 —— 0 行连节点都不出（不渲空白盒）。 */
+/** 展开体是否渲染：普通工具卡有内容（或待动作卡强制展开）才渲；已决只读态卡体恒在。 */
 function cardBodyShown(part: ToolPart): boolean {
   return hasBodyRows(part)
+}
+
+/** chevron 是否渲染：待决 HITL/GF 强制展开 ⇒ 无；已决只读卡恒有；普通工具卡有卡体才有。 */
+function cardChevronShown(part: ToolPart): boolean {
+  if (part.requiresAction) {
+    return false
+  }
+  return isReadOnlyCard(part) || cardBodyShown(part)
+}
+
+/** 卡片外壳：只读卡保留 rocard 容器锚，普通卡保留原间距。 */
+function cardShellClass(part: ToolPart): string {
+  return isReadOnlyCard(part)
+    ? 'rocard block border border-solid border-[#e3e6ea] bg-white rounded-[10px] overflow-hidden mb-3.5'
+    : 'mt-1.5 border border-solid border-[#e3e6ea] rounded-[10px] bg-white overflow-hidden mb-2'
+}
+
+/** 卡容器 testid（既有锚：hitl-receipt / pending-card-* / tool-card-*）。 */
+function cardTestId(part: ToolPart): string {
+  if (isReadOnlyCard(part)) {
+    return 'hitl-receipt'
+  }
+  return part.requiresAction ? `pending-card-${part.toolCallId}` : `tool-card-${part.toolCallId}`
+}
+
+/** 卡头 testid（既有锚：ro-toggle-* / block-toggle-*）。 */
+function cardToggleTestId(part: ToolPart, block: Block): string {
+  return isReadOnlyCard(part) ? `ro-toggle-${part.toolCallId}` : `block-toggle-${block.id}`
+}
+
+/** 右状态标签 testid（只读卡保留 ro-badge-*；其余 card-status-*）。 */
+function cardStatusTestId(part: ToolPart): string {
+  return isReadOnlyCard(part) ? `ro-badge-${part.toolCallId}` : `card-status-${part.toolCallId}`
+}
+
+/** 摘要 testid（只读卡保留 ro-summary-*；普通卡保留 tool-summary-*）。 */
+function cardSummaryTestId(part: ToolPart): string {
+  return isReadOnlyCard(part) ? `ro-summary-${part.toolCallId}` : `tool-summary-${part.toolCallId}`
+}
+
+/** 统一卡头 class：三类型同结构（36.4px = py 8+8 + 12px×1.7 标题行）。 */
+function cardHeadClass(part: ToolPart): string {
+  return [
+    'flex w-full items-center gap-[6px] px-[10px] py-[8px] border-0 bg-transparent text-left font-[inherit] whitespace-nowrap transition-colors duration-[150ms]',
+    isReadOnlyCard(part) ? 'ro-hd' : '',
+    cardHeadDisabled(part) ? 'cursor-default' : 'cursor-pointer hover:bg-[#f6f7f9]'
+  ].filter(Boolean).join(' ')
+}
+
+/** 卡头标题：tool/hitl = 工具中文名；form = 表单标题（FormRenderer 内头已抑制，标题上提）。 */
+function cardTitle(part: ToolPart): string {
+  if (cardTypeOf(part) === 'form') {
+    return cardFormSpec(part)?.title?.trim() || '请填写以下信息'
+  }
+  return toolLabel(part.name)
+}
+
+/** 待填写 GF 摘要：必填项计数（无必填 / 无 schema ⇒ 空串）。 */
+function formRequiredSummary(part: ToolPart): string {
+  const required = cardFormSpec(part)?.fields.filter((field) => field.required).length ?? 0
+  return required > 0 ? `${required} 项必填` : ''
+}
+
+/**
+ * 卡头摘要（中性色，不承载状态）：
+ * - form：待填写 = 必填计数；已提交 = submittedValues；已取消 = 未提交说明（F9 不回读残留值）；
+ * - tool/hitl：沿用工具摘要映射（与待决态同一份，随生命周期不变）。
+ */
+function cardSummary(part: ToolPart): string {
+  if (cardTypeOf(part) === 'form') {
+    if (!isReadOnlyCard(part)) {
+      return formRequiredSummary(part)
+    }
+    return readOnlyStateOf(part) === 'cancelled' ? '未提交，填写内容不作记录' : generativeFormSummary(part)
+  }
+  return toolSummaryOrNull(part) ?? ''
+}
+
+/** 右状态标签底座（demo r13/r14：9.5px / leading 1.7 / px-5 / 圆角 5 / 描边）。 */
+const CARD_STATUS_BASE = 'flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] border border-solid whitespace-nowrap max-w-[104px] truncate'
+const CARD_STATUS_TONE: Record<CardTone, string> = {
+  primary: 'text-[#2563eb] bg-[#eff4ff] border-[#cddcff]',
+  success: 'text-[#1a7f45] bg-[#edf7f0] border-[#bfe3cd]',
+  danger: 'text-[#c0392b] bg-[#fdf1ef] border-[#e3e6ea]',
+  warning: 'text-[#b45309] bg-[#fffbeb] border-[#fde68a]',
+  neutral: 'text-[#57606a] bg-[#f6f7f9] border-[#e3e6ea]'
+}
+
+function cardStatusClass(part: ToolPart): string {
+  return `${CARD_STATUS_BASE} ${CARD_STATUS_TONE[cardStatusOf(part).tone]}`
+}
+
+function cardStatusLabel(part: ToolPart): string {
+  return cardStatusOf(part).label
 }
 
 /**
@@ -2234,7 +2318,8 @@ function toolLabel(name: string): string {
 
 /**
  * R-165 S1：demo v7 胶囊四族（`.stchip` + `chip-idle/run/ok/bad` 工具类配方照搬）——
- * 底座与色族分离，状态胶囊/kind 胶囊/健康胶囊三处复用；承载件由 el-tag 换自绘 span。
+ * 底座与色族分离（门卡正文胶囊 / 健康胶囊复用）；承载件由 el-tag 换自绘 span。
+ * 卡片卡头的状态标签走独立的 CARD_STATUS_BASE / CARD_STATUS_TONE（三类型统一、带描边）。
  */
 const CHIP_BASE = 'flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] whitespace-nowrap'
 const CHIP_TONE: Record<'info' | 'warning' | 'success' | 'danger' | 'primary', string> = {
@@ -2329,111 +2414,6 @@ const SKELETON_BARS = ['w-[72%]', 'w-[92%]', 'w-[58%]', 'w-[85%]'].map((w) => `$
 
 /** R-165 S2：倒计时环周长（v7 同值：2πr，r=15.5 ⇒ 97.4）。 */
 const RING_CIRCUMFERENCE = 97.4
-
-/** 工具卡状态色（补丁③：REJECTED=warning「已拒绝」，FAILED=danger「执行失败」，互不混用）。
- *  R-165 S1：running 由 success 改 primary —— demo v7 在跑态整族取蓝（`.st-running` + chip-run），
- *  绿族只属"已成功"；原口径把在跑染绿且 effect=dark 落成实心块，与 v7 相悖。 */
-function toolTagType(status: ToolRunStatus): 'info' | 'warning' | 'success' | 'danger' | 'primary' {
-  // 批3③a D10(A)：九态全部显式 case + 去 default（原先 pending 由 default 兜底，非纯死码）——
-  // 形式对齐下方 toolStatusLabel 的 Record<ToolRunStatus, …> 穷尽闸：未来新增态编译期即报错，
-  // 不再被 default 静默误标。
-  switch (status) {
-    case 'pending':
-    case 'running':
-      return 'primary'
-    case 'succeeded':
-      return 'success'
-    case 'failed':
-      return 'danger'
-    case 'rejected':
-    // DC-14 T1：被防线③拦下（越 scope 未执行）与"人拒绝"同色（warning）——
-    // 两者都是"没有执行"，与后端执行失败（danger）语义不同
-    case 'blocked':
-      return 'warning'
-    case 'expired':
-    // 对话时序包 批1：取消终态与"会话已失效"同族（info）—— 都不是执行成功/失败，
-    // 只是这一轮没走完（用户取消 / 渲染器不可用 / 整轮取消）
-    case 'cancelled':
-      return 'info'
-    case 'unknown':
-      // 对话时序包 批1：结局未知（未确认成功/失败，如前端执行器超时）—— 提示级 warning，
-      // 与"执行失败/已拒绝"同色的待人工判断，不落 danger
-      return 'warning'
-  }
-}
-
-/**
- * 工具卡状态 tag 文案（九态穷尽闸）。
- *
- * R-166 口径④：`expired` 一态承两种语义 ——
- * ① 空历史降级 / 后端 TIMEOUT 沿用「会话已失效」；
- * ② **本地判定的「已超时作废」**（倒计时归零 + 权威校正仍无结局）由段上的 `expiredLocally`
- *    标记区分，卡片 tag 与回执徽标口径一致，不再被读成"会话失效"。
- */
-function toolStatusLabel(part: ToolPart): string {
-  const labels: Record<ToolRunStatus, string> = {
-    pending: '等待确认',
-    running: '调用中…',
-    succeeded: '已成功',
-    failed: '执行失败',
-    rejected: '已拒绝',
-    // DC-14 T1：越出当前披露范围（防线③），工具未执行
-    blocked: '超出当前范围',
-    expired: part.expiredLocally ? '已超时作废' : '会话已失效',
-    // 对话时序包 批1：取消终态（用户放弃 / 渲染器不可用 / 整轮取消）
-    cancelled: '已取消',
-    // 对话时序包 批1：结局未知 —— 未确认成功/失败，需人工再确认
-    unknown: '结局未知（未确认成功/失败）'
-  }
-  return labels[part.status]
-}
-
-/** R-165 S1：工具卡状态图标字符（demo v7 `.ti` 九态照搬；running 为空串，只留旋转环）。 */
-function toolIcon(status: ToolRunStatus): string {
-  const icons: Record<ToolRunStatus, string> = {
-    pending: '○',
-    running: '',
-    succeeded: '✓',
-    failed: '✗',
-    rejected: '✕',
-    blocked: '⊘',
-    expired: '∅',
-    cancelled: '⊗',
-    unknown: '?'
-  }
-  return icons[status]
-}
-
-/** R-165 S1：图标态类 —— 成功=绿圆环✓（1.2px 边）/ 失败=红圆环✗（1.2px 边）/
- *  进行中=旋转环（1.6px 边，#cddcff 环 + #2563eb 顶弧）/ 其余中性字符（无环）。
- *  ⚠ 本仓关闭 preflight（tailwind.config corePlugins.preflight=false）⇒ 无全局 `border-style:solid`，
- *  纯 border-* 只出 border-width 而 style 恒 none（环不可见）；故所有环一律显式 `border-solid`
- *  （同 v7.html 依赖 preflight 的差异点，实测 computed border-top-width 0px → 1.2px）。
- *  v7 的 `animate-spin7` 是 demo 临时 config 的私有动画（仓库 config 禁改），
- *  改用 Tailwind 内置 `animate-spin`（1s 线性无限；v7 为 .8s，同语义）。 */
-function toolIconClass(status: ToolRunStatus): string {
-  switch (status) {
-    case 'succeeded':
-      return 'border-solid border-[1.2px] border-[#1a7f45] text-[#1a7f45] rounded-[50%]'
-    case 'failed':
-      return 'border-solid border-[1.2px] border-[#c0392b] text-[#c0392b] rounded-[50%]'
-    case 'running':
-      return 'border-solid border-[1.6px] border-[#cddcff] border-t-[#2563eb] rounded-[50%] animate-spin motion-reduce:animate-none'
-    default:
-      return 'text-[#8b949e]'
-  }
-}
-
-/** R-165 S1：摘要变色（demo v7 `.st-running .tsum` 运行中蓝字 / `.st-failed .tsum` 失败红字）。 */
-function toolSummaryClass(status: ToolRunStatus): string {
-  if (status === 'running') {
-    return 'text-[#2563eb]'
-  }
-  if (status === 'failed') {
-    return 'text-[#c0392b]'
-  }
-  return 'text-[#57606a]'
-}
 
 function probe(): void {
   void ai.probeHealth()
@@ -2548,50 +2528,9 @@ function showCaret(message: ChatMessage, blockIndex: number): boolean {
 }
 
 /**
- * 2A 批（裁决 2026-10-17 §9 K1 / §10 F6 / §15 K12 / §16 M1）：已决只读卡呈现层。
- *
- * 徽标（两套，§2）：门卡 = 已批准 / 已拒绝 / 已超时 / 已批准·执行失败（**无已取消**）；
- * 表单系 = 已提交 / 已取消。审批卡旧字样（含被 R5 / §10 F6 废止的两枚与旧「已确认」）零残留。
- *
- * 字形前缀沿用 R-166 口径⑥（`✓` U+2713 / `✗` U+2717 / `!` 均文本字形、非 emoji）。
- * 徽标规格对齐 demo r13/r14：9.5px / leading 1.7 / px-5 / 圆角 5 / semibold（与工具卡胶囊同档，
- * 不撑高 36.4px 卡头行）。
- */
-const READONLY_BADGE_BASE = 'text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold border border-solid'
-const READONLY_BADGE_TONE: Record<ReturnType<typeof readOnlyStateOf>, string> = {
-  approved: 'text-[#1a7f45] bg-[#edf7f0] border-[#bfe3cd]',
-  rejected: 'text-[#c0392b] bg-[#fdf1ef] border-[#e3e6ea]',
-  expired: 'text-[#b45309] bg-[#fffbeb] border-[#fde68a]',
-  failed: 'text-[#c0392b] bg-[#fdf1ef] border-[#e3e6ea]',
-  submitted: 'text-[#1a7f45] bg-[#edf7f0] border-[#bfe3cd]',
-  cancelled: 'text-[#c0392b] bg-[#fdf1ef] border-[#e3e6ea]'
-}
-
-function readOnlyBadgeClass(part: ToolPart): string {
-  return `${READONLY_BADGE_BASE} ${READONLY_BADGE_TONE[readOnlyStateOf(part)]}`
-}
-
-/** 徽标文案：门卡四态 / 表单系两态（K2 + §10 F6；「已超时」不再带「作废」后缀）。 */
-function readOnlyBadgeLabel(part: ToolPart): string {
-  switch (readOnlyStateOf(part)) {
-    case 'approved':
-      return '✓ 已批准'
-    case 'rejected':
-      return '✗ 已拒绝'
-    case 'expired':
-      return '! 已超时'
-    case 'failed':
-      return '! 已批准 · 执行失败'
-    case 'submitted':
-      return '✓ 已提交'
-    case 'cancelled':
-      return '✗ 已取消'
-  }
-}
-
-/**
  * 生成式表单已提交摘要（RC-1 → 2A）：**只读 `submittedValues`**（用户这次实际提交的值），
- * 字段名走 schema 的 `label`；无本地提交值（他端提交）⇒ 空串（卡头只留「已提交」）。
+ * 字段名走 schema 的 `label`；无本地提交值（他端提交）⇒ 空串
+ * （状态由统一卡头右标签「✓ 已提交」唯一承担，摘要位不重复）。
  */
 function generativeFormSummary(part: ToolPart): string {
   const rows = submitRows(part)
@@ -2620,43 +2559,17 @@ function hitlReceiptSummary(part: ToolPart): string {
 }
 
 /**
- * 折叠卡头摘要（r15：六态均折叠，摘要恒可辨识；demo r13/r14 文案延续）：
- * `已批准 / 已拒绝 / 已超时 / 已批准·执行失败 / 已提交 / 已取消 · <人话摘要>`。
- * 取消 = 未提交：GF 摘要只取表单标题（无标题给固定文案），绝不拼接或回读 submittedValues（F9）。
+ * 卡片表单 schema（待填写 / 已决 GF 共用）：按段缓存，模板里会取多次（标题 / 必填计数 / v-if / :schema）。
  */
-function readOnlySummary(part: ToolPart): string {
-  switch (readOnlyStateOf(part)) {
-    case 'approved':
-      return `已批准 · ${hitlReceiptSummary(part)}`
-    case 'rejected':
-      return `已拒绝 · ${hitlReceiptSummary(part)}`
-    case 'expired':
-      return `已超时 · ${hitlReceiptSummary(part)}`
-    case 'failed':
-      return `已批准 · 执行失败 · ${hitlReceiptSummary(part)}`
-    case 'submitted': {
-      const detail = generativeFormSummary(part)
-      return detail === '' ? '已提交' : `已提交 · ${detail}`
-    }
-    case 'cancelled': {
-      const title = formSpecOf(part)?.title?.trim() ?? ''
-      return title === '' ? '已取消 · 未提交，填写内容不作记录' : `已取消 · ${title}`
-    }
-  }
-}
+const formSpecCache = new WeakMap<ToolPart, FormSpec | null>()
 
-/**
- * 已决 GF 的原卡 schema（K1：同一张表单）—— 按段缓存，模板里会取两次（v-if + :schema）。
- */
-const readOnlySpecCache = new WeakMap<ToolPart, FormSpec | null>()
-
-function readOnlyFormSpec(part: ToolPart): FormSpec | null {
-  const cached = readOnlySpecCache.get(part)
+function cardFormSpec(part: ToolPart): FormSpec | null {
+  const cached = formSpecCache.get(part)
   if (cached !== undefined) {
     return cached
   }
   const spec = formSpecOf(part)
-  readOnlySpecCache.set(part, spec)
+  formSpecCache.set(part, spec)
   return spec
 }
 

@@ -1,0 +1,547 @@
+<!doctype html>
+<html lang="zh-CN" data-card-channels="2026-10-18-v2" data-icon-variant="bare" data-review-status="approved">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ai-example · 三种卡片类型 × 状态 demo v2（已通过）</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="hitl-interrupts.css">
+</head>
+<body class="m-0 p-0 bg-[#f1f2f4] text-[#1f2328] font-sans text-[13.8px] leading-[1.7] antialiased [&_button:focus-visible]:outline-none [&_button:focus-visible]:ring-2 [&_button:focus-visible]:ring-[#2563eb]/40">
+
+<header class="sticky top-0 z-30 flex flex-wrap items-center gap-[16px] px-[22px] py-[12px] bg-white border-b border-[#e3e6ea]">
+  <div class="min-w-0">
+    <h1 class="m-0 text-[14px] [font-weight:650] tracking-[.2px]">ai-example · 三种卡片类型 × 状态 demo v2（已通过）</h1>
+    <p class="m-0 text-[11.5px] text-[#57606a] leading-[1.6]">左类型 · 右状态 · 静态视觉样张 · 图标槽 bare / tile 对照（2026-10-18-v2 · 用户已通过）</p>
+  </div>
+  <div class="ml-auto flex items-center gap-[8px]">
+    <span class="flex-none text-[11.5px] text-[#57606a]">图标槽</span>
+    <span class="inline-flex items-center rounded-[8px] border border-[#e3e6ea] overflow-hidden bg-white" role="group" aria-label="图标槽形态">
+      <button type="button" data-variant-btn="bare" aria-pressed="true" class="border-0 bg-[#eff4ff] text-[#2563eb] font-semibold px-[10px] py-[5px] text-[12px] cursor-pointer transition-colors duration-[150ms]">裸图标</button>
+      <button type="button" data-variant-btn="tile" aria-pressed="false" class="border-0 bg-transparent text-[#57606a] px-[10px] py-[5px] text-[12px] cursor-pointer transition-colors duration-[150ms]">圆角托底</button>
+    </span>
+  </div>
+</header>
+
+<main class="px-[22px] pt-[16px] pb-[60px]">
+  <div class="max-w-[1460px] mx-auto flex flex-col gap-[16px]">
+
+    <div class="w-[440px] max-w-full mx-auto flex flex-col gap-[8px]">
+      <p data-static-notice class="m-0 rounded-[8px] border border-[#fde68a] bg-[#fffbeb] px-[10px] py-[7px] text-[12.2px] leading-[1.6] text-[#b45309]">静态视觉样张；仅变体切换和折叠可交互，批准/提交不触发真实任务。</p>
+      <div data-icon-legend class="flex flex-wrap items-center gap-[6px] text-[10.5px] leading-[1.7] text-[#57606a]">
+        <span class="w-full text-[11.5px] text-[#57606a] leading-[1.6]">图例：三类型 × 状态。左图标只表示卡型，全生命周期不变且为中性色；右侧状态标签才用状态色。</span>
+        <span data-legend-type="tool" class="flex-none text-[10.5px] leading-[1.7] px-[5px] rounded-[5px] border border-[#e3e6ea] bg-[#f6f7f9] text-[#57606a]">工具 · 调用中 / 已成功 / 执行失败</span>
+        <span data-legend-type="hitl" class="flex-none text-[10.5px] leading-[1.7] px-[5px] rounded-[5px] border border-[#e3e6ea] bg-[#f6f7f9] text-[#57606a]">HITL · 待确认 / 已批准 / 已拒绝 / 已超时 / 已批准 · 执行失败</span>
+        <span data-legend-type="form" class="flex-none text-[10.5px] leading-[1.7] px-[5px] rounded-[5px] border border-[#e3e6ea] bg-[#f6f7f9] text-[#57606a]">表单 · 待填写 / 已提交 / 已取消</span>
+      </div>
+    </div>
+
+    <div class="flex flex-col gap-[16px]">
+
+      <!-- ================= 会话 A：当前待处理 ================= -->
+      <section data-panel data-conversation="current" class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden">
+        <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[13px] py-[9px] border-b border-[#eef0f3]">
+          <span class="flex-none w-[24px] h-[24px] rounded-[7px] bg-[#1f2328] text-white text-[11px] font-semibold flex items-center justify-center tabular-nums">A</span>
+          <h2 class="m-0 text-[13.2px] [font-weight:650]">当前待处理</h2>
+          <span class="text-[11.5px] text-[#57606a]">今天 10:42 · 会话 A</span>
+          <span class="ml-auto flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#f6f7f9] text-[#57606a] border border-[#e3e6ea]">静态样张</span>
+        </div>
+
+        <div class="px-[13px] py-[12px] flex flex-col gap-[10px]">
+
+          <div data-msg="user" class="flex flex-col items-end">
+            <div class="max-w-full rounded-[10px] bg-[#f6f7f9] border border-[#e3e6ea] px-[10px] py-[6px] text-[13px] leading-[1.6] text-[#1f2328]">导出本月税务配置差异，顺便准备一下生产发布。</div>
+          </div>
+
+          <div data-msg="ai" class="max-w-full text-[13px] leading-[1.7] text-[#1f2328]">我先跑只读比对；发布配置和重建搜索索引是两件独立的事，稍后分别请你确认。</div>
+
+          <div class="flex flex-col gap-[8px]">
+            <div data-card="tool-running" data-channel="tool" data-state="running" data-collapsed="0" data-weight="normal" class="w-full bg-white border border-[#e3e6ea] rounded-[10px] overflow-hidden">
+              <button type="button" data-card-head aria-expanded="true" aria-controls="body-tool-running" class="w-full flex items-center gap-[6px] px-[10px] py-[8px] text-left bg-transparent border-0 whitespace-nowrap cursor-pointer transition-colors duration-[150ms]">
+                <span data-icon-slot data-icon-type="tool" class="flex-none flex items-center justify-center w-[24px]">
+                  <svg data-icon-bare width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+                  <svg data-icon-tile width="20" height="20" viewBox="0 0 20 20" class="hidden" stroke="#57606a" aria-hidden="true" focusable="false"><rect x="0.5" y="0.5" width="19" height="19" rx="4.5" fill="#f6f7f9" stroke="#e3e6ea" stroke-width="1"/><svg x="3" y="3" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg></svg>
+                </span>
+                <span data-head-title-area class="flex min-w-0 flex-1 items-center gap-[6px]">
+                  <span data-head-title class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap font-mono font-semibold text-[11.4px] text-[#1f2328]">export_config_diff</span>
+                  <span data-head-summary class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[11.5px] leading-[1.6] text-[#57606a]">正在读取 12 个配置项…</span>
+                </span>
+                <span data-status-label class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] border whitespace-nowrap text-[#2563eb] bg-[#eff4ff] border-[#cddcff]">调用中…</span>
+                <span data-chev class="flex-none ml-auto text-[#8b949e] text-[12px] transition-transform duration-[180ms] rotate-90">›</span>
+              </button>
+              <div id="body-tool-running" data-collapse-body class="px-[11px] pb-[11px]">
+                <div class="block text-[11px] tracking-[.5px] uppercase text-[#8b949e] mb-[4px]">参数</div>
+                <div class="bg-[#f6f7f9] border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto" data-scroll-region data-limit="min(280px,35vh)">
+                  <div class="flex gap-[10px] py-[6px] border-b border-[#eef0f3] text-[12.6px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_72px] break-words text-[#8b949e] text-[12px]">profile</span><span class="flex-1 min-w-0 break-words">prod</span></div>
+                  <div class="flex gap-[10px] py-[6px] border-b border-[#eef0f3] text-[12.6px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_72px] break-words text-[#8b949e] text-[12px]">scope</span><span class="flex-1 min-w-0 break-words">TAX_RULE、PRICING、CURRENCY</span></div>
+                  <div class="flex gap-[10px] py-[6px] border-b border-[#eef0f3] text-[12.6px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_72px] break-words text-[#8b949e] text-[12px]">format</span><span class="flex-1 min-w-0 break-words">xlsx（含差异列）</span></div>
+                </div>
+                <div class="block text-[11px] tracking-[.5px] uppercase text-[#8b949e] mb-[4px] mt-[9px]">输出</div>
+                <div class="text-[12.1px] leading-[1.6] font-mono text-[#606266] bg-[#f6f7f9] border border-[#eef0f3] rounded-[8px] px-[9px] py-[8px] max-h-[min(280px,35vh)] overflow-y-auto whitespace-pre-wrap break-all" data-scroll-region data-limit="min(280px,35vh)">load config defs ... 12 ok
+compare baseline snapshot-2026-0518-0210
+diff CURRENCY#GLOBAL: 2 keys
+diff TAX_RULE#PRJ-07: 1 key
+writing export-20260518-1042.xlsx ...</div>
+              </div>
+            </div>
+          </div>
+
+          <div data-msg="ai" class="max-w-full text-[13px] leading-[1.7] text-[#1f2328]">比对仍在进行，差异清单会另存为导出作业，不会改动生产配置。</div>
+
+          <div class="flex flex-col gap-[8px]">
+            <div data-card="hitl-pending-normal" data-channel="hitl" data-state="pending" data-collapsed="0" data-weight="normal" class="w-full bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden">
+              <div data-card-head class="flex items-center gap-[6px] px-[10px] py-[8px]">
+                <span data-icon-slot data-icon-type="hitl" class="flex-none flex items-center justify-center w-[24px]">
+                  <svg data-icon-bare width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                  <svg data-icon-tile width="20" height="20" viewBox="0 0 20 20" class="hidden" stroke="#57606a" aria-hidden="true" focusable="false"><rect x="0.5" y="0.5" width="19" height="19" rx="4.5" fill="#f6f7f9" stroke="#e3e6ea" stroke-width="1"/><svg x="3" y="3" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></svg>
+                </span>
+                <span data-head-title-area class="flex min-w-0 flex-1 items-center gap-[6px]">
+                  <span data-head-title class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[12px] font-semibold text-[#1f2328]">发布配置变更</span>
+                  <span data-head-summary class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[11.5px] leading-[1.6] text-[#57606a]">CHG-2026-0518</span>
+                </span>
+                <span data-status-label class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] border whitespace-nowrap text-[#b45309] bg-[#fffbeb] border-[#fde68a]">待确认</span>
+              </div>
+              <div data-body class="px-[11px] pb-[11px]">
+                <div class="pt-[2px] text-[11.9px] text-[#57606a] leading-[1.6]">批准后立即写入生产；拒绝则保持现状，不做任何写入。</div>
+                <div class="mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto" data-scroll-region data-limit="min(280px,35vh)">
+                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">变更单</span><span class="flex-1 min-w-0 break-words">CHG-2026-0518（已登记）</span></div>
+                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">目标</span><span class="flex-1 min-w-0 break-words">CURRENCY#GLOBAL、TAX_RULE#PRJ-07、PRICING#CN</span></div>
+                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">窗口</span><span class="flex-1 min-w-0 break-words">夜间低峰 · 预计 20 秒</span></div>
+                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">回滚</span><span class="flex-1 min-w-0 break-words">snapshot-2026-0518-0210（已校验）</span></div>
+                </div>
+                <div class="flex flex-wrap items-center gap-[9px] mt-[10px]">
+                  <span class="min-w-0 text-[12.2px] text-[#57606a] tabular-nums">剩余确认时间 00:52</span>
+                  <span class="ml-auto flex flex-none items-center gap-[8px] whitespace-nowrap">
+                    <button type="button" title="静态样张：不触发任务" class="flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-[#e3e6ea] bg-white text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]">拒绝</button>
+                    <button type="button" title="静态样张：不触发任务" class="flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-transparent bg-[#2563eb] text-white font-semibold transition-all duration-[150ms] hover:brightness-[1.08]">批准</button>
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div data-msg="ai" class="max-w-full text-[13px] leading-[1.7] text-[#1f2328]">发布这单只写入配置读路；如果你拒绝，生产配置保持现状。另有一件搜索侧的操作需要单独确认。</div>
+
+          <div class="flex flex-col gap-[8px]">
+            <div data-card="hitl-pending-high" data-channel="hitl" data-state="pending" data-collapsed="0" data-weight="normal" class="w-full bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden">
+              <div data-card-head class="flex items-center gap-[6px] px-[10px] py-[8px]">
+                <span data-icon-slot data-icon-type="hitl" class="flex-none flex items-center justify-center w-[24px]">
+                  <svg data-icon-bare width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                  <svg data-icon-tile width="20" height="20" viewBox="0 0 20 20" class="hidden" stroke="#57606a" aria-hidden="true" focusable="false"><rect x="0.5" y="0.5" width="19" height="19" rx="4.5" fill="#f6f7f9" stroke="#e3e6ea" stroke-width="1"/><svg x="3" y="3" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></svg>
+                </span>
+                <span data-head-title-area class="flex min-w-0 flex-1 items-center gap-[6px]">
+                  <span data-head-title class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[12px] font-semibold text-[#1f2328]">重建生产搜索索引</span>
+                  <span data-head-summary class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[11.5px] leading-[1.6] text-[#57606a]">IDX-2026-0518</span>
+                </span>
+                <span data-status-label class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] border whitespace-nowrap text-[#b45309] bg-[#fffbeb] border-[#fde68a]">待确认</span>
+              </div>
+              <div data-body class="px-[11px] pb-[11px]">
+                <div class="mt-[2px] rounded-[8px] border border-[#fde68a] bg-[#fffbeb] px-[10px] py-[7px] text-[11.9px] leading-[1.6] text-[#b45309]">高风险操作：重建期间搜索可能降级约 15 分钟，订单与支付不受影响。</div>
+                <div class="mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto" data-scroll-region data-limit="min(280px,35vh)">
+                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">索引</span><span class="flex-1 min-w-0 break-words">IDX-2026-0518（生产搜索）</span></div>
+                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">影响</span><span class="flex-1 min-w-0 break-words">搜索降级约 15 分钟 · 下单与支付不受影响</span></div>
+                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">窗口</span><span class="flex-1 min-w-0 break-words">夜间低峰 · 预计 15 分钟</span></div>
+                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">回滚</span><span class="flex-1 min-w-0 break-words">旧索引保留 24 小时，可切回</span></div>
+                </div>
+                <div class="flex flex-wrap items-center gap-[9px] mt-[10px]">
+                  <span class="min-w-0 text-[12.2px] text-[#57606a]">60 秒内无应答自动收尾，本次重建不会执行。</span>
+                  <span class="ml-auto flex flex-none items-center gap-[8px] whitespace-nowrap">
+                    <button type="button" title="静态样张：不触发任务" class="flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-[#e3e6ea] bg-white text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]">拒绝</button>
+                    <button type="button" title="静态样张：不触发任务" class="flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-transparent bg-[#2563eb] text-white font-semibold transition-all duration-[150ms] hover:brightness-[1.08]">批准</button>
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div data-msg="ai" class="max-w-full text-[13px] leading-[1.7] text-[#1f2328]">索引重建与发布互不依赖，可以分开决定；它的影响面只到搜索。最后还有一份导出表单要填。</div>
+
+          <div class="flex flex-col gap-[8px]">
+            <div data-card="form-pending" data-channel="form" data-state="pending" data-collapsed="0" data-weight="normal" class="w-full bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden">
+              <div data-card-head class="flex items-center gap-[6px] px-[10px] py-[8px]">
+                <span data-icon-slot data-icon-type="form" class="flex-none flex items-center justify-center w-[24px]">
+                  <svg data-icon-bare width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M8 11h8"/><path d="M8 15h5"/></svg>
+                  <svg data-icon-tile width="20" height="20" viewBox="0 0 20 20" class="hidden" stroke="#57606a" aria-hidden="true" focusable="false"><rect x="0.5" y="0.5" width="19" height="19" rx="4.5" fill="#f6f7f9" stroke="#e3e6ea" stroke-width="1"/><svg x="3" y="3" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M8 11h8"/><path d="M8 15h5"/></svg></svg>
+                </span>
+                <span data-head-title-area class="flex min-w-0 flex-1 items-center gap-[6px]">
+                  <span data-head-title class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[12px] font-semibold text-[#1f2328]">税务配置差异导出表单</span>
+                  <span data-head-summary class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[11.5px] leading-[1.6] text-[#57606a]">3 项必填</span>
+                </span>
+                <span data-status-label class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] border whitespace-nowrap text-[#2563eb] bg-[#eff4ff] border-[#cddcff]">待填写</span>
+              </div>
+              <div data-body class="px-[11px] pb-[11px]">
+                <div class="pt-[2px] text-[13.2px] [font-weight:650] text-[#1f2328]">填写税务配置差异导出参数</div>
+                <div class="pt-[6px] text-[11.9px] text-[#57606a] leading-[1.6]">带 * 为必填。提交后生成独立导出作业号，不会复用上面的发布单。</div>
+                <div class="mt-[9px] max-h-[min(320px,45vh)] overflow-y-auto flex flex-col gap-[9px]" data-scroll-region data-limit="min(320px,45vh)">
+                  <div class="flex flex-col gap-[5px]">
+                    <label for="pending-form-name" class="block text-[11px] tracking-[.5px] uppercase text-[#8b949e]">作业名称 *</label>
+                    <input id="pending-form-name" name="jobName" type="text" required disabled placeholder="如：2026-05 税务配置差异导出" class="w-full bg-white border border-[#e3e6ea] rounded-[8px] px-[9px] py-[6px] text-[13px] leading-[1.5] text-[#1f2328] placeholder:text-[#8b949e] disabled:bg-transparent disabled:text-[#1f2328] disabled:opacity-100 disabled:cursor-default">
+                  </div>
+                  <div class="flex flex-col gap-[5px]">
+                    <label for="pending-form-scope" class="block text-[11px] tracking-[.5px] uppercase text-[#8b949e]">导出范围 *</label>
+                    <select id="pending-form-scope" name="scope" required disabled class="w-full bg-white border border-[#e3e6ea] rounded-[8px] px-[9px] py-[6px] text-[13px] leading-[1.5] text-[#1f2328] disabled:bg-transparent disabled:text-[#1f2328] disabled:opacity-100 disabled:cursor-default">
+                      <option value="diff">仅差异项（3 条）</option>
+                      <option value="full">全量配置</option>
+                      <option value="custom">指定配置集</option>
+                    </select>
+                  </div>
+                  <div class="flex flex-col gap-[5px]">
+                    <label for="pending-form-date" class="block text-[11px] tracking-[.5px] uppercase text-[#8b949e]">生效日期 *</label>
+                    <input id="pending-form-date" name="effectiveDate" type="date" required disabled value="2026-05-01" class="w-full bg-white border border-[#e3e6ea] rounded-[8px] px-[9px] py-[6px] text-[13px] leading-[1.5] text-[#1f2328] disabled:bg-transparent disabled:text-[#1f2328] disabled:opacity-100 disabled:cursor-default">
+                  </div>
+                  <div class="flex flex-col gap-[5px]">
+                    <label for="pending-form-email" class="block text-[11px] tracking-[.5px] uppercase text-[#8b949e]">通知邮箱</label>
+                    <input id="pending-form-email" name="notifyEmail" type="email" disabled placeholder="完成后发送下载链接" class="w-full bg-white border border-[#e3e6ea] rounded-[8px] px-[9px] py-[6px] text-[13px] leading-[1.5] text-[#1f2328] placeholder:text-[#8b949e] disabled:bg-transparent disabled:text-[#1f2328] disabled:opacity-100 disabled:cursor-default">
+                  </div>
+                  <div class="flex flex-col gap-[5px]">
+                    <label for="pending-form-shard" class="block text-[11px] tracking-[.5px] uppercase text-[#8b949e]">分片大小</label>
+                    <select id="pending-form-shard" name="shardSize" disabled class="w-full bg-white border border-[#e3e6ea] rounded-[8px] px-[9px] py-[6px] text-[13px] leading-[1.5] text-[#1f2328] disabled:bg-transparent disabled:text-[#1f2328] disabled:opacity-100 disabled:cursor-default">
+                      <option value="5000">5000 行 / 片</option>
+                      <option value="10000">10000 行 / 片</option>
+                      <option value="20000">20000 行 / 片</option>
+                    </select>
+                  </div>
+                  <div class="flex flex-col gap-[5px]">
+                    <label for="pending-form-note" class="block text-[11px] tracking-[.5px] uppercase text-[#8b949e]">备注</label>
+                    <textarea id="pending-form-note" name="note" rows="3" disabled placeholder="给同组同事的说明（可选）" class="w-full resize-none bg-white border border-[#e3e6ea] rounded-[8px] px-[9px] py-[6px] text-[13px] leading-[1.5] text-[#1f2328] placeholder:text-[#8b949e] disabled:bg-transparent disabled:text-[#1f2328] disabled:opacity-100 disabled:cursor-default"></textarea>
+                  </div>
+                  <label class="flex items-start gap-[9px]">
+                    <input id="pending-form-history" type="checkbox" disabled class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb] disabled:opacity-100 disabled:cursor-default">
+                    <span class="flex-1 min-w-0 text-[12.6px] leading-[1.5] text-[#1f2328]">包含 90 天内的历史版本（文件约增大 2 倍）</span>
+                  </label>
+                </div>
+                <div class="flex flex-wrap items-center gap-[8px] pt-[10px] pb-[10px]">
+                  <span class="min-w-0 text-[11.5px] text-[#57606a]">静态样张：未提交前不生成作业号。</span>
+                  <span class="ml-auto flex flex-none items-center gap-[8px] whitespace-nowrap">
+                    <button type="button" title="静态样张：不触发任务" class="flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-[#e3e6ea] bg-white text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]">取消</button>
+                    <button type="button" title="静态样张：不触发任务" class="flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-transparent bg-[#2563eb] text-white font-semibold transition-all duration-[150ms] hover:brightness-[1.08]">提交</button>
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div data-msg="ai" class="max-w-full text-[13px] leading-[1.7] text-[#1f2328]">这三件事都处理完后，我再继续下一步；表单不会复用上面的发布单。</div>
+
+        </div>
+      </section>
+
+      <!-- ================= 会话 B：历史记录（另一段对话） ================= -->
+      <section data-panel data-conversation="history" class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden">
+        <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[13px] py-[9px] border-b border-[#eef0f3]">
+          <span class="flex-none w-[24px] h-[24px] rounded-[7px] bg-[#1f2328] text-white text-[11px] font-semibold flex items-center justify-center tabular-nums">B</span>
+          <h2 class="m-0 text-[13.2px] [font-weight:650]">历史记录（另一段对话）</h2>
+          <span class="text-[11.5px] text-[#57606a]">2026-04-12 · 会话 B · 已决状态回放</span>
+          <span class="ml-auto flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#f6f7f9] text-[#57606a] border border-[#e3e6ea]">只读留档</span>
+        </div>
+
+        <div class="px-[13px] py-[12px] flex flex-col gap-[10px]">
+
+          <div data-msg="ai" class="max-w-full text-[13px] leading-[1.7] text-[#1f2328]">这是上一段对话在回合结束后的只读留档；六个已决状态都已落定，另附两条工具执行记录，不会重新执行。</div>
+
+          <div class="flex flex-col gap-[8px]">
+            <div data-card="tool-success" data-channel="tool" data-state="success" data-collapsed="1" data-weight="normal" class="w-full bg-white border border-[#e3e6ea] rounded-[10px] overflow-hidden">
+              <button type="button" data-card-head aria-expanded="false" aria-controls="body-tool-success" class="w-full flex items-center gap-[6px] px-[10px] py-[8px] text-left bg-transparent border-0 whitespace-nowrap cursor-pointer transition-colors duration-[150ms]">
+                <span data-icon-slot data-icon-type="tool" class="flex-none flex items-center justify-center w-[24px]">
+                  <svg data-icon-bare width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+                  <svg data-icon-tile width="20" height="20" viewBox="0 0 20 20" class="hidden" stroke="#57606a" aria-hidden="true" focusable="false"><rect x="0.5" y="0.5" width="19" height="19" rx="4.5" fill="#f6f7f9" stroke="#e3e6ea" stroke-width="1"/><svg x="3" y="3" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg></svg>
+                </span>
+                <span data-head-title-area class="flex min-w-0 flex-1 items-center gap-[6px]">
+                  <span data-head-title class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap font-mono font-semibold text-[11.4px] text-[#1f2328]">publish_config</span>
+                  <span data-head-summary class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[11.5px] leading-[1.6] text-[#57606a]">CHG-2026-0411 · 3/3 项已写入</span>
+                </span>
+                <span data-status-label class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] border whitespace-nowrap text-[#1a7f45] bg-[#edf7f0] border-[#bfe3cd]">已成功</span>
+                <span data-chev class="flex-none ml-auto text-[#8b949e] text-[12px] transition-transform duration-[180ms]">›</span>
+              </button>
+              <div id="body-tool-success" data-collapse-body class="hidden px-[11px] pb-[11px]">
+                <div class="block text-[11px] tracking-[.5px] uppercase text-[#8b949e] mb-[4px]">参数</div>
+                <div class="bg-[#f6f7f9] border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto" data-scroll-region data-limit="min(280px,35vh)">
+                  <div class="flex gap-[10px] py-[6px] border-b border-[#eef0f3] text-[12.6px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_72px] break-words text-[#8b949e] text-[12px]">change_id</span><span class="flex-1 min-w-0 break-words">CHG-2026-0411</span></div>
+                  <div class="flex gap-[10px] py-[6px] border-b border-[#eef0f3] text-[12.6px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_72px] break-words text-[#8b949e] text-[12px]">targets</span><span class="flex-1 min-w-0 break-words">3 项配置</span></div>
+                </div>
+                <div class="block text-[11px] tracking-[.5px] uppercase text-[#8b949e] mb-[4px] mt-[9px]">输出</div>
+                <div class="text-[12.1px] leading-[1.6] font-mono text-[#606266] bg-[#f6f7f9] border border-[#eef0f3] rounded-[8px] px-[9px] py-[8px] max-h-[min(280px,35vh)] overflow-y-auto whitespace-pre-wrap break-all">publish_config start change_id=CHG-2026-0411
+write CURRENCY#GLOBAL ... ok
+write TAX_RULE#PRJ-07 ... ok
+write PRICING#CN ... ok
+audit CHG-2026-0411 ... ok
+publish done in 18.2s, 3/3 targets</div>
+              </div>
+            </div>
+          </div>
+
+          <div data-msg="ai" class="max-w-full text-[13px] leading-[1.7] text-[#1f2328]">这一单发布成功；另一单在写入时权限校验失败，失败原因单独留档。</div>
+
+          <div class="flex flex-col gap-[8px]">
+            <div data-card="tool-failure" data-channel="tool" data-state="failure" data-collapsed="1" data-weight="normal" class="w-full bg-white border border-[#e3e6ea] rounded-[10px] overflow-hidden">
+              <button type="button" data-card-head aria-expanded="false" aria-controls="body-tool-failure" class="w-full flex items-center gap-[6px] px-[10px] py-[8px] text-left bg-transparent border-0 whitespace-nowrap cursor-pointer transition-colors duration-[150ms]">
+                <span data-icon-slot data-icon-type="tool" class="flex-none flex items-center justify-center w-[24px]">
+                  <svg data-icon-bare width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+                  <svg data-icon-tile width="20" height="20" viewBox="0 0 20 20" class="hidden" stroke="#57606a" aria-hidden="true" focusable="false"><rect x="0.5" y="0.5" width="19" height="19" rx="4.5" fill="#f6f7f9" stroke="#e3e6ea" stroke-width="1"/><svg x="3" y="3" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg></svg>
+                </span>
+                <span data-head-title-area class="flex min-w-0 flex-1 items-center gap-[6px]">
+                  <span data-head-title class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap font-mono font-semibold text-[11.4px] text-[#1f2328]">publish_config</span>
+                  <span data-head-summary class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[11.5px] leading-[1.6] text-[#57606a]">CHG-2026-0408 · 权限校验失败</span>
+                </span>
+                <span data-status-label class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] border whitespace-nowrap text-[#c0392b] bg-[#fdf1ef] border-[#e3e6ea]">执行失败</span>
+                <span data-chev class="flex-none ml-auto text-[#8b949e] text-[12px] transition-transform duration-[180ms]">›</span>
+              </button>
+              <div id="body-tool-failure" data-collapse-body class="hidden px-[11px] pb-[11px]">
+                <div class="block text-[11px] tracking-[.5px] uppercase text-[#8b949e] mb-[4px]">参数</div>
+                <div class="bg-[#f6f7f9] border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto" data-scroll-region data-limit="min(280px,35vh)">
+                  <div class="flex gap-[10px] py-[6px] border-b border-[#eef0f3] text-[12.6px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_72px] break-words text-[#8b949e] text-[12px]">change_id</span><span class="flex-1 min-w-0 break-words">CHG-2026-0408</span></div>
+                  <div class="flex gap-[10px] py-[6px] border-b border-[#eef0f3] text-[12.6px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_72px] break-words text-[#8b949e] text-[12px]">targets</span><span class="flex-1 min-w-0 break-words">CURRENCY#GLOBAL 等 3 项</span></div>
+                </div>
+                <div class="flex items-start gap-[7px] px-[10px] py-[7px] mt-[9px] text-[12.4px] text-[#c0392b] bg-[#fdf1ef] rounded-[9px]">
+                  <span class="mt-[1px] shrink-0 flex-[0_0_14px] w-[14px] h-[14px] flex items-center justify-center rounded-[50%] border-[1.3px] text-[#c0392b] text-[9px] font-bold" aria-hidden="true">!</span>
+                  <span class="flex-1 min-w-0 whitespace-pre-wrap break-words">原因：写入 CURRENCY#GLOBAL 时权限校验失败（403），已回滚前 1 项。</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div data-msg="ai" class="max-w-full text-[13px] leading-[1.7] text-[#1f2328]">下面展示六个已决状态，点卡头可以展开锁定内容；提交与取消的表单状态各自独立。</div>
+
+          <div class="flex flex-col gap-[8px]">
+
+            <div data-card="hitl-approved" data-channel="hitl" data-state="approved" data-collapsed="1" data-weight="low" class="w-full bg-white border border-[#e3e6ea] rounded-[10px] overflow-hidden">
+              <button type="button" data-card-head aria-expanded="false" aria-controls="body-hitl-approved" class="w-full flex items-center gap-[6px] px-[10px] py-[8px] text-left bg-transparent border-0 whitespace-nowrap cursor-pointer transition-colors duration-[150ms]">
+                <span data-icon-slot data-icon-type="hitl" class="flex-none flex items-center justify-center w-[24px]">
+                  <svg data-icon-bare width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                  <svg data-icon-tile width="20" height="20" viewBox="0 0 20 20" class="hidden" stroke="#57606a" aria-hidden="true" focusable="false"><rect x="0.5" y="0.5" width="19" height="19" rx="4.5" fill="#f6f7f9" stroke="#e3e6ea" stroke-width="1"/><svg x="3" y="3" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></svg>
+                </span>
+                <span data-head-title-area class="flex min-w-0 flex-1 items-center gap-[6px]">
+                  <span data-head-title class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[12px] font-semibold text-[#1f2328]">发布配置变更</span>
+                  <span data-head-summary class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[11.5px] leading-[1.6] text-[#57606a]">CHG-2026-0411</span>
+                </span>
+                <span data-status-label class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] border whitespace-nowrap text-[#1a7f45] bg-[#edf7f0] border-[#bfe3cd]">已批准</span>
+                <span data-chev class="flex-none ml-auto text-[#8b949e] text-[12px] transition-transform duration-[180ms]">›</span>
+              </button>
+              <div id="body-hitl-approved" data-collapse-body class="hidden pb-[11px]">
+                <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">发布配置变更</div>
+                <div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto" data-scroll-region data-limit="min(280px,35vh)">
+                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">变更单</span><span class="flex-1 min-w-0 break-words">CHG-2026-0411</span></div>
+                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">目标</span><span class="flex-1 min-w-0 break-words">CURRENCY#GLOBAL、TAX_RULE#PRJ-07、PRICING#CN</span></div>
+                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">窗口</span><span class="flex-1 min-w-0 break-words">夜间低峰 · 18 秒</span></div>
+                </div>
+                <div class="mx-[11px] mt-[7px] text-[11.5px] text-[#57606a] leading-[1.6]">审批已完成 · 发布流水线已执行（见上方工具卡）</div>
+              </div>
+            </div>
+
+            <div data-card="hitl-rejected" data-channel="hitl" data-state="rejected" data-collapsed="1" data-weight="low" class="w-full bg-white border border-[#e3e6ea] rounded-[10px] overflow-hidden">
+              <button type="button" data-card-head aria-expanded="false" aria-controls="body-hitl-rejected" class="w-full flex items-center gap-[6px] px-[10px] py-[8px] text-left bg-transparent border-0 whitespace-nowrap cursor-pointer transition-colors duration-[150ms]">
+                <span data-icon-slot data-icon-type="hitl" class="flex-none flex items-center justify-center w-[24px]">
+                  <svg data-icon-bare width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                  <svg data-icon-tile width="20" height="20" viewBox="0 0 20 20" class="hidden" stroke="#57606a" aria-hidden="true" focusable="false"><rect x="0.5" y="0.5" width="19" height="19" rx="4.5" fill="#f6f7f9" stroke="#e3e6ea" stroke-width="1"/><svg x="3" y="3" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></svg>
+                </span>
+                <span data-head-title-area class="flex min-w-0 flex-1 items-center gap-[6px]">
+                  <span data-head-title class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[12px] font-semibold text-[#1f2328]">重建生产搜索索引</span>
+                  <span data-head-summary class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[11.5px] leading-[1.6] text-[#57606a]">IDX-2026-0410</span>
+                </span>
+                <span data-status-label class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] border whitespace-nowrap text-[#c0392b] bg-[#fdf1ef] border-[#e3e6ea]">已拒绝</span>
+                <span data-chev class="flex-none ml-auto text-[#8b949e] text-[12px] transition-transform duration-[180ms]">›</span>
+              </button>
+              <div id="body-hitl-rejected" data-collapse-body class="hidden pb-[11px]">
+                <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">重建生产搜索索引</div>
+                <div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto" data-scroll-region data-limit="min(280px,35vh)">
+                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">索引</span><span class="flex-1 min-w-0 break-words">IDX-2026-0410</span></div>
+                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">影响</span><span class="flex-1 min-w-0 break-words">搜索降级约 15 分钟</span></div>
+                </div>
+                <div class="mx-[11px] mt-[7px] text-[11.5px] text-[#57606a] leading-[1.6]">拒绝后未执行索引重建，搜索服务保持原状。</div>
+              </div>
+            </div>
+
+            <div data-card="hitl-timeout" data-channel="hitl" data-state="timeout" data-collapsed="1" data-weight="low" class="w-full bg-white border border-[#e3e6ea] rounded-[10px] overflow-hidden">
+              <button type="button" data-card-head aria-expanded="false" aria-controls="body-hitl-timeout" class="w-full flex items-center gap-[6px] px-[10px] py-[8px] text-left bg-transparent border-0 whitespace-nowrap cursor-pointer transition-colors duration-[150ms]">
+                <span data-icon-slot data-icon-type="hitl" class="flex-none flex items-center justify-center w-[24px]">
+                  <svg data-icon-bare width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                  <svg data-icon-tile width="20" height="20" viewBox="0 0 20 20" class="hidden" stroke="#57606a" aria-hidden="true" focusable="false"><rect x="0.5" y="0.5" width="19" height="19" rx="4.5" fill="#f6f7f9" stroke="#e3e6ea" stroke-width="1"/><svg x="3" y="3" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></svg>
+                </span>
+                <span data-head-title-area class="flex min-w-0 flex-1 items-center gap-[6px]">
+                  <span data-head-title class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[12px] font-semibold text-[#1f2328]">发布配置变更</span>
+                  <span data-head-summary class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[11.5px] leading-[1.6] text-[#57606a]">CHG-2026-0409</span>
+                </span>
+                <span data-status-label class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] border whitespace-nowrap text-[#b45309] bg-[#fffbeb] border-[#fde68a]">已超时</span>
+                <span data-chev class="flex-none ml-auto text-[#8b949e] text-[12px] transition-transform duration-[180ms]">›</span>
+              </button>
+              <div id="body-hitl-timeout" data-collapse-body class="hidden pb-[11px]">
+                <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">发布配置变更</div>
+                <div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto" data-scroll-region data-limit="min(280px,35vh)">
+                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">变更单</span><span class="flex-1 min-w-0 break-words">CHG-2026-0409</span></div>
+                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">目标</span><span class="flex-1 min-w-0 break-words">PRICING#CN 等 2 项</span></div>
+                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">回滚</span><span class="flex-1 min-w-0 break-words">snapshot-2026-0409-0210</span></div>
+                </div>
+                <div class="mx-[11px] mt-[7px] text-[11.5px] text-[#57606a] leading-[1.6]">60 秒内未收到应答，未执行任何写入。</div>
+              </div>
+            </div>
+
+            <div data-card="hitl-failed" data-channel="hitl" data-state="failed" data-collapsed="1" data-weight="low" class="w-full bg-white border border-[#e3e6ea] rounded-[10px] overflow-hidden">
+              <button type="button" data-card-head aria-expanded="false" aria-controls="body-hitl-failed" class="w-full flex items-center gap-[6px] px-[10px] py-[8px] text-left bg-transparent border-0 whitespace-nowrap cursor-pointer transition-colors duration-[150ms]">
+                <span data-icon-slot data-icon-type="hitl" class="flex-none flex items-center justify-center w-[24px]">
+                  <svg data-icon-bare width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                  <svg data-icon-tile width="20" height="20" viewBox="0 0 20 20" class="hidden" stroke="#57606a" aria-hidden="true" focusable="false"><rect x="0.5" y="0.5" width="19" height="19" rx="4.5" fill="#f6f7f9" stroke="#e3e6ea" stroke-width="1"/><svg x="3" y="3" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></svg>
+                </span>
+                <span data-head-title-area class="flex min-w-0 flex-1 items-center gap-[6px]">
+                  <span data-head-title class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[12px] font-semibold text-[#1f2328]">发布配置变更</span>
+                  <span data-head-summary class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[11.5px] leading-[1.6] text-[#57606a]">CHG-2026-0408</span>
+                </span>
+                <span data-status-label class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] border whitespace-nowrap text-[#c0392b] bg-[#fdf1ef] border-[#e3e6ea]">已批准 · 执行失败</span>
+                <span data-chev class="flex-none ml-auto text-[#8b949e] text-[12px] transition-transform duration-[180ms]">›</span>
+              </button>
+              <div id="body-hitl-failed" data-collapse-body class="hidden pb-[11px]">
+                <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">发布配置变更</div>
+                <div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto" data-scroll-region data-limit="min(280px,35vh)">
+                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">变更单</span><span class="flex-1 min-w-0 break-words">CHG-2026-0408</span></div>
+                  <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">目标</span><span class="flex-1 min-w-0 break-words">CURRENCY#GLOBAL 等 3 项</span></div>
+                </div>
+                <div class="mx-[11px] mt-[9px] rounded-[8px] bg-[#fdf1ef] px-[10px] py-[7px] text-[11.9px] leading-[1.6] text-[#c0392b] whitespace-pre-wrap break-words">写入 CURRENCY#GLOBAL 时权限校验失败（403），已回滚前 1 项。</div>
+                <div class="mx-[11px] mt-[7px] text-[11.5px] text-[#57606a] leading-[1.6]">失败原因与上方工具卡一致，已回滚，未留下半成品配置。</div>
+              </div>
+            </div>
+
+            <div data-card="form-submitted" data-channel="form" data-state="submitted" data-collapsed="1" data-weight="low" class="w-full bg-white border border-[#e3e6ea] rounded-[10px] overflow-hidden">
+              <button type="button" data-card-head aria-expanded="false" aria-controls="body-form-submitted" class="w-full flex items-center gap-[6px] px-[10px] py-[8px] text-left bg-transparent border-0 whitespace-nowrap cursor-pointer transition-colors duration-[150ms]">
+                <span data-icon-slot data-icon-type="form" class="flex-none flex items-center justify-center w-[24px]">
+                  <svg data-icon-bare width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M8 11h8"/><path d="M8 15h5"/></svg>
+                  <svg data-icon-tile width="20" height="20" viewBox="0 0 20 20" class="hidden" stroke="#57606a" aria-hidden="true" focusable="false"><rect x="0.5" y="0.5" width="19" height="19" rx="4.5" fill="#f6f7f9" stroke="#e3e6ea" stroke-width="1"/><svg x="3" y="3" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M8 11h8"/><path d="M8 15h5"/></svg></svg>
+                </span>
+                <span data-head-title-area class="flex min-w-0 flex-1 items-center gap-[6px]">
+                  <span data-head-title class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[12px] font-semibold text-[#1f2328]">月度对账导出表单</span>
+                  <span data-head-summary class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[11.5px] leading-[1.6] text-[#57606a]">EXP-2026-0407</span>
+                </span>
+                <span data-status-label class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] border whitespace-nowrap text-[#1a7f45] bg-[#edf7f0] border-[#bfe3cd]">已提交</span>
+                <span data-chev class="flex-none ml-auto text-[#8b949e] text-[12px] transition-transform duration-[180ms]">›</span>
+              </button>
+              <div id="body-form-submitted" data-collapse-body class="hidden pb-[11px]">
+                <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">月度对账导出表单</div>
+                <div class="mx-[11px] mt-[9px] flex flex-col gap-[8px]">
+                  <div class="flex flex-col gap-[5px]">
+                    <label for="submitted-name" class="block text-[11px] tracking-[.5px] uppercase text-[#8b949e]">作业名称</label>
+                    <input id="submitted-name" type="text" value="2026-04 月度对账导出" disabled class="w-full bg-white border border-[#e3e6ea] rounded-[8px] px-[9px] py-[6px] text-[13px] leading-[1.5] text-[#1f2328] disabled:bg-transparent disabled:text-[#57606a] disabled:cursor-default disabled:opacity-[.55]">
+                  </div>
+                  <div class="flex flex-col gap-[5px]">
+                    <label for="submitted-scope" class="block text-[11px] tracking-[.5px] uppercase text-[#8b949e]">导出范围</label>
+                    <select id="submitted-scope" disabled class="w-full bg-white border border-[#e3e6ea] rounded-[8px] px-[9px] py-[6px] text-[13px] leading-[1.5] text-[#1f2328] disabled:bg-transparent disabled:text-[#57606a] disabled:cursor-default disabled:opacity-[.55]">
+                      <option value="diff" selected>仅差异项（3 条）</option>
+                      <option value="full">全量配置</option>
+                    </select>
+                  </div>
+                  <div class="flex flex-col gap-[5px]">
+                    <label for="submitted-date" class="block text-[11px] tracking-[.5px] uppercase text-[#8b949e]">生效日期</label>
+                    <input id="submitted-date" type="date" value="2026-04-30" disabled class="w-full bg-white border border-[#e3e6ea] rounded-[8px] px-[9px] py-[6px] text-[13px] leading-[1.5] text-[#1f2328] disabled:bg-transparent disabled:text-[#57606a] disabled:cursor-default disabled:opacity-[.55]">
+                  </div>
+                  <label class="flex items-start gap-[9px]">
+                    <input id="submitted-history" type="checkbox" checked disabled class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb] disabled:cursor-default disabled:opacity-[.55]">
+                    <span class="flex-1 min-w-0 text-[12.6px] leading-[1.5] text-[#57606a]">包含 90 天内的历史版本</span>
+                  </label>
+                </div>
+                <div class="mx-[11px] mt-[7px] text-[11.5px] text-[#57606a] leading-[1.6]">提交人：值班管理员 · 作业号 EXP-2026-0407 · 已入队</div>
+              </div>
+            </div>
+
+            <div data-card="form-cancelled" data-channel="form" data-state="cancelled" data-collapsed="1" data-weight="low" class="w-full bg-white border border-[#e3e6ea] rounded-[10px] overflow-hidden">
+              <button type="button" data-card-head aria-expanded="false" aria-controls="body-form-cancelled" class="w-full flex items-center gap-[6px] px-[10px] py-[8px] text-left bg-transparent border-0 whitespace-nowrap cursor-pointer transition-colors duration-[150ms]">
+                <span data-icon-slot data-icon-type="form" class="flex-none flex items-center justify-center w-[24px]">
+                  <svg data-icon-bare width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M8 11h8"/><path d="M8 15h5"/></svg>
+                  <svg data-icon-tile width="20" height="20" viewBox="0 0 20 20" class="hidden" stroke="#57606a" aria-hidden="true" focusable="false"><rect x="0.5" y="0.5" width="19" height="19" rx="4.5" fill="#f6f7f9" stroke="#e3e6ea" stroke-width="1"/><svg x="3" y="3" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M8 11h8"/><path d="M8 15h5"/></svg></svg>
+                </span>
+                <span data-head-title-area class="flex min-w-0 flex-1 items-center gap-[6px]">
+                  <span data-head-title class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[12px] font-semibold text-[#1f2328]">库存快照导出表单</span>
+                  <span data-head-summary class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[11.5px] leading-[1.6] text-[#57606a]">EXP-2026-0406</span>
+                </span>
+                <span data-status-label class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] border whitespace-nowrap text-[#57606a] bg-[#f6f7f9] border-[#e3e6ea]">已取消</span>
+                <span data-chev class="flex-none ml-auto text-[#8b949e] text-[12px] transition-transform duration-[180ms]">›</span>
+              </button>
+              <div id="body-form-cancelled" data-collapse-body class="hidden pb-[11px]">
+                <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">库存快照导出表单</div>
+                <div class="mx-[11px] mt-[9px] flex flex-col gap-[8px]">
+                  <div class="flex flex-col gap-[5px]">
+                    <label for="cancelled-name" class="block text-[11px] tracking-[.5px] uppercase text-[#8b949e]">作业名称</label>
+                    <input id="cancelled-name" type="text" value="" disabled placeholder="未填写" class="w-full bg-white border border-[#e3e6ea] rounded-[8px] px-[9px] py-[6px] text-[13px] leading-[1.5] text-[#1f2328] placeholder:text-[#8b949e] disabled:bg-transparent disabled:text-[#57606a] disabled:cursor-default disabled:opacity-[.55]">
+                  </div>
+                  <div class="flex flex-col gap-[5px]">
+                    <label for="cancelled-date" class="block text-[11px] tracking-[.5px] uppercase text-[#8b949e]">生效日期</label>
+                    <input id="cancelled-date" type="date" value="" disabled class="w-full bg-white border border-[#e3e6ea] rounded-[8px] px-[9px] py-[6px] text-[13px] leading-[1.5] text-[#1f2328] disabled:bg-transparent disabled:text-[#57606a] disabled:cursor-default disabled:opacity-[.55]">
+                  </div>
+                  <label class="flex items-start gap-[9px]">
+                    <input id="cancelled-history" type="checkbox" disabled class="mt-[3px] m-0 flex-[0_0_14px] w-[14px] h-[14px] accent-[#2563eb] disabled:cursor-default disabled:opacity-[.55]">
+                    <span class="flex-1 min-w-0 text-[12.6px] leading-[1.5] text-[#57606a]">包含 90 天内的历史版本</span>
+                  </label>
+                </div>
+                <div class="mx-[11px] mt-[7px] text-[11.5px] text-[#57606a] leading-[1.6]">取消后未提交，表单已回到初始空态，不保留任何填写内容。</div>
+              </div>
+            </div>
+
+          </div>
+
+          <div data-msg="ai" class="max-w-full text-[13px] leading-[1.7] text-[#1f2328]">以上为历史留档，不会重新触发任何任务；如需重试，请在当前会话里重新发起。</div>
+
+        </div>
+      </section>
+
+    </div>
+  </div>
+</main>
+
+<script>
+(function () {
+  var root = document.documentElement
+  var supportsHistory = window.history && history.replaceState
+
+  function applyVariant(v) {
+    root.setAttribute('data-icon-variant', v)
+    document.querySelectorAll('[data-icon-bare]').forEach(function (el) {
+      el.classList.toggle('hidden', v !== 'bare')
+    })
+    document.querySelectorAll('[data-icon-tile]').forEach(function (el) {
+      el.classList.toggle('hidden', v !== 'tile')
+    })
+    document.querySelectorAll('[data-variant-btn]').forEach(function (btn) {
+      var active = btn.getAttribute('data-variant-btn') === v
+      btn.setAttribute('aria-pressed', active ? 'true' : 'false')
+      btn.classList.toggle('bg-[#eff4ff]', active)
+      btn.classList.toggle('bg-transparent', !active)
+      btn.classList.toggle('text-[#2563eb]', active)
+      btn.classList.toggle('font-semibold', active)
+      btn.classList.toggle('text-[#57606a]', !active)
+    })
+    if (supportsHistory) {
+      var url = new URL(location.href)
+      if (v === 'tile') url.searchParams.set('icon-variant', 'tile')
+      else url.searchParams.delete('icon-variant')
+      history.replaceState(null, '', url)
+    }
+  }
+
+  document.querySelectorAll('[data-variant-btn]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      applyVariant(btn.getAttribute('data-variant-btn'))
+    })
+  })
+
+  document.querySelectorAll('[data-card]').forEach(function (card) {
+    var head = card.querySelector('[data-card-head]')
+    var body = card.querySelector('[data-collapse-body]')
+    if (!head || head.tagName !== 'BUTTON' || !body) return
+    var open = card.getAttribute('data-collapsed') === '0'
+    head.setAttribute('aria-expanded', open ? 'true' : 'false')
+    body.classList.toggle('hidden', !open)
+    var chev = card.querySelector('[data-chev]')
+    if (chev) chev.classList.toggle('rotate-90', open)
+
+    head.addEventListener('click', function () {
+      open = card.getAttribute('data-collapsed') === '0'
+      var next = !open
+      card.setAttribute('data-collapsed', next ? '0' : '1')
+      head.setAttribute('aria-expanded', next ? 'true' : 'false')
+      body.classList.toggle('hidden', !next)
+      if (chev) chev.classList.toggle('rotate-90', next)
+    })
+  })
+
+  var initial = new URLSearchParams(location.search).get('icon-variant') === 'tile' ? 'tile' : 'bare'
+  applyVariant(initial)
+})()
+</script>
+</body>
+</html>

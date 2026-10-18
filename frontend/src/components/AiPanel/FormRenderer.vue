@@ -8,10 +8,12 @@
          行为面逐字保留：setValue / checkFormValues 复核 / emit('submit'|'cancel') /
          data-testid="gf-cancel|gf-submit" / :disabled="submitting|disabled" 的禁用语义。 -->
     <!-- 卡头（v7 `.gf-hd`）：▤ + 标题 + 场景胶囊（右贴）。
-         2A 批（裁决 2026-10-17 §9 K1）：已决只读态**不渲染本卡头** —— 状态徽标 + 人话摘要 + chevron
-         由外层 HITL 卡头承担，卡体 = 同一张表单（标题 + 字段）原样锁定。 -->
+         2A 批（裁决 2026-10-17 §9 K1）：已决只读态**不渲染本卡头** —— 外层统一卡头
+         （左类型图标 + 中性标题/摘要 + 右状态标签 + chevron）承担辨识信息，
+         卡体 = 同一张表单（标题 + 字段）原样锁定。
+         showHeader=false：AiPanel 待填写 GF 的标题/状态已上提到统一卡头（一卡一头）。 -->
     <div
-      v-if="!readonly"
+      v-if="!readonly && showHeader"
       class="flex items-center gap-[7px] px-[11px] py-[9px] border-0 border-b border-solid border-[#eef0f3] bg-[#f6f7f9] text-[12.8px] [font-weight:650]"
     >
       <span class="flex-none text-[#8b949e] text-[11px]" aria-hidden="true">▤</span>
@@ -192,7 +194,7 @@ import { formatCountdown } from '@/utils/format'
 /** 六型取值并集（number 的"未填"用 undefined 表示）。 */
 type FormModelValue = string | number | boolean | undefined | string[]
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   schema: FormSpec
   submitting: boolean
   /** 后端 FORM_RESULT_REJECTED 的拒绝说明（挂起仍在等待，可改值重发或取消） */
@@ -209,7 +211,12 @@ const props = defineProps<{
    * 的初始态 —— 取消 / 超时收尾按 F9「未提交不记录」不保留任何填写内容。
    */
   initialValues?: Record<string, unknown> | null
-}>()
+  /**
+   * 卡头开关（默认 true）：独立使用保留 v7 `.gf-hd` 卡头；
+   * AiPanel 待填写 GF 由统一卡头承载标题/状态时传 false（一卡一头，不重复标题）。
+   */
+  showHeader?: boolean
+}>(), { showHeader: true })
 
 const emit = defineEmits<{
   (event: 'submit', values: Record<string, unknown>): void

@@ -23,10 +23,11 @@ export type ActivityPart = ToolPart | ReasoningPart
  * 已决 HITL（确认门/GF）不再派生第二块，改由**该工具段自己的卡**原地切只读态渲染。
  *
  * 2A 批（裁决 2026-10-17 §9 K1 + §10 F9 + §15 K12）：只读态 = **原样 UI 只读渲染**（门卡参数区
- * 字段表原样 / GF 同一张表单控件原生 disabled 值回填 / 零操作按钮），卡头 = 状态徽标 + 人话摘要 +
- * chevron 的裸文字单行；已决六态（已批准 / 已拒绝 / 已超时 / 已批准·执行失败 / 已提交 / 已取消）
- * 回合结束后**一律默认折叠**，卡头摘要行保留可辨识信息。卡面不渲染 decidedAt（§16 M1：后端照记、
- * 不上卡面）—— 摘要/徽标由卡头恒显行承接 R-160 兼容条件。
+ * 字段表原样 / GF 同一张表单控件原生 disabled 值回填 / 零操作按钮），卡头 = 左固定类型裸 SVG +
+ * 中性标题/摘要 + 右状态文字标签 + chevron（可折叠时）；已决六态（已批准 / 已拒绝 / 已超时 /
+ * 已批准·执行失败 / 已提交 / 已取消）回合结束后**一律默认折叠**，卡头单行（标题/摘要/状态标签）
+ * 保留可辨识信息。卡面不渲染 decidedAt（§16 M1：后端照记、不上卡面）—— 标题/摘要/状态标签由
+ * 卡头恒显行承接 R-160 兼容条件。
  */
 export interface Block {
   /** 成员稳定 id（加消息命名空间前缀，F1）：`${messageId}:${toolCallId}` / `${messageId}:reasoning-${seg}`（D5） */
@@ -304,7 +305,7 @@ function optionLabel(field: FormFieldLite, value: unknown): string {
  * name 兜底**仅** GENERATIVE_FORM_TOOL（旧数据 kind2=UNKNOWN 时 GF 仍认名，其余工具不认名）。
  *
  * 2A 批（裁决 §9 K2）：`blocked` / `unknown` / `pending` **不是决策态** —— 它们是工具运行侧
- * 的「未形成裁决」（越 scope 拦下 / 结局未知 / 仍在途），继续走普通工具卡（状态胶囊承接
+ * 的「未形成裁决」（越 scope 拦下 / 结局未知 / 仍在途），继续走普通工具卡（右状态标签承接
  * 「超出当前范围 / 结局未知 / 等待确认」），不进审批卡的只读四态，避免把非决策读成超时。
  */
 const NON_DECISION_STATUSES: ReadonlySet<ToolRunStatus> = new Set(['pending', 'blocked', 'unknown'])
@@ -356,13 +357,136 @@ export function readOnlyStateOf(part: ToolPart): ReadOnlyState {
 
 /**
  * 已决只读卡的默认展开态（§15 K12 → r15 直裁）：**六态一律折叠** ——
- * 回合结束后统一收成卡头摘要行（徽标 + 摘要 + chevron），由用户手动展开回溯。
+ * 回合结束后统一收成卡头单行（类型图标 + 中性标题/摘要 + 右状态标签 + chevron），
+ * 由用户手动展开回溯。
  * `pending` / `blocked` / `unknown` 与 requiresAction 待决门卡不属已决只读态（{@link isReadOnlyCard}
  * 挡在门外），本函数不承担它们的展开判定。
  * 「回合未结束仍展开」属回合时序，由 AiPanel 的 turnStillOpen 承担（不写进纯函数）。
  */
 export function readOnlyDefaultExpanded(_part: ToolPart): boolean {
   return false
+}
+
+/* ============================ 卡片三类型统一判据（tool / hitl / form） ============================
+ * 卡头通道统一后的单一状态来源：**类型**只认 name / kind2（CONFIRM→hitl、generative_form→form、
+ * 其余→tool，没有第四类型「decided」）；**状态**只读既有判据 —— 已决 HITL / GF 走
+ * {@link isReadOnlyCard} + {@link readOnlyStateOf}（不另起第二套只读状态机），
+ * 其余走段状态 `status`（pending 文案按类型分工）。返回 key / label / tone 三元组：
+ * AiPanel 只用 tone 映射右标签色族，标题/摘要/左侧类型 SVG 恒中性色。
+ * ================================================================================================ */
+
+export type CardType = 'tool' | 'hitl' | 'form'
+/** 右状态标签色族（与既有胶囊/徽标色族一一对应；neutral = 原 warning/info 中性灰族）。 */
+export type CardTone = 'primary' | 'success' | 'danger' | 'warning' | 'neutral'
+
+export interface CardStatus {
+  /** 段状态 key，或已决只读态 key（approved / rejected / expired / failed / submitted / cancelled） */
+  key: ToolRunStatus | ReadOnlyState
+  /** 右标签文案（已决 HITL / GF 带既有 ✓ / ✗ / ! 字形前缀） */
+  label: string
+  /** 状态色族；只作用于右标签 */
+  tone: CardTone
+}
+
+/** pending 文案按类型分工：普通工具「待执行」、HITL「等待确认」、GF「待填写」。 */
+const CARD_PENDING_LABEL: Record<CardType, string> = {
+  tool: '待执行',
+  hitl: '等待确认',
+  form: '待填写'
+}
+
+/** 普通状态色族（R-165 既有口径保持；pending / running 蓝、成功绿、失败红、其余中性灰）。 */
+const TOOL_STATUS_TONE: Record<ToolRunStatus, CardTone> = {
+  pending: 'primary',
+  running: 'primary',
+  succeeded: 'success',
+  failed: 'danger',
+  rejected: 'neutral',
+  blocked: 'neutral',
+  expired: 'neutral',
+  cancelled: 'neutral',
+  unknown: 'neutral'
+}
+
+/** 已决六态文案（2A 批 §9 K2 / §10 F6 原样；门卡无「已取消」）。 */
+const READ_ONLY_LABEL: Record<ReadOnlyState, string> = {
+  approved: '✓ 已批准',
+  rejected: '✗ 已拒绝',
+  expired: '! 已超时',
+  failed: '! 已批准 · 执行失败',
+  submitted: '✓ 已提交',
+  cancelled: '✗ 已取消'
+}
+
+/** 已决六态色族（与旧 READONLY_BADGE_TONE 同源：通过琥珀、提交/批准绿、拒绝/失败/取消红）。 */
+const READ_ONLY_TONE: Record<ReadOnlyState, CardTone> = {
+  approved: 'success',
+  rejected: 'danger',
+  expired: 'warning',
+  failed: 'danger',
+  submitted: 'success',
+  cancelled: 'danger'
+}
+
+/**
+ * 卡片类型（唯一来源）：generative_form 按名优先 ⇒ form；kind2=CONFIRM ⇒ hitl；其余 ⇒ tool。
+ * 已决 / 待决不改变类型（不存在「decided」第四类型），左图标因此整生命周期不变。
+ */
+export function cardTypeOf(part: ToolPart): CardType {
+  if (part.name === GENERATIVE_FORM_TOOL) {
+    return 'form'
+  }
+  if (part.kind2 === 'CONFIRM') {
+    return 'hitl'
+  }
+  return 'tool'
+}
+
+/**
+ * 普通段状态文案（排除 pending —— 已由 {@link cardStatusOf} 按类型分工先判；
+ * 只读六态走 {@link readOnlyStateOf}，不在此重复）。
+ */
+function toolStatusLabelOf(status: Exclude<ToolRunStatus, 'pending'>, expiredLocally: boolean | undefined): string {
+  switch (status) {
+    case 'running':
+      return '调用中…'
+    case 'succeeded':
+      return '已成功'
+    case 'failed':
+      return '执行失败'
+    case 'rejected':
+      return '已拒绝'
+    case 'blocked':
+      return '超出当前范围'
+    case 'expired':
+      return expiredLocally ? '已超时作废' : '会话已失效'
+    case 'cancelled':
+      return '已取消'
+    case 'unknown':
+      return '结局未知（未确认成功/失败）'
+  }
+}
+
+/**
+ * 卡片状态（key / label / tone）：
+ * - 已决 HITL / GF（{@link isReadOnlyCard}）⇒ key / label / tone 全由 {@link readOnlyStateOf} 派生；
+ * - 其余 pending ⇒ 文案按 {@link cardTypeOf} 分工；
+ * - 其余段状态（running / succeeded / failed / rejected / blocked / expired / cancelled / unknown）
+ *   ⇒ 既有八态文案 + 色族（blocked / unknown 不落只读六态；pending 已在前一分支处理）。
+ */
+export function cardStatusOf(part: ToolPart): CardStatus {
+  if (isReadOnlyCard(part)) {
+    const state = readOnlyStateOf(part)
+    return { key: state, label: READ_ONLY_LABEL[state], tone: READ_ONLY_TONE[state] }
+  }
+  if (part.status === 'pending') {
+    return { key: 'pending', label: CARD_PENDING_LABEL[cardTypeOf(part)], tone: 'primary' }
+  }
+  return {
+    key: part.status,
+    label: toolStatusLabelOf(part.status, part.expiredLocally),
+    tone: TOOL_STATUS_TONE[part.status]
+  }
 }
 
 /**
