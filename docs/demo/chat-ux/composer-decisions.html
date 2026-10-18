@@ -1,0 +1,599 @@
+<!doctype html>
+<html lang="zh-CN" data-composer-decisions="2026-10-18-v1" data-review-status="pending">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ai-example · 问题4 composer 三勾位新裁决 demo（待裁决）</title>
+<link rel="stylesheet" href="archive/r165-chat-ui-v7.11.css">
+</head>
+<body class="m-0 p-0 bg-[#f1f2f4] text-[#1f2328] font-sans text-[13.8px] leading-[1.7] antialiased">
+<div class="[&_.tip]:absolute [&_.tip]:bottom-full [&_.tip]:mb-[7px] [&_.tip]:left-1/2 [&_.tip]:-translate-x-1/2 [&_.tip]:bg-[#1f2328] [&_.tip]:text-white [&_.tip]:text-[11px] [&_.tip]:leading-[1.5] [&_.tip]:px-[8px] [&_.tip]:py-[3px] [&_.tip]:rounded-[6px] [&_.tip]:whitespace-nowrap [&_.tip]:pointer-events-none [&_.tip]:opacity-0 [&_.tip]:transition-opacity [&_.tip]:duration-[180ms] [&_.tip]:z-[6] [&_.tip]:motion-reduce:transition-none [&_.tip]:after:content-[''] [&_.tip]:after:absolute [&_.tip]:after:left-1/2 [&_.tip]:after:-ml-[4px] [&_.tip]:after:top-full [&_.tip]:after:border-[4px] [&_.tip]:after:border-transparent [&_.tip]:after:border-t-[#1f2328] [&_button:focus-visible]:outline-none">
+
+<main class="w-full max-w-[600px] mx-auto px-[10px] py-[12px]">
+  <div class="w-[420px] max-w-full mx-auto">
+
+    <header class="rounded-[12px] border border-[#e3e6ea] bg-white px-[13px] py-[12px]">
+      <div class="flex items-center gap-[8px] flex-wrap">
+        <span class="inline-flex items-center rounded-[6px] bg-[#1f2328] px-[7px] py-[1px] text-[11px] leading-[1.7] text-white">问题4</span>
+        <span class="inline-flex items-center rounded-[6px] border border-[#f0d5d0] bg-[#fdf1ef] px-[7px] py-[1px] text-[11px] leading-[1.7] text-[#c0392b]">pending · 待裁决</span>
+        <span class="inline-flex items-center rounded-[6px] border border-[#cddcff] bg-[#eff4ff] px-[7px] py-[1px] text-[11px] leading-[1.7] text-[#2563eb]">新 demo · 2026-10-18-v1</span>
+      </div>
+      <h1 class="m-0 mt-[8px] text-[16.5px] [font-weight:650] tracking-[.2px]">composer 输入区三勾位新裁决 demo</h1>
+      <p class="m-0 mt-[6px] text-[12.2px] leading-[1.65] text-[#57606a]">本页只用于看效果与试交互：三个勾位各自独立，当前页状态为 pending（待裁决），不代表任何裁决结论。Enter 三缺陷随批修复，不占勾位。</p>
+      <p class="m-0 mt-[6px] text-[11.2px] leading-[1.55] text-[#8b949e]">高度自适应优先使用 CSS <code class="font-mono text-[11px]">field-sizing: content</code>。现代浏览器可随内容增高；不支持该属性的浏览器回退为固定起始高度、框内滚动，本页不写 JS 行内样式。</p>
+    </header>
+
+    <nav aria-label="三勾位锚点导航" class="mt-[10px] flex flex-wrap items-center gap-[6px]">
+      <a href="#form" class="inline-flex items-center rounded-[999px] border border-[#cddcff] bg-[#eff4ff] px-[10px] py-[4px] text-[12px] leading-[1.6] text-[#2563eb] hover:bg-white focus-visible:ring-2 focus-visible:ring-[#2563eb]/40 focus-visible:ring-offset-0">① 形态</a>
+      <a href="#stream" class="inline-flex items-center rounded-[999px] border border-[#cddcff] bg-[#eff4ff] px-[10px] py-[4px] text-[12px] leading-[1.6] text-[#2563eb] hover:bg-white focus-visible:ring-2 focus-visible:ring-[#2563eb]/40 focus-visible:ring-offset-0">② 流式可编辑</a>
+      <a href="#queue" class="inline-flex items-center rounded-[999px] border border-[#cddcff] bg-[#eff4ff] px-[10px] py-[4px] text-[12px] leading-[1.6] text-[#2563eb] hover:bg-white focus-visible:ring-2 focus-visible:ring-[#2563eb]/40 focus-visible:ring-offset-0">③ 运行中排队</a>
+    </nav>
+
+    <section id="form" class="mt-[14px] overflow-hidden rounded-[12px] border border-[#e3e6ea] bg-white">
+      <div class="flex items-center gap-[8px] flex-wrap border-b border-[#eef0f3] bg-[#eff4ff] px-[13px] py-[9px]">
+        <span class="inline-flex items-center justify-center rounded-[7px] bg-[#2563eb] px-[7px] py-[1px] text-[11px] font-semibold leading-[1.7] text-white">①</span>
+        <h2 id="form-title" class="m-0 text-[13.6px] [font-weight:650]">形态：自适应高度 + 白底可编辑 + 圆形发送</h2>
+        <span class="ml-auto text-[10.5px] leading-[1.7] text-[#8b949e]">勾位 1 / 3</span>
+      </div>
+      <div class="p-[12px]">
+        <p class="m-0 mb-[10px] text-[11.9px] leading-[1.6] text-[#57606a]">与当前“固定 3 行灰底方钮”对照：提案从约 1 行 40px 起，输入自动增高，4 行约 101px 封顶后 textarea 内滚，盒内工具栏不动。</p>
+
+        <div class="grid grid-cols-1 gap-[10px]">
+          <div class="overflow-hidden rounded-[10px] border border-[#e3e6ea]">
+            <div class="flex items-center gap-[6px] border-b border-[#eef0f3] bg-[#f6f7f9] px-[10px] py-[6px] text-[11.4px] leading-[1.6]">
+              <span class="h-[6px] w-[6px] flex-none rounded-full bg-[#8b949e]" aria-hidden="true"></span>
+              <span class="[font-weight:650]">当前 · 固定 3 行灰底方钮</span>
+            </div>
+            <div class="bg-[#fbfbfc] p-[10px]">
+              <div class="flex items-center gap-[8px]">
+                <textarea rows="3" class="max-h-[76px] min-w-0 flex-1 resize-none rounded-[9px] border border-[#e3e6ea] bg-[#f6f7f9] px-[10px] py-[7px] font-sans text-[13px] leading-[1.4] text-[#1f2328] [outline:none]" aria-label="当前固定 3 行示例输入" placeholder="固定 3 行；内容超出时只能框内滚动"></textarea>
+                <button type="button" disabled class="flex h-[28px] w-[28px] flex-none items-center justify-center rounded-[8px] border-0 bg-[#8b949e] text-[13px] leading-none text-white disabled:cursor-default" aria-label="当前方形发送钮（静态对照）">↑</button>
+              </div>
+              <p class="m-0 mt-[6px] text-[11.2px] leading-[1.55] text-[#8b949e]">灰底容易被误读为不可编辑；固定 3 行不随内容增高；方形钮为当前形态。</p>
+            </div>
+          </div>
+
+          <div class="overflow-hidden rounded-[10px] border border-[#cddcff]">
+            <div class="flex items-center gap-[6px] border-b border-[#eef0f3] bg-[#eff4ff] px-[10px] py-[6px] text-[11.4px] leading-[1.6]">
+              <span class="h-[6px] w-[6px] flex-none rounded-full bg-[#2563eb]" aria-hidden="true"></span>
+              <span class="[font-weight:650]">提案 · 1 行 40px 起，自动增高，4 行 101px 封顶</span>
+            </div>
+            <div class="bg-white p-[10px]">
+              <div class="rounded-[12px] border border-[#e3e6ea] bg-white transition-[border-color,box-shadow] duration-[150ms] focus-within:border-[#2563eb] focus-within:ring-2 focus-within:ring-[#2563eb]/40">
+                <textarea rows="1" data-demo-composer="form" data-form-input class="block min-h-[40px] max-h-[101px] w-full resize-none overflow-y-auto rounded-t-[12px] border-0 bg-transparent px-[11px] pb-[7px] pt-[11px] font-sans text-[13px] leading-[1.6] text-[#1f2328] [outline:none] placeholder:text-[#8b949e] [field-sizing:content]" placeholder="输入消息，Enter 发送，Shift+Enter 换行" aria-label="提案形态示例输入"></textarea>
+                <div class="flex items-center gap-[6px] px-[9px] pb-[7px] pt-0">
+                  <span class="rounded-[6px] border border-dashed border-[#cddcff] px-[6px] py-[1px] text-[10.5px] leading-[1.6] text-[#8b949e]">工具位（预留 · 留空）</span>
+                  <span class="flex-1"></span>
+                  <button type="button" data-form-send class="group/tip relative ml-auto flex h-[28px] w-[28px] items-center justify-center rounded-full border-0 bg-[#2563eb] text-[13px] leading-none text-white transition-all duration-[150ms] hover:brightness-[1.08] disabled:cursor-default disabled:bg-[#8b949e] disabled:text-white focus-visible:ring-2 focus-visible:ring-[#2563eb]/40 focus-visible:ring-offset-0" aria-label="发送" disabled>↑<span class="tip delay-[500ms] group-hover/tip:!opacity-100 group-focus-visible/tip:!opacity-100" aria-hidden="true">发送</span></button>
+                </div>
+              </div>
+
+              <div class="mt-[8px] flex flex-wrap items-center gap-[6px]">
+                <button type="button" data-fill="1" class="inline-flex items-center rounded-[6px] border border-[#e3e6ea] bg-white px-[8px] py-[4px] text-[11.2px] leading-[1.6] text-[#57606a] hover:bg-[#eff4ff] focus-visible:ring-2 focus-visible:ring-[#2563eb]/40 focus-visible:ring-offset-0">填入 1 行</button>
+                <button type="button" data-fill="4" class="inline-flex items-center rounded-[6px] border border-[#e3e6ea] bg-white px-[8px] py-[4px] text-[11.2px] leading-[1.6] text-[#57606a] hover:bg-[#eff4ff] focus-visible:ring-2 focus-visible:ring-[#2563eb]/40 focus-visible:ring-offset-0">填入 4 行</button>
+                <button type="button" data-fill="6" class="inline-flex items-center rounded-[6px] border border-[#e3e6ea] bg-white px-[8px] py-[4px] text-[11.2px] leading-[1.6] text-[#57606a] hover:bg-[#eff4ff] focus-visible:ring-2 focus-visible:ring-[#2563eb]/40 focus-visible:ring-offset-0">填入 6 行</button>
+                <button type="button" data-form-clear class="inline-flex items-center rounded-[6px] border border-[#e3e6ea] bg-white px-[8px] py-[4px] text-[11.2px] leading-[1.6] text-[#57606a] hover:bg-[#eff4ff] focus-visible:ring-2 focus-visible:ring-[#2563eb]/40 focus-visible:ring-offset-0">清空</button>
+              </div>
+
+              <p class="m-0 mt-[6px] text-[11.2px] leading-[1.55] text-[#57606a]">填入 6 行后观察：框高停在 4 行上限，多出的内容在 textarea 内滚动，底栏工具位与发送钮位置不动。</p>
+
+              <div class="mt-[8px] flex flex-wrap items-center gap-[8px]">
+                <label for="form-fail" class="inline-flex items-center gap-[6px] text-[11.9px] leading-[1.6] text-[#57606a]">
+                  <input id="form-fail" type="checkbox" data-form-fail class="h-[14px] w-[14px] rounded-[2px] border-[#e3e6ea]">
+                  模拟发送失败
+                </label>
+                <span class="text-[11.2px] leading-[1.55] text-[#8b949e]" data-focus-state>焦点在输入框：否</span>
+              </div>
+
+              <div role="status" aria-live="polite" class="mt-[6px] rounded-[6px] bg-[#f6f7f9] px-[8px] py-[5px] text-[11.9px] leading-[1.6] text-[#57606a]" data-form-status>状态：空输入，发送禁用。</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="stream" class="mt-[14px] overflow-hidden rounded-[12px] border border-[#e3e6ea] bg-white">
+      <div class="flex items-center gap-[8px] flex-wrap border-b border-[#eef0f3] bg-[#eff4ff] px-[13px] py-[9px]">
+        <span class="inline-flex items-center justify-center rounded-[7px] bg-[#2563eb] px-[7px] py-[1px] text-[11px] font-semibold leading-[1.7] text-white">②</span>
+        <h2 id="stream-title" class="m-0 text-[13.6px] [font-weight:650]">流式中：textarea 白底可编辑 + 圆形停止钮</h2>
+        <span class="ml-auto text-[10.5px] leading-[1.7] text-[#8b949e]">勾位 2 / 3</span>
+      </div>
+      <div class="p-[12px]">
+        <div class="mb-[10px] rounded-[8px] border border-[#f0d5d0] bg-[#fdf1ef] px-[9px] py-[6px] text-[11.9px] leading-[1.6] text-[#c0392b]">行为变更：当前生成中禁用输入框并改用虚线 + 方钮；提案改为生成中仍可编辑，发送位原位换成同尺寸中性深色圆形停止钮（内白方块，非红色）。</div>
+
+        <div class="grid grid-cols-1 gap-[10px]">
+          <div class="overflow-hidden rounded-[10px] border border-[#e3e6ea]">
+            <div class="flex items-center gap-[6px] border-b border-[#eef0f3] bg-[#f6f7f9] px-[10px] py-[6px] text-[11.4px] leading-[1.6]">
+              <span class="h-[6px] w-[6px] flex-none rounded-full bg-[#8b949e]" aria-hidden="true"></span>
+              <span class="[font-weight:650]">当前 · 生成中禁用 + 虚线 + 方钮</span>
+              <span class="ml-auto text-[10.5px] leading-[1.7] text-[#8b949e]">静态对照</span>
+            </div>
+            <div class="bg-[#fbfbfc] p-[10px]">
+              <div class="rounded-[12px] border border-dashed border-[#cddcff] bg-[#f6f7f9]">
+                <textarea rows="2" disabled class="block max-h-[76px] w-full resize-none overflow-y-auto rounded-t-[12px] border-0 bg-transparent px-[11px] pb-[7px] pt-[11px] font-sans text-[13px] leading-[1.6] text-[#8b949e] [outline:none] disabled:cursor-default" aria-label="当前生成中禁用输入框（静态对照）">生成中：输入框被禁用，只能等本轮结束。</textarea>
+                <div class="flex items-center gap-[6px] px-[9px] pb-[7px] pt-0">
+                  <span class="flex-1"></span>
+                  <button type="button" disabled class="flex h-[28px] w-[28px] items-center justify-center rounded-[8px] border-0 bg-[#8b949e] text-white disabled:cursor-default" aria-label="当前方形停止钮（静态对照）"><span class="block h-[9px] w-[9px] rounded-[2px] bg-white" aria-hidden="true"></span></button>
+                </div>
+              </div>
+              <p class="m-0 mt-[6px] text-[11.2px] leading-[1.55] text-[#8b949e]">禁用输入框 + 虚线边框 + 方形停止钮；用户无法在生成中继续写下一段。</p>
+            </div>
+          </div>
+
+          <div class="overflow-hidden rounded-[10px] border border-[#cddcff]">
+            <div class="flex items-center gap-[6px] border-b border-[#eef0f3] bg-[#eff4ff] px-[10px] py-[6px] text-[11.4px] leading-[1.6]">
+              <span class="h-[6px] w-[6px] flex-none rounded-full bg-[#2563eb]" aria-hidden="true"></span>
+              <span class="[font-weight:650]">提案 · 流式中可编辑 + 圆形停止钮</span>
+              <span class="ml-auto text-[10.5px] leading-[1.7] text-[#8b949e]" data-stream-badge>空闲</span>
+            </div>
+            <div class="bg-white p-[10px]">
+              <div class="rounded-[12px] border border-[#e3e6ea] bg-white transition-[border-color,box-shadow] duration-[150ms] focus-within:border-[#2563eb] focus-within:ring-2 focus-within:ring-[#2563eb]/40">
+                <textarea rows="1" data-demo-composer="stream" data-stream-input class="block min-h-[40px] max-h-[101px] w-full resize-none overflow-y-auto rounded-t-[12px] border-0 bg-transparent px-[11px] pb-[7px] pt-[11px] font-sans text-[13px] leading-[1.6] text-[#1f2328] [outline:none] placeholder:text-[#8b949e] [field-sizing:content]" placeholder="流式中也可以继续输入；写完再按停止" aria-label="流式提案示例输入"></textarea>
+                <div class="flex items-center gap-[6px] px-[9px] pb-[7px] pt-0">
+                  <span class="flex-1"></span>
+                  <button type="button" data-stream-send class="group/tip relative ml-auto flex h-[28px] w-[28px] items-center justify-center rounded-full border-0 bg-[#2563eb] text-[13px] leading-none text-white transition-all duration-[150ms] hover:brightness-[1.08] disabled:cursor-default disabled:bg-[#8b949e] disabled:text-white focus-visible:ring-2 focus-visible:ring-[#2563eb]/40 focus-visible:ring-offset-0" aria-label="发送" disabled>↑<span class="tip delay-[500ms] group-hover/tip:!opacity-100 group-focus-visible/tip:!opacity-100" aria-hidden="true">发送</span></button>
+                  <button type="button" data-stream-stop class="group/tip relative ml-auto hidden h-[28px] w-[28px] items-center justify-center rounded-full border-0 bg-[#1f2328] transition-all duration-[150ms] hover:brightness-[1.15] focus-visible:ring-2 focus-visible:ring-[#2563eb]/40 focus-visible:ring-offset-0" aria-label="停止生成"><span class="block h-[9px] w-[9px] rounded-[2px] bg-white" aria-hidden="true"></span><span class="tip delay-[500ms] group-hover/tip:!opacity-100 group-focus-visible/tip:!opacity-100" aria-hidden="true">停止生成</span></button>
+                </div>
+              </div>
+
+              <div class="mt-[8px] flex flex-wrap items-center gap-[6px]">
+                <button type="button" data-stream-start class="inline-flex items-center rounded-[6px] border border-[#cddcff] bg-[#eff4ff] px-[8px] py-[4px] text-[11.2px] leading-[1.6] text-[#2563eb] hover:bg-white disabled:cursor-default disabled:opacity-50 focus-visible:ring-2 focus-visible:ring-[#2563eb]/40 focus-visible:ring-offset-0">模拟流式开始</button>
+                <button type="button" data-stream-end disabled class="inline-flex items-center rounded-[6px] border border-[#e3e6ea] bg-white px-[8px] py-[4px] text-[11.2px] leading-[1.6] text-[#57606a] hover:bg-[#eff4ff] disabled:cursor-default disabled:opacity-50 focus-visible:ring-2 focus-visible:ring-[#2563eb]/40 focus-visible:ring-offset-0">模拟流式结束</button>
+              </div>
+
+              <div role="status" aria-live="polite" class="mt-[6px] rounded-[6px] bg-[#f6f7f9] px-[8px] py-[5px] text-[11.9px] leading-[1.6] text-[#57606a]" data-stream-status>状态：空闲。开始模拟后可试在流式中继续输入，并观察发送位换成圆形停止钮。</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="queue" class="mt-[14px] overflow-hidden rounded-[12px] border border-[#e3e6ea] bg-white">
+      <div class="flex items-center gap-[8px] flex-wrap border-b border-[#eef0f3] bg-[#eff4ff] px-[13px] py-[9px]">
+        <span class="inline-flex items-center justify-center rounded-[7px] bg-[#2563eb] px-[7px] py-[1px] text-[11px] font-semibold leading-[1.7] text-white">③</span>
+        <h2 id="queue-title" class="m-0 text-[13.6px] [font-weight:650]">运行中 Enter：排队 chip + 回合结束自动发出</h2>
+        <span class="ml-auto text-[10.5px] leading-[1.7] text-[#8b949e]">勾位 3 / 3</span>
+      </div>
+      <div class="p-[12px]">
+        <p class="m-0 mb-[10px] text-[11.9px] leading-[1.6] text-[#57606a]">沿用归档 v7.11 已定交互：流式中输入框可编辑，按 Enter 后输入框清空，上方出现“已排队 1 条 · 取消”chip，回合结束自动发出。先点“模拟回合开始”，再输入并按 Enter。</p>
+
+        <div class="rounded-[10px] border border-[#cddcff] bg-white p-[10px]">
+          <div data-queue-chip class="mb-[6px] hidden flex flex-wrap items-center gap-[6px] rounded-[6px] border border-[#cddcff] bg-[#eff4ff] px-[8px] py-[4px] text-[11.5px] leading-[1.6] text-[#2563eb]">
+            <span class="[font-weight:650]">已排队 1 条</span>
+            <span class="text-[#57606a]">·</span>
+            <button type="button" data-queue-cancel class="inline-flex items-center rounded-[4px] border border-[#cddcff] bg-white px-[6px] py-[1px] text-[11px] leading-[1.6] text-[#2563eb] hover:bg-[#eff4ff] focus-visible:ring-2 focus-visible:ring-[#2563eb]/40 focus-visible:ring-offset-0">取消</button>
+          </div>
+
+          <div class="rounded-[12px] border border-[#e3e6ea] bg-white transition-[border-color,box-shadow] duration-[150ms] focus-within:border-[#2563eb] focus-within:ring-2 focus-within:ring-[#2563eb]/40">
+            <textarea rows="1" data-demo-composer="queue" data-queue-input class="block min-h-[40px] max-h-[101px] w-full resize-none overflow-y-auto rounded-t-[12px] border-0 bg-transparent px-[11px] pb-[7px] pt-[11px] font-sans text-[13px] leading-[1.6] text-[#1f2328] [outline:none] placeholder:text-[#8b949e] [field-sizing:content]" placeholder="运行中也可以继续输入；按 Enter 进入排队" aria-label="运行中排队示例输入"></textarea>
+            <div class="flex items-center gap-[6px] px-[9px] pb-[7px] pt-0">
+              <span class="rounded-[6px] border border-dashed border-[#cddcff] px-[6px] py-[1px] text-[10.5px] leading-[1.6] text-[#8b949e]">工具位（预留 · 留空）</span>
+              <span class="flex-1"></span>
+              <button type="button" data-queue-send class="group/tip relative ml-auto flex h-[28px] w-[28px] items-center justify-center rounded-full border-0 bg-[#2563eb] text-[13px] leading-none text-white transition-all duration-[150ms] hover:brightness-[1.08] disabled:cursor-default disabled:bg-[#8b949e] disabled:text-white focus-visible:ring-2 focus-visible:ring-[#2563eb]/40 focus-visible:ring-offset-0" aria-label="发送" disabled>↑<span class="tip delay-[500ms] group-hover/tip:!opacity-100 group-focus-visible/tip:!opacity-100" aria-hidden="true">发送</span></button>
+              <button type="button" data-queue-stop class="group/tip relative ml-auto hidden h-[28px] w-[28px] items-center justify-center rounded-full border-0 bg-[#1f2328] transition-all duration-[150ms] hover:brightness-[1.15] focus-visible:ring-2 focus-visible:ring-[#2563eb]/40 focus-visible:ring-offset-0" aria-label="停止生成"><span class="block h-[9px] w-[9px] rounded-[2px] bg-white" aria-hidden="true"></span><span class="tip delay-[500ms] group-hover/tip:!opacity-100 group-focus-visible/tip:!opacity-100" aria-hidden="true">停止生成</span></button>
+            </div>
+          </div>
+
+          <div class="mt-[8px] flex flex-wrap items-center gap-[6px]">
+            <button type="button" data-queue-start class="inline-flex items-center rounded-[6px] border border-[#cddcff] bg-[#eff4ff] px-[8px] py-[4px] text-[11.2px] leading-[1.6] text-[#2563eb] hover:bg-white disabled:cursor-default disabled:opacity-50 focus-visible:ring-2 focus-visible:ring-[#2563eb]/40 focus-visible:ring-offset-0">模拟回合开始</button>
+            <button type="button" data-queue-end disabled class="inline-flex items-center rounded-[6px] border border-[#e3e6ea] bg-white px-[8px] py-[4px] text-[11.2px] leading-[1.6] text-[#57606a] hover:bg-[#eff4ff] disabled:cursor-default disabled:opacity-50 focus-visible:ring-2 focus-visible:ring-[#2563eb]/40 focus-visible:ring-offset-0">模拟回合结束</button>
+            <button type="button" data-queue-reset class="inline-flex items-center rounded-[6px] border border-[#e3e6ea] bg-white px-[8px] py-[4px] text-[11.2px] leading-[1.6] text-[#57606a] hover:bg-[#eff4ff] focus-visible:ring-2 focus-visible:ring-[#2563eb]/40 focus-visible:ring-offset-0">重新开始</button>
+          </div>
+
+          <div role="status" aria-live="polite" class="mt-[6px] rounded-[6px] bg-[#f6f7f9] px-[8px] py-[5px] text-[11.9px] leading-[1.6] text-[#57606a]" data-queue-status>状态：回合未运行。点“模拟回合开始”后，运行中输入并按 Enter 才会出现排队 chip。</div>
+          <div class="mt-[6px] rounded-[6px] border border-[#eef0f3] bg-[#fbfbfc] px-[8px] py-[5px] text-[11.2px] leading-[1.55] text-[#57606a]">
+            <span class="[font-weight:650]">发出记录：</span>
+            <div class="mt-[2px] whitespace-pre-wrap break-words" data-queue-log>（尚无发出记录）</div>
+          </div>
+
+          <div class="mt-[8px] rounded-[6px] border border-[#f0d5d0] bg-[#fdf1ef] px-[8px] py-[5px] text-[11.2px] leading-[1.55] text-[#c0392b]">
+            <span class="[font-weight:650]">演示暂定，非最终裁决：</span>本样张按单条队列演示（容量未定）；取消后把排队内容追加回输入框，仅为演示可选行为，取消后草稿最终去向未裁。落地前还需明确是否只定交互形态，以及后端 / 会话边界（消息编号、队列上限、取消语义、回合边界）。
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="enter" class="mt-[14px] overflow-hidden rounded-[12px] border border-[#e3e6ea] bg-white">
+      <div class="flex items-center gap-[8px] flex-wrap border-b border-[#eef0f3] bg-[#eff4ff] px-[13px] py-[9px]">
+        <span class="inline-flex items-center justify-center rounded-[7px] bg-[#1f2328] px-[7px] py-[1px] text-[11px] font-semibold leading-[1.7] text-white">随批</span>
+        <h2 id="enter-title" class="m-0 text-[13.6px] [font-weight:650]">Enter 三缺陷随批修复（不占勾位）</h2>
+      </div>
+      <div class="p-[12px]">
+        <div class="grid grid-cols-1 gap-[8px]">
+          <div class="rounded-[8px] border border-[#eef0f3] bg-[#fbfbfc] px-[9px] py-[7px] text-[11.9px] leading-[1.6] text-[#57606a]">
+            <span class="[font-weight:650] text-[#1f2328]">缺陷 ① 中文输入法组合期 Enter 误发：</span>组合期 Enter 只交给输入法确认候选，不触发发送。
+          </div>
+          <div class="rounded-[8px] border border-[#eef0f3] bg-[#fbfbfc] px-[9px] py-[7px] text-[11.9px] leading-[1.6] text-[#57606a]">
+            <span class="[font-weight:650] text-[#1f2328]">缺陷 ② 发送后焦点丢失：</span>发送成功后焦点回到 textarea，连续输入不中断。
+          </div>
+          <div class="rounded-[8px] border border-[#eef0f3] bg-[#fbfbfc] px-[9px] py-[7px] text-[11.9px] leading-[1.6] text-[#57606a]">
+            <span class="[font-weight:650] text-[#1f2328]">缺陷 ③ 发送失败草稿丢失：</span>发送失败时不清空 textarea，草稿原地保留。
+          </div>
+        </div>
+        <p class="m-0 mt-[8px] text-[11.2px] leading-[1.55] text-[#57606a]">本页三个演示 textarea 已接入组合期守卫（compositionstart / compositionend、keyCode 229、组合结束后约 30ms 内不发送）与焦点回收；① 的“模拟发送失败”可验证草稿保留。真实中文输入法仍需实机验收，本页不伪造 IME 验收结论。</p>
+      </div>
+    </section>
+
+    <section id="summary" class="mt-[14px] overflow-hidden rounded-[12px] border border-[#e3e6ea] bg-white">
+      <div class="flex items-center gap-[8px] flex-wrap border-b border-[#eef0f3] bg-[#eff4ff] px-[13px] py-[9px]">
+        <span class="inline-flex items-center justify-center rounded-[7px] bg-[#2563eb] px-[7px] py-[1px] text-[11px] font-semibold leading-[1.7] text-white">汇总</span>
+        <h2 id="summary-title" class="m-0 text-[13.6px] [font-weight:650]">三勾位“通过 / 打回”含义</h2>
+      </div>
+      <div class="p-[12px]">
+        <div class="grid grid-cols-1 gap-[8px]">
+          <div class="rounded-[8px] border border-[#eef0f3] px-[9px] py-[7px] text-[11.9px] leading-[1.6] text-[#57606a]">
+            <span class="[font-weight:650] text-[#1f2328]">① 形态：</span>通过 = 采用“1 行 40px 起、自适应增高、4 行 101px 封顶、白底可编辑、整盒 focus-within 蓝环、盒内底栏左留空右发送、28×28 圆形发送钮”。打回 = 保留当前固定 3 行灰底方钮。
+          </div>
+          <div class="rounded-[8px] border border-[#eef0f3] px-[9px] py-[7px] text-[11.9px] leading-[1.6] text-[#57606a]">
+            <span class="[font-weight:650] text-[#1f2328]">② 流式可编辑：</span>通过 = 接受行为变更，流式中 textarea 白底可编辑，发送位换成同尺寸中性深色圆形停止钮（内白方块，非红色）。打回 = 保留当前生成中禁用 + 虚线 + 方钮。
+          </div>
+          <div class="rounded-[8px] border border-[#eef0f3] px-[9px] py-[7px] text-[11.9px] leading-[1.6] text-[#57606a]">
+            <span class="[font-weight:650] text-[#1f2328]">③ 运行中排队：</span>通过 = 采用“运行中 Enter → 输入框清空 + 已排队 1 条 · 取消 chip → 回合结束自动发出”的交互形态。打回 = 不做排队。若批准③，还需明确是否只定交互形态，以及后端 / 会话边界（消息编号、队列上限、取消语义、回合边界）。
+          </div>
+        </div>
+        <p class="m-0 mt-[8px] rounded-[6px] bg-[#f6f7f9] px-[8px] py-[5px] text-[11.2px] leading-[1.55] text-[#57606a]">本页状态：pending（待裁决）。页面只展示与演示，不记录勾选、不提交裁决，也不代表项目裁决状态。</p>
+      </div>
+    </section>
+
+    <footer class="py-[12px] text-center text-[11px] leading-[1.6] text-[#8b949e]">
+      数据契约：<code class="font-mono text-[11px]">data-composer-decisions="2026-10-18-v1"</code> · <code class="font-mono text-[11px]">data-review-status="pending"</code>
+    </footer>
+
+  </div>
+</main>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var imeState = new WeakMap();
+
+  function stateFor(el) {
+    var st = imeState.get(el);
+    if (!st) {
+      st = { active: false, endedAt: 0 };
+      imeState.set(el, st);
+    }
+    return st;
+  }
+
+  function isDemoComposer(el) {
+    return !!(el && el.matches && el.matches('textarea[data-demo-composer]'));
+  }
+
+  document.addEventListener('compositionstart', function (e) {
+    if (!isDemoComposer(e.target)) return;
+    stateFor(e.target).active = true;
+  });
+
+  document.addEventListener('compositionend', function (e) {
+    if (!isDemoComposer(e.target)) return;
+    var st = stateFor(e.target);
+    st.active = false;
+    st.endedAt = Date.now();
+  });
+
+  var formInput = document.querySelector('[data-form-input]');
+  var formSend = document.querySelector('[data-form-send]');
+  var formStatus = document.querySelector('[data-form-status]');
+  var formFail = document.querySelector('[data-form-fail]');
+  var focusState = document.querySelector('[data-focus-state]');
+
+  function syncForm() {
+    formSend.disabled = formInput.value.trim().length === 0;
+  }
+
+  function syncFormStatus() {
+    var text = formInput.value.trim().length === 0
+      ? '状态：空输入，发送禁用。'
+      : (formFail.checked
+        ? '状态：已输入，发送将模拟失败（草稿保留）。'
+        : '状态：已输入，可发送（Enter 发送，Shift+Enter 换行）。');
+    if (formStatus.textContent !== text) formStatus.textContent = text;
+  }
+
+  function focusForm() {
+    formInput.focus({ preventScroll: true });
+    focusState.textContent = '焦点在输入框：是';
+  }
+
+  function sendForm() {
+    var text = formInput.value;
+    if (!text.trim()) return;
+    if (formFail.checked) {
+      formStatus.textContent = '发送失败（演示）：草稿保留在输入框，未清空。';
+      focusForm();
+      return;
+    }
+    formInput.value = '';
+    syncForm();
+    formStatus.textContent = '已发送（演示）：' + text.replace(/\s+/g, ' ').slice(0, 48) + (text.length > 48 ? '…' : '');
+    focusForm();
+  }
+
+  formInput.addEventListener('input', function () {
+    syncForm();
+    syncFormStatus();
+  });
+  formInput.addEventListener('focus', function () {
+    focusState.textContent = '焦点在输入框：是';
+  });
+  formInput.addEventListener('blur', function () {
+    focusState.textContent = '焦点在输入框：否';
+  });
+  formSend.addEventListener('click', sendForm);
+  formFail.addEventListener('change', function () {
+    formStatus.textContent = formFail.checked ? '已开启模拟失败：下一次发送会保留草稿（演示）。' : '已关闭模拟失败：下一次发送会清空输入框（演示）。';
+  });
+
+  Array.prototype.forEach.call(document.querySelectorAll('[data-fill]'), function (btn) {
+    btn.addEventListener('click', function () {
+      var n = Number(btn.getAttribute('data-fill'));
+      var lines = [];
+      for (var i = 1; i <= n; i++) {
+        lines.push('第 ' + i + ' 行：' + (n === 1 ? '观察 1 行起始高度' : n === 4 ? '观察 4 行封顶高度' : '观察超过 4 行后的框内滚动'));
+      }
+      formInput.value = lines.join('\n');
+      syncForm();
+      focusForm();
+      formStatus.textContent = '已填入 ' + n + ' 行：看框高变化与底栏位置。';
+    });
+  });
+
+  document.querySelector('[data-form-clear]').addEventListener('click', function () {
+    formInput.value = '';
+    syncForm();
+    focusForm();
+    formStatus.textContent = '已清空：发送钮回到灰禁用。';
+  });
+
+  var streamInput = document.querySelector('[data-stream-input]');
+  var streamSend = document.querySelector('[data-stream-send]');
+  var streamStop = document.querySelector('[data-stream-stop]');
+  var streamStart = document.querySelector('[data-stream-start]');
+  var streamEnd = document.querySelector('[data-stream-end]');
+  var streamStatus = document.querySelector('[data-stream-status]');
+  var streamBadge = document.querySelector('[data-stream-badge]');
+  var streamOn = false;
+
+  function syncStream() {
+    streamSend.disabled = streamInput.value.trim().length === 0;
+  }
+
+  function focusStream() {
+    streamInput.focus({ preventScroll: true });
+  }
+
+  function setStream(on, message) {
+    streamOn = on;
+    streamSend.classList.toggle('hidden', on);
+    streamStop.classList.toggle('hidden', !on);
+    streamStart.disabled = on;
+    streamEnd.disabled = !on;
+    streamBadge.textContent = on ? '模拟流式进行中' : '空闲';
+    streamStatus.textContent = message;
+    focusStream();
+  }
+
+  function sendStream() {
+    var text = streamInput.value;
+    if (!text.trim()) return;
+    streamInput.value = '';
+    syncStream();
+    streamStatus.textContent = '已发送（演示）：' + text.replace(/\s+/g, ' ').slice(0, 48) + (text.length > 48 ? '…' : '');
+    focusStream();
+  }
+
+  streamInput.addEventListener('input', syncStream);
+  streamSend.addEventListener('click', sendStream);
+  streamStart.addEventListener('click', function () {
+    setStream(true, '模拟流式进行中：输入框保持白底可编辑；发送位已换成同尺寸圆形停止钮。');
+  });
+  streamEnd.addEventListener('click', function () {
+    setStream(false, '模拟流式结束：输入框保持可编辑，发送钮回到原位。');
+  });
+  streamStop.addEventListener('click', function () {
+    setStream(false, '已停止模拟流式（演示）：停止钮结束本轮模拟。');
+  });
+
+  var queueInput = document.querySelector('[data-queue-input]');
+  var queueSend = document.querySelector('[data-queue-send]');
+  var queueStop = document.querySelector('[data-queue-stop]');
+  var queueStart = document.querySelector('[data-queue-start]');
+  var queueEnd = document.querySelector('[data-queue-end]');
+  var queueReset = document.querySelector('[data-queue-reset]');
+  var queueChip = document.querySelector('[data-queue-chip]');
+  var queueCancel = document.querySelector('[data-queue-cancel]');
+  var queueStatus = document.querySelector('[data-queue-status]');
+  var queueLog = document.querySelector('[data-queue-log]');
+  var queueRunning = false;
+  var queuedText = null;
+  var queueLines = [];
+
+  function syncQueue() {
+    queueSend.disabled = queueInput.value.trim().length === 0;
+  }
+
+  function focusQueue() {
+    queueInput.focus({ preventScroll: true });
+  }
+
+  function renderQueueLog() {
+    queueLog.textContent = queueLines.length ? queueLines.join('\n') : '（尚无发出记录）';
+  }
+
+  function showQueueChip(show) {
+    queueChip.classList.toggle('hidden', !show);
+  }
+
+  function setQueueRunning(on, message) {
+    queueRunning = on;
+    queueSend.classList.toggle('hidden', on);
+    queueStop.classList.toggle('hidden', !on);
+    queueStart.disabled = on;
+    queueEnd.disabled = !on;
+    queueStatus.textContent = message;
+    focusQueue();
+  }
+
+  function finishQueueRound() {
+    if (!queueRunning) return;
+    queueRunning = false;
+    queueSend.classList.remove('hidden');
+    queueStop.classList.add('hidden');
+    queueStart.disabled = false;
+    queueEnd.disabled = true;
+    if (queuedText !== null) {
+      queueLines.push('回合结束，自动发出：' + queuedText);
+      renderQueueLog();
+      queueStatus.textContent = '回合结束：排队消息已自动发出（演示）。';
+      queuedText = null;
+      showQueueChip(false);
+    } else {
+      queueStatus.textContent = '回合结束：本轮没有排队消息（演示）。';
+    }
+    focusQueue();
+  }
+
+  function sendQueue() {
+    var text = queueInput.value;
+    if (!text.trim()) return;
+    queueInput.value = '';
+    syncQueue();
+    queueLines.push('已发送：' + text);
+    renderQueueLog();
+    queueStatus.textContent = '已发送（演示）：回合未运行，按 Enter 直接发出。';
+    focusQueue();
+  }
+
+  function queueEnter() {
+    if (!queueRunning) {
+      sendQueue();
+      return;
+    }
+    if (queueInput.value.trim().length === 0) {
+      queueStatus.textContent = '输入为空，未排队。';
+      focusQueue();
+      return;
+    }
+    if (queuedText !== null) {
+      queueStatus.textContent = '队列已有 1 条（演示暂定容量 1；容量未定，非最终裁决）。';
+      focusQueue();
+      return;
+    }
+    queuedText = queueInput.value;
+    queueInput.value = '';
+    syncQueue();
+    showQueueChip(true);
+    queueStatus.textContent = '已排队 1 条：输入框已清空，回合结束后自动发出（演示）。';
+    focusQueue();
+  }
+
+  queueInput.addEventListener('input', syncQueue);
+  queueSend.addEventListener('click', sendQueue);
+  queueStart.addEventListener('click', function () {
+    queuedText = null;
+    showQueueChip(false);
+    setQueueRunning(true, '模拟回合进行中：输入后按 Enter 排队；输入框保持可编辑。');
+  });
+  queueEnd.addEventListener('click', finishQueueRound);
+  queueStop.addEventListener('click', finishQueueRound);
+  queueCancel.addEventListener('click', function () {
+    if (queuedText === null) return;
+    var text = queuedText;
+    queuedText = null;
+    showQueueChip(false);
+    queueInput.value = queueInput.value.trim().length ? queueInput.value.replace(/\s+$/, '') + '\n' + text : text;
+    syncQueue();
+    queueStatus.textContent = '已取消排队（演示暂定：排队内容已退回输入框；最终去向未裁）。';
+    focusQueue();
+  });
+  queueReset.addEventListener('click', function () {
+    queuedText = null;
+    queueLines = [];
+    queueInput.value = '';
+    showQueueChip(false);
+    syncQueue();
+    renderQueueLog();
+    setQueueRunning(false, '已重新开始（演示）：回合未运行，输入后按 Enter 直接发送。');
+  });
+
+  document.addEventListener('keydown', function (e) {
+    var el = e.target;
+    if (!isDemoComposer(el)) return;
+    if (e.key !== 'Enter' || e.shiftKey) return;
+    var st = stateFor(el);
+    if (e.isComposing || e.keyCode === 229 || st.active) return;
+    if (Date.now() - st.endedAt < 30) {
+      e.preventDefault();
+      return;
+    }
+    e.preventDefault();
+    var kind = el.getAttribute('data-demo-composer');
+    if (kind === 'form') sendForm();
+    else if (kind === 'stream') {
+      if (streamOn) {
+        streamStatus.textContent = '流式中按 Enter：本页只在 ③ 演示排队，② 样张不处理发送。';
+      } else {
+        sendStream();
+      }
+    } else if (kind === 'queue') {
+      queueEnter();
+    }
+  });
+
+  document.addEventListener('blur', function (e) {
+    if (!isDemoComposer(e.target)) return;
+    var st = stateFor(e.target);
+    st.active = false;
+    st.endedAt = 0;
+  }, true);
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Escape') return;
+    Array.prototype.forEach.call(document.querySelectorAll('button:hover, button:focus'), function (btn) {
+      var tip = btn.querySelector('.tip');
+      if (tip) tip.classList.add('hidden');
+    });
+  });
+
+  document.addEventListener('mouseover', function (e) {
+    var btn = e.target.closest && e.target.closest('button');
+    if (!btn) return;
+    if (e.relatedTarget && btn.contains(e.relatedTarget)) return;
+    var tip = btn.querySelector('.tip');
+    if (tip) tip.classList.remove('hidden');
+  });
+
+  document.addEventListener('focusin', function (e) {
+    var btn = e.target.closest && e.target.closest('button');
+    if (!btn) return;
+    var tip = btn.querySelector('.tip');
+    if (tip) tip.classList.remove('hidden');
+  });
+
+  document.addEventListener('mouseout', function (e) {
+    var btn = e.target.closest && e.target.closest('button');
+    if (!btn) return;
+    if (e.relatedTarget && btn.contains(e.relatedTarget)) return;
+    var tip = btn.querySelector('.tip');
+    if (tip) tip.classList.remove('hidden');
+  });
+
+  document.addEventListener('focusout', function (e) {
+    var btn = e.target.closest && e.target.closest('button');
+    if (!btn) return;
+    var tip = btn.querySelector('.tip');
+    if (tip) tip.classList.remove('hidden');
+  });
+
+  syncForm();
+  syncStream();
+  syncQueue();
+  renderQueueLog();
+})();
+</script>
+
+</body>
+</html>
