@@ -9,7 +9,7 @@
  * 挂载方式：Element Plus 组件全部用轻量 stub（本用例只关心段序与出现与否，不测视觉）；
  * `onMounted` 的 health/loadHistory 取数用 `@/api/ai` 桩屏蔽。
  */
-import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import type { ActiveGenerativeForm, ChatMessage, MessagePart, PendingToolCall, ToolPart } from '@/types/ai'
@@ -3093,8 +3093,11 @@ describe('R-163B：视觉对齐 demo v6（样式生效 + 横滚止血）', () =>
 })
 
 /**
- * R-165 S3a：输入区（composer）+ 生成式表单卡（GF）的 v7 结构锁，以及三项收口
+ * R-165 S3a：输入区（composer）+ 生成式表单卡（GF）的结构锁，以及三项收口
  * （R6 消息间距 / R7 fab 定位 / R11 error 级通知色族）。
+ * 问题4 composer v2 阶段一（2026-10-19）：composer 由「固定 3 行灰底方钮 / busy 禁用虚线」
+ * 改为 demo v2 形态（1 行起 / 4 行 101px 封顶 / 白底 focus-within shell / 28×28 圆形钮），
+ * 并锁流式可编辑、禁用拆分、Enter（含 IME/repeat）与停止钮行为。
  * 其余用例把 FormRenderer 走 `true` 桩（本仓只关心挂载与宿主条件），本组**直接挂真身**锁内部结构。
  */
 describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 收口', () => {
@@ -3130,45 +3133,642 @@ describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 �
     })
   }
 
-  it('composer：原生 textarea（rows=3）+ 28×28 方钮；busy 态换停止钮与虚线框（el-textarea/el-button 退场）', async () => {
+  /** 阶段一挂载：health 按用例预置（ok / 未探测 / 探测报错），loading/suspended 一并预置。 */
+  async function mountPhase1(init: {
+    loading?: boolean
+    suspended?: boolean
+    messages?: ChatMessage[]
+    health?: 'ok' | 'unknown' | 'error'
+  } = {}) {
     const store = useAiStore()
-    const msg = buildMessage([{ kind: 'text', seg: 0, text: '原始回答', streaming: false }])
-    const wrapper = await mountPanel([msg])
+    if (init.health === 'unknown' || init.health === 'error') {
+      // 永不 resolve：阻止 onMounted 的 probeHealth 覆盖用例预置态
+      api.health.mockImplementation(() => new Promise<never>(() => {}))
+      store.health = null
+      store.healthError = init.health === 'error' ? 'health probe failed' : null
+    } else {
+      await store.probeHealth()
+    }
+    store.messages = init.messages ?? []
+    store.historyLoaded = true
+    store.loading = init.loading ?? false
+    store.suspended = init.suspended ?? false
+    api.chat.mockReset()
+    api.chat.mockResolvedValue(undefined)
+    api.history.mockResolvedValue({ sessionId: store.sessionId, count: 0, messages: [] })
+    api.runsCurrent.mockResolvedValue({ found: false, runId: null, snapshotStatus: null, pendingEntries: [], unresolvedExternal: [], archiveMaxSeq: 0 })
+    const { default: AiPanel } = await import('@/components/AiPanel/AiPanel.vue')
+    const wrapper = mount(AiPanel, { global: { stubs } })
+    await wrapper.vm.$nextTick()
+    return { store, wrapper }
+  }
+
+  function buildUser(id: string, text: string): ChatMessage {
+    const message = buildMessage([{ kind: 'text', seg: 0, text, streaming: false }])
+    message.id = id
+    message.role = 'user'
+    return message
+  }
+
+  /** 真实键盘事件（preventDefault 须可观察；isComposing/keyCode 用 defineProperty 兜住 jsdom 差异）。 */
+  function fireEnter(
+    el: HTMLTextAreaElement,
+    options: { shiftKey?: boolean; repeat?: boolean; isComposing?: boolean; keyCode?: number } = {}
+  ): KeyboardEvent {
+    const event = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      code: 'Enter',
+      bubbles: true,
+      cancelable: true,
+      shiftKey: options.shiftKey ?? false,
+      repeat: options.repeat ?? false
+    })
+    if (options.isComposing !== undefined) {
+      Object.defineProperty(event, 'isComposing', { value: options.isComposing })
+    }
+    if (options.keyCode !== undefined) {
+      Object.defineProperty(event, 'keyCode', { value: options.keyCode })
+    }
+    el.dispatchEvent(event)
+    return event
+  }
+
+  function fireTipMouse(el: Element, type: 'mouseover' | 'mouseout', relatedTarget: EventTarget | null = null): MouseEvent {
+    const event = new MouseEvent(type, { bubbles: true, cancelable: true, relatedTarget })
+    el.dispatchEvent(event)
+    return event
+  }
+
+  function fireTipFocus(el: Element, type: 'focusin' | 'focusout'): FocusEvent {
+    const event = new FocusEvent(type, { bubbles: true })
+    el.dispatchEvent(event)
+    return event
+  }
+
+  function fireTipEscape(el: Element): KeyboardEvent {
+    const event = new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true, cancelable: true })
+    el.dispatchEvent(event)
+    return event
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('composer v2 形态：1 行起 / max 101 / field-sizing / 白底 focus-within shell / 28×28 圆形钮 + tip（无原生 title）', async () => {
+    const { wrapper } = await mountPhase1()
 
     const box = wrapper.find('[data-testid="composer-input"]')
     expect(box.exists()).toBe(true)
     expect(box.element.tagName).toBe('TEXTAREA')
-    expect(box.attributes('rows')).toBe('3')
+    expect(box.attributes('rows')).toBe('1')
     expect(box.classes()).toEqual(expect.arrayContaining([
-      'flex-[1]', 'resize-none', 'rounded-[9px]', 'px-[10px]', 'py-[7px]',
-      'text-[13px]', 'bg-[#f6f7f9]', 'placeholder:text-[#8b949e]', 'border-solid', 'border-[#e3e6ea]'
+      'block', 'min-h-[40px]', 'max-h-[101px]', 'w-full', 'resize-none', 'overflow-y-auto',
+      'bg-transparent', 'px-[11px]', 'pt-[11px]', 'pb-[7px]', 'text-[13px]', 'leading-[1.6]',
+      '[field-sizing:content]'
     ]))
+    expect(box.classes()).not.toContain('bg-[#f6f7f9]')
+    expect(box.classes()).not.toContain('border-dashed')
 
-    // 容器：10px 14px 内边距 + 顶细线 #eef0f3（v7 composer 行）
-    const bar = box.element.parentElement as HTMLElement
-    for (const cls of ['flex', 'items-end', 'gap-[8px]', 'border-t', 'px-[14px]', 'py-[10px]', 'bg-white']) {
-      expect(bar.className).toContain(cls)
+    // 盒 shell：白底 + 整盒 focus-within 蓝环（textarea 父级）
+    const shell = box.element.parentElement as HTMLElement
+    for (const cls of [
+      'rounded-[12px]', 'border', 'border-[#e3e6ea]', 'bg-white',
+      'focus-within:border-[#2563eb]', 'focus-within:ring-2', 'focus-within:ring-[#2563eb]/40'
+    ]) {
+      expect(shell.className).toContain(cls)
     }
-    expect(wrapper.find('.el-textarea').exists()).toBe(false)
 
-    // 常态：28×28 蓝发送钮（v7 的白色图标位 = ↑ 字符，v7.html:364 逐字照搬）
+    // 盒内底栏：左侧虚线工具位占位（demo 同款文案）+ flex-1 撑开 + 右发送
+    const footer = shell.lastElementChild as HTMLElement
+    expect(footer.className).toContain('flex')
+    const slot = footer.firstElementChild as HTMLElement
+    expect(slot.tagName).toBe('SPAN')
+    expect(slot.textContent).toBe('工具位（预留 · 留空）')
+    expect(slot.className).toContain('border-dashed')
+    expect(slot.className).toContain('border-[#cddcff]')
+    expect(slot.className).toContain('rounded-[6px]')
+    expect(footer.children[1]?.className).toContain('flex-1')
+
     const send = wrapper.find('[data-testid="send-btn"]')
     expect(send.element.tagName).toBe('BUTTON')
-    expect(send.classes()).toEqual(expect.arrayContaining(['w-[28px]', 'h-[28px]', 'rounded-[8px]', 'bg-[#2563eb]', 'text-white', 'border-0']))
-    expect(send.text()).toBe('↑')
+    expect(send.attributes('aria-label')).toBe('发送')
+    expect(send.attributes('title')).toBeUndefined()
+    expect(send.attributes('style')).toBeUndefined()
+    expect(send.classes()).toEqual(expect.arrayContaining([
+      'w-[28px]', 'h-[28px]', 'rounded-full', 'bg-[#2563eb]', 'text-white', 'border-0',
+      'flex', 'items-center', 'justify-center'
+    ]))
+    expect(send.text().startsWith('↑')).toBe(true)
+    const sendTip = send.find('span.tip')
+    expect(sendTip.exists()).toBe(true)
+    expect(sendTip.text()).toBe('发送')
+    expect(sendTip.attributes('aria-hidden')).toBe('true')
+    expect(sendTip.classes()).toEqual(expect.arrayContaining(['pointer-events-none', 'absolute', 'bottom-[calc(100%+7px)]']))
     expect(wrapper.find('button[aria-label="停止生成"]').exists()).toBe(false)
 
-    // busy（= !canSend）：输入框虚线待命 + 停止钮换入（28×28 #1f2328 + 9×9 白方块）
-    store.loading = true
+    // 流式中同一发送位换圆形停止钮（28×28 #1f2328 + 9×9 白方块 + tip），仍无原生 title
+    useAiStore().loading = true
     await wrapper.vm.$nextTick()
-    expect(box.classes()).toContain('border-dashed')
-    expect(box.classes()).not.toContain('border-solid')
-    expect(box.attributes('disabled')).toBeDefined()
     expect(wrapper.find('[data-testid="send-btn"]').exists()).toBe(false)
     const stop = wrapper.find('button[aria-label="停止生成"]')
     expect(stop.exists()).toBe(true)
-    expect(stop.classes()).toEqual(expect.arrayContaining(['w-[28px]', 'h-[28px]', 'rounded-[8px]', 'bg-[#1f2328]', 'border-0']))
-    expect(stop.find('span').classes()).toEqual(expect.arrayContaining(['w-[9px]', 'h-[9px]', 'bg-white', 'rounded-[2px]']))
+    expect(stop.attributes('title')).toBeUndefined()
+    expect(stop.attributes('style')).toBeUndefined()
+    expect(stop.classes()).toEqual(expect.arrayContaining([
+      'w-[28px]', 'h-[28px]', 'rounded-full', 'bg-[#1f2328]', 'border-0',
+      'flex', 'items-center', 'justify-center'
+    ]))
+    const square = stop.findAll('span').find((node) => node.classes().includes('w-[9px]'))
+    expect(square).toBeTruthy()
+    expect(square!.classes()).toEqual(expect.arrayContaining(['h-[9px]', 'bg-white', 'rounded-[2px]', 'block']))
+    const stopTip = stop.find('span.tip')
+    expect(stopTip.text()).toBe('停止生成')
+    expect(stopTip.attributes('aria-hidden')).toBe('true')
+
+    expect(box.attributes('style')).toBeUndefined()
+    expect(wrapper.find('.el-textarea').exists()).toBe(false)
+    expect(wrapper.find('style').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('tooltip Escape：focus 发送钮显示、Escape 隐藏且不截断事件、focusin 恢复', async () => {
+    const { wrapper } = await mountPhase1()
+    const send = wrapper.find('[data-testid="send-btn"]')
+    const tip = send.find('span.tip')
+
+    fireTipFocus(send.element, 'focusin')
+    await wrapper.vm.$nextTick()
+    expect(tip.classes()).not.toContain('hidden')
+
+    const rootSpy = vi.fn()
+    wrapper.element.addEventListener('keydown', rootSpy)
+    const escape = fireTipEscape(send.element)
+    wrapper.element.removeEventListener('keydown', rootSpy)
+    await wrapper.vm.$nextTick()
+
+    expect(tip.classes()).toContain('hidden')
+    expect(tip.attributes('aria-hidden')).toBe('true')
+    expect(escape.defaultPrevented).toBe(false)
+    expect(escape.cancelBubble).toBe(false)
+    expect(rootSpy).toHaveBeenCalledTimes(1)
+
+    fireTipFocus(send.element, 'focusin')
+    await wrapper.vm.$nextTick()
+    expect(tip.classes()).not.toContain('hidden')
+    wrapper.unmount()
+  })
+
+  it('tooltip Escape：focusout 隐藏、再次 focusin 恢复', async () => {
+    const { wrapper } = await mountPhase1()
+    const send = wrapper.find('[data-testid="send-btn"]')
+    const tip = send.find('span.tip')
+
+    fireTipFocus(send.element, 'focusin')
+    await wrapper.vm.$nextTick()
+    expect(tip.classes()).not.toContain('hidden')
+    fireTipFocus(send.element, 'focusout')
+    await wrapper.vm.$nextTick()
+    expect(tip.classes()).toContain('hidden')
+    fireTipFocus(send.element, 'focusin')
+    await wrapper.vm.$nextTick()
+    expect(tip.classes()).not.toContain('hidden')
+    wrapper.unmount()
+  })
+
+  it('tooltip Escape：停止钮同样 Escape 隐藏、focusin 恢复', async () => {
+    const { wrapper } = await mountPhase1({ loading: true })
+    const stop = wrapper.find('button[aria-label="停止生成"]')
+    const tip = stop.find('span.tip')
+
+    fireTipFocus(stop.element, 'focusin')
+    await wrapper.vm.$nextTick()
+    expect(tip.classes()).not.toContain('hidden')
+    const escape = fireTipEscape(stop.element)
+    await wrapper.vm.$nextTick()
+    expect(tip.classes()).toContain('hidden')
+    expect(escape.defaultPrevented).toBe(false)
+    fireTipFocus(stop.element, 'focusin')
+    await wrapper.vm.$nextTick()
+    expect(tip.classes()).not.toContain('hidden')
+    wrapper.unmount()
+  })
+
+  it('tooltip mouseover/out：内部移动不清除，外部离开隐藏、重新进入恢复', async () => {
+    const { wrapper } = await mountPhase1()
+    const send = wrapper.find('[data-testid="send-btn"]')
+    const tip = send.find('span.tip')
+
+    fireTipMouse(send.element, 'mouseover', document.body)
+    await wrapper.vm.$nextTick()
+    expect(tip.classes()).not.toContain('hidden')
+    fireTipMouse(send.element, 'mouseout', tip.element)
+    await wrapper.vm.$nextTick()
+    expect(tip.classes()).not.toContain('hidden')
+    fireTipMouse(send.element, 'mouseout', document.body)
+    await wrapper.vm.$nextTick()
+    expect(tip.classes()).toContain('hidden')
+    fireTipMouse(send.element, 'mouseover', document.body)
+    await wrapper.vm.$nextTick()
+    expect(tip.classes()).not.toContain('hidden')
+    wrapper.unmount()
+  })
+
+  it('tooltip mouseover：内部子元素移动不误清除 Escape 隐藏', async () => {
+    const { wrapper } = await mountPhase1()
+    const send = wrapper.find('[data-testid="send-btn"]')
+    const tip = send.find('span.tip')
+
+    fireTipFocus(send.element, 'focusin')
+    await wrapper.vm.$nextTick()
+    fireTipEscape(send.element)
+    await wrapper.vm.$nextTick()
+    expect(tip.classes()).toContain('hidden')
+    fireTipMouse(tip.element, 'mouseover', send.element)
+    await wrapper.vm.$nextTick()
+    expect(tip.classes()).toContain('hidden')
+    wrapper.unmount()
+  })
+
+  it('composer v2 流式：textarea 保持可编辑（无 disabled / 无虚线）', async () => {
+    const { wrapper } = await mountPhase1({ loading: true })
+    const box = wrapper.find('[data-testid="composer-input"]')
+    expect(box.attributes('disabled')).toBeUndefined()
+    expect(box.classes()).not.toContain('border-dashed')
+    expect((box.element.parentElement as HTMLElement).className).not.toContain('border-dashed')
+
+    await box.setValue('流式里继续写')
+    expect((box.element as HTMLTextAreaElement).value).toBe('流式里继续写')
+    wrapper.unmount()
+  })
+
+  it('composer v2 禁用拆分：仅真实不可用 / 挂起 / pendingToolCall 硬禁用；loading 不硬禁用', async () => {
+    const { store, wrapper } = await mountPhase1()
+    const box = wrapper.find('[data-testid="composer-input"]')
+    const isDisabled = () => box.attributes('disabled') !== undefined
+
+    expect(isDisabled()).toBe(false)
+    store.loading = true
+    await wrapper.vm.$nextTick()
+    expect(isDisabled()).toBe(false)
+
+    store.suspended = true
+    await wrapper.vm.$nextTick()
+    expect(isDisabled()).toBe(true)
+    store.loading = false
+    await wrapper.vm.$nextTick()
+    expect(isDisabled()).toBe(true)
+
+    store.suspended = false
+    await wrapper.vm.$nextTick()
+    expect(isDisabled()).toBe(false)
+
+    store.health = { ...store.health!, available: false }
+    await wrapper.vm.$nextTick()
+    expect(isDisabled()).toBe(true)
+    store.health = { ...store.health!, available: true }
+    await wrapper.vm.$nextTick()
+    expect(isDisabled()).toBe(false)
+
+    store.messages = [buildMessage(
+      [{ kind: 'text', seg: 0, text: '', streaming: false }],
+      { toolCallId: 'pc-1', name: 'probe.tool', kind: 'FRONTEND', args: {}, status: 'pending' }
+    )]
+    await wrapper.vm.$nextTick()
+    expect(isDisabled()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('composer v2 Enter：流式普通 Enter = preventDefault 后静默（不发送 / 不停止 / 不换行 / 不提示）', async () => {
+    const { store, wrapper } = await mountPhase1({ loading: true })
+    const box = wrapper.find('[data-testid="composer-input"]')
+    await box.setValue('流式草稿')
+    const sendSpy = vi.spyOn(store, 'send')
+    const stopSpy = vi.spyOn(store, 'stop')
+    const busySpy = vi.spyOn(store, 'noticeBusySend')
+    api.chat.mockClear()
+
+    const event = fireEnter(box.element as HTMLTextAreaElement)
+    expect(event.defaultPrevented).toBe(true)
+    expect((box.element as HTMLTextAreaElement).value).toBe('流式草稿')
+    expect(sendSpy).not.toHaveBeenCalled()
+    expect(stopSpy).not.toHaveBeenCalled()
+    expect(busySpy).not.toHaveBeenCalled()
+    expect(api.chat).not.toHaveBeenCalled()
+    expect(store.notice).toBeNull()
+
+    // Shift+Enter 不拦截（浏览器原生换行路径）
+    const shift = fireEnter(box.element as HTMLTextAreaElement, { shiftKey: true })
+    expect(shift.defaultPrevented).toBe(false)
+    expect(sendSpy).not.toHaveBeenCalled()
+    expect(stopSpy).not.toHaveBeenCalled()
+    expect(busySpy).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('composer v2 Enter：IME 组合期（isComposing / keyCode 229）不误拦', async () => {
+    const { store, wrapper } = await mountPhase1({ loading: true })
+    const box = wrapper.find('[data-testid="composer-input"]')
+    const el = box.element as HTMLTextAreaElement
+    await box.setValue('ni')
+    const sendSpy = vi.spyOn(store, 'send')
+    const busySpy = vi.spyOn(store, 'noticeBusySend')
+
+    el.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }))
+    const composing = fireEnter(el, { isComposing: true })
+    expect(composing.defaultPrevented).toBe(false)
+    expect(sendSpy).not.toHaveBeenCalled()
+    expect(busySpy).not.toHaveBeenCalled()
+
+    // 组合已结束的独立场景：keyCode 229（Safari 乱序确认 Enter）
+    el.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }))
+    const safari = fireEnter(el, { keyCode: 229 })
+    expect(safari.defaultPrevented).toBe(false)
+    expect(sendSpy).not.toHaveBeenCalled()
+    expect(busySpy).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('composer v2 Enter：compositionend 后约 30ms 内不发（不误发刚确认的候选）', async () => {
+    const { store, wrapper } = await mountPhase1()
+    const box = wrapper.find('[data-testid="composer-input"]')
+    await box.setValue('候选文本')
+    const el = box.element as HTMLTextAreaElement
+    const sendSpy = vi.spyOn(store, 'send')
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(20_000)
+
+    el.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }))
+    el.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }))
+    nowSpy.mockReturnValue(20_010)
+    const guarded = fireEnter(el)
+    expect(guarded.defaultPrevented).toBe(true)
+    expect(sendSpy).not.toHaveBeenCalled()
+
+    nowSpy.mockReturnValue(20_031)
+    const passed = fireEnter(el)
+    expect(passed.defaultPrevented).toBe(true)
+    expect(sendSpy).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('composer v2 Enter：compositionstart 后无事件旗标的 Enter 由本地组合态拦截', async () => {
+    const { store, wrapper } = await mountPhase1()
+    const box = wrapper.find('[data-testid="composer-input"]')
+    const el = box.element as HTMLTextAreaElement
+    await box.setValue('组合草稿')
+    const sendSpy = vi.spyOn(store, 'send')
+    const busySpy = vi.spyOn(store, 'noticeBusySend')
+
+    el.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }))
+    const event = fireEnter(el)
+    expect(event.defaultPrevented).toBe(false)
+    expect(sendSpy).not.toHaveBeenCalled()
+    expect(busySpy).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('composer v2 Enter：组合态 blur 后复位（重新聚焦 Enter 恢复发送）', async () => {
+    const { store, wrapper } = await mountPhase1()
+    const box = wrapper.find('[data-testid="composer-input"]')
+    const el = box.element as HTMLTextAreaElement
+    await box.setValue('恢复发送')
+    const sendSpy = vi.spyOn(store, 'send')
+
+    // compositionstart → blur → 重新聚焦：本地组合态须复位
+    el.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }))
+    await box.trigger('blur')
+    await box.trigger('focus')
+    const event = fireEnter(el)
+    expect(event.defaultPrevented).toBe(true)
+    expect(sendSpy).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('composer v2 health 未知：textarea 不硬禁用，但发送钮禁用且 Enter 不发送', async () => {
+    const { store, wrapper } = await mountPhase1({ health: 'unknown' })
+    const box = wrapper.find('[data-testid="composer-input"]')
+    expect(box.attributes('disabled')).toBeUndefined()
+    await box.setValue('未知态草稿')
+
+    const send = wrapper.find('[data-testid="send-btn"]')
+    expect(send.attributes('disabled')).toBeDefined()
+    const sendSpy = vi.spyOn(store, 'send')
+    const busySpy = vi.spyOn(store, 'noticeBusySend')
+
+    const event = fireEnter(box.element as HTMLTextAreaElement)
+    expect(event.defaultPrevented).toBe(true)
+    expect(sendSpy).not.toHaveBeenCalled()
+    expect(busySpy).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('composer v2 healthError：textarea 硬禁用（真不可用）', async () => {
+    const { wrapper } = await mountPhase1({ health: 'error' })
+    const box = wrapper.find('[data-testid="composer-input"]')
+    expect(box.attributes('disabled')).toBeDefined()
+    expect(wrapper.find('[data-testid="send-btn"]').attributes('disabled')).toBeDefined()
+    wrapper.unmount()
+  })
+
+  it('composer v2 health 明确不可用：Enter preventDefault 后返回，不绕过发送钮', async () => {
+    const { store, wrapper } = await mountPhase1()
+    const box = wrapper.find('[data-testid="composer-input"]')
+    await box.setValue('不可用草稿')
+    store.health = { ...store.health!, available: false }
+    await wrapper.vm.$nextTick()
+
+    const send = wrapper.find('[data-testid="send-btn"]')
+    expect(send.attributes('disabled')).toBeDefined()
+    expect(box.attributes('disabled')).toBeDefined()
+    const sendSpy = vi.spyOn(store, 'send')
+    // 移出 DOM disabled 后直接派发：证明 keydown 分支自身也会拦（不只靠 disabled 属性）
+    box.element.removeAttribute('disabled')
+    const event = fireEnter(box.element as HTMLTextAreaElement)
+    expect(event.defaultPrevented).toBe(true)
+    expect(sendSpy).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('composer v2 硬禁用发送：suspended / pendingToolCall 且草稿非空时按钮不可点', async () => {
+    const { store, wrapper } = await mountPhase1()
+    const box = wrapper.find('[data-testid="composer-input"]')
+    await box.setValue('旧草稿')
+    const send = wrapper.find('[data-testid="send-btn"]')
+    expect(send.attributes('disabled')).toBeUndefined()
+    const sendSpy = vi.spyOn(store, 'send')
+
+    store.suspended = true
+    await wrapper.vm.$nextTick()
+    expect(send.attributes('disabled')).toBeDefined()
+    await send.trigger('click')
+    expect(sendSpy).not.toHaveBeenCalled()
+
+    store.suspended = false
+    store.messages = [buildMessage(
+      [{ kind: 'text', seg: 0, text: '', streaming: false }],
+      { toolCallId: 'pc-send', name: 'probe.tool', kind: 'FRONTEND', args: {}, status: 'pending' }
+    )]
+    await wrapper.vm.$nextTick()
+    expect(send.attributes('disabled')).toBeDefined()
+    await send.trigger('click')
+    expect(sendSpy).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('composer v2 Enter：event.repeat 无行为（不发送 / 不换行）', async () => {
+    const { store, wrapper } = await mountPhase1()
+    const box = wrapper.find('[data-testid="composer-input"]')
+    await box.setValue('重复按键草稿')
+    const sendSpy = vi.spyOn(store, 'send')
+
+    const event = fireEnter(box.element as HTMLTextAreaElement, { repeat: true })
+    expect(event.defaultPrevented).toBe(true)
+    expect(sendSpy).not.toHaveBeenCalled()
+    expect((box.element as HTMLTextAreaElement).value).toBe('重复按键草稿')
+    wrapper.unmount()
+  })
+
+  it('composer v2 Enter：空闲普通 Enter 仍走现有 send（不回归）', async () => {
+    const { store, wrapper } = await mountPhase1()
+    const box = wrapper.find('[data-testid="composer-input"]')
+    await box.setValue('空闲发送')
+    const sendSpy = vi.spyOn(store, 'send')
+
+    const event = fireEnter(box.element as HTMLTextAreaElement)
+    expect(event.defaultPrevented).toBe(true)
+    expect(sendSpy).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('composer v2 停止钮：只调用 stop，不自动发送、不改流式草稿', async () => {
+    const { store, wrapper } = await mountPhase1({ loading: true })
+    const box = wrapper.find('[data-testid="composer-input"]')
+    await box.setValue('下一段草稿')
+    const sendSpy = vi.spyOn(store, 'send')
+    const stopSpy = vi.spyOn(store, 'stop')
+    api.chat.mockClear()
+
+    await wrapper.find('button[aria-label="停止生成"]').trigger('click')
+    expect(stopSpy).toHaveBeenCalledTimes(1)
+    expect(sendSpy).not.toHaveBeenCalled()
+    expect(api.chat).not.toHaveBeenCalled()
+    expect((box.element as HTMLTextAreaElement).value).toBe('下一段草稿')
+    wrapper.unmount()
+  })
+
+  it('阶段二 发送成功：清空草稿并回收焦点（preventScroll）', async () => {
+    const { store, wrapper } = await mountPhase1()
+    const box = wrapper.find('[data-testid="composer-input"]')
+    await box.setValue('成功发送')
+    const focusSpy = vi.spyOn(box.element as HTMLTextAreaElement, 'focus')
+
+    await wrapper.find('[data-testid="send-btn"]').trigger('click')
+    await flushPromises()
+
+    expect((box.element as HTMLTextAreaElement).value).toBe('')
+    expect(focusSpy).toHaveBeenCalledWith({ preventScroll: true })
+    expect(store.messages.filter((message) => message.role === 'user')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  for (const outcome of ['error', 'interrupted', 'not-sent'] as const) {
+    it(`阶段二 ${outcome}：草稿为空时恢复原稿并重新聚焦`, async () => {
+      const { store, wrapper } = await mountPhase1()
+      const box = wrapper.find('[data-testid="composer-input"]')
+      await box.setValue('原始草稿')
+      const focusSpy = vi.spyOn(box.element as HTMLTextAreaElement, 'focus')
+      vi.spyOn(store, 'send').mockResolvedValue({ outcome, userMessageId: outcome === 'not-sent' ? null : 'u-recovered' })
+
+      await wrapper.find('[data-testid="send-btn"]').trigger('click')
+      await flushPromises()
+
+      expect((box.element as HTMLTextAreaElement).value).toBe('原始草稿')
+      expect(focusSpy.mock.calls.filter((call) => call[0]?.preventScroll === true).length).toBeGreaterThanOrEqual(2)
+      wrapper.unmount()
+    })
+  }
+
+  it('阶段二 cancelled：不恢复草稿', async () => {
+    const { store, wrapper } = await mountPhase1()
+    const box = wrapper.find('[data-testid="composer-input"]')
+    await box.setValue('停止草稿')
+    vi.spyOn(store, 'send').mockResolvedValue({ outcome: 'cancelled', userMessageId: 'u-cancelled' })
+
+    await wrapper.find('[data-testid="send-btn"]').trigger('click')
+    await flushPromises()
+
+    expect((box.element as HTMLTextAreaElement).value).toBe('')
+    wrapper.unmount()
+  })
+
+  it('阶段二 失败恢复：用户已写新内容时不覆盖、不设失败锚点', async () => {
+    const { store, wrapper } = await mountPhase1()
+    const box = wrapper.find('[data-testid="composer-input"]')
+    await box.setValue('原始草稿')
+    let resolveSend!: (value: { outcome: 'error'; userMessageId: string }) => void
+    const pending = new Promise<{ outcome: 'error'; userMessageId: string }>((resolve) => {
+      resolveSend = resolve
+    })
+    const sendSpy = vi.spyOn(store, 'send').mockReturnValue(pending)
+
+    await wrapper.find('[data-testid="send-btn"]').trigger('click')
+    await flushPromises()
+    expect((box.element as HTMLTextAreaElement).value).toBe('')
+
+    await box.setValue('用户新输入')
+    resolveSend({ outcome: 'error', userMessageId: 'u-failed' })
+    await flushPromises()
+    expect((box.element as HTMLTextAreaElement).value).toBe('用户新输入')
+
+    // 未把失败的 userMessageId 设为锚点：下一次发送仍按新消息走（不带 skipUserRecord）
+    await wrapper.find('[data-testid="send-btn"]').trigger('click')
+    await flushPromises()
+    expect(sendSpy.mock.calls[1]?.[1]?.skipUserRecord).not.toBe(true)
+    wrapper.unmount()
+  })
+
+  it('阶段二 新消息失败后重发：走编辑重跑，用户消息数不增加', async () => {
+    const { store, wrapper } = await mountPhase1()
+    const box = wrapper.find('[data-testid="composer-input"]')
+    await box.setValue('失败重发草稿')
+    api.chat.mockRejectedValueOnce(new Error('boom')).mockResolvedValue(undefined)
+
+    await wrapper.find('[data-testid="send-btn"]').trigger('click')
+    await flushPromises()
+    expect(store.messages.filter((message) => message.role === 'user')).toHaveLength(1)
+    expect((box.element as HTMLTextAreaElement).value).toBe('失败重发草稿')
+
+    await wrapper.find('[data-testid="send-btn"]').trigger('click')
+    await flushPromises()
+    const users = store.messages.filter((message) => message.role === 'user')
+    expect(users).toHaveLength(1)
+    expect(users[0]?.content).toBe('失败重发草稿')
+    expect(api.chat).toHaveBeenCalledTimes(2)
+    wrapper.unmount()
+  })
+
+  it('阶段二 编辑重跑失败：沿用发送前 editId，重发仍不新增用户消息', async () => {
+    const { store, wrapper } = await mountPhase1({ messages: [buildUser('u-edit-p2', '原提问')] })
+    const box = wrapper.find('[data-testid="composer-input"]')
+    api.chat.mockRejectedValueOnce(new Error('boom')).mockResolvedValue(undefined)
+
+    await wrapper.find('[data-testid="edit-msg-u-edit-p2"]').trigger('click')
+    await wrapper.vm.$nextTick()
+    expect((box.element as HTMLTextAreaElement).value).toBe('原提问')
+    await box.setValue('改写后的提问')
+
+    await wrapper.find('[data-testid="send-btn"]').trigger('click')
+    await flushPromises()
+    expect(store.messages.filter((message) => message.role === 'user')).toHaveLength(1)
+    expect((box.element as HTMLTextAreaElement).value).toBe('改写后的提问')
+
+    await wrapper.find('[data-testid="send-btn"]').trigger('click')
+    await flushPromises()
+    const users = store.messages.filter((message) => message.role === 'user')
+    expect(users).toHaveLength(1)
+    expect(users[0]?.id).toBe('u-edit-p2')
+    expect(users[0]?.content).toBe('改写后的提问')
+    expect(api.chat).toHaveBeenCalledTimes(2)
     wrapper.unmount()
   })
 
@@ -4019,7 +4619,7 @@ describe('R-165 S5c：错误卡族（三变体分派 + 内联位置 + 动作钮�
       m.errorCard = buildErrorCard(code, detail)
       return m
     }
-    const sendSpy = vi.spyOn(store, 'send').mockResolvedValue(undefined)
+    const sendSpy = vi.spyOn(store, 'send').mockResolvedValue({ outcome: 'ok', userMessageId: null })
     const resetSpy = vi.spyOn(store, 'resetSession').mockResolvedValue(undefined)
     const wrapper = await mountPanel([mk('q2', '429', '配额用尽'), mk('f2', 'content_filter', '被拦截'), mk('c2', 'context_length_exceeded', '超限')])
     const composer = wrapper.find('[data-testid="composer-input"]').element as HTMLTextAreaElement
@@ -4261,5 +4861,106 @@ describe('问题1 偏差修正批：7 项走样补齐', () => {
     } finally {
       nowSpy.mockRestore()
     }
+  })
+})
+
+/**
+ * 问题4 composer v2 阶段二：store `send()` 的 outcome / userMessageId 映射。
+ * 走真实 store + `@/api/ai` 桩，锁住空/loading 早退、ok、开流前 error、断流 interrupted、主动 stop cancelled。
+ */
+describe('问题4 composer v2 阶段二：store send outcome 映射', () => {
+  beforeEach(() => {
+    api.chat.mockReset()
+  })
+
+  it('空内容 / loading 早退 = not-sent + null（不发请求）', async () => {
+    const store = useAiStore()
+    await expect(store.send('   ')).resolves.toEqual({ outcome: 'not-sent', userMessageId: null })
+    expect(api.chat).not.toHaveBeenCalled()
+
+    store.loading = true
+    await expect(store.send('x')).resolves.toEqual({ outcome: 'not-sent', userMessageId: null })
+    expect(api.chat).not.toHaveBeenCalled()
+    expect(store.notice).toContain('本轮进行中')
+  })
+
+  it('正常 ok：返回新用户消息 id', async () => {
+    const store = useAiStore()
+    api.chat.mockResolvedValue(undefined)
+    const result = await store.send('正常消息')
+    expect(result.outcome).toBe('ok')
+    expect(result.userMessageId).not.toBeNull()
+    expect(result.userMessageId).toBe(store.messages[0]?.id)
+    expect(store.messages[0]?.role).toBe('user')
+    expect(store.loading).toBe(false)
+  })
+
+  it('开流前 error：返回 error + 已记录的用户消息 id', async () => {
+    const store = useAiStore()
+    api.chat.mockRejectedValueOnce(new Error('boom'))
+    const result = await store.send('失败消息')
+    expect(result.outcome).toBe('error')
+    expect(result.userMessageId).toBe(store.messages[0]?.id)
+    expect(store.loading).toBe(false)
+  })
+
+  it('断流 interrupted：onClose terminal=false 映射 interrupted', async () => {
+    const store = useAiStore()
+    api.chat.mockImplementation(async (
+      _request: unknown,
+      handlers?: { onClose?: (info: { terminal: boolean; reconnects: number; reason?: string }) => void }
+    ) => {
+      handlers?.onClose?.({ terminal: false, reconnects: 0, reason: '断流' })
+    })
+    const result = await store.send('断流消息')
+    expect(result.outcome).toBe('interrupted')
+    expect(result.userMessageId).toBe(store.messages[0]?.id)
+    expect(store.streamInterrupted).toBe(true)
+  })
+
+  it('error 终帧正常 resolve：映射 error（不被 ok 覆盖）', async () => {
+    const store = useAiStore()
+    const frame = {
+      type: 'error' as const,
+      runId: 'run-terminal-error',
+      code: 'UPSTREAM_STREAM_ERROR',
+      message: '上游失败'
+    }
+    api.chat.mockImplementation(async (
+      _request: unknown,
+      handlers?: {
+        onFrame?: (frame: { type: 'error'; runId: string; code: string; message: string }) => void
+      }
+    ) => {
+      handlers?.onFrame?.(frame)
+      return { terminal: true, lastFrame: frame, reconnects: 0 }
+    })
+    const result = await store.send('终帧错误')
+    expect(result.outcome).toBe('error')
+    expect(result.userMessageId).toBe(store.messages[0]?.id)
+    expect(store.lastRoundOutcome).toBe('error')
+  })
+
+  it('主动 stop：映射 cancelled', async () => {
+    const store = useAiStore()
+    api.chat.mockImplementation((_request: unknown, _handlers?: unknown, options?: { signal?: AbortSignal }) =>
+      new Promise<never>((_resolve, reject) => {
+        options?.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')))
+      })
+    )
+    const pending = store.send('停止我')
+    await Promise.resolve()
+    await store.stop()
+    const result = await pending
+    expect(result.outcome).toBe('cancelled')
+    expect(result.userMessageId).toBe(store.messages[0]?.id)
+  })
+
+  it('skipUserRecord：不记录用户消息，userMessageId=null', async () => {
+    const store = useAiStore()
+    api.chat.mockResolvedValue(undefined)
+    const result = await store.send('编辑重跑', { skipUserRecord: true })
+    expect(result).toEqual({ outcome: 'ok', userMessageId: null })
+    expect(store.messages.filter((message) => message.role === 'user')).toHaveLength(0)
   })
 })

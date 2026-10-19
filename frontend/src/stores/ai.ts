@@ -42,6 +42,14 @@ import { buildErrorCard } from '@/utils/error-card'
 export const SESSION_ID_KEY = 'ai-session-id'
 export const MIRROR_PREFIX = 'ai-mirror:'
 
+/** `send()` 收尾结果：composer 据此决定是否保稿、是否设编辑锚点。 */
+export type AiSendOutcome = 'ok' | 'error' | 'interrupted' | 'cancelled' | 'not-sent'
+export interface AiSendResult {
+  outcome: AiSendOutcome
+  /** 本轮新记录的用户消息 id；`skipUserRecord` / 早退为 null。 */
+  userMessageId: string | null
+}
+
 /** 当前轮的 AbortController（模块级：不进响应式状态）。 */
 let currentAbort: AbortController | null = null
 /**
@@ -1480,22 +1488,21 @@ export const useAiStore = defineStore('ai', {
      *   原地保留/更新并截断其后消息（编辑重跑 / 重试 regenerate），send 不得再追加新用户消息 ——
      *   否则旧文本与新文本并存（编辑）或同一提问重复两次（重试）。
      */
-    async send(text: string, resend: { skipUserRecord?: boolean } = {}): Promise<void> {
+    async send(text: string, resend: { skipUserRecord?: boolean } = {}): Promise<AiSendResult> {
       const content = text.trim()
       if (!content) {
         // 空内容依旧静默（面板层已用 trim 拦过，此处只是防御）
-        return
+        return { outcome: 'not-sent', userMessageId: null }
       }
       if (this.loading) {
-        // R4（issue#5）：守卫不再静默 —— 当前 UI 下真实 Enter 到不了这里（输入区 disabled），
-        // 但程序化调用与 loading/轮次失步窗口可达，必须给出可读反馈而不是丢弃用户输入
+        // R4（issue#5）：守卫不再静默 —— 流式中输入框保持可编辑，但组件 keydown 已拦截普通 Enter；
+        // 程序化调用与 loading/轮次失步窗口仍可达，必须给出可读反馈而不是丢弃用户输入
         this.noticeBusySend()
-        return
+        return { outcome: 'not-sent', userMessageId: null }
       }
       const workspace = useWorkspaceStore()
-      if (!resend.skipUserRecord) {
-        this.recordUserMessage(content)
-      }
+      const userMessage = resend.skipUserRecord ? null : this.recordUserMessage(content)
+      const userMessageId = userMessage?.id ?? null
       const assistant = this.appendAssistantMessage()
       this.loading = true
       this.stopped = false
@@ -1510,8 +1517,15 @@ export const useAiStore = defineStore('ai', {
       /** R1/R6（issue#5）：本轮是否仍是"当前轮" —— 以 AbortController 身份为准。 */
       const isCurrentRound = (): boolean => currentAbort === controller
 
+      /** error 终帧会让 `aiApi.chat` 正常 resolve（不是 reject）；用本轮局部标记与开流前 catch 区分。 */
+      let sawErrorTerminal = false
       const handlers: SseFrameHandlers = {
-        onFrame: (frame) => this.handleFrame(frame, assistant.id),
+        onFrame: (frame) => {
+          if (isCurrentRound() && frame.type === 'error') {
+            sawErrorTerminal = true
+          }
+          this.handleFrame(frame, assistant.id)
+        },
         onReconnect: (attempt, delayMs) => {
           if (!isCurrentRound()) {
             return // R6：旧轮的迟到重连公告不写进新轮
@@ -1545,16 +1559,32 @@ export const useAiStore = defineStore('ai', {
       // 动作只注入这一轮，构造完即清空，避免下一轮重复携带。
       const context = workspace.buildContext()
       workspace.clearRecentActions()
+      /** 收尾判定：身份已失效优先，其次用户停止 / 断流，最后才是调用方的正常/异常兜底。 */
+      const settleOutcome = (fallback: AiSendOutcome): AiSendOutcome => {
+        if (!isCurrentRound()) {
+          return 'interrupted'
+        }
+        if (this.stopped) {
+          return 'cancelled'
+        }
+        if (this.streamInterrupted) {
+          return 'interrupted'
+        }
+        return fallback
+      }
+      let outcome: AiSendOutcome
       try {
         await aiApi.chat(
           { sessionId: this.sessionId, message: content, context },
           handlers,
           options
         )
+        outcome = settleOutcome(sawErrorTerminal ? 'error' : 'ok')
       } catch (error) {
         if (isCurrentRound()) {
           this.handleChatError(error, assistant.id) // R6：旧轮的异常提示不写进新轮
         }
+        outcome = settleOutcome('error')
       } finally {
         if (isCurrentRound()) {
           // R1（issue#5）：只有"仍是本轮"时才复位轮次级状态 —— 否则旧轮的收尾会把新轮抹平
@@ -1570,6 +1600,7 @@ export const useAiStore = defineStore('ai', {
           target.done = true
         }
       }
+      return { outcome, userMessageId }
     },
 
     /** 处理 409/503 等开流前失败（按错误码给不同文案与动作）。 */

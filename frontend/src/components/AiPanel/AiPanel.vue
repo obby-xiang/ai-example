@@ -718,43 +718,60 @@
       </button>
     </div>
 
-    <!-- 输入区（R-165 S3a：el-textarea / el-button 全退 → demo v7 composer 结构，见 v7.html:362-365、745-755）
-         单行起排 = flex-[1] 输入框 + 28×28 方钮；容器 10px 14px 内边距 + 顶细线 #eef0f3 + 白底。
-         行为面逐字保留：v-model="inputText" / :rows="3" / resize-none / :disabled="!ai.canSend" /
-         :placeholder="inputPlaceholder" / @keydown.enter.exact.prevent="send" /
-         v-if="ai.loading" 换入停止钮（v7 同款替换关系）/ data-testid="send-btn" / :disabled="!canSubmit"。
-         busy（= !canSend）态：输入框描边转虚线（v7 `.busy` 口径：dashed 边框 + 灰底）。 -->
-    <div class="flex items-end gap-[8px] border-0 border-t border-solid border-[#eef0f3] bg-white px-[14px] py-[10px]">
-      <textarea
-        ref="composerRef"
-        v-model="inputText"
-        rows="3"
-        data-testid="composer-input"
-        class="flex-[1] min-w-0 resize-none rounded-[9px] border px-[10px] py-[7px] font-[inherit] text-[13px] leading-[1.6] text-[#1f2328] bg-[#f6f7f9] [outline:none] transition-colors duration-[150ms] placeholder:text-[#8b949e] focus:border-[#2563eb] disabled:cursor-default"
-        :class="ai.loading ? 'border-dashed border-[#e3e6ea]' : 'border-solid border-[#e3e6ea]'"
-        :disabled="!ai.canSend"
-        :placeholder="inputPlaceholder"
-        @keydown.enter.exact.prevent="send"
-      />
-      <button
-        v-if="ai.loading"
-        type="button"
-        class="flex-none w-[28px] h-[28px] rounded-[8px] bg-[#1f2328] border-0 flex items-center justify-center transition-all duration-[150ms] hover:brightness-[1.15]"
-        title="停止生成"
-        aria-label="停止生成"
-        @click="stop"
-      >
-        <span class="w-[9px] h-[9px] bg-white rounded-[2px] block" aria-hidden="true"></span>
-      </button>
-      <button
-        v-else
-        type="button"
-        data-testid="send-btn"
-        class="flex-none w-[28px] h-[28px] rounded-[8px] bg-[#2563eb] text-white border-0 text-[13px] leading-none flex items-center justify-center transition-all duration-[150ms] hover:brightness-[1.08] disabled:bg-[#8b949e] disabled:cursor-default"
-        aria-label="发送"
-        :disabled="!canSubmit"
-        @click="send"
-      >↑</button>
+    <!-- 输入区（问题4 composer v2 阶段一，demo docs/demo/chat-ux/composer-decisions.html ①/②）：
+         form 形态 = 1 行 40px 起 / [field-sizing:content] 随内容增高 / 4 行 101px 封顶后框内滚动；
+         白底 shell + 整盒 focus-within 蓝环；盒内底栏左工具位虚线占位、右 28×28 圆形发送/停止钮。
+         行为：流式生成中 textarea 保持可编辑（硬禁用只看真实不可用/挂起/pendingToolCall）；
+         普通 Enter 空闲走 send，流式中 preventDefault 后静默；Shift+Enter 不拦截；
+         IME 组合期（isComposing / keyCode 229 / compositionend 约 30ms）不误发；失焦复位组合态。 -->
+    <div
+      class="border-0 border-t border-solid border-[#eef0f3] bg-white px-[14px] py-[10px]"
+      @keydown="onComposerTipEscape"
+      @mouseover="onComposerTipMouseOver"
+      @mouseout="onComposerTipMouseOut"
+      @focusin="onComposerTipFocusIn"
+      @focusout="onComposerTipFocusOut"
+    >
+      <div class="rounded-[12px] border border-solid border-[#e3e6ea] bg-white transition-[border-color,box-shadow] duration-[150ms] focus-within:border-[#2563eb] focus-within:ring-2 focus-within:ring-[#2563eb]/40">
+        <textarea
+          ref="composerRef"
+          v-model="inputText"
+          rows="1"
+          data-testid="composer-input"
+          class="block min-h-[40px] max-h-[101px] w-full resize-none overflow-y-auto rounded-t-[12px] border-0 bg-transparent px-[11px] pb-[7px] pt-[11px] font-[inherit] text-[13px] leading-[1.6] text-[#1f2328] [outline:none] [field-sizing:content] placeholder:text-[#8b949e] disabled:cursor-default"
+          :disabled="composerHardDisabled"
+          :placeholder="inputPlaceholder"
+          @keydown="onComposerKeydown"
+          @compositionstart="onComposerCompositionStart"
+          @compositionend="onComposerCompositionEnd"
+          @blur.capture="onComposerBlur"
+        />
+        <div class="flex items-center gap-[6px] px-[9px] pb-[7px] pt-0">
+          <span class="rounded-[6px] border border-dashed border-[#cddcff] px-[6px] py-[1px] text-[10.5px] leading-[1.6] text-[#8b949e]">工具位（预留 · 留空）</span>
+          <span class="flex-1"></span>
+          <button
+            v-if="ai.loading"
+            type="button"
+            data-composer-tip="stop"
+            class="group/tip relative ml-auto flex h-[28px] w-[28px] flex-none items-center justify-center rounded-full border-0 bg-[#1f2328] transition-all duration-[150ms] hover:brightness-[1.15] focus-visible:ring-2 focus-visible:ring-[#2563eb]/40 focus-visible:ring-offset-0"
+            aria-label="停止生成"
+            @click="stop"
+          >
+            <span class="block h-[9px] w-[9px] rounded-[2px] bg-white" aria-hidden="true"></span>
+            <span class="tip" :class="[TIP_CLASS, hiddenComposerTips.has('stop') ? 'hidden' : '']" aria-hidden="true">停止生成<span class="tip-arrow" :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
+          </button>
+          <button
+            v-else
+            type="button"
+            data-testid="send-btn"
+            data-composer-tip="send"
+            class="group/tip relative ml-auto flex h-[28px] w-[28px] flex-none items-center justify-center rounded-full border-0 bg-[#2563eb] text-[13px] leading-none text-white transition-all duration-[150ms] hover:brightness-[1.08] disabled:cursor-default disabled:bg-[#8b949e] disabled:text-white focus-visible:ring-2 focus-visible:ring-[#2563eb]/40 focus-visible:ring-offset-0"
+            aria-label="发送"
+            :disabled="composerHardDisabled || !canSubmit"
+            @click="send"
+          >↑<span class="tip" :class="[TIP_CLASS, hiddenComposerTips.has('send') ? 'hidden' : '']" aria-hidden="true">发送<span class="tip-arrow" :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span></button>
+        </div>
+      </div>
     </div>
 
     <!-- R-165 S5b：mermaid 全屏查看器（demo v7.7 :1948-1964 重做口径）——
@@ -895,8 +912,9 @@
  * R-165 S2 续作：**思考卡 / HITL 门卡 / 回执卡 / 6 处顶部提示（el-alert）/ 空态（el-empty）/
  * 骨架屏（el-skeleton）/ 操作行 tip 气泡** 一并零 EP 承载，同口径纯 Tailwind；
  * 门卡的 el-input/el-button 与空态的 el-button/el-icon 同步退场（原生 textarea/button/span）。
- * R-165 S3a 收口：**输入区 composer**（el-textarea + el-button 全退）改 v7 单行结构——
- * 原生 textarea（rows=3 保持现状逻辑）+ 28×28 方钮（停止 #1f2328 白方块 / 发送 #2563eb 白图标）；
+ * R-165 S3a 收口：**输入区 composer**（el-textarea + el-button 全退）改原生结构——
+ * 问题4 composer v2（2026-10-19）起 rows=1 + `field-sizing:content`（1 行 40px 起 / 4 行 101px 封顶）、
+ * 白底 focus-within shell + 28×28 圆形钮（停止 #1f2328 白方块 / 发送 #2563eb 白图标）；
  * 同批按指挥官裁决收三项：R6 消息行撤 `mb-3.5`（间距回归元信息行单值 18px）、
  * R7 fab 回 `bottom-3`、R11 error 级通知改 v7 `.enotice` 红族（普通通知保持灰底虚线）。
  * R-165 S4（用户六项直裁）：① 操作行按钮**常驻**（撤 opacity-0/group-hover 浮出）；② 用户长消息
@@ -1287,7 +1305,166 @@ const healthTagType = computed<'success' | 'warning' | 'info'>(() => {
 
 const degradeReason = computed(() => ai.unavailableReason ?? '未检测到 AI 可用性，请点击「重新检测」。')
 
-const canSubmit = computed(() => ai.canSend && ai.available && inputText.value.trim().length > 0)
+/**
+ * 问题4 composer v2：输入区硬禁用只看真实不可用 / 挂起 / 待处理工具调用。
+ * health 尚未探测（null 且无 healthError）= 未知态，不硬禁用（避免首帧闪禁 / 吞掉输入）；
+ * `ai.loading`（流式生成中）**不**硬禁用 —— 生成中仍可继续编辑，发送位换停止钮。
+ */
+const composerHardDisabled = computed(
+  () =>
+    (ai.health !== null && !ai.health.available) ||
+    ai.healthError !== null ||
+    ai.suspended ||
+    ai.pendingToolCall !== null
+)
+
+/** 发送闸只认 health available + 非空；不依赖 loading（流式中的 Enter 在 keydown 层静默）。 */
+const canSubmit = computed(() => ai.available && inputText.value.trim().length > 0)
+
+/** compositionend 后约 30ms 内仍视为 IME 确认窗口（Safari 可能先送 compositionend 再送 Enter）。 */
+const COMPOSITION_END_GUARD_MS = 30
+let composerComposing = false
+let composerCompositionEndedAt: number | null = null
+
+function onComposerCompositionStart(): void {
+  composerComposing = true
+}
+
+function onComposerCompositionEnd(): void {
+  composerComposing = false
+  composerCompositionEndedAt = Date.now()
+}
+
+/** demo capture blur 口径：失焦即清组合态与 compositionend 守卫，避免再次聚焦后被旧状态吞掉 Enter。 */
+function onComposerBlur(): void {
+  composerComposing = false
+  composerCompositionEndedAt = null
+}
+
+/**
+ * composer tip 共享状态机（demo composer-decisions.html:382-416）：
+ * 容器统一处理 Escape / mouseover / focusin / mouseout / focusout，按钮只声明 `data-composer-tip`。
+ * `hidden` 只做 display 闸，移除后仍由 TIP_CLASS 的 opacity + group-hover/focus-visible 承接显隐。
+ */
+type ComposerTipKey = 'send' | 'stop'
+const hiddenComposerTips = ref<Set<ComposerTipKey>>(new Set())
+const hoveredComposerTip = ref<ComposerTipKey | null>(null)
+const focusedComposerTip = ref<ComposerTipKey | null>(null)
+
+function composerTipOwnerOf(target: EventTarget | null): { key: ComposerTipKey; owner: HTMLElement } | null {
+  if (!(target instanceof Element)) {
+    return null
+  }
+  const owner = target.closest<HTMLElement>('[data-composer-tip]')
+  const key = owner?.dataset.composerTip
+  if (!owner || (key !== 'send' && key !== 'stop')) {
+    return null
+  }
+  return { key, owner }
+}
+
+function hideComposerTip(key: ComposerTipKey): void {
+  if (hiddenComposerTips.value.has(key)) {
+    return
+  }
+  const next = new Set(hiddenComposerTips.value)
+  next.add(key)
+  hiddenComposerTips.value = next
+}
+
+function showComposerTip(key: ComposerTipKey): void {
+  if (!hiddenComposerTips.value.has(key)) {
+    return
+  }
+  const next = new Set(hiddenComposerTips.value)
+  next.delete(key)
+  hiddenComposerTips.value = next
+}
+
+function onComposerTipMouseOver(event: MouseEvent): void {
+  const hit = composerTipOwnerOf(event.target)
+  if (!hit) {
+    return
+  }
+  if (event.relatedTarget instanceof Node && hit.owner.contains(event.relatedTarget)) {
+    return
+  }
+  hoveredComposerTip.value = hit.key
+  showComposerTip(hit.key)
+}
+
+function onComposerTipMouseOut(event: MouseEvent): void {
+  const hit = composerTipOwnerOf(event.target)
+  if (!hit) {
+    return
+  }
+  if (event.relatedTarget instanceof Node && hit.owner.contains(event.relatedTarget)) {
+    return
+  }
+  if (hoveredComposerTip.value === hit.key) {
+    hoveredComposerTip.value = null
+  }
+  hideComposerTip(hit.key)
+}
+
+function onComposerTipFocusIn(event: FocusEvent): void {
+  const hit = composerTipOwnerOf(event.target)
+  if (!hit) {
+    return
+  }
+  focusedComposerTip.value = hit.key
+  showComposerTip(hit.key)
+}
+
+function onComposerTipFocusOut(event: FocusEvent): void {
+  const hit = composerTipOwnerOf(event.target)
+  if (!hit) {
+    return
+  }
+  if (focusedComposerTip.value === hit.key) {
+    focusedComposerTip.value = null
+  }
+  hideComposerTip(hit.key)
+}
+
+/** Escape 只清当前 hover/focus 的 tip，不 preventDefault / stopPropagation（mermaid 仍收得到）。 */
+function onComposerTipEscape(event: KeyboardEvent): void {
+  if (event.key !== 'Escape') {
+    return
+  }
+  if (hoveredComposerTip.value !== null) {
+    hideComposerTip(hoveredComposerTip.value)
+  }
+  if (focusedComposerTip.value !== null) {
+    hideComposerTip(focusedComposerTip.value)
+  }
+}
+
+/**
+ * Enter 唯一入口：空闲普通 Enter 走现有 send；流式中 preventDefault 后静默返回
+ * （不发送 / 不停止 / 不提示 / 不换行）；Shift+Enter 不拦截；IME 组合期与 repeat 不发。
+ * 发送闸与发送钮同源（composerHardDisabled || !canSubmit），不允许键盘绕过禁用。
+ */
+function onComposerKeydown(event: KeyboardEvent): void {
+  if (event.key !== 'Enter' || event.shiftKey) {
+    return
+  }
+  if (event.isComposing || event.keyCode === 229 || composerComposing) {
+    return
+  }
+  if (
+    composerCompositionEndedAt !== null &&
+    Date.now() - composerCompositionEndedAt < COMPOSITION_END_GUARD_MS
+  ) {
+    event.preventDefault()
+    return
+  }
+  event.preventDefault()
+  if (event.repeat || ai.loading || composerHardDisabled.value || !canSubmit.value) {
+    return
+  }
+  void send()
+}
 
 const inputPlaceholder = computed(() => {
   if (!ai.available) {
@@ -2358,7 +2535,7 @@ const ALERT_BTN = 'rounded-[8px] border border-solid border-[#e3e6ea] bg-white t
  * store 的 `notice` 是**单槽纯字符串**（无级别字段），本轮以 error 帧收尾时 store 同时置
  * `lastRoundOutcome = 'error'`（stores/ai.ts:2009）—— 这是"这条 notice 来自故障"在本仓
  * 唯一可信的既有信号（S2 §4-R11 实测的上游 503 `UPSTREAM_STREAM_ERROR` 正走此路径）。
- * 局限：HTTP/网络异常（catch 分支，如「对话请求失败」）不置 outcome，仍按普通通知呈现。
+ * 局限：HTTP/网络异常（catch 分支，如「对话请求失败」）不置 `lastRoundOutcome`，仍按普通通知呈现。
  */
 const noticeIsError = computed(() => ai.notice !== null && ai.lastRoundOutcome === 'error')
 
@@ -2582,15 +2759,16 @@ function readOnlyFormValues(part: ToolPart): Record<string, unknown> | null {
 }
 
 async function send(): Promise<void> {
-  const text = inputText.value.trim()
+  const draft = inputText.value
+  const text = draft.trim()
   if (!text) {
     // 空内容静默（用户没输入，不值得打扰）
     return
   }
   if (!ai.canSend) {
     // R4（issue#5）：面板层守卫同样不静默 —— **保留输入框内容**（不消费草稿），给出可读反馈。
-    // 当前 UI 下真实 Enter 到不了这里（输入区 disabled），这是纵深防御：一旦放开 disabled
-    // 或走到 loading/轮次失步窗口，用户不会"消息被静默丢弃"。
+    // 问题4 composer v2 起流式中的普通 Enter 已在 keydown 层静默短路，正常 UI 到不了这里；
+    // 这是纵深防御：程序化调用或 loading/轮次失步窗口下，用户不会"消息被静默丢弃"。
     ai.noticeBusySend()
     return
   }
@@ -2599,6 +2777,7 @@ async function send(): Promise<void> {
   // R-157 #2（收口 MAJOR-1 语义版）：编辑锚点在 ⇒ 「改完从该条重跑」——该条文本原地更新为
   // 输入框新文本、截断其后消息、从该条重跑（skipUserRecord：不另起新用户消息）。
   const editId = editingMessageId.value
+  let skipUserRecord = false
   if (editId) {
     editingMessageId.value = null
     const cut = ai.messages.findIndex((item) => item.id === editId)
@@ -2608,14 +2787,26 @@ async function send(): Promise<void> {
       deriveProjections(target)
       ai.messages.splice(cut + 1)
       pinBottom()
-      inputText.value = ''
-      await ai.send(text, { skipUserRecord: true })
-      return
+      skipUserRecord = true
     }
   }
-  pinBottom()
   inputText.value = ''
-  await ai.send(text)
+  composerRef.value?.focus({ preventScroll: true })
+  const result = skipUserRecord
+    ? await ai.send(text, { skipUserRecord: true })
+    : await ai.send(text)
+  // 成功 / 主动停止：保持已清空，草稿不回流。
+  if (result.outcome === 'ok' || result.outcome === 'cancelled') {
+    return
+  }
+  // 用户已在流式中写入新内容：不覆盖，也不把失败消息设成新的编辑锚点。
+  if (inputText.value !== '') {
+    return
+  }
+  // 失败 / 断流 / 未发送：原稿回流并聚焦；新消息锚到本轮用户消息，编辑重跑沿用发送前 editId。
+  inputText.value = draft
+  editingMessageId.value = result.userMessageId ?? editId ?? null
+  composerRef.value?.focus({ preventScroll: true })
 }
 
 function stop(): void {
