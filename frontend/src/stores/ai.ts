@@ -27,7 +27,8 @@ import {
   markApplied,
   openStreamPart,
   sealTrailingStreamPart,
-  upsertToolPart as writeToolPart
+  upsertToolPart as writeToolPart,
+  writeSubmittedValuesToMessage
 } from '@/utils/parts'
 import { ErrorCode, type SessionBusyConflict, type SuspendPoolSaturated } from '@/types/api'
 import { frameSeq, isTerminalFrame } from '@/types/sse'
@@ -2216,23 +2217,17 @@ export const useAiStore = defineStore('ai', {
      * `POST /frontend-tool-result` 的应答到达，`handleFrame` 会把 `activeForm` 置 null
      * （`:2764`）——旧写法把写回挂在 `activeForm` 身份守卫之后，值就随守卫一起丢掉
      * （只读渲染吃 `submittedValues`：本会话内值缺失，要等刷新才由后端 resultText 补回）。
+     *
+     * 2A②：写回**全部匹配段**（多消息 / 同消息重复段），不碰其他 toolCallId。
+     * `overwrite=true`（默认，POST 成功路径）以本次提交值为准；`overwrite=false`（帧路径）
+     * first-wins，只补空段 —— 两条路径共用 `writeSubmittedValuesToMessage` 单一写口。
      */
-    writeSubmittedValues(toolCallId: string, values: Record<string, unknown>): void {
-      const host = this.messages.find((item) => item.parts.some(
-        (part): boolean => part.kind === 'tool' && part.toolCallId === toolCallId
-      ))
-      const segment = host?.parts.find((part) => part.kind === 'tool' && part.toolCallId === toolCallId)
-      if (host && segment && segment.kind === 'tool') {
-        this.upsertToolPart(host, {
-          toolCallId,
-          name: segment.name,
-          kind2: segment.kind2,
-          submittedValues: values,
-          // 2A 批（裁决 §3 缺陷①）：GF 提交同样记 `decidedAt`（**数据层记录，卡面不渲染** ——
-          // r10 起卡头只留状态徽标 + 摘要 + chevron，时间不上卡面）。
-          ...(segment.decidedAt === undefined ? { decidedAt: Date.now() } : {}),
-          requiresAction: false
-        })
+    writeSubmittedValues(toolCallId: string, values: Record<string, unknown>, overwrite = true): void {
+      const decidedAt = Date.now()
+      for (const item of this.messages) {
+        if (writeSubmittedValuesToMessage(item, toolCallId, values, { overwrite, decidedAt })) {
+          deriveProjections(item)
+        }
       }
     },
 
@@ -2275,7 +2270,11 @@ export const useAiStore = defineStore('ai', {
       if (outcome.ok || outcome.duplicate) {
         // RC-2：值写回**先于** activeForm 身份守卫 —— 结局帧先到（activeForm 已 null）也要落值；
         // 守卫只留给"回填 form.status/error"这类必须择主的本地态（防瞬时覆写，红队问题 6）。
-        this.writeSubmittedValues(form.toolCallId, values)
+        // 2A② 边缘②：409 DUPLICATE = 该 toolCallId 已是终态（他端先提交）—— 本地这份值不是
+        // 权威提交值，不写回（既不覆盖先到帧值，也不写入空段冒充「同值」）。正常 ok 路径照旧。
+        if (!outcome.duplicate) {
+          this.writeSubmittedValues(form.toolCallId, values)
+        }
         if (this.activeForm?.toolCallId === form.toolCallId) {
           form.status = 'submitted'
         }
@@ -2820,6 +2819,15 @@ export const useAiStore = defineStore('ai', {
           // 双写口径分裂面）。挂起卡随 requiresAction=false 由派生抽掉。
           // 非帧路径（409 响应体 / 续收快照）仍用 applyFrontendToolTerminal 就地收敛，见其注释。
           applyFrameToParts(message, frame)
+          // 2A② 边缘①：frame-only（POST 应答丢失 / 未回）时，提交值不能只落帧宿主 —— 同
+          // toolCallId 的其他宿主段也按 first-wins 补齐。当前宿主已由 applyFrameToParts 解析并
+          // 写入（或保留更早的值），这里以**帧宿主的落定值**为准对全量消息幂等重放同一写口：
+          // 空宿主补齐、已有值不覆盖，避免多宿主出现两套值。
+          const settled = findToolPart(message, frame.toolCallId)
+          if (settled?.name === GENERATIVE_FORM_TOOL && settled.status === 'succeeded'
+            && settled.submittedValues) {
+            this.writeSubmittedValues(frame.toolCallId, settled.submittedValues, false)
+          }
           if (this.activeForm?.toolCallId === frame.toolCallId) {
             // 结局帧已到：表单收敛（提交/取消/超时皆自此收尾）。
             // T2a-D#2（B2 缓释）：帧到达时本地仍在填写（未在提交在途）→ 该表单已被他端提交/处理

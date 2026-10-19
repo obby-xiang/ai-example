@@ -11,16 +11,17 @@
  *
  * 本文件**不依赖 store**（纯函数：入参 message 就地改写、返回 void），便于仓内 vitest 直测。
  */
-import type {
-  ChatMessage,
-  MessagePart,
-  PendingToolCall,
-  ReasoningPart,
-  TextPart,
-  ToolPart,
-  ToolPartPatch,
-  ToolRun,
-  ToolRunStatus
+import {
+  GENERATIVE_FORM_TOOL,
+  type ChatMessage,
+  type MessagePart,
+  type PendingToolCall,
+  type ReasoningPart,
+  type TextPart,
+  type ToolPart,
+  type ToolPartPatch,
+  type ToolRun,
+  type ToolRunStatus
 } from '@/types/ai'
 import type { SseFrame } from '@/types/sse'
 import { parseToolArgs } from '@/utils/frontend-tools'
@@ -309,6 +310,71 @@ export function historyToolCallStatus(status: unknown): ToolRunStatus | null {
 }
 
 /**
+ * 2A②：GF 结局帧的 `result` 就是用户提交值原文（ConfirmGate#submitFrontendResult 落 resultText
+ * → SseChatEmitter#frontendToolResult 原样入帧）。只收合法 JSON **对象**；坏 JSON / 数组 /
+ * null / 标量一律不伪造（回执卡从 status 派生，值缺失保持空）。
+ */
+export function submittedValuesFromResult(name: string, result: string | null | undefined): Record<string, unknown> | null {
+  if (name !== GENERATIVE_FORM_TOOL || typeof result !== 'string' || result === '') {
+    return null
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(result)
+  } catch {
+    return null
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return null
+  }
+  return parsed as Record<string, unknown>
+}
+
+export interface SubmittedValuesWriteOptions {
+  /**
+   * `false`（帧路径）⇒ first-wins：已有 `submittedValues` 的段不覆盖；
+   * `true`（POST 成功路径）⇒ 本次提交值为准。
+   */
+  overwrite: boolean
+  /** 同一批写入共用的决策时刻（缺省 `Date.now()`），保证多段 `decidedAt` 一致。 */
+  decidedAt?: number
+}
+
+/**
+ * 2A② **单一提交值写口**（帧路径与 POST 路径共用，避免两套 first-wins 漂移）：
+ * 把值写到该消息内**所有**匹配 `toolCallId` 的段（同消息重复段也不漏），不碰其他工具；
+ * `overwrite=false` 时已有值的段保持原值。返回是否有段被改写（调用方据此派生投影）。
+ */
+export function writeSubmittedValuesToMessage(
+  message: ChatMessage,
+  toolCallId: string,
+  values: Record<string, unknown>,
+  options: SubmittedValuesWriteOptions
+): boolean {
+  let touched = false
+  const decidedAt = options.decidedAt ?? Date.now()
+  for (let index = 0; index < message.parts.length; index += 1) {
+    const part = message.parts[index]
+    if (!part || part.kind !== 'tool' || part.toolCallId !== toolCallId) {
+      continue
+    }
+    if (!options.overwrite && part.submittedValues !== undefined) {
+      continue
+    }
+    message.parts.splice(index, 1, {
+      ...part,
+      submittedValues: values,
+      // 2A 批（裁决 §3 缺陷①）：GF 提交同样记 `decidedAt`（**数据层记录，卡面不渲染** ——
+      // r10 起卡头只留状态徽标 + 摘要 + chevron，时间不上卡面）。
+      ...(part.decidedAt === undefined ? { decidedAt } : {}),
+      requiresAction: false
+    })
+    touched = true
+  }
+  return touched
+}
+
+/**
  * 帧 → 段序列的写入（只写 `message.parts` 与消息身份/流式标志，**不碰旧投影**）。
  *
  * 覆盖帧集：delta / reasoning / message_start / message_end / tool_start / tool_result /
@@ -452,9 +518,16 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
         || existing?.status === 'expired' || existing?.status === 'cancelled'
         || existing?.status === 'unknown'
       const fromFrame = frontendResultStatus(frame.status)
+      const frameStatus: ToolRunStatus = fromFrame ?? (frame.ok ? 'succeeded' : 'failed')
       const status: ToolRunStatus = localTerminal
         ? (existing?.status ?? 'failed')
-        : fromFrame ?? (frame.ok ? 'succeeded' : 'failed')
+        : frameStatus
+      // 2A②：结局帧先于 POST 应答到达时，只读卡已挂载且 submittedValues 尚未写回 —— 同帧把
+      // result（提交值原文）落到段上，卡面无需等应答即可显示真值。只有帧本身是 succeeded 才写
+      // （失败 / 取消不伪造），已有值 first-wins；落值走唯一写口 `writeSubmittedValuesToMessage`。
+      const submittedValues = status === 'succeeded' && frameStatus === 'succeeded'
+        ? submittedValuesFromResult(frame.name, frame.result)
+        : null
       upsertToolPart(message, {
         toolCallId: frame.toolCallId,
         name: frame.name,
@@ -464,6 +537,9 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
         result: frame.result ?? null,
         requiresAction: false
       })
+      if (submittedValues) {
+        writeSubmittedValuesToMessage(message, frame.toolCallId, submittedValues, { overwrite: false })
+      }
       break
     }
     case 'suspended': {

@@ -3905,6 +3905,136 @@ describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 �
     legal.unmount()
   })
 
+  it('2A② 缺陷①：readonly 挂载时值未到 ⇒ 回落默认；值后到 ⇒ 六型控件全部重灌真值（只读先到）', async () => {
+    const wrapper = mount(FormRenderer, {
+      props: {
+        schema: GF_SCHEMA,
+        submitting: false,
+        error: null,
+        remainingSeconds: null,
+        readonly: true,
+        initialValues: null
+      }
+    })
+    const read = () => ({
+      text: (wrapper.find('input[type="text"]').element as HTMLInputElement).value,
+      number: (wrapper.find('input[type="number"]').element as HTMLInputElement).value,
+      date: (wrapper.find('input[type="date"]').element as HTMLInputElement).value,
+      select: (wrapper.find('select').element as HTMLSelectElement).value,
+      boxes: wrapper.findAll('input[type="checkbox"]').map((box) => (box.element as HTMLInputElement).checked)
+    })
+
+    // 挂载即只读但值未到：六型回落 schema 初始态（枚举 = 首个合法选项，布尔 = false）
+    expect(read()).toEqual({ text: '', number: '', date: '', select: 'fast', boxes: [false, false, false] })
+
+    // POST 后 submittedValues 晚于挂载到达 ⇒ 只读卡必须重灌真值（旧实现 model 停留在初始态）
+    await wrapper.setProps({
+      initialValues: {
+        name: '季度导出',
+        interval: 30,
+        dryRun: true,
+        startAt: '2026-10-19',
+        mode: 'safe',
+        tags: ['a', 'b']
+      }
+    })
+    expect(read()).toEqual({
+      text: '季度导出',
+      number: '30',
+      date: '2026-10-19',
+      select: 'safe',
+      boxes: [true, true, true]
+    })
+    expect(wrapper.findAll('input, select').every((control) => control.attributes('disabled') !== undefined)).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('2A② 缺陷①：editable 本地输入不被 initialValues 变化覆盖；readonly 后到 ⇒ 以提交值为准（值先到）', async () => {
+    const wrapper = mount(FormRenderer, {
+      props: {
+        schema: GF_SCHEMA,
+        submitting: false,
+        error: null,
+        remainingSeconds: null,
+        readonly: false,
+        initialValues: null
+      }
+    })
+    const text = wrapper.find('input[type="text"]')
+    const select = () => wrapper.find('select').element as HTMLSelectElement
+    await text.setValue('本地草稿')
+
+    // 编辑态：initialValues 变化（如他端/预填数据晚到）不得覆盖用户正在输入的内容
+    await wrapper.setProps({ initialValues: { name: '服务端值', mode: 'safe', tags: ['b'] } })
+    expect((text.element as HTMLInputElement).value).toBe('本地草稿')
+    expect(select().value).toBe('fast')
+
+    // 只读后到：同一张表单锁定并回填提交值（用户本地草稿让位于已提交事实）
+    await wrapper.setProps({ readonly: true })
+    expect((text.element as HTMLInputElement).value).toBe('服务端值')
+    expect(select().value).toBe('safe')
+    expect(wrapper.findAll('[data-testid="gf-submit"]')).toHaveLength(0)
+    wrapper.unmount()
+  })
+
+  it('2A② 缺陷①：readonly 下 initialValues 从有到无（取消/超时收尾）⇒ 回落默认，不保留半成品', async () => {
+    const wrapper = mount(FormRenderer, {
+      props: {
+        schema: GF_SCHEMA,
+        submitting: false,
+        error: null,
+        remainingSeconds: null,
+        readonly: true,
+        initialValues: { name: '已提交', mode: 'safe' }
+      }
+    })
+    const name = () => (wrapper.find('input[type="text"]').element as HTMLInputElement).value
+    expect(name()).toBe('已提交')
+    await wrapper.setProps({ initialValues: null })
+    expect(name()).toBe('')
+    expect((wrapper.find('select').element as HTMLSelectElement).value).toBe('fast')
+    wrapper.unmount()
+  })
+
+  it('2A② 缺陷①端到端：只读卡已挂载（无值）⇒ submittedValues 后到，展开即显示提交值', async () => {
+    const args = JSON.stringify({
+      form: {
+        scenario: 'export_query',
+        title: '导出参数',
+        fields: [
+          {
+            key: 'region',
+            label: '导出范围',
+            type: 'enum',
+            required: true,
+            options: [{ value: 'HB', label: '华北' }, { value: 'HD', label: '华东' }]
+          },
+          { key: 'note', label: '说明', type: 'text', required: false }
+        ]
+      }
+    })
+    const msg = buildMessage([
+      {
+        kind: 'tool', seg: 0, toolCallId: 'g-late', name: 'generative_form', kind2: 'FRONTEND',
+        status: 'succeeded', args, requiresAction: false
+      }
+    ])
+    msg.id = 'a-late'
+    const wrapper = await mountPanel([msg], { realForm: true })
+    await wrapper.find('[data-testid="ro-toggle-g-late"]').trigger('click')
+    const body = () => wrapper.find('[data-testid="ro-body-g-late"]')
+    expect((body().find('select').element as HTMLSelectElement).value).toBe('HB')
+    expect((body().find('input[type="text"]').element as HTMLInputElement).value).toBe('')
+
+    // POST 应答后写回（旧实现：store 只写首宿主且 FormRenderer 不重灌 ⇒ 卡面停在默认值）
+    useAiStore().writeSubmittedValues('g-late', { region: 'HD', note: '晚到值' })
+    await wrapper.vm.$nextTick()
+    expect((body().find('select').element as HTMLSelectElement).value).toBe('HD')
+    expect((body().find('input[type="text"]').element as HTMLInputElement).value).toBe('晚到值')
+    expect(body().text()).toContain('华东')
+    wrapper.unmount()
+  })
+
   it('R6/R7：消息间距不再叠加（行无 mb-3.5、元信息行单值 mb-18px）；fab 回 bottom-3', async () => {
     const store = useAiStore()
     const first = buildMessage([{ kind: 'text', seg: 0, text: '甲', streaming: false }])

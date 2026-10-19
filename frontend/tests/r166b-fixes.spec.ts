@@ -25,6 +25,8 @@ import {
 } from '@/stores/ai'
 import { executeFrontendTool } from '@/utils/frontend-tools'
 import { useWorkspaceStore } from '@/stores/workspace'
+import { ApiError } from '@/api/http'
+import { ErrorCode } from '@/types/api'
 
 const api = vi.hoisted(() => ({
   health: vi.fn(),
@@ -241,6 +243,297 @@ describe('RC-2：GF submittedValues 写回不依赖 activeForm 身份（结局�
       seq: 3
     })
     expect(toolPartsOf(assistant)[0]).toMatchObject({ status: 'succeeded', submittedValues: { region: 'HB' } })
+  })
+})
+
+/**
+ * 2A② 数据链缺陷：结局帧（`frontend_tool_result`）先于 POST 应答到达时，只读卡挂载即无
+ * `submittedValues`（FormRenderer 以 null 初始化后不再重灌）。修复口径 = 帧内 `result`
+ * 就是用户提交值原文（ConfirmGate#submitFrontendResult 落 resultText），succeeded + 合法 JSON
+ * 对象 ⇒ 同帧写回 `submittedValues`；已有值 first-wins，非 GF / 失败终态 / 坏 JSON 不伪造。
+ */
+describe('2A②：GF 结局帧同帧写回 submittedValues', () => {
+  function resultFrame(
+    overrides: Partial<{ name: string; ok: boolean; status: string; result: string }> = {}
+  ): Parameters<ReturnType<typeof useAiStore>['handleFrame']>[0] {
+    return {
+      type: 'frontend_tool_result',
+      toolCallId: 'g1',
+      name: 'generative_form',
+      ok: true,
+      executed: true,
+      status: 'FRONTEND_RESULT',
+      result: '{"region":"HB"}',
+      seq: 3,
+      ...overrides
+    } as Parameters<ReturnType<typeof useAiStore>['handleFrame']>[0]
+  }
+
+  it('succeeded + result 为合法 JSON 对象 ⇒ 同帧写回提交值（只读卡立即有值）', () => {
+    const store = useAiStore()
+    const assistant = armGenerativeForm(store, 'g1')
+    store.handleFrame(resultFrame())
+    expect(toolPartsOf(assistant)[0]).toMatchObject({
+      status: 'succeeded',
+      requiresAction: false,
+      submittedValues: { region: 'HB' }
+    })
+  })
+
+  it('已有提交值 first-wins：结局帧不覆盖（POST 已写回的值与帧并存时以先落者为准）', () => {
+    const store = useAiStore()
+    const assistant = armGenerativeForm(store, 'g1')
+    store.writeSubmittedValues('g1', { region: 'HB' })
+    store.handleFrame(resultFrame({ result: '{"region":"HD"}' }))
+    expect(toolPartsOf(assistant)[0]).toMatchObject({ status: 'succeeded', submittedValues: { region: 'HB' } })
+  })
+
+  it('非 GF 前端工具 ⇒ 不写 submittedValues（通用 FRONTEND 结果不是表单值）', () => {
+    const store = useAiStore()
+    store.handleFrame({ type: 'start', runId: 'run-1', sessionId: store.sessionId, seq: 1 })
+    const assistant = store.appendAssistantMessage()
+    store.handleFrame({
+      type: 'tool_start',
+      toolCallId: 'n1',
+      name: 'navigate_to',
+      kind: 'FRONTEND',
+      args: '{"page":"tasks"}',
+      seq: 2
+    })
+    store.handleFrame({
+      type: 'frontend_tool_result',
+      toolCallId: 'n1',
+      name: 'navigate_to',
+      ok: true,
+      executed: false,
+      status: 'FRONTEND_RESULT',
+      result: '{"page":"tasks"}',
+      seq: 3
+    })
+    expect(toolPartsOf(assistant)[0]).toMatchObject({ status: 'succeeded' })
+    expect(toolPartsOf(assistant)[0]!.submittedValues).toBeUndefined()
+  })
+
+  it('GF 非成功终态（拒绝/取消）⇒ 即使 result 是合法 JSON 也不写', () => {
+    const store = useAiStore()
+    const assistant = armGenerativeForm(store, 'g1')
+    store.handleFrame(resultFrame({ status: 'REJECTED', ok: false }))
+    expect(toolPartsOf(assistant)[0]!.status).toBe('rejected')
+    expect(toolPartsOf(assistant)[0]!.submittedValues).toBeUndefined()
+  })
+
+  it('GF succeeded 但 result 非 JSON / 非对象 JSON ⇒ 不伪造提交值', () => {
+    for (const result of ['not-json{', '["HB"]', 'null', '"HB"']) {
+      setActivePinia(createPinia())
+      const store = useAiStore()
+      const assistant = armGenerativeForm(store, 'g1')
+      store.handleFrame(resultFrame({ result }))
+      expect(toolPartsOf(assistant)[0]!.status).toBe('succeeded')
+      expect(toolPartsOf(assistant)[0]!.submittedValues).toBeUndefined()
+    }
+  })
+})
+
+/**
+ * 2A② 缺陷③：同一 toolCallId 可能残留在多条消息（重投/重挂/双卡形态），只读卡按段渲染
+ * ⇒ 只写首条会让其余宿主卡面空。写回必须覆盖全部匹配段，且不碰无关 toolCallId。
+ */
+describe('2A②：writeSubmittedValues 多宿主写回（不错写 / 不漏写）', () => {
+  it('同一 toolCallId 的两条宿主消息都写回；无关工具段不受影响', () => {
+    const store = useAiStore()
+    const first = armGenerativeForm(store, 'g1')
+    const firstPart = toolPartsOf(first)[0]!
+
+    const second = store.appendAssistantMessage()
+    store.upsertToolPart(second, {
+      toolCallId: 'g1',
+      name: 'generative_form',
+      kind2: 'FRONTEND',
+      status: 'succeeded',
+      args: firstPart.args,
+      requiresAction: false
+    })
+    store.upsertToolPart(second, {
+      toolCallId: 'other',
+      name: 'list_tasks',
+      kind2: 'BACKEND',
+      status: 'succeeded',
+      args: '{}',
+      requiresAction: false
+    })
+
+    store.writeSubmittedValues('g1', { region: 'HB' })
+
+    const firstGf = toolPartsOf(first).find((part) => part.toolCallId === 'g1')!
+    const secondGf = toolPartsOf(second).find((part) => part.toolCallId === 'g1')!
+    const other = toolPartsOf(second).find((part) => part.toolCallId === 'other')!
+    expect(firstGf).toMatchObject({ submittedValues: { region: 'HB' }, requiresAction: false })
+    expect(secondGf).toMatchObject({ submittedValues: { region: 'HB' }, requiresAction: false })
+    expect(typeof firstGf.decidedAt).toBe('number')
+    expect(typeof secondGf.decidedAt).toBe('number')
+    expect(other.submittedValues).toBeUndefined()
+    expect(other.decidedAt).toBeUndefined()
+  })
+})
+
+/**
+ * 2A② 边缘①：只收到 `frontend_tool_result`（POST 应答丢失/未回）时，提交值不能只落帧宿主 ——
+ * 同 toolCallId 的其他宿主段也要按 first-wins 补齐。已有值的段保持原值；坏 JSON / 非 GF /
+ * 非成功终态一律不写。
+ */
+describe('2A② 边缘①：frame-only 多宿主回填（first-wins）', () => {
+  const GF_ARGS = JSON.stringify({
+    form: {
+      scenario: 'export_query',
+      title: '导出参数',
+      fields: [{ key: 'region', label: '导出范围', type: 'text', required: true }]
+    }
+  })
+
+  /** 造一条只读终态宿主消息（同 toolCallId 可重复；提交值仅第二宿主预置）。 */
+  function host(
+    store: ReturnType<typeof useAiStore>,
+    toolCallId: string,
+    overrides: Partial<ToolPart> = {},
+    name = 'generative_form'
+  ): ChatMessage {
+    const message = store.appendAssistantMessage()
+    store.upsertToolPart(message, {
+      toolCallId,
+      name,
+      kind2: 'FRONTEND',
+      status: 'succeeded',
+      args: name === 'generative_form' ? GF_ARGS : '{"page":"tasks"}',
+      requiresAction: false,
+      ...overrides
+    })
+    return message
+  }
+
+  it('无 POST 应答：全部空宿主都得到帧内提交值（不只当前帧宿主）', () => {
+    const store = useAiStore()
+    store.handleFrame({ type: 'start', runId: 'run-1', sessionId: store.sessionId, seq: 1 })
+    const first = host(store, 'g1')
+    const untouched = host(store, 'other')
+    const second = host(store, 'g1')
+
+    store.handleFrame({
+      type: 'frontend_tool_result',
+      toolCallId: 'g1',
+      name: 'generative_form',
+      ok: true,
+      executed: false,
+      status: 'FRONTEND_RESULT',
+      result: '{"region":"HB"}',
+      seq: 2
+    })
+
+    // 非帧宿主也必须拿到值（旧实现只写当前宿主 ⇒ 另一条卡面空）
+    expect(toolPartsOf(first)[0]).toMatchObject({ submittedValues: { region: 'HB' } })
+    expect(toolPartsOf(second)[0]).toMatchObject({ submittedValues: { region: 'HB' } })
+    // 无关 toolCallId 不写
+    expect(toolPartsOf(untouched)[0]!.submittedValues).toBeUndefined()
+  })
+
+  it('帧宿主已有值：first-wins 不被覆盖，并以首个值为准补齐空宿主', () => {
+    const store = useAiStore()
+    store.handleFrame({ type: 'start', runId: 'run-1', sessionId: store.sessionId, seq: 1 })
+    const first = host(store, 'g1')
+    const second = host(store, 'g1', { submittedValues: { region: 'OLD' } })
+
+    store.handleFrame({
+      type: 'frontend_tool_result',
+      toolCallId: 'g1',
+      name: 'generative_form',
+      ok: true,
+      executed: false,
+      status: 'FRONTEND_RESULT',
+      result: '{"region":"HB"}',
+      seq: 2
+    })
+
+    // 帧宿主已有值：不被后到的帧值覆盖
+    expect(toolPartsOf(second)[0]).toMatchObject({ submittedValues: { region: 'OLD' } })
+    // 空宿主按同一 first-wins 结果补齐（不出现两条宿主值不一致）
+    expect(toolPartsOf(first)[0]).toMatchObject({ submittedValues: { region: 'OLD' } })
+  })
+
+  it('坏 JSON / 非 GF / 非成功终态：多宿主一个都不写', () => {
+    const scenarios: Array<{ name: string; status: string; ok: boolean; result: string }> = [
+      { name: 'generative_form', status: 'FRONTEND_RESULT', ok: true, result: 'not-json{' },
+      { name: 'generative_form', status: 'FRONTEND_RESULT', ok: true, result: '["HB"]' },
+      { name: 'generative_form', status: 'REJECTED', ok: false, result: '{"region":"HB"}' },
+      { name: 'navigate_to', status: 'FRONTEND_RESULT', ok: true, result: '{"region":"HB"}' }
+    ]
+    for (const scenario of scenarios) {
+      setActivePinia(createPinia())
+      const store = useAiStore()
+      store.handleFrame({ type: 'start', runId: 'run-1', sessionId: store.sessionId, seq: 1 })
+      // 非成功终态必须落在仍待决的段上（已终态段 first-wins，帧的失败态本就不可改写它）
+      const first = host(store, 'g1', { status: 'pending', requiresAction: true }, scenario.name)
+      const second = host(store, 'g1', { status: 'pending', requiresAction: true }, scenario.name)
+
+      store.handleFrame({
+        type: 'frontend_tool_result',
+        toolCallId: 'g1',
+        name: scenario.name,
+        ok: scenario.ok,
+        executed: false,
+        status: scenario.status,
+        result: scenario.result,
+        seq: 2
+      })
+
+      expect(toolPartsOf(first)[0]!.submittedValues).toBeUndefined()
+      expect(toolPartsOf(second)[0]!.submittedValues).toBeUndefined()
+    }
+  })
+})
+
+/**
+ * 2A② 边缘②：409 DUPLICATE = 该 toolCallId 已是终态（他端先提交）。本地这份值不是权威
+ * 提交值 —— 既不能用它覆盖先到的帧值，也不能写入空段冒充「同值」。正常 ok 路径不变。
+ */
+describe('2A② 边缘②：409 DUPLICATE 不写本地提交值', () => {
+  function duplicate409(): ApiError {
+    return new ApiError('Conflict', 409, ErrorCode.DUPLICATE_TOOL_CALL_ID, { status: 'FRONTEND_RESULT' })
+  }
+
+  it('先到帧值不被本地值覆盖', async () => {
+    const store = useAiStore()
+    const assistant = armGenerativeForm(store, 'g1')
+    toolPartsOf(assistant)[0]!.submittedValues = { region: 'HD' } // 他端先提交并已落值
+    api.frontendToolResult.mockRejectedValue(duplicate409())
+
+    await store.submitGenerativeForm({ region: 'HB' })
+
+    expect(toolPartsOf(assistant)[0]).toMatchObject({
+      status: 'succeeded',
+      submittedValues: { region: 'HD' }
+    })
+    expect(store.activeForm?.status).toBe('submitted')
+  })
+
+  it('空段不得写入本地值冒充同值', async () => {
+    const store = useAiStore()
+    const assistant = armGenerativeForm(store, 'g1')
+    api.frontendToolResult.mockRejectedValue(duplicate409())
+
+    await store.submitGenerativeForm({ region: 'HB' })
+
+    expect(toolPartsOf(assistant)[0]!.status).toBe('succeeded')
+    expect(toolPartsOf(assistant)[0]!.submittedValues).toBeUndefined()
+    expect(store.activeForm?.status).toBe('submitted')
+  })
+
+  it('正常 ok 路径仍写回本地提交值（不因 duplicate 防护被削弱）', async () => {
+    const store = useAiStore()
+    const assistant = armGenerativeForm(store, 'g1')
+    api.frontendToolResult.mockResolvedValue({})
+
+    await store.submitGenerativeForm({ region: 'HB' })
+
+    expect(toolPartsOf(assistant)[0]).toMatchObject({ submittedValues: { region: 'HB' } })
   })
 })
 

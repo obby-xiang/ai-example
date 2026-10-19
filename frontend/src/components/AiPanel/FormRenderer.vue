@@ -186,7 +186,7 @@
  *
  * 与 ConditionForm.vue（视觉基线）同款的"标签在上、控件在下、每字段一列"密度。
  */
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { buildInitialValues, checkFormValues, type FormFieldSpec, type FormSpec } from '@/types/form-schema'
 import { SCROLLBAR_CLASS } from '@/utils/markdown'
 import { formatCountdown } from '@/utils/format'
@@ -295,6 +295,26 @@ const model = ref<Record<string, FormModelValue>>(initialModel())
  * （v7 红框 + 字段下 `.fmsg`），故改存数组、按 checkFormValues 的 `「label」` 前缀归属。
  */
 const localProblems = ref<string[]>([])
+
+/**
+ * 只读态值回填必须跟随 `initialValues` 后到：结局帧先切只读时卡已挂载（v-show 折叠也挂载），
+ * `submittedValues` 往往在 `POST /frontend-tool-result` 应答后才写回 —— 只靠 setup 初始化会让
+ * model 永久停在 schema 初始态。值再到 / 只读再到两种顺序都重灌；编辑态不重灌（不覆盖本地输入）。
+ * `initialValues` 变 null（取消 / 超时收尾，F9 未提交不记录）同口径回落初始态。
+ */
+function rehydrateReadonlyModel(): void {
+  if (props.readonly !== true) {
+    return
+  }
+  model.value = initialModel()
+  localProblems.value = []
+}
+
+watch(
+  () => [props.readonly, props.initialValues] as const,
+  rehydrateReadonlyModel,
+  { deep: true, immediate: true }
+)
 
 const expired = computed(() => props.remainingSeconds !== null && props.remainingSeconds <= 0)
 /**
