@@ -175,51 +175,80 @@ public class SpToolCallingManager implements ToolCallingManager {
 			}
 		}
 
-		// ===== 硬规范①：先把 assistant(tool_calls) 与待决条目外置，再进入任何等待 =====
-		this.store.saveSuspended(runId, assistant.getText(), pendings, prompt.getInstructions(), this.codec);
-		out.suspended(pendings, this.store.runKey(runId), this.store.pendingKey(runId), this.store.instanceId());
+		// ===== F8：闸门预登记必须早于 suspended 帧 =====
+		// 帧一到前端，确认卡就可被点击；此刻若闸门尚未登记，submitDecision 的 signal 返回 false，
+		// 死卡兜底会把"等待还没进入"误判成"本进程无人等待"并派发续跑，与原循环双驱动同一轮。
+		// CONFIRM 与 FRONTEND 两个通道都经 ConfirmGate.await 登记闸门，故两者一并预登记；
+		// 正常路径由 await 的 finally 逐个回收，这里只兜住异常/提前返回（取消、越 scope、
+		// 前端入参被拒、saveSuspended 抛错等）留下的未消费闸门，否则 hasActiveLatch 会永真。
+		List<String> gateWaitIds = gateWaitToolCallIds(pendings);
+		this.gate.arm(runId, gateWaitIds);
+		try {
+			// ===== 硬规范①：先把 assistant(tool_calls) 与待决条目外置，再进入任何等待 =====
+			this.store.saveSuspended(runId, assistant.getText(), pendings, prompt.getInstructions(), this.codec);
+			out.suspended(pendings, this.store.runKey(runId), this.store.pendingKey(runId), this.store.instanceId());
 
-		List<ToolResponseMessage.ToolResponse> responses = new ArrayList<>(pendings.size());
-		for (PendingToolCall pending : pendings) {
-			// 事件边界上的取消检查（ADR-8 修正③：取消在"分片/事件边界"轮询）：
-			// 逐个工具执行前先看一次权威标志，命中即终止整轮（终态 done{cancelled:true}）。
-			checkCancelled(runId);
-			out.toolStart(pending);
-			// 副作用信标（韧性棒）：工具开始执行即留下痕迹 ——
-			// ① 让看门狗在工具执行期间不计静默（硬规范①）；② 让"已产出内容前先有副作用"的重试被拦住。
-			this.beacon.enter(runId, pending.getName(), pending.getKind());
-			String text;
-			try {
-				// ===== 防线③：执行前复查 scope（T1）。越 scope 一律不执行、不认领、不记台账 =====
-				if (!this.toolRegistry.matchesContext(pending.getName(), context)) {
-					text = blockOutOfScope(runId, context, pending);
+			List<ToolResponseMessage.ToolResponse> responses = new ArrayList<>(pendings.size());
+			for (PendingToolCall pending : pendings) {
+				// 事件边界上的取消检查（ADR-8 修正③：取消在"分片/事件边界"轮询）：
+				// 逐个工具执行前先看一次权威标志，命中即终止整轮（终态 done{cancelled:true}）。
+				checkCancelled(runId);
+				out.toolStart(pending);
+				// 副作用信标（韧性棒）：工具开始执行即留下痕迹 ——
+				// ① 让看门狗在工具执行期间不计静默（硬规范①）；② 让"已产出内容前先有副作用"的重试被拦住。
+				this.beacon.enter(runId, pending.getName(), pending.getKind());
+				String text;
+				try {
+					// ===== 防线③：执行前复查 scope（T1）。越 scope 一律不执行、不认领、不记台账 =====
+					if (!this.toolRegistry.matchesContext(pending.getName(), context)) {
+						text = blockOutOfScope(runId, context, pending);
+					}
+					else {
+						text = switch (pending.getKind()) {
+							case PendingToolCall.KIND_FRONTEND -> awaitFrontend(runId, pending);
+							case PendingToolCall.KIND_CONFIRM -> awaitConfirm(runId, prompt, pending);
+							default -> executeOnce(runId, prompt, pending);
+						};
+					}
 				}
-				else {
-					text = switch (pending.getKind()) {
-						case PendingToolCall.KIND_FRONTEND -> awaitFrontend(runId, pending);
-						case PendingToolCall.KIND_CONFIRM -> awaitConfirm(runId, prompt, pending);
-						default -> executeOnce(runId, prompt, pending);
-					};
+				finally {
+					this.beacon.exit(runId, "done");
 				}
+				// 执行之后再查一次：确认门/前端工具可能正是在等待期间被取消
+				checkCancelled(runId);
+				// T2：回填模型的是裁剪后的文本；上面的 text 本身（进帧、进台账）保持全文
+				responses.add(new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
+						this.limiter.forModel(text)));
 			}
-			finally {
-				this.beacon.exit(runId, "done");
-			}
-			// 执行之后再查一次：确认门/前端工具可能正是在等待期间被取消
-			checkCancelled(runId);
-			// T2：回填模型的是裁剪后的文本；上面的 text 本身（进帧、进台账）保持全文
-			responses.add(new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
-					this.limiter.forModel(text)));
+
+			ToolResponseMessage toolMessage = ToolResponseMessage.builder().responses(responses).build();
+			// ===== 落定本轮：与官方 buildConversationHistoryAfterToolExecution 同构 =====
+			List<Message> history = new ArrayList<>(prompt.getInstructions());
+			history.add(assistant);
+			history.add(toolMessage);
+			settle(runId, history);
+
+			return ToolExecutionResult.builder().conversationHistory(history).build();
 		}
+		finally {
+			this.gate.disarm(runId, gateWaitIds);
+		}
+	}
 
-		ToolResponseMessage toolMessage = ToolResponseMessage.builder().responses(responses).build();
-		// ===== 落定本轮：与官方 buildConversationHistoryAfterToolExecution 同构 =====
-		List<Message> history = new ArrayList<>(prompt.getInstructions());
-		history.add(assistant);
-		history.add(toolMessage);
-		settle(runId, history);
-
-		return ToolExecutionResult.builder().conversationHistory(history).build();
+	/**
+	 * 本批会进入 {@link ConfirmGate} 等待的 toolCallId（{@code CONFIRM} 与 {@code FRONTEND} 都经
+	 * {@code ConfirmGate.await} 登记闸门，故两者都要预登记 —— F8）。
+	 */
+	private static List<String> gateWaitToolCallIds(List<PendingToolCall> pendings) {
+		List<String> ids = new ArrayList<>(pendings.size());
+		for (PendingToolCall pending : pendings) {
+			String kind = pending.getKind();
+			if ((PendingToolCall.KIND_CONFIRM.equals(kind) || PendingToolCall.KIND_FRONTEND.equals(kind))
+					&& pending.getToolCallId() != null) {
+				ids.add(pending.getToolCallId());
+			}
+		}
+		return ids;
 	}
 
 	// ── 三通道 ──────────────────────────────────────────────────────────────

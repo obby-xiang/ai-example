@@ -502,14 +502,14 @@
                                 <button
                                   type="button"
                                   class="flex-none whitespace-nowrap min-w-[56px] rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-[#e3e6ea] transition-all duration-[150ms] bg-white text-[#57606a] hover:border-[#8b949e] hover:text-[#1f2328] disabled:opacity-50 disabled:cursor-default"
-                                  :disabled="confirmExpired || deciding || gateSubmitting(part.toolCallId)"
-                                  @click="decide(false)"
+                                  :disabled="confirmExpired || gateSubmitting(part.toolCallId)"
+                                  @click="decide(false, part.toolCallId)"
                                 >拒绝</button>
                                 <button
                                   type="button"
                                   class="flex-none whitespace-nowrap min-w-[72px] rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-transparent transition-all duration-[150ms] bg-[#2563eb] text-white font-semibold hover:brightness-[1.08] disabled:opacity-50 disabled:cursor-default disabled:bg-[#8b949e] disabled:font-normal"
-                                  :disabled="confirmExpired || deciding || gateSubmitting(part.toolCallId)"
-                                  @click="decide(true)"
+                                  :disabled="confirmExpired || gateSubmitting(part.toolCallId)"
+                                  @click="decide(true, part.toolCallId)"
                                 >确认执行</button>
                               </span>
                             </div>
@@ -1013,7 +1013,6 @@ const ai = useAiStore()
 const workspace = useWorkspaceStore()
 
 const inputText = ref('')
-const deciding = ref(false)
 const msgWrapRef = ref<HTMLElement | null>(null)
 /** R-165 S5c：输入框 ref —— 错误卡「改写后重发」把焦点交回输入框（改写是用户动作）。 */
 const composerRef = ref<HTMLTextAreaElement | null>(null)
@@ -2909,15 +2908,13 @@ function gateSyncing(toolCallId: string): boolean {
  *
  * 2A 批（裁决 §3 缺陷④ / §9 K1）：H1 **无理由框** —— 拒因输入框整段删除，拒绝只提交
  * 固定口径 `用户拒绝执行`（后端 reason 字段仍为可选，契约不变；「修正走会话」）。
+ *
+ * 审批身份（调研 §3.9 ③）：`toolCallId` 由按钮所在卡片逐段传入 —— 多卡并存时不得回落到
+ * 全局单槽投影；按钮防重由 `gateSubmitting(part.toolCallId)` 按卡片承担。
  */
-async function decide(approved: boolean): Promise<void> {
+async function decide(approved: boolean, toolCallId: string): Promise<void> {
   const reason = approved ? undefined : '用户拒绝执行'
-  deciding.value = true
-  try {
-    await ai.confirm(approved, reason)
-  } finally {
-    deciding.value = false
-  }
+  await ai.confirm(approved, reason, toolCallId)
 }
 
 /** GF-B：表单提交（值已由 FormRenderer 按 schema 做过客户端复核）。 */

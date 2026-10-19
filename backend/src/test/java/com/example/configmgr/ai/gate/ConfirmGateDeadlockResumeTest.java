@@ -52,6 +52,14 @@ import static org.mockito.Mockito.when;
  * <li>触发载体饱和 → 不抛异常、不触发、{@code resumeOutcome} 如实回 {@code EXECUTOR_SATURATED}（A9）；</li>
  * <li>HTTP 线程<b>立即返回</b>：动作被派发到执行器而不在本线程内跑（A9 的时序证据）。</li>
  * </ol>
+ *
+ * <h2>F8（闸门预登记）新增的三条</h2>
+ * <ol start="10">
+ * <li>场景②的<b>前提被 arm 消除</b>：{@code arm} 之后、{@code await} 之前提交决策 → 闸门已登记 ⇒
+ *     {@code woke=true}，不触发续跑（{@code WOKE_IN_PROCESS_GATE}）；</li>
+ * <li>同一批还有另一张卡在等（arm 的是同轮另一个 toolCallId）→ 不触发（{@code ACTIVE_LATCH_IN_PROCESS}）；</li>
+ * <li>派发与执行之间的排队窗口：执行时复查到活跃闸门 ⇒ 放弃已派发的续跑（不调 {@code resume}）。</li>
+ * </ol>
  */
 class ConfirmGateDeadlockResumeTest {
 
@@ -273,8 +281,67 @@ class ConfirmGateDeadlockResumeTest {
         assertThat(this.dispatched).isEmpty();
     }
 
-    // ───────────────────────── helpers ─────────────────────────
+    // ── ⑩ F8：arm 之后、await 之前提交决策 → 不触发续跑 ──
 
+    @Test
+    void armedGateBeforeAwaitPreventsDeadCardResume() {
+        stubCommon();
+        when(this.store.get(RUN_ID)).thenReturn(snapshot(RunSnapshot.SUSPENDED));
+        when(this.store.pending(RUN_ID, TOOL_CALL_ID)).thenReturn(pending(PendingToolCall.PENDING));
+        // SpToolCallingManager 在 suspended 帧之前做的预登记（F8 第 1 步）
+        this.gate.arm(RUN_ID, List.of(TOOL_CALL_ID));
+
+        ConfirmGate.Submission submission = this.gate.submitDecision(RUN_ID, TOOL_CALL_ID, true, "同意");
+
+        assertThat(submission.woke()).as("预登记闸门被唤醒：帧后即点击不再落到空闸门上").isTrue();
+        assertThat(submission.resumeTrigger().triggered()).isFalse();
+        // 预登记后 signal 命中同一把闸门，直接走"同进程已唤醒"分支 ——
+        // 比 ACTIVE_LATCH_IN_PROCESS 更强（连"等 2s 轮询发现"都不需要）
+        assertThat(submission.resumeTrigger().outcome()).isEqualTo("WOKE_IN_PROCESS_GATE");
+        assertThat(this.dispatched).isEmpty();
+        verify(this.resumeService, never()).resume(anyString());
+    }
+
+    // ── ⑪ 同批另一张卡仍在等 → 不触发（ACTIVE_LATCH_IN_PROCESS） ──
+
+    @Test
+    void armedSiblingEntryInBatchStillBlocksResume() {
+        stubCommon();
+        when(this.store.get(RUN_ID)).thenReturn(snapshot(RunSnapshot.SUSPENDED));
+        when(this.store.pending(RUN_ID, TOOL_CALL_ID)).thenReturn(pending(PendingToolCall.PENDING));
+        // 同批还有一张卡在等（arm 覆盖整批，此处只登记兄弟条目以验证"本轮还有人在等"的判据）
+        this.gate.arm(RUN_ID, List.of(OTHER_TOOL_CALL_ID));
+
+        ConfirmGate.Submission submission = this.gate.submitDecision(RUN_ID, TOOL_CALL_ID, true, "同意");
+
+        assertThat(submission.woke()).isFalse();
+        assertThat(submission.resumeTrigger().triggered()).isFalse();
+        assertThat(submission.resumeTrigger().outcome()).isEqualTo("ACTIVE_LATCH_IN_PROCESS");
+        assertThat(this.dispatched).isEmpty();
+        this.gate.disarm(RUN_ID, List.of(OTHER_TOOL_CALL_ID));
+    }
+
+    // ── ⑫ F8 第 3 步：派发与执行之间出现活跃闸门 → 执行时复查放弃 ──
+
+    @Test
+    void dispatchedResumeIsAbandonedWhenLatchAppearsBeforeItRuns() {
+        stubCommon();
+        when(this.store.get(RUN_ID)).thenReturn(snapshot(RunSnapshot.SUSPENDED));
+        when(this.store.pending(RUN_ID, TOOL_CALL_ID)).thenReturn(pending(PendingToolCall.PENDING));
+
+        ConfirmGate.Submission submission = this.gate.submitDecision(RUN_ID, TOOL_CALL_ID, true, "同意");
+        assertThat(submission.resumeTrigger().triggered()).isTrue();
+        assertThat(this.dispatched).hasSize(1);
+
+        // 排队窗口里原循环进入了等待（预登记闸门出现）
+        this.gate.arm(RUN_ID, List.of(TOOL_CALL_ID));
+
+        drainNow();
+
+        verify(this.resumeService, never()).resume(anyString());
+    }
+
+    // ───────────────────────── helpers ─────────────────────────
     private void stubCommon() {
         when(this.provider.getIfAvailable()).thenReturn(this.resumeService);
         when(this.registry.of(RUN_ID)).thenReturn(this.emitter);

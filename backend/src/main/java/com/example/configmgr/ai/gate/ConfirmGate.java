@@ -20,6 +20,7 @@ import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
@@ -112,8 +113,17 @@ public class ConfirmGate {
 	 */
 	private final Executor resumeTriggerExecutor;
 
-	/** toolCallId → 进程内唤醒闸门（不承载状态）。 */
+	/**
+	 * toolCallId → 进程内唤醒闸门（不承载状态）。
+	 *
+	 * <p><b>F8</b>：闸门可以由 {@link #arm} 在 {@code suspended} 帧<b>之前</b>预登记 —— 帧一到前端
+	 * 用户就能点击，那条路径上的 {@code signal} 必须能找到闸门；{@link #await} 复用同一把
+	 * （{@code computeIfAbsent}），不再无条件新建（新建会丢掉预登记之后、等待之前发生的唤醒）。
+	 */
 	private final Map<String, Latch> latches = new ConcurrentHashMap<>();
+
+	/** {@link #arm} 预登记、尚未被 {@link #await} 消费的键（{@link #disarm} 只回收这些，不误删他人的闸门）。 */
+	private final Set<String> armedKeys = ConcurrentHashMap.newKeySet();
 
 	/**
 	 * 提交侧的互斥（S5c-6）：<b>状态落库 → 发回执帧 → 唤醒</b>是一次不可分割的动作。
@@ -185,6 +195,60 @@ public class ConfirmGate {
 	// ── 等待侧（在官方循环内阻塞） ──────────────────────────────────────────
 
 	/**
+	 * 预登记闸门（F8）：在 {@code saveSuspended} / {@code suspended} 帧<b>之前</b>，把本批将进入等待的
+	 * 条目（{@code CONFIRM} 与 {@code FRONTEND}，两者都经 {@link #await} 登记闸门）先登记好。
+	 *
+	 * <p><b>为什么必须在帧之前</b>：挂起帧一到前端，确认卡就能被点击 —— 用户在"帧已到、等待还没进入"
+	 * 的窗口里提交决策时，若闸门尚未登记，{@code signal} 返回 false，死卡兜底会判定"本进程无人等待"
+	 * 并派发 {@code ResumeService.resume}，与原循环并发驱动同一轮（重复帧/settle/历史分叉）。
+	 *
+	 * <p><b>幂等</b>：同 key 多次 arm 复用同一把闸门（{@code computeIfAbsent}）—— 重复登记不能把
+	 * 已经发生的唤醒丢掉。未被 {@link #await} 消费的键由 {@link #disarm} 回收。
+	 */
+	public void arm(String runId, List<String> toolCallIds) {
+		if (runId == null || toolCallIds == null) {
+			return;
+		}
+		for (String toolCallId : toolCallIds) {
+			if (toolCallId == null) {
+				continue;
+			}
+			String key = key(runId, toolCallId);
+			this.latches.computeIfAbsent(key, ignored -> new Latch());
+			this.armedKeys.add(key);
+		}
+	}
+
+	/**
+	 * 回收 {@link #arm} 预登记但<b>未进入等待</b>的闸门（异常/提前返回路径），防止
+	 * {@link #hasActiveLatch} 永远为真而不触发死卡兜底。
+	 *
+	 * <p><b>幂等</b>：键不存在、已被 {@link #await} 的 {@code finally} 消费、或从未 arm 过，都不报错也不
+	 * 误删 —— 只回收仍带"预登记"标记的键。
+	 */
+	public void disarm(String runId, List<String> toolCallIds) {
+		if (runId == null || toolCallIds == null) {
+			return;
+		}
+		for (String toolCallId : toolCallIds) {
+			if (toolCallId == null) {
+				continue;
+			}
+			String key = key(runId, toolCallId);
+			if (this.armedKeys.contains(key)) {
+				// F8 收口（M1）：先摘闸门、后摘预登记标记。两步之间到达的 signal 会扑空（woke=false），
+				// 交由死卡兜底续跑恢复；若反过来先摘标记，signal 会命中已无人接力的闸门 ⇒
+				// woke=true 但无驱动，挂起永久卡死。残余窗口方向刻意选可恢复的一侧。
+				Latch latch = this.latches.get(key);
+				if (latch != null) {
+					this.latches.remove(key, latch);
+				}
+				this.armedKeys.remove(key);
+			}
+		}
+	}
+
+	/**
 	 * 确认门：阻塞等人工决策，返回 Redis 里的<b>最终条目</b>（调用方据此决定执行与否）。
 	 */
 	public PendingToolCall awaitDecision(String runId, PendingToolCall pending) {
@@ -202,8 +266,10 @@ public class ConfirmGate {
 
 	private PendingToolCall await(String runId, PendingToolCall pending, int timeoutSeconds, boolean confirm) {
 		String key = key(runId, pending.getToolCallId());
-		Latch latch = new Latch();
-		this.latches.put(key, latch /* 先登记闸门再发请求，避免"外部输入已到、闸门还没登记"白等到超时 */);
+		// 先登记闸门再发请求，避免"外部输入已到、闸门还没登记"白等到超时。
+		// F8：复用 arm 的预登记（同一 key 只允许一把）—— 这里无条件 new 会盖掉预登记闸门，
+		// 使"帧已发出后、进入等待前"到达的唤醒（已 countDown 在旧闸门上）丢失。
+		Latch latch = this.latches.computeIfAbsent(key, ignored -> new Latch());
 		// 取消的加速通道（ADR-8 修正③）：同进程取消立即解开等待，权威态仍在 ai:cancel:<runId>。
 		// 跨进程取消则由下方循环里的 isCancelled 轮询发现（节拍 = 心跳节拍，属"分片边界"）。
 		AutoCloseable cancelHandle = this.cancellations.onCancel(runId, latch::signal);
@@ -257,6 +323,7 @@ public class ConfirmGate {
 		}
 		finally {
 			this.latches.remove(key, latch);
+			this.armedKeys.remove(key);
 			try {
 				cancelHandle.close();
 			}
@@ -601,6 +668,13 @@ public class ConfirmGate {
 			ResumeService service = this.resumeServiceProvider.getIfAvailable();
 			if (service == null) {
 				log.info("死卡兜底续跑结局 runId={} outcome=NO_RESUME_SERVICE", runId);
+				return;
+			}
+			// F8 第 3 步：派发（HTTP 线程）与执行（触发池）之间仍有排队窗口 —— 此处再复查一次，
+			// 本进程已有活跃等待就放弃，避免与"帧发出后才进入等待"的原循环双驱动同一轮。
+			if (hasActiveLatch(runId)) {
+				log.info("死卡兜底续跑放弃 runId={} outcome=ACTIVE_LATCH_IN_PROCESS（执行时复查到本进程仍有活跃等待）",
+						runId);
 				return;
 			}
 			ResumeService.ResumeResult result = service.resume(runId);

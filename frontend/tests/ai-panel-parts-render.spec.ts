@@ -24,7 +24,8 @@ const api = vi.hoisted(() => ({
   frontendToolResult: vi.fn(),
   reattachRun: vi.fn(),
   chat: vi.fn(),
-  feedbackSubmit: vi.fn()
+  feedbackSubmit: vi.fn(),
+  confirm: vi.fn()
 }))
 
 /** R-165 S5b：mermaid 渲染出口桩 —— 真 mermaid 不在 jsdom 跑（几何/真渲染在实机取证）；
@@ -80,6 +81,8 @@ beforeEach(() => {
   api.runsCurrent.mockReset()
   api.reattachRun.mockReset()
   api.feedbackSubmit.mockReset()
+  api.confirm.mockReset()
+  api.confirm.mockResolvedValue(undefined)
   api.feedbackSubmit.mockResolvedValue({ saved: true, cancelled: false })
   api.health.mockResolvedValue({ available: true, code: 'OK', model: 'm', baseUrl: 'b', memoryBackend: 'redis', sessionTtl: '1h', confirmTimeoutSeconds: 120, frontendToolTimeoutSeconds: 120, suspendPoolSize: 4, activeSuspendGates: 0, heldSessions: 0, sessionLockRenewals: 0, resumeOnStartup: false, instanceId: 'i', checkedAt: '2026-01-01T00:00:00Z' })
 })
@@ -242,6 +245,62 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
     expect(cards).toHaveLength(2)
     const testids = cards.map((c) => c.attributes('data-testid')).sort()
     expect(testids).toEqual(['pending-card-p1', 'pending-card-p2'])
+    wrapper.unmount()
+  })
+
+  it('审批身份①：同消息两卡点第一张 → aiApi.confirm 收到第一张卡的 toolCallId（旧单槽会发末段 id）', async () => {
+    const wrapper = await mountPanel([
+      buildMessage(
+        [
+          { kind: 'text', seg: 0, text: '', streaming: false },
+          { kind: 'tool', seg: 1, toolCallId: 'p1', name: 'start_export', kind2: 'CONFIRM', status: 'pending', args: '{}', timeoutSeconds: 120, requiresAction: true },
+          { kind: 'tool', seg: 2, toolCallId: 'p2', name: 'delete_job', kind2: 'CONFIRM', status: 'pending', args: '{}', timeoutSeconds: 120, requiresAction: true }
+        ],
+        // 旧单槽投影 = 末段（p2）：点 p1 时旧实现会误提 p2
+        { toolCallId: 'p2', name: 'delete_job', kind: 'CONFIRM', args: {}, rawArgs: '{}', timeoutSeconds: 120, status: 'pending' }
+      )
+    ])
+    const store = useAiStore()
+    store.activeRunId = 'run-1'
+    store.suspended = true
+
+    const gate = wrapper.find('[data-testid="pending-card-p1"]').find('[data-testid="hitl-gate"]')
+    await gate.findAll('button')[1]!.trigger('click')
+    await flushPromises()
+
+    expect(api.confirm).toHaveBeenCalledTimes(1)
+    expect(api.confirm.mock.calls[0]![0]).toMatchObject({ runId: 'run-1', toolCallId: 'p1', approved: true })
+    // 只落自己这张：另一张仍待决，挂起态不被误清
+    expect(store.pendingConfirms.map((part) => part.toolCallId)).toEqual(['p2'])
+    expect(store.suspended).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('审批身份②：CONFIRM 与 FRONTEND 待决并存，点 CONFIRM 卡 → 提交 CONFIRM 的 id 而非最近投影的 FRONTEND', async () => {
+    const wrapper = await mountPanel([
+      buildMessage(
+        [
+          { kind: 'tool', seg: 0, toolCallId: 'c1', name: 'start_export', kind2: 'CONFIRM', status: 'pending', args: '{"taskId":1}', timeoutSeconds: 120, requiresAction: true },
+          { kind: 'tool', seg: 1, toolCallId: 'f1', name: 'probe.tool', kind2: 'FRONTEND', status: 'pending', args: '{}', timeoutSeconds: 120, requiresAction: true }
+        ],
+        // 最近 requiresAction 段是 FRONTEND：旧 confirm() 取 pendingToolCall 会把 f1 发到 /api/ai/confirm
+        { toolCallId: 'f1', name: 'probe.tool', kind: 'FRONTEND', args: {}, rawArgs: '{}', timeoutSeconds: 120, status: 'pending' }
+      )
+    ])
+    const store = useAiStore()
+    store.activeRunId = 'run-1'
+    store.suspended = true
+
+    const gate = wrapper.find('[data-testid="pending-card-c1"]').find('[data-testid="hitl-gate"]')
+    await gate.findAll('button')[0]!.trigger('click')
+    await flushPromises()
+
+    expect(api.confirm).toHaveBeenCalledTimes(1)
+    expect(api.confirm.mock.calls[0]![0]).toMatchObject({ runId: 'run-1', toolCallId: 'c1', approved: false, reason: '用户拒绝执行' })
+    expect(api.confirm.mock.calls[0]![0].toolCallId).not.toBe('f1')
+    // FRONTEND 段仍在待前端执行，未被这次拒绝波及
+    const frontendPart = store.messages[0]!.parts.find((part) => part.kind === 'tool' && part.toolCallId === 'f1')
+    expect(frontendPart).toMatchObject({ status: 'pending', requiresAction: true })
     wrapper.unmount()
   })
 

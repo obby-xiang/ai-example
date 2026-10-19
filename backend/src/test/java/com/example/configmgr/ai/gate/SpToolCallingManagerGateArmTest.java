@@ -1,0 +1,154 @@
+package com.example.configmgr.ai.gate;
+
+import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.memory.MessageJsonCodec;
+import com.example.configmgr.ai.run.CancellationRegistry;
+import com.example.configmgr.ai.run.RunRegistry;
+import com.example.configmgr.ai.run.RunSnapshot;
+import com.example.configmgr.ai.run.RunStore;
+import com.example.configmgr.ai.run.SseChatEmitter;
+import com.example.configmgr.ai.run.StreamViolationException;
+import com.example.configmgr.ai.run.ToolActivityBeacon;
+import com.example.configmgr.ai.tool.AiContext;
+import com.example.configmgr.ai.tool.ToolMeta;
+import com.example.configmgr.ai.tool.ToolRegistry;
+import com.example.configmgr.ai.tool.ToolResultLimiter;
+import org.junit.jupiter.api.Test;
+import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.chat.model.Generation;
+import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.model.tool.ToolCallingChatOptions;
+
+import java.util.List;
+import java.util.Map;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+/**
+ * F8 用例（第 2 步）：{@code SpToolCallingManager} 在 {@code suspended} 帧之前预登记闸门，
+ * 并在异常/提前返回路径上回收未被消费的预登记 —— 否则 {@code hasActiveLatch} 永真，
+ * 死卡兜底彻底失效。
+ *
+ * <p>本类用<b>真实</b> {@link ConfirmGate}（{@code arm}/{@code disarm} 与 {@code latches} 是同一份状态），
+ * 只把 store/registry 换桩。
+ *
+ * <ol>
+ * <li>{@code saveSuspended} 抛异常：异常照常上抛，预登记闸门被回收；</li>
+ * <li>防线③拦截（越 scope，不进入等待）：整轮结束后没有残留闸门；</li>
+ * <li>事件边界取消（{@code checkCancelled} 在进入等待前抛出）：同样没有残留闸门。</li>
+ * </ol>
+ */
+class SpToolCallingManagerGateArmTest {
+
+    private static final String RUN_ID = "run-gate-arm";
+
+    private static final String TOOL_CALL_ID = "call-gate-arm-1";
+
+    private final RunStore store = mock(RunStore.class);
+
+    private final RunRegistry registry = mock(RunRegistry.class);
+
+    private final CancellationRegistry cancellations = mock(CancellationRegistry.class);
+
+    private final ToolActivityBeacon beacon = mock(ToolActivityBeacon.class);
+
+    private final SseChatEmitter emitter = mock(SseChatEmitter.class);
+
+    private final ToolRegistry toolRegistry = mock(ToolRegistry.class);
+
+    private final MessageJsonCodec codec = mock(MessageJsonCodec.class);
+
+    private final ConfirmGate gate = new ConfirmGate(this.store, this.registry, new AiProperties(),
+            this.cancellations, this.beacon, List.of());
+
+    private final SpToolCallingManager manager = new SpToolCallingManager(this.store, this.registry, this.gate,
+            this.toolRegistry, this.codec, this.beacon, this.cancellations,
+            new ToolResultLimiter(new AiProperties()), List.of());
+
+    @Test
+    void saveSuspendedFailureDisarmsPreRegisteredGate() {
+        stubRun();
+        when(this.toolRegistry.channelOf("start_import")).thenReturn(ToolMeta.Channel.BACKEND);
+        when(this.toolRegistry.riskOf("start_import")).thenReturn(ToolMeta.RiskLevel.DANGER);
+        when(this.toolRegistry.matchesContext(eq("start_import"), any(AiContext.class))).thenReturn(true);
+        doThrow(new IllegalStateException("redis down"))
+            .when(this.store)
+            .saveSuspended(anyString(), any(), anyList(), anyList(), any());
+
+        assertThatThrownBy(() -> this.manager.executeToolCalls(prompt("start_import"), response("start_import")))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("redis down");
+
+        assertThat(this.gate.hasActiveLatch(RUN_ID)).as("异常路径不留预登记闸门").isFalse();
+        assertThat(this.gate.pendingGates()).isZero();
+    }
+
+    @Test
+    void outOfScopeEntryLeavesNoArmedGate() {
+        stubRun();
+        when(this.toolRegistry.channelOf("start_import")).thenReturn(ToolMeta.Channel.BACKEND);
+        when(this.toolRegistry.riskOf("start_import")).thenReturn(ToolMeta.RiskLevel.DANGER);
+        when(this.toolRegistry.matchesContext(eq("start_import"), any(AiContext.class))).thenReturn(false);
+
+        this.manager.executeToolCalls(prompt("start_import"), response("start_import"));
+
+        assertThat(this.gate.hasActiveLatch(RUN_ID)).as("越 scope 不进入等待，预登记须被回收").isFalse();
+    }
+
+    @Test
+    void cancelledBeforeToolsLeavesNoArmedGate() {
+        stubRun();
+        when(this.cancellations.isCancelled(RUN_ID)).thenReturn(true);
+        when(this.toolRegistry.channelOf("start_import")).thenReturn(ToolMeta.Channel.BACKEND);
+        when(this.toolRegistry.riskOf("start_import")).thenReturn(ToolMeta.RiskLevel.DANGER);
+        when(this.toolRegistry.matchesContext(eq("start_import"), any(AiContext.class))).thenReturn(true);
+
+        assertThatThrownBy(() -> this.manager.executeToolCalls(prompt("start_import"), response("start_import")))
+            .isInstanceOf(StreamViolationException.class);
+
+        assertThat(this.gate.hasActiveLatch(RUN_ID)).as("取消路径不留预登记闸门").isFalse();
+    }
+
+    // ───────────────────────── helpers ─────────────────────────
+
+    private void stubRun() {
+        when(this.store.get(RUN_ID)).thenReturn(snapshot());
+        when(this.store.runKey(RUN_ID)).thenReturn("ai:run:" + RUN_ID);
+        when(this.store.pendingKey(RUN_ID)).thenReturn("ai:pending:" + RUN_ID);
+        when(this.store.instanceId()).thenReturn("test-instance");
+        when(this.registry.of(RUN_ID)).thenReturn(this.emitter);
+    }
+
+    private static RunSnapshot snapshot() {
+        RunSnapshot snapshot = new RunSnapshot();
+        snapshot.setRunId(RUN_ID);
+        snapshot.setSessionId("s-gate-arm");
+        snapshot.setStatus(RunSnapshot.RUNNING);
+        snapshot.setContext(AiContext.of("import", "IMPORT", "IMPORT", 7L, null).toMap());
+        return snapshot;
+    }
+
+    private static Prompt prompt(String tool) {
+        ToolCallingChatOptions options = ToolCallingChatOptions.builder()
+            .toolContext(Map.of("runId", RUN_ID))
+            .build();
+        return new Prompt(List.of(new UserMessage("hi")), options);
+    }
+
+    private static ChatResponse response(String tool) {
+        AssistantMessage assistant = AssistantMessage.builder()
+            .toolCalls(List.of(new AssistantMessage.ToolCall(TOOL_CALL_ID, "function", tool, "{\"taskId\":7}")))
+            .build();
+        return new ChatResponse(List.of(new Generation(assistant)));
+    }
+}

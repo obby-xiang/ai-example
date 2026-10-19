@@ -160,6 +160,45 @@ describe('施工项1：requiresAction 六残留点写段收口', () => {
     expect(soleToolPart(assistant)).toMatchObject({ status: 'rejected', requiresAction: false })
   })
 
+  it('confirm 无 id 兜底（审批身份③）：仍走单槽 pendingToolCall，既有调用签名兼容', async () => {
+    const store = useAiStore()
+    const assistant = armConfirm(store, 'c1')
+    api.confirm.mockResolvedValue({})
+
+    await store.confirm(true)
+
+    expect(api.confirm).toHaveBeenCalledTimes(1)
+    expect(api.confirm.mock.calls[0]![0]).toMatchObject({ runId: 'run-1', toolCallId: 'c1', approved: true })
+    expect(assistant.pendingCall).toBeNull()
+    expect(soleToolPart(assistant)).toMatchObject({ status: 'running', requiresAction: false })
+  })
+
+  it('confirm 带 id：按卡片定位宿主与段（不依赖末段单槽），非确认/非待决段被拒', async () => {
+    const store = useAiStore()
+    const assistant = armConfirm(store, 'c1')
+    store.handleFrame({
+      type: 'confirm_request',
+      toolCallId: 'c2',
+      name: 'danger_tool',
+      args: '{"y":2}',
+      timeoutSeconds: 120,
+      seq: 3
+    })
+    api.confirm.mockResolvedValue({})
+
+    // 点第一张卡（c1）——单槽此刻指向 c2
+    await store.confirm(false, '用户拒绝', 'c1')
+    expect(api.confirm).toHaveBeenCalledTimes(1)
+    expect(api.confirm.mock.calls[0]![0].toolCallId).toBe('c1')
+
+    // 非法身份：不存在的 id / 已决段 —— 提示并 return，不调用 API
+    api.confirm.mockClear()
+    await store.confirm(true, undefined, 'nope')
+    expect(api.confirm).not.toHaveBeenCalled()
+    expect(store.notice).toBe('没有待处理的确认请求')
+    expect(toolPartsOf(assistant).find((part) => part.toolCallId === 'c2')).toMatchObject({ status: 'pending', requiresAction: true })
+  })
+
   // R-166 口径③改写（原「段并入 running + 挂起卡收掉」是"硬写 approved"的诚实性缺陷）：
   // 409 不写任何乐观裁决 —— 段回待决（挂起卡仍在）+ 提交态置 syncing + 3s 后拉 runs/current
   // 落**真实裁决**（本用例后端真实状态是 REJECTED，旧口径会显示成「已确认」）。

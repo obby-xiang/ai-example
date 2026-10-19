@@ -903,6 +903,24 @@ export const useAiStore = defineStore('ai', {
       const pending = this.pendingToolCall as PendingToolCall | null
       return pending && pending.kind === 'CONFIRM' ? pending : null
     },
+    /**
+     * 全部待人工放行的确认门段 —— 同一消息可有多张确认卡（多闸门并存），
+     * 逐段扫描、不用 `pendingCall` 单槽（调研 §3.9 ③：审批身份按卡片而非全局槽）。
+     */
+    pendingConfirms(state): ToolPart[] {
+      const result: ToolPart[] = []
+      for (const message of state.messages) {
+        for (const part of message.parts) {
+          if (part.kind !== 'tool') {
+            continue
+          }
+          if (part.kind2 === 'CONFIRM' && part.requiresAction && part.status === 'pending') {
+            result.push(part)
+          }
+        }
+      }
+      return result
+    },
     /** AI 侧是否可用（无 key / 无 Redis 时降级提示）。 */
     available(state): boolean {
       return state.health?.available ?? false
@@ -1877,7 +1895,7 @@ export const useAiStore = defineStore('ai', {
      * ② 提交态置 `syncing`（面板显示「已提交，同步中…」且按钮禁用），
      * ③ 等 SSE 结局帧落真实状态；调用方再按 `GATE_SYNC_GRACE_MS` 武装权威校正。
      */
-    markGateSyncing(toolCallId: string, pending: PendingToolCall): void {
+    markGateSyncing(toolCallId: string, pending: Pick<PendingToolCall, 'name' | 'kind'>): void {
       const record = this.gateSubmissions[toolCallId]
       this.gateSubmissions = {
         ...this.gateSubmissions,
@@ -1975,6 +1993,17 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
+     * 挂起态收口的唯一判据：本次结局只清自己这张卡 —— 仍有其它待决确认段时保持 `suspended`。
+     * 调用方必须**先**把目标卡落终态再调用（终态段不在 `pendingConfirms` 中，自然不计入）。
+     */
+    clearSuspendedIfNoOtherConfirms(toolCallId: string): void {
+      const hasOther = this.pendingConfirms.some((item) => item.toolCallId !== toolCallId)
+      if (!hasOther) {
+        this.suspended = false
+      }
+    },
+
+    /**
      * 把权威裁决落成段终态 + 回执元数据，并撤时钟/提交态。
      * 段侧 first-wins：已终态段（含乐观写后已非 `pending`）不覆盖。
      */
@@ -2005,18 +2034,57 @@ export const useAiStore = defineStore('ai', {
       }
       this.clearConfirmClock(toolCallId)
       this.clearGateSubmission(toolCallId)
-      this.suspended = false
+      // 段已落终态后才计数：仅当无其它待决确认段时才撤挂起态
+      this.clearSuspendedIfNoOtherConfirms(toolCallId)
     },
 
-    /** HITL 确认/拒绝（双路径：approved=true 放行，false 拒绝并回填原因）。 */
-    async confirm(approved: boolean, reason?: string): Promise<void> {
-      const pending = this.pendingToolCall as PendingToolCall | null
+    /**
+     * HITL 确认/拒绝（双路径：approved=true 放行，false 拒绝并回填原因）。
+     *
+     * 审批身份（调研 §3.9 ③）：`toolCallId` 由按钮所在卡片传入 —— 多卡并存时按该 id 定位
+     * 宿主消息与工具段，不得回落到全局单槽 `pendingToolCall`。省略 id 时保留旧单槽兜底
+     * （既有调用方的兼容路径）。
+     */
+    async confirm(approved: boolean, reason?: string, toolCallId?: string): Promise<void> {
       const runId = this.activeRunId
-      if (!pending || !runId) {
-        this.notice = '没有待处理的确认请求'
-        return
+      let host: ChatMessage | null = null
+      let name: string
+      let kind: PendingToolCall['kind']
+      if (toolCallId !== undefined) {
+        let part: ToolPart | null = null
+        for (const message of this.messages) {
+          const found = findToolPart(message, toolCallId)
+          if (found) {
+            host = message
+            part = found
+            break
+          }
+        }
+        // 卡片身份校验：只接受仍待决的确认门段（终态段 / 前端工具卡不得经此提交）
+        if (!runId || !part) {
+          this.notice = '没有待处理的确认请求'
+          return
+        }
+        if (part.kind2 !== 'CONFIRM' || part.status !== 'pending' || !part.requiresAction) {
+          this.notice = '没有待处理的确认请求'
+          return
+        }
+        name = part.name
+        kind = 'CONFIRM'
+      } else {
+        const pending = this.pendingToolCall as PendingToolCall | null
+        if (!pending || !runId) {
+          this.notice = '没有待处理的确认请求'
+          return
+        }
+        toolCallId = pending.toolCallId
+        name = pending.name
+        kind = pending.kind
+        // 宿主 = 持该 toolCallId 工具段的消息（段由 confirm_request 帧建好；缺失时不新建）
+        host = this.messages.find((item) => item.parts.some(
+          (part): boolean => part.kind === 'tool' && part.toolCallId === toolCallId
+        )) ?? null
       }
-      const toolCallId = pending.toolCallId
       // R-166 口径③（源头防重）：**点击即入在途表**，同 toolCallId 最多提交一次。
       // 双按钮连点 / 程序化重入在此短路（面板另据 gateSubmissions 禁用按钮，纵深两道）。
       if (this.gateSubmissions[toolCallId]) {
@@ -2029,15 +2097,12 @@ export const useAiStore = defineStore('ai', {
       }
       // 批2（权威翻转）：确认门的乐观置位只写**段** —— 挂起卡与运行态全部由段派生。
       // 宿主 = 持该 toolCallId 工具段的消息（段由 confirm_request 帧建好；缺失时不新建）
-      const host = this.messages.find((item) => item.parts.some(
-        (part): boolean => part.kind === 'tool' && part.toolCallId === toolCallId
-      ))
       if (host) {
         // R-158 #10：决策元数据随段写回（回执卡徽标/时刻展示；乐观写，帧终态后为最终裁决）
         this.upsertToolPart(host, {
           toolCallId,
-          name: pending.name,
-          kind2: pending.kind,
+          name,
+          kind2: kind,
           status: approved ? 'running' : 'rejected',
           decision: approved ? 'approved' : 'rejected',
           decidedAt: Date.now(),
@@ -2047,14 +2112,15 @@ export const useAiStore = defineStore('ai', {
       }
       try {
         await aiApi.confirm({ runId, toolCallId, approved, reason: reason ?? null })
-        this.suspended = false
+        // 多卡并存：本轮还有别的确认门待决时保持挂起态（只清自己这张）
+        this.clearSuspendedIfNoOtherConfirms(toolCallId)
       } catch (error) {
         if (error instanceof ApiError && error.code === ErrorCode.DUPLICATE_TOOL_CALL_ID) {
           // R-166 口径③：409 只说"这条已有决策"，**不说是哪一个** —— 旧口径一律硬写
           // `approved`+`running`，于是"其实已被拒/已超时"也会被显示成「已批准」（诚实性缺陷）。
           // 改为不写任何乐观裁决：撤乐观写 → 置「已提交，同步中…」瞬态 → 等 SSE 结局帧 →
           // 3 秒未达则拉 runs/current 落真实裁决回执。
-          this.markGateSyncing(toolCallId, pending)
+          this.markGateSyncing(toolCallId, { name, kind })
           this.notice = '该确认已提交过（幂等拒绝），正在与后端同步真实裁决…'
           this.armGateSync(toolCallId)
           return
@@ -2065,8 +2131,8 @@ export const useAiStore = defineStore('ai', {
         if (host) {
           this.upsertToolPart(host, {
             toolCallId,
-            name: pending.name,
-            kind2: pending.kind,
+            name,
+            kind2: kind,
             status: 'pending',
             decision: undefined,
             decidedAt: undefined,
@@ -2782,7 +2848,8 @@ export const useAiStore = defineStore('ai', {
           // R-166 口径③：结局帧到达即撤时钟与提交在途态（409 瞬态的就地收敛口）
           this.clearConfirmClock(frame.toolCallId)
           this.clearGateSubmission(frame.toolCallId)
-          this.suspended = false
+          // M2：段已落终态后才计数 —— 多卡并存时另一张仍待决 ⇒ 保持挂起态
+          this.clearSuspendedIfNoOtherConfirms(frame.toolCallId)
           break
         }
         case 'frontend_tool_request': {

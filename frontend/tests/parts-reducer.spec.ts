@@ -462,6 +462,34 @@ describe('handleFrame 集成：seq 幂等 / 乱序兜底 / derive 时机', () =>
     expect(toolPart(assistant, 'g1').status).toBe('cancelled')
     expect(assistant.pendingCall).toBeNull()
   })
+
+  it('M2 收口：同消息两张待决 CONFIRM，第一张 confirm_decision 不清 suspended，最后一张才清', () => {
+    const store = useAiStore()
+    const assistant = store.appendAssistantMessage()
+
+    store.handleFrame({ type: 'confirm_request', toolCallId: 'c1', name: 'danger_a', args: '{}', timeoutSeconds: 120, seq: 1 })
+    store.handleFrame({ type: 'confirm_request', toolCallId: 'c2', name: 'danger_b', args: '{}', timeoutSeconds: 120, seq: 2 })
+    expect(store.pendingConfirms.map((part) => part.toolCallId)).toEqual(['c1', 'c2'])
+    expect(store.suspended).toBe(true)
+
+    // 第一张卡落终态：另一张仍待决 ⇒ 挂起态不得被误导清
+    store.handleFrame({
+      type: 'confirm_decision', toolCallId: 'c1', name: 'danger_a',
+      decision: 'APPROVED', approved: true, status: 'APPROVED', seq: 3
+    })
+    expect(toolPart(assistant, 'c1')).toMatchObject({ status: 'running', requiresAction: false })
+    expect(store.pendingConfirms.map((part) => part.toolCallId)).toEqual(['c2'])
+    expect(store.suspended).toBe(true)
+
+    // 最后一张也落终态：无其它待决确认段 ⇒ 挂起态收口
+    store.handleFrame({
+      type: 'confirm_decision', toolCallId: 'c2', name: 'danger_b',
+      decision: 'REJECTED', approved: false, status: 'REJECTED', reason: '用户拒绝', seq: 4
+    })
+    expect(toolPart(assistant, 'c2')).toMatchObject({ status: 'rejected', requiresAction: false })
+    expect(store.pendingConfirms).toEqual([])
+    expect(store.suspended).toBe(false)
+  })
 })
 
 /**
