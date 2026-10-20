@@ -1,0 +1,3583 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-10-19T09:10:17.755Z",
+  "self_attestation": {
+    "agentId": "agent-1151",
+    "profileName": "explore",
+    "modelAlias": "DeepSeek/deepseek-flash",
+    "thinkingEffort": "high",
+    "wire": "<SESSIONS_ROOT>/<SESSION_ID>/agents/agent-1151/wire.jsonl",
+    "statement": "已读自身 wire 的 profile.bind 单行：agentId=agent-1151、profileName=explore、modelAlias=DeepSeek/deepseek-flash、thinkingEffort=high。本次只读对账，未改仓库/服务/提交，仅写 <SCRATCH>/_cu-docs-census/。"
+  },
+  "scope": {
+    "repo": "<REPO_ROOT>",
+    "repo_head": "0900cf0c3a53ed7e0bc30a270b55721eeca8a345",
+    "inputs": [
+      "repo-inventory.json",
+      "external-candidates.json",
+      "session-index.json",
+      "session-index.md",
+      "archive-manifest.json"
+    ],
+    "outputs": [
+      "final-reconciliation.json",
+      "final-reconciliation.md"
+    ],
+    "write_root": "<SCRATCH>/_cu-docs-census/"
+  },
+  "method": {
+    "candidate_adjudication": "44 个 missing_candidate 逐条按 DC-21 / r163 过期锚点 / 仓库现状 / 任务看板引用 / 内容与仓内补档对应关系裁决。",
+    "session_mapping": "读取 54 个会话 wire tool.call 的写入路径与标题，匹配仓库 docs 内同名/同题补档件；issue 类映射到 issue-archive 候选；无对应者归为过程证据/误报/交接提示词。",
+    "verification": "仓库侧只读核对 git HEAD、docs 文件清单、任务/决策看板引用、r163 audit 锚点；未修改任何文件。"
+  },
+  "summary": {
+    "candidates": 44,
+    "decision_counts": {
+      "excluded_by_policy": 15,
+      "import_now": 17,
+      "import_as_historical": 6,
+      "stale_do_not_import": 5,
+      "evidence_only": 1
+    },
+    "import_total": 23,
+    "import_now": 17,
+    "import_as_historical": 6,
+    "excluded_total": 21,
+    "excluded_by_policy": 15,
+    "stale_do_not_import": 5,
+    "evidence_only": 1,
+    "session_index_total": 54,
+    "session_verdict_counts": {
+      "false_positive_other_repo": 1,
+      "already_in_repo": 39,
+      "excluded_by_policy": 4,
+      "process_evidence_not_candidate": 7,
+      "already_in_repo_partial": 2,
+      "handoff_prompt_excluded": 1
+    },
+    "risk_summary": {
+      "absolute_paths": {
+        "files": 34,
+        "occurrences": 128,
+        "max_severity": "low"
+      },
+      "org_name": {
+        "files": 7,
+        "occurrences": 77,
+        "max_severity": "high"
+      },
+      "session_ids": {
+        "files": 8,
+        "occurrences": 9,
+        "max_severity": "low"
+      },
+      "wire_paths": {
+        "files": 9,
+        "occurrences": 10,
+        "max_severity": "low"
+      },
+      "localhost_ports": {
+        "files": 16,
+        "occurrences": 48,
+        "max_severity": "low"
+      },
+      "pids": {
+        "files": 1,
+        "occurrences": 2,
+        "max_severity": "low"
+      }
+    }
+  },
+  "policy_basis": [
+    {
+      "id": "DC-21",
+      "source": "docs/adr/DECISION-REGISTER.md:25",
+      "conclusion": "issue 关闭后必须存证到仓库外 issue 存档目录再删除；issue 正文不入仓。"
+    },
+    {
+      "id": "ISSUE-ARCHIVE-README",
+      "source": "<SCRATCH>/issue-archive/README.md:3,6",
+      "conclusion": "本目录在仓库外，不受仓库命名纪律约束，但仍按脱敏惯例不写本机绝对路径/密钥。"
+    },
+    {
+      "id": "R163-AUDIT-STALE",
+      "source": "archive-manifest.json entries (pipeline-audit) + docs/demo/README.md:11",
+      "conclusion": "r163 audit 对应 2026-10-16 旧版 demo，仓库 hitl-interrupts 已升 r15，锚点集已变，核对表过期，不导入。"
+    },
+    {
+      "id": "DC-08-NAMING",
+      "source": "docs/README.md:67-74",
+      "conclusion": "入库文档禁止旧主仓目录名与绝对路径；使用 <REPO_ROOT> 等占位符。"
+    },
+    {
+      "id": "DC-19",
+      "source": "docs/adr/DECISION-REGISTER.md DC-19",
+      "conclusion": "过程报告须署名实际运行模型与会话；入库保留署名但需把会话路径改为占位符。"
+    }
+  ],
+  "import_plan": [
+    {
+      "target_path": "docs/evidence/补档-2A-内置浏览器验收-历史.md",
+      "source_path": "_cu-verify-2a/report.md",
+      "decision": "import_as_historical",
+      "batch": "2A",
+      "category": "evidence_report"
+    },
+    {
+      "target_path": "docs/evidence/补档-卡片通道-可访问性复验.md",
+      "source_path": "_cu-card-project/verification/report-final.md",
+      "decision": "import_now",
+      "batch": "卡片通道 #3",
+      "category": "evidence_report"
+    },
+    {
+      "target_path": "docs/evidence/补档-卡片通道-施工报告.md",
+      "source_path": "_cu-card-project/implementation-report.md",
+      "decision": "import_now",
+      "batch": "卡片通道 #3",
+      "category": "construction_report"
+    },
+    {
+      "target_path": "docs/evidence/补档-卡片通道-最终独立验收.md",
+      "source_path": "_cu-card-project/verification/report.md",
+      "decision": "import_now",
+      "batch": "卡片通道 #3",
+      "category": "evidence_report"
+    },
+    {
+      "target_path": "docs/evidence/补档-卡片通道-r26回归.md",
+      "source_path": "_cu-card-project/verification-r26/report.md",
+      "decision": "import_now",
+      "batch": "卡片通道 #3",
+      "category": "evidence_report"
+    },
+    {
+      "target_path": "docs/evidence/补档-问题4-composer-阶段二施工报告.md",
+      "source_path": "_cu-composer-project-r26/phase2-report.md",
+      "decision": "import_now",
+      "batch": "问题4 composer",
+      "category": "construction_report"
+    },
+    {
+      "target_path": "docs/evidence/补档-问题4-composer-阶段一施工报告.md",
+      "source_path": "_cu-composer-project-r26/phase1-report.md",
+      "decision": "import_as_historical",
+      "batch": "问题4 composer",
+      "category": "construction_report"
+    },
+    {
+      "target_path": "docs/evidence/补档-问题4-composer-浏览器验收.md",
+      "source_path": "_cu-composer-project-r26/browser/report.md",
+      "decision": "import_as_historical",
+      "batch": "问题4 composer",
+      "category": "evidence_report"
+    },
+    {
+      "target_path": "docs/evidence/补档-问题4-composer-修后复验.md",
+      "source_path": "_cu-composer-project-r26/browser/final/report.md",
+      "decision": "import_now",
+      "batch": "问题4 composer",
+      "category": "evidence_report"
+    },
+    {
+      "target_path": "docs/evidence/补档-问题4-composer-溢出与Esc根因诊断.md",
+      "source_path": "_cu-composer-project-r26/browser/scope-diagnosis/report.md",
+      "decision": "import_now",
+      "batch": "问题4 composer",
+      "category": "evidence_report"
+    },
+    {
+      "target_path": "docs/evidence/补档-问题4-composer-最终全差异审查.md",
+      "source_path": "_cu-composer-project-r26/final-review-report.md",
+      "decision": "import_now",
+      "batch": "问题4 composer",
+      "category": "review_report"
+    },
+    {
+      "target_path": "docs/evidence/补档-CI-vitest-12失败诊断-2026-10-18.md",
+      "source_path": "_cu-composer-decisions-r26/ci-diagnosis/diagnosis.md",
+      "decision": "import_as_historical",
+      "batch": "CI 诊断",
+      "category": "research_report"
+    },
+    {
+      "target_path": "docs/evidence/补档-GF回填-独立代码审查.md",
+      "source_path": "_cu-gf-fix-r26/review-report.md",
+      "decision": "import_now",
+      "batch": "GF 回填",
+      "category": "review_report"
+    },
+    {
+      "target_path": "docs/evidence/补档-GF回填-浏览器验收.md",
+      "source_path": "_cu-gf-fix-r26/browser/report.md",
+      "decision": "import_now",
+      "batch": "GF 回填",
+      "category": "evidence_report"
+    },
+    {
+      "target_path": "docs/evidence/补档-GF回填-施工报告.md",
+      "source_path": "_cu-gf-fix-r26/report.md",
+      "decision": "import_now",
+      "batch": "GF 回填",
+      "category": "evidence_report"
+    },
+    {
+      "target_path": "docs/evidence/补档-GF回填-edge-fix复审.md",
+      "source_path": "_cu-gf-fix-r26/edge-review-report.md",
+      "decision": "import_now",
+      "batch": "GF 回填",
+      "category": "review_report"
+    },
+    {
+      "target_path": "docs/evidence/补档-GF回填-final回归.md",
+      "source_path": "_cu-gf-fix-r26/browser/final/report.md",
+      "decision": "import_now",
+      "batch": "GF 回填",
+      "category": "evidence_report"
+    },
+    {
+      "target_path": "docs/evidence/补档-GF-只读视觉诊断.md",
+      "source_path": "_cu-gf-readonly-diagnosis/diagnosis-report.md",
+      "decision": "import_now",
+      "batch": "GF 只读视觉",
+      "category": "research_report"
+    },
+    {
+      "target_path": "docs/evidence/补档-HITL-G回落-r26回归.md",
+      "source_path": "_cu-hitl-g-r26/browser/report.md",
+      "decision": "import_now",
+      "batch": "HITL G",
+      "category": "evidence_report"
+    },
+    {
+      "target_path": "docs/evidence/补档-R15-折叠终态-独立验收.md",
+      "source_path": "_cu-collapse-fix/verification/report.md",
+      "decision": "import_as_historical",
+      "batch": "r15 折叠",
+      "category": "evidence_report"
+    },
+    {
+      "target_path": "docs/evidence/补档-R15-折叠终态-施工报告.md",
+      "source_path": "_cu-collapse-fix/implementation-report.md",
+      "decision": "import_now",
+      "batch": "r15 折叠",
+      "category": "construction_report"
+    },
+    {
+      "target_path": "docs/evidence/补档-R15-折叠终态-最终复验.md",
+      "source_path": "_cu-collapse-fix/verification/report-final.md",
+      "decision": "import_now",
+      "batch": "r15 折叠",
+      "category": "evidence_report"
+    },
+    {
+      "target_path": "docs/demo/r163-demo-INDEX.md",
+      "source_path": "r163-demo/INDEX.md",
+      "decision": "import_as_historical",
+      "batch": "r163 demo",
+      "category": "demo_index"
+    }
+  ],
+  "index_updates": [
+    {
+      "file": "docs/demo/README.md",
+      "lines": "11, 59-60",
+      "change": "把“版本登记口径取自仓外 r163-demo/INDEX.md”改为指向新入库的 docs/demo/r163-demo-INDEX.md（历史登记），并注明该件截至 2026-10-16、不含 10-17 r15 与 10-18 主题新规。",
+      "reason": "INDEX 入库后避免继续引用仓外路径。"
+    },
+    {
+      "file": "docs/demo/README.md",
+      "lines": "114",
+      "change": "将脱敏台账中的 chat-ux/r165-chat-ui-v7.8.html 修正为 chat-ux/archive/r165-chat-ui-v7.8.html（现有 DEMO-STALE-PATH 异常）。",
+      "reason": "repo-inventory anomaly DEMO-STALE-PATH；与本次导入无关但可同批修正。"
+    },
+    {
+      "file": "docs/evidence/补档-索引-2026-10-11.md 或新建 docs/evidence/补档-索引-2026-10-19.md",
+      "lines": "append-only 新节",
+      "change": "为 22 份新入库补档（17 现势 + 5 历史）追加“源件 → 落点 → 脱敏计数”索引；建议新建 2026-10-19 索引以免改写历史件。",
+      "reason": "docs/README.md:44 的补档索引是自包含索引；新增补档必须可溯源。"
+    },
+    {
+      "file": "docs/README.md",
+      "lines": "31-44",
+      "change": "证据分区“苞2 过程报告补档”行追加 2026-10-19 批计数/入口；若新建索引，替换入口指向新索引。",
+      "reason": "保持文档地图与证据区一致。"
+    },
+    {
+      "file": "docs/任务看板.md",
+      "lines": "13, 14, 21, 22, 34",
+      "change": "把“证据 仓外 _cu-*”替换/补注为对应 docs/evidence/补档-* 入库路径，保留仓外日志/截图指针。",
+      "reason": "任务板是批次事实源，不能只指向仓外。"
+    },
+    {
+      "file": "docs/决策看板.md",
+      "lines": "14, 15, 16, 24, 25",
+      "change": "同上，补注入库后的证据路径。",
+      "reason": "决策看板需可追溯。"
+    },
+    {
+      "file": "docs/research/README.md",
+      "lines": "27-28",
+      "change": "本次无新增 research 件；无需改。仅记录既有 17 件未逐件索引的 anomaly（RESEARCH-INDEX-GAP）留待人工。",
+      "reason": "避免把 research 索引缺口误算成本次遗漏。"
+    }
+  ],
+  "policy_exemptions": [
+    {
+      "source_path": "issue-archive/issue-6-download_export_file前端工具执行器await下载阻塞回灌超时.md",
+      "decision": "excluded_by_policy",
+      "group": "issue-archive",
+      "reason": "DC-21（docs/adr/DECISION-REGISTER.md:25）规定 issue 关闭后“存证（仓库外 issue 存档目录）后删除”；issue-archive/README.md:3,6 明示目录在仓库外。archive-manifest 将 14 个 issue 件标为 missing_candidate 并注明“与仓外归档政策冲突，需用户裁决”，本对账按 DC-21 裁决：不导入。"
+    },
+    {
+      "source_path": "issue-archive/README.md",
+      "decision": "excluded_by_policy",
+      "group": "issue-archive",
+      "reason": "DC-21（docs/adr/DECISION-REGISTER.md:25）规定 issue 关闭后“存证（仓库外 issue 存档目录）后删除”；issue-archive/README.md:3,6 明示目录在仓库外。archive-manifest 将 14 个 issue 件标为 missing_candidate 并注明“与仓外归档政策冲突，需用户裁决”，本对账按 DC-21 裁决：不导入。"
+    },
+    {
+      "source_path": "issue-archive/issue-3-手动勾选AI无感知.md",
+      "decision": "excluded_by_policy",
+      "group": "issue-archive",
+      "reason": "DC-21（docs/adr/DECISION-REGISTER.md:25）规定 issue 关闭后“存证（仓库外 issue 存档目录）后删除”；issue-archive/README.md:3,6 明示目录在仓库外。archive-manifest 将 14 个 issue 件标为 missing_candidate 并注明“与仓外归档政策冲突，需用户裁决”，本对账按 DC-21 裁决：不导入。"
+    },
+    {
+      "source_path": "issue-archive/issue-4-向导页page标签违反workspace契约.md",
+      "decision": "excluded_by_policy",
+      "group": "issue-archive",
+      "reason": "DC-21（docs/adr/DECISION-REGISTER.md:25）规定 issue 关闭后“存证（仓库外 issue 存档目录）后删除”；issue-archive/README.md:3,6 明示目录在仓库外。archive-manifest 将 14 个 issue 件标为 missing_candidate 并注明“与仓外归档政策冲突，需用户裁决”，本对账按 DC-21 裁决：不导入。"
+    },
+    {
+      "source_path": "issue-archive/issue-5-loading守卫静默丢弃连发消息.md",
+      "decision": "excluded_by_policy",
+      "group": "issue-archive",
+      "reason": "DC-21（docs/adr/DECISION-REGISTER.md:25）规定 issue 关闭后“存证（仓库外 issue 存档目录）后删除”；issue-archive/README.md:3,6 明示目录在仓库外。archive-manifest 将 14 个 issue 件标为 missing_candidate 并注明“与仓外归档政策冲突，需用户裁决”，本对账按 DC-21 裁决：不导入。"
+    },
+    {
+      "source_path": "issue-archive/issue-7-历史恢复后工具结果丢失+空白消息块.md",
+      "decision": "excluded_by_policy",
+      "group": "issue-archive",
+      "reason": "DC-21（docs/adr/DECISION-REGISTER.md:25）规定 issue 关闭后“存证（仓库外 issue 存档目录）后删除”；issue-archive/README.md:3,6 明示目录在仓库外。archive-manifest 将 14 个 issue 件标为 missing_candidate 并注明“与仓外归档政策冲突，需用户裁决”，本对账按 DC-21 裁决：不导入。"
+    },
+    {
+      "source_path": "issue-archive/issue-2-open_export_file_editor跨任务.md",
+      "decision": "excluded_by_policy",
+      "group": "issue-archive",
+      "reason": "DC-21（docs/adr/DECISION-REGISTER.md:25）规定 issue 关闭后“存证（仓库外 issue 存档目录）后删除”；issue-archive/README.md:3,6 明示目录在仓库外。archive-manifest 将 14 个 issue 件标为 missing_candidate 并注明“与仓外归档政策冲突，需用户裁决”，本对账按 DC-21 裁决：不导入。"
+    },
+    {
+      "source_path": "r163-demo/_v712/audit-v712.md",
+      "decision": "stale_do_not_import",
+      "group": "r163 audit",
+      "reason": "archive-manifest 状态 excluded / pipeline-audit，理由为“对应 2026-10-16 旧版 demo；仓库 hitl-interrupts 已升 r15，锚点集已变，核对表过期；结论已由 docs/demo/README.md 版本登记覆盖”。按“过期锚点”处理：不导入；如需审计证据，应对当前主题单文件重跑。"
+    },
+    {
+      "source_path": "issue-archive/issue-14-hitl-refresh-render-metadata-overflow.md",
+      "decision": "excluded_by_policy",
+      "group": "issue-archive",
+      "reason": "DC-21（docs/adr/DECISION-REGISTER.md:25）规定 issue 关闭后“存证（仓库外 issue 存档目录）后删除”；issue-archive/README.md:3,6 明示目录在仓库外。archive-manifest 将 14 个 issue 件标为 missing_candidate 并注明“与仓外归档政策冲突，需用户裁决”，本对账按 DC-21 裁决：不导入。"
+    },
+    {
+      "source_path": "issue-archive/issue-8-历史恢复后工具调用与文本回复拆分为多条消息.md",
+      "decision": "excluded_by_policy",
+      "group": "issue-archive",
+      "reason": "DC-21（docs/adr/DECISION-REGISTER.md:25）规定 issue 关闭后“存证（仓库外 issue 存档目录）后删除”；issue-archive/README.md:3,6 明示目录在仓库外。archive-manifest 将 14 个 issue 件标为 missing_candidate 并注明“与仓外归档政策冲突，需用户裁决”，本对账按 DC-21 裁决：不导入。"
+    },
+    {
+      "source_path": "r163-demo/_hitl5/audit-hitl5.md",
+      "decision": "stale_do_not_import",
+      "group": "r163 audit",
+      "reason": "archive-manifest 状态 excluded / pipeline-audit，理由为“对应 2026-10-16 旧版 demo；仓库 hitl-interrupts 已升 r15，锚点集已变，核对表过期；结论已由 docs/demo/README.md 版本登记覆盖”。按“过期锚点”处理：不导入；如需审计证据，应对当前主题单文件重跑。"
+    },
+    {
+      "source_path": "r163-demo/_v711/audit-v711.md",
+      "decision": "stale_do_not_import",
+      "group": "r163 audit",
+      "reason": "archive-manifest 状态 excluded / pipeline-audit，理由为“对应 2026-10-16 旧版 demo；仓库 hitl-interrupts 已升 r15，锚点集已变，核对表过期；结论已由 docs/demo/README.md 版本登记覆盖”。按“过期锚点”处理：不导入；如需审计证据，应对当前主题单文件重跑。"
+    },
+    {
+      "source_path": "issue-archive/issue-13-streaming-cursor-and-text-display.md",
+      "decision": "excluded_by_policy",
+      "group": "issue-archive",
+      "reason": "DC-21（docs/adr/DECISION-REGISTER.md:25）规定 issue 关闭后“存证（仓库外 issue 存档目录）后删除”；issue-archive/README.md:3,6 明示目录在仓库外。archive-manifest 将 14 个 issue 件标为 missing_candidate 并注明“与仓外归档政策冲突，需用户裁决”，本对账按 DC-21 裁决：不导入。"
+    },
+    {
+      "source_path": "issue-archive/issue-12-toolcard-truncation-ellipsis.md",
+      "decision": "excluded_by_policy",
+      "group": "issue-archive",
+      "reason": "DC-21（docs/adr/DECISION-REGISTER.md:25）规定 issue 关闭后“存证（仓库外 issue 存档目录）后删除”；issue-archive/README.md:3,6 明示目录在仓库外。archive-manifest 将 14 个 issue 件标为 missing_candidate 并注明“与仓外归档政策冲突，需用户裁决”，本对账按 DC-21 裁决：不导入。"
+    },
+    {
+      "source_path": "issue-archive/issue-10-hitl-receipt-lost-after-refresh.md",
+      "decision": "excluded_by_policy",
+      "group": "issue-archive",
+      "reason": "DC-21（docs/adr/DECISION-REGISTER.md:25）规定 issue 关闭后“存证（仓库外 issue 存档目录）后删除”；issue-archive/README.md:3,6 明示目录在仓库外。archive-manifest 将 14 个 issue 件标为 missing_candidate 并注明“与仓外归档政策冲突，需用户裁决”，本对账按 DC-21 裁决：不导入。"
+    },
+    {
+      "source_path": "r163-demo/_hitl/audit-hitl.md",
+      "decision": "stale_do_not_import",
+      "group": "r163 audit",
+      "reason": "archive-manifest 状态 excluded / pipeline-audit，理由为“对应 2026-10-16 旧版 demo；仓库 hitl-interrupts 已升 r15，锚点集已变，核对表过期；结论已由 docs/demo/README.md 版本登记覆盖”。按“过期锚点”处理：不导入；如需审计证据，应对当前主题单文件重跑。"
+    },
+    {
+      "source_path": "issue-archive/issue-9-AI批量下载导出文件触发多次浏览器下载可能被浏览器拦截.md",
+      "decision": "excluded_by_policy",
+      "group": "issue-archive",
+      "reason": "DC-21（docs/adr/DECISION-REGISTER.md:25）规定 issue 关闭后“存证（仓库外 issue 存档目录）后删除”；issue-archive/README.md:3,6 明示目录在仓库外。archive-manifest 将 14 个 issue 件标为 missing_candidate 并注明“与仓外归档政策冲突，需用户裁决”，本对账按 DC-21 裁决：不导入。"
+    },
+    {
+      "source_path": "issue-archive/issue-11-merged-assistant-copy-missing-newline.md",
+      "decision": "excluded_by_policy",
+      "group": "issue-archive",
+      "reason": "DC-21（docs/adr/DECISION-REGISTER.md:25）规定 issue 关闭后“存证（仓库外 issue 存档目录）后删除”；issue-archive/README.md:3,6 明示目录在仓库外。archive-manifest 将 14 个 issue 件标为 missing_candidate 并注明“与仓外归档政策冲突，需用户裁决”，本对账按 DC-21 裁决：不导入。"
+    },
+    {
+      "source_path": "r163-demo/_v710/audit-v710.md",
+      "decision": "stale_do_not_import",
+      "group": "r163 audit",
+      "reason": "archive-manifest 状态 excluded / pipeline-audit，理由为“对应 2026-10-16 旧版 demo；仓库 hitl-interrupts 已升 r15，锚点集已变，核对表过期；结论已由 docs/demo/README.md 版本登记覆盖”。按“过期锚点”处理：不导入；如需审计证据，应对当前主题单文件重跑。"
+    },
+    {
+      "source_path": "issue-archive/issue-1-navigate_to-select_definitions绑定竞态.md",
+      "decision": "excluded_by_policy",
+      "group": "issue-archive",
+      "reason": "DC-21（docs/adr/DECISION-REGISTER.md:25）规定 issue 关闭后“存证（仓库外 issue 存档目录）后删除”；issue-archive/README.md:3,6 明示目录在仓库外。archive-manifest 将 14 个 issue 件标为 missing_candidate 并注明“与仓外归档政策冲突，需用户裁决”，本对账按 DC-21 裁决：不导入。"
+    },
+    {
+      "source_path": "_shared/cu-双卡直发-报告.md",
+      "decision": "evidence_only",
+      "group": "DC-19 运行台账",
+      "reason": "CU 双卡直发运行台账（会话 id、pill、字节校验 sha 前 6 位），属 ops-ledger；不构成项目研究/证据文档，留仓外存证即可，且含会话/wire 路径，不宜入库。"
+    }
+  ],
+  "candidates": [
+    {
+      "id": 1,
+      "source_path": "issue-archive/issue-6-download_export_file前端工具执行器await下载阻塞回灌超时.md",
+      "category": "issue_report",
+      "title": "issue #6 存档：`download_export_file` 前端工具执行器 await 下载阻塞回灌超时",
+      "size_bytes": 21035,
+      "sha256": "22413019d73107ae3c8e69da896c2fe407eb1738c5b7c371978a0fdab49ea2e2",
+      "likely_formal_doc": true,
+      "decision": "excluded_by_policy",
+      "target_path": null,
+      "batch": "issue-archive",
+      "rationale": "DC-21（docs/adr/DECISION-REGISTER.md:25）规定 issue 关闭后“存证（仓库外 issue 存档目录）后删除”；issue-archive/README.md:3,6 明示目录在仓库外。archive-manifest 将 14 个 issue 件标为 missing_candidate 并注明“与仓外归档政策冲突，需用户裁决”，本对账按 DC-21 裁决：不导入。",
+      "evidence_refs": [
+        "docs/adr/DECISION-REGISTER.md:25",
+        "issue-archive/README.md:3,6",
+        "archive-manifest.json"
+      ],
+      "risk_flags": [
+        {
+          "type": "absolute_paths",
+          "count": 3,
+          "severity": "low",
+          "action": "replace with <REPO_ROOT>/<SCRATCH>"
+        },
+        {
+          "type": "org_name",
+          "count": 14,
+          "severity": "high",
+          "action": "replace with <ORG>"
+        }
+      ],
+      "redaction_required": [
+        "replace with <REPO_ROOT>/<SCRATCH>",
+        "replace with <ORG>"
+      ]
+    },
+    {
+      "id": 2,
+      "source_path": "issue-archive/README.md",
+      "category": "issue_index",
+      "title": "issue 存档政策",
+      "size_bytes": 18957,
+      "sha256": "b920899e6e839c154d91178a2570eb0fa0291e228398a5b32abb6caa94075627",
+      "likely_formal_doc": true,
+      "decision": "excluded_by_policy",
+      "target_path": null,
+      "batch": "issue-archive",
+      "rationale": "DC-21（docs/adr/DECISION-REGISTER.md:25）规定 issue 关闭后“存证（仓库外 issue 存档目录）后删除”；issue-archive/README.md:3,6 明示目录在仓库外。archive-manifest 将 14 个 issue 件标为 missing_candidate 并注明“与仓外归档政策冲突，需用户裁决”，本对账按 DC-21 裁决：不导入。",
+      "evidence_refs": [
+        "docs/adr/DECISION-REGISTER.md:25",
+        "issue-archive/README.md:3,6",
+        "archive-manifest.json"
+      ],
+      "risk_flags": [
+        {
+          "type": "org_name",
+          "count": 1,
+          "severity": "high",
+          "action": "replace with <ORG>"
+        }
+      ],
+      "redaction_required": [
+        "replace with <ORG>"
+      ]
+    },
+    {
+      "id": 3,
+      "source_path": "issue-archive/issue-3-手动勾选AI无感知.md",
+      "category": "issue_report",
+      "title": "issue #3 å­æ¡£ï¼ç¨æ·æå¨éå®ä¹åå·¥ä½åºä¸ä¸æä¸åæ­¥ï¼AI æ æ³æç¥ç¨æ·éæ©",
+      "size_bytes": 16368,
+      "sha256": "ede2fd7daaa6fdfe4ff0991e1ea70a52c90067dbf92630164715840262eff366",
+      "likely_formal_doc": true,
+      "decision": "excluded_by_policy",
+      "target_path": null,
+      "batch": "issue-archive",
+      "rationale": "DC-21（docs/adr/DECISION-REGISTER.md:25）规定 issue 关闭后“存证（仓库外 issue 存档目录）后删除”；issue-archive/README.md:3,6 明示目录在仓库外。archive-manifest 将 14 个 issue 件标为 missing_candidate 并注明“与仓外归档政策冲突，需用户裁决”，本对账按 DC-21 裁决：不导入。",
+      "evidence_refs": [
+        "docs/adr/DECISION-REGISTER.md:25",
+        "issue-archive/README.md:3,6",
+        "archive-manifest.json"
+      ],
+      "risk_flags": [
+        {
+          "type": "absolute_paths",
+          "count": 3,
+          "severity": "low",
+          "action": "replace with <REPO_ROOT>/<SCRATCH>"
+        },
+        {
+          "type": "org_name",
+          "count": 15,
+          "severity": "high",
+          "action": "replace with <ORG>"
+        }
+      ],
+      "redaction_required": [
+        "replace with <REPO_ROOT>/<SCRATCH>",
+        "replace with <ORG>"
+      ]
+    },
+    {
+      "id": 4,
+      "source_path": "_cu-card-project/implementation-report.md",
+      "category": "construction_report",
+      "title": "ai-example #3 é¡¹ç®åè½æ½å·¥æ¥åï¼å¡çééç»ä¸ï¼",
+      "size_bytes": 15218,
+      "sha256": "5b9757393678ec201ed663589a8b31008be710a532cf0a857307c3b294708643",
+      "likely_formal_doc": true,
+      "decision": "import_now",
+      "target_path": "docs/evidence/补档-卡片通道-施工报告.md",
+      "batch": "卡片通道 #3",
+      "rationale": "#3 三类型卡头回落已入库（3466d68）；任务看板 10-18 行把本件列为仓外证据。正式报告入证据区可闭合链，日志/截图仍留仓外。",
+      "evidence_refs": [
+        "docs/任务看板.md:22",
+        "docs/决策看板.md:26"
+      ],
+      "risk_flags": [
+        {
+          "type": "absolute_paths",
+          "count": 2,
+          "severity": "low",
+          "action": "replace with <REPO_ROOT>/<SCRATCH>"
+        }
+      ],
+      "redaction_required": [
+        "replace with <REPO_ROOT>/<SCRATCH>"
+      ]
+    },
+    {
+      "id": 5,
+      "source_path": "_cu-composer-project-r26/final-review-report.md",
+      "category": "review_report",
+      "title": "问题4 composer v2 项目回落 · 最终全差异审查",
+      "size_bytes": 14253,
+      "sha256": "1fcd86301cd082742a20619290a23e6ec98172d3debd864151d029457ef06945",
+      "likely_formal_doc": true,
+      "decision": "import_now",
+      "target_path": "docs/evidence/补档-问题4-composer-最终全差异审查.md",
+      "batch": "问题4 composer",
+      "rationale": "问题4 composer v2 已入库（60afe6f / 闭合 5274419）；任务看板 10-19 与决策看板 10-19 引用本组报告。按其在链条中的位置区分现势/历史件。",
+      "evidence_refs": [
+        "docs/任务看板.md:13,34",
+        "docs/决策看板.md:14"
+      ],
+      "risk_flags": [
+        {
+          "type": "absolute_paths",
+          "count": 6,
+          "severity": "low",
+          "action": "replace with <REPO_ROOT>/<SCRATCH>"
+        },
+        {
+          "type": "session_ids",
+          "count": 1,
+          "severity": "low",
+          "action": "replace with <SESSION_ID>"
+        },
+        {
+          "type": "wire_paths",
+          "count": 1,
+          "severity": "low",
+          "action": "replace with <SESSIONS_ROOT>/<SESSION_ID>/agents/<AGENT>/wire.jsonl"
+        }
+      ],
+      "redaction_required": [
+        "replace with <REPO_ROOT>/<SCRATCH>",
+        "replace with <SESSION_ID>",
+        "replace with <SESSIONS_ROOT>/<SESSION_ID>/agents/<AGENT>/wire.jsonl"
+      ]
+    },
+    {
+      "id": 6,
+      "source_path": "issue-archive/issue-4-向导页page标签违反workspace契约.md",
+      "category": "issue_report",
+      "title": "issue #4 å­æ¡£ï¼åå¯¼é¡µ page æ ç­¾è¿å workspace å¥çº¦ï¼å»ç»ä¸ä¸æä¸ start_export ç­å·¥å",
+      "size_bytes": 13829,
+      "sha256": "faa65717c49cf4a6cf6fbf979432d0319239ba9748612b672fd85fc2fa070fed",
+      "likely_formal_doc": true,
+      "decision": "excluded_by_policy",
+      "target_path": null,
+      "batch": "issue-archive",
+      "rationale": "DC-21（docs/adr/DECISION-REGISTER.md:25）规定 issue 关闭后“存证（仓库外 issue 存档目录）后删除”；issue-archive/README.md:3,6 明示目录在仓库外。archive-manifest 将 14 个 issue 件标为 missing_candidate 并注明“与仓外归档政策冲突，需用户裁决”，本对账按 DC-21 裁决：不导入。",
+      "evidence_refs": [
+        "docs/adr/DECISION-REGISTER.md:25",
+        "issue-archive/README.md:3,6",
+        "archive-manifest.json"
+      ],
+      "risk_flags": [
+        {
+          "type": "absolute_paths",
+          "count": 4,
+          "severity": "low",
+          "action": "replace with <REPO_ROOT>/<SCRATCH>"
+        },
+        {
+          "type": "org_name",
+          "count": 16,
+          "severity": "high",
+          "action": "replace with <ORG>"
+        }
+      ],
+      "redaction_required": [
+        "replace with <REPO_ROOT>/<SCRATCH>",
+        "replace with <ORG>"
+      ]
+    },
+    {
+      "id": 7,
+      "source_path": "_cu-gf-fix-r26/report.md",
+      "category": "evidence_report",
+      "title": "2A② 生成式表单只读回填缺陷 · 施工报告",
+      "size_bytes": 13685,
+      "sha256": "0681cc9c8a81bdf184a8faf66409824d301f02ffaadb8e64eb86ef329e59ef20",
+      "likely_formal_doc": true,
+      "decision": "import_now",
+      "target_path": "docs/evidence/补档-GF回填-施工报告.md",
+      "batch": "GF 回填",
+      "rationale": "GF 回填修复已入库（de4453d）；任务看板 10-19 与决策看板 10-19 明确引用本组报告。正式施工/审查/验收件应入证据区。",
+      "evidence_refs": [
+        "docs/任务看板.md:14,15",
+        "docs/决策看板.md:15,16"
+      ],
+      "risk_flags": [
+        {
+          "type": "absolute_paths",
+          "count": 3,
+          "severity": "low",
+          "action": "replace with <REPO_ROOT>/<SCRATCH>"
+        },
+        {
+          "type": "session_ids",
+          "count": 1,
+          "severity": "low",
+          "action": "replace with <SESSION_ID>"
+        },
+        {
+          "type": "wire_paths",
+          "count": 1,
+          "severity": "low",
+          "action": "replace with <SESSIONS_ROOT>/<SESSION_ID>/agents/<AGENT>/wire.jsonl"
+        }
+      ],
+      "redaction_required": [
+        "replace with <REPO_ROOT>/<SCRATCH>",
+        "replace with <SESSION_ID>",
+        "replace with <SESSIONS_ROOT>/<SESSION_ID>/agents/<AGENT>/wire.jsonl"
+      ]
+    },
+    {
+      "id": 8,
+      "source_path": "_cu-composer-project-r26/phase1-report.md",
+      "category": "construction_report",
+      "title": "问题4 composer 项目回落 · 阶段一施工报告",
+      "size_bytes": 13023,
+      "sha256": "f52b8980cd736b3e8355398365aeb886e34fed289b4da88a62dd1c575a653bf8",
+      "likely_formal_doc": true,
+      "decision": "import_as_historical",
+      "target_path": "docs/evidence/补档-问题4-composer-阶段一施工报告.md",
+      "batch": "问题4 composer",
+      "rationale": "问题4 composer v2 已入库（60afe6f / 闭合 5274419）；任务看板 10-19 与决策看板 10-19 引用本组报告。按其在链条中的位置区分现势/历史件。",
+      "evidence_refs": [
+        "docs/任务看板.md:13,34",
+        "docs/决策看板.md:14"
+      ],
+      "risk_flags": [
+        {
+          "type": "absolute_paths",
+          "count": 2,
+          "severity": "low",
+          "action": "replace with <REPO_ROOT>/<SCRATCH>"
+        },
+        {
+          "type": "session_ids",
+          "count": 1,
+          "severity": "low",
+          "action": "replace with <SESSION_ID>"
+        },
+        {
+          "type": "wire_paths",
+          "count": 1,
+          "severity": "low",
+          "action": "replace with <SESSIONS_ROOT>/<SESSION_ID>/agents/<AGENT>/wire.jsonl"
+        }
+      ],
+      "redaction_required": [
+        "replace with <REPO_ROOT>/<SCRATCH>",
+        "replace with <SESSION_ID>",
+        "replace with <SESSIONS_ROOT>/<SESSION_ID>/agents/<AGENT>/wire.jsonl"
+      ]
+    },
+    {
+      "id": 9,
+      "source_path": "_cu-composer-project-r26/phase2-report.md",
+      "category": "construction_report",
+      "title": "问题4 composer 项目回落 · 阶段二施工报告",
+      "size_bytes": 12541,
+      "sha256": "a7d7d2ce1e6604e10691933c56536c84ef6b9daa8c653d6f80ea05ba1952d444",
+      "likely_formal_doc": true,
+      "decision": "import_now",
+      "target_path": "docs/evidence/补档-问题4-composer-阶段二施工报告.md",
+      "batch": "问题4 composer",
+      "rationale": "问题4 composer v2 已入库（60afe6f / 闭合 5274419）；任务看板 10-19 与决策看板 10-19 引用本组报告。按其在链条中的位置区分现势/历史件。",
+      "evidence_refs": [
+        "docs/任务看板.md:13,34",
+        "docs/决策看板.md:14"
+      ],
+      "risk_flags": [
+        {
+          "type": "absolute_paths",
+          "count": 2,
+          "severity": "low",
+          "action": "replace with <REPO_ROOT>/<SCRATCH>"
+        },
+        {
+          "type": "session_ids",
+          "count": 1,
+          "severity": "low",
+          "action": "replace with <SESSION_ID>"
+        },
+        {
+          "type": "wire_paths",
+          "count": 1,
+          "severity": "low",
+          "action": "replace with <SESSIONS_ROOT>/<SESSION_ID>/agents/<AGENT>/wire.jsonl"
+        }
+      ],
+      "redaction_required": [
+        "replace with <REPO_ROOT>/<SCRATCH>",
+        "replace with <SESSION_ID>",
+        "replace with <SESSIONS_ROOT>/<SESSION_ID>/agents/<AGENT>/wire.jsonl"
+      ]
+    },
+    {
+      "id": 10,
+      "source_path": "issue-archive/issue-5-loading守卫静默丢弃连发消息.md",
+      "category": "issue_report",
+      "title": "issue #5 存档：前端 loading 守卫静默丢弃连发消息，用户无反馈",
+      "size_bytes": 12283,
+      "sha256": "e97db9ae24708fbb8284698123d4526e741809e6e9c3ff898dfdfda63acbe155",
+      "likely_formal_doc": true,
+      "decision": "excluded_by_policy",
+      "target_path": null,
+      "batch": "issue-archive",
+      "rationale": "DC-21（docs/adr/DECISION-REGISTER.md:25）规定 issue 关闭后“存证（仓库外 issue 存档目录）后删除”；issue-archive/README.md:3,6 明示目录在仓库外。archive-manifest 将 14 个 issue 件标为 missing_candidate 并注明“与仓外归档政策冲突，需用户裁决”，本对账按 DC-21 裁决：不导入。",
+      "evidence_refs": [
+        "docs/adr/DECISION-REGISTER.md:25",
+        "issue-archive/README.md:3,6",
+        "archive-manifest.json"
+      ],
+      "risk_flags": [
+        {
+          "type": "absolute_paths",
+          "count": 4,
+          "severity": "low",
+          "action": "replace with <REPO_ROOT>/<SCRATCH>"
+        },
+        {
+          "type": "org_name",
+          "count": 18,
+          "severity": "high",
+          "action": "replace with <ORG>"
+        }
+      ],
+      "redaction_required": [
+        "replace with <REPO_ROOT>/<SCRATCH>",
+        "replace with <ORG>"
+      ]
+    },
+    {
+      "id": 11,
+      "source_path": "_cu-collapse-fix/implementation-report.md",
+      "category": "construction_report",
+      "title": "profile.bind: agentId=`agent-988`, modelAlias=`DeepSeek/deepseek-flash`, profileName=`coder`（wire 首行自证）",
+      "size_bytes": 11831,
+      "sha256": "a827b7fbf8daafeda6821c49d9f72b84acb5f4810f5e0af6333d1f2a11d5563b",
+      "likely_formal_doc": true,
+      "decision": "import_now",
+      "target_path": "docs/evidence/补档-R15-折叠终态-施工报告.md",
+      "batch": "r15 折叠",
+      "rationale": "r15 终态折叠批；任务看板 10-17 r15 行与 10-19 GF 行引用。首轮验收被 report-final 覆盖，按历史件处理。",
+      "evidence_refs": [
+        "docs/任务看板.md:14,351"
+      ],
+      "risk_flags": [
+        {
+          "type": "absolute_paths",
+          "count": 16,
+          "severity": "low",
+          "action": "replace with <REPO_ROOT>/<SCRATCH>"
+        },
+        {
+          "type": "localhost_ports",
+          "count": 1,
+          "severity": "low",
+          "action": "replace with <LOCAL_ENDPOINT> or remove"
+        }
+      ],
+      "redaction_required": [
+        "replace with <REPO_ROOT>/<SCRATCH>",
+        "replace with <LOCAL_ENDPOINT> or remove"
+      ]
+    },
+    {
+      "id": 12,
+      "source_path": "_cu-verify-2a/report.md",
+      "category": "evidence_report",
+      "title": "2A 内置浏览器验收报告（本次实测）",
+      "size_bytes": 11261,
+      "sha256": "2019aff8b948d08e7763ca113ee428c3ca6e830f87ba97f3a1878ad1e0dffb3a",
+      "likely_formal_doc": true,
+      "decision": "import_as_historical",
+      "target_path": "docs/evidence/补档-2A-内置浏览器验收-历史.md",
+      "batch": "2A",
+      "rationale": "2A 修前 FAIL 验收（实时超时映射、GF 回填、failed 第四态不可达），是后续修复的缺陷基线；已被修复批覆盖，作为历史件入库。",
+      "evidence_refs": [
+        "docs/任务看板.md:14,21",
+        "docs/决策看板.md:25"
+      ],
+      "risk_flags": [
+        {
+          "type": "absolute_paths",
+          "count": 4,
+          "severity": "low",
+          "action": "replace with <REPO_ROOT>/<SCRATCH>"
+        },
+        {
+          "type": "session_ids",
+          "count": 1,
+          "severity": "low",
+          "action": "replace with <SESSION_ID>"
+        },
+        {
+          "type": "wire_paths",
+          "count": 1,
+          "severity": "low",
+          "action": "replace with <SESSIONS_ROOT>/<SESSION_ID>/agents/<AGENT>/wire.jsonl"
+        },
+        {
+          "type": "localhost_ports",
+          "count": 2,
+          "severity": "low",
+          "action": "replace with <LOCAL_ENDPOINT> or remove"
+        }
+      ],
+      "redaction_required": [
+        "replace with <REPO_ROOT>/<SCRATCH>",
+        "replace with <SESSION_ID>",
+        "replace with <SESSIONS_ROOT>/<SESSION_ID>/agents/<AGENT>/wire.jsonl",
+        "replace with <LOCAL_ENDPOINT> or remove"
+      ]
+    },
+    {
+      "id": 13,
+      "source_path": "_cu-card-project/verification-r26/report.md",
+      "category": "evidence_report",
+      "title": "ai-example 二十六棒 #3 · 真实浏览器只读回归（r26）",
+      "size_bytes": 10976,
+      "sha256": "8cdba06e299f998e7cdfe0f1b474cdd4021574361c0d7ea4be790463ccd9781f",
+      "likely_formal_doc": true,
+      "decision": "import_now",
+      "target_path": "docs/evidence/补档-卡片通道-r26回归.md",
+      "batch": "卡片通道 #3",
+      "rationale": "#3 三类型卡头回落已入库（3466d68）；任务看板 10-18 行把本件列为仓外证据。正式报告入证据区可闭合链，日志/截图仍留仓外。",
+      "evidence_refs": [
+        "docs/任务看板.md:22",
+        "docs/决策看板.md:26"
+      ],
+      "risk_flags": [
+        {
+          "type": "absolute_paths",
+          "count": 9,
+          "severity": "low",
+          "action": "replace with <REPO_ROOT>/<SCRATCH>"
+        },
+        {
+          "type": "localhost_ports",
+          "count": 9,
+          "severity": "low",
+          "action": "replace with <LOCAL_ENDPOINT> or remove"
+        }
+      ],
+      "redaction_required": [
+        "replace with <REPO_ROOT>/<SCRATCH>",
+        "replace with <LOCAL_ENDPOINT> or remove"
+      ]
+    },
+    {
+      "id": 14,
+      "source_path": "issue-archive/issue-7-历史恢复后工具结果丢失+空白消息块.md",
+      "category": "issue_report",
+      "title": "issue-7 历史恢复后工具结果丢失 + 空白消息块",
+      "size_bytes": 10784,
+      "sha256": "d1d15dbd34b29b330282df266cd8f536038946466faee765ec3423479906bca1",
+      "likely_formal_doc": true,
+      "decision": "excluded_by_policy",
+      "target_path": null,
+      "batch": "issue-archive",
+      "rationale": "DC-21（docs/adr/DECISION-REGISTER.md:25）规定 issue 关闭后“存证（仓库外 issue 存档目录）后删除”；issue-archive/README.md:3,6 明示目录在仓库外。archive-manifest 将 14 个 issue 件标为 missing_candidate 并注明“与仓外归档政策冲突，需用户裁决”，本对账按 DC-21 裁决：不导入。",
+      "evidence_refs": [
+        "docs/adr/DECISION-REGISTER.md:25",
+        "issue-archive/README.md:3,6",
+        "archive-manifest.json"
+      ],
+      "risk_flags": [],
+      "redaction_required": []
+    },
+    {
+      "id": 15,
+      "source_path": "_cu-gf-fix-r26/browser/report.md",
+      "category": "evidence_report",
+      "title": "generative_form 提交后只读回填 · 浏览器验收报告",
+      "size_bytes": 10666,
+      "sha256": "e8df0275c6234ee6e76edb63457493cf2315fc7a6309135958b9d77e88be0aac",
+      "likely_formal_doc": true,
+      "decision": "import_now",
+      "target_path": "docs/evidence/补档-GF回填-浏览器验收.md",
+      "batch": "GF 回填",
+      "rationale": "GF 回填修复已入库（de4453d）；任务看板 10-19 与决策看板 10-19 明确引用本组报告。正式施工/审查/验收件应入证据区。",
+      "evidence_refs": [
+        "docs/任务看板.md:14,15",
+        "docs/决策看板.md:15,16"
+      ],
+      "risk_flags": [
+        {
+          "type": "absolute_paths",
+          "count": 1,
+          "severity": "low",
+          "action": "replace with <REPO_ROOT>/<SCRATCH>"
+        },
+        {
+          "type": "localhost_ports",
+          "count": 2,
+          "severity": "low",
+          "action": "replace with <LOCAL_ENDPOINT> or remove"
+        }
+      ],
+      "redaction_required": [
+        "replace with <REPO_ROOT>/<SCRATCH>",
+        "replace with <LOCAL_ENDPOINT> or remove"
+      ]
+    },
+    {
+      "id": 16,
+      "source_path": "issue-archive/issue-2-open_export_file_editor跨任务.md",
+      "category": "issue_report",
+      "title": "issue #2 存档：AI 跨任务调用 open_export_file_editor / download_export_file 失败",
+      "size_bytes": 10466,
+      "sha256": "79b703ebe5fe51f1d5b6a3ba6cb9ac522e7b19f34b758c8d324826755b505780",
+      "likely_formal_doc": true,
+      "decision": "excluded_by_policy",
+      "target_path": null,
+      "batch": "issue-archive",
+      "rationale": "DC-21（docs/adr/DECISION-REGISTER.md:25）规定 issue 关闭后“存证（仓库外 issue 存档目录）后删除”；issue-archive/README.md:3,6 明示目录在仓库外。archive-manifest 将 14 个 issue 件标为 missing_candidate 并注明“与仓外归档政策冲突，需用户裁决”，本对账按 DC-21 裁决：不导入。",
+      "evidence_refs": [
+        "docs/adr/DECISION-REGISTER.md:25",
+        "issue-archive/README.md:3,6",
+        "archive-manifest.json"
+      ],
+      "risk_flags": [
+        {
+          "type": "absolute_paths",
+          "count": 3,
+          "severity": "low",
+          "action": "replace with <REPO_ROOT>/<SCRATCH>"
+        },
+        {
+          "type": "org_name",
+          "count": 12,
+          "severity": "high",
+          "action": "replace with <ORG>"
+        }
+      ],
+      "redaction_required": [
+        "replace with <REPO_ROOT>/<SCRATCH>",
+        "replace with <ORG>"
+      ]
+    },
+    {
+      "id": 17,
+      "source_path": "_cu-composer-project-r26/browser/report.md",
+      "category": "evidence_report",
+      "title": "真实项目 composer 浏览器验收报告",
+      "size_bytes": 10323,
+      "sha256": "5d1c4d1630f8c0c037deb42d1bc8f2820ba6ebe699edd628efd237bf4c24df5b",
+      "likely_formal_doc": true,
+      "decision": "import_as_historical",
+      "target_path": "docs/evidence/补档-问题4-composer-浏览器验收.md",
+      "batch": "问题4 composer",
+      "rationale": "问题4 composer v2 已入库（60afe6f / 闭合 5274419）；任务看板 10-19 与决策看板 10-19 引用本组报告。按其在链条中的位置区分现势/历史件。",
+      "evidence_refs": [
+        "docs/任务看板.md:13,34",
+        "docs/决策看板.md:14"
+      ],
+      "risk_flags": [
+        {
+          "type": "absolute_paths",
+          "count": 3,
+          "severity": "low",
+          "action": "replace with <REPO_ROOT>/<SCRATCH>"
+        },
+        {
+          "type": "localhost_ports",
+          "count": 1,
+          "severity": "low",
+          "action": "replace with <LOCAL_ENDPOINT> or remove"
+        }
+      ],
+      "redaction_required": [
+        "replace with <REPO_ROOT>/<SCRATCH>",
+        "replace with <LOCAL_ENDPOINT> or remove"
+      ]
+    },
+    {
+      "id": 18,
+      "source_path": "_cu-gf-fix-r26/browser/final/report.md",
+      "category": "evidence_report",
+      "title": "GF 边缘修复后 · 真实项目只读回填回归报告（final）",
+      "size_bytes": 10227,
+      "sha256": "a7ef66805e31b2107189784ef89b0a810c50ad06c3fc8e99483614f6e570decb",
+      "likely_formal_doc": true,
+      "decision": "import_now",
+      "target_path": "docs/evidence/补档-GF回填-final回归.md",
+      "batch": "GF 回填",
+      "rationale": "GF 回填修复已入库（de4453d）；任务看板 10-19 与决策看板 10-19 明确引用本组报告。正式施工/审查/验收件应入证据区。",
+      "evidence_refs": [
+        "docs/任务看板.md:14,15",
+        "docs/决策看板.md:15,16"
+      ],
+      "risk_flags": [
+        {
+          "type": "absolute_paths",
+          "count": 3,
+          "severity": "low",
+          "action": "replace with <REPO_ROOT>/<SCRATCH>"
+        },
+        {
+          "type": "localhost_ports",
+          "count": 2,
+          "severity": "low",
+          "action": "replace with <LOCAL_ENDPOINT> or remove"
+        }
+      ],
+      "redaction_required": [
+        "replace with <REPO_ROOT>/<SCRATCH>",
+        "replace with <LOCAL_ENDPOINT> or remove"
+      ]
+    },
+    {
+      "id": 19,
+      "source_path": "_cu-composer-project-r26/browser/scope-diagnosis/report.md",
+      "category": "evidence_report",
+      "title": "只读根因界定：360/400 溢出与 tip Esc",
+      "size_bytes": 10049,
+      "sha256": "225c3c16fd6ae9ab2b731398897afecfe5372396792715106975bbed20f48db7",
+      "likely_formal_doc": true,
+      "decision": "import_now",
+      "target_path": "docs/evidence/补档-问题4-composer-溢出与Esc根因诊断.md",
+      "batch": "问题4 composer",
+      "rationale": "问题4 composer v2 已入库（60afe6f / 闭合 5274419）；任务看板 10-19 与决策看板 10-19 引用本组报告。按其在链条中的位置区分现势/历史件。",
+      "evidence_refs": [
+        "docs/任务看板.md:13,34",
+        "docs/决策看板.md:14"
+      ],
+      "risk_flags": [
+        {
+          "type": "absolute_paths",
+          "count": 2,
+          "severity": "low",
+          "action": "replace with <REPO_ROOT>/<SCRATCH>"
+        },
+        {
+          "type": "localhost_ports",
+          "count": 1,
+          "severity": "low",
+          "action": "replace with <LOCAL_ENDPOINT> or remove"
+        }
+      ],
+      "redaction_required": [
+        "replace with <REPO_ROOT>/<SCRATCH>",
+        "replace with <LOCAL_ENDPOINT> or remove"
+      ]
+    },
+    {
+      "id": 20,
+      "source_path": "_cu-gf-fix-r26/review-report.md",
+      "category": "review_report",
+      "title": "GF 只读回填修复 · 独立代码审查报告",
+      "size_bytes": 9980,
+      "sha256": "d04f154d7328c39a8b8e0a8339333425f1e9c2769cc46b209c019e56de6c07a0",
+      "likely_formal_doc": true,
+      "decision": "import_now",
+      "target_path": "docs/evidence/补档-GF回填-独立代码审查.md",
+      "batch": "GF 回填",
+      "rationale": "GF 回填修复已入库（de4453d）；任务看板 10-19 与决策看板 10-19 明确引用本组报告。正式施工/审查/验收件应入证据区。",
+      "evidence_refs": [
+        "docs/任务看板.md:14,15",
+        "docs/决策看板.md:15,16"
+      ],
+      "risk_flags": [
+        {
+          "type": "absolute_paths",
+          "count": 2,
+          "severity": "low",
+          "action": "replace with <REPO_ROOT>/<SCRATCH>"
+        }
+      ],
+      "redaction_required": [
+        "replace with <REPO_ROOT>/<SCRATCH>"
+      ]
+    },
+    {
+      "id": 21,
+      "source_path": "r163-demo/_v712/audit-v712.md",
+      "category": "demo_audit",
+      "title": "| 族 | 场景 | 锚点 / 判据 | 结果 |",
+      "size_bytes": 9751,
+      "sha256": "fee344ab6935a5688f16c0666d67cdd1d2dc13d87c38f9ca4c236f8b5cf6120b",
+      "likely_formal_doc": true,
+      "decision": "stale_do_not_import",
+      "target_path": null,
+      "batch": "r163 audit",
+      "rationale": "archive-manifest 状态 excluded / pipeline-audit，理由为“对应 2026-10-16 旧版 demo；仓库 hitl-interrupts 已升 r15，锚点集已变，核对表过期；结论已由 docs/demo/README.md 版本登记覆盖”。按“过期锚点”处理：不导入；如需审计证据，应对当前主题单文件重跑。",
+      "evidence_refs": [
+        "archive-manifest.json (pipeline-audit)",
+        "docs/demo/README.md:11"
+      ],
+      "risk_flags": [],
+      "redaction_required": []
+    },
+    {
+      "id": 22,
+      "source_path": "_cu-gf-readonly-diagnosis/diagnosis-report.md",
+      "category": "research_report",
+      "title": "GF「选择导出任务」已提交卡只读诊断报告",
+      "size_bytes": 9718,
+      "sha256": "5b14adae0427d30eef6089a5c0e064a4257de053b5641778be22337a4b4a676f",
+      "likely_formal_doc": true,
+      "decision": "import_now",
+      "target_path": "docs/evidence/补档-GF-只读视觉诊断.md",
+      "batch": "GF 只读视觉",
+      "rationale": "GF 已提交卡只读视觉诊断；任务看板 10-19 与决策看板 10-19 引用，作为“暂缓/不一定做”的裁决依据。",
+      "evidence_refs": [
+        "docs/任务看板.md:14,15",
+        "docs/决策看板.md:15,16"
+      ],
+      "risk_flags": [
+        {
+          "type": "absolute_paths",
+          "count": 4,
+          "severity": "low",
+          "action": "replace with <REPO_ROOT>/<SCRATCH>"
+        },
+        {
+          "type": "localhost_ports",
+          "count": 4,
+          "severity": "low",
+          "action": "replace with <LOCAL_ENDPOINT> or remove"
+        },
+        {
+          "type": "pids",
+          "count": 2,
+          "severity": "low",
+          "action": "remove PID"
+        }
+      ],
+      "redaction_required": [
+        "replace with <REPO_ROOT>/<SCRATCH>",
+        "replace with <LOCAL_ENDPOINT> or remove",
+        "remove PID"
+      ]
+    },
+    {
+      "id": 23,
+      "source_path": "issue-archive/issue-14-hitl-refresh-render-metadata-overflow.md",
+      "category": "issue_report",
+      "title": "issue #14 存档（R-160 闭环）",
+      "size_bytes": 9658,
+      "sha256": "e3874224ca3700fc4ced73676910a0aacc4b5bb3c9486207ea1acc18e5a2cbd4",
+      "likely_formal_doc": true,
+      "decision": "excluded_by_policy",
+      "target_path": null,
+      "batch": "issue-archive",
+      "rationale": "DC-21（docs/adr/DECISION-REGISTER.md:25）规定 issue 关闭后“存证（仓库外 issue 存档目录）后删除”；issue-archive/README.md:3,6 明示目录在仓库外。archive-manifest 将 14 个 issue 件标为 missing_candidate 并注明“与仓外归档政策冲突，需用户裁决”，本对账按 DC-21 裁决：不导入。",
+      "evidence_refs": [
+        "docs/adr/DECISION-REGISTER.md:25",
+        "issue-archive/README.md:3,6",
+        "archive-manifest.json"
+      ],
+      "risk_flags": [
+        {
+          "type": "absolute_paths",
+          "count": 3,
+          "severity": "low",
+          "action": "replace with <REPO_ROOT>/<SCRATCH>"
+        }
+      ],
+      "redaction_required": [
+        "replace with <REPO_ROOT>/<SCRATCH>"
+      ]
+    },
+    {
+      "id": 24,
+      "source_path": "issue-archive/issue-8-历史恢复后工具调用与文本回复拆分为多条消息.md",
+      "category": "issue_report",
+      "title": "issue #8 存档（R-150 闭环）",
+      "size_bytes": 9489,
+      "sha256": "54f223db00888af379d7be143467e53316a62135c68aa5d8eb4e030c933cba03",
+      "likely_formal_doc": true,
+      "decision": "excluded_by_policy",
+      "target_path": null,
+      "batch": "issue-archive",
+      "rationale": "DC-21（docs/adr/DECISION-REGISTER.md:25）规定 issue 关闭后“存证（仓库外 issue 存档目录）后删除”；issue-archive/README.md:3,6 明示目录在仓库外。archive-manifest 将 14 个 issue 件标为 missing_candidate 并注明“与仓外归档政策冲突，需用户裁决”，本对账按 DC-21 裁决：不导入。",
+      "evidence_refs": [
+        "docs/adr/DECISION-REGISTER.md:25",
+        "issue-archive/README.md:3,6",
+        "archive-manifest.json"
+      ],
+      "risk_flags": [
+        {
+          "type": "absolute_paths",
+          "count": 1,
+          "severity": "low",
+          "action": "replace with <REPO_ROOT>/<SCRATCH>"
+        },
+        {
+          "type": "localhost_ports",
+          "count": 1,
+          "severity": "low",
+          "action": "replace with <LOCAL_ENDPOINT> or remove"
+        }
+      ],
+      "redaction_required": [
+        "replace with <REPO_ROOT>/<SCRATCH>",
+        "replace with <LOCAL_ENDPOINT> or remove"
+      ]
+    },
+    {
+      "id": 25,
+      "source_path": "_cu-card-project/verification/report.md",
+      "category": "evidence_report",
+      "title": "ai-example #3 三类型项目回落 · 最终独立验收",
+      "size_bytes": 9406,
+      "sha256": "9b7ed9ac8230180c63c73b03977bd87cededa75e3415796392acfc364042a57b",
+      "likely_formal_doc": true,
+      "decision": "import_now",
+      "target_path": "docs/evidence/补档-卡片通道-最终独立验收.md",
+      "batch": "卡片通道 #3",
+      "rationale": "#3 三类型卡头回落已入库（3466d68）；任务看板 10-18 行把本件列为仓外证据。正式报告入证据区可闭合链，日志/截图仍留仓外。",
+      "evidence_refs": [
+        "docs/任务看板.md:22",
+        "docs/决策看板.md:26"
+      ],
+      "risk_flags": [
+        {
+          "type": "absolute_paths",
+          "count": 6,
+          "severity": "low",
+          "action": "replace with <REPO_ROOT>/<SCRATCH>"
+        },
+        {
+          "type": "localhost_ports",
+          "count": 5,
+          "severity": "low",
+          "action": "replace with <LOCAL_ENDPOINT> or remove"
+        }
+      ],
+      "redaction_required": [
+        "replace with <REPO_ROOT>/<SCRATCH>",
+        "replace with <LOCAL_ENDPOINT> or remove"
+      ]
+    },
+    {
+      "id": 26,
+      "source_path": "_cu-collapse-fix/verification/report.md",
+      "category": "evidence_report",
+      "title": "r15 终态折叠修复 · 独立验收报告",
+      "size_bytes": 9135,
+      "sha256": "d7729195d0aba75b4aac0fc2eec956b658b5c000be0e762e352a2c4c2f5a3948",
+      "likely_formal_doc": true,
+      "decision": "import_as_historical",
+      "target_path": "docs/evidence/补档-R15-折叠终态-独立验收.md",
+      "batch": "r15 折叠",
+      "rationale": "r15 终态折叠批；任务看板 10-17 r15 行与 10-19 GF 行引用。首轮验收被 report-final 覆盖，按历史件处理。",
+      "evidence_refs": [
+        "docs/任务看板.md:14,351"
+      ],
+      "risk_flags": [
+        {
+          "type": "absolute_paths",
+          "count": 12,
+          "severity": "low",
+          "action": "replace with <REPO_ROOT>/<SCRATCH>"
+        },
+        {
+          "type": "wire_paths",
+          "count": 1,
+          "severity": "low",
+          "action": "replace with <SESSIONS_ROOT>/<SESSION_ID>/agents/<AGENT>/wire.jsonl"
+        },
+        {
+          "type": "localhost_ports",
+          "count": 6,
+          "severity": "low",
+          "action": "replace with <LOCAL_ENDPOINT> or remove"
+        }
+      ],
+      "redaction_required": [
+        "replace with <REPO_ROOT>/<SCRATCH>",
+        "replace with <SESSIONS_ROOT>/<SESSION_ID>/agents/<AGENT>/wire.jsonl",
+        "replace with <LOCAL_ENDPOINT> or remove"
+      ]
+    },
+    {
+      "id": 27,
+      "source_path": "r163-demo/_hitl5/audit-hitl5.md",
+      "category": "demo_audit",
+      "title": "| 族 | 场景 | 锚点 / 判据 | 结果 |",
+      "size_bytes": 8458,
+      "sha256": "f1fe6ca453600c20b4ddc4d5fbcf0de05848f10253663300ba0e79f894bcc068",
+      "likely_formal_doc": true,
+      "decision": "stale_do_not_import",
+      "target_path": null,
+      "batch": "r163 audit",
+      "rationale": "archive-manifest 状态 excluded / pipeline-audit，理由为“对应 2026-10-16 旧版 demo；仓库 hitl-interrupts 已升 r15，锚点集已变，核对表过期；结论已由 docs/demo/README.md 版本登记覆盖”。按“过期锚点”处理：不导入；如需审计证据，应对当前主题单文件重跑。",
+      "evidence_refs": [
+        "archive-manifest.json (pipeline-audit)",
+        "docs/demo/README.md:11"
+      ],
+      "risk_flags": [],
+      "redaction_required": []
+    },
+    {
+      "id": 28,
+      "source_path": "r163-demo/_v711/audit-v711.md",
+      "category": "demo_audit",
+      "title": "| 族 | 场景 | 锚点 / 判据 | 结果 |",
+      "size_bytes": 8005,
+      "sha256": "df44bdfd90929722be8182ad847db360021579a3e842e94c7a85d3a3355907f0",
+      "likely_formal_doc": true,
+      "decision": "stale_do_not_import",
+      "target_path": null,
+      "batch": "r163 audit",
+      "rationale": "archive-manifest 状态 excluded / pipeline-audit，理由为“对应 2026-10-16 旧版 demo；仓库 hitl-interrupts 已升 r15，锚点集已变，核对表过期；结论已由 docs/demo/README.md 版本登记覆盖”。按“过期锚点”处理：不导入；如需审计证据，应对当前主题单文件重跑。",
+      "evidence_refs": [
+        "archive-manifest.json (pipeline-audit)",
+        "docs/demo/README.md:11"
+      ],
+      "risk_flags": [],
+      "redaction_required": []
+    },
+    {
+      "id": 29,
+      "source_path": "_cu-hitl-g-r26/browser/report.md",
+      "category": "evidence_report",
+      "title": "ai-example #3 · G（Feather help-circle）回落 + 全项回归（r26-G）",
+      "size_bytes": 7958,
+      "sha256": "b2d1633215aac66409158c6955ba1b792841a90656f377ee23d1e6dbc8c0469e",
+      "likely_formal_doc": true,
+      "decision": "import_now",
+      "target_path": "docs/evidence/补档-HITL-G回落-r26回归.md",
+      "batch": "HITL G",
+      "rationale": "HITL 左图标由盾牌改 G 后的 r26-G 全项回归；决策看板 10-18 两行与任务看板 10-18 行引用。",
+      "evidence_refs": [
+        "docs/任务看板.md:21",
+        "docs/决策看板.md:24,25"
+      ],
+      "risk_flags": [
+        {
+          "type": "absolute_paths",
+          "count": 8,
+          "severity": "low",
+          "action": "replace with <REPO_ROOT>/<SCRATCH>"
+        },
+        {
+          "type": "session_ids",
+          "count": 1,
+          "severity": "low",
+          "action": "replace with <SESSION_ID>"
+        },
+        {
+          "type": "wire_paths",
+          "count": 1,
+          "severity": "low",
+          "action": "replace with <SESSIONS_ROOT>/<SESSION_ID>/agents/<AGENT>/wire.jsonl"
+        },
+        {
+          "type": "localhost_ports",
+          "count": 5,
+          "severity": "low",
+          "action": "replace with <LOCAL_ENDPOINT> or remove"
+        }
+      ],
+      "redaction_required": [
+        "replace with <REPO_ROOT>/<SCRATCH>",
+        "replace with <SESSION_ID>",
+        "replace with <SESSIONS_ROOT>/<SESSION_ID>/agents/<AGENT>/wire.jsonl",
+        "replace with <LOCAL_ENDPOINT> or remove"
+      ]
+    },
+    {
+      "id": 30,
+      "source_path": "issue-archive/issue-13-streaming-cursor-and-text-display.md",
+      "category": "issue_report",
+      "title": "issue #13 存档（R-159 闭环）",
+      "size_bytes": 7094,
+      "sha256": "f9809fb63c94f24c692151937c183e7f5e9e6d1a2d33a95f2bebd254f2e17773",
+      "likely_formal_doc": true,
+      "decision": "excluded_by_policy",
+      "target_path": null,
+      "batch": "issue-archive",
+      "rationale": "DC-21（docs/adr/DECISION-REGISTER.md:25）规定 issue 关闭后“存证（仓库外 issue 存档目录）后删除”；issue-archive/README.md:3,6 明示目录在仓库外。archive-manifest 将 14 个 issue 件标为 missing_candidate 并注明“与仓外归档政策冲突，需用户裁决”，本对账按 DC-21 裁决：不导入。",
+      "evidence_refs": [
+        "docs/adr/DECISION-REGISTER.md:25",
+        "issue-archive/README.md:3,6",
+        "archive-manifest.json"
+      ],
+      "risk_flags": [
+        {
+          "type": "absolute_paths",
+          "count": 1,
+          "severity": "low",
+          "action": "replace with <REPO_ROOT>/<SCRATCH>"
+        }
+      ],
+      "redaction_required": [
+        "replace with <REPO_ROOT>/<SCRATCH>"
+      ]
+    },
+    {
+      "id": 31,
+      "source_path": "issue-archive/issue-12-toolcard-truncation-ellipsis.md",
+      "category": "issue_report",
+      "title": "issue #12 存档（R-158 闭环）",
+      "size_bytes": 6490,
+      "sha256": "8c7abec6c416bb113a3ab4a81529d332b20ffa26aed52e5cc6302583d43acf6b",
+      "likely_formal_doc": true,
+      "decision": "excluded_by_policy",
+      "target_path": null,
+      "batch": "issue-archive",
+      "rationale": "DC-21（docs/adr/DECISION-REGISTER.md:25）规定 issue 关闭后“存证（仓库外 issue 存档目录）后删除”；issue-archive/README.md:3,6 明示目录在仓库外。archive-manifest 将 14 个 issue 件标为 missing_candidate 并注明“与仓外归档政策冲突，需用户裁决”，本对账按 DC-21 裁决：不导入。",
+      "evidence_refs": [
+        "docs/adr/DECISION-REGISTER.md:25",
+        "issue-archive/README.md:3,6",
+        "archive-manifest.json"
+      ],
+      "risk_flags": [
+        {
+          "type": "absolute_paths",
+          "count": 2,
+          "severity": "low",
+          "action": "replace with <REPO_ROOT>/<SCRATCH>"
+        }
+      ],
+      "redaction_required": [
+        "replace with <REPO_ROOT>/<SCRATCH>"
+      ]
+    },
+    {
+      "id": 32,
+      "source_path": "_cu-gf-fix-r26/edge-review-report.md",
+      "category": "review_report",
+      "title": "GF 回填 edge fix · Scoped Re-review",
+      "size_bytes": 6272,
+      "sha256": "cc7c92f9e972b5641fd5fcbe70a9b4d4eb3abda3055cbc6f43f7323bcb4c8220",
+      "likely_formal_doc": true,
+      "decision": "import_now",
+      "target_path": "docs/evidence/补档-GF回填-edge-fix复审.md",
+      "batch": "GF 回填",
+      "rationale": "GF 回填修复已入库（de4453d）；任务看板 10-19 与决策看板 10-19 明确引用本组报告。正式施工/审查/验收件应入证据区。",
+      "evidence_refs": [
+        "docs/任务看板.md:14,15",
+        "docs/决策看板.md:15,16"
+      ],
+      "risk_flags": [
+        {
+          "type": "absolute_paths",
+          "count": 1,
+          "severity": "low",
+          "action": "replace with <REPO_ROOT>/<SCRATCH>"
+        }
+      ],
+      "redaction_required": [
+        "replace with <REPO_ROOT>/<SCRATCH>"
+      ]
+    },
+    {
+      "id": 33,
+      "source_path": "issue-archive/issue-10-hitl-receipt-lost-after-refresh.md",
+      "category": "issue_report",
+      "title": "issue #10 存档（R-158 闭环）",
+      "size_bytes": 6183,
+      "sha256": "fb5bafb5e367b674be6c3b29664c1d8d8279f700ab054e891f8ba89b8d462726",
+      "likely_formal_doc": true,
+      "decision": "excluded_by_policy",
+      "target_path": null,
+      "batch": "issue-archive",
+      "rationale": "DC-21（docs/adr/DECISION-REGISTER.md:25）规定 issue 关闭后“存证（仓库外 issue 存档目录）后删除”；issue-archive/README.md:3,6 明示目录在仓库外。archive-manifest 将 14 个 issue 件标为 missing_candidate 并注明“与仓外归档政策冲突，需用户裁决”，本对账按 DC-21 裁决：不导入。",
+      "evidence_refs": [
+        "docs/adr/DECISION-REGISTER.md:25",
+        "issue-archive/README.md:3,6",
+        "archive-manifest.json"
+      ],
+      "risk_flags": [
+        {
+          "type": "absolute_paths",
+          "count": 1,
+          "severity": "low",
+          "action": "replace with <REPO_ROOT>/<SCRATCH>"
+        }
+      ],
+      "redaction_required": [
+        "replace with <REPO_ROOT>/<SCRATCH>"
+      ]
+    },
+    {
+      "id": 34,
+      "source_path": "_cu-composer-project-r26/browser/final/report.md",
+      "category": "evidence_report",
+      "title": "composer 修后只读复验（final）",
+      "size_bytes": 6106,
+      "sha256": "e09a7585b5d1e0d7540200e4f8dbc13cfc52c3ffc84c0b6ff7b46980266fcb95",
+      "likely_formal_doc": true,
+      "decision": "import_now",
+      "target_path": "docs/evidence/补档-问题4-composer-修后复验.md",
+      "batch": "问题4 composer",
+      "rationale": "问题4 composer v2 已入库（60afe6f / 闭合 5274419）；任务看板 10-19 与决策看板 10-19 引用本组报告。按其在链条中的位置区分现势/历史件。",
+      "evidence_refs": [
+        "docs/任务看板.md:13,34",
+        "docs/决策看板.md:14"
+      ],
+      "risk_flags": [
+        {
+          "type": "absolute_paths",
+          "count": 3,
+          "severity": "low",
+          "action": "replace with <REPO_ROOT>/<SCRATCH>"
+        },
+        {
+          "type": "localhost_ports",
+          "count": 1,
+          "severity": "low",
+          "action": "replace with <LOCAL_ENDPOINT> or remove"
+        }
+      ],
+      "redaction_required": [
+        "replace with <REPO_ROOT>/<SCRATCH>",
+        "replace with <LOCAL_ENDPOINT> or remove"
+      ]
+    },
+    {
+      "id": 35,
+      "source_path": "_cu-composer-decisions-r26/ci-diagnosis/diagnosis.md",
+      "category": "research_report",
+      "title": "CI run 39117309432 前端 vitest 12 失败 · 只读诊断（2026-10-18）",
+      "size_bytes": 5842,
+      "sha256": "2189b723e94bc883948db9a43d8545c12004ef4fb0f927b72e87d53517b2a63d",
+      "likely_formal_doc": true,
+      "decision": "import_as_historical",
+      "target_path": "docs/evidence/补档-CI-vitest-12失败诊断-2026-10-18.md",
+      "batch": "CI 诊断",
+      "rationale": "CI run 39117309432 前端 vitest 12 失败的只读诊断；结论为解决该次 CI 红的历史依据，按历史件入库。",
+      "evidence_refs": [
+        "docs/任务看板.md:13",
+        "docs/决策看板.md:14"
+      ],
+      "risk_flags": [
+        {
+          "type": "absolute_paths",
+          "count": 1,
+          "severity": "low",
+          "action": "replace with <REPO_ROOT>/<SCRATCH>"
+        },
+        {
+          "type": "session_ids",
+          "count": 1,
+          "severity": "low",
+          "action": "replace with <SESSION_ID>"
+        },
+        {
+          "type": "wire_paths",
+          "count": 1,
+          "severity": "low",
+          "action": "replace with <SESSIONS_ROOT>/<SESSION_ID>/agents/<AGENT>/wire.jsonl"
+        }
+      ],
+      "redaction_required": [
+        "replace with <REPO_ROOT>/<SCRATCH>",
+        "replace with <SESSION_ID>",
+        "replace with <SESSIONS_ROOT>/<SESSION_ID>/agents/<AGENT>/wire.jsonl"
+      ]
+    },
+    {
+      "id": 36,
+      "source_path": "_cu-collapse-fix/verification/report-final.md",
+      "category": "evidence_report",
+      "title": "r15 终态折叠修复 · 最终独立复验报告",
+      "size_bytes": 5792,
+      "sha256": "bd11e2de3568215e8c7678fcadcd22d89f6f1c327b6b812a8aed89c815b0979a",
+      "likely_formal_doc": true,
+      "decision": "import_now",
+      "target_path": "docs/evidence/补档-R15-折叠终态-最终复验.md",
+      "batch": "r15 折叠",
+      "rationale": "r15 终态折叠批；任务看板 10-17 r15 行与 10-19 GF 行引用。首轮验收被 report-final 覆盖，按历史件处理。",
+      "evidence_refs": [
+        "docs/任务看板.md:14,351"
+      ],
+      "risk_flags": [
+        {
+          "type": "absolute_paths",
+          "count": 8,
+          "severity": "low",
+          "action": "replace with <REPO_ROOT>/<SCRATCH>"
+        },
+        {
+          "type": "localhost_ports",
+          "count": 5,
+          "severity": "low",
+          "action": "replace with <LOCAL_ENDPOINT> or remove"
+        }
+      ],
+      "redaction_required": [
+        "replace with <REPO_ROOT>/<SCRATCH>",
+        "replace with <LOCAL_ENDPOINT> or remove"
+      ]
+    },
+    {
+      "id": 37,
+      "source_path": "r163-demo/_hitl/audit-hitl.md",
+      "category": "demo_audit",
+      "title": "| 族 | 场景 | 锚点 / 判据 | 结果 |",
+      "size_bytes": 5666,
+      "sha256": "5adf571e9ca1e29775c9c21750c7f1816dc0abca1287688de1c5f64672ea294a",
+      "likely_formal_doc": true,
+      "decision": "stale_do_not_import",
+      "target_path": null,
+      "batch": "r163 audit",
+      "rationale": "archive-manifest 状态 excluded / pipeline-audit，理由为“对应 2026-10-16 旧版 demo；仓库 hitl-interrupts 已升 r15，锚点集已变，核对表过期；结论已由 docs/demo/README.md 版本登记覆盖”。按“过期锚点”处理：不导入；如需审计证据，应对当前主题单文件重跑。",
+      "evidence_refs": [
+        "archive-manifest.json (pipeline-audit)",
+        "docs/demo/README.md:11"
+      ],
+      "risk_flags": [],
+      "redaction_required": []
+    },
+    {
+      "id": 38,
+      "source_path": "issue-archive/issue-9-AI批量下载导出文件触发多次浏览器下载可能被浏览器拦截.md",
+      "category": "issue_report",
+      "title": "issue #9 存档（R-156 闭环）",
+      "size_bytes": 5641,
+      "sha256": "7519ca11c46319f1f815c9391861738d083f27a68b52c62d3a89d2f905d6f9f1",
+      "likely_formal_doc": true,
+      "decision": "excluded_by_policy",
+      "target_path": null,
+      "batch": "issue-archive",
+      "rationale": "DC-21（docs/adr/DECISION-REGISTER.md:25）规定 issue 关闭后“存证（仓库外 issue 存档目录）后删除”；issue-archive/README.md:3,6 明示目录在仓库外。archive-manifest 将 14 个 issue 件标为 missing_candidate 并注明“与仓外归档政策冲突，需用户裁决”，本对账按 DC-21 裁决：不导入。",
+      "evidence_refs": [
+        "docs/adr/DECISION-REGISTER.md:25",
+        "issue-archive/README.md:3,6",
+        "archive-manifest.json"
+      ],
+      "risk_flags": [],
+      "redaction_required": []
+    },
+    {
+      "id": 39,
+      "source_path": "issue-archive/issue-11-merged-assistant-copy-missing-newline.md",
+      "category": "issue_report",
+      "title": "issue #11 存档（R-158 闭环）",
+      "size_bytes": 5145,
+      "sha256": "5b58f69ad6e07cbc9fd044552e39cb90986152285b1108a06069f91932da9880",
+      "likely_formal_doc": true,
+      "decision": "excluded_by_policy",
+      "target_path": null,
+      "batch": "issue-archive",
+      "rationale": "DC-21（docs/adr/DECISION-REGISTER.md:25）规定 issue 关闭后“存证（仓库外 issue 存档目录）后删除”；issue-archive/README.md:3,6 明示目录在仓库外。archive-manifest 将 14 个 issue 件标为 missing_candidate 并注明“与仓外归档政策冲突，需用户裁决”，本对账按 DC-21 裁决：不导入。",
+      "evidence_refs": [
+        "docs/adr/DECISION-REGISTER.md:25",
+        "issue-archive/README.md:3,6",
+        "archive-manifest.json"
+      ],
+      "risk_flags": [],
+      "redaction_required": []
+    },
+    {
+      "id": 40,
+      "source_path": "r163-demo/_v710/audit-v710.md",
+      "category": "demo_audit",
+      "title": "| 族 | 场景 | 锚点 / 判据 | 结果 |",
+      "size_bytes": 3940,
+      "sha256": "8908008f204989449228a2f35e21b1578eebdb63977dc2e247ae5d07197ce0a0",
+      "likely_formal_doc": true,
+      "decision": "stale_do_not_import",
+      "target_path": null,
+      "batch": "r163 audit",
+      "rationale": "archive-manifest 状态 excluded / pipeline-audit，理由为“对应 2026-10-16 旧版 demo；仓库 hitl-interrupts 已升 r15，锚点集已变，核对表过期；结论已由 docs/demo/README.md 版本登记覆盖”。按“过期锚点”处理：不导入；如需审计证据，应对当前主题单文件重跑。",
+      "evidence_refs": [
+        "archive-manifest.json (pipeline-audit)",
+        "docs/demo/README.md:11"
+      ],
+      "risk_flags": [],
+      "redaction_required": []
+    },
+    {
+      "id": 41,
+      "source_path": "issue-archive/issue-1-navigate_to-select_definitions绑定竞态.md",
+      "category": "issue_report",
+      "title": "issue #1 存档：AI 连续调用 navigate_to + select_definitions 竞态导致 select_definitions 需重试",
+      "size_bytes": 3554,
+      "sha256": "9d56a4131b55d1e75dc1d5e1e7bccfab75c83b69a11bde34e9331854bcfcfe6a",
+      "likely_formal_doc": true,
+      "decision": "excluded_by_policy",
+      "target_path": null,
+      "batch": "issue-archive",
+      "rationale": "DC-21（docs/adr/DECISION-REGISTER.md:25）规定 issue 关闭后“存证（仓库外 issue 存档目录）后删除”；issue-archive/README.md:3,6 明示目录在仓库外。archive-manifest 将 14 个 issue 件标为 missing_candidate 并注明“与仓外归档政策冲突，需用户裁决”，本对账按 DC-21 裁决：不导入。",
+      "evidence_refs": [
+        "docs/adr/DECISION-REGISTER.md:25",
+        "issue-archive/README.md:3,6",
+        "archive-manifest.json"
+      ],
+      "risk_flags": [
+        {
+          "type": "org_name",
+          "count": 1,
+          "severity": "high",
+          "action": "replace with <ORG>"
+        }
+      ],
+      "redaction_required": [
+        "replace with <ORG>"
+      ]
+    },
+    {
+      "id": 42,
+      "source_path": "r163-demo/INDEX.md",
+      "category": "demo_index",
+      "title": "r163-demo 版本登记（ai-example · AI 对话面板 demo）",
+      "size_bytes": 3326,
+      "sha256": "aaa87aed6f40c7b2e10be8aab691f10ba253f32f40d413886f992010f5661b65",
+      "likely_formal_doc": true,
+      "decision": "import_as_historical",
+      "target_path": "docs/demo/r163-demo-INDEX.md",
+      "batch": "r163 demo",
+      "rationale": "archive-manifest 列为 missing_candidate（目标 docs/demo/r163-demo-INDEX.md），但本件截至 2026-10-16，未含 10-17 r15 修订与 10-18 主题新规（docs/demo/README.md:11-13）。按历史登记件导入并加“历史登记/非现行”横幅，不作为现行版本口径。",
+      "evidence_refs": [
+        "archive-manifest.json",
+        "docs/demo/README.md:11"
+      ],
+      "risk_flags": [
+        {
+          "type": "absolute_paths",
+          "count": 1,
+          "severity": "low",
+          "action": "replace with <REPO_ROOT>/<SCRATCH>"
+        },
+        {
+          "type": "localhost_ports",
+          "count": 1,
+          "severity": "low",
+          "action": "replace with <LOCAL_ENDPOINT> or remove"
+        }
+      ],
+      "redaction_required": [
+        "replace with <REPO_ROOT>/<SCRATCH>",
+        "replace with <LOCAL_ENDPOINT> or remove"
+      ]
+    },
+    {
+      "id": 43,
+      "source_path": "_cu-card-project/verification/report-final.md",
+      "category": "evidence_report",
+      "title": "#3 可访问性收口后 · 提交前只读复验",
+      "size_bytes": 2581,
+      "sha256": "0e2f891b9f711032d9f3d8cb38bb0c0a7515b50d8e5cbca93d6691c7a9a4124f",
+      "likely_formal_doc": true,
+      "decision": "import_now",
+      "target_path": "docs/evidence/补档-卡片通道-可访问性复验.md",
+      "batch": "卡片通道 #3",
+      "rationale": "#3 三类型卡头回落已入库（3466d68）；任务看板 10-18 行把本件列为仓外证据。正式报告入证据区可闭合链，日志/截图仍留仓外。",
+      "evidence_refs": [
+        "docs/任务看板.md:22",
+        "docs/决策看板.md:26"
+      ],
+      "risk_flags": [
+        {
+          "type": "absolute_paths",
+          "count": 2,
+          "severity": "low",
+          "action": "replace with <REPO_ROOT>/<SCRATCH>"
+        },
+        {
+          "type": "localhost_ports",
+          "count": 2,
+          "severity": "low",
+          "action": "replace with <LOCAL_ENDPOINT> or remove"
+        }
+      ],
+      "redaction_required": [
+        "replace with <REPO_ROOT>/<SCRATCH>",
+        "replace with <LOCAL_ENDPOINT> or remove"
+      ]
+    },
+    {
+      "id": 44,
+      "source_path": "_shared/cu-双卡直发-报告.md",
+      "category": "shared_report",
+      "title": "CU 双卡直发 报告（DC-19）",
+      "size_bytes": 1406,
+      "sha256": "5c34c501f5ab460f35d776e846ea8280a782955deb78ff4cb400a415cff4a527",
+      "likely_formal_doc": true,
+      "decision": "evidence_only",
+      "target_path": null,
+      "batch": "DC-19 运行台账",
+      "rationale": "CU 双卡直发运行台账（会话 id、pill、字节校验 sha 前 6 位），属 ops-ledger；不构成项目研究/证据文档，留仓外存证即可，且含会话/wire 路径，不宜入库。",
+      "evidence_refs": [
+        "archive-manifest.json (ops-ledger)",
+        "DC-19"
+      ],
+      "risk_flags": [
+        {
+          "type": "absolute_paths",
+          "count": 2,
+          "severity": "low",
+          "action": "replace with <REPO_ROOT>/<SCRATCH>"
+        },
+        {
+          "type": "session_ids",
+          "count": 2,
+          "severity": "low",
+          "action": "replace with <SESSION_ID>"
+        },
+        {
+          "type": "wire_paths",
+          "count": 2,
+          "severity": "low",
+          "action": "replace with <SESSIONS_ROOT>/<SESSION_ID>/agents/<AGENT>/wire.jsonl"
+        }
+      ],
+      "redaction_required": [
+        "replace with <REPO_ROOT>/<SCRATCH>",
+        "replace with <SESSION_ID>",
+        "replace with <SESSIONS_ROOT>/<SESSION_ID>/agents/<AGENT>/wire.jsonl"
+      ]
+    }
+  ],
+  "session_reconciliation": [
+    {
+      "n": 1,
+      "sessionId": "<SESSION_ID_1>",
+      "createdAt": "2026-10-05T07:35:36.068Z",
+      "workstream": "需求/方案/调研",
+      "role": "other",
+      "topicExcerpt": "角色设定 你是一位资深Web全栈架构师，同时具备AI应用产品设计能力。你擅长在约束条件下自主思考技术方案，能够发现业务场景中的隐含矛盾并提出权衡后的最优解。 背景与目标 我只描述业务场景和不可协商的约束，具体怎么做由你全权决定。 生成项目 ",
+      "verdict": "false_positive_other_repo",
+      "repo_evidence": [],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/ai-example-kimi-2/docs/05-测试验证结果.md",
+        "<SCRATCH>/ai-example-kimi-2/docs/01-需求规格说明书.md",
+        "<SCRATCH>/ai-example-kimi-2/docs/02-技术方案设计.md"
+      ],
+      "reason": "产物在原型仓 ai-example-kimi-2/docs，不是目标仓；目标仓已有 docs/02、03 与 evidence 基线。误报。",
+      "process_reports": []
+    },
+    {
+      "n": 2,
+      "sessionId": "<SESSION_ID_2>",
+      "createdAt": "2026-10-08T12:24:41.565Z",
+      "workstream": "M2 里程碑批次",
+      "role": "builder",
+      "topicExcerpt": "【角色】Kimi K2.8 Preview，ai-example 合流项目主力编码。只执行不重新裁决；拿不准报【待裁决】。 【仓库】<REPO_ROOT>（分支 main，先 g",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/M2-T2b-施工与验证-K2.8.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "只执行不重新裁决；规格出处：docs/M2-T2-返修决策卡.md",
+        "docs/evidence/M2-T2-设计红队审查-DS-V4-Pro.md",
+        "docs/evidence/M2-T2a-修复复核-GLM-5.3.md"
+      ],
+      "reason": "会话直接写入仓库 docs/evidence；已入库。",
+      "process_reports": []
+    },
+    {
+      "n": 3,
+      "sessionId": "<SESSION_ID_3>",
+      "createdAt": "2026-10-09T01:33:08.282Z",
+      "workstream": "M2 里程碑批次",
+      "role": "verifier",
+      "topicExcerpt": "你是 M2-T2b 修复批的复核官（GLM-5.3）。主仓库 <REPO_ROOT>，工作区含未提交的 T2b 全部成果 + 修复批改动（共 13 M + 5 ??，HEAD=2",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/M2-T2b-修复复核-GLM.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [],
+      "reason": "会话直接写入仓库 docs/evidence；已入库。",
+      "process_reports": []
+    },
+    {
+      "n": 4,
+      "sessionId": "<SESSION_ID_4>",
+      "createdAt": "2026-10-09T11:12:31.256Z",
+      "workstream": "issue 修复",
+      "role": "redteam",
+      "topicExcerpt": "【红队确认任务卡：ai-example issue #2 修复】 你是红队（GLM-5.3），对 issue #2 修复做攻击面审查与独立复核。你的结论只有三种： 放行 / 修正后放行 / 打回，附按 S1（阻断）/S2（应修）/S3（观察",
+      "verdict": "excluded_by_policy",
+      "repo_evidence": [],
+      "mapped_candidates": [
+        "issue-archive/issue-2-open_export_file_editor跨任务.md"
+      ],
+      "external_reports": [
+        "<SCRATCH>/issue2-reports/红队确认-GLM-5.3.md"
+      ],
+      "reason": "issue #2 红队；唯一正式候选是 issue 存档，按 DC-21 仓外归档；红队报告为过程证据。",
+      "process_reports": []
+    },
+    {
+      "n": 5,
+      "sessionId": "<SESSION_ID_5>",
+      "createdAt": "2026-10-09T11:40:33.700Z",
+      "workstream": "issue 修复",
+      "role": "redteam",
+      "topicExcerpt": "【回灌确认任务卡：ai-example issue #2 红队 R1-R3 回灌复核】 你是红队（GLM-5.3），对你上一轮的「修正后放行」裁决做回灌确认——只审回灌是否 按你开的方子落地、有无回灌引入的新伤，不做全量重审。结论三种： 放",
+      "verdict": "excluded_by_policy",
+      "repo_evidence": [],
+      "mapped_candidates": [
+        "issue-archive/issue-2-open_export_file_editor跨任务.md"
+      ],
+      "external_reports": [
+        "<SCRATCH>/issue2-reports/红队回灌确认-GLM-5.3.md"
+      ],
+      "reason": "issue #2 回灌确认；同上，DC-21 政策豁免。",
+      "process_reports": []
+    },
+    {
+      "n": 6,
+      "sessionId": "<SESSION_ID_6>",
+      "createdAt": "2026-10-09T12:16:13.136Z",
+      "workstream": "issue 修复",
+      "role": "redteam",
+      "topicExcerpt": "你是 ai-example 合流项目 issue#3 修复的红队复核官（GLM-5.3）。任务：对刚完成、尚未提交的一批改动做攻击性复核，裁决「放行 / 修正后放行 / 打回」。 ═══ 子智能体分工条款 ═══ 你可派自己的子智能体（de",
+      "verdict": "excluded_by_policy",
+      "repo_evidence": [],
+      "mapped_candidates": [
+        "issue-archive/issue-3-手动勾选AI无感知.md"
+      ],
+      "external_reports": [
+        "<SCRATCH>/issue3-reports/红队确认-GLM-5.3.md"
+      ],
+      "reason": "issue #3 红队；issue 存档按 DC-21 仓外归档。",
+      "process_reports": []
+    },
+    {
+      "n": 7,
+      "sessionId": "<SESSION_ID_7>",
+      "createdAt": "2026-10-09T14:01:06.548Z",
+      "workstream": "issue 修复",
+      "role": "redteam",
+      "topicExcerpt": "红队任务卡：ai-example issue#4/#5 修复攻击面评审（GLM-5.3） 你是红队评审官。任务：对 ai-example 项目 issue#4/#5 的已完成修复（未提交）做攻击面评审，找出施工/复核可能遗漏的缺陷、误判与风",
+      "verdict": "excluded_by_policy",
+      "repo_evidence": [],
+      "mapped_candidates": [
+        "issue-archive/issue-4-向导页page标签违反workspace契约.md",
+        "issue-archive/issue-5-loading守卫静默丢弃连发消息.md"
+      ],
+      "external_reports": [
+        "<SCRATCH>/issue4-reports/issue4-红队确认.md",
+        "<SCRATCH>/issue5-reports/issue5-红队确认.md"
+      ],
+      "reason": "issue #4/#5 红队；issue 存档按 DC-21 仓外归档。",
+      "process_reports": []
+    },
+    {
+      "n": 8,
+      "sessionId": "<SESSION_ID_8>",
+      "createdAt": "2026-10-10T00:00:55.428Z",
+      "workstream": "M2 里程碑批次",
+      "role": "redteam",
+      "topicExcerpt": "═══ GLM-5.3 红队复判任务卡：M2-T4 批次 S2 修复复验（打回→复判）═══ 【子智能体分工条款】你可派自己的 deepseek-v4-flash 子智能体执行机械活（跑验证命令、扫文件、抓 diff）；你本体只做关键判断与",
+      "verdict": "process_evidence_not_candidate",
+      "repo_evidence": [],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/t4-recheck/m2/report.md"
+      ],
+      "reason": "T4 红队复验未进入 44 候选（扫描根未含 t4-recheck）；结论已在 docs/M2-排期计划.md 观察项承接；过程证据。",
+      "process_reports": [
+        "t4-recheck/m2/report.md"
+      ]
+    },
+    {
+      "n": 9,
+      "sessionId": "<SESSION_ID_9>",
+      "createdAt": "2026-10-10T03:46:29.395Z",
+      "workstream": "合流批次（其他）",
+      "role": "redteam",
+      "topicExcerpt": "你是 GLM-5.3 红队，对 ai-example 项目一批前端阻塞链修复做对抗审查。你的角色是攻击者：目标是找出施工与两轮复核都漏掉的缺陷，不是走流程放行。 【子智能体分工条款】你可以派自己的 deepseek-v4-flash 子智能",
+      "verdict": "process_evidence_not_candidate",
+      "repo_evidence": [],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/redteam-pkg15/红队报告.md"
+      ],
+      "reason": "包①/⑤ 红队过程报告；结论由 M2 排期与任务看板承接；非 44 候选。",
+      "process_reports": [
+        "redteam-pkg15/红队报告.md"
+      ]
+    },
+    {
+      "n": 10,
+      "sessionId": "<SESSION_ID_10>",
+      "createdAt": "2026-10-10T05:01:43.759Z",
+      "workstream": "合流批次（其他）",
+      "role": "redteam",
+      "topicExcerpt": "你是 GLM-5.3 红队，对 ai-example 项目第二批修复做对抗审查。你是攻击者：目标是找出施工与复核都漏掉的缺陷，不是走流程放行。 【子智能体分工条款】可派自己的 deepseek-v4-flash 子智能体执行机械活（批量走读",
+      "verdict": "process_evidence_not_candidate",
+      "repo_evidence": [],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/redteam-round2/红队报告.md"
+      ],
+      "reason": "第二批修复红队过程报告；非 44 候选，结论已进 M2 排期/看板。",
+      "process_reports": [
+        "redteam-round2/红队报告.md"
+      ]
+    },
+    {
+      "n": 11,
+      "sessionId": "<SESSION_ID_11>",
+      "createdAt": "2026-10-10T09:30:58.829Z",
+      "workstream": "R-95 下载导出",
+      "role": "redteam",
+      "topicExcerpt": "═══ 红队任务卡：ai-example 批 A「download_export_file 即发即回」（R-95）═══ 【你的角色】你是独立红队（对抗性审查者）。目标：设法攻破批 A 改造的正确性、 安全性与口径一致性主张。不是走过场——",
+      "verdict": "process_evidence_not_candidate",
+      "repo_evidence": [],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/redteam-batch-a/红队报告.md"
+      ],
+      "reason": "R-95 批 A 红队过程报告；非 44 候选。",
+      "process_reports": [
+        "redteam-batch-a/红队报告.md"
+      ]
+    },
+    {
+      "n": 12,
+      "sessionId": "<SESSION_ID_12>",
+      "createdAt": "2026-10-10T14:03:16.028Z",
+      "workstream": "合流批次（其他）",
+      "role": "redteam",
+      "topicExcerpt": "你是 GLM 红队审计员，对 ai-example 项目一批「未 push 变更」做对抗性审计。你在 Windows Git Bash 环境工作。你只读审计：禁止编辑任何文件、禁止 git add/commit/push、禁止起服务占端口（",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/补档-NUMSPEC-红队报告-GLM-小批.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/numeric-spec-audit/GLM红队报告-小批.md"
+      ],
+      "reason": "GLM 数字规格红队报告已以补档入库（仓外件为脱敏前版本）。",
+      "process_reports": []
+    },
+    {
+      "n": 13,
+      "sessionId": "<SESSION_ID_13>",
+      "createdAt": "2026-10-11T02:29:17.639Z",
+      "workstream": "R-96 看门狗",
+      "role": "builder",
+      "topicExcerpt": "【任务卡】批 B 施工：R-96 作业 fail-fast + 后端看门狗 + E2E 窗口同步 角色：Kimi K2.8 Preview（主力编码，只执行，不重新裁决） 授权来源：ai-example 合流项目用户签字（2026-10-1",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/M2-排期计划.md",
+        "docs/evidence/补档-NUMSPEC-清单总账.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/batch-b-run/施工报告.md"
+      ],
+      "reason": "会话直接更新仓库 M2 排期与 NUMSPEC 总账；外部施工报告为过程证据。",
+      "process_reports": [
+        "batch-b-run/施工报告.md"
+      ]
+    },
+    {
+      "n": 14,
+      "sessionId": "<SESSION_ID_14>",
+      "createdAt": "2026-10-11T03:10:20.493Z",
+      "workstream": "R-96 看门狗",
+      "role": "redteam",
+      "topicExcerpt": "【角色】DeepSeek V4 Pro · 反方审查 + 红队（对抗性找茬，目标=推翻） 【任务】对 ai-example 主仓库批 B（R-96 看门狗批）未提交在制品做对抗性审查。作者为 Kimi K2.8 Preview，你与作者异厂",
+      "verdict": "process_evidence_not_candidate",
+      "repo_evidence": [],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/batch-b-redteam/红队报告.md"
+      ],
+      "reason": "R-96 红队过程报告；结论已由 M2 批 B 行与任务看板承接；非 44 候选。",
+      "process_reports": [
+        "batch-b-redteam/红队报告.md"
+      ]
+    },
+    {
+      "n": 15,
+      "sessionId": "<SESSION_ID_15>",
+      "createdAt": "2026-10-11T03:37:50.242Z",
+      "workstream": "合流指挥棒",
+      "role": "builder",
+      "topicExcerpt": "【角色】Kimi K2.8 Preview · 主力编码（批 B 收口修，只执行不重新裁决） 【授权来源】用户 2026-10-11 授权指挥官 Kimi K3 经 computer use 下发本任务卡。批 B 红队（DS V4 Pro）",
+      "verdict": "process_evidence_not_candidate",
+      "repo_evidence": [],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/batch-b-fix/收口修报告.md"
+      ],
+      "reason": "R-96 收口修过程报告；M2 排期已更新；非 44 候选。",
+      "process_reports": [
+        "batch-b-fix/收口修报告.md"
+      ]
+    },
+    {
+      "n": 16,
+      "sessionId": "<SESSION_ID_16>",
+      "createdAt": "2026-10-11T06:13:01.467Z",
+      "workstream": "R-136 步骤条",
+      "role": "verifier",
+      "topicExcerpt": "任务卡：步骤条包（R-136）独立复核 执行者：GLM-5.3（复核与测试，独立复现验证）** 授权来源：Kimi K3 指挥官复核任务卡（用户 2026-10-11 授权代签，仅限本卡）** 日期：2026-10-11** 一、定位与纪律",
+      "verdict": "process_evidence_not_candidate",
+      "repo_evidence": [],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/step-wizard-pkg/复核报告.md"
+      ],
+      "reason": "R-136 复核为旧批过程证据，未入 44 候选；仓库无对应正式文档，如需完整历史须人工另立候选。",
+      "process_reports": [
+        "step-wizard-pkg/复核报告.md"
+      ]
+    },
+    {
+      "n": 17,
+      "sessionId": "<SESSION_ID_17>",
+      "createdAt": "2026-10-11T08:03:13.549Z",
+      "workstream": "vitest 前端单测",
+      "role": "builder",
+      "topicExcerpt": "═══ 任务卡：vitest 方案 A 施工（前端单测基建引入 + 首批 28 用例）═══ 执行者：Kimi K2.8 Preview（主力编码） 授权来源：K3 决策卡（2026-10-11 K3 代签批准） 你只执行不重新裁决。机械活",
+      "verdict": "already_in_repo_partial",
+      "repo_evidence": [
+        "docs/evidence/补档-VITESTA-复核报告-GLM-5.3.md",
+        "docs/evidence/补档-VITESTA-红队报告-DS-V4-Pro.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/vitest-run/施工报告.md"
+      ],
+      "reason": "复核/红队补档已入库；施工报告为过程证据，未入候选。",
+      "process_reports": [
+        "vitest-run/施工报告.md"
+      ]
+    },
+    {
+      "n": 18,
+      "sessionId": "<SESSION_ID_18>",
+      "createdAt": "2026-10-11T09:53:23.213Z",
+      "workstream": "对话时序包",
+      "role": "builder",
+      "topicExcerpt": "═══ 任务卡：对话时序包 批 1 施工（子包①双写过渡 + R-130/R-132 + R-133/R-131 Lua）═══ 执行者：Kimi K2.8 Preview（主力编码） 授权来源：K3 决策卡（<SCRATCH>\\chat-ti",
+      "verdict": "already_in_repo_partial",
+      "repo_evidence": [
+        "docs/evidence/补档-CHATTIMELINE-红队报告-DS-V4-Pro.md",
+        "docs/evidence/补档-CHATTIMELINE-复核报告-GLM-5.3.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/chat-timeline-pkg/施工报告-批1.md"
+      ],
+      "reason": "批 1 红队/复核补档已入库；批 1 施工报告为过程证据。",
+      "process_reports": [
+        "chat-timeline-pkg/施工报告-批1.md"
+      ]
+    },
+    {
+      "n": 19,
+      "sessionId": "<SESSION_ID_19>",
+      "createdAt": "2026-10-11T10:42:10.879Z",
+      "workstream": "对话时序包",
+      "role": "redteam",
+      "topicExcerpt": "任务卡 · DS V4 Pro 红队 · 对话时序包批 1（双写+R-130/R-131/R-132/R-133） 角色 你是反方审查 + 红队（DeepSeek V4 Pro）。对 Kimi K2.8 施工、GLM-5.3 已复核 PAS",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/补档-CHATTIMELINE-红队报告-DS-V4-Pro.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/chat-timeline-pkg/红队报告-批1.md"
+      ],
+      "reason": "对话时序包批 1 红队，已入库。",
+      "process_reports": []
+    },
+    {
+      "n": 20,
+      "sessionId": "<SESSION_ID_20>",
+      "createdAt": "2026-10-11T12:33:21.171Z",
+      "workstream": "对话时序包",
+      "role": "verifier",
+      "topicExcerpt": "任务卡 · GLM-5.3 复核 · 对话时序包批 2（子包②权威翻转） 角色 你是复核与测试角色（GLM-5.3）。对 Kimi K2.8 已施工、K3 已验收的对话时序包批 2 做独立复核：独立复现+对抗反查。你与作者（Kimi 系）互",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/补档-CHATTIMELINE-批2-复核报告-GLM-5.3.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/chat-timeline-pkg/复核报告-批2.md"
+      ],
+      "reason": "批 2 复核，已入库。",
+      "process_reports": []
+    },
+    {
+      "n": 21,
+      "sessionId": "<SESSION_ID_21>",
+      "createdAt": "2026-10-11T12:51:56.286Z",
+      "workstream": "对话时序包",
+      "role": "redteam",
+      "topicExcerpt": "任务卡 · DS V4 Pro 红队 · 对话时序包批 2（子包②权威翻转） 角色 你是反方审查+红队（DeepSeek V4 Pro）。对 Kimi K2.8 施工、GLM-5.3 复核 PASS（0B/0M/3m/4O）的对话时序包批 ",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/补档-CHATTIMELINE-批2-红队报告-DS-V4-Pro.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/chat-timeline-pkg/红队报告-批2.md"
+      ],
+      "reason": "批 2 红队，已入库。",
+      "process_reports": []
+    },
+    {
+      "n": 22,
+      "sessionId": "<SESSION_ID_22>",
+      "createdAt": "2026-10-11T14:59:19.892Z",
+      "workstream": "对话时序包",
+      "role": "builder",
+      "topicExcerpt": "「对话时序包 · 批 3 ③a」施工卡（**定稿**） ⚠️ 本稿替代草案，草案仅存档 本文件 = **批 3 ③a 施工卡定稿**，**完整替代** `<SCRATCH>\\chat-timeline-pkg\\批3③a-施工卡草案.md`（38",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/补档-CHATTIMELINE-批3③a-施工报告-K2.8.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/chat-timeline-pkg/施工报告-批3③a.md"
+      ],
+      "reason": "批 3③a 施工，已入库。",
+      "process_reports": []
+    },
+    {
+      "n": 23,
+      "sessionId": "<SESSION_ID_23>",
+      "createdAt": "2026-10-11T16:33:17.766Z",
+      "workstream": "对话时序包",
+      "role": "verifier",
+      "topicExcerpt": "任务卡 · GLM-5.3 复核 · 对话时序包 批 3 ③a（工具结局不得谎报 · 三态收口） 角色 你是**复核与测试角色（GLM-5.3）**。对 **Kimi K2.8 Preview** 已施工、**工作树未提交**的对话时序包批",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/补档-CHATTIMELINE-批3③a-复核报告-GLM-5.3.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/chat-timeline-pkg/复核报告-批3③a.md"
+      ],
+      "reason": "批 3③a 复核，已入库。",
+      "process_reports": []
+    },
+    {
+      "n": 24,
+      "sessionId": "<SESSION_ID_24>",
+      "createdAt": "2026-10-11T16:34:10.229Z",
+      "workstream": "对话时序包",
+      "role": "redteam",
+      "topicExcerpt": "任务卡 · DS V4 Pro 红队 · 对话时序包 批 3 ③a（工具结局不得谎报 · 三态收口） 角色 你是**反方审查 + 红队（DeepSeek V4 Pro）**。对 **Kimi K2.8 Preview** 施工、**工作树未",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/补档-CHATTIMELINE-批3③a-红队报告-DS-V4-Pro.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/chat-timeline-pkg/红队报告-批3③a.md"
+      ],
+      "reason": "批 3③a 红队，已入库。",
+      "process_reports": []
+    },
+    {
+      "n": 25,
+      "sessionId": "<SESSION_ID_25>",
+      "createdAt": "2026-10-11T17:18:02.756Z",
+      "workstream": "对话时序包",
+      "role": "verifier",
+      "topicExcerpt": "三方会审任务卡 · 批 3' ③b 施工方案评议（GLM-5.3 · 复核视角） 项 | 值 | 角色 | **GLM-5.3**（复核视角评议者：行为基线对照、设计一致性、测试覆盖盲区） | 授权来源 | **K3 指挥官三方会审卡，20",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/补档-CHATTIMELINE-批3③b-会审报告-GLM-5.3.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/chat-timeline-pkg/会审-批3③b-GLM.md"
+      ],
+      "reason": "批 3③b 会审（GLM），已入库。",
+      "process_reports": []
+    },
+    {
+      "n": 26,
+      "sessionId": "<SESSION_ID_26>",
+      "createdAt": "2026-10-11T17:41:33.096Z",
+      "workstream": "对话时序包",
+      "role": "builder",
+      "topicExcerpt": "「对话时序包 · 批 3' ③b」施工卡（**定稿**） ⚠️ 本稿替代草案，草案仅存档 本文件 = **批 3' ③b 施工卡定稿**，**完整替代** `<SCRATCH>\\chat-timeline-pkg\\批3'③b-施工卡草案.md`",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/补档-CHATTIMELINE-批3③b-施工报告-K2.8.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/chat-timeline-pkg/施工报告-批3③b.md"
+      ],
+      "reason": "批 3③b 施工，已入库。",
+      "process_reports": []
+    },
+    {
+      "n": 27,
+      "sessionId": "<SESSION_ID_27>",
+      "createdAt": "2026-10-11T18:36:39.084Z",
+      "workstream": "对话时序包",
+      "role": "verifier",
+      "topicExcerpt": "任务卡 · GLM-5.3 复核 · 对话时序包 批 3' ③b（一卡全生命周期：段状态机收口 + 死亡代码清除） 角色 你是**复核与测试角色（GLM-5.3）**。对 **Kimi K2.8 Preview** 已施工、**工作树未提交",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/补档-CHATTIMELINE-批3③b-复核报告-GLM-5.3.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/chat-timeline-pkg/复核报告-批3③b.md"
+      ],
+      "reason": "批 3③b 复核，已入库。",
+      "process_reports": []
+    },
+    {
+      "n": 28,
+      "sessionId": "<SESSION_ID_28>",
+      "createdAt": "2026-10-11T18:37:26.205Z",
+      "workstream": "对话时序包",
+      "role": "redteam",
+      "topicExcerpt": "任务卡 · DS V4 Pro 红队 · 对话时序包 批 3' ③b（一卡全生命周期：段状态机收口 + 死亡代码清除） 角色 你是**反方审查 + 红队（DeepSeek V4 Pro）**。对 **Kimi K2.8 Preview** ",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/补档-CHATTIMELINE-批3③b-红队报告-DS-V4-Pro.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/chat-timeline-pkg/红队报告-批3③b.md"
+      ],
+      "reason": "批 3③b 红队，已入库。",
+      "process_reports": []
+    },
+    {
+      "n": 29,
+      "sessionId": "<SESSION_ID_29>",
+      "createdAt": "2026-10-11T19:43:31.447Z",
+      "workstream": "合流指挥棒",
+      "role": "verifier",
+      "topicExcerpt": "会审任务卡 · 批4④ 施工卡草案评议（GLM-5.3 · 复核与测试视角） 【授权来源】K3 指挥官三方会审派单（批次级裁决标准动作）。你是两方独立评议之一；另一方（DS V4 Pro）也在评同一份草案，**你们互不见对方结论**，不得揣",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/补档-CHATTIMELINE-批4④-会审报告-GLM-5.3.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/chat-timeline-pkg/会审-批4④-GLM.md"
+      ],
+      "reason": "批 4④ 会审（GLM），已入库。",
+      "process_reports": []
+    },
+    {
+      "n": 30,
+      "sessionId": "<SESSION_ID_30>",
+      "createdAt": "2026-10-11T19:44:12.276Z",
+      "workstream": "合流指挥棒",
+      "role": "redteam",
+      "topicExcerpt": "会审任务卡 · 批4④ 施工卡草案评议（DS V4 Pro · 反方审查视角） 【授权来源】K3 指挥官三方会审派单（批次级裁决标准动作）。你是两方独立评议之一；另一方（GLM-5.3）也在评同一份草案，**你们互不见对方结论**，不得揣测",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/补档-CHATTIMELINE-批4④-会审报告-DS-V4-Pro.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/chat-timeline-pkg/会审-批4④-DSPro.md"
+      ],
+      "reason": "批 4④ 会审（DSPro），已入库。",
+      "process_reports": []
+    },
+    {
+      "n": 31,
+      "sessionId": "<SESSION_ID_31>",
+      "createdAt": "2026-10-11T20:11:51.772Z",
+      "workstream": "对话时序包",
+      "role": "builder",
+      "topicExcerpt": "「对话时序包 · 批 4④ 折叠规则」施工卡（**定稿**） ⚠️ 本稿替代草案，草案仅存档 本文件 = **批 4④ 施工卡定稿**，**完整替代** `<SCRATCH>\\chat-timeline-pkg\\批4④-施工卡草案.md`（48",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/补档-CHATTIMELINE-批4④-施工报告-K2.8.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/chat-timeline-pkg/evidence-p17/锚点实读表.md"
+      ],
+      "reason": "批 4④ 施工，已入库。",
+      "process_reports": []
+    },
+    {
+      "n": 32,
+      "sessionId": "<SESSION_ID_32>",
+      "createdAt": "2026-10-11T20:42:42.554Z",
+      "workstream": "合流指挥棒",
+      "role": "verifier",
+      "topicExcerpt": "复核任务卡 · 批4④ 施工复核（GLM-5.3 · 复核与测试视角） 【授权来源】K3 指挥官派单 · 批4④ 复核卡。你是独立复核方；红队（DS V4 Pro）与你并行审查同一批产出，**互不见对方结论**，不得揣测引用对方立场。 【背",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/补档-CHATTIMELINE-批4④-复核报告-GLM-5.3.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/chat-timeline-pkg/复核报告-批4④.md"
+      ],
+      "reason": "批 4④ 复核，已入库。",
+      "process_reports": []
+    },
+    {
+      "n": 33,
+      "sessionId": "<SESSION_ID_33>",
+      "createdAt": "2026-10-11T20:43:14.667Z",
+      "workstream": "合流指挥棒",
+      "role": "redteam",
+      "topicExcerpt": "红队任务卡 · 批4④ 对抗性审查（DS V4 Pro · 红队视角） 【授权来源】K3 指挥官派单 · 批4④ 红队卡。你是反方红队；复核方（GLM-5.3）与你并行审查同一批产出，**互不见对方结论**，不得揣测引用对方立场。你的默认立",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/补档-CHATTIMELINE-批4④-红队报告-DS-V4-Pro.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/chat-timeline-pkg/红队报告-批4④.md"
+      ],
+      "reason": "批 4④ 红队，已入库。",
+      "process_reports": []
+    },
+    {
+      "n": 34,
+      "sessionId": "<SESSION_ID_34>",
+      "createdAt": "2026-10-11T21:00:56.327Z",
+      "workstream": "合流指挥棒",
+      "role": "verifier",
+      "topicExcerpt": "收口修任务卡 · 批4④（K2.8 Preview 施工棒） 【授权来源】K3 指挥官派单 · 批4④ 收口修卡。复核（GLM-5.3）= PASS（0B/0M/6m/6O）；红队（DS V4 Pro）= 带条件 PASS（0B/1 MAJ",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/补档-CHATTIMELINE-批4④-施工报告-K2.8.md",
+        "docs/evidence/补档-CHATTIMELINE-批4④-收口修报告-K2.8.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/chat-timeline-pkg/施工报告-批4④.md",
+        "<SCRATCH>/chat-timeline-pkg/收口修报告-批4④.md"
+      ],
+      "reason": "批 4④ 施工/收口修，已入库。",
+      "process_reports": []
+    },
+    {
+      "n": 35,
+      "sessionId": "<SESSION_ID_35>",
+      "createdAt": "2026-10-12T00:42:18.248Z",
+      "workstream": "轮询治理",
+      "role": "builder",
+      "topicExcerpt": "【K3 派单·轮询治理一期施工（TDD）】本消息=派发头+施工卡定稿全文（派发头之下即为卡文，逐节读完再动手）。施工报告落盘 <SCRATCH>\\polling-gov\\施工报告-轮询一期.md；证据落 <SCRATCH>\\polling-gov\\",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/补档-POLLGOV-轮询一期-施工报告.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [],
+      "reason": "轮询一期施工，已以 POLLGOV 补档入库。",
+      "process_reports": []
+    },
+    {
+      "n": 36,
+      "sessionId": "<SESSION_ID_36>",
+      "createdAt": "2026-10-12T01:38:10.156Z",
+      "workstream": "轮询治理",
+      "role": "verifier",
+      "topicExcerpt": "【K3 派单·轮询治理一期复核】任务卡=<SCRATCH>\\polling-gov\\复核卡-轮询一期-GLM.md（sha256 fde7661de2926a886cfc2bd341ca536aec4c74dccf43c3cdde8175121",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/补档-POLLGOV-轮询一期-复核报告-GLM-5.3.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/polling-gov/复核报告-轮询一期.md"
+      ],
+      "reason": "轮询一期复核，已入库。",
+      "process_reports": []
+    },
+    {
+      "n": 37,
+      "sessionId": "<SESSION_ID_37>",
+      "createdAt": "2026-10-12T01:38:58.034Z",
+      "workstream": "轮询治理",
+      "role": "redteam",
+      "topicExcerpt": "【K3 派单·轮询治理一期红队】任务卡=<SCRATCH>\\polling-gov\\红队卡-轮询一期-DSPro.md（sha256 4fb98a3ae3dc238627d98eaf8e59c433092e334578921cb9fa5a4e9",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/补档-POLLGOV-轮询一期-红队报告-DS-V4-Pro.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/polling-gov/红队报告-轮询一期.md"
+      ],
+      "reason": "轮询一期红队，已入库。",
+      "process_reports": []
+    },
+    {
+      "n": 38,
+      "sessionId": "<SESSION_ID_38>",
+      "createdAt": "2026-10-12T02:53:52.744Z",
+      "workstream": "R-137 刷新守卫",
+      "role": "verifier",
+      "topicExcerpt": "【会审任务 · R-137 决策卡草案（三方会审，独立评议）】 1. 第一步 sha256 核验卡文件：Bash 执行 sha256sum <SCRATCH>/r137-guard/会审卡-R137.md，应等于 8ef374a6088bbc9",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/补档-R137-会审报告-GLM-5.3.md",
+        "docs/evidence/补档-MANUALREFRESH-手动刷新批-会审报告-归零轮-GLM-5.3.md",
+        "docs/evidence/补档-MANUALREFRESH-手动刷新批-会审报告-终版-GLM-5.3.md",
+        "docs/evidence/补档-R149-issue7-会审报告-GLM-5.3.md",
+        "docs/evidence/补档-R149-issue7-复核报告-GLM-5.3.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/r137-guard/会审-GLM.md",
+        "<SCRATCH>/r137-guard/会审-归零-GLM.md",
+        "<SCRATCH>/r137-guard/会审-终版-GLM.md",
+        "<SCRATCH>/r137-guard/会审-R149-GLM.md",
+        "<SCRATCH>/r137-guard/复核报告-手动刷新批.md",
+        "<SCRATCH>/r137-guard/复核报告-R149.md"
+      ],
+      "reason": "R-137/手动刷新/R-149 多份会审与复核，均已补档入库。",
+      "process_reports": []
+    },
+    {
+      "n": 39,
+      "sessionId": "<SESSION_ID_39>",
+      "createdAt": "2026-10-12T02:57:20.825Z",
+      "workstream": "R-137 刷新守卫",
+      "role": "verifier",
+      "topicExcerpt": "【会审任务 · R-137 决策卡草案（三方会审，独立评议）】 1. 第一步 sha256 核验卡文件：Bash 执行 sha256sum <SCRATCH>/r137-guard/会审卡-R137.md，应等于 8ef374a6088bbc9",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/补档-R137-会审报告-DS-V4-Pro.md",
+        "docs/evidence/补档-MANUALREFRESH-手动刷新批-会审报告-归零轮-DS-V4-Pro.md",
+        "docs/evidence/补档-MANUALREFRESH-手动刷新批-会审报告-终版-DS-V4-Pro.md",
+        "docs/evidence/补档-R149-issue7-会审报告-DS-V4-Pro.md",
+        "docs/evidence/补档-R149-issue7-红队报告-DS-V4-Pro.md",
+        "docs/evidence/补档-R150-红队报告-DSPro.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/r137-guard/会审-DSPro.md",
+        "<SCRATCH>/r137-guard/会审-归零-DSPro.md",
+        "<SCRATCH>/r137-guard/会审-终版-DSPro.md",
+        "<SCRATCH>/r137-guard/会审-R149-DSPro.md",
+        "<SCRATCH>/r137-guard/红队报告-手动刷新批.md",
+        "<SCRATCH>/r137-guard/红队报告-R149.md",
+        "<SCRATCH>/r150-split/会审-DSPro-R150.md",
+        "<SCRATCH>/r137-guard/复核报告-DSPro-R137.md"
+      ],
+      "reason": "R-137/手动刷新/R-149/R-150 DSPro 会审与红队，均已入库（R150 红队逐字节相同）。",
+      "process_reports": []
+    },
+    {
+      "n": 40,
+      "sessionId": "<SESSION_ID_40>",
+      "createdAt": "2026-10-12T03:40:01.388Z",
+      "workstream": "R-137 刷新守卫",
+      "role": "builder",
+      "topicExcerpt": "【施工任务 · 手动刷新批（TDD）】 1. 第一步 sha256 核验施工卡：Bash 执行 sha256sum <SCRATCH>/r137-guard/施工卡-手动刷新批.md，应等于 c55124669e0e67ed119dacf579",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/补档-MANUALREFRESH-手动刷新批-施工报告.md",
+        "docs/evidence/补档-MANUALREFRESH-手动刷新批-收口修报告.md",
+        "docs/evidence/补档-R144-前端-施工报告.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/r137-guard/施工报告-手动刷新批.md",
+        "<SCRATCH>/r137-guard/收口修报告-手动刷新批.md",
+        "<SCRATCH>/r144-history/施工报告-R144-前端.md"
+      ],
+      "reason": "手动刷新批施工/收口与 R-144 前端施工，均已入库。",
+      "process_reports": []
+    },
+    {
+      "n": 41,
+      "sessionId": "<SESSION_ID_41>",
+      "createdAt": "2026-10-12T14:04:00.826Z",
+      "workstream": "R-153 稳定性",
+      "role": "verifier",
+      "topicExcerpt": "【复核·R-153 前端面】你是 R-153 前端面复核方（施工方 K2.8，厂商互异）。 复核卡 = <SCRATCH>\\r153-flake\\复核卡-R153-前端.md（3059B，sha256 38064a265b02d82b8dfc0",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/补档-R153-前端-复核报告-DSPro.md",
+        "docs/evidence/补档-R144-前端-复核报告-DSPro.md",
+        "docs/evidence/补档-R144-前端-施工报告.md",
+        "docs/evidence/补档-R154-后端-施工报告-DSPro.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/r144-history/施工报告-R144-后端.md",
+        "<SCRATCH>/r153-flake/复核报告-R153-前端-DSPro.md",
+        "<SCRATCH>/r144-history/复核报告-R144-前端-DSPro.md",
+        "<SCRATCH>/r154-ux/施工报告-R154-后端.md"
+      ],
+      "reason": "R-153/R-144/R-154 相关施工与复核，均已入库。",
+      "process_reports": []
+    },
+    {
+      "n": 42,
+      "sessionId": "<SESSION_ID_42>",
+      "createdAt": "2026-10-12T14:54:02.777Z",
+      "workstream": "R-144 历史分页",
+      "role": "verifier",
+      "topicExcerpt": "【复核·R-144 后端面】你是 R-144 后端面复核方（施工方 DSPro，厂商互异）。 复核卡 = <SCRATCH>\\r144-history\\复核卡-R144-后端.md（2341B，sha256 491f8336ca969930d1",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/补档-R144-后端-复核报告-K28.md",
+        "docs/evidence/补档-R154-后端-复核报告-K28.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/r144-history/复核报告-R144-后端-K28.md",
+        "<SCRATCH>/r154-ux/复核报告-R154-后端.md",
+        "<SCRATCH>/r154-ux/复核报告-R154-后端.md"
+      ],
+      "reason": "R-144/R-154 后端复核，已入库。",
+      "process_reports": []
+    },
+    {
+      "n": 43,
+      "sessionId": "<SESSION_ID_43>",
+      "createdAt": "2026-10-12T15:17:41.374Z",
+      "workstream": "R-154 UX 批",
+      "role": "builder",
+      "topicExcerpt": "【施工·R-154 前端面】你是 R-154 前端面施工方（K2.8）。 卡 = <SCRATCH>\\r154-ux\\施工卡-R154.md（9768B，sha256 a0d2c80a74c8bd1505b8af3e85d292cf1ead74",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/补档-R158-施工报告-K28.md",
+        "docs/evidence/补档-R154-前端-施工报告-K28.md",
+        "docs/evidence/补档-R157-施工报告-K28.md",
+        "docs/evidence/补档-R94-施工报告-K28.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/r158-ux3/施工报告-R158.md",
+        "<SCRATCH>/r154-ux/施工报告-R154-前端.md",
+        "<SCRATCH>/r157-ux2/施工报告-R157.md",
+        "<SCRATCH>/r94-deadcode/施工报告-R94.md",
+        "<SCRATCH>/r94-deadcode/收口修报告-R94.md"
+      ],
+      "reason": "R-154/R-157/R-158/R-94 施工，均已入库。",
+      "process_reports": []
+    },
+    {
+      "n": 44,
+      "sessionId": "<SESSION_ID_44>",
+      "createdAt": "2026-10-12T15:47:48.594Z",
+      "workstream": "R-154 UX 批",
+      "role": "builder",
+      "topicExcerpt": "收口修卡 · R-154 后端面 #16（历史分页）· 施工方 = DS 系（DSPro 新会话接续） 【自证义务 DC-19】追加注记首页必署：实际运行模型 + 会话 id + 你 wire 的 `profile.bind` 单行 JSO",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/补档-R154-后端-施工报告-DSPro.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/r154-ux/施工报告-R154-后端.md"
+      ],
+      "reason": "R-154 后端面施工，已入库。",
+      "process_reports": []
+    },
+    {
+      "n": 45,
+      "sessionId": "<SESSION_ID_45>",
+      "createdAt": "2026-10-12T15:55:25.024Z",
+      "workstream": "R-154 UX 批",
+      "role": "verifier",
+      "topicExcerpt": "复核卡 · R-154 前端面（UX 批 #1~#7/#9/#12/#13+14/#17）· 复核方 = DS 系 【自证义务 DC-19】报告首页必署：实际运行模型 + 会话 id + 你 wire 的 `profile.bind` 单行",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/补档-R94-复核报告-DSPro.md",
+        "docs/evidence/补档-R94-复核确认-DSPro.md",
+        "docs/evidence/补档-R154-前端-复核报告-DSPro.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/r94-deadcode/复核报告-R94-DSPro.md",
+        "<SCRATCH>/r94-deadcode/复核确认-R94.md",
+        "<SCRATCH>/r154-ux/复核报告-R154-前端.md"
+      ],
+      "reason": "R-94/R-154 前端复核与确认，已入库。",
+      "process_reports": []
+    },
+    {
+      "n": 46,
+      "sessionId": "<SESSION_ID_46>",
+      "createdAt": "2026-10-12T17:38:52.042Z",
+      "workstream": "合流指挥棒",
+      "role": "commander",
+      "topicExcerpt": "交接提示词 · 2026-10-13 十四棒起（R-153/R-144/R-154/R-94 四全闭环入库∥队列清空；git 基线 HEAD=b950893 + 工作树净面） ═══ 角色与铁律 ═══ 你是 ai-example 合流项目",
+      "verdict": "handoff_prompt_excluded",
+      "repo_evidence": [
+        "docs/任务看板.md",
+        "docs/决策看板.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/r153-flake/哨兵窗台账.md",
+        "<SCRATCH>/handoff-archive/交接提示词-2026-10-13-当前态.md",
+        "<SCRATCH>/handoff-archive/交接提示词-2026-10-13-十五棒稿.md"
+      ],
+      "reason": "交接提示词属 handoff-archive 排除组（archive-manifest exclusionGroup=handoff-prompt）；状态已写入双看板。",
+      "process_reports": [
+        "handoff-archive/交接提示词-2026-10-13-当前态.md",
+        "handoff-archive/交接提示词-2026-10-13-十五棒稿.md"
+      ]
+    },
+    {
+      "n": 47,
+      "sessionId": "<SESSION_ID_47>",
+      "createdAt": "2026-10-13T02:12:18.051Z",
+      "workstream": "R-155 推理",
+      "role": "verifier",
+      "topicExcerpt": "【R-155 复核派发 · DSPro】复核卡 = <SCRATCH>\\r155-reason\\复核卡-R155.md，先读卡全文严格按卡执行（材料三件：决策卡/施工报告/审查锚 diff，锚 sha256 前8=e35797e3 先自验）。只",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/补档-R155-复核报告-DSPro.md",
+        "docs/evidence/补档-R155-复核确认-DSPro.md",
+        "docs/evidence/补档-R157-复核报告-DSPro.md",
+        "docs/evidence/补档-R157-复核确认-DSPro.md",
+        "docs/evidence/补档-R158-复核报告-DSPro.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/r157-ux2/复核确认-R157-DSPro.md",
+        "<SCRATCH>/r155-reason/复核报告-R155-DSPro.md",
+        "<SCRATCH>/r155-reason/复核确认-R155-DSPro.md",
+        "<SCRATCH>/r157-ux2/复核报告-R157-DSPro.md",
+        "<SCRATCH>/r158-ux3/复核报告-R158-DSPro.md"
+      ],
+      "reason": "R-155/R-157/R-158 复核与确认，均已入库。",
+      "process_reports": []
+    },
+    {
+      "n": 48,
+      "sessionId": "<SESSION_ID_48>",
+      "createdAt": "2026-10-13T04:35:28.401Z",
+      "workstream": "对话面板包",
+      "role": "verifier",
+      "topicExcerpt": "【R-158 复核确认 · DSPro 新会话】你是 ai-example 合流项目复核线（DSPro）。首轮须自证：读你自身 wire（会话目录 agents/agent-*/wire.jsonl）profile.bind 单行，实证 m",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/补档-R159-复核报告-DSPro.md",
+        "docs/evidence/补档-R159-会审报告-DSPro.md",
+        "docs/evidence/补档-R158-复核确认-DSPro.md",
+        "docs/evidence/补档-R161-会审报告-DSPro.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/r159-stream/复核报告-R159-DSPro.md",
+        "<SCRATCH>/r158-ux3/复核确认-R158-DSPro.md",
+        "<SCRATCH>/r159-stream/会审报告-R159-DSPro.md",
+        "<SCRATCH>/r161-scroll/会审报告-R161-DSPro.md"
+      ],
+      "reason": "R-158/R-159/R-161 复核与会审，均已入库（R159 复核/会审、R161 会审逐字节相同）。",
+      "process_reports": []
+    },
+    {
+      "n": 49,
+      "sessionId": "<SESSION_ID_49>",
+      "createdAt": "2026-10-13T05:10:32.658Z",
+      "workstream": "合流指挥棒",
+      "role": "commander",
+      "topicExcerpt": "交接提示词 · 2026-10-13 十七棒起（R-157/R-158 双闭环入库 bdbfc51 ∥ issue #10-12 DC-21 三件套完成 ∥ 哨兵 15/30 已净台须重挂 ∥ 态档热冷分离转本棒） ═══ 角色与铁律 ══",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/补档-R156-施工报告-DSFlash.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/handoff-archive/交接提示词-2026-10-13-十八棒起.md",
+        "<SCRATCH>/r156-batchdl/施工报告-R156.md",
+        "<SCRATCH>/r156-batchdl/决策卡-R156-定稿.md"
+      ],
+      "reason": "R-156 施工已入库；交接提示词按 handoff-prompt 排除。",
+      "process_reports": []
+    },
+    {
+      "n": 50,
+      "sessionId": "<SESSION_ID_50>",
+      "createdAt": "2026-10-13T09:29:57.006Z",
+      "workstream": "合流指挥棒",
+      "role": "commander",
+      "topicExcerpt": "交接提示词 · 2026-10-13 十九棒起（R-159 施工在途盯报告 ∥ R-161 立项毕待施工 ∥ issue #14 demo 待用户过目 ∥ 哨兵净台须重挂） ═══ 角色与铁律 ═══ 你是 ai-example 合流项目指",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/补档-R161-施工报告.md",
+        "docs/evidence/补档-R160-施工报告.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/r161-scroll/施工报告-R161.md",
+        "<SCRATCH>/r160-hitl/施工报告-R160.md",
+        "<SCRATCH>/r159-stream/提交报告-R159.md"
+      ],
+      "reason": "R-160/R-161 施工已入库；交接提示词按 handoff-prompt 排除。",
+      "process_reports": []
+    },
+    {
+      "n": 51,
+      "sessionId": "<SESSION_ID_51>",
+      "createdAt": "2026-10-13T09:58:41.683Z",
+      "workstream": "HITL / 问题2 (R-160)",
+      "role": "verifier",
+      "topicExcerpt": "会审卡 · R-160 立项前会审（issue #14 HITL 三缺陷） 你是会审方（厂商互异）。材料： 决策卡草案：<SCRATCH>\\r160-hitl\\决策卡-R160-草案.md（五项修改点 M1-M5 + 红线 + 门禁） demo",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/补档-R160-会审报告.md",
+        "docs/evidence/补档-R160-复会审报告.md",
+        "docs/evidence/补档-R160-三审报告.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/r160-hitl/会审报告-R160.md",
+        "<SCRATCH>/r160-hitl/复会审报告-R160.md",
+        "<SCRATCH>/r160-hitl/三审报告-R160.md"
+      ],
+      "reason": "R-160 会审/复会审/三审，已入库（会审、三审逐字节相同）。",
+      "process_reports": []
+    },
+    {
+      "n": 52,
+      "sessionId": "<SESSION_ID_52>",
+      "createdAt": "2026-10-13T10:15:51.840Z",
+      "workstream": "R-161 面板滚动",
+      "role": "builder",
+      "topicExcerpt": "施工卡-R161（AI 面板滚动行为专项 · 前端面） 唯一事实源 = `<SCRATCH>\\r161-scroll\\决策卡-R161-定稿.md` + demo `<SCRATCH>\\r161-scroll\\demo-scroll.html`（用",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/补档-R161-施工报告.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [],
+      "reason": "R-161 施工，已入库。",
+      "process_reports": []
+    },
+    {
+      "n": 53,
+      "sessionId": "<SESSION_ID_53>",
+      "createdAt": "2026-10-14T12:04:37.574Z",
+      "workstream": "R-163 聊天 UI",
+      "role": "verifier",
+      "topicExcerpt": "复核确认卡 R-163 · 三点核对（DSPro 确认轮 · 分组 DS Pro） 授权：K3 二十一棒指挥官。DC-19 自证=读自身 wire profile.bind 单行（modelAlias+会话 id）。只读复核、禁改仓库。 背",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/补档-R163-复核确认-DSPro.md",
+        "docs/evidence/补档-R163BCD-复核确认-DSPro.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/r163-chat-ui/复核确认-R163-DSPro.md",
+        "<SCRATCH>/r163-chat-ui/复核确认-R163BCD-DSPro.md"
+      ],
+      "reason": "R-163/R-163BCD 复核确认，已入库（逐字节相同）。",
+      "process_reports": []
+    },
+    {
+      "n": 54,
+      "sessionId": "<SESSION_ID_54>",
+      "createdAt": "2026-10-14T14:10:06.308Z",
+      "workstream": "R-163 聊天 UI",
+      "role": "builder",
+      "topicExcerpt": "闭合卡 R-163C · 复测残留三点（K2.8 施工棒 · 2026-10-14 · 分组 managed:kimi-code） 授权：K3 二十一棒指挥官。DC-19 首轮自证=读自身 wire profile.bind 单行。纪律同前",
+      "verdict": "already_in_repo",
+      "repo_evidence": [
+        "docs/evidence/补档-R163C-补修报告-K28.md",
+        "docs/evidence/补档-R163D-施工报告-K28.md"
+      ],
+      "mapped_candidates": [],
+      "external_reports": [
+        "<SCRATCH>/r163-chat-ui/补修报告-R163C-K2.8.md",
+        "<SCRATCH>/r163-chat-ui/施工报告-R163D-K2.8.md"
+      ],
+      "reason": "R-163C 补修/R-163D 施工，已入库。",
+      "process_reports": []
+    }
+  ],
+  "risks": [
+    {
+      "source_path": "issue-archive/issue-6-download_export_file前端工具执行器await下载阻塞回灌超时.md",
+      "type": "absolute_paths",
+      "count": 3,
+      "severity": "low",
+      "action": "replace with <REPO_ROOT>/<SCRATCH>",
+      "decision": "excluded_by_policy"
+    },
+    {
+      "source_path": "issue-archive/issue-6-download_export_file前端工具执行器await下载阻塞回灌超时.md",
+      "type": "org_name",
+      "count": 14,
+      "severity": "high",
+      "action": "replace with <ORG>",
+      "decision": "excluded_by_policy"
+    },
+    {
+      "source_path": "issue-archive/README.md",
+      "type": "org_name",
+      "count": 1,
+      "severity": "high",
+      "action": "replace with <ORG>",
+      "decision": "excluded_by_policy"
+    },
+    {
+      "source_path": "issue-archive/issue-3-手动勾选AI无感知.md",
+      "type": "absolute_paths",
+      "count": 3,
+      "severity": "low",
+      "action": "replace with <REPO_ROOT>/<SCRATCH>",
+      "decision": "excluded_by_policy"
+    },
+    {
+      "source_path": "issue-archive/issue-3-手动勾选AI无感知.md",
+      "type": "org_name",
+      "count": 15,
+      "severity": "high",
+      "action": "replace with <ORG>",
+      "decision": "excluded_by_policy"
+    },
+    {
+      "source_path": "_cu-card-project/implementation-report.md",
+      "type": "absolute_paths",
+      "count": 2,
+      "severity": "low",
+      "action": "replace with <REPO_ROOT>/<SCRATCH>",
+      "decision": "import_now"
+    },
+    {
+      "source_path": "_cu-composer-project-r26/final-review-report.md",
+      "type": "absolute_paths",
+      "count": 6,
+      "severity": "low",
+      "action": "replace with <REPO_ROOT>/<SCRATCH>",
+      "decision": "import_now"
+    },
+    {
+      "source_path": "_cu-composer-project-r26/final-review-report.md",
+      "type": "session_ids",
+      "count": 1,
+      "severity": "low",
+      "action": "replace with <SESSION_ID>",
+      "decision": "import_now"
+    },
+    {
+      "source_path": "_cu-composer-project-r26/final-review-report.md",
+      "type": "wire_paths",
+      "count": 1,
+      "severity": "low",
+      "action": "replace with <SESSIONS_ROOT>/<SESSION_ID>/agents/<AGENT>/wire.jsonl",
+      "decision": "import_now"
+    },
+    {
+      "source_path": "issue-archive/issue-4-向导页page标签违反workspace契约.md",
+      "type": "absolute_paths",
+      "count": 4,
+      "severity": "low",
+      "action": "replace with <REPO_ROOT>/<SCRATCH>",
+      "decision": "excluded_by_policy"
+    },
+    {
+      "source_path": "issue-archive/issue-4-向导页page标签违反workspace契约.md",
+      "type": "org_name",
+      "count": 16,
+      "severity": "high",
+      "action": "replace with <ORG>",
+      "decision": "excluded_by_policy"
+    },
+    {
+      "source_path": "_cu-gf-fix-r26/report.md",
+      "type": "absolute_paths",
+      "count": 3,
+      "severity": "low",
+      "action": "replace with <REPO_ROOT>/<SCRATCH>",
+      "decision": "import_now"
+    },
+    {
+      "source_path": "_cu-gf-fix-r26/report.md",
+      "type": "session_ids",
+      "count": 1,
+      "severity": "low",
+      "action": "replace with <SESSION_ID>",
+      "decision": "import_now"
+    },
+    {
+      "source_path": "_cu-gf-fix-r26/report.md",
+      "type": "wire_paths",
+      "count": 1,
+      "severity": "low",
+      "action": "replace with <SESSIONS_ROOT>/<SESSION_ID>/agents/<AGENT>/wire.jsonl",
+      "decision": "import_now"
+    },
+    {
+      "source_path": "_cu-composer-project-r26/phase1-report.md",
+      "type": "absolute_paths",
+      "count": 2,
+      "severity": "low",
+      "action": "replace with <REPO_ROOT>/<SCRATCH>",
+      "decision": "import_as_historical"
+    },
+    {
+      "source_path": "_cu-composer-project-r26/phase1-report.md",
+      "type": "session_ids",
+      "count": 1,
+      "severity": "low",
+      "action": "replace with <SESSION_ID>",
+      "decision": "import_as_historical"
+    },
+    {
+      "source_path": "_cu-composer-project-r26/phase1-report.md",
+      "type": "wire_paths",
+      "count": 1,
+      "severity": "low",
+      "action": "replace with <SESSIONS_ROOT>/<SESSION_ID>/agents/<AGENT>/wire.jsonl",
+      "decision": "import_as_historical"
+    },
+    {
+      "source_path": "_cu-composer-project-r26/phase2-report.md",
+      "type": "absolute_paths",
+      "count": 2,
+      "severity": "low",
+      "action": "replace with <REPO_ROOT>/<SCRATCH>",
+      "decision": "import_now"
+    },
+    {
+      "source_path": "_cu-composer-project-r26/phase2-report.md",
+      "type": "session_ids",
+      "count": 1,
+      "severity": "low",
+      "action": "replace with <SESSION_ID>",
+      "decision": "import_now"
+    },
+    {
+      "source_path": "_cu-composer-project-r26/phase2-report.md",
+      "type": "wire_paths",
+      "count": 1,
+      "severity": "low",
+      "action": "replace with <SESSIONS_ROOT>/<SESSION_ID>/agents/<AGENT>/wire.jsonl",
+      "decision": "import_now"
+    },
+    {
+      "source_path": "issue-archive/issue-5-loading守卫静默丢弃连发消息.md",
+      "type": "absolute_paths",
+      "count": 4,
+      "severity": "low",
+      "action": "replace with <REPO_ROOT>/<SCRATCH>",
+      "decision": "excluded_by_policy"
+    },
+    {
+      "source_path": "issue-archive/issue-5-loading守卫静默丢弃连发消息.md",
+      "type": "org_name",
+      "count": 18,
+      "severity": "high",
+      "action": "replace with <ORG>",
+      "decision": "excluded_by_policy"
+    },
+    {
+      "source_path": "_cu-collapse-fix/implementation-report.md",
+      "type": "absolute_paths",
+      "count": 16,
+      "severity": "low",
+      "action": "replace with <REPO_ROOT>/<SCRATCH>",
+      "decision": "import_now"
+    },
+    {
+      "source_path": "_cu-collapse-fix/implementation-report.md",
+      "type": "localhost_ports",
+      "count": 1,
+      "severity": "low",
+      "action": "replace with <LOCAL_ENDPOINT> or remove",
+      "decision": "import_now"
+    },
+    {
+      "source_path": "_cu-verify-2a/report.md",
+      "type": "absolute_paths",
+      "count": 4,
+      "severity": "low",
+      "action": "replace with <REPO_ROOT>/<SCRATCH>",
+      "decision": "import_as_historical"
+    },
+    {
+      "source_path": "_cu-verify-2a/report.md",
+      "type": "session_ids",
+      "count": 1,
+      "severity": "low",
+      "action": "replace with <SESSION_ID>",
+      "decision": "import_as_historical"
+    },
+    {
+      "source_path": "_cu-verify-2a/report.md",
+      "type": "wire_paths",
+      "count": 1,
+      "severity": "low",
+      "action": "replace with <SESSIONS_ROOT>/<SESSION_ID>/agents/<AGENT>/wire.jsonl",
+      "decision": "import_as_historical"
+    },
+    {
+      "source_path": "_cu-verify-2a/report.md",
+      "type": "localhost_ports",
+      "count": 2,
+      "severity": "low",
+      "action": "replace with <LOCAL_ENDPOINT> or remove",
+      "decision": "import_as_historical"
+    },
+    {
+      "source_path": "_cu-card-project/verification-r26/report.md",
+      "type": "absolute_paths",
+      "count": 9,
+      "severity": "low",
+      "action": "replace with <REPO_ROOT>/<SCRATCH>",
+      "decision": "import_now"
+    },
+    {
+      "source_path": "_cu-card-project/verification-r26/report.md",
+      "type": "localhost_ports",
+      "count": 9,
+      "severity": "low",
+      "action": "replace with <LOCAL_ENDPOINT> or remove",
+      "decision": "import_now"
+    },
+    {
+      "source_path": "_cu-gf-fix-r26/browser/report.md",
+      "type": "absolute_paths",
+      "count": 1,
+      "severity": "low",
+      "action": "replace with <REPO_ROOT>/<SCRATCH>",
+      "decision": "import_now"
+    },
+    {
+      "source_path": "_cu-gf-fix-r26/browser/report.md",
+      "type": "localhost_ports",
+      "count": 2,
+      "severity": "low",
+      "action": "replace with <LOCAL_ENDPOINT> or remove",
+      "decision": "import_now"
+    },
+    {
+      "source_path": "issue-archive/issue-2-open_export_file_editor跨任务.md",
+      "type": "absolute_paths",
+      "count": 3,
+      "severity": "low",
+      "action": "replace with <REPO_ROOT>/<SCRATCH>",
+      "decision": "excluded_by_policy"
+    },
+    {
+      "source_path": "issue-archive/issue-2-open_export_file_editor跨任务.md",
+      "type": "org_name",
+      "count": 12,
+      "severity": "high",
+      "action": "replace with <ORG>",
+      "decision": "excluded_by_policy"
+    },
+    {
+      "source_path": "_cu-composer-project-r26/browser/report.md",
+      "type": "absolute_paths",
+      "count": 3,
+      "severity": "low",
+      "action": "replace with <REPO_ROOT>/<SCRATCH>",
+      "decision": "import_as_historical"
+    },
+    {
+      "source_path": "_cu-composer-project-r26/browser/report.md",
+      "type": "localhost_ports",
+      "count": 1,
+      "severity": "low",
+      "action": "replace with <LOCAL_ENDPOINT> or remove",
+      "decision": "import_as_historical"
+    },
+    {
+      "source_path": "_cu-gf-fix-r26/browser/final/report.md",
+      "type": "absolute_paths",
+      "count": 3,
+      "severity": "low",
+      "action": "replace with <REPO_ROOT>/<SCRATCH>",
+      "decision": "import_now"
+    },
+    {
+      "source_path": "_cu-gf-fix-r26/browser/final/report.md",
+      "type": "localhost_ports",
+      "count": 2,
+      "severity": "low",
+      "action": "replace with <LOCAL_ENDPOINT> or remove",
+      "decision": "import_now"
+    },
+    {
+      "source_path": "_cu-composer-project-r26/browser/scope-diagnosis/report.md",
+      "type": "absolute_paths",
+      "count": 2,
+      "severity": "low",
+      "action": "replace with <REPO_ROOT>/<SCRATCH>",
+      "decision": "import_now"
+    },
+    {
+      "source_path": "_cu-composer-project-r26/browser/scope-diagnosis/report.md",
+      "type": "localhost_ports",
+      "count": 1,
+      "severity": "low",
+      "action": "replace with <LOCAL_ENDPOINT> or remove",
+      "decision": "import_now"
+    },
+    {
+      "source_path": "_cu-gf-fix-r26/review-report.md",
+      "type": "absolute_paths",
+      "count": 2,
+      "severity": "low",
+      "action": "replace with <REPO_ROOT>/<SCRATCH>",
+      "decision": "import_now"
+    },
+    {
+      "source_path": "_cu-gf-readonly-diagnosis/diagnosis-report.md",
+      "type": "absolute_paths",
+      "count": 4,
+      "severity": "low",
+      "action": "replace with <REPO_ROOT>/<SCRATCH>",
+      "decision": "import_now"
+    },
+    {
+      "source_path": "_cu-gf-readonly-diagnosis/diagnosis-report.md",
+      "type": "localhost_ports",
+      "count": 4,
+      "severity": "low",
+      "action": "replace with <LOCAL_ENDPOINT> or remove",
+      "decision": "import_now"
+    },
+    {
+      "source_path": "_cu-gf-readonly-diagnosis/diagnosis-report.md",
+      "type": "pids",
+      "count": 2,
+      "severity": "low",
+      "action": "remove PID",
+      "decision": "import_now"
+    },
+    {
+      "source_path": "issue-archive/issue-14-hitl-refresh-render-metadata-overflow.md",
+      "type": "absolute_paths",
+      "count": 3,
+      "severity": "low",
+      "action": "replace with <REPO_ROOT>/<SCRATCH>",
+      "decision": "excluded_by_policy"
+    },
+    {
+      "source_path": "issue-archive/issue-8-历史恢复后工具调用与文本回复拆分为多条消息.md",
+      "type": "absolute_paths",
+      "count": 1,
+      "severity": "low",
+      "action": "replace with <REPO_ROOT>/<SCRATCH>",
+      "decision": "excluded_by_policy"
+    },
+    {
+      "source_path": "issue-archive/issue-8-历史恢复后工具调用与文本回复拆分为多条消息.md",
+      "type": "localhost_ports",
+      "count": 1,
+      "severity": "low",
+      "action": "replace with <LOCAL_ENDPOINT> or remove",
+      "decision": "excluded_by_policy"
+    },
+    {
+      "source_path": "_cu-card-project/verification/report.md",
+      "type": "absolute_paths",
+      "count": 6,
+      "severity": "low",
+      "action": "replace with <REPO_ROOT>/<SCRATCH>",
+      "decision": "import_now"
+    },
+    {
+      "source_path": "_cu-card-project/verification/report.md",
+      "type": "localhost_ports",
+      "count": 5,
+      "severity": "low",
+      "action": "replace with <LOCAL_ENDPOINT> or remove",
+      "decision": "import_now"
+    },
+    {
+      "source_path": "_cu-collapse-fix/verification/report.md",
+      "type": "absolute_paths",
+      "count": 12,
+      "severity": "low",
+      "action": "replace with <REPO_ROOT>/<SCRATCH>",
+      "decision": "import_as_historical"
+    },
+    {
+      "source_path": "_cu-collapse-fix/verification/report.md",
+      "type": "wire_paths",
+      "count": 1,
+      "severity": "low",
+      "action": "replace with <SESSIONS_ROOT>/<SESSION_ID>/agents/<AGENT>/wire.jsonl",
+      "decision": "import_as_historical"
+    },
+    {
+      "source_path": "_cu-collapse-fix/verification/report.md",
+      "type": "localhost_ports",
+      "count": 6,
+      "severity": "low",
+      "action": "replace with <LOCAL_ENDPOINT> or remove",
+      "decision": "import_as_historical"
+    },
+    {
+      "source_path": "_cu-hitl-g-r26/browser/report.md",
+      "type": "absolute_paths",
+      "count": 8,
+      "severity": "low",
+      "action": "replace with <REPO_ROOT>/<SCRATCH>",
+      "decision": "import_now"
+    },
+    {
+      "source_path": "_cu-hitl-g-r26/browser/report.md",
+      "type": "session_ids",
+      "count": 1,
+      "severity": "low",
+      "action": "replace with <SESSION_ID>",
+      "decision": "import_now"
+    },
+    {
+      "source_path": "_cu-hitl-g-r26/browser/report.md",
+      "type": "wire_paths",
+      "count": 1,
+      "severity": "low",
+      "action": "replace with <SESSIONS_ROOT>/<SESSION_ID>/agents/<AGENT>/wire.jsonl",
+      "decision": "import_now"
+    },
+    {
+      "source_path": "_cu-hitl-g-r26/browser/report.md",
+      "type": "localhost_ports",
+      "count": 5,
+      "severity": "low",
+      "action": "replace with <LOCAL_ENDPOINT> or remove",
+      "decision": "import_now"
+    },
+    {
+      "source_path": "issue-archive/issue-13-streaming-cursor-and-text-display.md",
+      "type": "absolute_paths",
+      "count": 1,
+      "severity": "low",
+      "action": "replace with <REPO_ROOT>/<SCRATCH>",
+      "decision": "excluded_by_policy"
+    },
+    {
+      "source_path": "issue-archive/issue-12-toolcard-truncation-ellipsis.md",
+      "type": "absolute_paths",
+      "count": 2,
+      "severity": "low",
+      "action": "replace with <REPO_ROOT>/<SCRATCH>",
+      "decision": "excluded_by_policy"
+    },
+    {
+      "source_path": "_cu-gf-fix-r26/edge-review-report.md",
+      "type": "absolute_paths",
+      "count": 1,
+      "severity": "low",
+      "action": "replace with <REPO_ROOT>/<SCRATCH>",
+      "decision": "import_now"
+    },
+    {
+      "source_path": "issue-archive/issue-10-hitl-receipt-lost-after-refresh.md",
+      "type": "absolute_paths",
+      "count": 1,
+      "severity": "low",
+      "action": "replace with <REPO_ROOT>/<SCRATCH>",
+      "decision": "excluded_by_policy"
+    },
+    {
+      "source_path": "_cu-composer-project-r26/browser/final/report.md",
+      "type": "absolute_paths",
+      "count": 3,
+      "severity": "low",
+      "action": "replace with <REPO_ROOT>/<SCRATCH>",
+      "decision": "import_now"
+    },
+    {
+      "source_path": "_cu-composer-project-r26/browser/final/report.md",
+      "type": "localhost_ports",
+      "count": 1,
+      "severity": "low",
+      "action": "replace with <LOCAL_ENDPOINT> or remove",
+      "decision": "import_now"
+    },
+    {
+      "source_path": "_cu-composer-decisions-r26/ci-diagnosis/diagnosis.md",
+      "type": "absolute_paths",
+      "count": 1,
+      "severity": "low",
+      "action": "replace with <REPO_ROOT>/<SCRATCH>",
+      "decision": "import_as_historical"
+    },
+    {
+      "source_path": "_cu-composer-decisions-r26/ci-diagnosis/diagnosis.md",
+      "type": "session_ids",
+      "count": 1,
+      "severity": "low",
+      "action": "replace with <SESSION_ID>",
+      "decision": "import_as_historical"
+    },
+    {
+      "source_path": "_cu-composer-decisions-r26/ci-diagnosis/diagnosis.md",
+      "type": "wire_paths",
+      "count": 1,
+      "severity": "low",
+      "action": "replace with <SESSIONS_ROOT>/<SESSION_ID>/agents/<AGENT>/wire.jsonl",
+      "decision": "import_as_historical"
+    },
+    {
+      "source_path": "_cu-collapse-fix/verification/report-final.md",
+      "type": "absolute_paths",
+      "count": 8,
+      "severity": "low",
+      "action": "replace with <REPO_ROOT>/<SCRATCH>",
+      "decision": "import_now"
+    },
+    {
+      "source_path": "_cu-collapse-fix/verification/report-final.md",
+      "type": "localhost_ports",
+      "count": 5,
+      "severity": "low",
+      "action": "replace with <LOCAL_ENDPOINT> or remove",
+      "decision": "import_now"
+    },
+    {
+      "source_path": "issue-archive/issue-1-navigate_to-select_definitions绑定竞态.md",
+      "type": "org_name",
+      "count": 1,
+      "severity": "high",
+      "action": "replace with <ORG>",
+      "decision": "excluded_by_policy"
+    },
+    {
+      "source_path": "r163-demo/INDEX.md",
+      "type": "absolute_paths",
+      "count": 1,
+      "severity": "low",
+      "action": "replace with <REPO_ROOT>/<SCRATCH>",
+      "decision": "import_as_historical"
+    },
+    {
+      "source_path": "r163-demo/INDEX.md",
+      "type": "localhost_ports",
+      "count": 1,
+      "severity": "low",
+      "action": "replace with <LOCAL_ENDPOINT> or remove",
+      "decision": "import_as_historical"
+    },
+    {
+      "source_path": "_cu-card-project/verification/report-final.md",
+      "type": "absolute_paths",
+      "count": 2,
+      "severity": "low",
+      "action": "replace with <REPO_ROOT>/<SCRATCH>",
+      "decision": "import_now"
+    },
+    {
+      "source_path": "_cu-card-project/verification/report-final.md",
+      "type": "localhost_ports",
+      "count": 2,
+      "severity": "low",
+      "action": "replace with <LOCAL_ENDPOINT> or remove",
+      "decision": "import_now"
+    },
+    {
+      "source_path": "_shared/cu-双卡直发-报告.md",
+      "type": "absolute_paths",
+      "count": 2,
+      "severity": "low",
+      "action": "replace with <REPO_ROOT>/<SCRATCH>",
+      "decision": "evidence_only"
+    },
+    {
+      "source_path": "_shared/cu-双卡直发-报告.md",
+      "type": "session_ids",
+      "count": 2,
+      "severity": "low",
+      "action": "replace with <SESSION_ID>",
+      "decision": "evidence_only"
+    },
+    {
+      "source_path": "_shared/cu-双卡直发-报告.md",
+      "type": "wire_paths",
+      "count": 2,
+      "severity": "low",
+      "action": "replace with <SESSIONS_ROOT>/<SESSION_ID>/agents/<AGENT>/wire.jsonl",
+      "decision": "evidence_only"
+    }
+  ],
+  "manual_attention": [
+    "23 份拟入库件全部含本机绝对路径；其中 8 份还含会话 id / wire.jsonl 路径。入库前必须按 DC-08 与 docs/README.md §命名纪律改写为 <REPO_ROOT> / <SCRATCH> / <SESSIONS_ROOT>/<SESSION_ID>，否则 docs job 与 pre-commit 会阻断。",
+    "DC-21 与 archive-manifest 存在口径冲突：archive-manifest 把 14 个 issue 存档列为 missing_candidate 并建议 docs/evidence/issues/，但 DC-21 明确“存证（仓库外）后删除”。本次按 DC-21 排除；若要让 issue 正文可检索，须先由用户修订 DC-21，再按脱敏口径导入（issue #1~#6 仍含组织名 <ORG> 与绝对路径）。",
+    "r163-demo/INDEX.md 仅到 2026-10-16，未含 10-17 r15 修订与 10-18 主题单文件新规；只能作为历史登记件入库并加横幅，不可当现行版本口径。",
+    "5 份 r163 audit 表的锚点对应 2026-10-16 旧版 demo，仓库 hitl-interrupts 已升 r15，锚点集已变；本次按过期锚点排除。若需审计证据，应对当前主题单文件重跑 audit。",
+    "session-index 的 54 个“可能遗漏”中，41 个已有仓内对应件（39 完整 + 2 部分；多数为补档-*.md 重命名入库），4 个属 DC-21 issue 存档，7 个是未进入 44 候选的旧批过程证据（T4/R96/R136/vitest 施工等），1 个是原型仓文档，1 个是交接提示词。若要求“全历史过程报告零遗漏”，需第二轮候选扫描（当前 44 候选未覆盖 t4-recheck、step-wizard-pkg、vitest-run 等根）。",
+    "external-candidates 全局扫描发现 1 个疑似密钥形态命中：handoff-archive/交接提示词-2026-10-13-当前态.md（openai_sk 形态）。该件不在 44 候选、也不在本次入库清单；未输出值。建议确认是否为真实密钥并按需轮换。",
+    "本次 44 候选中未发现 API key / Bearer token / 邮箱；主要隐私风险是本机绝对路径、会话 id、wire 路径、localhost/PID 与 issue #1~#6 的组织名。",
+    "docs/demo/README.md 现有 DEMO-STALE-PATH（v7.8 路径）与 docs/research/README.md 的 RESEARCH-INDEX-GAP（17 件未逐件索引）是既有异常，不是本次导入造成；建议同批或下一批修正。"
+  ],
+  "limitations": [
+    "本对账只读；未对拟入库件做实际脱敏改写，未运行 check-docs。",
+    "内容等价判断以标题/结构/大小差（通常 200-500 B 的脱敏差）为依据；未对每份 40KB 级报告做逐字节 diff。",
+    "44 候选之外的旧批过程报告（T4/R96/R136/vitest 施工等）未纳入本次入库清单，仅在 54 会话映射中标注。"
+  ],
+  "cross_checks": {
+    "archive-manifest-15-missing": "15 = 14 个 issue 存档 + r163-demo/INDEX.md；本对账裁决 = 14 excluded_by_policy + 1 import_as_historical。",
+    "session-index-54-vs-44": "54 个会话与 23 份 10-17~19 报告候选无交集；其中 4 个 issue 修复会话映射到 44 中的 issue 存档候选（按 DC-21 排除）。54 中 41 个已有仓内对应件（39 完整 + 2 部分）。",
+    "repo-state": "对账前后 git HEAD 均为 0900cf0c3a53ed7e0bc30a270b55721eeca8a345；工作树仅有开工前既存 ?? data/。"
+  }
+}
