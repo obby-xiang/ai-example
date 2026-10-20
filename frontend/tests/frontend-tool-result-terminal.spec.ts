@@ -124,14 +124,14 @@ function resultFrame(
   } as Parameters<typeof applyFrameToParts>[1]
 }
 
-/** runs/current 的"有一轮挂起等待"快照（单条 FRONTEND 待执行 —— 非 GF 路的现场）。 */
+/** runs/current 的"有一轮挂起等待"快照（单条 FRONTEND 待执行 —— 非 GF 路的现场；请求帧已发）。 */
 function suspendedFrontendSnapshot(): AiRunCurrent {
   return {
     found: true,
     runId: 'run-old',
     snapshotStatus: 'PENDING',
     pendingEntries: [
-      { toolCallId: 'n1', entryStatus: 'PENDING', kind: 'FRONTEND', name: 'probe.unknown-nongf', arguments: '{}' }
+      { toolCallId: 'n1', entryStatus: 'PENDING', kind: 'FRONTEND', name: 'probe.unknown-nongf', arguments: '{}', req: true }
     ],
     unresolvedExternal: [],
     awaitingExternal: true,

@@ -396,6 +396,31 @@ public class RunStore {
 		}
 	}
 
+	/**
+	 * L0（2026-10-21 裁决 A）：给待决条目置「请求帧已发」位（{@link PendingToolCall#getReq()}）。
+	 *
+	 * <p>时机 = {@code ConfirmGate#await} <b>发射请求帧之前</b>（先置位、后发帧）：反过来先发帧再置位，
+	 * "帧已到、位未落"的窗口里刷新会拿不到这张卡；先置位最坏只是"位已落、帧紧跟着发出"，
+	 * 刷新重建出的卡与随后到达的帧同形，无副作用。
+	 *
+	 * <p>写入是"读 → 判 → 写"：<b>只对仍 {@code PENDING} 的条目置位</b> —— 已决条目的位没有消费者
+	 * （前端只为 PENDING 条目建卡），而把已决条目回写成未决会丢决策。同进程内的决策写入与本次置位
+	 * 由 {@code ConfirmGate} 的提交锁串行化（见 {@code ConfirmGate#reserveRequestSlot}）。
+	 *
+	 * @param atMs 置位时刻（调用方单点取钟，便于与帧内时间对账）
+	 * @return 置位后的条目；条目不存在返回 null
+	 */
+	public PendingToolCall markRequestEmitted(String runId, String toolCallId, long atMs) {
+		PendingToolCall pending = pending(runId, toolCallId);
+		if (pending == null || !PendingToolCall.PENDING.equals(pending.getStatus())) {
+			return pending;
+		}
+		pending.setReq(Boolean.TRUE);
+		pending.setReqAtMs(atMs);
+		putPending(runId, pending);
+		return pending;
+	}
+
 	// ── 执行认领 / 台账（跨进程不重放） ────────────────────────────────────
 
 	/**

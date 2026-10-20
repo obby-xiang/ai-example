@@ -458,6 +458,13 @@ public class AiController {
 			entry.put("kind", pending.getKind());
 			entry.put("name", pending.getName());
 			entry.put("arguments", pending.getArguments());
+			// L0（2026-10-21 裁决 A/B）：刷新恢复的两个判据原样透出 ——
+			// req = 该条目的请求帧（confirm_request / frontend_tool_request）<b>真的发过</b>，
+			// 由 ConfirmGate 在发射前经 RunStore#markRequestEmitted 置位；kind 是<b>三值原文</b>
+			// （CONFIRM/FRONTEND/BACKEND），前端只为 CONFIRM/FRONTEND 且 req=true 的 PENDING 条目建卡。
+			// 缺 req 键 = 旧实例/旧数据，前端按 false 处理（宁可少一张卡，不可让用户点到未生效的卡）。
+			entry.put("req", Boolean.TRUE.equals(pending.getReq()));
+			entry.put("reqAtMs", pending.getReqAtMs() > 0L ? pending.getReqAtMs() : null);
 			// R-160 M3：透出到期口径。去超时裁决后前端已退役倒计时/「等待人工确认」静态兜底，
 			// 快照里的 expiresAt/atMs 只作对账口径（null = 无期限：确认门/表单/旧数据）。
 			// 字段保留是兼容与取证需要（前端 utils/parts 仍原样携带，不据此置灰按钮）。

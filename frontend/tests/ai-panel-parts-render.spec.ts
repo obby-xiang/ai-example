@@ -381,7 +381,7 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
       runId: 'run-pf',
       snapshotStatus: 'PENDING',
       pendingEntries: [
-        { toolCallId: 'rpf1', entryStatus: 'PENDING', kind: 'CONFIRM', name: 'start_publish', arguments: '{"taskId":5}', preflight: PREFLIGHT }
+        { toolCallId: 'rpf1', entryStatus: 'PENDING', kind: 'CONFIRM', name: 'start_publish', arguments: '{"taskId":5}', req: true, preflight: PREFLIGHT }
       ],
       unresolvedExternal: ['rpf1'],
       awaitingExternal: true,
@@ -2599,7 +2599,7 @@ describe('R-160：HITL 三缺陷（回读恢复 / 回执独立块 / 倒计时续
     const expiresAt = atMs + 60_000
     api.runsCurrent.mockResolvedValue({
       found: true, runId: 'run-1', snapshotStatus: 'SUSPENDED',
-      pendingEntries: [{ toolCallId: 'c1', entryStatus: 'PENDING', kind: 'CONFIRM', name: 'start_export', arguments: '{"taskId":1}', expiresAt, atMs }],
+      pendingEntries: [{ toolCallId: 'c1', entryStatus: 'PENDING', kind: 'CONFIRM', name: 'start_export', arguments: '{"taskId":1}', req: true, expiresAt, atMs }],
       unresolvedExternal: ['c1'], awaitingExternal: true, archiveMaxSeq: 0
     })
     api.reattachRun.mockImplementation(() => new Promise(() => {}))
@@ -2622,7 +2622,7 @@ describe('R-160：HITL 三缺陷（回读恢复 / 回执独立块 / 倒计时续
     store.historyLoaded = true
     api.runsCurrent.mockResolvedValue({
       found: true, runId: 'run-1', snapshotStatus: 'SUSPENDED',
-      pendingEntries: [{ toolCallId: 'c1', entryStatus: 'PENDING', kind: 'CONFIRM', name: 'start_export', arguments: '{"taskId":1}', expiresAt: 1_700_000_240_000, atMs: 1_700_000_000_000 }],
+      pendingEntries: [{ toolCallId: 'c1', entryStatus: 'PENDING', kind: 'CONFIRM', name: 'start_export', arguments: '{"taskId":1}', req: true, expiresAt: 1_700_000_240_000, atMs: 1_700_000_000_000 }],
       unresolvedExternal: ['c1'], awaitingExternal: true, archiveMaxSeq: 0
     })
     api.reattachRun.mockImplementation(() => new Promise(() => {}))
@@ -2642,7 +2642,7 @@ describe('R-160：HITL 三缺陷（回读恢复 / 回执独立块 / 倒计时续
     store.historyLoaded = true
     api.runsCurrent.mockResolvedValue({
       found: true, runId: 'run-1', snapshotStatus: 'SUSPENDED',
-      pendingEntries: [{ toolCallId: 'c1', entryStatus: 'PENDING', kind: 'CONFIRM', name: 'start_export', arguments: '{"taskId":1}' }],
+      pendingEntries: [{ toolCallId: 'c1', entryStatus: 'PENDING', kind: 'CONFIRM', name: 'start_export', arguments: '{"taskId":1}', req: true }],
       unresolvedExternal: ['c1'], awaitingExternal: true, archiveMaxSeq: 0
     })
     api.reattachRun.mockImplementation(() => new Promise(() => {}))

@@ -23,6 +23,8 @@ import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import java.util.List;
 import java.util.Map;
 
+import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.nullValue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -168,6 +170,47 @@ class AiControllerRunsCurrentTest {
 		mockMvc.perform(get("/api/ai/runs/current").param("sessionId", "s-1"))
 			.andExpect(status().isOk())
 			.andExpect(jsonPath("$.data.pendingEntries[0].preflight").doesNotExist());
+	}
+
+	@Test
+	void pendingEntryCarriesRequestEmittedFlagForRefreshRestore() throws Exception {
+		// L0（2026-10-21 裁决 A）：刷新恢复只为"请求帧已发"的条目建卡 —— 该位必须随本端点透出。
+		PendingToolCall call = pending("c-1", PendingToolCall.PENDING, PendingToolCall.KIND_CONFIRM);
+		seedIndex("s-1", "r-1", RunSnapshot.SUSPENDED, List.of(call));
+
+		// 未发射（旧实例 / 还没轮到的卡）：req=false、reqAtMs=null（**键仍在、值为 null** ——
+		// N-1：`doesNotExist()` 对显式 null 与缺键都通过，区分不开，故用 nullValue() 断言"键在而值空"）
+		mockMvc.perform(get("/api/ai/runs/current").param("sessionId", "s-1"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.pendingEntries[0].req").value(false))
+			.andExpect(jsonPath("$.data.pendingEntries[0].reqAtMs").value(nullValue()))
+			.andExpect(jsonPath("$.data.pendingEntries[0].keys()").value(hasItem("reqAtMs")));
+
+		// 发射后：req=true + 置位时刻
+		call.setReq(Boolean.TRUE);
+		call.setReqAtMs(1_790_000_000_000L);
+		mockMvc.perform(get("/api/ai/runs/current").param("sessionId", "s-1"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.pendingEntries[0].req").value(true))
+			.andExpect(jsonPath("$.data.pendingEntries[0].reqAtMs").value(1_790_000_000_000L));
+	}
+
+	@Test
+	void pendingEntriesCarryTheRealThreeValuedKind() throws Exception {
+		// L0（2026-10-21 裁决 B）：kind 是**三值原文** —— 未执行的后端条目同样是 PENDING，
+		// 前端按 kind 过滤（旧前端把它整批画成前端挂起卡），本端点不得做二值折叠。
+		seedIndex("s-1", "r-1", RunSnapshot.SUSPENDED,
+				List.of(pending("c-confirm", PendingToolCall.PENDING, PendingToolCall.KIND_CONFIRM),
+						pending("c-front", PendingToolCall.PENDING, PendingToolCall.KIND_FRONTEND),
+						pending("c-back", PendingToolCall.PENDING, PendingToolCall.KIND_BACKEND)));
+
+		mockMvc.perform(get("/api/ai/runs/current").param("sessionId", "s-1"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.pendingEntries[0].kind").value(PendingToolCall.KIND_CONFIRM))
+			.andExpect(jsonPath("$.data.pendingEntries[1].kind").value(PendingToolCall.KIND_FRONTEND))
+			.andExpect(jsonPath("$.data.pendingEntries[2].kind").value(PendingToolCall.KIND_BACKEND))
+			// BACKEND 条目不计入 unresolvedExternal（既有口径不变）
+			.andExpect(jsonPath("$.data.unresolvedExternal.length()").value(2));
 	}
 
 	private void seedIndex(String sessionId, String runId, String status, List<PendingToolCall> pendings) {

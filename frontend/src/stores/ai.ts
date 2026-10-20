@@ -1253,6 +1253,13 @@ export const useAiStore = defineStore('ai', {
      * ⇒ 紧接着的 resumeSnapshotStream 会 abort 掉在跑轮自己的连接（死锁链）。
      *
      * **规则：本函数内任何新增 await 之后、写回之前都必须重新对账**（对账口径见下方守卫）。
+     *
+     * **L0（2026-10-21）：只为"请求帧已发"的待决条目建卡。** 判据三条并列 ——
+     * `entryStatus === 'PENDING'`、`kind ∈ {CONFIRM, FRONTEND}`（快照给的是**三值原文**，
+     * `BACKEND` 条目后端直接执行、从不弹卡）、`req === true`（后端 `ConfirmGate` 在发射
+     * `confirm_request` / `frontend_tool_request` **之前**置位）。一批多调用挂起时请求帧是逐条发的，
+     * 只按"条目存在"建卡会画出请求帧还没发出的卡，用户提前点击 ⇒ 决策早于帧。
+     * 未发卡条目不渲染、不新增占位 UI；`suspended` 仍按"存在任意 PENDING 条目"置位（输入禁用语义不变）。
      */
     async restoreSuspendedSnapshot(): Promise<void> {
       const sid = this.sessionId
@@ -1287,17 +1294,31 @@ export const useAiStore = defineStore('ai', {
         }
       }
 
-      // 重建：仅 entryStatus === 'PENDING' 的条目，已决条目不重建挂起卡
-      // （勘误 4 同口径：hasDecidedPendingResidue / isFrameDecidedPendingStatus）
+      // 重建：只认 **PENDING + kind ∈ {CONFIRM, FRONTEND} + req === true**（L0，2026-10-21）
+      // - PENDING：已决条目不重建挂起卡（勘误 4 同口径：hasDecidedPendingResidue / isFrameDecidedPendingStatus）；
+      // - kind：快照里是**三值原文**，BACKEND 条目（后端直接执行、从不弹卡）不是挂起卡 —— 旧代码
+      //   `entry.kind === 'CONFIRM' ? 'CONFIRM' : 'FRONTEND'` 把未执行的后端条目画成了前端挂起卡；
+      // - req：一批多调用挂起时请求帧逐条发，`pendingEntries` 却整批落库 —— 只为**真的发过请求帧**
+      //   的条目建卡，否则会给用户一张"后端还没走到"的卡（点了会提前决策、后端补帧时瞬时复活）。
+      // 未发卡条目不渲染、也不新增占位 UI：`suspended` 由下方"存在任意 PENDING"单独置位（输入禁用语义不变）。
+      const pendingEntries = current.pendingEntries.filter((entry) => entry.entryStatus === 'PENDING')
+      if (pendingEntries.length > 0) {
+        // 输入禁用语义只认"还有未决条目"，与 req / kind 无关
+        this.suspended = true
+        this.activeRunId = current.runId
+      }
       let host: ChatMessage | null = null
-      for (const entry of current.pendingEntries) {
-        if (entry.entryStatus !== 'PENDING') {
+      for (const entry of pendingEntries) {
+        if (entry.kind !== 'CONFIRM' && entry.kind !== 'FRONTEND') {
+          continue
+        }
+        if (entry.req !== true) {
           continue
         }
         if (this.hasDecidedPendingResidue(entry.toolCallId)) {
           continue
         }
-        const kind = entry.kind === 'CONFIRM' ? 'CONFIRM' : 'FRONTEND'
+        const kind = entry.kind
         // 宿主消息：优先镜像/历史里已持该工具**段**的消息；否则最后一条助手消息；都没有才
         // append 一条空助手消息作宿主 —— 唯一允许的新消息形态（历史/镜像皆无宿主），
         // 不复制历史工具卡、无双渲染。
@@ -1343,21 +1364,39 @@ export const useAiStore = defineStore('ai', {
           }
           // schema 非法：只留挂起卡（用户可取消），不武装表单态
         }
-        this.suspended = true
-        this.activeRunId = current.runId
       }
 
       if (host) {
         // 增量续收：lastSeq = archiveMaxSeq 只收新帧（见 resumeSnapshotStream）
         void this.resumeSnapshotStream(current.runId, current.archiveMaxSeq, host.id)
+        return
       }
+      // I-1（2026-10-21 收口修）：**无卡也要挂流** —— 挂起态下"没有可重建的卡"不等于"没有后续帧"。
+      // 真实窗口：卡 1 已决 → 后端先执行卡 1 的工具（时长可达数秒～数分钟，期间快照仍 SUSPENDED、
+      // 卡 2 一直 `req=false`）→ 才轮到卡 2 发请求帧。刷新落在这段里时本函数此前直接返回 ⇒
+      // 卡 2 的请求帧无人接收（只入归档），页面停在"输入禁用 + 上方无卡"死胡同（只能停止或再刷新）。
+      // 现在照常以 `archiveMaxSeq` 挂上差量续收：请求帧到达即按实时路径建卡（`confirm_request`
+      // handler），不新增任何占位 UI。宿主消息在**首个帧到达时**由 `handleFrame` 惰性取当前助手消息
+      // （有则续写、无则创建），故不传 `hostMessageId` —— 空转期间不留空气泡。
+      if (!this.suspended || !current.runId) {
+        return
+      }
+      const lastAssistant = [...this.messages].reverse().find((item) => item.role === 'assistant')
+      if (lastAssistant) {
+        void this.resumeSnapshotStream(current.runId, current.archiveMaxSeq, lastAssistant.id)
+        return
+      }
+      void this.resumeSnapshotStream(current.runId, current.archiveMaxSeq)
     },
 
     /**
      * T2b-D#3 增量续收（仿 reattachActive，但不新起消息 —— 挂起卡宿主已由快照重建就地就位）。
      * lastSeq = archiveMaxSeq：服务端只补发增量帧，禁全量回放（红队 A1/A3/B3）。
+     *
+     * @param hostMessageId 宿主消息 id；**省略** = 首帧到达时由 `handleFrame` 取当前助手消息
+     *   （有则续写、无则创建）—— 供 I-1 的"无卡但挂起"路径使用（不预建空气泡）
      */
-    async resumeSnapshotStream(runId: string, lastSeq: number, hostMessageId: string): Promise<void> {
+    async resumeSnapshotStream(runId: string, lastSeq: number, hostMessageId?: string): Promise<void> {
       // B1 收口修（C-1）：本入口是**同一轮**的续收连接（挂起收流 → 决策后重连 / 刷新恢复），
       // 慢前端工具的结局仍属于本轮 ⇒ 不递增 `roundEpoch`（否则工具回灌会在重连后被误丢）。
       const previous = currentAbort
@@ -1370,7 +1409,9 @@ export const useAiStore = defineStore('ai', {
       this.stopped = false
       const controller = new AbortController()
       currentAbort = controller
-      activeRoundHostId = hostMessageId
+      // 无宿主（I-1「无卡挂流」）：置 null —— `handleFrame` 收到 `assistantId === undefined` 时
+      // 按"本轮"处理并惰性取用当前助手消息，故 null 与 undefined 在此等价。
+      activeRoundHostId = hostMessageId ?? null
       /** R6（issue#5）：续收连接是否仍是"当前轮"（旧连接的断流提示不写进新轮）。 */
       const isCurrentRound = (): boolean => currentAbort === controller
       // 防双连接：**先换身份再中止旧连接** —— 旧连接的收尾此时判定为"非本轮"，

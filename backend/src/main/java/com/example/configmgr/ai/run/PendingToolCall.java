@@ -142,6 +142,23 @@ public class PendingToolCall {
 	private Long atMs;
 
 	/**
+	 * L0（2026-10-21 用户直裁）：<b>请求帧是否真的发过</b>。
+	 *
+	 * <p>一批多调用挂起时，请求帧是<b>逐条</b>发的（{@code ConfirmGate#await} 逐个发自己那张卡
+	 * 再断流）；{@code saveSuspended} 却把<b>整批</b>待决条目一起写进 Redis —— 于是"条目存在"
+	 * 不等于"卡已送达"。刷新恢复若按条目存在就建卡，用户会拿到一张请求帧还没发出的卡并提前点击
+	 * （决策早于帧，后端走到该条目时又补发一次请求帧 ⇒ 卡面瞬时复活再被收敛）。
+	 *
+	 * <p>取值 = {@code ConfirmGate#await} 在<b>发射请求帧之前</b>置位（{@link RunStore#markRequestEmitted}）；
+	 * {@code null} = 旧数据（本字段引入前的条目）/ 从未发射。刷新恢复只认 {@code true}
+	 * （{@code GET /api/ai/runs/current} 的 {@code req} 字段）。
+	 */
+	private Boolean req;
+
+	/** {@link #req} 置位的时刻（服务端钟；0 = 未发射/旧数据）。 */
+	private long reqAtMs;
+
+	/**
 	 * F5 只读预检报告（{@code {target, checks, impact, reportHash}}，见
 	 * {@code gate/ToolPreflightService}）：进确认门的工具在挂起<b>之前</b>产出的那份结论，
 	 * 随 {@code suspended} 帧的 {@code toolCalls[]} 与 {@code confirm_request} 帧下发。
@@ -204,6 +221,8 @@ public class PendingToolCall {
 		out.put("resolvedAtMs", this.resolvedAtMs);
 		out.put("expiresAt", this.expiresAt);
 		out.put("atMs", this.atMs);
+		out.put("req", Boolean.TRUE.equals(this.req));
+		out.put("reqAtMs", this.reqAtMs);
 		out.put("preflight", this.preflight);
 		return out;
 	}

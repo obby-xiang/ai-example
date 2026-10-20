@@ -67,6 +67,13 @@ import java.util.concurrent.TimeUnit;
  * ① 保活 SSE；② 续期轮键与 session 索引；③ 实测证据里"挂起期确实还有帧"由此可证。
  * 心跳<b>不再携带</b>等待上限（确认门/表单卡没有到期时刻，前端据此不武装倒计时）。
  *
+ * <h2>刷新恢复口径（L0，2026-10-21 用户直裁）</h2>
+ * 一批多调用的请求帧是<b>逐条</b>发的，{@code saveSuspended} 却把整批条目一起外置 ⇒「条目存在」不等于
+ * 「卡已送达」。两条口径由此而定：①<b>发帧前先置位</b>（{@link RunStore#markRequestEmitted} 落
+ * {@code req=true} + 时刻），前端刷新只为 {@code req=true} 的 {@code CONFIRM}/{@code FRONTEND} 条目建卡；
+ * ②<b>已决则不补发</b>（{@link #reserveRequestSlot}）：条目在到达 {@code await} 前已被决策时，跳过请求帧
+ * 与挂起断连、直接消费既有决策 —— 否则前端会把已收敛的卡瞬时复活再被收敛。实时路径（发帧与 handler）不受影响。
+ *
  * <h2>执行的幂等（SP-02 E2 语义）</h2>
  * 本类只负责"决策落库"，<b>不在</b>决策写入时执行工具 —— 执行与"已执行"标记的关系见
  * {@link RunStore#claimExecution}：认领发生在执行<b>之前</b>且原子，从而消除
@@ -298,6 +305,15 @@ public class ConfirmGate {
 	}
 
 	private PendingToolCall await(String runId, PendingToolCall pending, boolean confirm) {
+		// ===== L0（2026-10-21 裁决 A/C）：先判已决，再给请求帧"发车位" =====
+		// ①已决（另一页签/旧客户端早已提交该 toolCallId）：<b>不补发请求帧</b>、不断流，直接消费既有决策
+		//   —— 旧行为是无条件 emit，前端会把已收敛的卡瞬时复活成 pending、再被随后的结局帧收敛；
+		// ②未决：先把 Redis 条目的 req 位置上，再发帧（刷新恢复只认 req=true 的卡，见
+		//   AiController#runsCurrent 与前端 restoreSuspendedSnapshot）。
+		PendingToolCall decided = reserveRequestSlot(runId, pending);
+		if (decided != null) {
+			return decided;
+		}
 		// 等待上限（null = 无上限；只有即时执行类前端工具有值）
 		Integer timeoutSeconds = this.suspendWaitSeconds(pending);
 		String key = key(runId, pending.getToolCallId());
@@ -398,6 +414,66 @@ public class ConfirmGate {
 				log.debug("注销取消监听者失败 runId={}：{}", runId, ex.getMessage());
 			}
 		}
+	}
+
+	/**
+	 * L0（2026-10-21 裁决 A/C）：请求帧的"发车位"。
+	 *
+	 * <p>两件事在<b>同一把提交锁内</b>完成（与 {@link #submitDecision} / {@link #submitFrontendResult}
+	 * 的"落库 → 发回执帧 → 唤醒"共享同一互斥，因此"读到的已决"一定伴随已经写出去的回执帧）：
+	 * <ol>
+	 * <li><b>已决则不发</b>：条目状态已非 {@code PENDING} ⇒ 返回该条目，调用方直接消费既有决策
+	 *     （批准 → 执行；拒绝 → 未执行回填；前端结果 → 用既有 resultText），<b>不发请求帧、不断流</b>
+	 *     —— 旧行为在这里无条件 {@code confirmRequest}/{@code frontendToolRequest} + {@code completeSubscriptions}，
+	 *     前端会把一张早已收敛的卡瞬时复活；</li>
+	 * <li><b>未决则置位</b>：{@link RunStore#markRequestEmitted} 在 Redis 条目上落 {@code req=true} + 时刻，
+	 *     随后 {@code await} 才发帧。刷新恢复据此只重建"真的发过请求帧"的卡。</li>
+	 * </ol>
+	 *
+	 * <p>预登记闸门（{@link #arm}）在已决分支一并归还：本方法不会进入等待，闸门留着会让
+	 * {@link #hasActiveLatch} 在整批结算前恒真，挡住本进程的死卡兜底。归还动作与 {@code await}
+	 * 的 {@code finally} 同序（先摘闸门、后摘预登记标记）。
+	 *
+	 * <p><b>M-1（2026-10-21 收口修）：置位后要再判一次。</b>{@link RunStore#markRequestEmitted} 是
+	 * 「读 → 判 → 写」而非原子 CAS：读时还是 {@code PENDING}、写前被另一实例决策，返回的就是一个
+	 * <b>已决</b>条目（{@code RunStore} 原样返回、不覆写）。此时若照常发帧，裁决 C 的洞会在更窄的
+	 * 跨进程窗口里复发 —— 故写后复判，已决则按已决消费（同样不发帧、不断流、归还闸门）。
+	 *
+	 * @return 已决条目（调用方直接消费）；未决返回 null（请求帧已获准发射、req 位已落）
+	 */
+	private PendingToolCall reserveRequestSlot(String runId, PendingToolCall pending) {
+		synchronized (this.submitLock) {
+			PendingToolCall fresh = this.store.pending(runId, pending.getToolCallId());
+			if (fresh != null && fresh.resolved()) {
+				return consumeDecided(runId, pending.getToolCallId(), fresh);
+			}
+			long atMs = System.currentTimeMillis();
+			PendingToolCall marked = this.store.markRequestEmitted(runId, pending.getToolCallId(), atMs);
+			if (marked != null && marked.resolved()) {
+				// 读后写前被决（跨进程；单实例由本锁串行化，不可达）：置位作废，按已决消费
+				return consumeDecided(runId, pending.getToolCallId(), marked);
+			}
+			// 内存副本同步：同一批里的日志/后续判断读到的是"已发帧"的条目，而不是 saveSuspended 那版
+			pending.setReq(Boolean.TRUE);
+			pending.setReqAtMs(marked == null || marked.getReqAtMs() == 0L ? atMs : marked.getReqAtMs());
+			return null;
+		}
+	}
+
+	/**
+	 * 已决分支的统一收尾：归还 {@link #arm} 预登记但不会进入等待的闸门（先摘闸门、后摘预登记标记，
+	 * 与 {@code disarm} / {@code await.finally} 同序），留日志后把条目交给调用方消费。
+	 */
+	private PendingToolCall consumeDecided(String runId, String toolCallId, PendingToolCall decided) {
+		String key = key(runId, toolCallId);
+		Latch latch = this.latches.get(key);
+		if (latch != null) {
+			this.latches.remove(key, latch);
+		}
+		this.armedKeys.remove(key);
+		log.info("条目已决，跳过请求帧发射 runId={} toolCallId={} status={}（直接消费既有决策）", runId, toolCallId,
+				decided.getStatus());
+		return decided;
 	}
 
 	/**

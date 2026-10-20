@@ -36,14 +36,21 @@ function deferred<T>() {
   return { promise, resolve }
 }
 
-/** 后端 runs/current 的"有一轮挂起等待"快照（单条 CONFIRM 待确认）。 */
+/** 后端 runs/current 的"有一轮挂起等待"快照（单条 CONFIRM 待确认，请求帧已发）。 */
 function suspendedSnapshot(overrides: Partial<AiRunCurrent> = {}): AiRunCurrent {
   return {
     found: true,
     runId: 'run-old',
     snapshotStatus: 'PENDING',
     pendingEntries: [
-      { toolCallId: 't-old', entryStatus: 'PENDING', kind: 'CONFIRM', name: 'danger_tool', arguments: '{"x":1}' }
+      {
+        toolCallId: 't-old',
+        entryStatus: 'PENDING',
+        kind: 'CONFIRM',
+        name: 'danger_tool',
+        arguments: '{"x":1}',
+        req: true
+      }
     ],
     unresolvedExternal: [],
     awaitingExternal: true,
@@ -198,7 +205,15 @@ describe('restoreSuspendedSnapshot 的 await 后二次对账', () => {
     }
     api.runsCurrent.mockResolvedValue(suspendedSnapshot({
       pendingEntries: [
-        { toolCallId: 't-pf', entryStatus: 'PENDING', kind: 'CONFIRM', name: 'start_publish', arguments: '{"taskId":5}', preflight }
+        {
+          toolCallId: 't-pf',
+          entryStatus: 'PENDING',
+          kind: 'CONFIRM',
+          name: 'start_publish',
+          arguments: '{"taskId":5}',
+          req: true,
+          preflight
+        }
       ]
     }))
 

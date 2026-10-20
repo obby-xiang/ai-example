@@ -528,6 +528,17 @@ export interface AiRunCurrentEntry {
   name: string
   /** 入参 JSON 字符串（原样，展示/解析由前端做） */
   arguments?: string | null
+  /**
+   * L0（2026-10-21）：该条目的请求帧（`confirm_request` / `frontend_tool_request`）**真的发过**。
+   *
+   * 一批多调用挂起时请求帧是逐条发的，`pendingEntries` 却是整批一起落库的 —— 刷新恢复只为
+   * `req === true` 的条目建卡（`entryStatus === 'PENDING'` 且 `kind ∈ {CONFIRM, FRONTEND}` 且
+   * `req === true`），否则会画出一张"后端还没走到、请求帧还没发出"的卡并被提前点击。
+   * 缺键 / 旧数据 = false（宁可少一张卡，不可让用户点到未生效的卡）；已决条目恒 false。
+   */
+  req?: boolean
+  /** 上述置位时刻（服务端钟；null/缺键 = 未发射或旧数据） */
+  reqAtMs?: number | null
   /** R-160 M3：挂起到期口径（服务端钟；保留作对账/回滚，前端不再据此折算任何倒计时） */
   expiresAt?: number | null
   /**
