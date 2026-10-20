@@ -324,6 +324,7 @@ export function isReadOnlyCard(part: ToolPart): boolean {
  * - 表单系（GF）两态：已提交 / 已取消。
  *
  * 判定序 = 决策元数据优先、段状态兜底（与 R-160 M2「decision 缺省回退 status」同源）：
+ * - decision=timeout ⇒ 已超时（2A 挂账①：超时是**第三种门结局** —— 闸门未开、本次未执行）；
  * - decision=approved：status=failed ⇒ 执行失败（K3：失败是执行结果，不是决策结果）；
  * - decision=rejected ⇒ 已拒绝；
  * - 无 decision 的历史段：succeeded/running ⇒ 已批准、failed ⇒ 执行失败、rejected ⇒ 已拒绝、
@@ -337,6 +338,9 @@ export type ReadOnlyState = 'approved' | 'rejected' | 'expired' | 'failed' | 'su
 export function readOnlyStateOf(part: ToolPart): ReadOnlyState {
   if (part.name === GENERATIVE_FORM_TOOL) {
     return part.status === 'succeeded' ? 'submitted' : 'cancelled'
+  }
+  if (part.decision === 'timeout') {
+    return 'expired'
   }
   if (part.decision === 'approved') {
     return part.status === 'failed' ? 'failed' : 'approved'

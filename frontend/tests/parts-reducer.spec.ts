@@ -25,6 +25,7 @@ import {
   sealTrailingStreamPart,
   upsertToolPart
 } from '@/utils/parts'
+import { cardStatusOf, readOnlyStateOf } from '@/utils/blocks'
 import { useAiStore } from '@/stores/ai'
 
 const api = vi.hoisted(() => ({
@@ -573,5 +574,271 @@ describe('R-158 ⑪：deriveCopyText 复制口径（段间换行）', () => {
     const toolOnly = makeMessage()
     applyFrameToParts(toolOnly, { type: 'tool_start', toolCallId: 'c1', name: 'probe_tool', kind: 'BACKEND', args: '{}' })
     expect(deriveCopyText(toolOnly)).toBe('')
+  })
+})
+
+/**
+ * 2A 挂账剩余两项（用户 2026-10-20 批准）：
+ * ① 实时 confirm_decision 帧原只看 `approved`，后端超时帧（decision=timeout + approved=false +
+ *   status=TIMEOUT）被一律落成 rejected，卡面实时显示「✗ 已拒绝」（刷新后历史表才显示「! 已超时」）；
+ * ② 本地倒计时已落 expired 后，晚到的 TIMEOUT 帧把段覆盖回 rejected（无 first-wins）。
+ * ③ 确认卡批准后工具执行失败（tool_result outcome=failed）→ readOnlyStateOf 的 failed 分支可达。
+ */
+describe('2A 挂账修复：①超时口径（decision/status 优先 + first-wins）与 ③已批准·执行失败', () => {
+  it('①a confirm_decision TIMEOUT 帧（decision=timeout / status=TIMEOUT / approved=false）⇒ 段 expired（「! 已超时」），不是 rejected', () => {
+    const message = makeMessage()
+    applyFrameToParts(message, {
+      type: 'confirm_request',
+      toolCallId: 't1',
+      name: 'danger_tool',
+      args: '{"x":1}',
+      timeoutSeconds: 120,
+      expiresAt: 1_700_000_120_000,
+      atMs: 1_700_000_000_000
+    })
+    applyFrameToParts(message, {
+      type: 'confirm_decision',
+      toolCallId: 't1',
+      name: 'danger_tool',
+      decision: 'timeout',
+      approved: false,
+      status: 'TIMEOUT',
+      reason: 'CONFIRM_TIMEOUT'
+    })
+
+    const part = toolPart(message, 't1')
+    expect(part).toMatchObject({ status: 'expired', decision: 'timeout', requiresAction: false })
+    expect(readOnlyStateOf(part)).toBe('expired')
+    expect(cardStatusOf(part)).toMatchObject({ key: 'expired', label: '! 已超时', tone: 'warning' })
+  })
+
+  it('①a 负控制：REJECTED 帧仍落 rejected；APPROVED 帧仍落 running（既有口径不动）', () => {
+    const rejected = makeMessage()
+    applyFrameToParts(rejected, { type: 'confirm_request', toolCallId: 'r1', name: 'danger_tool', args: '{}', timeoutSeconds: 120 })
+    applyFrameToParts(rejected, {
+      type: 'confirm_decision', toolCallId: 'r1', name: 'danger_tool', decision: 'reject', approved: false, status: 'REJECTED', reason: '用户拒绝'
+    })
+    expect(toolPart(rejected, 'r1')).toMatchObject({ status: 'rejected', decision: 'rejected', reason: '用户拒绝' })
+    expect(cardStatusOf(toolPart(rejected, 'r1')).label).toBe('✗ 已拒绝')
+
+    const approved = makeMessage()
+    applyFrameToParts(approved, { type: 'confirm_request', toolCallId: 'a1', name: 'danger_tool', args: '{}', timeoutSeconds: 120 })
+    applyFrameToParts(approved, {
+      type: 'confirm_decision', toolCallId: 'a1', name: 'danger_tool', decision: 'approve', approved: true, status: 'APPROVED'
+    })
+    expect(toolPart(approved, 'a1')).toMatchObject({ status: 'running', decision: 'approved', requiresAction: false })
+    expect(cardStatusOf(toolPart(approved, 'a1')).label).toBe('✓ 已批准')
+  })
+
+  it('①a CANCELLED 分支（NIT-1）：decision=cancel / status=CANCELLED ⇒ 段 cancelled、卡面「! 已超时」', () => {
+    const byDecision = makeMessage()
+    applyFrameToParts(byDecision, { type: 'confirm_request', toolCallId: 'c1', name: 'danger_tool', args: '{}', timeoutSeconds: 120 })
+    applyFrameToParts(byDecision, {
+      type: 'confirm_decision', toolCallId: 'c1', name: 'danger_tool', decision: 'cancel', approved: false
+    } as never)
+    const cancelled = toolPart(byDecision, 'c1')
+    // 门卡无「已取消」：段态 cancelled + 无决策元数据，只读态归「已超时」
+    expect(cancelled).toMatchObject({ status: 'cancelled', requiresAction: false })
+    expect(cancelled.decision).toBeUndefined()
+    expect(readOnlyStateOf(cancelled)).toBe('expired')
+    expect(cardStatusOf(cancelled)).toMatchObject({ key: 'expired', label: '! 已超时', tone: 'warning' })
+
+    const byStatus = makeMessage()
+    applyFrameToParts(byStatus, { type: 'confirm_request', toolCallId: 'c2', name: 'danger_tool', args: '{}', timeoutSeconds: 120 })
+    applyFrameToParts(byStatus, {
+      type: 'confirm_decision', toolCallId: 'c2', name: 'danger_tool', decision: 'cancel', approved: false, status: 'CANCELLED'
+    })
+    expect(toolPart(byStatus, 'c2')).toMatchObject({ status: 'cancelled', requiresAction: false })
+    expect(cardStatusOf(toolPart(byStatus, 'c2')).label).toBe('! 已超时')
+  })
+
+  it('MINOR-1 优先序：decision=cancel + status=APPROVED ⇒ 按 approved 归并，不落 cancelled', () => {
+    const message = makeMessage()
+    applyFrameToParts(message, { type: 'confirm_request', toolCallId: 'p1', name: 'danger_tool', args: '{}', timeoutSeconds: 120 })
+    // 后端 cancel 对非 PENDING 条目仍发 decision='cancel' + 真实 status 的帧
+    applyFrameToParts(message, {
+      type: 'confirm_decision', toolCallId: 'p1', name: 'danger_tool', decision: 'cancel', approved: false, status: 'APPROVED'
+    })
+    const part = toolPart(message, 'p1')
+    expect(part).toMatchObject({ status: 'running', decision: 'approved', requiresAction: false })
+    expect(readOnlyStateOf(part)).toBe('approved')
+    expect(cardStatusOf(part)).toMatchObject({ key: 'approved', label: '✓ 已批准' })
+  })
+
+  it('①a 旧帧兼容：decision/status 皆缺时仍按 approved 布尔（true→running、false→rejected，旧口径不动）', () => {
+    const legacyApprove = makeMessage()
+    applyFrameToParts(legacyApprove, { type: 'confirm_request', toolCallId: 'l1', name: 'danger_tool', args: '{}', timeoutSeconds: 120 })
+    applyFrameToParts(legacyApprove, { type: 'confirm_decision', toolCallId: 'l1', name: 'danger_tool', approved: true } as never)
+    expect(toolPart(legacyApprove, 'l1')).toMatchObject({ status: 'running', decision: 'approved' })
+
+    const legacyReject = makeMessage()
+    applyFrameToParts(legacyReject, { type: 'confirm_request', toolCallId: 'l2', name: 'danger_tool', args: '{}', timeoutSeconds: 120 })
+    applyFrameToParts(legacyReject, { type: 'confirm_decision', toolCallId: 'l2', name: 'danger_tool', approved: false } as never)
+    expect(toolPart(legacyReject, 'l2')).toMatchObject({ status: 'rejected', decision: 'rejected' })
+  })
+
+  it('①b first-wins：本地倒计时已落 expired 后晚到的 TIMEOUT 帧不改写已落定结局（保持「! 已超时」）', () => {
+    const message = makeMessage()
+    applyFrameToParts(message, { type: 'confirm_request', toolCallId: 'x1', name: 'danger_tool', args: '{}', timeoutSeconds: 120 })
+    // 与 store.applyGateReceipt 的本地超时作废同形：status=expired + expiredLocally，无决策元数据
+    upsertToolPart(message, {
+      toolCallId: 'x1',
+      name: 'danger_tool',
+      kind2: 'CONFIRM',
+      status: 'expired',
+      expiredLocally: true,
+      requiresAction: false
+    })
+
+    applyFrameToParts(message, {
+      type: 'confirm_decision',
+      toolCallId: 'x1',
+      name: 'danger_tool',
+      decision: 'timeout',
+      approved: false,
+      status: 'TIMEOUT',
+      reason: 'CONFIRM_TIMEOUT'
+    })
+
+    const part = toolPart(message, 'x1')
+    expect(part.status).toBe('expired')
+    expect(part.expiredLocally).toBe(true)
+    expect(part.decision).toBeUndefined()
+    expect(cardStatusOf(part)).toMatchObject({ key: 'expired', label: '! 已超时' })
+  })
+
+  it('③ 确认卡批准（乐观写 decision=approved）→ tool_result outcome=failed 同 toolCallId ⇒ 卡面「已批准 · 执行失败」', () => {
+    const message = makeMessage()
+    applyFrameToParts(message, {
+      type: 'confirm_request',
+      toolCallId: 'f1',
+      name: 'danger_tool',
+      args: '{"x":1}',
+      timeoutSeconds: 120,
+      expiresAt: 1_700_000_120_000,
+      atMs: 1_700_000_000_000
+    })
+    // store.confirm(true) 的乐观置位（点击即写，先于 confirm_decision 帧）
+    upsertToolPart(message, {
+      toolCallId: 'f1',
+      name: 'danger_tool',
+      kind2: 'CONFIRM',
+      status: 'running',
+      decision: 'approved',
+      decidedAt: 1_700_000_010_000,
+      requiresAction: false
+    })
+    applyFrameToParts(message, {
+      type: 'confirm_decision',
+      toolCallId: 'f1',
+      name: 'danger_tool',
+      decision: 'approve',
+      approved: true,
+      status: 'APPROVED'
+    })
+    expect(cardStatusOf(toolPart(message, 'f1')).label).toBe('✓ 已批准')
+
+    // 后端执行失败：CONFIRM 条目的 status 仍是 APPROVED，结局由 outcome=failed 承载
+    applyFrameToParts(message, {
+      type: 'tool_result',
+      toolCallId: 'f1',
+      name: 'danger_tool',
+      kind: 'CONFIRM',
+      ok: false,
+      executed: true,
+      status: 'APPROVED',
+      outcome: 'failed',
+      code: 'TOOL_EXECUTION_FAILED',
+      result: '工具执行失败：boom'
+    })
+
+    const part = toolPart(message, 'f1')
+    expect(part).toMatchObject({ status: 'failed', kind2: 'CONFIRM', decision: 'approved', requiresAction: false })
+    expect(readOnlyStateOf(part)).toBe('failed')
+    expect(cardStatusOf(part)).toMatchObject({ key: 'failed', label: '! 已批准 · 执行失败', tone: 'danger' })
+  })
+
+  it('③ 无乐观写（另一端批准 / 重挂回放）也成立：帧序 confirm_decision(approved) → tool_result(outcome=failed)', () => {
+    const message = makeMessage()
+    applyFrameToParts(message, { type: 'confirm_request', toolCallId: 'f2', name: 'danger_tool', args: '{}', timeoutSeconds: 120 })
+    applyFrameToParts(message, {
+      type: 'confirm_decision', toolCallId: 'f2', name: 'danger_tool', decision: 'approve', approved: true, status: 'APPROVED'
+    })
+    applyFrameToParts(message, {
+      type: 'tool_result', toolCallId: 'f2', name: 'danger_tool', kind: 'CONFIRM', ok: false, executed: true,
+      status: 'APPROVED', outcome: 'failed', code: 'TOOL_EXECUTION_FAILED', result: '工具执行失败：boom'
+    })
+    const part = toolPart(message, 'f2')
+    expect(part.status).toBe('failed')
+    expect(cardStatusOf(part).label).toBe('! 已批准 · 执行失败')
+  })
+
+  it('③ store 集成：handleFrame 帧序 confirm_request → confirm_decision(APPROVED) → tool_result(failed) 卡面第四态可达', () => {
+    const store = useAiStore()
+    const assistant = store.appendAssistantMessage()
+    store.handleFrame({
+      type: 'confirm_request', toolCallId: 's1', name: 'danger_tool', args: '{"x":1}', timeoutSeconds: 120,
+      expiresAt: 1_700_000_120_000, atMs: 1_700_000_000_000, seq: 1
+    })
+    // 无乐观写：本页签只是收到另一端批准 / 重挂回放的帧
+    store.handleFrame({
+      type: 'confirm_decision', toolCallId: 's1', name: 'danger_tool', decision: 'approve', approved: true,
+      status: 'APPROVED', seq: 2
+    })
+    store.handleFrame({
+      type: 'tool_result', toolCallId: 's1', name: 'danger_tool', kind: 'CONFIRM', ok: false, executed: true,
+      status: 'APPROVED', outcome: 'failed', code: 'TOOL_EXECUTION_FAILED', result: '工具执行失败：boom', seq: 3
+    })
+
+    const part = toolPart(assistant, 's1')
+    expect(part).toMatchObject({ status: 'failed', kind2: 'CONFIRM', requiresAction: false })
+    expect(assistant.pendingCall).toBeNull()
+    expect(cardStatusOf(part)).toMatchObject({ key: 'failed', label: '! 已批准 · 执行失败', tone: 'danger' })
+  })
+
+  it('④ 历史恢复（NIT-4 + MINOR-2）：outcome=failed + decision=approved ⇒「已批准 · 执行失败」；decision=timeout 回读 ⇒「已超时」', async () => {
+    const store = useAiStore()
+    const sid = store.sessionId
+    api.history.mockResolvedValue({
+      sessionId: sid,
+      count: 2,
+      messages: [
+        {
+          type: 'ASSISTANT',
+          text: '历史确认轮',
+          toolCalls: [
+            { id: 'hist-f1', type: 'function', name: 'danger_tool', arguments: '{"x":1}' },
+            { id: 'hist-t1', type: 'function', name: 'slow_tool', arguments: '{}' }
+          ],
+          toolCallStates: {
+            'hist-f1': { status: 'EXECUTED', kind: 'CONFIRM', decision: 'approved', outcome: 'failed', code: 'TOOL_EXECUTION_FAILED' },
+            'hist-t1': { status: 'TIMEOUT', kind: 'CONFIRM', decision: 'timeout' }
+          }
+        }
+      ]
+    })
+    api.runsCurrent.mockResolvedValue({
+      found: false,
+      runId: null,
+      snapshotStatus: null,
+      pendingEntries: [],
+      unresolvedExternal: [],
+      awaitingExternal: false,
+      archiveMaxSeq: 0
+    })
+
+    await store.loadHistory()
+
+    const message = store.messages[0] as ChatMessage
+    // MINOR-2：timeout 决策元数据历史回读（刷新后不丢「已超时」的决策口径）
+    expect(toolPart(message, 'hist-t1')).toMatchObject({
+      status: 'expired', kind2: 'CONFIRM', decision: 'timeout', requiresAction: false
+    })
+    expect(cardStatusOf(toolPart(message, 'hist-t1')).label).toBe('! 已超时')
+    // NIT-4：批准 + 执行失败 = 卡面第四态（decision 从历史载荷回读，status 由 outcome 覆写为 failed）
+    const failed = toolPart(message, 'hist-f1')
+    expect(failed).toMatchObject({ status: 'failed', kind2: 'CONFIRM', decision: 'approved', requiresAction: false })
+    expect(readOnlyStateOf(failed)).toBe('failed')
+    expect(cardStatusOf(failed)).toMatchObject({ key: 'failed', label: '! 已批准 · 执行失败', tone: 'danger' })
   })
 })

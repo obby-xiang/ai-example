@@ -149,8 +149,9 @@ export interface AiHistoryMessage {
    * R-144（后端历史携带状态）：按 toolCallId 映射的段级真态（挂在带 toolCalls 的 ASSISTANT 消息
    * metadata 上随载荷透出）。旧载荷缺该字段 ⇒ 前端占位兜底（status 'succeeded' / kind2 'UNKNOWN'）；
    * `kind` 缺数据 ⇒ 保持 'UNKNOWN'（不臆造默认值）；resume 重建轮（T4）同样无状态，共用该兜底。
-   * R-160 M1：已决条目增透决策元数据 —— decision（approved/rejected，条目态派生）/ decidedAt
-   * （epoch 毫秒）/ submittedValues（FRONTEND 的 resultText 原文，前端 JSON.parse、失败兜底 null）。
+   * R-160 M1：已决条目增透决策元数据 —— decision（approved/rejected/timeout，条目态派生）/
+   * decidedAt（epoch 毫秒）/ submittedValues（FRONTEND 的 resultText 原文，前端 JSON.parse、
+   * 失败兜底 null）。
    */
   toolCallStates?: Record<string, {
     status?: string
@@ -297,8 +298,11 @@ export interface ToolPart extends MessagePartBase {
   /**
    * R-158 #10：HITL 只读回执元数据（confirm()/submitGenerativeForm 写回，随段持久化，
    * 历史/镜像/过期降级的 spread 重建语义下保留；旧数据缺省 ⇒ 徽标从 status 派生）。
+   *
+   * 2A 挂账①：`timeout` 是**第三种门结局**（闸门未开、本次未执行）—— 后端 confirm_decision
+   * 帧的 decision/status（TIMEOUT）由此落段；缺省（旧数据 / 历史载荷）仍从 status 派生。
    */
-  decision?: 'approved' | 'rejected'
+  decision?: 'approved' | 'rejected' | 'timeout'
   decidedAt?: number
   /** R-158 #10：generative_form 提交值回执（提交成功时写入，刷新后可回溯已填值） */
   submittedValues?: Record<string, unknown>
@@ -358,7 +362,7 @@ export interface ToolPartPatch {
   reason?: string | null
   messageId?: string
   /** 见 {@link ToolPart.decision} / {@link ToolPart.submittedValues}（R-158 #10 回执元数据） */
-  decision?: 'approved' | 'rejected'
+  decision?: 'approved' | 'rejected' | 'timeout'
   decidedAt?: number
   submittedValues?: Record<string, unknown>
   /** 见 {@link ToolPart.truncated}（R-154 #2 帧侧截断标记，随段持久化） */

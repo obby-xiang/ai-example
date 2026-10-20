@@ -350,6 +350,58 @@ export function outcomeStatus(outcome: unknown): ToolRunStatus | null {
 }
 
 /**
+ * `confirm_decision` 帧的门结局（2A 挂账①）：**帧 status/decision 优先，`approved` 布尔兜底**。
+ *
+ * 后端实发（`SseChatEmitter#confirmDecision`）：`decision` ∈ {approve, reject, timeout, cancel}
+ * （ConfirmGate 三处发口），`status` ∈ {APPROVED, REJECTED, TIMEOUT, CANCELLED}，`approved` 只对
+ * APPROVED 为 true。旧实现只看 `approved` ⇒ 超时帧被写成 rejected，实时卡面谎报「✗ 已拒绝」，
+ * 刷新后历史表（TIMEOUT→expired）才显示「! 已超时」。
+ *
+ * 返回 null = 帧未给可翻译结局/布尔（旧帧两字段皆缺），调用方退回既有 approved 分支。
+ * `cancelled` 与权威回执 `gateReceiptOfStatus` 同口径：段态 cancelled（门卡无「已取消」，
+ * `readOnlyStateOf` 归「已超时」），不写决策元数据。
+ */
+type ConfirmOutcome =
+  | { state: 'approved' }
+  | { state: 'rejected' }
+  | { state: 'timeout' }
+  | { state: 'cancelled' }
+
+function confirmDecisionOutcome(frame: { decision?: unknown; status?: unknown }): ConfirmOutcome | null {
+  const status = typeof frame.status === 'string' ? frame.status.toUpperCase() : ''
+  const decision = typeof frame.decision === 'string' ? frame.decision.toLowerCase() : ''
+  // 2A 收口修 MINOR-1：**具体终态 status 先于 decision 词表**。后端 cancel 对非 PENDING 条目
+  // 仍发 decision='cancel' + 真实 status（APPROVED/EXECUTED/REJECTED/…）的帧 —— 若让 decision
+  // 先行，会把「已批准（后执行失败）」「已拒绝」等真实结局误读成「已取消 → 卡面已超时」。
+  if (status === 'APPROVED' || status === 'EXECUTED') {
+    return { state: 'approved' }
+  }
+  if (status === 'REJECTED' || status === 'REJECTED_ARGUMENTS') {
+    return { state: 'rejected' }
+  }
+  if (status === 'TIMEOUT') {
+    return { state: 'timeout' }
+  }
+  if (status === 'CANCELLED') {
+    return { state: 'cancelled' }
+  }
+  // status 不具终态（PENDING/缺失）时才走 decision 词表（正常确认帧 / 旧帧兜底口径）。
+  if (decision === 'timeout') {
+    return { state: 'timeout' }
+  }
+  if (decision === 'cancel' || decision === 'cancelled') {
+    return { state: 'cancelled' }
+  }
+  if (decision === 'reject' || decision === 'rejected') {
+    return { state: 'rejected' }
+  }
+  if (decision === 'approve' || decision === 'approved') {
+    return { state: 'approved' }
+  }
+  return null
+}
+
+/**
  * 2A②：GF 结局帧的 `result` 就是用户提交值原文（ConfirmGate#submitFrontendResult 落 resultText
  * → SseChatEmitter#frontendToolResult 原样入帧）。只收合法 JSON **对象**；坏 JSON / 数组 /
  * null / 标量一律不伪造（回执卡从 status 派生，值缺失保持空）。
@@ -429,7 +481,9 @@ export function writeSubmittedValuesToMessage(
  * - `frontend_tool_result`：本地已终态（failed/rejected/blocked/succeeded/expired/cancelled/unknown/skipped）first-wins，
  *   否则 **outcome 八态（I1：帧带则有则用）** > 帧 `status`（后端 PendingToolCall 大写实发值）
  *   > ok 三元（`status` 缺失/未知才退回 ok；F1 收口修：原先不读 `status`，四类非失败终态全被落成 failed）；
- * - `confirm_decision`：approved → running、rejected → rejected（reason 原样）。
+ * - `confirm_decision`：**帧 status/decision 优先**（TIMEOUT → expired + decision='timeout'、
+ *   REJECTED → rejected、CANCELLED → cancelled、APPROVED → running + decision='approved'），
+ *   二者皆缺才回落 `approved` 布尔；超时帧对已落定段 first-wins（2A 挂账①）。
  */
 export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
   switch (frame.type) {
@@ -548,27 +602,66 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
         requiresAction: true
       })
       break
-    case 'confirm_decision':
-      if (frame.approved) {
-        // 放行后工具立刻进入执行（工具卡转"调用中"，结果帧随后落定）
+    case 'confirm_decision': {
+      // 2A 挂账①：结局以帧 status/decision 为准（TIMEOUT→expired / REJECTED→rejected /
+      // CANCELLED→cancelled / APPROVED→running），二者皆缺才回落 approved 布尔（旧帧）。
+      const resolved: ConfirmOutcome = confirmDecisionOutcome(frame)
+        ?? (frame.approved ? { state: 'approved' } : { state: 'rejected' })
+      if (resolved.state === 'timeout') {
+        // ①b first-wins：超时通知不携带新的决策信息 —— 段已落定（倒计时归零的本地 expired、
+        // 或已被其它帧落终态）时不得把结局改写成另一种终态，也不得抹掉本地超时标记。
+        // 取舍（收口修 NIT-3）：不同页签的持久化形状可能不同 —— 本页签本地钟先到 ⇒
+        // expired+expiredLocally、无 decision；另一端拿到 TIMEOUT 帧 ⇒ expired+decision='timeout'。
+        // 两者在卡面等价（readOnlyStateOf 均归「已超时」），故先到者形状保留即可，不为统一形状
+        // 覆盖已落定段。与权威回执 gateReceiptOfStatus 的「无 decision」不对称是有意的：那条路
+        // 只归一终态、不投影决策元数据，本路才承载帧带来的 decision。
+        const existing = findToolPart(message, frame.toolCallId)
+        if (existing !== null && existing.status !== 'pending' && existing.status !== 'running') {
+          break
+        }
         upsertToolPart(message, {
           toolCallId: frame.toolCallId,
           name: frame.name,
           kind2: 'CONFIRM',
-          status: 'running',
+          status: 'expired',
+          decision: 'timeout',
+          reason: frame.reason ?? '确认等待超时',
           requiresAction: false
         })
-      } else {
+      } else if (resolved.state === 'rejected') {
         upsertToolPart(message, {
           toolCallId: frame.toolCallId,
           name: frame.name,
           kind2: 'CONFIRM',
           status: 'rejected',
+          decision: 'rejected',
           reason: frame.reason ?? '用户拒绝',
+          requiresAction: false
+        })
+      } else if (resolved.state === 'cancelled') {
+        // 门卡无「已取消」（K2）：段态 cancelled 由 readOnlyStateOf 归「已超时」，不写决策元数据
+        //（与权威回执 gateReceiptOfStatus 的 CANCELLED 口径一致）。
+        upsertToolPart(message, {
+          toolCallId: frame.toolCallId,
+          name: frame.name,
+          kind2: 'CONFIRM',
+          status: 'cancelled',
+          requiresAction: false
+        })
+      } else {
+        // 放行后工具立刻进入执行（工具卡转"调用中"，结果帧随后落定）。决策元数据一并落段，
+        // 供 readOnlyStateOf 的「已批准 · 执行失败」分支读（2A 挂账③）。
+        upsertToolPart(message, {
+          toolCallId: frame.toolCallId,
+          name: frame.name,
+          kind2: 'CONFIRM',
+          status: 'running',
+          decision: 'approved',
           requiresAction: false
         })
       }
       break
+    }
     case 'frontend_tool_request':
       upsertToolPart(message, {
         toolCallId: frame.toolCallId,

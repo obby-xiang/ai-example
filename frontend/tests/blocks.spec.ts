@@ -268,6 +268,10 @@ describe('S6 批1：回执独立块退役（groupParts 不再派生第二块）+
     expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'failed', decision: 'approved' }))).toBe('failed')
     expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'rejected', decision: 'rejected' }))).toBe('rejected')
     expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'expired' }))).toBe('expired')
+    // 2A 挂账①：超时决策（decision='timeout'）与无决策元数据的 TIMEOUT 历史段同落「已超时」，
+    // 绝不落「已拒绝」—— decision 是决策元数据，不是 approved/rejected 二元。
+    expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'expired', decision: 'timeout' }))).toBe('expired')
+    // 2A 挂账③：批准 + 执行失败 = 第四态（失败是执行结果，不是决策结果；已由上方 failed+approved 行覆盖）
     // 门卡没有「已取消」（K2）：cancelled 归未批准收尾（已超时）
     expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'cancelled' }))).toBe('expired')
     // blocked / unknown / pending 不是决策态 ⇒ 不进只读卡（继续走普通工具卡）

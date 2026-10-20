@@ -1206,10 +1206,12 @@ export const useAiStore = defineStore('ai', {
               requiresAction: false
             }
             // R-160 M2/M1：回读决策元数据三字段（写口 R-158 #10 已成，历史路此前丢失 ⇒
-            // 刷新回执卡不渲染）。decision 仅认词表两值；decidedAt 仅认数值；
-            // submittedValues 为后端 resultText 原文（限 FRONTEND），JSON.parse 失败兜底 null。
+            // 刷新回执卡不渲染）。decision 按词表白名单（approved/rejected —— 2A 收口修 MINOR-2
+            // 起补 timeout：同批新增的第三种门结局，不补则刷新后超时卡丢失决策口径）；
+            // decidedAt 仅认数值；submittedValues 为后端 resultText 原文（限 FRONTEND），
+            // JSON.parse 失败兜底 null。
             if (state) {
-              if (state.decision === 'approved' || state.decision === 'rejected') {
+              if (state.decision === 'approved' || state.decision === 'rejected' || state.decision === 'timeout') {
                 part.decision = state.decision
               }
               if (typeof state.decidedAt === 'number') {
