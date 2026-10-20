@@ -28,6 +28,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 @Slf4j
@@ -70,15 +71,27 @@ public class JobService {
     private static final Set<Job.JobStatus> FINAL_JOB_STATUSES = Set.of(Job.JobStatus.COMPLETED);
 
     private void assertTaskNotFinalized(Long taskId, Job.JobType jobType) {
-        Task task = taskService.findByIdRaw(taskId)
-                .orElseThrow(() -> ResourceNotFoundException.of("任务", taskId));
+        ConflictException conflict = finalizedConflict(taskId, jobType);
+        if (conflict != null) {
+            throw conflict;
+        }
+    }
+
+    /**
+     * 任务终态判据的<b>只读口径</b>（执行路径与 AI 预检共用同一份判据，见 {@code gate/ToolPreflightService}）：
+     *
+     * @return 冲突（非 null 即"已终态、禁止新建作业"）；{@code null} 表示通过
+     * @throws ResourceNotFoundException 任务不存在（与执行路径同一口径，不吞成"通过"）
+     */
+    public ConflictException finalizedConflict(Long taskId, Job.JobType jobType) {
+        Task task = task(taskId);
         if (task.getStatus() == Task.TaskStatus.CANCELLED) {
-            throw new ConflictException("TASK_FINALIZED",
+            return new ConflictException("TASK_FINALIZED",
                     "任务 #" + taskId + " 已 CANCELLED，禁止新建作业（TASK_FINALIZED）。"
                             + "任务取消是用户明确意志，如需重新开始请创建新任务");
         }
         if (task.getStatus() != Task.TaskStatus.COMPLETED) {
-            return; // ACTIVE / FAILED：FAILED 放行（僵尸恢复语义，预检查守卫另行兜底）
+            return null; // ACTIVE / FAILED：FAILED 放行（僵尸恢复语义，预检查守卫另行兜底）
         }
         // COMPLETED：按任务类型核最终作业（IMPORT→PUBLISH、EXPORT→EXPORT 的成功作业）
         Job.JobType finalJobType = task.getType() == Task.TaskType.IMPORT
@@ -87,10 +100,21 @@ public class JobService {
                 .findFirstByTaskIdAndJobTypeAndStatusInOrderByIdDesc(taskId, finalJobType, FINAL_JOB_STATUSES)
                 .isPresent();
         if (hasFinalJob) {
-            throw new ConflictException("TASK_FINALIZED",
+            return new ConflictException("TASK_FINALIZED",
                     "任务 #" + taskId + " 已 COMPLETED（" + finalJobType + " 作业成功），禁止新建作业（TASK_FINALIZED）");
         }
         // COMPLETED 但最终作业未成功（如预检查 0 错误即置 COMPLETED 的导入任务）：流程仍可继续，放行
+        return null;
+    }
+
+    /** 任务原始记录（AI 预检要读标题/类型/状态做目标摘要；找不到即 empty）。 */
+    public Optional<Task> findTask(Long taskId) {
+        return taskId == null ? Optional.empty() : taskService.findByIdRaw(taskId);
+    }
+
+    private Task task(Long taskId) {
+        return taskService.findByIdRaw(taskId)
+                .orElseThrow(() -> ResourceNotFoundException.of("任务", taskId));
     }
 
     private final JobRepository jobRepository;
@@ -158,14 +182,25 @@ public class JobService {
      * （{@link #cancel}，PENDING/RUNNING 均可取消），故不会把任务钉死。
      */
     private void assertNoJobInFlight(Long taskId, Job.JobType jobType) {
-        jobRepository.findFirstByTaskIdAndJobTypeAndStatusInOrderByIdDesc(taskId, jobType, IN_FLIGHT)
-                .ifPresent(job -> {
-                    throw new ConflictException("JOB_ALREADY_RUNNING",
-                            "任务 #" + taskId + " 已有同类作业在途：作业 #" + job.getId() + " [" + jobType
-                                    + "] 状态 " + job.getStatus()
-                                    + "（JOB_ALREADY_RUNNING）。并发执行会互相覆盖同一批文件/暂存行，"
-                                    + "请等待其结束，或先取消该作业再发起");
-                });
+        ConflictException conflict = inFlightConflict(taskId, jobType);
+        if (conflict != null) {
+            throw conflict;
+        }
+    }
+
+    /**
+     * 同类互斥判据的<b>只读口径</b>（执行路径与 AI 预检共用）。
+     *
+     * @return 冲突（非 null 即"已有同类作业在途"）；{@code null} 表示通过
+     */
+    public ConflictException inFlightConflict(Long taskId, Job.JobType jobType) {
+        return jobRepository.findFirstByTaskIdAndJobTypeAndStatusInOrderByIdDesc(taskId, jobType, IN_FLIGHT)
+                .map(job -> new ConflictException("JOB_ALREADY_RUNNING",
+                        "任务 #" + taskId + " 已有同类作业在途：作业 #" + job.getId() + " [" + jobType
+                                + "] 状态 " + job.getStatus()
+                                + "（JOB_ALREADY_RUNNING）。并发执行会互相覆盖同一批文件/暂存行，"
+                                + "请等待其结束，或先取消该作业再发起"))
+                .orElse(null);
     }
 
     /**
@@ -180,27 +215,46 @@ public class JobService {
      *
      * <p><b>T3-4 起补第二道判据（仅 IMPORT）</b>：状态是"最近一次通过"也不再充分 ——
      * 上传件在预检查通过后被替换时，旧的一次通过<b>不应</b>再放行。故 IMPORT 追加
-     * {@link #assertImportFingerprintFresh} 的文件指纹比对（409 {@code PRECHECK_STALE}）；
+     * {@link #importFingerprintConflict} 的文件指纹比对（409 {@code PRECHECK_STALE}）；
      * PUBLISH 读 staging 不读文件，维持原状态守卫。
      */
     private void assertPrecheckPassed(Long taskId, Job.JobType jobType) {
-        if (jobType != Job.JobType.IMPORT && jobType != Job.JobType.PUBLISH) {
-            return;
+        ConflictException conflict = precheckConflict(taskId, jobType);
+        if (conflict != null) {
+            throw conflict;
         }
-        Job precheck = jobRepository
-                .findTopByTaskIdAndJobTypeOrderByCreatedAtDescIdDesc(taskId, Job.JobType.PRECHECK)
-                .orElseThrow(() -> new ConflictException("PRECHECK_NOT_PASSED",
-                        "任务 #" + taskId + " 尚无预检查记录，不能发起 " + jobType
-                                + "（PRECHECK_NOT_PASSED）：请先上传数据文件并执行预检查，通过后再继续"));
+    }
+
+    /**
+     * 预检查阻断判据的<b>只读口径</b>（执行路径与 AI 预检共用）：
+     *
+     * @return 冲突（非 null 即"预检查未通过/已失效"）；{@code null} 表示通过
+     */
+    public ConflictException precheckConflict(Long taskId, Job.JobType jobType) {
+        if (jobType != Job.JobType.IMPORT && jobType != Job.JobType.PUBLISH) {
+            return null;
+        }
+        Job precheck = latestPrecheck(taskId).orElse(null);
+        if (precheck == null) {
+            return new ConflictException("PRECHECK_NOT_PASSED",
+                    "任务 #" + taskId + " 尚无预检查记录，不能发起 " + jobType
+                            + "（PRECHECK_NOT_PASSED）：请先上传数据文件并执行预检查，通过后再继续");
+        }
         if (precheck.getStatus() != Job.JobStatus.COMPLETED || precheck.getErrorCount() > 0) {
-            throw new ConflictException("PRECHECK_NOT_PASSED",
+            return new ConflictException("PRECHECK_NOT_PASSED",
                     "任务 #" + taskId + " 最近一次预检查未通过：作业 #" + precheck.getId() + " 状态 "
                             + precheck.getStatus() + "，错误数 " + precheck.getErrorCount()
                             + "（PRECHECK_NOT_PASSED）。请先修复数据并重跑预检查通过后再发起 " + jobType);
         }
         if (jobType == Job.JobType.IMPORT) {
-            assertImportFingerprintFresh(taskId, precheck);
+            return importFingerprintConflict(taskId, precheck);
         }
+        return null;
+    }
+
+    /** 最近一次预检查作业（AI 预检据此给出"预检指纹"的可读依据；找不到即 empty）。 */
+    public Optional<Job> latestPrecheck(Long taskId) {
+        return jobRepository.findTopByTaskIdAndJobTypeOrderByCreatedAtDescIdDesc(taskId, Job.JobType.PRECHECK);
     }
 
     /**
@@ -219,34 +273,38 @@ public class JobService {
      * <p><b>遗留（登记为观察项）</b>：guard→落库→afterCommit 之间的 TOCTOU 窗口不闭合
      * （校验与真实导入之间文件仍可被替换）。
      */
-    private void assertImportFingerprintFresh(Long taskId, Job precheck) {
+    private ConflictException importFingerprintConflict(Long taskId, Job precheck) {
         JsonNode summary = parseFingerprintSummary(precheck.getResultJson());
         for (TaskItem item : taskItemRepository.findByTaskIdOrderBySortOrder(taskId)) {
             String defCode = item.getDefCode();
             JsonNode recorded = summary.path(defCode).path(IMPORT_FILE_TYPE);
             if (!recorded.isObject()) {
-                throw stale(defCode, "最近一次通过预检查的作业 #" + precheck.getId()
+                return stale(defCode, "最近一次通过预检查的作业 #" + precheck.getId()
                         + " 没有记下 " + IMPORT_FILE_TYPE + " 件指纹（历史预检查或预检查记的是其它 fileType）");
             }
             TaskFile file = taskFileRepository
                     .findByTaskIdAndDefCodeAndFileType(taskId, defCode, IMPORT_FILE_TYPE)
-                    .orElseThrow(() -> stale(defCode, "当前任务没有 " + IMPORT_FILE_TYPE + " 件"));
+                    .orElse(null);
+            if (file == null) {
+                return stale(defCode, "当前任务没有 " + IMPORT_FILE_TYPE + " 件");
+            }
             FileStorageService.FileDigest current;
             try {
                 current = fileStorageService.digest(file.getStoragePath());
             }
             catch (IOException e) {
-                throw stale(defCode, IMPORT_FILE_TYPE + " 件不可读：" + e.getMessage());
+                return stale(defCode, IMPORT_FILE_TYPE + " 件不可读：" + e.getMessage());
             }
             String expectedSha = recorded.path("sha256").asText(null);
             long expectedSize = recorded.path("size").asLong(-1L);
             if (expectedSha == null || !expectedSha.equals(current.sha256()) || expectedSize != current.size()) {
-                throw stale(defCode, IMPORT_FILE_TYPE + " 件已被替换（预检查时 sha256="
+                return stale(defCode, IMPORT_FILE_TYPE + " 件已被替换（预检查时 sha256="
                         + (expectedSha == null ? "null" : expectedSha.substring(0, Math.min(12, expectedSha.length())))
                         + " size=" + expectedSize + "；当前 sha256="
                         + current.sha256().substring(0, 12) + " size=" + current.size() + "）");
             }
         }
+        return null;
     }
 
     /** 解析指纹摘要；任何形态异常（缺失/非 JSON/非对象）都回落为空对象 —— 从严分支由此触发。 */

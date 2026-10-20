@@ -682,7 +682,7 @@ public class ResilientChatService {
 		return toolCallState(pending, status);
 	}
 
-	/** 条目级终态（非 PENDING / APPROVED 的 8 个状态码）判定。 */
+	/** 条目级终态（非 PENDING / APPROVED 的 10 个状态码）判定。 */
 	private static boolean isTerminalEntryStatus(String status) {
 		return PendingToolCall.EXECUTED.equals(status)
 			|| PendingToolCall.REJECTED.equals(status)
@@ -692,7 +692,8 @@ public class ResilientChatService {
 			|| PendingToolCall.FRONTEND_CANCELLED.equals(status)
 			|| PendingToolCall.CANCELLED.equals(status)
 			|| PendingToolCall.BLOCKED.equals(status)
-			|| PendingToolCall.SKIPPED.equals(status);
+			|| PendingToolCall.SKIPPED.equals(status)
+			|| PendingToolCall.PRECHECK_FAILED.equals(status);
 	}
 
 	/**

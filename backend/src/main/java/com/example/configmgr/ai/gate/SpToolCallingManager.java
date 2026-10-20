@@ -30,11 +30,14 @@ import org.springframework.ai.model.tool.ToolCallingManager;
 import org.springframework.ai.model.tool.ToolExecutionResult;
 import org.springframework.ai.tool.definition.ToolDefinition;
 import org.springframework.ai.tool.execution.DefaultToolExecutionExceptionProcessor;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 官方循环内的工具执行扩展点（S4.2 §2 {@code gate/SpToolCallingManager}）。
@@ -52,7 +55,11 @@ import java.util.Map;
  * 执行前用 {@link ToolRegistry#matchesContext} 复查"该工具在当前上下文里是否本就被披露"，
  * 越 scope 一律<b>不执行副作用</b>并把结构化错误结果回填模型（{@link #SCOPE_VIOLATION_CODE}）；</li>
  * <li><b>确认门</b>：风险等级 {@code DANGER} 的工具（读基座 {@link ToolRegistry} 的
- * {@code @ToolRisk} 分级）执行前挂起等人工决策（{@link ConfirmGate}）；</li>
+ * {@code @ToolRisk} 分级）执行前挂起等人工决策（{@link ConfirmGate}）——<b>F5 起先预检再进门</b>：
+ * 四个 {@code start_*} 在 {@code saveSuspended} 之前跑 {@link ToolPreflightService}，
+ * <b>不通过就不进确认门、不弹卡</b>（结构化 {@code PRECHECK_FAILED} 回给模型），通过则预检报告随帧下发；
+ * 预检本身受两道约束：越 scope 者<b>不预检</b>（先过防线③，走既有 {@code SCOPE_NOT_DISCLOSED} 路径），
+ * 预检基础设施异常则按 {@code PRECHECK_UNAVAILABLE} <b>安全侧兜底</b>（同样不进门、不放行）；</li>
  * <li><b>前端工具挂起</b>：通道为 {@code FRONTEND} 的工具（{@code @ToolChannel}）不执行后端桩体，
  * 下发 {@code frontend_tool_request} 并阻塞等 {@code POST /api/ai/frontend-tool-result} 回灌；
  * 另有<b>第五件事</b>：声明了复核器的前端工具（{@link FrontendToolGuard}，DC-15）在<b>挂起之前</b>
@@ -122,9 +129,22 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 */
 	private final List<FrontendToolGuard> frontendGuards;
 
+	/**
+	 * F5 只读预检器（确认门<b>之前</b>问"能不能做"）。null = 不预检 —— 只有单元测试的轻装配面
+	 * 会传 null（生产由容器注入唯一实例）；预检只对 {@link ToolPreflightService#supports(String)} 的工具生效。
+	 */
+	private final ToolPreflightService preflight;
+
 	public SpToolCallingManager(RunStore store, RunRegistry registry, ConfirmGate gate, ToolRegistry toolRegistry,
 			MessageJsonCodec codec, ToolActivityBeacon beacon, CancellationRegistry cancellations,
 			ToolResultLimiter limiter, List<FrontendToolGuard> frontendGuards) {
+		this(store, registry, gate, toolRegistry, codec, beacon, cancellations, limiter, frontendGuards, null);
+	}
+
+	@Autowired
+	public SpToolCallingManager(RunStore store, RunRegistry registry, ConfirmGate gate, ToolRegistry toolRegistry,
+			MessageJsonCodec codec, ToolActivityBeacon beacon, CancellationRegistry cancellations,
+			ToolResultLimiter limiter, List<FrontendToolGuard> frontendGuards, ToolPreflightService preflight) {
 		this.delegate = ToolCallingManager.builder()
 			// P0-1：让工具异常浮出到 executeOnce 的 catch（默认 alwaysThrow=false 会把失败吞成
 			// "ok=true 的文本"——start_* 的 ConflictException 因此不可见）。包内 ToolExecutionException
@@ -140,6 +160,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 		this.cancellations = cancellations;
 		this.limiter = limiter;
 		this.frontendGuards = frontendGuards == null ? List.of() : List.copyOf(frontendGuards);
+		this.preflight = preflight;
 	}
 
 	@Override
@@ -171,12 +192,50 @@ public class SpToolCallingManager implements ToolCallingManager {
 		// 见 RunStore#create 写下的 snapshot.context），因此复查不会因上下文漂移而误判。
 		AiContext context = AiContext.fromMap(snapshot.getContext());
 
+		// ===== F5：确认门之前先跑只读预检（不通过者根本不进门） =====
+		// 用户 2026-10-20 直裁：预检不通过 → 不进确认门、不弹卡；结构化失败回给模型，由 AI 用普通消息
+		// 说明原因与建议。因此"不通过"的条目在这里就地结算成 PRECHECK_FAILED（code 同名、
+		// retryable=true），既不出现在 suspended 帧里，也不会被 arm 成闸门、不会发 confirm_request。
+		List<PendingToolCall> suspended = new ArrayList<>(pendings.size());
+		Set<String> preflightBlocked = new HashSet<>();
+		for (PendingToolCall pending : pendings) {
+			if (this.preflight != null && PendingToolCall.KIND_CONFIRM.equals(pending.getKind())
+					&& ToolPreflightService.supports(pending.getName())
+					// MINOR-1：防线③先于预检 —— 越 scope 的调用本就不该读任务/产出预检报告，
+					// 跳过预检，交给执行循环里的既有 blockOutOfScope（SCOPE_NOT_DISCLOSED）。
+					&& this.toolRegistry.matchesContext(pending.getName(), context)) {
+				// MINOR-2：预检是挂着上游静默在跑的只读重活（如 IMPORT 的多文件 sha256），
+				// 前后打"被动活动锚点"——只刷新看门狗的静默锚点，不计 startedCount（不污染重试判定）。
+				this.beacon.markPassiveActivity(runId);
+				ToolPreflightService.PreflightReport report;
+				try {
+					report = this.preflight.inspect(pending.getName(), pending.getArguments());
+				}
+				catch (RuntimeException ex) {
+					// MINOR-4：预检基础设施异常 → 安全侧兜底：不放行、不判"预检未通过"、不进门。
+					blockPreflightUnavailable(runId, pending, ex);
+					preflightBlocked.add(pending.getToolCallId());
+					continue;
+				}
+				finally {
+					this.beacon.markPassiveActivity(runId);
+				}
+				if (!report.pass()) {
+					blockPreflight(runId, pending, report);
+					preflightBlocked.add(pending.getToolCallId());
+					continue;
+				}
+				pending.setPreflight(report.asMap());
+			}
+			suspended.add(pending);
+		}
+
 		// ===== R-160 M3：挂起登记处用 gate timeout 算定 expiresAt（先 set 再落库）=====
 		// 顺序红线：saveSuspended 先于下方 awaitConfirm/awaitFrontend 发帧（confirmRequest /
 		// frontendToolRequest），若等发帧后再 set 则不落库 —— 此处算定并 set 后随 saveSuspended
 		// 一并持久化；atMs 与 expiresAt 同帧单点取值，前端按 expiresAt − atMs 续算剩余时长。
 		long suspendedAtMs = System.currentTimeMillis();
-		for (PendingToolCall pending : pendings) {
+		for (PendingToolCall pending : suspended) {
 			int timeoutSeconds = switch (pending.getKind()) {
 				case PendingToolCall.KIND_CONFIRM -> this.gate.confirmTimeoutSeconds();
 				case PendingToolCall.KIND_FRONTEND -> this.gate.frontendToolTimeoutSeconds();
@@ -194,12 +253,18 @@ public class SpToolCallingManager implements ToolCallingManager {
 		// CONFIRM 与 FRONTEND 两个通道都经 ConfirmGate.await 登记闸门，故两者一并预登记；
 		// 正常路径由 await 的 finally 逐个回收，这里只兜住异常/提前返回（取消、越 scope、
 		// 前端入参被拒、saveSuspended 抛错等）留下的未消费闸门，否则 hasActiveLatch 会永真。
-		List<String> gateWaitIds = gateWaitToolCallIds(pendings);
+		List<String> gateWaitIds = gateWaitToolCallIds(suspended);
 		this.gate.arm(runId, gateWaitIds);
 		try {
 			// ===== 硬规范①：先把 assistant(tool_calls) 与待决条目外置，再进入任何等待 =====
-			this.store.saveSuspended(runId, assistant.getText(), pendings, prompt.getInstructions(), this.codec);
-			out.suspended(pendings, this.store.runKey(runId), this.store.pendingKey(runId), this.store.instanceId());
+			// 外置的是<b>本批全部</b>条目（含预检未通过的那些，它们已是终态），但帧只公告真正挂起的：
+			// 预检未通过的条目不出现在 suspended.toolCalls[] 里，因而不会渲染成确认卡；
+			// 全部都不通过时连 suspended 帧都不存在 —— 这正是"不进确认门、不弹卡"在帧面上的形态。
+			if (!suspended.isEmpty()) {
+				this.store.saveSuspended(runId, assistant.getText(), pendings, prompt.getInstructions(), this.codec);
+				out.suspended(suspended, this.store.runKey(runId), this.store.pendingKey(runId),
+						this.store.instanceId());
+			}
 
 			List<ToolResponseMessage.ToolResponse> responses = new ArrayList<>(pendings.size());
 			// P1-10 批策略：W/J/P 条目结算后若确定性失败（outcome=failed 且 retryable=false），
@@ -213,6 +278,17 @@ public class SpToolCallingManager implements ToolCallingManager {
 				// 事件边界上的取消检查（ADR-8 修正③：取消在"分片/事件边界"轮询）：
 				// 逐个工具执行前先看一次权威标志，命中即终止整轮（终态 done{cancelled:true}）。
 				checkCancelled(runId);
+				// F5：预检未通过的条目没有确认卡（没有 suspended/confirm_request），只有一张
+				// "未执行"的失败工具卡 + 一条结局帧：前端据此显示原因，模型据此向用户解释。
+				// 它不在"首错即停"的判据内（retryable=true，见 ToolOutcome#retryable）—— 用户修好可重试。
+				if (preflightBlocked.contains(pending.getToolCallId())) {
+					String text = frameText(pending.getResultText());
+					out.toolStart(pending);
+					out.toolResult(pending, false, false, text);
+					responses.add(new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
+							modelData(pending, text)));
+					continue;
+				}
 				out.toolStart(pending);
 				// 副作用信标（韧性棒）：工具开始执行即留下痕迹 ——
 				// ① 让看门狗在工具执行期间不计静默（硬规范①）；② 让"已产出内容前先有副作用"的重试被拦住。
@@ -348,6 +424,60 @@ public class SpToolCallingManager implements ToolCallingManager {
 			throw new StreamViolationException(StreamViolationException.CANCELLED,
 					"本轮对话已被取消，工具执行在事件边界终止（runId=" + runId + "）");
 		}
+	}
+
+	/**
+	 * F5 预检未通过：就地结算成"未进确认门、未执行"的终态条目（code={@code PRECHECK_FAILED}、
+	 * retryable=true），只留一条失败结局帧 —— 确认卡与闸门一概不存在。
+	 *
+	 * <p><b>为什么状态用 {@link PendingToolCall#PRECHECK_FAILED} 而不是 BLOCKED</b>：BLOCKED 的卡面文案
+	 * 是前端写死的"不在披露范围内"（{@code parts.ts} 的 tool_result 分支按 {@code status==='BLOCKED'}
+	 * 落阻断口径），预检失败挂上去会显示错误原因；而本状态在 tool_result 帧上落到既有的
+	 * {@code outcome=failed} 分支，前端零改动即可显示"失败 + 完整原因"。续跑口径两者一致
+	 * （{@link #resolvePending} 对非 PENDING/APPROVED 一律复用 resultText、不执行）。
+	 */
+	private void blockPreflight(String runId, PendingToolCall pending, ToolPreflightService.PreflightReport report) {
+		long now = System.currentTimeMillis();
+		String text = report.failureMessage();
+		pending.setPreflight(report.asMap());
+		pending.setStatus(PendingToolCall.PRECHECK_FAILED);
+		pending.setOutcome(ToolOutcome.FAILED.wire());
+		pending.setCode(ToolOutcome.CODE_PRECHECK_FAILED);
+		pending.setReason(ToolOutcome.CODE_PRECHECK_FAILED);
+		pending.setExecuted(false);
+		pending.setExecutedBy(null);
+		pending.setRequestedAtMs(now);
+		pending.setResolvedAtMs(now);
+		pending.setResultText(text);
+		this.store.putPending(runId, pending);
+		log.warn("预检未通过，不进入确认门 runId={} tool={} 未通过项={}（未挂起、未发确认请求、未执行）", runId,
+				pending.getName(),
+				report.failures().stream().map(ToolPreflightService.PreflightReport.Check::name).toList());
+	}
+
+	/**
+	 * 预检基础设施不可用（MINOR-4 的<b>安全侧兜底</b>）：{@code preflight.inspect} 自身抛错时，
+	 * 既不放行、也不冒充"预检未通过"—— 结算成 {@code code=PRECHECK_UNAVAILABLE} 的可重试失败，
+	 * <b>同样不进确认门、不弹卡、不执行</b>。宁可让模型如实说"暂时查不了、请稍后再试"，
+	 * 也不能把数据库/文件系统抖动变成一次未经检查的放行。
+	 */
+	private void blockPreflightUnavailable(String runId, PendingToolCall pending, RuntimeException error) {
+		long now = System.currentTimeMillis();
+		String text = "预检暂不可用（" + ToolOutcome.CODE_PRECHECK_UNAVAILABLE
+				+ "）：预检过程发生内部错误，本次未进入确认门、未执行 —— 这不代表条件已满足。"
+				+ "请稍后重试；若持续出现请联系维护人员。";
+		pending.setStatus(PendingToolCall.PRECHECK_FAILED);
+		pending.setOutcome(ToolOutcome.FAILED.wire());
+		pending.setCode(ToolOutcome.CODE_PRECHECK_UNAVAILABLE);
+		pending.setReason(ToolOutcome.CODE_PRECHECK_UNAVAILABLE);
+		pending.setExecuted(false);
+		pending.setExecutedBy(null);
+		pending.setRequestedAtMs(now);
+		pending.setResolvedAtMs(now);
+		pending.setResultText(text);
+		this.store.putPending(runId, pending);
+		log.error("预检基础设施异常，未进入确认门 runId={} tool={}（未挂起、未发确认请求、未执行）", runId,
+				pending.getName(), error);
 	}
 
 	/**
@@ -609,7 +739,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 * "已写条目、未执行"之间时的正常路径）；</li>
 	 * <li>{@code APPROVED}：补执行恰好一次（E2 窗口）；</li>
 	 * <li>其余（{@code EXECUTED}/{@code REJECTED}/{@code TIMEOUT}/{@code FRONTEND_RESULT}/
-	 * {@code FRONTEND_CANCELLED}/{@code REJECTED_ARGUMENTS}/{@code BLOCKED}）：
+	 * {@code FRONTEND_CANCELLED}/{@code REJECTED_ARGUMENTS}/{@code BLOCKED}/{@code PRECHECK_FAILED}）：
 	 * 一律复用 {@code resultText}，<b>不执行</b>。</li>
 	 * </ul>
 	 *

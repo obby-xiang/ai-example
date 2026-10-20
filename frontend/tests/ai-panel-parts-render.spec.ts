@@ -180,7 +180,8 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
     // R-163 T2 摘要行入卡头（T0 静态映射）
     expect(wrapper.find('[data-testid="tool-summary-c1"]').exists()).toBe(true)
     // 确认子块（CONFIRM pending）在持 testid 的同一张卡内
-    expect(cards[0]!.html()).toContain('确认执行')
+    // H1 口径（2026-10-17 裁决 + demo 定稿）：按钮文案 = 「批准」，非「确认执行」
+    expect(cards[0]!.html()).toContain('批准')
 
     // R-165 S2：门卡按 demo v7 `.gate` 纯 Tailwind 结构（卡头 + 字段表 + 倒计时环 + 拒绝原因 + 双自绘按钮）
     const gate = cards[0]!.find('[data-testid="hitl-gate"]')
@@ -211,7 +212,7 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
     expect(gate.find('textarea').exists()).toBe(false)
     expect(gate.find('[data-testid="reject-reason"]').exists()).toBe(false)
     const gateBtns = gate.findAll('button')
-    expect(gateBtns.map((b) => b.text())).toEqual(['拒绝', '确认执行'])
+    expect(gateBtns.map((b) => b.text())).toEqual(['拒绝', '批准'])
     // 2A 批（裁决 §3 缺陷③）：按钮防折行 —— whitespace-nowrap + flex-none + min-w
     for (const btn of gateBtns) {
       expect(btn.classes()).toEqual(expect.arrayContaining(['whitespace-nowrap', 'flex-none']))
@@ -228,6 +229,157 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
     const otherTool = html.indexOf('列出任务')
     expect(pendingCard).toBeGreaterThanOrEqual(0)
     expect(otherTool).toBeGreaterThan(pendingCard)
+    wrapper.unmount()
+  })
+
+  // H1 预检摘要（demo `docs/demo/chat-ux/hitl-confirm-preflight.html` 场景一，用户 2026-10-20 批准）：
+  // 位置 = 门卡「参数行」与「按钮行」之间；逐项对 demo 文案/结构；缺省 = 无该区（旧帧回归锁）。
+  const PREFLIGHT = {
+    // 后端实发形状（ToolPreflightService#asMap + inspect 的检查顺序）：
+    // target.type/status 是 Task 枚举名；checks 恒 4 项、顺序为「任务存在 → 类型匹配 →
+    // 无在途作业 → 预检指纹新鲜」，每项都带 detail（通过时可为空串；指纹依据非空）。
+    target: { taskId: 5, title: '订单配置导入', type: 'IMPORT', status: 'ACTIVE' },
+    checks: [
+      { name: '任务存在', pass: true, detail: '' },
+      { name: '类型匹配', pass: true, detail: '' },
+      { name: '无在途作业', pass: true, detail: '' },
+      { name: '预检指纹新鲜', pass: true, detail: '预检作业 #12 · 3a9f…' }
+    ],
+    impact: '将发布 3 个配置定义 · 影响 12,480 行数据',
+    reportHash: '3a9f'
+  }
+
+  it('H1 预检：门卡带 preflight → 参数行与按钮行之间渲染「预检摘要」区（逐项对 demo）', async () => {
+    useAiStore().anchorConfirmClock('pf1', undefined, undefined, 120)
+    const wrapper = await mountPanel([
+      buildMessage([
+        { kind: 'text', seg: 0, text: '', streaming: false },
+        { kind: 'tool', seg: 1, toolCallId: 'pf1', name: 'start_publish', kind2: 'CONFIRM', status: 'pending', args: '{"taskId":5}', timeoutSeconds: 120, requiresAction: true, preflight: PREFLIGHT }
+      ])
+    ])
+    const gate = wrapper.find('[data-testid="pending-card-pf1"]').find('[data-testid="hitl-gate"]')
+    expect(gate.exists()).toBe(true)
+    const summary = gate.find('[data-testid="preflight-summary"]')
+    expect(summary.exists()).toBe(true)
+
+    // 断言真实 asMap() 形态：顶层固定键序 target → checks → impact → reportHash；
+    // 每项检查恒为 name/pass/detail 三键（detail 通过时可为空串）
+    expect(Object.keys(PREFLIGHT)).toEqual(['target', 'checks', 'impact', 'reportHash'])
+    for (const check of PREFLIGHT.checks) {
+      expect(Object.keys(check)).toEqual(['name', 'pass', 'detail'])
+    }
+
+    // 位置：门卡子块序 = 卡头 / 字段表 / 预检摘要 / 按钮行（demo 场景一的插入点）
+    const kids = Array.from(gate.element.children) as HTMLElement[]
+    expect(kids[1]!.getAttribute('data-testid')).toBe('gate-rows')
+    expect(kids[2]!.getAttribute('data-testid')).toBe('preflight-summary')
+    expect(kids[3]!.querySelectorAll('button')).toHaveLength(2)
+
+    // 卡头：区名 + 通过徽标
+    expect(summary.text()).toContain('预检摘要')
+    expect(summary.text()).toContain('✓ 预检通过')
+
+    // 四行：目标 / 预检 / 影响面 / 批准绑定
+    const rows = Array.from(summary.element.children).slice(1) as HTMLElement[]
+    expect(rows.map((row) => row.firstElementChild?.textContent)).toEqual(['目标', '预检', '影响面', '批准绑定'])
+
+    // 目标行：任务 #5「订单配置导入」（类型：导入 · 状态：进行中）
+    expect(rows[0]!.textContent).toContain('任务 #5「订单配置导入」')
+    expect(rows[0]!.textContent).toContain('（类型：导入 · 状态：进行中）')
+
+    // 预检行：逐项 ✓ + 文案（后端真实顺序；第 4 项带指纹依据 detail）
+    const checkLines = Array.from((rows[1]!.children[1] as HTMLElement).children) as HTMLElement[]
+    expect(checkLines.map((line) => line.textContent)).toEqual([
+      '✓ 任务存在',
+      '✓ 类型匹配',
+      '✓ 无在途作业',
+      '✓ 预检指纹新鲜（预检作业 #12 · 3a9f…）'
+    ])
+    // 绿色 dingbat（#1a7f45）非 emoji
+    expect(checkLines[0]!.firstElementChild!.className).toContain('text-[#1a7f45]')
+    expect(summary.text()).not.toMatch(/[\u{1F000}-\u{1FAFF}]/u)
+    // data-preflight 绑 preflightAllPass 口径（原硬编码 "pass" 已改动态）
+    expect(summary.attributes('data-preflight')).toBe('pass')
+
+    // 影响面 / 批准绑定
+    expect(rows[2]!.textContent).toContain('将发布 3 个配置定义 · 影响 12,480 行数据')
+    expect(rows[3]!.textContent).toContain('批准时将记录预检指纹，数据变动则需重新确认。')
+
+    // 按钮文案口径（H1 仅两钮）：拒绝 / 批准
+    expect(gate.findAll('button').map((btn) => btn.text())).toEqual(['拒绝', '批准'])
+    wrapper.unmount()
+  })
+
+  it('H1 预检：门卡无 preflight（旧帧 / GF / 前端工具）→ 不渲染预检区（回归锁）', async () => {
+    useAiStore().anchorConfirmClock('np1', undefined, undefined, 120)
+    const wrapper = await mountPanel([
+      buildMessage([
+        { kind: 'text', seg: 0, text: '', streaming: false },
+        { kind: 'tool', seg: 1, toolCallId: 'np1', name: 'danger_tool', kind2: 'CONFIRM', status: 'pending', args: '{"x":1}', timeoutSeconds: 120, requiresAction: true }
+      ])
+    ])
+    const gate = wrapper.find('[data-testid="pending-card-np1"]').find('[data-testid="hitl-gate"]')
+    expect(gate.exists()).toBe(true)
+    expect(gate.find('[data-testid="preflight-summary"]').exists()).toBe(false)
+    expect(gate.text()).not.toContain('预检摘要')
+    expect(gate.text()).not.toContain('批准绑定')
+    // 旧卡面结构不变：字段表 + 按钮行 两子块（无新增中间区）
+    const kids = Array.from(gate.element.children) as HTMLElement[]
+    expect(kids[1]!.getAttribute('data-testid')).toBe('gate-rows')
+    expect(kids[2]!.querySelectorAll('button')).toHaveLength(2)
+    wrapper.unmount()
+  })
+
+  it('H1 预检：checks 含未通过项 → 徽标与 data-preflight 随 preflightAllPass 翻转为 fail（契约防御分支）', async () => {
+    useAiStore().anchorConfirmClock('pf2', undefined, undefined, 120)
+    const failed = {
+      ...PREFLIGHT,
+      checks: [
+        { name: '任务存在', pass: true, detail: '' },
+        { name: '类型匹配', pass: false, detail: '任务 #5 类型 EXPORT，不能发起 PUBLISH 作业' }
+      ]
+    }
+    const wrapper = await mountPanel([
+      buildMessage([
+        { kind: 'text', seg: 0, text: '', streaming: false },
+        { kind: 'tool', seg: 1, toolCallId: 'pf2', name: 'start_publish', kind2: 'CONFIRM', status: 'pending', args: '{"taskId":5}', timeoutSeconds: 120, requiresAction: true, preflight: failed }
+      ])
+    ])
+    const summary = wrapper.find('[data-testid="preflight-summary"]')
+    expect(summary.exists()).toBe(true)
+    expect(summary.attributes('data-preflight')).toBe('fail')
+    expect(summary.text()).toContain('✗ 预检未通过')
+    expect(summary.text()).not.toContain('✓ 预检通过')
+    wrapper.unmount()
+  })
+
+  it('H1 预检：runs/current 快照带 preflight → 刷新恢复后门卡仍有预检摘要区（MAJOR-1 回归锁）', async () => {
+    api.reattachRun.mockImplementation(() => new Promise(() => {}))
+    api.history.mockResolvedValue({ sessionId: 'sess-pf', count: 0, messages: [] })
+    api.runsCurrent.mockResolvedValue({
+      found: true,
+      runId: 'run-pf',
+      snapshotStatus: 'PENDING',
+      pendingEntries: [
+        { toolCallId: 'rpf1', entryStatus: 'PENDING', kind: 'CONFIRM', name: 'start_publish', arguments: '{"taskId":5}', preflight: PREFLIGHT }
+      ],
+      unresolvedExternal: ['rpf1'],
+      awaitingExternal: true,
+      archiveMaxSeq: 3
+    })
+    const store = useAiStore()
+    store.sessionId = 'sess-pf'
+    // 空历史 + onMounted loadHistory：走「历史空态 → restoreSuspendedSnapshot」的刷新恢复路径
+    const wrapper = await mountPanel([])
+    await flushPromises()
+
+    const summary = wrapper.find('[data-testid="preflight-summary"]')
+    expect(summary.exists()).toBe(true)
+    expect(summary.text()).toContain('预检摘要')
+    expect(summary.text()).toContain('✓ 预检通过')
+    expect(summary.text()).toContain('预检指纹新鲜（预检作业 #12 · 3a9f…）')
+    const part = store.messages[0]?.parts.find((item) => item.kind === 'tool')
+    expect(part).toMatchObject({ toolCallId: 'rpf1', preflight: PREFLIGHT })
     wrapper.unmount()
   })
 

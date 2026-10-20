@@ -58,6 +58,19 @@ public class ToolActivityBeacon {
 		}
 	}
 
+	/**
+	 * <b>被动</b>活动锚点（F5 预检）：只刷新 {@link #lastActivityAtMs(String)}，
+	 * <b>不</b>计入 {@link #startedCount(String)}、也不置 {@link #isActive(String)}。
+	 *
+	 * <p>预检（尤其 IMPORT 的多文件 sha256 指纹）是挂着上游静默在跑的只读重活；若不做锚点，
+	 * 长计算会被 {@code StreamWatchdog} 当成"上游断流"。但它<b>不是</b>工具副作用 ——
+	 * 计数自增会污染"本次尝试是否已产生副作用"的重试判定，故与 {@link #enter} 分开。
+	 * 与 {@link #pulse} 不同，锚点不存在时会创建（预检可能发生在任何工具执行之前）。
+	 */
+	public void markPassiveActivity(String runId) {
+		this.lastActivityAtMs.computeIfAbsent(runId, key -> new AtomicLong()).set(System.currentTimeMillis());
+	}
+
 	/** 工具执行结束：移出活跃表，保留退出时刻与结局（供重试判定与取证）。 */
 	public void exit(String runId, String outcome) {
 		Activity activity = this.active.remove(runId);

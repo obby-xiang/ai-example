@@ -67,6 +67,19 @@ public class PendingToolCall {
 	 */
 	public static final String SKIPPED = "SKIPPED";
 
+	/**
+	 * 只读预检未通过（F5）：工具<b>未进入确认门、未弹卡、未执行</b>，结构化失败（outcome=failed、
+	 * code={@code PRECHECK_FAILED}、retryable=true）回给模型由它向用户解释。
+	 *
+	 * <p>为什么不复用 {@link #BLOCKED}：前端对 BLOCKED 的卡面文案是写死的"不在披露范围内"
+	 * （{@code frontend/src/utils/parts.ts} 的 tool_result 分支），预检失败挂到这个状态上会显示错误原因；
+	 * 而本状态在 tool_result 帧上落到既有的 {@code outcome=failed} 分支（前端不 switch status），
+	 * 因此<b>前端无需改动</b>即可正确显示"失败 + 完整原因文本"。
+	 * 与 {@link #SKIPPED}（上游失败被跳过）分开记：两者都是"没做"，但一个是"不该轮到它"，
+	 * 一个是"试过了、条件不满足、修好可重试"。
+	 */
+	public static final String PRECHECK_FAILED = "PRECHECK_FAILED";
+
 	/** 挂起种类：确认门（DANGER 风险）。 */
 	public static final String KIND_CONFIRM = "CONFIRM";
 
@@ -127,6 +140,16 @@ public class PendingToolCall {
 	/** R-160 M3：算定 expiresAt 的构造时刻（同帧单点取值；前端按 {@code expiresAt − atMs} 续算剩余）。 */
 	private Long atMs;
 
+	/**
+	 * F5 只读预检报告（{@code {target, checks, impact, reportHash}}，见
+	 * {@code gate/ToolPreflightService}）：进确认门的工具在挂起<b>之前</b>产出的那份结论，
+	 * 随 {@code suspended} 帧的 {@code toolCalls[]} 与 {@code confirm_request} 帧下发。
+	 *
+	 * <p>缺省为 null（非确认门工具、旧数据）—— 契约上它是可选字段，
+	 * 前端"没有就不显示预检区"，不改变既有卡面。
+	 */
+	private Map<String, Object> preflight;
+
 	public boolean resolved() {
 		return !PENDING.equals(this.status);
 	}
@@ -155,6 +178,7 @@ public class PendingToolCall {
 			case CANCELLED -> ToolOutcome.CODE_RUN_CANCELLED;
 			case FRONTEND_CANCELLED -> ToolOutcome.CODE_FRONTEND_CANCELLED;
 			case SKIPPED -> ToolOutcome.CODE_UPSTREAM_FAILED;
+			case PRECHECK_FAILED -> ToolOutcome.CODE_PRECHECK_FAILED;
 			default -> null;
 		};
 	}
@@ -179,6 +203,7 @@ public class PendingToolCall {
 		out.put("resolvedAtMs", this.resolvedAtMs);
 		out.put("expiresAt", this.expiresAt);
 		out.put("atMs", this.atMs);
+		out.put("preflight", this.preflight);
 		return out;
 	}
 

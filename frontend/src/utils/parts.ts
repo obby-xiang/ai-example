@@ -285,6 +285,9 @@ export function frontendResultStatus(status: unknown): ToolRunStatus | null {
  * `FRONTEND_RESULT → succeeded` 为**定稿修正**（已回灌结果即成功终码，非瞬态）——
  * 与 `frontendResultStatus` 同映射，非分叉。
  * 契约增量：`SKIPPED → skipped`（上游失败导致未执行；历史载荷通道的 status 实发值）。
+ * 契约增量：`PRECHECK_FAILED → failed`（F5 预检未通过就地结算的终态；后端该条目
+ * outcome=failed，但旧载荷/缺 outcome 时若无本映射会落 `null` ⇒ 历史构造占位 `succeeded`
+ * 误显示成功 —— 本条把缺 outcome 的回落也钉在 failed）。
  */
 export function historyToolCallStatus(status: unknown): ToolRunStatus | null {
   switch (status) {
@@ -304,6 +307,8 @@ export function historyToolCallStatus(status: unknown): ToolRunStatus | null {
       return 'blocked'
     case 'SKIPPED':
       return 'skipped'
+    case 'PRECHECK_FAILED':
+      return 'failed'
     case 'APPROVED':
     case 'PENDING':
       return 'pending'
@@ -598,6 +603,9 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
         timeoutSeconds: frame.timeoutSeconds,
         expiresAt: frame.expiresAt,
         atMs: frame.atMs,
+        // H1 预检摘要（可选增量）：仅帧带该字段时落段 —— 旧帧不产生 undefined 键，
+        // 已落段的预检摘要也不会被后续无该字段的帧抹掉。
+        ...(frame.preflight ? { preflight: frame.preflight } : {}),
         // 待确认 = 等人工动作（该段此刻正在等用户）
         requiresAction: true
       })
@@ -761,6 +769,8 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
           name: waiting.name,
           kind2: waiting.kind,
           status: 'pending',
+          // H1 预检摘要（可选增量）：同 confirm_request 口径 —— 帧带才落段，缺省不产生键。
+          ...(waiting.preflight ? { preflight: waiting.preflight } : {}),
           requiresAction: true
         })
       }

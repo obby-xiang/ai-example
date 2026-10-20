@@ -5,7 +5,7 @@
  *         FrontendToolResultRequest.java、AiController.java（端点与响应体现场）
  */
 
-import type { SseFrame, PendingToolCallSnapshot, PendingStatus, ToolKind, ToolOutcome } from './sse'
+import type { SseFrame, PendingToolCallSnapshot, PendingStatus, ToolKind, ToolOutcome, ToolPreflight } from './sse'
 import type { FormSpec } from './form-schema'
 import type { ErrorCard } from '@/utils/error-card'
 
@@ -339,6 +339,12 @@ export interface ToolPart extends MessagePartBase {
    * 灰族回执形态与后端 TIMEOUT 同族，靠本字段区分回执徽标文案（「已超时作废」/「已超时」）。
    */
   expiredLocally?: boolean
+  /**
+   * H1 确认门预检摘要（可选契约增量；来自 confirm_request / suspended 帧，随段持久化）。
+   * 缺省 = 旧帧 / 无预检的工具（GF、前端工具、后端工具），门卡不渲染预检区。
+   * 预检**不通过**时后端不弹卡，故门卡只在 `preflight` 存在（且通过）时出现该区。
+   */
+  preflight?: ToolPreflight | null
 }
 
 /** 消息段判别联合（按 `kind` 判别）。 */
@@ -376,6 +382,8 @@ export interface ToolPartPatch {
   atMs?: number
   /** 见 {@link ToolPart.expiredLocally}（R-166 本地"已超时作废"标记） */
   expiredLocally?: boolean
+  /** 见 {@link ToolPart.preflight}（H1 确认门预检摘要，可选增量） */
+  preflight?: ToolPreflight | null
 }
 
 /** 展示态的挂起调用（由 SSE 帧聚合而来）。 */
@@ -556,6 +564,11 @@ export interface AiRunCurrentEntry {
    * 倒计时的唯一真值是 store 的 `ConfirmClock`（确认帧锚定 + 心跳校正，见 `stores/ai.ts`）。
    */
   atMs?: number | null
+  /**
+   * H1 确认门预检摘要（可选增量；缺省 = 旧载荷/无预检的工具）。刷新恢复据此重建带摘要的
+   * 挂起卡 —— 与 `suspended` / `confirm_request` 帧同一形状（后端 `PendingToolCall.preflight`）。
+   */
+  preflight?: ToolPreflight | null
 }
 
 /** GET /api/ai/runs/current?sessionId= 的 data：当前会话进行中的 run 挂起快照（T2b-D#3）。 */

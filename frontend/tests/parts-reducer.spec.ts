@@ -212,6 +212,48 @@ describe('①③④⑤ applyFrameToParts：段写入（纯函数层）', () => {
       status: 'pending', requiresAction: true
     })
   })
+
+  it('H1 预检摘要：confirm_request / suspended 帧的 preflight 落段；缺省帧不产生该键（旧帧零影响）', () => {
+    const message = makeMessage()
+    const preflight = {
+      // 后端 ToolPreflightService#asMap 实发形状：target 用 Task 枚举名；checks 固定四项、
+      // 顺序 = inspect 的写入序（任务存在 → 类型匹配 → 无在途作业 → 预检指纹新鲜），
+      // 每项恒带 detail（通过时可为空串）
+      target: { taskId: 5, title: '订单配置导入', type: 'IMPORT', status: 'ACTIVE' },
+      checks: [
+        { name: '任务存在', pass: true, detail: '' },
+        { name: '类型匹配', pass: true, detail: '' },
+        { name: '无在途作业', pass: true, detail: '' },
+        { name: '预检指纹新鲜', pass: true, detail: '预检作业 #12 · 3a9f…' }
+      ],
+      impact: '将发布 3 个配置定义 · 影响 12,480 行数据',
+      reportHash: '3a9f'
+    }
+
+    applyFrameToParts(message, { type: 'confirm_request', toolCallId: 'pf1', name: 'start_publish', args: '{}', timeoutSeconds: 120, preflight })
+    expect(toolPart(message, 'pf1').preflight).toEqual(preflight)
+
+    // 紧随其后的无 preflight 帧（真实顺序：suspended 先发、confirm_request 后到，反之亦然）
+    // 不得抹掉已落段的摘要 —— 缺省字段不产生键，段上原值保留。
+    applyFrameToParts(message, {
+      type: 'suspended',
+      runId: 'run-1',
+      toolCalls: [{ toolCallId: 'pf1', name: 'start_publish', type: 'function', kind: 'CONFIRM', arguments: '{}', status: 'PENDING', executed: false }]
+    })
+    expect(toolPart(message, 'pf1').preflight).toEqual(preflight)
+
+    // "只发 suspended"路径同样落段（suspended 载荷条目自带 preflight）
+    applyFrameToParts(message, {
+      type: 'suspended',
+      runId: 'run-1',
+      toolCalls: [{ toolCallId: 'pf2', name: 'start_publish', type: 'function', kind: 'CONFIRM', arguments: '{}', status: 'PENDING', executed: false, preflight }]
+    })
+    expect(toolPart(message, 'pf2').preflight).toEqual(preflight)
+
+    // 旧帧（无该字段）：段上不产生 preflight 键 —— 旧帧口径逐字不变
+    applyFrameToParts(message, { type: 'confirm_request', toolCallId: 'old1', name: 'danger_tool', args: '{}', timeoutSeconds: 120 })
+    expect(toolPart(message, 'old1')).not.toHaveProperty('preflight')
+  })
 })
 
 describe('⑧ deriveProjections：唯一派生写口（全量映射）', () => {

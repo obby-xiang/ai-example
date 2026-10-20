@@ -609,6 +609,8 @@ public class SseChatEmitter {
 		frame.put("name", pending.getName());
 		frame.put("args", pending.getArguments());
 		frame.put("summary", pending.getArguments());
+		// F5：只读预检报告随请求帧下发（契约新增可选字段；缺省 null = 旧卡面）
+		frame.put("preflight", pending.getPreflight());
 		frame.put("timeoutSeconds", timeoutSeconds);
 		frame.put("expiresAt", expiresAtEpochMs(frame, timeoutSeconds));
 		frame.put("callback", "POST /api/ai/confirm {runId, toolCallId, approved, reason}");
@@ -624,6 +626,9 @@ public class SseChatEmitter {
 		frame.put("status", pending.getStatus());
 		frame.put("reason", reason);
 		frame.put("waitedMs", waitedMs);
+		// F5 批准绑定：决策回执带同一份预检指纹（审计上"批准的是哪一版预检"可自证）
+		frame.put("preflightHash", pending.getPreflight() == null ? null
+				: pending.getPreflight().get("reportHash"));
 		emit(frame);
 	}
 

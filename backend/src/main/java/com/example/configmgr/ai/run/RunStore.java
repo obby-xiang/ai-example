@@ -354,6 +354,11 @@ public class RunStore {
 	public void saveSuspended(String runId, String assistantContent, List<PendingToolCall> pendings,
 			List<Message> history, MessageJsonCodec codec) {
 		for (PendingToolCall pending : pendings) {
+			// 只给真正挂起的条目打"请求时刻"：预检失败等已结算条目（非 PENDING）在挂起前就写了
+			// requestedAtMs/resolvedAtMs，这里再覆写会造出 resolvedAtMs < requestedAtMs 的时间倒挂。
+			if (!PendingToolCall.PENDING.equals(pending.getStatus())) {
+				continue;
+			}
 			pending.setRequestedAtMs(System.currentTimeMillis());
 			putPending(runId, pending);
 		}
@@ -456,6 +461,9 @@ public class RunStore {
 		record.put("kind", pending.getKind());
 		record.put("outcome", pending.effectiveOutcome().wire());
 		record.put("code", pending.effectiveCode());
+		// F5 批准绑定：批准时所见的那份预检指纹随执行台账留档（null = 未经预检/旧数据）
+		record.put("preflightHash", pending.getPreflight() == null ? null
+				: pending.getPreflight().get("reportHash"));
 		record.put("resultText", resultText);
 		try {
 			this.redis.opsForList().rightPush(ledgerKey(runId), this.mapper.writeValueAsString(record));

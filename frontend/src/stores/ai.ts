@@ -1433,7 +1433,10 @@ export const useAiStore = defineStore('ai', {
           status: 'pending',
           args: entry.arguments ?? undefined,
           requiresAction: true,
-          ...(entry.expiresAt != null ? { expiresAt: entry.expiresAt, atMs: entry.atMs ?? undefined } : {})
+          ...(entry.expiresAt != null ? { expiresAt: entry.expiresAt, atMs: entry.atMs ?? undefined } : {}),
+          // H1 预检摘要：快照载荷带则原样落段（与 suspended/confirm_request 帧同口径），
+          // 缺省不产生该键 —— 旧载荷重建出的门卡与既有形态一字不差。
+          ...(entry.preflight ? { preflight: entry.preflight } : {})
         })
         deriveProjections(host)
         if (entry.name === GENERATIVE_FORM_TOOL && !this.activeForm) {

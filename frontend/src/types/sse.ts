@@ -49,6 +49,45 @@ export type PendingStatus =
   | 'BLOCKED'
   /** 契约增量：上游确定性失败导致本工具未执行（一等状态，对应 outcome=`skipped`） */
   | 'SKIPPED'
+  /** F5 预检未通过：后端就地结算"未进确认门、未执行"的终态条目（code 同名，outcome=failed） */
+  | 'PRECHECK_FAILED'
+
+/**
+ * H1 确认门**预检摘要**（可选契约增量，与后端已锁定；缺省 = null/undefined，旧帧零影响）。
+ *
+ * 依据 `docs/demo/chat-ux/hitl-confirm-preflight.html` 场景一（用户 2026-10-20 批准）：
+ * 预检通过 → 确认卡在「参数行」与「按钮行」之间多出一块摘要区；预检不通过 → 后端**不弹卡**
+ * （不进确认门，无卡形态），故前端不存在「未通过」的门卡分支。
+ */
+export interface ToolPreflightTarget {
+  /** 任务 id（demo 卡面渲染为「任务 #5」） */
+  taskId: string | number
+  /** 任务标题（demo：「订单配置导入」） */
+  title: string
+  /** 任务类型（demo：「导入」） */
+  type: string
+  /** 任务状态（demo：「进行中」） */
+  status: string
+}
+
+/** 单项预检结论（`pass=false` 在门卡形态下不会出现 —— 预检失败后端不弹卡）。 */
+export interface ToolPreflightCheck {
+  /** 检查项名（demo：「任务存在」/「预检已通过」） */
+  name: string
+  pass: boolean
+  /** 补充说明（demo：指纹「3a9f…」），缺省 = 只显示检查项名 */
+  detail?: string | null
+}
+
+/** 预检摘要载荷（suspended 帧 toolCalls[] / confirm_request 帧可选字段）。 */
+export interface ToolPreflight {
+  target: ToolPreflightTarget
+  checks: ToolPreflightCheck[]
+  /** 影响面人读文本（demo：「将发布 3 个配置定义 · 影响 12,480 行数据」） */
+  impact: string
+  /** 预检报告指纹（demo：「批准绑定」行的依据；卡面只展示说明行，不直接显示本值） */
+  reportHash: string
+}
 
 /** 外置挂起条目（PendingToolCall#asMap 的字段集）。 */
 export interface PendingToolCallSnapshot {
@@ -72,6 +111,8 @@ export interface PendingToolCallSnapshot {
   outcome?: ToolOutcome
   /** 治理 P0-1：错误码（可选，null = 无码） */
   code?: string | null
+  /** H1 确认门预检摘要（可选增量；缺省 = 旧载荷，门卡无预检区） */
+  preflight?: ToolPreflight | null
 }
 
 /** 全部帧类型常量（顺序即后端产出顺序语义）。 */
@@ -216,6 +257,8 @@ export interface SseConfirmRequestFrame extends SseFrameBase {
   expiresAt?: number
   /** 回调端点说明文本：POST /api/ai/confirm {runId, toolCallId, approved, reason} */
   callback?: string
+  /** H1 确认门预检摘要（可选增量；缺省 = 旧帧，门卡不渲染预检区） */
+  preflight?: ToolPreflight | null
 }
 
 /** HITL 确认决策回执（放行/拒绝双路径都走这里）。 */
@@ -229,6 +272,11 @@ export interface SseConfirmDecisionFrame extends SseFrameBase {
   status: PendingStatus | string
   reason?: string | null
   waitedMs?: number
+  /**
+   * F5 批准绑定：决策回执带回的预检指纹（`PendingToolCall.preflight.reportHash`；
+   * 无预检 / 旧后端帧为 null 或缺省）。一期仅契约透传，不参与卡面判定。
+   */
+  preflightHash?: string | null
 }
 
 /** 前端工具请求（副作用在浏览器：打开编辑器 / 触发下载）。 */

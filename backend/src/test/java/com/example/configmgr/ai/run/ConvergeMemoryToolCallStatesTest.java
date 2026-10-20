@@ -119,6 +119,24 @@ class ConvergeMemoryToolCallStatesTest {
 	// ── 终态直写 + T3 kind 携载 ──
 
 	@Test
+	void precheckFailedEntryIsTerminalEvenWithoutPersistedOutcome() {
+		// NIT（收口）：PRECHECK_FAILED 补进 isTerminalEntryStatus —— 否则旧载荷缺 outcome 时
+		// 会落到"非终态"分支，最终可能被前端兜底成 succeeded。
+		PendingToolCall pending = new PendingToolCall();
+		pending.setToolCallId("c-precheck");
+		pending.setName("start_import");
+		pending.setKind(PendingToolCall.KIND_CONFIRM);
+		pending.setStatus(PendingToolCall.PRECHECK_FAILED);
+
+		Map<String, Object> state = this.service.resolveToolCallState(RUN_ID, pending, RunSnapshot.SUSPENDED,
+				"c-precheck");
+
+		assertThat(state).containsEntry("status", PendingToolCall.PRECHECK_FAILED)
+			.containsEntry("outcome", ToolOutcome.FAILED.wire())
+			.containsEntry("code", ToolOutcome.CODE_PRECHECK_FAILED);
+	}
+
+	@Test
 	void terminalEntryStatusIsCarriedPerToolCall() {
 		seed(List.of(new UserMessage("你好"), assistantWithToolCalls("tc-1"), toolResponse("tc-1")),
 				RunSnapshot.RUNNING);

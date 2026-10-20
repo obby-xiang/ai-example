@@ -192,6 +192,10 @@ public class InMemoryRunStore extends RunStore {
 	public void saveSuspended(String runId, String assistantContent, List<PendingToolCall> items,
 			List<Message> history, MessageJsonCodec codec) {
 		for (PendingToolCall pending : items) {
+			// 与真实 RunStore 同口径：已结算条目（如预检失败）不改写 requestedAtMs，避免时间倒挂
+			if (!PendingToolCall.PENDING.equals(pending.getStatus())) {
+				continue;
+			}
 			pending.setRequestedAtMs(System.currentTimeMillis());
 			putPending(runId, pending);
 		}
@@ -291,6 +295,9 @@ public class InMemoryRunStore extends RunStore {
 		record.put("kind", pending.getKind());
 		record.put("outcome", pending.effectiveOutcome().wire());
 		record.put("code", pending.effectiveCode());
+		// 与真实 RunStore#appendLedger 同构（F5 批准绑定：预检指纹随执行台账留档）
+		record.put("preflightHash", pending.getPreflight() == null ? null
+				: pending.getPreflight().get("reportHash"));
 		record.put("resultText", resultText);
 		ledgerList(runId).add(record);
 	}

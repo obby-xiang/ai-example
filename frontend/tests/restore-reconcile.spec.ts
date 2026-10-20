@@ -173,9 +173,41 @@ describe('restoreSuspendedSnapshot 的 await 后二次对账', () => {
       args: '{"x":1}',
       requiresAction: true
     })
+    // 快照条目无 preflight ⇒ 重建段不产生该键（旧载荷形态一字不变）
+    expect(host?.parts[1]).not.toHaveProperty('preflight')
     // 增量续收：lastSeq 取快照的 archiveMaxSeq
     expect(api.reattachRun).toHaveBeenCalledTimes(1)
     expect(api.reattachRun.mock.calls[0]?.[0]).toBe('run-old')
     expect(api.reattachRun.mock.calls[0]?.[2]).toMatchObject({ lastSeq: 7 })
+  }, 15000)
+
+  it('正例②：runs/current 条目带 preflight → 重建段保留预检摘要（MAJOR-1 回归锁）', async () => {
+    const store = await freshStore()
+    store.sessionId = 'sess-pf'
+    api.history.mockResolvedValue({ sessionId: 'sess-pf', count: 0, messages: [] })
+    const preflight = {
+      target: { taskId: 5, title: '订单配置导入', type: 'IMPORT', status: 'ACTIVE' },
+      checks: [
+        { name: '任务存在', pass: true, detail: '' },
+        { name: '类型匹配', pass: true, detail: '' },
+        { name: '无在途作业', pass: true, detail: '' },
+        { name: '预检指纹新鲜', pass: true, detail: '预检作业 #12 · 3a9f…' }
+      ],
+      impact: '将发布 3 个配置定义 · 影响 12,480 行数据',
+      reportHash: '3a9f'
+    }
+    api.runsCurrent.mockResolvedValue(suspendedSnapshot({
+      pendingEntries: [
+        { toolCallId: 't-pf', entryStatus: 'PENDING', kind: 'CONFIRM', name: 'start_publish', arguments: '{"taskId":5}', preflight }
+      ]
+    }))
+
+    await store.loadHistory()
+
+    expect(pendingCallHosts(store.messages)).toHaveLength(1)
+    const part = store.messages[0]?.parts.find((item) => item.kind === 'tool')
+    expect(part).toMatchObject({ toolCallId: 't-pf', status: 'pending', preflight })
+    // 派生投影照旧（预检摘要不影响挂起卡派生）
+    expect(store.messages[0]?.pendingCall).toMatchObject({ toolCallId: 't-pf', status: 'pending' })
   }, 15000)
 })

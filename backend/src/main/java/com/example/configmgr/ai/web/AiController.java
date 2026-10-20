@@ -461,6 +461,9 @@ public class AiController {
 			// R-160 M3：透出到期口径（旧数据为 null ⇒ 前端「等待人工确认」静态兜底，不伪造倒计时）
 			entry.put("expiresAt", pending.getExpiresAt());
 			entry.put("atMs", pending.getAtMs());
+			// MAJOR-1（收口）：刷新恢复路径也要带预检报告，否则卡面丢了"批准的是哪一版预检"。
+			// 非确认门工具/旧数据为 null ⇒ 键仍出现但值为 null（前端按"没有就不显示预检区"处理）。
+			entry.put("preflight", pending.getPreflight());
 			pendingEntries.add(entry);
 			if (PendingToolCall.PENDING.equals(pending.getStatus())
 					&& !PendingToolCall.KIND_BACKEND.equals(pending.getKind())) {

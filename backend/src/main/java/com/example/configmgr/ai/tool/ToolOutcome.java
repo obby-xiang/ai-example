@@ -15,7 +15,7 @@ import java.util.Set;
  * {@code retryable} 同样由结局与错误码推导（见 {@link #retryable(String)}）：
  * <ul>
  * <li>{@link #REJECTED}/{@link #BLOCKED}/{@link #TIMEOUT}/{@link #CANCELLED}：重试不会改变结论；</li>
- * <li>{@link #FAILED}：只有"改数据后可重试"的码（预检查未通过/过期）为 true，
+ * <li>{@link #FAILED}：只有"改数据后可重试"的码（预检查未通过/过期/只读预检不通过）为 true，
  * 其余（作业在途、任务终态、结果缺失、参数非法等）为 false；</li>
  * <li>{@link #OK}/{@link #UNKNOWN}/{@link #SKIPPED}：false（成功无须重试，未知须先对账，跳过不得重试）。</li>
  * </ul>
@@ -71,8 +71,22 @@ public enum ToolOutcome {
 	/** 未执行（批策略跳过）：上游工具 deterministic 失败后本调用没有执行。 */
 	public static final String CODE_UPSTREAM_FAILED = "UPSTREAM_FAILED";
 
-	/** "改数据后可重试"的失败码（预检查未通过/过期；其余失败码一律不可重试）。 */
-	private static final Set<String> RETRYABLE_FAILURE_CODES = Set.of("PRECHECK_NOT_PASSED", "PRECHECK_STALE");
+	/**
+	 * 只读预检未通过（F5 预检前移）：工具<b>未进入确认门</b>、未执行、不弹卡 ——
+	 * 结构化失败回给模型，由模型向用户说明原因与建议后再发起。
+	 */
+	public static final String CODE_PRECHECK_FAILED = "PRECHECK_FAILED";
+
+	/**
+	 * 预检基础设施不可用（F5 安全侧兜底）：{@code ToolPreflightService.inspect} 自身抛错时，
+	 * <b>既不判通过也不判"预检未通过"</b> —— 工具同样不进确认门、不执行，结构化失败回给模型。
+	 * 可重试（抖动恢复后可重来），措辞不得暗示"条件已满足"。
+	 */
+	public static final String CODE_PRECHECK_UNAVAILABLE = "PRECHECK_UNAVAILABLE";
+
+	/** "改数据后可重试"的失败码（预检查未通过/过期/预检不通过/预检暂不可用；其余失败码一律不可重试）。 */
+	private static final Set<String> RETRYABLE_FAILURE_CODES = Set.of("PRECHECK_NOT_PASSED", "PRECHECK_STALE",
+			CODE_PRECHECK_FAILED, CODE_PRECHECK_UNAVAILABLE);
 
 	private final String wire;
 
@@ -127,6 +141,7 @@ public enum ToolOutcome {
 			case PendingToolCall.TIMEOUT -> TIMEOUT;
 			case PendingToolCall.CANCELLED, PendingToolCall.FRONTEND_CANCELLED -> CANCELLED;
 			case PendingToolCall.SKIPPED -> SKIPPED;
+			case PendingToolCall.PRECHECK_FAILED -> FAILED;
 			default -> UNKNOWN;
 		};
 	}

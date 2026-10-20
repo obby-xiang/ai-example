@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="zh-CN" data-hitl-confirm-preflight="2026-10-20" data-review-status="approved">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ai-example · 主题 demo：H1 确认卡 + 预检摘要（定稿）</title>
+<link rel="stylesheet" href="hitl-interrupts.css">
+</head>
+<body class="m-0 p-0 bg-[#f1f2f4] text-[#1f2328] font-sans text-[13.8px] leading-[1.7] antialiased [&_button:focus-visible]:outline-none [&_button:focus-visible]:ring-2 [&_button:focus-visible]:ring-[#2563eb]/40">
+
+<header class="sticky top-0 z-30 flex flex-wrap items-center gap-[16px] gap-y-[8px] px-[22px] py-[12px] bg-white border-b border-[#e3e6ea]">
+  <div class="font-semibold text-[14px] tracking-[.2px]">ai-example · 主题 demo <span class="text-[#57606a] font-normal ml-[8px] text-[12.5px]">H1 确认卡 + 预检摘要（F5 预检前移）</span></div>
+  <span class="ml-auto flex items-center gap-[6px]">
+    <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#edf7f0] text-[#1a7f45] border border-[#bfe3cd]">定稿</span>
+    <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#1f2328] text-white">单文件 · 无构建</span>
+    <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#edf7f0] text-[#1a7f45] border border-[#bfe3cd]">2026-10-20</span>
+  </span>
+</header>
+
+<main class="px-[22px] pt-[16px] pb-[60px]">
+  <div class="max-w-[1460px] mx-auto flex flex-col gap-[16px]">
+
+    <!-- ================= S0 主题与口径 ================= -->
+    <section id="s0" data-scene="s0" class="mt-[16px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden">
+      <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[13px] py-[9px] border-b border-[#eef0f3] bg-[#f5f8ff]">
+        <span class="flex-none w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#2563eb] text-white text-[11px] font-semibold tabular-nums">0</span>
+        <h3 class="m-0 text-[13.6px] [font-weight:650]">主题与口径</h3>
+        <span class="ml-auto flex-none font-mono text-[11px] text-[#8b949e]">场景一 / 二 / 三 同页纵向排布</span>
+      </div>
+      <div class="px-[13px] pt-[9px] pb-[11px]">
+        <p class="m-0 text-[12.2px] leading-[1.6] text-[#57606a]">主题 = <b class="text-[#1f2328] [font-weight:650]">H1 确认卡 + 预检摘要</b>（F5 预检前移，用户 2026-10-20「demo通过」定稿）。口径：按钮 = 「拒绝 / 批准」；<b class="text-[#1f2328] [font-weight:650]">预检摘要区为本轮新增</b>，位置在参数行与按钮行之间；<b class="text-[#1f2328] [font-weight:650]">预检不通过 → 不进确认门、不弹卡（2026-10-20 用户直裁）</b>：结构化失败回给模型，由 AI 用普通消息说明原因与建议，此时不存在「批准钮禁用」的审批卡；场景三保留旧版卡面（仅操作 + 参数、无预检区）作对照。示例数据全虚构。</p>
+      </div>
+    </section>
+
+    <!-- ================= S1 预检通过的确认卡 ================= -->
+    <section id="s1" data-scene="s1" class="mt-[16px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden">
+      <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[13px] py-[9px] border-b border-[#eef0f3] bg-[#f5f8ff]">
+        <span class="flex-none w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#2563eb] text-white text-[11px] font-semibold tabular-nums">1</span>
+        <h3 class="m-0 text-[13.6px] [font-weight:650]">场景一 · 预检通过的确认卡</h3>
+        <span class="text-[11.5px] text-[#57606a]">H1 卡既有结构不变，参数行与按钮行之间新增「预检摘要」：目标 / 预检 / 影响面 / 批准绑定。</span>
+        <span class="ml-auto flex items-center gap-[6px]">
+          <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#edf7f0] text-[#1a7f45] border border-[#bfe3cd]">✓ 预检通过</span>
+          <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">批准可用</span>
+        </span>
+      </div>
+      <div class="px-[13px] pt-[9px] pb-[11px]">
+        <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
+          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-card="confirm-ok" data-status="pending">
+            <div class="flex items-center gap-[6px] px-[10px] py-[8px] border-b border-[#eef0f3]">
+              <span class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#2563eb] bg-[#eff4ff] border border-[#cddcff]">H1 审批</span>
+              <span class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#b45309] bg-[#fffbeb] border border-[#fde68a]">待确认</span>
+              <span class="ml-auto text-[11px] text-[#8b949e]">任务 #5</span>
+            </div>
+            <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">待你确认：发布 3 个配置定义</div>
+            <div class="px-[11px] pt-[6px] text-[11.9px] text-[#57606a] leading-[1.6]">任务 #5「订单配置导入」的配置将发布到生产，影响 12,480 行数据。预检已通过，请核对绑定口径后再处置。</div>
+
+            <div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px]">
+              <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">发布配置定义 × 3 到生产（订单配置导入）</span></div>
+              <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">范围</span><span class="flex-1 min-w-0 break-words">仅覆盖本次导入涉及的 3 个配置定义，不改动其他配置</span></div>
+              <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">回滚</span><span class="flex-1 min-w-0 break-words">保留上一版快照，发布后 24 小时内可整批回滚</span></div>
+              <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">留痕</span><span class="flex-1 min-w-0 break-words">决策人 demo-user · 决策与预检指纹一并写入审计</span></div>
+            </div>
+
+            <div class="mx-[11px] mt-[9px] rounded-[8px] border border-[#cddcff] bg-[#f5f8ff] p-[11px]" data-preflight="pass">
+              <div class="flex items-center gap-[6px]">
+                <span class="text-[12.4px] [font-weight:650] text-[#1f2328]">预检摘要</span>
+                <span class="ml-auto flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#1a7f45] bg-[#edf7f0] border border-[#bfe3cd]">✓ 预检通过</span>
+              </div>
+              <div class="mt-[8px] flex items-start gap-[8px]">
+                <span class="flex-[0_0_58px] text-[11.2px] text-[#8b949e] leading-[1.6]">目标</span>
+                <span class="flex-1 min-w-0 text-[12.2px] leading-[1.6] text-[#1f2328]">任务 #5「订单配置导入」<span class="text-[#8b949e]">（类型：导入 · 状态：进行中）</span></span>
+              </div>
+              <div class="mt-[7px] flex items-start gap-[8px]">
+                <span class="flex-[0_0_58px] text-[11.2px] text-[#8b949e] leading-[1.6]">预检</span>
+                <span class="flex-1 min-w-0 flex flex-col gap-[5px] text-[12.2px] leading-[1.6] text-[#1f2328]">
+                  <span><span class="text-[#1a7f45] font-semibold">✓</span> 任务存在</span>
+                  <span><span class="text-[#1a7f45] font-semibold">✓</span> 类型匹配</span>
+                  <span><span class="text-[#1a7f45] font-semibold">✓</span> 无在途作业</span>
+                  <span><span class="text-[#1a7f45] font-semibold">✓</span> 预检指纹新鲜（3a9f…）</span>
+                </span>
+              </div>
+              <div class="mt-[7px] flex items-start gap-[8px]">
+                <span class="flex-[0_0_58px] text-[11.2px] text-[#8b949e] leading-[1.6]">影响面</span>
+                <span class="flex-1 min-w-0 text-[12.2px] leading-[1.6] text-[#1f2328]">将发布 3 个配置定义 · 影响 12,480 行数据</span>
+              </div>
+              <div class="mt-[7px] flex items-start gap-[8px]">
+                <span class="flex-[0_0_58px] text-[11.2px] text-[#8b949e] leading-[1.6]">批准绑定</span>
+                <span class="flex-1 min-w-0 text-[12.2px] leading-[1.6] text-[#57606a]">批准时将记录预检指纹，数据变动则需重新确认。</span>
+              </div>
+            </div>
+
+            <div class="flex items-center gap-[8px] px-[11px] pt-[11px] pb-[10px]">
+              <span class="flex-1 text-[11.2px] text-[#8b949e] leading-[1.5]">批准后立即发布，不可撤销</span>
+              <button type="button" data-act="s1-reject" class="flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-[#e3e6ea] bg-white text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]">拒绝</button>
+              <button type="button" data-act="s1-approve" class="flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-transparent bg-[#2563eb] text-white font-semibold transition-all duration-[150ms] hover:brightness-[1.08]">批准</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= S2 预检不通过：不弹确认卡（无卡形态） ================= -->
+    <section id="s2" data-scene="s2" data-no-card="2026-10-20" class="mt-[16px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden">
+      <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[13px] py-[9px] border-b border-[#eef0f3] bg-[#f5f8ff]">
+        <span class="flex-none w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#2563eb] text-white text-[11px] font-semibold tabular-nums">2</span>
+        <h3 class="m-0 text-[13.6px] [font-weight:650]">场景二 · 预检不通过：不弹确认卡</h3>
+        <span class="text-[11.5px] text-[#57606a]">预检失败即不进确认门 —— 不存在「批准钮禁用」的审批卡形态；结构化失败回给模型，AI 用普通消息说明原因与建议，可折叠「预检明细」，卡面与按钮一律不出现。</span>
+        <span class="ml-auto flex items-center gap-[6px]">
+          <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#fdf1ef] text-[#c0392b] border border-[#e3e6ea]">✗ 2 项未通过</span>
+          <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">无卡 · 不进确认门</span>
+        </span>
+      </div>
+      <div class="px-[13px] pt-[9px] pb-[11px]">
+        <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
+          <div class="w-[440px] max-w-full mx-auto flex flex-col gap-[9px]" data-msg="preflight-fail-plain">
+            <div class="flex items-start gap-[8px]">
+              <span class="flex-none w-[24px] h-[24px] flex items-center justify-center rounded-full bg-[#2563eb] text-white text-[10.5px] font-semibold">AI</span>
+              <div class="flex-1 min-w-0">
+                <div class="text-[11px] leading-[1.5] text-[#8b949e] mb-[4px]">助手 · 普通消息</div>
+                <div class="rounded-[12px] border border-[#e3e6ea] bg-white px-[11px] pt-[10px] pb-[11px]">
+                  <p class="m-0 text-[12.8px] leading-[1.65] text-[#1f2328]">无法发起发布：已有同类型作业在跑（作业 #4221，进行中）；且预检指纹已过期（文件已变更）。你可以：等作业 #4221 结束后再试，或先重新预检。需要我帮你做哪个？</p>
+                  <details class="mt-[9px] rounded-[8px] border border-[#eef0f3] bg-[#fbfbfc] px-[10px] py-[2px]" data-preflight="fail" open>
+                    <summary class="cursor-pointer py-[7px] text-[11.8px] leading-[1.6] text-[#57606a]">预检明细（2 项未通过 / 2 项通过）</summary>
+                    <div class="flex flex-col gap-[5px] pb-[10px] text-[11.8px] leading-[1.6]">
+                      <span class="text-[#c0392b]">✗ 已有同类型作业在跑（作业 #4221，进行中）</span>
+                      <span class="text-[#c0392b]">✗ 预检指纹已过期（文件已变更）</span>
+                      <span class="text-[#1a7f45]">✓ 任务存在（任务 #5「订单配置导入」）</span>
+                      <span class="text-[#1a7f45]">✓ 类型匹配（导入）</span>
+                    </div>
+                  </details>
+                </div>
+              </div>
+            </div>
+            <div class="flex items-start gap-[8px]">
+              <span class="flex-none w-[24px]"></span>
+              <p class="m-0 flex-1 min-w-0 text-[11.2px] leading-[1.55] text-[#8b949e]">口径：预检不通过 → 不进确认门、不弹卡（2026-10-20 用户直裁）；结构化失败回给模型，由 AI 用普通消息说明原因与建议，此处不渲染批准 / 拒绝按钮。</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= S3 旧版卡面对照 ================= -->
+    <section id="s3" data-scene="s3" class="mt-[16px] border border-[#cddcff] rounded-[12px] bg-white overflow-hidden">
+      <div class="flex flex-wrap items-center gap-x-[8px] gap-y-[4px] px-[13px] py-[9px] border-b border-[#eef0f3] bg-[#f5f8ff]">
+        <span class="flex-none w-[24px] h-[24px] flex items-center justify-center rounded-[7px] bg-[#2563eb] text-white text-[11px] font-semibold tabular-nums">3</span>
+        <h3 class="m-0 text-[13.6px] [font-weight:650]">场景三 · 旧版卡面对照</h3>
+        <span class="text-[11.5px] text-[#57606a]">现役 2B/2C 蓝本口径：只有操作 + 参数，无预检区；用来直观对照新增区的位置与信息量。</span>
+        <span class="ml-auto flex items-center gap-[6px]">
+          <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#f6f7f9] text-[#57606a] border border-[#e3e6ea]">旧版 · 无预检区</span>
+          <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#eff4ff] text-[#2563eb] border border-[#cddcff]">对照件</span>
+        </span>
+      </div>
+      <div class="px-[13px] pt-[9px] pb-[11px]">
+        <div class="rounded-[10px] border border-[#eef0f3] bg-[#fbfbfc] p-[11px]">
+          <div class="w-[440px] max-w-full mx-auto bg-white border border-[#e3e6ea] rounded-[12px] overflow-hidden" data-card="confirm-old" data-status="pending">
+            <div class="flex items-center gap-[6px] px-[10px] py-[8px] border-b border-[#eef0f3]">
+              <span class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#2563eb] bg-[#eff4ff] border border-[#cddcff]">H1 审批</span>
+              <span class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold text-[#b45309] bg-[#fffbeb] border border-[#fde68a]">待确认</span>
+              <span class="ml-auto text-[11px] text-[#8b949e]">任务 #5</span>
+            </div>
+            <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">待你确认：发布 3 个配置定义</div>
+            <div class="px-[11px] pt-[6px] text-[11.9px] text-[#57606a] leading-[1.6]">任务 #5「订单配置导入」的配置将发布到生产。请自行确认影响面与回滚方案后再处置。</div>
+
+            <div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px]">
+              <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">操作</span><span class="flex-1 min-w-0 break-words">发布配置定义 × 3 到生产（订单配置导入）</span></div>
+              <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">范围</span><span class="flex-1 min-w-0 break-words">仅覆盖本次导入涉及的 3 个配置定义，不改动其他配置</span></div>
+              <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">回滚</span><span class="flex-1 min-w-0 break-words">保留上一版快照，发布后 24 小时内可整批回滚</span></div>
+              <div class="flex gap-[10px] py-[7px] border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-[0_0_58px] text-[#8b949e] text-[12.4px]">留痕</span><span class="flex-1 min-w-0 break-words">决策人 demo-user · 决策写入审计</span></div>
+            </div>
+
+            <div class="flex items-center gap-[8px] px-[11px] pt-[11px] pb-[10px]">
+              <span class="flex-1 text-[11.2px] text-[#8b949e] leading-[1.5]">批准后立即发布，不可撤销</span>
+              <button type="button" data-act="s3-reject" class="flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-[#e3e6ea] bg-white text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]">拒绝</button>
+              <button type="button" data-act="s3-approve" class="flex-none whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-transparent bg-[#2563eb] text-white font-semibold transition-all duration-[150ms] hover:brightness-[1.08]">批准</button>
+            </div>
+          </div>
+
+          <div class="w-[440px] max-w-full mx-auto mt-[10px] rounded-[8px] border border-[#e3e6ea] bg-white p-[11px]">
+            <div class="text-[11.5px] [font-weight:650] text-[#1f2328]">差异对照</div>
+            <div class="mt-[7px] flex items-start gap-[8px]">
+              <span class="flex-[0_0_58px] text-[11.2px] text-[#8b949e] leading-[1.6]">旧版</span>
+              <span class="flex-1 min-w-0 text-[11.8px] leading-[1.6] text-[#57606a]">按钮前只有操作 + 参数；预检结果、影响面数字与批准绑定都不在卡面，是否可批准由用户自行判断。</span>
+            </div>
+            <div class="mt-[7px] flex items-start gap-[8px]">
+              <span class="flex-[0_0_58px] text-[11.2px] text-[#8b949e] leading-[1.6]">新版</span>
+              <span class="flex-1 min-w-0 text-[11.8px] leading-[1.6] text-[#57606a]">按钮前新增「预检摘要」区（目标 / 预检 / 影响面 / 批准绑定）；预检不通过时不进确认门、不弹卡（无卡形态，见场景二）。</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= 页脚 ================= -->
+    <footer class="mt-[14px] rounded-[12px] border border-[#e3e6ea] bg-white px-[13px] py-[12px]" data-review-status="approved">
+      <div class="text-[11.5px] leading-[1.6] text-[#57606a]">主题：H1 确认卡 + 预检摘要（F5 预检前移）· 版本 2026-10-20 · 状态定稿（2026-10-20 用户「demo通过」）。口径：按钮 = 拒绝 / 批准；预检摘要区为新增；预检不通过 → 不进确认门、不弹卡（2026-10-20 用户直裁，见场景二）。</div>
+      <div class="mt-[7px] text-[11.2px] leading-[1.6] text-[#8b949e]">单文件 demo（外链复用 <code class="font-mono text-[11px]">chat-ux/hitl-interrupts.css</code>，无构建）；示例数据全虚构，无真实密钥、路径与组织名。</div>
+      <div class="mt-[7px] font-mono text-[11px] leading-[1.6] text-[#8b949e]">data-review-status="approved" · data-hitl-confirm-preflight="2026-10-20" · data-no-card="2026-10-20"（预检不通过不弹卡）</div>
+    </footer>
+
+  </div>
+</main>
+
+</body>
+</html>

@@ -486,6 +486,36 @@ describe('契约增量：SKIPPED 一等状态（上游确定性失败 ⇒ 本工
   })
 })
 
+describe('契约增量：PRECHECK_FAILED 历史终态（outcome 缺失时不得误显示成功）', () => {
+  it('历史 toolCallStates 的 PRECHECK_FAILED（无 outcome）⇒ 刷新后段状态 failed，而非占位 succeeded', async () => {
+    const store = useAiStore()
+    api.history.mockResolvedValue({
+      sessionId: store.sessionId,
+      count: 2,
+      messages: [
+        {
+          type: 'ASSISTANT',
+          text: '预检未通过，本次未进入确认门',
+          toolCalls: [
+            { id: 'pf1', type: 'function', name: 'start_publish', arguments: '{"taskId":5}' }
+          ],
+          // 真实载荷可能不带 outcome（旧写入 / 回灌重建）—— 只有 status 可依
+          toolCallStates: {
+            pf1: { status: 'PRECHECK_FAILED', kind: 'CONFIRM' }
+          }
+        }
+      ]
+    })
+    api.runsCurrent.mockResolvedValue(noSuspension())
+
+    await store.loadHistory()
+
+    const message = store.messages[0] as ChatMessage
+    expect(toolPart(message, 'pf1')).toMatchObject({ status: 'failed', kind2: 'CONFIRM', requiresAction: false })
+    expect(cardStatusOf(toolPart(message, 'pf1')).label).toContain('执行失败')
+  })
+})
+
 describe('治理 P0-1 M2：blocked 卡面 reason 按 code 选择', () => {
   it('TOOL_ALREADY_CLAIMED ⇒ 互斥抢占文案；SCOPE_NOT_DISCLOSED / 缺省 ⇒ 原文案', () => {
     const claimed = makeMessage()

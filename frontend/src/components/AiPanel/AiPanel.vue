@@ -446,7 +446,10 @@
                                el-button / el-input / class="gate|gate-hd|cd|gate-ft" 手写 CSS 类全部退场，
                                data-testid / @click / :disabled 判据逐字保留。
                                2A 批（裁决 §3 缺陷④ / §9 K1）：**拒绝原因输入框整段删除** —— H1 只问
-                               批不批、无理由框（「修正走会话」）；批准 / 拒绝按钮口径不变。 -->
+                               批不批、无理由框（「修正走会话」）；按钮口径 = 「拒绝 / 批准」两钮
+                               （2026-10-17 裁决 H1；原「确认执行」文案漂移已回落）。
+                               H1 预检摘要（demo `hitl-confirm-preflight.html` 场景一）：参数行与
+                               按钮行之间，仅在段带 `preflight` 时渲染。 -->
                           <div class="border border-solid border-[#cddcff] bg-[#eff4ff] rounded-[10px] p-[12px] mb-2.5" data-testid="hitl-gate">
                             <div class="flex items-center gap-[7px] text-[13.2px] mb-[9px]">
                               <span class="w-[15px] h-[15px] rounded-[50%] border-solid border-[1.4px] border-[#2563eb] text-[#2563eb] text-[10px] flex items-center justify-center" aria-hidden="true">!</span>
@@ -454,7 +457,7 @@
                               <span class="ml-auto" :class="chipClass('primary')">等待确认</span>
                             </div>
                             <!-- 门卡字段区 = 纯限高内滚（字段族双约束 min(280px,35vh)，裁决 §14.4）；
-                                 按钮区（倒计时 + 拒绝/确认）在滚动区之外常驻。 -->
+                                 按钮区（倒计时 + 拒绝/批准）在滚动区之外常驻。 -->
                             <div
                               class="bg-white border border-solid border-[#eef0f3] rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto"
                               :class="SCROLLBAR_CLASS"
@@ -470,6 +473,44 @@
                                      （min-w-0 + 上限 40%）+ truncate + title 看全，与只读卡键列同口径。 -->
                                 <span class="flex-[0_1_auto] min-w-0 max-w-[40%] truncate text-[#8b949e] text-[12.4px]" :title="row.key">{{ row.key }}</span>
                                 <span class="flex-1 min-w-0 break-words">{{ row.value }}</span>
+                              </div>
+                            </div>
+                            <!-- H1 预检摘要（demo `chat-ux/hitl-confirm-preflight.html` 场景一 1:1 移植）：
+                                 位置 = 参数行与按钮行之间；仅 `part.preflight` 存在时渲染（旧帧 / GF /
+                                 前端工具 / 后端工具零影响）。预检不通过时后端不弹卡（无卡形态），
+                                 故此处的 ✗ 分支只是契约防御，正常数据流不可达。 -->
+                            <div
+                              v-if="part.preflight"
+                              class="mt-[9px] rounded-[8px] border border-solid border-[#cddcff] bg-[#f5f8ff] p-[11px]"
+                              data-testid="preflight-summary"
+                              :data-preflight="preflightAllPass(part.preflight) ? 'pass' : 'fail'"
+                            >
+                              <div class="flex items-center gap-[6px]">
+                                <span class="text-[12.4px] [font-weight:650] text-[#1f2328]">预检摘要</span>
+                                <span
+                                  class="ml-auto flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold border border-solid"
+                                  :class="preflightAllPass(part.preflight)
+                                    ? 'text-[#1a7f45] bg-[#edf7f0] border-[#bfe3cd]'
+                                    : 'text-[#c0392b] bg-[#fdf1ef] border-[#e3e6ea]'"
+                                >{{ preflightAllPass(part.preflight) ? '✓ 预检通过' : '✗ 预检未通过' }}</span>
+                              </div>
+                              <div class="mt-[8px] flex items-start gap-[8px]">
+                                <span class="flex-[0_0_58px] text-[11.2px] text-[#8b949e] leading-[1.6]">目标</span>
+                                <span class="flex-1 min-w-0 text-[12.2px] leading-[1.6] text-[#1f2328]">任务 #{{ part.preflight.target.taskId }}「{{ part.preflight.target.title }}」<span class="text-[#8b949e]">（类型：{{ preflightTargetWord(TASK_TYPE_LABELS, part.preflight.target.type) }} · 状态：{{ preflightTargetWord(TASK_STATUS_LABELS, part.preflight.target.status) }}）</span></span>
+                              </div>
+                              <div class="mt-[7px] flex items-start gap-[8px]">
+                                <span class="flex-[0_0_58px] text-[11.2px] text-[#8b949e] leading-[1.6]">预检</span>
+                                <span class="flex-1 min-w-0 flex flex-col gap-[5px] text-[12.2px] leading-[1.6] text-[#1f2328]">
+                                  <span v-for="check in part.preflight.checks" :key="check.name"><span class="font-semibold" :class="check.pass ? 'text-[#1a7f45]' : 'text-[#c0392b]'">{{ check.pass ? '✓' : '✗' }}</span> {{ check.name }}<template v-if="check.detail">（{{ check.detail }}）</template></span>
+                                </span>
+                              </div>
+                              <div class="mt-[7px] flex items-start gap-[8px]">
+                                <span class="flex-[0_0_58px] text-[11.2px] text-[#8b949e] leading-[1.6]">影响面</span>
+                                <span class="flex-1 min-w-0 text-[12.2px] leading-[1.6] text-[#1f2328]">{{ part.preflight.impact }}</span>
+                              </div>
+                              <div class="mt-[7px] flex items-start gap-[8px]">
+                                <span class="flex-[0_0_58px] text-[11.2px] text-[#8b949e] leading-[1.6]">批准绑定</span>
+                                <span class="flex-1 min-w-0 text-[12.2px] leading-[1.6] text-[#57606a]">批准时将记录预检指纹，数据变动则需重新确认。</span>
                               </div>
                             </div>
                             <!-- 2A 批（裁决 §3 缺陷③）：按钮防折行 —— 行 flex-wrap（空间不足时按钮组整行
@@ -510,7 +551,7 @@
                                   class="flex-none whitespace-nowrap min-w-[72px] rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-transparent transition-all duration-[150ms] bg-[#2563eb] text-white font-semibold hover:brightness-[1.08] disabled:opacity-50 disabled:cursor-default disabled:bg-[#8b949e] disabled:font-normal"
                                   :disabled="confirmExpired || gateSubmitting(part.toolCallId)"
                                   @click="decide(true, part.toolCallId)"
-                                >确认执行</button>
+                                >批准</button>
                               </span>
                             </div>
                           </div>
@@ -969,7 +1010,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ArrowRight, ChatDotRound } from '@element-plus/icons-vue'
 import { useAiStore } from '@/stores/ai'
 import { useWorkspaceStore } from '@/stores/workspace'
-import { formatCountdown, formatProgressiveTs } from '@/utils/format'
+import { formatCountdown, formatProgressiveTs, TASK_STATUS_LABELS, TASK_TYPE_LABELS } from '@/utils/format'
 import {
   COPY_ICON_BTN_CLASS,
   COPY_ICON_SVGS,
@@ -2567,6 +2608,23 @@ function gateRows(part: ToolPart): FieldRow[] {
   return [{ key: '操作', value: toolLabel(part.name) }, ...argRows(part.args, true)]
 }
 
+/**
+ * H1 预检摘要徽标口径（demo 场景一「✓ 预检通过」）：全部检查项通过 ⇒ 通过徽标。
+ * 预检不通过时后端**不弹卡**（无卡形态），此处的未通过分支仅为契约防御，正常数据流不可达。
+ */
+function preflightAllPass(preflight: NonNullable<ToolPart['preflight']>): boolean {
+  return preflight.checks.every((check) => check.pass)
+}
+
+/**
+ * H1 预检目标行的类型/状态口径：后端 `PreflightReport.target` 放的是 Task 枚举名
+ * （`IMPORT` / `ACTIVE`，`ToolPreflightService#targetOf` 的 `String.valueOf`），demo 卡面是中文
+ * （「类型：导入 · 状态：进行中」）—— 按仓库既有的 `TASK_TYPE_LABELS` / `TASK_STATUS_LABELS`
+ * 归一；已是中文或未知取值原样显示（不臆造标签）。
+ */
+function preflightTargetWord(labels: Partial<Record<string, string>>, value: string): string {
+  return labels[value] ?? value
+}
 
 /**
  * R-165 S2：操作行 tip 气泡（demo v7 `.tip`：黑底 #1f2328 / 白字 11px / 圆角 6 / padding 3px 8px /

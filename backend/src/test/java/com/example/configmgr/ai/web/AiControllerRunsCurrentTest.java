@@ -21,6 +21,7 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -137,6 +138,36 @@ class AiControllerRunsCurrentTest {
 			.andExpect(jsonPath("$.data.pendingEntries[0].entryStatus").value(PendingToolCall.PENDING))
 			.andExpect(jsonPath("$.data.unresolvedExternal").isEmpty())
 			.andExpect(jsonPath("$.data.awaitingExternal").value(false));
+	}
+
+	@Test
+	void pendingEntryCarriesPreflightReportForRefreshRestore() throws Exception {
+		// MAJOR-1（收口）：刷新恢复走的是本端点；预检报告必须随条目下发，
+		// 否则卡面能批准但看不到"批准的是哪一版预检"（实时 SSE 有、刷新路径没有）。
+		PendingToolCall call = pending("c-1", PendingToolCall.PENDING, PendingToolCall.KIND_CONFIRM);
+		call.setPreflight(Map.of("target", Map.of("taskId", 7L, "title", "订单配置导入"), "checks",
+				List.of(Map.of("name", "任务存在", "pass", true, "detail", "")),
+				"impact", "将发布 1 个配置定义 · 影响 12,480 行数据", "reportHash", "3a9f2b1c"));
+		seedIndex("s-1", "r-1", RunSnapshot.SUSPENDED, List.of(call));
+
+		mockMvc.perform(get("/api/ai/runs/current").param("sessionId", "s-1"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.pendingEntries[0].preflight.reportHash").value("3a9f2b1c"))
+			.andExpect(jsonPath("$.data.pendingEntries[0].preflight.impact")
+				.value("将发布 1 个配置定义 · 影响 12,480 行数据"))
+			.andExpect(jsonPath("$.data.pendingEntries[0].preflight.checks[0].name").value("任务存在"))
+			.andExpect(jsonPath("$.data.pendingEntries[0].preflight.target.taskId").value(7))
+			.andExpect(jsonPath("$.data.awaitingExternal").value(true));
+	}
+
+	@Test
+	void pendingEntryWithoutPreflightReportsNullInsteadOfInventingOne() throws Exception {
+		seedIndex("s-1", "r-1", RunSnapshot.SUSPENDED, List.of(pending("c-1", PendingToolCall.PENDING,
+				PendingToolCall.KIND_FRONTEND)));
+
+		mockMvc.perform(get("/api/ai/runs/current").param("sessionId", "s-1"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.pendingEntries[0].preflight").doesNotExist());
 	}
 
 	private void seedIndex(String sessionId, String runId, String status, List<PendingToolCall> pendings) {
