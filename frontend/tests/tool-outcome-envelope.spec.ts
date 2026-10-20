@@ -2,7 +2,7 @@
  * 治理 P0-1（`docs/research/调研-AI工具执行治理与互斥-2026-10-19.md` §6.4）：统一结果信封的前端消费锁。
  *
  * 契约（与后端已锁定）：
- * - `tool_result` 帧可选 `outcome`（ok|failed|rejected|blocked|timeout|cancelled|unknown）；
+ * - `tool_result` 帧可选 `outcome`（ok|failed|rejected|blocked|timeout|cancelled|unknown|skipped）；
  * - 历史 `toolCallStates` 可选 `outcome` / `code`；
  * - 回灌 POST /api/ai/frontend-tool-result 请求体可选 `outcome`。
  *
@@ -139,7 +139,7 @@ describe('治理 P0-1 ①：tool_result 帧 outcome 优先（业务失败不被 
     expect(toolPart(message, 'c2')).toMatchObject({ status: 'succeeded', outcome: 'ok' })
   })
 
-  it('outcome 七态映射表（timeout→expired / cancelled→cancelled / unknown→failed）', () => {
+  it('outcome 八态映射表（timeout→expired / cancelled→cancelled / unknown→failed / skipped→skipped）', () => {
     expect(outcomeStatus('ok')).toBe('succeeded')
     expect(outcomeStatus('failed')).toBe('failed')
     expect(outcomeStatus('rejected')).toBe('rejected')
@@ -147,6 +147,7 @@ describe('治理 P0-1 ①：tool_result 帧 outcome 优先（业务失败不被 
     expect(outcomeStatus('timeout')).toBe('expired')
     expect(outcomeStatus('cancelled')).toBe('cancelled')
     expect(outcomeStatus('unknown')).toBe('failed')
+    expect(outcomeStatus('skipped')).toBe('skipped')
     // 缺失 / 域外值 ⇒ null（调用方回落旧口径）
     expect(outcomeStatus(undefined)).toBeNull()
     expect(outcomeStatus('bogus')).toBeNull()
@@ -389,6 +390,99 @@ describe('治理 P0-1 M1：历史非终态条目不被 outcome=unknown 覆写', 
     const message = store.messages[0] as ChatMessage
     expect(toolPart(message, 'm1')).toMatchObject({ status: 'pending', kind2: 'CONFIRM' })
     expect(toolPart(message, 'm2')).toMatchObject({ status: 'pending', kind2: 'CONFIRM' })
+  })
+})
+
+describe('契约增量：SKIPPED 一等状态（上游确定性失败 ⇒ 本工具未执行）', () => {
+  it('tool_result outcome=skipped（真实后端序列：无 tool_start）⇒ 仅凭帧建段、只落「输出」、reason 不存在（不双显）', () => {
+    const TEXT = '未执行：上游 start_export 失败（PRECHECK_NOT_PASSED），本调用已跳过'
+    const message = makeMessage()
+    // 真实序列：批次停走时该调用**从未执行**，后端只发 tool_result（不发 tool_start）。
+    applyFrameToParts(message, {
+      type: 'tool_result',
+      toolCallId: 's1',
+      name: 'start_import',
+      kind: 'BACKEND',
+      ok: false,
+      executed: false,
+      status: 'SKIPPED',
+      outcome: 'skipped',
+      code: 'UPSTREAM_FAILED',
+      result: TEXT
+    })
+
+    // 仅凭 tool_result 建段（不依赖先行 tool_start）
+    expect(message.parts.filter((part) => part.kind === 'tool')).toHaveLength(1)
+    const part = toolPart(message, 's1')
+    expect(part).toMatchObject({
+      status: 'skipped',
+      result: TEXT,
+      outcome: 'skipped',
+      requiresAction: false
+    })
+    deriveProjections(message)
+    expect(message.toolRuns[0]).toMatchObject({ status: 'skipped' })
+    // 卡面状态词表：skipped ⇒「已跳过」（中性灰族），不是「执行失败」也不是「已超时」
+    expect(cardStatusOf(part)).toEqual({ key: 'skipped', label: '已跳过', tone: 'neutral' })
+
+    // F1 收口 I-3（裁决）：reason 键根本不写 ⇒ AiPanel 红色「原因」行（`!isBlankText(part.reason)`）
+    // 自然不渲染，同一句文案只在「输出」出现一次（卡面同文双显清零）。
+    expect(Object.prototype.hasOwnProperty.call(part, 'reason')).toBe(false)
+    expect(part.reason).toBeUndefined()
+    const carrying = [part.result, part.reason].filter((text) => typeof text === 'string' && text.includes(TEXT))
+    expect(carrying).toHaveLength(1)
+  })
+
+  it('旧帧只带 envelope message（缺 result）⇒ 文案仍落「输出」，reason 同样不写', () => {
+    const TEXT = '未执行：上游 start_export 失败，本工具未执行'
+    const message = makeMessage()
+    applyFrameToParts(message, {
+      type: 'tool_result',
+      toolCallId: 's2',
+      name: 'start_import',
+      kind: 'BACKEND',
+      ok: false,
+      executed: false,
+      status: 'SKIPPED',
+      outcome: 'skipped',
+      code: 'UPSTREAM_FAILED',
+      message: TEXT,
+      result: null
+    })
+    const part = toolPart(message, 's2')
+    expect(part).toMatchObject({ status: 'skipped', result: TEXT })
+    expect(Object.prototype.hasOwnProperty.call(part, 'reason')).toBe(false)
+  })
+
+  it('历史 toolCallStates 的 SKIPPED status / outcome=skipped ⇒ 刷新后段状态 skipped', async () => {
+    const store = useAiStore()
+    const sid = store.sessionId
+    api.history.mockResolvedValue({
+      sessionId: sid,
+      count: 2,
+      messages: [
+        {
+          type: 'ASSISTANT',
+          text: '上游失败批次',
+          toolCalls: [
+            { id: 's1', type: 'function', name: 'start_import', arguments: '{}' },
+            { id: 's2', type: 'function', name: 'start_publish', arguments: '{}' }
+          ],
+          toolCallStates: {
+            s1: { status: 'SKIPPED', kind: 'BACKEND' },
+            s2: { status: 'EXECUTED', kind: 'BACKEND', outcome: 'skipped', code: 'UPSTREAM_FAILED' }
+          }
+        }
+      ]
+    })
+    api.runsCurrent.mockResolvedValue(noSuspension())
+
+    await store.loadHistory()
+
+    const message = store.messages[0] as ChatMessage
+    expect(toolPart(message, 's1')).toMatchObject({ status: 'skipped', kind2: 'BACKEND', requiresAction: false })
+    expect(toolPart(message, 's2')).toMatchObject({ status: 'skipped', kind2: 'BACKEND', requiresAction: false })
+    expect(cardStatusOf(toolPart(message, 's1')).label).toBe('已跳过')
   })
 })
 

@@ -245,7 +245,7 @@ export function deriveProjections(message: ChatMessage): void {
  *   FRONTEND_RESULT/FRONTEND_CANCELLED/CANCELLED/TIMEOUT/REJECTED_ARGUMENTS/REJECTED/BLOCKED
  *   两表同映射）；台账原"后者缺 CANCELLED 依据注释"系误述（ai.ts:347-349 注释实存）。
  * ② 段侧终态枚举 `localTerminal`（本文件 `frontend_tool_result` case 内）vs store 侧 `isFrameDecidedPendingStatus`
- *   （ai.ts）——同 7 态（succeeded/rejected/blocked/expired/cancelled/unknown/failed）、
+ *   （ai.ts）——同 8 态（succeeded/rejected/blocked/expired/cancelled/unknown/failed/skipped）、
  *   **无共享常量**（parts.ts 不依赖 store 的纯函数层约束），漂移由 D9 表驱动一致性锁兜底。
  * ③ 本表 + `historyToolCallStatus`（下方，R-144 history 载荷面单表）——分叉逐条见
  *   `historyToolCallStatus` 头注（EXECUTED / APPROVED·PENDING→pending / DONE / 不收录 SUCCEEDED 四条），
@@ -284,6 +284,7 @@ export function frontendResultStatus(status: unknown): ToolRunStatus | null {
  * ④ 本表**不收录** `SUCCEEDED`（后端 10 码无此值，旧载荷兜底不走本表）。
  * `FRONTEND_RESULT → succeeded` 为**定稿修正**（已回灌结果即成功终码，非瞬态）——
  * 与 `frontendResultStatus` 同映射，非分叉。
+ * 契约增量：`SKIPPED → skipped`（上游失败导致未执行；历史载荷通道的 status 实发值）。
  */
 export function historyToolCallStatus(status: unknown): ToolRunStatus | null {
   switch (status) {
@@ -301,6 +302,8 @@ export function historyToolCallStatus(status: unknown): ToolRunStatus | null {
       return 'cancelled'
     case 'BLOCKED':
       return 'blocked'
+    case 'SKIPPED':
+      return 'skipped'
     case 'APPROVED':
     case 'PENDING':
       return 'pending'
@@ -310,7 +313,7 @@ export function historyToolCallStatus(status: unknown): ToolRunStatus | null {
 }
 
 /**
- * 治理 P0-1（统一结果信封）单表：`outcome` 七态 → 段状态。唯一消费方 =
+ * 治理 P0-1（统一结果信封）单表：`outcome` 八态 → 段状态。唯一消费方 =
  * `applyFrameToParts` 的 `tool_result` / `frontend_tool_result`（I1 收口）与 `loadHistory`
  * 的历史段构造（有 outcome 则用、无则旧表）。
  *
@@ -319,6 +322,7 @@ export function historyToolCallStatus(status: unknown): ToolRunStatus | null {
  * - `timeout → expired`（沿用既有超时口径，与 `TIMEOUT`/`FRONTEND_CANCELLED` 词表同族）；
  * - `cancelled → cancelled`（沿用既有取消口径）；
  * - `unknown → failed`（旧卡面只有"执行失败"可承载"未确认成功"；unknown 段态二期再议）；
+ * - `skipped → skipped`（上游确定性失败导致本工具未执行；一等状态，不得折成 failed）；
  * - 缺失 / 域外值 ⇒ null，由调用方回落到既有 `ok` 三元或 status 旧表（旧帧一字不动）。
  *
  * 返回 null 不等于失败 —— 只表示"本字段未给出可翻译结局"。
@@ -338,6 +342,8 @@ export function outcomeStatus(outcome: unknown): ToolRunStatus | null {
       return 'expired'
     case 'cancelled':
       return 'cancelled'
+    case 'skipped':
+      return 'skipped'
     default:
       return null
   }
@@ -417,11 +423,11 @@ export function writeSubmittedValuesToMessage(
  * （它们还带轮次级副作用），此处一律 no-op。
  *
  * 裁决口径逐条照抄翻转前的 case 分支：
- * - `tool_result`：BLOCKED（防线③未执行）> 已被拒（REJECTED）> **outcome 七态（治理 P0-1，有则用）**
+ * - `tool_result`：BLOCKED（防线③未执行）> 已被拒（REJECTED）> **outcome 八态（治理 P0-1，有则用）**
  *   > ok 三元（旧帧回落，无 outcome 时一字不动）；阻断文案按 `code` 选择（`TOOL_ALREADY_CLAIMED`
- *   与披露范围拦截不是同一件事）；
- * - `frontend_tool_result`：本地已终态（failed/rejected/blocked/succeeded/expired/cancelled/unknown）first-wins，
- *   否则 **outcome 七态（I1：帧带则有则用）** > 帧 `status`（后端 PendingToolCall 大写实发值）
+ *   与披露范围拦截不是同一件事）；SKIPPED 单独早分支（只落「输出」、不写 reason，见 case 内注）；
+ * - `frontend_tool_result`：本地已终态（failed/rejected/blocked/succeeded/expired/cancelled/unknown/skipped）first-wins，
+ *   否则 **outcome 八态（I1：帧带则有则用）** > 帧 `status`（后端 PendingToolCall 大写实发值）
  *   > ok 三元（`status` 缺失/未知才退回 ok；F1 收口修：原先不读 `status`，四类非失败终态全被落成 failed）；
  * - `confirm_decision`：approved → running、rejected → rejected（reason 原样）。
  */
@@ -464,6 +470,31 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
       })
       break
     case 'tool_result': {
+      // 契约增量（SKIPPED 一等状态）：上游确定性失败导致本工具**未执行** —— 帧以
+      // outcome='skipped'（或 status='SKIPPED'）声明时直接落 skipped。本支先于下方既有判据序，
+      // 不改变其口径。真实后端序列：批次停走时该调用从未执行、**不发 tool_start**，只能凭
+      // tool_result 建段。
+      //
+      // F1 收口 I-3（裁决）：skipped 卡面**只走「输出」** —— 人读文案统一落 `result`，**不写 reason**。
+      // 后端把同一句措辞同时放进帧 result 与台账 reason，两键齐落会让「输出」块与红色「原因」行
+      // 同屏重复同一句话。reason 缺失 ⇒ AiPanel 原因行（`!isBlankText(part.reason)`）自然不渲染，
+      // 卡面视觉结构/样式/emoji 零改动。
+      if (frame.outcome === 'skipped' || frame.status === 'SKIPPED') {
+        upsertToolPart(message, {
+          toolCallId: frame.toolCallId,
+          name: frame.name,
+          kind2: frame.kind,
+          status: 'skipped',
+          messageId: frame.messageId,
+          // 信封文案（后端 skippedMessage 同文放帧 result）；message 仅作旧帧缺 result 时的回落。
+          result: frame.result ?? frame.message ?? null,
+          truncated: frame.truncated ?? false,
+          truncatedReason: frame.truncatedReason ?? null,
+          ...(frame.outcome !== undefined ? { outcome: frame.outcome } : {}),
+          requiresAction: false
+        })
+        break
+      }
       // 补丁③：被人工拒绝（REJECTED）保持「已拒绝」，不被紧随其后的 tool_result(ok=false)
       // 覆盖成「执行失败」；防线③拦截（BLOCKED）同为"未执行"，展示口径与拒绝同类
       const existing = findToolPart(message, frame.toolCallId)
@@ -561,17 +592,20 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
       // 批3③a D5(甲)：'unknown' 纳入 localTerminal —— 回灌 payload 不带 status/ok
       // （types/ai.ts FrontendToolResultRequest），后端回帧恒为 FRONTEND_RESULT，若 unknown
       // 不在此集合，回执帧会把它翻成 succeeded（T1 生死线用例锁定）。
+      // 契约增量：'skipped' 同为终态（一等状态），first-wins 不得被后续回执改写。
       const existing = findToolPart(message, frame.toolCallId)
       const localTerminal = existing?.status === 'failed' || existing?.status === 'rejected'
         || existing?.status === 'blocked' || existing?.status === 'succeeded'
         || existing?.status === 'expired' || existing?.status === 'cancelled'
-        || existing?.status === 'unknown'
+        || existing?.status === 'unknown' || existing?.status === 'skipped'
       // 治理 P0-1 I1（收口修）：回执帧补齐 outcome 四字段后，结局以 outcome 为准（复用单表）——
       // 后端回帧 status 仍是 FRONTEND_RESULT，若让旧表先行，ok=false 会被盖成成功。旧帧
-      // （无 outcome）仍走原表，行为一字不动。
-      const frameStatus: ToolRunStatus = outcomeStatus(frame.outcome)
-        ?? frontendResultStatus(frame.status)
-        ?? (frame.ok ? 'succeeded' : 'failed')
+      // （无 outcome）仍走原表，行为一字不动。契约增量：status='SKIPPED' 与 outcome='skipped' 同义。
+      const frameStatus: ToolRunStatus = frame.outcome === 'skipped' || frame.status === 'SKIPPED'
+        ? 'skipped'
+        : outcomeStatus(frame.outcome)
+          ?? frontendResultStatus(frame.status)
+          ?? (frame.ok ? 'succeeded' : 'failed')
       const status: ToolRunStatus = localTerminal
         ? (existing?.status ?? 'failed')
         : frameStatus
@@ -588,6 +622,10 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
         status,
         messageId: frame.messageId,
         result: frame.result ?? null,
+        // 契约增量：skipped 的卡面 reason 取信封 message（缺省回落结果文本；均无则不覆盖原值）
+        ...(status === 'skipped' && (frame.message !== undefined || frame.result !== undefined)
+          ? { reason: frame.message ?? frame.result ?? null }
+          : {}),
         requiresAction: false
       })
       if (submittedValues) {
@@ -602,7 +640,28 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
       // （status='pending' + requiresAction=true），不再什么都不写；生命周期双兜底：
       // ① 轮终态 expireResidueToolParts（pending ⇒ expired）；② 快照恢复路非 PENDING 收敛。
       // 已决 toolCallId 的建段拦截在 store 侧 handleFrame 的 D8 守卫（建段前过闸，防跨消息双段）。
-      const waiting = frame.toolCalls.find((call) => call.kind === 'CONFIRM' || call.kind === 'FRONTEND')
+      // 契约增量：suspended 载荷的条目也可能声明 skipped（上游失败导致未执行）—— 逐条落终态段，
+      // 不建待决占位；已有终态的段 first-wins（延迟帧不得改写已落定结局）。
+      for (const call of frame.toolCalls) {
+        if (call.outcome !== 'skipped' && call.status !== 'SKIPPED') {
+          continue
+        }
+        const existing = findToolPart(message, call.toolCallId)
+        if (existing && existing.status !== 'pending' && existing.status !== 'running') {
+          continue
+        }
+        upsertToolPart(message, {
+          toolCallId: call.toolCallId,
+          name: call.name,
+          kind2: call.kind,
+          status: 'skipped',
+          // resultText 是信封人读文案（后端 skippedMessage）；reason 仅为错误码，作末位兜底。
+          reason: call.resultText ?? call.reason ?? null,
+          requiresAction: false
+        })
+      }
+      const waiting = frame.toolCalls.find((call) => (call.kind === 'CONFIRM' || call.kind === 'FRONTEND')
+        && call.outcome !== 'skipped' && call.status !== 'SKIPPED')
       if (waiting) {
         upsertToolPart(message, {
           toolCallId: waiting.toolCallId,

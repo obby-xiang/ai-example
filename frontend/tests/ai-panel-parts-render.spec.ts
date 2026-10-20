@@ -1511,6 +1511,23 @@ describe('2A 批：已决原样 UI 只读态 / 折叠时序 / 冲突表格（R-1
     wrapper.unmount()
   })
 
+  it('F1 收口 I-3：skipped 段只显示「输出」—— 信封文案全卡恰一次、红色「原因」行不渲染', async () => {
+    const TEXT = '未执行：上游 start_export 失败（PRECHECK_NOT_PASSED），本调用已跳过'
+    const msg = buildMessage([
+      { kind: 'tool', seg: 0, toolCallId: 'sk1', name: 'start_import', kind2: 'BACKEND', status: 'skipped', args: '{}', result: TEXT, outcome: 'skipped', requiresAction: false }
+    ])
+    const wrapper = await mountPanel([msg])
+    await wrapper.find('[data-testid="block-toggle-a-1:sk1"]').trigger('click')
+    // 卡头仍走 skipped 词表（视觉零改动）
+    expect(wrapper.text()).toContain('已跳过')
+    // 同文双显清零：同一句信封文案在整张卡里只出现一次（「输出」块）
+    expect(wrapper.text().split(TEXT).length - 1).toBe(1)
+    // 原因行（普通工具红底 tool-error / 已决只读 ro-reason）零命中
+    expect(wrapper.find('[data-testid="tool-error"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="ro-reason-sk1"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('2A/r15：门卡四态徽标（已批准 / 已拒绝 / 已超时 / 已批准·执行失败；无已取消）+ 六态一律折叠', async () => {
     const expired = buildMessage([
       { kind: 'tool', seg: 0, toolCallId: 'e1', name: 'start_export', kind2: 'CONFIRM', status: 'expired', args: '{}', requiresAction: false }

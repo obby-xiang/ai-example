@@ -15,7 +15,7 @@
 
 import type { ToolPart, ToolRunStatus } from '@/types/ai'
 
-/** 状态词表（9 态，与 AiPanel toolStatusLabel 同口径的简短版，供兜底行）。
+/** 状态词表（10 态，与 AiPanel toolStatusLabel 同口径的简短版，供兜底行）。
  *  问题1 偏差修正批项 3：导出给面板的摘要去重判据用 —— 无映射工具的兜底摘要按前缀剥掉工具名后
  *  只剩状态词，而状态词已由同屏的状态胶囊承担 ⇒ 摘要位不再重复渲一次。 */
 export const TOOL_SUMMARY_STATUS_WORDS: Record<ToolRunStatus, string> = {
@@ -27,7 +27,8 @@ export const TOOL_SUMMARY_STATUS_WORDS: Record<ToolRunStatus, string> = {
   blocked: '超出范围',
   expired: '已失效',
   cancelled: '已取消',
-  unknown: '结局未知'
+  unknown: '结局未知',
+  skipped: '已跳过'
 }
 
 type ToolArgs = Record<string, unknown>

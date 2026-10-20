@@ -77,7 +77,7 @@ export interface FrontendToolResultRequest {
    */
   cancelled?: boolean
   /**
-   * 治理 P0-1：前端执行器的结局七态（`FrontendToolExecution.outcome` 原样回灌）。
+   * 治理 P0-1：前端执行器的结局八态（`FrontendToolExecution.outcome` 原样回灌）。
    * 后端据此落台账并在 tool_result 帧回发同值；取消路径可不带（`cancelled=true` 已表达结局）。
    */
   outcome?: ToolOutcome
@@ -159,7 +159,7 @@ export interface AiHistoryMessage {
     decidedAt?: number
     submittedValues?: string
     /**
-     * 治理 P0-1：条目结局七态（后端新载荷才有）。**有则优先**于 status 经词表映射；
+     * 治理 P0-1：条目结局八态（后端新载荷才有；含契约增量的 skipped）。**有则优先**于 status 经词表映射；
      * 缺（旧载荷 / resume 重建轮）⇒ 回落 status 旧表。
      */
     outcome?: string
@@ -187,9 +187,10 @@ export type RunDescription = Record<string, unknown>
  * rejected=人工拒绝，expired=会话已失效（后端历史为空，挂起态无法续跑），
  * blocked=被渐进披露防线③拦下（DC-14 T1：越 scope 的调用未执行 —— 与"执行失败"不是一回事），
  * unknown=结局未知（未确认成功/失败；前端执行器超时等"无法判定成败"的收尾），
- * cancelled=已取消（用户放弃 / 渲染器不可用 / 整轮取消）。
+ * cancelled=已取消（用户放弃 / 渲染器不可用 / 整轮取消），
+ * skipped=已跳过（上游确定性失败导致本工具未执行；**一等状态**，不是 failed、不是空）。
  */
-export type ToolRunStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'rejected' | 'expired' | 'blocked' | 'unknown' | 'cancelled'
+export type ToolRunStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'rejected' | 'expired' | 'blocked' | 'unknown' | 'cancelled' | 'skipped'
 
 /** 工具卡的一次执行记录（同一轮可多次工具调用）。 */
 export interface ToolRun {
@@ -308,7 +309,7 @@ export interface ToolPart extends MessagePartBase {
   truncated?: boolean
   truncatedReason?: string | null
   /**
-   * 治理 P0-1：帧侧结局七态（tool_result 帧带 outcome 时落段，随镜像持久化；旧帧无值）。
+   * 治理 P0-1：帧侧结局八态（tool_result 帧带 outcome 时落段，随镜像持久化；旧帧无值）。
    * 卡面**不展示本字段**（阶段二期再做）；段状态仍以 `status` 为准，二者由 parts.ts 的
    * `outcomeStatus` 单表映射，当前写入点只在 tool_result。
    */
@@ -363,7 +364,7 @@ export interface ToolPartPatch {
   /** 见 {@link ToolPart.truncated}（R-154 #2 帧侧截断标记，随段持久化） */
   truncated?: boolean
   truncatedReason?: string | null
-  /** 见 {@link ToolPart.outcome}（治理 P0-1 帧侧结局七态） */
+  /** 见 {@link ToolPart.outcome}（治理 P0-1 帧侧结局八态） */
   outcome?: ToolOutcome
   /** 见 {@link ToolPart.timeoutSeconds}（确认门/前端工具的等待口径，随段持久化） */
   timeoutSeconds?: number

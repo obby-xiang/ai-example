@@ -691,7 +691,8 @@ public class ResilientChatService {
 			|| PendingToolCall.FRONTEND_RESULT.equals(status)
 			|| PendingToolCall.FRONTEND_CANCELLED.equals(status)
 			|| PendingToolCall.CANCELLED.equals(status)
-			|| PendingToolCall.BLOCKED.equals(status);
+			|| PendingToolCall.BLOCKED.equals(status)
+			|| PendingToolCall.SKIPPED.equals(status);
 	}
 
 	/**

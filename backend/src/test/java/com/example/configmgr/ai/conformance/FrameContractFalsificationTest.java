@@ -131,6 +131,32 @@ class FrameContractFalsificationTest {
 				.anySatisfy(violation -> assertThat(violation).contains("出现两个结局帧"));
 	}
 
+	/**
+	 * 豁免的正控：{@code outcome=skipped}（或 {@code status=SKIPPED}）的结局帧<b>没有 tool_start 也合规</b>
+	 * —— 跳过项从未开始执行，补发 start 才是伪造。
+	 */
+	@Test
+	void acceptsSkippedOutcomeWithoutToolStart() {
+		List<Map<String, Object>> frames = List.of(fixture("start", 1), fixture("suspended", 2),
+				fixture("tool_result", 3, "toolCallId", "c-2", "outcome", "skipped", "status", "SKIPPED"),
+				fixture("tool_result", 4, "toolCallId", "c-3", "outcome", "skipped", "status", "SKIPPED"),
+				fixture("done", 5, "cancelled", false));
+		assertThat(FrameContract.toolPairingContract(frames)).isEmpty();
+	}
+
+	/**
+	 * 豁免的边界：只放过 skipped —— 其它 outcome 的结局帧没有 start 仍属违规。
+	 * kill：把豁免放宽成"所有结局帧都不查 start" ⇒ 本用例变红。
+	 */
+	@Test
+	void killsNonSkippedOutcomeWithoutToolStart() {
+		List<Map<String, Object>> frames = List.of(fixture("start", 1),
+				fixture("tool_result", 2, "toolCallId", "c-1", "outcome", "failed", "status", "EXECUTED"),
+				fixture("done", 3, "cancelled", false));
+		assertThat(FrameContract.toolPairingContract(frames))
+				.anySatisfy(violation -> assertThat(violation).contains("没有 tool_start"));
+	}
+
 	// ── 规则 4：正文三段式与拼接 ────────────────────────────────────────────
 
 	/** kill：砍掉 {@code finish()} 里的 {@code out.textEnd(...)} ⇒ 有 delta 但无 message_end。 */

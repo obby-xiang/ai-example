@@ -60,6 +60,13 @@ public class PendingToolCall {
 	 */
 	public static final String BLOCKED = "BLOCKED";
 
+	/**
+	 * 批策略跳过（P1-10）：同批次里上游 W/J/P 工具确定性失败（{@code outcome=failed 且
+	 * retryable=false}），本调用<b>未执行</b>。这是有着落的终态 —— 有信封（outcome=skipped、
+	 * code=UPSTREAM_FAILED）、有帧、有历史，模型侧每个 toolCallId 都有对应 ToolResponse。
+	 */
+	public static final String SKIPPED = "SKIPPED";
+
 	/** 挂起种类：确认门（DANGER 风险）。 */
 	public static final String KIND_CONFIRM = "CONFIRM";
 
@@ -147,6 +154,7 @@ public class PendingToolCall {
 			case REJECTED_ARGUMENTS -> this.reason == null || this.reason.isBlank() ? "REJECTED_ARGUMENTS" : this.reason;
 			case CANCELLED -> ToolOutcome.CODE_RUN_CANCELLED;
 			case FRONTEND_CANCELLED -> ToolOutcome.CODE_FRONTEND_CANCELLED;
+			case SKIPPED -> ToolOutcome.CODE_UPSTREAM_FAILED;
 			default -> null;
 		};
 	}

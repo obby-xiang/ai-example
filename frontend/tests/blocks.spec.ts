@@ -426,7 +426,7 @@ describe('卡片三类型统一判据（tool / hitl / form）', () => {
     })
   })
 
-  it('cardStatusOf：普通工具九态文案 / 色族（仅 pending 改「待执行」，其余保持）', () => {
+  it('cardStatusOf：普通工具十态文案 / 色族（仅 pending 改「待执行」，其余保持）', () => {
     const matrix: Array<[ToolRunStatus, string, CardTone]> = [
       ['pending', '待执行', 'primary'],
       ['running', '调用中…', 'primary'],
@@ -436,7 +436,8 @@ describe('卡片三类型统一判据（tool / hitl / form）', () => {
       ['blocked', '超出当前范围', 'neutral'],
       ['expired', '会话已失效', 'neutral'],
       ['cancelled', '已取消', 'neutral'],
-      ['unknown', '结局未知（未确认成功/失败）', 'neutral']
+      ['unknown', '结局未知（未确认成功/失败）', 'neutral'],
+      ['skipped', '已跳过', 'neutral']
     ]
     for (const [status, label, tone] of matrix) {
       expect(cardStatusOf(makeTool({ status }))).toEqual({ key: status, label, tone })
@@ -486,6 +487,13 @@ describe('卡片三类型统一判据（tool / hitl / form）', () => {
     })
     expect(cardStatusOf(makeTool({ kind2: 'CONFIRM', status: 'pending' }))).toEqual({
       key: 'pending', label: '等待确认', tone: 'primary'
+    })
+    // 契约增量：skipped 不是决策态 —— 门卡/表单卡同样显示「已跳过」，不被只读状态机折成「已超时」
+    expect(cardStatusOf(makeTool({ kind2: 'CONFIRM', status: 'skipped' }))).toEqual({
+      key: 'skipped', label: '已跳过', tone: 'neutral'
+    })
+    expect(cardStatusOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'skipped' }))).toEqual({
+      key: 'skipped', label: '已跳过', tone: 'neutral'
     })
     expect(cardStatusOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'blocked' }))).toEqual({
       key: 'blocked', label: '超出当前范围', tone: 'neutral'

@@ -15,12 +15,27 @@ public class ToolMeta {
     private String[] scopePatterns;
     private RiskLevel riskLevel;
     private Channel channel;
+    private Category category;
     private ToolCallback callback;
 
     public enum RiskLevel {
         READ,      // auto-execute, no side effects
         WRITE,     // auto-execute, reversible side effects
         DANGER     // requires HITL confirmation before execution
+    }
+
+    /**
+     * 执行类别（P1-10 批策略，见 {@link ToolCategory}）：R/H/U/F 失败后批次继续，
+     * W/J/P 确定性失败（outcome=failed 且 retryable=false）后批次停下并为未执行项补 SKIPPED。
+     */
+    public enum Category {
+        R,  // 纯读
+        H,  // 人工交互（生成式表单）
+        U,  // 向导/UI 状态
+        W,  // 创建写
+        J,  // 异步作业
+        P,  // 不可逆写（发布）
+        F   // 文件下载
     }
 
     /**

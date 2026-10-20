@@ -202,7 +202,14 @@ public class SpToolCallingManager implements ToolCallingManager {
 			out.suspended(pendings, this.store.runKey(runId), this.store.pendingKey(runId), this.store.instanceId());
 
 			List<ToolResponseMessage.ToolResponse> responses = new ArrayList<>(pendings.size());
+			// P1-10 批策略：W/J/P 条目结算后若确定性失败（outcome=failed 且 retryable=false），
+			// 本批剩余调用一律不再执行，逐个补结构化 SKIPPED（写库 + 发帧 + 模型 ToolResponse）。
+			PendingToolCall haltedBy = null;
 			for (PendingToolCall pending : pendings) {
+				if (haltedBy != null) {
+					responses.add(skipAsUpstreamFailed(runId, pending, haltedBy));
+					continue;
+				}
 				// 事件边界上的取消检查（ADR-8 修正③：取消在"分片/事件边界"轮询）：
 				// 逐个工具执行前先看一次权威标志，命中即终止整轮（终态 done{cancelled:true}）。
 				checkCancelled(runId);
@@ -236,8 +243,17 @@ public class SpToolCallingManager implements ToolCallingManager {
 				PendingToolCall source = settled == null ? pending : settled;
 				// T2：回填模型的是裁剪后的文本；上面的 text 本身（进帧、进台账）保持全文
 				// P0-1：模型侧 = 统一信封 JSON（先裁剪 message，再组装，见 ToolResultEnvelope#toModelJson）
+				// P1-10：执行中抛出异常的失败，executeOnce 已把对账措辞追加进 resultText
+				// （帧/台账/模型三面同一份文本；"结果缺失"这类未执行副作用不追加）。
 				responses.add(new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
 						modelData(source, text)));
+				// 停走判定放在结算之后：这里看到的 outcome/code 才是执行/确认门写下的真值。
+				if (haltsBatch(source)) {
+					haltedBy = source;
+					log.warn("批策略首错即停 runId={} 上游工具={} outcome={} code={}，本批剩余 {} 个调用置 SKIPPED",
+							runId, source.getName(), source.effectiveOutcome().wire(), source.effectiveCode(),
+							Math.max(0, pendings.size() - responses.size()));
+				}
 			}
 
 			ToolResponseMessage toolMessage = ToolResponseMessage.builder().responses(responses).build();
@@ -268,6 +284,60 @@ public class SpToolCallingManager implements ToolCallingManager {
 			}
 		}
 		return ids;
+	}
+
+	// ── 批策略（P1-10） ─────────────────────────────────────────────────────
+
+	/** 执行后失败的 message 追加语（副作用可能已发生，必须人工对账）。 */
+	public static final String RECONCILIATION_NOTE = "该操作可能已产生部分副作用，需人工对账。";
+
+	/**
+	 * 批次首错即停的判据：类别 W/J/P，且结算后的结局是<b>确定性失败</b>
+	 * （{@code outcome=failed} 且 {@code retryable=false}）。{@code retryable=true} 或
+	 * {@code unknown} 一律不停 —— 前者还有改数据重试的空间，后者须先对账。
+	 */
+	public boolean haltsBatch(PendingToolCall pending) {
+		if (pending == null) {
+			return false;
+		}
+		ToolMeta.Category category = this.toolRegistry.categoryOf(pending.getName());
+		if (category != ToolMeta.Category.W && category != ToolMeta.Category.J
+				&& category != ToolMeta.Category.P) {
+			return false;
+		}
+		ToolOutcome outcome = pending.effectiveOutcome();
+		return outcome == ToolOutcome.FAILED && !outcome.retryable(pending.effectiveCode());
+	}
+
+	/**
+	 * 为"已规划未执行"的调用补一条结构化 SKIPPED：写库、发 {@code tool_result} 帧、
+	 * 返回回填模型的统一信封（每个 {@code toolCallId} 都必须有对应 ToolResponse）。
+	 * 续跑路径与首轮共用本方法，因此重放同形。
+	 */
+	public ToolResponseMessage.ToolResponse skipAsUpstreamFailed(String runId, PendingToolCall pending,
+			PendingToolCall upstream) {
+		String message = skippedMessage(upstream.getName(), upstream.effectiveCode());
+		pending.setStatus(PendingToolCall.SKIPPED);
+		pending.setOutcome(ToolOutcome.SKIPPED.wire());
+		pending.setCode(ToolOutcome.CODE_UPSTREAM_FAILED);
+		pending.setReason(ToolOutcome.CODE_UPSTREAM_FAILED);
+		pending.setExecuted(false);
+		pending.setExecutedBy(null);
+		pending.setResolvedAtMs(System.currentTimeMillis());
+		pending.setResultText(message);
+		this.store.putPending(runId, pending);
+		this.registry.of(runId).toolResult(pending, false, false, message);
+		log.warn("批策略跳过调用 runId={} tool={} toolCallId={}（上游 {} 失败：{}）", runId, pending.getName(),
+				pending.getToolCallId(), upstream.getName(), upstream.effectiveCode());
+		return new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
+				modelData(pending, message));
+	}
+
+	/** SKIPPED 的人读 message（模型信封/帧 result/续跑重放共用一份措辞）。 */
+	private static String skippedMessage(String upstreamName, String upstreamCode) {
+		String code = upstreamCode == null || upstreamCode.isBlank()
+				? ToolOutcome.CODE_TOOL_EXECUTION_FAILED : upstreamCode;
+		return "未执行：上游 " + upstreamName + " 失败（" + code + "），本调用已跳过";
 	}
 
 	// ── 三通道 ──────────────────────────────────────────────────────────────
@@ -450,7 +520,9 @@ public class SpToolCallingManager implements ToolCallingManager {
 			log.warn("工具执行失败 runId={} name={}", runId, pending.getName(), ex);
 			ok = false;
 			String code = failureCode(ex);
-			text = "工具执行失败：" + ex.getMessage();
+			// P1-10：执行过程中抛错 = 副作用可能已部分发生 —— 对账措辞写进同一份 resultText
+			// （帧、台账、模型信封、续跑重放四处同形）。"结果缺失"不是执行中失败，不追加。
+			text = "工具执行失败：" + ex.getMessage() + "\n" + RECONCILIATION_NOTE;
 			pending.setOutcome(ToolOutcome.FAILED.wire());
 			pending.setCode(code);
 		}

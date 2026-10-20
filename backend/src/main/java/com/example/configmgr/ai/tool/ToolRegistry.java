@@ -49,6 +49,7 @@ public class ToolRegistry {
                 ToolScope scopeAnn = method.getAnnotation(ToolScope.class);
                 ToolRisk riskAnn = method.getAnnotation(ToolRisk.class);
                 ToolChannel channelAnn = method.getAnnotation(ToolChannel.class);
+                ToolCategory categoryAnn = method.getAnnotation(ToolCategory.class);
 
                 ToolMeta meta = new ToolMeta();
                 meta.setName(name);
@@ -57,6 +58,7 @@ public class ToolRegistry {
                 meta.setScopePatterns(scopeAnn != null ? scopeAnn.value() : new String[]{"*"});
                 meta.setRiskLevel(riskAnn != null ? riskAnn.value() : ToolMeta.RiskLevel.READ);
                 meta.setChannel(channelAnn != null ? channelAnn.value() : ToolMeta.Channel.BACKEND);
+                meta.setCategory(categoryAnn != null ? categoryAnn.value() : null);
 
                 metaMap.put(name, meta);
                 log.debug("Registered tool: {} scopes={}", name, Arrays.toString(meta.getScopePatterns()));
@@ -147,6 +149,15 @@ public class ToolRegistry {
     public ToolMeta.Channel channelOf(String name) {
         ToolMeta meta = metaMap.get(name);
         return meta == null || meta.getChannel() == null ? ToolMeta.Channel.BACKEND : meta.getChannel();
+    }
+
+    /**
+     * 执行类别（P1-10 批策略判定用）。未登记/未声明类别一律返回 null ——
+     * 停走只对<b>显式声明</b>的 W/J/P 生效，缺元数据不会让普通工具把整批停掉。
+     */
+    public ToolMeta.Category categoryOf(String name) {
+        ToolMeta meta = metaMap.get(name);
+        return meta == null ? null : meta.getCategory();
     }
 
     private Set<String> buildTags(AiContext ctx) {

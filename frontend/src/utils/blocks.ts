@@ -307,8 +307,10 @@ function optionLabel(field: FormFieldLite, value: unknown): string {
  * 2A 批（裁决 §9 K2）：`blocked` / `unknown` / `pending` **不是决策态** —— 它们是工具运行侧
  * 的「未形成裁决」（越 scope 拦下 / 结局未知 / 仍在途），继续走普通工具卡（右状态标签承接
  * 「超出当前范围 / 结局未知 / 等待确认」），不进审批卡的只读四态，避免把非决策读成超时。
+ * 契约增量：`skipped`（上游失败导致未执行）同属非决策态 —— 必须由普通状态标签显示「已跳过」，
+ * 不得被只读状态机折成「已超时 / 已批准」。
  */
-const NON_DECISION_STATUSES: ReadonlySet<ToolRunStatus> = new Set(['pending', 'blocked', 'unknown'])
+const NON_DECISION_STATUSES: ReadonlySet<ToolRunStatus> = new Set(['pending', 'blocked', 'unknown', 'skipped'])
 
 export function isReadOnlyCard(part: ToolPart): boolean {
   return !part.requiresAction
@@ -405,7 +407,8 @@ const TOOL_STATUS_TONE: Record<ToolRunStatus, CardTone> = {
   blocked: 'neutral',
   expired: 'neutral',
   cancelled: 'neutral',
-  unknown: 'neutral'
+  unknown: 'neutral',
+  skipped: 'neutral'
 }
 
 /** 已决六态文案（2A 批 §9 K2 / §10 F6 原样；门卡无「已取消」）。 */
@@ -464,6 +467,8 @@ function toolStatusLabelOf(status: Exclude<ToolRunStatus, 'pending'>, expiredLoc
       return '已取消'
     case 'unknown':
       return '结局未知（未确认成功/失败）'
+    case 'skipped':
+      return '已跳过'
   }
 }
 
@@ -471,8 +476,8 @@ function toolStatusLabelOf(status: Exclude<ToolRunStatus, 'pending'>, expiredLoc
  * 卡片状态（key / label / tone）：
  * - 已决 HITL / GF（{@link isReadOnlyCard}）⇒ key / label / tone 全由 {@link readOnlyStateOf} 派生；
  * - 其余 pending ⇒ 文案按 {@link cardTypeOf} 分工；
- * - 其余段状态（running / succeeded / failed / rejected / blocked / expired / cancelled / unknown）
- *   ⇒ 既有八态文案 + 色族（blocked / unknown 不落只读六态；pending 已在前一分支处理）。
+ * - 其余段状态（running / succeeded / failed / rejected / blocked / expired / cancelled / unknown / skipped）
+ *   ⇒ 既有九态文案 + 色族（blocked / unknown / skipped 不落只读六态；pending 已在前一分支处理）。
  */
 export function cardStatusOf(part: ToolPart): CardStatus {
   if (isReadOnlyCard(part)) {

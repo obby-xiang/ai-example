@@ -22,11 +22,14 @@ export type ToolKind = 'CONFIRM' | 'FRONTEND' | 'BACKEND'
  * 工具结局维度（治理 P0-1 统一结果信封的 `outcome` 取值域；
  * 依据 `docs/research/调研-AI工具执行治理与互斥-2026-10-19.md` §6.4 P0-1）。
  *
- * 与 `ok` 的关系：`ok` 是旧协议的布尔二元、语义只覆盖"执行是否成功"；`outcome` 是七态
+ * 与 `ok` 的关系：`ok` 是旧协议的布尔二元、语义只覆盖"执行是否成功"；`outcome` 是八态
  * 真实结局，`ok:true` 并不蕴含 `outcome:'ok'`（业务失败但被异常处理器吞成文本时，后端按本字段
  * 如实报 `failed`）。**旧帧没有本字段 ⇒ 前端必须回落到 `ok` 三元**，不得臆造默认值。
+ *
+ * `skipped`（契约增量，与后端已锁定）：上游确定性失败导致本工具**未执行**；信封 `code`
+ * 通常为 `UPSTREAM_FAILED`。它是一等状态 —— 不是 `failed`，也不是"空"。
  */
-export type ToolOutcome = 'ok' | 'failed' | 'rejected' | 'blocked' | 'timeout' | 'cancelled' | 'unknown'
+export type ToolOutcome = 'ok' | 'failed' | 'rejected' | 'blocked' | 'timeout' | 'cancelled' | 'unknown' | 'skipped'
 
 /** 挂起条目状态（PendingToolCall 的状态常量）。 */
 export type PendingStatus =
@@ -44,6 +47,8 @@ export type PendingStatus =
   | 'REJECTED_ARGUMENTS'
   /** DC-14 T1：防线③（执行兜底）拦截 —— 越 scope 的工具调用未执行 */
   | 'BLOCKED'
+  /** 契约增量：上游确定性失败导致本工具未执行（一等状态，对应 outcome=`skipped`） */
+  | 'SKIPPED'
 
 /** 外置挂起条目（PendingToolCall#asMap 的字段集）。 */
 export interface PendingToolCallSnapshot {
@@ -63,7 +68,7 @@ export interface PendingToolCallSnapshot {
   executedAtMs?: number
   requestedAtMs?: number
   resolvedAtMs?: number
-  /** 治理 P0-1：条目结局七态（可选，旧载荷没有） */
+  /** 治理 P0-1：条目结局八态（可选，旧载荷没有；含契约增量的 skipped） */
   outcome?: ToolOutcome
   /** 治理 P0-1：错误码（可选，null = 无码） */
   code?: string | null
@@ -173,7 +178,7 @@ export interface SseToolResultFrame extends SseFrameBase {
   truncated?: boolean
   truncatedReason?: string | null
   /**
-   * 治理 P0-1（统一结果信封）：结局七态。**可选** —— 旧后端帧没有该字段，此时前端按
+   * 治理 P0-1（统一结果信封）：结局八态。**可选** —— 旧后端帧没有该字段，此时前端按
    * `ok` 三元回落（{@link ToolOutcome}）。带该字段时它**优先于 `ok`**：业务失败但被
    * 异常处理器吞成文本的场景下 `ok` 仍为 true，只有 `outcome` 如实报 `failed`。
    */
@@ -184,6 +189,11 @@ export interface SseToolResultFrame extends SseFrameBase {
   retryable?: boolean
   /** 治理 P0-1：目标资源（可选，null = 未声明）；一期仅契约透传 */
   target?: Record<string, unknown> | null
+  /**
+   * 信封人读文本（可选；SKIPPED 时由后端给出「未执行：上游 start_import 失败…」一类说明）。
+   * 卡面 reason 行在 skipped 时直接展示本字段。
+   */
+  message?: string | null
 }
 
 /** HITL 确认请求（挂起等待口径）。 */
@@ -247,7 +257,7 @@ export interface SseFrontendToolResultFrame extends SseFrameBase {
   messageId?: string
   result?: string | null
   /**
-   * 治理 P0-1（统一结果信封，I1 收口）：结局七态，契约同 `tool_result` 帧。**可选** ——
+   * 治理 P0-1（统一结果信封，I1 收口）：结局八态，契约同 `tool_result` 帧。**可选** ——
    * 旧后端帧没有该字段（此时前端走原 `status` 旧表 + ok 三元）；带该字段时**优先于**
    * `status`/`ok`（`status='FRONTEND_RESULT'` 不再把 `ok=false` 盖成成功）。
    */
@@ -258,6 +268,8 @@ export interface SseFrontendToolResultFrame extends SseFrameBase {
   retryable?: boolean
   /** 治理 P0-1：目标资源（可选，null = 未声明）；一期仅契约透传 */
   target?: Record<string, unknown> | null
+  /** 信封人读文本（可选；SKIPPED 时卡面 reason 行直接展示本字段） */
+  message?: string | null
 }
 
 /** 挂起公告（快照已外置 Redis，带键名与写入者实例，供"可重挂"提示）。 */

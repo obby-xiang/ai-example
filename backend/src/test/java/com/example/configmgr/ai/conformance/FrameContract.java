@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.conformance;
 
+import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.RunStore;
 
 import java.util.ArrayList;
@@ -40,7 +41,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <tr><td>{@link #terminalContract}</td><td>首帧 {@code start}；恰好一个终帧；终帧之后无任何帧</td>
  * <td>在 {@code finish()} 的 {@code out.done(...)} 之后再补一帧（或终帧发两次）</td></tr>
  * <tr><td>{@link #toolPairingContract}</td><td>每个 {@code tool_start} 恰有一个配对结局帧
- * （{@code tool_result} 或 {@code frontend_tool_result}，同 {@code toolCallId}）</td>
+ * （{@code tool_result} 或 {@code frontend_tool_result}，同 {@code toolCallId}）；
+ * 批策略跳过项的结局帧（{@code outcome=skipped}）豁免"必须有 start"——它从未开始执行</td>
  * <td>删掉 {@code SpToolCallingManager} 里任一结局分支的 {@code toolResult(...)}</td></tr>
  * <tr><td>{@link #textSegmentContract}</td><td>{@code message_start(kind=text)} → {@code delta}×N →
  * {@code message_end}；delta 同 {@code messageId}；{@code chars} = delta 文本长度之和</td>
@@ -194,7 +196,15 @@ public final class FrameContract {
 	 * <p>
 	 * 三种合法结局：后端执行（{@code tool_result}）、确认门拒绝/超时（{@code tool_result, ok=false}）、
 	 * 前端通道（{@code frontend_tool_result}）。
-	 * kill：删掉 {@code ConfirmGate} 里拒绝路径的 {@code toolResult(...)} ⇒ 出现"有 start 无结局"。
+	 *
+	 * <p>
+	 * <b>SKIPPED 结局帧豁免"必须有 tool_start"</b>：批策略首错即停时，被跳过的调用
+	 * <b>从未开始执行</b>（{@code SpToolCallingManager#skipAsUpstreamFailed} 只写库 + 发结局帧，
+	 * 不发 {@code tool_start}）。若为了满足配对而补发 {@code tool_start}，等于向前端<b>伪造"已启动"</b>，
+	 * 与事实相反（前端会渲染出一次并未发生的执行）。因此这里按 {@code outcome=skipped} /
+	 * {@code status=SKIPPED} 显式豁免"结局帧必须有 start"；"有 start 无结局"仍照旧违规。
+	 * kill：把豁免删掉 ⇒ 首错即停的真实帧流（无法补 start 的 skipped 帧）变红；
+	 * 把豁免放宽到所有 outcome ⇒ {@code killsNonSkippedOutcomeWithoutToolStart} 变红。
 	 */
 	public static List<String> toolPairingContract(List<Map<String, Object>> frames) {
 		List<String> out = new ArrayList<>();
@@ -227,11 +237,22 @@ public final class FrameContract {
 			}
 		}
 		for (Map.Entry<String, Integer> entry : outcomes.entrySet()) {
-			if (!starts.containsKey(entry.getKey())) {
-				out.add("结局帧（toolCallId=" + entry.getKey() + "，第 " + entry.getValue() + " 帧）没有 tool_start");
+			if (starts.containsKey(entry.getKey())) {
+				continue;
 			}
+			if (isSkippedOutcome(frames.get(entry.getValue()))) {
+				// 跳过项从未开始执行，没有（也不应有）tool_start —— 见方法注释的豁免理由。
+				continue;
+			}
+			out.add("结局帧（toolCallId=" + entry.getKey() + "，第 " + entry.getValue() + " 帧）没有 tool_start");
 		}
 		return out;
+	}
+
+	/** 批策略跳过项的结局帧：{@code outcome=skipped} 或 {@code status=SKIPPED}（两者同源，任一即可判）。 */
+	private static boolean isSkippedOutcome(Map<String, Object> frame) {
+		return "skipped".equalsIgnoreCase(String.valueOf(frame.get("outcome")))
+				|| PendingToolCall.SKIPPED.equals(frame.get("status"));
 	}
 
 	// ── 规则 4：正文三段式与 delta 拼接 ──────────────────────────────────────

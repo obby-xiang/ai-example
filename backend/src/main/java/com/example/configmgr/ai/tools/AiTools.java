@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.tools;
 
+import com.example.configmgr.ai.tool.ToolCategory;
 import com.example.configmgr.ai.tool.ToolChannel;
 import com.example.configmgr.ai.tool.ToolMeta;
 import com.example.configmgr.ai.tool.ToolOutcome;
@@ -28,8 +29,9 @@ import java.util.stream.Collectors;
  * 每个工具方法都直接调用基座业务服务（DefinitionService/TaskService/ConfigDataService/JobService），
  * 与 REST 控制器走同一服务层，不复制业务逻辑、不另建数据访问路径；JSON Schema 由 Spring AI 从
  * 方法签名生成（不自建工具协议）。渐进披露标签见 {@link ToolScope}，风险等级见 {@link ToolRisk}，
- * 执行通道见 {@link ToolChannel} —— 这三份元数据正是 {@code gate/SpToolCallingManager}
- * 判定"要不要挂起、挂哪种"的依据（不在此处硬编码工具名清单）。
+ * 执行通道见 {@link ToolChannel}，批策略类别见 {@link ToolCategory} —— 这四份元数据正是
+ * {@code gate/SpToolCallingManager} 判定"要不要挂起、挂哪种、失败后要不要停"的依据
+ * （不在此处硬编码工具名清单）。
  *
  * <h2>本棒接回的工具（P1 遗留 N7 的收口）</h2>
  * <ul>
@@ -89,6 +91,7 @@ public class AiTools {
     @Tool(name = "list_config_defs", description = "列出系统中的配置定义（编码/名称/层级/字段数），可按层级筛选")
     @ToolScope("*")
     @ToolRisk(ToolMeta.RiskLevel.READ)
+    @ToolCategory(ToolMeta.Category.R)
     public String listConfigDefs(
             @ToolParam(description = "层级过滤：GLOBAL/REGION/PROJECT，不传返回全部", required = false) String level) {
         ConfigDefinition.ConfigLevel parsedLevel = null;
@@ -116,6 +119,7 @@ public class AiTools {
     @Tool(name = "get_config_def", description = "获取指定配置定义的字段详情（编码/标签/类型/必填/主键/引用）")
     @ToolScope("*")
     @ToolRisk(ToolMeta.RiskLevel.READ)
+    @ToolCategory(ToolMeta.Category.R)
     public String getConfigDef(
             @ToolParam(description = "配置定义编码，例如 CURRENCY") String code) {
         ConfigDefinition def = definitionService.findByCode(code);
@@ -158,6 +162,7 @@ public class AiTools {
     @Tool(name = "list_tasks", description = "列出最近的任务列表（含类型/步骤/状态），最多返回前 20 条，超出时给出总条数")
     @ToolScope({"*", "page:tasks"})
     @ToolRisk(ToolMeta.RiskLevel.READ)
+    @ToolCategory(ToolMeta.Category.R)
     public String listTasks() {
         List<Task> tasks = taskService.findAll();
         if (tasks.isEmpty()) return "当前没有任务，可以创建一个新任务";
@@ -172,6 +177,7 @@ public class AiTools {
     @Tool(name = "get_workspace_state", description = "获取当前工作区的任务状态快照")
     @ToolScope("*")
     @ToolRisk(ToolMeta.RiskLevel.READ)
+    @ToolCategory(ToolMeta.Category.R)
     public String getWorkspaceState(
             @ToolParam(description = "任务ID", required = false) Long taskId) {
         if (taskId == null) return "当前未打开任何任务，请先创建或选择一个任务";
@@ -191,6 +197,7 @@ public class AiTools {
     @Tool(name = "check_job_status", description = "查询作业状态和进度")
     @ToolScope("task:*")
     @ToolRisk(ToolMeta.RiskLevel.READ)
+    @ToolCategory(ToolMeta.Category.R)
     public String checkJobStatus(
             @ToolParam(description = "作业ID") Long jobId) {
         Job job = jobService.findById(jobId);
@@ -202,6 +209,7 @@ public class AiTools {
     @Tool(name = "get_row_count", description = "预估指定配置项的数据行数")
     @ToolScope({"*", "task:EXPORT/QUERY_COND", "task:EXPORT/EXPORT"})
     @ToolRisk(ToolMeta.RiskLevel.READ)
+    @ToolCategory(ToolMeta.Category.R)
     public String getRowCount(
             @ToolParam(description = "配置定义编码") String defCode,
             @ToolParam(description = "范围类型: GLOBAL/REGION/PROJECT", required = false) String scopeType,
@@ -240,6 +248,7 @@ public class AiTools {
     @Tool(name = "create_task", description = "从零创建一个配置管理任务（EXPORT 导出 / IMPORT 导入），创建即落库并返回任务 id；随后用 navigate_to(page=..., taskId=...) 打开它的向导")
     @ToolScope({ "page:tasks", "task:EXPORT", "task:IMPORT" })
     @ToolRisk(ToolMeta.RiskLevel.WRITE)
+    @ToolCategory(ToolMeta.Category.W)
     public String createTask(
             @ToolParam(description = "任务类型：EXPORT（导出配置）/ IMPORT（导入配置）") String type,
             @ToolParam(description = "任务标题，不传则按类型生成默认标题", required = false) String title) {
@@ -291,6 +300,7 @@ public class AiTools {
     @Tool(name = "start_export", description = "启动配置导出作业，开始将数据导出为Excel文件（高风险，需要用户确认）")
     @ToolScope({ "page:tasks", "task:EXPORT/EXPORT" })
     @ToolRisk(ToolMeta.RiskLevel.DANGER)
+    @ToolCategory(ToolMeta.Category.J)
     public String startExport(
             @ToolParam(description = "任务ID") Long taskId) {
         // R-137（T6 重抛面）：作业发起失败/被守卫拒绝（含 TASK_FINALIZED 409）不再吞成字符串 ——
@@ -310,6 +320,7 @@ public class AiTools {
     @Tool(name = "start_precheck", description = "启动预检查作业，验证上传的Excel文件格式和数据（需要用户确认）")
     @ToolScope({ "page:tasks", "task:IMPORT/PRECHECK" })
     @ToolRisk(ToolMeta.RiskLevel.DANGER)
+    @ToolCategory(ToolMeta.Category.J)
     public String startPrecheck(
             @ToolParam(description = "任务ID") Long taskId) {
         // R-137（T6 重抛面）：同 startExport —— 失败/被守卫拒绝抛出，恢复 ok=false 通道
@@ -325,6 +336,7 @@ public class AiTools {
     @Tool(name = "start_import", description = "启动导入作业，将数据写入暂存区（高风险，需要用户确认）")
     @ToolScope("task:IMPORT/IMPORT")
     @ToolRisk(ToolMeta.RiskLevel.DANGER)
+    @ToolCategory(ToolMeta.Category.J)
     public String startImport(
             @ToolParam(description = "任务ID") Long taskId) {
         // R-137（T6 重抛面）：同 startExport —— 失败/被守卫拒绝抛出，恢复 ok=false 通道
@@ -335,6 +347,7 @@ public class AiTools {
     @Tool(name = "start_publish", description = "启动发布作业，将暂存数据正式发布到生产数据（高风险，需要用户确认）")
     @ToolScope("task:IMPORT/PUBLISH")
     @ToolRisk(ToolMeta.RiskLevel.DANGER)
+    @ToolCategory(ToolMeta.Category.P)
     public String startPublish(
             @ToolParam(description = "任务ID") Long taskId) {
         // R-137（T6 重抛面）：同 startExport —— 失败/被守卫拒绝抛出，恢复 ok=false 通道
@@ -355,6 +368,7 @@ public class AiTools {
     @Tool(name = "open_export_file_editor", description = "请求前端打开指定配置的导出文件在线编辑器（SpreadJS）")
     @ToolScope("task:EXPORT/EXPORT")
     @ToolRisk(ToolMeta.RiskLevel.READ)
+    @ToolCategory(ToolMeta.Category.U)
     @ToolChannel(ToolMeta.Channel.FRONTEND)
     public String openExportFileEditor(
             @ToolParam(description = "任务ID") Long taskId,
@@ -374,6 +388,7 @@ public class AiTools {
     @Tool(name = "download_export_files", description = "触发浏览器下载导出文件：1 个码 = 直出单文件 xlsx；≥2 个码 = 打包为单个 zip 下载")
     @ToolScope("task:EXPORT/EXPORT")
     @ToolRisk(ToolMeta.RiskLevel.READ)
+    @ToolCategory(ToolMeta.Category.F)
     @ToolChannel(ToolMeta.Channel.FRONTEND)
     public String downloadExportFiles(
             @ToolParam(description = "任务ID") Long taskId,
@@ -390,6 +405,7 @@ public class AiTools {
     @Tool(name = "navigate_to", description = "驱动前端页面导航：切换到任务中心/导出向导/导入向导/配置定义/数据浏览页；带 taskId 时直接打开该任务的向导")
     @ToolScope("*")
     @ToolRisk(ToolMeta.RiskLevel.READ)
+    @ToolCategory(ToolMeta.Category.U)
     @ToolChannel(ToolMeta.Channel.FRONTEND)
     public String navigateTo(
             @ToolParam(description = "目标页面：tasks（任务中心）/export（导出向导）/import（导入向导）/definitions（配置定义）/data（数据浏览）") String page,
@@ -400,6 +416,7 @@ public class AiTools {
     @Tool(name = "select_definitions", description = "在导出/导入向导的「选择配置」步骤勾选配置项（按配置定义编码；需已导航到对应向导）")
     @ToolScope({ "page:tasks", "task:EXPORT", "task:IMPORT" })
     @ToolRisk(ToolMeta.RiskLevel.READ)
+    @ToolCategory(ToolMeta.Category.U)
     @ToolChannel(ToolMeta.Channel.FRONTEND)
     public String selectDefinitions(
             @ToolParam(description = "配置定义编码列表，例如 [\"CURRENCY\"]") String[] codes,
@@ -428,6 +445,7 @@ public class AiTools {
     @Tool(name = "set_condition", description = "在导出向导的「查询条件」步骤为指定配置项设置数据过滤条件（不设条件即导出全部；需已导航到导出向导并已勾选该配置项）")
     @ToolScope({ "page:tasks", "task:EXPORT" })
     @ToolRisk(ToolMeta.RiskLevel.READ)
+    @ToolCategory(ToolMeta.Category.U)
     @ToolChannel(ToolMeta.Channel.FRONTEND)
     public String setCondition(
             @ToolParam(description = "配置定义编码，例如 CURRENCY") String defCode,
@@ -464,6 +482,7 @@ public class AiTools {
     @Tool(name = "confirm_step", description = "确认并推进向导步骤（当前步骤校验通过时前端才前进；需已导航到导出/导入向导）")
     @ToolScope({ "page:tasks", "task:EXPORT", "task:IMPORT" })
     @ToolRisk(ToolMeta.RiskLevel.READ)
+    @ToolCategory(ToolMeta.Category.U)
     @ToolChannel(ToolMeta.Channel.FRONTEND)
     public String confirmStep(
             @ToolParam(description = "目标步骤（可选）：导出向导 SELECT_DEFS/QUERY_COND/EXPORT；导入向导 SELECT_DEFS/UPLOAD/PRECHECK/IMPORT/PUBLISH。不传则推进到下一步", required = false) String step) {
@@ -525,6 +544,7 @@ public class AiTools {
             + "用户关闭表单则 outcome=cancelled、无数据；schema 不合规则 outcome=rejected 且表单未下发")
     @ToolScope({ "page:tasks", "task:*" })
     @ToolRisk(ToolMeta.RiskLevel.READ)
+    @ToolCategory(ToolMeta.Category.H)
     @ToolChannel(ToolMeta.Channel.FRONTEND)
     public String generativeForm(
             @ToolParam(description = "表单 schema：{\"scenario\":\"FILTER|CLARIFY\",\"title\":\"标题(可选)\",\"fields\":[{\"key\":\"字段键\",\"label\":\"标签\",\"type\":\"text|number|boolean|date|enum|multi_select\",\"required\":true(可选),\"defaultValue\":默认值(可选),\"options\":[{\"value\":\"值\",\"label\":\"文本\"}](enum/multi_select 必填),\"placeholder\":\"占位提示(仅 text/number/date,可选)\"}]}（字段 ≤20）") FormSpec form) {

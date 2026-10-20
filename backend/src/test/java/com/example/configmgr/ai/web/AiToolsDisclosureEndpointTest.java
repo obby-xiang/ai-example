@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.web;
 
 import com.example.configmgr.ai.tool.AiContext;
+import com.example.configmgr.ai.tool.ToolMeta;
 import com.example.configmgr.ai.tool.ToolRegistry;
 import com.example.configmgr.job.repo.JobRepository;
 import com.example.configmgr.task.repo.TaskRepository;
@@ -143,6 +144,20 @@ class AiToolsDisclosureEndpointTest {
         assertThat(jobRepository.count()).as("不得新建作业").isEqualTo(jobsBefore);
         assertThat(taskRepository.count()).as("不得新建任务").isEqualTo(tasksBefore);
         assertThat(toolRegistry.registeredCount()).as("登记表不被端点改动").isEqualTo(registeredBefore);
+    }
+
+    /**
+     * P1-10 批策略的<b>类别接线</b>：{@code @ToolCategory} 注解经真实 {@link ToolRegistry} 扫描后，
+     * 停走类工具必须落到 W/J/P。这五个名字是批策略的"停走面"，任一注解缺失/写错都会让
+     * 首错即停静默失效（该停的批次继续执行）—— 因此逐名断言，不做集合近似。
+     */
+    @Test
+    void batchStopCategoriesAreWiredFromToolAnnotations() {
+        assertThat(toolRegistry.categoryOf("create_task")).isEqualTo(ToolMeta.Category.W);
+        assertThat(toolRegistry.categoryOf("start_export")).isEqualTo(ToolMeta.Category.J);
+        assertThat(toolRegistry.categoryOf("start_precheck")).isEqualTo(ToolMeta.Category.J);
+        assertThat(toolRegistry.categoryOf("start_import")).isEqualTo(ToolMeta.Category.J);
+        assertThat(toolRegistry.categoryOf("start_publish")).isEqualTo(ToolMeta.Category.P);
     }
 
     // ───────────────────────── helpers ─────────────────────────

@@ -31,6 +31,8 @@ import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.model.tool.ToolExecutionResult;
 import org.springframework.ai.tool.ToolCallback;
+import org.springframework.ai.tool.annotation.Tool;
+import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.ai.tool.method.MethodToolCallbackProvider;
 
 import java.util.List;
@@ -40,6 +42,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -405,6 +408,70 @@ class ToolFrameSequenceConformanceTest {
 		assertThat(this.store.ledger(RUN_ID)).as("复用不写新台账").hasSize(2);
 	}
 
+	// ── 批策略：首错即停的 skipped 帧（无 tool_start，帧序仍合规） ─────────────
+
+	/**
+	 * <b>【P1-10 全链路】</b>W 类别确定性失败 ⇒ 本批剩余调用不再执行、补发 {@code SKIPPED} 结局帧。
+	 *
+	 * <p>关键在帧序：被跳过项<b>从未开始执行</b>，所以真实的帧流里它<b>只有 {@code tool_result}、
+	 * 没有 {@code tool_start}</b>。这正是 {@link FrameContract#toolPairingContract} 对
+	 * {@code outcome=skipped}/{@code status=SKIPPED} 显式豁免的场景 —— 若为了"配对"补发
+	 * {@code tool_start}，等于向前端伪造一次并未发生的执行。
+	 *
+	 * <p>kill：删掉 FrameContract 的跳过项豁免 ⇒ 本用例的 {@code assertConformant} 变红；
+	 * 若在 {@code skipAsUpstreamFailed} 里补发 {@code tool_start} ⇒ 下方"skipped 无 start"断言变红。
+	 */
+	@Test
+	void firstDeterministicFailureSkipsTheRestAndSkippedFrameHasNoToolStart() {
+		when(this.toolRegistry.categoryOf("create_task")).thenReturn(ToolMeta.Category.W);
+		when(this.toolRegistry.channelOf("create_task")).thenReturn(ToolMeta.Channel.BACKEND);
+		when(this.toolRegistry.riskOf("create_task")).thenReturn(ToolMeta.RiskLevel.WRITE);
+		when(this.toolRegistry.categoryOf("start_export")).thenReturn(ToolMeta.Category.J);
+		when(this.toolRegistry.channelOf("start_export")).thenReturn(ToolMeta.Channel.BACKEND);
+		when(this.toolRegistry.riskOf("start_export")).thenReturn(ToolMeta.RiskLevel.DANGER);
+		FakeBatchTools tools = new FakeBatchTools();
+		SseChatEmitter out = this.registry.of(RUN_ID);
+		FrameWire wire = FrameWire.attachTo(out);
+		out.start(SESSION_ID);
+
+		ToolExecutionResult result = this.manager.executeToolCalls(promptWithTools(tools),
+				response(new AssistantMessage.ToolCall("call-w", "function", "create_task", "{\"type\":\"IMPORT\"}"),
+						new AssistantMessage.ToolCall("call-j", "function", "start_export", "{\"taskId\":9}")));
+		out.done(Map.of(), "deepseek-flash", Map.of("cancelled", false));
+
+		List<Map<String, Object>> frames = wire.frames();
+		assertThat(FrameContract.types(frames)).containsExactly("start", "suspended", "tool_start", "tool_result",
+				"tool_result", "done");
+		// 全链路帧序合规：skipped 的 tool_result 没有 tool_start 是合法的
+		FrameContract.assertConformant(frames);
+		assertThat(FrameContract.ofType(frames, "tool_start")).extracting(frame -> frame.get("toolCallId"))
+				.as("只有真正执行的上游工具发 tool_start；跳过项从未启动")
+				.containsExactly("call-w");
+		Map<String, Object> skipped = FrameContract.ofType(frames, "tool_result").stream()
+			.filter(frame -> "call-j".equals(frame.get("toolCallId")))
+			.findFirst()
+			.orElseThrow();
+		assertThat(skipped).containsEntry("ok", false)
+				.containsEntry("outcome", ToolOutcome.SKIPPED.wire())
+				.containsEntry("status", PendingToolCall.SKIPPED)
+				.containsEntry("code", ToolOutcome.CODE_UPSTREAM_FAILED)
+				.containsEntry("retryable", false)
+				.containsEntry("executed", false)
+				.containsEntry("messageId", "tool-call-j");
+		assertThat(skipped.get("result")).asString()
+				.isEqualTo("未执行：上游 create_task 失败（TASK_FINALIZED），本调用已跳过");
+		// 跳过项零执行：下游工具一次都没被调用
+		assertThat(tools.skippedInvocations.get()).isZero();
+		assertThat(tools.failedInvocations.get()).isEqualTo(1);
+		// 模型侧两个 toolCallId 都各有回填，第二条是 skipped 信封
+		assertThat(result.conversationHistory().stream()
+			.filter(org.springframework.ai.chat.messages.ToolResponseMessage.class::isInstance)
+			.map(org.springframework.ai.chat.messages.ToolResponseMessage.class::cast)
+			.flatMap(message -> message.getResponses().stream())
+			.map(response -> ToolResultEnvelope.fromJson(response.responseData()).outcome()))
+			.containsExactly(ToolOutcome.FAILED.wire(), ToolOutcome.SKIPPED.wire());
+	}
+
 	// ── ⑦ 修复后回归（S5c-6）：决策回执帧先于它唤起的后果 ────────────────────
 
 	/**
@@ -556,6 +623,44 @@ class ToolFrameSequenceConformanceTest {
 	}
 
 	// ── 桩与辅助 ────────────────────────────────────────────────────────────
+
+	private Prompt promptWithTools(Object toolObject) {
+		List<ToolCallback> callbacks = List.of(MethodToolCallbackProvider.builder()
+			.toolObjects(toolObject)
+			.build()
+			.getToolCallbacks());
+		ToolCallingChatOptions options = ToolCallingChatOptions.builder()
+			.toolCallbacks(callbacks)
+			.toolContext(Map.of("runId", RUN_ID, "sessionId", SESSION_ID))
+			.build();
+		return new Prompt(List.of(new UserMessage("请执行批量工具")), options);
+	}
+
+	private static ChatResponse response(AssistantMessage.ToolCall... calls) {
+		AssistantMessage assistant = AssistantMessage.builder().toolCalls(List.of(calls)).build();
+		return new ChatResponse(List.of(new Generation(assistant)));
+	}
+
+	/** 批策略全链路用例的两个真实回调：W 类别确定性失败 + 本应被跳过的 J 类别。 */
+	static class FakeBatchTools {
+
+		final AtomicInteger failedInvocations = new AtomicInteger();
+
+		final AtomicInteger skippedInvocations = new AtomicInteger();
+
+		@Tool(name = "create_task", description = "受控替身：建任务必失败（触发首错即停）")
+		public String createTask(@ToolParam(description = "任务类型") String type) {
+			this.failedInvocations.incrementAndGet();
+			throw new ConflictException("TASK_FINALIZED", "任务已终态，不能创建");
+		}
+
+		@Tool(name = "start_export", description = "受控替身：导出（本批应被跳过，永不执行）")
+		public String startExport(@ToolParam(description = "任务ID") Long taskId) {
+			this.skippedInvocations.incrementAndGet();
+			return "不应被执行";
+		}
+
+	}
 
 	private void stubConfirmTool(String name) {
 		when(this.toolRegistry.channelOf(name)).thenReturn(ToolMeta.Channel.BACKEND);

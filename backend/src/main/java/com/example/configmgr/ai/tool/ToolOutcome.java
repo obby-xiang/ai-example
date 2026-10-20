@@ -17,7 +17,7 @@ import java.util.Set;
  * <li>{@link #REJECTED}/{@link #BLOCKED}/{@link #TIMEOUT}/{@link #CANCELLED}：重试不会改变结论；</li>
  * <li>{@link #FAILED}：只有"改数据后可重试"的码（预检查未通过/过期）为 true，
  * 其余（作业在途、任务终态、结果缺失、参数非法等）为 false；</li>
- * <li>{@link #OK}/{@link #UNKNOWN}：false（成功无须重试，未知须先对账）。</li>
+ * <li>{@link #OK}/{@link #UNKNOWN}/{@link #SKIPPED}：false（成功无须重试，未知须先对账，跳过不得重试）。</li>
  * </ul>
  */
 public enum ToolOutcome {
@@ -34,7 +34,13 @@ public enum ToolOutcome {
 
 	CANCELLED("cancelled"),
 
-	UNKNOWN("unknown");
+	UNKNOWN("unknown"),
+
+	/**
+	 * 未执行：批次里上游 W/J/P 工具确定性失败后，本轮已规划但尚未执行的调用。
+	 * 不是成功、不是空文本、也不是可重试失败（P1-10 批策略）。
+	 */
+	SKIPPED("skipped");
 
 	/** 工具抛异常且异常不携带机器可读码时的兜底码。 */
 	public static final String CODE_TOOL_EXECUTION_FAILED = "TOOL_EXECUTION_FAILED";
@@ -61,6 +67,9 @@ public enum ToolOutcome {
 	public static final String CODE_RUN_CANCELLED = "RUN_CANCELLED";
 
 	public static final String CODE_FRONTEND_CANCELLED = "FRONTEND_CANCELLED";
+
+	/** 未执行（批策略跳过）：上游工具 deterministic 失败后本调用没有执行。 */
+	public static final String CODE_UPSTREAM_FAILED = "UPSTREAM_FAILED";
 
 	/** "改数据后可重试"的失败码（预检查未通过/过期；其余失败码一律不可重试）。 */
 	private static final Set<String> RETRYABLE_FAILURE_CODES = Set.of("PRECHECK_NOT_PASSED", "PRECHECK_STALE");
@@ -117,6 +126,7 @@ public enum ToolOutcome {
 			case PendingToolCall.BLOCKED -> BLOCKED;
 			case PendingToolCall.TIMEOUT -> TIMEOUT;
 			case PendingToolCall.CANCELLED, PendingToolCall.FRONTEND_CANCELLED -> CANCELLED;
+			case PendingToolCall.SKIPPED -> SKIPPED;
 			default -> UNKNOWN;
 		};
 	}

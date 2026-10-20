@@ -10,6 +10,7 @@ import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.session.AiSessionService;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ContextBuilder;
+import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.ai.tool.ToolRegistry;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -127,6 +128,23 @@ class ConvergeMemoryToolCallStatesTest {
 
 		assertThat(toolCallState(windowed, 1, "tc-1")).containsEntry("status", PendingToolCall.EXECUTED)
 			.containsEntry("kind", PendingToolCall.KIND_CONFIRM);
+	}
+
+	/** P1-10：SKIPPED 是终态，历史段状态照常写 outcome=skipped 与 code=UPSTREAM_FAILED。 */
+	@Test
+	void skippedEntryIsCarriedAsSkippedOutcome() {
+		seed(List.of(new UserMessage("你好"), assistantWithToolCalls("tc-1"), toolResponse("tc-1")),
+				RunSnapshot.RUNNING);
+		PendingToolCall skipped = pending("tc-1", PendingToolCall.SKIPPED, false, PendingToolCall.KIND_CONFIRM);
+		skipped.setOutcome(ToolOutcome.SKIPPED.wire());
+		skipped.setCode(ToolOutcome.CODE_UPSTREAM_FAILED);
+		this.store.seedPending(RUN_ID, skipped);
+
+		List<Message> windowed = driveAndCapture(Flux.just(chunk("你好"), terminal("stop")));
+
+		assertThat(toolCallState(windowed, 1, "tc-1")).containsEntry("status", PendingToolCall.SKIPPED)
+			.containsEntry("outcome", ToolOutcome.SKIPPED.wire())
+			.containsEntry("code", ToolOutcome.CODE_UPSTREAM_FAILED);
 	}
 
 	// ── T2 升格判据 ──

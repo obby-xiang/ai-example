@@ -733,6 +733,9 @@ function readActionRecord(payload: unknown): WorkspaceActionRecord | null {
  * 批3③b D9（R-141④）防漂移注记：与 parts.ts `frontendResultStatus` 的**唯一真实分叉 =
  * `SUCCEEDED`**（本表不收录、返回 null —— SUCCEEDED 非本响应体实发值；帧路表收录以覆盖
  * ConfirmGate#cancel 竞态）。实发交集七值两表同映射；`CANCELLED` 的 run-cancel 依据注释见下。
+ * 契约增量（skipped）：`SKIPPED` 显式登记为 null —— 它不经本表的翻译语义（skipped 段只由
+ * tool_result 早分支落；409 里见到 SKIPPED 时该段已终态、无待收敛投影），
+ * 两表同返回 null ⇒ 不构成新分叉，见 case 内注。
  */
 export function frameStatusToPendingStatus(status: unknown): PendingToolCall['status'] | null {
   switch (status) {
@@ -755,6 +758,17 @@ export function frameStatusToPendingStatus(status: unknown): PendingToolCall['st
       return 'rejected'
     case 'BLOCKED':
       return 'blocked'
+    case 'SKIPPED':
+      // 契约增量（SKIPPED 一等状态）**不经本表**：SKIPPED 只由后端批次策略
+      // （SpToolCallingManager#skipAsUpstreamFailed）经 **tool_result** 帧发出，段由 parts.ts 的
+      // tool_result 早分支直接落 skipped（requiresAction=false ⇒ 无挂起投影）。
+      // 本表只翻译 `frontend_tool_result` 帧与 409 响应体的 status：前者由 GF 提交/取消路径铸帧
+      //（FRONTEND_RESULT / FRONTEND_CANCELLED），不含 SKIPPED；后者的 SKIPPED 只可能出现在
+      // "该条目已被批策略跳过、又被重复回灌"的 409 里 —— 此时段已是 skipped 终态、无待收敛投影。
+      // `PendingToolCall['status']` 也没有 skipped 成员（挂起卡态没有"已跳过"）。
+      // 故显式返回 null：不收敛挂起投影、不误落成 pending/failed，且与 parts.ts#frontendResultStatus
+      // 同映射（两表不产生新分叉）。
+      return null
     default:
       return null
   }
@@ -775,8 +789,8 @@ export function frameStatusToPendingStatus(status: unknown): PendingToolCall['st
  * 批2（权威翻转）：入参同时接受段侧 `ToolRunStatus` —— 判据改读段（`hasDecidedPendingResidue`
  * 读 `part.status`），两个枚举的终态集合在这里取并集。
  *
- * 批3③b D9（R-141④）防漂移注记：本枚举（7 态：succeeded/rejected/blocked/expired/cancelled/
- * unknown/failed）与段侧 `localTerminal`（parts.ts 的 `frontend_tool_result` case 内）**同 7 态、无共享常量**
+ * 批3③b D9（R-141④）防漂移注记：本枚举（8 态：succeeded/rejected/blocked/expired/cancelled/
+ * unknown/failed/skipped）与段侧 `localTerminal`（parts.ts 的 `frontend_tool_result` case 内）**同 8 态、无共享常量**
  * （parts.ts 不依赖 store 的纯函数层约束）——漂移由 frontend-tool-result-terminal.spec.ts
  * 的 D9 表驱动一致性锁兜底，不得为"消除重复"抽公共表。
  *
@@ -790,7 +804,7 @@ export function frameStatusToPendingStatus(status: unknown): PendingToolCall['st
 function isFrameDecidedPendingStatus(status: PendingToolCall['status'] | ToolRunStatus): boolean {
   return status === 'succeeded' || status === 'rejected' || status === 'blocked'
     || status === 'expired' || status === 'cancelled'
-    || status === 'unknown' || status === 'failed'
+    || status === 'unknown' || status === 'failed' || status === 'skipped'
 }
 
 export const useAiStore = defineStore('ai', {
@@ -1163,7 +1177,7 @@ export const useAiStore = defineStore('ai', {
             const state = call.id !== null && call.id !== undefined && call.id !== ''
               ? item.toolCallStates?.[call.id]
               : undefined
-            // 治理 P0-1：结局七态 **outcome 优先**（新载荷）—— 有合法 outcome 即用，缺/域外值才
+            // 治理 P0-1：结局八态 **outcome 优先**（新载荷）—— 有合法 outcome 即用，缺/域外值才
             // 回落 status 旧表（旧载荷 / resume 重建轮 T4 同口径，行为一字不动）。
             // M1（收口修）：非终态（PENDING/APPROVED ⇒ pending）不得被 outcome='unknown' 覆写成
             // failed —— 条目仍在等人工，后端也不会对其写 outcome；此处为双保险。
@@ -2160,7 +2174,7 @@ export const useAiStore = defineStore('ai', {
      * 返回结构化结果（供生成式表单区分 400 FORM_RESULT_REJECTED「挂起仍在等待，可重试」
      * 与真失败）；通用执行器路径（runFrontendTool）忽略返回值，行为不变。
      *
-     * 治理 P0-1：`outcome` 为前端执行器的结局七态（`FrontendToolExecution.outcome`），仅执行器
+     * 治理 P0-1：`outcome` 为前端执行器的结局八态（`FrontendToolExecution.outcome`），仅执行器
      * 路径携带（取消路径由 `cancelled=true` 表达结局）；缺省不产该键，旧请求体形态不变。
      */
     async submitFrontendToolResult(
@@ -2789,7 +2803,7 @@ export const useAiStore = defineStore('ai', {
       }
 
       // 批3③b D6(B)（R-141①，店级守卫）：跨宿主"已决"终帧守卫 —— 重挂/续收回放时，若帧的
-      // toolCallId 已在**其他消息**上持有已决段（hasDecidedPendingResidue，统一 7 态），且当前
+      // toolCallId 已在**其他消息**上持有已决段（hasDecidedPendingResidue，统一 8 态），且当前
       // 宿主消息没有它的段，则整帧跳过：不得在新宿主重建同 id 段（旧卡 unknown/failed/cancelled
       // 仍在 ⇒ 第二张状态矛盾卡）。当前宿主已持段的正常收敛不受影响（含 T1 生死线的 first-wins）。
       // 挂起语义帧（request/suspended/confirm_request）的拦截由 D8 各 case 守卫承担；本守卫只覆盖
@@ -2840,7 +2854,7 @@ export const useAiStore = defineStore('ai', {
         }
         case 'confirm_request': {
           // 批3③b D8（R-141③）：已决 toolCallId 的重投帧不产生新挂起语义 —— 守卫去 GF 前缀、
-          // 扩到全部工具（判据统一 7 态）。实现取 break：seq 记账与 markApplied（switch 后统一
+          // 扩到全部工具（判据统一 8 态）。实现取 break：seq 记账与 markApplied（switch 后统一
           // 收口）照常执行，**语义再投以本闸兜底**（与 seq 幂等的职责分界：闸管语义、seq 管重复）。
           if (this.hasDecidedPendingResidue(frame.toolCallId)) {
             break
@@ -2868,7 +2882,7 @@ export const useAiStore = defineStore('ai', {
         case 'frontend_tool_request': {
           // 批3③b D8（R-141③）：守卫**去 GF 前缀** —— 通用 FRONTEND 工具的重投帧同样被拦：
           // 不再触发第二次 runFrontendTool（二次浏览器副作用）、不把已终态段改回
-          // pending+requiresAction（挂起卡复活）。已决判据统一 7 态（含 unknown/failed）。
+          // pending+requiresAction（挂起卡复活）。已决判据统一 8 态（含 unknown/failed/skipped）。
           // 原 GF 前缀守卫的行为对 GF 用例不变（回归锁见 frontend-tool-result-terminal.spec.ts）。
           if (this.hasDecidedPendingResidue(frame.toolCallId)) {
             // T2a 返修（S3）：守卫前移到**写段之前** —— 已决 toolCallId 不产生任何新挂起语义
@@ -2929,7 +2943,15 @@ export const useAiStore = defineStore('ai', {
           // find 首个 CONFIRM/FRONTEND）的 toolCallId 上，逐条目遍历判已决；已决 ⇒ 不建段 /
           // 不写 requiresAction / 不置 suspended（防 failed+requiresAction rogue 面经
           // pendingStatusOf 折 pending 复活挂起卡，R-141③ 行尾注记 / DS Pro O-5）。
-          const waiting = frame.toolCalls.find((call) => call.kind === 'CONFIRM' || call.kind === 'FRONTEND')
+          // 契约增量：skipped 条目是一等终态而非挂起。无待决条目时直接落段（不置 suspended）；
+          // 有待决条目时仍走下方原路（applyFrameToParts 会一并处理 skipped 条目，D8 守卫不变）。
+          const hasSkipped = frame.toolCalls.some((call) => call.outcome === 'skipped' || call.status === 'SKIPPED')
+          const waiting = frame.toolCalls.find((call) => (call.kind === 'CONFIRM' || call.kind === 'FRONTEND')
+            && call.outcome !== 'skipped' && call.status !== 'SKIPPED')
+          if (!waiting && hasSkipped) {
+            applyFrameToParts(message, frame)
+            break
+          }
           if (waiting) {
             if (this.hasDecidedPendingResidue(waiting.toolCallId)) {
               break
@@ -3240,7 +3262,7 @@ export const useAiStore = defineStore('ai', {
       if (execution.availability === 'degraded' || execution.availability === 'unavailable') {
         this.notice = execution.result
       }
-      // 治理 P0-1：前端执行器的结局七态随回灌上送（后端台账/回帧以此为权威结局）
+      // 治理 P0-1：前端执行器的结局八态随回灌上送（后端台账/回帧以此为权威结局）
       await this.submitFrontendToolResult(frame.toolCallId, execution.result, 'frontend-executor', false, undefined, execution.outcome)
     }
   }

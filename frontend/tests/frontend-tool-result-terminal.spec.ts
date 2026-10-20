@@ -446,7 +446,7 @@ describe('批3③a T3：hasDecidedPendingResidue 对 unknown / failed 段的拦�
 /**
  * 对话时序包 批3③b D8（R-141③）：挂起语义帧的"已决不重投"闸 —— 守卫去 GF 前缀、
  * 扩到全部工具（confirm_request / frontend_tool_request / suspended 各 case 内），
- * 判据统一 7 态（isFrameDecidedPendingStatus，含 unknown / failed）。
+ * 判据统一 8 态（isFrameDecidedPendingStatus，含 unknown / failed / skipped）。
  * 终态帧 case 不入本闸（③a E17 回归锁不破）；已决面的"跨宿主段重建"由 D6(B) 店级守卫承接
  * （见 ai-panel-parts-render.spec.ts 新宿主路渲染锁）。
  */
@@ -618,8 +618,8 @@ describe('批3③b D12：X1 dev 断言的 DEV 门', () => {
  * 唯一真实分叉 = SUCCEEDED（仅帧路表收录；响应体表不翻译 ⇒ null），显式登记。
  */
 describe('批3③b D9：两表 / 两枚举防漂移一致性锁', () => {
-  it('两枚举成员集合一致（7 态）：段侧 localTerminal == store 侧 isFrameDecidedPendingStatus', () => {
-    const CANDIDATES: ToolRunStatus[] = ['pending', 'running', 'succeeded', 'rejected', 'blocked', 'expired', 'cancelled', 'unknown', 'failed']
+  it('两枚举成员集合一致（8 态）：段侧 localTerminal == store 侧 isFrameDecidedPendingStatus', () => {
+    const CANDIDATES: ToolRunStatus[] = ['pending', 'running', 'succeeded', 'rejected', 'blocked', 'expired', 'cancelled', 'unknown', 'failed', 'skipped']
     // 段侧 localTerminal（parts.ts）行为枚举：已终态段 first-wins 不被 FRONTEND_RESULT 翻写
     const partSide = CANDIDATES.filter((status) => {
       const message = messageWithToolPart('r1', status)
@@ -636,8 +636,8 @@ describe('批3③b D9：两表 / 两枚举防漂移一致性锁', () => {
       store.messages.push(message)
       return store.hasDecidedPendingResidue(`probe-${status}`)
     })
-    expect(partSide).toHaveLength(7)
-    expect(storeSide).toHaveLength(7)
+    expect(partSide).toHaveLength(8)
+    expect(storeSide).toHaveLength(8)
     expect([...partSide].sort()).toEqual([...storeSide].sort())
   })
 
@@ -662,5 +662,9 @@ describe('批3③b D9：两表 / 两枚举防漂移一致性锁', () => {
     // 帧路表收录 SUCCEEDED（ConfirmGate#cancel 竞态带出的已决值同形映射）；响应体表不翻译。
     expect(frontendResultStatus('SUCCEEDED')).toBe('succeeded')
     expect(frameStatusToPendingStatus('SUCCEEDED')).toBeNull()
+    // 契约增量（skipped）：SKIPPED 只走后端批次停走的 tool_result 帧，不经
+    // frontend_tool_result / 409 响应体通道 —— 两表同返回 null（显式登记，非第二处分叉）。
+    expect(frameStatusToPendingStatus('SKIPPED')).toBeNull()
+    expect(frontendResultStatus('SKIPPED')).toBeNull()
   })
 })

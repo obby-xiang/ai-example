@@ -304,10 +304,17 @@ public class ResumeService {
 				List<Message> requestHistory = new ArrayList<>(history);
 				Prompt prompt = this.chatService.buildResumedPrompt(runId, sessionId, context, requestHistory);
 				List<ToolResponseMessage.ToolResponse> responses = new ArrayList<>();
+				// P1-10：续跑与首轮同一批策略 —— W/J/P 确定性失败后，剩余未执行项补 SKIPPED。
+				PendingToolCall haltedBy = null;
 				for (PendingToolCall item : snapshot.getInFlightToolCalls()) {
 					// 以 Redis 的待决条目为准（快照里的 in-flight 副本停留在"挂起那一刻"）
 					PendingToolCall fresh = this.store.pending(runId, item.getToolCallId());
 					PendingToolCall effective = fresh == null ? item : fresh;
+					if (haltedBy != null && isUnsettled(effective)) {
+						responses.add(this.toolCallingManager.skipAsUpstreamFailed(runId, effective, haltedBy));
+						rebuilt.add(effective.getToolCallId() + ":" + PendingToolCall.SKIPPED + ":not-executed");
+						continue;
+					}
 					String text = this.toolCallingManager.resolvePending(runId, prompt, effective);
 					// R6 裁决：标签必须在**结算之后**回读 Redis 才算准 ——
 					// executeOnce 的认领/完成是写在 Redis 里的新副本上，传入的 effective 可能仍是旧值
@@ -315,11 +322,17 @@ public class ResumeService {
 					PendingToolCall settled = this.store.pending(runId, effective.getToolCallId());
 					PendingToolCall source = settled == null ? effective : settled;
 					// T2 + P0-1：续跑重建的 role:tool 与首轮同形 —— 统一信封 JSON，message 先裁剪再组装
+					// P1-10 对账措辞已由 executeOnce 写进 resultText，此处不再二次加工（重放同形）。
 					responses.add(new ToolResponseMessage.ToolResponse(effective.getToolCallId(),
 							effective.getName(),
 							ToolResultEnvelope.of(source.effectiveOutcome(), source.effectiveCode(), text,
 									effective.getArguments()).toModelJson(this.limiter)));
 					rebuilt.add(settlementLabel(source));
+					if (this.toolCallingManager.haltsBatch(source)) {
+						haltedBy = source;
+						log.warn("续跑批策略首错即停 runId={} 上游工具={} outcome={} code={}，剩余条目将置 SKIPPED",
+								runId, source.getName(), source.effectiveOutcome().wire(), source.effectiveCode());
+					}
 				}
 				history.add(ToolResponseMessage.builder().responses(responses).build());
 				snapshot.setMessageJson(this.codec.serializeAll(history));
@@ -393,6 +406,18 @@ public class ResumeService {
 			execution = "reused(" + pending.getExecutedBy() + ")";
 		}
 		return pending.getToolCallId() + ":" + pending.getStatus() + ":" + execution;
+	}
+
+	/**
+	 * 停走级联时"仍未结算"的条目：未执行且状态仍是 {@code PENDING}（等外部输入/后端待执行）
+	 * 或 {@code APPROVED}（已放行未执行）。已执行/已有结论的条目不得被覆盖成 SKIPPED。
+	 */
+	private static boolean isUnsettled(PendingToolCall pending) {
+		if (pending == null || pending.isExecuted()) {
+			return false;
+		}
+		String status = pending.getStatus();
+		return PendingToolCall.PENDING.equals(status) || PendingToolCall.APPROVED.equals(status);
 	}
 
 	/** 从快照重建挂起那一轮的 {@code assistant(tool_calls)}（顺序与 id/type/name/arguments 原样）。 */
