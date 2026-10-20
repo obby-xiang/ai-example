@@ -224,6 +224,26 @@ class AiControllerRunsCurrentTest {
 		when(this.runStore.lastEventSeq(runId)).thenReturn(0L);
 	}
 
+	/**
+	 * M-3：{@code archiveMaxSeq} 的 <b>FrameStore 生产分支</b>（此前只测了 frameStore=null 的回落分支）。
+	 * 事件日志迁移后新写只进 Stream，末号必须问 FrameStore；回落值 42 必须被 77 覆盖。
+	 */
+	@Test
+	void archiveMaxSeqPrefersTheFrameStoreWhenInjected() throws Exception {
+		AiController controller = controller();
+		com.example.configmgr.ai.run.FrameStore frameStore = mock(com.example.configmgr.ai.run.FrameStore.class);
+		when(frameStore.lastSeq("r-1")).thenReturn(77L);
+		org.springframework.test.util.ReflectionTestUtils.setField(controller, "frameStore", frameStore);
+		MockMvc mvc = MockMvcBuilders.standaloneSetup(controller).build();
+
+		seedIndex("s-1", "r-1", RunSnapshot.SUSPENDED, List.of());
+		when(this.runStore.lastEventSeq("r-1")).thenReturn(42L);
+
+		mvc.perform(get("/api/ai/runs/current").param("sessionId", "s-1"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.archiveMaxSeq").value(77));
+	}
+
 	private static PendingToolCall pending(String toolCallId, String status, String kind) {
 		PendingToolCall pending = new PendingToolCall();
 		pending.setToolCallId(toolCallId);

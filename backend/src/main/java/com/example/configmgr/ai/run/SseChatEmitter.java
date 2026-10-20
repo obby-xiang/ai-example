@@ -33,9 +33,17 @@ import java.util.concurrent.atomic.AtomicLong;
  * <li><b>多订阅者扇出</b>：一帧发给本轮全部订阅者 —— 首轮客户端断开重连后，
  * {@code GET /api/ai/events/{runId}} 可以挂到同一个写出器上继续收流
  * （ADR-5 补记：409 携 runId + reattach 重挂进行中轮的流）；</li>
- * <li><b>每帧同时外置</b>：帧原文进 {@code ai:events:<runId>}（{@link RunStore}），
+ * <li><b>每帧同时外置</b>：帧原文进事件日志（B23L1 批① 起 = {@link FrameStore}，生产实现是
+ * Redis Stream {@code ai:xevents:<runId>}；兼容期还会双读旧的 {@code ai:events:<runId>} LIST），
  * 于是"进程在挂起期死亡"不再连 SSE 时序一起丢，重挂时先回放外置帧再续接实时帧。</li>
  * </ol>
+ *
+ * <p>
+ * <b>B23L1 批①（2026-10-21）多实例</b>：出帧 = 取号（{@link FrameStore#nextSeq}，生产为
+ * {@code INCR ai:seq:<runId>}）→ 截断 → 落档（{@link FrameStore#append}）→
+ * {@code PUBLISH ai:wake:<runId>（仅上界 seq）} → 本地扇出（同实例快路径）。
+ * 其它实例的连接由 {@link FrameWakeListener} 收到唤醒后从事件日志补差量，
+ * 重复帧按 {@link #lastFanoutSeq} 去重；连接层因此无状态 —— 任何实例都能 serve 任意 run 的 reattach。
  *
  * <p>
  * 帧类型：{@code start}（首包）→ 若干 {@code delta}/{@code tool_*}/
@@ -148,6 +156,20 @@ public class SseChatEmitter {
 
 	private final RunStore store;
 
+	/**
+	 * B23L1 批①：事件日志（取号 + 落档 + 按号回读）。
+	 *
+	 * <p>生产装配（{@link RunRegistry} 的 Spring 路径）恒为 {@link RedisFrameStore}；
+	 * 非 Spring/单测路径由兼容构造器注入 {@code ai:events:} LIST 口径的实现（见构造器注释）。
+	 */
+	private final FrameStore frames;
+
+	/** B23L1 批①：唤醒发布面（null = 不跨实例广播：单实例/单测路径）。 */
+	private final FrameWakeBus wakeBus;
+
+	/** B23L1 批①：唤醒订阅面（null = 不订阅；重挂仍可由事件日志回放补帧）。 */
+	private final FrameWakeListener wakeListener;
+
 	private final ObjectMapper objectMapper;
 
 	/** T3-1：本写出器的投递执行器。生产 = 共享有界投递池；三参构造（测试/非 Spring）= 同步直执。 */
@@ -178,10 +200,30 @@ public class SseChatEmitter {
 	/** T3-1：订阅者 = emitter + 有界队列 + CAS drain 独占标志。 */
 	private final List<Subscription> subscribers = new CopyOnWriteArrayList<>();
 
-	/** T6：本轮<b>已发放</b>的最大业务号（首帧前惰性从 max(归档末帧, ai:seq) 初始化）。 */
-	private final AtomicLong seq = new AtomicLong(-1);
+	/**
+	 * B23L1 批①：<b>本地已接手</b>的最大 seq（跨实例唤醒按它取差量，重复帧按它去重）。
+	 *
+	 * <p>
+	 * 语义 = "本实例这条写出器已经处置到哪一帧"：出帧路径在<b>落档之后、发布唤醒之前</b>登记，
+	 * 回放批、唤醒补帧也会推进它。三个后果：
+	 * <ul>
+	 * <li>同一帧不会被"本地扇出 + 唤醒"投递两次（本地先登记，自唤醒的回调看到上界 ≤ 水位即 no-op）；</li>
+	 * <li>唤醒载荷只带上界也不漏中间帧（差量由 {@link FrameStore#readFrom} 给齐）；</li>
+	 * <li>登记早于本地入队一步 —— 代价是"入队途中被中断"的那一帧不会被唤醒补投，
+	 * 但那种中断本身就是订阅者被摘除（前端按 lastSeq 重挂补帧），口径与 S2-1 一致。</li>
+	 * </ul>
+	 */
+	private final AtomicLong lastFanoutSeq = new AtomicLong(0);
 
-	private final Object seqLock = new Object();
+	/** 本写出器是否已在该 run 的唤醒频道上登记（首个订阅者登记、最后一个退订）。 */
+	private final AtomicBoolean wakeRegistered = new AtomicBoolean(false);
+
+	/**
+	 * 唤醒目标（<b>单一稳定实例</b>）：登记与注销必须是同一个对象 ——
+	 * 每次 {@code this::onWake} 都会新建一个方法引用对象，按引用去重的目标集会因此注销不掉，
+	 * 订阅随连接数泄漏。
+	 */
+	private final FrameWakeListener.WakeTarget wakeTarget = this::onWake;
 
 	/**
 	 * S5c-1：心跳的<b>独立</b>序号空间（自 1 起）。
@@ -249,11 +291,42 @@ public class SseChatEmitter {
 	 * <p>
 	 * 与投递执行器同口径（S2-1）：预算必须<b>显式传入</b>，绝不隐式读进程静态池 ——
 	 * 否则同一 JVM 内测试顺序会让"直执"悄悄变异步投递（帧序用例要求"发完即到"）。
+	 *
+	 * <p>
+	 * <b>B23L1 批①：事件日志走兼容口径</b>（{@code ai:events:} LIST，号锚 =
+	 * max(归档末帧, ai:seq)）——它的语义逐字等于 B1 收官行为，既有帧序/conformance 用例
+	 * （外置状态面是 {@code InMemoryRunStore} 之类 LIST 替身）因此零改动。
+	 * 生产装配不经过本构造器：{@link RunRegistry} 的 Spring 路径恒注入
+	 * {@link RedisFrameStore}（单/多实例同一实现），见下一个构造器。
 	 */
 	public SseChatEmitter(String runId, RunStore store, ObjectMapper objectMapper, Executor deliveryExecutor,
 			int queueCapacity, int maxFrameBytes, SseWriteBudget writeBudget) {
+		this(runId, store, RunStoreFrameStore.of(store), objectMapper, deliveryExecutor, queueCapacity, maxFrameBytes,
+				writeBudget, null, null);
+	}
+
+	/** 便捷构造（B23L1 测试/非 Spring 装配：显式给事件日志，无跨实例唤醒）。 */
+	public SseChatEmitter(String runId, RunStore store, FrameStore frames, ObjectMapper objectMapper) {
+		this(runId, store, frames, objectMapper, Runnable::run,
+				AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY, AiProperties.Frame.DEFAULT_MAX_BYTES,
+				SseWriteBudget.direct(), null, null);
+	}
+
+	/**
+	 * 生产装配构造（B23L1 批①）：事件日志 + 唤醒发布 + 唤醒订阅三件套一次注入。
+	 *
+	 * @param frames       事件日志（生产 = {@link RedisFrameStore}）
+	 * @param wakeBus      唤醒发布面（null = 不跨实例广播）
+	 * @param wakeListener 唤醒订阅面（null = 不订阅）
+	 */
+	public SseChatEmitter(String runId, RunStore store, FrameStore frames, ObjectMapper objectMapper,
+			Executor deliveryExecutor, int queueCapacity, int maxFrameBytes, SseWriteBudget writeBudget,
+			FrameWakeBus wakeBus, FrameWakeListener wakeListener) {
 		this.runId = runId;
 		this.store = store;
+		this.frames = frames;
+		this.wakeBus = wakeBus;
+		this.wakeListener = wakeListener;
 		// 帧面契约要求"字段存在、可为 null"（如 tool_result 的 code/target）：此处用一份
 		// "显式写 null"的副本，**防御未来把 primary ObjectMapper 改成 NON_NULL** —— 那会让 null
 		// 整键消失，前端无法区分"字段缺失"与"null"；更糟的是同一帧的实时写出与归档回放会按
@@ -355,6 +428,8 @@ public class SseChatEmitter {
 		sub.emitter.onCompletion(() -> closeSubscription(sub, "生命周期 onCompletion"));
 		sub.emitter.onTimeout(() -> closeSubscription(sub, "生命周期 onTimeout"));
 		sub.emitter.onError(ex -> closeSubscription(sub, "生命周期 onError"));
+		// B23L1：本实例的第一个订阅者出现 ⇒ 建立该 run 的唤醒订阅（按连接，不是按实例全量）。
+		syncWakeSubscription();
 	}
 
 	/**
@@ -383,7 +458,44 @@ public class SseChatEmitter {
 		sub.queue.clear();
 		sub.liveQueued.set(0);
 		sub.draining.set(false);
+		// B23L1：本实例最后一个订阅者消失 ⇒ 释放该 run 的唤醒订阅（断连即 unsubscribe）。
+		syncWakeSubscription();
 		log.debug("订阅者投递上下文已关闭 runId={} reason={}", this.runId, reason);
+	}
+
+	/**
+	 * B23L1：唤醒订阅的生命周期 —— 有本地订阅者才订阅，最后一个断开即退订。
+	 *
+	 * <p>
+	 * 幂等开关（{@link #wakeRegistered}）保证重复调用不重复 subscribe；
+	 * 判据是订阅表本身（{@code 0 ↔ N} 翻转），不在别处维护计数 —— 订阅者的增删路径
+	 * 全仓只有 {@link #attachSubscription} / {@link #closeSubscription} 两处，计数口径因此不会漂移。
+	 */
+	private void syncWakeSubscription() {
+		FrameWakeListener listener = this.wakeListener;
+		if (listener == null) {
+			return;
+		}
+		if (!this.subscribers.isEmpty()) {
+			if (this.wakeRegistered.compareAndSet(false, true)) {
+				boolean registered;
+				try {
+					registered = listener.register(this.runId, this.wakeTarget);
+				}
+				catch (Exception ex) {
+					log.warn("帧唤醒订阅异常 runId={}：{}", this.runId, ex.getMessage());
+					registered = false;
+				}
+				if (!registered) {
+					// I-3：订阅没建立就把登记位回退 —— 否则该写出器在订阅者归零前永不再试，
+					// 跨实例唤醒会整段静默缺席且没有任何观测面。
+					this.wakeRegistered.set(false);
+				}
+			}
+		}
+		else if (this.wakeRegistered.compareAndSet(true, false)) {
+			listener.unregister(this.runId, this.wakeTarget);
+		}
 	}
 
 	/**
@@ -400,6 +512,13 @@ public class SseChatEmitter {
 	public int replayAndAttach(SseEmitter emitter, Long lastSeq, boolean terminal) {
 		Subscription sub = new Subscription(emitter, terminal);
 		synchronized (this.emitLock) {
+			// I-1：**先挂订阅（含唤醒订阅）再读回放**。旧顺序（读档 → 挂订阅）之间落档的帧
+			// 谁也接不住：回放快照已读完、唤醒订阅还没建立，而挂起/终局帧之后不会再有下一次唤醒
+			// ⇒ B 侧连接永远等不到那一帧。两段同在 emitLock 内，先挂不会改变"回放帧先于实时帧入队"
+			// 的 FIFO 语义（实时入队同样要求这把锁）。
+			if (!terminal) {
+				attachSubscription(sub);
+			}
 			int staged = stageReplay(sub, lastSeq);
 			if (terminal) {
 				if (staged == 0) {
@@ -409,11 +528,8 @@ public class SseChatEmitter {
 					kickDrain(sub);
 				}
 			}
-			else {
-				attachSubscription(sub);
-				if (staged > 0) {
-					kickDrain(sub);
-				}
+			else if (staged > 0) {
+				kickDrain(sub);
 			}
 			return staged;
 		}
@@ -458,14 +574,27 @@ public class SseChatEmitter {
 	 *
 	 * <p>
 	 * <b>R1 裁决</b>：本方法入队<b>不受实时容量 256 约束</b>（回放批豁免）——慢重挂者的
-	 * 初始批上界 = 归档窗口 {@code EVENT_WINDOW}（3000，{@code RunStore#events} 天然裁剪），
-	 * "队列容量 &lt; 归档窗口"不变量只约束实时段。
+	 * 初始批上界 = 事件日志窗口（{@link FrameStore}，Stream 口径 6000 / 兼容 LIST 口径 3000），
+	 * "队列容量 &lt; 事件日志窗口"不变量只约束实时段。
+	 *
+	 * <p>
+	 * <b>B23L1 批①：回放源从 {@code ai:events:} LIST 切到 {@link FrameStore#readFrom}</b>
+	 * （兼容期内部仍会把旧 LIST 串在 Stream 前面并按 seq 去重）。差量下推口径不变：
+	 * 给了 {@code lastSeq} 就只要 {@code seq > lastSeq}（孤儿过滤仍在本方法兜一层，
+	 * 防"发帧后才落档失败"等错位）。回放同时把 {@link #lastFanoutSeq} 顶到已读到的最大号 ——
+	 * 这样随后的跨实例唤醒不会把这些帧再推一遍（重复帧按 seq 去重）。
 	 */
 	private int stageReplay(Subscription sub, Long lastSeq) {
-		List<Map<String, Object>> frames = this.store.events(this.runId);
+		long afterSeq = lastSeq == null ? 0L : lastSeq;
+		List<Map<String, Object>> frames = this.frames.readFrom(this.runId, afterSeq, 0);
 		int staged = 0;
+		long maxReadSeq = 0L;
 		for (Map<String, Object> frame : frames) {
 			String type = String.valueOf(frame.get("type"));
+			Object seqValue = frame.get("seq");
+			if (seqValue instanceof Number number && number.longValue() > maxReadSeq) {
+				maxReadSeq = number.longValue();
+			}
 			if (RunStore.HEARTBEAT_TYPE.equals(type)) {
 				// 心跳从不入档（T7），这里只是对"绕过发射器直塞的心跳帧"的防御性跳过。
 				// B1：delta 不再跳过 —— 挂起断连窗口内的正文帧只能经归档差量补回。
@@ -482,6 +611,9 @@ public class SseChatEmitter {
 				log.error("回放帧序列化失败 runId={} type={}: {}", this.runId, type, ex.getMessage());
 				break;
 			}
+		}
+		if (maxReadSeq > 0L) {
+			this.lastFanoutSeq.accumulateAndGet(maxReadSeq, Math::max);
 		}
 		return staged;
 	}
@@ -760,58 +892,39 @@ public class SseChatEmitter {
 	}
 
 	/**
-	 * 下一帧的单调序号（T6 + T3-2）。
+	 * B23L1 批①：出帧路径 —— <b>取号（FrameStore）→ 截断 → 落档（FrameStore）→ 唤醒发布 → 本地扇出</b>。
 	 *
 	 * <p>
-	 * 首帧前惰性续号：候选 = max(归档末帧, {@code ai:seq}) + 1（进程重启后由续跑新建的
-	 * 写出器<b>不会从 0 重来</b>，否则归档/前端 lastSeq 会出现两段重叠的序号，差量补发漏帧）。
-	 * 归档为空（全新轮次）则从 1 开始。
+	 * 与 B1 收官形态的三点差异（口径全部来自设计稿 §2.1）：
+	 * <ol>
+	 * <li><b>取号收敛到事件日志</b>：生产实现 = {@code INCR ai:seq:<runId>}（跨实例原子），
+	 * 进程内 {@code AtomicLong} 号锚退役 —— 多实例同时为一轮出帧不再可能撞号；</li>
+	 * <li><b>落档后发唤醒</b>：{@code PUBLISH ai:wake:<runId> <上界seq>}（载荷不含帧体），
+	 * 让持有该 run 连接的<b>其它实例</b>去事件日志补差量；</li>
+	 * <li><b>本地扇出保留</b>（同实例快路径）：唤醒是"补"，本地扇出是"快"，
+	 * 两者按 {@link #lastFanoutSeq} 去重，不会把同一帧投两遍。</li>
+	 * </ol>
 	 *
 	 * <p>
-	 * <b>T3-2：发放即登记</b> —— 每帧取号后立刻 {@code SET ai:seq:<runId>}（TTL=session-ttl）。
-	 * 归档写入可能落后于发放（落档失败 / 窗口裁剪），跨进程续号必须由 {@code ai:seq} 接管；
-	 * SET 失败仅 WARN + 继续出帧（{@link RunStore#recordIssuedSeq} 内部口径，S2-4）。
-	 *
-	 * <p>
-	 * S5c-1：这条推理成立的前提是<b>心跳不占业务号</b>（见 {@link #emit}）。
+	 * <b>锁内顺序不可调换</b>：取号 → 截断（判定含 seq，A19）→ 落档 → 发布 → 入队。
+	 * 落档必须拿到截断后的帧（否则事件日志里躺着未截断帧，回放与实时流分叉）；
+	 * 发布必须在落档之后（否则别的实例被唤醒后读不到这一帧）。
 	 */
-	private long nextSeq() {
-		if (this.seq.get() < 0) {
-			synchronized (this.seqLock) {
-				if (this.seq.get() < 0) {
-					long anchor = Math.max(this.store.lastEventSeq(this.runId), this.store.lastIssuedSeq(this.runId));
-					this.seq.set(anchor);
-				}
-			}
-		}
-		long next = this.seq.incrementAndGet();
-		// S2-4：SET 失败仅 WARN + 继续出帧（韧性优先）。RunStore 实现内部已做同类防护，
-		// 这里再兜一层，保证"发放即登记"的任何实现异常都不会中断出帧。
-		try {
-			this.store.recordIssuedSeq(this.runId, next);
-		}
-		catch (Exception ex) {
-			log.warn("登记已发放序号失败 runId={} seq={}（继续出帧，跨进程续号可能回退）：{}", this.runId, next,
-					ex.getMessage());
-		}
-		return next;
-	}
-
 	private void emit(Map<String, Object> frame) {
 		frame.putIfAbsent("runId", this.runId);
 		// T4-3 后半：atMs 已在 frame() 里定型（帧构造时刻），故这一份帧的序列化原文与落档副本
-		// atMs 同值；RunStore#appendEvent 的 putIfAbsent 只对"绕过 frame() 的直塞帧"生效（兜底）。
-		// S5c-3：取号 → 落归档 → 入队在同一把锁内完成 —— 多线程（运行线程的心跳 / HTTP 线程的
+		// atMs 同值；EventStore 落档侧的 putIfAbsent 只对"绕过 frame() 的直塞帧"生效（兜底）。
+		// S5c-3：取号 → 落档 → 入队在同一把锁内完成 —— 多线程（运行线程的心跳 / HTTP 线程的
 		// 决策与回灌）并发出帧时，订阅者队列里的先后与 seq 的先后必然一致；网络写出在锁外
 		// 由投递池异步完成（T3-1 慢订阅者隔离），单订阅者 FIFO 由 CAS drain 独占标志保证。
 		synchronized (this.emitLock) {
 			final byte[] payloadBytes;
 			if (RunStore.HEARTBEAT_TYPE.equals(String.valueOf(frame.get("type")))) {
-				// T7：心跳照常广播（下面的 subscribers），但不进归档窗口 —— 只留一个轻量活动戳，
-				// 让"这轮最近有过活动"仍可跨进程判定（僵尸判据的输入）。归档侧的同类跳过见
-				// RunStore#appendEvent（任何其他调用方直接塞心跳帧也不会占位）。
-				// S5c-1：心跳<b>不取业务 seq</b>，只在独立序号空间里计数 —— 于是"归档末帧"
-				// （跨进程续号锚点）恒等于已发放过的最大业务号，心跳永远不会把它顶到前面去。
+				// T7：心跳照常广播（下面的 subscribers），但不进事件日志 —— 只留一个轻量活动戳，
+				// 让"这轮最近有过活动"仍可跨进程判定（僵尸判据的输入）。事件日志侧的同类跳过见
+				// FrameStore#append（任何其他调用方直接塞心跳帧也不会占位）。
+				// S5c-1：心跳<b>不取业务 seq</b>，只在独立序号空间里计数 —— 于是事件日志末帧号
+				// 恒等于已发放过的最大业务号，心跳永远不会把它顶到前面去。
 				frame.put("heartbeatSeq", this.heartbeatSeq.incrementAndGet());
 				this.store.touchActivity(this.runId);
 				try {
@@ -823,19 +936,25 @@ public class SseChatEmitter {
 				}
 			}
 			else {
-				frame.put("seq", nextSeq());
+				// B23L1：取号 = 事件日志的取号口（生产 = Redis INCR，跨实例不重不回退）。
+				long seq = this.frames.nextSeq(this.runId);
+				frame.put("seq", seq);
 				// T3-10：单帧上限的字段级截断在"取号<b>之后</b>、落档与入队之前"——
 				// 判定口径是<b>整帧</b>（含 seq）的 UTF-8 字节数（A19），故必须先补 seq 再判；
-				// 归档与投递据此拿到同一份帧（否则重挂回放与实时流会分叉）。
+				// 落档与投递据此拿到同一份帧（否则重挂回放与实时流会分叉）。
 				// 返回值即最终负载（未超限时复用同一次序列化，不重复算）。
 				// 心跳帧不在此列：它没有 text/result，负载由常量字段构成（事件载荷固定小）。
 				payloadBytes = FrameSizeLimiter.apply(frame, this.objectMapper, this.maxFrameBytes);
 				if (payloadBytes == null) {
-					// 序列化失败：帧不进归档、不发订阅者（与 T3-1"锁内只做取号/落档/入队"同口径）
+					// 序列化失败：帧不落档、不发订阅者（与 T3-1"锁内只做取号/落档/入队"同口径）
 					log.error("SSE 帧序列化失败 runId={} type={}（本帧已跳过）", this.runId, frame.get("type"));
 					return;
 				}
-				this.store.appendEvent(this.runId, frame);
+				this.frames.append(this.runId, frame);
+				// B23L1：先登记"本地已接手到 seq"，再发唤醒 —— 唤醒分发可能在本线程内同步回调
+				// （同步总线/测试替身），若不先登记，自唤醒会把刚落的这一帧再推一遍。
+				this.lastFanoutSeq.accumulateAndGet(seq, Math::max);
+				publishWake(seq);
 			}
 			if (this.subscribers.isEmpty() || this.terminating.get()) {
 				// S1-1：轮终态已置 ⇒ 不再向订阅者收新帧（帧照旧取号落档，重挂回放仍可见）——
@@ -855,6 +974,84 @@ public class SseChatEmitter {
 					continue;
 				}
 				kickDrain(sub);
+			}
+		}
+	}
+
+	/** 唤醒发布（载荷仅上界 seq；失败只记日志 —— 唤醒可丢，正确性由 ?lastSeq 重连兜底）。 */
+	private void publishWake(long seq) {
+		FrameWakeBus bus = this.wakeBus;
+		if (bus == null) {
+			return;
+		}
+		try {
+			bus.publish(this.runId, seq);
+		}
+		catch (Exception ex) {
+			log.debug("帧唤醒发布失败 runId={} seq={}：{}", this.runId, seq, ex.getMessage());
+		}
+	}
+
+	/**
+	 * B23L1：收到跨实例唤醒 —— 从事件日志补 {@code > lastFanoutSeq} 的差量，推给本实例该 run 的连接。
+	 *
+	 * <p>
+	 * 去重口径（设计稿 §2.1 第 3 条）：<b>按 seq</b> 与本地扇出快路径共用同一个上界
+	 * （{@link #lastFanoutSeq}）—— 本地已经推过的帧不会被唤醒再推一遍；
+	 * 唤醒载荷只带上界，中间帧由 {@link FrameStore#readFrom} 给齐，因此"唤醒丢一条"不会造成永久缺口
+	 * （下一次唤醒或客户端 {@code ?lastSeq} 重连都能补齐）。
+	 *
+	 * <p>
+	 * 与 {@link #emit} 共用 {@code emitLock}：唤醒补帧与实时出帧在同一把锁下串行入队，
+	 * 单订阅者队列保持 FIFO 且 seq 单调。
+	 */
+	void onWake(String runId, long upperBoundSeq) {
+		if (!this.runId.equals(runId)) {
+			return;
+		}
+		synchronized (this.emitLock) {
+			if (this.subscribers.isEmpty() || this.terminating.get()) {
+				return;
+			}
+			long from = this.lastFanoutSeq.get();
+			if (upperBoundSeq > 0L && upperBoundSeq <= from) {
+				// 上界不高于本地已推上界 ⇒ 没有差量（重复唤醒幂等）。
+				// 收口注记（I-2）：晚到的**低号**帧（乱序落档兜底）也没有差量 —— 那一帧同样不会被
+				// 实时补发，这是协议要求（订阅者已看到更大的 seq，补发会破坏 seq 单调）；
+				// 它仍对 lastSeq < 该号的读者可见（重挂回放走 FrameStore#readFrom，按 ID 区间读）。
+				return;
+			}
+			List<Map<String, Object>> frames = this.frames.readFrom(this.runId, from, FrameStore.WAKE_BATCH_LIMIT);
+			for (Map<String, Object> frame : frames) {
+				if (RunStore.HEARTBEAT_TYPE.equals(String.valueOf(frame.get("type")))) {
+					continue;
+				}
+				Object seqValue = frame.get("seq");
+				if (!(seqValue instanceof Number number) || number.longValue() <= from) {
+					// 没有 seq 的老帧只走回放（唤醒是新帧语义）；不大于上界的帧是重复帧，跳过
+					continue;
+				}
+				long seq = number.longValue();
+				final String payload;
+				try {
+					payload = this.objectMapper.writeValueAsString(frame);
+				}
+				catch (Exception ex) {
+					log.error("唤醒补帧序列化失败 runId={} seq={}: {}", this.runId, seq, ex.getMessage());
+					break;
+				}
+				for (Subscription sub : this.subscribers) {
+					if (sub.closed) {
+						continue;
+					}
+					if (!enqueueLive(sub, payload)) {
+						evict(sub, "唤醒补帧超出实时队列容量（容量 " + this.queueCapacity + "）");
+						continue;
+					}
+					kickDrain(sub);
+				}
+				this.lastFanoutSeq.accumulateAndGet(seq, Math::max);
+				from = Math.max(from, seq);
 			}
 		}
 	}

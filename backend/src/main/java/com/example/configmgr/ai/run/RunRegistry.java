@@ -20,8 +20,13 @@ import java.util.concurrent.Executor;
  *
  * <p>
  * 重启后不存在旧实例的写出器：此时 {@link #of(String)} 惰性新建一个"零订阅者"的写出器，
- * 帧照样写进 {@code ai:events:<runId>}（外置优先），前端重挂时回放即可 —— 这正是
- * M3 与 ADR-5 reattach 的咬合点。
+ * 帧照样写进事件日志（{@link FrameStore}；生产 = Redis Stream），前端重挂时回放即可 ——
+ * 这正是 M3 与 ADR-5 reattach 的咬合点。
+ *
+ * <p>
+ * <b>B23L1 批①（2026-10-21）</b>：Spring 装配路径（{@code @Autowired} 六参构造）给写出器注入
+ * 事件日志 + 唤醒发布 + 唤醒订阅三件套 ⇒ 单/多实例同一套代码；非 Spring/单测的三参构造
+ * 退回兼容口径（LIST 写、不跨实例广播），既有帧序用例的确定性不受影响。
  *
  * <p>
  * T3-1：持有 AiProperties 的构造（Spring 装配路径）会用 {@code app.ai.sse.*} 配置并启用
@@ -59,11 +64,43 @@ public class RunRegistry {
 	 */
 	private final SseWriteBudget writeBudget;
 
-	@Autowired
+	/** B23L1 批①：事件日志（Spring 装配路径恒为 {@link RedisFrameStore}）。 */
+	private final FrameStore frames;
+
+	/** B23L1 批①：唤醒发布面。 */
+	private final FrameWakeBus wakeBus;
+
+	/** B23L1 批①：唤醒订阅面（按连接 subscribe/unsubscribe）。 */
+	private final FrameWakeListener wakeListener;
+
+	/**
+	 * 非 Spring/单测装配（三参）：事件日志走 {@code ai:events:} LIST 兼容口径、不跨实例唤醒。
+	 *
+	 * <p>
+	 * 保留它是为了让 {@code new RunRegistry(store, mapper, null)} 这类 conformance 装配
+	 * （外置状态面 = {@code InMemoryRunStore}）零改动；Spring 装配<b>不会</b>选这个构造器
+	 * （{@code @Autowired} 在六参构造上）。
+	 */
 	public RunRegistry(RunStore store, ObjectMapper objectMapper, AiProperties properties) {
+		this(store, objectMapper, properties, null, null, null);
+	}
+
+	/**
+	 * 生产装配（B23L1 批①）：写出器一律拿到 Redis Stream 事件日志 + wake 扇出。
+	 *
+	 * <p>
+	 * {@code frames/wakeBus/wakeListener} 允许为 null（局部上下文/测试）：为 null 时写出器
+	 * 退回兼容口径（LIST 写、不跨实例广播），语义与 B1 收官一致。
+	 */
+	@Autowired
+	public RunRegistry(RunStore store, ObjectMapper objectMapper, AiProperties properties, FrameStore frames,
+			FrameWakeBus wakeBus, FrameWakeListener wakeListener) {
 		this.store = store;
 		this.objectMapper = objectMapper;
 		this.properties = properties;
+		this.frames = frames;
+		this.wakeBus = wakeBus;
+		this.wakeListener = wakeListener;
 		if (properties != null) {
 			SseChatEmitter.configureSharedDeliveryPool(properties.getSse().getDeliveryPoolSize(),
 					properties.getSse().getDeliveryPoolSize() * 64);
@@ -82,8 +119,13 @@ public class RunRegistry {
 				: AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY;
 		int maxFrameBytes = this.properties != null ? this.properties.getFrame().getMaxBytes()
 				: AiProperties.Frame.DEFAULT_MAX_BYTES;
-		return this.emitters.computeIfAbsent(runId, id -> new SseChatEmitter(id, this.store, this.objectMapper,
-				this.deliveryExecutor, queueCapacity, maxFrameBytes, this.writeBudget));
+		if (this.frames == null) {
+			return this.emitters.computeIfAbsent(runId, id -> new SseChatEmitter(id, this.store, this.objectMapper,
+					this.deliveryExecutor, queueCapacity, maxFrameBytes, this.writeBudget));
+		}
+		return this.emitters.computeIfAbsent(runId,
+				id -> new SseChatEmitter(id, this.store, this.frames, this.objectMapper, this.deliveryExecutor,
+						queueCapacity, maxFrameBytes, this.writeBudget, this.wakeBus, this.wakeListener));
 	}
 
 	/** 只在已有写出器时返回（避免"查一下"就凭空造出一个）。 */

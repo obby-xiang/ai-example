@@ -42,12 +42,17 @@ import java.util.UUID;
  * 含 {@code executedBy} 实例标识，是跨进程"不重放"的判据；</li>
  * <li>{@code ai:events:<runId>} LIST（JSON）—— SSE 帧外置副本（崩溃前的帧不随进程消失，
  * 供 {@code GET /api/ai/events/{runId}} 重挂时回放）；每帧带单调 {@code seq}（T6 的差量补发判据），
- * <b>心跳帧不入本归档</b>（T7，改记 {@code ai:beat:<runId>}）；</li>
+ * <b>心跳帧不入本归档</b>（T7，改记 {@code ai:beat:<runId>}）。
+ * <b>B23L1 批① 起本键进只读兼容期</b>：新写只进 {@code ai:xevents:<runId>} Stream（{@link RedisFrameStore}），
+ * 本类只保留"读侧兼容"与"键的删除/TTL 续期"；</li>
+ * <li>{@code ai:xevents:<runId>} Stream —— <b>事件日志真值</b>（B23L1 批①）：{@code XADD ... MAXLEN ~ 6000}，
+ * 字段 {@code seq} + 帧 JSON；单/多实例同一实现，回放 = 按 {@code seq} 双读拼接（见 {@link FrameStore}）；</li>
  * <li>{@code ai:beat:<runId>} STRING —— 心跳活动戳（毫秒时刻，TTL 随心跳续期）：
  * 心跳不占归档窗口，但"这一轮最近有过活动"仍可跨进程判定（僵尸判据的输入之一）；</li>
  * <li>{@code ai:seq:<runId>} STRING —— <b>已发放的最大业务 seq</b>（T3-2）：每个业务帧发放
  * 序号时 {@code SET} 一次并随帧刷新 TTL=session-ttl（与归档同寿）。delta 帧跳过归档后
- * "归档末帧"不再是可靠的续号锚点，跨进程续号改由本键接管（候选 = max(归档末帧, ai:seq) + 1）；</li>
+ * "归档末帧"不再是可靠的续号锚点，跨进程续号改由本键接管（候选 = max(归档末帧, ai:seq) + 1）。
+ * <b>B23L1 批① 起本键是取号口</b>（{@code INCR}，跨实例原子），不再是"发放后登记"；</li>
  * <li>{@code ai:session:current:<sessionId>} STRING（value=runId，T2b-D#1）——
  * session → 当前挂起轮的索引：挂起写入、轮终态清除、TTL 对齐 session-ttl（与会话/快照同寿）；
  * 仅供 {@code GET /api/ai/runs/current} 重建挂起态，<b>不承诺同 session 多页签共享</b>。</li>
@@ -76,6 +81,15 @@ public class RunStore {
 
 	/** 心跳活动戳键前缀（T7：心跳不入归档，但活动证据必须留痕）。 */
 	public static final String BEAT_PREFIX = "ai:beat:";
+
+	/**
+	 * 事件日志的 Stream 键前缀（B23L1 批①）：{@code ai:xevents:<runId>}。
+	 *
+	 * <p>写入/读取都在 {@link RedisFrameStore}；本类只持有键名，用于"删除轮次"与
+	 * "挂起期 TTL 续期"两处 —— 事件日志的寿命必须与会话同规格（否则一次长时间挂起会让
+	 * 卡还在、回放源已过期）。
+	 */
+	public static final String XEVENTS_PREFIX = "ai:xevents:";
 
 	/**
 	 * session → 当前挂起轮的索引键前缀（T2b-D#1）：{@code ai:session:current:<sessionId>}
@@ -302,8 +316,13 @@ public class RunStore {
 	/** 池饱和回滚：删掉本轮的全部键（不留半截状态）。 */
 	public void deleteRun(String runId) {
 		this.redis.delete(List.of(runKey(runId), pendingKey(runId), claimKey(runId), ledgerKey(runId),
-				eventsKey(runId), seqKey(runId)));
+				eventsKey(runId), seqKey(runId), xeventsKey(runId)));
 		this.redis.opsForSet().remove(RUN_INDEX, runId);
+	}
+
+	/** 事件日志 Stream 键名（B23L1 批①；写入/读取归 {@link RedisFrameStore}，本类只管键名）。 */
+	public String xeventsKey(String runId) {
+		return XEVENTS_PREFIX + runId;
 	}
 
 	/** 全部仍存活的 runId（索引里已过期的惰性剔除）。 */
@@ -596,6 +615,12 @@ public class RunStore {
 	 * 重连）。代价：长轮次的 delta 会加速挤出 {@value #EVENT_WINDOW} 窗口内的早段帧
 	 * （极端长生成的重连补帧可能出现尾部缺口，已在设计稿 §6 留痕，B2 换 Redis Stream 时重估）。
 	 * delta 照旧 {@link #touchActivity(String)} 留活动戳（"只吐 delta 的长轮"僵尸判据不变）。
+	 *
+	 * <p>
+	 * <b>B23L1 批①（2026-10-21）：本方法已退居兼容写口</b> —— 生产出帧路径改经
+	 * {@link FrameStore#append}（{@code ai:xevents:} Stream），本方法只服务
+	 * {@link RunStoreFrameStore}（非 Spring/单测路径）与历史调用方；语义（心跳跳过、delta 入档、
+	 * 窗口裁剪、滑动 TTL）保持不动。
 	 */
 	public void appendEvent(String runId, Map<String, Object> frame) {
 		String type = String.valueOf(frame.get("type"));
@@ -686,9 +711,10 @@ public class RunStore {
 	/**
 	 * 挂起期心跳对<b>卡的后台数据</b>的滑动续期（用户裁决 2026-10-20 第 4 条）。
 	 *
-	 * <p>确认门 / 表单卡的等待没有上限，而这张卡的可重建性依赖四类键：轮快照
+	 * <p>确认门 / 表单卡的等待没有上限，而这张卡的可重建性依赖五类键：轮快照
 	 * （{@code ai:run}，含挂起中的 assistant(tool_calls) 与历史）、待决条目
-	 * （{@code ai:pending}，人的决策落点）、帧归档（{@code ai:events}，重挂回放）、
+	 * （{@code ai:pending}，人的决策落点）、帧归档（{@code ai:events}，兼容期只读）、
+	 * 事件日志 Stream（{@code ai:xevents}，B23L1 批① 起的回放真值）、
 	 * 已发放序号（{@code ai:seq}，差量补发锚点）。若只续心跳键，一次超过 session-ttl 的长等
 	 * 会让"卡还在、后台已过期" —— 人点批准时反而找不到挂起态。
 	 * 故 {@code ConfirmGate} 的 2s 心跳每拍把这些键（存在才生效）整额续期：
@@ -706,6 +732,8 @@ public class RunStore {
 			this.redis.expire(pendingKey(runId), ttl);
 			this.redis.expire(eventsKey(runId), ttl);
 			this.redis.expire(seqKey(runId), ttl);
+			// B23L1 批①：事件日志 Stream 与会话同寿（挂起期没有 append，靠心跳续期）
+			this.redis.expire(xeventsKey(runId), ttl);
 		}
 		catch (Exception ex) {
 			log.debug("挂起期续期轮键失败 runId={}：{}", runId, ex.getMessage());

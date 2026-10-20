@@ -117,15 +117,17 @@ class RunStoreSlidingTtlTest {
 		this.store.renewSuspensionTtl(runId);
 
 		ArgumentCaptor<Duration> ttl = ArgumentCaptor.forClass(Duration.class);
-		verify(this.redis, org.mockito.Mockito.times(4))
+		verify(this.redis, org.mockito.Mockito.times(5))
 				.expire(anyString(), ttl.capture());
 		assertThat(ttl.getAllValues())
-				.as("快照/待决/归档/序号四类键都被整额续期（卡的后台数据不先于会话过期）")
+				.as("快照/待决/归档/序号/事件日志五类键都被整额续期（卡的后台数据不先于会话过期）")
 				.containsOnly(Duration.ofHours(24));
 		verify(this.redis).expire(this.store.runKey(runId), Duration.ofHours(24));
 		verify(this.redis).expire(this.store.pendingKey(runId), Duration.ofHours(24));
 		verify(this.redis).expire(this.store.eventsKey(runId), Duration.ofHours(24));
 		verify(this.redis).expire(this.store.seqKey(runId), Duration.ofHours(24));
+		// B23L1 批①：事件日志 Stream 与其余卡的后台数据同寿（挂起期无 append，靠心跳续期）
+		verify(this.redis).expire(this.store.xeventsKey(runId), Duration.ofHours(24));
 	}
 
 	// ───────────────────────── 辅助 ─────────────────────────

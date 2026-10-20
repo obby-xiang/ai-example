@@ -6,6 +6,7 @@
 | 路径 | 作用 |
 | --- | --- |
 | `scripts/verify-e2e.ps1` | 端到端验证脚本（29 用例，PowerShell）。断言对象是**已启动的后端**，脚本自身不启动任何服务 |
+| `scripts/b23l1-dual-instance.ps1` | **双实例 harness**（B23L1 批①）：8081/8082 共享同一 Redis + 桩上游，脚本自己起/等/收（也可 `-NoStart` 接已就绪实例）。只交付、施工期不运行 |
 | `scripts/ci/stub-upstream.mjs` | CI E2E 用的**上游替身**（OpenAI 兼容桩），让用例在零密钥、零外网下确定性通过 |
 | `scripts/ci/stub-routes.json` | 桩的路由表（提示词 → 工具调用/表单），与 `GenerativeFormRules` 白名单手工对账 |
 | `scripts/githooks/` | 提交前敏感信息扫描（DC-08 落地），详见 `scripts/githooks/README.md` |
@@ -117,6 +118,54 @@ node scripts/ci/stub-upstream.mjs --self-check [--routes scripts/ci/stub-routes.
 
 ---
 
-## 3. `scripts/githooks/` —— 提交前敏感信息扫描
+## 3. `scripts/b23l1-dual-instance.ps1` —— 双实例 harness（B23L1 批①）
+
+### 3.1 用途边界
+
+多实例专项（`docs/research/设计-B23L1多实例与资源治理专项-2026-10-21.md`）的**实例面验证载体**：两个后端进程（8081/8082）共享同一 Redis 与同一上游桩，验证"任何实例可 serve 任意 run 的 reattach"与"跨实例唤醒扇出"。**不进 CI 的 29 主用例**，先脚本化（设计稿 §5.3）。
+
+### 3.2 形态与前置
+
+| 组件 | 默认 | 说明 |
+| --- | --- | --- |
+| 实例 A / B | `8081` / `8082` | 各自独立 H2 文件（避免文件锁冲突）；Redis 共享 |
+| 共享 Redis | `127.0.0.1:6379` | 事件日志 `ai:xevents:`、唤醒频道 `ai:wake:`、序号 `ai:seq:` 都在这里 |
+| 上游桩 | `18399` | `scripts/ci/stub-upstream.mjs`（零密钥）；实例以 `AI_API_KEY=b23l1-stub-placeholder` 启动 |
+
+前置：后端 jar 已打包（`mvn -DskipTests package`）、环境有 `java` 与 `node`。脚本自己起子进程并做健康等待：判据 = `/api/ai/health` **扁平响应体**的 `available && redis.available`（该端点无 `data` 包装、也无 `ai` 子对象；AI 不可用时返回 503 但体形不变），缺项整棒 FAIL。起进程前先做 8081/8082/18399 的端口连通性预检（端口被占 ⇒ 直接 FAIL，避免在"旧的健康实例"上产出假绿证据）。
+
+### 3.3 用法
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/b23l1-dual-instance.ps1 `
+    -Jar backend/target/config-mgr.jar `
+    -ArtifactDir backend/target/b23l1-artifacts
+
+# 只用已就绪的 8081/8082（不自己起服务）
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/b23l1-dual-instance.ps1 -NoStart
+
+# 只跑某一组
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/b23l1-dual-instance.ps1 -Cases suspend-reattach-wake
+```
+
+退出码：任一用例 FAIL ⇒ `1`；SKIP（批②/③ 依赖未落地）不计退出码。
+
+### 3.4 用例面
+
+| 用例 | 归属 | 断言 |
+| --- | --- | --- |
+| `reattach-full-replay` | 批① | A 侧一轮跑完，B 侧从 0 回放得到**逐帧同序同号**（连接层无状态） |
+| `reattach-diff` | 批① | B 侧带 `?lastSeq` 只拿到差量，不重不漏 |
+| `suspend-reattach-wake` | 批① | A 侧挂起 → B 侧重挂 → 在 A 批准确认 → 续跑帧**经 `ai:wake:` 扇出到 B 的连接**（终帧到达且 seq 推进） |
+| `suspend-decision` / `instance-kill` | 批② | SKIP：依赖 fencing 租约（跨实例决策只能路由到持有运行线程的实例） |
+| `resource-lock` / `idempotency` | 批③ | SKIP：依赖资源互斥租约与幂等键 |
+
+### 3.5 证据
+
+每用例把帧原文落 `<ArtifactDir>/<case>*.sse.txt`；两个实例与桩的 stdout 落 `<ArtifactDir>/{instance-a,instance-b,stub}.log`。失败时先看"哪一侧没收到/号断在哪"。
+
+---
+
+## 4. `scripts/githooks/` —— 提交前敏感信息扫描
 
 两条防线（`pre-commit` 扫暂存区新增行、`scan-history.sh` 扫全历史 blob），规则共用 `scan-lib.sh`。启用方式、三条规则、豁免清单与自测方法见 **`scripts/githooks/README.md`**。

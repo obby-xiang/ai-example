@@ -9,6 +9,7 @@ import com.example.configmgr.ai.feedback.AiFeedbackRepository;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.memory.RedisChatMemoryRepository;
 import com.example.configmgr.ai.run.CancellationRegistry;
+import com.example.configmgr.ai.run.FrameStore;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.ResilientChatService;
 import com.example.configmgr.ai.run.ResumeService;
@@ -130,6 +131,14 @@ public class AiController {
 	 */
 	@Autowired
 	private AiFeedbackRepository aiFeedbackRepository;
+
+	/**
+	 * B23L1 批①：事件日志（{@code archiveMaxSeq} 的真值源）。同为**字段注入** ——
+	 * 构造器签名不变 ⇒ 既有 {@code new AiController(...)} 测试零触碰；未注入（局部上下文/
+	 * 单测直接 new）时回落 {@link RunStore#lastEventSeq}（兼容期 LIST 口径），语义与 B1 一致。
+	 */
+	@Autowired(required = false)
+	private FrameStore frameStore;
 
 	public AiController(AiAvailability availability, ObjectProvider<ResilientChatService> chatService,
 			ObjectProvider<ResumeService> resumeService, ObjectProvider<StartupResumeRunner> startupResumeRunner,
@@ -302,6 +311,11 @@ public class AiController {
 	 * <p>
 	 * <b>S5c-2</b>：回放与挂订阅走 {@link SseChatEmitter#replayAndAttach}（同一把出帧锁内完成），
 	 * 消掉"回放快照读完、订阅还没挂上"之间丢帧的交接窗口。
+	 *
+	 * <p>
+	 * <b>B23L1 批①</b>：回放源改走 {@link FrameStore}（生产 = Redis Stream {@code ai:xevents:}；
+	 * 兼容期内部把旧的 {@code ai:events:} LIST 串在前面并按 {@code seq} 去重），
+	 * 差量/孤儿过滤口径不变；连接层因此无状态 —— 任何实例都能 serve 任意 run 的 reattach。
 	 */
 	@GetMapping(value = "/events/{runId}", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
 	public ResponseEntity<?> events(@PathVariable String runId,
@@ -482,8 +496,22 @@ public class AiController {
 		body.put("pendingEntries", pendingEntries);
 		body.put("unresolvedExternal", unresolvedExternal);
 		body.put("awaitingExternal", RunSnapshot.SUSPENDED.equals(snapshot.getStatus()) && !unresolvedExternal.isEmpty());
-		body.put("archiveMaxSeq", this.runStore.lastEventSeq(runId));
+		body.put("archiveMaxSeq", archiveMaxSeq(runId));
 		return ResponseEntity.ok(ApiResponse.ok(body));
+	}
+
+	/**
+	 * 该轮事件日志的已落档末号（前端 {@code restoreSuspendedSnapshot} 拿它当 {@code lastSeq}，
+	 * 只收增量、禁全量回放）。
+	 *
+	 * <p>
+	 * B23L1 批①：新写只进 Stream（{@code ai:xevents:}），{@code ai:events:} LIST 进只读兼容期 ——
+	 * 因此末号必须问事件日志（{@link FrameStore#lastSeq} 内部会把 LIST 尾巴也算进来），
+	 * 不能再看 LIST 末帧（那会在迁移后恒为 0，前端于是全量重放）。
+	 */
+	private long archiveMaxSeq(String runId) {
+		FrameStore frames = this.frameStore;
+		return frames != null ? frames.lastSeq(runId) : this.runStore.lastEventSeq(runId);
 	}
 
 	/** 索引缺失/快照消失时的明确空态（进程已死分支）。 */
