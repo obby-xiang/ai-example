@@ -1396,10 +1396,16 @@ function Gf-Skip($name, $why) {
 }
 
 # 挂起帧的通用契约断言（设计稿 GF1-A1，GF2/GF3/GF4 同构复用）
+# 2026-10-20 去超时裁决（第 2 条）：确认门与 generative_form 等的是人（填表/决策），没有到期时刻 ——
+# GF 帧**不带** timeoutSeconds/expiresAt 两键，前端据此不武装倒计时。即时执行类前端工具仍成对带
+# （120s，生产侧 ConfirmGate.suspendWaitSeconds 单点取值）；本函数只服务 GF 四用例，故只断言"无此两键"。
 function Gf-Assert-FrameContract($f) {
     if (-not $f.toolCallId) { throw 'frontend_tool_request 缺 toolCallId' }
-    if ([int]$f.timeoutSeconds -le 0) { throw "frontend_tool_request timeoutSeconds=$($f.timeoutSeconds)，期望 > 0（不硬编码 120，与 app.ai.hitl.frontend-tool-timeout 解耦）" }
-    if (-not ($f.expiresAt -match '^\d+$')) { throw 'frontend_tool_request expiresAt 非数字' }
+    foreach ($k in @('timeoutSeconds', 'expiresAt')) {
+        if ($null -ne $f.PSObject.Properties[$k]) {
+            throw "frontend_tool_request 带 $k=$($f.$k)，期望 GF 帧不含该键（generative_form 无到期时刻，2026-10-20 裁决）"
+        }
+    }
 }
 
 # 解析 args 原始 JSON 字符串并取 form（设计稿 §4；args 缺 form / scenario 漂移按 §3.3 判定）

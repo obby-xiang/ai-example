@@ -98,7 +98,7 @@
 
 > ⚠ 2026-10-08 真实 CI 证伪：上句【推断】的"不影响语义"**不成立**——该类反斜杠拼接共 **35 行/36 处**（全为 `$tmp`）。在 Linux 下两种语义分裂：**.NET 文件 API**（`[IO.File]::WriteAllBytes/ReadAllBytes`、`ZipFile`）把 `\` 当**普通字符**（文件名里带反斜杠），**自写自读成对闭合 ⇒ TC4–TC7 假绿**；而 **PowerShell cmdlet**（`Copy-Item`）走 FileSystem provider 的**路径归一**把 `\` 当分隔符 ⇒ 脚本内唯一"跨语义"点 `:749` 报 `Cannot find path '/tmp/s5b-e2e-…/CURRENCY_full.xlsx'`（**TC8 红**，`PASS=26 FAIL=1`）。已按裁决 **T12-E#9** 将 36 处统一改为 `(Join-Path $tmp 'X')`，**不启用 R3**。详见 `docs/evidence/M2-T1.2-E2E门禁实施-DS-V4-Flash.md §3.9`（同段推断在本文 §5.3 末尾亦有出现，同此失效）。
 
-**(g) 断言粒度（可预制性对账的输入）**：GF1–GF4 的断言逐条为 —— 帧契约（`toolCallId` 非空、`timeoutSeconds > 0`、`expiresAt` 为数字）、表单 schema 形状（`args.form.scenario` 精确、`needKeys` 齐备、字段类型落在六型白名单）、回灌 HTTP 语义（200 + `status=FRONTEND_RESULT` + `accepted=true` + `executed=false`）、`pending` 终态与 `resultText` **精确相等**、结局帧恰 1 条 `ok=true`、`done` 恰 1 条、`error` 0 条、**值回显走会话记忆的最终助手文本**（`Gf-Assert-Echo`：逐字段校验 `key` 与值字符串出现于该文本）、以及若干后端日志行断言【实测：脚本第 1360–1425、1459–1543 行】。**脚本对模型措辞、回答内容、delta 文本均不作判定**（delta 自 GF-C 裁决 #1 起降级为纯 INFO 弱旁证）【实测】。
+**(g) 断言粒度（可预制性对账的输入）**：GF1–GF4 的断言逐条为 —— 帧契约（`toolCallId` 非空、`timeoutSeconds > 0`、`expiresAt` 为数字）【**补注（2026-10-20 去超时裁决）**：GF 帧契约反转为 `toolCallId` 非空、且**不得含** `timeoutSeconds`/`expiresAt` 两键（确认门与 `generative_form` 无到期时刻，帧里整键省略）；「`timeoutSeconds > 0` / `expiresAt` 数字」自该裁决起只适用于即时执行类前端工具，本句为 2026-10-07 设计期口径存档】、表单 schema 形状（`args.form.scenario` 精确、`needKeys` 齐备、字段类型落在六型白名单）、回灌 HTTP 语义（200 + `status=FRONTEND_RESULT` + `accepted=true` + `executed=false`）、`pending` 终态与 `resultText` **精确相等**、结局帧恰 1 条 `ok=true`、`done` 恰 1 条、`error` 0 条、**值回显走会话记忆的最终助手文本**（`Gf-Assert-Echo`：逐字段校验 `key` 与值字符串出现于该文本）、以及若干后端日志行断言【实测：脚本第 1360–1425、1459–1543 行】。**脚本对模型措辞、回答内容、delta 文本均不作判定**（delta 自 GF-C 裁决 #1 起降级为纯 INFO 弱旁证）【实测】。
 
 ### 2.3 后端 AI 客户端与"可桩化面"【实测，除标注外】
 
@@ -164,7 +164,7 @@
 
 | 断言（用例） | 断言对象 | 产出方 | 预制可行性 |
 |---|---|---|---|
-| GF1-A1 帧契约：`toolCallId` 非空 / `timeoutSeconds > 0` / `expiresAt` 数字 | 后端挂起机制 | 后端 | 与桩无关，仅要求桩的 `tool_calls.id` 非空且工具名精确 |
+| GF1-A1 帧契约：`toolCallId` 非空 / `timeoutSeconds > 0` / `expiresAt` 数字（**补注 2026-10-20 去超时裁决**：GF 帧改为**不得含** `timeoutSeconds`/`expiresAt`；本行前段为设计期口径存档） | 后端挂起机制 | 后端 | 与桩无关，仅要求桩的 `tool_calls.id` 非空且工具名精确 |
 | GF1-A2 schema 形状：`args.form.scenario` 精确、`needKeys` 齐备、字段类型落六型白名单 | **桩的 `arguments` 字符串** | **桩完全控制** | **可预制**：模板化 `form`，且需通过后端白名单闸（`GenerativeFormRules`） |
 | GF1-A3 回灌 HTTP：200 + `FRONTEND_RESULT` + `accepted=true` + `executed=false` | 后端 | 后端 | 与桩无关 |
 | GF1-A4 `pending` 终态 + `resultText` **精确相等** | 后端 | 后端 | 与桩无关 |
