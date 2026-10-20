@@ -13,7 +13,9 @@ import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ToolMeta;
+import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.ai.tool.ToolRegistry;
+import com.example.configmgr.ai.tool.ToolResultEnvelope;
 import com.example.configmgr.ai.tool.ToolResultLimiter;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
@@ -129,8 +131,10 @@ class GenerativeFormGateTest {
 			ToolExecutionResult result = GenerativeFormGateTest.this.manager.executeToolCalls(
 					prompt(), response("generative_form", VALID_ARGS));
 
-			// 回填模型的就是前端回灌的值本体（字段 key→值 JSON）
-			assertThat(toolText(result)).isEqualTo("{\"keyword\":\"CNY\"}");
+			// 回填模型的是前端回灌的值本体（统一信封的 message 字段；值本体一字不差）
+			ToolResultEnvelope envelope = ToolResultEnvelope.fromJson(toolText(result));
+			assertThat(envelope.outcome()).isEqualTo(ToolOutcome.OK.wire());
+			assertThat(envelope.message()).isEqualTo("{\"keyword\":\"CNY\"}");
 			verify(GenerativeFormGateTest.this.gateForSuspension).awaitFrontendResult(eq(RUN_ID),
 					any(PendingToolCall.class));
 		}
@@ -141,9 +145,12 @@ class GenerativeFormGateTest {
 					prompt(), response("generative_form", INVALID_ARGS));
 
 			String modelText = toolText(result);
+			ToolResultEnvelope envelope = ToolResultEnvelope.fromJson(modelText);
 			// ① 模型收到机器可读码 + 原因清单（不是"成功"、也不是空文本）
-			assertThat(modelText).startsWith(GenerativeFormRules.SCHEMA_REJECTED);
-			assertThat(modelText).contains("未向前端下发表单").contains("不在白名单类型内").contains("1. ");
+			assertThat(envelope.outcome()).isEqualTo(ToolOutcome.REJECTED.wire());
+			assertThat(envelope.code()).isEqualTo(GenerativeFormRules.SCHEMA_REJECTED);
+			assertThat(envelope.message()).startsWith(GenerativeFormRules.SCHEMA_REJECTED)
+					.contains("未向前端下发表单").contains("不在白名单类型内").contains("1. ");
 
 			// ② 一次都没挂起（前端从未被要求渲染这张非法表单），也没有任何副作用认领
 			verify(GenerativeFormGateTest.this.gateForSuspension, never()).awaitFrontendResult(anyString(),
@@ -179,6 +186,38 @@ class GenerativeFormGateTest {
 			assertThat(pending.getStatus()).isEqualTo(PendingToolCall.FRONTEND_RESULT);
 			assertThat(pending.getResultText()).isEqualTo(values);
 			verify(GenerativeFormGateTest.this.store).putPending(RUN_ID, pending);
+			verify(GenerativeFormGateTest.this.emitter).frontendToolResult(pending, true, values);
+		}
+
+		@Test
+		void declaredFrontendOutcomeDerivesOkAndIsPersisted() {
+			PendingToolCall pending = formPending();
+			when(GenerativeFormGateTest.this.store.pending(RUN_ID, CALL_ID)).thenReturn(pending);
+			// 回灌内容本身合法（过得了结果复核）；outcome 是前端自报的"执行失败"
+			String values = "{\"keyword\":\"CNY\"}";
+
+			ConfirmGate.Submission submission = GenerativeFormGateTest.this.gate
+				.submitFrontendResult(RUN_ID, CALL_ID, values, "frontend-download", false, "failed");
+
+			assertThat(submission.outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
+			// 回灌自报 failed ⇒ 结局帧 ok=false；result 原文不变（模型读的仍是原文）
+			assertThat(pending.getStatus()).isEqualTo(PendingToolCall.FRONTEND_RESULT);
+			assertThat(pending.getOutcome()).isEqualTo(ToolOutcome.FAILED.wire());
+			assertThat(pending.getResultText()).isEqualTo(values);
+			verify(GenerativeFormGateTest.this.emitter).frontendToolResult(pending, false, values);
+		}
+
+		@Test
+		void absentFrontendOutcomeKeepsLegacyOkFallback() {
+			PendingToolCall pending = formPending();
+			when(GenerativeFormGateTest.this.store.pending(RUN_ID, CALL_ID)).thenReturn(pending);
+			String values = "{\"keyword\":\"CNY\"}";
+
+			ConfirmGate.Submission submission = GenerativeFormGateTest.this.gate
+				.submitFrontendResult(RUN_ID, CALL_ID, values, "unit-test", false, null);
+
+			assertThat(submission.outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
+			assertThat(pending.getOutcome()).isEqualTo(ToolOutcome.OK.wire());
 			verify(GenerativeFormGateTest.this.emitter).frontendToolResult(pending, true, values);
 		}
 

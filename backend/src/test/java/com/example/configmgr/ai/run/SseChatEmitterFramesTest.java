@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -95,13 +96,70 @@ class SseChatEmitterFramesTest {
 
     @Test
     void toolResultFramesCarryMessageId() {
-        this.emitter.toolResult(pending("call-7"), true, false, "全部 15 个定义");
-        this.emitter.frontendToolResult(pending("call-8"), true, "已打开编辑器");
+        this.emitter.toolResult(executed("call-7"), true, false, "全部 15 个定义");
+        this.emitter.frontendToolResult(frontendResult("call-8"), true, "已打开编辑器");
 
         List<Map<String, Object>> archived = archivedFrames();
         assertThat(archived.get(0)).containsEntry("messageId", "tool-call-7")
-                .containsEntry("status", PendingToolCall.PENDING);
+                .containsEntry("status", PendingToolCall.EXECUTED);
         assertThat(archived.get(1)).containsEntry("messageId", "tool-call-8");
+    }
+
+    @Test
+    void toolResultFrameCarriesOutcomeFieldsEvenUnderNonNullMapper() throws Exception {
+        // 本用例注入一个 NON_NULL 的 ObjectMapper，验证帧装配器不依赖"全局 inclusion 恰好是 ALWAYS"：
+        // 若把本类构造函数里的 copy().setSerializationInclusion(ALWAYS) 去掉，code/target 为 null 时
+        // 整键会消失，前端无法区分"字段缺失"与"null"。
+        // 注意：当前生产唯一 primary mapper（JacksonConfig）保持 Jackson 默认 ALWAYS，故那行 copy 是
+        // 防御未来改动的 no-op —— 不是"生产装配就是 NON_NULL"。
+        ObjectMapper nonNull = new ObjectMapper()
+                .setSerializationInclusion(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL);
+        SseChatEmitter out = new SseChatEmitter(RUN_ID, this.store, nonNull);
+        FrameWire wire = FrameWire.attachTo(out);
+
+        out.toolResult(executed("call-x"), true, false, "查看中");
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> payload = new ObjectMapper().readValue(wire.payloads().get(0), Map.class);
+        assertThat(payload).containsKeys("outcome", "code", "retryable", "target")
+                .containsEntry("outcome", "ok")
+                .containsEntry("retryable", false);
+        assertThat(payload.get("code")).isNull();
+        assertThat(payload.get("target")).isEqualTo(Map.of("taskId", 7));
+    }
+
+    @Test
+    void frontendToolResultCarriesSameOutcomeFieldsAsToolResult() {
+        // I1：回灌帧与 tool_result 同契约 —— 四字段同一推导，前端不会遇到"帧 ok=false 而卡面 succeeded"。
+        PendingToolCall ok = frontendResult("call-8");
+        PendingToolCall cancelled = pending("call-9");
+        cancelled.setStatus(PendingToolCall.FRONTEND_CANCELLED);
+        cancelled.setOutcome("cancelled");
+        cancelled.setCode("FRONTEND_CANCELLED");
+
+        this.emitter.frontendToolResult(ok, true, "{\"page\":\"export\"}");
+        this.emitter.frontendToolResult(cancelled, false, "用户取消");
+
+        List<Map<String, Object>> archived = archivedFrames();
+        assertThat(archived.get(0)).containsEntry("outcome", "ok")
+                .containsEntry("code", null)
+                .containsEntry("retryable", false)
+                .containsEntry("target", Map.of("taskId", 7));
+        assertThat(archived.get(1)).containsEntry("outcome", "cancelled")
+                .containsEntry("code", "FRONTEND_CANCELLED")
+                .containsEntry("retryable", false)
+                .containsEntry("target", Map.of("taskId", 7));
+    }
+
+    @Test
+    void toolResultRejectsOkThatContradictsOutcome() {
+        // M4：ok 保留在签名里，但只能等于 outcome.ok() —— 传错即 fail-fast，不产出自相矛盾的帧。
+        assertThatThrownBy(() -> this.emitter.toolResult(executed("call-bad"), false, false, "成功"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("ok 与 outcome 推导不一致");
+
+        // fail-fast 发生在组帧之前：归档里一帧都不该有
+        verify(this.store, never()).appendEvent(eq(RUN_ID), anyMap());
     }
 
     @Test
@@ -245,6 +303,21 @@ class SseChatEmitterFramesTest {
         pending.setName("start_import");
         pending.setKind(PendingToolCall.KIND_CONFIRM);
         pending.setArguments("{\"taskId\":7}");
+        return pending;
+    }
+
+    /** 已执行的后端条目（信封 ok；tool_result 的 ok=true 只能配这个结局）。 */
+    private static PendingToolCall executed(String toolCallId) {
+        PendingToolCall pending = pending(toolCallId);
+        pending.setStatus(PendingToolCall.EXECUTED);
+        return pending;
+    }
+
+    /** 前端回灌成功的条目（status=FRONTEND_RESULT ⇒ 旧数据推导也是 ok）。 */
+    private static PendingToolCall frontendResult(String toolCallId) {
+        PendingToolCall pending = pending(toolCallId);
+        pending.setKind(PendingToolCall.KIND_FRONTEND);
+        pending.setStatus(PendingToolCall.FRONTEND_RESULT);
         return pending;
     }
 

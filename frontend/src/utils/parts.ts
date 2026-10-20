@@ -310,6 +310,40 @@ export function historyToolCallStatus(status: unknown): ToolRunStatus | null {
 }
 
 /**
+ * 治理 P0-1（统一结果信封）单表：`outcome` 七态 → 段状态。唯一消费方 =
+ * `applyFrameToParts` 的 `tool_result` / `frontend_tool_result`（I1 收口）与 `loadHistory`
+ * 的历史段构造（有 outcome 则用、无则旧表）。
+ *
+ * 口径：
+ * - `ok → succeeded`；`failed → failed`；`rejected → rejected`；`blocked → blocked`；
+ * - `timeout → expired`（沿用既有超时口径，与 `TIMEOUT`/`FRONTEND_CANCELLED` 词表同族）；
+ * - `cancelled → cancelled`（沿用既有取消口径）；
+ * - `unknown → failed`（旧卡面只有"执行失败"可承载"未确认成功"；unknown 段态二期再议）；
+ * - 缺失 / 域外值 ⇒ null，由调用方回落到既有 `ok` 三元或 status 旧表（旧帧一字不动）。
+ *
+ * 返回 null 不等于失败 —— 只表示"本字段未给出可翻译结局"。
+ */
+export function outcomeStatus(outcome: unknown): ToolRunStatus | null {
+  switch (outcome) {
+    case 'ok':
+      return 'succeeded'
+    case 'failed':
+    case 'unknown':
+      return 'failed'
+    case 'rejected':
+      return 'rejected'
+    case 'blocked':
+      return 'blocked'
+    case 'timeout':
+      return 'expired'
+    case 'cancelled':
+      return 'cancelled'
+    default:
+      return null
+  }
+}
+
+/**
  * 2A②：GF 结局帧的 `result` 就是用户提交值原文（ConfirmGate#submitFrontendResult 落 resultText
  * → SseChatEmitter#frontendToolResult 原样入帧）。只收合法 JSON **对象**；坏 JSON / 数组 /
  * null / 标量一律不伪造（回执卡从 status 派生，值缺失保持空）。
@@ -383,10 +417,12 @@ export function writeSubmittedValuesToMessage(
  * （它们还带轮次级副作用），此处一律 no-op。
  *
  * 裁决口径逐条照抄翻转前的 case 分支：
- * - `tool_result`：BLOCKED（防线③未执行）> 已被拒（REJECTED）> ok 三元；
+ * - `tool_result`：BLOCKED（防线③未执行）> 已被拒（REJECTED）> **outcome 七态（治理 P0-1，有则用）**
+ *   > ok 三元（旧帧回落，无 outcome 时一字不动）；阻断文案按 `code` 选择（`TOOL_ALREADY_CLAIMED`
+ *   与披露范围拦截不是同一件事）；
  * - `frontend_tool_result`：本地已终态（failed/rejected/blocked/succeeded/expired/cancelled/unknown）first-wins，
- *   否则按帧 `status`（后端 PendingToolCall 大写实发值）映射终态，`status` 缺失/未知才退回 ok 三元
- *   （F1 收口修：原先不读 `status`，四类非失败终态全被落成 failed）；
+ *   否则 **outcome 七态（I1：帧带则有则用）** > 帧 `status`（后端 PendingToolCall 大写实发值）
+ *   > ok 三元（`status` 缺失/未知才退回 ok；F1 收口修：原先不读 `status`，四类非失败终态全被落成 failed）；
  * - `confirm_decision`：approved → running、rejected → rejected（reason 原样）。
  */
 export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
@@ -432,10 +468,20 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
       // 覆盖成「执行失败」；防线③拦截（BLOCKED）同为"未执行"，展示口径与拒绝同类
       const existing = findToolPart(message, frame.toolCallId)
       const rejected = existing?.status === 'rejected'
-      const blocked = frame.status === 'BLOCKED' || existing?.status === 'blocked'
-      const status: ToolRunStatus = blocked ? 'blocked' : rejected ? 'rejected' : frame.ok ? 'succeeded' : 'failed'
+      // 治理 P0-1：outcome='blocked' 与 status='BLOCKED' 同义（防线③未执行），一并落阻断口径
+      const blocked = frame.status === 'BLOCKED' || frame.outcome === 'blocked' || existing?.status === 'blocked'
+      // 治理 P0-1：**outcome 优先、缺省回落既有 ok 三元** —— 旧帧（无 outcome）走原逻辑一字不动；
+      // 业务失败被异常处理器吞成文本时 ok 仍为 true，只有 outcome='failed' 能纠正卡头谎报。
+      // BLOCKED 仍为最高优先级（status/段侧/outcome 三来源同义），已拒绝次之（补丁③口径）。
+      const fromOutcome = outcomeStatus(frame.outcome)
+      const status: ToolRunStatus = blocked
+        ? 'blocked'
+        : rejected ? 'rejected' : fromOutcome ?? (frame.ok ? 'succeeded' : 'failed')
+      // 治理 P0-1 M2：阻断文案按 `code` 区分 —— 互斥抢占（TOOL_ALREADY_CLAIMED）不是"未披露"。
       const reason = blocked
-        ? '该工具不在当前工作区上下文的披露范围内，未执行'
+        ? (frame.code === 'TOOL_ALREADY_CLAIMED'
+            ? '该操作已由另一实例执行，本次未重复执行'
+            : '该工具不在当前工作区上下文的披露范围内，未执行')
         : rejected ? (existing?.reason ?? '用户拒绝执行') : null
       upsertToolPart(message, {
         toolCallId: frame.toolCallId,
@@ -448,6 +494,9 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
         // 随段持久化供卡面「已截断」角标渲染；缺省 = 未截断
         truncated: frame.truncated ?? false,
         truncatedReason: frame.truncatedReason ?? null,
+        // 治理 P0-1：仅在帧带 outcome 时落段（旧帧不产生 undefined 键，镜像/段口径不变）；
+        // 一期卡面不展示，仅供后续阶段读段
+        ...(frame.outcome !== undefined ? { outcome: frame.outcome } : {}),
         reason,
         requiresAction: false
       })
@@ -517,8 +566,12 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
         || existing?.status === 'blocked' || existing?.status === 'succeeded'
         || existing?.status === 'expired' || existing?.status === 'cancelled'
         || existing?.status === 'unknown'
-      const fromFrame = frontendResultStatus(frame.status)
-      const frameStatus: ToolRunStatus = fromFrame ?? (frame.ok ? 'succeeded' : 'failed')
+      // 治理 P0-1 I1（收口修）：回执帧补齐 outcome 四字段后，结局以 outcome 为准（复用单表）——
+      // 后端回帧 status 仍是 FRONTEND_RESULT，若让旧表先行，ok=false 会被盖成成功。旧帧
+      // （无 outcome）仍走原表，行为一字不动。
+      const frameStatus: ToolRunStatus = outcomeStatus(frame.outcome)
+        ?? frontendResultStatus(frame.status)
+        ?? (frame.ok ? 'succeeded' : 'failed')
       const status: ToolRunStatus = localTerminal
         ? (existing?.status ?? 'failed')
         : frameStatus

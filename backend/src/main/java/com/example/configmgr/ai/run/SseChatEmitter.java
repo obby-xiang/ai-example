@@ -1,7 +1,10 @@
 package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.tool.ToolOutcome;
+import com.example.configmgr.ai.tool.ToolResultEnvelope;
 import com.example.configmgr.common.sse.SseWriteBudget;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
@@ -239,7 +242,13 @@ public class SseChatEmitter {
 			int queueCapacity, int maxFrameBytes, SseWriteBudget writeBudget) {
 		this.runId = runId;
 		this.store = store;
-		this.objectMapper = objectMapper;
+		// 帧面契约要求"字段存在、可为 null"（如 tool_result 的 code/target）：此处用一份
+		// "显式写 null"的副本，**防御未来把 primary ObjectMapper 改成 NON_NULL** —— 那会让 null
+		// 整键消失，前端无法区分"字段缺失"与"null"；更糟的是同一帧的实时写出与归档回放会按
+		// 不同 inclusion 重新序列化，字段面分叉。
+		// 现状（P0-1）：JacksonConfig 的自定义 primary mapper 保持 Jackson 默认 ALWAYS，故本行
+		// 当前是 no-op；保留它是把这条契约钉在写出器自己身上，而不是依赖全局配置不变。
+		this.objectMapper = objectMapper.copy().setSerializationInclusion(JsonInclude.Include.ALWAYS);
 		this.deliveryExecutor = deliveryExecutor;
 		this.queueCapacity = queueCapacity;
 		this.maxFrameBytes = maxFrameBytes;
@@ -557,16 +566,38 @@ public class SseChatEmitter {
 		emit(frame);
 	}
 
+	/**
+	 * 工具结局帧（P0-1 统一信封的帧面）：既有 {@code ok/result/status} 原样保留，
+	 * 新增 {@code outcome/code/retryable/target} 四字段。
+	 *
+	 * <p>
+	 * {@code ok} 按契约由 {@code outcome == ok} 推导（不信任调用方传值，避免"帧说成功、结局说失败"）；
+	 * {@code outcome}/{@code code} 取自待决条目的持久化信封（旧数据按 status 推导）；
+	 * {@code target} 从工具参数 JSON 提取 {@code {taskId?, defCode?, step?, page?}}，提取不到为 null。
+	 * {@code result} 仍是<b>全文</b>（人读通道，不受模型侧裁剪影响）。
+	 */
 	public void toolResult(PendingToolCall pending, boolean ok, boolean reused, String result) {
+		ToolOutcome outcome = pending.effectiveOutcome();
+		// M4：ok 保留在签名里（不改调用面），但契约上它只能是 outcome 的派生值。
+		// 传错即 fail-fast —— 否则"帧 ok 与信封 outcome 互相矛盾"会被前端按任一字段误读。
+		if (ok != outcome.ok()) {
+			throw new IllegalArgumentException("tool_result 帧的 ok 与 outcome 推导不一致：ok=" + ok
+					+ "，outcome=" + outcome.wire() + "（toolCallId=" + pending.getToolCallId() + "）");
+		}
+		String code = pending.effectiveCode();
 		Map<String, Object> frame = frame("tool_result");
 		frame.put("toolCallId", pending.getToolCallId());
 		frame.put("name", pending.getName());
 		frame.put("kind", pending.getKind());
-		frame.put("ok", ok);
+		frame.put("ok", outcome.ok());
 		frame.put("executed", pending.isExecuted());
 		frame.put("executedBy", pending.getExecutedBy());
 		frame.put("reused", reused);
 		frame.put("status", pending.getStatus());
+		frame.put("outcome", outcome.wire());
+		frame.put("code", code);
+		frame.put("retryable", outcome.retryable(code));
+		frame.put("target", ToolResultEnvelope.targetOf(pending.getArguments()));
 		frame.put("messageId", toolMessageId(pending));
 		frame.put("result", result);
 		emit(frame);
@@ -611,12 +642,20 @@ public class SseChatEmitter {
 	}
 
 	public void frontendToolResult(PendingToolCall pending, boolean ok, String result) {
+		// P0-1：与 tool_result 同契约 —— 结局四字段同一推导（见 toolResult），前端不必再从
+		// "ok=false 但 result 文本像是成功"里猜；卡面与帧共用 outcome 这个单一事实源。
+		ToolOutcome outcome = pending.effectiveOutcome();
+		String code = pending.effectiveCode();
 		Map<String, Object> frame = frame("frontend_tool_result");
 		frame.put("toolCallId", pending.getToolCallId());
 		frame.put("name", pending.getName());
 		frame.put("ok", ok);
 		frame.put("executed", false);
 		frame.put("status", pending.getStatus());
+		frame.put("outcome", outcome.wire());
+		frame.put("code", code);
+		frame.put("retryable", outcome.retryable(code));
+		frame.put("target", ToolResultEnvelope.targetOf(pending.getArguments()));
 		frame.put("messageId", toolMessageId(pending));
 		frame.put("result", result);
 		emit(frame);

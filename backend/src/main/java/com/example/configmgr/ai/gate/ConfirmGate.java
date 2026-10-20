@@ -10,6 +10,7 @@ import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
 import com.example.configmgr.ai.tool.FrontendToolGuard;
+import com.example.configmgr.ai.tool.ToolOutcome;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -345,6 +346,8 @@ public class ConfirmGate {
 		}
 		if (PendingToolCall.PENDING.equals(fresh.getStatus())) {
 			fresh.setStatus(PendingToolCall.CANCELLED);
+			fresh.setOutcome(ToolOutcome.CANCELLED.wire());
+			fresh.setCode(ToolOutcome.CODE_RUN_CANCELLED);
 			fresh.setReason("RUN_CANCELLED");
 			fresh.setExecuted(false);
 			fresh.setResolvedAtMs(System.currentTimeMillis());
@@ -383,6 +386,8 @@ public class ConfirmGate {
 			return fresh;
 		}
 		fresh.setStatus(PendingToolCall.TIMEOUT);
+		fresh.setOutcome(ToolOutcome.TIMEOUT.wire());
+		fresh.setCode(confirm ? ToolOutcome.CODE_CONFIRM_TIMEOUT : ToolOutcome.CODE_FRONTEND_TIMEOUT);
 		fresh.setReason(confirm ? "CONFIRM_TIMEOUT" : "FRONTEND_TIMEOUT");
 		fresh.setExecuted(false);
 		fresh.setResolvedAtMs(System.currentTimeMillis());
@@ -494,7 +499,14 @@ public class ConfirmGate {
 		pending.setExecutedBy(null);
 		pending.setResolvedAtMs(System.currentTimeMillis());
 		if (!approved) {
+			pending.setOutcome(ToolOutcome.REJECTED.wire());
+			pending.setCode(null);
 			pending.setResultText("用户拒绝了该操作，工具未执行。拒绝原因：" + pending.getReason());
+		}
+		else {
+			// 放行后的结局由执行决定（executeOnce 写入），此处清掉可能残留的旧结局
+			pending.setOutcome(null);
+			pending.setCode(null);
 		}
 		boolean woke;
 		// S5c-6：落库 → 发回执帧 → 唤醒，一次不可分割（顺序不可交换：唤醒会让等待方立刻产出
@@ -509,7 +521,7 @@ public class ConfirmGate {
 
 	/** 前端工具结果回灌（保持既有四参口径：非取消路径）。 */
 	public Submission submitFrontendResult(String runId, String toolCallId, String result, String source) {
-		return submitFrontendResult(runId, toolCallId, result, source, false);
+		return submitFrontendResult(runId, toolCallId, result, source, false, null);
 	}
 
 	/**
@@ -532,6 +544,20 @@ public class ConfirmGate {
 	 */
 	public Submission submitFrontendResult(String runId, String toolCallId, String result, String source,
 			boolean cancelled) {
+		return submitFrontendResult(runId, toolCallId, result, source, cancelled, null);
+	}
+
+	/**
+	 * 前端工具结果回灌（P0-1：带可选 {@code outcome}）。
+	 *
+	 * <p>
+	 * {@code outcome} 是前端对自己这次执行结局的自报（{@code ok/failed/rejected/...}）；
+	 * 收到后用它推导结局帧的 {@code ok}（缺省/null 保持现行 true 兜底），并随条目持久化，
+	 * 供模型信封与历史 toolCallStates 复用。{@code cancelled=true} 时 outcome 被忽略
+	 * （放弃是更高的语义优先级）。
+	 */
+	public Submission submitFrontendResult(String runId, String toolCallId, String result, String source,
+			boolean cancelled, String outcome) {
 		PendingToolCall pending = this.store.pending(runId, toolCallId);
 		if (pending == null) {
 			return new Submission(Outcome.NOT_FOUND, null, false, null);
@@ -549,13 +575,17 @@ public class ConfirmGate {
 			return new Submission(Outcome.REJECTED, pending, false, verdict);
 		}
 		pending.setStatus(PendingToolCall.FRONTEND_RESULT);
+		ToolOutcome declared = ToolOutcome.fromWire(outcome);
+		pending.setOutcome(declared == null ? ToolOutcome.OK.wire() : declared.wire());
+		pending.setCode(null);
+		boolean ok = declared == null || declared.ok();
 		pending.setReason("source=" + (source == null || source.isBlank() ? "http-post" : source));
 		pending.setResultText(result == null ? "" : result);
 		pending.setResolvedAtMs(System.currentTimeMillis());
 		boolean woke;
 		synchronized (this.submitLock) {
 			this.store.putPending(runId, pending);
-			this.registry.of(runId).frontendToolResult(pending, true, result == null ? "" : result);
+			this.registry.of(runId).frontendToolResult(pending, ok, result == null ? "" : result);
 			woke = signal(runId, toolCallId);
 		}
 		return new Submission(Outcome.ACCEPTED, pending, woke, null, maybeTriggerResume(runId, woke));
@@ -581,6 +611,8 @@ public class ConfirmGate {
 	 */
 	private Submission dismiss(String runId, PendingToolCall pending, String source) {
 		pending.setStatus(PendingToolCall.FRONTEND_CANCELLED);
+		pending.setOutcome(ToolOutcome.CANCELLED.wire());
+		pending.setCode(ToolOutcome.CODE_FRONTEND_CANCELLED);
 		pending.setReason("FRONTEND_DISMISSED" + (source == null || source.isBlank() ? "" : " source=" + source));
 		pending.setExecuted(false);
 		pending.setResolvedAtMs(System.currentTimeMillis());

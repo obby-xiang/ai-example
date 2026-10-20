@@ -5,7 +5,7 @@
  *         FrontendToolResultRequest.java、AiController.java（端点与响应体现场）
  */
 
-import type { SseFrame, PendingToolCallSnapshot, PendingStatus, ToolKind } from './sse'
+import type { SseFrame, PendingToolCallSnapshot, PendingStatus, ToolKind, ToolOutcome } from './sse'
 import type { FormSpec } from './form-schema'
 import type { ErrorCard } from '@/utils/error-card'
 
@@ -76,6 +76,11 @@ export interface FrontendToolResultRequest {
    * 条目立刻落 FRONTEND_CANCELLED，不必等超时；与提交共用同一幂等入口。
    */
   cancelled?: boolean
+  /**
+   * 治理 P0-1：前端执行器的结局七态（`FrontendToolExecution.outcome` 原样回灌）。
+   * 后端据此落台账并在 tool_result 帧回发同值；取消路径可不带（`cancelled=true` 已表达结局）。
+   */
+  outcome?: ToolOutcome
 }
 
 /** 前端工具回灌结果（响应体同样是裸对象）。 */
@@ -153,6 +158,13 @@ export interface AiHistoryMessage {
     decision?: string
     decidedAt?: number
     submittedValues?: string
+    /**
+     * 治理 P0-1：条目结局七态（后端新载荷才有）。**有则优先**于 status 经词表映射；
+     * 缺（旧载荷 / resume 重建轮）⇒ 回落 status 旧表。
+     */
+    outcome?: string
+    /** 治理 P0-1：错误码（可选，null = 无码）；一期不展示 */
+    code?: string | null
   }>
   timestamp?: unknown
 }
@@ -295,6 +307,12 @@ export interface ToolPart extends MessagePartBase {
    */
   truncated?: boolean
   truncatedReason?: string | null
+  /**
+   * 治理 P0-1：帧侧结局七态（tool_result 帧带 outcome 时落段，随镜像持久化；旧帧无值）。
+   * 卡面**不展示本字段**（阶段二期再做）；段状态仍以 `status` 为准，二者由 parts.ts 的
+   * `outcomeStatus` 单表映射，当前写入点只在 tool_result。
+   */
+  outcome?: ToolOutcome
   /** 该工具段当前是否在等人工/前端动作（确认门待放行、前端工具待执行） */
   requiresAction: boolean
   /**
@@ -345,6 +363,8 @@ export interface ToolPartPatch {
   /** 见 {@link ToolPart.truncated}（R-154 #2 帧侧截断标记，随段持久化） */
   truncated?: boolean
   truncatedReason?: string | null
+  /** 见 {@link ToolPart.outcome}（治理 P0-1 帧侧结局七态） */
+  outcome?: ToolOutcome
   /** 见 {@link ToolPart.timeoutSeconds}（确认门/前端工具的等待口径，随段持久化） */
   timeoutSeconds?: number
   expiresAt?: number

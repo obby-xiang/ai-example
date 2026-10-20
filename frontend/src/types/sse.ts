@@ -18,6 +18,16 @@
 /** 挂起种类（PendingToolCall.KIND_*）。 */
 export type ToolKind = 'CONFIRM' | 'FRONTEND' | 'BACKEND'
 
+/**
+ * 工具结局维度（治理 P0-1 统一结果信封的 `outcome` 取值域；
+ * 依据 `docs/research/调研-AI工具执行治理与互斥-2026-10-19.md` §6.4 P0-1）。
+ *
+ * 与 `ok` 的关系：`ok` 是旧协议的布尔二元、语义只覆盖"执行是否成功"；`outcome` 是七态
+ * 真实结局，`ok:true` 并不蕴含 `outcome:'ok'`（业务失败但被异常处理器吞成文本时，后端按本字段
+ * 如实报 `failed`）。**旧帧没有本字段 ⇒ 前端必须回落到 `ok` 三元**，不得臆造默认值。
+ */
+export type ToolOutcome = 'ok' | 'failed' | 'rejected' | 'blocked' | 'timeout' | 'cancelled' | 'unknown'
+
 /** 挂起条目状态（PendingToolCall 的状态常量）。 */
 export type PendingStatus =
   | 'PENDING'
@@ -53,6 +63,10 @@ export interface PendingToolCallSnapshot {
   executedAtMs?: number
   requestedAtMs?: number
   resolvedAtMs?: number
+  /** 治理 P0-1：条目结局七态（可选，旧载荷没有） */
+  outcome?: ToolOutcome
+  /** 治理 P0-1：错误码（可选，null = 无码） */
+  code?: string | null
 }
 
 /** 全部帧类型常量（顺序即后端产出顺序语义）。 */
@@ -158,6 +172,18 @@ export interface SseToolResultFrame extends SseFrameBase {
    */
   truncated?: boolean
   truncatedReason?: string | null
+  /**
+   * 治理 P0-1（统一结果信封）：结局七态。**可选** —— 旧后端帧没有该字段，此时前端按
+   * `ok` 三元回落（{@link ToolOutcome}）。带该字段时它**优先于 `ok`**：业务失败但被
+   * 异常处理器吞成文本的场景下 `ok` 仍为 true，只有 `outcome` 如实报 `failed`。
+   */
+  outcome?: ToolOutcome
+  /** 治理 P0-1：错误码（可选，null = 无码）；一期只落段/展示二期，卡面不展示 */
+  code?: string | null
+  /** 治理 P0-1：是否可重试（可选；旧帧没有）；一期仅契约透传，不参与卡面判定 */
+  retryable?: boolean
+  /** 治理 P0-1：目标资源（可选，null = 未声明）；一期仅契约透传 */
+  target?: Record<string, unknown> | null
 }
 
 /** HITL 确认请求（挂起等待口径）。 */
@@ -220,6 +246,18 @@ export interface SseFrontendToolResultFrame extends SseFrameBase {
   /** DC-14 T5：结果铸为消息后的消息 id */
   messageId?: string
   result?: string | null
+  /**
+   * 治理 P0-1（统一结果信封，I1 收口）：结局七态，契约同 `tool_result` 帧。**可选** ——
+   * 旧后端帧没有该字段（此时前端走原 `status` 旧表 + ok 三元）；带该字段时**优先于**
+   * `status`/`ok`（`status='FRONTEND_RESULT'` 不再把 `ok=false` 盖成成功）。
+   */
+  outcome?: ToolOutcome
+  /** 治理 P0-1：错误码（可选，null = 无码）；一期不参与卡面判定 */
+  code?: string | null
+  /** 治理 P0-1：是否可重试（可选；旧帧没有）；一期仅契约透传 */
+  retryable?: boolean
+  /** 治理 P0-1：目标资源（可选，null = 未声明）；一期仅契约透传 */
+  target?: Record<string, unknown> | null
 }
 
 /** 挂起公告（快照已外置 Redis，带键名与写入者实例，供"可重挂"提示）。 */

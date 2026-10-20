@@ -321,6 +321,9 @@ class SseFrameSequenceConformanceTest {
 		pending.setName("start_export");
 		pending.setKind(PendingToolCall.KIND_CONFIRM);
 		pending.setArguments("{\"taskId\":7}");
+		// tool_result 帧的 ok=true 必须与 outcome=ok 一致（SseChatEmitter 的 M4 一致性断言），
+		// 故语料条目按"已执行"构造；本类断言的是帧序/续号，与条目态无关。
+		pending.setStatus(PendingToolCall.EXECUTED);
 		return pending;
 	}
 

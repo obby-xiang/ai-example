@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.run;
 
+import com.example.configmgr.ai.tool.ToolOutcome;
 import lombok.Data;
 
 import java.util.LinkedHashMap;
@@ -82,6 +83,12 @@ public class PendingToolCall {
 
 	private String status = PENDING;
 
+	/** 结果信封的结局（{@code PendingToolCall} 的历史字段；null = 旧数据，按 status 推导）。 */
+	private String outcome;
+
+	/** 结果信封的机器可读码（null = 无码；旧数据按 status/reason 推导）。 */
+	private String code;
+
 	private String reason;
 
 	private String resultText;
@@ -117,6 +124,33 @@ public class PendingToolCall {
 		return !PENDING.equals(this.status);
 	}
 
+	/**
+	 * 条目当前结局：优先取持久化 outcome（新数据），否则按 {@link #status} 推导（旧数据/挂起中）。
+	 * 未决条目推导为 {@code unknown} —— 未知不等于失败。
+	 */
+	public ToolOutcome effectiveOutcome() {
+		ToolOutcome persisted = ToolOutcome.fromWire(this.outcome);
+		return persisted == null ? ToolOutcome.fromStatus(this.status) : persisted;
+	}
+
+	/**
+	 * 条目当前错误码：优先取持久化 code，否则按状态/原因推导
+	 * （{@code BLOCKED→SCOPE_NOT_DISCLOSED}、{@code TIMEOUT→reason}、{@code CANCELLED→RUN_CANCELLED} 等）。
+	 */
+	public String effectiveCode() {
+		if (this.code != null && !this.code.isBlank()) {
+			return this.code;
+		}
+		return switch (this.status) {
+			case BLOCKED -> ToolOutcome.CODE_SCOPE_NOT_DISCLOSED;
+			case TIMEOUT -> this.reason == null || this.reason.isBlank() ? "TIMEOUT" : this.reason;
+			case REJECTED_ARGUMENTS -> this.reason == null || this.reason.isBlank() ? "REJECTED_ARGUMENTS" : this.reason;
+			case CANCELLED -> ToolOutcome.CODE_RUN_CANCELLED;
+			case FRONTEND_CANCELLED -> ToolOutcome.CODE_FRONTEND_CANCELLED;
+			default -> null;
+		};
+	}
+
 	public Map<String, Object> asMap() {
 		Map<String, Object> out = new LinkedHashMap<>();
 		out.put("toolCallId", this.toolCallId);
@@ -125,6 +159,8 @@ public class PendingToolCall {
 		out.put("kind", this.kind);
 		out.put("arguments", this.arguments);
 		out.put("status", this.status);
+		out.put("outcome", effectiveOutcome().wire());
+		out.put("code", effectiveCode());
 		out.put("reason", this.reason);
 		out.put("resultText", this.resultText);
 		out.put("executed", this.executed);

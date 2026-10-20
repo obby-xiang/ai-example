@@ -26,12 +26,13 @@ import {
   historyToolCallStatus,
   markApplied,
   openStreamPart,
+  outcomeStatus,
   sealTrailingStreamPart,
   upsertToolPart as writeToolPart,
   writeSubmittedValuesToMessage
 } from '@/utils/parts'
 import { ErrorCode, type SessionBusyConflict, type SuspendPoolSaturated } from '@/types/api'
-import { frameSeq, isTerminalFrame } from '@/types/sse'
+import { frameSeq, isTerminalFrame, type ToolOutcome } from '@/types/sse'
 import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiHealth, type AiHistory, type AiHistoryMessage, type AiRunCurrent, type AiSessionMirror, type ChatMessage, type ConfirmClock, type GateSubmission, type MessagePart, type PendingToolCall, type ToolPart, type ToolPartPatch, type ToolRunStatus } from '@/types/ai'
 import { parseFormSchema, checkFormValues } from '@/types/form-schema'
 import type { SseFrame } from '@/types/sse'
@@ -1162,7 +1163,14 @@ export const useAiStore = defineStore('ai', {
             const state = call.id !== null && call.id !== undefined && call.id !== ''
               ? item.toolCallStates?.[call.id]
               : undefined
-            const mappedStatus = state?.status !== undefined ? historyToolCallStatus(state.status) : null
+            // 治理 P0-1：结局七态 **outcome 优先**（新载荷）—— 有合法 outcome 即用，缺/域外值才
+            // 回落 status 旧表（旧载荷 / resume 重建轮 T4 同口径，行为一字不动）。
+            // M1（收口修）：非终态（PENDING/APPROVED ⇒ pending）不得被 outcome='unknown' 覆写成
+            // failed —— 条目仍在等人工，后端也不会对其写 outcome；此处为双保险。
+            const statusDerived = state?.status !== undefined ? historyToolCallStatus(state.status) : null
+            const mappedStatus = statusDerived === 'pending'
+              ? statusDerived
+              : outcomeStatus(state?.outcome) ?? statusDerived
             const kind = state?.kind
             let matched: NonNullable<AiHistoryMessage['toolResponses']>[number] | undefined
             if (call.id !== null && call.id !== undefined && call.id !== '') {
@@ -2151,13 +2159,17 @@ export const useAiStore = defineStore('ai', {
      *
      * 返回结构化结果（供生成式表单区分 400 FORM_RESULT_REJECTED「挂起仍在等待，可重试」
      * 与真失败）；通用执行器路径（runFrontendTool）忽略返回值，行为不变。
+     *
+     * 治理 P0-1：`outcome` 为前端执行器的结局七态（`FrontendToolExecution.outcome`），仅执行器
+     * 路径携带（取消路径由 `cancelled=true` 表达结局）；缺省不产该键，旧请求体形态不变。
      */
     async submitFrontendToolResult(
       toolCallId: string,
       result: string,
       source = 'http-post',
       cancelled = false,
-      runId?: string
+      runId?: string,
+      outcome?: ToolOutcome
     ): Promise<{ ok: boolean; duplicate?: boolean; rejected?: string; message?: string }> {
       // GF-B 修复（红队问题 1）：表单回灌优先用表单创建时捕获的 runId，
       // 缺省才回退当前轮的 activeRunId（避免旧表单错配到新 run）
@@ -2170,7 +2182,8 @@ export const useAiStore = defineStore('ai', {
         await aiApi.frontendToolResult(
           cancelled
             ? { runId: targetRunId, toolCallId, cancelled: true, source }
-            : { runId: targetRunId, toolCallId, result, source }
+            // 治理 P0-1：仅执行器路径带 outcome（旧形态逐字保留，不产 undefined 键）
+            : { runId: targetRunId, toolCallId, result, source, ...(outcome !== undefined ? { outcome } : {}) }
         )
         return { ok: true }
       } catch (error) {
@@ -3227,7 +3240,8 @@ export const useAiStore = defineStore('ai', {
       if (execution.availability === 'degraded' || execution.availability === 'unavailable') {
         this.notice = execution.result
       }
-      await this.submitFrontendToolResult(frame.toolCallId, execution.result, 'frontend-executor')
+      // 治理 P0-1：前端执行器的结局七态随回灌上送（后端台账/回帧以此为权威结局）
+      await this.submitFrontendToolResult(frame.toolCallId, execution.result, 'frontend-executor', false, undefined, execution.outcome)
     }
   }
 })

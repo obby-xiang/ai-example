@@ -154,6 +154,23 @@ class ConvergeMemoryToolCallStatesTest {
 			.containsEntry("kind", PendingToolCall.KIND_CONFIRM);
 	}
 
+	/**
+	 * M1：未决条目（PENDING/APPROVED）不写 {@code outcome} —— 结局还没产生，写 unknown 会让前端
+	 * 的 unknown→failed 兜底把"等待中"卡面覆盖成失败。缺键 = 前端按 status 展示。
+	 */
+	@Test
+	void unresolvedEntriesOmitOutcomeSoFrontendKeepsPendingCard() {
+		Map<String, Object> pendingState = this.service.resolveToolCallState(RUN_ID,
+				pending("tc-1", PendingToolCall.PENDING, false, PendingToolCall.KIND_CONFIRM),
+				RunSnapshot.RUNNING, "tc-1");
+		assertThat(pendingState).containsEntry("status", PendingToolCall.PENDING).doesNotContainKey("outcome");
+
+		Map<String, Object> approvedState = this.service.resolveToolCallState(RUN_ID,
+				pending("tc-1", PendingToolCall.APPROVED, false, PendingToolCall.KIND_CONFIRM),
+				RunSnapshot.RUNNING, "tc-1");
+		assertThat(approvedState).containsEntry("status", PendingToolCall.APPROVED).doesNotContainKey("outcome");
+	}
+
 	@Test
 	void approvedWithLedgerHitUpgradesToExecuted() {
 		seed(List.of(new UserMessage("你好"), assistantWithToolCalls("tc-1"), toolResponse("tc-1")),

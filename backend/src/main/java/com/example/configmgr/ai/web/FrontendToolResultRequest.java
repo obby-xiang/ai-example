@@ -10,7 +10,10 @@ package com.example.configmgr.ai.web;
  * @param cancelled 前端是否报告"用户主动放弃"（关闭表单/取消对话框）——DC-15 取消终态：
  * 置 true 时 {@code result} 被忽略，待决条目落 {@code FRONTEND_CANCELLED}（明确终态，
  * 挂起立刻收敛而不是悬到超时）。可为 null（缺省按 false，老客户端零改动）。
+ * @param outcome 前端自报的本次执行结局（P0-1：{@code ok|failed|rejected|blocked|timeout|cancelled|unknown}），
+ * 可空 —— 缺省时后端按现行口径兜底为成功。仅用于推导结局帧的 {@code ok} 与持久化信封，
+ * 不改 {@code result} 原文（模型读的仍是原文）。
  */
 public record FrontendToolResultRequest(String runId, String toolCallId, String result, String source,
-		Boolean cancelled) {
+		Boolean cancelled, String outcome) {
 }

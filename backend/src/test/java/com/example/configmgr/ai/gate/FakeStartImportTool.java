@@ -22,9 +22,15 @@ public class FakeStartImportTool {
     /** 被调用次数（0 = 从未执行，用来断言"拒绝/超时/越 scope 时绝不执行"）。 */
     public final AtomicInteger invocations = new AtomicInteger();
 
+    /** 非空时工具体抛出该异常（模拟作业守卫的 ConflictException 等失败出口）。 */
+    public volatile RuntimeException failure;
+
     @Tool(name = "start_import", description = "受控替身：启动导入作业（不会真的写库）")
     public String startImport(@ToolParam(description = "任务ID") Long taskId) {
         this.invocations.incrementAndGet();
+        if (this.failure != null) {
+            throw this.failure;
+        }
         return "导入作业已启动（作业 #4242），数据将写入暂存区，发布前可预览";
     }
 

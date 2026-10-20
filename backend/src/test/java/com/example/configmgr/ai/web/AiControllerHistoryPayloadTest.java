@@ -98,6 +98,28 @@ class AiControllerHistoryPayloadTest {
 			.andExpect(jsonPath("$.data.messages[0].toolCalls[0].id").value("tc-1"));
 	}
 
+	/**
+	 * C2：一轮完成后记忆里 {@code role:tool} 的 {@code responseData} 是统一信封 JSON（模型侧形态），
+	 * 但 {@code /history} 是回显通道 —— 必须解包成 {@code message} 原文，不能把整段 JSON 甩给前端。
+	 */
+	@Test
+	void envelopeResponseDataIsUnwrappedToPlainMessageInHistory() throws Exception {
+		String envelopeJson = com.example.configmgr.ai.tool.ToolResultEnvelope
+			.ok("导入作业已启动（作业 #4242）", "{\"taskId\":7}").toJson();
+		ToolResponseMessage toolResponse = ToolResponseMessage.builder()
+			.responses(List.of(new ToolResponseMessage.ToolResponse("tc-1", "start_import", envelopeJson)))
+			.build();
+		when(this.chatMemory.get("s-1")).thenReturn(List.of(toolResponse));
+
+		this.mockMvc.perform(get("/api/ai/history/s-1"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.messages[0].type").value("TOOL"))
+			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].id").value("tc-1"))
+			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].name").value("start_import"))
+			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].responseData")
+				.value("导入作业已启动（作业 #4242）"));
+	}
+
 	@Test
 	void existingFiveFieldsAreUnchanged() throws Exception {
 		AssistantMessage assistant = AssistantMessage.builder()

@@ -12,8 +12,12 @@ import com.example.configmgr.ai.run.ToolActivityBeacon;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.FrontendToolGuard;
 import com.example.configmgr.ai.tool.ToolMeta;
+import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.ai.tool.ToolRegistry;
+import com.example.configmgr.ai.tool.ToolResultEnvelope;
 import com.example.configmgr.ai.tool.ToolResultLimiter;
+import com.example.configmgr.common.ConflictException;
+import com.example.configmgr.common.ResourceNotFoundException;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
@@ -25,6 +29,7 @@ import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.model.tool.ToolCallingManager;
 import org.springframework.ai.model.tool.ToolExecutionResult;
 import org.springframework.ai.tool.definition.ToolDefinition;
+import org.springframework.ai.tool.execution.DefaultToolExecutionExceptionProcessor;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -120,7 +125,12 @@ public class SpToolCallingManager implements ToolCallingManager {
 	public SpToolCallingManager(RunStore store, RunRegistry registry, ConfirmGate gate, ToolRegistry toolRegistry,
 			MessageJsonCodec codec, ToolActivityBeacon beacon, CancellationRegistry cancellations,
 			ToolResultLimiter limiter, List<FrontendToolGuard> frontendGuards) {
-		this.delegate = ToolCallingManager.builder().build();
+		this.delegate = ToolCallingManager.builder()
+			// P0-1：让工具异常浮出到 executeOnce 的 catch（默认 alwaysThrow=false 会把失败吞成
+			// "ok=true 的文本"——start_* 的 ConflictException 因此不可见）。包内 ToolExecutionException
+			// 保留 cause，catch 侧按 cause 链取 ConflictException/ResourceNotFoundException 的码。
+			.toolExecutionExceptionProcessor(DefaultToolExecutionExceptionProcessor.builder().alwaysThrow(true).build())
+			.build();
 		this.store = store;
 		this.registry = registry;
 		this.gate = gate;
@@ -147,6 +157,9 @@ public class SpToolCallingManager implements ToolCallingManager {
 		String runId = runIdOf(prompt);
 		RunSnapshot snapshot = runId == null ? null : this.store.get(runId);
 		if (runId == null || snapshot == null) {
+			// 仅防御：生产路径恒有 runId（ToolCallingChatOptions.toolContext 由服务层写入），
+			// 故此分支不可达。注意 delegate 用的是 alwaysThrow=true —— 一旦真的走到这里，工具异常
+			// 会穿出整轮（不落 tool_result 帧、不写台账），因为本类没有可外置的挂起态来做兜底。
 			log.warn("工具执行处拿不到本轮 runId/快照（runId={}），挂起态无法外置，回落官方默认执行：{}",
 					runId, assistant.getToolCalls().stream().map(AssistantMessage.ToolCall::name).toList());
 			return this.delegate.executeToolCalls(prompt, chatResponse);
@@ -216,9 +229,15 @@ public class SpToolCallingManager implements ToolCallingManager {
 				}
 				// 执行之后再查一次：确认门/前端工具可能正是在等待期间被取消
 				checkCancelled(runId);
+				// R6 裁决同口径：信封的 outcome/code 必须在**结算之后**回读待决条目 —— 循环里的
+				// pending 是等待前那份（status 仍 PENDING、outcome=null），拿它取信封会把成功写成
+				// unknown。executeOnce/gate 写的是外置存储里的新副本，故此处重读（缺失则回落原对象）。
+				PendingToolCall settled = this.store.pending(runId, pending.getToolCallId());
+				PendingToolCall source = settled == null ? pending : settled;
 				// T2：回填模型的是裁剪后的文本；上面的 text 本身（进帧、进台账）保持全文
+				// P0-1：模型侧 = 统一信封 JSON（先裁剪 message，再组装，见 ToolResultEnvelope#toModelJson）
 				responses.add(new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
-						this.limiter.forModel(text)));
+						modelData(source, text)));
 			}
 
 			ToolResponseMessage toolMessage = ToolResponseMessage.builder().responses(responses).build();
@@ -279,6 +298,8 @@ public class SpToolCallingManager implements ToolCallingManager {
 				+ "（" + describeContext(context) + "）的披露范围内（FR-5.2 三道防线的执行兜底）。"
 				+ "请改用系统当前披露给你的工具；若用户确实要做这件事，请提示其先切换到对应的页面/步骤或任务，再重新发起。";
 		pending.setStatus(PendingToolCall.BLOCKED);
+		pending.setOutcome(ToolOutcome.BLOCKED.wire());
+		pending.setCode(SCOPE_VIOLATION_CODE);
 		pending.setReason(SCOPE_VIOLATION_CODE);
 		pending.setExecuted(false);
 		pending.setExecutedBy(null);
@@ -342,6 +363,8 @@ public class SpToolCallingManager implements ToolCallingManager {
 	private String rejectFrontendArguments(String runId, PendingToolCall pending, FrontendToolGuard.Verdict verdict) {
 		String text = verdict.render();
 		pending.setStatus(PendingToolCall.REJECTED_ARGUMENTS);
+		pending.setOutcome(ToolOutcome.REJECTED.wire());
+		pending.setCode(verdict.code());
 		pending.setReason(verdict.code());
 		pending.setExecuted(false);
 		pending.setExecutedBy(null);
@@ -378,11 +401,18 @@ public class SpToolCallingManager implements ToolCallingManager {
 		Map<String, Object> ledger = this.store.ledgerFor(runId, pending.getToolCallId());
 		if (ledger != null) {
 			String reusedText = String.valueOf(ledger.getOrDefault("resultText", ""));
+			// P0-1：台账里有信封就用持久化结局重放（续跑与首轮同形）；旧台账无该键
+			// （或只有推导不出的 unknown）⇒ 按成功复用。
+			Object ledgerOutcome = ledger.get("outcome");
+			boolean legacyLedger = ledgerOutcome == null || "unknown".equalsIgnoreCase(String.valueOf(ledgerOutcome));
+			pending.setOutcome(legacyLedger ? ToolOutcome.OK.wire() : String.valueOf(ledgerOutcome));
+			pending.setCode(legacyLedger || ledger.get("code") == null ? null : String.valueOf(ledger.get("code")));
 			pending.setExecuted(true);
 			pending.setExecutedBy(String.valueOf(ledger.get("executedBy")));
 			pending.setResultText(reusedText);
 			this.store.putPending(runId, pending);
-			this.registry.of(runId).toolResult(pending, true, true, frameText(reusedText));
+			// 帧的 ok 必须是 outcome 的派生值（旧实现恒传 true，会把台账里的失败结局写成成功帧）
+			this.registry.of(runId).toolResult(pending, pending.effectiveOutcome().ok(), true, frameText(reusedText));
 			return reusedText;
 		}
 
@@ -390,6 +420,8 @@ public class SpToolCallingManager implements ToolCallingManager {
 			String claimedBy = this.store.claimedBy(runId, pending.getToolCallId());
 			String text = "该操作已由实例 " + claimedBy + " 认领执行（进程在其完成前退出）。"
 					+ "为避免重复副作用，本次不再执行；如需重做，请让用户重新发起。";
+			pending.setOutcome(ToolOutcome.BLOCKED.wire());
+			pending.setCode(ToolOutcome.CODE_ALREADY_CLAIMED);
 			pending.setExecuted(true);
 			pending.setExecutedBy(claimedBy);
 			pending.setResultText(text);
@@ -402,11 +434,25 @@ public class SpToolCallingManager implements ToolCallingManager {
 		boolean ok = true;
 		try {
 			text = delegateSingle(prompt, pending);
+			if (text == null) {
+				// orElse("") 出口：官方执行器没有回填该 toolCallId 的结果（既非成功也非已知失败）。
+				text = "";
+				ok = false;
+				pending.setOutcome(ToolOutcome.FAILED.wire());
+				pending.setCode(ToolOutcome.CODE_TOOL_RESULT_MISSING);
+			}
+			else {
+				pending.setOutcome(ToolOutcome.OK.wire());
+				pending.setCode(null);
+			}
 		}
 		catch (Exception ex) {
 			log.warn("工具执行失败 runId={} name={}", runId, pending.getName(), ex);
 			ok = false;
+			String code = failureCode(ex);
 			text = "工具执行失败：" + ex.getMessage();
+			pending.setOutcome(ToolOutcome.FAILED.wire());
+			pending.setCode(code);
 		}
 		this.store.appendLedger(runId, pending, text);
 
@@ -414,6 +460,8 @@ public class SpToolCallingManager implements ToolCallingManager {
 		if (fresh == null) {
 			fresh = pending;
 		}
+		fresh.setOutcome(pending.getOutcome());
+		fresh.setCode(pending.getCode());
 		fresh.setResultText(text);
 		fresh.setExecuted(true);
 		fresh.setExecutedBy(this.store.instanceId());
@@ -428,8 +476,32 @@ public class SpToolCallingManager implements ToolCallingManager {
 		return text;
 	}
 
+	/**
+	 * 从异常（可能被官方 {@code ToolExecutionException} 包裹）提取机器可读码：
+	 * {@code ConflictException} / {@code ResourceNotFoundException} 的码优先，否则
+	 * {@link ToolOutcome#CODE_TOOL_EXECUTION_FAILED}。
+	 */
+	private static String failureCode(Throwable error) {
+		Throwable current = error;
+		for (int depth = 0; current != null && depth < 8; depth++) {
+			if (current instanceof ConflictException conflict
+					&& conflict.getCode() != null && !conflict.getCode().isBlank()) {
+				return conflict.getCode();
+			}
+			if (current instanceof ResourceNotFoundException notFound
+					&& notFound.getCode() != null && !notFound.getCode().isBlank()) {
+				return notFound.getCode();
+			}
+			if (current.getCause() == current) {
+				break;
+			}
+			current = current.getCause();
+		}
+		return ToolOutcome.CODE_TOOL_EXECUTION_FAILED;
+	}
+
 	/** 用官方 DefaultToolCallingManager 执行单个工具调用（只借官方执行，不接管协议）。 */
-	private String delegateSingle(Prompt prompt, PendingToolCall pending) {
+	String delegateSingle(Prompt prompt, PendingToolCall pending) {
 		AssistantMessage.ToolCall call = new AssistantMessage.ToolCall(pending.getToolCallId(),
 				pending.getType() == null ? "function" : pending.getType(), pending.getName(), pending.getArguments());
 		AssistantMessage single = AssistantMessage.builder().toolCalls(List.of(call)).build();
@@ -443,7 +515,16 @@ public class SpToolCallingManager implements ToolCallingManager {
 			.filter(response -> pending.getToolCallId() != null && pending.getToolCallId().equals(response.id()))
 			.map(ToolResponseMessage.ToolResponse::responseData)
 			.findFirst()
-			.orElse("");
+			.orElse(null);
+	}
+
+	/**
+	 * 模型侧的统一信封 JSON（P0-1）：先对 message 跑 {@link ToolResultLimiter#forModel}，
+	 * 再组装/序列化（顺序不可交换 —— 先组装后截断会把 JSON 本身截坏）。
+	 */
+	private String modelData(PendingToolCall pending, String text) {
+		return ToolResultEnvelope.of(pending.effectiveOutcome(), pending.effectiveCode(), text,
+				pending.getArguments()).toModelJson(this.limiter);
 	}
 
 	// ── 辅助 ────────────────────────────────────────────────────────────────

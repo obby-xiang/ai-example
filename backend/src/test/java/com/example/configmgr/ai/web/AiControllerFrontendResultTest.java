@@ -26,6 +26,7 @@ import java.util.List;
 
 import static org.hamcrest.Matchers.containsString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -59,7 +60,7 @@ class AiControllerFrontendResultTest {
 				"回灌的表单结果未通过类型复核，本次回灌被拒（挂起仍在等待，可修正后重试）",
 				List.of("字段 keyword 期望 text（字符串），实际是数字"));
 		when(this.runStore.instanceId()).thenReturn("test-instance");
-		when(this.gate.submitFrontendResult("r-1", "c-1", "{\"keyword\":7}", "frontend-form", false))
+		when(this.gate.submitFrontendResult("r-1", "c-1", "{\"keyword\":7}", "frontend-form", false, null))
 			.thenReturn(new ConfirmGate.Submission(ConfirmGate.Outcome.REJECTED, pending, false, verdict));
 
 		mockMvc.perform(post("/api/ai/frontend-tool-result")
@@ -79,7 +80,7 @@ class AiControllerFrontendResultTest {
 	void cancellationIsForwardedAndReportedAsTerminalState() throws Exception {
 		PendingToolCall pending = pending(PendingToolCall.FRONTEND_CANCELLED);
 		when(this.runStore.instanceId()).thenReturn("test-instance");
-		when(this.gate.submitFrontendResult("r-1", "c-1", null, "frontend-form", true))
+		when(this.gate.submitFrontendResult("r-1", "c-1", null, "frontend-form", true, null))
 			.thenReturn(new ConfirmGate.Submission(ConfirmGate.Outcome.ACCEPTED, pending, true, null));
 
 		mockMvc.perform(post("/api/ai/frontend-tool-result")
@@ -95,10 +96,10 @@ class AiControllerFrontendResultTest {
 	@Test
 	void unknownAndDuplicateSubmissionsKeepThe409Semantics() throws Exception {
 		when(this.runStore.instanceId()).thenReturn("test-instance");
-		when(this.gate.submitFrontendResult("r-1", "c-1", "{\"keyword\":\"CNY\"}", null, false))
+		when(this.gate.submitFrontendResult("r-1", "c-1", "{\"keyword\":\"CNY\"}", null, false, null))
 			.thenReturn(new ConfirmGate.Submission(ConfirmGate.Outcome.DUPLICATE,
 					pending(PendingToolCall.FRONTEND_RESULT), false, null));
-		when(this.gate.submitFrontendResult("r-2", "c-2", "{\"keyword\":\"CNY\"}", null, false))
+		when(this.gate.submitFrontendResult("r-2", "c-2", "{\"keyword\":\"CNY\"}", null, false, null))
 			.thenReturn(new ConfirmGate.Submission(ConfirmGate.Outcome.NOT_FOUND, null, false, null));
 
 		mockMvc.perform(post("/api/ai/frontend-tool-result").contentType(MediaType.APPLICATION_JSON)
@@ -113,6 +114,23 @@ class AiControllerFrontendResultTest {
 	}
 
 	@Test
+	void outcomeIsForwardedToTheGate() throws Exception {
+		PendingToolCall pending = pending(PendingToolCall.FRONTEND_RESULT);
+		when(this.runStore.instanceId()).thenReturn("test-instance");
+		when(this.gate.submitFrontendResult("r-1", "c-1", "{\"error\":\"下载被拦截\"}", "frontend", false, "failed"))
+			.thenReturn(new ConfirmGate.Submission(ConfirmGate.Outcome.ACCEPTED, pending, true, null));
+
+		mockMvc.perform(post("/api/ai/frontend-tool-result")
+			.contentType(MediaType.APPLICATION_JSON)
+			.content(body("r-1", "c-1", "{\"error\":\"下载被拦截\"}", "frontend", false, "failed")))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.accepted").value(true));
+
+		verify(this.gate).submitFrontendResult("r-1", "c-1", "{\"error\":\"下载被拦截\"}", "frontend", false,
+				"failed");
+	}
+
+	@Test
 	void missingIdsAreStillABadRequest() throws Exception {
 		mockMvc.perform(post("/api/ai/frontend-tool-result").contentType(MediaType.APPLICATION_JSON)
 			.content("{}"))
@@ -122,8 +140,13 @@ class AiControllerFrontendResultTest {
 
 	private String body(String runId, String toolCallId, String result, String source, boolean cancelled)
 			throws Exception {
+		return body(runId, toolCallId, result, source, cancelled, null);
+	}
+
+	private String body(String runId, String toolCallId, String result, String source, boolean cancelled,
+			String outcome) throws Exception {
 		return this.objectMapper.writeValueAsString(
-				new FrontendToolResultRequest(runId, toolCallId, result, source, cancelled));
+				new FrontendToolResultRequest(runId, toolCallId, result, source, cancelled, outcome));
 	}
 
 	private static PendingToolCall pending(String status) {

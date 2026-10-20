@@ -32,8 +32,9 @@ import java.util.concurrent.CopyOnWriteArrayList;
  * <h2>与 Redis 实现的<b>有意</b>差异（断言前必须知道）</h2>
  * <ol>
  * <li><b>对象同一性</b>：真实 {@code pending()} 每次从 Redis JSON 反序列化出一个新对象，
- * 本替身返回<b>同一个</b>对象引用。可观测的帧内容一致（状态转换的先后语义未变），
- * 但"改一份不影响另一份"这类隔离性断言<b>不</b>在本替身的能力范围内；</li>
+ * 本替身默认返回<b>同一个</b>对象引用（既有帧序用例依赖这种引用可见性）。需要锁住
+ * "结算写的是新副本、等待前那份仍是旧值"的实现时，用 {@link #setDeepCopyPending(boolean)}
+ * （或构造参数）打开往返模式，{@code pending()} 即按真实语义返回深拷贝；</li>
  * <li><b>无 TTL、无 3000 帧窗口裁剪</b>：用例里都不触及这两个边界；</li>
  * <li><b>messageJson 不落</b>：本替身不调 {@code MessageJsonCodec}（用例断言的是帧，不是历史条数）。</li>
  * </ol>
@@ -63,8 +64,31 @@ public class InMemoryRunStore extends RunStore {
 	/** T3-2：{@code ai:seq:<runId>} 的进程内替身（已发放最大业务号）。 */
 	private final Map<String, Long> issuedSeqs = new ConcurrentHashMap<>();
 
+	/** 与真实 Redis 对齐的往返模式（见类注"对象同一性"）：开启后 {@link #pending} 返回深拷贝。 */
+	private volatile boolean deepCopyPending;
+
+	private static final ObjectMapper JSON = new ObjectMapper();
+
 	public InMemoryRunStore() {
 		super(null, new ObjectMapper(), new AiProperties());
+	}
+
+	/**
+	 * 往返模式：{@code pending()} 每次返回经 JSON 往返回来的<b>新对象</b>（真实
+	 * {@code RunStore} 从 Redis 反序列化的语义）。默认关闭以保持既有用例的引用可见性断言；
+	 * 凡"改一份是否影响另一份"不成立的实现（如 P0-1 曾用等待前的旧 pending 取信封）都靠它揭穿。
+	 */
+	public InMemoryRunStore(boolean deepCopyPending) {
+		this();
+		this.deepCopyPending = deepCopyPending;
+	}
+
+	public void setDeepCopyPending(boolean deepCopyPending) {
+		this.deepCopyPending = deepCopyPending;
+	}
+
+	public boolean isDeepCopyPending() {
+		return this.deepCopyPending;
 	}
 
 	// ── 标识与键名（与真实实现的键结构同形） ─────────────────────────────────
@@ -222,7 +246,16 @@ public class InMemoryRunStore extends RunStore {
 
 	@Override
 	public PendingToolCall pending(String runId, String toolCallId) {
-		return pendingTable(runId).get(toolCallId);
+		PendingToolCall stored = pendingTable(runId).get(toolCallId);
+		if (!this.deepCopyPending || stored == null) {
+			return stored;
+		}
+		try {
+			return JSON.readValue(JSON.writeValueAsString(stored), PendingToolCall.class);
+		}
+		catch (Exception ex) {
+			throw new IllegalStateException("待决条目往返序列化失败：" + toolCallId, ex);
+		}
 	}
 
 	// ── 认领与台账 ──────────────────────────────────────────────────────────
@@ -256,6 +289,8 @@ public class InMemoryRunStore extends RunStore {
 		record.put("toolCallId", pending.getToolCallId());
 		record.put("name", pending.getName());
 		record.put("kind", pending.getKind());
+		record.put("outcome", pending.effectiveOutcome().wire());
+		record.put("code", pending.effectiveCode());
 		record.put("resultText", resultText);
 		ledgerList(runId).add(record);
 	}

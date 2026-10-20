@@ -11,7 +11,9 @@ import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ToolMeta;
+import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.ai.tool.ToolRegistry;
+import com.example.configmgr.ai.tool.ToolResultEnvelope;
 import com.example.configmgr.ai.tool.ToolResultLimiter;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -102,9 +104,15 @@ class SpToolCallingManagerScopeGuardTest {
                 response("start_import", "{\"taskId\":7}"));
 
         String modelText = toolText(result);
+        ToolResultEnvelope envelope = ToolResultEnvelope.fromJson(modelText);
         // ① 模型收到结构化错误语义（不是"成功"、也不是空文本）
-        assertThat(modelText).startsWith(SpToolCallingManager.SCOPE_VIOLATION_CODE);
-        assertThat(modelText).contains("未执行").contains("page=tasks");
+        assertThat(envelope.outcome()).isEqualTo(ToolOutcome.BLOCKED.wire());
+        assertThat(envelope.code()).isEqualTo(SpToolCallingManager.SCOPE_VIOLATION_CODE);
+        assertThat(envelope.ok()).isFalse();
+        assertThat(envelope.retryable()).isFalse();
+        assertThat(envelope.target()).containsEntry("taskId", 7);
+        assertThat(envelope.message()).startsWith(SpToolCallingManager.SCOPE_VIOLATION_CODE)
+                .contains("未执行").contains("page=tasks");
         // ② 副作用为零：既不挂确认门，也不认领、不执行、不记台账
         verify(this.gate, never()).awaitDecision(anyString(), any(PendingToolCall.class));
         verify(this.store, never()).claimExecution(anyString(), anyString(), anyString());
@@ -113,9 +121,10 @@ class SpToolCallingManagerScopeGuardTest {
         PendingToolCall saved = capturedPending();
         assertThat(saved.getStatus()).isEqualTo(PendingToolCall.BLOCKED);
         assertThat(saved.getReason()).isEqualTo(SpToolCallingManager.SCOPE_VIOLATION_CODE);
+        assertThat(saved.getOutcome()).isEqualTo(ToolOutcome.BLOCKED.wire());
         assertThat(saved.isExecuted()).isFalse();
-        // ④ 前端帧如实告知"未执行"
-        verify(this.emitter).toolResult(any(PendingToolCall.class), eq(false), eq(false), eq(modelText));
+        // ④ 前端帧如实告知"未执行"（帧 result 仍是原文全文；信封印在模型侧）
+        verify(this.emitter).toolResult(any(PendingToolCall.class), eq(false), eq(false), eq(envelope.message()));
     }
 
     @Test
@@ -162,11 +171,14 @@ class SpToolCallingManagerScopeGuardTest {
                 response("list_tasks", "{}"));
 
         String modelText = toolText(result);
+        ToolResultEnvelope envelope = ToolResultEnvelope.fromJson(modelText);
+        String message = envelope.message();
         // ① 给模型的那一份被截断：只留前 200 行 + 截断标记（原始行数可见）
-        assertThat(modelText).contains(ToolResultLimiter.TRUNCATION_MARKER);
-        assertThat(modelText).contains("原 250 行");
-        assertThat(modelText.lines().count()).isLessThan(big.lines().count());
-        assertThat(modelText).doesNotContain("第 250 行");
+        assertThat(envelope.outcome()).isEqualTo(ToolOutcome.OK.wire());
+        assertThat(message).contains(ToolResultLimiter.TRUNCATION_MARKER);
+        assertThat(message).contains("原 250 行");
+        assertThat(message.lines().count()).isLessThan(big.lines().count());
+        assertThat(message).doesNotContain("第 250 行");
         // ② 给前端的那一份（帧）是全文，未被裁剪
         ArgumentCaptor<String> frameText = ArgumentCaptor.forClass(String.class);
         verify(this.emitter).toolResult(any(PendingToolCall.class), eq(true), eq(true), frameText.capture());

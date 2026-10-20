@@ -6,6 +6,7 @@ import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.session.AiSessionService;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ContextBuilder;
+import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.ai.tool.ToolRegistry;
 import com.example.configmgr.ai.web.AiChatRequest;
 import lombok.extern.slf4j.Slf4j;
@@ -717,6 +718,18 @@ public class ResilientChatService {
 	private static Map<String, Object> toolCallState(PendingToolCall pending, String status) {
 		Map<String, Object> state = new LinkedHashMap<>();
 		state.put("status", status);
+		// P0-1：历史段状态也带统一信封的 outcome/code（新增键，既有 status/kind 等不动）。
+		// M1：未决条目（PENDING/APPROVED）不写 outcome —— 结局尚未产生，写 unknown 会让前端把
+		// "等待中"映射成 failed（unknown→failed 的兜底），盖掉仍是 pending 的卡面。
+		// 缺键 = 前端按 status 展示；只有已决状态才落 outcome。
+		if (!PendingToolCall.PENDING.equals(status) && !PendingToolCall.APPROVED.equals(status)) {
+			ToolOutcome persisted = ToolOutcome.fromWire(pending.getOutcome());
+			state.put("outcome", (persisted == null ? ToolOutcome.fromStatus(status) : persisted).wire());
+		}
+		String code = pending.effectiveCode();
+		if (code != null) {
+			state.put("code", code);
+		}
 		String kind = pending.getKind();
 		if (kind != null && !kind.isBlank()) {
 			state.put("kind", kind);

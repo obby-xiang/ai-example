@@ -2,8 +2,10 @@ package com.example.configmgr.ai.tools;
 
 import com.example.configmgr.ai.tool.ToolChannel;
 import com.example.configmgr.ai.tool.ToolMeta;
+import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.ai.tool.ToolRisk;
 import com.example.configmgr.ai.tool.ToolScope;
+import com.example.configmgr.common.ConflictException;
 import com.example.configmgr.data.service.ConfigDataService;
 import com.example.configmgr.definition.entity.ConfigDefinition;
 import com.example.configmgr.definition.service.DefinitionService;
@@ -89,8 +91,19 @@ public class AiTools {
     @ToolRisk(ToolMeta.RiskLevel.READ)
     public String listConfigDefs(
             @ToolParam(description = "层级过滤：GLOBAL/REGION/PROJECT，不传返回全部", required = false) String level) {
-        List<ConfigDefinition> defs = level != null && !level.isBlank()
-                ? definitionService.findByLevel(ConfigDefinition.ConfigLevel.valueOf(level.toUpperCase()))
+        ConfigDefinition.ConfigLevel parsedLevel = null;
+        if (level != null && !level.isBlank()) {
+            try {
+                parsedLevel = ConfigDefinition.ConfigLevel.valueOf(level.trim().toUpperCase());
+            }
+            catch (IllegalArgumentException e) {
+                // 参数非法不再以字符串回填（那会让 ok=true 与失败文案自相矛盾；同 createTask 手法）
+                throw new ConflictException(ToolOutcome.CODE_ILLEGAL_ARGUMENT,
+                        "配置定义层级不合法：" + level + "（只支持 GLOBAL / REGION / PROJECT）");
+            }
+        }
+        List<ConfigDefinition> defs = parsedLevel != null
+                ? definitionService.findByLevel(parsedLevel)
                 : definitionService.findAll();
         if (defs.isEmpty()) return "没有找到配置定义";
         return defs.stream().map(d ->
@@ -105,27 +118,23 @@ public class AiTools {
     @ToolRisk(ToolMeta.RiskLevel.READ)
     public String getConfigDef(
             @ToolParam(description = "配置定义编码，例如 CURRENCY") String code) {
-        try {
-            ConfigDefinition def = definitionService.findByCode(code);
-            StringBuilder sb = new StringBuilder();
-            sb.append("配置定义: ").append(def.getCode()).append("（").append(def.getName()).append("）\n");
-            sb.append("层级: ").append(def.getLevel()).append("\n");
-            if (def.getDescription() != null) sb.append("说明: ").append(def.getDescription()).append("\n");
-            sb.append("字段:\n");
-            if (def.getFields() != null) {
-                def.getFields().forEach(f -> {
-                    sb.append("  - ").append(f.getCode()).append("（").append(f.getLabel()).append("）")
-                            .append(" 类型:").append(f.getFieldType())
-                            .append(f.isRequired() ? " [必填]" : "")
-                            .append(f.isKey() ? " [主键]" : "")
-                            .append(f.getRefDefCode() != null ? " 引用:" + f.getRefDefCode() : "")
-                            .append("\n");
-                });
-            }
-            return sb.toString();
-        } catch (Exception e) {
-            return "未找到配置定义: " + code;
+        ConfigDefinition def = definitionService.findByCode(code);
+        StringBuilder sb = new StringBuilder();
+        sb.append("配置定义: ").append(def.getCode()).append("（").append(def.getName()).append("）\n");
+        sb.append("层级: ").append(def.getLevel()).append("\n");
+        if (def.getDescription() != null) sb.append("说明: ").append(def.getDescription()).append("\n");
+        sb.append("字段:\n");
+        if (def.getFields() != null) {
+            def.getFields().forEach(f -> {
+                sb.append("  - ").append(f.getCode()).append("（").append(f.getLabel()).append("）")
+                        .append(" 类型:").append(f.getFieldType())
+                        .append(f.isRequired() ? " [必填]" : "")
+                        .append(f.isKey() ? " [主键]" : "")
+                        .append(f.getRefDefCode() != null ? " 引用:" + f.getRefDefCode() : "")
+                        .append("\n");
+            });
         }
+        return sb.toString();
     }
 
     // ==================== 只读：任务与作业 ====================
@@ -166,21 +175,17 @@ public class AiTools {
     public String getWorkspaceState(
             @ToolParam(description = "任务ID", required = false) Long taskId) {
         if (taskId == null) return "当前未打开任何任务，请先创建或选择一个任务";
-        try {
-            Task task = taskService.findById(taskId);
-            StringBuilder sb = new StringBuilder();
-            sb.append("任务 #").append(task.getId()).append(": ").append(task.getTitle()).append("\n");
-            sb.append("类型: ").append(task.getType()).append("，步骤: ").append(task.getCurrentStep())
-                    .append("，状态: ").append(task.getStatus()).append("\n");
-            if (!task.getItems().isEmpty()) {
-                sb.append("配置项: ").append(task.getItems().stream()
-                        .map(i -> i.getDefCode() + "(" + i.getStatus() + ")")
-                        .collect(Collectors.joining(", "))).append("\n");
-            }
-            return sb.toString();
-        } catch (Exception e) {
-            return "任务 #" + taskId + " 不存在或无法访问";
+        Task task = taskService.findById(taskId);
+        StringBuilder sb = new StringBuilder();
+        sb.append("任务 #").append(task.getId()).append(": ").append(task.getTitle()).append("\n");
+        sb.append("类型: ").append(task.getType()).append("，步骤: ").append(task.getCurrentStep())
+                .append("，状态: ").append(task.getStatus()).append("\n");
+        if (!task.getItems().isEmpty()) {
+            sb.append("配置项: ").append(task.getItems().stream()
+                    .map(i -> i.getDefCode() + "(" + i.getStatus() + ")")
+                    .collect(Collectors.joining(", "))).append("\n");
         }
+        return sb.toString();
     }
 
     @Tool(name = "check_job_status", description = "查询作业状态和进度")
@@ -188,14 +193,10 @@ public class AiTools {
     @ToolRisk(ToolMeta.RiskLevel.READ)
     public String checkJobStatus(
             @ToolParam(description = "作业ID") Long jobId) {
-        try {
-            Job job = jobService.findById(jobId);
-            return String.format("作业 #%d [%s] 状态:%s 进度:%d/%d 错误:%d",
-                    job.getId(), job.getJobType(), job.getStatus(),
-                    job.getProgress(), job.getTotal(), job.getErrorCount());
-        } catch (Exception e) {
-            return "查询作业失败: " + e.getMessage();
-        }
+        Job job = jobService.findById(jobId);
+        return String.format("作业 #%d [%s] 状态:%s 进度:%d/%d 错误:%d",
+                job.getId(), job.getJobType(), job.getStatus(),
+                job.getProgress(), job.getTotal(), job.getErrorCount());
     }
 
     @Tool(name = "get_row_count", description = "预估指定配置项的数据行数")
@@ -205,6 +206,8 @@ public class AiTools {
             @ToolParam(description = "配置定义编码") String defCode,
             @ToolParam(description = "范围类型: GLOBAL/REGION/PROJECT", required = false) String scopeType,
             @ToolParam(description = "范围键值（地区或项目编码）", required = false) String scopeKey) {
+        // 先校验配置定义存在：不存在时抛带 RESOURCE_NOT_FOUND 的异常，而不是回"0 行"伪造成功。
+        definitionService.findByCode(defCode);
         long count = dataService.count(defCode, scopeType, scopeKey);
         return String.format("%s 共有 %d 行数据", defCode, count);
     }
@@ -240,18 +243,23 @@ public class AiTools {
     public String createTask(
             @ToolParam(description = "任务类型：EXPORT（导出配置）/ IMPORT（导入配置）") String type,
             @ToolParam(description = "任务标题，不传则按类型生成默认标题", required = false) String title) {
+        Task.TaskType taskType;
         try {
-            Task.TaskType taskType = Task.TaskType.valueOf(type == null ? "" : type.trim().toUpperCase());
-            boolean export = taskType == Task.TaskType.EXPORT;
-            String effectiveTitle = title == null || title.isBlank() ? (export ? "导出任务" : "导入任务") : title.trim();
+            taskType = Task.TaskType.valueOf(type == null ? "" : type.trim().toUpperCase());
+        } catch (IllegalArgumentException e) {
+            // 参数非法不再以字符串回填（那会让 ok=true 与失败文案自相矛盾）
+            throw new ConflictException(ToolOutcome.CODE_ILLEGAL_ARGUMENT,
+                    "任务类型不合法：" + type + "（只支持 EXPORT / IMPORT）");
+        }
+        boolean export = taskType == Task.TaskType.EXPORT;
+        String effectiveTitle = title == null || title.isBlank() ? (export ? "导出任务" : "导入任务") : title.trim();
+        try {
             Task task = taskService.create(taskType, effectiveTitle);
             return String.format(
                     "已创建%s任务 #%d（标题：%s，当前步骤：%s）。下一步：navigate_to(page=\"%s\", taskId=%d) 打开向导，"
                             + "再用 select_definitions 勾选配置项。",
                     export ? "导出" : "导入", task.getId(), task.getTitle(), task.getCurrentStep(),
                     export ? "export" : "import", task.getId());
-        } catch (IllegalArgumentException e) {
-            return "任务类型不合法：" + type + "（只支持 EXPORT / IMPORT）";
         }
         // R-137（T6 重抛面）：写路径失败不再以字符串回填 —— 抛出后由
         // SpToolCallingManager.executeOnce 捕获置 ok=false 呈给模型（恢复框架既有失败通道）
@@ -512,7 +520,9 @@ public class AiTools {
      */
     @Tool(name = "generative_form", description = "在对话内渲染一张结构化表单并等待用户填写/选择（用于向用户收集筛选条件，"
             + "或在信息不足时向用户澄清）；字段类型仅限白名单 text/number/boolean/date/enum/multi_select，"
-            + "禁止 HTML/脚本/自定义属性；用户提交后你会收到字段 key→值的 JSON，用户关闭表单则收到取消终态（无数据）")
+            + "禁止 HTML/脚本/自定义属性。工具结果是统一信封 JSON（outcome/code/retryable/target/message）："
+            + "用户提交后，字段 key→值的 JSON 原文在 message 字段里（读取它，不要把整个信封当表单数据）；"
+            + "用户关闭表单则 outcome=cancelled、无数据；schema 不合规则 outcome=rejected 且表单未下发")
     @ToolScope({ "page:tasks", "task:*" })
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolChannel(ToolMeta.Channel.FRONTEND)

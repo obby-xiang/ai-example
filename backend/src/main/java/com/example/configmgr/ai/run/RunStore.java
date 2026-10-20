@@ -454,6 +454,8 @@ public class RunStore {
 		record.put("toolCallId", pending.getToolCallId());
 		record.put("name", pending.getName());
 		record.put("kind", pending.getKind());
+		record.put("outcome", pending.effectiveOutcome().wire());
+		record.put("code", pending.effectiveCode());
 		record.put("resultText", resultText);
 		try {
 			this.redis.opsForList().rightPush(ledgerKey(runId), this.mapper.writeValueAsString(record));

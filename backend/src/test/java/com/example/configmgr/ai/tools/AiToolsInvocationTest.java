@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.tools;
 
 import com.example.configmgr.common.ConflictException;
+import com.example.configmgr.common.ResourceNotFoundException;
 import com.example.configmgr.data.repo.ConfigDataRowRepository;
 import com.example.configmgr.definition.entity.ConfigDefinition;
 import com.example.configmgr.definition.service.DefinitionService;
@@ -102,7 +103,10 @@ class AiToolsInvocationTest {
     @Test
     void workspaceStateHintsWhenNoTask() {
         assertThat(aiTools.getWorkspaceState(null)).contains("未打开任何任务");
-        assertThat(aiTools.getWorkspaceState(999_999L)).contains("不存在");
+        // P0-1：不存在的任务不再吞成字符串 —— 抛带 RESOURCE_NOT_FOUND 的异常，由信封如实呈给模型
+        assertThatThrownBy(() -> aiTools.getWorkspaceState(999_999L))
+                .isInstanceOf(ResourceNotFoundException.class)
+                .hasMessageContaining("不存在");
 
         Task task = taskService.create(Task.TaskType.EXPORT, "S5A-AI-工作区");
         taskService.selectDefs(task.getId(), List.of(SYS_PARAM));
@@ -131,8 +135,10 @@ class AiToolsInvocationTest {
         assertThat(taskRepository.findById(firstId(importText)).orElseThrow().getCurrentStep())
                 .isEqualTo("UPLOAD");
 
-        // 类型非法 → 工具如实回报，不抛异常打断这一轮
-        assertThat(aiTools.createTask("NOPE", null)).contains("任务类型不合法");
+        // 类型非法 → 抛带 ILLEGAL_ARGUMENT 码的业务异常（由统一信封回填，不再伪造成功文本）
+        assertThatThrownBy(() -> aiTools.createTask("NOPE", null))
+                .isInstanceOf(ConflictException.class)
+                .hasMessageContaining("任务类型不合法");
     }
 
     // ── 用例 4：导出工具链 → 真起作业 → 真落导出文件 ──
@@ -188,8 +194,17 @@ class AiToolsInvocationTest {
     // ── 用例 6：未知配置编码如实回报 ──
 
     @Test
-    void unknownConfigCodeIsReported() {
-        assertThat(aiTools.getConfigDef("NO_SUCH_DEF")).contains("未找到配置定义");
+    void unknownConfigCodeIsReportedAsNotFound() {
+        // P0-1：get_config_def / get_row_count 对不存在的编码抛带码异常（不再返回"未找到"/"0 行"）
+        assertThatThrownBy(() -> aiTools.getConfigDef("NO_SUCH_DEF"))
+                .isInstanceOf(ResourceNotFoundException.class)
+                .hasMessageContaining("不存在: NO_SUCH_DEF");
+        assertThatThrownBy(() -> aiTools.getRowCount("NO_SUCH_DEF", null, null))
+                .isInstanceOf(ResourceNotFoundException.class)
+                .hasMessageContaining("不存在: NO_SUCH_DEF");
+        assertThatThrownBy(() -> aiTools.checkJobStatus(999_999L))
+                .isInstanceOf(ResourceNotFoundException.class)
+                .hasMessageContaining("不存在: 999999");
     }
 
     // ── 用例 7（M1 收尾守卫①的 AI 通道回归）：预检查未通过 → 工具如实回报失败，不起作业 ──

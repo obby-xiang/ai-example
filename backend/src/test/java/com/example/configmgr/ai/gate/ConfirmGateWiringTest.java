@@ -10,7 +10,9 @@ import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.tool.ToolMeta;
+import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.ai.tool.ToolRegistry;
+import com.example.configmgr.ai.tool.ToolResultEnvelope;
 import com.example.configmgr.ai.tool.ToolResultLimiter;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -125,9 +127,13 @@ class ConfirmGateWiringTest {
                 .containsExactly(PendingToolCall.KIND_CONFIRM);
         // ② 确认门被调用（挂起而不是直接执行）
         verify(this.gate).awaitDecision(eq(RUN_ID), any(PendingToolCall.class));
-        // ③ 拒绝 → 未认领执行；回填文本原样进 tool 消息
+        // ③ 拒绝 → 未认领执行；回填的是统一信封，message 为原拒绝文案
         verify(this.store, never()).claimExecution(anyString(), anyString(), anyString());
-        assertThat(toolText(result)).isEqualTo("用户拒绝了该操作，工具未执行。拒绝原因：先不导出");
+        ToolResultEnvelope envelope = ToolResultEnvelope.fromJson(toolText(result));
+        assertThat(envelope.outcome()).isEqualTo(ToolOutcome.REJECTED.wire());
+        assertThat(envelope.ok()).isFalse();
+        assertThat(envelope.target()).containsEntry("taskId", 7);
+        assertThat(envelope.message()).isEqualTo("用户拒绝了该操作，工具未执行。拒绝原因：先不导出");
     }
 
     @Test
@@ -184,7 +190,11 @@ class ConfirmGateWiringTest {
         assertThat(this.fakeStartImport.invocations.get()).as("放行后工具被真实执行").isEqualTo(1);
         verify(this.store).claimExecution(eq(RUN_ID), anyString(), anyString());
         verify(this.store).appendLedger(eq(RUN_ID), any(PendingToolCall.class), anyString());
-        assertThat(toolText(result)).contains("导入作业已启动（作业 #4242）");
+        ToolResultEnvelope envelope = ToolResultEnvelope.fromJson(toolText(result));
+        assertThat(envelope.outcome()).isEqualTo(ToolOutcome.OK.wire());
+        assertThat(envelope.code()).isNull();
+        assertThat(envelope.target()).containsEntry("taskId", 7);
+        assertThat(envelope.message()).contains("导入作业已启动（作业 #4242）");
     }
 
     /**
@@ -199,6 +209,7 @@ class ConfirmGateWiringTest {
         when(this.gate.awaitDecision(eq(RUN_ID), any(PendingToolCall.class))).thenAnswer(invocation -> {
             PendingToolCall pending = invocation.getArgument(1);
             pending.setStatus(PendingToolCall.TIMEOUT);
+            pending.setReason(ToolOutcome.CODE_CONFIRM_TIMEOUT);
             pending.setExecuted(false);
             pending.setResultText("确认等待超过 120 秒，系统已自动取消该操作（工具未执行）。");
             return pending;
@@ -210,7 +221,11 @@ class ConfirmGateWiringTest {
         assertThat(this.fakeStartImport.invocations.get()).as("超时后工具绝不执行").isZero();
         verify(this.store, never()).claimExecution(anyString(), anyString(), anyString());
         verify(this.store, never()).appendLedger(anyString(), any(PendingToolCall.class), anyString());
-        assertThat(toolText(result)).contains("系统已自动取消该操作（工具未执行）");
+        ToolResultEnvelope envelope = ToolResultEnvelope.fromJson(toolText(result));
+        assertThat(envelope.outcome()).isEqualTo(ToolOutcome.TIMEOUT.wire());
+        assertThat(envelope.code()).isEqualTo(ToolOutcome.CODE_CONFIRM_TIMEOUT);
+        assertThat(envelope.retryable()).isFalse();
+        assertThat(envelope.message()).contains("系统已自动取消该操作（工具未执行）");
     }
 
     /**

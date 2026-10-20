@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.tools;
 
 import com.example.configmgr.common.ConflictException;
+import com.example.configmgr.common.ResourceNotFoundException;
 import com.example.configmgr.job.entity.Job;
 import com.example.configmgr.job.repo.JobRepository;
 import com.example.configmgr.task.entity.Task;
@@ -20,10 +21,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * <p><b>T6 重抛面（恢复 ok=false）</b>：createTask 的 Exception 分支 + 四件 start_* 的
  * catch Exception——工具不再以字符串回填失败，改为抛出业务异常（中文文案保留于异常 message），
  * 由 {@code SpToolCallingManager.executeOnce} 的 catch 置 ok=false 呈给模型
- * （"工具执行失败：&lt;message&gt;"，框架既有通道）。
+ * （统一信封 {@code outcome=failed}，message="工具执行失败：&lt;message&gt;"）。
  *
- * <p><b>保留字符串回填 4 处</b>（会审一致反对一刀切）：getConfigDef / getWorkspaceState
- * （读路径 not-found）、checkJobStatus（读路径查询失败）、createTask 的 IAE（参数校验）。
+ * <p><b>P0-1：读路径不再吞错</b>：getConfigDef / getWorkspaceState / checkJobStatus / getRowCount
+ * 的"未找到"抛 {@link ResourceNotFoundException}（带 RESOURCE_NOT_FOUND 码），
+ * createTask 的参数非法抛 {@code ConflictException(ILLEGAL_ARGUMENT)} —— 这些路径以前返回
+ * "未找到…"/"任务类型不合法…"的字符串，模型与帧都读成 success。
  *
  * <p><b>T3 终态拒的 AI 通道形态</b>：终态任务上调 start_* ⇒ ConflictException("TASK_FINALIZED")
  * 透传（executeOnce 呈 ok=false + 文案），REST 侧由 GlobalExceptionHandler 转 409。
@@ -79,20 +82,46 @@ class AiToolsThrowPathTest {
                 .hasMessageContaining("TASK_FINALIZED");
     }
 
-    // ── T6 保留字符串回填 4 处（既有行为回归锁）──
+    // ── P0-1：读路径"未找到"与参数非法都以带码异常浮出（不再吞成字符串） ──
 
     @Test
-    void readPathNotFoundStillReturnsString() {
-        // getConfigDef：不存在的配置定义 → 字符串提示（不抛）
-        assertThat(aiTools.getConfigDef("NO_SUCH_DEF")).contains("未找到配置定义");
-        // getWorkspaceState：不存在的任务 → 字符串提示（不抛）
-        assertThat(aiTools.getWorkspaceState(999999L)).contains("不存在或无法访问");
+    void readPathNotFoundThrowsWithResourceNotFoundCode() {
+        assertThatThrownBy(() -> aiTools.getConfigDef("NO_SUCH_DEF"))
+                .isInstanceOfSatisfying(ResourceNotFoundException.class, ex -> {
+                    assertThat(ex.getCode()).isEqualTo(ResourceNotFoundException.DEFAULT_CODE);
+                    assertThat(ex.getMessage()).contains("不存在: NO_SUCH_DEF");
+                });
+        assertThatThrownBy(() -> aiTools.getWorkspaceState(999999L))
+                .isInstanceOfSatisfying(ResourceNotFoundException.class, ex -> {
+                    assertThat(ex.getCode()).isEqualTo(ResourceNotFoundException.DEFAULT_CODE);
+                    assertThat(ex.getMessage()).contains("任务 不存在: 999999");
+                });
+        assertThatThrownBy(() -> aiTools.checkJobStatus(999999L))
+                .isInstanceOf(ResourceNotFoundException.class)
+                .hasMessageContaining("不存在");
+        assertThatThrownBy(() -> aiTools.getRowCount("NO_SUCH_DEF", null, null))
+                .isInstanceOf(ResourceNotFoundException.class)
+                .hasMessageContaining("不存在");
     }
 
     @Test
-    void createTaskIllegalArgumentStillReturnsString() {
-        // createTask 的 IAE 参数校验分支：字符串回填（不抛）
-        assertThat(aiTools.createTask("NOT_A_TYPE", null)).contains("任务类型不合法");
+    void listConfigDefsIllegalLevelThrowsWithCode() {
+        // M5：非法 level 不再由 enum valueOf 抛裸 IllegalArgumentException（码会退化成
+        // TOOL_EXECUTION_FAILED）；与 createTask 同手法包一层带码的 ConflictException。
+        assertThatThrownBy(() -> aiTools.listConfigDefs("NOT_A_LEVEL"))
+                .isInstanceOfSatisfying(ConflictException.class, ex -> {
+                    assertThat(ex.getCode()).isEqualTo("ILLEGAL_ARGUMENT");
+                    assertThat(ex.getMessage()).contains("配置定义层级不合法").contains("GLOBAL");
+                });
+    }
+
+    @Test
+    void createTaskIllegalArgumentThrowsWithCode() {
+        assertThatThrownBy(() -> aiTools.createTask("NOT_A_TYPE", null))
+                .isInstanceOfSatisfying(ConflictException.class, ex -> {
+                    assertThat(ex.getCode()).isEqualTo("ILLEGAL_ARGUMENT");
+                    assertThat(ex.getMessage()).contains("任务类型不合法");
+                });
     }
 
     // ───────────────────────── helpers ─────────────────────────

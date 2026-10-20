@@ -13,8 +13,11 @@ import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ToolMeta;
+import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.ai.tool.ToolRegistry;
+import com.example.configmgr.ai.tool.ToolResultEnvelope;
 import com.example.configmgr.ai.tool.ToolResultLimiter;
+import com.example.configmgr.common.ConflictException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import org.junit.jupiter.api.AfterEach;
@@ -160,13 +163,62 @@ class ToolFrameSequenceConformanceTest {
 				.containsEntry("approved", true)
 				.containsEntry("status", PendingToolCall.APPROVED);
 		assertThat(FrameContract.oneOfType(frames, "tool_result")).containsEntry("ok", true)
+				.containsEntry("outcome", ToolOutcome.OK.wire())
+				.containsEntry("code", null)
+				.containsEntry("retryable", false)
 				.containsEntry("executed", true)
 				.containsEntry("messageId", "tool-" + CALL_ID);
+		assertThat(FrameContract.oneOfType(frames, "tool_result").get("target"))
+				.as("目标资源从参数 JSON 提取").isEqualTo(Map.of("taskId", 7));
 		// 放行 ⇒ 认领 + 真实执行 + 记台账，恰好一次
 		assertThat(this.fakeStartImport.invocations.get()).isEqualTo(1);
 		assertThat(this.store.claimedBy(RUN_ID, CALL_ID)).isEqualTo(this.store.instanceId());
 		assertThat(this.store.ledger(RUN_ID)).hasSize(1);
-		assertThat(toolText(result)).contains("导入作业已启动（作业 #4242）");
+		ToolResultEnvelope envelope = modelEnvelope(result);
+		assertThat(envelope.outcome()).isEqualTo(ToolOutcome.OK.wire());
+		assertThat(envelope.code()).isNull();
+		assertThat(envelope.target()).isEqualTo(Map.of("taskId", 7));
+		assertThat(envelope.message()).contains("导入作业已启动（作业 #4242）");
+	}
+
+	/**
+	 * I2：真实 Redis 的 {@code pending()} 每次返回反序列化出的<b>新对象</b>；本替身默认返回同一引用，
+	 * 会掩盖"拿等待前那份旧 pending 取信封"的错误（旧对象停在 PENDING → 信封 unknown）。
+	 * 往返模式下首轮执行必须回读结算后的条目，模型信封与帧都得到 ok。
+	 *
+	 * <p>kill：把 {@code SpToolCallingManager} 里结算后的 {@code store.pending(...)} 重读删掉，
+	 * 本用例变红（而普通模式仍绿 —— 这正是需要副本模式的理由）。
+	 */
+	@Test
+	void approvedConfirmPathSettlesEnvelopeWhenStoreReturnsFreshCopies() throws Exception {
+		this.store.setDeepCopyPending(true);
+		try {
+			stubConfirmTool("start_import");
+			SseChatEmitter out = this.registry.of(RUN_ID);
+			FrameWire wire = FrameWire.attachTo(out);
+			out.start(SESSION_ID);
+
+			Future<ConfirmGate.Submission> decision = this.decisionThread.submit(() -> {
+				wire.awaitType("confirm_request", 5000L);
+				return this.gate.submitDecision(RUN_ID, CALL_ID, true, "放行");
+			});
+
+			ToolExecutionResult result = this.manager.executeToolCalls(prompt("start_import", "{\"taskId\":7}"),
+					response("start_import", "{\"taskId\":7}"));
+			assertThat(decision.get(10, TimeUnit.SECONDS).outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
+			out.done(Map.of(), "deepseek-flash", Map.of("cancelled", false));
+
+			ToolResultEnvelope envelope = modelEnvelope(result);
+			assertThat(envelope.outcome()).isEqualTo(ToolOutcome.OK.wire());
+			assertThat(envelope.code()).isNull();
+			assertThat(envelope.message()).contains("导入作业已启动（作业 #4242）");
+			assertThat(FrameContract.oneOfType(wire.frames(), "tool_result")).containsEntry("ok", true)
+					.containsEntry("outcome", ToolOutcome.OK.wire());
+			assertThat(this.store.pending(RUN_ID, CALL_ID).getOutcome()).isEqualTo(ToolOutcome.OK.wire());
+		}
+		finally {
+			this.store.setDeepCopyPending(false);
+		}
 	}
 
 	// ── ⑦ 确认门：拒绝 ──────────────────────────────────────────────────────
@@ -198,12 +250,13 @@ class ToolFrameSequenceConformanceTest {
 				.containsEntry("approved", false)
 				.containsEntry("status", PendingToolCall.REJECTED);
 		assertThat(FrameContract.oneOfType(frames, "tool_result")).containsEntry("ok", false)
+				.containsEntry("outcome", ToolOutcome.REJECTED.wire())
 				.containsEntry("executed", false);
 		// 拒绝 ⇒ 零副作用：不认领、不执行、不记台账，回填给模型的是"未执行 + 原因"
 		assertThat(this.fakeStartImport.invocations.get()).isZero();
 		assertThat(this.store.claimedBy(RUN_ID, CALL_ID)).isNull();
 		assertThat(this.store.ledger(RUN_ID)).isEmpty();
-		assertThat(toolText(result)).contains("用户拒绝了该操作，工具未执行").contains("先不导出");
+		assertThat(modelEnvelope(result).message()).contains("用户拒绝了该操作，工具未执行").contains("先不导出");
 	}
 
 	/** 重复决策（前端双击/重发）必须被拒且<b>不产生第二帧</b>（HTTP 层对应 409 DUPLICATE_TOOL_CALL_ID）。 */
@@ -251,13 +304,17 @@ class ToolFrameSequenceConformanceTest {
 				"done");
 		FrameContract.assertConformant(frames);
 		assertThat(FrameContract.oneOfType(frames, "tool_result")).containsEntry("ok", false)
+				.containsEntry("outcome", ToolOutcome.BLOCKED.wire())
+				.containsEntry("code", SpToolCallingManager.SCOPE_VIOLATION_CODE)
+				.containsEntry("retryable", false)
 				.containsEntry("executed", false)
 				.containsEntry("status", PendingToolCall.BLOCKED);
 		assertThat(this.store.pending(RUN_ID, CALL_ID).getReason())
 				.isEqualTo(SpToolCallingManager.SCOPE_VIOLATION_CODE);
+		assertThat(this.store.pending(RUN_ID, CALL_ID).getOutcome()).isEqualTo(ToolOutcome.BLOCKED.wire());
 		assertThat(this.store.claimedBy(RUN_ID, CALL_ID)).isNull();
 		assertThat(this.store.ledger(RUN_ID)).isEmpty();
-		assertThat(toolText(result)).startsWith(SpToolCallingManager.SCOPE_VIOLATION_CODE);
+		assertThat(modelEnvelope(result).message()).startsWith(SpToolCallingManager.SCOPE_VIOLATION_CODE);
 	}
 
 	// ── ⑥ 前端通道：挂起 → 回灌 → 续跑 ─────────────────────────────────────
@@ -299,8 +356,11 @@ class ToolFrameSequenceConformanceTest {
 		assertThat(this.store.claimedBy(RUN_ID, CALL_ID)).isNull();
 		assertThat(this.store.ledger(RUN_ID)).isEmpty();
 		assertThat(FrameContract.ofType(frames, "tool_result")).isEmpty();
-		// 回灌结果原样回填给模型（续跑用的是同一份文本）
-		assertThat(toolText(result)).isEqualTo(payload);
+		// 回灌结果原样回填给模型的 message（续跑用的是同一份文本）；信封 outcome=ok
+		ToolResultEnvelope envelope = modelEnvelope(result);
+		assertThat(envelope.outcome()).isEqualTo(ToolOutcome.OK.wire());
+		assertThat(envelope.target()).isEqualTo(Map.of("page", "export"));
+		assertThat(envelope.message()).isEqualTo(payload);
 
 		// 幂等：同一 toolCallId 再次回灌 → DUPLICATE，且不再出帧（不重复执行、不重复渲染）
 		ConfirmGate.Submission duplicate = this.gate.submitFrontendResult(RUN_ID, CALL_ID, payload, "retry");
@@ -422,6 +482,79 @@ class ToolFrameSequenceConformanceTest {
 		assertThat(this.fakeStartImport.invocations.get()).isEqualTo(1);
 	}
 
+	// ── ⑦ 失败出口：工具异常浮出为 failed 信封（P0-1） ──────────────────────
+
+	/**
+	 * {@code start_*}} 的业务冲突（{@link ConflictException}）不再被官方执行器吞成
+	 * {@code ok=true} 的文本：{@code alwaysThrow=true} 让它浮出到 executeOnce 的 catch，
+	 * 帧与模型信封同时得到 {@code outcome=failed / code=TASK_FINALIZED}。
+	 */
+	@Test
+	void toolConflictSurfacesAsFailedEnvelopeInFrameAndModelText() {
+		stubConfirmTool("start_import");
+		this.fakeStartImport.failure = new ConflictException("TASK_FINALIZED", "任务已终态，不能启动导入");
+		SseChatEmitter out = this.registry.of(RUN_ID);
+		FrameWire wire = FrameWire.attachTo(out);
+		out.start(SESSION_ID);
+
+		Future<ConfirmGate.Submission> decision = this.decisionThread.submit(() -> {
+			wire.awaitType("confirm_request", 5000L);
+			return this.gate.submitDecision(RUN_ID, CALL_ID, true, "放行");
+		});
+		ToolExecutionResult result;
+		try {
+			result = this.manager.executeToolCalls(prompt("start_import", "{\"taskId\":7}"),
+					response("start_import", "{\"taskId\":7}"));
+			assertThat(decision.get(10, TimeUnit.SECONDS).outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
+		}
+		catch (Exception ex) {
+			throw new AssertionError(ex);
+		}
+		out.done(Map.of(), "deepseek-flash", Map.of("cancelled", false));
+
+		List<Map<String, Object>> frames = wire.frames();
+		assertThat(FrameContract.types(frames)).containsExactly("start", "suspended", "tool_start", "confirm_request",
+				"confirm_decision", "tool_result", "done");
+		FrameContract.assertConformant(frames);
+		Map<String, Object> frame = FrameContract.oneOfType(frames, "tool_result");
+		assertThat(frame).containsEntry("ok", false)
+				.containsEntry("outcome", ToolOutcome.FAILED.wire())
+				.containsEntry("code", "TASK_FINALIZED")
+				.containsEntry("retryable", false);
+		ToolResultEnvelope envelope = modelEnvelope(result);
+		assertThat(envelope.outcome()).isEqualTo(ToolOutcome.FAILED.wire());
+		assertThat(envelope.code()).isEqualTo("TASK_FINALIZED");
+		assertThat(envelope.message()).contains("工具执行失败：").contains("任务已终态");
+		// 失败也记台账（结果文本是事实），且台账带信封
+		assertThat(this.store.ledger(RUN_ID)).hasSize(1);
+		assertThat(this.store.ledger(RUN_ID).get(0)).containsEntry("outcome", ToolOutcome.FAILED.wire())
+				.containsEntry("code", "TASK_FINALIZED");
+	}
+
+	/** 确认超时：帧与模型信封都是 {@code timeout/CONFIRM_TIMEOUT}，且零执行。 */
+	@Test
+	void confirmTimeoutSurfacesAsTimeoutEnvelope() {
+		stubConfirmTool("start_import");
+		this.properties.getHitl().setConfirmTimeout(java.time.Duration.ofSeconds(1));
+		SseChatEmitter out = this.registry.of(RUN_ID);
+		FrameWire wire = FrameWire.attachTo(out);
+		out.start(SESSION_ID);
+
+		ToolExecutionResult result = this.manager.executeToolCalls(prompt("start_import", "{\"taskId\":7}"),
+				response("start_import", "{\"taskId\":7}"));
+		out.done(Map.of(), "deepseek-flash", Map.of("cancelled", false));
+
+		assertThat(this.fakeStartImport.invocations.get()).isZero();
+		Map<String, Object> frame = FrameContract.ofType(wire.frames(), "tool_result").get(0);
+		assertThat(frame).containsEntry("ok", false)
+				.containsEntry("outcome", ToolOutcome.TIMEOUT.wire())
+				.containsEntry("code", ToolOutcome.CODE_CONFIRM_TIMEOUT);
+		ToolResultEnvelope envelope = modelEnvelope(result);
+		assertThat(envelope.outcome()).isEqualTo(ToolOutcome.TIMEOUT.wire());
+		assertThat(envelope.code()).isEqualTo(ToolOutcome.CODE_CONFIRM_TIMEOUT);
+		assertThat(envelope.message()).contains("系统已自动取消该操作（工具未执行）");
+	}
+
 	// ── 桩与辅助 ────────────────────────────────────────────────────────────
 
 	private void stubConfirmTool(String name) {
@@ -457,6 +590,10 @@ class ToolFrameSequenceConformanceTest {
 			.map(org.springframework.ai.chat.messages.ToolResponseMessage.ToolResponse::responseData)
 			.findFirst()
 			.orElseThrow();
+	}
+
+	private static ToolResultEnvelope modelEnvelope(ToolExecutionResult result) {
+		return ToolResultEnvelope.fromJson(toolText(result));
 	}
 
 }

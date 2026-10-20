@@ -5,6 +5,7 @@ import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.gate.SpToolCallingManager;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.tool.AiContext;
+import com.example.configmgr.ai.tool.ToolResultEnvelope;
 import com.example.configmgr.ai.tool.ToolResultLimiter;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -308,14 +309,17 @@ public class ResumeService {
 					PendingToolCall fresh = this.store.pending(runId, item.getToolCallId());
 					PendingToolCall effective = fresh == null ? item : fresh;
 					String text = this.toolCallingManager.resolvePending(runId, prompt, effective);
-					// T2：回填模型前过模型侧上限（台账里仍是全文）
-					responses.add(new ToolResponseMessage.ToolResponse(effective.getToolCallId(),
-							effective.getName(), this.limiter.forModel(text)));
 					// R6 裁决：标签必须在**结算之后**回读 Redis 才算准 ——
 					// executeOnce 的认领/完成是写在 Redis 里的新副本上，传入的 effective 可能仍是旧值
 					// （旧实现因此在"本次刚执行完"时显示 reused(null)）。
 					PendingToolCall settled = this.store.pending(runId, effective.getToolCallId());
-					rebuilt.add(settlementLabel(settled == null ? effective : settled));
+					PendingToolCall source = settled == null ? effective : settled;
+					// T2 + P0-1：续跑重建的 role:tool 与首轮同形 —— 统一信封 JSON，message 先裁剪再组装
+					responses.add(new ToolResponseMessage.ToolResponse(effective.getToolCallId(),
+							effective.getName(),
+							ToolResultEnvelope.of(source.effectiveOutcome(), source.effectiveCode(), text,
+									effective.getArguments()).toModelJson(this.limiter)));
+					rebuilt.add(settlementLabel(source));
 				}
 				history.add(ToolResponseMessage.builder().responses(responses).build());
 				snapshot.setMessageJson(this.codec.serializeAll(history));

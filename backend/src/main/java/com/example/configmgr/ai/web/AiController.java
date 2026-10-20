@@ -21,6 +21,7 @@ import com.example.configmgr.ai.session.SessionGate;
 import com.example.configmgr.ai.tool.FrontendToolGuard;
 import com.example.configmgr.common.ApiResponse;
 import com.example.configmgr.job.service.JobWatchdog;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.memory.ChatMemory;
@@ -258,7 +259,7 @@ public class AiController {
 		}
 		boolean cancelled = Boolean.TRUE.equals(request.cancelled());
 		ConfirmGate.Submission submission = this.confirmGate.submitFrontendResult(request.runId(),
-				request.toolCallId(), request.result(), request.source(), cancelled);
+				request.toolCallId(), request.result(), request.source(), cancelled, request.outcome());
 		if (submission.outcome() == ConfirmGate.Outcome.NOT_FOUND) {
 			return json(HttpStatus.CONFLICT, unknownToolCall(request.runId(), request.toolCallId()));
 		}
@@ -561,13 +562,51 @@ public class AiController {
 			}
 		}
 		if (message instanceof ToolResponseMessage toolResponse) {
-			item.put("toolResponses", toolResponse.getResponses());
+			item.put("toolResponses", historyToolResponses(toolResponse));
 		}
 		Object timestamp = message.getMetadata().get(MessageJsonCodec.FIELD_TIMESTAMP);
 		if (timestamp != null) {
 			item.put("timestamp", timestamp);
 		}
 		return item;
+	}
+
+	/**
+	 * 历史通道的信封解包（P0-1）：模型记忆里 {@code role:tool} 继续带信封 JSON（续跑与首轮同形），
+	 * 但 {@code /history} 是<b>回显给人/前端</b>的通道 —— 前端按 {@code responseData} 渲染工具结果原文，
+	 * 直接透传信封会让卡片里出现一整段 {@code {"ok":...}}。因此这里只暴露 {@code message} 字段原文；
+	 * 旧数据（不是信封）原样透传，前端历史形态不变。
+	 */
+	private List<Map<String, Object>> historyToolResponses(ToolResponseMessage message) {
+		List<Map<String, Object>> out = new ArrayList<>(message.getResponses().size());
+		for (ToolResponseMessage.ToolResponse response : message.getResponses()) {
+			Map<String, Object> item = new LinkedHashMap<>();
+			item.put("id", response.id());
+			item.put("name", response.name());
+			item.put("responseData", unwrapEnvelope(response.responseData()));
+			out.add(item);
+		}
+		return out;
+	}
+
+	/** 信封 JSON → {@code message} 原文；识别不了（旧数据/普通 JSON 结果）一律原样返回。 */
+	private String unwrapEnvelope(String responseData) {
+		if (responseData == null || !responseData.trim().startsWith("{")) {
+			return responseData;
+		}
+		try {
+			JsonNode node = this.objectMapper.readTree(responseData);
+			// 三键同现才当信封（outcome + retryable + message）：避免把"恰好也有 outcome/message
+			// 字段的普通工具 JSON 结果"误判成信封而吞掉原数据。
+			if (node != null && node.isObject() && node.path("outcome").isTextual()
+					&& node.path("retryable").isBoolean() && node.path("message").isTextual()) {
+				return node.path("message").asText();
+			}
+		}
+		catch (Exception ex) {
+			log.debug("历史工具结果不是可解析的信封 JSON，按原文透传：{}", ex.getMessage());
+		}
+		return responseData;
 	}
 
 	/**
