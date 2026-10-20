@@ -31,6 +31,7 @@ import reactor.core.publisher.Flux;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executors;
@@ -245,10 +246,24 @@ class EmptyReplyTerminalTest {
 		return wire;
 	}
 
-	/** 客户端视角的完整帧流 = 归档状态帧 ∪ 实时 delta（与前端实际持有的帧集一致）。 */
+	/**
+	 * <b>客户端最终持有的完整帧流</b> = 归档帧 ∪ 实时流帧，按 seq 归并去重。
+	 *
+	 * <p>
+	 * B1（2026-10-20）起 delta 也入档，归档本身就是客户端完整流的超集；这里仍按 seq
+	 * 去重合并（归档优先），于是"归档与实时两条通道给的是同一份帧"这一点也被顺带锁住。
+	 */
 	private List<Map<String, Object>> clientView(FrameWire wire) {
-		List<Map<String, Object>> all = new ArrayList<>(FrameWire.normalize(this.store.events(RUN_ID)));
-		all.addAll(FrameContract.ofType(wire.frames(), "delta"));
+		Map<Long, Map<String, Object>> bySeq = new LinkedHashMap<>();
+		for (Map<String, Object> frame : FrameWire.normalize(this.store.events(RUN_ID))) {
+			bySeq.putIfAbsent(((Number) frame.get("seq")).longValue(), frame);
+		}
+		for (Map<String, Object> frame : wire.frames()) {
+			if (frame.get("seq") instanceof Number number) {
+				bySeq.putIfAbsent(number.longValue(), frame);
+			}
+		}
+		List<Map<String, Object>> all = new ArrayList<>(bySeq.values());
 		all.sort(Comparator.comparingLong(frame -> ((Number) frame.get("seq")).longValue()));
 		return all;
 	}

@@ -475,6 +475,12 @@ export interface StreamCloseInfo {
   reconnects: number
   /** 断流原因文案 */
   reason?: string
+  /**
+   * B1（2026-10-20 挂起即断）：本次收尾是**挂起**导致的服务端主动收流（正常收尾），
+   * 不是断流。判据 = 本连接已收到 `confirm_request` / `frontend_tool_request` 之后连接关闭。
+   * 调用方据此不置 `streamInterrupted`、不报「结果可能不完整」；卡仍待用户决策。
+   */
+  suspended?: boolean
 }
 
 /** 前端开发期读取 Spring AI 历史时使用的宽松消息快照（供对账比较）。 */

@@ -35,8 +35,10 @@ import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.ai.tool.method.MethodToolCallbackProvider;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -154,7 +156,7 @@ class ToolFrameSequenceConformanceTest {
 		// 工具落定后由服务层收尾（与 ResilientChatService.finish 同序）
 		out.done(Map.of(), "deepseek-flash", Map.of("cancelled", false));
 
-		List<Map<String, Object>> frames = wire.frames();
+		List<Map<String, Object>> frames = clientView(wire);
 		List<String> types = FrameContract.types(frames);
 		// 全序确定性（S5c-6 修复后）：回执帧一定先于它唤起的后果帧
 		assertThat(types).containsExactly("start", "suspended", "tool_start", "confirm_request", "confirm_decision",
@@ -215,7 +217,7 @@ class ToolFrameSequenceConformanceTest {
 			assertThat(envelope.outcome()).isEqualTo(ToolOutcome.OK.wire());
 			assertThat(envelope.code()).isNull();
 			assertThat(envelope.message()).contains("导入作业已启动（作业 #4242）");
-			assertThat(FrameContract.oneOfType(wire.frames(), "tool_result")).containsEntry("ok", true)
+			assertThat(FrameContract.oneOfType(clientView(wire), "tool_result")).containsEntry("ok", true)
 					.containsEntry("outcome", ToolOutcome.OK.wire());
 			assertThat(this.store.pending(RUN_ID, CALL_ID).getOutcome()).isEqualTo(ToolOutcome.OK.wire());
 		}
@@ -243,7 +245,7 @@ class ToolFrameSequenceConformanceTest {
 		assertThat(decision.get(10, TimeUnit.SECONDS).outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
 		out.done(Map.of(), "deepseek-flash", Map.of("cancelled", false));
 
-		List<Map<String, Object>> frames = wire.frames();
+		List<Map<String, Object>> frames = clientView(wire);
 		List<String> types = FrameContract.types(frames);
 		assertThat(types).containsExactly("start", "suspended", "tool_start", "confirm_request", "confirm_decision",
 				"tool_result", "done");
@@ -281,9 +283,9 @@ class ToolFrameSequenceConformanceTest {
 		ConfirmGate.Submission second = decision.get(10, TimeUnit.SECONDS);
 
 		assertThat(second.outcome()).isEqualTo(ConfirmGate.Outcome.DUPLICATE);
-		assertThat(FrameContract.ofType(wire.frames(), "confirm_decision")).as("确认回执恰好一帧（重复决策不再回执）")
+		assertThat(FrameContract.ofType(clientView(wire), "confirm_decision")).as("确认回执恰好一帧（重复决策不再回执）")
 				.hasSize(1);
-		assertThat(FrameContract.ofType(wire.frames(), "tool_result")).hasSize(1);
+		assertThat(FrameContract.ofType(clientView(wire), "tool_result")).hasSize(1);
 		assertThat(this.fakeStartImport.invocations.get()).as("重复决策不得二次执行").isEqualTo(1);
 		assertThat(this.store.ledger(RUN_ID)).hasSize(1);
 	}
@@ -302,7 +304,7 @@ class ToolFrameSequenceConformanceTest {
 				response("start_import", "{\"taskId\":7}"));
 		out.done(Map.of(), "deepseek-flash", Map.of("cancelled", false));
 
-		List<Map<String, Object>> frames = wire.frames();
+		List<Map<String, Object>> frames = clientView(wire);
 		assertThat(FrameContract.types(frames)).containsExactly("start", "suspended", "tool_start", "tool_result",
 				"done");
 		FrameContract.assertConformant(frames);
@@ -338,13 +340,13 @@ class ToolFrameSequenceConformanceTest {
 		ToolExecutionResult result = this.manager.executeToolCalls(prompt("navigate_to", "{\"page\":\"export\"}"),
 				response("navigate_to", "{\"page\":\"export\"}"));
 		assertThat(backfill.get(10, TimeUnit.SECONDS).outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
-		// 回灌帧由提交线程发出：等它落到线上再收尾（S5c-6 修复后回灌帧必然先于后果帧，
-		// 这里保留等待是为了让"终帧"在帧线上确定地排在最后）
-		wire.awaitType("frontend_tool_result", 5000L);
+		// 回灌帧由提交线程发出：等它**落档**再收尾（B1 起该帧只进归档 —— 决策后重连时差量补回；
+		// 这里保留等待是为了让"终帧"在帧序里确定地排在最后）
+		awaitArchived("frontend_tool_result", 5000L);
 		out.done(Map.of(), "deepseek-flash", Map.of("cancelled", false));
-		int framesAfterTerminal = wire.size();
+		int framesAfterTerminal = this.store.events(RUN_ID).size();
 
-		List<Map<String, Object>> frames = wire.frames();
+		List<Map<String, Object>> frames = clientView(wire);
 		assertThat(FrameContract.types(frames)).containsExactly("start", "suspended", "tool_start",
 				"frontend_tool_request", "frontend_tool_result", "done");
 		FrameContract.assertConformant(frames);
@@ -368,7 +370,7 @@ class ToolFrameSequenceConformanceTest {
 		// 幂等：同一 toolCallId 再次回灌 → DUPLICATE，且不再出帧（不重复执行、不重复渲染）
 		ConfirmGate.Submission duplicate = this.gate.submitFrontendResult(RUN_ID, CALL_ID, payload, "retry");
 		assertThat(duplicate.outcome()).isEqualTo(ConfirmGate.Outcome.DUPLICATE);
-		assertThat(wire.size()).as("重复回灌不再产生任何帧").isEqualTo(framesAfterTerminal);
+		assertThat(this.store.events(RUN_ID)).as("重复回灌不再产生任何帧").hasSize(framesAfterTerminal);
 		assertThat(this.store.pending(RUN_ID, CALL_ID).getStatus()).isEqualTo(PendingToolCall.FRONTEND_RESULT);
 	}
 
@@ -396,7 +398,7 @@ class ToolFrameSequenceConformanceTest {
 		this.manager.executeToolCalls(prompt("list_tasks", "{}"), new ChatResponse(List.of(new Generation(assistant))));
 		out.done(Map.of(), "deepseek-flash", Map.of("cancelled", false));
 
-		List<Map<String, Object>> frames = wire.frames();
+		List<Map<String, Object>> frames = clientView(wire);
 		assertThat(FrameContract.types(frames)).containsExactly("start", "suspended", "tool_start", "tool_result",
 				"tool_start", "tool_result", "done");
 		FrameContract.assertConformant(frames);
@@ -439,7 +441,7 @@ class ToolFrameSequenceConformanceTest {
 						new AssistantMessage.ToolCall("call-j", "function", "start_export", "{\"taskId\":9}")));
 		out.done(Map.of(), "deepseek-flash", Map.of("cancelled", false));
 
-		List<Map<String, Object>> frames = wire.frames();
+		List<Map<String, Object>> frames = clientView(wire);
 		assertThat(FrameContract.types(frames)).containsExactly("start", "suspended", "tool_start", "tool_result",
 				"tool_result", "done");
 		// 全链路帧序合规：skipped 的 tool_result 没有 tool_start 是合法的
@@ -498,11 +500,15 @@ class ToolFrameSequenceConformanceTest {
 		stubConfirmTool("start_import");
 		CountDownLatch receiptInSend = new CountDownLatch(1);
 		CountDownLatch releaseReceipt = new CountDownLatch(1);
+		SseChatEmitter out = this.registry.of(RUN_ID);
+		// 首条连接：收挂起公告与卡面请求帧，随后被服务端主动收流（B1 裁决 1）
+		FrameWire first = FrameWire.attachTo(out);
+		out.start(SESSION_ID);
+		// 决策后重连那条连接：回执帧的写出在这里被拖住（模拟慢订阅者 / 慢网络）
 		FrameWire wire = new FrameWire(payload -> {
 			if (payload.contains("confirm_decision")) {
 				receiptInSend.countDown();
 				try {
-					// 回执帧的写出被拖住（模拟慢订阅者 / 慢网络）：此刻它还没"到达"
 					releaseReceipt.await(5, TimeUnit.SECONDS);
 				}
 				catch (InterruptedException ex) {
@@ -510,12 +516,11 @@ class ToolFrameSequenceConformanceTest {
 				}
 			}
 		});
-		SseChatEmitter out = this.registry.of(RUN_ID);
-		out.attach(wire.emitter());
-		out.start(SESSION_ID);
 
 		Future<ConfirmGate.Submission> decision = this.decisionThread.submit(() -> {
-			wire.awaitType("confirm_request", 5000L);
+			first.awaitType("confirm_request", 5000L);
+			// B1：前端的"决策后重连"——先挂回同一轮（带 lastSeq 只收差量），再提交决策
+			out.replayAndAttach(wire.emitter(), maxSeqOf(first), false);
 			return this.gate.submitDecision(RUN_ID, CALL_ID, true, "放行");
 		});
 		ExecutorService runThread = Executors.newSingleThreadExecutor(runnable -> {
@@ -541,7 +546,7 @@ class ToolFrameSequenceConformanceTest {
 			runThread.shutdownNow();
 		}
 
-		List<Map<String, Object>> frames = wire.frames();
+		List<Map<String, Object>> frames = clientView(first, wire);
 		assertThat(FrameContract.types(frames)).as("回执帧先于后果帧，且终帧之后无帧")
 				.containsExactly("start", "suspended", "tool_start", "confirm_request", "confirm_decision",
 						"tool_result", "done");
@@ -579,7 +584,7 @@ class ToolFrameSequenceConformanceTest {
 		}
 		out.done(Map.of(), "deepseek-flash", Map.of("cancelled", false));
 
-		List<Map<String, Object>> frames = wire.frames();
+		List<Map<String, Object>> frames = clientView(wire);
 		assertThat(FrameContract.types(frames)).containsExactly("start", "suspended", "tool_start", "confirm_request",
 				"confirm_decision", "tool_result", "done");
 		FrameContract.assertConformant(frames);
@@ -639,7 +644,7 @@ class ToolFrameSequenceConformanceTest {
 		}
 		out.done(Map.of(), "deepseek-flash", Map.of("cancelled", false));
 
-		List<Map<String, Object>> frames = wire.frames();
+		List<Map<String, Object>> frames = clientView(wire);
 		List<Map<String, Object>> business = frames.stream()
 			.filter(frame -> !FrameContract.HEARTBEAT.equals(frame.get("type")))
 			.toList();
@@ -696,6 +701,66 @@ class ToolFrameSequenceConformanceTest {
 	private void stubConfirmTool(String name) {
 		when(this.toolRegistry.channelOf(name)).thenReturn(ToolMeta.Channel.BACKEND);
 		when(this.toolRegistry.riskOf(name)).thenReturn(ToolMeta.RiskLevel.DANGER);
+	}
+
+	/**
+	 * <b>B1（2026-10-20 挂起即断）：客户端眼里的完整帧流</b> = 各条连接收到的帧 ∪ 归档帧，
+	 * 按 {@code seq} 归并去重（同号以线上收到的原文为准）。
+	 *
+	 * <p>
+	 * 为什么必须这样断言：确认卡/表单卡请求帧送达后服务端<b>主动收流</b>（裁决 1），
+	 * 决策之后的帧（{@code confirm_decision} / {@code tool_result} / {@code done}）只进归档；
+	 * 前端在决策成功后带 {@code ?lastSeq} 重连，拿到的正是"差量回放 + 续收"。
+	 * 于是"客户端最终持有的那条流"= 首条连接 + 重连差量，本方法把归档补进来等价复刻这一视角
+	 * （{@link #clientView(FrameWire...)} 也接受重连连接的帧线）。
+	 *
+	 * <p>
+	 * 心跳（无业务 {@code seq}）不参与帧序契约，直接剔除（T7：心跳不占业务号、不入档）。
+	 */
+	private List<Map<String, Object>> clientView(FrameWire... wires) {
+		Map<Long, Map<String, Object>> bySeq = new TreeMap<>();
+		for (FrameWire wire : wires) {
+			for (Map<String, Object> frame : wire.frames()) {
+				if (frame.get("seq") instanceof Number number) {
+					bySeq.putIfAbsent(number.longValue(), frame);
+				}
+			}
+		}
+		for (Map<String, Object> frame : FrameWire.normalize(this.store.events(RUN_ID))) {
+			if (frame.get("seq") instanceof Number number) {
+				bySeq.putIfAbsent(number.longValue(), frame);
+			}
+		}
+		return new ArrayList<>(bySeq.values());
+	}
+
+	/** 某条帧线已收到的最大业务序号（前端的 lastSeq 锚点）。 */
+	private static long maxSeqOf(FrameWire wire) {
+		long max = 0L;
+		for (Map<String, Object> frame : wire.frames()) {
+			if (frame.get("seq") instanceof Number number) {
+				max = Math.max(max, number.longValue());
+			}
+		}
+		return max;
+	}
+
+	/** 等某类帧落档（B1：挂起收流后的帧只进归档，重连时差量补回）。 */
+	private void awaitArchived(String type, long timeoutMillis) {
+		long deadline = System.currentTimeMillis() + timeoutMillis;
+		while (System.currentTimeMillis() < deadline) {
+			if (this.store.archivedTypes(RUN_ID).contains(type)) {
+				return;
+			}
+			try {
+				Thread.sleep(20L);
+			}
+			catch (InterruptedException ex) {
+				Thread.currentThread().interrupt();
+				break;
+			}
+		}
+		throw new IllegalStateException("等待落档超时：" + type + "（已归档 " + this.store.archivedTypes(RUN_ID) + "）");
 	}
 
 	private Prompt prompt(String tool, String args) {

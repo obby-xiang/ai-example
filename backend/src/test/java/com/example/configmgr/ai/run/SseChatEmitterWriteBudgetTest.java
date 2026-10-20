@@ -221,10 +221,11 @@ class SseChatEmitterWriteBudgetTest {
 		assertThat(live.get(2)).as("confirm_request 无到期时刻").doesNotContainKey("expiresAt")
 				.doesNotContainKey("timeoutSeconds");
 
-		// T4-3：归档（start / confirm_request / done）与实时投递帧取的是同一个 atMs
+		// T4-3：归档（start / delta / confirm_request / done；B1 起 delta 入档）与实时投递帧
+		// 取的是同一个 atMs
 		List<Map<String, Object>> archived = FrameWire.normalize(store.events(RUN_ID));
 		assertThat(archived).extracting(frame -> frame.get("type"))
-				.containsExactly("start", "confirm_request", "done");
+				.containsExactly("start", "delta", "confirm_request", "done");
 		for (Map<String, Object> archivedFrame : archived) {
 			long seq = ((Number) archivedFrame.get("seq")).longValue();
 			Map<String, Object> liveFrame = live.stream()

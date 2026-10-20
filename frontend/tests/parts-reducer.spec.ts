@@ -35,7 +35,9 @@ const api = vi.hoisted(() => ({
   deleteHistory: vi.fn(),
   frontendToolResult: vi.fn(),
   confirm: vi.fn(),
-  chat: vi.fn()
+  chat: vi.fn(),
+  // B1（2026-10-20）：决策后重连收流会调 reattachRun —— 桩件保持"在跑"（永不结算）
+  reattachRun: vi.fn(() => new Promise(() => {}))
 }))
 
 vi.mock('@/api/ai', () => ({ aiApi: api }))

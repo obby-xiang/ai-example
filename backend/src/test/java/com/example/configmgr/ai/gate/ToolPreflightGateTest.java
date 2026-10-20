@@ -35,9 +35,11 @@ import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.ai.tool.method.MethodToolCallbackProvider;
 import org.springframework.ai.model.tool.ToolExecutionResult;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -195,7 +197,7 @@ class ToolPreflightGateTest {
 		decision.get(10, TimeUnit.SECONDS);
 		finish();
 
-		List<Map<String, Object>> frames = wire.frames();
+		List<Map<String, Object>> frames = clientView(wire);
 		assertThat(FrameContract.types(frames)).containsExactly("start", "suspended", "tool_start",
 				"confirm_request", "confirm_decision", "tool_result", "done");
 		FrameContract.assertConformant(frames);
@@ -337,6 +339,27 @@ class ToolPreflightGateTest {
 		FrameWire wire = FrameWire.attachTo(out);
 		out.start(SESSION_ID);
 		return wire;
+	}
+
+	/**
+	 * B1（2026-10-20 挂起即断）：客户端眼里的完整帧流 = 连接收到的帧 ∪ 归档帧（按 seq 归并去重）。
+	 *
+	 * <p>确认卡请求帧送达后服务端主动收流，决策之后的 {@code confirm_decision} / {@code tool_result}
+	 * 只进归档；前端在决策后带 {@code ?lastSeq} 重连把它补回来 —— 本方法等价复刻这一视角。
+	 */
+	private List<Map<String, Object>> clientView(FrameWire wire) {
+		Map<Long, Map<String, Object>> bySeq = new TreeMap<>();
+		for (Map<String, Object> frame : wire.frames()) {
+			if (frame.get("seq") instanceof Number number) {
+				bySeq.putIfAbsent(number.longValue(), frame);
+			}
+		}
+		for (Map<String, Object> frame : FrameWire.normalize(this.store.events(RUN_ID))) {
+			if (frame.get("seq") instanceof Number number) {
+				bySeq.putIfAbsent(number.longValue(), frame);
+			}
+		}
+		return new ArrayList<>(bySeq.values());
 	}
 
 	private void finish() {

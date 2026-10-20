@@ -31,6 +31,7 @@ import reactor.core.publisher.Flux;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executors;
@@ -144,11 +145,13 @@ class ChatTurnFrameSequenceConformanceTest {
 		assertThat(FrameContract.oneOfType(frames, "done")).containsEntry("cancelled", false)
 				.containsEntry("attempts", 1L)
 				.containsEntry("terminalSignal", "finishReason=stop");
-		// 重挂回放能把整轮拼回来（回放跳过 delta，但状态帧齐全）
+		// 重挂回放能把整轮拼回来（B1 起回放也含 delta ⇒ 正文可经差量补回）
 		FrameWire reattached = new FrameWire();
 		this.registry.of(RUN_ID).replayTo(reattached.emitter(), null);
-		assertThat(FrameContract.types(reattached.frames())).containsExactly("start", "message_start", "message_end",
-				"done");
+		assertThat(FrameContract.types(reattached.frames())).containsExactly("start", "message_start", "delta",
+				"delta", "message_end", "done");
+		assertThat(concatenatedDeltas(reattached.frames())).as("回放拼接的正文与落定正文一致")
+				.isEqualTo("你好，世界");
 	}
 
 	// ── ④ 断开重试 → error 终帧 ─────────────────────────────────────────────
@@ -287,8 +290,7 @@ class ChatTurnFrameSequenceConformanceTest {
 	}
 
 	/**
-	 * <b>客户端最终持有的完整帧流</b> = 归档回放的状态帧（首轮的 start 等历史帧 + 本轮状态帧，
-	 * 重挂时回放）∪ 实时流上收到的 delta，按 seq 归并。
+	 * <b>客户端最终持有的完整帧流</b> = 归档帧 ∪ 实时流帧，按 seq 归并去重（归档优先）。
 	 *
 	 * <p>
 	 * 续跑轮<b>不重发 {@code start}</b>（首包归属首轮，早已在归档里；前端靠重挂回放拿到），
@@ -296,13 +298,20 @@ class ChatTurnFrameSequenceConformanceTest {
 	 * 这恰好也是不变量⑤"回放 + 实时拼得完整一轮"在编排层的形态。
 	 *
 	 * <p>
-	 * <b>T3-2 修订</b>：delta 帧跳过归档后，归档不再是"客户端完整流"的超集 —— delta 只在
-	 * 实时流上存在（回放从来不发 delta，前端正文渲染靠实时拼接）。于是本方法从
-	 * "纯归档视角"改为"归档状态帧 + 实时 delta"的归并视角，与前端实际持有的帧集一致。
+	 * <b>B1 修订（2026-10-20）</b>：delta 入档后归档本身就是客户端完整流的超集，于是本方法
+	 * 按 seq 去重合并两条通道 —— 顺带把"归档帧与实时投递帧是同一份帧"这条也锁进断言。
 	 */
 	private List<Map<String, Object>> clientView(FrameWire wire) {
-		List<Map<String, Object>> all = new ArrayList<>(FrameWire.normalize(this.store.events(RUN_ID)));
-		all.addAll(FrameContract.ofType(wire.frames(), "delta"));
+		Map<Long, Map<String, Object>> bySeq = new LinkedHashMap<>();
+		for (Map<String, Object> frame : FrameWire.normalize(this.store.events(RUN_ID))) {
+			bySeq.putIfAbsent(((Number) frame.get("seq")).longValue(), frame);
+		}
+		for (Map<String, Object> frame : wire.frames()) {
+			if (frame.get("seq") instanceof Number number) {
+				bySeq.putIfAbsent(number.longValue(), frame);
+			}
+		}
+		List<Map<String, Object>> all = new ArrayList<>(bySeq.values());
 		all.sort(Comparator.comparingLong(frame -> ((Number) frame.get("seq")).longValue()));
 		return all;
 	}

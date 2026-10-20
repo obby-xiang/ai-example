@@ -24,9 +24,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <li>回放 seq 无洞（超限帧照旧占号）。</li>
  * </ol>
  *
- * <p>观测面说明：{@code delta} 帧自 T3-2 起<b>不入归档</b>（与心跳同待遇），故 {@code text} 字段的
- * 断言走"投递给订阅者的负载原文"（{@link FrameWire#payloads()}）；{@code result} 字段的断言可直接
- * 打在归档上（{@code tool_result} 帧入档）。两条通道都过同一个截断点（{@code emit} 锁内）。
+ * <p>观测面说明：B1（2026-10-20）起 {@code delta} 也入归档，但 {@code text} 字段的断言仍走
+ * "投递给订阅者的负载原文"（{@link FrameWire#payloads()}）—— 实时与归档两条通道共用同一个
+ * 截断点（{@code emit} 锁内），断言哪一条都等价，这里保留原观测面以免掩盖投递侧回归；
+ * {@code result} 字段的断言直接打在归档上（{@code tool_result} 帧入档）。
  */
 class SseFrameSizeLimitTest {
 
@@ -103,7 +104,10 @@ class SseFrameSizeLimitTest {
 		this.out.delta(text);
 		this.out.toolResult(pending("call-1"), true, false, "{\"ok\":true}");
 
-		Map<String, Object> archived = this.store.events(RUN_ID).get(0);
+		Map<String, Object> archived = this.store.events(RUN_ID).stream()
+				.filter(frame -> "tool_result".equals(frame.get("type")))
+				.findFirst()
+				.orElseThrow();
 		assertThat(archived.get("result")).as("值原样").isEqualTo("{\"ok\":true}");
 		assertThat(archived).as("不挂标记（没有截断发生）")
 				.doesNotContainKey(FrameSizeLimiter.TRUNCATED_FIELD)

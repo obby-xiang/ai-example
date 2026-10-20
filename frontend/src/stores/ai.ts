@@ -64,6 +64,17 @@ let currentAbort: AbortController | null = null
 let activeRoundHostId: string | null = null
 
 /**
+ * 轮次纪元（B1 收口修 C-1）：**真正换轮**才递增 —— `send()` 起新轮、`reattachActive()` 重挂到
+ * 既有轮、`adoptFreshSession()` 换会话、`stop()` 取消本轮。
+ *
+ * 与 `currentAbort` 的分工：后者是**连接**身份，挂起收流（服务端主动收流 → `finally` 置 null）
+ * 与决策后的同轮重连（`resumeSnapshotStream` 换 controller）都会换掉/清掉它，但那一轮**并未结束**
+ * ——在途前端工具的结局仍属于本轮，必须照常写段终态并回灌。因此 `runFrontendTool` 的"晚到结局
+ * 丢弃"守卫比对本纪元，而不是比对 controller 引用；上列四个换轮入口之外的任何路径都不得递增。
+ */
+let roundEpoch = 0
+
+/**
  * R-166（口径③）：409 幂等拒绝后**等待真实裁决**的宽限（毫秒）—— 到点仍未收到结局帧，
  * 就拉一次 `GET /api/ai/runs/current` 校正（见 `syncGateFromAuthority`）。
  * 取值 3s：挂起期心跳节拍 2s，结局帧与决策同锁发出（`ConfirmGate.submitDecision` 的
@@ -1347,6 +1358,8 @@ export const useAiStore = defineStore('ai', {
      * lastSeq = archiveMaxSeq：服务端只补发增量帧，禁全量回放（红队 A1/A3/B3）。
      */
     async resumeSnapshotStream(runId: string, lastSeq: number, hostMessageId: string): Promise<void> {
+      // B1 收口修（C-1）：本入口是**同一轮**的续收连接（挂起收流 → 决策后重连 / 刷新恢复），
+      // 慢前端工具的结局仍属于本轮 ⇒ 不递增 `roundEpoch`（否则工具回灌会在重连后被误丢）。
       const previous = currentAbort
       this.runSeq[runId] = Math.max(this.runSeq[runId] ?? 0, lastSeq)
       this.loading = true
@@ -1379,6 +1392,11 @@ export const useAiStore = defineStore('ai', {
                 return
               }
               // 苞 B 项 3：用户主动停止不报断流（同 send 的守卫；重挂/续收路径同样适用）
+              // B1（裁决 8）：挂起导致的服务端收流同样是正常收尾（多卡批次里第 2 张卡
+              // 送达后就会再断一次；此时不提示"结果可能不完整"）。
+              if (info.suspended) {
+                return
+              }
               if (!info.terminal && !this.stopped) {
                 this.streamInterrupted = true
                 this.lastRoundOutcome = 'interrupted'
@@ -1396,6 +1414,33 @@ export const useAiStore = defineStore('ai', {
           activeRoundHostId = null
         }
       }
+    },
+
+    /**
+     * B1（2026-10-20 裁决 9）：**决策 / 回灌之后带 lastSeq 重连收流**。
+     *
+     * <p>
+     * 挂起即断（裁决 1）之后，人等人的那段时间没有连接 —— 决策送达后本轮的后续帧
+     * （`confirm_decision` / `delta` / `tool_start` / `done` …）只会进归档。这里以
+     * `runSeq[runId]`（前端已知的最大帧序号）为锚点重连，服务端只补 `seq > lastSeq`
+     * 的差量（裁决 3/4：delta 也入档），于是"决策 → 续跑"既不重复渲染也不缺口。
+     *
+     * <p>
+     * 复用 {@link resumeSnapshotStream}：**续写原宿主消息**（不新起助手消息、不引入任何新 UI），
+     * 失败提示沿用该路径既有的 `onClose` / `onReconnect` 口径（不新增元素）。
+     * 只在 `suspended` 为真时动作：非挂起轮的 POST（如 409 幂等收敛）不需要重连。
+     */
+    reconnectSuspendedRun(runId: string, toolCallId: string): void {
+      if (!this.suspended) {
+        return
+      }
+      const host = this.messages.find((item) => item.parts.some(
+        (part): boolean => part.kind === 'tool' && part.toolCallId === toolCallId
+      ))
+      if (!host) {
+        return
+      }
+      void this.resumeSnapshotStream(runId, this.runSeq[runId] ?? 0, host.id)
     },
 
     /**
@@ -1425,6 +1470,8 @@ export const useAiStore = defineStore('ai', {
         return { outcome: 'not-sent', userMessageId: null }
       }
       const workspace = useWorkspaceStore()
+      // B1 收口修（C-1）：新消息 = 真正换轮 —— 上一轮在途的前端工具结局自此一律丢弃
+      roundEpoch += 1
       const userMessage = resend.skipUserRecord ? null : this.recordUserMessage(content)
       const userMessageId = userMessage?.id ?? null
       const assistant = this.appendAssistantMessage()
@@ -1443,6 +1490,8 @@ export const useAiStore = defineStore('ai', {
 
       /** error 终帧会让 `aiApi.chat` 正常 resolve（不是 reject）；用本轮局部标记与开流前 catch 区分。 */
       let sawErrorTerminal = false
+      /** B1：本轮收尾是否为"挂起导致的服务端收流"（正常收尾）—— finally 据此保留 suspended。 */
+      let suspendedClose = false
       const handlers: SseFrameHandlers = {
         onFrame: (frame) => {
           if (isCurrentRound() && frame.type === 'error') {
@@ -1463,6 +1512,13 @@ export const useAiStore = defineStore('ai', {
           // 苞 B 项 3：用户主动停止的轮次不报断流 —— abort → terminal=false 是停止的**正常**收尾，
           // 不是断流。`stopped` 只在 stop() 置位，在每次新连接建立处（send/reattachActive/
           // resumeSnapshotStream）与 resetSession 复位 ⇒ 只影响被停止的那一轮。
+          // B1（2026-10-20 裁决 8）：挂起即断 —— 服务端在卡面请求帧之后主动收流，同样不是断流。
+          if (info.suspended) {
+            // 正常收尾：卡还等着人决策（suspended 保持为真，由决策/终帧路径自己收口），
+            // 不置 streamInterrupted、不出「结果可能不完整」（决策后由 confirm/回填路径重连补帧）。
+            suspendedClose = true
+            return
+          }
           if (!info.terminal && !this.stopped) {
             // ADR-6：缺 done/error 终帧 = 断流，必须显式提示"结果可能不完整"
             this.streamInterrupted = true
@@ -1510,12 +1566,18 @@ export const useAiStore = defineStore('ai', {
           // R1（issue#5）：只有"仍是本轮"时才复位轮次级状态 —— 否则旧轮的收尾会把新轮抹平
           // （界面谎报空闲 + 新轮丢失本地取消句柄）
           this.loading = false
-          this.suspended = false
+          // B1（2026-10-20 裁决 8）：挂起收流不再无条件清 suspended —— 卡还在等人，
+          // 清掉会让停止按钮消失、输入区解禁（"这一轮其实没结束"被谎报成空闲）。
+          if (!suspendedClose) {
+            this.suspended = false
+          }
           currentAbort = null
           activeRoundHostId = null
         }
         const target = this.messages.find((message) => message.id === assistant.id)
-        if (target && !target.done) {
+        // B1：挂起收流时本轮尚未结束（决策后还要续跑），不封口消息 —— 与流派 A 的观感一致：
+        // 气泡仍是流式态，终帧（done/error）一到由 handleFrame 的既有路径封口。
+        if (target && !target.done && !suspendedClose) {
           target.streaming = false
           target.done = true
         }
@@ -1607,6 +1669,8 @@ export const useAiStore = defineStore('ai', {
         this.notice = '没有可重挂的轮次（缺少 runId）'
         return
       }
+      // B1 收口修（C-1）：重挂 = 接管既有轮（新连接身份）—— 在途的旧轮前端工具结局丢弃
+      roundEpoch += 1
       const previous = currentAbort
       const lastSeq = this.runSeq[targetRunId]
       const assistant = this.appendAssistantMessage('（正在重挂进行中的轮次…）')
@@ -1644,6 +1708,10 @@ export const useAiStore = defineStore('ai', {
                 return
               }
               // 苞 B 项 3：用户主动停止不报断流（同 send 的守卫；重挂/续收路径同样适用）
+              // B1（裁决 8）：挂起即断导致的收流是正常收尾 —— 不报断流（决策后另有显式重连）。
+              if (info.suspended) {
+                return
+              }
               if (!info.terminal && !this.stopped) {
                 this.streamInterrupted = true
                 this.lastRoundOutcome = 'interrupted'
@@ -1888,6 +1956,10 @@ export const useAiStore = defineStore('ai', {
       }
       try {
         await aiApi.confirm({ runId, toolCallId, approved, reason: reason ?? null })
+        // B1（2026-10-20 裁决 9）：决策送达 ⇒ 带 lastSeq 重连收流（挂起期连接已被服务端收掉）。
+        // 顺序先于 clearSuspendedIfNoOtherConfirms：后者在多卡批次里可能把 suspended 置 false，
+        // 而重连的触发判据正是"这轮仍在挂起语义里"。
+        this.reconnectSuspendedRun(runId, toolCallId)
         // 多卡并存：本轮还有别的确认门待决时保持挂起态（只清自己这张）
         this.clearSuspendedIfNoOtherConfirms(toolCallId)
       } catch (error) {
@@ -1953,6 +2025,9 @@ export const useAiStore = defineStore('ai', {
             // 治理 P0-1：仅执行器路径带 outcome（旧形态逐字保留，不产 undefined 键）
             : { runId: targetRunId, toolCallId, result, source, ...(outcome !== undefined ? { outcome } : {}) }
         )
+        // B1（2026-10-20 裁决 9）：回灌送达 ⇒ 带 lastSeq 重连收流（GF 提交/取消与即时前端工具共用）。
+        // 不 await：重连要活到本轮终帧，await 会把"表单已提交"的本地收尾拖到整轮结束之后。
+        this.reconnectSuspendedRun(targetRunId, toolCallId)
         return { ok: true }
       } catch (error) {
         if (error instanceof ApiError && error.code === ErrorCode.DUPLICATE_TOOL_CALL_ID) {
@@ -2188,6 +2263,8 @@ export const useAiStore = defineStore('ai', {
 
     /** 停止本轮：先断本地连接，再通知后端取消（后端不可达也不影响本地停止）。 */
     async stop(): Promise<void> {
+      // B1 收口修（C-1）：停止 = 本轮被放弃 —— 在途前端工具结局不得再写段/回灌（含挂起态无连接可 abort 时）
+      roundEpoch += 1
       this.stopped = true
       this.lastRoundOutcome = 'cancelled'
       try {
@@ -2203,6 +2280,10 @@ export const useAiStore = defineStore('ai', {
         // 用户停止本轮：表单随轮收起（后端取消会让挂起走 TIMEOUT/取消收尾）
         this.activeForm = null
       }
+      // B1（2026-10-20 裁决 10）：挂起态的"停止"没有连接可 abort（服务端早已收流），
+      // 本地挂起态在此收口 —— 否则停止按钮（loading || suspended）会永远亮着。
+      // 后端取消仍照发（下方 POST），权威终态由后端收尾。
+      this.suspended = false
       if (!runId) {
         return
       }
@@ -2235,6 +2316,8 @@ export const useAiStore = defineStore('ai', {
      */
     adoptFreshSession(): string {
       const oldSessionId = this.sessionId
+      // B1 收口修（C-1）：换会话 = 真正换轮 —— 旧会话在途的前端工具结局不得写进新会话
+      roundEpoch += 1
       // R5①（issue#5）：在跑的轮次先中止 —— 否则 loading 不复位（输入区一直禁用到流结束），
       // 且后续帧会写进**已清空**的 messages（按 assistantId 找不到宿主 ⇒ 孤儿消息/孤儿帧）
       try {
@@ -2936,10 +3019,12 @@ export const useAiStore = defineStore('ai', {
       message: ChatMessage,
       frame: Extract<SseFrame, { type: 'frontend_tool_request' }>
     ): Promise<void> {
-      // 批3③b D10（R-142）：入口捕获轮次句柄 —— `isCurrentRound` 是 send / reattachActive /
-      // resumeSnapshotStream / resetSession 内的局部闭包（非 drop-in），此处以模块级
-      // currentAbort 的身份比对为准（与 :811/:883/:1037 同族口径）。
-      const controllerAtStart = currentAbort
+      // 批3③b D10（R-142）/ B1 收口修（C-1）：入口捕获**轮次纪元** —— 丢弃判据 =
+      // "本轮已被真正换掉"（新消息 / 重挂 / 换会话 / 停止），而不是"AbortController 引用变了"。
+      // 挂起收流会在 `send()` 的 finally 里把 `currentAbort` 置 null，决策后的同轮重连还会换新
+      // controller，但那一轮**尚未结束** —— 慢前端工具的结局必须照常写段终态并回灌
+      //（否则段恒 `running`，后端只能等满 120s 前端工具上限出 `FRONTEND_TIMEOUT`）。
+      const epochAtStart = roundEpoch
       // 批2：本地执行开跑即落 running（只更新语义 —— 段由 frontend_tool_request 帧建好；
       // 段不再等动作）——前端工具段生命周期 pending→running→终态，与确认门放行同口径。
       // 先让出同步窗口：request 帧的 pending 段必须先落盘（m-R2 写点①的同步可观测语义）
@@ -2958,12 +3043,14 @@ export const useAiStore = defineStore('ai', {
         args: parseToolArgs(frame.args),
         budgetMs: deriveFrontendToolBudgetMs(frame.timeoutSeconds)
       })
-      // 批3③b D10（R-142）：await 返回后比对轮次句柄 —— stop()/新轮/重挂已把 currentAbort
-      // 复位（finally）或换成新句柄 ⇒ 本执行器已是"旧轮在途"：段终态写（:1829-1836 区）与
-      // 回灌 POST（submitFrontendToolResult）整体丢弃，防晚到结局覆盖已收尾现场/向已取消轮回灌。
-      // 窗口残留如实申报（施工报告 §8.4-6）：stop() 至本轮 finally 复位之间返回的执行器
-      // 仍正常写段（当时仍是当前轮），只有"返回晚于收尾"才被丢弃。
-      if (currentAbort !== controllerAtStart) {
+      // B1 收口修（C-1）：await 返回后比对**轮次纪元** —— 只有"真正换轮"（`send()` 起新轮 /
+      // `reattachActive()` 重挂 / `adoptFreshSession()` 换会话 / `stop()` 取消本轮）才丢弃晚到
+      // 结局：段终态写与回灌 POST（`submitFrontendToolResult`）整体不落，防晚到结局覆盖已收尾
+      // 现场 / 向已取消轮或新轮回灌。挂起收流（`StreamCloseInfo.suspended`）与决策后的同轮重连
+      // **不**递增纪元 ⇒ 工具回灌照常（C-1 的原始缺陷即栽在"controller 引用变了"这条判据上）。
+      // 本轮正常结束（done）后晚到的执行器同属本轮：段落真实结局、回灌交给 409 幂等收敛，
+      // 不把卡留在 running 假态（后端此时已超时/取消，重复回灌只会被幂等拒绝）。
+      if (roundEpoch !== epochAtStart) {
         return
       }
       // 批3③a A8：三态落卡（execution.ok 已 @deprecated，改读 outcome）——

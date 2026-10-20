@@ -9,6 +9,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -43,10 +44,17 @@ import java.util.concurrent.atomic.AtomicLong;
  * （无名 SSE 事件 + 帧内 type），与基座 SSE 形态一致，前端不必改用 addEventListener。
  *
  * <p>
+ * <b>B1（2026-10-20）挂起即断</b>：确认卡/表单卡请求帧（{@code confirm_request} /
+ * {@code frontend_tool_request}）发出后，{@code ConfirmGate#await} 调
+ * {@link #completeSubscriptions()} 完成<b>本轮当前全部订阅</b> —— 连接不再挂住等人；
+ * 轮次仍在跑（线程驻留等待决策），后续帧照旧取号落档，决策后前端带 {@code ?lastSeq}
+ * 重连做差量补帧。为此 {@code delta} 一并入档（{@code heartbeat} 仍不入档）。
+ *
+ * <p>
  * <b>序号口径（S5c-1 + T3-2）</b>：业务帧带单调 {@code seq}（自 1 起、跨进程续号）。
  * 心跳帧<b>不占</b>业务序号，只在独立空间里带 {@code heartbeatSeq}。T3-2 起每个业务帧
- * 发放序号时同步 {@code SET ai:seq:<runId>}（发放即登记，TTL 与归档同寿）—— delta 帧
- * 跳过归档后"归档末帧"不再是可靠锚点，续号候选 = max(归档末帧, {@code ai:seq}) + 1。
+ * 发放序号时同步 {@code SET ai:seq:<runId>}（发放即登记，TTL 与归档同寿）—— 归档写入可能
+ * 部分失败（{@code ai:seq} 已推进而归档落后），续号候选 = max(归档末帧, {@code ai:seq}) + 1。
  * <b>出帧串行（S5c-3）</b>：取号、落归档、入队在同一 {@code emitLock} 内完成，
  * 多线程出帧的到达顺序与 seq 顺序一致。
  *
@@ -109,8 +117,8 @@ import java.util.concurrent.atomic.AtomicLong;
  * {@link SseWriteBudget#DEFAULT_TIMEOUT_MILLIS}）⇒ 投递池不再因慢连接而饱和；</li>
  * <li><b>超时处置 = 主动断连</b>：超预算即 {@link #evictOnWriteTimeout}（摘表 + 清队列 + WARN + 计数），
  * 不静默丢帧 —— 前端 reattach 看门狗（{@code frontend/src/api/sse.ts} 的 onerror/onclose →
- * 带 lastSeq 重挂，ADR-5 通道）把断点之后的帧补回来；delta 不入归档，静默丢帧是补不回来的永久缺失，
- * 故"丢弃+继续投"被排除；</li>
+ * 带 lastSeq 重挂，ADR-5 通道）把断点之后的帧补回来；B1 起 delta 也入归档，故静默丢帧
+ * 才是补不回来的永久缺失，"丢弃+继续投"因此被排除；</li>
  * <li><b>收尾不跨线程 complete</b>：{@code send}/{@code complete} 同为 {@code synchronized}，
  * 写卡住时从别的线程 complete 只会一起挂住 —— 写在飞期间的收尾请求由写出线程在 {@code send}
  * 返回后补做（{@link #completeOne} 的交接 + {@link Subscription#writeInFlight}）；</li>
@@ -412,11 +420,12 @@ public class SseChatEmitter {
 	}
 
 	/**
-	 * 把外置状态帧回放给一个新订阅者（不入订阅表，回放发完即 complete）。
+	 * 把外置帧回放给一个新订阅者（不入订阅表，回放发完即 complete）。
 	 *
 	 * <p>
-	 * 只回放<b>状态类帧</b>（跳过 {@code delta}/{@code heartbeat}）：挂起中的轮次不产出正文，
-	 * 回放与订阅之间没有 delta 竞态，前端也就不会把同一段文本渲染两遍；而
+	 * <b>B1（2026-10-20）起 {@code delta} 也回放</b>：挂起即断（流派 B）让"决策 → 续跑"的
+	 * 窗口内产生的正文帧没有实时通道，只能靠归档补回，故 {@code delta} 与状态帧同待遇进归档、
+	 * 同待遇回放。{@code heartbeat} 仍跳过（不入档、只作保活）。
 	 * {@code start} / {@code message_*} / {@code suspended} / {@code confirm_request} / {@code tool_*} /
 	 * {@code confirm_decision} / {@code done} / {@code error} 全部保留 —— 重挂者据此重建
 	 * "这一轮发生过什么"，包括已经结束的轮次的终帧。
@@ -457,7 +466,9 @@ public class SseChatEmitter {
 		int staged = 0;
 		for (Map<String, Object> frame : frames) {
 			String type = String.valueOf(frame.get("type"));
-			if (RunStore.DELTA_TYPE.equals(type) || RunStore.HEARTBEAT_TYPE.equals(type)) {
+			if (RunStore.HEARTBEAT_TYPE.equals(type)) {
+				// 心跳从不入档（T7），这里只是对"绕过发射器直塞的心跳帧"的防御性跳过。
+				// B1：delta 不再跳过 —— 挂起断连窗口内的正文帧只能经归档差量补回。
 				continue;
 			}
 			if (isOrphan(frame, lastSeq)) {
@@ -758,7 +769,7 @@ public class SseChatEmitter {
 	 *
 	 * <p>
 	 * <b>T3-2：发放即登记</b> —— 每帧取号后立刻 {@code SET ai:seq:<runId>}（TTL=session-ttl）。
-	 * delta 帧跳过归档后归档末帧可能落后，跨进程续号必须由 {@code ai:seq} 接管；
+	 * 归档写入可能落后于发放（落档失败 / 窗口裁剪），跨进程续号必须由 {@code ai:seq} 接管；
 	 * SET 失败仅 WARN + 继续出帧（{@link RunStore#recordIssuedSeq} 内部口径，S2-4）。
 	 *
 	 * <p>
@@ -962,8 +973,9 @@ public class SseChatEmitter {
 	 * <li>{@code FAILED}：口径与修复前一致 —— 只记 DEBUG + 摘除该订阅者（前端带 lastSeq 重挂补帧）；</li>
 	 * <li>{@code TIMED_OUT}：<b>摘除（主动断连）+ 计数 + WARN</b>，见 {@link #evictOnWriteTimeout}。
 	 * 处置选择"断开让前端重连"而不是"丢弃该帧继续投"：与既有 S2-1"溢出摘除=主动断连，不静默丢帧"
-	 * 同口径 —— delta 帧按 T3-2 不入归档，静默丢一帧正文是<b>重挂也补不回来</b>的永久缺失，
-	 * 而断连有 ADR-5/re-attach 通道（前端 onerror/onclose 带 lastSeq 差量补发，seq 无洞）；</li>
+	 * 同口径 —— 静默丢一帧正文是<b>重挂也补不回来</b>的缺失（B1 起 delta 虽入档，但"丢弃"
+	 * 语义会把该帧从实时与归档两条通道一起抹掉），而断连有 ADR-5/re-attach 通道
+	 * （前端 onerror/onclose 带 lastSeq 差量补发，seq 无洞）；</li>
 	 * <li>{@code INTERRUPTED}：调用线程被中断（本线程中断位已复位）。与 {@code TIMED_OUT} <b>同走摘除路径</b>
 	 * —— 该帧已被 {@code drain} 弹出，中断后不会有补投接住它（{@code canTakeOverDrain} 还要求队列非空），
 	 * 只"让出 drain"就是静默丢帧（2026-10-10 复核 S3-② 收口）。</li>
@@ -1169,6 +1181,58 @@ public class SseChatEmitter {
 		for (Subscription sub : this.subscribers) {
 			completeWhenDrained(sub);
 		}
+	}
+
+	/**
+	 * <b>B1（2026-10-20）挂起即断</b>：完成<b>本 run 当前的全部订阅</b>，连接不再挂住等人。
+	 *
+	 * <p>
+	 * 与 {@link #complete()}（轮终态）的分工：本方法<b>不置</b> {@link #terminating} ——
+	 * 轮次还在跑（线程仍驻留在 {@code ConfirmGate#await} 里等人工决策），
+	 * 之后的帧照旧取号、落档、{@code touchActivity}；只是"当下这批订阅"被收掉。
+	 * 于是：
+	 * <ul>
+	 * <li><b>后续 emit 无副作用</b>：零订阅者时 {@link #emit} 在取号/截断/落档之后直接返回
+	 * （扇出循环不执行），与"还没有客户端连上"的形态逐字相同；</li>
+	 * <li><b>新订阅仍可接入</b>：{@code GET /events/{runId}} 照常回放归档 + 挂订阅，
+	 * 不会被本方法拦住（{@code terminating} 才是"轮次结束、不再收新帧"的开关）；</li>
+	 * <li><b>幂等</b>：重复调用只对"仍在订阅表里且未终结"的订阅者动作，已收尾的由
+	 * {@link #completeOne} 的 {@code completed} CAS 去重；</li>
+	 * <li><b>零订阅者 no-op</b>：订阅表为空时不取号、不写库、不产生任何归档痕迹
+	 * （挂起期反复调用不会污染归档窗口）。</li>
+	 * </ul>
+	 *
+	 * <p>
+	 * <b>不截断已出的帧</b>：收尾复用到 {@link #completeWhenDrained}（与
+	 * {@link #complete()} 同一路径）—— 已入队但还没写出的帧（正是刚发出的
+	 * {@code confirm_request}/{@code frontend_tool_request}）先排空，队列空了才
+	 * {@code emitter.complete()}。于是与并发出帧的先后关系是确定的：本方法之前由<b>调用线程</b>
+	 * emit 的帧必在队列里、必被投递（本方法的调用点就在这一帧 emit 之后），之后的帧只落档
+	 * （重挂差量补回，seq 无洞）。
+	 *
+	 * <p>
+	 * <b>订阅表快照在 {@code emitLock} 内取、收尾动作在锁外做</b>：{@code emitter.complete()}
+	 * 与 {@code send} 同为 {@code synchronized}，万一与"已弹出帧但还没置 writeInFlight"的写线程
+	 * 擦肩，持锁调用会把出帧线程一起拖住（最坏一个写预算）。收尾的幂等性（{@code closed} /
+	 * {@code evicted} / {@code completed} 三重去重 + {@code completeWhenDrained} 的 CAS）
+	 * 不依赖这把锁，故锁外调用不改变语义。
+	 *
+	 * @return 本次要求收尾的订阅者数（诊断/断言用；已终结或已摘除的不计）
+	 */
+	public int completeSubscriptions() {
+		List<Subscription> snapshot;
+		synchronized (this.emitLock) {
+			snapshot = new ArrayList<>(this.subscribers);
+		}
+		int completed = 0;
+		for (Subscription sub : snapshot) {
+			if (sub.closed || sub.evicted.get()) {
+				continue;
+			}
+			completeWhenDrained(sub);
+			completed++;
+		}
+		return completed;
 	}
 
 	/**

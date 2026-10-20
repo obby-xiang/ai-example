@@ -304,8 +304,8 @@ class SseChatEmitterFramesTest {
         when(this.store.events(RUN_ID)).thenAnswer(invocation -> archived());
         SseEmitter subscriber = mock(SseEmitter.class);
 
-        // 不传 lastSeq = 老客户端口径：全量回放（归档 5 帧里 delta 仍按"只回放状态帧"的口径跳过 ⇒ 4 帧）
-        assertThat(this.emitter.replayTo(subscriber, null)).isEqualTo(4);
+        // 不传 lastSeq = 老客户端口径：全量回放归档全部帧（B1 起 delta 也回放 ⇒ 不再跳过）
+        assertThat(this.emitter.replayTo(subscriber, null)).isEqualTo(5);
     }
 
     // ── 辅助 ────────────────────────────────────────────────────────────────

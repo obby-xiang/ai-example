@@ -131,6 +131,10 @@ class SseFrameSequenceConformanceTest {
 	 * （{@link InMemoryRunStore#lastIssuedSeq()}）。
 	 *
 	 * <p>
+	 * <b>B1（2026-10-20）修订</b>：delta 改为入档（挂起即断后的差量补帧依赖它），
+	 * 心跳仍不入档 —— 于是"心跳不占号"这条仍是本用例的主断言；归档侧只剩"心跳不占位"。
+	 *
+	 * <p>
 	 * kill：把 {@code SseChatEmitter#emit} 的心跳分支改回 {@code frame.put("seq", nextSeq())}
 	 * ⇒ 业务序号出现缺口、归档与订阅者视角不再一致，本用例变红。
 	 */
@@ -155,10 +159,10 @@ class SseFrameSequenceConformanceTest {
 				.filter(frame -> !FrameContract.HEARTBEAT.equals(FrameContract.type(frame))).toList();
 		assertThat(FrameContract.types(business)).containsExactly("start", "delta");
 		assertThat(FrameContract.seqContract(business)).as("业务序号自 1 起连续无缺口").isEmpty();
-		// T3-2：归档只计状态帧（delta 与心跳同待遇跳过），活动戳由 touchActivity 留下
-		assertThat(this.store.archivedSeqs(RUN_ID)).as("归档只含状态帧（delta 跳过归档）").containsExactly(1L);
-		assertThat(this.store.archivedTypes(RUN_ID)).containsExactly("start");
-		assertThat(this.store.lastEventSeq(RUN_ID)).as("归档末帧（delta 跳档后不再等于最大业务号）").isEqualTo(1L);
+		// B1：归档含 delta、不含心跳；活动戳由 touchActivity 留下
+		assertThat(this.store.archivedSeqs(RUN_ID)).as("归档含 delta（B1 入档），心跳不占位").containsExactly(1L, 2L);
+		assertThat(this.store.archivedTypes(RUN_ID)).containsExactly("start", "delta");
+		assertThat(this.store.lastEventSeq(RUN_ID)).as("归档末帧 = 已发放的最大业务号").isEqualTo(2L);
 		assertThat(this.store.lastIssuedSeq(RUN_ID)).as("T3-2 续号锚点 = ai:seq = 已发放的最大业务号").isEqualTo(2L);
 		assertThat(this.store.lastBeatAtMs(RUN_ID)).as("心跳/delta 都留下活动戳（僵尸判据的输入）").isPositive();
 		assertThat(FrameContract.archiveSeqContract(this.store.events(RUN_ID))).as("归档本身不得乱序或重号")

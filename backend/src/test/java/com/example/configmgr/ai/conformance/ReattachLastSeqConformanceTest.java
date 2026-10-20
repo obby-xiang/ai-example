@@ -107,15 +107,20 @@ class ReattachLastSeqConformanceTest {
 	// ── ⑤ 老客户端口径（不传 lastSeq）与升级期老帧 ───────────────────────────
 
 	/**
-	 * 不传 {@code lastSeq} 时保持 S4.2 时期的口径：全量回放<b>状态类帧</b>，
-	 * 跳过 {@code delta}/{@code heartbeat}（避免"回放 + 实时"把同一段正文渲染两遍）。
+	 * B1（2026-10-20）口径变更：{@code delta} 入档后回放<b>也含 delta</b> —— 不传 {@code lastSeq}
+	 * 时回放的是归档里的全部帧（仍跳过心跳，心跳从不入档）。
 	 *
 	 * <p>
-	 * kill：把 {@code includeDelta} 的默认口径改成 true ⇒ 回放里出现 delta，本用例变红
-	 * （前端会重复渲染正文）。
+	 * 为什么改：挂起即断（流派 B）后，"决策 → 续跑"窗口内的正文帧没有实时通道，只能靠归档
+	 * 差量补回；若回放仍跳过 delta，那段正文就永久缺失（T3b 根因）。防重复渲染的职责因此
+	 * 从"回放跳过 delta"移到"前端带 {@code lastSeq} 只收差量"（刷新恢复主路
+	 * {@code restoreSuspendedSnapshot} 以 {@code archiveMaxSeq} 为 lastSeq，回放集为空）。
+	 *
+	 * <p>
+	 * kill：把 {@code stageReplay} 的 delta 跳过改回去 ⇒ 本用例的 delta 断言变红。
 	 */
 	@Test
-	void replayWithoutLastSeqKeepsTheLegacyStateOnlyShape() {
+	void replayWithoutLastSeqNowIncludesDeltaBecauseReplayIsDiffBySeq() {
 		this.out.start("s-1");
 		this.out.delta("正文一");
 		this.out.heartbeat(Map.of("phase", "streaming"));
@@ -126,8 +131,11 @@ class ReattachLastSeqConformanceTest {
 		FrameWire reattached = new FrameWire();
 		int replayed = this.out.replayTo(reattached.emitter(), null);
 
-		assertThat(replayed).isEqualTo(3);
-		assertThat(FrameContract.types(reattached.frames())).containsExactly("start", "suspended", "done");
+		assertThat(replayed).isEqualTo(4);
+		assertThat(FrameContract.types(reattached.frames())).containsExactly("start", "delta", "suspended", "done");
+		assertThat(FrameContract.ofType(reattached.frames(), "delta"))
+				.singleElement()
+				.satisfies(frame -> assertThat(frame).containsEntry("text", "正文一"));
 	}
 
 	/**

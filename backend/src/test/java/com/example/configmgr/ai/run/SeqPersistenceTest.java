@@ -12,14 +12,14 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * T3-2 序号持久化（{@code ai:seq:<runId>}）与 delta 跳过归档的机制单测。
+ * T3-2 序号持久化（{@code ai:seq:<runId>}）与帧入档口径的机制单测。
  *
  * <ul>
  * <li><b>重号场景（设计卡验收）</b>：发放 3 帧、落档第 2/3 帧失败（进程内模拟 Redis
  * 部分失败）→ 新实例续跑，新帧必须续到 seq=4 —— 续号锚点是
  * {@code max(归档末帧, ai:seq)}，不再只是归档末帧；</li>
- * <li><b>delta 不进归档</b>：{@code LLEN}（归档帧数）只计状态帧，但 delta 照常占用
- * 业务序号并推进 {@code ai:seq}（前端 lastSeq 口径不变）；</li>
+ * <li><b>delta 入档（B1 2026-10-20）</b>：{@code LLEN}（归档帧数）含 delta，心跳仍不入档；
+ * delta 照常占用业务序号并推进 {@code ai:seq}；</li>
  * <li><b>发放即登记</b>：每帧 {@code recordIssuedSeq}，跨实例可读（InMemoryRunStore
  * 替身与 Redis 实现同语义）。</li>
  * </ul>
@@ -84,9 +84,9 @@ class SeqPersistenceTest {
 		assertThat(store.lastIssuedSeq(RUN_ID)).isEqualTo(4L);
 	}
 
-	/** delta 不进归档：归档帧数（LLEN 口径）只计状态帧，业务序号仍连续推进。 */
+	/** B1（2026-10-20）：delta 入档（心跳仍不入档），业务序号连续推进。 */
 	@Test
-	void deltaFramesAreNeverArchivedButStillConsumeBusinessSeq() {
+	void deltaFramesAreArchivedWhileHeartbeatStaysOut() {
 		InMemoryRunStore store = new InMemoryRunStore();
 		SseChatEmitter out = new SseChatEmitter(RUN_ID, store, new ObjectMapper());
 
@@ -98,18 +98,17 @@ class SeqPersistenceTest {
 		out.heartbeat(Map.of("phase", "streaming"));
 		out.done(Map.of(), "model-x", Map.of("cancelled", false));
 
-		assertThat(store.archivedTypes(RUN_ID)).as("LLEN 只计状态帧：delta/heartbeat 都不入档")
-				.containsExactly("start", "message_start", "message_end", "done");
-		assertThat(store.archivedSeqs(RUN_ID)).containsExactly(1L, 2L, 5L, 6L);
-		assertThat(store.lastEventSeq(RUN_ID)).as("归档末帧不再是续号锚点（中间隔着未入档的 delta）")
-				.isEqualTo(6L);
-		assertThat(store.lastIssuedSeq(RUN_ID)).as("ai:seq = 已发放的最大业务号（delta 占号）").isEqualTo(6L);
+		assertThat(store.archivedTypes(RUN_ID)).as("delta 入档；心跳仍不入档（T7 口径不动）")
+				.containsExactly("start", "message_start", "delta", "delta", "message_end", "done");
+		assertThat(store.archivedSeqs(RUN_ID)).containsExactly(1L, 2L, 3L, 4L, 5L, 6L);
+		assertThat(store.lastEventSeq(RUN_ID)).as("归档末帧 = 已发放的最大业务号").isEqualTo(6L);
+		assertThat(store.lastIssuedSeq(RUN_ID)).as("ai:seq = 已发放的最大业务号").isEqualTo(6L);
 		assertThat(store.lastBeatAtMs(RUN_ID)).as("delta/心跳的活动戳仍在（僵尸判据输入）").isPositive();
 	}
 
-	/** 终态轮重挂回放与 ai:seq 协同：回放只给状态帧，序号口径不乱。 */
+	/** 终态轮重挂回放与 ai:seq 协同：B1 起 delta 也在回放集里，序号口径不乱。 */
 	@Test
-	void replaySeesOnlyStateFramesWithSeqPersistenceIntact() {
+	void replayIncludesDeltaWithSeqPersistenceIntact() {
 		InMemoryRunStore store = new InMemoryRunStore();
 		SseChatEmitter out = new SseChatEmitter(RUN_ID, store, new ObjectMapper());
 		out.start("s-1");
@@ -119,8 +118,8 @@ class SeqPersistenceTest {
 		CapturingEmitter wire = new CapturingEmitter();
 		int replayed = out.replayTo(wire.emitter, null);
 
-		assertThat(replayed).isEqualTo(2);
-		assertThat(wire.seqs()).containsExactly(1L, 3L);
+		assertThat(replayed).isEqualTo(3);
+		assertThat(wire.seqs()).containsExactly(1L, 2L, 3L);
 		assertThat(store.lastIssuedSeq(RUN_ID)).isEqualTo(3L);
 	}
 

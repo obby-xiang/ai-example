@@ -317,6 +317,23 @@ public class ConfirmGate {
 		else {
 			out.frontendToolRequest(pending, timeoutSeconds);
 		}
+		// ===== B1（2026-10-20 裁决 1）：请求帧发出之后、进入阻塞等待之前，主动完成本 run 的全部订阅 =====
+		// 流派 B（挂起即断）：人机等待期不再占用 SSE 连接，连接在"卡已送达"这一刻收尾；
+		// 决策到达后再由前端带 ?lastSeq 重连做差量补帧（delta 已入档，见 RunStore#appendEvent）。
+		//
+		// 断连点为什么在这里、不在 suspended 帧上：实测帧序是 suspended（SpToolCallingManager）
+		// **早于** confirm_request / frontend_tool_request（本方法）—— 挂在 suspended 上会把
+		// 请求帧截断在门外，用户根本收不到卡。
+		//
+		// 为什么不会截断本帧：completeSubscriptions 复用到"排空队列后才 complete"的收尾路径，
+		// 刚 emit 的请求帧先写出、再关连接。
+		//
+		// 一批多 toolCall 的真实发射流（实测）：帧是**逐条**发的 —— suspended 帧一次列出本批全部
+		// 条目，随后 SpToolCallingManager 逐个进 await；每个 await 各自发自己那张卡的请求帧，
+		// 发完即断，然后阻塞等人。于是第 N 张卡的请求帧是在第 N-1 张卡决策之后、重新连上的
+		// 订阅里发出的（重连帧序：决策 → 续跑 → tool_start(cardN) → 请求帧(cardN) → 再次收流）。
+		// 任何一张卡的请求帧都落在"该帧 emit 之后"的断连点之后，不会被截断。
+		out.completeSubscriptions();
 		long startedAt = System.currentTimeMillis();
 		// T2b-D#1：挂起期续期 session→current 索引用的 sessionId（快照可能缺失，取一次缓存并判空）
 		String sessionId = snapshotSessionId(runId);

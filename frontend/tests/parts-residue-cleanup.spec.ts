@@ -24,7 +24,9 @@ const api = vi.hoisted(() => ({
   history: vi.fn(),
   runsCurrent: vi.fn(),
   frontendToolResult: vi.fn(),
-  confirm: vi.fn()
+  confirm: vi.fn(),
+  // B1（2026-10-20）：回灌成功后带 lastSeq 重连收流会调 reattachRun —— 桩件保持"在跑"
+  reattachRun: vi.fn(() => new Promise(() => {}))
 }))
 
 vi.mock('@/api/ai', () => ({ aiApi: api }))

@@ -13,7 +13,12 @@ import type { ChatMessage, MessagePart, ToolPart } from '@/types/ai'
 import { MIRROR_PREFIX, useAiStore } from '@/stores/ai'
 
 // 镜像迁移用例要走 loadHistory：把后端两个取数端点桩掉（其余用例不碰 API）
-const api = vi.hoisted(() => ({ history: vi.fn(), runsCurrent: vi.fn() }))
+// B1（2026-10-20）：决策后重连收流会调 reattachRun —— 桩件保持"在跑"（永不结算）
+const api = vi.hoisted(() => ({
+  history: vi.fn(),
+  runsCurrent: vi.fn(),
+  reattachRun: vi.fn(() => new Promise(() => {}))
+}))
 
 vi.mock('@/api/ai', () => ({ aiApi: api }))
 

@@ -88,10 +88,24 @@ interface StreamState {
   reconnects: number
   /** 已收到的最大帧序号（T6：重挂时回传，服务端只补增量）。 */
   lastSeq: number | null
+  /**
+   * 本连接是否已收到**挂起类请求帧**（`confirm_request` / `frontend_tool_request`）。
+   *
+   * B1（2026-10-20，挂起即断）：服务端在这类帧之后**主动完成订阅**（流派 B），
+   * 因此"连接关闭"在这里是**正常收尾**而不是断流 —— 既不自动重连（否则挂起期
+   * 又挂一条连接、还白占 2s 心跳），也不交给调用方按断流提示。重连只由用户决策后的
+   * 显式路径触发（`stores/ai.ts` 决策成功后带 lastSeq 重连）。
+   */
+  awaitsInput: boolean
 }
 
 function newState(): StreamState {
-  return { runId: null, terminal: false, lastFrame: null, reconnects: 0, lastSeq: null }
+  return { runId: null, terminal: false, lastFrame: null, reconnects: 0, lastSeq: null, awaitsInput: false }
+}
+
+/** B1：挂起类请求帧 —— 服务端发出它们之后会主动收流（挂起即断）。 */
+function isSuspendRequestFrame(frame: SseFrame): boolean {
+  return frame.type === 'confirm_request' || frame.type === 'frontend_tool_request'
 }
 
 /** SSE 事件块切分器：把字节流切成一个个 data 载荷。 */
@@ -171,6 +185,10 @@ function consumeFrame(
   if (frame.type === 'start') {
     state.runId = frame.runId
   }
+  if (isSuspendRequestFrame(frame)) {
+    // B1：卡面请求帧已送达 ⇒ 服务端随后主动收流（挂起即断）。标记只在本连接内有效。
+    state.awaitsInput = true
+  }
   handlers.onFrame?.(frame)
   if (isTerminalFrame(frame)) {
     state.terminal = true
@@ -220,11 +238,13 @@ function finish(
   terminal: boolean,
   reason: string | undefined
 ): StreamCloseInfo {
+  const suspended = !terminal && state.awaitsInput
   const info: StreamCloseInfo = {
     terminal,
     lastFrame: state.lastFrame,
     reconnects: state.reconnects,
-    ...(reason === undefined ? {} : { reason })
+    ...(reason === undefined ? {} : { reason }),
+    ...(suspended ? { suspended: true } : {})
   }
   handlers.onClose?.(info)
   return info
@@ -375,6 +395,11 @@ export async function streamChat(
         ? finish(state, handlers, true, undefined)
         : finish(state, handlers, false, reattached.reason ?? reason)
     }
+    if (state.awaitsInput) {
+      // B1（2026-10-20 挂起即断）：卡面请求帧已送达 ⇒ 服务端主动收流，这是**正常收尾**。
+      // 不自动重连（挂起期不占连接）；重连由决策成功后的显式路径带 lastSeq 触发。
+      return finish(state, handlers, false, '挂起等待（服务端已主动收流，决策后带 lastSeq 重连）')
+    }
     const reattached = await tryReattach(state, handlers, options)
     return reattached.terminal
       ? finish(state, handlers, true, undefined)
@@ -522,6 +547,12 @@ export async function reattach(
       clearConnect()
       if (options.signal?.aborted) {
         settle(state.terminal, '连接已取消')
+        return
+      }
+      if (state.awaitsInput) {
+        // B1（2026-10-20 挂起即断）：本连接已收到卡面请求帧 ⇒ 服务端收流属正常收尾。
+        // 不重连（重连会带着 lastSeq 再挂一条连接、在挂起期白占心跳）；下一次连理由决策触发。
+        settle(false, '挂起等待（服务端已主动收流，决策后带 lastSeq 重连）')
         return
       }
       if (attempts >= maxReconnects) {

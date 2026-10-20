@@ -3848,8 +3848,9 @@ describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 �
 
     store.suspended = true
     await wrapper.vm.$nextTick()
-    expect(send.attributes('disabled')).toBeDefined()
-    await send.trigger('click')
+    // B1（2026-10-20 裁决 10）：挂起态发送位换停止钮 —— 发送钮不渲染（草稿保留，发送不可达）
+    expect(wrapper.find('[data-testid="send-btn"]').exists()).toBe(false)
+    expect(wrapper.find('[data-composer-tip="stop"]').exists()).toBe(true)
     expect(sendSpy).not.toHaveBeenCalled()
 
     store.suspended = false
@@ -3858,8 +3859,9 @@ describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 �
       { toolCallId: 'pc-send', name: 'probe.tool', kind: 'FRONTEND', args: {}, status: 'pending' }
     )]
     await wrapper.vm.$nextTick()
-    expect(send.attributes('disabled')).toBeDefined()
-    await send.trigger('click')
+    const sendAfter = wrapper.find('[data-testid="send-btn"]')
+    expect(sendAfter.attributes('disabled')).toBeDefined()
+    await sendAfter.trigger('click')
     expect(sendSpy).not.toHaveBeenCalled()
     wrapper.unmount()
   })

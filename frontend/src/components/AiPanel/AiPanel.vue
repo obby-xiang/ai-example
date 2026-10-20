@@ -741,7 +741,7 @@
           <span class="rounded-[6px] border border-dashed border-[#cddcff] px-[6px] py-[1px] text-[10.5px] leading-[1.6] text-[#8b949e]">工具位（预留 · 留空）</span>
           <span class="flex-1"></span>
           <button
-            v-if="ai.loading"
+            v-if="ai.loading || ai.suspended"
             type="button"
             data-composer-tip="stop"
             class="group/tip relative ml-auto flex h-[28px] w-[28px] flex-none items-center justify-center rounded-full border-0 bg-[#1f2328] transition-all duration-[150ms] hover:brightness-[1.15] focus-visible:ring-2 focus-visible:ring-[#2563eb]/40 focus-visible:ring-offset-0"

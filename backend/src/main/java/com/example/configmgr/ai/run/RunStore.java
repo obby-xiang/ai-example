@@ -564,15 +564,24 @@ public class RunStore {
 	 * （回放跟着变瘦）。心跳的"在线推送"语义不受影响（仍在 {@code SseChatEmitter#emit} 里
 	 * 广播给订阅者），只是改由 {@link #touchActivity(String)} 记一个轻量活动戳 ——
 	 * 于是"心跳提供活动证据"这一用途照旧，归档却不被它占位。
+	 *
+	 * <p>
+	 * <b>B1（2026-10-20）：{@code delta} 改为入档</b> —— 挂起即断（流派 B）之后，用户决策 →
+	 * 后端续跑这段窗口内没有实时订阅者，正文帧只能靠归档差量补回（前端带 {@code ?lastSeq}
+	 * 重连）。代价：长轮次的 delta 会加速挤出 {@value #EVENT_WINDOW} 窗口内的早段帧
+	 * （极端长生成的重连补帧可能出现尾部缺口，已在设计稿 §6 留痕，B2 换 Redis Stream 时重估）。
+	 * delta 照旧 {@link #touchActivity(String)} 留活动戳（"只吐 delta 的长轮"僵尸判据不变）。
 	 */
 	public void appendEvent(String runId, Map<String, Object> frame) {
-		if (HEARTBEAT_TYPE.equals(String.valueOf(frame.get("type")))
-				|| DELTA_TYPE.equals(String.valueOf(frame.get("type")))) {
-			// T7：心跳照旧跳过归档；T3-2：delta 与心跳同待遇 —— 长流式轮次的 delta 量会挤掉
-			// 挂起期状态帧（回放跟着变瘦），正文重建靠"回放状态帧 + 实时 delta"两段式，不靠归档。
-			// 活动证据由 touchActivity 留下（只吐 delta 的长轮不会被僵尸判据误判）。
+		String type = String.valueOf(frame.get("type"));
+		if (HEARTBEAT_TYPE.equals(type)) {
+			// T7：心跳跳过归档，只留活动戳。
 			touchActivity(runId);
 			return;
+		}
+		if (DELTA_TYPE.equals(type)) {
+			// B1：delta 入档（差量补帧的真值），活动戳照旧 —— 窗口/TTL 口径不变。
+			touchActivity(runId);
 		}
 		frame.putIfAbsent("atMs", System.currentTimeMillis());
 		try {
