@@ -25,8 +25,13 @@ import java.time.Duration;
 @ConfigurationProperties(prefix = "app.ai")
 public class AiProperties {
 
-	/** 会话记忆滑动 TTL（写入刷新，D1/DC-02：会话不做长期留存）。 */
-	private Duration sessionTtl = Duration.ofHours(6);
+	/**
+	 * 会话记忆滑动 TTL（写入刷新；默认 24h，用户裁决 2026-10-20 第 4 条）。
+	 *
+	 * <p>滑动续期 = 活跃即续；整个会话维度，<b>无绝对上限</b>。run 级外置键（快照/待决/台账/帧/序号/心跳）
+	 * 的 TTL 同取本值且每次写/心跳都整额续期 —— 挂起等人期间卡的背景数据不会先于会话过期。
+	 */
+	private Duration sessionTtl = Duration.ofHours(24);
 
 	private Memory memory = new Memory();
 
@@ -97,39 +102,20 @@ public class AiProperties {
 	public static class Hitl {
 
 		/**
-		 * 确认门等待上限（<b>等人</b>）：AI 请求人类对破坏性操作（导出/检查/导入/发布）作出决策。
+		 * 即时执行类前端工具（{@code navigate_to} 等）的回执等待上限（<b>等机器</b>，默认 120s）。
 		 *
-		 * <p>取值依据（业界依据 §5「人机确认门（HITL approval）超时」）：该节唯一有官方硬依据的结论是
-		 * "不设超时 = 永久卡死"（AWS Step Functions 官方最佳实践），取值本身业界无统一标准；同节对
-		 * "内网、用户量小、有明确操作人的交互式确认门"给出的推荐值是 <b>10 分钟</b>，超时后自动拒绝
-		 * 并释放锁（fail-closed，不自动放行）。本键当前取 <b>240s</b>（过渡值，见下）。
-		 *
-		 * <p>与前端工具键（{@link #frontendToolTimeout}）<b>刻意分开</b>：本键等的是<b>人</b>的决策延迟
-		 * （分钟级），那个键等的是<b>机器</b>的回执延迟（秒级），同值共用会让两者互相迁就
-		 * （2026-10-10 数字规格清点裁决③；登记见 {@code docs/M2-排期计划.md} 去向表 R-99①）。
-		 *
-		 * <p>超过本上限即收口（{@code status=TIMEOUT, executed=false}），结局语义为"工具未执行"
-		 * （确定未发生）—— 与前端工具键的"结局未知"**不同**，文案也分开（见 {@code ConfirmGate#expire}）。
-		 *
-		 * <p><b>取值可达性（过渡声明）</b>：裁决③的目标值是 600s，但本轮还受
-		 * {@link Resilience#getTotalBudget()}（默认 300s）约束 ——
-		 * {@code StreamWatchdog} 的总预算判据先于"工具活跃期不计静默"生效，{@code SseEmitter}
-		 * 寿命亦取该值。故本键本轮取 <b>240s</b>（&lt; 300s，留 60s 余量，值真实可达）；
-		 * 抬到 600s 须与"轮次预算 / emitter 寿命 / 兜底等待三语义拆分"（等待治理 R-99③）同批。
-		 */
-		private Duration confirmTimeout = Duration.ofSeconds(240);
-
-		/**
-		 * 前端工具（含 {@code generative_form}）回执等待上限（<b>等机器</b>）。
+		 * <p><b>哪些工具读本键</b>（用户裁决 2026-10-20 第 2 条）：只有"下发了就等一个机器回执"的
+		 * 即时执行类前端工具。{@code generative_form} <b>不读</b>本键 —— 它等的是人填表，
+		 * 上限已退役（无超时），区分点见 {@code ConfirmGate#suspendWaitSeconds}。
+		 * 确认门（等人决策）同样<b>没有上限</b>，原 {@code app.ai.hitl.confirm-timeout} 键已退役。
 		 *
 		 * <p>取值依据（业界依据 §6「前端工具调用超时（AI 工具调用执行预算）」）：MCP 规范只要求
 		 * SHOULD 设超时、不规定数值；实现层默认常见 <b>60s</b>，Vercel AI SDK 官方 {@code toolMs}
-		 * 区间为 5–60s（跨系统工具取 60s）。本键本轮<b>暂维现状 120s</b>，理由见下。
+		 * 区间为 5–60s（跨系统工具取 60s）。本键保留现状 120s，理由见下。
 		 *
 		 * <p>超过本上限即收口（{@code status=TIMEOUT, executed=false}），但结局语义只说明
-		 * "回执没回来"、<b>结局未知</b>（副作用可能已经发生，如文件已落盘）—— 与确认门键的
-		 * "工具未执行"**不同**（见 {@code ConfirmGate#expire} 的分支文案与
-		 * {@code ConfirmGateFrontendTimeoutTextTest} 的回归锁）。
+		 * "回执没回来"、<b>结局未知</b>（副作用可能已经发生，如文件已落盘）——
+		 * 见 {@code ConfirmGate#expireFrontend} 与 {@code ConfirmGateFrontendTimeoutTextTest} 的回归锁。
 		 *
 		 * <p><b>已知约束（为什么暂维 120s）</b>：前端执行器预算由帧内 {@code timeoutSeconds} 折算
 		 * （{@code frontend/src/utils/frontend-tools.ts#deriveFrontendToolBudgetMs}，折算式
@@ -157,10 +143,11 @@ public class AiProperties {
 		 *
 		 * <p>
 		 * 初值 90s —— <b>待 §13.2 #2 压测裁决</b>。注意它与硬规范①（阈值 &gt; 最长工具耗时）的
-		 * 关系：挂起等待（确认门默认 240s、前端工具默认 120s）期间工具处于"活跃"，
+		 * 关系：挂起等待期间工具处于"活跃"，
 		 * {@link com.example.configmgr.ai.run.StreamWatchdog} 在工具执行期间<b>不计静默</b>、
-		 * 退出后以退出时刻重新计时，因此本值小于两个挂起上限仍正确（前端工具 120s &gt; 90s 同属此理）；
-		 * 但"配置值本身要不要直接大于确认门键 {@code app.ai.hitl.confirm-timeout}"列为【待裁决】。
+		 * 退出后以退出时刻重新计时，因此本值小于等待上限仍正确（即时执行类前端工具 120s &gt; 90s
+		 * 同属此理）；确认门与 {@code generative_form} 自 2026-10-20 起<b>无等待上限</b>，
+		 * 不再参与本条的"上限关系"。
 		 */
 		private Duration interEventTimeout = Duration.ofSeconds(90);
 
@@ -172,6 +159,9 @@ public class AiProperties {
 		 *
 		 * <p>
 		 * 初值 300s —— <b>待 §13.2 #2 压测裁决</b>（现网最长一轮的真实耗时）。
+		 * <b>人机预算分离</b>（用户裁决 2026-10-20 第 3 条）：挂起等待（确认门 / 前端工具 /
+		 * 生成式表单）的时长<b>不计入</b>本预算 —— 判据口径是"墙钟 − 挂起等待"，
+		 * 见 {@link com.example.configmgr.ai.run.ToolActivityBeacon#gateWaitMs(String)}。
 		 */
 		private Duration totalBudget = Duration.ofSeconds(300);
 	}
@@ -294,8 +284,9 @@ public class AiProperties {
 		 * <p>
 		 * 语义与选型见 {@link com.example.configmgr.common.sse.SseWriteBudget}：它约束的是
 		 * <b>单帧写出</b>的时长（写出挪到弹性写出池，投递池工作线程最多等本预算），
-		 * 而不是整条流的寿命（后者由 {@code app.ai.resilience.total-budget} 决定的 emitter
-		 * 生命周期超时承载 —— 请求侧 {@code AiController} 用 {@code budgetMillis()} 建 emitter）。
+		 * 而不是整条流的寿命（AI 通道的 emitter <b>不设传输层死线</b>：确认门/表单等
+		 * 人工输入没有上限，{@code AiController} 用 {@code new SseEmitter(-1L)} 建流；
+		 * 机器预算 {@code app.ai.resilience.total-budget} 仍由 {@code StreamWatchdog} 判）。
 		 * 超预算即摘除该订阅者（主动断连，前端 onerror/onclose 带 lastSeq 重挂差量补发），
 		 * 不静默丢帧（与 S2-1 溢出摘除同口径）。
 		 *

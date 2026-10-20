@@ -37,8 +37,8 @@ export const DEFAULT_RECONNECT_DELAY_MS = 1_000
  *   连接被误判为死"的假阳性压到最低（一次 TCP/TLS 握手 + 代理首包 + 服务端排队都要放得下）；
  * - 三轮建连预算合计 15 + 1(退避) + 15 + 2(退避) + 15 = 48s，**不超过** `DEFAULT_IDLE_TIMEOUT_MS`
  *   （90s）这条既有"单条流允许的最长无进展等待"，整段 reattach 仍落在同一量级内；
- * - 远小于 `api/http.ts` 的 axios 单请求上限（60s）与后端 `ConfirmGate` 挂起超时（120s）⇒
- *   前端先失败、先复位 `loading`、先出提示，不再沉默到后端超时才收尾。
+ * - 远小于 `api/http.ts` 的 axios 单请求上限（60s）与后端前端工具挂起上限（120s；确认门去超时后
+ *   已无该键）⇒ 前端先失败、先复位 `loading`、先出提示，不再沉默到后端超时才收尾。
  */
 export const DEFAULT_CONNECT_TIMEOUT_MS = 15_000
 

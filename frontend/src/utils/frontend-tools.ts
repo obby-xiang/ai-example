@@ -206,8 +206,8 @@ export function parseToolArgs(raw: string | undefined | null): Record<string, un
  * （折算见 {@link deriveFrontendToolBudgetMs}）。
  *
  * **为什么要有**：后端对前端工具挂起的等待上限是 `app.ai.hitl.frontend-tool-timeout`
- * （默认 **120s**，裁决③拆键后**只供前端工具**，与确认门键 `app.ai.hitl.confirm-timeout`
- * 分场景，见 backend `AiProperties$Hitl#frontendToolTimeout`），前端此前**没有任何自有预算**：
+ * （默认 **120s**，裁决③拆键后**只供前端工具**，见 backend
+ * `AiProperties$Hitl#frontendToolTimeout`；确认门已去超时、无对应键），前端此前**没有任何自有预算**：
  * 执行器一旦迟迟不返回（宿主浏览器的下载链路把页面拖住、或 `ensureTaskBoundForTool`
  * 串行 HTTP 叠加吃满 axios 60s 上限），回灌 POST 就发不出去，后端在 120s 判前端超时，
  * 模型与用户拿到的是"本次调用未获得数据"这种既非成功也非失败的空结局。

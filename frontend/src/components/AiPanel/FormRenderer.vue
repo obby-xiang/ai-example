@@ -1,8 +1,9 @@
 <template>
-  <div :class="readonly ? 'min-w-0' : 'border border-solid border-[#e3e6ea] rounded-[10px] bg-white overflow-hidden mb-2.5'">
+  <div :class="readonly || flat ? 'min-w-0' : 'border border-solid border-[#e3e6ea] rounded-[10px] bg-white overflow-hidden mb-2.5'">
     <!-- R-165 S3a：GF 表单卡 = demo v7 `.gf` 结构（v7.html:255-272）
          容器细描边 + 圆角 10 + overflow-hidden ｜ 卡头 ▤+标题+胶囊（9px 11px / 底细线 / #f6f7f9 / 12.8px/650）
-         ｜ 字段体 p-[11px] ｜ footer 时间行（9px 11px / 顶细线 / 11.8px #57606a / #f6f7f9）。
+         ｜ 字段体 p-[11px]。2026-10-20 去超时裁决：时限脚注整块退役（表单一直可填）；
+         嵌入态（flat）单框 —— 描边/底色/外边距/内边距交给宿主卡容器。
          EP 控件全退（el-input / el-input-number / el-switch / el-date-picker / el-select / el-button /
          el-tag / el-alert ⇒ 原生 input / select / checkbox / button + Tailwind 工具类）。
          行为面逐字保留：setValue / checkFormValues 复核 / emit('submit'|'cancel') /
@@ -21,17 +22,13 @@
       <span class="flex-none ml-auto text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] whitespace-nowrap font-normal text-[#2563eb] bg-[#eff4ff]">{{ scenarioLabel }}</span>
     </div>
 
-    <div :class="readonly ? '' : 'p-[11px]'">
-      <!-- 已决只读态：同一张表单的业务标题（无 ▤ / 无场景胶囊，与 demo 只读样张一致） -->
-      <div v-if="readonly" class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">
-        {{ schema.title ?? '请填写以下信息' }}
-      </div>
+    <div :class="readonly || flat ? '' : 'p-[11px]'">
       <!-- 字段区：六型白名单控件，文案一律文本插值，永不 v-html。
            R-165 S5a 项 4：字段区 = **纯限高内滚**，按钮行与卡级错误条移出滚动区常驻
            （v7 `.gf` 口径：max-h + overflow-y-auto + 操作行在其下）。
            2A 批（裁决 §14.4）：表单 / 组合族限高改**双约束** `min(320px,45vh)` —— 正常窗口取
            320px 上限，矮窗口按视口比例收紧。 -->
-      <div :class="['min-w-0 max-h-[min(320px,45vh)] overflow-y-auto', readonly ? 'mx-[11px] mt-[9px]' : 'pr-[4px]', SCROLLBAR_CLASS]" data-testid="gf-fields">
+      <div :class="['min-w-0 max-h-[min(320px,45vh)] overflow-y-auto', readonly ? '' : 'pr-[4px]', SCROLLBAR_CLASS]" data-testid="gf-fields">
       <div v-for="field in schema.fields" :key="field.key" class="mb-[11px]">
         <!-- S6 批1（长内容审计 #12）：字段 label 由模型生成，可长且无空格 ⇒ 补 break-words
              （原无断词类，长 label 靠字段区 `overflow-y-auto` 溢出，横条或被卡 overflow-hidden 裁）。 -->
@@ -159,16 +156,6 @@
         </button>
       </div>
     </div>
-
-    <!-- footer 时间行（形制照 v7.html:685 的表单脚注行：顶细线 + 9px 11px + 11.8px #57606a + #f6f7f9 底）
-         已决只读态不渲染（时限已结束、表单已锁定）。 -->
-    <p
-      v-if="!readonly && remainingSeconds !== null"
-      data-testid="gf-deadline"
-      class="m-0 px-[11px] py-[9px] border-0 border-t border-solid border-[#eef0f3] text-[11.8px] text-[#57606a] bg-[#f6f7f9]"
-    >
-      {{ expired ? '已超时，表单不可再提交' : `剩余填写时间 ${formatCountdown(remainingSeconds)}` }}
-    </p>
   </div>
 </template>
 
@@ -189,7 +176,6 @@
 import { computed, ref, watch } from 'vue'
 import { buildInitialValues, checkFormValues, type FormFieldSpec, type FormSpec } from '@/types/form-schema'
 import { SCROLLBAR_CLASS } from '@/utils/markdown'
-import { formatCountdown } from '@/utils/format'
 
 /** 六型取值并集（number 的"未填"用 undefined 表示）。 */
 type FormModelValue = string | number | boolean | undefined | string[]
@@ -199,16 +185,15 @@ const props = withDefaults(defineProps<{
   submitting: boolean
   /** 后端 FORM_RESULT_REJECTED 的拒绝说明（挂起仍在等待，可改值重发或取消） */
   error: string | null
-  /** 剩余填写秒数（null = 帧未带时限） */
-  remainingSeconds: number | null
   /**
    * 2A 批（裁决 2026-10-17 §9 K1 / §10 F9）：**已决只读态** —— 同一张表单原样锁定：
-   * 六型控件全部原生 `disabled`、值回填、操作按钮行与时限脚注整块不渲染、卡级错误条不渲染。
+   * 六型控件全部原生 `disabled`、值回填、操作按钮行整块不渲染、卡级错误条不渲染
+   * （标题已在统一卡头，卡体不再重复标题 —— 2026-10-20 卡面一致性裁决）。
    */
   readonly?: boolean
   /**
    * 只读态回填值（GF 提交回执的 `submittedValues`）。`null`/缺省 ⇒ 回落 `buildInitialValues`
-   * 的初始态 —— 取消 / 超时收尾按 F9「未提交不记录」不保留任何填写内容。
+   * 的初始态 —— 取消收尾按 F9「未提交不记录」不保留任何填写内容。
    */
   initialValues?: Record<string, unknown> | null
   /**
@@ -216,6 +201,11 @@ const props = withDefaults(defineProps<{
    * AiPanel 待填写 GF 由统一卡头承载标题/状态时传 false（一卡一头，不重复标题）。
    */
   showHeader?: boolean
+  /**
+   * 嵌入态（默认 false，独立使用的既有行为不变）：**单框** —— 自绘描边/底色/外边距/内边距整块
+   * 退役，由宿主卡容器承担外框与留白（demo `card-consistency-fix.html` 场景四：一层框线）。
+   */
+  flat?: boolean
 }>(), { showHeader: true })
 
 const emit = defineEmits<{
@@ -231,7 +221,7 @@ const emit = defineEmits<{
  */
 const FI_BASE = 'w-full border rounded-[8px] px-[9px] py-[6px] font-[inherit] text-[13px] leading-[normal] text-[#1f2328] [outline:none] transition-colors duration-[150ms] focus:border-[#2563eb] disabled:cursor-default'
 /**
- * 待决态禁用观感（提交中 / 超时）：灰底灰字。
+ * 待决态禁用观感（提交中）：灰底灰字。
  * 2A 批（裁决 §11 G3 → §12 H2）：已决只读态只保留 `disabled:text-[#57606a]` 一条可读性灰字，
  * 底色与边框与待决态完全一致（「锁定不降对比度」），故与下面一条分开声明。
  */
@@ -300,7 +290,7 @@ const localProblems = ref<string[]>([])
  * 只读态值回填必须跟随 `initialValues` 后到：结局帧先切只读时卡已挂载（v-show 折叠也挂载），
  * `submittedValues` 往往在 `POST /frontend-tool-result` 应答后才写回 —— 只靠 setup 初始化会让
  * model 永久停在 schema 初始态。值再到 / 只读再到两种顺序都重灌；编辑态不重灌（不覆盖本地输入）。
- * `initialValues` 变 null（取消 / 超时收尾，F9 未提交不记录）同口径回落初始态。
+ * `initialValues` 变 null（取消收尾，F9 未提交不记录）同口径回落初始态。
  */
 function rehydrateReadonlyModel(): void {
   if (props.readonly !== true) {
@@ -316,12 +306,12 @@ watch(
   { deep: true, immediate: true }
 )
 
-const expired = computed(() => props.remainingSeconds !== null && props.remainingSeconds <= 0)
 /**
- * 禁用判据：提交中 / 已超时 / **已决只读**（K1：同一张表单控件原生 disabled 锁定）。
- * 只读态下不再有提交动作，置 disabled 纯属控件锁定。
+ * 禁用判据：提交中 / **已决只读**（K1：同一张表单控件原生 disabled 锁定）。
+ * 只读态下不再有提交动作，置 disabled 纯属控件锁定；去超时裁决后表单不再有「已超时」态
+ * （一直可填）。
  */
-const disabled = computed(() => props.readonly === true || props.submitting || expired.value)
+const disabled = computed(() => props.readonly === true || props.submitting)
 
 const scenarioLabel = computed(() => (props.schema.scenario === 'FILTER' ? '筛选条件' : '信息确认'))
 

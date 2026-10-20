@@ -321,7 +321,7 @@ public class ResilientChatService {
 					}, settled::completeExceptionally, () -> settled.complete(null));
 				watchdog.bind(subscription);
 
-				awaitSettled(settled, turnStartedAtMs, config);
+				awaitSettled(runId, settled, turnStartedAtMs, config);
 
 				// 硬规范②：正常结束必须有终帧（带 finishReason 的响应）；"安静地"结束 = 断流
 				if (!accumulator.sawTerminal()) {
@@ -342,7 +342,7 @@ public class ResilientChatService {
 				// 副作用 = 本次尝试内工具开始执行过，或台账在本次尝试开始后新增了执行记录
 				boolean sideEffect = this.beacon.startedCount(runId) > beaconBefore
 						|| this.store.ledgerCountSince(runId, attemptStartedAtMs) > 0;
-				boolean overBudget = System.currentTimeMillis() - turnStartedAtMs
+				boolean overBudget = elapsedExcludingGateWait(runId, turnStartedAtMs)
 						>= config.getTotalBudget().toMillis();
 				boolean hasNext = attempt < maxAttempts;
 				boolean retryable = violation.brokenStream() && !emitted && !sideEffect && hasNext && !overBudget;
@@ -370,24 +370,47 @@ public class ResilientChatService {
 		}
 	}
 
-	/** 有界等待：看门狗负责判定，这里只做最后一道墙钟兜底（避免任何路径下永久阻塞）。 */
-	private void awaitSettled(CompletableFuture<Void> settled, long turnStartedAtMs, AiProperties.Resilience config) {
-		long deadline = turnStartedAtMs + config.getTotalBudget().toMillis() + 1000L;
-		long remain = Math.max(1000L, deadline - System.currentTimeMillis());
-		try {
-			settled.get(remain, TimeUnit.MILLISECONDS);
+	/**
+	 * 有界等待：看门狗负责判定，这里只做最后一道墙钟兜底（避免任何路径下永久阻塞）。
+	 *
+	 * <p><b>人机预算分离</b>（用户裁决 2026-10-20 第 3 条）：兜底判据同样是"墙钟 − 挂起等待"。
+	 * 确认门 / {@code generative_form} 没有等待上限，一次十几分钟的表单填写期间这里必须继续等
+	 * —— 否则 300s 一到就被折算成 {@code TOTAL_BUDGET}，把"无超时"变成 300s 的死线。
+	 * 故改成<b>短切片轮询</b>：每片复查一次"扣除等待后还剩多少预算"。
+	 */
+	private void awaitSettled(String runId, CompletableFuture<Void> settled, long turnStartedAtMs,
+			AiProperties.Resilience config) {
+		long budgetMs = config.getTotalBudget().toMillis();
+		while (true) {
+			long remain = budgetMs + 1000L - elapsedExcludingGateWait(runId, turnStartedAtMs);
+			if (remain <= 0) {
+				throw new StreamViolationException(StreamViolationException.TOTAL_BUDGET,
+						"本轮总预算 " + config.getTotalBudget() + " 已耗尽（墙钟兜底；人工等待不计入）");
+			}
+			try {
+				settled.get(Math.max(1000L, remain), TimeUnit.MILLISECONDS);
+				return;
+			}
+			catch (TimeoutException ex) {
+				// 切片到期：可能是预算真耗尽，也可能只是挂起等待中预算被暂停 —— 回到循环复查
+			}
+			catch (InterruptedException ex) {
+				Thread.currentThread().interrupt();
+				throw new StreamViolationException(StreamViolationException.CANCELLED, "运行线程被中断，本轮按取消收尾");
+			}
+			catch (ExecutionException ex) {
+				throw asRuntime(ex.getCause() == null ? ex : ex.getCause());
+			}
 		}
-		catch (TimeoutException ex) {
-			throw new StreamViolationException(StreamViolationException.TOTAL_BUDGET,
-					"本轮总预算 " + config.getTotalBudget() + " 已耗尽（墙钟兜底）");
-		}
-		catch (InterruptedException ex) {
-			Thread.currentThread().interrupt();
-			throw new StreamViolationException(StreamViolationException.CANCELLED, "运行线程被中断，本轮按取消收尾");
-		}
-		catch (ExecutionException ex) {
-			throw asRuntime(ex.getCause() == null ? ex : ex.getCause());
-		}
+	}
+
+	/**
+	 * 已计入预算的时长（毫秒）= 墙钟 − 本轮累计的挂起等待（含正在进行的等待）。
+	 *
+	 * <p>为什么不只扣"已结束的等待窗口"：看门狗与兜底判据每一拍都要判，等待没结束时也必须暂停预算。
+	 */
+	private long elapsedExcludingGateWait(String runId, long turnStartedAtMs) {
+		return (System.currentTimeMillis() - turnStartedAtMs) - this.beacon.gateWaitMs(runId);
 	}
 
 	/** 把任意异常归类成带 code 的 {@link StreamViolationException}（断流判定只看 code）。 */
@@ -930,8 +953,8 @@ public class ResilientChatService {
 		out.put("interEventTimeout", String.valueOf(config.getInterEventTimeout()));
 		out.put("maxAttempts", config.getMaxAttempts());
 		out.put("totalBudget", String.valueOf(config.getTotalBudget()));
-		// 两个挂起键分场景（裁决③拆键）：诊断快照的键名与语义一对齐，不再用旧的合并键名
-		out.put("confirmTimeout", String.valueOf(this.properties.getHitl().getConfirmTimeout()));
+		// 确认门已无等待上限（裁决 2026-10-20），故不再报告 confirmTimeout；
+		// 前端工具键只对即时执行类前端工具有意义（generative_form 豁免）。
 		out.put("frontendToolTimeout", String.valueOf(this.properties.getHitl().getFrontendToolTimeout()));
 		out.put("watchdogTickMillis", StreamWatchdog.TICK_MILLIS);
 		return out;
@@ -943,6 +966,7 @@ public class ResilientChatService {
 		out.put("toolActive", this.beacon.isActive(runId));
 		out.put("toolStarted", this.beacon.startedCount(runId));
 		out.put("lastToolActivityAtMs", this.beacon.lastActivityAtMs(runId));
+		out.put("gateWaitMs", this.beacon.gateWaitMs(runId));
 		out.put("cancelled", this.cancellations.isCancelled(runId));
 		out.put("cancelPolls", this.cancellations.polls());
 		out.put("budget", Duration.ofMillis(this.properties.getResilience().getTotalBudget().toMillis()).toString());

@@ -15,8 +15,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  * AI 运行线程模型（S4.2 §2 exec/AiExecutorConfig + DC-12：禁用虚拟线程）。
  *
  * <h2>挂起专用有界平台线程池</h2>
- * 一轮对话占用一条线程直至终帧 —— 挂起等待（确认门 ≤ {@code app.ai.hitl.confirm-timeout}，
- * 默认 240s）就是在这一条线程上阻塞的。因此：
+ * 一轮对话占用一条线程直至终帧 —— 挂起等待（确认门与 {@code generative_form} 自 2026-10-20
+ * 起<b>无上限</b>；即时执行类前端工具默认 120s）就是在这一条线程上阻塞的。因此：
  * <ul>
  * <li>池容量 = {@code app.ai.suspend.pool-size}（默认 20）= <b>挂起并发上限</b>
  * （ADR-2 重审 N1：BLOCKING 形态每次挂起实占本池 1 条 + 官方硬编码 boundedElastic 1 条）；</li>

@@ -18,9 +18,9 @@ import java.util.function.Consumer;
  * 四种"流已不再前进"的情形统一变成一次 {@link StreamViolationException}。
  *
  * <h2>为什么不直接用 {@code Flux.timeout(...)}</h2>
- * 官方 {@code timeout} 只有"距上一个事件多久"的概念，而挂起等待（上限由
- * {@code app.ai.hitl.confirm-timeout} 与 {@code app.ai.hitl.frontend-tool-timeout} 两键按场景给出：
- * 确认门等人 240s / 前端工具等机器 120s）期间上游<b>本来就</b>是静默的 —— 用纯 timeout 会把
+ * 官方 {@code timeout} 只有"距上一个事件多久"的概念，而挂起等待（确认门与
+ * {@code generative_form} 现在<b>没有上限</b>，其余前端工具 120s；见 {@code ConfirmGate}）期间
+ * 上游<b>本来就</b>是静默的 —— 用纯 timeout 会把
  * 一次长达分钟级的人工确认误判成断流（SM-02 的判据正是这一条）。因此本类把两个硬规范写进判定：
  * <ol>
  * <li><b>超时阈值 &gt; 最长工具耗时</b>：{@link ToolActivityBeacon#isActive(String)} 为真时
@@ -52,6 +52,14 @@ public class StreamWatchdog implements AutoCloseable {
 
 	private final long turnStartedAtMs;
 
+	/**
+	 * 构造时刻已累计的挂起等待（毫秒）：重试后新尝试的扣除基线。
+	 *
+	 * <p>总预算是<b>轮</b>维度的，故扣除量也是"本轮累计"，而不是"本次尝试累计" ——
+	 * 每次尝试的看门狗只扣自己这段窗口里新增的等待（超出基线之和），否则上一轮的等待会被重复扣。
+	 */
+	private final long gateWaitBaseMs;
+
 	private final Consumer<StreamViolationException> onViolation;
 
 	private final AtomicLong lastUpstreamAtMs = new AtomicLong();
@@ -78,6 +86,7 @@ public class StreamWatchdog implements AutoCloseable {
 		this.beacon = beacon;
 		this.cancellations = cancellations;
 		this.turnStartedAtMs = turnStartedAtMs;
+		this.gateWaitBaseMs = beacon.gateWaitMs(runId);
 		this.onViolation = onViolation;
 		this.lastUpstreamAtMs.set(turnStartedAtMs);
 		// 同进程取消的加速通道：监听者只做"当场判定"，权威态仍在 Redis
@@ -127,10 +136,12 @@ public class StreamWatchdog implements AutoCloseable {
 				fire(StreamViolationException.CANCELLED, "本轮对话已被取消（取消标志已置位）");
 				return;
 			}
-			// ② 总预算（墙钟）
-			if (now - this.turnStartedAtMs >= this.config.getTotalBudget().toMillis()) {
+			// ② 总预算（墙钟，<b>扣除挂起等待</b>）：等人（确认门 / generative_form）的时间不计入
+			// 预算 —— 否则"用户在想"会被判成 TOTAL_BUDGET，把无上限的等待变成 300s 的死线。
+			long elapsedMs = elapsedSinceTurnStart(now);
+			if (elapsedMs >= this.config.getTotalBudget().toMillis()) {
 				fire(StreamViolationException.TOTAL_BUDGET, "本轮总预算 " + this.config.getTotalBudget()
-						+ " 已耗尽（app.ai.resilience.total-budget）");
+						+ " 已耗尽（app.ai.resilience.total-budget；人工等待 " + gateWaitMs() + "ms 已扣除）");
 				return;
 			}
 			// ③ 硬规范①：工具执行期间不计静默（挂起等待本质上就是上游静默）
@@ -154,6 +165,21 @@ public class StreamWatchdog implements AutoCloseable {
 		catch (Exception ex) {
 			log.debug("看门狗节拍异常 runId={}：{}", this.runId, ex.getMessage());
 		}
+	}
+
+	/**
+	 * 本轮"计入预算"的已用时长（毫秒）= 墙钟 − 挂起等待（相对本看门狗构造时刻的新增量）。
+	 *
+	 * <p>只扣本尝试窗口内新增的等待：{@link #gateWaitBaseMs} 是构造时已累计的量，重试后
+	 * 新看门狗从新基线起算，不会把上一次尝试的等待重复扣除。
+	 */
+	private long elapsedSinceTurnStart(long nowMs) {
+		return (nowMs - this.turnStartedAtMs) - gateWaitMs();
+	}
+
+	/** 本尝试窗口内新增的挂起等待（毫秒）。 */
+	private long gateWaitMs() {
+		return Math.max(0L, this.beacon.gateWaitMs(this.runId) - this.gateWaitBaseMs);
 	}
 
 	private void fire(String code, String message) {

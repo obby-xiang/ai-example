@@ -423,7 +423,7 @@ describe('卡片三类型统一判据（tool / hitl / form）', () => {
       key: 'pending', label: '待执行', tone: 'primary'
     })
     expect(cardStatusOf(makeTool({ kind2: 'CONFIRM', status: 'pending', requiresAction: true }))).toEqual({
-      key: 'pending', label: '等待确认', tone: 'primary'
+      key: 'pending', label: '待确认', tone: 'warning'
     })
     expect(cardStatusOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'pending', requiresAction: true }))).toEqual({
       key: 'pending', label: '待填写', tone: 'primary'
@@ -446,10 +446,6 @@ describe('卡片三类型统一判据（tool / hitl / form）', () => {
     for (const [status, label, tone] of matrix) {
       expect(cardStatusOf(makeTool({ status }))).toEqual({ key: status, label, tone })
     }
-    // 本地判定的超时作废沿用段标记，不落「会话已失效」
-    expect(cardStatusOf(makeTool({ status: 'expired', expiredLocally: true }))).toEqual({
-      key: 'expired', label: '已超时作废', tone: 'neutral'
-    })
   })
 
   it('cardStatusOf：HITL 六态 = readOnlyStateOf 单一状态机（key / label / tone）', () => {
@@ -490,7 +486,7 @@ describe('卡片三类型统一判据（tool / hitl / form）', () => {
       key: 'unknown', label: '结局未知（未确认成功/失败）', tone: 'neutral'
     })
     expect(cardStatusOf(makeTool({ kind2: 'CONFIRM', status: 'pending' }))).toEqual({
-      key: 'pending', label: '等待确认', tone: 'primary'
+      key: 'pending', label: '待确认', tone: 'warning'
     })
     // 契约增量：skipped 不是决策态 —— 门卡/表单卡同样显示「已跳过」，不被只读状态机折成「已超时」
     expect(cardStatusOf(makeTool({ kind2: 'CONFIRM', status: 'skipped' }))).toEqual({

@@ -19,7 +19,7 @@ import type { ToolPart, ToolRunStatus } from '@/types/ai'
  *  问题1 偏差修正批项 3：导出给面板的摘要去重判据用 —— 无映射工具的兜底摘要按前缀剥掉工具名后
  *  只剩状态词，而状态词已由同屏的状态胶囊承担 ⇒ 摘要位不再重复渲一次。 */
 export const TOOL_SUMMARY_STATUS_WORDS: Record<ToolRunStatus, string> = {
-  pending: '等待确认',
+  pending: '待确认',
   running: '调用中',
   succeeded: '已完成',
   failed: '失败',

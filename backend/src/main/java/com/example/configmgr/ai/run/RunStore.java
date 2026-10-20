@@ -20,12 +20,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 挂起态与台账的 Redis 外置存储（S4.2 §2 {@code run/RunStore}，移植自 SP-02 同名实现）。
  *
- * <h2>键结构（全部带 TTL，前缀 {@code ai:}）</h2>
+ * <h2>键结构（run 级键<b>全部带滑动 TTL</b> = {@code app.ai.session-ttl}，默认 24h，前缀 {@code ai:}）</h2>
+ * <p>
+ * <b>无绝对上限</b>（用户裁决 2026-10-20 第 4 条）：每次写键/心跳都把该键重新养满一个 TTL，
+ * 挂起等待期间的心跳（2s 一拍）照常续期 —— 会话活着，卡的后台数据就活着。原 T3-8 的
+ * "创建时刻 + session-ttl 绝对封顶"已退役。
  * <ul>
  * <li>{@code ai:run:<runId>} STRING（JSON）—— {@link RunSnapshot}：完整请求历史 +
  * 挂起中的 {@code assistant(tool_calls)} + 状态 + 上下文；</li>
@@ -46,7 +49,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * 序号时 {@code SET} 一次并随帧刷新 TTL=session-ttl（与归档同寿）。delta 帧跳过归档后
  * "归档末帧"不再是可靠的续号锚点，跨进程续号改由本键接管（候选 = max(归档末帧, ai:seq) + 1）；</li>
  * <li>{@code ai:session:current:<sessionId>} STRING（value=runId，T2b-D#1）——
- * session → 当前挂起轮的索引：挂起写入、轮终态清除、TTL 对齐会话锁 watchdog；
+ * session → 当前挂起轮的索引：挂起写入、轮终态清除、TTL 对齐 session-ttl（与会话/快照同寿）；
  * 仅供 {@code GET /api/ai/runs/current} 重建挂起态，<b>不承诺同 session 多页签共享</b>。</li>
  * </ul>
  *
@@ -76,8 +79,8 @@ public class RunStore {
 
 	/**
 	 * session → 当前挂起轮的索引键前缀（T2b-D#1）：{@code ai:session:current:<sessionId>}
-	 * STRING（value = runId）。挂起写入、轮终态清除、TTL 对齐会话锁 watchdog
-	 * （{@code app.ai.session.lock.ttl}），O(1) 读写。
+	 * STRING（value = runId）。挂起写入、轮终态清除、TTL 对齐 {@code app.ai.session-ttl}
+	 * （与会话/快照同寿，进程死后索引不会先于挂起态消失），O(1) 读写。
 	 */
 	public static final String SESSION_CURRENT_PREFIX = "ai:session:current:";
 
@@ -99,24 +102,8 @@ public class RunStore {
 	 */
 	public static final int EVENT_WINDOW = 3000;
 
-	/**
-	 * 已过绝对上限时的"不再续期"TTL（T3-8）：{@code SET}/{@code EXPIRE} 不接受非正 TTL，
-	 * 而"剩余 ≤ 0"的语义是"该键此刻就该消失" —— 用一个最小正 TTL 让键随即过期，
-	 * 既保住"绝对上限"（不会因为一次续期把轮次再养 6 小时），又不给 Redis 留下永久键。
-	 */
-	public static final Duration EXPIRED_RENEWAL = Duration.ofSeconds(1);
-
 	/** 本实例标识：区分"崩溃前的旧实例"与"续跑的新实例"。 */
 	private final String instanceId;
-
-	/**
-	 * runId → 创建时刻（毫秒）的进程内缓存（T3-8）。
-	 *
-	 * <p>为什么可以缓存：{@link RunSnapshot#getCreatedAtMs()} 一经写入<b>永不改变</b>
-	 * （只读锚点），故缓存不会陈旧；没有它，每个业务帧（{@code appendEvent}/{@code touchActivity}）
-	 * 都得为"算剩余 TTL"多读一次快照键，长流式轮次下等于把 Redis 读放大约一倍。
-	 */
-	private final Map<String, Long> runCreatedAtMs = new ConcurrentHashMap<>();
 
 	private final StringRedisTemplate redis;
 
@@ -182,7 +169,6 @@ public class RunStore {
 		snapshot.setMessageJson(codec.serializeAll(history));
 		snapshot.setCreatedBy(this.instanceId);
 		snapshot.setCreatedAtMs(System.currentTimeMillis());
-		this.runCreatedAtMs.put(runId, snapshot.getCreatedAtMs());
 		save(snapshot);
 		this.redis.opsForSet().add(RUN_INDEX, runId);
 		return snapshot;
@@ -190,13 +176,9 @@ public class RunStore {
 
 	public void save(RunSnapshot snapshot) {
 		snapshot.setUpdatedAtMs(System.currentTimeMillis());
-		long createdAt = snapshot.getCreatedAtMs();
-		if (createdAt > 0) {
-			this.runCreatedAtMs.put(snapshot.getRunId(), createdAt);
-		}
 		try {
 			this.redis.opsForValue().set(runKey(snapshot.getRunId()), this.mapper.writeValueAsString(snapshot),
-					ttlFor(snapshot.getRunId(), createdAt));
+					ttlFor(snapshot.getRunId()));
 		}
 		catch (Exception ex) {
 			throw new IllegalStateException("无法写入轮次快照 " + snapshot.getRunId(), ex);
@@ -217,9 +199,10 @@ public class RunStore {
 
 	/**
 	 * 记录"该 session 当前挂起可重建的轮"：{@code SET ai:session:current:<sessionId> <runId>}，
-	 * TTL 对齐会话锁 watchdog（{@code app.ai.session.lock.ttl}，当前 10m）——
-	 * 挂起期由 {@code ConfirmGate} 心跳续期（与锁同寿），进程死亡后键随 TTL 过期，
-	 * {@code GET /api/ai/runs/current} 据此返回明确空态（三分支语义之一）。
+	 * TTL 对齐 {@code app.ai.session-ttl}（默认 24h）—— 挂起期由 {@code ConfirmGate} 心跳续期
+	 * （与快照/归档同寿）。<b>P2-3</b>：不再用会话锁的 10m —— 进程崩溃后索引与挂起态同寿，
+	 * 重启后仍能定位到那一轮；自然过期（24h 无活动）后才由
+	 * {@code GET /api/ai/runs/current} 返回明确空态（三分支语义之一）。
 	 *
 	 * <p>
 	 * <b>约束（红队 B2）</b>：不承诺同 session 多页签共享 —— 索引只覆盖
@@ -289,15 +272,18 @@ public class RunStore {
 	}
 
 	/**
-	 * 索引 TTL（T2b-D#1，不用快照的 session-ttl）：来源分两层看 —— <b>取值</b>取自配置项
-	 * {@code app.ai.session.lock.ttl}（{@code properties.getSession().getLock().getTtl()}，
-	 * 与会话锁 watchdog 共用同一配置）；<b>续期</b>与会话锁 watchdog 无关，而是由
-	 * {@code ConfirmGate} 挂起等待循环的心跳分支每拍调用
-	 * {@link #renewSessionCurrent(String, String)} 刷新为同一 TTL，轮落到终态则由
-	 * {@link #clearSessionCurrent(String, String)} 主动删除（红队 S3-3 措辞修正）。
+	 * 索引 TTL = <b>会话 TTL</b>（{@code app.ai.session-ttl}，默认 24h）—— 与快照/归档/待决同寿。
+	 *
+	 * <p>红队 P2-3（收尾批）：取值原先复用了会话锁 watchdog 的 {@code app.ai.session.lock.ttl}
+	 * （10m），但锁 TTL 只约束"一轮的互斥窗口"，不是"进程死后索引该活多久"。进程在挂起期崩溃后，
+	 * 心跳随进程一起停摆；索引若只活 10m，就会比同轮的快照/归档（24h）先消失，
+	 * 重启后的 {@code GET /api/ai/runs/current} 于是报"无当前轮"——正是"索引孤儿"。
+	 * 现在取值与会话同寿，<b>续期逻辑不变</b>：确认门挂起等待循环每拍调用
+	 * {@link #renewSessionCurrent(String, String)} 续期，轮落到终态由
+	 * {@link #clearSessionCurrent(String, String)} 主动删除。
 	 */
 	private Duration sessionCurrentTtl() {
-		return this.properties.getSession().getLock().getTtl();
+		return this.properties.getSessionTtl();
 	}
 
 	public RunSnapshot get(String runId) {
@@ -318,7 +304,6 @@ public class RunStore {
 		this.redis.delete(List.of(runKey(runId), pendingKey(runId), claimKey(runId), ledgerKey(runId),
 				eventsKey(runId), seqKey(runId)));
 		this.redis.opsForSet().remove(RUN_INDEX, runId);
-		this.runCreatedAtMs.remove(runId);
 	}
 
 	/** 全部仍存活的 runId（索引里已过期的惰性剔除）。 */
@@ -665,6 +650,35 @@ public class RunStore {
 	}
 
 	/**
+	 * 挂起期心跳对<b>卡的后台数据</b>的滑动续期（用户裁决 2026-10-20 第 4 条）。
+	 *
+	 * <p>确认门 / 表单卡的等待没有上限，而这张卡的可重建性依赖四类键：轮快照
+	 * （{@code ai:run}，含挂起中的 assistant(tool_calls) 与历史）、待决条目
+	 * （{@code ai:pending}，人的决策落点）、帧归档（{@code ai:events}，重挂回放）、
+	 * 已发放序号（{@code ai:seq}，差量补发锚点）。若只续心跳键，一次超过 session-ttl 的长等
+	 * 会让"卡还在、后台已过期" —— 人点批准时反而找不到挂起态。
+	 * 故 {@code ConfirmGate} 的 2s 心跳每拍把这些键（存在才生效）整额续期：
+	 * <b>会话活着，卡的后台数据就活着</b>；不计入预算的等待也因此可以放心地长。
+	 *
+	 * <p>Redis {@code EXPIRE} 对不存在的键是无操作（不报错），故本方法对"尚未写出"的键安全。
+	 */
+	public void renewSuspensionTtl(String runId) {
+		if (runId == null) {
+			return;
+		}
+		Duration ttl = ttlFor(runId);
+		try {
+			this.redis.expire(runKey(runId), ttl);
+			this.redis.expire(pendingKey(runId), ttl);
+			this.redis.expire(eventsKey(runId), ttl);
+			this.redis.expire(seqKey(runId), ttl);
+		}
+		catch (Exception ex) {
+			log.debug("挂起期续期轮键失败 runId={}：{}", runId, ex.getMessage());
+		}
+	}
+
+	/**
 	 * 该轮最近一次活动时刻（毫秒）：取 {@code ai:events:<runId>} 最后一帧的 {@code atMs}
 	 * 与心跳活动戳（{@link #touchActivity}）的<b>较新者</b>。
 	 *
@@ -738,65 +752,19 @@ public class RunStore {
 		return out;
 	}
 
-	// ── TTL（T3-8：滑动 TTL + 绝对上限） ─────────────────────────────────────────
+	// ── TTL（滑动续期：活跃即续，无绝对上限） ─────────────────────────────────────
 
 	/**
-	 * 本次续期应使用的 TTL（T3-8）：取"会话滑动 TTL"与"该轮创建时刻 + 会话 TTL 的剩余量"的较小者。
+	 * 本次写入/续期应使用的 TTL：<b>整额 {@code app.ai.session-ttl}（默认 24h）</b>。
 	 *
-	 * <p>锚点是 {@link RunSnapshot#getCreatedAtMs()}（不可变，A15）：写出器/心跳/台账等所有续期点
-	 * 都改走本方法，于是<b>续期不能突破"创建时刻 + session-ttl"</b> —— 否则一个每 2s 心跳的挂起轮
-	 * 可以无限续期，与 DC-06③/DC-09 D1 的"会话不做长期留存"相悖。
+	 * <p>滑动续期（用户裁决 2026-10-20 第 4 条）：每一次写键（业务帧、心跳、台账、待决条目、
+	 * 序号、轮快照）都把该键重新养满一个 TTL —— 挂起等待期间 2s 的心跳照常续期 run 键，
+	 * 于是"会话活着，卡的后台数据就活着"。
+	 * <b>不再有"创建时刻 + session-ttl"的绝对封顶</b>：那张 240s 的确认卡可以一直挂着，
+	 * 它的外置态不会被 6h 的创建时刻封顶掐断。整条会话的寿命由会话记忆键自己的滑动 TTL 承载。
 	 */
 	private Duration ttlFor(String runId) {
-		return ttlFor(runId, 0L);
-	}
-
-	/** 已知创建时刻时的 TTL（{@link #save} 走这条，省一次 Redis 读）。 */
-	private Duration ttlFor(String runId, long knownCreatedAtMs) {
-		long createdAt = knownCreatedAtMs > 0 ? knownCreatedAtMs : createdAtMs(runId);
-		return remainingTtl(createdAt, System.currentTimeMillis(), this.properties.getSessionTtl());
-	}
-
-	/**
-	 * 纯函数：剩余 TTL = min(sessionTtl, createdAt + sessionTtl − now)（T3-8 / A15）。
-	 *
-	 * <ul>
-	 * <li>{@code createdAtMs <= 0}（旧数据/未登记）→ 回落整额 {@code sessionTtl}，不制造"立刻过期"；</li>
-	 * <li>剩余 {@code > 0} → 取较小者（正常滑动，但被绝对上限压住）；</li>
-	 * <li>剩余 {@code <= 0}（已过上限）→ {@link #EXPIRED_RENEWAL}：<b>不再续期</b>，
-	 *     键随最小正 TTL 立即过期（Redis 不接受非正 TTL）。</li>
-	 * </ul>
-	 */
-	static Duration remainingTtl(long createdAtMs, long nowMs, Duration sessionTtl) {
-		if (sessionTtl == null || sessionTtl.isZero() || sessionTtl.isNegative() || createdAtMs <= 0) {
-			return sessionTtl;
-		}
-		long capMs = createdAtMs + sessionTtl.toMillis();
-		long remainMs = capMs - nowMs;
-		if (remainMs <= 0) {
-			return EXPIRED_RENEWAL;
-		}
-		return Duration.ofMillis(Math.min(sessionTtl.toMillis(), remainMs));
-	}
-
-	/** 该轮的创建时刻（进程内缓存优先；未命中则读一次快照键，读不到返回 0 = 未知）。 */
-	private long createdAtMs(String runId) {
-		Long cached = this.runCreatedAtMs.get(runId);
-		if (cached != null) {
-			return cached;
-		}
-		try {
-			RunSnapshot snapshot = get(runId);
-			long createdAt = snapshot == null ? 0L : snapshot.getCreatedAtMs();
-			if (createdAt > 0) {
-				this.runCreatedAtMs.put(runId, createdAt);
-			}
-			return createdAt;
-		}
-		catch (Exception ex) {
-			log.debug("读取轮次创建时刻失败 runId={}：{}", runId, ex.getMessage());
-			return 0L;
-		}
+		return this.properties.getSessionTtl();
 	}
 
 }

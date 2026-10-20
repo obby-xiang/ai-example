@@ -27,7 +27,8 @@ import static org.mockito.Mockito.when;
  * 与订阅者，不碰 Redis/Spring —— 锁住的正是"帧里到底有没有这几个字段、心跳有没有进归档"。
  *
  * <ul>
- * <li><b>T4</b>：{@code confirm_request} / {@code frontend_tool_request} 带绝对 {@code expiresAt}；</li>
+ * <li><b>T4</b>：只有<b>有时限</b>的 {@code frontend_tool_request} 带 {@code timeoutSeconds} +
+ * 绝对 {@code expiresAt}；无上限的确认卡与 {@code generative_form} 两键都不出现；</li>
  * <li><b>T5</b>：{@code tool_result}/{@code frontend_tool_result} 带 {@code messageId}，
  * 正文有 {@code message_start → delta → message_end} 三段式边界；</li>
  * <li><b>T6</b>：每帧带单调 {@code seq}（跨进程续号），reattach 用 {@code lastSeq} 只补增量。
@@ -75,21 +76,31 @@ class SseChatEmitterFramesTest {
 
     // ── T4：expiresAt ────────────────────────────────────────────────────────
 
+    /**
+     * 2026-10-20 裁决后：<b>只有有时限的前端工具</b>带到期时刻。
+     * 确认卡无上限（帧里不带 {@code timeoutSeconds}/{@code expiresAt}），
+     * {@code generative_form}（timeoutSeconds=null）同样不带 —— 前端据此不武装倒计时。
+     */
     @Test
-    void suspendRequestsCarryAbsoluteExpiry() {
+    void suspendRequestsCarryAbsoluteExpiryOnlyWhenThereIsADeadline() {
         long before = System.currentTimeMillis();
-        this.emitter.confirmRequest(pending("call-1"), 120);
+        this.emitter.confirmRequest(pending("call-1"));
         this.emitter.frontendToolRequest(pending("call-2"), 30);
+        this.emitter.frontendToolRequest(generativeForm("call-3"), null);
         long after = System.currentTimeMillis();
 
         List<Map<String, Object>> archived = archivedFrames();
         assertThat(archived).extracting(frame -> frame.get("type"))
-                .containsExactly("confirm_request", "frontend_tool_request");
-        assertThat((Long) archived.get(0).get("expiresAt"))
-                .isBetween(before + 120_000L, after + 120_000L);
-        assertThat(archived.get(0)).containsEntry("timeoutSeconds", 120);
+                .containsExactly("confirm_request", "frontend_tool_request", "frontend_tool_request");
+        assertThat(archived.get(0)).as("确认卡没有到期时刻（一直等人）")
+                .doesNotContainKey("expiresAt")
+                .doesNotContainKey("timeoutSeconds");
         assertThat((Long) archived.get(1).get("expiresAt"))
                 .isBetween(before + 30_000L, after + 30_000L);
+        assertThat(archived.get(1)).containsEntry("timeoutSeconds", 30);
+        assertThat(archived.get(2)).as("generative_form 无上限：键不出现（与 confirm_request 同口径）")
+                .doesNotContainKey("timeoutSeconds")
+                .doesNotContainKey("expiresAt");
     }
 
     // ── T5：messageId 与三段式边界 ───────────────────────────────────────────
@@ -211,7 +222,7 @@ class SseChatEmitterFramesTest {
         long before = System.currentTimeMillis();
         this.emitter.start("s-1");
         this.emitter.delta("正文");
-        this.emitter.confirmRequest(pending("call-1"), 120);
+        this.emitter.confirmRequest(pending("call-1"));
         this.emitter.heartbeat(Map.of("suspendKind", "confirm", "waitedSeconds", 4));
         this.emitter.done(Map.of(), "deepseek-flash", Map.of("cancelled", false));
         long after = System.currentTimeMillis();
@@ -230,17 +241,19 @@ class SseChatEmitterFramesTest {
     }
 
     @Test
-    void confirmRequestsShareOneClockBetweenAtMsAndExpiry() {
+    void frontendToolRequestSharesOneClockBetweenAtMsAndExpiry() {
         FrameWire wire = FrameWire.attachTo(this.emitter);
 
-        this.emitter.confirmRequest(pending("call-1"), 120);
+        this.emitter.confirmRequest(pending("call-1"));
         this.emitter.frontendToolRequest(pending("call-2"), 30);
+        this.emitter.frontendToolRequest(pending("call-3"), 120);
 
         List<Map<String, Object>> live = wire.frames();
         assertThat(live).extracting(frame -> frame.get("type"))
-                .containsExactly("confirm_request", "frontend_tool_request");
-        // 精确等式（long 运算，无容差）：expiresAt 与 atMs 必须同一取钟点，否则折算剩余时长会被毫秒差污染
-        for (Map<String, Object> frame : live) {
+                .containsExactly("confirm_request", "frontend_tool_request", "frontend_tool_request");
+        // 精确等式（long 运算，无容差）：expiresAt 与 atMs 必须同一取钟点，否则折算剩余时长会被毫秒差污染。
+        // 确认卡没有到期时刻（2026-10-20 裁决），故只对有时限的前端工具帧断言。
+        for (Map<String, Object> frame : live.subList(1, live.size())) {
             long atMs = ((Number) frame.get("atMs")).longValue();
             long expiresAt = ((Number) frame.get("expiresAt")).longValue();
             long timeoutSeconds = ((Number) frame.get("timeoutSeconds")).longValue();
@@ -254,7 +267,7 @@ class SseChatEmitterFramesTest {
         FrameWire wire = FrameWire.attachTo(this.emitter);
 
         this.emitter.start("s-1");
-        this.emitter.confirmRequest(pending("call-1"), 120);
+        this.emitter.confirmRequest(pending("call-1"));
         this.emitter.done(Map.of(), "deepseek-flash", Map.of());
 
         List<Map<String, Object>> live = wire.frames();
@@ -318,6 +331,14 @@ class SseChatEmitterFramesTest {
         PendingToolCall pending = pending(toolCallId);
         pending.setKind(PendingToolCall.KIND_FRONTEND);
         pending.setStatus(PendingToolCall.FRONTEND_RESULT);
+        return pending;
+    }
+
+    /** 生成式表单条目（前端通道，等待无上限）。 */
+    private static PendingToolCall generativeForm(String toolCallId) {
+        PendingToolCall pending = pending(toolCallId);
+        pending.setKind(PendingToolCall.KIND_FRONTEND);
+        pending.setName("generative_form");
         return pending;
     }
 

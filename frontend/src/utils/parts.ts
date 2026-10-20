@@ -599,7 +599,7 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
         kind2: 'CONFIRM',
         status: 'pending',
         args: frame.args,
-        // T4/T4-3：倒计时口径随段持久化 —— pendingCall 现由段派生，元数据必须在段上
+        // T4/T4-3：原始等待口径随段持久化（去超时后仅作对账 / 回滚，不驱动倒计时）
         timeoutSeconds: frame.timeoutSeconds,
         expiresAt: frame.expiresAt,
         atMs: frame.atMs,
@@ -616,10 +616,10 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
       const resolved: ConfirmOutcome = confirmDecisionOutcome(frame)
         ?? (frame.approved ? { state: 'approved' } : { state: 'rejected' })
       if (resolved.state === 'timeout') {
-        // ①b first-wins：超时通知不携带新的决策信息 —— 段已落定（倒计时归零的本地 expired、
-        // 或已被其它帧落终态）时不得把结局改写成另一种终态，也不得抹掉本地超时标记。
-        // 取舍（收口修 NIT-3）：不同页签的持久化形状可能不同 —— 本页签本地钟先到 ⇒
-        // expired+expiredLocally、无 decision；另一端拿到 TIMEOUT 帧 ⇒ expired+decision='timeout'。
+        // ①b first-wins：超时通知不携带新的决策信息 —— 段已落定（含其它页签先落的历史
+        // expired 段）时不得把结局改写成另一种终态。
+        // 取舍（收口修 NIT-3）：不同页签的持久化形状可能不同 —— 先到者可能是 expired+无
+        // decision（旧版本地判超时），也可能是 expired+decision='timeout'（本帧）。
         // 两者在卡面等价（readOnlyStateOf 均归「已超时」），故先到者形状保留即可，不为统一形状
         // 覆盖已落定段。与权威回执 gateReceiptOfStatus 的「无 decision」不对称是有意的：那条路
         // 只归一终态、不投影决策元数据，本路才承载帧带来的 decision。

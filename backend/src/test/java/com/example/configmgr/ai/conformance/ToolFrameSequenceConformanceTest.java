@@ -598,28 +598,59 @@ class ToolFrameSequenceConformanceTest {
 				.containsEntry("code", "TASK_FINALIZED");
 	}
 
-	/** 确认超时：帧与模型信封都是 {@code timeout/CONFIRM_TIMEOUT}，且零执行。 */
+	/**
+	 * 确认门<b>不再超时</b>（2026-10-20 用户裁决第 1 条）：
+	 * <ol>
+	 * <li>{@code confirm_request} 帧<b>不带</b> {@code timeoutSeconds}/{@code expiresAt}
+	 *     —— 前端据此不武装倒计时、不把按钮置灰；</li>
+	 * <li>跨过多个心跳节拍（2s/拍）期间<b>没有</b>任何收口帧：既无 {@code confirm_decision(timeout)}，
+	 *     也无 {@code tool_result}（旧逻辑在这里就会以 {@code CONFIRM_TIMEOUT} 收摊）；</li>
+	 * <li>人拒绝之后才收口：{@code confirm_decision(decision=reject)} → {@code tool_result}，
+	 *     且零执行。</li>
+	 * </ol>
+	 */
 	@Test
-	void confirmTimeoutSurfacesAsTimeoutEnvelope() {
+	void confirmRequestCarriesNoDeadlineAndNeverTimesOut() throws Exception {
 		stubConfirmTool("start_import");
-		this.properties.getHitl().setConfirmTimeout(java.time.Duration.ofSeconds(1));
 		SseChatEmitter out = this.registry.of(RUN_ID);
 		FrameWire wire = FrameWire.attachTo(out);
 		out.start(SESSION_ID);
 
-		ToolExecutionResult result = this.manager.executeToolCalls(prompt("start_import", "{\"taskId\":7}"),
-				response("start_import", "{\"taskId\":7}"));
+		Future<ConfirmGate.Submission> decision = this.decisionThread.submit(() -> {
+			wire.awaitType("confirm_request", 5000L);
+			Map<String, Object> request = FrameContract.oneOfType(wire.frames(), "confirm_request");
+			assertThat(request).as("确认卡没有等待上限").doesNotContainKey("timeoutSeconds").doesNotContainKey("expiresAt");
+			// 跨过多个心跳节拍：旧逻辑在 1s 上限下早已收摊，新逻辑必须仍在等
+			Thread.sleep(2500L);
+			List<Map<String, Object>> sofar = wire.frames();
+			assertThat(FrameContract.ofType(sofar, "confirm_decision")).as("等待期不得有任何决策帧").isEmpty();
+			assertThat(FrameContract.ofType(sofar, "tool_result")).as("等待期不得有工具结局帧").isEmpty();
+			return this.gate.submitDecision(RUN_ID, CALL_ID, false, "先不导入");
+		});
+
+		ToolExecutionResult result;
+		try {
+			result = this.manager.executeToolCalls(prompt("start_import", "{\"taskId\":7}"),
+					response("start_import", "{\"taskId\":7}"));
+			assertThat(decision.get(10, TimeUnit.SECONDS).outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
+		}
+		catch (Exception ex) {
+			throw new AssertionError(ex.getCause() == null ? ex : ex.getCause());
+		}
 		out.done(Map.of(), "deepseek-flash", Map.of("cancelled", false));
 
-		assertThat(this.fakeStartImport.invocations.get()).isZero();
-		Map<String, Object> frame = FrameContract.ofType(wire.frames(), "tool_result").get(0);
-		assertThat(frame).containsEntry("ok", false)
-				.containsEntry("outcome", ToolOutcome.TIMEOUT.wire())
-				.containsEntry("code", ToolOutcome.CODE_CONFIRM_TIMEOUT);
+		List<Map<String, Object>> frames = wire.frames();
+		List<Map<String, Object>> business = frames.stream()
+			.filter(frame -> !FrameContract.HEARTBEAT.equals(frame.get("type")))
+			.toList();
+		assertThat(FrameContract.types(business)).containsExactly("start", "suspended", "tool_start",
+				"confirm_request", "confirm_decision", "tool_result", "done");
+		FrameContract.assertConformant(business);
+		assertThat(this.fakeStartImport.invocations.get()).as("拒绝 ⇒ 零执行").isZero();
+		Map<String, Object> decisionFrame = FrameContract.oneOfType(frames, "confirm_decision");
+		assertThat(decisionFrame).containsEntry("decision", "reject").containsEntry("approved", false);
 		ToolResultEnvelope envelope = modelEnvelope(result);
-		assertThat(envelope.outcome()).isEqualTo(ToolOutcome.TIMEOUT.wire());
-		assertThat(envelope.code()).isEqualTo(ToolOutcome.CODE_CONFIRM_TIMEOUT);
-		assertThat(envelope.message()).contains("系统已自动取消该操作（工具未执行）");
+		assertThat(envelope.outcome()).isEqualTo(ToolOutcome.REJECTED.wire());
 	}
 
 	// ── 桩与辅助 ────────────────────────────────────────────────────────────

@@ -33,7 +33,7 @@ import {
 } from '@/utils/parts'
 import { ErrorCode, type SessionBusyConflict, type SuspendPoolSaturated } from '@/types/api'
 import { frameSeq, isTerminalFrame, type ToolOutcome } from '@/types/sse'
-import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiHealth, type AiHistory, type AiHistoryMessage, type AiRunCurrent, type AiSessionMirror, type ChatMessage, type ConfirmClock, type GateSubmission, type MessagePart, type PendingToolCall, type ToolPart, type ToolPartPatch, type ToolRunStatus } from '@/types/ai'
+import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiHealth, type AiHistory, type AiHistoryMessage, type AiRunCurrent, type AiSessionMirror, type ChatMessage, type GateSubmission, type MessagePart, type PendingToolCall, type ToolPart, type ToolPartPatch, type ToolRunStatus } from '@/types/ai'
 import { parseFormSchema, checkFormValues } from '@/types/form-schema'
 import type { SseFrame } from '@/types/sse'
 import type { WorkspaceActionRecord } from '@/types/tools'
@@ -62,15 +62,6 @@ let currentAbort: AbortController | null = null
  * `activeRunId` 仍是上一轮的值，而宿主消息 id 在 send / reattachActive / 续收入口即已就位。
  */
 let activeRoundHostId: string | null = null
-/** 生成式表单本地超时计时器（模块级：activeForm 被结局帧/新轮清掉时随之中和）。 */
-let formExpiryTimer: ReturnType<typeof setTimeout> | null = null
-
-function disarmFormExpiry(): void {
-  if (formExpiryTimer !== null) {
-    clearTimeout(formExpiryTimer)
-    formExpiryTimer = null
-  }
-}
 
 /**
  * R-166（口径③）：409 幂等拒绝后**等待真实裁决**的宽限（毫秒）—— 到点仍未收到结局帧，
@@ -112,105 +103,6 @@ export function createSessionId(): string {
     // 落回退实现
   }
   return `s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
-}
-
-/**
- * R-166（口径①/方案 A）：挂起倒计时改成**帧/心跳锚定、重派生只读**的口径。
- *
- * <h3>旧口径（T4-3 `foldDeadline`）为什么废弃</h3>
- * 旧真值 = 面板每次重派生时按帧差值现算：`deadline = 本地 now + (expiresAt − atMs)`。
- * 而 `expiresAt − atMs` 恒等于 `timeoutSeconds × 1000`（后端 `expiresAtEpochMs` 单点取钟），
- * 即"**帧构造那一刻**的完整剩余" —— 只有帧刚被收到时加上本地 now 才等于真剩余。一旦
- * ①重派生（`pendingConfirm` 引用变化 → 面板重算）或 ②刷新恢复（镜像/快照里的旧帧再折算一次），
- * 倒计时就被打回起点（R-166 症②"刷新/重派生闪回 04:00"）。
- *
- * <h3>新口径</h3>
- * - **锚点只写一次**（实时帧新鲜时）并由**心跳**刷新/校正，落成**本地钟的绝对到期时刻**
- *   （`ConfirmClock.deadlineMs`）；面板每秒 tick 只读 `deadlineMs − now` ⇒ 重派生天然幂等
- *   （同 `expiresAt` 重算同值，不闪回）；
- * - **心跳是主驱动**（`ConfirmGate.heartbeatData`）：剩余秒 = `timeoutSeconds − waitedSeconds`；
- * - **两条源的绝对到期同值**：后端确认帧 `expiresAt = atMs + timeoutSeconds×1000`，心跳
- *   `atMs + (timeoutSeconds − waitedSeconds)×1000` —— 心跳因 `waitedSeconds` 取整最多偏晚
- *   不到 1s，故并入时取 **min**（单调不回退，既不闪回也不因 1s 抖动"回跳"）；
- * - **刷新恢复走同一口径**：快照/镜像里的帧是陈旧的（`atMs` 是旧的），**不锚** ——
- *   挂起流的首个心跳（`ConfirmGate.HEARTBEAT_SECONDS` = 2s）到达即校正。
- *
- * 本地倒计时归零只作**兜底触发**（拉一次 `runs/current` 校正，见 `syncGateFromAuthority`），
- * 权威超时判据仍是后端 `ConfirmGate` 的结局帧。
- */
-
-/** 实时帧判新容差（毫秒）：|帧的 atMs − 本地钟| ≤ 本值才认"帧刚被收到"。 */
-export const FRESH_FRAME_TOLERANCE_MS = 5000
-
-/**
- * 帧是否为**实时新鲜帧**（新口径的锚定前提）。
- *
- * 为什么要这个判据：`expiresAt − atMs` 是"帧构造时刻的剩余"，只有帧**刚被收到**时加到本地
- * now 上才等于真剩余；重挂回放（后端 `replayTo` 原样重发归档帧）/ 刷新恢复给出的是**同一对
- * 陈旧值**，照搬折算就会把倒计时打回起点。实时帧的 |atMs − 本地钟| 只有网络传输耗时
- * （毫秒级），陈旧帧则 ≥ 已等待时长 —— 用时间差即可区分。
- *
- * 已知边界：若在确认帧到达后 5s 内刷新页面，该帧会被误判为新鲜 ⇒ 倒计时回起点一次、
- * 由随后的首个心跳校正（≤2s，取 min 后不回退）。容差取 5s 正是为压在心跳节拍量级上。
- */
-export function isFreshFrame(atMs?: number, nowMs: number = Date.now()): boolean {
-  return typeof atMs === 'number' && Number.isFinite(atMs) && atMs > 0
-    && Math.abs(nowMs - atMs) <= FRESH_FRAME_TOLERANCE_MS
-}
-
-/**
- * 陈旧帧判据（**锚定路唯一拦截条件**）：`atMs` 合法但已远离本地钟 ⇒ 该帧来自重挂回放 /
- * 刷新恢复，不得用于锚定。
- *
- * 缺 `atMs`（`undefined` / `0` / 负数）**不拦**：那是旧格式帧，无法判新旧，按既有回落口径
- * 处理（`expiresAt` 绝对值 → `timeoutSeconds` 相对秒），与 T4-3 起的兼容面一致。
- */
-export function isStaleFrame(atMs?: number, nowMs: number = Date.now()): boolean {
-  const usable = typeof atMs === 'number' && Number.isFinite(atMs) && atMs > 0
-  return usable && !isFreshFrame(atMs, nowMs)
-}
-
-/**
- * 确认帧 / 前端工具请求帧 → 本地绝对到期时刻。**只在帧新鲜时调用一次**（重派生不得调用）。
- *
- * 回落口径与旧版一致：缺 `atMs`（旧格式 / 损坏数据 / `≤ 0`）时用 `expiresAt` 绝对值对本地钟
- * （守卫挡掉"绝对 epoch 被当剩余时长"的膨胀面），再缺 `expiresAt` 才按 `timeoutSeconds`
- * 折算；三者皆无 → `null`（不武装倒计时）。`nowMs` 仅作可复算口，业务调用用默认值。
- */
-export function frameDeadlineLocal(
-  expiresAt?: number,
-  atMs?: number,
-  timeoutSeconds?: number,
-  nowMs: number = Date.now()
-): number | null {
-  if (typeof expiresAt === 'number' && Number.isFinite(expiresAt)) {
-    if (typeof atMs === 'number' && Number.isFinite(atMs) && atMs > 0 && expiresAt >= atMs) {
-      return nowMs + (expiresAt - atMs)
-    }
-    return expiresAt
-  }
-  return timeoutSeconds ? nowMs + timeoutSeconds * 1000 : null
-}
-
-/**
- * 挂起期心跳 → 本地绝对到期时刻（R-166 口径①的**主驱动**）。
- *
- * 剩余秒 = `timeoutSeconds − waitedSeconds`（后端 `ConfirmGate#heartbeatData` 同帧单点取值的
- * 两个数）；`waitedSeconds` 缺失/非法按 0（不因缺键把倒计时归零），倒挂（等待已超上限）归零。
- * `timeoutSeconds` 非法/缺失 → `null`（该帧不参与倒计时）。
- */
-export function heartbeatDeadlineLocal(
-  timeoutSeconds?: number,
-  waitedSeconds?: number,
-  nowMs: number = Date.now()
-): number | null {
-  if (typeof timeoutSeconds !== 'number' || !Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) {
-    return null
-  }
-  const waited = typeof waitedSeconds === 'number' && Number.isFinite(waitedSeconds) && waitedSeconds >= 0
-    ? waitedSeconds
-    : 0
-  return nowMs + Math.max(0, timeoutSeconds - waited) * 1000
 }
 
 /**
@@ -877,22 +769,10 @@ export const useAiStore = defineStore('ai', {
      */
     expandedBlocks: {} as Record<string, boolean>,
     /**
-     * R-166（口径①）：确认门倒计时时钟 —— 帧/心跳锚定的**本地绝对到期时刻**。
-     * 只在收到实时确认帧 / 挂起期心跳时写；**重派生（pendingCall 引用变化）只读不写**，
-     * 这是"同 expiresAt 重算同值、不闪回"的结构保证（见 `frameDeadlineLocal` 头注）。
-     * 不进镜像/持久化：刷新后由挂起流的首个心跳重建。
-     */
-    confirmClock: null as ConfirmClock | null,
-    /**
      * R-166（口径③）：确认门提交态（同 toolCallId 最多提交一次）。
      * 进表 = 点击批准/拒绝的同一刻；出表 = 结局帧 / 权威校正 / 提交失败回退。
      */
-    gateSubmissions: {} as Record<string, GateSubmission>,
-    /**
-     * R-166（口径④）：倒计时归零后已做过一次权威校正的记账（**每 toolCallId 只做一次**，
-     * 防每秒 tick 重复拉 `runs/current`）。
-     */
-    gateExpirySynced: {} as Record<string, true>
+    gateSubmissions: {} as Record<string, GateSubmission>
   }),
 
   getters: {
@@ -1423,9 +1303,8 @@ export const useAiStore = defineStore('ai', {
         }
         // 批2：挂起卡不再是"就地写独立投影"，而是**落段再派生** —— 段侧 requiresAction=true
         // 因为该条目正是"等人工/前端动作"的那一个（派生出唯一 pendingCall，不新增重复工具卡）
-        // R-166 口径变更：快照里的 expiresAt/atMs 是**陈旧帧口径**（atMs 是当年那一帧的构造时刻），
-        // 照搬"帧差值折算"会把倒计时打回满值（症②）。故本路**不锚门卡时钟** —— 段字段照原样
-        // 携带供对账，倒计时等挂起流首个心跳（`noteSuspendHeartbeat`）校正（刷新恢复走同一口径）。
+        // 去超时裁决后快照里的 expiresAt/atMs 只作对账口径：段字段照原样携带，前端不据其
+        // 折算任何倒计时 / 本地超时。
         this.upsertToolPart(host, {
           toolCallId: entry.toolCallId,
           name: entry.name,
@@ -1440,7 +1319,7 @@ export const useAiStore = defineStore('ai', {
         })
         deriveProjections(host)
         if (entry.name === GENERATIVE_FORM_TOOL && !this.activeForm) {
-          // deadline = null：不武装本地计时器，后端权威超时收敛（快照路径无 expiresAt 折算依据）
+          // 不武装任何本地时限：表单一直可填，收口只认后端结局帧 / 用户取消
           const spec = parseFormSchema(parseToolArgs(entry.arguments)?.form)
           if (spec) {
             this.activeForm = {
@@ -1448,8 +1327,7 @@ export const useAiStore = defineStore('ai', {
               runId: current.runId,
               form: spec,
               status: 'filling',
-              error: null,
-              deadline: null
+              error: null
             }
           }
           // schema 非法：只留挂起卡（用户可取消），不武装表单态
@@ -1590,12 +1468,8 @@ export const useAiStore = defineStore('ai', {
             this.streamInterrupted = true
             this.lastRoundOutcome = 'interrupted'
             this.notice = `连接中断，结果可能不完整（${info.reason ?? '未收到完成帧'}）。已生成的内容保留，可重新发送或一键重挂该轮。`
-            if (this.activeForm !== null) {
-              // 红队问题 2：断流是第五个收尾出口 —— 与 done/error/stop/resetSession 对齐，
-              // 收表单态与本地超时计时器（刷新后由后端权威超时收敛）
-              disarmFormExpiry()
-              this.activeForm = null
-            }
+            // 断流不是结局：确认卡/表单仍在等用户动作，activeForm 与待决段必须原样保留
+            //（重挂或刷新后由 restoreSuspendedSnapshot 按后端快照续上），只认终帧/取消才收口。
           }
         }
       }
@@ -1774,12 +1648,8 @@ export const useAiStore = defineStore('ai', {
                 this.streamInterrupted = true
                 this.lastRoundOutcome = 'interrupted'
                 this.notice = `连接中断，结果可能不完整（重挂未能收到完成帧：${info.reason ?? '断流'}）`
-                if (this.activeForm !== null) {
-                  // 与红队问题 2 同构：重挂断流同样是收尾出口，不能只置通知而漏收表单态
-                  // 与本地超时计时器（刷新后由后端权威超时收敛）
-                  disarmFormExpiry()
-                  this.activeForm = null
-                }
+                // 重挂耗尽同样不是结局：表单/确认卡仍待用户动作，activeForm 与待决段保留
+                //（再次重挂或刷新由 restoreSuspendedSnapshot 续上）。
               }
             }
           },
@@ -1798,99 +1668,6 @@ export const useAiStore = defineStore('ai', {
           currentAbort = null
           activeRoundHostId = null
         }
-      }
-    },
-
-    // ── R-166：确认门倒计时时钟（口径①） ──────────────────────────────────────
-
-    /**
-     * 确认帧锚定门卡时钟（**只在收到实时帧时调用**；重派生/面板重算一律不调）。
-     *
-     * 三道闸：
-     * 1. **陈旧帧不锚**（`isStaleFrame`）—— 重挂回放 / 刷新恢复给出的是旧帧（`atMs` 是当年
-     *    的构造时刻），折算出来必然是"完整等待时长"，正是症②把倒计时打回 04:00 的成因；
-     * 2. **同 id 只许更早**（`Math.min`）—— 同一门卡的重复帧/重投帧不得把到期时刻往后推，
-     *    这是"同 `expiresAt` 重算同值、不闪回"的结构保证（`expiresAt − atMs` 恒等于完整等待
-     *    时长，任何"再加一次本地 now"都只会得到更晚的值）；
-     * 3. 换 id 才重建（并发挂起 / 新门卡）。
-     */
-    anchorConfirmClock(
-      toolCallId: string,
-      expiresAt?: number,
-      atMs?: number,
-      timeoutSeconds?: number,
-      nowMs: number = Date.now()
-    ): void {
-      if (isStaleFrame(atMs, nowMs)) {
-        return
-      }
-      const incoming = frameDeadlineLocal(expiresAt, atMs, timeoutSeconds, nowMs)
-      if (incoming === null) {
-        this.clearConfirmClock(toolCallId)
-        return
-      }
-      const totalSeconds = typeof timeoutSeconds === 'number' && Number.isFinite(timeoutSeconds) && timeoutSeconds > 0
-        ? timeoutSeconds
-        : null
-      const current = this.confirmClock
-      if (current && current.toolCallId === toolCallId) {
-        this.confirmClock = {
-          ...current,
-          deadlineMs: Math.min(current.deadlineMs, incoming),
-          totalSeconds: current.totalSeconds ?? totalSeconds
-        }
-        return
-      }
-      this.confirmClock = { toolCallId, deadlineMs: incoming, totalSeconds, anchor: 'frame', waitedSeconds: null }
-    },
-
-    /**
-     * 消费挂起期心跳（口径①主驱动）：剩余秒 = `timeoutSeconds − waitedSeconds`。
-     *
-     * 只认**当前确认门**的心跳：并发的挂起条目（前端工具）各有自己的心跳线程，
-     * 它不得抢占门卡时钟（心跳帧的 `toolCallId` 就是判据）。
-     */
-    noteSuspendHeartbeat(
-      toolCallId: string,
-      timeoutSeconds?: number,
-      waitedSeconds?: number,
-      nowMs: number = Date.now()
-    ): void {
-      const gate = this.pendingConfirm as PendingToolCall | null
-      if (!gate || gate.toolCallId !== toolCallId) {
-        return
-      }
-      const incoming = heartbeatDeadlineLocal(timeoutSeconds, waitedSeconds, nowMs)
-      if (incoming === null) {
-        return
-      }
-      const waited = typeof waitedSeconds === 'number' && Number.isFinite(waitedSeconds) && waitedSeconds >= 0
-        ? waitedSeconds
-        : 0
-      const totalSeconds = typeof timeoutSeconds === 'number' && Number.isFinite(timeoutSeconds) && timeoutSeconds > 0
-        ? timeoutSeconds
-        : null
-      const current = this.confirmClock
-      if (current && current.toolCallId === toolCallId) {
-        this.confirmClock = {
-          ...current,
-          // min：两条源的绝对到期同值（后端 expiresAt = atMs + timeout×1000），心跳因
-          // waitedSeconds 取整最多偏晚不到 1s ⇒ 取更早的那个，倒计时单调不回跳
-          deadlineMs: Math.min(current.deadlineMs, incoming),
-          totalSeconds: current.totalSeconds ?? totalSeconds,
-          anchor: 'heartbeat',
-          waitedSeconds: waited
-        }
-        return
-      }
-      // 时钟还不属于这张卡（刷新恢复后的首个心跳）：就地锚定
-      this.confirmClock = { toolCallId, deadlineMs: incoming, totalSeconds, anchor: 'heartbeat', waitedSeconds: waited }
-    },
-
-    /** 撤门卡时钟（不传 toolCallId = 无条件撤）。 */
-    clearConfirmClock(toolCallId?: string): void {
-      if (toolCallId === undefined || this.confirmClock?.toolCallId === toolCallId) {
-        this.confirmClock = null
       }
     },
 
@@ -1960,20 +1737,16 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
-     * 拉权威状态校正门卡（口径③/④的唯一校正口）。
+     * 拉权威状态校正门卡（口径③的唯一校正口）。
      *
      * 数据源 = `GET /api/ai/runs/current`，落**真实裁决回执**（APPROVED→已批准 / EXECUTED→
      * 已批准（执行成功） / REJECTED→已拒绝 / TIMEOUT→已超时 / CANCELLED→未批准收尾（已超时） /
      * BLOCKED→越界，不进审批只读卡 —— 2A 批裁决 §9 K2：门卡只读四态、无已取消）。
      *
-     * 条目仍未定（PENDING）、条目缺失、或轮次已不存在时：
-     * - `voidOnNoOutcome = true`（**倒计时归零路径**，口径④）⇒ 落「已超时」回执态
-     *   （灰族，与 demo 的已超时同形态，**不设重试钮**；段侧 expiredLocally 标记保留）；后端结局帧若随后到达，仍按既有
-     *   收敛路径覆盖为真实终态；
-     * - 否则（409 路径）⇒ **绝不伪造裁决**：保留提交态（按钮继续禁用，同 id 不再提交），
-     *   只给一条提示。
+     * 条目仍未定（PENDING）、条目缺失、或轮次已不存在时 ⇒ **绝不伪造裁决**：保留提交态
+     * （按钮继续禁用，同 id 不再提交），只给一条提示。
      */
-    async syncGateFromAuthority(toolCallId: string, options: { voidOnNoOutcome?: boolean } = {}): Promise<void> {
+    async syncGateFromAuthority(toolCallId: string): Promise<void> {
       const sid = this.sessionId
       let current: AiRunCurrent
       try {
@@ -1994,29 +1767,7 @@ export const useAiStore = defineStore('ai', {
         this.applyGateReceipt(toolCallId, receipt)
         return
       }
-      if (options.voidOnNoOutcome) {
-        this.applyGateReceipt(toolCallId, { status: 'expired', expiredLocally: true })
-        this.notice = '确认门已超时作废：后端未回过结局帧，本地倒计时归零后校正仍无终态。'
-        return
-      }
       this.notice = '确认已提交，但暂未同步到后端真实裁决（可稍后刷新查看）。'
-    },
-
-    /**
-     * 倒计时归零入口（口径④）：**每个 toolCallId 只做一次**权威校正（面板每秒 tick 会
-     * 反复命中归零态，靠 `gateExpirySynced` 去重），避免每秒打一次 `runs/current`。
-     */
-    noteGateCountdownExpired(toolCallId: string): void {
-      if (this.gateExpirySynced[toolCallId]) {
-        return
-      }
-      // 提交在途/同步中：后端**已经收到**本次裁决，本地倒计时归零不再是权威判据 ——
-      // 此时去拉快照甚至可能读回"我们刚提交但尚未广播"的态；等 SSE 结局帧或 409 校正即可。
-      if (this.gateSubmissions[toolCallId]) {
-        return
-      }
-      this.gateExpirySynced = { ...this.gateExpirySynced, [toolCallId]: true }
-      void this.syncGateFromAuthority(toolCallId, { voidOnNoOutcome: true })
     },
 
     /**
@@ -2031,12 +1782,12 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
-     * 把权威裁决落成段终态 + 回执元数据，并撤时钟/提交态。
+     * 把权威裁决落成段终态 + 回执元数据，并撤提交态。
      * 段侧 first-wins：已终态段（含乐观写后已非 `pending`）不覆盖。
      */
     applyGateReceipt(
       toolCallId: string,
-      receipt: { decision?: 'approved' | 'rejected'; status: ToolRunStatus; expiredLocally?: boolean }
+      receipt: { decision?: 'approved' | 'rejected'; status: ToolRunStatus }
     ): void {
       for (const message of this.messages) {
         const part = findToolPart(message, toolCallId)
@@ -2054,12 +1805,10 @@ export const useAiStore = defineStore('ai', {
           decision: receipt.decision ?? part.decision,
           // 权威快照不带决策时刻：只有本次真出了裁决才盖本地时刻（沿用旧口径），否则不动原值
           ...(receipt.decision !== undefined && part.decidedAt === undefined ? { decidedAt: Date.now() } : {}),
-          expiredLocally: receipt.expiredLocally ?? false,
           requiresAction: false
         })
         deriveProjections(message)
       }
-      this.clearConfirmClock(toolCallId)
       this.clearGateSubmission(toolCallId)
       // 段已落终态后才计数：仅当无其它待决确认段时才撤挂起态
       this.clearSuspendedIfNoOtherConfirms(toolCallId)
@@ -2254,7 +2003,8 @@ export const useAiStore = defineStore('ai', {
 
     /**
      * GF-B：generative_form 帧到达 → 防御性解析 schema。
-     * 合法：挂到会话态进"等待用户填写"（AiPanel 渲染 FormRenderer），并按帧带时限武装本地超时；
+     * 合法：挂到会话态进"等待用户填写"（AiPanel 渲染 FormRenderer）；**不武装任何本地时限**
+     * （去超时裁决：表单一直可填，收口只认后端结局帧 / 用户取消）；
      * 非法 / 缺 runId（渲染器不可用的任何异常路径）：带 cancelled:true 回灌，挂起立刻收敛
      * （GFa §8.3 / 裁决 #3），绝不让通用执行器回灌说明文本。
      */
@@ -2266,7 +2016,6 @@ export const useAiStore = defineStore('ai', {
       // 写段（requiresAction=true）**之前**前置执行（`hasDecidedPendingResidue`，见
       // frontend_tool_request case）—— 放在这里会太晚：段已落 requiresAction，
       // reattach 回放会先渲染一张瞬时"表单状态已丢失"卡，再等后续结局帧收敛。
-      disarmFormExpiry()
       // 批2：挂起投影由段派生，args 取调用方已派生好的 pendingCall（同帧的 frontend_tool_request）
       const args = message.pendingCall?.args ?? parseToolArgs(frame.args)
       const spec = parseFormSchema(args?.form)
@@ -2285,26 +2034,14 @@ export const useAiStore = defineStore('ai', {
         void this.submitFrontendToolResult(frame.toolCallId, '', 'frontend-executor', true, runId ?? undefined)
         return
       }
-      // R-166 口径①同源（表单侧）：本地时限也只在**帧新鲜**时锚定 —— `expiresAt − atMs` 是
-      // "帧构造那一刻的剩余"，对重挂回放 / 刷新恢复给出的陈旧帧照搬折算会把时限打回满值。
-      // 陈旧帧 ⇒ deadline = null（不武装本地计时器，由后端 ConfirmGate 的权威超时收敛）。
-      const deadline = isStaleFrame(frame.atMs)
-        ? null
-        : frameDeadlineLocal(frame.expiresAt, frame.atMs, frame.timeoutSeconds)
+      // 去超时裁决（2026-10-20）：GF 不再武装本地时限计时器 —— 表单一直可填，收口只认后端结局帧
+      // / 用户主动取消。
       this.activeForm = {
         toolCallId: frame.toolCallId,
         runId,
         form: spec,
         status: 'filling',
-        error: null,
-        deadline
-      }
-      if (deadline !== null) {
-        formExpiryTimer = setTimeout(() => {
-          formExpiryTimer = null
-          // 本地判过期：收起表单并带 cancelled:true 回灌（409 幂等拒绝按现有口径忽略）
-          void this.cancelGenerativeForm(true)
-        }, Math.max(0, deadline - Date.now()))
+        error: null
       }
     },
 
@@ -2395,8 +2132,8 @@ export const useAiStore = defineStore('ai', {
         : '提交失败，请重试或点「取消」放弃'
     },
 
-    /** GF-B：显式取消（或本地超时自动取消）—— 带 cancelled:true 回灌，挂起立刻收敛。 */
-    async cancelGenerativeForm(auto = false): Promise<void> {
+    /** GF-B：显式取消 —— 带 cancelled:true 回灌，挂起立刻收敛。 */
+    async cancelGenerativeForm(): Promise<void> {
       const form = this.activeForm
       if (!form || form.status === 'cancelled' || form.status === 'submitted') {
         return
@@ -2407,14 +2144,13 @@ export const useAiStore = defineStore('ai', {
       this.applyPendingTerminal(form.toolCallId, 'cancelled')
       // 2A 批（裁决 §3 缺陷①）：取消 / 超时收尾记决策时刻（数据层记录，卡面不渲染）
       this.markFormDecided(form.toolCallId)
-      disarmFormExpiry()
       const outcome = await this.submitFrontendToolResult(form.toolCallId, '', 'http-post', true, form.runId)
       if (this.activeForm?.toolCallId !== form.toolCallId) {
         // 结局帧/新表单已收敛：错误提示不写进过期表单（红队问题 6）
         return
       }
       if (!outcome.ok && !outcome.duplicate) {
-        form.error = `${auto ? '表单已超时，' : ''}取消回灌未送达（${outcome.message ?? '网络异常'}），后端将在超时后自动收尾`
+        form.error = `取消回灌未送达（${outcome.message ?? '网络异常'}），后端将在超时后自动收尾`
         // 批4④ A4'（D3/D11）：同一份文案（同源自 form.error，不两处各写字面量）落段 reason ——
         // 段持久（activeForm 七处清空不影响可见性），卡内 reason 位渲染；不经 applyPendingTerminal
         // （防污染 confirm 路径 reason 语义）。D-C2 钉死形状：requiresAction 显式 false（必填字段，
@@ -2465,7 +2201,6 @@ export const useAiStore = defineStore('ai', {
       // 覆盖新轮（界面谎报空闲 + 新轮丢失取消句柄）。
       if (this.activeForm !== null) {
         // 用户停止本轮：表单随轮收起（后端取消会让挂起走 TIMEOUT/取消收尾）
-        disarmFormExpiry()
         this.activeForm = null
       }
       if (!runId) {
@@ -2527,12 +2262,9 @@ export const useAiStore = defineStore('ai', {
       this.busyConflict = null
       this.poolSaturated = null
       this.suspended = false
-      disarmFormExpiry()
       this.activeForm = null
-      // R-166（口径①/③/④）：门卡时钟、提交在途态、归零记账随会话清空（防跨会话串味）
-      this.clearConfirmClock()
+      // R-166（口径③）：提交在途态随会话清空（防跨会话串味）
       this.clearGateSubmissions()
-      this.gateExpirySynced = {}
       // 批4④ A5'/D4：折叠展开态随会话清空（防跨会话串味；会话内内存态，不进镜像）
       this.expandedBlocks = {}
       // R-155：发布冲突 jobId→工具段注册表随会话清空（内存态，与折叠展开态同生命周期口径）
@@ -2865,20 +2597,16 @@ export const useAiStore = defineStore('ai', {
             break
           }
           this.suspended = true
-          // 工具卡四态之"等待确认"：确认门未决期间该工具卡显示为等待确认（段 status=pending +
+          // 工具卡四态之"待确认"：确认门未决期间该工具卡显示为待确认（段 status=pending +
           // requiresAction=true ⇒ 派生出挂起卡）；原始帧口径随段持久化（对账用，见 ToolPart 注）
           applyFrameToParts(message, frame)
-          // R-166 口径①：门卡倒计时时钟在此锚定（**只在实时新鲜帧上**；重挂回放的陈旧帧不锚，
-          // 由挂起流首个心跳校正）。重派生路径一律不写本时钟 ⇒ 同 expiresAt 重算同值、不闪回。
-          this.anchorConfirmClock(frame.toolCallId, frame.expiresAt, frame.atMs, frame.timeoutSeconds)
           break
         }
         case 'confirm_decision': {
           // approved → running、rejected → rejected 的段裁决在 applyFrameToParts；
           // 挂起卡随 requiresAction=false 派生为 null（结局由工具卡承载）
           applyFrameToParts(message, frame)
-          // R-166 口径③：结局帧到达即撤时钟与提交在途态（409 瞬态的就地收敛口）
-          this.clearConfirmClock(frame.toolCallId)
+          // R-166 口径③：结局帧到达即撤提交在途态（409 瞬态的就地收敛口）
           this.clearGateSubmission(frame.toolCallId)
           // M2：段已落终态后才计数 —— 多卡并存时另一张仍待决 ⇒ 保持挂起态
           this.clearSuspendedIfNoOtherConfirms(frame.toolCallId)
@@ -2933,7 +2661,6 @@ export const useAiStore = defineStore('ai', {
             if (this.activeForm.status === 'filling') {
               this.notice = '该表单已在其他窗口提交，本地填写已停止'
             }
-            disarmFormExpiry()
             this.activeForm = null
           }
           this.suspended = false
@@ -2970,13 +2697,8 @@ export const useAiStore = defineStore('ai', {
           break
         }
         case 'heartbeat': {
-          // R-166 口径①：挂起期心跳是门卡倒计时的**主驱动** ——
-          // 剩余秒 = timeoutSeconds − waitedSeconds（后端 `ConfirmGate.heartbeatData` 同帧单点取值），
-          // 折成本地绝对到期后并入时钟（取 min，单调不回退）。流式期心跳不带 toolCallId ⇒ 忽略。
-          const beatToolCallId = typeof frame.toolCallId === 'string' ? frame.toolCallId : null
-          if (beatToolCallId) {
-            this.noteSuspendHeartbeat(beatToolCallId, frame.timeoutSeconds, frame.waitedSeconds)
-          }
+          // 挂起期/流式期心跳只作保活（keep-alive 由 SSE 层消费）；去超时裁决后前端不再据此
+          // 折算门卡倒计时，故本 case 无状态写入。
           break
         }
         case 'retry':
@@ -2992,16 +2714,14 @@ export const useAiStore = defineStore('ai', {
           sealTrailingStreamPart(message)
           expireResidueToolParts(message)
           if (this.activeForm !== null) {
-            // 轮次收尾时表单未决（如后端侧超时/放弃）：本地一并收起，计时器随之中和
-            disarmFormExpiry()
+            // 轮次收尾时表单未决（如后端侧超时/放弃）：本地一并收起
             this.activeForm = null
           }
           this.suspended = false
           if (frame.cancelled) {
             this.notice = '本轮已取消'
           }
-          // R-166：轮终态 ⇒ 门卡时钟与提交在途态一并收口（挂起卡已由 expireResidueToolParts 收掉）
-          this.clearConfirmClock()
+          // R-166：轮终态 ⇒ 提交在途态一并收口（挂起卡已由 expireResidueToolParts 收掉）
           this.clearGateSubmissions()
           break
         }
@@ -3012,7 +2732,6 @@ export const useAiStore = defineStore('ai', {
           sealTrailingStreamPart(message)
           expireResidueToolParts(message)
           if (this.activeForm !== null) {
-            disarmFormExpiry()
             this.activeForm = null
           }
           this.notice = `本轮出错（${frame.code}）：${frame.message}`
@@ -3020,8 +2739,7 @@ export const useAiStore = defineStore('ai', {
           // 它发生的位置内联渲染（绝不做顶部固定）。判据 = 码优先、文案兜底（utils/error-card.ts）。
           message.errorCard = buildErrorCard(frame.code, frame.message)
           this.lastRoundOutcome = 'error'
-          // R-166：与 done 同口径收口门卡时钟/提交在途态
-          this.clearConfirmClock()
+          // R-166：与 done 同口径收口提交在途态
           this.clearGateSubmissions()
           break
         }

@@ -245,14 +245,16 @@ export interface SseConfirmRequestFrame extends SseFrameBase {
   args?: string
   /** 与 args 同值（后端同时放了两份，供展示摘要用） */
   summary?: string
-  timeoutSeconds: number
+  /**
+   * 挂起等待上限（秒）。**可选**：去超时裁决（2026-10-20）后确认门不再超时，后端帧已不带本字段；
+   * 仅历史归档帧 / 旧后端可能携带，前端不再据此折算倒计时或本地超时。
+   */
+  timeoutSeconds?: number
   /**
    * DC-14 T4：挂起等待的**绝对**到期时刻（epoch 毫秒 = 帧内 `atMs` + timeoutSeconds，服务端单点取钟）。
    *
-   * **R-166 口径变更**：本字段不再驱动门卡倒计时 —— 原 T4-3 的 `expiresAt − atMs` 差值折算在
-   * 重派生 / 刷新恢复时会给出"完整等待时长"从而把倒计时打回起点（本批修复的症②）。倒计时现由
-   * `stores/ai.ts` 的 `ConfirmClock` 承载：**实时帧新鲜时锚定一次**（折算实现 `frameDeadlineLocal`），
-   * 之后由挂起期心跳校正（`heartbeatDeadlineLocal`）。本字段随帧照原样透出，供对账 / 回滚。
+   * 去超时裁决（2026-10-20）：前端不再据此折算倒计时 / 本地超时，本字段随帧照原样透出，
+   * 仅供对账 / 回滚。
    */
   expiresAt?: number
   /** 回调端点说明文本：POST /api/ai/confirm {runId, toolCallId, approved, reason} */
@@ -285,8 +287,12 @@ export interface SseFrontendToolRequestFrame extends SseFrameBase {
   toolCallId: string
   name: string
   args?: string
-  timeoutSeconds: number
-  /** DC-14 T4 同口径：绝对到期时刻（epoch 毫秒）；T4-3 后半起帧恒带 `atMs`，按 `expiresAt − atMs` 剩余时长折算，见 `SseConfirmRequestFrame.expiresAt` */
+  /**
+   * 前端工具回执等待上限（秒）。**可选**：`generative_form` 等人工填写场景后端不设上限，
+   * 帧里不带本字段（去超时裁决 2026-10-20）；有值的即时执行类工具仍成对下发。
+   */
+  timeoutSeconds?: number
+  /** DC-14 T4 同口径：绝对到期时刻（epoch 毫秒）；与 `timeoutSeconds` 成对出现（无上限时缺省），见 `SseConfirmRequestFrame.expiresAt` */
   expiresAt?: number
   /** 回调端点说明文本：POST /api/ai/frontend-tool-result {runId, toolCallId, result} */
   callback?: string
@@ -331,22 +337,22 @@ export interface SseSuspendedFrame extends SseFrameBase {
 }
 
 /**
- * 心跳帧（挂起期保活 + **R-166 起为门卡倒计时的主驱动**；流式期只保活）。键集不固定。
+ * 心跳帧（挂起期保活；流式期只保活）。键集不固定。
  *
  * 挂起期载荷见后端 `ConfirmGate.heartbeatData`（`runId` / `suspendKind` / `toolCallId` /
- * `name` / `status` / `waitedSeconds` / `timeoutSeconds`）——**两个秒数同帧单点取值**，
- * 故 `timeoutSeconds − waitedSeconds` 就是该帧时刻的服务端权威剩余秒。
+ * `name` / `status` / `waitedSeconds` / `timeoutSeconds`）。去超时裁决后前端只消费它维持
+ * 挂起流保活，不再据秒数折算门卡倒计时。
  * 流式期心跳（`ResilientChatService`）不带这四个键，前端据此区分两条心跳通道。
  */
 export interface SseHeartbeatFrame extends SseFrameBase {
   type: 'heartbeat'
   /** 挂起种类：`confirm`（确认门）/ `frontend-tool`（前端工具）；流式期心跳无此键 */
   suspendKind?: string
-  /** 本条挂起条目的 toolCallId（流式期心跳无此键 ⇒ 不参与倒计时） */
+  /** 本条挂起条目的 toolCallId（流式期心跳无此键） */
   toolCallId?: string
-  /** 挂起等待上限（秒） */
+  /** 挂起等待上限（秒；仅对账口径） */
   timeoutSeconds?: number
-  /** 已等待秒数（服务端钟，与 `timeoutSeconds` 同帧单点取值） */
+  /** 已等待秒数（服务端钟；仅对账口径） */
   waitedSeconds?: number
   [key: string]: unknown
 }

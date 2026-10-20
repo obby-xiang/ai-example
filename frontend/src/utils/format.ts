@@ -3,7 +3,7 @@
  */
 
 import dayjs from 'dayjs'
-import type { TaskStatus, TaskType } from '@/types/task'
+import type { TaskType } from '@/types/task'
 import type { ProgressView } from '@/types/job'
 import { formatJobProgress } from '@/types/job'
 
@@ -50,14 +50,6 @@ export function formatFromNow(value: string | null | undefined, fallback = '—'
   return `${Math.floor(diffSeconds / 86400)} 天前`
 }
 
-/** 秒 → 倒计时文案（确认门超时展示）。 */
-export function formatCountdown(seconds: number): string {
-  const safe = Math.max(0, Math.floor(seconds))
-  const minutes = Math.floor(safe / 60)
-  const rest = safe % 60
-  return minutes > 0 ? `${minutes}:${String(rest).padStart(2, '0')}` : `${rest} 秒`
-}
-
 /** 星期中文标签（渐进时间格式用，dayjs.day()：0=周日 … 6=周六）。 */
 const WEEKDAY_LABELS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
 
@@ -98,13 +90,6 @@ export function formatProgressiveTs(ts: unknown, now?: number | Date): string {
 export const TASK_TYPE_LABELS: Record<TaskType, string> = {
   EXPORT: '导出',
   IMPORT: '导入'
-}
-
-export const TASK_STATUS_LABELS: Record<TaskStatus, string> = {
-  ACTIVE: '进行中',
-  COMPLETED: '已完成',
-  CANCELLED: '已取消',
-  FAILED: '已失败'
 }
 
 /** 步骤 key → 中文（与后端 @ToolScope 标签一致）。 */

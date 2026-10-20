@@ -15,8 +15,11 @@ import java.util.Map;
  * 会话生命周期（S4.2 §2 {@code session/AiSessionService}，§3 时序第 1 步）。
  *
  * <h2>职责边界（DC-02 / D1：会话不做长期留存）</h2>
+ * <p>
+ * <b>2026-10-20 用户裁决第 4 条</b>：会话有效期 6h → <b>24h</b>，滑动续期（活跃即续），
+ * 整个会话维度，<b>无绝对上限</b> —— 挂起等人的卡可以跨过任何"创建时刻"封顶。
  * 这里只维护"页签会话还活着"这一件事：{@code ai:session:<sessionId>} 一个带
- * <b>滑动 TTL</b>（{@code app.ai.session-ttl}，默认 6h）的轻量记录，每轮对话 touch 一次。
+ * <b>滑动 TTL</b>（{@code app.ai.session-ttl}，默认 24h）的轻量记录，每轮对话 touch 一次。
  * 记忆窗口（{@code chat:mem:<sessionId>}，官方 {@code ChatMemoryRepository} 实现）
  * 与挂起态（{@code ai:run:<runId>}）各有自己的 TTL，本类不复制它们的内容，
  * 也不做"会话不属于谁"的权限判定（DC-10：权限/认证不在本规格范围）。

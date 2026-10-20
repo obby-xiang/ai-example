@@ -8,11 +8,12 @@ import java.time.Duration;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * T3-5 定值回灌（2026-10-09）在 {@link AiProperties} 上的锚定，另含裁决③拆键（2026-10-10）的两条：
+ * T3-5 定值回灌（2026-10-09）在 {@link AiProperties} 上的锚定，另含 2026-10-20 用户裁决后的两条：
  * <ol>
  * <li><b>默认值即定值</b>：投递池 8（原 4）、实时队列容量 256（维持）；</li>
- * <li><b>app.ai.hitl 拆键后的默认值与上限关系</b>（确认门 240s / 前端工具 120s；
- * 确认门上限须严格小于 {@code total-budget}，见 {@link #hitlKeysAreSplitAndConfirmTimeoutStaysWithinTotalBudget}）。</li>
+ * <li><b>会话 TTL 24h</b>（裁决第 4 条：6h → 24h、滑动续期、无绝对上限）；</li>
+ * <li><b>app.ai.hitl 只剩一个键</b>：{@code frontend-tool-timeout} 120s（即时执行类前端工具的回执兜底）；
+ *     确认门键已退役（等人无上限，见 {@link #confirmGateHasNoTimeoutKeyAndFrontendToolTimeoutStays}）。</li>
  * </ol>
  *
  * <p>R-148（B-3）连带删：原「启动期容量联动校验」随本批删除，其 WARN 用例与 appender 一并移除
@@ -38,26 +39,29 @@ class AiPropertiesT35DefaultsTest {
 	}
 
 	/**
-	 * 裁决③（2026-10-10 数字规格清点）拆键后的两个锚：① 两个挂起键的单键默认值；② 确认门可达性的
-	 * <b>上限关系不变量</b> —— 确认门上限必须严格小于 {@code total-budget}，否则"等 600s"在
-	 * 300s 就被看门狗判 {@code TOTAL_BUDGET} 收口（等待治理 R-99③ 的登记项 N-2）。
-	 *
-	 * <p>本用例是那条约束的机器化落点：日后若有人把 {@code confirm-timeout} 抬到 600s 而不同批抬高
-	 * {@code total-budget}，本断言先红 —— 而不是让配置里留一句"实际可达 300s"的谎报。
+	 * 2026-10-20 用户裁决第 1/2/4 条的机器化落点：
+	 * <ul>
+	 * <li>会话 TTL = 24h（6h → 24h，滑动续期、无绝对上限）；</li>
+	 * <li>确认门没有等待上限 —— 键退役后 {@link AiProperties.Hitl} 只剩前端工具键；</li>
+	 * <li>前端工具键仍为 120s（即时执行类前端工具的后端回执兜底；{@code generative_form} 豁免，
+	 *     口径在 {@code ConfirmGate#suspendWaitSeconds}）。</li>
+	 * </ul>
 	 */
 	@Test
-	void hitlKeysAreSplitAndConfirmTimeoutStaysWithinTotalBudget() {
+	void confirmGateHasNoTimeoutKeyAndFrontendToolTimeoutStays() {
 		AiProperties defaults = new AiProperties();
 
-		assertThat(defaults.getHitl().getConfirmTimeout())
-				.as("确认门（等人）默认 240s —— 过渡取值；600s 待 total-budget 三语义拆分同批")
-				.isEqualTo(Duration.ofSeconds(240));
+		assertThat(defaults.getSessionTtl())
+				.as("会话 TTL 24h（裁决第 4 条：滑动续期、整个会话维度、无绝对上限）")
+				.isEqualTo(Duration.ofHours(24));
 		assertThat(defaults.getHitl().getFrontendToolTimeout())
-				.as("前端工具（等机器）默认暂维 120s —— 降到 60s 的前置 = 前端折算面专项（P-1 / R-99②）")
+				.as("前端工具（等机器）默认维持 120s —— 降到 60s 的前置 = 前端折算面专项（P-1 / R-99②）")
 				.isEqualTo(Duration.ofSeconds(120));
-		assertThat(defaults.getHitl().getConfirmTimeout())
-				.as("上限关系（N-2）：confirm-timeout 必须严格小于 total-budget，否则确认门等不满自己的上限")
-				.isLessThan(defaults.getResilience().getTotalBudget());
+		assertThat(java.util.Arrays.stream(AiProperties.Hitl.class.getDeclaredFields())
+				.map(java.lang.reflect.Field::getName)
+				.toList())
+				.as("确认门键已退役：hitl 下不得再有 confirmTimeout（等人无上限，裁决第 1 条）")
+				.doesNotContain("confirmTimeout");
 	}
 
 }

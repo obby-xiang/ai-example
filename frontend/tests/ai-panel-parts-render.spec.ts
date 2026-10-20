@@ -84,7 +84,7 @@ beforeEach(() => {
   api.confirm.mockReset()
   api.confirm.mockResolvedValue(undefined)
   api.feedbackSubmit.mockResolvedValue({ saved: true, cancelled: false })
-  api.health.mockResolvedValue({ available: true, code: 'OK', model: 'm', baseUrl: 'b', memoryBackend: 'redis', sessionTtl: '1h', confirmTimeoutSeconds: 120, frontendToolTimeoutSeconds: 120, suspendPoolSize: 4, activeSuspendGates: 0, heldSessions: 0, sessionLockRenewals: 0, resumeOnStartup: false, instanceId: 'i', checkedAt: '2026-01-01T00:00:00Z' })
+  api.health.mockResolvedValue({ available: true, code: 'OK', model: 'm', baseUrl: 'b', memoryBackend: 'redis', sessionTtl: '1h', frontendToolTimeoutSeconds: 120, suspendPoolSize: 4, activeSuspendGates: 0, heldSessions: 0, sessionLockRenewals: 0, resumeOnStartup: false, instanceId: 'i', checkedAt: '2026-01-01T00:00:00Z' })
 })
 
 /** 手搭一条消息（含派生投影：两侧自洽 = deriveProjections 的结果）。 */
@@ -105,7 +105,7 @@ function buildMessage(parts: MessagePart[], pendingCall: PendingToolCall | null 
 
 /** A4' 夹具：造一个指定状态的 activeForm（form schema 本体与本锁无关，走 never 桩）。 */
 function makeActiveForm(toolCallId: string, status: ActiveGenerativeForm['status']): ActiveGenerativeForm {
-  return { toolCallId, runId: 'run-1', form: {} as never, status, error: null, deadline: null }
+  return { toolCallId, runId: 'run-1', form: {} as never, status, error: null }
 }
 
 async function mountPanel(
@@ -151,10 +151,6 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
   })
 
   it("A1'：挂起卡并入工具卡（单卡段驱动）——工具名全 DOM 只出一次、确认子块在持 testid 的同一张卡内", async () => {
-    // R-166 口径①：倒计时真值上移到 store 的 `confirmClock`（面板只读 `deadlineMs − now`），
-    // 本用例直造段（不经帧），故显式锚定一次时钟 —— 顺带覆盖"旧格式帧（无 atMs）按
-    // timeoutSeconds 相对秒回落"这条既有兼容面。
-    useAiStore().anchorConfirmClock('c1', undefined, undefined, 120)
     const wrapper = await mountPanel([
       buildMessage(
         [
@@ -183,29 +179,35 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
     // H1 口径（2026-10-17 裁决 + demo 定稿）：按钮文案 = 「批准」，非「确认执行」
     expect(cards[0]!.html()).toContain('批准')
 
-    // R-165 S2：门卡按 demo v7 `.gate` 纯 Tailwind 结构（卡头 + 字段表 + 倒计时环 + 拒绝原因 + 双自绘按钮）
+    // 2026-10-20 卡面一致性裁决（demo chat-ux/card-consistency-fix.html 场景一 1:1）：
+    // 确认卡**单层** —— 内层蓝框与内层卡头（「需要你确认后才能继续」+ 内层 chip）整段退役，
+    // 卡体直接 = 字段表 + 按钮行；倒计时环 / 读数一并退役。
     const gate = cards[0]!.find('[data-testid="hitl-gate"]')
     expect(gate.exists()).toBe(true)
-    expect(gate.classes()).toEqual(expect.arrayContaining(['border-[#cddcff]', 'bg-[#eff4ff]', 'rounded-[10px]', 'p-[12px]', 'border-solid']))
+    // 单层结构锁：门卡 = 卡体内的一层（pb-[11px]），旧内层蓝框配方全数不出现
+    expect(gate.classes()).toEqual(expect.arrayContaining(['pb-[11px]']))
+    for (const gone of ['border-[#cddcff]', 'bg-[#eff4ff]', 'rounded-[10px]', 'p-[12px]', 'border-solid', 'mb-2.5']) {
+      expect(gate.classes()).not.toContain(gone)
+    }
     expect(gate.find('.gate').exists()).toBe(false) // 手写 CSS 类退场
-    // 卡头字形/文案按 demo v7.7 蓝本（demo :760 `!` 圆环字形 + 「需要你确认后才能继续」）——
-    // 移植笔误期曾为手部 emoji（U+270B）+「需要人工确认」；本锁只锁字形/文案，圆环几何在 class 面（未动）。
-    const gateHd = gate.findAll(':scope > div')[0]!
-    expect(gateHd.findAll('span')[0]!.text()).toBe('!')
-    expect(gateHd.text()).toContain('需要你确认后才能继续')
-    expect(gateHd.text()).toContain('等待确认')
+    // 内层卡头退役（不再出现同名解释文案 / 内层 chip）
+    expect(gate.text()).not.toContain('需要你确认后才能继续')
     // 字形面零 emoji（emoji 呈现区 + dingbat 区）—— 移植笔误锁
-    expect(gateHd.text()).not.toMatch(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/u)
+    expect(gate.text()).not.toMatch(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/u)
+    // 无倒计时锁：环 / 读数 / 静态兜底文案全无
+    expect(gate.find('svg').exists()).toBe(false)
+    expect(gate.text()).not.toContain('剩余确认时间')
+    expect(gate.text()).not.toContain('等待人工确认')
+    expect(gate.text()).not.toContain('确认已超时')
+    // chip 文案锁：卡头右标签 = 琥珀「待确认」（demo 定稿 #b45309 / #fffbeb）
+    const chip = cards[0]!.find('[data-testid="card-status-c1"]')
+    expect(chip.text()).toBe('待确认')
+    expect(chip.classes()).toEqual(expect.arrayContaining(['text-[#b45309]', 'bg-[#fffbeb]', 'border-[#fde68a]']))
     const rows = gate.find('[data-testid="gate-rows"]').findAll(':scope > div')
     expect(rows[0]!.text()).toContain('操作')
     expect(rows[0]!.text()).toContain('启动导出作业')
     expect(rows[1]!.text()).toContain('taskId')
     expect(rows[1]!.text()).toContain('1')
-    // 倒计时环（v7 同构：双 circle + 周长/dashoffset 绑定）
-    const ring = gate.find('svg')
-    expect(ring.exists()).toBe(true)
-    expect(ring.attributes('viewBox')).toBe('0 0 36 36')
-    expect(ring.find('circle').exists()).toBe(true) // 两枚描边圆（底环 + 蓝弧）
     // el-input/el-button 退场：双按钮 = 原生 button
     // （R-165 S3a 续：输入区 composer 亦已退 EP，断言改挂 [data-testid="composer-input"] 原生 textarea）
     // 2A 批（裁决 §3 缺陷④ / §9 K1）：H1 无理由框 —— 拒因输入框零残留
@@ -232,6 +234,44 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
     wrapper.unmount()
   })
 
+  // 2026-10-20「卡面一致性」三项显式锁（demo `docs/demo/chat-ux/card-consistency-fix.html`）：
+  // 单层结构 / 无倒计时 / chip 文案。与 A1' 的结构细节断言互补 —— 本用例只锁三条不可回退的结论。
+  it('卡面一致性三锁：单层确认卡 · 无倒计时 · chip「待确认」（琥珀）', async () => {
+    const wrapper = await mountPanel([
+      buildMessage(
+        [
+          { kind: 'tool', seg: 0, toolCallId: 'lock1', name: 'start_export', kind2: 'CONFIRM', status: 'pending', args: '{"taskId":7,"scope":"DOC_TYPE","format":"xlsx"}', timeoutSeconds: 120, requiresAction: true }
+        ],
+        { toolCallId: 'lock1', name: 'start_export', kind: 'CONFIRM', args: { taskId: 7 }, rawArgs: '{"taskId":7}', timeoutSeconds: 120, status: 'pending' }
+      )
+    ])
+    const card = wrapper.find('[data-testid="pending-card-lock1"]')
+    const gate = card.find('[data-testid="hitl-gate"]')
+
+    // ① 单层：卡容器一层描边，门卡本身不再有描边/底色/圆角/内边距（内层蓝框退役）
+    expect(card.classes()).toEqual(expect.arrayContaining(['border-[#e3e6ea]', 'bg-white', 'rounded-[10px]']))
+    expect(gate.classes()).toEqual(['pb-[11px]'])
+
+    // ② 无倒计时：环 / 读数 / 兜底文案三缺一不可出现
+    expect(gate.find('svg').exists()).toBe(false)
+    expect(gate.text()).not.toMatch(/剩余确认时间|等待人工确认|确认已超时/)
+
+    // ③ chip：文案「待确认」+ 琥珀族（#b45309 / #fffbeb / #fde68a）
+    const chip = card.find('[data-testid="card-status-lock1"]')
+    expect(chip.text()).toBe('待确认')
+    expect(chip.classes()).toEqual(expect.arrayContaining(['text-[#b45309]', 'bg-[#fffbeb]', 'border-[#fde68a]']))
+
+    // 操作/参数行一个不许少（demo 场景一）
+    const rows = gate.find('[data-testid="gate-rows"]').findAll(':scope > div')
+    expect(rows.map((row) => row.text())).toEqual([
+      '操作启动导出作业',
+      'taskId7',
+      'scopeDOC_TYPE',
+      'formatxlsx'
+    ])
+    wrapper.unmount()
+  })
+
   // H1 预检摘要（demo `docs/demo/chat-ux/hitl-confirm-preflight.html` 场景一，用户 2026-10-20 批准）：
   // 位置 = 门卡「参数行」与「按钮行」之间；逐项对 demo 文案/结构；缺省 = 无该区（旧帧回归锁）。
   const PREFLIGHT = {
@@ -249,8 +289,7 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
     reportHash: '3a9f'
   }
 
-  it('H1 预检：门卡带 preflight → 参数行与按钮行之间渲染「预检摘要」区（逐项对 demo）', async () => {
-    useAiStore().anchorConfirmClock('pf1', undefined, undefined, 120)
+  it('卡面一致性：门卡带 preflight → 预检摘要区**不渲染**（payload 留段不展示）+ 标题业务化', async () => {
     const wrapper = await mountPanel([
       buildMessage([
         { kind: 'text', seg: 0, text: '', streaming: false },
@@ -259,59 +298,41 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
     ])
     const gate = wrapper.find('[data-testid="pending-card-pf1"]').find('[data-testid="hitl-gate"]')
     expect(gate.exists()).toBe(true)
-    const summary = gate.find('[data-testid="preflight-summary"]')
-    expect(summary.exists()).toBe(true)
 
-    // 断言真实 asMap() 形态：顶层固定键序 target → checks → impact → reportHash；
-    // 每项检查恒为 name/pass/detail 三键（detail 通过时可为空串）
-    expect(Object.keys(PREFLIGHT)).toEqual(['target', 'checks', 'impact', 'reportHash'])
-    for (const check of PREFLIGHT.checks) {
-      expect(Object.keys(check)).toEqual(['name', 'pass', 'detail'])
-    }
+    // 预检摘要区**整块撤除**：payload 保留在段上，卡面不渲染（不再有区名 / 徽标 / 四行）
+    expect(gate.find('[data-testid="preflight-summary"]').exists()).toBe(false)
+    expect(gate.text()).not.toContain('预检摘要')
+    expect(gate.text()).not.toContain('预检通过')
+    expect(gate.text()).not.toContain('批准绑定')
+    expect(gate.text()).not.toContain('影响面')
 
-    // 位置：门卡子块序 = 卡头 / 字段表 / 预检摘要 / 按钮行（demo 场景一的插入点）
+    // 单层卡体子块序 = 字段表 / 按钮行（demo 场景一：无中间区、无内层卡头）
     const kids = Array.from(gate.element.children) as HTMLElement[]
-    expect(kids[1]!.getAttribute('data-testid')).toBe('gate-rows')
-    expect(kids[2]!.getAttribute('data-testid')).toBe('preflight-summary')
-    expect(kids[3]!.querySelectorAll('button')).toHaveLength(2)
+    expect(kids[0]!.getAttribute('data-testid')).toBe('gate-rows')
+    expect(kids[1]!.querySelectorAll('button')).toHaveLength(2)
 
-    // 卡头：区名 + 通过徽标
-    expect(summary.text()).toContain('预检摘要')
-    expect(summary.text()).toContain('✓ 预检通过')
+    // 标题业务化（demo 场景一）：待你确认：<类型> 任务 #<id>『<title>』
+    const card = wrapper.find('[data-testid="pending-card-pf1"]')
+    expect(card.find('[data-testid="card-title-pf1"]').text()).toBe('待你确认：导入 任务 #5『订单配置导入』')
+    // 标题说清后不再重复「工具名（任务 #N）」摘要
+    expect(card.find('[data-testid="tool-summary-pf1"]').text()).toBe('')
+    // chip = 琥珀「待确认」
+    expect(card.find('[data-testid="card-status-pf1"]').text()).toBe('待确认')
+    expect(card.find('[data-testid="card-status-pf1"]').classes()).toEqual(expect.arrayContaining(['text-[#b45309]', 'bg-[#fffbeb]', 'border-[#fde68a]']))
 
-    // 四行：目标 / 预检 / 影响面 / 批准绑定
-    const rows = Array.from(summary.element.children).slice(1) as HTMLElement[]
-    expect(rows.map((row) => row.firstElementChild?.textContent)).toEqual(['目标', '预检', '影响面', '批准绑定'])
-
-    // 目标行：任务 #5「订单配置导入」（类型：导入 · 状态：进行中）
-    expect(rows[0]!.textContent).toContain('任务 #5「订单配置导入」')
-    expect(rows[0]!.textContent).toContain('（类型：导入 · 状态：进行中）')
-
-    // 预检行：逐项 ✓ + 文案（后端真实顺序；第 4 项带指纹依据 detail）
-    const checkLines = Array.from((rows[1]!.children[1] as HTMLElement).children) as HTMLElement[]
-    expect(checkLines.map((line) => line.textContent)).toEqual([
-      '✓ 任务存在',
-      '✓ 类型匹配',
-      '✓ 无在途作业',
-      '✓ 预检指纹新鲜（预检作业 #12 · 3a9f…）'
-    ])
-    // 绿色 dingbat（#1a7f45）非 emoji
-    expect(checkLines[0]!.firstElementChild!.className).toContain('text-[#1a7f45]')
-    expect(summary.text()).not.toMatch(/[\u{1F000}-\u{1FAFF}]/u)
-    // data-preflight 绑 preflightAllPass 口径（原硬编码 "pass" 已改动态）
-    expect(summary.attributes('data-preflight')).toBe('pass')
-
-    // 影响面 / 批准绑定
-    expect(rows[2]!.textContent).toContain('将发布 3 个配置定义 · 影响 12,480 行数据')
-    expect(rows[3]!.textContent).toContain('批准时将记录预检指纹，数据变动则需重新确认。')
+    // 操作/参数行一个不许少（demo 场景一：操作 + args 全键）
+    const rows = gate.find('[data-testid="gate-rows"]').findAll(':scope > div')
+    const rowCells = rows.map((row) => Array.from(row.element.children) as HTMLElement[])
+    expect(rowCells.map((cells) => cells[0]!.textContent)).toEqual(['操作', 'taskId'])
+    expect(rows[0]!.text()).toContain('启动发布作业')
+    expect(rows[1]!.text()).toContain('5')
 
     // 按钮文案口径（H1 仅两钮）：拒绝 / 批准
     expect(gate.findAll('button').map((btn) => btn.text())).toEqual(['拒绝', '批准'])
     wrapper.unmount()
   })
 
-  it('H1 预检：门卡无 preflight（旧帧 / GF / 前端工具）→ 不渲染预检区（回归锁）', async () => {
-    useAiStore().anchorConfirmClock('np1', undefined, undefined, 120)
+  it('卡面一致性：门卡无 preflight → 标题回落工具名（现形态），无预检区（回归锁）', async () => {
     const wrapper = await mountPanel([
       buildMessage([
         { kind: 'text', seg: 0, text: '', streaming: false },
@@ -323,15 +344,16 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
     expect(gate.find('[data-testid="preflight-summary"]').exists()).toBe(false)
     expect(gate.text()).not.toContain('预检摘要')
     expect(gate.text()).not.toContain('批准绑定')
-    // 旧卡面结构不变：字段表 + 按钮行 两子块（无新增中间区）
+    // 单层卡体子块序 = 字段表 / 按钮行 两子块（无新增中间区）
     const kids = Array.from(gate.element.children) as HTMLElement[]
-    expect(kids[1]!.getAttribute('data-testid')).toBe('gate-rows')
-    expect(kids[2]!.querySelectorAll('button')).toHaveLength(2)
+    expect(kids[0]!.getAttribute('data-testid')).toBe('gate-rows')
+    expect(kids[1]!.querySelectorAll('button')).toHaveLength(2)
+    // 无 preflight ⇒ 标题回落现形态（工具名），无「待你确认：」前缀
+    expect(wrapper.find('[data-testid="card-title-np1"]').text()).toBe('danger_tool')
     wrapper.unmount()
   })
 
-  it('H1 预检：checks 含未通过项 → 徽标与 data-preflight 随 preflightAllPass 翻转为 fail（契约防御分支）', async () => {
-    useAiStore().anchorConfirmClock('pf2', undefined, undefined, 120)
+  it('卡面一致性：checks 含未通过项 → 卡面同样不出预检区（payload 不渲染，无防御分支）', async () => {
     const failed = {
       ...PREFLIGHT,
       checks: [
@@ -345,15 +367,13 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
         { kind: 'tool', seg: 1, toolCallId: 'pf2', name: 'start_publish', kind2: 'CONFIRM', status: 'pending', args: '{"taskId":5}', timeoutSeconds: 120, requiresAction: true, preflight: failed }
       ])
     ])
-    const summary = wrapper.find('[data-testid="preflight-summary"]')
-    expect(summary.exists()).toBe(true)
-    expect(summary.attributes('data-preflight')).toBe('fail')
-    expect(summary.text()).toContain('✗ 预检未通过')
-    expect(summary.text()).not.toContain('✓ 预检通过')
+    expect(wrapper.find('[data-testid="preflight-summary"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('预检未通过')
+    expect(wrapper.find('[data-testid="card-title-pf2"]').text()).toBe('待你确认：导入 任务 #5『订单配置导入』')
     wrapper.unmount()
   })
 
-  it('H1 预检：runs/current 快照带 preflight → 刷新恢复后门卡仍有预检摘要区（MAJOR-1 回归锁）', async () => {
+  it('卡面一致性：runs/current 快照带 preflight → 段保留 payload，卡面不出预检区（MAJOR-1 改写）', async () => {
     api.reattachRun.mockImplementation(() => new Promise(() => {}))
     api.history.mockResolvedValue({ sessionId: 'sess-pf', count: 0, messages: [] })
     api.runsCurrent.mockResolvedValue({
@@ -373,13 +393,12 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
     const wrapper = await mountPanel([])
     await flushPromises()
 
-    const summary = wrapper.find('[data-testid="preflight-summary"]')
-    expect(summary.exists()).toBe(true)
-    expect(summary.text()).toContain('预检摘要')
-    expect(summary.text()).toContain('✓ 预检通过')
-    expect(summary.text()).toContain('预检指纹新鲜（预检作业 #12 · 3a9f…）')
+    expect(wrapper.find('[data-testid="preflight-summary"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('预检摘要')
     const part = store.messages[0]?.parts.find((item) => item.kind === 'tool')
     expect(part).toMatchObject({ toolCallId: 'rpf1', preflight: PREFLIGHT })
+    // 恢复出来的挂起卡仍走业务化标题（preflight.target 驱动），payload 本身不展示
+    expect(wrapper.find('[data-testid="card-title-rpf1"]').text()).toBe('待你确认：导入 任务 #5『订单配置导入』')
     wrapper.unmount()
   })
 
@@ -552,7 +571,7 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
     const wrapper = mount(AiPanel, { global: { stubs } })
     await wrapper.vm.$nextTick()
 
-    await store.cancelGenerativeForm(false)
+    await store.cancelGenerativeForm()
     await wrapper.vm.$nextTick()
 
     // D-C2 形状：段 reason 写入（同源自 form.error，D11 文案逐字）
@@ -1338,9 +1357,16 @@ describe('2A 批：已决原样 UI 只读态 / 折叠时序 / 冲突表格（R-1
     const head = wrapper.find('[data-testid="ro-toggle-g1"]')
     await head.trigger('click')
     const body = wrapper.find('[data-testid="ro-body-g1"]')
-    // 同一张表单：标题 + 六型控件原样（值回填），全部原生 disabled
-    expect(body.text()).toContain('导出参数')
+    // 卡面一致性：只读体不再重复标题（标题只在统一卡头），卡体直接字段表（demo 场景五）
+    expect(body.text()).not.toContain('导出参数')
     expect(body.find('[data-testid="gf-fields"]').exists()).toBe(true)
+    // P2-4 卡体留白锁：只读 GF = 与门卡只读态同构的 mx-[11px] mt-[9px] 包裹（demo 场景五），
+    // inset 只由包裹层承担，字段区不再叠加第二份 11px。
+    const formWrap = body.find('[data-testid="ro-form-g1"]')
+    expect(formWrap.exists()).toBe(true)
+    expect(formWrap.classes()).toEqual(expect.arrayContaining(['mx-[11px]', 'mt-[9px]']))
+    expect(formWrap.find('[data-testid="gf-fields"]').exists()).toBe(true)
+    expect(formWrap.find('[data-testid="gf-fields"]').classes()).not.toContain('mx-[11px]')
     const select = body.find('select')
     expect(select.element.value).toBe('HB')
     expect(select.attributes('disabled')).toBeDefined()
@@ -1580,7 +1606,6 @@ describe('2A 批：已决原样 UI 只读态 / 折叠时序 / 冲突表格（R-1
   })
 
   it('S6：门卡字段表 = **全键**（原「首行 + 4」上限退役）+ 敏感值掩码；卡内无 args JSON 盒', async () => {
-    useAiStore().anchorConfirmClock('g1', undefined, undefined, 120)
     const args = JSON.stringify({
       taskId: 290,
       mode: 'full',
@@ -1686,7 +1711,7 @@ describe('2A 批：已决原样 UI 只读态 / 折叠时序 / 冲突表格（R-1
     ])
     expired.id = 'a-expired'
     const expiredLocal = buildMessage([
-      { kind: 'tool', seg: 0, toolCallId: 'e2', name: 'start_export', kind2: 'CONFIRM', status: 'expired', args: '{}', requiresAction: false, expiredLocally: true }
+      { kind: 'tool', seg: 0, toolCallId: 'e2', name: 'start_export', kind2: 'CONFIRM', status: 'expired', args: '{}', requiresAction: false }
     ])
     expiredLocal.id = 'a-expired-local'
     const cancelled = buildMessage([
@@ -1711,7 +1736,7 @@ describe('2A 批：已决原样 UI 只读态 / 折叠时序 / 冲突表格（R-1
     // 徽标字形前缀保留（✓ / ✗ / !，均文本字形）
     expect(cardText('a-expired')).toContain('! 已超时')
     expect(cardText('a-expired')).not.toContain('已过期')
-    // 本地作废不再单列文案（F6：超时徽标仅「已超时」）
+    // 去超时裁决后不再有「本地作废」变体；历史 expired 段一律「已超时」（F6 口径不变）
     expect(cardText('a-expired-local')).toContain('! 已超时')
     expect(cardText('a-expired-local')).not.toContain('作废')
     // 门卡没有「已取消」（K2）：cancelled 归未批准收尾 —— 已取消字样零残留
@@ -2006,7 +2031,7 @@ describe('卡片通道统一：三类型卡头（左裸 SVG / 中标题摘要 / 
       { testid: 'card-status-st-tool-pending', label: '待执行', tone: 'text-[#2563eb]', state: 'pending' },
       { testid: 'card-status-st-tool-ok', label: '已成功', tone: 'text-[#1a7f45]', state: 'succeeded' },
       { testid: 'card-status-st-tool-bad', label: '执行失败', tone: 'text-[#c0392b]', state: 'failed' },
-      { testid: 'card-status-st-hitl-pending', label: '等待确认', tone: 'text-[#2563eb]', state: 'pending' },
+      { testid: 'card-status-st-hitl-pending', label: '待确认', tone: 'text-[#b45309]', state: 'pending' },
       { testid: 'ro-badge-st-hitl-ok', label: '✓ 已批准', tone: 'text-[#1a7f45]', state: 'approved' },
       { testid: 'ro-badge-st-hitl-exp', label: '! 已超时', tone: 'text-[#b45309]', state: 'expired' },
       { testid: 'ro-badge-st-hitl-failed', label: '! 已批准 · 执行失败', tone: 'text-[#c0392b]', state: 'failed' },
@@ -2095,7 +2120,7 @@ describe('卡片通道统一：三类型卡头（左裸 SVG / 中标题摘要 / 
     )
     msg.id = 'a-gf-head'
     const store = useAiStore()
-    store.activeForm = { toolCallId: 'gf1', runId: 'run-1', form: GF_FORM, status: 'filling', error: null, deadline: null }
+    store.activeForm = { toolCallId: 'gf1', runId: 'run-1', form: GF_FORM, status: 'filling', error: null }
 
     const wrapper = await mountPanel([msg], { realForm: true })
     // 卡头 = 唯一标题（FormRenderer 默认头被 showHeader=false 抑制）
@@ -2109,9 +2134,13 @@ describe('卡片通道统一：三类型卡头（左裸 SVG / 中标题摘要 / 
     expect(wrapper.find('[data-testid="block-body-a-gf-head:gf1"]').attributes('style') ?? '').not.toContain('display: none')
     wrapper.unmount()
 
+    // 嵌入态单框（demo 场景四）：FormRenderer 自身描边/底色/外边距退役，只剩字段与操作行
+    const embeddedRoot = wrapper.findComponent(FormRenderer).element as HTMLElement
+    expect(embeddedRoot.className.split(' ')).toEqual(['min-w-0'])
+
     // 独立 FormRenderer：默认 showHeader=true，行为不变
     const standalone = mount(FormRenderer, {
-      props: { schema: GF_FORM, submitting: false, error: null, remainingSeconds: null }
+      props: { schema: GF_FORM, submitting: false, error: null }
     })
     expect(standalone.text()).toContain('▤')
     expect(standalone.text()).toContain('税务配置差异导出表单')
@@ -2119,7 +2148,7 @@ describe('卡片通道统一：三类型卡头（左裸 SVG / 中标题摘要 / 
     standalone.unmount()
 
     const noHeader = mount(FormRenderer, {
-      props: { schema: GF_FORM, submitting: false, error: null, remainingSeconds: null, showHeader: false }
+      props: { schema: GF_FORM, submitting: false, error: null, showHeader: false }
     })
     expect(noHeader.text()).not.toContain('▤')
     expect(noHeader.text()).not.toContain('税务配置差异导出表单')
@@ -2560,11 +2589,10 @@ describe('R-160：HITL 三缺陷（回读恢复 / 回执独立块 / 倒计时续
     wrapper.unmount()
   })
 
-  // R-166 口径①重写（原 R-160 M3「快照透出 expiresAt/atMs ⇒ 续走倒计时」）：
-  // 快照里的 `atMs` 是**陈旧帧口径**，照搬"帧差值折算"正是症②（刷新回到 04:00）的成因；
-  // 新口径下快照路**不锚时钟**，倒计时等挂起流首个心跳校正 —— 故本用例锁两件事：
-  // ①快照字段照原样透出（对账口径不丢）；②无心跳时不伪造倒计时（静态「等待人工确认」）。
-  it('M3/R-166：快照透出 expiresAt/atMs 但**不锚**倒计时（陈旧帧不折算）—— 静态「等待人工确认」', async () => {
+  // 2026-10-20 去超时裁决（原 R-166 口径① 三例改写）：
+  // 快照里的 expiresAt/atMs 仍照原样透出（对账口径不丢），但**不再驱动任何倒计时** ——
+  // 卡面既无倒计时读数、也无「等待人工确认」静态兜底；心跳帧到达同样不改卡面。
+  it('快照透出 expiresAt/atMs（对账口径不丢），卡面无倒计时读数 / 无静态兜底', async () => {
     const store = useAiStore()
     store.historyLoaded = true
     const atMs = Date.now()
@@ -2579,19 +2607,17 @@ describe('R-160：HITL 三缺陷（回读恢复 / 回执独立块 / 倒计时续
     const part = store.messages.flatMap((m) => m.parts).find((p) => p.kind === 'tool' && p.toolCallId === 'c1') as ToolPart
     expect(part).toMatchObject({ requiresAction: true, status: 'pending', expiresAt, atMs })
     expect(store.pendingConfirm).toMatchObject({ toolCallId: 'c1', expiresAt, atMs })
-    // 快照路不写门卡时钟（唯一的写点是实时确认帧 / 挂起期心跳）
-    expect(store.confirmClock).toBeNull()
 
     const wrapper = await mountPanel(store.messages)
     const card = wrapper.find('[data-testid="pending-card-c1"]')
     expect(card.exists()).toBe(true)
-    expect(card.text()).toContain('等待人工确认')
     expect(card.text()).not.toContain('剩余确认时间')
+    expect(card.text()).not.toContain('等待人工确认')
+    expect(card.find('[data-testid="hitl-gate"] svg').exists()).toBe(false)
     wrapper.unmount()
   })
 
-  // R-166 口径①：刷新恢复后**首个心跳**即校正倒计时（新增用例，覆盖"恢复续走"）。
-  it('R-166：快照恢复 + 首个挂起期心跳 ⇒ 倒计时按 timeoutSeconds − waitedSeconds 续走', async () => {
+  it('快照恢复 + 挂起期心跳：心跳不写任何卡面状态（DOM 逐帧不变）', async () => {
     const store = useAiStore()
     store.historyLoaded = true
     api.runsCurrent.mockResolvedValue({
@@ -2601,22 +2627,17 @@ describe('R-160：HITL 三缺陷（回读恢复 / 回执独立块 / 倒计时续
     })
     api.reattachRun.mockImplementation(() => new Promise(() => {}))
     await store.restoreSuspendedSnapshot()
-    expect(store.confirmClock).toBeNull()
-
-    // 挂起期心跳（后端 ConfirmGate.heartbeatData 同帧两值）：已等待 60s / 上限 240s ⇒ 剩 180s
-    store.handleFrame({ type: 'heartbeat', runId: 'run-1', toolCallId: 'c1', suspendKind: 'confirm', timeoutSeconds: 240, waitedSeconds: 60, heartbeatSeq: 1 })
-    const clock = store.confirmClock
-    expect(clock).toMatchObject({ toolCallId: 'c1', anchor: 'heartbeat', waitedSeconds: 60, totalSeconds: 240 })
-    const remain = Math.round((clock!.deadlineMs - Date.now()) / 1000)
-    expect(remain).toBeGreaterThan(178)
-    expect(remain).toBeLessThanOrEqual(180)
 
     const wrapper = await mountPanel(store.messages)
-    expect(wrapper.find('[data-testid="pending-card-c1"]').text()).toContain('剩余确认时间')
+    const before = wrapper.find('[data-testid="pending-card-c1"]').html()
+    store.handleFrame({ type: 'heartbeat', runId: 'run-1', toolCallId: 'c1', suspendKind: 'confirm', timeoutSeconds: 240, waitedSeconds: 60, heartbeatSeq: 1 })
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-testid="pending-card-c1"]').html()).toBe(before)
+    expect(wrapper.find('[data-testid="pending-card-c1"]').text()).not.toContain('剩余确认时间')
     wrapper.unmount()
   })
 
-  it('M3：旧数据无 expiresAt ⇒ 不伪造倒计时，静态「等待人工确认」', async () => {
+  it('旧数据无 expiresAt ⇒ 卡面同样无倒计时（与有口径时一字不差）', async () => {
     const store = useAiStore()
     store.historyLoaded = true
     api.runsCurrent.mockResolvedValue({
@@ -2632,8 +2653,8 @@ describe('R-160：HITL 三缺陷（回读恢复 / 回执独立块 / 倒计时续
 
     const wrapper = await mountPanel(store.messages)
     const card = wrapper.find('[data-testid="pending-card-c1"]')
-    expect(card.text()).toContain('等待人工确认')
     expect(card.text()).not.toContain('剩余确认时间')
+    expect(card.text()).not.toContain('等待人工确认')
     wrapper.unmount()
   })
 
@@ -3355,9 +3376,9 @@ describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 �
     ]
   }
 
-  function mountGf(overrides: Partial<{ submitting: boolean; error: string | null; remainingSeconds: number | null }> = {}) {
+  function mountGf(overrides: Partial<{ submitting: boolean; error: string | null }> = {}) {
     return mount(FormRenderer, {
-      props: { schema: GF_SCHEMA, submitting: false, error: null, remainingSeconds: 120, ...overrides }
+      props: { schema: GF_SCHEMA, submitting: false, error: null, ...overrides }
     })
   }
 
@@ -4036,7 +4057,7 @@ describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 �
     expect(wrapper.findAll('select')).toHaveLength(1)
     expect(wrapper.html()).not.toContain('<el-')
 
-    // 双钮 + footer 时间行
+    // 双钮（去超时裁决后无时限脚注）
     const cancel = wrapper.find('[data-testid="gf-cancel"]')
     const submit = wrapper.find('[data-testid="gf-submit"]')
     expect(cancel.element.tagName).toBe('BUTTON')
@@ -4050,14 +4071,14 @@ describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 �
     expect(actRow.className).toContain('gap-2')
     expect(cancel.element.parentElement).toBe(actRow)
     expect(submit.text()).toBe('提交')
-    const foot = wrapper.find('[data-testid="gf-deadline"]')
-    expect(foot.element.tagName).toBe('P')
-    expect(foot.classes()).toEqual(expect.arrayContaining(['px-[11px]', 'py-[9px]', 'border-t', 'text-[11.8px]', 'text-[#57606a]', 'bg-[#f6f7f9]']))
-    expect(foot.text()).toContain('剩余填写时间')
+    // 去超时裁决：时限脚注整块退役（表单一直可填）
+    expect(wrapper.find('[data-testid="gf-deadline"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('剩余填写时间')
+    expect(wrapper.text()).not.toContain('已超时，表单不可再提交')
     wrapper.unmount()
   })
 
-  it('GF 表单卡：必填未填 ⇒ 字段红框 + 字段下 .fmsg；填齐 ⇒ 提交值上抛；超时 ⇒ footer 换文案', async () => {
+  it('GF 表单卡：必填未填 ⇒ 字段红框 + 字段下 .fmsg；填齐 ⇒ 提交值上抛（无本地超时态）', async () => {
     const wrapper = mountGf()
     await wrapper.find('[data-testid="gf-submit"]').trigger('click')
     await wrapper.vm.$nextTick()
@@ -4096,11 +4117,11 @@ describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 �
     expect(bar.classes()).toEqual(expect.arrayContaining(['text-[#c0392b]', 'bg-[#fdf1ef]', 'border-[#f0d5d0]']))
     rejected.unmount()
 
-    // 超时：footer 换超时文案
-    const expired = mountGf({ remainingSeconds: 0 })
-    expect(expired.find('[data-testid="gf-deadline"]').text()).toBe('已超时，表单不可再提交')
-    expect(expired.find('[data-testid="gf-submit"]').attributes('disabled')).toBeDefined()
-    expired.unmount()
+    // 去超时裁决：任何时刻都不出现「已超时」态，提交钮不被本地时限置灰
+    const alwaysOpen = mountGf()
+    expect(alwaysOpen.find('[data-testid="gf-deadline"]').exists()).toBe(false)
+    expect(alwaysOpen.find('[data-testid="gf-submit"]').attributes('disabled')).toBeUndefined()
+    alwaysOpen.unmount()
   })
 
   it('2A 缺陷②：enum 初值合法默认（缺省 / 非法 defaultValue ⇒ 首个选项；合法 defaultValue 保留）', () => {
@@ -4117,7 +4138,7 @@ describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 �
       }]
     })
     const mountWith = (schema: FormSpec) => mount(FormRenderer, {
-      props: { schema, submitting: false, error: null, remainingSeconds: null }
+      props: { schema, submitting: false, error: null }
     })
     // 缺省 ⇒ 首个选项（不落空串 / 不落「请选择…」非法初态）
     const none = mountWith(schemaWith({}))
@@ -4139,7 +4160,6 @@ describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 �
         schema: GF_SCHEMA,
         submitting: false,
         error: null,
-        remainingSeconds: null,
         readonly: true,
         initialValues: null
       }
@@ -4183,7 +4203,6 @@ describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 �
         schema: GF_SCHEMA,
         submitting: false,
         error: null,
-        remainingSeconds: null,
         readonly: false,
         initialValues: null
       }
@@ -4211,7 +4230,6 @@ describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 �
         schema: GF_SCHEMA,
         submitting: false,
         error: null,
-        remainingSeconds: null,
         readonly: true,
         initialValues: { name: '已提交', mode: 'safe' }
       }
@@ -4538,7 +4556,8 @@ describe('R-165 S5a：复制两态反馈 / 滚动条 / 聚焦环 / 表格双区�
     const toolCard = wrapper.find('[data-testid="tool-card-s1"]').element as HTMLElement
     expect(toolCard.className).toContain('mb-2')
     const gate = wrapper.find('[data-testid="hitl-gate"]').element as HTMLElement
-    expect(gate.className).toContain('mb-2.5')
+    // 卡面一致性：确认卡单层（卡体内一层，不再是自带外边距的内层蓝框）
+    expect(gate.className).toBe('pb-[11px]')
     const gateRows = wrapper.find('[data-testid="gate-rows"]').element as HTMLElement
     expect(gateRows.className).toContain('max-h-[min(280px,35vh)]')
     expect(gateRows.className).toContain('overflow-y-auto')
@@ -5274,6 +5293,69 @@ describe('问题4 composer v2 阶段二：store send outcome 映射', () => {
     expect(result.outcome).toBe('interrupted')
     expect(result.userMessageId).toBe(store.messages[0]?.id)
     expect(store.streamInterrupted).toBe(true)
+  })
+
+  it('非终态断流：activeForm 保留（挂起表单活着，重挂/刷新后可继续）', async () => {
+    const store = useAiStore()
+    api.chat.mockImplementation(async (
+      _request: unknown,
+      handlers?: {
+        onFrame?: (frame: unknown) => void
+        onClose?: (info: { terminal: boolean; reconnects: number; reason?: string }) => void
+      }
+    ) => {
+      handlers?.onFrame?.({ type: 'start', runId: 'run-gf', sessionId: store.sessionId, seq: 1 })
+      handlers?.onFrame?.({
+        type: 'frontend_tool_request',
+        runId: 'run-gf',
+        toolCallId: 'gf-keep',
+        name: 'generative_form',
+        args: JSON.stringify({ form: { scenario: 'demo', fields: [{ key: 'k', label: 'K', type: 'text' }] } }),
+        seq: 2
+      })
+      handlers?.onClose?.({ terminal: false, reconnects: 2, reason: '重挂耗尽' })
+    })
+    const result = await store.send('填写表单')
+    expect(result.outcome).toBe('interrupted')
+    // 断流不是结局：表单态与挂起段都原样保留
+    expect(store.activeForm?.toolCallId).toBe('gf-keep')
+    expect(store.activeForm?.status).toBe('filling')
+    const part = store.messages
+      .flatMap((message) => message.parts)
+      .find((item): item is ToolPart => item.kind === 'tool' && item.toolCallId === 'gf-keep')
+    expect(part?.status).toBe('pending')
+    expect(part?.requiresAction).toBe(true)
+  })
+
+  it('非终态断流：确认卡待决态保留（段 pending/requiresAction + 挂起投影仍在）', async () => {
+    const store = useAiStore()
+    api.chat.mockImplementation(async (
+      _request: unknown,
+      handlers?: {
+        onFrame?: (frame: unknown) => void
+        onClose?: (info: { terminal: boolean; reconnects: number; reason?: string }) => void
+      }
+    ) => {
+      handlers?.onFrame?.({ type: 'start', runId: 'run-c', sessionId: store.sessionId, seq: 1 })
+      handlers?.onFrame?.({
+        type: 'confirm_request',
+        runId: 'run-c',
+        toolCallId: 'c-keep',
+        name: 'start_publish',
+        args: '{"taskId":1}',
+        seq: 2
+      })
+      handlers?.onClose?.({ terminal: false, reconnects: 2, reason: '重挂耗尽' })
+    })
+    const result = await store.send('发布')
+    expect(result.outcome).toBe('interrupted')
+    expect(store.pendingConfirms.map((item) => item.toolCallId)).toEqual(['c-keep'])
+    expect(store.pendingToolCall?.toolCallId).toBe('c-keep')
+    const part = store.messages
+      .flatMap((message) => message.parts)
+      .find((item): item is ToolPart => item.kind === 'tool' && item.toolCallId === 'c-keep')
+    expect(part?.status).toBe('pending')
+    expect(part?.requiresAction).toBe(true)
   })
 
   it('error 终帧正常 resolve：映射 error（不被 ok 覆盖）', async () => {

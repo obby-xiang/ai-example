@@ -197,7 +197,7 @@ class SseChatEmitterWriteBudgetTest {
 
 		out.start("s-wb");
 		out.delta("正文");
-		out.confirmRequest(pending("c-1"), 120);
+		out.confirmRequest(pending("c-1"));
 		out.heartbeat(Map.of("phase", "suspended"));
 		out.done(Map.of(), "deepseek-flash", Map.of("cancelled", false));
 		awaitSize(wire, 5, 5_000L);
@@ -217,10 +217,9 @@ class SseChatEmitterWriteBudgetTest {
 		assertThat(live.get(2)).containsEntry("seq", 3L);
 		assertThat(live.get(4)).containsEntry("seq", 4L);
 		assertThat(live.get(3)).doesNotContainKey("seq").containsKey("heartbeatSeq");
-		// T4：expiresAt 与同帧 atMs 同钟 ⇒ 差恒等于 timeoutSeconds * 1000
-		long expiresAt = ((Number) live.get(2).get("expiresAt")).longValue();
-		long atMs = ((Number) live.get(2).get("atMs")).longValue();
-		assertThat(expiresAt - atMs).as("confirm_request 的 expiresAt − atMs").isEqualTo(120_000L);
+		// T4：确认卡不再有到期时刻（2026-10-20 裁决第 1 条）—— 帧里不带 expiresAt/timeoutSeconds
+		assertThat(live.get(2)).as("confirm_request 无到期时刻").doesNotContainKey("expiresAt")
+				.doesNotContainKey("timeoutSeconds");
 
 		// T4-3：归档（start / confirm_request / done）与实时投递帧取的是同一个 atMs
 		List<Map<String, Object>> archived = FrameWire.normalize(store.events(RUN_ID));

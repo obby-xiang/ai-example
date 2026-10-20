@@ -40,8 +40,9 @@ import java.util.stream.Collectors;
  * （S4.4e 裁决②，见 {@link #createTask}）；</li>
  * <li><b>作业发起（确认门）</b>：{@code start_export} / {@code start_precheck} / {@code start_import} /
  * {@code start_publish} 四个工具统一为 {@code @ToolRisk(DANGER)} —— 执行前挂起、渲染确认卡片，
- * 放行才创建作业，拒绝/超时以"未执行"语义回填（FR-5.3 明文，S4.4e 裁决⑥，
- * 机制见 {@code gate/ConfirmGate}，无需工具名清单）；</li>
+ * 放行才创建作业，拒绝（或历史上的超时记录）以"未执行"语义回填（FR-5.3 明文，S4.4e 裁决⑥，
+ * 机制见 {@code gate/ConfirmGate}，无需工具名清单）；确认门自 2026-10-20 起<b>不再超时</b>
+ * ——一直等到用户批准/拒绝/取消；</li>
  * <li><b>前端指令</b>：{@code open_export_file_editor} / {@code download_export_files} /
  * {@code navigate_to} / {@code select_definitions} / {@code set_condition} / {@code confirm_step} /
  * {@code generative_form}
@@ -293,8 +294,9 @@ public class AiTools {
      *
      * <p><b>S4.4e 裁决⑥：风险等级由 {@code WRITE} 升为 {@code DANGER}，纳入确认门（FR-5.3 明文）</b>——
      * 与 {@link #startPublish} 同一套 {@code gate/ConfirmGate}：执行前挂起并向前端渲染确认卡片，
-     * <b>放行</b>才创建作业、<b>拒绝</b>以"用户拒绝 + 原因"回填且不执行、<b>超时</b>自动取消同样不执行
-     * （三结局一致）；机制完全由风险等级驱动（{@code SpToolCallingManager#kindOf}），
+     * <b>放行</b>才创建作业、<b>拒绝</b>以"用户拒绝 + 原因"回填且不执行；确认门<b>不设等待上限</b>
+     * （2026-10-20 裁决第 1 条：一直等到批准/拒绝/取消，只有历史遗留的超时记录仍按"未执行"结算）；
+     * 机制完全由风险等级驱动（{@code SpToolCallingManager#kindOf}），
      * 此处不新增工具名清单。披露范围不变。
      */
     @Tool(name = "start_export", description = "启动配置导出作业，开始将数据导出为Excel文件（高风险，需要用户确认）")
@@ -527,11 +529,12 @@ public class AiTools {
      * 回灌，待决条目落 {@code FRONTEND_CANCELLED}（明确终态，不会无限悬置），模型收到
      * "用户取消，未获得数据"后自行收尾。</li>
      * </ol>
-     * 时间上限沿用既有前端通道口径（{@code app.ai.hitl.frontend-tool-timeout}，默认 120s）：用户长时间不提交即
-     * {@code FRONTEND_TIMEOUT}。但<b>不能</b>把它读成"工具未执行"—— 超时的结局语义由挂起的
-     * <b>类型</b>决定（见 {@code ConfirmGate#expire}）：确认门等的是人的决策，超时 = 确定未执行；
-     * 前端工具等的是<b>前端回执</b>，超时只说明"回执没回来"，<b>结局未知</b>（副作用可能已经发生，
-     * 例如表单已提交、文件已落盘）。
+     * <b>等待没有上限</b>（用户裁决 2026-10-20 第 2 条）：{@code generative_form} 等的是人填表，
+     * 不套用 {@code app.ai.hitl.frontend-tool-timeout}（那个键只给 {@code navigate_to} 等即时执行类
+     * 前端工具做后端回执兜底）—— 用户不提交就一直等，直到提交或前端以 {@code cancelled=true} 放弃。
+     * 无论如何<b>不能</b>把"没收到回执"读成"工具未执行"：前端工具的副作用可能已经发生
+     * （例如表单已提交、文件已落盘），即时执行类前端工具真超时时的结局语义是<b>结局未知</b>
+     * （{@code FRONTEND_TIMEOUT}，见 {@code ConfirmGate#expireFrontend}）。
      *
      * <p><b>方法体是哨兵桩</b>（{@link #FRONTEND_STUB}）：副作用（渲染表单、收集值）在前端，
      * 后端只挂起与回灌；schema 与回灌的校验在挂起机制里（{@code SpToolCallingManager}/

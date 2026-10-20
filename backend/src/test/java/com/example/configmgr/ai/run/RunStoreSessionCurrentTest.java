@@ -28,7 +28,7 @@ import static org.mockito.Mockito.when;
  * T2b-D#1：{@code ai:session:current:<sessionId>} session → 当前挂起轮索引。
  *
  * <p>Redis 用 Map 支撑的桩（{@code StringRedisTemplate} mock）：索引是体验优化不是正确性依赖，
- * 所以除"SET 带锁 TTL"用 verify 锁定外，其余断言都走公开方法的语义面。
+ * 所以除"SET 带 session-ttl"用 verify 锁定外，其余断言都走公开方法的语义面。
  */
 @SuppressWarnings({ "unchecked", "rawtypes" })
 class RunStoreSessionCurrentTest {
@@ -71,12 +71,12 @@ class RunStoreSessionCurrentTest {
 	}
 
 	@Test
-	void suspendedSaveWritesIndexWithSessionLockTtl() {
+	void suspendedSaveWritesIndexWithSessionTtl() {
 		this.store.save(snapshot("r-1", "s-1", RunSnapshot.SUSPENDED));
 
 		assertEquals("r-1", this.store.sessionCurrentRunId("s-1"));
-		// TTL 期望值从测试所用的 AiProperties 实例实读（取值源 app.ai.session.lock.ttl），
-		// 不是快照 session-ttl，也不硬编码默认值 —— 默认值漂移不该让本断言失效（红队 S3-7）
+		// TTL 期望值从测试所用的 AiProperties 实例实读（P2-3：取值源 app.ai.session-ttl，
+		// 与会话/快照同寿；不再复用会话锁的 10m），不硬编码默认值（红队 S3-7）
 		verify(this.valueOps).set(eq("ai:session:current:s-1"), eq("r-1"), eq(expectedIndexTtl()));
 	}
 
@@ -109,9 +109,9 @@ class RunStoreSessionCurrentTest {
 		verify(this.redis).expire(eq("ai:session:current:s-1"), eq(expectedIndexTtl()));
 	}
 
-	/** 索引 TTL 的期望值：与实现同源实读（app.ai.session.lock.ttl），不用字面量锁死默认值。 */
+	/** 索引 TTL 的期望值：与实现同源实读（P2-3：app.ai.session-ttl），不用字面量锁死默认值。 */
 	private Duration expectedIndexTtl() {
-		return this.properties.getSession().getLock().getTtl();
+		return this.properties.getSessionTtl();
 	}
 
 	@Test

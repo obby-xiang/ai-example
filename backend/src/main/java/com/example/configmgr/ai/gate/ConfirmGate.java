@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.gate;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.form.GenerativeFormRules;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.ResumeService;
@@ -29,19 +30,30 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 确认门状态机（S4.2 §2 {@code gate/ConfirmGate}）：放行 / 拒绝（原因回填）/ 超时自动取消。
+ * 确认门状态机（S4.2 §2 {@code gate/ConfirmGate}）：放行 / 拒绝（原因回填）。
  *
- * <h2>三结局</h2>
+ * <h2>结局</h2>
  * <ul>
  * <li><b>放行</b>：{@code POST /api/ai/confirm {approved:true}} → Redis 里
  * {@code status=APPROVED, executed=false} → 唤醒循环内的等待 → 由循环执行工具并记台账；</li>
  * <li><b>拒绝</b>：{@code status=REJECTED}，结果文本回填"用户拒绝 + 原因"，<b>不执行</b>，
  * 官方循环照常继续（模型如实解释）；</li>
- * <li><b>超时</b>：等待超过 {@code app.ai.hitl.confirm-timeout}（确认门，默认 240s）
- * 或 {@code app.ai.hitl.frontend-tool-timeout}（前端工具，默认 120s）（ADR-2 上限约束）
- * 自动取消：{@code status=TIMEOUT, executed=false}；结果文本按<b>挂起类型</b>分场景（见 {@link #expire}）——
- * 确认门 = "工具未执行"（确定未发生），前端工具 = "回执没回来、结局未知"（副作用可能已发生）。</li>
+ * <li><b>取消</b>：整轮被取消（{@code ai:cancel:<runId>}）→ {@code status=CANCELLED}，不执行。</li>
  * </ul>
+ *
+ * <h2>等待没有时限（用户裁决 2026-10-20 第 1/2 条）</h2>
+ * 确定性操作（确认门）与 {@code generative_form} 的等待<b>不再有超时</b>：不再有 240s/120s 的死线，
+ * 一直等到用户批准 / 拒绝 / 取消（前端另可 {@code cancelled=true} 放弃）。只有<b>其他前端工具</b>
+ * （{@code navigate_to} 等即时执行类）保留 {@code app.ai.hitl.frontend-tool-timeout}（默认 120s）
+ * 的后端回执兜底 —— 那等待的是机器回执，机器"不回"是故障，不能无限悬置。
+ * 区分点只有一个：{@link #suspendWaitSeconds(PendingToolCall)}（返回 null = 不设上限）。
+ * 等待期的时间不计入 {@code app.ai.resilience.total-budget}（人机预算分离，见
+ * {@link ToolActivityBeacon#gateWaitMs}）。
+ *
+ * <h2>历史兼容</h2>
+ * 已存在的 {@code TIMEOUT} 记录（旧轮的 {@code CONFIRM_TIMEOUT}）仍然可读：结局/码的推导照旧，
+ * 前端"已超时"展示态不受影响；<b>新逻辑不再产生</b>确认门的超时帧
+ * （{@code confirm_decision decision=timeout} 不再发出）。
  *
  * <h2>状态在哪、唤醒在哪（硬规范①）</h2>
  * 决策状态一律先写 Redis（{@link RunStore}），进程内的 {@link Latch} 只承担"唤醒"职责 ——
@@ -52,7 +64,8 @@ import java.util.concurrent.TimeUnit;
  *
  * <h2>挂起期心跳保活</h2>
  * 等待循环每 {@value #HEARTBEAT_SECONDS} 秒发一帧 {@code heartbeat}（带挂起种类与已等待秒数）：
- * ① 保活 SSE；② 前端据此显示"等待确认中"；③ 实测证据里"挂起期确实还有帧"由此可证。
+ * ① 保活 SSE；② 续期轮键与 session 索引；③ 实测证据里"挂起期确实还有帧"由此可证。
+ * 心跳<b>不再携带</b>等待上限（确认门/表单卡没有到期时刻，前端据此不武装倒计时）。
  *
  * <h2>执行的幂等（SP-02 E2 语义）</h2>
  * 本类只负责"决策落库"，<b>不在</b>决策写入时执行工具 —— 执行与"已执行"标记的关系见
@@ -176,21 +189,39 @@ public class ConfirmGate {
 		}
 	}
 
-	/** 确认门等待上限（秒）：{@code app.ai.hitl.confirm-timeout}（等人，默认 240s）。 */
-	public int confirmTimeoutSeconds() {
-		Duration timeout = this.properties.getHitl().getConfirmTimeout();
-		return (int) Math.max(1, timeout.toSeconds());
-	}
-
 	/**
-	 * 前端工具回执等待上限（秒）：{@code app.ai.hitl.frontend-tool-timeout}（等机器）。
+	 * 前端工具回执等待上限（秒）：{@code app.ai.hitl.frontend-tool-timeout}（等机器，默认 120s）。
 	 *
-	 * <p>与确认门键（{@code confirm-timeout}）<b>刻意分开</b>：两者等的对象不同（机器回执 vs 人的决策），
-	 * 延迟分布差一个数量级，共用一个键会使"人等得起的时长"被迫压成"机器回执的时长"（裁决③）。
+	 * <p>只供<b>即时执行类</b>前端工具（{@code navigate_to} 等）的后端回执兜底使用；
+	 * {@code generative_form} 与确认门<b>不读本键</b>（等待没有时限，见
+	 * {@link #suspendWaitSeconds(PendingToolCall)}）。这等待的是机器回执（秒级）而不是人的决策
+	 * （分钟级），台账里"回执没回来、结局未知"与"工具未执行"是两件事。
 	 */
 	public int frontendToolTimeoutSeconds() {
 		Duration timeout = this.properties.getHitl().getFrontendToolTimeout();
 		return (int) Math.max(1, timeout.toSeconds());
+	}
+
+	/**
+	 * 该条目挂起等待的上限（秒）；<b>null = 不设上限</b>（用户裁决 2026-10-20）。
+	 *
+	 * <ul>
+	 * <li>确认门（{@link PendingToolCall#KIND_CONFIRM}）：等的是人的决策 ⇒ 无上限；</li>
+	 * <li>{@code generative_form}：等的是人填表 ⇒ 无上限（与确认门同一路径，按<b>工具名</b>区分）；</li>
+	 * <li>其余前端工具：{@link #frontendToolTimeoutSeconds()}（默认 120s，等机器回执的兜底）。</li>
+	 * </ul>
+	 *
+	 * <p>等待上限只影响"什么时候系统收摊"，不影响"人还能不能提交"：无上限时唯一出口是人决策、
+	 * 取消或前端主动放弃（{@code cancelled=true}）。
+	 */
+	public Integer suspendWaitSeconds(PendingToolCall pending) {
+		if (pending == null || !PendingToolCall.KIND_FRONTEND.equals(pending.getKind())) {
+			return null;
+		}
+		if (GenerativeFormRules.TOOL_NAME.equals(pending.getName())) {
+			return null;
+		}
+		return frontendToolTimeoutSeconds();
 	}
 
 	// ── 等待侧（在官方循环内阻塞） ──────────────────────────────────────────
@@ -251,21 +282,24 @@ public class ConfirmGate {
 
 	/**
 	 * 确认门：阻塞等人工决策，返回 Redis 里的<b>最终条目</b>（调用方据此决定执行与否）。
+	 *
+	 * <p><b>无上限</b>：一直等到批准 / 拒绝 / 取消（用户裁决 2026-10-20 第 1 条）。
 	 */
 	public PendingToolCall awaitDecision(String runId, PendingToolCall pending) {
-		return await(runId, pending, confirmTimeoutSeconds(), true);
+		return await(runId, pending, true);
 	}
 
 	/**
-	 * 前端工具：阻塞等前端回灌结果。等待上限 = {@code app.ai.hitl.frontend-tool-timeout}
-	 * （等机器，默认 120s），与确认门键（{@code confirm-timeout}，等人，默认 240s）<b>分场景</b>各自取值
-	 * —— 原单键 {@code app.ai.hitl.timeout} 同供三场景已按裁决③拆分。
+	 * 前端工具：阻塞等前端回灌结果。上限见 {@link #suspendWaitSeconds(PendingToolCall)} ——
+	 * 即时执行类前端工具 120s（等机器回执的兜底）；{@code generative_form} 无上限（等的是人填表）。
 	 */
 	public PendingToolCall awaitFrontendResult(String runId, PendingToolCall pending) {
-		return await(runId, pending, frontendToolTimeoutSeconds(), false);
+		return await(runId, pending, false);
 	}
 
-	private PendingToolCall await(String runId, PendingToolCall pending, int timeoutSeconds, boolean confirm) {
+	private PendingToolCall await(String runId, PendingToolCall pending, boolean confirm) {
+		// 等待上限（null = 无上限；只有即时执行类前端工具有值）
+		Integer timeoutSeconds = this.suspendWaitSeconds(pending);
 		String key = key(runId, pending.getToolCallId());
 		// 先登记闸门再发请求，避免"外部输入已到、闸门还没登记"白等到超时。
 		// F8：复用 arm 的预登记（同一 key 只允许一把）—— 这里无条件 new 会盖掉预登记闸门，
@@ -276,19 +310,22 @@ public class ConfirmGate {
 		AutoCloseable cancelHandle = this.cancellations.onCancel(runId, latch::signal);
 		SseChatEmitter out = this.registry.of(runId);
 		if (confirm) {
-			out.confirmRequest(pending, timeoutSeconds);
+			// 确认卡不再有到期时刻（裁决第 1 条）：帧里不带 timeoutSeconds/expiresAt，
+			// 前端据此不武装倒计时、不把按钮置灰。
+			out.confirmRequest(pending);
 		}
 		else {
 			out.frontendToolRequest(pending, timeoutSeconds);
 		}
 		long startedAt = System.currentTimeMillis();
-		long deadline = startedAt + timeoutSeconds * 1000L;
 		// T2b-D#1：挂起期续期 session→current 索引用的 sessionId（快照可能缺失，取一次缓存并判空）
 		String sessionId = snapshotSessionId(runId);
+		// 人机预算分离（裁决第 3 条）：等待窗口内的时间累计到信标上，总预算判据据此扣除
+		this.beacon.beginGateWait(runId);
 		try {
 			while (true) {
 				if (this.cancellations.isCancelled(runId)) {
-					return cancel(runId, pending, timeoutSeconds, confirm);
+					return cancel(runId, pending, confirm, startedAt);
 				}
 				PendingToolCall fresh;
 				// S5c-6：与提交侧读同一把锁 —— 提交方在锁内完成"落库 + 发回执帧 + 唤醒"，
@@ -300,29 +337,41 @@ public class ConfirmGate {
 					// 决策可能来自本进程（闸门唤醒）也可能来自另一实例（Redis 轮询发现）
 					return fresh;
 				}
-				long remain = deadline - System.currentTimeMillis();
-				if (remain <= 0) {
-					return expire(runId, pending, timeoutSeconds, confirm);
+				long sliceMs = HEARTBEAT_SECONDS * 1000L;
+				if (timeoutSeconds != null) {
+					long remain = startedAt + timeoutSeconds * 1000L - System.currentTimeMillis();
+					if (remain <= 0) {
+						return expireFrontend(runId, pending, timeoutSeconds);
+					}
+					sliceMs = Math.min(sliceMs, remain);
 				}
-				boolean signalled = latch.await(Math.min(remain, HEARTBEAT_SECONDS * 1000L));
+				boolean signalled = latch.await(sliceMs);
 				if (!signalled) {
 					// 工具活动脉冲（韧性看门狗据此在挂起期不计静默，硬规范①）
 					this.beacon.pulse(runId);
-					// T2b-D#1：与心跳同节拍续期 session→current 索引（TTL 对齐会话锁 watchdog）
+					// T2b-D#1：与心跳同节拍续期 session→current 索引（TTL 对齐 session-ttl，与会话同寿）
 					if (sessionId != null) {
 						this.store.renewSessionCurrent(sessionId, runId);
 					}
+					// 裁决第 4 条：心跳同时续期卡的后台数据（快照/待决/归档/序号），
+					// 于是"会话活着，卡的后台数据就活着"—— 等多久都不会出现"卡还在、挂起态已过期"。
+					this.store.renewSuspensionTtl(runId);
 					out.heartbeat(heartbeatData(runId, pending, confirm, timeoutSeconds,
 							(System.currentTimeMillis() - startedAt) / 1000));
 				}
 			}
 		}
 		catch (InterruptedException ex) {
+			// 线程被中断（应用停止 / 池关闭）：<b>不写超时结局</b>（用户裁决 2026-10-20 第 1 条口径：
+			// 确认门不设超时 —— 中断不是到期，不能把"没等到人"伪装成 TIMEOUT）。
+			// 条目保持未决，进程重启后仍可由挂起态外置 + 人决策继续收敛；本轮按中断收尾。
 			Thread.currentThread().interrupt();
-			log.warn("挂起等待被中断 runId={} toolCallId={}", runId, pending.getToolCallId());
-			return expire(runId, pending, timeoutSeconds, confirm);
+			log.warn("挂起等待被中断 runId={} toolCallId={}（条目保持未决，不写超时结局）", runId, pending.getToolCallId());
+			PendingToolCall fresh = this.store.pending(runId, pending.getToolCallId());
+			return fresh == null ? pending : fresh;
 		}
 		finally {
+			this.beacon.endGateWait(runId);
 			this.latches.remove(key, latch);
 			this.armedKeys.remove(key);
 			try {
@@ -339,7 +388,7 @@ public class ConfirmGate {
 	 * {@link PendingToolCall#CANCELLED}（未执行），发一帧与人工决策同形的结局帧，
 	 * 然后由 {@code SpToolCallingManager} 在事件边界终止整轮（终态 {@code done{cancelled:true}}）。
 	 */
-	private PendingToolCall cancel(String runId, PendingToolCall pending, int timeoutSeconds, boolean confirm) {
+	private PendingToolCall cancel(String runId, PendingToolCall pending, boolean confirm, long startedAt) {
 		PendingToolCall fresh = this.store.pending(runId, pending.getToolCallId());
 		if (fresh == null) {
 			fresh = pending;
@@ -362,22 +411,22 @@ public class ConfirmGate {
 			out.frontendToolResult(fresh, false, fresh.getResultText());
 		}
 		log.info("挂起等待被取消 runId={} toolCallId={} kind={} 已等待={}s", runId, pending.getToolCallId(),
-				confirm ? "confirm" : "frontend-tool", timeoutSeconds);
+				confirm ? "confirm" : "frontend-tool", (System.currentTimeMillis() - startedAt) / 1000);
 		return fresh;
 	}
 
 	/**
-	 * 超时收口：把结局也写进外置状态（重启后仍可读）。
+	 * 前端工具回执兜底收口（<b>只对有时限的前端工具</b>，见 {@link #suspendWaitSeconds}）：
+	 * 把结局也写进外置状态（重启后仍可读）。
 	 *
-	 * <p>两个分支的结局语义**不同**，文案必须分开：
-	 * <ul>
-	 * <li>确认门：等待的是人的决策 ⇒ 超时 = "未执行"（确定未发生，{@code CONFIRM_TIMEOUT}）；</li>
-	 * <li>前端工具：等待的是前端的回执 ⇒ 超时只说明"回执没回来"，**结局未知**
+	 * <p>结局语义：等待的是前端的回执 ⇒ 超时只说明"回执没回来"，<b>结局未知</b>
 	 * （{@code FRONTEND_TIMEOUT}）—— 副作用可能已经发生（如文件已落盘），故不再写
-	 * "本次调用未获得数据"这种会被读成"什么都没发生"的措辞。</li>
-	 * </ul>
+	 * "本次调用未获得数据"这种会被读成"什么都没发生"的措辞。
+	 *
+	 * <p><b>确认门没有这条路径</b>（裁决 2026-10-20 第 1 条）：确认卡只由人收摊，系统不再
+	 * 产生 {@code decision=timeout} 帧。
 	 */
-	private PendingToolCall expire(String runId, PendingToolCall pending, int timeoutSeconds, boolean confirm) {
+	private PendingToolCall expireFrontend(String runId, PendingToolCall pending, int timeoutSeconds) {
 		PendingToolCall fresh = this.store.pending(runId, pending.getToolCallId());
 		if (fresh == null) {
 			fresh = pending;
@@ -387,28 +436,19 @@ public class ConfirmGate {
 		}
 		fresh.setStatus(PendingToolCall.TIMEOUT);
 		fresh.setOutcome(ToolOutcome.TIMEOUT.wire());
-		fresh.setCode(confirm ? ToolOutcome.CODE_CONFIRM_TIMEOUT : ToolOutcome.CODE_FRONTEND_TIMEOUT);
-		fresh.setReason(confirm ? "CONFIRM_TIMEOUT" : "FRONTEND_TIMEOUT");
+		fresh.setCode(ToolOutcome.CODE_FRONTEND_TIMEOUT);
+		fresh.setReason("FRONTEND_TIMEOUT");
 		fresh.setExecuted(false);
 		fresh.setResolvedAtMs(System.currentTimeMillis());
-		fresh.setResultText(confirm
-				? "确认等待超过 " + timeoutSeconds + " 秒，系统已自动取消该操作（工具未执行）。"
-				: "前端工具 " + fresh.getName() + " 未在 " + timeoutSeconds + " 秒内收到前端回执，本次调用结局未知（不表示未发生）。");
+		fresh.setResultText(
+				"前端工具 " + fresh.getName() + " 未在 " + timeoutSeconds + " 秒内收到前端回执，本次调用结局未知（不表示未发生）。");
 		this.store.putPending(runId, fresh);
-		// 超时的结局帧与人工决策同形（SP-01ab 实测形态：confirm_decision 的 decision=timeout），
-		// 前端不必区分"人拒绝"与"等超时"两套解析路径。
-		SseChatEmitter out = this.registry.of(runId);
-		if (confirm) {
-			out.confirmDecision(fresh, "timeout", fresh.getReason(), timeoutSeconds * 1000L);
-		}
-		else {
-			out.frontendToolResult(fresh, false, fresh.getResultText());
-		}
+		this.registry.of(runId).frontendToolResult(fresh, false, fresh.getResultText());
 		return fresh;
 	}
 
 	private Map<String, Object> heartbeatData(String runId, PendingToolCall pending, boolean confirm,
-			int timeoutSeconds, long waitedSeconds) {
+			Integer timeoutSeconds, long waitedSeconds) {
 		Map<String, Object> data = new LinkedHashMap<>();
 		data.put("runId", runId);
 		data.put("suspendKind", confirm ? "confirm" : "frontend-tool");
@@ -416,6 +456,7 @@ public class ConfirmGate {
 		data.put("name", pending.getName());
 		data.put("status", pending.getStatus());
 		data.put("waitedSeconds", waitedSeconds);
+		// 无上限的挂起（确认门 / generative_form）报 null：前端据此不武装倒计时
 		data.put("timeoutSeconds", timeoutSeconds);
 		return data;
 	}
@@ -604,9 +645,10 @@ public class ConfirmGate {
 	/**
 	 * 用户主动放弃（关闭/取消表单）：与决策写入同一套次序（落库 → 发结局帧 → 唤醒）。
 	 *
-	 * <p>为什么要有这个终态：前端工具此前只有"回灌结果"与"超时/整轮取消"三个出口 ——
-	 * 用户关掉表单时前端<b>没有合法动作</b>，挂起只能悬到 {@code app.ai.hitl.frontend-tool-timeout} 才由
-	 * {@code FRONTEND_TIMEOUT} 收摊。取消终态把"用户不打算填了"变成一次明确的、立刻的收敛
+	 * <p>为什么要有这个终态：前端工具此前只有"回灌结果"与"超时/整轮取消"出口 ——
+	 * 用户关掉表单时前端<b>没有合法动作</b>，挂起只能悬到该工具自己的上限（即时执行类前端工具
+	 * {@code app.ai.hitl.frontend-tool-timeout}；{@code generative_form} 自 2026-10-20 起无上限）。
+	 * 取消终态把"用户不打算填了"变成一次明确的、立刻的收敛
 	 * （且与"没人响应"的超时语义分开，排障时看得清）。
 	 */
 	private Submission dismiss(String runId, PendingToolCall pending, String source) {

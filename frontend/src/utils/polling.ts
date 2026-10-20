@@ -19,8 +19,7 @@
  *   **补发恰好 1 次**（多次合并 1 次）——被挡掉的刷新没有静默丢弃路径；
  * - `setIntervals`（job-watch 通道降级 3s ⇄ 慢档用）：运行时换节奏，切换即重排表、起点重置。
  *
- * 现存消费方：作业跟踪兜底轮询（`utils/job-watch.ts`）、AI 面板倒计时 tick
- * （`components/AiPanel/AiPanel.vue`，intervalMs=1000 单节奏 + start/stop）。
+ * 现存消费方：作业跟踪兜底轮询（`utils/job-watch.ts`）。
  */
 
 /** 回可见补刷的错峰窗口上界（0~250ms 均匀取值，**作用于补刷本身**；内部常量，不再导出）。 */

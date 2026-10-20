@@ -227,10 +227,10 @@ public class AppProperties {
              * 连接 ⇒ 阻塞写抛 IOException ⇒ 线程退出。注意它<b>不是</b>写侧唯一的释放手段 —— 本配置下
              * 卡住的写通常更早被容器的 120s 写超时（{@code server.tomcat.connection-timeout} 派生）以
              * {@code SocketTimeoutException} 收场；{@code 0L} 的语义因此是"少这一层、释放时刻随连接配置
-             * 漂移"，而<b>不是</b>"连接永无释放手段"。取值 5 分钟
-             * = <b>与 AI 通道的 emitter 生命周期同量级对齐</b>（AI 通道的 emitter 由
-             * {@code AiController} 用轮次总预算 {@code app.ai.resilience.total-budget}（300s）构造），
-             * 两条通道的"单条流寿命"因此是同一口径。
+             * 漂移"，而<b>不是</b>"连接永无释放手段"。取值 5 分钟是任务通道自己的流寿命口径
+             * （AI 通道自 P1 收口起<b>不设</b>传输层死线：{@code new SseEmitter(-1L)}，因为确认门/表单
+             * 等人没有上限；它的机器预算由 {@code StreamWatchdog} 判，与传输层无关 —— 两条通道
+             * 不再对齐同一个 emitter 生命周期）。
              *
              * <p>
              * 前端代价已论证可接受：{@code openTaskEvents} 用 {@code EventSource}（断线按 retry 自动

@@ -306,7 +306,7 @@ function optionLabel(field: FormFieldLite, value: unknown): string {
  *
  * 2A 批（裁决 §9 K2）：`blocked` / `unknown` / `pending` **不是决策态** —— 它们是工具运行侧
  * 的「未形成裁决」（越 scope 拦下 / 结局未知 / 仍在途），继续走普通工具卡（右状态标签承接
- * 「超出当前范围 / 结局未知 / 等待确认」），不进审批卡的只读四态，避免把非决策读成超时。
+ * 「超出当前范围 / 结局未知 / 待确认」），不进审批卡的只读四态，避免把非决策读成超时。
  * 契约增量：`skipped`（上游失败导致未执行）同属非决策态 —— 必须由普通状态标签显示「已跳过」，
  * 不得被只读状态机折成「已超时 / 已批准」。
  */
@@ -394,11 +394,21 @@ export interface CardStatus {
   tone: CardTone
 }
 
-/** pending 文案按类型分工：普通工具「待执行」、HITL「等待确认」、GF「待填写」。 */
+/** pending 文案按类型分工：普通工具「待执行」、HITL「待确认」（琥珀）、GF「待填写」。 */
 const CARD_PENDING_LABEL: Record<CardType, string> = {
   tool: '待执行',
-  hitl: '等待确认',
+  hitl: '待确认',
   form: '待填写'
+}
+
+/**
+ * 待决卡色族：确认卡（hitl）承载"等用户拍板"的唯一状态色 = 琥珀（对齐 card-channels 定稿
+ * `#b45309` / `#fffbeb`）；工具/表单待决仍是蓝族（动作已就绪，等执行/填写）。
+ */
+const CARD_PENDING_TONE: Record<CardType, CardTone> = {
+  tool: 'primary',
+  hitl: 'warning',
+  form: 'primary'
 }
 
 /** 普通状态色族（R-165 既有口径保持；pending / running 蓝、成功绿、失败红、其余中性灰）。 */
@@ -453,7 +463,7 @@ export function cardTypeOf(part: ToolPart): CardType {
  * 普通段状态文案（排除 pending —— 已由 {@link cardStatusOf} 按类型分工先判；
  * 只读六态走 {@link readOnlyStateOf}，不在此重复）。
  */
-function toolStatusLabelOf(status: Exclude<ToolRunStatus, 'pending'>, expiredLocally: boolean | undefined): string {
+function toolStatusLabelOf(status: Exclude<ToolRunStatus, 'pending'>): string {
   switch (status) {
     case 'running':
       return '调用中…'
@@ -466,7 +476,7 @@ function toolStatusLabelOf(status: Exclude<ToolRunStatus, 'pending'>, expiredLoc
     case 'blocked':
       return '超出当前范围'
     case 'expired':
-      return expiredLocally ? '已超时作废' : '会话已失效'
+      return '会话已失效'
     case 'cancelled':
       return '已取消'
     case 'unknown':
@@ -489,11 +499,12 @@ export function cardStatusOf(part: ToolPart): CardStatus {
     return { key: state, label: READ_ONLY_LABEL[state], tone: READ_ONLY_TONE[state] }
   }
   if (part.status === 'pending') {
-    return { key: 'pending', label: CARD_PENDING_LABEL[cardTypeOf(part)], tone: 'primary' }
+    const type = cardTypeOf(part)
+    return { key: 'pending', label: CARD_PENDING_LABEL[type], tone: CARD_PENDING_TONE[type] }
   }
   return {
     key: part.status,
-    label: toolStatusLabelOf(part.status, part.expiredLocally),
+    label: toolStatusLabelOf(part.status),
     tone: TOOL_STATUS_TONE[part.status]
   }
 }

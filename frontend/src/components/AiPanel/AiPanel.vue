@@ -330,9 +330,10 @@
                     </button>
                     <div v-if="isReadOnlyCard(part)" v-show="isBlockExpanded(block)" class="pb-[11px]" :data-testid="'ro-body-' + part.toolCallId">
                       <!-- 门卡：参数区字段表原样（与待决态同一份 gateRows：操作 + args 全键 + 敏感掩码）；
-                           字段区限高 = 字段族双约束 min(280px,35vh)（裁决 §14.4）。 -->
+                           字段区限高 = 字段族双约束 min(280px,35vh)（裁决 §14.4）。
+                           2026-10-20 卡面一致性裁决：**删重复标题行**（标题已在统一卡头业务化），
+                           卡体直接字段表（demo 场景二/三 1:1）。 -->
                       <template v-if="part.name !== GENERATIVE_FORM_TOOL">
-                        <div class="px-[11px] pt-[10px] text-[13.2px] [font-weight:650] text-[#1f2328]">{{ hitlReceiptSummary(part) }}</div>
                         <div
                           :class="['mx-[11px] mt-[9px] bg-white border border-solid border-[#eef0f3] rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto', SCROLLBAR_CLASS]"
                           :data-testid="'ro-rows-' + part.toolCallId"
@@ -348,17 +349,23 @@
                           </div>
                         </div>
                       </template>
-                      <!-- GF：同一张表单原样锁定（readonly 模式复用 FormRenderer，零操作按钮） -->
+                      <!-- GF：同一张表单原样锁定（readonly 模式复用 FormRenderer，零操作按钮）。
+                           卡体留白与门卡只读态同构：mx-[11px] mt-[9px] 包裹（demo
+                           card-consistency-fix.html 场景五 data-form-fields 11px/9px 口径）。 -->
                       <template v-else>
-                        <FormRenderer
+                        <div
                           v-if="cardFormSpec(part)"
-                          :schema="(cardFormSpec(part) as FormSpec)"
-                          readonly
-                          :submitting="false"
-                          :error="null"
-                          :remaining-seconds="null"
-                          :initial-values="readOnlyFormValues(part)"
-                        />
+                          class="mx-[11px] mt-[9px]"
+                          :data-testid="'ro-form-' + part.toolCallId"
+                        >
+                          <FormRenderer
+                            :schema="(cardFormSpec(part) as FormSpec)"
+                            readonly
+                            :submitting="false"
+                            :error="null"
+                            :initial-values="readOnlyFormValues(part)"
+                          />
+                        </div>
                         <div v-else class="px-[11px] pt-[10px] text-[12.6px] text-[#57606a]">表单定义不可用，无法还原原卡</div>
                       </template>
                       <!-- 失败 / 拒绝 / 取消收尾的原因单独一行常驻卡面（K3：执行失败原因常驻；F9 同源） -->
@@ -371,7 +378,9 @@
                     <!-- 卡体分支保留（统一卡头之下）：已决只读态 → ro-body；普通工具 → 折叠展开体。
                          展开体渲染后 0 行 ⇒ 不渲展开体 / 不渲 chevron / 卡头 disabled（v7.10 ajv11）。 -->
                     <template v-else-if="cardBodyShown(part)">
-                      <div v-show="isBlockExpanded(block)" class="px-2 pb-2 pt-0 flex flex-col gap-1.5" :data-testid="'block-body-' + block.id">
+                      <!-- 待动作卡（确认门 / GF）的卡体留白由子块自带（门卡 pb-[11px] + rows/操作行
+                           mx-[11px]，demo 场景一/四 1:1）；通用工具展开体才是 px-2 pb-2 的内缩盒。 -->
+                      <div v-show="isBlockExpanded(block)" :class="part.requiresAction ? 'flex flex-col' : 'px-2 pb-2 pt-0 flex flex-col gap-1.5'" :data-testid="'block-body-' + block.id">
                       <!-- S6 批1（裁决 2026-10-16 第 2 条：面板 JSON 展示全面清零 / v7.9 场景 16 口径）：
                            工具卡**参数**由 mono JSON 盒改**折叠区 label-value 字段表**（解析 args JSON → 键值行，
                            值可读化：布尔 是/否、数组 顿号、文件路径 文件名）。
@@ -441,25 +450,18 @@
                            右状态标签（cardStatusOf，expired→「会话已失效」）与段 reason 位（A4'，D11）承接。 -->
                       <template v-if="part.requiresAction">
                         <template v-if="part.kind2 === 'CONFIRM' && part.status === 'pending'">
-                          <!-- R-163D D5 结构 → R-165 S2 纯 Tailwind 化：demo v7 `.gate` 全结构
-                               （蓝底门卡 = 卡头 + 字段表 grows + SVG 倒计时环 + 双自绘按钮）；
-                               el-button / el-input / class="gate|gate-hd|cd|gate-ft" 手写 CSS 类全部退场，
-                               data-testid / @click / :disabled 判据逐字保留。
-                               2A 批（裁决 §3 缺陷④ / §9 K1）：**拒绝原因输入框整段删除** —— H1 只问
-                               批不批、无理由框（「修正走会话」）；按钮口径 = 「拒绝 / 批准」两钮
-                               （2026-10-17 裁决 H1；原「确认执行」文案漂移已回落）。
-                               H1 预检摘要（demo `hitl-confirm-preflight.html` 场景一）：参数行与
-                               按钮行之间，仅在段带 `preflight` 时渲染。 -->
-                          <div class="border border-solid border-[#cddcff] bg-[#eff4ff] rounded-[10px] p-[12px] mb-2.5" data-testid="hitl-gate">
-                            <div class="flex items-center gap-[7px] text-[13.2px] mb-[9px]">
-                              <span class="w-[15px] h-[15px] rounded-[50%] border-solid border-[1.4px] border-[#2563eb] text-[#2563eb] text-[10px] flex items-center justify-center" aria-hidden="true">!</span>
-                              <span class="[font-weight:650]">需要你确认后才能继续</span>
-                              <span class="ml-auto" :class="chipClass('primary')">等待确认</span>
-                            </div>
-                            <!-- 门卡字段区 = 纯限高内滚（字段族双约束 min(280px,35vh)，裁决 §14.4）；
-                                 按钮区（倒计时 + 拒绝/批准）在滚动区之外常驻。 -->
+                          <!-- 2026-10-20 卡面一致性裁决（demo chat-ux/card-consistency-fix.html 场景一
+                               1:1 移植）：确认卡**单层** —— 内层蓝框与内层卡头（「需要你确认后才能
+                               继续」+ 内层 chip）整段退役，字段表与按钮行直接落在统一卡头的卡体内；
+                               操作/参数行一个不少（操作 + args 全键，敏感掩码口径不变）。
+                               倒计时环 / 剩余秒 / 「等待人工确认」静态兜底随去超时裁决一并退役
+                               （历史 TIMEOUT 卡只读展示保留）。预检摘要区撤除（types 的 preflight
+                               字段保留不渲染）；409 幂等拒绝后的「已提交，同步中…」瞬态保留。 -->
+                          <div class="pb-[11px]" data-testid="hitl-gate">
+                            <!-- 字段区 = 纯限高内滚（字段族双约束 min(280px,35vh)，裁决 §14.4）；
+                                 按钮行在滚动区之外常驻。 -->
                             <div
-                              class="bg-white border border-solid border-[#eef0f3] rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto"
+                              class="mx-[11px] mt-[9px] bg-white border border-solid border-[#eef0f3] rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto"
                               :class="SCROLLBAR_CLASS"
                               data-testid="gate-rows"
                             >
@@ -475,81 +477,26 @@
                                 <span class="flex-1 min-w-0 break-words">{{ row.value }}</span>
                               </div>
                             </div>
-                            <!-- H1 预检摘要（demo `chat-ux/hitl-confirm-preflight.html` 场景一 1:1 移植）：
-                                 位置 = 参数行与按钮行之间；仅 `part.preflight` 存在时渲染（旧帧 / GF /
-                                 前端工具 / 后端工具零影响）。预检不通过时后端不弹卡（无卡形态），
-                                 故此处的 ✗ 分支只是契约防御，正常数据流不可达。 -->
-                            <div
-                              v-if="part.preflight"
-                              class="mt-[9px] rounded-[8px] border border-solid border-[#cddcff] bg-[#f5f8ff] p-[11px]"
-                              data-testid="preflight-summary"
-                              :data-preflight="preflightAllPass(part.preflight) ? 'pass' : 'fail'"
-                            >
-                              <div class="flex items-center gap-[6px]">
-                                <span class="text-[12.4px] [font-weight:650] text-[#1f2328]">预检摘要</span>
-                                <span
-                                  class="ml-auto flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] font-semibold border border-solid"
-                                  :class="preflightAllPass(part.preflight)
-                                    ? 'text-[#1a7f45] bg-[#edf7f0] border-[#bfe3cd]'
-                                    : 'text-[#c0392b] bg-[#fdf1ef] border-[#e3e6ea]'"
-                                >{{ preflightAllPass(part.preflight) ? '✓ 预检通过' : '✗ 预检未通过' }}</span>
-                              </div>
-                              <div class="mt-[8px] flex items-start gap-[8px]">
-                                <span class="flex-[0_0_58px] text-[11.2px] text-[#8b949e] leading-[1.6]">目标</span>
-                                <span class="flex-1 min-w-0 text-[12.2px] leading-[1.6] text-[#1f2328]">任务 #{{ part.preflight.target.taskId }}「{{ part.preflight.target.title }}」<span class="text-[#8b949e]">（类型：{{ preflightTargetWord(TASK_TYPE_LABELS, part.preflight.target.type) }} · 状态：{{ preflightTargetWord(TASK_STATUS_LABELS, part.preflight.target.status) }}）</span></span>
-                              </div>
-                              <div class="mt-[7px] flex items-start gap-[8px]">
-                                <span class="flex-[0_0_58px] text-[11.2px] text-[#8b949e] leading-[1.6]">预检</span>
-                                <span class="flex-1 min-w-0 flex flex-col gap-[5px] text-[12.2px] leading-[1.6] text-[#1f2328]">
-                                  <span v-for="check in part.preflight.checks" :key="check.name"><span class="font-semibold" :class="check.pass ? 'text-[#1a7f45]' : 'text-[#c0392b]'">{{ check.pass ? '✓' : '✗' }}</span> {{ check.name }}<template v-if="check.detail">（{{ check.detail }}）</template></span>
-                                </span>
-                              </div>
-                              <div class="mt-[7px] flex items-start gap-[8px]">
-                                <span class="flex-[0_0_58px] text-[11.2px] text-[#8b949e] leading-[1.6]">影响面</span>
-                                <span class="flex-1 min-w-0 text-[12.2px] leading-[1.6] text-[#1f2328]">{{ part.preflight.impact }}</span>
-                              </div>
-                              <div class="mt-[7px] flex items-start gap-[8px]">
-                                <span class="flex-[0_0_58px] text-[11.2px] text-[#8b949e] leading-[1.6]">批准绑定</span>
-                                <span class="flex-1 min-w-0 text-[12.2px] leading-[1.6] text-[#57606a]">批准时将记录预检指纹，数据变动则需重新确认。</span>
-                              </div>
-                            </div>
                             <!-- 2A 批（裁决 §3 缺陷③）：按钮防折行 —— 行 flex-wrap（空间不足时按钮组整行
                                  下移）、按钮组 flex-none、按钮 whitespace-nowrap + min-w；组内不再换行。 -->
-                            <div class="flex flex-wrap items-center gap-[9px] mt-[11px]">
-                              <svg v-if="remainingSeconds !== null" class="flex-[0_0_30px]" viewBox="0 0 36 36" width="30" height="30" aria-hidden="true">
-                                <circle class="fill-none stroke-[#e3e6ea] [stroke-width:3]" cx="18" cy="18" r="15.5" stroke-width="3"></circle>
-                                <circle
-                                  class="fill-none stroke-[#2563eb] [stroke-width:3] transition-[stroke-dashoffset] duration-1000 ease-linear motion-reduce:transition-none"
-                                  cx="18" cy="18" r="15.5" stroke-width="3" stroke-linecap="round"
-                                  :stroke-dasharray="RING_CIRCUMFERENCE" :stroke-dashoffset="confirmRingOffset"
-                                  transform="rotate(-90 18 18)"
-                                ></circle>
-                              </svg>
+                            <div class="mx-[11px] flex flex-wrap items-center gap-[9px] pt-[11px]">
                               <!-- R-166 口径③：409 幂等拒绝后的「已提交，同步中…」瞬态（不写任何乐观裁决） -->
                               <span
                                 v-if="gateSyncing(part.toolCallId)"
                                 class="text-[12.2px] text-[#57606a]"
                                 data-testid="gate-syncing"
                               >已提交，同步中…</span>
-                              <span
-                                v-else-if="remainingSeconds !== null"
-                                class="min-w-0 text-[12.2px] text-[#57606a] tabular-nums"
-                                :class="confirmExpired ? 'opacity-60' : ''"
-                              >
-                                {{ confirmExpired ? '确认已超时（按钮已置灰），本轮将按拒绝/超时收尾' : `剩余确认时间 ${formatCountdown(remainingSeconds)}` }}
-                              </span>
-                              <span v-else class="min-w-0 text-[12.2px] text-[#57606a]">等待人工确认</span>
                               <span class="ml-auto flex flex-none items-center gap-[8px] whitespace-nowrap">
                                 <button
                                   type="button"
                                   class="flex-none whitespace-nowrap min-w-[56px] rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-[#e3e6ea] transition-all duration-[150ms] bg-white text-[#57606a] hover:border-[#8b949e] hover:text-[#1f2328] disabled:opacity-50 disabled:cursor-default"
-                                  :disabled="confirmExpired || gateSubmitting(part.toolCallId)"
+                                  :disabled="gateSubmitting(part.toolCallId)"
                                   @click="decide(false, part.toolCallId)"
                                 >拒绝</button>
                                 <button
                                   type="button"
                                   class="flex-none whitespace-nowrap min-w-[72px] rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-transparent transition-all duration-[150ms] bg-[#2563eb] text-white font-semibold hover:brightness-[1.08] disabled:opacity-50 disabled:cursor-default disabled:bg-[#8b949e] disabled:font-normal"
-                                  :disabled="confirmExpired || gateSubmitting(part.toolCallId)"
+                                  :disabled="gateSubmitting(part.toolCallId)"
                                   @click="decide(true, part.toolCallId)"
                                 >批准</button>
                               </span>
@@ -557,18 +504,21 @@
                           </div>
                         </template>
 
-                        <div v-else-if="part.kind2 === 'FRONTEND' && part.name === GENERATIVE_FORM_TOOL" class="mt-2">
+                        <div v-else-if="part.kind2 === 'FRONTEND' && part.name === GENERATIVE_FORM_TOOL" class="p-[11px]">
                           <!-- GF-B：生成式表单挂起 —— 渲染 FormRenderer 等用户填写（同 toolCallId 可重发/取消） -->
                           <!-- T2a-D#3（D10 不扩判据）：同 toolCallId 至多一个 FormRenderer —— 只渲染在宿主
                                消息（最后一条持该挂起调用的消息）上；非宿主消息不再出独立 tag 列（D-C7 已删） -->
+                          <!-- 2026-10-20 卡面一致性裁决（demo 场景四）：嵌入态**单框** —— FormRenderer 走
+                               flat（自绘描边/底色/外边距整块退役，只剩字段与操作行），外框由统一卡容器承担；
+                               时限脚注随去超时裁决退役（表单一直可填）。 -->
                           <FormRenderer
                             v-if="liveForm && liveForm.toolCallId === part.toolCallId && m.id === formHostMessageId"
                             :key="liveForm.toolCallId"
                             :schema="liveForm.form"
                             :submitting="liveForm.status === 'submitting'"
                             :error="liveForm.error"
-                            :remaining-seconds="formRemainingSeconds"
                             :show-header="false"
+                            flat
                             @submit="onFormSubmit"
                             @cancel="onFormCancel"
                           />
@@ -932,10 +882,10 @@
  *   复制内容仍取 `m.content`（text 段 join 的派生投影，同源）；
  * - 上下文条：会话 id / 工作区上下文 / 数据版本 / 可用性 tag / 契约同步 chip —— 蓝本无
  *   `/api/ai/health`、无契约事件，本仓需要可视化"刷新恢复"与"工作区已同步"的状态；
- * - 工具卡四态（调用中/成功/失败/待执行·等待确认按通道）并展示参数与结果 —— 蓝本是"已执行工具 X"单标签；
+ * - 工具卡四态（调用中/成功/失败/待执行·待确认按通道）并展示参数与结果 —— 蓝本是"已执行工具 X"单标签；
  * - 生成式表单挂起卡（GF-B）：generative_form 帧渲染 FormRenderer 等用户填写，取消/超时带
  *   cancelled:true 回灌 —— 蓝本无此前端工具通道；
- * - HITL 卡片：确认/拒绝双路径 + 拒绝原因输入 + 超时倒计时置灰 —— 蓝本有双按钮但无原因与倒计时；
+ * - HITL 卡片：确认/拒绝双路径（无原因输入、无倒计时 —— 2026-10-20 去超时裁决与 H1 口径）；
  * - 409/503/断流三类降级提示与一键重挂 —— 蓝本是蓝本后端（无 SESSION_BUSY/挂起池）；
  * - 头部「新建对话」文字按钮 + 空态页签语义小字（苞 A 项 1）：清空当前会话并换新 sessionId
  *   （旧会话的服务端记忆由 `DELETE /api/ai/history/{sessionId}` 删除）—— 蓝本无"重开"入口；
@@ -1010,7 +960,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ArrowRight, ChatDotRound } from '@element-plus/icons-vue'
 import { useAiStore } from '@/stores/ai'
 import { useWorkspaceStore } from '@/stores/workspace'
-import { formatCountdown, formatProgressiveTs, TASK_STATUS_LABELS, TASK_TYPE_LABELS } from '@/utils/format'
+import { formatProgressiveTs, TASK_TYPE_LABELS } from '@/utils/format'
 import {
   COPY_ICON_BTN_CLASS,
   COPY_ICON_SVGS,
@@ -1044,7 +994,6 @@ import {
   type Block
 } from '@/utils/blocks'
 import { deriveCopyText, deriveProjections } from '@/utils/parts'
-import { createPollingController, type PollingController } from '@/utils/polling'
 import FormRenderer from '@/components/AiPanel/FormRenderer.vue'
 import { GENERATIVE_FORM_TOOL, type ChatMessage, type ToolPart } from '@/types/ai'
 import type { FormSpec } from '@/types/form-schema'
@@ -1271,23 +1220,6 @@ let copyTimer: ReturnType<typeof setTimeout> | null = null
 function isMsgCopied(messageId: string): boolean {
   return copyState.value !== null && copyState.value.id === messageId && copyState.value.ok
 }
-
-/** 倒计时节拍（每秒推进一次；确认卡据此置灰）。 */
-const now = ref(Date.now())
-/**
- * R-166 口径①：倒数秒的**唯一来源** = store 的 `confirmClock`（帧/心跳锚定的本地绝对到期时刻）。
- *
- * 本组件**不再自行折算/不再持有 deadline** —— 旧口径把"帧差值折算"放在面板的重派生路径上，
- * `pendingConfirm` 引用一变就把倒计时打回起点（症②）。现在面板只做 `deadlineMs − now` 的读取，
- * 锚点由 store 在**收到实时帧 / 心跳**时写一次 ⇒ 重派生天然幂等。
- */
-const TICK_MS = 1000
-/**
- * 节拍器（步2 接入可见性纪律 controller，节奏 1s/1s ⇒ 单节奏）。
- * 回可见时 controller 会错峰补刷一次，run 本身即"重写 now" ⇒ 倒计时**立即重算**，
- * 不会停在已过期的假倒计时上。
- */
-let tickController: PollingController | null = null
 
 /** 工具名 → 中文（后端工具全集 + 前端工具/页面能力的可读名）。 */
 const TOOL_LABELS: Record<string, string> = {
@@ -1517,52 +1449,6 @@ const inputPlaceholder = computed(() => {
 })
 
 /**
- * R-166 口径①：剩余秒 = 门卡时钟（帧/心跳锚定的本地绝对到期）− 本地 now。
- *
- * 时钟与门卡**必须同 id**：换挂起（toolCallId 变）时旧时钟不得给新卡读数；时钟未锚定
- * （首心跳前的刷新恢复窗口 / 帧不带任何到期口径）→ null ⇒ 门卡显示静态「等待人工确认」
- * （不伪造倒计时）。归零后由 `watch` 触发一次权威校正（口径④）。
- */
-const remainingSeconds = computed(() => {
-  const clock = ai.confirmClock
-  const pending = ai.pendingConfirm
-  if (!clock || !pending || clock.toolCallId !== pending.toolCallId) {
-    return null
-  }
-  return Math.max(0, Math.ceil((clock.deadlineMs - now.value) / 1000))
-})
-
-const confirmExpired = computed(() => remainingSeconds.value !== null && remainingSeconds.value <= 0)
-
-/**
- * R-165 S2：门卡 SVG 倒计时环的**总量**（秒）—— R-166 起取自门卡时钟的同帧口径
- * （帧/心跳的 `timeoutSeconds`），用于把「剩余/总量」折算成 stroke-dashoffset；
- * 缺省时环按满弧呈现，不伪造比例。
- */
-const confirmTotalSeconds = computed(() => {
-  const clock = ai.confirmClock
-  const pending = ai.pendingConfirm
-  if (!clock || !pending || clock.toolCallId !== pending.toolCallId) {
-    return null
-  }
-  return clock.totalSeconds
-})
-
-/** 环的 dashoffset：dasharray = 周长，offset = 周长 ×（1 − 剩余/总量）⇒ 蓝弧随时间线性退去（v7 同法）。 */
-const confirmRingOffset = computed(() => {
-  const remain = remainingSeconds.value
-  const total = confirmTotalSeconds.value
-  if (remain === null) {
-    return RING_CIRCUMFERENCE
-  }
-  if (!total || total <= 0) {
-    return 0
-  }
-  const ratio = Math.max(0, Math.min(1, remain / total))
-  return RING_CIRCUMFERENCE * (1 - ratio)
-})
-
-/**
  * GF-B：当前可交互的生成式表单（填写中/提交中才渲染 FormRenderer；
  * 结局帧到达后 activeForm 被清空，挂起卡随 pendingCall 一并消失）。
  */
@@ -1590,15 +1476,6 @@ const formHostMessageId = computed(() => {
     }
   }
   return null
-})
-
-/** 表单剩余填写秒数（store 的本地超时计时器同口径：deadline − now）。 */
-const formRemainingSeconds = computed(() => {
-  const form = liveForm.value
-  if (!form || form.deadline === null) {
-    return null
-  }
-  return Math.max(0, Math.ceil((form.deadline - now.value) / 1000))
 })
 
 /**
@@ -1742,7 +1619,7 @@ function markdownHtml(message: ChatMessage, block: Block): string {
  * 修复轮 1（向导工具泄漏）：`export.start` / `download_templates` 等 10 个 FRONTEND 向导工具
  * 有中文展示名（`toolLabel`）但 `tool-summaries.ts` 无 summaryFor 映射，兜底串为
  * 「<原始 name> · <状态词>」—— 展示名前缀剥不到它。故展示名剥壳失败时**再按 part.name 剥一次**；
- * 剥后只剩状态词（`STATUS_WORD_SET`，含兜底用的「等待确认」）⇒ 同样返回 null，
+ * 剥后只剩状态词（`STATUS_WORD_SET`，含兜底用的「待确认」）⇒ 同样返回 null，
  * 由右状态标签（普通 tool pending = 「待执行」）唯一承载状态。
  */
 const SUMMARY_PREFIX_SEP = /^[\s·、，,:：\-—]+/
@@ -2450,10 +2327,21 @@ function cardHeadClass(part: ToolPart): string {
   ].filter(Boolean).join(' ')
 }
 
-/** 卡头标题：tool/hitl = 工具中文名；form = 表单标题（FormRenderer 内头已抑制，标题上提）。 */
+/**
+ * 卡头标题。
+ * - form = 表单业务标题（FormRenderer 内头已抑制，标题上提）；
+ * - CONFIRM 带 `preflight.target` ⇒ **业务化标题**（demo 场景一/二/三 1:1）：
+ *   `待你确认：<类型> 任务 #<id>『<title>』`（待决）/ `<类型> 任务 #<id>『<title>』`（只读）；
+ * - 其余（无 preflight 的旧帧 / 普通工具）⇒ 回落工具中文名（现形态不变）。
+ */
 function cardTitle(part: ToolPart): string {
   if (cardTypeOf(part) === 'form') {
     return cardFormSpec(part)?.title?.trim() || '请填写以下信息'
+  }
+  const target = cardTypeOf(part) === 'hitl' ? part.preflight?.target : undefined
+  if (target) {
+    const business = `${labelWord(TASK_TYPE_LABELS, target.type)} 任务 #${target.taskId}『${target.title}』`
+    return isReadOnlyCard(part) ? business : `待你确认：${business}`
   }
   return toolLabel(part.name)
 }
@@ -2467,7 +2355,9 @@ function formRequiredSummary(part: ToolPart): string {
 /**
  * 卡头摘要（中性色，不承载状态）：
  * - form：待填写 = 必填计数；已提交 = submittedValues；已取消 = 未提交说明（F9 不回读残留值）；
- * - tool/hitl：沿用工具摘要映射（与待决态同一份，随生命周期不变）。
+ * - hitl 且已业务化标题（有 preflight.target）⇒ **空**（demo 卡头只有业务标题，标题已说清，
+ *   摘要再报「工具名（任务 #N）」= 同屏重复）；
+ * - 其余 tool/hitl：沿用工具摘要映射（与待决态同一份，随生命周期不变）。
  */
 function cardSummary(part: ToolPart): string {
   if (cardTypeOf(part) === 'form') {
@@ -2475,6 +2365,9 @@ function cardSummary(part: ToolPart): string {
       return formRequiredSummary(part)
     }
     return readOnlyStateOf(part) === 'cancelled' ? '未提交，填写内容不作记录' : generativeFormSummary(part)
+  }
+  if (cardTypeOf(part) === 'hitl' && part.preflight?.target) {
+    return ''
   }
   return toolSummaryOrNull(part) ?? ''
 }
@@ -2536,7 +2429,8 @@ function toolLabel(name: string): string {
 /**
  * R-165 S1：demo v7 胶囊四族（`.stchip` + `chip-idle/run/ok/bad` 工具类配方照搬）——
  * 底座与色族分离（门卡正文胶囊 / 健康胶囊复用）；承载件由 el-tag 换自绘 span。
- * 卡片卡头的状态标签走独立的 CARD_STATUS_BASE / CARD_STATUS_TONE（三类型统一、带描边）。
+ * 卡片卡头的状态标签走独立的 CARD_STATUS_BASE / CARD_STATUS_TONE（三类型统一、带描边；
+ * 待确认的琥珀族在那边定义）。本族只剩健康胶囊在用，warning/info 收敛中性灰（R-163 C2 口径不变）。
  */
 const CHIP_BASE = 'flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] whitespace-nowrap'
 const CHIP_TONE: Record<'info' | 'warning' | 'success' | 'danger' | 'primary', string> = {
@@ -2609,20 +2503,11 @@ function gateRows(part: ToolPart): FieldRow[] {
 }
 
 /**
- * H1 预检摘要徽标口径（demo 场景一「✓ 预检通过」）：全部检查项通过 ⇒ 通过徽标。
- * 预检不通过时后端**不弹卡**（无卡形态），此处的未通过分支仅为契约防御，正常数据流不可达。
+ * 业务枚举名 → 中文：后端 `PreflightReport.target` 放的是 Task 枚举名（`EXPORT` / `IMPORT`，
+ * `ToolPreflightService#targetOf` 的 `String.valueOf`），卡头业务标题要中文（「导出 任务 #411…」）
+ * —— 按仓库既有的 `TASK_TYPE_LABELS` 归一；已是中文或未知取值原样显示（不臆造标签）。
  */
-function preflightAllPass(preflight: NonNullable<ToolPart['preflight']>): boolean {
-  return preflight.checks.every((check) => check.pass)
-}
-
-/**
- * H1 预检目标行的类型/状态口径：后端 `PreflightReport.target` 放的是 Task 枚举名
- * （`IMPORT` / `ACTIVE`，`ToolPreflightService#targetOf` 的 `String.valueOf`），demo 卡面是中文
- * （「类型：导入 · 状态：进行中」）—— 按仓库既有的 `TASK_TYPE_LABELS` / `TASK_STATUS_LABELS`
- * 归一；已是中文或未知取值原样显示（不臆造标签）。
- */
-function preflightTargetWord(labels: Partial<Record<string, string>>, value: string): string {
+function labelWord(labels: Partial<Record<string, string>>, value: string): string {
   return labels[value] ?? value
 }
 
@@ -2645,9 +2530,6 @@ const SUGGESTION_CHIP = 'rounded-[999px] border border-solid border-[#e3e6ea] bg
  */
 const SKELETON_BAR_BASE = 'bg-[linear-gradient(90deg,#f6f7f9_0,#eef0f3_40%,#f6f7f9_80%)] bg-[length:220%_100%] animate-pulse motion-reduce:animate-none rounded-[6px] h-[11px] mb-[9px]'
 const SKELETON_BARS = ['w-[72%]', 'w-[92%]', 'w-[58%]', 'w-[85%]'].map((w) => `${SKELETON_BAR_BASE} ${w}`)
-
-/** R-165 S2：倒计时环周长（v7 同值：2πr，r=15.5 ⇒ 97.4）。 */
-const RING_CIRCUMFERENCE = 97.4
 
 function probe(): void {
   void ai.probeHealth()
@@ -2773,23 +2655,6 @@ function generativeFormSummary(part: ToolPart): string {
   }
   const items = rows.slice(0, 3).map((row) => `${row.key} ${row.value}`)
   return `${items.join('，')}${rows.length > items.length ? '…' : ''}`
-}
-
-/**
- * 门卡人话摘要（卡体标题 + 已决折叠摘要共用）：工具中文名 + args 前三键值。
- * S6 批1：值走 `readableValue`（布尔 是/否、数组 顿号、对象（复杂值））—— 摘要里不出现 JSON 片段。
- */
-function hitlReceiptSummary(part: ToolPart): string {
-  const label = toolLabel(part.name)
-  if (part.name === GENERATIVE_FORM_TOOL) {
-    return generativeFormSummary(part)
-  }
-  const rows = argRows(part.args)
-  if (rows.length === 0) {
-    return label
-  }
-  const pairs = rows.slice(0, 3).map((row) => `${row.key}=${row.value}`)
-  return `${label} · ${pairs.join('，')}`
 }
 
 /**
@@ -3016,17 +2881,6 @@ watch(() => ai.expanded, (expanded) => {
 })
 
 /**
- * R-166 口径④：倒计时归零 ⇒ 主动拉一次权威状态校正（每 toolCallId 只做一次，去重在 store）。
- * 后端真悬挂（无结局）时 store 落「已超时作废」回执态；有结局则按真实裁决收敛。
- */
-watch(remainingSeconds, (remain) => {
-  const pending = ai.pendingConfirm
-  if (remain === 0 && pending) {
-    ai.noteGateCountdownExpired(pending.toolCallId)
-  }
-})
-
-/**
  * R-161（RC-1/2 修复）：RO 内容重钉底 —— 确认门 / 生成式表单 / 工具卡 / 折叠展开等
  * 「只增高度、不进滚动指纹」的内容插入（指纹 watch 盲区）由 ResizeObserver 兜底：
  * msgWrapRef 的 scrollHeight 增大且处于跟随态 ⇒ pinBottom()；高度减小的回调不动作。
@@ -3049,13 +2903,6 @@ function onMsgWrapResized(): void {
 onMounted(async () => {
   ai.startMirror()
   ai.startWorkspaceSync()
-  tickController = createPollingController({
-    intervalMs: TICK_MS, // 单节奏（S2 起无 fallbackIntervalMs：双速语义已随任务中心自刷摘除）
-    run: () => {
-      now.value = Date.now()
-    }
-  })
-  tickController.start()
   void ai.probeHealth()
   // RC-4：先判本页签是不是**复制页签**（Web Locks 探活）再读历史 —— 复制页签会发现场换新会话，
   // 不能把原页签的历史/挂起卡读进复制页签里。
@@ -3083,8 +2930,6 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
-  tickController?.stop()
-  tickController = null
   if (copyTimer !== null) {
     clearTimeout(copyTimer)
     copyTimer = null

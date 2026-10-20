@@ -65,24 +65,22 @@ class AiControllerHealthSseDeliveryTest {
 	}
 
 	/**
-	 * 拆键后的观测面（数字规格清点裁决③）：两个挂起键各自可观测，且各取各的取键方法。
-	 *
-	 * <p>两个 stub 值刻意取不同的数（240 / 120，即 {@code application.yml} 的现态值）——
-	 * 这样"两键写反/串读"（把前端工具键接到确认门方法上）会被本用例直接抓住；
-	 * 键的默认值与 {@code total-budget} 的上限关系由
-	 * {@code AiPropertiesT35DefaultsTest} 锚定，本用例只管端点回显的配对是否正确。
+	 * 2026-10-20 裁决后的观测面：确认门不再超时，/health <b>不再</b>报告 {@code confirmTimeoutSeconds}；
+	 * {@code frontendToolTimeoutSeconds} 仍在（只对即时执行类前端工具有意义，
+	 * {@code generative_form} 豁免 —— 见 {@code ConfirmGate#suspendWaitSeconds}）。
+	 * 值与 {@code application.yml} 现态一致（120）。
 	 */
 	@Test
-	void healthExposesBothSuspendTimeoutsAfterKeySplit() throws Exception {
+	void healthExposesOnlyFrontendToolTimeoutAfterConfirmGateRetirement() throws Exception {
 		mockMvc.perform(get("/api/ai/health"))
 			.andExpect(status().isOk())
-			.andExpect(jsonPath("$.confirmTimeoutSeconds").value(240))
+			.andExpect(jsonPath("$.confirmTimeoutSeconds").doesNotExist())
 			.andExpect(jsonPath("$.frontendToolTimeoutSeconds").value(120));
 	}
 
 	/**
 	 * 作业看门狗观测面（R-96 批 B）：tracked / judgedDeadTotal / judgedTimeoutTotal / lastScanAt
-	 * 四键（值由桩钉死，断回显配对，与 confirmTimeout 拆键用例同姿态）。
+	 * 四键（值由桩钉死，断回显配对，与上面挂起键回显用例同姿态）。
 	 */
 	@Test
 	void healthExposesJobWatchdogMetrics() throws Exception {
@@ -98,7 +96,6 @@ class AiControllerHealthSseDeliveryTest {
 	private AiController controller() {
 		when(this.availability.isAvailable()).thenReturn(true);
 		ConfirmGate gate = mock(ConfirmGate.class);
-		when(gate.confirmTimeoutSeconds()).thenReturn(240);
 		when(gate.frontendToolTimeoutSeconds()).thenReturn(120);
 		JobWatchdog jobWatchdog = mock(JobWatchdog.class);
 		when(jobWatchdog.metrics()).thenReturn(java.util.Map.of(

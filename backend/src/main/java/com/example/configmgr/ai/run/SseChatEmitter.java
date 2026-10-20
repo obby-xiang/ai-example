@@ -52,9 +52,11 @@ import java.util.concurrent.atomic.AtomicLong;
  *
  * <p>
  * <b>帧时间戳口径（T4-3 后半）</b>：每帧在 {@link #frame} 构造时就带 {@code atMs}
- * （服务端钟 epoch 毫秒），因此<b>实时投递帧与归档帧都含</b> {@code atMs}；挂起类的
- * {@code expiresAt} 与同一帧的 {@code atMs} 同钟单点取值，二者之差恒等于 {@code timeoutSeconds}
+ * （服务端钟 epoch 毫秒），因此<b>实时投递帧与归档帧都含</b> {@code atMs}；<b>有时限</b>的挂起类帧
+ * （即时执行类前端工具的 {@code frontend_tool_request}）的 {@code expiresAt} 与同一帧的
+ * {@code atMs} 同钟单点取值，二者之差恒等于 {@code timeoutSeconds}
  * —— 前端据此按"服务端剩余时长"折算本地倒计时，免疫客户端钟漂移。
+ * 确认卡与 {@code generative_form} 自 2026-10-20 起<b>没有到期时刻</b>（帧里不带这两个字段）。
  *
  * <h2>T3-1 慢订阅者隔离（R1 裁决 + 施工注记 R2/R3）</h2>
  * {@code emitLock} 内只保留：取号、落归档、{@code touchActivity}（S3-9：必须留锁内同步，
@@ -113,8 +115,10 @@ import java.util.concurrent.atomic.AtomicLong;
  * 写卡住时从别的线程 complete 只会一起挂住 —— 写在飞期间的收尾请求由写出线程在 {@code send}
  * 返回后补做（{@link #completeOne} 的交接 + {@link Subscription#writeInFlight}）；</li>
  * <li><b>残留</b>：被卡住的那一次写仍占 1 个写出池线程（每条订阅者至多 1 个），最终由客户端断开、
- * 容器写超时（{@code connection-timeout}=120s）或 emitter 生命周期超时（AI 通道 = 轮次总预算
- * {@code app.ai.resilience.total-budget}，300s，通常最晚）三者先到者释放。</li>
+ * 容器写超时（{@code connection-timeout}=120s）或单帧写预算先到者释放。AI 通道的 emitter
+ * <b>不设传输层死线</b>（{@code new SseEmitter(-1L)}：确认门/表单等人工输入没有上限），
+ * 因此"整条流寿命"不是写侧兜底 —— 机器预算 {@code app.ai.resilience.total-budget}
+ * 由 {@code StreamWatchdog} 判（墙钟 − 挂起等待），不在本类。</li>
  * </ul>
  *
  * <p>
@@ -331,6 +335,12 @@ public class SseChatEmitter {
 	 * {@code onError}）时队列里还压着的帧（生产上是重挂回放的千级状态帧）无人释放 = 内存滞留，
 	 * 且 drain 独占标志留在原地。现在与 {@code evict/completeOne} 共用
 	 * {@link #closeSubscription}，清理口径只有一处。
+	 *
+	 * <p>
+	 * <b>onTimeout 与无传输死线</b>：AI 通道的 emitter 由 {@code AiController} 以
+	 * {@code new SseEmitter(-1L)} 构造（Servlet 语义：超时 ≤ 0 = 永不到期），因此这条回调在
+	 * 生产路径上<b>不会</b>被触发。保留它是防御性的：本类接的是调用方给的 emitter，
+	 * 将来若有有限超时的接入方（或单测），断开清理仍走同一路径；它不承担"流寿命"职责。
 	 */
 	private void attachSubscription(Subscription sub) {
 		this.subscribers.add(sub);
@@ -603,7 +613,13 @@ public class SseChatEmitter {
 		emit(frame);
 	}
 
-	public void confirmRequest(PendingToolCall pending, int timeoutSeconds) {
+	/**
+	 * 确认卡请求帧：<b>不带到期时刻</b>（用户裁决 2026-10-20 第 1 条 —— 确认门不再超时）。
+	 *
+	 * <p>帧里没有 {@code timeoutSeconds}/{@code expiresAt}：前端据此不武装倒计时、不把按钮置灰，
+	 * 一直等到人批准 / 拒绝 / 取消。历史轮的旧帧仍可能带这两个字段，前端按旧口径渲染即可。
+	 */
+	public void confirmRequest(PendingToolCall pending) {
 		Map<String, Object> frame = frame("confirm_request");
 		frame.put("toolCallId", pending.getToolCallId());
 		frame.put("name", pending.getName());
@@ -611,8 +627,6 @@ public class SseChatEmitter {
 		frame.put("summary", pending.getArguments());
 		// F5：只读预检报告随请求帧下发（契约新增可选字段；缺省 null = 旧卡面）
 		frame.put("preflight", pending.getPreflight());
-		frame.put("timeoutSeconds", timeoutSeconds);
-		frame.put("expiresAt", expiresAtEpochMs(frame, timeoutSeconds));
 		frame.put("callback", "POST /api/ai/confirm {runId, toolCallId, approved, reason}");
 		emit(frame);
 	}
@@ -632,16 +646,25 @@ public class SseChatEmitter {
 		emit(frame);
 	}
 
-	public void frontendToolRequest(PendingToolCall pending, int timeoutSeconds) {
+	/**
+	 * 前端工具请求帧。
+	 *
+	 * @param timeoutSeconds 后端回执等待上限（秒）；<b>null = 不设上限</b>（{@code generative_form}：
+	 *                       等的是人填表，用户裁决 2026-10-20 第 2 条）。null 时帧里不带
+	 *                       {@code timeoutSeconds}/{@code expiresAt}，前端据此不武装倒计时；
+	 *                       有值时两者成对下发，且 {@code expiresAt − atMs} 精确等于
+	 *                       {@code timeoutSeconds * 1000L}（同帧单点取钟，见 {@link #expiresAtEpochMs}）。
+	 */
+	public void frontendToolRequest(PendingToolCall pending, Integer timeoutSeconds) {
 		Map<String, Object> frame = frame("frontend_tool_request");
 		frame.put("toolCallId", pending.getToolCallId());
 		frame.put("name", pending.getName());
 		frame.put("args", pending.getArguments());
-		frame.put("timeoutSeconds", timeoutSeconds);
-		// T4 同口径（纯增量）：前端工具挂起与确认门共用同一个等待上限，绝对时钟一并给出，
-		// 前端不必用本地 "120s 常量" 推断到期时刻。T4-3 后半起与帧内 atMs 同钟取值（见
-		// expiresAtEpochMs）：expiresAt − atMs 精确等于 timeoutSeconds * 1000L。
-		frame.put("expiresAt", expiresAtEpochMs(frame, timeoutSeconds));
+		if (timeoutSeconds != null) {
+			frame.put("timeoutSeconds", timeoutSeconds);
+			// T4 同口径（纯增量）：有时限的前端工具一并给出绝对时钟，前端不必用本地常量推断到期时刻。
+			frame.put("expiresAt", expiresAtEpochMs(frame, timeoutSeconds));
+		}
 		frame.put("callback", "POST /api/ai/frontend-tool-result {runId, toolCallId, result}");
 		emit(frame);
 	}
@@ -1101,7 +1124,11 @@ public class SseChatEmitter {
 	}
 
 	/**
-	 * T4/T4-3：挂起等待的绝对到期时刻 = <b>本帧构造时刻的 {@code atMs}</b> + 等待上限。
+	 * T4/T4-3：<b>有时限</b>的挂起等待的绝对到期时刻 = <b>本帧构造时刻的 {@code atMs}</b> + 等待上限。
+	 *
+	 * <p>
+	 * 只有即时执行类前端工具的 {@code frontend_tool_request} 会调用本方法：确认卡与
+	 * {@code generative_form} 自 2026-10-20 起没有到期时刻（等人无上限），帧里不带这两个字段。
 	 *
 	 * <p>
 	 * 与 {@code atMs} 同钟单点取值（不另取 {@code System.currentTimeMillis()}），故对任意

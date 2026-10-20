@@ -230,20 +230,18 @@ public class SpToolCallingManager implements ToolCallingManager {
 			suspended.add(pending);
 		}
 
-		// ===== R-160 M3：挂起登记处用 gate timeout 算定 expiresAt（先 set 再落库）=====
-		// 顺序红线：saveSuspended 先于下方 awaitConfirm/awaitFrontend 发帧（confirmRequest /
-		// frontendToolRequest），若等发帧后再 set 则不落库 —— 此处算定并 set 后随 saveSuspended
+		// ===== 挂起登记：只给「有时限」的前端工具算定 expiresAt（用户裁决 2026-10-20）=====
+		// 顺序红线：saveSuspended 先于下方 awaitConfirm/awaitFrontend 发帧（confirm_request /
+		// frontend_tool_request），若等发帧后再 set 则不落库 —— 此处算定并 set 后随 saveSuspended
 		// 一并持久化；atMs 与 expiresAt 同帧单点取值，前端按 expiresAt − atMs 续算剩余时长。
+		// 确认门与 generative_form 现在无上限（等人填/等人决策），故<b>不写</b>到期时刻：
+		// 写了一个假的到期点，前端就会按它置灰按钮 —— 上限的口径只有一处（ConfirmGate#suspendWaitSeconds）。
 		long suspendedAtMs = System.currentTimeMillis();
 		for (PendingToolCall pending : suspended) {
-			int timeoutSeconds = switch (pending.getKind()) {
-				case PendingToolCall.KIND_CONFIRM -> this.gate.confirmTimeoutSeconds();
-				case PendingToolCall.KIND_FRONTEND -> this.gate.frontendToolTimeoutSeconds();
-				default -> 0;
-			};
-			if (timeoutSeconds > 0) {
+			Integer waitSeconds = this.gate.suspendWaitSeconds(pending);
+			if (waitSeconds != null && waitSeconds > 0) {
 				pending.setAtMs(suspendedAtMs);
-				pending.setExpiresAt(suspendedAtMs + timeoutSeconds * 1000L);
+				pending.setExpiresAt(suspendedAtMs + waitSeconds * 1000L);
 			}
 		}
 
@@ -577,7 +575,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 		return text;
 	}
 
-	/** 确认门：放行则执行（经认领与台账，恰好一次），拒绝/超时以"未执行"语义回填并继续循环。 */
+	/** 确认门：放行则执行（经认领与台账，恰好一次），拒绝（或历史遗留的 TIMEOUT 记录）以"未执行"语义回填并继续循环。 */
 	private String awaitConfirm(String runId, Prompt prompt, PendingToolCall pending) {
 		PendingToolCall resolved = this.gate.awaitDecision(runId, pending);
 		if (PendingToolCall.APPROVED.equals(resolved.getStatus())) {

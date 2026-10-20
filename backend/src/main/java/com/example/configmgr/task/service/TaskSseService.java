@@ -36,7 +36,8 @@ import java.util.concurrent.ConcurrentHashMap;
  * 调用线程（作业线程 / 取消接口的 HTTP 线程）最多被占用一个预算就会脱身；超时/失败即摘除该
  * emitter（不再投递）并记日志；</li>
  * <li><b>非 0 生命周期超时</b>：{@code SseEmitter(0L)} → {@code app.task.sse.emitter-timeout}
- * （缺省 5m，与 AI 通道的 emitter 生命周期同量级；<b>启动期校验必须为正</b>，见
+ * （缺省 5m，任务通道自己的流寿命口径；AI 通道自 P1 收口起不设传输层死线 —— 确认门/表单等人
+ * 没有上限；<b>启动期校验必须为正</b>，见
  * {@link AppProperties}）。0 的语义是"该 emitter 没有生命周期超时"，<b>不等于"没有任何释放手段"</b>
  * —— 上面那条 120s 容器写超时仍在，只是它随连接配置漂移、且通常比生命周期超时<b>更早</b>到；
  * 前端用 {@code EventSource}（断线自愈 + {@code job-watch} 快照轮询兜底），周期性重连可接受。</li>

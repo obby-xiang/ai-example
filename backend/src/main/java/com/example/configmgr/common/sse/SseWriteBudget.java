@@ -45,10 +45,11 @@ import java.util.concurrent.atomic.AtomicLong;
  * <ul>
  * <li><b>本类（每帧写预算）</b>：约束"单帧写出"的时长 ⇒ 调用线程最多等 {@code timeoutMillis}
  * 就能脱身，慢订阅者被摘除（主动断连）；</li>
- * <li><b>emitter 生命周期超时</b>：约束"整条流"的寿命（AI 通道 = 轮次总预算
- * {@code app.ai.resilience.total-budget}；任务通道 = {@code app.task.sse.emitter-timeout}），
- * 它<b>不是</b>写侧的释放手段 —— 本配置下两条生命周期（300s / 5m）都<b>晚于</b>上面那条 120s
- * 写超时，卡住的写一般先由 {@code SocketTimeoutException} 收场，生命周期超时只兜"流寿命"这一维。</li>
+ * <li><b>emitter 生命周期超时</b>：约束"整条流"的寿命（任务通道 = {@code app.task.sse.emitter-timeout}；
+ * AI 通道<b>不设</b>传输层死线 —— {@code new SseEmitter(-1L)}，因为确认门/表单等人工输入没有上限），
+ * 它<b>不是</b>写侧的释放手段 —— 任务通道的 5m 生命周期<b>晚于</b>上面那条 120s
+ * 写超时，卡住的写一般先由 {@code SocketTimeoutException} 收场；AI 通道则只剩客户端断开、
+ * 120s 容器写超时与本类 15s 预算三条释放路径。</li>
  * </ul>
  *
  * <h2>为什么必须把写出挪到别的线程</h2>
@@ -68,7 +69,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * {@code timeoutMillis}，池饱和度因此<b>不再由"慢连接数"决定</b>（修复前：{@code M ≥ 池容量}
  * 即全进程停投）。代价是"被卡住的那一次写"仍占 1 个写出池线程，上界 = 每条订阅者 1 个
  * （订阅者的 drain 是串行的），最终由客户端断开、容器写超时（{@code connection-timeout}=120s）、
- * emitter 生命周期超时（通常最晚）三者先到者释放。
+ * emitter 生命周期超时（任务通道 5m，通常最晚；AI 通道无此层）三者先到者释放。
  */
 @Slf4j
 public final class SseWriteBudget {

@@ -132,12 +132,13 @@ public class PendingToolCall {
 	private long resolvedAtMs;
 
 	/**
-	 * R-160 M3：挂起等待的绝对到期时刻（epoch 毫秒，登记挂起时用 gate timeout 算定）。
-	 * 包装类型：旧数据无该字段反序列化为 null ⇒ 前端「等待人工确认」静态兜底，不伪造倒计时。
+	 * R-160 M3：挂起等待的绝对到期时刻（epoch 毫秒；只有有时限的前端工具才算定）。
+	 * 包装类型：null = 无期限（确认门/表单/旧数据）。去超时裁决后前端不再据此倒计时或
+	 * 渲染「等待人工确认」静态兜底，本字段只作对账/取证口径。
 	 */
 	private Long expiresAt;
 
-	/** R-160 M3：算定 expiresAt 的构造时刻（同帧单点取值；前端按 {@code expiresAt − atMs} 续算剩余）。 */
+	/** R-160 M3：算定 expiresAt 的构造时刻（同帧单点取值；仅作对账口径，前端不据此武装倒计时）。 */
 	private Long atMs;
 
 	/**

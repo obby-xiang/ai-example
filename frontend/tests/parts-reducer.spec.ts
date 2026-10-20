@@ -719,16 +719,15 @@ describe('2A 挂账修复：①超时口径（decision/status 优先 + first-win
     expect(toolPart(legacyReject, 'l2')).toMatchObject({ status: 'rejected', decision: 'rejected' })
   })
 
-  it('①b first-wins：本地倒计时已落 expired 后晚到的 TIMEOUT 帧不改写已落定结局（保持「! 已超时」）', () => {
+  it('①b first-wins：段已落 expired 后晚到的 TIMEOUT 帧不改写已落定结局（保持「! 已超时」）', () => {
     const message = makeMessage()
     applyFrameToParts(message, { type: 'confirm_request', toolCallId: 'x1', name: 'danger_tool', args: '{}', timeoutSeconds: 120 })
-    // 与 store.applyGateReceipt 的本地超时作废同形：status=expired + expiredLocally，无决策元数据
+    // 已落定形态：status=expired、无决策元数据（旧版本地判超时 / 历史快照都可能长这样）
     upsertToolPart(message, {
       toolCallId: 'x1',
       name: 'danger_tool',
       kind2: 'CONFIRM',
       status: 'expired',
-      expiredLocally: true,
       requiresAction: false
     })
 
@@ -744,7 +743,6 @@ describe('2A 挂账修复：①超时口径（decision/status 优先 + first-win
 
     const part = toolPart(message, 'x1')
     expect(part.status).toBe('expired')
-    expect(part.expiredLocally).toBe(true)
     expect(part.decision).toBeUndefined()
     expect(cardStatusOf(part)).toMatchObject({ key: 'expired', label: '! 已超时' })
   })

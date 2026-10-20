@@ -104,8 +104,7 @@ export interface AiHealth {
   baseUrl: string
   memoryBackend: string
   sessionTtl: string
-  confirmTimeoutSeconds: number
-  /** 前端工具挂起上限（秒；`app.ai.hitl.frontend-tool-timeout` 的折算值，与确认门键分场景） */
+  /** 前端工具挂起上限（秒；`app.ai.hitl.frontend-tool-timeout` 的折算值） */
   frontendToolTimeoutSeconds: number
   suspendPoolSize: number
   activeSuspendGates: number
@@ -326,19 +325,12 @@ export interface ToolPart extends MessagePartBase {
    * 为什么落在段上（批2 起）：`message.pendingCall` 已改为由段派生，若这几个字段不随段持久化，
    * 派生的挂起卡就丢了原始等待口径。
    *
-   * **R-166 口径变更（重要）**：这三个字段自本批起**不再驱动确认门倒计时**（原"帧差值折算"
-   * 在重派生/刷新时会闪回起点，见 `stores/ai.ts` 的 `frameDeadlineLocal` 头注）。倒计时的
-   * 唯一真值是 store 的 `confirmClock`（确认帧锚定 + 心跳校正，重派生只读不写）；
-   * 本组字段保留为**原始帧口径的对账/回滚依据**（镜像与快照重建仍照原样携带）。
+   * 2026-10-20 去超时裁决后：前端**不再**据此折算任何倒计时/本地超时（表单一直可填、确认卡
+   * 不设倒计时），本组字段只作**原始帧口径的对账/回滚依据**（镜像与快照重建仍照原样携带）。
    */
   timeoutSeconds?: number
   expiresAt?: number
   atMs?: number
-  /**
-   * R-166 口径④：本地判定"已超时作废"（倒计时归零 + 权威校正仍无结局）的标记。
-   * 灰族回执形态与后端 TIMEOUT 同族，靠本字段区分回执徽标文案（「已超时作废」/「已超时」）。
-   */
-  expiredLocally?: boolean
   /**
    * H1 确认门预检摘要（可选契约增量；来自 confirm_request / suspended 帧，随段持久化）。
    * 缺省 = 旧帧 / 无预检的工具（GF、前端工具、后端工具），门卡不渲染预检区。
@@ -380,8 +372,6 @@ export interface ToolPartPatch {
   timeoutSeconds?: number
   expiresAt?: number
   atMs?: number
-  /** 见 {@link ToolPart.expiredLocally}（R-166 本地"已超时作废"标记） */
-  expiredLocally?: boolean
   /** 见 {@link ToolPart.preflight}（H1 确认门预检摘要，可选增量） */
   preflight?: ToolPreflight | null
 }
@@ -395,17 +385,15 @@ export interface PendingToolCall {
   args: Record<string, unknown> | null
   /** 原始入参字符串 */
   rawArgs?: string
-  /** 确认门倒计时（秒），来自 confirm_request 帧 */
+  /** 挂起等待上限（秒），来自 confirm_request 帧（去超时后仅作对账口径，不驱动任何倒计时） */
   timeoutSeconds?: number
   /**
    * DC-14 T4：挂起等待的绝对到期时刻（epoch 毫秒，服务端钟）。
-   * **R-166 起不再参与倒计时折算**（原 `expiresAt − atMs` 折算会在重派生/刷新时闪回起点）——
-   * 现只随段原样透出以对账/回滚；倒计时读取 store 的 {@link ConfirmClock}。
+   * 去超时裁决后只随段原样透出以对账/回滚。
    */
   expiresAt?: number
   /**
-   * T4-3：帧的**服务端构造时刻**（epoch 毫秒；实时 / 归档帧均带）。
-   * **R-166 起不再参与倒计时折算**（同上）；保留以对账。
+   * T4-3：帧的**服务端构造时刻**（epoch 毫秒；实时 / 归档帧均带）。保留以对账。
    */
   atMs?: number
   /**
@@ -414,27 +402,6 @@ export interface PendingToolCall {
    * 另保留本地确认/执行过程的 running/approved。
    */
   status: 'pending' | 'running' | 'approved' | 'rejected' | 'expired' | 'cancelled' | 'succeeded' | 'blocked'
-}
-
-/**
- * R-166（口径①/方案 A）：确认门倒计时时钟 —— **帧/心跳驱动、重派生只读**。
- *
- * 为什么单独立一个状态：倒计时原来的真值是"面板每次重派生时按帧差值现算"，于是
- * `pendingCall` 引用一变（帧重投 / 重挂 / 任何重派生）就把倒计时打回起点（R-166 症②）。
- * 现在锚点只在**收到实时帧**（或心跳）时写一次，落成**本地钟的绝对到期时刻**；
- * 面板每秒 tick 只做 `deadlineMs − now` 的读取 ⇒ 重派生天然幂等（同 `expiresAt` 重算同值）。
- */
-export interface ConfirmClock {
-  /** 时钟所属的挂起条目（换人即整体重建；并发挂起时别的心跳不得抢占本时钟） */
-  toolCallId: string
-  /** 本地钟的绝对到期时刻（epoch 毫秒）—— 锚定后不因重派生改变 */
-  deadlineMs: number
-  /** 倒计时环的折算分母（秒，取帧/心跳的 timeoutSeconds；缺省 = 环按满弧） */
-  totalSeconds: number | null
-  /** 锚来源：`frame` = 实时确认帧新鲜折算（首心跳前兜底）；`heartbeat` = 心跳剩余秒 */
-  anchor: 'frame' | 'heartbeat'
-  /** 最近一次心跳的已等待秒数（null = 尚未收到挂起期心跳） */
-  waitedSeconds: number | null
 }
 
 /**
@@ -485,8 +452,9 @@ export type GenerativeFormStatus = 'filling' | 'submitting' | 'submitted' | 'can
 
 /**
  * GF-B（DC-15）：当前待填写的生成式表单（会话态，挂在 store 上，AiPanel 据此渲染 FormRenderer）。
- * 不走 frontend-tools.ts 通用执行器 —— 那段说明文本不是值 JSON，会被闸门 400 拒、挂起拖到超时
- * （GFa §8.3），故 frontend_tool_request 帧在 store 层特判挂起，等用户填写。
+ * 不走 frontend-tools.ts 通用执行器 —— 那段说明文本不是值 JSON，会被闸门 400 拒；去超时裁决后
+ * 表单一直可填，收口只认后端结局帧 / 用户取消（GFa §8.3），故 frontend_tool_request 帧在 store
+ * 层特判挂起，等用户填写。
  */
 export interface ActiveGenerativeForm {
   toolCallId: string
@@ -496,8 +464,6 @@ export interface ActiveGenerativeForm {
   status: GenerativeFormStatus
   /** 客户端复核 / 后端 FORM_RESULT_REJECTED 的提示（null = 无） */
   error: string | null
-  /** 本地判超时的绝对时刻（epoch 毫秒；服务端剩余时长折算 `expiresAt − atMs` 优先（`atMs > 0`），缺 `atMs` 回落 `expiresAt` 绝对值、再缺回落 `timeoutSeconds`；null = 不限） */
-  deadline: number | null
 }
 
 /** SSE 一轮的收尾判定结果。 */
@@ -556,12 +522,11 @@ export interface AiRunCurrentEntry {
   name: string
   /** 入参 JSON 字符串（原样，展示/解析由前端做） */
   arguments?: string | null
-  /** R-160 M3：挂起到期口径（服务端钟；旧数据缺省 = null ⇒ 「等待人工确认」静态兜底） */
+  /** R-160 M3：挂起到期口径（服务端钟；保留作对账/回滚，前端不再据此折算任何倒计时） */
   expiresAt?: number | null
   /**
-   * R-160 M3：expiresAt 的构造时刻（帧内单点取值）。**R-166 起倒计时不再折算这对值**
-   * （原 `expiresAt − atMs` 的差值折算在重派生/刷新时会闪回起点，已废弃）——本字段保留供对账；
-   * 倒计时的唯一真值是 store 的 `ConfirmClock`（确认帧锚定 + 心跳校正，见 `stores/ai.ts`）。
+   * R-160 M3：expiresAt 的构造时刻（帧内单点取值）。去超时裁决后本字段只作对账口径，
+   * 前端不再据此折算倒计时。
    */
   atMs?: number | null
   /**

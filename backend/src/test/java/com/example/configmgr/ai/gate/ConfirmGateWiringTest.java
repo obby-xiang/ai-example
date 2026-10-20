@@ -163,7 +163,7 @@ class ConfirmGateWiringTest {
         verify(this.store).claimExecution(eq(RUN_ID), anyString(), anyString());
     }
 
-    // ── B2（DC-14）：start_import 确认门三结局（与 start_export 同机制，补放行/超时用例） ──
+    // ── B2（DC-14）：start_import 确认门结局（放行 + 历史 TIMEOUT 记录可读） ──
 
     /**
      * 放行：确认门返回 {@code APPROVED} → 管理器进入执行路径（认领 + 台账），
@@ -198,11 +198,14 @@ class ConfirmGateWiringTest {
     }
 
     /**
-     * 超时：确认门返回 {@code TIMEOUT}（自动取消）→ 与拒绝同一路径：不认领、不执行、
-     * 回填"未执行"语义的文本（三个结局里唯一由系统而非人给出的那个）。
+     * <b>历史兼容</b>（2026-10-20 裁决第 6 条）：旧轮遗留的 {@code TIMEOUT} 待决条目仍按
+     * "未执行"语义结算 —— 不认领、不执行、信封 {@code timeout/CONFIRM_TIMEOUT} 可读。
+     *
+     * <p>新逻辑已不再产生这种条目（确认门无上限），但已存在的记录必须继续可读，
+     * 故这里用桩门返回一个旧格式条目，锁住管理器一侧的兼容分支。
      */
     @Test
-    void startImportIsNotExecutedOnTimeout() {
+    void legacyTimeoutRecordsAreStillSettledAsNotExecuted() {
         stubCommon();
         when(this.toolRegistry.channelOf("start_import")).thenReturn(ToolMeta.Channel.BACKEND);
         when(this.toolRegistry.riskOf("start_import")).thenReturn(ToolMeta.RiskLevel.DANGER);
@@ -218,7 +221,7 @@ class ConfirmGateWiringTest {
         ToolExecutionResult result = this.manager.executeToolCalls(prompt("start_import", "{\"taskId\":7}"),
                 response("start_import", "{\"taskId\":7}"));
 
-        assertThat(this.fakeStartImport.invocations.get()).as("超时后工具绝不执行").isZero();
+        assertThat(this.fakeStartImport.invocations.get()).as("旧超时记录同样绝不执行").isZero();
         verify(this.store, never()).claimExecution(anyString(), anyString(), anyString());
         verify(this.store, never()).appendLedger(anyString(), any(PendingToolCall.class), anyString());
         ToolResultEnvelope envelope = ToolResultEnvelope.fromJson(toolText(result));
@@ -229,16 +232,19 @@ class ConfirmGateWiringTest {
     }
 
     /**
-     * R-160 M3：挂起登记处用 gate timeout 算定 expiresAt/atMs —— 顺序红线（saveSuspended
-     * 先于 confirmRequest 发帧，发帧后 set 不落库）⇒ 算定必须发生在 saveSuspended 之前，
-     * 落库条目与外置帧条目同一份引用带到期口径；剩余时长 = gate timeout 精确折算。
+     * 挂起登记的到期口径（2026-10-20 裁决后重写）：
+     * <ul>
+     * <li><b>确认门不写</b> {@code atMs}/{@code expiresAt} —— 等人没有上限，写了假的到期点，
+     * 前端就会按它置灰按钮；</li>
+     * <li><b>有时限的前端工具</b>（即时执行类）仍写，且"落库条目 = 外置帧条目"同一份引用
+     * （顺序红线：算定先于 {@code saveSuspended} 持久化）。</li>
+     * </ul>
      */
     @Test
-    void suspensionRegistersExpiresAtFromGateTimeoutBeforePersisting() {
+    void confirmSuspensionRegistersNoDeadline() {
         stubCommon();
         when(this.toolRegistry.channelOf("start_import")).thenReturn(ToolMeta.Channel.BACKEND);
         when(this.toolRegistry.riskOf("start_import")).thenReturn(ToolMeta.RiskLevel.DANGER);
-        when(this.gate.confirmTimeoutSeconds()).thenReturn(120);
         when(this.gate.awaitDecision(eq(RUN_ID), any(PendingToolCall.class))).thenAnswer(invocation -> {
             PendingToolCall pending = invocation.getArgument(1);
             pending.setStatus(PendingToolCall.REJECTED);
@@ -248,18 +254,43 @@ class ConfirmGateWiringTest {
         this.manager.executeToolCalls(prompt("start_import", "{\"taskId\":7}"),
                 response("start_import", "{\"taskId\":7}"));
 
-        // ① 落库条目（saveSuspended）已带 expiresAt/atMs —— 算定先于持久化
-        @SuppressWarnings("unchecked")
+        PendingToolCall suspended = persistedSuspension();
+        assertThat(suspended.getAtMs()).as("确认门不写到期锚点").isNull();
+        assertThat(suspended.getExpiresAt()).as("确认门不写到期时刻（等人无上限）").isNull();
+        assertThat(pendingsToldToFrontend()).extracting(PendingToolCall::getExpiresAt).containsOnlyNulls();
+    }
+
+    /** 即时执行类前端工具（{@code navigate_to}）：仍按 120s（这里是桩值）算定到期时刻。 */
+    @Test
+    void timedFrontendToolSuspensionRegistersExpiresAt() {
+        stubCommon();
+        when(this.toolRegistry.channelOf("navigate_to")).thenReturn(ToolMeta.Channel.FRONTEND);
+        when(this.gate.suspendWaitSeconds(any(PendingToolCall.class))).thenReturn(120);
+        when(this.gate.awaitFrontendResult(eq(RUN_ID), any(PendingToolCall.class))).thenAnswer(invocation -> {
+            PendingToolCall pending = invocation.getArgument(1);
+            pending.setStatus(PendingToolCall.FRONTEND_RESULT);
+            pending.setResultText("已打开编辑器");
+            return pending;
+        });
+
+        this.manager.executeToolCalls(prompt("navigate_to", "{\"page\":\"editor\"}"),
+                response("navigate_to", "{\"page\":\"editor\"}"));
+
+        PendingToolCall suspended = persistedSuspension();
+        assertThat(suspended.getAtMs()).isNotNull();
+        assertThat(suspended.getExpiresAt() - suspended.getAtMs()).isEqualTo(120_000L);
+        // 外置帧（suspended 事件）与外发请求帧同一份条目：前端续收/刷新同源
+        assertThat(pendingsToldToFrontend()).extracting(PendingToolCall::getExpiresAt)
+            .containsExactly(suspended.getExpiresAt());
+    }
+
+    /** 取 {@code saveSuspended} 落库的第一条挂起条目。 */
+    @SuppressWarnings("unchecked")
+    private PendingToolCall persistedSuspension() {
         ArgumentCaptor<List<PendingToolCall>> persisted = ArgumentCaptor.forClass(List.class);
         verify(this.store).saveSuspended(eq(RUN_ID), nullable(String.class), persisted.capture(),
                 any(List.class), any(MessageJsonCodec.class));
-        PendingToolCall suspended = persisted.getValue().get(0);
-        assertThat(suspended.getAtMs()).isNotNull();
-        assertThat(suspended.getExpiresAt()).isNotNull();
-        assertThat(suspended.getExpiresAt() - suspended.getAtMs()).isEqualTo(120_000L);
-        // ② 外置帧（suspended 事件）与外发请求帧同一份条目：前端续收/刷新同源
-        assertThat(pendingsToldToFrontend()).extracting(PendingToolCall::getExpiresAt)
-            .containsExactly(suspended.getExpiresAt());
+        return persisted.getValue().get(0);
     }
 
     /** 三种结局共用的桩（外置状态/帧出口/取消标志）。 */

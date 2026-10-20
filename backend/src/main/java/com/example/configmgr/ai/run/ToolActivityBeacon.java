@@ -21,6 +21,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * "上游事件流静默"——若按配置值（默认 90s）直接判定，一次 120s 的人工确认就会被误判成断流。
  * {@link #isActive(String)} 把工具执行窗口告知 {@link StreamWatchdog}，
  * 使静默判定在工具执行期间<b>不参与</b>，退出后以退出时刻为锚点重新计时。</li>
+ * <li><b>人机预算分离</b>（用户裁决 2026-10-20 第 3 条）：挂起等待（{@link #beginGateWait} /
+ * {@link #endGateWait}）累计成 {@link #gateWaitMs(String)}，总预算判据按它扣除 ——
+ * 等人的时间不计入 {@code app.ai.resilience.total-budget}。</li>
  * </ol>
  *
  * <p>
@@ -39,6 +42,20 @@ public class ToolActivityBeacon {
 
 	/** runId → 最后一次活动时刻（进入/退出/脉冲），退出后仍保留，供静默锚点使用。 */
 	private final ConcurrentMap<String, AtomicLong> lastActivityAtMs = new ConcurrentHashMap<>();
+
+	/**
+	 * runId → 累计的<b>挂起等待</b>时长（毫秒；已结束的等待窗口之和）。
+	 *
+	 * <p>人机预算分离（用户裁决 2026-10-20 第 3 条）：确认门 / 前端工具等待人的那段时间
+	 * <b>不计入</b> {@code app.ai.resilience.total-budget}。挂起等待是"人在想"，不是"上游不动"，
+	 * 用墙钟把它算进轮次预算会让"等人"与"模型/工具慢"被同一个 300s 掐死。
+	 * {@link StreamWatchdog} 与 {@code ResilientChatService} 的总预算判据都按
+	 * {@link #gateWaitMs(String)} 扣除。
+	 */
+	private final ConcurrentMap<String, AtomicLong> gateWaitFinishedMs = new ConcurrentHashMap<>();
+
+	/** runId → 当前挂起等待的起点（毫秒；0 = 当前不在等待）。 */
+	private final ConcurrentMap<String, AtomicLong> gateWaitSinceMs = new ConcurrentHashMap<>();
 
 	private final Map<String, Map<String, Object>> lastFinished = new ConcurrentHashMap<>();
 
@@ -86,6 +103,52 @@ public class ToolActivityBeacon {
 		log.debug("工具执行退出 runId={} tool={} outcome={}", runId, finished.get("tool"), outcome);
 	}
 
+	/**
+	 * 进入挂起等待（人在想 / 前端在填）：开始累计"不计入预算"的时长。
+	 *
+	 * <p>同一个 runId 的工具调用是<b>串行</b>结算的（一个批次内逐个 await），故不需要嵌套计数；
+	 * 重复 begin 只把起点前移（等价于"这段等待从此刻算"，宁可少扣不可多扣）。
+	 */
+	public void beginGateWait(String runId) {
+		this.gateWaitSinceMs.computeIfAbsent(runId, key -> new AtomicLong()).set(System.currentTimeMillis());
+	}
+
+	/** 退出挂起等待：把本段等待时长并进累计量（幂等；未在等待时调用无副作用）。 */
+	public void endGateWait(String runId) {
+		AtomicLong since = this.gateWaitSinceMs.get(runId);
+		if (since == null) {
+			return;
+		}
+		long start = since.getAndSet(0L);
+		if (start > 0) {
+			long waited = Math.max(0L, System.currentTimeMillis() - start);
+			this.gateWaitFinishedMs.computeIfAbsent(runId, key -> new AtomicLong()).addAndGet(waited);
+		}
+	}
+
+	/**
+	 * 该轮累计的挂起等待时长（毫秒，<b>含</b>当前正在进行的等待）—— 总预算判据的扣除量。
+	 *
+	 * <p>含正在进行的等待是刻意的：看门狗每拍都要判预算，若只扣"已结束的窗口"，一次长达
+	 * 十几分钟的表单填写会在整个等待期里被反复算成"预算已耗尽"。
+	 */
+	public long gateWaitMs(String runId) {
+		long finished = 0L;
+		AtomicLong total = this.gateWaitFinishedMs.get(runId);
+		if (total != null) {
+			finished = total.get();
+		}
+		AtomicLong since = this.gateWaitSinceMs.get(runId);
+		long ongoing = 0L;
+		if (since != null) {
+			long start = since.get();
+			if (start > 0) {
+				ongoing = Math.max(0L, System.currentTimeMillis() - start);
+			}
+		}
+		return finished + ongoing;
+	}
+
 	/** 该轮当前是否有工具正在执行（静默判定的抑制条件，硬规范①）。 */
 	public boolean isActive(String runId) {
 		return this.active.containsKey(runId);
@@ -113,6 +176,8 @@ public class ToolActivityBeacon {
 		this.active.remove(runId);
 		this.started.remove(runId);
 		this.lastFinished.remove(runId);
+		this.gateWaitFinishedMs.remove(runId);
+		this.gateWaitSinceMs.remove(runId);
 		// lastActivityAtMs 故意保留：重试判定要看退出时刻（TTL 由轮的生命周期兜住）
 	}
 

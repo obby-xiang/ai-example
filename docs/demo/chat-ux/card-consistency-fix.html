@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="zh-CN" data-card-consistency-fix="2026-10-20" data-final-only="2026-10-20">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ai-example · HITL 卡面最终形态（去超时 · 撤预检区 · 一致性五项）</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="hitl-interrupts.css">
+</head>
+<body class="m-0 p-0 bg-[#f1f2f4] text-[#1f2328] font-sans text-[13.8px] leading-[1.7] antialiased [&_button:focus-visible]:outline-none [&_button:focus-visible]:ring-2 [&_button:focus-visible]:ring-[#2563eb]/40">
+
+<header class="sticky top-0 z-30 flex flex-wrap items-center gap-[16px] px-[22px] py-[12px] bg-white border-b border-[#e3e6ea]">
+  <div class="min-w-0">
+    <h1 class="m-0 text-[14px] [font-weight:650] tracking-[.2px]">ai-example · HITL 卡面最终形态（去超时 · 撤预检区 · 一致性五项）</h1>
+    <p class="m-0 text-[11.5px] text-[#57606a] leading-[1.6]">口径（2026-10-20 用户裁决）：去超时 · 撤预检区 · 单层卡 · 单框 · chip 对齐 · 标题业务化 · 删重复标题行。只放最终形态，示例数据全虚构。</p>
+  </div>
+  <span class="ml-auto flex items-center gap-[6px]">
+    <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#eef8f2] text-[#1a7f37] border border-[#c6e6d5]">approved · 定稿</span>
+    <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#1f2328] text-white">单文件 · 无构建</span>
+    <span class="flex-none text-[10.5px] leading-[1.7] px-[6px] rounded-[5px] bg-[#f6f7f9] text-[#57606a] border border-[#e3e6ea]">2026-10-20</span>
+  </span>
+</header>
+
+<main class="px-[22px] pt-[16px] pb-[60px]">
+  <div class="max-w-[1460px] mx-auto flex flex-col gap-[16px]">
+    <div class="w-[440px] max-w-full mx-auto flex flex-col gap-[16px]">
+
+    <!-- ================= 1 确认卡 · 待决 ================= -->
+    <section class="flex flex-col gap-[8px]" data-scene="confirm-pending">
+      <h2 class="m-0 text-[12.5px] [font-weight:650] text-[#1f2328]">1 · 确认卡 · 待决（最终形态）<span class="ml-[8px] font-normal text-[11.2px] text-[#8b949e]">单层卡；chip 琥珀「待确认」</span></h2>
+      <div class="w-[440px] max-w-full bg-white border border-[#e3e6ea] rounded-[10px] overflow-hidden" data-card="confirm-pending" data-state="pending" data-shells="1">
+        <div class="flex items-center gap-[6px] px-[10px] py-[8px] whitespace-nowrap" data-card-head>
+          <span class="flex-none flex items-center justify-center w-[24px] text-[#57606a]" aria-hidden="true">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          </span>
+          <span class="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-[12px] leading-[1.7] [font-weight:650] text-[#1f2328]">待你确认：导出 任务 #411『导出 DOC_TYPE 配置』</span>
+          <span class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] border border-[#fde68a] whitespace-nowrap text-[#b45309] bg-[#fffbeb]">待确认</span>
+        </div>
+        <div class="pb-[11px]" data-card-body>
+          <div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto" data-gate-rows>
+            <div class="flex gap-[10px] py-[7px] border-0 border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-none min-w-0 max-w-[128px] overflow-hidden text-ellipsis whitespace-nowrap text-[#8b949e] text-[12.4px]" title="操作">操作</span><span class="flex-1 min-w-0 break-words">启动导出作业</span></div>
+            <div class="flex gap-[10px] py-[7px] border-0 border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-none min-w-0 max-w-[128px] overflow-hidden text-ellipsis whitespace-nowrap text-[#8b949e] text-[12.4px]" title="taskId">taskId</span><span class="flex-1 min-w-0 break-words">411</span></div>
+            <div class="flex gap-[10px] py-[7px] border-0 border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-none min-w-0 max-w-[128px] overflow-hidden text-ellipsis whitespace-nowrap text-[#8b949e] text-[12.4px]" title="scope">scope</span><span class="flex-1 min-w-0 break-words">DOC_TYPE</span></div>
+            <div class="flex gap-[10px] py-[7px] border-0 border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-none min-w-0 max-w-[128px] overflow-hidden text-ellipsis whitespace-nowrap text-[#8b949e] text-[12.4px]" title="format">format</span><span class="flex-1 min-w-0 break-words">xlsx</span></div>
+          </div>
+          <div class="mx-[11px] flex flex-wrap items-center gap-[9px] pt-[11px]" data-gate-actions>
+            <span class="ml-auto flex flex-none items-center gap-[8px] whitespace-nowrap">
+              <button type="button" class="flex-[0_0_58px] whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-[#e3e6ea] bg-white text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]">拒绝</button>
+              <button type="button" class="flex-[0_0_72px] whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-transparent bg-[#2563eb] text-white font-semibold transition-all duration-[150ms] hover:brightness-[1.08]">批准</button>
+            </span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= 2 确认卡 · 已批准 ================= -->
+    <section class="flex flex-col gap-[8px]" data-scene="confirm-approved">
+      <h2 class="m-0 text-[12.5px] [font-weight:650] text-[#1f2328]">2 · 确认卡 · 已批准（只读）<span class="ml-[8px] font-normal text-[11.2px] text-[#8b949e]">卡体直接字段表；删重复标题行</span></h2>
+      <div class="w-[440px] max-w-full bg-white border border-[#e3e6ea] rounded-[10px] overflow-hidden" data-card="confirm-approved" data-state="approved" data-shells="1">
+        <div class="flex items-center gap-[6px] px-[10px] py-[8px] whitespace-nowrap" data-card-head>
+          <span class="flex-none flex items-center justify-center w-[24px] text-[#57606a]" aria-hidden="true">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          </span>
+          <span class="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-[12px] leading-[1.7] [font-weight:650] text-[#1f2328]">导出 任务 #411『导出 DOC_TYPE 配置』</span>
+          <span class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] border border-[#bfe3cd] whitespace-nowrap text-[#1a7f45] bg-[#edf7f0]">✓ 已批准</span>
+          <span class="flex-none ml-auto text-[#8b949e] text-[12px] rotate-90" aria-hidden="true">›</span>
+        </div>
+        <div class="pb-[11px]" data-card-body>
+          <div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto" data-gate-rows>
+            <div class="flex gap-[10px] py-[7px] border-0 border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-none min-w-0 max-w-[128px] overflow-hidden text-ellipsis whitespace-nowrap text-[#8b949e] text-[12.4px]" title="操作">操作</span><span class="flex-1 min-w-0 break-words">启动导出作业</span></div>
+            <div class="flex gap-[10px] py-[7px] border-0 border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-none min-w-0 max-w-[128px] overflow-hidden text-ellipsis whitespace-nowrap text-[#8b949e] text-[12.4px]" title="taskId">taskId</span><span class="flex-1 min-w-0 break-words">411</span></div>
+            <div class="flex gap-[10px] py-[7px] border-0 border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-none min-w-0 max-w-[128px] overflow-hidden text-ellipsis whitespace-nowrap text-[#8b949e] text-[12.4px]" title="scope">scope</span><span class="flex-1 min-w-0 break-words">DOC_TYPE</span></div>
+            <div class="flex gap-[10px] py-[7px] border-0 border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-none min-w-0 max-w-[128px] overflow-hidden text-ellipsis whitespace-nowrap text-[#8b949e] text-[12.4px]" title="format">format</span><span class="flex-1 min-w-0 break-words">xlsx</span></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= 3 确认卡 · 已拒绝 ================= -->
+    <section class="flex flex-col gap-[8px]" data-scene="confirm-rejected">
+      <h2 class="m-0 text-[12.5px] [font-weight:650] text-[#1f2328]">3 · 确认卡 · 已拒绝（只读）<span class="ml-[8px] font-normal text-[11.2px] text-[#8b949e]">卡体直接字段表；删重复标题行</span></h2>
+      <div class="w-[440px] max-w-full bg-white border border-[#e3e6ea] rounded-[10px] overflow-hidden" data-card="confirm-rejected" data-state="rejected" data-shells="1">
+        <div class="flex items-center gap-[6px] px-[10px] py-[8px] whitespace-nowrap" data-card-head>
+          <span class="flex-none flex items-center justify-center w-[24px] text-[#57606a]" aria-hidden="true">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          </span>
+          <span class="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-[12px] leading-[1.7] [font-weight:650] text-[#1f2328]">导出 任务 #411『导出 DOC_TYPE 配置』</span>
+          <span class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] border border-[#e3e6ea] whitespace-nowrap text-[#c0392b] bg-[#fdf1ef]">✗ 已拒绝</span>
+          <span class="flex-none ml-auto text-[#8b949e] text-[12px] rotate-90" aria-hidden="true">›</span>
+        </div>
+        <div class="pb-[11px]" data-card-body>
+          <div class="mx-[11px] mt-[9px] bg-white border border-[#eef0f3] rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto" data-gate-rows>
+            <div class="flex gap-[10px] py-[7px] border-0 border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-none min-w-0 max-w-[128px] overflow-hidden text-ellipsis whitespace-nowrap text-[#8b949e] text-[12.4px]" title="操作">操作</span><span class="flex-1 min-w-0 break-words">启动导出作业</span></div>
+            <div class="flex gap-[10px] py-[7px] border-0 border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-none min-w-0 max-w-[128px] overflow-hidden text-ellipsis whitespace-nowrap text-[#8b949e] text-[12.4px]" title="taskId">taskId</span><span class="flex-1 min-w-0 break-words">411</span></div>
+            <div class="flex gap-[10px] py-[7px] border-0 border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-none min-w-0 max-w-[128px] overflow-hidden text-ellipsis whitespace-nowrap text-[#8b949e] text-[12.4px]" title="scope">scope</span><span class="flex-1 min-w-0 break-words">DOC_TYPE</span></div>
+            <div class="flex gap-[10px] py-[7px] border-0 border-b border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"><span class="flex-none min-w-0 max-w-[128px] overflow-hidden text-ellipsis whitespace-nowrap text-[#8b949e] text-[12.4px]" title="format">format</span><span class="flex-1 min-w-0 break-words">xlsx</span></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= 4 GF 表单卡 · 待填写 ================= -->
+    <section class="flex flex-col gap-[8px]" data-scene="form-pending">
+      <h2 class="m-0 text-[12.5px] [font-weight:650] text-[#1f2328]">4 · GF 表单卡 · 待填写（最终形态）<span class="ml-[8px] font-normal text-[11.2px] text-[#8b949e]">一层框线；按钮「取消 / 提交」原位</span></h2>
+      <div class="w-[440px] max-w-full bg-white border border-[#e3e6ea] rounded-[10px] overflow-hidden" data-card="form-pending" data-state="pending" data-shells="1">
+        <div class="flex items-center gap-[6px] px-[10px] py-[8px] whitespace-nowrap" data-card-head>
+          <span class="flex-none flex items-center justify-center w-[24px] text-[#57606a]" aria-hidden="true">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M8 11h8"/><path d="M8 15h5"/></svg>
+          </span>
+          <span class="flex min-w-0 flex-1 items-center gap-[6px]">
+            <span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[12px] leading-[1.7] [font-weight:650] text-[#1f2328]">导出 DOC_TYPE 配置</span>
+            <span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[11.5px] leading-[1.6] text-[#57606a]">2 项必填</span>
+          </span>
+          <span class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] border border-[#cddcff] whitespace-nowrap text-[#2563eb] bg-[#eff4ff]">待填写</span>
+        </div>
+        <div class="p-[11px]" data-card-body>
+          <div class="min-w-0 max-h-[min(320px,45vh)] overflow-y-auto" data-form-fields>
+            <div class="mb-[11px]">
+              <span class="block text-[12.2px] mb-[4px] break-words text-[#57606a]">文件名<span class="text-[#c0392b]"> *</span></span>
+              <input type="text" class="w-full border rounded-[8px] px-[9px] py-[6px] font-sans text-[13px] leading-[normal] text-[#1f2328] [outline:none] transition-colors duration-[150ms] focus:border-[#2563eb] border-[#e3e6ea] bg-white placeholder:text-[#8b949e]" placeholder="如：doc-type-2026-10-20">
+            </div>
+            <div class="mb-[11px]">
+              <span class="block text-[12.2px] mb-[4px] break-words text-[#57606a]">每页行数</span>
+              <input type="number" class="w-full border rounded-[8px] px-[9px] py-[6px] font-sans text-[13px] leading-[normal] text-[#1f2328] [outline:none] transition-colors duration-[150ms] focus:border-[#2563eb] border-[#e3e6ea] bg-white placeholder:text-[#8b949e]" placeholder="500" value="800">
+            </div>
+            <div class="mb-[11px]">
+              <span class="block text-[12.2px] mb-[4px] break-words text-[#57606a]">导出范围<span class="text-[#c0392b]"> *</span></span>
+              <select class="w-full border rounded-[8px] px-[9px] py-[6px] font-sans text-[13px] leading-[normal] text-[#1f2328] [outline:none] transition-colors duration-[150ms] focus:border-[#2563eb] border-[#e3e6ea] bg-white">
+                <option value="">请选择导出范围</option>
+                <option value="scope" selected>仅 DOC_TYPE</option>
+                <option value="all">DOC_TYPE 与归档</option>
+              </select>
+            </div>
+            <div class="mb-[11px]">
+              <span class="block text-[12.2px] mb-[4px] break-words text-[#57606a]">包含字段</span>
+              <span class="flex flex-wrap gap-[6px]">
+                <label class="inline-flex items-center gap-[5px] rounded-full border px-[11px] py-[4px] text-[12.2px] transition-colors duration-[150ms] border-[#cddcff] bg-[#eff4ff] text-[#2563eb] cursor-pointer">
+                  <input type="checkbox" class="m-0 accent-[#2563eb]" checked> 配置定义
+                </label>
+                <label class="inline-flex items-center gap-[5px] rounded-full border px-[11px] py-[4px] text-[12.2px] transition-colors duration-[150ms] border-[#cddcff] bg-[#eff4ff] text-[#2563eb] cursor-pointer">
+                  <input type="checkbox" class="m-0 accent-[#2563eb]" checked> 数据行
+                </label>
+                <label class="inline-flex items-center gap-[5px] rounded-full border px-[11px] py-[4px] text-[12.2px] transition-colors duration-[150ms] border-[#e3e6ea] bg-white text-[#57606a] cursor-pointer">
+                  <input type="checkbox" class="m-0 accent-[#2563eb]"> 审计日志
+                </label>
+              </span>
+            </div>
+            <div>
+              <span class="block text-[12.2px] mb-[4px] break-words text-[#57606a]">包含已归档数据</span>
+              <span class="relative inline-flex w-[34px] h-[18px] align-middle">
+                <input type="checkbox" class="absolute inset-0 m-0 w-full h-full appearance-none rounded-full cursor-pointer" checked>
+                <span class="absolute inset-0 rounded-full bg-[#2563eb] transition-colors duration-[150ms]" aria-hidden="true"></span>
+                <span class="absolute top-[2px] left-[2px] w-[14px] h-[14px] rounded-[50%] bg-white transition-transform duration-[150ms] translate-x-[16px]" aria-hidden="true"></span>
+              </span>
+            </div>
+          </div>
+          <div class="flex flex-wrap items-center gap-[8px] mt-[10px] pt-[10px] border-t border-[#eef0f3]" data-form-actions>
+            <span class="flex-1"></span>
+            <button type="button" class="flex-[0_0_58px] whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-[#e3e6ea] bg-white text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]">取消</button>
+            <button type="button" class="flex-[0_0_58px] whitespace-nowrap rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-transparent bg-[#2563eb] text-white font-semibold transition-all duration-[150ms] hover:brightness-[1.08]">提交</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= 5 GF 表单卡 · 已提交 ================= -->
+    <section class="flex flex-col gap-[8px]" data-scene="form-submitted">
+      <h2 class="m-0 text-[12.5px] [font-weight:650] text-[#1f2328]">5 · GF 表单卡 · 已提交（只读）<span class="ml-[8px] font-normal text-[11.2px] text-[#8b949e]">值已回填、控件禁用；删重复标题行</span></h2>
+      <div class="w-[440px] max-w-full bg-white border border-[#e3e6ea] rounded-[10px] overflow-hidden" data-card="form-submitted" data-state="submitted" data-shells="1">
+        <div class="flex items-center gap-[6px] px-[10px] py-[8px] whitespace-nowrap" data-card-head>
+          <span class="flex-none flex items-center justify-center w-[24px] text-[#57606a]" aria-hidden="true">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M8 11h8"/><path d="M8 15h5"/></svg>
+          </span>
+          <span class="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-[12px] leading-[1.7] [font-weight:650] text-[#1f2328]">导出 DOC_TYPE 配置</span>
+          <span class="flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] border border-[#bfe3cd] whitespace-nowrap text-[#1a7f45] bg-[#edf7f0]">✓ 已提交</span>
+          <span class="flex-none ml-auto text-[#8b949e] text-[12px] rotate-90" aria-hidden="true">›</span>
+        </div>
+        <div class="pb-[11px]" data-card-body>
+          <div class="min-w-0 max-h-[min(320px,45vh)] overflow-y-auto mx-[11px] mt-[9px]" data-form-fields>
+            <div class="mb-[11px]">
+              <span class="block text-[12.2px] mb-[4px] break-words text-[#57606a]">文件名<span class="text-[#c0392b]"> *</span></span>
+              <input type="text" class="w-full border rounded-[8px] px-[9px] py-[6px] font-sans text-[13px] leading-[normal] text-[#1f2328] [outline:none] border-[#e3e6ea] bg-white disabled:text-[#57606a]" value="doc-type-2026-10-20" disabled>
+            </div>
+            <div class="mb-[11px]">
+              <span class="block text-[12.2px] mb-[4px] break-words text-[#57606a]">每页行数</span>
+              <input type="number" class="w-full border rounded-[8px] px-[9px] py-[6px] font-sans text-[13px] leading-[normal] text-[#1f2328] [outline:none] border-[#e3e6ea] bg-white disabled:text-[#57606a]" value="800" disabled>
+            </div>
+            <div class="mb-[11px]">
+              <span class="block text-[12.2px] mb-[4px] break-words text-[#57606a]">导出范围<span class="text-[#c0392b]"> *</span></span>
+              <select class="w-full border rounded-[8px] px-[9px] py-[6px] font-sans text-[13px] leading-[normal] text-[#1f2328] [outline:none] border-[#e3e6ea] bg-white disabled:text-[#57606a]" disabled>
+                <option value="">请选择导出范围</option>
+                <option value="scope" selected>仅 DOC_TYPE</option>
+                <option value="all">DOC_TYPE 与归档</option>
+              </select>
+            </div>
+            <div class="mb-[11px]">
+              <span class="block text-[12.2px] mb-[4px] break-words text-[#57606a]">包含字段</span>
+              <span class="flex flex-wrap gap-[6px]">
+                <label class="inline-flex items-center gap-[5px] rounded-full border px-[11px] py-[4px] text-[12.2px] border-[#cddcff] bg-[#eff4ff] text-[#2563eb] cursor-default">
+                  <input type="checkbox" class="m-0 accent-[#2563eb]" checked disabled> 配置定义
+                </label>
+                <label class="inline-flex items-center gap-[5px] rounded-full border px-[11px] py-[4px] text-[12.2px] border-[#cddcff] bg-[#eff4ff] text-[#2563eb] cursor-default">
+                  <input type="checkbox" class="m-0 accent-[#2563eb]" checked disabled> 数据行
+                </label>
+                <label class="inline-flex items-center gap-[5px] rounded-full border px-[11px] py-[4px] text-[12.2px] border-[#e3e6ea] bg-white text-[#57606a] cursor-default">
+                  <input type="checkbox" class="m-0 accent-[#2563eb]" disabled> 审计日志
+                </label>
+              </span>
+            </div>
+            <div>
+              <span class="block text-[12.2px] mb-[4px] break-words text-[#57606a]">包含已归档数据</span>
+              <span class="relative inline-flex w-[34px] h-[18px] align-middle">
+                <input type="checkbox" class="absolute inset-0 m-0 w-full h-full appearance-none rounded-full cursor-default" checked disabled>
+                <span class="absolute inset-0 rounded-full bg-[#2563eb]" aria-hidden="true"></span>
+                <span class="absolute top-[2px] left-[2px] w-[14px] h-[14px] rounded-[50%] bg-white translate-x-[16px]" aria-hidden="true"></span>
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    </div>
+
+    <!-- ================= 页脚 ================= -->
+    <footer class="mt-[14px] rounded-[12px] border border-[#e3e6ea] bg-white px-[13px] py-[12px]" data-review-status="approved">
+      <div class="text-[11.5px] leading-[1.6] text-[#57606a]">主题：HITL 卡面最终形态（去超时 · 撤预检区 · 一致性五项）· 2026-10-20 · <b class="[font-weight:650] text-[#1a7f37]">状态：定稿（2026-10-20 用户「demo通过」）</b>。</div>
+      <div class="mt-[7px] text-[11.2px] leading-[1.6] text-[#8b949e]">单文件 demo（外链复用 <code class="font-mono text-[11px]">chat-ux/hitl-interrupts.css</code>，无构建、无新样式文件）；示例数据全虚构。</div>
+      <div class="mt-[7px] font-mono text-[11px] leading-[1.6] text-[#8b949e]">data-review-status="approved" · data-card-consistency-fix="2026-10-20" · data-final-only="2026-10-20"</div>
+    </footer>
+
+  </div>
+</main>
+
+</body>
+</html>

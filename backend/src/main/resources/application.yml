@@ -104,25 +104,21 @@ app:
   #    max-iterations/session-ttl-minutes/hitl-timeout-minutes/thinking-disabled 已删除，
   #    其中 thinking-disabled 在新运行时早已失效：官方循环 + reasoning 补丁不设 extraBody.thinking）──
   ai:
-    session-ttl: 6h
+    # 会话滑动 TTL（2026-10-20 用户裁决第 4 条：6h → 24h，活跃即续、整个会话维度、无绝对上限）。
+    # run 级外置键（快照/待决/台账/帧/序号/心跳）同取本值，每次写/心跳都整额续期。
+    session-ttl: 24h
     memory:
       max-messages: 40
     hitl:
-      # 挂起等待上限**分场景**（2026-10-10 数字规格清点裁决③；原单键 timeout: 120s 同供三场景）：
-      #   confirm-timeout（等人）：确认破坏性操作时等人类决策。
-      #     依据 = 业界依据 §5：该节唯一硬结论是"不设超时=永久卡死"（AWS Step Functions），
-      #     取值无统一标准，对内网/小用户量的交互式确认门推荐 10 分钟（600s），超时自动拒绝。
-      #     本键**本轮取 240s 为过渡值**：600s 才是目标值，但实际可达上界受本文件
-      #     app.ai.resilience.total-budget（300s）约束 —— 看门狗的总预算判据先于"工具活跃期
-      #     不计静默"生效，SseEmitter 寿命亦取该值。240s < 300s（留 60s 余量）故值真实可达；
-      #     抬到 600s 须与"轮次预算 / emitter 寿命 / 兜底等待三语义拆分"（等待治理 R-99③）同批。
-      #   frontend-tool-timeout（等机器）：前端工具与 generative_form 的回执等待。
+      # 挂起等待上限（2026-10-20 用户裁决第 1/2 条后只剩一个键）：
+      #   confirm-timeout（确认门，等人）**已退役**：确认门不再超时，一直等到用户批准/拒绝/取消。
+      #   frontend-tool-timeout（等机器）：**只**管即时执行类前端工具（navigate_to 等）的后端回执兜底；
+      #     generative_form 不读本键（等的是人填表，无上限）。
       #     依据 = 业界依据 §6：MCP 只规定 SHOULD 设超时；实现层默认常见 60s，Vercel AI SDK
-      #     toolMs 区间 5–60s。**本键本轮暂维现状 120s**：降到 60s 会把前端执行器预算折算压到
+      #     toolMs 区间 5–60s。**本键维持 120s**：降到 60s 会把前端执行器预算折算压到
       #     5s 下限（frontend/src/utils/frontend-tools.ts 的"预算 = 服务端上限 − 回灌 POST 60s"，
       #     该文件自述 ≤65s 为病态配置，而实测最慢成功回灌 30.6s）—— 降到 60s 的前置 = 前端折算面
       #     （回灌 POST 单独给更短上限）专项（数字规格清点 P-1 / 等待治理 R-99②），本次不动。
-      confirm-timeout: 240s
       frontend-tool-timeout: 120s
     suspend:
       # 挂起专用有界平台线程池（DC-12 禁虚拟线程）；容量即挂起并发上限，队列为 0 ⇒ 饱和快速失败 503
@@ -130,9 +126,10 @@ app:
     resilience:
       # 双超时 + 有界重试 + 总预算（韧性棒落地：run/StreamWatchdog）。
       # 三个阈值均为初值，待技术方案 §13.2 #2 压测裁决（【待裁决】见 S42-P3 证据文档）。
-      # 硬规范①：超时阈值 > 最长工具耗时 —— 挂起等待（确认门 240s / 前端工具 120s）期间工具处于"活跃"，
-      #   看门狗在工具执行期间不计静默、退出后以退出时刻重新计时，故 90s 小于两个挂起上限仍正确；
-      #   "配置值本身要不要直接大于 app.ai.hitl.confirm-timeout"列为待裁决。
+      # 硬规范①：超时阈值 > 最长工具耗时 —— 挂起等待期间工具处于"活跃"，
+      #   看门狗在工具执行期间不计静默、退出后以退出时刻重新计时，故 90s 小于等待上限仍正确；
+      #   确认门与 generative_form 已无等待上限（2026-10-20 裁决），不再参与本条。
+      # 人机预算分离（裁决第 3 条）：total-budget 的判据 = 墙钟 − 挂起等待，等人时间不计入。
       # 硬规范②：TCP 静默 FIN 按断流处理 —— 正常收尾必须有终帧（finishReason/usage），
       #   缺失即判 UPSTREAM_STREAM_INCOMPLETE 并进入重试三条件判定。
       first-byte-timeout: 30s
@@ -173,8 +170,9 @@ app:
       #     （值取代码缺省 8 / 256，不显式写出）。
       #   write-timeout：**单帧写出**的超时预算 —— 写出挪到弹性写出池（sse-write-*），
       #     投递池线程最多等本值；超预算即摘除该订阅者（主动断连，前端 onerror/onclose
-      #     带 lastSeq 重挂差量补发，不静默丢帧）。整条流的寿命由 emitter 生命周期承载
-      #     （AiController 用轮次总预算 total-budget=300s 构造 emitter）。
+      #     带 lastSeq 重挂差量补发，不静默丢帧）。整条流的寿命**不设传输层死线**
+      #     （AiController 用 new SseEmitter(-1L)：确认门/表单等人工输入没有上限；
+      #     机器预算 total-budget=300s 仍由 StreamWatchdog 判，与传输层无关）。
       #     **必须 > 0**（启动期 fail-fast 校验，见 AiProperties）：0/负值会被 SseWriteBudget
       #     静默回落成缺省 15s（配置面与运行面说两套话），故启动期直接失败 —— 与任务通道
       #     app.task.sse.write-timeout 同款守卫。
@@ -193,7 +191,8 @@ app:
       #   emitter-timeout：订阅者生命周期超时，**必须 > 0**（启动期 fail-fast 校验，见 AppProperties）。
       #     原为 SseEmitter(0L) = 该 emitter 没有生命周期超时 —— 但这不等于"连接没有释放手段"：
       #     上面那条 120s 容器写超时仍在，只是它随连接配置漂移、通常比生命周期超时更早到。
-      #     5m 与 AI 通道的 emitter 生命周期同量级。
+      #     5m 是任务通道自己的流寿命口径（AI 通道自 P1 起不设传输层死线：new SseEmitter(-1L)，
+      #     因为确认门/表单等人没有上限；机器预算仍由 StreamWatchdog 判）。
       #     前端 EventSource 会按 retry 自动重连，job-watch 的快照轮询兜底。
       write-timeout: 15s
       emitter-timeout: 5m

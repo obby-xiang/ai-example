@@ -52,7 +52,7 @@ class SseFrameSequenceConformanceTest {
 		this.out.suspended(List.of(pending("c-1")), this.store.runKey(RUN_ID), this.store.pendingKey(RUN_ID),
 				this.store.instanceId());
 		this.out.toolStart(pending("c-1"));
-		this.out.confirmRequest(pending("c-1"), 120);
+		this.out.confirmRequest(pending("c-1"));
 		this.out.confirmDecision(pending("c-1"), "approve", "用户批准", 1234L);
 		this.out.toolResult(pending("c-1"), true, false, "导出作业已启动");
 		this.out.delta("已启动");

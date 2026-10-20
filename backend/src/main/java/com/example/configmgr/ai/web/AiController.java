@@ -189,7 +189,7 @@ public class AiController {
 			return json(HttpStatus.CONFLICT, body);
 		}
 
-		SseEmitter emitter = new SseEmitter(budgetMillis());
+		SseEmitter emitter = new SseEmitter(NO_TRANSPORT_DEADLINE);
 		SseChatEmitter out = this.runRegistry.of(runId);
 		out.attach(emitter);
 		try {
@@ -310,7 +310,7 @@ public class AiController {
 		if (snapshot == null) {
 			return json(HttpStatus.NOT_FOUND, Map.of("code", "UNKNOWN_RUN", "runId", runId));
 		}
-		SseEmitter emitter = new SseEmitter(budgetMillis());
+		SseEmitter emitter = new SseEmitter(NO_TRANSPORT_DEADLINE);
 		SseChatEmitter out = this.runRegistry.of(runId);
 		int replayed = out.replayAndAttach(emitter, lastSeq, isTerminal(snapshot.getStatus()));
 		log.debug("reattach runId={} status={} lastSeq={} 回放帧数={}", runId, snapshot.getStatus(), lastSeq, replayed);
@@ -458,7 +458,9 @@ public class AiController {
 			entry.put("kind", pending.getKind());
 			entry.put("name", pending.getName());
 			entry.put("arguments", pending.getArguments());
-			// R-160 M3：透出到期口径（旧数据为 null ⇒ 前端「等待人工确认」静态兜底，不伪造倒计时）
+			// R-160 M3：透出到期口径。去超时裁决后前端已退役倒计时/「等待人工确认」静态兜底，
+			// 快照里的 expiresAt/atMs 只作对账口径（null = 无期限：确认门/表单/旧数据）。
+			// 字段保留是兼容与取证需要（前端 utils/parts 仍原样携带，不据此置灰按钮）。
 			entry.put("expiresAt", pending.getExpiresAt());
 			entry.put("atMs", pending.getAtMs());
 			// MAJOR-1（收口）：刷新恢复路径也要带预检报告，否则卡面丢了"批准的是哪一版预检"。
@@ -712,8 +714,9 @@ public class AiController {
 		body.put("baseUrl", this.environment.getProperty("spring.ai.openai.base-url", "(unset)"));
 		body.put("memoryBackend", this.chatMemoryRepository.getClass().getSimpleName());
 		body.put("sessionTtl", String.valueOf(this.properties.getSessionTtl()));
-		body.put("confirmTimeoutSeconds", this.confirmGate.confirmTimeoutSeconds());
-		// 与确认门键对称的观测面（裁决③拆键后的第二个挂起键）：值是前端工具键的折算秒
+		// 确认门自 2026-10-20 起不再超时（等人无上限），故 /health 不再报告 confirmTimeoutSeconds。
+		// 与确认门原地对称的观测面仍在：值是前端工具键的折算秒（只对即时执行类前端工具有意义，
+		// generative_form 豁免 —— 见 ConfirmGate#suspendWaitSeconds）。
 		body.put("frontendToolTimeoutSeconds", this.confirmGate.frontendToolTimeoutSeconds());
 		body.put("suspendPoolSize", this.properties.getSuspend().getPoolSize());
 		body.put("sseDelivery", sseDeliverySnapshot());
@@ -841,9 +844,21 @@ public class AiController {
 		return body;
 	}
 
-	private long budgetMillis() {
-		return this.properties.getResilience().getTotalBudget().toMillis();
-	}
+	/**
+	 * AI 流<b>不设传输层死线</b>：{@code -1L} 交给 Servlet 异步语义 = 永不到期
+	 * （Servlet 3.1 §2.3.3.3：超时 ≤ 0 的异步操作不会超时）。
+	 *
+	 * <p>为什么必须拆掉这条死线：确认门与 {@code generative_form} 的等待<b>没有上限</b>
+	 * （用户裁决 2026-10-20 第 1/2 条）—— 一条流可能在等人上挂几十分钟，用
+	 * {@code app.ai.resilience.total-budget}（300s）当 emitter 期限会在人点击之前把连接掐断。
+	 * 该预算仍是<b>机器预算</b>：判据在 {@code StreamWatchdog}（墙钟 − 挂起等待），
+	 * 上游不动 / 首包不来照样触发 {@code StreamViolationException}，与本传输死线是两层。
+	 *
+	 * <p>卡住的写仍有三条释放路径：客户端断开（{@code onError}/{@code onCompletion}）、
+	 * 容器写超时（{@code server.tomcat.connection-timeout} 派生，本配置 120s）、
+	 * 以及 {@code SseChatEmitter} 的单帧写预算（{@code app.ai.sse.write-timeout}，15s）。
+	 */
+	private static final long NO_TRANSPORT_DEADLINE = -1L;
 
 	/** 挂起项快照（诊断用：确认门/前端工具各自等在哪里）。 */
 	@GetMapping("/pending/{runId}")
