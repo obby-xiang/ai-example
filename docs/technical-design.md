@@ -258,8 +258,25 @@ void runAgentLoop(RunInput input, SseRunEmitter emitter) {
       （先推送再 awaitResponse；future 由 HitlManager 以 iid 为键独立持有）
 前端：用户点击确认/拒绝 → POST /api/ai/sessions/{sid}/interactions/{iid}
 后端：future.complete(result) → 继续循环；拒绝结果同样作为工具结果回填模型
-超时（5min）/取消：按拒绝处理，保证 tool_calls 与 tool 结果配对完整
+超时（现行：确认门无等待上限；仅即时执行类前端工具的机器回执有 120s 兜底）/取消：按拒绝处理，
+      保证 tool_calls 与 tool 结果配对完整
 ```
+
+**会话级外置键的寿命语义（超时面治理批① 第 12 项；与决策看板 2026-10-21 裁决一致）**
+
+- **会话级键 24h 滑动共亡**：`ai:run`（轮快照）/`ai:pending`（待决条目）/`ai:events`+`ai:xevents`
+  （帧归档与事件日志）/`ai:seq`/`ai:req`/`ai:decided`/`ai:fence:run`/`ai:session:current`/
+  `ai:ctx` 三件套/`ai:safety`/`ai:ledger`/`ai:idem` 的 TTL 一律 `app.ai.session-ttl`（缺省 24h），
+  <b>每次写/心跳/读侧 touch 都整额续期</b>（活跃即续，无绝对上限）。键族清单与续期面登记在
+  `ai/run/SessionKeyRegistry` 一处；短命协调键（租约 30s / 资源锁 60s）显式排除在外。
+- **无待审批例外**：确认门与 `generative_form` 的等待<b>没有上限</b>，挂起多久都不影响"卡的后台数据
+  与会话同寿"——不存在"等人超过某个时长就让挂起态过期"的分支（原 `confirm-timeout` 与 240s/120s
+  死线均已退役）。
+- **取消信号随会话**：`ai:cancel:<runId>` 的 TTL = `session-ttl`（原 `total-budget × 2 = 600s`），
+  并进读侧续期面 —— 一次 15 分钟的挂起不会让"已取消"这个事实先于会话消失（否则续跑/重挂会把它捡回来）。
+- **AI 对话数据不落库**：以上状态全在 Redis（滑动 TTL 到期即消失），业务库只存任务/作业/配置等业务实体；
+  会话记忆同样是内存/Redis 形态，进程重启不承诺恢复对话内容（只承诺"已有人类决策的轮次"可按快照续跑）。
+
 
 #### UI_COMMAND 协议（AI → 前端）
 

@@ -213,7 +213,10 @@ public class AiProviderRegistry {
 
     private ChatModel newModel(OpenAiApi api, OpenAiChatOptions options) {
         return new ReasoningAwareOpenAiChatModel(api, options, this.toolCallingManager,
-                this.retryTemplate.getIfAvailable(RetryTemplate::new),
+                // 超时面治理批① 第 2 项：默认策略显式化为「仅瞬时故障 + 0.5s×2 上限 5s + 抖动」
+                //（见 AiRetryDefaults；自有的 retryTemplate bean 由 AiRetryConfig 提供，
+                // 这里的回落只为"非 Spring 装配/单测"与 bean 缺失两种场景兜底）
+                this.retryTemplate.getIfAvailable(AiRetryDefaults::retryTemplate),
                 this.observationRegistry.getIfAvailable(() -> ObservationRegistry.NOOP));
     }
 

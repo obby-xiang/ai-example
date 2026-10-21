@@ -1469,15 +1469,24 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		}
 		Duration ttl = ttlFor(runId);
 		try {
-			this.redis.expire(runKey(runId), ttl);
-			this.redis.expire(pendingKey(runId), ttl);
-			this.redis.expire(eventsKey(runId), ttl);
-			this.redis.expire(seqKey(runId), ttl);
-			// B23L1 批①：事件日志 Stream 与会话同寿（挂起期没有 append，靠心跳续期）
-			this.redis.expire(xeventsKey(runId), ttl);
+			renew(runId, ttl, SessionKeyRegistry.Renewal.HEARTBEAT);
 		}
 		catch (Exception ex) {
 			log.debug("挂起期续期轮键失败 runId={}：{}", runId, ex.getMessage());
+		}
+	}
+
+	/**
+	 * 按登记表续期一个续期面（超时面治理批① 第 11 项）：键清单来自
+	 * {@link SessionKeyRegistry#renewalKeys(SessionKeyRegistry.Renewal)}，本方法只负责发 {@code EXPIRE}。
+	 *
+	 * <p>Redis {@code EXPIRE} 对不存在的键是无操作（不报错），故"该键还没写出"不构成错误。
+	 * 失败语义与改造前一致：<b>整面共用调用方的一个 try</b> —— 首个键抛错即停，由调用方记 debug 并返回
+	 * （续期是尽力而为的养键动作，不该把调用方打成 500）。
+	 */
+	private void renew(String runId, Duration ttl, SessionKeyRegistry.Renewal renewal) {
+		for (java.util.function.Function<String, String> keyBuilder : SessionKeyRegistry.renewalKeys(renewal)) {
+			this.redis.expire(keyBuilder.apply(runId), ttl);
 		}
 	}
 
@@ -1524,11 +1533,8 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		renewSessionCurrent(snapshot.getSessionId(), runId);
 		Duration ttl = ttlFor(runId);
 		try {
-			this.redis.expire(reqKey(runId), ttl);
-			this.redis.expire(decidedKey(runId), ttl);
-			// M1：fence 键与快照同寿。它若先过期，下一次 fence 写会把号"推回去"（新写的 epoch 记在
-			// 一个空键上，陈旧写反而可能通过），fencing 的单调前提就被打破了。
-			this.redis.expire(fenceKey(runId), ttl);
+			// 契约位 / 决策 guard / fence / 取消信号（超时面治理批① 第 11 项：取键走登记表）
+			renew(runId, ttl, SessionKeyRegistry.Renewal.READ);
 		}
 		catch (Exception ex) {
 			log.debug("读侧续期契约位键失败 runId={}：{}", runId, ex.getMessage());

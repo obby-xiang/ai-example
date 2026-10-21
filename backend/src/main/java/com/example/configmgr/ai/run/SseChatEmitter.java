@@ -153,6 +153,14 @@ public class SseChatEmitter {
 	 */
 	private static volatile ThreadPoolExecutor sharedDeliveryPool;
 
+	/**
+	 * 写侧单帧预算的<b>实际值</b>（毫秒，装配时由 {@code app.ai.sse.write-timeout} 注入）。
+	 *
+	 * <p>超时面治理批① 第 3 项：{@code /api/ai/health} 的 {@code writeTimeoutMs} 必须读配置面的真实值，
+	 * 不能恒报编译期缺省 15000（否则改配置后可观测面说谎）。未装配 ⇒ 缺省值。
+	 */
+	private static volatile long sharedWriteTimeoutMs = SseWriteBudget.DEFAULT_TIMEOUT_MILLIS;
+
 	/** 投递池指标：累计摘除的订阅者数（溢出 / 写出失败 / 池拒绝共用，供 /api/ai/health）。 */
 	private static final AtomicLong EVICTED_TOTAL = new AtomicLong();
 
@@ -371,6 +379,23 @@ public class SseChatEmitter {
 	 * 触发本次提交的订阅者。
 	 */
 	public static synchronized void configureSharedDeliveryPool(int poolSize, int poolQueueCapacity) {
+		configureSharedDeliveryPool(poolSize, poolQueueCapacity, SseWriteBudget.DEFAULT_TIMEOUT_MILLIS);
+	}
+
+	/**
+	 * 装配进程级共享投递池，并登记<b>写侧超时预算的实际值</b>（超时面治理批① 第 3 项）。
+	 *
+	 * <p>此前 {@link #deliveryPoolMetrics()} 里 {@code writeTimeoutMs} 恒为编译期缺省 15000 ——
+	 * {@code /api/ai/health} 于是对"运维把 {@code app.ai.sse.write-timeout} 改成 8s"这件事
+	 * 一律说 15000（配置面与可观测面两套话）。现在由装配方（{@link RunRegistry}）把绑定后的
+	 * 实际值传进来，指标恒等于配置面。
+	 *
+	 * @param writeTimeoutMs 单帧写出预算（毫秒；非正 ⇒ 回落
+	 * {@link SseWriteBudget#DEFAULT_TIMEOUT_MILLIS}，与启动期 fail-fast 守卫同口径）
+	 */
+	public static synchronized void configureSharedDeliveryPool(int poolSize, int poolQueueCapacity,
+			long writeTimeoutMs) {
+		sharedWriteTimeoutMs = writeTimeoutMs > 0 ? writeTimeoutMs : SseWriteBudget.DEFAULT_TIMEOUT_MILLIS;
 		if (sharedDeliveryPool == null) {
 			AtomicLong threadNo = new AtomicLong();
 			ThreadPoolExecutor pool = new ThreadPoolExecutor(poolSize, poolSize, 60L, TimeUnit.SECONDS,
@@ -398,7 +423,8 @@ public class SseChatEmitter {
 		metrics.put("queueDepth", pool == null ? 0 : pool.getQueue().size());
 		metrics.put("evicted", EVICTED_TOTAL.get());
 		// 包②（纯增量键）：写侧超时预算与其命中次数 —— 写超时是"慢客户端"的直接观测面。
-		metrics.put("writeTimeoutMs", SseWriteBudget.DEFAULT_TIMEOUT_MILLIS);
+		// 超时面治理批① 第 3 项：报装配进来的实际值（= app.ai.sse.write-timeout），不是编译期缺省。
+		metrics.put("writeTimeoutMs", sharedWriteTimeoutMs);
 		metrics.put("writeTimeouts", SseWriteBudget.writeTimeouts());
 		return metrics;
 	}

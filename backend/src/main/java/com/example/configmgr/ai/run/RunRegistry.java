@@ -102,8 +102,10 @@ public class RunRegistry {
 		this.wakeBus = wakeBus;
 		this.wakeListener = wakeListener;
 		if (properties != null) {
+			// 超时面治理批① 第 3 项：把绑定后的写侧预算一并登记，供 /api/ai/health 如实回报
 			SseChatEmitter.configureSharedDeliveryPool(properties.getSse().getDeliveryPoolSize(),
-					properties.getSse().getDeliveryPoolSize() * 64);
+					properties.getSse().getDeliveryPoolSize() * 64,
+					properties.getSse().getWriteTimeout().toMillis());
 		}
 		// 池必须先装配再取用（configureSharedDeliveryPool 幂等，首装配者胜）
 		this.deliveryExecutor = properties != null ? SseChatEmitter.sharedDeliveryExecutorOrDirect() : Runnable::run;

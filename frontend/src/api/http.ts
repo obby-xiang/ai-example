@@ -10,6 +10,7 @@
 import axios, { AxiosError, type AxiosInstance, type AxiosRequestConfig } from 'axios'
 import type { ApiErrorBody, ApiResponse } from '@/types/api'
 import { acceptLanguage } from '@/locales'
+import { HTTP_TIMEOUT_MS } from '@/utils/time-constants'
 
 /** 前端侧补充的错误码（后端未定义，仅用于网络层异常）。 */
 export const FRONTEND_ERROR_CODES = {
@@ -94,14 +95,18 @@ function normalizeError(error: unknown): ApiError {
  * **本值不是新值**：原为 create 配置里的内联字面量 `timeout: 60000`，取值零变化；2026-10-10 数字规格
  * 清点裁决① 对它只做"值保留 + 命名常量化 + 补本注释"，故不属行为变更。
  *
- * 它同时是另外三个前端超时常量的**对齐根**：回灌 POST 的最坏耗时
- * （`utils/frontend-tools.ts` 的 `FRONTEND_TOOL_RESULT_HEADROOM_MS`）、表格引擎就绪
- * （`components/SpreadGrid.vue` 的 `READY_TIMEOUT_MS`）、下载拉取
- * （`stores/workspace.ts` 的 `DOWNLOAD_FETCH_TIMEOUT_MS`）。**改本值须同批复核这三处**
- * —— 三者目前仍是各自独立的常量、仅在注释里与本值对齐；改成 `import { HTTP_TIMEOUT_MS }` 的
- * 代码同源形态是下一步候选，2026-10-10 已按裁决登记，本批不做（那两个文件本批不在改动面）。
+ * **单一事实源（2026-10-21 超时面治理批① 第 4 项）**：本值已提到
+ * `utils/time-constants.ts` 的 `HTTP_TIMEOUT_MS`，本文件只做转出 + 使用。原"另外三个前端超时常量
+ * 与本值对齐"的注释式约定已改为<b>代码同源</b>：
+ * `utils/frontend-tools.ts` 的 `FRONTEND_TOOL_RESULT_HEADROOM_MS`、`stores/workspace.ts` 的
+ * `DOWNLOAD_FETCH_TIMEOUT_MS` 都直接 import 这个常量 —— 改值一次生效三处，不再靠"改本值须同批复核"。
+ * （`components/SpreadGrid.vue` 的 `READY_TIMEOUT_MS` 是"表格引擎就绪"的独立语义，不并入：
+ * 它不是 HTTP 请求上限。）
+ *
+ * 值本体在 `utils/time-constants.ts`；本文件保留同名转出，既有 `import { HTTP_TIMEOUT_MS } from '@/api/http'`
+ * 的调用方零改动。
  */
-export const HTTP_TIMEOUT_MS = 60_000
+export { HTTP_TIMEOUT_MS }
 
 export const http: AxiosInstance = axios.create({
   baseURL: '/api',

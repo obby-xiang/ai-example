@@ -299,9 +299,24 @@ public class AiProperties {
 		 * 即时执行类前端工具（{@code navigate_to} 等）的回执等待上限（<b>等机器</b>，默认 120s）。
 		 *
 		 * <p><b>哪些工具读本键</b>（用户裁决 2026-10-20 第 2 条）：只有"下发了就等一个机器回执"的
-		 * 即时执行类前端工具。{@code generative_form} <b>不读</b>本键 —— 它等的是人填表，
-		 * 上限已退役（无超时），区分点见 {@code ConfirmGate#suspendWaitSeconds}。
+		 * 即时执行类前端工具 —— 共 <b>6 个</b>：
+		 * <ul>
+		 * <li>{@code navigate_to}（页面导航）</li>
+		 * <li>{@code select_definitions}（选择配置项）</li>
+		 * <li>{@code set_condition}（设置查询条件）</li>
+		 * <li>{@code confirm_step}（推进向导步骤）</li>
+		 * <li>{@code open_export_file_editor}（打开在线编辑器）</li>
+		 * <li>{@code download_export_files}（触发浏览器下载）</li>
+		 * </ul>
+		 * 这些工具都是"请求前端做一件事、等它回一个回执"，回执没回来是<b>机器故障</b>而非人的决定，
+		 * 不能无限悬置。
+		 *
+		 * <p><b>哪些工具不读本键</b>（等的是人 ⇒ 无上限）：{@code generative_form}（人填表）、
+		 * 三个表格写工具 {@code replace_values}/{@code update_rows}/{@code normalize_column}、
+		 * {@code undo_last_sheet_edit}、{@code ui_request_upload}（等用户手势给文件句柄）——
+		 * 共 <b>6 个</b>，按工具名集合 {@code ConfirmGate#HUMAN_WAIT_FRONTEND_TOOLS} 区分。
 		 * 确认门（等人决策）同样<b>没有上限</b>，原 {@code app.ai.hitl.confirm-timeout} 键已退役。
+		 * 区分点只有一个：{@code ConfirmGate#suspendWaitSeconds}（返回 null = 不设上限）。
 		 *
 		 * <p>取值依据（业界依据 §6「前端工具调用超时（AI 工具调用执行预算）」）：MCP 规范只要求
 		 * SHOULD 设超时、不规定数值；实现层默认常见 <b>60s</b>，Vercel AI SDK 官方 {@code toolMs}
@@ -368,8 +383,13 @@ public class AiProperties {
 		 * 里仍存活的轮次，把"已有人类决策/后端工具在飞"的那些自动续跑。
 		 *
 		 * <p>
-		 * 默认 false（保守：自动补执行破坏性工具需谨慎），由运维在 {@code application.yml}
-		 * 显式打开；打开后仍<b>只</b>续跑"已有结论"的条目（{@code APPROVED/EXECUTED/REJECTED/TIMEOUT/}
+		 * <b>两个缺省不一致是刻意的（超时面治理批① 第 8⑤ 项钉明）</b>：
+		 * <b>代码缺省 = false</b>（保守：自动补执行破坏性工具需谨慎），而<b>出厂
+		 * {@code application.yml} 显式配 true</b>（运维可在部署面关掉）。因此线上行为以 yml 为准：
+		 * 未改配置 = 自动续跑<b>开启</b>；单测/非 Spring 装配（只 new 本类）= 关闭。
+		 * 判别方法：看 {@code app.ai.resume.on-startup} 是否被显式配置，而不是看本字段初值。
+		 *
+		 * <p>打开后仍<b>只</b>续跑"已有结论"的条目（{@code APPROVED/EXECUTED/REJECTED/TIMEOUT/}
 		 * {@code FRONTEND_RESULT/FRONTEND_CANCELLED/REJECTED_ARGUMENTS/BLOCKED}）—— 仍 {@code PENDING}
 		 * （人工/前端未给结论）的一律跳过，因此不会绕开人审。
 		 */
@@ -409,7 +429,21 @@ public class AiProperties {
 		@Data
 		public static class Lock {
 
-			/** 会话锁 TTL = 轮上限（ADR-5）：正常由 watchdog 续期、轮终态主动释放。 */
+			/**
+			 * 会话锁的有效期（缺省 10m）。
+			 *
+			 * <p>
+			 * <b>语义（超时面治理批① 第 8③ 项订正）</b>：这是<b>互斥窗口的上界</b>，不是"一轮的预算上限"。
+			 * 早先的自述写作"TTL = 轮上限（ADR-5）"，容易被读成"等于
+			 * {@code app.ai.resilience.total-budget} 300s" —— 两者不是一回事：
+			 * <ul>
+			 * <li>一轮的<b>机器预算</b>是 {@code total-budget}（300s，含流式/工具/重试，扣除挂起等待）；</li>
+			 * <li>锁 TTL 约束的是"<b>持锁进程死了以后，别人多久能接管这条会话</b>"：watchdog 每
+			 * {@link Lock#getWatchdog()}（30s）续期，轮终态主动释放；进程崩溃时最多等一个 TTL
+			 * 就有新实例能拿到锁，不会被一轮的长耗时（挂起等人可无限期）拖成"事实永锁"。</li>
+			 * </ul>
+			 * 故 TTL 与轮预算<b>无等式关系</b>；挂起等人期间由 ConfirmGate 的心跳续期承担"锁还活着"的证明。
+			 */
 			private Duration ttl = Duration.ofMinutes(10);
 
 			/** watchdog 续期间隔（ADR-5 补记 CH-P4：锁须带续期）。 */

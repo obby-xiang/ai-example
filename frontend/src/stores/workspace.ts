@@ -18,6 +18,7 @@
 import { defineStore } from 'pinia'
 import router, { ROUTE_NAMES } from '@/router'
 import { saveBlob } from '@/api/http'
+import { HTTP_TIMEOUT_MS } from '@/utils/time-constants'
 import { tasksApi } from '@/api/tasks'
 import { jobsApi } from '@/api/jobs'
 import { useTaskStore } from '@/stores/task'
@@ -321,14 +322,15 @@ export function notifyWorkspaceChanged(summary: string): void {
 // ── ui_event 统一分发（AI → 业务，与用户点击同一套 action） ───────────────────
 
 /**
- * `ui_event download` 的下载请求上限（毫秒）：与 `api/http.ts` 的 axios 单请求上限同值
- * （`timeout: 60000`）—— 两者都是"拉字节"类请求，延迟分布同类，故沿用同一口径。
+ * `ui_event download` 的下载请求上限（毫秒）：<b>代码同源</b> = `utils/time-constants.ts` 的
+ * {@link HTTP_TIMEOUT_MS}（axios 单请求上限）。两者都是"拉字节"类请求、延迟分布同类，
+ * 故不各写一个字面量（超时面治理批① 第 4 项：此前是 `60_000` 字面量 + 注释对齐）。
  *
  * 为什么必须有（R-11）：本分支此前是**无 signal、无上限**的裸 `fetch`，上游不响应时
  * 这一步会永久挂住 —— 它在 `dispatchUiEvent` 的 await 链上，于是"回灌给模型的结果"
  * 也一起被拖住（与本批 W-01 同族：等待没有上界、结局没人消费）。
  */
-const DOWNLOAD_FETCH_TIMEOUT_MS = 60_000
+const DOWNLOAD_FETCH_TIMEOUT_MS = HTTP_TIMEOUT_MS
 
 function ok(message: string): UiEventResult {
   return { handled: true, message }

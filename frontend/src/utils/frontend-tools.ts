@@ -49,6 +49,7 @@
  * 丢失；**同步阻塞主线程类**的边界见 `runWithBudget` 的说明）。
  */
 
+import { HTTP_TIMEOUT_MS } from '@/utils/time-constants'
 import {
   SHEET_TOOL_NAMES,
   UI_EVENT_TYPES,
@@ -278,11 +279,13 @@ export const FRONTEND_TOOL_TIMEOUT_BUDGET_MS = 60_000
 /**
  * 回灌 POST 的最坏耗时（毫秒）= 预算必须让出的余量。
  *
- * 取值 = `api/http.ts` 的 axios 单请求上限（60s，`http.ts:85`）—— 回灌 POST 自己最多能花
- * 这么久，不是"经验留白"。折算式见 {@link deriveFrontendToolBudgetMs}：
+ * 取值 = `utils/time-constants.ts` 的 {@link HTTP_TIMEOUT_MS}（axios 单请求上限 60s）——
+ * 回灌 POST 自己最多能花这么久，不是"经验留白"。<b>代码同源</b>（超时面治理批① 第 4 项）：
+ * 此前这里是字面量 `60_000`，只在注释里与 `api/http.ts` 对齐；改 axios 上限而忘了改这里，
+ * 折算式 `预算 + 余量 ≤ 服务端上限` 会静默失真。折算式见 {@link deriveFrontendToolBudgetMs}：
  * `预算 = min(max(服务端上限 − 本余量, 5s 下限), 服务端上限)`。
  */
-export const FRONTEND_TOOL_RESULT_HEADROOM_MS = 60_000
+export const FRONTEND_TOOL_RESULT_HEADROOM_MS = HTTP_TIMEOUT_MS
 
 /**
  * 折算预算的下限（毫秒）：服务端上限被配得过小时，仍给执行器一点起码的完成时间。

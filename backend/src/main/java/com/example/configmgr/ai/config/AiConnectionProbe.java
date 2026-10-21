@@ -79,31 +79,41 @@ public class AiConnectionProbe {
 
     /**
      * 复用一个 JDK HttpClient：每次 {@code /test} 新建一个会让"点十次测试连接"留下十个 selector 线程
-     * 等着被 GC。连接超时取自配置（本键是启动期静态配置，故单例安全）；单次请求的超时另由
-     * {@code HttpRequest#timeout} 给。
+     * 等着被 GC。连接超时取自配置（{@code app.ai.config.probe-timeout}）。
+     *
+     * <p><b>超时面治理批① 第 10 项</b>：此前 {@code HttpClient} 在<b>首次构造时固化</b>了当时的
+     * {@code probe-timeout}，之后改配置（或测试把它调到 150ms 触发超时档）仍跑旧值 —— 连接超时与
+     * 请求超时来自两个不同时刻的配置，是"配置面与运行面说两套话"的典型形态。现在每次调用都读当前值，
+     * 值与缓存实例不一致就重建（单实例进程里这是一次启动期抖动，不是热路径）。
      */
     private volatile HttpClient client;
+
+    /** 当前缓存实例所用的连接超时（与 {@link #client} 同一把锁下更新）。 */
+    private volatile Duration clientTimeout;
 
     public AiConnectionProbe(AiProperties properties) {
         this.properties = properties;
         this.guard = new AiEndpointGuard(properties);
     }
 
-    private HttpClient client(Duration timeout) {
+    /** 取（必要时重建）HttpClient：连接超时 = <b>本次调用读到的</b> {@code probe-timeout}。 */
+    HttpClient client(Duration timeout) {
         HttpClient existing = this.client;
-        if (existing == null) {
-            synchronized (this) {
-                existing = this.client;
-                if (existing == null) {
-                    existing = HttpClient.newBuilder()
-                        .connectTimeout(timeout)
-                        .followRedirects(HttpClient.Redirect.NEVER)
-                        .build();
-                    this.client = existing;
-                }
-            }
+        if (existing != null && java.util.Objects.equals(timeout, this.clientTimeout)) {
+            return existing;
         }
-        return existing;
+        synchronized (this) {
+            if (this.client != null && java.util.Objects.equals(timeout, this.clientTimeout)) {
+                return this.client;
+            }
+            HttpClient rebuilt = HttpClient.newBuilder()
+                .connectTimeout(timeout)
+                .followRedirects(HttpClient.Redirect.NEVER)
+                .build();
+            this.client = rebuilt;
+            this.clientTimeout = timeout;
+            return rebuilt;
+        }
     }
 
     /**

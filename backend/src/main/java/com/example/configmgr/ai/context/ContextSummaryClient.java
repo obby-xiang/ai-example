@@ -14,12 +14,15 @@ import org.springframework.beans.factory.ObjectProvider;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 摘要模型客户端（上下文统计与压缩专项批③；设计稿 §3.5 / 裁决 D3）。
@@ -36,6 +39,19 @@ import java.util.concurrent.TimeoutException;
  * <p>
  * {@code summary-model} 为空 = 主模型（D3 的过渡形态：本仓只有一套 provider 配置；
  * 模型配置专项落地后只改这一个键即可切便宜模型）。
+ *
+ * <h2>线程形态（超时面治理批① 第 5 项）</h2>
+ * 摘要跑在<b>有界平台线程池</b>上，不是 {@code newVirtualThreadPerTaskExecutor()}。理由是超时收口
+ * 依赖 {@code Future#cancel(true)}：中断在平台线程上能穿透到阻塞 socket 读（JDK HttpClient 会因此
+ * 中止请求），而对停在 native 阻塞读上的虚拟线程并不可靠（取消可能只标记了 future，请求继续跑）。
+ * 摘要调用本身是非流式 {@code ChatModel#call}（Spring AI 内部走 RestClient，不经 WebClient），
+ * 因此 HTTP 层的 {@code responseTimeout} 对这条路径没有收口作用；层次分工是
+ * <b>父预算（{@code summary-timeout}）给"一次摘要"的硬上限，HTTP 层上限管连接/读的细粒度切片</b>。
+ *
+ * <p>
+ * 池容量 {@value #POOL_THREADS}、有界队列 {@value #QUEUE_CAPACITY}：摘要只由 L2/L3 压缩触发、
+ * 单轮内串行，4 条线程足够；队满即 {@code AbortPolicy} 拒绝 ⇒ 映射成
+ * {@code AI_SUMMARY_UNAVAILABLE}（可判定，不排队无限等）。
  */
 public final class ContextSummaryClient implements RollingSummarizer.Summarizer {
 
@@ -51,7 +67,15 @@ public final class ContextSummaryClient implements RollingSummarizer.Summarizer 
 
 	private final ModelCall call;
 
-	private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
+	/** 有界平台线程池（不是虚拟线程：见类注。守护线程 + 空闲回收，容器关闭时 shutdownNow）。 */
+	private static final int POOL_THREADS = 4;
+
+	/** 待执行摘要的排队上限；队满即拒绝（宁可判"摘要不可用"，也不无限排队等一个挂住的请求）。 */
+	private static final int QUEUE_CAPACITY = 8;
+
+	private static final AtomicInteger THREAD_NO = new AtomicInteger();
+
+	private final ExecutorService executor = newExecutor();
 
 	public ContextSummaryClient(AiProperties properties, ModelCall call) {
 		this.properties = properties;
@@ -82,7 +106,15 @@ public final class ContextSummaryClient implements RollingSummarizer.Summarizer 
 		String configured = this.properties.getContext().getSummaryModel();
 		String model = configured == null || configured.isBlank() ? null : configured.trim();
 		Duration timeout = this.properties.getContext().getSummaryTimeout();
-		Future<String> future = this.executor.submit(() -> this.call.call(prompt, model));
+		Future<String> future;
+		try {
+			future = this.executor.submit(() -> this.call.call(prompt, model));
+		}
+		catch (RejectedExecutionException ex) {
+			// 池饱和/已关闭：不排队等（一个挂住的摘要请求会把队列堵满），按"摘要不可用"收口
+			throw new CodedIllegalStateException(ErrorCodes.AI_SUMMARY_UNAVAILABLE,
+					"摘要执行池已满或已关闭（池=" + POOL_THREADS + " 队列=" + QUEUE_CAPACITY + "）", ex);
+		}
 		try {
 			return future.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
 		}
@@ -107,6 +139,28 @@ public final class ContextSummaryClient implements RollingSummarizer.Summarizer 
 	/** 由 Spring 在容器关闭时调用（{@code @Bean} 的推断销毁方法）。 */
 	public void close() {
 		this.executor.shutdownNow();
+	}
+
+	/**
+	 * 摘要执行池（超时面治理批① 第 5 项）：有界、平台线程、守护、空闲回收。
+	 *
+	 * <p>为什么 {@code allowCoreThreadTimeOut(true)}：摘要不是常驻负载，一个只压缩过几次的进程
+	 * 不该长期占着 4 条线程（单测里每个用例都新建一个客户端，线程泄漏会拖垮整轮门禁）。
+	 */
+	private static ExecutorService newExecutor() {
+		ThreadPoolExecutor pool = new ThreadPoolExecutor(POOL_THREADS, POOL_THREADS, 30L, TimeUnit.SECONDS,
+				new ArrayBlockingQueue<>(QUEUE_CAPACITY), runnable -> {
+					Thread thread = new Thread(runnable, "ctx-summary-" + THREAD_NO.incrementAndGet());
+					thread.setDaemon(true);
+					return thread;
+				}, new ThreadPoolExecutor.AbortPolicy());
+		pool.allowCoreThreadTimeOut(true);
+		return pool;
+	}
+
+	/** 本客户端实际使用的执行池（诊断/用例断言"不是虚拟线程 + 有界"）。 */
+	ExecutorService executor() {
+		return this.executor;
 	}
 
 }

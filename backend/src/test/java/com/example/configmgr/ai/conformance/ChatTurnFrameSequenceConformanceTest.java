@@ -180,7 +180,9 @@ class ChatTurnFrameSequenceConformanceTest {
 		// 上游一个事件都没有正文、也没有 finishReason：每轮都判"缺终帧"
 		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(emptyChunk()));
 
+		long startedAt = System.nanoTime();
 		FrameWire wire = runTurn();
+		long elapsedMs = (System.nanoTime() - startedAt) / 1_000_000L;
 
 		List<Map<String, Object>> frames = clientView(wire);
 		assertThat(FrameContract.types(frames)).containsExactly("start", "retry", "error");
@@ -191,6 +193,8 @@ class ChatTurnFrameSequenceConformanceTest {
 		assertThat(FrameContract.ofType(wire.frames(), "delta")).as("两次尝试都未产出内容（重试的前提）").isEmpty();
 		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.FAILED);
 		assertThat(this.store.get(RUN_ID).getAttempts()).isEqualTo(2);
+		// 超时面治理批① 第 1 项：两次尝试之间真的退避了（基线 500ms，抖动下限 0.75×）
+		assertThat(elapsedMs).as("退避生效（≥375ms）").isGreaterThanOrEqualTo(375L);
 	}
 
 	// ── ④ 取消也走合法终帧 ──────────────────────────────────────────────────
