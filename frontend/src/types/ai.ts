@@ -339,6 +339,50 @@ export interface ToolPart extends MessagePartBase {
   preflight?: ToolPreflight | null
 }
 
+// ── AI 表格操作专项：写预览计划（设计稿 §3.3bis / §3.5） ─────────────────────
+
+/** 预览三档：count（0 行业务值）/ sample-diff（≤20 行）/ full-diff（0 行经模型，只在前端卡渲染）。 */
+export type SheetPreviewLevel = 'count' | 'sample-diff' | 'full-diff'
+
+/** 单个单元格改动（预览 / 反向补丁共用的最小单元）。 */
+export interface SheetChange {
+  /** 数据行下标（0 基；文案转 Excel 行号） */
+  row: number
+  /** 列下标（0 基） */
+  col: number
+  oldValue: unknown
+  newValue: unknown
+}
+
+/**
+ * 写预览计划：模型只签一张“变更集”（planId + 计数 + 分布），业务行值留在浏览器。
+ *
+ * `changes` 只供前端卡渲染（P2 全量 diff），**不得**进入回灌文本；
+ * `fingerprint` 与 `targetRows` 一一对应（行指纹，应用前逐行复核）。
+ */
+export interface SheetWritePlan {
+  planId: string
+  toolCallId: string
+  defCode: string
+  tool: string
+  level: 'small' | 'large'
+  preview: SheetPreviewLevel
+  scopeSummary: string
+  predicateSummary: string
+  rowsCount: number
+  cellsCount: number
+  skippedCount: number
+  samples: SheetChange[]
+  changes: SheetChange[]
+  targetRows: number[]
+  fingerprint: string[]
+  warnings: string[]
+  rulesText: string
+  status: 'pending' | 'applied' | 'cancelled' | 'stale'
+  /** 所属轮次（store 回灌用；纯函数计划不带） */
+  runId?: string
+}
+
 /** 消息段判别联合（按 `kind` 判别）。 */
 export type MessagePart = TextPart | ReasoningPart | ToolPart
 

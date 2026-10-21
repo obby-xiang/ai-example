@@ -5406,3 +5406,38 @@ describe('问题4 composer v2 阶段二：store send outcome 映射', () => {
     expect(store.messages.filter((message) => message.role === 'user')).toHaveLength(0)
   })
 })
+
+/**
+ * AI 表格操作专项 T-17（设计稿 §3.5）：刷新后写工具没有本地 plan 时，
+ * 不得渲染点得动的“应用”卡 —— 必须收口成“预览已失效 + 放弃”。
+ */
+describe('AI 表格操作专项 T-17：写预览段的无 plan 收口', () => {
+  it('待决写工具且无本地 plan ⇒ “预览已失效”+ 放弃（无“应用”），放弃提交 cancelled=true', async () => {
+    const wrapper = await mountPanel([
+      buildMessage([
+        {
+          kind: 'tool',
+          seg: 1,
+          toolCallId: 't1',
+          name: 'replace_values',
+          kind2: 'FRONTEND',
+          status: 'pending',
+          args: '{"defCode":"DEMO"}',
+          requiresAction: true
+        }
+      ])
+    ])
+    const store = useAiStore()
+    store.activeRunId = 'run-1'
+    store.stalePreviewToolCallId = 't1'
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.text()).toContain('预览已失效')
+    expect(wrapper.find('[data-testid="sheet-preview-apply"]').exists()).toBe(false)
+
+    await wrapper.find('[data-testid="sheet-preview-abandon"]').trigger('click')
+    await flushPromises()
+    expect(api.frontendToolResult).toHaveBeenCalledWith(expect.objectContaining({ cancelled: true }))
+    wrapper.unmount()
+  })
+})

@@ -45,7 +45,8 @@ import java.util.concurrent.TimeUnit;
  * </ul>
  *
  * <h2>等待没有时限（用户裁决 2026-10-20 第 1/2 条）</h2>
- * 确定性操作（确认门）与 {@code generative_form} 的等待<b>不再有超时</b>：不再有 240s/120s 的死线，
+ * 确定性操作（确认门）与等**人**的前端工具（{@code generative_form} 与表格写工具，见
+ * {@link #HUMAN_WAIT_FRONTEND_TOOLS}）的等待<b>不再有超时</b>：不再有 240s/120s 的死线，
  * 一直等到用户批准 / 拒绝 / 取消（前端另可 {@code cancelled=true} 放弃）。只有<b>其他前端工具</b>
  * （{@code navigate_to} 等即时执行类）保留 {@code app.ai.hitl.frontend-tool-timeout}（默认 120s）
  * 的后端回执兜底 —— 那等待的是机器回执，机器"不回"是故障，不能无限悬置。
@@ -116,6 +117,23 @@ public class ConfirmGate {
 
 	/** 心跳与"跨进程决策发现"的节拍（秒）。 */
 	public static final int HEARTBEAT_SECONDS = 2;
+
+	/**
+	 * 等**人**的前端工具名单（等待无上限；设计稿 §3.4 / §7-裁 1 选项 A）。
+	 *
+	 * <ul>
+	 * <li>{@code generative_form}：等用户填表（DC-15 既有先例）；</li>
+	 * <li>{@code replace_values} / {@code update_rows} / {@code normalize_column}：等用户在预览卡上
+	 * 点“应用/取消”（AI 表格操作专项）；</li>
+	 * <li>{@code undo_last_sheet_edit}：撤销同样走前端、可能等待用户确认上下文（无时限）。</li>
+	 * </ul>
+	 *
+	 * 其余前端工具（{@code navigate_to} 等即时执行类）仍用
+	 * {@code app.ai.hitl.frontend-tool-timeout} 做机器回执兜底。
+	 */
+	static final Set<String> HUMAN_WAIT_FRONTEND_TOOLS = Set.of(
+			GenerativeFormRules.TOOL_NAME,
+			"replace_values", "update_rows", "normalize_column", "undo_last_sheet_edit");
 
 	private final RunStore store;
 
@@ -312,7 +330,9 @@ public class ConfirmGate {
 	 *
 	 * <ul>
 	 * <li>确认门（{@link PendingToolCall#KIND_CONFIRM}）：等的是人的决策 ⇒ 无上限；</li>
-	 * <li>{@code generative_form}：等的是人填表 ⇒ 无上限（与确认门同一路径，按<b>工具名</b>区分）；</li>
+	 * <li>{@code generative_form} 与三个表格写工具（{@code replace_values}/{@code update_rows}/
+	 * {@code normalize_column}）及 {@code undo_last_sheet_edit}：等的是人 ⇒ 无上限
+	 * （与确认门同一路径，按<b>工具名</b>集合 {@link #HUMAN_WAIT_FRONTEND_TOOLS} 区分）；</li>
 	 * <li>其余前端工具：{@link #frontendToolTimeoutSeconds()}（默认 120s，等机器回执的兜底）。</li>
 	 * </ul>
 	 *
@@ -323,7 +343,7 @@ public class ConfirmGate {
 		if (pending == null || !PendingToolCall.KIND_FRONTEND.equals(pending.getKind())) {
 			return null;
 		}
-		if (GenerativeFormRules.TOOL_NAME.equals(pending.getName())) {
+		if (HUMAN_WAIT_FRONTEND_TOOLS.contains(pending.getName())) {
 			return null;
 		}
 		return frontendToolTimeoutSeconds();

@@ -165,6 +165,7 @@ import {
   type ExcelRowIssue
 } from '@/utils/excel'
 import { registerFrontendToolExecutor, unregisterFrontendToolExecutor, PAGE_HANDLER_OPEN_EXPORT_EDITOR } from '@/utils/frontend-tools'
+import type { SheetAdapter } from '@/utils/sheet-tools'
 import { stepLabel } from '@/utils/format'
 import { watchJob, type JobChannelState } from '@/utils/job-watch'
 
@@ -175,6 +176,7 @@ interface GridApi {
   collectRows(): Array<Record<string, string>>
   toXlsxBlob(): Promise<Blob>
   validateLocal(): ExcelRowIssue[]
+  getSheetAdapter(): SheetAdapter
 }
 
 interface ExportResultItem {
@@ -1088,7 +1090,8 @@ const HANDLER_NAMES = [
   'export.setConditions',
   'export.start',
   'export.nextStep',
-  PAGE_HANDLER_OPEN_EXPORT_EDITOR
+  PAGE_HANDLER_OPEN_EXPORT_EDITOR,
+  'sheet.current'
 ]
 
 /** 跨任务绑定的结局（供两个执行器给出互相可区分、对 AI 可行动的文案）。 */
@@ -1318,6 +1321,38 @@ function registerHandlers(): void {
     }
     await startExport()
     return exportJob.value ? `导出作业 #${exportJob.value.id} 已启动` : '导出未启动（请检查配置项选择）'
+  })
+
+  // AI 表格操作专项：把**当前激活结果标签页**的表格适配器反向暴露给 AI 工具。
+  // 只作用于当前标签页（设计稿 §7-裁 5）；非激活/未挂载一律给出可行动文案，不代开标签。
+  registerPageHandler('sheet.current', (payload) => {
+    const code = String(payload.defCode ?? activeTab.value ?? '')
+    if (!code) {
+      return { ok: false, reason: '当前没有激活的表格标签页。请先切到导出结果步骤并打开对应配置的标签。' }
+    }
+    if (code !== activeTab.value) {
+      return {
+        ok: false,
+        reason: `当前激活的表格是 ${activeTab.value || '无'}，不是 ${code}。请先切换到该配置的结果标签页。`
+      }
+    }
+    const grid = gridRefs[code]
+    if (!grid || typeof grid.getSheetAdapter !== 'function') {
+      return { ok: false, reason: `${code} 的结果表格未挂载（请重开该标签页后重试）。` }
+    }
+    try {
+      return {
+        ok: true,
+        defCode: code,
+        sheetName: defName(code),
+        readOnly: isReadOnly.value,
+        version: workspace.dataVersion,
+        fields: fieldsOf(code),
+        adapter: grid.getSheetAdapter()
+      }
+    } catch (error) {
+      return { ok: false, reason: `${code} 的表格未就绪：${error instanceof Error ? error.message : String(error)}` }
+    }
   })
 
   registerPageHandler(PAGE_HANDLER_OPEN_EXPORT_EDITOR, async (payload) => {

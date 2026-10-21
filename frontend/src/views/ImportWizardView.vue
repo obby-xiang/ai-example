@@ -233,6 +233,7 @@ import { tasksApi } from '@/api/tasks'
 import { useTaskStore } from '@/stores/task'
 import { registerPageHandler, unregisterPageHandler, useWorkspaceStore } from '@/stores/workspace'
 import { buildTemplateWorkbookJson, downloadBlob, xlsxFileName, type ExcelRowIssue } from '@/utils/excel'
+import type { SheetAdapter } from '@/utils/sheet-tools'
 import { watchJob, type JobChannelState } from '@/utils/job-watch'
 import { stepLabel } from '@/utils/format'
 import type { PublishConflictAsync } from '@/types/api'
@@ -249,6 +250,7 @@ interface GridApi {
   collectRows(): Array<Record<string, string>>
   toXlsxBlob(): Promise<Blob>
   validateLocal(): ExcelRowIssue[]
+  getSheetAdapter(): SheetAdapter
 }
 
 interface StagingGroup {
@@ -1043,10 +1045,42 @@ const HANDLER_NAMES = [
   'import.startPrecheck',
   'import.startImport',
   'import.startPublish',
-  'import.nextStep'
+  'import.nextStep',
+  'sheet.current'
 ]
 
 function registerHandlers(): void {
+  // AI 表格操作专项：当前激活编辑标签页的表格适配器（与导出向导同一套 `sheet.current` 契约）。
+  registerPageHandler('sheet.current', (payload) => {
+    const code = String(payload.defCode ?? activeEditorTab.value ?? '')
+    if (!code) {
+      return { ok: false, reason: '当前没有激活的编辑标签页。请先在第 1 步勾选配置项并打开编辑区。' }
+    }
+    if (code !== activeEditorTab.value) {
+      return {
+        ok: false,
+        reason: `当前激活的表格是 ${activeEditorTab.value || '无'}，不是 ${code}。请先切换到该配置的编辑标签页。`
+      }
+    }
+    const grid = gridRefs[code]
+    if (!grid || typeof grid.getSheetAdapter !== 'function') {
+      return { ok: false, reason: `${code} 的编辑区表格未挂载（请重开该标签页后重试）。` }
+    }
+    try {
+      return {
+        ok: true,
+        defCode: code,
+        sheetName: defName(code),
+        readOnly: isReadOnly.value,
+        version: workspace.dataVersion,
+        fields: defOf(code)?.fields ?? [],
+        adapter: grid.getSheetAdapter()
+      }
+    } catch (error) {
+      return { ok: false, reason: `${code} 的编辑区表格未就绪：${error instanceof Error ? error.message : String(error)}` }
+    }
+  })
+
   // 补丁②：AI 工作区动作 confirm_step 的页面实现（推进到下一步；与用户点「下一步」同路径）
   registerPageHandler('import.nextStep', async (payload) => {
     // 施工卡 §S3e：只读态拦在 goStep 之前 —— 已结束任务不得借 AI 通道推进步骤（零写）

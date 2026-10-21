@@ -42,8 +42,8 @@ class ToolScopeTagSpaceGuardTest {
      */
     private static final List<String> RESERVED_PAGE_TAGS = List.of("page:export", "page:import");
 
-    /** 扫描下限：防止"扫描自身坏掉"被当成"没有违规"（当前 18 个 @ToolScope 声明）。 */
-    private static final int MIN_DECLARATIONS = 15;
+    /** 扫描下限：防止"扫描自身坏掉"被当成"没有违规"（当前 26 个 @ToolScope 声明）。 */
+    private static final int MIN_DECLARATIONS = 26;
 
     @Test
     void noToolScopeUsesReservedWizardPageTags() {

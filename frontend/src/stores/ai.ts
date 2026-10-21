@@ -17,7 +17,16 @@ import { aiApi } from '@/api/ai'
 import type { SseFrameHandlers, SseStreamOptions } from '@/api/sse'
 import { onWorkspaceEvent, reportUiEventResult, useWorkspaceStore } from '@/stores/workspace'
 import { useTaskStore } from '@/stores/task'
-import { deriveFrontendToolBudgetMs, executeFrontendTool, parseToolArgs } from '@/utils/frontend-tools'
+import { deriveFrontendToolBudgetMs, executeFrontendTool, parseToolArgs, resolveSheetContext } from '@/utils/frontend-tools'
+import {
+  applySheetPlan,
+  needsSheetPreview,
+  planCancelledText,
+  planNormalize,
+  planPreviewText,
+  planReplace,
+  planUpdate
+} from '@/utils/sheet-tools'
 import {
   alreadyApplied,
   applyFrameToParts,
@@ -33,7 +42,7 @@ import {
 } from '@/utils/parts'
 import { ErrorCode, type SessionBusyConflict, type SuspendPoolSaturated } from '@/types/api'
 import { frameSeq, isTerminalFrame, type ToolOutcome } from '@/types/sse'
-import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiHealth, type AiHistory, type AiHistoryMessage, type AiRunCurrent, type AiSessionMirror, type ChatMessage, type ContextBreakdownItem, type ContextCompaction, type ContextUsage, type GateSubmission, type MessagePart, type PendingToolCall, type ToolPart, type ToolPartPatch, type ToolRunStatus } from '@/types/ai'
+import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiHealth, type AiHistory, type AiHistoryMessage, type AiRunCurrent, type AiSessionMirror, type ChatMessage, type ContextBreakdownItem, type ContextCompaction, type ContextUsage, type GateSubmission, type MessagePart, type PendingToolCall, type SheetPreviewLevel, type SheetWritePlan, type ToolPart, type ToolPartPatch, type ToolRunStatus } from '@/types/ai'
 import { parseFormSchema, checkFormValues } from '@/types/form-schema'
 import type { SseFrame } from '@/types/sse'
 import type { WorkspaceActionRecord } from '@/types/tools'
@@ -768,6 +777,16 @@ export const useAiStore = defineStore('ai', {
      */
     activeForm: null as ActiveGenerativeForm | null,
     /**
+     * AI 表格操作专项：当前待确认的写预览（设计稿 §3.3bis / §3.4）。
+     * 只活在浏览器内存（业务行值不外送）；刷新即丢 ⇒ 恢复路径转 {@link stalePreviewToolCallId}。
+     */
+    activePreview: null as SheetWritePlan | null,
+    /**
+     * 刷新后失去本地 plan 的待决写工具（L0 恢复路径会为 PENDING 条目建卡）：
+     * 写工具无超时，若不收口会渲染一张点不动的“应用”卡 —— 面板据此改渲染“预览已失效 + 放弃”。
+     */
+    stalePreviewToolCallId: null as string | null,
+    /**
      * 已收到的最大帧序号（DC-14 T6）：reattach 时回传，服务端只补增量。
      * 按 runId 记录 —— 换轮次（新 runId）即从零开始，不跨轮混用序号。
      */
@@ -1405,6 +1424,11 @@ export const useAiStore = defineStore('ai', {
           ...(entry.preflight ? { preflight: entry.preflight } : {})
         })
         deriveProjections(host)
+        // AI 表格操作专项 §3.5：刷新后本地 plan 已丢 —— 写工具无超时，必须收口成
+        // “预览已失效 + 放弃”，否则会出现一张点不动的“应用”卡。
+        if (needsSheetPreview(entry.name, parseToolArgs(entry.arguments)) && this.activePreview?.toolCallId !== entry.toolCallId) {
+          this.stalePreviewToolCallId = entry.toolCallId
+        }
         if (entry.name === GENERATIVE_FORM_TOOL && !this.activeForm) {
           // 不武装任何本地时限：表单一直可填，收口只认后端结局帧 / 用户取消
           const spec = parseFormSchema(parseToolArgs(entry.arguments)?.form)
@@ -2217,6 +2241,207 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
+     * AI 表格操作专项：写工具预览（设计稿 §3.4 选项 A —— 确认落在前端）。
+     *
+     * 与 `openGenerativeForm` 同族：写工具在 `frontend_tool_request` 分支被特判，**不进**
+     * `runFrontendTool`（不受 60s 预算约束，等的是人）。这里只算 plan、建卡，**不回灌**；
+     * 用户点“应用/取消”后才由 {@link confirmWritePreview} / {@link cancelWritePreview} 回灌。
+     */
+    async openWritePreview(
+      message: ChatMessage,
+      frame: Extract<SseFrame, { type: 'frontend_tool_request' }>
+    ): Promise<void> {
+      const args = parseToolArgs(frame.args)
+      const toolCallId = frame.toolCallId
+      const runId = frame.runId ?? this.activeRunId ?? undefined
+      const fail = async (reason: string): Promise<void> => {
+        this.upsertToolPart(message, {
+          toolCallId,
+          name: frame.name,
+          kind2: 'FRONTEND',
+          status: 'failed',
+          result: reason,
+          requiresAction: false
+        }, false)
+        deriveProjections(message)
+        await this.submitFrontendToolResult(toolCallId, reason, 'frontend-executor', false, runId, 'failed')
+      }
+      const resolved = await resolveSheetContext(args.defCode)
+      if (!resolved.ok) {
+        await fail(resolved.reason)
+        return
+      }
+      if (resolved.ctx.readOnly) {
+        await fail('任务已结束，仅供查看，未对表格做任何修改。')
+        return
+      }
+      let planned
+      if (frame.name === 'replace_values') {
+        planned = planReplace(resolved.ctx, args, toolCallId)
+      } else if (frame.name === 'update_rows') {
+        planned = planUpdate(resolved.ctx, args, toolCallId)
+      } else if (frame.name === 'normalize_column') {
+        planned = planNormalize(resolved.ctx, args, toolCallId)
+      } else {
+        await fail(`未识别的表格写工具 ${frame.name}：本次未做任何修改。`)
+        return
+      }
+      if (!planned.ok) {
+        await fail(planned.reason)
+        return
+      }
+      this.activePreview = { ...planned.plan, runId }
+      this.stalePreviewToolCallId = null
+      this.upsertToolPart(message, {
+        toolCallId,
+        name: frame.name,
+        kind2: 'FRONTEND',
+        status: 'pending',
+        args: frame.args,
+        requiresAction: true
+      }, false)
+      deriveProjections(message)
+    },
+
+    /** 预览文案（面板与测试共用的单一口径）。 */
+    previewText(): string {
+      return planPreviewText(this.activePreview)
+    },
+
+    /** 切换预览档位（count / sample-diff / full-diff；数据只在前端卡）。 */
+    setPreviewLevel(level: SheetPreviewLevel): void {
+      if (this.activePreview) {
+        this.activePreview = { ...this.activePreview, preview: level }
+      }
+    },
+
+    /** 写工具结局的统一落点：先写段，再回灌（cancelled 走既有 `FRONTEND_CANCELLED` 语义）。 */
+    async finishSheetTool(input: {
+      toolCallId: string
+      name: string
+      runId?: string
+      status: ToolRunStatus
+      result: string
+      cancelled?: boolean
+    }): Promise<void> {
+      for (const item of this.messages) {
+        if (!findToolPart(item, input.toolCallId)) {
+          continue
+        }
+        this.upsertToolPart(item, {
+          toolCallId: input.toolCallId,
+          name: input.name,
+          kind2: 'FRONTEND',
+          status: input.status,
+          result: input.result,
+          requiresAction: false
+        }, false)
+        deriveProjections(item)
+      }
+      const outcome: ToolOutcome | undefined = input.cancelled === true
+        ? undefined
+        : input.status === 'succeeded' ? 'ok' : 'failed'
+      await this.submitFrontendToolResult(
+        input.toolCallId,
+        input.result,
+        'frontend-executor',
+        input.cancelled === true,
+        input.runId,
+        outcome
+      )
+    },
+
+    /** 用户点“应用”：大批量必须先勾选二次确认；应用前复核行指纹。 */
+    async confirmWritePreview(acknowledged = false): Promise<void> {
+      const plan = this.activePreview
+      if (!plan) {
+        return
+      }
+      if (plan.level === 'large' && !acknowledged) {
+        this.notice = `本次将修改 ${plan.rowsCount} 行 / ${plan.cellsCount} 格（超过 200 行）：请先勾选「我了解影响范围」再点「应用」。`
+        return
+      }
+      const resolved = await resolveSheetContext(plan.defCode)
+      if (!resolved.ok) {
+        this.activePreview = null
+        await this.finishSheetTool({
+          toolCallId: plan.toolCallId,
+          name: plan.tool,
+          runId: plan.runId,
+          status: 'failed',
+          result: resolved.reason
+        })
+        return
+      }
+      const applied = applySheetPlan(resolved.ctx, plan)
+      this.activePreview = null
+      if (!applied.ok) {
+        await this.finishSheetTool({
+          toolCallId: plan.toolCallId,
+          name: plan.tool,
+          runId: plan.runId,
+          status: 'failed',
+          result: applied.reason
+        })
+        return
+      }
+      await this.finishSheetTool({
+        toolCallId: plan.toolCallId,
+        name: plan.tool,
+        runId: plan.runId,
+        status: 'succeeded',
+        result: applied.text
+      })
+    },
+
+    /** 用户点“取消”：零写 + `cancelled=true` ⇒ 后端 `FRONTEND_CANCELLED`。 */
+    async cancelWritePreview(): Promise<void> {
+      const plan = this.activePreview
+      if (!plan) {
+        return
+      }
+      this.activePreview = null
+      await this.finishSheetTool({
+        toolCallId: plan.toolCallId,
+        name: plan.tool,
+        runId: plan.runId,
+        status: 'cancelled',
+        result: planCancelledText(),
+        cancelled: true
+      })
+    },
+
+    /**
+     * 预览失效收口（设计稿 §3.5）：刷新后本地无 plan 的 PENDING 写工具不得渲染可点的“应用”。
+     */
+    markPreviewStale(toolCallId: string): void {
+      if (this.activePreview?.toolCallId === toolCallId) {
+        this.activePreview = null
+      }
+      this.stalePreviewToolCallId = toolCallId
+    },
+
+    /** 用户对“预览已失效”卡点“放弃”：回灌 `cancelled=true`，让模型重新发起。 */
+    async abandonStalePreview(): Promise<void> {
+      const toolCallId = this.stalePreviewToolCallId
+      if (!toolCallId) {
+        return
+      }
+      this.stalePreviewToolCallId = null
+      const part = this.messages
+        .map((item) => findToolPart(item, toolCallId))
+        .find((value) => value !== null) ?? null
+      await this.finishSheetTool({
+        toolCallId,
+        name: part?.name ?? 'replace_values',
+        runId: this.activeRunId ?? undefined,
+        status: 'cancelled',
+        result: '预览已失效（页面刷新导致），已放弃本次调用，未改动任何单元格。请让 AI 重新发起。',
+        cancelled: true
+      })
+    },
+
+    /**
      * RC-2：GF 提交值写回工具段（**按 toolCallId 直接定位，不依赖 `activeForm` 身份**）。
      *
      * 为什么要独立于 activeForm：结局帧（`frontend_tool_result`）可能先于
@@ -2816,7 +3041,14 @@ export const useAiStore = defineStore('ai', {
             this.openGenerativeForm(message, frame)
             break
           }
-          // 前端工具没有 HITL：立即在浏览器执行并回灌结果
+          // AI 表格操作专项（2026-10-21）：「前端工具没有 HITL」的旧口径已订正 ——
+          // 写表格工具与 generative_form 同族，等的是**人**：先建预览卡（计数/采样/全量三档），
+          // 用户点“应用/取消”后才回灌；因此不进 runFrontendTool，也不受 60s 前端工具预算约束。
+          if (needsSheetPreview(frame.name, parseToolArgs(frame.args))) {
+            void this.openWritePreview(message, frame)
+            break
+          }
+          // 其余即时执行类前端工具：立即在浏览器执行并回灌结果
           void this.runFrontendTool(message, frame)
           break
         }
