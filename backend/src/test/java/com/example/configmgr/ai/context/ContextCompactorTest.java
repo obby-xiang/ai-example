@@ -226,4 +226,147 @@ class ContextCompactorTest {
 			.containsEntry("percent", null);
 	}
 
+	// ── 批③：L2 / L3 / 熔断（以下为追加用例，不改上方任何断言） ──────────────────
+
+	/** 9 轮历史（每轮 user + assistant），够 L2/L3 的 keep-recent-turns=6 切出 3 轮旧轮。 */
+	private static List<Message> longTurns() {
+		List<Message> messages = new ArrayList<>();
+		for (int i = 1; i <= 9; i++) {
+			messages.add(new UserMessage("第 " + i + " 轮问题 " + "问".repeat(40)));
+			messages.add(AssistantMessage.builder().content("第 " + i + " 轮回答 " + "答".repeat(40)).build());
+		}
+		return messages;
+	}
+
+	private ContextCompactor.Request requestWith(List<Message> messages, int usedTokens, int completionTokens,
+			Set<String> protectedIds) {
+		return new ContextCompactor.Request(SESSION_ID, RUN_ID, "deepseek-flash", 1L, messages, List.of("{}"),
+				usedTokens, completionTokens, 0, 0, 3000, 4000, protectedIds);
+	}
+
+	private ContextCompactor compactorWith(RollingSummarizer.Summarizer summarizer) {
+		return new ContextCompactor(this.properties, this.resolver, this.store, summarizer);
+	}
+
+	private void seed(String level, int usedTokens) {
+		long now = System.currentTimeMillis();
+		this.store.write(SESSION_ID, ContextState.EMPTY
+			.withUsage(usedTokens, 0, 1, false, now, "deepseek-flash", 0, 0, 0)
+			.withCompaction(ContextTrigger.Level.fromWire(level), 0, 0, "seed", now));
+	}
+
+	/** T-15：每次最多升一级（none → L1 → L2 → L3），且 L2 真的产摘要、L3 真的按 Turn 截。 */
+	@Test
+	void advancesOneLevelPerCompaction() {
+		// 第一棒：none + 70.4% ⇒ L1
+		ContextCompactor.Outcome first = this.compactor.compact(request(turns(6), 81000, List.of("{}")));
+		assertThat(first.level()).isEqualTo(ContextTrigger.Level.L1);
+
+		// 第二棒：L1 + 82.6% ⇒ L2（摘要 3 轮）
+		seed("L1", 70000);
+		ContextCompactor.Outcome second = compactorWith(prompt -> "摘要正文").compact(requestWith(longTurns(), 70000,
+				25000, Set.of()));
+		assertThat(second.level()).isEqualTo(ContextTrigger.Level.L2);
+		assertThat(second.turns()).isEqualTo(3);
+		assertThat(second.messages()).hasSize(2 + 6 * 2);
+		assertThat(ContextBreakdown.isCompacted(second.messages().get(0))).isTrue();
+
+		// 第三棒：L2 + 95.7% ⇒ L3（按 Turn 丢最旧 3 轮）
+		seed("L2", 70000);
+		ContextCompactor.Outcome third = compactorWith(prompt -> "摘要正文").compact(requestWith(longTurns(), 70000,
+				40000, Set.of()));
+		assertThat(third.level()).isEqualTo(ContextTrigger.Level.L3);
+		assertThat(third.turns()).isEqualTo(3);
+		assertThat(third.messages()).hasSize(6 * 2);
+	}
+
+	/** C-30：熔断期只留 L1（摘要坏了不许把对话拖下水）。 */
+	@Test
+	void circuitOpenKeepsL1Working() {
+		long now = System.currentTimeMillis();
+		seed("L1", 70000);
+		ContextState opened = this.store.read(SESSION_ID)
+			.withFuse(CompactionFuse.OPEN, 3, now + java.time.Duration.ofMinutes(10).toMillis());
+		this.store.write(SESSION_ID, opened);
+
+		ContextCompactor.Outcome outcome = compactorWith(prompt -> {
+			throw new IllegalStateException("不该被调用");
+		}).compact(requestWith(turns(6), 70000, 25000, Set.of()));
+
+		assertThat(outcome.changed()).isTrue();
+		assertThat(outcome.level()).isEqualTo(ContextTrigger.Level.L1);
+		assertThat(outcome.clearedPairs()).isPositive();
+	}
+
+	/** P7：有未决 HITL 条目时（挂起期）比例到 L2 也只做 L1。 */
+	@Test
+	void suspendedSessionOnlyAllowsL1() {
+		seed("L1", 70000);
+
+		ContextCompactor.Outcome outcome = compactorWith(prompt -> "摘要正文")
+			.compact(requestWith(turns(6), 70000, 25000, Set.of("pending-x")));
+
+		assertThat(outcome.changed()).isTrue();
+		assertThat(outcome.level()).isEqualTo(ContextTrigger.Level.L1);
+	}
+
+	/** L2 的归档 / 台账 / 真值：三条观测面同一组 (level, before, after, turns, lostTokens)。 */
+	@Test
+	void l2ArchivesAndRecordsLedgerWithTurns() {
+		seed("L1", 70000);
+
+		ContextCompactor.Outcome outcome = compactorWith(prompt -> "摘要正文").compact(requestWith(longTurns(), 70000,
+				25000, Set.of()));
+
+		assertThat(outcome.level()).isEqualTo(ContextTrigger.Level.L2);
+		assertThat(outcome.lostTokens()).isEqualTo(outcome.before() - outcome.after());
+		assertThat(outcome.lostTokens()).isPositive();
+		assertThat(outcome.summaryChars()).isEqualTo("摘要正文".length());
+		assertThat(this.store.archiveCount()).isEqualTo(1);
+		Map<String, Object> event = this.store.contextLedger(SESSION_ID).get(0);
+		assertThat(event).containsEntry("level", "L2")
+			.containsEntry("turns", 3)
+			.containsEntry("lostTokens", outcome.lostTokens())
+			.containsEntry("summaryChars", outcome.summaryChars())
+			.containsEntry("model", "deepseek-flash")
+			.containsEntry("est", false);
+		ContextState state = this.store.read(SESSION_ID);
+		assertThat(state.level()).isEqualTo("L2");
+		assertThat(state.usedTokens()).isEqualTo(outcome.after());
+		assertThat(state.est()).isTrue();
+	}
+
+	/** C-24 编排面：摘要失败 ⇒ 历史逐字不变、无归档、fails+1（熔断的输入）。 */
+	@Test
+	void l2FailureKeepsHistoryAndCountsAFuseFailure() {
+		seed("L1", 70000);
+		List<Message> messages = longTurns();
+
+		ContextCompactor.Outcome outcome = compactorWith(prompt -> {
+			throw new IllegalStateException("上游 500");
+		}).compact(requestWith(messages, 70000, 25000, Set.of()));
+
+		assertThat(outcome.changed()).isFalse();
+		assertThat(outcome.reason()).isEqualTo(ContextCompactor.REASON_SUMMARY_FAILED);
+		assertThat(outcome.messages()).isSameAs(messages);
+		assertThat(this.store.archiveCount()).isZero();
+		assertThat(this.store.read(SESSION_ID).fuseFails()).isEqualTo(1);
+	}
+
+	/** 帧契约冻结：`context` 帧载荷键集不变，turns/lostTokens 从恒 0 改为如实值。 */
+	@Test
+	void contextFramePayloadKeepsItsFrozenKeySet() {
+		seed("L1", 70000);
+
+		ContextCompactor.Outcome outcome = compactorWith(prompt -> "摘要正文").compact(requestWith(longTurns(), 70000,
+				25000, Set.of()));
+
+		Map<String, Object> payload = ContextCompactor.framePayload(outcome);
+
+		assertThat(payload.keySet()).containsExactlyInAnyOrder("level", "before", "after", "turns", "lostTokens",
+				"reason", "est", "savedTokens", "clearedPairs");
+		assertThat(payload).containsEntry("level", "L2").containsEntry("turns", 3);
+		assertThat((Integer) payload.get("lostTokens")).isPositive();
+	}
+
 }

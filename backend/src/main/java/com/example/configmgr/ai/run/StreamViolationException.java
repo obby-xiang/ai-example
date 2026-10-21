@@ -39,6 +39,14 @@ public class StreamViolationException extends RuntimeException {
 	/** 其它上游流错误。 */
 	public static final String STREAM_ERROR = "UPSTREAM_STREAM_ERROR";
 
+	/**
+	 * 上游拒绝：上下文超出模型窗口（L3 丢到 pin 下限后仍超；映射依据 = 响应体措辞）。
+	 *
+	 * <p>刻意<b>不</b>进 {@link #brokenStream()}：同一份超大请求重发一次只会再超一次，
+	 * 重试只会浪费预算并拖长用户等待；它需要的是人工/后续轮次的压缩，不是重连。
+	 */
+	public static final String CONTEXT_OVERFLOW = "CONTEXT_OVERFLOW";
+
 	private final String code;
 
 	public StreamViolationException(String code, String message) {

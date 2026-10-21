@@ -302,12 +302,29 @@ R5 全轮无有效候选 ⇒ 回退 `ContextEstimator` 估算并置 `est=true`�
 **恒有 Σ分项 == used**），`free = limit − used`（派生，可为负 ⇒ "已超"）。`system`/`tools` 来自装配点
 落进 `ai:ctx:` 的锚点（它们不在历史里，端点无从重建）。
 
-**L1 工具结果清除（批① 唯一实现的压缩级）**：`ratio ≥ 70%` 时把最旧的、非 pin 的
+**L1 工具结果清除**：`ratio ≥ 70%` 时把最旧的、非 pin 的
 `ToolResponseMessage.responseData` 换成 `[tool_result 已清理：… ai:ledger:<runId>]`
 （**不删消息、不改 id、不动 `assistant(tool_calls)`** ⇒ 构造上无孤儿对；占位符刻意不复用
 `ToolResultLimiter.TRUNCATION_MARKER`）；pin = 最近 `keep-tool-pairs: 5` 对 + 未决 HITL 条目。
-L2（Turn 滑窗 + 递归摘要）与 L3（硬截断）属批③，`ContextCompactor.MAX_LEVEL` 刻意封顶 L1
-（不允许"实现没做、帧里却报 L2"）。
+
+**L2 按 Turn 滑窗 + 递归摘要**：`ratio ≥ 80%` 时把最旧的非 pin 前缀替换为「合成 `UserMessage`
+（metadata `compacted=true` / `compactedFrom` / `lostTokens` / `atMs`）+ `AssistantMessage` 摘要」。
+裁切单位是 **Turn**（`ConversationTurns`：一条 `UserMessage` 起、到下一条止），pin = 最近
+`keep-recent-turns: 6` 轮 + 最后一段（本轮输入）+ 含未决 HITL 条目的轮。递归 = 前缀按
+`chunk-tokens: 8000` 分块逐块摘要，分段摘要再按同一预算递归合并（**不截断摘要正文**）。
+摘要请求带六项保留清单（目标 / 已确认操作 / 已执行不可回滚动作与资源 ID / 未解决报错与下一步 /
+待审批项清单 / 已完成勿重做）并声明"跟随用户语言"；`summary-model` 空 = 主模型，
+超时 `summary-timeout: 60s` 硬上限。
+
+**L3 硬截断兜底**：`ratio ≥ 95%` 或 L2 不可用时按 Turn 丢最旧的非 pin 段（切口永远落在
+`UserMessage` 上）；**丢到 pin 下限即停，丢完仍超就照发请求**，让上游如实报错（映射
+`CONTEXT_OVERFLOW`）—— 绝不静默截断。
+
+**逐级与熔断**：每次压缩最多升一级（`none → L1 → L2 → L3`，前缀改写一次、缓存必然整段 miss，
+升一级后够不够只有下一轮真值能回答）；滞回 60% 只看真值。熔断只被 L2/L3 的**摘要尝试**驱动：
+连续失败 `fuse-threshold: 3` 次 ⇒ `circuit=open` + `openUntil = now + fuse-cooldown: 10m`，
+窗口内**只留 L1**；到点半开一次，成功清零、失败重开新窗（不升指数）。摘要失败/超时/产物空白
+一律**历史逐字不变** + 计数 +1（不退回截断）。有未决 HITL 条目（挂起期）按 P7 也只允许 L1。
 
 **原子性**：压缩统一入口 `ContextCompactor`，两个调用点同源（首轮 `ResilientChatService#chat`
 取记忆之后 / 续跑 `ResumeService#resume` 重建历史之后）。顺序 = **先归档** `ai:ctx:archive:<sid>:<turnNo>`
@@ -329,9 +346,12 @@ L2（Turn 滑窗 + 递归摘要）与 L3（硬截断）属批③，`ContextCompa
 `summary-timeout` / `fuse-threshold` / `fuse-cooldown` / `summary-model`），启动期校验见
 `AiProperties#verifyContext`（reserve ≥ limit、阈值倒挂、冷却为 0 一律 fail-fast）。
 
-**边界（如实登记）**：L2/L3、递归摘要、熔断计数（`circuit` 恒 `closed`、`fuseFails` 恒 0）、
-压缩提示条（设计稿排批④）与用户手动 pin（D6 不做）均**不在批①**；`/health` 的 `compactionOn`
-只表示"比例判定会执行"，不表示"一定会压缩"。
+**边界（如实登记）**：压缩提示条渲染（设计稿排批④，与 i18n 文案 key 化同棒）与用户手动 pin（D6 不做）
+**不在本期**；`/health` 的 `compactionOn` 只表示"比例判定会执行"，不表示"一定会压缩"。
+`context` 帧的键集自批① 起**冻结**（批③ 只把 `turns` / `lostTokens` 从恒 0 改为如实值）。
+**多实例（DC-11）**：压缩写在首轮路径上无租约（设计稿 §8 已登记），fuse 的"读 → 判 → 写回"
+非原子 —— 双实例可能各放一次半开摘要尝试（后果 = 多重试一次摘要，不丢历史、不越窗）；
+单实例路径不存在该竞态。
 
 #### 联动而不耦合（关键架构原则）
 
