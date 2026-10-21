@@ -100,6 +100,27 @@ class RunStoreTouchTest {
 		assertThat(this.store.touchActiveRun("run-touch-missing")).as("快照缺失 ⇒ 不续").isFalse();
 	}
 
+	/**
+	 * 超时面治理批① 第 11 项：取消信号并入读侧续期面（用户裁：取消信号随会话共亡）。
+	 *
+	 * <p>原状态：{@code ai:cancel:} 的 TTL 自己算（{@code total-budget × 2 = 600s}）且<b>不在任何
+	 * 续期点</b> —— 一次 15 分钟的挂起就能让取消标志先于会话消失。
+	 */
+	@Test
+	void touchingAlsoRenewsTheCancelFlag() {
+		RunSnapshot snapshot = this.store.get(RUN_ID);
+		snapshot.setStatus(RunSnapshot.SUSPENDED);
+		this.store.save(snapshot);
+		this.fake.strings.put(CancellationRegistry.CANCEL_PREFIX + RUN_ID, "inst-a");
+		this.fake.expiries.replaceAll((key, value) -> Duration.ofSeconds(1));
+
+		assertThat(this.store.touchActiveRun(RUN_ID)).isTrue();
+
+		assertThat(this.fake.expiry(CancellationRegistry.CANCEL_PREFIX + RUN_ID))
+			.as("取消标志与会话同寿（原 600s、且不在续期面）")
+			.isEqualTo(SESSION_TTL);
+	}
+
 	/** T4 重载：传快照的入口省掉一次快照读（调用方刚从 Redis 读到它）。 */
 	@Test
 	void snapshotOverloadSkipsTheSnapshotRead() {

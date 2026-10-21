@@ -44,36 +44,71 @@ wait-audit §3 已列：后端 18 组超时/预算键 + 前端 13 组 + 7 项「
 | 编号 | 分类 | 位置 / 键名 | 现值 | 作用场景 | 可调性 | 依据现状 |
 |---|---|---|---|---|---|---|
 | B1-01 | 超时 | `application.yml:6` `server.tomcat.connection-timeout` | `120000` | Tomcat 建连/请求行空闲超时；**同时是 SSE 写侧事实兜底上界（≈116s 实测）** | 配置键 | 裸数字（yml 内无注释；口径澄清见 wait-audit §3.1/R-38） |
-| B1-02 | 超时 | `application.yml:55` `spring.data.redis.timeout` | `2s` | Redis 单命令超时 | 配置键 | 有依据（yml:49-50 注释：R4 裁决，实测「5 次串行各等 3s = 15.1s」后收紧）【实测】 |
-| B1-03 | 超时 | `application.yml:56` `spring.data.redis.connect-timeout` | `2s` | Redis 建连超时 | 配置键 | 部分依据（同上注释覆盖，未单独论证） |
-| B1-04 | 超时 | `application.yml:58` `spring.data.redis.lettuce.shutdown-timeout` | `200ms` | Lettuce 关停等待 | 配置键 | **裸数字** |
-| B1-05 | 其他 | `application.yml:88` `spring.ai.openai.chat.options.temperature` | `0.2` | 模型采样温度 | 配置键 | **裸数字** |
-| B1-06 | 缓冲 | `application.yml:89` `spring.ai.openai.chat.options.max-tokens` | `4096` | 单轮输出 token 上限 | 配置键 | **裸数字**（无注释；与 DeepSeek 模型上下文无对照说明） |
-| B1-07 | TTL | `application.yml:98` `app.ai.session-ttl` | `6h` | AI 会话记忆滑动 TTL | 配置键 | 有依据（`AiProperties.java:28` 注释：D1/DC-02 决策「会话不做长期留存」）【实测】 |
-| B1-08 | 缓冲 | `application.yml:100` `app.ai.memory.max-messages` | `40` | `MessageWindowChatMemory` 窗口条数 | 配置键 | **裸数字**（`AiProperties.java:97` 注释只说「官方实现负责裁剪」，没论证 40） |
-| B1-09 | 超时 | `application.yml:103` `app.ai.hitl.timeout` | `120s` | 确认门 / 前端工具 / `generative_form` **三场景共用**挂起上限 | 配置键 | 部分依据（ADR-2「上限约束」；压测证据 §S1.3 维持现值，但**无延迟分布数据**）。见 wait-audit §3.1 与 §3.3 第 1 项 |
-| B1-10 | 池 | `application.yml:106` `app.ai.suspend.pool-size` | `20` | 挂起专用有界平台线程池容量（队列 0，饱和 503） | 配置键 | 有依据（压测证据 §S1.3：并发 20 受理 / 25 路 5 拒绝，阶梯线性）【实测引自 docs】 |
-| B1-11 | 超时 | `application.yml:115` `app.ai.resilience.first-byte-timeout` | `30s` | 上游首包静默上限 | 配置键 | 部分依据（yml:109 明示「三个阈值均为初值，待 §13.2 #2 压测裁决」；压测证据标【推断】无数据） |
-| B1-12 | 超时 | `application.yml:116` `app.ai.resilience.inter-event-timeout` | `90s` | 事件间静默上限 | 配置键 | 部分依据（同上；压测证据 §419 行标【推断】无数据） |
-| B1-13 | 重试 | `application.yml:117` `app.ai.resilience.max-attempts` | `2` | 单轮最大尝试次数（首轮 + 重试 1 次） | 配置键 | 部分依据（`AiProperties.java:148` 只注「首轮 + 重试次数-1」；压测证据 §421 行标【推断】无数据） |
-| B1-14 | 超时 | `application.yml:118` `app.ai.resilience.total-budget` | `300s` | 单轮总预算（轮次预算 / emitter 寿命 / 兜底等待**三语义合一**） | 配置键 | 部分依据（压测证据 §S8：6004 帧全程 < 3s，预算**远未触及**；撞预算路径未构造） |
-| B1-15 | 轮询 | `application.yml:123` `app.ai.resume.startup-delay` | `8s` | 启动后延迟多久开始自动续跑 | 配置键 | **裸数字** |
-| B1-16 | TTL | `application.yml:124` `app.ai.resume.zombie-age` | `60s` | 判定「死卡」的僵尸时长阈值 | 配置键 | **裸数字** |
-| B1-17 | 阈值 | `application.yml:125` `app.ai.resume.max-on-startup` | `10` | 单次启动最多续跑多少轮 | 配置键 | **裸数字** |
-| B1-18 | 池 | `application.yml:128` `app.ai.resume.trigger-pool-size` | `2` | 死卡兜底触发池线程数 | 配置键 | 部分依据（yml:127 注释解释「容量小 + 队列有界 + 饱和拒绝」的理由，但 2 这个数无论证） |
-| B1-19 | 缓冲 | `application.yml:129` `app.ai.resume.trigger-queue-capacity` | `16` | 触发池队列容量 | 配置键 | 部分依据（同上） |
-| B1-20 | TTL | `application.yml:133` `app.ai.session.lock.ttl` | `10m` | 会话锁 TTL | 配置键 | 部分依据（yml:132 注「ADR-5：TTL = 轮上限」，但轮上限实为 `total-budget` 300s ⇒ **口径张力**，见 wait-audit §3.3 第 7 项） |
-| B1-21 | 轮询 | `application.yml:134` `app.ai.session.lock.watchdog` | `30s` | 会话锁续期节拍 | 配置键 | 部分依据（同 ADR-5 注释；`M2-T2b-施工红队` 实测续期实际来自 ConfirmGate 2s 心跳） |
-| B1-22 | 缓冲 | `application.yml:139` `app.ai.tool-result.max-rows` | `200` | 工具结果**回填模型**前的行数上限 | 配置键 | 部分依据（yml:138 注「初值依 R10-1 建议…实际取值随 §13.2 #9 压测复核」） |
-| B1-23 | 缓冲 | `application.yml:140` `app.ai.tool-result.max-chars` | `8000` | 工具结果回填模型前的字符上限 | 配置键 | 部分依据（同上） |
-| B1-24 | 缓冲 | `application.yml:146` `app.ai.frame.max-bytes` | `65536`（64KB） | SSE 单帧 UTF-8 字节上限，超限字段级截断 | 配置键 | 有依据（yml:141-145 注：T3-10 裁定；口径边界在技术方案 §673/§680 行明文「已闭环」） |
-| B1-25 | 池 | `application.yml:163` `app.ai.sse.delivery-pool-size` | `8` | SSE 投递池工作线程数 | 配置键 | 有依据（压测证据 §S1.2：M<poolSize 才不饿死健康订阅者）【实测引自 docs】 |
-| B1-26 | 缓冲 | `application.yml:164` `app.ai.sse.delivery-queue-capacity` | `256` | 每订阅者实时帧队列容量 | 配置键 | 有依据（压测证据 §S4.3：256 条实时 + 3000 回放不误摘） |
-| B1-27 | 超时 | `application.yml:165` `app.ai.sse.write-timeout` | `15s` | **单帧** SSE 写出预算，超预算摘除订阅者 | 配置键 | 有依据（yml:147-162 长篇论证 + tomcat 字节码反证实测「写侧 = connection-timeout ≈116s，是 15s 的 8 倍宽」）【实测】 |
-| B1-28 | 超时 | `application.yml:177` `app.task.sse.write-timeout` | `15s` | 任务通道单帧写预算 | 配置键 | 有依据（yml:168-175 注「与 AI 通道同一缺省来源 `SseWriteBudget#DEFAULT_TIMEOUT_MILLIS`」+ 启动期 fail-fast 守卫） |
-| B1-29 | 超时 | `application.yml:178` `app.task.sse.emitter-timeout` | `5m` | 任务 SSE 订阅者生命周期 | 配置键 | 部分依据（注释只说「与 AI 通道的 emitter 生命周期同量级」） |
-| B1-30 | 轮询 | `application.yml:180` `app.job.demo-batch-delay-ms` | `300` | 作业分片间人为节拍（演示/可观测性） | 配置键 | **裸数字**（`AppProperties.java:81` 无注释；E2E 依赖此节拍可见性） |
-| B1-31 | 缓冲 | `application.yml:181` `app.job.batch-size` | `100` | 作业分片大小 | 配置键 | **裸数字**（`AppProperties.java:82` 无注释） |
+| B1-02 | 超时 | `application.yml:73` `spring.data.redis.timeout` | `2s` | Redis 单命令超时 | 配置键 | 有依据（yml:70-72 注释：R4 裁决，实测「5 次串行各等 3s = 15.1s」后收紧）【实测】 |
+| B1-03 | 超时 | `application.yml:74` `spring.data.redis.connect-timeout` | `2s` | Redis 建连超时 | 配置键 | 部分依据（同上注释覆盖，未单独论证） |
+| B1-04 | 超时 | `application.yml:76` `spring.data.redis.lettuce.shutdown-timeout` | `200ms` | Lettuce 关停等待 | 配置键 | **裸数字** |
+| B1-05 | 其他 | `application.yml:111` `spring.ai.openai.chat.options.temperature` | `0.2` | 模型采样温度 | 配置键 | **裸数字** |
+| B1-06 | 缓冲 | `application.yml:112` `spring.ai.openai.chat.options.max-tokens` | `4096` | 单轮输出 token 上限 | 配置键 | **裸数字**（无注释；与 DeepSeek 模型上下文无对照说明） |
+| B1-07 | TTL | `application.yml:138` `app.ai.session-ttl` | `24h` | **会话级键族的统一滑动 TTL**（记忆 + run 快照/待决/帧归档/序号/事件日志/req/decided/fence/session:current/ctx 三件套/safety/ledger/idem + **`ai:cancel`**）：每次写/心跳/读侧 touch 整额续期，无绝对上限 | 配置键 | 有依据（2026-10-20 用户裁决第 4 条 6h→24h + 2026-10-21「取消信号随会话共亡」；类注 `AiProperties.java:28-33`、键族登记 `ai/run/SessionKeyRegistry`）【实测：`RunStoreSlidingTtlTest` / `SessionKeyRegistryTest`】 |
+| B1-08 | 缓冲 | `application.yml:140` `app.ai.memory.max-messages` | `40` | `MessageWindowChatMemory` 窗口条数 | 配置键 | **裸数字**（`AiProperties.java` 的 `Memory` 注只说「官方实现负责裁剪」，没论证 40） |
+| B1-09 | 超时 | `application.yml:181` `app.ai.hitl.frontend-tool-timeout` | `120s` | **只**管 6 个即时执行类前端工具（navigate_to / select_definitions / set_condition / confirm_step / open_export_file_editor / download_export_files）的**机器回执**兜底；确认门与 6 个等人工具（generative_form / replace_values / update_rows / normalize_column / undo_last_sheet_edit / ui_request_upload）**无上限** | 配置键 | 有依据（yml:172-180 注释 + 业界依据 §6；`confirm-timeout` 键**已退役**）。见 wait-audit §3.1 与 §3.3 第 1 项（拆分已闭环，退役面见本批 §1.1c） |
+| B1-10 | 池 | `application.yml:184` `app.ai.suspend.pool-size` | `20` | 挂起专用有界平台线程池容量（队列 0，饱和 503） | 配置键 | 有依据（压测证据 §S1.3：并发 20 受理 / 25 路 5 拒绝，阶梯线性）【实测引自 docs】 |
+| B1-11 | 超时 | `application.yml:194` `app.ai.resilience.first-byte-timeout` | `30s` | 上游首包静默上限 | 配置键 | 部分依据（yml:186-193 明示「三个阈值均为初值，待 §13.2 #2 压测裁决」；压测证据标【推断】无数据） |
+| B1-12 | 超时 | `application.yml:195` `app.ai.resilience.inter-event-timeout` | `90s` | 事件间静默上限 | 配置键 | 部分依据（同上；压测证据标【推断】无数据） |
+| B1-13 | 重试 | `application.yml:196` `app.ai.resilience.max-attempts` | `2` | 单轮最大尝试次数（首轮 + 重试 1 次）；两次尝试之间有 **0.5s 起 ×2 + 抖动** 的退避（`ai/run/RetryBackoff`，只从剩余总预算里出） | 配置键 | 部分依据（类注只注「首轮 + 重试次数-1」；退避算式见超时面治理批① 第 1 项） |
+| B1-14 | 超时 | `application.yml:197` `app.ai.resilience.total-budget` | `300s` | 单轮总预算（墙钟 − 挂起等待）；同时是 E2E 脚本 HTTP/SSE 等待窗口的派生根源（+60s 余量） | 配置键 | 部分依据（压测证据 §S8：6004 帧全程 < 3s，预算**远未触及**；撞预算路径未构造） |
+| B1-15 | 轮询 | `application.yml:202` `app.ai.resume.startup-delay` | `8s` | 启动后延迟多久开始自动续跑 | 配置键 | **裸数字** |
+| B1-16 | TTL | `application.yml:203` `app.ai.resume.zombie-age` | `60s` | 判定「死卡」的僵尸时长阈值 | 配置键 | **裸数字** |
+| B1-17 | 阈值 | `application.yml:204` `app.ai.resume.max-on-startup` | `10` | 单次启动最多续跑多少轮 | 配置键 | **裸数字** |
+| B1-18 | 池 | `application.yml:207` `app.ai.resume.trigger-pool-size` | `2` | 死卡兜底触发池线程数 | 配置键 | 部分依据（yml:205-206 注释解释「容量小 + 队列有界 + 饱和拒绝」的理由，但 2 这个数无论证） |
+| B1-19 | 缓冲 | `application.yml:208` `app.ai.resume.trigger-queue-capacity` | `16` | 触发池队列容量 | 配置键 | 部分依据（同上） |
+| B1-20 | TTL | `application.yml:214` `app.ai.session.lock.ttl` | `10m` | **会话锁 = 互斥窗口上界**（持锁进程死后别人多久能接管；watchdog 续期 + 轮终态释放）。**不是**轮预算上限（轮预算 = `total-budget` 300s） | 配置键 | 有依据（超时面治理批① 第 8③ 项订正自述：原「= 轮上限」是误述，已改为现行语义） |
+| B1-21 | 轮询 | `application.yml:215` `app.ai.session.lock.watchdog` | `30s` | 会话锁续期节拍 | 配置键 | 部分依据（同 ADR-5；`M2-T2b-施工红队` 实测续期实际来自 ConfirmGate 2s 心跳） |
+| B1-22 | 缓冲 | `application.yml:231` `app.ai.tool-result.max-rows` | `200` | 工具结果**回填模型**前的行数上限 | 配置键 | 部分依据（yml:230 注「初值依 R10-1 建议…实际取值随 §13.2 #9 压测复核」） |
+| B1-23 | 缓冲 | `application.yml:232` `app.ai.tool-result.max-chars` | `8000` | 工具结果回填模型前的字符上限 | 配置键 | 部分依据（同上） |
+| B1-24 | 缓冲 | `application.yml:254` `app.ai.frame.max-bytes` | `65536`（64KB） | SSE 单帧 UTF-8 字节上限，超限字段级截断 | 配置键 | 有依据（yml:253-253 注：T3-10 裁定；口径边界在技术方案「帧上限」节明文） |
+| B1-25 | 池 | `AiProperties.java:479` `app.ai.sse.delivery-pool-size`（**代码缺省，yml 不写**） | `8` | SSE 投递池工作线程数 | 配置键 | 有依据（压测证据 §S1.2：M<poolSize 才不饿死健康订阅者）【实测引自 docs】 |
+| B1-26 | 缓冲 | `AiProperties.java:506` `app.ai.sse.delivery-queue-capacity`（**代码缺省，yml 不写**） | `256` | 每订阅者实时帧队列容量 | 配置键 | 有依据（压测证据 §S4.3：256 条实时 + 3000 回放不误摘） |
+| B1-27 | 超时 | `application.yml:272` `app.ai.sse.write-timeout` | `15s` | **单帧** SSE 写出预算，超预算摘除订阅者（`/api/ai/health` 的 `writeTimeoutMs` 报**本键实际值**，批① 第 3 项） | 配置键 | 有依据（yml:243-271 长篇论证 + tomcat 字节码反证实测「写侧 = connection-timeout ≈116s，是 15s 的 8 倍宽」）【实测】 |
+| B1-28 | 超时 | `application.yml:285` `app.task.sse.write-timeout` | `15s` | 任务通道单帧写预算 | 配置键 | 有依据（yml:262-284 注「与 AI 通道同一缺省来源 `SseWriteBudget#DEFAULT_TIMEOUT_MILLIS`」+ 启动期 fail-fast 守卫） |
+| B1-29 | 超时 | `application.yml:286` `app.task.sse.emitter-timeout` | `5m` | 任务 SSE 订阅者生命周期（AI 通道**不设**传输层死线） | 配置键 | 部分依据（注释只说「与 AI 通道的 emitter 生命周期同量级」） |
+| B1-30 | 轮询 | `application.yml:288` `app.job.demo-batch-delay-ms` | `300` | 作业分片间人为节拍（演示/可观测性） | 配置键 | **裸数字**（`AppProperties` 无注释；E2E 依赖此节拍可见性） |
+| B1-31 | 缓冲 | `application.yml:289` `app.job.batch-size` | `100` | 作业分片大小 | 配置键 | **裸数字**（`AppProperties` 无注释） |
+
+### 1.1b 代码缺省键（`application.yml` **不显式写出**，值取 `@ConfigurationProperties` 字段初值）
+
+> 追加登记（2026-10-21 超时面治理批① 第 6 项）。这 7 个键此前只活在代码里 —— 配置面 grep 不到，
+> 运维无从发现「租约 30s / 续租 10s / 资源锁 60s」这类时间口径，也无法判断改的是哪一层。
+> 本批在 `application.yml` 的 `app.ai.session` 段后补了**注释段**（只标默认值与出处行，**不写出值**：
+> 写出来就等于给配置面加第二份事实源）。下表是那份注释的机器可读版。
+
+| 编号 | 分类 | 键名 | 现值 | 作用场景 | 可调性 | 依据现状 |
+|---|---|---|---|---|---|---|
+| B1-57 | TTL | `app.ai.lease.ttl`（`AiProperties.java:567`） | `30s` | 续跑权（fencing）租约有效期 = 续租间隔 ×3 | 配置键（代码缺省） | 有依据（类注：TTL 30s = 持租进程死后「多快能接管」上界） |
+| B1-58 | 轮询 | `app.ai.lease.renew-interval`（`:570`） | `10s` | 租约持有者续租间隔（= TTL/3，容忍两次连续失败） | 配置键（代码缺省） | 有依据（同上） |
+| B1-59 | 退避 | `app.ai.lease.retry-delay`（`:573`） | `35s` | 抢租失败后的退避重试间隔（TTL + 5s 余量） | 配置键（代码缺省） | 有依据（同上） |
+| B1-60 | TTL | `app.ai.lease.resource-ttl`（`:588`） | `60s` | L1 资源互斥锁（`ai:lock:task|job:*`）有效期；**不续租**，只作临界区上界 | 配置键（代码缺省） | 有依据（B23L1 批③b 复审 I-1：动作超上界宁可放开，也不把「事实永锁」续出来） |
+| B1-61 | 开关 | `app.ai.lock.enabled`（`:603`） | `true` | 资源互斥总开关（关掉只该用于单实例对照，不是故障开关） | 配置键（代码缺省） | 有依据（裁决 13：降级会让「锁坏了」与「锁关了」在日志里长得一样） |
+| B1-62 | 池 | `app.ai.sse.delivery-pool-size`（`:479`） | `8` | SSE 投递池工作线程数（与 B1-25 同一项，此处补出处行） | 配置键（代码缺省） | 同 B1-25（T3-5 压测定值 8） |
+| B1-63 | 缓冲 | `app.ai.sse.delivery-queue-capacity`（`:506`） | `256` | 每订阅者实时队列容量（与 B1-26 同一项，此处补出处行） | 配置键（代码缺省） | 同 B1-26（T3-5 压测定值 256） |
+
+### 1.1c 超时面退役键与订正（2026-10-21 批①）
+
+| 退役键 | 原口径 | 现行替代 | 落点 |
+|---|---|---|---|
+| `app.ai.hitl.confirm-timeout` | 确认门等待上限（240s 过渡值 → 曾拟 600s） | **无上限**（等人不设超时）；机器回执上限走 `app.ai.hitl.frontend-tool-timeout` | 2026-10-20 用户裁决第 2 条；启动期 WARN 见 `AiRetiredKeysWarner` |
+| `app.ai.session-ttl-minutes` | 会话 TTL 分钟数（6h） | `app.ai.session-ttl`（Duration，24h） | 同上（批① 第 7 项加退役告警） |
+| `app.ai.max-iterations` | 工具循环迭代上限 | 官方工具循环的退出条件 + `total-budget` | 同上 |
+| `app.ai.thinking-disabled` | 关闭思考 | 不再下发 `extraBody.thinking`（由模型侧参数决定） | 同上 |
+
+> **编号唯一性复核**：本文件 B1-01..B1-63 逐号唯一（`grep -o '^| B1-[0-9]*' | sort | uniq -d` 为空）。
+> 任务卡点名的「B1-50 编号重复」在 `cb420ff` 基线**已不可复现**（`summary-timeout` 行仅此一条，位于 §7），
+> 本批以本次逐号清点作为收口证据，不另造改动。
+>
+> **数值/行号订正说明（批①）**：B1-01..B1-31 的 `application.yml` 行号统一按 `cb420ff` 现态重标（原表按
+> 2026-10-10 的旧版 yml 编号，整体偏移 10~40 行）；B1-07 现值 `6h → 24h`；B1-09 键名由
+> `app.ai.hitl.timeout`（三场景共用）改为 `app.ai.hitl.frontend-tool-timeout`（只管机器回执）；
+> B1-20 自述由「= 轮上限」改为「互斥窗口上界」；B1-25/26 标注「代码缺省，yml 不写」。
 
 ### 1.2 后端硬编码常量（代码内 `static final` / 字面量）
 
@@ -256,6 +291,11 @@ wait-audit §3 已列：后端 18 组超时/预算键 + 前端 13 组 + 7 项「
 | 其中分组行含多条 | 3 行（B2-21 含 10 项、B2-31 含 3 项、B2-32 含 3 项） |
 | **折算独立数值总数** | **≈ 158** |
 | 断言来源 | 【实测】 |
+
+> 口径说明（2026-10-21 只追加）：本节分母 = **2026-10-10 首次普查时的表体**（145 行）。此后 §7 追加
+> 16 行（上下文键 13 + 常量 3）、本次追加 §1.1b 的 7 行（代码缺省键）**均不并入本节**——保留历史口径，
+> 避免「统计结论」随追加批次来回漂移。现表体行数用 `grep -c '^| B[0-9]-'` 复核（本批追加后 = 86 行，
+> 其中 §1.1b 新增 7 行）；**本节 145 这个分母不随之改写**。
 
 ### 3.2 按分类分布
 

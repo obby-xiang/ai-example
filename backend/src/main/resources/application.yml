@@ -208,9 +208,22 @@ app:
       trigger-queue-capacity: 16
     session:
       lock:
-        # ADR-5：会话锁 TTL = 轮上限；watchdog 续期；轮终态主动释放
+        # 会话锁的有效期（超时面治理批① 第 8③ 项订正自述）：这是**互斥窗口上界**，不是"轮上限"——
+        #   轮预算 = app.ai.resilience.total-budget(300s)；锁 TTL 约束的是"持锁进程死后多久别人能接管"，
+        #   由 watchdog(30s) 续期、轮终态主动释放，两者无等式关系。
         ttl: 10m
         watchdog: 30s
+    # ── 代码缺省键（本文件**不显式写出**：值取 @ConfigurationProperties 字段初值；改键须同改出处）──
+    # 键                                  缺省值  出处（backend/src/main/java/.../ai/config/AiProperties.java）
+    # app.ai.lease.ttl                     30s     Lease#ttl（:567）   续跑权有效期 = 续租间隔 ×3
+    # app.ai.lease.renew-interval          10s     Lease#renewInterval（:570）  持有者续租间隔（TTL/3）
+    # app.ai.lease.retry-delay             35s     Lease#retryDelay（:573）     抢租失败退避（TTL + 5s 余量）
+    # app.ai.lease.resource-ttl            60s     Lease#resourceTtl（:588）    L1 资源互斥锁有效期（不续租）
+    # app.ai.lock.enabled                  true    Lock#enabled（:603）         资源互斥总开关（关掉只该用于单实例对照）
+    # app.ai.sse.delivery-pool-size        8       Sse#deliveryPoolSize（:479） 共享投递池线程数（T3-5 压测定值）
+    # app.ai.sse.delivery-queue-capacity   256     Sse#deliveryQueueCapacity（:506）  每订阅者实时队列容量
+    # 说明：这 7 个键此前只活在代码里（配置面 grep 不到），运维无从发现"租约 30s / 续租 10s"这类
+    #   时间口径；**本段只做显化，不写出值**（写出来就等于给配置面加了第二份事实源，改键要改两处）。
     tool-result:
       # DC-14 T2（R10-1）：工具结果**回填模型**前的上限（行数/字符数）——防上下文爆炸。
       # 只约束"给模型看的"那一份：前端 tool_result 帧与 Redis 台账始终是全文。

@@ -90,12 +90,21 @@ function No($name, $why) {
     Write-Host ("  [FAIL] " + $name + " => " + $why) -ForegroundColor Red
 }
 
+# ---------- 超时窗口（超时面治理批① 第 9 项：一律从产品键派生，不写字面量） ----------
+# 根源键 = app.ai.resilience.total-budget（application.yml，缺省 300s）= 一轮对话的机器预算上界。
+# 客户端等一帧 / 等一个响应必须比它**宽**，否则"产品还在跑、脚本先判超时"就是假红。
+# 公式 = total-budget + 60s 余量（余量覆盖建连 + 服务端收尾 + 本机调度抖动）。
+# 键值调整时只改 $script:TurnBudgetSeconds 一处（原为 :98 的 5min 与 :250 的 180000 两个魔数）。
+$script:TurnBudgetSeconds = 300
+$script:HttpTimeoutMs = ($script:TurnBudgetSeconds + 60) * 1000
+
 Add-Type -AssemblyName System.Net.Http
 Add-Type -AssemblyName System.IO.Compression -ErrorAction SilentlyContinue
 Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
 
 $http = New-Object System.Net.Http.HttpClient
-$http.Timeout = [TimeSpan]::FromMinutes(5)
+# 单请求上限 = total-budget + 60s（见上方派生段；原为写死的 5min）
+$http.Timeout = [TimeSpan]::FromMilliseconds($script:HttpTimeoutMs)
 
 # ---------- HTTP 辅助（main 响应信封：{success, message?, code?, data?}） ----------
 
@@ -164,7 +173,9 @@ function Expect-Fail($method, $path, $body, $what) {
 }
 
 # Wait-Job 作业终态等待窗口（总账 S-10；2026-10-11 批 B / R-96 由隐式 96s 显式化为 120s）。
-# = heartbeat-interval(30s) × dead-multiplier(3) + scan-period(10s) + margin(20s)，与 application.yml 四键对应，键值调整时须同步本式
+# = heartbeat-interval(30s) × dead-multiplier(3) + scan-period(10s) + margin(20s)，与 application.yml 四键对应，键值调整时须同步本式。
+# 同一纪律见上方 $script:HttpTimeoutMs（total-budget + 60s）：窗口一律由产品键派生，脚本里不出现裸时间常量；
+# 本式与 SSE 窗口的分工 = 作业通道看"作业终态"，对话通道看"一帧/一个响应"。
 $script:JobWaitTimeoutMs = ((30*3)+10+20)*1000
 
 function Wait-Job($jobId, [string[]]$terminal = @('COMPLETED', 'FAILED', 'CANCELLED')) {
@@ -247,7 +258,8 @@ function Read-Sse($path, $bodyObj, [string[]]$stopOn, $sink, $onOpen) {
         $req.Method = [System.Net.Http.HttpMethod]::Get
     }
     $cts = New-Object System.Threading.CancellationTokenSource
-    $cts.CancelAfter(180000)
+    # SSE 读窗口与 HTTP 同源（total-budget + 60s；原为写死的 180000ms）
+    $cts.CancelAfter($script:HttpTimeoutMs)
     $resp = $http.SendAsync($req, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead, $cts.Token).Result
     if (-not $resp.IsSuccessStatusCode) {
         $t = $resp.Content.ReadAsStringAsync().Result

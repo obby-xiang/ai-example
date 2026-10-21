@@ -437,6 +437,11 @@ public class ResilientChatService {
 		AiProperties.Resilience config = this.properties.getResilience();
 		int maxAttempts = Math.max(1, config.getMaxAttempts());
 		for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+			// 超时面治理批① 第 1 项：断流重试之间退避（0.5s 起 ×2 + 抖动），且只从"剩余总预算"里出。
+			// 位置在旧看门狗关闭之后、新看门狗建立之前 ⇒ 退避不占用任何段死线，只消耗总预算。
+			if (attempt > 1) {
+				awaitRetryBackoff(runId, attempt - 1, turnStartedAtMs, config);
+			}
 			long attemptStartedAtMs = System.currentTimeMillis();
 			long beaconBefore = this.beacon.startedCount(runId);
 			Accumulator accumulator = new Accumulator();
@@ -527,6 +532,47 @@ public class ResilientChatService {
 				if (subscription != null && !subscription.isDisposed()) {
 					subscription.dispose();
 				}
+			}
+		}
+	}
+
+	/**
+	 * 两次尝试之间的退避（超时面治理批① 第 1 项；算式见 {@link RetryBackoff}）。
+	 *
+	 * <p>三条口径：
+	 * <ul>
+	 * <li><b>只从剩余预算里出</b>：剩余 = {@code total-budget} − 已用（扣挂起等待），并留 1s 给下一次
+	 * 尝试本身 —— 退避把预算花完 = 下一次尝试刚发出去就撞 {@code TOTAL_BUDGET}，不如不睡；</li>
+	 * <li><b>取消优先</b>：切片轮询取消标志（250ms 一片），命中即停止退避并把控制权交回尝试循环
+	 * —— 新看门狗第一拍就会把它收口成 {@code CANCELLED} 终态（退避不吞取消）；</li>
+	 * <li><b>中断即返回</b>：线程被中断时不吞标志，交给上层路径收尾。</li>
+	 * </ul>
+	 */
+	private void awaitRetryBackoff(String runId, int retryNo, long turnStartedAtMs, AiProperties.Resilience config) {
+		long remaining = config.getTotalBudget().toMillis() - elapsedExcludingGateWait(runId, turnStartedAtMs);
+		long delay = RetryBackoff.delayMs(retryNo, remaining);
+		if (delay <= 0) {
+			log.debug("重试退避跳过 runId={} retry={} 剩余预算={}ms（不再等待）", runId, retryNo, remaining);
+			return;
+		}
+		log.debug("重试退避 runId={} retry={} 等待={}ms 剩余预算={}ms", runId, retryNo, delay, remaining);
+		long deadline = System.currentTimeMillis() + delay;
+		while (true) {
+			long slice = Math.min(250L, deadline - System.currentTimeMillis());
+			if (slice <= 0) {
+				return;
+			}
+			if (this.cancellations.isCancelled(runId)) {
+				log.info("退避期间收到取消 runId={} retry={}（剩余 {}ms 不再等待）", runId, retryNo,
+						Math.max(0L, deadline - System.currentTimeMillis()));
+				return;
+			}
+			try {
+				Thread.sleep(slice);
+			}
+			catch (InterruptedException ex) {
+				Thread.currentThread().interrupt();
+				return;
 			}
 		}
 	}

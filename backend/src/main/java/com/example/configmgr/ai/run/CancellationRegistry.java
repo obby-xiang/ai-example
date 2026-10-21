@@ -36,7 +36,8 @@ import java.util.concurrent.atomic.AtomicLong;
  *
  * <h2>键的清理</h2>
  * 取消标志<b>故意不随轮终态删除</b>：它要在 TTL 内继续可见（取证），并且"取消后立刻重启"
- * 时仍然拦得住续跑。TTL = {@code app.ai.resilience.total-budget} × 2。
+ * 时仍然拦得住续跑。TTL = {@code app.ai.session-ttl}（缺省 24h，与会话同寿；超时面治理批①
+ * 第 11 项改述 —— 原为 {@code total-budget × 2 = 600s}，见 {@link #cancelFlagTtl()}）。
  */
 @Slf4j
 @Component
@@ -228,7 +229,7 @@ public class CancellationRegistry {
 	}
 
 	private boolean writeRedisFlag(String runId, String requestedBy) {
-		Duration ttl = this.properties.getResilience().getTotalBudget().multipliedBy(2);
+		Duration ttl = cancelFlagTtl();
 		try {
 			this.redis.opsForValue().set(keyFor(runId), requestedBy == null ? "unknown" : requestedBy, ttl);
 			return true;
@@ -238,6 +239,21 @@ public class CancellationRegistry {
 			log.warn("取消标志写入 Redis 失败（仅进程内生效）runId={}：{}", runId, ex.getMessage());
 			return false;
 		}
+	}
+
+	/**
+	 * 取消标志的存活期 = <b>{@code app.ai.session-ttl}（缺省 24h）</b>，与会话同寿。
+	 *
+	 * <p>
+	 * 超时面治理批① 第 11 项（用户裁决「取消信号随会话共亡」）：原值 {@code total-budget × 2 = 600s}
+	 * 只说"10 分钟内可见"，而会话本身有 24h —— 于是一次挂起 15 分钟后取消的轮次，其取消标志可能已
+	 * 先于会话消失（续跑/重挂在 10min~24h 之间读到的是"未取消"，会把已取消的轮重新捡起来）。
+	 * 取消标志与 run 快照/待决条目/帧归档同寿；它同时登记在
+	 * {@link SessionKeyRegistry} 的读侧续期面（{@code touchActiveRun} 会像其他会话级键一样整额续期）。
+	 */
+	private Duration cancelFlagTtl() {
+		Duration sessionTtl = this.properties.getSessionTtl();
+		return sessionTtl != null ? sessionTtl : Duration.ofHours(24);
 	}
 
 	/**
