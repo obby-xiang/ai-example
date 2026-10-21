@@ -2,6 +2,7 @@ package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiAvailability;
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.observe.AiTrace;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
@@ -154,6 +155,8 @@ public class StartupResumeRunner {
 				skipped.add(skippedItem);
 				continue;
 			}
+			// 日志链路批：启动扫描是"没有 HTTP 入口"的续跑路径，锚点只能在循环里逐轮装
+			AiTrace.bind(runId, null);
 			try {
 				ResumeService.ResumeResult result = this.resumeService.resume(runId, zombie);
 				Map<String, Object> item = new LinkedHashMap<>();
@@ -170,6 +173,9 @@ public class StartupResumeRunner {
 				item.put("error", String.valueOf(ex.getMessage()));
 				resumed.add(item);
 				log.error("启动自动续跑异常 runId={}", runId, ex);
+			}
+			finally {
+				AiTrace.clear();
 			}
 		}
 		Map<String, Object> report = new LinkedHashMap<>();

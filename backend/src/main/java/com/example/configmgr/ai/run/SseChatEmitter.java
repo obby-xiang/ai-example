@@ -4,6 +4,7 @@ import com.example.configmgr.common.CodedIllegalArgumentException;
 import com.example.configmgr.common.ErrorCodes;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.ai.tool.ToolResultEnvelope;
 import com.example.configmgr.common.sse.SseWriteBudget;
@@ -1171,7 +1172,12 @@ public class SseChatEmitter {
 	 */
 	private void submitDrain(Subscription sub) {
 		try {
-			this.deliveryExecutor.execute(() -> drain(sub));
+			// 日志链路：投递池是裸 executor（MDC 不继承）—— 包装体带提交时刻快照，
+			// 并兜底绑本轮的 runId（跨实例唤醒线程上没有锚点）
+			this.deliveryExecutor.execute(AiTrace.wrap(() -> {
+				AiTrace.bind(this.runId, null);
+				drain(sub);
+			}));
 		}
 		catch (RejectedExecutionException ex) {
 			sub.draining.set(false);

@@ -16,6 +16,7 @@ import com.example.configmgr.ai.feedback.AiFeedback;
 import com.example.configmgr.ai.feedback.AiFeedbackRepository;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.memory.RedisChatMemoryRepository;
+import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.FrameStore;
 import com.example.configmgr.ai.run.PendingToolCall;
@@ -335,6 +336,14 @@ public class AiController {
 		SseEmitter emitter = new SseEmitter(NO_TRANSPORT_DEADLINE);
 		SseChatEmitter out = this.runRegistry.of(runId);
 		out.attach(emitter);
+		// 日志链路批：HTTP 线程先装锚点 —— 线程池的 TaskDecorator 在 submit 时刻抓快照，一行不带锚点的
+		// "已受理/池饱和"日志会让"这一轮的日志到底有没有开"无从判断。
+		AiTrace.bind(runId, sessionId);
+		AiTrace.event("turn_accepted",
+				"context", effective.context() == null || effective.context().page() == null ? "none"
+						: effective.context().page(),
+				"model", effective.modelId() == null ? "default" : effective.modelId(),
+				"chars", modelText.length());
 		try {
 			this.aiRunExecutor.execute(() -> {
 				try {
@@ -352,9 +361,13 @@ public class AiController {
 		}
 		catch (RejectedExecutionException ex) {
 			log.warn("挂起专用线程池饱和，拒绝 sessionId={} runId={}", sessionId, runId);
+			AiTrace.event("turn_rejected", "code", "SUSPEND_POOL_SATURATED");
 			this.sessionGate.release(sessionId, runId);
 			this.runRegistry.close(runId);
 			return json(HttpStatus.SERVICE_UNAVAILABLE, poolSaturated(runId));
+		}
+		finally {
+			AiTrace.clear();
 		}
 		return ResponseEntity.ok(emitter);
 	}
@@ -409,8 +422,17 @@ public class AiController {
 		// 自带终态判据：轮已终态 / 快照已删 ⇒ 不续期（不养孤儿键）。
 		this.runStore.touchActiveRun(request.runId());
 		boolean approved = Boolean.TRUE.equals(request.approved());
-		ConfirmGate.Submission submission = this.confirmGate.submitDecision(request.runId(), request.toolCallId(),
-				approved, request.reason());
+		ConfirmGate.Submission submission;
+		// 日志链路批：决策落在 HTTP 线程上 —— 装锚点，使 approval_decided 与"决策触发的续跑任务"
+		// （同一 MDC 快照进池）都能挂回这一轮。
+		AiTrace.bind(request.runId(), null);
+		try {
+			submission = this.confirmGate.submitDecision(request.runId(), request.toolCallId(), approved,
+					request.reason());
+		}
+		finally {
+			AiTrace.clear();
+		}
 		if (submission.outcome() == ConfirmGate.Outcome.NOT_FOUND) {
 			return json(HttpStatus.CONFLICT, unknownToolCall(request.runId(), request.toolCallId()));
 		}
@@ -457,8 +479,16 @@ public class AiController {
 			log.info("前端工具结果超限已截断 runId={} toolCallId={} 原长度={} 上限={}", request.runId(),
 					request.toolCallId(), request.result().length(), FRONTEND_RESULT_MAX_CHARS);
 		}
-		ConfirmGate.Submission submission = this.confirmGate.submitFrontendResult(request.runId(),
-				request.toolCallId(), result, request.source(), cancelled, request.outcome());
+		ConfirmGate.Submission submission;
+		// 日志链路批：回灌同样落在 HTTP 线程上（同 /confirm 的口径）
+		AiTrace.bind(request.runId(), null);
+		try {
+			submission = this.confirmGate.submitFrontendResult(request.runId(), request.toolCallId(), result,
+					request.source(), cancelled, request.outcome());
+		}
+		finally {
+			AiTrace.clear();
+		}
 		if (submission.outcome() == ConfirmGate.Outcome.NOT_FOUND) {
 			return json(HttpStatus.CONFLICT, unknownToolCall(request.runId(), request.toolCallId()));
 		}

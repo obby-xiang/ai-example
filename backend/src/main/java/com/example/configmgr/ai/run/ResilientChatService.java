@@ -10,6 +10,7 @@ import com.example.configmgr.ai.context.ContextEstimator;
 import com.example.configmgr.ai.context.ContextMeter;
 import com.example.configmgr.ai.context.ContextState;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
+import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.session.AiSessionService;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ContextBuilder;
@@ -227,6 +228,8 @@ public class ResilientChatService {
 
 	public void chat(String runId, AiChatRequest request, SseChatEmitter out) {
 		String sessionId = request.sessionId();
+		// 日志链路：本方法可能跑在挂起池线程上（AiController 提交），入口再绑一次保证锚点成立
+		AiTrace.bind(runId, sessionId);
 		AiContext context = toContext(request.context());
 		boolean existed = this.sessionService.ensure(sessionId);
 		long turnStartedAtMs = System.currentTimeMillis();
@@ -297,6 +300,12 @@ public class ResilientChatService {
 				this.properties.getResilience().getFirstByteTimeout(), this.properties.getResilience().getInterEventTimeout(),
 				this.properties.getResilience().getMaxAttempts(), this.properties.getResilience().getTotalBudget());
 		log.debug("AI 轮次模型身份 runId={} provider={} model={}", runId, runtime.providerCode(), runtime.modelId());
+		// 日志链路批：成功路径的首条 INFO（此前一轮正常开始/结束在 INFO 级无痕）
+		AiTrace.event("turn_start", "model", runtime.modelId(), "provider", runtime.providerCode(), "attempt", 1,
+				"resumed", false, "context", context.getContextKey(), "tools", tools.size(),
+				"inputEst", inputTokens, "compact", compaction.levelWire(), "newSession", !existed,
+				"maxAttempts", this.properties.getResilience().getMaxAttempts(),
+				"budgetMs", this.properties.getResilience().getTotalBudget().toMillis());
 
 		try {
 			TurnContext turn = new TurnContext(systemTokens, toolsTokens, inputTokens,
@@ -320,6 +329,7 @@ public class ResilientChatService {
 		finally {
 			this.cancellations.unregister(runId);
 			this.beacon.clear(runId);
+			AiTrace.clear();
 		}
 	}
 
@@ -357,12 +367,18 @@ public class ResilientChatService {
 	public void driveResumed(String runId, String sessionId, AiContext context, List<Message> history,
 			Long providerId, String modelId, SseChatEmitter out) {
 		long turnStartedAtMs = System.currentTimeMillis();
+		// 日志链路：续跑落在挂起池线程上（ResumeService 提交），入口重绑锚点
+		AiTrace.bind(runId, sessionId);
 		// 续跑也要现取一次实例：在飞期间换了 base-url/key 的话，续跑落在新端点上（与首轮同口径）——
 		// 但<b>模型名来自快照</b>，不跟随默认变化。
 		ProviderRuntime runtime = runtimeForSnapshot(runId, providerId, modelId);
 		this.cancellations.register(runId);
 		// 上下文专项批①：续跑侧的分母/分项锚点现算（历史里没有 tools schema，故走披露口径）
 		TurnContext turn = resumedTurn(runId, context, history, runtime.modelId(), turnStartedAtMs);
+		AiTrace.event("turn_start", "model", runtime.modelId(), "provider", runtime.providerCode(), "attempt", 1,
+				"resumed", true, "context", context.getContextKey(), "history", history.size(),
+				"compact", turn.compactionLevel(), "maxAttempts", this.properties.getResilience().getMaxAttempts(),
+				"budgetMs", this.properties.getResilience().getTotalBudget().toMillis());
 		try {
 			runAttempts(runId, sessionId, turnStartedAtMs, out, turn, attempt -> {
 				log.debug("续跑第 {} 次尝试重建完整历史 runId={} sessionId={} 历史条数={}", attempt, runId, sessionId,
@@ -374,6 +390,7 @@ public class ResilientChatService {
 		finally {
 			this.cancellations.unregister(runId);
 			this.beacon.clear(runId);
+			AiTrace.clear();
 		}
 	}
 
@@ -477,6 +494,7 @@ public class ResilientChatService {
 				watchdog.bind(subscription);
 
 				awaitSettled(runId, settled, turnStartedAtMs, config);
+				emitFirstByte(attempt, attemptStartedAtMs, accumulator);
 
 				// 硬规范②：正常结束必须有终帧（带 finishReason 的响应）；"安静地"结束 = 断流
 				if (!accumulator.sawTerminal()) {
@@ -494,6 +512,8 @@ public class ResilientChatService {
 			}
 			catch (Throwable error) {
 				drain(guard, out, accumulator);
+				// 首包可能已经到过（随后才断流）：先把"首包耗时"落在断流日志之前
+				emitFirstByte(attempt, attemptStartedAtMs, accumulator);
 				StreamViolationException violation = classify(error, watchdog.upstreamEvents());
 				if (StreamViolationException.CANCELLED.equals(violation.getCode())) {
 					cancelTerminal(runId, sessionId, accumulator, attempt, watchdog, out, turn, guard);
@@ -516,7 +536,7 @@ public class ResilientChatService {
 						runId, attempt, maxAttempts, violation.getCode(), emitted, sideEffect, overBudget, retryable,
 						watchdog.upstreamEvents(), violation.getMessage(), accumulator.tailSummary());
 				if (!retryable) {
-					fail(runId, sessionId, violation, attempt, emitted, sideEffect, accumulator.text().length(), out);
+					fail(runId, sessionId, violation, attempt, emitted, sideEffect, accumulator, out, turn);
 					return;
 				}
 				Map<String, Object> retryFrame = new LinkedHashMap<>();
@@ -526,6 +546,11 @@ public class ResilientChatService {
 				retryFrame.put("upstreamEvents", watchdog.upstreamEvents());
 				retryFrame.put("elapsedMs", System.currentTimeMillis() - turnStartedAtMs);
 				out.retry(retryFrame);
+				// 日志链路批：重试是"这一轮为什么慢/为什么贵"的第一解释项，必须有结构化行
+				AiTrace.event("turn_retry", "attempt", attempt, "nextAttempt", attempt + 1, "code", violation.getCode(),
+						"reason", violation.getMessage(), "emitted", emitted, "sideEffect", sideEffect,
+						"upstreamEvents", watchdog.upstreamEvents(),
+						"elapsedMs", System.currentTimeMillis() - turnStartedAtMs);
 			}
 			finally {
 				watchdog.close();
@@ -575,6 +600,22 @@ public class ResilientChatService {
 				return;
 			}
 		}
+	}
+
+	/**
+	 * 首包耗时事件（日志链路批）：从"本次尝试开始组装请求"到"第一条上游分片到达"。
+	 *
+	 * <p>为什么在<b>这里</b>记而不是在 {@code subscribe} 的回调里：回调跑在 Reactor 的线程上
+	 * （{@code MDC} 已不在），在那里打日志会得到一行没有 {@code runId} 的孤儿行；本方法在驱动线程
+	 * 上执行，锚点成立。代价是它要等本次尝试落定后才写出（时刻值仍是真值）。
+	 */
+	private void emitFirstByte(int attempt, long attemptStartedAtMs, Accumulator accumulator) {
+		long ms = accumulator.firstByteMs(attemptStartedAtMs);
+		if (ms < 0 || !accumulator.claimFirstByteLog()) {
+			return;
+		}
+		AiTrace.event("upstream_first_byte", "attempt", attempt, "ms", ms, "chars",
+				accumulator.text().length(), "events", accumulator.meter().frames());
 	}
 
 	/**
@@ -686,7 +727,7 @@ public class ResilientChatService {
 			SseChatEmitter out, TurnContext turn, OutputGuard guard) {
 		String text = accumulator.text();
 		if (!StringUtils.hasText(text)) {
-			emptyReply(runId, sessionId, accumulator, attempts, out);
+			emptyReply(runId, sessionId, accumulator, attempts, out, turn);
 			return;
 		}
 		RunSnapshot snapshot = this.store.get(runId);
@@ -719,6 +760,29 @@ public class ResilientChatService {
 		// 上下文专项批①：先记账（真值回填 ai:ctx:），再发终帧（done.context 与端点必须同源）
 		Map<String, Object> context = contextTelemetry(sessionId, turn, accumulator);
 		out.done(accumulator.usage(turn.promptEstimate()), doneModel(accumulator, turn), extra, context);
+		emitTurnEnd(runId, sessionId, "done", null, attempts, accumulator, turn, watchdog);
+	}
+
+	/**
+	 * 一轮的<b>唯一摘要行</b>（日志链路批）：{@code event=turn_end}。
+	 *
+	 * <p>五个终态出口（done / failed / empty_reply / blocked / cancelled）全都经过这里 ——
+	 * "按 runId grep 一定有收尾行"是排查手册的第一条，缺一个出口就等于缺一条线索。
+	 * 只记元数据：耗时、审批等待、工具次数、三维 token 与估算标记；<b>不含任何正文</b>。
+	 */
+	private void emitTurnEnd(String runId, String sessionId, String status, String code, int attempts,
+			Accumulator accumulator, TurnContext turn, StreamWatchdog watchdog) {
+		long totalMs = Math.max(0L, System.currentTimeMillis() - turn.turnStartedAtMs());
+		long gateWaitMs = Math.max(0L, this.beacon.gateWaitMs(runId));
+		Map<String, Object> usage = accumulator == null ? Map.of() : accumulator.usage(turn.promptEstimate());
+		AiTrace.event("turn_end", "status", status, "code", code == null ? "none" : code, "attempts", attempts,
+				"totalMs", totalMs, "activeMs", Math.max(0L, totalMs - gateWaitMs), "gateWaitMs", gateWaitMs,
+				"toolCalls", this.beacon.startedCount(runId), "chars", accumulator == null ? 0 : accumulator.text().length(),
+				"inputTokens", usage.getOrDefault("promptTokens", 0),
+				"outputTokens", usage.getOrDefault("completionTokens", 0),
+				"totalTokens", usage.getOrDefault("totalTokens", 0), "est", usage.getOrDefault("est", true),
+				"model", doneModel(accumulator, turn),
+				"upstreamEvents", watchdog == null ? 0 : watchdog.upstreamEvents());
 	}
 
 	/**
@@ -751,6 +815,7 @@ public class ResilientChatService {
 		recordSafety(runId, sessionId, guard);
 		out.textEnd(accumulator == null ? 0 : accumulator.text().length());
 		out.error(SENSITIVE_OUTPUT_BLOCKED, message);
+		emitTurnEnd(runId, sessionId, "blocked", SENSITIVE_OUTPUT_BLOCKED, 1, accumulator, turn, null);
 	}
 
 	/**
@@ -803,7 +868,8 @@ public class ResilientChatService {
 	 * "这一轮开过的东西"不悬空）。已经打开过的正文段（纯空白分片也发 delta，见 {@code consume}）
 	 * 先收尾再发终帧 —— 与 {@link #fail} 的帧序契约一致（运行关闭前，它打开的一切都要先关闭）。
 	 */
-	private void emptyReply(String runId, String sessionId, Accumulator accumulator, int attempts, SseChatEmitter out) {
+	private void emptyReply(String runId, String sessionId, Accumulator accumulator, int attempts, SseChatEmitter out,
+			TurnContext turn) {
 		String text = accumulator.text();
 		String message = "模型本轮未产出任何正文（去空白后为空），按失败收尾。"
 				+ "常见成因：上游静默截断产出 0 字符的\"成功\"响应，或模型返回空回复；请重试或换一种问法。";
@@ -825,6 +891,7 @@ public class ResilientChatService {
 		}
 		out.textEnd(text.length());
 		out.error(EMPTY_REPLY_CODE, message);
+		emitTurnEnd(runId, sessionId, "failed", EMPTY_REPLY_CODE, attempts, accumulator, turn, null);
 	}
 
 	/**
@@ -861,6 +928,11 @@ public class ResilientChatService {
 		Map<String, Object> context = contextTelemetry(sessionId, turn, accumulator);
 		out.done(accumulator == null ? Map.of() : accumulator.usage(turn.promptEstimate()),
 				doneModel(accumulator, turn), extra, context);
+		AiTrace.event("turn_cancelled", "attempts", attempts, "partialChars",
+				accumulator == null ? 0 : accumulator.text().length(), "upstreamEvents",
+				watchdog == null ? 0 : watchdog.upstreamEvents());
+		emitTurnEnd(runId, sessionId, "cancelled", StreamViolationException.CANCELLED, attempts, accumulator, turn,
+				watchdog);
 	}
 
 	/**
@@ -884,7 +956,8 @@ public class ResilientChatService {
 	}
 
 	private void fail(String runId, String sessionId, StreamViolationException violation, int attempts, boolean emitted,
-			boolean sideEffect, int partialChars, SseChatEmitter out) {
+			boolean sideEffect, Accumulator accumulator, SseChatEmitter out, TurnContext turn) {
+		int partialChars = accumulator == null ? 0 : accumulator.text().length();
 		String code = violation.getCode();
 		if (sideEffect) {
 			code = code + "_AFTER_TOOL_SIDE_EFFECT";
@@ -907,6 +980,7 @@ public class ResilientChatService {
 		// 未开过段（纯工具轮 / 未产出正文）时 textEnd 是幂等空操作。
 		out.textEnd(partialChars);
 		out.error(code, message);
+		emitTurnEnd(runId, sessionId, "failed", code, attempts, accumulator, turn, null);
 	}
 
 	/** 历史载荷里段级工具状态映射的键名（R-144）：挂在带 {@code toolCalls} 的 ASSISTANT 消息 metadata 上。 */
@@ -1194,6 +1268,12 @@ public class ResilientChatService {
 
 		private final Deque<String> tail = new ArrayDeque<>();
 
+		/** 本次尝试的<b>首包时刻</b>（第一条上游分片到达；0 = 一个都没到）。 */
+		private volatile long firstByteAtMs;
+
+		/** 首包事件是否已上报（每次尝试一个 Accumulator ⇒ 天然"每 attempt 一行"）。 */
+		private final java.util.concurrent.atomic.AtomicBoolean firstByteLogged = new java.util.concurrent.atomic.AtomicBoolean();
+
 		private volatile String terminalSignal;
 
 		void accept(ChatResponse response) {
@@ -1205,6 +1285,9 @@ public class ResilientChatService {
 		 * null = 用原文（无守卫/测试直连路径）
 		 */
 		void accept(ChatResponse response, String textOverride) {
+			if (this.firstByteAtMs == 0L) {
+				this.firstByteAtMs = System.currentTimeMillis();
+			}
 			this.lastResponse.set(response);
 			this.meter.accept(response);
 			Generation generation = response.getResult();
@@ -1248,6 +1331,16 @@ public class ResilientChatService {
 
 		String tailSummary() {
 			return String.join(" ; ", this.tail);
+		}
+
+		/** 首包耗时（ms；未收到任何分片 = -1）。 */
+		long firstByteMs(long attemptStartedAtMs) {
+			return this.firstByteAtMs <= 0L ? -1L : Math.max(0L, this.firstByteAtMs - attemptStartedAtMs);
+		}
+
+		/** 首包事件只上报一次（成功结束与断流两条出口都会调用本方法）。 */
+		boolean claimFirstByteLog() {
+			return this.firstByteLogged.compareAndSet(false, true);
 		}
 
 		boolean sawTerminal() {

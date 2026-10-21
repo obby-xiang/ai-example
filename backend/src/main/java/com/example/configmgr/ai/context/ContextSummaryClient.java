@@ -6,6 +6,7 @@ import com.example.configmgr.common.ErrorCodes;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.AiProviderRegistry;
 import com.example.configmgr.ai.config.ProviderRuntime;
+import com.example.configmgr.ai.observe.AiTrace;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.prompt.Prompt;
@@ -108,7 +109,7 @@ public final class ContextSummaryClient implements RollingSummarizer.Summarizer 
 		Duration timeout = this.properties.getContext().getSummaryTimeout();
 		Future<String> future;
 		try {
-			future = this.executor.submit(() -> this.call.call(prompt, model));
+			future = this.executor.submit(AiTrace.wrapCallable(() -> this.call.call(prompt, model)));
 		}
 		catch (RejectedExecutionException ex) {
 			// 池饱和/已关闭：不排队等（一个挂住的摘要请求会把队列堵满），按"摘要不可用"收口
