@@ -3,10 +3,11 @@
 ## 0 自证与入库锚
 
 - 提交官自证（wire `profile.bind`：**`grep -c '"type":"profile.bind"'` 全文件命中数 = 1**，该行是文件第 **5** 行〔前 4 行是 metadata / runtime 绑定 / 工具发现 / 权限模式〕，**未用 `head -1`**）：`agentId=agent-1353`、`modelAlias=DeepSeek/deepseek-flash`、`profileName=coder`、`thinkingEffort=high`。
-- 三笔入库（逐笔 push，基线 = `3c79eaa`，`origin/main` 同步至第三笔）：
+- 三笔入库（逐笔 push，基线 = `3c79eaa`，`origin/main` 同步至证据笔）：
   - **主体笔 `35a30ad`**（`feat(ai-context): 上下文统计与压缩批①（计量+展示+L1清除）`，44 文件 +5416 / −34）；
   - **看板笔 `0507a37`**（`docs(board): 上下文统计与压缩批① 销记 + 挂账 A-4（分布式 Redis Cluster 适配审查）`，2 文件 +7 / −5）；
-  - **证据笔**（本件所在提交）的 sha **不可自引用**（`git log --oneline -3`）。
+  - **证据笔 `9274370`**（`docs(evidence): 补档上下文统计与压缩批① 四件`，4 文件 +394）；
+  - 本件所在提交 = **CI 回填笔**（自身 sha 不可自引用，`git log --oneline -1`；体例同上一批 `3c79eaa`）。
 
 ## 1 门禁（提交官本机复跑；口径以本表为准）
 
@@ -64,7 +65,7 @@ repo = 本仓远程 `origin`（GitHub），workflow = 「CI 门禁」（后端�
 | --- | --- | --- | --- |
 | **39557930065**（`35a30ad`） | 主体笔 | **attempt1 红 → attempt2 `success`（5/5 绿）** | attempt1 红于 **L-19 同族既有抖动**：`ResumeServiceLeaseTest.concurrentSameRunResumesDoNotLetTheLoserReleaseTheWinnersLease:302`，`Expecting actual [ACCEPTED, ALREADY_RUNNING] to contain exactly in any order [ACCEPTED, IN_PROGRESS]`（`Tests run: 939, Failures: 1, Skipped: 1`，其余全绿）⇒ `gh run rerun 39557930065 --failed` → attempt2 **5/5**（后端 2m34s / 前端 1m51s / check-docs 9s / 脱敏报告制 / **E2E 29 用例 2m5s**） |
 | **39558013421**（`0507a37`） | 看板笔 | **`success`（首跑 5/5 绿，未 rerun）** | 后端 2m32s / 前端 1m41s / check-docs 8s / E2E 1m55s —— **同一份后端代码在另一 run 首跑即绿**，是"抖动而非回归"的直接反证 |
-| 证据笔（本件所在提交） | 证据笔 | **待回填**（run 号不可自引用；见后续 `提交报告 CI 回填` 笔） | 与模型配置批① 同处置 |
+| **39559207162**（`9274370`） | 证据笔 | **`success`（首跑 5/5 绿，未 rerun）** | 后端 1m39s / 前端 1m41s / check-docs 7s / E2E 2m10s —— 三笔中两笔需 rerun 的只有主体笔的 attempt1，**L-19 抖动在本批未复现于后两笔** |
 
 **L-19 抖动的判据（四条，照 `docs/任务看板.md:423` 的既有口径，不扩权改用例）**：
 1. **零 diff**：`ResumeServiceLeaseTest` 在本批 44 文件里**一行未改**（`git log -1 --stat` 可核）；
