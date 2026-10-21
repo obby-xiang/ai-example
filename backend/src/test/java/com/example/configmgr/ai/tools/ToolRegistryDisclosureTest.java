@@ -68,6 +68,15 @@ class ToolRegistryDisclosureTest {
             "inspect_columns", "review_cells", "normalize_column", "replace_values", "update_rows",
             "undo_last_sheet_edit");
 
+    /** AI 可视可操作专项的 7 个通用原语（1 看 + 6 做）。 */
+    private static final List<String> UI_PRIMITIVE_TOOLS = List.of("ui_snapshot", "ui_click", "ui_fill",
+            "ui_select", "ui_scroll", "ui_highlight", "ui_request_upload");
+
+    private static final List<String> UI_READ_TOOLS = List.of("ui_snapshot", "ui_scroll", "ui_highlight");
+
+    private static final List<String> UI_WRITE_TOOLS = List.of("ui_click", "ui_fill", "ui_select",
+            "ui_request_upload");
+
     /** S4.4e 裁决⑥：必须经确认门的启动类工具（FR-5.3 明文清单）。 */
     private static final List<String> GATED_START_TOOLS = List.of("start_export", "start_precheck", "start_import",
             "start_publish");
@@ -89,6 +98,49 @@ class ToolRegistryDisclosureTest {
                     .isEqualTo(ToolMeta.RiskLevel.READ);
             assertThat(toolRegistry.getMeta(name)).as("%s 已注册元数据", name).isNotNull();
         }
+    }
+
+    @Test
+    void uiPrimitiveToolsUseFrontendChannelAndHonestRisk() {
+        for (String name : UI_PRIMITIVE_TOOLS) {
+            assertThat(toolRegistry.channelOf(name)).as("%s 的执行通道", name)
+                    .isEqualTo(ToolMeta.Channel.FRONTEND);
+            assertThat(toolRegistry.getMeta(name)).as("%s 已注册元数据", name).isNotNull();
+        }
+        for (String name : UI_READ_TOOLS) {
+            assertThat(toolRegistry.riskOf(name)).as("%s 是只读原语", name)
+                    .isEqualTo(ToolMeta.RiskLevel.READ);
+        }
+        for (String name : UI_WRITE_TOOLS) {
+            assertThat(toolRegistry.riskOf(name)).as("%s 是写原语（对外部副作用诚实）", name)
+                    .isEqualTo(ToolMeta.RiskLevel.WRITE);
+        }
+        // 披露面 ≠ 可达面：scope 一律 *（围栏在区域与元素两层）
+        assertThat(toolRegistry.matchesContext("ui_snapshot", AiContext.empty()))
+                .as("空上下文也披露 ui_snapshot").isTrue();
+        assertThat(toolRegistry.matchesContext("ui_click", AiContext.empty())).isTrue();
+    }
+
+    @Test
+    void uiPrimitiveStubsReturnFrontendStub() {
+        assertThat(aiTools.uiSnapshot(null, null, null)).isEqualTo(AiTools.FRONTEND_STUB);
+        assertThat(aiTools.uiClick("import.upload.choose", "a1b2c3-1")).isEqualTo(AiTools.FRONTEND_STUB);
+        assertThat(aiTools.uiFill("import.upload.query", "v", "a1b2c3-1")).isEqualTo(AiTools.FRONTEND_STUB);
+        assertThat(aiTools.uiSelect("import.mode.group", "MERGE", "a1b2c3-1")).isEqualTo(AiTools.FRONTEND_STUB);
+        assertThat(aiTools.uiScroll("import.grid.viewport", 100, "nearest", "a1b2c3-1"))
+                .isEqualTo(AiTools.FRONTEND_STUB);
+        assertThat(aiTools.uiHighlight("import.upload.choose", null, "a1b2c3-1")).isEqualTo(AiTools.FRONTEND_STUB);
+        assertThat(aiTools.uiRequestUpload(null, List.of("xlsx"))).isEqualTo(AiTools.FRONTEND_STUB);
+    }
+
+    @Test
+    void uiSnapshotDescriptionMirrorsTheCaps() {
+        // T-43b 防漂移：描述与常量同源（40 行 / 2000 字符），且写明 ref 不是 selector
+        ToolCallback callback = toolRegistry.getCallback("ui_snapshot");
+        assertThat(callback).isNotNull();
+        String description = callback.getToolDefinition().description();
+        assertThat(description).contains("40").contains("2000").contains("共");
+        assertThat(description).contains("不是 selector");
     }
 
     @Test
@@ -297,7 +349,9 @@ class ToolRegistryDisclosureTest {
                 "select_definitions", "set_condition", "confirm_step",
                 com.example.configmgr.ai.form.GenerativeFormRules.TOOL_NAME,
                 "read_sheet_summary", "aggregate_sheet", "inspect_columns", "review_cells",
-                "normalize_column", "replace_values", "update_rows", "undo_last_sheet_edit");
+                "normalize_column", "replace_values", "update_rows", "undo_last_sheet_edit",
+                "ui_snapshot", "ui_click", "ui_fill", "ui_select", "ui_scroll", "ui_highlight",
+                "ui_request_upload");
 
         for (AiContext context : contexts) {
             List<String> disclosed = namesFor(context);

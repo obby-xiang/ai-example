@@ -119,6 +119,34 @@
       </div>
     </div>
 
+    <!-- AI 可视可操作专项（设计稿 §3.10）：操作条落在**消息流之上、panel header 之下** ——
+         不进 composer 底栏（那是模型配置批③ 的 model-picker 落点）。停止复用既有停止语义
+         （`ai.stop()` 同时置"后续界面动词一律拒绝"，已执行的不回滚）。 -->
+    <div
+      v-if="aiOperating"
+      class="mx-2 mt-2 flex items-center gap-[8px] rounded-[9px] border border-solid border-[#dbeafe] bg-[#eff6ff] px-[11px] py-[7px]"
+      data-testid="ai-operating-bar"
+    >
+      <span class="inline-flex flex-none items-center text-[#2563eb]" aria-hidden="true">
+        <svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor">
+          <path d="M8 1.5l1.2 3.2 3.2 1.2-3.2 1.2L8 10.3 6.8 7.1 3.6 5.9l3.2-1.2z" />
+        </svg>
+      </span>
+      <span class="min-w-0 flex-1 text-[12.4px] leading-[1.5] text-[#1f2328] break-words [overflow-wrap:anywhere]">
+        AI 正在操作左侧工作区：{{ ai.uiAnnouncement }}
+      </span>
+      <button
+        type="button"
+        class="flex-none whitespace-nowrap rounded-[8px] border border-solid border-[#e3e6ea] bg-white px-[11px] py-[4px] text-[12.2px] text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]"
+        data-testid="ai-operating-stop"
+        @click="ai.stop()"
+      >
+        停止
+      </button>
+    </div>
+    <!-- 读屏播报（只读动词也播报；视觉零占位） -->
+    <div class="sr-only" aria-live="polite" data-testid="ai-live-region">{{ ai.uiAnnouncement ?? '' }}</div>
+
     <!-- 消息流（蓝本 AiPanel.vue:21-89）；R-154 #5：外层 relative 壳承载「回到底部」浮钮 -->
     <div class="flex-1 relative min-h-0 flex flex-col">
       <!-- R-161：role="log" 补滚动容器（无障碍，无视觉影响）；R-163B G2：overflow-x-hidden 止血横滚条。
@@ -416,6 +444,24 @@
                           >已截断</span>
                         </div>
                       </div>
+                      <!-- AI 可视可操作专项（§3.8 / 裁 6）：操作摘要行的「撤销」按钮。
+                           只有用户能撤销（**不提供** ui_undo 工具）；深度 1 —— 撤销后按钮消失。 -->
+                      <div
+                        v-if="part.toolCallId === ai.uiUndoToolCallId && ai.uiUndoEntry"
+                        class="flex items-center gap-[8px]"
+                        data-testid="ui-undo-row"
+                      >
+                        <span class="text-[12.2px] text-[#57606a]">界面已改动，可撤销最近 1 步。</span>
+                        <button
+                          type="button"
+                          class="flex-none whitespace-nowrap rounded-[8px] border border-solid border-[#e3e6ea] bg-white px-[11px] py-[4px] text-[12.2px] text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]"
+                          data-testid="ui-undo-button"
+                          @click="onUiUndo"
+                        >
+                          撤销
+                        </button>
+                      </div>
+
                       <!-- R-158 #6：卡内错误位（自绘圆环 ! + 红底 + 文案）——错误就地呈现，不再全堆顶部 Alert；
                            R-165 S1：el-icon 退场，圆环 ! 照搬 demo v7 行内错误通知形制。
                            S6 批1（v7.10 N8）：发布冲突明细收敛 —— 红底行只留一句人话摘要（reason 首行），
@@ -533,6 +579,20 @@
                             @cancel="onSheetPreviewCancel"
                             @abandon="onSheetPreviewAbandon"
                             @level="ai.setPreviewLevel"
+                          />
+                        </div>
+
+                        <!-- AI 可视可操作专项 §3.3.7：上传交接卡（唯一新增的人围栏外观）。
+                             「选择文件」= 用户手势（picker 必须在同步栈里被调）；「放弃」= cancelled=true。
+                             刷新后区域仍注册 ⇒ 可继续；区域不在该页 ⇒ 主按钮禁用 + 只能放弃。 -->
+                        <div v-else-if="isUploadHandoffPart(part)" class="p-[11px]">
+                          <UploadHandoffCard
+                            :status="uploadHandoffStatus(part)"
+                            :accept="uploadHandoffAccept(part)"
+                            :label="uploadHandoffLabel(part)"
+                            :reason="uploadHandoffReason(part)"
+                            @choose="ai.chooseUploadFile()"
+                            @cancel="ai.cancelUploadHandoff()"
                           />
                         </div>
                       </template>
@@ -1023,9 +1083,11 @@ import {
 import { deriveCopyText, deriveProjections } from '@/utils/parts'
 import FormRenderer from '@/components/AiPanel/FormRenderer.vue'
 import SheetPreviewCard from '@/components/AiPanel/SheetPreviewCard.vue'
+import UploadHandoffCard from '@/components/AiPanel/UploadHandoffCard.vue'
 import ContextPill from '@/components/AiPanel/ContextPill.vue'
 import { GENERATIVE_FORM_TOOL, type ChatMessage, type ToolPart } from '@/types/ai'
-import { SHEET_PREVIEW_TOOLS } from '@/types/tools'
+import { SHEET_PREVIEW_TOOLS, UI_HANDOFF_TOOLS } from '@/types/tools'
+import { resolveAiRef } from '@/utils/ai-regions'
 import type { FormSpec } from '@/types/form-schema'
 import type { ErrorCard, ErrorCardVariant } from '@/utils/error-card'
 
@@ -1284,6 +1346,14 @@ const TOOL_LABELS: Record<string, string> = {
   replace_values: '查找替换',
   update_rows: '条件更新行',
   undo_last_sheet_edit: '撤销 AI 表格修改',
+  // AI 可视可操作专项：7 个通用原语
+  ui_snapshot: '查看界面',
+  ui_click: '点击界面元素',
+  ui_fill: '填写输入框',
+  ui_select: '选择选项',
+  ui_scroll: '滚动界面',
+  ui_highlight: '高亮界面元素',
+  ui_request_upload: '请用户选择文件',
   download_templates: '下载模板',
   'export.selectDefs': '选择配置项',
   'export.setConditions': '设置查询条件',
@@ -2391,6 +2461,50 @@ function cardBodyShown(part: ToolPart): boolean {
 /** AI 表格操作专项：待用户确认的写预览段（replace_values / update_rows / normalize commit=true）。 */
 function isSheetPreviewPart(part: ToolPart): boolean {
   return part.kind2 === 'FRONTEND' && part.requiresAction && SHEET_PREVIEW_TOOLS.has(part.name)
+}
+
+// ── AI 可视可操作专项：上传交接卡 + 操作条 + 撤销 ─────────────────────────────
+
+/** 上传交接段（唯一的人围栏工具；`ui_request_upload`）。 */
+function isUploadHandoffPart(part: ToolPart): boolean {
+  return part.kind2 === 'FRONTEND' && part.requiresAction && UI_HANDOFF_TOOLS.has(part.name)
+}
+
+/** 交接卡状态：活动交接 → 其 status；刷新后丢了本地态 → missing（只能放弃）。 */
+function uploadHandoffStatus(part: ToolPart): 'waiting' | 'degraded' | 'missing' | 'unavailable' {
+  const handoff = ai.activeUploadHandoff
+  if (handoff && handoff.toolCallId === part.toolCallId) {
+    return handoff.status
+  }
+  return 'missing'
+}
+
+function uploadHandoffAccept(part: ToolPart): string[] | null {
+  const handoff = ai.activeUploadHandoff
+  return handoff && handoff.toolCallId === part.toolCallId ? handoff.accept : null
+}
+
+function uploadHandoffReason(part: ToolPart): string | null {
+  const handoff = ai.activeUploadHandoff
+  return handoff && handoff.toolCallId === part.toolCallId ? handoff.reason : null
+}
+
+/** 入口的可读标签（取注册区域里该 ref 的 aria-label / 文案；取不到用兜底文案）。 */
+function uploadHandoffLabel(part: ToolPart): string {
+  const handoff = ai.activeUploadHandoff
+  if (!handoff || handoff.toolCallId !== part.toolCallId || !handoff.ref) {
+    return '上传 xlsx / zip'
+  }
+  const hit = resolveAiRef(handoff.ref)
+  const label = hit?.el.getAttribute('aria-label') ?? hit?.el.textContent?.trim() ?? ''
+  return label === '' ? '上传 xlsx / zip' : label
+}
+
+/** 操作条：本轮仍在跑/挂起且刚播报过界面动作（停止后自动消失）。 */
+const aiOperating = computed(() => ai.uiAnnouncement !== null && (ai.loading || ai.suspended))
+
+function onUiUndo(): void {
+  void ai.undoLastUiAction()
 }
 
 /** 该段对应的本地预览计划（无 ⇒ 面板渲染“预览已失效 + 放弃”）。 */

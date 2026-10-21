@@ -36,7 +36,7 @@ class ConfirmGateHumanWaitTest {
     @Test
     void humanWaitFrontendToolsHaveNoDeadline() {
         for (String name : new String[] { "generative_form", "replace_values", "update_rows", "normalize_column",
-                "undo_last_sheet_edit" }) {
+                "undo_last_sheet_edit", "ui_request_upload" }) {
             assertThat(gate.suspendWaitSeconds(frontend(name)))
                     .as("%s 等的是人 ⇒ 不设上限", name)
                     .isNull();

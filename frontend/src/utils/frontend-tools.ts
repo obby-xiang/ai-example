@@ -16,6 +16,12 @@
  *   AiPanel 渲染 `FormRenderer`，**不走本文件通用执行器**；
  * - 表格写工具（`replace_values` / `update_rows` / `normalize_column(commit=true)`）同族：
  *   store 特判进预览卡（等用户“应用/取消”），**不走**本文件的 60s 预算 —— 那预算包不住“等人”。
+ * - **AI 可视可操作专项（2026-10-21）**：`FRONTEND_TOOLS` 10 → 17 条，后端 `@Tool` 26 → 33
+ *   （前端通道 15 → 22）。新增的 7 个通用原语（`ui_snapshot` / `ui_click` / `ui_fill` /
+ *   `ui_select` / `ui_scroll` / `ui_highlight` / `ui_request_upload`）走**路由 1 + 默认执行器**，
+ *   执行体在 `utils/ai-dom-tools.ts`；其中 `ui_request_upload` 是「等人」工具，由 `stores/ai.ts`
+ *   特判进交接卡（与 GF 同族），**同样不走** 60s 预算。
+ *   `ui_*` 的 scope 一律 `*`：真正的围栏在**区域**（`registerAiRegion`）与**元素**（`data-ai-*`）两层。
  *
  * 四条路由（AI 经 frontend_tool 帧驱动工作区的统一入口；编号与 `dispatchFrontendTool`
  * 内的分支注释一致，实读该方法确认共 4 条）：
@@ -46,6 +52,7 @@
 import {
   SHEET_TOOL_NAMES,
   UI_EVENT_TYPES,
+  UI_TOOL_NAMES,
   findFrontendTool,
   type FrontendToolDescriptor,
   type FrontendToolExecution,
@@ -55,6 +62,15 @@ import {
   type UiEvent,
   type WorkspacePageId
 } from '@/types/tools'
+import {
+  aiClick,
+  aiFill,
+  aiHighlight,
+  aiScroll,
+  aiSelect,
+  aiSnapshot,
+  type UiToolOutcome
+} from '@/utils/ai-dom-tools'
 import { dispatchUiEvent, getPageHandler, useWorkspaceStore } from '@/stores/workspace'
 import type { ConfigField } from '@/types/definition'
 import {
@@ -1254,8 +1270,58 @@ function isWorkspacePageId(page: string): page is WorkspacePageId {
 
 const PAGE_IDS: readonly WorkspacePageId[] = ['tasks', 'export', 'import', 'definitions', 'data']
 
+/**
+ * AI 可视可操作专项：7 个通用原语的执行桥。
+ *
+ * 原语只返回 `{ outcome, availability, result }`（**不产 `ok` 字段**），
+ * 结局一致性仍由 {@link makeExecution} 单点推导（D1 不破）。
+ * `ui_request_upload` 正常路径由 store 特判进交接卡；走到这里说明帧路由异常，
+ * 如实报错而不是静默假装成功。
+ */
+async function runUiPrimitive(name: string, args: Record<string, unknown>): Promise<FrontendToolExecution> {
+  let outcome: UiToolOutcome
+  switch (name) {
+    case 'ui_snapshot':
+      outcome = aiSnapshot(args)
+      break
+    case 'ui_click':
+      outcome = await aiClick(args)
+      break
+    case 'ui_fill':
+      outcome = await aiFill(args)
+      break
+    case 'ui_select':
+      outcome = await aiSelect(args)
+      break
+    case 'ui_scroll':
+      outcome = aiScroll(args)
+      break
+    case 'ui_highlight':
+      outcome = aiHighlight(args)
+      break
+    case 'ui_request_upload':
+      outcome = {
+        outcome: 'failed',
+        availability: 'degraded',
+        result: '上传交接不走通用执行器：请在对话内的交接卡上由用户手势选择文件（本次未执行）。'
+      }
+      break
+    default:
+      outcome = {
+        outcome: 'failed',
+        availability: 'unavailable',
+        result: `未知界面原语 ${name}：本次未执行。`
+      }
+  }
+  return makeExecution({ outcome: outcome.outcome, availability: outcome.availability, result: outcome.result })
+}
+
 /** 契约层自带的默认执行器（页面未覆盖时使用）。 */
 function defaultExecutor(name: FrontendToolName): FrontendToolExecutor | null {
+  // AI 可视可操作专项：7 个通用原语（执行体在 utils/ai-dom-tools.ts，结局过 makeExecution）
+  if ((UI_TOOL_NAMES as readonly string[]).includes(name)) {
+    return (call) => runUiPrimitive(name, call.args)
+  }
   if ((SHEET_TOOL_NAMES as readonly string[]).includes(name)) {
     return (call) => runSheetTool(name, call.args)
   }

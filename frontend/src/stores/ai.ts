@@ -18,6 +18,30 @@ import type { SseFrameHandlers, SseStreamOptions } from '@/api/sse'
 import { onWorkspaceEvent, reportUiEventResult, useWorkspaceStore } from '@/stores/workspace'
 import { useTaskStore } from '@/stores/task'
 import { deriveFrontendToolBudgetMs, executeFrontendTool, parseToolArgs, resolveSheetContext } from '@/utils/frontend-tools'
+import { UI_HANDOFF_TOOLS } from '@/types/tools'
+import type { ActiveUploadHandoff } from '@/types/ui-handoff'
+import {
+  abortUiOperations,
+  applyUiUndo,
+  beginUiTurn,
+  clearUiAnnouncement,
+  clearUiUndo,
+  peekUiAnnouncement,
+  peekUiUndo,
+  requestFilePicker,
+  supportsFilePicker,
+  takeUiUndo,
+  uploadFileNameOf,
+  validateUploadArgs
+} from '@/utils/ai-dom-tools'
+import {
+  currentAiEpoch,
+  listAiRegions,
+  resolveAiRef,
+  type AiRegion
+} from '@/utils/ai-regions'
+import { aiHighlight, clearUiHighlights } from '@/utils/ai-dom-tools'
+import type { UiUndoEntry } from '@/utils/ai-dom-tools'
 import {
   applySheetPlan,
   needsSheetPreview,
@@ -719,6 +743,43 @@ function isFrameDecidedPendingStatus(status: PendingToolCall['status'] | ToolRun
     || status === 'unknown' || status === 'failed' || status === 'skipped'
 }
 
+/**
+ * AI 可视可操作专项：上传入口的定位（显式 ref 优先，否则取区域声明的 `uploadEntry`）。
+ *
+ * 只在**已注册区域**里找：区域未注册 = 该页没有上传入口（不可见即不可操作）。
+ */
+function resolveUploadRegion(refArg: string | null): { region: AiRegion; entry: string } | null {
+  if (refArg) {
+    const hit = resolveAiRef(refArg)
+    if (hit) {
+      return { region: hit.region, entry: refArg }
+    }
+  }
+  for (const region of listAiRegions()) {
+    if (region.uploadEntry) {
+      return { region, entry: region.uploadEntry }
+    }
+  }
+  return null
+}
+
+/** 高亮上传入口（失败不影响交接主流程：高亮是"引导"，不是前提）。 */
+function highlightUploadEntry(ref: string): void {
+  try {
+    aiHighlight({ ref, epoch: currentAiEpoch() })
+  } catch {
+    // 高亮失败不改变交接三态（用户仍能在对话里点「选择文件」）
+  }
+}
+
+function pickUiAnnouncement(): string | null {
+  return peekUiAnnouncement()
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
 export const useAiStore = defineStore('ai', {
   state: () => ({
     /** 页签级会话 id（记忆窗口 CONVERSATION_ID） */
@@ -786,6 +847,23 @@ export const useAiStore = defineStore('ai', {
      * 写工具无超时，若不收口会渲染一张点不动的“应用”卡 —— 面板据此改渲染“预览已失效 + 放弃”。
      */
     stalePreviewToolCallId: null as string | null,
+    /**
+     * AI 可视可操作专项：上传交接的活动态（设计稿 §3.9）。
+     *
+     * 与表格预览是**两种形态**：预览依赖浏览器里算出的 diff（刷新必死 → stalePreviewToolCallId）；
+     * 交接只依赖「页面入口是否还在」，刷新后仍可继续（`status` 由区域是否仍注册决定）。
+     * 不进镜像：`toolCallId/runId/ref` 足够重建，卡渲染时再判区域。
+     */
+    activeUploadHandoff: null as ActiveUploadHandoff | null,
+    /**
+     * 最近一次界面原语留下的撤销点（深度 1；与表格的 `undo_last_sheet_edit` 互不共享状态）。
+     * 只给用户（面板摘要行的「撤销」按钮），**不提供** `ui_undo` 工具。
+     */
+    uiUndoEntry: null as UiUndoEntry | null,
+    /** 撤销点归属的工具段（面板只在那一张卡上出「撤销」按钮）。 */
+    uiUndoToolCallId: null as string | null,
+    /** 界面原语的一次性播报（面板 `aria-live` 区消费）。 */
+    uiAnnouncement: null as string | null,
     /**
      * 已收到的最大帧序号（DC-14 T6）：reattach 时回传，服务端只补增量。
      * 按 runId 记录 —— 换轮次（新 runId）即从零开始，不跨轮混用序号。
@@ -1428,6 +1506,27 @@ export const useAiStore = defineStore('ai', {
         // “预览已失效 + 放弃”，否则会出现一张点不动的“应用”卡。
         if (needsSheetPreview(entry.name, parseToolArgs(entry.arguments)) && this.activePreview?.toolCallId !== entry.toolCallId) {
           this.stalePreviewToolCallId = entry.toolCallId
+        }
+        // AI 可视可操作专项：上传交接**天然可恢复**（不依赖浏览器中间态）—— 区域仍注册即可继续，
+        // 区域不在该页则落 missing（主按钮禁用、只能放弃）。与上面"预览已失效"是两种形态。
+        if (UI_HANDOFF_TOOLS.has(entry.name) && this.activeUploadHandoff?.toolCallId !== entry.toolCallId) {
+          const args = parseToolArgs(entry.arguments)
+          const validated = validateUploadArgs(args)
+          if (validated.ok) {
+            const target = resolveUploadRegion(validated.value.ref)
+            const status: ActiveUploadHandoff['status'] = target && target.region.root.isConnected === true
+              ? 'waiting'
+              : 'missing'
+            this.activeUploadHandoff = {
+              toolCallId: entry.toolCallId,
+              runId: current.runId ?? null,
+              ref: target?.entry ?? validated.value.ref ?? null,
+              accept: validated.value.accept,
+              status,
+              reason: status === 'missing' ? '请先打开导入向导第 1 步' : null,
+              filename: null
+            }
+          }
         }
         if (entry.name === GENERATIVE_FORM_TOOL && !this.activeForm) {
           // 不武装任何本地时限：表单一直可填，收口只认后端结局帧 / 用户取消
@@ -2308,6 +2407,284 @@ export const useAiStore = defineStore('ai', {
       return planPreviewText(this.activePreview)
     },
 
+    // ── AI 可视可操作专项：上传交接（唯一的「等人」工具） ────────────────────────
+
+    /**
+     * `ui_request_upload` 帧到达 → 建交接卡。
+     *
+     * 与 `openGenerativeForm` 同族：**先校验再挂起**，任何异常路径都**带结局回灌收敛**
+     * （绝不让挂起悬空）。三态分流：
+     * - 只读页 / 无上传入口 ⇒ `unavailable`，直接回灌失败（不建卡）；
+     * - 浏览器无 `showOpenFilePicker` ⇒ `degraded`（卡保留可重试 + 高亮入口）；
+     * - 其余 ⇒ `waiting`（等用户手势）。
+     */
+    async openUploadHandoff(
+      message: ChatMessage,
+      frame: Extract<SseFrame, { type: 'frontend_tool_request' }>
+    ): Promise<void> {
+      const toolCallId = frame.toolCallId
+      const runId = frame.runId ?? this.activeRunId ?? null
+      const fail = async (result: string): Promise<void> => {
+        this.upsertToolPart(message, {
+          toolCallId,
+          name: frame.name,
+          kind2: 'FRONTEND',
+          status: 'failed',
+          result,
+          requiresAction: false
+        }, false)
+        deriveProjections(message)
+        await this.submitFrontendToolResult(toolCallId, result, 'frontend-executor', false, runId ?? undefined, 'failed')
+      }
+
+      const validated = validateUploadArgs(parseToolArgs(frame.args))
+      if (!validated.ok) {
+        await fail(validated.outcome.result)
+        return
+      }
+      const target = resolveUploadRegion(validated.value.ref)
+      if (!target) {
+        await fail('当前页面没有可用的上传入口（请先打开导入向导的第 1 步），本次未执行上传。')
+        return
+      }
+      if (target.region.readOnly?.() === true) {
+        await fail('任务已结束，仅供查看；上传入口在只读页面不可用，本次未执行上传。')
+        return
+      }
+      // 高亮入口（把用户送到上传按钮；视觉零变化，只加描边 + 徽标 + 播报）
+      highlightUploadEntry(target.entry)
+      const pickerOk = supportsFilePicker()
+      this.activeUploadHandoff = {
+        toolCallId,
+        runId,
+        ref: target.entry,
+        accept: validated.value.accept,
+        status: pickerOk ? 'waiting' : 'degraded',
+        reason: pickerOk ? null : '当前浏览器不支持在对话内直接选择文件',
+        filename: null
+      }
+      this.uiAnnouncement = pickUiAnnouncement()
+      this.upsertToolPart(message, {
+        toolCallId,
+        name: frame.name,
+        kind2: 'FRONTEND',
+        status: 'pending',
+        args: frame.args,
+        requiresAction: true
+      }, false)
+      deriveProjections(message)
+    },
+
+    /**
+     * 用户点交接卡的「选择文件」。
+     *
+     * **手势约束（规范级，不得重构掉）**：本方法第一行就同步调用 `requestFilePicker`
+     * —— 浏览器只在用户手势的同一调用栈里给出 transient activation，首个 `await` 之后再叫
+     * 会被拒（`NotAllowedError`）。
+     */
+    async chooseUploadFile(): Promise<void> {
+      const handoff = this.activeUploadHandoff
+      if (!handoff || handoff.status !== 'waiting') {
+        return
+      }
+      const picked = requestFilePicker(handoff.accept)
+      if (!picked) {
+        this.activeUploadHandoff = {
+          ...handoff,
+          status: 'degraded',
+          reason: '当前浏览器不支持在对话内直接选择文件'
+        }
+        this.uiAnnouncement = pickUiAnnouncement()
+        return
+      }
+      let files: File[]
+      try {
+        files = await picked
+      } catch (error) {
+        const aborted = error instanceof Error && (error.name === 'AbortError' || /abort/i.test(error.message))
+        this.activeUploadHandoff = {
+          ...handoff,
+          status: 'degraded',
+          reason: aborted ? '你取消了文件选择，可以重试' : `文件选择失败：${errorText(error)}`
+        }
+        this.uiAnnouncement = pickUiAnnouncement()
+        return
+      }
+      const file = files[0]
+      if (!file) {
+        this.activeUploadHandoff = { ...handoff, status: 'degraded', reason: '没有拿到文件，请重试' }
+        return
+      }
+      const name = uploadFileNameOf(file)
+      const region = handoff.ref ? resolveUploadRegion(handoff.ref)?.region ?? null : null
+      let summary = ''
+      if (region?.receiveFile) {
+        try {
+          summary = await region.receiveFile(file)
+        } catch (error) {
+          this.activeUploadHandoff = { ...handoff, status: 'degraded', reason: `页面接收文件失败：${errorText(error)}` }
+          return
+        }
+      }
+      const tail = summary ? `；${summary}` : ''
+      await this.finishUploadHandoff(
+        handoff,
+        'succeeded',
+        `用户已选择文件「${name}」并交给导入向导${tail}`,
+        false
+      )
+    },
+
+    /** 用户点「放弃」：`cancelled=true` 走既有 `FRONTEND_CANCELLED`，卡落终态。 */
+    async cancelUploadHandoff(): Promise<void> {
+      const handoff = this.activeUploadHandoff
+      if (!handoff) {
+        return
+      }
+      await this.finishUploadHandoff(handoff, 'cancelled', '用户已放弃本次上传交接，未上传任何文件。', true)
+    },
+
+    /**
+     * 用户嫌麻烦，直接点了页面上的上传按钮：页面成功后调本方法，活动交接**立即**以 ok 收口
+     * （否则 AI 会一直等）。无活动交接时是空操作（不误杀别的轮）。
+     */
+    async notifyAiUploadDone(summary: string): Promise<void> {
+      const handoff = this.activeUploadHandoff
+      if (!handoff) {
+        return
+      }
+      await this.finishUploadHandoff(handoff, 'succeeded', `用户已通过页面入口完成上传：${summary}`, false)
+    },
+
+    /**
+     * 刷新恢复的判据（**只看区域**）：交接不依赖浏览器里算出的中间态，
+     * 区域仍注册 ⇒ 可继续；区域已不在该页 ⇒ `missing`（主按钮禁用、只能放弃）。
+     * 浏览器 picker 能力在点击时再判（`open` 时的 `degraded` 是"当时"的分流）。
+     */
+    uploadHandoffAvailability(): 'waiting' | 'missing' | 'degraded' | null {
+      const handoff = this.activeUploadHandoff
+      if (!handoff) {
+        return null
+      }
+      if (handoff.status === 'degraded') {
+        return 'degraded'
+      }
+      if (!handoff.ref) {
+        return 'missing'
+      }
+      const target = resolveUploadRegion(handoff.ref)
+      if (!target || target.region.root.isConnected !== true) {
+        return 'missing'
+      }
+      return target.region.readOnly?.() === true ? 'missing' : 'waiting'
+    },
+
+    /** 恢复路：后端快照里的 PENDING 交接条目重建卡（不依赖本地 plan，与表格预览的"失效卡"不同）。 */
+    async rebuildUploadHandoffFromFrame(
+      message: ChatMessage,
+      frame: Extract<SseFrame, { type: 'frontend_tool_request' }>
+    ): Promise<void> {
+      const validated = validateUploadArgs(parseToolArgs(frame.args))
+      if (!validated.ok) {
+        return
+      }
+      const target = resolveUploadRegion(validated.value.ref)
+      const status: ActiveUploadHandoff['status'] = target && target.region.root.isConnected === true
+        ? 'waiting'
+        : 'missing'
+      this.activeUploadHandoff = {
+        toolCallId: frame.toolCallId,
+        runId: frame.runId ?? this.activeRunId ?? null,
+        ref: target?.entry ?? validated.value.ref ?? null,
+        accept: validated.value.accept,
+        status,
+        reason: status === 'missing' ? '请先打开导入向导第 1 步' : null,
+        filename: null
+      }
+      this.uiAnnouncement = pickUiAnnouncement()
+      this.upsertToolPart(message, {
+        toolCallId: frame.toolCallId,
+        name: frame.name,
+        kind2: 'FRONTEND',
+        status: 'pending',
+        args: frame.args,
+        requiresAction: true
+      }, false)
+      deriveProjections(message)
+    },
+
+    /** 交接的统一收口：先写段终态（含所有持该 toolCallId 的宿主），再回灌。 */
+    async finishUploadHandoff(
+      handoff: ActiveUploadHandoff,
+      status: ToolRunStatus,
+      result: string,
+      cancelled: boolean
+    ): Promise<void> {
+      this.activeUploadHandoff = null
+      for (const item of this.messages) {
+        if (!findToolPart(item, handoff.toolCallId)) {
+          continue
+        }
+        this.upsertToolPart(item, {
+          toolCallId: handoff.toolCallId,
+          name: 'ui_request_upload',
+          kind2: 'FRONTEND',
+          status,
+          result,
+          requiresAction: false
+        }, false)
+        deriveProjections(item)
+      }
+      const outcome: ToolOutcome | undefined = cancelled ? undefined : status === 'succeeded' ? 'ok' : 'failed'
+      await this.submitFrontendToolResult(
+        handoff.toolCallId,
+        result,
+        'frontend-executor',
+        cancelled,
+        handoff.runId ?? undefined,
+        outcome
+      )
+    },
+
+    // ── AI 可视可操作专项：撤销（只给用户） ────────────────────────────────────
+
+    /** 面板「撤销」：取撤销栈顶并应用（深度 1）。 */
+    async undoLastUiAction(): Promise<string> {
+      const entry = takeUiUndo()
+      this.uiUndoEntry = null
+      this.uiUndoToolCallId = null
+      if (!entry) {
+        this.notice = '没有可撤销的界面操作'
+        return '没有可撤销的界面操作'
+      }
+      const outcome = applyUiUndo(entry)
+      this.notice = outcome.result
+      return outcome.result
+    },
+
+    /** 把原语运行时的一次性状态同步进 store（面板渲染用）。 */
+    syncUiRuntimeState(): void {
+      this.uiUndoEntry = peekUiUndo()
+      this.uiAnnouncement = peekUiAnnouncement()
+    },
+
+    /** 面板 aria-live 区播报完毕（消费后清空，避免重复念）。 */
+    acknowledgeUiAnnouncement(): void {
+      clearUiAnnouncement()
+      this.uiAnnouncement = null
+    },
+
+    /** 换轮/换页收口：清撤销点与高亮（撤销栈不持久化，刷新即失效）。 */
+    resetUiSurfaces(): void {
+      clearUiUndo()
+      clearUiHighlights()
+      clearUiAnnouncement()
+      this.uiUndoEntry = null
+      this.uiUndoToolCallId = null
+      this.uiAnnouncement = null
+      this.activeUploadHandoff = null
+    },
+
     /** 切换预览档位（count / sample-diff / full-diff；数据只在前端卡）。 */
     setPreviewLevel(level: SheetPreviewLevel): void {
       if (this.activePreview) {
@@ -2586,6 +2963,10 @@ export const useAiStore = defineStore('ai', {
     async stop(): Promise<void> {
       // B1 收口修（C-1）：停止 = 本轮被放弃 —— 在途前端工具结局不得再写段/回灌（含挂起态无连接可 abort 时）
       roundEpoch += 1
+      // AI 可视可操作专项：停止后**后续界面动词立即拒绝**（已执行的不回滚）；
+      // 交接卡随本轮收起（后端取消会让挂起走取消收尾）。
+      abortUiOperations()
+      this.activeUploadHandoff = null
       this.stopped = true
       this.lastRoundOutcome = 'cancelled'
       try {
@@ -3048,6 +3429,12 @@ export const useAiStore = defineStore('ai', {
             void this.openWritePreview(message, frame)
             break
           }
+          // AI 可视可操作专项：上传交接是「等人手势」的工具（与 GF 同族，绝不能让 60s 预算兜底：
+          // showOpenFilePicker 只认用户手势的同步调用栈）。建卡后**不回灌**，等用户选文件/放弃。
+          if (UI_HANDOFF_TOOLS.has(frame.name)) {
+            void this.openUploadHandoff(message, frame)
+            break
+          }
           // 其余即时执行类前端工具：立即在浏览器执行并回灌结果
           void this.runFrontendTool(message, frame)
           break
@@ -3378,6 +3765,8 @@ export const useAiStore = defineStore('ai', {
       // controller，但那一轮**尚未结束** —— 慢前端工具的结局必须照常写段终态并回灌
       //（否则段恒 `running`，后端只能等满 120s 前端工具上限出 `FRONTEND_TIMEOUT`）。
       const epochAtStart = roundEpoch
+      // AI 可视可操作专项：单轮配额与"停止后零执行"按轮次 token 归零（同 runId 不重置）
+      beginUiTurn(frame.runId ?? this.activeRunId ?? 'local')
       // 批2：本地执行开跑即落 running（只更新语义 —— 段由 frontend_tool_request 帧建好；
       // 段不再等动作）——前端工具段生命周期 pending→running→终态，与确认门放行同口径。
       // 先让出同步窗口：request 帧的 pending 段必须先落盘（m-R2 写点①的同步可观测语义）
@@ -3390,6 +3779,7 @@ export const useAiStore = defineStore('ai', {
         requiresAction: false
       }, false)
       deriveProjections(message)
+      const undoBefore = peekUiUndo()
       const execution = await executeFrontendTool({
         name: frame.name,
         toolCallId: frame.toolCallId,
@@ -3427,6 +3817,11 @@ export const useAiStore = defineStore('ai', {
       }
       // 治理 P0-1：前端执行器的结局八态随回灌上送（后端台账/回帧以此为权威结局）
       await this.submitFrontendToolResult(frame.toolCallId, execution.result, 'frontend-executor', false, undefined, execution.outcome)
+      // AI 可视可操作专项：把原语运行时的一次性状态（撤销点 / 播报）同步给面板
+      this.syncUiRuntimeState()
+      this.uiUndoToolCallId = this.uiUndoEntry !== null && this.uiUndoEntry !== undoBefore
+        ? frame.toolCallId
+        : null
     }
   }
 })

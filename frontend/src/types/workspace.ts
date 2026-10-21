@@ -23,6 +23,8 @@ export type PageHandlerName =
   | 'import.startPublish'
   | 'import.nextStep'
   | 'data.refresh'
+  /** AI 可视可操作专项：上传交接把用户手势选到的文件交回页面既有上传链（永不传路径）。 */
+  | 'import.receiveFile'
 
 /** 页面能力 handler：入参由各页自定，返回说明文本（作为工具结果回灌）。 */
 export type PageHandler = (payload: Record<string, unknown>) => unknown | Promise<unknown>
