@@ -73,8 +73,10 @@
 | `AiPanel.vue` | **重叠，git 自动合** | 批③ 加模型选择器与「不支持工具调用」提示条；本专项加第三条挂起支、交接卡、撤销行、`aria-live` |
 | `docs/test-cases.md` | **本专项未改** | 无重叠 |
 
-- 自动合并正确性复核：两文件合流后 `git diff edc98f5..HEAD` 仅含本专项新增（无删改批③ 行）；
-  批③ 的 `modelPatch`、`MODEL_NOT_FOUND`、`model-picker`、`alert-no-tool-calling` 与
+- 自动合并正确性复核（`git diff 00b389c 4ad7f53 -- AiPanel.vue stores/ai.ts`，逐行看）：**删除行 = 1 条**，
+  且是 import 行的**扩展**而非语义删除 —— `AiPanel.vue` 的 `import { SHEET_PREVIEW_TOOLS } from '@/types/tools'`
+  → `import { SHEET_PREVIEW_TOOLS, UI_HANDOFF_TOOLS } from '@/types/tools'`（本专项在既有 import 行上加第二个符号）；
+  批③ 侧新增行**零删除**。批③ 的 `modelPatch`、`MODEL_NOT_FOUND`、`model-picker`、`alert-no-tool-calling` 与
   本专项的 `uiUndoEntry`/`activeUploadHandoff`/`ui-undo-row` 并存且互不引用；`vue-tsc` 0 + 743 例全绿反证模板/类型未被破坏。
 - 冲突标记复查（`^<<<<<<<` / `^=======` / `^>>>>>>>`）：**0 命中**；**语义冲突 = 0**。
 
