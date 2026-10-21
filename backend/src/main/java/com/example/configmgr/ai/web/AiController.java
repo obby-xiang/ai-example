@@ -253,7 +253,20 @@ public class AiController {
 		String sessionId = request.sessionId();
 		// 归一后的文本才是进模型/进记忆的那份（原始 request 不可变，故换一个新 record）
 		AiChatRequest effective = sanitized.changed()
-				? new AiChatRequest(sessionId, sanitized.text(), request.context()) : request;
+				? new AiChatRequest(sessionId, sanitized.text(), request.context(), request.modelId(), request.params())
+				: request;
+		// 批③：模型与参数的<b>存在性</b>校验（纯查快照，不碰上游）。放在限流/长度之后、会话门之前 ——
+		// 与既有闸序一致（所有请求都计数、超长先撞），且拒绝不占 in-flight 位。
+		// 显式模型不可用 ⇒ 400 MODEL_NOT_FOUND（不静默回落默认模型：用户点了 A 却跑 B 比报错更糟）。
+		if (this.aiConfigService != null && StringUtils.hasText(effective.modelId())
+				&& this.aiConfigService.resolveChatTarget(effective.modelId()).isEmpty()) {
+			return json(HttpStatus.BAD_REQUEST, Map.of("code", "MODEL_NOT_FOUND",
+					"message", "该模型当前不可用（未在可用端点的模型清单里，或端点已停用/密钥不可用）：" + effective.modelId()));
+		}
+		String paramsRejection = validateParams(effective.params());
+		if (paramsRejection != null) {
+			return json(HttpStatus.BAD_REQUEST, Map.of("code", "INVALID_PARAM", "message", paramsRejection));
+		}
 		String runId = UUID.randomUUID().toString();
 		SessionGate.Busy busy = this.sessionGate.acquire(sessionId, runId);
 		if (busy != null) {
@@ -293,6 +306,38 @@ public class AiController {
 			return json(HttpStatus.SERVICE_UNAVAILABLE, poolSaturated(runId));
 		}
 		return ResponseEntity.ok(emitter);
+	}
+
+	/**
+	 * 本轮参数的取值校验（批③）：越界即 400 {@code INVALID_PARAM}（稳定码在 {@code AiConfigWriter}
+	 * 也用于设置页，前端按 code 查同一份文案）。
+	 *
+	 * <p>
+	 * 范围与设置页写路径<b>逐值相同</b>（temperature [0,2] / top_p [0,1] / max_tokens [1,200000]）：
+	 * 两条入口同一把尺，否则"设置页存得进、对话发不出"这种割裂就会出现。
+	 *
+	 * @return null = 通过；否则是给用户看的中文兜底（前端按 code 显示自己的文案）
+	 */
+	private static String validateParams(AiChatRequest.Params params) {
+		if (params == null) {
+			return null;
+		}
+		if (params.temperature() != null) {
+			double value = params.temperature();
+			if (!Double.isFinite(value) || value < 0d || value > 2d) {
+				return "temperature 必须在 [0,2] 之间（当前 = " + value + "）";
+			}
+		}
+		if (params.topP() != null) {
+			double value = params.topP();
+			if (!Double.isFinite(value) || value < 0d || value > 1d) {
+				return "top_p 必须在 [0,1] 之间（当前 = " + value + "）";
+			}
+		}
+		if (params.maxTokens() != null && (params.maxTokens() < 1 || params.maxTokens() > 200_000)) {
+			return "max_tokens 必须在 [1,200000] 之间（当前 = " + params.maxTokens() + "）";
+		}
+		return null;
 	}
 
 	// ── 外部输入：确认门 / 前端工具 ────────────────────────────────────────
@@ -644,6 +689,9 @@ public class AiController {
 			// 409 家族（B23L1 批②b 显式列出）：续跑权在别的实例手里 = 这一轮已经有主，
 			// 不是"服务不可用"（不该 503 让运维误以为要扩容），也不是"没找到"。
 			case LEASE_HELD_ELSEWHERE, IN_PROGRESS, ALREADY_RUNNING -> json(HttpStatus.CONFLICT, result.body());
+			// 批③：快照的 provider 已删/停用/密钥不可解 —— 不静默换模型续跑（历史与 done.model 不许说谎），
+			// 也不 404（轮次存在）：409 + 稳定码 PROVIDER_GONE，前端据此引导"重新发一轮"。
+			case PROVIDER_GONE -> json(HttpStatus.CONFLICT, result.body());
 			default -> json(HttpStatus.CONFLICT, result.body());
 		};
 	}
@@ -954,6 +1002,16 @@ public class AiController {
 		body.put("contextLimitTokens", contextLimitTokens > 0 ? contextLimitTokens : null);
 		body.put("compactionOn", this.contextCompactor != null && contextLimitTokens > 0);
 		body.put("providers", this.aiConfigService == null ? List.of() : this.aiConfigService.describeProviders());
+		// 批③（additive）：面板据此决定参数 popover 是否可用、初值取什么。
+		// allowedParams = ai_setting['allow.userParams']（缺省 true，与设置页同一口径）；
+		// defaultParams = 全局默认三值（null = 该项未设置，前端留空）。
+		AiConfigService.Defaults defaults = this.aiConfigService == null ? null : this.aiConfigService.defaults();
+		body.put("allowedParams", defaults == null || !Boolean.FALSE.equals(defaults.allowUserParams()));
+		Map<String, Object> defaultParams = new LinkedHashMap<>();
+		defaultParams.put("temperature", defaults == null ? null : defaults.temperature());
+		defaultParams.put("topP", defaults == null ? null : defaults.topP());
+		defaultParams.put("maxTokens", defaults == null ? null : defaults.maxTokens());
+		body.put("defaultParams", defaultParams);
 		body.put("memoryBackend", this.chatMemoryRepository.getClass().getSimpleName());
 		body.put("sessionTtl", String.valueOf(this.properties.getSessionTtl()));
 		// 确认门自 2026-10-20 起不再超时（等人无上限），故 /health 不再报告 confirmTimeoutSeconds。

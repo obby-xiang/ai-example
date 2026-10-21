@@ -260,8 +260,16 @@ public class AiConfigWriter {
             throw new AiConfigException(CODE_CODE_IMMUTABLE,
                     "provider code 不可修改（它是 key 密文 AAD 的一段，改了旧密文将无法解密）");
         }
-        String baseUrl = StringUtils.hasText(command.baseUrl())
-                ? checkBaseUrl(command.baseUrl()) : existing.getBaseUrl();
+        // I-3（批③ 首项修复）：baseUrl <b>没变</b>就不重跑 URL 闸。
+        //
+        // 为什么必须这样：env 种子的 baseUrl 是 CI/E2E 的本地桩（127.0.0.1），而 URL 闸默认禁私网/回环
+        // ⇒ 旧实现下"改个显示名/换把 key"都会被 BLOCKED_PRIVATE_ENDPOINT 打回，种子行在设置页上
+        // 表现为"改不动"。闸的本意是拦住<b>新引入的</b>地址，不是复审一个用户没动过的既有地址
+        // （初始地址由受信来源 env 提供，见设计稿 §3.5"种子路径不受闸限制"）。
+        // 反例仍被拦住：改了 baseUrl ⇒ 走闸（哪怕改成另一个私网地址）。
+        String requestedBaseUrl = trimToNull(command.baseUrl());
+        String baseUrl = requestedBaseUrl == null || requestedBaseUrl.equals(existing.getBaseUrl())
+                ? existing.getBaseUrl() : checkBaseUrl(requestedBaseUrl);
         String displayName = StringUtils.hasText(command.displayName())
                 ? requireText(command.displayName(), "displayName", 128) : existing.getDisplayName();
         String protocol = StringUtils.hasText(command.protocol()) ? requireProtocol(command.protocol())

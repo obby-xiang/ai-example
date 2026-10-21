@@ -148,7 +148,17 @@ function sourceLabel(provider: AiProviderView): string {
   return provider.source === 'ENV_SEED' ? T.sourceEnvSeed : T.sourceDb
 }
 
-/** 提交体：key 留空 ⇒ <b>不出现</b> apiKey 键（F2：留空不改）。 */
+/**
+ * 提交体：<b>只带变化字段</b>（批③ I-3 的前端半边）。
+ *
+ * <h2>为什么不能整张卡片回传</h2>
+ * 一次"只改显示名"的保存若也带上 `baseUrl`，后端就要对<b>没变过</b>的地址重跑 URL 闸 ——
+ * env 种子的本地桩（http://127.0.0.1:…）因此永远 400 `BLOCKED_PRIVATE_ENDPOINT`，设置页表现为
+ * "改不动"。后端已同步改成"地址没变就跳过闸"（双保险）；前端这一侧按变化字段提交，
+ * 从源头就不产生"复审既有地址"的请求。
+ *
+ * <p>key 仍按既有口径：留空 ⇒ 不出现 `apiKey` 键（F2）；填了 ⇒ 只带 `apiKey`。
+ */
 function providerBody(provider: AiProviderView) {
   const form = cardForms[provider.id]
   const body: {
@@ -157,11 +167,22 @@ function providerBody(provider: AiProviderView) {
     completionsPath?: string
     modelsPath?: string
     apiKey?: string
-  } = {
-    displayName: form?.displayName ?? provider.displayName,
-    baseUrl: form?.baseUrl ?? provider.baseUrl,
-    completionsPath: form?.completionsPath ?? provider.completionsPath,
-    modelsPath: form?.modelsPath ?? provider.modelsPath
+  } = {}
+  const displayName = form?.displayName ?? provider.displayName
+  const baseUrl = form?.baseUrl ?? provider.baseUrl
+  const completionsPath = form?.completionsPath ?? provider.completionsPath
+  const modelsPath = form?.modelsPath ?? provider.modelsPath
+  if (displayName !== provider.displayName) {
+    body.displayName = displayName
+  }
+  if (baseUrl !== provider.baseUrl) {
+    body.baseUrl = baseUrl
+  }
+  if (completionsPath !== provider.completionsPath) {
+    body.completionsPath = completionsPath
+  }
+  if (modelsPath !== provider.modelsPath) {
+    body.modelsPath = modelsPath
   }
   const key = (form?.key ?? '').trim()
   if (key !== '') {
@@ -503,7 +524,7 @@ async function confirm(message: string): Promise<boolean> {
           <div class="grid grid-cols-2 gap-2 text-[12px]">
             <label class="flex items-center gap-2">
               <span class="text-[#909399] w-20 shrink-0">{{ T.displayName }}</span>
-              <input v-model="cardForms[provider.id].displayName" class="flex-1 border border-solid border-[#dcdfe6] rounded px-2 py-1" />
+              <input v-model="cardForms[provider.id].displayName" data-testid="provider-display-name" class="flex-1 border border-solid border-[#dcdfe6] rounded px-2 py-1" />
             </label>
             <label class="flex items-center gap-2">
               <span class="text-[#909399] w-20 shrink-0">{{ T.baseUrl }}</span>

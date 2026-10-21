@@ -467,6 +467,171 @@ public class AiConfigService {
                 provider.getId() == null));
     }
 
+    /**
+     * 一次 {@code /chat} 的运行目标（批③）：运行目标 + <b>能力位</b>。
+     *
+     * <p>
+     * 为什么单列一个 record 而不是给 {@link ResolvedProvider} 加字段：后者是批① 的对外形状
+     * （{@code /health}、注册表、测试都在用），加字段会牵动 4 处测试构造与两个解析方法；
+     * 能力位是"本轮要不要下发工具"的判据，只属于请求级解析。
+     *
+     * @param modelId 本轮模型名（= 请求显式值或解析链结果）
+     * @param supportsToolCalling {@code false} ⇒ 本轮不下发 toolCallbacks（纯问答降级）
+     */
+    public record ChatTarget(ResolvedProvider provider, String modelId, boolean supportsToolCalling) {
+    }
+
+    /**
+     * 面板可选的模型（{@code GET /api/ai/models} 的一行；web 层原样转成
+     * {@code AvailableModelView} —— config 层不依赖 web 包）。
+     */
+    public record AvailableModel(Long providerId, String providerCode, String providerName, String modelId,
+            String displayName, boolean supportsToolCalling, boolean supportsVision, boolean supportsReasoning,
+            Integer maxContext, Integer maxOutput, boolean isDefault) {
+    }
+
+    /**
+     * 请求级解析（批③ 的唯一入口）：显式 {@code modelId} 优先，未指定则退化成 {@link #resolveDefault()}。
+     *
+     * <h2>显式模型的可用性判据（三条同时成立）</h2>
+     * <ol>
+     * <li>provider {@code enabled}；</li>
+     * <li>key 可解析（{@link KeyStatus#OK}）；</li>
+     * <li>该模型在<b>这个</b> provider 的 allowlist 里且 {@code enabled}（env 合成行的种子模型等价于
+     * 一行 enabled 的 allowlist）。</li>
+     * </ol>
+     *
+     * <p>
+     * 三条缺一 ⇒ 空 ⇒ 控制器 400 {@code MODEL_NOT_FOUND}。<b>刻意不回落默认模型</b>：用户点了 A
+     * 却静默跑了 B，比报错更糟（历史与 {@code done.model} 都会说谎）。
+     *
+     * <p>
+     * 显式模型<b>优先于</b> {@code is_default} 与全局 {@code default.modelId} —— 前端的选择是会话级的
+     * 意图，优先级高于"没指定时用什么"。
+     */
+    public Optional<ChatTarget> resolveChatTarget(String requestedModelId) {
+        if (!StringUtils.hasText(requestedModelId)) {
+            return resolveDefault().map(resolved -> new ChatTarget(resolved, resolved.modelId(),
+                    supportsToolCalling(resolved.providerId(), resolved.modelId())));
+        }
+        String wanted = requestedModelId.trim();
+        ConfigSnapshot snap = current();
+        for (AiProvider provider : effectiveProviders(snap)) {
+            if (!provider.isEnabled()) {
+                continue;
+            }
+            KeyResolution key = resolveKey(provider);
+            if (key.status() != KeyStatus.OK) {
+                continue;
+            }
+            AiProviderModel row = selectableModel(snap, provider, wanted);
+            if (row == null) {
+                continue;
+            }
+            ResolvedProvider resolved = new ResolvedProvider(provider.getId(), provider.getCode(),
+                    provider.getBaseUrl(), provider.getCompletionsPath(), wanted, key.apiKey(), key.fingerprint(),
+                    provider.getId() == null);
+            return Optional.of(new ChatTarget(resolved, wanted, row.isSupportsToolCalling()));
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * 该模型在指定 provider 上是否可选（可选则返回那一行；env 合成行返回种子模型）。
+     *
+     * <p>
+     * 合成行（{@code id=null}）走 {@link #envSeedModel()}：它不是库里的行，但它是"当前真的在跑"
+     * 的模型 —— CI/E2E 全靠它，把它判成不可选等于让主路径 400。
+     */
+    private AiProviderModel selectableModel(ConfigSnapshot snap, AiProvider provider, String modelId) {
+        if (provider.getId() == null) {
+            AiProviderModel seed = envSeedModel();
+            return seed.getModelId().equals(modelId) ? seed : null;
+        }
+        return snap.models()
+            .stream()
+            .filter(model -> provider.getId().equals(model.getProviderId()))
+            .filter(AiProviderModel::isEnabled)
+            .filter(model -> modelId.equals(model.getModelId()))
+            .findFirst()
+            .orElse(null);
+    }
+
+    /**
+     * 模型的能力位（{@code supports_tool_calling}）。
+     *
+     * <p>
+     * 找不到模型行（{@code ai_setting} / env 回落的模型名，库里没登记）时判 <b>true</b>：批③ 之前
+     * 的行为就是"所有模型都下发工具"，无行可查时保持等价；只有显式登记为 {@code false} 的行才降级。
+     */
+    public boolean supportsToolCalling(Long providerId, String modelId) {
+        if (modelId == null) {
+            return true;
+        }
+        ConfigSnapshot snap = current();
+        if (providerId == null) {
+            return true;
+        }
+        return snap.models()
+            .stream()
+            .filter(model -> providerId.equals(model.getProviderId()))
+            .filter(model -> modelId.equals(model.getModelId()))
+            .map(AiProviderModel::isSupportsToolCalling)
+            .findFirst()
+            .orElse(true);
+    }
+
+    /**
+     * 普通用户是否允许调整参数（{@code ai_setting['allow.userParams']}）。
+     *
+     * <p>
+     * <b>缺省 = 允许</b>：该项未设置时谈"锁定"没有依据（设置页的 {@code allowUserParams !== false}
+     * 是同一口径），只有显式 {@code false} 才锁。
+     */
+    public boolean allowUserParams() {
+        return !Boolean.FALSE.equals(defaults().allowUserParams());
+    }
+
+    /**
+     * 面板可选的模型（{@code GET /api/ai/models}；设计稿 §3.5）。
+     *
+     * <h2>为什么是独立端点而不是复用 {@code /providers}</h2>
+     * 面板只要"能选什么"，{@code /providers} 还带着 baseUrl / keyRef / 模型路径这些配置面字段，
+     * 且要前端自己再过滤一遍（过滤规则一旦与后端漂移，就会出现"列出来了点不通"）。
+     * 本方法把三条可用性判据（provider enabled / key 可解析 / 模型 enabled）落在<b>后端唯一口径</b>，
+     * 面板拿到即真值；payload 也更小（一次挂载就取，不考虑缓存）。
+     *
+     * <p>顺序 = provider 库序 → 模型库序：面板下拉的次序因此稳定（不随 HashMap 抖动）。
+     */
+    public List<AvailableModel> availableModels() {
+        ConfigSnapshot snap = current();
+        List<AvailableModel> out = new ArrayList<>();
+        for (AiProvider provider : effectiveProviders(snap)) {
+            if (!provider.isEnabled() || resolveKey(provider).status() != KeyStatus.OK) {
+                continue;
+            }
+            List<AiProviderModel> rows;
+            if (provider.getId() == null) {
+                rows = List.of(envSeedModel());
+            }
+            else {
+                rows = snap.models()
+                    .stream()
+                    .filter(model -> provider.getId().equals(model.getProviderId()))
+                    .filter(AiProviderModel::isEnabled)
+                    .toList();
+            }
+            for (AiProviderModel row : rows) {
+                out.add(new AvailableModel(provider.getId(), provider.getCode(), provider.getDisplayName(),
+                        row.getModelId(), row.getDisplayName() == null ? row.getModelId() : row.getDisplayName(),
+                        row.isSupportsToolCalling(), Boolean.TRUE.equals(row.getSupportsVision()),
+                        Boolean.TRUE.equals(row.getSupportsReasoning()),
+                        row.getMaxContext(), row.getMaxOutput(), row.isDefault()));
+            }
+        }
+        return out;
+    }
+
     /** 模型解析（见 {@link AiModelResolver} 的优先级链；批③ 的按请求解析复用同一条链）。 */
     public String resolveModelId(ConfigSnapshot snap, AiProvider provider) {
         List<AiProviderModel> models = snap.models()

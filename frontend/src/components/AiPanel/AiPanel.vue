@@ -17,7 +17,7 @@
       <div class="w-[34px] h-[34px] rounded-lg bg-gradient-to-br from-[#409eff] to-[#7b61ff] text-white flex items-center justify-center font-bold">AI</div>
       <div class="flex-1 min-w-0">
         <div class="text-sm font-semibold text-[#303133]">实施助手</div>
-        <div class="text-xs text-[#909399]">流式对话 · 工具调用</div>
+        <div class="text-xs text-[#909399]" data-testid="current-model">{{ currentModelLabel }}</div>
       </div>
       <el-button
         size="small"
@@ -69,6 +69,23 @@
       <div class="flex-1 min-w-0">
         <b class="block text-[12.6px] [font-weight:650] text-[#1f2328]">挂起池已饱和</b>
         <span class="text-[11.8px] text-[#57606a] break-words [overflow-wrap:anywhere]">挂起专用线程池容量 {{ ai.poolSaturated.poolSize }} 已用满，请等当前挂起轮次确认/超时后再试。</span>
+      </div>
+    </div>
+
+    <!-- 批③ 能力位降级（P4）：模型不支持工具调用时不报错，只把"本轮退化为纯问答"说清楚。
+         位置在既有 Alert 之后（不改动任何既有提示的遮挡顺序）。 -->
+    <div
+      v-if="modelWithoutToolCalling"
+      class="m-2 flex items-center gap-[8px] rounded-[9px] border border-solid border-[#f0d5b0] bg-[#fdf6e3] px-[11px] py-[8px] text-[12.6px] text-[#1f2328]"
+      data-testid="alert-no-tool-calling"
+    >
+      <span
+        class="flex-[0_0_14px] w-[14px] h-[14px] rounded-[50%] border-solid border-[1.3px] border-[#b45309] text-[#b45309] text-[9px] font-bold flex items-center justify-center"
+        aria-hidden="true"
+      >!</span>
+      <div class="flex-1 min-w-0">
+        <b class="block text-[12.6px] [font-weight:650] text-[#1f2328]">该模型不支持工具调用，本轮退化为纯问答</b>
+        <span class="text-[11.8px] text-[#57606a] break-words [overflow-wrap:anywhere]">回答照常生成，但不会再调用工具（如需工具，切换到支持工具调用的模型）。</span>
       </div>
     </div>
 
@@ -738,10 +755,99 @@
           @compositionend="onComposerCompositionEnd"
           @blur.capture="onComposerBlur"
         />
-        <div class="flex items-center gap-[6px] px-[9px] pb-[7px] pt-0">
+        <div class="relative flex items-center gap-[6px] px-[9px] pb-[7px] pt-0">
           <!-- 布局裁决（上下文专项批①）：[模型选择器位][参数位] …… [用量 pill][发送/停止]。
-               左端虚线格留给模型配置专项批③ 的选择器/参数 popover，本批只占 pill 位。 -->
-          <span class="rounded-[6px] border border-dashed border-[#cddcff] px-[6px] py-[1px] text-[10.5px] leading-[1.6] text-[#8b949e]">工具位（预留 · 留空）</span>
+               批③ 填左端两格（本行起）；ContextPill 的位置与顺序一格不动。 -->
+          <span class="flex min-w-0 items-center" data-testid="model-slot">
+          <select
+            v-if="aiModel.models.length > 0"
+            data-testid="model-picker"
+            class="max-w-[132px] flex-none rounded-[6px] border border-solid border-[#e3e6ea] bg-white px-[6px] py-[1px] text-[10.5px] leading-[1.6] text-[#57606a] [outline:none] focus-visible:ring-2 focus-visible:ring-[#2563eb]/40 disabled:cursor-default disabled:bg-[#f6f7f9] disabled:text-[#a8b0b8]"
+            :value="aiModel.modelId ?? ''"
+            :disabled="modelPickerDisabled"
+            :title="currentModelLabel"
+            aria-label="选择模型"
+            @change="onModelChange"
+          >
+            <option value="">默认模型</option>
+            <option
+              v-for="model in aiModel.models"
+              :key="`${model.providerId ?? 'env'}:${model.modelId}`"
+              :value="model.modelId"
+            >
+              {{ model.displayName }}{{ model.isDefault ? ' · 默认' : '' }}{{ model.supportsToolCalling ? '' : ' · 无工具' }}
+            </option>
+          </select>
+          <span
+            v-else-if="aiModel.modelsLoaded"
+            data-testid="model-picker-empty"
+            class="flex-none rounded-[6px] border border-dashed border-[#e3e6ea] px-[6px] py-[1px] text-[10.5px] leading-[1.6] text-[#8b949e]"
+          >无可选模型</span>
+          </span>
+          <button
+            type="button"
+            data-testid="params-toggle"
+            class="flex-none rounded-[6px] border border-solid border-[#e3e6ea] bg-white px-[6px] py-[1px] text-[10.5px] leading-[1.6] text-[#57606a] transition-colors duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328] disabled:cursor-default disabled:bg-[#f6f7f9] disabled:text-[#a8b0b8]"
+            :disabled="aiModel.paramsLocked"
+            :aria-expanded="paramsOpen ? 'true' : 'false'"
+            @click="toggleParams"
+          >参数</button>
+          <span
+            v-if="aiModel.paramsLocked"
+            data-testid="params-locked"
+            class="min-w-0 truncate text-[10.5px] leading-[1.6] text-[#8b949e]"
+          >{{ PARAMS_LOCKED_COPY }}</span>
+          <!-- 参数 popover（P2）：三项 + 恢复默认；锚在参数钮下方左对齐 -->
+          <div
+            v-if="paramsOpen && !aiModel.paramsLocked"
+            data-testid="params-popover"
+            class="absolute bottom-[30px] left-0 z-[8] w-[196px] rounded-[9px] border border-solid border-[#e3e6ea] bg-white p-[9px] shadow-[0_4px_14px_rgba(0,0,0,0.12)]"
+          >
+            <label class="mb-[6px] flex items-center gap-[6px] text-[10.5px] text-[#57606a]">
+              <span class="w-[74px] flex-none">temperature</span>
+              <input
+                data-testid="param-temperature"
+                type="number"
+                min="0"
+                max="2"
+                step="0.1"
+                class="min-w-0 flex-1 rounded-[5px] border border-solid border-[#e3e6ea] px-[5px] py-[1px] text-[11px] text-[#1f2328] [outline:none]"
+                :value="paramInput('temperature')"
+                @change="onParamChange('temperature', $event)"
+              />
+            </label>
+            <label class="mb-[6px] flex items-center gap-[6px] text-[10.5px] text-[#57606a]">
+              <span class="w-[74px] flex-none">top_p</span>
+              <input
+                data-testid="param-top-p"
+                type="number"
+                min="0"
+                max="1"
+                step="0.1"
+                class="min-w-0 flex-1 rounded-[5px] border border-solid border-[#e3e6ea] px-[5px] py-[1px] text-[11px] text-[#1f2328] [outline:none]"
+                :value="paramInput('topP')"
+                @change="onParamChange('topP', $event)"
+              />
+            </label>
+            <label class="mb-[6px] flex items-center gap-[6px] text-[10.5px] text-[#57606a]">
+              <span class="w-[74px] flex-none">max_tokens</span>
+              <input
+                data-testid="param-max-tokens"
+                type="number"
+                min="1"
+                step="1"
+                class="min-w-0 flex-1 rounded-[5px] border border-solid border-[#e3e6ea] px-[5px] py-[1px] text-[11px] text-[#1f2328] [outline:none]"
+                :value="paramInput('maxTokens')"
+                @change="onParamChange('maxTokens', $event)"
+              />
+            </label>
+            <button
+              type="button"
+              data-testid="params-reset"
+              class="mt-[2px] rounded-[6px] border border-solid border-[#e3e6ea] bg-white px-[7px] py-[1px] text-[10.5px] text-[#57606a] transition-colors duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]"
+              @click="resetParams"
+            >恢复默认</button>
+          </div>
           <span class="flex-1"></span>
           <span
             v-if="inputText.length > 0"
@@ -974,6 +1080,8 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ArrowRight, ChatDotRound } from '@element-plus/icons-vue'
 import { useAiStore } from '@/stores/ai'
+import { useAiModelStore } from '@/stores/ai-model'
+import { AI_CONFIG_ERROR_TEXT } from '@/constants/ai-settings-copy'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { formatProgressiveTs, TASK_TYPE_LABELS } from '@/utils/format'
 import {
@@ -1017,6 +1125,8 @@ import type { ErrorCard, ErrorCardVariant } from '@/utils/error-card'
 
 const ai = useAiStore()
 const workspace = useWorkspaceStore()
+// 批③：模型/参数状态独立成 store（避开与表格专项在 stores/ai.ts 的相邻 hunk）
+const aiModel = useAiModelStore()
 
 const inputText = ref('')
 /**
@@ -2619,6 +2729,8 @@ const SKELETON_BARS = ['w-[72%]', 'w-[92%]', 'w-[58%]', 'w-[85%]'].map((w) => `$
 
 function probe(): void {
   void ai.probeHealth()
+  // 批③：「重新检测」同时刷新可选模型（可用性变了，选择器要跟着变）
+  void aiModel.ensureModels(true)
 }
 
 /**
@@ -2986,8 +3098,67 @@ function onMsgWrapResized(): void {
   lastMsgScrollHeight = height
 }
 
+
+// ── 批③ 模型选择器 / 参数 popover（P1–P7） ────────────────────────────────────
+//
+// 落点裁决（上下文专项批① 已定）：composer 底栏左端两格 = [模型选择器][参数]，
+// ContextPill 与发送钮的位置与顺序一格不动。
+/** `ai_setting['allow.userParams']=false` 的文案（与设置页同一份词表：后端只给 code）。 */
+const PARAMS_LOCKED_COPY = AI_CONFIG_ERROR_TEXT.PARAMS_LOCKED
+
+const paramsOpen = ref(false)
+
+/** 副标题（P5）：当前模型名；未选/未知时退回既有固定文案。纯展示，不承担切换。 */
+const currentModelLabel = computed(() => aiModel.currentModel?.displayName ?? '流式对话 · 工具调用')
+
+/** P4：选中模型明确声明"不支持工具调用"时出黄条（未知不算降级）。 */
+const modelWithoutToolCalling = computed(
+  () => aiModel.currentModel !== null && aiModel.currentModel.supportsToolCalling === false
+)
+
+/**
+ * 在飞轮不许改模型（P6）：切换是"下一轮生效"，本轮已固化在快照里。
+ * 置灰而不是"改了不生效"——后者会让用户以为切换失败。
+ */
+const modelPickerDisabled = computed(() => ai.loading || ai.suspended)
+
+function onModelChange(event: Event): void {
+  const value = (event.target as HTMLSelectElement).value
+  aiModel.select(value === '' ? null : value)
+}
+
+function toggleParams(): void {
+  if (aiModel.paramsLocked) {
+    return
+  }
+  paramsOpen.value = !paramsOpen.value
+}
+
+/** 输入框回显：用户改过的值优先，否则显示全局默认（空 = 该项未设置）。 */
+function paramInput(key: 'temperature' | 'topP' | 'maxTokens'): string {
+  const own = aiModel.paramsOf(ai.sessionId)[key]
+  const value = own ?? aiModel.defaults[key] ?? null
+  return value == null ? '' : String(value)
+}
+
+function onParamChange(key: 'temperature' | 'topP' | 'maxTokens', event: Event): void {
+  const raw = (event.target as HTMLInputElement).value.trim()
+  const parsed = raw === '' ? null : Number(raw)
+  aiModel.setParam(ai.sessionId, key, parsed === null || Number.isNaN(parsed) ? null : parsed)
+}
+
+function resetParams(): void {
+  aiModel.resetParams(ai.sessionId)
+}
+
+// `/health` 到达（含"重新检测"）即刷新策略与默认值：锁定态与初值都来自后端真值
+watch(() => ai.health, (health) => aiModel.applyHealth(health), { immediate: true })
+
 onMounted(async () => {
   ai.startMirror()
+  // 批③：可用模型清单（面板选择器）+ 本会话参数回显
+  void aiModel.ensureModels()
+  aiModel.paramsOf(ai.sessionId)
   ai.startWorkspaceSync()
   void ai.probeHealth()
   // RC-4：先判本页签是不是**复制页签**（Web Locks 探活）再读历史 —— 复制页签会发现场换新会话，

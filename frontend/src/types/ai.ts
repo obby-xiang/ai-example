@@ -648,3 +648,41 @@ export interface ContextSnapshot {
   /** `?ledger=1` 时才返回（最近 20 条压缩事件） */
   ledger?: Record<string, unknown>[]
 }
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * 批③（模型配置 · 对话面板 + 契约）：**尾部追加**
+ *
+ * 为什么用「同名 interface 合并」而不是回到文件中部改 `AiChatRequest` / `AiHealth`：
+ * 本文件与表格专项共享（对方在同一文件的工具类型段追加 Sheet*）。把本批的新增全部落在文件末尾，
+ * 两批合并就不存在行号/lint 竞争 —— TypeScript 的 declaration merging 让同名的 interface
+ * 在同一个模块里自然合并，类型面与"就地加两个可选字段"完全等价。
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/** 一轮对话的三项参数覆盖（键名与后端 `AiChatRequest.Params` 的 record 组件名逐字一致）。 */
+export interface AiChatParams {
+  temperature?: number | null
+  topP?: number | null
+  maxTokens?: number | null
+}
+
+/**
+ * `POST /api/ai/chat` 的批③ 增量（可选）。
+ *
+ * - `modelId` 缺省 ⇒ 后端按默认解析链（`is_default` → 首个 enabled → 全局默认 → env）；
+ * - `params` 缺省 ⇒ 全部用全局默认；只带用户真正改过的项（见 `stores/ai-model.ts#patch`）。
+ */
+export interface AiChatRequest {
+  modelId?: string
+  params?: AiChatParams
+}
+
+/**
+ * `/health` 的批③ 增量（additive）。
+ *
+ * - `allowedParams`：`ai_setting['allow.userParams']`，缺省 = true；
+ * - `defaultParams`：全局默认三值（null = 该项未设置）。
+ */
+export interface AiHealth {
+  allowedParams?: boolean
+  defaultParams?: AiChatParams
+}

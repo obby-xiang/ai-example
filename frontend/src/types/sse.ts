@@ -408,6 +408,11 @@ export interface SseDoneFrame extends SseFrameBase {
   attempts?: number
   upstreamEvents?: number
   terminalSignal?: string
+  /**
+   * 批③（additive 键，帧型不变）：本轮请求带了 `params` 但被策略锁住
+   * （`ai_setting['allow.userParams']=false`）⇒ 参数<b>未生效</b>。缺键 = 参数允许或本轮没带。
+   */
+  paramsLocked?: boolean
 }
 
 /**
