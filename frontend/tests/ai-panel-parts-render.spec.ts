@@ -3155,7 +3155,7 @@ describe('R-163B：视觉对齐 demo v6（样式生效 + 横滚止血）', () =>
     // ④ 渲染层真的吐出来了（不是只写在常量里没人用）——逐标签断言产物
     const { renderMarkdown } = await import('@/utils/markdown')
     const { html } = renderMarkdown(
-      '# 一级\n\n## 二级\n\n### 三级\n\n#### 四级\n\n##### 五级\n\n###### 六级\n\n正文 **粗** 与 `chip` 与 [a](https://e.com) 与 ![图](https://e.com/a.png)\n\n- 项\n\n1. 项\n\n> 引用\n\n---\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n\n```js\nconst a = 1\n```\n',
+      '# 一级\n\n## 二级\n\n### 三级\n\n#### 四级\n\n##### 五级\n\n###### 六级\n\n正文 **粗** 与 `chip` 与 [a](https://e.com) 与 ![图](/api/file/1.png)\n\n- 项\n\n1. 项\n\n> 引用\n\n---\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n\n```js\nconst a = 1\n```\n',
       false
     )
     for (const token of [

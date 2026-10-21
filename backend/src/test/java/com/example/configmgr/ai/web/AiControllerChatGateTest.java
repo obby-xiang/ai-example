@@ -79,6 +79,8 @@ class AiControllerChatGateTest {
 
 	private final FakeRateRedis redis = new FakeRateRedis();
 
+	private final com.example.configmgr.ai.run.SecurityEvents securityEvents = new com.example.configmgr.ai.run.SecurityEvents();
+
 	private final AiController controller = controller(this.properties);
 
 	/**
@@ -99,6 +101,89 @@ class AiControllerChatGateTest {
 		assertThat(this.controller.chat(new AiChatRequest(SESSION + "-2", "中".repeat(8192), null), null)
 				.getStatusCode()).as("8192 字符：边界值放行（含 8192 个多字节字符 = 24576 字节 ⇒ 按字符数而非字节数）")
 				.isEqualTo(HttpStatus.OK);
+	}
+
+	/**
+	 * 防护批③ B3-T05：输入侧 DLP 是 <b>mask 后继续</b>（HTTP 200），且脱敏发生在送模型之前。
+	 *
+	 * <p>kill：把 mask 改成"命中即 400" ⇒ 第一条断言立刻变红（那会打断"用户来粘配置"这个主场景）。
+	 */
+	@Test
+	void inputDlpMasksSecretsBeforeTheyReachTheModel() {
+		String key = "s" + "k-" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4";
+
+		ResponseEntity<?> response = this.controller.chat(
+				new AiChatRequest(SESSION, "我的 key 是 " + key + " 帮我看看对不对", null), null);
+
+		assertThat(response.getStatusCode()).as("输入命中只脱敏，不拒绝").isEqualTo(HttpStatus.OK);
+
+		ArgumentCaptor<AiChatRequest> captor = ArgumentCaptor.forClass(AiChatRequest.class);
+		verify(this.service, timeout(2000)).chat(anyString(), captor.capture(), any(SseChatEmitter.class));
+		assertThat(captor.getValue().message()).doesNotContain(key).contains("[REDACTED:API_KEY]");
+		assertThat(this.securityEvents.metrics()).containsEntry("inputRedacted", 1L);
+	}
+
+	@Test
+	void inputDlpLogsOnlyRuleIdsAndNeverTheSecret() {
+		String key = "s" + "k-" + "Zz9Yy8Xx7Ww6Vv5Uu4Tt3Ss2Rr1";
+		ListAppender<ILoggingEvent> appender = new ListAppender<>();
+		appender.start();
+		Logger logger = (Logger) LoggerFactory.getLogger(AiController.class);
+		logger.addAppender(appender);
+
+		try {
+			this.controller.chat(new AiChatRequest(SESSION, "看看这个 " + key, null), null);
+
+			List<String> messages = appender.list.stream().map(ILoggingEvent::getFormattedMessage).toList();
+			assertThat(messages).anySatisfy((message) -> {
+				assertThat(message).contains("输入 DLP 脱敏").contains("命中=1");
+				assertThat(message).as("日志不得含命中原文").doesNotContain(key);
+			});
+		}
+		finally {
+			logger.detachAppender(appender);
+		}
+	}
+
+	/**
+	 * 防护批② B2-T04：未知 page <b>降级不回显、不拒绝</b>（用户裁决 2026-10-21 第 1 条）。
+	 *
+	 * <p>kill：把未知 page 改回 400 ⇒ 第一条断言变红；改成原样回显 ⇒ 第二条断言变红。
+	 */
+	@Test
+	void unknownPageIsDowngradedInsteadOfRejected() {
+		AiChatRequest.Context context = new AiChatRequest.Context("<script>alert(1)</script>", null, null, null,
+				null);
+
+		ResponseEntity<?> response = this.controller.chat(new AiChatRequest(SESSION, "当前在哪一页？", context), null);
+
+		assertThat(response.getStatusCode()).as("未知 page 是降级而不是拒绝").isEqualTo(HttpStatus.OK);
+		ArgumentCaptor<AiChatRequest> captor = ArgumentCaptor.forClass(AiChatRequest.class);
+		verify(this.service, timeout(2000)).chat(anyString(), captor.capture(), any(SseChatEmitter.class));
+		assertThat(captor.getValue().context().page())
+				.isEqualTo(com.example.configmgr.ai.gate.ContextFieldGate.UNKNOWN_PAGE_ID)
+				.doesNotContain("script");
+		assertThat(this.securityEvents.metrics()).containsEntry("contextDowngraded", 1L);
+	}
+
+	@Test
+	void healthExposesTheSecuritySection() {
+		ResponseEntity<Map<String, Object>> response = this.controller.health();
+
+		@SuppressWarnings("unchecked")
+		Map<String, Object> security = (Map<String, Object>) response.getBody().get("security");
+		assertThat(security).as("/health.security（additive）").isNotNull();
+		assertThat(security).containsKeys("inputRejected", "inputRedacted", "outputRedacted", "outputBlocked",
+				"rateLimited", "contextDowngraded", "payloadTruncated", "scope");
+	}
+
+	@Test
+	void rateLimitedRequestsAreCounted() {
+		this.properties.getLimit().setSessionPerMinute(1);
+		this.controller.chat(new AiChatRequest(SESSION, "一", null), null);
+		this.controller.chat(new AiChatRequest(SESSION, "二", null), null);
+
+		assertThat(this.securityEvents.metrics()).containsEntry("rateLimited", 1L);
 	}
 
 	@Test
@@ -299,6 +384,10 @@ class AiControllerChatGateTest {
 		AiController built = rawController(props);
 		ReflectionTestUtils.setField(built, "inputSanitizer", new InputSanitizer());
 		ReflectionTestUtils.setField(built, "aiRateLimiter", new AiRateLimiter(this.redis.redis, props));
+		// 防护批②③ 的三件（同为字段注入）
+		ReflectionTestUtils.setField(built, "inputDlp", new com.example.configmgr.ai.gate.InputDlp());
+		ReflectionTestUtils.setField(built, "contextFieldGate", new com.example.configmgr.ai.gate.ContextFieldGate());
+		ReflectionTestUtils.setField(built, "securityEvents", this.securityEvents);
 		return built;
 	}
 

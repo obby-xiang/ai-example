@@ -26,6 +26,9 @@
     · suspend-decision-concurrent  同一 runId/toolCallId 双路并发决策（恰一个 200、一个 409）
     · lease-scripts                真 Redis 租约脚本冒烟（ACQUIRE/RENEW/FENCED-SET/RELEASE；
                                    会 kill instance-a，须排在最后或单独跑）
+    · rate-limit-shared           防护批③：A 侧 11 次 + B 侧 10 次（同一 sessionId）→ 第 21 次 429。
+                                   证据面 = "限流计数在 Redis 上跨实例共享"，进程内计数会放行第 21 次。
+                                   探针用超长 message（裁决 I2：超长也占额度）⇒ 不必真跑 21 轮模型。
 
 .PARAMETER SharedDb
   两实例共享同一 H2 文件（绝对路径 + AUTO_SERVER=TRUE + DB_CLOSE_DELAY=-1）：
@@ -1323,6 +1326,67 @@ function Case-Lease-Scripts {
     Ok $name
 }
 
+# ── 防护批③ W5：跨实例限流（"共享 Redis 计数，不按实例放大 2×"） ─────────────
+# 判据：A 侧 11 次 + B 侧 10 次（同一 sessionId）⇒ 第 21 次必须 429。
+# 若计数是进程内的，A 只会数到 11、B 数到 10，第 21 次仍会被放行 —— 这条用例正是那个差别的唯一证据。
+#
+# 探针用**超长 message**（8193 字符）：批① 裁决 I2 明确"超长请求同样消耗额度"，
+# 因此不必真跑 21 轮模型（省时省桩），而限流判据不变（限流排在归一化/长度之前）。
+#
+# 守卫（SKIP 而不是假绿）：
+#   · 首跳就 503（AI 未装配 / Redis 不可用）⇒ 闸门根本没跑，SKIP 并点名；
+#   · 首跳就 429 ⇒ 上一个同名前缀的窗口没退，SKIP（同一分钟内不要连跑两次）。
+function Case-RateLimit-Shared {
+    $name = 'rate-limit-shared（防护批③：A11+B10 同一 sessionId → 第 21 次 429）'
+    $sessionId = 'b23l1-ratelimit-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+    $probe = '中' * 8193
+    $other429 = 0
+    $bad = @()
+
+    for ($i = 1; $i -le 20; $i++) {
+        $base = if ($i -le 11) { $BaseA } else { $BaseB }
+        $resp = PostJson $base '/api/ai/chat' @{ sessionId = $sessionId; message = $probe }
+        if ($null -eq $resp) { throw "第 $i 次 POST /api/ai/chat 无响应（$base）" }
+        $status = [int]$resp.status
+        if ($status -eq 503 -and $i -eq 1) {
+            Skip $name ('首跳即 503（AI 未装配或 Redis 不可用），限流闸门未运行：HTTP 503 ' + $resp.text)
+            return
+        }
+        if ($status -eq 429) {
+            $other429++
+            if ($i -eq 1) {
+                Skip $name '首跳即 429，窗口未退（同一分钟内不要连跑本用例）'
+                return
+            }
+        }
+        elseif ($status -ne 400) {
+            $bad += ("第 " + $i + " 次=" + $status)
+        }
+    }
+    if ($bad.Count -gt 0) {
+        throw ("额度内的 20 次应全部 400 MESSAGE_TOO_LONG，实得异常状态：" + ($bad -join ', '))
+    }
+    if ($other429 -gt 0) {
+        throw ("额度内出现 $other429 次 429（20 次额度被提前耗尽：检查 app.ai.limit.session-per-minute 是否为 20）")
+    }
+
+    # 第 21 次打 A：跨实例累计已满 ⇒ 429 + Retry-After + scope=session
+    $last = PostJson $BaseA '/api/ai/chat' @{ sessionId = $sessionId; message = $probe }
+    if ($null -eq $last) { throw '第 21 次 POST /api/ai/chat 无响应（A 侧）' }
+    if ([int]$last.status -ne 429) {
+        throw ("第 21 次期望 429（共享 Redis 计数），实得 HTTP " + $last.status + "：跨实例计数可能被按实例各算一份")
+    }
+    $body = $null
+    try { $body = $last.text | ConvertFrom-Json } catch { $body = $null }
+    if ($null -eq $body -or [string]$body.code -ne 'RATE_LIMITED') {
+        throw ("第 21 次期望 code=RATE_LIMITED，实得 '" + $body.code + "'：" + $last.text)
+    }
+    if ([string]$body.scope -ne 'session') {
+        throw ("期望 scope=session（同 sessionId 额度），实得 '" + $body.scope + "'")
+    }
+    Ok $name
+}
+
 # ── 主流程 ──────────────────────────────────────────────────────────────────
 
 $pendingCases = @{
@@ -1401,6 +1465,7 @@ try {
                 'idempotency' { Case-Idempotency }
                 'instance-kill' { Case-Instance-Kill }
                 'lease-scripts' { Case-Lease-Scripts }
+                'rate-limit-shared' { Case-RateLimit-Shared }
                 default {
                     if ($pendingCases.ContainsKey($c)) { Skip $c $pendingCases[$c] }
                     else { No $c '未知用例名' }

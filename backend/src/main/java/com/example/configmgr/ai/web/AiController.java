@@ -6,7 +6,10 @@ import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.RedisAvailability;
 import com.example.configmgr.ai.gate.ConfirmGate;
 import com.example.configmgr.ai.gate.AiRateLimiter;
+import com.example.configmgr.ai.gate.ContextFieldGate;
+import com.example.configmgr.ai.gate.InputDlp;
 import com.example.configmgr.ai.gate.InputSanitizer;
+import com.example.configmgr.ai.gate.SafetyRules;
 import com.example.configmgr.ai.feedback.AiFeedback;
 import com.example.configmgr.ai.feedback.AiFeedbackRepository;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
@@ -19,6 +22,7 @@ import com.example.configmgr.ai.run.ResumeService;
 import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
+import com.example.configmgr.ai.run.SecurityEvents;
 import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.run.StartupResumeRunner;
 import com.example.configmgr.ai.session.SessionGate;
@@ -159,6 +163,25 @@ public class AiController {
 	private AiRateLimiter aiRateLimiter;
 
 	/**
+	 * 防护批③ B3-1：输入侧 DLP（脱敏后继续）。字段注入的理由同 {@link #inputSanitizer}：
+	 * 既有 {@code new AiController(...)} 的用例零触碰。
+	 */
+	@Autowired(required = false)
+	private InputDlp inputDlp;
+
+	/**
+	 * 防护批③ B2-5：{@code context} 形状闸（白名单化 + 降级不回显）。未注入时退化为"不闸"。
+	 */
+	@Autowired(required = false)
+	private ContextFieldGate contextFieldGate;
+
+	/**
+	 * 防护批③ B3-5：安全事件计数（{@code /health.security}）。未注入时 {@code /health} 少这一段。
+	 */
+	@Autowired(required = false)
+	private SecurityEvents securityEvents;
+
+	/**
 	 * 模型配置专项批①：配置快照（{@code /health} 的 additive 扩展面）。同为**字段注入**：
 	 * 构造器签名不变 ⇒ 既有 {@code new AiController(...)} 的用例零触碰；未注入时
 	 * {@code /health} 的旧键照旧、新键缺省（"无 provider"口径）。
@@ -227,6 +250,9 @@ public class AiController {
 		// 超长体绕过限流做免费试探）。同时它在会话门之前：被限流的请求不该占住一个 in-flight 位。
 		AiRateLimiter.Decision rate = this.aiRateLimiter.check(request.sessionId(), clientIp(httpRequest));
 		if (!rate.allowed()) {
+			if (this.securityEvents != null) {
+				this.securityEvents.rateLimited();
+			}
 			return rateLimited(rate);
 		}
 		// 批① 闸门 2：归一化（只归一不拦截，§5.1 #2）。先归一后量长度 —— 量的是"真正进模型的那份"，
@@ -247,13 +273,36 @@ public class AiController {
 		// 批① 闸门 3：长度（§5.1 #1 / 数据最小化 R5）。超限**拒绝不截断**：截断会让模型基于半句话下结论。
 		int maxChars = this.properties.getInput().getMaxChars();
 		if (sanitized.text().length() > maxChars) {
+			if (this.securityEvents != null) {
+				this.securityEvents.inputRejected();
+			}
 			return json(HttpStatus.BAD_REQUEST, messageTooLong(sanitized.text().length(), maxChars));
 		}
 
 		String sessionId = request.sessionId();
-		// 归一后的文本才是进模型/进记忆的那份（原始 request 不可变，故换一个新 record）
-		AiChatRequest effective = sanitized.changed()
-				? new AiChatRequest(sessionId, sanitized.text(), request.context()) : request;
+		// 批② 新段（追加在既有五道闸之后，既有闸顺序不变）：
+		// ① context 形状闸 —— 白名单化 + **降级不回显**（用户裁决 2026-10-21 第 1 条：不拒绝请求）；
+		// ② 输入 DLP —— 高置信凭据 mask 后继续（同裁决第 2 条）。
+		ContextFieldGate.Result gated = this.contextFieldGate == null ? null : this.contextFieldGate.sanitize(request.context());
+		AiChatRequest.Context effectiveContext = gated == null ? request.context() : gated.context();
+		if (gated != null && gated.downgraded() > 0) {
+			if (this.securityEvents != null) {
+				this.securityEvents.contextDowngraded(gated.downgraded());
+			}
+		}
+		InputDlp.Result dlp = this.inputDlp == null ? null : this.inputDlp.mask(sanitized.text());
+		String modelText = sanitized.text();
+		if (dlp != null && dlp.hit()) {
+			modelText = dlp.text();
+			// 只记规则 id 与处数（命中原文可能是密钥，日志里不得出现）
+			log.info("输入 DLP 脱敏 sessionId={} 命中={} 处 规则={}", sessionId, dlp.redacted(), dlp.rules());
+			if (this.securityEvents != null) {
+				this.securityEvents.inputRedacted(dlp.redacted());
+			}
+			appendSafety(sessionId, null, "input", dlp.hits());
+		}
+		// 归一后的文本 / 闸后的 context 才是进模型/进记忆的那份（原始 request 不可变，故换一个新 record）
+		AiChatRequest effective = new AiChatRequest(sessionId, modelText, effectiveContext);
 		String runId = UUID.randomUUID().toString();
 		SessionGate.Busy busy = this.sessionGate.acquire(sessionId, runId);
 		if (busy != null) {
@@ -303,6 +352,11 @@ public class AiController {
 				|| !StringUtils.hasText(request.toolCallId())) {
 			return json(HttpStatus.BAD_REQUEST, Map.of("code", "BAD_REQUEST", "message", "runId 与 toolCallId 均为必填"));
 		}
+		// 防护批③ B2-6：{@code reason} 长度闸（与 {@code ai_feedback.reason} 同尺 1024）。
+		// 它是人工路径（误伤面小），但<b>会原样回填模型</b> —— 不闸就等于给了一条无上限的注入通道。
+		if (request.reason() != null && request.reason().length() > REASON_MAX_CHARS) {
+			return json(HttpStatus.BAD_REQUEST, reasonTooLong(request.reason().length()));
+		}
 		// B23L1 批②b（读侧续期 touchActiveRun，方案第 5 条）：<b>先续命再落决策</b> —— 挂起线程可能早已不在本实例
 		// （挂起在 A、决策落在 B），卡的后台数据只能由"有人在读/在写"这件事本身来续。
 		// 自带终态判据：轮已终态 / 快照已删 ⇒ 不续期（不养孤儿键）。
@@ -343,8 +397,21 @@ public class AiController {
 		// B23L1 批②b：读侧续期（同 /confirm 的口径：先续命再落回灌）
 		this.runStore.touchActiveRun(request.runId());
 		boolean cancelled = Boolean.TRUE.equals(request.cancelled());
+		// 防护批③ B2-7：回灌载荷闸 —— 机器数据超限**截断并标记**（不像用户输入那样 400：
+		// 表格摘要本来就可能很长，拒绝回灌会让前端工具永远无法收尾）。
+		String result = request.result();
+		boolean truncated = false;
+		if (result != null && result.length() > FRONTEND_RESULT_MAX_CHARS) {
+			result = result.substring(0, FRONTEND_RESULT_MAX_CHARS) + "…（结果过长已截断）";
+			truncated = true;
+			if (this.securityEvents != null) {
+				this.securityEvents.payloadTruncated();
+			}
+			log.info("前端工具结果超限已截断 runId={} toolCallId={} 原长度={} 上限={}", request.runId(),
+					request.toolCallId(), request.result().length(), FRONTEND_RESULT_MAX_CHARS);
+		}
 		ConfirmGate.Submission submission = this.confirmGate.submitFrontendResult(request.runId(),
-				request.toolCallId(), request.result(), request.source(), cancelled, request.outcome());
+				request.toolCallId(), result, request.source(), cancelled, request.outcome());
 		if (submission.outcome() == ConfirmGate.Outcome.NOT_FOUND) {
 			return json(HttpStatus.CONFLICT, unknownToolCall(request.runId(), request.toolCallId()));
 		}
@@ -370,6 +437,7 @@ public class AiController {
 		body.put("resumeTriggered", submission.resumeTrigger().triggered());
 		body.put("resumeOutcome", submission.resumeTrigger().outcome());
 		body.put("storedBy", this.runStore.instanceId());
+		body.put("truncated", truncated);
 		return ResponseEntity.ok(body);
 	}
 
@@ -659,6 +727,32 @@ public class AiController {
 	}
 
 	/**
+	 * 安全台账（防护批③ B3-7；{@code ai:safety:<sessionId>}）。
+	 *
+	 * <p>
+	 * 只记 {@code atMs/runId/side/ruleId/offset/length/action} —— <b>命中原文一律不落盘</b>
+	 * （它本身就是凭据）。输入侧命中的 block 档规则也只记 {@code masked}：
+	 * 输入侧从不阻断，写成 blocked 会误导复盘。
+	 */
+	private void appendSafety(String sessionId, String runId, String side, List<SafetyRules.Hit> hits) {
+		if (hits == null || hits.isEmpty()) {
+			return;
+		}
+		long now = System.currentTimeMillis();
+		for (SafetyRules.Hit hit : hits) {
+			Map<String, Object> entry = new LinkedHashMap<>();
+			entry.put("atMs", now);
+			entry.put("runId", runId);
+			entry.put("side", side);
+			entry.put("ruleId", hit.ruleId());
+			entry.put("offset", hit.start());
+			entry.put("length", hit.end() - hit.start());
+			entry.put("action", "input".equals(side) || !hit.block() ? "masked" : "blocked");
+			this.runStore.appendSafetyEvent(sessionId, entry);
+		}
+	}
+
+	/**
 	 * 400 {@code MESSAGE_TOO_LONG}（批① 闸门 2）。稳定码 + 中文文案 + 两枚数字 ——
 	 * <b>不回显原文</b>（它可能本身就是敏感数据，且长度已足够定位问题）。
 	 */
@@ -668,6 +762,18 @@ public class AiController {
 		body.put("message", "消息长度 " + length + " 字符，超过单条上限 " + limit + " 字符；请拆分或缩短后重发（本接口不做截断）");
 		body.put("length", length);
 		body.put("limit", limit);
+		return body;
+	}
+
+	/**
+	 * 400 {@code REASON_TOO_LONG}（防护批③ B2-6）。稳定码 + 两枚数字，<b>不回显原因原文</b>。
+	 */
+	private static Map<String, Object> reasonTooLong(int length) {
+		Map<String, Object> body = new LinkedHashMap<>();
+		body.put("code", "REASON_TOO_LONG");
+		body.put("message", "拒绝原因 " + length + " 字符，超过上限 " + REASON_MAX_CHARS + " 字符；请缩短后重新提交决策");
+		body.put("length", length);
+		body.put("limit", REASON_MAX_CHARS);
 		return body;
 	}
 
@@ -985,6 +1091,11 @@ public class AiController {
 		// 作业看门狗观测面（R-96 批 B，Q1）：tracked / judgedDeadTotal / judgedTimeoutTotal / lastScanAt，
 		// 与上面 AI 通道的投递池指标同一姿态 —— 作业侧失联/超时收敛在 /health 可观测。
 		body.put("jobWatchdog", this.jobWatchdog.metrics());
+		// 防护批③ B3-6（additive）：安全事件计数 —— 进程内口径，见 SecurityEvents 类注。
+		// 未注入时<b>不写</b>该键（"未装配"与"全 0"必须可区分，与 contextLimitTokens 同姿态）。
+		if (this.securityEvents != null) {
+			body.put("security", this.securityEvents.metrics());
+		}
 		if (!this.availability.isAvailable()) {
 			body.put("message", this.availability.reason());
 			return json(HttpStatus.SERVICE_UNAVAILABLE, body);
@@ -1105,6 +1216,15 @@ public class AiController {
 	 */
 	private static final long NO_TRANSPORT_DEADLINE = -1L;
 
+	/** 确认门 {@code reason} 的字符上限（防护批③ B2-6；与 {@code ai_feedback.reason} 同尺）。 */
+	public static final int REASON_MAX_CHARS = 1024;
+
+	/**
+	 * 前端工具结果回灌的单条字符上限（防护批③ B2-7；与 {@code app.ai.tool-result.max-chars} 同尺）。
+	 * 超限<b>截断 + 标记</b>而不是 400 —— 见 {@code frontendToolResult} 的注释。
+	 */
+	public static final int FRONTEND_RESULT_MAX_CHARS = 8000;
+
 	/** 挂起项快照（诊断用：确认门/前端工具各自等在哪里）。 */
 	@GetMapping("/pending/{runId}")
 	public ApiResponse<List<Map<String, Object>>> pending(@PathVariable String runId) {
@@ -1159,7 +1279,11 @@ public class AiController {
 			entry.setReason(reason.length() > 1024 ? reason.substring(0, 1024) : reason);
 		}
 		if (excerpt != null) {
-			entry.setMessageExcerpt(excerpt.length() > 200 ? excerpt.substring(0, 200) : excerpt);
+			// 防护批③ B3-8：摘录<b>永久入库</b>（H2），误伤不可逆 ⇒ 命中高置信凭据即整条替换为 [已隐去]，
+			// 而不是逐处脱敏（逐处脱敏会把"这条曾被脱敏"的事实一起模糊掉）。
+			SafetyRules.Masked maskedExcerpt = SafetyRules.mask(excerpt);
+			String safeExcerpt = maskedExcerpt.redacted() > 0 ? "[已隐去]" : maskedExcerpt.text();
+			entry.setMessageExcerpt(safeExcerpt.length() > 200 ? safeExcerpt.substring(0, 200) : safeExcerpt);
 		}
 		this.aiFeedbackRepository.save(entry);
 		return ResponseEntity.ok(ApiResponse.ok(Map.of("saved", saved, "cancelled", false)));

@@ -76,6 +76,25 @@ class AiControllerFeedbackTest {
 		assertThat(existing.getMessageExcerpt()).isEqualTo("被评价消息正文快照");
 	}
 
+	/**
+	 * 防护批③ B3-T12：{@code excerpt} 是<b>永久入库</b>（H2），命中高置信凭据即整条替换为 {@code [已隐去]}
+	 * —— 逐处脱敏会把"这条曾被脱敏"的事实模糊掉，而这里误伤不可逆。
+	 */
+	@Test
+	void excerptContainingASecretIsStoredAsRedactedPlaceholder() throws Exception {
+		when(this.feedbackRepository.findByMessageId("m-9")).thenReturn(null);
+		String key = "s" + "k-" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4";
+
+		this.mockMvc.perform(post("/api/ai/feedback").contentType(MediaType.APPLICATION_JSON)
+				.content("{\"messageId\":\"m-9\",\"sessionId\":\"s-1\",\"rating\":1,\"excerpt\":\"回复里带出 " + key
+						+ " 这一段\"}"))
+			.andExpect(status().isOk());
+
+		ArgumentCaptor<AiFeedback> captor = ArgumentCaptor.forClass(AiFeedback.class);
+		verify(this.feedbackRepository).save(captor.capture());
+		assertThat(captor.getValue().getMessageExcerpt()).isEqualTo("[已隐去]").doesNotContain(key);
+	}
+
 	@Test
 	void ratingZeroCancelsByDeletingRow() throws Exception {
 		AiFeedback existing = new AiFeedback();

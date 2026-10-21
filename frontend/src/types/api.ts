@@ -74,7 +74,9 @@ export const ErrorCode = {
   /** 400：生成式表单 schema 越白名单（后端在工具入参处拒绝不下发，前端防御性登记展示态） */
   FORM_SCHEMA_REJECTED: 'FORM_SCHEMA_REJECTED',
   /** 前端工具条目终态：用户取消/渲染器不可用（结局帧 status 口径，展示态登记） */
-  FRONTEND_CANCELLED: 'FRONTEND_CANCELLED'
+  FRONTEND_CANCELLED: 'FRONTEND_CANCELLED',
+  /** SSE error 帧（防护批③ B3-3）：输出含高置信敏感凭据（私钥块），本轮被安全策略阻断 */
+  SENSITIVE_OUTPUT_BLOCKED: 'SENSITIVE_OUTPUT_BLOCKED'
 } as const
 
 export type ErrorCodeValue = (typeof ErrorCode)[keyof typeof ErrorCode]
