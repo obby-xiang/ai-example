@@ -48,9 +48,35 @@ class GlobalExceptionHandlerTest {
         return source;
     }
 
+    private final Locale originalDefaultLocale = Locale.getDefault();
+
     @AfterEach
     void resetLocale() {
         LocaleContextHolder.resetLocaleContext();
+        Locale.setDefault(originalDefaultLocale);
+    }
+
+    /**
+     * CI 回归：Ubuntu 的 JVM 默认 locale 是 en-US，本机是 zh-CN（见 run 39613094682 的 5 红）。
+     * 无 `Accept-Language` 头 = 默认 zh（S6 口径），不得因 JVM 默认 locale 漂成英文。
+     */
+    @Test
+    void jvmDefaultLocaleDoesNotLeakIntoErrorMessages() {
+        Locale.setDefault(Locale.ENGLISH);
+        LocaleContextHolder.resetLocaleContext();
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/x");
+        assertNull(request.getHeader("Accept-Language"), "本用例的前提：无 Accept-Language 头");
+
+        ResponseEntity<?> response = handlerWithMessages().handleIllegalArg(
+                new IllegalArgumentException("字段编码不能为空"), request);
+        ApiResponse<?> body = assertInstanceOf(ApiResponse.class, response.getBody());
+        assertEquals("字段编码不能为空", body.getMessage(),
+                "无 Accept-Language 时默认 zh，不得随 JVM 默认 locale 取 en");
+
+        ResponseEntity<?> conflict = handlerWithMessages().handleConflict(
+                new ConflictException(ErrorCodes.TASK_FINALIZED, "任务 #7 已终态"), request);
+        ApiResponse<?> conflictBody = assertInstanceOf(ApiResponse.class, conflict.getBody());
+        assertEquals("任务 #7 已终态", conflictBody.getMessage());
     }
 
     @Test
@@ -169,6 +195,24 @@ class GlobalExceptionHandlerTest {
         if (message != null && message.startsWith("error.")) {
             throw new AssertionError("不得回显裸 key：" + message);
         }
+    }
+
+    /** 头畸形 / 空白 / 不支持的语言，一律 zh-CN——不得经 `request.getLocale()` 退到 JVM 默认 locale。 */
+    @Test
+    void localeResolverFallsBackToChineseWhenHeaderUnusable() {
+        LocaleResolver resolver = new WebI18nConfig().localeResolver();
+
+        MockHttpServletRequest malformed = new MockHttpServletRequest();
+        malformed.addHeader("Accept-Language", "en_US;;q=x");
+        assertEquals(Locale.SIMPLIFIED_CHINESE, resolver.resolveLocale(malformed), "畸形头回落 zh");
+
+        MockHttpServletRequest blank = new MockHttpServletRequest();
+        blank.addHeader("Accept-Language", " ");
+        assertEquals(Locale.SIMPLIFIED_CHINESE, resolver.resolveLocale(blank), "空白头回落 zh");
+
+        MockHttpServletRequest unsupported = new MockHttpServletRequest();
+        unsupported.addHeader("Accept-Language", "de-DE");
+        assertEquals(Locale.SIMPLIFIED_CHINESE, resolver.resolveLocale(unsupported), "不支持的语言回落 zh");
     }
 
     @Test

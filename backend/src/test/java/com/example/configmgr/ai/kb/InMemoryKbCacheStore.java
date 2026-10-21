@@ -48,10 +48,11 @@ final class InMemoryKbCacheStore implements KbCacheStore {
     @Override
     public boolean setIfAbsent(String key, String value, Duration ttl) {
         expireIfNeeded(key);
-        if (this.values.containsKey(key)) {
+        // 原子判存+写入（等价 Redis SETNX）：非原子的 containsKey→put 会让并发两线程同时拿到锁，
+        // 冷启动单飞用例在负载下随机红（见 CachedKbSourceTest#twoConcurrentColdStartsDoOnlyOneRemotePull）。
+        if (this.values.putIfAbsent(key, value) != null) {
             return false;
         }
-        this.values.put(key, value);
         if (ttl != null && !ttl.isZero() && !ttl.isNegative()) {
             this.expiresAt.put(key, this.clock.get() + ttl.toMillis());
         }
