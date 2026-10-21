@@ -104,6 +104,14 @@ public class RunSnapshot {
 	/** 续跑过的实例标识（按时间顺序）。 */
 	private List<String> resumedBy = new ArrayList<>();
 
+	/**
+	 * 写入本条快照的<b>租约 epoch</b>（B23L1 批②a）：0 = 无租约写入（单实例/降级路径/旧数据）。
+	 *
+	 * <p>它回答"这条状态是哪一任续跑权写的"：与 {@code ai:fence:run:<runId>} 对账即可判定
+	 * 一次写回是否已被后来者超越（陈旧写不得覆盖新主人的状态）。旧 JSON 没有本字段 ⇒ 0。
+	 */
+	private long runEpoch;
+
 	/** 取证视图（不含 messageJson 正文）。 */
 	public Map<String, Object> asMap() {
 		Map<String, Object> out = new LinkedHashMap<>();
@@ -122,6 +130,7 @@ public class RunSnapshot {
 		out.put("createdAtMs", this.createdAtMs);
 		out.put("updatedAtMs", this.updatedAtMs);
 		out.put("resumedBy", this.resumedBy);
+		out.put("runEpoch", this.runEpoch);
 		return out;
 	}
 

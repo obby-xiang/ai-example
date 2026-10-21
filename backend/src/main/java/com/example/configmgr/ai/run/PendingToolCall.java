@@ -127,6 +127,15 @@ public class PendingToolCall {
 	/** 执行完成时刻（认领先于执行，故 {@code claimedAtMs ≤ executedAtMs}）。 */
 	private long executedAtMs;
 
+	/**
+	 * 认领所用的租约 epoch（B23L1 批②a，additive）：{@code ai:claim:} 的值现在是
+	 * {@code <epoch>|<instanceId>}，本字段是它读回后的结构化副本（0 = 无租约/旧数据）。
+	 *
+	 * <p>用途：换主之后的"旧认领"要能跟当前 fence 对账（旧 epoch 的执行权已失效），
+	 * 因此 epoch 必须随条目可读，而不是只能从 claim 哈希的原始串里剥。
+	 */
+	private long claimedEpoch;
+
 	private long requestedAtMs;
 
 	private long resolvedAtMs;
@@ -152,6 +161,10 @@ public class PendingToolCall {
 	 * <p>取值 = {@code ConfirmGate#await} 在<b>发射请求帧之前</b>置位（{@link RunStore#markRequestEmitted}）；
 	 * {@code null} = 旧数据（本字段引入前的条目）/ 从未发射。刷新恢复只认 {@code true}
 	 * （{@code GET /api/ai/runs/current} 的 {@code req} 字段）。
+	 *
+	 * <p>B23L1 批②a 起<b>存储位置</b>变了：位不再回写进条目 JSON，而是落在独立 HASH
+	 * {@code ai:req:<runId>}（{@code HSETNX}，首写者胜），{@code RunStore} 读出条目后合并；
+	 * 本字段仍是它的读侧视图（回写会与并发决策互相覆盖，见 M-2）。
 	 */
 	private Boolean req;
 
@@ -217,6 +230,7 @@ public class PendingToolCall {
 		out.put("executedBy", this.executedBy);
 		out.put("claimedAtMs", this.claimedAtMs);
 		out.put("executedAtMs", this.executedAtMs);
+		out.put("claimedEpoch", this.claimedEpoch);
 		out.put("requestedAtMs", this.requestedAtMs);
 		out.put("resolvedAtMs", this.resolvedAtMs);
 		out.put("expiresAt", this.expiresAt);

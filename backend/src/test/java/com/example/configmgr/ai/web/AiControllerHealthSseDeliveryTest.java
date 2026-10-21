@@ -92,8 +92,36 @@ class AiControllerHealthSseDeliveryTest {
 			.andExpect(jsonPath("$.jobWatchdog.lastScanAt").value("2026-10-11T00:00:00Z"));
 	}
 
+	/**
+	 * B23L1 批②b：租约设施观测面（{@code leaseOk}，additive 字段）。
+	 *
+	 * <p>值必须<b>现算</b>（{@link com.example.configmgr.ai.run.LeaseService#leaseOk()} 每次真打一次
+	 * PING）—— 运维要看的是"现在能不能抢租"，不是"上一次抢的时候行不行"。无租约设施的装配
+	 * （降级/单测）报 {@code false}：键始终存在，调用方不必判空。
+	 */
+	@Test
+	void healthExposesLeaseOkFromTheLeaseFacility() throws Exception {
+		com.example.configmgr.ai.run.LeaseService leases = mock(com.example.configmgr.ai.run.LeaseService.class);
+		when(leases.leaseOk()).thenReturn(true);
+		MockMvc withLease = MockMvcBuilders.standaloneSetup(controller(leases)).build();
+
+		withLease.perform(get("/api/ai/health"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.leaseOk").value(true));
+
+		// 默认装配（RunStore 桩未提供租约设施）：键在、值为 false
+		mockMvc.perform(get("/api/ai/health"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.leaseOk").value(false));
+	}
+
 	/** 只装配被测端点用得到的依赖（其余为桩：本用例不发模型请求、不读 Redis）。 */
 	private AiController controller() {
+		return controller(null);
+	}
+
+	/** 同上，但给 {@code RunStore} 配一个租约设施（{@code leaseOk} 用例）。 */
+	private AiController controller(com.example.configmgr.ai.run.LeaseService leases) {
 		when(this.availability.isAvailable()).thenReturn(true);
 		ConfirmGate gate = mock(ConfirmGate.class);
 		when(gate.frontendToolTimeoutSeconds()).thenReturn(120);
@@ -101,8 +129,12 @@ class AiControllerHealthSseDeliveryTest {
 		when(jobWatchdog.metrics()).thenReturn(java.util.Map.of(
 				"tracked", 0, "judgedDeadTotal", 0L,
 				"judgedTimeoutTotal", 0L, "lastScanAt", "2026-10-11T00:00:00Z"));
+		RunStore store = mock(RunStore.class);
+		if (leases != null) {
+			when(store.leaseService()).thenReturn(leases);
+		}
 		return new AiController(this.availability, provider(), provider(), provider(), mock(ChatMemory.class),
-				mock(ChatMemoryRepository.class), mock(SessionGate.class), gate, mock(RunStore.class),
+				mock(ChatMemoryRepository.class), mock(SessionGate.class), gate, store,
 				mock(RunRegistry.class), mock(CancellationRegistry.class), mock(RedisAvailability.class),
 				mock(ThreadPoolTaskExecutor.class), new ObjectMapper(), new AiProperties(), mock(Environment.class),
 				jobWatchdog);

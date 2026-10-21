@@ -65,8 +65,42 @@ public class InMemoryRunStore extends RunStore {
 	/** T3-2：{@code ai:seq:<runId>} 的进程内替身（已发放最大业务号）。 */
 	private final Map<String, Long> issuedSeqs = new ConcurrentHashMap<>();
 
+	/** B23L1 批②a：{@code ai:req:<runId>}（field=toolCallId, value=置位时刻）。 */
+	private final Map<String, Map<String, String>> reqMarks = new ConcurrentHashMap<>();
+
+	/** B23L1 批②a：{@code ai:decided:<runId>}（field=toolCallId, value={@code status|atMs|instanceId}）。 */
+	private final Map<String, Map<String, String>> decided = new ConcurrentHashMap<>();
+
+	/** B23L1 批②a：续跑权租约的进程内替身（key = {@code ai:lease:run:<runId>} → epoch）。 */
+	private final Map<String, Long> heldEpochs = new ConcurrentHashMap<>();
+
+	/** B23L1 批②a：fence（键 = runId → 已落库的最大 epoch）。 */
+	private final Map<String, Long> fenceEpochs = new ConcurrentHashMap<>();
+
+	/** 取号器（与真实 {@code INCR ai:lease:epoch} 同口径：只增不减）。 */
+	private final java.util.concurrent.atomic.AtomicLong epochSeq = new java.util.concurrent.atomic.AtomicLong();
+
 	/** 与真实 Redis 对齐的往返模式（见类注"对象同一性"）：开启后 {@link #pending} 返回深拷贝。 */
 	private volatile boolean deepCopyPending;
+
+	/**
+	 * B23L1 批②b：可选的<b>真实</b>租约设施（{@link com.example.configmgr.ai.run.LeaseService}）。
+	 *
+	 * <p>未设置时沿用批②a 的进程内替身（永远抢得到、epoch 自增、无 TTL）：既有用例的语义不变。
+	 * 设成真实设施之后，本替身的租约薄口（抢/放/heldEpoch/fence 写）全部交给它，
+	 * 于是"两个实例共享一份 Redis"的 fencing 用例可以跑在同一套语义上。
+	 */
+	private volatile com.example.configmgr.ai.run.LeaseService leaseFacility;
+
+	/** 装配真实租约设施（{@code leaseService()} 与三个薄口随之改走它）。 */
+	public void useLeaseFacility(com.example.configmgr.ai.run.LeaseService leaseService) {
+		this.leaseFacility = leaseService;
+	}
+
+	@Override
+	public com.example.configmgr.ai.run.LeaseService leaseService() {
+		return this.leaseFacility;
+	}
 
 	private static final ObjectMapper JSON = new ObjectMapper();
 
@@ -153,16 +187,123 @@ public class InMemoryRunStore extends RunStore {
 	@Override
 	public void save(RunSnapshot snapshot) {
 		snapshot.setUpdatedAtMs(System.currentTimeMillis());
+		// B23L1 批②a：与真实 RunStore 同语义 —— 持租走 fence 写（陈旧 epoch 拒写、fence 推进），
+		// 不持租保持 plain 写（E3 红线：无租约不拒写）。
+		long epoch = heldRunEpoch(snapshot.getRunId());
+		if (epoch > 0L) {
+			long fence = this.fenceEpochs.getOrDefault(snapshot.getRunId(), 0L);
+			if (fence > epoch) {
+				return;
+			}
+			snapshot.setRunEpoch(epoch);
+			this.fenceEpochs.put(snapshot.getRunId(), epoch);
+		}
 		this.runs.put(snapshot.getRunId(), snapshot);
 		// 与真实实现同一联动口径（T2b-D#1）：SUSPENDED 建索引、终态清索引、RUNNING 保留
 		String status = snapshot.getStatus();
 		if (RunSnapshot.SUSPENDED.equals(status)) {
 			markSessionCurrent(snapshot.getSessionId(), snapshot.getRunId());
 		}
-		else if (RunSnapshot.DONE.equals(status) || RunSnapshot.FAILED.equals(status)
-				|| RunSnapshot.CANCELLED.equals(status)) {
+		else if (RunSnapshot.isTerminal(status)) {
 			clearSessionCurrent(snapshot.getSessionId(), snapshot.getRunId());
+			releaseRunLease(snapshot.getRunId());
 		}
+	}
+
+	// ── B23L1 批②a：租约 / req 位 / 决策 guard 的进程内替身 ────────────────────
+
+	@Override
+	public java.util.Optional<com.example.configmgr.ai.run.LeaseService.Lease> tryAcquireRunLease(String runId) {
+		String key = runLeaseKey(runId);
+		if (this.leaseFacility != null) {
+			// 真实设施的 TTL 用它的配置（ttl=null ⇒ 走 app.ai.lease.ttl），与生产同口径
+			return this.leaseFacility.tryAcquire(key, null);
+		}
+		Long existing = this.heldEpochs.get(key);
+		long epoch = existing != null ? existing : this.epochSeq.incrementAndGet();
+		this.heldEpochs.put(key, epoch);
+		return java.util.Optional.of(new com.example.configmgr.ai.run.LeaseService.Lease(key, epoch, instanceId()));
+	}
+
+	@Override
+	public com.example.configmgr.ai.run.LeaseService.AcquireResult acquireRunLease(String runId) {
+		if (this.leaseFacility != null) {
+			return this.leaseFacility.acquire(runLeaseKey(runId), null);
+		}
+		// 进程内替身 = 单实例：抢租永远成功（没有"别人持有"这回事）。
+		// created 与真实实现同口径：视图里本来就有 ⇒ 重入（没有释放权）。
+		String key = runLeaseKey(runId);
+		boolean existed = this.heldEpochs.containsKey(key);
+		return new com.example.configmgr.ai.run.LeaseService.AcquireResult(
+				com.example.configmgr.ai.run.LeaseService.AcquireOutcome.ACQUIRED,
+				tryAcquireRunLease(runId).orElse(null), !existed);
+	}
+
+	@Override
+	public void releaseRunLease(String runId) {
+		if (this.leaseFacility != null) {
+			this.leaseFacility.releaseIfHeld(runLeaseKey(runId));
+			return;
+		}
+		this.heldEpochs.remove(runLeaseKey(runId));
+	}
+
+	@Override
+	public long heldRunEpoch(String runId) {
+		if (this.leaseFacility != null) {
+			return this.leaseFacility.heldEpoch(runLeaseKey(runId));
+		}
+		return this.heldEpochs.getOrDefault(runLeaseKey(runId), 0L);
+	}
+
+	@Override
+	public PendingToolCall markRequestEmitted(String runId, String toolCallId, long atMs) {
+		PendingToolCall pending = pending(runId, toolCallId);
+		if (pending == null || !PendingToolCall.PENDING.equals(pending.getStatus())) {
+			return pending;
+		}
+		reqTable(runId).putIfAbsent(toolCallId, String.valueOf(atMs));
+		return pending(runId, toolCallId);
+	}
+
+	@Override
+	public DecisionClaim tryRecordDecision(String runId, String toolCallId, String status) {
+		String value = status + "|" + System.currentTimeMillis() + "|" + instanceId();
+		String winner = decidedTable(runId).putIfAbsent(toolCallId, value);
+		return winner == null ? new DecisionClaim(true, value) : new DecisionClaim(false, winner);
+	}
+
+	@Override
+	public String decisionOf(String runId, String toolCallId) {
+		return decidedTable(runId).get(toolCallId);
+	}
+
+	@Override
+	public String decidedStatus(String runId, String toolCallId) {
+		String raw = decisionOf(runId, toolCallId);
+		if (raw == null) {
+			return null;
+		}
+		int sep = raw.indexOf('|');
+		return sep < 0 ? raw : raw.substring(0, sep);
+	}
+
+	@Override
+	public boolean touchActiveRun(String runId) {
+		return touchActiveRun(get(runId));
+	}
+
+	@Override
+	public boolean touchActiveRun(RunSnapshot snapshot) {
+		if (snapshot == null || snapshot.getRunId() == null) {
+			return false;
+		}
+		if (RunSnapshot.isTerminal(snapshot.getStatus())) {
+			return false;
+		}
+		// 无 TTL 可续：语义等价于"值匹配才续期"（不属于自己的轮不动作）
+		renewSessionCurrent(snapshot.getSessionId(), snapshot.getRunId());
+		return true;
 	}
 
 	@Override
@@ -178,6 +319,11 @@ public class InMemoryRunStore extends RunStore {
 		this.ledger.remove(runId);
 		this.events.remove(runId);
 		this.issuedSeqs.remove(runId);
+		// B23L1 批②a：租约/fence/req/decided 同属"本轮的全部键"
+		this.reqMarks.remove(runId);
+		this.decided.remove(runId);
+		this.heldEpochs.remove(runLeaseKey(runId));
+		this.fenceEpochs.remove(runId);
 	}
 
 	@Override
@@ -217,7 +363,13 @@ public class InMemoryRunStore extends RunStore {
 
 	@Override
 	public List<PendingToolCall> pendings(String runId) {
-		return new ArrayList<>(pendingTable(runId).values());
+		List<PendingToolCall> out = new ArrayList<>();
+		for (PendingToolCall item : pendingTable(runId).values()) {
+			applyRequestMarker(runId, item);
+			applyDecisionMarker(runId, item);
+			out.add(item);
+		}
+		return out;
 	}
 
 	// ── session → current 轮索引（T2b-D#1 的进程内替身，语义与真实实现一致） ──
@@ -249,10 +401,40 @@ public class InMemoryRunStore extends RunStore {
 		return sessionId == null ? null : this.sessionCurrent.get(sessionId);
 	}
 
+	/**
+	 * I2①：与生产同口径的读侧合并（只并"可重建"的三种结论；grant-only）。
+	 * 本替身默认返回同一对象引用，故合并会"就地"改到表里那份 —— 与真实实现（每次反序列化新副本）
+	 * 的差异只体现在"是否持久化"，测试断言的是"读侧看得见结论"，两侧一致。
+	 */
+	private void applyDecisionMarker(String runId, PendingToolCall pending) {
+		String guard = this.decided.getOrDefault(runId, java.util.Map.of()).get(pending.getToolCallId());
+		if (guard == null || pending == null || !PendingToolCall.PENDING.equals(pending.getStatus())) {
+			return;
+		}
+		int sep = guard.indexOf('|');
+		String status = sep < 0 ? guard : guard.substring(0, sep);
+		if (!RunStore.mergeableDecisionStatus(status)) {
+			return;
+		}
+		pending.setStatus(status);
+		pending.setExecuted(false);
+		if (PendingToolCall.REJECTED.equals(status)) {
+			pending.setOutcome(com.example.configmgr.ai.tool.ToolOutcome.REJECTED.wire());
+		}
+		else if (PendingToolCall.FRONTEND_CANCELLED.equals(status)) {
+			pending.setOutcome(com.example.configmgr.ai.tool.ToolOutcome.CANCELLED.wire());
+			pending.setCode(com.example.configmgr.ai.tool.ToolOutcome.CODE_FRONTEND_CANCELLED);
+		}
+		else if (PendingToolCall.CANCELLED.equals(status)) {
+			pending.setOutcome(com.example.configmgr.ai.tool.ToolOutcome.CANCELLED.wire());
+			pending.setCode(com.example.configmgr.ai.tool.ToolOutcome.CODE_RUN_CANCELLED);
+		}
+	}
+
 	@Override
-	public PendingToolCall pending(String runId, String toolCallId) {
+	public PendingToolCall pendingRaw(String runId, String toolCallId) {
 		PendingToolCall stored = pendingTable(runId).get(toolCallId);
-		if (!this.deepCopyPending || stored == null) {
+		if (stored == null || !this.deepCopyPending) {
 			return stored;
 		}
 		try {
@@ -263,16 +445,54 @@ public class InMemoryRunStore extends RunStore {
 		}
 	}
 
+	@Override
+	public PendingToolCall pending(String runId, String toolCallId) {
+		PendingToolCall stored = pendingTable(runId).get(toolCallId);
+		if (stored == null) {
+			return null;
+		}
+		PendingToolCall view = stored;
+		if (this.deepCopyPending) {
+			try {
+				view = JSON.readValue(JSON.writeValueAsString(stored), PendingToolCall.class);
+			}
+			catch (Exception ex) {
+				throw new IllegalStateException("待决条目往返序列化失败：" + toolCallId, ex);
+			}
+		}
+		applyRequestMarker(runId, view);
+		applyDecisionMarker(runId, view);
+		return view;
+	}
+
+	/** B23L1 批②a：req 位来自独立表（与 {@code ai:req:} 同口径：只授予、不清除）。 */
+	private void applyRequestMarker(String runId, PendingToolCall pending) {
+		String marker = reqTable(runId).get(pending.getToolCallId());
+		if (marker == null) {
+			return;
+		}
+		pending.setReq(Boolean.TRUE);
+		try {
+			pending.setReqAtMs(Long.parseLong(marker));
+		}
+		catch (NumberFormatException ex) {
+			// 坏值：位成立、时刻缺席（与真实实现同口径）
+		}
+	}
+
 	// ── 认领与台账 ──────────────────────────────────────────────────────────
 
 	@Override
 	public boolean claimExecution(String runId, String toolCallId, String executedBy) {
-		String previous = claimTable(runId).putIfAbsent(toolCallId, executedBy);
+		// B23L1 批②a：值与真实实现同形（<epoch>|<instanceId>），claimedBy 剥前缀
+		long epoch = heldRunEpoch(runId);
+		String previous = claimTable(runId).putIfAbsent(toolCallId, epoch + "|" + executedBy);
 		boolean won = previous == null;
 		if (won) {
 			PendingToolCall pending = pending(runId, toolCallId);
 			if (pending != null) {
 				pending.setClaimedAtMs(System.currentTimeMillis());
+				pending.setClaimedEpoch(epoch);
 				pending.setExecuted(true);
 				pending.setExecutedBy(executedBy);
 				putPending(runId, pending);
@@ -283,7 +503,8 @@ public class InMemoryRunStore extends RunStore {
 
 	@Override
 	public String claimedBy(String runId, String toolCallId) {
-		return claimTable(runId).get(toolCallId);
+		String value = claimTable(runId).get(toolCallId);
+		return value == null ? null : stripEpochPrefix(value);
 	}
 
 	@Override
@@ -299,6 +520,7 @@ public class InMemoryRunStore extends RunStore {
 		// 与真实 RunStore#appendLedger 同构（F5 批准绑定：预检指纹随执行台账留档）
 		record.put("preflightHash", pending.getPreflight() == null ? null
 				: pending.getPreflight().get("reportHash"));
+		record.put("epoch", pending.getClaimedEpoch() > 0L ? pending.getClaimedEpoch() : heldRunEpoch(runId));
 		record.put("resultText", resultText);
 		ledgerList(runId).add(record);
 	}
@@ -488,6 +710,14 @@ public class InMemoryRunStore extends RunStore {
 
 	private Map<String, String> claimTable(String runId) {
 		return this.claims.computeIfAbsent(runId, key -> new ConcurrentHashMap<>());
+	}
+
+	private Map<String, String> reqTable(String runId) {
+		return this.reqMarks.computeIfAbsent(runId, key -> new ConcurrentHashMap<>());
+	}
+
+	private Map<String, String> decidedTable(String runId) {
+		return this.decided.computeIfAbsent(runId, key -> new ConcurrentHashMap<>());
 	}
 
 	private List<Map<String, Object>> ledgerList(String runId) {

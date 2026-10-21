@@ -18,7 +18,6 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Service;
 
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -54,16 +53,16 @@ import java.util.stream.Collectors;
  * <li>状态 {@code RUNNING} → 409（无进程在跑却停在 RUNNING = 僵尸轮，见【待裁决】）；</li>
  * <li>仍有 {@code PENDING} 的<b>外部</b>挂起项（确认门/前端工具）→ 409 {@code PENDING_UNRESOLVED}，
  * 不改任何状态、不发模型请求；</li>
- * <li>runId 级续跑互斥锁（SP-02 §6.2 遗留项）：同一 runId 并发续跑只有一个能进来，
- * 其余 {@code RESUME_IN_PROGRESS}；锁在轮终态释放。</li>
+ * <li><b>续跑权租约</b>（B23L1 批②b，取代 {@code ai:resume:lock:}）：{@code ai:lease:run:<runId>}
+ * 的持有者才是本轮的续跑主人。旧签名自抢（抢不到 ⇒ {@code LEASE_HELD_ELSEWHERE}）；带租约重载
+ * 只校验归属（调用方就是持有者）—— 见 {@link #resume(String, boolean, LeaseService.Lease)}。
+ * 进程内 {@code resuming} 表保留：同进程并发续跑仍然只有一个能进（{@code IN_PROGRESS}）。</li>
  * </ul>
  */
 @Slf4j
 @Service
 @Conditional(AiKeyPresentCondition.class)
 public class ResumeService {
-
-	public static final String RESUME_LOCK_PREFIX = "ai:resume:lock:";
 
 	private final RunStore store;
 
@@ -77,6 +76,12 @@ public class ResumeService {
 
 	private final ThreadPoolTaskExecutor suspendExecutor;
 
+	/**
+	 * <b>保留仅为构造器兼容，锁已摘除</b>（M5）：{@code ai:resume:lock:} 在批②b 整体并入续跑权租约
+	 * （GET-比对-DEL 那条非原子释放会删掉别人的锁）；本字段已无任何读取者，留着是为了不动 10 参
+	 * 兼容构造器（{@code ResumeSkipCascadeTest}/{@code ResumeEnvelopeShapeTest} 等既有用例零改动）。
+	 * 下一次可以改签名的窗口应直接删掉它。
+	 */
 	private final StringRedisTemplate redis;
 
 	private final AiProperties properties;
@@ -86,7 +91,7 @@ public class ResumeService {
 	/** T2：重建历史的 {@code role:tool} 也要过同一份模型侧上限（口径与首轮一致，不因续跑而变）。 */
 	private final ToolResultLimiter limiter;
 
-	/** 进程内续跑互斥（Redis 不可用时仍是最后一道闸）。 */
+	/** 进程内续跑互斥（同进程并发续跑的唯一闸；租约管的是跨实例）。 */
 	private final Map<String, Boolean> resuming = new ConcurrentHashMap<>();
 
 	public ResumeService(RunStore store, RunRegistry registry, MessageJsonCodec codec, ResilientChatService chatService,
@@ -108,7 +113,15 @@ public class ResumeService {
 	public enum Outcome {
 
 		ACCEPTED, NOT_FOUND, ALREADY_DONE, ALREADY_RUNNING, PENDING_UNRESOLVED, IN_PROGRESS, POOL_SATURATED,
-		ALREADY_CANCELLED
+		ALREADY_CANCELLED,
+
+		/**
+		 * B23L1 批②b：本轮的续跑权租约在<b>别的实例</b>手里（或调用方给的租约已过期）。
+		 *
+		 * <p>它不是错误：说明那一轮已经有主（在等卡 / 在驱动 / 正在收尾），本实例什么都不该做。
+		 * 对外统一 409（{@code AiController#resume} 的 switch）。
+		 */
+		LEASE_HELD_ELSEWHERE
 
 	}
 
@@ -203,7 +216,9 @@ public class ResumeService {
 		out.put("ledgerCounts", this.store.ledgerCounts(runId));
 		out.put("instanceId", this.store.instanceId());
 		out.put("keys", Map.of("state", this.store.runKey(runId), "pending", this.store.pendingKey(runId), "ledger",
-				this.store.ledgerKey(runId), "events", this.store.eventsKey(runId), "claim", this.store.claimKey(runId)));
+				this.store.ledgerKey(runId), "events", this.store.eventsKey(runId), "claim", this.store.claimKey(runId),
+				// B23L1 批②b：fencing 的两个契约键也要能在运维面上直接对上（同一个入口拼键，不另拼字符串）
+				"lease", this.store.runLeaseKey(runId), "fence", this.store.fenceKey(runId)));
 		return out;
 	}
 
@@ -212,14 +227,102 @@ public class ResumeService {
 	}
 
 	/**
-	 * 续跑（幂等 + 互斥 + 取消优先 + 可选僵尸接管）。
+	 * 续跑（幂等 + 互斥 + 取消优先 + 可选僵尸接管）—— <b>旧签名</b>：自抢续跑权租约。
+	 *
+	 * <p>既有调用方（{@code StartupResumeRunner} 的启动/僵尸扫描、{@code AiController} 的运维端点）
+	 * <b>零改动</b>即获得 fencing：
+	 * <ol>
+	 * <li>抢 {@code ai:lease:run:<runId>}；抢不到（且本仓有租约设施）⇒ {@code LEASE_HELD_ELSEWHERE}，
+	 * 什么都不动；无租约设施（单测/降级装配）⇒ 走原路径，由进程内互斥兜底；</li>
+	 * <li>走带租约重载 {@link #resume(String, boolean, LeaseService.Lease)}；</li>
+	 * <li>非 {@code ACCEPTED} ⇒ 当场还租；{@code ACCEPTED} ⇒ 交续租调度器
+	 * （终态由 {@code RunStore.save} 释放）。<b>只还自己创建的</b>（{@code AcquireResult#created()}）：
+	 * 可重入命中的租约属于等待方或另一个并发调用方，还了就会把别人的续跑权删掉 ——
+	 * 这正是"并发同主双抢、败方删掉胜方租约"那个缺陷的根因。</li>
+	 * </ol>
 	 *
 	 * @param forceTakeover 仅由<b>启动自动续跑</b>使用的僵尸接管开关（N3）：为 true 时允许
 	 * 接管"状态仍是 {@code RUNNING} 但已超龄"的轮次（上一进程死在模型调用中间留下的僵尸轮）。
 	 * 运维端点不传这个开关（{@code false}），保持"RUNNING 一律 409"的保守语义。
 	 */
 	public ResumeResult resume(String runId, boolean forceTakeover) {
-		if (!acquireResumeLock(runId)) {
+		LeaseService leases = this.store.leaseService();
+		boolean fresh = false;
+		LeaseService.Lease lease = null;
+		if (leases != null) {
+			LeaseService.AcquireResult acquired = this.store.acquireRunLease(runId);
+			if (acquired.outcome() == LeaseService.AcquireOutcome.HELD_ELSEWHERE) {
+				return new ResumeResult(Outcome.LEASE_HELD_ELSEWHERE, Map.of("runId", runId, "resumed", false,
+						"reason", "LEASE_HELD_ELSEWHERE", "instanceId", this.store.instanceId()));
+			}
+			// I4：设施不可用（{@code UNAVAILABLE}）⇒ 走"无租约降级"这条既有路径（进程内互斥放行），
+			// 与 leaseService == null 完全同义。把"我不知道有没有主"报成"别人持有"会让一次 Redis 抖动
+			// 把启动续跑/运维续跑全部 409 掉。
+			// 所有权口径：<b>谁创建谁释放</b>。只有真正建出这一任的调用方才允许交调度器/还租；
+			// 命中现值（同主重入）时 created=false —— 用"抢占前 epoch"推断是错的：并发同主双抢时
+			// 两边读到同一个前置状态，于是败方（撞 resuming 互斥 → IN_PROGRESS）会去还胜方的租约，
+			// 把胜方的 fencing 写打回 plain SET（harness lease-scripts 实锤）。
+			lease = acquired.lease();
+			fresh = acquired.created();
+		}
+		ResumeResult result;
+		try {
+			result = resume(runId, forceTakeover, lease);
+		}
+		catch (RuntimeException ex) {
+			if (fresh) {
+				this.store.releaseRunLease(runId);
+			}
+			throw ex;
+		}
+		if (fresh) {
+			if (result.outcome() == Outcome.ACCEPTED) {
+				// I7：续租带上存活判据 —— 本进程仍在续跑（resuming 表里有它）且快照非终态；
+				// 驱动任务收尾（finally 里摘除 resuming）后下一拍即停续租并还租，
+				// 于是"驱动线程异常退出、快照停在 RUNNING"不会留下永远续租的僵尸租约。
+				leases.markDriving(lease, () -> this.resuming.containsKey(runId) && snapshotNotTerminal(runId));
+			}
+			else {
+				this.store.releaseRunLease(runId);
+			}
+		}
+		return result;
+	}
+
+	/**
+	 * 续跑（<b>带租约重载</b>，B23L1 批②b）：调用方已经是续跑权的主人，本方法<b>不再自抢</b>，
+	 * 只校验归属 —— {@code LeaseService#verifyHeld(key, epoch)}（<b>对着 Redis 真值</b>，一次往返）。
+	 *
+	 * <p>为什么不用"抢"来校验：确认门在等待期就持租（交棒后继续持有），自抢会走可重入短路
+	 * （同一个 epoch、恒成功），于是"拿着过期 epoch 的陈旧驱动方"也能进来 —— 那正是 fencing 要拦的。
+	 * 为什么也不只比对 {@code heldRunEpoch}（进程内视图）：TTL 到期被别人接管后，视图要等下一次
+	 * 续租失败才会清，这个窗口里视图会说谎，而本方法正是"要不要驱动这一轮"的入口。
+	 * 对真值校验才能让"租约已被别的实例接管"在入口处变成 {@link Outcome#LEASE_HELD_ELSEWHERE}；
+	 * 设施不可用（{@code Hold.UNAVAILABLE}）按无租约降级放行（I4 同口径）。
+	 *
+	 * <p>租约的收尾职责在<b>调用方</b>：本方法不 {@code markDriving}、不 {@code release}
+	 * （确认门在 {@code runResume} 里做；旧签名在自己那一层做）。
+	 *
+	 * @param lease 调用方持有的租约；{@code null} = 无租约降级（单测/无 Redis 装配），
+	 * 此时只由进程内互斥排他 —— 与批②b 之前的语义一致
+	 */
+	public ResumeResult resume(String runId, boolean forceTakeover, LeaseService.Lease lease) {
+		if (lease != null) {
+			// I3：归属校验对着 Redis 真值做（一次往返），不用进程内视图 —— 视图在"TTL 已到、续租还没失败"
+			// 的窗口里会说谎，而这个判定正是"要不要驱动这一轮"的入口。
+			LeaseService leases = this.store.leaseService();
+			LeaseService.Hold hold = leases == null ? LeaseService.Hold.UNAVAILABLE
+					: leases.verifyHeld(lease.key(), lease.epoch());
+			if (hold == LeaseService.Hold.LOST) {
+				return new ResumeResult(Outcome.LEASE_HELD_ELSEWHERE, Map.of("runId", runId, "resumed", false,
+						// heldEpoch 是进程内视图（可能在"TTL 已到、续租未失败"窗口里滞后），只作排障参考
+						"reason", "LEASE_HELD_ELSEWHERE", "staleEpoch", lease.epoch(),
+						"heldEpoch", this.store.heldRunEpoch(runId), "instanceId", this.store.instanceId()));
+			}
+			// UNAVAILABLE：设施不可用 ⇒ 与 I4 同口径放行（本方法仍是"调用方已持租"的语义，
+			// 只是这一拍校验不了；后面的杀招是 fence 写与 claimExecution 的 STALE_EPOCH）。
+		}
+		if (this.resuming.putIfAbsent(runId, Boolean.TRUE) != null) {
 			return new ResumeResult(Outcome.IN_PROGRESS, Map.of("runId", runId, "resumed", false,
 					"reason", "RESUME_IN_PROGRESS", "instanceId", this.store.instanceId()));
 		}
@@ -366,8 +469,10 @@ public class ResumeService {
 						out.error("AI_RESUME_FAILED", String.valueOf(ex.getMessage()));
 					}
 					finally {
-						// 轮终态：完成订阅者 + 释放续跑锁（ADR-5 的"轮终态主动释放"同族语义）
-						releaseResumeLock(runId);
+						// 轮终态：完成订阅者 + 摘掉进程内互斥（ADR-5 的"轮终态主动释放"同族语义）。
+						// 续跑权租约不在这里还：终态写进 RunStore.save 时 best-effort 释放（同一个
+						// 唯一写口），此处再还一次只会在"写终态前"制造一个别人可接管的窗口。
+						this.resuming.remove(runId);
 						this.registry.close(runId);
 					}
 				});
@@ -384,8 +489,24 @@ public class ResumeService {
 		}
 		finally {
 			if (!handedOff) {
-				releaseResumeLock(runId);
+				this.resuming.remove(runId);
 			}
+		}
+	}
+
+	/**
+	 * 交棒后的存活判据（I7）：该轮快照仍存在且<b>非终态</b>。
+	 *
+	 * <p>与 {@code resuming} 表合用 = "本进程还有续跑任务在跑，且这一轮还没收尾"。读快照失败
+	 * （Redis 抖动）按"仍活着"处理：误判为假会提前放掉一个正在跑的轮的续跑权。
+	 */
+	private boolean snapshotNotTerminal(String runId) {
+		try {
+			RunSnapshot snapshot = this.store.get(runId);
+			return snapshot != null && !RunSnapshot.isTerminal(snapshot.getStatus());
+		}
+		catch (Exception ex) {
+			return true;
 		}
 	}
 
@@ -433,38 +554,13 @@ public class ResumeService {
 			.build();
 	}
 
-	// ── runId 级续跑互斥锁 ──────────────────────────────────────────────────
-
-	private boolean acquireResumeLock(String runId) {
-		if (this.resuming.putIfAbsent(runId, Boolean.TRUE) != null) {
-			return false;
-		}
-		Duration ttl = this.properties.getResilience().getTotalBudget();
-		try {
-			Boolean acquired = this.redis.opsForValue().setIfAbsent(RESUME_LOCK_PREFIX + runId,
-					this.store.instanceId(), ttl);
-			if (!Boolean.TRUE.equals(acquired)) {
-				this.resuming.remove(runId);
-				return false;
-			}
-		}
-		catch (Exception ex) {
-			log.warn("续跑互斥锁降级为进程内 runId={}：{}", runId, ex.getMessage());
-		}
-		return true;
-	}
-
-	private void releaseResumeLock(String runId) {
-		this.resuming.remove(runId);
-		try {
-			String value = this.redis.opsForValue().get(RESUME_LOCK_PREFIX + runId);
-			if (this.store.instanceId().equals(value)) {
-				this.redis.delete(RESUME_LOCK_PREFIX + runId);
-			}
-		}
-		catch (Exception ex) {
-			log.debug("释放续跑互斥锁失败 runId={}：{}", runId, ex.getMessage());
-		}
-	}
+	// ── 互斥：进程内表 + 续跑权租约（B23L1 批②b 起不再用 ai:resume:lock:） ──────
+	//
+	// 原实现 acquireResumeLock/releaseResumeLock 用 SETNX 拿一把 ai:resume:lock:<runId>，
+	// 释放是"GET → Java 比对 → DEL"：比对与删除之间锁可能已过期并被别的实例重抢，于是
+	// 删掉别人的锁（同一缺陷族见 LeaseService 类注 L6）。互斥语义整体并入续跑权租约：
+	//   · 跨实例 = ai:lease:run:<runId>（epoch 比对在 Lua 里原子完成）；
+	//   · 同进程 = 上面这张 resuming 表（租约可重入，挡不住同进程的两次并发续跑）。
+	// 全仓 grep 确认 ai:resume:lock: 无外部读者后才摘除（运维文档里的历史叙述保留）。
 
 }

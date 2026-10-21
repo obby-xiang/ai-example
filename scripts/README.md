@@ -118,7 +118,7 @@ node scripts/ci/stub-upstream.mjs --self-check [--routes scripts/ci/stub-routes.
 
 ---
 
-## 3. `scripts/b23l1-dual-instance.ps1` —— 双实例 harness（B23L1 批①）
+## 3. `scripts/b23l1-dual-instance.ps1` —— 双实例 harness（B23L1 批①+批②）
 
 ### 3.1 用途边界
 
@@ -132,7 +132,7 @@ node scripts/ci/stub-upstream.mjs --self-check [--routes scripts/ci/stub-routes.
 | 共享 Redis | `127.0.0.1:6379` | 事件日志 `ai:xevents:`、唤醒频道 `ai:wake:`、序号 `ai:seq:` 都在这里 |
 | 上游桩 | `18399` | `scripts/ci/stub-upstream.mjs`（零密钥）；实例以 `AI_API_KEY=b23l1-stub-placeholder` 启动 |
 
-前置：后端 jar 已打包（`mvn -DskipTests package`）、环境有 `java` 与 `node`。脚本自己起子进程并做健康等待：判据 = `/api/ai/health` **扁平响应体**的 `available && redis.available`（该端点无 `data` 包装、也无 `ai` 子对象；AI 不可用时返回 503 但体形不变），缺项整棒 FAIL。起进程前先做 8081/8082/18399 的端口连通性预检（端口被占 ⇒ 直接 FAIL，避免在"旧的健康实例"上产出假绿证据）。
+前置：后端 jar 已打包（`mvn -DskipTests package`）、环境有 `java` 与 `node`。脚本自己起子进程并做健康等待：判据 = `/api/ai/health` **扁平响应体**的 `available && redis.available`（该端点无 `data` 包装、也无 `ai` 子对象；AI 不可用时返回 503 但体形不变），缺项整棒 FAIL。起进程前先做 8081/8082/18399 的端口连通性预检（端口被占 ⇒ 直接 FAIL，避免在"旧的健康实例"上产出假绿证据），并对 `RedisHost:RedisPort` 做连通预检（harness 不自起 Redis，不通即 FAIL）。挂起类用例会在 A 侧自建一个真实 `EXPORT` 任务并 `select-defs`：确认门前的只读预检要求任务存在，chat 也必须带 `context`（否则 `start_export` 不在披露清单里，桩会退化为文本轮）。
 
 ### 3.3 用法
 
@@ -148,7 +148,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/b23l1-dual-insta
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/b23l1-dual-instance.ps1 -Cases suspend-reattach-wake
 ```
 
-退出码：任一用例 FAIL ⇒ `1`；SKIP（批②/③ 依赖未落地）不计退出码。
+退出码：任一用例 FAIL ⇒ `1`；SKIP（批③ 依赖未落地）不计退出码。默认用例 = `reattach-full-replay,reattach-diff,suspend-reattach-wake,suspend-decision,instance-kill`；`instance-kill` 会 kill `instance-a`，恒为最后一条。`lease-scripts` 也会 kill A，且耗时较长（等待方续租/租约过期），须单独跑或排在最后。
 
 ### 3.4 用例面
 
@@ -156,13 +156,16 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/b23l1-dual-insta
 | --- | --- | --- |
 | `reattach-full-replay` | 批① | A 侧一轮跑完，B 侧从 0 回放得到**逐帧同序同号**（连接层无状态） |
 | `reattach-diff` | 批① | B 侧带 `?lastSeq` 只拿到差量，不重不漏 |
-| `suspend-reattach-wake` | 批① | A 侧挂起 → B 侧重挂 → 在 A 批准确认 → 续跑帧**经 `ai:wake:` 扇出到 B 的连接**（终帧到达且 seq 推进） |
-| `suspend-decision` / `instance-kill` | 批② | SKIP：依赖 fencing 租约（跨实例决策只能路由到持有运行线程的实例） |
+| `suspend-reattach-wake` | 批① | A 侧挂起 → B 侧重挂 → 在 A 批准确认 → 续跑帧**经 `ai:wake:` 扇出到 B 的连接**（终帧到达且 seq 推进）；并记录 confirm→B 首帧延迟（P50/P95） |
+| `suspend-decision` | 批② | 决策打 B：`accepted=true` 且 `resumeOutcome=LEASE_HELD_ELSEWHERE`（A 的等待方持租）；`tool_start`/`tool_result` 各恰 1 帧；A、B 双侧重挂都能收到终帧 |
+| `instance-kill` | 批② | `Stop-Child -Name instance-a` 杀真 A；B 的 `/runs/current` 能重建挂起轮；决策落 B 后租约过期由延迟重试接管（预算 `-KillTakeoverTimeoutSec`，默认 90s）；`tool_start` 恰 1 帧、终帧到达、台账 `executedBy=B` 且 `ledgerCounts.start_export=1` |
+| `suspend-decision-concurrent` | 批②（可选） | 同一 runId/toolCallId 双路并发 POST：恰一个 200（accepted）+ 一个 409（`DUPLICATE_TOOL_CALL_ID`）；`confirm_decision`/`tool_start` 各恰 1 帧 |
+| `lease-scripts` | 批②（可选，终止性） | 真 Redis 租约冒烟：`/health.leaseOk=true`；挂起期租约键存在（ACQUIRE）、等待 12s 后 PTTL 回升（RENEW）、fence 键存在且快照 `runEpoch>0`、台账 `epoch>0`（FENCED-SET）、终态后租约键消失（RELEASE）；并发两路 `POST /runs/{runId}/resume` 恰一个 202、一个 409 |
 | `resource-lock` / `idempotency` | 批③ | SKIP：依赖资源互斥租约与幂等键 |
 
 ### 3.5 证据
 
-每用例把帧原文落 `<ArtifactDir>/<case>*.sse.txt`；两个实例与桩的 stdout 落 `<ArtifactDir>/{instance-a,instance-b,stub}.log`。失败时先看"哪一侧没收到/号断在哪"。
+每用例把帧原文落 `<ArtifactDir>/<case>*.sse.txt`；两个实例与桩的 stdout 落 `<ArtifactDir>/{instance-a,instance-b,stub}.log`。失败时先看"哪一侧没收到/号断在哪"。`suspend-reattach-wake` 的订阅就绪哨兵为 `<ArtifactDir>/wake-B.ready.<runId>`（作业写、主线程轮询）；摘要前会打印 `帧延迟（A confirm 完成 → B 首续跑帧）：P50/P95`（L-5 取证，单样本时 P50=P95）。
 
 ---
 

@@ -3,6 +3,7 @@ package com.example.configmgr.ai.gate;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.form.GenerativeFormRules;
 import com.example.configmgr.ai.run.CancellationRegistry;
+import com.example.configmgr.ai.run.LeaseService;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.ResumeService;
 import com.example.configmgr.ai.run.RunRegistry;
@@ -26,7 +27,9 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -90,6 +93,22 @@ import java.util.concurrent.TimeUnit;
  * {@code frontend_tool_result(ok=false)} 与"前端超时"同形，模型据此收尾。</li>
  * </ul>
  * 两道闸门都<b>按工具名自认领</b>（{@code supports}），本类对具体工具名零知识。
+ *
+ * <h2>续跑权 fencing（B23L1 批②b）</h2>
+ * 多实例下"谁在等这张卡 / 谁能推进这一轮"必须有<b>跨进程</b>的答案，进程内的 {@code latches}
+ * 与 {@code submitLock} 都只是实例内事实。两条接线的落点：
+ * <ul>
+ * <li><b>等待方持租</b>（{@link #await}）：进入挂起等待即抢 {@code ai:lease:run:<runId>}，
+ * 心跳按 {@code lease.renew-interval} 续租；决策到达时<b>交棒不释放</b>（原循环接手驱动），
+ * 取消/中断/前端超时等"本轮不驱动"的出口才释放（epoch scoped，错 epoch 不删别人的租约）；</li>
+ * <li><b>触发方抢租</b>（{@link #maybeTriggerResume}）：死卡兜底派发前先抢同一把租约，
+ * 抢不到就<b>不派发</b>（{@code LEASE_HELD_ELSEWHERE}）+ 排一次延迟重试 —— 决策本身早已落库，
+ * "续跑没派出去"不是请求失败；</li>
+ * <li><b>决策 guard</b>（{@code ai:decided:} 的 {@code HSETNX}）：两个实例并发提交同一张卡时
+ * 恰一个 {@code ACCEPTED}、恰一个 {@code DUPLICATE}、回执帧恰一次。</li>
+ * </ul>
+ * 无租约设施（6/8 参兼容构造、无 Redis 的降级装配）时全部退回批②b 之前的口径：
+ * 进程内互斥 + 原死卡兜底。
  */
 @Slf4j
 @Component
@@ -158,20 +177,85 @@ public class ConfirmGate {
 	 */
 	private final Object submitLock = new Object();
 
+	/**
+	 * 续跑权租约设施（B23L1 批②b）。<b>可为 null</b>：6/8 参兼容构造器（单测、局部装配）
+	 * 不注入它 —— 此时走"无租约降级"：派发不带租约、由 {@code ResumeService} 的进程内互斥兜底
+	 * （单实例仍然正确；跨实例由批②a 的 {@code RunStore} fence 写与认领兜底）。
+	 *
+	 * <p>与 {@code RunStore} 注入的是<b>同一个 bean</b>：fence 写（{@code RunStore#save}）读
+	 * {@code heldRunEpoch} 与本类抢/续/放操作的是同一份进程内视图。
+	 */
+	private final LeaseService leaseService;
+
+	/** 抢租失败后的一次性延迟重试调度器（见 {@link RetryScheduler}）。 */
+	private final RetryScheduler retryScheduler;
+
+	/**
+	 * 抢租失败后的<b>一次性</b>延迟重试调度缝（默认 = 守护线程单线程调度器）。
+	 *
+	 * <p>为什么是接口：用例要断言"35s 后重试一次、holder 还活着就不动作、且不再排下一次"，
+	 * 真线程只能 sleep 真实时间（慢且不稳）。生产路径就是 {@code schedule(task, 35s)}。
+	 */
+	interface RetryScheduler {
+
+		AutoCloseable schedule(Runnable task, Duration delay);
+
+	}
+
+	/** 默认重试调度器（守护线程，不阻止 JVM 退出；单线程足够：重试任务是"一次 Redis 读 + 转投"）。 */
+	static final RetryScheduler DEFAULT_RETRY_SCHEDULER = defaultRetryScheduler();
+
+	private static RetryScheduler defaultRetryScheduler() {
+		ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor(runnable -> {
+			Thread thread = new Thread(runnable, "ai-resume-lease-retry");
+			thread.setDaemon(true);
+			return thread;
+		});
+		return (task, delay) -> {
+			long millis = delay == null ? 0L : Math.max(1L, delay.toMillis());
+			var future = executor.schedule(task, millis, TimeUnit.MILLISECONDS);
+			return () -> future.cancel(false);
+		};
+	}
+
+	/** 兼容构造（6 参：既有单测）：无续跑通路、无租约设施。 */
 	public ConfirmGate(RunStore store, RunRegistry registry, AiProperties properties,
 			CancellationRegistry cancellations, ToolActivityBeacon beacon, List<FrontendToolGuard> frontendGuards) {
-		this(store, registry, properties, cancellations, beacon, frontendGuards, null, null);
+		this(store, registry, properties, cancellations, beacon, frontendGuards, null, null, null,
+				DEFAULT_RETRY_SCHEDULER);
 	}
 
 	/**
-	 * Spring 装配路径（T3-6a）：多出 {@code ObjectProvider<ResumeService>}（惰性，解环）与
-	 * 续跑触发的轻量执行器（{@code aiResumeTrigger}，见 {@link #maybeTriggerResume}）。
+	 * 兼容构造（8 参，T3-6a）：有续跑通路、<b>无</b>租约设施 ⇒ 无租约降级
+	 * （派发走 {@code resume(runId)}，由 {@code ResumeService} 自抢或进程内互斥）。
+	 */
+	public ConfirmGate(RunStore store, RunRegistry registry, AiProperties properties,
+			CancellationRegistry cancellations, ToolActivityBeacon beacon, List<FrontendToolGuard> frontendGuards,
+			ObjectProvider<ResumeService> resumeServiceProvider,
+			@Qualifier("aiResumeTrigger") Executor resumeTriggerExecutor) {
+		this(store, registry, properties, cancellations, beacon, frontendGuards, resumeServiceProvider,
+				resumeTriggerExecutor, null, DEFAULT_RETRY_SCHEDULER);
+	}
+
+	/**
+	 * Spring 装配路径（T3-6a + B23L1 批②b）：多出 {@code ObjectProvider<ResumeService>}（惰性，解环）、
+	 * 续跑触发的轻量执行器（{@code aiResumeTrigger}，见 {@link #maybeTriggerResume}）与
+	 * 续跑权租约设施（{@link LeaseService}）。
 	 */
 	@Autowired
 	public ConfirmGate(RunStore store, RunRegistry registry, AiProperties properties,
 			CancellationRegistry cancellations, ToolActivityBeacon beacon, List<FrontendToolGuard> frontendGuards,
 			ObjectProvider<ResumeService> resumeServiceProvider,
-			@Qualifier("aiResumeTrigger") Executor resumeTriggerExecutor) {
+			@Qualifier("aiResumeTrigger") Executor resumeTriggerExecutor, LeaseService leaseService) {
+		this(store, registry, properties, cancellations, beacon, frontendGuards, resumeServiceProvider,
+				resumeTriggerExecutor, leaseService, DEFAULT_RETRY_SCHEDULER);
+	}
+
+	/** 包内构造（测试注入重试调度器）：全部字段的唯一赋值点。 */
+	ConfirmGate(RunStore store, RunRegistry registry, AiProperties properties, CancellationRegistry cancellations,
+			ToolActivityBeacon beacon, List<FrontendToolGuard> frontendGuards,
+			ObjectProvider<ResumeService> resumeServiceProvider, Executor resumeTriggerExecutor,
+			LeaseService leaseService, RetryScheduler retryScheduler) {
 		this.store = store;
 		this.registry = registry;
 		this.properties = properties;
@@ -180,7 +264,21 @@ public class ConfirmGate {
 		this.frontendGuards = frontendGuards == null ? List.of() : List.copyOf(frontendGuards);
 		this.resumeServiceProvider = resumeServiceProvider;
 		this.resumeTriggerExecutor = resumeTriggerExecutor;
+		this.leaseService = leaseService;
+		this.retryScheduler = retryScheduler == null ? DEFAULT_RETRY_SCHEDULER : retryScheduler;
 	}
+
+	/**
+	 * 实际使用的租约设施：构造参数优先，其次 {@code RunStore} 持有的那个。
+	 *
+	 * <p>为什么要兜底：Spring 路径两者是同一个 bean；但测试里 {@code RunStore} 替身可能装配了
+	 * 真实设施而 gate 用 8 参构造器构造（或反之）。以"同一份外置状态的持有者"为准可避免
+	 * "gate 抢到的 epoch 与 fence 写看到的 epoch 不是一回事"这种假绿。
+	 */
+	private LeaseService leases() {
+		return this.leaseService != null ? this.leaseService : this.store.leaseService();
+	}
+
 
 	/**
 	 * 轮快照的 sessionId（索引续期用；快照缺失返回 null，调用方据此跳过续期）。
@@ -316,6 +414,19 @@ public class ConfirmGate {
 		}
 		// 等待上限（null = 无上限；只有即时执行类前端工具有值）
 		Integer timeoutSeconds = this.suspendWaitSeconds(pending);
+		// ===== B23L1 批②b：<b>等待方持租</b>（设计稿 §2.2；方案第 1 条）=====
+		// 从"进入等待"起，本进程是本轮续跑权的主人：另一实例的死卡兜底抢不到租约，于是不会与本
+		// 等待方的原循环双驱动同一轮（重复帧 / settle 分叉）。抢不到（别的实例持有 / 无租约设施 /
+		// Redis 降级）就照常等 —— "抢不到租约"绝不能变成"等不到人"；那条路径的互斥由
+		// woke / ACTIVE_LATCH_IN_PROCESS 与 claimExecution 兜底。
+		LeaseService leases = leases();
+		LeaseService.Lease lease = leases == null ? null
+				: leases.tryAcquire(this.store.runLeaseKey(runId), this.properties.getLease().getTtl()).orElse(null);
+		int renewEveryTicks = leaseRenewEveryTicks();
+		long heartbeatTicks = 0L;
+		// 决策到达 = 把续跑权交棒给驱动方（原循环）；此刻<b>不释放</b>租约：释放会让另一个实例
+		// 在"原循环正在执行已放行工具"的窗口里接管并重放同一轮。
+		boolean handedOff = false;
 		String key = key(runId, pending.getToolCallId());
 		// 先登记闸门再发请求，避免"外部输入已到、闸门还没登记"白等到超时。
 		// F8：复用 arm 的预登记（同一 key 只允许一把）—— 这里无条件 new 会盖掉预登记闸门，
@@ -368,18 +479,27 @@ public class ConfirmGate {
 				}
 				if (fresh != null && fresh.resolved()) {
 					// 决策可能来自本进程（闸门唤醒）也可能来自另一实例（Redis 轮询发现）
+					handedOff = true;
+					handOffLease(lease);
 					return fresh;
 				}
 				long sliceMs = HEARTBEAT_SECONDS * 1000L;
 				if (timeoutSeconds != null) {
 					long remain = startedAt + timeoutSeconds * 1000L - System.currentTimeMillis();
 					if (remain <= 0) {
+						// C1（复审必修）：前端超时<b>不是本轮结束</b> —— 结局文本回填给模型后，本线程继续驱动
+						// （后续帧/工具/续跑都还在这一轮里）。所以超时出口与"决策到达"同形：交棒（不释放）。
+						// 旧实现走 finally 的"未交棒即还租"，等于在轮次仍在跑的时候把续跑权扔回池子：
+						// fencing 失效，另一实例的死卡兜底可以据此接管并双驱动同一轮。
+						handedOff = true;
+						handOffLease(lease);
 						return expireFrontend(runId, pending, timeoutSeconds);
 					}
 					sliceMs = Math.min(sliceMs, remain);
 				}
 				boolean signalled = latch.await(sliceMs);
 				if (!signalled) {
+					heartbeatTicks++;
 					// 工具活动脉冲（韧性看门狗据此在挂起期不计静默，硬规范①）
 					this.beacon.pulse(runId);
 					// T2b-D#1：与心跳同节拍续期 session→current 索引（TTL 对齐 session-ttl，与会话同寿）
@@ -389,6 +509,11 @@ public class ConfirmGate {
 					// 裁决第 4 条：心跳同时续期卡的后台数据（快照/待决/归档/序号），
 					// 于是"会话活着，卡的后台数据就活着"—— 等多久都不会出现"卡还在、挂起态已过期"。
 					this.store.renewSuspensionTtl(runId);
+					// B23L1 批②b：续跑权租约按 lease.renew-interval 续期（默认 10s = 5 跳；
+					// 与 TTL 30s 的关系是 3:1，容忍两次连续续租失败）。等多久都不会"把租约等丢"。
+					if (lease != null && heartbeatTicks % renewEveryTicks == 0L) {
+						renewWaitingLease(lease, runId);
+					}
 					out.heartbeat(heartbeatData(runId, pending, confirm, timeoutSeconds,
 							(System.currentTimeMillis() - startedAt) / 1000));
 				}
@@ -407,12 +532,118 @@ public class ConfirmGate {
 			this.beacon.endGateWait(runId);
 			this.latches.remove(key, latch);
 			this.armedKeys.remove(key);
+			// 续跑权只在"没有交棒"的出口归还（R5：与 C1 对齐后的口径）：
+			// · 决策到达 与 <b>前端超时</b> 都置 handedOff=true —— 两者之后本线程都还在驱动这一轮
+			//   （已放行的工具要执行 / 超时文案回填给模型继续跑），租约交续租调度器、终态由
+			//   RunStore.save 释放，这里<b>不动作</b>；
+			// · 取消 与 中断 是真"本轮不驱动"（前者整轮终止、后者按收尾退出）⇒ 当场还租。
+			// 释放是 epoch scoped（若是迟到的释放，不会删掉新持有者的租约）。
+			if (lease != null && !handedOff) {
+				releaseWaitingLease(lease, runId);
+			}
 			try {
 				cancelHandle.close();
 			}
 			catch (Exception ex) {
 				log.debug("注销取消监听者失败 runId={}：{}", runId, ex.getMessage());
 			}
+		}
+	}
+
+	/**
+	 * 把续跑权<b>交棒</b>给驱动方（决策到达 / 前端超时两个出口同形）：不释放，续租转给调度器。
+	 *
+	 * <p>为什么含续租：等待方退出等待之后，继续驱动这一轮的是外层循环（已放行的工具要执行、
+	 * 后续帧要产出），"持有 + 续租"必须跟着驱动方走；终态由 {@code RunStore.save} 释放
+	 * （那里同时停掉续租任务）。
+	 *
+	 * <p><b>I7 存活判据</b>：续租任务每一拍先问"这一轮还需要我活着吗" —— 快照存在且<b>非终态</b>，
+	 * 且本进程仍是这一任租约的主人（{@code heldRunEpoch == lease.epoch}）。判据转假 ⇒ 停续租 + 释放，
+	 * 于是"驱动线程悄悄死掉、快照停在 RUNNING"不会留下一个永远续租的僵尸租约。
+	 */
+	private void handOffLease(LeaseService.Lease lease) {
+		if (lease == null) {
+			return;
+		}
+		String runId = runIdOf(lease);
+		if (runId == null) {
+			// 键形不认得（非本类拼的键）：没有可靠的存活判据，退回"调用方自己 release"的旧口径
+			LeaseService holder = leases();
+			if (holder != null) {
+				holder.markDriving(lease);
+			}
+			return;
+		}
+		markDrivingGuarded(lease, runId);
+	}
+
+	/**
+	 * 交续租调度器，<b>带存活判据</b>（R2：决策到达 / 前端超时 / 死卡兜底派发三条路径共用）。
+	 *
+	 * <p>判据 = {@link #stillDriving}（快照非终态 ∧ 本进程仍是该 epoch 主人）：判据转假 ⇒
+	 * 停续租 + 归还租约。没有这一层的"恒真续租"会在驱动任务死掉时把租约永久攥住。
+	 */
+	private void markDrivingGuarded(LeaseService.Lease lease, String runId) {
+		LeaseService holder = leases();
+		if (holder == null || lease == null || runId == null) {
+			return;
+		}
+		holder.markDriving(lease, () -> stillDriving(runId, lease));
+	}
+
+	/**
+	 * 交棒后的存活判据（I7）：快照仍非终态，且本进程仍是该租约的主人。
+	 *
+	 * <p>读快照失败（Redis 抖动）按"仍活着"处理：判据误判为假会提前放掉一个正在跑的轮的续跑权，
+	 * 代价远大于多续一拍（续租本身会失败并走 {@code renewTick} 的既有降级）。
+	 */
+	private boolean stillDriving(String runId, LeaseService.Lease lease) {
+		try {
+			RunSnapshot snapshot = this.store.get(runId);
+			if (snapshot == null || RunSnapshot.isTerminal(snapshot.getStatus())) {
+				return false;
+			}
+			return this.store.heldRunEpoch(runId) == lease.epoch();
+		}
+		catch (Exception ex) {
+			return true;
+		}
+	}
+
+	/** 租约键 → runId（键形如 {@code ai:lease:run:<runId>}；不匹配返回 null = 判据退化为恒真）。 */
+	private static String runIdOf(LeaseService.Lease lease) {
+		String key = lease == null ? null : lease.key();
+		String prefix = RunStore.LEASE_RUN_PREFIX;
+		return key != null && key.startsWith(prefix) ? key.substring(prefix.length()) : null;
+	}
+
+	/** 等待期续租的节拍（心跳跳数）= {@code lease.renew-interval} / {@link #HEARTBEAT_SECONDS}，下限 1 跳。 */
+	private int leaseRenewEveryTicks() {
+		Duration interval = this.properties.getLease().getRenewInterval();
+		long millis = interval == null ? 0L : interval.toMillis();
+		return (int) Math.max(1L, Math.round(millis / (HEARTBEAT_SECONDS * 1000.0)));
+	}
+
+	/** 等待期续租：失败只留痕（租约已被接管时，人等人的路径不受影响；fencing 写会拒掉陈旧写）。 */
+	private void renewWaitingLease(LeaseService.Lease lease, String runId) {
+		LeaseService leases = leases();
+		if (leases == null) {
+			return;
+		}
+		if (!leases.renew(lease, this.properties.getLease().getTtl())) {
+			log.warn("等待期续租失败 runId={} epoch={}（租约可能已被另一实例接管：决策仍会正常收敛，"
+					+ "但本进程不再拥有续跑权）", runId, lease.epoch());
+		}
+	}
+
+	/** 等待方离开且<b>没有</b>交棒时的释放（epoch scoped：错 epoch 不删别人的租约）。 */
+	private void releaseWaitingLease(LeaseService.Lease lease, String runId) {
+		LeaseService leases = leases();
+		if (leases == null) {
+			return;
+		}
+		if (!leases.release(lease)) {
+			log.debug("等待方释放续跑租约未生效 runId={} epoch={}（现值已不是自己那一任）", runId, lease.epoch());
 		}
 	}
 
@@ -616,16 +847,55 @@ public class ConfirmGate {
 		}
 	}
 
-	/** 人工决策：先写 Redis，再发回执帧，最后唤醒（帧先于它唤起的后果）。重复提交按状态幂等拒绝（SP-01d V-d2B）。 */
+	/**
+	 * 人工决策：<b>抢决策 guard</b> → 先写 Redis，再发回执帧，最后唤醒（帧先于它唤起的后果）。
+	 * 重复提交按状态幂等拒绝（SP-01d V-d2B）。
+	 *
+	 * <h2>R4（B23L1 批②b）：全集群唯一写者</h2>
+	 * 过去"读 PENDING → 判 → 改写 → 落库"只由 {@code submitLock} 串行化，而那是<b>实例内</b>的锁：
+	 * 两个实例（两个 JVM / 两次请求落在不同实例）会各读一次 PENDING、各改一版、各自落库 ——
+	 * 两次都成功、两帧回执、后写覆盖先写。现在第一件事是抢 {@code ai:decided:<runId>} 的
+	 * {@code HSETNX}（批②a 建设施，单条命令即原子）：抢到的才是唯一写者，抢不到的按已决响应。
+	 *
+	 * <p><b>为什么在 {@code submitLock} 之外抢</b>：那把锁只在<b>本实例</b>内排他，对跨实例的
+	 * 竞争毫无作用；把它包在 guard 外面只会让本实例的提交在锁内多做一次 Redis 往返
+	 * （等待侧 2s 轮询也读这把锁，往返被拉长 = 决策可见性变慢）。guard 的互斥由 Redis 保证，
+	 * 与本地锁正交；本地锁仍然只管"落库 → 发帧 → 唤醒"这三步的帧序。
+	 *
+	 * <p><b>失败/已决分支不写 guard</b>：{@code NOT_FOUND} 与"条目已非 PENDING"（旧客户端/取消/
+	 * 超时先到）都不该占用 guard，否则一条本不该被决的卡会被永久判成"已决"。
+	 *
+	 * <p><b>{@code claim == null} 的处理</b>：真实 {@link RunStore} 永远返回结论或抛异常；
+	 * 只有<b>未实现该口的替身</b>（既有 {@code mock(RunStore.class)} 用例）会返回 null。
+	 * 此时按"本次抢到"继续 —— 语义回落到批②b 之前的"实例内互斥"口径，而不是把一次合法提交
+	 * 打成 NPE。这是刻意的降级分支，不是给生产路径留的后门。
+	 */
 	public Submission submitDecision(String runId, String toolCallId, boolean approved, String reason) {
-		PendingToolCall pending = this.store.pending(runId, toolCallId);
+		PendingToolCall pending = pendingForWrite(runId, toolCallId);
 		if (pending == null) {
 			return new Submission(Outcome.NOT_FOUND, null, false, null);
 		}
 		if (!PendingToolCall.PENDING.equals(pending.getStatus())) {
 			return new Submission(Outcome.DUPLICATE, pending, false, null);
 		}
-		pending.setStatus(approved ? PendingToolCall.APPROVED : PendingToolCall.REJECTED);
+		String decidedStatus = approved ? PendingToolCall.APPROVED : PendingToolCall.REJECTED;
+		RunStore.DecisionClaim claim = this.store.tryRecordDecision(runId, toolCallId, decidedStatus);
+		if (claim != null) {
+			if (!claim.won()) {
+				return convergeOnDecided(runId, toolCallId, claim.recorded());
+			}
+			// guard 到手：读与 guard 之间可能已有"不带 guard 的写者"（取消/前端超时）落库，故复判一次。
+			// 复判必须看<b>原始</b>条目：读侧合并会把我刚写的 guard 回灌进视图，于是"自己把自己判成已决"。
+			// （guard 不存在时没有这件事可判 —— 替身/降级实现，保持批②b 之前的单读路径。）
+			pending = pendingForWrite(runId, toolCallId);
+			if (pending == null) {
+				return new Submission(Outcome.NOT_FOUND, null, false, null);
+			}
+			if (!PendingToolCall.PENDING.equals(pending.getStatus())) {
+				return new Submission(Outcome.DUPLICATE, pending, false, null);
+			}
+		}
+		pending.setStatus(decidedStatus);
 		pending.setReason(reason == null || reason.isBlank()
 				? (approved ? "用户在确认门中批准" : "用户在确认门中拒绝") : reason);
 		// 决策落库时"一定还没执行"：执行由循环内的认领（claimExecution）负责置位
@@ -651,6 +921,90 @@ public class ConfirmGate {
 			woke = signal(runId, toolCallId);
 		}
 		return new Submission(Outcome.ACCEPTED, pending, woke, null, maybeTriggerResume(runId, woke));
+	}
+
+	/**
+	 * <b>写路径</b>读条目：优先 {@link RunStore#pendingRaw}（不做 req/guard 读侧合并）。
+	 *
+	 * <p>为什么写路径必须看原始态：I2① 之后 {@code pending()} 会把 guard 结论合进返回值 ——
+	 * 写者刚抢到 guard 就复读时，会看到"已决"（其实是自己刚写的那条 guard），于是把自己判成重复提交；
+	 * 而 WAL 补齐要判断的也是"存储里还是不是 PENDING"。
+	 *
+	 * <p>替身（未实现 {@code pendingRaw} 的 mock）返回 null 时回落 {@code pending()}：
+	 * 既有用例的桩因此零改动。
+	 */
+	private PendingToolCall pendingForWrite(String runId, String toolCallId) {
+		PendingToolCall raw = this.store.pendingRaw(runId, toolCallId);
+		return raw != null ? raw : this.store.pending(runId, toolCallId);
+	}
+
+	/**
+	 * guard 已被别的写者抢到时的收敛路径（R4 的"恰一次"）：结论已定 ⇒ 按幂等回 {@code DUPLICATE}。
+	 *
+	 * <h2>WAL 修复（不补帧，刻意）</h2>
+	 * guard 有值而条目仍是 {@code PENDING} = 上一写者死在"写 guard → 改条目"之间（{@code ai:decided}
+	 * 就是那条 WAL）。此时按 guard 的值把条目补齐，让等待侧/续跑侧能收敛出结论。
+	 *
+	 * <p><b>这里不发回执帧</b>：抢到 guard 的写者可能只是"还在落库的路上"，本方法无法区分
+	 * "它死了"与"它正在写" —— 发了就会在正常的双写竞争里出现两帧（R4 锁的正是"帧恰一次"）。
+	 * 帧的发送权只属于 guard 的持有者；条目补齐后，后果帧（{@code tool_result} 等）照常由驱动方产出。
+	 */
+	private Submission convergeOnDecided(String runId, String toolCallId, String recorded) {
+		String decidedStatus = statusOfDecision(recorded);
+		// 用"原始"条目：pending() 已经把 guard 结论合进返回值（I2① 的读侧收敛），
+		// 拿合并后的视图判断"要不要补齐"就永远看不到该补的那一态。
+		PendingToolCall pending = this.store.pendingRaw(runId, toolCallId);
+		if (pending == null) {
+			return new Submission(Outcome.NOT_FOUND, null, false, null);
+		}
+		if (!PendingToolCall.PENDING.equals(pending.getStatus())) {
+			return new Submission(Outcome.DUPLICATE, pending, false, null);
+		}
+		if (decidedStatus == null || !RunStore.mergeableDecisionStatus(decidedStatus)) {
+			// I1：不可重建的结论（APPROVED / FRONTEND_RESULT）<b>不写裸状态</b> —— 前者需要执行侧字段
+			// （executed=false 等由驱动方按 E2 语义补），后者的 resultText 就是用户填的值，裸写会把载荷抹掉。
+			// 读侧（RunStore#applyDecisionMarker）对这两类同样不合并 ⇒ 卡继续显示为待处理，不出现"已决但没内容"。
+			return new Submission(Outcome.DUPLICATE, pending, false, null);
+		}
+		// WAL 修复：条目补齐成 guard 记录的结论（执行/发帧都不在这里做）。读侧已据 guard 收敛，
+		// 这里的写是<b>持久化</b>同一条结论（否则下次读走别的路径时结论会消失）。
+		pending.setStatus(decidedStatus);
+		pending.setExecuted(false);
+		pending.setResolvedAtMs(System.currentTimeMillis());
+		pending.setReason("由另一实例落库的决策（guard=" + decidedStatus + "）；本条为 WAL 补齐");
+		if (PendingToolCall.REJECTED.equals(decidedStatus)) {
+			pending.setOutcome(ToolOutcome.REJECTED.wire());
+			pending.setCode(null);
+			pending.setResultText("用户拒绝了该操作，工具未执行。");
+		}
+		else if (PendingToolCall.FRONTEND_CANCELLED.equals(decidedStatus)) {
+			pending.setOutcome(ToolOutcome.CANCELLED.wire());
+			pending.setCode(ToolOutcome.CODE_FRONTEND_CANCELLED);
+		}
+		else if (PendingToolCall.CANCELLED.equals(decidedStatus)) {
+			pending.setOutcome(ToolOutcome.CANCELLED.wire());
+			pending.setCode(ToolOutcome.CODE_RUN_CANCELLED);
+		}
+		synchronized (this.submitLock) {
+			this.store.putPending(runId, pending);
+		}
+		log.warn("决策 guard 已被另一写者持有 runId={} toolCallId={} guard={}（按幂等拒绝；条目按 WAL 补齐，不补发回执帧）",
+				runId, toolCallId, recorded);
+		// I2②：补出来的结论必须有驱动者 —— 否则这张卡停在"已决 + 没人推进"（尤其确认门没有超时兜底）。
+		// 走的就是死卡兜底同一条判定（woke=false：本进程确实没有等待方，否则会走到 WOKE/ACTIVE_LATCH 分支）。
+		Submission converged = new Submission(Outcome.DUPLICATE, pending, false, null,
+				maybeTriggerResume(runId, false));
+		return converged;
+	}
+
+	/** guard 原值 {@code <status>|<atMs>|<instanceId>} → status；格式不认识返回 null。 */
+	private static String statusOfDecision(String recorded) {
+		if (recorded == null || recorded.isBlank()) {
+			return null;
+		}
+		int sep = recorded.indexOf('|');
+		String status = sep < 0 ? recorded : recorded.substring(0, sep);
+		return status.isBlank() ? null : status;
 	}
 
 	/** 前端工具结果回灌（保持既有四参口径：非取消路径）。 */
@@ -692,7 +1046,7 @@ public class ConfirmGate {
 	 */
 	public Submission submitFrontendResult(String runId, String toolCallId, String result, String source,
 			boolean cancelled, String outcome) {
-		PendingToolCall pending = this.store.pending(runId, toolCallId);
+		PendingToolCall pending = pendingForWrite(runId, toolCallId);
 		if (pending == null) {
 			return new Submission(Outcome.NOT_FOUND, null, false, null);
 		}
@@ -704,9 +1058,26 @@ public class ConfirmGate {
 		}
 		FrontendToolGuard.Verdict verdict = inspectResult(pending, result);
 		if (verdict != null && !verdict.accepted()) {
+			// 复核不过<b>不落 guard</b>：状态不变、挂起继续等待，用户修正后还能重试
+			// （占了 guard 就再也没有"第二次机会"了 —— 一次不合法的提交不该把卡消费掉）。
 			log.warn("前端工具回灌被安全闸拒绝 runId={} toolCallId={} name={} code={}（状态不变，挂起继续等待）：{}",
 					runId, toolCallId, pending.getName(), verdict.code(), verdict.reasons());
 			return new Submission(Outcome.REJECTED, pending, false, verdict);
+		}
+		// R4：与 submitDecision 同一套 guard（详见该方法的"全集群唯一写者"）。
+		RunStore.DecisionClaim claim = this.store.tryRecordDecision(runId, toolCallId,
+				PendingToolCall.FRONTEND_RESULT);
+		if (claim != null) {
+			if (!claim.won()) {
+				return convergeOnDecided(runId, toolCallId, claim.recorded());
+			}
+			pending = pendingForWrite(runId, toolCallId);
+			if (pending == null) {
+				return new Submission(Outcome.NOT_FOUND, null, false, null);
+			}
+			if (!PendingToolCall.PENDING.equals(pending.getStatus())) {
+				return new Submission(Outcome.DUPLICATE, pending, false, null);
+			}
 		}
 		pending.setStatus(PendingToolCall.FRONTEND_RESULT);
 		ToolOutcome declared = ToolOutcome.fromWire(outcome);
@@ -745,6 +1116,12 @@ public class ConfirmGate {
 	 * （且与"没人响应"的超时语义分开，排障时看得清）。
 	 */
 	private Submission dismiss(String runId, PendingToolCall pending, String source) {
+		// R4：放弃同样是"这张卡的结论"，与决策/回灌争同一把 guard（两个页签同时关表单只落一次）
+		RunStore.DecisionClaim claim = this.store.tryRecordDecision(runId, pending.getToolCallId(),
+				PendingToolCall.FRONTEND_CANCELLED);
+		if (claim != null && !claim.won()) {
+			return convergeOnDecided(runId, pending.getToolCallId(), claim.recorded());
+		}
 		pending.setStatus(PendingToolCall.FRONTEND_CANCELLED);
 		pending.setOutcome(ToolOutcome.CANCELLED.wire());
 		pending.setCode(ToolOutcome.CODE_FRONTEND_CANCELLED);
@@ -776,14 +1153,17 @@ public class ConfirmGate {
 	 * （都不是 PENDING），续跑会走正常路径（重建历史 → 执行已决工具），死闸门组合天然消失，
 	 * 不需要任何"活闸门检测"（原 S3-7 方案作废）。
 	 *
-	 * <h2>四个前置判据（缺一不触发）</h2>
+	 * <h2>五个前置判据（缺一不触发）</h2>
 	 * <ol>
 	 * <li>{@code woke=true} → 本进程的等待方已被唤醒，正常续跑路径已成立（{@code WOKE_IN_PROCESS_GATE}）；</li>
 	 * <li>{@link #hasActiveLatch(String)} → 本进程仍有该 runId 的活跃等待
 	 *     （R4③ 的毫秒窗：{@code saveSuspended} 写完、latch 还没登记时同进程 confirm 也会看到
 	 *     {@code woke=false}）—— 触发会双驱动同一轮（{@code ACTIVE_LATCH_IN_PROCESS}）；</li>
 	 * <li>快照存在且状态为 {@code SUSPENDED}（{@code SNAPSHOT_NOT_SUSPENDED}）；</li>
-	 * <li>{@link ResumeService} 可用（无 key 的降级装配下 provider 返回 null，{@code NO_RESUME_SERVICE}）。</li>
+	 * <li>{@link ResumeService} 可用（无 key 的降级装配下 provider 返回 null，{@code NO_RESUME_SERVICE}）；</li>
+	 * <li><b>抢到续跑权租约</b>（B23L1 批②b）：等价于"全集群没有别的实例在等/在驱动这一轮"。
+	 *     抢不到 ⇒ 不派发（{@code LEASE_HELD_ELSEWHERE}）+ 排一次延迟重试；
+	 *     无租约设施（兼容构造/降级装配）⇒ 走原逻辑，不带租约派发。</li>
 	 * </ol>
 	 *
 	 * <p><b>触发点是异步的（A9）</b>：动作交给 {@link #resumeTriggerExecutor}（轻量池，
@@ -793,9 +1173,19 @@ public class ConfirmGate {
 	 * {@link RunStore#claimExecution} 的原子认领仍是"工具恰好一次"的最终兜底。
 	 *
 	 * <p>真实续跑结局由 {@link #runResume} 在执行时打 INFO 日志（ACCEPTED /
-	 * ALREADY_RUNNING / PENDING_UNRESOLVED / POOL_SATURATED / 异常都留痕）。
+	 * ALREADY_RUNNING / LEASE_HELD_ELSEWHERE / PENDING_UNRESOLVED / POOL_SATURATED / 异常都留痕）。
 	 */
 	private ResumeTrigger maybeTriggerResume(String runId, boolean woke) {
+		return triggerResume(runId, woke, true);
+	}
+
+	/**
+	 * 触发判定与派发（{@link #maybeTriggerResume} 与"抢租失败后的延迟重试"共用）。
+	 *
+	 * @param allowRetry 抢租失败时是否排一次延迟重试。派发路径 true；<b>重试任务自身 false</b> ——
+	 * 一次性重试不会自我续命（holder 活着就一直重排会让一个死卡永久占用重试线程）
+	 */
+	private ResumeTrigger triggerResume(String runId, boolean woke, boolean allowRetry) {
 		if (woke) {
 			return ResumeTrigger.skipped("WOKE_IN_PROCESS_GATE", null);
 		}
@@ -814,14 +1204,52 @@ public class ConfirmGate {
 		if (this.resumeServiceProvider.getIfAvailable() == null) {
 			return ResumeTrigger.skipped("NO_RESUME_SERVICE", "续跑服务不可用（无 AI key 的降级装配）");
 		}
+		// ===== B23L1 批②b：抢续跑权租约（方案第 2 条）=====
+		// 只有抢到租约的实例才派发续跑：另一实例在同一轮上已经在驱动（或正在等这张卡）时，
+		// 这里的第二次派发会双驱动同一轮。抢不到<b>不影响决策落库</b> —— 决策、回执帧、唤醒
+		// 都已在本方法之前完成，这里只决定"要不要把续跑派出去"。
+		LeaseService leases = leases();
+		if (leases == null) {
+			// 无租约设施（6/8 参兼容构造、单测、无 Redis 降级装配）：原逻辑派发，不带租约。
+			// 单实例仍然正确（进程内互斥）；跨实例由批②a 的 fence 写与 claimExecution 兜底。
+			return dispatchResume(runId, null, false);
+		}
+		String leaseKey = this.store.runLeaseKey(runId);
+		// 可重入：本进程可能在等待期（或上一次派发/上一次续跑）已持租 —— 此时"释放/交调度器"的职责
+		// 不属于本次调用，释放会把正在等/正在驱动的那一任租约删掉。判据取 {@code created}
+		// （脚本告诉我们"这一任是不是我建的"），不再用"抢占前是否持租"去猜：后者在并发下发同时
+		// 两边都会读到"未持租"（与 ResumeService 同型的缺陷，见该处的注释）。
+		LeaseService.AcquireResult acquired = leases.acquire(leaseKey, this.properties.getLease().getTtl());
+		if (acquired.outcome() == LeaseService.AcquireOutcome.UNAVAILABLE) {
+			// I4：设施不可用 ⇒ 无租约降级（与"没有租约设施"同口径）：派发不带租约，
+			// 由 ResumeService 的进程内互斥兜底。把"不知道"当成"别人持有"会让 Redis 抖一下就停止续跑。
+			log.warn("续跑权租约不可用，按无租约降级派发 runId={}", runId);
+			return dispatchResume(runId, null, false);
+		}
+		LeaseService.Lease lease = acquired.lease();
+		if (lease == null) {
+			log.info("死卡兜底不派发 runId={} outcome=LEASE_HELD_ELSEWHERE（另一实例持有续跑租约，"
+					+ "决策已落库，由它续跑）", runId);
+			if (allowRetry) {
+				scheduleLeaseRetry(runId);
+			}
+			return ResumeTrigger.skipped("LEASE_HELD_ELSEWHERE", "另一实例持有续跑租约");
+		}
+		return dispatchResume(runId, lease, acquired.created());
+	}
+
+	/** 把续跑动作交给轻量执行器；池饱和时<b>先还租约</b>再如实回报（A9 口径不变）。 */
+	private ResumeTrigger dispatchResume(String runId, LeaseService.Lease lease, boolean fresh) {
 		try {
-			this.resumeTriggerExecutor.execute(() -> runResume(runId));
+			this.resumeTriggerExecutor.execute(() -> runResume(runId, lease, fresh));
 		}
 		catch (RejectedExecutionException ex) {
+			releaseLeaseQuietly(lease, runId, fresh);
 			log.warn("死卡兜底续跑未派发（触发池饱和）runId={}：{}", runId, ex.getMessage());
 			return ResumeTrigger.skipped("EXECUTOR_SATURATED", "续跑触发池已饱和，本次未派发");
 		}
 		catch (RuntimeException ex) {
+			releaseLeaseQuietly(lease, runId, fresh);
 			log.warn("死卡兜底续跑派发失败 runId={}：{}", runId, ex.getMessage());
 			return ResumeTrigger.skipped("DISPATCH_FAILED", String.valueOf(ex.getMessage()));
 		}
@@ -829,12 +1257,43 @@ public class ConfirmGate {
 		return ResumeTrigger.dispatched();
 	}
 
-	/** 触发任务本体：调 {@link ResumeService#resume(String)} 并把结局打 INFO 日志留痕（A9 的"饱和/结局可见"）。 */
-	private void runResume(String runId) {
+	/**
+	 * 抢租失败后的一次性延迟重试（{@code app.ai.lease.retry-delay}，默认 35s = TTL + 5s 余量）。
+	 *
+	 * <p>救的是"holder 已经死了但它没来得及释放"的场景：TTL 到期后本实例就能接管。
+	 * holder 还活着时重试同样无害 —— 抢租仍失败，走 {@code allowRetry=false} 的静默分支，
+	 * 不再排下一次（否则一张死卡会永久占用重试线程）。
+	 */
+	private void scheduleLeaseRetry(String runId) {
+		try {
+			this.retryScheduler.schedule(() -> {
+				try {
+					triggerResume(runId, false, false);
+				}
+				catch (Exception ex) {
+					log.warn("续跑租约重试异常 runId={}：{}", runId, ex.getMessage());
+				}
+			}, this.properties.getLease().getRetryDelay());
+		}
+		catch (Exception ex) {
+			log.warn("续跑租约重试未排上 runId={}：{}", runId, ex.getMessage());
+		}
+	}
+
+	/**
+	 * 触发任务本体：调 {@link ResumeService#resume(String, boolean, LeaseService.Lease)} 并把结局打
+	 * INFO 日志留痕（A9 的"饱和/结局可见"）。
+	 *
+	 * <p><b>租约职责</b>：{@code fresh=true}（本次抢到的）才由这里收尾 —— 结局 {@code ACCEPTED}
+	 * 交续租调度器（终态由 {@code RunStore.save} 释放），其余结局当场还租。{@code fresh=false}
+	 * 表示租约本来就在本进程手里（等待方/上一次派发），本次不动它。
+	 */
+	private void runResume(String runId, LeaseService.Lease lease, boolean fresh) {
 		try {
 			ResumeService service = this.resumeServiceProvider.getIfAvailable();
 			if (service == null) {
 				log.info("死卡兜底续跑结局 runId={} outcome=NO_RESUME_SERVICE", runId);
+				releaseLeaseQuietly(lease, runId, fresh);
 				return;
 			}
 			// F8 第 3 步：派发（HTTP 线程）与执行（触发池）之间仍有排队窗口 —— 此处再复查一次，
@@ -842,13 +1301,47 @@ public class ConfirmGate {
 			if (hasActiveLatch(runId)) {
 				log.info("死卡兜底续跑放弃 runId={} outcome=ACTIVE_LATCH_IN_PROCESS（执行时复查到本进程仍有活跃等待）",
 						runId);
+				releaseLeaseQuietly(lease, runId, fresh);
 				return;
 			}
-			ResumeService.ResumeResult result = service.resume(runId);
-			log.info("死卡兜底续跑结局 runId={} outcome={} body={}", runId, result.outcome(), result.body());
+			ResumeService.ResumeResult result = lease == null ? service.resume(runId)
+					: service.resume(runId, false, lease);
+			log.info("死卡兜底续跑结局 runId={} outcome={} body={}", runId,
+					result == null ? null : result.outcome(), result == null ? null : result.body());
+			if (lease == null) {
+				return;
+			}
+			if (result != null && result.outcome() == ResumeService.Outcome.ACCEPTED) {
+				if (fresh) {
+					// R2：与 handOffLease 同形的存活判据（快照非终态 ∧ 本进程仍是该 epoch 主人）。
+					// 恒真续租在"驱动任务死了却没写终态"时会永久攥着租约，接管方只能干等。
+					markDrivingGuarded(lease, runId);
+				}
+			}
+			else {
+				releaseLeaseQuietly(lease, runId, fresh);
+			}
 		}
 		catch (Exception ex) {
 			log.error("死卡兜底续跑异常 runId={}", runId, ex);
+			releaseLeaseQuietly(lease, runId, fresh);
+		}
+	}
+
+	/** 还没交棒时归还租约（{@code fresh=false} = 租约不归本次调用管，不动它）。 */
+	private void releaseLeaseQuietly(LeaseService.Lease lease, String runId, boolean fresh) {
+		if (lease == null || !fresh) {
+			return;
+		}
+		LeaseService leases = leases();
+		if (leases == null) {
+			return;
+		}
+		try {
+			leases.release(lease);
+		}
+		catch (Exception ex) {
+			log.debug("派发路径释放续跑租约失败 runId={} epoch={}：{}", runId, lease.epoch(), ex.getMessage());
 		}
 	}
 

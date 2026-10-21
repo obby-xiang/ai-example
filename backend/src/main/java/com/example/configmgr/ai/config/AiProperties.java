@@ -51,6 +51,8 @@ public class AiProperties {
 
 	private Frame frame = new Frame();
 
+	private Lease lease = new Lease();
+
 	/**
 	 * 启动期校验 {@code app.ai.sse.write-timeout} 必须为正（2026-10-10 复核 S3-1 收口：守卫对称化）。
 	 *
@@ -319,6 +321,29 @@ public class AiProperties {
 
 		/** 回填模型的最大字符数（行数未超但字符超限时同样截断）。 */
 		private int maxChars = 8000;
+	}
+
+	/**
+	 * 租约（fencing）设施参数（B23L1 批②a；设计稿 §2.2）。
+	 *
+	 * <p>与本专项的 B3（续跑权 fencing）和 L1（目标资源互斥）共用同一组原语：epoch 由
+	 * {@code INCR ai:lease:epoch} 全局发放（无 TTL，号不回退），租约键带 TTL 并由持有者续租。
+	 *
+	 * <p>取值口径：TTL 30s = "持租进程卡顿/死亡后，别的实例多快能接管" 的上界；续租 10s = TTL/3，
+	 * 容忍两次连续续租失败（网络抖动）而不丢租约；重试 35s = TTL + 5s 余量，抢租失败的一方按它
+	 * 退避重试（批②b 的续跑触发路径消费，本批只建键与设施）。
+	 */
+	@Data
+	public static class Lease {
+
+		/** 租约有效期（秒级冗余：续租间隔的三倍）。 */
+		private Duration ttl = Duration.ofSeconds(30);
+
+		/** 持有者的续租间隔。 */
+		private Duration renewInterval = Duration.ofSeconds(10);
+
+		/** 抢租失败后的退避重试间隔（TTL + 5s 余量）。 */
+		private Duration retryDelay = Duration.ofSeconds(35);
 	}
 
 	/**

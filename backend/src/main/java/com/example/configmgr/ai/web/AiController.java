@@ -233,6 +233,10 @@ public class AiController {
 				|| !StringUtils.hasText(request.toolCallId())) {
 			return json(HttpStatus.BAD_REQUEST, Map.of("code", "BAD_REQUEST", "message", "runId 与 toolCallId 均为必填"));
 		}
+		// B23L1 批②b（读侧续期 touchActiveRun，方案第 5 条）：<b>先续命再落决策</b> —— 挂起线程可能早已不在本实例
+		// （挂起在 A、决策落在 B），卡的后台数据只能由"有人在读/在写"这件事本身来续。
+		// 自带终态判据：轮已终态 / 快照已删 ⇒ 不续期（不养孤儿键）。
+		this.runStore.touchActiveRun(request.runId());
 		boolean approved = Boolean.TRUE.equals(request.approved());
 		ConfirmGate.Submission submission = this.confirmGate.submitDecision(request.runId(), request.toolCallId(),
 				approved, request.reason());
@@ -266,6 +270,8 @@ public class AiController {
 				|| !StringUtils.hasText(request.toolCallId())) {
 			return json(HttpStatus.BAD_REQUEST, Map.of("code", "BAD_REQUEST", "message", "runId 与 toolCallId 均为必填"));
 		}
+		// B23L1 批②b：读侧续期（同 /confirm 的口径：先续命再落回灌）
+		this.runStore.touchActiveRun(request.runId());
 		boolean cancelled = Boolean.TRUE.equals(request.cancelled());
 		ConfirmGate.Submission submission = this.confirmGate.submitFrontendResult(request.runId(),
 				request.toolCallId(), request.result(), request.source(), cancelled, request.outcome());
@@ -324,6 +330,8 @@ public class AiController {
 		if (snapshot == null) {
 			return json(HttpStatus.NOT_FOUND, Map.of("code", "UNKNOWN_RUN", "runId", runId));
 		}
+		// B23L1 批②b：读侧续期（重挂是最强的"有人还在看这张卡"信号；终态/缺失不续期）
+		this.runStore.touchActiveRun(snapshot);
 		SseEmitter emitter = new SseEmitter(NO_TRANSPORT_DEADLINE);
 		SseChatEmitter out = this.runRegistry.of(runId);
 		int replayed = out.replayAndAttach(emitter, lastSeq, isTerminal(snapshot.getStatus()));
@@ -462,6 +470,8 @@ public class AiController {
 		body.put("found", true);
 		body.put("runId", runId);
 		body.put("snapshotStatus", snapshot.getStatus());
+		// B23L1 批②b：读侧续期（快照重载，省掉 touch 内部的一次读；终态快照由 RunStore 判掉）
+		this.runStore.touchActiveRun(snapshot);
 		List<PendingToolCall> pendings = this.runStore.pendings(runId);
 		List<Map<String, Object>> pendingEntries = new ArrayList<>();
 		List<String> unresolvedExternal = new ArrayList<>();
@@ -544,6 +554,9 @@ public class AiController {
 				ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body(result.body());
 			case NOT_FOUND -> json(HttpStatus.NOT_FOUND, result.body());
 			case POOL_SATURATED -> json(HttpStatus.SERVICE_UNAVAILABLE, result.body());
+			// 409 家族（B23L1 批②b 显式列出）：续跑权在别的实例手里 = 这一轮已经有主，
+			// 不是"服务不可用"（不该 503 让运维误以为要扩容），也不是"没找到"。
+			case LEASE_HELD_ELSEWHERE, IN_PROGRESS, ALREADY_RUNNING -> json(HttpStatus.CONFLICT, result.body());
 			default -> json(HttpStatus.CONFLICT, result.body());
 		};
 	}
@@ -771,6 +784,9 @@ public class AiController {
 		body.put("cancellations", Map.of("registeredRuns", this.cancellations.registeredRuns(),
 				"redisPolls", this.cancellations.polls(), "degraded", this.cancellations.degraded()));
 		body.put("instanceId", this.runStore.instanceId());
+		// B23L1 批②b：租约设施自检（additive 字段）。值<b>现算</b>（每次真打一次 PING）——
+		// 运维要看的是"现在能不能抢租"，不是"上一次抢的时候行不行"。无租约设施（降级装配）= false。
+		body.put("leaseOk", this.runStore.leaseService() != null && this.runStore.leaseService().leaseOk());
 		body.put("checkedAt", Instant.now().toString());
 		// 作业看门狗观测面（R-96 批 B，Q1）：tracked / judgedDeadTotal / judgedTimeoutTotal / lastScanAt，
 		// 与上面 AI 通道的投递池指标同一姿态 —— 作业侧失联/超时收敛在 /health 可观测。
