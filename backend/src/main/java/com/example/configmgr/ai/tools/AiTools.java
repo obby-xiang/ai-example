@@ -605,4 +605,151 @@ public class AiTools {
             @ToolParam(description = "选项展示文本（可选，≤100 字符，缺省用 value）", required = false) String label) {
     }
 
+    // ==================== AI 表格操作专项：8 个前端工具（哨兵桩） ====================
+
+    /**
+     * 表格工具的公共披露范围：表格只出现在导出结果页（EXPORT/EXPORT）与上传页（IMPORT/UPLOAD）。
+     *
+     * <p>8 个工具全部是 {@link ToolMeta.Channel#FRONTEND}（副作用在浏览器，业务行数据不出浏览器）；
+     * 写侧 3 个工具额外由前端“人围栏”预览确认（{@code stores/ai.ts} 特判），后端只挂起与回灌。
+     * 方法体一律 {@link #FRONTEND_STUB}；入参由 {@code SheetWriteGuard} 在下发前复核。
+     *
+     * <p>回灌契约（设计稿 §4.2）：读工具恒带“共 N 行/处/组”；写工具成功文本必含“用户已确认”与
+     * “未保存/可撤销”；工具描述里写死“最多 20 行”，与前端常量同源。
+     */
+    @Tool(name = "read_sheet_summary", description = "读取当前激活表格的结构与采样摘要（采样最多 20 行 / 2000 字符），"
+            + "业务行数据不出浏览器；末尾恒回“共 N 行”。适用于“这表有多少行/某地区几行/有哪些列”")
+    @ToolScope({ "task:EXPORT/EXPORT", "task:IMPORT/UPLOAD" })
+    @ToolRisk(ToolMeta.RiskLevel.READ)
+    @ToolCategory(ToolMeta.Category.R)
+    @ToolChannel(ToolMeta.Channel.FRONTEND)
+    public String readSheetSummary(
+            @ToolParam(description = "配置定义编码，例如 CURRENCY") String defCode,
+            @ToolParam(description = "范围：selection（默认）/sheet/columns/rows", required = false) String scope,
+            @ToolParam(description = "投影列（字段编码，最多 5 列）", required = false) String[] columnCodes,
+            @ToolParam(description = "scope=rows 时的 Excel 行号区间，例如 2-41（表头为第 1 行）", required = false) String rowRange,
+            @ToolParam(description = "字段条件（FieldQueryCondition：scopeKeys + fields[{fieldCode,operator,value}]）", required = false) FieldQueryCondition predicate,
+            @ToolParam(description = "采样行数 1..20，默认 5", required = false) Integer limit) {
+        return FRONTEND_STUB;
+    }
+
+    @Tool(name = "aggregate_sheet", description = "按条件/分组聚合当前表格（最多 20 组），只回聚合值不回原始行；"
+            + "兼作写操作的计数级预览引擎（0 行业务数据）。适用于“各地区几行/总额/空值率”")
+    @ToolScope({ "task:EXPORT/EXPORT", "task:IMPORT/UPLOAD" })
+    @ToolRisk(ToolMeta.RiskLevel.READ)
+    @ToolCategory(ToolMeta.Category.R)
+    @ToolChannel(ToolMeta.Channel.FRONTEND)
+    public String aggregateSheet(
+            @ToolParam(description = "配置定义编码") String defCode,
+            @ToolParam(description = "字段条件（FieldQueryCondition）", required = false) FieldQueryCondition predicate,
+            @ToolParam(description = "分组列（字段编码）", required = false) String groupBy,
+            @ToolParam(description = "度量列（字段编码）", required = false) String columnCode,
+            @ToolParam(description = "指标：count/distinct/blankRate/min/max/sum（默认 count）", required = false) String[] metrics,
+            @ToolParam(description = "分组显示上限 1..20（默认 20）", required = false) Integer limit) {
+        return FRONTEND_STUB;
+    }
+
+    @Tool(name = "inspect_columns", description = "诊断当前表头与字段定义的映射（已匹配/缺失/多余/疑似映射，"
+            + "候选最多 20 条），只给建议、不改文件也不改定义")
+    @ToolScope({ "task:EXPORT/EXPORT", "task:IMPORT/UPLOAD" })
+    @ToolRisk(ToolMeta.RiskLevel.READ)
+    @ToolCategory(ToolMeta.Category.R)
+    @ToolChannel(ToolMeta.Channel.FRONTEND)
+    public String inspectColumns(@ToolParam(description = "配置定义编码") String defCode) {
+        return FRONTEND_STUB;
+    }
+
+    @Tool(name = "review_cells", description = "对当前表格做本地校验并聚合报告（必填/类型/枚举/主键重复），"
+            + "明细最多 20 条、恒回“共 N 处”；只报告不修复，不替代服务端预检")
+    @ToolScope({ "task:EXPORT/EXPORT", "task:IMPORT/UPLOAD" })
+    @ToolRisk(ToolMeta.RiskLevel.READ)
+    @ToolCategory(ToolMeta.Category.R)
+    @ToolChannel(ToolMeta.Channel.FRONTEND)
+    public String reviewCells(
+            @ToolParam(description = "配置定义编码") String defCode,
+            @ToolParam(description = "范围：sheet（默认）/selection", required = false) String scope,
+            @ToolParam(description = "字段条件（FieldQueryCondition）", required = false) FieldQueryCondition predicate,
+            @ToolParam(description = "明细条数 1..20（默认 5）", required = false) Integer limit) {
+        return FRONTEND_STUB;
+    }
+
+    @Tool(name = "normalize_column", description = "列归一化：commit=false 只出建议（零写入、采样最多 20 行）；"
+            + "commit=true 只允许 trim/case/width，且必须由用户在预览卡上确认后应用；只改浏览器内存")
+    @ToolScope({ "task:EXPORT/EXPORT", "task:IMPORT/UPLOAD" })
+    @ToolRisk(ToolMeta.RiskLevel.WRITE)
+    @ToolCategory(ToolMeta.Category.W)
+    @ToolChannel(ToolMeta.Channel.FRONTEND)
+    public String normalizeColumn(
+            @ToolParam(description = "配置定义编码") String defCode,
+            @ToolParam(description = "要归一化的列（字段编码，最多 5 列）") String[] columnCodes,
+            @ToolParam(description = "规则：trim/case/width（可执行）；space/number/date（仅建议），最多 3 条") String[] rules,
+            @ToolParam(description = "rule=case 时取值 upper/lower", required = false) String caseMode,
+            @ToolParam(description = "默认 false（只建议）；true = 提交执行（必须经用户确认）", required = false) Boolean commit,
+            @ToolParam(description = "预览档：count（默认）/sample-diff/full-diff", required = false) String preview) {
+        return FRONTEND_STUB;
+    }
+
+    @Tool(name = "replace_values", description = "按列查找替换（wholeCell/contains/prefix/wildcard/regex），"
+            + "必须先给用户看预览（采样最多 20 行）并由用户确认；只改浏览器内存，不落服务端")
+    @ToolScope({ "task:EXPORT/EXPORT", "task:IMPORT/UPLOAD" })
+    @ToolRisk(ToolMeta.RiskLevel.WRITE)
+    @ToolCategory(ToolMeta.Category.W)
+    @ToolChannel(ToolMeta.Channel.FRONTEND)
+    public String replaceValues(
+            @ToolParam(description = "配置定义编码") String defCode,
+            @ToolParam(description = "范围：selection（默认）/sheet/columns/rows/predicate", required = false) String scope,
+            @ToolParam(description = "字段条件（FieldQueryCondition）", required = false) FieldQueryCondition predicate,
+            @ToolParam(description = "目标列（字段编码，1..5 列）") String[] columnCodes,
+            @ToolParam(description = "匹配方式：wholeCell（默认）/contains/prefix/wildcard/regex（wildcard 与 regex 互斥）", required = false) String match,
+            @ToolParam(description = "是否忽略大小写（默认 true）", required = false) Boolean ignoreCase,
+            @ToolParam(description = "查找原文（regex 时为正则原文）") String search,
+            @ToolParam(description = "替换为（可为空串 = 删除子串）", required = false) String replace,
+            @ToolParam(description = "预览档：count（默认）/sample-diff/full-diff", required = false) String preview) {
+        return FRONTEND_STUB;
+    }
+
+    @Tool(name = "update_rows", description = "按条件更新命中行（literal/fillDown/fillSeries/template），"
+            + "必须先给用户看预览（采样最多 20 行）并由用户确认；只改浏览器内存，不落服务端")
+    @ToolScope({ "task:EXPORT/EXPORT", "task:IMPORT/UPLOAD" })
+    @ToolRisk(ToolMeta.RiskLevel.WRITE)
+    @ToolCategory(ToolMeta.Category.W)
+    @ToolChannel(ToolMeta.Channel.FRONTEND)
+    public String updateRows(
+            @ToolParam(description = "配置定义编码") String defCode,
+            @ToolParam(description = "范围：predicate（默认）/selection/sheet/rows", required = false) String scope,
+            @ToolParam(description = "字段条件（FieldQueryCondition；scope=predicate 时必填）", required = false) FieldQueryCondition predicate,
+            @ToolParam(description = "要写入的列与写法（最多 5 条）：columnCode + mode（literal/fillDown/fillSeries/template）+ value|template|start|step") List<SheetSetItem> set,
+            @ToolParam(description = "预览档：count（默认）/sample-diff/full-diff", required = false) String preview) {
+        return FRONTEND_STUB;
+    }
+
+    @Tool(name = "undo_last_sheet_edit", description = "撤销最近一次 AI 对当前表格的修改（反向补丁、深度 1；"
+            + "回灌说明最多 20 行），不改服务端数据；没有可撤销修改时如实回“没有可撤销的 AI 修改”")
+    @ToolScope({ "task:EXPORT/EXPORT", "task:IMPORT/UPLOAD" })
+    @ToolRisk(ToolMeta.RiskLevel.WRITE)
+    @ToolCategory(ToolMeta.Category.W)
+    @ToolChannel(ToolMeta.Channel.FRONTEND)
+    public String undoLastSheetEdit(@ToolParam(description = "配置定义编码") String defCode) {
+        return FRONTEND_STUB;
+    }
+
+    /**
+     * update_rows 的单条写入声明（类型化镜像，让 JSON Schema 自带形状）。
+     *
+     * @param columnCode 目标列（字段编码）
+     * @param mode       literal / fillDown / fillSeries / template
+     * @param value      mode=literal 时的值
+     * @param template   mode=template 时的模板（如 {@code ${code}-${name}}）
+     * @param start      mode=fillSeries 时的起点
+     * @param step       mode=fillSeries 时的步长
+     */
+    public record SheetSetItem(
+            @ToolParam(description = "目标列（字段编码）") String columnCode,
+            @ToolParam(description = "literal/fillDown/fillSeries/template") String mode,
+            @ToolParam(description = "mode=literal 时的值", required = false) Object value,
+            @ToolParam(description = "mode=template 时的模板，引用同表列如 ${code}", required = false) String template,
+            @ToolParam(description = "mode=fillSeries 时的起点", required = false) Object start,
+            @ToolParam(description = "mode=fillSeries 时的步长", required = false) Object step) {
+    }
+
 }

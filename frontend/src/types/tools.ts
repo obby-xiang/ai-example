@@ -26,6 +26,8 @@
  * | set_condition | `page:tasks`, `task:EXPORT` | READ | FRONTEND |
  * | confirm_step | `page:tasks`, `task:EXPORT`, `task:IMPORT` | READ | FRONTEND |
  * | generative_form | `page:tasks`, `task:*` | READ | FRONTEND |
+ * | read_sheet_summary / aggregate_sheet / inspect_columns / review_cells | `task:EXPORT/EXPORT`, `task:IMPORT/UPLOAD` | READ | FRONTEND |
+ * | normalize_column / replace_values / update_rows / undo_last_sheet_edit | `task:EXPORT/EXPORT`, `task:IMPORT/UPLOAD` | WRITE（预览卡人确认） | FRONTEND |
  *
  * 两处**已过期的旧口径**（勿再沿用）：① 四个 `start_*` 曾标 WRITE/BACKEND 且不进确认门，
  * S4.4e 裁决⑥ 已全部升为 `DANGER`（执行前挂起、前端渲染确认卡片，FR-5.3）；
@@ -57,8 +59,8 @@ export type ToolAvailability = 'available' | 'degraded' | 'unavailable'
 /** 工具参数声明（用于执行前校验与说明文本生成）。 */
 export interface ToolArgSpec {
   name: string
-  /** 与后端 @ToolParam 一致的基本类型（`string[]` = 后端 `String[]` 列表参数） */
-  type: 'string' | 'number' | 'boolean' | 'string[]'
+  /** 与后端 @ToolParam 一致的基本类型（`string[]` = 后端 `String[]`；object = 嵌套契约对象） */
+  type: 'string' | 'number' | 'boolean' | 'string[]' | 'object' | 'object[]'
   required: boolean
   description: string
 }
@@ -75,8 +77,40 @@ export interface FrontendToolDescriptor {
   args: ToolArgSpec[]
 }
 
+/** 表格工具名（与后端 @Tool(name=...) 严格同名；设计稿 §3.1）。 */
+export const SHEET_TOOL_NAMES = [
+  'read_sheet_summary',
+  'aggregate_sheet',
+  'inspect_columns',
+  'review_cells',
+  'normalize_column',
+  'replace_values',
+  'update_rows',
+  'undo_last_sheet_edit'
+] as const
+
+export type SheetToolName = (typeof SHEET_TOOL_NAMES)[number]
+
+/** 写侧工具（含撤销）：供 store 特判与风险断言使用。 */
+export const SHEET_WRITE_TOOLS: ReadonlySet<string> = new Set<SheetToolName>([
+  'normalize_column',
+  'replace_values',
+  'update_rows',
+  'undo_last_sheet_edit'
+])
+
+/** 需要“人围栏”预览的写工具（`normalize_column` 仅 commit=true 档；撤销不预览）。 */
+export const SHEET_PREVIEW_TOOLS: ReadonlySet<string> = new Set<string>([
+  'replace_values',
+  'update_rows',
+  'normalize_column'
+])
+
 /** 前端工具名（与后端 @Tool(name=...) 严格同名）。 */
-export type FrontendToolName = 'open_export_file_editor' | 'download_export_files'
+export type FrontendToolName = 'open_export_file_editor' | 'download_export_files' | SheetToolName
+
+/** 表格工具的披露范围：只在“能看到表格”的两个向导步骤（导出结果 / 导入上传后编辑）。 */
+const SHEET_SCOPE_PATTERNS: string[] = ['task:EXPORT/EXPORT', 'task:IMPORT/UPLOAD']
 
 /** 前端工具注册表。 */
 export const FRONTEND_TOOLS: readonly FrontendToolDescriptor[] = [
@@ -103,6 +137,121 @@ export const FRONTEND_TOOLS: readonly FrontendToolDescriptor[] = [
       { name: 'taskId', type: 'number', required: true, description: '任务ID' },
       { name: 'defCodes', type: 'string[]', required: true, description: '配置定义编码列表（必填非空）' }
     ]
+  },
+  // ── AI 表格操作专项：8 个工具（读侧 5 + 写侧 3 + 撤销 1，normalize 双档） ──
+  {
+    name: 'read_sheet_summary',
+    displayName: '读取表格摘要',
+    description: '读取当前表格的结构与采样摘要（最多 20 行采样、2000 字符），业务行数据不出浏览器；末尾恒回“共 N 行”',
+    channel: 'FRONTEND',
+    riskLevel: 'READ',
+    scopePatterns: SHEET_SCOPE_PATTERNS,
+    args: [
+      { name: 'defCode', type: 'string', required: true, description: '配置定义编码' },
+      { name: 'scope', type: 'string', required: false, description: 'selection（默认）/sheet/columns/rows' },
+      { name: 'columnCodes', type: 'string[]', required: false, description: '投影列（≤5）' },
+      { name: 'rowRange', type: 'object', required: false, description: 'scope=rows 时的 Excel 行号区间' },
+      { name: 'predicate', type: 'object', required: false, description: 'FieldQueryCondition 条件' },
+      { name: 'limit', type: 'number', required: false, description: '采样行数 1..20' }
+    ]
+  },
+  {
+    name: 'aggregate_sheet',
+    displayName: '聚合表格',
+    description: '按条件/分组聚合当前表格（最多 20 组），只回聚合值不回原始行；兼作写操作的计数级预览引擎',
+    channel: 'FRONTEND',
+    riskLevel: 'READ',
+    scopePatterns: SHEET_SCOPE_PATTERNS,
+    args: [
+      { name: 'defCode', type: 'string', required: true, description: '配置定义编码' },
+      { name: 'predicate', type: 'object', required: false, description: 'FieldQueryCondition 条件' },
+      { name: 'groupBy', type: 'string', required: false, description: '分组列（字段编码）' },
+      { name: 'columnCode', type: 'string', required: false, description: '度量列（字段编码）' },
+      { name: 'metrics', type: 'string[]', required: false, description: 'count/distinct/blankRate/min/max/sum' },
+      { name: 'limit', type: 'number', required: false, description: '分组显示上限 1..20' }
+    ]
+  },
+  {
+    name: 'inspect_columns',
+    displayName: '诊断列映射',
+    description: '诊断当前表头与字段定义的映射（已匹配/缺失/多余/疑似映射，候选最多 20 条），只建议不改文件',
+    channel: 'FRONTEND',
+    riskLevel: 'READ',
+    scopePatterns: SHEET_SCOPE_PATTERNS,
+    args: [{ name: 'defCode', type: 'string', required: true, description: '配置定义编码' }]
+  },
+  {
+    name: 'review_cells',
+    displayName: '本地校验摘要',
+    description: '对当前表格做本地校验并聚合报告（必填/类型/枚举/主键重复），明细最多 20 条、恒回“共 N 处”',
+    channel: 'FRONTEND',
+    riskLevel: 'READ',
+    scopePatterns: SHEET_SCOPE_PATTERNS,
+    args: [
+      { name: 'defCode', type: 'string', required: true, description: '配置定义编码' },
+      { name: 'scope', type: 'string', required: false, description: 'sheet（默认）/selection' },
+      { name: 'predicate', type: 'object', required: false, description: 'FieldQueryCondition 条件' },
+      { name: 'limit', type: 'number', required: false, description: '明细条数 1..20' }
+    ]
+  },
+  {
+    name: 'normalize_column',
+    displayName: '列归一化',
+    description: '列归一化：commit=false 只出建议（零写入、采样最多 20 行）；commit=true 只允许 trim/case/width，且必须由用户确认后应用',
+    channel: 'FRONTEND',
+    riskLevel: 'WRITE',
+    scopePatterns: SHEET_SCOPE_PATTERNS,
+    args: [
+      { name: 'defCode', type: 'string', required: true, description: '配置定义编码' },
+      { name: 'columnCodes', type: 'string[]', required: true, description: '要归一化的列（≤5）' },
+      { name: 'rules', type: 'string[]', required: true, description: 'trim/case/width（可执行）；space/number/date（仅建议）' },
+      { name: 'case', type: 'string', required: false, description: 'rule=case 时 upper/lower' },
+      { name: 'commit', type: 'boolean', required: false, description: '默认 false（只建议）' },
+      { name: 'preview', type: 'string', required: false, description: 'count/sample-diff/full-diff' }
+    ]
+  },
+  {
+    name: 'replace_values',
+    displayName: '查找替换',
+    description: '按列查找替换（wholeCell/contains/prefix/wildcard/regex），必须先给用户看预览（采样最多 20 行）并由用户确认；只改浏览器内存',
+    channel: 'FRONTEND',
+    riskLevel: 'WRITE',
+    scopePatterns: SHEET_SCOPE_PATTERNS,
+    args: [
+      { name: 'defCode', type: 'string', required: true, description: '配置定义编码' },
+      { name: 'scope', type: 'string', required: false, description: 'selection（默认）/sheet/columns/rows/predicate' },
+      { name: 'predicate', type: 'object', required: false, description: 'FieldQueryCondition 条件' },
+      { name: 'columnCodes', type: 'string[]', required: true, description: '目标列（1..5）' },
+      { name: 'match', type: 'string', required: false, description: 'wholeCell（默认）/contains/prefix/wildcard/regex' },
+      { name: 'ignoreCase', type: 'boolean', required: false, description: '默认 true' },
+      { name: 'search', type: 'string', required: true, description: '查找原文' },
+      { name: 'replace', type: 'string', required: false, description: '替换为（可为空串）' },
+      { name: 'preview', type: 'string', required: false, description: 'count（默认）/sample-diff/full-diff' }
+    ]
+  },
+  {
+    name: 'update_rows',
+    displayName: '条件更新行',
+    description: '按条件更新命中行（literal/fillDown/fillSeries/template），必须先给用户看预览（采样最多 20 行）并由用户确认；只改浏览器内存',
+    channel: 'FRONTEND',
+    riskLevel: 'WRITE',
+    scopePatterns: SHEET_SCOPE_PATTERNS,
+    args: [
+      { name: 'defCode', type: 'string', required: true, description: '配置定义编码' },
+      { name: 'scope', type: 'string', required: false, description: 'predicate（默认）/selection/sheet/rows' },
+      { name: 'predicate', type: 'object', required: false, description: 'FieldQueryCondition 条件（scope=predicate 必填）' },
+      { name: 'set', type: 'object[]', required: true, description: '每项 {columnCode, mode, value|template|start|step}（≤5）' },
+      { name: 'preview', type: 'string', required: false, description: 'count（默认）/sample-diff/full-diff' }
+    ]
+  },
+  {
+    name: 'undo_last_sheet_edit',
+    displayName: '撤销 AI 表格修改',
+    description: '撤销最近一次 AI 对当前表格的修改（反向补丁，深度 1；回灌最多 20 行说明）；不改服务端数据',
+    channel: 'FRONTEND',
+    riskLevel: 'WRITE',
+    scopePatterns: SHEET_SCOPE_PATTERNS,
+    args: [{ name: 'defCode', type: 'string', required: true, description: '配置定义编码' }]
   }
 ] as const
 

@@ -1,19 +1,21 @@
 /**
  * 前端工具执行器（规格 §2「契约窄接口」/ §3 前端工具回灌）。
  *
- * **后端口径核对（本棒实测，勿凭蓝本臆造）**：main 后端 `AiTools` 共 18 个 `@Tool`，
- * 其中带 `@ToolChannel(FRONTEND)` 的**有 7 个**：`open_export_file_editor`、`download_export_files`、
- * `navigate_to`、`select_definitions`、`set_condition`、`confirm_step`、`generative_form`
- * （其余 11 个是 BACKEND 通道，由后端自己执行；`start_export/start_precheck/start_import/start_publish`
- * 在 main 里都是 BACKEND，不再像旧基座那样挂起等前端）。所以：
- * - 路由 1 覆盖 `FRONTEND_TOOLS` 登记的前端工具（2 个：`open_export_file_editor` / `download_export_files`），
- *   完整实现；
+ * **后端口径核对（AI 表格操作专项后复核，勿凭蓝本臆造）**：后端 `AiTools` 共 26 个 `@Tool`，
+ * 其中带 `@ToolChannel(FRONTEND)` 的**有 15 个**：`open_export_file_editor`、`download_export_files`、
+ * `navigate_to`、`select_definitions`、`set_condition`、`confirm_step`、`generative_form`，
+ * 加上 AI 表格操作专项的 8 个表格工具（读 5 / 写 3 + 撤销；`normalize_column` 双档同名）。
+ * 所以：
+ * - 路由 1 覆盖 `FRONTEND_TOOLS` 登记的前端工具（10 个：2 个既有 + 8 个表格工具），
+ *   完整实现（表格读工具与撤销经 `sheet.current` 页面能力取适配器；写工具由 store 预览特判）；
  * - 路由 2（兜底直调 `dispatchUiEvent`，与路由 3 是**同一落点**，并非"落回路由 3"）是**补丁②**：把蓝本形态的工作区动作（`navigate_to` /
  *   `select_definitions` / `set_condition` / `confirm_step` 及蓝本别名）做成可执行能力表 ——
  *   这 4 个后端已标为 FRONTEND 并披露，故今天经任何 `frontend_tool_request` 帧或契约层驱动
  *   即可生效，前端零改动（见 `WORKSPACE_ACTIONS`）；
  * - `generative_form` 前端执行接入已落地（GF-B）：`stores/ai.ts` 对 `frontend_tool_request` 特判 +
- *   AiPanel 渲染 `FormRenderer`，**不走本文件通用执行器**。
+ *   AiPanel 渲染 `FormRenderer`，**不走本文件通用执行器**；
+ * - 表格写工具（`replace_values` / `update_rows` / `normalize_column(commit=true)`）同族：
+ *   store 特判进预览卡（等用户“应用/取消”），**不走**本文件的 60s 预算 —— 那预算包不住“等人”。
  *
  * 四条路由（AI 经 frontend_tool 帧驱动工作区的统一入口；编号与 `dispatchFrontendTool`
  * 内的分支注释一致，实读该方法确认共 4 条）：
@@ -42,6 +44,7 @@
  */
 
 import {
+  SHEET_TOOL_NAMES,
   UI_EVENT_TYPES,
   findFrontendTool,
   type FrontendToolDescriptor,
@@ -53,6 +56,18 @@ import {
   type WorkspacePageId
 } from '@/types/tools'
 import { dispatchUiEvent, getPageHandler, useWorkspaceStore } from '@/stores/workspace'
+import type { ConfigField } from '@/types/definition'
+import {
+  aggregateSheet,
+  inspectColumns,
+  normalizeSuggest,
+  readSheetSummary,
+  reviewCells,
+  undoLastSheetEdit,
+  type SheetAdapter,
+  type SheetContext,
+  type SheetToolOutcome
+} from '@/utils/sheet-tools'
 
 /** 前端工具执行上下文（args 已解析为对象）。 */
 export interface FrontendToolCall {
@@ -166,6 +181,16 @@ function validateArgs(
       coerced[spec.name] = num
     } else if (spec.type === 'string') {
       coerced[spec.name] = String(value)
+    } else if (spec.type === 'object') {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        return { ok: false, reason: `参数 ${spec.name} 应为对象，实际为 ${String(value)}` }
+      }
+      coerced[spec.name] = value
+    } else if (spec.type === 'object[]') {
+      if (!Array.isArray(value) || value.some((item) => !item || typeof item !== 'object' || Array.isArray(item))) {
+        return { ok: false, reason: `参数 ${spec.name} 应为对象数组` }
+      }
+      coerced[spec.name] = value
     } else if (spec.type === 'string[]') {
       // 列表参数（后端 `String[]`）：必填的语义是**必填非空** —— 空数组等于没给，
       // 缺参不猜即失败；顺带滤掉空串项（后端 `[]` 与 `[""]` 都不是合法的编码列表）。
@@ -485,6 +510,15 @@ async function dispatchFrontendTool(call: FrontendToolCall): Promise<FrontendToo
   const descriptor = findFrontendTool(call.name)
   if (descriptor) {
     return await runRegisteredTool(descriptor, call)
+  }
+  // 设计稿 §3.1 / §7-裁 7：`delete_rows` 留批③待裁，未上线时调用必须明确“不可用”，
+  // 不能落到“未知前端工具”的模糊文案。
+  if (call.name === 'delete_rows') {
+    return makeExecution({
+      outcome: 'failed',
+      availability: 'unavailable',
+      result: '当前不支持按条件删除行（该能力未上线）；可用 review_cells 查看重复/问题明细，或由用户手动删除。本次未做任何修改。'
+    })
   }
   // 路由 2：工作区动作表（补丁②：导航 / 选配置 / 填条件 / 推进步骤 + 蓝本别名）
   const action = findWorkspaceAction(call.name)
@@ -890,6 +924,106 @@ function toStringList(value: unknown): string[] {
   return Array.isArray(value) ? value.map((item) => String(item)).filter((item) => item !== '') : []
 }
 
+/**
+ * 取当前表格上下文（页面能力 `sheet.current`）。
+ *
+ * 页面只注册**能力**，AI 侧不 import 任何视图：导出向导与导入向导各自注册同一套 handler，
+ * 因此两页共用本函数。未注册 / 结构不合法 / handler 抛错一律给出**可行动**的降级文案
+ * （设计稿 §3.6：约定不 reject）。
+ */
+export async function resolveSheetContext(
+  defCode: unknown
+): Promise<{ ok: true; ctx: SheetContext } | { ok: false; reason: string }> {
+  const handler = getPageHandler('sheet.current')
+  if (!handler) {
+    return {
+      ok: false,
+      reason: '当前页面没有可操作的表格。请先打开导出结果页或上传页（表格只在这两处出现），再重试。'
+    }
+  }
+  let raw: unknown
+  try {
+    raw = await handler({ defCode })
+  } catch (error) {
+    return { ok: false, reason: `读取表格失败：${error instanceof Error ? error.message : String(error)}` }
+  }
+  if (!raw || typeof raw !== 'object') {
+    return { ok: false, reason: '表格能力返回了无法识别的结果（页面可能刚卸载），请重试。' }
+  }
+  const value = raw as {
+    ok?: unknown
+    reason?: unknown
+    defCode?: unknown
+    sheetName?: unknown
+    readOnly?: unknown
+    version?: unknown
+    adapter?: unknown
+    fields?: unknown
+  }
+  if (value.ok === false) {
+    return { ok: false, reason: typeof value.reason === 'string' && value.reason !== '' ? value.reason : '表格当前不可用。' }
+  }
+  if (typeof value.defCode !== 'string' || !Array.isArray(value.fields) || !value.adapter || typeof value.adapter !== 'object') {
+    return { ok: false, reason: '表格能力返回的结构不完整（缺少 defCode/fields/adapter），请重新打开该表格后重试。' }
+  }
+  return {
+    ok: true,
+    ctx: {
+      defCode: value.defCode,
+      sheetName: typeof value.sheetName === 'string' ? value.sheetName : value.defCode,
+      readOnly: value.readOnly === true,
+      adapter: value.adapter as SheetAdapter,
+      fields: value.fields as ConfigField[],
+      version: typeof value.version === 'number' ? value.version : 0
+    }
+  }
+}
+
+/** 表格工具 → 纯函数（读侧 5 档 + 撤销；写侧预览由 store 特判，不走本执行器）。 */
+function runSheetTool(name: string, args: Record<string, unknown>): Promise<FrontendToolExecution> {
+  return resolveSheetContext(args.defCode).then((resolved) => {
+    if (!resolved.ok) {
+      return makeExecution({ outcome: 'failed', availability: 'degraded', result: resolved.reason })
+    }
+    const ctx = resolved.ctx
+    if (ctx.readOnly && name !== 'normalize_column') {
+      return makeExecution({
+        outcome: 'failed',
+        availability: 'degraded',
+        result: '任务已结束，仅供查看，未对表格做任何修改。'
+      })
+    }
+    let outcome: SheetToolOutcome
+    switch (name) {
+      case 'read_sheet_summary':
+        outcome = readSheetSummary(ctx, args)
+        break
+      case 'aggregate_sheet':
+        outcome = aggregateSheet(ctx, args)
+        break
+      case 'inspect_columns':
+        outcome = inspectColumns(ctx, args)
+        break
+      case 'review_cells':
+        outcome = reviewCells(ctx, args)
+        break
+      case 'normalize_column':
+        outcome = args.commit === true
+          ? { ok: false, reason: '写操作（commit=true）必须经用户确认后由预览卡应用，本次未做任何修改。' }
+          : normalizeSuggest(ctx, args)
+        break
+      case 'undo_last_sheet_edit':
+        outcome = undoLastSheetEdit(ctx)
+        break
+      default:
+        outcome = { ok: false, reason: `未知的表格工具 ${name}。` }
+    }
+    return outcome.ok
+      ? makeExecution({ outcome: 'ok', availability: 'available', result: outcome.text })
+      : makeExecution({ outcome: 'failed', availability: 'degraded', result: outcome.reason })
+  })
+}
+
 /** 路由 1：登记在册的前端工具（参数校验 + scope 校验 + 执行器）。 */
 async function runRegisteredTool(
   descriptor: FrontendToolDescriptor,
@@ -1122,6 +1256,9 @@ const PAGE_IDS: readonly WorkspacePageId[] = ['tasks', 'export', 'import', 'defi
 
 /** 契约层自带的默认执行器（页面未覆盖时使用）。 */
 function defaultExecutor(name: FrontendToolName): FrontendToolExecutor | null {
+  if ((SHEET_TOOL_NAMES as readonly string[]).includes(name)) {
+    return (call) => runSheetTool(name, call.args)
+  }
   if (name === 'open_export_file_editor') {
     return async (call) => {
       const handler = getPageHandler(PAGE_HANDLER_OPEN_EXPORT_EDITOR)

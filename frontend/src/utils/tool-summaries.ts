@@ -162,6 +162,37 @@ function summaryFor(name: string, args: ToolArgs): string | null {
       return '刷新配置数据'
     case 'refresh_tasks':
       return '刷新任务列表'
+    case 'read_sheet_summary': {
+      const defCode = str(args, 'defCode')
+      const scope = str(args, 'scope')
+      return `读取表格摘要${defCode ? `（${defCode}${scope ? ` · ${scope}` : ''}）` : ''}`
+    }
+    case 'aggregate_sheet': {
+      const groupBy = str(args, 'groupBy')
+      return `聚合表格${groupBy ? `（按 ${groupBy} 分组）` : ''}`
+    }
+    case 'inspect_columns':
+      return '诊断列映射'
+    case 'review_cells':
+      return '本地校验摘要'
+    case 'normalize_column': {
+      const rules = args['rules']
+      const count = Array.isArray(rules) ? rules.length : 0
+      const commit = args['commit'] === true
+      return `列归一化${count > 0 ? `（${count} 条规则）` : ''}${commit ? ' · 待确认' : ' · 只出建议'}`
+    }
+    case 'replace_values': {
+      const search = str(args, 'search')
+      const replace = str(args, 'replace')
+      return `查找替换${search ? `「${search}」→「${replace}」` : ''}`
+    }
+    case 'update_rows': {
+      const set = args['set']
+      const count = Array.isArray(set) ? set.length : 0
+      return `条件更新行${count > 0 ? `（${count} 列）` : ''}`
+    }
+    case 'undo_last_sheet_edit':
+      return '撤销 AI 表格修改'
     default:
       return null
   }

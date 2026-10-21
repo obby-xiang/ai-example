@@ -52,10 +52,21 @@ class ToolRegistryDisclosureTest {
     private static final List<String> SCOPED_WIZARD_TOOLS = List.of("select_definitions", "set_condition",
             "confirm_step");
 
-    /** 全部前端通道工具（2 个既有 + 4 个工作区动作 + DC-15 的 generative_form）。 */
+    /** 只读前端通道工具（2 个既有 + 4 个工作区动作 + DC-15 的 generative_form）。 */
     private static final List<String> FRONTEND_TOOLS = List.of("open_export_file_editor", "download_export_files",
             "navigate_to", "select_definitions", "set_condition", "confirm_step",
             com.example.configmgr.ai.form.GenerativeFormRules.TOOL_NAME);
+
+    /** AI 表格操作专项的 8 个工具（读侧 5 / 写侧 3 + 撤销；normalize 双档同名）。 */
+    private static final List<String> SHEET_READ_TOOLS = List.of("read_sheet_summary", "aggregate_sheet",
+            "inspect_columns", "review_cells");
+
+    private static final List<String> SHEET_WRITE_TOOLS = List.of("replace_values", "update_rows",
+            "normalize_column", "undo_last_sheet_edit");
+
+    private static final List<String> SHEET_TOOLS = List.of("read_sheet_summary", "aggregate_sheet",
+            "inspect_columns", "review_cells", "normalize_column", "replace_values", "update_rows",
+            "undo_last_sheet_edit");
 
     /** S4.4e 裁决⑥：必须经确认门的启动类工具（FR-5.3 明文清单）。 */
     private static final List<String> GATED_START_TOOLS = List.of("start_export", "start_precheck", "start_import",
@@ -78,6 +89,54 @@ class ToolRegistryDisclosureTest {
                     .isEqualTo(ToolMeta.RiskLevel.READ);
             assertThat(toolRegistry.getMeta(name)).as("%s 已注册元数据", name).isNotNull();
         }
+    }
+
+    @Test
+    void sheetToolsUseFrontendChannelAndExpectedRisk() {
+        for (String name : SHEET_READ_TOOLS) {
+            assertThat(toolRegistry.channelOf(name)).as("%s 的执行通道", name)
+                    .isEqualTo(ToolMeta.Channel.FRONTEND);
+            assertThat(toolRegistry.riskOf(name)).as("%s 是只读工具", name)
+                    .isEqualTo(ToolMeta.RiskLevel.READ);
+        }
+        for (String name : SHEET_WRITE_TOOLS) {
+            assertThat(toolRegistry.channelOf(name)).as("%s 的执行通道", name)
+                    .isEqualTo(ToolMeta.Channel.FRONTEND);
+            // 通道优先于风险：写工具即使标 WRITE，也不会进后端确认门；确认落在前端预览卡。
+            assertThat(toolRegistry.riskOf(name)).as("%s 是写工具", name)
+                    .isEqualTo(ToolMeta.RiskLevel.WRITE);
+        }
+    }
+
+    @Test
+    void sheetToolsAreDisclosedOnlyWhereATableExists() {
+        // 导出结果步与导入上传步披露；其他步骤/非向导页面不披露（表格只在这两处存在）
+        assertThat(namesFor(AiContext.of("export", "EXPORT", "EXPORT", 1L, Map.of()))).containsAll(SHEET_TOOLS);
+        assertThat(namesFor(AiContext.of("import", "IMPORT", "UPLOAD", 1L, Map.of()))).containsAll(SHEET_TOOLS);
+        assertThat(namesFor(AiContext.of("export", "EXPORT", "SELECT_DEFS", 1L, Map.of())))
+                .doesNotContainAnyElementsOf(SHEET_TOOLS);
+        assertThat(namesFor(AiContext.of("import", "IMPORT", "PRECHECK", 1L, Map.of())))
+                .doesNotContainAnyElementsOf(SHEET_TOOLS);
+        assertThat(namesFor(AiContext.of("data", null, null, null, null)))
+                .doesNotContainAnyElementsOf(SHEET_TOOLS);
+    }
+
+    @Test
+    void sheetToolBodiesAreSentinelStubs() {
+        assertThat(aiTools.readSheetSummary("CURRENCY", "sheet", new String[] { "code" }, null, null, 5))
+                .isEqualTo(AiTools.FRONTEND_STUB);
+        assertThat(aiTools.aggregateSheet("CURRENCY", null, "region", "code", new String[] { "count" }, 20))
+                .isEqualTo(AiTools.FRONTEND_STUB);
+        assertThat(aiTools.inspectColumns("CURRENCY")).isEqualTo(AiTools.FRONTEND_STUB);
+        assertThat(aiTools.reviewCells("CURRENCY", "sheet", null, 5)).isEqualTo(AiTools.FRONTEND_STUB);
+        assertThat(aiTools.normalizeColumn("CURRENCY", new String[] { "code" }, new String[] { "trim" }, null, false, null))
+                .isEqualTo(AiTools.FRONTEND_STUB);
+        assertThat(aiTools.replaceValues("CURRENCY", "sheet", null, new String[] { "status" }, "wholeCell", true,
+                "停用", "禁用", "count")).isEqualTo(AiTools.FRONTEND_STUB);
+        assertThat(aiTools.updateRows("CURRENCY", "sheet", null,
+                List.of(new AiTools.SheetSetItem("status", "literal", "禁用", null, null, null)), "count"))
+                .isEqualTo(AiTools.FRONTEND_STUB);
+        assertThat(aiTools.undoLastSheetEdit("CURRENCY")).isEqualTo(AiTools.FRONTEND_STUB);
     }
 
     @Test
@@ -236,7 +295,9 @@ class ToolRegistryDisclosureTest {
                 "check_job_status", "get_row_count", "create_task", "start_export", "start_precheck", "start_import",
                 "start_publish", "open_export_file_editor", "download_export_files", "navigate_to",
                 "select_definitions", "set_condition", "confirm_step",
-                com.example.configmgr.ai.form.GenerativeFormRules.TOOL_NAME);
+                com.example.configmgr.ai.form.GenerativeFormRules.TOOL_NAME,
+                "read_sheet_summary", "aggregate_sheet", "inspect_columns", "review_cells",
+                "normalize_column", "replace_values", "update_rows", "undo_last_sheet_edit");
 
         for (AiContext context : contexts) {
             List<String> disclosed = namesFor(context);

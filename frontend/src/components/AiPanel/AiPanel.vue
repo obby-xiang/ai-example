@@ -523,6 +523,18 @@
                             @cancel="onFormCancel"
                           />
                         </div>
+
+                        <!-- AI 表格操作专项 §3.3bis：写预览卡（计数 / 采样 diff / 全量 diff 三档）。
+                             数据只在浏览器渲染，不上送；大批量须勾选“我了解影响范围”。 -->
+                        <div v-else-if="isSheetPreviewPart(part)" class="p-[11px]">
+                          <SheetPreviewCard
+                            :plan="sheetPreviewFor(part)"
+                            @apply="onSheetPreviewApply"
+                            @cancel="onSheetPreviewCancel"
+                            @abandon="onSheetPreviewAbandon"
+                            @level="ai.setPreviewLevel"
+                          />
+                        </div>
                       </template>
                     </div>
                     </template>
@@ -1010,8 +1022,10 @@ import {
 } from '@/utils/blocks'
 import { deriveCopyText, deriveProjections } from '@/utils/parts'
 import FormRenderer from '@/components/AiPanel/FormRenderer.vue'
+import SheetPreviewCard from '@/components/AiPanel/SheetPreviewCard.vue'
 import ContextPill from '@/components/AiPanel/ContextPill.vue'
 import { GENERATIVE_FORM_TOOL, type ChatMessage, type ToolPart } from '@/types/ai'
+import { SHEET_PREVIEW_TOOLS } from '@/types/tools'
 import type { FormSpec } from '@/types/form-schema'
 import type { ErrorCard, ErrorCardVariant } from '@/utils/error-card'
 
@@ -1262,6 +1276,14 @@ const TOOL_LABELS: Record<string, string> = {
   select_definitions: '选择配置项',
   set_condition: '设置查询条件',
   confirm_step: '确认步骤',
+  read_sheet_summary: '读取表格摘要',
+  aggregate_sheet: '聚合表格',
+  inspect_columns: '诊断列映射',
+  review_cells: '本地校验摘要',
+  normalize_column: '列归一化',
+  replace_values: '查找替换',
+  update_rows: '条件更新行',
+  undo_last_sheet_edit: '撤销 AI 表格修改',
   download_templates: '下载模板',
   'export.selectDefs': '选择配置项',
   'export.setConditions': '设置查询条件',
@@ -2364,6 +2386,28 @@ function cardHeadDisabled(part: ToolPart): boolean {
 /** 展开体是否渲染：普通工具卡有内容（或待动作卡强制展开）才渲；已决只读态卡体恒在。 */
 function cardBodyShown(part: ToolPart): boolean {
   return hasBodyRows(part)
+}
+
+/** AI 表格操作专项：待用户确认的写预览段（replace_values / update_rows / normalize commit=true）。 */
+function isSheetPreviewPart(part: ToolPart): boolean {
+  return part.kind2 === 'FRONTEND' && part.requiresAction && SHEET_PREVIEW_TOOLS.has(part.name)
+}
+
+/** 该段对应的本地预览计划（无 ⇒ 面板渲染“预览已失效 + 放弃”）。 */
+function sheetPreviewFor(part: ToolPart) {
+  return ai.activePreview && ai.activePreview.toolCallId === part.toolCallId ? ai.activePreview : null
+}
+
+function onSheetPreviewApply(acknowledged: boolean): void {
+  void ai.confirmWritePreview(acknowledged)
+}
+
+function onSheetPreviewCancel(): void {
+  void ai.cancelWritePreview()
+}
+
+function onSheetPreviewAbandon(): void {
+  void ai.abandonStalePreview()
 }
 
 /** chevron 是否渲染：待决 HITL/GF 强制展开 ⇒ 无；已决只读卡恒有；普通工具卡有卡体才有。 */

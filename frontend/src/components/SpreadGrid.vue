@@ -49,6 +49,7 @@ import {
 import { loadSpreadCore, type SpreadSheets } from '@/utils/spreadjs'
 import type { ConfigField } from '@/types/definition'
 import { parseRowData } from '@/types/data'
+import type { SheetAdapter, SheetCellUpdate, SheetSelection } from '@/utils/sheet-tools'
 
 const props = withDefaults(
   defineProps<{
@@ -342,6 +343,76 @@ function validateLocal(): ExcelRowIssue[] {
   return validateRows(fields, collectRows())
 }
 
+/**
+ * 表格适配器（AI 表格操作专项 §3.6 的窄接口）：只暴露纯数据面，不把 SpreadJS 类型漏进 store。
+ *
+ * 行口径：适配器行 = 数据行下标（0 基）⇒ 视口行 = row + 1（视口第 0 行是表头）。
+ * 批量写走 `setArray`（逐格 `setValue` 在数千行上会卡主线程），且**只发一次 `data-changed`**
+ * （否则一个 N 格操作会打 N 次事件）。
+ */
+function getSheetAdapter(): SheetAdapter {
+  const sheet = activeSheet()
+  if (!sheet) {
+    throw new Error('表格引擎尚未就绪，无法提供表格适配器')
+  }
+  const rowCount = (): number => Math.max(0, sheet.getRowCount() - 1)
+  const colCount = (): number => (fields.length > 0 ? fields.length : sheet.getColumnCount())
+  return {
+    rowCount,
+    colCount,
+    header: (col) => String(sheet.getValue(0, col) ?? ''),
+    getCell: (row, col) => sheet.getValue(row + 1, col),
+    getArray: (row, col, rows, cols) => sheet.getArray(row + 1, col, rows, cols) as unknown[][],
+    writeCells: (updates) => {
+      const list = updates.filter((update) => update.row >= 0 && update.row < rowCount() && update.col >= 0 && update.col < colCount())
+      if (list.length === 0) {
+        return
+      }
+      restoring = true
+      sheet.suspendPaint()
+      try {
+        const byColumn = new Map<number, SheetCellUpdate[]>()
+        for (const update of list) {
+          const bucket = byColumn.get(update.col) ?? []
+          bucket.push(update)
+          byColumn.set(update.col, bucket)
+        }
+        for (const [col, bucket] of byColumn) {
+          bucket.sort((left, right) => left.row - right.row)
+          let runStart = 0
+          for (let index = 1; index <= bucket.length; index += 1) {
+            const prev = bucket[index - 1]
+            const next = bucket[index]
+            if (next && prev && next.row === prev.row + 1) {
+              continue
+            }
+            const run = bucket.slice(runStart, index)
+            const first = run[0]
+            if (first) {
+              sheet.setArray(first.row + 1, col, run.map((item) => [item.value]))
+            }
+            runStart = index
+          }
+        }
+      } finally {
+        sheet.resumePaint()
+        restoring = false
+      }
+      emit('data-changed')
+    },
+    selection: (): SheetSelection | null => {
+      const ranges = sheet.getSelections()
+      const first = ranges && ranges.length > 0 ? ranges[0] : null
+      if (!first) {
+        return null
+      }
+      const row = Math.max(0, first.row - 1)
+      const rowCount = Math.max(0, first.rowCount - (first.row > 0 ? 0 : 1))
+      return { row, col: first.col, rowCount, colCount: first.colCount }
+    }
+  }
+}
+
 /** 从已发布数据行装配表格（只读浏览用）。 */
 function loadFromRows(fieldDefs: readonly ConfigField[], rows: readonly { dataJson: string }[]): void {
   loadData(
@@ -358,6 +429,7 @@ defineExpose({
   collectRows,
   toWorkbookJson,
   toXlsxBlob,
-  validateLocal
+  validateLocal,
+  getSheetAdapter
 })
 </script>
