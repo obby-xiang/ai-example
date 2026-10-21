@@ -1,0 +1,151 @@
+[INFO] Scanning for projects...
+[INFO] 
+[INFO] -----------------------< com.example:config-mgr >-----------------------
+[INFO] Building config-mgr 1.0.0
+[INFO]   from pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO] 
+[INFO] --- resources:3.3.1:resources (default-resources) @ config-mgr ---
+[INFO] Copying 1 resource from src\main\resources to target\classes
+[INFO] Copying 7 resources from src\main\resources to target\classes
+[INFO] 
+[INFO] --- compiler:3.14.1:compile (default-compile) @ config-mgr ---
+[INFO] Recompiling the module because of changed source code.
+[INFO] Compiling 225 source files with javac [debug parameters release 21] to target\classes
+[INFO] 由于在类路径中发现了一个或多个处理程序，因此启用了
+  批注处理。未来发行版的 javac 可能会禁用批注处理，
+  除非至少按名称指定了一个处理程序 (-processor)，
+  或指定了搜索路径 (--processor-path, --processor-module-path)，
+  或显式启用了批注处理 (-proc:only, -proc:full)。
+  可使用 -Xlint:-options 隐藏此消息。
+  可使用 -proc:none 禁用批注处理。
+[INFO] /<WORKTREE>/backend/src/main/java/com/example/configmgr/excel/ExcelWriter.java: 某些输入文件使用或覆盖了已过时的 API。
+[INFO] /<WORKTREE>/backend/src/main/java/com/example/configmgr/excel/ExcelWriter.java: 有关详细信息, 请使用 -Xlint:deprecation 重新编译。
+[INFO] 
+[INFO] --- resources:3.3.1:testResources (default-testResources) @ config-mgr ---
+[INFO] skip non existing resourceDirectory <WORKTREE>\backend\src\test\resources
+[INFO] 
+[INFO] --- compiler:3.14.1:testCompile (default-testCompile) @ config-mgr ---
+[INFO] Recompiling the module because of changed dependency.
+[INFO] Compiling 221 source files with javac [debug parameters release 21] to target\test-classes
+[INFO] 由于在类路径中发现了一个或多个处理程序，因此启用了
+  批注处理。未来发行版的 javac 可能会禁用批注处理，
+  除非至少按名称指定了一个处理程序 (-processor)，
+  或指定了搜索路径 (--processor-path, --processor-module-path)，
+  或显式启用了批注处理 (-proc:only, -proc:full)。
+  可使用 -Xlint:-options 隐藏此消息。
+  可使用 -proc:none 禁用批注处理。
+[INFO] /<WORKTREE>/backend/src/test/java/com/example/configmgr/ai/run/FakeFrameRedis.java: 某些输入文件使用或覆盖了已过时的 API。
+[INFO] /<WORKTREE>/backend/src/test/java/com/example/configmgr/ai/run/FakeFrameRedis.java: 有关详细信息, 请使用 -Xlint:deprecation 重新编译。
+[INFO] /<WORKTREE>/backend/src/test/java/com/example/configmgr/ai/conformance/ChatTurnFrameSequenceConformanceTest.java: 某些输入文件使用了未经检查或不安全的操作。
+[INFO] /<WORKTREE>/backend/src/test/java/com/example/configmgr/ai/conformance/ChatTurnFrameSequenceConformanceTest.java: 有关详细信息, 请使用 -Xlint:unchecked 重新编译。
+[INFO] 
+[INFO] --- surefire:3.5.5:test (default-test) @ config-mgr ---
+[INFO] Using auto detected provider org.apache.maven.surefire.junitplatform.JUnitPlatformProvider
+[INFO] 
+[INFO] -------------------------------------------------------
+[INFO]  T E S T S
+[INFO] -------------------------------------------------------
+[INFO] Running com.example.configmgr.ai.kb.KbDisclosurePromptTest
+10月 21, 2026 10:59:31 下午 org.apache.lucene.store.MemorySegmentIndexInputProvider <init>
+信息: Using MemorySegmentIndexInput with Java 21 or later; to disable start with -Dorg.apache.lucene.store.MMapDirectory.enableMemorySegments=false
+10月 21, 2026 10:59:31 下午 org.apache.lucene.internal.vectorization.VectorizationProvider lookup
+警告: Java vector incubator module is not readable. For optimal vector performance, pass '--add-modules jdk.incubator.vector' to enable Vector API.
+22:59:32.348 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219650031421100
+22:59:32.394 [main] WARN com.example.configmgr.ai.kb.KbService -- 知识库刷新失败（保留旧索引，不变更检索面）：manifest.json 解析失败：Unexpected character ('b' (code 98)): was expecting double-quote to start field name
+ at [Source: REDACTED (`StreamReadFeature.INCLUDE_SOURCE_IN_LOCATION` disabled); line: 1, column: 2]
+22:59:32.449 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=1 chunks=1 source=local dir=build-219650712229100
+22:59:32.650 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219650780759500
+22:59:33.033 [main] INFO com.example.configmgr.ai.tool.ToolRegistry -- ToolRegistry: registered 3 tools（定义来源=annotations）
+22:59:33.229 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219651362868300
+[INFO] Tests run: 7, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 2.012 s -- in com.example.configmgr.ai.kb.KbDisclosurePromptTest
+[INFO] Running com.example.configmgr.ai.kb.KbHttpSourceTest
+22:59:33.954 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=http dir=build-219651949500600
+22:59:34.120 [main] WARN com.example.configmgr.ai.kb.KbService -- 知识库刷新失败（保留旧索引，不变更检索面）：请求超时（读超时 150ms）：manifest.json
+22:59:34.935 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=http dir=build-219653063408600
+22:59:34.939 [main] WARN com.example.configmgr.ai.kb.KbService -- 知识库刷新失败（保留旧索引，不变更检索面）：知识服务返回 HTTP 500（manifest.json）
+22:59:35.374 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219653467361800
+22:59:35.691 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=http dir=build-219653820489900
+22:59:36.016 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=http dir=build-219654170696400
+22:59:36.023 [main] WARN com.example.configmgr.ai.kb.KbService -- 知识库刷新失败（保留旧索引，不变更检索面）：知识服务返回 HTTP 401（manifest.json）
+22:59:36.276 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=http dir=build-219654434695200
+22:59:36.298 [main] WARN com.example.configmgr.ai.kb.KbService -- 知识文档内容 sha 与 manifest 声明不一致（以 manifest 声明做增量判据）：doc=currency-scope
+22:59:36.457 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=http dir=build-219654602572700
+22:59:36.753 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=http dir=build-219654913022200
+[INFO] Tests run: 6, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 3.515 s -- in com.example.configmgr.ai.kb.KbHttpSourceTest
+[INFO] Running com.example.configmgr.ai.kb.KbLocalSourceTest
+22:59:36.830 [main] WARN com.example.configmgr.ai.kb.LocalDirKbSource -- 知识库 manifest 的 sha 与文件不一致，以实算为准：doc=a declared=deadbeef actual=67801d2813e2…
+[INFO] Tests run: 5, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.065 s -- in com.example.configmgr.ai.kb.KbLocalSourceTest
+[INFO] Running com.example.configmgr.ai.kb.KbLookupTermTest
+22:59:37.025 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219655168828000
+22:59:37.207 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219655351949800
+22:59:37.394 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219655539879400
+22:59:37.606 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219655718776600
+22:59:37.811 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219655969159200
+22:59:37.971 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219656135154100
+[INFO] Tests run: 6, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 1.136 s -- in com.example.configmgr.ai.kb.KbLookupTermTest
+[INFO] Running com.example.configmgr.ai.kb.KbPropertiesTest
+22:59:38.205 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219656352503800
+[INFO] Tests run: 8, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.234 s -- in com.example.configmgr.ai.kb.KbPropertiesTest
+[INFO] Running com.example.configmgr.ai.kb.KbReadDocTest
+22:59:38.302 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=1 chunks=13 source=local dir=build-219656533034600
+22:59:38.480 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219656635265100
+22:59:38.665 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219656813412100
+22:59:38.834 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219656988020600
+22:59:39.004 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219657156048300
+22:59:39.173 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219657333362900
+22:59:39.352 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219657497599100
+[INFO] Tests run: 7, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 1.141 s -- in com.example.configmgr.ai.kb.KbReadDocTest
+[INFO] Running com.example.configmgr.ai.kb.KbSampleCorpusTest
+[INFO] Tests run: 3, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.044 s -- in com.example.configmgr.ai.kb.KbSampleCorpusTest
+[INFO] Running com.example.configmgr.ai.kb.KbServiceIncrementalTest
+22:59:39.677 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219657782157100
+22:59:39.706 [main] WARN com.example.configmgr.ai.kb.LocalDirKbSource -- 知识库 manifest 的 sha 与文件不一致，以实算为准：doc=currency-scope declared=83bf4ad45507… actual=ac77dee1228a…
+22:59:39.891 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219658027479800
+22:59:40.142 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219658265325300
+22:59:40.386 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=19 chunks=181 source=local dir=build-219658489364300
+22:59:40.968 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219658806403100
+22:59:40.972 [main] WARN com.example.configmgr.ai.kb.KbService -- 知识库刷新失败（保留旧索引，不变更检索面）：manifest.json 解析失败：Unexpected character ('n' (code 110)): was expecting double-quote to start field name
+ at [Source: REDACTED (`StreamReadFeature.INCLUDE_SOURCE_IN_LOCATION` disabled); line: 1, column: 3]
+22:59:41.495 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219659583954800
+22:59:42.065 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219660010881500
+[INFO] Tests run: 5, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 4.082 s -- in com.example.configmgr.ai.kb.KbServiceIncrementalTest
+[INFO] Running com.example.configmgr.ai.kb.KbServiceIndexTest
+22:59:43.750 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219661821927200
+22:59:43.943 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219662085472200
+22:59:44.116 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219662277439800
+22:59:44.266 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219662438215900
+22:59:44.433 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219662589796700
+22:59:44.639 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219662762306800
+22:59:44.895 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219662975137400
+22:59:45.062 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219663224595500
+22:59:45.220 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219663388670500
+22:59:45.377 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219663559989300
+22:59:45.514 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219663706721400
+[INFO] Tests run: 12, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 2.026 s -- in com.example.configmgr.ai.kb.KbServiceIndexTest
+[INFO] Running com.example.configmgr.ai.kb.KbToolsTest
+22:59:45.706 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219663849814900
+22:59:45.872 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219664029527200
+22:59:46.039 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219664193643000
+22:59:46.209 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219664368053700
+22:59:46.380 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219664528575700
+22:59:46.536 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219664708227300
+22:59:46.699 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219664867049700
+22:59:46.865 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=20 chunks=186 source=local dir=build-219665020516300
+22:59:46.957 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=1 chunks=25 source=local dir=build-219665183828500
+22:59:47.047 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=2 chunks=4 source=local dir=build-219665277056800
+22:59:47.127 [main] INFO com.example.configmgr.ai.kb.KbService -- 业务知识库索引已重建：docs=1 chunks=2 source=local dir=build-219665364007600
+[INFO] Tests run: 12, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 1.609 s -- in com.example.configmgr.ai.kb.KbToolsTest
+[INFO] Running com.example.configmgr.ai.kb.MarkdownChunkerTest
+[INFO] Tests run: 6, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.021 s -- in com.example.configmgr.ai.kb.MarkdownChunkerTest
+[INFO] 
+[INFO] Results:
+[INFO] 
+[INFO] Tests run: 77, Failures: 0, Errors: 0, Skipped: 0
+[INFO] 
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD SUCCESS
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  01:05 min
+[INFO] Finished at: 2026-10-21T22:59:47+08:00
+[INFO] ------------------------------------------------------------------------

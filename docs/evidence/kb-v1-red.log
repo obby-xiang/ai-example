@@ -1,0 +1,3348 @@
+[INFO] Scanning for projects...
+[INFO] 
+[INFO] -----------------------< com.example:config-mgr >-----------------------
+[INFO] Building config-mgr 1.0.0
+[INFO]   from pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO] 
+[INFO] --- resources:3.3.1:resources (default-resources) @ config-mgr ---
+[INFO] Copying 1 resource from src\main\resources to target\classes
+[INFO] Copying 7 resources from src\main\resources to target\classes
+[INFO] 
+[INFO] --- compiler:3.14.1:compile (default-compile) @ config-mgr ---
+[INFO] Nothing to compile - all classes are up to date.
+[INFO] 
+[INFO] --- resources:3.3.1:testResources (default-testResources) @ config-mgr ---
+[INFO] skip non existing resourceDirectory <WORKTREE>\backend\src\test\resources
+[INFO] 
+[INFO] --- compiler:3.14.1:testCompile (default-testCompile) @ config-mgr ---
+[INFO] Nothing to compile - all classes are up to date.
+[INFO] 
+[INFO] --- surefire:3.5.5:test (default-test) @ config-mgr ---
+[INFO] Using auto detected provider org.apache.maven.surefire.junitplatform.JUnitPlatformProvider
+[INFO] 
+[INFO] -------------------------------------------------------
+[INFO]  T E S T S
+[INFO] -------------------------------------------------------
+[INFO] Running com.example.configmgr.ai.kb.KbDisclosurePromptTest
+[ERROR] Tests run: 7, Failures: 0, Errors: 4, Skipped: 0, Time elapsed: 0.498 s <<< FAILURE! -- in com.example.configmgr.ai.kb.KbDisclosurePromptTest
+[ERROR] com.example.configmgr.ai.kb.KbDisclosurePromptTest.adminEndpointsExposeStatusDocsAndReload -- Time elapsed: 0.039 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbDisclosurePromptTest.adminEndpointsExposeStatusDocsAndReload(KbDisclosurePromptTest.java:134)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbDisclosurePromptTest.catalogEntriesAreSanitizedAgainstDelimiterSpoofing -- Time elapsed: 0.012 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbDisclosurePromptTest.catalogEntriesAreSanitizedAgainstDelimiterSpoofing(KbDisclosurePromptTest.java:119)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbDisclosurePromptTest.registryDisclosesKbToolsInEveryContextAndPassesThirdDefense -- Time elapsed: 0.005 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbTestSupport.samplesService(KbTestSupport.java:50)
+	at com.example.configmgr.ai.kb.KbDisclosurePromptTest.registryDisclosesKbToolsInEveryContextAndPassesThirdDefense(KbDisclosurePromptTest.java:48)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbDisclosurePromptTest.promptSectionInjectsCatalogAndAllRules -- Time elapsed: 0.004 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbTestSupport.samplesService(KbTestSupport.java:50)
+	at com.example.configmgr.ai.kb.KbDisclosurePromptTest.promptSectionInjectsCatalogAndAllRules(KbDisclosurePromptTest.java:73)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[INFO] Running com.example.configmgr.ai.kb.KbHttpSourceTest
+[ERROR] Tests run: 6, Failures: 0, Errors: 6, Skipped: 0, Time elapsed: 0.430 s <<< FAILURE! -- in com.example.configmgr.ai.kb.KbHttpSourceTest
+[ERROR] com.example.configmgr.ai.kb.KbHttpSourceTest.readTimeoutFailsOpenWithoutClearingIndex -- Time elapsed: 0.287 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbHttpSourceTest.readTimeoutFailsOpenWithoutClearingIndex(KbHttpSourceTest.java:105)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbHttpSourceTest.serverErrorKeepsOldIndexAndReports -- Time elapsed: 0.026 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbHttpSourceTest.serverErrorKeepsOldIndexAndReports(KbHttpSourceTest.java:90)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbHttpSourceTest.localAndHttpSourcesIndexTheSameCorpus -- Time elapsed: 0.027 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbTestSupport.samplesService(KbTestSupport.java:50)
+	at com.example.configmgr.ai.kb.KbHttpSourceTest.localAndHttpSourcesIndexTheSameCorpus(KbHttpSourceTest.java:44)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbHttpSourceTest.authHeaderIsSentButNeverLeaksInErrors -- Time elapsed: 0.027 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbHttpSourceTest.authHeaderIsSentButNeverLeaksInErrors(KbHttpSourceTest.java:120)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbHttpSourceTest.changedShaFetchesOnlyThatDocument -- Time elapsed: 0.026 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbHttpSourceTest.changedShaFetchesOnlyThatDocument(KbHttpSourceTest.java:73)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbHttpSourceTest.unchangedEtagSkipsRebuild -- Time elapsed: 0.029 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbHttpSourceTest.unchangedEtagSkipsRebuild(KbHttpSourceTest.java:59)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[INFO] Running com.example.configmgr.ai.kb.KbLocalSourceTest
+22:47:53.450 [main] WARN com.example.configmgr.ai.kb.LocalDirKbSource -- 知识库 manifest 的 sha 与文件不一致，以实算为准：doc=a declared=deadbeef actual=67801d2813e2…
+[INFO] Tests run: 5, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.153 s -- in com.example.configmgr.ai.kb.KbLocalSourceTest
+[INFO] Running com.example.configmgr.ai.kb.KbLookupTermTest
+[ERROR] Tests run: 6, Failures: 0, Errors: 6, Skipped: 0, Time elapsed: 0.020 s <<< FAILURE! -- in com.example.configmgr.ai.kb.KbLookupTermTest
+[ERROR] com.example.configmgr.ai.kb.KbLookupTermTest.aliasTermHitsTheSameAnswer -- Time elapsed: 0.003 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbTestSupport.samplesService(KbTestSupport.java:50)
+	at com.example.configmgr.ai.kb.KbLookupTermTest.aliasTermHitsTheSameAnswer(KbLookupTermTest.java:27)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbLookupTermTest.nearTermIsNotFuzzyMatched -- Time elapsed: 0.003 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbTestSupport.samplesService(KbTestSupport.java:50)
+	at com.example.configmgr.ai.kb.KbLookupTermTest.nearTermIsNotFuzzyMatched(KbLookupTermTest.java:49)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbLookupTermTest.exactTermReturnsAnswerWithSource -- Time elapsed: 0.002 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbTestSupport.samplesService(KbTestSupport.java:50)
+	at com.example.configmgr.ai.kb.KbLookupTermTest.exactTermReturnsAnswerWithSource(KbLookupTermTest.java:14)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbLookupTermTest.missSuggestsSearchAsNextStep -- Time elapsed: 0.002 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbTestSupport.samplesService(KbTestSupport.java:50)
+	at com.example.configmgr.ai.kb.KbLookupTermTest.missSuggestsSearchAsNextStep(KbLookupTermTest.java:61)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbLookupTermTest.documentAliasResolvesToDocLevelAnswer -- Time elapsed: 0.002 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbTestSupport.samplesService(KbTestSupport.java:50)
+	at com.example.configmgr.ai.kb.KbLookupTermTest.documentAliasResolvesToDocLevelAnswer(KbLookupTermTest.java:71)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbLookupTermTest.normalizationIgnoresWhitespaceCaseAndFullWidth -- Time elapsed: 0.001 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbTestSupport.samplesService(KbTestSupport.java:50)
+	at com.example.configmgr.ai.kb.KbLookupTermTest.normalizationIgnoresWhitespaceCaseAndFullWidth(KbLookupTermTest.java:38)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[INFO] Running com.example.configmgr.ai.kb.KbPropertiesTest
+[ERROR] Tests run: 8, Failures: 0, Errors: 1, Skipped: 0, Time elapsed: 0.026 s <<< FAILURE! -- in com.example.configmgr.ai.kb.KbPropertiesTest
+[ERROR] com.example.configmgr.ai.kb.KbPropertiesTest.topKAndMaxCharsAreClampedOnTheServer -- Time elapsed: 0.002 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbTestSupport.samplesService(KbTestSupport.java:50)
+	at com.example.configmgr.ai.kb.KbPropertiesTest.topKAndMaxCharsAreClampedOnTheServer(KbPropertiesTest.java:89)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[INFO] Running com.example.configmgr.ai.kb.KbReadDocTest
+[ERROR] Tests run: 7, Failures: 0, Errors: 7, Skipped: 0, Time elapsed: 0.018 s <<< FAILURE! -- in com.example.configmgr.ai.kb.KbReadDocTest
+[ERROR] com.example.configmgr.ai.kb.KbReadDocTest.maxCharsIsCappedAt8000 -- Time elapsed: 0.003 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbTestSupport.samplesService(KbTestSupport.java:50)
+	at com.example.configmgr.ai.kb.KbReadDocTest.maxCharsIsCappedAt8000(KbReadDocTest.java:61)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbReadDocTest.unknownSectionReturnsSectionCandidates -- Time elapsed: 0.002 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbTestSupport.samplesService(KbTestSupport.java:50)
+	at com.example.configmgr.ai.kb.KbReadDocTest.unknownSectionReturnsSectionCandidates(KbReadDocTest.java:94)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbReadDocTest.sectionReadStartsAtSectionBody -- Time elapsed: 0.002 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbTestSupport.samplesService(KbTestSupport.java:50)
+	at com.example.configmgr.ai.kb.KbReadDocTest.sectionReadStartsAtSectionBody(KbReadDocTest.java:72)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbReadDocTest.offsetBeyondEndReportsEmptyPageWithoutError -- Time elapsed: 0.002 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbTestSupport.samplesService(KbTestSupport.java:50)
+	at com.example.configmgr.ai.kb.KbReadDocTest.offsetBeyondEndReportsEmptyPageWithoutError(KbReadDocTest.java:105)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbReadDocTest.unknownDocReturnsCandidatesInsteadOfThrowing -- Time elapsed: 0.002 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbTestSupport.samplesService(KbTestSupport.java:50)
+	at com.example.configmgr.ai.kb.KbReadDocTest.unknownDocReturnsCandidatesInsteadOfThrowing(KbReadDocTest.java:83)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbReadDocTest.firstScreenReturnsTocAndAtMost1200Chars -- Time elapsed: 0.002 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbTestSupport.samplesService(KbTestSupport.java:50)
+	at com.example.configmgr.ai.kb.KbReadDocTest.firstScreenReturnsTocAndAtMost1200Chars(KbReadDocTest.java:21)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbReadDocTest.paginationByNextOffsetReconstructsWholeDocument -- Time elapsed: 0.001 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbTestSupport.samplesService(KbTestSupport.java:50)
+	at com.example.configmgr.ai.kb.KbReadDocTest.paginationByNextOffsetReconstructsWholeDocument(KbReadDocTest.java:35)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[INFO] Running com.example.configmgr.ai.kb.KbSampleCorpusTest
+[ERROR] Tests run: 3, Failures: 1, Errors: 0, Skipped: 0, Time elapsed: 0.044 s <<< FAILURE! -- in com.example.configmgr.ai.kb.KbSampleCorpusTest
+[ERROR] com.example.configmgr.ai.kb.KbSampleCorpusTest.complexityElementsAreCovered -- Time elapsed: 0.008 s <<< FAILURE!
+java.lang.AssertionError: 
+
+Expecting actual:
+  "# 区域费率管理口径（样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据。
+
+## 1 定义
+
+区域费率（REGION_TARIFF）是配置管理平台按「区域 + 币种 + 档位」维度维护的价格参数集合。它决定导出、结算与预算三类业务的计价基准，是 GLM 种子域中的核心配置之一。
+
+费率不是财务凭证，不能在费率表里记录结算结果；结算结果属于业务数据，走独立的结算库。
+
+## 2 关键字段
+
+| 字段 | 含义 | 必填 | 备注 |
+| --- | --- | --- | --- |
+| region_code | 区域编码 | 是 | 来自 REGION 定义 |
+| currency | 币种 | 是 | 来自 CURRENCY 定义 |
+| level | 档位 | 是 | A/B/C |
+| base_rate | 标准费率 | 是 | 大于 0 |
+| cross_ratio | 跨区加收比例 | 否 | 0–30% |
+
+## 3 维护规则
+
+1. 新增费率必须同时提供三元组与标准费率，缺一不可；
+2. 修改标准费率必须走变更审批，不允许直接编辑生效版本；
+3. 停用区域前必须先确认该区域没有有效费率；
+4. 批量维护优先走导入流程，不逐条手工修改；
+5. 同一三元组不允许重复记录。
+
+## 4 常见问题
+
+**问：费率表在哪里维护？**
+答：在配置管理平台的「配置定义 → REGION_TARIFF → 数据浏览」中查看，修改走导出/导入流程。
+
+**问：口头说的"区域价格"指什么？**
+答：就是区域费率，二者是同一个配置域。
+
+**问：标准费率和基准费率有区别吗？**
+答：没有。基准费率是标准费率的另一种叫法，字段都是 `base_rate`。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。
+# 区域费率计算规则（样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据。数字均为演示值。
+
+## 1 单笔计算
+
+应收金额 = 业务量 × 标准费率 × 档位系数。档位系数 A=1.00、B=1.05、C=1.10。金额只在最终结果取整到分，中间步骤不取整。
+
+示例：业务量 87，标准费率 4.25，档位 B ⇒ 87 × 4.25 × 1.05 = 388.24（四舍五入到分）。
+
+## 2 跨区加收
+
+跨区金额 = 业务量 × 业务发生地费率 × 档位系数 ×（1 + 跨区加收比例）。注意：比例读取业务发生地所属区域，不是费率所属区域。
+
+示例：业务量 200，发生地费率 1.80，档位 A，比例 7.5% ⇒ 200 × 1.80 × 1.00 × 1.075 = 387.00。
+
+## 3 取整与边界
+
+| 场景 | 处理 |
+| --- | --- |
+| 费率 ≤ 0 | 拒绝发布 |
+| 费率 > 9999.99 | 需要二次确认 |
+| 跨区比例 < 0 或 > 30% | 拒绝保存 |
+| 跨区比例非 0.5% 整数倍 | 拒绝保存 |
+| 最终金额 | 四舍五入到分 |
+
+## 4 校验顺序
+
+1. 先校验定义引用（区域/币种/档位是否存在）；
+2. 再校验数值区间与步长；
+3. 最后校验生效日期冲突。
+
+顺序不能反：先校验日期会在定义缺失时给出误导性的冲突提示。
+
+## 5 排障提示
+
+金额不一致时，按「档位系数 → 跨区比例来源 → 取整时机」三步复算。90% 的差异来自跨区比例读错区域，10% 来自中间步骤提前取整。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。
+# 区域费率实施细则（长篇样例）
+
+> 本文为**样例文档**，仅用于业务知识库功能验证（切块、分页、检索），不含任何真实业务数据、真实地区编码或真实费率。文中数字均为演示值。
+
+## 1 适用范围
+
+本细则适用于配置管理平台中「区域费率」（REGION_TARIFF）配置域的全部维护动作，包括新增费率版本、调整费率档位、跨区结算加收、历史版本回溯与费率发布。适用的使用方包括：区域运营、项目实施、财务结算与配置管理员。
+
+本细则不适用于项目环境（PROJECT_ENV）、告警阈值（ALARM_THRESHOLD）与项目成员（PROJECT_MEMBER）三个域；这些域的口径见各自的样例文档。
+
+### 1.1 生效边界
+
+费率以「生效日期 + 区域编码 + 币种」三元组确定唯一有效版本。三元组完全相同而存在两条记录时，属于数据质量问题，必须由配置管理员在发布前修正，不能靠"后发布的覆盖先发布的"来兜底。
+
+### 1.2 与旧口径的关系
+
+旧口径按「区域 + 费率档位」定位，不含币种；新口径增加币种维度后，旧数据在迁移时统一补默认币种 CNY。迁移期间新旧口径并行一个发布周期，冲突时以新口径为准，并在发布说明中注明迁移批次。
+
+## 2 术语与口径
+
+### 2.1 标准费率
+
+标准费率为区域内默认档位的费率，是其它档位计算的基准。标准费率变更必须走完整审批（见第 5 章），不得通过"新增一条同三元组记录"的方式绕过审批。
+
+### 2.2 基准费率
+
+基准费率是标准费率的同义口头叫法，二者在系统里是同一个字段 `base_rate`。检索、讨论与工单里出现"基准费率"时，一律按标准费率理解。
+
+### 2.3 档位
+
+档位是同一区域内按业务量或客户等级划分的费率层级，常见档位为 A/B/C 三档。档位编码必须来自 `TARIFF_LEVEL` 配置定义，不允许在费率表中自造档位编码。
+
+### 2.4 跨区结算
+
+当业务发生地与费率所属区域不一致时，按「业务发生地费率 + 跨区加收比例」计算。跨区加收比例是区域级参数，最小 0%，最大 30%，步长 0.5%。
+
+## 3 费率分类
+
+| 分类编码 | 分类名称 | 是否含跨区加收 | 默认档位 | 说明 |
+| --- | --- | --- | --- | --- |
+| STD | 标准业务 | 是 | A | 默认分类，覆盖大多数场景 |
+| ENT | 企业专线 | 是 | B | 需要项目成员角色校验 |
+| TMP | 临时业务 | 否 | C | 有效期不超过 30 天 |
+| INT | 内部结算 | 否 | A | 仅限内部项目，不对外结算 |
+
+费率分类编码来自 `TARIFF_CATEGORY` 定义，新增分类必须先发布定义，再发布费率数据。
+
+## 4 计算规则
+
+### 4.1 标准计算
+
+单条业务量的应收金额 = 业务量 × 标准费率 × 档位系数。档位系数：A = 1.00，B = 1.05，C = 1.10。金额保留两位小数，采用四舍五入。
+
+示例：业务量 120，标准费率 3.40，档位 B ⇒ 120 × 3.40 × 1.05 = 428.40。
+
+### 4.2 跨区结算
+
+跨区应收金额 = 业务发生地标准费率 × 业务量 × 档位系数 ×（1 + 跨区加收比例）。跨区加收比例按业务发生地所属区域读取，不按费率所属区域读取——这是历史上最容易搞反的一处，排障时优先核对。
+
+示例：业务发生地费率 2.80，业务量 100，档位 A，加收比例 5% ⇒ 2.80 × 100 × 1.00 × 1.05 = 294.00。
+
+### 4.3 边界与取整
+
+1. 费率小于 0 一律拒绝发布；
+2. 费率大于 9999.99 需要二次确认；
+3. 中间计算不取整，只在最终金额取整到分；
+4. 跨区加收比例超过 30% 时拒绝保存，不做静默截断；
+5. 生效日期早于当前日期 90 天以上的补录，需要财务负责人复核。
+
+### 4.4 计算流程图
+
+```mermaid
+flowchart TD
+    A[读取业务发生地与费率区域] --> B{是否跨区}
+    B -- 否 --> C[业务量 x 标准费率 x 档位系数]
+    B -- 是 --> D[读取跨区加收比例]
+    D --> E{比例是否在 0-30%}
+    E -- 否 --> F[拒绝并提示修正]
+    E -- 是 --> G[业务量 x 发生地费率 x 档位系数 x 1+比例]
+    C --> H[金额取整到分]
+    G --> H
+    H --> I[生成结算明细]
+```
+
+流程图中的判断分支与 4.3 的边界规则一一对应；修改任一分支必须同步修改 4.3，否则文档与实现会分叉。
+
+## 5 审批流程
+
+1. 区域运营提交费率变更单，填写区域、币种、生效日期与变更原因；
+2. 项目实施核对受影响的项目清单，确认无未结项项目；
+3. 财务结算核对跨区加收比例与历史结算差异；
+4. 配置管理员在配置管理平台创建导出任务，导出当前费率快照留档；
+5. 配置管理员导入新费率，执行预检查；
+6. 预检查通过后发布，发布作业完成前不得重复发起；
+7. 发布完成后由区域运营抽检三个档位的计算结果；
+8. 抽检通过后在变更单上回填发布作业编号，流程关闭。
+
+以上八步缺一不可。任何"先发布后补审批"的做法都视为违规操作，需要在操作审计中登记。
+
+## 6 变更与版本
+
+### 6.1 版本号
+
+费率版本采用「YYYY.MM.N」格式，N 为当月序号。版本号只在发布成功后生成，草稿不占用版本号。
+
+### 6.2 回滚
+
+发布后 24 小时内发现问题，可以回滚到上一个版本；超过 24 小时的回滚按新变更处理，需要重新走审批。回滚不是删除：旧版本保留在历史表中，只把"当前有效版本"指针指回去。
+
+### 6.3 多版本并存
+
+同一区域允许存在多个未来生效版本，但同一生效日期只允许一个版本。版本冲突时，发布预检查会给出冲突清单，不允许强制发布。
+
+## 7 常见问题（FAQ）
+
+**Q1：标准费率改了，历史结算会变吗？**
+不会。结算明细在生成时固化当时费率，后续费率变更不影响已生成的结算明细。
+
+**Q2：跨区加收比例可以按项目单独设置吗？**
+不可以。它是区域级参数；项目级的差异通过档位系数体现。
+
+**Q3：为什么导入时提示"档位编码不存在"？**
+档位编码必须来自 `TARIFF_LEVEL` 定义。先确认定义已发布，再检查导入文件中的档位编码是否有多余空格。
+
+**Q4：费率发布后可以删除吗？**
+不可以删除，只能新增版本覆盖。删除会破坏历史结算的可追溯性。
+
+**Q5：临时业务到期后费率还在吗？**
+临时业务分类的费率记录保留，但状态置为失效；查询时默认只显示有效记录。
+
+**Q6：一个区域可以没有标准费率吗？**
+不可以。每个区域至少有一个 A 档标准费率；缺失时预检查会直接失败。
+
+**Q7：跨区加收比例为 0 与"不跨区"有区别吗？**
+计算金额相同，但结算明细中的分类不同，报表口径也不同。不要用 0 比例代替"不跨区"标记。
+
+## 8 附：字段与代码
+
+```json
+{
+  "defCode": "REGION_TARIFF",
+  "fields": [
+    {"code": "region_code", "label": "区域编码", "type": "STRING", "required": true, "key": true},
+    {"code": "currency", "label": "币种", "type": "STRING", "required": true, "key": true},
+    {"code": "level", "label": "档位", "type": "STRING", "required": true, "key": true},
+    {"code": "base_rate", "label": "标准费率", "type": "DECIMAL", "required": true},
+    {"code": "cross_ratio", "label": "跨区加收比例", "type": "DECIMAL", "required": false}
+  ]
+}
+```
+
+字段 `base_rate` 即标准费率，`cross_ratio` 即跨区加收比例。字段编码发布后不可改名，只能新增字段并逐步下线旧字段。
+
+## 9 附录：发布前检查清单
+
+- [ ] 区域编码来自已发布的 `REGION` 定义；
+- [ ] 币种来自已发布的 `CURRENCY` 定义；
+- [ ] 档位来自已发布的 `TARIFF_LEVEL` 定义；
+- [ ] 每个区域至少一条 A 档标准费率；
+- [ ] 跨区加收比例在 0%–30% 之间且为 0.5% 的整数倍；
+- [ ] 生效日期不与既有版本冲突；
+- [ ] 受影响项目清单已核对；
+- [ ] 当前费率快照已导出留档；
+- [ ] 预检查通过且无未处理告警；
+- [ ] 发布窗口内没有其它费率发布作业在途。
+
+## 10 附录：术语对照
+
+| 口头叫法 | 正式名称 | 字段 |
+| --- | --- | --- |
+| 基准费率 | 标准费率 | base_rate |
+| 费率表 | 区域费率 | REGION_TARIFF |
+| 加收比例 | 跨区加收比例 | cross_ratio |
+| 档位系数 | 档位系数 | level_factor |
+| 区域价格 | 区域费率 | REGION_TARIFF |
+
+术语对照用于检索召回：用户说"费率表"时，实际想查的是区域费率配置；用户说"加收比例"时，对应字段是 `cross_ratio`。
+
+## 11 附录：典型错误与处置
+
+### 11.1 导入失败：主键冲突
+
+原因：同一「区域 + 币种 + 档位 + 生效日期」已存在记录。
+处置：先导出当前版本核对，再决定是覆盖还是新增版本；不要删除既有记录。
+
+### 11.2 预检查失败：跨区比例越界
+
+原因：比例大于 30% 或不是 0.5% 的整数倍。
+处置：修正导入文件；系统不做静默截断，避免"看起来成功、实际口径已变"。
+
+### 11.3 发布作业长时间未完成
+
+原因：可能有其它作业占用同一配置域，或作业被实例重启中断。
+处置：先在作业列表查看状态；不要重复发起发布，避免双写。
+
+### 11.4 结算金额与手工计算不一致
+
+原因：常见为档位系数取错、跨区比例按费率所属区域读取、或中间步骤提前取整。
+处置：按 4.1–4.3 逐步复算，核对结算明细中固化的费率与系数。
+
+## 12 附录：口径变更记录（样例）
+
+| 日期 | 版本 | 变更内容 | 影响范围 |
+| --- | --- | --- | --- |
+| 2026-01-15 | 2026.01.1 | 新增币种维度 | 全部区域 |
+| 2026-03-02 | 2026.03.1 | 跨区加收比例上限由 20% 调整为 30% | 跨区业务 |
+| 2026-05-20 | 2026.05.1 | 临时业务默认档位由 B 调整为 C | 临时业务 |
+| 2026-07-08 | 2026.07.1 | 档位系数 B 由 1.03 调整为 1.05 | 全部区域 |
+| 2026-09-01 | 2026.09.1 | 明确金额只在最终步骤取整 | 全部区域 |
+
+变更记录用于"冲突以 updated_at 新者为准"的裁决：当两篇文档对同一口径描述不一致时，以变更记录中较新的版本为准，并在回答中说明存在历史版本。
+
+## 13 附录：与其他配置域的联动
+
+区域费率与以下配置域存在联动，排障时需要一并核对：
+
+1. **CURRENCY（币种）**：费率的币种必须存在于币种定义中，且状态为有效；
+2. **REGION（区域）**：区域编码必须存在，停用区域不允许新增费率；
+3. **PROJECT_ENV（项目环境）**：项目环境引用的区域决定其默认费率；
+4. **ALARM_THRESHOLD（告警阈值）**：费率异常波动会触发结算类告警，阈值口径见对应文档；
+5. **PROJECT_MEMBER（项目成员）**：企业专线分类需要校验项目成员角色。
+
+联动核对顺序建议：先定义（CURRENCY/REGION），再主数据（PROJECT_ENV/PROJECT_MEMBER），最后业务数据（REGION_TARIFF）。
+
+## 14 附录：批量维护建议
+
+批量维护优先使用"导出 → 离线修改 → 导入 → 预检查 → 发布"的链路，不建议逐条手工修改。导出时选择完整字段，避免离线修改后导入缺列。导入文件建议保留原始编码列，便于失败时定位到具体行。
+
+批量修改跨区加收比例时，先在测试区域验证一轮，再推广到全部区域。每次批量修改都要记录变更单编号，便于审计回溯。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。文档长度约 9000 字符，用于验证切块、分页与 offset 连续性。
+
+## 15 附录：结算对账口径
+
+每月结算完成后，区域运营需要在三个工作日内完成对账。对账的最小口径是：按区域汇总的业务量、按档位汇总的金额、按分类汇总的跨区加收金额，三者都要与结算报表一致。
+
+对账差异按以下顺序定位：
+
+1. 先核对结算周期内是否有费率版本切换；版本切换日按"生效日期当天零点"切分，不按发布时刻切分；
+2. 再核对跨区业务是否按业务发生地读取加收比例；
+3. 然后核对档位系数是否按结算当时固化的值计算；
+4. 最后核对是否存在手工调整金额；手工调整必须带审批单号，否则视为异常；
+5. 差异超过千分之三时，升级到财务负责人复核，不允许区域自行调账。
+
+对账结果记录在月度对账表中，保存期限不少于二十四个月。对账表本身不进入配置库，只作为审计附件归档。
+
+## 16 附录：异常场景处置
+
+### 16.1 发布中断
+
+发布作业中断时，系统保留已写入的暂存数据，不自动回滚。处置步骤：确认作业状态为失败 → 查看错误明细 → 修正数据 → 重新发起发布。重新发起前必须先清理未完成的暂存批次，否则会出现重复记录。
+
+### 16.2 并发修改
+
+两个管理员同时修改同一区域费率时，后保存的一方会收到版本冲突提示。此时不允许强制覆盖，必须重新加载最新版本后再改。强制覆盖会导致前一位管理员的变化被静默丢弃，属于严重操作事故。
+
+### 16.3 定义变更
+
+区域、币种、档位等定义发生变更时，费率不会自动跟随。定义停用后，引用该定义的费率记录仍然存在，但发布预检查会提示"引用已停用定义"。处置：要么恢复定义，要么先把费率迁移到新定义，再停用旧定义。
+
+### 16.4 时钟与生效日期
+
+服务器时钟与业务时区不一致时，可能出现"刚发布就生效"或"发布后迟迟不生效"。系统统一按业务时区的日期比较，不使用服务器本地时间。排障时先确认业务时区配置，再核对生效日期字段。
+
+## 17 附录：权限与审计
+
+费率维护权限分为查看、编辑、发布三级。查看权限可以导出；编辑权限可以创建草稿与预检查；发布权限只能由配置管理员持有。任何一级权限都不包含"删除历史版本"的能力。
+
+审计记录至少包含：操作人、操作时间、操作类型、目标区域与币种、变更前后摘要、关联变更单号、发布作业编号。审计记录只追加不修改，保存期限不少于三十六个月。
+
+审计查询按"区域 + 时间范围"检索；跨区域查询需要财务负责人授权。审计记录不包含完整费率明细，只包含变更摘要与差异行数，完整明细通过导出快照回溯。
+
+## 18 附录：培训与交接要点
+
+新成员上手费率维护，建议按以下顺序学习：
+
+1. 先读本文第 1–4 章，理解三元组、档位与跨区口径；
+2. 再用测试区域完成一次"导出 → 修改 → 导入 → 预检查"的完整演练；
+3. 然后在有发布权限的同事陪同下完成一次真实发布；
+4. 最后学习第 15–17 章的对账、异常与审计口径。
+
+交接时必须交付：当前有效版本清单、未来生效版本清单、未关闭的变更单、最近一次对账差异说明。缺少任何一项都视为交接未完成。
+
+## 19 附录：常见指标定义
+
+| 指标 | 定义 | 口径说明 |
+| --- | --- | --- |
+| 费率覆盖率 | 有标准费率的区域数 / 全部有效区域数 | 目标 100% |
+| 跨区业务占比 | 跨区结算金额 / 总结算金额 | 按区域分别统计 |
+| 版本切换次数 | 单月发布的费率版本数 | 不含回滚 |
+| 预检查失败率 | 预检查失败次数 / 预检查总次数 | 按变更单统计 |
+| 对账差异率 | 对账差异金额 / 结算金额 | 超过 0.3% 需升级 |
+
+指标只用于运营观察，不作为个人考核依据；指标异常时先排查数据与口径，再讨论流程问题。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。文档长度约 9000 字符，用于验证切块、分页与 offset 连续性。
+
+## 20 附录：问答补遗
+
+**Q8：费率版本号可以手工指定吗？**
+不可以。版本号由发布成功时刻自动生成，手工指定会破坏版本序列的唯一性。
+
+**Q9：同一区域可以有多个币种吗？**
+可以。同一区域的每个币种各自维护档位与费率，互不影响；跨币种结算需要先折算，折算汇率不在本配置域维护。
+
+**Q10：导入文件里多出一列会怎样？**
+预检查会提示"未知字段"，默认拒绝导入。确实需要新增字段时，先发布字段定义，再重新导出模板，不要依赖系统忽略多余列。
+
+**Q11：预检查通过但发布失败，需要重新预检查吗？**
+需要。预检查结果有有效期，发布前数据或定义发生变化时结果即失效；重新预检查是最低成本的安全动作。
+
+**Q12：回滚会不会影响已经开始的发布作业？**
+会。回滚前必须确认没有在途发布作业；有在途作业时回滚会被拒绝，避免版本指针与作业写入交叉。
+
+**Q13：为什么两个区域的同名档位金额不同？**
+档位只是层级标识，金额由各区域的标准费率与档位系数共同决定；同名档位不代表同价。
+
+## 21 附录：文档维护约定
+
+本文由区域运营与配置管理员共同维护。涉及计算规则（第 4 章）的修改必须由财务结算会签；涉及权限与审计（第 17 章）的修改必须由安全负责人会签。修改后在文末更新 `updated_at`，并同步更新 manifest 的 sha 与 updated_at，否则增量刷新不会重建该文档。
+
+文档中的表格如果超过屏幕宽度，允许横向滚动，不要求拆表；索引时表格作为一个整体块处理，检索命中后通过章节定位回原文。代码块与流程图按原样保留，不要为了排版把 mermaid 改成图片，图片无法被检索。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。文档长度约 8400 字符，用于验证切块、分页与 offset 连续性。
+
+补充约定：本文所有示例数字仅用于演示取整与比例规则，不构成任何区域的实际费率承诺；如需引用具体数值，请以配置库中的当前有效版本为准。
+# 费率边界与特例（样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据。表格为宽表示例。
+
+## 1 宽表：跨区结算参数矩阵
+
+| 区域 | 币种 | 档位A比例 | 档位B比例 | 档位C比例 | 跨区加收比例 | 生效日期 | 失效日期 | 最小业务量 | 最大业务量 | 结算周期 | 审批级别 | 备注 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| R-NORTH | CNY | 1.00 | 1.05 | 1.10 | 5.0% | 2026-01-01 | 2026-12-31 | 0 | 100000 | 月结 | 区域 | 演示行 |
+| R-SOUTH | CNY | 1.00 | 1.06 | 1.12 | 7.5% | 2026-02-01 | 2026-12-31 | 0 | 80000 | 月结 | 区域 | 演示行 |
+| R-EAST | CNY | 1.00 | 1.04 | 1.08 | 3.0% | 2026-03-01 | 2026-12-31 | 10 | 50000 | 半月结 | 财务 | 演示行 |
+| R-WEST | CNY | 1.00 | 1.07 | 1.15 | 10.0% | 2026-04-01 | 2026-12-31 | 0 | 30000 | 月结 | 财务 | 演示行 |
+| R-CENTER | CNY | 1.00 | 1.05 | 1.10 | 0.0% | 2026-01-01 | 2026-12-31 | 0 | 200000 | 月结 | 区域 | 演示行 |
+
+## 2 特例一：跨区加收比例为 0
+
+比例 0 表示"允许跨区但不加收"，与"不跨区"在金额上相同、在报表上不同。统计跨区业务占比时，比例 0 仍计入跨区业务。
+
+## 3 特例二：最小业务量为 10 的区域
+
+最小业务量为 10 的区域（如 R-EAST）在业务量不足 10 时按 10 计费，但结算明细中同时展示实际业务量与计费业务量，避免对账歧义。
+
+## 4 特例三：半月结
+
+半月结区域的跨区比例按"业务发生日所在半月"的生效版本读取，不按结算日读取。跨月时可能出现两段比例，需分段计算后相加。
+
+## 5 特例四：停用区域
+
+区域停用后，历史费率仍可查询与导出，但不可新增版本、不可发布。停用前必须在途结算全部完成。
+
+## 6 排障：宽表检索
+
+宽表字段多，检索时建议使用列名 + 值的组合，例如"跨区加收比例 7.5%"，或直接检索区域编码。表格在索引中是一个整体块，命中后通过 section 定位。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。
+# 项目环境管理口径（样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据。
+
+## 1 定义
+
+项目环境（PROJECT_ENV）描述一个项目可用的运行环境集合，包括环境编码、环境类型、所属区域、默认币种与状态。它决定项目导出数据的范围与默认参数。
+
+## 2 环境类型
+
+| 类型编码 | 名称 | 用途 | 是否允许生产数据 |
+| --- | --- | --- | --- |
+| DEV | 开发 | 联调与自测 | 否 |
+| TEST | 测试 | 功能验证 | 否 |
+| UAT | 验收 | 用户验收 | 否 |
+| PROD | 生产 | 正式运行 | 是 |
+
+## 3 维护规则
+
+1. 一个项目至少有一个 PROD 环境；
+2. 环境编码在项目内唯一，跨项目可重复；
+3. 环境所属区域决定默认费率，变更区域需要重新核对费率；
+4. 环境停用前必须确认没有在途作业；
+5. 环境清单（口头叫法）就是 PROJECT_ENV 的列表。
+
+## 4 常见问题
+
+**问：项目环境与区域是什么关系？**
+答：环境属于区域，区域决定默认费率与告警阈值；一个区域可以有多个项目环境。
+
+**问：可以把 DEV 环境改成 PROD 吗？**
+答：不建议。类型变更会影响导出范围与权限校验，应新建 PROD 环境并迁移项目。
+
+**问：环境清单在哪里看？**
+答：配置管理平台「配置定义 → PROJECT_ENV → 数据浏览」，或让 AI 助手检索"项目环境"。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。
+# 项目环境变更流程（样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据。
+
+## 1 流程图
+
+```mermaid
+sequenceDiagram
+    participant PM as 项目经理
+    participant OPS as 运维
+    participant ADM as 配置管理员
+    participant SYS as 配置管理平台
+    PM->>OPS: 提交环境变更申请（项目/环境/目标区域）
+    OPS->>OPS: 核对容量与在途作业
+    OPS->>ADM: 会签变更单
+    ADM->>SYS: 导出当前环境快照
+    ADM->>SYS: 导入变更后的环境
+    SYS-->>ADM: 预检查结果
+    ADM->>SYS: 发布
+    SYS-->>PM: 变更完成通知
+    PM->>OPS: 验证环境可用性
+```
+
+## 2 流程说明
+
+1. 项目经理提交变更申请，说明变更原因与期望完成时间；
+2. 运维核对目标区域的容量与在途作业，有在途作业时不得变更；
+3. 配置管理员导出当前环境快照留档，再导入变更后的环境；
+4. 预检查必须通过，失败时按提示修正后重新导入；
+5. 发布完成后由项目经理验证环境可用性，验证不通过可以回滚。
+
+## 3 时限
+
+| 阶段 | 时限 | 超时处理 |
+| --- | --- | --- |
+| 运维核对 | 1 个工作日 | 升级到运维负责人 |
+| 会签 | 2 个工作日 | 变更单挂起并通知 |
+| 发布 | 1 个工作日 | 顺延到下一个发布窗口 |
+| 验证 | 2 个工作日 | 视为验证不通过，触发回滚评估 |
+
+## 4 禁止事项
+
+- 禁止跳过预检查直接发布；
+- 禁止在变更窗口外发布；
+- 禁止用"删除再新建"代替环境变更；
+- 禁止在验证未完成时关闭变更单。
+
+## 5 回滚
+
+验证不通过时，用变更前导出的快照回滚。回滚后重新执行预检查与发布，并记录回滚原因。回滚不需要重新走会签，但必须在变更单中注明。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。
+# 告警阈值设定口径（样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据。数字为演示值。
+
+## 1 定义
+
+告警阈值（ALARM_THRESHOLD）是"指标在什么条件下触发哪一级告警"的配置。它由指标编码、分类、级别、阈值、窗口与方向共同决定。
+
+## 2 阈值三要素
+
+1. **阈值**：触发边界，必须是可比较的数值；
+2. **窗口**：累计时间，最小 1 分钟，最大 24 小时；
+3. **方向**：UP（越高越差）或 DOWN（越低越差）。
+
+三者缺一不可。只给阈值不给窗口，等于没有定义告警。
+
+## 3 分级规则
+
+| 级别 | 触发占比 | 通知方式 | 要求 |
+| --- | --- | --- | --- |
+| INFO | 超过提示阈值 | 站内消息 | 可批量汇总 |
+| WARN | 超过警告阈值 | 站内 + 邮件 | 需当日处置 |
+| CRIT | 超过严重阈值 | 站内 + 邮件 + 电话 | 5 分钟内响应 |
+
+级别必须单调：UP 指标满足 INFO < WARN < CRIT，DOWN 指标相反。
+
+## 4 取值方法
+
+1. 取最近 30 天的指标分布，找到 P95 与 P99；
+2. 提示阈值取 P95 的 1.2 倍，警告取 P99 的 1.2 倍，严重取历史峰值的 1.5 倍；
+3. 没有历史数据时，先用保守值并设置观察期；
+4. 观察期结束后按实际触发情况调整。
+
+## 5 禁止事项
+
+- 禁止把阈值设为 0 或负数（除明确声明"低于 0 告警"的场景）；
+- 禁止同一指标配置超过三级阈值；
+- 禁止用长期抑制规则代替阈值调整；
+- 禁止关闭严重级通知。
+
+## 6 与其它域的关系
+
+告警阈值不改变业务数据，只影响通知。费率异常、环境变更、成员调整都可能触发告警，排障时应先看最近变更。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。
+# 告警阈值运维手册（长篇样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据、真实阈值或真实项目编码。文中数字均为演示值。
+
+## 1 文档目的
+
+本手册面向告警阈值（ALARM_THRESHOLD）配置域的日常运维人员，说明阈值的分类、设定原则、变更流程、误告警处置与季度复核口径。阅读前建议先了解配置管理的「定义 → 数据 → 发布」基本流程。
+
+本手册不替代具体监控系统的使用说明；监控系统的操作界面与告警通知渠道不在本文范围内。
+
+## 2 阈值分类
+
+### 2.1 按对象分类
+
+| 分类编码 | 对象 | 典型指标 | 默认窗口 | 说明 |
+| --- | --- | --- | --- | --- |
+| BIZ | 业务指标 | 导出失败率、导入耗时 | 5 分钟 | 面向业务结果 |
+| SYS | 系统指标 | CPU、内存、连接数 | 1 分钟 | 面向基础设施 |
+| JOB | 作业指标 | 作业失败数、积压数 | 10 分钟 | 面向异步作业 |
+| DATA | 数据质量 | 空值率、主键重复率 | 单批次 | 面向数据结果 |
+
+分类编码来自 `ALARM_CATEGORY` 定义。新增分类需要先发布定义，再发布阈值，顺序不能颠倒。
+
+### 2.2 按级别分类
+
+告警级别分为提示（INFO）、警告（WARN）、严重（CRIT）。同一指标可以配置多级阈值，但必须满足"提示阈值 ≤ 警告阈值 ≤ 严重阈值"（对"越低越差"的指标则相反）。级别倒挂会在发布预检查时被拒绝。
+
+### 2.3 按窗口分类
+
+窗口决定"在多长时间内累计到什么程度才告警"。窗口过短会放大抖动，窗口过长会延迟发现。默认窗口按 2.1 的表格执行；确有需要时可在阈值记录中覆盖，但必须在备注里写明理由。
+
+## 3 设定原则
+
+1. **可解释**：每个阈值都要能回答"为什么是这个数"，不能只写"经验值"；
+2. **可行动**：阈值触发后必须有明确的处置动作，没有处置动作的阈值不应存在；
+3. **可回退**：阈值变更要能在 24 小时内回退，回退不需要重新走完整审批；
+4. **分级**：至少配置提示与警告两级，严重级只在确有业务影响时配置；
+5. **少而准**：同一指标不超过三级阈值，避免告警风暴；
+6. **与容量联动**：系统类阈值必须低于容量上限的 80%，留出处置时间。
+
+## 4 变更流程
+
+### 4.1 变更单
+
+所有阈值变更都要有变更单，变更单至少包含：指标名称、当前值、目标值、变更理由、影响范围、回退方案、观察期。缺少任何一项，配置管理员可以拒绝受理。
+
+### 4.2 审批
+
+- 提示级：运维负责人审批；
+- 警告级：运维负责人 + 业务负责人会签；
+- 严重级：运维负责人 + 业务负责人 + 值班经理会签；
+- 涉及数据质量类的任何级别：额外需要数据负责人会签。
+
+### 4.3 发布与观察
+
+发布后进入 72 小时观察期。观察期内每天记录触发次数与处置结果。触发次数明显高于预期的，优先考虑阈值过严或窗口过短；明显低于预期的，优先考虑指标采集是否正常。
+
+### 4.4 回退
+
+观察期内确认阈值不合理，可以回退到上一版本。回退同样要记录变更单，并在备注中写明回退原因。观察期结束后回退按新变更处理。
+
+## 5 误告警处置
+
+### 5.1 判定标准
+
+同时满足以下三条才算误告警：
+
+1. 指标值确实越过了阈值；
+2. 业务实际没有受到影响；
+3. 按当前处置手册执行后确认无需干预。
+
+仅仅"觉得不重要"不构成误告警，不能据此放宽阈值。
+
+### 5.2 处置顺序
+
+1. 先确认采集链路正常，排除"指标本身错了"；
+2. 再确认窗口与统计口径，排除"算法口径不一致"；
+3. 然后确认是否存在短时脉冲，排除"抖动"；
+4. 最后才讨论阈值是否需要调整。
+
+顺序不能反：先调阈值会掩盖采集或口径问题。
+
+### 5.3 误告警记录
+
+每次误告警都要记录：时间、指标、阈值、实际值、判定依据、处置人。连续两周同一指标误告警超过三次，才允许发起阈值调整变更。
+
+## 6 季度复核
+
+每季度对全部阈值做一次复核，复核内容包括：
+
+- 是否仍有对应的业务或系统对象；
+- 是否仍有明确的处置动作；
+- 触发次数是否在合理区间；
+- 是否存在长期未触发的"僵尸阈值"；
+- 是否存在长期持续触发的"背景噪声"；
+- 阈值与容量、SLA 是否仍然匹配。
+
+复核结果形成季度报告，报告不需要逐条列出全部阈值，但必须列出所有调整项与保留理由。
+
+## 7 常见问题（FAQ）
+
+**Q1：阈值可以按项目单独设置吗？**
+可以覆盖，但默认继承区域级阈值。项目级覆盖必须在备注中写明理由，且不得超过区域级阈值的上下 20%。
+
+**Q2：为什么发布预检查提示"级别倒挂"？**
+提示/警告/严重的阈值顺序不满足单调关系。对"越高越差"的指标应递增，对"越低越差"的指标应递减，并在指标定义中声明方向。
+
+**Q3：窗口可以设置为 0 吗？**
+不可以。窗口为 0 等于逐点告警，会产生大量瞬时告警；最小窗口为 1 分钟。
+
+**Q4：告警阈值与作业看门狗是什么关系？**
+两者独立。看门狗负责"作业是否失联"，告警阈值负责"业务指标是否异常"；不要用告警阈值替代看门狗。
+
+**Q5：阈值变更后历史告警会重算吗？**
+不会。历史告警按触发时的阈值记录，后续变更不影响历史。
+
+**Q6：可以批量导入阈值吗？**
+可以，走导入流程：导出模板 → 填写 → 预检查 → 发布。批量导入同样需要变更单。
+
+**Q7：严重级告警可以关闭通知吗？**
+不可以。严重级告警必须保持通知开启；需要降噪时调整阈值或增加抑制规则，不能关闭通知。
+
+## 8 附录：阈值记录字段
+
+```json
+{
+  "defCode": "ALARM_THRESHOLD",
+  "fields": [
+    {"code": "metric_code", "label": "指标编码", "type": "STRING", "required": true, "key": true},
+    {"code": "category", "label": "分类", "type": "STRING", "required": true},
+    {"code": "level", "label": "级别", "type": "STRING", "required": true},
+    {"code": "threshold", "label": "阈值", "type": "DECIMAL", "required": true},
+    {"code": "window_minutes", "label": "窗口(分钟)", "type": "INTEGER", "required": true},
+    {"code": "direction", "label": "方向", "type": "STRING", "required": true}
+  ]
+}
+```
+
+`direction` 取 `UP`（越高越差）或 `DOWN`（越低越差），决定级别单调性的校验方向。
+
+## 9 附录：值班交接清单
+
+- [ ] 当前未关闭的告警及处置进展；
+- [ ] 最近 24 小时的误告警记录；
+- [ ] 观察期内的阈值变更；
+- [ ] 计划内的发布/变更窗口；
+- [ ] 需要关注的容量指标；
+- [ ] 上一班次未完成的处置动作。
+
+交接必须口头 + 书面双确认，只在聊天里说一句"没问题"不算交接完成。
+
+## 10 附录：典型阈值示例（演示值）
+
+| 指标 | 分类 | 提示 | 警告 | 严重 | 窗口 |
+| --- | --- | --- | --- | --- | --- |
+| 导出失败率 | BIZ | 1% | 3% | 10% | 5 分钟 |
+| 导入平均耗时 | BIZ | 60s | 120s | 300s | 10 分钟 |
+| 作业积压数 | JOB | 20 | 50 | 100 | 10 分钟 |
+| 空值率 | DATA | 2% | 5% | 10% | 单批次 |
+| 主键重复率 | DATA | 0.1% | 0.5% | 1% | 单批次 |
+
+以上仅为演示，实际取值以各环境当前的配置库为准。
+
+## 11 附录：文档维护
+
+本文由运维团队维护，涉及审批链（第 4 章）的修改需要值班经理会签。修改后更新文末的更新日期，并同步 manifest 的 sha 与 updated_at。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。文档长度约 5000 字符，用于验证长文切块与检索。
+
+## 12 附录：告警抑制与降噪
+
+告警抑制只在以下场景使用：同一根因引发的多条关联告警、计划内维护窗口、已知的采集延迟。抑制规则必须写明生效条件、失效时间与责任人，最长有效期七天；到期自动失效，不续期。
+
+不要用抑制规则长期屏蔽某类告警。长期屏蔽会让真正的故障在"安静"中扩大，季度复核时必须逐条检查抑制规则是否仍然必要。
+
+## 13 附录：跨域联动排查
+
+告警阈值本身只是判定规则，触发后常常需要联动其它配置域：
+
+1. 作业类告警先查作业状态与看门狗记录，确认是否真的积压；
+2. 数据质量类告警先查导入批次的预检查结果，确认是否为已知脏数据；
+3. 业务指标类告警先查费率或项目环境是否刚发布过变更；
+4. 系统指标类告警先查是否有大批量导出/导入作业在途；
+5. 项目成员相关告警先查角色变更记录，确认是否因权限调整导致操作失败。
+
+排查顺序建议"先看最近变更，再看当前指标，最后看历史基线"。最近变更包括费率发布、定义发布、项目环境变更与成员调整，它们是最常见的告警诱因。
+
+## 14 附录：升级与通报
+
+严重级告警触发后，值班人员在五分钟内确认，十五分钟内给出初步判断，三十分钟内决定是否升级。升级对象为值班经理与对应业务负责人；升级时必须带上：告警原文、影响范围初判、已执行的处置动作。
+
+通报口径要区分"已知影响"与"未知影响"。未知影响不得写成"暂无影响"，应写"影响范围待确认"。对外通报由值班经理统一发出，个人不得先行对外承诺恢复时间。
+
+## 15 附录：指标采集质量检查
+
+每月抽查一次指标采集质量：抽样比对监控系统与配置库的同一指标，差异超过 1% 时视为采集异常。采集异常期间产生的告警不纳入误告警统计，但要在季度报告中单独说明。
+
+采集质量检查记录保留十二个月。发现采集异常时，先停止基于该指标的阈值调整，待采集恢复并稳定一周后再继续。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。文档长度约 5300 字符，用于验证长文切块与检索。
+
+## 16 附录：阈值评审会议纪要模板
+
+会议纪要至少包含：参会人、评审对象、逐条结论（通过/调整/驳回）、调整理由、责任人、完成时限。驳回项必须写明驳回依据，不能只写"暂不调整"。
+
+评审结论分为三档：通过（保持现状）、调整（进入变更流程）、观察（记录指标，下一次评审再议）。"观察"最多连续使用两次，第三次必须给出通过或调整的明确结论。
+
+会议纪要归档到运维文档库，并在下一季度复核时作为输入。纪要中的数字与配置库不一致时，以配置库为准，同时修正纪要中的引用。
+
+## 17 附录：与发布流程的衔接
+
+阈值发布与业务配置发布共用同一套导入/预检查/发布链路，但发布窗口建议错开：业务配置发布期间不要同时发布阈值，避免告警噪声干扰发布判断。确有需要时，提前在变更单中说明并通知值班人员。
+
+发布完成后，先在监控系统确认新阈值已生效，再关闭变更单。只看到"发布成功"就关闭变更单，属于流程不完整。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。文档长度约 5200 字符，用于验证长文切块与检索。
+
+补充：本文中的"观察期""复核""抑制"三个词在不同团队有不同叫法（观察期也称试运行期，复核也称评审，抑制也称静默），检索时可用这些同义词再查一次。
+# 项目成员与角色（样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据。
+
+## 1 定义
+
+项目成员（PROJECT_MEMBER）记录"谁在哪个项目里担任什么角色"。它不等同于系统账号：账号决定能否登录，项目成员决定登录后能操作哪些项目数据。
+
+## 2 角色
+
+| 角色编码 | 名称 | 可查看 | 可编辑 | 可发布 | 说明 |
+| --- | --- | --- | --- | --- | --- |
+| VIEWER | 查看者 | 是 | 否 | 否 | 只读 |
+| EDITOR | 编辑者 | 是 | 是 | 否 | 可建草稿 |
+| PUBLISHER | 发布者 | 是 | 是 | 是 | 仅配置管理员授予 |
+| OWNER | 负责人 | 是 | 是 | 否 | 可管理成员 |
+
+## 3 规则
+
+1. 每个项目至少有一个 OWNER；
+2. 同一人在同一项目只能有一个角色；
+3. PUBLISHER 由配置管理员授予，项目经理不能自行授予；
+4. 成员离职时先移除成员关系，再停用账号；
+5. 角色变更记录保留不少于二十四个月。
+
+## 4 常见问题
+
+**问：项目成员和项目环境有关系吗？**
+答：没有直接隶属关系。成员属于项目，环境属于项目；成员角色不影响环境状态。
+
+**问：为什么我看不到某个项目？**
+答：先确认是否是该项目成员；不是成员时联系 OWNER 添加。
+
+**问：OWNER 可以移除自己吗？**
+答：不可以。必须先把 OWNER 转给其他人，再移除自己。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。
+# 配置导入导出流程（样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据。
+
+## 1 全流程图
+
+```mermaid
+flowchart LR
+    A[创建任务] --> B[选择配置项]
+    B --> C{是否需要过滤}
+    C -- 是 --> D[设置查询条件]
+    C -- 否 --> E[确认步骤]
+    D --> E
+    E --> F[启动导出]
+    F --> G[下载文件]
+    G --> H[离线修改]
+    H --> I[创建导入任务]
+    I --> J[上传文件]
+    J --> K[预检查]
+    K --> L{检查通过}
+    L -- 否 --> H
+    L -- 是 --> M[导入到暂存]
+    M --> N[预览]
+    N --> O[发布]
+```
+
+## 2 导出
+
+1. 在任务中心创建导出任务；
+2. 勾选要导出的配置项（可多选）；
+3. 按需设置查询条件（范围 + 字段过滤）；
+4. 确认步骤后启动导出；
+5. 导出完成后下载 xlsx 文件。
+
+导出是只读操作，不改变配置数据。导出文件是快照，后续配置变更不会回写文件。
+
+## 3 导入
+
+1. 创建导入任务并上传文件；
+2. 预检查校验格式、类型、主键与引用关系；
+3. 预检查失败时按错误明细修正文件，不要跳过；
+4. 预检查通过后导入到暂存区；
+5. 预览暂存数据，确认无误后发布。
+
+导入写入暂存区，发布才写入正式库。未发布的暂存数据可以丢弃，不会影响正式数据。
+
+## 4 查询条件
+
+范围条件按 `scopeKeys` 过滤，字段条件按 `fields` 过滤，多条字段条件之间是 AND 关系。条件为空表示不过滤。
+
+```json
+{
+  "scopeKeys": ["R-NORTH"],
+  "fields": [
+    {"fieldCode": "level", "operator": "EQ", "value": "A"}
+  ]
+}
+```
+
+## 5 常见问题
+
+**问：可以先导入再补预检查吗？**
+答：不可以。预检查是导入的前置条件，跳过会写入脏数据。
+
+**问：导出文件可以改名吗？**
+答：可以，但不要修改扩展名与表头结构。
+
+**问：发布后可以撤销吗？**
+答：发布是终态操作，不能撤销；需要更正时走新的变更流程。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。
+# 发布前检查清单（样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据。
+
+## 1 数据检查
+
+- [ ] 导入文件的行数与导出快照的预期行数一致；
+- [ ] 主键列没有空值、没有重复；
+- [ ] 必填列全部有值；
+- [ ] 枚举列的取值都在定义范围内；
+- [ ] 引用列（区域/币种/项目/成员）都能找到对应记录；
+- [ ] 数值列的精度与定义一致（小数位数不超限）；
+- [ ] 日期列格式为 `yyyy-MM-dd`，没有非法日期；
+- [ ] 文本列没有超长（超过定义长度会被拒绝）；
+- [ ] 没有明显的测试数据混入（如"测试""test""示例"字样）；
+- [ ] 变更行数与变更单描述一致。
+
+## 2 定义检查
+
+- [ ] 引用的配置定义都已发布；
+- [ ] 定义版本与导入文件使用的模板版本一致；
+- [ ] 没有引用已停用的定义；
+- [ ] 新增字段已经发布，旧字段没有被删除。
+
+## 3 流程检查
+
+- [ ] 变更单已审批；
+- [ ] 当前没有同配置域的在途作业；
+- [ ] 发布窗口已确认；
+- [ ] 当前数据快照已导出留档；
+- [ ] 回退方案已写明。
+
+## 4 发布后检查
+
+- [ ] 作业状态为成功；
+- [ ] 抽检三条记录与导入文件一致；
+- [ ] 相关页面数据显示正常；
+- [ ] 没有新增告警；
+- [ ] 变更单已回填作业编号；
+- [ ] 通知相关方发布完成。
+
+## 5 使用说明
+
+清单逐项确认，不允许"整体确认"。任何一项未通过时，先修正再发布；确因客观原因无法确认的，在变更单中注明并由审批人签字。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。
+# 配置定义与字段口径（样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据。
+
+## 1 定义与数据的关系
+
+配置定义（ConfigDefinition）描述"一类配置由哪些字段组成"，配置数据是按定义落库的具体记录。定义是结构，数据是内容；改定义影响所有引用它的数据。
+
+## 2 层级
+
+| 层级 | 含义 | 典型定义 | 范围键 |
+| --- | --- | --- | --- |
+| GLOBAL | 全局 | CURRENCY | 无 |
+| REGION | 区域级 | REGION_TARIFF | 区域编码 |
+| PROJECT | 项目级 | PROJECT_ENV、PROJECT_MEMBER | 项目编码 |
+
+层级决定范围过滤的行为：GLOBAL 忽略范围条件，REGION 按区域过滤，PROJECT 按项目过滤。
+
+## 3 字段类型
+
+| 类型 | 说明 | 示例 |
+| --- | --- | --- |
+| STRING | 文本 | "R-NORTH" |
+| INTEGER | 整数 | 100 |
+| DECIMAL | 小数 | 3.40 |
+| DATE | 日期 | 2026-01-01 |
+| BOOLEAN | 布尔 | true |
+
+## 4 字段属性
+
+### 4.1 必填（required）
+
+必填字段为空时，预检查直接失败。不要用空字符串代替"未填写"，空字符串会被当作有效值。
+
+### 4.2 主键（key）
+
+主键字段组合唯一。多字段主键时，所有主键字段都必填。主键重复是导入失败最常见的原因。
+
+#### 4.2.1 复合主键的排序
+
+复合主键在索引与导出的排序按"字段在定义中的声明顺序"，不按字母序。调整声明顺序会改变导出行的排序，属于可见变更，需要通知使用方。
+
+#### 4.2.2 主键缺失
+
+主键字段为空时，预检查直接失败并指出行号；不要用占位值（如 `0`、`N/A`）填充主键，占位值会造成更难发现的重复。
+
+
+### 4.3 引用（refDefCode）
+
+引用字段的值必须存在于被引用的定义中。引用已停用的定义时，预检查会提示"引用已停用"。
+
+### 4.4 枚举（enum）
+
+枚举值来自定义，不接受自定义值。枚举值大小写敏感，`A` 与 `a` 是两个值。
+
+## 5 变更定义的影响
+
+1. 新增字段：旧数据该字段为空，读取时按空值处理；
+2. 删除字段：历史数据保留但不再展示，属于高风险操作；
+3. 修改类型：需要数据迁移，不能直接改；
+4. 修改必填：已有空值数据会导致后续导入失败。
+
+定义变更必须评估存量数据，不能只看新数据能否导入。
+
+## 6 常见问题
+
+**问：定义可以改名吗？**
+答：名称可以改，编码不行。编码是数据引用的键，改名不会破坏引用。
+
+**问：一个字段可以既是主键又是引用吗？**
+答：可以，但引用目标必须存在且唯一。
+
+**问：为什么导入提示"字段不存在"？**
+答：导入文件的列名与定义字段编码不一致，或定义尚未发布。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。
+# GLM 种子域总览（样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据。
+
+## 1 Overview / 概述
+
+GLM seed domains are the five core configuration domains shipped with the platform: REGION_TARIFF, PROJECT_ENV, ALARM_THRESHOLD, PROJECT_MEMBER and CURRENCY. They are called "seed" domains because they are initialized from seed data and then maintained through the standard definition/data/publish flow.
+
+GLM 种子域指平台随包初始化的五个核心配置域：区域费率、项目环境、告警阈值、项目成员与币种。它们由种子数据初始化，之后按"定义 → 数据 → 发布"的标准流程维护。
+
+## 2 Domain list / 域清单
+
+| Domain | 中文名 | Scope | Owner |
+| --- | --- | --- | --- |
+| REGION_TARIFF | 区域费率 | REGION | 财务结算 |
+| PROJECT_ENV | 项目环境 | PROJECT | 项目实施 |
+| ALARM_THRESHOLD | 告警阈值 | REGION | 运维 |
+| PROJECT_MEMBER | 项目成员 | PROJECT | 项目经理 |
+| CURRENCY | 币种 | GLOBAL | 财务结算 |
+
+## 3 Initialization / 初始化
+
+1. Definitions are created first / 先建定义；
+2. Seed data is loaded in dependency order: CURRENCY → REGION → PROJECT_ENV → PROJECT_MEMBER → REGION_TARIFF → ALARM_THRESHOLD / 按依赖顺序灌种子数据；
+3. Seeding is idempotent: existing rows with the same key are skipped, not overwritten / 种子灌入幂等，同主键已存在则跳过。
+
+## 4 Common pitfalls / 常见坑
+
+- Do not edit seed rows in place during initialization / 初始化期间不要直接改种子行；
+- Currency must exist before any tariff row / 费率前必须先有币种；
+- Project environment must exist before members reference it / 成员引用环境前环境必须存在；
+- Alarm thresholds depend on metric definitions, not on projects / 告警阈值依赖指标定义，不依赖项目。
+
+## 5 FAQ / 常见问题
+
+**Q: Can I add a new seed domain? / 可以新增种子域吗？**
+A: Yes, but it must follow the same five-step contract: definition, seed, import, precheck, publish. / 可以，但必须走同样的五步：定义、种子、导入、预检查、发布。
+
+**Q: Is GLM an acronym for a model? / GLM 是模型缩写吗？**
+A: In this repository, GLM refers to the seed-domain package name, not to a language model. / 在本仓库里，GLM 指种子域包名，不是语言模型。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。
+# 币种与范围口径（样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据。
+
+## 1 币种定义
+
+币种（CURRENCY）是 GLOBAL 级配置，字段只有三项：编码、名称、小数位。编码采用三位大写字母，小数位取 0–4。
+
+## 2 范围口径
+
+币种没有区域范围，所有区域共用一份币种表。区域费率中的币种必须存在于币种表且状态为有效。
+
+## 3 规则
+
+1. 币种编码不允许修改，只能停用后新增；
+2. 停用币种前必须确认没有有效费率引用；
+3. 小数位变更等于口径变更，必须走变更审批；
+4. 默认币种为 CNY，仅用于迁移期补值。
+
+## 4 常见问题
+
+**问：可以删除币种吗？**
+答：不可以，只能停用。删除会破坏历史费率与结算的可追溯性。
+
+**问：为什么导入提示"币种不存在"？**
+答：编码大小写不一致，或币种已停用。停用与不存在在提示文案上不同，注意区分。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。
+# 查询条件写法（样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据。
+
+## 1 结构
+
+查询条件由范围条件与字段条件两部分组成：
+
+```json
+{
+  "scopeKeys": ["R-NORTH", "R-EAST"],
+  "fields": [
+    {"fieldCode": "level", "operator": "EQ", "value": "A"},
+    {"fieldCode": "base_rate", "operator": "GTE", "value": 2.0}
+  ]
+}
+```
+
+字段条件之间是 AND；范围条件之间是 OR（命中任一范围即可）。
+
+## 2 操作符
+
+| 操作符 | 含义 | 值形态 |
+| --- | --- | --- |
+| EQ | 等于 | 标量 |
+| NE | 不等于 | 标量 |
+| CONTAINS | 包含子串 | 文本 |
+| LIKE | 模糊匹配 | 文本 |
+| STARTS_WITH | 前缀匹配 | 文本 |
+| IN | 在集合内 | 数组 |
+| EMPTY | 为空 | 不带值 |
+| NOT_EMPTY | 不为空 | 不带值 |
+| GT/GTE/LT/LTE | 比较 | 数值/日期 |
+
+## 3 注意
+
+1. IN 的值必须是数组，传字符串会被拒绝；
+2. EMPTY/NOT_EMPTY 不带 value，带了也会被忽略；
+3. GLOBAL 级定义忽略 scopeKeys；
+4. 日期比较使用 `yyyy-MM-dd` 格式，不接受时间戳；
+5. 条件为空对象等价于"不过滤"，不要用空条件冒充"查不到"。
+
+## 4 常见错误
+
+**错误：** 把 `fields` 写成扁平对象 `{"fieldCode":"level","operator":"EQ","value":"A"}`。
+**后果：** 前端只读 `fields` 数组，扁平形态会被静默丢弃，表现为"工具成功但条件为空"。
+
+**错误：** 用 `EQ` 比较数值却传字符串 `"3.40"`。
+**后果：** 类型不匹配，比较结果不可靠；数值列请传数值。
+
+## 5 与预览的关系
+
+条件设置后只影响当前浏览器里的预览；落库发生在向导推进步骤时。关闭页面不会自动保存条件。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。
+# AI 面板使用口径（样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据。
+
+## 1 能做什么
+
+AI 面板可以创建任务、勾选配置项、设置查询条件、推进向导步骤、发起导出/预检查/导入/发布（后四类需要确认卡片），也可以回答制度、流程、口径类问题。
+
+## 2 渐进披露
+
+AI 只能使用当前页面披露的工具。在任务中心与对应向导里能看到向导动作；在定义页与数据浏览页只能看到只读工具。工具不会"一次性全给"，这是刻意设计。
+
+## 3 确认门
+
+启动导出/预检查/导入/发布时，界面会弹出确认卡片，用户点「确认执行」后才真正执行。AI 不得预先宣称"已启动"。
+
+## 4 知识问答
+
+制度/流程/口径类问题，AI 会先检索业务知识库，再读原文核对，最后按 `[doc_id §章节]` 格式引用。未检索到时会明确说明"知识库中未找到"，并建议联系业务负责人。
+
+## 5 常见问题
+
+**问：为什么 AI 说"没有对应工具"？**
+答：当前页面没有披露该工具。先导航到任务中心或对应向导。
+
+**问：AI 回答里为什么没有具体条款？**
+答：知识库未命中或片段不足。可以让 AI 换同义词再查，或提供更具体的术语。
+
+**问：AI 能直接改数据吗？**
+答：不能。写操作都要经过确认卡片；表格内修改只改浏览器内存，不落服务端。
+
+**问：回答里的方括号是什么？**
+答：引用来源，格式为 `[doc_id §章节]`，只引用工具实际返回过的内容。
+
+## 6 使用建议
+
+1. 提问尽量带上配置域名称（如"区域费率"）；
+2. 口头叫法也可以，AI 会用别名再查一次；
+3. 需要条款原文时，明确说"读原文"或"第几章"；
+4. 发现回答与制度不符时，以知识库原文为准并反馈维护人。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。
+# 术语表（样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据。
+
+## 1 业务术语
+
+| 术语 | 口头叫法 | 含义 | 所属域 |
+| --- | --- | --- | --- |
+| 标准费率 | 基准费率、基础价 | 区域内默认档位费率 | REGION_TARIFF |
+| 区域费率 | 费率表、区域价格 | 区域级价格参数集合 | REGION_TARIFF |
+| 跨区加收比例 | 加收比例、跨区系数 | 跨区结算的加价比例 | REGION_TARIFF |
+| 档位 | 等级、级别 | 费率层级 A/B/C | REGION_TARIFF |
+| 项目环境 | 环境清单、环境 | 项目可用运行环境集合 | PROJECT_ENV |
+| 告警阈值 | 告警线、阈值线 | 触发告警的边界值 | ALARM_THRESHOLD |
+| 观察期 | 试运行期 | 变更后的观察时间窗 | ALARM_THRESHOLD |
+| 项目成员 | 成员、项目人员 | 项目内的人与角色关系 | PROJECT_MEMBER |
+| 预检查 | 导入检查 | 导入前的格式与依赖校验 | 通用流程 |
+| 发布 | 上线、生效 | 把暂存数据写入正式库 | 通用流程 |
+
+## 2 技术术语
+
+| 术语 | 含义 |
+| --- | --- |
+| 定义（Definition） | 一类配置的字段结构 |
+| 数据（Data） | 按定义落库的具体记录 |
+| 主键（Key） | 唯一定位一条记录的字段组合 |
+| 引用（Ref） | 字段值受另一份定义约束 |
+| 暂存区 | 导入后、发布前的中间区域 |
+
+## 3 使用约定
+
+同一术语在检索时可能以口头叫法出现；知识库的别名索引会把口头叫法映射回正式术语。精确查询术语解释用 `kb_lookup_term`，模糊召回用 `kb_search`。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。
+# 数据质量校验规则（样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据。数字为演示值。
+
+## 1 校验分层
+
+数据质量校验分为三层：格式校验、业务校验、跨域校验。三层按顺序执行，前一层不通过时不进入下一层。
+
+## 2 格式校验
+
+| 规则 | 判据 | 失败处理 |
+| --- | --- | --- |
+| 必填 | 字段值非空且非空白 | 拒绝导入 |
+| 长度 | 不超过定义长度 | 拒绝导入 |
+| 类型 | 与字段类型一致 | 拒绝导入 |
+| 日期 | `yyyy-MM-dd` 且真实存在 | 拒绝导入 |
+| 小数位 | 不超过定义精度 | 拒绝导入 |
+
+## 3 业务校验
+
+1. 主键唯一：同一主键组合只能出现一次；
+2. 枚举合法：值必须在定义枚举内；
+3. 数值区间：费率 > 0、比例 0–30%；
+4. 状态合法：状态值必须来自状态枚举；
+5. 生效日期：不得早于定义的最小生效日期。
+
+## 4 跨域校验
+
+- 区域编码必须存在且有效；
+- 币种编码必须存在且有效；
+- 项目环境引用的区域必须存在；
+- 项目成员引用的项目必须存在；
+- 费率引用的档位必须存在。
+
+跨域校验依赖的定义必须已发布；定义未发布时校验会提示"无法校验引用"，此时不能强行导入。
+
+## 5 质量指标
+
+| 指标 | 计算方式 | 目标 |
+| --- | --- | --- |
+| 一次通过率 | 首次预检查通过批次数 / 总批次数 | ≥ 90% |
+| 主键重复率 | 重复行数 / 总行数 | ≤ 0.1% |
+| 空值率 | 必填字段空值数 / 必填字段总数 | 0 |
+| 引用缺失率 | 引用缺失行数 / 总行数 | ≤ 0.5% |
+
+指标按月统计，低于目标时先分析原因，再决定是修数据还是修规则。
+
+## 6 处置建议
+
+- 格式问题：修文件，不要改定义迁就数据；
+- 业务问题：核对业务口径，必要时更新定义；
+- 跨域问题：先补引用数据，再导入；
+- 批量问题：抽样定位模式，避免逐行修。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。
+# 操作审计与留痕（样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据。
+
+## 1 审计范围
+
+以下动作必须留痕：定义发布、数据导入、数据发布、任务创建、作业发起、成员角色变更、阈值变更、知识库热重载。
+
+只读动作（查询、导出、检索）默认不留业务审计，但保留访问日志。
+
+## 2 审计字段
+
+| 字段 | 说明 |
+| --- | --- |
+| 操作人 | 账号 + 姓名 |
+| 操作时间 | 精确到秒 |
+| 操作类型 | 发布/导入/变更等 |
+| 目标对象 | 定义编码或数据主键 |
+| 变更摘要 | 变更前后摘要，不含完整数据 |
+| 关联单号 | 变更单/工单编号 |
+| 结果 | 成功/失败 + 失败原因码 |
+
+## 3 保留期限
+
+业务审计保留三十六个月；访问日志保留六个月；作业日志保留十二个月。到期后归档，不直接删除。
+
+## 4 查询与导出
+
+审计查询按时间范围 + 操作类型检索；跨项目查询需要授权。导出审计记录需要审批，导出文件加密保存。
+
+## 5 常见问题
+
+**问：审计记录可以修改吗？**
+答：不可以。审计只追加，发现记录错误时以补充说明的方式追加，不覆盖原记录。
+
+**问：AI 发起的操作有审计吗？**
+答：有。AI 发起的写操作与人工操作走同一审计链路，并额外记录会话标识。
+
+**问：热重载为什么也要审计？**
+答：热重载会改变模型可检索的知识面，属于影响回答口径的动作，必须可追溯。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。
+# 知识库维护 FAQ（样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据。
+
+## 1 如何新增一篇知识文档
+
+1. 在知识目录新增 `md` 文件（文件名建议编号 + 英文 slug）；
+2. 在 `manifest.json` 的 `docs` 中登记 id、title、tags、aliases 与 file；
+3. 计算文件 sha 并写入 manifest 的 `sha`，更新 `updated_at`；
+4. 调管理端点 `POST /api/ai/kb/reload` 触发重建；
+5. 用 `GET /api/ai/kb/status` 确认 doc_count 增加。
+
+## 2 如何让口头叫法被召回
+
+在 manifest 的 `aliases` 里登记同义词。例如"费率表"登记为区域费率的别名，检索"费率表"即可命中。
+
+## 3 如何提供术语的预制答案
+
+在 manifest 该文档的 `terms` 里登记 `name`、`aliases`、`section`、`answer`。`kb_lookup_term` 只做精确/别名命中，不做模糊兜底。
+
+## 4 修改文档后索引没变
+
+常见原因：manifest 的 sha 没更新（local 源按文件实算 sha，会自动发现），或刷新间隔未到。可手动调 reload。
+
+## 5 热重载会不会影响正在进行的问答
+
+不会中断。新索引在临时目录构建，成功后原子切换；进行中的检索要么用旧索引，要么用新索引，不会读到半成品。
+
+## 6 文档写多长合适
+
+单篇建议不超过一万字；超长文档请用多级标题分节，便于切块与按 section 读取。表格与 mermaid 会原样保留。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。
+"
+to contain:
+  "```java" 
+	at com.example.configmgr.ai.kb.KbSampleCorpusTest.complexityElementsAreCovered(KbSampleCorpusTest.java:65)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[INFO] Running com.example.configmgr.ai.kb.KbServiceIncrementalTest
+[ERROR] Tests run: 5, Failures: 0, Errors: 5, Skipped: 0, Time elapsed: 0.145 s <<< FAILURE! -- in com.example.configmgr.ai.kb.KbServiceIncrementalTest
+[ERROR] com.example.configmgr.ai.kb.KbServiceIncrementalTest.changedShaRebuildsOnlyThatDocument -- Time elapsed: 0.028 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbServiceIncrementalTest.changedShaRebuildsOnlyThatDocument(KbServiceIncrementalTest.java:63)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbServiceIncrementalTest.removedDocumentLeavesTheIndex -- Time elapsed: 0.029 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbServiceIncrementalTest.removedDocumentLeavesTheIndex(KbServiceIncrementalTest.java:84)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbServiceIncrementalTest.brokenManifestKeepsOldIndexAndReportsError -- Time elapsed: 0.031 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbServiceIncrementalTest.brokenManifestKeepsOldIndexAndReportsError(KbServiceIncrementalTest.java:111)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbServiceIncrementalTest.unchangedShaDoesNotRefetchContentAndReusesChunks -- Time elapsed: 0.026 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbServiceIncrementalTest.unchangedShaDoesNotRefetchContentAndReusesChunks(KbServiceIncrementalTest.java:45)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbServiceIncrementalTest.concurrentSearchesNeverSeePartialIndexDuringReload -- Time elapsed: 0.028 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbServiceIncrementalTest.concurrentSearchesNeverSeePartialIndexDuringReload(KbServiceIncrementalTest.java:128)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[INFO] Running com.example.configmgr.ai.kb.KbServiceIndexTest
+[ERROR] Tests run: 12, Failures: 0, Errors: 12, Skipped: 0, Time elapsed: 0.047 s <<< FAILURE! -- in com.example.configmgr.ai.kb.KbServiceIndexTest
+[ERROR] com.example.configmgr.ai.kb.KbServiceIndexTest.topKIsClampedToServerMaximum -- Time elapsed: 0.003 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbTestSupport.samplesService(KbTestSupport.java:50)
+	at com.example.configmgr.ai.kb.KbServiceIndexTest.topKIsClampedToServerMaximum(KbServiceIndexTest.java:71)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbServiceIndexTest.hitsCarryMatchLevelsAndNeverRawScores -- Time elapsed: 0.004 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbTestSupport.samplesService(KbTestSupport.java:50)
+	at com.example.configmgr.ai.kb.KbServiceIndexTest.hitsCarryMatchLevelsAndNeverRawScores(KbServiceIndexTest.java:112)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbServiceIndexTest.aliasQueryRecallsTheCanonicalDoc -- Time elapsed: 0.002 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbTestSupport.samplesService(KbTestSupport.java:50)
+	at com.example.configmgr.ai.kb.KbServiceIndexTest.aliasQueryRecallsTheCanonicalDoc(KbServiceIndexTest.java:43)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbServiceIndexTest.chineseSentenceQueryHitsRelevantDocWithoutSpaces -- Time elapsed: 0.001 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbTestSupport.samplesService(KbTestSupport.java:50)
+	at com.example.configmgr.ai.kb.KbServiceIndexTest.chineseSentenceQueryHitsRelevantDocWithoutSpaces(KbServiceIndexTest.java:31)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbServiceIndexTest.oneOrTwoHitsAreLowConfidenceAndMarkedLow -- Time elapsed: 0.002 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbTestSupport.samplesService(KbTestSupport.java:50)
+	at com.example.configmgr.ai.kb.KbServiceIndexTest.oneOrTwoHitsAreLowConfidenceAndMarkedLow(KbServiceIndexTest.java:94)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbServiceIndexTest.noMatchReturnsSearchedTermsAndNearbyTitles -- Time elapsed: 0.001 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbTestSupport.samplesService(KbTestSupport.java:50)
+	at com.example.configmgr.ai.kb.KbServiceIndexTest.noMatchReturnsSearchedTermsAndNearbyTitles(KbServiceIndexTest.java:82)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbServiceIndexTest.sampleCorpusIsIndexedAndReady -- Time elapsed: 0.009 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbTestSupport.samplesService(KbTestSupport.java:50)
+	at com.example.configmgr.ai.kb.KbServiceIndexTest.sampleCorpusIsIndexedAndReady(KbServiceIndexTest.java:16)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbServiceIndexTest.mermaidDocIsFoundByTitle -- Time elapsed: 0.004 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbTestSupport.samplesService(KbTestSupport.java:50)
+	at com.example.configmgr.ai.kb.KbServiceIndexTest.mermaidDocIsFoundByTitle(KbServiceIndexTest.java:61)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbServiceIndexTest.catalogIsManifestOrdered -- Time elapsed: 0.002 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbTestSupport.samplesService(KbTestSupport.java:50)
+	at com.example.configmgr.ai.kb.KbServiceIndexTest.catalogIsManifestOrdered(KbServiceIndexTest.java:152)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbServiceIndexTest.tableContentIsSearchable -- Time elapsed: 0.002 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbTestSupport.samplesService(KbTestSupport.java:50)
+	at com.example.configmgr.ai.kb.KbServiceIndexTest.tableContentIsSearchable(KbServiceIndexTest.java:52)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbServiceIndexTest.searchBeforeIndexIsReadyReturnsNotReady -- Time elapsed: 0.002 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.search
+	at com.example.configmgr.ai.kb.KbService.search(KbService.java:76)
+	at com.example.configmgr.ai.kb.KbServiceIndexTest.searchBeforeIndexIsReadyReturnsNotReady(KbServiceIndexTest.java:134)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbServiceIndexTest.blankQueryIsInvalidNotNoMatch -- Time elapsed: 0.002 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbTestSupport.samplesService(KbTestSupport.java:50)
+	at com.example.configmgr.ai.kb.KbServiceIndexTest.blankQueryIsInvalidNotNoMatch(KbServiceIndexTest.java:142)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[INFO] Running com.example.configmgr.ai.kb.KbToolsTest
+[ERROR] Tests run: 12, Failures: 0, Errors: 12, Skipped: 0, Time elapsed: 0.043 s <<< FAILURE! -- in com.example.configmgr.ai.kb.KbToolsTest
+[ERROR] com.example.configmgr.ai.kb.KbToolsTest.topKIsClampedAndShownInOutput -- Time elapsed: 0.003 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbTestSupport.samplesService(KbTestSupport.java:50)
+	at com.example.configmgr.ai.kb.KbToolsTest.topKIsClampedAndShownInOutput(KbToolsTest.java:50)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbToolsTest.noMatchShowsTermsAndSuggestions -- Time elapsed: 0.002 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbTestSupport.samplesService(KbTestSupport.java:50)
+	at com.example.configmgr.ai.kb.KbToolsTest.noMatchShowsTermsAndSuggestions(KbToolsTest.java:73)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbToolsTest.lookupHitRendersSourceFields -- Time elapsed: 0.002 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbTestSupport.samplesService(KbTestSupport.java:50)
+	at com.example.configmgr.ai.kb.KbToolsTest.lookupHitRendersSourceFields(KbToolsTest.java:115)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbToolsTest.firstScreenIsLimitedTo1200Chars -- Time elapsed: 0.001 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbTestSupport.samplesService(KbTestSupport.java:50)
+	at com.example.configmgr.ai.kb.KbToolsTest.firstScreenIsLimitedTo1200Chars(KbToolsTest.java:94)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbToolsTest.unknownDocReturnsCandidatesNotException -- Time elapsed: 0.002 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbTestSupport.samplesService(KbTestSupport.java:50)
+	at com.example.configmgr.ai.kb.KbToolsTest.unknownDocReturnsCandidatesNotException(KbToolsTest.java:84)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbToolsTest.notReadyToolsFailOpenWithLoadingMessage -- Time elapsed: 0.002 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.search
+	at com.example.configmgr.ai.kb.KbService.search(KbService.java:76)
+	at com.example.configmgr.ai.kb.KbTools.kbSearch(KbTools.java:61)
+	at com.example.configmgr.ai.kb.KbToolsTest.notReadyToolsFailOpenWithLoadingMessage(KbToolsTest.java:21)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbToolsTest.lookupMissPointsToSearchAndNeverFuzzyMatches -- Time elapsed: 0.001 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbTestSupport.samplesService(KbTestSupport.java:50)
+	at com.example.configmgr.ai.kb.KbToolsTest.lookupMissPointsToSearchAndNeverFuzzyMatches(KbToolsTest.java:104)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbToolsTest.blankQueryIsRejectedAsIllegalArgument -- Time elapsed: 0.002 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbTestSupport.samplesService(KbTestSupport.java:50)
+	at com.example.configmgr.ai.kb.KbToolsTest.blankQueryIsRejectedAsIllegalArgument(KbToolsTest.java:28)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbToolsTest.searchResultIsDelimitedAndCarriesNoScoreOrDebugKeys -- Time elapsed: 0.001 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbTestSupport.samplesService(KbTestSupport.java:50)
+	at com.example.configmgr.ai.kb.KbToolsTest.searchResultIsDelimitedAndCarriesNoScoreOrDebugKeys(KbToolsTest.java:37)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbToolsTest.toolResultNeverExceeds8000Chars -- Time elapsed: 0.009 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbToolsTest.toolResultNeverExceeds8000Chars(KbToolsTest.java:147)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbToolsTest.singleHitIsReportedAsLowConfidence -- Time elapsed: 0.004 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbToolsTest.singleHitIsReportedAsLowConfidence(KbToolsTest.java:62)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[ERROR] com.example.configmgr.ai.kb.KbToolsTest.injectedDelimitersAndZeroWidthCharsAreNeutralized -- Time elapsed: 0.003 s <<< ERROR!
+java.lang.UnsupportedOperationException: TODO KbService.refreshNow
+	at com.example.configmgr.ai.kb.KbService.refreshNow(KbService.java:49)
+	at com.example.configmgr.ai.kb.KbTestSupport.service(KbTestSupport.java:57)
+	at com.example.configmgr.ai.kb.KbToolsTest.injectedDelimitersAndZeroWidthCharsAreNeutralized(KbToolsTest.java:130)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+
+[INFO] 
+[INFO] Results:
+[INFO] 
+[ERROR] Failures: 
+[ERROR]   KbSampleCorpusTest.complexityElementsAreCovered:65 
+Expecting actual:
+  "# 区域费率管理口径（样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据。
+
+## 1 定义
+
+区域费率（REGION_TARIFF）是配置管理平台按「区域 + 币种 + 档位」维度维护的价格参数集合。它决定导出、结算与预算三类业务的计价基准，是 GLM 种子域中的核心配置之一。
+
+费率不是财务凭证，不能在费率表里记录结算结果；结算结果属于业务数据，走独立的结算库。
+
+## 2 关键字段
+
+| 字段 | 含义 | 必填 | 备注 |
+| --- | --- | --- | --- |
+| region_code | 区域编码 | 是 | 来自 REGION 定义 |
+| currency | 币种 | 是 | 来自 CURRENCY 定义 |
+| level | 档位 | 是 | A/B/C |
+| base_rate | 标准费率 | 是 | 大于 0 |
+| cross_ratio | 跨区加收比例 | 否 | 0–30% |
+
+## 3 维护规则
+
+1. 新增费率必须同时提供三元组与标准费率，缺一不可；
+2. 修改标准费率必须走变更审批，不允许直接编辑生效版本；
+3. 停用区域前必须先确认该区域没有有效费率；
+4. 批量维护优先走导入流程，不逐条手工修改；
+5. 同一三元组不允许重复记录。
+
+## 4 常见问题
+
+**问：费率表在哪里维护？**
+答：在配置管理平台的「配置定义 → REGION_TARIFF → 数据浏览」中查看，修改走导出/导入流程。
+
+**问：口头说的"区域价格"指什么？**
+答：就是区域费率，二者是同一个配置域。
+
+**问：标准费率和基准费率有区别吗？**
+答：没有。基准费率是标准费率的另一种叫法，字段都是 `base_rate`。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。
+# 区域费率计算规则（样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据。数字均为演示值。
+
+## 1 单笔计算
+
+应收金额 = 业务量 × 标准费率 × 档位系数。档位系数 A=1.00、B=1.05、C=1.10。金额只在最终结果取整到分，中间步骤不取整。
+
+示例：业务量 87，标准费率 4.25，档位 B ⇒ 87 × 4.25 × 1.05 = 388.24（四舍五入到分）。
+
+## 2 跨区加收
+
+跨区金额 = 业务量 × 业务发生地费率 × 档位系数 ×（1 + 跨区加收比例）。注意：比例读取业务发生地所属区域，不是费率所属区域。
+
+示例：业务量 200，发生地费率 1.80，档位 A，比例 7.5% ⇒ 200 × 1.80 × 1.00 × 1.075 = 387.00。
+
+## 3 取整与边界
+
+| 场景 | 处理 |
+| --- | --- |
+| 费率 ≤ 0 | 拒绝发布 |
+| 费率 > 9999.99 | 需要二次确认 |
+| 跨区比例 < 0 或 > 30% | 拒绝保存 |
+| 跨区比例非 0.5% 整数倍 | 拒绝保存 |
+| 最终金额 | 四舍五入到分 |
+
+## 4 校验顺序
+
+1. 先校验定义引用（区域/币种/档位是否存在）；
+2. 再校验数值区间与步长；
+3. 最后校验生效日期冲突。
+
+顺序不能反：先校验日期会在定义缺失时给出误导性的冲突提示。
+
+## 5 排障提示
+
+金额不一致时，按「档位系数 → 跨区比例来源 → 取整时机」三步复算。90% 的差异来自跨区比例读错区域，10% 来自中间步骤提前取整。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。
+# 区域费率实施细则（长篇样例）
+
+> 本文为**样例文档**，仅用于业务知识库功能验证（切块、分页、检索），不含任何真实业务数据、真实地区编码或真实费率。文中数字均为演示值。
+
+## 1 适用范围
+
+本细则适用于配置管理平台中「区域费率」（REGION_TARIFF）配置域的全部维护动作，包括新增费率版本、调整费率档位、跨区结算加收、历史版本回溯与费率发布。适用的使用方包括：区域运营、项目实施、财务结算与配置管理员。
+
+本细则不适用于项目环境（PROJECT_ENV）、告警阈值（ALARM_THRESHOLD）与项目成员（PROJECT_MEMBER）三个域；这些域的口径见各自的样例文档。
+
+### 1.1 生效边界
+
+费率以「生效日期 + 区域编码 + 币种」三元组确定唯一有效版本。三元组完全相同而存在两条记录时，属于数据质量问题，必须由配置管理员在发布前修正，不能靠"后发布的覆盖先发布的"来兜底。
+
+### 1.2 与旧口径的关系
+
+旧口径按「区域 + 费率档位」定位，不含币种；新口径增加币种维度后，旧数据在迁移时统一补默认币种 CNY。迁移期间新旧口径并行一个发布周期，冲突时以新口径为准，并在发布说明中注明迁移批次。
+
+## 2 术语与口径
+
+### 2.1 标准费率
+
+标准费率为区域内默认档位的费率，是其它档位计算的基准。标准费率变更必须走完整审批（见第 5 章），不得通过"新增一条同三元组记录"的方式绕过审批。
+
+### 2.2 基准费率
+
+基准费率是标准费率的同义口头叫法，二者在系统里是同一个字段 `base_rate`。检索、讨论与工单里出现"基准费率"时，一律按标准费率理解。
+
+### 2.3 档位
+
+档位是同一区域内按业务量或客户等级划分的费率层级，常见档位为 A/B/C 三档。档位编码必须来自 `TARIFF_LEVEL` 配置定义，不允许在费率表中自造档位编码。
+
+### 2.4 跨区结算
+
+当业务发生地与费率所属区域不一致时，按「业务发生地费率 + 跨区加收比例」计算。跨区加收比例是区域级参数，最小 0%，最大 30%，步长 0.5%。
+
+## 3 费率分类
+
+| 分类编码 | 分类名称 | 是否含跨区加收 | 默认档位 | 说明 |
+| --- | --- | --- | --- | --- |
+| STD | 标准业务 | 是 | A | 默认分类，覆盖大多数场景 |
+| ENT | 企业专线 | 是 | B | 需要项目成员角色校验 |
+| TMP | 临时业务 | 否 | C | 有效期不超过 30 天 |
+| INT | 内部结算 | 否 | A | 仅限内部项目，不对外结算 |
+
+费率分类编码来自 `TARIFF_CATEGORY` 定义，新增分类必须先发布定义，再发布费率数据。
+
+## 4 计算规则
+
+### 4.1 标准计算
+
+单条业务量的应收金额 = 业务量 × 标准费率 × 档位系数。档位系数：A = 1.00，B = 1.05，C = 1.10。金额保留两位小数，采用四舍五入。
+
+示例：业务量 120，标准费率 3.40，档位 B ⇒ 120 × 3.40 × 1.05 = 428.40。
+
+### 4.2 跨区结算
+
+跨区应收金额 = 业务发生地标准费率 × 业务量 × 档位系数 ×（1 + 跨区加收比例）。跨区加收比例按业务发生地所属区域读取，不按费率所属区域读取——这是历史上最容易搞反的一处，排障时优先核对。
+
+示例：业务发生地费率 2.80，业务量 100，档位 A，加收比例 5% ⇒ 2.80 × 100 × 1.00 × 1.05 = 294.00。
+
+### 4.3 边界与取整
+
+1. 费率小于 0 一律拒绝发布；
+2. 费率大于 9999.99 需要二次确认；
+3. 中间计算不取整，只在最终金额取整到分；
+4. 跨区加收比例超过 30% 时拒绝保存，不做静默截断；
+5. 生效日期早于当前日期 90 天以上的补录，需要财务负责人复核。
+
+### 4.4 计算流程图
+
+```mermaid
+flowchart TD
+    A[读取业务发生地与费率区域] --> B{是否跨区}
+    B -- 否 --> C[业务量 x 标准费率 x 档位系数]
+    B -- 是 --> D[读取跨区加收比例]
+    D --> E{比例是否在 0-30%}
+    E -- 否 --> F[拒绝并提示修正]
+    E -- 是 --> G[业务量 x 发生地费率 x 档位系数 x 1+比例]
+    C --> H[金额取整到分]
+    G --> H
+    H --> I[生成结算明细]
+```
+
+流程图中的判断分支与 4.3 的边界规则一一对应；修改任一分支必须同步修改 4.3，否则文档与实现会分叉。
+
+## 5 审批流程
+
+1. 区域运营提交费率变更单，填写区域、币种、生效日期与变更原因；
+2. 项目实施核对受影响的项目清单，确认无未结项项目；
+3. 财务结算核对跨区加收比例与历史结算差异；
+4. 配置管理员在配置管理平台创建导出任务，导出当前费率快照留档；
+5. 配置管理员导入新费率，执行预检查；
+6. 预检查通过后发布，发布作业完成前不得重复发起；
+7. 发布完成后由区域运营抽检三个档位的计算结果；
+8. 抽检通过后在变更单上回填发布作业编号，流程关闭。
+
+以上八步缺一不可。任何"先发布后补审批"的做法都视为违规操作，需要在操作审计中登记。
+
+## 6 变更与版本
+
+### 6.1 版本号
+
+费率版本采用「YYYY.MM.N」格式，N 为当月序号。版本号只在发布成功后生成，草稿不占用版本号。
+
+### 6.2 回滚
+
+发布后 24 小时内发现问题，可以回滚到上一个版本；超过 24 小时的回滚按新变更处理，需要重新走审批。回滚不是删除：旧版本保留在历史表中，只把"当前有效版本"指针指回去。
+
+### 6.3 多版本并存
+
+同一区域允许存在多个未来生效版本，但同一生效日期只允许一个版本。版本冲突时，发布预检查会给出冲突清单，不允许强制发布。
+
+## 7 常见问题（FAQ）
+
+**Q1：标准费率改了，历史结算会变吗？**
+不会。结算明细在生成时固化当时费率，后续费率变更不影响已生成的结算明细。
+
+**Q2：跨区加收比例可以按项目单独设置吗？**
+不可以。它是区域级参数；项目级的差异通过档位系数体现。
+
+**Q3：为什么导入时提示"档位编码不存在"？**
+档位编码必须来自 `TARIFF_LEVEL` 定义。先确认定义已发布，再检查导入文件中的档位编码是否有多余空格。
+
+**Q4：费率发布后可以删除吗？**
+不可以删除，只能新增版本覆盖。删除会破坏历史结算的可追溯性。
+
+**Q5：临时业务到期后费率还在吗？**
+临时业务分类的费率记录保留，但状态置为失效；查询时默认只显示有效记录。
+
+**Q6：一个区域可以没有标准费率吗？**
+不可以。每个区域至少有一个 A 档标准费率；缺失时预检查会直接失败。
+
+**Q7：跨区加收比例为 0 与"不跨区"有区别吗？**
+计算金额相同，但结算明细中的分类不同，报表口径也不同。不要用 0 比例代替"不跨区"标记。
+
+## 8 附：字段与代码
+
+```json
+{
+  "defCode": "REGION_TARIFF",
+  "fields": [
+    {"code": "region_code", "label": "区域编码", "type": "STRING", "required": true, "key": true},
+    {"code": "currency", "label": "币种", "type": "STRING", "required": true, "key": true},
+    {"code": "level", "label": "档位", "type": "STRING", "required": true, "key": true},
+    {"code": "base_rate", "label": "标准费率", "type": "DECIMAL", "required": true},
+    {"code": "cross_ratio", "label": "跨区加收比例", "type": "DECIMAL", "required": false}
+  ]
+}
+```
+
+字段 `base_rate` 即标准费率，`cross_ratio` 即跨区加收比例。字段编码发布后不可改名，只能新增字段并逐步下线旧字段。
+
+## 9 附录：发布前检查清单
+
+- [ ] 区域编码来自已发布的 `REGION` 定义；
+- [ ] 币种来自已发布的 `CURRENCY` 定义；
+- [ ] 档位来自已发布的 `TARIFF_LEVEL` 定义；
+- [ ] 每个区域至少一条 A 档标准费率；
+- [ ] 跨区加收比例在 0%–30% 之间且为 0.5% 的整数倍；
+- [ ] 生效日期不与既有版本冲突；
+- [ ] 受影响项目清单已核对；
+- [ ] 当前费率快照已导出留档；
+- [ ] 预检查通过且无未处理告警；
+- [ ] 发布窗口内没有其它费率发布作业在途。
+
+## 10 附录：术语对照
+
+| 口头叫法 | 正式名称 | 字段 |
+| --- | --- | --- |
+| 基准费率 | 标准费率 | base_rate |
+| 费率表 | 区域费率 | REGION_TARIFF |
+| 加收比例 | 跨区加收比例 | cross_ratio |
+| 档位系数 | 档位系数 | level_factor |
+| 区域价格 | 区域费率 | REGION_TARIFF |
+
+术语对照用于检索召回：用户说"费率表"时，实际想查的是区域费率配置；用户说"加收比例"时，对应字段是 `cross_ratio`。
+
+## 11 附录：典型错误与处置
+
+### 11.1 导入失败：主键冲突
+
+原因：同一「区域 + 币种 + 档位 + 生效日期」已存在记录。
+处置：先导出当前版本核对，再决定是覆盖还是新增版本；不要删除既有记录。
+
+### 11.2 预检查失败：跨区比例越界
+
+原因：比例大于 30% 或不是 0.5% 的整数倍。
+处置：修正导入文件；系统不做静默截断，避免"看起来成功、实际口径已变"。
+
+### 11.3 发布作业长时间未完成
+
+原因：可能有其它作业占用同一配置域，或作业被实例重启中断。
+处置：先在作业列表查看状态；不要重复发起发布，避免双写。
+
+### 11.4 结算金额与手工计算不一致
+
+原因：常见为档位系数取错、跨区比例按费率所属区域读取、或中间步骤提前取整。
+处置：按 4.1–4.3 逐步复算，核对结算明细中固化的费率与系数。
+
+## 12 附录：口径变更记录（样例）
+
+| 日期 | 版本 | 变更内容 | 影响范围 |
+| --- | --- | --- | --- |
+| 2026-01-15 | 2026.01.1 | 新增币种维度 | 全部区域 |
+| 2026-03-02 | 2026.03.1 | 跨区加收比例上限由 20% 调整为 30% | 跨区业务 |
+| 2026-05-20 | 2026.05.1 | 临时业务默认档位由 B 调整为 C | 临时业务 |
+| 2026-07-08 | 2026.07.1 | 档位系数 B 由 1.03 调整为 1.05 | 全部区域 |
+| 2026-09-01 | 2026.09.1 | 明确金额只在最终步骤取整 | 全部区域 |
+
+变更记录用于"冲突以 updated_at 新者为准"的裁决：当两篇文档对同一口径描述不一致时，以变更记录中较新的版本为准，并在回答中说明存在历史版本。
+
+## 13 附录：与其他配置域的联动
+
+区域费率与以下配置域存在联动，排障时需要一并核对：
+
+1. **CURRENCY（币种）**：费率的币种必须存在于币种定义中，且状态为有效；
+2. **REGION（区域）**：区域编码必须存在，停用区域不允许新增费率；
+3. **PROJECT_ENV（项目环境）**：项目环境引用的区域决定其默认费率；
+4. **ALARM_THRESHOLD（告警阈值）**：费率异常波动会触发结算类告警，阈值口径见对应文档；
+5. **PROJECT_MEMBER（项目成员）**：企业专线分类需要校验项目成员角色。
+
+联动核对顺序建议：先定义（CURRENCY/REGION），再主数据（PROJECT_ENV/PROJECT_MEMBER），最后业务数据（REGION_TARIFF）。
+
+## 14 附录：批量维护建议
+
+批量维护优先使用"导出 → 离线修改 → 导入 → 预检查 → 发布"的链路，不建议逐条手工修改。导出时选择完整字段，避免离线修改后导入缺列。导入文件建议保留原始编码列，便于失败时定位到具体行。
+
+批量修改跨区加收比例时，先在测试区域验证一轮，再推广到全部区域。每次批量修改都要记录变更单编号，便于审计回溯。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。文档长度约 9000 字符，用于验证切块、分页与 offset 连续性。
+
+## 15 附录：结算对账口径
+
+每月结算完成后，区域运营需要在三个工作日内完成对账。对账的最小口径是：按区域汇总的业务量、按档位汇总的金额、按分类汇总的跨区加收金额，三者都要与结算报表一致。
+
+对账差异按以下顺序定位：
+
+1. 先核对结算周期内是否有费率版本切换；版本切换日按"生效日期当天零点"切分，不按发布时刻切分；
+2. 再核对跨区业务是否按业务发生地读取加收比例；
+3. 然后核对档位系数是否按结算当时固化的值计算；
+4. 最后核对是否存在手工调整金额；手工调整必须带审批单号，否则视为异常；
+5. 差异超过千分之三时，升级到财务负责人复核，不允许区域自行调账。
+
+对账结果记录在月度对账表中，保存期限不少于二十四个月。对账表本身不进入配置库，只作为审计附件归档。
+
+## 16 附录：异常场景处置
+
+### 16.1 发布中断
+
+发布作业中断时，系统保留已写入的暂存数据，不自动回滚。处置步骤：确认作业状态为失败 → 查看错误明细 → 修正数据 → 重新发起发布。重新发起前必须先清理未完成的暂存批次，否则会出现重复记录。
+
+### 16.2 并发修改
+
+两个管理员同时修改同一区域费率时，后保存的一方会收到版本冲突提示。此时不允许强制覆盖，必须重新加载最新版本后再改。强制覆盖会导致前一位管理员的变化被静默丢弃，属于严重操作事故。
+
+### 16.3 定义变更
+
+区域、币种、档位等定义发生变更时，费率不会自动跟随。定义停用后，引用该定义的费率记录仍然存在，但发布预检查会提示"引用已停用定义"。处置：要么恢复定义，要么先把费率迁移到新定义，再停用旧定义。
+
+### 16.4 时钟与生效日期
+
+服务器时钟与业务时区不一致时，可能出现"刚发布就生效"或"发布后迟迟不生效"。系统统一按业务时区的日期比较，不使用服务器本地时间。排障时先确认业务时区配置，再核对生效日期字段。
+
+## 17 附录：权限与审计
+
+费率维护权限分为查看、编辑、发布三级。查看权限可以导出；编辑权限可以创建草稿与预检查；发布权限只能由配置管理员持有。任何一级权限都不包含"删除历史版本"的能力。
+
+审计记录至少包含：操作人、操作时间、操作类型、目标区域与币种、变更前后摘要、关联变更单号、发布作业编号。审计记录只追加不修改，保存期限不少于三十六个月。
+
+审计查询按"区域 + 时间范围"检索；跨区域查询需要财务负责人授权。审计记录不包含完整费率明细，只包含变更摘要与差异行数，完整明细通过导出快照回溯。
+
+## 18 附录：培训与交接要点
+
+新成员上手费率维护，建议按以下顺序学习：
+
+1. 先读本文第 1–4 章，理解三元组、档位与跨区口径；
+2. 再用测试区域完成一次"导出 → 修改 → 导入 → 预检查"的完整演练；
+3. 然后在有发布权限的同事陪同下完成一次真实发布；
+4. 最后学习第 15–17 章的对账、异常与审计口径。
+
+交接时必须交付：当前有效版本清单、未来生效版本清单、未关闭的变更单、最近一次对账差异说明。缺少任何一项都视为交接未完成。
+
+## 19 附录：常见指标定义
+
+| 指标 | 定义 | 口径说明 |
+| --- | --- | --- |
+| 费率覆盖率 | 有标准费率的区域数 / 全部有效区域数 | 目标 100% |
+| 跨区业务占比 | 跨区结算金额 / 总结算金额 | 按区域分别统计 |
+| 版本切换次数 | 单月发布的费率版本数 | 不含回滚 |
+| 预检查失败率 | 预检查失败次数 / 预检查总次数 | 按变更单统计 |
+| 对账差异率 | 对账差异金额 / 结算金额 | 超过 0.3% 需升级 |
+
+指标只用于运营观察，不作为个人考核依据；指标异常时先排查数据与口径，再讨论流程问题。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。文档长度约 9000 字符，用于验证切块、分页与 offset 连续性。
+
+## 20 附录：问答补遗
+
+**Q8：费率版本号可以手工指定吗？**
+不可以。版本号由发布成功时刻自动生成，手工指定会破坏版本序列的唯一性。
+
+**Q9：同一区域可以有多个币种吗？**
+可以。同一区域的每个币种各自维护档位与费率，互不影响；跨币种结算需要先折算，折算汇率不在本配置域维护。
+
+**Q10：导入文件里多出一列会怎样？**
+预检查会提示"未知字段"，默认拒绝导入。确实需要新增字段时，先发布字段定义，再重新导出模板，不要依赖系统忽略多余列。
+
+**Q11：预检查通过但发布失败，需要重新预检查吗？**
+需要。预检查结果有有效期，发布前数据或定义发生变化时结果即失效；重新预检查是最低成本的安全动作。
+
+**Q12：回滚会不会影响已经开始的发布作业？**
+会。回滚前必须确认没有在途发布作业；有在途作业时回滚会被拒绝，避免版本指针与作业写入交叉。
+
+**Q13：为什么两个区域的同名档位金额不同？**
+档位只是层级标识，金额由各区域的标准费率与档位系数共同决定；同名档位不代表同价。
+
+## 21 附录：文档维护约定
+
+本文由区域运营与配置管理员共同维护。涉及计算规则（第 4 章）的修改必须由财务结算会签；涉及权限与审计（第 17 章）的修改必须由安全负责人会签。修改后在文末更新 `updated_at`，并同步更新 manifest 的 sha 与 updated_at，否则增量刷新不会重建该文档。
+
+文档中的表格如果超过屏幕宽度，允许横向滚动，不要求拆表；索引时表格作为一个整体块处理，检索命中后通过章节定位回原文。代码块与流程图按原样保留，不要为了排版把 mermaid 改成图片，图片无法被检索。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。文档长度约 8400 字符，用于验证切块、分页与 offset 连续性。
+
+补充约定：本文所有示例数字仅用于演示取整与比例规则，不构成任何区域的实际费率承诺；如需引用具体数值，请以配置库中的当前有效版本为准。
+# 费率边界与特例（样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据。表格为宽表示例。
+
+## 1 宽表：跨区结算参数矩阵
+
+| 区域 | 币种 | 档位A比例 | 档位B比例 | 档位C比例 | 跨区加收比例 | 生效日期 | 失效日期 | 最小业务量 | 最大业务量 | 结算周期 | 审批级别 | 备注 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| R-NORTH | CNY | 1.00 | 1.05 | 1.10 | 5.0% | 2026-01-01 | 2026-12-31 | 0 | 100000 | 月结 | 区域 | 演示行 |
+| R-SOUTH | CNY | 1.00 | 1.06 | 1.12 | 7.5% | 2026-02-01 | 2026-12-31 | 0 | 80000 | 月结 | 区域 | 演示行 |
+| R-EAST | CNY | 1.00 | 1.04 | 1.08 | 3.0% | 2026-03-01 | 2026-12-31 | 10 | 50000 | 半月结 | 财务 | 演示行 |
+| R-WEST | CNY | 1.00 | 1.07 | 1.15 | 10.0% | 2026-04-01 | 2026-12-31 | 0 | 30000 | 月结 | 财务 | 演示行 |
+| R-CENTER | CNY | 1.00 | 1.05 | 1.10 | 0.0% | 2026-01-01 | 2026-12-31 | 0 | 200000 | 月结 | 区域 | 演示行 |
+
+## 2 特例一：跨区加收比例为 0
+
+比例 0 表示"允许跨区但不加收"，与"不跨区"在金额上相同、在报表上不同。统计跨区业务占比时，比例 0 仍计入跨区业务。
+
+## 3 特例二：最小业务量为 10 的区域
+
+最小业务量为 10 的区域（如 R-EAST）在业务量不足 10 时按 10 计费，但结算明细中同时展示实际业务量与计费业务量，避免对账歧义。
+
+## 4 特例三：半月结
+
+半月结区域的跨区比例按"业务发生日所在半月"的生效版本读取，不按结算日读取。跨月时可能出现两段比例，需分段计算后相加。
+
+## 5 特例四：停用区域
+
+区域停用后，历史费率仍可查询与导出，但不可新增版本、不可发布。停用前必须在途结算全部完成。
+
+## 6 排障：宽表检索
+
+宽表字段多，检索时建议使用列名 + 值的组合，例如"跨区加收比例 7.5%"，或直接检索区域编码。表格在索引中是一个整体块，命中后通过 section 定位。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。
+# 项目环境管理口径（样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据。
+
+## 1 定义
+
+项目环境（PROJECT_ENV）描述一个项目可用的运行环境集合，包括环境编码、环境类型、所属区域、默认币种与状态。它决定项目导出数据的范围与默认参数。
+
+## 2 环境类型
+
+| 类型编码 | 名称 | 用途 | 是否允许生产数据 |
+| --- | --- | --- | --- |
+| DEV | 开发 | 联调与自测 | 否 |
+| TEST | 测试 | 功能验证 | 否 |
+| UAT | 验收 | 用户验收 | 否 |
+| PROD | 生产 | 正式运行 | 是 |
+
+## 3 维护规则
+
+1. 一个项目至少有一个 PROD 环境；
+2. 环境编码在项目内唯一，跨项目可重复；
+3. 环境所属区域决定默认费率，变更区域需要重新核对费率；
+4. 环境停用前必须确认没有在途作业；
+5. 环境清单（口头叫法）就是 PROJECT_ENV 的列表。
+
+## 4 常见问题
+
+**问：项目环境与区域是什么关系？**
+答：环境属于区域，区域决定默认费率与告警阈值；一个区域可以有多个项目环境。
+
+**问：可以把 DEV 环境改成 PROD 吗？**
+答：不建议。类型变更会影响导出范围与权限校验，应新建 PROD 环境并迁移项目。
+
+**问：环境清单在哪里看？**
+答：配置管理平台「配置定义 → PROJECT_ENV → 数据浏览」，或让 AI 助手检索"项目环境"。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。
+# 项目环境变更流程（样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据。
+
+## 1 流程图
+
+```mermaid
+sequenceDiagram
+    participant PM as 项目经理
+    participant OPS as 运维
+    participant ADM as 配置管理员
+    participant SYS as 配置管理平台
+    PM->>OPS: 提交环境变更申请（项目/环境/目标区域）
+    OPS->>OPS: 核对容量与在途作业
+    OPS->>ADM: 会签变更单
+    ADM->>SYS: 导出当前环境快照
+    ADM->>SYS: 导入变更后的环境
+    SYS-->>ADM: 预检查结果
+    ADM->>SYS: 发布
+    SYS-->>PM: 变更完成通知
+    PM->>OPS: 验证环境可用性
+```
+
+## 2 流程说明
+
+1. 项目经理提交变更申请，说明变更原因与期望完成时间；
+2. 运维核对目标区域的容量与在途作业，有在途作业时不得变更；
+3. 配置管理员导出当前环境快照留档，再导入变更后的环境；
+4. 预检查必须通过，失败时按提示修正后重新导入；
+5. 发布完成后由项目经理验证环境可用性，验证不通过可以回滚。
+
+## 3 时限
+
+| 阶段 | 时限 | 超时处理 |
+| --- | --- | --- |
+| 运维核对 | 1 个工作日 | 升级到运维负责人 |
+| 会签 | 2 个工作日 | 变更单挂起并通知 |
+| 发布 | 1 个工作日 | 顺延到下一个发布窗口 |
+| 验证 | 2 个工作日 | 视为验证不通过，触发回滚评估 |
+
+## 4 禁止事项
+
+- 禁止跳过预检查直接发布；
+- 禁止在变更窗口外发布；
+- 禁止用"删除再新建"代替环境变更；
+- 禁止在验证未完成时关闭变更单。
+
+## 5 回滚
+
+验证不通过时，用变更前导出的快照回滚。回滚后重新执行预检查与发布，并记录回滚原因。回滚不需要重新走会签，但必须在变更单中注明。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。
+# 告警阈值设定口径（样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据。数字为演示值。
+
+## 1 定义
+
+告警阈值（ALARM_THRESHOLD）是"指标在什么条件下触发哪一级告警"的配置。它由指标编码、分类、级别、阈值、窗口与方向共同决定。
+
+## 2 阈值三要素
+
+1. **阈值**：触发边界，必须是可比较的数值；
+2. **窗口**：累计时间，最小 1 分钟，最大 24 小时；
+3. **方向**：UP（越高越差）或 DOWN（越低越差）。
+
+三者缺一不可。只给阈值不给窗口，等于没有定义告警。
+
+## 3 分级规则
+
+| 级别 | 触发占比 | 通知方式 | 要求 |
+| --- | --- | --- | --- |
+| INFO | 超过提示阈值 | 站内消息 | 可批量汇总 |
+| WARN | 超过警告阈值 | 站内 + 邮件 | 需当日处置 |
+| CRIT | 超过严重阈值 | 站内 + 邮件 + 电话 | 5 分钟内响应 |
+
+级别必须单调：UP 指标满足 INFO < WARN < CRIT，DOWN 指标相反。
+
+## 4 取值方法
+
+1. 取最近 30 天的指标分布，找到 P95 与 P99；
+2. 提示阈值取 P95 的 1.2 倍，警告取 P99 的 1.2 倍，严重取历史峰值的 1.5 倍；
+3. 没有历史数据时，先用保守值并设置观察期；
+4. 观察期结束后按实际触发情况调整。
+
+## 5 禁止事项
+
+- 禁止把阈值设为 0 或负数（除明确声明"低于 0 告警"的场景）；
+- 禁止同一指标配置超过三级阈值；
+- 禁止用长期抑制规则代替阈值调整；
+- 禁止关闭严重级通知。
+
+## 6 与其它域的关系
+
+告警阈值不改变业务数据，只影响通知。费率异常、环境变更、成员调整都可能触发告警，排障时应先看最近变更。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。
+# 告警阈值运维手册（长篇样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据、真实阈值或真实项目编码。文中数字均为演示值。
+
+## 1 文档目的
+
+本手册面向告警阈值（ALARM_THRESHOLD）配置域的日常运维人员，说明阈值的分类、设定原则、变更流程、误告警处置与季度复核口径。阅读前建议先了解配置管理的「定义 → 数据 → 发布」基本流程。
+
+本手册不替代具体监控系统的使用说明；监控系统的操作界面与告警通知渠道不在本文范围内。
+
+## 2 阈值分类
+
+### 2.1 按对象分类
+
+| 分类编码 | 对象 | 典型指标 | 默认窗口 | 说明 |
+| --- | --- | --- | --- | --- |
+| BIZ | 业务指标 | 导出失败率、导入耗时 | 5 分钟 | 面向业务结果 |
+| SYS | 系统指标 | CPU、内存、连接数 | 1 分钟 | 面向基础设施 |
+| JOB | 作业指标 | 作业失败数、积压数 | 10 分钟 | 面向异步作业 |
+| DATA | 数据质量 | 空值率、主键重复率 | 单批次 | 面向数据结果 |
+
+分类编码来自 `ALARM_CATEGORY` 定义。新增分类需要先发布定义，再发布阈值，顺序不能颠倒。
+
+### 2.2 按级别分类
+
+告警级别分为提示（INFO）、警告（WARN）、严重（CRIT）。同一指标可以配置多级阈值，但必须满足"提示阈值 ≤ 警告阈值 ≤ 严重阈值"（对"越低越差"的指标则相反）。级别倒挂会在发布预检查时被拒绝。
+
+### 2.3 按窗口分类
+
+窗口决定"在多长时间内累计到什么程度才告警"。窗口过短会放大抖动，窗口过长会延迟发现。默认窗口按 2.1 的表格执行；确有需要时可在阈值记录中覆盖，但必须在备注里写明理由。
+
+## 3 设定原则
+
+1. **可解释**：每个阈值都要能回答"为什么是这个数"，不能只写"经验值"；
+2. **可行动**：阈值触发后必须有明确的处置动作，没有处置动作的阈值不应存在；
+3. **可回退**：阈值变更要能在 24 小时内回退，回退不需要重新走完整审批；
+4. **分级**：至少配置提示与警告两级，严重级只在确有业务影响时配置；
+5. **少而准**：同一指标不超过三级阈值，避免告警风暴；
+6. **与容量联动**：系统类阈值必须低于容量上限的 80%，留出处置时间。
+
+## 4 变更流程
+
+### 4.1 变更单
+
+所有阈值变更都要有变更单，变更单至少包含：指标名称、当前值、目标值、变更理由、影响范围、回退方案、观察期。缺少任何一项，配置管理员可以拒绝受理。
+
+### 4.2 审批
+
+- 提示级：运维负责人审批；
+- 警告级：运维负责人 + 业务负责人会签；
+- 严重级：运维负责人 + 业务负责人 + 值班经理会签；
+- 涉及数据质量类的任何级别：额外需要数据负责人会签。
+
+### 4.3 发布与观察
+
+发布后进入 72 小时观察期。观察期内每天记录触发次数与处置结果。触发次数明显高于预期的，优先考虑阈值过严或窗口过短；明显低于预期的，优先考虑指标采集是否正常。
+
+### 4.4 回退
+
+观察期内确认阈值不合理，可以回退到上一版本。回退同样要记录变更单，并在备注中写明回退原因。观察期结束后回退按新变更处理。
+
+## 5 误告警处置
+
+### 5.1 判定标准
+
+同时满足以下三条才算误告警：
+
+1. 指标值确实越过了阈值；
+2. 业务实际没有受到影响；
+3. 按当前处置手册执行后确认无需干预。
+
+仅仅"觉得不重要"不构成误告警，不能据此放宽阈值。
+
+### 5.2 处置顺序
+
+1. 先确认采集链路正常，排除"指标本身错了"；
+2. 再确认窗口与统计口径，排除"算法口径不一致"；
+3. 然后确认是否存在短时脉冲，排除"抖动"；
+4. 最后才讨论阈值是否需要调整。
+
+顺序不能反：先调阈值会掩盖采集或口径问题。
+
+### 5.3 误告警记录
+
+每次误告警都要记录：时间、指标、阈值、实际值、判定依据、处置人。连续两周同一指标误告警超过三次，才允许发起阈值调整变更。
+
+## 6 季度复核
+
+每季度对全部阈值做一次复核，复核内容包括：
+
+- 是否仍有对应的业务或系统对象；
+- 是否仍有明确的处置动作；
+- 触发次数是否在合理区间；
+- 是否存在长期未触发的"僵尸阈值"；
+- 是否存在长期持续触发的"背景噪声"；
+- 阈值与容量、SLA 是否仍然匹配。
+
+复核结果形成季度报告，报告不需要逐条列出全部阈值，但必须列出所有调整项与保留理由。
+
+## 7 常见问题（FAQ）
+
+**Q1：阈值可以按项目单独设置吗？**
+可以覆盖，但默认继承区域级阈值。项目级覆盖必须在备注中写明理由，且不得超过区域级阈值的上下 20%。
+
+**Q2：为什么发布预检查提示"级别倒挂"？**
+提示/警告/严重的阈值顺序不满足单调关系。对"越高越差"的指标应递增，对"越低越差"的指标应递减，并在指标定义中声明方向。
+
+**Q3：窗口可以设置为 0 吗？**
+不可以。窗口为 0 等于逐点告警，会产生大量瞬时告警；最小窗口为 1 分钟。
+
+**Q4：告警阈值与作业看门狗是什么关系？**
+两者独立。看门狗负责"作业是否失联"，告警阈值负责"业务指标是否异常"；不要用告警阈值替代看门狗。
+
+**Q5：阈值变更后历史告警会重算吗？**
+不会。历史告警按触发时的阈值记录，后续变更不影响历史。
+
+**Q6：可以批量导入阈值吗？**
+可以，走导入流程：导出模板 → 填写 → 预检查 → 发布。批量导入同样需要变更单。
+
+**Q7：严重级告警可以关闭通知吗？**
+不可以。严重级告警必须保持通知开启；需要降噪时调整阈值或增加抑制规则，不能关闭通知。
+
+## 8 附录：阈值记录字段
+
+```json
+{
+  "defCode": "ALARM_THRESHOLD",
+  "fields": [
+    {"code": "metric_code", "label": "指标编码", "type": "STRING", "required": true, "key": true},
+    {"code": "category", "label": "分类", "type": "STRING", "required": true},
+    {"code": "level", "label": "级别", "type": "STRING", "required": true},
+    {"code": "threshold", "label": "阈值", "type": "DECIMAL", "required": true},
+    {"code": "window_minutes", "label": "窗口(分钟)", "type": "INTEGER", "required": true},
+    {"code": "direction", "label": "方向", "type": "STRING", "required": true}
+  ]
+}
+```
+
+`direction` 取 `UP`（越高越差）或 `DOWN`（越低越差），决定级别单调性的校验方向。
+
+## 9 附录：值班交接清单
+
+- [ ] 当前未关闭的告警及处置进展；
+- [ ] 最近 24 小时的误告警记录；
+- [ ] 观察期内的阈值变更；
+- [ ] 计划内的发布/变更窗口；
+- [ ] 需要关注的容量指标；
+- [ ] 上一班次未完成的处置动作。
+
+交接必须口头 + 书面双确认，只在聊天里说一句"没问题"不算交接完成。
+
+## 10 附录：典型阈值示例（演示值）
+
+| 指标 | 分类 | 提示 | 警告 | 严重 | 窗口 |
+| --- | --- | --- | --- | --- | --- |
+| 导出失败率 | BIZ | 1% | 3% | 10% | 5 分钟 |
+| 导入平均耗时 | BIZ | 60s | 120s | 300s | 10 分钟 |
+| 作业积压数 | JOB | 20 | 50 | 100 | 10 分钟 |
+| 空值率 | DATA | 2% | 5% | 10% | 单批次 |
+| 主键重复率 | DATA | 0.1% | 0.5% | 1% | 单批次 |
+
+以上仅为演示，实际取值以各环境当前的配置库为准。
+
+## 11 附录：文档维护
+
+本文由运维团队维护，涉及审批链（第 4 章）的修改需要值班经理会签。修改后更新文末的更新日期，并同步 manifest 的 sha 与 updated_at。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。文档长度约 5000 字符，用于验证长文切块与检索。
+
+## 12 附录：告警抑制与降噪
+
+告警抑制只在以下场景使用：同一根因引发的多条关联告警、计划内维护窗口、已知的采集延迟。抑制规则必须写明生效条件、失效时间与责任人，最长有效期七天；到期自动失效，不续期。
+
+不要用抑制规则长期屏蔽某类告警。长期屏蔽会让真正的故障在"安静"中扩大，季度复核时必须逐条检查抑制规则是否仍然必要。
+
+## 13 附录：跨域联动排查
+
+告警阈值本身只是判定规则，触发后常常需要联动其它配置域：
+
+1. 作业类告警先查作业状态与看门狗记录，确认是否真的积压；
+2. 数据质量类告警先查导入批次的预检查结果，确认是否为已知脏数据；
+3. 业务指标类告警先查费率或项目环境是否刚发布过变更；
+4. 系统指标类告警先查是否有大批量导出/导入作业在途；
+5. 项目成员相关告警先查角色变更记录，确认是否因权限调整导致操作失败。
+
+排查顺序建议"先看最近变更，再看当前指标，最后看历史基线"。最近变更包括费率发布、定义发布、项目环境变更与成员调整，它们是最常见的告警诱因。
+
+## 14 附录：升级与通报
+
+严重级告警触发后，值班人员在五分钟内确认，十五分钟内给出初步判断，三十分钟内决定是否升级。升级对象为值班经理与对应业务负责人；升级时必须带上：告警原文、影响范围初判、已执行的处置动作。
+
+通报口径要区分"已知影响"与"未知影响"。未知影响不得写成"暂无影响"，应写"影响范围待确认"。对外通报由值班经理统一发出，个人不得先行对外承诺恢复时间。
+
+## 15 附录：指标采集质量检查
+
+每月抽查一次指标采集质量：抽样比对监控系统与配置库的同一指标，差异超过 1% 时视为采集异常。采集异常期间产生的告警不纳入误告警统计，但要在季度报告中单独说明。
+
+采集质量检查记录保留十二个月。发现采集异常时，先停止基于该指标的阈值调整，待采集恢复并稳定一周后再继续。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。文档长度约 5300 字符，用于验证长文切块与检索。
+
+## 16 附录：阈值评审会议纪要模板
+
+会议纪要至少包含：参会人、评审对象、逐条结论（通过/调整/驳回）、调整理由、责任人、完成时限。驳回项必须写明驳回依据，不能只写"暂不调整"。
+
+评审结论分为三档：通过（保持现状）、调整（进入变更流程）、观察（记录指标，下一次评审再议）。"观察"最多连续使用两次，第三次必须给出通过或调整的明确结论。
+
+会议纪要归档到运维文档库，并在下一季度复核时作为输入。纪要中的数字与配置库不一致时，以配置库为准，同时修正纪要中的引用。
+
+## 17 附录：与发布流程的衔接
+
+阈值发布与业务配置发布共用同一套导入/预检查/发布链路，但发布窗口建议错开：业务配置发布期间不要同时发布阈值，避免告警噪声干扰发布判断。确有需要时，提前在变更单中说明并通知值班人员。
+
+发布完成后，先在监控系统确认新阈值已生效，再关闭变更单。只看到"发布成功"就关闭变更单，属于流程不完整。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。文档长度约 5200 字符，用于验证长文切块与检索。
+
+补充：本文中的"观察期""复核""抑制"三个词在不同团队有不同叫法（观察期也称试运行期，复核也称评审，抑制也称静默），检索时可用这些同义词再查一次。
+# 项目成员与角色（样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据。
+
+## 1 定义
+
+项目成员（PROJECT_MEMBER）记录"谁在哪个项目里担任什么角色"。它不等同于系统账号：账号决定能否登录，项目成员决定登录后能操作哪些项目数据。
+
+## 2 角色
+
+| 角色编码 | 名称 | 可查看 | 可编辑 | 可发布 | 说明 |
+| --- | --- | --- | --- | --- | --- |
+| VIEWER | 查看者 | 是 | 否 | 否 | 只读 |
+| EDITOR | 编辑者 | 是 | 是 | 否 | 可建草稿 |
+| PUBLISHER | 发布者 | 是 | 是 | 是 | 仅配置管理员授予 |
+| OWNER | 负责人 | 是 | 是 | 否 | 可管理成员 |
+
+## 3 规则
+
+1. 每个项目至少有一个 OWNER；
+2. 同一人在同一项目只能有一个角色；
+3. PUBLISHER 由配置管理员授予，项目经理不能自行授予；
+4. 成员离职时先移除成员关系，再停用账号；
+5. 角色变更记录保留不少于二十四个月。
+
+## 4 常见问题
+
+**问：项目成员和项目环境有关系吗？**
+答：没有直接隶属关系。成员属于项目，环境属于项目；成员角色不影响环境状态。
+
+**问：为什么我看不到某个项目？**
+答：先确认是否是该项目成员；不是成员时联系 OWNER 添加。
+
+**问：OWNER 可以移除自己吗？**
+答：不可以。必须先把 OWNER 转给其他人，再移除自己。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。
+# 配置导入导出流程（样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据。
+
+## 1 全流程图
+
+```mermaid
+flowchart LR
+    A[创建任务] --> B[选择配置项]
+    B --> C{是否需要过滤}
+    C -- 是 --> D[设置查询条件]
+    C -- 否 --> E[确认步骤]
+    D --> E
+    E --> F[启动导出]
+    F --> G[下载文件]
+    G --> H[离线修改]
+    H --> I[创建导入任务]
+    I --> J[上传文件]
+    J --> K[预检查]
+    K --> L{检查通过}
+    L -- 否 --> H
+    L -- 是 --> M[导入到暂存]
+    M --> N[预览]
+    N --> O[发布]
+```
+
+## 2 导出
+
+1. 在任务中心创建导出任务；
+2. 勾选要导出的配置项（可多选）；
+3. 按需设置查询条件（范围 + 字段过滤）；
+4. 确认步骤后启动导出；
+5. 导出完成后下载 xlsx 文件。
+
+导出是只读操作，不改变配置数据。导出文件是快照，后续配置变更不会回写文件。
+
+## 3 导入
+
+1. 创建导入任务并上传文件；
+2. 预检查校验格式、类型、主键与引用关系；
+3. 预检查失败时按错误明细修正文件，不要跳过；
+4. 预检查通过后导入到暂存区；
+5. 预览暂存数据，确认无误后发布。
+
+导入写入暂存区，发布才写入正式库。未发布的暂存数据可以丢弃，不会影响正式数据。
+
+## 4 查询条件
+
+范围条件按 `scopeKeys` 过滤，字段条件按 `fields` 过滤，多条字段条件之间是 AND 关系。条件为空表示不过滤。
+
+```json
+{
+  "scopeKeys": ["R-NORTH"],
+  "fields": [
+    {"fieldCode": "level", "operator": "EQ", "value": "A"}
+  ]
+}
+```
+
+## 5 常见问题
+
+**问：可以先导入再补预检查吗？**
+答：不可以。预检查是导入的前置条件，跳过会写入脏数据。
+
+**问：导出文件可以改名吗？**
+答：可以，但不要修改扩展名与表头结构。
+
+**问：发布后可以撤销吗？**
+答：发布是终态操作，不能撤销；需要更正时走新的变更流程。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。
+# 发布前检查清单（样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据。
+
+## 1 数据检查
+
+- [ ] 导入文件的行数与导出快照的预期行数一致；
+- [ ] 主键列没有空值、没有重复；
+- [ ] 必填列全部有值；
+- [ ] 枚举列的取值都在定义范围内；
+- [ ] 引用列（区域/币种/项目/成员）都能找到对应记录；
+- [ ] 数值列的精度与定义一致（小数位数不超限）；
+- [ ] 日期列格式为 `yyyy-MM-dd`，没有非法日期；
+- [ ] 文本列没有超长（超过定义长度会被拒绝）；
+- [ ] 没有明显的测试数据混入（如"测试""test""示例"字样）；
+- [ ] 变更行数与变更单描述一致。
+
+## 2 定义检查
+
+- [ ] 引用的配置定义都已发布；
+- [ ] 定义版本与导入文件使用的模板版本一致；
+- [ ] 没有引用已停用的定义；
+- [ ] 新增字段已经发布，旧字段没有被删除。
+
+## 3 流程检查
+
+- [ ] 变更单已审批；
+- [ ] 当前没有同配置域的在途作业；
+- [ ] 发布窗口已确认；
+- [ ] 当前数据快照已导出留档；
+- [ ] 回退方案已写明。
+
+## 4 发布后检查
+
+- [ ] 作业状态为成功；
+- [ ] 抽检三条记录与导入文件一致；
+- [ ] 相关页面数据显示正常；
+- [ ] 没有新增告警；
+- [ ] 变更单已回填作业编号；
+- [ ] 通知相关方发布完成。
+
+## 5 使用说明
+
+清单逐项确认，不允许"整体确认"。任何一项未通过时，先修正再发布；确因客观原因无法确认的，在变更单中注明并由审批人签字。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。
+# 配置定义与字段口径（样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据。
+
+## 1 定义与数据的关系
+
+配置定义（ConfigDefinition）描述"一类配置由哪些字段组成"，配置数据是按定义落库的具体记录。定义是结构，数据是内容；改定义影响所有引用它的数据。
+
+## 2 层级
+
+| 层级 | 含义 | 典型定义 | 范围键 |
+| --- | --- | --- | --- |
+| GLOBAL | 全局 | CURRENCY | 无 |
+| REGION | 区域级 | REGION_TARIFF | 区域编码 |
+| PROJECT | 项目级 | PROJECT_ENV、PROJECT_MEMBER | 项目编码 |
+
+层级决定范围过滤的行为：GLOBAL 忽略范围条件，REGION 按区域过滤，PROJECT 按项目过滤。
+
+## 3 字段类型
+
+| 类型 | 说明 | 示例 |
+| --- | --- | --- |
+| STRING | 文本 | "R-NORTH" |
+| INTEGER | 整数 | 100 |
+| DECIMAL | 小数 | 3.40 |
+| DATE | 日期 | 2026-01-01 |
+| BOOLEAN | 布尔 | true |
+
+## 4 字段属性
+
+### 4.1 必填（required）
+
+必填字段为空时，预检查直接失败。不要用空字符串代替"未填写"，空字符串会被当作有效值。
+
+### 4.2 主键（key）
+
+主键字段组合唯一。多字段主键时，所有主键字段都必填。主键重复是导入失败最常见的原因。
+
+#### 4.2.1 复合主键的排序
+
+复合主键在索引与导出的排序按"字段在定义中的声明顺序"，不按字母序。调整声明顺序会改变导出行的排序，属于可见变更，需要通知使用方。
+
+#### 4.2.2 主键缺失
+
+主键字段为空时，预检查直接失败并指出行号；不要用占位值（如 `0`、`N/A`）填充主键，占位值会造成更难发现的重复。
+
+
+### 4.3 引用（refDefCode）
+
+引用字段的值必须存在于被引用的定义中。引用已停用的定义时，预检查会提示"引用已停用"。
+
+### 4.4 枚举（enum）
+
+枚举值来自定义，不接受自定义值。枚举值大小写敏感，`A` 与 `a` 是两个值。
+
+## 5 变更定义的影响
+
+1. 新增字段：旧数据该字段为空，读取时按空值处理；
+2. 删除字段：历史数据保留但不再展示，属于高风险操作；
+3. 修改类型：需要数据迁移，不能直接改；
+4. 修改必填：已有空值数据会导致后续导入失败。
+
+定义变更必须评估存量数据，不能只看新数据能否导入。
+
+## 6 常见问题
+
+**问：定义可以改名吗？**
+答：名称可以改，编码不行。编码是数据引用的键，改名不会破坏引用。
+
+**问：一个字段可以既是主键又是引用吗？**
+答：可以，但引用目标必须存在且唯一。
+
+**问：为什么导入提示"字段不存在"？**
+答：导入文件的列名与定义字段编码不一致，或定义尚未发布。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。
+# GLM 种子域总览（样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据。
+
+## 1 Overview / 概述
+
+GLM seed domains are the five core configuration domains shipped with the platform: REGION_TARIFF, PROJECT_ENV, ALARM_THRESHOLD, PROJECT_MEMBER and CURRENCY. They are called "seed" domains because they are initialized from seed data and then maintained through the standard definition/data/publish flow.
+
+GLM 种子域指平台随包初始化的五个核心配置域：区域费率、项目环境、告警阈值、项目成员与币种。它们由种子数据初始化，之后按"定义 → 数据 → 发布"的标准流程维护。
+
+## 2 Domain list / 域清单
+
+| Domain | 中文名 | Scope | Owner |
+| --- | --- | --- | --- |
+| REGION_TARIFF | 区域费率 | REGION | 财务结算 |
+| PROJECT_ENV | 项目环境 | PROJECT | 项目实施 |
+| ALARM_THRESHOLD | 告警阈值 | REGION | 运维 |
+| PROJECT_MEMBER | 项目成员 | PROJECT | 项目经理 |
+| CURRENCY | 币种 | GLOBAL | 财务结算 |
+
+## 3 Initialization / 初始化
+
+1. Definitions are created first / 先建定义；
+2. Seed data is loaded in dependency order: CURRENCY → REGION → PROJECT_ENV → PROJECT_MEMBER → REGION_TARIFF → ALARM_THRESHOLD / 按依赖顺序灌种子数据；
+3. Seeding is idempotent: existing rows with the same key are skipped, not overwritten / 种子灌入幂等，同主键已存在则跳过。
+
+## 4 Common pitfalls / 常见坑
+
+- Do not edit seed rows in place during initialization / 初始化期间不要直接改种子行；
+- Currency must exist before any tariff row / 费率前必须先有币种；
+- Project environment must exist before members reference it / 成员引用环境前环境必须存在；
+- Alarm thresholds depend on metric definitions, not on projects / 告警阈值依赖指标定义，不依赖项目。
+
+## 5 FAQ / 常见问题
+
+**Q: Can I add a new seed domain? / 可以新增种子域吗？**
+A: Yes, but it must follow the same five-step contract: definition, seed, import, precheck, publish. / 可以，但必须走同样的五步：定义、种子、导入、预检查、发布。
+
+**Q: Is GLM an acronym for a model? / GLM 是模型缩写吗？**
+A: In this repository, GLM refers to the seed-domain package name, not to a language model. / 在本仓库里，GLM 指种子域包名，不是语言模型。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。
+# 币种与范围口径（样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据。
+
+## 1 币种定义
+
+币种（CURRENCY）是 GLOBAL 级配置，字段只有三项：编码、名称、小数位。编码采用三位大写字母，小数位取 0–4。
+
+## 2 范围口径
+
+币种没有区域范围，所有区域共用一份币种表。区域费率中的币种必须存在于币种表且状态为有效。
+
+## 3 规则
+
+1. 币种编码不允许修改，只能停用后新增；
+2. 停用币种前必须确认没有有效费率引用；
+3. 小数位变更等于口径变更，必须走变更审批；
+4. 默认币种为 CNY，仅用于迁移期补值。
+
+## 4 常见问题
+
+**问：可以删除币种吗？**
+答：不可以，只能停用。删除会破坏历史费率与结算的可追溯性。
+
+**问：为什么导入提示"币种不存在"？**
+答：编码大小写不一致，或币种已停用。停用与不存在在提示文案上不同，注意区分。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。
+# 查询条件写法（样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据。
+
+## 1 结构
+
+查询条件由范围条件与字段条件两部分组成：
+
+```json
+{
+  "scopeKeys": ["R-NORTH", "R-EAST"],
+  "fields": [
+    {"fieldCode": "level", "operator": "EQ", "value": "A"},
+    {"fieldCode": "base_rate", "operator": "GTE", "value": 2.0}
+  ]
+}
+```
+
+字段条件之间是 AND；范围条件之间是 OR（命中任一范围即可）。
+
+## 2 操作符
+
+| 操作符 | 含义 | 值形态 |
+| --- | --- | --- |
+| EQ | 等于 | 标量 |
+| NE | 不等于 | 标量 |
+| CONTAINS | 包含子串 | 文本 |
+| LIKE | 模糊匹配 | 文本 |
+| STARTS_WITH | 前缀匹配 | 文本 |
+| IN | 在集合内 | 数组 |
+| EMPTY | 为空 | 不带值 |
+| NOT_EMPTY | 不为空 | 不带值 |
+| GT/GTE/LT/LTE | 比较 | 数值/日期 |
+
+## 3 注意
+
+1. IN 的值必须是数组，传字符串会被拒绝；
+2. EMPTY/NOT_EMPTY 不带 value，带了也会被忽略；
+3. GLOBAL 级定义忽略 scopeKeys；
+4. 日期比较使用 `yyyy-MM-dd` 格式，不接受时间戳；
+5. 条件为空对象等价于"不过滤"，不要用空条件冒充"查不到"。
+
+## 4 常见错误
+
+**错误：** 把 `fields` 写成扁平对象 `{"fieldCode":"level","operator":"EQ","value":"A"}`。
+**后果：** 前端只读 `fields` 数组，扁平形态会被静默丢弃，表现为"工具成功但条件为空"。
+
+**错误：** 用 `EQ` 比较数值却传字符串 `"3.40"`。
+**后果：** 类型不匹配，比较结果不可靠；数值列请传数值。
+
+## 5 与预览的关系
+
+条件设置后只影响当前浏览器里的预览；落库发生在向导推进步骤时。关闭页面不会自动保存条件。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。
+# AI 面板使用口径（样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据。
+
+## 1 能做什么
+
+AI 面板可以创建任务、勾选配置项、设置查询条件、推进向导步骤、发起导出/预检查/导入/发布（后四类需要确认卡片），也可以回答制度、流程、口径类问题。
+
+## 2 渐进披露
+
+AI 只能使用当前页面披露的工具。在任务中心与对应向导里能看到向导动作；在定义页与数据浏览页只能看到只读工具。工具不会"一次性全给"，这是刻意设计。
+
+## 3 确认门
+
+启动导出/预检查/导入/发布时，界面会弹出确认卡片，用户点「确认执行」后才真正执行。AI 不得预先宣称"已启动"。
+
+## 4 知识问答
+
+制度/流程/口径类问题，AI 会先检索业务知识库，再读原文核对，最后按 `[doc_id §章节]` 格式引用。未检索到时会明确说明"知识库中未找到"，并建议联系业务负责人。
+
+## 5 常见问题
+
+**问：为什么 AI 说"没有对应工具"？**
+答：当前页面没有披露该工具。先导航到任务中心或对应向导。
+
+**问：AI 回答里为什么没有具体条款？**
+答：知识库未命中或片段不足。可以让 AI 换同义词再查，或提供更具体的术语。
+
+**问：AI 能直接改数据吗？**
+答：不能。写操作都要经过确认卡片；表格内修改只改浏览器内存，不落服务端。
+
+**问：回答里的方括号是什么？**
+答：引用来源，格式为 `[doc_id §章节]`，只引用工具实际返回过的内容。
+
+## 6 使用建议
+
+1. 提问尽量带上配置域名称（如"区域费率"）；
+2. 口头叫法也可以，AI 会用别名再查一次；
+3. 需要条款原文时，明确说"读原文"或"第几章"；
+4. 发现回答与制度不符时，以知识库原文为准并反馈维护人。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。
+# 术语表（样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据。
+
+## 1 业务术语
+
+| 术语 | 口头叫法 | 含义 | 所属域 |
+| --- | --- | --- | --- |
+| 标准费率 | 基准费率、基础价 | 区域内默认档位费率 | REGION_TARIFF |
+| 区域费率 | 费率表、区域价格 | 区域级价格参数集合 | REGION_TARIFF |
+| 跨区加收比例 | 加收比例、跨区系数 | 跨区结算的加价比例 | REGION_TARIFF |
+| 档位 | 等级、级别 | 费率层级 A/B/C | REGION_TARIFF |
+| 项目环境 | 环境清单、环境 | 项目可用运行环境集合 | PROJECT_ENV |
+| 告警阈值 | 告警线、阈值线 | 触发告警的边界值 | ALARM_THRESHOLD |
+| 观察期 | 试运行期 | 变更后的观察时间窗 | ALARM_THRESHOLD |
+| 项目成员 | 成员、项目人员 | 项目内的人与角色关系 | PROJECT_MEMBER |
+| 预检查 | 导入检查 | 导入前的格式与依赖校验 | 通用流程 |
+| 发布 | 上线、生效 | 把暂存数据写入正式库 | 通用流程 |
+
+## 2 技术术语
+
+| 术语 | 含义 |
+| --- | --- |
+| 定义（Definition） | 一类配置的字段结构 |
+| 数据（Data） | 按定义落库的具体记录 |
+| 主键（Key） | 唯一定位一条记录的字段组合 |
+| 引用（Ref） | 字段值受另一份定义约束 |
+| 暂存区 | 导入后、发布前的中间区域 |
+
+## 3 使用约定
+
+同一术语在检索时可能以口头叫法出现；知识库的别名索引会把口头叫法映射回正式术语。精确查询术语解释用 `kb_lookup_term`，模糊召回用 `kb_search`。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。
+# 数据质量校验规则（样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据。数字为演示值。
+
+## 1 校验分层
+
+数据质量校验分为三层：格式校验、业务校验、跨域校验。三层按顺序执行，前一层不通过时不进入下一层。
+
+## 2 格式校验
+
+| 规则 | 判据 | 失败处理 |
+| --- | --- | --- |
+| 必填 | 字段值非空且非空白 | 拒绝导入 |
+| 长度 | 不超过定义长度 | 拒绝导入 |
+| 类型 | 与字段类型一致 | 拒绝导入 |
+| 日期 | `yyyy-MM-dd` 且真实存在 | 拒绝导入 |
+| 小数位 | 不超过定义精度 | 拒绝导入 |
+
+## 3 业务校验
+
+1. 主键唯一：同一主键组合只能出现一次；
+2. 枚举合法：值必须在定义枚举内；
+3. 数值区间：费率 > 0、比例 0–30%；
+4. 状态合法：状态值必须来自状态枚举；
+5. 生效日期：不得早于定义的最小生效日期。
+
+## 4 跨域校验
+
+- 区域编码必须存在且有效；
+- 币种编码必须存在且有效；
+- 项目环境引用的区域必须存在；
+- 项目成员引用的项目必须存在；
+- 费率引用的档位必须存在。
+
+跨域校验依赖的定义必须已发布；定义未发布时校验会提示"无法校验引用"，此时不能强行导入。
+
+## 5 质量指标
+
+| 指标 | 计算方式 | 目标 |
+| --- | --- | --- |
+| 一次通过率 | 首次预检查通过批次数 / 总批次数 | ≥ 90% |
+| 主键重复率 | 重复行数 / 总行数 | ≤ 0.1% |
+| 空值率 | 必填字段空值数 / 必填字段总数 | 0 |
+| 引用缺失率 | 引用缺失行数 / 总行数 | ≤ 0.5% |
+
+指标按月统计，低于目标时先分析原因，再决定是修数据还是修规则。
+
+## 6 处置建议
+
+- 格式问题：修文件，不要改定义迁就数据；
+- 业务问题：核对业务口径，必要时更新定义；
+- 跨域问题：先补引用数据，再导入；
+- 批量问题：抽样定位模式，避免逐行修。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。
+# 操作审计与留痕（样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据。
+
+## 1 审计范围
+
+以下动作必须留痕：定义发布、数据导入、数据发布、任务创建、作业发起、成员角色变更、阈值变更、知识库热重载。
+
+只读动作（查询、导出、检索）默认不留业务审计，但保留访问日志。
+
+## 2 审计字段
+
+| 字段 | 说明 |
+| --- | --- |
+| 操作人 | 账号 + 姓名 |
+| 操作时间 | 精确到秒 |
+| 操作类型 | 发布/导入/变更等 |
+| 目标对象 | 定义编码或数据主键 |
+| 变更摘要 | 变更前后摘要，不含完整数据 |
+| 关联单号 | 变更单/工单编号 |
+| 结果 | 成功/失败 + 失败原因码 |
+
+## 3 保留期限
+
+业务审计保留三十六个月；访问日志保留六个月；作业日志保留十二个月。到期后归档，不直接删除。
+
+## 4 查询与导出
+
+审计查询按时间范围 + 操作类型检索；跨项目查询需要授权。导出审计记录需要审批，导出文件加密保存。
+
+## 5 常见问题
+
+**问：审计记录可以修改吗？**
+答：不可以。审计只追加，发现记录错误时以补充说明的方式追加，不覆盖原记录。
+
+**问：AI 发起的操作有审计吗？**
+答：有。AI 发起的写操作与人工操作走同一审计链路，并额外记录会话标识。
+
+**问：热重载为什么也要审计？**
+答：热重载会改变模型可检索的知识面，属于影响回答口径的动作，必须可追溯。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。
+# 知识库维护 FAQ（样例）
+
+> 本文为**样例文档**，仅用于知识库功能验证，不含真实业务数据。
+
+## 1 如何新增一篇知识文档
+
+1. 在知识目录新增 `md` 文件（文件名建议编号 + 英文 slug）；
+2. 在 `manifest.json` 的 `docs` 中登记 id、title、tags、aliases 与 file；
+3. 计算文件 sha 并写入 manifest 的 `sha`，更新 `updated_at`；
+4. 调管理端点 `POST /api/ai/kb/reload` 触发重建；
+5. 用 `GET /api/ai/kb/status` 确认 doc_count 增加。
+
+## 2 如何让口头叫法被召回
+
+在 manifest 的 `aliases` 里登记同义词。例如"费率表"登记为区域费率的别名，检索"费率表"即可命中。
+
+## 3 如何提供术语的预制答案
+
+在 manifest 该文档的 `terms` 里登记 `name`、`aliases`、`section`、`answer`。`kb_lookup_term` 只做精确/别名命中，不做模糊兜底。
+
+## 4 修改文档后索引没变
+
+常见原因：manifest 的 sha 没更新（local 源按文件实算 sha，会自动发现），或刷新间隔未到。可手动调 reload。
+
+## 5 热重载会不会影响正在进行的问答
+
+不会中断。新索引在临时目录构建，成功后原子切换；进行中的检索要么用旧索引，要么用新索引，不会读到半成品。
+
+## 6 文档写多长合适
+
+单篇建议不超过一万字；超长文档请用多级标题分节，便于切块与按 section 读取。表格与 mermaid 会原样保留。
+
+> 本文为样例文档，仅用于知识库功能验证，不含真实业务数据。
+"
+to contain:
+  "```java" 
+[ERROR] Errors: 
+[ERROR]   KbDisclosurePromptTest.adminEndpointsExposeStatusDocsAndReload:134 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbDisclosurePromptTest.catalogEntriesAreSanitizedAgainstDelimiterSpoofing:119 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbDisclosurePromptTest.promptSectionInjectsCatalogAndAllRules:73 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbDisclosurePromptTest.registryDisclosesKbToolsInEveryContextAndPassesThirdDefense:48 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbHttpSourceTest.authHeaderIsSentButNeverLeaksInErrors:120 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbHttpSourceTest.changedShaFetchesOnlyThatDocument:73 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbHttpSourceTest.localAndHttpSourcesIndexTheSameCorpus:44 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbHttpSourceTest.readTimeoutFailsOpenWithoutClearingIndex:105 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbHttpSourceTest.serverErrorKeepsOldIndexAndReports:90 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbHttpSourceTest.unchangedEtagSkipsRebuild:59 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbLookupTermTest.aliasTermHitsTheSameAnswer:27 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbLookupTermTest.documentAliasResolvesToDocLevelAnswer:71 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbLookupTermTest.exactTermReturnsAnswerWithSource:14 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbLookupTermTest.missSuggestsSearchAsNextStep:61 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbLookupTermTest.nearTermIsNotFuzzyMatched:49 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbLookupTermTest.normalizationIgnoresWhitespaceCaseAndFullWidth:38 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbPropertiesTest.topKAndMaxCharsAreClampedOnTheServer:89 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbReadDocTest.firstScreenReturnsTocAndAtMost1200Chars:21 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbReadDocTest.maxCharsIsCappedAt8000:61 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbReadDocTest.offsetBeyondEndReportsEmptyPageWithoutError:105 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbReadDocTest.paginationByNextOffsetReconstructsWholeDocument:35 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbReadDocTest.sectionReadStartsAtSectionBody:72 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbReadDocTest.unknownDocReturnsCandidatesInsteadOfThrowing:83 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbReadDocTest.unknownSectionReturnsSectionCandidates:94 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbServiceIncrementalTest.brokenManifestKeepsOldIndexAndReportsError:111 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbServiceIncrementalTest.changedShaRebuildsOnlyThatDocument:63 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbServiceIncrementalTest.concurrentSearchesNeverSeePartialIndexDuringReload:128 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbServiceIncrementalTest.removedDocumentLeavesTheIndex:84 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbServiceIncrementalTest.unchangedShaDoesNotRefetchContentAndReusesChunks:45 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbServiceIndexTest.aliasQueryRecallsTheCanonicalDoc:43 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbServiceIndexTest.blankQueryIsInvalidNotNoMatch:142 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbServiceIndexTest.catalogIsManifestOrdered:152 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbServiceIndexTest.chineseSentenceQueryHitsRelevantDocWithoutSpaces:31 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbServiceIndexTest.hitsCarryMatchLevelsAndNeverRawScores:112 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbServiceIndexTest.mermaidDocIsFoundByTitle:61 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbServiceIndexTest.noMatchReturnsSearchedTermsAndNearbyTitles:82 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbServiceIndexTest.oneOrTwoHitsAreLowConfidenceAndMarkedLow:94 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbServiceIndexTest.sampleCorpusIsIndexedAndReady:16 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbServiceIndexTest.searchBeforeIndexIsReadyReturnsNotReady:134 » UnsupportedOperation TODO KbService.search
+[ERROR]   KbServiceIndexTest.tableContentIsSearchable:52 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbServiceIndexTest.topKIsClampedToServerMaximum:71 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbToolsTest.blankQueryIsRejectedAsIllegalArgument:28 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbToolsTest.firstScreenIsLimitedTo1200Chars:94 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbToolsTest.injectedDelimitersAndZeroWidthCharsAreNeutralized:130 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbToolsTest.lookupHitRendersSourceFields:115 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbToolsTest.lookupMissPointsToSearchAndNeverFuzzyMatches:104 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbToolsTest.noMatchShowsTermsAndSuggestions:73 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbToolsTest.notReadyToolsFailOpenWithLoadingMessage:21 » UnsupportedOperation TODO KbService.search
+[ERROR]   KbToolsTest.searchResultIsDelimitedAndCarriesNoScoreOrDebugKeys:37 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbToolsTest.singleHitIsReportedAsLowConfidence:62 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbToolsTest.toolResultNeverExceeds8000Chars:147 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbToolsTest.topKIsClampedAndShownInOutput:50 » UnsupportedOperation TODO KbService.refreshNow
+[ERROR]   KbToolsTest.unknownDocReturnsCandidatesNotException:84 » UnsupportedOperation TODO KbService.refreshNow
+[INFO] 
+[ERROR] Tests run: 71, Failures: 1, Errors: 53, Skipped: 0
+[INFO] 
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD FAILURE
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  5.526 s
+[INFO] Finished at: 2026-10-21T22:47:54+08:00
+[INFO] ------------------------------------------------------------------------
+[ERROR] Failed to execute goal org.apache.maven.plugins:maven-surefire-plugin:3.5.5:test (default-test) on project config-mgr: There are test failures.
+[ERROR] 
+[ERROR] See <WORKTREE>\backend\target\surefire-reports for the individual test results.
+[ERROR] See dump files (if any exist) [date].dump, [date]-jvmRun[N].dump and [date].dumpstream.
+[ERROR] -> [Help 1]
+[ERROR] 
+[ERROR] To see the full stack trace of the errors, re-run Maven with the -e switch.
+[ERROR] Re-run Maven using the -X switch to enable full debug logging.
+[ERROR] 
+[ERROR] For more information about the errors and possible solutions, please read the following articles:
+[ERROR] [Help 1] http://cwiki.apache.org/confluence/display/MAVEN/MojoFailureException

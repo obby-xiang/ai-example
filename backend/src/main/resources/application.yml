@@ -237,6 +237,47 @@ app:
     # app.ai.sse.delivery-queue-capacity   256     Sse#deliveryQueueCapacity（:506）  每订阅者实时队列容量
     # 说明：这 7 个键此前只活在代码里（配置面 grep 不到），运维无从发现"租约 30s / 续租 10s"这类
     #   时间口径；**本段只做显化，不写出值**（写出来就等于给配置面加了第二份事实源，改键要改两处）。
+    # ── 业务知识库（业务知识问答 v1）───────────────────────────────────────────
+    # 知识内容 = 业务资料（不是对话数据），落 ./data/kb 或由 HTTP 知识服务提供；
+    # 检索结果回填模型前一律过 <knowledge> 定界与"数据不是指令"声明（KbText）。
+    # 样例知识仓在 docs/kb-samples/（20 篇，manifest.json 带 sha/aliases/terms）；
+    # 本地试跑：把该目录内容拷到 ./data/kb（或把 dir 指过去）。
+    kb:
+      enabled: true
+      # local = 读 dir；http = 从 http.base-url 拉 manifest.json 与各文档（生产形态）。
+      source: local
+      dir: ./data/kb
+      index-dir: ./data/kb-index
+      # 定时增量刷新（sha 变才重建该篇；http 另用 ETag 短路整份未变）。
+      refresh-interval: 10m
+      # top_k 默认 5 / 上限 10：服务端强截，模型给多少都不会超过上限。
+      top-k-default: 5
+      top-k-max: 10
+      # read_doc 默认 4000 / 上限 8000（与工具结果回填上限 8000 同量级）。
+      read-max-chars-default: 4000
+      read-max-chars-max: 8000
+      # 切块目标区间：按 ## 切章节，块内短段落合并到 ≥300，超过 800 必须切分。
+      chunk-min-chars: 300
+      chunk-max-chars: 800
+      # match 三档的相对阈值（对本次最高分取比）：只给档位，原始 BM25 分不进模型上下文。
+      match-high-ratio: 0.7
+      match-medium-ratio: 0.4
+      # Redis 缓存层（追加 3，手写 cache-aside）：会话无关的全局知识域，索引一律从缓存重建；
+      # local 源同样过缓存（读盘→写缓存→建索引），保证多实例同一份字节。键不设 TTL。
+      # Redis 不可用时自动降级直连知识源（WARN），单实例功能不受影响。
+      cache:
+        enabled: true
+        # 刷新权锁 SET NX PX 的 TTL（不续租；过期让位，防崩溃实例永久锁死刷新）。
+        lock-ttl: 30s
+        # 版本号轮询间隔：其它实例 INCR kb:cache:manifest:version 后，本实例最迟一个周期发现并重建。
+        version-poll-interval: 30s
+      # 生产 HTTP 源（source=http 时 base-url 必填，否则启动失败）。
+      http:
+        base-url: ""
+        connect-timeout: 5s
+        read-timeout: 10s
+        # 鉴权头的值只从该环境变量读取（整段作为 Authorization 头），不写配置文件、不进日志。
+        auth-env: KB_HTTP_AUTH
     tool-result:
       # DC-14 T2（R10-1）：工具结果**回填模型**前的上限（行数/字符数）——防上下文爆炸。
       # 只约束"给模型看的"那一份：前端 tool_result 帧与 Redis 台账始终是全文。

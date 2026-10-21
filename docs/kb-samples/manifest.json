@@ -1,0 +1,478 @@
+{
+  "version": "kb-samples-2026-10-21",
+  "generated_at": "2026-10-21",
+  "docs": [
+    {
+      "id": "region-tariff",
+      "title": "区域费率管理口径（样例）",
+      "summary": "区域费率的定义、字段、维护规则与常见问题（样例）",
+      "tags": [
+        "费率",
+        "GLM",
+        "REGION_TARIFF"
+      ],
+      "aliases": [
+        "费率表",
+        "区域价格",
+        "区域费率表"
+      ],
+      "sha": "3f48dbb98408f10f848d539ea9386a116f7ef949091251fafb34e9332ace9dfa",
+      "updated_at": "2026-09-01",
+      "file": "01-region-tariff.md",
+      "terms": [
+        {
+          "name": "标准费率",
+          "aliases": [
+            "基准费率",
+            "基础价"
+          ],
+          "section": "区域费率管理口径（样例） > 1 定义",
+          "answer": "区域内默认档位的费率，是其它档位计算的基准；字段为 base_rate。基准费率是它的同义叫法。"
+        },
+        {
+          "name": "跨区加收比例",
+          "aliases": [
+            "加收比例",
+            "跨区系数"
+          ],
+          "section": "区域费率管理口径（样例） > 2 关键字段",
+          "answer": "跨区结算时的加价比例，取值 0%–30%，步长 0.5%，按业务发生地所属区域读取；字段为 cross_ratio。"
+        }
+      ],
+      "aliases_en": [
+        "regional tariff",
+        "rate table",
+        "reimbursement rate"
+      ]
+    },
+    {
+      "id": "region-tariff-calc",
+      "title": "区域费率计算规则（样例）",
+      "summary": "单笔与跨区金额的计算公式、取整与校验顺序（样例）",
+      "tags": [
+        "费率",
+        "计算",
+        "公式"
+      ],
+      "aliases": [
+        "费率计算",
+        "金额计算",
+        "费率公式"
+      ],
+      "sha": "882956a1e8fd07ffb2432e668c7bc635173e5d5c83f41cf3d3d1b2f88b933c94",
+      "updated_at": "2026-09-05",
+      "file": "02-region-tariff-calc.md",
+      "terms": [],
+      "aliases_en": []
+    },
+    {
+      "id": "region-tariff-long",
+      "title": "区域费率实施细则（长篇样例）",
+      "summary": "费率实施细则全文：范围、术语、计算、审批、对账、异常与审计（样例，8000+ 字）",
+      "tags": [
+        "费率",
+        "实施细则",
+        "长文"
+      ],
+      "aliases": [
+        "费率细则",
+        "实施细则"
+      ],
+      "sha": "24ed8e23c6cc455a109a4de59e3e8f764352a9f00fdf95ccba0601d6ca7e0aa8",
+      "updated_at": "2026-09-10",
+      "file": "03-region-tariff-long.md",
+      "terms": [],
+      "aliases_en": []
+    },
+    {
+      "id": "tariff-boundary",
+      "title": "费率边界与特例（样例）",
+      "summary": "跨区结算参数宽表与四类特例的处置口径（样例）",
+      "tags": [
+        "费率",
+        "边界",
+        "宽表"
+      ],
+      "aliases": [
+        "费率特例",
+        "边界场景"
+      ],
+      "sha": "094e2f8e8eed7c5e6a75525a2fc9db334205d5bc6af772b976459889d2c80754",
+      "updated_at": "2026-09-12",
+      "file": "04-tariff-boundary.md",
+      "terms": [
+        {
+          "name": "半月结",
+          "aliases": [
+            "半月结算"
+          ],
+          "section": "费率边界与特例（样例） > 4 特例三：半月结",
+          "answer": "跨区比例按业务发生日所在半月的生效版本读取，不按结算日读取；跨月时分段计算后相加。"
+        }
+      ],
+      "aliases_en": []
+    },
+    {
+      "id": "project-env",
+      "title": "项目环境管理口径（样例）",
+      "summary": "项目环境的定义、环境类型与维护规则（样例）",
+      "tags": [
+        "项目环境",
+        "PROJECT_ENV"
+      ],
+      "aliases": [
+        "环境清单",
+        "环境列表",
+        "项目环境表"
+      ],
+      "sha": "33b095ba310270e88719ffa60af0bf12e3b6dd1f650d25cff6344a6ac8bfaab5",
+      "updated_at": "2026-08-20",
+      "file": "05-project-env.md",
+      "terms": [
+        {
+          "name": "项目环境",
+          "aliases": [
+            "环境清单"
+          ],
+          "section": "项目环境管理口径（样例） > 1 定义",
+          "answer": "描述一个项目可用的运行环境集合（环境编码、类型、所属区域、默认币种与状态），决定导出范围与默认参数。"
+        }
+      ],
+      "aliases_en": []
+    },
+    {
+      "id": "project-env-flow",
+      "title": "项目环境变更流程（样例）",
+      "summary": "环境变更的时序流程、时限与回滚口径（样例）",
+      "tags": [
+        "项目环境",
+        "流程",
+        "时序图"
+      ],
+      "aliases": [
+        "环境变更",
+        "环境切换流程"
+      ],
+      "sha": "b0bea1caf74e23e99670417eadda86f095f22d1a24fe32f84eb8cec1de2eb6ce",
+      "updated_at": "2026-08-25",
+      "file": "06-project-env-flow.md",
+      "terms": [],
+      "aliases_en": []
+    },
+    {
+      "id": "alarm-threshold",
+      "title": "告警阈值设定口径（样例）",
+      "summary": "告警阈值的三要素、分级、取值方法与禁止事项（样例）",
+      "tags": [
+        "告警",
+        "阈值",
+        "ALARM_THRESHOLD"
+      ],
+      "aliases": [
+        "告警线",
+        "阈值线",
+        "告警设置"
+      ],
+      "sha": "bac688a095d1cca418713f6c652c91bf11e3053e41eb803a371e230e76bc98f7",
+      "updated_at": "2026-09-15",
+      "file": "07-alarm-threshold.md",
+      "terms": [],
+      "aliases_en": [
+        "alarm threshold",
+        "alert threshold"
+      ]
+    },
+    {
+      "id": "alarm-threshold-manual",
+      "title": "告警阈值运维手册（长篇样例）",
+      "summary": "告警阈值运维全流程：分类、变更、误告警、复核与交接（样例，5000+ 字）",
+      "tags": [
+        "告警",
+        "运维",
+        "手册"
+      ],
+      "aliases": [
+        "阈值手册",
+        "告警手册"
+      ],
+      "sha": "ad77ceac43d1dad13c6230ff8add2942670ae037b1863db0499a96cf6a1384ee",
+      "updated_at": "2026-09-18",
+      "file": "08-alarm-threshold-manual.md",
+      "terms": [],
+      "aliases_en": []
+    },
+    {
+      "id": "project-member",
+      "title": "项目成员与角色（样例）",
+      "summary": "项目成员的角色、规则与常见问题（样例）",
+      "tags": [
+        "项目成员",
+        "角色",
+        "PROJECT_MEMBER"
+      ],
+      "aliases": [
+        "成员",
+        "项目人员",
+        "角色表"
+      ],
+      "sha": "897310aa4971a1241b12d5b23723facf511a738046d69aaeb69a98a9db4256fe",
+      "updated_at": "2026-08-10",
+      "file": "09-project-member.md",
+      "terms": [
+        {
+          "name": "PUBLISHER",
+          "aliases": [
+            "发布者"
+          ],
+          "section": "项目成员与角色（样例） > 2 角色",
+          "answer": "可发布角色，仅配置管理员可授予；项目经理不能自行授予 PUBLISHER。"
+        }
+      ],
+      "aliases_en": [
+        "project member",
+        "member roles"
+      ]
+    },
+    {
+      "id": "import-export-flow",
+      "title": "配置导入导出流程（样例）",
+      "summary": "从导出、离线修改、导入、预检查到发布的完整流程图与说明（样例）",
+      "tags": [
+        "导入",
+        "导出",
+        "流程",
+        "流程图"
+      ],
+      "aliases": [
+        "导出导入",
+        "迁移流程"
+      ],
+      "sha": "972ce0d0bb2a96badf1fe67e26a4fd95045f6966f010ca6b86bad65bad99ff46",
+      "updated_at": "2026-07-30",
+      "file": "10-import-export-flow.md",
+      "terms": [],
+      "aliases_en": [
+        "import export",
+        "import and export flow"
+      ]
+    },
+    {
+      "id": "publish-checklist",
+      "title": "发布前检查清单（样例）",
+      "summary": "数据、定义、流程与发布后四组检查项（样例）",
+      "tags": [
+        "发布",
+        "检查清单"
+      ],
+      "aliases": [
+        "上线检查",
+        "发布检查表"
+      ],
+      "sha": "be11fda3f5401ef091e04e623cefee4a907460a45c7c006008fd7a8f2580d4be",
+      "updated_at": "2026-09-20",
+      "file": "11-publish-checklist.md",
+      "terms": [],
+      "aliases_en": []
+    },
+    {
+      "id": "definitions-fields",
+      "title": "配置定义与字段口径（样例）",
+      "summary": "定义与数据的关系、层级、字段类型与变更影响（样例）",
+      "tags": [
+        "定义",
+        "字段",
+        "口径"
+      ],
+      "aliases": [
+        "配置定义",
+        "字段说明",
+        "定义字段"
+      ],
+      "sha": "9bc40d9594600ea1cefb2392dda89e6d1545f8dbcbd7416f3147a4830db9e55e",
+      "updated_at": "2026-09-22",
+      "file": "12-definitions-fields.md",
+      "terms": [],
+      "aliases_en": []
+    },
+    {
+      "id": "glm-seed",
+      "title": "GLM 种子域总览（样例）",
+      "summary": "五个 GLM 种子域的中英文总览、初始化顺序与常见坑（样例）",
+      "tags": [
+        "GLM",
+        "种子域",
+        "bilingual"
+      ],
+      "aliases": [
+        "GLM 种子",
+        "种子域",
+        "glm seed"
+      ],
+      "sha": "3fd1a9626826fe7b75242cd6b7fc50141d1c4672f0b3eecad972ebf7340700dd",
+      "updated_at": "2026-09-25",
+      "file": "13-glm-seed.md",
+      "terms": [
+        {
+          "name": "GLM 种子域",
+          "aliases": [
+            "种子域",
+            "GLM seed domains"
+          ],
+          "section": "GLM 种子域总览（样例） > 1 Overview / 概述",
+          "answer": "指随平台初始化的五个核心配置域：REGION_TARIFF、PROJECT_ENV、ALARM_THRESHOLD、PROJECT_MEMBER、CURRENCY；按定义→数据→发布流程维护。"
+        }
+      ],
+      "aliases_en": [
+        "glm seed domains",
+        "seed domain"
+      ]
+    },
+    {
+      "id": "currency-scope",
+      "title": "币种与范围口径（样例）",
+      "summary": "币种定义的字段与全局范围口径（样例）",
+      "tags": [
+        "币种",
+        "CURRENCY",
+        "范围"
+      ],
+      "aliases": [
+        "货币",
+        "币种表"
+      ],
+      "sha": "83bf4ad45507173002d7508ee9fe0a29acdd4dc7e4ccece9a4cebceb0c014c56",
+      "updated_at": "2026-07-15",
+      "file": "14-currency-scope.md",
+      "terms": [],
+      "aliases_en": []
+    },
+    {
+      "id": "query-condition",
+      "title": "查询条件写法（样例）",
+      "summary": "查询条件的 JSON 结构、操作符与常见错误（样例）",
+      "tags": [
+        "查询条件",
+        "操作符",
+        "JSON"
+      ],
+      "aliases": [
+        "过滤条件",
+        "条件写法",
+        "条件模板"
+      ],
+      "sha": "7bfcf15ee41bc24500e224b8192606ff3b67ce90b3f93673998460f380928d8c",
+      "updated_at": "2026-08-05",
+      "file": "15-query-condition.md",
+      "terms": [],
+      "aliases_en": []
+    },
+    {
+      "id": "ai-panel-guide",
+      "title": "AI 面板使用口径（样例）",
+      "summary": "AI 面板能力、渐进披露、确认门与知识问答口径（样例）",
+      "tags": [
+        "AI",
+        "面板",
+        "问答"
+      ],
+      "aliases": [
+        "AI 助手",
+        "助手使用",
+        "面板说明"
+      ],
+      "sha": "b4d57a6ed6d8b17dd8f42299278b183c6095f091525ef407188e1178e9af03be",
+      "updated_at": "2026-10-01",
+      "file": "16-ai-panel-guide.md",
+      "terms": [],
+      "aliases_en": []
+    },
+    {
+      "id": "term-glossary",
+      "title": "术语表（样例）",
+      "summary": "业务与技术术语、口头叫法对照（样例）",
+      "tags": [
+        "术语",
+        "词汇表",
+        "别名"
+      ],
+      "aliases": [
+        "词汇表",
+        "名词解释"
+      ],
+      "sha": "5216435361f02016135ab1561fcc6ae194fec52df11883c3ed5233a85ddd6124",
+      "updated_at": "2026-10-02",
+      "file": "17-term-glossary.md",
+      "terms": [
+        {
+          "name": "预检查",
+          "aliases": [
+            "导入检查"
+          ],
+          "section": "术语表（样例） > 1 业务术语",
+          "answer": "导入前的格式与依赖校验，校验通过后才允许写入暂存区。"
+        }
+      ],
+      "aliases_en": []
+    },
+    {
+      "id": "data-quality",
+      "title": "数据质量校验规则（样例）",
+      "summary": "格式/业务/跨域三层校验与质量指标（样例）",
+      "tags": [
+        "数据质量",
+        "校验",
+        "指标"
+      ],
+      "aliases": [
+        "质量规则",
+        "校验规则"
+      ],
+      "sha": "5880485ea2d876c783a28df2c27c6eee0416354efd48d0f0e7c9ff071054a505",
+      "updated_at": "2026-08-28",
+      "file": "18-data-quality.md",
+      "terms": [],
+      "aliases_en": []
+    },
+    {
+      "id": "audit-log",
+      "title": "操作审计与留痕（样例）",
+      "summary": "审计范围、字段、保留期限与查询口径（样例）",
+      "tags": [
+        "审计",
+        "留痕",
+        "合规"
+      ],
+      "aliases": [
+        "操作日志",
+        "审计记录"
+      ],
+      "sha": "f67fa4b4b9c24bb7af9974c025885f0299d40540974053aa9862a016f74e5aa5",
+      "updated_at": "2026-09-30",
+      "file": "19-audit-log.md",
+      "terms": [],
+      "aliases_en": []
+    },
+    {
+      "id": "kb-maintenance-faq",
+      "title": "知识库维护 FAQ（样例）",
+      "summary": "新增文档、别名、术语预制答案与热重载的维护问答（样例）",
+      "tags": [
+        "知识库",
+        "维护",
+        "FAQ"
+      ],
+      "aliases": [
+        "知识库问答",
+        "维护手册 FAQ"
+      ],
+      "sha": "3ad22af6fc5d5b05f1836403f3914a8caffb9904dd83738afebf90eb37fbe9cd",
+      "updated_at": "2026-10-05",
+      "file": "20-kb-maintenance-faq.md",
+      "terms": [],
+      "aliases_en": [
+        "knowledge base maintenance",
+        "kb faq"
+      ]
+    }
+  ]
+}
