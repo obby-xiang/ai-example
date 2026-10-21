@@ -89,6 +89,19 @@ class AiConnectionProbeTest {
 			respond(exchange, 500, "{\"error\":\"boom\"}");
 			return;
 		}
+		if (path.contains("huge")) {
+			// N-1：> 1 MiB 的合法模型列表（6 万个 id ≈ 1.15 MB）—— 截断后 JSON 不完整 ⇒ MODELS_INVALID
+			StringBuilder huge = new StringBuilder("{\"data\":[");
+			for (int i = 0; i < 60000; i++) {
+				if (i > 0) {
+					huge.append(',');
+				}
+				huge.append("{\"id\":\"model-").append(i).append("\"}");
+			}
+			huge.append("]}");
+			respond(exchange, 200, huge.toString());
+			return;
+		}
 		if (path.contains("notarray")) {
 			respond(exchange, 200, "{\"data\":\"nope\"}");
 			return;
@@ -184,6 +197,22 @@ class AiConnectionProbeTest {
 		assertThat(result.ok()).isTrue();
 		assertThat(result.modelCount()).isZero();
 		assertThat(result.models()).isEmpty();
+	}
+
+	/**
+	 * N-1（复审）：响应体按 1 MiB 截断后再解析。
+	 *
+	 * <p>
+	 * 6 万个 id 的合法 /models（≈1.15 MB）如果全量解析会得到 ok=true + 60000 条；截断后 JSON 不完整
+	 * ⇒ {@code MODELS_INVALID}（可判定结局，不是 500/UNREACHABLE）。<b>证红</b>：把
+	 * {@code MAX_BODY_BYTES} 调到 {@code Integer.MAX_VALUE} ⇒ 本用例得 ok=true ⇒ 红。
+	 */
+	@Test
+	void oversizedBodyIsTruncatedAndReportedAsModelsInvalid() {
+		AiConnectionProbe.ProbeResult result = probe(true, Duration.ofSeconds(5)).fetchModels(this.baseUrl,
+				"/models-huge/models", "probe-key", false);
+		assertThat(result.ok()).as("截断后 JSON 不完整 ⇒ 不当作完整清单").isFalse();
+		assertThat(result.code()).isEqualTo(AiConnectionProbe.CODE_MODELS_INVALID);
 	}
 
 	@Test

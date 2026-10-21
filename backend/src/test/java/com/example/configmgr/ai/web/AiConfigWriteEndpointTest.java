@@ -230,6 +230,26 @@ class AiConfigWriteEndpointTest {
 			.andExpect(jsonPath("$.data.code").value(AiConnectionProbe.CODE_AUTH_FAILED));
 	}
 
+	/**
+	 * M-1（复审）：key 声明了但本进程解不开（KEK 缺失/变更/密文损坏）⇒ {@code /test} 直接回
+	 * {@code KEY_UNREADABLE}，<b>不</b>拿 null key 去打上游换一个误导性的 AUTH_FAILED
+	 * （用户会去改 key，真正要修的是 KEK）。
+	 */
+	@Test
+	void testEndpointShortCircuitsUnreadableKeysWithoutProbingUpstream() throws Exception {
+		AiProvider provider = provider(null);
+		when(this.configService.provider(7L)).thenReturn(java.util.Optional.of(provider));
+		when(this.configService.resolveKey(any())).thenReturn(
+				new AiConfigService.KeyResolution(AiConfigService.KeyStatus.UNREADABLE, null, null));
+
+		this.mockMvc.perform(post("/api/ai/providers/7/test"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.ok").value(false))
+			.andExpect(jsonPath("$.data.code").value(AiConfigService.CODE_KEY_UNREADABLE))
+			.andExpect(jsonPath("$.data.modelCount").value(0));
+		verify(this.probe, org.mockito.Mockito.never()).fetchModels(any(), any(), any(), anyBoolean());
+	}
+
 	@Test
 	void testOfAMissingProviderIsA404() throws Exception {
 		when(this.configService.provider(9L)).thenReturn(java.util.Optional.empty());
@@ -268,8 +288,8 @@ class AiConfigWriteEndpointTest {
 
 	@Test
 	void modelsFetchFailureCarriesTheStableCode() throws Exception {
-		when(this.catalog.fetch(7L, true)).thenReturn(AiModelCatalog.CatalogResult
-			.failed(AiConnectionProbe.CODE_MODELS_UNSUPPORTED, 404, "该端点未实现 /models，可手填模型 ID"));
+		when(this.catalog.fetch(7L, true)).thenReturn(new AiModelCatalog.CatalogResult(false, List.of(), false,
+				AiConnectionProbe.CODE_MODELS_UNSUPPORTED, "该端点未实现 /models，可手填模型 ID"));
 		this.mockMvc.perform(post("/api/ai/providers/7/models/fetch"))
 			.andExpect(status().isOk())
 			.andExpect(jsonPath("$.data.ok").value(false))

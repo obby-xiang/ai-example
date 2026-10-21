@@ -474,6 +474,61 @@ class AiConfigWriterTest {
 				AiConfigWriter.ACTION_DEFAULTS_UPDATE, AiConfigWriter.ACTION_PROVIDER_DELETE);
 		assertThat(this.fixture.audits).extracting(AiConfigAudit::getTargetType)
 			.containsExactly("provider", "model", "setting", "provider");
+		// M-3（复审）：每一次写入都必须 INCR 一次跨实例失效信号 —— 次数与变更次数逐一对齐
+		//（少 INCR = 别的实例要等 DB 版本比对才看得见；多 INCR = 无意义的重载信号）
+		verify(this.redisOps, org.mockito.Mockito.times(4)).increment(AiConfigService.REDIS_VERSION_KEY);
+	}
+
+	// ── I-1（复审必修）：用户一改即脱离种子 ─────────────────────────────────
+
+	/**
+	 * I-1：env 种子行（{@code source=ENV_SEED}）被用户在设置页改过一次后，必须变成 {@code source=DB} ——
+	 * 否则 {@code app.ai.config.seed-force=true} 重启时 {@code AiConfigSeeder#writeSeed} 会按
+	 * "来源=ENV_SEED" 把用户改过的 base-url <b>覆盖回去</b>。
+	 *
+	 * <p>
+	 * 连锁面一并锁住：seed-force 的 {@code setKeyLast4} 也只在"仍是 ENV_SEED"的分支里执行 ——
+	 * source 翻转后，连 env key 换了新值都不会再改写 {@code key_last4}（测试用两个不同 env key 证明）。
+	 *
+	 * <p>
+	 * <b>证红</b>：去掉 {@code updateProvider} 里的 source 翻转 ⇒ baseUrl 被 env 覆盖回
+	 * {@code http://env-endpoint:1234}、keyLast4 被改成新 env key 的末 4 位 ⇒ 两条断言同时红。
+	 */
+	@Test
+	void userUpdateDetachesTheSeedRowSoSeedForceCannotOverwriteIt() {
+		this.fixture.chatProperties.setApiKey("env-probe-1111");
+		this.fixture.properties.getConfig().setSeedForce(false);
+		AiConfigSeeder seeder = seeder(this.fixture.service(AiConfigTestFixture.KEK_A));
+		assertThat(seeder.seed()).as("空表 + env ⇒ 写入种子").isTrue();
+		AiProvider seeded = this.fixture.providers.get(0);
+		assertThat(seeded.getSource()).isEqualTo(AiProvider.SOURCE_ENV_SEED);
+		assertThat(seeded.getKeyRef()).isEqualTo(AiProvider.KEY_REF_ENV);
+		assertThat(seeded.getKeyLast4()).isEqualTo("1111");
+		assertThat(seeded.getBaseUrl()).isEqualTo("http://env-endpoint:1234");
+
+		AiProvider updated = writer(AiConfigTestFixture.KEK_A)
+			.updateProvider(seeded.getId(),
+					new AiConfigWriter.ProviderCommand(null, null, null, "https://user-edited.example.com", null,
+							null, null, null, null, null));
+		assertThat(updated.getSource()).as("用户一改即脱离种子").isEqualTo(AiProvider.SOURCE_DB);
+
+		// seed-force 重启：env 已换成另一把 key + 另一个 base-url
+		this.fixture.chatProperties.setApiKey("env-probe-2222");
+		this.fixture.connectionProperties.setBaseUrl("http://new-env-host:2222");
+		this.fixture.properties.getConfig().setSeedForce(true);
+		seeder.seed();
+
+		AiProvider afterForce = this.fixture.providers.get(0);
+		assertThat(afterForce.getBaseUrl()).as("seed-force 不覆盖用户改过的行")
+			.isEqualTo("https://user-edited.example.com");
+		assertThat(afterForce.getKeyLast4()).as("key_last4 的 seed-force 赋值同属 ENV_SEED 分支 ⇒ 一并跳过")
+			.isEqualTo("1111");
+		assertThat(afterForce.getSource()).isEqualTo(AiProvider.SOURCE_DB);
+	}
+
+	private AiConfigSeeder seeder(AiConfigService service) {
+		return new AiConfigSeeder(this.fixture.providerRepository, this.fixture.modelRepository, service,
+				this.fixture.properties, this.transactionManager);
 	}
 
 }

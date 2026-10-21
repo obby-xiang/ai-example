@@ -21,7 +21,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { aiApi } from '@/api/ai'
 import type { AiHealth } from '@/types/ai'
 import { aiConfigApi, type AiDefaults, type AiModelRow, type AiProbeResult, type AiProviderView } from '@/api/aiConfig'
-import { AI_SETTINGS_COPY as T, describeAiConfigError } from '@/constants/ai-settings-copy'
+import { AI_SETTINGS_COPY as T, describeAiConfigError, errorCodeOf, softDeleteHint } from '@/constants/ai-settings-copy'
 
 const loading = ref(true)
 const loadError = ref<unknown>(null)
@@ -215,6 +215,14 @@ async function toggleEnabled(provider: AiProviderView): Promise<void> {
   })
 }
 
+/**
+ * 删除端点：**先试硬删**（{@code hard=true}），被"仍有模型引用"挡住（409 {@code PROVIDER_IN_USE}）
+ * 时回落软删（{@code enabled=false}）并明说走了哪一步（复审 M-2）。
+ *
+ * <p>
+ * 为什么不是"一律软删"：用户的删除意图是"这个端点不该再出现"；只留一行 disabled 的孤儿配置
+ * 会让人以为删失败了。硬删优先 + 明确回落，既尊重意图又不会悄悄丢掉模型清单。
+ */
 async function removeProvider(provider: AiProviderView): Promise<void> {
   const confirmed = await confirm(T.removeConfirm)
   if (!confirmed) {
@@ -222,10 +230,20 @@ async function removeProvider(provider: AiProviderView): Promise<void> {
   }
   await withBusy(`remove-${provider.id}`, async () => {
     try {
-      await aiConfigApi.deleteProvider(provider.id)
+      await aiConfigApi.deleteProvider(provider.id, true)
       await load()
     } catch (error) {
-      ElMessage.error(describeAiConfigError(error))
+      if (errorCodeOf(error) !== 'PROVIDER_IN_USE') {
+        ElMessage.error(describeAiConfigError(error))
+        return
+      }
+      try {
+        await aiConfigApi.deleteProvider(provider.id, false)
+        ElMessage.warning(softDeleteHint(provider.models.length))
+        await load()
+      } catch (fallbackError) {
+        ElMessage.error(describeAiConfigError(fallbackError))
+      }
     }
   })
 }

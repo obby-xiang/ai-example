@@ -121,11 +121,18 @@ public class AiConfigController {
             AiProvider provider = this.configService.provider(id)
                 .orElseThrow(() -> new AiConfigException(AiConfigWriter.CODE_PROVIDER_NOT_FOUND,
                         "provider 不存在：" + id));
-            String apiKey = this.configService.resolveKey(provider).apiKey();
+            AiConfigService.KeyResolution key = this.configService.resolveKey(provider);
+            // M-1（复审）：key 声明了但本进程解不开（KEK 缺失/变更/密文损坏）⇒ 探活没有意义，
+            // 直接把稳定码报出去。否则会拿 null key 去打上游，回来一个 AUTH_FAILED ——
+            // 用户去改 key 也修不好（真正要修的是 KEK），排障方向被带偏。
+            if (key.status() == AiConfigService.KeyStatus.UNREADABLE) {
+                return new ProbeView(false, null, 0L, AiConfigService.CODE_KEY_UNREADABLE,
+                        "库里的密钥无法解密（KEK 缺失/变更或密文损坏）：请恢复 AI_SECRET_KEK 或重新录入 key", 0);
+            }
             // 种子行（source=ENV_SEED）是受信来源：私网闸对它例外（CI 的 127.0.0.1 桩）
             boolean trusted = AiProvider.SOURCE_ENV_SEED.equals(provider.getSource());
             AiConnectionProbe.ProbeResult result = this.probe.fetchModels(provider.getBaseUrl(),
-                    provider.getModelsPath(), apiKey, trusted);
+                    provider.getModelsPath(), key.apiKey(), trusted);
             return new ProbeView(result.ok(), result.status(), result.latencyMs(), result.code(), result.message(),
                     result.modelCount());
         });

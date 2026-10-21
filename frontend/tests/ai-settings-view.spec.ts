@@ -203,6 +203,56 @@ describe('F2 密钥掩码与「留空不改」', () => {
     expect(body.apiKey).toBe('new-key-1234abcd')
   })
 
+  it('M-2：硬删被模型引用挡住（409 PROVIDER_IN_USE）⇒ 回落软删并说明原因', async () => {
+    const wrapper = await mountView()
+    api.deleteProvider.mockRejectedValueOnce(
+      new ApiError('该 provider 仍有 1 个模型引用，不能硬删', 409, 'PROVIDER_IN_USE', null)
+    )
+    api.deleteProvider.mockResolvedValueOnce({ ...providersFixture()[0], enabled: false })
+
+    await wrapper.find('[data-testid="remove-provider"]').trigger('click')
+    await flushPromises()
+
+    expect(api.deleteProvider).toHaveBeenNthCalledWith(1, 7, true)
+    expect(api.deleteProvider).toHaveBeenNthCalledWith(2, 7, false)
+    const warned = toast.warning.mock.calls.map((call: unknown[]) => String(call[0])).join(' ')
+    expect(warned).toContain('1 个模型引用')
+    expect(warned).toContain('停用')
+    expect(toast.error).not.toHaveBeenCalled()
+  })
+
+  it('M-2：无模型引用时直接硬删（不回落、不告警）', async () => {
+    const wrapper = await mountView()
+    api.deleteProvider.mockResolvedValue({ ...providersFixture()[0], enabled: false })
+
+    await wrapper.find('[data-testid="remove-provider"]').trigger('click')
+    await flushPromises()
+
+    expect(api.deleteProvider).toHaveBeenCalledTimes(1)
+    expect(api.deleteProvider).toHaveBeenCalledWith(7, true)
+    expect(toast.warning).not.toHaveBeenCalled()
+  })
+
+  it('M-1：探活回 KEY_UNREADABLE 时显示映射文案（不显示后端原文）', async () => {
+    const backendMessage = '库里的密钥无法解密（KEK 缺失）：AES/GCM 失败'
+    api.testProvider.mockResolvedValue({
+      ok: false,
+      status: null,
+      latencyMs: 0,
+      code: 'KEY_UNREADABLE',
+      message: backendMessage,
+      modelCount: 0
+    })
+    const wrapper = await mountView()
+
+    await wrapper.find('[data-testid="test-provider"]').trigger('click')
+    await flushPromises()
+
+    const shown = wrapper.find('[data-testid="probe-result"]').text()
+    expect(shown).toContain('无法解密')
+    expect(shown).not.toContain(backendMessage)
+  })
+
   it('清除密钥要二次确认，取消则不请求', async () => {
     const wrapper = await mountView()
     confirmMock.mockRejectedValueOnce(new Error('cancel'))

@@ -25,6 +25,10 @@ import java.util.concurrent.TimeoutException;
  * 零新依赖（本仓"依赖引入需显式裁决"），且这是一个<b>一次性的 GET</b>：不需要 Spring 的
  * WebClient/连接池，也不需要把 chat 那套 WebClient 配置（重试/观测/网关）带进来。
  *
+ * <h2>响应体上限</h2>
+ * 按字节收（{@code ofByteArray}），解析前截断到 {@value #MAX_BODY_BYTES} 字节 —— 上游回一个
+ * 超大 /models 不会把解析器拖死；被截断的 JSON 解析失败 ⇒ {@code MODELS_INVALID}（可判定）。
+ *
  * <h2>四档错误面（设计稿 §3.5 的稳定 code，禁止自由文本）</h2>
  * <table>
  * <tr><th>上游事实</th><th>code</th></tr>
@@ -61,6 +65,9 @@ public class AiConnectionProbe {
     public static final String MESSAGE_UNREACHABLE = "网络不可达/超时";
 
     public static final String MESSAGE_MODELS_INVALID = "上游 /models 返回的不是模型数组";
+
+    /** 解析前的响应体字节上限（N-1）：1 MiB ≈ 数万个模型 id，远超任何真实 /models。 */
+    public static final int MAX_BODY_BYTES = 1024 * 1024;
 
     private final AiProperties properties;
 
@@ -134,11 +141,14 @@ public class AiConnectionProbe {
             HttpClient client = client(timeout);
             // 同步等一个 future：HttpClient 的 send() 在超时上跨越"连接"与"读取"两段，
             // 但部分平台（代理/慢 DNS）仍会把 connectTimeout 拉长 ⇒ 再用 get(timeout) 兜一道硬闸。
-            CompletableFuture<HttpResponse<String>> future = client.sendAsync(builder.build(),
-                    HttpResponse.BodyHandlers.ofString());
-            HttpResponse<String> response = future.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+            // N-1（复审）：按字节收（ofByteArray）而不是 ofString —— 解析前先按上限截断，
+            // 避免"上游回一个上百 MB 的 /models"把 JSON 解析器与内存拖死。
+            CompletableFuture<HttpResponse<byte[]>> future = client.sendAsync(builder.build(),
+                    HttpResponse.BodyHandlers.ofByteArray());
+            HttpResponse<byte[]> response = future.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
             long latencyMs = (System.nanoTime() - startedAt) / 1_000_000L;
-            return interpret(response.statusCode(), response.body(), latencyMs);
+            String body = boundedBody(response.body());
+            return interpret(response.statusCode(), body, latencyMs);
         }
         catch (TimeoutException ex) {
             log.debug("探活超时 uri={}（超时即 UNREACHABLE，不再重试）", uri);
@@ -166,6 +176,28 @@ public class AiConnectionProbe {
 
     private static long elapsedMs(long startedAt) {
         return (System.nanoTime() - startedAt) / 1_000_000L;
+    }
+
+    /**
+     * 响应体截断（N-1）：最多解析 {@value #MAX_BODY_BYTES} 字节。
+     *
+     * <p>
+     * 截断的后果是<b>可判定</b>的：一段被切断的 JSON 解析失败 ⇒ {@code MODELS_INVALID}（前端文案
+     * "该端点的 /models 返回格式不认识，请手填模型 ID"），不会落成 UNREACHABLE 或 500。
+     * 已知残余：JDK HttpClient 仍会把整段 body 读进内存后才交给我们（没有响应体上限配置项）；
+     * 截断保护的是<b>解析器与返回列表</b>，不是 RSS —— 真正的字节级上限要换
+     * {@code ofInputStream} + 自管读循环与截止时间，登记为后续（本批不做）。
+     */
+    private static String boundedBody(byte[] body) {
+        if (body == null || body.length == 0) {
+            return "";
+        }
+        int length = Math.min(body.length, MAX_BODY_BYTES);
+        if (length < body.length) {
+            log.debug("探活响应体 {} 字节，按 {} 字节截断后再解析（MODELS_INVALID 是可接受结局）", body.length,
+                    MAX_BODY_BYTES);
+        }
+        return new String(body, 0, length, java.nio.charset.StandardCharsets.UTF_8);
     }
 
     private static String normalisePath(String modelsPath) {

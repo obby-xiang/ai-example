@@ -123,8 +123,11 @@ final class AiConfigTestFixture {
 			if (provider.getId() == null) {
 				provider.setId(this.ids.getAndIncrement());
 			}
-			this.providers.removeIf(existing -> existing.getCode().equals(provider.getCode())
-					&& !existing.getId().equals(provider.getId()));
+			// 与 JPA 同语义：同 id 覆盖（更新），同 code 不同 id 视为唯一约束冲突的替代
+			//（旧实现只删"同 code 不同 id"，于是 update 之后列表里会出现同一 id 的两份 ——
+			//  findByCode/findById 拿到的是旧的 ENV_SEED 那份，I-1 的回归用例正是靠它暴露的）
+			this.providers.removeIf(existing -> existing.getId().equals(provider.getId())
+					|| existing.getCode().equals(provider.getCode()));
 			this.providers.add(provider);
 			return provider;
 		});

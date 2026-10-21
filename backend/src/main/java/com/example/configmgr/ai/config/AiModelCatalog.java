@@ -62,17 +62,24 @@ public class AiModelCatalog {
         AiProvider provider = this.configService.provider(providerId)
             .orElseThrow(() -> new AiConfigException(AiConfigWriter.CODE_PROVIDER_NOT_FOUND,
                     "provider 不存在：" + providerId));
+        AiConfigService.KeyResolution key = this.configService.resolveKey(provider);
+        // M-1（复审）：key 解不开就没有"拉取"可言 —— 直接回 KEY_UNREADABLE（与 /test 同口径），
+        // 而不是拿 null key 打上游换一个 AUTH_FAILED（用户会去改 key，但真正要修的是 KEK）。
+        // 位置在缓存读<b>之前</b>：缓存命中也不该掩盖"这行 key 已经解不开"这个更重要的事实。
+        if (key.status() == AiConfigService.KeyStatus.UNREADABLE) {
+            return new CatalogResult(false, List.of(), false, AiConfigService.CODE_KEY_UNREADABLE,
+                    "库里的密钥无法解密（KEK 缺失/变更或密文损坏）：请恢复 AI_SECRET_KEK 或重新录入 key");
+        }
         if (!refresh) {
             List<String> cached = readCache(providerId);
             if (cached != null) {
                 return new CatalogResult(true, cached, true, null, null);
             }
         }
-        String apiKey = this.configService.resolveKey(provider).apiKey();
         // env 种子行是受信来源（私网闸对它是例外；否则 CI 的 127.0.0.1 桩会被拦）
         boolean trusted = AiProvider.SOURCE_ENV_SEED.equals(provider.getSource());
         AiConnectionProbe.ProbeResult result = this.probe.fetchModels(provider.getBaseUrl(),
-                provider.getModelsPath(), apiKey, trusted);
+                provider.getModelsPath(), key.apiKey(), trusted);
         if (!result.ok()) {
             return new CatalogResult(false, List.of(), false, result.code(), result.message());
         }
@@ -123,6 +130,11 @@ public class AiModelCatalog {
     /**
      * 一次拉取的结果。
      *
+     * <p>
+     * N-2（复审）：删掉了 {@code failed(code, status, message)} 静态工厂 —— 它<b>没有调用点</b>，
+     * 且收了 {@code status} 却不使用（把"上游状态码"这个信息悄悄丢掉）。保留的
+     * {@link #ok(List, boolean)} 在 {@code /test} 的测试桩里有真实调用方。
+     *
      * @param cached true = 本次来自缓存（没有打上游）
      * @param code 稳定错误码（ok=true 时为 null）
      */
@@ -130,10 +142,6 @@ public class AiModelCatalog {
 
         public static CatalogResult ok(List<String> models, boolean cached) {
             return new CatalogResult(true, List.copyOf(models), cached, null, null);
-        }
-
-        public static CatalogResult failed(String code, Integer status, String message) {
-            return new CatalogResult(false, List.of(), false, code, message);
         }
     }
 

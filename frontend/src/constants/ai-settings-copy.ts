@@ -84,7 +84,8 @@ export const AI_SETTINGS_COPY = {
 export const AI_CONFIG_ERROR_TEXT: Record<string, string> = {
   AI_SECRET_KEK_MISSING: '尚未配置加密密钥（AI_SECRET_KEK），无法保存 API Key。请让管理员配置后重试。',
   KEY_EMPTY: 'API Key 为空：请填写密钥，或用「清除密钥」。',
-  KEY_UNREADABLE: '库里的密钥无法解密（加密密钥变更或密文损坏）：请重新录入密钥。',
+  // /test 与 /models/fetch 也会回这个码（M-1）：探活前就短路，不再拿 null key 打上游
+  KEY_UNREADABLE: '库里的密钥无法解密（加密密钥变更或密文损坏）：请让管理员恢复加密密钥，或重新录入密钥。',
   INVALID_BASE_URL: 'Base URL 不合法：必须是 http:// 或 https:// 开头的完整地址，且不能带账号密码。',
   BLOCKED_PRIVATE_ENDPOINT: '该地址指向私网/回环地址，默认禁止。确为内网网关时请联系管理员开启白名单开关。',
   PROVIDER_NOT_FOUND: '该端点不存在（可能已被删除）：刷新后再试。',
@@ -109,6 +110,17 @@ export const AI_CONFIG_ERROR_TEXT: Record<string, string> = {
 
 /** 兜底文案（未知 code / 没有 code 时使用）。 */
 export const AI_CONFIG_ERROR_FALLBACK = AI_CONFIG_ERROR_TEXT.UNKNOWN_ERROR
+
+/**
+ * 删除被"仍有模型引用"挡住后的回落提示（复审 M-2）：明确告诉用户**做了哪一步**。
+ *
+ * <p>
+ * 只写"删除失败"会让人以为端点还在、再点一次；写"已停用"又不说原因会让人以为删成功了。
+ * 两者都写：为什么不能删 + 现在是什么状态。
+ */
+export function softDeleteHint(modelCount: number): string {
+  return `仍有 ${modelCount} 个模型引用，不能删除，已改为停用（模型清单保留，可随时恢复）`
+}
 
 /** 读一个错误的稳定 code（`ApiError` 有 code；普通 Error 没有）。 */
 export function errorCodeOf(error: unknown): string | null {

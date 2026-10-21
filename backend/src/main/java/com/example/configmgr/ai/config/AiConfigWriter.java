@@ -18,6 +18,8 @@ import org.springframework.util.StringUtils;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.regex.Pattern;
 
 /**
@@ -157,7 +159,10 @@ public class AiConfigWriter {
         this.cipher = cipher;
         this.guard = guard;
         this.redis = redis;
-        this.transactionTemplate = transactionManager == null ? null : new TransactionTemplate(transactionManager);
+        // N-6（复审）：事务边界是写路径的正确性前提，装配期就 fail-fast —— 不要在运行时才 NPE
+        this.transactionTemplate = new TransactionTemplate(
+                Objects.requireNonNull(transactionManager, "AiConfigWriter 需要 PlatformTransactionManager："
+                        + "写路径的“数据行 + 版本号 + 审计行”必须同一提交点"));
         this.configService = configService;
         this.objectMapper = objectMapper;
     }
@@ -288,6 +293,12 @@ public class AiConfigWriter {
             existing.setModelsPath(modelsPath);
             existing.setEnabled(command.enabled() == null ? existing.isEnabled() : command.enabled());
             existing.setSortOrder(command.sortOrder() == null ? existing.getSortOrder() : command.sortOrder());
+            // I-1（复审必修）：用户一改即脱离种子 —— 否则 seed-force 重启会把用户改过的 base-url/key_last4
+            // 又按 env 覆盖回去（AiConfigSeeder#writeSeed 只重灌 source=ENV_SEED 的行）。
+            // 连锁面：keyLast4 的 seed-force 赋值同样在 ENV_SEED 分支里 ⇒ source 翻转后自然跳过。
+            if (!AiProvider.SOURCE_DB.equals(existing.getSource())) {
+                existing.setSource(AiProvider.SOURCE_DB);
+            }
             if (finalKey != null) {
                 existing.setKeyCipher(finalKey.cipher());
                 existing.setKeyLast4(finalKey.last4());
@@ -522,18 +533,27 @@ public class AiConfigWriter {
      * <p>
      * 读侧（{@link AiConfigService#current()}）在 Redis 不可用时就是靠比较本值决定要不要重载，
      * 所以它必须与数据行<b>同一个事务</b>：改了数据却没动版本 = 读侧永远看不到（比报错更糟）。
+     *
+     * <h2>为什么是"读-改-写"而不是原子 UPDATE（复审 M-3）</h2>
+     * 配置写路径是<b>低频人工操作</b>（点一次保存），不存在并发抢版本号的场景；JPA 下走
+     * {@code find → set → save} 能复用实体与 {@code @UpdateTimestamp}，可读性也最好。
+     * 真要并发写同一键，两个事务都会读到旧值 ⇒ 版本号只 +1 一次 —— 但<b>配置数据本身</b>也会
+     * 有一个事务被覆盖，版本号少跳一格并不改变"读侧最终会看到最新值"这个结论（DB 版本单调不减、
+     * Redis {@code INCR} 每次都动）。故不做 {@code UPDATE ... SET value=value+1} 的原生 SQL：
+     * 那是给高并发计数器的写法，在这里只会换来一个绕过实体层的特例。
+     *
+     * <p>
+     * N-5（复审）：只查一次 {@code findBySettingKey}（旧实现查两次：一次算值、一次取实体）。
      */
     private void bumpVersion() {
-        long current = this.settingRepository.findBySettingKey(AiSetting.CONFIG_VERSION)
-            .map(AiSetting::getValueJson)
-            .map(AiConfigWriter::parseVersion)
-            .orElse(0L);
-        AiSetting setting = this.settingRepository.findBySettingKey(AiSetting.CONFIG_VERSION).orElseGet(() -> {
+        Optional<AiSetting> current = this.settingRepository.findBySettingKey(AiSetting.CONFIG_VERSION);
+        long next = current.map(AiSetting::getValueJson).map(AiConfigWriter::parseVersion).orElse(0L) + 1L;
+        AiSetting setting = current.orElseGet(() -> {
             AiSetting fresh = new AiSetting();
             fresh.setSettingKey(AiSetting.CONFIG_VERSION);
             return fresh;
         });
-        setting.setValueJson(String.valueOf(current + 1));
+        setting.setValueJson(String.valueOf(next));
         this.settingRepository.save(setting);
     }
 
