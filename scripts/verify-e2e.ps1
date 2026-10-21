@@ -32,8 +32,8 @@
 #     （TC11 断言 JOB_PROGRESS 事件流；batch-size 为默认 100 时小配置项不会跨分片边界）
 #   - 安全防护批①（裁决 I3，2026-10-21）：**限流不在 E2E 覆盖面，由单测覆盖**
 #     （AiRateLimiterTest 锁滑动窗口语义与降级；AiControllerChatGateTest 锁 20/21、429 形状、
-#     归一化与长度闸）。本脚本的 /chat 才 21 次、每个 sessionId ≤ 2 次，默认 20/分·60/分 本可跑通，
-#     但用例增长或同机并跑就会以 429 变成"看似产品坏"的假红 —— 故启动后端时请显式抬高：
+#     归一化与长度闸）。本脚本的 /chat 才 21 次、每 sessionId ≤ 22 次（TC18 取消后重试循环），
+#     全程最坏 ~40 次；故限流在 E2E 显式抬高，否则用例增长或同机并跑会以 429 变成"看似产品坏"的假红：
 #       --app.ai.limit.session-per-minute=200 --app.ai.limit.ip-per-minute=2000
 #     CI 的 e2e job（.github/workflows/ci.yml）已按此参数启动。
 #   - -BackendLog：后端 stdout 日志文件（com.example.configmgr 为 DEBUG 级）。
