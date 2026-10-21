@@ -1,5 +1,8 @@
 package com.example.configmgr.task.controller;
 
+import com.example.configmgr.common.CodedIllegalArgumentException;
+import com.example.configmgr.common.ErrorCodes;
+
 import com.example.configmgr.common.ApiResponse;
 import com.example.configmgr.job.entity.Job;
 import com.example.configmgr.job.repo.JobRepository;
@@ -136,14 +139,14 @@ public class TaskController {
                 text = objectMapper.writeValueAsString(condition);
             }
             catch (Exception e) {
-                throw new IllegalArgumentException("condition 无法序列化为 JSON：" + e.getMessage());
+                throw new CodedIllegalArgumentException(ErrorCodes.CONDITION_JSON_INVALID, "condition 无法序列化为 JSON：" + e.getMessage());
             }
         }
         try {
             objectMapper.readTree(text);
         }
         catch (Exception e) {
-            throw new IllegalArgumentException("condition 不是合法 JSON：" + e.getMessage());
+            throw new CodedIllegalArgumentException(ErrorCodes.CONDITION_JSON_INVALID, "condition 不是合法 JSON：" + e.getMessage());
         }
         return text;
     }

@@ -1,5 +1,7 @@
 package com.example.configmgr.ai.config;
 
+import com.example.configmgr.common.ErrorCodes;
+
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -49,13 +51,13 @@ import java.util.concurrent.TimeoutException;
 @Component
 public class AiConnectionProbe {
 
-    public static final String CODE_MODELS_UNSUPPORTED = "MODELS_UNSUPPORTED";
+    public static final String CODE_MODELS_UNSUPPORTED = ErrorCodes.MODELS_UNSUPPORTED;
 
-    public static final String CODE_AUTH_FAILED = "AUTH_FAILED";
+    public static final String CODE_AUTH_FAILED = ErrorCodes.AUTH_FAILED;
 
-    public static final String CODE_UNREACHABLE = "UNREACHABLE";
+    public static final String CODE_UNREACHABLE = ErrorCodes.UNREACHABLE;
 
-    public static final String CODE_MODELS_INVALID = "MODELS_INVALID";
+    public static final String CODE_MODELS_INVALID = ErrorCodes.MODELS_INVALID;
 
     /** 与设计稿 §3.5 的文案一致：后端 message 只是中文兜底，前端按 code 查文案。 */
     public static final String MESSAGE_MODELS_UNSUPPORTED = "该端点未实现 /models，可手填模型 ID";

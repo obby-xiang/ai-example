@@ -1,5 +1,8 @@
 package com.example.configmgr.excel;
 
+import com.example.configmgr.common.CodedIllegalArgumentException;
+import com.example.configmgr.common.ErrorCodes;
+
 import com.example.configmgr.definition.entity.ConfigDefinition;
 import com.example.configmgr.definition.entity.ConfigField;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -33,13 +36,13 @@ public class ExcelReader {
                 fieldCodes = readHeaderRow(wb, def);
             }
             if (fieldCodes == null || fieldCodes.isEmpty()) {
-                throw new IllegalArgumentException("无法解析文件列映射，请确认文件格式正确");
+                throw new CodedIllegalArgumentException(ErrorCodes.EXCEL_COLUMN_MAPPING_INVALID, "无法解析文件列映射，请确认文件格式正确");
             }
 
             // Read data sheet (first non-hidden, non-meta sheet)
             Sheet dataSheet = findDataSheet(wb);
             if (dataSheet == null) {
-                throw new IllegalArgumentException("未找到数据工作表");
+                throw new CodedIllegalArgumentException(ErrorCodes.EXCEL_SHEET_NOT_FOUND, "未找到数据工作表");
             }
 
             FormulaEvaluator evaluator = wb.getCreationHelper().createFormulaEvaluator();

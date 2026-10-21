@@ -1,5 +1,7 @@
 package com.example.configmgr.ai.run;
 
+import com.example.configmgr.common.ErrorCodes;
+
 import com.example.configmgr.ai.config.AiConfigService;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.context.ContextCompactor;
@@ -685,7 +687,7 @@ public class ResumeService {
 					}
 					catch (Exception ex) {
 						log.error("续跑未捕获异常 runId={}", runId, ex);
-						out.error("AI_RESUME_FAILED", String.valueOf(ex.getMessage()));
+						out.error(ErrorCodes.AI_RESUME_FAILED, String.valueOf(ex.getMessage()));
 					}
 					finally {
 						// 轮终态：完成订阅者 + 摘掉进程内互斥（ADR-5 的"轮终态主动释放"同族语义）。

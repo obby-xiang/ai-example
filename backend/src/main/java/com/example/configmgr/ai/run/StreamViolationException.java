@@ -1,5 +1,7 @@
 package com.example.configmgr.ai.run;
 
+import com.example.configmgr.common.ErrorCodes;
+
 import lombok.Getter;
 
 /**
@@ -37,7 +39,7 @@ public class StreamViolationException extends RuntimeException {
 	public static final String CONNECTION_BROKEN = "UPSTREAM_CONNECTION_BROKEN";
 
 	/** 其它上游流错误。 */
-	public static final String STREAM_ERROR = "UPSTREAM_STREAM_ERROR";
+	public static final String STREAM_ERROR = ErrorCodes.UPSTREAM_STREAM_ERROR;
 
 	/**
 	 * 上游拒绝：上下文超出模型窗口（L3 丢到 pin 下限后仍超；映射依据 = 响应体措辞）。

@@ -1,5 +1,8 @@
 package com.example.configmgr.ai.run;
 
+import com.example.configmgr.common.CodedIllegalArgumentException;
+import com.example.configmgr.common.ErrorCodes;
+
 import java.util.Locale;
 
 /**
@@ -43,7 +46,7 @@ public final class LeaseKeys {
 	/** 任务级锁键：{@code ai:lock:task:<taskId>}。 */
 	public static String task(long taskId) {
 		if (taskId <= 0L) {
-			throw new IllegalArgumentException("taskId 必须 > 0（当前 = " + taskId + "）：0/负值会拼出"
+			throw new CodedIllegalArgumentException(ErrorCodes.LEASE_KEY_INVALID, "taskId 必须 > 0（当前 = " + taskId + "）：0/负值会拼出"
 					+ "一个所有调用方都能命中的'空任务'锁，互斥面随之失效");
 		}
 		return TASK_PREFIX + taskId;
@@ -63,7 +66,7 @@ public final class LeaseKeys {
 	 */
 	public static String normalizeJobType(String jobType) {
 		if (jobType == null || jobType.isBlank()) {
-			throw new IllegalArgumentException("jobType 不能为空：作业级锁的键形是 "
+			throw new CodedIllegalArgumentException(ErrorCodes.LEASE_KEY_INVALID, "jobType 不能为空：作业级锁的键形是 "
 					+ "ai:lock:job:<taskId>:<JOBTYPE>，缺 JOBTYPE 会让不同类型的作业共用一把锁");
 		}
 		return jobType.trim().toUpperCase(Locale.ROOT);

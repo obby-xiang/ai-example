@@ -11,7 +11,13 @@ import java.util.List;
 @Data
 public class ToolMeta {
     private String name;
-    private String displayName; // Chinese display name
+    private String displayName; // 兼容字段：不再由 description 截断派生（见 ToolRegistry#applyOverrides）
+    /** UI 用 i18n key（`tool.<toolKey>.title`）；前端据此渲染，displayName 只作诊断兜底。 */
+    private String titleKey;
+    /** UI 用中文标题（来自 YAML `title`；缺省空 ⇒ 前端回落 i18n / 工具名）。 */
+    private String title;
+    /** 模型侧语言标签（zh / en），与用户 locale 无关。 */
+    private String lang;
     private String[] scopePatterns;
     private RiskLevel riskLevel;
     private Channel channel;

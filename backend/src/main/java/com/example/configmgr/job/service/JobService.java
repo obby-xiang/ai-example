@@ -1,6 +1,7 @@
 package com.example.configmgr.job.service;
 
 import com.example.configmgr.common.ConflictException;
+import com.example.configmgr.common.ErrorCodes;
 import com.example.configmgr.common.ResourceNotFoundException;
 import com.example.configmgr.file.FileStorageService;
 import com.example.configmgr.job.entity.Job;
@@ -48,7 +49,7 @@ public class JobService {
     private static final String IMPORT_FILE_TYPE = "UPLOAD";
 
     /** 新增机器可读码（A5）：预检查文件指纹缺失或与当前 UPLOAD 件不一致 —— 视同"未预检查"。 */
-    public static final String PRECHECK_STALE_CODE = "PRECHECK_STALE";
+    public static final String PRECHECK_STALE_CODE = ErrorCodes.PRECHECK_STALE;
 
     /**
      * R-137（T1/T2）任务终态守卫：任务已"真正结束"时拒绝新建作业（409 {@code TASK_FINALIZED}）。
@@ -86,7 +87,7 @@ public class JobService {
     public ConflictException finalizedConflict(Long taskId, Job.JobType jobType) {
         Task task = task(taskId);
         if (task.getStatus() == Task.TaskStatus.CANCELLED) {
-            return new ConflictException("TASK_FINALIZED",
+            return new ConflictException(ErrorCodes.TASK_FINALIZED,
                     "任务 #" + taskId + " 已 CANCELLED，禁止新建作业（TASK_FINALIZED）。"
                             + "任务取消是用户明确意志，如需重新开始请创建新任务");
         }
@@ -100,7 +101,7 @@ public class JobService {
                 .findFirstByTaskIdAndJobTypeAndStatusInOrderByIdDesc(taskId, finalJobType, FINAL_JOB_STATUSES)
                 .isPresent();
         if (hasFinalJob) {
-            return new ConflictException("TASK_FINALIZED",
+            return new ConflictException(ErrorCodes.TASK_FINALIZED,
                     "任务 #" + taskId + " 已 COMPLETED（" + finalJobType + " 作业成功），禁止新建作业（TASK_FINALIZED）");
         }
         // COMPLETED 但最终作业未成功（如预检查 0 错误即置 COMPLETED 的导入任务）：流程仍可继续，放行
@@ -195,7 +196,7 @@ public class JobService {
      */
     public ConflictException inFlightConflict(Long taskId, Job.JobType jobType) {
         return jobRepository.findFirstByTaskIdAndJobTypeAndStatusInOrderByIdDesc(taskId, jobType, IN_FLIGHT)
-                .map(job -> new ConflictException("JOB_ALREADY_RUNNING",
+                .map(job -> new ConflictException(ErrorCodes.JOB_ALREADY_RUNNING,
                         "任务 #" + taskId + " 已有同类作业在途：作业 #" + job.getId() + " [" + jobType
                                 + "] 状态 " + job.getStatus()
                                 + "（JOB_ALREADY_RUNNING）。并发执行会互相覆盖同一批文件/暂存行，"
@@ -236,12 +237,12 @@ public class JobService {
         }
         Job precheck = latestPrecheck(taskId).orElse(null);
         if (precheck == null) {
-            return new ConflictException("PRECHECK_NOT_PASSED",
+            return new ConflictException(ErrorCodes.PRECHECK_NOT_PASSED,
                     "任务 #" + taskId + " 尚无预检查记录，不能发起 " + jobType
                             + "（PRECHECK_NOT_PASSED）：请先上传数据文件并执行预检查，通过后再继续");
         }
         if (precheck.getStatus() != Job.JobStatus.COMPLETED || precheck.getErrorCount() > 0) {
-            return new ConflictException("PRECHECK_NOT_PASSED",
+            return new ConflictException(ErrorCodes.PRECHECK_NOT_PASSED,
                     "任务 #" + taskId + " 最近一次预检查未通过：作业 #" + precheck.getId() + " 状态 "
                             + precheck.getStatus() + "，错误数 " + precheck.getErrorCount()
                             + "（PRECHECK_NOT_PASSED）。请先修复数据并重跑预检查通过后再发起 " + jobType);
@@ -355,7 +356,7 @@ public class JobService {
     public JobCancellationRegistry.CancelResult cancel(Long jobId, String requestedBy) {
         Job job = findById(jobId);
         if (job.getStatus() != Job.JobStatus.PENDING && job.getStatus() != Job.JobStatus.RUNNING) {
-            throw new ConflictException("JOB_ALREADY_FINAL",
+            throw new ConflictException(ErrorCodes.JOB_ALREADY_FINAL,
                     "作业 #" + jobId + " 已是终态 " + job.getStatus() + "，不可取消");
         }
 

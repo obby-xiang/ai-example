@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.tool;
 
 import com.example.configmgr.ai.run.PendingToolCall;
+import com.example.configmgr.common.ErrorCodes;
 
 import java.util.Set;
 
@@ -45,46 +46,46 @@ public enum ToolOutcome {
 	SKIPPED("skipped");
 
 	/** 工具抛异常且异常不携带机器可读码时的兜底码。 */
-	public static final String CODE_TOOL_EXECUTION_FAILED = "TOOL_EXECUTION_FAILED";
+	public static final String CODE_TOOL_EXECUTION_FAILED = ErrorCodes.TOOL_EXECUTION_FAILED;
 
 	/** 官方执行器没有回填该 toolCallId 的结果（{@code orElse(null)} 出口）。 */
-	public static final String CODE_TOOL_RESULT_MISSING = "TOOL_RESULT_MISSING";
+	public static final String CODE_TOOL_RESULT_MISSING = ErrorCodes.TOOL_RESULT_MISSING;
 
 	/** 业务对象不存在（{@code ResourceNotFoundException} 的默认码）。 */
-	public static final String CODE_RESOURCE_NOT_FOUND = "RESOURCE_NOT_FOUND";
+	public static final String CODE_RESOURCE_NOT_FOUND = ErrorCodes.RESOURCE_NOT_FOUND;
 
 	/** 参数非法（工具入参的类型/取值不合法）。 */
-	public static final String CODE_ILLEGAL_ARGUMENT = "ILLEGAL_ARGUMENT";
+	public static final String CODE_ILLEGAL_ARGUMENT = ErrorCodes.ILLEGAL_ARGUMENT;
 
 	/** 他实例已认领该调用，本实例不再执行（避免重复副作用）。 */
-	public static final String CODE_ALREADY_CLAIMED = "TOOL_ALREADY_CLAIMED";
+	public static final String CODE_ALREADY_CLAIMED = ErrorCodes.TOOL_ALREADY_CLAIMED;
 
 	/** 越 scope（防线③）。 */
-	public static final String CODE_SCOPE_NOT_DISCLOSED = "SCOPE_NOT_DISCLOSED";
+	public static final String CODE_SCOPE_NOT_DISCLOSED = ErrorCodes.SCOPE_NOT_DISCLOSED;
 
-	public static final String CODE_CONFIRM_TIMEOUT = "CONFIRM_TIMEOUT";
+	public static final String CODE_CONFIRM_TIMEOUT = ErrorCodes.CONFIRM_TIMEOUT;
 
-	public static final String CODE_FRONTEND_TIMEOUT = "FRONTEND_TIMEOUT";
+	public static final String CODE_FRONTEND_TIMEOUT = ErrorCodes.FRONTEND_TIMEOUT;
 
-	public static final String CODE_RUN_CANCELLED = "RUN_CANCELLED";
+	public static final String CODE_RUN_CANCELLED = ErrorCodes.RUN_CANCELLED;
 
-	public static final String CODE_FRONTEND_CANCELLED = "FRONTEND_CANCELLED";
+	public static final String CODE_FRONTEND_CANCELLED = ErrorCodes.FRONTEND_CANCELLED;
 
 	/** 未执行（批策略跳过）：上游工具 deterministic 失败后本调用没有执行。 */
-	public static final String CODE_UPSTREAM_FAILED = "UPSTREAM_FAILED";
+	public static final String CODE_UPSTREAM_FAILED = ErrorCodes.UPSTREAM_FAILED;
 
 	/**
 	 * 只读预检未通过（F5 预检前移）：工具<b>未进入确认门</b>、未执行、不弹卡 ——
 	 * 结构化失败回给模型，由模型向用户说明原因与建议后再发起。
 	 */
-	public static final String CODE_PRECHECK_FAILED = "PRECHECK_FAILED";
+	public static final String CODE_PRECHECK_FAILED = ErrorCodes.PRECHECK_FAILED;
 
 	/**
 	 * 预检基础设施不可用（F5 安全侧兜底）：{@code ToolPreflightService.inspect} 自身抛错时，
 	 * <b>既不判通过也不判"预检未通过"</b> —— 工具同样不进确认门、不执行，结构化失败回给模型。
 	 * 可重试（抖动恢复后可重来），措辞不得暗示"条件已满足"。
 	 */
-	public static final String CODE_PRECHECK_UNAVAILABLE = "PRECHECK_UNAVAILABLE";
+	public static final String CODE_PRECHECK_UNAVAILABLE = ErrorCodes.PRECHECK_UNAVAILABLE;
 
 	/**
 	 * 目标资源正被同类动作占用（B23L1 批③a / 裁决 4）：L1 资源互斥（{@code ai:lock:*}，见
@@ -96,7 +97,7 @@ public enum ToolOutcome {
 	 * 用 {@code failed} 表达会让"改数据后可重试"的表（预检类码）与"等锁"混在一起，
 	 * 模型也就分不清"该改参数"还是"该等"。
 	 */
-	public static final String CODE_RESOURCE_LOCKED = "RESOURCE_LOCKED";
+	public static final String CODE_RESOURCE_LOCKED = ErrorCodes.RESOURCE_LOCKED;
 
 	/**
 	 * 工具参数里的目标资源不成立（B23L1 批③a / 裁决 5；设计稿 F2 {@code ToolTargetResolver}）：
@@ -107,10 +108,10 @@ public enum ToolOutcome {
 	 * <p>与 {@link #CODE_RESOURCE_LOCKED} 的分工：两者都挂在 {@code blocked} 下、都不抛异常不断流，
 	 * 但一个"等会儿再来就好"（可重试），一个"换目标再来"（不可重试）。
 	 */
-	public static final String CODE_TARGET_INVALID = "TARGET_INVALID";
+	public static final String CODE_TARGET_INVALID = ErrorCodes.TARGET_INVALID;
 
 	/** "改数据后可重试"的失败码（预检查未通过/过期/预检不通过/预检暂不可用；其余失败码一律不可重试）。 */
-	private static final Set<String> RETRYABLE_FAILURE_CODES = Set.of("PRECHECK_NOT_PASSED", "PRECHECK_STALE",
+	private static final Set<String> RETRYABLE_FAILURE_CODES = Set.of(ErrorCodes.PRECHECK_NOT_PASSED, ErrorCodes.PRECHECK_STALE,
 			CODE_PRECHECK_FAILED, CODE_PRECHECK_UNAVAILABLE);
 
 	private final String wire;

@@ -1,6 +1,9 @@
 package com.example.configmgr.definition.service;
 
+import com.example.configmgr.common.CodedIllegalArgumentException;
+
 import com.example.configmgr.common.ConflictException;
+import com.example.configmgr.common.ErrorCodes;
 import com.example.configmgr.common.ResourceNotFoundException;
 import com.example.configmgr.data.repo.ConfigDataRowRepository;
 import com.example.configmgr.data.repo.ConfigStagingRowRepository;
@@ -58,7 +61,7 @@ public class DefinitionService {
     public ConfigDefinition save(ConfigDefinition definition) {
         // 编号为空时交给唯一约束/后续校验，这里只拦"已存在的编码"
         if (definition.getCode() != null && definitionRepository.findByCode(definition.getCode()).isPresent()) {
-            throw new ConflictException("DEFINITION_CODE_DUPLICATE",
+            throw new ConflictException(ErrorCodes.DEFINITION_CODE_DUPLICATE,
                     "配置定义编码 " + definition.getCode() + " 已存在（DEFINITION_CODE_DUPLICATE），"
                             + "请换一个编码，或改用更新接口修改该定义");
         }
@@ -108,7 +111,7 @@ public class DefinitionService {
 
         long publishedRows = dataRowRepository.countByDefCode(code);
         if (publishedRows > 0) {
-            throw new ConflictException("DEFINITION_HAS_DATA",
+            throw new ConflictException(ErrorCodes.DEFINITION_HAS_DATA,
                     "配置定义 " + code + " 存在 " + publishedRows + " 行已发布数据，禁止删除（不级联删除业务数据）");
         }
 
@@ -117,13 +120,13 @@ public class DefinitionService {
             String refs = referencing.stream()
                     .map(f -> f.getDefCode() + "." + f.getCode())
                     .distinct().sorted().reduce((a, b) -> a + ", " + b).orElse("");
-            throw new ConflictException("DEFINITION_REFERENCED",
+            throw new ConflictException(ErrorCodes.DEFINITION_REFERENCED,
                     "配置定义 " + code + " 被他定义引用（" + refs + "），请先解除引用再删除");
         }
 
         long activeTaskRefs = taskItemRepository.countByDefCodeAndTaskStatus(code, Task.TaskStatus.ACTIVE);
         if (activeTaskRefs > 0) {
-            throw new ConflictException("DEFINITION_IN_ACTIVE_TASK",
+            throw new ConflictException(ErrorCodes.DEFINITION_IN_ACTIVE_TASK,
                     "配置定义 " + code + " 被 " + activeTaskRefs + " 个进行中任务选中，请先结束或删除这些任务");
         }
 
@@ -226,21 +229,21 @@ public class DefinitionService {
         java.util.Set<String> codes = new java.util.HashSet<>();
         for (ConfigField f : fields) {
             if (f.getCode() == null || f.getCode().isBlank()) {
-                throw new IllegalArgumentException("字段编码不能为空");
+                throw new CodedIllegalArgumentException(ErrorCodes.DEFINITION_FIELD_CODE_EMPTY, "字段编码不能为空");
             }
             if (!f.getCode().matches("[A-Za-z][A-Za-z0-9_]*")) {
-                throw new IllegalArgumentException("字段编码必须以字母开头，只允许字母、数字、下划线: " + f.getCode());
+                throw new CodedIllegalArgumentException(ErrorCodes.DEFINITION_FIELD_CODE_INVALID, "字段编码必须以字母开头，只允许字母、数字、下划线: " + f.getCode());
             }
             if (!codes.add(f.getCode())) {
-                throw new IllegalArgumentException("字段编码重复: " + f.getCode());
+                throw new CodedIllegalArgumentException(ErrorCodes.DEFINITION_FIELD_CODE_DUPLICATE, "字段编码重复: " + f.getCode());
             }
             if (f.getFieldType() == ConfigField.FieldType.REFERENCE
                     && (f.getRefDefCode() == null || f.getRefFieldCode() == null)) {
-                throw new IllegalArgumentException("REFERENCE 字段 [" + f.getCode() + "] 必须指定引用配置与引用字段");
+                throw new CodedIllegalArgumentException(ErrorCodes.DEFINITION_FIELD_REFERENCE_INCOMPLETE, "REFERENCE 字段 [" + f.getCode() + "] 必须指定引用配置与引用字段");
             }
         }
         if (fields.stream().noneMatch(ConfigField::isKey)) {
-            throw new IllegalArgumentException("至少需要一个主键字段");
+            throw new CodedIllegalArgumentException(ErrorCodes.DEFINITION_PRIMARY_KEY_REQUIRED, "至少需要一个主键字段");
         }
     }
 

@@ -1,5 +1,8 @@
 package com.example.configmgr.ai.run;
 
+import com.example.configmgr.common.CodedIllegalArgumentException;
+import com.example.configmgr.common.ErrorCodes;
+
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.ai.tool.ToolResultEnvelope;
@@ -735,7 +738,7 @@ public class SseChatEmitter {
 		// M4：ok 保留在签名里（不改调用面），但契约上它只能是 outcome 的派生值。
 		// 传错即 fail-fast —— 否则"帧 ok 与信封 outcome 互相矛盾"会被前端按任一字段误读。
 		if (ok != outcome.ok()) {
-			throw new IllegalArgumentException("tool_result 帧的 ok 与 outcome 推导不一致：ok=" + ok
+			throw new CodedIllegalArgumentException(ErrorCodes.TOOL_RESULT_OUTCOME_MISMATCH, "tool_result 帧的 ok 与 outcome 推导不一致：ok=" + ok
 					+ "，outcome=" + outcome.wire() + "（toolCallId=" + pending.getToolCallId() + "）");
 		}
 		String code = pending.effectiveCode();

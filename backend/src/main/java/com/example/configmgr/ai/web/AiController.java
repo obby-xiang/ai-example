@@ -1,5 +1,7 @@
 package com.example.configmgr.ai.web;
 
+import com.example.configmgr.common.ErrorCodes;
+
 import com.example.configmgr.ai.config.AiAvailability;
 import com.example.configmgr.ai.config.AiConfigService;
 import com.example.configmgr.ai.config.AiProperties;
@@ -240,7 +242,7 @@ public class AiController {
 		// 必填校验在探活之前（参数错就该报 400，不该被 Redis 状态遮住）；其余三道闸依赖 Redis 计数，
 		// 故排在探活之后 —— 由此产生的既定顺序是：Redis 不可用时，超长请求会先撞 503 而不是 400。
 		if (request == null || !StringUtils.hasText(request.sessionId()) || !StringUtils.hasText(request.message())) {
-			return json(HttpStatus.BAD_REQUEST, Map.of("code", "BAD_REQUEST", "message", "sessionId 与 message 均为必填"));
+			return json(HttpStatus.BAD_REQUEST, Map.of("code", ErrorCodes.BAD_REQUEST, "message", "sessionId 与 message 均为必填"));
 		}
 		if (!this.redisAvailability.isAvailable()) {
 			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
@@ -268,7 +270,7 @@ public class AiController {
 		// 否则会带着一条空 user 消息进模型与记忆窗口。
 		if (!StringUtils.hasText(sanitized.text())) {
 			return json(HttpStatus.BAD_REQUEST,
-					Map.of("code", "BAD_REQUEST", "message", "message 归一化后为空（原文仅含不可见字符），请重新输入"));
+					Map.of("code", ErrorCodes.BAD_REQUEST, "message", "message 归一化后为空（原文仅含不可见字符），请重新输入"));
 		}
 		// 批① 闸门 3：长度（§5.1 #1 / 数据最小化 R5）。超限**拒绝不截断**：截断会让模型基于半句话下结论。
 		int maxChars = this.properties.getInput().getMaxChars();
@@ -309,19 +311,19 @@ public class AiController {
 		// 显式模型不可用 ⇒ 400 MODEL_NOT_FOUND（不静默回落默认模型：用户点了 A 却跑 B 比报错更糟）。
 		if (this.aiConfigService != null && StringUtils.hasText(effective.modelId())
 				&& this.aiConfigService.resolveChatTarget(effective.modelId()).isEmpty()) {
-			return json(HttpStatus.BAD_REQUEST, Map.of("code", "MODEL_NOT_FOUND",
+			return json(HttpStatus.BAD_REQUEST, Map.of("code", ErrorCodes.MODEL_NOT_FOUND,
 					"message", "该模型当前不可用（未在可用端点的模型清单里，或端点已停用/密钥不可用）：" + effective.modelId()));
 		}
 		String paramsRejection = validateParams(effective.params());
 		if (paramsRejection != null) {
-			return json(HttpStatus.BAD_REQUEST, Map.of("code", "INVALID_PARAM", "message", paramsRejection));
+			return json(HttpStatus.BAD_REQUEST, Map.of("code", ErrorCodes.INVALID_PARAM, "message", paramsRejection));
 		}
 		String runId = UUID.randomUUID().toString();
 		SessionGate.Busy busy = this.sessionGate.acquire(sessionId, runId);
 		if (busy != null) {
 			// ADR-5：409 必须携带进行中轮的 runId，前端据此改走 /api/ai/events/{runId}
 			Map<String, Object> body = new LinkedHashMap<>();
-			body.put("code", "SESSION_BUSY");
+			body.put("code", ErrorCodes.SESSION_BUSY);
 			body.put("message", "该会话已有一轮对话在进行中，请先处理或重挂该轮");
 			body.put("sessionId", sessionId);
 			body.put("runId", busy.runId());
@@ -340,7 +342,7 @@ public class AiController {
 				}
 				catch (Exception ex) {
 					log.error("AI 轮次未捕获异常 sessionId={} runId={}", sessionId, runId, ex);
-					out.error("AI_RUN_FAILED", String.valueOf(ex.getMessage()));
+					out.error(ErrorCodes.AI_RUN_FAILED, String.valueOf(ex.getMessage()));
 				}
 				finally {
 					this.sessionGate.release(sessionId, runId);
@@ -395,7 +397,7 @@ public class AiController {
 	public ResponseEntity<?> confirm(@RequestBody(required = false) ConfirmRequest request) {
 		if (request == null || !StringUtils.hasText(request.runId())
 				|| !StringUtils.hasText(request.toolCallId())) {
-			return json(HttpStatus.BAD_REQUEST, Map.of("code", "BAD_REQUEST", "message", "runId 与 toolCallId 均为必填"));
+			return json(HttpStatus.BAD_REQUEST, Map.of("code", ErrorCodes.BAD_REQUEST, "message", "runId 与 toolCallId 均为必填"));
 		}
 		// 防护批③ B2-6：{@code reason} 长度闸（与 {@code ai_feedback.reason} 同尺 1024）。
 		// 它是人工路径（误伤面小），但<b>会原样回填模型</b> —— 不闸就等于给了一条无上限的注入通道。
@@ -437,7 +439,7 @@ public class AiController {
 	public ResponseEntity<?> frontendToolResult(@RequestBody(required = false) FrontendToolResultRequest request) {
 		if (request == null || !StringUtils.hasText(request.runId())
 				|| !StringUtils.hasText(request.toolCallId())) {
-			return json(HttpStatus.BAD_REQUEST, Map.of("code", "BAD_REQUEST", "message", "runId 与 toolCallId 均为必填"));
+			return json(HttpStatus.BAD_REQUEST, Map.of("code", ErrorCodes.BAD_REQUEST, "message", "runId 与 toolCallId 均为必填"));
 		}
 		// B23L1 批②b：读侧续期（同 /confirm 的口径：先续命再落回灌）
 		this.runStore.touchActiveRun(request.runId());
@@ -511,7 +513,7 @@ public class AiController {
 			@RequestParam(required = false) Long lastSeq) {
 		RunSnapshot snapshot = this.runStore.get(runId);
 		if (snapshot == null) {
-			return json(HttpStatus.NOT_FOUND, Map.of("code", "UNKNOWN_RUN", "runId", runId));
+			return json(HttpStatus.NOT_FOUND, Map.of("code", ErrorCodes.UNKNOWN_RUN, "runId", runId));
 		}
 		// B23L1 批②b：读侧续期（重挂是最强的"有人还在看这张卡"信号；终态/缺失不续期）
 		this.runStore.touchActiveRun(snapshot);
@@ -658,7 +660,7 @@ public class AiController {
 	@GetMapping("/runs/current")
 	public ResponseEntity<?> runsCurrent(@RequestParam(required = false) String sessionId) {
 		if (!StringUtils.hasText(sessionId)) {
-			return json(HttpStatus.BAD_REQUEST, Map.of("code", "BAD_REQUEST", "message", "sessionId 为必填"));
+			return json(HttpStatus.BAD_REQUEST, Map.of("code", ErrorCodes.BAD_REQUEST, "message", "sessionId 为必填"));
 		}
 		String runId = this.runStore.sessionCurrentRunId(sessionId);
 		RunSnapshot snapshot = runId == null ? null : this.runStore.get(runId);
@@ -806,7 +808,7 @@ public class AiController {
 	 */
 	private static Map<String, Object> messageTooLong(int length, int limit) {
 		Map<String, Object> body = new LinkedHashMap<>();
-		body.put("code", "MESSAGE_TOO_LONG");
+		body.put("code", ErrorCodes.MESSAGE_TOO_LONG);
 		body.put("message", "消息长度 " + length + " 字符，超过单条上限 " + limit + " 字符；请拆分或缩短后重发（本接口不做截断）");
 		body.put("length", length);
 		body.put("limit", limit);
@@ -832,7 +834,7 @@ public class AiController {
 	private static ResponseEntity<Map<String, Object>> rateLimited(AiRateLimiter.Decision decision) {
 		String scopeName = AiRateLimiter.SCOPE_SESSION.equals(decision.scope()) ? "该会话" : "当前来源";
 		Map<String, Object> body = new LinkedHashMap<>();
-		body.put("code", "RATE_LIMITED");
+		body.put("code", ErrorCodes.RATE_LIMITED);
 		body.put("message", scopeName + "对话请求过于频繁：每 " + decision.limit() + " 次/分钟（"
 				+ decision.scope() + " 维度）已达上限，请约 " + decision.retryAfterSeconds() + " 秒后重试");
 		body.put("scope", decision.scope());
@@ -984,7 +986,7 @@ public class AiController {
 	@DeleteMapping("/history/{sessionId}")
 	public ResponseEntity<Map<String, Object>> deleteHistory(@PathVariable String sessionId) {
 		if (!StringUtils.hasText(sessionId)) {
-			return json(HttpStatus.BAD_REQUEST, Map.of("code", "BAD_REQUEST", "message", "sessionId 必填"));
+			return json(HttpStatus.BAD_REQUEST, Map.of("code", ErrorCodes.BAD_REQUEST, "message", "sessionId 必填"));
 		}
 		if (!this.redisAvailability.isAvailable()) {
 			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
@@ -1038,13 +1040,13 @@ public class AiController {
 	public ResponseEntity<Map<String, Object>> context(@PathVariable String sessionId,
 			@RequestParam(name = "ledger", required = false) Boolean ledger) {
 		if (!StringUtils.hasText(sessionId)) {
-			return json(HttpStatus.BAD_REQUEST, Map.of("code", "BAD_REQUEST", "message", "sessionId 必填"));
+			return json(HttpStatus.BAD_REQUEST, Map.of("code", ErrorCodes.BAD_REQUEST, "message", "sessionId 必填"));
 		}
 		if (!this.redisAvailability.isAvailable()) {
 			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
 		}
 		if (this.contextBreakdownService == null) {
-			return json(HttpStatus.SERVICE_UNAVAILABLE, Map.of("code", "AI_CONTEXT_UNAVAILABLE",
+			return json(HttpStatus.SERVICE_UNAVAILABLE, Map.of("code", ErrorCodes.AI_CONTEXT_UNAVAILABLE,
 					"message", "上下文计量未装配（ContextBreakdownService 缺失）"));
 		}
 		List<Message> memory;
@@ -1203,7 +1205,7 @@ public class AiController {
 
 	private Map<String, Object> poolSaturated(String runId) {
 		Map<String, Object> body = new LinkedHashMap<>();
-		body.put("code", "SUSPEND_POOL_SATURATED");
+		body.put("code", ErrorCodes.SUSPEND_POOL_SATURATED);
 		body.put("message", "挂起专用线程池已饱和（池容量 = app.ai.suspend.pool-size），请稍后重试");
 		body.put("runId", runId);
 		body.put("poolSize", this.properties.getSuspend().getPoolSize());
@@ -1212,7 +1214,7 @@ public class AiController {
 
 	private Map<String, Object> unknownToolCall(String runId, String toolCallId) {
 		Map<String, Object> body = new LinkedHashMap<>();
-		body.put("code", "UNKNOWN_TOOL_CALL");
+		body.put("code", ErrorCodes.UNKNOWN_TOOL_CALL);
 		body.put("message", "未知或已过期的 runId/toolCallId");
 		body.put("runId", runId);
 		body.put("toolCallId", toolCallId);
@@ -1222,7 +1224,7 @@ public class AiController {
 
 	private Map<String, Object> duplicateToolCall(String runId, String toolCallId, String status) {
 		Map<String, Object> body = new LinkedHashMap<>();
-		body.put("code", "DUPLICATE_TOOL_CALL_ID");
+		body.put("code", ErrorCodes.DUPLICATE_TOOL_CALL_ID);
 		body.put("message", "该 toolCallId 已有决策或结果，重复提交被拒绝");
 		body.put("runId", runId);
 		body.put("toolCallId", toolCallId);
@@ -1312,7 +1314,7 @@ public class AiController {
 		if (messageId == null || sessionId == null || rating == null
 				|| (rating != 1 && rating != -1 && rating != 0)) {
 			return json(HttpStatus.BAD_REQUEST,
-					Map.of("code", "BAD_REQUEST", "message", "messageId/sessionId 必填，rating ∈ 1/-1/0"));
+					Map.of("code", ErrorCodes.BAD_REQUEST, "message", "messageId/sessionId 必填，rating ∈ 1/-1/0"));
 		}
 		if (rating == 0) {
 			AiFeedback existing = this.aiFeedbackRepository.findByMessageId(messageId);

@@ -10,6 +10,10 @@ public class ApiResponse<T> {
     private String message;
     /** 机器可读错误码（仅错误时出现，如 JOB_ALREADY_FINAL），便于前端与验证按码判定 */
     private String code;
+    /** 文案参数（仅错误且需要参数化时出现；NON_NULL ⇒ 存量响应不新增键） */
+    private java.util.Map<String, Object> args;
+    /** 请求追踪号（问题排查用；NON_NULL ⇒ 存量响应不新增键） */
+    private String traceId;
     private T data;
 
     public static <T> ApiResponse<T> ok(T data) {

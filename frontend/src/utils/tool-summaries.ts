@@ -1,11 +1,16 @@
 /**
- * R-163 T0：工具卡一行摘要的**静态映射表**（决策卡 §三.6）——
- * 工具名 → 中文动宾模板（args 确定性填充，前端静态生成，禁模型写文案）；
- * 失败/未知兜底 = 工具名 + 状态词。全集来源（逐个核名，非凭猜）：
+ * R-163 T0：工具卡一行摘要的**模板表**（决策卡 §三.6）—— 工具名 → 动宾模板
+ * （args 确定性填充，前端静态生成，禁模型写文案）。
+ *
+ * i18n（S2 收口）：模板不再写死在 TS 里，全部落在 `locales/*.json` 的
+ * `tool.<name>.<variant>`；本文件只保留**选哪个变体**的判定（参数有无决定变体）。
+ * zh 值逐字等于迁移前模板（`tool-summary-parity.spec.ts` 快照钉死）。
+ *
+ * 全集来源（逐个核名，非凭猜）：
  * - 后端 @Tool（AiTools.java）：list_config_defs / get_config_def / list_tasks /
  *   get_workspace_state / check_job_status / get_row_count / create_task /
  *   start_export / start_precheck / start_import / start_publish / download_export_files /
- *   navigate_to / open_export_file_editor / generative_form
+ *   navigate_to / open_export_file_editor / generative_form / 8 个表格工具
  * - 前端工具（utils/frontend-tools.ts 执行器）：navigate_to（别名 open_page / restore_task /
  *   goto_step）、open_export_file_editor、download_export_files、generative_form、
  *   select_definitions（别名 select_defs）、set_condition（别名 set_conditions）、
@@ -13,25 +18,44 @@
  *   refresh_defs / refresh_data / refresh_tasks
  */
 
+import i18n from '@/locales'
 import type { ToolPart, ToolRunStatus } from '@/types/ai'
 
-/** 状态词表（10 态，与 AiPanel toolStatusLabel 同口径的简短版，供兜底行）。
- *  问题1 偏差修正批项 3：导出给面板的摘要去重判据用 —— 无映射工具的兜底摘要按前缀剥掉工具名后
- *  只剩状态词，而状态词已由同屏的状态胶囊承担 ⇒ 摘要位不再重复渲一次。 */
-export const TOOL_SUMMARY_STATUS_WORDS: Record<ToolRunStatus, string> = {
-  pending: '待确认',
-  running: '调用中',
-  succeeded: '已完成',
-  failed: '失败',
-  rejected: '已拒绝',
-  blocked: '超出范围',
-  expired: '已失效',
-  cancelled: '已取消',
-  unknown: '结局未知',
-  skipped: '已跳过'
+/** 状态词全集（10 态）；兜底摘要与右状态标签共用同一份译文。 */
+export const TOOL_STATUSES: readonly ToolRunStatus[] = [
+  'pending',
+  'running',
+  'succeeded',
+  'failed',
+  'rejected',
+  'blocked',
+  'expired',
+  'cancelled',
+  'unknown',
+  'skipped'
+]
+
+/** 当前语言下的状态词。 */
+export function toolStatusWord(status: ToolRunStatus): string {
+  return translate(`tool.status.${status}`)
+}
+
+/** 当前语言下的状态词集合（摘要位去重判据用；随语言变化 ⇒ 调用点须实时取）。 */
+export function toolStatusWords(): Set<string> {
+  return new Set(TOOL_STATUSES.map((status) => toolStatusWord(status)))
 }
 
 type ToolArgs = Record<string, unknown>
+
+function translate(key: string, params?: Record<string, unknown>): string {
+  return params ? i18n.global.t(key, params) : i18n.global.t(key)
+}
+
+/** 取译文；缺键（vue-i18n 回落为 key 本身）⇒ 返回 null，由调用方决定兜底。 */
+function optional(key: string, params?: Record<string, unknown>): string | null {
+  const value = translate(key, params)
+  return value === key ? null : value
+}
 
 function str(args: ToolArgs, key: string): string {
   const value = args[key]
@@ -64,135 +88,150 @@ function toolArgsOf(part: ToolPart): ToolArgs {
  * 工具名 → 摘要模板。返回 null = 无静态映射（走兜底）。
  * 每个模板一行自然语言，参数缺失时省略该片段（不臆造）。
  *
- * 问题1 偏差修正批项 3（工具卡头重名）：卡头 mono 槽渲**工具中文名**（`TOOL_LABELS`），而模板的
+ * 问题1 偏差修正批项 3（工具卡头重名）：卡头 mono 槽渲**工具中文名**（`tool.<name>.title`），而模板的
  * 首词常与它同义 ⇒ 卡头读作「启动导出作业　启动导出作业（任务 #12）」两段同义相邻。
  * 口径统一为：**模板以工具中文名打头**，接在名字后的是「参数信息」；渲染侧
  * （`AiPanel.toolSummaryOrNull`）按前缀剥掉名字 —— 剥后为空则不渲摘要位（只留工具名一行）。
- * 本文件里打头的措辞因此逐条改写成自己标签（如 `列出任务` / `读取工作区状态` / `预估数据行数`），
- * 名字不再由模板重复承担（demo 样张里 `.tname` 渲英文工具名、`.tsum` 渲参数摘要，同一分工）。
  */
 function summaryFor(name: string, args: ToolArgs): string | null {
   const taskId = num(args, 'taskId')
-  const taskSuffix = taskId ? `（任务 #${taskId}）` : ''
+  const withTask = (): string | null => (taskId ? optional(`tool.${name}.withTask`, { taskId }) : null)
   switch (name) {
     case 'list_config_defs': {
       const level = str(args, 'level')
-      return level ? `列出配置定义（${level} 层）` : '列出配置定义'
+      return level ? optional('tool.list_config_defs.withLevel', { level }) : optional('tool.list_config_defs.summary')
     }
     case 'get_config_def': {
       const code = str(args, 'code')
-      return code ? `读取配置定义 ${code} 的完整字段` : '读取配置定义'
+      return code ? optional('tool.get_config_def.withCode', { code }) : optional('tool.get_config_def.summary')
     }
     case 'list_tasks':
-      return '列出任务'
+      return optional('tool.list_tasks.summary')
     case 'get_workspace_state':
-      return '读取工作区状态'
+      return optional('tool.get_workspace_state.summary')
     case 'check_job_status': {
       const jobId = num(args, 'jobId')
-      return jobId ? `查询作业状态（作业 #${jobId}）` : '查询作业状态'
+      return jobId ? optional('tool.check_job_status.withJob', { jobId }) : optional('tool.check_job_status.summary')
     }
     case 'get_row_count': {
       const defCode = str(args, 'defCode')
       const scope = str(args, 'scopeType')
-      return `预估数据行数${defCode ? `（${defCode}${scope ? ` · ${scope}` : ''}）` : scope ? `（${scope}）` : ''}`
+      if (defCode && scope) return optional('tool.get_row_count.withDefScope', { def: defCode, scope })
+      if (defCode) return optional('tool.get_row_count.withDef', { def: defCode })
+      if (scope) return optional('tool.get_row_count.withScope', { scope })
+      return optional('tool.get_row_count.summary')
     }
     case 'create_task': {
       const label = taskTypeLabel(args)
       const title = str(args, 'title')
-      return `创建${label || ''}任务${title ? `「${title}」` : ''}`
+      return title
+        ? optional('tool.create_task.withTitle', { type: label, title })
+        : optional('tool.create_task.summary', { type: label })
     }
     case 'start_export':
-      return `启动导出作业${taskSuffix}`
+      return withTask() ?? optional('tool.start_export.summary')
     case 'start_precheck':
-      return `启动预检查作业${taskSuffix}`
+      return withTask() ?? optional('tool.start_precheck.summary')
     case 'start_import':
-      return `启动导入作业${taskSuffix}`
+      return withTask() ?? optional('tool.start_import.summary')
     case 'start_publish':
-      return `启动发布作业${taskSuffix}`
+      return withTask() ?? optional('tool.start_publish.summary')
     case 'navigate_to':
     case 'open_page': {
       const page = str(args, 'page')
-      return page ? `跳转页面（${page}）` : '跳转页面'
+      return page ? optional(`tool.${name}.withPage`, { page }) : optional(`tool.${name}.summary`)
     }
     case 'restore_task':
-      return taskId ? `恢复任务 #${taskId}` : '恢复任务'
+      return taskId ? optional('tool.restore_task.withTask', { taskId }) : optional('tool.restore_task.summary')
     case 'goto_step': {
       const step = str(args, 'step')
-      return step ? `跳转到步骤 ${step}` : '跳转向导步骤'
+      return step ? optional('tool.goto_step.withStep', { step }) : optional('tool.goto_step.summary')
     }
     case 'open_export_file_editor':
-      return '打开导出文件在线编辑器'
+      return optional('tool.open_export_file_editor.summary')
     case 'download_export_files': {
       const codes = args['defCodes']
       const count = Array.isArray(codes) ? codes.length : 0
-      return `下载导出文件${count > 0 ? `（${count} 个配置项）` : ''}`
+      return count > 0
+        ? optional('tool.download_export_files.withCount', { count })
+        : optional('tool.download_export_files.summary')
     }
     case 'download': {
       const filename = str(args, 'filename')
-      return filename ? `下载文件 ${filename}` : '下载文件'
+      return filename ? optional('tool.download.withName', { filename }) : optional('tool.download.summary')
     }
     case 'generative_form':
-      return '生成式表单（待填写）'
+      return optional('tool.generative_form.summary')
     case 'select_definitions':
     case 'select_defs': {
       const codes = args['codes'] ?? args['defCodes']
       const count = Array.isArray(codes) ? codes.length : 0
-      return `选择配置项${count > 0 ? `（${count} 项）` : ''}`
+      return count > 0 ? optional(`tool.${name}.withCount`, { count }) : optional(`tool.${name}.summary`)
     }
     case 'set_condition':
     case 'set_conditions':
-      return '设置查询条件'
+      return optional(`tool.${name}.summary`)
     case 'set_import_mode': {
       const mode = str(args, 'mode')
-      return mode ? `设置导入方式（${mode}）` : '设置导入方式'
+      return mode ? optional('tool.set_import_mode.withMode', { mode }) : optional('tool.set_import_mode.summary')
     }
     case 'confirm_step': {
       const step = str(args, 'step')
-      return step ? `确认步骤 ${step}` : '确认当前步骤'
+      return step ? optional('tool.confirm_step.withStep', { step }) : optional('tool.confirm_step.summary')
     }
     case 'run_job':
-      return taskId ? `启动作业（任务 #${taskId}）` : '启动作业'
+      return withTask() ?? optional('tool.run_job.summary')
     case 'cancel_job': {
       const jobId = num(args, 'jobId')
-      return jobId ? `取消作业 #${jobId}` : '取消作业'
+      return jobId ? optional('tool.cancel_job.withJob', { jobId }) : optional('tool.cancel_job.summary')
     }
     case 'refresh_defs':
-      return '刷新配置定义列表'
+      return optional('tool.refresh_defs.summary')
     case 'refresh_data':
-      return '刷新配置数据'
+      return optional('tool.refresh_data.summary')
     case 'refresh_tasks':
-      return '刷新任务列表'
+      return optional('tool.refresh_tasks.summary')
     case 'read_sheet_summary': {
       const defCode = str(args, 'defCode')
       const scope = str(args, 'scope')
-      return `读取表格摘要${defCode ? `（${defCode}${scope ? ` · ${scope}` : ''}）` : ''}`
+      if (defCode && scope) return optional('tool.read_sheet_summary.withDefScope', { def: defCode, scope })
+      if (defCode) return optional('tool.read_sheet_summary.withDef', { def: defCode })
+      if (scope) return optional('tool.read_sheet_summary.withScope', { scope })
+      return optional('tool.read_sheet_summary.summary')
     }
     case 'aggregate_sheet': {
       const groupBy = str(args, 'groupBy')
-      return `聚合表格${groupBy ? `（按 ${groupBy} 分组）` : ''}`
+      return groupBy
+        ? optional('tool.aggregate_sheet.withGroup', { groupBy })
+        : optional('tool.aggregate_sheet.summary')
     }
     case 'inspect_columns':
-      return '诊断列映射'
+      return optional('tool.inspect_columns.summary')
     case 'review_cells':
-      return '本地校验摘要'
+      return optional('tool.review_cells.summary')
     case 'normalize_column': {
       const rules = args['rules']
       const count = Array.isArray(rules) ? rules.length : 0
       const commit = args['commit'] === true
-      return `列归一化${count > 0 ? `（${count} 条规则）` : ''}${commit ? ' · 待确认' : ' · 只出建议'}`
+      if (count > 0) {
+        return optional(commit ? 'tool.normalize_column.withRulesPending' : 'tool.normalize_column.withRulesAdvisory', {
+          count
+        })
+      }
+      return optional(commit ? 'tool.normalize_column.pending' : 'tool.normalize_column.advisory')
     }
     case 'replace_values': {
       const search = str(args, 'search')
       const replace = str(args, 'replace')
-      return `查找替换${search ? `「${search}」→「${replace}」` : ''}`
+      return search ? optional('tool.replace_values.withSearch', { search, replace }) : optional('tool.replace_values.summary')
     }
     case 'update_rows': {
       const set = args['set']
       const count = Array.isArray(set) ? set.length : 0
-      return `条件更新行${count > 0 ? `（${count} 列）` : ''}`
+      return count > 0 ? optional('tool.update_rows.withCols', { count }) : optional('tool.update_rows.summary')
     }
     case 'undo_last_sheet_edit':
-      return '撤销 AI 表格修改'
+      return optional('tool.undo_last_sheet_edit.summary')
     default:
       return null
   }
@@ -208,5 +247,5 @@ export function toolSummary(part: ToolPart): string {
   if (mapped) {
     return mapped
   }
-  return `${part.name} · ${TOOL_SUMMARY_STATUS_WORDS[part.status] ?? part.status}`
+  return translate('tool.fallback', { name: part.name, status: toolStatusWord(part.status) })
 }

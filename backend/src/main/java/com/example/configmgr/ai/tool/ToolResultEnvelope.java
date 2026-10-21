@@ -1,5 +1,9 @@
 package com.example.configmgr.ai.tool;
 
+import com.example.configmgr.common.CodedIllegalArgumentException;
+import com.example.configmgr.common.CodedIllegalStateException;
+import com.example.configmgr.common.ErrorCodes;
+
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -109,7 +113,7 @@ public record ToolResultEnvelope(boolean ok, String code, String outcome, boolea
 			return JSON.writeValueAsString(this);
 		}
 		catch (JsonProcessingException ex) {
-			throw new IllegalStateException("工具结果信封序列化失败：" + this.message, ex);
+			throw new CodedIllegalStateException(ErrorCodes.TOOL_ENVELOPE_SERIALIZE_FAILED, "工具结果信封序列化失败：" + this.message, ex);
 		}
 	}
 
@@ -166,7 +170,7 @@ public record ToolResultEnvelope(boolean ok, String code, String outcome, boolea
 			return JSON.readValue(unwrapModelJson(json), ToolResultEnvelope.class);
 		}
 		catch (JsonProcessingException ex) {
-			throw new IllegalArgumentException("工具结果信封解析失败：" + json, ex);
+			throw new CodedIllegalArgumentException(ErrorCodes.TOOL_ENVELOPE_PARSE_FAILED, "工具结果信封解析失败：" + json, ex);
 		}
 	}
 

@@ -48,7 +48,7 @@ export default defineConfig(({ mode }) => {
       rollupOptions: {
         output: {
           manualChunks: {
-            vendor: ['vue', 'vue-router', 'pinia', 'axios', 'dayjs'],
+            vendor: ['vue', 'vue-router', 'pinia', 'axios', 'dayjs', 'vue-i18n'],
             element: ['element-plus', '@element-plus/icons-vue'],
             spreadjs: ['@grapecity/spread-sheets', '@grapecity/spread-excelio']
           }

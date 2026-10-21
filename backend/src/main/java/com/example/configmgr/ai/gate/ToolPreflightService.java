@@ -1,5 +1,9 @@
 package com.example.configmgr.ai.gate;
 
+import com.example.configmgr.common.CodedIllegalArgumentException;
+import com.example.configmgr.common.CodedIllegalStateException;
+import com.example.configmgr.common.ErrorCodes;
+
 import com.example.configmgr.common.ConflictException;
 import com.example.configmgr.common.ResourceNotFoundException;
 import com.example.configmgr.data.repo.ConfigStagingRowRepository;
@@ -261,7 +265,7 @@ public class ToolPreflightService {
 			return hex.toString();
 		}
 		catch (NoSuchAlgorithmException ex) {
-			throw new IllegalStateException("SHA-256 不可用，无法生成预检指纹", ex);
+			throw new CodedIllegalStateException(ErrorCodes.SHA256_UNAVAILABLE, "SHA-256 不可用，无法生成预检指纹", ex);
 		}
 	}
 
@@ -307,7 +311,7 @@ public class ToolPreflightService {
 			case TOOL_PRECHECK -> Job.JobType.PRECHECK;
 			case TOOL_IMPORT -> Job.JobType.IMPORT;
 			case TOOL_PUBLISH -> Job.JobType.PUBLISH;
-			default -> throw new IllegalArgumentException("工具 " + toolName + " 不在预检范围内（见 supports）");
+			default -> throw new CodedIllegalArgumentException(ErrorCodes.TOOL_NOT_PREFLIGHTABLE, "工具 " + toolName + " 不在预检范围内（见 supports）");
 		};
 	}
 

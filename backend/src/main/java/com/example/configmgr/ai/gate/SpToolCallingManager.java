@@ -1,5 +1,7 @@
 package com.example.configmgr.ai.gate;
 
+import com.example.configmgr.common.ErrorCodes;
+
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.PendingToolCall;
@@ -102,7 +104,7 @@ import java.util.Set;
 public class SpToolCallingManager implements ToolCallingManager {
 
 	/** 防线③拦截时回填模型的结果文本前缀（结构化错误码，测试与排障据此断言/检索）。 */
-	public static final String SCOPE_VIOLATION_CODE = "SCOPE_NOT_DISCLOSED";
+	public static final String SCOPE_VIOLATION_CODE = ErrorCodes.SCOPE_NOT_DISCLOSED;
 
 	private final ToolCallingManager delegate;
 

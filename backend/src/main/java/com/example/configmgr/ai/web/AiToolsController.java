@@ -64,7 +64,14 @@ public class AiToolsController {
             ToolMeta meta = toolRegistry.getMeta(name);
             Map<String, Object> item = new LinkedHashMap<>();
             item.put("name", name);
-            item.put("displayName", meta == null ? callback.getToolDefinition().description() : meta.getDisplayName());
+            // E9：展示名不再取 description（改模型文案会连带改 UI）；缺省 = 工具名，
+            // 外置定义（YAML title）在时用 title。titleKey 是前端的权威取值。
+            item.put("displayName", meta == null || meta.getDisplayName() == null ? name : meta.getDisplayName());
+            item.put("titleKey", meta == null ? "tool." + name + ".title" : meta.getTitleKey());
+            if (meta != null && meta.getTitle() != null) {
+                item.put("title", meta.getTitle());
+            }
+            item.put("lang", meta == null || meta.getLang() == null ? "zh" : meta.getLang());
             item.put("riskLevel", toolRegistry.riskOf(name).name());
             item.put("channel", toolRegistry.channelOf(name).name());
             item.put("scopePatterns", meta == null ? List.of("*") : List.of(meta.getScopePatterns()));
@@ -79,6 +86,7 @@ public class AiToolsController {
         body.put("taskId", ctx.getTaskId());
         body.put("count", names.size());
         body.put("registeredCount", toolRegistry.registeredCount());
+        body.put("definitionsVersion", toolRegistry.snapshotVersion());
         body.put("toolNames", names);
         body.put("tools", tools);
         return ApiResponse.ok(body);

@@ -1,5 +1,8 @@
 package com.example.configmgr.ai.context;
 
+import com.example.configmgr.common.CodedIllegalStateException;
+import com.example.configmgr.common.ErrorCodes;
+
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.AiProviderRegistry;
 import com.example.configmgr.ai.config.ProviderRuntime;
@@ -61,14 +64,14 @@ public final class ContextSummaryClient implements RollingSummarizer.Summarizer 
 		return new ContextSummaryClient(properties, (prompt, model) -> {
 			AiProviderRegistry registry = registryProvider.getIfAvailable();
 			if (registry == null) {
-				throw new IllegalStateException("摘要模型不可用：provider 注册表未装配");
+				throw new CodedIllegalStateException(ErrorCodes.AI_SUMMARY_UNAVAILABLE, "摘要模型不可用：provider 注册表未装配");
 			}
 			ProviderRuntime runtime = registry.current();
 			String modelId = model != null ? model : runtime.modelId();
 			OpenAiChatOptions options = OpenAiChatOptions.builder().model(modelId).temperature(0.2).build();
 			ChatResponse response = runtime.chatModel().call(new Prompt(List.of(new UserMessage(prompt)), options));
 			if (response == null || response.getResult() == null || response.getResult().getOutput() == null) {
-				throw new IllegalStateException("摘要模型返回空响应");
+				throw new CodedIllegalStateException(ErrorCodes.AI_SUMMARY_UNAVAILABLE, "摘要模型返回空响应");
 			}
 			return response.getResult().getOutput().getText();
 		});
@@ -85,19 +88,19 @@ public final class ContextSummaryClient implements RollingSummarizer.Summarizer 
 		}
 		catch (TimeoutException ex) {
 			future.cancel(true);
-			throw new IllegalStateException("摘要请求超时（summary-timeout=" + timeout + "）", ex);
+			throw new CodedIllegalStateException(ErrorCodes.AI_SUMMARY_UNAVAILABLE, "摘要请求超时（summary-timeout=" + timeout + "）", ex);
 		}
 		catch (ExecutionException ex) {
 			Throwable cause = ex.getCause();
 			if (cause instanceof Exception failure) {
 				throw failure;
 			}
-			throw new IllegalStateException("摘要请求失败：" + cause, cause);
+			throw new CodedIllegalStateException(ErrorCodes.AI_SUMMARY_UNAVAILABLE, "摘要请求失败：" + cause, cause);
 		}
 		catch (InterruptedException ex) {
 			future.cancel(true);
 			Thread.currentThread().interrupt();
-			throw new IllegalStateException("摘要请求被中断", ex);
+			throw new CodedIllegalStateException(ErrorCodes.AI_SUMMARY_UNAVAILABLE, "摘要请求被中断", ex);
 		}
 	}
 

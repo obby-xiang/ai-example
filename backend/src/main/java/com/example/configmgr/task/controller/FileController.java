@@ -1,5 +1,8 @@
 package com.example.configmgr.task.controller;
 
+import com.example.configmgr.common.CodedIllegalArgumentException;
+import com.example.configmgr.common.ErrorCodes;
+
 import com.example.configmgr.common.ApiResponse;
 import com.example.configmgr.common.ResourceNotFoundException;
 import com.example.configmgr.definition.service.DefinitionService;
@@ -78,7 +81,7 @@ public class FileController {
         }
 
         if (!originalName.toLowerCase().endsWith(".xlsx")) {
-            throw new IllegalArgumentException("仅支持 .xlsx 或 .zip 文件");
+            throw new CodedIllegalArgumentException(ErrorCodes.FILE_TYPE_UNSUPPORTED, "仅支持 .xlsx 或 .zip 文件");
         }
 
         String defCode = matchDefCode(taskId, originalName);

@@ -1,5 +1,8 @@
 package com.example.configmgr.data.service;
 
+import com.example.configmgr.common.CodedIllegalArgumentException;
+import com.example.configmgr.common.ErrorCodes;
+
 import com.example.configmgr.common.ResourceNotFoundException;
 import com.example.configmgr.data.entity.ConfigDataRow;
 import com.example.configmgr.data.entity.ConfigStagingRow;
@@ -85,7 +88,7 @@ public class ConfigDataService {
         try {
             cond = objectMapper.readValue(conditions, QueryCondition.class);
         } catch (Exception e) {
-            throw new IllegalArgumentException("条件 JSON 解析失败: " + e.getMessage());
+            throw new CodedIllegalArgumentException(ErrorCodes.CONDITION_JSON_INVALID, "条件 JSON 解析失败: " + e.getMessage());
         }
         ConditionEvaluator.validate(cond);
         return cond;

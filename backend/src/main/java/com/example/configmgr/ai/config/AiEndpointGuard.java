@@ -1,5 +1,7 @@
 package com.example.configmgr.ai.config;
 
+import com.example.configmgr.common.ErrorCodes;
+
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
@@ -40,10 +42,10 @@ import java.util.Locale;
 public class AiEndpointGuard {
 
     /** URL 不合法（scheme/host/凭据/长度/端口）。 */
-    public static final String CODE_INVALID_BASE_URL = "INVALID_BASE_URL";
+    public static final String CODE_INVALID_BASE_URL = ErrorCodes.INVALID_BASE_URL;
 
     /** 目标落在私网/回环/元数据地址且开关未开。 */
-    public static final String CODE_BLOCKED_PRIVATE_ENDPOINT = "BLOCKED_PRIVATE_ENDPOINT";
+    public static final String CODE_BLOCKED_PRIVATE_ENDPOINT = ErrorCodes.BLOCKED_PRIVATE_ENDPOINT;
 
     /** 与 {@code ai_provider.base_url} 的列宽一致（512）。 */
     private static final int MAX_URL_LENGTH = 512;

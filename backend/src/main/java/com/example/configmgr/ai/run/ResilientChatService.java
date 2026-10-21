@@ -16,6 +16,7 @@ import com.example.configmgr.ai.tool.ContextBuilder;
 import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.ai.tool.ToolRegistry;
 import com.example.configmgr.ai.web.AiChatRequest;
+import com.example.configmgr.common.ErrorCodes;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -200,8 +201,8 @@ public class ResilientChatService {
 	@Autowired(required = false)
 	private SecurityEvents securityEvents;
 
-	/** 输出被安全策略阻断的机器可读码（防护批③ B3-3；前端错误卡按"过滤类"变体呈现）。 */
-	public static final String SENSITIVE_OUTPUT_BLOCKED = "SENSITIVE_OUTPUT_BLOCKED";
+	/** 输出被安全策略阻断的机器可读码（防护批③ B3-3；前端错误卡按"过滤类"变体呈现）。别名到 {@link ErrorCodes}，码值不变。 */
+	public static final String SENSITIVE_OUTPUT_BLOCKED = ErrorCodes.SENSITIVE_OUTPUT_BLOCKED;
 
 	public ResilientChatService(AiProviderRegistry providerRegistry, ChatMemory chatMemory,
 			MessageJsonCodec codec, RunStore store, RunRegistry registry, ToolRegistry toolRegistry,

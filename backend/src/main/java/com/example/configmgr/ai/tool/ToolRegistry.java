@@ -3,6 +3,8 @@ package com.example.configmgr.ai.tool;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.annotation.Tool;
+import org.springframework.ai.tool.definition.DefaultToolDefinition;
+import org.springframework.ai.tool.definition.ToolDefinition;
 import org.springframework.ai.tool.method.MethodToolCallbackProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.ApplicationContext;
@@ -24,9 +26,16 @@ public class ToolRegistry {
     @Autowired
     private ApplicationContext applicationContext;
 
+    /** 工具定义覆盖源（YAML 阶段；缺失 ⇒ 空快照 ⇒ 全部回落注解）。 */
+    @Autowired(required = false)
+    private ToolDefinitionSource toolDefinitionSource;
+
     // name -> (meta, callback)
     private final Map<String, ToolMeta> metaMap = new LinkedHashMap<>();
     private final Map<String, ToolCallback> callbackMap = new LinkedHashMap<>();
+
+    /** 已应用的快照版本（诊断面 / 日志用；空快照 = "annotations"）。 */
+    private String snapshotVersion = "annotations";
 
     @PostConstruct
     public void init() {
@@ -53,8 +62,11 @@ public class ToolRegistry {
 
                 ToolMeta meta = new ToolMeta();
                 meta.setName(name);
-                meta.setDisplayName(toolAnn.description().length() > 20
-                        ? toolAnn.description().substring(0, 20) : toolAnn.description());
+                // E9：展示名不再取 description 前 20 字（改描述会连带改 UI 文案）。
+                // 缺省 = 工具名；YAML 有 title 时由 applyOverrides 覆盖。
+                meta.setDisplayName(name);
+                meta.setTitleKey("tool." + name + ".title");
+                meta.setLang("zh");
                 meta.setScopePatterns(scopeAnn != null ? scopeAnn.value() : new String[]{"*"});
                 meta.setRiskLevel(riskAnn != null ? riskAnn.value() : ToolMeta.RiskLevel.READ);
                 meta.setChannel(channelAnn != null ? channelAnn.value() : ToolMeta.Channel.BACKEND);
@@ -74,7 +86,69 @@ public class ToolRegistry {
                 // Not a tool bean or no @Tool methods
             }
         }
-        log.info("ToolRegistry: registered {} tools", callbackMap.size());
+        applyOverrides();
+        log.info("ToolRegistry: registered {} tools（定义来源={}）", callbackMap.size(), snapshotVersion);
+    }
+
+    /**
+     * 应用外置定义（YAML 阶段 A）：只换送模型的 definition 与 UI 标题，**执行路径不动**。
+     *
+     * <p>
+     * 三条校验（只对"写了覆盖"的条目生效）：
+     * ① toolKey 必须能对上已注册的模型侧 name（否则覆盖永远不生效，属配置错误）；
+     * ② 提供 inputSchema 时与反射生成的对账（property 名/类型 + required 集合），不一致**启动失败**；
+     * ③ status 非 published 的条目忽略。
+     */
+    private void applyOverrides() {
+        if (toolDefinitionSource == null) {
+            return;
+        }
+        ToolSnapshot snapshot = toolDefinitionSource.load();
+        this.snapshotVersion = snapshot.isEmpty() ? "annotations" : snapshot.version();
+        for (ToolDefinitionOverride override : snapshot.byToolKey().values()) {
+            String modelName = override.effectiveModelName();
+            ToolCallback original = callbackMap.get(modelName);
+            if (original == null) {
+                throw new IllegalStateException("工具定义覆盖指向未注册的工具：" + override.toolKey()
+                        + "（modelName=" + modelName + "）");
+            }
+            if (!override.published()) {
+                log.info("工具定义覆盖：{} status={}，不进快照", override.toolKey(), override.status());
+                continue;
+            }
+            ToolMeta meta = metaMap.get(modelName);
+            if (meta != null) {
+                meta.setTitleKey(override.effectiveTitleKey());
+                meta.setTitle(override.title());
+                meta.setLang(override.lang() == null ? "zh" : override.lang());
+                if (override.title() != null && !override.title().isBlank()) {
+                    meta.setDisplayName(override.title());
+                }
+            }
+            ToolDefinition reflected = original.getToolDefinition();
+            String schema = reflected.inputSchema();
+            if (override.hasSchema()) {
+                ToolSchemaReconciler.reconcile(override.toolKey(), reflected.inputSchema(), override.inputSchema());
+                schema = override.inputSchema();
+            }
+            if (!override.hasDescription() && !override.hasSchema()) {
+                continue;
+            }
+            ToolDefinition overridden = DefaultToolDefinition.builder()
+                    .name(reflected.name())
+                    .description(override.hasDescription() ? override.description() : reflected.description())
+                    .inputSchema(schema)
+                    .build();
+            callbackMap.put(modelName, new OverriddenToolCallback(original, overridden));
+            log.info("工具定义覆盖生效：{}（description={}，schema={}）", modelName,
+                    override.hasDescription() ? "overridden" : "annotation",
+                    override.hasSchema() ? "overridden" : "reflection");
+        }
+    }
+
+    /** 快照版本（诊断面 `GET /api/ai/tools` 可观测；改描述会击穿 prompt 缓存）。 */
+    public String snapshotVersion() {
+        return snapshotVersion;
     }
 
     /**

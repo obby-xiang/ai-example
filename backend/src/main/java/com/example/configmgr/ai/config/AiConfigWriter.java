@@ -1,5 +1,7 @@
 package com.example.configmgr.ai.config;
 
+import com.example.configmgr.common.ErrorCodes;
+
 import com.example.configmgr.ai.config.db.AiConfigAudit;
 import com.example.configmgr.ai.config.db.AiConfigAuditRepository;
 import com.example.configmgr.ai.config.db.AiProvider;
@@ -59,26 +61,26 @@ public class AiConfigWriter {
 
     // ── 稳定错误码（设计稿 §3.5 的封闭表 + 本批新增的五条，见类注末段） ──────────────
 
-    public static final String CODE_PROVIDER_NOT_FOUND = "PROVIDER_NOT_FOUND";
+    public static final String CODE_PROVIDER_NOT_FOUND = ErrorCodes.PROVIDER_NOT_FOUND;
 
-    public static final String CODE_PROVIDER_IN_USE = "PROVIDER_IN_USE";
+    public static final String CODE_PROVIDER_IN_USE = ErrorCodes.PROVIDER_IN_USE;
 
     /** 本批新增：{@code code} 唯一（设计稿表里没有，但重名必须有可判定的码，否则只能落 500）。 */
-    public static final String CODE_PROVIDER_EXISTS = "PROVIDER_EXISTS";
+    public static final String CODE_PROVIDER_EXISTS = ErrorCodes.PROVIDER_EXISTS;
 
-    public static final String CODE_MODEL_NOT_FOUND = "MODEL_NOT_FOUND";
+    public static final String CODE_MODEL_NOT_FOUND = ErrorCodes.MODEL_NOT_FOUND;
 
     /** 本批新增：{@code (provider_id, model_id)} 唯一。 */
-    public static final String CODE_MODEL_EXISTS = "MODEL_EXISTS";
+    public static final String CODE_MODEL_EXISTS = ErrorCodes.MODEL_EXISTS;
 
     /** 本批新增：{@code code} 是密文 AAD 的一段，不可原地改（改了旧密文就解不开）。 */
-    public static final String CODE_CODE_IMMUTABLE = "CODE_IMMUTABLE";
+    public static final String CODE_CODE_IMMUTABLE = ErrorCodes.CODE_IMMUTABLE;
 
     /** 本批新增：数值/长度/格式类校验（temperature 越界、key 过短等统一落这里）。 */
-    public static final String CODE_INVALID_PARAM = "INVALID_PARAM";
+    public static final String CODE_INVALID_PARAM = ErrorCodes.INVALID_PARAM;
 
     /** 本批新增：模型名不合法（空白/超长/含空白符）。 */
-    public static final String CODE_INVALID_MODEL = "INVALID_MODEL";
+    public static final String CODE_INVALID_MODEL = ErrorCodes.INVALID_MODEL;
 
     // ── 审计动作 ────────────────────────────────────────────────────────────
 

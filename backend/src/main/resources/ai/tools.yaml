@@ -1,0 +1,68 @@
+# 工具定义覆盖（阶段 A：classpath YAML）
+#
+# 契约（本批裁决 D-3）：**注解是缺省，本文件是可选覆盖**。
+# - 只有写了的字段才覆盖；`description` / `inputSchema` 缺省 ⇒ 用 `@Tool` / `@ToolParam` 反射值；
+# - 写了 `inputSchema` 就与反射 schema 对账（property 名/类型 + required 集合），漂移即启动失败；
+# - `modelName` 缺省 = `toolKey`；`titleKey` 缺省 = `tool.<toolKey>.title`；
+# - `status` 缺省视为 published。
+#
+# 本批（S2）只落 UI 标题（title/titleKey）：模型侧 description 保持注解中文单语
+# （裁决 A/B：模型侧单语、不随用户 locale 切；切英文是独立评测项，不在本批）。
+#
+# 改 description 会击穿 prompt 缓存（tools → system → messages 前缀），故将来改描述
+# 必须发新 version 并留痕，禁止"保存即生效"式编辑。
+version: 2026-10-21.1
+lang: zh
+tools:
+  - toolKey: list_config_defs
+    title: 列出配置定义
+  - toolKey: get_config_def
+    title: 读取配置定义
+  - toolKey: list_tasks
+    title: 列出任务
+  - toolKey: get_workspace_state
+    title: 读取工作区状态
+  - toolKey: check_job_status
+    title: 查询作业状态
+  - toolKey: get_row_count
+    title: 预估数据行数
+  - toolKey: create_task
+    title: 创建任务
+  - toolKey: start_export
+    title: 启动导出作业
+  - toolKey: start_precheck
+    title: 启动预检查作业
+  - toolKey: start_import
+    title: 启动导入作业
+  - toolKey: start_publish
+    title: 启动发布作业
+  - toolKey: open_export_file_editor
+    title: 打开导出文件在线编辑器
+  - toolKey: download_export_files
+    title: 下载导出文件
+  - toolKey: navigate_to
+    title: 跳转页面
+  - toolKey: select_definitions
+    title: 选择配置项
+  - toolKey: set_condition
+    title: 设置查询条件
+  - toolKey: confirm_step
+    title: 确认步骤
+  - toolKey: generative_form
+    title: 生成式表单
+  - toolKey: read_sheet_summary
+    title: 读取表格摘要
+  - toolKey: aggregate_sheet
+    title: 聚合表格
+  - toolKey: inspect_columns
+    title: 诊断列映射
+  - toolKey: review_cells
+    title: 本地校验摘要
+  - toolKey: normalize_column
+    title: 列归一化
+  - toolKey: replace_values
+    title: 查找替换
+  - toolKey: update_rows
+    title: 条件更新行
+  - toolKey: undo_last_sheet_edit
+    title: 撤销 AI 表格修改
