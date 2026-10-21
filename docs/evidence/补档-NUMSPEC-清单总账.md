@@ -56,7 +56,7 @@ wait-audit §3 已列：后端 18 组超时/预算键 + 前端 13 组 + 7 项「
 | B1-11 | 超时 | `application.yml:194` `app.ai.resilience.first-byte-timeout` | `30s` | 上游首包静默上限 | 配置键 | 部分依据（yml:186-193 明示「三个阈值均为初值，待 §13.2 #2 压测裁决」；压测证据标【推断】无数据） |
 | B1-12 | 超时 | `application.yml:195` `app.ai.resilience.inter-event-timeout` | `90s` | 事件间静默上限 | 配置键 | 部分依据（同上；压测证据标【推断】无数据） |
 | B1-13 | 重试 | `application.yml:196` `app.ai.resilience.max-attempts` | `2` | 单轮最大尝试次数（首轮 + 重试 1 次）；两次尝试之间有 **0.5s 起 ×2 + 抖动** 的退避（`ai/run/RetryBackoff`，只从剩余总预算里出） | 配置键 | 部分依据（类注只注「首轮 + 重试次数-1」；退避算式见超时面治理批① 第 1 项） |
-| B1-14 | 超时 | `application.yml:197` `app.ai.resilience.total-budget` | `300s` | 单轮总预算（墙钟 − 挂起等待）；同时是 E2E 脚本 HTTP/SSE 等待窗口的派生根源（+60s 余量） | 配置键 | 部分依据（压测证据 §S8：6004 帧全程 < 3s，预算**远未触及**；撞预算路径未构造） |
+| B1-14 | 超时 | `application.yml` `app.ai.resilience.total-budget` | `300s`（**段**预算，超时面治理批② 改语义、码名保留） | 单段预算 = 段起点 → 现在（挂起点段结束、恢复点段重置）；同时是 E2E 脚本 HTTP/SSE 等待窗口的派生根源（+60s 余量） | 配置键 | 有依据（决策看板 `:14`「段级预算重置式」；依据件 Q1：调用/轮次型 SDK 恢复即新时钟） |
 | B1-15 | 轮询 | `application.yml:202` `app.ai.resume.startup-delay` | `8s` | 启动后延迟多久开始自动续跑 | 配置键 | **裸数字** |
 | B1-16 | TTL | `application.yml:203` `app.ai.resume.zombie-age` | `60s` | 判定「死卡」的僵尸时长阈值 | 配置键 | **裸数字** |
 | B1-17 | 阈值 | `application.yml:204` `app.ai.resume.max-on-startup` | `10` | 单次启动最多续跑多少轮 | 配置键 | **裸数字** |
@@ -152,11 +152,11 @@ wait-audit §3 已列：后端 18 组超时/预算键 + 前端 13 组 + 7 项「
 | 编号 | 分类 | 位置 | 现值 | 作用场景 | 可调性 | 依据现状 |
 |---|---|---|---|---|---|---|
 | F1-01 | 超时 | `api/http.ts:85` | `timeout: 60000` | 所有 axios 请求单次上限（业务 REST + **回灌 POST** 共用） | 硬编码 | **裸数字**（无任何注释；见 wait-audit §3.2 与 §3.3 第 2 项） |
-| F1-02 | 超时 | `api/sse.ts:22` | `DEFAULT_IDLE_TIMEOUT_MS = 90_000` | 帧间静默上限，超即判断流 | 硬编码 | 部分依据（注释说明语义与后端 heartbeat 的关系；90s 取值无独立论证） |
-| F1-03 | 重试 | `api/sse.ts:25` | `DEFAULT_MAX_RECONNECTS = 2` | 断流后自动重挂最大次数 | 硬编码 | **裸数字** |
+| F1-02 | 超时 | `api/sse.ts` `DEFAULT_IDLE_TIMEOUT_MS` | **`45_000`**（超时面治理批② 由 90_000 改） | 帧间静默上限，超即判断流 | 硬编码 | 有依据（决策看板 `:16`；依据件《调研-LLM超时惯例对照》⑦：90s 撞 nginx/ALB 默认 60s 死区 ⇒ 取 45s < 60s；后端 `inter-event-timeout` 90s **不动**，刻意为错层） |
+| F1-03 | 重试 | `api/sse.ts` `DEFAULT_MAX_RECONNECTS` | **`4`**（批② 由 2 改） | 断流后自动重挂最大次数 | 硬编码 | 有依据（决策看板 `:16`；依据件 ⑦「重连 2 次偏少」：一次代理重建 + 跨实例续跑常超过 3s 退避总额） |
 | F1-04 | 退避 | `api/sse.ts:28` | `DEFAULT_RECONNECT_DELAY_MS = 1_000` | 首次重连等待（后续指数退避） | 硬编码 | 部分依据（注释「后续指数退避」，base=1s 无独立论证） |
-| F1-05 | 退避 | `api/sse.ts:540`（`baseDelay` 定义在 `:433`） | `delay = baseDelay * 2 ** (attempts - 1)` | 指数退避公式 = 1s → 2s | 硬编码 | 部分依据（同 F1-04；**无上限封顶、无抖动/jitter**） |
-| F1-06 | 超时 | `api/sse.ts:43` | `DEFAULT_CONNECT_TIMEOUT_MS = 15_000` | reattach **建连**看门狗 | 硬编码 | 有依据（:31-42 注释完整论证：落在审计建议 10~15s 上界；三轮预算 15+1+15+2+15=48s < 90s） |
+| F1-05 | 退避 | `api/sse.ts` `reconnectDelayMs` | `reconnectDelayMs(a, rand) = 1000 × 2^(a-1) × (0.75 + 0.5·rand)` | 重挂退避 = 1/2/4/8s + **±25% 抖动**（批② 第 5 项） | 硬编码 | 有依据（决策看板 `:16`；依据件 ②「重试零退避是反模式」：指数 + 抖动避免雷群） |
+| F1-06 | 超时 | `api/sse.ts` `DEFAULT_CONNECT_TIMEOUT_MS` | `15_000` | reattach **建连**看门狗（按**每条连接**计，不与重挂次数相乘后对比帧间静默） | 硬编码 | 有依据（注释完整论证：落在审计建议 10~15s 上界；批② 起重挂 4 次，整段恢复窗口 = 5×15 + 15 = 90s，与 45s 帧间判据是两个维度） |
 | F1-07 | 轮询 | `api/jobs.ts:51` | `intervalMs ?? 1000` | `waitForJobFinal` 轮询间隔 | 硬编码（可传参覆写） | **裸数字** |
 | F1-08 | 超时 | `api/jobs.ts:52` | `timeoutMs ?? 300_000` | `waitForJobFinal` 上限（超时**返回非终态不抛错**） | 硬编码（可传参覆写） | **裸数字**（与后端 `total-budget` 300s 同值但语义无关 ⇒ 数值巧合） |
 | F1-09 | 退避 | `api/tasks.ts:106` | 无 | 任务通道 `new EventSource(...)` **未接管重连**，完全依赖浏览器默认 retry（约 3s） | 硬编码（缺配置） | **裸数字**【推断】（浏览器默认值；与 AI 通道 `api/sse.ts` 的显式退避策略不对称） |
@@ -520,3 +520,12 @@ wait-audit §3 已列：后端 18 组超时/预算键 + 前端 13 组 + 7 项「
 **自洽性复核（与既有数字的关系）**：`reserve-tokens 13000` 覆盖 `spring.ai.openai.chat.options.max-tokens 4096`
 （B1-06）；L3 触发线在 128K 下剩余 `5.75K`，仍大于 4096 ⇒ **触发线不会把输出空间吃掉**。
 换更小窗口模型（如 32K）时必须重算这两条不等式 —— 已写进 `AiProperties.Context` 的类注与 `application.yml` 同段注释。
+
+## 超时面治理批② 追加（2026-10-21；决策看板 `:14` / `:16`）
+
+| 编号 | 分类 | 位置 | 现值 | 作用场景 | 依据现状 |
+|---|---|---|---|---|---|
+| B2-01 | 步数 | `application.yml` `app.ai.resilience.max-tool-steps` | `25` | 工具调用步数上限，**累计、跨挂起不重置**（`RunSnapshot.toolSteps` 外置）；到顶降级「部分完成收尾」 | 有依据（决策看板 `:14`；依据件 Q1「唯一无争议项 = 步数类预算一律继续累计、绝不重置」；同时是段重置的强制配套） |
+| B2-02 | 超时 | `application.yml` `app.ai.tool.exec-timeout` | `120s` | 单次后端工具执行上限；到点 `TOOL_TIMEOUT` / `executed=false` / 轮继续 | 有依据（决策看板 `:16`；依据件 ④「单个工具可吃掉全部 300s，且没有工具卡死的独立信号」；与前端工具回执上限同量级） |
+| B2-03 | 超时 | `ai/config/AiProviderRegistry.java` `UPSTREAM_SOCKET_IDLE_TIMEOUT` | `300s` | 上游流式 WebClient 的**读空闲**兜底（半开连接回收）；不参与判据，watchdog 优先 | 有依据（决策看板 `:16`；依据件 ③「socket 层保留 300~600s 兜底，用于回收半开连接」取下沿；90s < 300s ⇒ 静默类失败总由看门狗先判） |
+| B2-04 | 退避 | `api/sse.ts` `RECONNECT_JITTER_RATIO` | `0.25` | 重连退避抖动幅度（±25% = 0.75~1.25） | 有依据（决策看板 `:16`「1·2·4·8s + jitter」；抖动幅度按业界惯用 ±25% 取） |

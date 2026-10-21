@@ -84,6 +84,20 @@ public final class ErrorCodes {
     public static final String CONFIRM_TIMEOUT = "CONFIRM_TIMEOUT";
     /** 前端工具回灌超时。 */
     public static final String FRONTEND_TIMEOUT = "FRONTEND_TIMEOUT";
+    /**
+     * 后端工具**执行**超时（超时面治理批② 第 3 项；{@code app.ai.tool.exec-timeout}）。
+     *
+     * <p>与 {@link #FRONTEND_TIMEOUT} 分工：前者等"后端桩体跑完"（工具自己卡住），后者等"前端回执"
+     * （回灌没回来）。到点 {@code executed=false}，轮继续（不判整轮失败）。
+     */
+    public static final String TOOL_TIMEOUT = "TOOL_TIMEOUT";
+    /**
+     * 工具调用步数到顶（超时面治理批② 第 2 项；{@code app.ai.resilience.max-tool-steps}）。
+     *
+     * <p>结局 {@code skipped}（不是 failed）：预算用完 ≠ 执行出错，不触发批次首错即停，
+     * 本轮降级成「部分完成收尾」。
+     */
+    public static final String TOOL_STEP_LIMIT = "TOOL_STEP_LIMIT";
     /** 轮次被取消。 */
     public static final String RUN_CANCELLED = "RUN_CANCELLED";
     /** 前端工具被用户取消。 */

@@ -76,6 +76,10 @@ export const ErrorCode = {
   SCOPE_NOT_DISCLOSED: 'SCOPE_NOT_DISCLOSED',
   CONFIRM_TIMEOUT: 'CONFIRM_TIMEOUT',
   FRONTEND_TIMEOUT: 'FRONTEND_TIMEOUT',
+  /** 后端工具执行超时（超时面治理批②；等后端桩体，区别于 FRONTEND_TIMEOUT 等前端回执） */
+  TOOL_TIMEOUT: 'TOOL_TIMEOUT',
+  /** 工具调用步数到顶（超时面治理批②；skipped 结局，本轮部分完成收尾） */
+  TOOL_STEP_LIMIT: 'TOOL_STEP_LIMIT',
   RUN_CANCELLED: 'RUN_CANCELLED',
   /** 前端工具条目终态：用户取消/渲染器不可用（结局帧 status 口径，展示态登记） */
   FRONTEND_CANCELLED: 'FRONTEND_CANCELLED',

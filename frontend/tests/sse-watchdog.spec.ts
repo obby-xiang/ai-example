@@ -1,9 +1,20 @@
 /**
- * 仓外可行性实测 ②：sse.ts 双看门狗（R-03/B-03）—— 用 vitest fake timers 直接把 15s/90s
- * 计时器压缩到毫秒级，断言"任一时刻只武装一只看门狗""settle 后无残留计时器""建连黑洞必收敛"。
+ * sse.ts 双看门狗（R-03/B-03）：用 vitest fake timers 把 15s/45s 计时器压缩到毫秒级，
+ * 断言"任一时刻只武装一只看门狗""settle 后无残留计时器""建连黑洞必收敛"。
+ *
+ * 超时面治理批②（决策看板 `:16`）后追加两组断言：
+ * - 帧间静默 90s → **45s**（< 代理 60s 死区；后端 90s 不动，错层）；
+ * - 重挂 2 次（1s/2s）→ **4 次（1/2/4/8s + jitter ±25%）**，耗尽仍 `settle(false)`。
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
-import { DEFAULT_CONNECT_TIMEOUT_MS, DEFAULT_IDLE_TIMEOUT_MS, reattach } from '@/api/sse'
+import {
+  DEFAULT_CONNECT_TIMEOUT_MS,
+  DEFAULT_IDLE_TIMEOUT_MS,
+  DEFAULT_MAX_RECONNECTS,
+  RECONNECT_JITTER_RATIO,
+  reattach,
+  reconnectDelayMs
+} from '@/api/sse'
 
 class FakeEventSource {
   static instances: FakeEventSource[] = []
@@ -36,31 +47,79 @@ afterEach(() => {
 })
 
 describe('reattach 双看门狗', () => {
-  it('常量口径：建连 15s、帧间 90s（建连预算显著短于帧间）', () => {
+  it('常量口径：建连 15s、帧间 45s、重挂 4 次（建连预算显著短于帧间）', () => {
     expect(DEFAULT_CONNECT_TIMEOUT_MS).toBe(15_000)
-    expect(DEFAULT_IDLE_TIMEOUT_MS).toBe(90_000)
+    expect(DEFAULT_IDLE_TIMEOUT_MS).toBe(45_000)
+    expect(DEFAULT_MAX_RECONNECTS).toBe(4)
     expect(DEFAULT_CONNECT_TIMEOUT_MS).toBeLessThan(DEFAULT_IDLE_TIMEOUT_MS)
   })
 
-  it('建连黑洞（既不 onopen 也不 error）：三轮 15s + 退避 1s/2s = 48s 内必收敛，不留计时器', async () => {
-    let settled: { terminal: boolean; reason?: string } | null = null
-    const pending = reattach('run-1', {}).then((info) => {
+  it('45s 低于代理 60s 死区、低于后端 90s（错层：前端先判、先复位 loading）', () => {
+    const PROXY_DEFAULT_IDLE_MS = 60_000
+    const BACKEND_INTER_EVENT_MS = 90_000
+    expect(DEFAULT_IDLE_TIMEOUT_MS).toBeLessThan(PROXY_DEFAULT_IDLE_MS)
+    expect(PROXY_DEFAULT_IDLE_MS).toBeLessThan(BACKEND_INTER_EVENT_MS)
+  })
+
+  it('退避序列 1/2/4/8s + jitter ±25%', () => {
+    // random=0.5 ⇒ 因子 1.0（中点 = 裸指数退避）
+    expect([1, 2, 3, 4].map((attempt) => reconnectDelayMs(attempt, () => 0.5))).toEqual([
+      1_000, 2_000, 4_000, 8_000
+    ])
+    // random=0 ⇒ 下界 0.75×；random=1 ⇒ 上界 1.25×
+    expect([1, 2, 3, 4].map((attempt) => reconnectDelayMs(attempt, () => 0))).toEqual([
+      750, 1_500, 3_000, 6_000
+    ])
+    expect([1, 2, 3, 4].map((attempt) => reconnectDelayMs(attempt, () => 1))).toEqual([
+      1_250, 2_500, 5_000, 10_000
+    ])
+    expect(RECONNECT_JITTER_RATIO).toBe(0.25)
+  })
+
+  it('建连黑洞（既不 onopen 也不 error）：5 条连接 15s + 退避 1/2/4/8s = 90s 内必收敛，不留计时器', async () => {
+    let settled: { terminal: boolean; reason?: string; reconnects: number } | null = null
+    const pending = reattach('run-1', {}, { random: () => 0.5 }).then((info) => {
       settled = info
       return info
     })
 
-    await vi.advanceTimersByTimeAsync(47_000)
+    await vi.advanceTimersByTimeAsync(89_000)
     expect(settled).toBeNull() // 预算内不该提前判死
 
     await vi.advanceTimersByTimeAsync(1_000)
     const info = await pending
     expect(info.terminal).toBe(false)
     expect(info.reason).toContain('建立超时')
-    expect(FakeEventSource.instances).toHaveLength(3)
+    expect(info.reconnects).toBe(4)
+    // 首连 + 4 次重挂 = 5 条连接（旧口径是 3 条）
+    expect(FakeEventSource.instances).toHaveLength(5)
     expect(vi.getTimerCount()).toBe(0) // settle 后无残留看门狗
   })
 
-  it('onopen 后建连看门狗让位：不再因 15s 到点而误判断流（只留 90s 帧间看门狗）', async () => {
+  it('帧间静默 45s 到点即断流并重挂（不再等 90s）', async () => {
+    let reconnects = 0
+    const controller = new AbortController()
+    const pending = reattach(
+      'run-4',
+      { onReconnect: () => { reconnects += 1 } },
+      { signal: controller.signal, random: () => 0.5 }
+    )
+    FakeEventSource.instances[0]?.fireOpen()
+
+    await vi.advanceTimersByTimeAsync(44_000)
+    expect(FakeEventSource.instances).toHaveLength(1) // 45s 之前不该判死
+
+    await vi.advanceTimersByTimeAsync(2_500) // 45s 到点 + 1s 退避（random=0.5 ⇒ 因子 1.0）
+    expect(reconnects).toBe(1)
+    expect(FakeEventSource.instances).toHaveLength(2)
+    expect(FakeEventSource.instances[0]?.closed).toBe(true)
+
+    controller.abort()
+    await pending
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('onopen 后建连看门狗让位：不再因 15s 到点而误判断流（只留 45s 帧间看门狗）', async () => {
     let settled: unknown = null
     void reattach('run-2', {}).then((info) => {
       settled = info

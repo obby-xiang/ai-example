@@ -75,6 +75,16 @@ public class RunSnapshot {
 	/** 本轮的尝试次数（韧性棒：&gt;1 说明发生过断流重试）。 */
 	private int attempts;
 
+	/**
+	 * 本轮已消耗的工具调用步数（超时面治理批② 第 2 项；决策看板 {@code :14}）。
+	 *
+	 * <p><b>累计、跨挂起不重置</b>（LangGraph 口径）：上限 = {@code app.ai.resilience.max-tool-steps}
+	 * （25），到顶后降级「部分完成收尾」。正因为"不重置"，这个计数必须<b>外置</b>在这里 ——
+	 * 挂起后的续跑可能落在另一个进程上，进程内计数器会被重置成 0（五段挂起就能刷出 5×25 步）。
+	 * 旧快照没有本字段 ⇒ 0（Jackson 缺省），与"还没用过工具"同义。
+	 */
+	private int toolSteps;
+
 	/** 是否由用户取消（终态判据之一，与 {@link #CANCELLED} 同步设置）。 */
 	private boolean cancelled;
 
@@ -133,6 +143,7 @@ public class RunSnapshot {
 		out.put("status", this.status);
 		out.put("round", this.round);
 		out.put("attempts", this.attempts);
+		out.put("toolSteps", this.toolSteps);
 		out.put("cancelled", this.cancelled);
 		out.put("messageCount", this.messageJson.size());
 		out.put("inFlight", this.inFlightToolCalls.size());

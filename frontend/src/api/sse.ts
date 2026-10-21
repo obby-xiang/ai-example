@@ -18,14 +18,42 @@ import { frameSeq, isTerminalFrame, toSseFrame } from '@/types/sse'
 import type { SseDoneFrame, SseErrorFrame, SseFrame } from '@/types/sse'
 import type { AiChatRequest, StreamCloseInfo } from '@/types/ai'
 
-/** 帧间静默上限：超过即判断流（后端挂起期有 heartbeat，正常不会触发）。 */
-export const DEFAULT_IDLE_TIMEOUT_MS = 90_000
+/**
+ * 帧间静默上限：超过即判断流（后端挂起期有 heartbeat，正常不会触发）。
+ *
+ * 45s（超时面治理批② 第 4 项；决策看板 `:16`）：原 90s **落在代理死区里** ——
+ * nginx / ALB 一类反向代理的默认空闲超时是 60s，它们会先于前端把连接静默掐掉，
+ * 于是前端看到的永远是「连接中断」而不是「静默超时」，判定链与提示文案都对不上号。
+ * 45s < 60s（代理）< 90s（后端 `app.ai.resilience.inter-event-timeout`，**本批不动**）：
+ * 这是**刻意的错层** —— 前端先失败、先复位 loading、先出提示，后端那层继续按机器口径判。
+ */
+export const DEFAULT_IDLE_TIMEOUT_MS = 45_000
 
-/** 断流后自动重挂的最大次数。 */
-export const DEFAULT_MAX_RECONNECTS = 2
+/**
+ * 断流后自动重挂的最大次数（超时面治理批② 第 5 项；决策看板 `:16` = 4 次 / 1·2·4·8s + jitter）。
+ *
+ * 原 2 次（1s/2s）在一次代理重建 + 后端跨实例续跑（数秒级）的现实里偏少：
+ * 两次退避合计 3s，常常在"续跑还没就绪"时就把重挂额度用完。
+ */
+export const DEFAULT_MAX_RECONNECTS = 4
 
-/** 首次重连等待（后续指数退避）。 */
+/** 首次重连等待（后续指数退避 1/2/4/8s，叠加 ±25% 抖动）。 */
 export const DEFAULT_RECONNECT_DELAY_MS = 1_000
+
+/** 退避抖动幅度（±25%）：避免"整批客户端在同一毫秒重连"的雷群。 */
+export const RECONNECT_JITTER_RATIO = 0.25
+
+/**
+ * 第 `attempt` 次重连的等待（毫秒）= 基数 × 2^(attempt-1)，再乘 [0.75, 1.25] 的抖动。
+ *
+ * `random` 可注入（默认 `Math.random`）：抖动是"防雷群"的手段，但它会让断言失去确定性 ——
+ * 测试注入固定值即可同时锁住基数与抖动边界（见 `tests/sse-watchdog.spec.ts`）。
+ */
+export function reconnectDelayMs(attempt: number, random: () => number = Math.random): number {
+  const base = DEFAULT_RECONNECT_DELAY_MS * 2 ** (Math.max(1, attempt) - 1)
+  const factor = 1 - RECONNECT_JITTER_RATIO + random() * RECONNECT_JITTER_RATIO * 2
+  return Math.round(base * factor)
+}
 
 /**
  * reattach **建连**（`onopen` 之前）的看门狗上限（R-03 / 前端篇 B-03）。
@@ -35,8 +63,9 @@ export const DEFAULT_RECONNECT_DELAY_MS = 1_000
  * 预算理应显著更短。取值论证（对齐既有常量）：
  * - 落在审计建议的 10~15s（`blocking-audit/frontend.md` §S1-2 修法方向）**上界**，把"活但慢的
  *   连接被误判为死"的假阳性压到最低（一次 TCP/TLS 握手 + 代理首包 + 服务端排队都要放得下）；
- * - 三轮建连预算合计 15 + 1(退避) + 15 + 2(退避) + 15 = 48s，**不超过** `DEFAULT_IDLE_TIMEOUT_MS`
- *   （90s）这条既有"单条流允许的最长无进展等待"，整段 reattach 仍落在同一量级内；
+ * - 建连预算按**每条连接**计（15s），不与重挂次数相乘后对比帧间静默：重挂 4 次时整段
+ *   reattach 的最坏耗时 = 5×15 + (1+2+4+8) = 90s（抖动再乘 ≤1.25）—— 这是"断流后的恢复窗口"，
+ *   与 `DEFAULT_IDLE_TIMEOUT_MS`（45s，单条流的无进展判据）是**两个维度**，不构成矛盾；
  * - 远小于 `api/http.ts` 的 axios 单请求上限（60s）与后端前端工具挂起上限（120s；确认门去超时后
  *   已无该键）⇒ 前端先失败、先复位 `loading`、先出提示，不再沉默到后端超时才收尾。
  */
@@ -74,6 +103,11 @@ export interface SseFrameHandlers {
 export interface SseStreamOptions {
   /** 外部取消（用户点"停止"）：abort 后不再重连 */
   signal?: AbortSignal
+  /**
+   * 退避抖动源（默认 `Math.random`）：只给测试注入固定值用 —— 生产不要传。
+   * 传了也不会改变退避的"基数 × 2^n ± 25%"口径，只改变抽到的那个点。
+   */
+  random?: () => number
   /**
    * reattach 专用（DC-14 T6）：前端已收到的最大帧序号 —— 服务端据此只补发增量。
    * 不传 = 全量回放（与 S4.2 时期行为一致）。
@@ -448,7 +482,7 @@ export async function reattach(
   const state = existing ?? newState()
   state.runId = runId
   const maxReconnects = DEFAULT_MAX_RECONNECTS
-  const baseDelay = DEFAULT_RECONNECT_DELAY_MS
+  const random = options.random ?? Math.random
   const idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS
 
   return await new Promise<StreamCloseInfo>((resolve) => {
@@ -561,7 +595,7 @@ export async function reattach(
       }
       attempts += 1
       state.reconnects = attempts
-      const delay = baseDelay * 2 ** (attempts - 1)
+      const delay = reconnectDelayMs(attempts, random)
       handlers.onReconnect?.(attempts, delay)
       setTimeout(() => {
         if (!settled && !options.signal?.aborted) {

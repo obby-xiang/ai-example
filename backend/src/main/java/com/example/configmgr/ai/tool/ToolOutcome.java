@@ -67,6 +67,15 @@ public enum ToolOutcome {
 
 	public static final String CODE_FRONTEND_TIMEOUT = ErrorCodes.FRONTEND_TIMEOUT;
 
+	/**
+	 * 后端工具执行超时（{@code app.ai.tool.exec-timeout}）：到点未跑完，{@code executed=false}，
+	 * 结局 {@link #TIMEOUT}（不可重试：重试同一个调用大概率同样卡住），轮继续。
+	 */
+	public static final String CODE_TOOL_TIMEOUT = ErrorCodes.TOOL_TIMEOUT;
+
+	/** 工具调用步数到顶（{@code app.ai.resilience.max-tool-steps}）：未执行，结局 {@link #SKIPPED}。 */
+	public static final String CODE_TOOL_STEP_LIMIT = ErrorCodes.TOOL_STEP_LIMIT;
+
 	public static final String CODE_RUN_CANCELLED = ErrorCodes.RUN_CANCELLED;
 
 	public static final String CODE_FRONTEND_CANCELLED = ErrorCodes.FRONTEND_CANCELLED;

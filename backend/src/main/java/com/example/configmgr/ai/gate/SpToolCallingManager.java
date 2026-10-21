@@ -2,6 +2,8 @@ package com.example.configmgr.ai.gate;
 
 import com.example.configmgr.common.ErrorCodes;
 
+import com.example.configmgr.ai.config.AiProperties;
+
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.run.CancellationRegistry;
@@ -25,6 +27,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
+import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.chat.prompt.Prompt;
@@ -36,11 +39,21 @@ import org.springframework.ai.tool.execution.DefaultToolExecutionExceptionProces
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 官方循环内的工具执行扩展点（S4.2 §2 {@code gate/SpToolCallingManager}）。
@@ -107,6 +120,38 @@ public class SpToolCallingManager implements ToolCallingManager {
 	/** 防线③拦截时回填模型的结果文本前缀（结构化错误码，测试与排障据此断言/检索）。 */
 	public static final String SCOPE_VIOLATION_CODE = ErrorCodes.SCOPE_NOT_DISCLOSED;
 
+	/**
+	 * 步数到顶时的收尾指令（超时面治理批② 第 2 项；决策看板 {@code :14}）。
+	 *
+	 * <p>到顶<b>不判整轮失败</b>：把指令追加到历史末尾，让模型用已有信息收尾（部分完成也要说清缺什么）。
+	 */
+	public static final String STEP_LIMIT_WRAP_UP = "已达到本轮工具调用步数上限（app.ai.resilience.max-tool-steps）。"
+			+ "请不要再次调用工具，直接用已经获得的信息给出结论；如有未完成的部分，如实说明哪些未完成以及原因。";
+
+	/**
+	 * 工具执行超时监视线程池（超时面治理批② 第 3 项）。
+	 *
+	 * <p>为什么需要一条独立线程：{@code Future#get(timeout)} 要在<b>调用线程</b>上等到点，
+	 * 而桩体必须跑在<b>另一条线程</b>上才能被 {@code cancel(true)} 打断。容量取挂起池缺省值
+	 * （{@code app.ai.suspend.pool-size} = 20）：一轮至多一个工具在跑，容量即并发上限。
+	 * 队列为 {@link SynchronousQueue}（不排队）+ {@code AbortPolicy}：饱和时退化为"同步执行、无超时"
+	 * 并留 WARN —— 宁可少一层兜底，也不让工具调用在队列里无限等。
+	 */
+	private static final int TOOL_TIMEOUT_THREADS = 20;
+
+	private static final ExecutorService TOOL_TIMEOUT_EXECUTOR = newExecutor();
+
+	private static ExecutorService newExecutor() {
+		AtomicInteger counter = new AtomicInteger();
+		ThreadPoolExecutor executor = new ThreadPoolExecutor(0, TOOL_TIMEOUT_THREADS, 30L, TimeUnit.SECONDS,
+				new SynchronousQueue<>(), runnable -> {
+					Thread thread = new Thread(runnable, "ai-tool-timeout-" + counter.incrementAndGet());
+					thread.setDaemon(true);
+					return thread;
+				}, new ThreadPoolExecutor.AbortPolicy());
+		return executor;
+	}
+
 	private final ToolCallingManager delegate;
 
 	private final RunStore store;
@@ -150,6 +195,12 @@ public class SpToolCallingManager implements ToolCallingManager {
 	/** UNKNOWN 对账器（B23L1 批③b）：续跑结算前把"未知"尽量收敛成台账里的确定结局。 */
 	private final ToolUnknownReconciler unknownReconciler;
 
+	/**
+	 * 配置面（超时面治理批②）：{@code app.ai.resilience.max-tool-steps}（步数笼）与
+	 * {@code app.ai.tool.exec-timeout}（工具独立超时）。
+	 */
+	private final AiProperties properties;
+
 	public SpToolCallingManager(RunStore store, RunRegistry registry, ConfirmGate gate, ToolRegistry toolRegistry,
 			MessageJsonCodec codec, ToolActivityBeacon beacon, CancellationRegistry cancellations,
 			ToolResultLimiter limiter, List<FrontendToolGuard> frontendGuards) {
@@ -163,12 +214,21 @@ public class SpToolCallingManager implements ToolCallingManager {
 				null, null, null);
 	}
 
-	@Autowired
 	public SpToolCallingManager(RunStore store, RunRegistry registry, ConfirmGate gate, ToolRegistry toolRegistry,
 			MessageJsonCodec codec, ToolActivityBeacon beacon, CancellationRegistry cancellations,
 			ToolResultLimiter limiter, List<FrontendToolGuard> frontendGuards, ToolPreflightService preflight,
 			ToolResourceLocks resourceLocks, ToolTargetResolver targetResolver,
 			ToolUnknownReconciler unknownReconciler) {
+		this(store, registry, gate, toolRegistry, codec, beacon, cancellations, limiter, frontendGuards, preflight,
+				resourceLocks, targetResolver, unknownReconciler, new AiProperties());
+	}
+
+	@Autowired
+	public SpToolCallingManager(RunStore store, RunRegistry registry, ConfirmGate gate, ToolRegistry toolRegistry,
+			MessageJsonCodec codec, ToolActivityBeacon beacon, CancellationRegistry cancellations,
+			ToolResultLimiter limiter, List<FrontendToolGuard> frontendGuards, ToolPreflightService preflight,
+			ToolResourceLocks resourceLocks, ToolTargetResolver targetResolver,
+			ToolUnknownReconciler unknownReconciler, AiProperties properties) {
 		this.delegate = ToolCallingManager.builder()
 			// P0-1：让工具异常浮出到 executeOnce 的 catch（默认 alwaysThrow=false 会把失败吞成
 			// "ok=true 的文本"——start_* 的 ConflictException 因此不可见）。包内 ToolExecutionException
@@ -188,6 +248,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 		this.resourceLocks = resourceLocks;
 		this.targetResolver = targetResolver;
 		this.unknownReconciler = unknownReconciler;
+		this.properties = properties == null ? new AiProperties() : properties;
 	}
 
 	@Override
@@ -215,6 +276,10 @@ public class SpToolCallingManager implements ToolCallingManager {
 
 		SseChatEmitter out = this.registry.of(runId);
 		List<PendingToolCall> pendings = newPendings(assistant);
+		// 步数笼（超时面治理批② 第 2 项 / 决策看板 :14）：起点来自**外置快照**而不是进程内计数 ——
+		// 挂起后的续跑可能落在另一个进程上，进程内计数会被重置（"跨挂起不重置"只有外置才能成立）。
+		int maxToolSteps = Math.max(1, this.properties.getResilience().getMaxToolSteps());
+		int stepsUsed = snapshot.getToolSteps();
 		// 防线③（T1）的判据来源：本轮<b>冻结</b>的工作区上下文（与请求侧披露用的同一份，
 		// 见 RunStore#create 写下的 snapshot.context），因此复查不会因上下文漂移而误判。
 		AiContext context = AiContext.fromMap(snapshot.getContext());
@@ -286,6 +351,8 @@ public class SpToolCallingManager implements ToolCallingManager {
 			// 预检未通过的条目不出现在 suspended.toolCalls[] 里，因而不会渲染成确认卡；
 			// 全部都不通过时连 suspended 帧都不存在 —— 这正是"不进确认门、不弹卡"在帧面上的形态。
 			if (!suspended.isEmpty()) {
+				// 步数先落快照再挂起：跨进程续跑读的就是这份累计值（saveSuspended 会重新 get 快照）
+				persistToolSteps(runId, stepsUsed);
 				this.store.saveSuspended(runId, assistant.getText(), pendings, prompt.getInstructions(), this.codec);
 				out.suspended(suspended, this.store.runKey(runId), this.store.pendingKey(runId),
 						this.store.instanceId());
@@ -314,6 +381,16 @@ public class SpToolCallingManager implements ToolCallingManager {
 							modelData(pending, text)));
 					continue;
 				}
+				// 步数笼：到顶后的调用不再执行，结算成 skipped/TOOL_STEP_LIMIT（不判整轮失败）
+				if (stepsUsed >= maxToolSteps) {
+					// 帧序：先 tool_start 再 tool_result（与预检未通过分支同形，不破帧序契约）
+					out.toolStart(pending);
+					responses.add(skipAsStepLimit(runId, pending, maxToolSteps));
+					log.warn("工具步数到顶，本调用不再执行 runId={} tool={} toolCallId={} steps={}/{}", runId,
+							pending.getName(), pending.getToolCallId(), stepsUsed, maxToolSteps);
+					continue;
+				}
+				stepsUsed++;
 				out.toolStart(pending);
 				// 副作用信标（韧性棒）：工具开始执行即留下痕迹 ——
 				// ① 让看门狗在工具执行期间不计静默（硬规范①）；② 让"已产出内容前先有副作用"的重试被拦住。
@@ -375,6 +452,11 @@ public class SpToolCallingManager implements ToolCallingManager {
 			List<Message> history = new ArrayList<>(prompt.getInstructions());
 			history.add(assistant);
 			history.add(toolMessage);
+			// 步数到顶 ⇒ 降级「部分完成收尾」：追加一条收尾指令（不抛错、不判整轮失败）
+			if (stepsUsed >= maxToolSteps) {
+				history.add(new UserMessage(STEP_LIMIT_WRAP_UP));
+			}
+			persistToolSteps(runId, stepsUsed);
 			settle(runId, history);
 
 			return ToolExecutionResult.builder().conversationHistory(history).build();
@@ -445,6 +527,46 @@ public class SpToolCallingManager implements ToolCallingManager {
 				pending.getToolCallId(), upstream.getName(), upstream.effectiveCode());
 		return new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
 				modelData(pending, message));
+	}
+
+	/**
+	 * 步数到顶的调用：结算成 {@code skipped/TOOL_STEP_LIMIT}（未执行、不占认领、不记台账），
+	 * 帧照发（前端能看到"这步为什么没跑"），回填模型的是统一信封 + 收尾提示。
+	 *
+	 * <p>为什么是 {@link ToolOutcome#SKIPPED} 而不是 {@code FAILED}：这不是"执行出错"，
+	 * 而是"预算用完了"—— 用 failed 会触发批次首错即停（{@link #haltsBatch}），
+	 * 把"部分完成"变成"整批作废"，与"降级收尾"的裁决相反。
+	 */
+	public ToolResponseMessage.ToolResponse skipAsStepLimit(String runId, PendingToolCall pending, int maxSteps) {
+		String message = "未执行：本轮工具调用步数已达上限（app.ai.resilience.max-tool-steps = " + maxSteps
+				+ "）。请用已经获得的信息给出结论，并说明哪些部分未完成。";
+		pending.setStatus(PendingToolCall.SKIPPED);
+		pending.setOutcome(ToolOutcome.SKIPPED.wire());
+		pending.setCode(ToolOutcome.CODE_TOOL_STEP_LIMIT);
+		pending.setReason(ToolOutcome.CODE_TOOL_STEP_LIMIT);
+		pending.setExecuted(false);
+		pending.setExecutedBy(null);
+		pending.setResolvedAtMs(System.currentTimeMillis());
+		pending.setResultText(message);
+		this.store.putPending(runId, pending);
+		this.registry.of(runId).toolResult(pending, false, false, message);
+		return new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
+				modelData(pending, message));
+	}
+
+	/**
+	 * 把累计步数写回外置快照（唯一真值）。
+	 *
+	 * <p>为什么单独写一次而不是只改 {@code settle()}：挂起路径（{@code saveSuspended}）自己会
+	 * {@code get} 一份新快照再保存 —— 只在内存对象上自增，跨进程续跑读到的仍是旧值。
+	 */
+	private void persistToolSteps(String runId, int steps) {
+		RunSnapshot fresh = this.store.get(runId);
+		if (fresh == null || fresh.getToolSteps() == steps) {
+			return;
+		}
+		fresh.setToolSteps(steps);
+		this.store.save(fresh);
 	}
 
 	/** SKIPPED 的人读 message（模型信封/帧 result/续跑重放共用一份措辞）。 */
@@ -733,8 +855,9 @@ public class SpToolCallingManager implements ToolCallingManager {
 
 		String text;
 		boolean ok = true;
+		boolean timedOut = false;
 		try {
-			text = delegateSingle(prompt, pending);
+			text = executeWithTimeout(prompt, pending);
 			if (text == null) {
 				// orElse("") 出口：官方执行器没有回填该 toolCallId 的结果（既非成功也非已知失败）。
 				text = "";
@@ -747,6 +870,18 @@ public class SpToolCallingManager implements ToolCallingManager {
 				pending.setCode(null);
 			}
 		}
+		catch (ToolExecutionTimeoutException ex) {
+			// 超时面治理批② 第 3 项：独立执行超时 ⇒ outcome=timeout / code=TOOL_TIMEOUT / executed=false。
+			// 不抛给调用方（轮继续）、不 appendLedger（未判定为"执行过"），但保留对账提示
+			// （桩体可能已经产生部分副作用 —— 只是"到点没回来"与"执行成功"必须区分）。
+			log.warn("工具执行超时 runId={} tool={} toolCallId={} 上限={}", runId, pending.getName(),
+					pending.getToolCallId(), ex.getTimeout());
+			ok = false;
+			timedOut = true;
+			text = ex.getMessage() + "\n" + RECONCILIATION_NOTE;
+			pending.setOutcome(ToolOutcome.TIMEOUT.wire());
+			pending.setCode(ToolOutcome.CODE_TOOL_TIMEOUT);
+		}
 		catch (Exception ex) {
 			log.warn("工具执行失败 runId={} name={}", runId, pending.getName(), ex);
 			ok = false;
@@ -756,6 +891,9 @@ public class SpToolCallingManager implements ToolCallingManager {
 			text = "工具执行失败：" + ex.getMessage() + "\n" + RECONCILIATION_NOTE;
 			pending.setOutcome(ToolOutcome.FAILED.wire());
 			pending.setCode(code);
+		}
+		if (timedOut) {
+			return settleToolTimeout(runId, pending, text);
 		}
 		this.store.appendLedger(runId, pending, text);
 
@@ -777,6 +915,96 @@ public class SpToolCallingManager implements ToolCallingManager {
 		this.store.putPending(runId, fresh);
 		this.registry.of(runId).toolResult(fresh, ok, false, frameText(text));
 		return text;
+	}
+
+	/**
+	 * 带独立超时执行一次工具（超时面治理批② 第 3 项；{@code app.ai.tool.exec-timeout}）。
+	 *
+	 * <p>形态 = 提交到独立平台线程 + {@code Future#get(timeout)}；到点 {@code cancel(true)} 并抛
+	 * {@link ToolExecutionTimeoutException}（由调用方结算成 {@code timeout/TOOL_TIMEOUT}）。
+	 * <b>诚实边界</b>：{@code cancel(true)} 只能"请求中断"—— 不响应中断的桩体（纯 CPU 循环、
+	 * 不可中断的 IO）会继续在池线程上跑完，只是结果被丢弃；这正是"到点必须收口"的代价，
+	 * 也是把超时做成 opt-out（长任务免超时）之前必须先登记的理由。
+	 *
+	 * <p>线程池饱和（{@code AbortPolicy}）时退化为<b>同步执行、无超时</b> + WARN：宁可少一层兜底，
+	 * 也不能让工具调用卡在一个排队等槽位的状态里。
+	 */
+	private String executeWithTimeout(Prompt prompt, PendingToolCall pending) {
+		Duration timeout = this.properties.getTool().getExecTimeout();
+		if (timeout == null || timeout.isZero() || timeout.isNegative()) {
+			return delegateSingle(prompt, pending);
+		}
+		Future<String> future;
+		try {
+			// MDC 不随线程池继承：锚点（runId/sessionId）随任务进池，工具日志才不会变成孤儿行
+			future = TOOL_TIMEOUT_EXECUTOR.submit(AiTrace.wrapCallable(() -> delegateSingle(prompt, pending)));
+		}
+		catch (RejectedExecutionException ex) {
+			log.warn("工具超时监视线程池饱和，退化为同步执行（本次无独立超时）tool={} toolCallId={}", pending.getName(),
+					pending.getToolCallId());
+			return delegateSingle(prompt, pending);
+		}
+		try {
+			return future.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+		}
+		catch (TimeoutException ex) {
+			future.cancel(true);
+			throw new ToolExecutionTimeoutException(timeout, pending.getName());
+		}
+		catch (InterruptedException ex) {
+			Thread.currentThread().interrupt();
+			throw new StreamViolationException(StreamViolationException.CANCELLED,
+					"工具执行等待被中断，本轮按取消收尾（tool=" + pending.getName() + "）");
+		}
+		catch (ExecutionException ex) {
+			Throwable cause = ex.getCause() == null ? ex : ex.getCause();
+			if (cause instanceof RuntimeException runtime) {
+				throw runtime;
+			}
+			throw new IllegalStateException(cause);
+		}
+	}
+
+	/**
+	 * 超时结算（{@code executed=false} + 结局帧 + 回填模型）：<b>不写台账</b>、不占重放索引 ——
+	 * 台账记的是"执行过且知道结局"的事实，超时的结局是"不知道有没有副作用"，由
+	 * {@link #RECONCILIATION_NOTE} 提醒人工对账。
+	 */
+	private String settleToolTimeout(String runId, PendingToolCall pending, String text) {
+		PendingToolCall fresh = this.store.pending(runId, pending.getToolCallId());
+		if (fresh == null) {
+			fresh = pending;
+		}
+		fresh.setOutcome(ToolOutcome.TIMEOUT.wire());
+		fresh.setCode(ToolOutcome.CODE_TOOL_TIMEOUT);
+		fresh.setReason(ToolOutcome.CODE_TOOL_TIMEOUT);
+		fresh.setResultText(text);
+		fresh.setExecuted(false);
+		fresh.setExecutedBy(null);
+		fresh.setResolvedAtMs(System.currentTimeMillis());
+		fresh.setStatus(PendingToolCall.TIMEOUT);
+		this.store.putPending(runId, fresh);
+		this.registry.of(runId).toolResult(fresh, false, false, frameText(text));
+		log.warn("工具执行超时已结算（executed=false，轮继续）runId={} tool={} toolCallId={}", runId,
+				pending.getName(), pending.getToolCallId());
+		return text;
+	}
+
+	/** 工具执行超时的内部信号（不穿出本类：调用方一律结算成 {@code timeout/TOOL_TIMEOUT}）。 */
+	private static final class ToolExecutionTimeoutException extends RuntimeException {
+
+		private final Duration timeout;
+
+		ToolExecutionTimeoutException(Duration timeout, String toolName) {
+			super("工具执行超时（app.ai.tool.exec-timeout = " + timeout + "）：" + toolName
+					+ " 在时限内没有返回，本次调用已中止（未判定为执行成功）");
+			this.timeout = timeout;
+		}
+
+		Duration getTimeout() {
+			return this.timeout;
+		}
+
 	}
 
 	/**

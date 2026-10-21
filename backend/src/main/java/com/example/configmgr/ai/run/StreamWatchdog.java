@@ -14,8 +14,20 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
 /**
- * 单次尝试的流式看门狗（S4.2 §2 韧性棒的判定核心）：把"首包静默 / 事件间静默 / 总预算 / 取消"
+ * 单次尝试的流式看门狗（S4.2 §2 韧性棒的判定核心）：把"首包静默 / 事件间静默 / <b>段</b>预算 / 取消"
  * 四种"流已不再前进"的情形统一变成一次 {@link StreamViolationException}。
+ *
+ * <h2>段预算（2026-10-21 决策看板 {@code :14}「挂起恢复计时口径裁决」）</h2>
+ * 原判据是「轮开始 − 挂起等待 &gt; 300s」（扣除式）；现改为「<b>段开始</b> &gt; 300s」（重置式）：
+ * <b>挂起点段结束、恢复点段重置</b>。`{@code TOTAL_BUDGET}` 码名保留、语义改为「段」。
+ * <ul>
+ * <li>段起点由 {@link ToolActivityBeacon#segmentStartedAtMs(String, long)} 持有：轮开始/续跑入口播种，
+ * 每次挂起结束（决策/回灌/超时/取消）在 {@code endGateWait} 里前移；</li>
+ * <li>挂起进行中（{@link ToolActivityBeacon#inGateWait(String)}）<b>不判预算</b> —— 段已结束；</li>
+ * <li>{@link ToolActivityBeacon#gateWaitMs(String)} 保留但<b>只供观测</b>（日志/指标），不再参与判据。</li>
+ * </ul>
+ * 为什么必须配步数笼（{@code app.ai.resilience.max-tool-steps}）：段重置让"每段 300s"成立，
+ * 若同时放开工具步数，一轮可以靠反复挂起无限续命 —— 步数累计不重置正是这条的地板（看板 {@code :14}）。
  *
  * <h2>为什么不直接用 {@code Flux.timeout(...)}</h2>
  * 官方 {@code timeout} 只有"距上一个事件多久"的概念，而挂起等待（确认门与
@@ -50,15 +62,15 @@ public class StreamWatchdog implements AutoCloseable {
 
 	private final CancellationRegistry cancellations;
 
-	private final long turnStartedAtMs;
-
 	/**
-	 * 构造时刻已累计的挂起等待（毫秒）：重试后新尝试的扣除基线。
+	 * 段起点的<b>播种值</b>（本尝试构造时刻）。
 	 *
-	 * <p>总预算是<b>轮</b>维度的，故扣除量也是"本轮累计"，而不是"本次尝试累计" ——
-	 * 每次尝试的看门狗只扣自己这段窗口里新增的等待（超出基线之和），否则上一轮的等待会被重复扣。
+	 * <p>语义变更（2026-10-21 决策看板 {@code :14}）：本参数以前是"轮开始"，现在只是
+	 * {@link ToolActivityBeacon#segmentStartedAtMs(String, long)} 的兜底 —— 真正的段锚点由信标持有，
+	 * 恢复点（决策/回灌/续跑）会在工具循环线程上把它前移。看门狗每拍重读一次，因此运行中的段重置
+	 * 立刻生效。
 	 */
-	private final long gateWaitBaseMs;
+	private final long segmentSeedAtMs;
 
 	private final Consumer<StreamViolationException> onViolation;
 
@@ -79,16 +91,15 @@ public class StreamWatchdog implements AutoCloseable {
 	private final ScheduledFuture<?> future;
 
 	public StreamWatchdog(String runId, ScheduledExecutorService scheduler, AiProperties.Resilience config,
-			ToolActivityBeacon beacon, CancellationRegistry cancellations, long turnStartedAtMs,
+			ToolActivityBeacon beacon, CancellationRegistry cancellations, long segmentStartedAtMs,
 			Consumer<StreamViolationException> onViolation) {
 		this.runId = runId;
 		this.config = config;
 		this.beacon = beacon;
 		this.cancellations = cancellations;
-		this.turnStartedAtMs = turnStartedAtMs;
-		this.gateWaitBaseMs = beacon.gateWaitMs(runId);
+		this.segmentSeedAtMs = segmentStartedAtMs;
 		this.onViolation = onViolation;
-		this.lastUpstreamAtMs.set(turnStartedAtMs);
+		this.lastUpstreamAtMs.set(segmentStartedAtMs);
 		// 同进程取消的加速通道：监听者只做"当场判定"，权威态仍在 Redis
 		this.cancelListener = cancellations.onCancel(runId, () -> fire(StreamViolationException.CANCELLED,
 				"本轮对话已被取消（取消标志已置位），上游连接随即断开）"));
@@ -136,13 +147,23 @@ public class StreamWatchdog implements AutoCloseable {
 				fire(StreamViolationException.CANCELLED, "本轮对话已被取消（取消标志已置位）");
 				return;
 			}
-			// ② 总预算（墙钟，<b>扣除挂起等待</b>）：等人（确认门 / generative_form）的时间不计入
-			// 预算 —— 否则"用户在想"会被判成 TOTAL_BUDGET，把无上限的等待变成 300s 的死线。
-			long elapsedMs = elapsedSinceTurnStart(now);
-			if (elapsedMs >= this.config.getTotalBudget().toMillis()) {
-				fire(StreamViolationException.TOTAL_BUDGET, "本轮总预算 " + this.config.getTotalBudget()
-						+ " 已耗尽（app.ai.resilience.total-budget；人工等待 " + gateWaitMs() + "ms 已扣除）");
-				return;
+			// ② 段预算（决策看板 :14「段级预算重置式」）：判据 = 当前段起点，不跨段累计。
+			// 挂起点（确认门 / 无超时工具 suspend）段已结束 ⇒ 等待期<b>不判</b>；
+			// 恢复点（决策/回灌/续跑）由 ToolActivityBeacon#endGateWait / markSegmentStart 重置段起点，
+			// 于是每段各自重新拥有 app.ai.resilience.total-budget。code 名沿用 TOTAL_BUDGET（码名保留）。
+			if (!this.beacon.inGateWait(this.runId)) {
+				long segmentStart = this.beacon.segmentStartedAtMs(this.runId, this.segmentSeedAtMs);
+				// 轻装配面（mock/无锚点）读回 0 ⇒ 按播种值算（否则"没有锚点"会当场判成预算耗尽）
+				if (segmentStart <= 0L) {
+					segmentStart = this.segmentSeedAtMs;
+				}
+				long segmentElapsedMs = now - segmentStart;
+				if (segmentElapsedMs >= this.config.getTotalBudget().toMillis()) {
+					fire(StreamViolationException.TOTAL_BUDGET, "本段预算 " + this.config.getTotalBudget()
+							+ " 已耗尽（app.ai.resilience.total-budget，段级；本段已用 " + segmentElapsedMs
+							+ "ms，本轮累计人工等待 " + this.beacon.gateWaitMs(this.runId) + "ms 不计入）");
+					return;
+				}
 			}
 			// ③ 硬规范①：工具执行期间不计静默（挂起等待本质上就是上游静默）
 			if (this.beacon.isActive(this.runId)) {
@@ -168,18 +189,14 @@ public class StreamWatchdog implements AutoCloseable {
 	}
 
 	/**
-	 * 本轮"计入预算"的已用时长（毫秒）= 墙钟 − 挂起等待（相对本看门狗构造时刻的新增量）。
+	 * 本段"计入预算"的已用时长（毫秒）= 墙钟 − 段起点。
 	 *
-	 * <p>只扣本尝试窗口内新增的等待：{@link #gateWaitBaseMs} 是构造时已累计的量，重试后
-	 * 新看门狗从新基线起算，不会把上一次尝试的等待重复扣除。
+	 * <p>段起点由信标持有（{@link ToolActivityBeacon#segmentStartedAtMs(String, long)}），恢复点会在
+	 * 工具循环线程上把它前移；这里每拍现读，因此运行中的段重置立刻生效。
 	 */
-	private long elapsedSinceTurnStart(long nowMs) {
-		return (nowMs - this.turnStartedAtMs) - gateWaitMs();
-	}
-
-	/** 本尝试窗口内新增的挂起等待（毫秒）。 */
-	private long gateWaitMs() {
-		return Math.max(0L, this.beacon.gateWaitMs(this.runId) - this.gateWaitBaseMs);
+	long segmentElapsedMs(long nowMs) {
+		long start = this.beacon.segmentStartedAtMs(this.runId, this.segmentSeedAtMs);
+		return nowMs - (start <= 0L ? this.segmentSeedAtMs : start);
 	}
 
 	private void fire(String code, String message) {

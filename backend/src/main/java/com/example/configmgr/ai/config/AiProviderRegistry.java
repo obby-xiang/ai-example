@@ -12,10 +12,13 @@ import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.ai.openai.ReasoningAwareOpenAiChatModel;
 import org.springframework.ai.openai.api.OpenAiApi;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.http.client.reactive.JdkClientHttpConnector;
 import org.springframework.retry.support.RetryTemplate;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
+import org.springframework.web.reactive.function.client.WebClient;
 
+import java.time.Duration;
 import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Optional;
@@ -65,6 +68,22 @@ public class AiProviderRegistry {
     private final Map<String, ProviderRuntime> runtimes = new ConcurrentHashMap<>();
 
     private final Object buildLock = new Object();
+
+    /**
+     * 上游流式连接的<b>读空闲</b>兜底（超时面治理批② 第 6 项；决策看板 {@code :16} = 300s）。
+     *
+     * <p>角色是"半开连接回收"：既不是首包/事件间判据（那两档 30s/90s 归看门狗），
+     * 也不是段预算（300s 归看门狗，看板 {@code :14}）。三者到点行为的关系是
+     * <b>watchdog 判据优先</b>：90s &lt; 300s ⇒ 静默类失败总由看门狗先判，
+     * socket 层只在"连接已死但 TCP 未感知"（半开）时兜最后一道。
+     *
+     * <p>为什么不用 reactor-netty：本仓的编译依赖里<b>没有</b> {@code reactor-netty-http}
+     * （{@code spring-webflux} 在，但 starter 未引入），{@code WebClient.builder()} 的缺省连接器
+     * 实际落在 JDK {@code HttpClient}（Spring 6.2 的 {@code DefaultWebClientBuilder#initConnector}）。
+     * 因此这里显式固定成 {@link JdkClientHttpConnector} 并设读超时 —— 依赖面零新增，
+     * 语义面从"没有读超时"变成"有 300s 读空闲超时"。
+     */
+    static final Duration UPSTREAM_SOCKET_IDLE_TIMEOUT = Duration.ofSeconds(300);
 
     public AiProviderRegistry(AiConfigService configService, SpToolCallingManager toolCallingManager,
             MessageChatMemoryAdvisor memoryAdvisor, ObjectProvider<RetryTemplate> retryTemplate,
@@ -200,7 +219,21 @@ public class AiProviderRegistry {
             .baseUrl(resolved.baseUrl())
             .apiKey(resolved.apiKey())
             .completionsPath(resolved.completionsPath())
+            // 流式通道专用连接器（见 UPSTREAM_SOCKET_IDLE_TIMEOUT）：非流式走 RestClient，不受影响
+            .webClientBuilder(upstreamWebClientBuilder())
             .build();
+    }
+
+    /**
+     * 上游流式 {@link WebClient} 的构造点（唯一）：读空闲 300s 兜底。
+     *
+     * <p>只改"读操作的最长等待"（per-read idle），不是整条响应的总时长 —— 持续吐字的长轮
+     * 不会被它掐断（每个分片都重置计时），只有真正死掉的半开连接才会被回收。
+     */
+    WebClient.Builder upstreamWebClientBuilder() {
+        JdkClientHttpConnector connector = new JdkClientHttpConnector();
+        connector.setReadTimeout(UPSTREAM_SOCKET_IDLE_TIMEOUT);
+        return WebClient.builder().clientConnector(connector);
     }
 
     private ProviderRuntime newRuntime(AiConfigService.ResolvedProvider resolved, String key, OpenAiApi api) {

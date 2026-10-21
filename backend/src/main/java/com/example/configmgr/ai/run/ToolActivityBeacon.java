@@ -21,9 +21,12 @@ import java.util.concurrent.atomic.AtomicLong;
  * "上游事件流静默"——若按配置值（默认 90s）直接判定，一次 120s 的人工确认就会被误判成断流。
  * {@link #isActive(String)} 把工具执行窗口告知 {@link StreamWatchdog}，
  * 使静默判定在工具执行期间<b>不参与</b>，退出后以退出时刻为锚点重新计时。</li>
- * <li><b>人机预算分离</b>（用户裁决 2026-10-20 第 3 条）：挂起等待（{@link #beginGateWait} /
- * {@link #endGateWait}）累计成 {@link #gateWaitMs(String)}，总预算判据按它扣除 ——
- * 等人的时间不计入 {@code app.ai.resilience.total-budget}。</li>
+ * <li><b>人机预算分离 → 段级预算</b>（2026-10-20 裁决第 3 条起步，2026-10-21 决策看板
+ * {@code :14} 改为「段级预算重置式」）：挂起等待（{@link #beginGateWait} / {@link #endGateWait}）
+ * 仍累计成 {@link #gateWaitMs(String)}（<b>只供日志/指标</b>，不再参与预算判据）；预算判据改看
+ * <b>段起点</b>（{@link #segmentStartedAtMs(String, long)}）—— 挂起点段结束（{@link #inGateWait}），
+ * 恢复点（决策/回灌/续跑）段重置，于是每段各自重新拥有
+ * {@code app.ai.resilience.total-budget}（300s）。</li>
  * </ol>
  *
  * <p>
@@ -46,16 +49,27 @@ public class ToolActivityBeacon {
 	/**
 	 * runId → 累计的<b>挂起等待</b>时长（毫秒；已结束的等待窗口之和）。
 	 *
-	 * <p>人机预算分离（用户裁决 2026-10-20 第 3 条）：确认门 / 前端工具等待人的那段时间
-	 * <b>不计入</b> {@code app.ai.resilience.total-budget}。挂起等待是"人在想"，不是"上游不动"，
-	 * 用墙钟把它算进轮次预算会让"等人"与"模型/工具慢"被同一个 300s 掐死。
-	 * {@link StreamWatchdog} 与 {@code ResilientChatService} 的总预算判据都按
-	 * {@link #gateWaitMs(String)} 扣除。
+	 * <p><b>语义变更（2026-10-21 决策看板 {@code :14}）</b>：本量<b>不再</b>从预算里扣除 ——
+	 * 段级预算重置式把「等人」表达成"挂起点段结束、恢复点段重置"（见
+	 * {@link #segmentStartedAtMs(String, long)}）。本量保留为<b>观测面</b>
+	 * （日志批的 {@code turn_end.gateWaitMs} 与排障口径依赖它），删掉会让"这一轮为什么慢"失去一半证据。
 	 */
 	private final ConcurrentMap<String, AtomicLong> gateWaitFinishedMs = new ConcurrentHashMap<>();
 
 	/** runId → 当前挂起等待的起点（毫秒；0 = 当前不在等待）。 */
 	private final ConcurrentMap<String, AtomicLong> gateWaitSinceMs = new ConcurrentHashMap<>();
+
+	/**
+	 * runId → 当前<b>段</b>的起点（毫秒）。
+	 *
+	 * <p>段 = 一次"机器在干活"的连续窗口：轮开始 / 决策后恢复 / 回灌后恢复 / 续跑。
+	 * 决策看板 {@code :14}（2026-10-21）：段预算重置式 —— 挂起点段结束，恢复点段重置，
+	 * 每段各自重新拥有 {@code app.ai.resilience.total-budget}。<b>不跨段累计</b>。
+	 *
+	 * <p>为什么放在信标而不是看门狗字段里：挂起发生在<b>工具循环线程</b>上，而判定发生在
+	 * 看门狗的调度线程上 —— 同一个 runId 的两条路径只有共享一个进程内锚点才能表达"段重置"。
+	 */
+	private final ConcurrentMap<String, AtomicLong> segmentStartedAtMs = new ConcurrentHashMap<>();
 
 	private final Map<String, Map<String, Object>> lastFinished = new ConcurrentHashMap<>();
 
@@ -113,7 +127,11 @@ public class ToolActivityBeacon {
 		this.gateWaitSinceMs.computeIfAbsent(runId, key -> new AtomicLong()).set(System.currentTimeMillis());
 	}
 
-	/** 退出挂起等待：把本段等待时长并进累计量（幂等；未在等待时调用无副作用）。 */
+	/**
+	 * 退出挂起等待：把本段等待时长并进累计量（幂等；未在等待时调用无副作用），
+	 * 并把<b>段起点</b>前移到此刻 —— 这就是「恢复点段重置」的唯一落点
+	 * （决策/回灌/超时/取消四条收尾路径都经 {@code ConfirmGate} 的 finally 走到这里）。
+	 */
 	public void endGateWait(String runId) {
 		AtomicLong since = this.gateWaitSinceMs.get(runId);
 		if (since == null) {
@@ -123,14 +141,17 @@ public class ToolActivityBeacon {
 		if (start > 0) {
 			long waited = Math.max(0L, System.currentTimeMillis() - start);
 			this.gateWaitFinishedMs.computeIfAbsent(runId, key -> new AtomicLong()).addAndGet(waited);
+			// 段重置：恢复点给本段一个全新的预算时钟
+			this.segmentStartedAtMs.computeIfAbsent(runId, key -> new AtomicLong())
+				.set(System.currentTimeMillis());
 		}
 	}
 
 	/**
-	 * 该轮累计的挂起等待时长（毫秒，<b>含</b>当前正在进行的等待）—— 总预算判据的扣除量。
+	 * 该轮累计的挂起等待时长（毫秒，<b>含</b>当前正在进行的等待）—— <b>纯观测量</b>。
 	 *
-	 * <p>含正在进行的等待是刻意的：看门狗每拍都要判预算，若只扣"已结束的窗口"，一次长达
-	 * 十几分钟的表单填写会在整个等待期里被反复算成"预算已耗尽"。
+	 * <p>2026-10-21 起它不再参与预算判据（判据看段起点，见 {@link #segmentStartedAtMs(String, long)}），
+	 * 但仍是日志/排障的一等证据：它回答"这一轮里人占了多少时间"。
 	 */
 	public long gateWaitMs(String runId) {
 		long finished = 0L;
@@ -152,6 +173,35 @@ public class ToolActivityBeacon {
 	/** 该轮当前是否有工具正在执行（静默判定的抑制条件，硬规范①）。 */
 	public boolean isActive(String runId) {
 		return this.active.containsKey(runId);
+	}
+
+	/**
+	 * 是否正处在挂起等待（确认门 / 前端工具 / 无超时工具）里 —— 即<b>段已结束</b>。
+	 *
+	 * <p>预算判据在段结束期间<b>暂停</b>：否则一次十几分钟的表单填写会在等待期里被判成
+	 * {@code TOTAL_BUDGET}，把"无上限的等待"变成 300s 的死线（决策看板 {@code :14} 的挂起点）。
+	 */
+	public boolean inGateWait(String runId) {
+		AtomicLong since = this.gateWaitSinceMs.get(runId);
+		return since != null && since.get() > 0L;
+	}
+
+	/**
+	 * 标记<b>段起点</b>（轮开始 / 续跑入口）。已存在则前移 —— 调用点就是"新段开始"的事实。
+	 */
+	public void markSegmentStart(String runId, long startedAtMs) {
+		this.segmentStartedAtMs.computeIfAbsent(runId, key -> new AtomicLong()).set(startedAtMs);
+	}
+
+	/**
+	 * 当前段起点；尚无记录时以 {@code fallback} 播种并返回它。
+	 *
+	 * <p>看门狗每拍读一次（而非在构造时缓存在字段里）：恢复点重置发生在本进程的<b>另一条线程</b>
+	 * （工具循环线程的 {@code endGateWait}），缓存值会停在旧段上。
+	 */
+	public long segmentStartedAtMs(String runId, long fallback) {
+		AtomicLong start = this.segmentStartedAtMs.computeIfAbsent(runId, key -> new AtomicLong(fallback));
+		return start.get();
 	}
 
 	/** 该轮是否已经"开始过"工具执行（正在执行也算）——重试副作用判定的进程内一侧。 */
@@ -178,6 +228,7 @@ public class ToolActivityBeacon {
 		this.lastFinished.remove(runId);
 		this.gateWaitFinishedMs.remove(runId);
 		this.gateWaitSinceMs.remove(runId);
+		this.segmentStartedAtMs.remove(runId);
 		// lastActivityAtMs 故意保留：重试判定要看退出时刻（TTL 由轮的生命周期兜住）
 	}
 
