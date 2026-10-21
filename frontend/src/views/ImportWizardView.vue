@@ -33,8 +33,13 @@
 
       <DefSelector v-model="selectedDefs" :defs="defs" :loading="defsLoading" :disabled="isReadOnly" />
 
-      <div class="flex items-center gap-3 my-3">
-        <el-button v-if="!isReadOnly" size="small" :disabled="!selectedDefs.length" :loading="busy === 'templates'" @click="downloadTemplates">
+      <div
+        ref="aiUploadRowRef"
+        class="flex items-center gap-3 my-3"
+        @dragover="onAiDragOver"
+        @drop="onAiDrop"
+      >
+        <el-button v-if="!isReadOnly" size="small" :disabled="!selectedDefs.length" :loading="busy === 'templates'" data-ai-ref="import.upload.templates" data-ai-risk="consequential" @click="downloadTemplates">
           下载模板（{{ selectedDefs.length > 1 ? 'zip' : 'xlsx' }}）
         </el-button>
         <el-upload
@@ -45,11 +50,11 @@
           :disabled="!selectedDefs.length || busy === 'upload'"
           :on-change="handleUpload"
         >
-          <el-button size="small" type="primary" :loading="busy === 'upload'" :disabled="!selectedDefs.length">
+          <el-button size="small" type="primary" :loading="busy === 'upload'" :disabled="!selectedDefs.length" data-ai-ref="import.upload.choose" data-ai-risk="consequential">
             上传 xlsx / zip
           </el-button>
         </el-upload>
-        <el-button v-if="!isReadOnly" size="small" :disabled="!selectedDefs.length" :loading="busy === 'flush'" @click="flushEditors">
+        <el-button v-if="!isReadOnly" size="small" :disabled="!selectedDefs.length" :loading="busy === 'flush'" data-ai-ref="import.upload.flush" data-ai-risk="consequential" @click="flushEditors">
           保存草稿到服务端
         </el-button>
         <span class="text-xs text-[#909399]">
@@ -232,6 +237,8 @@ import { jobsApi } from '@/api/jobs'
 import { tasksApi } from '@/api/tasks'
 import { useTaskStore } from '@/stores/task'
 import { registerPageHandler, unregisterPageHandler, useWorkspaceStore } from '@/stores/workspace'
+import { useAiStore } from '@/stores/ai'
+import { noteAiPage, registerAiRegion, unregisterAiRegion } from '@/utils/ai-regions'
 import { buildTemplateWorkbookJson, downloadBlob, xlsxFileName, type ExcelRowIssue } from '@/utils/excel'
 import type { SheetAdapter } from '@/utils/sheet-tools'
 import { watchJob, type JobChannelState } from '@/utils/job-watch'
@@ -273,6 +280,8 @@ const route = useRoute()
 const router = useRouter()
 const workspace = useWorkspaceStore()
 const taskStore = useTaskStore()
+/** AI 可视可操作专项：上传交接的成功联动（用户自己点了上传也要收口 AI 的等待）。 */
+const aiStore = useAiStore()
 
 const taskId = ref<number | null>(readTaskId())
 const task = ref<Task | null>(null)
@@ -566,19 +575,22 @@ async function downloadTemplates(): Promise<void> {
   }
 }
 
-async function handleUpload(uploadFile: UploadFile): Promise<void> {
-  const file = uploadFile.raw
-  if (!file) {
-    return
-  }
+/**
+ * AI 可视可操作专项：单个文件的上传（`handleUpload` 与上传交接共用的**唯一**链路）。
+ *
+ * 抽出来后两条入口（用户手点 el-upload / 交接卡的 `import.receiveFile`）行为完全一致：
+ * 选择持久化 → `tasksApi.uploadFile` → 匹配回填 → 刷新编辑区 → 通知 AI 交接收口。
+ * 返回一句页面摘要（**不含路径**），作为 `ui_request_upload` 的回灌素材。
+ */
+async function uploadOne(file: File): Promise<string> {
   if (taskId.value === null || selectedDefs.value.length === 0) {
     ElMessage.warning('请先勾选配置项')
-    return
+    return '未上传：请先勾选配置项'
   }
   busy.value = 'upload'
   try {
     await persistSelection()
-    const result = await tasksApi.uploadFile(taskId.value, file)
+    const result = await tasksApi.uploadFile(taskId.value!, file)
     const matched = result.matchedFiles ?? []
     for (const item of matched) {
       uploadedFiles[item.defCode] = item.fileName
@@ -597,11 +609,25 @@ async function handleUpload(uploadFile: UploadFile): Promise<void> {
     // 用服务端刚存下的文件刷新编辑区（保证"所见即服务端所有"）
     await nextTick()
     await loadEditors(true)
+    const summary = `已上传并匹配 ${matched.length} 个文件`
+    // AI 上传交接联动收口：用户自己点了上传也立即回灌，避免 AI 一直等（无活动交接时是空操作）
+    void aiStore.notifyAiUploadDone(summary)
+    return summary
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '文件上传失败')
+    const message = error instanceof Error ? error.message : '文件上传失败'
+    ElMessage.error(message)
+    return `上传失败：${message}`
   } finally {
     busy.value = null
   }
+}
+
+async function handleUpload(uploadFile: UploadFile): Promise<void> {
+  const file = uploadFile.raw
+  if (!file) {
+    return
+  }
+  await uploadOne(file)
 }
 
 /** 载入各配置项的编辑区：有 UPLOAD 文件用文件，否则用客户端生成的模板。 */
@@ -1046,8 +1072,13 @@ const HANDLER_NAMES = [
   'import.startImport',
   'import.startPublish',
   'import.nextStep',
-  'sheet.current'
+  'sheet.current',
+  // AI 可视可操作专项：上传交接把用户手势选到的 File 交回页面既有上传链
+  'import.receiveFile'
 ]
+
+/** AI 可视可操作专项：上传区（区域围栏的 root；`data-ai-ref` 挂在其中的三个按钮上）。 */
+const aiUploadRowRef = ref<HTMLElement | null>(null)
 
 function registerHandlers(): void {
   // AI 表格操作专项：当前激活编辑标签页的表格适配器（与导出向导同一套 `sheet.current` 契约）。
@@ -1128,6 +1159,19 @@ function registerHandlers(): void {
       return '任务已结束，仅供查看；上传入口在只读页面不可用，本次未执行上传。'
     }
     return '上传文件需要浏览器文件句柄：请提示用户点击「上传 xlsx / zip」选择文件（文件名需包含配置项编码）。'
+      + '若对话内已出现「选择文件」按钮，请让用户点它（那是同一套上传链的交接入口）。'
+  })
+
+  // AI 可视可操作专项：上传交接回手 —— 只收 File 句柄（**永不接受路径**），走既有 uploadOne 链
+  registerPageHandler('import.receiveFile', async (payload) => {
+    if (isReadOnly.value) {
+      return '任务已结束，仅供查看；本次未上传任何文件。'
+    }
+    const file = payload.file
+    if (!(file instanceof File)) {
+      return { ok: false, reason: '未接收到文件句柄，本次未上传任何文件。' }
+    }
+    return await uploadOne(file)
   })
 
   registerPageHandler('import.startPrecheck', async () => {
@@ -1160,12 +1204,63 @@ function registerHandlers(): void {
   })
 }
 
+/**
+ * AI 可视可操作专项（原裁 4 = A）：上传回退的**拖拽**入口。
+ *
+ * 只在存在活动交接时接管拖放（其余时刻保持页面原有行为，视觉零变化）：
+ * 交接卡在浏览器无 `showOpenFilePicker` 时提示「拖到高亮区域」，这里就是那个区域。
+ * 拖进来的 `File` 与手势选中的走**同一条** `uploadOne`。
+ */
+function onAiDragOver(event: DragEvent): void {
+  if (aiStore.activeUploadHandoff) {
+    event.preventDefault()
+  }
+}
+
+function onAiDrop(event: DragEvent): void {
+  if (!aiStore.activeUploadHandoff) {
+    return
+  }
+  event.preventDefault()
+  const file = event.dataTransfer?.files?.[0]
+  if (file) {
+    void uploadOne(file)
+  }
+}
+
 onMounted(async () => {
   workspace.enterPage({ pageId: 'import', page: 'import', taskType: 'IMPORT', step: STEP_KEYS[0], taskId: taskId.value })
+  // AI 可视可操作专项：声明 AI 当前页（换页才推进 epoch），再注册上传区
+  noteAiPage('import')
   registerHandlers()
+  registerAiUploadRegion()
   await Promise.all([loadDefinitions(), loadTask()])
   await loadEditors()
 })
+
+/**
+ * AI 可视可操作专项：注册上传区（区域围栏的唯一入口）。
+ *
+ * 三个按钮都显式标 `consequential`（下载模板 = 数据出域；上传 = 交出字节；保存草稿 = 服务端写）
+ * ⇒ 通用原语 `ui_click` **一次都不会点**它们；上传只能走 `ui_request_upload` 的交接卡。
+ * 视觉零变化：这里只加属性，不改任何 class / 结构。
+ */
+function registerAiUploadRegion(): void {
+  const root = aiUploadRowRef.value
+  if (!root) {
+    return
+  }
+  registerAiRegion({
+    id: 'import.upload',
+    root,
+    risk: 'consequential',
+    page: 'import',
+    label: '上传区（导入向导第 1 步）',
+    uploadEntry: 'import.upload.choose',
+    readOnly: () => isReadOnly.value,
+    receiveFile: (file: File) => uploadOne(file)
+  })
+}
 
 onBeforeUnmount(() => {
   // 卸载/结束：释放全部在途订阅（原 registry.disposeAll 语义；dispose 会经 onDisposed 摘柄，
@@ -1175,6 +1270,9 @@ onBeforeUnmount(() => {
   }
   jobWatchDisposes.clear()
   HANDLER_NAMES.forEach(unregisterPageHandler)
+  // AI 可视可操作专项：区域漏收 = 跨页脏 ref（isConnected 拦得住"元素没了"，
+  // 拦不住"ref 指向另一页同名元素"）
+  unregisterAiRegion('import.upload')
 })
 
 async function createAndBindTask(): Promise<void> {

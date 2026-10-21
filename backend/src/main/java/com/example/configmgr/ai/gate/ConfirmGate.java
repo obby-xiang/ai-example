@@ -133,7 +133,10 @@ public class ConfirmGate {
 	 */
 	static final Set<String> HUMAN_WAIT_FRONTEND_TOOLS = Set.of(
 			GenerativeFormRules.TOOL_NAME,
-			"replace_values", "update_rows", "normalize_column", "undo_last_sheet_edit");
+			"replace_values", "update_rows", "normalize_column", "undo_last_sheet_edit",
+			// AI 可视可操作专项：上传交接等的是**用户手势**（浏览器只在 transient activation 里
+			// 给文件句柄），既不能判超时，也不能让 120s 机器回执兜底把它掐掉。
+			"ui_request_upload");
 
 	private final RunStore store;
 

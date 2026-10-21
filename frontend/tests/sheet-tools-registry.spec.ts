@@ -20,9 +20,10 @@ beforeEach(() => {
   unregisterPageHandler('sheet.current')
 })
 
-describe('T-19 注册表：前端工具 2 → 10', () => {
+describe('T-19 注册表：前端工具 2 → 10 → 17', () => {
   it('八个表格工具全部登记，写侧风险 WRITE、读侧 READ', () => {
-    expect(FRONTEND_TOOLS).toHaveLength(10)
+    // 2 既有 + 8 表格 + 7 界面原语（AI 可视可操作专项）；工具族增加时本计数同步提高（只升不降）
+    expect(FRONTEND_TOOLS).toHaveLength(17)
     for (const name of SHEET_TOOL_NAMES) {
       const descriptor = findFrontendTool(name)
       expect(descriptor, `${name} 已登记`).not.toBeNull()
