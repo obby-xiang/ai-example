@@ -2,6 +2,7 @@ package com.example.configmgr.ai.gate;
 
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.form.GenerativeFormRules;
+import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.LeaseService;
 import com.example.configmgr.ai.run.PendingToolCall;
@@ -489,6 +490,16 @@ public class ConfirmGate {
 		String sessionId = snapshotSessionId(runId);
 		// 人机预算分离（裁决第 3 条）：等待窗口内的时间累计到信标上，总预算判据据此扣除
 		this.beacon.beginGateWait(runId);
+		// 日志链路批：等待期间的心跳/续租/取消都是这条线程产的 —— 锚点在这里续上，
+		// 于是"挂起期"的每一行都能按 runId 归到这一轮（跨实例续跑时由 ResumeService 的入口绑）
+		if (sessionId != null) {
+			AiTrace.bind(runId, sessionId);
+		}
+		// 日志链路批：卡已发出、等待开始 —— 这一行是"这一轮为什么慢"的第一个解释项
+		AiTrace.eventOn(runId, sessionId, "approval_suspend", "toolCallId", pending.getToolCallId(), "tool",
+				pending.getName(), "kind", confirm ? "confirm" : "frontend",
+				"timeoutS", timeoutSeconds == null ? "none" : timeoutSeconds,
+				"preflight", pending.getPreflight() != null);
 		try {
 			while (true) {
 				if (this.cancellations.isCancelled(runId)) {
@@ -759,6 +770,7 @@ public class ConfirmGate {
 		}
 		log.info("挂起等待被取消 runId={} toolCallId={} kind={} 已等待={}s", runId, pending.getToolCallId(),
 				confirm ? "confirm" : "frontend-tool", (System.currentTimeMillis() - startedAt) / 1000);
+		traceDecision(runId, pending.getToolCallId(), "cancel", fresh, "ACCEPTED", "user");
 		return fresh;
 	}
 
@@ -791,6 +803,7 @@ public class ConfirmGate {
 				"前端工具 " + fresh.getName() + " 未在 " + timeoutSeconds + " 秒内收到前端回执，本次调用结局未知（不表示未发生）。");
 		this.store.putPending(runId, fresh);
 		this.registry.of(runId).frontendToolResult(fresh, false, fresh.getResultText());
+		traceDecision(runId, pending.getToolCallId(), "timeout", fresh, "ACCEPTED", "system");
 		return fresh;
 	}
 
@@ -871,6 +884,18 @@ public class ConfirmGate {
 	}
 
 	/**
+	 * 人工决策（写入 + 结构化留痕）：语义与 {@link #doSubmitDecision} 逐字相同，
+	 * 本方法只多一件事 —— 无论结局（含 {@code NOT_FOUND}/{@code DUPLICATE}）都落一行
+	 * {@code event=approval_decided}，让"有人点过、但没生效"这类形态在日志里也有痕迹。
+	 */
+	public Submission submitDecision(String runId, String toolCallId, boolean approved, String reason) {
+		Submission submission = doSubmitDecision(runId, toolCallId, approved, reason);
+		traceDecision(runId, toolCallId, approved ? "approve" : "reject", submission.pending(),
+				String.valueOf(submission.outcome()), "user");
+		return submission;
+	}
+
+	/**
 	 * 人工决策：<b>抢决策 guard</b> → 先写 Redis，再发回执帧，最后唤醒（帧先于它唤起的后果）。
 	 * 重复提交按状态幂等拒绝（SP-01d V-d2B）。
 	 *
@@ -893,7 +918,7 @@ public class ConfirmGate {
 	 * 此时按"本次抢到"继续 —— 语义回落到批②b 之前的"实例内互斥"口径，而不是把一次合法提交
 	 * 打成 NPE。这是刻意的降级分支，不是给生产路径留的后门。
 	 */
-	public Submission submitDecision(String runId, String toolCallId, boolean approved, String reason) {
+	private Submission doSubmitDecision(String runId, String toolCallId, boolean approved, String reason) {
 		PendingToolCall pending = pendingForWrite(runId, toolCallId);
 		if (pending == null) {
 			return new Submission(Outcome.NOT_FOUND, null, false, null);
@@ -944,6 +969,37 @@ public class ConfirmGate {
 			woke = signal(runId, toolCallId);
 		}
 		return new Submission(Outcome.ACCEPTED, pending, woke, null, maybeTriggerResume(runId, woke));
+	}
+
+	/**
+	 * 决策落地的<b>唯一</b>结构化日志出口（日志链路批）：{@code event=approval_decided}。
+	 *
+	 * <p>四个决策来源（人工批准/拒绝、前端回灌、整轮取消、前端超时）都经过这里 —— 排查"这一轮到底
+	 * 是卡在人身上、还是卡在机器上"只需要按 runId 拉出这些行看 {@code waitedMs} 与 {@code actor}。
+	 *
+	 * @param decision 决策类型（{@code approve}/{@code reject}/{@code frontend_result}/{@code cancel}/{@code timeout}）
+	 * @param outcome  提交结局（{@code ACCEPTED}/{@code DUPLICATE}/{@code NOT_FOUND} …）
+	 * @param actor    谁拍的板（{@code user}=人；{@code system}=超时等系统动作）
+	 */
+	private void traceDecision(String runId, String toolCallId, String decision, PendingToolCall pending,
+			String outcome, String actor) {
+		long waitedMs = -1L;
+		if (pending != null && pending.getResolvedAtMs() > 0 && pending.getReqAtMs() > 0) {
+			waitedMs = Math.max(0L, pending.getResolvedAtMs() - pending.getReqAtMs());
+		}
+		AiTrace.eventOn(runId, sessionOf(runId), "approval_decided", "toolCallId", toolCallId, "decision",
+				decision, "actor", actor, "outcome", outcome, "waitedMs", waitedMs,
+				"tool", pending == null ? null : pending.getName(),
+				"status", pending == null ? null : pending.getStatus());
+	}
+
+	/**
+	 * 决策行的 sessionId：<b>先看当前线程的 MDC</b>（驱动线程/等待线程本来就有），
+	 * 没有才回查快照 —— 决策路径对时延敏感，不为一行日志多付一次 Redis 读。
+	 */
+	private String sessionOf(String runId) {
+		String fromMdc = AiTrace.currentSessionId();
+		return fromMdc != null ? fromMdc : snapshotSessionId(runId);
 	}
 
 	/**
@@ -1068,6 +1124,15 @@ public class ConfirmGate {
 	 * （放弃是更高的语义优先级）。
 	 */
 	public Submission submitFrontendResult(String runId, String toolCallId, String result, String source,
+			boolean cancelled, String outcome) {
+		Submission submission = doSubmitFrontendResult(runId, toolCallId, result, source, cancelled, outcome);
+		traceDecision(runId, toolCallId, cancelled ? "frontend_cancel" : "frontend_result", submission.pending(),
+				String.valueOf(submission.outcome()), "user");
+		return submission;
+	}
+
+	/** 回灌的写入本体（{@link #submitFrontendResult} 去掉结构化留痕的那一层）。 */
+	private Submission doSubmitFrontendResult(String runId, String toolCallId, String result, String source,
 			boolean cancelled, String outcome) {
 		PendingToolCall pending = pendingForWrite(runId, toolCallId);
 		if (pending == null) {

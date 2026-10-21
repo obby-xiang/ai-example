@@ -3,6 +3,7 @@ package com.example.configmgr.ai.gate;
 import com.example.configmgr.common.ErrorCodes;
 
 import com.example.configmgr.ai.memory.MessageJsonCodec;
+import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.RunRegistry;
@@ -317,6 +318,13 @@ public class SpToolCallingManager implements ToolCallingManager {
 				// 副作用信标（韧性棒）：工具开始执行即留下痕迹 ——
 				// ① 让看门狗在工具执行期间不计静默（硬规范①）；② 让"已产出内容前先有副作用"的重试被拦住。
 				this.beacon.enter(runId, pending.getName(), pending.getKind());
+				// 日志链路批：工具生命周期的左端。这一行之后必然有对应的 tool_call_end（同一 toolCallId）
+				AiTrace.eventOn(runId, snapshot.getSessionId(), "tool_call_start", "toolCallId", pending.getToolCallId(),
+						"tool", pending.getName(), "kind", pending.getKind(),
+						"approval", PendingToolCall.KIND_CONFIRM.equals(pending.getKind())
+								|| PendingToolCall.KIND_FRONTEND.equals(pending.getKind()),
+						"index", responses.size());
+				long toolStartedAtMs = System.currentTimeMillis();
 				String text;
 				try {
 					// ===== 防线③：执行前复查 scope（T1）。越 scope 一律不执行、不认领、不记台账 =====
@@ -341,6 +349,12 @@ public class SpToolCallingManager implements ToolCallingManager {
 				// unknown。executeOnce/gate 写的是外置存储里的新副本，故此处重读（缺失则回落原对象）。
 				PendingToolCall settled = this.store.pending(runId, pending.getToolCallId());
 				PendingToolCall source = settled == null ? pending : settled;
+				// 日志链路批：工具生命周期的右端 —— 结局分类沿用条目真值（不另造一套口径）
+				AiTrace.eventOn(runId, snapshot.getSessionId(), "tool_call_end", "toolCallId", pending.getToolCallId(),
+						"tool", pending.getName(), "kind", pending.getKind(),
+						"ms", System.currentTimeMillis() - toolStartedAtMs, "ok", source.effectiveOutcome().ok(),
+						"outcome", source.effectiveOutcome().wire(), "code", source.effectiveCode(),
+						"executed", source.isExecuted(), "chars", text == null ? 0 : text.length());
 				// T2：回填模型的是裁剪后的文本；上面的 text 本身（进帧、进台账）保持全文
 				// P0-1：模型侧 = 统一信封 JSON（先裁剪 message，再组装，见 ToolResultEnvelope#toModelJson）
 				// P1-10：执行中抛出异常的失败，executeOnce 已把对账措辞追加进 resultText

@@ -300,3 +300,7 @@ logging:
     com.example.configmgr: DEBUG
     org.springframework.ai: INFO
     org.hibernate.SQL: WARN
+  # AI 日志链路（可观测性专项·日志链路追踪批）：把 MDC 里的本轮锚点渲染到每一行行首。
+  # 无锚点的行（绝大多数非 AI 日志）渲染为空 —— 行形态与批之前逐字相同，不破坏按行首匹配的既有脚本。
+  pattern:
+    level: "%5p %X{runId:-} %X{sessionId:-}"

@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.context;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.observe.AiTrace;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.Message;
 
@@ -312,6 +313,10 @@ public final class ContextCompactor {
 					+ "clearedPairs={} summaryChars={} reason={} ratio={}", request.sessionId(), request.runId(),
 					action.wire(), before, after, turns, lost, clear.cleared().size(), summaryChars, reason,
 					String.format("%.3f", decision.ratio()));
+			// 日志链路批：压缩是"这一轮为什么变了/省了多少"的唯一解释项（与上面那行同源，字段可聚合）
+			AiTrace.eventOn(request.runId(), request.sessionId(), "compaction", "level", action.wire(), "reason",
+					reason, "before", before, "after", after, "savedTokens", saved, "lostTokens", lost, "turns",
+					turns, "clearedPairs", clear.cleared().size(), "summaryChars", summaryChars, "limit", limit);
 			return new Outcome(action, current, before, after, saved, clear.cleared().size(), clear.clearedIds(),
 					reason, limit, after, true, compacted.circuit(), decision.ratio(), decision.nextEst(), turns, lost,
 					summaryChars);

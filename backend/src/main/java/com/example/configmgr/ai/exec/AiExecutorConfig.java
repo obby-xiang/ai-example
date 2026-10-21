@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.exec;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.observe.AiMdcTaskDecorator;
 import com.example.configmgr.ai.run.StreamWatchdog;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -47,6 +48,8 @@ public class AiExecutorConfig {
 		executor.setQueueCapacity(0);
 		executor.setThreadNamePrefix("ai-suspend-");
 		executor.setRejectedExecutionHandler(new ThreadPoolExecutor.AbortPolicy());
+		// 日志链路：本轮锚点在提交时刻随任务进池（平台线程不继承 MDC）
+		executor.setTaskDecorator(new AiMdcTaskDecorator());
 		executor.setWaitForTasksToCompleteOnShutdown(false);
 		executor.initialize();
 		return executor;
@@ -90,6 +93,8 @@ public class AiExecutorConfig {
 		executor.setQueueCapacity(properties.getResume().getTriggerQueueCapacity());
 		executor.setThreadNamePrefix("ai-resume-trigger-");
 		executor.setRejectedExecutionHandler(new ThreadPoolExecutor.AbortPolicy());
+		// 日志链路：POST /confirm 线程上的锚点随"死卡兜底续跑"任务一起进池
+		executor.setTaskDecorator(new AiMdcTaskDecorator());
 		executor.setWaitForTasksToCompleteOnShutdown(false);
 		executor.initialize();
 		return executor;

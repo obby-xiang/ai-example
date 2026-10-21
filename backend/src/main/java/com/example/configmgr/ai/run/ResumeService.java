@@ -8,6 +8,7 @@ import com.example.configmgr.ai.context.ContextCompactor;
 import com.example.configmgr.ai.context.ContextEstimator;
 import com.example.configmgr.ai.context.ContextState;
 import com.example.configmgr.ai.gate.SpToolCallingManager;
+import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ToolResultEnvelope;
@@ -466,6 +467,9 @@ public class ResumeService {
 								this.store.instanceId()));
 			}
 			String sessionId = snapshot.getSessionId();
+			// 日志链路批：续跑可能落在 ResumeService 自己的调用线程上（启动扫描 / 死卡兜底触发池），
+			// 入口先装锚点；真正的驱动线程由 driveResumed 再绑一次。
+			AiTrace.bind(runId, sessionId);
 			List<PendingToolCall> pendings = this.store.pendings(runId);
 			Map<String, Object> body = new LinkedHashMap<>();
 			body.put("runId", runId);
@@ -716,6 +720,8 @@ public class ResumeService {
 			if (!handedOff) {
 				this.resuming.remove(runId);
 			}
+			// 驱动线程（挂起池）在 driveResumed 入口自己绑锚点 —— 本线程到此结束，一律摘掉
+			AiTrace.clear();
 		}
 	}
 

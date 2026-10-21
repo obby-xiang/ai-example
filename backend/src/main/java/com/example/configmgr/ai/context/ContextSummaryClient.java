@@ -6,6 +6,7 @@ import com.example.configmgr.common.ErrorCodes;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.AiProviderRegistry;
 import com.example.configmgr.ai.config.ProviderRuntime;
+import com.example.configmgr.ai.observe.AiTrace;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.prompt.Prompt;
@@ -82,7 +83,7 @@ public final class ContextSummaryClient implements RollingSummarizer.Summarizer 
 		String configured = this.properties.getContext().getSummaryModel();
 		String model = configured == null || configured.isBlank() ? null : configured.trim();
 		Duration timeout = this.properties.getContext().getSummaryTimeout();
-		Future<String> future = this.executor.submit(() -> this.call.call(prompt, model));
+		Future<String> future = this.executor.submit(AiTrace.wrapCallable(() -> this.call.call(prompt, model)));
 		try {
 			return future.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
 		}
