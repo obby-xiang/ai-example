@@ -3,7 +3,10 @@ package com.example.configmgr.ai.conformance;
 import com.example.configmgr.ai.config.AiAvailability;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.RedisAvailability;
+import com.example.configmgr.ai.gate.AiRateLimiter;
 import com.example.configmgr.ai.gate.ConfirmGate;
+import com.example.configmgr.ai.gate.FakeRateRedis;
+import com.example.configmgr.ai.gate.InputSanitizer;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.ResilientChatService;
 import com.example.configmgr.ai.run.RunRegistry;
@@ -24,6 +27,7 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
@@ -103,6 +107,11 @@ class SessionBusyFrameIsolationConformanceTest {
 				mock(ChatMemoryRepository.class), this.sessionGate, mock(ConfirmGate.class), this.store, this.registry,
 				mock(CancellationRegistry.class), redisAvailability, this.aiRunExecutor, this.mapper, this.properties,
 				mock(Environment.class), mock(com.example.configmgr.job.service.JobWatchdog.class));
+		// 批① 入口闸门是字段注入（构造器签名不变）：本类真的调 chat()，故必须灌入两个组件，
+		// 否则闸门字段为 null。计数走 FakeRateRedis（单测不起真 Redis），额度远大于本类调用次数。
+		ReflectionTestUtils.setField(this.controller, "inputSanitizer", new InputSanitizer());
+		ReflectionTestUtils.setField(this.controller, "aiRateLimiter",
+				new AiRateLimiter(new FakeRateRedis().redis, this.properties));
 	}
 
 	@AfterEach
@@ -118,7 +127,7 @@ class SessionBusyFrameIsolationConformanceTest {
 		CountDownLatch releaseFirstTurn = new CountDownLatch(1);
 		scriptTurns(firstTurnStarted, releaseFirstTurn);
 
-		ResponseEntity<?> first = this.controller.chat(new AiChatRequest(SESSION_ID, "第一轮", null));
+		ResponseEntity<?> first = this.controller.chat(new AiChatRequest(SESSION_ID, "第一轮", null), null);
 		assertThat(first.getStatusCode()).isEqualTo(HttpStatus.OK);
 		assertThat(firstTurnStarted.await(5, TimeUnit.SECONDS)).as("第一轮已开跑（start 帧已出）").isTrue();
 		FrameWire running = awaitWire(1);
@@ -126,7 +135,7 @@ class SessionBusyFrameIsolationConformanceTest {
 		assertThat(running.types()).containsExactly("start");
 
 		// 同一 sessionId 的第二轮：必须被拒，且回体要能让前端改走重挂（ADR-5）
-		ResponseEntity<?> second = this.controller.chat(new AiChatRequest(SESSION_ID, "第二轮", null));
+		ResponseEntity<?> second = this.controller.chat(new AiChatRequest(SESSION_ID, "第二轮", null), null);
 		assertThat(second.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
 		assertThat(second.getBody()).isInstanceOf(Map.class);
 		Map<String, Object> busy = bodyOf(second);
@@ -159,14 +168,14 @@ class SessionBusyFrameIsolationConformanceTest {
 		CountDownLatch noWait = new CountDownLatch(0);
 		scriptTurns(noWait, noWait);
 
-		assertThat(this.controller.chat(new AiChatRequest(SESSION_ID, "第一轮", null)).getStatusCode())
+		assertThat(this.controller.chat(new AiChatRequest(SESSION_ID, "第一轮", null), null).getStatusCode())
 				.isEqualTo(HttpStatus.OK);
 		FrameWire firstWire = awaitWire(1);
 		firstWire.awaitType("done", 5000L);
 		String firstRunId = this.lastStartedRunId;
 		awaitSessionRelease();
 
-		assertThat(this.controller.chat(new AiChatRequest(SESSION_ID, "第二轮", null)).getStatusCode())
+		assertThat(this.controller.chat(new AiChatRequest(SESSION_ID, "第二轮", null), null).getStatusCode())
 				.isEqualTo(HttpStatus.OK);
 		FrameWire secondWire = theWireOfANewRun(firstRunId);
 		secondWire.awaitType("done", 5000L);

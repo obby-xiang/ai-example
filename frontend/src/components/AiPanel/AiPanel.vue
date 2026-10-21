@@ -729,6 +729,7 @@
           v-model="inputText"
           rows="1"
           data-testid="composer-input"
+          :maxlength="MESSAGE_MAX_CHARS"
           class="block min-h-[40px] max-h-[101px] w-full resize-none overflow-y-auto rounded-t-[12px] border-0 bg-transparent px-[11px] pb-[7px] pt-[11px] font-[inherit] text-[13px] leading-[1.6] text-[#1f2328] [outline:none] [field-sizing:content] placeholder:text-[#8b949e] disabled:cursor-default"
           :disabled="composerHardDisabled"
           :placeholder="inputPlaceholder"
@@ -740,6 +741,13 @@
         <div class="flex items-center gap-[6px] px-[9px] pb-[7px] pt-0">
           <span class="rounded-[6px] border border-dashed border-[#cddcff] px-[6px] py-[1px] text-[10.5px] leading-[1.6] text-[#8b949e]">工具位（预留 · 留空）</span>
           <span class="flex-1"></span>
+          <span
+            v-if="inputText.length > 0"
+            data-testid="composer-count"
+            class="mr-[2px] flex-none text-[10.5px] leading-[1.6] tabular-nums"
+            :class="composerCounterClass"
+            aria-live="polite"
+          >{{ composerCounterText }}</span>
           <button
             v-if="ai.loading || ai.suspended"
             type="button"
@@ -1003,6 +1011,12 @@ const ai = useAiStore()
 const workspace = useWorkspaceStore()
 
 const inputText = ref('')
+/**
+ * 安全防护专项批①：单条消息的字符上限——与后端 {@code app.ai.input.max-chars}（8192）**同值同尺**
+ * （判据 = UTF-16 码元数，即 JS `String#length` / `<textarea maxlength>` 的计数口径，中文按 1 字算）。
+ * 前端只做"不让写出超限文本 + 提前告知"，真正的拒绝仍在后端（400 MESSAGE_TOO_LONG，不截断）。
+ */
+const MESSAGE_MAX_CHARS = 8192
 const msgWrapRef = ref<HTMLElement | null>(null)
 /** R-165 S5c：输入框 ref —— 错误卡「改写后重发」把焦点交回输入框（改写是用户动作）。 */
 const composerRef = ref<HTMLTextAreaElement | null>(null)
@@ -1290,8 +1304,37 @@ const composerHardDisabled = computed(
     ai.pendingToolCall !== null
 )
 
-/** 发送闸只认 health available + 非空；不依赖 loading（流式中的 Enter 在 keydown 层静默）。 */
-const canSubmit = computed(() => ai.available && inputText.value.trim().length > 0)
+/** 发送闸只认 health available + 非空 + 未超限；不依赖 loading（流式中的 Enter 在 keydown 层静默）。 */
+const canSubmit = computed(
+  () => ai.available && inputText.value.trim().length > 0 && inputText.value.length <= MESSAGE_MAX_CHARS
+)
+
+/**
+ * 批① 字数提示（composer 底栏、发送钮左侧）：**剩余**字数 + 到顶/超限态。
+ * 三档：常态灰 `剩余 N 字`；余量 ≤ 500 转琥珀；到顶（= 8192，仍可发送）提示 `已达 8192 字上限`；
+ * 超限只可能来自程序化回填（编辑重跑把超长原文塞回输入框），此时发送闸关闭并标红 ——
+ * 前端不留"点了必然 400"的按钮，但绝不替用户截断。
+ */
+const composerRemaining = computed(() => MESSAGE_MAX_CHARS - inputText.value.length)
+
+const composerOverLimit = computed(() => composerRemaining.value < 0)
+
+const composerCounterText = computed(() => {
+  if (composerOverLimit.value) {
+    return `已超 ${-composerRemaining.value} 字上限`
+  }
+  if (composerRemaining.value === 0) {
+    return `已达 ${MESSAGE_MAX_CHARS} 字上限`
+  }
+  return `剩余 ${composerRemaining.value} 字`
+})
+
+const composerCounterClass = computed(() => {
+  if (composerOverLimit.value) {
+    return 'text-[#c0392b]'
+  }
+  return composerRemaining.value <= 500 ? 'text-[#b45309]' : 'text-[#8b949e]'
+})
 
 /** compositionend 后约 30ms 内仍视为 IME 确认窗口（Safari 可能先送 compositionend 再送 Enter）。 */
 const COMPOSITION_END_GUARD_MS = 30

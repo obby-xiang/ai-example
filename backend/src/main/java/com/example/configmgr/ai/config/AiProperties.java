@@ -53,6 +53,10 @@ public class AiProperties {
 
 	private Lease lease = new Lease();
 
+	private Input input = new Input();
+
+	private Limit limit = new Limit();
+
 	/**
 	 * 启动期校验 {@code app.ai.sse.write-timeout} 必须为正（2026-10-10 复核 S3-1 收口：守卫对称化）。
 	 *
@@ -368,6 +372,54 @@ public class AiProperties {
 
 		/** 单帧 JSON 的 UTF-8 字节上限（64KB）。 */
 		private int maxBytes = DEFAULT_MAX_BYTES;
+	}
+
+	/**
+	 * 输入闸门（安全防护专项批①；{@code 调研-AI输入输出安全防护业界惯例-2026-10-21.md} §5.1 #1
+	 * + {@code 调研-AI上下文数据最小化业界惯例-2026-10-21.md} R5）。
+	 *
+	 * <p>
+	 * <b>只约束用户输入的那一条 message</b>（不是整包请求体）：判据 = UTF-16 码元数，与前端
+	 * {@code <textarea maxlength>} / JS {@code String#length} <b>同一把尺</b>，故中文不会因为
+	 * UTF-8 三字节而被提前判死（8192 个汉字 = 24576 字节，仍须放行）。
+	 *
+	 * <p>
+	 * 超限<b>拒绝</b>而非截断（用户裁决 A1 建议 400）：截断会让模型基于半句话下结论。
+	 */
+	@Data
+	public static class Input {
+
+		/** 单条 message 的字符上限的<b>单一事实源</b>（前端 {@code MESSAGE_MAX_CHARS} 与它同值）。 */
+		public static final int DEFAULT_MAX_CHARS = 8192;
+
+		/** 单条 message 的字符上限（8192）。 */
+		private int maxChars = DEFAULT_MAX_CHARS;
+	}
+
+	/**
+	 * 限流（安全防护专项批① §5.1 #3）：{@code /api/ai/chat} 的双维度滑动窗口。
+	 *
+	 * <p>
+	 * 计数落在 Redis（{@code ai:rate:session:*} / {@code ai:rate:ip:*}），用 B23L1 已有的 Redis
+	 * 原语（单键 Lua 原子），<b>不要</b>另起进程内计数：多实例下进程内计数每实例各算一份，等于把
+	 * 额度放大 N 倍（§6.4）。
+	 *
+	 * <p>
+	 * 取值口径（用户裁决 A5 草值）：会话 20 次/分 —— 本仓单用户、一轮对话动辄数秒，
+	 * 20 次/分已远超正常手速，只拦"脚本连发"；IP 60 次/分 —— 兜住"换 sessionId 绕会话额度"，
+	 * 也是 E2E（21 次 {@code /chat} 全程）不会被误伤的量级。
+	 */
+	@Data
+	public static class Limit {
+
+		/** 同一 sessionId 每窗口允许的对话请求数。 */
+		private int sessionPerMinute = 20;
+
+		/** 同一来源 IP 每窗口允许的对话请求数。 */
+		private int ipPerMinute = 60;
+
+		/** 窗口长度（滑动窗口：计数按时间戳落 ZSET，窗口滑过即回收额度）。 */
+		private Duration window = Duration.ofMinutes(1);
 	}
 
 }

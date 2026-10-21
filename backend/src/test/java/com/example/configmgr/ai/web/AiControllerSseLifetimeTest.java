@@ -61,7 +61,7 @@ class AiControllerSseLifetimeTest {
 	void chatEmitterSurvivesPastTheMachineBudgetWhileTheTurnIsSuspended() throws Exception {
 		this.properties.getResilience().setTotalBudget(Duration.ofMillis(50));
 
-		ResponseEntity<?> response = this.controller.chat(new AiChatRequest("s-suspend", "等人确认", null));
+		ResponseEntity<?> response = this.controller.chat(new AiChatRequest("s-suspend", "等人确认", null), null);
 
 		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
 		SseEmitter emitter = (SseEmitter) response.getBody();
@@ -102,13 +102,20 @@ class AiControllerSseLifetimeTest {
 		when(sessionGate.acquire(any(), any())).thenReturn(null);
 		when(this.runRegistry.of(any())).thenReturn(this.out);
 
-		return new AiController(availability, providerOf(mock(ResilientChatService.class)),
+		AiController controller = new AiController(availability, providerOf(mock(ResilientChatService.class)),
 				providerOf((com.example.configmgr.ai.run.ResumeService) null),
 				providerOf((com.example.configmgr.ai.run.StartupResumeRunner) null), mock(ChatMemory.class),
 				mock(ChatMemoryRepository.class), sessionGate, mock(ConfirmGate.class), this.runStore, this.runRegistry,
 				mock(CancellationRegistry.class), redisAvailability, mock(ThreadPoolTaskExecutor.class),
 				new ObjectMapper(), props, mock(Environment.class),
 				mock(com.example.configmgr.job.service.JobWatchdog.class));
+		// 批① 入口闸门是字段注入（构造器签名不变）：本类要过 chat() 的闸门，故灌入两个组件。
+		org.springframework.test.util.ReflectionTestUtils.setField(controller, "inputSanitizer",
+				new com.example.configmgr.ai.gate.InputSanitizer());
+		org.springframework.test.util.ReflectionTestUtils.setField(controller, "aiRateLimiter",
+				new com.example.configmgr.ai.gate.AiRateLimiter(
+						new com.example.configmgr.ai.gate.FakeRateRedis().redis, props));
+		return controller;
 	}
 
 	@SuppressWarnings("unchecked")

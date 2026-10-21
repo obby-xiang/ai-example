@@ -4,6 +4,8 @@ import com.example.configmgr.ai.config.AiAvailability;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.RedisAvailability;
 import com.example.configmgr.ai.gate.ConfirmGate;
+import com.example.configmgr.ai.gate.AiRateLimiter;
+import com.example.configmgr.ai.gate.InputSanitizer;
 import com.example.configmgr.ai.feedback.AiFeedback;
 import com.example.configmgr.ai.feedback.AiFeedbackRepository;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
@@ -24,6 +26,7 @@ import com.example.configmgr.common.ApiResponse;
 import com.example.configmgr.job.service.JobWatchdog;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.memory.ChatMemoryRepository;
@@ -140,6 +143,20 @@ public class AiController {
 	@Autowired(required = false)
 	private FrameStore frameStore;
 
+	/**
+	 * 安全防护专项批①：输入归一化（{@code /chat} 入口闸门 1）。**字段注入** —— 构造器签名不变 ⇒
+	 * 既有 {@code new AiController(...)} 的全部测试零触碰；Spring 装配来自
+	 * {@link InputSanitizer}（同一 {@code ai.gate} 包，组件扫描覆盖）。
+	 */
+	@Autowired
+	private InputSanitizer inputSanitizer;
+
+	/**
+	 * 安全防护专项批①：{@code /chat} 限流（入口闸门 3）。同为字段注入。
+	 */
+	@Autowired
+	private AiRateLimiter aiRateLimiter;
+
 	public AiController(AiAvailability availability, ObjectProvider<ResilientChatService> chatService,
 			ObjectProvider<ResumeService> resumeService, ObjectProvider<StartupResumeRunner> startupResumeRunner,
 			ChatMemory chatMemory, ChatMemoryRepository chatMemoryRepository, SessionGate sessionGate,
@@ -169,7 +186,8 @@ public class AiController {
 	// ── 一轮对话 ────────────────────────────────────────────────────────────
 
 	@PostMapping(value = "/chat", produces = { MediaType.TEXT_EVENT_STREAM_VALUE, MediaType.APPLICATION_JSON_VALUE })
-	public ResponseEntity<?> chat(@RequestBody(required = false) AiChatRequest request) {
+	public ResponseEntity<?> chat(@RequestBody(required = false) AiChatRequest request,
+			HttpServletRequest httpRequest) {
 		ResilientChatService service = this.chatService.getIfAvailable();
 		if (!this.availability.isAvailable() || service == null) {
 			return json(HttpStatus.SERVICE_UNAVAILABLE, unavailable());
@@ -179,11 +197,39 @@ public class AiController {
 		if (request == null || !StringUtils.hasText(request.sessionId()) || !StringUtils.hasText(request.message())) {
 			return json(HttpStatus.BAD_REQUEST, Map.of("code", "BAD_REQUEST", "message", "sessionId 与 message 均为必填"));
 		}
+		// 批① 闸门 1：归一化（只归一不拦截，§5.1 #2）。先归一后量长度 —— 量的是"真正进模型的那份"，
+		// 零宽填充不该算进用户的额度；长度口径 = UTF-16 码元数，与前端 maxlength 同一把尺。
+		InputSanitizer.Result sanitized = this.inputSanitizer.sanitize(request.message());
+		if (sanitized.changed()) {
+			// 只记长度差与剥离计数：原文可能含敏感数据，日志里不得出现
+			log.info("输入归一化生效 sessionId={} 长度 {}→{}（剥离格式字符 {} / 控制字符 {}）",
+					request.sessionId(), sanitized.originalLength(), sanitized.text().length(),
+					sanitized.removedFormat(), sanitized.removedControl());
+		}
+		// 归一后为空 = 原文只由不可见字符构成（"零宽填充"式空转）：与"message 必填"同一口径拒掉，
+		// 否则会带着一条空 user 消息进模型与记忆窗口。
+		if (!StringUtils.hasText(sanitized.text())) {
+			return json(HttpStatus.BAD_REQUEST,
+					Map.of("code", "BAD_REQUEST", "message", "message 归一化后为空（原文仅含不可见字符），请重新输入"));
+		}
+		// 批① 闸门 2：长度（§5.1 #1 / 数据最小化 R5）。超限**拒绝不截断**：截断会让模型基于半句话下结论。
+		int maxChars = this.properties.getInput().getMaxChars();
+		if (sanitized.text().length() > maxChars) {
+			return json(HttpStatus.BAD_REQUEST, messageTooLong(sanitized.text().length(), maxChars));
+		}
 		if (!this.redisAvailability.isAvailable()) {
 			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
 		}
+		// 批① 闸门 3：限流（§5.1 #3）。放在会话门之前 —— 被限流的请求不该占住一个 in-flight 位。
+		AiRateLimiter.Decision rate = this.aiRateLimiter.check(request.sessionId(), clientIp(httpRequest));
+		if (!rate.allowed()) {
+			return rateLimited(rate);
+		}
 
 		String sessionId = request.sessionId();
+		// 归一后的文本才是进模型/进记忆的那份（原始 request 不可变，故换一个新 record）
+		AiChatRequest effective = sanitized.changed()
+				? new AiChatRequest(sessionId, sanitized.text(), request.context()) : request;
 		String runId = UUID.randomUUID().toString();
 		SessionGate.Busy busy = this.sessionGate.acquire(sessionId, runId);
 		if (busy != null) {
@@ -204,7 +250,7 @@ public class AiController {
 		try {
 			this.aiRunExecutor.execute(() -> {
 				try {
-					service.chat(runId, request, out);
+					service.chat(runId, effective, out);
 				}
 				catch (Exception ex) {
 					log.error("AI 轮次未捕获异常 sessionId={} runId={}", sessionId, runId, ex);
@@ -569,6 +615,53 @@ public class AiController {
 	 */
 	private ResponseEntity<Map<String, Object>> json(HttpStatus status, Map<String, Object> body) {
 		return ResponseEntity.status(status).contentType(MediaType.APPLICATION_JSON).body(body);
+	}
+
+	/**
+	 * 400 {@code MESSAGE_TOO_LONG}（批① 闸门 2）。稳定码 + 中文文案 + 两枚数字 ——
+	 * <b>不回显原文</b>（它可能本身就是敏感数据，且长度已足够定位问题）。
+	 */
+	private static Map<String, Object> messageTooLong(int length, int limit) {
+		Map<String, Object> body = new LinkedHashMap<>();
+		body.put("code", "MESSAGE_TOO_LONG");
+		body.put("message", "消息长度 " + length + " 字符，超过单条上限 " + limit + " 字符；请拆分或缩短后重发（本接口不做截断）");
+		body.put("length", length);
+		body.put("limit", limit);
+		return body;
+	}
+
+	/**
+	 * 429 {@code RATE_LIMITED}（批① 闸门 3）。带 {@code Retry-After}（秒，向上取整）——
+	 * 客户端据此退避，而不是盲目重试把窗口继续打满。
+	 */
+	private static ResponseEntity<Map<String, Object>> rateLimited(AiRateLimiter.Decision decision) {
+		String scopeName = AiRateLimiter.SCOPE_SESSION.equals(decision.scope()) ? "该会话" : "当前来源";
+		Map<String, Object> body = new LinkedHashMap<>();
+		body.put("code", "RATE_LIMITED");
+		body.put("message", scopeName + "对话请求过于频繁：每 " + decision.limit() + " 次/分钟（"
+				+ decision.scope() + " 维度）已达上限，请约 " + decision.retryAfterSeconds() + " 秒后重试");
+		body.put("scope", decision.scope());
+		body.put("used", decision.used());
+		body.put("limit", decision.limit());
+		body.put("retryAfterSeconds", decision.retryAfterSeconds());
+		return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
+				.header("Retry-After", String.valueOf(decision.retryAfterSeconds()))
+				.contentType(MediaType.APPLICATION_JSON)
+				.body(body);
+	}
+
+	/**
+	 * 限流用的来源 IP：只认 {@code RemoteAddr}。
+	 *
+	 * <p>{@code X-Forwarded-For} 可被客户端任意伪造，本仓没有前置代理，读它等于把"算谁的额度"
+	 * 交给请求方自己声明。将来若上代理，须在代理层覆写并在此显式放开（M3 事项）。
+	 */
+	private static String clientIp(HttpServletRequest httpRequest) {
+		if (httpRequest == null) {
+			return "unknown";
+		}
+		String remote = httpRequest.getRemoteAddr();
+		return StringUtils.hasText(remote) ? remote : "unknown";
 	}
 
 	/**
