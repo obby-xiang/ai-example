@@ -135,16 +135,37 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 */
 	private final ToolPreflightService preflight;
 
+	/**
+	 * L1 资源互斥（B23L1 批③b）：执行前的任务级/作业级锁。null = 不取锁 —— 只有单元测试的
+	 * 轻装配面会传 null（生产由容器注入唯一实例）。
+	 */
+	private final ToolResourceLocks resourceLocks;
+
+	/** F2 目标资源硬校验（B23L1 批③b）。null = 不校验（轻装配面）。 */
+	private final ToolTargetResolver targetResolver;
+
+	/** UNKNOWN 对账器（B23L1 批③b）：续跑结算前把"未知"尽量收敛成台账里的确定结局。 */
+	private final ToolUnknownReconciler unknownReconciler;
+
 	public SpToolCallingManager(RunStore store, RunRegistry registry, ConfirmGate gate, ToolRegistry toolRegistry,
 			MessageJsonCodec codec, ToolActivityBeacon beacon, CancellationRegistry cancellations,
 			ToolResultLimiter limiter, List<FrontendToolGuard> frontendGuards) {
 		this(store, registry, gate, toolRegistry, codec, beacon, cancellations, limiter, frontendGuards, null);
 	}
 
-	@Autowired
 	public SpToolCallingManager(RunStore store, RunRegistry registry, ConfirmGate gate, ToolRegistry toolRegistry,
 			MessageJsonCodec codec, ToolActivityBeacon beacon, CancellationRegistry cancellations,
 			ToolResultLimiter limiter, List<FrontendToolGuard> frontendGuards, ToolPreflightService preflight) {
+		this(store, registry, gate, toolRegistry, codec, beacon, cancellations, limiter, frontendGuards, preflight,
+				null, null, null);
+	}
+
+	@Autowired
+	public SpToolCallingManager(RunStore store, RunRegistry registry, ConfirmGate gate, ToolRegistry toolRegistry,
+			MessageJsonCodec codec, ToolActivityBeacon beacon, CancellationRegistry cancellations,
+			ToolResultLimiter limiter, List<FrontendToolGuard> frontendGuards, ToolPreflightService preflight,
+			ToolResourceLocks resourceLocks, ToolTargetResolver targetResolver,
+			ToolUnknownReconciler unknownReconciler) {
 		this.delegate = ToolCallingManager.builder()
 			// P0-1：让工具异常浮出到 executeOnce 的 catch（默认 alwaysThrow=false 会把失败吞成
 			// "ok=true 的文本"——start_* 的 ConflictException 因此不可见）。包内 ToolExecutionException
@@ -161,6 +182,9 @@ public class SpToolCallingManager implements ToolCallingManager {
 		this.limiter = limiter;
 		this.frontendGuards = frontendGuards == null ? List.of() : List.copyOf(frontendGuards);
 		this.preflight = preflight;
+		this.resourceLocks = resourceLocks;
+		this.targetResolver = targetResolver;
+		this.unknownReconciler = unknownReconciler;
 	}
 
 	@Override
@@ -300,8 +324,8 @@ public class SpToolCallingManager implements ToolCallingManager {
 					else {
 						text = switch (pending.getKind()) {
 							case PendingToolCall.KIND_FRONTEND -> awaitFrontend(runId, pending);
-							case PendingToolCall.KIND_CONFIRM -> awaitConfirm(runId, prompt, pending);
-							default -> executeOnce(runId, prompt, pending);
+							case PendingToolCall.KIND_CONFIRM -> awaitConfirm(runId, prompt, pending, context);
+							default -> executeOnce(runId, prompt, pending, context);
 						};
 					}
 				}
@@ -575,46 +599,109 @@ public class SpToolCallingManager implements ToolCallingManager {
 		return text;
 	}
 
-	/** 确认门：放行则执行（经认领与台账，恰好一次），拒绝（或历史遗留的 TIMEOUT 记录）以"未执行"语义回填并继续循环。 */
-	private String awaitConfirm(String runId, Prompt prompt, PendingToolCall pending) {
+	/** 确认门：放行则执行（经资源锁、认领与台账，恰好一次），拒绝（或历史遗留的 TIMEOUT 记录）以"未执行"语义回填并继续循环。 */
+	private String awaitConfirm(String runId, Prompt prompt, PendingToolCall pending, AiContext context) {
 		PendingToolCall resolved = this.gate.awaitDecision(runId, pending);
 		if (PendingToolCall.APPROVED.equals(resolved.getStatus())) {
-			return executeOnce(runId, prompt, resolved);
+			return executeOnce(runId, prompt, resolved, context);
 		}
 		String text = resolved.getResultText() == null ? "该操作未执行。" : resolved.getResultText();
 		this.registry.of(runId).toolResult(resolved, false, false, text);
 		return text;
 	}
 
+	/** 工具被"别人正在做同类动作"挡下时的固定口径（模型/帧/台账三面同文；禁 emoji）。 */
+	public static final String RESOURCE_LOCKED_TEXT = ToolOutcome.CODE_RESOURCE_LOCKED
+			+ "：该任务已有作业在执行，本次未执行。请等待该作业收尾后重新发起（资源锁会随对方收尾释放）。";
+
+	/** 工具被"目标资源不成立"挡下时的固定口径（细节由 {@link ToolTargetResolver} 给出）。 */
+	public static String targetInvalidText(ToolTargetResolver.Verdict verdict) {
+		String detail = verdict == null || verdict.detail() == null || verdict.detail().isBlank() ? "目标资源不成立"
+				: verdict.detail();
+		return ToolOutcome.CODE_TARGET_INVALID + "：目标资源不存在或不在当前任务内，本次未执行（" + detail
+				+ "）。请核对任务 ID 与当前页面/步骤后重新发起。";
+	}
+
 	/**
-	 * 后端执行（含放行后的敏感工具）：跨进程台账防重放 + 执行前原子认领。
+	 * 后端执行（含放行后的敏感工具）：<b>对账/重放 → 目标校验 → 资源锁 → 认领 → 执行 → 台账</b>。
 	 *
 	 * <ol>
-	 * <li>台账里已有同一 {@code toolCallId} → 复用原结果，不再执行（跨进程"不重放"）；</li>
-	 * <li>认领失败（他实例已认领）→ 不重复执行（避免重复副作用），如实回填；</li>
-	 * <li>认领成功 → 委托官方执行 → 结果写回待决条目并记台账（含 {@code executedBy}）。</li>
+	 * <li><b>对账/重放</b>：{@code ai:idem:<runId>} 命中即回台账原结果（不取锁、不认领、不执行、无副作用）；
+	 * 命中的结局是 {@code unknown} 就<b>保持 unknown</b>（B23L1 批③b U4：旧实现把它当成功重放）；</li>
+	 * <li><b>目标资源硬校验</b>（F2）：不成立 → {@code blocked/TARGET_INVALID}，<b>不占认领</b>；</li>
+	 * <li><b>资源互斥</b>（L1）：任务级 → 作业级；被别人持有 → {@code blocked/RESOURCE_LOCKED}
+	 * （不占认领、不抛、不断流）；设施不可用 → 放行 + WARN；</li>
+	 * <li><b>原子认领</b>三态：{@code WON} 执行；{@code LOST} 二次对账（命中按重放回原结果，未命中按既有
+	 * "已认领"文案）；{@code STALE_FENCE} 独立结论（"写回权已转移"，不再写"由实例 null 认领"）；</li>
+	 * <li><b>执行 → appendLedger（带 idemKey）</b>，资源锁在 {@code finally} 归还（只还本次创建的那一任）。</li>
 	 * </ol>
 	 */
 	private String executeOnce(String runId, Prompt prompt, PendingToolCall pending) {
-		Map<String, Object> ledger = this.store.ledgerFor(runId, pending.getToolCallId());
+		return executeOnce(runId, prompt, pending, contextOf(runId));
+	}
+
+	private String executeOnce(String runId, Prompt prompt, PendingToolCall pending, AiContext context) {
+		// ① 对账/重放：命中台账 ⇒ 原结果复用（三面同源），任何副作用都不发生
+		Map<String, Object> ledger = ledgerOf(runId, pending.getToolCallId());
 		if (ledger != null) {
-			String reusedText = String.valueOf(ledger.getOrDefault("resultText", ""));
-			// P0-1：台账里有信封就用持久化结局重放（续跑与首轮同形）；旧台账无该键
-			// （或只有推导不出的 unknown）⇒ 按成功复用。
-			Object ledgerOutcome = ledger.get("outcome");
-			boolean legacyLedger = ledgerOutcome == null || "unknown".equalsIgnoreCase(String.valueOf(ledgerOutcome));
-			pending.setOutcome(legacyLedger ? ToolOutcome.OK.wire() : String.valueOf(ledgerOutcome));
-			pending.setCode(legacyLedger || ledger.get("code") == null ? null : String.valueOf(ledger.get("code")));
-			pending.setExecuted(true);
-			pending.setExecutedBy(String.valueOf(ledger.get("executedBy")));
-			pending.setResultText(reusedText);
-			this.store.putPending(runId, pending);
-			// 帧的 ok 必须是 outcome 的派生值（旧实现恒传 true，会把台账里的失败结局写成成功帧）
-			this.registry.of(runId).toolResult(pending, pending.effectiveOutcome().ok(), true, frameText(reusedText));
-			return reusedText;
+			return replayLedger(runId, pending, ledger);
 		}
 
-		if (!this.store.claimExecution(runId, pending.getToolCallId(), this.store.instanceId())) {
+		// ② F2：目标资源硬校验（参数指向的任务必须存在、类型对得上、且在同一个工作区任务内）
+		if (this.targetResolver != null) {
+			ToolTargetResolver.Verdict verdict = this.targetResolver.check(pending.getName(),
+					pending.getArguments(), context);
+			if (!verdict.valid()) {
+				return settleBlocked(runId, pending, ToolOutcome.CODE_TARGET_INVALID, targetInvalidText(verdict));
+			}
+		}
+
+		// ③ L1：资源互斥（固定顺序：先任务级、后作业级）
+		ToolResourceLocks.LockHandle locks = acquireResourceLocks(runId, pending);
+		if (locks.heldElsewhere()) {
+			return settleBlocked(runId, pending, ToolOutcome.CODE_RESOURCE_LOCKED, RESOURCE_LOCKED_TEXT);
+		}
+		try {
+			return claimAndExecute(runId, prompt, pending);
+		}
+		finally {
+			// 终态与异常路径都必须归还（只放本次创建的那一任；重入没有释放权）
+			locks.close();
+		}
+	}
+
+	/**
+	 * 认领（三态）通过后的执行段。
+	 *
+	 * <p>认领<b>首次即走三态口</b> {@link RunStore#tryClaimExecution}（B23L1 批③b 复审 M-4）：
+	 * 一次调用同时拿到结论、epoch 与 fence，不再"先布尔口、失败后再补一次三态口"（那会把
+	 * {@code HSETNX} 与 fence 的 {@code GET} 各做两遍）。布尔口 {@link RunStore#claimExecution}
+	 * 仍保留给既有装配面/用例，但本路径不再依赖它。
+	 *
+	 * <p>轻装配面（Mockito 底座只桩了布尔口）从三态口读回 null —— 这不是生产形态（两个实现都返回非 null），
+	 * 回落到布尔口只是为了不改动既有的 mock 用例。
+	 */
+	private String claimAndExecute(String runId, Prompt prompt, PendingToolCall pending) {
+		RunStore.ClaimResult claim = this.store.tryClaimExecution(runId, pending.getToolCallId(),
+				this.store.instanceId());
+		if (claim == null) {
+			claim = this.store.claimExecution(runId, pending.getToolCallId(), this.store.instanceId())
+					? new RunStore.ClaimResult(RunStore.ClaimOutcome.WON, 0L, 0L)
+					: new RunStore.ClaimResult(RunStore.ClaimOutcome.LOST, 0L, 0L);
+		}
+		if (!claim.won()) {
+			if (claim.outcome() == RunStore.ClaimOutcome.STALE_FENCE) {
+				long epoch = claim.epoch();
+				long fence = claim.fence();
+				return settleBlocked(runId, pending, ToolOutcome.CODE_ALREADY_CLAIMED,
+						"本轮写回权已转移，本次未执行（本实例持 epoch " + epoch + "，fence 已推进到 " + fence
+								+ "，续跑权已被接管）。如需重做，请让用户在接管方完成后重新发起。");
+			}
+			// I4：认领失败后<b>再对一次台账</b> —— 对方可能恰好在这两步之间写完台账
+			Map<String, Object> ledger = ledgerOf(runId, pending.getToolCallId());
+			if (ledger != null) {
+				return replayLedger(runId, pending, ledger);
+			}
 			String claimedBy = this.store.claimedBy(runId, pending.getToolCallId());
 			String text = "该操作已由实例 " + claimedBy + " 认领执行（进程在其完成前退出）。"
 					+ "为避免重复副作用，本次不再执行；如需重做，请让用户重新发起。";
@@ -674,6 +761,91 @@ public class SpToolCallingManager implements ToolCallingManager {
 		this.store.putPending(runId, fresh);
 		this.registry.of(runId).toolResult(fresh, ok, false, frameText(text));
 		return text;
+	}
+
+	/**
+	 * 台账读口：{@code idemFor}（O(1) 索引）优先，未命中回落 {@code ledgerFor}（全表扫描 / 旧数据）。
+	 *
+	 * <p>为什么两跳都要：真实实现的 {@code idemFor} 内部已经回落过一次，这里的第二跳只保护
+	 * <b>轻装配面</b>（只桩了旧读口的单元底座），语义上"台账才是判据"也因此只有一个出口。
+	 * 空表按未命中处理 —— 一条台账记录至少带 {@code atMs/toolCallId/name/outcome} 四键。
+	 */
+	private Map<String, Object> ledgerOf(String runId, String toolCallId) {
+		Map<String, Object> indexed = this.store.idemFor(runId, toolCallId);
+		if (indexed != null && !indexed.isEmpty()) {
+			return indexed;
+		}
+		Map<String, Object> scanned = this.store.ledgerFor(runId, toolCallId);
+		return scanned == null || scanned.isEmpty() ? null : scanned;
+	}
+
+	/**
+	 * 台账重放（首轮对账命中 / 认领失败后二次对账命中 / 续跑复跑同一 {@code toolCallId}）：三面同源，
+	 * <b>不执行任何副作用</b>。
+	 *
+	 * <p>结局口径（B23L1 批③b U4）：台账里有 {@code outcome} 就原样重放；只有<b>旧台账缺该键</b>
+	 * 才按成功复用（历史兼容）。{@code outcome=unknown} 是<b>确定的"未判定"</b>—— 把它写成成功
+	 * 会让"执行了但不知道结果"变成"执行成功"，前端的失败/对账提示随之消失。
+	 */
+	private String replayLedger(String runId, PendingToolCall pending, Map<String, Object> ledger) {
+		String reusedText = String.valueOf(ledger.getOrDefault("resultText", ""));
+		Object rawOutcome = ledger.get("outcome");
+		ToolOutcome replayed = ToolOutcome.fromWire(rawOutcome == null ? null : String.valueOf(rawOutcome));
+		boolean legacyLedger = replayed == null; // 旧台账无 outcome 键 ⇒ 保持批②之前的兼容口径
+		if (legacyLedger) {
+			replayed = ToolOutcome.OK;
+		}
+		pending.setOutcome(replayed.wire());
+		pending.setCode(legacyLedger || ledger.get("code") == null ? null : String.valueOf(ledger.get("code")));
+		pending.setExecuted(true);
+		Object executedBy = ledger.get("executedBy");
+		pending.setExecutedBy(executedBy == null ? this.store.instanceId() : String.valueOf(executedBy));
+		pending.setResultText(reusedText);
+		this.store.putPending(runId, pending);
+		// 帧的 ok 必须是 outcome 的派生值（旧实现恒传 true，会把台账里的失败/未知结局写成成功帧）
+		this.registry.of(runId).toolResult(pending, replayed.ok(), true, frameText(reusedText));
+		log.info("工具调用命中台账，按原结果重放 runId={} tool={} toolCallId={} outcome={}（未取锁/未认领/未执行）",
+				runId, pending.getName(), pending.getToolCallId(), replayed.wire());
+		return reusedText;
+	}
+
+	/**
+	 * 阻断的<b>统一出口</b>（资源锁冲突 / 目标不成立 / 写回权转移）：落库为终态、发一条
+	 * {@code ok=false} 的结局帧、回填模型，然后正常返回 —— <b>不 appendLedger、不占认领、不抛异常、
+	 * 不动 suspended</b>，同批后续调用照常（{@code haltsBatch} 只认 FAILED）。
+	 */
+	private String settleBlocked(String runId, PendingToolCall pending, String code, String text) {
+		pending.setStatus(PendingToolCall.BLOCKED);
+		pending.setOutcome(ToolOutcome.BLOCKED.wire());
+		pending.setCode(code);
+		pending.setExecuted(false);
+		pending.setExecutedBy(null);
+		pending.setResolvedAtMs(System.currentTimeMillis());
+		pending.setResultText(text);
+		this.store.putPending(runId, pending);
+		this.registry.of(runId).toolResult(pending, false, false, frameText(text));
+		log.warn("工具调用被阻断 runId={} tool={} toolCallId={} code={}（未执行、未占认领、未记台账）", runId,
+				pending.getName(), pending.getToolCallId(), code);
+		return text;
+	}
+
+	/** 抢本次调用所需的资源锁（不可锁的工具/无 taskId ⇒ 空句柄，零往返）。 */
+	private ToolResourceLocks.LockHandle acquireResourceLocks(String runId, PendingToolCall pending) {
+		if (this.resourceLocks == null || !ToolResourceLocks.supports(pending.getName())) {
+			return ToolResourceLocks.LockHandle.none(ToolResourceLocks.LockOutcome.DISABLED);
+		}
+		Long taskId = ToolTargetResolver.taskIdOf(pending.getArguments());
+		if (taskId == null || taskId <= 0L) {
+			return ToolResourceLocks.LockHandle.none(ToolResourceLocks.LockOutcome.DISABLED);
+		}
+		String owner = this.store.instanceId() + ":" + runId + ":" + pending.getToolCallId();
+		return this.resourceLocks.acquire(taskId, ToolTargetResolver.jobTypeOf(pending.getName()).name(), owner);
+	}
+
+	/** 本轮冻结的工作区上下文（与执行路径用的是同一份快照，见 {@link RunSnapshot#getContext()}）。 */
+	private AiContext contextOf(String runId) {
+		RunSnapshot snapshot = this.store.get(runId);
+		return snapshot == null ? AiContext.empty() : AiContext.fromMap(snapshot.getContext());
 	}
 
 	/**
@@ -751,9 +923,44 @@ public class SpToolCallingManager implements ToolCallingManager {
 		if (shouldExecute) {
 			return executeOnce(runId, prompt, pending);
 		}
+		// B23L1 批③b：已终态但结局是 unknown 的条目，先经三跳对账（台账 → 认领 → 资源锁）再回填 ——
+		// 台账里有确定结局就采用它（含原文与执行者），否则如实保持 UNKNOWN 并给出"为什么"。
+		if (this.unknownReconciler != null && pending.resolved()
+				&& pending.effectiveOutcome() == ToolOutcome.UNKNOWN
+				&& !PendingToolCall.KIND_FRONTEND.equals(pending.getKind())) {
+			return applyReconciliation(runId, pending);
+		}
 		String text = pending.getResultText() == null ? "" : pending.getResultText();
 		log.debug("续跑结算复用结果 runId={} toolCallId={} status={} executedBy={}", runId, pending.getToolCallId(),
 				status, pending.getExecutedBy());
+		return text;
+	}
+
+	/**
+	 * 把一次 UNKNOWN 对账的结论写回条目并返回回填文本。
+	 *
+	 * <p>只有 {@link ToolUnknownReconciler.Reconciliation#adopted()}（台账命中且结局非 unknown）才覆盖
+	 * {@code outcome/code/executedBy}；其余情况保持 UNKNOWN，只更新人读文案 —— 不确定性不能被对账器
+	 * "猜"成成功。
+	 */
+	private String applyReconciliation(String runId, PendingToolCall pending) {
+		ToolUnknownReconciler.Reconciliation reconciliation = this.unknownReconciler.reconcile(runId, pending);
+		if (reconciliation == null) {
+			return pending.getResultText() == null ? "" : pending.getResultText();
+		}
+		String text = reconciliation.text() == null ? "" : reconciliation.text();
+		if (reconciliation.adopted()) {
+			pending.setOutcome(reconciliation.outcome().wire());
+			pending.setCode(reconciliation.code());
+			pending.setExecuted(true);
+			if (reconciliation.executedBy() != null) {
+				pending.setExecutedBy(reconciliation.executedBy());
+			}
+		}
+		pending.setResultText(text);
+		this.store.putPending(runId, pending);
+		log.info("续跑结算经 UNKNOWN 对账 runId={} toolCallId={} adopted={} outcome={}", runId,
+				pending.getToolCallId(), reconciliation.adopted(), pending.effectiveOutcome().wire());
 		return text;
 	}
 

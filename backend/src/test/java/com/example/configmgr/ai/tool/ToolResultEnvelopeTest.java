@@ -60,6 +60,9 @@ class ToolResultEnvelopeTest {
 		assertThat(ToolResultEnvelope.failed("SOMETHING_NEW", "", "{}").retryable()).isFalse();
 		assertThat(ToolResultEnvelope.rejected(null, "", "{}").retryable()).isFalse();
 		assertThat(ToolResultEnvelope.blocked("SCOPE_NOT_DISCLOSED", "", "{}").retryable()).isFalse();
+		// 批③a 扩写（不是放宽）：同一结局下新码可重试、旧码仍不可重试
+		assertThat(ToolResultEnvelope.blocked(ToolOutcome.CODE_RESOURCE_LOCKED, "", "{}").retryable()).isTrue();
+		assertThat(ToolResultEnvelope.blocked(ToolOutcome.CODE_TARGET_INVALID, "", "{}").retryable()).isFalse();
 		assertThat(ToolResultEnvelope.timeout("CONFIRM_TIMEOUT", "", "{}").retryable()).isFalse();
 		assertThat(ToolResultEnvelope.cancelled("RUN_CANCELLED", "", "{}").retryable()).isFalse();
 	}

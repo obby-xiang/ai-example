@@ -215,11 +215,64 @@ public class ResumeService {
 		out.put("ledger", this.store.ledger(runId));
 		out.put("ledgerCounts", this.store.ledgerCounts(runId));
 		out.put("instanceId", this.store.instanceId());
-		out.put("keys", Map.of("state", this.store.runKey(runId), "pending", this.store.pendingKey(runId), "ledger",
-				this.store.ledgerKey(runId), "events", this.store.eventsKey(runId), "claim", this.store.claimKey(runId),
-				// B23L1 批②b：fencing 的两个契约键也要能在运维面上直接对上（同一个入口拼键，不另拼字符串）
-				"lease", this.store.runLeaseKey(runId), "fence", this.store.fenceKey(runId)));
+		out.put("keys", describeKeys(runId, snapshot));
 		return out;
+	}
+
+	/**
+	 * 运维面键表（同一个入口拼键，不另拼字符串）。
+	 *
+	 * <p>批③a 增 {@code lockTask} / {@code lockJob}：资源互斥锁（{@link LeaseKeys}）按 taskId 记，
+	 * 与 runId 记的 {@code lease}/{@code fence} <b>不是同一族键</b>。上下文里没有 taskId（页面轮）时
+	 * 两个值都是 null（键仍在，便于前端/运维面按固定键面取值）；有 taskId 但无 step/taskType 时
+	 * 只有 {@code lockJob} 为 null。
+	 */
+	private Map<String, Object> describeKeys(String runId, RunSnapshot snapshot) {
+		Map<String, Object> keys = new LinkedHashMap<>();
+		keys.put("state", this.store.runKey(runId));
+		keys.put("pending", this.store.pendingKey(runId));
+		keys.put("ledger", this.store.ledgerKey(runId));
+		keys.put("events", this.store.eventsKey(runId));
+		keys.put("claim", this.store.claimKey(runId));
+		// B23L1 批②b：fencing 的两个契约键也要能在运维面上直接对上
+		keys.put("lease", this.store.runLeaseKey(runId));
+		keys.put("fence", this.store.fenceKey(runId));
+		// B23L1 批③a：L1 资源互斥的两把锁（按 taskId 记，随 TTL 自清，轮次回收不清）
+		Long taskId = contextTaskId(snapshot);
+		String jobType = contextJobType(snapshot);
+		keys.put("lockTask", taskId == null || taskId <= 0L ? null : LeaseKeys.task(taskId));
+		keys.put("lockJob", taskId == null || taskId <= 0L || jobType == null ? null : LeaseKeys.job(taskId, jobType));
+		return keys;
+	}
+
+	/** 快照上下文里的 taskId（null = 页面轮/旧数据）。 */
+	private static Long contextTaskId(RunSnapshot snapshot) {
+		Object value = snapshot.getContext().get("taskId");
+		if (value instanceof Number number) {
+			return number.longValue();
+		}
+		try {
+			return value == null ? null : Long.valueOf(String.valueOf(value));
+		}
+		catch (NumberFormatException ex) {
+			return null;
+		}
+	}
+
+	/**
+	 * 快照上下文里的作业类型（JOBTYPE 的<b>来源</b>）：取 {@code step}，缺省取 {@code taskType}。
+	 *
+	 * <p>两者在既有上下文里同义（{@code AiContext.of(page, taskType, step, taskId, extra)}：
+	 * 导出页 {@code taskType=EXPORT, step=EXPORT}）；大写归一交给 {@link LeaseKeys#normalizeJobType}。
+	 */
+	private static String contextJobType(RunSnapshot snapshot) {
+		for (String field : List.of("step", "taskType")) {
+			Object value = snapshot.getContext().get(field);
+			if (value != null && !String.valueOf(value).isBlank()) {
+				return String.valueOf(value);
+			}
+		}
+		return null;
 	}
 
 	public ResumeResult resume(String runId) {
@@ -312,7 +365,9 @@ public class ResumeService {
 			// 的窗口里会说谎，而这个判定正是"要不要驱动这一轮"的入口。
 			LeaseService leases = this.store.leaseService();
 			LeaseService.Hold hold = leases == null ? LeaseService.Hold.UNAVAILABLE
-					: leases.verifyHeld(lease.key(), lease.epoch());
+					// 批③a：按租约<b>自己的 owner</b> 校验（租约不再隐含 instanceId —— 同一个键上
+					// 可能并存不同持有者的租约，用错 owner 会把自己"校验失败"掉）
+					: leases.verifyHeld(lease.key(), lease.epoch(), lease.owner());
 			if (hold == LeaseService.Hold.LOST) {
 				return new ResumeResult(Outcome.LEASE_HELD_ELSEWHERE, Map.of("runId", runId, "resumed", false,
 						// heldEpoch 是进程内视图（可能在"TTL 已到、续租未失败"窗口里滞后），只作排障参考

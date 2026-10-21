@@ -80,6 +80,43 @@ class RunStoreClaimFenceTest {
 	}
 
 	@Test
+	void claimOutcomeDistinguishesWonLostAndStaleFence() {
+		// A 持租并写一次快照：fence = A 的 epoch（本实例既不陈旧、也不越权）
+		this.leaseA.tryAcquire(this.storeA.runLeaseKey(RUN_ID), this.properties.getLease().getTtl()).orElseThrow();
+		long epochA = this.storeA.heldRunEpoch(RUN_ID);
+		this.storeA.save(snapshot(RunSnapshot.SUSPENDED));
+
+		RunStore.ClaimResult won = this.storeA.tryClaimExecution(RUN_ID, "c-1", this.storeA.instanceId());
+		RunStore.ClaimResult lost = this.storeA.tryClaimExecution(RUN_ID, "c-1", this.storeA.instanceId());
+
+		// 换主：A 的租约过期、B 接管并写入（fence 推进到更大的 epoch）
+		this.fake.dropKey(this.storeA.runLeaseKey(RUN_ID));
+		this.leaseB.tryAcquire(this.storeB.runLeaseKey(RUN_ID), this.properties.getLease().getTtl()).orElseThrow();
+		this.storeB.save(snapshot(RunSnapshot.SUSPENDED));
+		RunStore.ClaimResult stale = this.storeA.tryClaimExecution(RUN_ID, "c-2", this.storeA.instanceId());
+
+		assertThat(won.outcome()).as("第一个认领者 ⇒ WON").isEqualTo(RunStore.ClaimOutcome.WON);
+		assertThat(won.won()).isTrue();
+		assertThat(won.epoch()).as("认领记录的 epoch = 本实例持租的 epoch").isEqualTo(epochA);
+		assertThat(won.fence()).as("WON 时 fence ≤ epoch").isLessThanOrEqualTo(epochA);
+
+		assertThat(lost.outcome()).as("同一调用第二次 ⇒ LOST（被他人认领）")
+			.isEqualTo(RunStore.ClaimOutcome.LOST);
+		assertThat(lost.won()).isFalse();
+
+		assertThat(stale.outcome()).as("换主后 ⇒ STALE_FENCE（不是'被他人认领'）")
+			.isEqualTo(RunStore.ClaimOutcome.STALE_FENCE);
+		assertThat(stale.won()).isFalse();
+		assertThat(stale.fence()).as("STALE_FENCE 带上拒绝依据（fence > epoch）").isGreaterThan(stale.epoch());
+		assertThat(this.storeA.claimedBy(RUN_ID, "c-2")).as("stale 拒绝不得留痕").isNull();
+
+		// 布尔旧口保留：两种失败在布尔面上都是 false（"不得执行"这一点相同）
+		assertThat(this.storeA.claimExecution(RUN_ID, "c-1", this.storeA.instanceId())).as("LOST ⇒ false").isFalse();
+		assertThat(this.storeA.claimExecution(RUN_ID, "c-3", this.storeA.instanceId())).as("STALE_FENCE ⇒ false")
+			.isFalse();
+	}
+
+	@Test
 	void claimWithoutALeaseKeepsThePreviousSemantics() {
 		// epoch == 0（本实例未持租）：E3 红线 —— 不看 fence，照旧认领
 		this.fake.strings.put(RunStore.FENCE_RUN_PREFIX + RUN_ID, "9");

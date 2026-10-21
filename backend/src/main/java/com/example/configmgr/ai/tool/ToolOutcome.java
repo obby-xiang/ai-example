@@ -14,9 +14,11 @@ import java.util.Set;
  * <p>
  * {@code retryable} 同样由结局与错误码推导（见 {@link #retryable(String)}）：
  * <ul>
- * <li>{@link #REJECTED}/{@link #BLOCKED}/{@link #TIMEOUT}/{@link #CANCELLED}：重试不会改变结论；</li>
+ * <li>{@link #REJECTED}/{@link #TIMEOUT}/{@link #CANCELLED}：重试不会改变结论；</li>
+ * <li>{@link #BLOCKED}：只有 {@link #CODE_RESOURCE_LOCKED}（资源正被同类动作占用）为 true ——
+ * 这是"现在不能执行"，等锁释放即可；越 scope 等其余 blocked 码仍为 false；</li>
  * <li>{@link #FAILED}：只有"改数据后可重试"的码（预检查未通过/过期/只读预检不通过）为 true，
- * 其余（作业在途、任务终态、结果缺失、参数非法等）为 false；</li>
+ * 其余（作业在途、任务终态、结果缺失、参数非法、目标资源不成立等）为 false；</li>
  * <li>{@link #OK}/{@link #UNKNOWN}/{@link #SKIPPED}：false（成功无须重试，未知须先对账，跳过不得重试）。</li>
  * </ul>
  */
@@ -84,6 +86,29 @@ public enum ToolOutcome {
 	 */
 	public static final String CODE_PRECHECK_UNAVAILABLE = "PRECHECK_UNAVAILABLE";
 
+	/**
+	 * 目标资源正被同类动作占用（B23L1 批③a / 裁决 4）：L1 资源互斥（{@code ai:lock:*}，见
+	 * {@code LeaseKeys}）抢不到锁时的机器可读码，结局 {@link #BLOCKED}。
+	 *
+	 * <p>为什么是 {@code blocked} 而不是 {@code failed}：这不是"执行出错"，而是"现在不能执行"——
+	 * 与前一个动作的成败无关，等对方收尾即可。因此它<b>可重试</b>
+	 * （见 {@link #retryable(String)}）：锁的寿命由 TTL/续租界定，等一会儿再来是正确策略。
+	 * 用 {@code failed} 表达会让"改数据后可重试"的表（预检类码）与"等锁"混在一起，
+	 * 模型也就分不清"该改参数"还是"该等"。
+	 */
+	public static final String CODE_RESOURCE_LOCKED = "RESOURCE_LOCKED";
+
+	/**
+	 * 工具参数里的目标资源不成立（B23L1 批③a / 裁决 5；设计稿 F2 {@code ToolTargetResolver}）：
+	 * 如 taskId 不存在/已删除，<b>尚未</b>进入确认门、<b>未</b>执行，结局 {@link #BLOCKED}，
+	 * <b>不可重试</b>（{@link #retryable(String)} 恒 false）—— 参数本身就是错的，重试同一个调用
+	 * 只会得到同一个结论；换目标重发是模型/用户的动作。
+	 *
+	 * <p>与 {@link #CODE_RESOURCE_LOCKED} 的分工：两者都挂在 {@code blocked} 下、都不抛异常不断流，
+	 * 但一个"等会儿再来就好"（可重试），一个"换目标再来"（不可重试）。
+	 */
+	public static final String CODE_TARGET_INVALID = "TARGET_INVALID";
+
 	/** "改数据后可重试"的失败码（预检查未通过/过期/预检不通过/预检暂不可用；其余失败码一律不可重试）。 */
 	private static final Set<String> RETRYABLE_FAILURE_CODES = Set.of("PRECHECK_NOT_PASSED", "PRECHECK_STALE",
 			CODE_PRECHECK_FAILED, CODE_PRECHECK_UNAVAILABLE);
@@ -107,9 +132,17 @@ public enum ToolOutcome {
 	/**
 	 * 是否可重试。
 	 *
-	 * @param code 失败码（仅 {@link #FAILED} 分支使用；可为 null）
+	 * <p>表（B23L1 批③a 起）：{@link #BLOCKED} 只有 {@link #CODE_RESOURCE_LOCKED} 为 true
+	 * （等锁 = 等前一个动作收尾，锁的寿命由 TTL 界定；{@link #CODE_TARGET_INVALID} 仍是 false ——
+	 * 目标不成立时重试同一个调用结论不变）；
+	 * {@link #FAILED} 只有"改数据后可重试"的码为 true；其余结局一律 false，语义与批②之前一致。
+	 *
+	 * @param code 失败码（仅 {@link #FAILED} / {@link #BLOCKED} 分支使用；可为 null）
 	 */
 	public boolean retryable(String code) {
+		if (this == BLOCKED) {
+			return CODE_RESOURCE_LOCKED.equals(code);
+		}
 		if (this != FAILED || code == null) {
 			return false;
 		}

@@ -570,10 +570,16 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
         ? 'blocked'
         : rejected ? 'rejected' : fromOutcome ?? (frame.ok ? 'succeeded' : 'failed')
       // 治理 P0-1 M2：阻断文案按 `code` 区分 —— 互斥抢占（TOOL_ALREADY_CLAIMED）不是"未披露"。
+      // B23L1 批③b 增两支（只增不改）：资源锁冲突（RESOURCE_LOCKED）与目标资源不成立（TARGET_INVALID）——
+      // 两者都是"本次未执行"，但原因完全不同（一个等对方收尾、一个参数就是错的）。
       const reason = blocked
         ? (frame.code === 'TOOL_ALREADY_CLAIMED'
             ? '该操作已由另一实例执行，本次未重复执行'
-            : '该工具不在当前工作区上下文的披露范围内，未执行')
+            : frame.code === 'RESOURCE_LOCKED'
+              ? '该任务已有作业在执行，本次未执行'
+              : frame.code === 'TARGET_INVALID'
+                ? '目标资源不存在或不在当前任务内，本次未执行'
+                : '该工具不在当前工作区上下文的披露范围内，未执行')
         : rejected ? (existing?.reason ?? '用户拒绝执行') : null
       upsertToolPart(message, {
         toolCallId: frame.toolCallId,

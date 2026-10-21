@@ -12,19 +12,26 @@
     · 实例 B   java -jar config-mgr.jar --server.port=8082（同上）
     · 两者共享 spring.data.redis.*（事件日志 ai:xevents: / 唤醒 ai:wake: 都在 Redis 上）
 
-  用例面（默认 = 批① 三条 + 批② 两条；批③ 两条仍 SKIP 并打印原因）：
+  用例面（默认 = 批① 三条 + 批② 三条 + 批③ 两条）：
     · reattach-full-replay   一轮在 A 跑完，B 侧从 0 回放得到逐帧同序同号（连接层无状态）
     · reattach-diff          同一轮在 B 侧用 ?lastSeq 只拿到差量，不重不漏
     · suspend-reattach-wake  A 挂起 → B 侧重挂 → 在 A 批准确认 → 续跑帧经 ai:wake: 扇出到 B 的连接
     · suspend-decision       A 挂起 → 决策打 B（A 的等待方持租）→ 续跑只发生一次，双实例都能重挂到终帧
+    · resource-lock          同 task 双 start_export 竞态：恰一个执行、恰一个 blocked/RESOURCE_LOCKED
+                              未开 -SharedDb 时走 H3 确定性预置锁变体（不依赖共享 H2）
+    · idempotency            同一 runId+toolCallId 二次决策 → 409 DUPLICATE，台账/执行仍恰一次
     · instance-kill          A 挂起后杀真 A → 决策打 B → 租约过期后 B 接管续跑（台账 executedBy=B）
-    · resource-lock          批③ 依赖（跨实例资源互斥）—— SKIP
-    · idempotency            批③ 依赖（runId:toolCallId 幂等）—— SKIP
 
   非默认可选用例（显式 -Cases 指定）：
     · suspend-decision-concurrent  同一 runId/toolCallId 双路并发决策（恰一个 200、一个 409）
     · lease-scripts                真 Redis 租约脚本冒烟（ACQUIRE/RENEW/FENCED-SET/RELEASE；
                                    会 kill instance-a，须排在最后或单独跑）
+
+.PARAMETER SharedDb
+  两实例共享同一 H2 文件（绝对路径 + AUTO_SERVER=TRUE + DB_CLOSE_DELAY=-1）：
+  批③ resource-lock 的跨实例变体要求任务在两库都可见（L-12 边界）。
+  未开时 resource-lock 走 H3 预置锁变体，仍可验证 blocked/RESOURCE_LOCKED。
+  SharedDb 启动失败（H2 共享不可行）会直接 FAIL 并点名该边界，不回退到假绿。
 
 .PARAMETER NoStart
   不自起服务：只用已就绪的 8081/8082（脚本仍做健康等待，不达标即整棒 FAIL）。
@@ -33,7 +40,7 @@
   用例跑完不杀进程（默认会收掉本脚本起来的全部子进程）。
 
 .PARAMETER Cases
-  逗号分隔的用例名；缺省跑批①+批② 五条（instance-kill 会杀 A，恒为最后一条）。
+  逗号分隔的用例名；缺省跑批①+②+③ 七条（instance-kill 会杀 A，恒为最后一条）。
 
 .PARAMETER WakeReadyTimeoutSec
   B 侧重挂长连接的"订阅就绪"等待上限（秒，默认 30）：后台作业建立连接后写哨兵
@@ -57,10 +64,13 @@ param(
     [string]$RedisHost = '127.0.0.1',
     [int]$RedisPort = 6379,
     [string]$ArtifactDir = '',
-    [string]$Cases = 'reattach-full-replay,reattach-diff,suspend-reattach-wake,suspend-decision,instance-kill',
+    [string]$Cases = 'reattach-full-replay,reattach-diff,suspend-reattach-wake,suspend-decision,resource-lock,idempotency,instance-kill',
     [int]$HealthTimeoutSec = 120,
     [int]$WakeReadyTimeoutSec = 30,
     [int]$KillTakeoverTimeoutSec = 90,
+    # 批③：两实例共享同一 H2 文件（AUTO_SERVER=TRUE），用于跨实例同 taskId 的资源锁用例。
+    # 关（默认）时 resource-lock 走"确定性预置锁（H3）"变体，不依赖共享库。
+    [switch]$SharedDb,
     [switch]$NoStart,
     [switch]$KeepAlive
 )
@@ -227,6 +237,34 @@ function Stop-Child($name) {
         if (-not [object]::ReferenceEquals($child, $target)) { $remaining.Add($child) | Out-Null }
     }
     $script:children = $remaining
+}
+
+# 起一个后端实例（SharedDb 时两条实例的 H2 URL 相同；A 先起、健康后再起 B，
+# 让 H2 AUTO_SERVER 的服务端先就绪，降低"两边同时初始化抢文件锁"的失败率）。
+function Start-Instance($pair, $jarPath) {
+    $runDir = Join-Path $ArtifactDir $pair.name
+    New-Item -ItemType Directory -Force -Path $runDir | Out-Null
+    # SharedDb 时 URL 可能含空格：整体加引号（ProcessStartInfo.Arguments 是单串，靠引号保住一个 argv）。
+    $dsArg = if ($SharedDb) {
+        '--spring.datasource.url="' + $sharedDbUrl + '"'
+    } else {
+        "--spring.datasource.url=jdbc:h2:file:./data/b23l1_$($pair.name);DB_CLOSE_DELAY=-1"
+    }
+    $javaArgs = @(
+        '-jar', "`"$jarPath`"",
+        "--server.port=$($pair.port)",
+        "--spring.data.redis.host=$RedisHost",
+        "--spring.data.redis.port=$RedisPort",
+        $dsArg,
+        '--app.job.batch-size=10'
+    ) -join ' '
+    $env = @{
+        'AI_API_KEY' = 'b23l1-stub-placeholder'
+        'AI_BASE_URL' = $StubBase
+        'AI_MODEL' = 'ci-stub'
+        'LOGGING_LEVEL_COM_EXAMPLE_CONFIGMGR' = 'DEBUG'
+    }
+    Start-Child $pair.name 'java' $javaArgs $runDir $env | Out-Null
 }
 
 # Ctrl-C：先收干净子进程再退出（130 = 128 + SIGINT），不让 java/node 变成孤儿进程。
@@ -459,38 +497,83 @@ function Invoke-RedisCommand([string[]]$parts) {
     }
 }
 
-# 挂起骨架（wake / suspend-decision / instance-kill / lease-scripts 共用）：
-# 建真实 EXPORT 任务 → select-defs → 带 context 发 start_export → 读到 confirm_request 为止。
+# 测试预置/清理专用（批③ H3 变体）——仅允许：
+#   SET <key> <value> PX <ms>（必须带 TTL，避免留下无主测试键）
+#   DEL <key>
+# 作用域固定为 harness 自己的 $RedisHost:$RedisPort；判定路径仍只用只读 Invoke-RedisCommand。
+function Invoke-RedisWrite([string[]]$parts) {
+    if ($null -eq $parts -or $parts.Count -lt 2) { throw 'Invoke-RedisWrite：至少需要命令与键' }
+    $cmd = ([string]$parts[0]).ToUpperInvariant()
+    if ($cmd -eq 'SET') {
+        if ($parts.Count -ne 5 -or ([string]$parts[3]).ToUpperInvariant() -ne 'PX') {
+            throw 'Invoke-RedisWrite 的 SET 只允许 SET <key> <value> PX <ms>（禁止无 TTL 写）'
+        }
+        $ttl = 0
+        if (-not [int]::TryParse([string]$parts[4], [ref]$ttl) -or $ttl -le 0) {
+            throw "Invoke-RedisWrite 的 PX 必须是正整数毫秒（当前 = $($parts[4])）"
+        }
+    } elseif ($cmd -eq 'DEL') {
+        if ($parts.Count -ne 2) { throw 'Invoke-RedisWrite 的 DEL 只允许单键：DEL <key>' }
+    } else {
+        throw "Invoke-RedisWrite 只允许 SET(key value PX ms) / DEL(key)，收到：$cmd"
+    }
+    $result = Invoke-RedisCommand $parts
+    if ($null -eq $result) { throw "Invoke-RedisWrite 执行失败：$cmd $($parts[1])（Redis 不可达或命令被拒）" }
+    return $result
+}
+
+# 等一个 Redis 键消失（只读轮询）：资源锁"终态释放"的取证用，避免与释放时点抢跑。
+function Wait-RedisKeyGone($key, [int]$timeoutSec = 10) {
+    $deadline = (Get-Date).AddSeconds($timeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        if ($null -eq (Invoke-RedisCommand @('GET', $key))) { return $true }
+        Start-Sleep -Milliseconds 300
+    }
+    return ($null -eq (Invoke-RedisCommand @('GET', $key)))
+}
+
+# 挂起骨架（wake / suspend-decision / instance-kill / lease-scripts / 批③ 共用）：
+# 建真实 EXPORT 任务（或复用 -TaskId）→ select-defs → 带 context 发 start_export → 读到 confirm_request 为止。
+# -Base 缺省 A；SharedDb 资源锁用例的第二条必须在 B 侧发起（run 的挂起者 = 该实例）。
+# -MessageSuffix：桩的会话指纹 = 首条 user 消息文本；共享库变体两侧必须给互异后缀，
+#   否则同一 taskId + 同一句话会被桩视为同一会话（bucket.used 已占 TC16-EXPORT → 退化为文本轮）。
 # 返回 @{ sessionId; taskId; runId; toolCallId; lastSeq }。
-function New-SuspendedExportRun($prefix, $tag) {
+function New-SuspendedExportRun($prefix, $tag, [int64]$TaskId = 0, $Base = '', [string]$MessageSuffix = '') {
+    if ([string]::IsNullOrWhiteSpace($Base)) { $Base = $BaseA }
+    $sideLabel = if ($Base -eq $BaseA) { 'A 侧' } else { 'B 侧' }
     $sessionId = $prefix + [guid]::NewGuid().ToString('N').Substring(0, 8)
-    # 确认门的两道脚本侧前提：
-    #   ① start_export 只在 page:tasks / task:EXPORT/EXPORT 上下文披露（否则桩的 requiresTools 硬闸不过）；
-    #   ② 确认门前的只读预检要求任务真实存在（任务不存在会被 block，不出确认卡）。
-    $taskTitle = $prefix + [guid]::NewGuid().ToString('N').Substring(0, 8)
-    $taskResp = PostJson $BaseA '/api/tasks' @{ type = 'EXPORT'; title = $taskTitle }
-    $taskText = if ($null -ne $taskResp) { [string]$taskResp.text } else { '' }
-    if ($null -eq $taskResp -or -not $taskResp.ok) {
-        throw "创建导出任务失败：HTTP $($taskResp.status) $($taskText)"
-    }
-    $taskBody = $null
-    try { $taskBody = $taskText | ConvertFrom-Json } catch { $taskBody = $null }
-    $taskId = $null
-    if ($null -ne $taskBody -and $null -ne $taskBody.data -and $null -ne $taskBody.data.id) {
-        $taskId = [int64]$taskBody.data.id
-    }
-    if ($null -eq $taskId -or $taskId -le 0) {
-        $snippet = if ($taskText.Length -gt 400) { $taskText.Substring(0, 400) } else { $taskText }
-        throw "创建导出任务响应缺少 data.id：HTTP $($taskResp.status) 体=$snippet"
-    }
-    $defsResp = PostJson $BaseA ("/api/tasks/" + $taskId + "/select-defs") @{ defCodes = @('CURRENCY') }
-    if ($null -eq $defsResp -or -not $defsResp.ok) {
-        throw "选择导出定义失败：HTTP $($defsResp.status) $($defsResp.text)"
+    if ($TaskId -gt 0) {
+        # SharedDb / 资源锁用例：复用已存在（且两侧可见）的任务，不再建新任务。
+        $taskId = $TaskId
+    } else {
+        # 确认门的两道脚本侧前提：
+        #   ① start_export 只在 page:tasks / task:EXPORT/EXPORT 上下文披露（否则桩的 requiresTools 硬闸不过）；
+        #   ② 确认门前的只读预检要求任务真实存在（任务不存在会被 block，不出确认卡）。
+        $taskTitle = $prefix + [guid]::NewGuid().ToString('N').Substring(0, 8)
+        $taskResp = PostJson $BaseA '/api/tasks' @{ type = 'EXPORT'; title = $taskTitle }
+        $taskText = if ($null -ne $taskResp) { [string]$taskResp.text } else { '' }
+        if ($null -eq $taskResp -or -not $taskResp.ok) {
+            throw "创建导出任务失败：HTTP $($taskResp.status) $($taskText)"
+        }
+        $taskBody = $null
+        try { $taskBody = $taskText | ConvertFrom-Json } catch { $taskBody = $null }
+        $taskId = $null
+        if ($null -ne $taskBody -and $null -ne $taskBody.data -and $null -ne $taskBody.data.id) {
+            $taskId = [int64]$taskBody.data.id
+        }
+        if ($null -eq $taskId -or $taskId -le 0) {
+            $snippet = if ($taskText.Length -gt 400) { $taskText.Substring(0, 400) } else { $taskText }
+            throw "创建导出任务响应缺少 data.id：HTTP $($taskResp.status) 体=$snippet"
+        }
+        $defsResp = PostJson $BaseA ("/api/tasks/" + $taskId + "/select-defs") @{ defCodes = @('CURRENCY') }
+        if ($null -eq $defsResp -or -not $defsResp.ok) {
+            throw "选择导出定义失败：HTTP $($defsResp.status) $($defsResp.text)"
+        }
     }
 
     $context = @{ page = 'tasks'; taskType = 'EXPORT'; step = 'EXPORT'; taskId = $taskId }
-    $message = 'start_export 帮我导出 taskId=' + $taskId
-    $framesA = Read-Sse $BaseA '/api/ai/chat' @{ sessionId = $sessionId; message = $message; context = $context } @('confirm_request', 'frontend_tool_request', 'error') 120000 $tag
+    $message = 'start_export 帮我导出 taskId=' + $taskId + $MessageSuffix
+    $framesA = Read-Sse $Base '/api/ai/chat' @{ sessionId = $sessionId; message = $message; context = $context } @('confirm_request', 'frontend_tool_request', 'error') 120000 $tag
     $runId = $null
     $toolCallId = $null
     $lastSeq = 0
@@ -499,8 +582,12 @@ function New-SuspendedExportRun($prefix, $tag) {
         if ($f.type -eq 'confirm_request') { $toolCallId = $f.toolCallId }
         if ($null -ne $f.seq) { $lastSeq = [int64]$f.seq }
     }
-    if (-not $runId) { throw 'A 侧未收到 start 帧（runId 缺失）' }
-    if (-not $toolCallId) { throw 'A 侧未出现确认卡（桩路由 start_export 未触发）' }
+    if (-not $runId) { throw "${sideLabel}未收到 start 帧（runId 缺失）" }
+    # 桩的指纹 = 首条 user 消息；同一 taskId 的并发两条必须带互异后缀，否则后到的一条退化为文本轮。
+    if (-not $toolCallId) {
+        $seen = @($framesA | ForEach-Object { $_.type }) -join ','
+        throw "${sideLabel}未出现确认卡（桩路由 start_export 未触发；已收帧: $seen；消息: $message）"
+    }
     return @{ sessionId = $sessionId; taskId = $taskId; runId = $runId; toolCallId = $toolCallId; lastSeq = $lastSeq }
 }
 
@@ -742,8 +829,310 @@ function Case-Suspend-Decision-Concurrent {
     Ok $name
 }
 
+# 全量回放（?lastSeq=0）到终帧：对"快照已 DONE、done 帧尚未落档"的窄窗重试。
+# 后端 finish() 先 save(DONE)（ResilientChatService:487）再 out.done(:502)，而终态回放不挂订阅
+# （SseChatEmitter:523-530）——恰在此窗口到达的重挂会拿到 16 帧（到 message_end）就收流，永远收不到 done。
+# 这里缺终帧时短延迟重读（done 通常几毫秒内落档）；4 次仍无终帧才 FAIL（不掩盖真实的 done 缺失）。
+function Read-RunFullToTerminal($base, $runId, $tag, [int]$timeoutSec = 120) {
+    $lastFrames = $null
+    for ($attempt = 1; $attempt -le 4; $attempt++) {
+        $frames = Read-Sse $base ("/api/ai/events/" + $runId + "?lastSeq=0") $null @('done', 'error') $timeoutSec ("$tag-a$attempt")
+        $lastFrames = $frames
+        if ((Count-Frames $frames 'done' $null) -ge 1 -or (Count-Frames $frames 'error' $null) -ge 1) {
+            return , $frames
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    $seen = @($lastFrames | ForEach-Object { $_.type }) -join ','
+    throw "全量回放重试 4 次仍未收到终帧（runId=$runId；最后已收：$seen）"
+}
+
+# 审批一轮挂起并在该 run 所在的实例上全量回放到终帧；返回全量帧数组。
+function Approve-SuspendedRun($base, $run, $tag, $reason) {
+    $approve = PostJson $base '/api/ai/confirm' @{ runId = $run.runId; toolCallId = $run.toolCallId; approved = $true; reason = $reason }
+    if ($null -eq $approve -or -not $approve.ok) {
+        throw "决策被拒：HTTP $($approve.status) $($approve.text)"
+    }
+    $full = Read-RunFullToTerminal $base $run.runId $tag 120
+    if ((Count-Frames $full 'done' $null) -lt 1) {
+        throw "未收到终帧（已收：$(($full | ForEach-Object { $_.type }) -join ',')）"
+    }
+    return , $full
+}
+
+# 单轮竞态判定（抽出来便于离线喂假数据）：命中 = 恰一个 RESOURCE_LOCKED（BLOCKED/blocked/未执行）
+# + 恰一个真实执行 + 两轮台账合计 1 + 作业数 1。否则返回 Hit=false（竞态窗口没重叠，不是系统错）。
+function Test-ResourceLockRound($fullA, $fullB, $detailA, $detailB, $jobsCount) {
+    $all = @($fullA) + @($fullB)
+    $locked = @($all | Where-Object { $_.type -eq 'tool_result' -and [string]$_.code -eq 'RESOURCE_LOCKED' })
+    $executed = @($all | Where-Object { $_.type -eq 'tool_result' -and [bool]$_.executed })
+    $sum = [int]$detailA.ledgerCounts.start_export + [int]$detailB.ledgerCounts.start_export
+    $lockShapeOk = $false
+    if ($locked.Count -eq 1) {
+        $lf = $locked[0]
+        $lockShapeOk = ([string]$lf.status -eq 'BLOCKED' -and [string]$lf.outcome -eq 'blocked' -and -not [bool]$lf.executed)
+    }
+    $hit = ($locked.Count -eq 1 -and $lockShapeOk -and $executed.Count -eq 1 -and $sum -eq 1 -and [int]$jobsCount -eq 1)
+    $lockShown = if ($locked.Count -eq 1) {
+        "status=$($locked[0].status)/outcome=$($locked[0].outcome)/executed=$($locked[0].executed)"
+    } else { "-" }
+    return @{
+        Hit = $hit
+        Shape = ("locked=$($locked.Count)[$lockShown] executed=$($executed.Count) ledgerSum=$sum jobs=$jobsCount")
+    }
+}
+
+# 竞态重试编排（I-2）：最多 $maxRounds 轮；任一命中即 PASS，全未命中 → SKIP（行为可能完全正确）。
+# $roundRunner 是无参/单参脚本块，返回 Test-ResourceLockRound 的结果（@{Hit;Shape}）。
+function Invoke-ResourceLockRace($roundRunner, [int]$maxRounds = 3) {
+    $shapes = @()
+    for ($i = 1; $i -le $maxRounds; $i++) {
+        $r = & $roundRunner $i
+        $shapes += ("R$i[" + [string]$r.Shape + "]")
+        if ([bool]$r.Hit) {
+            return @{ Result = 'PASS'; Rounds = $i; Shapes = $shapes }
+        }
+    }
+    return @{ Result = 'SKIP'; Rounds = $maxRounds; Shapes = $shapes }
+}
+
+function Case-Resource-Lock {
+    $name = 'resource-lock（批③：同 task 双 start_export 恰一个执行、恰一个 RESOURCE_LOCKED）'
+    if ($SharedDb) {
+        Say '  resource-lock：-SharedDb 已开 ⇒ 跨实例共享库变体（最多 3 轮，命中即 PASS；3 轮均未命中判 SKIP）'
+        $race = Case-Resource-Lock-Shared
+        if ($race -eq 'SKIP') {
+            Skip $name '竞态窗口未命中（3/3），跨实例资源互斥证据以 H3 确定性变体为准'
+            return
+        }
+    } else {
+        Say '  resource-lock：未开 -SharedDb ⇒ 走 H3 确定性预置锁变体（跨实例共享库版需 -SharedDb）'
+        Case-Resource-Lock-Preset
+    }
+    Ok $name
+}
+
+# H3：真 Redis 预置 ai:lock:job:<taskId>:EXPORT，单侧发起 start_export 必得 blocked/RESOURCE_LOCKED；
+# DEL 后同一任务重跑成功。不依赖 SharedDb（任务/执行都在 A 侧）。
+function Case-Resource-Lock-Preset {
+    $run = New-SuspendedExportRun 'b23l1-lock-' 'lock-A'
+    $lockKey = 'ai:lock:job:' + $run.taskId + ':EXPORT'
+    Say ("  H3：预置资源锁 " + $lockKey + " = 1|other-instance（PX 60000）")
+    Invoke-RedisWrite @('SET', $lockKey, '1|other-instance', 'PX', '60000') | Out-Null
+    try {
+        $blockedFrames = Approve-SuspendedRun $BaseA $run 'lock-A-blocked' 'b23l1 resource-lock preset'
+        $tr = @($blockedFrames | Where-Object { $_.type -eq 'tool_result' -and $_.toolCallId -eq $run.toolCallId })
+        if ($tr.Count -ne 1) { throw "预置锁场景 tool_result 期望 1 帧，实得 $($tr.Count)" }
+        $f = $tr[0]
+        # 字段依据：SseChatEmitter#toolResult（code/status/outcome/executed/retryable）
+        # 与 ToolOutcome.BLOCKED（只 RESOURCE_LOCKED 映射 blocked 且 retryable=true）。
+        if ([string]$f.code -ne 'RESOURCE_LOCKED') {
+            throw "预置锁场景期望 code=RESOURCE_LOCKED，实得 '$($f.code)'（status=$($f.status) outcome=$($f.outcome)）"
+        }
+        if ([string]$f.status -ne 'BLOCKED') { throw "预置锁场景 status 期望 BLOCKED，实得 '$($f.status)'" }
+        if ([string]$f.outcome -ne 'blocked') { throw "预置锁场景 outcome 期望 blocked，实得 '$($f.outcome)'" }
+        if ([bool]$f.executed) { throw 'RESOURCE_LOCKED 帧不应 executed=true（被锁=未执行）' }
+        if (-not [bool]$f.retryable) { throw 'RESOURCE_LOCKED 应 retryable=true（等锁可重试）' }
+
+        $detail = (GetJson $BaseA ('/api/ai/runs/' + $run.runId)).data
+        if ([int]$detail.ledgerCounts.start_export -ne 0) {
+            throw "被锁调用不应进执行台账：ledgerCounts.start_export=$($detail.ledgerCounts.start_export)"
+        }
+        $jobsBlocked = @((GetJson $BaseA ('/api/tasks/' + $run.taskId + '/jobs')).data)
+        if ($jobsBlocked.Count -ne 0) { throw "被锁调用不应创建作业：jobs=$($jobsBlocked.Count)" }
+
+        Invoke-RedisWrite @('DEL', $lockKey) | Out-Null
+        Say '  已删除预置锁，同一任务重跑 start_export'
+        $run2 = New-SuspendedExportRun 'b23l1-lock-' 'lock-A-ok' $run.taskId
+        $okFrames = Approve-SuspendedRun $BaseA $run2 'lock-A-ok-done' 'b23l1 resource-lock rerun'
+        $tr2 = @($okFrames | Where-Object { $_.type -eq 'tool_result' -and $_.toolCallId -eq $run2.toolCallId })
+        if ($tr2.Count -ne 1) { throw "解锁后 tool_result 期望 1 帧，实得 $($tr2.Count)" }
+        if (-not [bool]$tr2[0].executed) {
+            throw "解锁后工具应真实执行（executed=true），实得 code=$($tr2[0].code) outcome=$($tr2[0].outcome)"
+        }
+        if ([string]$tr2[0].outcome -ne 'ok') { throw "解锁后 outcome 期望 ok，实得 '$($tr2[0].outcome)'" }
+        $detail2 = (GetJson $BaseA ('/api/ai/runs/' + $run2.runId)).data
+        if ([int]$detail2.ledgerCounts.start_export -ne 1) {
+            throw "解锁后台账 start_export 期望 1，实得 $($detail2.ledgerCounts.start_export)"
+        }
+        $jobsOk = @((GetJson $BaseA ('/api/tasks/' + $run.taskId + '/jobs')).data)
+        if ($jobsOk.Count -ne 1) { throw "解锁后作业数期望 1，实得 $($jobsOk.Count)" }
+        if (-not (Wait-RedisKeyGone $lockKey 10)) {
+            throw "执行完成后资源锁未释放：$lockKey=$(Invoke-RedisCommand @('GET', $lockKey))"
+        }
+    } finally {
+        # 预置锁清理（成败都清；幂等）
+        try { Invoke-RedisWrite @('DEL', $lockKey) | Out-Null } catch { }
+    }
+}
+
+# SharedDb 每轮新建一个共享任务（新任务 = 干净的 jobs=1 判据，不被上一轮的作业污染），
+# 并先在 B 侧确认可见（看不到 = SharedDb 未生效，立即点名 L-12 边界）。
+function New-SharedExportTask($prefix) {
+    $taskTitle = $prefix + [guid]::NewGuid().ToString('N').Substring(0, 8)
+    $taskResp = PostJson $BaseA '/api/tasks' @{ type = 'EXPORT'; title = $taskTitle }
+    $taskText = if ($null -ne $taskResp) { [string]$taskResp.text } else { '' }
+    if ($null -eq $taskResp -or -not $taskResp.ok) { throw "SharedDb：创建共享任务失败 HTTP $($taskResp.status) $taskText" }
+    $taskBody = $null
+    try { $taskBody = $taskText | ConvertFrom-Json } catch { $taskBody = $null }
+    $taskId = $null
+    if ($null -ne $taskBody -and $null -ne $taskBody.data -and $null -ne $taskBody.data.id) { $taskId = [int64]$taskBody.data.id }
+    if ($null -eq $taskId -or $taskId -le 0) { throw "SharedDb：创建共享任务响应缺少 data.id：$taskText" }
+    $defsResp = PostJson $BaseA ("/api/tasks/" + $taskId + "/select-defs") @{ defCodes = @('CURRENCY') }
+    if ($null -eq $defsResp -or -not $defsResp.ok) { throw "SharedDb：select-defs 失败 HTTP $($defsResp.status) $($defsResp.text)" }
+    try { $null = GetJson $BaseB ('/api/tasks/' + $taskId) } catch {
+        throw ("SharedDb 未生效：B 侧看不到任务 #$taskId（" + $_.Exception.Message +
+            "）。请确认 -SharedDb（H2 AUTO_SERVER、绝对路径）或改用 H3 变体（不加 -SharedDb）。")
+    }
+    return $taskId
+}
+
+# 跨实例单轮：每轮新任务 + A/B 各一个新 run，同刻发令 → 锁竞态；返回 Test-ResourceLockRound 结果。
+# 基础设施错误（批准非 200 / 缺终帧 / 锁不释放）直接抛；"窗口没重叠"只算 miss，不抛。
+function Invoke-ResourceLockSharedRound($round) {
+    $taskId = New-SharedExportTask ("b23l1-lock-shared-r$round-")
+    # 同 taskId 的两条消息必须互异（桩的会话指纹 = 首条 user 消息文本）：加后缀但不引入前置数字，
+    # extractTaskId 仍取到同一个 taskId；否则后到的一条会因 bucket.used 已占 TC16-EXPORT 退化为文本轮。
+    $runA = New-SuspendedExportRun ("b23l1-lockA$round-") ("lock-shared-A$round") $taskId $BaseA '（共享库并发 A 侧）'
+    $runB = New-SuspendedExportRun ("b23l1-lockB$round-") ("lock-shared-B$round") $taskId $BaseB '（共享库并发 B 侧）'
+    Say ("  第 $round 轮：task=#$taskId；A run=" + $runA.runId + "；B run=" + $runB.runId)
+
+    $fireAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + 2000
+    $jobA = Start-PostJob $BaseA '/api/ai/confirm' @{ runId = $runA.runId; toolCallId = $runA.toolCallId; approved = $true; reason = "b23l1 shared lock r$round A" } $fireAt
+    $jobB = Start-PostJob $BaseB '/api/ai/confirm' @{ runId = $runB.runId; toolCallId = $runB.toolCallId; approved = $true; reason = "b23l1 shared lock r$round B" } $fireAt
+    $null = Wait-Job -Job @($jobA, $jobB) -Timeout 60
+    $errA = @(); $errB = @()
+    $rA = Receive-Job $jobA -ErrorAction SilentlyContinue -ErrorVariable errA
+    $rB = Receive-Job $jobB -ErrorAction SilentlyContinue -ErrorVariable errB
+    Remove-Job $jobA, $jobB -Force -ErrorAction SilentlyContinue
+    foreach ($side in @(@{ r = $rA; e = $errA; s = 'A' }, @{ r = $rB; e = $errB; s = 'B' })) {
+        if ($null -eq $side.r -or [int]$side.r.status -ne 200) {
+            $msg = if (@($side.e).Count -gt 0) { ($side.e | ForEach-Object { $_.Exception.Message }) -join ' | ' } else { '（无作业错误）' }
+            throw ("Shared 资源锁（第 $round 轮）：$($side.s) 侧批准失败：$msg")
+        }
+    }
+
+    $fullA = Read-RunFullToTerminal $BaseA $runA.runId ("lock-shared-A-r$round") 120
+    $fullB = Read-RunFullToTerminal $BaseB $runB.runId ("lock-shared-B-r$round") 120
+    if ((Count-Frames $fullA 'done' $null) -lt 1) {
+        throw "Shared 资源锁（第 $round 轮）：A 侧未收到终帧（已收：$(($fullA | ForEach-Object { $_.type }) -join ',')）"
+    }
+    if ((Count-Frames $fullB 'done' $null) -lt 1) {
+        throw "Shared 资源锁（第 $round 轮）：B 侧未收到终帧（已收：$(($fullB | ForEach-Object { $_.type }) -join ',')）"
+    }
+
+    $dA = (GetJson $BaseA ('/api/ai/runs/' + $runA.runId)).data
+    $dB = (GetJson $BaseB ('/api/ai/runs/' + $runB.runId)).data
+    $jobs = @((GetJson $BaseA ('/api/tasks/' + $taskId + '/jobs')).data)
+    $result = Test-ResourceLockRound $fullA $fullB $dA $dB $jobs.Count
+
+    if ([bool]$result.Hit) {
+        $lockKey = 'ai:lock:job:' + $taskId + ':EXPORT'
+        if (-not (Wait-RedisKeyGone $lockKey 10)) {
+            throw "执行完成后资源锁未释放：$lockKey=$(Invoke-RedisCommand @('GET', $lockKey))"
+        }
+    }
+    return $result
+}
+
+# 跨实例变体（-SharedDb）：I-2 裁决 —— 两段临界区都是毫秒级，可能不重叠 ⇒ 最多重试 3 轮；
+# 任一命中即 PASS，3 轮全未命中判 SKIP（不等于系统错，证据以 H3 确定性变体为准）。
+function Case-Resource-Lock-Shared {
+    $race = Invoke-ResourceLockRace { param($i) Invoke-ResourceLockSharedRound $i } 3
+    foreach ($shape in $race.Shapes) { Say ('  竞态观察：' + $shape) }
+    if ($race.Result -eq 'PASS') {
+        Say ('  Shared 竞态命中：第 ' + $race.Rounds + ' 轮')
+        return 'PASS'
+    }
+    return 'SKIP'
+}
+
+function Case-Idempotency {
+    $name = 'idempotency（批③：同 runId+toolCallId 二次决策 409 DUPLICATE，执行/台账仍恰一次）'
+    $run = New-SuspendedExportRun 'b23l1-idem-' 'idem-A'
+    $full = Approve-SuspendedRun $BaseA $run 'idem-A' 'b23l1 idempotency first'
+    $tr = @($full | Where-Object { $_.type -eq 'tool_result' -and $_.toolCallId -eq $run.toolCallId })
+    if ($tr.Count -ne 1) { throw "首次决策 tool_result 期望 1 帧，实得 $($tr.Count)" }
+    if (-not [bool]$tr[0].executed) { throw "首次决策应真实执行（executed=true），实得 code=$($tr[0].code)" }
+    $detail1 = (GetJson $BaseA ('/api/ai/runs/' + $run.runId)).data
+    if ([int]$detail1.ledgerCounts.start_export -ne 1) {
+        throw "首次执行后台账 start_export 期望 1，实得 $($detail1.ledgerCounts.start_export)"
+    }
+    $jobs1 = @((GetJson $BaseA ('/api/tasks/' + $run.taskId + '/jobs')).data)
+    if ($jobs1.Count -ne 1) { throw "首次执行后作业数期望 1，实得 $($jobs1.Count)" }
+
+    # 第二次：同一 runId+toolCallId 打 B（决策 guard 已在 Redis，不触碰任务库）。
+    $dup = PostJson $BaseB '/api/ai/confirm' @{ runId = $run.runId; toolCallId = $run.toolCallId; approved = $true; reason = 'b23l1 idempotency duplicate' }
+    if ($null -eq $dup -or [int]$dup.status -ne 409) {
+        throw "二次决策期望 HTTP 409，实得 status=$($dup.status) body=$($dup.text)"
+    }
+    $dupBody = $null
+    try { $dupBody = $dup.text | ConvertFrom-Json } catch { $dupBody = $null }
+    # 字段依据：AiController#confirm 的 DUPLICATE 分支 → duplicateToolCall（code=DUPLICATE_TOOL_CALL_ID）。
+    if ($null -eq $dupBody -or [string]$dupBody.code -ne 'DUPLICATE_TOOL_CALL_ID') {
+        throw "二次决策期望 code=DUPLICATE_TOOL_CALL_ID，实得 '$($dupBody.code)'：$($dup.text)"
+    }
+
+    $detail2 = (GetJson $BaseA ('/api/ai/runs/' + $run.runId)).data
+    if ([int]$detail2.ledgerCounts.start_export -ne 1) {
+        throw "二次决策后台账 start_export 仍应 1，实得 $($detail2.ledgerCounts.start_export)"
+    }
+    $jobs2 = @((GetJson $BaseA ('/api/tasks/' + $run.taskId + '/jobs')).data)
+    if ($jobs2.Count -ne 1) { throw "二次决策后作业数仍应 1，实得 $($jobs2.Count)" }
+
+    $full2 = Read-Sse $BaseA ("/api/ai/events/" + $run.runId + "?lastSeq=0") $null @('done', 'error') 60000 'idem-A-after'
+    $starts = Count-Frames $full2 'tool_start' $run.toolCallId
+    if ($starts -ne 1) { throw "二次决策后 tool_start 仍应恰 1，实得 $starts" }
+
+    # 批③ 幂等索引只读取证：ai:idem:<runId> 的 field = <runId>:<toolCallId>（RunStore#idemField）。
+    $idemField = $run.runId + ':' + $run.toolCallId
+    $idemVal = Invoke-RedisCommand @('HGET', ('ai:idem:' + $run.runId), $idemField)
+    if ([string]::IsNullOrWhiteSpace([string]$idemVal)) {
+        throw "幂等索引缺失：HGET ai:idem:$($run.runId) $idemField 为空"
+    }
+    Ok $name
+}
+
+# instance-kill 的「恰一次」中间证据（批③ TARGET_INVALID 前置拦截后新增形态乙）：
+#   形态甲（共享库/生产形态）：台账恰 1 条且 executedBy=接管实例；
+#   形态乙（H2 隔离，L-12 边界）：台账 0 条 + 全量回放里该 toolCallId 有 TARGET_INVALID 帧
+#     （status=BLOCKED、executed=false）—— 证明是设计内前置拦截，不是丢消息/没执行。
+# 返回 'A' / 'B'；其它组合抛错并带实得细节。抽成函数是为了离线用伪造帧序列验两形态。
+function Assert-KillTakeoverEvidence($ledger, $full, $toolCallId, $bInstanceId, $ledgerCount) {
+    $entries = @($ledger)
+    if ($entries.Count -gt 1) {
+        throw "台账该 toolCallId 期望 0 或 1 条（形态乙/甲），实得 $($entries.Count)"
+    }
+    if ($entries.Count -eq 1) {
+        if ([string]$entries[0].executedBy -ne $bInstanceId) {
+            throw "台账形态甲要求 executedBy=接管实例 $bInstanceId，实得 $($entries[0].executedBy)"
+        }
+        if ([int]$ledgerCount -ne 1) {
+            throw "台账形态甲要求 ledgerCounts.start_export=1，实得 $ledgerCount"
+        }
+        return 'A'
+    }
+    $blocked = @($full | Where-Object {
+        $_.type -eq 'tool_result' -and $_.toolCallId -eq $toolCallId -and [string]$_.code -eq 'TARGET_INVALID'
+    })
+    if ($blocked.Count -ne 1) {
+        $seen = @($full | Where-Object { $_.type -eq 'tool_result' } | ForEach-Object {
+            "code=$($_.code)/status=$($_.status)/executed=$($_.executed)"
+        })
+        throw ("台账 0 条但未找到恰 1 帧 TARGET_INVALID 拦截（实得 tool_result：" + ($seen -join '; ') + "）")
+    }
+    $bf = $blocked[0]
+    if ([string]$bf.status -ne 'BLOCKED') {
+        throw "TARGET_INVALID 帧 status 期望 BLOCKED，实得 '$($bf.status)'"
+    }
+    if ([bool]$bf.executed) {
+        throw 'TARGET_INVALID 帧不应 executed=true（前置拦截 = 未执行）'
+    }
+    return 'B'
+}
+
 function Case-Instance-Kill {
-    $name = 'instance-kill（批②：杀真 A 后 B 接管续跑，台账 executedBy=B）'
+    $name = 'instance-kill（批②：杀真 A 后 B 接管续跑；中间证据两形态）'
     if ($NoStart) {
         Skip $name '-NoStart：实例不是本脚本起的，无法按名字精确 kill（Stop-Child 只动自己的子进程）'
         return
@@ -795,17 +1184,20 @@ function Case-Instance-Kill {
     $starts = Count-Frames $full 'tool_start' $toolCallId
     if ($starts -ne 1) { throw "接管续跑 tool_start 期望恰 1 帧（全量回放），实得 $starts" }
 
-    # 台账：该工具恰 1 条、executedBy = B 的 instanceId、ledgerCounts=1。
-    # 字段依据：ResumeService#describe（ledger/ledgerCounts/instanceId）与 RunStore#appendLedger（executedBy）。
+    # 「恰一次」的中间证据两形态（批③ ToolTargetResolver 前置拦截后新增形态乙）：
+    #   甲：台账恰 1 条且 executedBy=B（共享库/生产形态）；
+    #   乙：台账 0 条 + 全量回放里该 toolCallId 有 TARGET_INVALID / status=BLOCKED / executed=false
+    #       （L-12 H2 隔离：B 库无此任务，设计内拦截 = 闭环证据，不占 claim/不写台账/不执行）。
+    # 字段依据：SseChatEmitter#toolResult（code/status/executed）、ToolOutcome.CODE_TARGET_INVALID、
+    # ResumeService#describe（ledger/ledgerCounts）与 RunStore#appendLedger（executedBy）。
     $detail = (GetJson $BaseB ('/api/ai/runs/' + $runId)).data
     if ($null -eq $detail) { throw "B 侧 /runs/$runId 返回空" }
     $ledger = @($detail.ledger | Where-Object { $_.toolCallId -eq $toolCallId })
-    if ($ledger.Count -ne 1) { throw "台账该 toolCallId 期望 1 条，实得 $($ledger.Count)" }
-    if ([string]$ledger[0].executedBy -ne $bInstanceId) {
-        throw "台账 executedBy 期望 B 实例 $bInstanceId，实得 $($ledger[0].executedBy)"
-    }
-    if ([int]$detail.ledgerCounts.start_export -ne 1) {
-        throw "ledgerCounts.start_export 期望 1，实得 $($detail.ledgerCounts.start_export)"
+    $form = Assert-KillTakeoverEvidence $ledger $full $toolCallId $bInstanceId ([int]$detail.ledgerCounts.start_export)
+    if ($form -eq 'A') {
+        Say ('  台账形态甲（执行落账）：1 条，executedBy=B（' + $bInstanceId + '）')
+    } else {
+        Say ('  台账形态乙（L-12 边界：B 库无任务，ToolTargetResolver 前置拦截即闭环证据）：TARGET_INVALID/status=BLOCKED/executed=false，台账 0 条')
     }
     Ok $name
 }
@@ -934,11 +1326,28 @@ function Case-Lease-Scripts {
 # ── 主流程 ──────────────────────────────────────────────────────────────────
 
 $pendingCases = @{
-    'resource-lock'    = '批③ 未落地：资源互斥租约（RESOURCE_LOCKED）'
-    'idempotency'      = '批③ 未落地：工具副作用幂等键'
+    # 批③ 两条已实作；保留空表给未知批③后续条目（switch 的 default 仍按此表给 Skip 文案）。
+}
+
+# 批③ SharedDb：两实例共享同一 H2 文件（绝对路径 + AUTO_SERVER=TRUE）。
+# AUTO_SERVER 让第一个 JVM 兼作 H2 服务端，第二个 JVM 通过本机 TCP 连同一文件；
+# 这是跨实例同 taskId 用例（L-12）的前提。未开时 resource-lock 走 H3 预置锁变体。
+$sharedDbUrl = $null
+if ($SharedDb) {
+    $sharedDbDir = Join-Path $ArtifactDir 'h2'
+    New-Item -ItemType Directory -Force -Path $sharedDbDir | Out-Null
+    $sharedDbPath = (Join-Path $sharedDbDir 'b23l1_shared').Replace('\', '/')
+    $sharedDbUrl = 'jdbc:h2:file:' + $sharedDbPath + ';AUTO_SERVER=TRUE;DB_CLOSE_DELAY=-1'
+    Say ('  SharedDb：两实例共享 H2 → ' + $sharedDbUrl)
 }
 
 try {
+    # 守卫（不是警告）：-SharedDb 时 A 兼作 H2 AUTO_SERVER 服务端，杀 A 会断开 B 的共享库连接 ——
+    # 与 instance-kill/lease-scripts 同棒必然半路崩，提前 FAIL 点名（两棒分开跑）。
+    if ($SharedDb -and ($Cases -match 'instance-kill|lease-scripts')) {
+        throw ('-SharedDb 不能与 instance-kill/lease-scripts 同棒：杀 A 会断开 B 的 H2 AUTO_SERVER 连接。' +
+            '请分两棒：① -SharedDb -Cases resource-lock（跨实例锁）② 不加 -SharedDb 跑 instance-kill/lease-scripts。')
+    }
     if (-not $NoStart) {
         $jarPath = if ([System.IO.Path]::IsPathRooted($Jar)) { $Jar } else { Join-Path $RepoRoot $Jar }
         if (-not (Test-Path $jarPath)) { throw "找不到后端 jar：$jarPath（先跑 mvn -DskipTests package）" }
@@ -953,28 +1362,24 @@ try {
         New-Item -ItemType Directory -Force -Path $stubLogDir | Out-Null
         Start-Child 'stub' 'node' ("scripts/ci/stub-upstream.mjs --port " + $StubPort + " --dir `"" + $stubLogDir + "`"") $RepoRoot $null | Out-Null
 
-        foreach ($pair in @(@{ name = 'instance-a'; port = $PortA }, @{ name = 'instance-b'; port = $PortB })) {
-            $runDir = Join-Path $ArtifactDir $pair.name
-            New-Item -ItemType Directory -Force -Path $runDir | Out-Null
-            $javaArgs = @(
-                '-jar', "`"$jarPath`"",
-                "--server.port=$($pair.port)",
-                "--spring.data.redis.host=$RedisHost",
-                "--spring.data.redis.port=$RedisPort",
-                "--spring.datasource.url=jdbc:h2:file:./data/b23l1_$($pair.name);DB_CLOSE_DELAY=-1",
-                '--app.job.batch-size=10'
-            ) -join ' '
-            $env = @{
-                'AI_API_KEY' = 'b23l1-stub-placeholder'
-                'AI_BASE_URL' = $StubBase
-                'AI_MODEL' = 'ci-stub'
-                'LOGGING_LEVEL_COM_EXAMPLE_CONFIGMGR' = 'DEBUG'
+        $pairs = @(@{ name = 'instance-a'; port = $PortA }, @{ name = 'instance-b'; port = $PortB })
+        if ($SharedDb) {
+            # 交错启动：A 先起并等健康（H2 AUTO_SERVER 服务端就绪），再起 B 连接同一文件。
+            Start-Instance $pairs[0] $jarPath
+            try { Wait-Health $BaseA '实例 A' } catch {
+                throw ("SharedDb 启动失败（H2 AUTO_SERVER 共享不可行）：" + $_.Exception.Message +
+                    "。可用 resource-lock 的 H3 预置锁变体（不加 -SharedDb）继续验证 RESOURCE_LOCKED。")
             }
-            Start-Child $pair.name 'java' $javaArgs $runDir $env | Out-Null
+            Start-Instance $pairs[1] $jarPath
+            try { Wait-Health $BaseB '实例 B' } catch {
+                throw ("SharedDb 启动失败（H2 AUTO_SERVER 共享不可行）：实例 B 连不上 A 打开的共享库 —— " + $_.Exception.Message +
+                    "。可用 resource-lock 的 H3 预置锁变体（不加 -SharedDb）继续验证 RESOURCE_LOCKED。")
+            }
+        } else {
+            foreach ($pair in $pairs) { Start-Instance $pair $jarPath }
+            Wait-Health $BaseA '实例 A'
+            Wait-Health $BaseB '实例 B'
         }
-
-        Wait-Health $BaseA '实例 A'
-        Wait-Health $BaseB '实例 B'
     } else {
         Wait-Health $BaseA '实例 A（-NoStart）'
         Wait-Health $BaseB '实例 B（-NoStart）'
@@ -992,6 +1397,8 @@ try {
                 'suspend-reattach-wake' { Case-Suspend-Reattach-Wake }
                 'suspend-decision' { Case-Suspend-Decision }
                 'suspend-decision-concurrent' { Case-Suspend-Decision-Concurrent }
+                'resource-lock' { Case-Resource-Lock }
+                'idempotency' { Case-Idempotency }
                 'instance-kill' { Case-Instance-Kill }
                 'lease-scripts' { Case-Lease-Scripts }
                 default {

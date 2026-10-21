@@ -568,4 +568,46 @@ describe('治理 P0-1 M2：blocked 卡面 reason 按 code 选择', () => {
       reason: '该工具不在当前工作区上下文的披露范围内，未执行'
     })
   })
+
+  // B23L1 批③b：资源锁冲突 / 目标资源不成立 —— 与"未披露"分开说，且只增不改（既有两支保持原样）
+  it('RESOURCE_LOCKED / TARGET_INVALID ⇒ 各自的阻断文案（status 仍是 blocked，不被降级）', () => {
+    const locked = makeMessage()
+    applyFrameToParts(locked, {
+      type: 'tool_result',
+      toolCallId: 'k4',
+      name: 'start_import',
+      kind: 'CONFIRM',
+      ok: false,
+      executed: false,
+      status: 'BLOCKED',
+      outcome: 'blocked',
+      code: 'RESOURCE_LOCKED',
+      retryable: true
+    })
+    expect(toolPart(locked, 'k4')).toMatchObject({
+      status: 'blocked',
+      reason: '该任务已有作业在执行，本次未执行'
+    })
+
+    const invalid = makeMessage()
+    applyFrameToParts(invalid, {
+      type: 'tool_result',
+      toolCallId: 'k5',
+      name: 'start_import',
+      kind: 'CONFIRM',
+      ok: false,
+      executed: false,
+      status: 'BLOCKED',
+      outcome: 'blocked',
+      code: 'TARGET_INVALID',
+      retryable: false
+    })
+    expect(toolPart(invalid, 'k5')).toMatchObject({
+      status: 'blocked',
+      reason: '目标资源不存在或不在当前任务内，本次未执行'
+    })
+
+    // 只升不降：两支都仍是阻断口径（不是 failed/succeeded），且既有两支在上面那例原样通过
+    expect(outcomeStatus('blocked')).toBe('blocked')
+  })
 })

@@ -55,6 +55,9 @@ public class InMemoryRunStore extends RunStore {
 
 	private final Map<String, List<Map<String, Object>>> ledger = new ConcurrentHashMap<>();
 
+	/** B23L1 批③a：{@code ai:idem:<runId>} 的进程内替身（toolCallId → 台账下标）。 */
+	private final Map<String, Map<String, Integer>> idemIndex = new ConcurrentHashMap<>();
+
 	private final Map<String, List<Map<String, Object>>> events = new ConcurrentHashMap<>();
 
 	private final Map<String, Long> beats = new ConcurrentHashMap<>();
@@ -95,6 +98,22 @@ public class InMemoryRunStore extends RunStore {
 	/** 装配真实租约设施（{@code leaseService()} 与三个薄口随之改走它）。 */
 	public void useLeaseFacility(com.example.configmgr.ai.run.LeaseService leaseService) {
 		this.leaseFacility = leaseService;
+	}
+
+	/**
+	 * B23L1 批③b（I5 语料）：直接铺"本进程仍持有的续跑权 epoch"。
+	 *
+	 * <p>真实实现里 epoch 来自 {@link com.example.configmgr.ai.run.LeaseService}；本替身没有
+	 * leaseFacility 时用进程内表顶替。用例靠它把"持租但已不是主人"这个窗口<b>确定化</b>
+	 * （而不必先抢租再等别人接管）。
+	 */
+	public void seedHeldRunEpoch(String runId, long epoch) {
+		this.heldEpochs.put(runLeaseKey(runId), epoch);
+	}
+
+	/** B23L1 批③b（I5 语料）：直接铺已落库的 fence（{@code ai:fence:run:<runId>} 的替身）。 */
+	public void seedFence(String runId, long fence) {
+		this.fenceEpochs.put(runId, fence);
 	}
 
 	@Override
@@ -317,6 +336,7 @@ public class InMemoryRunStore extends RunStore {
 		this.pendings.remove(runId);
 		this.claims.remove(runId);
 		this.ledger.remove(runId);
+		this.idemIndex.remove(runId);
 		this.events.remove(runId);
 		this.issuedSeqs.remove(runId);
 		// B23L1 批②a：租约/fence/req/decided 同属"本轮的全部键"
@@ -484,21 +504,37 @@ public class InMemoryRunStore extends RunStore {
 
 	@Override
 	public boolean claimExecution(String runId, String toolCallId, String executedBy) {
-		// B23L1 批②a：值与真实实现同形（<epoch>|<instanceId>），claimedBy 剥前缀
+		// B23L1 批③a：布尔口保持（既有用例零改动），三态走 tryClaimExecution；
+		// LOST 与 STALE_FENCE 在布尔面上同为 false（"不得执行"这一点相同）。
+		return tryClaimExecution(runId, toolCallId, executedBy).won();
+	}
+
+	@Override
+	public ClaimResult tryClaimExecution(String runId, String toolCallId, String executedBy) {
+		// B23L1 批②a/③a：值与真实实现同形（<epoch>|<instanceId>），claimedBy 剥前缀；
+		// 持租时先对 fence 复核（与真实实现同口径：fence > epoch ⇒ STALE_FENCE，
+		// 无租约 epoch == 0 不看 fence —— E3 红线）。
 		long epoch = heldRunEpoch(runId);
-		String previous = claimTable(runId).putIfAbsent(toolCallId, epoch + "|" + executedBy);
-		boolean won = previous == null;
-		if (won) {
-			PendingToolCall pending = pending(runId, toolCallId);
-			if (pending != null) {
-				pending.setClaimedAtMs(System.currentTimeMillis());
-				pending.setClaimedEpoch(epoch);
-				pending.setExecuted(true);
-				pending.setExecutedBy(executedBy);
-				putPending(runId, pending);
+		long fence = 0L;
+		if (epoch > 0L) {
+			fence = fenceEpochs.getOrDefault(runId, 0L);
+			if (fence > epoch) {
+				return new ClaimResult(ClaimOutcome.STALE_FENCE, epoch, fence);
 			}
 		}
-		return won;
+		String previous = claimTable(runId).putIfAbsent(toolCallId, epoch + "|" + executedBy);
+		if (previous != null) {
+			return new ClaimResult(ClaimOutcome.LOST, epoch, fence);
+		}
+		PendingToolCall pending = pending(runId, toolCallId);
+		if (pending != null) {
+			pending.setClaimedAtMs(System.currentTimeMillis());
+			pending.setClaimedEpoch(epoch);
+			pending.setExecuted(true);
+			pending.setExecutedBy(executedBy);
+			putPending(runId, pending);
+		}
+		return new ClaimResult(ClaimOutcome.WON, epoch, fence);
 	}
 
 	@Override
@@ -509,6 +545,7 @@ public class InMemoryRunStore extends RunStore {
 
 	@Override
 	public void appendLedger(String runId, PendingToolCall pending, String resultText) {
+		String idemField = idemField(runId, pending.getToolCallId());
 		Map<String, Object> record = new LinkedHashMap<>();
 		record.put("atMs", System.currentTimeMillis());
 		record.put("executedBy", pending.getExecutedBy() == null ? instanceId() : pending.getExecutedBy());
@@ -521,8 +558,32 @@ public class InMemoryRunStore extends RunStore {
 		record.put("preflightHash", pending.getPreflight() == null ? null
 				: pending.getPreflight().get("reportHash"));
 		record.put("epoch", pending.getClaimedEpoch() > 0L ? pending.getClaimedEpoch() : heldRunEpoch(runId));
+		// B23L1 批③a：幂等索引 field（additive），与真实实现同形
+		record.put("idemKey", idemField);
 		record.put("resultText", resultText);
-		ledgerList(runId).add(record);
+		List<Map<String, Object>> records = ledgerList(runId);
+		synchronized (records) {
+			int index = records.size();
+			records.add(record);
+			// HSETNX 语义：首次执行即建索引，重放不得改写"第一次是哪条记录"
+			idemTable(runId).putIfAbsent(pending.getToolCallId(), index);
+		}
+	}
+
+	@Override
+	public Map<String, Object> idemFor(String runId, String toolCallId) {
+		if (toolCallId == null) {
+			return null;
+		}
+		Integer index = idemTable(runId).get(toolCallId);
+		if (index != null) {
+			List<Map<String, Object>> records = ledgerList(runId);
+			if (index >= 0 && index < records.size()) {
+				return records.get(index);
+			}
+		}
+		// 未命中/取不回 ⇒ 回落扫描（与真实实现同口径：索引是加速面，台账才是判据）
+		return ledgerFor(runId, toolCallId);
 	}
 
 	@Override
@@ -722,6 +783,11 @@ public class InMemoryRunStore extends RunStore {
 
 	private List<Map<String, Object>> ledgerList(String runId) {
 		return this.ledger.computeIfAbsent(runId, key -> new CopyOnWriteArrayList<>());
+	}
+
+	/** B23L1 批③a：{@code ai:idem:<runId>} 的进程内表（toolCallId → 台账下标）。 */
+	private Map<String, Integer> idemTable(String runId) {
+		return this.idemIndex.computeIfAbsent(runId, key -> new ConcurrentHashMap<>());
 	}
 
 	private List<Map<String, Object>> eventList(String runId) {

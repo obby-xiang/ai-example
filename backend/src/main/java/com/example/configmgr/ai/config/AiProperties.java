@@ -53,6 +53,8 @@ public class AiProperties {
 
 	private Lease lease = new Lease();
 
+	private Lock lock = new Lock();
+
 	/**
 	 * 启动期校验 {@code app.ai.sse.write-timeout} 必须为正（2026-10-10 复核 S3-1 收口：守卫对称化）。
 	 *
@@ -331,7 +333,8 @@ public class AiProperties {
 	 *
 	 * <p>取值口径：TTL 30s = "持租进程卡顿/死亡后，别的实例多快能接管" 的上界；续租 10s = TTL/3，
 	 * 容忍两次连续续租失败（网络抖动）而不丢租约；重试 35s = TTL + 5s 余量，抢租失败的一方按它
-	 * 退避重试（批②b 的续跑触发路径消费，本批只建键与设施）。
+	 * 退避重试（批②b 的续跑触发路径消费，本批只建键与设施）。{@code resource-ttl} 60s 是
+	 * <b>另一条线</b>（L1 资源互斥，批③a），依据见字段注。
 	 */
 	@Data
 	public static class Lease {
@@ -344,6 +347,36 @@ public class AiProperties {
 
 		/** 抢租失败后的退避重试间隔（TTL + 5s 余量）。 */
 		private Duration retryDelay = Duration.ofSeconds(35);
+
+		/**
+		 * 资源互斥锁（L1：{@code ai:lock:task:<taskId>} / {@code ai:lock:job:<taskId>:<JOBTYPE>}，
+		 * 键名见 {@link com.example.configmgr.ai.run.LeaseKeys}）的有效期（B23L1 批③a / 裁决 12）。
+		 *
+		 * <p>为什么是 60s 而不是跟续跑权一样 30s：这把锁包住的是一次<b>业务动作</b>（导入/发布/导出的
+		 * 发起与收尾），最长耗时可到分钟级；但如果按动作时长设 TTL，持锁进程崩溃后别的实例要白等
+		 * 整段动作时长才能接上。60s = 两倍续跑权 TTL，<b>不续租，TTL 仅作临界区上界</b>
+		 * （B23L1 批③b 复审 I-1：动作真超过上界时宁可让锁按 TTL 放开，也不把"事实永锁"续出来；
+		 * 崩溃后的白等窗因此恒不超过一分钟）。
+		 *
+		 * <p>与 {@link #ttl} 分开是刻意的：续跑权的 TTL 约束"多快能接管一轮"，资源锁的 TTL 约束
+		 * "多快能重试同一动作"，两者的取值依据不同，不共用一键。
+		 */
+		private Duration resourceTtl = Duration.ofSeconds(60);
+	}
+
+	/**
+	 * 资源互斥开关（B23L1 批③a / 裁决 13）：{@code app.ai.lock.enabled}。
+	 *
+	 * <p>默认 <b>true</b>。关掉的唯一正当场景是"确定只有一个实例、且要排除锁设施本身的干扰"
+	 * （单实例冒烟/压测对照）；<b>不是</b>故障开关 —— 多实例下关掉它，任务级/作业级互斥整体失效
+	 * （同一作业被两个实例同时发起）。因此它是显式配置项而不是"抢锁失败就降级"的兜底：
+	 * 降级会让"锁坏了"与"锁关了"在日志里长得一样。
+	 */
+	@Data
+	public static class Lock {
+
+		/** 是否启用资源互斥（{@code ai:lock:*}）。false ⇒ 使用方不抢锁、不释放（本层不续租，见 {@link Lease#getResourceTtl()}）。 */
+		private boolean enabled = true;
 	}
 
 	/**

@@ -61,6 +61,13 @@ import java.util.function.BooleanSupplier;
  * {@link #heldEpoch} 是"本进程认为自己持有的租约"，只作<b>短路</b>与 fencing 写判据：
  * 可重入因此不会重复 {@code SET}（L3），{@code RunStore.save} 也据此决定走 fence 写还是 plain SET
  * （E3：无租约不拒写）。视图与 Redis 真值冲突时以 Redis 为准（脚本返回值覆盖视图）。
+ *
+ * <h2>owner 维度（B23L1 批③a；裁决 7）</h2>
+ * 租约的持有者不再隐含"＝实例标识"：{@link #acquire(String, Duration, String)} 允许调用方显式给出
+ * owner（L1 资源互斥按<b>任务/作业</b>记主，同一实例内两个不同的业务持有者必须能区分）。
+ * 进程内视图与续租表按 {@code key + "\0" + owner} 记账 —— 同一个 Redis 键上，<b>不同 owner 是不同租约</b>
+ * （后者 OCCUPIED / {@link AcquireOutcome#HELD_ELSEWHERE}），同一个 owner 才是重入。
+ * owner 缺省的旧方法全部等价于 {@code owner = instanceId}，批②的语义与用例<b>零变化</b>。
  */
 @Slf4j
 @Component
@@ -211,10 +218,10 @@ public class LeaseService {
 
 	private final String instanceId;
 
-	/** 进程内所有权视图（key → 已到手的租约）。 */
+	/** 进程内所有权视图（{@code key + "\0" + owner} → 已到手的租约）。 */
 	private final Map<String, Lease> held = new ConcurrentHashMap<>();
 
-	/** 正在续租的租约句柄（key → 关闭器）。 */
+	/** 正在续租的租约句柄（{@code key + "\0" + owner} → 关闭器）。 */
 	private final Map<String, AutoCloseable> driving = new ConcurrentHashMap<>();
 
 	@Autowired
@@ -257,6 +264,11 @@ public class LeaseService {
 		return Optional.ofNullable(acquire(key, ttl).lease());
 	}
 
+	/** 带 owner 的 {@link #tryAcquire(String, Duration)}（L1 资源互斥：同一实例内的不同持有者互斥）。 */
+	public Optional<Lease> tryAcquire(String key, Duration ttl, String owner) {
+		return Optional.ofNullable(acquire(key, ttl, owner).lease());
+	}
+
 	/**
 	 * 抢一份租约（<b>三态</b>：拿到 / 别人持有 / 设施不可用，见 {@link AcquireOutcome}）。
 	 *
@@ -265,31 +277,46 @@ public class LeaseService {
 	 * （{@link #markDriving}）兜底 —— 短路的代价至多是一个续租间隔（10s），换来的是热路径零往返。
 	 */
 	public AcquireResult acquire(String key, Duration ttl) {
+		return acquire(key, ttl, this.instanceId);
+	}
+
+	/**
+	 * 抢一份租约，持有者由调用方指定（{@code owner} 缺省 = 本实例标识）。
+	 *
+	 * <p>语义与 epoch / created 判据与 {@link #acquire(String, Duration)} 完全一致，区别只在
+	 * "谁"：进程内视图按 {@code key + "\0" + owner} 记账，脚本返回的现值也按 {@code owner} 比对 ——
+	 * 同一 Redis 键上 owner 不同即"别人持有"（{@link AcquireOutcome#HELD_ELSEWHERE}），
+	 * 只有 owner 相同才算重入（{@code created=false}，没有释放权）。
+	 */
+	public AcquireResult acquire(String key, Duration ttl, String owner) {
+		String holder = owner(owner);
 		Duration effective = ttl == null || ttl.isZero() || ttl.isNegative() ? this.properties.getLease().getTtl() : ttl;
-		Lease already = this.held.get(key);
+		String viewKey = viewKey(key, holder);
+		Lease already = this.held.get(viewKey);
 		if (already != null) {
-			// 可重入短路：同实例重复 acquire 不得再 SET（L3），也不消耗新 epoch。
+			// 可重入短路：同 owner 重复 acquire 不得再 SET（L3），也不消耗新 epoch。
 			// created=false：租约不是这次调用创建的 ⇒ 本次调用没有释放权。
 			return new AcquireResult(AcquireOutcome.ACQUIRED, already, false);
 		}
 		try {
-			String raw = this.redis.execute(ACQUIRE_SCRIPT, List.of(key, EPOCH_KEY), this.instanceId,
+			String raw = this.redis.execute(ACQUIRE_SCRIPT, List.of(key, EPOCH_KEY), holder,
 					String.valueOf(effective.toMillis()));
 			Lease current = parse(key, raw);
 			if (current == null) {
-				log.warn("租约脚本返回空值 key={}（按占用处理，不吞并别人的租约）", key);
+				log.warn("租约脚本返回空值 key={} owner={}（按占用处理，不吞并别人的租约）", key, holder);
 				return new AcquireResult(AcquireOutcome.HELD_ELSEWHERE, null);
 			}
-			if (!this.instanceId.equals(current.owner())) {
+			if (!holder.equals(current.owner())) {
 				return new AcquireResult(AcquireOutcome.HELD_ELSEWHERE, null);
 			}
 			// 双保险：脚本返回的现值就是本次取号的结果，或是"视图丢失但 owner 仍是自己"的重入
-			this.held.put(key, current);
+			this.held.put(viewKey, current);
 			// 只有脚本说"是我建的"才算创建者（并发同主双抢时，后到的那个 owner 也是自己，但不是创建者）
 			return new AcquireResult(AcquireOutcome.ACQUIRED, current, createdFlag(raw));
 		}
 		catch (Exception ex) {
-			log.warn("租约抢用降级 key={}（Redis 不可用 ⇒ 调用方走进程内互斥）：{}", key, ex.getMessage());
+			log.warn("租约抢用降级 key={} owner={}（Redis 不可用 ⇒ 调用方走进程内互斥）：{}", key, holder,
+					ex.getMessage());
 			return new AcquireResult(AcquireOutcome.UNAVAILABLE, null);
 		}
 	}
@@ -305,24 +332,31 @@ public class LeaseService {
 	 * {@link Hold#UNAVAILABLE}，由调用方按"无租约降级"处理。
 	 */
 	public Hold verifyHeld(String key, long epoch) {
+		return verifyHeld(key, epoch, this.instanceId);
+	}
+
+	/** 带 owner 的归属校验（与 {@link #acquire(String, Duration, String)} 同一 owner 口径）。 */
+	public Hold verifyHeld(String key, long epoch, String owner) {
 		if (key == null || epoch <= 0L) {
 			return Hold.LOST;
 		}
+		String holder = owner(owner);
 		try {
-			Long held = this.redis.execute(VERIFY_SCRIPT, List.of(key), epoch + "|" + this.instanceId);
+			Long held = this.redis.execute(VERIFY_SCRIPT, List.of(key), epoch + "|" + holder);
 			if (held != null && held > 0L) {
 				return Hold.HELD;
 			}
 			// 现值已不是自己那一任：只摘<b>匹配的那一任</b>（R3）—— 若视图已经换成更新的 epoch，
 			// 这次校验说明的是"被校验的那一任没了"，不能顺手把当前那一任也作废。
-			Lease local = this.held.get(key);
+			Lease local = this.held.get(viewKey(key, holder));
 			if (local != null && local.epoch() == epoch) {
-				this.held.remove(key, local);
+				this.held.remove(viewKey(key, holder), local);
 			}
 			return Hold.LOST;
 		}
 		catch (Exception ex) {
-			log.warn("租约归属校验降级 key={} epoch={}（Redis 不可用 ⇒ 按无租约处理）：{}", key, epoch, ex.getMessage());
+			log.warn("租约归属校验降级 key={} owner={} epoch={}（Redis 不可用 ⇒ 按无租约处理）：{}", key, holder,
+					epoch, ex.getMessage());
 			return Hold.UNAVAILABLE;
 		}
 	}
@@ -344,7 +378,7 @@ public class LeaseService {
 		}
 	}
 
-	/** 释放：只有现值仍是自己那一任才删（错 epoch 不删别人的租约）。 */
+	/** 释放：只有现值仍是自己那一任才删（错 epoch / 错 owner 不删别人的租约）。 */
 	public boolean release(Lease lease) {
 		if (lease == null) {
 			return false;
@@ -356,8 +390,10 @@ public class LeaseService {
 			// release(旧租约) 会把本进程<b>当前</b>那一任的视图与续租任务一起误杀（新主人于是
 			// 拿不回 fencing 依据、续租也停了）。"错 epoch 不删别人的键"由脚本保证，
 			// "错 epoch 不动别人的进程内状态"由这里的条件删除保证。
-			if (this.held.remove(lease.key(), lease)) {
-				stopDriving(lease.key());
+			// 批③a：视图与续租任务按 (key, owner) 记账 —— 错 owner 的 release 也摘不到别人那一任。
+			String viewKey = viewKey(lease.key(), lease.owner());
+			if (this.held.remove(viewKey, lease)) {
+				stopDrivingExact(viewKey);
 			}
 			return released != null && released > 0L;
 		}
@@ -369,19 +405,34 @@ public class LeaseService {
 
 	/** 释放"本进程持有的"租约（未持有返回 false，不触 Redis）。 */
 	public boolean releaseIfHeld(String key) {
-		Lease lease = key == null ? null : this.held.get(key);
+		return releaseIfHeld(key, this.instanceId);
+	}
+
+	/** 带 owner 的 {@link #releaseIfHeld(String)}（只放这个 owner 那一任）。 */
+	public boolean releaseIfHeld(String key, String owner) {
+		Lease lease = key == null ? null : this.held.get(viewKey(key, owner(owner)));
 		return lease != null && release(lease);
 	}
 
 	/** 进程内所有权视图（0 = 未持有）。fencing 写与 {@code ai:claim:} 值都读它。 */
 	public long heldEpoch(String key) {
-		Lease lease = key == null ? null : this.held.get(key);
+		return heldEpoch(key, this.instanceId);
+	}
+
+	/** 带 owner 的进程内所有权视图（同一键上不同 owner 各自独立）。 */
+	public long heldEpoch(String key, String owner) {
+		Lease lease = key == null ? null : this.held.get(viewKey(key, owner(owner)));
 		return lease == null ? 0L : lease.epoch();
 	}
 
 	/** 进程内持有的租约（未持有返回 empty）。 */
 	public Optional<Lease> heldLease(String key) {
-		return Optional.ofNullable(key == null ? null : this.held.get(key));
+		return heldLease(key, this.instanceId);
+	}
+
+	/** 带 owner 的 {@link #heldLease(String)}。 */
+	public Optional<Lease> heldLease(String key, String owner) {
+		return Optional.ofNullable(key == null ? null : this.held.get(viewKey(key, owner(owner))));
 	}
 
 	// ── 续租调度 ────────────────────────────────────────────────────────────
@@ -410,13 +461,39 @@ public class LeaseService {
 		// R9：登记用 computeIfAbsent（原子）—— 旧实现是"containsKey 判空 → schedule → put"，
 		// 两个线程同时来到会各自排一个续租任务，后 put 的那个把先前的 handle 覆盖成<b>孤儿任务</b>
 		// （永远取消不掉，release 之后还在续租）。
-		this.driving.computeIfAbsent(lease.key(),
+		// 批③a：登记键 = (key, owner) —— 同键不同 owner 各有一个续租任务，互不覆盖。
+		this.driving.computeIfAbsent(viewKey(lease.key(), lease.owner()),
 				key -> this.scheduler.schedule(() -> renewTick(lease, check), interval));
 	}
 
-	/** 停掉该 key 的续租任务（未在续租则无操作）。 */
+	/**
+	 * 停掉该 key 上的续租任务（未在续租则无操作）。
+	 *
+	 * <p>批③a 起续租任务按 {@code (key, owner)} 登记，本方法按<b>裸键</b>停掉该键上的<b>全部</b>
+	 * owner（对外语义与批②一致：调用方只认键）；只停某一个 owner 用 {@link #stopDriving(String, String)}。
+	 */
 	public void stopDriving(String key) {
-		AutoCloseable handle = key == null ? null : this.driving.remove(key);
+		if (key == null) {
+			return;
+		}
+		String prefix = key + VIEW_SEPARATOR;
+		for (String viewKey : List.copyOf(this.driving.keySet())) {
+			if (viewKey.equals(key) || viewKey.startsWith(prefix)) {
+				stopDrivingExact(viewKey);
+			}
+		}
+	}
+
+	/** 停掉 {@code (key, owner)} 这一任的续租任务。 */
+	public void stopDriving(String key, String owner) {
+		if (key == null) {
+			return;
+		}
+		stopDrivingExact(viewKey(key, owner(owner)));
+	}
+
+	private void stopDrivingExact(String viewKey) {
+		AutoCloseable handle = viewKey == null ? null : this.driving.remove(viewKey);
 		if (handle == null) {
 			return;
 		}
@@ -424,29 +501,53 @@ public class LeaseService {
 			handle.close();
 		}
 		catch (Exception ex) {
-			log.debug("停止续租任务失败 key={}：{}", key, ex.getMessage());
+			log.debug("停止续租任务失败 key={}：{}", viewKey, ex.getMessage());
 		}
 	}
 
 	private void renewTick(Lease lease, BooleanSupplier alive) {
 		try {
 			if (!alive.getAsBoolean()) {
-				log.info("续租判据转假，停续租并归还租约 key={} epoch={}（驱动者已不在：轮终态/线程收尾）",
-						lease.key(), lease.epoch());
+				log.info("续租判据转假，停续租并归还租约 key={} owner={} epoch={}（驱动者已不在：轮终态/线程收尾）",
+						lease.key(), lease.owner(), lease.epoch());
 				release(lease);
-				stopDriving(lease.key());
+				stopDriving(lease.key(), lease.owner());
 				return;
 			}
 			if (renew(lease, this.properties.getLease().getTtl())) {
 				return;
 			}
-			log.warn("续租失败，放弃本进程的租约视图 key={} epoch={}（另一实例可以接管）", lease.key(), lease.epoch());
-			this.held.remove(lease.key(), lease);
-			stopDriving(lease.key());
+			log.warn("续租失败，放弃本进程的租约视图 key={} owner={} epoch={}（另一实例可以接管）", lease.key(),
+					lease.owner(), lease.epoch());
+			this.held.remove(viewKey(lease.key(), lease.owner()), lease);
+			stopDriving(lease.key(), lease.owner());
 		}
 		catch (Exception ex) {
 			// 续租是后台动作：单拍失败不杀任务，下一拍再试（TTL 三倍于间隔，容忍两拍失败）
 			log.debug("续租任务异常 key={} epoch={}：{}", lease.key(), lease.epoch(), ex.getMessage());
+		}
+	}
+
+	/**
+	 * 只读探针：该键上此刻是否有租约（不判 owner、不取号、不取租约）。
+	 *
+	 * <p>给"这个业务对象上还有没有动作在进行"这类<b>对账</b>问题用（B23L1 批③b 的
+	 * {@code ToolUnknownReconciler} 第三跳）：对账只关心"有没有锁"，不关心是谁的 ——
+	 * 判 owner 需要知道"期望的主人是谁"，而 UNKNOWN 场景里恰恰连主人都不可知。
+	 *
+	 * <p>设施不可用时返回 false（与"没有锁"同形）：对账的结论本来就是 UNKNOWN，
+	 * 探针失败只影响文案里"资源是否仍在执行"的措辞，不应把异常抛进复跑路径。
+	 */
+	public boolean isHeld(String key) {
+		if (key == null) {
+			return false;
+		}
+		try {
+			return Boolean.TRUE.equals(this.redis.hasKey(key));
+		}
+		catch (Exception ex) {
+			log.debug("租约只读探针失败 key={}：{}", key, ex.getMessage());
+			return false;
 		}
 	}
 
@@ -472,11 +573,11 @@ public class LeaseService {
 	@PreDestroy
 	void shutdown() {
 		for (String key : List.copyOf(this.driving.keySet())) {
-			stopDriving(key);
+			stopDrivingExact(key);
 		}
 		// 优雅停机时把本进程仍持有的租约还掉：等 TTL 到期会让接管方白等一个续租周期
-		for (String key : List.copyOf(this.held.keySet())) {
-			releaseIfHeld(key);
+		for (Lease lease : List.copyOf(this.held.values())) {
+			release(lease);
 		}
 		if (this.ownExecutor != null) {
 			this.ownExecutor.shutdownNow();
@@ -484,6 +585,19 @@ public class LeaseService {
 	}
 
 	// ── 内部 ────────────────────────────────────────────────────────────────
+
+	/** 视图键的分隔符：owner 由调用方给出（任务/作业级锁），必须与键名不可能混淆。 */
+	private static final String VIEW_SEPARATOR = "\0";
+
+	/** 视图/续租表的记账键：{@code key + "\0" + owner}。 */
+	static String viewKey(String key, String owner) {
+		return key + VIEW_SEPARATOR + owner;
+	}
+
+	/** owner 归一：缺省（null/空白）= 本实例标识（批②的旧行为）。 */
+	private String owner(String owner) {
+		return owner == null || owner.isBlank() ? this.instanceId : owner;
+	}
 
 	/** {@code <epoch>|<owner>} → 租约；格式不合法返回 null（调用方按占用处理）。 */
 	private static Lease parse(String key, String raw) {

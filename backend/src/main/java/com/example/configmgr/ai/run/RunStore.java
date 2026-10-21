@@ -57,6 +57,14 @@ import java.util.concurrent.ConcurrentHashMap;
  * TTL 随快照。无租约（降级/单实例）时保持 plain {@code SET}（不拒写）；</li>
  * <li>{@code ai:ledger:<runId>} LIST（JSON）—— 工具执行台账：每次<b>真实执行完成</b>一条，
  * 含 {@code executedBy} 实例标识，是跨进程"不重放"的判据；</li>
+ * <li>{@code ai:idem:<runId>} HASH（B23L1 批③a）—— 工具执行的<b>幂等索引</b>：
+ * field={@code <runId>:<toolCallId>}，value={@code <listIndex>|<outcome>|<code>|<executedBy>|<atMs>}，
+ * 与台账记录在<b>同一条 Lua</b> 里写入（{@code RPUSH} + {@code HSETNX}）；读口 {@link #idemFor}
+ * 命中即 {@code LINDEX} 取回原记录（O(1)），未命中回落 {@link #ledgerFor} 扫描（旧数据兼容）；</li>
+ * <li>{@code ai:lock:task:<taskId>} / {@code ai:lock:job:<taskId>:<JOBTYPE>} STRING
+ * （B23L1 批③a；{@code com.example.configmgr.ai.run.LeaseKeys}）—— <b>L1 资源互斥</b>：
+ * 按 taskId 记（不是 runId），值 = {@code <epoch>|<owner>}，TTL = {@code app.ai.lease.resource-ttl}；
+ * 轮次回收（{@link #deleteRun}）<b>不</b>清这两键（见该方法注）；</li>
  * <li>{@code ai:events:<runId>} LIST（JSON）—— SSE 帧外置副本（崩溃前的帧不随进程消失，
  * 供 {@code GET /api/ai/events/{runId}} 重挂时回放）；每帧带单调 {@code seq}（T6 的差量补发判据），
  * <b>心跳帧不入本归档</b>（T7，改记 {@code ai:beat:<runId>}）。
@@ -105,6 +113,15 @@ public class RunStore {
 	public static final String FENCE_RUN_PREFIX = "ai:fence:run:";
 
 	public static final String LEDGER_PREFIX = "ai:ledger:";
+
+	/**
+	 * 幂等索引的 HASH 键前缀（B23L1 批③a / 裁决 6）：{@code ai:idem:<runId>}。
+	 *
+	 * <p>field = {@code <runId>:<toolCallId>}，value = {@code <listIndex>|<outcome>|<code>|<executedBy>|<atMs>}。
+	 * <b>不复制 {@code resultText}</b>：结果正文可以很大（帧上限 64KB），索引只是"哪条台账记录"的
+	 * 指针；正文留在 LIST 里（{@code LINDEX} 取回原记录，O(1)），两份正文会出现"索引与台账不一致"。
+	 */
+	public static final String IDEM_PREFIX = "ai:idem:";
 
 	public static final String EVENTS_PREFIX = "ai:events:";
 
@@ -183,6 +200,73 @@ public class RunStore {
 			return 1
 			""", Long.class);
 
+	/**
+	 * 台账落库 + 幂等索引<b>同一个原子步</b>（B23L1 批③a / 裁决 6）。
+	 *
+	 * <p>为什么必须合成一条脚本：先 {@code RPUSH} 再 {@code HSET}，两步之间崩溃会留下
+	 * "台账有记录、索引没有"的洞 —— 下一次续跑按索引查会查不到，于是<b>再执行一遍</b>
+	 * （工具是导入/发布这类不可撤销的副作用）；反过来先写索引再推台账，则会留下
+	 * "索引指向一条不存在的记录"（读侧只能回落全表扫描，索引白建）。
+	 *
+	 * <p>索引下标在脚本内用 {@code LLEN} 现取（<b>推入前</b>的列表长度 = 本次记录的 0 基下标）：
+	 * Java 侧先读长度再推入会与并发写者竞争，拿到的下标指向别人的记录。
+	 *
+	 * <p>{@code HSETNX} 而非 {@code HSET}：同一条 {@code (runId, toolCallId)} 首次执行即建索引，
+	 * 之后的重放/重试不得改写"第一次是哪条记录"。
+	 *
+	 * @param KEYS[1] 台账 LIST 键 {@code ai:ledger:<runId>}
+	 * @param KEYS[2] 幂等索引 HASH 键 {@code ai:idem:<runId>}
+	 * @param ARGV[1] 台账记录 JSON
+	 * @param ARGV[2] 索引 field（{@code <runId>:<toolCallId>}）
+	 * @param ARGV[3] 索引 value 的后半段（{@code <outcome>|<code>|<executedBy>|<atMs>}；下标由脚本前插）
+	 * @param ARGV[4] TTL（毫秒，两个键同寿 = {@code app.ai.session-ttl}）
+	 */
+	private static final RedisScript<Long> IDEM_PUSH_SCRIPT = new DefaultRedisScript<>("""
+			-- IDEM_PUSH
+			local index = redis.call('LLEN', KEYS[1])
+			redis.call('RPUSH', KEYS[1], ARGV[1])
+			redis.call('HSETNX', KEYS[2], ARGV[2], tostring(index) .. '|' .. ARGV[3])
+			redis.call('PEXPIRE', KEYS[1], ARGV[4])
+			redis.call('PEXPIRE', KEYS[2], ARGV[4])
+			return index
+			""", Long.class);
+
+	/**
+	 * 认领结论的三态（B23L1 批③a / 裁决 9）。
+	 *
+	 * <p>为什么要区分后两者：{@code LOST} 的语义是"这个调用已经有主（他实例在执行）"，
+	 * {@code STALE_FENCE} 的语义是"<b>我</b>已经没有续跑权了" —— 处理方式不同（前者等/跳过，
+	 * 后者要放弃本进程的驱动、可能触发接管），混成一个 false 时现场只能看到"认领失败"。
+	 */
+	public enum ClaimOutcome {
+
+		/** 本次由当前实例认领成功（可以执行）。 */
+		WON,
+
+		/** 已被他实例认领（不得执行，等它执行完）。 */
+		LOST,
+
+		/** fence 已推进到更高 epoch：本实例的续跑权已被接管（不得执行）。 */
+		STALE_FENCE
+
+	}
+
+	/**
+	 * 认领结论。
+	 *
+	 * @param outcome 三态结论
+	 * @param epoch 本次认领试图使用的租约 epoch（0 = 无租约路径）
+	 * @param fence 认领时读到的 fence（0 = 无 fence 键/未持租未读）
+	 */
+	public record ClaimResult(ClaimOutcome outcome, long epoch, long fence) {
+
+		/** 是否认领成功（{@link ClaimOutcome#WON}）。 */
+		public boolean won() {
+			return this.outcome == ClaimOutcome.WON;
+		}
+
+	}
+
 	@Autowired
 	public RunStore(StringRedisTemplate redis, ObjectMapper mapper, AiProperties properties, LeaseService leaseService) {
 		this.redis = redis;
@@ -215,6 +299,21 @@ public class RunStore {
 
 	public String ledgerKey(String runId) {
 		return LEDGER_PREFIX + runId;
+	}
+
+	/** 幂等索引的 HASH 键名（{@code ai:idem:<runId>}）。 */
+	public String idemKey(String runId) {
+		return IDEM_PREFIX + runId;
+	}
+
+	/**
+	 * 幂等索引的 field：{@code <runId>:<toolCallId>}（B23L1 批③a / 裁决 6）。
+	 *
+	 * <p>为什么把 runId 拼进 field：{@code toolCallId} 由上游模型生成，<b>只在单轮内唯一</b>；
+	 * 同一个 HASH 里若只按 toolCallId 记，续跑/重试时换了一轮却撞上同一个 id 就会误判"已执行"。
+	 */
+	public static String idemField(String runId, String toolCallId) {
+		return runId + ":" + (toolCallId == null ? "" : toolCallId);
 	}
 
 	public String eventsKey(String runId) {
@@ -479,9 +578,12 @@ public class RunStore {
 		releaseRunLease(runId);
 		// B23L1 批②a：租约 / fence / req 位 / decided guard 同属"本轮的全部键"——
 		// 留着它们会让下一轮同 id 的运行继承前任的 fence 与决策（且 fence 只增不减 ⇒ 新租约写不进去）。
+		// 批③a：幂等索引随台账一起删（索引是台账的指针，台账没了它只会指向空气）。
+		// 注意：ai:lock:*（LeaseKeys，按 taskId 记）**不在这里** —— 资源锁的寿命与 run 的生死无关，
+		// 由 app.ai.lease.resource-ttl 自清；在轮次回收里删锁会把别人的业务互斥一起放掉。
 		this.redis.delete(List.of(runKey(runId), pendingKey(runId), claimKey(runId), ledgerKey(runId),
-				eventsKey(runId), seqKey(runId), xeventsKey(runId), runLeaseKey(runId), fenceKey(runId),
-				reqKey(runId), decidedKey(runId)));
+				idemKey(runId), eventsKey(runId), seqKey(runId), xeventsKey(runId), runLeaseKey(runId),
+				fenceKey(runId), reqKey(runId), decidedKey(runId)));
 		this.redis.opsForSet().remove(RUN_INDEX, runId);
 	}
 
@@ -858,36 +960,52 @@ public class RunStore {
 	 * {@code HSETNX} 的原子性不变；读口 {@link #claimedBy} 剥前缀，对调用方返回的仍是实例标识。
 	 * 认领所用 epoch 同时写进条目的 {@link PendingToolCall#getClaimedEpoch()}（additive）。
 	 *
-	 * @return true = 本次由当前实例认领（可以执行）；false = 已被他实例认领（<b>不得</b>执行）
+	 * @return true = 本次由当前实例认领（可以执行）；false = 已被他实例认领或本实例已失去续跑权
+	 * （<b>不得</b>执行）。批③a 起两者可用 {@link #tryClaimExecution} 区分（{@code LOST} /
+	 * {@code STALE_FENCE}）
 	 */
 	public boolean claimExecution(String runId, String toolCallId, String executedBy) {
+		// 批③a：布尔口保留（既有调用与用例零改动），三态由 tryClaimExecution 给出；
+		// LOST 与 STALE_FENCE 在布尔面上都是 false（"不得执行"这一点相同）。
+		return tryClaimExecution(runId, toolCallId, executedBy).won();
+	}
+
+	/**
+	 * 原子认领并给出<b>三态</b>结论（B23L1 批③a / 裁决 9）。
+	 *
+	 * <p>与 {@link #claimExecution} 是同一段逻辑：先过 fence（持租时），再 {@code HSETNX} 认领。
+	 * 两个失败分支语义不同 —— 见 {@link ClaimOutcome}。
+	 */
+	public ClaimResult tryClaimExecution(String runId, String toolCallId, String executedBy) {
 		long epoch = heldRunEpoch(runId);
+		long fence = 0L;
 		if (epoch > 0L) {
 			// I5：持租不等于"仍是主人" —— TTL 到期被别人接管后，本进程的视图要等续租失败才会清。
 			// 认领是"执行一个副作用"的入口，必须对着 fence 复核：fence 已推进到更高 epoch ⇒ 本实例的
-			// 执行权已失效，拒绝认领（返回 false 的语义与"被他实例认领"一致：不得执行）。
-			long fence = fenceEpoch(runId);
+			// 执行权已失效，拒绝认领（不得执行）。
+			fence = fenceEpoch(runId);
 			if (fence > epoch) {
 				log.warn("STALE_EPOCH 拒绝认领 runId={} toolCallId={} epoch={}（fence 已推进到 {}："
 						+ "本实例的续跑权已被接管，不得执行该工具）", runId, toolCallId, epoch, fence);
-				return false;
+				return new ClaimResult(ClaimOutcome.STALE_FENCE, epoch, fence);
 			}
 		}
 		String claimValue = epoch + "|" + executedBy;
 		Boolean claimed = this.redis.opsForHash().putIfAbsent(claimKey(runId), toolCallId, claimValue);
 		this.redis.expire(claimKey(runId), ttlFor(runId));
 		boolean won = Boolean.TRUE.equals(claimed);
-		if (won) {
-			PendingToolCall pending = pending(runId, toolCallId);
-			if (pending != null) {
-				pending.setClaimedAtMs(System.currentTimeMillis());
-				pending.setClaimedEpoch(epoch);
-				pending.setExecuted(true);
-				pending.setExecutedBy(executedBy);
-				putPending(runId, pending);
-			}
+		if (!won) {
+			return new ClaimResult(ClaimOutcome.LOST, epoch, fence);
 		}
-		return won;
+		PendingToolCall pending = pending(runId, toolCallId);
+		if (pending != null) {
+			pending.setClaimedAtMs(System.currentTimeMillis());
+			pending.setClaimedEpoch(epoch);
+			pending.setExecuted(true);
+			pending.setExecutedBy(executedBy);
+			putPending(runId, pending);
+		}
+		return new ClaimResult(ClaimOutcome.WON, epoch, fence);
 	}
 
 	/** 已落库的最大 epoch（{@code ai:fence:run:<runId>}；0 = 无键/坏值/读不出来）。 */
@@ -929,29 +1047,67 @@ public class RunStore {
 		return raw.substring(sep + 1);
 	}
 
+	/**
+	 * 追加一条执行台账，并把<b>幂等索引</b>与它写在同一个原子步里（B23L1 批③a / 裁决 6）。
+	 *
+	 * <h2>索引是什么、不是什么</h2>
+	 * 索引 {@code ai:idem:<runId>} 只回答"这个 toolCallId 已经在<b>第几条</b>台账记录里执行过"，
+	 * <b>不复制 resultText</b>（正文可能很大，且两份正文会出现"索引与台账不一致"）；读侧按
+	 * {@link #idemFor} 用 {@code LINDEX} 取回原记录，O(1)。
+	 *
+	 * <h2>原子性</h2>
+	 * {@code RPUSH} 与 {@code HSETNX}（含两个键的 {@code PEXPIRE}）在一条 Lua 里
+	 * （{@link #IDEM_PUSH_SCRIPT}）：两步之间崩溃留下的洞正好是"台账有、索引没有 ⇒ 续跑再执行一遍"
+	 * 这种不可撤销的重复副作用。脚本之后的那次 {@code EXPIRE} 只重复续期台账键
+	 * （批②滑动 TTL 的可观测面，幂等、不参与"记录与索引"的原子性）。
+	 *
+	 * <h2>旧数据兼容</h2>
+	 * 本批之前写入的台账没有索引；{@link #idemFor} 未命中索引时回落 {@link #ledgerFor} 的全表扫描，
+	 * 因此索引<b>缺失</b>只影响快慢，不影响"是否已执行"的判定。
+	 */
 	public void appendLedger(String runId, PendingToolCall pending, String resultText) {
+		long atMs = System.currentTimeMillis();
+		String toolCallId = pending.getToolCallId();
+		String idemField = idemField(runId, toolCallId);
+		String executedBy = pending.getExecutedBy() == null ? this.instanceId : pending.getExecutedBy();
+		String outcome = pending.effectiveOutcome().wire();
+		String code = pending.effectiveCode();
 		Map<String, Object> record = new LinkedHashMap<>();
-		record.put("atMs", System.currentTimeMillis());
+		record.put("atMs", atMs);
 		record.put("at", Instant.now().toString());
-		record.put("executedBy", pending.getExecutedBy() == null ? this.instanceId : pending.getExecutedBy());
-		record.put("toolCallId", pending.getToolCallId());
+		record.put("executedBy", executedBy);
+		record.put("toolCallId", toolCallId);
 		record.put("name", pending.getName());
 		record.put("kind", pending.getKind());
-		record.put("outcome", pending.effectiveOutcome().wire());
-		record.put("code", pending.effectiveCode());
+		record.put("outcome", outcome);
+		record.put("code", code);
 		// F5 批准绑定：批准时所见的那份预检指纹随执行台账留档（null = 未经预检/旧数据）
 		record.put("preflightHash", pending.getPreflight() == null ? null
 				: pending.getPreflight().get("reportHash"));
 		// I5：执行发生在哪一任续跑权之下（additive；旧记录没有本字段 ⇒ 读侧按缺失处理）。
 		// 取值顺序：认领时的 epoch（执行权的依据）→ 当前持租 epoch（旧条目/兼容路径）。
 		record.put("epoch", pending.getClaimedEpoch() > 0L ? pending.getClaimedEpoch() : heldRunEpoch(runId));
+		// 批③a：本条记录的幂等索引 field（additive；与 ai:idem:<runId> 的 field 同形，便于对账）
+		record.put("idemKey", idemField);
 		record.put("resultText", resultText);
+		String json;
 		try {
-			this.redis.opsForList().rightPush(ledgerKey(runId), this.mapper.writeValueAsString(record));
-			this.redis.expire(ledgerKey(runId), ttlFor(runId));
+			json = this.mapper.writeValueAsString(record);
 		}
 		catch (Exception ex) {
-			throw new IllegalStateException("无法写入执行台账 " + pending.getToolCallId(), ex);
+			throw new IllegalStateException("无法序列化执行台账 " + toolCallId, ex);
+		}
+		String indexTail = outcome + "|" + (code == null ? "" : code) + "|" + executedBy + "|" + atMs;
+		Duration ttl = ttlFor(runId);
+		try {
+			this.redis.execute(IDEM_PUSH_SCRIPT, List.of(ledgerKey(runId), idemKey(runId)), json, idemField,
+					indexTail, String.valueOf(ttl.toMillis()));
+			// 台账键的"整额续期"仍是可观测的一次 EXPIRE（批②的滑动 TTL 契约；脚本内已有 PEXPIRE，
+			// 这里只是把同一事实再落到模板面上，幂等、不在判据路径上）。
+			this.redis.expire(ledgerKey(runId), ttl);
+		}
+		catch (Exception ex) {
+			throw new IllegalStateException("无法写入执行台账 " + toolCallId, ex);
 		}
 	}
 
@@ -984,6 +1140,92 @@ public class RunStore {
 			}
 		}
 		return null;
+	}
+
+	/**
+	 * 取该 toolCallId 的台账记录：<b>先查幂等索引（O(1)），未命中再回落全表扫描</b>
+	 * （B23L1 批③a / 裁决 6）。
+	 *
+	 * <p>三条路径：
+	 * <ol>
+	 * <li>索引命中 → {@code LINDEX} 取回原记录（一次 {@code HGET} + 一次 {@code LINDEX}，与台账长度无关）；</li>
+	 * <li>索引未命中（本批之前写入的旧数据 / 索引被淘汰）→ {@link #ledgerFor} 扫描（旧行为，
+	 * 结果与索引路径同形）；</li>
+	 * <li>索引命中但取不回（下标越界/记录被删/JSON 坏）→ 同样回落扫描：索引只是加速面，
+	 * <b>台账才是判据</b>，索引坏掉不能把"已执行"报成"没执行"（那会导致重复副作用）；</li>
+	 * <li>索引命中但<b>指向别人的记录</b>（下标错位/索引被污染）→ 仍回落扫描（B23L1 批③b 复审 M-1）：
+	 * 重放必须"谁的结果回给谁"，把别人的执行结论当成本调用结果，比"没查到"更危险。</li>
+	 * </ol>
+	 */
+	public Map<String, Object> idemFor(String runId, String toolCallId) {
+		if (toolCallId == null) {
+			return null;
+		}
+		String field = idemField(runId, toolCallId);
+		String indexed;
+		try {
+			Object raw = this.redis.opsForHash().get(idemKey(runId), field);
+			indexed = raw == null ? null : String.valueOf(raw);
+		}
+		catch (Exception ex) {
+			log.debug("读取幂等索引失败 runId={} toolCallId={}（回落台账扫描）：{}", runId, toolCallId, ex.getMessage());
+			indexed = null;
+		}
+		if (indexed != null) {
+			Long index = listIndexOf(indexed);
+			Map<String, Object> record = index == null ? null : recordAt(runId, index);
+			if (record != null && matchesToolCall(record, toolCallId)) {
+				return record;
+			}
+			if (record != null) {
+				// M-1（复审裁决）：索引指向<b>别人的</b>记录（下标错位/索引被污染）时绝不能把它当成本调用的结果 ——
+				// 那会把 A 的产物交给 B（重放错了副作用结论比"没查到"更危险）。回落扫描由记录自身定身份。
+				log.warn("幂等索引错位 runId={} toolCallId={} index={}（该下标属于 toolCallId={}，回落台账扫描）", runId,
+						toolCallId, indexed, record.get("toolCallId"));
+			}
+			else {
+				log.debug("幂等索引命中但取不回原记录 runId={} toolCallId={} index={}（回落台账扫描）", runId, toolCallId,
+						indexed);
+			}
+		}
+		return ledgerFor(runId, toolCallId);
+	}
+
+	/** 索引指向的记录是否<b>就是</b>请求的 {@code toolCallId}（错位/字段缺失一律 false ⇒ 回落扫描）。 */
+	private static boolean matchesToolCall(Map<String, Object> record, String toolCallId) {
+		Object recordId = record.get("toolCallId");
+		return recordId != null && toolCallId.equals(String.valueOf(recordId));
+	}
+
+	/** 索引值的下标段（{@code <listIndex>|<outcome>|...}；坏值返回 null）。 */
+	private static Long listIndexOf(String indexed) {
+		int sep = indexed.indexOf('|');
+		String head = sep < 0 ? indexed : indexed.substring(0, sep);
+		try {
+			return Long.valueOf(head);
+		}
+		catch (NumberFormatException ex) {
+			return null;
+		}
+	}
+
+	/** 台账第 {@code index} 条（越界/读不出来返回 null）。 */
+	private Map<String, Object> recordAt(String runId, long index) {
+		if (index < 0L) {
+			return null;
+		}
+		try {
+			String item = this.redis.opsForList().index(ledgerKey(runId), index);
+			if (item == null) {
+				return null;
+			}
+			return this.mapper.readValue(item, new TypeReference<Map<String, Object>>() {
+			});
+		}
+		catch (Exception ex) {
+			log.debug("按索引读取台账失败 runId={} index={}：{}", runId, index, ex.getMessage());
+			return null;
+		}
 	}
 
 	/** 工具名 → 执行次数（"恰好一次"的对账口径）。 */

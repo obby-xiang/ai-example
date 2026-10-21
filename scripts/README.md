@@ -118,7 +118,7 @@ node scripts/ci/stub-upstream.mjs --self-check [--routes scripts/ci/stub-routes.
 
 ---
 
-## 3. `scripts/b23l1-dual-instance.ps1` —— 双实例 harness（B23L1 批①+批②）
+## 3. `scripts/b23l1-dual-instance.ps1` —— 双实例 harness（B23L1 批①+批②+批③）
 
 ### 3.1 用途边界
 
@@ -128,11 +128,13 @@ node scripts/ci/stub-upstream.mjs --self-check [--routes scripts/ci/stub-routes.
 
 | 组件 | 默认 | 说明 |
 | --- | --- | --- |
-| 实例 A / B | `8081` / `8082` | 各自独立 H2 文件（避免文件锁冲突）；Redis 共享 |
-| 共享 Redis | `127.0.0.1:6379` | 事件日志 `ai:xevents:`、唤醒频道 `ai:wake:`、序号 `ai:seq:` 都在这里 |
+| 实例 A / B | `8081` / `8082` | 默认各自独立 H2 文件（避免文件锁冲突）；`-SharedDb` 时共享同一 H2 文件（绝对路径 + `AUTO_SERVER=TRUE`）；Redis 共享 |
+| 共享 Redis | `127.0.0.1:6379` | 事件日志 `ai:xevents:`、唤醒频道 `ai:wake:`、序号 `ai:seq:`、续跑权 `ai:lease:run:`、资源锁 `ai:lock:*`、幂等索引 `ai:idem:` 都在这里 |
 | 上游桩 | `18399` | `scripts/ci/stub-upstream.mjs`（零密钥）；实例以 `AI_API_KEY=b23l1-stub-placeholder` 启动 |
 
 前置：后端 jar 已打包（`mvn -DskipTests package`）、环境有 `java` 与 `node`。脚本自己起子进程并做健康等待：判据 = `/api/ai/health` **扁平响应体**的 `available && redis.available`（该端点无 `data` 包装、也无 `ai` 子对象；AI 不可用时返回 503 但体形不变），缺项整棒 FAIL。起进程前先做 8081/8082/18399 的端口连通性预检（端口被占 ⇒ 直接 FAIL，避免在"旧的健康实例"上产出假绿证据），并对 `RedisHost:RedisPort` 做连通预检（harness 不自起 Redis，不通即 FAIL）。挂起类用例会在 A 侧自建一个真实 `EXPORT` 任务并 `select-defs`：确认门前的只读预检要求任务存在，chat 也必须带 `context`（否则 `start_export` 不在披露清单里，桩会退化为文本轮）。
+
+**L-12 / `-SharedDb` 边界**：默认两实例各用独立 H2，跨实例同 `taskId` 时另一侧预检会先失败（任务不存在），走不到资源锁；`instance-kill` 的 B 接管也会因 B 库无任务而被 `ToolTargetResolver` 前置拦截（`blocked/TARGET_INVALID`，不写台账、不执行）——这是设计内形态。`-SharedDb` 把两实例指到同一 H2 文件（`jdbc:h2:file:<绝对路径>/h2/b23l1_shared;AUTO_SERVER=TRUE;DB_CLOSE_DELAY=-1`），`resource-lock` 才会跑跨实例竞态版，`instance-kill` 才可能走"台账 1 条 executedBy=B"的形态甲。**I-2 竞态重试**：跨实例版的临界区是毫秒级 `createAndStart`，两轮可能不重叠（两轮都执行）——该变体最多跑 **3 轮**（每轮新 task + 两个新 run 同刻发令），任一命中「恰一个 RESOURCE_LOCKED + 恰一个执行 + 台账合计 1 + 作业 1」即 PASS；3 轮全未命中判 **SKIP**（不判 FAIL，行为可能完全正确；跨实例资源互斥证据以 H3 确定性变体为准）。H2 共享不可行（启动不健康）时 harness **直接 FAIL 并点名该边界**，可去掉 `-SharedDb` 改用 H3 预置锁变体。**桩指纹约束**：跨实例变体同一 taskId 的两条消息必须带互异后缀（桩的会话指纹 = 首条 user 消息文本；同 taskId + 同一句话会被判成同一会话，后到者因 `bucket.used` 已占 TC16-EXPORT 退化为文本轮、不弹确认卡）。**守卫**：`-SharedDb` 与 `instance-kill`/`lease-scripts` 同棒会因"杀 A = 杀 H2 AUTO_SERVER 服务端、B 的连接随之断开"而必然半路崩，脚本在起进程前直接 FAIL 要求分两棒跑。`idempotency` 不需要 SharedDb：第二次决策只在 Redis 上读 `ai:decided:`/pending，不触碰任务库。
 
 ### 3.3 用法
 
@@ -146,9 +148,13 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/b23l1-dual-insta
 
 # 只跑某一组
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/b23l1-dual-instance.ps1 -Cases suspend-reattach-wake
+
+# 批③跨实例资源锁（共享 H2；其余用例仍可在同一棒里跑）
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/b23l1-dual-instance.ps1 `
+    -SharedDb -Cases resource-lock
 ```
 
-退出码：任一用例 FAIL ⇒ `1`；SKIP（批③ 依赖未落地）不计退出码。默认用例 = `reattach-full-replay,reattach-diff,suspend-reattach-wake,suspend-decision,instance-kill`；`instance-kill` 会 kill `instance-a`，恒为最后一条。`lease-scripts` 也会 kill A，且耗时较长（等待方续租/租约过期），须单独跑或排在最后。
+退出码：任一用例 FAIL ⇒ `1`；SKIP 不计退出码。默认用例 = `reattach-full-replay,reattach-diff,suspend-reattach-wake,suspend-decision,resource-lock,idempotency,instance-kill`；`resource-lock` 默认走 H3 预置锁变体（不加 `-SharedDb`），加 `-SharedDb` 走跨实例共享库版；`instance-kill` 会 kill `instance-a`，恒为最后一条。`lease-scripts` 也会 kill A，且耗时较长（等待方续租/租约过期），须单独跑或排在最后。
 
 ### 3.4 用例面
 
@@ -158,14 +164,15 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/b23l1-dual-insta
 | `reattach-diff` | 批① | B 侧带 `?lastSeq` 只拿到差量，不重不漏 |
 | `suspend-reattach-wake` | 批① | A 侧挂起 → B 侧重挂 → 在 A 批准确认 → 续跑帧**经 `ai:wake:` 扇出到 B 的连接**（终帧到达且 seq 推进）；并记录 confirm→B 首帧延迟（P50/P95） |
 | `suspend-decision` | 批② | 决策打 B：`accepted=true` 且 `resumeOutcome=LEASE_HELD_ELSEWHERE`（A 的等待方持租）；`tool_start`/`tool_result` 各恰 1 帧；A、B 双侧重挂都能收到终帧 |
-| `instance-kill` | 批② | `Stop-Child -Name instance-a` 杀真 A；B 的 `/runs/current` 能重建挂起轮；决策落 B 后租约过期由延迟重试接管（预算 `-KillTakeoverTimeoutSec`，默认 90s）；`tool_start` 恰 1 帧、终帧到达、台账 `executedBy=B` 且 `ledgerCounts.start_export=1` |
+| `resource-lock` | 批③ | 同 task 双 `start_export`：恰一个真实执行、恰一个 `tool_result` 为 `code=RESOURCE_LOCKED / status=BLOCKED / outcome=blocked / executed=false / retryable=true`；两条流都收到 done；台账 `start_export` 合计 1（预置锁变体为 0）；作业数 1（预置锁变体为 0，解锁后重跑为 1）；终态后 `ai:lock:job:<taskId>:EXPORT` 不存在。默认 H3 必跑；`-SharedDb` 跨实例版最多重试 3 轮，任一命中即 PASS，3 轮均未命中判 SKIP（竞态窗口未命中，证据以 H3 为准） |
+| `idempotency` | 批③ | 首轮执行后再用同一 `runId+toolCallId` 打 B → 409 `DUPLICATE_TOOL_CALL_ID`；台账仍 1 条、全量回放 `tool_start` 仍 1 帧、作业数仍 1；真 Redis `HGET ai:idem:<runId> <runId>:<toolCallId>` 非空 |
+| `instance-kill` | 批② | `Stop-Child -Name instance-a` 杀真 A；B 的 `/runs/current` 能重建挂起轮；决策落 B 后租约过期由延迟重试接管（预算 `-KillTakeoverTimeoutSec`，默认 90s）；`tool_start` 恰 1 帧、终帧到达。中间证据**两形态皆可**并打印实际形态：甲（共享库/生产）= 台账恰 1 条且 `executedBy=B`、`ledgerCounts.start_export=1`；乙（默认，H2 隔离 L-12）= 台账 0 条 + 全量回放该 toolCallId 有 `TARGET_INVALID / status=BLOCKED / executed=false`（设计内前置拦截） |
 | `suspend-decision-concurrent` | 批②（可选） | 同一 runId/toolCallId 双路并发 POST：恰一个 200（accepted）+ 一个 409（`DUPLICATE_TOOL_CALL_ID`）；`confirm_decision`/`tool_start` 各恰 1 帧 |
 | `lease-scripts` | 批②（可选，终止性） | 真 Redis 租约冒烟：`/health.leaseOk=true`；挂起期租约键存在（ACQUIRE）、等待 12s 后 PTTL 回升（RENEW）、fence 键存在且快照 `runEpoch>0`、台账 `epoch>0`（FENCED-SET）、终态后租约键消失（RELEASE）；并发两路 `POST /runs/{runId}/resume` 恰一个 202、一个 409 |
-| `resource-lock` / `idempotency` | 批③ | SKIP：依赖资源互斥租约与幂等键 |
 
 ### 3.5 证据
 
-每用例把帧原文落 `<ArtifactDir>/<case>*.sse.txt`；两个实例与桩的 stdout 落 `<ArtifactDir>/{instance-a,instance-b,stub}.log`。失败时先看"哪一侧没收到/号断在哪"。`suspend-reattach-wake` 的订阅就绪哨兵为 `<ArtifactDir>/wake-B.ready.<runId>`（作业写、主线程轮询）；摘要前会打印 `帧延迟（A confirm 完成 → B 首续跑帧）：P50/P95`（L-5 取证，单样本时 P50=P95）。
+每用例把帧原文落 `<ArtifactDir>/<case>*.sse.txt`；两个实例与桩的 stdout 落 `<ArtifactDir>/{instance-a,instance-b,stub}.log`。失败时先看"哪一侧没收到/号断在哪"。**终态回放窄窗**：后端 `finish()` 先 `save(DONE)` 再 `out.done`，且终态回放不挂订阅；恰在"快照已 DONE、done 未落档"窗口到达的重挂会拿到到 `message_end` 为止的回放并直接收流。harness 的全量回放遇到"无终帧"会短延迟重读（最多 4 次，`<tag>-a1..a4.sse.txt` 留证），4 次仍无终帧才 FAIL（不掩盖真实的 done 缺失）。`suspend-reattach-wake` 的订阅就绪哨兵为 `<ArtifactDir>/wake-B.ready.<runId>`（作业写、主线程轮询）；摘要前会打印 `帧延迟（A confirm 完成 → B 首续跑帧）：P50/P95`（L-5 取证，单样本时 P50=P95）。批③ 的资源锁/幂等索引用只读 RESP 直读真 Redis（`Invoke-RedisCommand`：GET/PTTL/HGET）；H3 变体的预置锁走 `Invoke-RedisWrite`（**仅** `SET key value PX ms` 与 `DEL key`，作用域固定为 harness 的 Redis，仅供测试预置/清理）。
 
 ---
 
