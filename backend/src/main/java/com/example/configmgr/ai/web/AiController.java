@@ -193,11 +193,23 @@ public class AiController {
 			return json(HttpStatus.SERVICE_UNAVAILABLE, unavailable());
 		}
 		// R4：Redis 不可用时在**开流之前**快速失败（≤ 一次 PING 的超时，见 RedisAvailability）。
-		// 顺序放在参数校验之后：参数错就该报 400，不该被 Redis 状态遮住。
+		// 顺序：必填校验 → Redis 探活 → 限流 → 归一化 → 空拒 → 长度。
+		// 必填校验在探活之前（参数错就该报 400，不该被 Redis 状态遮住）；其余三道闸依赖 Redis 计数，
+		// 故排在探活之后 —— 由此产生的既定顺序是：Redis 不可用时，超长请求会先撞 503 而不是 400。
 		if (request == null || !StringUtils.hasText(request.sessionId()) || !StringUtils.hasText(request.message())) {
 			return json(HttpStatus.BAD_REQUEST, Map.of("code", "BAD_REQUEST", "message", "sessionId 与 message 均为必填"));
 		}
-		// 批① 闸门 1：归一化（只归一不拦截，§5.1 #2）。先归一后量长度 —— 量的是"真正进模型的那份"，
+		if (!this.redisAvailability.isAvailable()) {
+			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
+		}
+		// 批① 闸门 1：限流（§5.1 #3）。**排在归一化/长度之前**（裁决 I2，2026-10-21）：所有 /chat 请求
+		// 一律计数 —— 超长/纯不可见字符也是请求，同样消耗额度（防洪优先于"额度洁癖"：否则攻击者可用
+		// 超长体绕过限流做免费试探）。同时它在会话门之前：被限流的请求不该占住一个 in-flight 位。
+		AiRateLimiter.Decision rate = this.aiRateLimiter.check(request.sessionId(), clientIp(httpRequest));
+		if (!rate.allowed()) {
+			return rateLimited(rate);
+		}
+		// 批① 闸门 2：归一化（只归一不拦截，§5.1 #2）。先归一后量长度 —— 量的是"真正进模型的那份"，
 		// 零宽填充不该算进用户的额度；长度口径 = UTF-16 码元数，与前端 maxlength 同一把尺。
 		InputSanitizer.Result sanitized = this.inputSanitizer.sanitize(request.message());
 		if (sanitized.changed()) {
@@ -212,18 +224,10 @@ public class AiController {
 			return json(HttpStatus.BAD_REQUEST,
 					Map.of("code", "BAD_REQUEST", "message", "message 归一化后为空（原文仅含不可见字符），请重新输入"));
 		}
-		// 批① 闸门 2：长度（§5.1 #1 / 数据最小化 R5）。超限**拒绝不截断**：截断会让模型基于半句话下结论。
+		// 批① 闸门 3：长度（§5.1 #1 / 数据最小化 R5）。超限**拒绝不截断**：截断会让模型基于半句话下结论。
 		int maxChars = this.properties.getInput().getMaxChars();
 		if (sanitized.text().length() > maxChars) {
 			return json(HttpStatus.BAD_REQUEST, messageTooLong(sanitized.text().length(), maxChars));
-		}
-		if (!this.redisAvailability.isAvailable()) {
-			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
-		}
-		// 批① 闸门 3：限流（§5.1 #3）。放在会话门之前 —— 被限流的请求不该占住一个 in-flight 位。
-		AiRateLimiter.Decision rate = this.aiRateLimiter.check(request.sessionId(), clientIp(httpRequest));
-		if (!rate.allowed()) {
-			return rateLimited(rate);
 		}
 
 		String sessionId = request.sessionId();

@@ -26,6 +26,22 @@ import java.text.Normalizer;
  * <h2>幂等</h2>
  * 归一 = 一个不动点：{@code sanitize(sanitize(x)) == sanitize(x)}。实现为此做了收敛循环
  * （剥字符可能让原本被隔开的基字符与组合符相邻，从而产生新的可组合序列，需要再归一一次）。
+ *
+ * <h2>作用域与 fail-closed 边界（复审 M3 登记，2026-10-21）</h2>
+ * 本类<b>只处理 message 这一条自由文本</b>。{@code AiChatRequest.context} 的各字段
+ * （{@code page} / {@code taskType} / {@code step} / {@code taskId} / {@code extra}）<b>不经过</b>本类 ——
+ * 它们是结构化字段，正确的处理方式是"白名单 + 长度/字符集约束"（安全防护 §5.1 #5 系统提示字段白名单化，
+ * 属批②），而不是文本归一。
+ *
+ * <p>
+ * 因此<b>边界是 fail-closed 的</b>：任何消费 {@code context} 的路径（{@code ContextBuilder}、
+ * 披露工具子集的判定、日志/审计回显）<b>不得假设"该字段已归一/已可信"</b>；在批② 的白名单落地前，
+ * 消费方必须自己兜住未知值（未知 {@code page} 不得原样回显、不得据此放宽工具披露），
+ * 否则本类提供的"编码平整"会被 {@code context} 这条侧路绕过。
+ *
+ * <p>
+ * 同理，{@code /confirm} 的 {@code reason} 与 {@code /frontend-tool-result} 的载荷目前也<b>没有</b>
+ * 长度闸与归一化（复审 M4，留防护批②③）—— 本类的存在不代表全入口已受控。
  */
 @Component
 public class InputSanitizer {

@@ -139,6 +139,22 @@ export function isDegraded(): boolean {
   return degraded
 }
 
+/**
+ * 归零自适应降级开关。
+ *
+ * <p>产品语义里 {@code degraded} 是<b>会话级粘滞</b>的（一次慢渲染后本会话不再尝试高亮/ mermaid，
+ * 免得反复越预算）。但它是<b>模块全局</b>状态：同进程内的下一批渲染（新会话 / 单测用例）会继承
+ * 上一个会话的判定。
+ *
+ * <p>单测必须每例归零 —— 否则一条慢渲染就污染其后全部用例。实测（2026-10-21）：
+ * 并行 worker 下 CPU 抖动会让首个用例的单次渲染越过 {@link RENDER_BUDGET_MS}（24ms），
+ * 随后 12 条 mermaid / 代码块用例连带变红；同一现象在父提交上以同样 CPU 压力可复现
+ * ⇒ 既有缺陷，与本批改动无关（见 {@code tests/setup.ts} 的全局 beforeEach）。
+ */
+export function resetDegradation(): void {
+  degraded = false
+}
+
 /* ---------- R-165 S5c：正文排版工具类（原 src/styles/ai-chat.css 的 .md-body / 表格 / figure.code 族
    逐值迁移；类串写在本 .ts 源码里 ⇒ 被 tailwind.config.js 的 content 扫到并编译进产物） ---------- */
 

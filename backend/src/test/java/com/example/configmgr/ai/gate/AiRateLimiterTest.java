@@ -112,6 +112,32 @@ class AiRateLimiterTest {
 				.as("窗口键必须带 TTL（否则键面无限增长）").isEqualTo(Duration.ofMinutes(1));
 	}
 
+	/**
+	 * I1（复审要求）：<b>脚本正文契约</b> —— 单键原子性的保障就是"先回收、再判、再写"这一条命令序，
+	 * 四段拆分到 Java 侧就退化成并发可绕过的非原子计数。断言逐条锁：
+	 * ① 唯一分派标记 {@code RATE_SLIDING_WINDOW}；② 回收用 {@code ZREMRANGEBYSCORE KEYS[1]}；
+	 * ③ 计数 {@code ZCARD}；④ 写入 {@code ZADD}；⑤ 键有 TTL（{@code PEXPIRE}）；
+	 * ⑥ 时间取 Redis 自己的 {@code TIME}（不是各实例的本地时钟）；
+	 * ⑦ 序：{@code ZREMRANGEBYSCORE} → {@code ZCARD} → {@code ZADD}（先判后写才是"上限内"）。
+	 */
+	@Test
+	void scriptBodyKeepsTheAtomicSlidingWindowCommandOrder() {
+		this.limiter.check("s-body", IP);
+
+		String body = this.redis.lastScriptBody();
+
+		assertThat(body).as("分派标记").contains(AiRateLimiter.SCRIPT_MARK);
+		assertThat(body).contains("'ZREMRANGEBYSCORE', KEYS[1]");
+		assertThat(body).contains("'ZCARD'");
+		assertThat(body).contains("'ZADD'");
+		assertThat(body).contains("'PEXPIRE'");
+		assertThat(body).contains("'TIME'");
+		assertThat(body.indexOf("ZREMRANGEBYSCORE")).as("先回收窗口外成员")
+				.isLessThan(body.indexOf("ZCARD"));
+		assertThat(body.indexOf("ZCARD")).as("先数再写（count < limit 才 ZADD）")
+				.isLessThan(body.indexOf("'ZADD'"));
+	}
+
 	@Test
 	void limitsAreConfigurable() {
 		this.properties.getLimit().setSessionPerMinute(2);

@@ -49,6 +49,12 @@ public class AiRateLimiter {
 	/** 键族前缀（观测口径：{@code ai:} 下按用途分段）。 */
 	public static final String KEY_PREFIX = "ai:rate:";
 
+	/**
+	 * 脚本分派标记（= 脚本正文首行注释）：单测与 {@code FakeRateRedis} 同取本常量，
+	 * 避免"改脚本忘了改桩"的静默失配。
+	 */
+	public static final String SCRIPT_MARK = "RATE_SLIDING_WINDOW";
+
 	/** 会话维度的键前缀。 */
 	public static final String SESSION_KEY_PREFIX = KEY_PREFIX + "session:";
 

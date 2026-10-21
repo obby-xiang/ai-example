@@ -34,8 +34,8 @@ import static org.mockito.Mockito.when;
 @SuppressWarnings({ "unchecked", "rawtypes" })
 public final class FakeRateRedis {
 
-	/** 脚本分派标记（必须与 {@link AiRateLimiter} 脚本正文里的注释一致）。 */
-	static final String MARK = "RATE_SLIDING_WINDOW";
+	/** 脚本分派标记：直接取产品常量（不再各自写字面量，改脚本忘改桩会编译期暴露）。 */
+	static final String MARK = AiRateLimiter.SCRIPT_MARK;
 
 	/** ZSET 键面：键 → (成员 → 分值=毫秒时间戳)。 */
 	public final Map<String, Map<String, Long>> zsets = new ConcurrentHashMap<>();
@@ -51,6 +51,13 @@ public final class FakeRateRedis {
 
 	/** 置 true = 模拟 Redis 宕机（所有命令抛出 ⇒ 限流降级放行）。 */
 	public volatile boolean down;
+
+	/** 最近一次执行的脚本正文（I1：锁"命令序 = 先回收再判再写"的契约，不依赖文本快照文件）。 */
+	private volatile String lastScriptBody;
+
+	public String lastScriptBody() {
+		return this.lastScriptBody;
+	}
 
 	public final StringRedisTemplate redis = mock(StringRedisTemplate.class);
 
@@ -71,6 +78,7 @@ public final class FakeRateRedis {
 			throw new IllegalStateException("Redis 不可用（模拟宕机）");
 		}
 		String body = script.getScriptAsString();
+		this.lastScriptBody = body;
 		if (!body.contains(MARK)) {
 			throw new UnsupportedOperationException("未建模的脚本：" + body);
 		}

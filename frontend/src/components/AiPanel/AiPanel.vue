@@ -746,7 +746,6 @@
             data-testid="composer-count"
             class="mr-[2px] flex-none text-[10.5px] leading-[1.6] tabular-nums"
             :class="composerCounterClass"
-            aria-live="polite"
           >{{ composerCounterText }}</span>
           <button
             v-if="ai.loading || ai.suspended"
@@ -771,6 +770,10 @@
           >↑<span class="tip" :class="[TIP_CLASS, hiddenComposerTips.has('send') ? 'hidden' : '']" aria-hidden="true">发送<span class="tip-arrow" :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span></button>
         </div>
       </div>
+      <!-- M5（复审）：播报节流 —— 计数文本自身**不带** aria-live（否则每敲一个字都播报一次），
+           改由这个屏读专用 live region 只在**档位切换**时说话：其文本在一个档位内是常量，
+           DOM 文本因此只在"常规→余量不足/到顶/超限"的跃迁上变化。 -->
+      <span class="sr-only" data-testid="composer-count-live" aria-live="polite">{{ composerTierAnnouncement }}</span>
     </div>
 
     <!-- R-165 S5b：mermaid 全屏查看器（demo v7.7 :1948-1964 重做口径）——
@@ -1311,13 +1314,43 @@ const canSubmit = computed(
 
 /**
  * 批① 字数提示（composer 底栏、发送钮左侧）：**剩余**字数 + 到顶/超限态。
- * 三档：常态灰 `剩余 N 字`；余量 ≤ 500 转琥珀；到顶（= 8192，仍可发送）提示 `已达 8192 字上限`；
- * 超限只可能来自程序化回填（编辑重跑把超长原文塞回输入框），此时发送闸关闭并标红 ——
+ * 四档（判据见下方 composerTier）：常态灰 `剩余 N 字` → 余量 ≤ 500 转琥珀 → 到顶（= 8192，仍可发送）
+ * `已达 8192 字上限` → 超限（只可能来自程序化回填，如编辑重跑把超长原文塞回输入框）标红并关发送闸。
  * 前端不留"点了必然 400"的按钮，但绝不替用户截断。
  */
 const composerRemaining = computed(() => MESSAGE_MAX_CHARS - inputText.value.length)
 
 const composerOverLimit = computed(() => composerRemaining.value < 0)
+
+/**
+ * 档位（M5 播报节流的判据）：一个档位内计数文本逐字变化，但**播报**只在档位跃迁时发生。
+ * `normal` 余量充裕 / `near` 余量 ≤ 500 / `limit` 正好到顶（仍可发送）/ `over` 超限（发送闸关闭）。
+ */
+type ComposerTier = 'normal' | 'near' | 'limit' | 'over'
+
+const composerTier = computed<ComposerTier>(() => {
+  if (composerOverLimit.value) {
+    return 'over'
+  }
+  if (composerRemaining.value === 0) {
+    return 'limit'
+  }
+  return composerRemaining.value <= 500 ? 'near' : 'normal'
+})
+
+/** 屏读播报文案：**每档一个常量**（不含剩余数字）⇒ DOM 文本只在跃迁时变，不会逐字打断用户。 */
+const composerTierAnnouncement = computed(() => {
+  switch (composerTier.value) {
+    case 'near':
+      return '剩余字数不足 500 字'
+    case 'limit':
+      return `已达 ${MESSAGE_MAX_CHARS} 字上限`
+    case 'over':
+      return '已超出上限，无法发送'
+    default:
+      return ''
+  }
+})
 
 const composerCounterText = computed(() => {
   if (composerOverLimit.value) {
@@ -1330,10 +1363,15 @@ const composerCounterText = computed(() => {
 })
 
 const composerCounterClass = computed(() => {
-  if (composerOverLimit.value) {
-    return 'text-[#c0392b]'
+  switch (composerTier.value) {
+    case 'over':
+      return 'text-[#c0392b]'
+    case 'near':
+    case 'limit':
+      return 'text-[#b45309]'
+    default:
+      return 'text-[#8b949e]'
   }
-  return composerRemaining.value <= 500 ? 'text-[#b45309]' : 'text-[#8b949e]'
 })
 
 /** compositionend 后约 30ms 内仍视为 IME 确认窗口（Safari 可能先送 compositionend 再送 Enter）。 */

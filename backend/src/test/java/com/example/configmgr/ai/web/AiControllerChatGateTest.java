@@ -171,15 +171,30 @@ class AiControllerChatGateTest {
 		assertThat(body.get("limit")).isEqualTo(1);
 	}
 
+	/**
+	 * <b>裁决 I2（2026-10-21）后的语义</b>：限流排在归一化/长度<b>之前</b> —— 所有 {@code /chat} 计数，
+	 * 超长请求同样占额度（防洪优先于"额度洁癖"）。
+	 *
+	 * <p>
+	 * <b>这是经裁决批准的语义改写，不是降格</b>：原用例 {@code overlongMessageDoesNotConsumeRateQuota}
+	 * 断言"超长不吃额度"（旧顺序：归一化→长度→限流），现改为"超长仍 400，但 20 条之后正常消息被 429"
+	 * —— 两条断言都在，只是额度语义按裁决翻转。
+	 */
 	@Test
-	void overlongMessageDoesNotConsumeRateQuota() {
+	void overlongMessagesStillGet400AndConsumeTheRateQuota() {
 		for (int i = 1; i <= 20; i++) {
-			this.controller.chat(new AiChatRequest(SESSION, "中".repeat(8193), null), null);
+			ResponseEntity<?> rejected = this.controller
+					.chat(new AiChatRequest(SESSION, "中".repeat(8193), null), null);
+			assertThat(rejected.getStatusCode()).as("第 %d 条超长仍按长度拒（400）", i)
+					.isEqualTo(HttpStatus.BAD_REQUEST);
+			assertThat(((Map<?, ?>) rejected.getBody()).get("code")).isEqualTo("MESSAGE_TOO_LONG");
 		}
 
-		assertThat(this.controller.chat(new AiChatRequest(SESSION, "正常长度的一句话", null), null).getStatusCode())
-				.as("长度闸在限流之前：被 400 拒掉的请求不占额度")
-				.isEqualTo(HttpStatus.OK);
+		ResponseEntity<?> limited = this.controller.chat(new AiChatRequest(SESSION, "正常长度的一句话", null), null);
+
+		assertThat(limited.getStatusCode()).as("超长也占额度 ⇒ 第 21 次直接被限流（429）")
+				.isEqualTo(HttpStatus.TOO_MANY_REQUESTS);
+		assertThat(((Map<?, ?>) limited.getBody()).get("code")).isEqualTo("RATE_LIMITED");
 	}
 
 	@Test

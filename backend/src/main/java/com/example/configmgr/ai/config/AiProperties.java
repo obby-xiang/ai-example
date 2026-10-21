@@ -83,6 +83,40 @@ public class AiProperties {
 		}
 	}
 
+	/**
+	 * 启动期校验 {@code app.ai.limit.*} 必须为正（复审 M1；与上面 {@link #verifySseWriteTimeout()} 同一姿态）。
+	 *
+	 * <p>
+	 * 两个键配错都不是"性能降级"，而是<b>语义被静默改写</b>：
+	 * <ul>
+	 * <li>{@code session-per-minute / ip-per-minute ≤ 0}：Lua 判 {@code count < limit} 恒假 ⇒ <b>每条</b>
+	 * {@code /chat} 都 429 —— 配置面看起来是"限流"，运行面是"关掉对话"；</li>
+	 * <li>{@code window ≤ 0}：{@code PEXPIRE 0} 会立刻删键 ⇒ 计数永远归零、限流<b>静默失效</b>
+	 * （运维以为有闸，实际没有 —— 比报错更危险）。</li>
+	 * </ul>
+	 * 故启动即失败，并点名具体键与当前值。
+	 */
+	@PostConstruct
+	void verifyRateLimit() {
+		Limit limit = this.limit;
+		if (limit == null) {
+			throw new IllegalStateException("app.ai.limit 段缺失（绑定为 null）：限流无法装配，启动失败");
+		}
+		if (limit.getSessionPerMinute() <= 0) {
+			throw new IllegalStateException("app.ai.limit.session-per-minute 必须 > 0（当前 = "
+					+ limit.getSessionPerMinute() + "）：0/负值会让每条 /chat 都 429（等于关掉对话）");
+		}
+		if (limit.getIpPerMinute() <= 0) {
+			throw new IllegalStateException("app.ai.limit.ip-per-minute 必须 > 0（当前 = " + limit.getIpPerMinute()
+					+ "）：0/负值会让每个来源的每条 /chat 都 429（等于关掉对话）");
+		}
+		Duration window = limit.getWindow();
+		if (window == null || window.isZero() || window.isNegative()) {
+			throw new IllegalStateException("app.ai.limit.window 必须 > 0（当前 = " + window
+					+ "）：Lua 的 PEXPIRE 0/负值会立刻删键 ⇒ 计数永远归零、限流静默失效");
+		}
+	}
+
 	@Data
 	public static class Memory {
 
