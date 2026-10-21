@@ -9,6 +9,7 @@ import com.example.configmgr.ai.context.ContextCompactor;
 import com.example.configmgr.ai.context.ContextEstimator;
 import com.example.configmgr.ai.context.ContextMeter;
 import com.example.configmgr.ai.context.ContextState;
+import com.example.configmgr.ai.kb.KbPromptSection;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.session.AiSessionService;
@@ -196,6 +197,16 @@ public class ResilientChatService {
 	private ContextCompactor contextCompactor;
 
 	/**
+	 * 业务知识库提示词后缀（业务知识问答 v1）。
+	 *
+	 * <p><b>字段注入</b>而非构造器参数：本类构造器被多份 conformance/run 用例直接 {@code new}
+	 * （改签名等于要求它们跟改，而"既有断言零删改"是本批门禁）。缺席时（单测直接 new）
+	 * 只是不注入知识段，与"知识库未启用"同形。
+	 */
+	@Autowired(required = false)
+	private KbPromptSection kbPromptSection;
+
+	/**
 	 * 安全事件计数（防护批③ B3-5）。同为<b>字段注入</b>：单测直接 {@code new} 本类时缺席，
 	 * 计数退化为"不记"（安全计数不该成为跑一轮对话的前提）。
 	 */
@@ -238,7 +249,12 @@ public class ResilientChatService {
 		// 人设与工作区快照合成"一条"系统消息：官方 ChatClient 的 system 文本是单槽位
 		// （Spec 内部 systemTextParams 只有一个 key），连续两次 .system() 会覆盖前者 ——
 		// 实测：只发第二条时，主提示词整段消失（快照里 system 只剩工作区快照）。
-		String systemText = SYSTEM_PROMPT + "\n\n" + this.contextBuilder.buildContextMessage(context);
+		// 业务知识库后缀（业务知识问答 v1）：只在既有 SYSTEM_PROMPT 之后追加一段稳定文本，
+		// 不改人设原文（prompt 缓存的最长稳定前缀不被击穿）；未装配/未启用时为空串。
+		String kbSection = this.kbPromptSection == null ? "" : this.kbPromptSection.render();
+		String systemText = SYSTEM_PROMPT + "\n\n"
+				+ (kbSection.isEmpty() ? "" : kbSection + "\n\n")
+				+ this.contextBuilder.buildContextMessage(context);
 		List<Message> instructions = List.of(new SystemMessage(systemText), new UserMessage(request.message()));
 
 		// 模型身份 = 本轮固化进快照的那一对（providerId/modelId）；没有可用 provider 时

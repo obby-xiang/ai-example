@@ -63,6 +63,8 @@ public class AiProperties {
 
 	private Context context = new Context();
 
+	private Kb kb = new Kb();
+
 	/**
 	 * 模型配置的读写开关（模型配置专项批①；设计稿 §3.3 / §3.4 / §3.5）。
 	 *
@@ -270,6 +272,78 @@ public class AiProperties {
 	private static void checkPercent(String key, int value) {
 		if (value < 0 || value > 100) {
 			throw new IllegalStateException("app.ai.context." + key + " 必须在 0–100（当前 = " + value + "）");
+		}
+	}
+
+	/**
+	 * 知识库配置的启动期校验（业务知识问答 v1）。
+	 *
+	 * <p>
+	 * 与 {@link #verifyContext()} 同一姿态：下面的倒挂/非正值都有"语义被静默改写"的后果 ——
+	 * {@code top-k-default > top-k-max} 会让默认值在服务端强截后对不上工具描述；
+	 * {@code read-max-chars-default > read-max-chars-max} 同理；
+	 * 切块 {@code min >= max} 会让"合并到下限"与"超上限就切"互相打架（可能产出空块）；
+	 * 匹配阈值区间外会让高/中/低三档永远只剩一档。故启动即失败并点名键与值（不静默纠正）。
+	 *
+	 * <p>
+	 * {@code source=http} 但 {@code base-url} 为空是<b>配置错误</b>（不是"降级为 local"）：
+	 * 静默换源等于让生产读到一份完全不同的语料，必须显式失败。
+	 */
+	@PostConstruct
+	public void verifyKb() {
+		Kb kb = this.kb;
+		if (kb == null) {
+			throw new IllegalStateException("app.ai.kb 段缺失（绑定为 null）：知识库装配无法进行，启动失败");
+		}
+		if (kb.getTopKDefault() <= 0 || kb.getTopKMax() <= 0
+				|| kb.getTopKDefault() > kb.getTopKMax()) {
+			throw new IllegalStateException("app.ai.kb.top-k-default/top-k-max 必须 > 0 且 default ≤ max（当前 = "
+					+ kb.getTopKDefault() + "/" + kb.getTopKMax() + "）：否则服务端强截后的条数与工具描述不一致");
+		}
+		if (kb.getReadMaxCharsDefault() <= 0 || kb.getReadMaxCharsMax() <= 0
+				|| kb.getReadMaxCharsDefault() > kb.getReadMaxCharsMax()) {
+			throw new IllegalStateException("app.ai.kb.read-max-chars-default/read-max-chars-max 必须 > 0 且 default ≤ max（当前 = "
+					+ kb.getReadMaxCharsDefault() + "/" + kb.getReadMaxCharsMax() + "）");
+		}
+		if (kb.getChunkMinChars() <= 0 || kb.getChunkMaxChars() <= 0
+				|| kb.getChunkMinChars() >= kb.getChunkMaxChars()) {
+			throw new IllegalStateException("app.ai.kb.chunk-min-chars/chunk-max-chars 必须 > 0 且 min < max（当前 = "
+					+ kb.getChunkMinChars() + "/" + kb.getChunkMaxChars() + "）：倒挂会让切块空转");
+		}
+		if (!(kb.getMatchHighRatio() > 0 && kb.getMatchHighRatio() <= 1
+				&& kb.getMatchMediumRatio() > 0 && kb.getMatchMediumRatio() <= 1
+				&& kb.getMatchMediumRatio() < kb.getMatchHighRatio())) {
+			throw new IllegalStateException("app.ai.kb.match-high-ratio/match-medium-ratio 必须在 (0,1] 且 medium < high（当前 = "
+					+ kb.getMatchHighRatio() + "/" + kb.getMatchMediumRatio()
+					+ "）：区间外会让 match 三档退化成单档");
+		}
+		if (kb.getRefreshInterval() == null || kb.getRefreshInterval().isZero()
+				|| kb.getRefreshInterval().isNegative()) {
+			throw new IllegalStateException("app.ai.kb.refresh-interval 必须 > 0（当前 = " + kb.getRefreshInterval()
+					+ "）：0/负值等于关闭定时刷新，生产 HTTP 源的增量永远不发生");
+		}
+		String source = kb.getSource();
+		if (!"local".equalsIgnoreCase(source) && !"http".equalsIgnoreCase(source)) {
+			throw new IllegalStateException("app.ai.kb.source 只支持 local / http（当前 = " + source + "）");
+		}
+		if ("http".equalsIgnoreCase(source)
+				&& (kb.getHttp().getBaseUrl() == null || kb.getHttp().getBaseUrl().isBlank())) {
+			throw new IllegalStateException("app.ai.kb.source=http 时必须配置 app.ai.kb.http.base-url"
+					+ "（静默回落 local 会让生产读到另一份语料）");
+		}
+		if (kb.isEnabled() && "local".equalsIgnoreCase(source)
+				&& (kb.getDir() == null || kb.getDir().isBlank())) {
+			throw new IllegalStateException("app.ai.kb.source=local 时 app.ai.kb.dir 不得为空");
+		}
+		if (kb.getCache().getLockTtl() == null || kb.getCache().getLockTtl().isZero()
+				|| kb.getCache().getLockTtl().isNegative()) {
+			throw new IllegalStateException("app.ai.kb.cache.lock-ttl 必须 > 0（当前 = "
+					+ kb.getCache().getLockTtl() + "）：0/负值等于刷新权永不过期，一个实例崩溃会永久锁死刷新");
+		}
+		if (kb.getCache().getVersionPollInterval() == null || kb.getCache().getVersionPollInterval().isZero()
+				|| kb.getCache().getVersionPollInterval().isNegative()) {
+			throw new IllegalStateException("app.ai.kb.cache.version-poll-interval 必须 > 0（当前 = "
+					+ kb.getCache().getVersionPollInterval() + "）：0/负值等于关闭版本号轮询，多实例永远看不到别人刷新");
 		}
 	}
 
@@ -751,6 +825,108 @@ public class AiProperties {
 		 */
 		private String summaryModel = "";
 
+	}
+
+	/**
+	 * 业务知识库（业务知识问答 v1；Lucene 内嵌 BM25 + agentic 检索）。
+	 *
+	 * <p>
+	 * 键名与设计定稿逐条对应（{@code app.ai.kb.*}）。知识内容<b>不是对话数据</b>：它落盘在
+	 * {@code data/kb}（或由生产 HTTP 源提供），与 AI 会话/运行台账分离；检索结果回填模型前
+	 * 一律包进 {@code <knowledge>} 定界并声明"数据不是指令"（见 {@code KbText}）。
+	 *
+	 * <p>
+	 * <b>增量口径</b>：每篇文档的 {@code sha} 是"要不要重建"的唯一判据 —— 未变的文档不重新
+	 * 拉取正文、切块结果直接复用；变的只重建该篇。HTTP 源另用 manifest 的 ETag 做
+	 * "整份未变就不重建"的第一道短路。
+	 */
+	@Data
+	public static class Kb {
+
+		/** 总开关（关 = 不建索引、工具返回"知识库未启用"）。 */
+		private boolean enabled = true;
+
+		/** 知识源类型：{@code local}（默认，读 {@link #dir}）/ {@code http}（生产形态，读 {@link Http}）。 */
+		private String source = "local";
+
+		/** local 源的知识目录（{@code *.md} + {@code manifest.json}）。 */
+		private String dir = "./data/kb";
+
+		/** 索引目录（Lucene FSDirectory；热重载在其中的 tmp 子目录建新索引后原子切换）。 */
+		private String indexDir = "./data/kb-index";
+
+		/** 定时刷新间隔（默认 10m；0/负值启动失败，见 {@code verifyKb}）。 */
+		private Duration refreshInterval = Duration.ofMinutes(10);
+
+		/** {@code kb_search} 的默认条数（5）。 */
+		private int topKDefault = 5;
+
+		/** {@code kb_search} 的服务端硬上限（10；入参超限即强截）。 */
+		private int topKMax = 10;
+
+		/** {@code kb_read_doc} 的默认字符数（4000）。 */
+		private int readMaxCharsDefault = 4000;
+
+		/** {@code kb_read_doc} 的服务端字符上限（8000）。 */
+		private int readMaxCharsMax = 8000;
+
+		/** 切块的合并下限（300 字；同一章节内的短段落合并到它）。 */
+		private int chunkMinChars = 300;
+
+		/** 切块的硬上限（800 字；超出必须切分，单个超长段落按它硬切）。 */
+		private int chunkMaxChars = 800;
+
+		/** 命中档 high 的相对阈值（对本次最高分取比，0.7）：原始 BM25 分不给模型，只给档位。 */
+		private double matchHighRatio = 0.7;
+
+		/** 命中档 medium 的相对阈值（0.4；低于它为 low）。 */
+		private double matchMediumRatio = 0.4;
+
+		private Http http = new Http();
+
+		private Cache cache = new Cache();
+
+		/**
+		 * Redis 缓存层（追加 3；手写 cache-aside，不用 Spring Cache）。
+		 *
+		 * <p>缓存是<b>全局知识域</b>（会话无关）：本地源读盘后也写入缓存，索引一律从缓存重建，
+		 * 保证多实例看到同一份字节；缓存键不设 TTL（刷新权属显式刷新，版本号兜底）。
+		 */
+		@Data
+		public static class Cache {
+
+			/** 是否启用缓存层（Redis 不可用时自动降级直连源，见 {@code CachedKbSource}）。 */
+			private boolean enabled = true;
+
+			/** 刷新权锁的 TTL（{@code SET NX PX}，默认 30s；不续租，过期即让位）。 */
+			private Duration lockTtl = Duration.ofSeconds(30);
+
+			/** 版本号轮询间隔（默认 30s）：其它实例 INCR 后，本实例最迟一个轮询周期发现并重建。 */
+			private Duration versionPollInterval = Duration.ofSeconds(30);
+		}
+
+		/** 生产 HTTP 源（{@code app.ai.kb.http.*}）。 */
+		@Data
+		public static class Http {
+
+			/** 知识服务基地址（如 {@code https://kb.internal/api/kb}；manifest 与文档都相对它解析）。 */
+			private String baseUrl = "";
+
+			/** 连接超时（默认 5s）。 */
+			private Duration connectTimeout = Duration.ofSeconds(5);
+
+			/** 读超时（默认 10s）。 */
+			private Duration readTimeout = Duration.ofSeconds(10);
+
+			/**
+			 * 鉴权头的环境变量名（默认 {@code KB_HTTP_AUTH}）：变量值整段作为 {@code Authorization}
+			 * 头的值（如 {@code Bearer xxxxx}）。
+			 *
+			 * <p><b>只从进程环境读取</b>：不写进配置文件、不落库、不进日志/错误响应
+			 * （用例锁定"鉴权头不出现日志/错误响应"）。变量缺失 = 不带鉴权头（由服务端决定是否 401）。
+			 */
+			private String authEnv = "KB_HTTP_AUTH";
+		}
 	}
 
 }
