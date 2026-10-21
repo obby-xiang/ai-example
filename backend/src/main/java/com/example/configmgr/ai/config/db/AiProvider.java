@@ -80,7 +80,13 @@ public class AiProvider {
     @Column(name = "key_last4", length = 8)
     private String keyLast4;
 
-    /** HMAC-SHA256(KEK, key) 前 16 hex（不是裸 SHA-256：指纹也是运行时缓存键的一部分）。 */
+    /**
+     * HMAC-SHA256(KEK, key) 前 16 hex（不是裸 SHA-256：指纹也是运行时缓存键的一部分）。
+     *
+     * <p>与 {@link #keyCipher} 同理不进 {@code toString()}：指纹虽是单向摘要，但它足以回答
+     * "两处 key 是不是同一个"（离线比对即可，无需 KEK），属于 key 的派生材料而非无害元数据。
+     */
+    @ToString.Exclude
     @Column(name = "key_fingerprint", length = 64)
     private String keyFingerprint;
 

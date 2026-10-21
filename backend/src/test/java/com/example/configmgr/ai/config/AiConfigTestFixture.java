@@ -74,6 +74,9 @@ final class AiConfigTestFixture {
 
 	final AiProperties properties = new AiProperties();
 
+	/** &gt;0 时接下来的 N 次 provider 查询抛错（模拟读库抖动；M2 的重试用例）。 */
+	final java.util.concurrent.atomic.AtomicInteger pendingProviderLoadFailures = new java.util.concurrent.atomic.AtomicInteger();
+
 	private final AtomicLong ids = new AtomicLong(1);
 
 	AiConfigTestFixture() {
@@ -89,8 +92,13 @@ final class AiConfigTestFixture {
 		this.properties.getConfig().setReloadInterval(Duration.ZERO);
 		this.settings.put(AiSetting.CONFIG_VERSION, "1");
 
-		when(this.providerRepository.findAllByOrderBySortOrderAscIdAsc())
-			.thenAnswer(invocation -> copyProviders(sortedProviders(this.providers, false)));
+		when(this.providerRepository.findAllByOrderBySortOrderAscIdAsc()).thenAnswer(invocation -> {
+			if (this.pendingProviderLoadFailures.get() > 0) {
+				this.pendingProviderLoadFailures.decrementAndGet();
+				throw new IllegalStateException("DB 不可用（测试注入的读库失败）");
+			}
+			return copyProviders(sortedProviders(this.providers, false));
+		});
 		when(this.providerRepository.findByEnabledTrueOrderBySortOrderAscIdAsc())
 			.thenAnswer(invocation -> copyProviders(sortedProviders(this.providers, true)));
 		when(this.providerRepository.count()).thenAnswer(invocation -> (long) this.providers.size());
@@ -247,9 +255,35 @@ final class AiConfigTestFixture {
 	}
 
 	AiConfigService service(String kekBase64) {
+		return service(kekBase64, null);
+	}
+
+	/** 带 Redis 版本信号的服务（M2 的重试用例走这条：版本比对只看 {@code ai:cfg:ver}）。 */
+	AiConfigService serviceWithRedis(org.springframework.data.redis.core.StringRedisTemplate redis) {
+		return service(KEK_A, redis);
+	}
+
+	private AiConfigService service(String kekBase64,
+			org.springframework.data.redis.core.StringRedisTemplate redis) {
 		return new AiConfigService(this.providerRepository, this.modelRepository, this.settingRepository,
 				mock(org.springframework.core.env.Environment.class), new AiKeyCipher(kekBase64), this.properties,
-				this.connectionProperties, this.chatProperties, null);
+				this.connectionProperties, this.chatProperties, redis);
+	}
+
+	/**
+	 * {@code StringRedisTemplate} 的最小桩：{@code opsForValue().get("ai:cfg:ver")} 读一个可变的版本值
+	 * （{@code null} = 键不存在 ⇒ 服务退化到 DB 版本比对）。
+	 */
+	@SuppressWarnings({ "unchecked", "rawtypes" })
+	static org.springframework.data.redis.core.StringRedisTemplate redisReturning(
+			java.util.concurrent.atomic.AtomicReference<String> version) {
+		org.springframework.data.redis.core.StringRedisTemplate redis = mock(
+				org.springframework.data.redis.core.StringRedisTemplate.class);
+		org.springframework.data.redis.core.ValueOperations<String, String> ops = mock(
+				org.springframework.data.redis.core.ValueOperations.class);
+		when(redis.opsForValue()).thenReturn(ops);
+		when(ops.get(anyString())).thenAnswer(invocation -> version.get());
+		return redis;
 	}
 
 	AiProviderRegistry registry(AiConfigService service) {

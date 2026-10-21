@@ -34,6 +34,12 @@ import java.util.Base64;
  * <h2>指纹为什么是 HMAC 而不是 SHA-256</h2>
  * 指纹是运行时缓存键的一部分；裸 {@code SHA-256(key)} 在低熵 key 上等于把"无 KEK 也能做离线
  * 字典"的口子打开（设计稿 §10-8）。故用 KEK 作 HMAC 密钥、取前 16 hex。
+ *
+ * <h2>已知限制（复审 N2 的其余半条，登记不改）</h2>
+ * KEK/明文的 {@code byte[]} 在方法返回后<b>不主动清零</b>：JDK 无法阻止 JVM 内部（GC、JIT、
+ * 拷贝构造）把同一份字节复制到别处，{@code Arrays.fill} 只会制造"已擦除"的错觉；真正的
+ * 内存擦除需要 {@code ByteBuffer}/{@code Destroyable} 级别的全程约定，超出本专项范围。
+ * 现有边界改为：明文只在 {@code encrypt}/{@code decrypt} 的局部变量里存在、绝不进日志/异常消息。
  */
 @Component
 public class AiKeyCipher {
@@ -68,6 +74,10 @@ public class AiKeyCipher {
 
     private static final int FINGERPRINT_HEX_CHARS = 16;
 
+    /** kid 的字符集与长度约束：只允许进信封点分段而不破坏分段完整性的字符（复审 N2 半条）。 */
+    private static final java.util.regex.Pattern KID_PATTERN = java.util.regex.Pattern
+        .compile("[A-Za-z0-9_-]{1,16}");
+
     private final String kekBase64;
 
     private final String kid;
@@ -86,7 +96,30 @@ public class AiKeyCipher {
 
     public AiKeyCipher(String kekBase64, String kid) {
         this.kekBase64 = kekBase64;
-        this.kid = StringUtils.hasText(kid) ? kid.trim() : DEFAULT_KID;
+        this.kid = normalizeKid(kid);
+    }
+
+    /**
+     * kid 归一化（复审 N2 半条）：只接受 {@code [A-Za-z0-9_-]{1,16}}。
+     *
+     * <p>
+     * 为什么必须校验：信封是 {@code v1.<kid>.<iv>.<ct>} 的<b>点分段</b>格式 —— kid 里混进
+     * {@code "."} 会把段数变成 5，解密侧按 {@code split("\\.")} 判"格式不合法"，一条本来完好的密文
+     * 就被自己的 kid 打成 {@code KEY_UNREADABLE}；而 {@code "\n"} 等控制字符还会污染落库/日志。
+     * 非法 kid <b>不静默改写</b>：直接回落到 {@link #DEFAULT_KID}（P1 只有一个 kid，回落不会造成
+     * 密钥混淆），并由 {@link #isKidValid(String)} 的返回值给调用方留复核口。
+     */
+    private static String normalizeKid(String kid) {
+        if (!StringUtils.hasText(kid)) {
+            return DEFAULT_KID;
+        }
+        String trimmed = kid.trim();
+        return isKidValid(trimmed) ? trimmed : DEFAULT_KID;
+    }
+
+    /** kid 是否满足信封分段完整性约束（{@code [A-Za-z0-9_-]{1,16}}）。 */
+    public static boolean isKidValid(String kid) {
+        return kid != null && KID_PATTERN.matcher(kid).matches();
     }
 
     /** KEK 是否可用（能解出 32 字节）。<b>不</b>暴露 KEK 本身。 */

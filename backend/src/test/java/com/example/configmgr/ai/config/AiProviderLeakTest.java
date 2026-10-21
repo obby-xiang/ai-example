@@ -51,11 +51,16 @@ class AiProviderLeakTest {
 	void providerToStringNeverCarriesTheCipherOrThePlaintext() {
 		String envelope = this.cipher.encrypt(SECRET, "deepseek", AiProvider.KEY_REF_DB);
 		AiProvider provider = this.fixture.addDbProvider("deepseek", "http://x", envelope);
+		provider.setKeyFingerprint(this.cipher.fingerprint(SECRET));
 
 		String rendered = provider.toString();
 		assertThat(rendered).contains("deepseek").doesNotContain(envelope).doesNotContain(SECRET)
 			.doesNotContain("v1.k1.");
+		// M1（复审）：指纹同样是 key 派生材料（可用来离线比对两个库里的 key 是否同一个），
+		// 也不许进 toString —— 只允许出现在 key_fingerprint 列与运行时缓存键里。
+		assertThat(rendered).doesNotContain(provider.getKeyFingerprint());
 		assertThat(provider.getKeyCipher()).isEqualTo(envelope);
+		assertThat(provider.getKeyFingerprint()).hasSize(16);
 	}
 
 	@Test

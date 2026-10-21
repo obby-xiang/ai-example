@@ -159,6 +159,12 @@ public class AiProviderRegistry {
      * 基底刻意取 {@link OpenAiChatProperties#getOptions()}（而不是自己写一套默认值）：
      * "空表 + env" 下与今天<b>逐值等价</b>（temperature 0.2 / max-tokens 4096 / stream-usage true）
      * 就是批① 的验收基线。{@code ai_setting} 里的全局默认（批② 写入）在这里覆盖。
+     *
+     * <p>
+     * <b>脏值容错（M3）</b>：{@code ai_setting} 是人工可写入的键值表（设置页/直接改库/未来导入），
+     * 一个 {@code default.temperature="hot"} 不该让整条 AI 链路 500 —— 解析失败/非有限值/
+     * 非正的 maxTokens 一律 WARN + <b>忽略该项</b>（沿用 {@code spring.ai.openai.*} 的缺省），
+     * 其余项照常生效。
      */
     OpenAiChatOptions buildOptions(String modelId) {
         OpenAiChatOptions base = this.chatProperties.getOptions();
@@ -169,11 +175,44 @@ public class AiProviderRegistry {
         }
         options.setModel(modelId);
         this.configService.setting(AiSetting.DEFAULT_TEMPERATURE)
-            .ifPresent(value -> options.setTemperature(Double.valueOf(value.trim())));
+            .ifPresent(value -> applyDouble(AiSetting.DEFAULT_TEMPERATURE, value, options::setTemperature));
         this.configService.setting(AiSetting.DEFAULT_TOP_P)
-            .ifPresent(value -> options.setTopP(Double.valueOf(value.trim())));
+            .ifPresent(value -> applyDouble(AiSetting.DEFAULT_TOP_P, value, options::setTopP));
         this.configService.setting(AiSetting.DEFAULT_MAX_TOKENS)
-            .ifPresent(value -> options.setMaxTokens(Integer.valueOf(value.trim())));
+            .ifPresent(value -> applyMaxTokens(AiSetting.DEFAULT_MAX_TOKENS, value, options::setMaxTokens));
         return options;
+    }
+
+    private void applyDouble(String settingKey, String raw, java.util.function.Consumer<Double> setter) {
+        try {
+            double value = Double.parseDouble(raw.trim());
+            if (!Double.isFinite(value)) {
+                throw new NumberFormatException("非有限值");
+            }
+            setter.accept(value);
+        }
+        catch (RuntimeException ex) {
+            log.warn("ai_setting[{}] 的值 \"{}\" 不可用（{}）：忽略该项，沿用 spring.ai.openai.* 的缺省",
+                    settingKey, abbreviate(raw), ex.getMessage());
+        }
+    }
+
+    private void applyMaxTokens(String settingKey, String raw, java.util.function.Consumer<Integer> setter) {
+        try {
+            int value = Integer.parseInt(raw.trim());
+            if (value <= 0) {
+                throw new NumberFormatException("必须为正整数");
+            }
+            setter.accept(value);
+        }
+        catch (RuntimeException ex) {
+            log.warn("ai_setting[{}] 的值 \"{}\" 不可用（{}）：忽略该项，沿用 spring.ai.openai.* 的缺省",
+                    settingKey, abbreviate(raw), ex.getMessage());
+        }
+    }
+
+    private static String abbreviate(String raw) {
+        String text = raw == null ? "" : raw.trim();
+        return text.length() <= 32 ? text : text.substring(0, 32) + "…";
     }
 }

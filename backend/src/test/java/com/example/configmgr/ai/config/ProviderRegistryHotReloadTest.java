@@ -145,6 +145,43 @@ class ProviderRegistryHotReloadTest {
 		assertThat(runtime.options().getStreamUsage()).isTrue();
 	}
 
+	/**
+	 * M3（复审）：{@code ai_setting} 是人工可写的键值表，脏值不许把整条链路打成 500/异常。
+	 *
+	 * <p>期望：坏项逐项 WARN + 忽略（沿用 {@code spring.ai.openai.*} 缺省），好项照常生效。
+	 * <b>证红</b>：把 {@code buildOptions} 里的 try/catch 去掉（直接 {@code Double.valueOf}）⇒
+	 * 本例在 {@code NumberFormatException} 上抛错 ⇒ 红。
+	 */
+	@Test
+	void dirtyAiSettingValuesAreIgnoredWithAWarningInsteadOfBlowingUp() {
+		this.provider.setBaseUrl("http://placeholder");
+		this.fixture.settings.put("default.temperature", "hot");
+		this.fixture.settings.put("default.topP", "NaN");
+		this.fixture.settings.put("default.maxTokens", "-5");
+		ch.qos.logback.classic.Logger logger =
+				(ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(AiProviderRegistry.class);
+		ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> appender =
+				new ch.qos.logback.core.read.ListAppender<>();
+		appender.start();
+		logger.addAppender(appender);
+		try {
+			ProviderRuntime runtime = this.fixture.registry(this.fixture.service()).current();
+
+			// 三项都被忽略 ⇒ 值与 spring.ai.openai.chat.options 的缺省逐值相同
+			assertThat(runtime.options().getTemperature()).isEqualTo(0.2d);
+			assertThat(runtime.options().getTopP()).isNull();
+			assertThat(runtime.options().getMaxTokens()).isEqualTo(4096);
+			assertThat(runtime.options().getStreamUsage()).isTrue();
+			assertThat(appender.list).filteredOn(event -> event.getLevel() == ch.qos.logback.classic.Level.WARN)
+				.hasSize(3);
+			assertThat(appender.list).allSatisfy(event -> assertThat(event.getFormattedMessage())
+				.doesNotContain("env-probe"));
+		}
+		finally {
+			logger.detachAppender(appender);
+		}
+	}
+
 	// ── 桩与调用 ────────────────────────────────────────────────────────────
 
 	private String chat(ProviderRuntime runtime) {

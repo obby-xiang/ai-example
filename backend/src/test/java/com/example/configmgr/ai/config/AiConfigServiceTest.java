@@ -187,8 +187,7 @@ class AiConfigServiceTest {
 	}
 
 	@Test
-	void runtimeKeyIsStableForTheSameRowAndChangesWithBaseUrlOrFingerprint() {
-		AiProvider provider = this.fixture.addEnvProvider("deepseek", "http://old-endpoint");
+	void runtimeKeyIsStableForTheSameRowAndChangesWithBaseUrlOrFingerprint() {		AiProvider provider = this.fixture.addEnvProvider("deepseek", "http://old-endpoint");
 		this.fixture.addModel(provider.getId(), "deepseek-flash", true);
 		AiConfigService service = this.fixture.service();
 
@@ -199,6 +198,57 @@ class AiConfigServiceTest {
 		this.fixture.bumpVersion();
 		String after = service.resolveDefault().orElseThrow().runtimeKey();
 		assertThat(after).isNotEqualTo(before).contains("http://new-endpoint").doesNotContain("env-probe-1111");
+	}
+
+	// ── M2（复审）：加载失败必须可重试 ─────────────────────────────────────────
+
+	/**
+	 * Redis 版本信号路径上的漏洞：旧实现"看到新版本就把 lastRedisVersion 推进，再去读库"。
+	 * 若这次读库失败而版本号不再变化，坏快照会被永久冻住（下一个 tick 以为"已处理过该版本"）。
+	 *
+	 * <p><b>证红</b>：把 {@code lastRedisVersion} 的推进挪回 {@code checkReload} 里（旧实现）⇒ 本用例红。
+	 */
+	@Test
+	void failedLoadIsRetriedAtTheNextTickEvenWhenTheRedisVersionDoesNotChangeAgain() {
+		AiProvider provider = this.fixture.addEnvProvider("deepseek", "http://old-endpoint");
+		this.fixture.addModel(provider.getId(), "deepseek-flash", true);
+		java.util.concurrent.atomic.AtomicReference<String> redisVersion =
+				new java.util.concurrent.atomic.AtomicReference<>("1");
+		AiConfigService service = this.fixture.serviceWithRedis(
+				AiConfigTestFixture.redisReturning(redisVersion));
+		assertThat(service.resolveDefault()).get()
+			.extracting(AiConfigService.ResolvedProvider::baseUrl)
+			.isEqualTo("http://old-endpoint");
+
+		// 写路径语义：改行 + 版本号 +1（DB 与 Redis 两侧）；这一次读库失败
+		provider.setBaseUrl("http://new-endpoint");
+		this.fixture.bumpVersion();
+		redisVersion.set("2");
+		this.fixture.pendingProviderLoadFailures.set(1);
+
+		assertThat(service.resolveDefault()).get()
+			.as("加载失败 ⇒ 保留上一份好快照")
+			.extracting(AiConfigService.ResolvedProvider::baseUrl)
+			.isEqualTo("http://old-endpoint");
+
+		// 版本号<b>没有</b>再变（Redis 仍是 "2"）：必须重试，而不是把这次失败当成"该版本已处理"
+		assertThat(service.current().version()).isEqualTo(2);
+		assertThat(service.resolveDefault()).get()
+			.as("下一次版本比对无条件重试")
+			.extracting(AiConfigService.ResolvedProvider::baseUrl)
+			.isEqualTo("http://new-endpoint");
+	}
+
+	/** 无 Redis（退化本地版本比对）时同理：第一次加载就失败，也必须在版本不变的情况下重试成功。 */
+	@Test
+	void failedFirstLoadIsRetriedWithoutAnyVersionChange() {
+		AiProvider provider = this.fixture.addEnvProvider("deepseek", "http://deepseek-endpoint");
+		this.fixture.addModel(provider.getId(), "deepseek-flash", true);
+		this.fixture.pendingProviderLoadFailures.set(1);
+		AiConfigService service = this.fixture.service();
+
+		assertThat(service.listProviders()).as("首次加载失败 ⇒ 空快照（端点按不可用降级）").isEmpty();
+		assertThat(service.listProviders()).as("版本没变也重试").hasSize(1);
 	}
 
 }

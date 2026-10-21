@@ -103,6 +103,44 @@ class AiKeyCipherTest {
 				AiKeyCipher.CODE_KEY_UNREADABLE);
 	}
 
+	// ── N2 半条（复审）：kid 字符校验，保信封分段完整性 ─────────────────────
+
+	/**
+	 * 信封是 {@code v1.<kid>.<iv>.<ct>} 的点分段格式：kid 里一旦混进 {@code "."}，段数变 5，
+	 * 解密侧按段数判"格式不合法"⇒ 一条完好的密文被自己的 kid 打成 {@code KEY_UNREADABLE}。
+	 *
+	 * <p><b>证红</b>：把 {@code normalizeKid} 退回"只 trim 不校验"⇒ 本用例红（kid="k.1" 时段数 5，
+	 * 往返解密失败）。
+	 */
+	@Test
+	void illegalKidIsRejectedSoTheEnvelopeKeepsFourSegments() {
+		AiKeyCipher dotted = new AiKeyCipher(AiConfigTestFixture.KEK_A, "k.1");
+		assertThat(dotted.kid()).as("含点号的 kid 回落到缺省 kid").isEqualTo(AiKeyCipher.DEFAULT_KID);
+
+		String envelope = dotted.encrypt(SECRET, PROVIDER_CODE, KEY_REF);
+		assertThat(envelope.split("\\.")).as("信封必须恰好四段").hasSize(4);
+		assertThat(dotted.decrypt(envelope, PROVIDER_CODE, KEY_REF)).isEqualTo(SECRET);
+
+		// 控制字符（换行/空白）同样不接受
+		assertThat(new AiKeyCipher(AiConfigTestFixture.KEK_A, "k1\nx").kid())
+			.isEqualTo(AiKeyCipher.DEFAULT_KID);
+		assertThat(new AiKeyCipher(AiConfigTestFixture.KEK_A, "k 1").kid()).isEqualTo(AiKeyCipher.DEFAULT_KID);
+	}
+
+	@Test
+	void kidValidationFollowsTheCharsetAndLengthBoundary() {
+		assertThat(AiKeyCipher.isKidValid("k1")).isTrue();
+		assertThat(AiKeyCipher.isKidValid("K1_rot-2026a")).isTrue();
+		assertThat(AiKeyCipher.isKidValid("1234567890abcdef")).as("16 字符为界内").isTrue();
+		assertThat(AiKeyCipher.isKidValid("1234567890abcdefg")).as("17 字符越界").isFalse();
+		assertThat(AiKeyCipher.isKidValid("")).isFalse();
+		assertThat(AiKeyCipher.isKidValid("k.1")).isFalse();
+		assertThat(AiKeyCipher.isKidValid("k1/2")).isFalse();
+
+		// 合法自定义 kid 原样保留（不无谓地回落到 k1）
+		assertThat(new AiKeyCipher(AiConfigTestFixture.KEK_A, "k2_rot").kid()).isEqualTo("k2_rot");
+	}
+
 	// ── B5（加密侧）：KEK 缺失 fail-closed ───────────────────────────────────
 
 	@Test

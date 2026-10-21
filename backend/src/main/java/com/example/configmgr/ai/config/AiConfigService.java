@@ -108,6 +108,9 @@ public class AiConfigService {
 
     private volatile String lastRedisVersion;
 
+    /** 上一次加载是否失败（M2）：失败 ⇒ 下一个 tick 无条件重试，不依赖版本号变化。 */
+    private volatile boolean lastLoadFailed;
+
     public AiConfigService(AiProviderRepository providerRepository, AiProviderModelRepository modelRepository,
             AiSettingRepository settingRepository, Environment environment, AiKeyCipher cipher,
             AiProperties properties, OpenAiConnectionProperties connectionProperties,
@@ -135,8 +138,9 @@ public class AiConfigService {
                 snap = this.snapshot;
                 if (snap == null || now - this.lastCheckAtMs >= reloadIntervalMs()) {
                     this.lastCheckAtMs = now;
-                    if (shouldReload(snap)) {
-                        this.snapshot = load();
+                    ReloadCheck check = checkReload(snap);
+                    if (check.reload()) {
+                        applyLoad(load(), check.observedRedisVersion());
                     }
                 }
             }
@@ -147,9 +151,32 @@ public class AiConfigService {
     /** 强制重载（种子写完、批② 写路径、测试用）。 */
     public ConfigSnapshot reload() {
         synchronized (this.refreshLock) {
-            this.snapshot = load();
+            applyLoad(load(), readRedisVersion());
             this.lastCheckAtMs = System.currentTimeMillis();
             return this.snapshot;
+        }
+    }
+
+    /**
+     * 应用一次加载结果：<b>只在加载成功之后</b>推进 {@link #lastRedisVersion}（M2）。
+     *
+     * <h2>为什么"先推进版本、后加载"是个洞</h2>
+     * Redis 的 {@code ai:cfg:ver} 是"本轮看到的版本"。旧实现一看到新版本就把它记进
+     * {@code lastRedisVersion}，然后才去读库；若这一次读库失败（Hikari 抖动 / 迁移中 / 表锁），
+     * 快照仍是旧的那份，而下一个 tick 会看到"版本没再变"直接跳过 —— <b>坏配置会被永久冻住</b>，
+     * 直到下一个版本号（下一次人工改配置）才恢复。
+     *
+     * <p>现在的口径：版本只在 {@code load} 成功后成为 {@code lastRedisVersion}；
+     * 失败的加载置 {@link #lastLoadFailed}，下一个 tick 无条件重试（与版本号是否变化无关）。
+     */
+    private void applyLoad(LoadOutcome outcome, String observedRedisVersion) {
+        this.snapshot = outcome.snapshot();
+        this.lastLoadFailed = !outcome.ok();
+        if (outcome.ok() && observedRedisVersion != null) {
+            this.lastRedisVersion = observedRedisVersion;
+        }
+        else if (outcome.ok()) {
+            this.lastRedisVersion = null;
         }
     }
 
@@ -158,20 +185,24 @@ public class AiConfigService {
         return interval == null ? 0L : Math.max(0L, interval.toMillis());
     }
 
-    private boolean shouldReload(ConfigSnapshot snap) {
-        if (snap == null) {
-            return true;
+    /** 一次版本比对的结果；{@code observedRedisVersion} 只用于"加载成功后"推进，不在比对时落地。 */
+    private record ReloadCheck(boolean reload, String observedRedisVersion) {
+    }
+
+    private record LoadOutcome(ConfigSnapshot snapshot, boolean ok) {
+    }
+
+    private ReloadCheck checkReload(ConfigSnapshot snap) {
+        if (snap == null || this.lastLoadFailed) {
+            // 从未加载成功 / 上次加载失败 ⇒ 必须重试（重试与版本号是否变化无关）
+            return new ReloadCheck(true, readRedisVersion());
         }
         String redisVersion = readRedisVersion();
         if (redisVersion != null) {
-            if (redisVersion.equals(this.lastRedisVersion)) {
-                return false;
-            }
-            this.lastRedisVersion = redisVersion;
-            return true;
+            return new ReloadCheck(!redisVersion.equals(this.lastRedisVersion), redisVersion);
         }
         // Redis 不可用 / 没有失效信号键 ⇒ 退化为本地版本比对（一次主键查询）
-        return readDbVersion(snap.version()) != snap.version();
+        return new ReloadCheck(readDbVersion(snap.version()) != snap.version(), null);
     }
 
     private String readRedisVersion() {
@@ -200,7 +231,7 @@ public class AiConfigService {
         }
     }
 
-    private ConfigSnapshot load() {
+    private LoadOutcome load() {
         try {
             List<AiProvider> providers = this.providerRepository.findAllByOrderBySortOrderAscIdAsc();
             List<Long> ids = providers.stream().map(AiProvider::getId).filter(java.util.Objects::nonNull).toList();
@@ -210,13 +241,14 @@ public class AiConfigService {
             this.settingRepository.findAll().forEach(setting -> settings.put(setting.getSettingKey(),
                     setting.getValueJson()));
             long version = parseVersion(settings.get(AiSetting.CONFIG_VERSION));
-            return new ConfigSnapshot(version, providers, models, settings);
+            return new LoadOutcome(new ConfigSnapshot(version, providers, models, settings), true);
         }
         catch (Exception ex) {
-            // 读库失败不能让 /health 或 /chat 抛 500：保留上一份好快照，没有就回空快照（= 不可用）
-            log.warn("配置快照加载失败（保留上一份好快照 / 退化为空快照）：{}", ex.getMessage());
+            // 读库失败不能让 /health 或 /chat 抛 500：保留上一份好快照，没有就回空快照（= 不可用）。
+            // ok=false 会被 applyLoad 记进 lastLoadFailed ⇒ 下一个 tick 无条件重试（M2）。
+            log.warn("配置快照加载失败（保留上一份好快照 / 退化为空快照，下次版本比对时重试）：{}", ex.getMessage());
             ConfigSnapshot previous = this.snapshot;
-            return previous != null ? previous : ConfigSnapshot.empty();
+            return new LoadOutcome(previous != null ? previous : ConfigSnapshot.empty(), false);
         }
     }
 
