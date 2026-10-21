@@ -3488,16 +3488,18 @@ describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 �
       expect(shell.className).toContain(cls)
     }
 
-    // 盒内底栏：左侧虚线工具位占位（demo 同款文案）+ flex-1 撑开 + 右发送
+    // 盒内底栏：左端 = 批③ 的模型选择器/参数位（原「工具位（预留 · 留空）」虚线占位已按
+    // 上下文专项的布局裁决被填充），随后 flex-1 撑开，右侧仍是用量 pill + 发送钮（顺序未变）
     const footer = shell.lastElementChild as HTMLElement
     expect(footer.className).toContain('flex')
-    const slot = footer.firstElementChild as HTMLElement
-    expect(slot.tagName).toBe('SPAN')
-    expect(slot.textContent).toBe('工具位（预留 · 留空）')
-    expect(slot.className).toContain('border-dashed')
-    expect(slot.className).toContain('border-[#cddcff]')
-    expect(slot.className).toContain('rounded-[6px]')
-    expect(footer.children[1]?.className).toContain('flex-1')
+    // 左端第一格 = 模型位（选择器 / 空态 / 清单未就绪时的空壳），结构稳定
+    expect(footer.firstElementChild?.getAttribute('data-testid')).toBe('model-slot')
+    expect(footer.children[1]?.getAttribute('data-testid')).toBe('params-toggle')
+    const spacer = Array.from(footer.children).find((child) => child.className.includes('flex-1'))
+    expect(spacer).toBeTruthy()
+    expect(Array.from(footer.children).indexOf(spacer as Element))
+      .toBeLessThan(Array.from(footer.children).findIndex((child) =>
+        child.getAttribute('data-testid') === 'send-btn'))
 
     const send = wrapper.find('[data-testid="send-btn"]')
     expect(send.element.tagName).toBe('BUTTON')

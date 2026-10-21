@@ -9,6 +9,7 @@ import com.example.configmgr.ai.config.AiKeyCipher;
 import com.example.configmgr.ai.config.AiModelCatalog;
 import com.example.configmgr.ai.config.db.AiProvider;
 import com.example.configmgr.ai.config.db.AiProviderModel;
+import com.example.configmgr.ai.web.dto.AvailableModelView;
 import com.example.configmgr.ai.web.dto.DefaultsView;
 import com.example.configmgr.ai.web.dto.FetchModelsView;
 import com.example.configmgr.ai.web.dto.ModelView;
@@ -81,6 +82,24 @@ public class AiConfigController {
     }
 
     // ── provider 写 ──────────────────────────────────────────────────────────
+
+    /**
+     * 面板可选的模型（跨 provider；设计稿 §3.5 的「对话面板用」端点）。
+     *
+     * <p>与 {@code GET /providers} 的分工：这个只回答"现在能选什么"，不含任何配置面字段
+     * （baseUrl / keyRef / 路径）；可用性三条判据在后端一次判完（见
+     * {@link AiConfigService#availableModels()}），面板不做二次过滤。
+     */
+    @GetMapping("/models")
+    public ApiResponse<List<AvailableModelView>> models() {
+        List<AvailableModelView> out = new ArrayList<>();
+        for (AiConfigService.AvailableModel row : this.configService.availableModels()) {
+            out.add(new AvailableModelView(row.providerId(), row.providerCode(), row.providerName(), row.modelId(),
+                    row.displayName(), row.supportsToolCalling(), row.supportsVision(), row.supportsReasoning(),
+                    row.maxContext(), row.maxOutput(), row.isDefault()));
+        }
+        return ApiResponse.ok(out);
+    }
 
     @PostMapping("/providers")
     public ResponseEntity<ApiResponse<ProviderView>> createProvider(

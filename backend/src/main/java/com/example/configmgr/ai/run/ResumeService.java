@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.run;
 
+import com.example.configmgr.ai.config.AiConfigService;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.context.ContextCompactor;
 import com.example.configmgr.ai.context.ContextEstimator;
@@ -105,6 +106,15 @@ public class ResumeService {
 	@Autowired(required = false)
 	private ContextCompactor contextCompactor;
 
+	/**
+	 * 模型配置快照（批③ 的 {@code PROVIDER_GONE} 判据）。
+	 *
+	 * <p>同为<b>字段注入</b>：四份既有用例直接 {@code new ResumeService(...)}，改构造器签名等于要求
+	 * 它们跟改。未注入时不做 provider 存在性判定（"没有配置设施"→ 走默认口径，与批③ 之前等价）。
+	 */
+	@Autowired(required = false)
+	private AiConfigService aiConfigService;
+
 	/** 进程内续跑互斥（同进程并发续跑的唯一闸；租约管的是跨实例）。 */
 	private final Map<String, Boolean> resuming = new ConcurrentHashMap<>();
 
@@ -135,7 +145,15 @@ public class ResumeService {
 		 * <p>它不是错误：说明那一轮已经有主（在等卡 / 在驱动 / 正在收尾），本实例什么都不该做。
 		 * 对外统一 409（{@code AiController#resume} 的 switch）。
 		 */
-		LEASE_HELD_ELSEWHERE;
+		LEASE_HELD_ELSEWHERE,
+
+		/**
+		 * 批③：快照里的 provider 已不可用（删除/停用/密钥不可解/模型已不在 allowlist）。
+		 *
+		 * <p>它不是"没找到"（轮次还在），也不是 503：这一轮<b>没法按原样</b>继续 —— 换模型续跑会让
+		 * 历史与 {@code done.model} 说谎，故对外 409 + 稳定码 {@code PROVIDER_GONE}。
+		 */
+		PROVIDER_GONE;
 
 		/**
 		 * 该结局下，<b>自抢租约的调用方</b>是否可以归还租约（<b>归还白名单</b>，默认不还）。
@@ -165,7 +183,8 @@ public class ResumeService {
 		 */
 		public boolean releasesLease() {
 			return this == NOT_FOUND || this == ALREADY_DONE || this == ALREADY_CANCELLED
-					|| this == ALREADY_RUNNING || this == PENDING_UNRESOLVED || this == POOL_SATURATED;
+					|| this == ALREADY_RUNNING || this == PENDING_UNRESOLVED || this == POOL_SATURATED
+					|| this == PROVIDER_GONE;
 		}
 
 	}
@@ -495,6 +514,28 @@ public class ResumeService {
 				body.put("activeAtMs", activeAtMs);
 				body.put("activeAgeMs", System.currentTimeMillis() - activeAtMs);
 			}
+			// 批③ PROVIDER_GONE：快照的模型身份此刻必须仍可用。判据 = 能解析出<b>同一个</b> provider
+			// 与该模型（enabled + key 可解 + 模型在 allowlist）。缺一 ⇒ 409，不静默换模型续跑。
+			// 旧快照（providerId=null）不判 —— 它们本来就没有身份可校验，走默认 + WARN（兼容）。
+			// 位置在 PENDING_UNRESOLVED <b>之前</b>：端点没了是比"还有人没决策"更硬的前置条件。
+			if (this.aiConfigService != null && snapshot.getProviderId() != null) {
+				AiConfigService.ChatTarget target = this.aiConfigService
+					.resolveChatTarget(snapshot.getModelId())
+					.orElse(null);
+				boolean gone = target == null
+						|| !snapshot.getProviderId().equals(target.provider().providerId());
+				if (gone) {
+					log.warn("续跑拒绝：快照的 provider 已不可用 runId={} providerId={} model={}（target={}）", runId,
+							snapshot.getProviderId(), snapshot.getModelId(),
+							target == null ? "none" : target.provider().providerId());
+					body.put("resumed", false);
+					body.put("reason", "PROVIDER_GONE");
+					body.put("providerId", snapshot.getProviderId());
+					body.put("modelId", snapshot.getModelId());
+					body.put("message", "该轮使用的模型端点已被删除或停用，无法按原模型续跑；请重新发送一轮。");
+					return new ResumeResult(Outcome.PROVIDER_GONE, body);
+				}
+			}
 			List<PendingToolCall> unresolved = pendings.stream()
 				.filter(pending -> PendingToolCall.PENDING.equals(pending.getStatus()))
 				.filter(pending -> !PendingToolCall.KIND_BACKEND.equals(pending.getKind()))
@@ -631,7 +672,16 @@ public class ResumeService {
 			try {
 				this.suspendExecutor.execute(() -> {
 					try {
-						this.chatService.driveResumed(runId, sessionId, context, resumeHistory, out);
+						// 批③：有身份的快照按<b>快照身份</b>续跑（上面的 PROVIDER_GONE 检查已保证它此刻可用）。
+						// 旧快照（无 providerId）仍走五参旧签名 —— 语义等价（按默认目标续跑 + WARN），
+						// 也让既有用例的 verify(driveResumed(...5 参)) 不必跟改（回归零改动）。
+						if (snapshot.getProviderId() == null) {
+							this.chatService.driveResumed(runId, sessionId, context, resumeHistory, out);
+						}
+						else {
+							this.chatService.driveResumed(runId, sessionId, context, resumeHistory,
+									snapshot.getProviderId(), snapshot.getModelId(), out);
+						}
 					}
 					catch (Exception ex) {
 						log.error("续跑未捕获异常 runId={}", runId, ex);

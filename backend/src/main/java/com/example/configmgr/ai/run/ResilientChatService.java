@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.run;
 
+import com.example.configmgr.ai.config.AiConfigService;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.AiProviderRegistry;
 import com.example.configmgr.ai.config.ProviderRuntime;
@@ -224,11 +225,35 @@ public class ResilientChatService {
 
 		// 模型身份 = 本轮固化进快照的那一对（providerId/modelId）；没有可用 provider 时
 		// 控制器早已 503 拦住（这里抛 AiUnavailableException 只是并发改配置的窄窗口兜底）。
-		ProviderRuntime runtime = this.providerRegistry.current();
+		//
+		// 批③：先做请求级解析（显式 modelId 优先，未指定则退化成默认链），再按"本次模型 + 参数覆盖"
+		// 派生一次性运行态 —— 缓存条目（按 RuntimeKey）不动，故交替选模型不会互相踩踏。
+		AiConfigService.ChatTarget target = this.providerRegistry.target(request.modelId()).orElse(null);
+		if (target == null && StringUtils.hasText(request.modelId())) {
+			// 控制器已按 400 MODEL_NOT_FOUND 拦过；走到这里只可能是"读库后配置又被改了"的窄窗口。
+			// 不静默换模型：让这一轮按默认目标跑并在日志里留痕（用户会在 done.model 里看到真实模型）。
+			log.warn("请求的模型已不可用（并发改配置？）runId={} requested={}：本轮回落默认目标", runId,
+					request.modelId());
+		}
+		boolean paramsAllowed = this.providerRegistry.allowUserParams();
+		AiProviderRegistry.Overrides overrides = paramsAllowed ? overridesOf(request.params())
+				: AiProviderRegistry.Overrides.NONE;
+		// 参数被策略锁住时"忽略"不是"没说"：done.extra.paramsLocked 要如实告知（设计稿 §3.6）
+		boolean paramsLocked = !paramsAllowed && request.params() != null
+				&& !overridesOf(request.params()).isEmpty();
+		ProviderRuntime runtime = target == null ? this.providerRegistry.current()
+				: this.providerRegistry.forRequest(target.provider(), target.modelId(), overrides);
+		// 能力位降级（设计稿 §3.6）：模型不支持工具调用 ⇒ 本轮下发<b>空</b>工具集（纯问答），
+		// 不报错 —— 模型能力不是用户错误，界面上已有黄条说明。
+		boolean toolsAllowed = target == null || target.supportsToolCalling();
 
 		// 上下文专项批①：装配点同时给出三个分项锚点（system/tools/input）—— 它们不在历史里，
 		// 端点重建时无从再算，故在本轮起点就随真值一起落进 ai:ctx:。
-		List<ToolCallback> tools = this.toolRegistry.forContext(context);
+		List<ToolCallback> tools = toolsAllowed ? this.toolRegistry.forContext(context) : List.of();
+		if (!toolsAllowed) {
+			log.info("本轮模型不支持工具调用 runId={} provider={} model={}：退化为纯问答（不下发 tools）", runId,
+					runtime.providerCode(), runtime.modelId());
+		}
 		int systemTokens = ContextEstimator.estimate(systemText);
 		int toolsTokens = ContextEstimator.estimateToolSchemas(tools);
 		int inputTokens = ContextEstimator.estimate(request.message());
@@ -261,7 +286,7 @@ public class ResilientChatService {
 		try {
 			TurnContext turn = new TurnContext(systemTokens, toolsTokens, inputTokens,
 					systemTokens + toolsTokens + ContextEstimator.estimateMessages(memory) + inputTokens,
-					compaction.limitTokens(), runtime.modelId(), compaction.levelWire(), turnStartedAtMs);
+					compaction.limitTokens(), runtime.modelId(), compaction.levelWire(), turnStartedAtMs, paramsLocked);
 			runAttempts(runId, sessionId, turnStartedAtMs, out, turn, attempt -> {
 				log.debug("本轮第 {} 次尝试组装请求 runId={} sessionId={}（每轮重建请求）", attempt, runId, sessionId);
 				return Flux.defer(() -> {
@@ -296,10 +321,30 @@ public class ResilientChatService {
 	 */
 	public void driveResumed(String runId, String sessionId, AiContext context, List<Message> history,
 			SseChatEmitter out) {
+		driveResumed(runId, sessionId, context, history, null, null, out);
+	}
+
+	/**
+	 * 续跑（批③：<b>按快照身份</b>取模型）。
+	 *
+	 * <p>
+	 * 与五参重载的差别只在一件事：模型身份来自 {@link RunSnapshot#getProviderId()} /
+	 * {@link RunSnapshot#getModelId()}，而不是"此刻的默认目标"。这样"用户改了默认模型"不会让一个
+	 * 挂起中的旧轮换模型续跑（历史与 {@code done.model} 都不许说谎）。
+	 *
+	 * <p>
+	 * provider 已删/停用由 {@code ResumeService} 预先判 409 {@code PROVIDER_GONE}（那是 HTTP 语义的
+	 * 位置）；走到这里仍取不到目标（读库后又被改）时回落默认并 WARN，不静默冒充快照模型。
+	 *
+	 * @param providerId 快照的 provider（{@code null} = 批① 之前的旧快照）
+	 * @param modelId 快照的模型名（{@code null}/空白 = 旧快照）
+	 */
+	public void driveResumed(String runId, String sessionId, AiContext context, List<Message> history,
+			Long providerId, String modelId, SseChatEmitter out) {
 		long turnStartedAtMs = System.currentTimeMillis();
-		// 续跑也要现取一次实例：在飞期间换了 base-url/key 的话，续跑落在新端点上（与首轮同口径）。
-		// 批③ 会改成"按快照的 providerId/modelId 取"，provider 没了就 409 PROVIDER_GONE。
-		ProviderRuntime runtime = this.providerRegistry.current();
+		// 续跑也要现取一次实例：在飞期间换了 base-url/key 的话，续跑落在新端点上（与首轮同口径）——
+		// 但<b>模型名来自快照</b>，不跟随默认变化。
+		ProviderRuntime runtime = runtimeForSnapshot(runId, providerId, modelId);
 		this.cancellations.register(runId);
 		// 上下文专项批①：续跑侧的分母/分项锚点现算（历史里没有 tools schema，故走披露口径）
 		TurnContext turn = resumedTurn(runId, context, history, runtime.modelId(), turnStartedAtMs);
@@ -315,6 +360,33 @@ public class ResilientChatService {
 			this.cancellations.unregister(runId);
 			this.beacon.clear(runId);
 		}
+	}
+
+	/** 请求级覆盖的映射（{@code AiChatRequest.Params} → 注册表的 Overrides）。 */
+	private static AiProviderRegistry.Overrides overridesOf(AiChatRequest.Params params) {
+		if (params == null) {
+			return AiProviderRegistry.Overrides.NONE;
+		}
+		return new AiProviderRegistry.Overrides(params.temperature(), params.topP(), params.maxTokens());
+	}
+
+	/** 快照口径的运行态：旧快照（两值皆空）走默认；模型不可解析时回落默认 + WARN。 */
+	private ProviderRuntime runtimeForSnapshot(String runId, Long providerId, String modelId) {
+		if (providerId == null && !StringUtils.hasText(modelId)) {
+			log.warn("续跑遇到批① 之前的旧快照（无 providerId/modelId）runId={}：按当前默认目标续跑", runId);
+			return this.providerRegistry.current();
+		}
+		AiConfigService.ChatTarget target = this.providerRegistry.target(modelId).orElse(null);
+		if (target == null) {
+			log.warn("续跑时快照模型已不可解析 runId={} providerId={} model={}：回落当前默认目标", runId, providerId,
+					modelId);
+			return this.providerRegistry.current();
+		}
+		if (providerId != null && !providerId.equals(target.provider().providerId())) {
+			log.warn("续跑时快照 provider 与模型所在 provider 不一致 runId={} snapshotProvider={} resolvedProvider={}",
+					runId, providerId, target.provider().providerId());
+		}
+		return this.providerRegistry.forRequest(target.provider(), modelId, AiProviderRegistry.Overrides.NONE);
 	}
 
 	/**
@@ -334,7 +406,10 @@ public class ResilientChatService {
 		ChatOptions base = runtime == null ? null : runtime.chatModel().getDefaultOptions();
 		OpenAiChatOptions options = base instanceof OpenAiChatOptions openAiOptions
 				? OpenAiChatOptions.fromOptions(openAiOptions) : OpenAiChatOptions.builder().build();
-		options.setToolCallbacks(this.toolRegistry.forContext(context));
+		// 能力位同口径（批③）：续跑也不许给"不支持工具调用"的模型下发 tools
+		boolean toolsAllowed = runtime == null
+				|| this.providerRegistry.supportsToolCalling(runtime.providerId(), runtime.modelId());
+		options.setToolCallbacks(toolsAllowed ? this.toolRegistry.forContext(context) : List.of());
 		options.setInternalToolExecutionEnabled(true);
 		options.setToolContext(Map.of("runId", runId, "sessionId", sessionId));
 		return new Prompt(history, options);
@@ -561,11 +636,12 @@ public class ResilientChatService {
 		extra.put("attempts", attempts);
 		extra.put("upstreamEvents", watchdog == null ? 0 : watchdog.upstreamEvents());
 		extra.put("terminalSignal", accumulator.terminalSignal());
+		putParamsLocked(extra, turn);
 		// T5：正文段收尾（未开过段则不发 —— 纯工具轮没有正文）
 		out.textEnd(text.length());
 		// 上下文专项批①：先记账（真值回填 ai:ctx:），再发终帧（done.context 与端点必须同源）
 		Map<String, Object> context = contextTelemetry(sessionId, turn, accumulator);
-		out.done(accumulator.usage(turn.promptEstimate()), accumulator.model(), extra, context);
+		out.done(accumulator.usage(turn.promptEstimate()), doneModel(accumulator, turn), extra, context);
 	}
 
 	/**
@@ -627,12 +703,33 @@ public class ResilientChatService {
 		extra.put("attempts", attempts);
 		extra.put("upstreamEvents", watchdog == null ? 0 : watchdog.upstreamEvents());
 		extra.put("partialChars", accumulator == null ? 0 : accumulator.text().length());
+		putParamsLocked(extra, turn);
 		// T5：取消也收尾正文段（半截正文不写进历史，但"这一段到此为止"必须显式告知前端）
 		out.textEnd(accumulator == null ? 0 : accumulator.text().length());
 		// 上下文专项批①：取消轮同样如实报占用（半轮的真值仍是真值，est 标注照旧）
 		Map<String, Object> context = contextTelemetry(sessionId, turn, accumulator);
 		out.done(accumulator == null ? Map.of() : accumulator.usage(turn.promptEstimate()),
-				accumulator == null ? null : accumulator.model(), extra, context);
+				doneModel(accumulator, turn), extra, context);
+	}
+
+	/**
+	 * {@code done.model} 的口径（批③ 裁决 F3）：<b>上游回显优先，回落本轮解析值</b>。
+	 *
+	 * <p>
+	 * 上游可能回显一个别名（厂商侧的 model 字段）或干脆不回显：前者是"这一轮真的跑了谁"的最强证据，
+	 * 后者必须有值 —— 面板与 E2E 都靠它确认切换生效。故两路都空时返回 null（帧里不写该键，
+	 * 与批③ 之前"无 model 就不写"逐字相同）。
+	 */
+	private static String doneModel(Accumulator accumulator, TurnContext turn) {
+		String echoed = accumulator == null ? null : accumulator.model();
+		return StringUtils.hasText(echoed) ? echoed : turn.model();
+	}
+
+	/** {@code paramsLocked} 只在其为真时写（"没说"与"锁住"必须可区分；键名 additive，帧型不变）。 */
+	private static void putParamsLocked(Map<String, Object> extra, TurnContext turn) {
+		if (turn.paramsLocked()) {
+			extra.put("paramsLocked", true);
+		}
 	}
 
 	private void fail(String runId, String sessionId, StreamViolationException violation, int attempts, boolean emitted,
@@ -1007,9 +1104,12 @@ public class ResilientChatService {
 	 *                        不靠时刻反推 —— 续跑的压缩发生在 {@code ResumeService} 里（早于本方法），
 	 *                        压完再驱动，"压缩时刻 ≥ 轮起点"这条比较必然为假 ⇒ 会恒报 {@code none}（I-1）
 	 * @param turnStartedAtMs 轮起点（预算/超时口径用）
+	 * @param paramsLocked   本轮请求带了 params 但被策略锁住（{@code allow.userParams=false}）：
+	 *                       参数<b>未生效</b>，终帧 {@code done.extra.paramsLocked=true} 如实告知
+	 *                       （批③；载体取 {@code done.extra} 的 additive 键，帧型不变）
 	 */
 	private record TurnContext(int systemTokens, int toolsTokens, int inputTokens, int promptEstimate, int limitTokens,
-			String model, String compactionLevel, long turnStartedAtMs) {
+			String model, String compactionLevel, long turnStartedAtMs, boolean paramsLocked) {
 	}
 
 	/**
@@ -1173,7 +1273,7 @@ public class ResilientChatService {
 			level = "none";
 		}
 		return new TurnContext(systemTokens, toolsTokens, 0, systemTokens + toolsTokens + historyTokens, limit, model,
-				level, turnStartedAtMs);
+				level, turnStartedAtMs, false);
 	}
 
 	/**

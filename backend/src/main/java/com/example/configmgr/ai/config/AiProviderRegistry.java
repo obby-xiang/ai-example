@@ -14,6 +14,7 @@ import org.springframework.ai.openai.api.OpenAiApi;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.retry.support.RetryTemplate;
 import org.springframework.stereotype.Component;
+import org.springframework.util.StringUtils;
 
 import java.util.LinkedHashSet;
 import java.util.Map;
@@ -118,6 +119,66 @@ public class AiProviderRegistry {
         }
     }
 
+    // ── 请求级解析与逐请求 options（批③） ────────────────────────────────────
+
+    /** 请求级覆盖（{@code AiChatRequest.Params} 在 config 层的样子；三值全空 = 没有覆盖）。 */
+    public record Overrides(Double temperature, Double topP, Integer maxTokens) {
+
+        public static final Overrides NONE = new Overrides(null, null, null);
+
+        public boolean isEmpty() {
+            return this.temperature == null && this.topP == null && this.maxTokens == null;
+        }
+    }
+
+    /** 请求级解析（{@code modelId} 为空 ⇒ 默认链）；解析失败返回空（控制器已按 400 拦住，这里是窄窗口兜底）。 */
+    public Optional<AiConfigService.ChatTarget> target(String requestedModelId) {
+        return this.configService.resolveChatTarget(requestedModelId);
+    }
+
+    /** 普通用户参数开关（{@code ai_setting['allow.userParams']}；缺省 = 允许）。 */
+    public boolean allowUserParams() {
+        return this.configService.allowUserParams();
+    }
+
+    /** 模型能力位（{@code supports_tool_calling}；无行可查时 true —— 与批③ 之前的行为等价）。 */
+    public boolean supportsToolCalling(Long providerId, String modelId) {
+        return this.configService.supportsToolCalling(providerId, modelId);
+    }
+
+    /**
+     * 请求级运行态：按 {@code modelId} + 参数覆盖派生<b>一次性</b>实例。
+     *
+     * <h2>为什么不改缓存（批③ 的核心修复）</h2>
+     * 批① 的 {@code runtimeFor} 用"同 key 换模型就轻量重绑"来表达默认模型变更；把它用到逐请求模型上
+     * 会带来两个真实故障：
+     * <ol>
+     * <li><b>互相踩踏</b>：用户在两轮里交替选 A/B，缓存条目被反复重绑；</li>
+     * <li><b>污染默认路径</b>：请求级模型覆盖了缓存条目的<b>默认选项</b>，下一轮"没选模型"的请求
+     * 会带着上一轮的模型名。</li>
+     * </ol>
+     * 因此请求级模型/参数在<b>这里</b>派生：复用缓存条目里的 {@link OpenAiApi}（不重建 HTTP 客户端），
+     * 只新建 model/client，<b>不读写也不淘汰</b>缓存 —— 缓存条目数恒等于 RuntimeKey 的个数。
+     *
+     * <p>
+     * 与默认完全一致（模型相同、无覆盖）时直接返回缓存实例，避免每轮多建两个对象。
+     */
+    public ProviderRuntime forRequest(AiConfigService.ResolvedProvider resolved, String modelId,
+            Overrides overrides) {
+        ProviderRuntime base = runtimeFor(resolved);
+        String effectiveModel = StringUtils.hasText(modelId) ? modelId.trim() : base.modelId();
+        Overrides effectiveOverrides = overrides == null ? Overrides.NONE : overrides;
+        if (effectiveModel.equals(base.modelId()) && effectiveOverrides.isEmpty()) {
+            return base;
+        }
+        OpenAiChatOptions options = buildOptions(effectiveModel, effectiveOverrides);
+        ChatModel model = newModel(base.api(), options);
+        ChatClient client = ChatClient.builder(model).defaultAdvisors(this.memoryAdvisor).build();
+        return new ProviderRuntime(base.providerId(), base.providerCode(), effectiveModel, base.baseUrl(),
+                base.completionsPath(), base.runtimeKey(), options, base.api(), model, client);
+    }
+
+
     /** 缓存条目数（取证/热生效用例：换 base-url 后仍是 1 条；条目身份变了才说明真的重建）。 */
     public int runtimeCount() {
         return this.runtimes.size();
@@ -144,13 +205,18 @@ public class AiProviderRegistry {
 
     private ProviderRuntime newRuntime(AiConfigService.ResolvedProvider resolved, String key, OpenAiApi api) {
         OpenAiChatOptions options = buildOptions(resolved.modelId());
-        ChatModel model = new ReasoningAwareOpenAiChatModel(api, options, this.toolCallingManager,
-                this.retryTemplate.getIfAvailable(RetryTemplate::new),
-                this.observationRegistry.getIfAvailable(() -> ObservationRegistry.NOOP));
+        ChatModel model = newModel(api, options);
         ChatClient client = ChatClient.builder(model).defaultAdvisors(this.memoryAdvisor).build();
         return new ProviderRuntime(resolved.providerId(), resolved.providerCode(), resolved.modelId(),
                 resolved.baseUrl(), resolved.completionsPath(), key, options, api, model, client);
     }
+
+    private ChatModel newModel(OpenAiApi api, OpenAiChatOptions options) {
+        return new ReasoningAwareOpenAiChatModel(api, options, this.toolCallingManager,
+                this.retryTemplate.getIfAvailable(RetryTemplate::new),
+                this.observationRegistry.getIfAvailable(() -> ObservationRegistry.NOOP));
+    }
+
 
     /**
      * 默认选项 = 今天 {@code spring.ai.openai.chat.options} 的逐值副本 + 解析出的模型名。
@@ -167,6 +233,22 @@ public class AiProviderRegistry {
      * 其余项照常生效。
      */
     OpenAiChatOptions buildOptions(String modelId) {
+        return buildOptions(modelId, Overrides.NONE);
+    }
+
+    /**
+     * 逐请求 options：全局默认（{@code ai_setting}）之上叠<b>本轮请求的覆盖</b>。
+     *
+     * <p>
+     * 覆盖值的容错与 {@code ai_setting} 同一条纪律（M3）：越界/非有限/非正一律 WARN + <b>忽略该项</b>，
+     * 其余项照常生效 —— 控制器已按 400 {@code INVALID_PARAM} 拦过一遍，这里是"并发改配置/旁路调用"
+     * 的窄窗口兜底，不让一条脏值把整轮打成 500。
+     *
+     * <p>
+     * {@code streamUsage} 由基底保证为 true（全局默认段），覆盖只碰三值，<b>永远不动它</b> ——
+     * {@code done.usage} 的来源不能因为用户调了 temperature 而消失。
+     */
+    OpenAiChatOptions buildOptions(String modelId, Overrides overrides) {
         OpenAiChatOptions base = this.chatProperties.getOptions();
         OpenAiChatOptions options = base != null ? OpenAiChatOptions.fromOptions(base)
                 : OpenAiChatOptions.builder().build();
@@ -180,8 +262,37 @@ public class AiProviderRegistry {
             .ifPresent(value -> applyDouble(AiSetting.DEFAULT_TOP_P, value, options::setTopP));
         this.configService.setting(AiSetting.DEFAULT_MAX_TOKENS)
             .ifPresent(value -> applyMaxTokens(AiSetting.DEFAULT_MAX_TOKENS, value, options::setMaxTokens));
+        if (overrides != null && !overrides.isEmpty()) {
+            if (overrides.temperature() != null) {
+                applyRange("request.temperature", overrides.temperature(), 0d, 2d, options::setTemperature);
+            }
+            if (overrides.topP() != null) {
+                applyRange("request.topP", overrides.topP(), 0d, 1d, options::setTopP);
+            }
+            if (overrides.maxTokens() != null) {
+                applyPositiveInt("request.maxTokens", overrides.maxTokens(), options::setMaxTokens);
+            }
+        }
         return options;
     }
+
+    private void applyRange(String label, double value, double min, double max,
+            java.util.function.Consumer<Double> setter) {
+        if (!Double.isFinite(value) || value < min || value > max) {
+            log.warn("{} 的值 {} 越界（[{},{}]）：忽略该项，沿用全局默认", label, value, min, max);
+            return;
+        }
+        setter.accept(value);
+    }
+
+    private void applyPositiveInt(String label, int value, java.util.function.Consumer<Integer> setter) {
+        if (value <= 0) {
+            log.warn("{} 的值 {} 必须为正整数：忽略该项，沿用全局默认", label, value);
+            return;
+        }
+        setter.accept(value);
+    }
+
 
     private void applyDouble(String settingKey, String raw, java.util.function.Consumer<Double> setter) {
         try {

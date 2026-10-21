@@ -188,7 +188,10 @@ describe('F2 密钥掩码与「留空不改」', () => {
     const [id, body] = api.updateProvider.mock.calls[0]
     expect(id).toBe(7)
     expect(body).not.toHaveProperty('apiKey')
-    expect(body.baseUrl).toBe('https://api.deepseek.com')
+    // 批③ I-3：<b>没改过的字段一律不提交</b>（原断言是"总是带 baseUrl"，那正是"改不动"的成因——
+    // 后端会对没变的私网地址重跑 URL 闸）。口径收紧而非放宽：见下面两条"只带变化字段"用例。
+    expect(body).not.toHaveProperty('baseUrl')
+    expect(body).not.toHaveProperty('displayName')
   })
 
   it('填了密钥 ⇒ 请求体带 apiKey（且是用户输入的那一串）', async () => {
@@ -201,6 +204,35 @@ describe('F2 密钥掩码与「留空不改」', () => {
 
     const [, body] = api.updateProvider.mock.calls[0]
     expect(body.apiKey).toBe('new-key-1234abcd')
+  })
+
+  it('批③ I-3：只改显示名 ⇒ 提交体只有 displayName（私网种子行也能保存）', async () => {
+    const wrapper = await mountView()
+    const seeded = { ...providersFixture()[0], baseUrl: 'http://127.0.0.1:18399', source: 'ENV_SEED' }
+    api.listProviders.mockResolvedValue([seeded])
+    api.updateProvider.mockResolvedValue(seeded)
+    await flushPromises()
+
+    await wrapper.find('[data-testid="provider-display-name"]').setValue('我的本地桩')
+    await wrapper.find('[data-testid="save-provider"]').trigger('click')
+    await flushPromises()
+
+    const [, body] = api.updateProvider.mock.calls[0]
+    expect(body).toEqual({ displayName: '我的本地桩' })
+    expect(body).not.toHaveProperty('baseUrl')
+  })
+
+  it('批③ I-3 反例：改了 baseUrl ⇒ 提交体带 baseUrl（"变化字段"不是"永不带"）', async () => {
+    const wrapper = await mountView()
+    api.updateProvider.mockResolvedValue(providersFixture()[0])
+
+    await wrapper.find('[data-testid="provider-base-url"]').setValue('https://gateway.example.com')
+    await wrapper.find('[data-testid="save-provider"]').trigger('click')
+    await flushPromises()
+
+    const [, body] = api.updateProvider.mock.calls[0]
+    expect(body.baseUrl).toBe('https://gateway.example.com')
+    expect(body).not.toHaveProperty('displayName')
   })
 
   it('M-2：硬删被模型引用挡住（409 PROVIDER_IN_USE）⇒ 回落软删并说明原因', async () => {

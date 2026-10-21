@@ -161,6 +161,32 @@ export function deleteModel(id: number, modelId: string): Promise<AiModelRow> {
   return del<AiModelRow>(`${base}/providers/${id}/models/${encodeURIComponent(modelId)}`)
 }
 
+/** `GET /api/ai/models` 的一行（批③ 面板的选模型数据源；只含此刻真能选的）。 */
+export interface AiModelView {
+  /** 库内 id；null = env 合成行（尚未落库） */
+  providerId: number | null
+  providerCode: string
+  providerName: string
+  modelId: string
+  displayName: string
+  supportsToolCalling: boolean
+  supportsVision: boolean
+  supportsReasoning: boolean
+  maxContext: number | null
+  maxOutput: number | null
+  isDefault: boolean
+}
+
+/**
+ * GET /api/ai/models（批③ 面板用：跨 provider 的可用模型）。
+ *
+ * 可用性三条判据（provider enabled / key 可解析 / 模型 enabled）全在后端判完 ——
+ * 面板拿到即真值，不做二次过滤（两套判据必然漂移）。
+ */
+export function listAvailableModels(): Promise<AiModelView[]> {
+  return get<AiModelView[]>(`${base}/models`)
+}
+
 /** GET /api/ai/settings/defaults */
 export function getDefaults(): Promise<AiDefaults> {
   return get<AiDefaults>(`${base}/settings/defaults`)
@@ -172,6 +198,7 @@ export function updateDefaults(body: AiDefaultsWriteBody): Promise<AiDefaults> {
 }
 
 export const aiConfigApi = {
+  listAvailableModels,
   listProviders,
   createProvider,
   updateProvider,

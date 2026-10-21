@@ -17,6 +17,8 @@ import { aiApi } from '@/api/ai'
 import type { SseFrameHandlers, SseStreamOptions } from '@/api/sse'
 import { onWorkspaceEvent, reportUiEventResult, useWorkspaceStore } from '@/stores/workspace'
 import { useTaskStore } from '@/stores/task'
+import { useAiModelStore } from '@/stores/ai-model'
+import { AI_CONFIG_ERROR_TEXT } from '@/constants/ai-settings-copy'
 import { deriveFrontendToolBudgetMs, executeFrontendTool, parseToolArgs, resolveSheetContext } from '@/utils/frontend-tools'
 import {
   applySheetPlan,
@@ -1655,6 +1657,9 @@ export const useAiStore = defineStore('ai', {
       // 动作只注入这一轮，构造完即清空，避免下一轮重复携带。
       const context = workspace.buildContext()
       workspace.clearRecentActions()
+      // 批③：模型选择 + 参数覆盖（只带变化项；未选/未改时是空对象 —— 与批③ 之前逐字等价）。
+      // 状态在独立 store（stores/ai-model.ts）里，这里只取一次投影，避免两批在同一文件相邻改。
+      const modelPatch = useAiModelStore().patch(this.sessionId)
       /** 收尾判定：身份已失效优先，其次用户停止 / 断流，最后才是调用方的正常/异常兜底。 */
       const settleOutcome = (fallback: AiSendOutcome): AiSendOutcome => {
         if (!isCurrentRound()) {
@@ -1671,7 +1676,7 @@ export const useAiStore = defineStore('ai', {
       let outcome: AiSendOutcome
       try {
         await aiApi.chat(
-          { sessionId: this.sessionId, message: content, context },
+          { sessionId: this.sessionId, message: content, context, ...modelPatch },
           handlers,
           options
         )
@@ -1765,6 +1770,18 @@ export const useAiStore = defineStore('ai', {
         case ErrorCode.AI_REDIS_UNAVAILABLE:
           this.notice = `AI 运行时依赖的 Redis 不可用：${error.message}`
           void this.probeHealth()
+          break
+        // 批③ 新增的 /chat 稳定码（模型配置面）：前端按 code 查同一份词表，
+        // 不回显后端中文 message（i18n 口径）。MODEL_NOT_FOUND 顺带刷新可用模型清单 ——
+        // 多半是"模型被下架/端点被停用"，选择器要跟着变。
+        case 'MODEL_NOT_FOUND':
+        case 'INVALID_PARAM':
+        case 'PARAMS_LOCKED':
+        case 'PROVIDER_GONE':
+          this.notice = AI_CONFIG_ERROR_TEXT[error.code] ?? error.message
+          if (error.code === 'MODEL_NOT_FOUND') {
+            void useAiModelStore().ensureModels(true)
+          }
           break
         default:
           this.notice = error.message
