@@ -60,10 +60,18 @@
 
 | 笔 | run | 结论 |
 | --- | --- | --- |
-| **合并笔 `a6a93cd`** | **`39549829243`** | 见 §5.1（本件写作时该 run 在跑，结果由提交官在看板销记与台账行内回填） |
-| docs 笔（本件所在提交） | — | sha/run **不可自引用**；结果同样记入台账行 |
+| **合并笔 `a6a93cd`** | **`39549829243`** | **最终 success（5/5 全绿，含 E2E 29 用例）**：后端 ✓ 2m1s / 前端 ✓ 1m42s / check-docs ✓ 7s / 脱敏报告 ✓ / **E2E ✓ 2m7s**。**attempt1–3 各红 1 例**（同一既有抖动：`ResumeServiceLeaseTest#concurrentSameRunResumesDoNotLetTheLoserReleaseTheWinnersLease`，`expected [ACCEPTED, IN_PROGRESS] but was [ALREADY_RUNNING, ACCEPTED]`），按 L-19 既定处置 `gh run rerun --failed` 至 **attempt4 绿**（未改用例、未跳过、未 `--no-verify`） |
+| docs 笔 `9fb5564` | **`39549954121`** | **success（5/5 全绿，首跑即绿）**：后端 ✓ 2m42s / 前端 ✓ 1m16s / check-docs ✓ 8s / 脱敏报告 ✓ / **E2E ✓ 1m53s** |
+| 本件回填笔 | — | sha/run **不可自引用**；结果记入提交官台账行 |
 
-**E2E 口径**：CI 的 E2E job 跑 `verify-e2e.ps1`（主计数 **29 用例** + 2 条 GF 例外计数），桩模式；`E2E_STUB_MODE=1` 下 `GFSKIP≥1` 即整棒 FAIL（零容忍）。本批**零前端改动、零帧变更**，E2E 面只应出现既有基线形态。
+**E2E 口径**：CI 的 E2E job 跑 `verify-e2e.ps1`（主计数 **29 用例** + 2 条 GF 例外计数），桩模式；`E2E_STUB_MODE=1` 下 `GFSKIP≥1` 即整棒 FAIL（零容忍）。本批**零前端改动、零帧变更**，两次绿的 E2E 均 29 用例全过。
+
+**关于 attempt1–3 的红（关键判据：非本批引入）**：
+
+1. **零 diff**：`git diff edccc1f..a6a93cd -- backend/src/test/java/.../ResumeServiceLeaseTest.java` **为空**；该用例最后一次改动是 `a96cd06`（L-19 修复笔，本批之前）。
+2. **同码异果**：同一份 Java 代码在 docs 笔 run `39549954121` 与合并笔 attempt4 **都绿**；本机 `mvn -o test` **连跑 2 次 859/859**。⇒ 抖动、非确定性回归。
+3. **机理**：用例的 `CyclicBarrier` 只架在 `acquireRunLease` **之前**；胜方若在败方进入 `resume` **之前**已把快照推进到 RUNNING/收尾，败方看到 `ALREADY_RUNNING` —— 仍是"恰一个驱动"，L-19 的**产品面**（归还白名单）不受影响，是该断言把 `IN_PROGRESS` 钉死过严。
+4. **处置**：rerun `--failed` + 在看板 L-19 行**补登记**（见 §6），**不扩权改用例**（断言收紧/放宽属该用例维护方）。
 
 ## 6 看板 / 决策 / 设计稿留痕
 
