@@ -4,6 +4,9 @@ import com.example.configmgr.ai.config.db.AiProvider;
 import com.example.configmgr.ai.config.db.AiSetting;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+import java.util.Map;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -249,6 +252,31 @@ class AiConfigServiceTest {
 
 		assertThat(service.listProviders()).as("首次加载失败 ⇒ 空快照（端点按不可用降级）").isEmpty();
 		assertThat(service.listProviders()).as("版本没变也重试").hasSize(1);
+	}
+
+	/**
+	 * M5（批① 复审登记，批② 收口）：表为空 + env 有 key 时，{@code /health.providers} 会多出一行
+	 * "env 兜底合成行"。设置页据此提示"还没落库"——判据必须是 {@code synthetic}（布尔，恒出现），
+	 * 不能靠 {@code id} 键是否存在（全局 Jackson {@code non_null} 可能把它省掉）。
+	 */
+	@Test
+	void envFallbackRowIsMarkedSyntheticUntilItIsPersisted() {
+		AiConfigService service = this.fixture.service();
+
+		List<Map<String, Object>> rows = service.describeProviders();
+		assertThat(rows).hasSize(1);
+		assertThat(rows.get(0)).containsEntry("synthetic", true)
+			.containsEntry("source", AiProvider.SOURCE_ENV_SEED)
+			.containsEntry("id", null)
+			.containsKeys("id", "code", "name", "baseUrl", "enabled", "keyConfigured", "keyRef", "source",
+					"synthetic", "status");
+
+		// 落库之后（有 id）就不再是合成行
+		AiProvider persisted = this.fixture.addEnvProvider("deepseek", "http://deepseek-endpoint");
+		this.fixture.bumpVersion();
+		assertThat(service.describeProviders()).hasSize(1);
+		assertThat(service.describeProviders().get(0)).containsEntry("synthetic", false)
+			.containsEntry("id", persisted.getId());
 	}
 
 }

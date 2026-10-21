@@ -1,5 +1,7 @@
 package com.example.configmgr.ai.config;
 
+import com.example.configmgr.ai.config.db.AiConfigAudit;
+import com.example.configmgr.ai.config.db.AiConfigAuditRepository;
 import com.example.configmgr.ai.config.db.AiProvider;
 import com.example.configmgr.ai.config.db.AiProviderModel;
 import com.example.configmgr.ai.config.db.AiProviderModelRepository;
@@ -29,6 +31,7 @@ import java.util.function.Supplier;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -72,6 +75,11 @@ final class AiConfigTestFixture {
 
 	final AiSettingRepository settingRepository = mock(AiSettingRepository.class);
 
+	/** 审计表（批② 写路径的伴生面）：内存收集，便于断言"key 只写 last4"。 */
+	final AiConfigAuditRepository auditRepository = mock(AiConfigAuditRepository.class);
+
+	final List<AiConfigAudit> audits = new CopyOnWriteArrayList<>();
+
 	final AiProperties properties = new AiProperties();
 
 	/** &gt;0 时接下来的 N 次 provider 查询抛错（模拟读库抖动；M2 的重试用例）。 */
@@ -102,6 +110,10 @@ final class AiConfigTestFixture {
 		when(this.providerRepository.findByEnabledTrueOrderBySortOrderAscIdAsc())
 			.thenAnswer(invocation -> copyProviders(sortedProviders(this.providers, true)));
 		when(this.providerRepository.count()).thenAnswer(invocation -> (long) this.providers.size());
+		when(this.providerRepository.findById(any())).thenAnswer(invocation -> this.providers.stream()
+			.filter(provider -> provider.getId().equals(invocation.getArgument(0)))
+			.findFirst()
+			.map(AiConfigTestFixture::copyProvider));
 		when(this.providerRepository.findByCode(anyString())).thenAnswer(invocation -> this.providers.stream()
 			.filter(provider -> provider.getCode().equals(invocation.getArgument(0)))
 			.findFirst()
@@ -111,8 +123,11 @@ final class AiConfigTestFixture {
 			if (provider.getId() == null) {
 				provider.setId(this.ids.getAndIncrement());
 			}
-			this.providers.removeIf(existing -> existing.getCode().equals(provider.getCode())
-					&& !existing.getId().equals(provider.getId()));
+			// 与 JPA 同语义：同 id 覆盖（更新），同 code 不同 id 视为唯一约束冲突的替代
+			//（旧实现只删"同 code 不同 id"，于是 update 之后列表里会出现同一 id 的两份 ——
+			//  findByCode/findById 拿到的是旧的 ENV_SEED 那份，I-1 的回归用例正是靠它暴露的）
+			this.providers.removeIf(existing -> existing.getId().equals(provider.getId())
+					|| existing.getCode().equals(provider.getCode()));
 			this.providers.add(provider);
 			return provider;
 		});
@@ -174,6 +189,27 @@ final class AiConfigTestFixture {
 			this.settings.put(setting.getSettingKey(), setting.getValueJson());
 			return setting;
 		});
+
+		// 批②：写路径的删除面（软删走 save、硬删走 delete）与审计表
+		// void 方法不能用 when(...)：走 doAnswer.doThrow 形态（Mockito 的显式约定）
+		doAnswer(invocation -> {
+			AiProviderModel removed = invocation.getArgument(0);
+			this.models.removeIf(existing -> existing.getId().equals(removed.getId()));
+			return null;
+		}).when(this.modelRepository).delete(any(AiProviderModel.class));
+		doAnswer(invocation -> {
+			Long removedId = invocation.getArgument(0);
+			this.providers.removeIf(existing -> existing.getId().equals(removedId));
+			return null;
+		}).when(this.providerRepository).deleteById(any());
+		when(this.auditRepository.save(any(AiConfigAudit.class))).thenAnswer(invocation -> {
+			AiConfigAudit audit = invocation.getArgument(0);
+			audit.setId((long) (this.audits.size() + 1));
+			this.audits.add(audit);
+			return audit;
+		});
+		when(this.auditRepository.findAllByOrderByIdDesc())
+			.thenAnswer(invocation -> List.copyOf(this.audits.reversed()));
 	}
 
 	// ── 数据 ────────────────────────────────────────────────────────────────

@@ -15,12 +15,15 @@ import java.time.LocalDateTime;
  * 配置变更审计（{@code ai_config_audit}，设计稿 §3.1 P2）。
  *
  * <p>
- * 批① <b>只建表结构</b>（V4 迁移），不写数据 —— 写路径与审计落表在批②/批④。本类先落位，
- * 免得"表已建好但代码里没有对应口"造成下一批又要动迁移。
+ * <b>现状（批② 起）</b>：写路径每次变更都落一行 —— {@code AiConfigWriter} 在"数据行 + 版本号"
+ * 的<b>同一个事务</b>里写审计，动作见 {@code ACTION_} 常量（PROVIDER_CREATE/UPDATE/DELETE、
+ * MODEL_ADD/UPDATE/DELETE、DEFAULTS_UPDATE），{@code target_type = provider|model|setting}。
+ * 只建表不写数据的时期（批①）已结束。
  *
  * <p>
  * 纪律（调研 §3.1e）：{@link #diffJson} 对 key 只写 {@code {"key":"updated","last4":"ab12"}}，
- * 永远不写密文或明文。
+ * 永远不写密文或明文（{@code AiConfigWriterTest#auditNeverCarriesTheKeyOrTheCipher} 与
+ * {@code AiConfigWritePersistenceTest#auditRowsCarryOnlyTheLast4AndTheAction} 两处锁死）。
  */
 @Data
 @Entity

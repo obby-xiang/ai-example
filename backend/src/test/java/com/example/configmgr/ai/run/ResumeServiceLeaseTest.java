@@ -258,8 +258,17 @@ class ResumeServiceLeaseTest {
 	 * 败方（撞 {@code resuming} 互斥 → IN_PROGRESS）在外层按"fres"还租 —— 删掉的却是<b>胜方同一个
 	 * token</b> 的租约，顺带清掉进程内视图。后果：胜方后续写回全走 plain SET，fence 键从未创建。
 	 *
-	 * <p>屏障架在 {@code acquireRunLease} 上：两边都在<b>读完"未持租"状态之后</b>才真正抢 ——
-	 * 这条时序正是 harness 抓到的那个窗口，不靠运气。
+	 * <h2>确定性（复审 I-2 收口：去 flake，不放宽断言）</h2>
+	 * 旧版只有 {@code acquireRunLease} 上的屏障：两条线程同时出屏障后，<b>谁先跑到快照状态判定</b>
+	 * 由调度决定 —— 慢机器上胜方可能整轮跑完才轮到败方，败方看到 {@code status=RUNNING} 得
+	 * {@code ALREADY_RUNNING}，断言 {@code [ACCEPTED, IN_PROGRESS]} 就红（实测见过
+	 * {@code [ALREADY_RUNNING, ACCEPTED]}）。现在照 L-19 的写法把时序钉死：
+	 * <ol>
+	 * <li>{@code acquireRunLease} 屏障保证两边都"读完未持租"再抢（原始缺陷窗口，保留）；</li>
+	 * <li>胜方进入 {@code driveResumed}（= 已占住 {@code resuming} 互斥）后<b>被测试按住</b>；</li>
+	 * <li>败方此时必然撞互斥 ⇒ 反序返回的那个必是 {@code IN_PROGRESS}，与机器快慢无关；</li>
+	 * <li>断言仍要求"恰一个 ACCEPTED + 恰一个 IN_PROGRESS"，<b>不放宽</b>成"含某结局"。</li>
+	 * </ol>
 	 */
 	@Test
 	void concurrentSameRunResumesDoNotLetTheLoserReleaseTheWinnersLease() throws Exception {
@@ -284,6 +293,15 @@ class ResumeServiceLeaseTest {
 		ResumeService racingService = new ResumeService(racing, this.registry, this.codec, this.chatService,
 				this.toolCallingManager, this.executor, this.redis, this.properties, this.cancellations, this.limiter);
 
+		// 胜方的驱动被按住：等到"败方已返回"再放行 —— 这是本用例确定性的来源
+		CountDownLatch winnerEnteredDriver = new CountDownLatch(1);
+		CountDownLatch releaseWinner = new CountDownLatch(1);
+		doAnswer(invocation -> {
+			winnerEnteredDriver.countDown();
+			releaseWinner.await(10, TimeUnit.SECONDS);
+			return null;
+		}).when(this.chatService).driveResumed(any(), any(), any(), any(), any());
+
 		java.util.concurrent.atomic.AtomicReference<ResumeService.ResumeResult> first =
 				new java.util.concurrent.atomic.AtomicReference<>();
 		java.util.concurrent.atomic.AtomicReference<ResumeService.ResumeResult> second =
@@ -292,18 +310,42 @@ class ResumeServiceLeaseTest {
 		Thread b = new Thread(() -> second.set(racingService.resume(RUN_ID)), "r-concurrent-b");
 		a.start();
 		b.start();
-		a.join(5_000);
-		b.join(5_000);
+		assertThat(winnerEnteredDriver.await(5, TimeUnit.SECONDS))
+			.as("恰有一个线程成为胜方并进入驱动（已占住 resuming 互斥）").isTrue();
 
-		assertThat(a.isAlive()).isFalse();
-		assertThat(b.isAlive()).isFalse();
-		assertThat(java.util.List.of(first.get().outcome(), second.get().outcome()))
-			.as("恰一个驱动、恰一个被进程内互斥挡下")
-			.containsExactlyInAnyOrder(ResumeService.Outcome.ACCEPTED, ResumeService.Outcome.IN_PROGRESS);
+		// 胜方被按住期间，败方必然撞互斥 ⇒ 先返回的那个必是 IN_PROGRESS（与调度无关）
+		ResumeService.ResumeResult loserResult = awaitFirstOutcome(first, second, 5_000L);
+		assertThat(loserResult.outcome()).as("败方：进程内互斥挡下").isEqualTo(ResumeService.Outcome.IN_PROGRESS);
 		// 败方不得把胜方的租约删掉（同一 token、可重入命中 ⇒ created=false ⇒ 没有释放权）
 		assertThat(this.fake.string(racing.runLeaseKey(RUN_ID)))
 			.as("IN_PROGRESS 一方不得删除租约（fence 与 fencing 写全靠它）").isNotNull();
 		assertThat(racing.heldRunEpoch(RUN_ID)).as("进程内视图仍持有").isPositive();
+
+		releaseWinner.countDown();
+		a.join(10_000L);
+		b.join(10_000L);
+		assertThat(a.isAlive()).isFalse();
+		assertThat(b.isAlive()).isFalse();
+		ResumeService.ResumeResult winnerResult = first.get() == loserResult ? second.get() : first.get();
+		assertThat(winnerResult.outcome()).as("胜方：驱动跑完").isEqualTo(ResumeService.Outcome.ACCEPTED);
+		assertThat(this.fake.string(racing.runLeaseKey(RUN_ID))).as("胜方驱动期间租约一直在").isNotNull();
+	}
+
+	/** 等到两条续跑线程中<b>先</b>返回的那一个（另一个此刻正被测试按住）。 */
+	private static ResumeService.ResumeResult awaitFirstOutcome(
+			AtomicReference<ResumeService.ResumeResult> first,
+			AtomicReference<ResumeService.ResumeResult> second, long millis) throws InterruptedException {
+		long deadline = System.currentTimeMillis() + millis;
+		while (System.currentTimeMillis() < deadline) {
+			if (first.get() != null) {
+				return first.get();
+			}
+			if (second.get() != null) {
+				return second.get();
+			}
+			Thread.sleep(5L);
+		}
+		throw new AssertionError("两条续跑线程在 " + millis + "ms 内都没有返回（胜方是否被驱动门卡住？）");
 	}
 
 	// ── L-19：创建者输掉进程内互斥，也不得还租 ─────────────────────────────

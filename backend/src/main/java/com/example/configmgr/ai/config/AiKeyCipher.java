@@ -59,6 +59,16 @@ public class AiKeyCipher {
     /** KEK 缺失/不可用时的稳定错误码（保存 key 的 400 码，批② 消费）。 */
     public static final String CODE_KEK_MISSING = "AI_SECRET_KEK_MISSING";
 
+    /**
+     * 待加密的 key 为空/空白（批① 复审登记 M6，批② 与 KEK 缺失分离）。
+     *
+     * <p>
+     * 旧实现把 {@code encrypt(null)} 也报成 {@link #CODE_KEK_MISSING}：调用方传了个空值，却让运维
+     * 去查环境变量。现在它是独立的 400 码（BAD_REQUEST 语义）—— "请求本身不合法" 与 "部署没配好"
+     * 是两种修法，排障方向不能混。
+     */
+    public static final String CODE_KEY_EMPTY = "KEY_EMPTY";
+
     /** 密文解不开（KEK 换了/错了、kid 不认识、AAD 不匹配）的稳定错误码。 */
     public static final String CODE_KEY_UNREADABLE = "KEY_UNREADABLE";
 
@@ -137,13 +147,15 @@ public class AiKeyCipher {
      * @param plaintext key 明文（只在本方法内存在，绝不落日志）
      * @param providerCode 行标识（AAD 第一段）
      * @param keyRef key 位置（AAD 第二段，{@code DB}/{@code ENV}/{@code NONE}）
-     * @throws KeyCipherException {@code AI_SECRET_KEK_MISSING}（KEK 缺失/格式不对）
+     * @throws KeyCipherException {@code KEY_EMPTY}（明文为空：入参错误，先于 KEK 判定）或
+     * {@code AI_SECRET_KEK_MISSING}（KEK 缺失/格式不对）
      */
     public String encrypt(String plaintext, String providerCode, String keyRef) {
-        byte[] kek = requireKek();
-        if (plaintext == null) {
-            throw new KeyCipherException(CODE_KEK_MISSING, "待加密的 key 为空");
+        // M6：空明文先判 —— 它是"调用方传错了"，不是"部署没配 KEK"（两者的修法完全不同）
+        if (!StringUtils.hasText(plaintext)) {
+            throw new KeyCipherException(CODE_KEY_EMPTY, "待加密的 key 为空（该项必填；如需清空请用 clearKey）");
         }
+        byte[] kek = requireKek();
         try {
             byte[] iv = new byte[IV_BYTES];
             this.random.nextBytes(iv);

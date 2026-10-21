@@ -498,6 +498,65 @@ function crashReport(kind, err) {
   process.exit(1)
 }
 
+/**
+ * 桩返回的模型清单（模型配置专项批②；`GET /models`）。
+ *
+ * 只放两个 id：设置页的"拉取模型 → 勾选加入 allowlist"链路需要一个**可勾选**的列表，
+ * 数量与命名不影响任何断言。新增 id 时顺手看一眼 `AiConnectionProbe` 的单测（若它按名字断言）。
+ */
+const STUB_MODEL_IDS = ['stub-model-a', 'stub-model-b']
+
+/**
+ * GET /models（OpenAI 兼容的模型列表端点；模型配置专项批② 的 E2 用例依赖它）。
+ *
+ * 故障注入（查询参数，与 `AiConnectionProbe` 的单测同形 —— 产品侧按状态码判四档）：
+ *   `?models=401` / `403` ⇒ AUTH_FAILED
+ *   `?models=404` / `405` / `500` ⇒ MODELS_UNSUPPORTED（该端点没实现 /models）
+ *   `?models=empty` ⇒ 200 + `{data:[]}`（合法但空）
+ *   `?models=notarray` ⇒ 200 + `{data:"nope"}` ⇒ MODELS_INVALID
+ * 不带参数 ⇒ 200 + `{data:[{id},…]}`。
+ *
+ * 口径：本桩**不**校验 Authorization —— 401/403 只由上面的查询参数产生（否则 E2E 里"随便一个
+ * 占位 key"就过不去，而桩本来就用占位 key）。
+ */
+function handleModels(req, res) {
+  const url = new URL(req.url ?? '/models', `http://127.0.0.1:${PORT}`)
+  const mode = url.searchParams.get('models') ?? ''
+  const send = (status, body) => {
+    res.writeHead(status, { 'content-type': 'application/json' })
+    res.end(typeof body === 'string' ? body : JSON.stringify(body))
+  }
+  switch (mode) {
+    case '401':
+      send(401, { error: { message: 'stub: unauthorized', type: 'invalid_request_error' } })
+      break
+    case '403':
+      send(403, { error: { message: 'stub: forbidden', type: 'invalid_request_error' } })
+      break
+    case '404':
+      send(404, { error: { message: 'stub: no such endpoint', type: 'invalid_request_error' } })
+      break
+    case '405':
+      send(405, { error: { message: 'stub: method not allowed', type: 'invalid_request_error' } })
+      break
+    case '500':
+      send(500, { error: { message: 'stub: boom', type: 'server_error' } })
+      break
+    case 'empty':
+      send(200, { object: 'list', data: [] })
+      break
+    case 'notarray':
+      send(200, { object: 'list', data: 'nope' })
+      break
+    default:
+      send(200, {
+        object: 'list',
+        data: STUB_MODEL_IDS.map((id) => ({ id, object: 'model', owned_by: 'stub' }))
+      })
+  }
+  fs.writeSync(1, `[models] ${mode || 'ok'} → ${res.statusCode}\n`)
+}
+
 function startServer() {
   ensureDir(DIR)
   // 进程级兜底：任何未捕获异常/未处理拒绝都必须留下栈并以退出码 1 死亡（不许静默消失）
@@ -508,6 +567,12 @@ function startServer() {
     // 连接级兜底：客户端中途断开/重置属正常攻击面，只记日志，绝不升级为进程级异常
     req.on('error', (err) => fs.writeSync(2, `[WARN] 请求流错误：${err?.message ?? err}\n`))
     res.on('error', (err) => fs.writeSync(2, `[WARN] 响应流错误：${err?.message ?? err}\n`))
+    // 模型配置专项批②：GET /models（OpenAI 兼容端点列表）—— 设置页「测试连接」与「拉取模型」的上游。
+    // 故障注入口径与 AiConnectionProbe 的测试同形：?models=401|403|404|405|500|empty|notarray。
+    if ((req.url ?? '').split('?')[0].endsWith('/models')) {
+      handleModels(req, res)
+      return
+    }
     if (req.method !== 'POST') {
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end('{"ok":true,"stub":"ci-upstream"}')

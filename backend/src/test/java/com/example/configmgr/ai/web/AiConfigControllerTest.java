@@ -40,7 +40,10 @@ class AiConfigControllerTest {
 
 	private final AiConfigService configService = mock(AiConfigService.class);
 
-	private final MockMvc mockMvc = MockMvcBuilders.standaloneSetup(new AiConfigController(this.configService))
+	private final MockMvc mockMvc = MockMvcBuilders
+		.standaloneSetup(new AiConfigController(this.configService, mock(com.example.configmgr.ai.config.AiConfigWriter.class),
+				mock(com.example.configmgr.ai.config.AiConnectionProbe.class),
+				mock(com.example.configmgr.ai.config.AiModelCatalog.class)))
 		.build();
 
 	@Test
@@ -51,6 +54,9 @@ class AiConfigControllerTest {
 		AiProvider provider = provider("deepseek", envelope);
 		when(this.configService.listProviders()).thenReturn(List.of(provider));
 		when(this.configService.modelsOf(org.mockito.ArgumentMatchers.any())).thenReturn(List.of(model()));
+		when(this.configService.resolveKey(provider))
+			.thenReturn(keyOk(secret, "fp-0011223344"));
+		when(this.configService.keyStatus(provider)).thenReturn("OK");
 
 		MvcResult result = this.mockMvc.perform(get("/api/ai/providers"))
 			.andExpect(status().isOk())
@@ -59,6 +65,7 @@ class AiConfigControllerTest {
 			.andExpect(jsonPath("$.data[0].keyConfigured").value(true))
 			.andExpect(jsonPath("$.data[0].keyLast4").value("cdef"))
 			.andExpect(jsonPath("$.data[0].keyRef").value("DB"))
+			.andExpect(jsonPath("$.data[0].keyStatus").value("OK"))
 			.andExpect(jsonPath("$.data[0].source").value("DB"))
 			.andExpect(jsonPath("$.data[0].models[0].modelId").value("deepseek-flash"))
 			.andExpect(jsonPath("$.data[0].models[0].maxContext").value(128000))
@@ -75,6 +82,16 @@ class AiConfigControllerTest {
 					|| key.equalsIgnoreCase("keyCipher") || key.equalsIgnoreCase("cipher")
 					|| key.equalsIgnoreCase("keyFingerprint") || key.equalsIgnoreCase("secret"));
 		assertThat(keys).contains("keyConfigured", "keyLast4", "keyRef");
+
+		// M7（批① 复审登记，批② 收口）：字段白名单从"含有某几个键"升级为**精确键集**——
+		// 顶层一层 + models[] 一层；多一个键（例如哪天把 keyCipher 加回 DTO）或少一个键都红。
+		JsonNode providerNode = this.mapper.readTree(body).path("data").get(0);
+		assertThat(fieldNames(providerNode)).as("顶层键集精确相等")
+			.containsExactlyInAnyOrder("id", "code", "displayName", "protocol", "baseUrl", "completionsPath",
+					"modelsPath", "keyConfigured", "keyLast4", "keyRef", "keyStatus", "source", "enabled", "models");
+		assertThat(fieldNames(providerNode.path("models").get(0))).as("models[] 键集精确相等")
+			.containsExactlyInAnyOrder("id", "modelId", "displayName", "supportsToolCalling", "supportsVision",
+					"supportsReasoning", "maxContext", "maxOutput", "enabled", "isDefault", "sortOrder");
 	}
 
 	@Test
@@ -89,6 +106,15 @@ class AiConfigControllerTest {
 	}
 
 	// ── 夹具 ────────────────────────────────────────────────────────────────
+
+
+	private static AiConfigService.KeyResolution keyOk(String apiKey, String fingerprint) {
+		return new AiConfigService.KeyResolution(AiConfigService.KeyStatus.OK, apiKey, fingerprint);
+	}
+
+	private static AiConfigService.KeyResolution keyMissing() {
+		return new AiConfigService.KeyResolution(AiConfigService.KeyStatus.MISSING, null, null);
+	}
 
 	private static byte[] fill(byte value) {
 		byte[] bytes = new byte[32];
@@ -137,6 +163,14 @@ class AiConfigControllerTest {
 		else if (node.isArray()) {
 			node.elements().forEachRemaining(child -> collectKeys(child, out));
 		}
+	}
+
+	private static Set<String> fieldNames(JsonNode node) {
+		Set<String> keys = new TreeSet<>();
+		List<String> names = new ArrayList<>();
+		node.fieldNames().forEachRemaining(names::add);
+		keys.addAll(names);
+		return keys;
 	}
 
 }

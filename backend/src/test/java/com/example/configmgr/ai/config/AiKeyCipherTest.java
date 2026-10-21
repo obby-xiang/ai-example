@@ -163,6 +163,27 @@ class AiKeyCipherTest {
 		assertCipherException(() -> shortKek.encrypt(SECRET, PROVIDER_CODE, KEY_REF), AiKeyCipher.CODE_KEK_MISSING);
 	}
 
+	/**
+	 * M6（批① 复审登记，批② 收口）：{@code encrypt(null)} 原来与"KEK 缺失"共用
+	 * {@code AI_SECRET_KEK_MISSING} —— 一个"调用方传了空值"的编程/入参错误被报成"部署没配 KEK"，
+	 * 排障方向被带偏（运维会去找环境变量，实际是请求体为空）。现在两者分离：
+	 * 空明文 = {@code KEY_EMPTY}（BAD_REQUEST 语义），KEK 缺失 = {@code AI_SECRET_KEK_MISSING}。
+	 *
+	 * <p>
+	 * 注意 <b>判定顺序</b>：空明文先判 —— 即使本进程没 KEK，空入参也回 {@code KEY_EMPTY}
+	 * （"请求本身不合法"比"环境没配好"更贴近事实，且不泄露 KEK 是否配置）。
+	 */
+	@Test
+	void emptyPlaintextIsKeyEmptyRatherThanKekMissing() {
+		assertCipherException(() -> this.cipher.encrypt(null, PROVIDER_CODE, KEY_REF), AiKeyCipher.CODE_KEY_EMPTY);
+		assertCipherException(() -> this.cipher.encrypt("", PROVIDER_CODE, KEY_REF), AiKeyCipher.CODE_KEY_EMPTY);
+		assertCipherException(() -> this.cipher.encrypt("   ", PROVIDER_CODE, KEY_REF), AiKeyCipher.CODE_KEY_EMPTY);
+		// 没有 KEK 时同样是 KEY_EMPTY（入参先判），而不是 AI_SECRET_KEK_MISSING
+		AiKeyCipher noKek = new AiKeyCipher("");
+		assertCipherException(() -> noKek.encrypt(null, PROVIDER_CODE, KEY_REF), AiKeyCipher.CODE_KEY_EMPTY);
+		assertCipherException(() -> noKek.encrypt(SECRET, PROVIDER_CODE, KEY_REF), AiKeyCipher.CODE_KEK_MISSING);
+	}
+
 	private static void assertCipherException(Runnable action, String expectedCode) {
 		assertThatThrownBy(action::run).isInstanceOfSatisfying(AiKeyCipher.KeyCipherException.class,
 				ex -> assertThat(ex.getCode()).isEqualTo(expectedCode));

@@ -271,6 +271,106 @@ public class AiConfigService {
         return current().providers();
     }
 
+    /** 按 id 找库里的 provider 行（写端点与 {@code /test} 用；合成行没有 id，不在此列）。 */
+    public Optional<AiProvider> provider(Long providerId) {
+        if (providerId == null) {
+            return Optional.empty();
+        }
+        return current().providers().stream().filter(provider -> providerId.equals(provider.getId())).findFirst();
+    }
+
+    /**
+     * 一行的 key 状态标签（设置页每个 provider 卡片显示"已配置/未配置/不可解"）：
+     * 停用 ⇒ {@code DISABLED}；否则取运行时解密结论。
+     */
+    public String keyStatus(AiProvider provider) {
+        if (provider == null) {
+            return KeyStatus.MISSING.name();
+        }
+        if (!provider.isEnabled()) {
+            return "DISABLED";
+        }
+        return resolveKey(provider).status().name();
+    }
+
+    /**
+     * 全局默认参数（{@code ai_setting}）的视图（{@code GET/PUT /api/ai/settings/defaults}）。
+     *
+     * <p>
+     * <b>读时容错</b>（批① M3 的口径）：脏值（{@code "hot"} / {@code NaN} / 负数）不抛，按"未设置"
+     * 返回（{@code null}）—— 一个手填的设置项不能关掉整页；写路径（批②）负责让脏值进不来。
+     *
+     * @param version {@code config.version}（诊断用：改完能确认版本真的动了）
+     */
+    public record Defaults(String modelId, Double temperature, Double topP, Integer maxTokens,
+            Boolean allowUserParams, long version) {
+    }
+
+    /** 当前全局默认参数。 */
+    public Defaults defaults() {
+        ConfigSnapshot snap = current();
+        Map<String, String> settings = snap.settings();
+        return new Defaults(text(settings.get(AiSetting.DEFAULT_MODEL_ID)),
+                parseDouble(settings.get(AiSetting.DEFAULT_TEMPERATURE)),
+                parseDouble(settings.get(AiSetting.DEFAULT_TOP_P)), parseInteger(settings.get(AiSetting.DEFAULT_MAX_TOKENS)),
+                parseBoolean(settings.get(AiSetting.ALLOW_USER_PARAMS)), snap.version());
+    }
+
+    private static String text(String raw) {
+        return StringUtils.hasText(raw) ? raw.trim() : null;
+    }
+
+    private static Double parseDouble(String raw) {
+        if (!StringUtils.hasText(raw)) {
+            return null;
+        }
+        try {
+            double value = Double.parseDouble(raw.trim());
+            if (Double.isNaN(value) || Double.isInfinite(value)) {
+                log.debug("ai_setting 里的浮点脏值（忽略该项）：{}", raw);
+                return null;
+            }
+            return value;
+        }
+        catch (NumberFormatException ex) {
+            log.debug("ai_setting 里的浮点脏值（忽略该项）：{}", raw);
+            return null;
+        }
+    }
+
+    private static Integer parseInteger(String raw) {
+        if (!StringUtils.hasText(raw)) {
+            return null;
+        }
+        try {
+            int value = Integer.parseInt(raw.trim());
+            if (value < 1) {
+                log.debug("ai_setting 里的整数脏值（忽略该项）：{}", raw);
+                return null;
+            }
+            return value;
+        }
+        catch (NumberFormatException ex) {
+            log.debug("ai_setting 里的整数脏值（忽略该项）：{}", raw);
+            return null;
+        }
+    }
+
+    private static Boolean parseBoolean(String raw) {
+        if (!StringUtils.hasText(raw)) {
+            return null;
+        }
+        String trimmed = raw.trim();
+        if ("true".equalsIgnoreCase(trimmed)) {
+            return Boolean.TRUE;
+        }
+        if ("false".equalsIgnoreCase(trimmed)) {
+            return Boolean.FALSE;
+        }
+        log.debug("ai_setting 里的布尔脏值（忽略该项）：{}", raw);
+        return null;
+    }
+
     public List<AiProviderModel> listModels() {
         return current().models();
     }
@@ -367,25 +467,14 @@ public class AiConfigService {
                 provider.getId() == null));
     }
 
-    /** 模型解析（见 {@link #resolveDefault()} 的优先级）。 */
+    /** 模型解析（见 {@link AiModelResolver} 的优先级链；批③ 的按请求解析复用同一条链）。 */
     public String resolveModelId(ConfigSnapshot snap, AiProvider provider) {
         List<AiProviderModel> models = snap.models()
             .stream()
             .filter(model -> provider.getId() == null || provider.getId().equals(model.getProviderId()))
-            .filter(AiProviderModel::isEnabled)
             .toList();
-        Optional<AiProviderModel> flagged = models.stream().filter(AiProviderModel::isDefault).findFirst();
-        if (flagged.isPresent()) {
-            return flagged.get().getModelId();
-        }
-        if (!models.isEmpty()) {
-            return models.get(0).getModelId();
-        }
-        String configured = snap.settings().get(AiSetting.DEFAULT_MODEL_ID);
-        if (StringUtils.hasText(configured)) {
-            return configured.trim();
-        }
-        return resolveEnvModelId();
+        return AiModelResolver.resolve(null, models, snap.settings().get(AiSetting.DEFAULT_MODEL_ID),
+                resolveEnvModelId());
     }
 
     // ── key 解析 ────────────────────────────────────────────────────────────
@@ -587,7 +676,18 @@ public class AiConfigService {
                 + String.valueOf(resolved.completionsPath());
     }
 
-    /** 诊断视图（不含 key）：provider 行 + key 状态。 */
+    /**
+     * 诊断视图（不含 key）：provider 行 + key 状态。
+     *
+     * <h2>合成行（批① 复审登记 M5 的消费面，批② 收口）</h2>
+     * 表为空且 env key 非空时，这里会多出一行"<b>还没落库的 env 兜底行</b>"：{@code id=null}、
+     * {@code source=ENV_SEED}、{@code synthetic=true}。设置页据此提示"当前配置来自环境变量兜底，
+     * 尚未写入配置库"——否则用户会看到"库是空的"却仍然能用 AI，无从判断自己在改哪一层。
+     *
+     * <p>
+     * {@code id} 可能因全局 Jackson {@code default-property-inclusion=non_null} 被省略，
+     * 故<b>不要</b>用"{@code id} 键是否存在"判断合成行：认 {@code synthetic}（布尔，恒出现）。
+     */
     public List<Map<String, Object>> describeProviders() {
         List<Map<String, Object>> out = new ArrayList<>();
         for (AiProvider provider : effectiveProviders()) {
@@ -596,10 +696,12 @@ public class AiConfigService {
             row.put("id", provider.getId());
             row.put("code", provider.getCode());
             row.put("name", provider.getDisplayName());
+            row.put("baseUrl", provider.getBaseUrl());
             row.put("enabled", provider.isEnabled());
             row.put("keyConfigured", provider.isKeyDeclared());
             row.put("keyRef", provider.getKeyRef());
             row.put("source", provider.getSource());
+            row.put("synthetic", provider.getId() == null);
             row.put("status", provider.isEnabled() ? key.status().name() : "DISABLED");
             out.add(row);
         }

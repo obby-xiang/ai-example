@@ -10,3 +10,20 @@ spring:
   ai:
     openai:
       api-key: "<在此填入你的 DeepSeek API Key>"
+
+# 模型配置专项批②（写路径 + URL 闸 + 设置页）
+#   AI_SECRET_KEK = base64 的 32 字节，**只**在"在设置页保存/更新 API Key（key_ref=DB）"时需要；
+#     生成示例（PowerShell）：[Convert]::ToBase64String((1..32 | % { Get-Random -Max 256 }))
+#     缺失时保存 key 直接 400 AI_SECRET_KEK_MISSING（fail-closed，不做明文降级）。
+#   KEK 必须与 H2 库同生命周期备份：KEK 丢了 + 库在 = 库里的 key 不可恢复。
+#
+# app:
+#   ai:
+#     config:
+#       # 允许 provider 指向私网/回环地址（默认 false）。内网自建网关或 E2E 桩才打开；
+#       # 打开等于"允许应用去打内网"，是取舍不是根治。
+#       allow-private-endpoints: false
+#       # /test 与拉取模型的超时
+#       probe-timeout: 5s
+#       # 远端模型清单缓存 TTL
+#       models-cache-ttl: 10m

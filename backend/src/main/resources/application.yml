@@ -116,6 +116,14 @@ app:
       seed-force: false
       # 读路径版本比对的最小间隔：稳态至多 1 次/秒/实例（Redis ai:cfg:ver，不可用时退化为本地版本）。
       reload-interval: 1s
+      # URL 闸（SSRF，模型配置专项批②）：写路径只接受 http/https 绝对地址、禁内嵌凭据；
+      # 默认**禁**私网/回环/云元数据（169.254.169.254）。打开本键 = 允许应用去打内网，
+      # 仅在"内网自建 OpenAI 兼容网关 / E2E 桩"时显式打开（种子行 source=ENV_SEED 不受本键约束）。
+      allow-private-endpoints: false
+      # /test 与 /models/fetch 的单次上游超时（人点按钮等结果的同步动作，按 5s 而不是聊天预算取值）。
+      probe-timeout: 5s
+      # 拉取到的远端模型清单缓存（Redis ai:cfg:models:<providerId>；不落库）。
+      models-cache-ttl: 10m
     # 会话滑动 TTL（2026-10-20 用户裁决第 4 条：6h → 24h，活跃即续、整个会话维度、无绝对上限）。
     # run 级外置键（快照/待决/台账/帧/序号/心跳）同取本值，每次写/心跳都整额续期。
     session-ttl: 24h
