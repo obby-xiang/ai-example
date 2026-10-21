@@ -19,6 +19,9 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -303,6 +306,91 @@ class ResumeServiceLeaseTest {
 		assertThat(racing.heldRunEpoch(RUN_ID)).as("进程内视图仍持有").isPositive();
 	}
 
+	// ── L-19：创建者输掉进程内互斥，也不得还租 ─────────────────────────────
+
+	/**
+	 * <b>确定性</b>复现 L-19（不靠调度运气，时序由屏障钉死）：
+	 * <ol>
+	 * <li>X 先 {@code acquireRunLease} → 创建租约（{@code created=true}），但<b>停在 acquire 之后</b>；</li>
+	 * <li>Y 随后抢 → 重入命中（{@code created=false}），并<b>第一个</b>进入 {@code resuming} 互斥，
+	 *     卡在驱动里（{@code driveResumed} 被测试按住）；</li>
+	 * <li>X 这才继续 → 互斥已被占 ⇒ {@code IN_PROGRESS}。</li>
+	 * </ol>
+	 *
+	 * <p>旧实现只按"是不是我创建的"决定还租：X 是创建者，于是它在 IN_PROGRESS 时把租约还了 ——
+	 * 而那一任正被 Y 使用（同一 token），Y 后续写回因此退化成 plain SET、fence 键从不推进。
+	 * 正确口径是<b>两个条件都满足才还</b>：created=true <b>且</b>结局在归还白名单内。
+	 */
+	@Test
+	void creatorLosingTheInProcessMutexDoesNotReleaseTheLeaseTheWinnerUses() throws Exception {
+		CountDownLatch creatorAcquired = new CountDownLatch(1);
+		CountDownLatch winnerInsideMutex = new CountDownLatch(1);
+		CountDownLatch holdDriver = new CountDownLatch(1);
+		InMemoryRunStore racing = new InMemoryRunStore() {
+
+			@Override
+			public LeaseService.AcquireResult acquireRunLease(String runId) {
+				LeaseService.AcquireResult result = super.acquireRunLease(runId);
+				if (result.created()) {
+					// 创建者：抢到了，但先别往下走 —— 等胜方进入互斥并卡在驱动里
+					creatorAcquired.countDown();
+					awaitQuietly(winnerInsideMutex, 5_000L);
+				}
+				return result;
+			}
+
+		};
+		racing.useLeaseFacility(this.leases);
+		seedResumableRun(racing);
+		ResumeService racingService = new ResumeService(racing, this.registry, this.codec, this.chatService,
+				this.toolCallingManager, this.executor, this.redis, this.properties, this.cancellations, this.limiter);
+		// 胜方的驱动卡住：进入 driveResumed = 已在互斥内
+		doAnswer(invocation -> {
+			winnerInsideMutex.countDown();
+			holdDriver.await(10, TimeUnit.SECONDS);
+			return null;
+		}).when(this.chatService).driveResumed(any(), any(), any(), any(), any());
+
+		AtomicReference<ResumeService.ResumeResult> creator = new AtomicReference<>();
+		Thread x = new Thread(() -> creator.set(racingService.resume(RUN_ID)), "l19-creator");
+		x.start();
+		assertThat(creatorAcquired.await(5, TimeUnit.SECONDS)).as("创建者已抢到租约（正等胜方进互斥）").isTrue();
+
+		AtomicReference<ResumeService.ResumeResult> winner = new AtomicReference<>();
+		Thread y = new Thread(() -> winner.set(racingService.resume(RUN_ID)), "l19-winner");
+		y.start();
+		assertThat(winnerInsideMutex.await(5, TimeUnit.SECONDS)).as("胜方已进入 resuming 互斥并卡在驱动里").isTrue();
+
+		x.join(5_000L);
+		assertThat(x.isAlive()).as("创建者应在胜方持锁期间立即返回").isFalse();
+		assertThat(creator.get().outcome()).isEqualTo(ResumeService.Outcome.IN_PROGRESS);
+		// L-19 的核心断言：创建者输掉互斥 ⇒ 这一任仍归胜方使用，不得还
+		assertThat(this.fake.string(racing.runLeaseKey(RUN_ID))).as("租约仍在（胜方正在用同一 token）").isNotNull();
+		assertThat(racing.heldRunEpoch(RUN_ID)).as("进程内视图仍持有").isPositive();
+
+		holdDriver.countDown();
+		y.join(10_000L);
+		assertThat(y.isAlive()).isFalse();
+		assertThat(winner.get().outcome()).isEqualTo(ResumeService.Outcome.ACCEPTED);
+		assertThat(this.fake.string(racing.runLeaseKey(RUN_ID))).as("胜方驱动期间租约一直在").isNotNull();
+	}
+
+	/**
+	 * 归还白名单的另一侧（防止"一律不还"式过度修正）：<b>轮不存在</b>时没有任何执行者会接手，
+	 * 租约必须还 —— 否则一个误传的 runId 会白占 30s（TTL），把后续同 id 的真实续跑挡在
+	 * {@code LEASE_HELD_ELSEWHERE} 上。
+	 */
+	@Test
+	void unknownRunStillReleasesTheLeaseBecauseNobodyCanTakeOver() {
+		String missing = "run-l19-missing";
+
+		ResumeService.ResumeResult result = this.service.resume(missing);
+
+		assertThat(result.outcome()).isEqualTo(ResumeService.Outcome.NOT_FOUND);
+		assertThat(this.fake.string(this.store.runLeaseKey(missing))).as("无人接管 ⇒ 当场还").isNull();
+		assertThat(this.store.heldRunEpoch(missing)).isZero();
+	}
+
 	// ── 观测面 ────────────────────────────────────────────────────────────
 
 	@Test
@@ -334,6 +422,18 @@ class ResumeServiceLeaseTest {
 		snapshot.setInFlightToolCalls(new ArrayList<>(List.of(inFlight)));
 		target.save(snapshot);
 		target.seedPending(RUN_ID, entry(PendingToolCall.EXECUTED));
+	}
+
+	private static void awaitQuietly(CountDownLatch latch, long millis) {
+		try {
+			if (!latch.await(millis, TimeUnit.MILLISECONDS)) {
+				throw new IllegalStateException("屏障超时（" + millis + "ms）");
+			}
+		}
+		catch (InterruptedException ex) {
+			Thread.currentThread().interrupt();
+			throw new IllegalStateException("屏障被中断", ex);
+		}
 	}
 
 	private static PendingToolCall entry(String status) {

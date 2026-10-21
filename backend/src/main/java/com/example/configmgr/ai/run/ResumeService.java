@@ -121,7 +121,38 @@ public class ResumeService {
 		 * <p>它不是错误：说明那一轮已经有主（在等卡 / 在驱动 / 正在收尾），本实例什么都不该做。
 		 * 对外统一 409（{@code AiController#resume} 的 switch）。
 		 */
-		LEASE_HELD_ELSEWHERE
+		LEASE_HELD_ELSEWHERE;
+
+		/**
+		 * 该结局下，<b>自抢租约的调用方</b>是否可以归还租约（<b>归还白名单</b>，默认不还）。
+		 *
+		 * <h2>判据</h2>
+		 * 调用方已经通过 {@code created} 证明了一件事：<b>抢租那一刻全集群没有人持有这一轮的租约</b>
+		 * （否则它只会是重入命中、{@code created=false}，那条路径根本不还租）。所以"还有别人在管"只可能
+		 * 来自<b>本进程内后到的并发调用方</b> —— 而那种情形下本线程的结局必然是
+		 * {@link #IN_PROGRESS}（{@code resuming} 互斥被占）。
+		 *
+		 * <ul>
+		 * <li>{@link #IN_PROGRESS}：<b>本进程已有胜方在跑</b>，它用的是<b>同一 token</b> ——
+		 *     还租就是删它的续跑权（L-19：创建者输掉互斥时，"创建者"身份不等于"可以删"）⇒ <b>不还</b>；</li>
+		 * <li>{@link #LEASE_HELD_ELSEWHERE}：租约在别人手里（本方法只可能是 verifyHeld 判丢后返回它）⇒ 更不该碰；</li>
+		 * <li>{@link #NOT_FOUND} / {@link #ALREADY_DONE} / {@link #ALREADY_CANCELLED}：轮不存在或已收尾，
+		 *     没有任何执行者 ⇒ 还；</li>
+		 * <li>{@link #ALREADY_RUNNING} / {@link #PENDING_UNRESOLVED}：快照停在 RUNNING（僵尸轮）或
+		 *     外部卡未决 —— {@code created=true} 已说明<b>现在没有别的实例在驱动/等待</b>，
+		 *     这批租约没有接管者 ⇒ 还（否则要白等一个 TTL，启动扫描/重试才拿得回来）；</li>
+		 * <li>{@link #POOL_SATURATED}：池饱和 = 派发失败 = 无人接管（与 {@code ConfirmGate} 的
+		 *     {@code EXECUTOR_SATURATED} 必须还租同一条红线）⇒ 还；</li>
+		 * <li>{@link #ACCEPTED}：调用方把租约<b>交续租调度器</b>（不是"还"）⇒ 本方法返回 false。</li>
+		 * </ul>
+		 *
+		 * <p>白名单（默认不还）而不是黑名单：将来新增结局时，默认落在"不还"一侧 —— 漏还是一个 TTL 的
+		 * 可用性问题，错还是一次双驱动/丢 fencing 的正确性问题。
+		 */
+		public boolean releasesLease() {
+			return this == NOT_FOUND || this == ALREADY_DONE || this == ALREADY_CANCELLED
+					|| this == ALREADY_RUNNING || this == PENDING_UNRESOLVED || this == POOL_SATURATED;
+		}
 
 	}
 
@@ -288,10 +319,17 @@ public class ResumeService {
 	 * <li>抢 {@code ai:lease:run:<runId>}；抢不到（且本仓有租约设施）⇒ {@code LEASE_HELD_ELSEWHERE}，
 	 * 什么都不动；无租约设施（单测/降级装配）⇒ 走原路径，由进程内互斥兜底；</li>
 	 * <li>走带租约重载 {@link #resume(String, boolean, LeaseService.Lease)}；</li>
-	 * <li>非 {@code ACCEPTED} ⇒ 当场还租；{@code ACCEPTED} ⇒ 交续租调度器
-	 * （终态由 {@code RunStore.save} 释放）。<b>只还自己创建的</b>（{@code AcquireResult#created()}）：
-	 * 可重入命中的租约属于等待方或另一个并发调用方，还了就会把别人的续跑权删掉 ——
-	 * 这正是"并发同主双抢、败方删掉胜方租约"那个缺陷的根因。</li>
+	 * <li>非 {@code ACCEPTED} 且结局在<b>归还白名单</b>内（{@link Outcome#releasesLease()}，
+	 * {@code IN_PROGRESS} 与 {@code LEASE_HELD_ELSEWHERE} 不在其中 = 有人正在用这一任）
+	 * ⇒ 当场还租；{@code ACCEPTED} ⇒ 交续租调度器（终态由 {@code RunStore.save} 释放）。
+	 * <b>两个条件都必要</b>：
+	 * <ul>
+	 * <li><b>只还自己创建的</b>（{@code AcquireResult#created()}）—— 可重入命中的租约属于等待方
+	 * 或另一个并发调用方；</li>
+	 * <li><b>只在无人接管的结局下还</b>（L-19）—— 创建者也可能输掉 {@code resuming} 互斥
+	 * （{@code IN_PROGRESS}），此时它手里的租约正被胜方使用，"创建者"身份并不等于"可以删"。</li>
+	 * </ul>
+	 * 合起来才是完整口径：<b>租约跟"这一轮还有没有人管"走，不跟"是谁建的"走</b>。</li>
 	 * </ol>
 	 *
 	 * @param forceTakeover 仅由<b>启动自动续跑</b>使用的僵尸接管开关（N3）：为 true 时允许
@@ -335,7 +373,10 @@ public class ResumeService {
 				// 于是"驱动线程异常退出、快照停在 RUNNING"不会留下永远续租的僵尸租约。
 				leases.markDriving(lease, () -> this.resuming.containsKey(runId) && snapshotNotTerminal(runId));
 			}
-			else {
+			else if (result.outcome().releasesLease()) {
+				// L-19：只有"确认无人会接手"的结局才还租。IN_PROGRESS = 本进程已有胜方在跑 ——
+				// 创建者输掉 resuming 互斥时，它手里这份租约仍是胜方在用的那一任，
+				// 还了就把胜方的 fencing 写打回 plain SET（fence 键不再推进）。
 				this.store.releaseRunLease(runId);
 			}
 		}

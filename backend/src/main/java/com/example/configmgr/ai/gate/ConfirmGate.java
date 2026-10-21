@@ -1285,8 +1285,10 @@ public class ConfirmGate {
 	 * INFO 日志留痕（A9 的"饱和/结局可见"）。
 	 *
 	 * <p><b>租约职责</b>：{@code fresh=true}（本次抢到的）才由这里收尾 —— 结局 {@code ACCEPTED}
-	 * 交续租调度器（终态由 {@code RunStore.save} 释放），其余结局当场还租。{@code fresh=false}
-	 * 表示租约本来就在本进程手里（等待方/上一次派发），本次不动它。
+	 * 交续租调度器（终态由 {@code RunStore.save} 释放）；其余结局按 {@link ResumeService.Outcome#releasesLease()}
+	 * 的<b>归还白名单</b>决定（L-19：{@code IN_PROGRESS} / {@code LEASE_HELD_ELSEWHERE} 有人正在用这一任 ⇒
+	 * 不还，其余"确认无人接管"的结局当场还）。{@code fresh=false} 表示租约本来就在本进程手里
+	 * （等待方/上一次派发），本次不动它。
 	 */
 	private void runResume(String runId, LeaseService.Lease lease, boolean fresh) {
 		try {
@@ -1299,9 +1301,11 @@ public class ConfirmGate {
 			// F8 第 3 步：派发（HTTP 线程）与执行（触发池）之间仍有排队窗口 —— 此处再复查一次，
 			// 本进程已有活跃等待就放弃，避免与"帧发出后才进入等待"的原循环双驱动同一轮。
 			if (hasActiveLatch(runId)) {
-				log.info("死卡兜底续跑放弃 runId={} outcome=ACTIVE_LATCH_IN_PROCESS（执行时复查到本进程仍有活跃等待）",
-						runId);
-				releaseLeaseQuietly(lease, runId, fresh);
+				// L-19 同族：这里<b>不还租</b>。排队窗口里出现的等待方（帧已发、await 刚登记）
+				// 刚刚以可重入方式拿到了同一任租约 —— 它才是现在管这一轮的人。还了就等于在
+				// "等待方持租"的时刻把它的租约删掉（它随后交棒时 fencing 写会退化成 plain SET）。
+				log.info("死卡兜底续跑放弃 runId={} outcome=ACTIVE_LATCH_IN_PROCESS（执行时复查到本进程仍有活跃等待；"
+						+ "租约留给等待方，不还）", runId);
 				return;
 			}
 			ResumeService.ResumeResult result = lease == null ? service.resume(runId)
@@ -1318,8 +1322,15 @@ public class ConfirmGate {
 					markDrivingGuarded(lease, runId);
 				}
 			}
-			else {
+			else if (result != null && result.outcome().releasesLease()) {
+				// L-19：与 ResumeService 同一条<b>归还白名单</b>（{@link ResumeService.Outcome#releasesLease}）。
+				// IN_PROGRESS = 本进程有胜方在用<b>同一 token</b>，LEASE_HELD_ELSEWHERE = 租约已归别人 ——
+				// 两者都<b>不还</b>。派发失败（EXECUTOR_SATURATED）与执行异常仍还租：
+				// 那是"确认没人接管"的两条路径（与 ResumeService 池饱和同口径的红线）。
 				releaseLeaseQuietly(lease, runId, fresh);
+			}
+			else if (result == null) {
+				log.warn("死卡兜底续跑未返回结局 runId={}（按'有人接管'处理：不还租，最多等 TTL）", runId);
 			}
 		}
 		catch (Exception ex) {

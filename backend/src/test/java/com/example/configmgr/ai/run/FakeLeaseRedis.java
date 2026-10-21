@@ -335,7 +335,15 @@ public final class FakeLeaseRedis {
 
 	// ── 脚本语义（逐行复刻 Lua） ────────────────────────────────────────────
 
-	private Object handleScript(RedisScript<?> script, List<?> keys, List<Object> args) {
+	/**
+	 * Lua 脚本的语义替身。
+	 *
+	 * <p><b>synchronized 是刻意的</b>：真实 Redis 的脚本执行为<b>串行</b>语义 —— 抢租脚本里
+	 * "GET 命中则返回 / 否则 INCR+SET"这一整段原子执行，两个并发调用不可能都看到空值。
+	 * 早期实现没加锁，于是并发用例里两个线程可能各建一任（epoch 不同、owner 相同），
+	 * 表现为"两边 created=true"的<b>替身假象</b>（生产不会发生）。这里用同一把锁复刻串行引擎。
+	 */
+	private synchronized Object handleScript(RedisScript<?> script, List<?> keys, List<Object> args) {
 		this.scriptCalls.incrementAndGet();
 		checkAlive();
 		String body = script.getScriptAsString();
