@@ -11,6 +11,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.context.i18n.LocaleContext;
 import org.springframework.context.i18n.LocaleContextHolder;
 
 import java.util.Locale;
@@ -100,10 +101,7 @@ public class GlobalExceptionHandler {
      */
     private ResponseEntity<?> respond(HttpStatus status, String code, String message,
             Map<String, Object> args, HttpServletRequest request) {
-        Locale locale = LocaleContextHolder.getLocale();
-        if (locale == null) {
-            locale = Locale.SIMPLIFIED_CHINESE;
-        }
+        Locale locale = requestLocale();
         String traceId = request == null ? null : traceIdOf(request);
         if (wantsProblemJson(request)) {
             ProblemDetail problem = bodyFactory.problem(code, status, message, args,
@@ -117,6 +115,20 @@ public class GlobalExceptionHandler {
             body.setTraceId(traceId);
         }
         return ResponseEntity.status(status).body(body);
+    }
+
+    /**
+     * 请求线程上的 locale。**没有 LocaleContext 时回落 zh-CN，不读 JVM 默认 locale**。
+     *
+     * <p>{@code LocaleContextHolder.getLocale()} 在无上下文时返回 {@code Locale.getDefault()}
+     * （CI 的 Ubuntu 是 en-US），会让"无 {@code Accept-Language} 头 = 默认 zh"的 S6 口径随机器漂移。
+     * 正常请求由 {@code WebI18nConfig} 的 {@code AcceptHeaderLocaleResolver} 写入上下文（默认即 zh），
+     * 故这里只兜底"没有协商结果"的情形。
+     */
+    private static Locale requestLocale() {
+        LocaleContext context = LocaleContextHolder.getLocaleContext();
+        Locale locale = context == null ? null : context.getLocale();
+        return locale == null ? Locale.SIMPLIFIED_CHINESE : locale;
     }
 
     /** `Accept` 含 `application/problem+json` 才切 RFC 9457 形态（默认形态零变化）。 */

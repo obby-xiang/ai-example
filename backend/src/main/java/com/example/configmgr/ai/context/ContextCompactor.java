@@ -7,6 +7,7 @@ import org.springframework.ai.chat.messages.Message;
 
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -312,7 +313,7 @@ public final class ContextCompactor {
 			log.info("上下文压缩 sessionId={} runId={} level={} before={} after={} turns={} lostTokens={} "
 					+ "clearedPairs={} summaryChars={} reason={} ratio={}", request.sessionId(), request.runId(),
 					action.wire(), before, after, turns, lost, clear.cleared().size(), summaryChars, reason,
-					String.format("%.3f", decision.ratio()));
+					String.format(Locale.ROOT, "%.3f", decision.ratio()));
 			// 日志链路批：压缩是"这一轮为什么变了/省了多少"的唯一解释项（与上面那行同源，字段可聚合）
 			AiTrace.eventOn(request.runId(), request.sessionId(), "compaction", "level", action.wire(), "reason",
 					reason, "before", before, "after", after, "savedTokens", saved, "lostTokens", lost, "turns",
@@ -364,7 +365,7 @@ public final class ContextCompactor {
 	private Outcome noop(Request request, int before, ContextTrigger.Level level, int limit, double ratio, int nextEst,
 			String reason, String circuit) {
 		log.debug("上下文压缩跳过 sessionId={} runId={} reason={} limit={} ratio={}", request.sessionId(),
-				request.runId(), reason, limit, String.format("%.3f", ratio));
+				request.runId(), reason, limit, String.format(Locale.ROOT, "%.3f", ratio));
 		return new Outcome(ContextTrigger.Level.NONE, request.messages(), before, before, 0, 0, List.of(), reason, limit,
 				request.usedTokens(), false, circuit, ratio, nextEst, 0, 0, 0);
 	}
