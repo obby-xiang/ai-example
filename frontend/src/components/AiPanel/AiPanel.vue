@@ -1092,6 +1092,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ArrowRight, ChatDotRound } from '@element-plus/icons-vue'
 import { useAiStore } from '@/stores/ai'
+import { useI18n } from 'vue-i18n'
 import { useAiModelStore } from '@/stores/ai-model'
 import { AI_CONFIG_ERROR_TEXT } from '@/constants/ai-settings-copy'
 import { useWorkspaceStore } from '@/stores/workspace'
@@ -1108,7 +1109,7 @@ import {
   renderMermaidSvg,
   setStreamFlushHandler
 } from '@/utils/markdown'
-import { toolSummary, TOOL_SUMMARY_STATUS_WORDS } from '@/utils/tool-summaries'
+import { toolSummary, toolStatusWords } from '@/utils/tool-summaries'
 import {
   argRows,
   cardStatusOf,
@@ -1137,6 +1138,7 @@ import { SHEET_PREVIEW_TOOLS } from '@/types/tools'
 import type { FormSpec } from '@/types/form-schema'
 import type { ErrorCard, ErrorCardVariant } from '@/utils/error-card'
 
+const { t } = useI18n()
 const ai = useAiStore()
 const workspace = useWorkspaceStore()
 // 批③：模型/参数状态独立成 store（避开与表格专项在 stores/ai.ts 的相邻 hunk）
@@ -1368,43 +1370,6 @@ function isMsgCopied(messageId: string): boolean {
 }
 
 /** 工具名 → 中文（后端工具全集 + 前端工具/页面能力的可读名）。 */
-const TOOL_LABELS: Record<string, string> = {
-  list_config_defs: '列出配置定义',
-  get_config_def: '读取配置定义',
-  list_tasks: '列出任务',
-  get_workspace_state: '读取工作区状态',
-  check_job_status: '查询作业状态',
-  get_row_count: '预估数据行数',
-  start_export: '启动导出作业',
-  start_precheck: '启动预检查作业',
-  start_import: '启动导入作业',
-  start_publish: '启动发布作业',
-  open_export_file_editor: '打开导出文件在线编辑器',
-  download_export_files: '下载导出文件',
-  navigate_to: '跳转页面',
-  [GENERATIVE_FORM_TOOL]: '生成式表单',
-  select_definitions: '选择配置项',
-  set_condition: '设置查询条件',
-  confirm_step: '确认步骤',
-  read_sheet_summary: '读取表格摘要',
-  aggregate_sheet: '聚合表格',
-  inspect_columns: '诊断列映射',
-  review_cells: '本地校验摘要',
-  normalize_column: '列归一化',
-  replace_values: '查找替换',
-  update_rows: '条件更新行',
-  undo_last_sheet_edit: '撤销 AI 表格修改',
-  download_templates: '下载模板',
-  'export.selectDefs': '选择配置项',
-  'export.setConditions': '设置查询条件',
-  'export.start': '启动导出作业',
-  'export.openEditor': '打开在线编辑器',
-  'import.selectDefs': '选择配置项',
-  'import.upload': '上传文件',
-  'import.startPrecheck': '启动预检查作业',
-  'import.startImport': '启动导入作业',
-  'import.startPublish': '启动发布作业'
-}
 
 const shortSessionId = computed(() => ai.sessionId.slice(0, 8))
 
@@ -1842,7 +1807,7 @@ function markdownHtml(message: ChatMessage, block: Block): string {
  */
 const SUMMARY_PREFIX_SEP = /^[\s·、，,:：\-—]+/
 /** 状态词全集（兜底摘要剥掉工具名后只剩状态词 ⇒ 右状态标签已同屏承担，摘要位不再重复）。 */
-const STATUS_WORD_SET = new Set(Object.values(TOOL_SUMMARY_STATUS_WORDS))
+const STATUS_WORD_SET = computed(() => toolStatusWords())
 
 function toolSummaryOrNull(part: ToolPart): string | null {
   const summary = toolSummary(part)
@@ -1857,7 +1822,7 @@ function toolSummaryOrNull(part: ToolPart): string | null {
   if (rest === null) {
     return summary
   }
-  return rest === '' || STATUS_WORD_SET.has(rest) ? null : rest
+  return rest === '' || STATUS_WORD_SET.value.has(rest) ? null : rest
 }
 
 /**
@@ -2662,8 +2627,14 @@ function reasonText(part: ToolPart): string {
   return conflictRows(part).length > 0 ? reasonHeadline(reason) : reason
 }
 
+/**
+ * 工具展示名（S2 收口）：`tool.<name>.title` 是唯一来源（zh 值与迁移前 `TOOL_LABELS` 逐字一致）。
+ * 缺键时回落工具名原文 —— 保证"永远有字"，不渲染 key 片段。
+ */
 function toolLabel(name: string): string {
-  return TOOL_LABELS[name] ?? name
+  const key = `tool.${name}.title`
+  const value = t(key)
+  return value === key ? name : value
 }
 
 /**

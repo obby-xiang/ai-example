@@ -1,0 +1,274 @@
+{
+  "common": {
+    "app": {
+      "title": "Configuration Manager"
+    },
+    "action": {
+      "confirm": "OK",
+      "cancel": "Cancel"
+    }
+  },
+  "nav": {
+    "tasks": "Tasks",
+    "definitions": "Definitions",
+    "data": "Data",
+    "aiSettings": "AI Settings",
+    "aiFeedback": "AI Feedback",
+    "showAiPanel": "Show AI panel",
+    "hideAiPanel": "Hide AI panel",
+    "langZh": "中文",
+    "langEn": "EN"
+  },
+  "route": {
+    "taskCenter": "Tasks",
+    "exportWizard": "Export wizard",
+    "importWizard": "Import wizard",
+    "definitions": "Definitions",
+    "dataBrowser": "Data browser",
+    "aiSettings": "AI Settings",
+    "aiFeedback": "AI Feedback"
+  },
+  "app": {
+    "footer": {
+      "contract": "Workspace contract v{version}",
+      "context": "Context {key}",
+      "dataVersion": "Data version {version}",
+      "collapsedHint": "(The AI panel is collapsed to a 48px rail; all business features remain available.)"
+    }
+  },
+  "tool": {
+    "list_config_defs": {
+      "title": "List definitions",
+      "summary": "List definitions",
+      "withLevel": "List definitions (level {level})"
+    },
+    "get_config_def": {
+      "title": "Read definition",
+      "summary": "Read definition",
+      "withCode": "Read all fields of definition {code}"
+    },
+    "list_tasks": {
+      "title": "List tasks",
+      "summary": "List tasks"
+    },
+    "get_workspace_state": {
+      "title": "Read workspace state",
+      "summary": "Read workspace state"
+    },
+    "check_job_status": {
+      "title": "Check job status",
+      "summary": "Check job status",
+      "withJob": "Check job status (job #{jobId})"
+    },
+    "get_row_count": {
+      "title": "Estimate row count",
+      "summary": "Estimate row count",
+      "withDef": "Estimate row count ({def})",
+      "withDefScope": "Estimate row count ({def} · {scope})",
+      "withScope": "Estimate row count ({scope})"
+    },
+    "create_task": {
+      "title": "Create task",
+      "summary": "Create {type} task",
+      "withTitle": "Create {type} task \"{title}\""
+    },
+    "start_export": {
+      "title": "Start export job",
+      "summary": "Start export job",
+      "withTask": "Start export job (task #{taskId})"
+    },
+    "start_precheck": {
+      "title": "Start precheck job",
+      "summary": "Start precheck job",
+      "withTask": "Start precheck job (task #{taskId})"
+    },
+    "start_import": {
+      "title": "Start import job",
+      "summary": "Start import job",
+      "withTask": "Start import job (task #{taskId})"
+    },
+    "start_publish": {
+      "title": "Start publish job",
+      "summary": "Start publish job",
+      "withTask": "Start publish job (task #{taskId})"
+    },
+    "open_export_file_editor": {
+      "title": "Open export file editor",
+      "summary": "Open export file editor"
+    },
+    "download_export_files": {
+      "title": "Download export files",
+      "summary": "Download export files",
+      "withCount": "Download export files ({count} definitions)"
+    },
+    "navigate_to": {
+      "title": "Navigate",
+      "summary": "Navigate",
+      "withPage": "Navigate ({page})"
+    },
+    "generative_form": {
+      "title": "Generated form",
+      "summary": "Generated form (pending)"
+    },
+    "select_definitions": {
+      "title": "Select definitions",
+      "summary": "Select definitions",
+      "withCount": "Select definitions ({count})"
+    },
+    "set_condition": {
+      "title": "Set query conditions",
+      "summary": "Set query conditions"
+    },
+    "confirm_step": {
+      "title": "Confirm step",
+      "summary": "Confirm current step",
+      "withStep": "Confirm step {step}"
+    },
+    "read_sheet_summary": {
+      "title": "Read sheet summary",
+      "summary": "Read sheet summary",
+      "withDef": "Read sheet summary ({def})",
+      "withDefScope": "Read sheet summary ({def} · {scope})",
+      "withScope": "Read sheet summary ({scope})"
+    },
+    "aggregate_sheet": {
+      "title": "Aggregate sheet",
+      "summary": "Aggregate sheet",
+      "withGroup": "Aggregate sheet (group by {groupBy})"
+    },
+    "inspect_columns": {
+      "title": "Inspect column mapping",
+      "summary": "Inspect column mapping"
+    },
+    "review_cells": {
+      "title": "Local validation summary",
+      "summary": "Local validation summary"
+    },
+    "normalize_column": {
+      "title": "Normalize column",
+      "summary": "Normalize column",
+      "withRules": "Normalize column ({count} rules)",
+      "withRulesPending": "Normalize column ({count} rules) · pending",
+      "withRulesAdvisory": "Normalize column ({count} rules) · advisory only",
+      "pending": "Normalize column · pending",
+      "advisory": "Normalize column · advisory only"
+    },
+    "replace_values": {
+      "title": "Find and replace",
+      "summary": "Find and replace",
+      "withSearch": "Find and replace \"{search}\" → \"{replace}\""
+    },
+    "update_rows": {
+      "title": "Update rows",
+      "summary": "Update rows",
+      "withCols": "Update rows ({count} columns)"
+    },
+    "undo_last_sheet_edit": {
+      "title": "Undo AI sheet edit",
+      "summary": "Undo AI sheet edit"
+    },
+    "download_templates": {
+      "title": "Download templates"
+    },
+    "open_page": {
+      "title": "Navigate",
+      "summary": "Navigate",
+      "withPage": "Navigate ({page})"
+    },
+    "restore_task": {
+      "title": "Restore task",
+      "summary": "Restore task",
+      "withTask": "Restore task #{taskId}"
+    },
+    "goto_step": {
+      "title": "Go to step",
+      "summary": "Go to step",
+      "withStep": "Go to step {step}"
+    },
+    "select_defs": {
+      "title": "Select definitions",
+      "summary": "Select definitions",
+      "withCount": "Select definitions ({count})"
+    },
+    "set_conditions": {
+      "title": "Set query conditions",
+      "summary": "Set query conditions"
+    },
+    "set_import_mode": {
+      "title": "Set import mode",
+      "summary": "Set import mode",
+      "withMode": "Set import mode ({mode})"
+    },
+    "run_job": {
+      "title": "Start job",
+      "summary": "Start job",
+      "withTask": "Start job (task #{taskId})"
+    },
+    "cancel_job": {
+      "title": "Cancel job",
+      "summary": "Cancel job",
+      "withJob": "Cancel job #{jobId}"
+    },
+    "download": {
+      "title": "Download file",
+      "summary": "Download file",
+      "withName": "Download file {filename}"
+    },
+    "refresh_defs": {
+      "title": "Refresh definitions",
+      "summary": "Refresh definitions"
+    },
+    "refresh_data": {
+      "title": "Refresh data",
+      "summary": "Refresh data"
+    },
+    "refresh_tasks": {
+      "title": "Refresh tasks",
+      "summary": "Refresh tasks"
+    },
+    "status": {
+      "pending": "pending",
+      "running": "running",
+      "succeeded": "done",
+      "failed": "failed",
+      "rejected": "rejected",
+      "blocked": "out of scope",
+      "expired": "expired",
+      "cancelled": "cancelled",
+      "unknown": "unknown",
+      "skipped": "skipped"
+    },
+    "fallback": "{name} · {status}",
+    "export": {
+      "selectDefs": {
+        "title": "Select definitions"
+      },
+      "setConditions": {
+        "title": "Set query conditions"
+      },
+      "start": {
+        "title": "Start export job"
+      },
+      "openEditor": {
+        "title": "Open editor"
+      }
+    },
+    "import": {
+      "selectDefs": {
+        "title": "Select definitions"
+      },
+      "upload": {
+        "title": "Upload file"
+      },
+      "startPrecheck": {
+        "title": "Start precheck job"
+      },
+      "startImport": {
+        "title": "Start import job"
+      },
+      "startPublish": {
+        "title": "Start publish job"
+      }
+    }
+  }
+}

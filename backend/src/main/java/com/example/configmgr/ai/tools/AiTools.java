@@ -1,5 +1,8 @@
 package com.example.configmgr.ai.tools;
 
+import com.example.configmgr.common.CodedIllegalStateException;
+import com.example.configmgr.common.ErrorCodes;
+
 import com.example.configmgr.ai.tool.ToolCategory;
 import com.example.configmgr.ai.tool.ToolChannel;
 import com.example.configmgr.ai.tool.ToolMeta;
@@ -274,7 +277,7 @@ public class AiTools {
         // R-137（T6 重抛面）：写路径失败不再以字符串回填 —— 抛出后由
         // SpToolCallingManager.executeOnce 捕获置 ok=false 呈给模型（恢复框架既有失败通道）
         catch (Exception e) {
-            throw new IllegalStateException("创建任务失败: " + e.getMessage(), e);
+            throw new CodedIllegalStateException(ErrorCodes.TOOL_EXECUTION_FAILED, "创建任务失败: " + e.getMessage(), e);
         }
     }
 

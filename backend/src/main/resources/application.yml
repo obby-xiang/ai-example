@@ -16,6 +16,15 @@ spring:
       # AI 侧见 ai/exec/AiExecutorConfig（挂起专用有界池，饱和 503 SUSPEND_POOL_SATURATED）。
       enabled: false
 
+  messages:
+    # 只两份（zh / en）：区域变体靠 messages_zh_CN → messages_zh → messages 链回落。
+    # 兜底口径见 common/ErrorBodyFactory：zh 一律用调用方原文（E2E 中文断言逐字不变），
+    # en 才查 error.<CODE>；缺键回落原文，绝不回显裸 key。
+    basename: messages
+    encoding: UTF-8
+    fallback-to-system-locale: false
+    cache-duration: 3600
+
   datasource:
     url: jdbc:h2:file:./data/config_mgr_db;DB_CLOSE_DELAY=-1
     driver-class-name: org.h2.Driver

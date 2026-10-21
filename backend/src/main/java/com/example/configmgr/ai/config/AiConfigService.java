@@ -1,5 +1,7 @@
 package com.example.configmgr.ai.config;
 
+import com.example.configmgr.common.ErrorCodes;
+
 import com.example.configmgr.ai.config.db.AiProvider;
 import com.example.configmgr.ai.config.db.AiProviderModel;
 import com.example.configmgr.ai.config.db.AiProviderModelRepository;
@@ -67,12 +69,12 @@ public class AiConfigService {
     public static final int ENV_SEED_MAX_CONTEXT = 128000;
 
     /** 无 provider 时的 503 码与文案 —— 与批①之前<b>逐字相同</b>（前端与 E2E 的兼容基线）。 */
-    public static final String CODE_UNAVAILABLE = "AI_UNAVAILABLE";
+    public static final String CODE_UNAVAILABLE = ErrorCodes.AI_UNAVAILABLE;
 
     public static final String LEGACY_UNAVAILABLE_REASON =
             "AI 能力未启用：未配置 AI_API_KEY（或 DEEPSEEK_API_KEY）环境变量，AI 端点已惰性降级";
 
-    public static final String CODE_KEY_MISSING = "AI_KEY_MISSING";
+    public static final String CODE_KEY_MISSING = ErrorCodes.AI_KEY_MISSING;
 
     public static final String CODE_KEY_UNREADABLE = AiKeyCipher.CODE_KEY_UNREADABLE;
 

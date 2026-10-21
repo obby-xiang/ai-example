@@ -1,5 +1,8 @@
 package com.example.configmgr.data.service;
 
+import com.example.configmgr.common.CodedIllegalArgumentException;
+import com.example.configmgr.common.ErrorCodes;
+
 import java.time.LocalDate;
 import java.time.format.DateTimeParseException;
 import java.util.List;
@@ -50,7 +53,7 @@ public final class ConditionEvaluator {
     }
 
     private static IllegalArgumentException unknownOperator(String op, String fieldCode) {
-        return new IllegalArgumentException("未知的查询条件操作符: " + op
+        return new CodedIllegalArgumentException(ErrorCodes.CONDITION_OPERATOR_UNKNOWN, "未知的查询条件操作符: " + op
                 + "（字段 " + fieldCode + "），已登记的操作符: " + OPERATORS);
     }
 

@@ -31,14 +31,16 @@ import static org.mockito.Mockito.when;
  */
 class GlobalExceptionHandlerSseTest {
 
-	private final GlobalExceptionHandler handler = new GlobalExceptionHandler();
+	private final GlobalExceptionHandler handler = new GlobalExceptionHandler(
+			new ErrorBodyFactory(new org.springframework.beans.factory.support.DefaultListableBeanFactory()
+					.getBeanProvider(org.springframework.context.MessageSource.class)));
 
 	@Test
 	void sseResponseIsNotRewrittenWithAJsonBody() {
 		HttpServletResponse response = mock(HttpServletResponse.class);
 		when(response.getContentType()).thenReturn(MediaType.TEXT_EVENT_STREAM_VALUE);
 
-		ResponseEntity<ApiResponse<?>> handled = this.handler.handleGeneral(
+		ResponseEntity<?> handled = this.handler.handleGeneral(
 				new IOException("你的主机中的软件中止了一个已建立的连接。"), request(), response);
 
 		assertThat(handled.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
@@ -51,7 +53,7 @@ class GlobalExceptionHandlerSseTest {
 		when(response.getContentType()).thenReturn(MediaType.APPLICATION_JSON_VALUE);
 		when(response.isCommitted()).thenReturn(true);
 
-		ResponseEntity<ApiResponse<?>> handled = this.handler.handleGeneral(new IllegalStateException("响应已提交"), request(),
+		ResponseEntity<?> handled = this.handler.handleGeneral(new IllegalStateException("响应已提交"), request(),
 				response);
 
 		assertThat(handled.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
@@ -63,13 +65,15 @@ class GlobalExceptionHandlerSseTest {
 		HttpServletResponse response = mock(HttpServletResponse.class);
 		when(response.getContentType()).thenReturn(null);
 
-		ResponseEntity<ApiResponse<?>> handled = this.handler.handleGeneral(new IllegalStateException("数据库炸了"), request(),
+		ResponseEntity<?> handled = this.handler.handleGeneral(new IllegalStateException("数据库炸了"), request(),
 				response);
 
 		assertThat(handled.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
-		assertThat(handled.getBody()).isNotNull();
-		assertThat(handled.getBody().isSuccess()).isFalse();
-		assertThat(handled.getBody().getMessage()).contains("服务器内部错误").contains("数据库炸了");
+		assertThat(handled.getBody()).isInstanceOf(ApiResponse.class);
+		ApiResponse<?> body = (ApiResponse<?>) handled.getBody();
+		assertThat(body.isSuccess()).isFalse();
+		assertThat(body.getCode()).isEqualTo(ErrorCodes.INTERNAL_ERROR);
+		assertThat(body.getMessage()).contains("服务器内部错误").contains("数据库炸了");
 	}
 
 	private static HttpServletRequest request() {

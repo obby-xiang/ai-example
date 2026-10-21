@@ -1,6 +1,9 @@
 package com.example.configmgr.task.service;
 
+import com.example.configmgr.common.CodedIllegalArgumentException;
+import com.example.configmgr.common.CodedIllegalStateException;
 import com.example.configmgr.common.ConflictException;
+import com.example.configmgr.common.ErrorCodes;
 import com.example.configmgr.common.ResourceNotFoundException;
 import com.example.configmgr.data.repo.ConfigStagingRowRepository;
 import com.example.configmgr.file.FileStorageService;
@@ -162,16 +165,17 @@ public class TaskService {
         assertTaskNotFinalized(task);
         // ②step 校验：非空 + 格式 + 按任务类型白名单（非法 → IllegalArgumentException → 400）
         if (step == null || step.isBlank()) {
-            throw new IllegalArgumentException("目标步骤不得为空");
+            throw new CodedIllegalArgumentException(ErrorCodes.STEP_REQUIRED, "目标步骤不得为空");
         }
         String normalized = step.trim();
         if (!STEP_FORMAT.matcher(normalized).matches()) {
-            throw new IllegalArgumentException("目标步骤格式不合法：" + step
+            throw new CodedIllegalArgumentException(ErrorCodes.STEP_INVALID, "目标步骤格式不合法：" + step
                     + "（应为全大写字母/数字/下划线，如 SELECT_DEFS、QUERY_COND）");
         }
         if (!STEP_DONE.equals(normalized)
                 && !STEP_WHITELIST.getOrDefault(task.getType(), List.of()).contains(normalized)) {
-            throw new IllegalArgumentException("目标步骤不在该任务类型的步骤序列内：" + step
+            throw new CodedIllegalArgumentException(ErrorCodes.STEP_NOT_IN_SEQUENCE,
+                    "目标步骤不在该任务类型的步骤序列内：" + step
                     + "（" + task.getType() + " 可选：" + STEP_WHITELIST.get(task.getType()) + "）");
         }
         task.setCurrentStep(normalized);
@@ -208,7 +212,7 @@ public class TaskService {
      */
     private void assertTaskNotFinalized(Task task) {
         if (task.getStatus() == Task.TaskStatus.CANCELLED) {
-            throw new ConflictException("TASK_FINALIZED",
+            throw new ConflictException(ErrorCodes.TASK_FINALIZED,
                     "任务 #" + task.getId() + " 已 CANCELLED，禁止跳转步骤（TASK_FINALIZED）");
         }
         if (task.getStatus() != Task.TaskStatus.COMPLETED) {
@@ -221,7 +225,7 @@ public class TaskService {
                         java.util.Set.of(Job.JobStatus.COMPLETED))
                 .isPresent();
         if (hasFinalJob) {
-            throw new ConflictException("TASK_FINALIZED",
+            throw new ConflictException(ErrorCodes.TASK_FINALIZED,
                     "任务 #" + task.getId() + " 已 COMPLETED（" + finalJobType + " 作业成功），禁止跳转步骤（TASK_FINALIZED）");
         }
     }
@@ -232,7 +236,7 @@ public class TaskService {
     @Transactional
     public Task setImportMode(Long taskId, String mode) {
         if (!"MERGE".equals(mode) && !"REPLACE".equals(mode)) {
-            throw new IllegalArgumentException("导入模式只支持 MERGE 或 REPLACE");
+            throw new CodedIllegalArgumentException(ErrorCodes.IMPORT_MODE_INVALID, "导入模式只支持 MERGE 或 REPLACE");
         }
         Task task = taskRepository.findById(taskId)
                 .orElseThrow(() -> ResourceNotFoundException.of("任务", taskId));
@@ -251,7 +255,7 @@ public class TaskService {
         try {
             task.setSettingsJson(objectMapper.writeValueAsString(settings));
         } catch (Exception e) {
-            throw new IllegalStateException("任务设置序列化失败: " + e.getMessage(), e);
+            throw new CodedIllegalStateException(ErrorCodes.TASK_SETTINGS_UNREADABLE, "任务设置序列化失败: " + e.getMessage(), e);
         }
         task = taskRepository.save(task);
         return task;

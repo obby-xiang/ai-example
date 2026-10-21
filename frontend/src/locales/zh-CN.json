@@ -1,0 +1,274 @@
+{
+  "common": {
+    "app": {
+      "title": "配置管理平台"
+    },
+    "action": {
+      "confirm": "确定",
+      "cancel": "取消"
+    }
+  },
+  "nav": {
+    "tasks": "任务中心",
+    "definitions": "配置定义",
+    "data": "数据浏览",
+    "aiSettings": "AI 设置",
+    "aiFeedback": "AI 反馈",
+    "showAiPanel": "显示 AI 栏",
+    "hideAiPanel": "隐藏 AI 栏",
+    "langZh": "中文",
+    "langEn": "EN"
+  },
+  "route": {
+    "taskCenter": "任务中心",
+    "exportWizard": "导出向导",
+    "importWizard": "导入向导",
+    "definitions": "配置定义",
+    "dataBrowser": "数据浏览",
+    "aiSettings": "AI 设置",
+    "aiFeedback": "AI 反馈"
+  },
+  "app": {
+    "footer": {
+      "contract": "工作区契约 v{version}",
+      "context": "上下文 {key}",
+      "dataVersion": "数据版本 {version}",
+      "collapsedHint": "（AI 栏已收起为 48px 侧条，全部业务功能仍可用）"
+    }
+  },
+  "tool": {
+    "list_config_defs": {
+      "title": "列出配置定义",
+      "summary": "列出配置定义",
+      "withLevel": "列出配置定义（{level} 层）"
+    },
+    "get_config_def": {
+      "title": "读取配置定义",
+      "summary": "读取配置定义",
+      "withCode": "读取配置定义 {code} 的完整字段"
+    },
+    "list_tasks": {
+      "title": "列出任务",
+      "summary": "列出任务"
+    },
+    "get_workspace_state": {
+      "title": "读取工作区状态",
+      "summary": "读取工作区状态"
+    },
+    "check_job_status": {
+      "title": "查询作业状态",
+      "summary": "查询作业状态",
+      "withJob": "查询作业状态（作业 #{jobId}）"
+    },
+    "get_row_count": {
+      "title": "预估数据行数",
+      "summary": "预估数据行数",
+      "withDef": "预估数据行数（{def}）",
+      "withDefScope": "预估数据行数（{def} · {scope}）",
+      "withScope": "预估数据行数（{scope}）"
+    },
+    "create_task": {
+      "title": "创建任务",
+      "summary": "创建{type}任务",
+      "withTitle": "创建{type}任务「{title}」"
+    },
+    "start_export": {
+      "title": "启动导出作业",
+      "summary": "启动导出作业",
+      "withTask": "启动导出作业（任务 #{taskId}）"
+    },
+    "start_precheck": {
+      "title": "启动预检查作业",
+      "summary": "启动预检查作业",
+      "withTask": "启动预检查作业（任务 #{taskId}）"
+    },
+    "start_import": {
+      "title": "启动导入作业",
+      "summary": "启动导入作业",
+      "withTask": "启动导入作业（任务 #{taskId}）"
+    },
+    "start_publish": {
+      "title": "启动发布作业",
+      "summary": "启动发布作业",
+      "withTask": "启动发布作业（任务 #{taskId}）"
+    },
+    "open_export_file_editor": {
+      "title": "打开导出文件在线编辑器",
+      "summary": "打开导出文件在线编辑器"
+    },
+    "download_export_files": {
+      "title": "下载导出文件",
+      "summary": "下载导出文件",
+      "withCount": "下载导出文件（{count} 个配置项）"
+    },
+    "navigate_to": {
+      "title": "跳转页面",
+      "summary": "跳转页面",
+      "withPage": "跳转页面（{page}）"
+    },
+    "generative_form": {
+      "title": "生成式表单",
+      "summary": "生成式表单（待填写）"
+    },
+    "select_definitions": {
+      "title": "选择配置项",
+      "summary": "选择配置项",
+      "withCount": "选择配置项（{count} 项）"
+    },
+    "set_condition": {
+      "title": "设置查询条件",
+      "summary": "设置查询条件"
+    },
+    "confirm_step": {
+      "title": "确认步骤",
+      "summary": "确认当前步骤",
+      "withStep": "确认步骤 {step}"
+    },
+    "read_sheet_summary": {
+      "title": "读取表格摘要",
+      "summary": "读取表格摘要",
+      "withDef": "读取表格摘要（{def}）",
+      "withDefScope": "读取表格摘要（{def} · {scope}）",
+      "withScope": "读取表格摘要（{scope}）"
+    },
+    "aggregate_sheet": {
+      "title": "聚合表格",
+      "summary": "聚合表格",
+      "withGroup": "聚合表格（按 {groupBy} 分组）"
+    },
+    "inspect_columns": {
+      "title": "诊断列映射",
+      "summary": "诊断列映射"
+    },
+    "review_cells": {
+      "title": "本地校验摘要",
+      "summary": "本地校验摘要"
+    },
+    "normalize_column": {
+      "title": "列归一化",
+      "summary": "列归一化",
+      "withRules": "列归一化（{count} 条规则）",
+      "withRulesPending": "列归一化（{count} 条规则） · 待确认",
+      "withRulesAdvisory": "列归一化（{count} 条规则） · 只出建议",
+      "pending": "列归一化 · 待确认",
+      "advisory": "列归一化 · 只出建议"
+    },
+    "replace_values": {
+      "title": "查找替换",
+      "summary": "查找替换",
+      "withSearch": "查找替换「{search}」→「{replace}」"
+    },
+    "update_rows": {
+      "title": "条件更新行",
+      "summary": "条件更新行",
+      "withCols": "条件更新行（{count} 列）"
+    },
+    "undo_last_sheet_edit": {
+      "title": "撤销 AI 表格修改",
+      "summary": "撤销 AI 表格修改"
+    },
+    "download_templates": {
+      "title": "下载模板"
+    },
+    "open_page": {
+      "title": "跳转页面",
+      "summary": "跳转页面",
+      "withPage": "跳转页面（{page}）"
+    },
+    "restore_task": {
+      "title": "恢复任务",
+      "summary": "恢复任务",
+      "withTask": "恢复任务 #{taskId}"
+    },
+    "goto_step": {
+      "title": "跳转到向导步骤",
+      "summary": "跳转向导步骤",
+      "withStep": "跳转到步骤 {step}"
+    },
+    "select_defs": {
+      "title": "选择配置项",
+      "summary": "选择配置项",
+      "withCount": "选择配置项（{count} 项）"
+    },
+    "set_conditions": {
+      "title": "设置查询条件",
+      "summary": "设置查询条件"
+    },
+    "set_import_mode": {
+      "title": "设置导入方式",
+      "summary": "设置导入方式",
+      "withMode": "设置导入方式（{mode}）"
+    },
+    "run_job": {
+      "title": "启动作业",
+      "summary": "启动作业",
+      "withTask": "启动作业（任务 #{taskId}）"
+    },
+    "cancel_job": {
+      "title": "取消作业",
+      "summary": "取消作业",
+      "withJob": "取消作业 #{jobId}"
+    },
+    "download": {
+      "title": "下载文件",
+      "summary": "下载文件",
+      "withName": "下载文件 {filename}"
+    },
+    "refresh_defs": {
+      "title": "刷新配置定义列表",
+      "summary": "刷新配置定义列表"
+    },
+    "refresh_data": {
+      "title": "刷新配置数据",
+      "summary": "刷新配置数据"
+    },
+    "refresh_tasks": {
+      "title": "刷新任务列表",
+      "summary": "刷新任务列表"
+    },
+    "status": {
+      "pending": "待确认",
+      "running": "调用中",
+      "succeeded": "已完成",
+      "failed": "失败",
+      "rejected": "已拒绝",
+      "blocked": "超出范围",
+      "expired": "已失效",
+      "cancelled": "已取消",
+      "unknown": "结局未知",
+      "skipped": "已跳过"
+    },
+    "fallback": "{name} · {status}",
+    "export": {
+      "selectDefs": {
+        "title": "选择配置项"
+      },
+      "setConditions": {
+        "title": "设置查询条件"
+      },
+      "start": {
+        "title": "启动导出作业"
+      },
+      "openEditor": {
+        "title": "打开在线编辑器"
+      }
+    },
+    "import": {
+      "selectDefs": {
+        "title": "选择配置项"
+      },
+      "upload": {
+        "title": "上传文件"
+      },
+      "startPrecheck": {
+        "title": "启动预检查作业"
+      },
+      "startImport": {
+        "title": "启动导入作业"
+      },
+      "startPublish": {
+        "title": "启动发布作业"
+      }
+    }
+  }
+}

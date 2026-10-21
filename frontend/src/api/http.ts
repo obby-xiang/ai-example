@@ -9,6 +9,7 @@
 
 import axios, { AxiosError, type AxiosInstance, type AxiosRequestConfig } from 'axios'
 import type { ApiErrorBody, ApiResponse } from '@/types/api'
+import { acceptLanguage } from '@/locales'
 
 /** 前端侧补充的错误码（后端未定义，仅用于网络层异常）。 */
 export const FRONTEND_ERROR_CODES = {
@@ -105,6 +106,17 @@ export const HTTP_TIMEOUT_MS = 60_000
 export const http: AxiosInstance = axios.create({
   baseURL: '/api',
   timeout: HTTP_TIMEOUT_MS
+})
+
+/**
+ * 语言协商头：随每次请求发送当前 UI 语言。
+ *
+ * 后端 `AcceptHeaderLocaleResolver` 默认 locale = zh-CN，**不带该头的调用方零变化**
+ * （E2E / curl / 桩的既有行为不变）；带 `en-US` 时才取英文 messages。
+ */
+http.interceptors.request.use((config) => {
+  config.headers.set('Accept-Language', acceptLanguage())
+  return config
 })
 
 http.interceptors.response.use(

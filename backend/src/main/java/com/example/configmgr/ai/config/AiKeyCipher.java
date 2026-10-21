@@ -1,5 +1,7 @@
 package com.example.configmgr.ai.config;
 
+import com.example.configmgr.common.ErrorCodes;
+
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
@@ -57,7 +59,7 @@ public class AiKeyCipher {
     public static final String ENVELOPE_VERSION = "v1";
 
     /** KEK 缺失/不可用时的稳定错误码（保存 key 的 400 码，批② 消费）。 */
-    public static final String CODE_KEK_MISSING = "AI_SECRET_KEK_MISSING";
+    public static final String CODE_KEK_MISSING = ErrorCodes.AI_SECRET_KEK_MISSING;
 
     /**
      * 待加密的 key 为空/空白（批① 复审登记 M6，批② 与 KEK 缺失分离）。
@@ -67,10 +69,10 @@ public class AiKeyCipher {
      * 去查环境变量。现在它是独立的 400 码（BAD_REQUEST 语义）—— "请求本身不合法" 与 "部署没配好"
      * 是两种修法，排障方向不能混。
      */
-    public static final String CODE_KEY_EMPTY = "KEY_EMPTY";
+    public static final String CODE_KEY_EMPTY = ErrorCodes.KEY_EMPTY;
 
     /** 密文解不开（KEK 换了/错了、kid 不认识、AAD 不匹配）的稳定错误码。 */
-    public static final String CODE_KEY_UNREADABLE = "KEY_UNREADABLE";
+    public static final String CODE_KEY_UNREADABLE = ErrorCodes.KEY_UNREADABLE;
 
     private static final String TRANSFORMATION = "AES/GCM/NoPadding";
 

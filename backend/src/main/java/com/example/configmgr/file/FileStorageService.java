@@ -1,5 +1,8 @@
 package com.example.configmgr.file;
 
+import com.example.configmgr.common.CodedIllegalStateException;
+import com.example.configmgr.common.ErrorCodes;
+
 import com.example.configmgr.config.AppProperties;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -63,7 +66,7 @@ public class FileStorageService {
             md = MessageDigest.getInstance("SHA-256");
         }
         catch (NoSuchAlgorithmException ex) {
-            throw new IllegalStateException("运行环境缺少 SHA-256 实现", ex);
+            throw new CodedIllegalStateException(ErrorCodes.SHA256_UNAVAILABLE, "运行环境缺少 SHA-256 实现", ex);
         }
         long size = 0L;
         byte[] buffer = new byte[DIGEST_BUFFER_BYTES];

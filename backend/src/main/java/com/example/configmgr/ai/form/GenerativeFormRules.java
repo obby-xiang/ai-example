@@ -1,5 +1,7 @@
 package com.example.configmgr.ai.form;
 
+import com.example.configmgr.common.ErrorCodes;
+
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.time.LocalDate;
@@ -64,10 +66,10 @@ public final class GenerativeFormRules {
 	public static final String TOOL_NAME = "generative_form";
 
 	/** schema 级拒绝码（下发前端之前，工具错误结果）。 */
-	public static final String SCHEMA_REJECTED = "FORM_SCHEMA_REJECTED";
+	public static final String SCHEMA_REJECTED = ErrorCodes.FORM_SCHEMA_REJECTED;
 
 	/** 回灌结果级拒绝码（HTTP 400，挂起不被消费）。 */
-	public static final String RESULT_REJECTED = "FORM_RESULT_REJECTED";
+	public static final String RESULT_REJECTED = ErrorCodes.FORM_RESULT_REJECTED;
 
 	/** 字段类型白名单（DC-15 明文六型，不外扩）。 */
 	public static final List<String> FIELD_TYPES = List.of("text", "number", "boolean", "date", "enum", "multi_select");

@@ -1,5 +1,8 @@
 package com.example.configmgr.definition.service;
 
+import com.example.configmgr.common.CodedIllegalStateException;
+import com.example.configmgr.common.ErrorCodes;
+
 import com.example.configmgr.definition.entity.ConfigDefinition;
 import com.example.configmgr.definition.repo.ConfigDefinitionRepository;
 import lombok.RequiredArgsConstructor;
@@ -96,7 +99,7 @@ public class DependencyResolver {
         if (sorted.size() != defCodes.size()) {
             Set<String> remaining = new HashSet<>(defCodes);
             remaining.removeAll(sorted);
-            throw new IllegalStateException("配置定义间存在循环依赖: " + remaining);
+            throw new CodedIllegalStateException(ErrorCodes.DEFINITION_DEPENDENCY_CYCLE, "配置定义间存在循环依赖: " + remaining);
         }
         return sorted;
     }
