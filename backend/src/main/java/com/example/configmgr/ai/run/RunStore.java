@@ -347,14 +347,36 @@ public class RunStore {
 
 	// ── 轮次快照 ────────────────────────────────────────────────────────────
 
+	/**
+	 * 建立一轮的外置快照（不写模型身份；模型身份见
+	 * {@link #create(String, String, AiContext, List, MessageJsonCodec, Long, String)}）。
+	 */
 	public RunSnapshot create(String runId, String sessionId, AiContext context, List<Message> history,
 			MessageJsonCodec codec) {
+		return create(runId, sessionId, context, history, codec, null, null);
+	}
+
+	/**
+	 * 建立一轮的外置快照，并固化<b>模型身份</b>（模型配置专项批①；设计稿 §3.4"续跑一致性"）。
+	 *
+	 * <p>
+	 * {@code providerId}/{@code modelId} 是 additive 字段：旧快照没有它们（反序列化为 null），
+	 * 新快照从第一笔写就带上。批① 只<b>写</b>（取证面 + 为批③ 的"按快照续跑"备好数据），
+	 * 续跑取用口径的切换在批③。
+	 *
+	 * @param providerId 库内 provider id；{@code null} = env 合成行（种子尚未落库/无 DB 行）
+	 * @param modelId 本轮使用的模型名（请求体 {@code model} 的原值）
+	 */
+	public RunSnapshot create(String runId, String sessionId, AiContext context, List<Message> history,
+			MessageJsonCodec codec, Long providerId, String modelId) {
 		RunSnapshot snapshot = new RunSnapshot();
 		snapshot.setRunId(runId);
 		snapshot.setSessionId(sessionId);
 		snapshot.setStatus(RunSnapshot.RUNNING);
 		snapshot.setContext(context == null ? AiContext.empty().toMap() : context.toMap());
 		snapshot.setMessageJson(codec.serializeAll(history));
+		snapshot.setProviderId(providerId);
+		snapshot.setModelId(modelId);
 		snapshot.setCreatedBy(this.instanceId);
 		snapshot.setCreatedAtMs(System.currentTimeMillis());
 		save(snapshot);

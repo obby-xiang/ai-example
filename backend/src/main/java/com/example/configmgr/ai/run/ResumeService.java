@@ -1,6 +1,5 @@
 package com.example.configmgr.ai.run;
 
-import com.example.configmgr.ai.config.AiKeyPresentCondition;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.gate.SpToolCallingManager;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
@@ -13,7 +12,6 @@ import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.context.annotation.Conditional;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Service;
@@ -61,7 +59,6 @@ import java.util.stream.Collectors;
  */
 @Slf4j
 @Service
-@Conditional(AiKeyPresentCondition.class)
 public class ResumeService {
 
 	private final RunStore store;

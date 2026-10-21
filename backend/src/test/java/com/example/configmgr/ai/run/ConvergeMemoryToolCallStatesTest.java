@@ -6,6 +6,8 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.config.AiProviderRegistry;
+import com.example.configmgr.ai.config.ProviderRuntime;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.session.AiSessionService;
 import com.example.configmgr.ai.tool.AiContext;
@@ -73,6 +75,13 @@ class ConvergeMemoryToolCallStatesTest {
 
 	private final ChatModel chatModel = mock(ChatModel.class);
 
+	/** 注册表桩（模型配置专项批①）：取用即返回同一个运行态。 */
+	private final AiProviderRegistry providerRegistry = mock(AiProviderRegistry.class);
+
+	private final ProviderRuntime runtime = new ProviderRuntime(null, "test-provider", "test-model",
+			"http://localhost", "/chat/completions", "test|runtime", null, null, this.chatModel,
+			mock(ChatClient.class));
+
 	private final ChatMemory chatMemory = mock(ChatMemory.class);
 
 	private final ToolRegistry toolRegistry = mock(ToolRegistry.class);
@@ -93,12 +102,14 @@ class ConvergeMemoryToolCallStatesTest {
 
 	@BeforeEach
 	void setUp() {
+		when(this.providerRegistry.current()).thenReturn(this.runtime);
+		when(this.providerRegistry.tryCurrent()).thenReturn(java.util.Optional.of(this.runtime));
 		this.watchdogExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
 			Thread thread = new Thread(runnable, "r144-converge-watchdog");
 			thread.setDaemon(true);
 			return thread;
 		});
-		this.service = new ResilientChatService(mock(ChatClient.class), this.chatModel, this.chatMemory, this.codec,
+		this.service = new ResilientChatService(this.providerRegistry, this.chatMemory, this.codec,
 				this.store, this.registry, this.toolRegistry, this.contextBuilder, this.sessionService,
 				this.properties, this.cancellations, this.beacon, this.watchdogExecutor);
 		when(this.cancellations.isCancelled(RUN_ID)).thenReturn(false);

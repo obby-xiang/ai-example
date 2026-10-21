@@ -105,6 +105,19 @@ public class RunSnapshot {
 	private List<String> resumedBy = new ArrayList<>();
 
 	/**
+	 * 本轮使用的 provider（模型配置专项批①；{@code ai_provider.id}）。
+	 *
+	 * <p>
+	 * {@code null} = 旧快照（批① 之前写的）或 env 合成行（种子尚未落库）。批③ 的续跑将<b>按快照</b>
+	 * 取模型：provider 已删/停用 ⇒ 409 {@code PROVIDER_GONE}，不静默换模型续跑（历史与
+	 * {@code done.model} 都不许说谎）。
+	 */
+	private Long providerId;
+
+	/** 本轮使用的模型名（请求体 {@code model} 的原值；{@code null} = 旧快照）。 */
+	private String modelId;
+
+	/**
 	 * 写入本条快照的<b>租约 epoch</b>（B23L1 批②a）：0 = 无租约写入（单实例/降级路径/旧数据）。
 	 *
 	 * <p>它回答"这条状态是哪一任续跑权写的"：与 {@code ai:fence:run:<runId>} 对账即可判定
@@ -131,6 +144,9 @@ public class RunSnapshot {
 		out.put("updatedAtMs", this.updatedAtMs);
 		out.put("resumedBy", this.resumedBy);
 		out.put("runEpoch", this.runEpoch);
+		// 模型身份（模型配置专项批①，additive）：旧快照为 null，取证口径与 runEpoch 一致
+		out.put("providerId", this.providerId);
+		out.put("modelId", this.modelId);
 		return out;
 	}
 

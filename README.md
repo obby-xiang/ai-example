@@ -100,10 +100,14 @@ yarn dev
 
 | 变量 | 作用 | 默认 / 说明 |
 | --- | --- | --- |
-| `AI_API_KEY` | 模型 API Key | 无默认。为空则不装配模型 bean，AI 端点降级 `503 AI_UNAVAILABLE`，业务不受影响 |
+| `AI_API_KEY` | 模型 API Key | 无默认。为空且 `ai_provider` 表为空时 AI 端点降级 `503 AI_UNAVAILABLE`（code 与文案不变），业务不受影响；有值时**只作首次种子**（见下） |
 | `DEEPSEEK_API_KEY` | 兜底兼容名 | 仅在 `AI_API_KEY` 未设置时生效 |
-| `AI_BASE_URL` | OpenAI 兼容 base-url | 默认 `https://api.deepseek.com`（接口路径强制 `/chat/completions`） |
-| `AI_MODEL` | 模型名 | 默认 `deepseek-flash` |
+| `AI_BASE_URL` | OpenAI 兼容 base-url | 默认 `https://api.deepseek.com`（接口路径强制 `/chat/completions`）；同样只作首次种子 |
+| `AI_MODEL` | 模型名 | 默认 `deepseek-flash`；同样只作首次种子 |
+| `AI_SECRET_KEK` | 库内 key 的加密 KEK | base64 的 32 字节。**只在保存/更新 DB 托管密钥（`key_ref=DB`）时需要**；缺失或格式不对即 fail-closed（`AI_SECRET_KEK_MISSING`），不做明文降级、不自动生成 |
+| `AI_SECRET_KEK_KID` | KEK 版本标识 | 可选，缺省 `k1`；只接受 `[A-Za-z0-9_-]{1,16}`（保信封分段完整性） |
+
+**种子语义（strict seed）**：首次启动且 `ai_provider` 为空时，上表 `AI_API_KEY`/`AI_BASE_URL`/`AI_MODEL` 写 1 行 provider + 1 行模型（`source=ENV_SEED`、`key_ref=ENV`，**env key 不落库**）。此后表非空 ⇒ env **只作种子**：改 env 不影响运行行为（需要重灌时显式置 `app.ai.config.seed-force=true` 并重启）。模型侧 bean 改为无条件装配 + 调用时按"存在可用 provider"动态判定可用性，因此"无 key 也能启动、AI 端点惰性 503"的既有形态不变。
 
 密钥**绝不写入版本库**。两种注入方式任选：进程环境变量（如上），或复制 `backend/config/application.yml.example` 为 `backend/config/application.yml` 后填写（该文件已在 `.gitignore` 中排除）。
 

@@ -4,6 +4,8 @@ import com.example.configmgr.ai.conformance.FrameContract;
 import com.example.configmgr.ai.conformance.FrameWire;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.config.AiProviderRegistry;
+import com.example.configmgr.ai.config.ProviderRuntime;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.session.AiSessionService;
 import com.example.configmgr.ai.tool.AiContext;
@@ -78,6 +80,13 @@ class EmptyReplyTerminalTest {
 
 	private final ChatModel chatModel = mock(ChatModel.class);
 
+	/** 注册表桩：取用即返回同一个运行态（模型 = 下面那个 ChatModel 桩）。 */
+	private final AiProviderRegistry providerRegistry = mock(AiProviderRegistry.class);
+
+	private final ProviderRuntime runtime = new ProviderRuntime(null, "test-provider", "test-model",
+			"http://localhost", "/chat/completions", "test|runtime", null, null, this.chatModel,
+			mock(ChatClient.class));
+
 	private final ChatMemory chatMemory = mock(ChatMemory.class);
 
 	private final ToolRegistry toolRegistry = mock(ToolRegistry.class);
@@ -96,12 +105,15 @@ class EmptyReplyTerminalTest {
 
 	@BeforeEach
 	void setUp() {
+		when(this.providerRegistry.current()).thenReturn(this.runtime);
+		when(this.providerRegistry.tryCurrent()).thenReturn(java.util.Optional.of(this.runtime));
 		this.watchdogExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
 			Thread thread = new Thread(runnable, "t3b-empty-reply-watchdog");
 			thread.setDaemon(true);
 			return thread;
 		});
-		this.service = new ResilientChatService(mock(ChatClient.class), this.chatModel, this.chatMemory, this.codec,
+		// 模型配置专项批①：模型侧改成从注册表取用（ProviderRuntime 包住 api/model/client 三件套）
+		this.service = new ResilientChatService(this.providerRegistry, this.chatMemory, this.codec,
 				this.store, this.registry, this.toolRegistry, this.contextBuilder, this.sessionService,
 				this.properties, this.cancellations, this.beacon, this.watchdogExecutor);
 		when(this.cancellations.isCancelled(RUN_ID)).thenReturn(false);

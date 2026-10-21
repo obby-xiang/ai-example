@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.web;
 
 import com.example.configmgr.ai.config.AiAvailability;
+import com.example.configmgr.ai.config.AiConfigService;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.RedisAvailability;
 import com.example.configmgr.ai.gate.ConfirmGate;
@@ -156,6 +157,14 @@ public class AiController {
 	 */
 	@Autowired
 	private AiRateLimiter aiRateLimiter;
+
+	/**
+	 * 模型配置专项批①：配置快照（{@code /health} 的 additive 扩展面）。同为**字段注入**：
+	 * 构造器签名不变 ⇒ 既有 {@code new AiController(...)} 的用例零触碰；未注入时
+	 * {@code /health} 的旧键照旧、新键缺省（"无 provider"口径）。
+	 */
+	@Autowired(required = false)
+	private AiConfigService aiConfigService;
 
 	public AiController(AiAvailability availability, ObjectProvider<ResilientChatService> chatService,
 			ObjectProvider<ResumeService> resumeService, ObjectProvider<StartupResumeRunner> startupResumeRunner,
@@ -449,6 +458,16 @@ public class AiController {
 			return ApiResponse.ok(Map.of("scanned", false, "reason", "AI_UNAVAILABLE",
 					"message", "无 AI key，模型侧未装配，启动自动续跑不参与"));
 		}
+		// 模型配置专项批①：runner 改为无条件装配 ⇒ "runner 在但 AI 不可用" 必须在这里也给出
+		// reason=AI_UNAVAILABLE（旧实现该情形下 runner 压根不存在）。runner 自己的 lastScan 也有同一
+		// 分支（启动时跳过多），这里再判一次是为了"运行中 provider 被停用"的窗口。
+		if (!this.availability.isAvailable()) {
+			Map<String, Object> body = new LinkedHashMap<>();
+			body.put("scanned", false);
+			body.put("reason", this.availability.code());
+			body.put("message", this.availability.reason());
+			return ApiResponse.ok(body);
+		}
 		return ApiResponse.ok(runner.lastScan());
 	}
 
@@ -461,6 +480,13 @@ public class AiController {
 		StartupResumeRunner runner = this.startupResumeRunner.getIfAvailable();
 		if (runner == null) {
 			return ApiResponse.ok(Map.of("scanned", false, "reason", "AI_UNAVAILABLE"));
+		}
+		if (!this.availability.isAvailable()) {
+			Map<String, Object> body = new LinkedHashMap<>();
+			body.put("scanned", false);
+			body.put("reason", this.availability.code());
+			body.put("message", this.availability.reason());
+			return ApiResponse.ok(body);
 		}
 		return ApiResponse.ok(runner.scan(true));
 	}
@@ -855,8 +881,18 @@ public class AiController {
 		Map<String, Object> body = new LinkedHashMap<>();
 		body.put("available", this.availability.isAvailable());
 		body.put("code", this.availability.isAvailable() ? "AI_AVAILABLE" : this.availability.code());
-		body.put("model", this.environment.getProperty("spring.ai.openai.chat.options.model", "(unset)"));
-		body.put("baseUrl", this.environment.getProperty("spring.ai.openai.base-url", "(unset)"));
+		// 模型配置专项批①（additive）：model/baseUrl 仍<b>保留</b>同名同语义，值优先取配置快照的
+		// 默认目标；快照里没有可用 provider 时回落 env 回读 —— "空表 + 无 env" 下与批①之前逐值相同。
+		AiConfigService.ResolvedProvider resolved = this.aiConfigService == null ? null
+				: this.aiConfigService.resolveDefault().orElse(null);
+		body.put("model", resolved != null ? resolved.modelId()
+				: this.environment.getProperty("spring.ai.openai.chat.options.model", "(unset)"));
+		body.put("baseUrl", resolved != null ? resolved.baseUrl()
+				: this.environment.getProperty("spring.ai.openai.base-url", "(unset)"));
+		// 新增：当前默认目标的 provider/model 身份 + 逐 provider 的 key 状态（永不含 key 本身）
+		body.put("providerId", resolved != null ? resolved.providerId() : null);
+		body.put("defaultModelId", resolved != null ? resolved.modelId() : null);
+		body.put("providers", this.aiConfigService == null ? List.of() : this.aiConfigService.describeProviders());
 		body.put("memoryBackend", this.chatMemoryRepository.getClass().getSimpleName());
 		body.put("sessionTtl", String.valueOf(this.properties.getSessionTtl()));
 		// 确认门自 2026-10-20 起不再超时（等人无上限），故 /health 不再报告 confirmTimeoutSeconds。
