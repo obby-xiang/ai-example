@@ -68,8 +68,9 @@ import java.util.function.IntFunction;
  * <li><b>每轮/每次尝试重建请求</b>：尝试之间不复制任何"上一次的请求对象"——
  * {@code attemptStream} 每次被调用都重新组装（ChatClient 路径重读记忆窗口、重挂工具子集），
  * 因此重试不会把上一次的残留状态带进去；</li>
- * <li><b>双超时 + 总预算</b>（{@code app.ai.resilience.first-byte-timeout / inter-event-timeout /
- * total-budget}）：判定在 {@link StreamWatchdog}，首包与事件间分别计时；</li>
+ * <li><b>双超时 + 段预算</b>（{@code app.ai.resilience.first-byte-timeout / inter-event-timeout /
+ * total-budget}）：判定在 {@link StreamWatchdog}，首包与事件间分别计时；{@code total-budget}
+ * 自 2026-10-21（决策看板 {@code :14}）为<b>段</b>预算 —— 挂起点段结束、恢复点段重置；</li>
  * <li><b>重试三条件</b>：次数未尽 <b>且</b> 预算未耗尽 <b>且</b> 本次尝试"未产出内容
  * 且无副作用"（副作用 = 本次尝试内工具开始执行过 {@link ToolActivityBeacon}，或台账在本次尝试
  * 之后新增了执行记录 —— 后者覆盖"执行完成、结果还没回填"的跨进程窗口）；</li>
@@ -307,6 +308,8 @@ public class ResilientChatService {
 				"maxAttempts", this.properties.getResilience().getMaxAttempts(),
 				"budgetMs", this.properties.getResilience().getTotalBudget().toMillis());
 
+		// 段级预算（决策看板 :14）：本轮第一段的起点 = 轮起点。恢复点由 beacon.endGateWait 前移。
+		this.beacon.markSegmentStart(runId, turnStartedAtMs);
 		try {
 			TurnContext turn = new TurnContext(systemTokens, toolsTokens, inputTokens,
 					systemTokens + toolsTokens + ContextEstimator.estimateMessages(memory) + inputTokens,
@@ -373,6 +376,8 @@ public class ResilientChatService {
 		// 但<b>模型名来自快照</b>，不跟随默认变化。
 		ProviderRuntime runtime = runtimeForSnapshot(runId, providerId, modelId);
 		this.cancellations.register(runId);
+		// 段级预算（决策看板 :14）：续跑 = 一次恢复点 ⇒ 新段从这里起算
+		this.beacon.markSegmentStart(runId, turnStartedAtMs);
 		// 上下文专项批①：续跑侧的分母/分项锚点现算（历史里没有 tools schema，故走披露口径）
 		TurnContext turn = resumedTurn(runId, context, history, runtime.modelId(), turnStartedAtMs);
 		AiTrace.event("turn_start", "model", runtime.modelId(), "provider", runtime.providerCode(), "attempt", 1,
@@ -454,8 +459,8 @@ public class ResilientChatService {
 		AiProperties.Resilience config = this.properties.getResilience();
 		int maxAttempts = Math.max(1, config.getMaxAttempts());
 		for (int attempt = 1; attempt <= maxAttempts; attempt++) {
-			// 超时面治理批① 第 1 项：断流重试之间退避（0.5s 起 ×2 + 抖动），且只从"剩余总预算"里出。
-			// 位置在旧看门狗关闭之后、新看门狗建立之前 ⇒ 退避不占用任何段死线，只消耗总预算。
+			// 超时面治理批① 第 1 项：断流重试之间退避（0.5s 起 ×2 + 抖动），且只从"本段剩余预算"里出。
+			// 位置在旧看门狗关闭之后、新看门狗建立之前 ⇒ 退避不占用任何段死线，只消耗本段预算。
 			if (attempt > 1) {
 				awaitRetryBackoff(runId, attempt - 1, turnStartedAtMs, config);
 			}
@@ -528,7 +533,7 @@ public class ResilientChatService {
 				// 副作用 = 本次尝试内工具开始执行过，或台账在本次尝试开始后新增了执行记录
 				boolean sideEffect = this.beacon.startedCount(runId) > beaconBefore
 						|| this.store.ledgerCountSince(runId, attemptStartedAtMs) > 0;
-				boolean overBudget = elapsedExcludingGateWait(runId, turnStartedAtMs)
+				boolean overBudget = segmentElapsedMs(runId, turnStartedAtMs)
 						>= config.getTotalBudget().toMillis();
 				boolean hasNext = attempt < maxAttempts;
 				boolean retryable = violation.brokenStream() && !emitted && !sideEffect && hasNext && !overBudget;
@@ -566,7 +571,7 @@ public class ResilientChatService {
 	 *
 	 * <p>三条口径：
 	 * <ul>
-	 * <li><b>只从剩余预算里出</b>：剩余 = {@code total-budget} − 已用（扣挂起等待），并留 1s 给下一次
+	 * <li><b>只从剩余预算里出</b>：剩余 = 段预算 − 本段已用，并留 1s 给下一次
 	 * 尝试本身 —— 退避把预算花完 = 下一次尝试刚发出去就撞 {@code TOTAL_BUDGET}，不如不睡；</li>
 	 * <li><b>取消优先</b>：切片轮询取消标志（250ms 一片），命中即停止退避并把控制权交回尝试循环
 	 * —— 新看门狗第一拍就会把它收口成 {@code CANCELLED} 终态（退避不吞取消）；</li>
@@ -574,7 +579,7 @@ public class ResilientChatService {
 	 * </ul>
 	 */
 	private void awaitRetryBackoff(String runId, int retryNo, long turnStartedAtMs, AiProperties.Resilience config) {
-		long remaining = config.getTotalBudget().toMillis() - elapsedExcludingGateWait(runId, turnStartedAtMs);
+		long remaining = config.getTotalBudget().toMillis() - segmentElapsedMs(runId, turnStartedAtMs);
 		long delay = RetryBackoff.delayMs(retryNo, remaining);
 		if (delay <= 0) {
 			log.debug("重试退避跳过 runId={} retry={} 剩余预算={}ms（不再等待）", runId, retryNo, remaining);
@@ -621,19 +626,22 @@ public class ResilientChatService {
 	/**
 	 * 有界等待：看门狗负责判定，这里只做最后一道墙钟兜底（避免任何路径下永久阻塞）。
 	 *
-	 * <p><b>人机预算分离</b>（用户裁决 2026-10-20 第 3 条）：兜底判据同样是"墙钟 − 挂起等待"。
-	 * 确认门 / {@code generative_form} 没有等待上限，一次十几分钟的表单填写期间这里必须继续等
-	 * —— 否则 300s 一到就被折算成 {@code TOTAL_BUDGET}，把"无超时"变成 300s 的死线。
-	 * 故改成<b>短切片轮询</b>：每片复查一次"扣除等待后还剩多少预算"。
+	 * <p><b>段级预算重置式</b>（决策看板 {@code :14}，2026-10-21）；兜底判据与看门狗同源
+	 * （{@link #segmentElapsedMs} = 墙钟 − 段起点，budget+1s 切片）。确认门 / {@code generative_form}
+	 * 没有等待上限，一次十几分钟的表单填写期间这里必须继续等 —— 故挂起中
+	 * （{@link ToolActivityBeacon#inGateWait}）只走短切片复查，不判预算；恢复点重置段起点后，
+	 * 新段重新拥有完整 budget。
 	 */
 	private void awaitSettled(String runId, CompletableFuture<Void> settled, long turnStartedAtMs,
 			AiProperties.Resilience config) {
 		long budgetMs = config.getTotalBudget().toMillis();
 		while (true) {
-			long remain = budgetMs + 1000L - elapsedExcludingGateWait(runId, turnStartedAtMs);
+			// 挂起中（段已结束）：预算暂停，只留一个短切片回来复查 —— 恢复点在另一条线程上重置段起点
+			long remain = this.beacon.inGateWait(runId) ? Math.max(1000L, budgetMs)
+					: budgetMs + 1000L - segmentElapsedMs(runId, turnStartedAtMs);
 			if (remain <= 0) {
 				throw new StreamViolationException(StreamViolationException.TOTAL_BUDGET,
-						"本轮总预算 " + config.getTotalBudget() + " 已耗尽（墙钟兜底；人工等待不计入）");
+						"本段预算 " + config.getTotalBudget() + " 已耗尽（墙钟兜底，段级；人工等待不计入）");
 			}
 			try {
 				settled.get(Math.max(1000L, remain), TimeUnit.MILLISECONDS);
@@ -653,12 +661,19 @@ public class ResilientChatService {
 	}
 
 	/**
-	 * 已计入预算的时长（毫秒）= 墙钟 − 本轮累计的挂起等待（含正在进行的等待）。
+	 * 本段已用时长（毫秒）= 墙钟 − <b>段起点</b>（决策看板 {@code :14} 段级预算重置式）。
 	 *
-	 * <p>为什么不只扣"已结束的等待窗口"：看门狗与兜底判据每一拍都要判，等待没结束时也必须暂停预算。
+	 * <p>段起点由 {@link ToolActivityBeacon#segmentStartedAtMs(String, long)} 持有：轮开始/续跑入口播种，
+	 * 每次挂起结束（决策/回灌/超时/取消）在 {@code endGateWait} 里前移 —— 所以"等人"不再靠扣除，
+	 * 而是靠<b>换一段新时钟</b>。挂起进行中调用本方法的调用方必须自己跳过判据（{@code inGateWait}）。
 	 */
-	private long elapsedExcludingGateWait(String runId, long turnStartedAtMs) {
-		return (System.currentTimeMillis() - turnStartedAtMs) - this.beacon.gateWaitMs(runId);
+	private long segmentElapsedMs(String runId, long segmentSeedAtMs) {
+		long start = this.beacon.segmentStartedAtMs(runId, segmentSeedAtMs);
+		// 轻装配面（mock/无锚点）：信标读回 0 ⇒ 按播种值算，不能把"没有锚点"当成"段已跑了一辈子"
+		if (start <= 0L) {
+			start = segmentSeedAtMs;
+		}
+		return System.currentTimeMillis() - start;
 	}
 
 	/** 把任意异常归类成带 code 的 {@link StreamViolationException}（断流判定只看 code）。 */
@@ -1623,8 +1638,8 @@ public class ResilientChatService {
 		}
 		if (error instanceof IllegalStateException && error.getMessage() != null
 				&& error.getMessage().startsWith("Timeout on blocking read")) {
-			return "AI 调用超过总预算 " + this.properties.getResilience().getTotalBudget()
-					+ " 未完成（双超时阈值待压测裁决）";
+			return "AI 调用超过本段预算 " + this.properties.getResilience().getTotalBudget()
+					+ " 未完成（段级预算；双超时阈值待压测裁决）";
 		}
 		return error.getMessage() != null ? error.getMessage() : error.getClass().getSimpleName();
 	}

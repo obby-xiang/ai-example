@@ -47,6 +47,8 @@ public class AiProperties {
 
 	private Resume resume = new Resume();
 
+	private Tool tool = new Tool();
+
 	private ToolResult toolResult = new ToolResult();
 
 	private Frame frame = new Frame();
@@ -373,6 +375,40 @@ public class AiProperties {
 		 * 见 {@link com.example.configmgr.ai.run.ToolActivityBeacon#gateWaitMs(String)}。
 		 */
 		private Duration totalBudget = Duration.ofSeconds(300);
+
+		/**
+		 * 工具调用步数上限（超时面治理批② 第 2 项；决策看板 {@code :14} 的「步数笼」）。
+		 *
+		 * <p><b>累计、跨挂起不重置</b>（LangGraph 口径）：段级预算重置式让"每段 300s"成立，
+		 * 若同时放开步数，一轮可以靠反复挂起无限续命 —— 故看板把本键定为段预算的<b>强制配套</b>
+		 * （"二者缺一即失控"）。计数落在 {@link com.example.configmgr.ai.run.RunSnapshot#getToolSteps()}
+		 * （外置：续跑可能落在另一个进程上）。
+		 *
+		 * <p>到顶后<b>不判整轮失败</b>：降级「部分完成收尾」—— 到顶的调用结算成
+		 * {@code skipped/TOOL_STEP_LIMIT}，并在历史末尾追加一条收尾指令，让模型用已有信息作答。
+		 */
+		private int maxToolSteps = 25;
+	}
+
+	/**
+	 * 后端工具执行面（超时面治理批② 第 3 项）。
+	 */
+	@Data
+	public static class Tool {
+
+		/**
+		 * 单次后端工具执行的独立超时（缺省 120s；决策看板 {@code :16}）。
+		 *
+		 * <p>修的是"后端工具无执行超时"这一过松项（盘点 §二 ③-1：300s 段预算独自兜底
+		 * 「工具无轮数上限 / 工具无执行超时 / 上游无 read timeout」三件事）。到点产出
+		 * {@code TOOL_TIMEOUT}（{@code executed=false}），<b>轮继续</b>（同批后续调用照常）——
+		 * 一个卡死的工具不该把用户已经看到的正文一并废掉。
+		 *
+		 * <p>取值 120s 与既有 {@code app.ai.hitl.frontend-tool-timeout} 同量级：前端工具等回执、
+		 * 后端工具等执行，两者都不该比"人机等待"更松。长任务（IMPORT/EXPORT 等作业型）的
+		 * <b>opt-in 免超时机制本批不做</b>（已登记为批③ 候选），本批先给出统一上限。
+		 */
+		private Duration execTimeout = Duration.ofSeconds(120);
 	}
 
 	@Data

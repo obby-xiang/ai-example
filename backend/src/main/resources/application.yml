@@ -179,6 +179,13 @@ app:
       #     该文件自述 ≤65s 为病态配置，而实测最慢成功回灌 30.6s）—— 降到 60s 的前置 = 前端折算面
       #     （回灌 POST 单独给更短上限）专项（数字规格清点 P-1 / 等待治理 R-99②），本次不动。
       frontend-tool-timeout: 120s
+    tool:
+      # 后端工具**独立执行超时**（超时面治理批② 第 3 项；决策看板 :16 = 120s + TOOL_TIMEOUT）。
+      # 修"工具无独立超时"这一过松项（盘点 §二 ③-1：此前由 300s 段预算独自兜底）。
+      # 到点 ⇒ 该调用 outcome=timeout / code=TOOL_TIMEOUT / executed=false，**轮继续**（不判整轮失败）。
+      # 与 hitl.frontend-tool-timeout 同理不同面：前者等"后端桩体跑完"，后者等"前端回执"。
+      # 长任务（作业型工具）的 opt-in 免超时机制**本批不做**（登记为批③ 候选）。
+      exec-timeout: 120s
     suspend:
       # 挂起专用有界平台线程池（DC-12 禁虚拟线程）；容量即挂起并发上限，队列为 0 ⇒ 饱和快速失败 503
       pool-size: 20
@@ -188,13 +195,19 @@ app:
       # 硬规范①：超时阈值 > 最长工具耗时 —— 挂起等待期间工具处于"活跃"，
       #   看门狗在工具执行期间不计静默、退出后以退出时刻重新计时，故 90s 小于等待上限仍正确；
       #   确认门与 generative_form 已无等待上限（2026-10-20 裁决），不再参与本条。
-      # 人机预算分离（裁决第 3 条）：total-budget 的判据 = 墙钟 − 挂起等待，等人时间不计入。
+      # 段级预算（2026-10-21 决策看板 :14「挂起恢复计时口径裁决」）：total-budget 的判据 = 段起点，
+      #   挂起点段结束、恢复点（决策/回灌/续跑）段重置 —— 不再用"墙钟 − 挂起等待"的扣除式。
+      #   **码名保留、语义改为「段」**（TOTAL_BUDGET 不变）；等人时间不计入靠"换段"表达。
+      # max-tool-steps = 25：工具调用步数上限，**累计、跨挂起不重置**（LangGraph 口径）——
+      #   段重置的强制配套（看板 :14「步数笼」）：缺了它，一轮能靠反复挂起无限续命。
+      #   到顶降级「部分完成收尾」（不判整轮失败）：到顶调用 skipped/TOOL_STEP_LIMIT + 收尾指令。
       # 硬规范②：TCP 静默 FIN 按断流处理 —— 正常收尾必须有终帧（finishReason/usage），
       #   缺失即判 UPSTREAM_STREAM_INCOMPLETE 并进入重试三条件判定。
       first-byte-timeout: 30s
       inter-event-timeout: 90s
       max-attempts: 2
       total-budget: 300s
+      max-tool-steps: 25
     resume:
       # N3/N8：应用启动自动续跑（扫描 RunStore 后自动 resume）。
       # 仅续"已有人类结论/无外部输入需求"的轮次；仍 PENDING 的确认门/前端工具一律跳过（不绕开人审）。
