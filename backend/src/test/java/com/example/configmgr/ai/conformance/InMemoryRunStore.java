@@ -172,12 +172,15 @@ public class InMemoryRunStore extends RunStore {
 
 	@Override
 	public RunSnapshot create(String runId, String sessionId, AiContext context, List<Message> history,
-			MessageJsonCodec codec) {
+			MessageJsonCodec codec, Long providerId, String modelId) {
 		RunSnapshot snapshot = new RunSnapshot();
 		snapshot.setRunId(runId);
 		snapshot.setSessionId(sessionId);
 		snapshot.setStatus(RunSnapshot.RUNNING);
 		snapshot.setContext(context == null ? AiContext.empty().toMap() : context.toMap());
+		// 模型配置专项批①：与真实实现同口径固化模型身份（additive 字段）
+		snapshot.setProviderId(providerId);
+		snapshot.setModelId(modelId);
 		snapshot.setCreatedBy(instanceId());
 		snapshot.setCreatedAtMs(System.currentTimeMillis());
 		save(snapshot);

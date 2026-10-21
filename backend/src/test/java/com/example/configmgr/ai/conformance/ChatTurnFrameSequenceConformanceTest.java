@@ -1,6 +1,8 @@
 package com.example.configmgr.ai.conformance;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.config.AiProviderRegistry;
+import com.example.configmgr.ai.config.ProviderRuntime;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.ResilientChatService;
@@ -79,6 +81,13 @@ class ChatTurnFrameSequenceConformanceTest {
 
 	private final ChatClient chatClient = mock(ChatClient.class);
 
+	/** 模型配置专项批①：模型侧从注册表取用（Runtime 包住 api/model/client）。 */
+	private final AiProviderRegistry providerRegistry = mock(AiProviderRegistry.class);
+
+	private final ProviderRuntime runtime = new ProviderRuntime(null, "test-provider", "test-model",
+			"http://localhost", "/chat/completions", "test|runtime", null, null, this.chatModel,
+			this.chatClient);
+
 	private final ChatMemory chatMemory = mock(ChatMemory.class);
 
 	private final ToolRegistry toolRegistry = mock(ToolRegistry.class);
@@ -97,12 +106,14 @@ class ChatTurnFrameSequenceConformanceTest {
 
 	@BeforeEach
 	void setUp() {
+		when(this.providerRegistry.current()).thenReturn(this.runtime);
+		when(this.providerRegistry.tryCurrent()).thenReturn(java.util.Optional.of(this.runtime));
 		this.watchdogExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
 			Thread thread = new Thread(runnable, "conformance-watchdog");
 			thread.setDaemon(true);
 			return thread;
 		});
-		this.service = new ResilientChatService(this.chatClient, this.chatModel, this.chatMemory, this.codec,
+		this.service = new ResilientChatService(this.providerRegistry, this.chatMemory, this.codec,
 				this.store, this.registry, this.toolRegistry, this.contextBuilder, this.sessionService,
 				this.properties, this.cancellations, this.beacon, this.watchdogExecutor);
 		when(this.cancellations.isCancelled(RUN_ID)).thenReturn(false);

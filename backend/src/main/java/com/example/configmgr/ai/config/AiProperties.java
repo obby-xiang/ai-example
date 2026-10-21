@@ -53,6 +53,39 @@ public class AiProperties {
 
 	private Lease lease = new Lease();
 
+	private Config config = new Config();
+
+	/**
+	 * 模型配置的读写开关（模型配置专项批①；设计稿 §3.3 / §3.4）。
+	 *
+	 * <p>
+	 * 批① 只有两个键：{@link #seedForce}（strict seed 的显式运维逃生门）与
+	 * {@link #reloadInterval}（读路径版本比对的最小间隔）。URL 闸与私网开关属于批②。
+	 */
+	@Data
+	public static class Config {
+
+		/**
+		 * 强制重灌 env 种子（默认 false = strict seed：表非空时 env 完全不参与）。
+		 *
+		 * <p>
+		 * 默认 false 是<b>刻意</b>的：表非空后改 env 不再改变线上行为（否则运维改 env 会静默
+		 * 改掉 DB 真源，与"DB 为真源"自相矛盾）。需要重灌时显式打开本键并重启 —— 动作本身
+		 * 就是"我知道会覆盖 seed 行的 base-url/model"。
+		 */
+		private boolean seedForce = false;
+
+		/**
+		 * 读路径版本比对的最小间隔（缺省 1s）。
+		 *
+		 * <p>
+		 * 稳态 = 至多 1 次版本比对/秒/实例（Redis 有 {@code ai:cfg:ver} 时只 GET 一次；Redis 不可用
+		 * 时退化为一次 DB 主键查询），<b>不</b>在 chat 热路径上逐轮打表。单测把它设 0 让版本比对
+		 * 每次都做（确定性，不靠 sleep）。
+		 */
+		private Duration reloadInterval = Duration.ofSeconds(1);
+	}
+
 	/**
 	 * 启动期校验 {@code app.ai.sse.write-timeout} 必须为正（2026-10-10 复核 S3-1 收口：守卫对称化）。
 	 *

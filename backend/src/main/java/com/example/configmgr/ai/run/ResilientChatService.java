@@ -1,7 +1,8 @@
 package com.example.configmgr.ai.run;
 
-import com.example.configmgr.ai.config.AiKeyPresentCondition;
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.config.AiProviderRegistry;
+import com.example.configmgr.ai.config.ProviderRuntime;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.session.AiSessionService;
 import com.example.configmgr.ai.tool.AiContext;
@@ -10,14 +11,12 @@ import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.ai.tool.ToolRegistry;
 import com.example.configmgr.ai.web.AiChatRequest;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.MessageType;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
-import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.chat.prompt.ChatOptions;
@@ -26,7 +25,6 @@ import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.context.annotation.Conditional;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
@@ -90,7 +88,6 @@ import java.util.function.IntFunction;
  */
 @Slf4j
 @Service
-@Conditional(AiKeyPresentCondition.class)
 public class ResilientChatService {
 
 	/** 流式活动心跳的最小间隔（毫秒）：僵尸判据要"有活动痕迹"，但不能把帧刷爆。 */
@@ -137,9 +134,16 @@ public class ResilientChatService {
 			    而是如实汇报"已推进到 X 步骤"，并用一句话引导用户（例如"请回复「继续」完成最后一步"）
 			""";
 
-	private final ChatClient chatClient;
-
-	private final ChatModel chatModel;
+	/**
+	 * provider 实例注册表（模型配置专项批①，设计稿 §3.4）。
+	 *
+	 * <p>
+	 * 取代此前注入的 {@code (ChatClient, ChatModel)} 双单例：模型侧不再有"启动期一次成型"的
+	 * bean，改为按 {@code RuntimeKey} 从注册表<b>取用</b>（key/base-url/completions-path 变了就
+	 * 下次取用重建，模型名变了就轻量重绑）。取用点每次请求现取，因此在飞轮持有旧引用、下一轮
+	 * 用新配置 —— 热生效不需要重启。
+	 */
+	private final AiProviderRegistry providerRegistry;
 
 	private final ChatMemory chatMemory;
 
@@ -163,13 +167,12 @@ public class ResilientChatService {
 
 	private final ScheduledExecutorService watchdogExecutor;
 
-	public ResilientChatService(ChatClient chatClient, ChatModel chatModel, ChatMemory chatMemory,
+	public ResilientChatService(AiProviderRegistry providerRegistry, ChatMemory chatMemory,
 			MessageJsonCodec codec, RunStore store, RunRegistry registry, ToolRegistry toolRegistry,
 			ContextBuilder contextBuilder, AiSessionService sessionService, AiProperties properties,
 			CancellationRegistry cancellations, ToolActivityBeacon beacon,
 			@Qualifier("aiStreamWatchdog") ScheduledExecutorService watchdogExecutor) {
-		this.chatClient = chatClient;
-		this.chatModel = chatModel;
+		this.providerRegistry = providerRegistry;
 		this.chatMemory = chatMemory;
 		this.codec = codec;
 		this.store = store;
@@ -198,28 +201,35 @@ public class ResilientChatService {
 		String systemText = SYSTEM_PROMPT + "\n\n" + this.contextBuilder.buildContextMessage(context);
 		List<Message> instructions = List.of(new SystemMessage(systemText), new UserMessage(request.message()));
 
+		// 模型身份 = 本轮固化进快照的那一对（providerId/modelId）；没有可用 provider 时
+		// 控制器早已 503 拦住（这里抛 AiUnavailableException 只是并发改配置的窄窗口兜底）。
+		ProviderRuntime runtime = this.providerRegistry.current();
+
 		// 与官方 MessageChatMemoryAdvisor.before 的变换逐字对齐（1.1.8 字节码实测）：
 		// [首个 SystemMessage] + 记忆窗口 + 其余指令 —— 快照里存的就是模型真正看到的那串消息。
 		List<Message> full = new ArrayList<>(memory.size() + instructions.size());
 		full.add(instructions.get(0));
 		full.addAll(memory);
 		full.add(instructions.get(1));
-		this.store.create(runId, sessionId, context, full, this.codec);
+		this.store.create(runId, sessionId, context, full, this.codec, runtime.providerId(), runtime.modelId());
 
 		this.cancellations.register(runId);
 		out.start(sessionId);
 
 		List<ToolCallback> tools = this.toolRegistry.forContext(context);
+		// 格式契约：E2E 的披露取证按 `上下文=(\S+)\s+披露工具=\[` 正则读这一行（scripts/verify-e2e.ps1），
+		// 因此 provider/model 只能另起一行，不得插进本行字段之间。
 		log.debug("AI 轮次开始 runId={} sessionId={} 会话已存在={} 上下文={} 披露工具={} 首包超时={} 包间超时={} 最大尝试={} 总预算={}",
 				runId, sessionId, existed, context.getContextKey(), tools.stream().map(t -> t.getToolDefinition().name()).toList(),
 				this.properties.getResilience().getFirstByteTimeout(), this.properties.getResilience().getInterEventTimeout(),
 				this.properties.getResilience().getMaxAttempts(), this.properties.getResilience().getTotalBudget());
+		log.debug("AI 轮次模型身份 runId={} provider={} model={}", runId, runtime.providerCode(), runtime.modelId());
 
 		try {
 			runAttempts(runId, sessionId, turnStartedAtMs, out, attempt -> {
 				log.debug("本轮第 {} 次尝试组装请求 runId={} sessionId={}（每轮重建请求）", attempt, runId, sessionId);
 				return Flux.defer(() -> {
-					var spec = this.chatClient.prompt()
+					var spec = runtime.chatClient().prompt()
 						.system(systemText)
 						.user(request.message())
 						// 记忆 advisor 的会话键：官方常量（MessageChatMemoryAdvisor 据此读写 Redis）
@@ -251,13 +261,16 @@ public class ResilientChatService {
 	public void driveResumed(String runId, String sessionId, AiContext context, List<Message> history,
 			SseChatEmitter out) {
 		long turnStartedAtMs = System.currentTimeMillis();
+		// 续跑也要现取一次实例：在飞期间换了 base-url/key 的话，续跑落在新端点上（与首轮同口径）。
+		// 批③ 会改成"按快照的 providerId/modelId 取"，provider 没了就 409 PROVIDER_GONE。
+		ProviderRuntime runtime = this.providerRegistry.current();
 		this.cancellations.register(runId);
 		try {
 			runAttempts(runId, sessionId, turnStartedAtMs, out, attempt -> {
 				log.debug("续跑第 {} 次尝试重建完整历史 runId={} sessionId={} 历史条数={}", attempt, runId, sessionId,
 						history.size());
-				Prompt prompt = buildResumedPrompt(runId, sessionId, context, history);
-				return this.chatModel.stream(prompt);
+				Prompt prompt = buildResumedPrompt(runtime, runId, sessionId, context, history);
+				return runtime.chatModel().stream(prompt);
 			});
 		}
 		finally {
@@ -271,10 +284,16 @@ public class ResilientChatService {
 	 *
 	 * <p>
 	 * 也供 {@code ResumeService} 在重建阶段结算挂起项时复用（工具的委托执行需要一个带
-	 * toolCallbacks 的 Prompt）。
+	 * toolCallbacks 的 Prompt）。此处取不到实例（无可用 provider）时退化为"只有工具选项"的
+	 * Prompt：结算挂起项不需要模型名，而这条路在控制器已按 availability 放行之后几乎不可达。
 	 */
 	public Prompt buildResumedPrompt(String runId, String sessionId, AiContext context, List<Message> history) {
-		ChatOptions base = this.chatModel.getDefaultOptions();
+		return buildResumedPrompt(this.providerRegistry.tryCurrent().orElse(null), runId, sessionId, context, history);
+	}
+
+	private Prompt buildResumedPrompt(ProviderRuntime runtime, String runId, String sessionId, AiContext context,
+			List<Message> history) {
+		ChatOptions base = runtime == null ? null : runtime.chatModel().getDefaultOptions();
 		OpenAiChatOptions options = base instanceof OpenAiChatOptions openAiOptions
 				? OpenAiChatOptions.fromOptions(openAiOptions) : OpenAiChatOptions.builder().build();
 		options.setToolCallbacks(this.toolRegistry.forContext(context));

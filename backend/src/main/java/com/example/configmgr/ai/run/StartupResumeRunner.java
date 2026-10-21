@@ -1,10 +1,9 @@
 package com.example.configmgr.ai.run;
 
-import com.example.configmgr.ai.config.AiKeyPresentCondition;
+import com.example.configmgr.ai.config.AiAvailability;
 import com.example.configmgr.ai.config.AiProperties;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
-import org.springframework.context.annotation.Conditional;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
 
@@ -44,7 +43,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 @Slf4j
 @Component
-@Conditional(AiKeyPresentCondition.class)
 public class StartupResumeRunner {
 
 	private final ResumeService resumeService;
@@ -53,14 +51,18 @@ public class StartupResumeRunner {
 
 	private final AiProperties properties;
 
+	private final AiAvailability availability;
+
 	private final AtomicBoolean scanned = new AtomicBoolean();
 
 	private volatile Map<String, Object> lastScan = Map.of("scanned", false);
 
-	public StartupResumeRunner(ResumeService resumeService, RunStore store, AiProperties properties) {
+	public StartupResumeRunner(ResumeService resumeService, RunStore store, AiProperties properties,
+			AiAvailability availability) {
 		this.resumeService = resumeService;
 		this.store = store;
 		this.properties = properties;
+		this.availability = availability;
 	}
 
 	@EventListener(ApplicationReadyEvent.class)
@@ -69,6 +71,13 @@ public class StartupResumeRunner {
 			log.info("启动自动续跑未开启（app.ai.resume.on-startup=false），只做发现：GET /api/ai/runs");
 			this.lastScan = Map.of("scanned", false, "reason", "app.ai.resume.on-startup=false",
 					"instanceId", this.store.instanceId());
+			return;
+		}
+		if (!this.availability.isAvailable()) {
+			// 模型配置专项批①（设计稿 §3.4）：本类改为无条件装配，所以"没有可用 provider"必须
+			// 在这里自检并跳过 —— 绝不能因"无 key"在启动扫描里报错（旧行为 = bean 压根不存在）。
+			this.lastScan = unavailableScan();
+			log.info("启动自动续跑跳过：AI 不可用（{}）", this.availability.code());
 			return;
 		}
 		Duration delay = this.properties.getResume().getStartupDelay();
@@ -96,6 +105,12 @@ public class StartupResumeRunner {
 			return this.lastScan;
 		}
 		this.scanned.set(true);
+		if (!this.availability.isAvailable()) {
+			// 强制重扫（运维端点）同样自检：不可用时不扫、不报错，只留事实
+			this.lastScan = unavailableScan();
+			log.info("启动自动续跑扫描跳过：AI 不可用（{}）", this.availability.code());
+			return this.lastScan;
+		}
 		List<Map<String, Object>> candidates;
 		try {
 			candidates = this.resumeService.listRuns();
@@ -174,6 +189,19 @@ public class StartupResumeRunner {
 
 	public Map<String, Object> lastScan() {
 		return this.lastScan;
+	}
+
+	/**
+	 * "AI 不可用所以不续跑"的扫描事实（与 {@code GET /api/ai/startup-resume} 的 {
+	 * {@code scanned=false, reason=AI_UNAVAILABLE}} 同形；批① 起 runner 恒存在，故该分支只能由本类给出）。
+	 */
+	private Map<String, Object> unavailableScan() {
+		Map<String, Object> report = new LinkedHashMap<>();
+		report.put("scanned", false);
+		report.put("reason", this.availability.code());
+		report.put("message", this.availability.reason());
+		report.put("instanceId", this.store.instanceId());
+		return report;
 	}
 
 }
