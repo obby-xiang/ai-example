@@ -47,7 +47,8 @@ import java.util.concurrent.atomic.AtomicLong;
  *
  * <p>
  * 帧类型：{@code start}（首包）→ 若干 {@code delta}/{@code tool_*}/
- * {@code retry}/{@code confirm_*}/{@code frontend_tool_*}/{@code heartbeat}/{@code suspended} →
+ * {@code retry}/{@code confirm_*}/{@code frontend_tool_*}/{@code heartbeat}/{@code suspended}/
+ * {@code context}（上下文专项批①：压缩事件，仅在真发生压缩时出现）→
  * 恰好一个 {@code done}（正常完成或取消：{@code cancelled=true}/{@code false}）或 {@code error} 终帧。帧体是 JSON 对象且带 {@code type} 字段
  * （无名 SSE 事件 + 帧内 type），与基座 SSE 形态一致，前端不必改用 addEventListener。
  *
@@ -851,6 +852,20 @@ public class SseChatEmitter {
 	 * 与"正常完成"共用同一个终帧类型（前端的终态处理不必分两套）。
 	 */
 	public void done(Map<String, Object> usage, String model, Map<String, Object> extra) {
+		done(usage, model, extra, null);
+	}
+
+	/**
+	 * 终帧：{@code done}（带上下文计量子对象）。
+	 *
+	 * <p>
+	 * <b>上下文专项批①（帧增量）</b>：{@code context} 子对象是 {@code done} 帧的<b>可选</b>键
+	 * {@code {usedTokens, limitTokens, percent, level, est, circuit}}，每轮都会带（帧类型集不变）。
+	 * 旧客户端忽略未知键，前向兼容。为 null/空时<b>不写</b>该键（"无计量设施"与"计量为 0" 必须可区分）。
+	 *
+	 * @param context 上下文计量快照（{@code ContextTelemetry}）；null = 本进程未装配计量
+	 */
+	public void done(Map<String, Object> usage, String model, Map<String, Object> extra, Map<String, Object> context) {
 		Map<String, Object> frame = frame("done");
 		frame.put("runId", this.runId);
 		if (usage != null && !usage.isEmpty()) {
@@ -861,6 +876,29 @@ public class SseChatEmitter {
 		}
 		if (extra != null) {
 			frame.putAll(extra);
+		}
+		if (context != null && !context.isEmpty()) {
+			frame.put("context", context);
+		}
+		emit(frame);
+	}
+
+	/**
+	 * 压缩事件帧（上下文专项批①；帧类型集 15 → 16 的<b>唯一</b>新增）。
+	 *
+	 * <p>
+	 * 与 {@code done.context} 的分工：{@code done.context} 是"本轮结束时的占用"（每轮一次、轻量），
+	 * 本帧是"<b>此刻发生了一次压缩</b>"（即时可见，挂起/续跑期间也可能出现）。载荷
+	 * {@code {level, before, after, turns, lostTokens, reason, est}} 与日志、台账三处同一组值。
+	 *
+	 * <p>
+	 * 位置约束：压缩发生在请求前，故本帧必然出现在本轮第一个 {@code delta}/{@code tool_start} 之前
+	 * （非终帧、非工具帧，不参与 {@code FrameContract} 的任何一条不变量）。
+	 */
+	public void context(Map<String, Object> data) {
+		Map<String, Object> frame = frame("context");
+		if (data != null) {
+			frame.putAll(data);
 		}
 		emit(frame);
 	}

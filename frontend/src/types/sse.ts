@@ -118,6 +118,14 @@ export interface PendingToolCallSnapshot {
 /** 全部帧类型常量（顺序即后端产出顺序语义）。 */
 export const SseFrameTypes = [
   'start',
+  /**
+   * 上下文压缩事件（上下文统计与压缩专项批①；帧类型集 15 → 16 的**唯一**新增）。
+   *
+   * 位置：压缩发生在**请求前**，故它必然出现在本轮第一个 `delta` / `tool_start` 之前；
+   * 载荷 `{level, before, after, turns, lostTokens, reason, est, savedTokens, clearedPairs}`。
+   * 未发生压缩则**一帧不发**（不是"每轮发一个 level=none"）。
+   */
+  'context',
   'message_start',
   'delta',
   'message_end',
@@ -382,12 +390,62 @@ export interface SseRetryFrame extends SseFrameBase {
 export interface SseDoneFrame extends SseFrameBase {
   type: 'done'
   runId: string
+  /**
+   * 本轮 usage（上下文专项批① 起含计量增量键）：既有三维 `promptTokens/completionTokens/totalTokens`
+   * 不变，新增 `est`（是否估算）· `source`（`stream`/`estimate`）· `frames`（采集到的非空 usage 帧数）·
+   * `dirty`（prompt 回退的脏帧数）。旧后端没有这四个键 ⇒ 前端按"未知"处理，不显示 `≈`。
+   */
   usage?: Record<string, unknown>
   model?: string
+  /**
+   * 上下文计量快照（上下文专项批①；每轮都带，旧后端缺该键）。
+   *
+   * `usedTokens` 是**真值**（`usage.promptTokens`；无 usage 时为估算并置 `est=true`），
+   * `limitTokens` 为 null 表示上限未知（降级态：只显示已用，不显示百分比）。
+   */
+  context?: ContextUsage
   cancelled?: boolean
   attempts?: number
   upstreamEvents?: number
   terminalSignal?: string
+}
+
+/**
+ * 上下文占用（`done.context` 与端点 `GET /api/ai/context/{sessionId}` 的公共子集）。
+ *
+ * 刻意与后端设计稿 §3.4(a) 逐键对应；`percent` 由服务端算（一位小数），前端不重复折算 ——
+ * 前后端各自 round 一次会出现"49.95 → 一个显示 50.0、另一个 49.9"的同源分歧。
+ */
+export interface ContextUsage {
+  usedTokens: number
+  /** null = 上限未知（降级态） */
+  limitTokens: number | null
+  /** 服务端算好的百分比（一位小数）；上限未知时为 null */
+  percent: number | null
+  /** 本轮压缩级别（`none`/`L1`/`L2`/`L3`） */
+  level: string
+  /** usedTokens 是否来自估算（界面显示 `≈` 的唯一来源） */
+  est: boolean
+  /** 熔断态（`closed`/`open`/`half_open`；批③ 写入，批① 恒 closed） */
+  circuit?: string
+}
+
+/** 压缩事件帧（仅在真发生压缩时出现）。 */
+export interface SseContextFrame extends SseFrameBase {
+  type: 'context'
+  /** 实际应用的级别（批① 只到 `L1`） */
+  level: string
+  /** 压缩前/后的历史估算 */
+  before: number
+  after: number
+  /** 折叠掉的 Turn 数（L1 恒 0：只清结果不丢轮） */
+  turns: number
+  /** 丢掉的 token（L1 恒 0） */
+  lostTokens: number
+  reason: string
+  est: boolean
+  savedTokens?: number
+  clearedPairs?: number
 }
 
 /** 终帧：error。 */
@@ -398,9 +456,10 @@ export interface SseErrorFrame extends SseFrameBase {
   message: string
 }
 
-/** 一轮对话的 SSE 帧判别联合（后端 15 类 + 前向兼容的 reasoning）。 */
+/** 一轮对话的 SSE 帧判别联合（后端 16 类 + 前向兼容的 reasoning）。 */
 export type SseFrame =
   | SseStartFrame
+  | SseContextFrame
   | SseMessageBoundaryFrame
   | SseDeltaFrame
   | SseReasoningFrame

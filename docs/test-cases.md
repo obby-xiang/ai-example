@@ -188,6 +188,14 @@
 | N-AI-05 | UI_COMMAND navigate | AI 创建任务后前端自动跳转到向导页 |
 | N-AI-06 | UI_COMMAND open_editor | 导出步骤 AI 请求后编辑器对话框打开 |
 | N-AI-07 | 渐进式披露 | 不同步骤可用工具集不同（发布工具只在 PUBLISH 步骤暴露） |
+| CTX-01 | usage 取最后一帧 + 去重 | 单帧真值 / 每块重复同一 usage **不放大** / 末帧 0/0/0 时取最后一个**非空**（`est=false`） |
+| CTX-02 | 无 usage 回退估算 | `done.usage.est=true`、`source=estimate`，pill 前缀 `≈`；压缩仍按估算触发 |
+| CTX-03 | 分母与降级 | 有 `ai_model.max_context` 用 DB 值；否则用 `app.ai.context.limit-tokens`；两者都没有 ⇒ 端点 `limitTokens:null`、pill 只显示已用 |
+| CTX-04 | 拆分守恒 | 端点七项里前六项之和 == `usedTokens`（含 `used < Σ估算` 与 `used > Σ估算` 两侧） |
+| CTX-05 | pill 三档边界 | 69/70、84/85、94/95 逐点换色；`≈` 与未知上限两态正确；刷新后由端点重建、流式中不跳动 |
+| CTX-06 | L1 工具结果清除 | 占比 ≥70% 时最旧非 pin 的 `responseData` 变占位符，**消息条数不变**、配对 0 孤儿、占位符含工具名 + `≈N tokens` + `ai:ledger:<runId>` |
+| CTX-07 | L1 的 pin | 最近 5 对不清理；未决 HITL 条目所在对不清理；压缩前原文进 `ai:ctx:archive:`、事件进 `ai:ctx:ledger:` |
+| CTX-08 | 压缩帧与压缩失败 | 真压缩时另发 `context` 帧（早于首个 `delta`）；归档/记账失败 ⇒ 历史**逐字不变**、本轮照常发请求 |
 
 ### 5.5 配置定义字段编辑
 

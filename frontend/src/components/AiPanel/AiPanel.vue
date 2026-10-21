@@ -739,6 +739,8 @@
           @blur.capture="onComposerBlur"
         />
         <div class="flex items-center gap-[6px] px-[9px] pb-[7px] pt-0">
+          <!-- 布局裁决（上下文专项批①）：[模型选择器位][参数位] …… [用量 pill][发送/停止]。
+               左端虚线格留给模型配置专项批③ 的选择器/参数 popover，本批只占 pill 位。 -->
           <span class="rounded-[6px] border border-dashed border-[#cddcff] px-[6px] py-[1px] text-[10.5px] leading-[1.6] text-[#8b949e]">工具位（预留 · 留空）</span>
           <span class="flex-1"></span>
           <span
@@ -747,6 +749,8 @@
             class="mr-[2px] flex-none text-[10.5px] leading-[1.6] tabular-nums"
             :class="composerCounterClass"
           >{{ composerCounterText }}</span>
+          <!-- 上下文占用（只在收到 done.context 或端点重建后出现；流式中不跳动） -->
+          <ContextPill />
           <button
             v-if="ai.loading || ai.suspended"
             type="button"
@@ -1006,6 +1010,7 @@ import {
 } from '@/utils/blocks'
 import { deriveCopyText, deriveProjections } from '@/utils/parts'
 import FormRenderer from '@/components/AiPanel/FormRenderer.vue'
+import ContextPill from '@/components/AiPanel/ContextPill.vue'
 import { GENERATIVE_FORM_TOOL, type ChatMessage, type ToolPart } from '@/types/ai'
 import type { FormSpec } from '@/types/form-schema'
 import type { ErrorCard, ErrorCardVariant } from '@/utils/error-card'

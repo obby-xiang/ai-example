@@ -565,3 +565,53 @@ export interface AiRunCurrent {
   /** 归档流最大帧序号：增量续收（lastSeq）的锚点 */
   archiveMaxSeq: number
 }
+
+// ── 上下文占用（上下文统计与压缩专项批①：GET /api/ai/context/{sessionId}） ────────────
+
+/**
+ * `done.context` 的形状（真值来源在帧类型里，故定义在 `types/sse.ts` 的 `SseDoneFrame` 边上，
+ * 这里转出给 store/组件用 —— 避免 store 为了一个类型去 import 帧模块的整个判别联合）。
+ */
+export type { ContextUsage } from './sse'
+
+/** 分项键（顺序以服务端返回为准；前端只按返回顺序渲染，不重排）。 */
+export type ContextBreakdownKey = 'history' | 'toolResults' | 'summary' | 'system' | 'tools' | 'input' | 'free'
+
+export interface ContextBreakdownItem {
+  key: ContextBreakdownKey | string
+  /** 已用项为归一后的估算（Σ 前六项 == usedTokens）；`free` 为 `limit − used`，可为负 */
+  tokens: number
+}
+
+/** 压缩态（批① 只有 `level=turns=lostTokens=0` 与 `circuit=closed`；字段先定形状，批③ 填值）。 */
+export interface ContextCompaction {
+  level: string
+  compactedTurns: number
+  lostTokens: number
+  lastAtMs: number | null
+  reason: string | null
+  circuit: string
+  fuseFails: number
+}
+
+/**
+ * 上下文快照端点载荷（刷新恢复 / 展开分项 / 挂起态的唯一数据源）。
+ *
+ * `source` 三态：`stream`（真值）/ `estimate`（估算）/ `none`（会话从未记账 —— 此时
+ * `percent` 为 null，界面不得显示 0%）。
+ */
+export interface ContextSnapshot {
+  sessionId: string
+  model: string | null
+  turnNo: number
+  measuredAtMs: number | null
+  limitTokens: number | null
+  usedTokens: number
+  percent: number | null
+  source: 'stream' | 'estimate' | 'none' | string
+  estimated: boolean
+  breakdown: ContextBreakdownItem[]
+  compaction: ContextCompaction
+  /** `?ledger=1` 时才返回（最近 20 条压缩事件） */
+  ledger?: Record<string, unknown>[]
+}

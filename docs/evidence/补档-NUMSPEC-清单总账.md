@@ -444,3 +444,39 @@ wait-audit §3 已列：后端 18 组超时/预算键 + 前端 13 组 + 7 项「
 - **`docs/evidence/` 中可能存在的、已废弃键的历史值**未追查（例如曾出现过后来被删的 `app.ai.first-event-timeout`）。
 - **运行时实际生效值**未验证（未启服务读 `/api/ai/health` 的 `sseDelivery`/`heartbeatIntervalMs` 回灌键）—— 本报告只覆盖**静态源码/配置面**。
 - **测试代码**（`backend/src/test/**`）内的数字未纳入 —— 它们是断言值而非产品规格，但 `S-17` 那类「主动避免硬编码的守卫」如果只存在于测试中，会构成另一类风险。
+
+## 7. 追加登记：上下文统计与压缩专项批①（2026-10-21）
+
+> 登记范围 = `app.ai.context.*` 全部新增键（施工 = `backend/src/main/java/com/example/configmgr/ai/config/AiProperties.java`
+> 的 `Context` 内部类 + `application.yml` 同段注释）。**设计稿 §3.7 的标题写「11 键」而表内实际列了 13 行**，
+> 本批按表实现 **13 个键**并逐行登记（数字口径以本表为准，标题的「11」属设计稿笔误，已在施工报告登记）。
+> 依据链：`docs/research/调研-上下文统计与压缩业界惯例-2026-10-21.md` §②（索引第 31 件）→
+> `docs/research/设计-上下文统计与压缩专项-2026-10-21.md` §3.7（索引第 34 件）。
+
+| 编号 | 分类 | 键名 | 现值 | 作用场景 | 可调性 | 依据现状 |
+|---|---|---|---|---|---|---|
+| B1-41 | 容量 | `app.ai.context.limit-tokens` | `128000` | 上下文上限（占用条的分母）的**过渡键**；模型配置专项的 `ai_model.max_context` 落地后由它覆盖（唯一消费点 = `ContextLimitResolver`）。`0` = 主动声明未知（降级态） | 配置键 | 有依据（本仓默认模型 128K 窗口；设计稿 §3.2「波次 1 分母」）。**待模型配置批②③ 接线后复核**：届时本键只是回落值 |
+| B1-42 | 缓冲 | `app.ai.context.reserve-tokens` | `13000` | 预留输出缓冲；比例阈值对 `limit − reserve` 取比 | 配置键 | 有依据（调研 §① Claude Code 的 13K；覆盖 `max-tokens 4096` + 一轮工具回环余量） |
+| B1-43 | 阈值 | `app.ai.context.l1-percent` | `70` | L1（工具结果清除）触发线 | 配置键 | 有依据（调研 Q2 谱系 70–75 取中值） |
+| B1-44 | 阈值 | `app.ai.context.l2-percent` | `80` | L2（滑窗 + 递归摘要）触发线（批③ 消费） | 配置键 | 有依据（同上 80–85 取中值） |
+| B1-45 | 阈值 | `app.ai.context.l3-percent` | `95` | L3（硬截断兜底）触发线（批③ 消费） | 配置键 | 有依据（同上 95）；自洽性 = 128K 下 `0.05 × 115K = 5.75K > max-tokens 4096` |
+| B1-46 | 阈值 | `app.ai.context.hysteresis-percent` | `60` | 滞回：压缩后 `used / limit < 60%` 才允许再次触发 | 配置键 | 有依据（调研 Q4「压缩到 60% 以下才允许再次触发」）；启动期校验要求 ≤ `l1-percent`（否则抖动链） |
+| B1-47 | pin | `app.ai.context.keep-tool-pairs` | `5` | L1 不清理的最近工具结果对（**按 `ToolResponseMessage` 里的 response 条数计**，不是按消息条数：一条 tool 消息可含多份响应，按消息计会把 pin 窗口放大成 N 倍） | 配置键 | 有依据（调研「保留最近 3–5 对」**取上限** = 保守） |
+| B1-48 | pin | `app.ai.context.keep-recent-turns` | `6` | L2 逐字保留的最近轮数（批③ 消费） | 配置键 | 有依据（调研「保留最近 6–8 轮」**取下限** = 省 token 优先） |
+| B1-49 | 缓冲 | `app.ai.context.chunk-tokens` | `8000` | 递归摘要的分块大小（批③ 消费） | 配置键 | 有依据（设计稿 §3.7：必须小于 `reserve-tokens`，保证摘要请求自身不越窗） |
+| B1-50 | 超时 | `app.ai.context.summary-timeout` | `60s` | 一次摘要请求的硬上限（批③ 消费） | 配置键 | 部分依据（设计稿 §3.7 缺省；**无压测数据**，与 `first-byte-timeout 30s` 同量级 + 摘要多分块余量） |
+| B1-51 | 熔断 | `app.ai.context.fuse-threshold` | `3` | 连续失败几次熔断（批③ 消费） | 配置键 | 有依据（调研 §①「连续失败 3 次熔断」） |
+| B1-52 | 熔断 | `app.ai.context.fuse-cooldown` | `10m` | 熔断冷却窗（到点半开重试一次，不升指数） | 配置键 | 部分依据（设计稿 §3.7 缺省；取值意图 = 「一次失败不阻塞太久」+「不放大上游长尾」，无数据） |
+| B1-53 | 模型 | `app.ai.context.summary-model` | `""` | 递归摘要用模型；空 = 主模型（D3 裁决） | 配置键 | 有依据（D3：本仓当前只有一套 provider 配置，`summary-model` 留空即主模型；模型配置专项落地后改配置即可切） |
+
+**本批另有的三个非配置常量**（一并登记，避免"只登记配置文件里的"这种口径漏洞）：
+
+| 编号 | 分类 | 位置 | 现值 | 作用场景 | 依据现状 |
+|---|---|---|---|---|---|
+| B1-54 | 估算 | `ai/context/ContextEstimator.java` `CJK_CHARS_PER_TOKEN` | `1.7` | 中文折算 token 的除数 | 有依据（调研 §②「中文按字符/1.6~1.8 兜底」取中值） |
+| B1-55 | 估算 | 同上 `OTHER_CHARS_PER_TOKEN` | `4.0` | 其余字符折算 token 的除数 | 有依据（GPT 系分词器 4 字符/token 的通行经验值） |
+| B1-56 | 容量 | `ai/run/RunStore.java` `CONTEXT_LEDGER_MAX` | `20` | 压缩台账保留条数 | 有依据（设计稿 §3.6「最近 20 条」） |
+
+**自洽性复核（与既有数字的关系）**：`reserve-tokens 13000` 覆盖 `spring.ai.openai.chat.options.max-tokens 4096`
+（B1-06）；L3 触发线在 128K 下剩余 `5.75K`，仍大于 4096 ⇒ **触发线不会把输出空间吃掉**。
+换更小窗口模型（如 32K）时必须重算这两条不等式 —— 已写进 `AiProperties.Context` 的类注与 `application.yml` 同段注释。

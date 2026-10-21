@@ -3,6 +3,11 @@ package com.example.configmgr.ai.run;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.AiProviderRegistry;
 import com.example.configmgr.ai.config.ProviderRuntime;
+import com.example.configmgr.ai.context.ContextBreakdownService;
+import com.example.configmgr.ai.context.ContextCompactor;
+import com.example.configmgr.ai.context.ContextEstimator;
+import com.example.configmgr.ai.context.ContextMeter;
+import com.example.configmgr.ai.context.ContextState;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.session.AiSessionService;
 import com.example.configmgr.ai.tool.AiContext;
@@ -24,6 +29,7 @@ import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.ai.tool.ToolCallback;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
@@ -36,9 +42,12 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -167,6 +176,18 @@ public class ResilientChatService {
 
 	private final ScheduledExecutorService watchdogExecutor;
 
+	/**
+	 * 上下文压缩统一入口（上下文统计与压缩专项批①）。
+	 *
+	 * <p>
+	 * <b>字段注入</b>而非构造器参数：本类的构造器被三份既有 conformance/run 用例直接
+	 * {@code new}（{@code ChatTurnFrameSequenceConformanceTest} 等），改签名等于要求它们跟改
+	 * —— 而"既有断言零删改"是本批的门禁。未注入（局部上下文/单测直接 new）时压缩与计量整体缺席，
+	 * 帧里也就不带 {@code done.context}（"未装配"与"计量为 0"必须可区分）。
+	 */
+	@Autowired(required = false)
+	private ContextCompactor contextCompactor;
+
 	public ResilientChatService(AiProviderRegistry providerRegistry, ChatMemory chatMemory,
 			MessageJsonCodec codec, RunStore store, RunRegistry registry, ToolRegistry toolRegistry,
 			ContextBuilder contextBuilder, AiSessionService sessionService, AiProperties properties,
@@ -205,18 +226,30 @@ public class ResilientChatService {
 		// 控制器早已 503 拦住（这里抛 AiUnavailableException 只是并发改配置的窄窗口兜底）。
 		ProviderRuntime runtime = this.providerRegistry.current();
 
+		// 上下文专项批①：装配点同时给出三个分项锚点（system/tools/input）—— 它们不在历史里，
+		// 端点重建时无从再算，故在本轮起点就随真值一起落进 ai:ctx:。
+		List<ToolCallback> tools = this.toolRegistry.forContext(context);
+		int systemTokens = ContextEstimator.estimate(systemText);
+		int toolsTokens = ContextEstimator.estimateToolSchemas(tools);
+		int inputTokens = ContextEstimator.estimate(request.message());
+		Compaction compaction = compactBeforeRequest(runId, sessionId, runtime.modelId(), runtime.providerId(), memory,
+				inputTokens, systemTokens, toolsTokens, 0);
+		memory = compaction.memory();
+
 		// 与官方 MessageChatMemoryAdvisor.before 的变换逐字对齐（1.1.8 字节码实测）：
 		// [首个 SystemMessage] + 记忆窗口 + 其余指令 —— 快照里存的就是模型真正看到的那串消息。
 		List<Message> full = new ArrayList<>(memory.size() + instructions.size());
 		full.add(instructions.get(0));
 		full.addAll(memory);
 		full.add(instructions.get(1));
+		// 压缩若已发生：快照写的就是压缩后的那一份（快照 === 模型看到的；分叉即 SM-01 同族）
 		this.store.create(runId, sessionId, context, full, this.codec, runtime.providerId(), runtime.modelId());
 
 		this.cancellations.register(runId);
 		out.start(sessionId);
+		// 压缩即时可见：请求前压的，故必在本轮第一个 delta/tool_start 之前（帧类型 15 → 16 的唯一新增）
+		compaction.emitIfChanged(out);
 
-		List<ToolCallback> tools = this.toolRegistry.forContext(context);
 		// 格式契约：E2E 的披露取证按 `上下文=(\S+)\s+披露工具=\[` 正则读这一行（scripts/verify-e2e.ps1），
 		// 因此 provider/model 只能另起一行，不得插进本行字段之间。
 		log.debug("AI 轮次开始 runId={} sessionId={} 会话已存在={} 上下文={} 披露工具={} 首包超时={} 包间超时={} 最大尝试={} 总预算={}",
@@ -226,7 +259,10 @@ public class ResilientChatService {
 		log.debug("AI 轮次模型身份 runId={} provider={} model={}", runId, runtime.providerCode(), runtime.modelId());
 
 		try {
-			runAttempts(runId, sessionId, turnStartedAtMs, out, attempt -> {
+			TurnContext turn = new TurnContext(systemTokens, toolsTokens, inputTokens,
+					systemTokens + toolsTokens + ContextEstimator.estimateMessages(memory) + inputTokens,
+					compaction.limitTokens(), runtime.modelId(), compaction.levelWire(), turnStartedAtMs);
+			runAttempts(runId, sessionId, turnStartedAtMs, out, turn, attempt -> {
 				log.debug("本轮第 {} 次尝试组装请求 runId={} sessionId={}（每轮重建请求）", attempt, runId, sessionId);
 				return Flux.defer(() -> {
 					var spec = runtime.chatClient().prompt()
@@ -265,8 +301,10 @@ public class ResilientChatService {
 		// 批③ 会改成"按快照的 providerId/modelId 取"，provider 没了就 409 PROVIDER_GONE。
 		ProviderRuntime runtime = this.providerRegistry.current();
 		this.cancellations.register(runId);
+		// 上下文专项批①：续跑侧的分母/分项锚点现算（历史里没有 tools schema，故走披露口径）
+		TurnContext turn = resumedTurn(runId, context, history, runtime.modelId(), turnStartedAtMs);
 		try {
-			runAttempts(runId, sessionId, turnStartedAtMs, out, attempt -> {
+			runAttempts(runId, sessionId, turnStartedAtMs, out, turn, attempt -> {
 				log.debug("续跑第 {} 次尝试重建完整历史 runId={} sessionId={} 历史条数={}", attempt, runId, sessionId,
 						history.size());
 				Prompt prompt = buildResumedPrompt(runtime, runId, sessionId, context, history);
@@ -305,7 +343,7 @@ public class ResilientChatService {
 	// ── 尝试循环（双超时 + 三条件重试 + 完成帧校验 + 取消） ────────────────────
 
 	private void runAttempts(String runId, String sessionId, long turnStartedAtMs, SseChatEmitter out,
-			IntFunction<Flux<ChatResponse>> attemptStream) {
+			TurnContext turn, IntFunction<Flux<ChatResponse>> attemptStream) {
 		AiProperties.Resilience config = this.properties.getResilience();
 		int maxAttempts = Math.max(1, config.getMaxAttempts());
 		for (int attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -348,13 +386,13 @@ public class ResilientChatService {
 							"上游流已结束但缺少 finishReason 终帧——按断流处理，已收上游事件 "
 									+ watchdog.upstreamEvents() + " 个");
 				}
-				finish(runId, sessionId, accumulator, attempt, watchdog, out);
+				finish(runId, sessionId, accumulator, attempt, watchdog, out, turn);
 				return;
 			}
 			catch (Throwable error) {
 				StreamViolationException violation = classify(error, watchdog.upstreamEvents());
 				if (StreamViolationException.CANCELLED.equals(violation.getCode())) {
-					cancelTerminal(runId, sessionId, accumulator, attempt, watchdog, out);
+					cancelTerminal(runId, sessionId, accumulator, attempt, watchdog, out, turn);
 					return;
 				}
 				boolean emitted = accumulator.emittedAny();
@@ -488,7 +526,7 @@ public class ResilientChatService {
 	 * "用过工具"只说明这一轮做过事，不改变"模型没给出任何正文"这一事实。
 	 */
 	private void finish(String runId, String sessionId, Accumulator accumulator, int attempts, StreamWatchdog watchdog,
-			SseChatEmitter out) {
+			SseChatEmitter out, TurnContext turn) {
 		String text = accumulator.text();
 		if (!StringUtils.hasText(text)) {
 			emptyReply(runId, sessionId, accumulator, attempts, out);
@@ -518,7 +556,9 @@ public class ResilientChatService {
 		extra.put("terminalSignal", accumulator.terminalSignal());
 		// T5：正文段收尾（未开过段则不发 —— 纯工具轮没有正文）
 		out.textEnd(text.length());
-		out.done(accumulator.usage(), accumulator.model(), extra);
+		// 上下文专项批①：先记账（真值回填 ai:ctx:），再发终帧（done.context 与端点必须同源）
+		Map<String, Object> context = contextTelemetry(sessionId, turn, accumulator);
+		out.done(accumulator.usage(turn.promptEstimate()), accumulator.model(), extra, context);
 	}
 
 	/**
@@ -559,7 +599,7 @@ public class ResilientChatService {
 	 * 历史取快照现状（含本轮已落定的工具配对），快照转 CANCELLED，终帧 {@code done{cancelled:true}}。
 	 */
 	private void cancelTerminal(String runId, String sessionId, Accumulator accumulator, int attempts,
-			StreamWatchdog watchdog, SseChatEmitter out) {
+			StreamWatchdog watchdog, SseChatEmitter out, TurnContext turn) {
 		RunSnapshot snapshot = this.store.get(runId);
 		if (snapshot != null) {
 			List<Message> history = new ArrayList<>(this.codec.deserializeAll(snapshot.getMessageJson()));
@@ -582,8 +622,10 @@ public class ResilientChatService {
 		extra.put("partialChars", accumulator == null ? 0 : accumulator.text().length());
 		// T5：取消也收尾正文段（半截正文不写进历史，但"这一段到此为止"必须显式告知前端）
 		out.textEnd(accumulator == null ? 0 : accumulator.text().length());
-		out.done(accumulator == null ? Map.of() : accumulator.usage(), accumulator == null ? null : accumulator.model(),
-				extra);
+		// 上下文专项批①：取消轮同样如实报占用（半轮的真值仍是真值，est 标注照旧）
+		Map<String, Object> context = contextTelemetry(sessionId, turn, accumulator);
+		out.done(accumulator == null ? Map.of() : accumulator.usage(turn.promptEstimate()),
+				accumulator == null ? null : accumulator.model(), extra, context);
 	}
 
 	private void fail(String runId, String sessionId, StreamViolationException violation, int attempts, boolean emitted,
@@ -859,12 +901,19 @@ public class ResilientChatService {
 
 		private final AtomicReference<ChatResponse> lastResponse = new AtomicReference<>();
 
+		/**
+		 * 计量器（上下文专项批①）：R1–R6 的规则本体在 {@link ContextMeter}，本类只负责喂它。
+		 * 每次 attempt 新建 ⇒ 重试天然不串值（R6）。
+		 */
+		private final ContextMeter meter = new ContextMeter();
+
 		private final Deque<String> tail = new ArrayDeque<>();
 
 		private volatile String terminalSignal;
 
 		void accept(ChatResponse response) {
 			this.lastResponse.set(response);
+			this.meter.accept(response);
 			Generation generation = response.getResult();
 			if (generation != null) {
 				String finishReason = generation.getMetadata() == null ? null : generation.getMetadata().getFinishReason();
@@ -916,26 +965,245 @@ public class ResilientChatService {
 			return this.text.toString();
 		}
 
-		Map<String, Object> usage() {
-			ChatResponse response = this.lastResponse.get();
-			if (response == null || response.getMetadata() == null || response.getMetadata().getUsage() == null) {
-				return Map.of();
-			}
-			var usage = response.getMetadata().getUsage();
-			Map<String, Object> out = new LinkedHashMap<>();
-			out.put("promptTokens", usage.getPromptTokens());
-			out.put("completionTokens", usage.getCompletionTokens());
-			out.put("totalTokens", usage.getTotalTokens());
-			// T8：可选维度（cachedTokens / reasoningTokens）—— 从 native usage 提取，取不到即省略
-			UsageDetails.enrich(out, usage.getNativeUsage());
-			return out;
+		Map<String, Object> usage(int fallbackEstimate) {
+			return this.meter.usage(fallbackEstimate);
+		}
+
+		ContextMeter meter() {
+			return this.meter;
 		}
 
 		String model() {
+			String fromMeter = this.meter.model();
+			if (fromMeter != null) {
+				return fromMeter;
+			}
 			ChatResponse response = this.lastResponse.get();
 			return response != null && response.getMetadata() != null ? response.getMetadata().getModel() : null;
 		}
 
+	}
+
+	// ── 上下文专项批①：压缩 / 计量 / 记账 ────────────────────────────────────
+
+	/**
+	 * 一轮的上下文装配锚点（批① 新增）。
+	 *
+	 * @param systemTokens   人设 + 工作区快照的估算（端点重建不从历史算）
+	 * @param toolsTokens    本轮披露 schema 的估算
+	 * @param inputTokens    本轮输入的估算
+	 * @param promptEstimate 本轮请求的整包估算（只在<b>无真值</b>时作为回退展示值）
+	 * @param limitTokens    分母（0 = 未知）
+	 * @param model          本轮模型名
+	 * @param limitTokens    分母（0 = 未知）
+	 * @param compactionLevel 本轮压缩级别（{@code none}/{@code L1}）：<b>由压缩方显式交接</b>，
+	 *                        不靠时刻反推 —— 续跑的压缩发生在 {@code ResumeService} 里（早于本方法），
+	 *                        压完再驱动，"压缩时刻 ≥ 轮起点"这条比较必然为假 ⇒ 会恒报 {@code none}（I-1）
+	 * @param turnStartedAtMs 轮起点（预算/超时口径用）
+	 */
+	private record TurnContext(int systemTokens, int toolsTokens, int inputTokens, int promptEstimate, int limitTokens,
+			String model, String compactionLevel, long turnStartedAtMs) {
+	}
+
+	/**
+	 * 压缩结果 + 后续动作（把"压没压、压成什么"与"发不发 context 帧"绑在一个值上，
+	 * 避免调用方各自判断而漏发）。
+	 */
+	private record Compaction(List<Message> memory, int limitTokens, ContextCompactor.Outcome outcome) {
+
+		boolean changed() {
+			return this.outcome != null && this.outcome.changed();
+		}
+
+		/** 本轮级别（未装配压缩设施 / 未压缩 ⇒ {@code none}）。 */
+		String levelWire() {
+			return changed() ? this.outcome.levelWire() : "none";
+		}
+
+		/** 压缩发生时另发一条 {@code context} 帧（帧类型 15 → 16 的唯一新增；未压缩则一帧不发）。 */
+		void emitIfChanged(SseChatEmitter out) {
+			if (!changed()) {
+				return;
+			}
+			out.context(ContextCompactor.framePayload(this.outcome));
+		}
+
+	}
+
+	/**
+	 * 请求前压缩（两个调用点之一；另一处见 {@code ResumeService}）。
+	 *
+	 * <p>
+	 * <b>落库顺序 = 归档 → 记忆 → 快照</b>（与设计稿 §3.5 的"快照在前、记忆在后"相反，理由见
+	 * {@link ContextCompactor} 类注的差异段）：{@code store.create} 失败时，残留的是
+	 * <b>"记忆已压、快照未建"</b>（旧快照不存在 ⇒ 下次重试重新压，幂等）；反序会残留
+	 * <b>"快照已压、记忆未压"</b>，这一轮模型看压缩后的历史、记忆窗口仍是原文，
+	 * 续跑与下一轮各自再压一次且 pin 窗口不同 ⇒ 同一会话两条历史线（SM-01 同族）。
+	 * 三步都对，"模型看到的 / 快照里的 / 记忆里的"才是同一份。
+	 */
+	private Compaction compactBeforeRequest(String runId, String sessionId, String model, Long providerId,
+			List<Message> memory, int inputTokens, int systemTokens, int toolsTokens, int toolResultsSinceMeasure) {
+		if (this.contextCompactor == null) {
+			return new Compaction(memory, 0, null);
+		}
+		int limit = this.contextCompactor.limitTokens(providerId, model);
+		if (memory == null || memory.isEmpty()) {
+			return new Compaction(memory, limit, null);
+		}
+		ContextState state = this.contextCompactor.readState(sessionId);
+		ContextCompactor.Outcome outcome = this.contextCompactor.compact(new ContextCompactor.Request(sessionId, runId,
+				model, providerId, memory, this.codec.serializeAll(memory), state.usedTokens(),
+				state.completionTokens(), inputTokens, toolResultsSinceMeasure, systemTokens, toolsTokens,
+				protectedToolCallIds(runId, sessionId)));
+		if (!outcome.changed()) {
+			return new Compaction(memory, limit, outcome);
+		}
+		try {
+			// 记忆整体覆盖写（与 convergeMemory 同一通道）：不写回的话下一轮又读到未压缩的那份。
+			// 顺序（记忆先于快照）见方法注：`store.create` 失败时不留"快照已压、记忆未压"组合
+			this.chatMemory.clear(sessionId);
+			this.chatMemory.add(sessionId, outcome.messages());
+		}
+		catch (RuntimeException ex) {
+			log.warn("压缩后记忆写回失败 sessionId={}：{}（快照仍写压缩后的那一份）", sessionId, ex.getMessage());
+		}
+		return new Compaction(outcome.messages(), limit, outcome);
+	}
+
+	/**
+	 * 未决 HITL 条目的 toolCallId 集合（P3 的可执行投影：这些工具结果永不清除）。
+	 *
+	 * <p>取两处：本轮 runId（首轮通常为空）与会话当前挂起轮（{@code ai:session:current:}）——
+	 * 后者覆盖"上一轮挂起未决、用户又发了新消息"这一真实场景。
+	 */
+	private Set<String> protectedToolCallIds(String runId, String sessionId) {
+		Set<String> ids = new LinkedHashSet<>();
+		collectPendingIds(ids, runId);
+		try {
+			String current = this.store.sessionCurrentRunId(sessionId);
+			if (current != null && !current.equals(runId)) {
+				collectPendingIds(ids, current);
+			}
+		}
+		catch (RuntimeException ex) {
+			log.debug("读会话当前轮失败 sessionId={}：{}", sessionId, ex.getMessage());
+		}
+		return ids;
+	}
+
+	private void collectPendingIds(Set<String> ids, String runId) {
+		try {
+			for (PendingToolCall pending : this.store.pendings(runId)) {
+				boolean unresolved = PendingToolCall.PENDING.equals(pending.getStatus())
+						|| (PendingToolCall.APPROVED.equals(pending.getStatus()) && !pending.isExecuted());
+				if (unresolved && pending.getToolCallId() != null) {
+					ids.add(pending.getToolCallId());
+				}
+			}
+		}
+		catch (RuntimeException ex) {
+			log.debug("读未决条目失败 runId={}：{}", runId, ex.getMessage());
+		}
+	}
+
+	/**
+	 * 本轮披露 schema 的估算（上下文专项批①）。
+	 *
+	 * <p>暴露给 {@code ResumeService}：续跑侧没有 {@code ToolRegistry}，但它必须与首轮用<b>同一个</b>
+	 * {@code tools} 口径 —— 否则两条路径的 {@code done.context} 分项会在同一会话里跳变。
+	 */
+	public int disclosedToolTokens(AiContext context) {
+		return ContextEstimator.estimateToolSchemas(this.toolRegistry.forContext(context));
+	}
+
+	/**
+	 * 续跑侧的压缩级别交接（I-1）。
+	 *
+	 * <p>
+	 * 为什么需要这张表：续跑的压缩发生在 {@code ResumeService}（早于 {@code driveResumed}），
+	 * 而"本轮压没压过"若用 {@code ai:ctx:} 的时刻去反推（压缩时刻 ≥ 轮起点）必然为假 ——
+	 * 压完才交棒，轮起点比压缩时刻更晚。因此级别由压缩方<b>显式交接</b>，驱动侧读后即弃。
+	 *
+	 * <p>容量：一轮一个键、读完即删；即便某轮在交棒前失败，条目也只留到该轮结束（runId 不复用）。
+	 */
+	private final Map<String, String> compactionLevels = new ConcurrentHashMap<>();
+
+	/**
+	 * 记录续跑轮的压缩级别（由 {@code ResumeService} 在压缩成功后、交棒前调用）。
+	 *
+	 * @param level 实际级别（{@code none}/{@code L1}）；{@code null} 按 {@code none}
+	 */
+	public void noteCompaction(String runId, String level) {
+		this.compactionLevels.put(runId, level == null ? "none" : level);
+	}
+
+	/**
+	 * 丢弃某轮尚未被读取的压缩级别交接（由 {@code ResumeService} 在<b>交棒失败</b>时调用）。
+	 *
+	 * <p>
+	 * 与 {@link #noteCompaction} 的区别是"没有下一手"：交棒被拒（{@code POOL_SATURATED}）这一轮
+	 * 不会被驱动，{@code resumedTurn} 永远不会来取，留着只会让"一轮一个键、读完即删"的容量
+	 * 论证失真。{@code noteCompaction(runId, null)} 写的是 {@code "none"}（仍占位），不是清除。
+	 */
+	public void clearCompaction(String runId) {
+		this.compactionLevels.remove(runId);
+	}
+
+	/** 续跑侧的装配锚点（历史里的 system 即是人设 + 工作区快照的合成体；级别来自一次性交接）。 */
+	private TurnContext resumedTurn(String runId, AiContext context, List<Message> history, String model,
+			long turnStartedAtMs) {
+		int systemTokens = 0;
+		for (Message message : history) {
+			if (message.getMessageType() == MessageType.SYSTEM) {
+				systemTokens += ContextEstimator.estimate(message.getText());
+			}
+		}
+		int toolsTokens = ContextEstimator.estimateToolSchemas(this.toolRegistry.forContext(context));
+		int historyTokens = ContextEstimator.estimateMessages(history);
+		int limit = this.contextCompactor == null ? 0 : this.contextCompactor.limitTokens(null, model);
+		String level = this.compactionLevels.remove(runId);
+		if (level == null) {
+			level = "none";
+		}
+		return new TurnContext(systemTokens, toolsTokens, 0, systemTokens + toolsTokens + historyTokens, limit, model,
+				level, turnStartedAtMs);
+	}
+
+	/**
+	 * 轮末记账 + {@code done.context} 载荷（上一轮真值 → 本轮真值）。
+	 *
+	 * <p>
+	 * 判"本轮压过没"用时刻比较：压缩发生在<b>轮起点</b>，故 {@code state.atMs >= turnStartedAtMs}
+	 * 等价于"本轮压过"；没有压缩设施的进程返回 null（帧里不出现 {@code context} 键，
+	 * "未装配"与"计量为 0" 因此可区分）。
+	 */
+	private Map<String, Object> contextTelemetry(String sessionId, TurnContext turn, Accumulator accumulator) {
+		if (this.contextCompactor == null || turn == null) {
+			return null;
+		}
+		ContextMeter meter = accumulator == null ? new ContextMeter() : accumulator.meter();
+		boolean est = !meter.measured();
+		int used = est ? Math.max(0, turn.promptEstimate()) : meter.promptTokens();
+		int completion = est ? 0 : meter.completionTokens();
+		ContextState before = this.contextCompactor.readState(sessionId);
+		// 级别由压缩方交接（见 TurnContext#compactionLevel）：时刻反推在续跑轮必然误判为 none（I-1）
+		String level = turn.compactionLevel();
+		String model = meter.model() != null ? meter.model() : turn.model();
+		if (meter.dirty() > 0) {
+			// 脏 usage 要留痕：frames/dirty 是"这个数可信到什么程度"的唯一证据
+			log.warn("usage 存在回退帧 runId 轮次计量 sessionId={} frames={} dirty={} 已采纳 prompt={}", sessionId,
+					meter.frames(), meter.dirty(), used);
+		}
+		this.contextCompactor.recordTurn(sessionId, model, used, completion, before.turnNo() + 1, est,
+				turn.systemTokens(), turn.toolsTokens(), turn.inputTokens());
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("usedTokens", used);
+		payload.put("limitTokens", turn.limitTokens() > 0 ? turn.limitTokens() : null);
+		payload.put("percent", turn.limitTokens() > 0 ? ContextBreakdownService.percent(used, turn.limitTokens()) : null);
+		payload.put("level", level);
+		payload.put("est", est);
+		payload.put("circuit", before.circuit() == null ? "closed" : before.circuit());
+		return payload;
 	}
 
 	private AiContext toContext(AiChatRequest.Context context) {

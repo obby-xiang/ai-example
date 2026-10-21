@@ -33,7 +33,7 @@ import {
 } from '@/utils/parts'
 import { ErrorCode, type SessionBusyConflict, type SuspendPoolSaturated } from '@/types/api'
 import { frameSeq, isTerminalFrame, type ToolOutcome } from '@/types/sse'
-import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiHealth, type AiHistory, type AiHistoryMessage, type AiRunCurrent, type AiSessionMirror, type ChatMessage, type GateSubmission, type MessagePart, type PendingToolCall, type ToolPart, type ToolPartPatch, type ToolRunStatus } from '@/types/ai'
+import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiHealth, type AiHistory, type AiHistoryMessage, type AiRunCurrent, type AiSessionMirror, type ChatMessage, type ContextBreakdownItem, type ContextCompaction, type ContextUsage, type GateSubmission, type MessagePart, type PendingToolCall, type ToolPart, type ToolPartPatch, type ToolRunStatus } from '@/types/ai'
 import { parseFormSchema, checkFormValues } from '@/types/form-schema'
 import type { SseFrame } from '@/types/sse'
 import type { WorkspaceActionRecord } from '@/types/tools'
@@ -783,7 +783,18 @@ export const useAiStore = defineStore('ai', {
      * R-166（口径③）：确认门提交态（同 toolCallId 最多提交一次）。
      * 进表 = 点击批准/拒绝的同一刻；出表 = 结局帧 / 权威校正 / 提交失败回退。
      */
-    gateSubmissions: {} as Record<string, GateSubmission>
+    gateSubmissions: {} as Record<string, GateSubmission>,
+    /**
+     * 上下文占用（上下文专项批①）：`done.context` 的逐轮快照 + 端点重建的七项拆分。
+     *
+     * 更新口径（C-36）：**只在 `done` 帧到达时**写 —— 流式中不跳动（半轮的真值是半轮的，
+     * 拿它刷新进度条会让读者把"正在变大"误读成"要爆了"）。`breakdown` 独立于 `contextUsage`：
+     * 它只在端点返回时才有（popover 打开时按需拉，不必每轮都发）。
+     */
+    contextUsage: null as ContextUsage | null,
+    contextBreakdown: null as ContextBreakdownItem[] | null,
+    /** 端点返回的压缩态（提示条/运维面用；批① 只存不渲染） */
+    contextCompaction: null as ContextCompaction | null
   }),
 
   getters: {
@@ -948,8 +959,48 @@ export const useAiStore = defineStore('ai', {
      * 完成路径每次落盘（写 `messages`、触发 `restoreSuspendedSnapshot`）前对账：身份已变即整体
      * 丢弃，不让旧会话的历史/挂起卡写进新会话（写后写竞态）。守卫口径同本文件 isCurrentRound 同族。
      */
-    async loadHistory(): Promise<void> {
+    /**
+     * 拉取会话上下文占用（上下文统计与压缩专项批①；`GET /api/ai/context/{sessionId}`）。
+     *
+     * <p>
+     * 三个调用点：① {@link #loadHistory}（刷新恢复：本地 store 是内存态，刷新即丢，占用量必须由
+     * 服务端重建）；② popover 打开（七项拆分按需拉，不必每轮都发）；③ 挂起态（没有新帧，占用仍要可读）。
+     *
+     * <p>
+     * 两条降级口径：
+     * <ul>
+     * <li>端点失败（503/网络）⇒ **保持现状**、不覆盖 —— 把"读不到"写成"用了 0"是最糟的谎；</li>
+     * <li>`source === 'none'`（会话从未记账）⇒ `contextUsage = null`（pill 不出现：没有可说的数）。</li>
+     * </ul>
+     */
+    async loadContext(): Promise<void> {
       const sid = this.sessionId
+      try {
+        const snapshot = await aiApi.getContext(sid)
+        // 会话身份守卫（同 loadHistory 的红队 MAJOR-1 口径）：跨 await 期间换了会话即整体丢弃
+        if (this.sessionId !== sid) {
+          return
+        }
+        this.contextBreakdown = snapshot.breakdown ?? null
+        this.contextCompaction = snapshot.compaction ?? null
+        if (snapshot.source === 'none') {
+          this.contextUsage = null
+          return
+        }
+        this.contextUsage = {
+          usedTokens: snapshot.usedTokens,
+          limitTokens: snapshot.limitTokens,
+          percent: snapshot.percent,
+          level: snapshot.compaction?.level ?? 'none',
+          est: snapshot.estimated,
+          circuit: snapshot.compaction?.circuit ?? 'closed'
+        }
+      } catch {
+        // 读不到就不动（历史渲染与既有状态不受影响）
+      }
+    },
+
+    async loadHistory(): Promise<void> {      const sid = this.sessionId
       this.startMirror()
       const mirror = readMirror(this.sessionId)
       if (mirror && Array.isArray(mirror.messages) && mirror.messages.length > 0) {
@@ -997,6 +1048,10 @@ export const useAiStore = defineStore('ai', {
       if (this.sessionId !== sid) {
         return
       }
+
+      // 上下文专项批①：占用条在刷新后必须由服务端重建（本地 store 是内存态，刷新即丢）。
+      // 与历史并行拉，不阻塞历史渲染（pill 慢一拍可接受，历史渲染慢一拍不可接受）。
+      void this.loadContext()
 
       if (!history.messages || history.messages.length === 0) {
         // 后端历史为空（重启/TTL 过期）：镜像里的挂起已无法回灌续跑 —— 待决工具段过期降级
@@ -2396,6 +2451,10 @@ export const useAiStore = defineStore('ai', {
       // 轮次级标志一并复位：新会话不该继承上一轮的停止/断流事实（骨架屏见 historyLoaded）
       this.stopped = false
       this.streamInterrupted = false
+      // 上下文专项批①：占用与拆分随会话清空（跨会话串味 = 拿上一会话的 84k 配新会话）
+      this.contextUsage = null
+      this.contextBreakdown = null
+      this.contextCompaction = null
       this.historyLoaded = true
       return nextId
     },
@@ -2820,6 +2879,21 @@ export const useAiStore = defineStore('ai', {
           }
           break
         }
+        case 'context': {
+          // 上下文专项批①：压缩事件（帧类型 15 → 16 的唯一新增）。本批**不渲染**提示条
+          // （设计稿 §6.4 把它排在批④），只记一段现场（排障/取证 + 供批次④ 直接消费）。
+          // 刻意不刷新 pill：pill 的口径是"轮末占用"，压缩帧带来的是"压前/压后"的过程量。
+          this.contextCompaction = {
+            level: frame.level,
+            compactedTurns: frame.turns,
+            lostTokens: frame.lostTokens,
+            lastAtMs: typeof frame.atMs === 'number' ? frame.atMs : null,
+            reason: frame.reason,
+            circuit: this.contextUsage?.circuit ?? 'closed',
+            fuseFails: 0
+          }
+          break
+        }
         case 'heartbeat': {
           // 挂起期/流式期心跳只作保活（keep-alive 由 SSE 层消费）；去超时裁决后前端不再据此
           // 折算门卡倒计时，故本 case 无状态写入。
@@ -2844,6 +2918,12 @@ export const useAiStore = defineStore('ai', {
           this.suspended = false
           if (frame.cancelled) {
             this.notice = '本轮已取消'
+          }
+          // 上下文专项批①：轮末占用（唯一刷新点 —— 流式中不跳动，C-36）
+          if (frame.context) {
+            this.contextUsage = frame.context
+            // 拆分是端点面（popover 打开时按需拉）：轮末先置脏，避免拿上一轮的七项配这一轮的总量
+            this.contextBreakdown = null
           }
           // R-166：轮终态 ⇒ 提交在途态一并收口（挂起卡已由 expireResidueToolParts 收掉）
           this.clearGateSubmissions()

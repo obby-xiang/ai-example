@@ -90,13 +90,25 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 @Slf4j
 @Component
-public class RunStore {
+public class RunStore implements com.example.configmgr.ai.context.ContextStateStore {
 
 	public static final String RUN_PREFIX = "ai:run:";
 
 	public static final String RUN_INDEX = "ai:runs";
 
 	public static final String PENDING_PREFIX = "ai:pending:";
+
+	/** 上下文真值 HASH 前缀（上下文统计与压缩专项批①；{@code ai:ctx:<sessionId>}）。 */
+	public static final String CONTEXT_PREFIX = "ai:ctx:";
+
+	/** 上下文台账 LIST 前缀（{@code ai:ctx:ledger:<sessionId>}，压缩事件，最近 20 条）。 */
+	public static final String CONTEXT_LEDGER_PREFIX = "ai:ctx:ledger:";
+
+	/** 压缩前原文前缀（{@code ai:ctx:archive:<sessionId>:<turnNo>}）。 */
+	public static final String CONTEXT_ARCHIVE_PREFIX = "ai:ctx:archive:";
+
+	/** 上下文台账保留条数（设计稿 §3.6：最近 20 条）。 */
+	public static final int CONTEXT_LEDGER_MAX = 20;
 
 	public static final String CLAIM_PREFIX = "ai:claim:";
 
@@ -1657,6 +1669,125 @@ public class RunStore {
 	 */
 	private Duration ttlFor(String runId) {
 		return this.properties.getSessionTtl();
+	}
+
+	// ── 上下文计量与压缩的三个键族（上下文统计与压缩专项批①） ──────────────────────
+
+	/** {@code ai:ctx:<sessionId>} —— 会话上下文真值（HASH，字段见 {@code ContextState#toFields}）。 */
+	public String contextKey(String sessionId) {
+		return CONTEXT_PREFIX + sessionId;
+	}
+
+	/** {@code ai:ctx:ledger:<sessionId>} —— 压缩事件台账（LIST，新→旧）。 */
+	public String contextLedgerKey(String sessionId) {
+		return CONTEXT_LEDGER_PREFIX + sessionId;
+	}
+
+	/** {@code ai:ctx:archive:<sessionId>:<turnNo>} —— 压缩前原文（STRING，JSON 数组）。 */
+	public String contextArchiveKey(String sessionId, int turnNo) {
+		return CONTEXT_ARCHIVE_PREFIX + sessionId + ":" + turnNo;
+	}
+
+	/**
+	 * 读会话上下文真值（HASH → {@code ContextState}；键不存在 ⇒ 空态）。
+	 *
+	 * <p>读也 touch TTL（"与会话同滑动"：只读不写的会话同样按活跃续期）。Redis 抖动<b>不</b>抛错
+	 * —— 计量面挂了不该让端点 500，降级为空态由调用方决定怎么展示。
+	 */
+	@Override
+	public com.example.configmgr.ai.context.ContextState read(String sessionId) {
+		String key = contextKey(sessionId);
+		try {
+			Map<Object, Object> raw = this.redis.opsForHash().entries(key);
+			touchContextTtl(key);
+			if (raw == null || raw.isEmpty()) {
+				return com.example.configmgr.ai.context.ContextState.EMPTY;
+			}
+			Map<String, String> fields = new LinkedHashMap<>();
+			for (Map.Entry<Object, Object> entry : raw.entrySet()) {
+				fields.put(String.valueOf(entry.getKey()), String.valueOf(entry.getValue()));
+			}
+			return com.example.configmgr.ai.context.ContextState.fromFields(fields);
+		}
+		catch (RuntimeException ex) {
+			log.warn("读上下文真值失败 sessionId={}：{}（按空态处理）", sessionId, ex.getMessage());
+			return com.example.configmgr.ai.context.ContextState.EMPTY;
+		}
+	}
+
+	/**
+	 * 整份写会话上下文真值（HSET + EXPIRE）。
+	 *
+	 * <p>
+	 * <b>边界（N-3 如实登记）</b>：底层是 {@code HSET} 的<b>字段级合并</b>，不是"先删后写"——
+	 * {@code ContextState#toFields()} 对 null 键<b>不产字段</b>（避免把 null 写成空串），
+	 * 于是"上一份有 {@code reason}、这一份 reason=null"时，<b>旧值会残留</b>在该 HASH 里。
+	 * 影响面仅限 {@code reason}（唯一的可空字符串字段；其余字段恒写）+ {@code model}（同为空则残留旧模型名）。
+	 * 两者都是<b>观测/展示</b>字段：残留表现为"上一次压缩的原因/模型名没被清掉"，
+	 * 不会被任何判定消费（判据只看 {@code used/level/turnNo/circuit}）。不做 DEL+HSET 的理由 =
+	 * 多一次往返且窗口内 HASH 可能为空（读侧会误判"从未记账"）。
+	 */
+	@Override
+	public void write(String sessionId, com.example.configmgr.ai.context.ContextState state) {
+		String key = contextKey(sessionId);
+		Map<String, String> fields = state.toFields();
+		this.redis.opsForHash().putAll(key, fields);
+		touchContextTtl(key);
+	}
+
+	/** 追加上下文台账（LPUSH + LTRIM 20 + EXPIRE；写失败只抛给调用方，由压缩的失败路径兜住）。 */
+	@Override
+	public void appendLedger(String sessionId, Map<String, Object> event) {
+		String key = contextLedgerKey(sessionId);
+		try {
+			this.redis.opsForList().leftPush(key, this.mapper.writeValueAsString(event));
+			this.redis.opsForList().trim(key, 0, CONTEXT_LEDGER_MAX - 1);
+			touchContextTtl(key);
+		}
+		catch (Exception ex) {
+			throw new IllegalStateException("无法写入上下文台账 sessionId=" + sessionId + "：" + ex.getMessage(), ex);
+		}
+	}
+
+	/** 读上下文台账（新→旧，最多 {@value #CONTEXT_LEDGER_MAX} 条）。 */
+	@Override
+	public List<Map<String, Object>> contextLedger(String sessionId) {
+		List<Map<String, Object>> out = new ArrayList<>();
+		try {
+			List<String> raw = this.redis.opsForList().range(contextLedgerKey(sessionId), 0, CONTEXT_LEDGER_MAX - 1);
+			if (raw == null) {
+				return out;
+			}
+			for (String item : raw) {
+				out.add(this.mapper.readValue(item, new TypeReference<Map<String, Object>>() {
+				}));
+			}
+		}
+		catch (Exception ex) {
+			log.warn("读上下文台账失败 sessionId={}：{}（按空台账处理）", sessionId, ex.getMessage());
+		}
+		return out;
+	}
+
+	/** 归档压缩前原文（STRING，JSON 数组；TTL 同会话）。 */
+	@Override
+	public void archive(String sessionId, int turnNo, List<String> messageJson) {
+		try {
+			String json = this.mapper.writeValueAsString(messageJson);
+			this.redis.opsForValue().set(contextArchiveKey(sessionId, turnNo), json, this.properties.getSessionTtl());
+		}
+		catch (Exception ex) {
+			throw new IllegalStateException("无法归档压缩前原文 sessionId=" + sessionId + "：", ex);
+		}
+	}
+
+	private void touchContextTtl(String key) {
+		try {
+			this.redis.expire(key, this.properties.getSessionTtl());
+		}
+		catch (RuntimeException ex) {
+			log.debug("上下文键续期失败 key={}：{}", key, ex.getMessage());
+		}
 	}
 
 }

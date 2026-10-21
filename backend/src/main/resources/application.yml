@@ -121,6 +121,36 @@ app:
     session-ttl: 24h
     memory:
       max-messages: 40
+    # ── 上下文计量与压缩（上下文统计与压缩专项批①；设计稿 §3.7）────────────────
+    # 每个数字的依据逐行登记在 docs/evidence/补档-NUMSPEC-清单总账.md（禁裸数字）。
+    # 启动期校验见 AiProperties#verifyContext（reserve >= limit、阈值倒挂、冷却为 0 等一律 fail-fast）。
+    context:
+      # 分母的过渡键。模型配置专项的 ai_model.max_context 落地后由它覆盖
+      #（唯一消费点 = context/ContextLimitResolver）；0 = 主动声明未知（降级态：不显示百分比、不做比例压缩）。
+      limit-tokens: 128000
+      # 预留缓冲（调研 §① Claude Code 的 13K）：覆盖 max-tokens 4096 的输出空间 + 一轮工具回环余量。
+      # 比例阈值对 (limit - reserve) 取比 ⇒ 128K 下 L3@95% 仍剩 5.75K > 4096。
+      reserve-tokens: 13000
+      # 压缩谱系的三条触发线（对 limit - reserve 的百分比；调研 Q2 区间 70–75 / 80–85 / 95 取中值）。
+      # L2/L3 由批③ 实现；本批只到 L1（每次最多升一级的第一格）。
+      l1-percent: 70
+      l2-percent: 80
+      l3-percent: 95
+      # 滞回（调研 Q4）：压缩到 used/limit < 60% 才允许再次触发 —— 防"压一次不够、立刻再压"的抖动链。
+      hysteresis-percent: 60
+      # pin：最近 5 对工具结果不清（调研"保留最近 3–5 对"取上限 = 保守）。
+      keep-tool-pairs: 5
+      # pin：最近 6 轮逐字保留（调研"保留最近 6–8 轮"取下限 = 省 token 优先；批③ 消费）。
+      keep-recent-turns: 6
+      # 摘要分块（必须小于 reserve-tokens：保证摘要请求自身不越窗；批③ 消费）。
+      chunk-tokens: 8000
+      # 一次摘要请求的硬上限（批③ 消费）：失败即走熔断，不回退到"静默截断"。
+      summary-timeout: 60s
+      # 熔断（批③ 消费）：连续 3 次失败 open；冷却 10m 后半开重试一次。
+      fuse-threshold: 3
+      fuse-cooldown: 10m
+      # 摘要模型：空 = 主模型（D3 裁决）；模型配置的 provider 表落地后可只改本键切换。
+      summary-model: ""
     hitl:
       # 挂起等待上限（2026-10-20 用户裁决第 1/2 条后只剩一个键）：
       #   confirm-timeout（确认门，等人）**已退役**：确认门不再超时，一直等到用户批准/拒绝/取消。

@@ -61,6 +61,8 @@ public class AiProperties {
 
 	private Config config = new Config();
 
+	private Context context = new Context();
+
 	/**
 	 * 模型配置的读写开关（模型配置专项批①；设计稿 §3.3 / §3.4）。
 	 *
@@ -152,11 +154,94 @@ public class AiProperties {
 		}
 	}
 
+	/**
+	 * 启动期校验 {@code app.ai.context.*}（上下文统计与压缩专项批①；与上面两个守卫同一姿态）。
+	 *
+	 * <p>
+	 * 这里的每个坏值都不是"性能降级"，而是<b>判定被静默改写</b>：
+	 * <ul>
+	 * <li>{@code reserve >= limit}（且 limit &gt; 0）⇒ 分母 {@code limit − reserve <= 0} 被钳到 1，
+	 * 任何一轮都判"已满"、每轮都触发压缩（前缀每轮重写、缓存全灭）；</li>
+	 * <li>{@code l1/l2/l3} 非单调 ⇒ 谱系倒挂（L2 比 L1 先到 = 最轻的一级永远不触发）；</li>
+	 * <li>{@code chunk-tokens >= reserve} ⇒ 摘要请求自身就可能越窗（批③ 的失败路径）；</li>
+	 * <li>{@code fuse-threshold <= 0} ⇒ 第一次失败即永久熔断（L2/L3 再也不会尝试）。</li>
+	 * </ul>
+	 * 因此启动即失败并点名键与值。
+	 */
+	@PostConstruct
+	void verifyContext() {
+		Context context = this.context;
+		if (context == null) {
+			throw new IllegalStateException("app.ai.context 段缺失（绑定为 null）：上下文计量无法装配，启动失败");
+		}
+		if (context.getLimitTokens() < 0) {
+			throw new IllegalStateException("app.ai.context.limit-tokens 不得为负（当前 = " + context.getLimitTokens()
+					+ "）：0 = 主动声明未知（降级态），负值没有任何解释空间");
+		}
+		if (context.getReserveTokens() <= 0) {
+			throw new IllegalStateException("app.ai.context.reserve-tokens 必须 > 0（当前 = "
+					+ context.getReserveTokens() + "）：预留缓冲为 0 会让触发线与上下文上限重合，"
+					+ "输出空间被压缩判定吃掉");
+		}
+		if (context.getLimitTokens() > 0 && context.getReserveTokens() >= context.getLimitTokens()) {
+			throw new IllegalStateException("app.ai.context.reserve-tokens（" + context.getReserveTokens()
+					+ "）必须小于 limit-tokens（" + context.getLimitTokens()
+					+ "）：分母 limit − reserve 会被钳到 1 ⇒ 每轮都判已满、每轮都压缩");
+		}
+		checkPercent("l1-percent", context.getL1Percent());
+		checkPercent("l2-percent", context.getL2Percent());
+		checkPercent("l3-percent", context.getL3Percent());
+		checkPercent("hysteresis-percent", context.getHysteresisPercent());
+		if (!(context.getL1Percent() < context.getL2Percent() && context.getL2Percent() < context.getL3Percent())) {
+			throw new IllegalStateException("app.ai.context 的 l1/l2/l3-percent 必须严格递增（当前 = "
+					+ context.getL1Percent() + "/" + context.getL2Percent() + "/" + context.getL3Percent()
+					+ "）：倒挂会让谱系失效（较轻的一级永远不触发）");
+		}
+		if (context.getHysteresisPercent() > context.getL1Percent()) {
+			throw new IllegalStateException("app.ai.context.hysteresis-percent（" + context.getHysteresisPercent()
+					+ "）不得大于 l1-percent（" + context.getL1Percent()
+					+ "）：滞回线高于触发线 ⇒ 压缩后立刻满足再次触发条件（抖动链）");
+		}
+		if (context.getKeepToolPairs() < 0 || context.getKeepRecentTurns() < 0) {
+			throw new IllegalStateException("app.ai.context.keep-tool-pairs / keep-recent-turns 不得为负（当前 = "
+					+ context.getKeepToolPairs() + " / " + context.getKeepRecentTurns() + "）");
+		}
+		if (context.getChunkTokens() <= 0) {
+			throw new IllegalStateException("app.ai.context.chunk-tokens 必须 > 0（当前 = " + context.getChunkTokens()
+					+ "）：摘要分块为 0 会让摘要请求无限递归");
+		}
+		if (context.getChunkTokens() >= context.getReserveTokens()) {
+			// M-1 收口：类注与 NUMSPEC 都承诺"分块 < 预留"，无闸则承诺与实现不一致。
+			// 摘要本身也是一次模型请求：分块 ≥ 预留时，摘要请求会挤掉输出空间（越窗 ⇒ 失败 ⇒ 熔断）。
+			throw new IllegalStateException("app.ai.context.chunk-tokens（" + context.getChunkTokens()
+					+ "）必须小于 reserve-tokens（" + context.getReserveTokens()
+					+ "）：摘要请求自身的输入分块不得吃掉预留缓冲（否则摘要请求会越窗）");
+		}
+		if (context.getSummaryTimeout() == null || context.getSummaryTimeout().isZero()
+				|| context.getSummaryTimeout().isNegative()) {
+			throw new IllegalStateException("app.ai.context.summary-timeout 必须 > 0（当前 = "
+					+ context.getSummaryTimeout() + "）：0/负值等于摘要永不超时（熔断判据失去输入）");
+		}
+		if (context.getFuseThreshold() <= 0) {
+			throw new IllegalStateException("app.ai.context.fuse-threshold 必须 > 0（当前 = " + context.getFuseThreshold()
+					+ "）：0 = 第一次失败即熔断，L2/L3 再也不会被尝试");
+		}
+		if (context.getFuseCooldown() == null || context.getFuseCooldown().isZero()
+				|| context.getFuseCooldown().isNegative()) {
+			throw new IllegalStateException("app.ai.context.fuse-cooldown 必须 > 0（当前 = " + context.getFuseCooldown()
+					+ "）：冷却为 0 = 一直半开，熔断形同虚设");
+		}
+	}
+
+	private static void checkPercent(String key, int value) {
+		if (value < 0 || value > 100) {
+			throw new IllegalStateException("app.ai.context." + key + " 必须在 0–100（当前 = " + value + "）");
+		}
+	}
+
 	@Data
 	public static class Memory {
-
-		/** MessageWindowChatMemory 窗口大小（官方实现负责裁剪）。 */
-		private int maxMessages = 40;
+		/** MessageWindowChatMemory 窗口大小（官方实现负责裁剪）。 */		private int maxMessages = 40;
 	}
 
 	@Data
@@ -520,6 +605,84 @@ public class AiProperties {
 
 		/** 窗口长度（滑动窗口：计数按时间戳落 ZSET，窗口滑过即回收额度）。 */
 		private Duration window = Duration.ofMinutes(1);
+	}
+
+	/**
+	 * 上下文计量与压缩（上下文统计与压缩专项批①；设计稿 §3.7 的 11 个键）。
+	 *
+	 * <p>
+	 * <b>键名纪律（NUMSPEC）</b>：本段每个数字都在 {@code docs/evidence/补档-NUMSPEC-清单总账.md}
+	 * 逐行登记了依据 —— "为什么是 128000 / 13000 / 70-80-95 / 60"这些结论不能只活在代码注释里。
+	 *
+	 * <p>
+	 * <b>启动期校验</b>见 {@link AiProperties#verifyContext()}：与 limit/SSE 两段同一姿态 ——
+	 * 0/负值不是"性能降级"而是语义被静默改写（例如 {@code reserve >= limit} 会让分母变成 1，
+	 * 任何一轮都判"已满"、每轮都压缩）。
+	 */
+	@Data
+	public static class Context {
+
+		/**
+		 * 上下文上限（token）的<b>过渡键</b>（默认 128000）。
+		 *
+		 * <p>取值依据：本仓当前默认模型（deepseek 系）的 128K 窗口；模型配置专项的
+		 * {@code ai_model.max_context} 落地后由它覆盖（唯一消费点 = {@code ContextLimitResolver}）。
+		 * {@code 0} = 主动声明"未知"（降级态：界面只显示已用、不显示百分比；压缩不做比例判定）。
+		 */
+		private int limitTokens = 128000;
+
+		/**
+		 * 预留缓冲（默认 13000 token）。
+		 *
+		 * <p>依据 = 调研 §① Claude Code 的 13K 预留缓冲；覆盖 {@code max-tokens 4096} 输出空间
+		 * + 一轮工具回环余量。比例阈值对 {@code limit − reserve} 取比 ⇒ 触发线不会把输出空间吃掉
+		 * （128K 下 L3@95% 仍剩 5.75K &gt; 4096）。
+		 */
+		private int reserveTokens = 13000;
+
+		/** L1（工具结果清除）触发线（对 {@code limit − reserve} 的百分比）。 */
+		private int l1Percent = 70;
+
+		/** L2（滑窗 + 递归摘要）触发线（批③ 消费）。 */
+		private int l2Percent = 80;
+
+		/** L3（硬截断兜底）触发线（批③ 消费）。 */
+		private int l3Percent = 95;
+
+		/**
+		 * 滞回线（默认 60）：压缩完成后 {@code used / limit < 60%} 才允许再次触发。
+		 *
+		 * <p>依据 = 调研 Q4"压缩到 60% 以下才允许再次触发"；防的是"压一次不够、立刻再压"的抖动链
+		 * （每次压缩都要改写前缀 ⇒ 缓存整段重建）。
+		 */
+		private int hysteresisPercent = 60;
+
+		/** 最近多少对工具结果不清理（L1 的 pin；调研"保留最近 3–5 对"取上限 = 保守）。 */
+		private int keepToolPairs = 5;
+
+		/** 最近多少轮逐字保留（L2 的 pin；调研"保留最近 6–8 轮"取下限 = 省 token 优先；批③ 消费）。 */
+		private int keepRecentTurns = 6;
+
+		/** 摘要分块大小（token；批③ 消费）。必须小于 {@link #reserveTokens}，保证摘要请求自身不越窗。 */
+		private int chunkTokens = 8000;
+
+		/** 一次摘要请求的硬上限（批③ 消费；失败即熔断路径，不回退到截断）。 */
+		private Duration summaryTimeout = Duration.ofSeconds(60);
+
+		/** 连续失败多少次熔断（批③ 消费；调研 §①"连续失败 3 次熔断"）。 */
+		private int fuseThreshold = 3;
+
+		/** 熔断冷却窗（批③ 消费；到点半开重试一次，失败重新计数 —— 不升指数，避免长尾锁死）。 */
+		private Duration fuseCooldown = Duration.ofMinutes(10);
+
+		/**
+		 * 递归摘要用的模型名（默认空 = 主模型；D3 裁决）。
+		 *
+		 * <p>留空即主模型是刻意的：本仓当前只有一套 provider 配置，先主模型 + 超时 + 熔断；
+		 * 模型配置专项落地后可只改本键切到便宜模型（接缝已留，批③ 消费）。
+		 */
+		private String summaryModel = "";
+
 	}
 
 }

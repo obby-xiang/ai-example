@@ -9,7 +9,7 @@
  * context_length_exceeded → 蓝族；其余（断流 / 未分类故障）沿用红卡。
  *
  * 现实化（本仓 store 实际错误产生点，见施工报告 §错误卡映射表）：
- * - SSE `error` 帧：`frame.code` + `frame.message`（后端 15 类帧里唯一的错误终帧，
+ * - SSE `error` 帧：`frame.code` + `frame.message`（后端 16 类帧里唯一的错误终帧，
  *   实测上游 503 走 `UPSTREAM_STREAM_ERROR`）—— 三变体分派在此路生效；
  * - 开流前失败（`handleChatError`）：ApiError 的 `code` = 响应体 `code`，缺省为 HTTP 状态码字符串
  *   （429 配额即走这一形态）；

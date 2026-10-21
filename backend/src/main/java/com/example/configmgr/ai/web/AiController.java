@@ -166,6 +166,17 @@ public class AiController {
 	@Autowired(required = false)
 	private AiConfigService aiConfigService;
 
+	/**
+	 * 上下文统计与压缩专项批①：分母取数点 + 端点装配。同为**字段注入**（构造器签名不变 ⇒
+	 * 既有 {@code new AiController(...)} 的用例零触碰）；未注入时端点回 503（"未装配"如实失败），
+	 * {@code /health} 的 {@code compactionOn} 为 false。
+	 */
+	@Autowired(required = false)
+	private com.example.configmgr.ai.context.ContextCompactor contextCompactor;
+
+	@Autowired(required = false)
+	private com.example.configmgr.ai.context.ContextBreakdownService contextBreakdownService;
+
 	public AiController(AiAvailability availability, ObjectProvider<ResilientChatService> chatService,
 			ObjectProvider<ResumeService> resumeService, ObjectProvider<StartupResumeRunner> startupResumeRunner,
 			ChatMemory chatMemory, ChatMemoryRepository chatMemoryRepository, SessionGate sessionGate,
@@ -851,6 +862,49 @@ public class AiController {
 	}
 
 	/**
+	 * 会话上下文占用（上下文统计与压缩专项批①；设计稿 §3.4(b)）。
+	 *
+	 * <h2>为什么必须是一个端点（而不是把七项都塞进 done 帧）</h2>
+	 * <ul>
+	 * <li><b>刷新恢复</b>：本地 store 是内存态，刷新后 pill 必须由服务端重建；</li>
+	 * <li><b>展开分项</b>：七项只在用户点开 popover 时才需要，没必要每轮都发；</li>
+	 * <li><b>挂起态</b>：挂起期间没有新帧，占用仍要可读。</li>
+	 * </ul>
+	 *
+	 * <p>
+	 * 姿态与 {@code GET /history/{sessionId}} 同族：<b>只读</b>、<b>不查 AI key</b>（无 key 时记忆与
+	 * {@code ai:ctx:} 依然可读）、<b>Redis 不可用 → 503</b>。响应体是<b>裸对象</b>（与 {@code /cancel}、
+	 * {@code DELETE /history} 同姿态），字段见设计稿 §3.4(b)。
+	 *
+	 * <p>
+	 * {@code ?ledger=1} 时附带 {@code ai:ctx:ledger:} 最近 20 条压缩事件（运维面）；默认不带，
+	 * 保持每轮/每次刷新都拉的载荷轻。
+	 */
+	@GetMapping("/context/{sessionId}")
+	public ResponseEntity<Map<String, Object>> context(@PathVariable String sessionId,
+			@RequestParam(name = "ledger", required = false) Boolean ledger) {
+		if (!StringUtils.hasText(sessionId)) {
+			return json(HttpStatus.BAD_REQUEST, Map.of("code", "BAD_REQUEST", "message", "sessionId 必填"));
+		}
+		if (!this.redisAvailability.isAvailable()) {
+			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
+		}
+		if (this.contextBreakdownService == null) {
+			return json(HttpStatus.SERVICE_UNAVAILABLE, Map.of("code", "AI_CONTEXT_UNAVAILABLE",
+					"message", "上下文计量未装配（ContextBreakdownService 缺失）"));
+		}
+		List<Message> memory;
+		try {
+			memory = this.chatMemory.get(sessionId);
+		}
+		catch (RuntimeException ex) {
+			// 读记忆失败 = Redis 抖动：与 /history 同口径如实 503，不假装"用了 0"
+			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
+		}
+		return ResponseEntity.ok(this.contextBreakdownService.snapshot(sessionId, memory, Boolean.TRUE.equals(ledger)));
+	}
+
+	/**
 	 * 该会话 id 是否仍在记忆仓储的会话 id 索引内 —— {@code removedFromIndex} 的唯一判据。
 	 *
 	 * <p>
@@ -892,6 +946,13 @@ public class AiController {
 		// 新增：当前默认目标的 provider/model 身份 + 逐 provider 的 key 状态（永不含 key 本身）
 		body.put("providerId", resolved != null ? resolved.providerId() : null);
 		body.put("defaultModelId", resolved != null ? resolved.modelId() : null);
+		// 上下文专项批①（additive，仅观测）：分母的实际取值 + 压缩是否真的会被判。
+		// 上限未知（null）时压缩不做比例判定（降级态），故 compactionOn 也随之为 false —— 两者同源。
+		int contextLimitTokens = this.contextCompactor == null ? 0
+				: this.contextCompactor.limitTokens(resolved != null ? resolved.providerId() : null,
+						resolved != null ? resolved.modelId() : null);
+		body.put("contextLimitTokens", contextLimitTokens > 0 ? contextLimitTokens : null);
+		body.put("compactionOn", this.contextCompactor != null && contextLimitTokens > 0);
 		body.put("providers", this.aiConfigService == null ? List.of() : this.aiConfigService.describeProviders());
 		body.put("memoryBackend", this.chatMemoryRepository.getClass().getSimpleName());
 		body.put("sessionTtl", String.valueOf(this.properties.getSessionTtl()));

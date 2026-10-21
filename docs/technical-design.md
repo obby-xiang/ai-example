@@ -280,6 +280,59 @@ void runAgentLoop(RunInput input, SseRunEmitter emitter) {
   该流不再产生 TASK_CHANGED 帧；作业进度/终态仍经 `GET /api/tasks/{id}/events` SSE 推送，消费方为前端 job-watch）
 - AI 下发的导航/编辑器指令 → UI_COMMAND（见上）
 
+#### 上下文计量与压缩（上下文统计与压缩专项批①）
+
+**计量（真值）**：流式 usage 一律经 `ai/context/ContextMeter` 采集，六条规则
+R1 空帧（0/0/0）不参与 · R2 与已采纳值三维全等去重（治"每个 chunk 重复同一份 usage"）·
+R3 采纳最后一个非空候选（治"末帧 0/0/0"）· R4 `prompt` 回退判脏帧并保留旧值（`dirty++`，不抛错）·
+R5 全轮无有效候选 ⇒ 回退 `ContextEstimator` 估算并置 `est=true`（界面 `≈`）· R6 每次 attempt 新建实例
+（重试不串值）。输出 = `done.usage` 的增量键 `est/source/frames/dirty`（既有三维不动）。
+
+**分母（单一取数点）**：`ContextLimitResolver.resolve(providerId, modelId)` 的优先级
+`ai_model.max_context`（模型配置专项）> `app.ai.context.limit-tokens`（过渡键 128000）> **0 = 未知**。
+未知即降级态：端点 `limitTokens: null`、界面只显示已用、压缩不做比例判定。
+
+**两套口径分开**：展示用真值 `usedNow`（上次请求的 `usage.promptTokens`），触发用预估
+`nextEst = usedNow + lastCompletion + estimate(本轮输入) + Σ(上次真值之后新增的工具结果)`；
+比例对 `limit − reserve`（reserve = 13000）取，L1/L2/L3 = 70/80/95%，滞回 60%（只看真值）。
+触发线自洽性：128K 下 `limit − reserve = 115K`，L3@95% 仍剩 5.75K > `max-tokens 4096`。
+
+**六项拆分 + free**：`history / toolResults / summary / system / tools / input` 六项按比例归一到
+`usedTokens`（`ContextBreakdown.normalizeTo`：`floor(v_i × used / Σv)` + 差额补给 argmax ⇒
+**恒有 Σ分项 == used**），`free = limit − used`（派生，可为负 ⇒ "已超"）。`system`/`tools` 来自装配点
+落进 `ai:ctx:` 的锚点（它们不在历史里，端点无从重建）。
+
+**L1 工具结果清除（批① 唯一实现的压缩级）**：`ratio ≥ 70%` 时把最旧的、非 pin 的
+`ToolResponseMessage.responseData` 换成 `[tool_result 已清理：… ai:ledger:<runId>]`
+（**不删消息、不改 id、不动 `assistant(tool_calls)`** ⇒ 构造上无孤儿对；占位符刻意不复用
+`ToolResultLimiter.TRUNCATION_MARKER`）；pin = 最近 `keep-tool-pairs: 5` 对 + 未决 HITL 条目。
+L2（Turn 滑窗 + 递归摘要）与 L3（硬截断）属批③，`ContextCompactor.MAX_LEVEL` 刻意封顶 L1
+（不允许"实现没做、帧里却报 L2"）。
+
+**原子性**：压缩统一入口 `ContextCompactor`，两个调用点同源（首轮 `ResilientChatService#chat`
+取记忆之后 / 续跑 `ResumeService#resume` 重建历史之后）。顺序 = **先归档** `ai:ctx:archive:<sid>:<turnNo>`
+→ 写 `ai:ctx:` 真值/台账 → 调用方写快照 + 记忆；任一步失败 ⇒ 返回原消息列表，本轮照常发请求
+（"宁可偏大，不失真"，对齐"绝不静默截断"）。
+
+**展示与观测面**：
+
+| 面 | 内容 |
+|---|---|
+| 帧 | `done.context = {usedTokens, limitTokens, percent, level, est, circuit}`（每轮）+ 压缩时另发一条 `context` 帧（**帧类型集 15 → 16**）`{level, before, after, turns, lostTokens, reason, est, savedTokens, clearedPairs}` |
+| 端点 | `GET /api/ai/context/{sessionId}`（只读、不查 key、Redis 不可用 503；`?ledger=1` 附最近 20 条压缩台账） |
+| `/health` | `contextLimitTokens`（分母实际取值，未知为 null）+ `compactionOn`（压缩是否真的会被判） |
+| Redis | `ai:ctx:<sid>` HASH（真值）/ `ai:ctx:ledger:<sid>` LIST（事件，20 条）/ `ai:ctx:archive:<sid>:<turnNo>` STRING（压缩前原文），TTL 一律 `app.ai.session-ttl` 且读写 touch |
+| 前端 | composer 底栏 `[模型选择器位][参数位] …… [用量 pill][发送/停止]` 的 pill 位：`65.8% · 84.2k/128k`、70/85/95 四档配色、`≈` 与"上限未知只显示已用"两态、点击展开七项；**刷新后由端点重建**、**流式中不跳动**（只在 `done` 刷新） |
+
+配置 = `app.ai.context.*` 13 键（`limit-tokens` / `reserve-tokens` / `l1-percent` / `l2-percent` /
+`l3-percent` / `hysteresis-percent` / `keep-tool-pairs` / `keep-recent-turns` / `chunk-tokens` /
+`summary-timeout` / `fuse-threshold` / `fuse-cooldown` / `summary-model`），启动期校验见
+`AiProperties#verifyContext`（reserve ≥ limit、阈值倒挂、冷却为 0 一律 fail-fast）。
+
+**边界（如实登记）**：L2/L3、递归摘要、熔断计数（`circuit` 恒 `closed`、`fuseFails` 恒 0）、
+压缩提示条（设计稿排批④）与用户手动 pin（D6 不做）均**不在批①**；`/health` 的 `compactionOn`
+只表示"比例判定会执行"，不表示"一定会压缩"。
+
 #### 联动而不耦合（关键架构原则）
 
 **单一事实来源**：任务/作业/配置的全部状态只存在后端。用户在工作区的操作与

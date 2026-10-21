@@ -12,6 +12,7 @@ import type {
   AiCancelResult,
   AiChatRequest,
   AiHealth,
+  ContextSnapshot,
   AiHistory,
   AiRunCurrent,
   ConfirmRequest,
@@ -63,6 +64,19 @@ export function cancelStatus(runId: string): Promise<Record<string, unknown>> {
 /** GET /api/ai/history/{sessionId}（刷新恢复用的会话记忆原文）。 */
 export function history(sessionId: string): Promise<AiHistory> {
   return get<AiHistory>(`/ai/history/${encodeURIComponent(sessionId)}`)
+}
+
+/**
+ * GET /api/ai/context/{sessionId}（上下文占用：刷新恢复 / 展开分项 / 挂起态）。
+ *
+ * 姿态与 `/history` 同族：只读、不查 AI key；Redis 不可用或计量未装配时后端回 503
+ * （调用方按"没有数据"降级，**不得**把它当成"用了 0"）。
+ *
+ * @param ledger 是否附带最近 20 条压缩台账（运维面；默认不带）
+ */
+export function getContext(sessionId: string, ledger = false): Promise<ContextSnapshot> {
+  const query = ledger ? '?ledger=1' : ''
+  return get<ContextSnapshot>(`/ai/context/${encodeURIComponent(sessionId)}${query}`)
 }
 
 /**
@@ -135,6 +149,7 @@ export const aiApi = {
   cancel,
   cancelStatus,
   history,
+  getContext,
   deleteHistory,
   health,
   runs,

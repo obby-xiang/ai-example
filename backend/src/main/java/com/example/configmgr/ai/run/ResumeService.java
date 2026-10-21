@@ -1,6 +1,9 @@
 package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.context.ContextCompactor;
+import com.example.configmgr.ai.context.ContextEstimator;
+import com.example.configmgr.ai.context.ContextState;
 import com.example.configmgr.ai.gate.SpToolCallingManager;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.tool.AiContext;
@@ -9,8 +12,10 @@ import com.example.configmgr.ai.tool.ToolResultLimiter;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.MessageType;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
@@ -18,8 +23,10 @@ import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.stream.Collectors;
@@ -87,6 +94,16 @@ public class ResumeService {
 
 	/** T2：重建历史的 {@code role:tool} 也要过同一份模型侧上限（口径与首轮一致，不因续跑而变）。 */
 	private final ToolResultLimiter limiter;
+
+	/**
+	 * 上下文压缩统一入口（上下文统计与压缩专项批①）。
+	 *
+	 * <p><b>字段注入</b>：{@link #ResumeService} 的构造器被四份既有用例直接 {@code new}
+	 * （{@code ResumeServiceLeaseTest} / {@code ResumeEnvelopeShapeTest} 等），改签名等于要求它们跟改。
+	 * 未注入时续跑不压缩（"未装配"而不是"永远压不动"）。
+	 */
+	@Autowired(required = false)
+	private ContextCompactor contextCompactor;
 
 	/** 进程内续跑互斥（同进程并发续跑的唯一闸；租约管的是跨实例）。 */
 	private final Map<String, Boolean> resuming = new ConcurrentHashMap<>();
@@ -492,6 +509,7 @@ public class ResumeService {
 			AiContext context = AiContext.fromMap(snapshot.getContext());
 			List<Message> history = new ArrayList<>(this.codec.deserializeAll(snapshot.getMessageJson()));
 			List<String> rebuilt = new ArrayList<>();
+			int rebuiltToolTokens = 0;
 
 			if (!snapshot.getInFlightToolCalls().isEmpty()) {
 				// ===== 硬规范②：把挂起那一轮的 assistant(tool_calls) 重新拼回完整历史 =====
@@ -531,6 +549,10 @@ public class ResumeService {
 					}
 				}
 				history.add(ToolResponseMessage.builder().responses(responses).build());
+				// 上下文专项批①：本次重建出来的工具响应是"上次真值之后"的真增量（续跑侧的 nextEst 一项）
+				rebuiltToolTokens = responses.stream()
+					.mapToInt(response -> ContextEstimator.estimate(response.responseData()))
+					.sum();
 				snapshot.setMessageJson(this.codec.serializeAll(history));
 				snapshot.setInFlightToolCalls(new ArrayList<>());
 				snapshot.setAssistantContent(null);
@@ -544,6 +566,45 @@ public class ResumeService {
 				this.store.save(snapshot);
 			}
 
+			// ── 上下文专项批①：续跑前压缩（与首轮同源：同一个 ContextCompactor） ──
+			// 位置刻意在"历史重建之后、交棒之前"：重建出来的工具响应已经进 history，
+			// 于是 L1 能清到它们（挂在挂起期的结果往往正是最大的一块）。
+			ContextCompactor.Outcome compaction = null;
+			if (this.contextCompactor != null && !history.isEmpty()) {
+				ContextState state = this.contextCompactor.readState(sessionId);
+				int systemTokens = 0;
+				for (Message message : history) {
+					if (message.getMessageType() == MessageType.SYSTEM) {
+						systemTokens += ContextEstimator.estimate(message.getText());
+					}
+				}
+				Set<String> protectedIds = new LinkedHashSet<>();
+				for (PendingToolCall pending : this.store.pendings(runId)) {
+					if (PendingToolCall.PENDING.equals(pending.getStatus())
+							|| (PendingToolCall.APPROVED.equals(pending.getStatus()) && !pending.isExecuted())) {
+						protectedIds.add(pending.getToolCallId());
+					}
+				}
+				compaction = this.contextCompactor.compact(new ContextCompactor.Request(sessionId,
+						runId, snapshot.getModelId(), snapshot.getProviderId(), history, this.codec.serializeAll(history),
+						state.usedTokens(), state.completionTokens(), 0, rebuiltToolTokens, systemTokens,
+						this.chatService.disclosedToolTokens(context), protectedIds));
+				if (compaction.changed()) {
+					history = compaction.messages();
+					snapshot.setMessageJson(this.codec.serializeAll(history));
+					this.store.save(snapshot);
+					body.put("contextCompaction", compaction.levelWire());
+					// 落库顺序（本路径）= 归档 → 快照 → 记忆（轮末 converge 时）。与首轮路径的
+					// "记忆 → 快照"不同，原因是本类拿不到 ChatMemory：轮末 convergeMemory 会以快照为准
+					// 整体覆盖写回，故偏差窗口的方向是"记忆更旧"（不会多算术、不会丢配对），
+					// 也不会出现首轮路径要防的"快照已压、记忆未压"长期分叉。
+				}
+				else {
+					body.put("contextCompaction", "none");
+					body.put("contextCompactionReason", compaction.reason());
+				}
+			}
+
 			body.put("resumed", true);
 			body.put("rebuiltTools", rebuilt);
 			body.put("promptMessageCount", history.size());
@@ -551,6 +612,21 @@ public class ResumeService {
 			body.put("resumedBy", this.store.instanceId());
 
 			SseChatEmitter out = this.registry.of(runId);
+			// ── I-1：续跑侧压缩也要即时可见（与首轮同一份 outcome 载荷）──
+			// 位置：start 已由原轮发出（归档里），本帧在此处取号 ⇒ 必然晚于 start、且早于交棒后的
+			// 首个 delta（交棒在下面 execute 里，本帧在提交之前同步发出）。
+			if (compaction != null && compaction.changed()) {
+				// 发帧是观测面，不决定续跑成败：写失败（客户端已断/emitter 已关闭/序列化异常）
+				// 只降级为 WARN —— 级别交接与交棒都必须照常进行，否则"看得见"反噬"跑得成"。
+				try {
+					out.context(ContextCompactor.framePayload(compaction));
+				}
+				catch (RuntimeException ex) {
+					log.warn("续跑 context 帧发送失败（已忽略，不影响本轮续跑）runId={}：{}", runId, ex.getMessage());
+				}
+				// 级别显式交接给驱动侧：续跑轮的 done.context.level 不能靠时刻反推（压完才交棒）
+				this.chatService.noteCompaction(runId, compaction.levelWire());
+			}
 			List<Message> resumeHistory = history;
 			try {
 				this.suspendExecutor.execute(() -> {
@@ -574,6 +650,10 @@ public class ResumeService {
 			catch (RejectedExecutionException ex) {
 				body.put("resumed", false);
 				body.put("reason", "SUSPEND_POOL_SATURATED");
+				// 没交棒这一轮就不会有人来读那个一次性交接位：就地清掉，别让它活到本轮结束
+				// （runId 不复用，留着不致命，但会让"读后即弃"的容量论证失真、也让排障时
+				// 看到一条"压过 L1 但其实没跑"的幽灵记录）。
+				this.chatService.clearCompaction(runId);
 				snapshot.setStatus(RunSnapshot.SUSPENDED);
 				this.store.save(snapshot);
 				return new ResumeResult(Outcome.POOL_SATURATED, body);
