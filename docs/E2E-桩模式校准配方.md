@@ -7,7 +7,7 @@
 1. 起上游桩：`node scripts/ci/stub-upstream.mjs --port 18399 --dir <SCRATCH> --violate-form-type`
 2. 自起后端：环境变量 AI_BASE_URL=http://127.0.0.1:18399、AI_MODEL=ci-stub、AI_API_KEY=ci-stub-placeholder；JVM 参数 --server.port=18330 --app.job.batch-size=10 --app.job.demo-batch-delay-ms=150；H2 库落 <SCRATCH>（避免写 backend/data/）。
 3. HTTP 就绪轮询后再跑 E2E：`E2E_STUB_MODE=1 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify-e2e.ps1 -EnableGf6 -BackendLog <后端日志路径>`。
-4. 基线口径：桩模式 29 用例。
+4. 基线口径：桩模式 **35** 用例（原有 31 = 文档旧口径 29 + R-137 两条主计数用例；+ E2E-CTX-1..4。后者靠桩的请求级 `usage-shape` 标记供形，见 `scripts/README.md` §2.3b）。
 5. 本地增强纪律：启动前必 netstat 查端口；只停自起进程、按 PID 停。
 6. 已知坑：后台 bash 里带空格路径的 mvn.cmd 直启可能失败，用 Maven 包装脚本；E2E 日志/artifact 匿名访问 403，PASS=29 按 step 成功+退出码反推；check-runs/<job_id>/annotations 匿名可读。
 7. 端口纪律：后端 18330 起、桩 18399、CDP 9334-9337、前端 dev 实际 5202（strictPort）、探针 5211-5213。

@@ -5,7 +5,7 @@
 
 | 路径 | 作用 |
 | --- | --- |
-| `scripts/verify-e2e.ps1` | 端到端验证脚本（29 用例，PowerShell）。断言对象是**已启动的后端**，脚本自身不启动任何服务 |
+| `scripts/verify-e2e.ps1` | 端到端验证脚本（35 用例，PowerShell）。断言对象是**已启动的后端**，脚本自身不启动任何服务 |
 | `scripts/b23l1-dual-instance.ps1` | **双实例 harness**（B23L1 批①）：8081/8082 共享同一 Redis + 桩上游，脚本自己起/等/收（也可 `-NoStart` 接已就绪实例）。只交付、施工期不运行 |
 | `scripts/ci/stub-upstream.mjs` | CI E2E 用的**上游替身**（OpenAI 兼容桩），让用例在零密钥、零外网下确定性通过 |
 | `scripts/ci/stub-routes.json` | 桩的路由表（提示词 → 工具调用/表单），与 `GenerativeFormRules` 白名单手工对账 |
@@ -51,9 +51,9 @@ $env:E2E_STUB_MODE = '1'
 ./scripts/verify-e2e.ps1 -Base http://127.0.0.1:18330 -BackendLog <boot.log> -ArtifactDir <artifacts/gfc> -EnableGf6
 ```
 
-> CI 口径：桩以 `--violate-form-type` 启动（GF6 的确定性底座），脚本带 `-EnableGf6`，主用例计数 **29**。
+> CI 口径：桩以 `--violate-form-type` 启动（GF6 的确定性底座），脚本带 `-EnableGf6`，主用例计数 **35**（原有 31 = 文档口径 29 + R-137 两条，+ E2E-CTX-1..4）。
 
-### 1.4 用例构成（29 用例）
+### 1.4 用例构成（35 用例）
 
 | 分组 | 计数 | 计入主 PASS/FAIL 与退出码 |
 | --- | --- | --- |
@@ -61,6 +61,8 @@ $env:E2E_STUB_MODE = '1'
 | TC23（CONFIRM 卡快照重建，T3b/T3-6b） | 1 | 是 |
 | GF1–GF5（生成式表单端到端：FILTER/CLARIFY 回灌续跑、取消路径、复核拒绝、幂等 409 双向） | 5 | 是 |
 | GF6（入参闸门：非法 schema 不挂起 + `REJECTED_ARGUMENTS` 结局帧；需 `-EnableGf6`，桩模式启用） | 1 | **是**（M2-T4 T4-4 裁决 4 起计入主计数） |
+| R-137 红队补测（MAJOR-2 终态任务拒建作业 / MAJOR-3 只读联动在位） | 2 | 是（此前未计入文档口径 29，故真实基数为 31） |
+| E2E-CTX-1..4（上下文计量：末块 usage 真值 / 每块重复不放大 / 末块 0/0/0 取中间值 / 无 usage 回退估算；桩侧由请求级 `usage-shape` 标记供形） | 4 | 是 |
 | Q8①/Q8②（明细落库、SSE 请求不做二次 JSON 写入） | 2 | **否**，单列计数 |
 
 ### 1.5 退出码与判定口径
@@ -106,6 +108,21 @@ node scripts/ci/stub-upstream.mjs --self-check [--routes scripts/ci/stub-routes.
 #          触发越白名单注入，不连带污染共用 GF-FILTER 路由的 GF1/GF3/GF4（M2-T4 T4-4 裁决 4）
 ```
 
+### 2.3b usage 形状（E2E-CTX-1..4 的确定性底座）
+
+桩按提示词里的 **`usage-shape=<last|repeat|zero-last|none>`** 标记发 usage —— **请求级**开关（与 `--violate-form-type` 同族），
+不带标记即 `last`（改造前的行为，帧逐字节不变）；工具轮不受影响。
+
+| 形状 | 帧形态 | 消费它的用例 |
+| --- | --- | --- |
+| `last` | 末个 usage-only 帧发一份真值（基线） | E2E-CTX-1（真值 + 端点同源） |
+| `repeat` | **每个 content 分片都挂同一份** usage，末帧再挂一次 | E2E-CTX-2（不放大） |
+| `zero-last` | 首个分片真值 + **末个 usage-only 帧 0/0/0** | E2E-CTX-3（取中间真值） |
+| `none` | 整轮不发 usage（`stop` 终帧与 `[DONE]` 仍在） | E2E-CTX-4（回退估算） |
+
+数值唯一取数点 = `stub-routes.json` 的 `usageShapes`（`verify-e2e.ps1` 读同一份 ⇒ 桩与用例不会漂移）；
+`--self-check` 的段 ⑧ 逐形状断言帧形态与标记解析，并校验形状表三维自洽。
+
 ### 2.4 记录契约（可归因性）
 
 每请求落 `<dir>/req-NN.json`（请求原文）、`.tools.txt`（本请求实际披露的工具名清单）、`.head.txt`（模型可见消息摘要）、`.decision.json`（桩本轮的判定：路由 id / 工具名 / 理由）——这是"桩坏 / 产品坏"的区分依据。
@@ -122,7 +139,7 @@ node scripts/ci/stub-upstream.mjs --self-check [--routes scripts/ci/stub-routes.
 
 ### 3.1 用途边界
 
-多实例专项（`docs/research/设计-B23L1多实例与资源治理专项-2026-10-21.md`）的**实例面验证载体**：两个后端进程（8081/8082）共享同一 Redis 与同一上游桩，验证"任何实例可 serve 任意 run 的 reattach"与"跨实例唤醒扇出"。**不进 CI 的 29 主用例**，先脚本化（设计稿 §5.3）。
+多实例专项（`docs/research/设计-B23L1多实例与资源治理专项-2026-10-21.md`）的**实例面验证载体**：两个后端进程（8081/8082）共享同一 Redis 与同一上游桩，验证"任何实例可 serve 任意 run 的 reattach"与"跨实例唤醒扇出"。**不进 CI 的 35 主用例**，先脚本化（设计稿 §5.3）。
 
 ### 3.2 形态与前置
 

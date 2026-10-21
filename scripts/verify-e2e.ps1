@@ -1,5 +1,5 @@
 # ============================================================
-# E2E 验证脚本（main 版）：动态配置管理系统 全流程 29 用例
+# E2E 验证脚本（main 版）：动态配置管理系统 全流程 35 用例
 #
 # 移植来源：<REPO_ROOT>/ai-example-code/ai-example-deepseek-v4-pro/scripts/verify-e2e.ps1
 #           （685 行 / TC1–TC22 共 22 用例）。用例编号与源脚本一一对照，
@@ -32,8 +32,8 @@
 #     （TC11 断言 JOB_PROGRESS 事件流；batch-size 为默认 100 时小配置项不会跨分片边界）
 #   - 安全防护批①（裁决 I3，2026-10-21）：**限流不在 E2E 覆盖面，由单测覆盖**
 #     （AiRateLimiterTest 锁滑动窗口语义与降级；AiControllerChatGateTest 锁 20/21、429 形状、
-#     归一化与长度闸）。本脚本的 /chat 才 21 次、每 sessionId ≤ 22 次（TC18 取消后重试循环），
-#     全程最坏 ~40 次；故限流在 E2E 显式抬高，否则用例增长或同机并跑会以 429 变成"看似产品坏"的假红：
+#     归一化与长度闸）。本脚本的 /chat 才 26 次、每 sessionId ≤ 22 次（TC18 取消后重试循环），
+#     全程最坏 ~45 次；故限流在 E2E 显式抬高，否则用例增长或同机并跑会以 429 变成"看似产品坏"的假红：
 #       --app.ai.limit.session-per-minute=200 --app.ai.limit.ip-per-minute=2000
 #     CI 的 e2e job（.github/workflows/ci.yml）已按此参数启动。
 #   - -BackendLog：后端 stdout 日志文件（com.example.configmgr 为 DEBUG 级）。
@@ -44,12 +44,15 @@
 # 数据面安全：本脚本只创建/删除自己的 S5B-* 任务与 E2E_TEMP 定义；
 #   CURRENCY 演示数据在 TC13 会被替换为 3 行，TC19 用全量导出件恢复为 5 行。
 #
-# 结果口径：29 个用例计入 PASS/FAIL 与退出码（有失败即 exit 1）——TC1–TC22 共 22 个
+# 结果口径：35 个用例计入 PASS/FAIL 与退出码（有失败即 exit 1）——TC1–TC22 共 22 个
 #   + TC23（T3b 收尾：CONFIRM 卡快照重建，T3-6b）
 #   （由源脚本移植而来）+ GF1–GF5 共 5 个（生成式表单端到端，设计稿 docs/evidence/
 #   GFc-E2E用例设计-GLM-5.3.md）；+ GF6（入参闸门，-EnableGf6，桩模式启用并计入主计数，
 #   底座为桩的确定性违规模式 --violate-form-type）共 1 个；
-#   移植期缺陷清单（Q8）的两项断言单列计数（Q8 项 PASS/FAIL），不计入 29 用例与退出码
+#   + R-137 红队补测（MAJOR-2/MAJOR-3）共 2 个（守卫断言走主计数器，见下文 R-137 段）；
+#   + E2E-CTX-1..4 共 4 个（上下文计量，设计稿 §5.8；底座为桩的请求级 usage 形状开关
+#   `usage-shape=<last|repeat|zero-last|none>`，形状表取 scripts/ci/stub-routes.json）；
+#   移植期缺陷清单（Q8）的两项断言单列计数（Q8 项 PASS/FAIL），不计入 35 用例与退出码
 #   —— Q8② 属日志质量问题，具体残留见 docs/evidence/S5b-deepseek-E2E移植验证.md
 # 退出码：任一主用例 FAIL ⇒ exit 1；GF1–GF4 全部 SKIP（本棒零有效验证，硬底线）⇒ exit 1；
 #   E2E_STUB_MODE=1 且 GFSKIP≥1 ⇒ exit 1（桩模式零容忍）
@@ -1966,6 +1969,197 @@ if ($EnableGf6) {
 }
 
 # ============================================================
+# E2E-CTX-1..4 上下文计量（上下文统计与压缩专项批① 的 E2E 面；设计稿 §5.8）
+#   缺口登记：E2E-CTX-1..4 + 三形态 usage 桩（批① 收尾记录，统一归 E2E 批）
+#   底座：桩的**请求级** usage 形状开关 —— 提示词里的 `usage-shape=<mode>` 标记
+#     （scripts/ci/stub-upstream.mjs；与 --violate-form-type 同族；未带标记的请求帧逐字节不变）
+#   数值唯一取数点：scripts/ci/stub-routes.json 的 `usageShapes`（桩读同一份 ⇒ 桩与用例不漂移）
+#   口径：pill 的"显示一致"在无浏览器 CI 里的等价物 = GET /api/ai/context/{sessionId}
+#     （pill 的唯一数据源）与 done.usage / done.context **三方同源**；pill 渲染本身由前端
+#     tests/context-pill.spec.ts（C-31..C-36）锁，本批不起浏览器。
+#   压缩：四条用例的占比都远低于 trigger-ratio，故"本轮不发 context 帧"本身是断言；
+#     「压缩按估算触发」的等价物见 E2E-CTX-4 的第二轮（估算随历史增长 = 触发判定的输入）。
+# ============================================================
+
+# 形状表（与桩同源）。读不到即本组 4 条全 FAIL —— 桩坏了不能装成绿
+function Get-CtxShapes {
+    $file = Join-Path $PSScriptRoot 'ci/stub-routes.json'
+    if (-not (Test-Path $file)) { throw "形状表缺失：$file" }
+    $cfg = Get-Content -Raw -Encoding UTF8 -Path $file | ConvertFrom-Json
+    if (-not $cfg.usageShapes) { throw "形状表缺失：$file 的 usageShapes 段（三形态 usage 桩未落地）" }
+    return $cfg.usageShapes
+}
+
+# 一轮帧 + 端点快照 → 错误串数组（空 = 通过）。
+#   刻意不碰 HTTP 与全局计数：可在**无服务**环境里用合成件单独回归（施工报告 §3.2 的做法）。
+function Test-CtxCase($frames, $snap, $expect) {
+    $errors = New-Object System.Collections.ArrayList
+    $dones = @($frames | Where-Object { $_.type -eq 'done' })
+    if ($dones.Count -ne 1) {
+        $errors.Add("done 帧 $($dones.Count) 个，期望恰 1") | Out-Null
+        return $errors
+    }
+    $done = $dones[0]
+    $u = $done.usage
+    if ($null -eq $u) {
+        $errors.Add('done 帧缺 usage 载荷') | Out-Null
+        return $errors
+    }
+    if ([bool]$u.est -ne [bool]$expect.est) { $errors.Add("usage.est=$($u.est)，期望 $($expect.est)") | Out-Null }
+    if ($u.source -ne $expect.source) { $errors.Add("usage.source=$($u.source)，期望 $($expect.source)") | Out-Null }
+    if ([int]$u.dirty -ne 0) { $errors.Add("usage.dirty=$($u.dirty)，期望 0（本组用例没有回退帧）") | Out-Null }
+    if ($null -ne $expect.framesExact -and [int]$u.frames -ne [int]$expect.framesExact) {
+        $errors.Add("usage.frames=$($u.frames)，期望恰 $($expect.framesExact)") | Out-Null
+    }
+    if ($null -ne $expect.framesMin -and [int]$u.frames -lt [int]$expect.framesMin) {
+        $errors.Add("usage.frames=$($u.frames)，期望 ≥$($expect.framesMin)（形状没被真的发出来，用例即空转）") | Out-Null
+    }
+    if ($null -ne $expect.prompt) {
+        if ([int]$u.promptTokens -ne [int]$expect.prompt -or [int]$u.completionTokens -ne [int]$expect.completion `
+                -or [int]$u.totalTokens -ne [int]$expect.total) {
+            $errors.Add(("usage={0}/{1}/{2}，期望 {3}/{4}/{5}（形状 {6}）" -f $u.promptTokens, $u.completionTokens,
+                    $u.totalTokens, $expect.prompt, $expect.completion, $expect.total, $expect.shape)) | Out-Null
+        }
+    } else {
+        # 估算回退（ContextMeter.usage 的 est 分支）：completion 恒 0、total 恒等于 prompt、prompt 必须 >0
+        if ([int]$u.promptTokens -le 0) { $errors.Add("usage.promptTokens=$($u.promptTokens)，期望 >0（估算回退值）") | Out-Null }
+        if ([int]$u.completionTokens -ne 0) { $errors.Add("usage.completionTokens=$($u.completionTokens)，期望 0（估算回退值）") | Out-Null }
+        if ([int]$u.totalTokens -ne [int]$u.promptTokens) {
+            $errors.Add("usage.totalTokens=$($u.totalTokens) ≠ promptTokens=$($u.promptTokens)（估算回退口径）") | Out-Null
+        }
+    }
+    # done.context 与 done.usage 同源（批①「端点与 done 必须同源」的帧面一半）
+    $c = $done.context
+    if ($null -eq $c) {
+        $errors.Add('done 帧缺 context 子对象（上下文计量未装配？）') | Out-Null
+    } else {
+        if ([int]$c.usedTokens -ne [int]$u.promptTokens) {
+            $errors.Add("done.context.usedTokens=$($c.usedTokens) ≠ usage.promptTokens=$($u.promptTokens)") | Out-Null
+        }
+        if ([bool]$c.est -ne [bool]$expect.est) { $errors.Add("done.context.est=$($c.est)，期望 $($expect.est)") | Out-Null }
+        if ($c.level -ne 'none') { $errors.Add("done.context.level=$($c.level)，期望 none（本组用例不触发压缩）") | Out-Null }
+    }
+    # 未压缩轮不得发 context 帧（批① 自决⑥：只在该轮真压缩时发）
+    if (@($frames | Where-Object { $_.type -eq 'context' }).Count -ne 0) {
+        $errors.Add('本轮不应出现 context 帧（未压缩却发作压缩事件）') | Out-Null
+    }
+    # 端点（pill 的唯一数据源）
+    if ($null -eq $snap) {
+        $errors.Add('GET /api/ai/context 无响应体') | Out-Null
+        return $errors
+    }
+    if ([int]$snap.usedTokens -ne [int]$u.promptTokens) {
+        $errors.Add("端点 usedTokens=$($snap.usedTokens)，期望 $($u.promptTokens)（与 done 必须同源）") | Out-Null
+    }
+    $wantSource = if ([bool]$expect.est) { 'estimate' } else { 'stream' }
+    if ($snap.source -ne $wantSource) { $errors.Add("端点 source=$($snap.source)，期望 $wantSource") | Out-Null }
+    if ([bool]$snap.estimated -ne [bool]$expect.est) { $errors.Add("端点 estimated=$($snap.estimated)，期望 $($expect.est)") | Out-Null }
+    if ($null -eq $snap.turnNo -or [int]$snap.turnNo -lt 1) { $errors.Add("端点 turnNo=$($snap.turnNo)，期望 ≥1") | Out-Null }
+    # 分项守恒：Σ(非 free 项) == usedTokens（设计稿 §9 第 3 条的端点面）
+    $sum = 0
+    foreach ($part in @($snap.breakdown)) { if ($part.key -ne 'free') { $sum += [int]$part.tokens } }
+    if ($sum -ne [int]$snap.usedTokens) { $errors.Add("分项 Σ=$sum ≠ usedTokens=$($snap.usedTokens)（守恒破坏）") | Out-Null }
+    if ($null -ne $snap.limitTokens -and $null -ne $snap.percent) {
+        $wantPercent = [math]::Round([double]$snap.usedTokens * 1000.0 / [double]$snap.limitTokens) / 10.0
+        if ([math]::Abs([double]$snap.percent - $wantPercent) -gt 0.05) {
+            $errors.Add("端点 percent=$($snap.percent)，期望 $wantPercent（used/limit 的一位小数）") | Out-Null
+        }
+    }
+    return $errors
+}
+
+Say '--- E2E-CTX-1..4 上下文计量（usage 形状 / 去重 / 末帧零 / 回退估算） ---'
+$ctxShapes = $null
+try { $ctxShapes = Get-CtxShapes } catch { }
+if ($null -eq $ctxShapes) {
+    foreach ($ctxId in @('E2E-CTX-1', 'E2E-CTX-2', 'E2E-CTX-3', 'E2E-CTX-4')) {
+        No $ctxId '形状表不可读（scripts/ci/stub-routes.json 的 usageShapes）：三形态 usage 桩未落地'
+    }
+} else {
+    $ctxCases = @(
+        @{ id = 'E2E-CTX-1'; shape = 'last'; title = '末块 usage 真值'
+            expect = @{ est = $false; source = 'stream'; framesMin = 1; shape = 'last'
+                prompt = [int]$ctxShapes.last.promptTokens
+                completion = [int]$ctxShapes.last.completionTokens
+                total = [int]$ctxShapes.last.totalTokens } },
+        @{ id = 'E2E-CTX-2'; shape = 'repeat'; title = '每块重复 usage 不放大'
+            expect = @{ est = $false; source = 'stream'; framesMin = 2; shape = 'repeat'
+                prompt = [int]$ctxShapes.repeat.promptTokens
+                completion = [int]$ctxShapes.repeat.completionTokens
+                total = [int]$ctxShapes.repeat.totalTokens } },
+        @{ id = 'E2E-CTX-3'; shape = 'zero-last'; title = '末块 0/0/0 取中间真值'
+            # frames 判据 = **与 E2E-CTX-1 实测同值**（同构对照），不写死数字：
+            # 实测（2026-10-21 主会话 E2E 首轮）末帧序列 = 真值×2 + 0/0/0×2 —— Spring AI 的
+            # buffer(2,1) 聚合把每个候选各投递 2 次，`last` 与 `zero-last` 在这一维度**同构**；
+            # 写死 1 会红（首轮实测 frames=2）。判据需在循环内取 CTX-1 的实测值填充。
+            expect = @{ est = $false; source = 'stream'; framesMin = 1; shape = 'zero-last'
+                prompt = [int]$ctxShapes.'zero-last'.promptTokens
+                completion = [int]$ctxShapes.'zero-last'.completionTokens
+                total = [int]$ctxShapes.'zero-last'.totalTokens } },
+        @{ id = 'E2E-CTX-4'; shape = 'none'; title = '无 usage 回退估算'
+            expect = @{ est = $true; source = 'estimate'; framesExact = 0; shape = 'none'; prompt = $null } }
+    )
+    # E2E-CTX-1 实测 usage.frames —— E2E-CTX-3 的**同构对照基准**（见该用例 expect 的注释）：
+    # 两个形状在这一维度必须相等（每个 usage 候选被聚合器投递的次数相同）；数值不同即形状没走对路径。
+    $ctxLastFrames = $null
+    foreach ($c in $ctxCases) {
+        Say ("--- {0} {1}（usage-shape={2}） ---" -f $c.id, $c.title, $c.shape)
+        try {
+            $sid = 's5b-' + $c.id.ToLower() + '-' + [Guid]::NewGuid().ToString('N')
+            $turn = Invoke-AiTurn $sid "【上下文计量用例 $($c.id)】usage-shape=$($c.shape) 请只回复一句确认。" `
+                @{ page = 'tasks' } $script:continueHandler 2
+            $resp = Invoke-Api 'GET' "/api/ai/context/$sid" $null
+            if (-not $resp.ok) { throw "GET /api/ai/context/$sid => HTTP $($resp.status) $($resp.text)" }
+            $doneFrame = @($turn.frames | Where-Object { $_.type -eq 'done' })[0]
+            if ($null -ne $doneFrame -and $null -ne $doneFrame.usage) {
+                if ($c.id -eq 'E2E-CTX-1') { $ctxLastFrames = [int]$doneFrame.usage.frames }
+            }
+            if ($c.id -eq 'E2E-CTX-3') {
+                # 同构判据（依据 = 首轮实跑 + 指挥官裁决 2026-10-21）：基准缺失即判红，不静默跳过
+                if ($null -eq $ctxLastFrames) {
+                    throw 'E2E-CTX-1 未取到 usage.frames —— CTX-3 的同构判据没有基准（不允许退化成"不判"）'
+                }
+                $c.expect.framesExact = $ctxLastFrames
+            }
+            $errors = New-Object System.Collections.ArrayList
+            foreach ($e in @(Test-CtxCase $turn.frames $resp.json $c.expect)) { $errors.Add($e) | Out-Null }
+            $used1 = [int]$resp.json.usedTokens
+
+            if ($c.id -eq 'E2E-CTX-4') {
+                # 第二轮：估算随历史增长（"压缩按估算触发"的输入面）；长提示词让增长无歧义
+                $filler = ('历史增长填充。' * 20)
+                $turn2 = Invoke-AiTurn $sid "【上下文计量用例 E2E-CTX-4】usage-shape=none 第二轮（$filler）请只回复一句确认。" `
+                    @{ page = 'tasks' } $script:continueHandler 2
+                $resp2 = Invoke-Api 'GET' "/api/ai/context/$sid" $null
+                if (-not $resp2.ok) { throw "第二轮 GET /api/ai/context/$sid => HTTP $($resp2.status) $($resp2.text)" }
+                foreach ($e in @(Test-CtxCase $turn2.frames $resp2.json $c.expect)) { $errors.Add($e) | Out-Null }
+                if ([int]$resp2.json.usedTokens -le $used1) {
+                    $errors.Add("第二轮估算 usedTokens=$($resp2.json.usedTokens) 未超过第一轮 $used1（估算不随历史增长 ⇒ 压缩触发判定的输入失真）") | Out-Null
+                }
+                # /health 的两个上下文观测字段必须同源（上限未知 ⇒ 不做比例判定 ⇒ compactionOn=false）
+                $health = Invoke-Api 'GET' '/api/ai/health' $null
+                if (-not $health.ok) {
+                    $errors.Add("GET /api/ai/health => HTTP $($health.status)") | Out-Null
+                } else {
+                    $ctxLimit = $health.json.contextLimitTokens
+                    $ctxOn = [bool]$health.json.compactionOn
+                    if ($ctxOn -ne ($null -ne $ctxLimit)) {
+                        $errors.Add("health.compactionOn=$ctxOn 与 contextLimitTokens=$ctxLimit 不同源") | Out-Null
+                    }
+                }
+            }
+
+            if ($errors.Count -gt 0) { throw ($errors -join '；') }
+            # 成功行带实测 usage 与 frames：frames 是 CTX-3 同构判据的**取证值**（与 CTX-1 对照可读）
+            $uOk = if ($null -ne $doneFrame) { $doneFrame.usage } else { $null }
+            $usageOk = if ($null -ne $uOk) { "{0}/{1}/{2} est={3}" -f $uOk.promptTokens, $uOk.completionTokens, $uOk.totalTokens, $uOk.est } else { '?' }
+            $framesOk = if ($null -ne $uOk) { $uOk.frames } else { '?' }
+            Ok ("{0} {1}（usage={2} frames={3}；端点 usedTokens={4} 与 done.usage/done.context 同源；分项守恒）" -f $c.id, $c.title, $usageOk, $framesOk, $used1)
+        } catch { No $c.id $_.Exception.Message }
+    }
+}
+
+# ============================================================
 # TC17 HITL：破坏性操作需确认（拒绝不执行、确认后执行）
 #   源断言：confirm_tool → 拒绝后未发布、同意后 PUBLISHED
 #   main 适配：确认事件为 confirm_request，回执帧为 confirm_decision；
@@ -2322,7 +2516,8 @@ try {
 #   MAJOR-2 = 后端高危工具绕行只读：终态任务上 start_* 必须拒建作业（TASK_FINALIZED 409）
 #   MAJOR-3 = SpreadGrid 只读态单元格不可编辑（F2 修复的运行期锁：isProtected 生效）
 #   口径注记（R-137 E2E 热修项 3，改如实）：MAJOR-2/3 为守卫断言，走主计数器 Ok()/No()，
-#   PASS/FAIL 计入主用例计数（口径 29+2），任一失败即扛 exit 1（与 TC 用例同门禁属性）。
+#   PASS/FAIL 计入主用例计数（登记时口径 29+2 ⇒ 当时的真实基数是 31；现基数见脚本头「结果口径」= 35），
+#   任一失败即扛 exit 1（与 TC 用例同门禁属性）。
 # ============================================================
 Say '--- R-137 红队补测（MAJOR-2/MAJOR-3） ---'
 try {
@@ -2426,7 +2621,7 @@ try {
 } catch { Q8-No 'Q8 项回归' $_.Exception.Message }
 
 Say '============================================================'
-Say (" 结果：PASS={0}  FAIL={1}  （主用例计数，含 TC1–TC22、TC23 与 GF1–GF6（GF6 需 -EnableGf6）；基数不写死，随用例演进）" -f $script:passed, $script:failed)
+Say (" 结果：PASS={0}  FAIL={1}  （主用例计数，含 TC1–TC22、TC23、GF1–GF6（GF6 需 -EnableGf6）与 E2E-CTX-1..4；基数不写死，随用例演进）" -f $script:passed, $script:failed)
 # GFSKIP 摘要口径（红队问题 5）：文案随模式分支，与下方判定分支保持一致（纯文案，不改判定）
 $gfskipNote = if ($env:E2E_STUB_MODE -eq '1') {
     '桩模式零容忍：GFSKIP≥1 即整棒 FAIL（上游是确定性替身，任何 SKIP 都属桩路由或产品链路异常）'

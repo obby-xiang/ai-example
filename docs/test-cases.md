@@ -196,6 +196,10 @@
 | CTX-06 | L1 工具结果清除 | 占比 ≥70% 时最旧非 pin 的 `responseData` 变占位符，**消息条数不变**、配对 0 孤儿、占位符含工具名 + `≈N tokens` + `ai:ledger:<runId>` |
 | CTX-07 | L1 的 pin | 最近 5 对不清理；未决 HITL 条目所在对不清理；压缩前原文进 `ai:ctx:archive:`、事件进 `ai:ctx:ledger:` |
 | CTX-08 | 压缩帧与压缩失败 | 真压缩时另发 `context` 帧（早于首个 `delta`）；归档/记账失败 ⇒ 历史**逐字不变**、本轮照常发请求 |
+| E2E-CTX-1 | E2E：末块 usage 真值 | 桩发末块 usage（1200/40/1240）⇒ `done.usage` 真值（`est=false`/`source=stream`）+ `done.context` 与 `GET /api/ai/context/{sessionId}` 三方同源、分项 Σ == `usedTokens`、未压缩不发 `context` 帧 |
+| E2E-CTX-2 | E2E：每块重复 usage 不放大 | 桩每个分片都挂同一份 usage ⇒ 计数不放大（4321/77/4398，`frames≥2` 证明去重被行使过）；业界 "1.7M tokens" 事故的等价物 |
+| E2E-CTX-3 | E2E：末块 0/0/0 取中间真值 | 桩末个 usage 帧 0/0/0 ⇒ 取中间真值（3100/50/3150）、`est=false`、`frames=1` |
+| E2E-CTX-4 | E2E：无 usage 回退估算 | 桩整轮不发 usage ⇒ `est=true`/`source=estimate`/`frames=0`、`completion=0`、`total==prompt>0`；第二轮估算随历史增长（压缩触发判定的输入）；`/health` 的 `compactionOn` 与 `contextLimitTokens` 同源 |
 
 ### 5.5 配置定义字段编辑
 

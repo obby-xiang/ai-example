@@ -22,7 +22,7 @@
 | **证据** | 验证记录与原始附件（`file:line` 级断言、日志/JSON/SSE 原文）。按主题分组，见下节「证据分区」 | `docs/evidence/` | 现行（历史取证） |
 | **研究** | 外部设计挖掘与借鉴报告（DC-14 的判定依据；含 AG-UI / AI SDK / CopilotKit 原始材料） | `docs/research/外部设计挖掘与借鉴报告.md` | 现行（结论已裁决） |
 | **研究（交互调研）** | 业界调研入库件（脱敏版，只追加）：① 向导步骤条节点点击交互（组件库/设计系统/工作流产品三态可点性 + 失败与只读范式）；② AI 对话文本/工具调用/HITL 混排展示（协议/SDK/开源 UI/历史回放 + 最小改造面）。两份均保留来源 URL 与证据分级标注、「设计启示」节；原始稿在 `<SCRATCH>/ux-research/` | `docs/research/步骤条交互-业界调研.md`、`docs/research/对话时序混排-业界调研.md` | 现行（2026-10-10 入库；待裁决引用） |
-| **操作配方** | E2E 桩模式校准配方（起上游桩 / 自起后端 / 就绪轮询后跑 E2E / 基线口径 29 用例 / 端口纪律；来源 = 交接存档，2026-10-11 入库） | `docs/E2E-桩模式校准配方.md` | 现行 |
+| **操作配方** | E2E 桩模式校准配方（起上游桩 / 自起后端 / 就绪轮询后跑 E2E / 基线口径 35 用例 / 端口纪律；来源 = 交接存档，2026-10-11 入库） | `docs/E2E-桩模式校准配方.md` | 现行 |
 | **PoC 决策卡** | SP-01ab / SP-01c / SP-01d / SP-02 决策卡与附件（挂起态外置、续跑协议、故障注入实测） | `docs/spike/` | 现行（结论已并入 ADR/DC） |
 | **PoC 代码** | 可运行的独立 spike 工程（与主仓构建分离，各自带 `pom.xml`） | `spike/sp01ab/`、`spike/sp01c/`、`spike/sp01d/`、`spike/sp02/` | 现行（参考实现） |
 | **前期合流包** | 合流启动期的分支评价 / 需求 / 方案 / 用例 / 落地手册五份（S1 阶段产物） | `docs/merge/` | 存档（历史阶段产物，勿当现行设计） |
@@ -58,7 +58,7 @@
 | `docs/requirements.md` | 需求规格说明书（源分支 v1.0） | `docs/02-需求设计文档-v2.2-冻结版.md` |
 | `docs/technical-design.md` | 技术方案文档（源分支 v1.0） | `docs/03-技术方案文档-v2.1.md` + `docs/adr/DECISION-CARDS.md` |
 | `docs/implementation-plan.md` | 实现方案文档（源分支 v1.0） | `docs/M2-排期计划.md`（批次与状态）+ `docs/s4/`（施工级规格） |
-| `docs/test-cases.md` | 测试用例文档（源分支 v1.0） | 后端 `backend/src/test/`、`scripts/verify-e2e.ps1`（29 用例）、`docs/evidence/S5*` |
+| `docs/test-cases.md` | 测试用例文档（源分支 v1.0） | 后端 `backend/src/test/`、`scripts/verify-e2e.ps1`（35 用例）、`docs/evidence/S5*` |
 | `docs/verification-results.md` | 验证结果文档（源分支 v1.1） | `docs/evidence/` 全量证据文档 |
 
 ## 阅读顺序建议
