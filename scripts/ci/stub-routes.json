@@ -24,6 +24,13 @@
   "convergence": {
     "maxCallsPerTurn": 6
   },
+  "usageShapes": {
+    "note": "上下文统计与压缩专项 §5.8 的 usage 形状表（E2E-CTX-1..4 的唯一取数点）。`last` = 改造前桩就发的基线（逐字节不变）；`repeat` = 每块重复同一份；`zero-last` = 中间真值 + 末块 0/0/0；`none` = 整轮不发。verify-e2e.ps1 读同一份文件，桩与用例因此不会漂移。",
+    "last": { "promptTokens": 1200, "completionTokens": 40, "totalTokens": 1240, "cachedTokens": 640, "reasoningTokens": 16 },
+    "repeat": { "promptTokens": 4321, "completionTokens": 77, "totalTokens": 4398, "cachedTokens": 2048, "reasoningTokens": 12 },
+    "zero-last": { "promptTokens": 3100, "completionTokens": 50, "totalTokens": 3150 },
+    "none": {}
+  },
   "routes": [
     {
       "id": "GF-FILTER",

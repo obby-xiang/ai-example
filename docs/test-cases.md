@@ -203,6 +203,10 @@
 | CTX-13 | 逐级与挂起期 | 每次最多升一级（none → L1 → L2 → L3）；有未决 HITL 条目时只允许 L1 |
 | CTX-14 | 熔断与恢复 | 摘要连续失败 3 次 ⇒ `circuit=open` 且 10 分钟内只留 L1；到点半开一次，成功清零、失败重开窗；摘要失败时历史逐字不变 |
 | CTX-15 | 摘要超时 | `summary-timeout` 到点即中断并走熔断失败路径（不挂住整轮） |
+| E2E-CTX-1 | E2E：末块 usage 真值 | 桩发末块 usage（1200/40/1240）⇒ `done.usage` 真值（`est=false`/`source=stream`）+ `done.context` 与 `GET /api/ai/context/{sessionId}` 三方同源、分项 Σ == `usedTokens`、未压缩不发 `context` 帧 |
+| E2E-CTX-2 | E2E：每块重复 usage 不放大 | 桩每个分片都挂同一份 usage ⇒ 计数不放大（4321/77/4398，`frames≥2` 证明去重被行使过）；业界 "1.7M tokens" 事故的等价物 |
+| E2E-CTX-3 | E2E：末块 0/0/0 取中间真值 | 桩末个 usage 帧 0/0/0 ⇒ 取中间真值（3100/50/3150）、`est=false`、`frames` 与 E2E-CTX-1 实测同值（同构对照，基准缺失即判红） |
+| E2E-CTX-4 | E2E：无 usage 回退估算 | 桩整轮不发 usage ⇒ `est=true`/`source=estimate`/`frames=0`、`completion=0`、`total==prompt>0`；第二轮估算随历史增长（压缩触发判定的输入）；`/health` 的 `compactionOn` 与 `contextLimitTokens` 同源 |
 
 ### 5.5 配置定义字段编辑
 

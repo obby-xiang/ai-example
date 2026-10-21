@@ -1,12 +1,12 @@
 name: CI 门禁
 
 # S5.d：门禁骨架 = 后端编译 + 后端单测 + 前端类型检查/构建。
-# M2-T1.2：新增 e2e job（桩上游 + services:redis 容器，跑满 29 用例）。
+# M2-T1.2：新增 e2e job（桩上游 + services:redis 容器，跑满 35 用例）。
 #   口径补注（设计草案 §4.3，只补注不改判定）：CI 内的 GFSKIP=0 由构造保证——桩按路由表下发
 #   生成式表单，"模型未触发/schema 漂移"两条 SKIP 分支不可达，故它只证明"桩给出的表单被产品链路
 #   正确消费"，不证明"模型服从率"。真模型的 E2E 维持本地手动（S5d 裁决 #3）；
 #   真实模型证据线的归属见 M2 排期 T4（nightly 真 key job 评估项）。
-#   M2-T4 T4-4（裁决 4）：GF6 入参闸门用例在桩模式启用并进主计数（29 用例），其非法 schema 由
+#   M2-T4 T4-4（裁决 4）：GF6 入参闸门用例在桩模式启用并进主计数（登记时 29，现 35），其非法 schema 由
 #   桩的 --violate-form-type（请求级，仅 GF6 提示词触发）构造保证 —— 故"桩模式零容忍"口径不变：
 #   GF6 的 SKIP 分支在桩下不可达（未产出即 FAIL），GFSKIP=0 仍由构造保证。
 # M2-T4 补充批（裁决①，2026-10-09）：**脱敏扫描分口径** ——
@@ -109,7 +109,7 @@ jobs:
   #     （session 200/分、ip 2000/分），使本 job 的失败只归因于产品，而不是"用例数增长后撞限流"。
   # ============================================================
   e2e:
-    name: E2E 全流程（29 用例 · 桩上游 + redis）
+    name: E2E 全流程（35 用例 · 桩上游 + redis）
     runs-on: ubuntu-latest
     timeout-minutes: 25
     needs: backend
@@ -193,7 +193,7 @@ jobs:
           echo $! > "$GITHUB_WORKSPACE/backend/target/e2e-artifacts/backend.pid"
 
       # 把"环境坏"与"用例失败"分开：无 key 时 /health 回 503 AI_UNAVAILABLE、
-      # Redis 不可用时回 503 AI_REDIS_UNAVAILABLE；本步不过就直接失败，不让 29 个用例全红。
+      # Redis 不可用时回 503 AI_REDIS_UNAVAILABLE；本步不过就直接失败，不让 35 个用例全红。
       - name: 就绪等待（/api/ai/health：available + redis.available）
         working-directory: ${{ github.workspace }}
         run: |
@@ -220,7 +220,7 @@ jobs:
           done
           echo "::error::60s 内 /api/definitions 未达 15（基座 7 + glm 8），种子播种未完成"; tail -n 40 backend/target/e2e-artifacts/boot.log; exit 1
 
-      - name: 运行 E2E（29 用例）
+      - name: 运行 E2E（35 用例）
         # 去掉 run 内的 `pwsh -NoProfile -File` 双层调用（红队问题 6①）：step 已经声明 shell: pwsh，
         # 直接以 pwsh 原生方式调用脚本；脚本内的 `exit N` 会成为 pwsh 进程退出码并被 shell 模板透传为 step 退出码。
         # -EnableGf6（M2-T4 T4-4 裁决 4）：桩模式下 GF6 入参闸门用例启用并计入主计数；

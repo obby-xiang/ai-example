@@ -25,6 +25,16 @@
  * `.tools.txt`（本请求实际披露的工具名清单）、`.head.txt`（模型可见消息摘要）、
  * `.decision.json`（桩本轮的判定：路由 id / 工具名 / 理由）——"桩坏 / 产品坏"的区分依据。
  *
+ * usage 形状（上下文统计与压缩专项 §5.8；E2E-CTX-1..4 的确定性底座）：
+ *   提示词里带 `usage-shape=<last|repeat|zero-last|none>` 即按该形状发 usage（**请求级**开关，
+ *   与 `--violate-form-type` 同族；不带标记 = `last` = 改造前的行为，帧逐字节不变）：
+ *     last      末个 usage-only 帧发一份真值（基线）
+ *     repeat    **每个 content 分片都挂同一份**（治"每块重复被累加放大"）
+ *     zero-last 首个分片真值 + **末个 usage-only 帧 0/0/0**（治"直读末帧把真值读成 0"）
+ *     none      整轮不发 usage（产品必须回退估算：`est=true` / `source=estimate`）
+ *   数值唯一取数点 = `stub-routes.json` 的 `usageShapes`（verify-e2e.ps1 读同一份 ⇒ 不会漂移）；
+ *   `--self-check` 段 ⑧ 逐形状断言帧形态与标记解析。
+ *
  * 用法：
  *   node scripts/ci/stub-upstream.mjs --port 18399 --dir <dir> [--routes <stub-routes.json>]
  *   node scripts/ci/stub-upstream.mjs --self-check [--routes <stub-routes.json>]
@@ -148,6 +158,50 @@ function applyRequestViolation(decision, body) {
   if (!target) return null
   target.type = 'html'
   return 'violate-form-type（请求级）：GF-FILTER 的 scope 字段类型改为 html（越白名单）'
+}
+
+// ── usage 形状（上下文统计与压缩专项 §5.8：E2E-CTX-1..4 的确定性底座）──────────
+// 与 `--violate-form-type` 同族的**请求级**开关：由提示词里的 `usage-shape=<mode>` 标记选择，
+// 不猜调用方身份、不影响未带标记的请求（既有 29 用例的帧逐字节不变）。
+// 四种形状（`stub-routes.json` 的 `usageShapes` 是唯一取数点，E2E 脚本读同一份）：
+//   last      —— 末块 usage（基线：改造前桩就发这一份）
+//   repeat    —— **每块都挂同一份 usage**（治"累加放大"，对标业界 1.7M tokens 事故）
+//   zero-last —— 中间块真值 + **末块 0/0/0**（治"直读末帧"把真值读成 0）
+//   none      —— **完全不发 usage**（产品必须回退估算：`est=true` / `source=estimate`）
+const USAGE_SHAPE_MARKER = /usage-shape=(last|repeat|zero-last|none)\b/
+const USAGE_SHAPE_NAMES = ['last', 'repeat', 'zero-last', 'none']
+const USAGE_SHAPE_DEFAULTS = {
+  last: { promptTokens: 1200, completionTokens: 40, totalTokens: 1240, cachedTokens: 640, reasoningTokens: 16 },
+  repeat: { promptTokens: 4321, completionTokens: 77, totalTokens: 4398, cachedTokens: 2048, reasoningTokens: 12 },
+  'zero-last': { promptTokens: 3100, completionTokens: 50, totalTokens: 3150 },
+  none: {}
+}
+
+/** 形状表：路由表（或任意外部 routes 文件）里缺项/无该键时回落内建默认值 —— 向后兼容。 */
+function usageShapes() {
+  const declared = ROUTES.usageShapes || {}
+  const out = {}
+  for (const name of USAGE_SHAPE_NAMES) out[name] = { ...USAGE_SHAPE_DEFAULTS[name], ...(declared[name] || {}) }
+  return out
+}
+
+/** 本请求要求的形状；未带标记 / 未知值一律 `last`（默认形状 = 改造前行为）。 */
+function usageShapeOf(body) {
+  const userText = textOf(lastMessageWithRole(messagesOf(body), 'user'))
+  const hit = USAGE_SHAPE_MARKER.exec(userText || '')
+  return hit ? hit[1] : 'last'
+}
+
+/** 形状的 `usage` 负载（OpenAI 兼容形态；数值全取自上表，不在帧里写裸数字）。 */
+function usageOf(shape) {
+  const usage = {
+    prompt_tokens: shape.promptTokens,
+    completion_tokens: shape.completionTokens,
+    total_tokens: shape.totalTokens
+  }
+  if (shape.cachedTokens) usage.prompt_tokens_details = { cached_tokens: shape.cachedTokens }
+  if (shape.reasoningTokens) usage.completion_tokens_details = { reasoning_tokens: shape.reasoningTokens }
+  return usage
 }
 
 // ── 请求解析辅助 ───────────────────────────────────────────────────────────
@@ -357,36 +411,55 @@ function decide(body, routes, turns, overrides = {}) {
 
 let frameSeq = 0
 
-function chunk(delta, finishReason = null, model = 'ci-stub') {
-  return `data: ${JSON.stringify({
+function chunk(delta, finishReason = null, model = 'ci-stub', usage = null) {
+  const body = {
     id: `chatcmpl-stub-${++frameSeq}`,
     object: 'chat.completion.chunk',
     created: Math.floor(Date.now() / 1000),
     model,
     choices: [{ index: 0, delta, finish_reason: finishReason }]
-  })}\n\n`
+  }
+  // 只有形状 repeat / zero-last 会走这条分支；其余情况该键不写，既有请求的帧逐字节不变
+  if (usage) body.usage = usage
+  return `data: ${JSON.stringify(body)}\n\n`
 }
 
-/** 文本轮：分片 content → finish_reason=stop → usage 帧 → [DONE]（硬规范②：必须有终帧）。 */
-function textRound(text, model) {
-  const out = [chunk({ role: 'assistant', content: '' }, null, model)]
-  const pieces = String(text).match(/[\s\S]{1,24}/g) || [String(text)]
-  for (const piece of pieces) out.push(chunk({ content: piece }, null, model))
-  out.push(chunk({}, 'stop', model))
-  out.push(`data: ${JSON.stringify({
+/** usage-only 帧（`choices: []` + usage）：OpenAI `stream_options.include_usage` 的形态。 */
+function usageChunk(usage, model) {
+  return `data: ${JSON.stringify({
     id: `chatcmpl-stub-${++frameSeq}`,
     object: 'chat.completion.chunk',
     created: Math.floor(Date.now() / 1000),
     model,
     choices: [],
-    usage: {
-      prompt_tokens: 1200,
-      completion_tokens: 40,
-      total_tokens: 1240,
-      prompt_tokens_details: { cached_tokens: 640 },
-      completion_tokens_details: { reasoning_tokens: 16 }
-    }
-  })}\n\n`)
+    usage
+  })}\n\n`
+}
+
+/** 末块 0/0/0：直读末帧的实现会把它当真值（`ContextMeter` 的 R1 必须跳过）。 */
+const ZERO_USAGE = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+
+/**
+ * 文本轮：分片 content → finish_reason=stop → usage 帧 → [DONE]（硬规范②：必须有终帧）。
+ *
+ * `shapeName` 决定 usage 的落点（形状表见 {@link usageShapes}）：
+ *   - `last`（默认）：只在末个 usage-only 帧发一份 —— 改造前的既有行为，逐字节不变；
+ *   - `repeat`：**每个 content 分片都挂同一份**，末帧再挂一次（每块重复）；
+ *   - `zero-last`：首个 content 分片挂真值，末个 usage-only 帧挂 0/0/0；
+ *   - `none`：整轮不发 usage（产品必须回退估算）。
+ */
+function textRound(text, model, shapeName = 'last') {
+  const shapes = usageShapes()
+  const name = USAGE_SHAPE_NAMES.includes(shapeName) ? shapeName : 'last'
+  const usage = name === 'none' ? null : usageOf(shapes[name])
+  const out = [chunk({ role: 'assistant', content: '' }, null, model)]
+  const pieces = String(text).match(/[\s\S]{1,24}/g) || [String(text)]
+  pieces.forEach((piece, index) => {
+    const attach = usage && (name === 'repeat' || (name === 'zero-last' && index === 0))
+    out.push(attach ? chunk({ content: piece }, null, model, usage) : chunk({ content: piece }, null, model))
+  })
+  out.push(chunk({}, 'stop', model))
+  if (usage) out.push(usageChunk(name === 'zero-last' ? ZERO_USAGE : usage, model))
   out.push('data: [DONE]\n\n')
   return out
 }
@@ -441,6 +514,8 @@ function handleChat(req, res, raw) {
   const index = ++requestSeq
   const body = safeJson(raw)
   const model = typeof body?.model === 'string' && body.model ? body.model : 'ci-stub'
+  // 形状是**请求级**开关（与 --violate-form-type 同族）：只对文本轮生效，工具轮不带 usage
+  const usageShape = usageShapeOf(body ?? {})
   let decision
   if (!body) {
     decision = { kind: 'text', text: CLOSING_TEXT, reason: '请求体不是合法 JSON（退化为文本）' }
@@ -451,6 +526,9 @@ function handleChat(req, res, raw) {
       decision = { kind: 'text', text: CLOSING_TEXT, reason: `判定异常：${err.message}` }
     }
   }
+  // 归因面（记录契约）：非默认形状写进 decision.json，让"这轮为什么是伪值"可追溯；
+  // 默认形状不写键 ⇒ 既有 29 用例的落盘件逐字节不变。
+  if (usageShape !== 'last') decision.usageShape = usageShape
   // 注入必须先于落盘（T4-S2-6）：`record` 会把 decision **立即** 序列化进 req-NN.decision.json，
   // 它自称"桩收到的原请求与判定"的失败归因三件套之一 —— 若先落盘再注入，GF6 失败时落盘的判定
   // 是注入前的合法 schema，与 SSE 实际回帧（注入后的 html）相反，会把排查方向引偏。
@@ -465,7 +543,7 @@ function handleChat(req, res, raw) {
   })
   const frames = decision.kind === 'tool_call'
     ? toolRound(decision.tool, decision.args, `call-stub-${index}`, model)
-    : textRound(decision.text, model)
+    : textRound(decision.text, model, usageShape)
   try {
     for (const frame of frames) res.write(frame)
     res.end()
@@ -888,13 +966,114 @@ function selfCheck() {
   }
   ok('工具结果反解通过（对象/双层字符串/前缀混合三形态）')
 
+  section()
+  // ⑧ usage 形状（上下文专项 §5.8 的 E2E-CTX-1..4 底座）：四种形状的帧形态 + 标记解析。
+  //    这里的断言与 `scripts/verify-e2e.ps1` 的 E2E-CTX-1..4 是**同一组期望**（数值取
+  //    `stub-routes.json` 的 usageShapes，E2E 脚本读同一份）；任何一侧漂移，自检或 E2E 即红。
+  const shapes = usageShapes()
+  // ⑧-0 形状表结构：四个形状齐备、数值自洽（缺项回落默认值，但路由表显式声明时必须是合法值）
+  const declaredShapes = ROUTES.usageShapes || {}
+  for (const name of Object.keys(declaredShapes).filter((k) => k !== 'note')) {
+    if (!USAGE_SHAPE_NAMES.includes(name)) bad(`usageShapes 含未知形状 ${name}（白名单：${USAGE_SHAPE_NAMES.join(' / ')}）`)
+  }
+  for (const name of USAGE_SHAPE_NAMES) {
+    const shape = shapes[name]
+    if (name === 'none') {
+      if (shape.promptTokens !== undefined) bad('usageShapes.none 不该带数值（"完全不发 usage"的形状）')
+      continue
+    }
+    for (const field of ['promptTokens', 'completionTokens', 'totalTokens']) {
+      if (!Number.isInteger(shape[field]) || shape[field] < 0) bad(`usageShapes.${name}.${field}=${shape[field]} 非法（须为非负整数）`)
+    }
+    if (shape.promptTokens + shape.completionTokens !== shape.totalTokens) {
+      bad(`usageShapes.${name} 三维不自洽：${shape.promptTokens}+${shape.completionTokens}≠${shape.totalTokens}`)
+    }
+    if (shape.promptTokens <= 0) bad(`usageShapes.${name}.promptTokens 必须 > 0（否则真值会被当成空帧）`)
+  }
+  if (shapes.repeat.promptTokens === shapes.last.promptTokens) {
+    bad('usageShapes.repeat 的数值与 last 相同 —— "重复 vs 基线"无法在 done.usage 上区分')
+  }
+  const SHAPE_FILLER = '上下文计量形状自证的填充文本。'.repeat(8)
+  const framesOfShape = (name) => textRound(SHAPE_FILLER, 'ci-stub', name)
+    .filter((f) => f !== 'data: [DONE]\n\n')
+    .map((f) => JSON.parse(f.replace(/^data: /, '').trim()))
+  const usagesOf = (frames) => frames.filter((f) => f.usage).map((f) => f.usage)
+
+  // ⑧-1 last：恰 1 个 usage 帧，数值与改造前**逐值一致**
+  const lastUsage = usagesOf(framesOfShape('last'))
+  if (lastUsage.length !== 1) {
+    bad(`形状 last 的 usage 帧 ${lastUsage.length} 个，期望恰 1（基线：改造前桩只发末块 usage）`)
+  } else {
+    const u = lastUsage[0]
+    const want = shapes.last
+    if (u.prompt_tokens !== want.promptTokens || u.completion_tokens !== want.completionTokens
+      || u.total_tokens !== want.totalTokens) {
+      bad(`形状 last 的 usage=${u.prompt_tokens}/${u.completion_tokens}/${u.total_tokens}，期望 ${want.promptTokens}/${want.completionTokens}/${want.totalTokens}`)
+    }
+    if (u.prompt_tokens_details?.cached_tokens !== want.cachedTokens
+      || u.completion_tokens_details?.reasoning_tokens !== want.reasoningTokens) {
+      bad('形状 last 丢了可选维度（cached_tokens / reasoning_tokens）—— 与改造前不再逐值一致')
+    }
+  }
+
+  // ⑧-2 repeat：**每块都挂同一份** usage（≥3 帧且逐帧同值；不是 N 倍累加）
+  const repeatUsage = usagesOf(framesOfShape('repeat'))
+  const wantRepeat = shapes.repeat
+  if (repeatUsage.length < 3) {
+    bad(`形状 repeat 的 usage 帧 ${repeatUsage.length} 个，期望 ≥3（"每块重复"必须真的重复，否则 E2E-CTX-2 是空转）`)
+  }
+  for (const u of repeatUsage) {
+    if (u.prompt_tokens !== wantRepeat.promptTokens || u.completion_tokens !== wantRepeat.completionTokens
+      || u.total_tokens !== wantRepeat.totalTokens) {
+      bad(`形状 repeat 出现非同一份 usage（${u.prompt_tokens}/${u.completion_tokens}/${u.total_tokens}），期望逐帧 ${wantRepeat.promptTokens}/${wantRepeat.completionTokens}/${wantRepeat.totalTokens}`)
+      break
+    }
+  }
+
+  // ⑧-3 zero-last：**末个 usage 帧 0/0/0**，且此前恰 1 个真值帧
+  const zeroLast = usagesOf(framesOfShape('zero-last'))
+  const wantZero = shapes['zero-last']
+  if (zeroLast.length !== 2) {
+    bad(`形状 zero-last 的 usage 帧 ${zeroLast.length} 个，期望 2（1 个中间真值 + 1 个末块 0/0/0）`)
+  } else {
+    const tail = zeroLast[zeroLast.length - 1]
+    const real = zeroLast[0]
+    if (tail.prompt_tokens !== 0 || tail.completion_tokens !== 0 || tail.total_tokens !== 0) {
+      bad(`形状 zero-last 的末个 usage 帧 ${tail.prompt_tokens}/${tail.completion_tokens}/${tail.total_tokens}，期望 0/0/0`)
+    }
+    if (real.prompt_tokens !== wantZero.promptTokens || real.completion_tokens !== wantZero.completionTokens
+      || real.total_tokens !== wantZero.totalTokens) {
+      bad(`形状 zero-last 的中间真值 ${real.prompt_tokens}/${real.completion_tokens}/${real.total_tokens}，期望 ${wantZero.promptTokens}/${wantZero.completionTokens}/${wantZero.totalTokens}`)
+    }
+  }
+
+  // ⑧-4 none：**0 个 usage 帧**，但 stop 终帧与 [DONE] 仍在（硬规范②：正常收尾必须有终帧）
+  const noneFrames = framesOfShape('none')
+  if (usagesOf(noneFrames).length !== 0) bad(`形状 none 仍发了 ${usagesOf(noneFrames).length} 个 usage 帧（产品侧 est 回退路径因此走不到）`)
+  if (!noneFrames.some((f) => f.choices?.[0]?.finish_reason === 'stop')) bad('形状 none 缺 finish_reason=stop 终帧')
+
+  // ⑧-5 标记解析：无标记/未知值 ⇒ last（默认形状不得因标记语法扩展而漂移）
+  const markerCases = [
+    ['无标记', { messages: [{ role: 'user', content: '普通一句' }] }, 'last'],
+    ['last', { messages: [{ role: 'user', content: '前缀 usage-shape=last 后缀' }] }, 'last'],
+    ['repeat', { messages: [{ role: 'user', content: '前缀 usage-shape=repeat 后缀' }] }, 'repeat'],
+    ['zero-last', { messages: [{ role: 'user', content: '前缀 usage-shape=zero-last 后缀' }] }, 'zero-last'],
+    ['none', { messages: [{ role: 'user', content: '前缀 usage-shape=none 后缀' }] }, 'none'],
+    ['未知值', { messages: [{ role: 'user', content: '前缀 usage-shape=bogus 后缀' }] }, 'last']
+  ]
+  for (const [label, body, want] of markerCases) {
+    const got = usageShapeOf(body)
+    if (got !== want) bad(`usage 形状标记解析失败（${label}）：得到 ${got}，期望 ${want}`)
+  }
+  ok('usage 形状自证通过（last 逐值不变 / repeat 逐帧同值不累加 / zero-last 末帧 0/0/0 / none 零 usage 仍收尾 + 标记解析）')
+
   console.log('------------------------------------------------------------')
   if (problems.length) {
     console.log(`SELF-CHECK FAIL：${problems.length} 项`)
     for (const p of problems) console.log(`  - ${p}`)
     process.exit(1)
   }
-  console.log('SELF-CHECK PASS：路由表契约、白名单对账、收敛自证、披露驱动、帧形态、反解全部通过')
+  console.log('SELF-CHECK PASS：路由表契约、白名单对账、收敛自证、披露驱动、帧形态、反解、usage 形状全部通过')
   process.exit(0)
 }
 
