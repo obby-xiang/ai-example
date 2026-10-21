@@ -62,11 +62,12 @@ public class AiProperties {
 	private Config config = new Config();
 
 	/**
-	 * 模型配置的读写开关（模型配置专项批①；设计稿 §3.3 / §3.4）。
+	 * 模型配置的读写开关（模型配置专项批①；设计稿 §3.3 / §3.4 / §3.5）。
 	 *
 	 * <p>
-	 * 批① 只有两个键：{@link #seedForce}（strict seed 的显式运维逃生门）与
-	 * {@link #reloadInterval}（读路径版本比对的最小间隔）。URL 闸与私网开关属于批②。
+	 * 批①：{@link #seedForce}（strict seed 的显式运维逃生门）与 {@link #reloadInterval}
+	 * （读路径版本比对的最小间隔）。批②：{@link #allowPrivateEndpoints}（URL 闸的私网开关）、
+	 * {@link #probeTimeout}（{@code /test} 与拉取模型的超时）、{@link #modelsCacheTtl}（远端模型清单缓存）。
 	 */
 	@Data
 	public static class Config {
@@ -90,6 +91,39 @@ public class AiProperties {
 		 * 每次都做（确定性，不靠 sleep）。
 		 */
 		private Duration reloadInterval = Duration.ofSeconds(1);
+
+		/**
+		 * 是否允许把 provider 指向私网/回环地址（默认 <b>false</b>；设计稿 §3.5 URL 闸）。
+		 *
+		 * <p>
+		 * 默认关 = SSRF 面默认关闭：写路径只接受"解析得到公网地址"的 http/https 绝对 URL。
+		 * 打开它只该发生在两种场景：① E2E/CI 用 {@code http://127.0.0.1:18399} 的桩；② 内网自建的
+		 * OpenAI 兼容网关。打开等于"允许应用去打内网"，是取舍不是根治（设计稿 §9 最后一条）。
+		 *
+		 * <p>
+		 * <b>种子路径不受本开关约束</b>：env 是受信来源（运维已经在进程环境里写了这个地址），
+		 * {@code key_ref=ENV} 的种子行探活/拉模型按受信处理 —— 否则 CI 的桩端点会被自己的闸拦掉。
+		 */
+		private boolean allowPrivateEndpoints = false;
+
+		/**
+		 * {@code /test} 与 {@code /models/fetch} 的单次上游超时（缺省 5s；设计稿 §3.5）。
+		 *
+		 * <p>
+		 * 这两个动作是<b>人点按钮</b>等结果的同步操作，不能按聊天那套 30s/90s 的韧性预算取值；
+		 * 5s 覆盖"跨公网握手 + /models 列表返回"的常见耗时，超时即给 {@code UNREACHABLE}
+		 * （"网络不可达/超时"），不无限等。单测把它调到 150ms 以确定性触发超时档。
+		 */
+		private Duration probeTimeout = Duration.ofSeconds(5);
+
+		/**
+		 * 远端模型清单的缓存 TTL（缺省 10min；设计稿 §3.1「不建表的东西」）。
+		 *
+		 * <p>
+		 * 缓存键 {@code ai:cfg:models:<providerId>}，只缓存"上游实际返回的 id 列表"，<b>不</b>缓存
+		 * allowlist（allowlist 在 {@code ai_model} 表里）。Redis 不可用 ⇒ 每次真拉（不降级到"假装成功"）。
+		 */
+		private Duration modelsCacheTtl = Duration.ofMinutes(10);
 	}
 
 	/**

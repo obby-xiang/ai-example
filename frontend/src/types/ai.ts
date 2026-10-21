@@ -118,6 +118,39 @@ export interface AiHealth {
   redis?: Record<string, unknown>
   resilience?: Record<string, unknown>
   cancellations?: Record<string, unknown>
+  /**
+   * 模型配置专项批①（additive）：当前默认目标的 provider 身份。
+   *
+   * <p>
+   * 批① 复审登记 N3 的口径：快照里没有可用 provider 时，`model`/`baseUrl` 会回落 env 回读，
+   * 而 `providerId`/`defaultModelId` 为 null —— 消费者**先判 `providerId == null`** 再决定
+   * 要不要相信 `model`（否则会把"env 回读值"当成"配置库里的默认模型"）。
+   */
+  providerId?: number | null
+  defaultModelId?: string | null
+  /** 逐 provider 的 key 状态（永不含 key 本身）；合成行 synthetic=true / id=null。 */
+  providers?: AiHealthProvider[]
+}
+
+/**
+ * `/health.providers[]` 的一行（M5：设置页据此判断"env 兜底还没落库"）。
+ *
+ * 合成行 = 表为空但 env 有 key 时临时合成的种子行：`id=null`、`source=ENV_SEED`、`synthetic=true`。
+ * 全局 Jackson `default-property-inclusion=non_null` 可能省掉 `id` 键 ⇒ **认 `synthetic`**，不要认 `id`。
+ */
+export interface AiHealthProvider {
+  id?: number | null
+  code: string
+  name: string
+  baseUrl?: string
+  enabled: boolean
+  keyConfigured: boolean
+  keyRef: string
+  source: string
+  /** true = env 兜底合成行（尚未写入配置库） */
+  synthetic?: boolean
+  /** OK / MISSING / UNREADABLE / DISABLED */
+  status: string
 }
 
 /** 取消一轮对话的结果（POST /api/ai/cancel/{runId}，裸对象）。 */
