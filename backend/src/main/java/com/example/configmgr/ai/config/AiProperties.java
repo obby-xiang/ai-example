@@ -677,10 +677,10 @@ public class AiProperties {
 		/** L1（工具结果清除）触发线（对 {@code limit − reserve} 的百分比）。 */
 		private int l1Percent = 70;
 
-		/** L2（滑窗 + 递归摘要）触发线（批③ 消费）。 */
+		/** L2（滑窗 + 递归摘要）触发线（批③ 已消费）。 */
 		private int l2Percent = 80;
 
-		/** L3（硬截断兜底）触发线（批③ 消费）。 */
+		/** L3（硬截断兜底）触发线（批③ 已消费）。 */
 		private int l3Percent = 95;
 
 		/**
@@ -694,26 +694,26 @@ public class AiProperties {
 		/** 最近多少对工具结果不清理（L1 的 pin；调研"保留最近 3–5 对"取上限 = 保守）。 */
 		private int keepToolPairs = 5;
 
-		/** 最近多少轮逐字保留（L2 的 pin；调研"保留最近 6–8 轮"取下限 = 省 token 优先；批③ 消费）。 */
+		/** 最近多少轮逐字保留（L2 的 pin；调研"保留最近 6–8 轮"取下限 = 省 token 优先；批③ 已消费）。 */
 		private int keepRecentTurns = 6;
 
-		/** 摘要分块大小（token；批③ 消费）。必须小于 {@link #reserveTokens}，保证摘要请求自身不越窗。 */
+		/** 摘要分块大小（token；批③ 已消费）。必须小于 {@link #reserveTokens}，保证摘要请求自身不越窗。 */
 		private int chunkTokens = 8000;
 
-		/** 一次摘要请求的硬上限（批③ 消费；失败即熔断路径，不回退到截断）。 */
+		/** 一次摘要请求的硬上限（批③ 已消费；失败即熔断路径，不回退到截断）。 */
 		private Duration summaryTimeout = Duration.ofSeconds(60);
 
-		/** 连续失败多少次熔断（批③ 消费；调研 §①"连续失败 3 次熔断"）。 */
+		/** 连续失败多少次熔断（批③ 已消费；调研 §①"连续失败 3 次熔断"）。 */
 		private int fuseThreshold = 3;
 
-		/** 熔断冷却窗（批③ 消费；到点半开重试一次，失败重新计数 —— 不升指数，避免长尾锁死）。 */
+		/** 熔断冷却窗（批③ 已消费；到点半开重试一次，失败重新计数 —— 不升指数，避免长尾锁死）。 */
 		private Duration fuseCooldown = Duration.ofMinutes(10);
 
 		/**
 		 * 递归摘要用的模型名（默认空 = 主模型；D3 裁决）。
 		 *
 		 * <p>留空即主模型是刻意的：本仓当前只有一套 provider 配置，先主模型 + 超时 + 熔断；
-		 * 模型配置专项落地后可只改本键切到便宜模型（接缝已留，批③ 消费）。
+		 * 模型配置专项落地后可只改本键切到便宜模型（接缝已留，批③ 已消费）。
 		 */
 		private String summaryModel = "";
 

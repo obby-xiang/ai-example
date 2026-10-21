@@ -294,4 +294,31 @@ class ContextFrameWiringTest {
 		assertThat(FrameContract.oneOfType(framesOf(wire), "done")).doesNotContainKey("context");
 	}
 
+	/**
+	 * 上游越窗（上下文专项批③；设计稿 §3.5 L3）⇒ 终帧错误码 {@code CONTEXT_OVERFLOW}，且<b>不重试</b>。
+	 *
+	 * <p>
+	 * 为什么必须单独一条：越窗是"请求太大"，重发同一份请求只会再超一次。若被归成
+	 * {@code UPSTREAM_STREAM_ERROR}（断流类），重试次数会白烧在一份注定失败的请求上，
+	 * 用户看到的还是含糊的"上游流错误"。
+	 */
+	@Test
+	void contextOverflowIsMappedToItsOwnCodeWithoutRetry() {
+		byte[] body = "{\"error\":{\"message\":\"This model's maximum context length is 128000 tokens\"}}"
+			.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.error(
+				org.springframework.web.reactive.function.client.WebClientResponseException.create(400, "Bad Request",
+						org.springframework.http.HttpHeaders.EMPTY, body, null)));
+		SseChatEmitter out = emitter();
+		FrameWire wire = FrameWire.attachTo(out);
+		out.start(SESSION_ID);
+
+		this.service.driveResumed(RUN_ID, SESSION_ID, AiContext.empty(), List.of(new UserMessage("你好")), out);
+
+		List<Map<String, Object>> frames = framesOf(wire);
+		FrameContract.assertConformant(frames);
+		assertThat(FrameContract.oneOfType(frames, "error")).containsEntry("code", "CONTEXT_OVERFLOW");
+		org.mockito.Mockito.verify(this.chatModel, org.mockito.Mockito.times(1)).stream(any(Prompt.class));
+	}
+
 }

@@ -9,7 +9,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 /**
- * 上下文专项的装配（批①：计量 + 展示 + L1）。
+ * 上下文专项的装配（批①②③：计量 + 展示 + L1/L2/L3 + 熔断）。
  *
  * <p>
  * <b>为什么单独一个 {@code @Configuration} 而不并进 {@code AiModelConfig}</b>：后者与模型配置专项
@@ -41,8 +41,21 @@ public class ContextConfig {
 
 	@Bean
 	public ContextCompactor contextCompactor(AiProperties properties, ContextLimitResolver contextLimitResolver,
-			RunStore runStore) {
-		return new ContextCompactor(properties, contextLimitResolver, runStore);
+			RunStore runStore, ObjectProvider<ContextSummaryClient> summaryClient) {
+		return new ContextCompactor(properties, contextLimitResolver, runStore, summaryClient.getIfAvailable());
+	}
+
+	/**
+	 * 摘要模型（L2 递归摘要用；D3：{@code summary-model} 空 = 主模型）。
+	 *
+	 * <p>
+	 * 走 {@link ContextSummaryClient#production}：直接取 provider 的 {@code ChatModel}，不挂记忆 advisor
+	 * —— 摘要是一次旁路请求，不能读写主会话记忆。
+	 */
+	@Bean
+	public ContextSummaryClient contextSummaryClient(AiProperties properties,
+			ObjectProvider<com.example.configmgr.ai.config.AiProviderRegistry> providerRegistry) {
+		return ContextSummaryClient.production(properties, providerRegistry);
 	}
 
 	@Bean

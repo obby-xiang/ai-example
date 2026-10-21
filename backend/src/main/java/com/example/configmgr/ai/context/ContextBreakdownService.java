@@ -91,7 +91,7 @@ public final class ContextBreakdownService {
 		compaction.put("lostTokens", state.lostTokens());
 		compaction.put("lastAtMs", state.atMs() > 0L ? state.atMs() : null);
 		compaction.put("reason", state.reason());
-		// 熔断态由批③ 写入；批① 恒 closed/0 —— 字段先在契约里，前端不必按版本分支
+		// 熔断态由批③ 的 CompactionFuse 维护（closed/open/half_open）
 		compaction.put("circuit", state.circuit() == null ? "closed" : state.circuit());
 		compaction.put("fuseFails", state.fuseFails());
 		return compaction;

@@ -458,14 +458,14 @@ wait-audit §3 已列：后端 18 组超时/预算键 + 前端 13 组 + 7 项「
 | B1-41 | 容量 | `app.ai.context.limit-tokens` | `128000` | 上下文上限（占用条的分母）的**过渡键**；模型配置专项的 `ai_model.max_context` 落地后由它覆盖（唯一消费点 = `ContextLimitResolver`）。`0` = 主动声明未知（降级态） | 配置键 | 有依据（本仓默认模型 128K 窗口；设计稿 §3.2「波次 1 分母」）。**待模型配置批②③ 接线后复核**：届时本键只是回落值 |
 | B1-42 | 缓冲 | `app.ai.context.reserve-tokens` | `13000` | 预留输出缓冲；比例阈值对 `limit − reserve` 取比 | 配置键 | 有依据（调研 §① Claude Code 的 13K；覆盖 `max-tokens 4096` + 一轮工具回环余量） |
 | B1-43 | 阈值 | `app.ai.context.l1-percent` | `70` | L1（工具结果清除）触发线 | 配置键 | 有依据（调研 Q2 谱系 70–75 取中值） |
-| B1-44 | 阈值 | `app.ai.context.l2-percent` | `80` | L2（滑窗 + 递归摘要）触发线（批③ 消费） | 配置键 | 有依据（同上 80–85 取中值） |
-| B1-45 | 阈值 | `app.ai.context.l3-percent` | `95` | L3（硬截断兜底）触发线（批③ 消费） | 配置键 | 有依据（同上 95）；自洽性 = 128K 下 `0.05 × 115K = 5.75K > max-tokens 4096` |
+| B1-44 | 阈值 | `app.ai.context.l2-percent` | `80` | L2（滑窗 + 递归摘要）触发线（批③ 已消费：`ContextCompactor` 逐级升格，每次最多一级） | 配置键 | 有依据（同上 80–85 取中值） |
+| B1-45 | 阈值 | `app.ai.context.l3-percent` | `95` | L3（硬截断兜底）触发线（批③ 已消费：`HardTrim` 兜底） | 配置键 | 有依据（同上 95）；自洽性 = 128K 下 `0.05 × 115K = 5.75K > max-tokens 4096` |
 | B1-46 | 阈值 | `app.ai.context.hysteresis-percent` | `60` | 滞回：压缩后 `used / limit < 60%` 才允许再次触发 | 配置键 | 有依据（调研 Q4「压缩到 60% 以下才允许再次触发」）；启动期校验要求 ≤ `l1-percent`（否则抖动链） |
 | B1-47 | pin | `app.ai.context.keep-tool-pairs` | `5` | L1 不清理的最近工具结果对（**按 `ToolResponseMessage` 里的 response 条数计**，不是按消息条数：一条 tool 消息可含多份响应，按消息计会把 pin 窗口放大成 N 倍） | 配置键 | 有依据（调研「保留最近 3–5 对」**取上限** = 保守） |
-| B1-48 | pin | `app.ai.context.keep-recent-turns` | `6` | L2 逐字保留的最近轮数（批③ 消费） | 配置键 | 有依据（调研「保留最近 6–8 轮」**取下限** = 省 token 优先） |
-| B1-49 | 缓冲 | `app.ai.context.chunk-tokens` | `8000` | 递归摘要的分块大小（批③ 消费） | 配置键 | 有依据（设计稿 §3.7：必须小于 `reserve-tokens`，保证摘要请求自身不越窗） |
-| B1-50 | 超时 | `app.ai.context.summary-timeout` | `60s` | 一次摘要请求的硬上限（批③ 消费） | 配置键 | 部分依据（设计稿 §3.7 缺省；**无压测数据**，与 `first-byte-timeout 30s` 同量级 + 摘要多分块余量） |
-| B1-51 | 熔断 | `app.ai.context.fuse-threshold` | `3` | 连续失败几次熔断（批③ 消费） | 配置键 | 有依据（调研 §①「连续失败 3 次熔断」） |
+| B1-48 | pin | `app.ai.context.keep-recent-turns` | `6` | L2 逐字保留的最近轮数（批③ 已消费：`RollingSummarizer`） | 配置键 | 有依据（调研「保留最近 6–8 轮」**取下限** = 省 token 优先） |
+| B1-49 | 缓冲 | `app.ai.context.chunk-tokens` | `8000` | 递归摘要的分块大小（批③ 已消费：分块 + 递归合并，单请求正文 ≤ 本值） | 配置键 | 有依据（设计稿 §3.7：必须小于 `reserve-tokens`，保证摘要请求自身不越窗） |
+| B1-50 | 超时 | `app.ai.context.summary-timeout` | `60s` | 一次摘要请求的硬上限（批③ 已消费：`ContextSummaryClient` 到点中断） | 配置键 | 部分依据（设计稿 §3.7 缺省；**无压测数据**，与 `first-byte-timeout 30s` 同量级 + 摘要多分块余量） |
+| B1-51 | 熔断 | `app.ai.context.fuse-threshold` | `3` | 连续失败几次熔断（批③ 已消费：`CompactionFuse`，只被 L2/L3 摘要尝试驱动） | 配置键 | 有依据（调研 §①「连续失败 3 次熔断」） |
 | B1-52 | 熔断 | `app.ai.context.fuse-cooldown` | `10m` | 熔断冷却窗（到点半开重试一次，不升指数） | 配置键 | 部分依据（设计稿 §3.7 缺省；取值意图 = 「一次失败不阻塞太久」+「不放大上游长尾」，无数据） |
 | B1-53 | 模型 | `app.ai.context.summary-model` | `""` | 递归摘要用模型；空 = 主模型（D3 裁决） | 配置键 | 有依据（D3：本仓当前只有一套 provider 配置，`summary-model` 留空即主模型；模型配置专项落地后改配置即可切） |
 

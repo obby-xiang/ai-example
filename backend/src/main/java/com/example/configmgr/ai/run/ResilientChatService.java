@@ -488,6 +488,13 @@ public class ResilientChatService {
 			return new StreamViolationException(StreamViolationException.INCOMPLETE,
 					"上游未给出任何事件即结束（" + message + "）——按断流处理", error);
 		}
+		// 上下文越窗（上下文专项批③）：L3 丢到 pin 下限后仍超时，让上游如实报错并把这条报错认出来。
+		// 放在断流判定之前：越窗响应体里也可能带 "Response has been closed" 之类的字眼，
+		// 但那不是断流 —— 按断流重试会把同一份超大请求再发一次。
+		if (com.example.configmgr.ai.context.ContextOverflow.matches(text, chain, message)) {
+			return new StreamViolationException(StreamViolationException.CONTEXT_OVERFLOW,
+					"上游拒绝：上下文超出模型窗口（" + message + "）", error);
+		}
 		if (containsAny(text, "PrematureClose", "premature", "reset", "Connection", "closed", "EOF", "Broken pipe",
 				"header parser received no bytes", "no bytes", "channel closed", "aborted", "SocketException",
 				"ConnectException", "Response has been closed")
@@ -996,7 +1003,7 @@ public class ResilientChatService {
 	 * @param limitTokens    分母（0 = 未知）
 	 * @param model          本轮模型名
 	 * @param limitTokens    分母（0 = 未知）
-	 * @param compactionLevel 本轮压缩级别（{@code none}/{@code L1}）：<b>由压缩方显式交接</b>，
+	 * @param compactionLevel 本轮压缩级别（{@code none}/{@code L1}/{@code L2}/{@code L3}）：<b>由压缩方显式交接</b>，
 	 *                        不靠时刻反推 —— 续跑的压缩发生在 {@code ResumeService} 里（早于本方法），
 	 *                        压完再驱动，"压缩时刻 ≥ 轮起点"这条比较必然为假 ⇒ 会恒报 {@code none}（I-1）
 	 * @param turnStartedAtMs 轮起点（预算/超时口径用）
@@ -1131,7 +1138,7 @@ public class ResilientChatService {
 	/**
 	 * 记录续跑轮的压缩级别（由 {@code ResumeService} 在压缩成功后、交棒前调用）。
 	 *
-	 * @param level 实际级别（{@code none}/{@code L1}）；{@code null} 按 {@code none}
+	 * @param level 实际级别（{@code none}/{@code L1}/{@code L2}/{@code L3}）；{@code null} 按 {@code none}
 	 */
 	public void noteCompaction(String runId, String level) {
 		this.compactionLevels.put(runId, level == null ? "none" : level);
