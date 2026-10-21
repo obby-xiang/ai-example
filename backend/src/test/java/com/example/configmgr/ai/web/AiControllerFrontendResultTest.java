@@ -25,6 +25,10 @@ import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import java.util.List;
 
 import static org.hamcrest.Matchers.containsString;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -128,6 +132,48 @@ class AiControllerFrontendResultTest {
 
 		verify(this.gate).submitFrontendResult("r-1", "c-1", "{\"error\":\"下载被拦截\"}", "frontend", false,
 				"failed");
+	}
+
+	/**
+	 * 防护批③ B2-T11：回灌载荷超限<b>截断 + 标记</b>，不是 400。
+	 *
+	 * <p>理由：前端工具结果是机器数据（表格摘要本来就长），拒绝回灌会让这一轮永久挂起；
+	 * 而用户输入超限仍是 400（截断会让模型基于半句话下结论）—— 两个方向刻意不同。
+	 */
+	@Test
+	void overlongResultIsTruncatedAndMarkedInsteadOfRejected() throws Exception {
+		PendingToolCall pending = pending(PendingToolCall.FRONTEND_RESULT);
+		when(this.runStore.instanceId()).thenReturn("test-instance");
+		when(this.gate.submitFrontendResult(anyString(), anyString(), anyString(), any(), anyBoolean(), any()))
+			.thenReturn(new ConfirmGate.Submission(ConfirmGate.Outcome.ACCEPTED, pending, true, null));
+		String huge = "行内容".repeat(3000);
+
+		mockMvc.perform(post("/api/ai/frontend-tool-result").contentType(MediaType.APPLICATION_JSON)
+			.content(body("r-1", "c-1", huge, "frontend", false)))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.accepted").value(true))
+			.andExpect(jsonPath("$.truncated").value(true));
+
+		org.mockito.ArgumentCaptor<String> captor = org.mockito.ArgumentCaptor.forClass(String.class);
+		verify(this.gate).submitFrontendResult(anyString(), anyString(), captor.capture(), any(), anyBoolean(),
+				any());
+		assertThat(captor.getValue()).hasSizeLessThanOrEqualTo(AiController.FRONTEND_RESULT_MAX_CHARS + 16)
+				.contains("（结果过长已截断）");
+	}
+
+	@Test
+	void shortResultIsPassedThroughUntruncated() throws Exception {
+		PendingToolCall pending = pending(PendingToolCall.FRONTEND_RESULT);
+		when(this.runStore.instanceId()).thenReturn("test-instance");
+		when(this.gate.submitFrontendResult("r-1", "c-1", "{\"ok\":true}", "frontend", false, null))
+			.thenReturn(new ConfirmGate.Submission(ConfirmGate.Outcome.ACCEPTED, pending, true, null));
+
+		mockMvc.perform(post("/api/ai/frontend-tool-result").contentType(MediaType.APPLICATION_JSON)
+			.content(body("r-1", "c-1", "{\"ok\":true}", "frontend", false)))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.truncated").value(false));
+
+		verify(this.gate).submitFrontendResult("r-1", "c-1", "{\"ok\":true}", "frontend", false, null);
 	}
 
 	@Test

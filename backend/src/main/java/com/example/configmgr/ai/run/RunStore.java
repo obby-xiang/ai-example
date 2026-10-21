@@ -110,6 +110,19 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	/** 上下文台账保留条数（设计稿 §3.6：最近 20 条）。 */
 	public static final int CONTEXT_LEDGER_MAX = 20;
 
+	/**
+	 * 安全事件台账前缀（防护批③ B3-7；{@code ai:safety:<sessionId>}）。
+	 *
+	 * <p>
+	 * 与 {@code ai:ctx:ledger:} 同一形态（LIST、新→旧、TTL 同会话），但<b>键族与写入方法都是新的</b>
+	 * —— 上下文批的台账方法一个字都不动（改旧方法会在合流时变成同 hunk 冲突）。
+	 * 条目只记 {@code atMs / runId / turnNo / ruleId / offset / length / action}，<b>无原文</b>。
+	 */
+	public static final String SAFETY_PREFIX = "ai:safety:";
+
+	/** 安全事件台账保留条数（一个新版页面最多几十次命中，20 条够复盘一轮）。 */
+	public static final int SAFETY_LEDGER_MAX = 20;
+
 	public static final String CLAIM_PREFIX = "ai:claim:";
 
 	/** 请求帧已发位（L0 的 {@code req}）的 HASH 键前缀（HSETNX 首写者胜）。 */
@@ -1765,6 +1778,51 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		}
 		catch (Exception ex) {
 			log.warn("读上下文台账失败 sessionId={}：{}（按空台账处理）", sessionId, ex.getMessage());
+		}
+		return out;
+	}
+
+	/**
+	 * 追加安全事件台账（防护批③ B3-7；{@code ai:safety:<sessionId>}，LPUSH + LTRIM 20 + 同会话 TTL）。
+	 *
+	 * <p>
+	 * 与上下文台账的写入口径一致（新→旧、截断到 {@value #SAFETY_LEDGER_MAX} 条），
+	 * 但失败<b>不抛</b>：安全台账是观测面，Redis 抖动不该让已经在跑的一轮失败
+	 * （缺一条审计好过整个请求 500）。
+	 */
+	public void appendSafetyEvent(String sessionId, Map<String, Object> event) {
+		if (sessionId == null || sessionId.isBlank() || event == null) {
+			return;
+		}
+		String key = SAFETY_PREFIX + sessionId;
+		try {
+			this.redis.opsForList().leftPush(key, this.mapper.writeValueAsString(event));
+			this.redis.opsForList().trim(key, 0, SAFETY_LEDGER_MAX - 1);
+			touchContextTtl(key);
+		}
+		catch (Exception ex) {
+			log.warn("写安全台账失败 sessionId={}：{}（不影响本轮）", sessionId, ex.getMessage());
+		}
+	}
+
+	/** 读安全台账（新→旧，最多 {@value #SAFETY_LEDGER_MAX} 条；Redis 抖动按空台账）。 */
+	public List<Map<String, Object>> safetyLedger(String sessionId) {
+		List<Map<String, Object>> out = new ArrayList<>();
+		if (sessionId == null || sessionId.isBlank()) {
+			return out;
+		}
+		try {
+			List<String> raw = this.redis.opsForList().range(SAFETY_PREFIX + sessionId, 0, SAFETY_LEDGER_MAX - 1);
+			if (raw == null) {
+				return out;
+			}
+			for (String item : raw) {
+				out.add(this.mapper.readValue(item, new TypeReference<Map<String, Object>>() {
+				}));
+			}
+		}
+		catch (Exception ex) {
+			log.warn("读安全台账失败 sessionId={}：{}（按空台账处理）", sessionId, ex.getMessage());
 		}
 		return out;
 	}

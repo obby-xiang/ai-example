@@ -413,6 +413,17 @@ export interface SseDoneFrame extends SseFrameBase {
    * （`ai_setting['allow.userParams']=false`）⇒ 参数<b>未生效</b>。缺键 = 参数允许或本轮没带。
    */
   paramsLocked?: boolean
+  /**
+   * 安全事件摘要（防护批③ B3-4；**additive 可选键**，帧类型集仍是 16）。
+   *
+   * `{redacted, rules, blocked}`：本轮正文里被脱敏的处数、命中的规则 id、是否被阻断。
+   * **未命中时后端不写该键** —— "没发生"与"发生 0 次"必须可区分（与 `context` 同姿态）。
+   */
+  safety?: {
+    redacted: number
+    rules: string[]
+    blocked: boolean
+  }
 }
 
 /**

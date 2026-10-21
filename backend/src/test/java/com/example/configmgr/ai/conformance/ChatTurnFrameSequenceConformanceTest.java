@@ -352,4 +352,76 @@ class ChatTurnFrameSequenceConformanceTest {
 		return text.toString();
 	}
 
+	// ── 防护批③：输出 DLP 在编排层的形态（B3-T03/T07/T08/T16） ──────────────
+
+	private static String apiKey() {
+		return "s" + "k-" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4";
+	}
+
+	/**
+	 * 密钥跨分片时：帧里不出现原文、{@code done.safety} 如实记录，且
+	 * {@code message_end.chars == Σ delta}（脱敏发生在累计器之前 ⇒ 四处同源）。
+	 *
+	 * <p>kill：把脱敏挪到 {@code SseChatEmitter#delta} ⇒ 累计器仍是原文，
+	 * {@link FrameContract#textSegmentContract} 立刻变红（本用例的断言与契约断言同时失守）。
+	 */
+	@Test
+	void crossChunkSecretIsMaskedAndTheSegmentStillBalances() {
+		String key = apiKey();
+		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(chunk("保存这个 " + key.substring(0, 3)),
+				chunk(key.substring(3) + " 到变量里"), terminal("stop")));
+
+		FrameWire wire = runTurn();
+		List<Map<String, Object>> frames = clientView(wire);
+		FrameContract.assertConformant(frames);
+
+		String concatenated = concatenatedDeltas(frames);
+		assertThat(concatenated).doesNotContain(key).contains("[REDACTED:API_KEY]");
+		assertThat(FrameContract.oneOfType(frames, "message_end")).containsEntry("chars",
+				(long) concatenated.length());
+		assertThat(this.store.get(RUN_ID).getFinalText()).isEqualTo(concatenated);
+		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.DONE);
+
+		@SuppressWarnings("unchecked")
+		Map<String, Object> safety = (Map<String, Object>) FrameContract.oneOfType(frames, "done").get("safety");
+		assertThat(safety).as("done.extra.safety（additive 键，帧类型集不变）").isNotNull();
+		assertThat(safety).containsEntry("redacted", 1).containsEntry("blocked", false);
+		assertThat((List<String>) safety.get("rules")).containsExactly("API_KEY");
+	}
+
+	/**
+	 * 私钥整块 = 唯一走 block 的一档：正文段先收尾，终帧是 {@code error{SENSITIVE_OUTPUT_BLOCKED}}，
+	 * 且整轮仍满足 6 条不变量（单终帧、段闭合）。
+	 */
+	@Test
+	void privateKeyBlockEndsWithSensitiveOutputBlockedAndNoLeak() {
+		String head = "-----BEGIN " + "RSA PRIVATE KEY-----";
+		String foot = "-----END " + "RSA PRIVATE KEY-----";
+		String body = "MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun";
+		when(this.chatModel.stream(any(Prompt.class)))
+				.thenReturn(Flux.just(chunk("这是配置：\n" + head + "\n" + body + "\n" + foot), terminal("stop")));
+
+		FrameWire wire = runTurn();
+		List<Map<String, Object>> frames = clientView(wire);
+		FrameContract.assertConformant(frames);
+
+		assertThat(FrameContract.types(frames)).endsWith("message_end", "error");
+		assertThat(FrameContract.oneOfType(frames, "error")).containsEntry("code",
+				ResilientChatService.SENSITIVE_OUTPUT_BLOCKED);
+		assertThat(concatenatedDeltas(frames)).doesNotContain("MIIEowIBAAKCAQEA").doesNotContain("-----BEGIN");
+		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.FAILED);
+	}
+
+	/** 无命中时 {@code done} 不带 {@code safety} 键（"没发生"与"发生 0 次"必须可区分）。 */
+	@Test
+	void doneCarriesNoSafetyKeyWhenNothingHit() {
+		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(chunk("你好"), terminal("stop")));
+
+		FrameWire wire = runTurn();
+		List<Map<String, Object>> frames = clientView(wire);
+
+		assertThat(FrameContract.oneOfType(frames, "done")).doesNotContainKey("safety");
+		assertThat(concatenatedDeltas(frames)).isEqualTo("你好");
+	}
+
 }
