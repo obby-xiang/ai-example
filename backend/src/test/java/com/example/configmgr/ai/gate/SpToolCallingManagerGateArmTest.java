@@ -3,6 +3,7 @@ package com.example.configmgr.ai.gate;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.run.CancellationRegistry;
+import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
@@ -22,6 +23,7 @@ import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
 
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -30,6 +32,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -117,6 +120,59 @@ class SpToolCallingManagerGateArmTest {
             .isInstanceOf(StreamViolationException.class);
 
         assertThat(this.gate.hasActiveLatch(RUN_ID)).as("取消路径不留预登记闸门").isFalse();
+    }
+
+    /**
+     * 批4-D（用户 2026-10-23 裁决）：不可撤销 = 确认卡 + 复选框 —— 条目上的 {@code irreversible}
+     * 由 {@code @ToolCategory(ToolMeta.Category.P)} 决定，且必须在挂起<b>落库之前</b>定型
+     * （否则刷新恢复拿不到该位，复选框重建不出来）。
+     *
+     * <p>用 saveSuspended 抛错截住挂起：本用例只关心"交给 store 的那批条目各自带什么值"。
+     */
+    @Test
+    void suspendedPendingsCarryIrreversibleFlagFromCategoryP() {
+        stubRun();
+        when(this.toolRegistry.channelOf("start_publish")).thenReturn(ToolMeta.Channel.BACKEND);
+        when(this.toolRegistry.riskOf("start_publish")).thenReturn(ToolMeta.RiskLevel.DANGER);
+        when(this.toolRegistry.categoryOf("start_publish")).thenReturn(ToolMeta.Category.P);
+        when(this.toolRegistry.matchesContext(eq("start_publish"), any(AiContext.class))).thenReturn(true);
+        AtomicReference<List<PendingToolCall>> captured =
+            new AtomicReference<>();
+        doAnswer(invocation -> {
+            captured.set(invocation.getArgument(2));
+            throw new IllegalStateException("stop");
+        }).when(this.store).saveSuspended(anyString(), any(), anyList(), anyList(), any());
+
+        assertThatThrownBy(() -> this.manager.executeToolCalls(prompt("start_publish"), response("start_publish")))
+            .isInstanceOf(IllegalStateException.class);
+
+        assertThat(captured.get()).singleElement().satisfies(pending -> {
+            assertThat(pending.getName()).isEqualTo("start_publish");
+            assertThat(pending.isIrreversible()).as("发布作业 = Category.P ⇒ 不可撤销").isTrue();
+        });
+    }
+
+    @Test
+    void reversibleConfirmPendingsStayNonIrreversible() {
+        stubRun();
+        when(this.toolRegistry.channelOf("start_import")).thenReturn(ToolMeta.Channel.BACKEND);
+        when(this.toolRegistry.riskOf("start_import")).thenReturn(ToolMeta.RiskLevel.DANGER);
+        when(this.toolRegistry.categoryOf("start_import")).thenReturn(ToolMeta.Category.J);
+        when(this.toolRegistry.matchesContext(eq("start_import"), any(AiContext.class))).thenReturn(true);
+        AtomicReference<List<PendingToolCall>> captured =
+            new AtomicReference<>();
+        doAnswer(invocation -> {
+            captured.set(invocation.getArgument(2));
+            throw new IllegalStateException("stop");
+        }).when(this.store).saveSuspended(anyString(), any(), anyList(), anyList(), any());
+
+        assertThatThrownBy(() -> this.manager.executeToolCalls(prompt("start_import"), response("start_import")))
+            .isInstanceOf(IllegalStateException.class);
+
+        assertThat(captured.get()).singleElement().satisfies(pending -> {
+            assertThat(pending.getName()).isEqualTo("start_import");
+            assertThat(pending.isIrreversible()).as("普通确认卡维持现状：不加复选框").isFalse();
+        });
     }
 
     // ───────────────────────── helpers ─────────────────────────

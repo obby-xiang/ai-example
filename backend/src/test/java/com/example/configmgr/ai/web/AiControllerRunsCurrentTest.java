@@ -143,6 +143,24 @@ class AiControllerRunsCurrentTest {
 	}
 
 	@Test
+	void pendingEntryCarriesIrreversibleFlagForRefreshRestore() throws Exception {
+		// 批4-D（用户 2026-10-23 裁决）：刷新恢复要能重建复选框 —— 不可撤销位必须随条目下发。
+		PendingToolCall publish = pending("c-1", PendingToolCall.PENDING, PendingToolCall.KIND_CONFIRM);
+		publish.setName("start_publish");
+		publish.setIrreversible(true);
+		PendingToolCall export = pending("c-2", PendingToolCall.PENDING, PendingToolCall.KIND_CONFIRM);
+		export.setName("start_import");
+		seedIndex("s-1", "r-1", RunSnapshot.SUSPENDED, List.of(publish, export));
+
+		mockMvc.perform(get("/api/ai/runs/current").param("sessionId", "s-1"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.pendingEntries[0].name").value("start_publish"))
+			.andExpect(jsonPath("$.data.pendingEntries[0].irreversible").value(true))
+			.andExpect(jsonPath("$.data.pendingEntries[1].name").value("start_import"))
+			.andExpect(jsonPath("$.data.pendingEntries[1].irreversible").value(false));
+	}
+
+	@Test
 	void pendingEntryCarriesPreflightReportForRefreshRestore() throws Exception {
 		// MAJOR-1（收口）：刷新恢复走的是本端点；预检报告必须随条目下发，
 		// 否则卡面能批准但看不到"批准的是哪一版预检"（实时 SSE 有、刷新路径没有）。

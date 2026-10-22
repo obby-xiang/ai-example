@@ -535,9 +535,34 @@
                                 <span class="flex-1 min-w-0 break-words">{{ row.value }}</span>
                               </div>
                             </div>
+                            <!-- 批4-D（用户 2026-10-23 裁决）：不可撤销 = 确认卡 + 复选框。
+                                 位置 = 字段内滚区**之外**（恒可见，不跟着参数一起滚走），
+                                 默认不勾；文案动态带动作名。普通后果确认卡不渲染本区（一字不动）。 -->
+                            <div v-if="part.irreversible" class="mx-[11px] flex pt-[10px]" data-testid="gate-ack-row">
+                              <label
+                                class="flex cursor-pointer items-start gap-[6px] text-[12.2px] leading-[1.5] text-[#1f2328]"
+                                data-testid="gate-ack"
+                              >
+                                <input
+                                  type="checkbox"
+                                  class="mt-[2px] flex-none cursor-pointer accent-[#2563eb]"
+                                  data-testid="gate-ack-box"
+                                  :checked="gateAcked(part.toolCallId)"
+                                  :disabled="gateSubmitting(part.toolCallId)"
+                                  @change="onGateAckChange(part.toolCallId, $event)"
+                                />
+                                <span class="min-w-0 break-words">{{ gateAckText(part) }}</span>
+                              </label>
+                            </div>
                             <!-- 2A 批（裁决 §3 缺陷③）：按钮防折行 —— 行 flex-wrap（空间不足时按钮组整行
                                  下移）、按钮组 flex-none、按钮 whitespace-nowrap + min-w；组内不再换行。 -->
                             <div class="mx-[11px] flex flex-wrap items-center gap-[9px] pt-[11px]">
+                              <!-- 批4-D：未勾选时给一行提示（紧邻置灰的「批准」）—— 拒绝永远可用 -->
+                              <span
+                                v-if="gateNeedsAck(part)"
+                                class="text-[12.2px] text-[#b45309]"
+                                data-testid="gate-ack-hint"
+                              >{{ t('ai.hitl.ackHint') }}</span>
                               <!-- R-166 口径③：409 幂等拒绝后的「已提交，同步中…」瞬态（不写任何乐观裁决） -->
                               <span
                                 v-if="gateSyncing(part.toolCallId)"
@@ -554,7 +579,7 @@
                                 <button
                                   type="button"
                                   class="flex-none whitespace-nowrap min-w-[72px] rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-transparent transition-all duration-[150ms] bg-[#2563eb] text-white font-semibold hover:brightness-[1.08] disabled:opacity-50 disabled:cursor-default disabled:bg-[#8b949e] disabled:font-normal"
-                                  :disabled="gateSubmitting(part.toolCallId)"
+                                  :disabled="gateSubmitting(part.toolCallId) || gateNeedsAck(part)"
                                   @click="decide(true, part.toolCallId)"
                                 >批准</button>
                               </span>
@@ -3244,6 +3269,41 @@ function gateSubmitting(toolCallId: string): boolean {
 /** R-166 口径③：该门卡是否处于 409 之后的「已提交，同步中…」瞬态。 */
 function gateSyncing(toolCallId: string): boolean {
   return ai.gateSubmissionOf(toolCallId)?.syncing === true
+}
+
+// ── 批4-D（用户 2026-10-23 裁决）：不可撤销确认卡的复选框 ──────────────────────
+
+/** 该卡是否已勾选（普通确认卡无复选框，恒 false —— 也不参与任何禁用判据）。 */
+function gateAcked(toolCallId: string): boolean {
+  return ai.gateAckOf(toolCallId)
+}
+
+/** 不可撤销卡还差这一步：`批准` 置灰 + 提示行出现的唯一判据。 */
+function gateNeedsAck(part: ToolPart): boolean {
+  return part.irreversible === true && !gateAcked(part.toolCallId)
+}
+
+/**
+ * 勾选文案：「确认{动作}，执行后无法恢复」（中文）/ 英文动名词组（`ai.hitl.action.<tool>`）。
+ *
+ * 动作名两段回落，保证"永远有字"：
+ * ① `ai.hitl.action.<name>`（仅英文有实质值，中文与 `tool.<name>.title` 同字）；
+ * ② 缺键 ⇒ `tool.<name>.title`（工具展示名，与门卡「操作」行同源）；再缺 ⇒ 工具名原文。
+ */
+function gateAckText(part: ToolPart): string {
+  const key = `ai.hitl.action.${part.name}`
+  const action = t(key)
+  return t('ai.hitl.irreversible', { action: action === key ? toolLabel(part.name) : action })
+}
+
+/** 复选框变更即写回 store（用户取消勾选同样要落库 —— 勾选不是单向开关）。 */
+function onGateAckChange(toolCallId: string, event: Event): void {
+  const checked = (event.target as HTMLInputElement | null)?.checked === true
+  if (checked) {
+    ai.ackGate(toolCallId)
+    return
+  }
+  ai.clearGateAck(toolCallId)
 }
 
 /**

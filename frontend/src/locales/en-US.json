@@ -29,6 +29,13 @@
       "high": "in the compaction zone (tool results cleared first)",
       "danger": "near the limit; tool results are cleared before the next request"
     },
+    "hitl": {
+      "irreversible": "I understand that {action} cannot be undone",
+      "ackHint": "Tick the box above to continue",
+      "action": {
+        "start_publish": "starting the publish job"
+      }
+    },
     "gf": {
       "title": "Please fill in the following",
       "scenario": {

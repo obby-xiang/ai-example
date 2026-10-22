@@ -1448,6 +1448,9 @@ public class SpToolCallingManager implements ToolCallingManager {
 			pending.setType(call.type() == null ? "function" : call.type());
 			pending.setArguments(call.arguments());
 			pending.setKind(kindOf(call.name()));
+			// 批4-D（用户 2026-10-23 裁决）：不可撤销 = 确认卡 + 复选框。判据是执行类别
+			// （Category.P = 不可逆写/发布），不是风险等级 —— DANGER 的 W/J 类工具照旧只弹确认卡。
+			pending.setIrreversible(this.toolRegistry.categoryOf(call.name()) == ToolMeta.Category.P);
 			out.add(pending);
 		}
 		return out;

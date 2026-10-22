@@ -117,6 +117,11 @@ export interface PendingToolCallSnapshot {
   code?: string | null
   /** H1 确认门预检摘要（可选增量；缺省 = 旧载荷，门卡无预检区） */
   preflight?: ToolPreflight | null
+  /**
+   * 批4-D：本条目不可撤销（{@code Category.P}）—— 与 `confirm_request` 帧同口径的
+   * additive 字段（`suspended` 帧先到，复选框不该等到请求帧才出现）。
+   */
+  irreversible?: boolean
 }
 
 /** 全部帧类型常量（顺序即后端产出顺序语义）。 */
@@ -280,6 +285,14 @@ export interface SseConfirmRequestFrame extends SseFrameBase {
   callback?: string
   /** H1 确认门预检摘要（可选增量；缺省 = 旧帧，门卡不渲染预检区） */
   preflight?: ToolPreflight | null
+  /**
+   * 批4-D（用户 2026-10-23 裁决）：本次确认**不可撤销**（后端 `ToolMeta.Category.P`，
+   * 当前唯一 = `start_publish`）—— 前端据此在门卡上叠加复选框（勾选才放行「批准」）。
+   *
+   * 可选增量：缺省/`false` = 普通后果确认卡（`start_export` / `start_precheck` / `start_import`）
+   * 与旧后端帧，卡面一字不动。
+   */
+  irreversible?: boolean
 }
 
 /** HITL 确认决策回执（放行/拒绝双路径都走这里）。 */

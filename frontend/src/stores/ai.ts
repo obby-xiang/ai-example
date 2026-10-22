@@ -1013,6 +1013,14 @@ export const useAiStore = defineStore('ai', {
      */
     gateSubmissions: {} as Record<string, GateSubmission>,
     /**
+     * 批4-D（用户 2026-10-23 裁决）：**不可撤销确认卡的勾选态**（`toolCallId → true`）。
+     *
+     * 只对 `part.irreversible === true` 的门卡有意义（普通后果确认卡不读本表）。键缺省 = 未勾选；
+     * **变更即复位**：新的 `confirm_request` 帧 / 结局帧（`confirm_decision`）/ 提交成功 /
+     * 会话或轮次收口都清 —— 不让"上一张卡的勾选"变成下一张卡的默认同意。
+     */
+    gateAcks: {} as Record<string, boolean>,
+    /**
      * 上下文占用（上下文专项批①）：`done.context` 的逐轮快照 + 端点重建的七项拆分。
      *
      * 更新口径（C-36）：**只在 `done` 帧到达时**写 —— 流式中不跳动（半轮的真值是半轮的，
@@ -1102,6 +1110,13 @@ export const useAiStore = defineStore('ai', {
      */
     gateSubmissionOf(state) {
       return (toolCallId: string): GateSubmission | null => state.gateSubmissions[toolCallId] ?? null
+    },
+    /**
+     * 批4-D：不可撤销门卡的勾选态（false = 未勾选 / 普通确认卡恒 false）。
+     * 面板据此禁用「批准」并显示提示行 —— 拒绝永远可用。
+     */
+    gateAckOf(state) {
+      return (toolCallId: string): boolean => state.gateAcks[toolCallId] === true
     }
   },
 
@@ -1912,7 +1927,10 @@ export const useAiStore = defineStore('ai', {
         ...(entry.expiresAt != null ? { expiresAt: entry.expiresAt, atMs: entry.atMs ?? undefined } : {}),
         // H1 预检摘要：快照载荷带则原样落段（与 suspended/confirm_request 帧同口径），
         // 缺省不产生该键 —— 旧载荷重建出的门卡与既有形态一字不差。
-        ...(entry.preflight ? { preflight: entry.preflight } : {})
+        ...(entry.preflight ? { preflight: entry.preflight } : {}),
+        // 批4-D：不可撤销位同口径落段 —— 刷新恢复要能把复选框重建出来（且勾选态从零开始：
+        // 恢复动作本身不得代替用户勾选，否则"刷新"就等于"已同意"）。
+        ...(entry.irreversible === true ? { irreversible: true } : {})
       })
       deriveProjections(host)
       // AI 表格操作专项 §3.5：刷新后本地 plan 已丢 —— 写工具无超时，必须收口成
@@ -2415,10 +2433,40 @@ export const useAiStore = defineStore('ai', {
     /** 撤全部提交态（轮终态 / 会话重置；计时器随之中和）。 */
     clearGateSubmissions(): void {
       disarmAllGateSync()
+      // 批4-D：勾选态与提交态同寿 —— 轮/会话收口时一并清（勾选不得跨轮沿用）
+      this.clearGateAcks()
       if (Object.keys(this.gateSubmissions).length === 0) {
         return
       }
       this.gateSubmissions = {}
+    },
+
+    // ── 批4-D：不可撤销确认卡的勾选态（toolCallId 粒度） ──────────────────────
+
+    /** 勾选（面板 checkbox 的 checked=true）。 */
+    ackGate(toolCallId: string): void {
+      if (this.gateAcks[toolCallId] === true) {
+        return
+      }
+      this.gateAcks = { ...this.gateAcks, [toolCallId]: true }
+    },
+
+    /** 撤某张卡的勾选（用户取消勾选 / 变更即复位）。 */
+    clearGateAck(toolCallId: string): void {
+      if (this.gateAcks[toolCallId] === undefined) {
+        return
+      }
+      const next = { ...this.gateAcks }
+      delete next[toolCallId]
+      this.gateAcks = next
+    },
+
+    /** 撤全部勾选态（会话/轮次收口）。 */
+    clearGateAcks(): void {
+      if (Object.keys(this.gateAcks).length === 0) {
+        return
+      }
+      this.gateAcks = {}
     },
 
     /**
@@ -2596,6 +2644,14 @@ export const useAiStore = defineStore('ai', {
         this.notice = '该确认已提交，正在同步…'
         return
       }
+      // 批4-D（纵深两道）：不可撤销卡必须**已勾选**才放行「批准」—— 面板已把按钮置灰，
+      // 这里拦住程序化/键盘/竞态路径（拒绝不受限：不勾选也能否掉）。
+      // 勾选态只认段上的 irreversible（旧段无该键 ⇒ 与可逆卡同路，行为一字不动）。
+      const targetPart = host ? findToolPart(host, toolCallId) : null
+      if (approved && targetPart?.irreversible === true && this.gateAcks[toolCallId] !== true) {
+        this.notice = '不可撤销操作：请先勾选确认项'
+        return
+      }
       this.gateSubmissions = {
         ...this.gateSubmissions,
         [toolCallId]: { decision: approved ? 'approved' : 'rejected', submittedAt: Date.now(), syncing: false }
@@ -2617,6 +2673,8 @@ export const useAiStore = defineStore('ai', {
       }
       try {
         await aiApi.confirm({ runId, toolCallId, approved, reason: reason ?? null })
+        // 批4-D：决策送达 ⇒ 勾选态复位（该卡已收尾，不留"已同意"的残影）
+        this.clearGateAck(toolCallId)
         // B1（2026-10-20 裁决 9）：决策送达 ⇒ 带 lastSeq 重连收流（挂起期连接已被服务端收掉）。
         // 顺序先于 clearSuspendedIfNoOtherConfirms：后者在多卡批次里可能把 suspended 置 false，
         // 而重连的触发判据正是"这轮仍在挂起语义里"。
@@ -4144,6 +4202,9 @@ export const useAiStore = defineStore('ai', {
             break
           }
           this.suspended = true
+          // 批4-D：同 toolCallId 的勾选态**变更即复位** —— 新请求帧到达即视为一张新卡，
+          // 上一轮勾选绝不继承（否则"已同意"会变成默认值）。
+          this.clearGateAck(frame.toolCallId)
           // 工具卡四态之"待确认"：确认门未决期间该工具卡显示为待确认（段 status=pending +
           // requiresAction=true ⇒ 派生出挂起卡）；原始帧口径随段持久化（对账用，见 ToolPart 注）
           applyFrameToParts(message, frame)
@@ -4155,6 +4216,8 @@ export const useAiStore = defineStore('ai', {
           applyFrameToParts(message, frame)
           // R-166 口径③：结局帧到达即撤提交在途态（409 瞬态的就地收敛口）
           this.clearGateSubmission(frame.toolCallId)
+          // 批4-D：结局落定 ⇒ 勾选态复位（变更即复位：这一版卡的同意不外溢）
+          this.clearGateAck(frame.toolCallId)
           // M2：段已落终态后才计数 —— 多卡并存时另一张仍待决 ⇒ 保持挂起态
           this.clearSuspendedIfNoOtherConfirms(frame.toolCallId)
           break

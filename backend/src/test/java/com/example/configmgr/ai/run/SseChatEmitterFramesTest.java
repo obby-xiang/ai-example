@@ -103,6 +103,32 @@ class SseChatEmitterFramesTest {
                 .doesNotContainKey("expiresAt");
     }
 
+    /**
+     * 批4-D（用户 2026-10-23 裁决）：不可撤销的工具（{@code ToolMeta.Category.P}）确认卡
+     * 多一层复选框 —— 该事实必须随 {@code confirm_request} 帧下发，前端才可能画出复选框。
+     *
+     * <p>契约是 <b>additive</b>：不论真假键都在（false 也让前端明确"这张卡不需要勾选"），
+     * 帧类型集不变。
+     */
+    @Test
+    void confirmRequestCarriesIrreversibleFlag() {
+        PendingToolCall publish = pending("call-publish");
+        publish.setName("start_publish");
+        publish.setIrreversible(true);
+        PendingToolCall export = pending("call-export");
+
+        this.emitter.confirmRequest(publish);
+        this.emitter.confirmRequest(export);
+
+        List<Map<String, Object>> archived = archivedFrames();
+        assertThat(archived).extracting(frame -> frame.get("type"))
+                .containsExactly("confirm_request", "confirm_request");
+        assertThat(archived.get(0)).as("发布作业不可撤销 ⇒ 帧带 irreversible=true")
+                .containsEntry("irreversible", true);
+        assertThat(archived.get(1)).as("可逆确认卡显式带 false（键恒在，前端不必猜）")
+                .containsEntry("irreversible", false);
+    }
+
     // ── T5：messageId 与三段式边界 ───────────────────────────────────────────
 
     @Test

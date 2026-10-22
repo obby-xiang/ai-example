@@ -29,6 +29,13 @@
       "high": "已进入压缩区（工具结果优先清理）",
       "danger": "接近上限，下一次请求前会先清理历史工具结果"
     },
+    "hitl": {
+      "irreversible": "确认{action}，执行后无法恢复",
+      "ackHint": "请先勾选上方确认项",
+      "action": {
+        "start_publish": "启动发布作业"
+      }
+    },
     "gf": {
       "title": "请填写以下信息",
       "scenario": {

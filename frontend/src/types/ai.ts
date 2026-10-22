@@ -430,6 +430,13 @@ export interface ToolPart extends MessagePartBase {
    * 预检**不通过**时后端不弹卡，故门卡只在 `preflight` 存在（且通过）时出现该区。
    */
   preflight?: ToolPreflight | null
+  /**
+   * 批4-D（用户 2026-10-23 裁决）：该确认**不可撤销**（后端 `ToolMeta.Category.P`，当前唯一 =
+   * `start_publish`）。true ⇒ 门卡在字段区与按钮行之间叠加复选框，未勾选只禁用「批准」。
+   *
+   * 缺省 = 普通后果确认卡（start_export / start_precheck / start_import）/ 旧段 —— 卡面一字不动。
+   */
+  irreversible?: boolean
 }
 
 // ── AI 表格操作专项：写预览计划（设计稿 §3.3bis / §3.5） ─────────────────────
@@ -560,6 +567,8 @@ export interface ToolPartPatch {
   atMs?: number
   /** 见 {@link ToolPart.preflight}（H1 确认门预检摘要，可选增量） */
   preflight?: ToolPreflight | null
+  /** 见 {@link ToolPart.irreversible}（批4-D 不可撤销位：confirm_request / suspended 帧落段） */
+  irreversible?: boolean
 }
 
 /** 展示态的挂起调用（由 SSE 帧聚合而来）。 */
@@ -761,6 +770,11 @@ export interface AiRunCurrentEntry {
    * 挂起卡 —— 与 `suspended` / `confirm_request` 帧同一形状（后端 `PendingToolCall.preflight`）。
    */
   preflight?: ToolPreflight | null
+  /**
+   * 批4-D（用户 2026-10-23 裁决）：条目不可撤销（`Category.P`）。刷新恢复据此重建门卡上的
+   * 复选框 —— 缺键 = 旧后端/普通确认卡（不加复选框，与既有形态一字不差）。
+   */
+  irreversible?: boolean
 }
 
 /** GET /api/ai/runs/current?sessionId= 的 data：当前会话进行中的 run 挂起快照（T2b-D#3）。 */

@@ -210,6 +210,17 @@ public class PendingToolCall {
 	 */
 	private Map<String, Object> sheetMeta;
 
+	/**
+	 * 批4-D（用户 2026-10-23 裁决）：本次确认是否<b>不可撤销</b>
+	 * （{@code @ToolCategory(ToolMeta.Category.P)}，当前唯一 = {@code start_publish}）。
+	 *
+	 * <p>判定点在 {@code SpToolCallingManager#newPendings}（挂起落库<b>之前</b>定型，故刷新恢复
+	 * 也拿得到）：前端据此在确认卡上叠加复选框（勾选才放行「批准」），可逆确认卡一律不加。
+	 * 缺省 {@code false} = 普通后果确认卡 / 旧数据。本字段是<b>展示与闸门口径</b>，
+	 * 不改变任何执行语义。
+	 */
+	private boolean irreversible;
+
 	public boolean resolved() {
 		return !PENDING.equals(this.status);
 	}
@@ -268,6 +279,7 @@ public class PendingToolCall {
 		out.put("req", Boolean.TRUE.equals(this.req));
 		out.put("reqAtMs", this.reqAtMs);
 		out.put("preflight", this.preflight);
+		out.put("irreversible", this.irreversible);
 		return out;
 	}
 

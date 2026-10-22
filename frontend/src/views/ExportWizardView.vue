@@ -169,6 +169,7 @@ import type { SheetAdapter } from '@/utils/sheet-tools'
 import { useAiStore } from '@/stores/ai'
 import { stepLabel } from '@/utils/format'
 import { watchJob, type JobChannelState } from '@/utils/job-watch'
+import { confirmIrreversible } from '@/utils/confirm-irreversible'
 
 /** 表格宿主的最小接口（defineExpose 出来的方法）。 */
 interface GridApi {
@@ -797,6 +798,15 @@ async function cancelJob(): Promise<void> {
   }
   const jobId = exportJob.value?.id
   if (jobId === undefined) {
+    return
+  }
+  // 批4-D（用户 2026-10-23 裁决）：取消作业不可撤销 —— 由「一点即发」改为复选框确认。
+  const confirmed = await confirmIrreversible({
+    title: '取消作业',
+    message: '作业将立即终止，已处理的部分不会回滚。',
+    ack: '确认取消作业，执行后无法恢复'
+  })
+  if (!confirmed) {
     return
   }
   try {

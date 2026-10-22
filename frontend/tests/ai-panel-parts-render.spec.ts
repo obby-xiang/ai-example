@@ -5716,3 +5716,184 @@ describe('S6 批2 迁移步④ · 工具卡输出区由 resultView 接管（list
     wrapper.unmount()
   })
 })
+
+/**
+ * 批4-D（用户 2026-10-23 裁决）：**不可撤销** = 确认卡 + 复选框。
+ *
+ * 口径逐条：
+ * - 普通后果确认卡（start_export / start_precheck / start_import）**维持现状**：无复选框、批准立即可点；
+ * - 不可撤销（`irreversible=true`，后端 `ToolMeta.Category.P` 透出）才叠加复选框；
+ * - 复选框文案动态带动作名（`tool.<name>.title` 中文 / `ai.hitl.action.<tool>` 英文动名词，缺键回落）；
+ * - 未勾选 ⇒ **只禁用「批准」**，「拒绝」永远可用；置灰旁给一行提示；
+ * - 复选框恒可见（不放进字段内滚区）、默认不勾、变更即复位；
+ * - 刷新恢复（runs/current 的 `irreversible`）要能把复选框重建出来且仍是未勾选态；
+ * - store 层兜底（纵深两道）：未勾选直接调 `confirm()` 也不得发出请求。
+ */
+describe('批4-D：不可撤销确认卡的复选框（可逆卡一字不动）', () => {
+  /** 不可撤销门卡段（后端 start_publish = 唯一 Category.P）。 */
+  function irreversiblePart(toolCallId = 'pub1', name = 'start_publish'): ToolPart {
+    return {
+      kind: 'tool', seg: 0, toolCallId, name, kind2: 'CONFIRM', status: 'pending',
+      args: '{"taskId":9}', timeoutSeconds: 120, requiresAction: true, irreversible: true
+    }
+  }
+
+  it('未勾选：批准禁用 / 拒绝可用 / 提示可见 / 复选框在字段内滚区之外且默认不勾', async () => {
+    const wrapper = await mountPanel([buildMessage([irreversiblePart()])])
+    const gate = wrapper.find('[data-testid="pending-card-pub1"]').find('[data-testid="hitl-gate"]')
+    expect(gate.exists()).toBe(true)
+
+    // 复选框：≤ 原生 input[type=checkbox]，默认不勾，恒可见（不在 gate-rows 内滚区里）
+    const box = gate.find('[data-testid="gate-ack-box"]')
+    expect(box.exists()).toBe(true)
+    expect((box.element as HTMLInputElement).checked).toBe(false)
+    const rows = gate.find('[data-testid="gate-rows"]')
+    expect(rows.element.contains(box.element)).toBe(false)
+
+    // 文案：中文「确认{动作}，执行后无法恢复」，动作名取 tool.<name>.title
+    const ack = gate.find('[data-testid="gate-ack"]')
+    expect(ack.text()).toContain('确认启动发布作业，执行后无法恢复')
+    // 字形面零 emoji（同卡面锁口径）
+    expect(ack.text()).not.toMatch(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/u)
+
+    // 按钮：只禁用「批准」，「拒绝」永远可用
+    const buttons = gate.findAll('button')
+    expect(buttons.map((btn) => btn.text())).toEqual(['拒绝', '批准'])
+    expect(buttons[1]!.attributes('disabled')).toBeDefined()
+    expect(buttons[0]!.attributes('disabled')).toBeUndefined()
+
+    // 置灰旁一行提示
+    const hint = gate.find('[data-testid="gate-ack-hint"]')
+    expect(hint.exists()).toBe(true)
+    expect(hint.text()).toBe('请先勾选上方确认项')
+
+    // 未勾选点击批准：不发任何请求（按钮禁用 + store 兜底两道）
+    await buttons[1]!.trigger('click')
+    await flushPromises()
+    expect(api.confirm).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('勾选后可批准：提示消失、批准可用、点击提交 approved', async () => {
+    const wrapper = await mountPanel([buildMessage([irreversiblePart()])])
+    const gate = wrapper.find('[data-testid="pending-card-pub1"]').find('[data-testid="hitl-gate"]')
+    const store = useAiStore()
+    store.activeRunId = 'run-1'
+    store.suspended = true
+
+    const box = gate.find('[data-testid="gate-ack-box"]')
+    await box.setValue(true)
+
+    expect((box.element as HTMLInputElement).checked).toBe(true)
+    const buttons = gate.findAll('button')
+    expect(buttons[1]!.attributes('disabled')).toBeUndefined()
+    expect(gate.find('[data-testid="gate-ack-hint"]').exists()).toBe(false)
+
+    await buttons[1]!.trigger('click')
+    await flushPromises()
+    expect(api.confirm).toHaveBeenCalledTimes(1)
+    expect(api.confirm.mock.calls[0]![0]).toMatchObject({ runId: 'run-1', toolCallId: 'pub1', approved: true })
+    wrapper.unmount()
+  })
+
+  it('可逆确认卡（start_export）维持现状：无复选框、无提示、批准立即可点', async () => {
+    const wrapper = await mountPanel([
+      buildMessage([
+        { kind: 'tool', seg: 0, toolCallId: 'c1', name: 'start_export', kind2: 'CONFIRM', status: 'pending', args: '{"taskId":1}', timeoutSeconds: 120, requiresAction: true }
+      ])
+    ])
+    const gate = wrapper.find('[data-testid="pending-card-c1"]').find('[data-testid="hitl-gate"]')
+    expect(gate.find('[data-testid="gate-ack-box"]').exists()).toBe(false)
+    expect(gate.find('[data-testid="gate-ack-row"]').exists()).toBe(false)
+    expect(gate.find('[data-testid="gate-ack-hint"]').exists()).toBe(false)
+    // 卡体子块序不变：字段表 / 按钮行（复选框不占位）
+    const kids = Array.from(gate.element.children) as HTMLElement[]
+    expect(kids[0]!.getAttribute('data-testid')).toBe('gate-rows')
+    expect(kids[1]!.querySelectorAll('button')).toHaveLength(2)
+    const buttons = gate.findAll('button')
+    expect(buttons[1]!.attributes('disabled')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('刷新恢复：runs/current 带 irreversible → 重建复选框且仍未勾选（批准禁用）', async () => {
+    api.reattachRun.mockImplementation(() => new Promise(() => {}))
+    api.history.mockResolvedValue({ sessionId: 'sess-pub', count: 0, messages: [] })
+    api.runsCurrent.mockResolvedValue({
+      found: true,
+      runId: 'run-pub',
+      snapshotStatus: 'PENDING',
+      pendingEntries: [
+        { toolCallId: 'rpub1', entryStatus: 'PENDING', kind: 'CONFIRM', name: 'start_publish', arguments: '{"taskId":9}', req: true, irreversible: true }
+      ],
+      unresolvedExternal: ['rpub1'],
+      awaitingExternal: true,
+      archiveMaxSeq: 2
+    })
+    const store = useAiStore()
+    store.sessionId = 'sess-pub'
+    const wrapper = await mountPanel([])
+    await flushPromises()
+
+    const gate = wrapper.find('[data-testid="pending-card-rpub1"]').find('[data-testid="hitl-gate"]')
+    expect(gate.exists()).toBe(true)
+    const box = gate.find('[data-testid="gate-ack-box"]')
+    expect(box.exists()).toBe(true)
+    expect((box.element as HTMLInputElement).checked).toBe(false)
+    const buttons = gate.findAll('button')
+    expect(buttons[1]!.attributes('disabled')).toBeDefined()
+    expect(gate.find('[data-testid="gate-ack-hint"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('双 locale：英文用动名词短语（ai.hitl.action.<tool>），提示行同批切换', async () => {
+    const { default: i18n } = await import('@/locales')
+    i18n.global.locale.value = 'en-US'
+    try {
+      const wrapper = await mountPanel([buildMessage([irreversiblePart('pub-en')])])
+      const gate = wrapper.find('[data-testid="pending-card-pub-en"]').find('[data-testid="hitl-gate"]')
+      expect(gate.find('[data-testid="gate-ack"]').text()).toBe(
+        'I understand that starting the publish job cannot be undone'
+      )
+      expect(gate.find('[data-testid="gate-ack-hint"]').text()).toBe('Tick the box above to continue')
+      // 按钮文案不动（2026-10-20 定稿口径）
+      expect(gate.findAll('button').map((btn) => btn.text())).toEqual(['拒绝', '批准'])
+      wrapper.unmount()
+    } finally {
+      i18n.global.locale.value = 'zh-CN'
+    }
+  })
+
+  it('store 兜底（纵深两道）：段未勾选时直接调 confirm(true) 不发请求，勾选后才发', async () => {
+    const store = useAiStore()
+    store.messages = [buildMessage([irreversiblePart('pub2')])]
+    store.historyLoaded = true
+    store.activeRunId = 'run-2'
+    store.suspended = true
+
+    await store.confirm(true, undefined, 'pub2')
+    expect(api.confirm).not.toHaveBeenCalled()
+    expect(store.notice).toContain('勾选')
+
+    store.ackGate('pub2')
+    await store.confirm(true, undefined, 'pub2')
+    expect(api.confirm).toHaveBeenCalledTimes(1)
+    expect(api.confirm.mock.calls[0]![0]).toMatchObject({ toolCallId: 'pub2', approved: true })
+  })
+
+  it('变更即复位：confirm_decision 到达后勾选态清空（同 toolCallId 再审不会带着旧勾选）', async () => {
+    const store = useAiStore()
+    store.messages = [buildMessage([irreversiblePart('pub3')])]
+    store.historyLoaded = true
+    store.activeRunId = 'run-3'
+    store.suspended = true
+
+    store.ackGate('pub3')
+    expect(store.gateAckOf('pub3')).toBe(true)
+
+    store.handleFrame({
+      type: 'confirm_decision', seq: 1, atMs: 1_790_000_000_000,
+      toolCallId: 'pub3', name: 'start_publish', decision: 'rejected', approved: false, status: 'REJECTED'
+    } as never)
+    expect(store.gateAckOf('pub3')).toBe(false)
+  })
+})

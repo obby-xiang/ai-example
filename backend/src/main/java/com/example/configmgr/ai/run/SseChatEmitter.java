@@ -851,6 +851,9 @@ public class SseChatEmitter {
 		frame.put("summary", pending.getArguments());
 		// F5：只读预检报告随请求帧下发（契约新增可选字段；缺省 null = 旧卡面）
 		frame.put("preflight", pending.getPreflight());
+		// 批4-D（用户 2026-10-23 裁决）：不可撤销位随帧下发（additive；false 也显式给，
+		// 前端据此决定是否在卡上叠加复选框 —— 普通确认卡因此一字不动）。
+		frame.put("irreversible", pending.isIrreversible());
 		frame.put("callback", "POST /api/ai/confirm {runId, toolCallId, approved, reason}");
 		emit(frame);
 	}

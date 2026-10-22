@@ -619,6 +619,9 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
         // H1 预检摘要（可选增量）：仅帧带该字段时落段 —— 旧帧不产生 undefined 键，
         // 已落段的预检摘要也不会被后续无该字段的帧抹掉。
         ...(frame.preflight ? { preflight: frame.preflight } : {}),
+        // 批4-D（用户 2026-10-23 裁决）：不可撤销位落段（只在 true 时产生键 —— 普通后果
+        // 确认卡的段形状与既有实现逐字节一致）。
+        ...(frame.irreversible === true ? { irreversible: true } : {}),
         // 待确认 = 等人工动作（该段此刻正在等用户）
         requiresAction: true
       })
@@ -785,6 +788,9 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
           status: 'pending',
           // H1 预检摘要（可选增量）：同 confirm_request 口径 —— 帧带才落段，缺省不产生键。
           ...(waiting.preflight ? { preflight: waiting.preflight } : {}),
+          // 批4-D：不可撤销位同口径落段（suspended 先于 confirm_request 到达时，
+          // 复选框不该等到请求帧才出现）。
+          ...(waiting.irreversible === true ? { irreversible: true } : {}),
           requiresAction: true
         })
       }

@@ -842,6 +842,9 @@ public class AiController {
 			// MAJOR-1（收口）：刷新恢复路径也要带预检报告，否则卡面丢了"批准的是哪一版预检"。
 			// 非确认门工具/旧数据为 null ⇒ 键仍出现但值为 null（前端按"没有就不显示预检区"处理）。
 			entry.put("preflight", pending.getPreflight());
+			// 批4-D（用户 2026-10-23 裁决）：不可撤销位随条目透出 —— 刷新恢复要据此重建复选框
+			// （否则刷新后"一点即发"，复选框消失 = 安全回退）。恒给布尔值（false = 不加复选框）。
+			entry.put("irreversible", pending.isIrreversible());
 			pendingEntries.add(entry);
 			if (PendingToolCall.PENDING.equals(pending.getStatus())
 					&& !PendingToolCall.KIND_BACKEND.equals(pending.getKind())) {

@@ -159,11 +159,12 @@
  */
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { Plus, Refresh } from '@element-plus/icons-vue'
 import { useTaskStore } from '@/stores/task'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { formatDateTime, progressView, stepLabel, TASK_TYPE_LABELS } from '@/utils/format'
+import { confirmIrreversible } from '@/utils/confirm-irreversible'
 import type { TaskStatus, TaskSummary, TaskType } from '@/types/task'
 import type { Job } from '@/types/job'
 
@@ -277,13 +278,12 @@ async function cancelTask(row: TaskSummary): Promise<void> {
   if (jobId === undefined) {
     return
   }
-  try {
-    await ElMessageBox.confirm(
-      `确定取消任务「${row.task.title}」当前运行的作业 #${jobId}？已处理的部分不会回滚。`,
-      '取消作业',
-      { type: 'warning' }
-    )
-  } catch {
+  const confirmed = await confirmIrreversible({
+    title: '取消作业',
+    message: `确定取消任务「${row.task.title}」当前运行的作业 #${jobId}？已处理的部分不会回滚。`,
+    ack: '确认取消作业，执行后无法恢复'
+  })
+  if (!confirmed) {
     return
   }
   cancellingId.value = row.task.id ?? null
@@ -305,13 +305,13 @@ async function removeTask(row: TaskSummary): Promise<void> {
   if (row.task.id === undefined) {
     return
   }
-  try {
-    await ElMessageBox.confirm(
-      `确定删除任务「${row.task.title}」？关联作业、暂存与导出结果将一并删除。`,
-      '删除任务',
-      { type: 'error' }
-    )
-  } catch {
+  const confirmed = await confirmIrreversible({
+    title: '删除任务',
+    message: `确定删除任务「${row.task.title}」？关联作业、暂存与导出结果将一并删除。`,
+    ack: '确认删除任务，执行后无法恢复',
+    type: 'error'
+  })
+  if (!confirmed) {
     return
   }
   const ok = await taskStore.removeTask(row.task.id)

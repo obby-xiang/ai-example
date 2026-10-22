@@ -15,7 +15,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import { defineComponent, type PropType } from 'vue'
+import { defineComponent, type PropType, type VNode } from 'vue'
 
 const api = vi.hoisted(() => ({ listTasks: vi.fn(), cancelJob: vi.fn() }))
 const confirmMock = vi.hoisted(() => vi.fn())
@@ -203,6 +203,64 @@ describe('views/TaskCenterView.vue · 全静止 + 手动刷新（M1+F2）', () =
     expect(api.cancelJob).toHaveBeenCalledTimes(1)
     expect(refreshSpy).toHaveBeenCalledTimes(1) // 写操作成功后本地刷新（F2 保留面）
     expect(api.listTasks).toHaveBeenCalledTimes(2)
+    wrapper.unmount()
+  })
+
+  /**
+   * 批4-D（用户 2026-10-23 裁决）：取消/删除是**不可撤销**动作 —— 原 `ElMessageBox.confirm`
+   * 升级为复选框版（勾选才放行），文案带动作名。
+   */
+  it('irreversible-cancel：取消任务走复选框对话框（动作化文案 + beforeClose 放行闸）', async () => {
+    api.listTasks.mockResolvedValue(pageOf([makeSummary(1, 'RUNNING')]))
+    const wrapper = mount(TaskCenterView, { global: { stubs } })
+    await flushPromises()
+
+    const cancelButton = wrapper.findAll('button').find((b) => b.text() === '取消')
+    await cancelButton!.trigger('click')
+    await flushPromises()
+
+    const call = confirmMock.mock.calls.at(-1)!
+    const options = call[2] as { beforeClose?: (action: string, instance: unknown, done: () => void) => void }
+    expect(options.beforeClose).toBeTypeOf('function')
+    const bubble = mount({ render: () => call[0] as VNode })
+    expect(bubble.find('[data-testid="irreversible-ack-box"]').exists()).toBe(true)
+    expect(bubble.text()).toContain('确认取消作业，执行后无法恢复')
+    // 未勾选点「确定」被拦
+    const done = vi.fn()
+    options.beforeClose!('confirm', {}, done)
+    expect(done).not.toHaveBeenCalled()
+    bubble.unmount()
+    wrapper.unmount()
+  })
+
+  it('irreversible-cancel-dismiss：对话框被取消 ⇒ 不发取消请求', async () => {
+    api.listTasks.mockResolvedValue(pageOf([makeSummary(1, 'RUNNING')]))
+    confirmMock.mockRejectedValueOnce('cancel')
+    const wrapper = mount(TaskCenterView, { global: { stubs } })
+    await flushPromises()
+
+    const cancelButton = wrapper.findAll('button').find((b) => b.text() === '取消')
+    await cancelButton!.trigger('click')
+    await flushPromises()
+    expect(api.cancelJob).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('irreversible-delete：删除任务走复选框对话框（「确认删除任务，执行后无法恢复」）', async () => {
+    api.listTasks.mockResolvedValue(pageOf([makeSummary(1, 'RUNNING')]))
+    const wrapper = mount(TaskCenterView, { global: { stubs } })
+    await flushPromises()
+
+    const deleteButton = wrapper.findAll('button').find((b) => b.text() === '删除')
+    expect(deleteButton).toBeDefined()
+    await deleteButton!.trigger('click')
+    await flushPromises()
+
+    const call = confirmMock.mock.calls.at(-1)!
+    const bubble = mount({ render: () => call[0] as VNode })
+    expect(bubble.find('[data-testid="irreversible-ack-box"]').exists()).toBe(true)
+    expect(bubble.text()).toContain('确认删除任务，执行后无法恢复')
+    bubble.unmount()
     wrapper.unmount()
   })
 })
