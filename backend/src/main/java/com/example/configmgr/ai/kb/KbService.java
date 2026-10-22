@@ -56,7 +56,8 @@ import java.util.stream.Stream;
  * 知识库服务（定稿 §2）：索引生命周期 + BM25 检索 + 精确术语查表。
  *
  * <h2>启动与刷新</h2>
- * 启动期<b>异步</b>建索引（{@link #start()} 只提交任务，不阻塞就绪）；未就绪时三个工具 fail-open 回
+ * 启动期先做源准备（{@link KbSource#prepare()}：local 源在知识目录缺失/为空时从 classpath 播种
+ * 样例），再<b>异步</b>建索引（{@link #start()} 只提交任务，不阻塞就绪）；未就绪时三个工具 fail-open 回
  * 「知识库加载中」。之后按 {@code app.ai.kb.refresh-interval}（默认 10m）定时刷新，管理端点可同步热重载。
  *
  * <h2>增量</h2>
@@ -143,6 +144,8 @@ public class KbService {
             log.info("业务知识库未启用（app.ai.kb.enabled=false）");
             return;
         }
+        // 首启自播种（local 源且目录为空时复制随包样例；http 源无操作）必须在第一次回源前完成
+        this.source.prepare();
         this.scheduler = Executors.newSingleThreadScheduledExecutor(runnable -> {
             Thread thread = new Thread(runnable, "kb-refresh");
             thread.setDaemon(true);

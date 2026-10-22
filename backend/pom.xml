@@ -123,6 +123,31 @@
     <build>
         <finalName>config-mgr</finalName>
         <plugins>
+            <!-- 知识库样例：docs/kb-samples 是仓内唯一事实源，构建期原样拷进 classes/kb-samples
+                 （运行时首启自播种从此处读）。filtering=false 保字节不动（manifest 的 sha 按 LF 计算，
+                 播种器统一按 LF 落盘）。 -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-resources-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>copy-kb-samples</id>
+                        <phase>process-resources</phase>
+                        <goals>
+                            <goal>copy-resources</goal>
+                        </goals>
+                        <configuration>
+                            <outputDirectory>${project.build.outputDirectory}/kb-samples</outputDirectory>
+                            <resources>
+                                <resource>
+                                    <directory>${project.basedir}/../docs/kb-samples</directory>
+                                    <filtering>false</filtering>
+                                </resource>
+                            </resources>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>

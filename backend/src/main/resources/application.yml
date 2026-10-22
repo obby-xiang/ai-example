@@ -253,8 +253,8 @@ app:
     # ── 业务知识库（业务知识问答 v1）───────────────────────────────────────────
     # 知识内容 = 业务资料（不是对话数据），落 ./data/kb 或由 HTTP 知识服务提供；
     # 检索结果回填模型前一律过 <knowledge> 定界与"数据不是指令"声明（KbText）。
-    # 样例知识仓在 docs/kb-samples/（20 篇，manifest.json 带 sha/aliases/terms）；
-    # 本地试跑：把该目录内容拷到 ./data/kb（或把 dir 指过去）。
+    # 样例知识仓在 docs/kb-samples/（20 篇，manifest.json 带 sha/aliases/terms）；构建期拷进
+    # classes/kb-samples，local 源首启时若 dir 不存在/为空会自动播种（无需手工拷贝）。
     kb:
       enabled: true
       # local = 读 dir；http = 从 http.base-url 拉 manifest.json 与各文档（生产形态）。

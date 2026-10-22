@@ -66,6 +66,12 @@ public class CachedKbSource implements KbSource {
         return this.delegate.kind();
     }
 
+    /** 首启自播种属于源准备：有缓存层时同样要在第一次回源前完成。 */
+    @Override
+    public void prepare() {
+        this.delegate.prepare();
+    }
+
     /** 当前缓存版本（诊断/轮询用；缓存不可用返回 -1）。 */
     public long cachedVersion() {
         try {

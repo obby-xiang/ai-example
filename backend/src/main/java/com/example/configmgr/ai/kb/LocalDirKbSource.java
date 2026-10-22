@@ -42,6 +42,15 @@ public class LocalDirKbSource implements KbSource {
         return "local";
     }
 
+    /**
+     * 首启自播种：目录不存在/为空时从 classpath 复制样例（详见 {@link KbSampleSeeder}）。
+     * 目录已有内容则不动；失败只 WARN。
+     */
+    @Override
+    public void prepare() {
+        new KbSampleSeeder(this.dir, this.mapper).seedIfAbsent();
+    }
+
     @Override
     public KbSource.ManifestFetch fetchManifest(String previousEtag) throws KbSourceException {
         Path manifestPath = this.dir.resolve("manifest.json").normalize();

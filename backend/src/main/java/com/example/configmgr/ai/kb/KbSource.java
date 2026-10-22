@@ -20,6 +20,15 @@ public interface KbSource {
     String kind();
 
     /**
+     * 启动前准备（{@code KbService} 在第一次建索引前调用；默认无操作）。
+     *
+     * <p>local 源据此在知识目录不存在/为空时从 classpath 播种样例（{@link KbSampleSeeder}）；
+     * http 源没有本地目录，保持无操作 —— 生产覆盖路径不受影响。
+     */
+    default void prepare() {
+    }
+
+    /**
      * 拉取 manifest。
      *
      * @param previousEtag 上一次成功拉取拿到的 ETag（可空）；HTTP 源据此发 {@code If-None-Match}
