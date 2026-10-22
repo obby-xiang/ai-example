@@ -3325,6 +3325,11 @@ function onMsgWrapResized(): void {
 const currentModelLabel = computed(() => ai.health?.model || '流式对话 · 工具调用')
 
 onMounted(async () => {
+  // 批G · R2：订阅必须在读历史**之前**装（刷新后首帧要落盘），但启动期 `messages=[]` 不是
+  // "确实为空"而是"还没读" —— 下面 `ensureTabOwnership()` 的 state 变更会触发一次即时写盘，
+  // 早先把上一页签留下的持久化镜像清空（真机打点 `SET n=0 → GET n=0 → SET n=3`），
+  // 令 `loadHistory` 的 readMirror 读到空镜像、G3 合并在途轮空转。竞态由 store 侧闸住
+  // （`writeMirrorNow` 在 historyLoaded 之前不写空态），此处挂载次序保持不动。
   ai.startMirror()
   ai.startWorkspaceSync()
   void ai.probeHealth()

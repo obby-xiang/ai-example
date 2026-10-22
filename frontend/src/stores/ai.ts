@@ -1138,8 +1138,21 @@ export const useAiStore = defineStore('ai', {
       }
     },
 
-    /** 立即落盘（throttle 的 leading / trailing、pagehide、stop() 共用唯一写口）。 */
+    /**
+     * 立即落盘（throttle 的 leading / trailing、pagehide、stop() 共用唯一写口）。
+     *
+     * <p>
+     * 批G · R2（真机回归）：**启动期空态不是"确实为空"，而是"还没读"** —— 面板挂载时
+     * `startMirror()` 先装订阅，`ensureTabOwnership()` 的任何 state 变更（写 `tabOwnership` 就会
+     * 触发）都会以此刻的 `messages=[]` 立即落盘，把上一页签留下的持久化镜像清空；紧接着
+     * `loadHistory()` 的 `readMirror` 读到空镜像，G3 合并在途轮空转（真机打点顺序
+     * `SET n=0 → GET n=0 → SET n=3`）。故 `historyLoaded` 之前的空态一律不写：
+     * 那时镜像里若有内容，只能来自另一次更完整的现场，任何本地空态都无权覆盖它。
+     */
     writeMirrorNow(): void {
+      if (!this.historyLoaded && this.messages.length === 0) {
+        return
+      }
       mirrorLastWriteAt = Date.now()
       writeMirror(this.sessionId, this.messages, this.activeRunId, {
         inFlight: this.loading,
@@ -1752,11 +1765,10 @@ export const useAiStore = defineStore('ai', {
       this.streamInterrupted = false
       this.suspended = false
       this.loading = true
-      let host = [...this.messages].reverse().find((item) => item.role === 'assistant' && !item.done)
-        ?? [...this.messages].reverse().find((item) => item.role === 'assistant')
-        ?? null
+      let host = this.findInFlightHost()
       if (!host) {
-        // 历史与镜像都没有这一轮的助手消息（如首轮刚开、镜像未落盘）：新建空宿主继续收
+        // 本轮在消息里没有宿主（如第 2 轮刚开、历史只到本轮的提问、镜像未落盘）：**新建**空宿主
+        // 继续收 —— 绝不回落到已收尾的上一轮（R2 修 2，见 findInFlightHost）
         host = this.appendAssistantMessage('')
       }
       // 镜像正文滞后于真实：清空段后全量重放（不保留镜像里的半截，否则回放会重复拼接）
@@ -1771,6 +1783,39 @@ export const useAiStore = defineStore('ai', {
       host.appliedSeqs = []
       deriveProjections(host)
       await this.reattachActive(runId, { hostMessageId: host.id, lastSeq: 0 })
+    },
+
+    /**
+     * 批G · R2（真机回归）：在途轮的宿主**只认本轮** —— 绝不回落到已收尾的上一轮。
+     *
+     * <p>
+     * 原实现先找"未收尾的助手消息"，找不到就回落到「最后一条助手消息」，清其段后
+     * `lastSeq=0` 全量重放：只要本轮在本地没有宿主（镜像被启动期空写清掉、第 2 轮刚开还没有
+     * 助手消息、私有模式写不了 sessionStorage…），上一轮那条回答就被本轮帧覆盖 ——
+     * 真机现场正是 `[user1, assistant(第2轮内容), user2]`：第 1 轮回答被吞，且回答排在提问之前。
+     *
+     * <p>
+     * 判据（结构性的"答案位"）：**最后一条用户消息之后**的助手消息才是本轮的宿主 —— 本轮的回答
+     * 必然排在它自己的提问之后。该窗口内只认 `!done` 那条（镜像 `inFlight` 落在
+     * `loadHistory` 里被归一成未收尾，见 G2），窗口为空/只有已收尾消息即返回 null，
+     * 由调用方**新建**宿主。新建的代价只是多一条气泡；回落覆盖的代价是把上一轮的正文毁掉
+     * 并让两轮顺序错乱 —— 两者不对等，前者才是可接受的兜底。
+     */
+    findInFlightHost(): ChatMessage | null {
+      let lastUserIndex = -1
+      for (let index = this.messages.length - 1; index >= 0; index -= 1) {
+        if (this.messages[index]?.role === 'user') {
+          lastUserIndex = index
+          break
+        }
+      }
+      for (let index = this.messages.length - 1; index > lastUserIndex; index -= 1) {
+        const item = this.messages[index]
+        if (item && item.role === 'assistant' && !item.done) {
+          return item
+        }
+      }
+      return null
     },
 
     /**
