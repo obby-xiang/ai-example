@@ -20,7 +20,10 @@ class AiRetiredKeysWarnerTest {
 			.withProperty("app.ai.hitl.confirm-timeout", "5m")
 			.withProperty("app.ai.session-ttl-minutes", "360")
 			.withProperty("app.ai.max-iterations", "12")
-			.withProperty("app.ai.thinking-disabled", "true");
+			.withProperty("app.ai.thinking-disabled", "true")
+			.withProperty("app.ai.tool-result.max-rows", "500")
+			.withProperty("app.ai.tool-result.max-chars", "12000")
+			.withProperty("app.ai.frame.max-bytes", "131072");
 
 		new AiRetiredKeysWarner(env).warnOnRetiredKeys();
 
@@ -30,7 +33,13 @@ class AiRetiredKeysWarnerTest {
 			.contains("改用 app.ai.session-ttl")
 			.contains("app.ai.max-iterations 已退役")
 			.contains("app.ai.thinking-disabled 已退役")
-			.contains("启动期发现 4 个已退役的 app.ai 配置键");
+			.contains("app.ai.tool-result.max-rows 已退役")
+			.contains("app.ai.result-budget.model.max-rows")
+			.contains("app.ai.tool-result.max-chars 已退役")
+			.contains("app.ai.result-budget.model.default-max-chars")
+			.contains("app.ai.frame.max-bytes 已退役")
+			.contains("app.ai.result-budget.ui.max-frame-bytes")
+			.contains("启动期发现 7 个已退役的 app.ai 配置键");
 	}
 
 	@Test

@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.tool.ToolResultLimiter;
 import com.example.configmgr.common.sse.SseWriteBudget;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -64,6 +65,9 @@ public class RunRegistry {
 	 */
 	private final SseWriteBudget writeBudget;
 
+	/** G5：模型侧裁剪器（null = 不标注模型侧视图）。 */
+	private final ToolResultLimiter resultLimiter;
+
 	/** B23L1 批①：事件日志（Spring 装配路径恒为 {@link RedisFrameStore}）。 */
 	private final FrameStore frames;
 
@@ -92,15 +96,30 @@ public class RunRegistry {
 	 * {@code frames/wakeBus/wakeListener} 允许为 null（局部上下文/测试）：为 null 时写出器
 	 * 退回兼容口径（LIST 写、不跨实例广播），语义与 B1 收官一致。
 	 */
-	@Autowired
 	public RunRegistry(RunStore store, ObjectMapper objectMapper, AiProperties properties, FrameStore frames,
 			FrameWakeBus wakeBus, FrameWakeListener wakeListener) {
+		this(store, objectMapper, properties, frames, wakeBus, wakeListener, null);
+	}
+
+	/**
+	 * 生产装配（G5 起多注入模型侧裁剪器）：{@code tool_result} 帧据此挂上"模型视图是否被截断"。
+	 *
+	 * <p>{@code resultLimiter} 允许为 null（局部上下文/测试）：为 null 时写出器不标注模型侧视图，
+	 * 帧面其余语义不变。
+	 */
+	@Autowired
+	public RunRegistry(RunStore store, ObjectMapper objectMapper, AiProperties properties, FrameStore frames,
+			FrameWakeBus wakeBus, FrameWakeListener wakeListener, ToolResultLimiter resultLimiter) {
 		this.store = store;
 		this.objectMapper = objectMapper;
 		this.properties = properties;
 		this.frames = frames;
 		this.wakeBus = wakeBus;
 		this.wakeListener = wakeListener;
+		// 非 Spring 装配（三参/六参）也要有模型侧标注：裁剪器是无状态、纯配置驱动的，
+		// 这里按同一份 AiProperties 现造一个，判定与 Spring 注入的 bean 完全一致。
+		this.resultLimiter = resultLimiter != null || properties == null ? resultLimiter
+				: new ToolResultLimiter(properties);
 		if (properties != null) {
 			// 超时面治理批① 第 3 项：把绑定后的写侧预算一并登记，供 /api/ai/health 如实回报
 			SseChatEmitter.configureSharedDeliveryPool(properties.getSse().getDeliveryPoolSize(),
@@ -119,15 +138,18 @@ public class RunRegistry {
 	public SseChatEmitter of(String runId) {
 		int queueCapacity = this.properties != null ? this.properties.getSse().getDeliveryQueueCapacity()
 				: AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY;
-		int maxFrameBytes = this.properties != null ? this.properties.getFrame().getMaxBytes()
-				: AiProperties.Frame.DEFAULT_MAX_BYTES;
+		int maxFrameBytes = this.properties != null ? this.properties.getResultBudget().getUi().getMaxFrameBytes()
+				: AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES;
 		if (this.frames == null) {
-			return this.emitters.computeIfAbsent(runId, id -> new SseChatEmitter(id, this.store, this.objectMapper,
-					this.deliveryExecutor, queueCapacity, maxFrameBytes, this.writeBudget));
+			return this.emitters.computeIfAbsent(runId,
+					id -> new SseChatEmitter(id, this.store, RunStoreFrameStore.of(this.store), this.objectMapper,
+							this.deliveryExecutor, queueCapacity, maxFrameBytes, this.writeBudget, null, null,
+							this.resultLimiter));
 		}
 		return this.emitters.computeIfAbsent(runId,
 				id -> new SseChatEmitter(id, this.store, this.frames, this.objectMapper, this.deliveryExecutor,
-						queueCapacity, maxFrameBytes, this.writeBudget, this.wakeBus, this.wakeListener));
+						queueCapacity, maxFrameBytes, this.writeBudget, this.wakeBus, this.wakeListener,
+						this.resultLimiter));
 	}
 
 	/** 只在已有写出器时返回（避免"查一下"就凭空造出一个）。 */

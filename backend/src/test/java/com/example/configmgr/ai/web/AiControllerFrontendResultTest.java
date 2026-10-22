@@ -152,13 +152,20 @@ class AiControllerFrontendResultTest {
 			.content(body("r-1", "c-1", huge, "frontend", false)))
 			.andExpect(status().isOk())
 			.andExpect(jsonPath("$.accepted").value(true))
-			.andExpect(jsonPath("$.truncated").value(true));
+			.andExpect(jsonPath("$.truncated").value(true))
+			.andExpect(jsonPath("$.strategy").value("head"))
+			.andExpect(jsonPath("$.originalChars").value(huge.length()))
+			.andExpect(jsonPath("$.returnedChars").isNumber())
+			.andExpect(jsonPath("$.notice").value(org.hamcrest.Matchers.containsString("结果过长已截断")));
 
 		org.mockito.ArgumentCaptor<String> captor = org.mockito.ArgumentCaptor.forClass(String.class);
 		verify(this.gate).submitFrontendResult(anyString(), anyString(), captor.capture(), any(), anyBoolean(),
 				any());
-		assertThat(captor.getValue()).hasSizeLessThanOrEqualTo(AiController.FRONTEND_RESULT_MAX_CHARS + 16)
-				.contains("（结果过长已截断）");
+		int budget = new AiProperties().getResultBudget().getCallback().getMaxChars();
+		assertThat(captor.getValue()).as("G5：标记计入回调上限（不再是 上限 + 标记）")
+			.hasSizeLessThanOrEqualTo(budget)
+			.contains("结果过长已截断")
+			.contains("strategy=head");
 	}
 
 	@Test

@@ -6,7 +6,9 @@ import com.example.configmgr.common.ErrorCodes;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.tool.ToolOutcome;
+import com.example.configmgr.ai.tool.ToolResultLimiter;
 import com.example.configmgr.ai.tool.ToolResultEnvelope;
+import com.example.configmgr.ai.tool.TruncationContract;
 import com.example.configmgr.common.sse.SseWriteBudget;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -202,13 +204,23 @@ public class SseChatEmitter {
 	private final int queueCapacity;
 
 	/**
-	 * T3-10：单帧 JSON 的 UTF-8 字节上限（{@code app.ai.frame.max-bytes}，裁定 64KB）。
+	 * T3-10：单帧 JSON 的 UTF-8 字节上限
+	 * （{@code app.ai.result-budget.ui.max-frame-bytes}，缺省 64KB）。
 	 *
 	 * <p>出帧路径在"取号 → 落档 → 入队"之前调用 {@link FrameSizeLimiter#apply}：
-	 * 超限帧按<b>字段级</b>截断并挂 {@code truncated}/{@code truncatedReason}，
+	 * 超限帧按<b>字段级</b>降采样并挂统一截断字段（{@code truncated/strategy/originalChars/
+	 * returnedChars/notice}，{@code truncatedReason} 为兼容别名），
 	 * 归档与投递拿到的是同一份截断后帧（重挂回放与实时流不会分叉）。
 	 */
 	private final int maxFrameBytes;
+
+	/**
+	 * G5：模型侧裁剪器（null = 不标注模型侧视图，帧序测试/非 Spring 路径）。
+	 *
+	 * <p>{@code tool_result} 帧的 {@code result} 仍是全文；这里只用它把"模型侧被裁到多少"
+	 * 同步成帧上的同一套截断字段 —— 模型侧 {@code truncated=true} 时帧侧绝不为 false。
+	 */
+	private final ToolResultLimiter resultLimiter;
 
 	/** T3-1：订阅者 = emitter + 有界队列 + CAS drain 独占标志。 */
 	private final List<Subscription> subscribers = new CopyOnWriteArrayList<>();
@@ -285,12 +297,12 @@ public class SseChatEmitter {
 
 	public SseChatEmitter(String runId, RunStore store, ObjectMapper objectMapper) {
 		this(runId, store, objectMapper, Runnable::run, AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY,
-				AiProperties.Frame.DEFAULT_MAX_BYTES);
+				AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES);
 	}
 
 	public SseChatEmitter(String runId, RunStore store, ObjectMapper objectMapper, Executor deliveryExecutor,
 			int queueCapacity) {
-		this(runId, store, objectMapper, deliveryExecutor, queueCapacity, AiProperties.Frame.DEFAULT_MAX_BYTES);
+		this(runId, store, objectMapper, deliveryExecutor, queueCapacity, AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES);
 	}
 
 	public SseChatEmitter(String runId, RunStore store, ObjectMapper objectMapper, Executor deliveryExecutor,
@@ -321,7 +333,7 @@ public class SseChatEmitter {
 	/** 便捷构造（B23L1 测试/非 Spring 装配：显式给事件日志，无跨实例唤醒）。 */
 	public SseChatEmitter(String runId, RunStore store, FrameStore frames, ObjectMapper objectMapper) {
 		this(runId, store, frames, objectMapper, Runnable::run,
-				AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY, AiProperties.Frame.DEFAULT_MAX_BYTES,
+				AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY, AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES,
 				SseWriteBudget.direct(), null, null);
 	}
 
@@ -335,11 +347,27 @@ public class SseChatEmitter {
 	public SseChatEmitter(String runId, RunStore store, FrameStore frames, ObjectMapper objectMapper,
 			Executor deliveryExecutor, int queueCapacity, int maxFrameBytes, SseWriteBudget writeBudget,
 			FrameWakeBus wakeBus, FrameWakeListener wakeListener) {
+		this(runId, store, frames, objectMapper, deliveryExecutor, queueCapacity, maxFrameBytes, writeBudget,
+				wakeBus, wakeListener, null);
+	}
+
+	/**
+	 * 全参构造（G5）：额外注入模型侧裁剪器，使 {@code tool_result} 帧能挂上"模型看到的是不是全文"。
+	 *
+	 * <p>
+	 * 为什么帧侧要认识模型侧预算：两条通道的阈值不同（字符 vs 字节），但都是同一份结果的
+	 * "没给你全部"信号。只报帧侧预算时，模型侧裁到 20000 而帧侧 {@code truncated=false}，
+	 * 人机会各信一半。传 null 表示"本写出器不标注模型侧视图"（帧序/非 Spring 测试路径）。
+	 */
+	public SseChatEmitter(String runId, RunStore store, FrameStore frames, ObjectMapper objectMapper,
+			Executor deliveryExecutor, int queueCapacity, int maxFrameBytes, SseWriteBudget writeBudget,
+			FrameWakeBus wakeBus, FrameWakeListener wakeListener, ToolResultLimiter resultLimiter) {
 		this.runId = runId;
 		this.store = store;
 		this.frames = frames;
 		this.wakeBus = wakeBus;
 		this.wakeListener = wakeListener;
+		this.resultLimiter = resultLimiter;
 		// 帧面契约要求"字段存在、可为 null"（如 tool_result 的 code/target）：此处用一份
 		// "显式写 null"的副本，**防御未来把 primary ObjectMapper 改成 NON_NULL** —— 那会让 null
 		// 整键消失，前端无法区分"字段缺失"与"null"；更糟的是同一帧的实时写出与归档回放会按
@@ -354,7 +382,7 @@ public class SseChatEmitter {
 		this.assistantMessageId = "assistant-" + runId;
 	}
 
-	/** 本写出器的单帧字节上限（供断言与诊断；单一事实源 = {@code app.ai.frame.max-bytes}）。 */
+	/** 本写出器的单帧字节上限（供断言与诊断；单一事实源 = {@code app.ai.result-budget.ui.max-frame-bytes}）。 */
 	int maxFrameBytes() {
 		return this.maxFrameBytes;
 	}
@@ -784,6 +812,7 @@ public class SseChatEmitter {
 		frame.put("target", ToolResultEnvelope.targetOf(pending.getArguments()));
 		frame.put("messageId", toolMessageId(pending));
 		frame.put("result", result);
+		markModelView(frame, pending.getName(), result);
 		emit(frame);
 	}
 
@@ -860,8 +889,40 @@ public class SseChatEmitter {
 		frame.put("target", ToolResultEnvelope.targetOf(pending.getArguments()));
 		frame.put("messageId", toolMessageId(pending));
 		frame.put("result", result);
+		markModelView(frame, pending.getName(), result);
 		emit(frame);
 	}
+
+	/**
+	 * G5：把<b>模型侧</b>的截断判定如实映射到帧上（同一套字段名，见 {@code TruncationContract}）。
+	 *
+	 * <p>
+	 * {@code result} 仍是全文 —— 这里只说"模型看到的是不是全文"。为什么必须做：
+	 * 模型侧仍存在大结果被裁的时刻；如果帧侧只说 {@code truncated=false}，前端角标不亮、
+	 * 用户以为模型看全了，人机对同一份结果形成两种事实。
+	 *
+	 * <p>
+	 * 反向（帧字节超限而模型侧未超）由 {@link FrameSizeLimiter} 在帧上覆盖说明 ——
+	 * 那时是"前端这一份被压过"，与模型侧无关，notice 会写明。
+	 */
+	private void markModelView(Map<String, Object> frame, String toolName, String result) {
+		if (this.resultLimiter == null || result == null || result.isEmpty()) {
+			return;
+		}
+		ToolResultLimiter.Truncation view = this.resultLimiter.forModel(toolName, result);
+		if (!view.truncated()) {
+			return;
+		}
+		String notice = "模型侧视图已截断：原 " + view.originalChars() + " 字符，模型可见 " + view.returnedChars()
+				+ " 字符（strategy=" + view.strategy() + "）；本帧 result 为全文。";
+		frame.put(TruncationContract.TRUNCATED_FIELD, true);
+		frame.put(TruncationContract.STRATEGY_FIELD, view.strategy());
+		frame.put(TruncationContract.ORIGINAL_CHARS_FIELD, view.originalChars());
+		frame.put(TruncationContract.RETURNED_CHARS_FIELD, view.returnedChars());
+		frame.put(TruncationContract.NOTICE_FIELD, notice);
+		frame.put(TruncationContract.LEGACY_REASON_FIELD, notice);
+	}
+
 
 	/**
 	 * 断流重试公告（韧性棒）：本轮第 {@code nextAttempt} 次尝试即将开始 ——

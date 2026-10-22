@@ -587,7 +587,7 @@ public class ResumeService {
 					responses.add(new ToolResponseMessage.ToolResponse(effective.getToolCallId(),
 							effective.getName(),
 							ToolResultEnvelope.of(source.effectiveOutcome(), source.effectiveCode(), text,
-									effective.getArguments()).toModelJson(this.limiter)));
+									effective.getArguments()).toModelJson(this.limiter, effective.getName())));
 					rebuilt.add(settlementLabel(source));
 					if (this.toolCallingManager.haltsBatch(source)) {
 						haltedBy = source;

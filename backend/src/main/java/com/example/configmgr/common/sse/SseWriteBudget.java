@@ -78,7 +78,7 @@ public final class SseWriteBudget {
      * 单帧写出的缺省预算（毫秒，<b>单一事实源</b>）。
      *
      * <p>
-     * 取值 15s 的依据：单帧上界是 T3-10 的 64KB（{@code app.ai.frame.max-bytes}），
+     * 取值 15s 的依据：单帧上界是 T3-10 的 64KB（{@code app.ai.result-budget.ui.max-frame-bytes}），
      * T3-5 压测的本机状态帧 p99 写出成本 1.15ms，15s 是它的四个数量级；换算成带宽，
      * 即便按"每帧都是 64KB 上限帧"计，15s 仍容许约 4.4KB/s 的持续链路（真实 delta 帧多在
      * 百字节量级，余量更大），因此它筛掉的是"停读/挂起"的客户端，而不是"慢但仍在推进"的客户端。

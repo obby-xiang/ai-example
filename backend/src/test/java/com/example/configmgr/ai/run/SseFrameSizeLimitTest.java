@@ -2,6 +2,7 @@ package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.conformance.FrameWire;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
+import com.example.configmgr.ai.tool.TruncationContract;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
@@ -152,6 +153,48 @@ class SseFrameSizeLimitTest {
 		assertThat(this.store.archivedSeqs(RUN_ID)).as("超限帧照旧占号（回放 seq 无洞）")
 				.containsExactly(1L, 2L, 3L);
 		assertThat(this.store.events(RUN_ID)).as("回放读一帧不少").hasSize(3);
+	}
+
+	// ── ⑥ G5 统一截断字段契约（两侧同一套字段名） ──
+
+	@Test
+	void truncatedFrameCarriesTheUnifiedFieldSet() {
+		this.out.toolResult(pending("call-1"), true, false, "y".repeat(9_000));
+
+		Map<String, Object> frame = this.store.events(RUN_ID).get(0);
+		assertThat(frame).containsEntry(TruncationContract.TRUNCATED_FIELD, true)
+				.containsEntry(TruncationContract.STRATEGY_FIELD, TruncationContract.STRATEGY_HEAD);
+		assertThat(frame.get(TruncationContract.ORIGINAL_CHARS_FIELD)).isEqualTo(9_000);
+		assertThat((Integer) frame.get(TruncationContract.RETURNED_CHARS_FIELD)).isPositive()
+				.isLessThan(9_000);
+		assertThat(String.valueOf(frame.get(TruncationContract.NOTICE_FIELD))).contains("单帧");
+		assertThat(frame.get(TruncationContract.LEGACY_REASON_FIELD))
+				.as("truncatedReason 保留为 notice 的兼容别名").isEqualTo(frame.get(TruncationContract.NOTICE_FIELD));
+	}
+
+	@Test
+	void structuredResultIsWholeMarkedInsteadOfCharCut() throws Exception {
+		StringBuilder sb = new StringBuilder("{\"rows\":[");
+		for (int i = 1; i <= 200; i++) {
+			if (i > 1) {
+				sb.append(',');
+			}
+			sb.append("{\"code\":\"C-").append(i).append("\",\"title\":\"定义 ").append(i).append("\"}");
+		}
+		sb.append("]}");
+		String json = sb.toString();
+		assertThat(json.length()).isGreaterThan(LIMIT);
+
+		this.out.toolResult(pending("call-1"), true, false, json);
+
+		Map<String, Object> frame = this.store.events(RUN_ID).get(0);
+		assertThat(this.mapper.writeValueAsBytes(frame).length).isLessThanOrEqualTo(LIMIT);
+		String result = (String) frame.get("result");
+		Map<?, ?> marker = this.mapper.readValue(result, Map.class);
+		assertThat(marker.get("truncated")).as("结构化结果整体标记成合法 JSON，绝不半截").isEqualTo(true);
+		assertThat(String.valueOf(marker.get("preview"))).isNotEmpty();
+		assertThat(marker.get("strategy")).isEqualTo(TruncationContract.STRATEGY_HEAD);
+		assertThat(((Number) marker.get("originalChars")).intValue()).isEqualTo(json.length());
 	}
 
 	// ───────────────────────── 辅助 ─────────────────────────

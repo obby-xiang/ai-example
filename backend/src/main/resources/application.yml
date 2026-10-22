@@ -278,18 +278,41 @@ app:
         read-timeout: 10s
         # 鉴权头的值只从该环境变量读取（整段作为 Authorization 头），不写配置文件、不进日志。
         auth-env: KB_HTTP_AUTH
-    tool-result:
-      # DC-14 T2（R10-1）：工具结果**回填模型**前的上限（行数/字符数）——防上下文爆炸。
-      # 只约束"给模型看的"那一份：前端 tool_result 帧与 Redis 台账始终是全文。
-      # 初值依 R10-1 建议（200 行 / 8000 字符），实际取值随 §13.2 #9 压测复核。
-      max-rows: 200
-      max-chars: 8000
+    result-budget:
+      # G5 双通道对齐：工具结果的预算**只在这里配**（模型侧字符 / UI 单帧字节 / 回灌端点三条
+      # 阈值独立可调、同源可查）。旧键 app.ai.tool-result.* 与 app.ai.frame.max-bytes 已退役，
+      # 启动期由 AiRetiredKeysWarner 逐键 WARN（旧值不会被读取）。
+      model:
+        # DC-14 T2：工具结果**回填模型**前的上限（行数/字符数）—— 防上下文爆炸。
+        # 只约束"给模型看的"那一份：前端 tool_result 帧与 Redis 台账始终是全文。
+        # 0 = 不限制（压测对照用）；负值启动失败。
+        max-rows: 200
+        # 具名工具的默认字符档：G5 由 8000 提到 20000（业界常见 10k–25k token ≈ 4 万字符
+        # 量级；8000 会让一轮两次 list_* 就把窗口吃掉）。
+        default-max-chars: 20000
+        # 拿不到工具名 / 未注册工具的兜底档：保留旧的 8000 口径，避免"不知道是什么结果"时放大风险。
+        fallback-max-chars: 8000
+        # 逐工具覆盖（工具名 → 字符上限；0 = 该工具不限制）。留空 = 全部走上面两档。
+        per-tool: {}
+      ui:
+        # T3-10：SSE 单帧 JSON 的 UTF-8 字节上限 64KB（判定 = 整帧字节数）。
+        # 超限对 text/result 做**字段级**降采样并挂统一截断字段
+        # （truncated/strategy/originalChars/returnedChars/notice；truncatedReason 为兼容别名），
+        # 严禁字节级截断；结构化结果（JSON）整体标记而非字符切。
+        # 语义边界（G5）：这是"单帧字节上限"，超限产出仍是一份完整合法帧，不做跨帧分片；
+        # 分片/续帧协议与超大结果 spill 挂账（见 ToolResultLimiter 类注）。必须 > 0。
+        max-frame-bytes: 65536
+      callback:
+        # 前端工具结果回灌端点（POST /api/ai/frontend-tool-result）的单条字符上限。
+        # 超限**截断 + 标记**而非 400（拒绝回灌会让这一轮永久挂起）；标记计入上限。必须 > 0。
+        max-chars: 8000
     input:
       # 安全防护专项批① 闸门 1（界面 §5.1 #1；数据最小化 R5）：单条 message 的字符上限。
       # 判据 = UTF-16 码元数，与前端 <textarea maxlength> / JS String#length **同一把尺**
       #   ⇒ 8192 个汉字（24576 字节）照常放行，中文不会被 UTF-8 字节数提前判死。
       # 超限 **400 MESSAGE_TOO_LONG 拒绝**，不截断（裁决 A1：截断会让模型基于半句话下结论）。
-      # 取值 8192 = 与工具结果回填上限（tool-result.max-chars 8000）同量级：超过它就不再是"一句话需求"。
+      # 取值 8192 = 与"未知工具兜底档"（result-budget.model.fallback-max-chars 8000）同量级：
+      # 超过它就不再是"一句话需求"。
       max-chars: 8192
     limit:
       # 安全防护专项批① 闸门 3：POST /api/ai/chat 的滑动窗口限流（Redis 单键 Lua 原子）。
@@ -300,12 +323,6 @@ app:
       session-per-minute: 20
       ip-per-minute: 60
       window: 1m
-    frame:
-      # T3-10 裁定：SSE 单帧 JSON 的 UTF-8 字节上限 64KB（判定=整帧字节数；
-      # 超限对 text/result 做**字段级**截断 + truncated/truncatedReason 标记，严禁字节级截断）。
-      # 该上限**优先于** T2"给前端看的帧全文不裁剪"的承诺（A21 口径变更），
-      # 修订落在 ToolResultLimiter javadoc 与 com.example.configmgr.ai.run.FrameSizeLimiter。
-      max-bytes: 65536
     sse:
       # 包②：SSE 写侧超时预算（ai/run/SseChatEmitter + common/sse/SseWriteBudget）。
       #   delivery-pool-size / delivery-queue-capacity：T3-1 的投递池与每订阅者实时队列

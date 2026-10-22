@@ -64,7 +64,7 @@ public class DataController {
      * <p>同批登记（不在本步改动面）：作业问题列表 {@code JobController} 缺省 50 ↔
      * {@code stores/task.ts} 缺省 50（同源一致）、任务列表 {@code TaskController} 缺省 10 ↔
      * {@code stores/task.ts} 缺省 10（同源一致）、{@code views/ImportWizardView.vue} 拉问题列表
-     * {@code getIssues(jobId, 0, 200)}（与 {@code app.ai.tool-result.max-rows} 的 200
+     * {@code getIssues(jobId, 0, 200)}（与 {@code app.ai.result-budget.model.max-rows} 的 200
      * <b>同值不同义</b>）。是否把 {@code JobController} 的 50 也统一为 20 属新决策，
      * 2026-10-10 已登记为待裁决项，本步不动。
      */

@@ -1,66 +1,146 @@
 package com.example.configmgr.ai.tool;
 
 import com.example.configmgr.ai.config.AiProperties;
-import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 /**
- * 工具结果回填模型的裁剪器（DC-14 T2 / R10-1，{@code app.ai.tool-result.max-rows|max-chars}）。
+ * 工具结果回填模型的裁剪器（DC-14 T2 / R10-1；G5 起预算收敛到
+ * {@code app.ai.result-budget.model.*}）。
  *
- * <h2>两条通道分离（T2 的形态要求）</h2>
+ * <h2>两条通道分离，但截断判定同源</h2>
  * <ul>
  * <li><b>给模型看的</b>：{@code role:tool} 消息的 {@code responseData} —— 经本类裁剪；
  * 调用点只有两处：{@code gate/SpToolCallingManager}（本轮循环内回填）与
  * {@code run/ResumeService}（续跑重建历史时按台账 {@code resultText} 重建），
  * 两处同源，不会出现"续跑后的历史比首轮长/短"的口径分叉；</li>
  * <li><b>给前端看的</b>：SSE {@code tool_result} 帧与 Redis 台账的 {@code resultText} ——
- * 本类<b>不裁剪</b>（模型侧上限是上下文成本问题，不是数据完备性问题）。
- * <b>T3-10 起该承诺有上限</b>：前端帧受<b>单帧字节上限</b>
- * （{@code app.ai.frame.max-bytes}，裁定 64KB）约束 —— 超限时由
- * {@link com.example.configmgr.ai.run.FrameSizeLimiter} 对 {@code text}/{@code result}
- * 做<b>字段级</b>截断并挂 {@code truncated}/{@code truncatedReason} 标记
- * （仍绝不整帧字段丢失、绝不字节级截断）；台账 {@code resultText} 不受该上限约束（账本仍是全文事实源）。</li>
+ * 帧里的 {@code result} 仍是<b>全文</b>；但帧必须能回答"模型看到的是不是全文"，
+ * 故 {@code SseChatEmitter} 用<b>同一个本类实例/同一份判定</b>在帧上挂同一套截断字段
+ * （{@link TruncationContract}）—— 模型侧 {@code truncated=true} 时帧侧绝不为 false。</li>
  * </ul>
  *
- * <h2>截断必须可被模型看见</h2>
- * 截断处追加<b>截断标记</b>（含原始行数/字符数与生效上限），否则模型会把"前 N 行"
- * 当成全部 —— 这类"静默截断"会让模型基于缺数据自信地下结论（比不截断更危险）。
+ * <h2>预算分档（{@code app.ai.result-budget.model.*}）</h2>
+ * 具名工具走 {@code default-max-chars}（20000）；{@code per-tool} 逐工具覆盖；
+ * <b>拿不到工具名/未知工具</b>走 {@code fallback-max-chars}（8000，旧口径兜底）。
+ * 行数上限 200 仍然先行施加（JSON 转义形态的 {@code \n} 也计行）。
+ *
+ * <h2>截断必须可被模型看见，且不破坏结构</h2>
+ * <ul>
+ * <li>普通文本：头部保留 + <b>截断标记</b>（{@link #TRUNCATION_MARKER}），
+ * <b>标记长度计入预算</b>（返回总长 ≤ 上限；上限小到装不下正文时只给标记，绝不静默丢弃）；</li>
+ * <li>结构化结果（JSON）：<b>绝不按字符切</b>（切完就是非法 JSON，下游整段丢失），
+ * 改为整体标记成一份合法 JSON（{@link TruncationContract#jsonMarker}，含 {@code preview} 头部分片）。</li>
+ * </ul>
+ *
+ * <h2>挂账（本批不做）</h2>
+ * 超大结果的 <b>spill</b>（模型只拿 handle + 预览，正文落对象存储/本地文件，模型按需分段取回）
+ * 与 <b>SSE 帧分片/续帧协议</b>不在本期范围：前者要新存储面与工具协议扩展，后者要前后端同时改
+ * 帧消费逻辑，工作量均超出"双通道对齐"本身。本类与 {@code FrameSizeLimiter} 已把"截断"表达成
+ * 可替换的决策（{@link Truncation}）与统一字段，后续接 spill 时只需把 {@code text} 换成 handle 引用。
  */
 @Component
-@RequiredArgsConstructor
 public class ToolResultLimiter {
 
 	/** 截断标记的固定前缀（测试与排障据此识别，勿改）。 */
 	public static final String TRUNCATION_MARKER = "\n…[结果已截断：";
 
+	/** 人读说明的固定前缀（{@code notice} 与标记正文同一句话）。 */
+	private static final String NOTICE_PREFIX = "结果已截断：";
+
 	private final AiProperties properties;
+
+	/**
+	 * 已注册工具目录（判"未知工具"用；null = 无注册表，按"具名即已知"处理）。
+	 *
+	 * <p>为什么需要它：{@code per-tool} 是显式清单，未列出的工具默认按 20000 处理；
+	 * 但"具名却从未注册"（历史重放里已被删除的工具）应当收回兜底档 8000 —— 这类结果
+	 * 通常不是当前工具集的产物，放大它只增加上下文风险。
+	 */
+	private final ToolRegistry toolRegistry;
+
+	/** 无注册表装配（单测/非 Spring）：具名工具一律按默认档。 */
+	public ToolResultLimiter(AiProperties properties) {
+		this(properties, null);
+	}
+
+	@Autowired
+	public ToolResultLimiter(AiProperties properties, ToolRegistry toolRegistry) {
+		this.properties = properties;
+		this.toolRegistry = toolRegistry;
+	}
+
+	/**
+	 * 一次截断判定的完整结果（统一字段契约；帧侧同名复用）。
+	 *
+	 * @param truncated     是否截断
+	 * @param strategy      {@link TruncationContract#STRATEGY_HEAD} 等（未截断为 null）
+	 * @param originalChars 截断前字符数
+	 * @param returnedChars 截断后返回的字符数
+	 * @param notice        人读说明（未截断为 null）
+	 * @param text          实际返回给模型的文本
+	 */
+	public record Truncation(boolean truncated, String strategy, int originalChars, int returnedChars, String notice,
+			String text) {
+
+		/** 未截断的判定（字段面与截断判定同一套，值为客观事实）。 */
+		public static Truncation untouched(String text) {
+			String value = text == null ? "" : text;
+			return new Truncation(false, null, value.length(), value.length(), null, value);
+		}
+	}
 
 	/**
 	 * 按配置裁剪一份<b>给模型看</b>的工具结果文本。
 	 *
-	 * <ol>
-	 * <li>行数超 {@code maxRows} → 只留前 {@code maxRows} 行 + 截断标记；</li>
-	 * <li>行数未超但字符数超 {@code maxChars} → 截断到 {@code maxChars} 字符 + 截断标记；</li>
-	 * <li>两者都未超（或上限取 0/负数表示不限制）→ 原样返回。</li>
-	 * </ol>
+	 * @param toolName 工具名（决定分档；null/空白/未注册 ⇒ 兜底档 8000）
+	 * @param text     原始结果文本
 	 */
-	public String forModel(String text) {
+	public Truncation forModel(String toolName, String text) {
 		if (text == null || text.isEmpty()) {
-			return text == null ? "" : text;
+			return Truncation.untouched(text);
 		}
-		int maxChars = this.properties.getToolResult().getMaxChars();
-		int maxRows = this.properties.getToolResult().getMaxRows();
-		int totalChars = text.length();
-		int totalRows = countRows(text);
+		AiProperties.ResultBudget.Model model = this.properties.getResultBudget().getModel();
+		int maxRows = model.getMaxRows();
+		int maxChars = maxCharsFor(toolName, model);
+		int originalChars = text.length();
 
-		if (maxRows > 0 && totalRows > maxRows) {
-			String head = firstRows(text, maxRows);
-			return head + marker(totalRows, totalChars, "仅前 " + maxRows + " 行");
+		if (TruncationContract.looksStructured(text)) {
+			// 结构化结果：行数语义不适用（一行 JSON），只按字符档判
+			if (maxChars <= 0 || originalChars <= maxChars) {
+				return Truncation.untouched(text);
+			}
+			return structured(text, maxChars);
 		}
-		if (maxChars > 0 && totalChars > maxChars) {
-			return text.substring(0, maxChars) + marker(totalRows, totalChars, "仅前 " + maxChars + " 字符");
+
+		int totalRows = countRows(text);
+		boolean rowsCut = maxRows > 0 && totalRows > maxRows;
+		String kept = rowsCut ? firstRows(text, maxRows) : text;
+		boolean charsCut = maxChars > 0 && kept.length() > maxChars;
+		if (!rowsCut && !charsCut) {
+			return Truncation.untouched(text);
 		}
-		return text;
+
+		String notice = notice(originalChars, totalRows, kept.length(), maxRows, maxChars, rowsCut);
+		if (maxChars > 0) {
+			// 标记长度计入预算：正文只拿"上限 − 标记"的额度
+			int budget = maxChars - marker(notice).length();
+			kept = cutChars(kept, Math.max(0, budget));
+			notice = notice(originalChars, totalRows, kept.length(), maxRows, maxChars, rowsCut);
+			int second = maxChars - marker(notice).length();
+			if (kept.length() > second) {
+				kept = cutChars(kept, Math.max(0, second));
+				notice = notice(originalChars, totalRows, kept.length(), maxRows, maxChars, rowsCut);
+			}
+		}
+		String visited = kept + marker(notice);
+		return new Truncation(true, TruncationContract.STRATEGY_HEAD, originalChars, visited.length(), notice,
+				visited);
+	}
+
+	/** 兼容口（无工具名 ⇒ 兜底档）。 */
+	public String forModel(String text) {
+		return forModel(null, text).text();
 	}
 
 	/** 是否被裁剪过（供诊断/帧字段标注；判据只认标记，避免"恰好等长"的误判）。 */
@@ -68,10 +148,60 @@ public class ToolResultLimiter {
 		return text != null && text.contains(TRUNCATION_MARKER);
 	}
 
-	private static String marker(int rows, int chars, String kept) {
-		return TRUNCATION_MARKER + "原 " + rows + " 行 / " + chars + " 字符，" + kept
-				+ "；完整结果见本轮工具调用记录（前端帧受单帧字节上限约束、台账为全文；"
-				+ "T3-10 口径）。如需更多细节，请缩小查询范围或分页获取。]";
+	private int maxCharsFor(String toolName, AiProperties.ResultBudget.Model model) {
+		if (toolName == null || toolName.isBlank()) {
+			return model.getFallbackMaxChars();
+		}
+		Integer explicit = model.getPerTool() == null ? null : model.getPerTool().get(toolName);
+		if (explicit != null) {
+			return explicit;
+		}
+		if (this.toolRegistry != null && this.toolRegistry.getMeta(toolName) == null) {
+			return model.getFallbackMaxChars();
+		}
+		return model.getDefaultMaxChars();
+	}
+
+	/**
+	 * 结构化结果的整体标记（<b>不</b>按字符切 JSON）。
+	 *
+	 * <p>标记本身是合法 JSON；{@code preview} 是原文的头部分片（普通字符串字段，转义由
+	 * Jackson 负责），既让模型能判读"这大概是什么"，又不产生半截 JSON。
+	 */
+	private static Truncation structured(String text, int maxChars) {
+		int originalChars = text.length();
+		String notice = "结构化结果（JSON）超限：原 " + originalChars + " 字符 > 上限 " + maxChars
+				+ " 字符，未做字符截断（截断会产生非法 JSON）；已整体标记并保留头部预览，"
+				+ "完整结果见本轮工具调用记录。如需更多细节，请缩小查询范围或分页获取。";
+		String marker = TruncationContract.jsonMarker("", originalChars, notice);
+		int previewBudget = maxChars - marker.length();
+		String preview = previewBudget > 0 ? cutChars(text, previewBudget) : "";
+		for (int i = 0; i < 4; i++) {
+			marker = TruncationContract.jsonMarker(preview, originalChars, notice);
+			if (marker.length() <= maxChars) {
+				break;
+			}
+			int over = marker.length() - maxChars;
+			preview = cutChars(preview, Math.max(0, preview.length() - over));
+		}
+		marker = TruncationContract.jsonMarker(preview, originalChars, notice);
+		return new Truncation(true, TruncationContract.STRATEGY_HEAD, originalChars, marker.length(), notice,
+				marker);
+	}
+
+	private static String marker(String notice) {
+		String body = notice.startsWith(NOTICE_PREFIX) ? notice.substring(NOTICE_PREFIX.length()) : notice;
+		return TRUNCATION_MARKER + body + "]";
+	}
+
+	private static String notice(int originalChars, int totalRows, int returnedChars, int maxRows, int maxChars,
+			boolean rowsCut) {
+		String keptDescription = rowsCut ? "仅前 " + maxRows + " 行" : "共 " + totalRows + " 行";
+		return NOTICE_PREFIX + "原 " + totalRows + " 行 / " + originalChars + " 字符，" + keptDescription + "，返回 " + returnedChars
+				+ " 字符（上限：" + (maxRows > 0 ? maxRows + " 行" : "行数不限") + " / "
+				+ (maxChars > 0 ? maxChars + " 字符" : "字符不限") + "；strategy="
+				+ TruncationContract.STRATEGY_HEAD + "）。完整结果见本轮工具调用记录（台账为全文）；"
+				+ "如需更多细节，请缩小查询范围或分页获取。";
 	}
 
 	/**
@@ -105,6 +235,21 @@ public class ToolResultLimiter {
 			}
 		}
 		return text;
+	}
+
+	/** 按字符截断到 budget（不切断代理对）。 */
+	private static String cutChars(String text, int budget) {
+		if (text == null || budget <= 0) {
+			return "";
+		}
+		if (text.length() <= budget) {
+			return text;
+		}
+		int end = budget;
+		if (Character.isHighSurrogate(text.charAt(end - 1))) {
+			end--;
+		}
+		return text.substring(0, end);
 	}
 
 	private static int countChar(String text, char target) {

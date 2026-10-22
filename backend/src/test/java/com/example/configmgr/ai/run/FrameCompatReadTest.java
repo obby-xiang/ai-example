@@ -34,7 +34,7 @@ class FrameCompatReadTest {
 
 	private final SseChatEmitter out = new SseChatEmitter(RUN_ID, new InMemoryRunStore(), this.frames, MAPPER,
 			Runnable::run, com.example.configmgr.ai.config.AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY,
-			com.example.configmgr.ai.config.AiProperties.Frame.DEFAULT_MAX_BYTES, SseWriteBudget.direct(), null, null);
+			com.example.configmgr.ai.config.AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.direct(), null, null);
 
 	/** M13：升级后新写已不进 LIST，但迁移前写进 LIST 的帧仍能完整回放。 */
 	@Test

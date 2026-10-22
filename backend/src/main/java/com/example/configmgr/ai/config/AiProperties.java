@@ -6,6 +6,8 @@ import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 import java.time.Duration;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 /**
  * AI Runtime 运行参数（规格书 S4.2 §4 配置键表，逐键对应）。
@@ -49,9 +51,7 @@ public class AiProperties {
 
 	private Tool tool = new Tool();
 
-	private ToolResult toolResult = new ToolResult();
-
-	private Frame frame = new Frame();
+	private ResultBudget resultBudget = new ResultBudget();
 
 	private Lease lease = new Lease();
 
@@ -189,6 +189,66 @@ public class AiProperties {
 		if (window == null || window.isZero() || window.isNegative()) {
 			throw new IllegalStateException("app.ai.limit.window 必须 > 0（当前 = " + window
 					+ "）：Lua 的 PEXPIRE 0/负值会立刻删键 ⇒ 计数永远归零、限流静默失效");
+		}
+	}
+
+	/**
+	 * 启动期校验 {@code app.ai.result-budget.*}（G5 双通道对齐批）。
+	 *
+	 * <p>
+	 * 这里的坏值都不是"性能降级"，而是<b>静默关闸或两侧口径分叉</b>：
+	 * <ul>
+	 * <li>{@code ui.max-frame-bytes <= 0} ⇒ {@code FrameSizeLimiter} 把 {@code <= 0} 读成"不限制"，
+	 * 单帧上限静默失效（一个超大 {@code result} 直接压垮订阅者）；</li>
+	 * <li>{@code callback.max-chars <= 0} ⇒ 回灌端点把每次回灌都"截成空 + 标记"，
+	 * 前端工具永远拿不到结果（比拒绝更隐蔽）；</li>
+	 * <li>{@code default-max-chars / fallback-max-chars < 0} ⇒ 负值在裁剪器里等价于"不限制"，
+	 * 与"0 = 不限制"的显式口径撞车（写错一个符号就把上下文成本控制关掉）；</li>
+	 * <li>{@code per-tool} 的负值 ⇒ 只影响单个工具，同样会让该工具的结果整段落进模型上下文。</li>
+	 * </ul>
+	 * 故启动即失败，并点名具体键与当前值（{@code per-tool} 还点名工具名）。
+	 */
+	@PostConstruct
+	void verifyResultBudget() {
+		ResultBudget budget = this.resultBudget;
+		if (budget == null) {
+			throw new IllegalStateException("app.ai.result-budget 段缺失（绑定为 null）：工具结果预算无法装配，启动失败");
+		}
+		ResultBudget.Model model = budget.getModel();
+		if (model == null) {
+			throw new IllegalStateException("app.ai.result-budget.model 段缺失（绑定为 null）：启动失败");
+		}
+		if (model.getMaxRows() < 0) {
+			throw new IllegalStateException("app.ai.result-budget.model.max-rows 不得为负（当前 = "
+					+ model.getMaxRows() + "）：0 = 不限制；负值只会让行数闸静默失效");
+		}
+		if (model.getDefaultMaxChars() < 0) {
+			throw new IllegalStateException("app.ai.result-budget.model.default-max-chars 不得为负（当前 = "
+					+ model.getDefaultMaxChars() + "）：0 = 不限制；负值在裁剪器里同样等于关掉上限");
+		}
+		if (model.getFallbackMaxChars() < 0) {
+			throw new IllegalStateException("app.ai.result-budget.model.fallback-max-chars 不得为负（当前 = "
+					+ model.getFallbackMaxChars() + "）：0 = 不限制；未知工具的兜底档不允许静默关闸");
+		}
+		if (model.getPerTool() != null) {
+			for (Map.Entry<String, Integer> entry : model.getPerTool().entrySet()) {
+				if (entry.getValue() == null || entry.getValue() < 0) {
+					throw new IllegalStateException("app.ai.result-budget.model.per-tool." + entry.getKey()
+							+ " 不得为负（当前 = " + entry.getValue() + "）：0 = 该工具不限制");
+				}
+			}
+		}
+		ResultBudget.Ui ui = budget.getUi();
+		if (ui == null || ui.getMaxFrameBytes() <= 0) {
+			throw new IllegalStateException("app.ai.result-budget.ui.max-frame-bytes 必须 > 0（当前 = "
+					+ (ui == null ? "段缺失" : ui.getMaxFrameBytes())
+					+ "）：0/负值会被帧侧读成\"不限制\"，单帧上限静默失效");
+		}
+		ResultBudget.Callback callback = budget.getCallback();
+		if (callback == null || callback.getMaxChars() <= 0) {
+			throw new IllegalStateException("app.ai.result-budget.callback.max-chars 必须 > 0（当前 = "
+					+ (callback == null ? "段缺失" : callback.getMaxChars())
+					+ "）：0/负值会把每次前端回灌都截成空（前端工具永远拿不到结果）");
 		}
 	}
 
@@ -637,27 +697,89 @@ public class AiProperties {
 	}
 
 	/**
-	 * 工具结果<b>回填模型</b>时的上限（DC-14 T2 / R10-1 落实，§13.2 #9"回填截断长度"的取值落点）。
+	 * <b>双通道结果预算的单一配置对象</b>（G5 双通道对齐批；{@code app.ai.result-budget.*}）。
 	 *
-	 * <p>
-	 * <b>只约束"给模型看的"那一份</b>：工具结果进 {@code role:tool} 消息前按行数与字符数裁剪；
-	 * 发给前端的 {@code tool_result} 帧与 Redis 台账里的 {@code resultText} 都是<b>全文</b>
-	 * （两条通道分离，前端渲染/取证不受模型侧上限影响）。
+	 * <h2>为什么收敛成一个对象</h2>
+	 * 同一份工具结果有两个消费者：模型（{@code role:tool} 消息）与前端（SSE {@code tool_result} 帧 +
+	 * Redis 台账）。两者的成本不同 —— 模型侧是<b>字符</b>（上下文窗口），前端侧是<b>单帧字节</b>
+	 * （传输与渲染）—— 但阈值此前分居 {@code app.ai.tool-result}、{@code app.ai.frame} 与
+	 * {@code AiController} 的类内常量 三处，各改各的：模型侧悄悄停在 8000，
+	 * 前端却按"全文"承诺渲染，人机看到的是两份不同的事实。现在两侧阈值
+	 * <b>独立可调、同源可查</b>，并由 {@code ToolResultLimiter} / {@code FrameSizeLimiter} 共用
+	 * 同一套截断字段（{@code truncated/strategy/originalChars/returnedChars/notice}）。
 	 *
-	 * <p>
-	 * 为什么必须配置化：万行级设计目标下，一个 {@code list_*} 类工具的输出可以轻易占满整轮上下文，
-	 * 而"到底多少行合适"取决于模型窗口与业务密度，不能写死在代码里。初值 200 行 / 8000 字符
-	 * 依 R10-1 建议值，实际取值随 §13.2 #9 压测复核。
+	 * <h2>模型侧分档</h2>
+	 * <ul>
+	 * <li>{@code model.default-max-chars}（20000）：<b>具名工具</b>的默认档。业界常见 10k–25k token
+	 * ≈ 4 万字符量级，8000 字符偏保守（一轮两次 {@code list_*} 就把窗口吃掉）；</li>
+	 * <li>{@code model.per-tool.*}：逐工具覆盖（长文本类工具可以更小，摘要类可以更大）；</li>
+	 * <li>{@code model.fallback-max-chars}（8000）：<b>拿不到工具名 / 未注册工具</b>的兜底档，
+	 * 保持旧口径，避免"不知道是什么结果"时放大上下文风险。</li>
+	 * </ul>
+	 *
+	 * <h2>0 的语义</h2>
+	 * {@code model.max-rows / default-max-chars / fallback-max-chars} 取 0 表示<b>不限制</b>
+	 * （沿用 DC-14 T2 的既有口径，压测对照要用）；负值启动失败。{@code ui.max-frame-bytes} 与
+	 * {@code callback.max-chars} 必须 &gt; 0 —— 它们不是"性能参数"，而是"宁可截断也不产坏帧/坏链路"
+	 * 的安全阀，配成 0 等于静默关闸。
 	 */
 	@Data
-	public static class ToolResult {
+	public static class ResultBudget {
 
-		/** 回填模型的最大行数（超出即截断并附截断标记）。 */
-		private int maxRows = 200;
+		private Model model = new Model();
 
-		/** 回填模型的最大字符数（行数未超但字符超限时同样截断）。 */
-		private int maxChars = 8000;
+		private Ui ui = new Ui();
+
+		private Callback callback = new Callback();
+
+		/** 模型侧（{@code role:tool} 回填）的预算与分档。 */
+		@Data
+		public static class Model {
+
+			/** 回填模型的最大行数（0 = 不限；JSON 转义形态的 {@code \n} 也计行）。 */
+			private int maxRows = 200;
+
+			/** 具名工具的默认字符上限（0 = 不限；G5 由 8000 提到 20000）。 */
+			private int defaultMaxChars = 20_000;
+
+			/** 拿不到工具名 / 未注册工具的兜底字符上限（0 = 不限；保留旧的 8000 口径）。 */
+			private int fallbackMaxChars = 8_000;
+
+			/** 逐工具覆盖（工具名 → 字符上限；0 = 该工具不限）。 */
+			private Map<String, Integer> perTool = new LinkedHashMap<>();
+		}
+
+		/** 前端/SSE 侧的单帧预算。 */
+		@Data
+		public static class Ui {
+
+			/** 单帧 JSON 的 UTF-8 字节上限的<b>单一事实源</b>（缺省 64KB）。 */
+			public static final int DEFAULT_MAX_FRAME_BYTES = 64 * 1024;
+
+			/**
+			 * 单帧 JSON 的 UTF-8 字节上限（64KB）。
+			 *
+			 * <p>判定口径（A19）：<b>整帧 JSON 的 UTF-8 字节数</b>；超限时对 {@code text}/{@code result}
+			 * 的值做<b>字段级</b>降采样（普通文本头部截断；JSON 整体标记）+ 统一截断字段，
+			 * <b>严禁</b>帧字节级截断 —— 后者破坏 JSON，坏帧在回放读路径（{@code RunStore#events}）
+			 * 被静默忽略，表现为 seq 洞。
+			 *
+			 * <p>语义边界（G5）：本键是<b>单帧字节上限</b>，不是"结果长度上限"。超限时产出的是
+			 * <b>一份完整合法的帧</b>（字段级降采样/标记），不做跨帧分片；分片协议（续帧/引用 handle）
+			 * 与超大结果 spill 一并挂账，见 {@code ToolResultLimiter} 类注。
+			 */
+			private int maxFrameBytes = DEFAULT_MAX_FRAME_BYTES;
+		}
+
+		/** 前端工具结果回灌端点（{@code POST /api/ai/frontend-tool-result}）的单条上限。 */
+		@Data
+		public static class Callback {
+
+			/** 回灌载荷的字符上限（超限<b>截断 + 标记</b>，不 400 —— 拒绝回灌会让这一轮永久挂起）。 */
+			private int maxChars = 8_000;
+		}
 	}
+
 
 	/**
 	 * 租约（fencing）设施参数（B23L1 批②a；设计稿 §2.2）。
@@ -711,30 +833,6 @@ public class AiProperties {
 
 		/** 是否启用资源互斥（{@code ai:lock:*}）。false ⇒ 使用方不抢锁、不释放（本层不续租，见 {@link Lease#getResourceTtl()}）。 */
 		private boolean enabled = true;
-	}
-
-	/**
-	 * SSE 单帧上限（T3-10 裁定，{@code app.ai.frame.max-bytes}）。
-	 *
-	 * <p>判定口径（A19）：<b>整帧 JSON 的 UTF-8 字节数</b>；超限时对 {@code text}/{@code result}
-	 * 的值做<b>字段级</b>字符截断 + 独立标记字段 {@code truncated}/{@code truncatedReason}，
-	 * <b>严禁</b>帧字节级截断 —— 后者破坏 JSON，坏帧在回放读路径（{@code RunStore#events}）被
-	 * 静默忽略，表现为 seq 洞。
-	 *
-	 * <p><b>口径变更（A21）</b>：本上限<b>优先于</b> T2"给前端看的帧全文不裁剪"的承诺 ——
-	 * 前端帧从"永不裁剪"变为"受单帧上限约束的字段级截断 + 标记"
-	 * （{@link com.example.configmgr.ai.tool.ToolResultLimiter} 的 javadoc 已同步修订）。
-	 *
-	 * <p>取值 64KB（A20 定案；"单键理论最大 ≈192MB，M1 不做额外限制"记观察项）。
-	 */
-	@Data
-	public static class Frame {
-
-		/** 单帧 JSON 的 UTF-8 字节上限的<b>单一事实源</b>（缺省 64KB；写出器装配路径与配置项同取本常量）。 */
-		public static final int DEFAULT_MAX_BYTES = 64 * 1024;
-
-		/** 单帧 JSON 的 UTF-8 字节上限（64KB）。 */
-		private int maxBytes = DEFAULT_MAX_BYTES;
 	}
 
 	/**

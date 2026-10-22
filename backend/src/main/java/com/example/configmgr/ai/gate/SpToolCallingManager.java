@@ -87,7 +87,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * 同一个工具结果有两份去向，<b>口径刻意不同</b>：
  * <ul>
  * <li><b>给模型看的</b>：{@code role:tool} 的 {@code responseData} —— 经
- * {@link ToolResultLimiter} 按 {@code app.ai.tool-result.max-rows|max-chars} 裁剪（防上下文膨胀）；</li>
+ * {@link ToolResultLimiter} 按 {@code app.ai.result-budget.model.max-rows|default-max-chars} 裁剪（防上下文膨胀）；</li>
  * <li><b>给前端/台账看的</b>：{@code tool_result} 帧的 {@code result} 与
  * {@code ai:ledger:<runId>} 的 {@code resultText} —— <b>全文</b>，不裁剪。</li>
  * </ul>
@@ -1140,7 +1140,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 */
 	private String modelData(PendingToolCall pending, String text) {
 		return ToolResultEnvelope.of(pending.effectiveOutcome(), pending.effectiveCode(), text,
-				pending.getArguments()).toModelJson(this.limiter);
+				pending.getArguments()).toModelJson(this.limiter, pending.getName());
 	}
 
 	// ── 辅助 ────────────────────────────────────────────────────────────────

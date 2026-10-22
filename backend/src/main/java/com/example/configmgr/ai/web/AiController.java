@@ -30,6 +30,7 @@ import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.run.StartupResumeRunner;
 import com.example.configmgr.ai.session.SessionGate;
 import com.example.configmgr.ai.tool.FrontendToolGuard;
+import com.example.configmgr.ai.tool.TruncationContract;
 import com.example.configmgr.common.ApiResponse;
 import com.example.configmgr.job.service.JobWatchdog;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -468,16 +469,32 @@ public class AiController {
 		boolean cancelled = Boolean.TRUE.equals(request.cancelled());
 		// 防护批③ B2-7：回灌载荷闸 —— 机器数据超限**截断并标记**（不像用户输入那样 400：
 		// 表格摘要本来就可能很长，拒绝回灌会让前端工具永远无法收尾）。
+		// G5：上限来自 app.ai.result-budget.callback.max-chars（不再是类内常量），
+		// 截断标记计入预算，响应体与工具结果帧共用同一套截断字段（truncated/strategy/
+		// originalChars/returnedChars/notice）。
+		int callbackMaxChars = this.properties.getResultBudget().getCallback().getMaxChars();
 		String result = request.result();
 		boolean truncated = false;
-		if (result != null && result.length() > FRONTEND_RESULT_MAX_CHARS) {
-			result = result.substring(0, FRONTEND_RESULT_MAX_CHARS) + "…（结果过长已截断）";
+		int originalChars = result == null ? 0 : result.length();
+		int returnedChars = originalChars;
+		String notice = null;
+		if (result != null && result.length() > callbackMaxChars) {
+			notice = "结果过长已截断：原 " + originalChars + " 字符，上限 " + callbackMaxChars
+					+ " 字符；strategy=" + TruncationContract.STRATEGY_HEAD;
+			String marker = "…（" + notice + "）";
+			int budget = Math.max(0, callbackMaxChars - marker.length());
+			int end = Math.min(budget, result.length());
+			if (end > 0 && Character.isHighSurrogate(result.charAt(end - 1))) {
+				end--;
+			}
+			result = result.substring(0, end) + marker;
 			truncated = true;
+			returnedChars = result.length();
 			if (this.securityEvents != null) {
 				this.securityEvents.payloadTruncated();
 			}
 			log.info("前端工具结果超限已截断 runId={} toolCallId={} 原长度={} 上限={}", request.runId(),
-					request.toolCallId(), request.result().length(), FRONTEND_RESULT_MAX_CHARS);
+					request.toolCallId(), originalChars, callbackMaxChars);
 		}
 		ConfirmGate.Submission submission;
 		// 日志链路批：回灌同样落在 HTTP 线程上（同 /confirm 的口径）
@@ -515,6 +532,12 @@ public class AiController {
 		body.put("resumeOutcome", submission.resumeTrigger().outcome());
 		body.put("storedBy", this.runStore.instanceId());
 		body.put("truncated", truncated);
+		if (truncated) {
+			body.put(TruncationContract.STRATEGY_FIELD, TruncationContract.STRATEGY_HEAD);
+			body.put(TruncationContract.ORIGINAL_CHARS_FIELD, originalChars);
+			body.put(TruncationContract.RETURNED_CHARS_FIELD, returnedChars);
+			body.put(TruncationContract.NOTICE_FIELD, notice);
+		}
 		return ResponseEntity.ok(body);
 	}
 
@@ -1308,12 +1331,6 @@ public class AiController {
 
 	/** 确认门 {@code reason} 的字符上限（防护批③ B2-6；与 {@code ai_feedback.reason} 同尺）。 */
 	public static final int REASON_MAX_CHARS = 1024;
-
-	/**
-	 * 前端工具结果回灌的单条字符上限（防护批③ B2-7；与 {@code app.ai.tool-result.max-chars} 同尺）。
-	 * 超限<b>截断 + 标记</b>而不是 400 —— 见 {@code frontendToolResult} 的注释。
-	 */
-	public static final int FRONTEND_RESULT_MAX_CHARS = 8000;
 
 	/** 挂起项快照（诊断用：确认门/前端工具各自等在哪里）。 */
 	@GetMapping("/pending/{runId}")

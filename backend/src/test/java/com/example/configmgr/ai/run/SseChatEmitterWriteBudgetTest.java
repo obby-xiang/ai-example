@@ -130,7 +130,7 @@ class SseChatEmitterWriteBudgetTest {
 		// 投递走本用例线程（Runnable::run）⇒ drain 在本线程里等 future.get，可由辅助线程精确打断它；
 		// 写预算给到 30s ⇒ 唯一能让 write 提前返回的就是中断本身（不是超时）。
 		SseChatEmitter out = new SseChatEmitter(RUN_ID, store, MAPPER, Runnable::run, 256,
-				AiProperties.Frame.DEFAULT_MAX_BYTES, SseWriteBudget.on(this.writerPool, 30_000L));
+				AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.on(this.writerPool, 30_000L));
 		MonitorFaithfulEmitter slow = new MonitorFaithfulEmitter(true, false);
 		out.attach(slow.emitter());
 
@@ -243,7 +243,7 @@ class SseChatEmitterWriteBudgetTest {
 	void directBudgetKeepsTheInlineSendPath() throws Exception {
 		InMemoryRunStore store = new InMemoryRunStore();
 		SseChatEmitter out = new SseChatEmitter(RUN_ID, store, MAPPER, this.deliveryPool, 256,
-				AiProperties.Frame.DEFAULT_MAX_BYTES);
+				AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES);
 		MonitorFaithfulEmitter wire = new MonitorFaithfulEmitter(false, false);
 		out.attach(wire.emitter());
 
@@ -258,7 +258,7 @@ class SseChatEmitterWriteBudgetTest {
 
 	private SseChatEmitter budgeted(InMemoryRunStore store, int queueCapacity, long writeTimeoutMillis) {
 		return new SseChatEmitter(RUN_ID, store, MAPPER, this.deliveryPool, queueCapacity,
-				AiProperties.Frame.DEFAULT_MAX_BYTES,
+				AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES,
 				SseWriteBudget.on(this.writerPool, writeTimeoutMillis));
 	}
 

@@ -69,8 +69,8 @@ class ToolResultEnvelopeTest {
 
 	@Test
 	void modelJsonTruncatesMessageBeforeAssemblingSoJsonStaysValid() throws Exception {
-		properties.getToolResult().setMaxRows(2);
-		properties.getToolResult().setMaxChars(0);
+		properties.getResultBudget().getModel().setMaxRows(2);
+		properties.getResultBudget().getModel().setDefaultMaxChars(0);
 		ToolResultLimiter limiter = new ToolResultLimiter(properties);
 		String longMessage = "- 第 1 行\n- 第 2 行\n- 第 3 行\n- 第 4 行";
 
@@ -114,8 +114,8 @@ class ToolResultEnvelopeTest {
 
 	@Test
 	void modelJsonStillTruncatesBeforeDelimiting() throws Exception {
-		properties.getToolResult().setMaxRows(2);
-		properties.getToolResult().setMaxChars(0);
+		properties.getResultBudget().getModel().setMaxRows(2);
+		properties.getResultBudget().getModel().setDefaultMaxChars(0);
 		ToolResultLimiter limiter = new ToolResultLimiter(properties);
 
 		String modelJson = ToolResultEnvelope.ok("- 第 1 行\n- 第 2 行\n- 第 3 行", "{}").toModelJson(limiter);

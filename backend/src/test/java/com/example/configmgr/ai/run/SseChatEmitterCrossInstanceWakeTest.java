@@ -272,7 +272,7 @@ class SseChatEmitterCrossInstanceWakeTest {
 
 	private SseChatEmitter emitter(String instance) {
 		return new SseChatEmitter(RUN_ID, this.store, this.frames, new ObjectMapper(), Runnable::run,
-				AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY, AiProperties.Frame.DEFAULT_MAX_BYTES,
+				AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY, AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES,
 				SseWriteBudget.direct(), this.bus, this.listener);
 	}
 

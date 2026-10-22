@@ -111,7 +111,7 @@ class SseChatEmitterFrameStoreTest {
 
 	private SseChatEmitter emitter(RunStore store) {
 		return new SseChatEmitter(RUN_ID, store, this.frames, this.mapper, Runnable::run,
-				AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY, AiProperties.Frame.DEFAULT_MAX_BYTES,
+				AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY, AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES,
 				SseWriteBudget.direct(), this.bus, null);
 	}
 

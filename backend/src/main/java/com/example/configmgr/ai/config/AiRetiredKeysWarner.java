@@ -12,7 +12,7 @@ import java.util.Map;
  * 退役配置键的启动告警（超时面治理批① 第 7 项）。
  *
  * <h2>为什么要告警而不是静默忽略</h2>
- * 这四个键已从绑定类里删除（{@link AiProperties} 类注逐条说明），但 {@code application.yml}、
+ * 这些键已从绑定类里删除（{@link AiProperties} 类注逐条说明），但 {@code application.yml}、
  * 部署脚本、运维的 {@code --app.ai.xxx=} 命令行参数里可能还留着它们。Spring Boot 对"没人绑定的
  * 属性"<b>不报错也不提示</b> —— 于是"我把 confirm-timeout 调成 600s 了"会得到"其实什么都没发生"，
  * 而现场看到的仍然是旧行为。与 {@link AiProperties#verifySseWriteTimeout()} 同一姿态：
@@ -47,11 +47,18 @@ public class AiRetiredKeysWarner {
 				"官方工具循环的退出条件已取代迭代上限（无替代键：上限由 total-budget 与工具循环自身判）");
 		keys.put("app.ai.thinking-disabled",
 				"reasoning 补丁不再下发 extraBody.thinking（无替代键：思考开关由模型侧参数决定）");
+		keys.put("app.ai.tool-result.max-rows",
+				"G5 双通道对齐：改用 app.ai.result-budget.model.max-rows（单一配置对象，两侧阈值同源）");
+		keys.put("app.ai.tool-result.max-chars",
+				"G5 双通道对齐：具名工具默认档改用 app.ai.result-budget.model.default-max-chars（20000），"
+						+ "未知工具兜底档见 fallback-max-chars（8000），逐工具覆盖见 per-tool");
+		keys.put("app.ai.frame.max-bytes",
+				"G5 双通道对齐：改用 app.ai.result-budget.ui.max-frame-bytes（单帧字节上限语义不变）");
 		return keys;
 	}
 
 	/**
-	 * 命中即逐键 WARN（一次启动最多 4 条），并在末尾给一条"共 n 项"的汇总，便于日志检索。
+	 * 命中即逐键 WARN（一次启动最多 RETIRED_KEYS.size() 条），并在末尾给一条"共 n 项"的汇总，便于日志检索。
 	 *
 	 * <p>刻意不 fail-fast：这几个键留着不影响正确性（它们只是不再被读），为此拒绝启动会让
 	 * "升级到本版"变成需要先改配置的动作。

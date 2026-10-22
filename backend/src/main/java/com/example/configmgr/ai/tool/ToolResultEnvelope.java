@@ -27,16 +27,21 @@ import java.util.Map;
  * <li>{@code retryable}：由 outcome + code 推导（见 {@link ToolOutcome#retryable(String)}）；</li>
  * <li>{@code target}：从工具参数 JSON 提取的 {@code {taskId?, defCode?, step?, page?}}，提取不到为 null；</li>
  * <li>{@code evidence}：一期恒为 null（证据面后续单独施工）；</li>
- * <li>{@code message}：原有的人读文本（越 scope/拒绝/超时文案一字不改）。</li>
+ * <li>{@code message}：原有的人读文本（越 scope/拒绝/超时文案一字不改）；</li>
+ * <li>{@code truncated/strategy/originalChars/returnedChars/notice}：<b>统一截断字段契约</b>
+ * （G5；定义见 {@link TruncationContract}）—— 与 SSE 帧侧同名字段同源，模型因此能看见
+ * "这份结果不是全部"，而不是把前 N 字符当成全部。</li>
  * </ul>
  *
  * <p>
  * <b>裁剪顺序</b>：模型侧必须先对 {@code message} 跑 {@link ToolResultLimiter#forModel}，
- * 再序列化整份 JSON（{@link #toModelJson(ToolResultLimiter)}）—— 先组装后截断会把 JSON 本身截坏。
+ * 再序列化整份 JSON（{@link #toModelJson(ToolResultLimiter, String)}）—— 先组装后截断会把
+ * JSON 本身截坏。
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 public record ToolResultEnvelope(boolean ok, String code, String outcome, boolean retryable,
-		Map<String, Object> target, Object evidence, String message) {
+		Map<String, Object> target, Object evidence, String message, boolean truncated, String strategy,
+		int originalChars, int returnedChars, String notice) {
 
 	/** 目标资源提取的字段白名单（顺序即序列化顺序）。 */
 	private static final List<String> TARGET_KEYS = List.of("taskId", "defCode", "step", "page");
@@ -79,8 +84,9 @@ public record ToolResultEnvelope(boolean ok, String code, String outcome, boolea
 	/** 统一工厂：outcome 为 null 时按 {@link ToolOutcome#UNKNOWN}（未知不等于失败）。 */
 	public static ToolResultEnvelope of(ToolOutcome outcome, String code, String message, String argumentsJson) {
 		ToolOutcome effective = outcome == null ? ToolOutcome.UNKNOWN : outcome;
+		String text = message == null ? "" : message;
 		return new ToolResultEnvelope(effective.ok(), code, effective.wire(), effective.retryable(code),
-				targetOf(argumentsJson), null, message == null ? "" : message);
+				targetOf(argumentsJson), null, text, false, null, text.length(), text.length(), null);
 	}
 
 	/** 从参数 JSON 提取目标资源；没有可提取字段/解析失败一律 null。 */
@@ -135,9 +141,26 @@ public record ToolResultEnvelope(boolean ok, String code, String outcome, boolea
 	 * 边界：SSE {@code tool_result} 帧与执行台账走 {@link #toJson()}（<b>不</b>加外壳）。
 	 */
 	public String toModelJson(ToolResultLimiter limiter) {
-		String limited = limiter == null ? this.message : limiter.forModel(this.message);
+		return toModelJson(limiter, null);
+	}
+
+	/**
+	 * 模型侧形态（分档版，G5）：按<b>工具名</b>取预算档
+	 * （{@code app.ai.result-budget.model.per-tool/default/fallback}），先裁剪再组装。
+	 *
+	 * <p>
+	 * 截断判定（{@link ToolResultLimiter.Truncation}）同时写进信封的五个统一字段；
+	 * 于是"模型看到的 message 被裁过"这件事在 JSON 里可读，而不是只藏在文本标记里。
+	 *
+	 * @param limiter  裁剪器（null = 不裁剪，仅测试/诊断）
+	 * @param toolName 工具名（null/空白 ⇒ 兜底档 8000）
+	 */
+	public String toModelJson(ToolResultLimiter limiter, String toolName) {
+		ToolResultLimiter.Truncation truncation = limiter == null ? ToolResultLimiter.Truncation.untouched(this.message)
+				: limiter.forModel(toolName, this.message);
 		String json = new ToolResultEnvelope(this.ok, this.code, this.outcome, this.retryable, this.target,
-				this.evidence, limited).toJson();
+				this.evidence, truncation.text(), truncation.truncated(), truncation.strategy(),
+				truncation.originalChars(), truncation.returnedChars(), truncation.notice()).toJson();
 		return TOOL_RESULT_NOTICE + "\n" + TOOL_RESULT_OPEN + "\n" + json + "\n" + TOOL_RESULT_CLOSE;
 	}
 
