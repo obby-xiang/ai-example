@@ -31,7 +31,9 @@
         </el-button>
       </el-alert>
 
-      <DefSelector v-model="selectedDefs" :defs="defs" :loading="defsLoading" :disabled="isReadOnly" />
+      <div ref="aiSelectDefsRef">
+        <DefSelector v-model="selectedDefs" :defs="defs" :loading="defsLoading" :disabled="isReadOnly" ai-ref-prefix="import.selectDefs" />
+      </div>
 
       <div
         ref="aiUploadRowRef"
@@ -63,23 +65,32 @@
       </div>
 
       <template v-if="editorDefs.length">
-        <el-tabs v-model="activeEditorTab" type="border-card" @tab-change="onEditorTabChange">
-          <el-tab-pane v-for="def in editorDefs" :key="def.code" :name="def.code">
-            <template #label>
-              {{ def.name }}（{{ def.code }}）
-              <el-tag v-if="uploadedFiles[def.code]" size="small" type="success" class="ml-1">已上传</el-tag>
-              <el-tag v-else-if="savedDefs.has(def.code)" size="small" type="info" class="ml-1">草稿已存</el-tag>
-            </template>
-            <SpreadGrid
-              :ref="(el) => setGridRef(def.code, el)"
-              height="380px"
-              :read-only="isReadOnly"
-              :def-code="def.code"
-              :sheet-name="def.name"
-              @data-changed="onGridChanged"
-            />
-          </el-tab-pane>
-        </el-tabs>
+        <div ref="aiGridRef">
+          <el-tabs v-model="activeEditorTab" type="border-card" @tab-change="onEditorTabChange">
+            <el-tab-pane v-for="def in editorDefs" :key="def.code" :name="def.code">
+              <template #label>
+                <span
+                  :data-ai-ref="`import.grid.tab.${def.code}`"
+                  role="tab"
+                  :aria-selected="activeEditorTab === def.code ? 'true' : 'false'"
+                  data-ai-risk="read"
+                  data-ai-verbs="click,highlight"
+                  :data-ai-label="`${def.name}（${def.code}）`"
+                >{{ def.name }}（{{ def.code }}）</span>
+                <el-tag v-if="uploadedFiles[def.code]" size="small" type="success" class="ml-1">已上传</el-tag>
+                <el-tag v-else-if="savedDefs.has(def.code)" size="small" type="info" class="ml-1">草稿已存</el-tag>
+              </template>
+              <SpreadGrid
+                :ref="(el) => setGridRef(def.code, el)"
+                height="380px"
+                :read-only="isReadOnly"
+                :def-code="def.code"
+                :sheet-name="def.name"
+                @data-changed="onGridChanged"
+              />
+            </el-tab-pane>
+          </el-tabs>
+        </div>
       </template>
       <el-empty v-else description="请先勾选配置项，再下载模板 / 上传文件 / 在线编辑" :image-size="60" />
     </div>
@@ -142,10 +153,26 @@
         <template #header>
           <div class="flex justify-between items-center">
             <span>暂存数据核查</span>
-            <div class="flex items-center gap-2">
+            <div ref="aiModeRowRef" class="flex items-center gap-2">
               <el-radio-group v-model="importMode" size="small" :disabled="isReadOnly" @change="onImportModeChange">
-                <el-radio-button value="MERGE">增量合并</el-radio-button>
-                <el-radio-button value="REPLACE">范围内替换</el-radio-button>
+                <el-radio-button
+                  value="MERGE"
+                  data-ai-ref="import.mode.merge"
+                  role="radio"
+                  :aria-checked="importMode === 'MERGE' ? 'true' : 'false'"
+                  data-ai-option="MERGE"
+                  data-ai-risk="consequential"
+                  data-ai-label="增量合并"
+                >增量合并</el-radio-button>
+                <el-radio-button
+                  value="REPLACE"
+                  data-ai-ref="import.mode.replace"
+                  role="radio"
+                  :aria-checked="importMode === 'REPLACE' ? 'true' : 'false'"
+                  data-ai-option="REPLACE"
+                  data-ai-risk="consequential"
+                  data-ai-label="范围内替换"
+                >范围内替换</el-radio-button>
               </el-radio-group>
               <el-button size="small" :loading="stagingLoading" @click="loadStaging">刷新</el-button>
             </div>
@@ -1098,6 +1125,10 @@ const HANDLER_NAMES = [
 
 /** AI 可视可操作专项：上传区（区域围栏的 root；`data-ai-ref` 挂在其中的三个按钮上）。 */
 const aiUploadRowRef = ref<HTMLElement | null>(null)
+/** visop 批 B：配置项选择区 / 导入模式区 / 编辑区标签页（三个新增区域的 root）。 */
+const aiSelectDefsRef = ref<HTMLElement | null>(null)
+const aiModeRowRef = ref<HTMLElement | null>(null)
+const aiGridRef = ref<HTMLElement | null>(null)
 
 function registerHandlers(): void {
   // 批 D · D3（问题 6）：AI 触发 start_precheck / start_import 后把作业绑进本页的跟踪面。
@@ -1281,8 +1312,13 @@ onMounted(async () => {
   noteAiPage('import')
   registerHandlers()
   registerAiUploadRegion()
+  registerAiSelectDefsRegion()
+  registerAiModeRegion()
   await Promise.all([loadDefinitions(), loadTask()])
   await loadEditors()
+  // 编辑区标签页是 `v-if` 渲染的：挂载期可能还不存在，出现后再补注册（批 B / import.grid）
+  await nextTick()
+  registerAiGridRegion()
 })
 
 /**
@@ -1309,6 +1345,75 @@ function registerAiUploadRegion(): void {
   })
 }
 
+/**
+ * visop 批 B / O-2：配置项选择区（勾选框 = `mutate-local`，搜索与层级筛选同档）。
+ *
+ * 勾选只改本页/工作区的选中集，落库发生在推进步骤（`persistStepData`）⇒ 不是后果性动作。
+ */
+function registerAiSelectDefsRegion(): void {
+  const root = aiSelectDefsRef.value
+  if (!root) {
+    return
+  }
+  registerAiRegion({
+    id: 'import.selectDefs',
+    root,
+    risk: 'mutate-local',
+    page: 'import',
+    label: '配置项选择（导入向导第 1 步）',
+    readOnly: () => isReadOnly.value
+  })
+}
+
+/**
+ * visop 批 B / O-2：导入模式单选（MERGE / REPLACE）。
+ *
+ * **与 42 件 §3.4.3 的登记不同**：那里记的是 `mutate-local`，但本页 `onImportModeChange`
+ * 直接 `PUT /tasks/{id}/import-mode`（`ImportWizardView.vue:1075`）—— 是服务端写。
+ * 按 `read` = 不产生服务端写的定义，这里必须标 `consequential`：通用原语一次不点，
+ * 指路注册动作 `set_import_mode`（它进后端确认门）。
+ */
+function registerAiModeRegion(): void {
+  const root = aiModeRowRef.value
+  if (!root) {
+    return
+  }
+  registerAiRegion({
+    id: 'import.mode',
+    root,
+    risk: 'consequential',
+    page: 'import',
+    label: '导入模式（导入向导第 4 步）',
+    readOnly: () => isReadOnly.value
+  })
+}
+
+/** visop 批 B / O-2：编辑区表格标签页（切 tab = 只改视口，`read`）。 */
+function registerAiGridRegion(): void {
+  const root = aiGridRef.value
+  if (!root) {
+    unregisterAiRegion('import.grid')
+    return
+  }
+  registerAiRegion({
+    id: 'import.grid',
+    root,
+    risk: 'read',
+    page: 'import',
+    label: '编辑区标签页（导入向导第 1 步）',
+    readOnly: () => isReadOnly.value
+  })
+}
+
+// 编辑区随勾选集出现/消失：出现即注册、消失即注销（漏收 = 脏 ref）。
+watch(
+  () => editorDefs.value.length,
+  async () => {
+    await nextTick()
+    registerAiGridRegion()
+  }
+)
+
 onBeforeUnmount(() => {
   // 卸载/结束：释放全部在途订阅（原 registry.disposeAll 语义；dispose 会经 onDisposed 摘柄，
   // 先拷贝再迭代避免遍历中改表）
@@ -1320,6 +1425,9 @@ onBeforeUnmount(() => {
   // AI 可视可操作专项：区域漏收 = 跨页脏 ref（isConnected 拦得住"元素没了"，
   // 拦不住"ref 指向另一页同名元素"）
   unregisterAiRegion('import.upload')
+  unregisterAiRegion('import.selectDefs')
+  unregisterAiRegion('import.mode')
+  unregisterAiRegion('import.grid')
 })
 
 async function createAndBindTask(): Promise<void> {

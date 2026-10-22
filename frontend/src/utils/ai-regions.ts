@@ -281,10 +281,146 @@ export function riskRank(risk: AiRisk): number {
   return RISK_ORDER[risk]
 }
 
+// ── 标注治理（批 B / D7-②：DEV 告警不改变生产语义） ─────────────────────────
+
+/** 审计问题码（闭集：新增码 = 新增一条标注纪律）。 */
+export type AiRegionAuditCode =
+  | 'root-detached'
+  | 'region-empty'
+  | 'ref-duplicate'
+  | 'missing-name'
+  | 'risk-below-region'
+
+/** 一条审计结论。`ref` 缺省表示问题属于区域本身（root / 空区域）。 */
+export interface AiRegionAuditIssue {
+  code: AiRegionAuditCode
+  regionId: string
+  ref?: string
+  detail: string
+}
+
+/** 已告警过的键（同一条只 warn 一次；`resetAiRegions` 归零）。 */
+const warnedAuditKeys = new Set<string>()
+
+/** 审计输入：区域 + 该区域里带 `data-ai-ref` 的元素（由调用方遍历好再传）。 */
+export interface AiRegionAuditTarget {
+  region: AiRegion
+  elements: readonly HTMLElement[]
+}
+
+/**
+ * 结构审计：对**已注册**区域做五类检查。
+ *
+ * 为什么运行期还要审一遍（源码级审计在 `tests/ai-region-audit.spec.ts`）：源码看不见
+ * 「区域注册了但 root 被摘除」「同一 ref 被两个区域声明」这类只在挂载后才成立的缺陷。
+ * 只读、幂等、不抛错 —— 它不进任何执行路径的判定，唯一消费者是 DEV 告警与审计用例。
+ *
+ * `targets` 缺省时自行遍历；`ui_snapshot` 传入自己那一次的遍历结果，
+ * 因此 DEV 审计**不额外多扫一遍 DOM**（T-12「同一 epoch 只遍历一次」的断言不变）。
+ */
+export function auditAiRegions(targets?: readonly AiRegionAuditTarget[]): AiRegionAuditIssue[] {
+  const issues: AiRegionAuditIssue[] = []
+  const refOwners = new Map<string, string>()
+  const reportedDuplicate = new Set<string>()
+  const scopes: readonly AiRegionAuditTarget[] = targets ?? [...regions.values()].map((region) => ({
+    region,
+    elements: region.root.isConnected === true
+      ? Array.from(region.root.querySelectorAll('[data-ai-ref]')) as HTMLElement[]
+      : []
+  }))
+  for (const { region, elements } of scopes) {
+    if (region.root.isConnected !== true) {
+      issues.push({
+        code: 'root-detached',
+        regionId: region.id,
+        detail: `区域 ${region.id} 的 root 已不在文档中（ref 会指向已卸载节点）`
+      })
+      continue
+    }
+    if (elements.length === 0) {
+      issues.push({
+        code: 'region-empty',
+        regionId: region.id,
+        detail: `区域 ${region.id} 没有任何 data-ai-ref 元素（注册了却对模型不可见）`
+      })
+    }
+    for (const el of elements) {
+      const ref = el.getAttribute('data-ai-ref') ?? ''
+      if (!ref) {
+        continue
+      }
+      const owner = refOwners.get(ref)
+      if (owner !== undefined && !reportedDuplicate.has(ref)) {
+        reportedDuplicate.add(ref)
+        issues.push({
+          code: 'ref-duplicate',
+          regionId: region.id,
+          ref,
+          detail: `ref ${ref} 同时出现在区域 ${owner} 与 ${region.id}（点击会落到哪个由遍历顺序决定）`
+        })
+      } else if (owner === undefined) {
+        refOwners.set(ref, region.id)
+      }
+      if (accessibleNameOf(el) === '') {
+        issues.push({
+          code: 'missing-name',
+          regionId: region.id,
+          ref,
+          detail: `ref ${ref} 缺可访问名（data-ai-label / aria-label / title / 文案全空）`
+        })
+      }
+      const declared = el.getAttribute('data-ai-risk')
+      if (declared === 'read' || declared === 'mutate-local' || declared === 'consequential') {
+        if (RISK_ORDER[declared] < RISK_ORDER[region.risk]) {
+          issues.push({
+            code: 'risk-below-region',
+            regionId: region.id,
+            ref,
+            detail: `ref ${ref} 的风险 ${declared} 低于区域 ${region.id} 的 ${region.risk}（降级必须是有意为之）`
+          })
+        }
+      }
+    }
+  }
+  return issues
+}
+
+/**
+ * DEV 期告警：每条审计结论只 `console.warn` 一次（快照频繁调用也不刷屏）。
+ *
+ * **不改变任何返回值 / 执行路径**：生产构建里 `import.meta.env.DEV` 为 false 时整段被裁掉。
+ */
+export function warnAiRegionAudit(targets?: readonly AiRegionAuditTarget[]): AiRegionAuditIssue[] {
+  const issues = auditAiRegions(targets)
+  if (import.meta.env.DEV) {
+    for (const issue of issues) {
+      const key = `${issue.code}|${issue.regionId}|${issue.ref ?? ''}`
+      if (warnedAuditKeys.has(key)) {
+        continue
+      }
+      warnedAuditKeys.add(key)
+      console.warn(`[ai-region-audit] ${issue.code}：${issue.detail}`)
+    }
+  }
+  return issues
+}
+
+/** 可访问名（与快照的 label 推导链同序，但不做 24 字截断）。 */
+function accessibleNameOf(el: HTMLElement): string {
+  for (const attr of ['data-ai-label', 'aria-label', 'title']) {
+    const value = el.getAttribute(attr)
+    if (value && value.trim() !== '') {
+      return value.trim()
+    }
+  }
+  return (el.textContent ?? '').replace(/\s+/g, ' ').trim()
+}
+
 /** 测试/页面卸载时清空（不进生产路径的语义：区域必须逐个注销）。 */
 export function resetAiRegions(): void {
   regions.clear()
   refIndex.clear()
   currentPage = null
+  warnedAuditKeys.clear()
   epochCounter += 1
 }

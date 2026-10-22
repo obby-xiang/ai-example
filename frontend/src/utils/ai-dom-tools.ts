@@ -28,7 +28,9 @@ import {
   resolveAiRef,
   riskOfElement,
   verbAllowed,
+  warnAiRegionAudit,
   type AiRegion,
+  type AiRegionAuditTarget,
   type AiRegionHit,
   type AiVerb
 } from './ai-regions'
@@ -490,12 +492,21 @@ export function aiSnapshot(args: Record<string, unknown> = {}): UiToolOutcome {
   const rows: string[] = []
   const seenRefs = new Set<string>()
   let total = 0
+  // 标注治理（批 B / D7-②）：把本次遍历结果喂给审计，**不额外多扫一遍 DOM**。
+  const auditTargets: AiRegionAuditTarget[] = []
   for (const region of selected) {
+    const nodes: HTMLElement[] = []
+    if (import.meta.env.DEV) {
+      auditTargets.push({ region, elements: nodes })
+    }
     for (const node of Array.from(region.root.querySelectorAll('[data-ai-ref]'))) {
       const el = node as HTMLElement
       const ref = el.getAttribute('data-ai-ref')
       if (!ref) {
         continue
+      }
+      if (import.meta.env.DEV) {
+        nodes.push(el)
       }
       // 快照闸只认"被真实快照遍历过"的 ref（含 deny / 角色过滤掉的：拒绝归因仍走各自围栏，
       // 不能因为"没展示"就把 deny 误报成"未快照"）。
@@ -518,6 +529,9 @@ export function aiSnapshot(args: Record<string, unknown> = {}): UiToolOutcome {
     snapshotRefs.clear()
   }
   seenRefs.forEach((ref) => snapshotRefs.add(ref))
+  if (import.meta.env.DEV) {
+    warnAiRegionAudit(auditTargets)
+  }
 
   const head = `界面快照：${pageLabelOf(ctx.pageId)} · 步骤「${ctx.step ?? '未进入步骤'}」  epoch=${epoch}`
     + `  区域 ${selected.length} 个（${selected.map((region) => region.id).join(' / ') || '无'}）  共 ${total} 个元素`
@@ -704,6 +718,9 @@ async function acquireWriteSlot(): Promise<UiToolOutcome | null> {
 function suggestActionFor(ref: string): { kind: 'action'; name: string } | { kind: 'handoff' } | null {
   if (/(\.choose|\.upload)$/.test(ref)) {
     return { kind: 'handoff' }
+  }
+  if (/\.mode\.(merge|replace)$/.test(ref)) {
+    return { kind: 'action', name: 'set_import_mode' }
   }
   if (/(\.start)$/.test(ref)) {
     return { kind: 'action', name: 'start_export' }

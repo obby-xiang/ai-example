@@ -30,20 +30,30 @@
           创建导出任务并进入
         </el-button>
       </el-alert>
-      <DefSelector v-model="selectedDefs" :defs="defs" :loading="defsLoading" :disabled="isReadOnly" />
+      <div ref="aiExportSelectDefsRef">
+        <DefSelector v-model="selectedDefs" :defs="defs" :loading="defsLoading" :disabled="isReadOnly" ai-ref-prefix="export.selectDefs" />
+      </div>
       <div class="mt-2.5 text-[13px] text-[#909399]">
         已选 {{ selectedDefs.length }} 个配置项；存在依赖关系的配置项将按依赖顺序导出。
       </div>
     </div>
 
     <!-- ============ 第 2 步：查询配置 ============ -->
-    <div v-show="stepIndex === 1">
+    <div v-show="stepIndex === 1" ref="aiCondRef">
       <el-empty v-if="!selectedDefs.length" description="请先在第 1 步选择配置项" />
       <el-card v-for="code in selectedDefs" :key="code" shadow="never" class="mb-3">
         <template #header>
           <div class="flex items-center gap-3">
             <span class="font-semibold mr-auto">{{ defName(code) }}（{{ code }}）</span>
-            <el-button v-if="!isReadOnly" size="small" :loading="countLoading[code] === true" @click="previewCount(code)">预览行数</el-button>
+            <el-button
+              v-if="!isReadOnly"
+              size="small"
+              :loading="countLoading[code] === true"
+              :data-ai-ref="`export.cond.${code}.count`"
+              data-ai-verbs="click,highlight"
+              :data-ai-label="`预览 ${code} 行数`"
+              @click="previewCount(code)"
+            >预览行数</el-button>
             <el-tag v-if="counts[code] !== undefined" size="small" type="success">命中 {{ counts[code] }} 行</el-tag>
           </div>
         </template>
@@ -51,6 +61,7 @@
           :fields="fieldsOf(code)"
           :model-value="draftModels[code] ?? emptyDraftModel()"
           :disabled="isReadOnly"
+          :ai-ref-prefix="`export.cond.${code}`"
           @update:model-value="(value) => (draftModels[code] = value)"
         />
       </el-card>
@@ -144,6 +155,7 @@ import { jobsApi } from '@/api/jobs'
 import { tasksApi } from '@/api/tasks'
 import { useTaskStore } from '@/stores/task'
 import { registerPageHandler, unregisterPageHandler, useWorkspaceStore } from '@/stores/workspace'
+import { noteAiPage, registerAiRegion, unregisterAiRegion } from '@/utils/ai-regions'
 import {
   buildQueryCondition,
   draftModelFromCondition,
@@ -1109,6 +1121,10 @@ const HANDLER_NAMES = [
   'export.syncJob'
 ]
 
+/** visop 批 B：两个新增区域的 root（第 1 步配置项选择 / 第 2 步查询条件）。 */
+const aiExportSelectDefsRef = ref<HTMLElement | null>(null)
+const aiCondRef = ref<HTMLElement | null>(null)
+
 /** 跨任务绑定的结局（供两个执行器给出互相可区分、对 AI 可行动的文案）。 */
 type ToolTaskGate = { ok: true; switched: boolean } | { ok: false; message: string }
 
@@ -1510,15 +1526,54 @@ function registerHandlers(): void {
 
 onMounted(async () => {
   workspace.enterPage({ pageId: 'export', page: 'export', taskType: 'EXPORT', step: STEP_KEYS[0], taskId: taskId.value })
+  // visop 批 B：声明 AI 当前页（换页才推进 epoch），再注册两个新区域
+  noteAiPage('export')
   registerHandlers()
   await Promise.all([loadDefinitions(), loadTask()])
+  await nextTick()
+  registerAiExportRegions()
 })
+
+/**
+ * visop 批 B / O-2：导出向导的两个区域。
+ *
+ * - `export.selectDefs`（`mutate-local`）：勾选/筛选只改本页与工作区的选中集，落库在推进步骤时；
+ * - `export.cond`（`read`）：条件表单是**查询意图的可视面**，选择语义由注册动作 `set_condition`
+ *   承担（O-2 原文「原语只补看得见/点得着」）；只有文本取值框在元素级升为 `mutate-local`
+ *   （`data-ai-risk` 显式授权）以获得 `fill` 写入口，其余控件动词收紧到 highlight/scroll。
+ */
+function registerAiExportRegions(): void {
+  const selectDefsRoot = aiExportSelectDefsRef.value
+  if (selectDefsRoot) {
+    registerAiRegion({
+      id: 'export.selectDefs',
+      root: selectDefsRoot,
+      risk: 'mutate-local',
+      page: 'export',
+      label: '配置项选择（导出向导第 1 步）',
+      readOnly: () => isReadOnly.value
+    })
+  }
+  const condRoot = aiCondRef.value
+  if (condRoot) {
+    registerAiRegion({
+      id: 'export.cond',
+      root: condRoot,
+      risk: 'read',
+      page: 'export',
+      label: '查询条件（导出向导第 2 步）',
+      readOnly: () => isReadOnly.value
+    })
+  }
+}
 
 onBeforeUnmount(() => {
   stopWatchJob?.()
   stopWatchJob = null
   HANDLER_NAMES.forEach(unregisterPageHandler)
   unregisterFrontendToolExecutor('download_export_files')
+  unregisterAiRegion('export.selectDefs')
+  unregisterAiRegion('export.cond')
   if (gridDirty) {
     ElMessage.warning('表格有未保存的在线编辑内容（可用「保存编辑到服务端」写回）')
   }
