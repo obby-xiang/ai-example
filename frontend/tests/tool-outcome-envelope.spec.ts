@@ -16,7 +16,7 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import type { AiRunCurrent, ChatMessage, ToolPart } from '@/types/ai'
-import { applyFrameToParts, deriveProjections, outcomeStatus } from '@/utils/parts'
+import { applyFrameToParts, deriveProjections, historyToolCallStatus, outcomeStatus } from '@/utils/parts'
 import { cardStatusOf } from '@/utils/blocks'
 import { useAiStore } from '@/stores/ai'
 
@@ -609,5 +609,15 @@ describe('治理 P0-1 M2：blocked 卡面 reason 按 code 选择', () => {
 
     // 只升不降：两支都仍是阻断口径（不是 failed/succeeded），且既有两支在上面那例原样通过
     expect(outcomeStatus('blocked')).toBe('blocked')
+  })
+})
+
+describe('契约增量：SHEET_DISABLED 历史终态（治理批）', () => {
+  it('历史 toolCallStates 的 SHEET_DISABLED（无 outcome）⇒ 刷新后段状态 failed，不是占位 succeeded', () => {
+    expect(historyToolCallStatus('SHEET_DISABLED')).toBe('failed')
+    // 其余既有映射不回退（只增不改）
+    expect(historyToolCallStatus('PRECHECK_FAILED')).toBe('failed')
+    expect(historyToolCallStatus('BLOCKED')).toBe('blocked')
+    expect(historyToolCallStatus('EXECUTED')).toBe('succeeded')
   })
 })

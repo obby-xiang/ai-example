@@ -163,12 +163,19 @@ class ToolRegistryDisclosureTest {
     @Test
     void sheetToolsAreDisclosedOnlyWhereATableExists() {
         // 导出结果步与导入上传步披露；其他步骤/非向导页面不披露（表格只在这两处存在）
-        assertThat(namesFor(AiContext.of("export", "EXPORT", "EXPORT", 1L, Map.of()))).containsAll(SHEET_TOOLS);
-        assertThat(namesFor(AiContext.of("import", "IMPORT", "UPLOAD", 1L, Map.of()))).containsAll(SHEET_TOOLS);
+        // 【2026-10-22 语义变更（AI 表格工具治理批）】缺省披露集 = 5 个纯读工具：
+        // app.ai.sheet.write-enabled 缺省 false ⇒ 写 3 + 撤销 + normalize 双档不在披露面
+        // （"改状态的通道默认关"）。写闸打开后的全量披露见 ToolRegistrySheetGateOnTest。
+        assertThat(namesFor(AiContext.of("export", "EXPORT", "EXPORT", 1L, Map.of())))
+                .containsAll(SHEET_READ_TOOLS)
+                .doesNotContainAnyElementsOf(SHEET_WRITE_TOOLS);
+        assertThat(namesFor(AiContext.of("import", "IMPORT", "UPLOAD", 1L, Map.of())))
+                .containsAll(SHEET_READ_TOOLS)
+                .doesNotContainAnyElementsOf(SHEET_WRITE_TOOLS);
         assertThat(namesFor(AiContext.of("export", "EXPORT", "SELECT_DEFS", 1L, Map.of())))
-                .doesNotContainAnyElementsOf(SHEET_TOOLS);
+                .doesNotContainAnyElementsOf(SHEET_READ_TOOLS);
         assertThat(namesFor(AiContext.of("import", "IMPORT", "PRECHECK", 1L, Map.of())))
-                .doesNotContainAnyElementsOf(SHEET_TOOLS);
+                .doesNotContainAnyElementsOf(SHEET_READ_TOOLS);
         assertThat(namesFor(AiContext.of("data", null, null, null, null)))
                 .doesNotContainAnyElementsOf(SHEET_TOOLS);
     }
@@ -186,9 +193,9 @@ class ToolRegistryDisclosureTest {
         assertThat(aiTools.normalizeColumn("CURRENCY", new String[] { "code" }, new String[] { "trim" }, null, false, null))
                 .isEqualTo(AiTools.FRONTEND_STUB);
         assertThat(aiTools.replaceValues("CURRENCY", "sheet", null, new String[] { "status" }, "wholeCell", true,
-                "停用", "禁用", "count")).isEqualTo(AiTools.FRONTEND_STUB);
+                "停用", "禁用", "count", null)).isEqualTo(AiTools.FRONTEND_STUB);
         assertThat(aiTools.updateRows("CURRENCY", "sheet", null,
-                List.of(new AiTools.SheetSetItem("status", "literal", "禁用", null, null, null)), "count"))
+                List.of(new AiTools.SheetSetItem("status", "literal", "禁用", null, null, null)), "count", null))
                 .isEqualTo(AiTools.FRONTEND_STUB);
         assertThat(aiTools.undoLastSheetEdit("CURRENCY")).isEqualTo(AiTools.FRONTEND_STUB);
     }

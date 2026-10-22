@@ -298,6 +298,18 @@
     }
   },
   "sheet": {
-    "readOnlyWriteBlocked": "任务已结束，仅供查看；写操作未执行，未对表格做任何修改。"
+    "readOnlyWriteBlocked": "任务已结束，仅供查看；写操作未执行，未对表格做任何修改。",
+    "preview": {
+      "countLevel": "计数级预览：只算总数与分布，不逐格展示。点“看样例”可查看前 3 条（样例会作为工具结果回传）。",
+      "detailPending": "明细未加载（计数级预览）：点「看样例」或「全量 diff」才会逐格计算。",
+      "distribution": "分布（按 {by}，前 {count} 组）：{items}",
+      "distributionOthers": "其余 {count} 组",
+      "distributionTruncated": "组数超过 20，其余不再细分",
+      "distributionItem": "{key} {rows} 行 / {cells} 格",
+      "manualChanges": "其后人工改动 {count} 格"
+    },
+    "applied": {
+      "line": "AI 改动 {cells} 格（可撤销，深度 3 中第 {layer} 层）"
+    }
   }
 }

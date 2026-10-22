@@ -311,6 +311,8 @@ export function historyToolCallStatus(status: unknown): ToolRunStatus | null {
     case 'SKIPPED':
       return 'skipped'
     case 'PRECHECK_FAILED':
+    case 'SHEET_DISABLED':
+      // 表格开关关掉的终态（治理批）：缺这条映射会让刷新后的段回落成"成功"占位
       return 'failed'
     case 'APPROVED':
     case 'PENDING':

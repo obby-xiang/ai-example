@@ -166,6 +166,7 @@ import {
 } from '@/utils/excel'
 import { registerFrontendToolExecutor, unregisterFrontendToolExecutor, PAGE_HANDLER_OPEN_EXPORT_EDITOR } from '@/utils/frontend-tools'
 import type { SheetAdapter } from '@/utils/sheet-tools'
+import { useAiStore } from '@/stores/ai'
 import { stepLabel } from '@/utils/format'
 import { watchJob, type JobChannelState } from '@/utils/job-watch'
 
@@ -862,6 +863,8 @@ function onGridChanged(): void {
     // 契约联动：把"用户改了导出结果表格"同步给 AI 上下文（同一批编辑只记一次）
     workspace.touch('导出结果表格内容已修改（尚未保存到服务端文件）')
   }
+  // AI 表格工具治理 §5.4：手改之后重算「AI 改动 / 你的改动」的现算部分（只计数，不记坐标）
+  void useAiStore().refreshSheetApplied(activeTab.value)
 }
 
 /** 取某配置项的下载用 xlsx（优先用表格里的**当前内容**，反映在线编辑）。 */

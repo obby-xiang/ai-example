@@ -7,6 +7,7 @@
 
 import type { SseFrame, PendingToolCallSnapshot, PendingStatus, ToolKind, ToolOutcome, ToolPreflight } from './sse'
 import type { FormSpec } from './form-schema'
+import type { SheetToolMeta } from '@/utils/sheet-tools'
 import type { ErrorCard } from '@/utils/error-card'
 
 /**
@@ -81,6 +82,13 @@ export interface FrontendToolResultRequest {
    * 后端据此落台账并在 tool_result 帧回发同值；取消路径可不带（`cancelled=true` 已表达结局）。
    */
   outcome?: ToolOutcome
+  /**
+   * 表格采样元数据（AI 表格工具治理批；additive，可空 = 非表格工具/旧调用方）。
+   *
+   * <p>后端按白名单过滤后才落日志与台账：**任何业务值（单元格原文 / 条件取值 /
+   * scopeSummary）在这里都会被丢弃**，不是靠调用方自觉。
+   */
+  sheetMeta?: SheetToolMeta
 }
 
 /** 前端工具回灌结果（响应体同样是裸对象）。 */
@@ -130,6 +138,29 @@ export interface AiHealth {
   defaultModelId?: string | null
   /** 逐 provider 的 key 状态（永不含 key 本身）；合成行 synthetic=true / id=null。 */
   providers?: AiHealthProvider[]
+  /**
+   * 表格工具开关的有效值 + 进程内计数（AI 表格工具治理批，additive）。
+   *
+   * <p>
+   * `sampleMaxRows` / `projectionMaxColumns` 是**生效值**（已按硬顶收敛）：前端据此收紧采样上界
+   * `min(args.limit, sampleMaxRows)`。缺该块（旧后端 / 未装配）⇒ 用硬编码常量兜底，
+   * 与治理批之前的行为逐字等价（不引入"健康检查失败就不能用表格"的新故障面）。
+   */
+  sheet?: AiSheetHealth
+}
+
+/** `/health.sheet`（配置面 + 计数面）。四个配置键与 `AiProperties.Sheet` 同源。 */
+export interface AiSheetHealth {
+  readEnabled: boolean
+  writeEnabled: boolean
+  /** 有效采样行数上界（= min(配置值, 20)） */
+  sampleMaxRows: number
+  /** 有效投影列数上界（= min(配置值, 5)；选区路径不适用） */
+  projectionMaxColumns: number
+  /** 取值来源（当前恒 config） */
+  effectiveFrom?: string
+  /** 进程内计数（多实例下各实例视图；不作审计结论） */
+  counters?: Record<string, number | string>
 }
 
 /**
@@ -377,6 +408,27 @@ export interface ToolPart extends MessagePartBase {
 /** 预览三档：count（0 行业务值）/ sample-diff（≤20 行）/ full-diff（0 行经模型，只在前端卡渲染）。 */
 export type SheetPreviewLevel = 'count' | 'sample-diff' | 'full-diff'
 
+/**
+ * 计数档的分布（AI 表格工具治理方案 2026-10-22 §6.4）。
+ *
+ * <p>
+ * `rows` 与 `cells` 必须都显示：一 row 多列命中时二者不等，只报格数会低估影响面。
+ * 键是<b>业务值</b>（D2），但**只在浏览器渲染、不回灌**（`planAppliedText` 不含本块）——
+ * 一旦回灌，模型侧的 D2 体积就多一块，而模型此刻正在等它确认，本就不需要分布。
+ */
+export interface SheetDistribution {
+  /** 分组列（字段编码） */
+  by: string
+  /** 字段中文标签（有则显示，无则只显示 code） */
+  byLabel?: string
+  /** 前 5 组（按 rows 降序，同值按键字典序） */
+  groups: { key: string; rows: number; cells: number }[]
+  /** 被折叠的组数（0 = 无折叠；不含「其他」这一组本身） */
+  otherGroups: number
+  /** 组数是否超过内部上限 20（超过即只统计前 20 组，"其余"不再细分） */
+  truncated: boolean
+}
+
 /** 单个单元格改动（预览 / 反向补丁共用的最小单元）。 */
 export interface SheetChange {
   /** 数据行下标（0 基；文案转 Excel 行号） */
@@ -412,6 +464,32 @@ export interface SheetWritePlan {
   warnings: string[]
   rulesText: string
   status: 'pending' | 'applied' | 'cancelled' | 'stale'
+  /**
+   * 明细粒度（AI 表格工具治理方案 §6.2 的 P0 快路径）：
+   * `none` = 计数档，**没有物化 changes**（`changes` 恒空、`targetRows`/`fingerprint` 恒空）；
+   * `full` = 已物化逐格明细（sample-diff / full-diff）。
+   *
+   * <p>
+   * 为什么必须有这个字段：count 档此前也走"先物化全量再判 10 万上限"，300 万格会先建
+   * 300 万个对象再拒绝。快路径只数不建，但"没有明细"这件事必须显式化 —— 否则
+   * {@code changes.length === 0} 会被误读成"没有命中"，而"应用"会静默改 0 格。
+   */
+  detail: 'none' | 'full'
+  /**
+   * 计数档的分布（§6.3）。`undefined` = 无命中 / 无分组列（不渲染空块）。
+   *
+   * <p>只在卡面渲染，**不进回灌**（P-06）：分布键是业务值，回灌等于白送一块 D2 体积。
+   */
+  distribution?: SheetDistribution
+  /**
+   * 本计划的入参快照（切档重算用）：`setPreviewLevel` 用它把同一份计划重跑成另一档，
+   * `planId` 保持不变（撤销补丁按 planId 绑定，换 id 会让撤销指向不存在的计划）。
+   *
+   * <p><b>只在浏览器内存</b>：可能含 predicate 的取值，绝不进回灌、不进日志。
+   */
+  args?: Record<string, unknown>
+  /** 计划生成时的工作区版本号（切档重算前比对，变了即"预览失效"，不静默套用旧结果）。 */
+  sheetVer?: number
   /** 所属轮次（store 回灌用；纯函数计划不带） */
   runId?: string
 }

@@ -63,6 +63,14 @@ public enum ToolOutcome {
 	/** 越 scope（防线③）。 */
 	public static final String CODE_SCOPE_NOT_DISCLOSED = ErrorCodes.SCOPE_NOT_DISCLOSED;
 
+	/**
+	 * 表格工具被管理员关闸（{@code app.ai.sheet.*}）：<b>未执行、零副作用</b>，结局 {@link #FAILED}。
+	 *
+	 * <p>不可重试（{@link #retryable(String)} 恒 false）：开关是进程内一次绑定，重试同一个调用
+	 * 只会得到同一个结论 —— 要变只能改配置并重启（方案 §2.4"不要重试"的模型侧提示）。
+	 */
+	public static final String CODE_SHEET_DISABLED = ErrorCodes.SHEET_DISABLED;
+
 	public static final String CODE_CONFIRM_TIMEOUT = ErrorCodes.CONFIRM_TIMEOUT;
 
 	public static final String CODE_FRONTEND_TIMEOUT = ErrorCodes.FRONTEND_TIMEOUT;
@@ -184,7 +192,7 @@ public enum ToolOutcome {
 			case PendingToolCall.TIMEOUT -> TIMEOUT;
 			case PendingToolCall.CANCELLED, PendingToolCall.FRONTEND_CANCELLED -> CANCELLED;
 			case PendingToolCall.SKIPPED -> SKIPPED;
-			case PendingToolCall.PRECHECK_FAILED -> FAILED;
+			case PendingToolCall.PRECHECK_FAILED, PendingToolCall.SHEET_DISABLED -> FAILED;
 			default -> UNKNOWN;
 		};
 	}

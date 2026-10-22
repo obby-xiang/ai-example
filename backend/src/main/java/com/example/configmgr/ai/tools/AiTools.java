@@ -732,7 +732,8 @@ public class AiTools {
             @ToolParam(description = "是否忽略大小写（默认 true）", required = false) Boolean ignoreCase,
             @ToolParam(description = "查找原文（regex 时为正则原文）") String search,
             @ToolParam(description = "替换为（可为空串 = 删除子串）", required = false) String replace,
-            @ToolParam(description = "预览档：count（默认）/sample-diff/full-diff", required = false) String preview) {
+            @ToolParam(description = "预览档：count（默认）/sample-diff/full-diff", required = false) String preview,
+            @ToolParam(description = "分布分组列（字段编码；缺省 = 谓词首字段，无谓词则投影首列）", required = false) String distributionBy) {
         return FRONTEND_STUB;
     }
 
@@ -747,7 +748,8 @@ public class AiTools {
             @ToolParam(description = "范围：predicate（默认）/selection/sheet/rows", required = false) String scope,
             @ToolParam(description = "字段条件（FieldQueryCondition；scope=predicate 时必填）", required = false) FieldQueryCondition predicate,
             @ToolParam(description = "要写入的列与写法（最多 5 条）：columnCode + mode（literal/fillDown/fillSeries/template）+ value|template|start|step") List<SheetSetItem> set,
-            @ToolParam(description = "预览档：count（默认）/sample-diff/full-diff", required = false) String preview) {
+            @ToolParam(description = "预览档：count（默认）/sample-diff/full-diff", required = false) String preview,
+            @ToolParam(description = "分布分组列（字段编码；缺省 = 谓词首字段，无谓词则首个 set 列）", required = false) String distributionBy) {
         return FRONTEND_STUB;
     }
 

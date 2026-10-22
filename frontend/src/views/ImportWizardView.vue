@@ -676,6 +676,13 @@ async function ensureEditorLoaded(code: string): Promise<void> {
 function onGridChanged(): void {
   // 契约联动：导入编辑区的内容改动同步进 AI 上下文（表格类改动只递增版本，避免刷爆动作记录）
   workspace.touch('导入编辑区内容已修改（尚未写回服务端文件）')
+  // AI 表格工具治理 §5.4：手改之后重算「AI 改动 / 你的改动」的现算部分（只计数，不记坐标）
+  void useAiStore().refreshSheetApplied(activeEditorCode())
+}
+
+/** 当前编辑区的配置编码（刷新 AI 改动摘要用；无编辑区 ⇒ 空串，摘要保持现状）。 */
+function activeEditorCode(): string {
+  return String(activeEditorTab.value ?? '')
 }
 
 /**

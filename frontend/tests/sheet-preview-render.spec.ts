@@ -48,6 +48,7 @@ function planOf(overrides: Partial<SheetWritePlan> = {}): SheetWritePlan {
     warnings: [],
     rulesText: '整格相等 · 「停用」→「禁用」',
     status: 'pending',
+    detail: 'full',
     ...overrides
   }
 }

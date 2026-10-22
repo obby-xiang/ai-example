@@ -80,6 +80,14 @@ public final class ErrorCodes {
     public static final String TOOL_ALREADY_CLAIMED = "TOOL_ALREADY_CLAIMED";
     /** 越 scope（防线③）。 */
     public static final String SCOPE_NOT_DISCLOSED = "SCOPE_NOT_DISCLOSED";
+    /**
+     * 表格工具被管理员关闸（{@code app.ai.sheet.read-enabled|write-enabled}；AI 表格工具治理批）。
+     *
+     * <p>与 {@link #SCOPE_NOT_DISCLOSED} 刻意分开：两者都是"未执行"，但一个是"你在这个页面不该用"
+     * （模型/用户切页面可解），一个是"管理员把这个功能关了"（切页面无用，只能改配置重启）。
+     * 复用越权码会让卡面显示「不在披露范围内」，把"功能被关"误导成"用户点错了"。
+     */
+    public static final String SHEET_DISABLED = "SHEET_DISABLED";
     /** 确认门超时。 */
     public static final String CONFIRM_TIMEOUT = "CONFIRM_TIMEOUT";
     /** 前端工具回灌超时。 */

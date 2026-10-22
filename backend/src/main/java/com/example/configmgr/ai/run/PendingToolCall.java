@@ -80,6 +80,18 @@ public class PendingToolCall {
 	 */
 	public static final String PRECHECK_FAILED = "PRECHECK_FAILED";
 
+	/**
+	 * 表格工具被管理员关闸（{@code app.ai.sheet.read-enabled|write-enabled}；AI 表格工具治理批）：
+	 * 工具<b>未执行、零副作用</b>，结构化失败（{@code outcome=failed}、{@code code=SHEET_DISABLED}）。
+	 *
+	 * <p>为什么单列一个状态而不是复用 {@link #BLOCKED}：BLOCKED 的卡面文案是前端写死的
+	 * "不在披露范围内，未执行"—— 而"功能被管理员关了"与"你切错了页面"是两件事，
+	 * 后者能靠引导解决，前者只能改配置重启。本状态在 {@code tool_result} 帧上落到既有的
+	 * {@code outcome=failed} 分支（前端按 outcome 渲染完整原因文本），另在前端历史状态表里补
+	 * 一条 {@code SHEET_DISABLED → failed}（缺它会让刷新后的段回落成"成功"）。
+	 */
+	public static final String SHEET_DISABLED = "SHEET_DISABLED";
+
 	/** 挂起种类：确认门（DANGER 风险）。 */
 	public static final String KIND_CONFIRM = "CONFIRM";
 
@@ -181,6 +193,19 @@ public class PendingToolCall {
 	 */
 	private Map<String, Object> preflight;
 
+	/**
+	 * 表格工具的采样/改动元数据（AI 表格工具治理批；additive）。
+	 *
+	 * <p>来源 = 前端工具结果回灌体（{@code POST /api/ai/frontend-tool-result} 的可选
+	 * {@code sheetMeta}），**只允许白名单键**（{@link com.example.configmgr.ai.tool.SheetAudit#sanitize}）：
+	 * 任何单元格值、条件取值、scopeSummary 原文都会被丢弃在入口处（不是"评审记得不写"）。
+	 *
+	 * <p>用途三处，全部只读元数据：① {@code tool_call_end} 的 additive 字段；
+	 * ② {@code ai:safety:<sessionId>} 的 {@code kind=sheet_sample} 台账；③ {@code /health.sheet} 计数。
+	 * {@code null} = 非表格工具 / 旧前端（不上送）。
+	 */
+	private Map<String, Object> sheetMeta;
+
 	public boolean resolved() {
 		return !PENDING.equals(this.status);
 	}
@@ -210,6 +235,7 @@ public class PendingToolCall {
 			case FRONTEND_CANCELLED -> ToolOutcome.CODE_FRONTEND_CANCELLED;
 			case SKIPPED -> ToolOutcome.CODE_UPSTREAM_FAILED;
 			case PRECHECK_FAILED -> ToolOutcome.CODE_PRECHECK_FAILED;
+			case SHEET_DISABLED -> ToolOutcome.CODE_SHEET_DISABLED;
 			default -> null;
 		};
 	}

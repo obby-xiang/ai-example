@@ -103,6 +103,20 @@ let pendingLoad: { fields: readonly ConfigField[]; rows: readonly Record<string,
  */
 const READY_TIMEOUT_MS = 60_000
 
+/**
+ * AI 改动格的屏幕底色（AI 表格工具治理 §5.4）。
+ *
+ * <p>取卡面同族的浅蓝（`#eff4ff`）：只是"这些格是 AI 改的"的视觉标记，不是状态色
+ * （四族状态色留给校验/审批），故不新增颜色语义。清标记时按值精确比对，不会误清用户自设底色。
+ */
+const AI_CHANGED_BACKCOLOR = '#eff4ff'
+
+/**
+ * 已打标记的格（清标记只扫这一份，不扫全表 —— 3 万行应用后 `clearMarks` 若逐格
+ * `getCell` 会把主线程卡住；这与写路径"批量 setArray"的取舍同源）。
+ */
+const markedCells: Array<{ row: number; col: number }> = []
+
 let readyResolve: (() => void) | null = null
 let readyTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -409,6 +423,47 @@ function getSheetAdapter(): SheetAdapter {
       const row = Math.max(0, first.row - 1)
       const rowCount = Math.max(0, first.rowCount - (first.row > 0 ? 0 : 1))
       return { row, col: first.col, rowCount, colCount: first.colCount }
+    },
+    // 屏幕态标记（AI 表格工具治理 §5.4）：只设底色，不碰 cell style 的持久结构、
+    // 不调 conditionalFormats —— 后者会进 toWorkbookJson()，而导出链只读值（collectRows）。
+    markCells: (cells) => {
+      if (cells.length === 0) {
+        return
+      }
+      restoring = true
+      sheet.suspendPaint()
+      try {
+        for (const cell of cells) {
+          if (cell.row < 0 || cell.row >= rowCount() || cell.col < 0 || cell.col >= colCount()) {
+            continue
+          }
+          sheet.getCell(cell.row + 1, cell.col).backColor(AI_CHANGED_BACKCOLOR)
+          markedCells.push({ row: cell.row, col: cell.col })
+        }
+      } finally {
+        sheet.resumePaint()
+        restoring = false
+      }
+    },
+    clearMarks: () => {
+      if (markedCells.length === 0) {
+        return
+      }
+      restoring = true
+      sheet.suspendPaint()
+      try {
+        for (const cell of markedCells) {
+          const target = sheet.getCell(cell.row + 1, cell.col)
+          // 按值精确比对：只清自己打的那层底色，不动用户自设的颜色
+          if (target.backColor() === AI_CHANGED_BACKCOLOR) {
+            target.backColor(undefined)
+          }
+        }
+        markedCells.length = 0
+      } finally {
+        sheet.resumePaint()
+        restoring = false
+      }
     }
   }
 }

@@ -199,7 +199,7 @@ class AiControllerFrontendResultTest {
 	private String body(String runId, String toolCallId, String result, String source, boolean cancelled,
 			String outcome) throws Exception {
 		return this.objectMapper.writeValueAsString(
-				new FrontendToolResultRequest(runId, toolCallId, result, source, cancelled, outcome));
+				new FrontendToolResultRequest(runId, toolCallId, result, source, cancelled, outcome, null));
 	}
 
 	private static PendingToolCall pending(String status) {

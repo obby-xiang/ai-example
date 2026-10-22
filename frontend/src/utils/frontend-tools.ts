@@ -140,6 +140,7 @@ export function makeExecution(input: {
   availability: ToolAvailability
   result: string
   reason?: string
+  sheetMeta?: FrontendToolExecution['sheetMeta']
 }): FrontendToolExecution {
   const execution: FrontendToolExecution = {
     ok: input.outcome === 'ok',
@@ -149,6 +150,9 @@ export function makeExecution(input: {
   }
   if (input.reason !== undefined) {
     execution.reason = input.reason
+  }
+  if (input.sheetMeta !== undefined) {
+    execution.sheetMeta = input.sheetMeta
   }
   return execution
 }
@@ -1048,8 +1052,22 @@ function runSheetTool(name: string, args: Record<string, unknown>): Promise<Fron
       default:
         outcome = { ok: false, reason: `未知的表格工具 ${name}。` }
     }
+    // 表格采样元数据（治理批 §4.2）：只有成功读数才有"出域体积"可言 —— 失败路径不带，
+    // 免得把"没读到"记成"读了 0 行"（那是另一种失真）。
     return outcome.ok
-      ? makeExecution({ outcome: 'ok', availability: 'available', result: outcome.text })
+      ? makeExecution({
+          outcome: 'ok',
+          availability: 'available',
+          result: outcome.text,
+          sheetMeta: outcome.meta
+            ? {
+                ...outcome.meta,
+                defCode: typeof args.defCode === 'string' ? args.defCode : undefined,
+                // 台账定位用的页面 id（只进台账，不进日志面）
+                page: useWorkspaceStore().snapshot().page
+              }
+            : undefined
+        })
       : makeExecution({ outcome: 'failed', availability: 'degraded', result: outcome.reason })
   })
 }
@@ -1113,7 +1131,10 @@ function normalizeExecutorReturn(value: string | FrontendToolExecution): Fronten
     outcome: value.outcome ?? (value.ok ? 'ok' : 'failed'),
     availability: value.availability,
     result: value.result,
-    reason: value.reason
+    reason: value.reason,
+    // 表格采样元数据必须穿过这一层：本函数是执行器返回值的**重新包装**点，
+    // 丢了它 = 后端永远收不到采样事实（日志/台账/计数三面同时失明）
+    sheetMeta: value.sheetMeta
   })
 }
 

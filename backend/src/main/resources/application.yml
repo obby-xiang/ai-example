@@ -354,6 +354,16 @@ app:
       #     写超时以 SocketTimeoutException 释放；它随连接配置漂移，是 15s 预算的 ≈8 倍宽。
       #     故本包的价值 = 把写侧预算收紧到 15s + 消除锁内写 + 消除投递池/调用线程占用（详见包②施工报告 §实测）。
       write-timeout: 15s
+    # ── 表格工具治理开关（AI 表格工具治理方案 2026-10-22；值唯一事实源 = AiProperties.Sheet）──
+    # 键                                       缺省值   出处
+    # app.ai.sheet.read-enabled                true     Sheet#readEnabled      读侧总闸（5 个纯读工具；D2 采样通道）
+    # app.ai.sheet.write-enabled               false    Sheet#writeEnabled     写侧总闸（写 3 + 撤销 1 + normalize 双档）
+    # app.ai.sheet.sample-max-rows             20       Sheet#sampleMaxRows    只能收紧（硬顶 20）
+    # app.ai.sheet.projection-max-columns      5        Sheet#projectionMaxColumns  只能收紧（硬顶 5）
+    # 读默认开 / 写默认关：改状态的通道默认关、只读通道默认开（与"模型配置写端点默认禁私网"同姿态）。
+    # 生效点 = ToolRegistry 的披露谓词（不披露即不在请求的 toolCallbacks 里），关掉时旧缓存调用回
+    #   SHEET_DISABLED（不是 SCOPE_NOT_DISCLOSED）。四个键都是**进程内一次绑定**，改值需重启。
+    # 说明：本段只做显化，**不写出值** —— 写出来就等于给配置面加了第二份事实源。
   task:
     sse:
       # 包②：任务级 SSE 通道（GET /api/tasks/{id}/events）的写侧预算，与 app.ai.sse 同口径。

@@ -768,6 +768,37 @@ public class InMemoryRunStore extends RunStore {
 
 	// ── 内部表 ──────────────────────────────────────────────────────────────
 
+	/**
+	 * 安全台账（{@code ai:safety:<sessionId>}）的进程内替身（AI 表格工具治理批）。
+	 *
+	 * <p>
+	 * 父类实现走 Redis（测试里 {@code redis} 为 null ⇒ 被自身 try/catch 吞掉、只剩一条 WARN），
+	 * 于是「采样事实真的落进安全台账了吗」在无 Redis 的用例里**无法断言**。这里按真实语义复刻：
+	 * 新→旧、截断到 {@link RunStore#SAFETY_LEDGER_MAX} 条。只增测试侧保真度，不改生产语义。
+	 */
+	private final Map<String, List<Map<String, Object>>> safety = new ConcurrentHashMap<>();
+
+	@Override
+	public void appendSafetyEvent(String sessionId, Map<String, Object> event) {
+		if (sessionId == null || sessionId.isBlank() || event == null) {
+			return;
+		}
+		List<Map<String, Object>> list = this.safety.computeIfAbsent(sessionId,
+				key -> new CopyOnWriteArrayList<>());
+		list.add(0, new LinkedHashMap<>(event));
+		while (list.size() > RunStore.SAFETY_LEDGER_MAX) {
+			list.remove(list.size() - 1);
+		}
+	}
+
+	@Override
+	public List<Map<String, Object>> safetyLedger(String sessionId) {
+		if (sessionId == null || sessionId.isBlank()) {
+			return List.of();
+		}
+		return List.copyOf(this.safety.getOrDefault(sessionId, List.of()));
+	}
+
 	private Map<String, PendingToolCall> pendingTable(String runId) {
 		return this.pendings.computeIfAbsent(runId, key -> new ConcurrentHashMap<>());
 	}

@@ -51,6 +51,8 @@ export type PendingStatus =
   | 'SKIPPED'
   /** F5 预检未通过：后端就地结算"未进确认门、未执行"的终态条目（code 同名，outcome=failed） */
   | 'PRECHECK_FAILED'
+  /** 表格工具被管理员关闸（AI 表格工具治理批，`app.ai.sheet.*`）：未执行、零副作用，outcome=failed */
+  | 'SHEET_DISABLED'
 
 /**
  * H1 确认门**预检摘要**（可选契约增量，与后端已锁定；缺省 = null/undefined，旧帧零影响）。

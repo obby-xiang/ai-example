@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.tool;
 
+import com.example.configmgr.common.ErrorCodes;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.annotation.Tool;
@@ -29,6 +30,14 @@ public class ToolRegistry {
     /** 工具定义覆盖源（YAML 阶段；缺失 ⇒ 空快照 ⇒ 全部回落注解）。 */
     @Autowired(required = false)
     private ToolDefinitionSource toolDefinitionSource;
+
+    /**
+     * 表格工具披露开关（AI 表格工具治理批）。缺省装配 = 读开/写关（与 {@link AiProperties.Sheet}
+     * 的字段初值同一口径），Spring 在容器内注入真实实例覆盖它 —— 于是"未注入"与"默认四键"
+     * 行为一致，不会因为装配缺失而把功能静默全关。
+     */
+    @Autowired(required = false)
+    private SheetSwitches sheetSwitches = SheetSwitches.defaults();
 
     // name -> (meta, callback)
     private final Map<String, ToolMeta> metaMap = new LinkedHashMap<>();
@@ -153,6 +162,11 @@ public class ToolRegistry {
 
     /**
      * Returns the list of ToolCallbacks visible in the given context.
+     *
+     * <p>
+     * AI 表格工具治理批（2026-10-22 §2.3）：披露判定 = {@code scopeMatches AND sheetAllows} ——
+     * 表格开关并入<b>同一谓词</b>，而不是新增第四道防线。执行前的 {@link #matchesContext} 复用
+     * 完全相同的两项，故"披露面"与"执行面"在结构上无法分叉（S-02）。
      */
     public List<ToolCallback> forContext(AiContext ctx) {
         Set<String> tags = buildTags(ctx);
@@ -160,7 +174,7 @@ public class ToolRegistry {
                 .filter(e -> {
                     ToolMeta meta = metaMap.get(e.getKey());
                     if (meta == null) return true; // unscoped: always include
-                    return matchesAny(meta.getScopePatterns(), tags);
+                    return matchesAny(meta.getScopePatterns(), tags) && this.sheetSwitches.allows(e.getKey());
                 })
                 .map(Map.Entry::getValue)
                 .collect(Collectors.toList());
@@ -197,10 +211,28 @@ public class ToolRegistry {
      */
     public boolean matchesContext(String name, AiContext ctx) {
         ToolMeta meta = metaMap.get(name);
-        if (meta == null || meta.getScopePatterns() == null || meta.getScopePatterns().length == 0) {
-            return true;
-        }
-        return matchesAny(meta.getScopePatterns(), buildTags(ctx == null ? AiContext.empty() : ctx));
+        boolean scopeOk = meta == null || meta.getScopePatterns() == null || meta.getScopePatterns().length == 0
+                || matchesAny(meta.getScopePatterns(), buildTags(ctx == null ? AiContext.empty() : ctx));
+        return scopeOk && !sheetDisabled(name);
+    }
+
+    /**
+     * 表格开关是否把该工具挡在披露面之外（AI 表格工具治理批）。
+     *
+     * <p>
+     * 与 {@link #matchesContext} 的关系是<b>互补</b>而非并列：{@code matchesContext = scopeOk AND !sheetDisabled}。
+     * 执行兜底据此把"同一种未披露"分成两个机器码 ——
+     * {@code SHEET_DISABLED}（管理员关闸，切页面无用，只能改配置重启）与
+     * {@code SCOPE_NOT_DISCLOSED}（页面/步骤不对，切过去就能用）。
+     * 两者都<b>零副作用</b>，区别只在于把"该怎么办"如实告诉模型与用户（方案 §2.4）。
+     */
+    public boolean sheetDisabled(String name) {
+        return !this.sheetSwitches.allows(name);
+    }
+
+    /** 未披露的原因码（{@code SHEET_DISABLED} / {@code SCOPE_NOT_DISCLOSED}）。 */
+    public String undisclosedCode(String name) {
+        return sheetDisabled(name) ? ErrorCodes.SHEET_DISABLED : ErrorCodes.SCOPE_NOT_DISCLOSED;
     }
 
     public ToolMeta getMeta(String name) {

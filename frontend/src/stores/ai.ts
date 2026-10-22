@@ -48,11 +48,14 @@ import {
   applySheetPlan,
   needsSheetPreview,
   planCancelledText,
-  planNormalize,
   planPreviewText,
-  planReplace,
-  planUpdate,
-  sheetReadOnlyWriteBlocked
+  planSheetWithLevel,
+  replanSheet,
+  setSheetPolicy,
+  sheetAppliedSummary,
+  sheetReadOnlyWriteBlocked,
+  type SheetAppliedSummary,
+  type SheetToolMeta
 } from '@/utils/sheet-tools'
 import {
   alreadyApplied,
@@ -865,6 +868,14 @@ export const useAiStore = defineStore('ai', {
      */
     stalePreviewToolCallId: null as string | null,
     /**
+     * AI 表格工具治理批（§5.4）：最近一次已应用的 AI 改动摘要（卡面一行 + 撤销深度）。
+     *
+     * <p>
+     * 只活在内存（撤销栈本身是 WeakMap，刷新即失效 —— 与"AI 改动只在本次页面有效"同一口径）。
+     * `manualChanges` 由 {@link refreshSheetApplied} 现算：用户手改后重新取一次，卡面才不说旧数。
+     */
+    sheetApplied: null as SheetAppliedSummary | null,
+    /**
      * M-2b（2026-10-22 用户直裁「无感恢复」）：快照恢复时**尚未呈现**的同批待决条目。
      *
      * 串行呈现与实时路径一致（一次只出一张卡）：刷新恢复只建第一张，其余按快照顺序排在这里，
@@ -1063,9 +1074,13 @@ export const useAiStore = defineStore('ai', {
       try {
         this.health = await aiApi.health()
         this.healthError = null
+        // AI 表格工具治理批（§2.5）：把管理员的有效上界下发到前端采样的"下笔之前"。
+        // 取不到 / 旧后端 ⇒ 传 undefined 回到硬顶兜底（20/5），与治理批之前逐字等价。
+        setSheetPolicy(this.health?.sheet ?? null)
       } catch (error) {
         this.health = null
         this.healthError = error instanceof Error ? error.message : 'AI 可用性探测失败'
+        // 探测失败不清策略：已生效的收紧值比"回到 20"更安全（K-10：兜底是放宽方向，仍安全）
       }
     },
 
@@ -2306,7 +2321,8 @@ export const useAiStore = defineStore('ai', {
       source = 'http-post',
       cancelled = false,
       runId?: string,
-      outcome?: ToolOutcome
+      outcome?: ToolOutcome,
+      sheetMeta?: SheetToolMeta
     ): Promise<{ ok: boolean; duplicate?: boolean; rejected?: string; message?: string }> {
       // GF-B 修复（红队问题 1）：表单回灌优先用表单创建时捕获的 runId，
       // 缺省才回退当前轮的 activeRunId（避免旧表单错配到新 run）
@@ -2320,7 +2336,15 @@ export const useAiStore = defineStore('ai', {
           cancelled
             ? { runId: targetRunId, toolCallId, cancelled: true, source }
             // 治理 P0-1：仅执行器路径带 outcome（旧形态逐字保留，不产 undefined 键）
-            : { runId: targetRunId, toolCallId, result, source, ...(outcome !== undefined ? { outcome } : {}) }
+            : {
+                runId: targetRunId,
+                toolCallId,
+                result,
+                source,
+                ...(outcome !== undefined ? { outcome } : {}),
+                // 治理批：只有表格工具带（旧形态逐字保留，非表格工具不产 undefined 键）
+                ...(sheetMeta !== undefined ? { sheetMeta } : {})
+              }
         )
         // B1（2026-10-20 裁决 9）：回灌送达 ⇒ 带 lastSeq 重连收流（GF 提交/取消与即时前端工具共用）。
         // 不 await：重连要活到本轮终帧，await 会把"表单已提交"的本地收尾拖到整轮结束之后。
@@ -2454,14 +2478,9 @@ export const useAiStore = defineStore('ai', {
         await fail(sheetReadOnlyWriteBlocked())
         return
       }
-      let planned
-      if (frame.name === 'replace_values') {
-        planned = planReplace(resolved.ctx, args, toolCallId)
-      } else if (frame.name === 'update_rows') {
-        planned = planUpdate(resolved.ctx, args, toolCallId)
-      } else if (frame.name === 'normalize_column') {
-        planned = planNormalize(resolved.ctx, args, toolCallId)
-      } else {
+      // 工具名 → 确定性计划函数（唯一分发点，切档重算也走它 —— 两条路径不可能算出不同的计划）
+      const planned = planSheetWithLevel(resolved.ctx, frame.name, args, toolCallId)
+      if (!planned) {
         await fail(`未识别的表格写工具 ${frame.name}：本次未做任何修改。`)
         return
       }
@@ -2485,6 +2504,25 @@ export const useAiStore = defineStore('ai', {
     /** 预览文案（面板与测试共用的单一口径）。 */
     previewText(): string {
       return planPreviewText(this.activePreview)
+    },
+
+    /**
+     * 重算"已应用改动"的现算部分（§5.4）：用户在表格里手改之后调用一次，卡面的
+     * 「其后人工改动 N 格」才不会停在应用瞬间的 0。
+     *
+     * <p>由两个向导的 `onGridChanged` 在 `workspace.bumpVersion()` 之后调用 —— 那里是
+     * "表格内容变了"的唯一信号源。解析不到表格（切标签/未挂载）时静默保持现状。
+     */
+    async refreshSheetApplied(defCode?: string): Promise<void> {
+      const code = defCode ?? this.sheetApplied?.defCode ?? ''
+      if (!code) {
+        return
+      }
+      const resolved = await resolveSheetContext(code)
+      if (!resolved.ok) {
+        return
+      }
+      this.sheetApplied = sheetAppliedSummary(resolved.ctx)
     },
 
     // ── AI 可视可操作专项：上传交接（唯一的「等人」工具） ────────────────────────
@@ -2765,11 +2803,39 @@ export const useAiStore = defineStore('ai', {
       this.activeUploadHandoff = null
     },
 
-    /** 切换预览档位（count / sample-diff / full-diff；数据只在前端卡）。 */
-    setPreviewLevel(level: SheetPreviewLevel): void {
-      if (this.activePreview) {
-        this.activePreview = { ...this.activePreview, preview: level }
+    /**
+     * 切换预览档位（count / sample-diff / full-diff；数据只在前端卡）。
+     *
+     * <p>
+     * AI 表格工具治理批（§6.2）：计数档**没有物化明细**（快路径只数不建），故切到明细档要
+     * 用计划的入参快照 `replanSheet` 重算一次 —— `planId` 不变（撤销补丁按它绑定）。
+     * 重算前的版本比对由 `replanSheet` 负责：表格在预览期间被改动 ⇒ 走 stale，不静默套用旧结果。
+     */
+    async setPreviewLevel(level: SheetPreviewLevel): Promise<void> {
+      const plan = this.activePreview
+      if (!plan || plan.preview === level) {
+        return
       }
+      if (level === 'count' || plan.detail === 'full') {
+        this.activePreview = { ...plan, preview: level }
+        return
+      }
+      const resolved = await resolveSheetContext(plan.defCode)
+      if (!resolved.ok) {
+        this.activePreview = null
+        this.markPreviewStale(plan.toolCallId)
+        return
+      }
+      const replanned = replanSheet(resolved.ctx, plan, level)
+      if (!replanned.ok) {
+        // 两种都收口到"预览已失效"：表格被改（stale）与明细超上限（物化失败）。
+        // 前者用户重新发起即可，后者卡面会显示原因（不静默降级成 0 格预览）。
+        this.activePreview = null
+        this.stalePreviewToolCallId = plan.toolCallId
+        this.notice = replanned.reason
+        return
+      }
+      this.activePreview = replanned.plan
     },
 
     /** 写工具结局的统一落点：先写段，再回灌（cancelled 走既有 `FRONTEND_CANCELLED` 语义）。 */
@@ -2780,6 +2846,8 @@ export const useAiStore = defineStore('ai', {
       status: ToolRunStatus
       result: string
       cancelled?: boolean
+      /** 采样元数据（治理批 §4.2）：写侧只报 planId / 预览档 / 样例对数，不报任何单元格值 */
+      sheetMeta?: SheetToolMeta
     }): Promise<void> {
       for (const item of this.messages) {
         if (!findToolPart(item, input.toolCallId)) {
@@ -2804,7 +2872,8 @@ export const useAiStore = defineStore('ai', {
         'frontend-executor',
         input.cancelled === true,
         input.runId,
-        outcome
+        outcome,
+        input.sheetMeta
       )
     },
 
@@ -2830,25 +2899,63 @@ export const useAiStore = defineStore('ai', {
         })
         return
       }
-      const applied = applySheetPlan(resolved.ctx, plan)
+      // 计数档没有逐格新值 ⇒ 落笔前必须先物化明细（§6.2）。这一步是"应用"的必要前提：
+      // 没有它就只能"改 0 格"，那是谎。物化超硬上限 ⇒ 如实回灌失败，不静默降级。
+      let applied = plan
+      if (plan.detail === 'none') {
+        const materialized = replanSheet(resolved.ctx, plan, 'sample-diff')
+        if (!materialized.ok) {
+          this.activePreview = null
+          await this.finishSheetTool({
+            toolCallId: plan.toolCallId,
+            name: plan.tool,
+            runId: plan.runId,
+            status: 'failed',
+            result: materialized.reason
+          })
+          return
+        }
+        // 关键：指纹/目标行沿用**预览时**那一份。物化是按"此刻"的表状态重算的，若把重算出的
+        // 指纹当成预览指纹，就等于把改动后的状态认成预览时的状态 —— 行指纹这道闸会被自己绕过。
+        applied = {
+          ...materialized.plan,
+          targetRows: plan.targetRows,
+          fingerprint: plan.fingerprint
+        }
+        this.activePreview = applied
+      }
+      const outcome = applySheetPlan(resolved.ctx, applied)
       this.activePreview = null
-      if (!applied.ok) {
+      if (!outcome.ok) {
         await this.finishSheetTool({
-          toolCallId: plan.toolCallId,
-          name: plan.tool,
-          runId: plan.runId,
+          toolCallId: applied.toolCallId,
+          name: applied.tool,
+          runId: applied.runId,
           status: 'failed',
-          result: applied.reason
+          result: outcome.reason
         })
         return
       }
       await this.finishSheetTool({
-        toolCallId: plan.toolCallId,
-        name: plan.tool,
-        runId: plan.runId,
+        toolCallId: applied.toolCallId,
+        name: applied.tool,
+        runId: applied.runId,
         status: 'succeeded',
-        result: applied.text
+        result: outcome.text,
+        // 写侧元数据（§4.2 planId / previewLevel）：样例对数是"回灌了几处业务值"的度量，
+        // >0 即 D2 —— 写路径本来就是 D2 通道（§0 结论 2）
+        sheetMeta: {
+          dataClass: applied.samples.length > 0 ? 'D2' : 'D1',
+          // 只报"回灌了几处样例"；写侧不回给字符数（没有可靠的度量源，宁缺不造）
+          sampleRows: applied.samples.length,
+          planId: applied.planId,
+          previewLevel: applied.preview,
+          sheetVer: applied.sheetVer,
+          defCode: applied.defCode
+        }
       })
+      // 卡面一行「AI 改动 N 格（可撤销，深度 3 中第 L 层）」（§5.4；不新增工具，也不新增帧字段）
+      this.sheetApplied = sheetAppliedSummary(resolved.ctx)
     },
 
     /** 用户点“取消”：零写 + `cancelled=true` ⇒ 后端 `FRONTEND_CANCELLED`。 */
@@ -3900,7 +4007,15 @@ export const useAiStore = defineStore('ai', {
         this.notice = execution.result
       }
       // 治理 P0-1：前端执行器的结局八态随回灌上送（后端台账/回帧以此为权威结局）
-      await this.submitFrontendToolResult(frame.toolCallId, execution.result, 'frontend-executor', false, undefined, execution.outcome)
+      await this.submitFrontendToolResult(
+        frame.toolCallId,
+        execution.result,
+        'frontend-executor',
+        false,
+        undefined,
+        execution.outcome,
+        execution.sheetMeta
+      )
       // AI 可视可操作专项：把原语运行时的一次性状态（撤销点 / 播报）同步给面板
       this.syncUiRuntimeState()
       this.uiUndoToolCallId = this.uiUndoEntry !== null && this.uiUndoEntry !== undoBefore

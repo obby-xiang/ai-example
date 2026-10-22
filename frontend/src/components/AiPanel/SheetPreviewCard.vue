@@ -38,9 +38,27 @@
       </div>
 
       <div v-if="plan.preview === 'count'" class="mt-[7px] text-[11.9px] leading-[1.6] text-[#57606a]" data-testid="sheet-preview-count">
-        计数级预览：只回计数与分布，不回业务行原文。点“看样例”可查看前 3 条。
+        {{ t('sheet.preview.countLevel') }}
       </div>
-      <div v-else-if="plan.preview === 'sample-diff'" class="mt-[7px]" data-testid="sheet-preview-sample">
+      <!-- 计数档分布（AI 表格工具治理 §6.4）：一行式、可折行；长 key 截断 12 字符 + title 全量。
+           样式沿用卡内既有灰度文字，不新增颜色语义（避免与状态色四族冲突）。 -->
+      <div
+        v-if="plan.preview === 'count' && distributionGroups.length > 0"
+        class="mt-[4px] text-[11.9px] leading-[1.6] text-[#57606a]"
+        data-testid="sheet-preview-distribution"
+      >
+        <span>分布（按 {{ distribution!.byLabel || distribution!.by }}，前 {{ distributionGroups.length }} 组）：</span>
+        <span
+          v-for="(group, index) in distributionGroups"
+          :key="group.key"
+          :data-testid="'sheet-preview-dist-' + group.key"
+          :title="group.key"
+        >{{ index > 0 ? ' · ' : '' }}{{ truncateKey(group.key) }} {{ group.rows }} 行 / {{ group.cells }} 格</span>
+        <span v-if="(distribution?.otherGroups ?? 0) > 0"> · {{ t('sheet.preview.distributionOthers', { count: distribution?.otherGroups }) }}</span>
+        <span v-if="distribution?.truncated">（{{ t('sheet.preview.distributionTruncated') }}）</span>
+      </div>
+      <!-- 三档各自独立（不用 v-else-if 链）：中间夹了分布块，链式判定会被前一个 v-if 抢走配对 -->
+      <div v-if="plan.preview === 'sample-diff'" class="mt-[7px]" data-testid="sheet-preview-sample">
         <div
           v-for="(change, index) in plan.samples"
           :key="index"
@@ -48,7 +66,7 @@
         >第 {{ change.row + 2 }} 行 列 {{ change.col + 1 }}「{{ display(change.oldValue) }}」→「{{ display(change.newValue) }}」</div>
         <div v-if="plan.samples.length === 0" class="text-[11.9px] text-[#8b949e]">没有匹配的单元格。</div>
       </div>
-      <div v-else class="mt-[7px]" data-testid="sheet-preview-full">
+      <div v-if="plan.preview === 'full-diff'" class="mt-[7px]" data-testid="sheet-preview-full">
         <div class="max-h-[min(240px,32vh)] overflow-y-auto border border-solid border-[#eef0f3] rounded-[6px] bg-white px-[8px] py-[4px]">
           <div
             v-for="(change, index) in pageChanges"
@@ -62,6 +80,13 @@
           <button type="button" class="border-0 bg-transparent p-0 text-[#57606a] disabled:text-[#c0c4cc]" :disabled="page >= pageCount - 1" @click="page += 1">下一页</button>
         </div>
       </div>
+
+      <!-- 明细未加载（计数档）：独立块放在三档链之外 —— 插在链中间会改写 v-else-if 的配对 -->
+      <div
+        v-if="plan.detail === 'none'"
+        class="mt-[4px] text-[11.5px] leading-[1.6] text-[#8b949e]"
+        data-testid="sheet-preview-detail-pending"
+      >{{ t('sheet.preview.detailPending') }}</div>
 
       <div
         v-for="(warning, index) in plan.warnings"
@@ -102,6 +127,7 @@
  * 大批量（>200 行）必须勾选“我了解影响范围”后“应用”才可用。
  */
 import { computed, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import type { SheetPreviewLevel, SheetWritePlan } from '@/types/ai'
 
 const props = defineProps<{
@@ -114,6 +140,18 @@ const emit = defineEmits<{
   (event: 'abandon'): void
   (event: 'level', level: SheetPreviewLevel): void
 }>()
+
+const { t } = useI18n()
+
+/** 分布块（无命中/无分组列 ⇒ null ⇒ 不渲染空块，§6.3）。 */
+const distribution = computed(() => props.plan?.distribution ?? null)
+/** 渲染开关与数据同源：模板里只用 `groups`，避免"有块没组"的半渲染。 */
+const distributionGroups = computed(() => distribution.value?.groups ?? [])
+
+/** 长 key 截断到 12 字符（全量走 title，避免卡片被一个长业务值撑开）。 */
+function truncateKey(key: string): string {
+  return key.length > 12 ? `${key.slice(0, 12)}…` : key
+}
 
 const LEVELS: Array<{ value: SheetPreviewLevel; label: string }> = [
   { value: 'count', label: '计数' },

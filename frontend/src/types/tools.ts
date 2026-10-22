@@ -278,7 +278,8 @@ export const FRONTEND_TOOLS: readonly FrontendToolDescriptor[] = [
       { name: 'ignoreCase', type: 'boolean', required: false, description: '默认 true' },
       { name: 'search', type: 'string', required: true, description: '查找原文' },
       { name: 'replace', type: 'string', required: false, description: '替换为（可为空串）' },
-      { name: 'preview', type: 'string', required: false, description: 'count（默认）/sample-diff/full-diff' }
+      { name: 'preview', type: 'string', required: false, description: 'count（默认）/sample-diff/full-diff' },
+      { name: 'distributionBy', type: 'string', required: false, description: '分布分组列（字段编码；缺省 = 谓词首字段，无谓词则投影首列）' }
     ]
   },
   {
@@ -293,7 +294,8 @@ export const FRONTEND_TOOLS: readonly FrontendToolDescriptor[] = [
       { name: 'scope', type: 'string', required: false, description: 'predicate（默认）/selection/sheet/rows' },
       { name: 'predicate', type: 'object', required: false, description: 'FieldQueryCondition 条件（scope=predicate 必填）' },
       { name: 'set', type: 'object[]', required: true, description: '每项 {columnCode, mode, value|template|start|step}（≤5）' },
-      { name: 'preview', type: 'string', required: false, description: 'count（默认）/sample-diff/full-diff' }
+      { name: 'preview', type: 'string', required: false, description: 'count（默认）/sample-diff/full-diff' },
+      { name: 'distributionBy', type: 'string', required: false, description: '分布分组列（字段编码；缺省 = 谓词首字段，无谓词则首个 set 列）' }
     ]
   },
   {
@@ -446,6 +448,13 @@ export interface FrontendToolExecution {
    * 结局信息走 `outcome` 字段而非文本编码（D11：不加 `[unknown]` 类机器前缀）。
    */
   result: string
+  /**
+   * 表格工具的采样元数据（AI 表格工具治理批；可选）：随回灌体上送，供后端
+   * `tool_call_end` 的 additive 字段、`ai:safety:` 台账与 `/health.sheet` 计数使用。
+   *
+   * <p>只有计数与标识（行数/字符数/列数/版本号/planId），**没有业务值** —— 类型面就不留位置。
+   */
+  sheetMeta?: import('@/utils/sheet-tools').SheetToolMeta
 }
 
 // ── ui_event 协议（AI → 工作区，deepseek 蓝本 workspaceContract 的形态 + 版本号） ──

@@ -298,6 +298,18 @@
     }
   },
   "sheet": {
-    "readOnlyWriteBlocked": "Task finished; read-only. Write actions were not executed and the sheet was not modified."
+    "readOnlyWriteBlocked": "Task finished; read-only. Write actions were not executed and the sheet was not modified.",
+    "preview": {
+      "countLevel": "Count-only preview: totals and distribution only, no per-cell listing. Click \"View samples\" to see the first 3 (samples are returned as tool results).",
+      "detailPending": "Details not loaded (count-only preview): click \"View samples\" or \"Full diff\" to compute them cell by cell.",
+      "distribution": "Distribution (by {by}, top {count} groups): {items}",
+      "distributionOthers": "{count} more groups",
+      "distributionTruncated": "more than 20 groups; the rest are not itemised",
+      "distributionItem": "{key} {rows} rows / {cells} cells",
+      "manualChanges": "your edits since: {count} cells"
+    },
+    "applied": {
+      "line": "AI changed {cells} cells (undoable, layer {layer} of 3)"
+    }
   }
 }

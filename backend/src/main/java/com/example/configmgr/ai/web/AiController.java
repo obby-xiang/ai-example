@@ -30,6 +30,8 @@ import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.run.StartupResumeRunner;
 import com.example.configmgr.ai.session.SessionGate;
 import com.example.configmgr.ai.tool.FrontendToolGuard;
+import com.example.configmgr.ai.tool.SheetAudit;
+import com.example.configmgr.ai.tool.SheetSwitches;
 import com.example.configmgr.ai.tool.TruncationContract;
 import com.example.configmgr.common.ApiResponse;
 import com.example.configmgr.job.service.JobWatchdog;
@@ -184,6 +186,18 @@ public class AiController {
 	 */
 	@Autowired(required = false)
 	private SecurityEvents securityEvents;
+
+	/**
+	 * AI 表格工具治理批：表格开关（{@code /health.sheet} 的配置面）。未注入时少该键。
+	 */
+	@Autowired(required = false)
+	private SheetSwitches sheetSwitches;
+
+	/**
+	 * AI 表格工具治理批：表格采样/改动计数（{@code /health.sheet.counters}）。未注入时少这一段。
+	 */
+	@Autowired(required = false)
+	private SheetAudit sheetAudit;
 
 	/**
 	 * 模型配置专项批①：配置快照（{@code /health} 的 additive 扩展面）。同为**字段注入**：
@@ -525,8 +539,14 @@ public class AiController {
 		// 日志链路批：回灌同样落在 HTTP 线程上（同 /confirm 的口径）
 		AiTrace.bind(request.runId(), null);
 		try {
-			submission = this.confirmGate.submitFrontendResult(request.runId(), request.toolCallId(), result,
-					request.source(), cancelled, request.outcome());
+			// AI 表格工具治理批：sheetMeta 在<b>入口</b>就过白名单（任何业务值到此为止），
+			// 之后才交给确认门；不带 meta 时保持六参调用 —— 旧调用方与既有桩的实参形状逐字不变。
+			Map<String, Object> sheetMeta = SheetAudit.sanitize(request.sheetMeta());
+			submission = sheetMeta.isEmpty()
+					? this.confirmGate.submitFrontendResult(request.runId(), request.toolCallId(), result,
+							request.source(), cancelled, request.outcome())
+					: this.confirmGate.submitFrontendResult(request.runId(), request.toolCallId(), result,
+							request.source(), cancelled, request.outcome(), sheetMeta);
 		}
 		finally {
 			AiTrace.clear();
@@ -1262,6 +1282,17 @@ public class AiController {
 		// 未注入时<b>不写</b>该键（"未装配"与"全 0"必须可区分，与 contextLimitTokens 同姿态）。
 		if (this.securityEvents != null) {
 			body.put("security", this.securityEvents.metrics());
+		}
+		// AI 表格工具治理批（additive）：表格开关的<b>有效值</b> + 进程内计数。
+		// 为什么必须回显有效值而不是配置原值：前端据此收紧采样/投影上界（min(键值, 硬顶)），
+		// 若这里报"配置写 200"而实际生效 20，前端就会以为还能取 200 行（配置面对运行面说谎）。
+		// 未装配时不写该键（"未装配"与"全 0"必须可区分，与 security/contextLimitTokens 同姿态）。
+		if (this.sheetSwitches != null) {
+			Map<String, Object> sheet = new LinkedHashMap<>(this.sheetSwitches.health());
+			if (this.sheetAudit != null) {
+				sheet.put("counters", this.sheetAudit.metrics());
+			}
+			body.put("sheet", sheet);
 		}
 		if (!this.availability.isAvailable()) {
 			body.put("message", this.availability.reason());

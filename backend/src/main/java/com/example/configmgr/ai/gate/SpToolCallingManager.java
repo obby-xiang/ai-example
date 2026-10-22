@@ -16,6 +16,8 @@ import com.example.configmgr.ai.run.StreamViolationException;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.FrontendToolGuard;
+import com.example.configmgr.ai.tool.SheetAudit;
+import com.example.configmgr.ai.tool.SheetSwitches;
 import com.example.configmgr.ai.tool.ToolMeta;
 import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.ai.tool.ToolRegistry;
@@ -208,6 +210,18 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 * {@code app.ai.tool.exec-timeout}（工具独立超时）。
 	 */
 	private final AiProperties properties;
+
+	/**
+	 * 表格采样/改动审计面（AI 表格工具治理批）。null = 未注入（轻装配面 / 单元测试）——
+	 * 此时只是少了计数与台账，日志字段照常发射（字段来自条目自身的 {@code sheetMeta}）。
+	 */
+	private SheetAudit sheetAudit;
+
+	/** 可选注入（{@code SheetAudit} 是观测面，不是判定面；缺失不影响任何工具的执行语义）。 */
+	@Autowired(required = false)
+	public void setSheetAudit(SheetAudit audit) {
+		this.sheetAudit = audit;
+	}
 
 	public SpToolCallingManager(RunStore store, RunRegistry registry, ConfirmGate gate, ToolRegistry toolRegistry,
 			MessageJsonCodec codec, ToolActivityBeacon beacon, CancellationRegistry cancellations,
@@ -417,8 +431,12 @@ public class SpToolCallingManager implements ToolCallingManager {
 				String text;
 				try {
 					// ===== 防线③：执行前复查 scope（T1）。越 scope 一律不执行、不认领、不记台账 =====
+					// AI 表格工具治理批：同一谓词的两个出口 —— 管理员关闸回 SHEET_DISABLED
+					// （切页面无用，只能改配置重启），页面/步骤不对回 SCOPE_NOT_DISCLOSED。
 					if (!this.toolRegistry.matchesContext(pending.getName(), context)) {
-						text = blockOutOfScope(runId, context, pending);
+						text = this.toolRegistry.sheetDisabled(pending.getName())
+								? blockSheetDisabled(runId, context, pending)
+								: blockOutOfScope(runId, context, pending);
 					}
 					else {
 						text = switch (pending.getKind()) {
@@ -453,12 +471,42 @@ public class SpToolCallingManager implements ToolCallingManager {
 				// 日志链路批：工具生命周期的右端 —— 结局分类沿用条目真值（不另造一套口径）
 				// AI 日志最小补齐批：ms 含审批等待，execMs 把它扣掉（"工具慢"与"人在犹豫"必须可分）
 				long totalToolMs = System.currentTimeMillis() - toolStartedAtMs;
-				AiTrace.eventOn(runId, snapshot.getSessionId(), "tool_call_end", "toolCallId", pending.getToolCallId(),
-						"tool", pending.getName(), "kind", pending.getKind(),
-						"ms", totalToolMs, "execMs", execMsOf(source, totalToolMs), "skipped", false,
-						"ok", source.effectiveOutcome().ok(),
-						"outcome", source.effectiveOutcome().wire(), "code", source.effectiveCode(),
-						"executed", source.isExecuted(), "chars", text == null ? 0 : text.length());
+				// AI 表格工具治理批（2026-10-22 §4.2）：表格工具的采样元数据挂同一行的 additive 字段
+				// （8 键；非表格工具一个键都不写 —— "逐键可缺席"）。字段值一律来自条目上的
+				// sheetMeta 白名单副本（SheetAudit#sanitize 在入口就丢掉了任何业务值）。
+				Map<String, Object> sheetMeta = source.getSheetMeta();
+				// 用 add 而不是 List.of：code/kind 允许为 null（成功条目没有 code），List.of 会 NPE
+				List<Object> tracePairs = new ArrayList<>();
+				tracePairs.add("toolCallId");
+				tracePairs.add(pending.getToolCallId());
+				tracePairs.add("tool");
+				tracePairs.add(pending.getName());
+				tracePairs.add("kind");
+				tracePairs.add(pending.getKind());
+				tracePairs.add("ms");
+				tracePairs.add(totalToolMs);
+				tracePairs.add("execMs");
+				tracePairs.add(execMsOf(source, totalToolMs));
+				tracePairs.add("skipped");
+				tracePairs.add(false);
+				tracePairs.add("ok");
+				tracePairs.add(source.effectiveOutcome().ok());
+				tracePairs.add("outcome");
+				tracePairs.add(source.effectiveOutcome().wire());
+				tracePairs.add("code");
+				tracePairs.add(source.effectiveCode());
+				tracePairs.add("executed");
+				tracePairs.add(source.isExecuted());
+				tracePairs.add("chars");
+				tracePairs.add(text == null ? 0 : text.length());
+				if (sheetMeta != null && !sheetMeta.isEmpty()) {
+					tracePairs.addAll(SheetAudit.logPairs(sheetMeta));
+				}
+				AiTrace.eventOn(runId, snapshot.getSessionId(), "tool_call_end", tracePairs.toArray());
+				// 台账 + 计数（同一时点；SheetAudit 未注入时只是少了观测面，判定语义不变）
+				if (this.sheetAudit != null && sheetMeta != null && !sheetMeta.isEmpty()) {
+					this.sheetAudit.record(snapshot.getSessionId(), source);
+				}
 				// T2：回填模型的是裁剪后的文本；上面的 text 本身（进帧、进台账）保持全文
 				// P0-1：模型侧 = 统一信封 JSON（先裁剪 message，再组装，见 ToolResultEnvelope#toModelJson）
 				// P1-10：执行中抛出异常的失败，executeOnce 已把对账措辞追加进 resultText
@@ -754,6 +802,51 @@ public class SpToolCallingManager implements ToolCallingManager {
 		this.registry.of(runId).toolResult(pending, false, false, text);
 		log.warn("防线③拦截越 scope 工具调用 runId={} tool={} 上下文={}（未执行、未认领、未记台账）",
 				runId, pending.getName(), describeContext(context));
+		return text;
+	}
+
+	/**
+	 * 表格开关拦截（AI 表格工具治理方案 §2.4）：该工具被管理员关闸 ——<b>不执行、不认领、不记台账</b>，
+	 * 回填结构化失败（{@code outcome=failed}、{@code code=SHEET_DISABLED}）。
+	 *
+	 * <p>
+	 * 与 {@link #blockOutOfScope} 的三点差异都是刻意的：
+	 * <ol>
+	 * <li><b>码不同</b>：{@code SHEET_DISABLED} 不复用 {@code SCOPE_NOT_DISCLOSED} —— 后者在前端卡面
+	 * 渲染成「不在披露范围内」，会把"功能被关了"误导成"用户点错了页面"；</li>
+	 * <li><b>文案不同</b>：读闸关说"未读任何数据"（防模型编造行数），写闸关说"未做任何修改"
+	 * （与既有写侧失败文案同句式）；</li>
+	 * <li><b>模型侧多一句可行动提示</b>："不要重试；请让用户联系管理员…" —— 开关是进程内一次绑定，
+	 * 换参数重试必然同样失败，与"首错即停"同姿态。</li>
+	 * </ol>
+	 * 状态用 {@link PendingToolCall#SHEET_DISABLED}（单列）而不是 {@code BLOCKED}：前者在
+	 * {@code tool_result} 帧上落 {@code outcome=failed} 分支，前端零改动即可显示完整原因。
+	 */
+	private String blockSheetDisabled(String runId, AiContext context, PendingToolCall pending) {
+		String name = pending.getName();
+		boolean readSide = SheetSwitches.READ_TOOLS.contains(name);
+		String human = readSide ? SheetSwitches.readDisabledText() : SheetSwitches.writeDisabledText();
+		String text = ToolOutcome.CODE_SHEET_DISABLED + "：工具 " + name + " 未执行 —— " + human
+				+ "（管理员关闭了 app.ai.sheet." + (readSide ? "read-enabled" : "write-enabled")
+				+ "；当前上下文 " + describeContext(context) + "）。"
+				+ "不要重试；请让用户联系管理员开启表格" + (readSide ? "读取" : "写入")
+				+ (readSide ? "，或改用导出后自行查看。" : "，或改用导出后自行编辑。");
+		pending.setStatus(PendingToolCall.SHEET_DISABLED);
+		pending.setOutcome(ToolOutcome.FAILED.wire());
+		pending.setCode(ToolOutcome.CODE_SHEET_DISABLED);
+		pending.setReason(ToolOutcome.CODE_SHEET_DISABLED);
+		pending.setExecuted(false);
+		pending.setExecutedBy(null);
+		pending.setResolvedAtMs(System.currentTimeMillis());
+		pending.setResultText(text);
+		this.store.putPending(runId, pending);
+		this.registry.of(runId).toolResult(pending, false, false, text);
+		if (this.sheetAudit != null) {
+			// 应恒 0；非 0 = 有旧缓存调用或在途残留（方案 §4.4 的告警口径）
+			this.sheetAudit.disabledReject();
+		}
+		log.warn("表格工具被开关拦截 runId={} tool={} 上下文={}（未执行、未认领、未记台账）",
+				runId, name, describeContext(context));
 		return text;
 	}
 

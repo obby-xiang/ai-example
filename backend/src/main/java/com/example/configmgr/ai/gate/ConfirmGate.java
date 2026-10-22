@@ -13,6 +13,7 @@ import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
 import com.example.configmgr.ai.tool.FrontendToolGuard;
+import com.example.configmgr.ai.tool.SheetAudit;
 import com.example.configmgr.ai.tool.ToolOutcome;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
@@ -1150,7 +1151,20 @@ public class ConfirmGate {
 	 */
 	public Submission submitFrontendResult(String runId, String toolCallId, String result, String source,
 			boolean cancelled, String outcome) {
-		Submission submission = doSubmitFrontendResult(runId, toolCallId, result, source, cancelled, outcome);
+		return submitFrontendResult(runId, toolCallId, result, source, cancelled, outcome, null);
+	}
+
+	/**
+	 * 前端工具结果回灌（AI 表格工具治理批：带可选的表格采样元数据）。
+	 *
+	 * <p>{@code sheetMeta} 只承载<b>元数据</b>（行数/字符数/列数/版本号/planId），写过白名单过滤后
+	 * 随条目持久化，供 {@code tool_call_end} 的 additive 字段与 {@code ai:safety:} 台账读取。
+	 * 它<b>不参与</b>任何判定：判定面（披露/复核/结算）一个字节都没变。
+	 */
+	public Submission submitFrontendResult(String runId, String toolCallId, String result, String source,
+			boolean cancelled, String outcome, Map<String, Object> sheetMeta) {
+		Submission submission = doSubmitFrontendResult(runId, toolCallId, result, source, cancelled, outcome,
+				sheetMeta);
 		traceDecision(runId, toolCallId, cancelled ? "frontend_cancel" : "frontend_result", submission.pending(),
 				String.valueOf(submission.outcome()), "user");
 		return submission;
@@ -1158,13 +1172,21 @@ public class ConfirmGate {
 
 	/** 回灌的写入本体（{@link #submitFrontendResult} 去掉结构化留痕的那一层）。 */
 	private Submission doSubmitFrontendResult(String runId, String toolCallId, String result, String source,
-			boolean cancelled, String outcome) {
+			boolean cancelled, String outcome, Map<String, Object> sheetMeta) {
 		PendingToolCall pending = pendingForWrite(runId, toolCallId);
 		if (pending == null) {
 			return new Submission(Outcome.NOT_FOUND, null, false, null);
 		}
 		if (!PendingToolCall.PENDING.equals(pending.getStatus())) {
 			return new Submission(Outcome.DUPLICATE, pending, false, null);
+		}
+		// AI 表格工具治理批：采样元数据只写过白名单（入口即丢业务值），且不参与任何判定。
+		// 位置刻意在"幂等判定之后、取消分支之前"—— 取消路径不需要它，重复提交不该覆盖它。
+		if (sheetMeta != null && !sheetMeta.isEmpty()) {
+			Map<String, Object> sanitized = SheetAudit.sanitize(sheetMeta);
+			if (!sanitized.isEmpty()) {
+				pending.setSheetMeta(sanitized);
+			}
 		}
 		if (cancelled) {
 			return dismiss(runId, pending, source);

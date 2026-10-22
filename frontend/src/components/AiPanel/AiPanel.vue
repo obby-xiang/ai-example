@@ -599,6 +599,20 @@
                           />
                         </div>
 
+                        <!-- AI 表格工具治理 §5.4：已应用改动的一行标识（不新增工具、不新增帧字段）。
+                             数据源 = store 的 sheetApplied（现算），`其后人工改动 N 格` 在手改后由
+                             refreshSheetApplied 重算 —— 不显示"应用瞬间的 0"当作现状。 -->
+                        <div
+                          v-else-if="appliedSummaryFor(part)"
+                          class="p-[11px] text-[11.9px] leading-[1.6] text-[#57606a]"
+                          data-testid="sheet-applied-summary"
+                        >
+                          <div>{{ appliedLine(appliedSummaryFor(part)!) }}</div>
+                          <div v-if="(appliedSummaryFor(part)!.manualChanges ?? 0) > 0" class="mt-[2px] text-[#8b949e]">
+                            {{ t('sheet.preview.manualChanges', { count: appliedSummaryFor(part)!.manualChanges }) }}
+                          </div>
+                        </div>
+
                         <!-- AI 可视可操作专项 §3.3.7：上传交接卡（唯一新增的人围栏外观）。
                              「选择文件」= 用户手势（picker 必须在同步栈里被调）；「放弃」= cancelled=true。
                              刷新后区域仍注册 ⇒ 可继续；区域不在该页 ⇒ 主按钮禁用 + 只能放弃。 -->
@@ -1197,6 +1211,7 @@ import ContextPill from '@/components/AiPanel/ContextPill.vue'
 import { GENERATIVE_FORM_TOOL, type ChatMessage, type ToolPart } from '@/types/ai'
 import { SHEET_PREVIEW_TOOLS, UI_HANDOFF_TOOLS } from '@/types/tools'
 import { resolveAiRef } from '@/utils/ai-regions'
+import type { SheetAppliedSummary } from '@/utils/sheet-tools'
 import type { FormSpec } from '@/types/form-schema'
 import type { ErrorCard, ErrorCardVariant } from '@/utils/error-card'
 
@@ -2570,6 +2585,25 @@ const aiOperating = computed(() => ai.uiAnnouncement !== null && (ai.loading || 
 
 function onUiUndo(): void {
   void ai.undoLastUiAction()
+}
+
+/**
+ * 已应用的表格写工具段 → 改动摘要（治理批 §5.4 的卡面一行）。
+ *
+ * <p>只对"最近一次应用"的那一段显示（`sheetApplied` 是单值），且必须在段上是 succeeded ——
+ * 否则会把上一批的摘要挂到这一批失败卡上。
+ */
+function appliedSummaryFor(part: ToolPart): SheetAppliedSummary | null {
+  const summary = ai.sheetApplied
+  if (!summary || part.toolCallId !== summary.toolCallId) {
+    return null
+  }
+  return part.status === 'succeeded' ? summary : null
+}
+
+/** 一行式：`AI 改动 120 格（可撤销，深度 3 中第 1 层）`。 */
+function appliedLine(summary: SheetAppliedSummary): string {
+  return t('sheet.applied.line', { cells: summary.cells, layer: summary.layer })
 }
 
 /** 该段对应的本地预览计划（无 ⇒ 面板渲染“预览已失效 + 放弃”）。 */

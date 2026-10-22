@@ -63,6 +63,13 @@ public class AiProperties {
 
 	private Config config = new Config();
 
+	/**
+	 * 表格工具治理开关（AI 表格工具治理方案 2026-10-22 §2；消费方 = {@code SheetSwitches}）。
+	 *
+	 * <p>四个键的唯一事实源就在这里：{@code application.yml} 只写注释、不写值（7 键显化纪律）。
+	 */
+	private Sheet sheet = new Sheet();
+
 	private Context context = new Context();
 
 	private Kb kb = new Kb();
@@ -130,6 +137,72 @@ public class AiProperties {
 		 * allowlist（allowlist 在 {@code ai_model} 表里）。Redis 不可用 ⇒ 每次真拉（不降级到"假装成功"）。
 		 */
 		private Duration modelsCacheTtl = Duration.ofMinutes(10);
+	}
+
+	/**
+	 * 表格工具治理开关（AI 表格工具治理方案 2026-10-22 §2.1；四键，值唯一事实源 = 本类）。
+	 *
+	 * <p>
+	 * 生效点<b>只有一个</b>：{@code ToolRegistry} 的披露谓词（{@code forContext} 与
+	 * {@code matchesContext} 共用同一判定，不新增第四道防线）。关闸的语义是"工具不披露"
+	 * （模型看不见），不是"调用了再拒"；旧缓存调用由执行前复查拦下并回 {@code SHEET_DISABLED}。
+	 *
+	 * <p>
+	 * 两个上界键<b>只能收紧、不能放大</b>：值大于前端硬顶时按硬顶计
+	 * （有效值 = {@code min(本键, 硬顶)}，由 {@code SheetSwitches} 收敛并经 {@code /health.sheet}
+	 * 下发前端）—— 硬顶是 R3 的物理边界，不随配置漂移。
+	 */
+	@Data
+	public static class Sheet {
+
+		/**
+		 * 表格读侧总闸（缺省 <b>true</b>）。
+		 *
+		 * <p>覆盖 5 个纯读工具（{@code read_sheet_summary} / {@code aggregate_sheet} /
+		 * {@code inspect_columns} / {@code review_cells} / {@code find_rows}）。缺省 true = 允许把
+		 * ≤20 行投影采样送进模型（D2 授权见 {@code docs/evidence} 的授权件）。关掉 = 这 5 个工具
+		 * 退出披露面，模型看不到也不会被调用；不是"调用了再拒"。
+		 *
+		 * <p><b>{@code normalize_column} 不单独归本键</b>：它有 write 档，按"读闸 AND 写闸"披露
+		 * （见 {@link #writeEnabled}）。改本键需<b>重启</b>（进程内一次绑定，与
+		 * {@code app.ai.config.seed-force} 同口径）。
+		 */
+		private boolean readEnabled = true;
+
+		/**
+		 * 表格写侧总闸（缺省 <b>false</b>）。
+		 *
+		 * <p>覆盖 {@code replace_values} / {@code update_rows} / {@code undo_last_sheet_edit} 与
+		 * {@code normalize_column} 的<b>两档</b>。缺省 false：写会改用户眼前的表格，默认必须由管理员
+		 * 显式打开（与"模型配置写端点默认禁私网""AI 可用性动态判空"同姿态 —— 改状态的通道默认关）。
+		 * 关掉时这 4 个工具不披露；模型若凭旧缓存调用，回执码 {@code SHEET_DISABLED}
+		 * （不是 {@code SCOPE_VIOLATION}：那会让用户以为是自己点错了页面）。
+		 *
+		 * <p><b>{@code normalize_column} 的双闸规则 = readEnabled AND writeEnabled</b>：它的
+		 * {@code commit=false} 档虽是只读建议，但与 {@code commit=true} <b>同名同形参</b> ⇒ 若按读闸
+		 * 开放，模型可直接传 {@code commit=true} 绕过写闸。改本键需重启。
+		 */
+		private boolean writeEnabled = false;
+
+		/**
+		 * 单次采样行数上界（缺省 20 = 硬顶）。
+		 *
+		 * <p><b>只能收紧、不能放大</b>：值 &gt; 20 时按 20 计（硬顶是 R3 的物理边界，不随配置漂移）；
+		 * 有效值 = {@code min(本键, 20)}，经 {@code /health.sheet.sampleMaxRows} 下发前端。
+		 * 改本键需重启。
+		 */
+		private int sampleMaxRows = 20;
+
+		/**
+		 * 单次投影列数上界（缺省 5 = 硬顶；同 {@code columnCodes} 的 5 列硬校）。
+		 *
+		 * <p><b>只能收紧</b>：值 &gt; 5 时按 5 计；有效值 = {@code min(本键, 5)}，经
+		 * {@code /health.sheet.projectionMaxColumns} 下发前端。改本键需重启。
+		 *
+		 * <p><b>选区路径不适用</b>：用户亲手框选 = 逐次授权（2026-10-22 裁决，方案 §8 K-11 / §10 O-9），
+		 * 故本键只约束 {@code columnCodes} 与缺省投影两条路径。
+		 */
+		private int projectionMaxColumns = 5;
 	}
 
 	/**
@@ -372,6 +445,43 @@ public class AiProperties {
 	private static void checkPercent(String key, int value) {
 		if (value < 0 || value > 100) {
 			throw new IllegalStateException("app.ai.context." + key + " 必须在 0–100（当前 = " + value + "）");
+		}
+	}
+
+	/**
+	 * 启动期校验 {@code app.ai.sheet.*}（AI 表格工具治理批；与 {@link #verifyResultBudget()} 同一姿态）。
+	 *
+	 * <p>
+	 * 两个上界键的坏值都不是"性能降级"，而是<b>闸门被静默改写</b>：
+	 * <ul>
+	 * <li>{@code sample-max-rows <= 0} ⇒ 采样行数上界为 0，{@code capSheetResult} 的
+	 * {@code Math.max(1, …)} 会把它救成 1 行 —— 配置面写"0 = 不采样"，运行面却仍回 1 行，
+	 * 两个口径对不上；</li>
+	 * <li>{@code projection-max-columns <= 0} ⇒ 同上，投影列被救成 1 列，读侧"缺省投影 = 主键列 +
+	 * 前 4 列"的承诺与实发列数不符。</li>
+	 * </ul>
+	 * 故启动即失败并点名键与当前值（与 {@code verifyMemory} 的 {@code min-messages} 同类判据）。
+	 *
+	 * <p>
+	 * <b>大于硬顶不是坏值</b>：本批的口径是"只能收紧、不能放大"（§2.1 / S-04）——
+	 * 值 &gt; 20 / 5 时按硬顶计（由 {@code SheetSwitches} 收敛并在 {@code /health.sheet} 回显有效值），
+	 * 不在这里拒绝。理由是"配大了"不会造成静默错误，只会被收敛；拒绝反而会让一次笔误把服务挡在门外。
+	 */
+	@PostConstruct
+	void verifySheet() {
+		Sheet sheet = this.sheet;
+		if (sheet == null) {
+			throw new IllegalStateException("app.ai.sheet 段缺失（绑定为 null）：表格工具开关无法装配，启动失败");
+		}
+		if (sheet.getSampleMaxRows() <= 0) {
+			throw new IllegalStateException("app.ai.sheet.sample-max-rows 必须 > 0（当前 = "
+					+ sheet.getSampleMaxRows() + "）：0/负值会被 capSheetResult 静默救成 1 行，"
+					+ "配置面与运行面说两套话；要收紧请配 1..20 的正值");
+		}
+		if (sheet.getProjectionMaxColumns() <= 0) {
+			throw new IllegalStateException("app.ai.sheet.projection-max-columns 必须 > 0（当前 = "
+					+ sheet.getProjectionMaxColumns() + "）：0/负值会让投影列被救成 1 列，"
+					+ "与「缺省投影 = 主键列 + 前 4 列」的承诺不符；要收紧请配 1..5 的正值");
 		}
 	}
 
