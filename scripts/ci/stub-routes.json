@@ -26,18 +26,277 @@
   },
   "usageShapes": {
     "note": "上下文统计与压缩专项 §5.8 的 usage 形状表（E2E-CTX-1..4 的唯一取数点）。`last` = 改造前桩就发的基线（逐字节不变）；`repeat` = 每块重复同一份；`zero-last` = 中间真值 + 末块 0/0/0；`none` = 整轮不发。verify-e2e.ps1 读同一份文件，桩与用例因此不会漂移。",
-    "last": { "promptTokens": 1200, "completionTokens": 40, "totalTokens": 1240, "cachedTokens": 640, "reasoningTokens": 16 },
-    "repeat": { "promptTokens": 4321, "completionTokens": 77, "totalTokens": 4398, "cachedTokens": 2048, "reasoningTokens": 12 },
-    "zero-last": { "promptTokens": 3100, "completionTokens": 50, "totalTokens": 3150 },
+    "last": {
+      "promptTokens": 1200,
+      "completionTokens": 40,
+      "totalTokens": 1240,
+      "cachedTokens": 640,
+      "reasoningTokens": 16
+    },
+    "repeat": {
+      "promptTokens": 4321,
+      "completionTokens": 77,
+      "totalTokens": 4398,
+      "cachedTokens": 2048,
+      "reasoningTokens": 12
+    },
+    "zero-last": {
+      "promptTokens": 3100,
+      "completionTokens": 50,
+      "totalTokens": 3150
+    },
     "none": {}
+  },
+  "faults": {
+    "note": "E2E 批① §4.6 桩开关清单的唯一取数点（数值默认值 + 承载层）。桩（stub-upstream.mjs）与用例（verify-e2e.ps1）读同一份 ⇒ 开关名与默认值不会两边各写一套。layer=stub 的开关由桩按提示词标记注入；layer=script 的开关由用例自己构造（桩无法替代）；layer=product 的开关由产品既有语义产生（桩只负责触发）。",
+    "switches": {
+      "break-at-seq": {
+        "layer": "stub",
+        "value": "frames",
+        "default": 2,
+        "note": "在指定 seq 断流（写满 K 帧后销毁 socket，不发 [DONE]）",
+        "cases": [
+          "S-05",
+          "M-08",
+          "M-09"
+        ]
+      },
+      "stall-frames": {
+        "layer": "stub",
+        "value": "ms",
+        "default": 50000,
+        "note": "帧间静默（首帧后每帧前等 ms）",
+        "cases": [
+          "S-04"
+        ]
+      },
+      "kill-stream": {
+        "layer": "stub",
+        "value": "ms",
+        "default": 3000,
+        "note": "上游 TCP 断（到点销毁 socket）",
+        "cases": [
+          "S-06",
+          "D-09"
+        ]
+      },
+      "slow-tool": {
+        "layer": "stub",
+        "value": "ms",
+        "default": 130000,
+        "note": "工具轮首个 tool_calls 帧前静默 ms（建模上游编排慢）",
+        "cases": [
+          "S-09",
+          "S-11",
+          "P-03",
+          "R-03"
+        ]
+      },
+      "turn-text": {
+        "layer": "stub",
+        "value": "none",
+        "default": 0,
+        "note": "命名轮蓝本：确定性长文本轮（段序基线）",
+        "cases": [
+          "S-01",
+          "S-12"
+        ]
+      },
+      "turn-interleave": {
+        "layer": "stub",
+        "value": "none",
+        "default": 0,
+        "note": "命名轮蓝本：t→tool→t→tool 交错（同一 toolCallId 不得被拆两段）",
+        "cases": [
+          "S-02"
+        ]
+      },
+      "multi-card": {
+        "layer": "stub",
+        "value": "n",
+        "default": 3,
+        "note": "一批多张待决卡（同一条 assistant 消息里 n 个 tool_calls，id 互异）",
+        "cases": [
+          "H-04",
+          "H-11",
+          "P-05"
+        ]
+      },
+      "gf-seven-types": {
+        "layer": "stub",
+        "value": "route",
+        "default": 0,
+        "note": "路由 GF-SEVEN-TYPES：七型全覆盖",
+        "cases": [
+          "G-07",
+          "G-18"
+        ]
+      },
+      "gf-linkage": {
+        "layer": "stub",
+        "value": "route",
+        "default": 0,
+        "note": "路由 GF-LINKAGE/GF-LINKAGE-EXPR：三原语 + 表达式判非法",
+        "cases": [
+          "G-09",
+          "G-10",
+          "X-10"
+        ]
+      },
+      "gf-deep-linkage": {
+        "layer": "stub",
+        "value": "route",
+        "default": 0,
+        "note": "路由 GF-DEEP-LINKAGE：四层依赖 ⇒ 超 MAX_LINKAGE_DEPTH",
+        "cases": [
+          "G-13"
+        ]
+      },
+      "gf-options-from": {
+        "layer": "stub",
+        "value": "route",
+        "default": 0,
+        "note": "路由 GF-OPTIONS-FROM：optionsFrom/defaultFrom",
+        "cases": [
+          "G-11",
+          "G-12"
+        ]
+      },
+      "gf-attachment": {
+        "layer": "stub",
+        "value": "route",
+        "default": 0,
+        "note": "路由 GF-ATTACHMENT：附件两段式",
+        "cases": [
+          "G-14",
+          "G-15"
+        ]
+      },
+      "gf-longtext": {
+        "layer": "stub",
+        "value": "route",
+        "default": 0,
+        "note": "路由 GF-LONGTEXT：textarea 2000",
+        "cases": [
+          "G-08"
+        ]
+      },
+      "usage-shape": {
+        "layer": "stub",
+        "value": "enum",
+        "default": "last",
+        "note": "已存在（四形状）",
+        "cases": [
+          "C-03",
+          "C-04",
+          "C-05",
+          "C-06"
+        ]
+      },
+      "context-overflow": {
+        "layer": "stub",
+        "value": "none",
+        "default": 0,
+        "note": "上游回 400 + 越窗措辞（ContextOverflow.MARKERS 命中）",
+        "cases": [
+          "C-12"
+        ]
+      },
+      "fail-503-once": {
+        "layer": "stub",
+        "value": "none",
+        "default": 0,
+        "note": "同一轮首次 503、之后正常（重试退避 S-07 的底座；attempts≥2 且只 1 个 done）",
+        "cases": [
+          "S-07"
+        ]
+      },
+      "summary-500": {
+        "layer": "stub",
+        "value": "none",
+        "default": 0,
+        "note": "arm 后下一条摘要请求回 500（历史逐字不变 + 熔断）",
+        "cases": [
+          "C-10"
+        ]
+      },
+      "stall-headers": {
+        "layer": "stub",
+        "value": "ms",
+        "default": 30000,
+        "note": "写响应头前静默 ms（建连看门狗）",
+        "cases": [
+          "S-03"
+        ]
+      },
+      "huge-frame": {
+        "layer": "stub",
+        "value": "bytes",
+        "default": 102400,
+        "note": "单个 delta 帧 N 字节（64KB 帧上限）",
+        "cases": [
+          "S-13"
+        ]
+      },
+      "slow-reader": {
+        "layer": "stub",
+        "value": "none",
+        "default": 0,
+        "note": "慢生产者：20 帧 × 250ms（配合两路订阅验隔离）",
+        "cases": [
+          "S-14",
+          "D-10"
+        ]
+      },
+      "tool-loop": {
+        "layer": "stub",
+        "value": "n",
+        "default": 26,
+        "note": "连续 n 次工具调用（步数上限 25）",
+        "cases": [
+          "S-10"
+        ]
+      },
+      "fe-tool-hang": {
+        "layer": "script",
+        "value": "none",
+        "default": 0,
+        "note": "客户端不回灌（桩只负责下发 frontend_tool_request；挂起由用例的 handler 停住）",
+        "cases": [
+          "D-11"
+        ]
+      },
+      "sheet-big": {
+        "layer": "script",
+        "value": "rows",
+        "default": 500,
+        "note": "用例自建 500 行任务（桩不造业务数据）",
+        "cases": [
+          "T-01"
+        ]
+      },
+      "preflight-fail": {
+        "layer": "product",
+        "value": "none",
+        "default": 0,
+        "note": "产品预检失败语义（桩只负责触发 start_export）",
+        "cases": [
+          "H-06"
+        ]
+      }
+    }
   },
   "routes": [
     {
       "id": "GF-FILTER",
       "note": "GF1/GF3/GF4 共用的 union 模板：keyword+minRows+effectiveDate 满足 GF1、keyword 满足 GF3、keyword+amount+scope 满足 GF4。只有 keyword 标 required:true —— GF4 的改值重发只带 keyword+scope，其余字段若必填会被回灌闸门 400 拒。",
       "match": {
-        "messageAny": ["scenario=FILTER"],
-        "requiresTools": ["generative_form"]
+        "messageAny": [
+          "scenario=FILTER"
+        ],
+        "requiresTools": [
+          "generative_form"
+        ]
       },
       "tool": "generative_form",
       "arguments": {
@@ -72,8 +331,14 @@
               "label": "范围",
               "type": "enum",
               "options": [
-                { "value": "XN", "label": "XN" },
-                { "value": "HD", "label": "HD" }
+                {
+                  "value": "XN",
+                  "label": "XN"
+                },
+                {
+                  "value": "HD",
+                  "label": "HD"
+                }
               ]
             }
           ]
@@ -84,8 +349,12 @@
       "id": "GF-CLARIFY",
       "note": "GF2：CLARIFY 场景，Task:EXPORT/QUERY_COND 上下文（该上下文由 task:* 披露 generative_form）。",
       "match": {
-        "messageAny": ["scenario=CLARIFY"],
-        "requiresTools": ["generative_form"]
+        "messageAny": [
+          "scenario=CLARIFY"
+        ],
+        "requiresTools": [
+          "generative_form"
+        ]
       },
       "tool": "generative_form",
       "arguments": {
@@ -98,8 +367,14 @@
               "label": "导出范围",
               "type": "enum",
               "options": [
-                { "value": "ALL", "label": "全部" },
-                { "value": "SELECTED", "label": "仅已选" }
+                {
+                  "value": "ALL",
+                  "label": "全部"
+                },
+                {
+                  "value": "SELECTED",
+                  "label": "仅已选"
+                }
               ]
             },
             {
@@ -115,41 +390,428 @@
       "id": "TC17-PUBLISH",
       "note": "TC17/TC18：DANGER 工具，产品会挂起确认门；拒绝/同意两条结局都由脚本决策，桩每轮独立、无状态依赖。",
       "match": {
-        "messageAny": ["start_publish"],
-        "requiresTools": ["start_publish"]
+        "messageAny": [
+          "start_publish"
+        ],
+        "requiresTools": [
+          "start_publish"
+        ]
       },
       "tool": "start_publish",
-      "arguments": { "taskId": "${taskId}" }
+      "arguments": {
+        "taskId": "${taskId}"
+      }
     },
     {
       "id": "TC16-EXPORT",
       "note": "TC16a：DANGER 工具，放行后由后端服务层真实创建导出作业。",
       "match": {
-        "messageAny": ["start_export"],
-        "requiresTools": ["start_export"]
+        "messageAny": [
+          "start_export"
+        ],
+        "requiresTools": [
+          "start_export"
+        ]
       },
       "tool": "start_export",
-      "arguments": { "taskId": "${taskId}" }
+      "arguments": {
+        "taskId": "${taskId}"
+      }
     },
     {
       "id": "TC16-NAVIGATE",
       "note": "TC16b：工作区动作走 FRONTEND 通道（后端不执行、下发 frontend_tool_request 等回灌）。",
       "match": {
-        "messageAny": ["导出向导"],
-        "requiresTools": ["navigate_to"]
+        "messageAny": [
+          "导出向导"
+        ],
+        "requiresTools": [
+          "navigate_to"
+        ]
       },
       "tool": "navigate_to",
-      "arguments": { "page": "export", "taskId": "${taskId}" }
+      "arguments": {
+        "page": "export",
+        "taskId": "${taskId}"
+      }
     },
     {
       "id": "TC15-LIST-DEFS",
       "note": "TC15：只读工具，执行后由桩给出文本轮（满足 delta ≥ 1 与 done ≥ 1）。",
       "match": {
-        "messageAny": ["配置定义"],
-        "requiresTools": ["list_config_defs"]
+        "messageAny": [
+          "配置定义"
+        ],
+        "requiresTools": [
+          "list_config_defs"
+        ]
       },
       "tool": "list_config_defs",
       "arguments": {}
+    },
+    {
+      "id": "GF-SEVEN-TYPES",
+      "note": "G-07/G-18 的底座：七型全覆盖（text/number/boolean/date/enum/multi_select/attachment）。attachment 的值由用户上传产生，故不得带 defaultValue（GenerativeFormRules:749）。",
+      "match": {
+        "messageAny": [
+          "gf-seven-types"
+        ],
+        "requiresTools": [
+          "generative_form"
+        ]
+      },
+      "tool": "generative_form",
+      "arguments": {
+        "form": {
+          "scenario": "FILTER",
+          "title": "七型渲染基线",
+          "fields": [
+            {
+              "key": "f_text",
+              "label": "文本",
+              "type": "text",
+              "required": true,
+              "placeholder": "任意文本"
+            },
+            {
+              "key": "f_number",
+              "label": "数字",
+              "type": "number"
+            },
+            {
+              "key": "f_boolean",
+              "label": "开关",
+              "type": "boolean"
+            },
+            {
+              "key": "f_date",
+              "label": "日期",
+              "type": "date"
+            },
+            {
+              "key": "f_enum",
+              "label": "单选",
+              "type": "enum",
+              "options": [
+                {
+                  "value": "XN",
+                  "label": "XN"
+                },
+                {
+                  "value": "HD",
+                  "label": "HD"
+                }
+              ]
+            },
+            {
+              "key": "f_multi",
+              "label": "多选",
+              "type": "multi_select",
+              "options": [
+                {
+                  "value": "A",
+                  "label": "A"
+                },
+                {
+                  "value": "B",
+                  "label": "B"
+                }
+              ]
+            },
+            {
+              "key": "f_file",
+              "label": "附件",
+              "type": "attachment"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "GF-LINKAGE",
+      "note": "G-09/G-10 的底座：visibleWhen / requiredWhen / disabledWhen 三原语（op 取闭集 eq/in，不含表达式）。",
+      "match": {
+        "messageAny": [
+          "gf-linkage"
+        ],
+        "requiresTools": [
+          "generative_form"
+        ]
+      },
+      "tool": "generative_form",
+      "arguments": {
+        "form": {
+          "scenario": "FILTER",
+          "title": "联动三原语",
+          "fields": [
+            {
+              "key": "kind",
+              "label": "类型",
+              "type": "enum",
+              "required": true,
+              "options": [
+                {
+                  "value": "A1",
+                  "label": "A1"
+                },
+                {
+                  "value": "A2",
+                  "label": "A2"
+                }
+              ]
+            },
+            {
+              "key": "detail",
+              "label": "明细",
+              "type": "text",
+              "visibleWhen": {
+                "key": "kind",
+                "op": "eq",
+                "value": "A1"
+              },
+              "requiredWhen": {
+                "key": "kind",
+                "op": "eq",
+                "value": "A1"
+              }
+            },
+            {
+              "key": "note",
+              "label": "备注",
+              "type": "text",
+              "disabledWhen": {
+                "key": "kind",
+                "op": "in",
+                "values": [
+                  "A2"
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "GF-LINKAGE-EXPR",
+      "note": "X-10 的底座：把 visibleWhen 写成表达式字符串（a === 1）。产品必须判非法（LINKAGE_CONDITION_INVALID）且**不求值**。 标记用 gf-expr-linkage（不与 gf-linkage 互为子串：路由匹配是 includes，前缀重叠会让自检的等长重发断言失真）。",
+      "match": {
+        "messageAny": [
+          "gf-expr-linkage"
+        ],
+        "requiresTools": [
+          "generative_form"
+        ]
+      },
+      "tool": "generative_form",
+      "arguments": {
+        "form": {
+          "scenario": "FILTER",
+          "title": "表达式形态联动",
+          "fields": [
+            {
+              "key": "a",
+              "label": "A",
+              "type": "text"
+            },
+            {
+              "key": "b",
+              "label": "B",
+              "type": "text",
+              "visibleWhen": "a === 1"
+            }
+          ]
+        }
+      },
+      "invalidByDesign": true
+    },
+    {
+      "id": "GF-DEEP-LINKAGE",
+      "note": "G-13 的底座：A→B→C→D 四层依赖，超过 MAX_LINKAGE_DEPTH=2 ⇒ 产品必须拒（not 静默丢字段）。",
+      "match": {
+        "messageAny": [
+          "gf-deep-linkage"
+        ],
+        "requiresTools": [
+          "generative_form"
+        ]
+      },
+      "tool": "generative_form",
+      "arguments": {
+        "form": {
+          "scenario": "FILTER",
+          "title": "超深联动",
+          "fields": [
+            {
+              "key": "a",
+              "label": "A",
+              "type": "text"
+            },
+            {
+              "key": "b",
+              "label": "B",
+              "type": "text",
+              "visibleWhen": {
+                "key": "a",
+                "op": "notEmpty"
+              }
+            },
+            {
+              "key": "c",
+              "label": "C",
+              "type": "text",
+              "visibleWhen": {
+                "key": "b",
+                "op": "notEmpty"
+              }
+            },
+            {
+              "key": "d",
+              "label": "D",
+              "type": "text",
+              "visibleWhen": {
+                "key": "c",
+                "op": "notEmpty"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "GF-OPTIONS-FROM",
+      "note": "G-11/G-12 的底座：B 的选项走 optionsFrom 静态映射（dependsOn=region），C 的初值走 defaultFrom。sourceId 只允许注册值 definition_fields。",
+      "match": {
+        "messageAny": [
+          "gf-options-from"
+        ],
+        "requiresTools": [
+          "generative_form"
+        ]
+      },
+      "tool": "generative_form",
+      "arguments": {
+        "form": {
+          "scenario": "FILTER",
+          "title": "级联选项",
+          "fields": [
+            {
+              "key": "region",
+              "label": "区域",
+              "type": "enum",
+              "required": true,
+              "options": [
+                {
+                  "value": "XN",
+                  "label": "XN"
+                },
+                {
+                  "value": "HD",
+                  "label": "HD"
+                }
+              ]
+            },
+            {
+              "key": "city",
+              "label": "城市",
+              "type": "enum",
+              "optionsFrom": {
+                "dependsOn": "region",
+                "map": {
+                  "XN": [
+                    {
+                      "value": "XA",
+                      "label": "XA"
+                    }
+                  ],
+                  "HD": [
+                    {
+                      "value": "HD1",
+                      "label": "HD1"
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "key": "amount",
+              "label": "金额",
+              "type": "number",
+              "defaultFrom": {
+                "dependsOn": "region",
+                "map": {
+                  "XN": 10,
+                  "HD": 20
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "GF-ATTACHMENT",
+      "note": "G-14/G-15 的底座：附件两段式上传（第一段发 POST /api/ai/form/attachments 拿 fileId，回灌只带 fileId）。",
+      "match": {
+        "messageAny": [
+          "gf-attachment"
+        ],
+        "requiresTools": [
+          "generative_form"
+        ]
+      },
+      "tool": "generative_form",
+      "arguments": {
+        "form": {
+          "scenario": "CLARIFY",
+          "title": "附件交接",
+          "fields": [
+            {
+              "key": "sheet",
+              "label": "数据文件",
+              "type": "attachment",
+              "required": true
+            },
+            {
+              "key": "memo",
+              "label": "说明",
+              "type": "text"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "GF-LONGTEXT",
+      "note": "G-08 的底座：text + variant=longText 的 2000 字上限（普通 text 仍 200）。",
+      "match": {
+        "messageAny": [
+          "gf-longtext"
+        ],
+        "requiresTools": [
+          "generative_form"
+        ]
+      },
+      "tool": "generative_form",
+      "arguments": {
+        "form": {
+          "scenario": "FILTER",
+          "title": "长文本",
+          "fields": [
+            {
+              "key": "memo",
+              "label": "长备注",
+              "type": "text",
+              "variant": "longText",
+              "required": true
+            },
+            {
+              "key": "short",
+              "label": "短备注",
+              "type": "text"
+            }
+          ]
+        }
+      }
     }
   ]
 }

@@ -5,10 +5,10 @@
 
 | 路径 | 作用 |
 | --- | --- |
-| `scripts/verify-e2e.ps1` | 端到端验证脚本（35 用例，PowerShell）。断言对象是**已启动的后端**，脚本自身不启动任何服务 |
+| `scripts/verify-e2e.ps1` | 端到端验证脚本（123 用例 = 既有 35 + 批① 桩模式 88，PowerShell）。断言对象是**已启动的后端**，脚本自身不启动任何服务 |
 | `scripts/b23l1-dual-instance.ps1` | **双实例 harness**（B23L1 批①）：8081/8082 共享同一 Redis + 桩上游，脚本自己起/等/收（也可 `-NoStart` 接已就绪实例）。只交付、施工期不运行 |
 | `scripts/ci/stub-upstream.mjs` | CI E2E 用的**上游替身**（OpenAI 兼容桩），让用例在零密钥、零外网下确定性通过 |
-| `scripts/ci/stub-routes.json` | 桩的路由表（提示词 → 工具调用/表单），与 `GenerativeFormRules` 白名单手工对账 |
+| `scripts/ci/stub-routes.json` | 桩的路由表（提示词 → 工具调用/表单）+ `usageShapes` + `faults.switches`（§4.6 桩开关清单的唯一取数点），与 `GenerativeFormRules` 白名单**事实源逐值对账** |
 | `scripts/githooks/` | 提交前敏感信息扫描（DC-08 落地），详见 `scripts/githooks/README.md` |
 
 ---
@@ -22,7 +22,8 @@
   - **Redis 可用**（默认 `127.0.0.1:6379`）—— AI 会话记忆 / 确认门 / 会话锁都走它；
   - 建议启动参数 `--app.job.batch-size=10 --app.job.demo-batch-delay-ms=150`（TC11 断言 `JOB_PROGRESS` 事件流；`batch-size` 为默认 100 时小配置项不会跨分片边界）；
   - 日志级别 `com.example.configmgr=DEBUG`（TC10 与 Q8 的日志类断言依赖它）。
-- **数据面安全**：脚本只创建/删除自己的 `S5B-*` 任务与 `E2E_TEMP` 定义；`CURRENCY` 演示数据在 TC13 被替换为 3 行，TC19 用全量导出件恢复为 5 行。
+- **数据面安全**：脚本只创建/删除自己的 `S5B-*` / `AIE2E-*` 任务与 `E2E_TEMP` 定义；`CURRENCY` 演示数据在 TC13 被替换为 3 行，TC19 用全量导出件恢复为 5 行。
+- **批① 88 条（AIE2E-*）**：接口级、桩模式下**零 SKIP**（本节不调用 `Gf-Skip`），末尾 `AIE2E-MANIFEST` 自校验「条数 88 / 逐域分布 / P0-P1-P2=12-50-26」；P0/P1 红 ⇒ `exit 1`，**P2 红只计数不阻塞**（设计稿 §4.2 第 5 项）。用例名单推导链见脚本第 3 节的注释（154 = 88 + 10 nightly + 41 UI + 7 多实例 + 8 收编）。
 
 ### 1.2 参数表
 
@@ -123,13 +124,33 @@ node scripts/ci/stub-upstream.mjs --self-check [--routes scripts/ci/stub-routes.
 数值唯一取数点 = `stub-routes.json` 的 `usageShapes`（`verify-e2e.ps1` 读同一份 ⇒ 桩与用例不会漂移）；
 `--self-check` 的段 ⑧ 逐形状断言帧形态与标记解析，并校验形状表三维自洽。
 
+### 2.3c 故障注入与命名轮蓝本（E2E 批① 的 §4.6 开关；同样是**请求级**提示词标记）
+
+| 开关 | 形态 | 消费它的用例 |
+| --- | --- | --- |
+| `turn-text` / `turn-interleave` | 确定性文本轮 / 文本↔工具交错轮（段序基线） | AIE2E-S-01/S-02（S-02 归批② nightly） |
+| `break-at-seq=K` | 写满 K 帧后销毁 socket（不发 `[DONE]`） | S-05 / M-08 / M-09 |
+| `stall-frames=<ms>` / `stall-headers=<ms>` | 帧间静默 / 写响应头前静默 | S-04 / S-03 |
+| `kill-stream=<ms>` | 到点销毁 socket（上游 TCP 断） | S-06 / D-09 |
+| `slow-tool=<ms>` / `slow-reader` | 工具轮首帧前静默 / 慢生产者 20×250ms | S-09·S-11 / S-14·D-10 |
+| `multi-card=<n>` | 一条消息 n 个 `tool_calls`（id 互异） | H-04 / H-11 |
+| `huge-frame=<bytes>` / `tool-loop=<n>` | 单帧字节数 / 连续 n 次工具调用 | S-13 / S-10 |
+| `fail-503-once` | 同一轮首次 503、之后正常 | S-07 |
+| `context-overflow` / `summary-500` | 越窗 400（措辞取 `ContextOverflow.MARKERS`）/ 摘要请求 500 | C-12 / C-10 |
+| `gf-seven-types` / `gf-linkage` / `gf-expr-linkage` / `gf-deep-linkage` / `gf-options-from` / `gf-attachment` / `gf-longtext` | GF 新能力面的路由开关（`GF-*` 路由） | G-04…G-15 / X-10 |
+
+`fe-tool-hang` / `sheet-big` / `preflight-fail` 三项**不是桩层开关**（`faults.switches` 里标 `layer=script/product`）：
+挂起由用例的处理器停住、大表由用例自建任务、预检失败走产品既有语义 —— 桩只提供触发面，不伪造业务结果。
+`--self-check` 段 ⑨ 断言"表与实现不漂移"（桩层 21 项逐项有实现）、标记解析、写出计划、段序、多卡 id 互异、
+大帧字节数、越窗错误体命中产品 `MARKERS`（读事实源）、摘要识别式与 `RollingSummarizer` 同源。
+
 ### 2.4 记录契约（可归因性）
 
 每请求落 `<dir>/req-NN.json`（请求原文）、`.tools.txt`（本请求实际披露的工具名清单）、`.head.txt`（模型可见消息摘要）、`.decision.json`（桩本轮的判定：路由 id / 工具名 / 理由）——这是"桩坏 / 产品坏"的区分依据。
 
 ### 2.5 与产品侧白名单的对账（已改为事实源逐值对账，T4-5 落地）
 
-`stub-upstream.mjs` 的 8 组常量 + 5 项上限仍是 `GenerativeFormRules` 的**桩内副本**，但 `--self-check` 的自检③已改为**读产品事实源 `backend/src/main/java/com/example/configmgr/ai/form/GenerativeFormRules.java` 逐值对账**（8 组常量 + 5 项上限 + 原型三键；不新增端点、不新增生成步骤）——产品侧收紧或改动白名单而桩未同步时，**自检即红、e2e job 即红**，"副本自证仍绿"的漂移窗口已关闭。自检输出会打印事实源路径；对事实源**文本格式**（常量声明书写形态）有依赖，采用宽松解析、解析失败即红。
+`stub-upstream.mjs` 的 13 组常量 + 6 项上限仍是 `GenerativeFormRules` 的**桩内副本**，但 `--self-check` 的自检③已改为**读产品事实源 `backend/src/main/java/com/example/configmgr/ai/form/GenerativeFormRules.java` 逐值对账**（13 组常量 + 6 项上限 + 原型三键；不新增端点、不新增生成步骤）——产品侧收紧或改动白名单而桩未同步时，**自检即红、e2e job 即红**，"副本自证仍绿"的漂移窗口已关闭。自检输出会打印事实源路径；对事实源**文本格式**（常量声明书写形态）有依赖，采用宽松解析、解析失败即红。
 
 > 桩 / 前端 / 后端三处"原型键黑名单"另由后端用例 `GenerativeFormContractTest#forbiddenFieldKeysMatchAcrossEnds` 逐键锚定（同一批 T4-5 落地）。
 

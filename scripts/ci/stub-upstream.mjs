@@ -42,6 +42,20 @@
  *     --violate-form-keys：全局（S7 缺陷注入口径不变）；
  *     --violate-form-type：**请求级**——只有提示词明写"把字段 type 故意写成 html"的用例（GF6）触发，
  *       不连带污染共用 GF-FILTER 路由的 GF1/GF3/GF4（T4-4 裁决 4）。
+ *
+ * 故障注入与命名轮蓝本（E2E 批① §4.6；与 `usage-shape` 同族的**请求级**开关，提示词标记选择）：
+ *   turn-text / turn-interleave      确定性文本轮 / 文本↔工具交错轮（段序基线）
+ *   break-at-seq=K                   写满 K 帧后销毁 socket（不发 [DONE]）
+ *   stall-frames=<ms>                帧间静默；stall-headers=<ms> 写响应头前静默
+ *   kill-stream=<ms>                 到点销毁 socket（上游 TCP 断）
+ *   slow-tool=<ms>                   工具轮首帧前静默；slow-reader 慢生产者（20 帧 × 250ms）
+ *   multi-card=<n>                   一条消息 n 个 tool_calls（id 互异）
+ *   huge-frame=<bytes> / tool-loop=<n>   单帧字节数 / 连续 n 次工具调用
+ *   context-overflow / summary-500   越窗 400（措辞取产品 ContextOverflow.MARKERS）/ 摘要请求 500
+ *   gf-seven-types / gf-linkage / gf-expr-linkage / gf-deep-linkage / gf-options-from /
+ *   gf-attachment / gf-longtext      GF 新能力面的路由开关（stub-routes.json 的 GF-* 路由）
+ *   开关名与默认值的唯一取数点 = `stub-routes.json` 的 `faults.switches`（`--self-check` ⑨ 断言表与实现不漂移）；
+ *   未带标记的请求走改造前路径，帧逐字节不变。
  */
 
 import http from 'node:http'
@@ -85,12 +99,22 @@ const VIOLATE_FORM_TYPE = flag('violate-form-type')
 // 残留观察项（见 M2-T4 施工报告 §观察项）：③-b 模板校验里的 fields 数量上限（1..20）与 label
 //   长度上限（100）仍是**行内字面量**，未纳入本次逐值对账集合。
 const FORBIDDEN_KEYS = ['__proto__', 'constructor', 'prototype']
-const FIELD_TYPES = ['text', 'number', 'boolean', 'date', 'enum', 'multi_select']
+const FIELD_TYPES = ['text', 'number', 'boolean', 'date', 'enum', 'multi_select', 'attachment']
 const SCENARIOS = ['FILTER', 'CLARIFY']
 const FORM_ATTRIBUTES = ['scenario', 'title', 'fields']
-const FIELD_ATTRIBUTES = ['key', 'label', 'type', 'required', 'defaultValue', 'options', 'placeholder']
+// GF 优化批（attachment + 联动五原语/两条 from + 文本修饰）已进产品白名单，桩副本必须同步；
+// 未同步时 `--self-check` ③ 会红（事实源对账），这正是漂移窗口的告警位。
+const FIELD_ATTRIBUTES = ['key', 'label', 'type', 'required', 'defaultValue', 'options', 'placeholder',
+  'variant', 'minLength', 'maxLength', 'format', 'min', 'max', 'step', 'integer', 'minItems', 'maxItems',
+  'visibleWhen', 'requiredWhen', 'disabledWhen', 'optionsFrom', 'defaultFrom']
 const OPTION_ATTRIBUTES = ['value', 'label']
 const PLACEHOLDER_TYPES = ['text', 'number', 'date']
+const OPTION_TYPES = ['enum', 'multi_select']
+const CONDITION_OPS = ['eq', 'in', 'notIn', 'empty', 'notEmpty', 'between']
+const CONDITION_ATTRIBUTES = ['key', 'op', 'value', 'values']
+const VARIANT_TYPES = ['text']
+const TEXT_FORMATS = ['email', 'tel', 'url', 'idcard']
+const OPTION_SOURCE_IDS = ['definition_fields']
 const KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,39}$/
 
 const MAX_TITLE_CHARS = 100
@@ -98,6 +122,7 @@ const MAX_OPTIONS = 50
 const MAX_OPTION_TEXT_CHARS = 100
 const MAX_PLACEHOLDER_CHARS = 100
 const MAX_FORM_CHARS = 8000
+const MAX_LINKAGE_DEPTH = 2
 
 // ── 路由表 ─────────────────────────────────────────────────────────────────
 
@@ -203,6 +228,153 @@ function usageOf(shape) {
   if (shape.reasoningTokens) usage.completion_tokens_details = { reasoning_tokens: shape.reasoningTokens }
   return usage
 }
+
+// ── 故障注入与命名轮蓝本（E2E 批① §4.6 的桩开关；与 usage-shape 同族的**请求级**开关）──
+// 口径（与既有 35 用例零耦合的硬要求）：开关只由**提示词标记**选择，标记之外的请求
+// 走改造前的路径，帧逐字节不变。开关名与默认值不在本文件写死 —— 事实源是
+// `stub-routes.json` 的 `faults.switches`（用例与桩读同一份 ⇒ 不会两边各写一套）。
+//
+// 七个桩层开关（§4.6 行 1–7、9、10）：
+//   turn-text / turn-interleave  命名轮蓝本（段序基线 / t→tool→t→tool 交错）
+//   break-at-seq=K               写满 K 帧后销毁 socket（不发 [DONE]）
+//   stall-frames=<ms>            首帧后每帧前静默 ms（45s 静默判定）
+//   stall-headers=<ms>           写响应头前静默 ms（建连看门狗）
+//   kill-stream=<ms>             到点销毁 socket（上游 TCP 断）
+//   slow-tool=<ms>               工具轮首个 tool_calls 帧前静默 ms
+//   multi-card=<n>               一条 assistant 消息里 n 个 tool_calls（id 互异）
+//   huge-frame=<bytes>           单个 delta 帧 N 字节
+//   tool-loop=<n>                连续 n 次工具调用（步数上限）
+//   context-overflow             上游回 400 + 越窗措辞（ContextOverflow.MARKERS 命中）
+//   summary-500                  arm 后下一条摘要请求回 500
+//   slow-reader                  慢生产者：20 帧 × 250ms（配合双订阅验隔离）
+//
+// 三个非桩层开关（`faults.switches` 里标 layer=script/product）：`fe-tool-hang` 由用例的
+// 挂起处理器停住、`sheet-big` 由用例自建 500 行任务、`preflight-fail` 走产品既有预检语义。
+// 桩只为它们提供触发面（下发工具/表单），不在桩里伪造业务结果 —— 否则"桩绿=产品绿"的假象。
+const FAULT_VALUE_SWITCHES = ['break-at-seq', 'stall-frames', 'stall-headers', 'kill-stream', 'slow-tool',
+  'multi-card', 'huge-frame', 'tool-loop']
+const FAULT_FLAG_SWITCHES = ['turn-text', 'turn-interleave', 'context-overflow', 'summary-500', 'slow-reader',
+  'fail-503-once']
+const FAULT_SWITCHES = [...FAULT_VALUE_SWITCHES, ...FAULT_FLAG_SWITCHES]
+const FAULT_MARKER = new RegExp(`(?:^|[\\s【（(,，】：:])(${FAULT_SWITCHES.join('|')})(?:=(\\d+))?(?![\\w-])`, 'g')
+
+/** 本请求要求的故障开关（`{name: number|true}`）；无标记 = 空对象 = 改造前行为。 */
+function faultsOf(body) {
+  const text = textOf(lastMessageWithRole(messagesOf(body), 'user'))
+  const out = {}
+  if (!text) return out
+  FAULT_MARKER.lastIndex = 0
+  for (const m of text.matchAll(FAULT_MARKER)) {
+    const [, name, value] = m
+    out[name] = FAULT_VALUE_SWITCHES.includes(name) && value !== undefined ? Number(value) : true
+  }
+  return out
+}
+
+/** 开关默认值（`stub-routes.json` 的 `faults.switches[*].default`；缺失回落内建同值）。 */
+const FAULT_DEFAULTS = { 'break-at-seq': 2, 'stall-frames': 50000, 'stall-headers': 30000, 'kill-stream': 3000,
+  'slow-tool': 130000, 'multi-card': 3, 'huge-frame': 102400, 'tool-loop': 26 }
+
+/** 命名轮蓝本的确定性文本（段序基线与"迟到帧不写"用例共用；长度 > 120 字以覆盖多个 delta）。 */
+const TURN_TEXT = '命名轮蓝本：这是一段确定性文本，用于验证纯文本流的帧序完整性（start 恰 1 / delta ≥ 1 / done 恰 1），'
+  + '以及 done 之后零帧的迟到帧闸门。文本按 24 字符切片发送，切片数由本串长度决定，不依赖模型。'
+
+/** 开关的数值取值：`name=5` → 5；只写 `name`（无值）→ 表内默认值（不把 `true` 当 1 用）。 */
+function numericFault(faults, name) {
+  const v = faults[name]
+  if (typeof v === 'number') return v
+  return FAULT_DEFAULTS[name] ?? 0
+}
+
+/**
+ * 故障对"写出计划"的影响 —— **纯函数**（`--self-check` 直接断言，不起服务）：
+ * `{ headerDelayMs, firstFrameDelayMs, frameGapMs, killAfterMs, breakAtFrame }`。
+ * `breakAtFrame = K` 表示只写前 K 帧就销毁 socket；`killAfterMs > 0` 表示定时销毁。
+ */
+function writePlan(faults) {
+  return {
+    headerDelayMs: faults['stall-headers'] ? numericFault(faults, 'stall-headers') : 0,
+    firstFrameDelayMs: faults['slow-tool'] ? numericFault(faults, 'slow-tool') : 0,
+    frameGapMs: faults['stall-frames'] ? numericFault(faults, 'stall-frames') : (faults['slow-reader'] ? 250 : 0),
+    killAfterMs: faults['kill-stream'] ? numericFault(faults, 'kill-stream') : 0,
+    breakAtFrame: faults['break-at-seq'] ? numericFault(faults, 'break-at-seq') : 0
+  }
+}
+
+/** 交错轮：一条消息里 text→tool_calls（`t→tool` 半段），下一轮再来一次（`tool→t` 半段）。 */
+function interleaveRound(text, tool, args, callId, model, round) {
+  return [
+    chunk({ role: 'assistant', content: '' }, null, model),
+    chunk({ content: text }, null, model),
+    chunk({
+      tool_calls: [{
+        index: 0,
+        id: callId,
+        type: 'function',
+        function: { name: tool, arguments: JSON.stringify(args) }
+      }]
+    }, null, model),
+    chunk({}, 'tool_calls', model),
+    'data: [DONE]\n\n'
+  ].map((f) => f)
+}
+
+/** 多卡轮：n 个 tool_calls（id 互异）落在同一条 assistant 消息里（H-04 的"一批多张待决卡"）。 */
+function multiToolRound(tool, args, callId, model, n) {
+  const calls = []
+  for (let i = 0; i < n; i++) {
+    calls.push({
+      index: i,
+      id: `${callId}-${i + 1}`,
+      type: 'function',
+      function: { name: tool, arguments: JSON.stringify(args) }
+    })
+  }
+  return [
+    chunk({ role: 'assistant', content: '' }, null, model),
+    chunk({ tool_calls: calls }, null, model),
+    chunk({}, 'tool_calls', model),
+    'data: [DONE]\n\n'
+  ]
+}
+
+/** 大帧轮：**单个** delta 帧携带 N 字节（帧侧 64KB 上限与 JSON 合法性的注入面）。 */
+function hugeTextRound(bytes, model) {
+  const unit = '大帧注入面ABCDEFGHIJ'
+  const text = unit.repeat(Math.ceil(bytes / unit.length)).slice(0, Math.max(1, bytes))
+  return [
+    chunk({ role: 'assistant', content: '' }, null, model),
+    chunk({ content: text }, null, model),
+    chunk({}, 'stop', model),
+    'data: [DONE]\n\n'
+  ]
+}
+
+/** 越窗错误体：措辞取产品 `ContextOverflow.MARKERS` 里"只在这一种情况下出现"的短语。 */
+const OVERFLOW_BODY = {
+  error: {
+    message: "This model's maximum context length is 200000 tokens. However, your messages resulted in 300001 tokens.",
+    type: 'invalid_request_error',
+    code: 'context_length_exceeded'
+  }
+}
+
+/** 摘要请求识别（`RollingSummarizer` 的两段固定指令头；与产品提示词同源，不猜调用方身份）。 */
+const SUMMARY_REQUEST = /You (summarize an AI assistant conversation|merge partial summaries of one AI assistant conversation)/
+
+/** `summary-500` 的 arm 状态：mark 命中后，**下一条**摘要请求 500 并解除（一次性，可重 arm）。 */
+const summaryFault = { armedUntilMs: 0 }
+
+/**
+ * `fail-503-once` 的一次性台账（按会话指纹）：同一轮只 503 一次，第二次起正常回帧 ——
+ * 这是 S-07「首请求 503、次请求 200」的确定性底座（重试退避的**可观测**面 = attempts≥2）。
+ */
+const failOnceSeen = new Set()
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)))
+}
+
 
 // ── 请求解析辅助 ───────────────────────────────────────────────────────────
 
@@ -510,18 +682,137 @@ function record(index, raw, body, decision) {
     JSON.stringify(decision, null, 2), 'utf8')
 }
 
-function handleChat(req, res, raw) {
+/** 全部消息文本（摘要请求识别用：摘要请求不带对话提示词标记）。 */
+function allText(body) {
+  return messagesOf(body).map((m) => textOf(m)).join('\n')
+}
+
+/** 交错轮的参数表：只挑**空参**后端工具，避免蓝图轮依赖业务夹具（夹具留给业务用例）。 */
+const INTERLEAVE_TOOLS = ['list_config_defs', 'get_workspace_state', 'get_row_count']
+
+/**
+ * 命名轮蓝本 / 步数上限的判定覆盖（返回 `null` = 不覆盖，走 `decide` 的路由表）。
+ * 纯函数：`--self-check` 用合成 messages 直接断言段序与步数。
+ */
+function blueprintDecision(body, faults) {
+  const messages = messagesOf(body)
+  const disclosed = new Set(toolNames(body))
+  const toolMessages = messages.filter((m) => m?.role === 'tool').length
+  if (faults['turn-text']) {
+    return { kind: 'text', text: TURN_TEXT, reason: '命名轮蓝本 turn-text（确定性文本）' }
+  }
+  if (faults['turn-interleave']) {
+    const tool = INTERLEAVE_TOOLS.find((t) => disclosed.has(t))
+    if (!tool) {
+      return { kind: 'text', text: TURN_TEXT, reason: '命名轮蓝本 turn-interleave（无可用空参工具，退化为文本）' }
+    }
+    if (toolMessages >= 2) {
+      return { kind: 'text', text: '交错轮收尾：两段工具之后回到文本。', reason: '交错轮第 3 段（收尾文本）' }
+    }
+    return { kind: 'tool_call', tool, args: {}, route: 'TURN-INTERLEAVE',
+      reason: `交错轮第 ${toolMessages + 1} 段（text→tool）` }
+  }
+  if (faults['tool-loop']) {
+    const limit = numericFault(faults, 'tool-loop') || FAULT_DEFAULTS['tool-loop']
+    const tool = INTERLEAVE_TOOLS.find((t) => disclosed.has(t))
+    if (!tool || toolMessages >= limit) {
+      return { kind: 'text', text: CLOSING_TEXT, reason: `步数轮收尾（已 ${toolMessages} 次，上限 ${limit}）` }
+    }
+    return { kind: 'tool_call', tool, args: {}, route: 'TOOL-LOOP',
+      reason: `步数轮第 ${toolMessages + 1}/${limit} 次` }
+  }
+  return null
+}
+
+/** 本轮帧序列（纯函数）：故障开关只改"帧怎么发"，不改路由判定。 */
+function framesFor(decision, faults, index, model, usageShape) {
+  const callId = `call-stub-${index}`
+  if (decision.kind !== 'tool_call') {
+    if (faults['huge-frame']) return hugeTextRound(numericFault(faults, 'huge-frame'), model)
+    return textRound(decision.text, model, usageShape)
+  }
+  const n = faults['multi-card'] ? numericFault(faults, 'multi-card') : 1
+  if (n > 1) return multiToolRound(decision.tool, decision.args, callId, model, n)
+  return toolRound(decision.tool, decision.args, callId, model)
+}
+
+/**
+ * 按写出计划发帧（`--self-check` 只断言 {@link writePlan} 的纯结果，本函数不在自检里跑）。
+ * 返回 `ok` / `broken`（break-at-seq 断流）/ `killed`（kill-stream 到点）。
+ */
+async function writeFrames(res, frames, plan) {
+  let killed = false
+  let timer = null
+  if (plan.killAfterMs > 0) {
+    timer = setTimeout(() => {
+      killed = true
+      try { res.socket?.destroy() } catch { /* 已断开 */ }
+    }, plan.killAfterMs)
+  }
+  try {
+    const limit = plan.breakAtFrame > 0 ? Math.min(plan.breakAtFrame, frames.length) : frames.length
+    for (let i = 0; i < limit; i++) {
+      if (killed) return 'killed'
+      if (i === 0 && plan.firstFrameDelayMs > 0) await sleep(plan.firstFrameDelayMs)
+      if (i > 0 && plan.frameGapMs > 0) await sleep(plan.frameGapMs)
+      res.write(frames[i])
+    }
+    if (plan.breakAtFrame > 0 && plan.breakAtFrame < frames.length) {
+      // 断流形态：不发 [DONE]、不 res.end，直接销毁 socket（客户端看到 EOF/reset）
+      try { res.socket?.destroy() } catch { /* 已断开 */ }
+      return 'broken'
+    }
+    if (!killed) res.end()
+    return killed ? 'killed' : 'ok'
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
+async function handleChat(req, res, raw) {
   const index = ++requestSeq
   const body = safeJson(raw)
   const model = typeof body?.model === 'string' && body.model ? body.model : 'ci-stub'
-  // 形状是**请求级**开关（与 --violate-form-type 同族）：只对文本轮生效，工具轮不带 usage
+  // 形状与故障都是**请求级**开关（与 --violate-form-type 同族）：未带标记的请求帧逐字节不变
   const usageShape = usageShapeOf(body ?? {})
+  const faults = body ? faultsOf(body) : {}
+  const summaryRequest = SUMMARY_REQUEST.test(allText(body ?? {}))
+  // summary-500：arm 后**下一条**摘要请求 500（一次性；armed 标记随标记请求写入）
+  if (faults['summary-500']) summaryFault.armedUntilMs = Date.now() + 300000
+  if (summaryRequest && summaryFault.armedUntilMs > Date.now()) {
+    summaryFault.armedUntilMs = 0
+    record(index, raw, body, { kind: 'error', status: 500, reason: 'summary-500 注入（摘要请求回 5xx）' })
+    res.writeHead(500, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ error: { message: 'stub: summary model unavailable', type: 'server_error' } }))
+    console.log(`[req-${String(index).padStart(3, '0')}] summary-500 注入 → 500`)
+    return
+  }
+  // fail-503-once：同一轮首次 503、之后正常（重试退避的可观测面 = attempts ≥ 2 且只 1 个 done）
+  if (faults['fail-503-once']) {
+    const fp = fingerprint(messagesOf(body ?? {}))
+    if (!failOnceSeen.has(fp)) {
+      failOnceSeen.add(fp)
+      record(index, raw, body ?? {}, { kind: 'error', status: 503, reason: 'fail-503-once 注入（首次 503）' })
+      res.writeHead(503, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ error: { message: 'stub: temporarily unavailable', type: 'server_error' } }))
+      console.log(`[req-${String(index).padStart(3, '0')}] fail-503-once 注入 → 503`)
+      return
+    }
+  }
+  // context-overflow：上游回 400 + 越窗措辞（产品必须识别为 CONTEXT_OVERFLOW 且不重试）
+  if (faults['context-overflow']) {
+    record(index, raw, body ?? {}, { kind: 'error', status: 400, reason: 'context-overflow 注入（越窗 400）' })
+    res.writeHead(400, { 'content-type': 'application/json' })
+    res.end(JSON.stringify(OVERFLOW_BODY))
+    console.log(`[req-${String(index).padStart(3, '0')}] context-overflow 注入 → 400`)
+    return
+  }
   let decision
   if (!body) {
     decision = { kind: 'text', text: CLOSING_TEXT, reason: '请求体不是合法 JSON（退化为文本）' }
   } else {
     try {
-      decision = decide(body, ROUTES, turns)
+      decision = blueprintDecision(body, faults) ?? decide(body, ROUTES, turns)
     } catch (err) {
       decision = { kind: 'text', text: CLOSING_TEXT, reason: `判定异常：${err.message}` }
     }
@@ -529,6 +820,8 @@ function handleChat(req, res, raw) {
   // 归因面（记录契约）：非默认形状写进 decision.json，让"这轮为什么是伪值"可追溯；
   // 默认形状不写键 ⇒ 既有 29 用例的落盘件逐字节不变。
   if (usageShape !== 'last') decision.usageShape = usageShape
+  const faultNames = Object.keys(faults)
+  if (faultNames.length) decision.faults = faultNames
   // 注入必须先于落盘（T4-S2-6）：`record` 会把 decision **立即** 序列化进 req-NN.decision.json，
   // 它自称"桩收到的原请求与判定"的失败归因三件套之一 —— 若先落盘再注入，GF6 失败时落盘的判定
   // 是注入前的合法 schema，与 SSE 实际回帧（注入后的 html）相反，会把排查方向引偏。
@@ -536,22 +829,23 @@ function handleChat(req, res, raw) {
   if (violationNote) console.log(`[违规模式] ${violationNote}`)
   record(index, raw, body ?? {}, decision)
 
+  const plan = writePlan(faults)
+  if (plan.headerDelayMs > 0) await sleep(plan.headerDelayMs)
+  if (plan.firstFrameDelayMs > 0 && decision.kind !== 'tool_call') plan.firstFrameDelayMs = 0
   res.writeHead(200, {
     'content-type': 'text/event-stream; charset=utf-8',
     'cache-control': 'no-cache',
     connection: 'keep-alive'
   })
-  const frames = decision.kind === 'tool_call'
-    ? toolRound(decision.tool, decision.args, `call-stub-${index}`, model)
-    : textRound(decision.text, model, usageShape)
+  const frames = framesFor(decision, faults, index, model, usageShape)
+  let outcome = 'ok'
   try {
-    for (const frame of frames) res.write(frame)
-    res.end()
+    outcome = await writeFrames(res, frames, plan)
   } catch (err) {
     // 客户端在响应写出过程中断开（socket destroyed）属正常现象，不许升级为进程级异常
     fs.writeSync(2, `[WARN] 响应写出失败（客户端可能已断开）req-${index}：${err?.message ?? err}\n`)
   }
-  console.log(`[req-${String(index).padStart(3, '0')}] ${decision.kind}${decision.tool ? ` tool=${decision.tool}` : ''} route=${decision.route ?? '-'} —— ${decision.reason}`)
+  console.log(`[req-${String(index).padStart(3, '0')}] ${decision.kind}${decision.tool ? ` tool=${decision.tool}` : ''} route=${decision.route ?? '-'} outcome=${outcome}${faultNames.length ? ` faults=${faultNames.join('+')}` : ''} —— ${decision.reason}`)
 }
 
 /**
@@ -666,7 +960,17 @@ function startServer() {
           res.end('{"ok":true}')
           return
         }
-        handleChat(req, res, raw)
+        // handleChat 是 async（stall/kill 类开关要按时序发帧）：异常必须落到 catch 里，
+        // 不许变成 unhandledRejection（那会被 crashReport 判成进程崩溃）
+        handleChat(req, res, raw).catch((err) => {
+          fs.writeSync(2, `[ERROR] 处理请求失败（进程存活）：${err?.stack ?? err}\n`)
+          try {
+            res.writeHead(500, { 'content-type': 'application/json' })
+            res.end('{"error":"stub-handle-failed"}')
+          } catch {
+            /* ignore */
+          }
+        })
       } catch (err) {
         // 判定/落盘/写出任一步骤异常都不许杀死桩：回 500 并记栈，进程继续服务后续请求
         fs.writeSync(2, `[ERROR] 处理请求失败（进程存活）：${err?.stack ?? err}\n`)
@@ -727,6 +1031,12 @@ function checkConstantsAgainstSource(src, bad) {
     ['FIELD_ATTRIBUTES', FIELD_ATTRIBUTES],
     ['OPTION_ATTRIBUTES', OPTION_ATTRIBUTES],
     ['PLACEHOLDER_TYPES', PLACEHOLDER_TYPES],
+    ['OPTION_TYPES', OPTION_TYPES],
+    ['CONDITION_OPS', CONDITION_OPS],
+    ['CONDITION_ATTRIBUTES', CONDITION_ATTRIBUTES],
+    ['VARIANT_TYPES', VARIANT_TYPES],
+    ['TEXT_FORMATS', TEXT_FORMATS],
+    ['OPTION_SOURCE_IDS', OPTION_SOURCE_IDS],
     ['FORBIDDEN_FIELD_KEYS', FORBIDDEN_KEYS]
   ]
   for (const [javaName, local] of lists) {
@@ -747,7 +1057,8 @@ function checkConstantsAgainstSource(src, bad) {
     ['MAX_OPTIONS', MAX_OPTIONS],
     ['MAX_OPTION_TEXT_CHARS', MAX_OPTION_TEXT_CHARS],
     ['MAX_PLACEHOLDER_CHARS', MAX_PLACEHOLDER_CHARS],
-    ['MAX_FORM_CHARS', MAX_FORM_CHARS]
+    ['MAX_FORM_CHARS', MAX_FORM_CHARS],
+    ['MAX_LINKAGE_DEPTH', MAX_LINKAGE_DEPTH]
   ]
   for (const [name, local] of limits) {
     const value = javaInt(src, name)
@@ -808,10 +1119,17 @@ function selfCheck() {
     bad(`产品事实源不可读：${FORM_RULES_REL}（自检已改为事实源对账，缺文件即红）`)
   } else {
     checkConstantsAgainstSource(rulesSrc, bad)
-    ok(`生成式表单白名单与产品事实源逐值对账通过（事实源：${FORM_RULES_REL}；8 组常量 + 5 项上限 + 原型三键）`)
+    ok(`生成式表单白名单与产品事实源逐值对账通过（事实源：${FORM_RULES_REL}；13 组常量 + 6 项上限 + 原型三键）`)
   }
   // ③-b 路由表模板逐字段校验（用上面已对账过的常量）
   for (const route of (ROUTES.routes || []).filter((r) => r.tool === 'generative_form')) {
+    // 故意违规的模板（X-10 的表达式形态联动）：白名单校验对它**必须**判非法，
+    // 故跳过形状校验，改成断言"它确实带表达式的字符串条件"（否则这条注入面就成了空转）。
+    if (route.invalidByDesign) {
+      const expr = (route.arguments?.form?.fields || []).find((f) => typeof f.visibleWhen === 'string')
+      if (!expr) bad(`路由 ${route.id} 标了 invalidByDesign 却没有字符串形态的条件（注入面失效）`)
+      continue
+    }
     const form = route.arguments?.form
     const at = `路由 ${route.id}.form`
     if (!form || typeof form !== 'object') {
@@ -829,6 +1147,7 @@ function selfCheck() {
     if (formChars > MAX_FORM_CHARS) bad(`${at} 序列化 ${formChars} 字符，超过上限 ${MAX_FORM_CHARS}`)
     const fields = Array.isArray(form.fields) ? form.fields : []
     if (fields.length < 1 || fields.length > 20) bad(`${at}.fields 数量 ${fields.length} 越界（1..20）`)
+    const allKeys = new Set(fields.map((f) => f.key))
     const seen = new Set()
     for (const f of fields) {
       for (const name of Object.keys(f)) if (!FIELD_ATTRIBUTES.includes(name)) bad(`${at} 字段 ${f.key} 含白名单外属性 ${name}`)
@@ -846,7 +1165,9 @@ function selfCheck() {
         }
       }
       if (f.type === 'enum' || f.type === 'multi_select') {
-        if (!Array.isArray(f.options) || f.options.length === 0) bad(`${at} 字段 ${f.key} 缺 options`)
+        // 产品口径：options 与 optionsFrom 二选一（缺两者才判非法）
+        const hasOptions = Array.isArray(f.options) && f.options.length > 0
+        if (!hasOptions && !f.optionsFrom) bad(`${at} 字段 ${f.key} 缺 options（枚举型必须静态选项或 optionsFrom）`)
         if (Array.isArray(f.options) && f.options.length > MAX_OPTIONS) {
           bad(`${at} 字段 ${f.key} 的 options ${f.options.length} 项，超过上限 ${MAX_OPTIONS}`)
         }
@@ -870,9 +1191,62 @@ function selfCheck() {
       } else if (f.options !== undefined) {
         bad(`${at} 字段 ${f.key}（type=${f.type}）不该带 options`)
       }
+      // 联动三原语（闭集 op，禁表达式；X-10/G-09/G-10 的底座）
+      for (const attr of ['visibleWhen', 'requiredWhen', 'disabledWhen']) {
+        if (f[attr] === undefined) continue
+        const c = f[attr]
+        if (!c || typeof c !== 'object' || Array.isArray(c)) {
+          bad(`${at} 字段 ${f.key} 的 ${attr} 不是对象形态（表达式字符串必须判非法）`)
+          continue
+        }
+        for (const name of Object.keys(c)) {
+          if (!CONDITION_ATTRIBUTES.includes(name)) bad(`${at} 字段 ${f.key} 的 ${attr} 含白名单外属性 ${name}`)
+        }
+        if (!CONDITION_OPS.includes(c.op)) bad(`${at} 字段 ${f.key} 的 ${attr}.op=${c.op} 越闭集`)
+        if (!allKeys.has(c.key)) bad(`${at} 字段 ${f.key} 的 ${attr}.key=${c.key} 未声明`)
+        if (c.key === f.key) bad(`${at} 字段 ${f.key} 的 ${attr} 自引用`)
+        if (c.op === 'eq' && c.value === undefined) bad(`${at} 字段 ${f.key} 的 ${attr} eq 缺 value`)
+        if (['in', 'notIn', 'between'].includes(c.op) && !Array.isArray(c.values)) {
+          bad(`${at} 字段 ${f.key} 的 ${attr} ${c.op} 缺 values 数组`)
+        }
+      }
+      // optionsFrom / defaultFrom（G-11/G-12 的底座；sourceId 只收注册 id，URL/脚本判非法）
+      for (const attr of ['optionsFrom', 'defaultFrom']) {
+        const v = f[attr]
+        if (v === undefined) continue
+        if (!v || typeof v !== 'object' || Array.isArray(v)) {
+          bad(`${at} 字段 ${f.key} 的 ${attr} 不是对象`)
+          continue
+        }
+        if (!allKeys.has(v.dependsOn) || v.dependsOn === f.key) bad(`${at} 字段 ${f.key} 的 ${attr}.dependsOn 非法`)
+        if (attr === 'optionsFrom') {
+          if (!OPTION_TYPES.includes(f.type)) bad(`${at} 字段 ${f.key}（type=${f.type}）不该带 optionsFrom`)
+          if (v.map && v.sourceId) bad(`${at} 字段 ${f.key} 的 optionsFrom 的 map 与 sourceId 只能二选一`)
+          if (!v.map && !v.sourceId) bad(`${at} 字段 ${f.key} 的 optionsFrom 缺 map/sourceId`)
+          if (v.sourceId && !OPTION_SOURCE_IDS.includes(v.sourceId)) {
+            bad(`${at} 字段 ${f.key} 的 optionsFrom.sourceId=${v.sourceId} 不是注册数据源`)
+          }
+          if (v.map) for (const [k, arr] of Object.entries(v.map)) {
+            if (!Array.isArray(arr)) bad(`${at} 字段 ${f.key} 的 optionsFrom.map["${k}"] 不是数组`)
+          }
+        } else if (!v.map || typeof v.map !== 'object') {
+          bad(`${at} 字段 ${f.key} 的 defaultFrom.map 必须是对象`)
+        }
+      }
+      // attachment 的值由用户上传产生，模型不得预填（产品侧同判）
+      if (f.type === 'attachment' && f.defaultValue !== undefined) {
+        bad(`${at} 字段 ${f.key} 是 attachment，不得带 defaultValue`)
+      }
+      // variant 只放开 text 的 longText（textarea 渲染 + 2000 字上限）
+      if (f.variant !== undefined && (!VARIANT_TYPES.includes(f.type) || f.variant !== 'longText')) {
+        bad(`${at} 字段 ${f.key} 的 variant=${f.variant} 越白名单`)
+      }
+      if (f.format !== undefined && !TEXT_FORMATS.includes(f.format)) {
+        bad(`${at} 字段 ${f.key} 的 format=${f.format} 不在命名枚举内（禁自带正则）`)
+      }
     }
   }
-  ok(`生成式表单模板逐字段校验通过（白名单形状取自事实源对账结果；含 5 项上限：title/options/option 文本与去重/placeholder/form 序列化）`)
+  ok(`生成式表单模板逐字段校验通过（白名单形状取自事实源对账结果；含 6 项上限 + 联动三原语 + 两条 from + attachment 禁预填 + variant/format 闭集）`)
 
   section()
   // ④ 收敛自证：逐路由跑"首轮→工具调用、续轮→文本"的模拟循环（长度递增形态）
@@ -1067,13 +1441,163 @@ function selfCheck() {
   }
   ok('usage 形状自证通过（last 逐值不变 / repeat 逐帧同值不累加 / zero-last 末帧 0/0/0 / none 零 usage 仍收尾 + 标记解析）')
 
+  section()
+  // ⑨ 故障注入开关（E2E 批① §4.6）：表与实现不漂移 + 每个开关的**计划/帧形态**可判。
+  //    纯函数自证，不起服务（stall/kill 的真实时序在 E2E 里由用例断言）。
+  const declared = ROUTES.faults?.switches || {}
+  const declaredNames = Object.keys(declared)
+  const routeMarkers = new Set((ROUTES.routes || []).flatMap((r) => r.match?.messageAny || []))
+  if (declaredNames.length === 0) bad('stub-routes.json 缺 faults.switches（§4.6 开关清单的唯一取数点）')
+  for (const [name, meta] of Object.entries(declared)) {
+    if (!['stub', 'script', 'product'].includes(meta.layer)) bad(`faults.switches.${name}.layer=${meta.layer} 非法`)
+    if (!Array.isArray(meta.cases) || meta.cases.length === 0) bad(`faults.switches.${name} 未登记支撑用例`)
+    if (meta.layer === 'stub') {
+      // 三类实现形态：marker 开关（FAULT_SWITCHES）/ 路由开关（messageAny 命中）/ 既有 usage-shape
+      const byMarker = FAULT_SWITCHES.includes(name) || name === 'usage-shape'
+      const byRoute = routeMarkers.has(name) || [...routeMarkers].some((m) => m.startsWith(name))
+      if (!byMarker && !byRoute) bad(`桩层开关 ${name} 在 faults.switches 里声明但桩内无实现（表与实现漂移）`)
+    }
+  }
+  for (const name of FAULT_SWITCHES) {
+    if (!declaredNames.includes(name)) bad(`桩内实现的开关 ${name} 未在 faults.switches 登记（表与实现漂移）`)
+  }
+  ok(`§4.6 开关清单与桩实现不漂移（表 ${declaredNames.length} 项：桩层 ${declaredNames.filter((n) => declared[n].layer === 'stub').length} / 脚本层 ${declaredNames.filter((n) => declared[n].layer === 'script').length} / 产品层 ${declaredNames.filter((n) => declared[n].layer === 'product').length}；桩内实现 ${FAULT_SWITCHES.length} 个标记）`)
+
+  // ⑨-b 标记解析：带值/不带值/未知/无标记
+  const faultMarkerCases = [
+    ['无标记', '普通一句', {}],
+    ['带值', '前缀 break-at-seq=5 后缀', { 'break-at-seq': 5 }],
+    ['布尔标记', '前缀 turn-interleave 后缀', { 'turn-interleave': true }],
+    ['多开关', 'turn-text stall-frames=120', { 'turn-text': true, 'stall-frames': 120 }],
+    ['未知开关', '前缀 bogus-switch=1 后缀', {}],
+    ['中文包裹', '【用例 S-05】break-at-seq=3', { 'break-at-seq': 3 }]
+  ]
+  for (const [label, text, want] of faultMarkerCases) {
+    const got = faultsOf({ messages: [{ role: 'user', content: text }] })
+    if (JSON.stringify(got) !== JSON.stringify(want)) {
+      bad(`故障标记解析失败（${label}）：得到 ${JSON.stringify(got)}，期望 ${JSON.stringify(want)}`)
+    }
+  }
+
+  // ⑨-c 写出计划：每个时序开关对计划的影响逐项可判
+  const planCases = [
+    ['break-at-seq=3', { 'break-at-seq': 3 }, { breakAtFrame: 3 }],
+    ['stall-frames=100', { 'stall-frames': 100 }, { frameGapMs: 100 }],
+    ['stall-headers=200', { 'stall-headers': 200 }, { headerDelayMs: 200 }],
+    ['kill-stream=50', { 'kill-stream': 50 }, { killAfterMs: 50 }],
+    ['slow-tool=70', { 'slow-tool': 70 }, { firstFrameDelayMs: 70 }],
+    ['slow-reader', { 'slow-reader': true }, { frameGapMs: 250 }],
+    ['无开关', {}, { breakAtFrame: 0, frameGapMs: 0, headerDelayMs: 0, killAfterMs: 0, firstFrameDelayMs: 0 }]
+  ]
+  for (const [label, faults, want] of planCases) {
+    const plan = writePlan(faults)
+    for (const [k, v] of Object.entries(want)) {
+      if (plan[k] !== v) bad(`写出计划 ${label} 的 ${k}=${plan[k]}，期望 ${v}`)
+    }
+  }
+
+  // ⑨-d 命名轮蓝本：turn-text 恒文本；tool-loop 步数收口；interleave 段序 text→tool
+  const disclosed = toolNames({ tools: [{ function: { name: 'list_config_defs' } }] })
+  const bpText = blueprintDecision({ messages: [{ role: 'user', content: 'turn-text' }], tools: [] }, { 'turn-text': true })
+  if (bpText?.kind !== 'text' || !String(bpText.text).includes('命名轮蓝本')) bad('turn-text 蓝本未产出确定性文本轮')
+  const bpNoTool = blueprintDecision({ messages: [{ role: 'user', content: 'turn-interleave' }], tools: [] }, { 'turn-interleave': true })
+  if (bpNoTool?.kind !== 'text') bad('turn-interleave 在无可用工具时应退化为文本（不得发未披露工具）')
+  const toolBag = { tools: [{ function: { name: disclosed[0] } }] }
+  const seq = []
+  for (let used = 0; used < 3; used++) {
+    const msgs = [{ role: 'user', content: 'turn-interleave' }]
+    for (let i = 0; i < used; i++) msgs.push({ role: 'tool', tool_call_id: `c${i}`, content: '{}' })
+    seq.push(blueprintDecision({ messages: msgs, ...toolBag }, { 'turn-interleave': true }).kind)
+  }
+  if (seq.join('>') !== 'tool_call>tool_call>text') bad(`turn-interleave 段序 ${seq.join('>')}，期望 tool_call>tool_call>text`)
+  const ilFrames = interleaveRound('文本半段', disclosed[0], {}, 'call-il', 'ci-stub', 0)
+    .filter((f) => f !== 'data: [DONE]\n\n')
+    .map((f) => JSON.parse(f.replace(/^data: /, '').trim()))
+  const hasDelta = ilFrames.some((f) => f.choices?.[0]?.delta?.content)
+  const hasTool = ilFrames.some((f) => f.choices?.[0]?.delta?.tool_calls)
+  if (!hasDelta || !hasTool) bad('交错轮单条消息里必须既有 text delta 又有 tool_calls（段序 t→tool）')
+  if (ilFrames.findIndex((f) => f.choices?.[0]?.delta?.content)
+    > ilFrames.findIndex((f) => f.choices?.[0]?.delta?.tool_calls)) {
+    bad('交错轮帧序错：text 必须在 tool_calls 之前')
+  }
+  for (const [used, wantKind] of [[0, 'tool_call'], [25, 'tool_call'], [26, 'text'], [40, 'text']]) {
+    const msgs = [{ role: 'user', content: 'tool-loop=26' }]
+    for (let i = 0; i < used; i++) msgs.push({ role: 'tool', tool_call_id: `c${i}`, content: '{}' })
+    const d = blueprintDecision({ messages: msgs, ...toolBag }, { 'tool-loop': 26 })
+    if (d.kind !== wantKind) bad(`tool-loop=26 在第 ${used} 次工具后应 ${wantKind}，实际 ${d.kind}`)
+  }
+
+  // ⑨-e 多卡 / 大帧：多张待决卡的 id 互异且同消息；大帧是**单个** delta 且达到字节数
+  const multi = multiToolRound('start_export', { taskId: 1 }, 'call-m', 'ci-stub', 3)
+    .filter((f) => f !== 'data: [DONE]\n\n')
+    .map((f) => JSON.parse(f.replace(/^data: /, '').trim()))
+  const calls = multi.flatMap((f) => f.choices?.[0]?.delta?.tool_calls || [])
+  if (calls.length !== 3) bad(`multi-card=3 的 tool_calls 数 ${calls.length}，期望 3`)
+  if (new Set(calls.map((c) => c.id)).size !== calls.length) bad('multi-card 的 toolCallId 有重复（多卡重建会互相覆盖）')
+  if (calls.some((c) => c.function.name !== 'start_export')) bad('multi-card 的卡片工具名不一致')
+  const huge = hugeTextRound(4096, 'ci-stub')
+    .filter((f) => f !== 'data: [DONE]\n\n')
+    .map((f) => JSON.parse(f.replace(/^data: /, '').trim()))
+  const hugeDelta = huge.filter((f) => f.choices?.[0]?.delta?.content)
+  if (hugeDelta.length !== 1) bad(`huge-frame 应是单个 delta 帧，实际 ${hugeDelta.length} 个`)
+  else if (hugeDelta[0].choices[0].delta.content.length < 4096) bad('huge-frame 的 delta 未达到请求字节数')
+  else if (!huge.some((f) => f.choices?.[0]?.finish_reason === 'stop')) bad('huge-frame 缺 stop 终帧')
+
+  // ⑨-f 越窗/摘要：错误体必须命中产品 ContextOverflow.MARKERS（读事实源，不猜措辞）
+  const overflowRel = 'backend/src/main/java/com/example/configmgr/ai/context/ContextOverflow.java'
+  const overflowPath = path.resolve(HERE, '..', '..', overflowRel)
+  const overflowSrc = fs.existsSync(overflowPath) ? fs.readFileSync(overflowPath, 'utf8') : null
+  if (overflowSrc === null) {
+    bad(`越窗措辞事实源不可读：${overflowRel}`)
+  } else {
+    const markers = javaStringList(overflowSrc, 'MARKERS') || []
+    const bodyText = JSON.stringify(OVERFLOW_BODY).toLowerCase()
+    if (markers.length === 0) bad('事实源未解析到 ContextOverflow.MARKERS')
+    else if (!markers.some((m) => bodyText.includes(m.toLowerCase()))) {
+      bad(`context-overflow 的错误体不含任何产品越窗措辞（MARKERS=${markers.join('/')}），产品会退化成泛化上游错误`)
+    }
+    ok(`context-overflow 错误体命中产品越窗措辞（事实源 ${overflowRel}：${markers.length} 个 marker）`)
+  }
+  const summarizerRel = 'backend/src/main/java/com/example/configmgr/ai/context/RollingSummarizer.java'
+  const summarizerSrc = fs.existsSync(path.resolve(HERE, '..', '..', summarizerRel))
+    ? fs.readFileSync(path.resolve(HERE, '..', '..', summarizerRel), 'utf8') : null
+  if (summarizerSrc === null) bad(`摘要提示词事实源不可读：${summarizerRel}`)
+  else if (!SUMMARY_REQUEST.test(summarizerSrc)) bad('摘要请求识别式与产品提示词不同源（RollingSummarizer 的指令头已改）')
+  else ok('summary-500 的摘要请求识别式与产品提示词同源（RollingSummarizer 两段指令头）')
+
+  // ⑨-g GF 新能力面：七型 = 白名单全集；深联动确实超深；两条 from 用注册源
+  const sevenRoute = (ROUTES.routes || []).find((r) => r.id === 'GF-SEVEN-TYPES')
+  const sevenTypes = (sevenRoute?.arguments?.form?.fields || []).map((f) => f.type)
+  if (sortedJoin(sevenTypes) !== sortedJoin(FIELD_TYPES)) {
+    bad(`GF-SEVEN-TYPES 的字段类型 [${sevenTypes.join(',')}] 未覆盖白名单全集 [${FIELD_TYPES.join(',')}]`)
+  }
+  const deepRoute = (ROUTES.routes || []).find((r) => r.id === 'GF-DEEP-LINKAGE')
+  const deepFields = deepRoute?.arguments?.form?.fields || []
+  const chain = (key) => {
+    let depth = 0
+    let cur = deepFields.find((f) => f.key === key)
+    while (cur && cur.visibleWhen) {
+      depth++
+      cur = deepFields.find((f) => f.key === cur.visibleWhen.key)
+    }
+    return depth
+  }
+  const deepest = Math.max(0, ...deepFields.map((f) => chain(f.key)))
+  if (deepest <= MAX_LINKAGE_DEPTH) bad(`GF-DEEP-LINKAGE 的依赖深度 ${deepest} 未超上限 ${MAX_LINKAGE_DEPTH}（用例 G-13 会空转）`)
+  const optRoute = (ROUTES.routes || []).find((r) => r.id === 'GF-OPTIONS-FROM')
+  const optField = (optRoute?.arguments?.form?.fields || []).find((f) => f.optionsFrom)
+  if (!optField || !optField.optionsFrom.map) bad('GF-OPTIONS-FROM 缺 optionsFrom.map（G-11 无底座）')
+  const defField = (optRoute?.arguments?.form?.fields || []).find((f) => f.defaultFrom)
+  if (!defField) bad('GF-OPTIONS-FROM 缺 defaultFrom（G-12 无底座）')
+  ok(`GF 新能力面自证通过（七型覆盖 / 深联动 ${deepest} 层 > ${MAX_LINKAGE_DEPTH} / optionsFrom+defaultFrom 底座在位）`)
+
   console.log('------------------------------------------------------------')
   if (problems.length) {
     console.log(`SELF-CHECK FAIL：${problems.length} 项`)
     for (const p of problems) console.log(`  - ${p}`)
     process.exit(1)
   }
-  console.log('SELF-CHECK PASS：路由表契约、白名单对账、收敛自证、披露驱动、帧形态、反解、usage 形状全部通过')
+  console.log('SELF-CHECK PASS：路由表契约、白名单对账、收敛自证、披露驱动、帧形态、反解、usage 形状、§4.6 故障开关全部通过')
   process.exit(0)
 }
 
