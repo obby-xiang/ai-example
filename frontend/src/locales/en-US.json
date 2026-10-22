@@ -311,5 +311,40 @@
     "applied": {
       "line": "AI changed {cells} cells (undoable, layer {layer} of 3)"
     }
+  },
+  "resultview": {
+    "fallback": {
+      "generic": "This result cannot be shown as a structured view",
+      "blocked": "This result contains content that cannot be displayed"
+    },
+    "truncated": "{total} rows in total, showing the first {shown}",
+    "table": {
+      "caption": "Result details"
+    },
+    "boolean": {
+      "true": "Yes",
+      "false": "No"
+    },
+    "publishConflict": {
+      "title": "Publish conflicts",
+      "label": "Publish conflict details",
+      "fallback": "Publish conflict details cannot be shown as a table; please check the task center",
+      "col": {
+        "defCode": "Definition",
+        "rowKey": "Row key",
+        "message": "Reason"
+      }
+    },
+    "listTasks": {
+      "title": "Tasks",
+      "fallback": "The task list cannot be shown as a table; please check the task center",
+      "col": {
+        "id": "ID",
+        "type": "Type",
+        "title": "Title",
+        "step": "Step",
+        "status": "Status"
+      }
+    }
   }
 }

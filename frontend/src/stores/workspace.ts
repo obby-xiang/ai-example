@@ -480,12 +480,13 @@ async function runUiEvent(event: UiEvent): Promise<UiEventResult> {
           publishWatcherDispose?.()
           publishWatcherDispose = taskStore.watchPublishOutcome(event.taskId, job.id ?? 0, {
             // AI 保证通道：明细摘要经 reportUiEventResult（UiEventResult 同形）回灌模型 + 面板回执位
-            onConflict: (summary) => {
+            onConflict: (summary, issues) => {
               // R-155：注册表命中（该 jobId 有 start_publish 工具段关联）时把明细写回工具卡 reason；
+              // S6 批 2：同一份结构化 issues 一并落成 resultView（卡面渲表，不再反解 reason）。
               // 查无关联（run_job 自建作业等）静默走原回执条通道，不报错、不阻断
               if (findPublishTool(job.id ?? 0)) {
                 void import('@/stores/ai').then(({ useAiStore }) => {
-                  useAiStore().attachPublishConflict(job.id ?? 0, summary)
+                  useAiStore().attachPublishConflict(job.id ?? 0, summary, issues)
                 })
               }
               reportUiEventResult('run_job', summary)

@@ -5,6 +5,7 @@ import com.example.configmgr.common.ErrorCodes;
 
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.observe.AiTrace;
+import com.example.configmgr.ai.resultview.ResultView;
 import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.ai.tool.ToolResultLimiter;
 import com.example.configmgr.ai.tool.ToolResultEnvelope;
@@ -787,8 +788,25 @@ public class SseChatEmitter {
 	 * {@code outcome}/{@code code} 取自待决条目的持久化信封（旧数据按 status 推导）；
 	 * {@code target} 从工具参数 JSON 提取 {@code {taskId?, defCode?, step?, page?}}，提取不到为 null。
 	 * {@code result} 仍是<b>全文</b>（人读通道，不受模型侧裁剪影响）。
+	 *
+	 * <p>
+	 * <b>resultView（S6 批 2）</b>：{@code tool_result} 的 <b>additive 可选键</b>（帧类型集仍是 16，
+	 * 见设计稿 §6）。它是<b>给 UI 的那一份</b>结构化投影，与 {@code result} 同源、不进模型载荷；
+	 * 不传（= null）时帧的键集合与基线逐字一致 —— 旧客户端/旧归档零影响。
 	 */
 	public void toolResult(PendingToolCall pending, boolean ok, boolean reused, String result) {
+		toolResult(pending, ok, reused, result, null);
+	}
+
+	/**
+	 * 带视图投影的工具结局帧（见 {@link #toolResult(PendingToolCall, boolean, boolean, String)}）。
+	 *
+	 * <p>
+	 * {@code resultView} 为<b>不可截字段</b>（{@code FrameSizeLimiter} 只截 {@code text}/{@code result}），
+	 * 其规模闸必须由构造方在造视图时完成（设计稿 §6.3-3）—— 这里只管挂键，不做二次裁剪。
+	 */
+	public void toolResult(PendingToolCall pending, boolean ok, boolean reused, String result,
+			ResultView resultView) {
 		ToolOutcome outcome = pending.effectiveOutcome();
 		// M4：ok 保留在签名里（不改调用面），但契约上它只能是 outcome 的派生值。
 		// 传错即 fail-fast —— 否则"帧 ok 与信封 outcome 互相矛盾"会被前端按任一字段误读。
@@ -812,6 +830,9 @@ public class SseChatEmitter {
 		frame.put("target", ToolResultEnvelope.targetOf(pending.getArguments()));
 		frame.put("messageId", toolMessageId(pending));
 		frame.put("result", result);
+		if (resultView != null) {
+			frame.put("resultView", resultView.toMap());
+		}
 		markModelView(frame, pending.getName(), result);
 		emit(frame);
 	}

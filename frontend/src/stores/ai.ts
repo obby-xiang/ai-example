@@ -75,9 +75,11 @@ import { frameSeq, isTerminalFrame, type ToolOutcome } from '@/types/sse'
 import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiHealth, type AiHistory, type AiHistoryMessage, type AiRunCurrent, type AiRunCurrentEntry, type AiSessionMirror, type ChatMessage, type ContextBreakdownItem, type ContextCompaction, type ContextUsage, type GateSubmission, type MessagePart, type PendingToolCall, type SheetPreviewLevel, type SheetWritePlan, type ToolPart, type ToolPartPatch, type ToolRunStatus } from '@/types/ai'
 import { parseFormSchema, checkFormValues } from '@/types/form-schema'
 import type { SseFrame } from '@/types/sse'
+import type { ValidationIssue } from '@/types/job'
 import type { WorkspaceActionRecord } from '@/types/tools'
 import { clearPublishToolLinks, findPublishTool, linkPublishTool, unlinkPublishTool } from '@/utils/publish-links'
 import { buildErrorCard } from '@/utils/error-card'
+import { buildPublishConflictView } from '@/utils/resultview'
 
 /** sessionStorage 键：会话 id 与镜像前缀。 */
 export const SESSION_ID_KEY = 'ai-session-id'
@@ -3892,20 +3894,27 @@ export const useAiStore = defineStore('ai', {
       }
       linkPublishTool(jobId, { toolCallId: frame.toolCallId, sessionId: this.sessionId })
       useTaskStore().watchPublishOutcome(taskId, jobId, {
-        onConflict: (summary) => {
-          this.attachPublishConflict(jobId, summary)
+        onConflict: (summary, issues) => {
+          this.attachPublishConflict(jobId, summary, issues)
           reportUiEventResult('start_publish', summary)
         }
       })
     },
 
     /**
-     * R-155：把发布冲突明细摘要写入该 jobId 关联的 start_publish 工具段 reason（卡面红字行）。
+     * R-155 → S6 批 2（P1-4 承载）：把发布冲突明细落到该 jobId 关联的 start_publish 工具段。
+     *
+     * 写两份、拆两个消费者（设计稿 §5.3 的「依赖倒置」）：
+     * - `reason` = 明细摘要**整串**（模型侧口径一字不动，「reason 是否只留一句」仍是独立的模型侧决策）；
+     * - `resultView` = `kind=table` 视图（列 = 配置 / 行键 / 原因），卡面据此渲表，
+     *   **不再反解 reason**。带 `issues` 时才建视图；旧调用面（只给 summary）行为逐字不变。
+     *
      * 仿 A4' 收口范式：段唯一写口 upsertToolPart（createIfMissing=false 不新建段）+ 同步派生投影；
-     * reason 单落点 = 末条持该 toolCallId 的宿主消息。命中即注销注册项。
+     * 落点 = 末条持该 toolCallId 的宿主消息。命中即注销注册项。
+     * @param issues 结构化校验问题（视图的行来源；缺省 = 只走 reason 旧口径）
      * @returns 是否落段；查无关联 / 会话已切换 / 段不存在 ⇒ false（调用方静默走原通道）
      */
-    attachPublishConflict(jobId: number, summary: string): boolean {
+    attachPublishConflict(jobId: number, summary: string, issues?: ValidationIssue[]): boolean {
       const link = findPublishTool(jobId)
       if (!link) {
         return false
@@ -3926,7 +3935,16 @@ export const useAiStore = defineStore('ai', {
             name: part.name,
             kind2: part.kind2,
             requiresAction: false,
-            reason: summary
+            reason: summary,
+            ...(issues && issues.length > 0
+              ? {
+                  resultView: buildPublishConflictView({
+                    id: `rv-${link.toolCallId}`,
+                    issues,
+                    total: issues.length
+                  })
+                }
+              : {})
           }, false)
           deriveProjections(message)
           unlinkPublishTool(jobId)

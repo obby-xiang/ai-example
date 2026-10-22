@@ -7,6 +7,7 @@
 
 import type { SseFrame, PendingToolCallSnapshot, PendingStatus, ToolKind, ToolOutcome, ToolPreflight } from './sse'
 import type { FormSpec } from './form-schema'
+import type { ResultView } from './resultview'
 import type { SheetToolMeta } from '@/utils/sheet-tools'
 import type { ErrorCard } from '@/utils/error-card'
 
@@ -376,6 +377,13 @@ export interface ToolPart extends MessagePartBase {
   truncated?: boolean
   truncatedReason?: string | null
   /**
+   * S6 批 2：工具结果的视图通道（`tool_result.resultView` 落段，或发布冲突检出时由前端
+   * 确定性构造后写段）。随段持久化 —— 镜像/历史恢复后卡面表格仍在（设计稿 §6.3-1/2）。
+   *
+   * 缺省 = 旧段（无视图）⇒ 卡面走旧渲染路径（发布冲突仍按 reason 反解，§7.1 的最后一步才删）。
+   */
+  resultView?: ResultView
+  /**
    * 治理 P0-1：帧侧结局八态（tool_result 帧带 outcome 时落段，随镜像持久化；旧帧无值）。
    * 卡面**不展示本字段**（阶段二期再做）；段状态仍以 `status` 为准，二者由 parts.ts 的
    * `outcomeStatus` 单表映射，当前写入点只在 tool_result。
@@ -521,6 +529,8 @@ export interface ToolPartPatch {
   /** 见 {@link ToolPart.truncated}（R-154 #2 帧侧截断标记，随段持久化） */
   truncated?: boolean
   truncatedReason?: string | null
+  /** 见 {@link ToolPart.resultView}（S6 批 2 视图通道，随段持久化） */
+  resultView?: ResultView
   /** 见 {@link ToolPart.outcome}（治理 P0-1 帧侧结局八态） */
   outcome?: ToolOutcome
   /** 见 {@link ToolPart.timeoutSeconds}（确认门/前端工具的等待口径，随段持久化） */

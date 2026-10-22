@@ -5443,3 +5443,81 @@ describe('AI 表格操作专项 T-17：写预览段的无 plan 收口', () => {
     wrapper.unmount()
   })
 })
+
+/**
+ * S6 批 2 · 发布冲突卡改由 `ResultViewRenderer` 渲表格（设计稿 §5.3 / §7.1-③）。
+ *
+ * 判据：
+ * - 段上有 `resultView` ⇒ 表格来自渲染器（`resultview-table`），**旧反解表（`conflict-table`）零出现**；
+ * - 红字行只留首行摘要（`reasonHeadline`）—— 明细不同屏重复；
+ * - 段上没有 `resultView`（旧镜像 / 旧归档）⇒ 旧反解路径照旧（回退路径不删）。
+ */
+describe('S6 批2 · resultView 渲染（发布冲突首个迁移对象）', () => {
+  const CONFLICT_VIEW = {
+    version: '1.0',
+    id: 'rv-tc-1',
+    revision: 1,
+    kind: 'table' as const,
+    title: 'i18n:resultview.publishConflict.title',
+    status: 'ok' as const,
+    data: {
+      inline: {
+        rows: [
+          { defCode: 'CURRENCY', rowKey: 'GLOBAL', message: '币种精度与主数据不一致' },
+          { defCode: 'TAX_RULE', rowKey: 'PRJ-07', message: '税率区间重叠' }
+        ]
+      }
+    },
+    columns: [
+      { key: 'defCode', type: 'string' as const, label: 'i18n:resultview.publishConflict.col.defCode', width: 4 },
+      { key: 'rowKey', type: 'string' as const, label: 'i18n:resultview.publishConflict.col.rowKey', width: 3 },
+      { key: 'message', type: 'string' as const, label: 'i18n:resultview.publishConflict.col.message', width: 5 }
+    ],
+    a11y: { label: 'i18n:resultview.publishConflict.label', role: 'table' },
+    fallback: { text: 'i18n:resultview.publishConflict.fallback', format: 'plain' as const }
+  }
+  const REASON = [
+    '发布作业 #317 校验冲突明细（共 2 处）',
+    '1. CURRENCY#GLOBAL：币种精度与主数据不一致',
+    '2. TAX_RULE#PRJ-07：税率区间重叠'
+  ].join('\n')
+
+  it('有 resultView ⇒ 渲染器表格 + 旧反解表零出现 + 红字行只留首行', async () => {
+    const msg = buildMessage([
+      {
+        kind: 'tool', seg: 0, toolCallId: 'rv1', name: 'start_publish', kind2: 'BACKEND',
+        status: 'failed', args: '{"taskId":291}', result: '发布作业已启动（作业 #317）…',
+        reason: REASON, requiresAction: false, resultView: CONFLICT_VIEW
+      }
+    ])
+    msg.id = 'a-rv1'
+    const wrapper = await mountPanel([msg])
+    await wrapper.find('[data-testid="block-toggle-a-rv1:rv1"]').trigger('click')
+
+    expect(wrapper.find('[data-testid="resultview-table"]').exists()).toBe(true)
+    // §5.3-4 / §7.2-6：有视图时旧反解表不出现（不同屏双份报同一明细 = 违规）
+    expect(wrapper.find('[data-testid="conflict-table"]').exists()).toBe(false)
+    const err = wrapper.find('[data-testid="tool-error"]')
+    expect(err.text()).toContain('发布作业 #317 校验冲突明细（共 2 处）')
+    expect(err.text()).not.toContain('CURRENCY')
+    expect(wrapper.find('[data-testid="resultview-table"]').text()).toContain('币种精度与主数据不一致')
+    wrapper.unmount()
+  })
+
+  it('无 resultView ⇒ 旧反解路径照旧（回退路径保留）', async () => {
+    const msg = buildMessage([
+      {
+        kind: 'tool', seg: 0, toolCallId: 'rv2', name: 'start_publish', kind2: 'BACKEND',
+        status: 'failed', args: '{"taskId":291}', result: '发布作业已启动（作业 #317）…',
+        reason: REASON, requiresAction: false
+      }
+    ])
+    msg.id = 'a-rv2'
+    const wrapper = await mountPanel([msg])
+    await wrapper.find('[data-testid="block-toggle-a-rv2:rv2"]').trigger('click')
+
+    expect(wrapper.find('[data-testid="resultview-table"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="conflict-table"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+})

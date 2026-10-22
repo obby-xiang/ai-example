@@ -482,14 +482,23 @@
                       <!-- R-158 #6：卡内错误位（自绘圆环 ! + 红底 + 文案）——错误就地呈现，不再全堆顶部 Alert；
                            R-165 S1：el-icon 退场，圆环 ! 照搬 demo v7 行内错误通知形制。
                            S6 批1（v7.10 N8）：发布冲突明细收敛 —— 红底行只留一句人话摘要（reason 首行），
-                           明细解析成表格（列 = 配置 / 行键 / 原因；表体长表格族双约束 min(480px,60vh) 内滚），
                            两种形态不同屏重复报同一份明细。
+                           S6 批2：明细表的**来源**改为 `part.resultView`（通用渲染器），红底行仍只取首行；
+                           无视图的旧段才回退到反解表（回退路径按设计稿 §7.1-⑤ 最后删）。
                            2A 批（裁决 §14.4 回执 / 文本族）：原因行限高改 `min(280px,35vh)`。 -->
                       <div v-if="!isBlankText(part.reason)" class="flex items-start gap-[7px] px-[10px] py-[7px] text-[12.4px] text-[#c0392b] bg-[#fdf1ef] border border-solid border-[#f0d5d0] rounded-[9px]" data-testid="tool-error">
                         <span class="mt-px shrink-0 flex-[0_0_14px] w-[14px] h-[14px] flex items-center justify-center rounded-[50%] border-[1.3px] border-[#c0392b] text-[#c0392b] text-[9px] font-bold" aria-hidden="true">!</span>
                         <span class="flex-1 min-w-0 whitespace-pre-wrap break-words max-h-[min(280px,35vh)] overflow-y-auto">原因：{{ reasonText(part) }}</span>
                       </div>
-                      <div v-if="conflictRows(part).length" class="border border-solid border-[#eef0f3] rounded-[8px] overflow-hidden" data-testid="conflict-table">
+                      <!-- S6 批2（§5.3 / §7.1-③）：视图通道接管明细表 —— 有 `resultView` 时由通用渲染器渲，
+                           旧反解表（`conflict-table`）在本分支下**零出现**（不同屏双份报同一份明细 = 违规）。
+                           旧表保留为 `v-else-if` 回退：旧镜像 / 旧归档的段没有视图，按 §7.1-⑤ 最后才删。 -->
+                      <ResultViewRenderer
+                        v-if="part.resultView"
+                        :view="part.resultView"
+                        :document-text="part.result ?? null"
+                      />
+                      <div v-else-if="conflictRows(part).length" class="border border-solid border-[#eef0f3] rounded-[8px] overflow-hidden" data-testid="conflict-table">
                         <div class="px-[9px] py-[5px] bg-[#f6f7f9] border-0 border-b border-solid border-[#e3e6ea] text-[11.4px] [font-weight:650] text-[#57606a]">
                           <span class="inline-block w-[34%]">配置</span><span class="inline-block w-[26%]">行键</span><span class="inline-block w-[40%]">原因</span>
                         </div>
@@ -1205,6 +1214,7 @@ import {
 } from '@/utils/blocks'
 import { deriveCopyText, deriveProjections } from '@/utils/parts'
 import FormRenderer from '@/components/AiPanel/FormRenderer.vue'
+import ResultViewRenderer from '@/components/AiPanel/resultview/ResultViewRenderer.vue'
 import SheetPreviewCard from '@/components/AiPanel/SheetPreviewCard.vue'
 import UploadHandoffCard from '@/components/AiPanel/UploadHandoffCard.vue'
 import ContextPill from '@/components/AiPanel/ContextPill.vue'
@@ -2755,13 +2765,17 @@ function conflictRows(part: ToolPart): ConflictRow[] {
 }
 
 /**
- * 卡面 reason 红底行文案（S6 批1 / v7.10 N8）：
- * - **冲突明细**（能解析出编号明细行）⇒ 只留首行一句人话摘要（明细由 `conflictRows` 渲成表格，
- *   两种形态不同屏重复报同一份明细）；
+ * 卡面 reason 红底行文案（S6 批1 / v7.10 N8 → S6 批2 §5.3）：
+ * - **有 `resultView`** ⇒ 只留首行摘要，**不调用** `parsePublishConflicts`
+ *   （明细由 `ResultViewRenderer` 渲，设计稿 §5.3-1/4、§7.2-6 的负断言就在这里成立）；
+ * - 无视图但能解析出编号明细（旧镜像 / 旧归档）⇒ 仍只留首行，明细走旧反解表（回退路径保留）；
  * - 其余失败 / 拒绝原因 ⇒ 原文（多行错误文案不截断，v-show 口径不变）。
  */
 function reasonText(part: ToolPart): string {
   const reason = part.reason ?? ''
+  if (part.resultView) {
+    return reasonHeadline(reason)
+  }
   return conflictRows(part).length > 0 ? reasonHeadline(reason) : reason
 }
 

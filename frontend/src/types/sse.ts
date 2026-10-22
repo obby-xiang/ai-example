@@ -15,6 +15,8 @@
  * 本文件按后端实测帧集定义。
  */
 
+import type { ResultView } from './resultview'
+
 /** 挂起种类（PendingToolCall.KIND_*）。 */
 export type ToolKind = 'CONFIRM' | 'FRONTEND' | 'BACKEND'
 
@@ -245,6 +247,13 @@ export interface SseToolResultFrame extends SseFrameBase {
    * 卡面 reason 行在 skipped 时直接展示本字段。
    */
   message?: string | null
+  /**
+   * S6 批 2：工具结果的**视图通道**（additive 可选键，设计稿 §6）。
+   *
+   * 帧类型集仍是 16（新增的是键，不是帧名）：`result` 是给模型/人读的那一份，
+   * `resultView` 是给卡面渲染器的结构化投影，两者同源。缺省 = 旧帧 → 卡面走旧形态。
+   */
+  resultView?: ResultView | null
 }
 
 /** HITL 确认请求（挂起等待口径）。 */

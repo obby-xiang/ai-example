@@ -14,6 +14,8 @@ import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.run.StreamViolationException;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
+import com.example.configmgr.ai.resultview.ResultView;
+import com.example.configmgr.ai.resultview.ToolResultViewProvider;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.FrontendToolGuard;
 import com.example.configmgr.ai.tool.SheetAudit;
@@ -217,10 +219,24 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 */
 	private SheetAudit sheetAudit;
 
+	/**
+	 * 结果视图投影器（S6 批 2）：{@code tool_result} 帧的 {@code resultView} 由它们按工具名自认领。
+	 *
+	 * <p>与 {@code FrontendToolGuard} 同体例：本类对"哪个工具有视图"零知识；空列表 = 一律不出视图
+	 * （帧上连 {@code resultView} 键都不出现，旧卡面零变化）。
+	 */
+	private List<ToolResultViewProvider> resultViewProviders = List.of();
+
 	/** 可选注入（{@code SheetAudit} 是观测面，不是判定面；缺失不影响任何工具的执行语义）。 */
 	@Autowired(required = false)
 	public void setSheetAudit(SheetAudit audit) {
 		this.sheetAudit = audit;
+	}
+
+	/** 可选注入（视图投影是展示增强，不是判定面；缺失 = 所有工具走旧卡面）。 */
+	@Autowired(required = false)
+	public void setResultViewProviders(List<ToolResultViewProvider> providers) {
+		this.resultViewProviders = providers == null ? List.of() : List.copyOf(providers);
 	}
 
 	public SpToolCallingManager(RunStore store, RunRegistry registry, ConfirmGate gate, ToolRegistry toolRegistry,
@@ -1091,8 +1107,44 @@ public class SpToolCallingManager implements ToolCallingManager {
 			fresh.setResolvedAtMs(fresh.getExecutedAtMs());
 		}
 		this.store.putPending(runId, fresh);
-		this.registry.of(runId).toolResult(fresh, ok, false, frameText(text));
+		// 无视图时走**原四参调用**（帧调用面与既有用例逐字不变）；有视图才用 additive 五参重载
+		ResultView resultView = resultViewOf(fresh, text, ok);
+		if (resultView == null) {
+			this.registry.of(runId).toolResult(fresh, ok, false, frameText(text));
+		}
+		else {
+			this.registry.of(runId).toolResult(fresh, ok, false, frameText(text), resultView);
+		}
 		return text;
+	}
+
+	/**
+	 * 视图投影（S6 批 2）：按工具名自认领，只对<b>成功</b>结局出视图。
+	 *
+	 * <p>三条硬口径：① 视图是 UI 通道，模型侧读的仍是 {@code resultText}（本方法不参与任何裁剪）；
+	 * ② 投影器异常一律吞掉并 WARN —— 展示增强不得让工具结果帧发不出去；③ 未认领 ⇒ null
+	 * （帧上不多键，旧卡面逐字不变）。
+	 */
+	private ResultView resultViewOf(PendingToolCall pending, String text, boolean ok) {
+		if (!ok || this.resultViewProviders.isEmpty()) {
+			return null;
+		}
+		for (ToolResultViewProvider provider : this.resultViewProviders) {
+			if (!provider.supports(pending.getName())) {
+				continue;
+			}
+			try {
+				ResultView view = provider.build(pending.getToolCallId(), pending.getName(), text);
+				if (view != null) {
+					return view;
+				}
+			}
+			catch (RuntimeException ex) {
+				log.warn("resultView 构造失败（本次不出视图，卡面走旧形态）：tool={} toolCallId={}",
+						pending.getName(), pending.getToolCallId(), ex);
+			}
+		}
+		return null;
 	}
 
 	/**

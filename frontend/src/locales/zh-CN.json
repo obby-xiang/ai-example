@@ -311,5 +311,40 @@
     "applied": {
       "line": "AI 改动 {cells} 格（可撤销，深度 3 中第 {layer} 层）"
     }
+  },
+  "resultview": {
+    "fallback": {
+      "generic": "该结果暂不支持结构化展示",
+      "blocked": "该结果包含不可展示的内容"
+    },
+    "truncated": "共 {total} 行，本次展示前 {shown} 行",
+    "table": {
+      "caption": "结果明细"
+    },
+    "boolean": {
+      "true": "是",
+      "false": "否"
+    },
+    "publishConflict": {
+      "title": "发布冲突明细",
+      "label": "发布冲突明细表",
+      "fallback": "发布冲突明细无法以表格展示，请在任务中心查看",
+      "col": {
+        "defCode": "配置",
+        "rowKey": "行键",
+        "message": "原因"
+      }
+    },
+    "listTasks": {
+      "title": "任务列表",
+      "fallback": "任务列表无法以表格展示，请在任务中心查看",
+      "col": {
+        "id": "编号",
+        "type": "类型",
+        "title": "标题",
+        "step": "步骤",
+        "status": "状态"
+      }
+    }
   }
 }

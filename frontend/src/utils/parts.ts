@@ -598,6 +598,8 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
         // 治理 P0-1：仅在帧带 outcome 时落段（旧帧不产生 undefined 键，镜像/段口径不变）；
         // 一期卡面不展示，仅供后续阶段读段
         ...(frame.outcome !== undefined ? { outcome: frame.outcome } : {}),
+        // S6 批 2：视图通道（additive 可选键）—— 仅在帧带视图时落段（旧帧不产生 undefined 键）
+        ...(frame.resultView ? { resultView: frame.resultView } : {}),
         reason,
         requiresAction: false
       })

@@ -93,9 +93,11 @@ function notifyJobWatch(message: string): void {
  *
  * 形态：**首行 = 人话摘要**（`发布作业 #N 校验冲突明细（共 M 处）`），其后逐条编号明细
  * （`N. defCode#rowKey：message`，截断前 5 条）。首行即卡面 reason 红底行的**唯一**文案
- * （「原因：<首行>」），编号明细由前端解析成表格卡渲染（列 = 配置 / 行键 / 原因）——
- * 两种形态不同屏重复报同一份明细（N8 判据）。
+ * （「原因：<首行>」）—— 两种形态不同屏重复报同一份明细（N8 判据）。
  * 文本同时是 Ai 保证通道的 message 载荷（回灌模型），故明细本身保留在字符串里。
+ *
+ * S6 批 2：卡面明细表已改由 `resultView`（结构化 issues → kind=table）承载，
+ * 本串只服务**模型侧**与旧段回退；字符串形态**刻意不动**（「reason 是否只留一句」是独立的模型侧决策）。
  */
 function formatPublishConflictSummary(jobId: number, issues: ValidationIssue[]): string {
   const lines = issues.slice(0, 5).map((issue, index) =>
@@ -269,13 +271,15 @@ export const useTaskStore = defineStore('task', {
      * - 失败/成功终态 → onFinal 内收口（R-94 范围 B 双通道：ElMessage 瞬时提示 +
      *   onConflict 明细摘要回灌，见 {@link applyPublishOutcome}）。
      *
-     * @param handlers.onConflict 冲突明细摘要的出口回调（AI 保证通道缝点，run_job 分支注入）
+     * @param handlers.onConflict 冲突明细摘要的出口回调（AI 保证通道缝点，run_job 分支注入）。
+     *   第二个参数是**结构化 issues**（S6 批 2）：调用方据此构造 `resultView` 表格，
+     *   不必再回头反解摘要字符串（设计稿 §5.3「拆的是消费者，不是字符串」）。
      * @returns dispose —— 调用方持有；组件卸载/轮次收尾调用。
      */
     watchPublishOutcome(
       taskId: number,
       jobId: number,
-      handlers: { onConflict?: (summary: string) => void } = {}
+      handlers: { onConflict?: (summary: string, issues?: ValidationIssue[]) => void } = {}
     ): () => void {
       if (!jobId) {
         return () => {}
@@ -334,7 +338,7 @@ export const useTaskStore = defineStore('task', {
     async applyPublishOutcome(
       jobId: number,
       job: Job,
-      handlers: { onConflict?: (summary: string) => void } = {}
+      handlers: { onConflict?: (summary: string, issues?: ValidationIssue[]) => void } = {}
     ): Promise<void> {
       if (watchingJobId !== jobId) {
         // F4：旧作业晚到终态 —— 闸位已被更新的跟踪占据，不覆盖/清空新冲突
@@ -359,7 +363,7 @@ export const useTaskStore = defineStore('task', {
       const conflictIssues = issues.filter((issue) => issue.severity === 'ERROR')
       const counted = conflictIssues.length > 0 ? conflictIssues : issues
       notifyJobWatch(`发布冲突：${counted.length} 处，明细见 AI 面板回执`)
-      handlers.onConflict?.(formatPublishConflictSummary(jobId, counted))
+      handlers.onConflict?.(formatPublishConflictSummary(jobId, counted), counted)
     },
 
     /**
