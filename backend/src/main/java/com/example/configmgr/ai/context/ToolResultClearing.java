@@ -27,15 +27,17 @@ import java.util.Set;
  * </ol>
  *
  * <h2>原文不丢</h2>
- * 占位符给出 {@code toolCallId} 与台账键（{@code ai:ledger:<runId>} 本就是全文，见
- * {@code RunStore#appendLedger}）。占位符<b>刻意不复用</b>
+ * 工具结果原文仍在台账里（{@code ai:ledger:<runId>} 本就是全文，见 {@code RunStore#appendLedger}），
+ * 占位符只给 {@code toolCallId} 这一个回取键 —— 台账键是<b>内部 Redis 键</b>，写进面向模型的文本
+ * 既没有模型用得上的信息量，还会诱导它去"查台账"（2026-10-22 用户裁「占位符文案：改吧」）。
+ * 占位符<b>刻意不复用</b>
  * {@code ToolResultLimiter.TRUNCATION_MARKER}：那个标记的语义是"上游结果过长被截断"，
  * 复用会让 {@code ToolResultLimiter#truncated} 把"已清理"误判成"被截断"。
  */
 public final class ToolResultClearing {
 
 	/** 占位符前缀（幂等判据：已清除的一条不再重复清除/重复计费）。 */
-	public static final String PLACEHOLDER_PREFIX = "[tool_result 已清理：";
+	public static final String PLACEHOLDER_PREFIX = "[工具结果已清除：";
 
 	/**
 	 * 一对被清除的工具结果。
@@ -74,10 +76,8 @@ public final class ToolResultClearing {
 	 * @param messages              当前历史（原消息对象不被修改）
 	 * @param keepToolPairs         最近多少对被 pin（{@code <=0} 表示不 pin）
 	 * @param protectedToolCallIds  未决 HITL 条目的 toolCallId（永不清除；可为 null）
-	 * @param ledgerRunId           台账键里的 runId（原文回取路径）
 	 */
-	public static Plan plan(List<Message> messages, int keepToolPairs, Set<String> protectedToolCallIds,
-			String ledgerRunId) {
+	public static Plan plan(List<Message> messages, int keepToolPairs, Set<String> protectedToolCallIds) {
 		if (messages == null || messages.isEmpty()) {
 			return new Plan(messages, List.of(), 0);
 		}
@@ -114,7 +114,7 @@ public final class ToolResultClearing {
 				continue;
 			}
 			int tokens = ContextEstimator.estimate(slot.data());
-			String placeholder = placeholder(slot.name(), tokens, slot.toolCallId(), ledgerRunId);
+			String placeholder = placeholder(slot.name(), tokens, slot.toolCallId());
 			replacements.computeIfAbsent(slot.messageIndex(), key -> new HashMap<>()).put(slot.responseIndex(),
 					placeholder);
 			cleared.add(new Cleared(slot.toolCallId(), slot.name(), tokens));
@@ -140,11 +140,10 @@ public final class ToolResultClearing {
 		return data != null && data.startsWith(PLACEHOLDER_PREFIX);
 	}
 
-	/** 占位符正文（格式即契约：C-16 断言工具名 + 估算 token + 台账键）。 */
-	public static String placeholder(String name, int tokens, String toolCallId, String ledgerRunId) {
+	/** 占位符正文（格式即契约：C-16 逐字断言前缀 + 工具名 + 估算 token + toolCallId）。 */
+	public static String placeholder(String name, int tokens, String toolCallId) {
 		return PLACEHOLDER_PREFIX + (name == null ? "(unknown)" : name) + " · ≈" + tokens + " tokens · toolCallId="
-				+ (toolCallId == null ? "(none)" : toolCallId) + " · 原文见台账 ai:ledger:" + (ledgerRunId == null ? "(unknown)" : ledgerRunId)
-				+ "]";
+				+ (toolCallId == null ? "(none)" : toolCallId) + "]";
 	}
 
 	private static ToolResponseMessage rebuild(ToolResponseMessage original, Map<Integer, String> patch) {

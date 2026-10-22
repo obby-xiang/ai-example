@@ -9,6 +9,7 @@ import com.example.configmgr.ai.context.ContextCompactor;
 import com.example.configmgr.ai.context.ContextEstimator;
 import com.example.configmgr.ai.context.ContextMeter;
 import com.example.configmgr.ai.context.ContextState;
+import com.example.configmgr.ai.context.MemoryWindow;
 import com.example.configmgr.ai.kb.KbPromptSection;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.observe.AiTrace;
@@ -1460,7 +1461,12 @@ public class ResilientChatService {
 	}
 
 	/**
-	 * 请求前压缩（两个调用点之一；另一处见 {@code ResumeService}）。
+	 * 请求前：<b>记忆窗口</b>（记忆窗口批）→ 压缩（上下文专项批①）。
+	 *
+	 * <p>
+	 * 两步的顺序是刻意的：窗口先按<b>绝对历史预算</b>收口（清旧工具结果 → 按 turn 整轮淘汰最旧），
+	 * 压缩再按<b>模型上限占比</b>兜底。反序的话"窗口该多长"会被压缩的 pin 窗口（keep-recent-turns）
+	 * 间接决定，同一份历史在不同模型上得到不同窗口 —— 这正是记忆窗口批要消掉的不可预期性。
 	 *
 	 * <p>
 	 * <b>落库顺序 = 归档 → 记忆 → 快照</b>（与设计稿 §3.5 的"快照在前、记忆在后"相反，理由见
@@ -1469,34 +1475,57 @@ public class ResilientChatService {
 	 * <b>"快照已压、记忆未压"</b>，这一轮模型看压缩后的历史、记忆窗口仍是原文，
 	 * 续跑与下一轮各自再压一次且 pin 窗口不同 ⇒ 同一会话两条历史线（SM-01 同族）。
 	 * 三步都对，"模型看到的 / 快照里的 / 记忆里的"才是同一份。
+	 *
+	 * <p>
+	 * <b>为什么窗口必须写回记忆</b>：官方 {@code MessageChatMemoryAdvisor} 是<b>自己</b>从
+	 * {@code ChatMemory} 读历史的（不读本方法的返回值）。只算不写回 ⇒ 快照里是短的、模型看到的是长的，
+	 * 比不裁剪更坏。故"窗口改了"与"压缩改了"合并成<b>一次</b>覆盖写。
 	 */
 	private Compaction compactBeforeRequest(String runId, String sessionId, String model, Long providerId,
 			List<Message> memory, int inputTokens, int systemTokens, int toolsTokens, int toolResultsSinceMeasure) {
-		if (this.contextCompactor == null) {
-			return new Compaction(memory, 0, null);
-		}
-		int limit = this.contextCompactor.limitTokens(providerId, model);
+		int limit = this.contextCompactor == null ? 0 : this.contextCompactor.limitTokens(providerId, model);
 		if (memory == null || memory.isEmpty()) {
 			return new Compaction(memory, limit, null);
 		}
+		// ── ① 记忆窗口：token 预算为主 + 条数兜底（纯函数；写回与否见下） ──
+		MemoryWindow.Budget windowBudget = MemoryWindow.Budget.from(this.properties);
+		Set<String> protectedIds = protectedToolCallIds(runId, sessionId);
+		MemoryWindow.Plan window = MemoryWindow.plan(memory, windowBudget, protectedIds);
+		MemoryWindow.emit(runId, sessionId, window, windowBudget);
+		List<Message> windowed = window.messages();
+		if (this.contextCompactor == null) {
+			writeBackMemory(sessionId, windowed, window.changed(), "记忆窗口");
+			return new Compaction(windowed, 0, null);
+		}
+		// ── ② 上下文压缩：按模型上限占比兜底（窗口之后的历史才是它的输入） ──
 		ContextState state = this.contextCompactor.readState(sessionId);
 		ContextCompactor.Outcome outcome = this.contextCompactor.compact(new ContextCompactor.Request(sessionId, runId,
-				model, providerId, memory, this.codec.serializeAll(memory), state.usedTokens(),
+				model, providerId, windowed, this.codec.serializeAll(windowed), state.usedTokens(),
 				state.completionTokens(), inputTokens, toolResultsSinceMeasure, systemTokens, toolsTokens,
-				protectedToolCallIds(runId, sessionId)));
-		if (!outcome.changed()) {
-			return new Compaction(memory, limit, outcome);
+				protectedIds));
+		List<Message> finalMessages = outcome.changed() ? outcome.messages() : windowed;
+		writeBackMemory(sessionId, finalMessages, window.changed() || outcome.changed(), "记忆窗口/压缩");
+		return new Compaction(finalMessages, limit, outcome);
+	}
+
+	/**
+	 * 记忆整体覆盖写（与 {@link #convergeMemory} 同一通道）：不写回的话下一轮又读到未裁剪的那份。
+	 *
+	 * <p>顺序（记忆先于快照）见 {@link #compactBeforeRequest} 方法注：{@code store.create} 失败时
+	 * 不留"快照已裁、记忆未裁"组合。写失败只 WARN：观测面/存储抖动不得让本轮对话直接失败
+	 * （这一轮仍按裁剪后的列表发请求，快照也写这一份 —— 三者的一致性由返回值保证）。
+	 */
+	private void writeBackMemory(String sessionId, List<Message> messages, boolean changed, String stage) {
+		if (!changed || messages == null || messages.isEmpty()) {
+			return;
 		}
 		try {
-			// 记忆整体覆盖写（与 convergeMemory 同一通道）：不写回的话下一轮又读到未压缩的那份。
-			// 顺序（记忆先于快照）见方法注：`store.create` 失败时不留"快照已压、记忆未压"组合
 			this.chatMemory.clear(sessionId);
-			this.chatMemory.add(sessionId, outcome.messages());
+			this.chatMemory.add(sessionId, messages);
 		}
 		catch (RuntimeException ex) {
-			log.warn("压缩后记忆写回失败 sessionId={}：{}（快照仍写压缩后的那一份）", sessionId, ex.getMessage());
+			log.warn("{}后记忆写回失败 sessionId={}：{}（快照仍写裁剪后的那一份）", stage, sessionId, ex.getMessage());
 		}
-		return new Compaction(outcome.messages(), limit, outcome);
 	}
 
 	/**

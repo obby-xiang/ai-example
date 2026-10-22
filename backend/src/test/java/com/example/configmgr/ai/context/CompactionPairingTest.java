@@ -71,7 +71,7 @@ class CompactionPairingTest {
 	void l1ClearingKeepsPairing() {
 		List<Message> messages = turns(6);
 
-		ToolResultClearing.Plan plan = ToolResultClearing.plan(messages, 2, Set.of(), "run-1");
+		ToolResultClearing.Plan plan = ToolResultClearing.plan(messages, 2, Set.of());
 
 		assertThat(plan.changed()).isTrue();
 		assertThat(plan.messages()).hasSameSizeAs(messages);

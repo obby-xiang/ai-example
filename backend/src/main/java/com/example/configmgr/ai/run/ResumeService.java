@@ -7,6 +7,7 @@ import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.context.ContextCompactor;
 import com.example.configmgr.ai.context.ContextEstimator;
 import com.example.configmgr.ai.context.ContextState;
+import com.example.configmgr.ai.context.MemoryWindow;
 import com.example.configmgr.ai.gate.SpToolCallingManager;
 import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
@@ -613,6 +614,27 @@ public class ResumeService {
 				this.store.save(snapshot);
 			}
 
+			// ── 记忆窗口批：续跑重建出来的历史也按同一个 token 预算收口（与首轮同源：同一个 MemoryWindow） ──
+			// 为什么续跑更需要它：这里是完整 run 历史（挂起期越长越大），没有条数窗口兜着 ——
+			// 只按模型上限占比判的话，"32K 模型 + 40 条大工具结果"会先撞上游 400 才发现。
+			// 只改"这一轮交棒给模型的视图"：快照保留完整历史（审计/后续续跑的原文），窗口是确定性
+			// 纯函数（同输入同输出），故不落库、不归档（区别于压缩：压缩改写内容且必须归档原文）。
+			Set<String> protectedIds = new LinkedHashSet<>();
+			for (PendingToolCall pending : this.store.pendings(runId)) {
+				if (PendingToolCall.PENDING.equals(pending.getStatus())
+						|| (PendingToolCall.APPROVED.equals(pending.getStatus()) && !pending.isExecuted())) {
+					protectedIds.add(pending.getToolCallId());
+				}
+			}
+			MemoryWindow.Budget windowBudget = MemoryWindow.Budget.from(this.properties);
+			MemoryWindow.Plan window = MemoryWindow.plan(history, windowBudget, protectedIds);
+			MemoryWindow.emit(runId, sessionId, window, windowBudget);
+			history = window.messages();
+			body.put("memoryWindowTrimmed", window.changed());
+			if (window.changed()) {
+				body.put("memoryWindow", window.summary());
+			}
+
 			// ── 上下文专项批①：续跑前压缩（与首轮同源：同一个 ContextCompactor） ──
 			// 位置刻意在"历史重建之后、交棒之前"：重建出来的工具响应已经进 history，
 			// 于是 L1 能清到它们（挂在挂起期的结果往往正是最大的一块）。
@@ -623,13 +645,6 @@ public class ResumeService {
 				for (Message message : history) {
 					if (message.getMessageType() == MessageType.SYSTEM) {
 						systemTokens += ContextEstimator.estimate(message.getText());
-					}
-				}
-				Set<String> protectedIds = new LinkedHashSet<>();
-				for (PendingToolCall pending : this.store.pendings(runId)) {
-					if (PendingToolCall.PENDING.equals(pending.getStatus())
-							|| (PendingToolCall.APPROVED.equals(pending.getStatus()) && !pending.isExecuted())) {
-						protectedIds.add(pending.getToolCallId());
 					}
 				}
 				compaction = this.contextCompactor.compact(new ContextCompactor.Request(sessionId,

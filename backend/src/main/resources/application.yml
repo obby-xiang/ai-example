@@ -137,7 +137,20 @@ app:
     # run 级外置键（快照/待决/台账/帧/序号/心跳）同取本值，每次写/心跳都整额续期。
     session-ttl: 24h
     memory:
+      # 条数上限（官方 MessageWindowChatMemory 的窗口大小，默认 40）。
+      # 记忆窗口批起它退化为兜底：预算没越线时的条数上限，40 = 调研区间 40–60 的下沿（取小 = 省 token 优先）。
+      # 与下面的 min-messages 同为 40 ⇒ 条数固定 40（见该键注释：min = max = 40 的实际语义）。
       max-messages: 40
+      # 历史 token 预算（默认 48k；0 = 关闭预算、只按条数 —— 回到记忆窗口批之前的语义）。
+      # 只算记忆窗口里的历史：system 人设/工作区快照与工具 schema 不在内（请求侧单列，见 ContextEstimator）。
+      # 依据 = 调研 §① 历史预算 32k–48k 取上限（本仓工具结果偏大、单轮回环多）。
+      # 与本文件 app.ai.context.limit-tokens 不是一个东西：后者是整请求上限、压缩谱系的分母。
+      token-budget: 48000
+      # 条数下限（默认 40，与 max-messages 同值；2026-10-22 用户裁「业界主流的来吧，40」）。
+      # 口径：条数 40 条不动、超预算靠清旧工具结果（keep-tool-pairs 之外的最旧结果换占位符）；
+      # turn 整轮淘汰只在"清完仍超预算 且 条数 > 40"时发生 —— 这正是 min = max = 40 的实际语义。
+      # 防的是"预算把窗口压到只剩最后一轮"（失忆）；最后一轮本身永不被淘汰。
+      min-messages: 40
     # ── 上下文计量与压缩（上下文统计与压缩专项批①；设计稿 §3.7）────────────────
     # 每个数字的依据逐行登记在 docs/evidence/补档-NUMSPEC-清单总账.md（禁裸数字）。
     # 启动期校验见 AiProperties#verifyContext（reserve >= limit、阈值倒挂、冷却为 0 等一律 fail-fast）。

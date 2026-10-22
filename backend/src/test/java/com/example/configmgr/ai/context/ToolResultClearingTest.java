@@ -28,8 +28,6 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class ToolResultClearingTest {
 
-	private static final String RUN_ID = "run-l1";
-
 	/** 造 n 个"用户提问 → 工具调用 → 工具结果"的轮次（每轮一对）。 */
 	private static List<Message> turns(int pairs) {
 		List<Message> messages = new ArrayList<>();
@@ -61,7 +59,7 @@ class ToolResultClearingTest {
 	@Test
 	void c15OnlyTheOldestPairIsClearedAndNoMessageIsDropped() {
 		List<Message> messages = turns(6);
-		ToolResultClearing.Plan plan = ToolResultClearing.plan(messages, 5, Set.of(), RUN_ID);
+		ToolResultClearing.Plan plan = ToolResultClearing.plan(messages, 5, Set.of());
 
 		assertThat(plan.changed()).isTrue();
 		assertThat(plan.clearedIds()).containsExactly("c-1");
@@ -73,28 +71,55 @@ class ToolResultClearingTest {
 			.allSatisfy(message -> assertThat(((AssistantMessage) message).getToolCalls()).hasSize(1));
 	}
 
-	/** C-16：占位符 = 工具名 + 估算 token + 台账键；且不含截断标记。 */
+	/** C-16：占位符 = 工具名 + 估算 token + toolCallId；不含截断标记、不暴露内部 Redis 台账键。 */
 	@Test
-	void c16PlaceholderCarriesNameTokensAndLedgerKeyWithoutTruncationMarker() {
-		ToolResultClearing.Plan plan = ToolResultClearing.plan(turns(6), 5, Set.of(), RUN_ID);
+	void c16PlaceholderCarriesNameTokensAndToolCallIdWithoutTruncationMarker() {
+		List<Message> messages = turns(6);
+		ToolResultClearing.Plan plan = ToolResultClearing.plan(messages, 5, Set.of());
 		String placeholder = responseData(plan.messages()).get(0);
+		int tokens = ContextEstimator.estimate(responseData(messages).get(0));
 
+		// 文案即契约（2026-10-22 用户裁「占位符文案：改吧」）：前缀 + 工具名 + 估算 token + toolCallId
+		// 逐字锁定；改格式必须同步改断言，不允许"contains 差不离"放过
+		assertThat(placeholder).isEqualTo("[工具结果已清除：list_tasks · ≈" + tokens + " tokens · toolCallId=c-1]");
 		assertThat(placeholder).startsWith(ToolResultClearing.PLACEHOLDER_PREFIX)
-			.contains("list_tasks")
-			.contains("≈")
-			.contains("tokens")
-			.contains("ai:ledger:" + RUN_ID)
-			.contains("toolCallId=c-1");
+			.as("面向模型的文案不带内部 Redis 台账键（jargon 无信息量，还会诱导模型去查台账）")
+			.doesNotContain("ai:ledger")
+			.doesNotContain("原文见台账");
 		ToolResultLimiter limiter = new ToolResultLimiter(new com.example.configmgr.ai.config.AiProperties());
 		assertThat(limiter.truncated(placeholder)).as("不得复用截断标记（语义不同）").isFalse();
 		assertThat(placeholder).doesNotContain(ToolResultLimiter.TRUNCATION_MARKER);
 	}
 
+	/** 文案改版（2026-10-22）：旧前缀不再算"已清除"⇒ 旧历史被改写一次落到新文案，之后稳定。 */
+	@Test
+	void legacyPlaceholderIsRewrittenOnceIntoTheNewText() {
+		String legacy = "[tool_result 已清理：list_tasks · ≈120 tokens · toolCallId=c-9 · 原文见台账 ai:ledger:run-l1]";
+		List<Message> messages = List.of(
+				AssistantMessage.builder()
+					.content("")
+					.toolCalls(List.of(new AssistantMessage.ToolCall("c-9", "function", "list_tasks", "{}")))
+					.build(),
+				ToolResponseMessage.builder()
+					.responses(List.of(new ToolResponseMessage.ToolResponse("c-9", "list_tasks", legacy)))
+					.build(),
+				new UserMessage("继续"));
+
+		assertThat(ToolResultClearing.isAlreadyCleared(legacy)).as("幂等判据只认新前缀").isFalse();
+
+		ToolResultClearing.Plan first = ToolResultClearing.plan(messages, 0, Set.of());
+		assertThat(first.clearedIds()).containsExactly("c-9");
+		assertThat(responseData(first.messages()).get(0)).startsWith("[工具结果已清除：").doesNotContain("ai:ledger");
+
+		assertThat(ToolResultClearing.plan(first.messages(), 0, Set.of()).cleared()).as("改写只发生一次")
+			.isEmpty();
+	}
+
 	/** 幂等：已清除的占位符不再重复清除（重复跑压缩不该反复记账）。 */
 	@Test
 	void alreadyClearedPlaceholdersAreNotClearedAgain() {
-		ToolResultClearing.Plan first = ToolResultClearing.plan(turns(6), 5, Set.of(), RUN_ID);
-		ToolResultClearing.Plan second = ToolResultClearing.plan(first.messages(), 5, Set.of(), RUN_ID);
+		ToolResultClearing.Plan first = ToolResultClearing.plan(turns(6), 5, Set.of());
+		ToolResultClearing.Plan second = ToolResultClearing.plan(first.messages(), 5, Set.of());
 
 		assertThat(second.changed()).isFalse();
 		assertThat(second.cleared()).isEmpty();
@@ -103,10 +128,10 @@ class ToolResultClearingTest {
 	/** C-19：keep-tool-pairs 生效 —— 6 对只清 1 对；keep=0 时全清。kill：keepPairs 失效 ⇒ 多清。 */
 	@Test
 	void c19KeepPairsBoundsTheClearing() {
-		assertThat(ToolResultClearing.plan(turns(3), 5, Set.of(), RUN_ID).changed())
+		assertThat(ToolResultClearing.plan(turns(3), 5, Set.of()).changed())
 			.as("3 对 <= keep 5 ⇒ 一对都不清").isFalse();
 
-		ToolResultClearing.Plan all = ToolResultClearing.plan(turns(6), 0, Set.of(), RUN_ID);
+		ToolResultClearing.Plan all = ToolResultClearing.plan(turns(6), 0, Set.of());
 		assertThat(all.clearedIds()).containsExactly("c-1", "c-2", "c-3", "c-4", "c-5", "c-6");
 	}
 
@@ -114,18 +139,18 @@ class ToolResultClearingTest {
 	@Test
 	void c20PendingHitlToolResultsAreNeverCleared() {
 		// keep=4 ⇒ 候选 = c-1, c-2；c-1 受保护 ⇒ 只清 c-2
-		ToolResultClearing.Plan plan = ToolResultClearing.plan(turns(6), 4, Set.of("c-1"), RUN_ID);
+		ToolResultClearing.Plan plan = ToolResultClearing.plan(turns(6), 4, Set.of("c-1"));
 		assertThat(plan.clearedIds()).as("c-1 受保护 ⇒ 清下一条最旧的（且不因保护而多清一条）").containsExactly("c-2");
 		assertThat(responseData(plan.messages()).get(0)).isEqualTo("任务列表内容".repeat(50) + 1);
 
 		// keep=5 ⇒ 候选只有 c-1，而它受保护 ⇒ 一条都不清（保护不把窗口往后推）
-		assertThat(ToolResultClearing.plan(turns(6), 5, Set.of("c-1"), RUN_ID).clearedIds()).isEmpty();
+		assertThat(ToolResultClearing.plan(turns(6), 5, Set.of("c-1")).clearedIds()).isEmpty();
 	}
 
 	/** 估算口径：savedTokens 为正且小于原文本量。 */
 	@Test
 	void savedTokensIsPositiveAndBounded() {
-		ToolResultClearing.Plan plan = ToolResultClearing.plan(turns(6), 5, Set.of(), RUN_ID);
+		ToolResultClearing.Plan plan = ToolResultClearing.plan(turns(6), 5, Set.of());
 
 		assertThat(plan.savedTokens()).isGreaterThan(0);
 		assertThat(plan.savedTokens()).isLessThan(ContextEstimator.estimate("任务列表内容".repeat(50) + 1));
@@ -134,9 +159,9 @@ class ToolResultClearingTest {
 	/** 空历史/无工具结果 ⇒ 不动（不得返回 null 列表）。 */
 	@Test
 	void noOpOnEmptyOrToolFreeHistory() {
-		assertThat(ToolResultClearing.plan(List.of(), 5, Set.of(), RUN_ID).changed()).isFalse();
-		assertThat(ToolResultClearing.plan(List.of(new UserMessage("你好")), 5, Set.of(), RUN_ID).changed()).isFalse();
-		assertThat(ToolResultClearing.plan(null, 5, Set.of(), RUN_ID).changed()).isFalse();
+		assertThat(ToolResultClearing.plan(List.of(), 5, Set.of()).changed()).isFalse();
+		assertThat(ToolResultClearing.plan(List.of(new UserMessage("你好")), 5, Set.of()).changed()).isFalse();
+		assertThat(ToolResultClearing.plan(null, 5, Set.of()).changed()).isFalse();
 	}
 
 	/** 一条 ToolResponseMessage 里多份响应：只清该清的那几份，消息本身与其余响应不动。 */
@@ -148,7 +173,7 @@ class ToolResultClearingTest {
 			.build();
 		List<Message> messages = List.of(multi, new UserMessage("继续"));
 
-		ToolResultClearing.Plan plan = ToolResultClearing.plan(messages, 1, Set.of(), RUN_ID);
+		ToolResultClearing.Plan plan = ToolResultClearing.plan(messages, 1, Set.of());
 
 		assertThat(plan.clearedIds()).containsExactly("c-1");
 		List<String> data = responseData(plan.messages());

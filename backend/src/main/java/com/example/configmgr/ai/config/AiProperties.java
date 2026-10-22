@@ -331,6 +331,44 @@ public class AiProperties {
 		}
 	}
 
+	/**
+	 * 启动期校验 {@code app.ai.memory.*}（记忆窗口批；与 {@link #verifyContext()} 同一姿态）。
+	 *
+	 * <p>
+	 * 这里的每个坏值都不是"性能降级"，而是<b>窗口判定被静默改写</b>：
+	 * <ul>
+	 * <li>{@code min-messages > max-messages} ⇒ 两套兜底互相打穿：上限想裁到 40、下限要求留 60，
+	 * 结果是"配了上限但永远不生效"；</li>
+	 * <li>{@code token-budget < 0} ⇒ 每一轮都判"越线"，历史被钉死在最近几条上；</li>
+	 * <li>{@code min-messages <= 0} ⇒ 没有下限，预算可以把窗口压到只剩最后一个 turn（失忆）。</li>
+	 * </ul>
+	 * {@code token-budget = 0} 是<b>合法</b>的逃生门：关闭预算、只按条数（回到记忆窗口批之前的语义）。
+	 */
+	@PostConstruct
+	void verifyMemory() {
+		Memory memory = this.memory;
+		if (memory == null) {
+			throw new IllegalStateException("app.ai.memory 段缺失（绑定为 null）：记忆窗口无法装配，启动失败");
+		}
+		if (memory.getTokenBudget() < 0) {
+			throw new IllegalStateException("app.ai.memory.token-budget 不得为负（当前 = " + memory.getTokenBudget()
+					+ "）：0 = 关闭预算（只按条数），负值会让每一轮都判越线");
+		}
+		if (memory.getMinMessages() <= 0) {
+			throw new IllegalStateException("app.ai.memory.min-messages 必须 > 0（当前 = " + memory.getMinMessages()
+					+ "）：下限为 0 = 没有下限，预算可以把窗口压到只剩最后一个 turn（失忆）");
+		}
+		if (memory.getMaxMessages() <= 0) {
+			throw new IllegalStateException("app.ai.memory.max-messages 必须 > 0（当前 = " + memory.getMaxMessages()
+					+ "）：条数上限为 0 会让官方窗口什么都不留");
+		}
+		if (memory.getMinMessages() > memory.getMaxMessages()) {
+			throw new IllegalStateException("app.ai.memory.min-messages（" + memory.getMinMessages()
+					+ "）不得大于 max-messages（" + memory.getMaxMessages()
+					+ "）：两套兜底互相打穿（上限永远不生效，窗口只剩预算一个维度）");
+		}
+	}
+
 	private static void checkPercent(String key, int value) {
 		if (value < 0 || value > 100) {
 			throw new IllegalStateException("app.ai.context." + key + " 必须在 0–100（当前 = " + value + "）");
@@ -411,7 +449,40 @@ public class AiProperties {
 
 	@Data
 	public static class Memory {
-		/** MessageWindowChatMemory 窗口大小（官方实现负责裁剪）。 */		private int maxMessages = 40;
+
+		/**
+		 * 条数上限（官方 {@code MessageWindowChatMemory} 的窗口大小；默认 40）。
+		 *
+		 * <p>记忆窗口批起它退化为<b>兜底</b>：主判据是 {@link #tokenBudget}，本键负责"预算没越线时
+		 * 也别无限长"这一半（40 与调研区间 40–60 的下沿一致，取小 = 省 token 优先且不放大既有窗口）。
+		 */
+		private int maxMessages = 40;
+
+		/**
+		 * 历史 token 预算（默认 48000；{@code 0} = 关闭，只按条数）。
+		 *
+		 * <p>只算<b>记忆窗口里的历史</b>（system 人设/工作区快照与工具 schema 不在内 —— 它们在请求侧
+		 * 单列，见 {@code ContextEstimator#estimateMessages} 跳过 SYSTEM 的口径）。取值依据 =
+		 * 调研《调研-上下文统计与压缩业界惯例-2026-10-21》：历史预算区间 32k–48k，取上限（本仓工具结果
+		 * 偏大、单轮回环多，取下沿会频繁淘汰）；与 {@code app.ai.context.limit-tokens} 不是一个东西：
+		 * 后者是整请求上限、压缩谱系的分母，本键是"读进来的历史该有多长"。
+		 */
+		private int tokenBudget = 48000;
+
+		/**
+		 * 条数下限（默认 40，与 {@link #maxMessages} 同值）：token 预算淘汰时至少要留住的消息条数。
+		 *
+		 * <p>防的是"预算把窗口压到只剩最后一轮"—— 那不是省 token，是失忆。最后一轮本身永不被淘汰
+		 * （见 {@code MemoryWindow}），故下限只在"前缀还有可淘汰的轮次"时起作用。
+		 *
+		 * <p><b>为什么是 40 且与上限同值</b>（2026-10-22 用户裁「业界主流的来吧，40」）：口径 = 条数
+		 * 40 条不动、超预算靠<b>清旧工具结果</b>消化；turn 淘汰只在"清完仍超 <b>且</b>条数 &gt; 40"时
+		 * 发生（min = max = 40 的实际语义 —— 窗口是"40 条的滑动历史"，预算只决定这 40 条里有多少工具
+		 * 结果还留着原文）。业界调研区间"保留最近 3–8 轮"是按轮算，本仓按条计（一轮提问+回答 = 2 条），
+		 * 40 条 ≈ 20 轮 ≈ 调研区间上限的 2–6 倍 —— 48k 预算才是真正起作用的那个维度。
+		 */
+		private int minMessages = 40;
+
 	}
 
 	@Data

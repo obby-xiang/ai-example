@@ -232,7 +232,7 @@ public final class ContextCompactor {
 			}
 		}
 		ToolResultClearing.Plan clear = ToolResultClearing.plan(original, config.getKeepToolPairs(),
-				request.protectedToolCallIds(), request.runId());
+				request.protectedToolCallIds());
 		List<Message> current = clear.messages();
 		ContextTrigger.Level action = target;
 		int turns = 0;
