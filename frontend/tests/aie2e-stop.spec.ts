@@ -308,19 +308,21 @@ describe('P-09（P2）：双击停止幂等 —— 只 1 次 cancel，alreadyCan
 
 describe('P-11（P0）：停止后迟到帧不写 —— 屏上帧数不增、卡状态不回退、镜像不写', () => {
   /**
-   * 【缺陷挂账 · 红测先行】本用例**当前是红的**（`it.fails` 显式登记为"已知不满足"）。
+   * 【缺陷挂账 · 已修复（2026-10-22）】本用例原为 `it.fails`（红测先行），根因已修，现为常绿回归锁。
    *
-   * <p>实测（HEAD 0e8bc7c）：`stop()` 已把本轮助手消息 `done=true` 封口，于是
+   * <p>缺陷史（实测于 HEAD 0e8bc7c）：`stop()` 已把本轮助手消息 `done=true` 封口，于是
    * `handleFrame` 的宿主解析（`currentAssistantMessage()`：找最后一条 `!done` 的助手消息，
    * 找不到就 **append 一条新的**）会把迟到 `delta` 写进**一条全新的空气泡** —— 屏上多出一条
    * 「迟到正文」消息。实测证据：messages 由 2 条变 3 条。这正是 Q18「停止后 60ms 内还能新建
-   * 工具卡/改写卡状态」在 store 层的同型面；`api/sse.ts` 的读循环只挡住了"中止后已到达的整块"，
-   * 挡不住"停止之后仍被投递的帧"（例如另一条双通道连接、或 SSE 层已收进队列的那几帧）。
+   * 工具卡/改写卡状态」在 store 层的同型面；`api/sse.ts` 的读循环当时只挡住了"中止后已到达的
+   * 整块"，挡不住"停止之后仍被投递的帧"（例如另一条双通道连接、或 SSE 层已收进队列的那几帧）。
    *
-   * <p>修法方向（生产小改，本批不动生产）：`handleFrame` 入口对 `this.stopped`/轮终态后的
-   * 非终态帧直接丢弃（与 `api/sse.ts` 的终帧闸门同口径）。修复合入后把 `it.fails` 改回 `it`。
+   * <p>修复锚点：`frontend/src/stores/ai.ts#handleFrame` **入口处**的 P-11 终态闸门 ——
+   * `this.stopped` 为真时非终态帧整帧丢弃，且闸门必须在宿主解析之前（否则空气泡已 append）。
+   * 与 `frontend/src/api/sse.ts#consumeFrame` 的 S-12 终帧闸门同口径；`stopped` 在每个新连接
+   * 建立处复位，故只作用于被停止的那一轮。
    */
-  it.fails('stop 之后投递 delta / tool_start：消息数、parts 与镜像都不动', async () => {
+  it('stop 之后投递 delta / tool_start：消息数、parts 与镜像都不动', async () => {
     const store = await freshStore()
     store.sessionId = SESSION
     store.messages = [textMessage('u-1', 'user', '问'), assistantWithTool('半截', 'c1', 'running')]
@@ -341,6 +343,41 @@ describe('P-11（P0）：停止后迟到帧不写 —— 屏上帧数不增、�
     expect(JSON.stringify(store.messages[1]?.parts)).toBe(partsBefore) // 卡状态不回退
     expect(store.messages[1]?.content).toBe('半截')
     expect(JSON.stringify(readMirrorFixture(SESSION))).toBe(mirrorBefore) // 镜像不写
+  }, 20_000)
+
+  /**
+   * 【常驻回归锁（2026-10-22 补）】上一条只锁**非终态**帧；本条锁同一缺陷族的**终帧分支**：
+   * 停止后 `done(cancelled)` 到达时，宿主解析一度仍走 `currentAssistantMessage()` 的
+   * "找不到 `!done` 的助手消息就 append" 分支 —— 屏上凭空多一条空消息（修复前实测
+   * messages 2 → 3，一条 content 为空的 done 气泡）。
+   *
+   * <p>修复锚点：`frontend/src/stores/ai.ts#handleFrame` 的 **P-11 宿主解析**（`sealedRoundHost`）——
+   * 停止轮只认已存在的助手消息（优先本轮宿主），一条都没有才整帧丢弃；终态帧本身仍放行，
+   * 以便轮次级收口（`contextUsage` / `clearGateSubmissions`）照常执行。
+   *
+   * <p>断言面：消息数不变 ⇒ 不新建空气泡；原消息「已停止」标记与半截正文完好 ⇒ 终帧不得回退
+   * 用户决策的事实；卡仍为 cancelled ⇒ 卡状态不回退。
+   */
+  it('stop 之后投递 done(cancelled)：不新建空气泡，原消息「已停止」标记完好', async () => {
+    const store = await freshStore()
+    store.sessionId = SESSION
+    store.messages = [textMessage('u-1', 'user', '问'), assistantWithTool('半截', 'c1', 'running')]
+    store.loading = true
+    store.activeRunId = 'run-11b'
+
+    await store.stop()
+    const countBefore = store.messages.length
+    const idsBefore = store.messages.map((item) => item.id)
+
+    store.handleFrame(frame({ type: 'done', runId: 'run-11b', seq: 101, cancelled: true }))
+
+    expect(store.messages).toHaveLength(countBefore) // 终帧也不得凭空多一条气泡
+    expect(store.messages.map((item) => item.id)).toEqual(idsBefore) // 宿主身份不变
+    expect(store.messages[1]?.stopped).toBe(true) // 「已停止」是消息级事实，终帧抹不掉
+    expect(store.messages[1]?.content).toBe('半截') // 半截正文完好
+    expect(store.messages[1]?.done).toBe(true)
+    const card = store.messages[1]?.parts.find((part) => part.kind === 'tool')
+    expect(card?.kind === 'tool' ? card.status : null).toBe('cancelled') // 卡状态不回退
   }, 20_000)
 })
 

@@ -224,18 +224,21 @@ describe('S-06（P0）：上游中途断流 ⇒ 终态可见、正文保留、�
 
 describe('S-12（P0）：done 之后的迟到帧一条都不落地', () => {
   /**
-   * 【缺陷挂账 · 红测先行】本用例**当前是红的**（`it.fails` 显式登记为"已知不满足"）。
+   * 【缺陷挂账 · 已修复（2026-10-22）】本用例原为 `it.fails`（红测先行），根因已修，现为常绿回归锁。
    *
-   * <p>实测：`api/sse.ts#readStream` 的终帧判定在**整块消费完**之后才 `break`
+   * <p>缺陷史：`api/sse.ts#readStream` 的终帧判定在**整块消费完**之后才 `break`
    * （`for (const payload of parser.push(text))` 内部不检查 `state.terminal`）——
    * 同一 TCP 块里跟在 `done` 后面的帧仍会逐帧投递给 `onFrame`，store 侧也没有"终态后拒收"
-   * 的守卫，于是迟到 `delta` 会写进 parts、迟到 `tool_start` 会新建卡。
+   * 的守卫，于是迟到 `delta` 会写进 parts、迟到 `tool_start` 会新建卡，
+   * 与蓝本 §2.1 S-12 断言点（"帧不入 parts、不改卡状态、不进镜像"）正面冲突。
    *
-   * <p>与蓝本 §2.1 S-12 断言点（"帧不入 parts、不改卡状态、不进镜像"）正面冲突；
-   * 修法只需在读循环内每帧前判 `state.terminal`（生产小改，本批不动生产代码）。
-   * 修复合入后本用例会"意外通过"，届时把 `it.fails` 改回 `it` 即可 —— 这正是它存在的意义。
+   * <p>修复锚点：`frontend/src/api/sse.ts#consumeFrame` 顶部的 **S-12 终帧闸门** ——
+   * `state.terminal` 为真时整帧丢弃（不更新 lastSeq/lastFrame、不投递 `onFrame`、不触发
+   * `onTerminal`）。闸门放在三处投递点（主读循环 / 流尾冲刷 / `parser.flush()`）与 reattach
+   * `onmessage` 共用的唯一入口上，故"读循环内每帧前判终态"由一处判定覆盖全部到达路径。
+   * 同口径收口见 `stores/ai.ts#handleFrame` 入口的 P-11 终态闸门。
    */
-  it.fails('done 之后服务端仍继续推 2 帧：onFrame 只收到 done 之前的帧', async () => {
+  it('done 之后服务端仍继续推 2 帧：onFrame 只收到 done 之前的帧', async () => {
     const encoder = new TextEncoder()
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {

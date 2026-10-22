@@ -3988,18 +3988,47 @@ export const useAiStore = defineStore('ai', {
     /** SSE 帧 → store（判别联合 switch，覆盖后端全部帧类型）。 */
     handleFrame(frame: SseFrame, assistantId?: string): void {
       /**
+       * P-11 终态闸门（2026-10-22 修复）：用户停止（或本轮已终态收尾）之后到达的**非终态帧**
+       * 一律丢弃 —— 与 `api/sse.ts` 读循环的终帧闸门同口径。
+       *
+       * <p>修掉的缺陷：`stop()` 已把本轮助手消息 `done=true` 封口并就地收敛（工具段 → cancelled），
+       * 但宿主的唯一解析口 `currentAssistantMessage()` 是"找最后一条 `!done` 的助手消息，
+       * 找不到就 **append 一条新的**" —— 于是停止后迟到的 `delta` 会写进一条**全新的空气泡**
+       * （实测 messages 2 → 3 条），迟到的 `tool_start` 会新建工具卡，并继续写镜像。
+       *
+       * <p>闸门必须放在**宿主解析之前**：一旦先解析，空气泡已经被 append 出来，再丢帧也回不去了。
+       * 终态帧仍放行（abort 竞态下 `done(cancelled)` 可能已经到达，轮次级收口需要它）。
+       * `stopped` 在每个新连接建立处（send / reattachActive / resumeSnapshotStream /
+       * restoreInFlightRound / resetSession）复位 ⇒ 本闸门只作用于被停止的那一轮，不跨轮生效。
+       */
+      if (this.stopped && !isTerminalFrame(frame)) {
+        return
+      }
+      /**
        * R2/R6（issue#5）帧归属判定：只有"本轮"（宿主消息仍是当前轮的宿主）的帧才允许改写
        * **轮次级**状态（activeRunId / loading / suspended / notice / activeForm）——旧轮迟到帧
        * （resetSession 之后、或新轮已起）只收敛它自己那条消息，不能把新轮标记成空闲。
        */
       const ownedByActiveRound = assistantId === undefined || assistantId === activeRoundHostId
-      const message = assistantId
-        ? this.messages.find((item) => item.id === assistantId)
-          ?? (ownedByActiveRound ? this.currentAssistantMessage() : null)
-        : this.currentAssistantMessage()
+      /**
+       * P-11 宿主解析（停止轮）：放行的终态帧同样**不得新建空气泡** —— `stop()` 已把本轮宿主
+       * 封口（`done=true`），若仍走 `currentAssistantMessage()` 的"找不到 `!done` 就 append"
+       * 分支，`done(cancelled)` 一到屏上就凭空多一条空消息（实测 messages 2 → 3）。停止轮只认
+       * 已存在的助手消息（优先本轮宿主），一条都没有就整帧丢弃 —— 轮次级收口 `stop()` 早已做完。
+       */
+      const sealedRoundHost = (): ChatMessage | null =>
+        this.messages.find((item) => item.id === activeRoundHostId && item.role === 'assistant')
+        ?? [...this.messages].reverse().find((item) => item.role === 'assistant')
+        ?? null
+      const foundHost = assistantId ? this.messages.find((item) => item.id === assistantId) : undefined
+      const message = foundHost
+        ?? (this.stopped
+          ? (ownedByActiveRound ? sealedRoundHost() : null)
+          : (ownedByActiveRound ? this.currentAssistantMessage() : null))
       if (!message) {
         // 宿主消息已不在（会话已重置/历史已整体替换）且该帧不属于当前轮 ⇒ 整帧丢弃，
-        // 不再凭空 append 一条孤儿助手消息（G5）
+        // 不再凭空 append 一条孤儿助手消息（G5）。
+        // 停止轮（上文的 sealedRoundHost 返回 null）同理：屏上已无任何助手消息可收敛 ⇒ 整帧丢弃。
         return
       }
 

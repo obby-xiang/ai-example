@@ -211,6 +211,22 @@ function consumeFrame(
   state: StreamState,
   handlers: SseFrameHandlers
 ): void {
+  /**
+   * S-12 终帧闸门（2026-10-22 修复）：终态（`done` / `error`）之后到达的帧**一条都不落地** ——
+   * 不更新 lastSeq / lastFrame，不投递 `onFrame`，更不触发 `onTerminal`。
+   *
+   * <p>修掉的缺陷：旧实现的终帧判定在**整块消费完**之后（`for (const payload of parser.push(text))`
+   * 循环之后才 `break`），同一 TCP 块里跟在 `done` 后面的迟到帧仍会逐帧投递给 `onFrame`，
+   * 调用方据此写 parts / 新建工具卡 / 改卡状态（违反蓝本 §2.1 S-12「帧不入 parts、不改卡状态、
+   * 不进镜像」）。
+   *
+   * <p>闸门放在本函数顶部而不是三个循环体内：主读循环、流尾 `decoder.decode()` 冲刷、
+   * `parser.flush()` 残余块、以及 reattach 通道的 `onmessage` 都只经这一个投递口 ——
+   * 一处判定即覆盖全部到达路径（双通道 / 重挂回放同样受约束）。
+   */
+  if (state.terminal) {
+    return
+  }
   state.lastFrame = frame
   const seq = frameSeq(frame)
   if (seq !== null) {
