@@ -142,13 +142,55 @@ function isSuspendRequestFrame(frame: SseFrame): boolean {
   return frame.type === 'confirm_request' || frame.type === 'frontend_tool_request'
 }
 
-/** SSE 事件块切分器：把字节流切成一个个 data 载荷。 */
-class SseChunkParser {
+/**
+ * SSE 事件块切分器：把字节流切成一个个 data 载荷。
+ *
+ * <p>导出理由：**可测试性**。分片 / 换行归一 / 多行 data / 流尾残余这些分支只在
+ * `readStream` 内部可达，没有导出就只能靠整条 `streamChat` + fetch mock 间接覆盖，
+ * 边界用例（一帧跨多块、`\r` 与 `\n` 分属两块、BOM）无法逐分支断言。
+ * 它不是公共 API —— 生产调用点仍只有 `readStream`。
+ */
+export class SseChunkParser {
   private buffer = ''
+
+  /** 上一块以裸 `\r` 结尾：留到下一块再归一，避免 CRLF 被块边界劈成"空行"。 */
+  private carryCr = false
 
   /** 投喂一段文本，返回本次新产生的完整事件载荷。 */
   push(chunk: string): string[] {
-    this.buffer += chunk.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+    let text = this.carryCr ? `\r${chunk}` : chunk
+    this.carryCr = false
+    // CRLF / 单 CR 都归一成 LF；块尾的 CR 可能是被切开的 CRLF 前半，先挂起
+    if (text.endsWith('\r')) {
+      text = text.slice(0, -1)
+      this.carryCr = true
+    }
+    this.buffer += text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+    // 挂起的 CR 若已跟在换行之后（空行已成型），它就是该空行的行结束 —— 立即收口，
+    // 否则 `\r\r` 这类块内分隔要等到下一块或 flush 才成帧。
+    if (this.carryCr && this.buffer.endsWith('\n')) {
+      this.buffer += '\n'
+      this.carryCr = false
+    }
+    return this.drain()
+  }
+
+  /** 流结束时冲刷残余块（后端正常以 \n\n 结尾，这里是防御）。 */
+  flush(): string[] {
+    if (this.carryCr) {
+      this.buffer += '\n'
+      this.carryCr = false
+    }
+    if (!this.buffer.trim()) {
+      this.buffer = ''
+      return []
+    }
+    const payload = extractData(this.buffer)
+    this.buffer = ''
+    return payload === null ? [] : [payload]
+  }
+
+  private drain(): string[] {
     const payloads: string[] = []
     let index = this.buffer.indexOf('\n\n')
     while (index >= 0) {
@@ -162,24 +204,19 @@ class SseChunkParser {
     }
     return payloads
   }
-
-  /** 流结束时冲刷残余块（后端正常以 \n\n 结尾，这里是防御）。 */
-  flush(): string[] {
-    if (!this.buffer.trim()) {
-      this.buffer = ''
-      return []
-    }
-    const payload = extractData(this.buffer)
-    this.buffer = ''
-    return payload === null ? [] : [payload]
-  }
 }
 
-/** 从单个事件块抽取 data（多行 data 以 \n 连接；忽略注释与 event/id 字段）。 */
+/**
+ * 从单个事件块抽取 data（多行 data 以 \n 连接；忽略注释与 event/id 字段）。
+ *
+ * BOM 容忍：部分代理/中间件会在流首（甚至每个事件块）补 U+FEFF，它落在 `data:` 之前时
+ * 会让 `startsWith('data:')` 判定失败、整帧静默丢失 —— 先剥掉行首 BOM 再判前缀。
+ */
 function extractData(block: string): string | null {
   const lines = block.split('\n')
   const dataLines: string[] = []
-  for (const line of lines) {
+  for (const raw of lines) {
+    const line = raw.startsWith('\ufeff') ? raw.slice(1) : raw
     if (!line.startsWith('data:')) {
       continue
     }
@@ -188,13 +225,18 @@ function extractData(block: string): string | null {
   return dataLines.length > 0 ? dataLines.join('\n') : null
 }
 
-/** 文本 → 帧（非 JSON 或 type 不在白名单时返回 null，并交给 onFrame 之外的路径忽略）。 */
+/**
+ * 文本 → 帧（非 JSON 或 type 不在白名单时返回 null，并交给 onFrame 之外的路径忽略）。
+ *
+ * BOM 容忍：`data: \ufeff{...}` 里的 BOM 会让 JSON.parse 失败；剥掉首字符后按原口径解析。
+ */
 export function parseSseFrame(text: string): SseFrame | null {
-  if (!text || text === '[DONE]') {
+  const payload = text.startsWith('\ufeff') ? text.slice(1) : text
+  if (!payload || payload === '[DONE]') {
     return null
   }
   try {
-    return toSseFrame(JSON.parse(text))
+    return toSseFrame(JSON.parse(payload))
   } catch {
     return null
   }
@@ -225,6 +267,19 @@ function consumeFrame(
    * 一处判定即覆盖全部到达路径（双通道 / 重挂回放同样受约束）。
    */
   if (state.terminal) {
+    return
+  }
+  /**
+   * 单连接单轮次（帧归属闸）：一条 SSE 连接只承载一轮（`streamChat` 的 POST 与 `reattach`
+   * 的 GET 都是按 runId 建连）。若服务端/代理异常地把**另一轮**的帧混进同一连接，
+   * 这里整帧丢弃 —— 否则异轮的 `start` 会把 `state.runId` 改写成别人（断流后重挂到错的轮次），
+   * 异轮的 `done` 会把本轮判成终态、提前收流，业务帧则会写进本轮的 parts（串轮）。
+   *
+   * 判据：本轮 runId 已确立（`start` 已到或 `reattach` 入参）、帧自带 runId 且不等。
+   * 帧不带 runId（旧帧 / 心跳）与尚未确立 runId 的窗口一律照收，保持既有兼容口径。
+   */
+  const incomingRunId = (frame as { runId?: unknown }).runId
+  if (state.runId !== null && typeof incomingRunId === 'string' && incomingRunId !== state.runId) {
     return
   }
   state.lastFrame = frame
