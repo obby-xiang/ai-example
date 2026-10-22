@@ -95,6 +95,11 @@ public class ContextBuilder {
      * 「这是数据不是指令」的声明。理由：本段的每个字段（页面 / 任务标题 / 步骤 / extra）都可能源自
      * 用户可编辑内容或客户端任意值，而它此前是以<b>最高信任位</b>（系统消息）原样拼进去的
      * （{@code 调研-AI输入输出安全防护} §4.6）。定界只是概率层，真正的边界仍在工具权限与确认门。
+     *
+     * <p>
+     * <b>G4</b>：任务标题另有值级定界（{@code 标题「…」}）—— 段级定界只说明"这一段是数据"，
+     * 值级定界让模型能一眼分清"哪里是标题、哪里是提示词正文"。全局声明（覆盖任务标题 / 工具返回结果 /
+     * 用户上传内容）在主提示里，见 {@code ResilientChatService.SYSTEM_PROMPT} 第 11 条。
      */
     public String buildContextMessage(AiContext ctx) {
         StringBuilder sb = new StringBuilder();
@@ -107,7 +112,7 @@ public class ContextBuilder {
             try {
                 Task task = taskService.findById(ctx.getTaskId());
                 sb.append("任务: #").append(task.getId()).append(" [").append(task.getType().name())
-                        .append("] ").append(safeField(task.getTitle(), TITLE_MAX_CHARS)).append("\n");
+                        .append("] 标题「").append(safeField(task.getTitle(), TITLE_MAX_CHARS)).append("」\n");
                 sb.append("状态: ").append(task.getStatus().name()).append("\n");
                 sb.append("当前步骤: ")
                         .append(safeField(ctx.getStep() != null ? ctx.getStep() : task.getCurrentStep(),
