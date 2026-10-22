@@ -319,18 +319,20 @@ export function isReadOnlyCard(part: ToolPart): boolean {
 }
 
 /**
- * 已决只读态（2A 批裁决 §9 K2 + §10 F6 + §15 K12 定名）：
- * - 门卡（H1）恰四态：已批准 / 已拒绝 / 已超时 / 已批准·执行失败 —— **没有已取消**；
+ * 已决只读态（2A 批裁决 §9 K2 + §10 F6 + §15 K12 定名；批G · S13 起门卡增至五态）：
+ * - 门卡（H1）五态：已批准 / 已拒绝 / 已超时 / 已批准·执行失败 / **已取消**；
  * - 表单系（GF）两态：已提交 / 已取消。
  *
  * 判定序 = 决策元数据优先、段状态兜底（与 R-160 M2「decision 缺省回退 status」同源）：
  * - decision=timeout ⇒ 已超时（2A 挂账①：超时是**第三种门结局** —— 闸门未开、本次未执行）；
  * - decision=approved：status=failed ⇒ 执行失败（K3：失败是执行结果，不是决策结果）；
  * - decision=rejected ⇒ 已拒绝；
+ * - decision=cancel ⇒ 已取消（批G · S13：**用户停止是一次决策**，不是"没人管"，更不是系统超时；
+ *   写口见 `cancelRoundParts`（本地停止）/ confirm_decision 帧 / 历史 toolCallStates）；
  * - 无 decision 的历史段：succeeded/running ⇒ 已批准、failed ⇒ 执行失败、rejected ⇒ 已拒绝、
  *   其余（expired / cancelled）⇒ 已超时。
- *   `cancelled` 归入「已超时」是 K2「审批卡没有已取消」的落点：两者同属**未批准收尾**
- *   （闸门未开、本次操作未执行），闸门侧不得出现「已取消」字样。
+ *   无决策元数据的 `cancelled` 归入「已超时」是 K2 旧口径的兜底：旧载荷/旧镜像没有 cancel
+ *   决策可读，两者同属**未批准收尾**（闸门未开、本次操作未执行）。
  *   `blocked` / `unknown` / `pending` 不属决策态，已由 {@link isReadOnlyCard} 挡在只读卡之外。
  */
 export type ReadOnlyState = 'approved' | 'rejected' | 'expired' | 'failed' | 'submitted' | 'cancelled'
@@ -347,6 +349,9 @@ export function readOnlyStateOf(part: ToolPart): ReadOnlyState {
   }
   if (part.decision === 'rejected') {
     return 'rejected'
+  }
+  if (part.decision === 'cancel') {
+    return 'cancelled'
   }
   switch (part.status) {
     case 'succeeded':
@@ -425,7 +430,10 @@ const TOOL_STATUS_TONE: Record<ToolRunStatus, CardTone> = {
   skipped: 'neutral'
 }
 
-/** 已决六态文案（2A 批 §9 K2 / §10 F6 原样；门卡无「已取消」）。 */
+/**
+ * 已决六态文案（2A 批 §9 K2 / §10 F6 原样；批G · S13 起门卡的 `cancelled` 不再被折叠成
+ * 「已超时」—— 用户停止是一次决策，文案与 GF 取消同字：`✗ 已取消`）。
+ */
 const READ_ONLY_LABEL: Record<ReadOnlyState, string> = {
   approved: '✓ 已批准',
   rejected: '✗ 已拒绝',

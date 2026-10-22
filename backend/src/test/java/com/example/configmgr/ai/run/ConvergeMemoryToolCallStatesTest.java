@@ -265,6 +265,23 @@ class ConvergeMemoryToolCallStatesTest {
 	}
 
 	@Test
+	void cancelledEntryCarriesCancelDecision() {
+		// 批G · S13：用户停止也是一次决策 —— 历史载荷必须带 decision=cancel，
+		// 否则前端刷新后把「已取消」的确认卡读成「已超时」。
+		seed(List.of(new UserMessage("你好"), assistantWithToolCalls("tc-1"), toolResponse("tc-1")),
+				RunSnapshot.RUNNING);
+		PendingToolCall pending = pending("tc-1", PendingToolCall.CANCELLED, false, PendingToolCall.KIND_CONFIRM);
+		pending.setResolvedAtMs(1_700_000_000_000L);
+		this.store.seedPending(RUN_ID, pending);
+
+		List<Message> windowed = driveAndCapture(Flux.just(chunk("你好"), terminal("stop")));
+
+		assertThat(toolCallState(windowed, 1, "tc-1")).containsEntry("status", PendingToolCall.CANCELLED)
+			.containsEntry("decision", "cancel")
+			.containsEntry("decidedAt", 1_700_000_000_000L);
+	}
+
+	@Test
 	void frontendResultCarriesSubmittedValuesRawText() {
 		// submittedValues ← resultText 原文（限 kind==FRONTEND；解析与失败兜底在前端）。
 		seed(List.of(new UserMessage("你好"), assistantWithToolCalls("tc-1"), toolResponse("tc-1")),

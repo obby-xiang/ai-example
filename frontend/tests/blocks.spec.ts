@@ -272,7 +272,13 @@ describe('S6 批1：回执独立块退役（groupParts 不再派生第二块）+
     // 绝不落「已拒绝」—— decision 是决策元数据，不是 approved/rejected 二元。
     expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'expired', decision: 'timeout' }))).toBe('expired')
     // 2A 挂账③：批准 + 执行失败 = 第四态（失败是执行结果，不是决策结果；已由上方 failed+approved 行覆盖）
-    // 门卡没有「已取消」（K2）：cancelled 归未批准收尾（已超时）
+    // 批G · S13（用户直裁 2026-10-22）：**用户停止 = 一次决策**（decision='cancel'）⇒ 卡面「已取消」，
+    // 不再读成系统超时；无决策元数据的 cancelled 段（旧载荷）仍按 K2 归未批准收尾（已超时）。
+    expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'cancelled', decision: 'cancel' }))).toBe('cancelled')
+    expect(cardStatusOf(makeTool({ kind2: 'CONFIRM', status: 'cancelled', decision: 'cancel' }))).toMatchObject({
+      key: 'cancelled', label: '✗ 已取消', tone: 'danger'
+    })
+    // 旧口径保持：cancelled 但无决策元数据 ⇒ 已超时
     expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'cancelled' }))).toBe('expired')
     // blocked / unknown / pending 不是决策态 ⇒ 不进只读卡（继续走普通工具卡）
     for (const status of ['blocked', 'unknown', 'pending'] as const) {
@@ -454,7 +460,9 @@ describe('卡片三类型统一判据（tool / hitl / form）', () => {
       [makeTool({ kind2: 'CONFIRM', status: 'rejected', decision: 'rejected' }), { key: 'rejected', label: '✗ 已拒绝', tone: 'danger' }],
       [makeTool({ kind2: 'CONFIRM', status: 'expired' }), { key: 'expired', label: '! 已超时', tone: 'warning' }],
       [makeTool({ kind2: 'CONFIRM', status: 'failed', decision: 'approved' }), { key: 'failed', label: '! 已批准 · 执行失败', tone: 'danger' }],
-      // 门卡没有「已取消」：cancelled 归未批准收尾（已超时）
+      // 批G · S13：用户停止（decision='cancel'）是第五种门结局 ⇒ 「✗ 已取消」
+      [makeTool({ kind2: 'CONFIRM', status: 'cancelled', decision: 'cancel' }), { key: 'cancelled', label: '✗ 已取消', tone: 'danger' }],
+      // 无决策元数据的 cancelled 段（旧载荷）仍归未批准收尾（已超时）
       [makeTool({ kind2: 'CONFIRM', status: 'cancelled' }), { key: 'expired', label: '! 已超时', tone: 'warning' }]
     ]
     for (const [part, expected] of matrix) {

@@ -173,7 +173,7 @@ export function createSessionId(): string {
  * `EXECUTED`**（`/confirm` 的 409 响应体与 `runs/current` 却正是这两个值），照用会把"已批准"
  * 读成"未定"⇒ 门卡永远收不了口。`null` = 条目仍未定（PENDING / 未知态）。
  */
-function gateReceiptOfStatus(status: unknown): { decision?: 'approved' | 'rejected'; status: ToolRunStatus } | null {
+function gateReceiptOfStatus(status: unknown): { decision?: 'approved' | 'rejected' | 'cancel'; status: ToolRunStatus } | null {
   switch (status) {
     case 'APPROVED':
       return { decision: 'approved', status: 'running' }
@@ -188,7 +188,8 @@ function gateReceiptOfStatus(status: unknown): { decision?: 'approved' | 'reject
       return { status: 'expired' }
     case 'CANCELLED':
     case 'FRONTEND_CANCELLED':
-      return { status: 'cancelled' }
+      // 批G · S13：取消是用户决策（与 confirm_decision(decision=cancel) 帧同口径）⇒「✗ 已取消」
+      return { decision: 'cancel', status: 'cancelled' }
     case 'BLOCKED':
       return { status: 'blocked' }
     default:
@@ -689,6 +690,28 @@ function cloneMessage(message: ChatMessage): ChatMessage {
   }
 }
 
+/**
+ * 批G · R5/R2（真机回归）：**提问判重的同口径归一化**。
+ *
+ * <p>
+ * 历史侧的用户消息是后端 `InputSanitizer` 的产物 —— NFKC 折叠（全角标点/兼容字符 → 规范形态）
+ * 后再落 ChatMemory；镜像侧是用户原文。逐字比原文时两边永远不等（`，` vs `,`），同一句提问就会
+ * 在刷新后被补成两条气泡（真机 R2：4 气泡变 5、两条 head 只差标点）。
+ *
+ * <p>
+ * 这里复刻后端的同一把尺：NFKC + 剥离不可见/控制字符（保留换行与制表，同 `stripInvisible`
+ * 的例外），再折叠空白。只用于**判定"是不是同一句"**，不参与任何展示 —— 界面照旧显示各自原文。
+ */
+function normalizeUserText(text: string): string {
+  const strip = (value: string): string => value
+    // Cf = 格式字符（零宽/BOM/双向控制符）、Cs = 孤立代理项 —— 肉眼不可见，整类剥掉
+    .replace(/[\p{Cf}\p{Cs}]/gu, '')
+    // Cc = 控制字符，保留换行与制表（与后端 stripInvisible 的例外一字对齐）
+    .replace(/\p{Cc}/gu, (char) => (char === '\n' || char === '\t' ? char : ''))
+  // 与后端同序：先剥再 NFKC，再收敛一次（剥字符可能让新的组合序列浮现）
+  return strip(strip(text).normalize('NFKC')).replace(/\s+/g, ' ').trim()
+}
+
 /** 批G：轮次快照状态是否已终态（`/runs/current` 的 `snapshotStatus` 口径）。 */
 function isTerminalRunStatus(status: string | null | undefined): boolean {
   const normalized = (status ?? '').toUpperCase()
@@ -1155,7 +1178,11 @@ export const useAiStore = defineStore('ai', {
       }
       mirrorLastWriteAt = Date.now()
       writeMirror(this.sessionId, this.messages, this.activeRunId, {
-        inFlight: this.loading,
+        // 批G · R4（真机回归）：**挂起态也是在途** —— B1「挂起即断」把挂起轮写成
+        // `loading=false && suspended=true`（收流了，但这一轮还在等人决策）。只看 loading 会把
+        // "还在等决策的一轮"标成不在途，刷新后 `mergeMirrorInFlightRound` 首行直接返回，
+        // 只存在于镜像里的同段正文与已执行卡全丢（真机：5 张卡只剩一张重建的确认卡）。
+        inFlight: this.loading || this.suspended,
         runSeq: this.runSeq
       })
     },
@@ -1442,11 +1469,13 @@ export const useAiStore = defineStore('ai', {
             }
             // R-160 M2/M1：回读决策元数据三字段（写口 R-158 #10 已成，历史路此前丢失 ⇒
             // 刷新回执卡不渲染）。decision 按词表白名单（approved/rejected —— 2A 收口修 MINOR-2
-            // 起补 timeout：同批新增的第三种门结局，不补则刷新后超时卡丢失决策口径）；
+            // 起补 timeout：同批新增的第三种门结局，不补则刷新后超时卡丢失决策口径；批G · S13
+            // 起补 cancel：用户停止也是一次决策，不补则刷新后「已取消」的卡又读成「已超时」）；
             // decidedAt 仅认数值；submittedValues 为后端 resultText 原文（限 FRONTEND），
             // JSON.parse 失败兜底 null。
             if (state) {
-              if (state.decision === 'approved' || state.decision === 'rejected' || state.decision === 'timeout') {
+              if (state.decision === 'approved' || state.decision === 'rejected'
+                || state.decision === 'timeout' || state.decision === 'cancel') {
                 part.decision = state.decision
               }
               if (typeof state.decidedAt === 'number') {
@@ -1600,7 +1629,9 @@ export const useAiStore = defineStore('ai', {
      * <li>历史的末条**不是**一条已收下的助手回答（末条是 assistant 且已有正文/工具段 ⇒ 不补，
      *    说明后端已经把这轮收进记忆，此时历史才是权威）。</li>
      * </ol>
-     * 用户消息只在"历史里没有同文用户消息"时补（否则同一句话出现两遍）。
+     * 用户消息只在"历史里没有同一句用户消息"时补（否则同一句话出现两遍）。**"同一句"按后端
+     * `InputSanitizer` 的同口径归一化后比较**（批G · R5/R2：历史侧标点已被 NFKC 折成半角，
+     * 逐字比原文必然不等 ⇒ 真机出现两条同样的提问气泡）。
      */
     mergeMirrorInFlightRound(
       historical: ChatMessage[],
@@ -1623,7 +1654,8 @@ export const useAiStore = defineStore('ai', {
       const mirrorUser = [...mirrorMessages].reverse().find((item) => item.role === 'user') ?? null
       const historyUser = [...historical].reverse().find((item) => item.role === 'user') ?? null
       const merged = [...historical]
-      if (mirrorUser && (!historyUser || messageText(mirrorUser) !== messageText(historyUser))) {
+      if (mirrorUser && (!historyUser
+        || normalizeUserText(messageText(mirrorUser)) !== normalizeUserText(messageText(historyUser)))) {
         merged.push(cloneMessage(mirrorUser))
       }
       merged.push(cloneMessage(tail))
@@ -2434,8 +2466,9 @@ export const useAiStore = defineStore('ai', {
      * 拉权威状态校正门卡（口径③的唯一校正口）。
      *
      * 数据源 = `GET /api/ai/runs/current`，落**真实裁决回执**（APPROVED→已批准 / EXECUTED→
-     * 已批准（执行成功） / REJECTED→已拒绝 / TIMEOUT→已超时 / CANCELLED→未批准收尾（已超时） /
-     * BLOCKED→越界，不进审批只读卡 —— 2A 批裁决 §9 K2：门卡只读四态、无已取消）。
+     * 已批准（执行成功） / REJECTED→已拒绝 / TIMEOUT→已超时 / CANCELLED→已取消（批G · S13：
+     * 用户停止是一次决策，与 confirm_decision(decision=cancel) 帧同口径） /
+     * BLOCKED→越界，不进审批只读卡 —— 2A 批裁决 §9 K2 的门卡四态由此增为五态）。
      *
      * 条目仍未定（PENDING）、条目缺失、或轮次已不存在时 ⇒ **绝不伪造裁决**：保留提交态
      * （按钮继续禁用，同 id 不再提交），只给一条提示。
@@ -2481,7 +2514,7 @@ export const useAiStore = defineStore('ai', {
      */
     applyGateReceipt(
       toolCallId: string,
-      receipt: { decision?: 'approved' | 'rejected'; status: ToolRunStatus }
+      receipt: { decision?: 'approved' | 'rejected' | 'cancel'; status: ToolRunStatus }
     ): void {
       for (const message of this.messages) {
         const part = findToolPart(message, toolCallId)
@@ -3607,6 +3640,10 @@ export const useAiStore = defineStore('ai', {
     /**
      * S1：把本轮所有未收尾的工具段收敛为 {@code cancelled}（`pending` / `running` /
      * `requiresAction` 三条入口都收），并重算投影 —— `pendingToolCall` 立刻变 null。
+     *
+     * <p>
+     * 批G · S13（真机回归）：停止是**一次决策**，不是"没人管" —— 段上同时落 `decision='cancel'`，
+     * 否则只读态按"无决策元数据"回退 status 落到「已超时」（用户主动停掉的一轮被读成系统超时）。
      */
     cancelRoundParts(): void {
       for (const message of this.messages) {
@@ -3618,7 +3655,12 @@ export const useAiStore = defineStore('ai', {
           if (!part.requiresAction && part.status !== 'pending' && part.status !== 'running') {
             return
           }
-          message.parts.splice(index, 1, { ...part, requiresAction: false, status: 'cancelled' })
+          message.parts.splice(index, 1, {
+            ...part,
+            requiresAction: false,
+            status: 'cancelled',
+            decision: 'cancel'
+          })
           touched = true
         })
         if (touched) {
@@ -3630,9 +3672,17 @@ export const useAiStore = defineStore('ai', {
     /**
      * S3：给本轮助手消息打「已停止」标记并封口（有正文或工具段才标 —— 空气泡不标）。
      * 同时清掉错误卡：一条被用户停掉的回答不是"出错"。
+     *
+     * <p>
+     * 批G · S14（真机回归）：标记要落在**本轮宿主**（`activeRoundHostId`）上 —— "最后一条助手消息"
+     * 在 GF/确认卡轮里可能是快照重建出来的空宿主，标错了消息就等于没标。停止是消息级事实：
+     * 一旦打上不再由后续帧推导覆盖（迟到帧只补段状态，不改这个标记）。
      */
     markStoppedMessage(): void {
-      const last = [...this.messages].reverse().find((message) => message.role === 'assistant')
+      const roundHost = this.messages.find(
+        (message) => message.id === activeRoundHostId && message.role === 'assistant'
+      ) ?? null
+      const last = roundHost ?? [...this.messages].reverse().find((message) => message.role === 'assistant')
       if (!last) {
         return
       }

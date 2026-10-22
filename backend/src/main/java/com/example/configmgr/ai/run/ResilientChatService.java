@@ -1275,8 +1275,9 @@ public class ResilientChatService {
 	 * R-144 T1/T3 → R-160 M1：{@code {status, kind?, decision?, decidedAt?, submittedValues?}} 载荷映射。
 	 * R-160 M1：决策元数据三字段随历史载荷透传（前端刷新回执卡渲染真值）—— decision 由
 	 * <b>条目态</b>派生（APPROVED → approved / REJECTED、REJECTED_ARGUMENTS → rejected；T2 升格
-	 * EXECUTED 不抹掉已发生的决策）；decidedAt ← resolvedAtMs；submittedValues ← resultText 原文
-	 * （限 kind==FRONTEND；前端 JSON.parse，失败兜底 null）。kind 无数据不写（禁臆造默认值）。
+	 * EXECUTED 不抹掉已发生的决策；批G · S13 起 CANCELLED → cancel：用户停止是一次决策，
+	 * 不写则该卡刷新后又被前端读成「已超时」）；decidedAt ← resolvedAtMs；submittedValues ←
+	 * resultText 原文（限 kind==FRONTEND；前端 JSON.parse，失败兜底 null）。kind 无数据不写（禁臆造默认值）。
 	 */
 	private static Map<String, Object> toolCallState(PendingToolCall pending, String status) {
 		Map<String, Object> state = new LinkedHashMap<>();
@@ -1304,6 +1305,10 @@ public class ResilientChatService {
 		else if (PendingToolCall.REJECTED.equals(entryStatus)
 				|| PendingToolCall.REJECTED_ARGUMENTS.equals(entryStatus)) {
 			state.put("decision", "rejected");
+		}
+		else if (PendingToolCall.CANCELLED.equals(entryStatus)) {
+			// 批G · S13：取消与 confirm_decision(decision=cancel) 帧同口径 —— 用户决策，不是系统超时
+			state.put("decision", "cancel");
 		}
 		if (pending.getResolvedAtMs() > 0) {
 			state.put("decidedAt", pending.getResolvedAtMs());

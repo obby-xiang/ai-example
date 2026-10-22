@@ -379,8 +379,10 @@ export interface ToolPart extends MessagePartBase {
    *
    * 2A 挂账①：`timeout` 是**第三种门结局**（闸门未开、本次未执行）—— 后端 confirm_decision
    * 帧的 decision/status（TIMEOUT）由此落段；缺省（旧数据 / 历史载荷）仍从 status 派生。
+   * 批G · S13：`cancel` 是**用户决策**的第四种门结局（停止/取消收尾，闸门未开、本次未执行）——
+   * 卡面「✗ 已取消」；缺省时 `cancelled` 段仍按 K2 归未批准收尾（已超时）。
    */
-  decision?: 'approved' | 'rejected' | 'timeout'
+  decision?: 'approved' | 'rejected' | 'timeout' | 'cancel'
   decidedAt?: number
   /** R-158 #10：generative_form 提交值回执（提交成功时写入，刷新后可回溯已填值） */
   submittedValues?: Record<string, unknown>
@@ -537,7 +539,7 @@ export interface ToolPartPatch {
   reason?: string | null
   messageId?: string
   /** 见 {@link ToolPart.decision} / {@link ToolPart.submittedValues}（R-158 #10 回执元数据） */
-  decision?: 'approved' | 'rejected' | 'timeout'
+  decision?: 'approved' | 'rejected' | 'timeout' | 'cancel'
   decidedAt?: number
   submittedValues?: Record<string, unknown>
   /** 见 {@link ToolPart.truncated}（R-154 #2 帧侧截断标记，随段持久化） */

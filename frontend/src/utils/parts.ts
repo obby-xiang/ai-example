@@ -368,8 +368,8 @@ export function outcomeStatus(outcome: unknown): ToolRunStatus | null {
  * 刷新后历史表（TIMEOUT→expired）才显示「! 已超时」。
  *
  * 返回 null = 帧未给可翻译结局/布尔（旧帧两字段皆缺），调用方退回既有 approved 分支。
- * `cancelled` 与权威回执 `gateReceiptOfStatus` 同口径：段态 cancelled（门卡无「已取消」，
- * `readOnlyStateOf` 归「已超时」），不写决策元数据。
+ * `cancelled` 批G · S13 起落 **decision='cancel'**：用户停止是一次决策（门卡第五态「已取消」），
+ * 不写决策元数据就会被 `readOnlyStateOf` 的 status 兜底读成「已超时」。
  */
 type ConfirmOutcome =
   | { state: 'approved' }
@@ -660,13 +660,14 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
           requiresAction: false
         })
       } else if (resolved.state === 'cancelled') {
-        // 门卡无「已取消」（K2）：段态 cancelled 由 readOnlyStateOf 归「已超时」，不写决策元数据
-        //（与权威回执 gateReceiptOfStatus 的 CANCELLED 口径一致）。
+        // 批G · S13：取消 = 用户决策（decision='cancel'）⇒ 门卡第五态「✗ 已取消」，
+        // 不再被 status 兜底读成「! 已超时」（段态仍是 cancelled，只读态由 decision 派生）。
         upsertToolPart(message, {
           toolCallId: frame.toolCallId,
           name: frame.name,
           kind2: 'CONFIRM',
           status: 'cancelled',
+          decision: 'cancel',
           requiresAction: false
         })
       } else {

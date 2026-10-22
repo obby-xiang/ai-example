@@ -674,26 +674,26 @@ describe('2A 挂账修复：①超时口径（decision/status 优先 + first-win
     expect(cardStatusOf(toolPart(approved, 'a1')).label).toBe('✓ 已批准')
   })
 
-  it('①a CANCELLED 分支（NIT-1）：decision=cancel / status=CANCELLED ⇒ 段 cancelled、卡面「! 已超时」', () => {
+  it('①a CANCELLED 分支（批G · S13 改判）：decision=cancel / status=CANCELLED ⇒ 段 cancelled + 决策元数据、卡面「✗ 已取消」', () => {
     const byDecision = makeMessage()
     applyFrameToParts(byDecision, { type: 'confirm_request', toolCallId: 'c1', name: 'danger_tool', args: '{}', timeoutSeconds: 120 })
     applyFrameToParts(byDecision, {
       type: 'confirm_decision', toolCallId: 'c1', name: 'danger_tool', decision: 'cancel', approved: false
     } as never)
     const cancelled = toolPart(byDecision, 'c1')
-    // 门卡无「已取消」：段态 cancelled + 无决策元数据，只读态归「已超时」
-    expect(cancelled).toMatchObject({ status: 'cancelled', requiresAction: false })
-    expect(cancelled.decision).toBeUndefined()
-    expect(readOnlyStateOf(cancelled)).toBe('expired')
-    expect(cardStatusOf(cancelled)).toMatchObject({ key: 'expired', label: '! 已超时', tone: 'warning' })
+    // 批G · S13（用户直裁 2026-10-22）：取消 = 用户决策（decision='cancel'）⇒ 门卡「✗ 已取消」，
+    // 不再被 status 兜底读成系统超时（旧 K2「门卡无已取消」由此作废，断言按新口径上抬）。
+    expect(cancelled).toMatchObject({ status: 'cancelled', requiresAction: false, decision: 'cancel' })
+    expect(readOnlyStateOf(cancelled)).toBe('cancelled')
+    expect(cardStatusOf(cancelled)).toMatchObject({ key: 'cancelled', label: '✗ 已取消', tone: 'danger' })
 
     const byStatus = makeMessage()
     applyFrameToParts(byStatus, { type: 'confirm_request', toolCallId: 'c2', name: 'danger_tool', args: '{}', timeoutSeconds: 120 })
     applyFrameToParts(byStatus, {
       type: 'confirm_decision', toolCallId: 'c2', name: 'danger_tool', decision: 'cancel', approved: false, status: 'CANCELLED'
     })
-    expect(toolPart(byStatus, 'c2')).toMatchObject({ status: 'cancelled', requiresAction: false })
-    expect(cardStatusOf(toolPart(byStatus, 'c2')).label).toBe('! 已超时')
+    expect(toolPart(byStatus, 'c2')).toMatchObject({ status: 'cancelled', requiresAction: false, decision: 'cancel' })
+    expect(cardStatusOf(toolPart(byStatus, 'c2')).label).toBe('✗ 已取消')
   })
 
   it('MINOR-1 优先序：decision=cancel + status=APPROVED ⇒ 按 approved 归并，不落 cancelled', () => {
