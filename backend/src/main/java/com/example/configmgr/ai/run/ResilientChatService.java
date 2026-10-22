@@ -109,6 +109,15 @@ public class ResilientChatService {
 	public static final long STREAMING_HEARTBEAT_MILLIS = 5000L;
 
 	/**
+	 * 批G · S4：被用户取消的半截 assistant 正文的元数据标记键（值恒为 {@code true}）。
+	 *
+	 * <p>
+	 * 作用是让"不完整"成为记忆里的事实而不是靠猜：下一轮知道这条回答是被停掉的，
+	 * {@code /history} 也据此把 {@code stopped} 透给前端（刷新后显示「已停止」半截正文）。
+	 */
+	public static final String STOPPED_KEY = "stopped";
+
+	/**
 	 * 空回复的机器可读码（T3-7 / A12，口径变更）：<b>空文本（去空白后为空）的轮次终态转 FAILED</b>。
 	 *
 	 * <p>为什么采纳"空回复即失败"：上游静默截断可以产出 0 字符的"成功"终态（实测形态），
@@ -978,14 +987,26 @@ public class ResilientChatService {
 	}
 
 	/**
-	 * 取消终局：<b>不</b>写入半截 assistant 正文（半条消息会污染下一轮记忆），
-	 * 历史取快照现状（含本轮已落定的工具配对），快照转 CANCELLED，终帧 {@code done{cancelled:true}}。
+	 * 取消终局：快照转 CANCELLED，未决条目落 CANCELLED **并补裁决帧**（S5），
+	 * 半截正文**写进记忆并带 {@code stopped} 标记**（S4），终帧 {@code done{cancelled:true}}。
+	 *
+	 * <p>
+	 * S4 口径变更（批G）：旧口径"半条消息会污染下一轮记忆"把代价留给了用户 —— 停止后刷新，
+	 * 整条回答凭空消失（实证 1b：历史只剩 USER）。改为写半截 + 元数据标记：
+	 * 记忆与历史都看得见"这一轮被用户停在哪里"，而 {@code stopped} 标记让下一轮知道它不完整。
 	 */
 	private void cancelTerminal(String runId, String sessionId, Accumulator accumulator, int attempts,
 			StreamWatchdog watchdog, SseChatEmitter out, TurnContext turn, OutputGuard guard) {
 		RunSnapshot snapshot = this.store.get(runId);
+		String partial = accumulator == null ? "" : accumulator.text();
 		if (snapshot != null) {
 			List<Message> history = new ArrayList<>(this.codec.deserializeAll(snapshot.getMessageJson()));
+			if (StringUtils.hasText(partial)) {
+				history.add(AssistantMessage.builder()
+					.content(partial)
+					.properties(new LinkedHashMap<>(Map.of(STOPPED_KEY, true)))
+					.build());
+			}
 			snapshot.setInFlightToolCalls(new ArrayList<>());
 			snapshot.setAssistantContent(null);
 			snapshot.setStatus(RunSnapshot.CANCELLED);
@@ -995,7 +1016,7 @@ public class ResilientChatService {
 			this.store.save(snapshot);
 			convergeMemory(runId, sessionId, history);
 		}
-		this.store.cancelPendings(runId);
+		emitCancelOutcomes(runId, this.store, out);
 		log.info("AI 轮次取消 runId={} sessionId={} 尝试次数={} 已收上游事件={} 末帧序列=[{}]", runId, sessionId, attempts,
 				watchdog == null ? 0 : watchdog.upstreamEvents(), accumulator == null ? "" : accumulator.tailSummary());
 		Map<String, Object> extra = new LinkedHashMap<>();
@@ -1016,6 +1037,50 @@ public class ResilientChatService {
 				watchdog == null ? 0 : watchdog.upstreamEvents());
 		emitTurnEnd(runId, sessionId, "cancelled", StreamViolationException.CANCELLED, attempts, accumulator, turn,
 				watchdog);
+	}
+
+	/**
+	 * 批G · S5：取消时给每个**尚未决策**的挂起条目补裁决帧，让任何再连接的客户端（重挂/刷新）
+	 * 都能收敛卡面。
+	 *
+	 * <p>
+	 * 旧口径只有 {@code RunStore#cancelPendings} 改 Redis 条目、<b>不发帧</b>（实证 S3c 归档：
+	 * {@code suspended → tool_start → confirm_request → message_end → done{cancelled}}，
+	 * 没有 {@code confirm_decision}）⇒ 卡永远「待确认」、点批准还 409。
+	 *
+	 * <p>
+	 * 帧型按条目种类分叉（与实时路径同一张表）：CONFIRM → {@code confirm_decision(cancel)}；
+	 * FRONTEND → {@code frontend_tool_result(ok=false, status=CANCELLED)}。已终态条目不补帧
+	 * （first-wins：不得把"已执行"改写成"已取消"）。调用时机 = {@code cancelPendings} 之后
+	 * （帧里的 status 取自条目终态）。
+	 *
+	 * <p>返回补发的帧数（可观测/测试断言用）。
+	 */
+	static int emitCancelOutcomes(String runId, RunStore store, SseChatEmitter out) {
+		List<PendingToolCall> before = store.pendings(runId);
+		store.cancelPendings(runId);
+		Map<String, PendingToolCall> cancelled = new LinkedHashMap<>();
+		for (PendingToolCall pending : store.pendings(runId)) {
+			if (PendingToolCall.CANCELLED.equals(pending.getStatus())) {
+				cancelled.put(pending.getToolCallId(), pending);
+			}
+		}
+		int emitted = 0;
+		for (PendingToolCall original : before) {
+			PendingToolCall settled = cancelled.get(original.getToolCallId());
+			if (settled == null) {
+				continue;
+			}
+			if (PendingToolCall.KIND_CONFIRM.equals(settled.getKind())) {
+				out.confirmDecision(settled, "cancel", "RUN_CANCELLED", 0L);
+				emitted++;
+			}
+			else if (PendingToolCall.KIND_FRONTEND.equals(settled.getKind())) {
+				out.frontendToolResult(settled, false, "本轮对话已被用户取消，该工具未执行。");
+				emitted++;
+			}
+		}
+		return emitted;
 	}
 
 	/**

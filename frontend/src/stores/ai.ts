@@ -5,7 +5,8 @@
  * 原 .js:25-52 与 248-301），TS 化并按本仓后端契约重写：
  * - 会话 id 存 **sessionStorage**（页签级：同页签刷新保持，新页签是新会话，DC-06③）；
  * - 刷新恢复走"镜像即时恢复 + `GET /api/ai/history/{sessionId}` 对账"两步；
- * - 409 SESSION_BUSY 不当作普通失败：记下进行中的 runId 并允许一键 reattach（ADR-5）；
+ * - 409 SESSION_BUSY 不当作普通失败：回收乐观气泡（不出现幻影双份），提示里不暴露 runId；
+ *   在途轮由刷新恢复**静默续收**（批G，用户看不到「重挂」概念）；
  * - 断流（缺 done/error 终帧）按 ADR-6 置 `streamInterrupted` 提示"结果可能不完整"；
  * - 契约联动（S4.4c）：订阅工作区 `workspace_changed` 事件，把用户手点的动作同步进
  *   下一轮请求上下文（`buildContext().extra.recentActions`）。
@@ -69,7 +70,7 @@ import {
   upsertToolPart as writeToolPart,
   writeSubmittedValuesToMessage
 } from '@/utils/parts'
-import { ErrorCode, type SessionBusyConflict, type SuspendPoolSaturated } from '@/types/api'
+import { ErrorCode, type SuspendPoolSaturated } from '@/types/api'
 import { frameSeq, isTerminalFrame, type ToolOutcome } from '@/types/sse'
 import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiHealth, type AiHistory, type AiHistoryMessage, type AiRunCurrent, type AiRunCurrentEntry, type AiSessionMirror, type ChatMessage, type ContextBreakdownItem, type ContextCompaction, type ContextUsage, type GateSubmission, type MessagePart, type PendingToolCall, type SheetPreviewLevel, type SheetWritePlan, type ToolPart, type ToolPartPatch, type ToolRunStatus } from '@/types/ai'
 import type { FormValueIssue } from '@/types/form-schema'
@@ -142,6 +143,12 @@ function disarmAllGateSync(): void {
 /** 会话镜像是否已启动（防止重复 $subscribe）。 */
 let mirrorStarted = false
 let mirrorTimer: ReturnType<typeof setTimeout> | null = null
+/** 批G · G4：最后一次真实落盘时刻（throttle 的 leading 判据）与节流窗口。 */
+let mirrorLastWriteAt = 0
+const MIRROR_THROTTLE_MS = 300
+/** 页面离开/隐藏时的立即落盘是否已装上（只装一次）。 */
+let mirrorFlushInstalled = false
+let mirrorFlushHandler: (() => void) | null = null
 /** 工作区契约事件订阅是否已启动 + 反订阅句柄。 */
 let workspaceSyncStarted = false
 let workspaceSyncStops: Array<() => void> = []
@@ -626,7 +633,12 @@ const START_JOB_SYNC: Readonly<Record<string, string>> = {
   start_import: 'import.syncJob'
 }
 
-function writeMirror(sessionId: string, messages: ChatMessage[], lastRunId: string | null): void {
+function writeMirror(
+  sessionId: string,
+  messages: ChatMessage[],
+  lastRunId: string | null,
+  extra: { inFlight?: boolean; runSeq?: Record<string, number> } = {}
+): void {
   try {
     const mirror: AiSessionMirror = {
       // 批2 权威翻转后口径：parts 是**唯一真值**，content/reasoning/toolRuns/pendingCall 是同一次
@@ -635,6 +647,10 @@ function writeMirror(sessionId: string, messages: ChatMessage[], lastRunId: stri
       v: MIRROR_VERSION,
       savedAt: Date.now(),
       lastRunId,
+      // 批G · G4：在途标记 + 帧序号 —— 刷新后据此决定"静默续收"，以及能否只补差量。
+      // `stopped` 一并入镜像（S3/S4）：停止标记必须活过刷新，否则半截正文刷新后变成"完整答案"。
+      inFlight: extra.inFlight === true,
+      runSeq: extra.runSeq ? { ...extra.runSeq } : undefined,
       // 镜像只留展示所需字段（pendingCall 内嵌其中，刷新后可重建确认卡）；
       // `appliedSeqs` 是内部幂等记账，**不入镜像**（Pick 不含它）
       messages: messages.map((message) => ({
@@ -644,13 +660,39 @@ function writeMirror(sessionId: string, messages: ChatMessage[], lastRunId: stri
         parts: message.parts,
         reasoning: message.reasoning,
         toolRuns: message.toolRuns,
-        pendingCall: message.pendingCall
+        pendingCall: message.pendingCall,
+        ...(message.stopped ? { stopped: true } : {})
       }))
     }
     sessionStorage.setItem(MIRROR_PREFIX + sessionId, JSON.stringify(mirror))
   } catch {
     // 配额/隐私模式等场景忽略：镜像是刷新体验优化，不是正确性依赖
   }
+}
+
+/** 批G：一条消息的全部正文（段是唯一真值；`content` 只是同一份数据的派生投影）。 */
+function messageText(message: ChatMessage): string {
+  return message.parts
+    .filter((part): part is Extract<ChatMessage['parts'][number], { kind: 'text' }> => part.kind === 'text')
+    .map((part) => part.text)
+    .join('')
+}
+
+/** 批G：跨镜像/历史搬运消息时的浅拷贝（段与投影各复制一层，避免两处共写同一对象）。 */
+function cloneMessage(message: ChatMessage): ChatMessage {
+  return {
+    ...message,
+    parts: message.parts.map((part) => ({ ...part })) as ChatMessage['parts'],
+    toolRuns: message.toolRuns.map((run) => ({ ...run })),
+    pendingCall: message.pendingCall ? { ...message.pendingCall } : null,
+    appliedSeqs: []
+  }
+}
+
+/** 批G：轮次快照状态是否已终态（`/runs/current` 的 `snapshotStatus` 口径）。 */
+function isTerminalRunStatus(status: string | null | undefined): boolean {
+  const normalized = (status ?? '').toUpperCase()
+  return normalized === 'DONE' || normalized === 'FAILED' || normalized === 'CANCELLED' || normalized === 'REJECTED'
 }
 
 /** 历史消息 type → 展示角色。 */
@@ -837,8 +879,11 @@ export const useAiStore = defineStore('ai', {
     suspended: false,
     /** 连接/降级提示（断流、重连、池饱和、无 key 等） */
     notice: null as string | null,
-    /** 409 SESSION_BUSY 的现场（可一键 reattach） */
-    busyConflict: null as SessionBusyConflict | null,
+    /**
+     * 批G · S2：停止请求在途（按钮「停止中」disabled；`stop()` 幂等）。
+     * 只由 `stop()` 置位/复位，其它地方不得改写。
+     */
+    stopping: false,
     /** 503 挂起池饱和现场 */
     poolSaturated: null as SuspendPoolSaturated | null,
     /** AI 可用性 */
@@ -1041,18 +1086,65 @@ export const useAiStore = defineStore('ai', {
       persistExpanded(this.expanded)
     },
 
-    /** 启动会话镜像：messages 任何变化（含流式 token）防抖写入 sessionStorage。 */
+    /**
+     * 启动会话镜像：messages 任何变化（含流式 token）**节流**写入 sessionStorage。
+     *
+     * <p>
+     * 批G · G4：原先是**防抖**（每个 token 都 clearTimeout 重排 300ms）—— 只要帧间间隔 < 300ms，
+     * 镜像就永远写不下去（实证 A2：刷新前镜像正文为空、DOM 已 154 字）。节流 = leading 立即写
+     * + 窗口内合并为一次 trailing；另在 pagehide / visibilitychange(hidden) 立即 flush，
+     * 保证"关页/切后台"那一刻的正文不丢。
+     */
     startMirror(): void {
       if (mirrorStarted) {
         return
       }
       mirrorStarted = true
       this.$subscribe(() => {
-        if (mirrorTimer !== null) {
-          clearTimeout(mirrorTimer)
+        const now = Date.now()
+        const elapsed = now - mirrorLastWriteAt
+        if (elapsed >= MIRROR_THROTTLE_MS) {
+          if (mirrorTimer !== null) {
+            clearTimeout(mirrorTimer)
+            mirrorTimer = null
+          }
+          this.writeMirrorNow()
+          return
         }
-        mirrorTimer = setTimeout(() => writeMirror(this.sessionId, this.messages, this.activeRunId), 300)
+        if (mirrorTimer !== null) {
+          return // 窗口内已有一次待写：合并（trailing 覆盖最新快照）
+        }
+        mirrorTimer = setTimeout(() => {
+          mirrorTimer = null
+          this.writeMirrorNow()
+        }, MIRROR_THROTTLE_MS - elapsed)
       }, { detached: true, deep: true })
+      // 页面隐藏/卸载 = 最后一次机会：立即落盘（退订由浏览器负责，页签生命周期内不重复装）
+      if (!mirrorFlushInstalled) {
+        mirrorFlushInstalled = true
+        mirrorFlushHandler = () => {
+          if (mirrorTimer !== null) {
+            clearTimeout(mirrorTimer)
+            mirrorTimer = null
+          }
+          this.writeMirrorNow()
+        }
+        window.addEventListener('pagehide', mirrorFlushHandler)
+        document.addEventListener('visibilitychange', () => {
+          if (document.visibilityState === 'hidden') {
+            mirrorFlushHandler?.()
+          }
+        })
+      }
+    },
+
+    /** 立即落盘（throttle 的 leading / trailing、pagehide、stop() 共用唯一写口）。 */
+    writeMirrorNow(): void {
+      mirrorLastWriteAt = Date.now()
+      writeMirror(this.sessionId, this.messages, this.activeRunId, {
+        inFlight: this.loading,
+        runSeq: this.runSeq
+      })
     },
 
     /**
@@ -1162,9 +1254,15 @@ export const useAiStore = defineStore('ai', {
       }
     },
 
-    async loadHistory(): Promise<void> {      const sid = this.sessionId
+    async loadHistory(): Promise<void> {
+      const sid = this.sessionId
       this.startMirror()
       const mirror = readMirror(this.sessionId)
+      // 批G · G4：镜像里的在途标记与帧序号在**归一之前**取出 —— 归一会把消息一律标成 done
+      const mirrorInFlight = mirror?.inFlight === true
+      const mirrorRunSeq = mirror?.runSeq ?? {}
+      /** 归一后的镜像消息快照（G3 合并要用 —— this.messages 随后会被历史整体替换） */
+      let mirrorMessages: ChatMessage[] = []
       if (mirror && Array.isArray(mirror.messages) && mirror.messages.length > 0) {
         // 对话时序包 批1 §6.4：旧镜像（无 parts / v<2）先同步迁移出 parts 再落展示态，
         // 迁移后**立即回写**新镜像 —— 早于 startMirror 的防抖写盘（300ms），顺序与
@@ -1181,16 +1279,32 @@ export const useAiStore = defineStore('ai', {
           parts: message.parts.map((part) => ('streaming' in part && part.streaming ? { ...part, streaming: false } : part))
         }))
         this.activeRunId = mirror.lastRunId ?? null
+        // 批G · G4：帧序号随镜像回来（增量续收的锚点）；刷新后本轮之前没有更新的序号，直接接管
+        this.runSeq = { ...mirrorRunSeq }
+        if (mirrorInFlight) {
+          // 写镜像时该轮还在途：末条助手消息保持"流式未收尾"，供静默续收就地续写
+          // （否则 G2 找不到宿主，只能新起一条气泡）
+          const host = [...this.messages].reverse().find((item) => item.role === 'assistant')
+          if (host) {
+            host.done = false
+            host.streaming = true
+          }
+        }
         // 批2 前置（GLM o1）：存量镜像残留的 requiresAction=true 在读取侧收口（v1 迁移结果与
-        // v2 intact 都生效），须在 writeMirror 回写之前完成 —— 否则刷新复活挂起语义
-        const sanitized = sanitizeMirrorResidues(this.messages)
+        // v2 intact 都生效），须在 writeMirror 回写之前完成 —— 否则刷新复活挂起语义。
+        // 批G：在途轮保留原样（它还没收尾，挂起语义可能是真的 —— 不能在读取侧替它收口）
+        const sanitized = mirrorInFlight ? false : sanitizeMirrorResidues(this.messages)
         // 批2（权威翻转）：镜像里的旧投影一律按段重算（存量 v2 镜像可能是双写期的产物，
         // 投影里仍留着"已终态但挂起卡不消失"的旧口径）—— 落展示态前先归一到段口径
         this.messages.forEach((message) => deriveProjections(message))
+        mirrorMessages = this.messages
         if (migrated.migrated || sanitized) {
           // 只在"迁移过 / 收口过"时回写：无变化时回写会让每次刷新都写盘
           // （既有幂等断言 `savedAt` 不变即锁这一口径），派生本身是幂等纯函数
-          writeMirror(this.sessionId, this.messages, this.activeRunId)
+          writeMirror(this.sessionId, this.messages, this.activeRunId, {
+            inFlight: mirrorInFlight,
+            runSeq: this.runSeq
+          })
         }
       }
 
@@ -1356,7 +1470,9 @@ export const useAiStore = defineStore('ai', {
           streaming: false,
           done: true,
           // R-154 #17：历史路时间戳 = 后端条目 metadata.timestamp（原样透传，仅展示用途）
-          timestamp: item.timestamp
+          timestamp: item.timestamp,
+          // 批G · S4：被用户停止的半截正文（后端 stopped 元数据透出）—— 渲染「已停止」
+          ...(item.stopped === true ? { stopped: true } : {})
         }
         deriveProjections(message)
         return [message]
@@ -1449,12 +1565,56 @@ export const useAiStore = defineStore('ai', {
         group.push(message)
       }
       flushGroup()
-      this.messages = mergedMessages
+      // 批G · G3：历史 + **未被历史覆盖的镜像在途轮** —— 用户消息在开轮即写入 ChatMemory
+      // （实测流式中 /history 已有 USER），若整体替换就会把镜像里还在途的助手消息（正文 +
+      // 已执行卡）抹掉（实证 C：整轮卡与说明文字丢失）。
+      this.messages = this.mergeMirrorInFlightRound(mergedMessages, mirrorMessages, mirrorInFlight)
       // 历史里若存在未决挂起，补一张待处理卡片（前端工具/确认门都可能出现在这里）
       this.historyLoaded = true
       // T2b-D#3：historyLoaded 先行置位后再触发快照重建（loadHistory 先行完成，
       // 消除历史整体替换与挂起重建之间的写后写竞态）
       await this.restoreSuspendedSnapshot()
+    },
+
+    /**
+     * 批G · G3：把镜像里**仍在途**的那条助手消息接回历史尾部。
+     *
+     * <p>
+     * 判据（宁可少补、不可双份）：
+     * <ol>
+     * <li>镜像写了 `inFlight`（写镜像时本轮还没收尾）；</li>
+     * <li>镜像末条是 assistant；</li>
+     * <li>历史的末条**不是**一条已收下的助手回答（末条是 assistant 且已有正文/工具段 ⇒ 不补，
+     *    说明后端已经把这轮收进记忆，此时历史才是权威）。</li>
+     * </ol>
+     * 用户消息只在"历史里没有同文用户消息"时补（否则同一句话出现两遍）。
+     */
+    mergeMirrorInFlightRound(
+      historical: ChatMessage[],
+      mirrorMessages: ChatMessage[],
+      inFlight: boolean
+    ): ChatMessage[] {
+      if (!inFlight || mirrorMessages.length === 0) {
+        return historical
+      }
+      const tail = mirrorMessages[mirrorMessages.length - 1]
+      if (!tail || tail.role !== 'assistant') {
+        return historical
+      }
+      const last = historical[historical.length - 1]
+      const historyHasReply = last !== undefined && last.role === 'assistant'
+        && (last.content.trim() !== '' || last.parts.some((part) => part.kind !== 'text'))
+      if (historyHasReply) {
+        return historical
+      }
+      const mirrorUser = [...mirrorMessages].reverse().find((item) => item.role === 'user') ?? null
+      const historyUser = [...historical].reverse().find((item) => item.role === 'user') ?? null
+      const merged = [...historical]
+      if (mirrorUser && (!historyUser || messageText(mirrorUser) !== messageText(historyUser))) {
+        merged.push(cloneMessage(mirrorUser))
+      }
+      merged.push(cloneMessage(tail))
+      return merged
     },
 
     /**
@@ -1499,8 +1659,17 @@ export const useAiStore = defineStore('ai', {
       }
       // M-2b：本次快照是当前会话的权威口径 —— 先作废旧队列，空态/已决态不得残留可补的旧卡
       this.restoredPendingQueue = []
-      if (!current.found || !current.runId || !current.awaitingExternal) {
-        // 已决/空态：不重建挂起卡，既有历史渲染与空历史 expired 降级规则兜底
+      if (!current.found || !current.runId) {
+        // 空态：没有在途轮 —— 镜像若留下"未收尾"的助手消息，就地封口（否则光标永远在流）。
+        // 既有历史渲染与空历史 expired 降级规则兜底。
+        this.sealLeftoverInFlight()
+        return
+      }
+      if (!current.awaitingExternal) {
+        // 批G · G2：**在途轮静默续收**。covers RUNNING（纯文本/工具执行中）与 SUSPENDED 但条目
+        // 全决的中间态。用户看不到任何"重挂"概念：不弹横幅、不写占位文案、不出现 runId。
+        // 不 await：续收是长连接，loadHistory 不能被它拖住（loading 已在分支内同步置位）。
+        void this.restoreInFlightRound(current)
         return
       }
 
@@ -1554,6 +1723,80 @@ export const useAiStore = defineStore('ai', {
         return
       }
       void this.resumeSnapshotStream(current.runId, current.archiveMaxSeq)
+    },
+
+    /**
+     * 批G · G2：**在途轮静默续收**（刷新恢复的核心）。
+     *
+     * <p>
+     * 判据来自 {@code /runs/current}（G1 起 RUNNING 也写索引）：`found && !awaitingExternal`。
+     * 行为：找宿主助手消息 → **清空其段** → `lastSeq=0` 全量重放 → 接着收实时帧。为什么全量而
+     * 不是增量：镜像正文/卡片受节流窗口影响本就滞后（实证 A2：镜像 0 字、DOM 154 字），
+     * 拿本地位点续收会缺口；归档回放的完整性已由实证 B2/E 验过。
+     *
+     * <p>
+     * **全程无横幅、无占位文案、无 runId**：用户看到的只是"那条回答继续写下去"。
+     */
+    async restoreInFlightRound(current: AiRunCurrent): Promise<void> {
+      const runId = current.runId
+      if (!runId) {
+        return
+      }
+      if (isTerminalRunStatus(current.snapshotStatus)) {
+        // 索引尚未被终态清掉（竞态窗口）：不是在途轮，封口即走
+        this.sealLeftoverInFlight()
+        return
+      }
+      this.activeRunId = runId
+      this.stopped = false
+      this.streamInterrupted = false
+      this.suspended = false
+      this.loading = true
+      let host = [...this.messages].reverse().find((item) => item.role === 'assistant' && !item.done)
+        ?? [...this.messages].reverse().find((item) => item.role === 'assistant')
+        ?? null
+      if (!host) {
+        // 历史与镜像都没有这一轮的助手消息（如首轮刚开、镜像未落盘）：新建空宿主继续收
+        host = this.appendAssistantMessage('')
+      }
+      // 镜像正文滞后于真实：清空段后全量重放（不保留镜像里的半截，否则回放会重复拼接）
+      host.parts = [{ kind: 'text', seg: 0, text: '', streaming: true }]
+      host.content = ''
+      host.reasoning = ''
+      host.toolRuns = []
+      host.pendingCall = null
+      host.streaming = true
+      host.done = false
+      host.stopped = false
+      host.appliedSeqs = []
+      deriveProjections(host)
+      await this.reattachActive(runId, { hostMessageId: host.id, lastSeq: 0 })
+    },
+
+    /**
+     * 批G：把镜像留下的"未收尾"助手消息就地封口（后端已无在途轮时）。
+     *
+     * <p>
+     * 不封口的代价：刷新后光标一直"在流"、且镜像被下一次写入继续标成 inFlight，
+     * 于是每次刷新都去续收一个不存在的轮（空转）。
+     */
+    sealLeftoverInFlight(): void {
+      let sealed = false
+      for (const message of this.messages) {
+        if (message.role !== 'assistant' || message.done) {
+          continue
+        }
+        message.streaming = false
+        message.done = true
+        sealTrailingStreamPart(message)
+        deriveProjections(message)
+        sealed = true
+      }
+      if (sealed) {
+        this.loading = false
+        this.suspended = false
+        this.writeMirrorNow()
+      }
     },
 
     /**
@@ -1763,14 +2006,7 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
-     * R4（issue#5）：发送守卫命中的统一提示 —— 面板层与 store 层共用同一文案，避免两处漂移。
-     * 只写提示：**不动 `inputText`**（草稿保留），也不触碰 `send()` 里的清空逻辑。
-     */
-    noticeBusySend(): void {
-      this.notice = '本轮进行中：本条消息未发送，可等本轮结束后重发。'
-    },
-
-    /** 发一轮消息（含渐进披露上下文注入 + 工作区动作同步）。 */
+     * 发一轮消息（含渐进披露上下文注入 + 工作区动作同步）。 */
     /**
      * @param resend.skipUserRecord 截断后重发通道（R-157 收口 MAJOR-1）：调用方已把用户消息
      *   原地保留/更新并截断其后消息（编辑重跑 / 重试 regenerate），send 不得再追加新用户消息 ——
@@ -1783,9 +2019,10 @@ export const useAiStore = defineStore('ai', {
         return { outcome: 'not-sent', userMessageId: null }
       }
       if (this.loading) {
-        // R4（issue#5）：守卫不再静默 —— 流式中输入框保持可编辑，但组件 keydown 已拦截普通 Enter；
-        // 程序化调用与 loading/轮次失步窗口仍可达，必须给出可读反馈而不是丢弃用户输入
-        this.noticeBusySend()
+        // 批G · G6（用户直裁 2026-10-22）：在途轮里输入框可输入，但回车/发送**不响应且零提示**
+        // —— 不弹 notice、不写占位气泡、不清草稿。用户要发就自己点停止、再点发送。
+        // 仓内同一口径的既有规格：AiPanel.vue 的 onComposerKeydown 注释「流式中 preventDefault
+        // 后静默返回（不发送 / 不停止 / 不提示 / 不换行）」与 composerHardDisabled 注释。
         return { outcome: 'not-sent', userMessageId: null }
       }
       const workspace = useWorkspaceStore()
@@ -1803,7 +2040,6 @@ export const useAiStore = defineStore('ai', {
       this.lastRoundOutcome = 'ok' // R-163 T4：新轮复位「继续」入口判据
       // 批 E · E2：新轮触发即收起上一轮的建议条（点 chip / 点建议 / 手打发都是这个入口）
       this.followupReady = false
-      this.busyConflict = null
       this.poolSaturated = null
       const controller = new AbortController()
       currentAbort = controller
@@ -1846,7 +2082,7 @@ export const useAiStore = defineStore('ai', {
             // ADR-6：缺 done/error 终帧 = 断流，必须显式提示"结果可能不完整"
             this.streamInterrupted = true
             this.lastRoundOutcome = 'interrupted'
-            this.notice = `连接中断，结果可能不完整（${info.reason ?? '未收到完成帧'}）。已生成的内容保留，可重新发送或一键重挂该轮。`
+            this.notice = `连接中断，结果可能不完整（${info.reason ?? '未收到完成帧'}）。已生成的内容保留，可重新发送或刷新页面继续接收。`
             // 断流不是结局：确认卡/表单仍在等用户动作，activeForm 与待决段必须原样保留
             //（重挂或刷新后由 restoreSuspendedSnapshot 按后端快照续上），只认终帧/取消才收口。
           }
@@ -1884,6 +2120,14 @@ export const useAiStore = defineStore('ai', {
       } catch (error) {
         if (isCurrentRound()) {
           this.handleChatError(error, assistant.id) // R6：旧轮的异常提示不写进新轮
+          // 批G · G6：409 SESSION_BUSY 的**乐观气泡回收** —— 先把"以为发出去了"的用户气泡与
+          // 空气泡撤掉，草稿只留在输入框一处（旧行为会同时留下"已发送"气泡 + 回填的草稿，
+          // 形成幻影双份并随镜像持久化，实证 E）。
+          if (error instanceof ApiError && error.code === ErrorCode.SESSION_BUSY) {
+            this.messages = this.messages.filter(
+              (message) => message.id !== assistant.id && message.id !== userMessageId
+            )
+          }
         }
         outcome = settleOutcome('error')
       } finally {
@@ -1919,12 +2163,12 @@ export const useAiStore = defineStore('ai', {
           message.done = true
           // 本轮压根没开始：给占位助手消息一个可读的收尾，避免留空气泡。
           // 批2：正文不再直写 `content` —— 文案写进 text 段（同段口径），投影由 derive 产出。
-          // SESSION_BUSY 用 `||`（正文已有内容则不覆盖），其余错误只在正文为空时补文案；
-          // "正文已有内容"的判据取 **parts**（渲染真值），不读派生投影（同 §6.3 的消费点口径）。
+          // 批G · G5：**不再出现**「本轮未开始」这类技术措辞与 runId（SESSION_BUSY 的气泡整体
+          // 回收，不走这里）；其余错误只在正文为空时补一句人话。
           const hasText = message.parts.some((part) => part.kind === 'text' && part.text !== '')
-          const literal = error instanceof ApiError && error.code === ErrorCode.SESSION_BUSY
-            ? '（本轮未开始：该会话已有一轮正在进行，可一键重挂接收它）'
-            : error instanceof Error ? `（本轮未开始：${error.message}）` : null
+          const literal = error instanceof Error && !(error instanceof ApiError && error.code === ErrorCode.SESSION_BUSY)
+            ? `（这条消息没有发出去：${error.message}）`
+            : null
           if (literal !== null && !hasText) {
             const part = openStreamPart(message, 'text')
             part.text = literal
@@ -1948,11 +2192,9 @@ export const useAiStore = defineStore('ai', {
       }
       switch (error.code) {
         case ErrorCode.SESSION_BUSY: {
-          const body = error.bodyAs<SessionBusyConflict>()
-          this.busyConflict = body
-          this.notice = body
-            ? `该会话已有一轮进行中（runId=${body.runId}），可一键重挂继续接收。`
-            : '该会话已有一轮进行中，可尝试重挂。'
+          // 批G · G5/G6：不再暴露 runId / "重挂"等实现概念 —— 用户看到的只有"这条没发出去"。
+          // 乐观气泡的回收在 send() 的 catch 里做（这里只管文案与现场标记）。
+          this.notice = '这条消息没有发出去，请稍后再试。'
           break
         }
         case ErrorCode.SUSPEND_POOL_SATURATED: {
@@ -1986,46 +2228,52 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
-     * 一键 reattach：重挂进行中那一轮（ADR-5）。
-     * 409 的响应体已带 reattach 路径，这里只取 runId（路径由 sse.ts 统一拼）。
+     * 静默接管一个既有轮（批G · G2/G5）：复用宿主消息、全量/增量回放、**不出现任何 UI 文案**。
      *
+     * <p>
+     * 旧形态是「一键重挂」：新建一条助手消息 + 永久占位文案「（正在重挂进行中的轮次…）」+
+     * 顶部横幅 + 带 runId 的提示。批G 起这条路只剩一个调用方 —— 刷新恢复（G2），
+     * 用户看不到"重挂"这个概念：宿主是镜像里那条还没收尾的助手消息，首帧直接续写它。
+     *
+     * <p>
      * `runId` 参数做**类型防御**：UI 侧若把点击事件当参数传进来（形如 `[object PointerEvent]`），
-     * 会把 reattach 打到 404 上（S4.4c E6 实测发现的缺陷），故非字符串一律忽略、落回现场 runId。
+     * 会把 reattach 打到 404 上（S4.4c E6 实测发现的缺陷），故非字符串一律忽略。
      *
-     * DC-14 T6：带上该 runId 已收到的最大帧序号 —— 服务端只补发 `seq > lastSeq` 的增量
-     * （本地已有的帧不重发），回放与实时续接之间不会重复渲染。序号未知（首挂/旧格式帧）则不传，
-     * 服务端全量回放（行为与 S4.4c 一致）。
+     * DC-14 T6：带上该 runId 已收到的最大帧序号（`options.lastSeq` 优先）—— 服务端只补发
+     * `seq > lastSeq` 的增量；刷新恢复走 `lastSeq = 0`（全量重放最稳：镜像正文本就滞后）。
      */
-    async reattachActive(runId?: string): Promise<void> {
+    async reattachActive(
+      runId?: string,
+      options: { hostMessageId?: string; lastSeq?: number } = {}
+    ): Promise<void> {
       const explicit = typeof runId === 'string' && runId.trim() !== '' ? runId : null
-      const targetRunId = explicit ?? this.busyConflict?.runId ?? this.activeRunId
+      const targetRunId = explicit ?? this.activeRunId
       if (!targetRunId) {
-        this.notice = '没有可重挂的轮次（缺少 runId）'
-        return
+        return // 没有可接管的轮：静默（不写任何技术提示）
       }
-      // B1 收口修（C-1）：重挂 = 接管既有轮（新连接身份）—— 在途的旧轮前端工具结局丢弃
+      // B1 收口修（C-1）：接管 = 换轮次身份 —— 在途的旧轮前端工具结局丢弃
       roundEpoch += 1
-      // M-2b：重挂走实时帧重建，快照串行队列作废（防旧队列在重连后复读旧卡）
+      // M-2b：接管走实时帧重建，快照串行队列作废（防旧队列在重连后复读旧卡）
       this.restoredPendingQueue = []
       const previous = currentAbort
-      const lastSeq = this.runSeq[targetRunId]
-      const assistant = this.appendAssistantMessage('（正在重挂进行中的轮次…）')
+      const lastSeq = options.lastSeq ?? this.runSeq[targetRunId]
+      const host = options.hostMessageId
+        ? this.messages.find((item) => item.id === options.hostMessageId)
+        : [...this.messages].reverse().find((item) => item.role === 'assistant' && !item.done)
+          ?? [...this.messages].reverse().find((item) => item.role === 'assistant')
+      const assistant = host ?? this.appendAssistantMessage('')
       this.loading = true
       this.streamInterrupted = false
       // 红队 MINOR-1 收口：新连接 ≠ 被停止的那条连接 —— `stop()` 留下的 stopped 置位只该
-      // 作用于被中止的那一轮，不能跨连接生效（否则重挂后的断流会被 onClose 误判成"用户主动
-      // 停止"而吞掉"结果可能不完整"提示）。复位点与 send() / resetSession() 对齐。
+      // 作用于被中止的那一轮，不能跨连接生效
       this.stopped = false
-      this.notice = lastSeq === undefined
-        ? '正在重挂该轮（先回放已产出的帧，再续收实时帧）…'
-        : `正在重挂该轮（只补发第 ${lastSeq} 帧之后的增量）…`
+      this.notice = null
       const controller = new AbortController()
       currentAbort = controller
       activeRoundHostId = assistant.id
-      /** R1/R6（issue#5）：本次重挂是否仍是"当前轮"（以 AbortController 身份为准）。 */
+      /** R1/R6（issue#5）：本次接管是否仍是"当前轮"（以 AbortController 身份为准）。 */
       const isCurrentRound = (): boolean => currentAbort === controller
-      // R5②（issue#5）：连点/重复重挂先中止既有连接（与 resumeSnapshotStream#防双连接同款）——
-      // 否则两条 EventSource 同时往不同宿主消息写帧（双渲染），且两者 finally 互相覆盖轮次状态。
+      // R5②（issue#5）：连点/重复接管先中止既有连接（与 resumeSnapshotStream#防双连接同款）。
       // **先换身份再中止**：旧连接的收尾据此判定"非本轮"，不会把断流/取消提示写脏新连接现场。
       previous?.abort()
       try {
@@ -2037,13 +2285,13 @@ export const useAiStore = defineStore('ai', {
               if (!isCurrentRound()) {
                 return
               }
-              this.notice = `重挂中断，${Math.round(delayMs / 1000)} 秒后第 ${attempt} 次重试`
+              this.notice = `连接中断，${Math.round(delayMs / 1000)} 秒后第 ${attempt} 次重试`
             },
             onClose: (info) => {
               if (!isCurrentRound()) {
                 return
               }
-              // 苞 B 项 3：用户主动停止不报断流（同 send 的守卫；重挂/续收路径同样适用）
+              // 苞 B 项 3：用户主动停止不报断流（同 send 的守卫；接管/续收路径同样适用）
               // B1（裁决 8）：挂起即断导致的收流是正常收尾 —— 不报断流（决策后另有显式重连）。
               if (info.suspended) {
                 return
@@ -2051,22 +2299,19 @@ export const useAiStore = defineStore('ai', {
               if (!info.terminal && !this.stopped) {
                 this.streamInterrupted = true
                 this.lastRoundOutcome = 'interrupted'
-                this.notice = `连接中断，结果可能不完整（重挂未能收到完成帧：${info.reason ?? '断流'}）`
-                // 重挂耗尽同样不是结局：表单/确认卡仍待用户动作，activeForm 与待决段保留
-                //（再次重挂或刷新由 restoreSuspendedSnapshot 续上）。
+                this.notice = `连接中断，结果可能不完整（${info.reason ?? '断流'}）。已生成的内容保留。`
+                // 接管耗尽同样不是结局：表单/确认卡仍待用户动作，activeForm 与待决段保留
+                //（刷新由 restoreSuspendedSnapshot 续上）。
               }
             }
           },
           { signal: controller.signal, lastSeq }
         )
-        this.busyConflict = null
-      } catch (error) {
-        if (isCurrentRound()) {
-          this.notice = error instanceof Error ? error.message : '重挂失败'
-        }
+      } catch {
+        // 静默：接管失败的现场由当前画面承担（refresh 后仍可再试），不写技术文案
       } finally {
         if (isCurrentRound()) {
-          // R1 同型（issue#5）：被后一次重挂/新轮取代的旧连接，其收尾不得复位新轮状态
+          // R1 同型（issue#5）：被后一次接管/新轮取代的旧连接，其收尾不得复位新轮状态
           this.loading = false
           this.suspended = false
           currentAbort = null
@@ -3240,9 +3485,36 @@ export const useAiStore = defineStore('ai', {
       }
     },
 
-    /** 停止本轮：先断本地连接，再通知后端取消（后端不可达也不影响本地停止）。 */
+    /**
+     * 停止本轮（批G · S1/S2/S3/S4 收敛口径）。
+     *
+     * <p>
+     * 旧实现只清"挂起标志"、不碰任何段，且立刻 abort 本地流 —— 于是：挂起态停止后
+     * {@code pendingToolCall} 恒非 null ⇒ **输入框永久禁用**（实证 D1）；执行中的工具卡永远
+     * 「调用中…」（D4）；停止后的正文既不进记忆、刷新后还被历史整替抹掉（D3）。
+     *
+     * <p>
+     * 新口径 = **本地就地收敛**（不依赖后端帧，后端不可达也成立）：
+     * <ol>
+     * <li>所有 pending/running 工具段 → {@code cancelled}、{@code requiresAction=false}，
+     *     清 activeForm / activePreview / 挂起队列 / suspended ⟹ 输入框立刻解禁、卡变只读；</li>
+     * <li>本轮助手消息打 {@code stopped} 标记（S3「已停止」，与「继续」入口互斥）；</li>
+     * <li>立即写镜像（S4：半截正文 + done，刷新后仍可见）；</li>
+     * <li>幂等（S2）：{@code stopping} 在途时重复点击直接返回；{@code alreadyCancelled} 照读。</li>
+     * </ol>
+     */
     async stop(): Promise<void> {
-      // B1 收口修（C-1）：停止 = 本轮被放弃 —— 在途前端工具结局不得再写段/回灌（含挂起态无连接可 abort 时）
+      if (this.stopping) {
+        return // S2：停止在途，重复点击不重复 POST
+      }
+      const runId = this.activeRunId
+      // 幂等判据：有在途连接 / 挂起等待 / 有一轮尚未被停过的 runId。已停过的轮不再重复 POST。
+      const hadRound = this.loading || this.suspended || (runId !== null && !this.stopped)
+      if (!hadRound) {
+        return // 幂等：没有可停的轮（不写任何提示）
+      }
+      this.stopping = true
+      // B1 收口修（C-1）：停止 = 本轮被放弃 —— 在途前端工具结局不得再写段/回灌
       roundEpoch += 1
       // M-2b：停止后不得再把快照队列里的旧卡补出来
       this.restoredPendingQueue = []
@@ -3258,27 +3530,76 @@ export const useAiStore = defineStore('ai', {
       } catch {
         // 忽略：中止失败不影响后续取消请求
       }
-      const runId = this.activeRunId
-      // R3（issue#5）：**不在这里抢清 loading** —— 复位交给本轮自身的收尾（send 的 finally 里
-      // 按 AbortController 身份判定）。否则"停止后立刻发送"会让旧轮的收尾与 abort 提示
-      // 覆盖新轮（界面谎报空闲 + 新轮丢失取消句柄）。
-      if (this.activeForm !== null) {
-        // 用户停止本轮：表单随轮收起（后端取消会让挂起走 TIMEOUT/取消收尾）
-        this.dropActiveForm()
-      }
-      // B1（2026-10-20 裁决 10）：挂起态的"停止"没有连接可 abort（服务端早已收流），
-      // 本地挂起态在此收口 —— 否则停止按钮（loading || suspended）会永远亮着。
-      // 后端取消仍照发（下方 POST），权威终态由后端收尾。
+      // 停止是"本轮到此为止"：`stopped` 置位让本轮收尾判定为 cancelled；连接仍交给它自己的
+      // finally 收口（abort 后立即返回），**不在这里清 currentAbort** —— 清了会让本轮 settle
+      // 成 interrupted（身份失效），与"用户主动停止"的语义不符。
+      this.loading = false
       this.suspended = false
-      if (!runId) {
+      this.dropActiveForm()
+      this.activePreview = null
+      this.stalePreviewToolCallId = null
+      // S1：段级就地收敛（输入框解禁的直接前提：pendingToolCall 由段派生）
+      this.cancelRoundParts()
+      // S3/S4：消息尾标记 + 立即落镜像（含 done、stopped 与半截正文）
+      this.markStoppedMessage()
+      this.writeMirrorNow()
+      try {
+        if (runId) {
+          const response = (await aiApi.cancel(runId)) as { alreadyCancelled?: boolean } | undefined
+          // S2：读 alreadyCancelled —— 服务端幂等已生效（另一页签/重复点击已取消过）。
+          // 本地收口在上方早就完成，这里只对齐轮次结局，不追加任何提示（同一件事不说两遍）。
+          if (response?.alreadyCancelled === true) {
+            this.lastRoundOutcome = 'cancelled'
+          }
+        }
+      } catch {
+        // 后端不可达不影响本地停止（上面已收敛）；不写技术文案，用户看到的仍是「已停止」
+      } finally {
+        this.stopping = false
+      }
+    },
+
+    /**
+     * S1：把本轮所有未收尾的工具段收敛为 {@code cancelled}（`pending` / `running` /
+     * `requiresAction` 三条入口都收），并重算投影 —— `pendingToolCall` 立刻变 null。
+     */
+    cancelRoundParts(): void {
+      for (const message of this.messages) {
+        let touched = false
+        message.parts.forEach((part, index) => {
+          if (part.kind !== 'tool') {
+            return
+          }
+          if (!part.requiresAction && part.status !== 'pending' && part.status !== 'running') {
+            return
+          }
+          message.parts.splice(index, 1, { ...part, requiresAction: false, status: 'cancelled' })
+          touched = true
+        })
+        if (touched) {
+          deriveProjections(message)
+        }
+      }
+    },
+
+    /**
+     * S3：给本轮助手消息打「已停止」标记并封口（有正文或工具段才标 —— 空气泡不标）。
+     * 同时清掉错误卡：一条被用户停掉的回答不是"出错"。
+     */
+    markStoppedMessage(): void {
+      const last = [...this.messages].reverse().find((message) => message.role === 'assistant')
+      if (!last) {
         return
       }
-      try {
-        await aiApi.cancel(runId)
-        this.notice = '已请求取消本轮对话'
-      } catch (error) {
-        this.notice = error instanceof Error ? `取消请求失败：${error.message}` : '取消请求失败'
+      last.streaming = false
+      last.done = true
+      sealTrailingStreamPart(last)
+      deriveProjections(last)
+      const hasBody = last.content.trim() !== '' || last.parts.some((part) => part.kind !== 'text')
+      if (hasBody) {
+        last.stopped = true
       }
+      last.errorCard = null
     },
 
     /** R-163 T3/T5：赞踩上报（本地态在面板；上报失败静默——不打扰主对话流）。携正文快照 excerpt（F2）。 */
@@ -3330,7 +3651,7 @@ export const useAiStore = defineStore('ai', {
       this.messages = []
       this.activeRunId = null
       this.notice = null
-      this.busyConflict = null
+      this.stopping = false
       this.poolSaturated = null
       this.suspended = false
       this.dropActiveForm()
@@ -3826,7 +4147,14 @@ export const useAiStore = defineStore('ai', {
           }
           this.suspended = false
           if (frame.cancelled) {
-            this.notice = '本轮已取消'
+            // 批G · S1/S3：取消轮把仍 pending/running 的段一并收敛（后端不会再发 tool_result），
+            // 并在消息尾打「已停止」标记（与「继续」入口互斥）。
+            this.cancelRoundParts()
+            const hasBody = message.content.trim() !== '' || message.parts.some((part) => part.kind !== 'text')
+            if (hasBody) {
+              message.stopped = true
+            }
+            this.lastRoundOutcome = 'cancelled'
           }
           // 批 E · E2：取消的轮次不算"正常完成"—— 建议条只在非取消的 done 后出现
           this.followupReady = !frame.cancelled

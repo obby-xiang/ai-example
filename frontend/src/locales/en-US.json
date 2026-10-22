@@ -1,5 +1,10 @@
 {
   "ai": {
+    "round": {
+      "stop": "Stop generating",
+      "stopping": "Stopping…",
+      "stopped": "Stopped"
+    },
     "suggestions": {
       "ariaLabel": "Suggested follow-ups",
       "sendAria": "Send: {text}",

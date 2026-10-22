@@ -93,7 +93,7 @@ export interface SseFrameHandlers {
   onTerminal?: (frame: SseDoneFrame | SseErrorFrame) => void
   /** 流关闭（terminal=false 表示断流） */
   onClose?: (info: StreamCloseInfo) => void
-  /** 重连前的公告（前端可展示"连接中断，正在重挂"） */
+  /** 重连前的公告（前端可展示"连接中断，N 秒后重试"） */
   onReconnect?: (attempt: number, delayMs: number) => void
   /** 连接层面的错误（HTTP 非 2xx、网络异常） */
   onError?: (error: ApiError) => void
@@ -314,9 +314,18 @@ async function readStream(
 
   try {
     for (;;) {
+      // 批G · S6：**每块前先看中止标志**。abort 只断网络，不会撤回 `reader.read()` 已经返回
+      // 的那一整块帧 —— 旧实现会把它全部消费掉（实证 D8：停止后 60ms 内还能新建/改写工具卡）。
+      if (controller.signal.aborted) {
+        return { terminal: state.terminal, aborted: true, reason: '连接被中止' }
+      }
       const { done, value } = await reader.read()
       if (done) {
         break
+      }
+      if (controller.signal.aborted) {
+        // 读返回与 abort 同一 tick：这块帧属于"停止之后"，一律不落地
+        return { terminal: state.terminal, aborted: true, reason: '连接被中止' }
       }
       resetIdle()
       const text = decoder.decode(value, { stream: true })
@@ -330,6 +339,9 @@ async function readStream(
       if (state.terminal) {
         break
       }
+    }
+    if (controller.signal.aborted) {
+      return { terminal: state.terminal, aborted: true, reason: '连接被中止' }
     }
     const tail = decoder.decode()
     if (tail) {

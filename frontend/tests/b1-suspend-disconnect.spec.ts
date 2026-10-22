@@ -587,6 +587,8 @@ describe('B1 收口修 C-1：慢前端工具晚于挂起收流返回仍回灌', 
     await flushPromises()
 
     expect(api.frontendToolResult).not.toHaveBeenCalled()
-    expect(toolPartOf(store, 'f1')).toMatchObject({ status: 'running' })
+    // 批G · S1（语义变更）：stop() 现在把仍在途的段就收敛为 cancelled（旧口径留在 running，
+    // 卡面永久「调用中…」并随镜像传染）。晚到的旧轮结局仍必须被丢弃（本用例的真正红线）。
+    expect(toolPartOf(store, 'f1')).toMatchObject({ status: 'cancelled', requiresAction: false })
   }, 20_000)
 })

@@ -98,6 +98,19 @@ class RunStoreSessionCurrentTest {
 		assertEquals("r-1", this.store.sessionCurrentRunId("s-1"));
 	}
 
+	/**
+	 * 批G · G1：**在途（RUNNING）开轮即写索引** —— 纯文本轮从不 SUSPENDED，
+	 * 旧实现下 {@code /runs/current} 恒 {@code found:false}，刷新后前端没有任何
+	 * "这一轮还在跑"的可发现面（实证 A/A3/B/C2）。
+	 */
+	@Test
+	void runningSaveWritesIndexForInFlightRound() {
+		this.store.save(snapshot("r-1", "s-1", RunSnapshot.RUNNING));
+
+		assertEquals("r-1", this.store.sessionCurrentRunId("s-1"));
+		verify(this.valueOps).set(eq("ai:session:current:s-1"), eq("r-1"), eq(expectedIndexTtl()));
+	}
+
 	@Test
 	void renewOnlyExtendsMatchingRunId() {
 		this.store.markSessionCurrent("s-1", "r-1");

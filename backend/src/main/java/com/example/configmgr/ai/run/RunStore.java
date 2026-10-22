@@ -457,10 +457,12 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			}
 		}
 		// T2b-D#1：快照持久化成功后联动 session → current 轮索引（全部走本方法这一唯一通道，
-		// 不会漏分支）。RUNNING 不动 —— settle 期间轮仍是 current，索引必须保留。
+		// 不会漏分支）。批G · G1：**RUNNING 也写** —— 纯文本轮从不 SUSPENDED，旧口径下
+		// `/runs/current` 对该轮恒 `found:false`，刷新后前端没有任何"这一轮还在跑"的可发现面
+		// （实证 A/A3/B/C2：整条回答静默消失）。终态照旧清除（取消后不留索引）。
 		// T3-7（A14）：终态分支改调统一判定函数（不再散点比对字面量）。
 		String status = snapshot.getStatus();
-		if (RunSnapshot.SUSPENDED.equals(status)) {
+		if (RunSnapshot.SUSPENDED.equals(status) || RunSnapshot.RUNNING.equals(status)) {
 			markSessionCurrent(snapshot.getSessionId(), runId);
 		}
 		else if (RunSnapshot.isTerminal(status)) {

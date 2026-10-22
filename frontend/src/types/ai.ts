@@ -232,6 +232,11 @@ export interface AiHistoryMessage {
     code?: string | null
   }>
   timestamp?: unknown
+  /**
+   * 批G · S4：这一条 assistant 是**被用户停止**的半截正文（后端 {@code stopped} 元数据透出）。
+   * 前端据此渲染「已停止」，而不是把半句话当完整答案。
+   */
+  stopped?: boolean
 }
 
 /** 会话历史响应（GET /api/ai/history/{sessionId} 的 data）。 */
@@ -319,6 +324,15 @@ export interface ChatMessage {
    * 内存态、不入镜像（刷新后由历史重载消失；错误卡记录的是"本轮现场"，不属可回读的业务事实）。
    */
   errorCard?: ErrorCard | null
+  /**
+   * 批G · S3：本轮被用户**手工停止**（消息尾出「已停止」标识）。
+   *
+   * <p>
+   * 与 {@link errorCard} / 断流提示互斥：一条被停的回答不是"出错"，也不是"完整答案"。
+   * 实时路（`done{cancelled}` 帧 / `stop()` 本地收口）与刷新路（后端 history 的 `stopped`）
+   * 都写这个字段；**入镜像**（刷新后标记仍在），不入历史载荷之外的任何持久化。
+   */
+  stopped?: boolean
 }
 
 /** 消息段序号：同一消息内单调递增（封口后另起的段不复用编号）。 */
@@ -600,9 +614,22 @@ export interface AiSessionMirror {
   /** 镜像结构版本（缺省 = v1 旧镜像，需迁移） */
   v?: number
   savedAt: number
-  messages: Array<Pick<ChatMessage, 'id' | 'role' | 'content' | 'parts' | 'reasoning' | 'toolRuns' | 'pendingCall'>>
-  /** 已结束轮的 runId（供 reattach 提示） */
+  messages: Array<Pick<ChatMessage, 'id' | 'role' | 'content' | 'parts' | 'reasoning' | 'toolRuns' | 'pendingCall' | 'stopped'>>
+  /** 最近一轮的 runId（刷新后据此静默续收在途轮） */
   lastRunId?: string | null
+  /**
+   * 批G · G4：写入时该轮**是否仍在途中**（`loading`）。
+   *
+   * <p>
+   * 刷新侧唯一的"这一轮还没收尾"判据：`messages` 里没有 `done` 字段（写入侧本来就不存），
+   * 而"最后一条助手消息是不是流式"恰恰决定要不要静默续收。
+   */
+  inFlight?: boolean
+  /**
+   * 批G · G4：各 runId 已收到的最大帧序号（刷新后若走增量续收，服务端据此只补差量）。
+   * 缺省 = 序号未知（走全量重放）。
+   */
+  runSeq?: Record<string, number>
 }
 
 /**

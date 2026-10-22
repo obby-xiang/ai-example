@@ -55,15 +55,6 @@
 
     <!-- 降级与冲突提示（R-165 S2：EP Alert 全退场 → 自绘 demo v7 `.alert` 结构 = 描边圆图标 + 标题 + 说明 + ghost 动作钮；
          色族按 v7 语义表：故障红 / 并发·降级蓝 / 通知灰 / 结果绿；`.notice` 虚线灰底承接单行通知槽） -->
-    <div v-if="ai.busyConflict" :class="alertBox('primary')" data-testid="alert-busy-conflict">
-      <span :class="alertIcon('primary')" aria-hidden="true">⇄</span>
-      <div class="flex-1 min-w-0">
-        <b class="block text-[12.6px] [font-weight:650] text-[#1f2328]">当前会话正在进行中</b>
-        <span class="text-[11.8px] text-[#57606a] break-words [overflow-wrap:anywhere]">该会话已有一轮在进行（runId={{ ai.busyConflict.runId }}），可一键重挂继续接收这一轮的输出。</span>
-      </div>
-      <button type="button" :class="ALERT_BTN" @click="reattach()">一键重挂收流</button>
-    </div>
-
     <div v-if="ai.poolSaturated" :class="alertBox('primary')" data-testid="alert-pool-saturated">
       <span :class="alertIcon('primary')" aria-hidden="true">▦</span>
       <div class="flex-1 min-w-0">
@@ -87,11 +78,8 @@
       <span :class="alertIcon('error')" aria-hidden="true">!</span>
       <div class="flex-1 min-w-0">
         <b class="block text-[12.6px] [font-weight:650] text-[#1f2328]">连接中断，结果可能不完整</b>
-        <span class="text-[11.8px] text-[#57606a]">本轮没有收到完成帧（done/error）。已生成的内容保留在上方，可重新发送或一键重挂该轮。</span>
+        <span class="text-[11.8px] text-[#57606a]">本轮没有收到完成帧（done/error）。已生成的内容保留在上方，可重新发送或刷新页面继续接收。</span>
       </div>
-      <button v-if="ai.activeRunId" type="button" :class="ALERT_BTN" @click="reattach(ai.activeRunId)">
-        一键重挂该轮
-      </button>
     </div>
 
     <!-- 单行通知槽——普通通知 = demo v7 `.notice`（虚线灰底 + — 描边圆），取消 / 重试 / 幂等等通知的承载位；
@@ -697,6 +685,15 @@
             >
               {{ '复制失败，请手动选中文本复制' }}
             </span>
+            <!-- 批G · S3：停止可见 —— 消息尾「已停止」标识（与「继续」入口互斥：停掉的轮不出继续） -->
+            <span
+              v-if="m.role === 'assistant' && m.stopped"
+              :data-testid="'msg-stopped-' + m.id"
+              class="inline-flex items-center gap-[4px] rounded-[6px] border border-solid border-[#e3e6ea] bg-[#f6f7f9] px-[6px] py-[1px] text-[10.5px] leading-[1.6] text-[#57606a]"
+            >
+              <span class="block h-[6px] w-[6px] rounded-[1px] bg-[#8b949e]" aria-hidden="true"></span>
+              {{ t('ai.round.stopped') }}
+            </span>
             <!-- R-163 T4：「继续」入口（error/断流/取消后，最后一条助手消息）——点击直发「继续」 -->
             <button
               v-if="showContinue(m)"
@@ -891,13 +888,15 @@
           <button
             v-if="ai.loading || ai.suspended"
             type="button"
+            data-testid="stop-btn"
             data-composer-tip="stop"
-            class="group/tip relative ml-auto flex h-[28px] w-[28px] flex-none items-center justify-center rounded-full border-0 bg-[#1f2328] transition-all duration-[150ms] hover:brightness-[1.15] focus-visible:ring-2 focus-visible:ring-[#2563eb]/40 focus-visible:ring-offset-0"
-            aria-label="停止生成"
+            class="group/tip relative ml-auto flex h-[28px] w-[28px] flex-none items-center justify-center rounded-full border-0 bg-[#1f2328] transition-all duration-[150ms] hover:brightness-[1.15] focus-visible:ring-2 focus-visible:ring-[#2563eb]/40 focus-visible:ring-offset-0 disabled:cursor-default disabled:opacity-60 disabled:hover:brightness-100"
+            :aria-label="ai.stopping ? t('ai.round.stopping') : t('ai.round.stop')"
+            :disabled="ai.stopping"
             @click="stop"
           >
             <span class="block h-[9px] w-[9px] rounded-[2px] bg-white" aria-hidden="true"></span>
-            <span class="tip" :class="[TIP_CLASS, hiddenComposerTips.has('stop') ? 'hidden' : '']" aria-hidden="true">停止生成<span class="tip-arrow" :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
+            <span class="tip" :class="[TIP_CLASS, hiddenComposerTips.has('stop') ? 'hidden' : '']" aria-hidden="true">{{ ai.stopping ? t('ai.round.stopping') : t('ai.round.stop') }}<span class="tip-arrow" :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
           </button>
           <button
             v-else
@@ -1038,7 +1037,7 @@
  * - 生成式表单挂起卡（GF-B）：generative_form 帧渲染 FormRenderer 等用户填写，取消/超时带
  *   cancelled:true 回灌 —— 蓝本无此前端工具通道；
  * - HITL 卡片：确认/拒绝双路径（无原因输入、无倒计时 —— 2026-10-20 去超时裁决与 H1 口径）；
- * - 409/503/断流三类降级提示与一键重挂 —— 蓝本是蓝本后端（无 SESSION_BUSY/挂起池）；
+ * - 409/503/断流三类降级提示（批G 起不再有「一键重挂」：在途轮刷新即静默续收）；
  * - 头部「新建对话」文字按钮 + 空态页签语义小字（苞 A 项 1）：清空当前会话并换新 sessionId
  *   （旧会话的服务端记忆由 `DELETE /api/ai/history/{sessionId}` 删除）—— 蓝本无"重开"入口；
  * - 逐条复制（苞 B 项 2）：消息 hover/聚焦时显现「复制」，复制正文纯文本（不含思考链与工具卡）；
@@ -1451,11 +1450,11 @@ function suggestionText(item: FollowupSuggestion): string {
  * 点 chip / 点建议 = **直接发送**（批 E · E2：不再回填输入框）。
  *
  * 直接走 `ai.send()`（与用户手打发送同一入口）：写操作该走确认卡的自然会走确认卡，
- * 面板不在这里做任何"要不要先问一句"的判断。忙时给出与发送钮一致的提示，不吞点击。
+ * 面板不在这里做任何"要不要先问一句"的判断。在途轮里点了不响应、**不提示**（批G · G6 用户直裁：
+ * 输入/快捷操作都不响应，用户要发就自己先停止）。
  */
 function sendPreset(text: string): void {
   if (!ai.canSend) {
-    ai.noticeBusySend()
     return
   }
   void ai.send(text)
@@ -2855,8 +2854,8 @@ const ALERT_TONE: Record<'error' | 'primary' | 'success' | 'gray', { box: string
   success: { box: 'border-solid border-[#cbe7d6] bg-[#edf7f0]', ic: 'border-[#1a7f45] text-[#1a7f45]' },
   gray: { box: 'border-solid border-[#e3e6ea] bg-[#f6f7f9]', ic: 'border-[#8b949e] text-[#8b949e]' }
 }
-/** ghost 动作钮（v7 提示内按钮形制：白底细描边小圆角，悬停加深描边与字色）。 */
-const ALERT_BTN = 'rounded-[8px] border border-solid border-[#e3e6ea] bg-white text-[#57606a] px-[10px] py-[3px] text-[11.5px] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]'
+/** ghost 动作钮（v7 提示内按钮形制：白底细描边小圆角，悬停加深描边与字色）。
+ *  批G · G5：「一键重挂」/「重挂该轮」按钮退场 —— 在途轮由刷新恢复静默续收，横幅与按钮一并不再存在。 */
 
 /**
  * R-165 S3a（R11 指挥官裁决）：error 级通知判据。
@@ -2986,11 +2985,13 @@ function editMessage(m: ChatMessage): void {
   editingMessageId.value = m.id
 }
 
-/** R-163 T4：「继续」按钮判据 —— error/断流/取消后，最后一条助手消息给出消息级入口。 */
+/** R-163 T4：「继续」按钮判据 —— error/断流/取消后，最后一条助手消息给出消息级入口。
+ *  批G · S3：被用户停止的轮**不出**「继续」（与「已停止」标识互斥）。 */
 function showContinue(message: ChatMessage): boolean {
   const last = ai.messages[ai.messages.length - 1]
   return message.role === 'assistant'
     && last === message
+    && message.stopped !== true
     && (ai.lastRoundOutcome === 'error' || ai.lastRoundOutcome === 'interrupted' || ai.lastRoundOutcome === 'cancelled')
 }
 
@@ -3091,10 +3092,8 @@ async function send(): Promise<void> {
     return
   }
   if (!ai.canSend) {
-    // R4（issue#5）：面板层守卫同样不静默 —— **保留输入框内容**（不消费草稿），给出可读反馈。
-    // 问题4 composer v2 起流式中的普通 Enter 已在 keydown 层静默短路，正常 UI 到不了这里；
-    // 这是纵深防御：程序化调用或 loading/轮次失步窗口下，用户不会"消息被静默丢弃"。
-    ai.noticeBusySend()
+    // 批G · G6（用户直裁 2026-10-22）：在途轮里发送**不响应且零提示** —— 草稿保留在输入框，
+    // 不弹 notice。同源规格见下方 onComposerKeydown 的「流式中 preventDefault 后静默返回」。
     return
   }
   // R-157 #4 → R-161：发送即统一 pinBottom 强制钉底（上滑暂停不挡住主动发送）。
@@ -3209,11 +3208,6 @@ async function copyMessage(m: ChatMessage): Promise<void> {
  */
 function newChat(): void {
   void ai.resetSession()
-}
-
-function reattach(runId?: unknown): void {
-  // 传进来的可能是点击事件对象（模板里若漏写括号），一律只接受字符串
-  void ai.reattachActive(typeof runId === 'string' ? runId : undefined)
 }
 
 /**

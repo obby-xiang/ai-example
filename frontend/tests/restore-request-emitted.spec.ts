@@ -130,7 +130,7 @@ describe('restoreSuspendedSnapshot：只重建请求帧已发的待决卡', () =
     expect(api.reattachRun).toHaveBeenCalledTimes(1)
   }, 15000)
 
-  it('全 BACKEND 批（awaitingExternal=false）⇒ 恢复整体早退：不建卡、不置挂起、不挂流', async () => {
+  it('全 BACKEND 批（awaitingExternal=false）⇒ 不建卡、不置挂起，按在途轮静默全量续收（批G · G2）', async () => {
     const store = await freshStore()
     store.sessionId = 'sess-l0-backend-only'
     store.historyLoaded = true
@@ -142,10 +142,13 @@ describe('restoreSuspendedSnapshot：只重建请求帧已发的待决卡', () =
 
     await store.restoreSuspendedSnapshot()
 
+    // 旧口径「不挂流」把这类轮判成死局（实证 C2：后端继续跑完、UI 12s 仍空）；
+    // 新口径 = 与 RUNNING 同路：无卡、无横幅、无占位文案，lastSeq=0 全量重放后继续收流。
     expect(toolSegments(store.messages)).toHaveLength(0)
-    expect(store.messages).toHaveLength(0)
     expect(store.suspended).toBe(false)
-    expect(api.reattachRun).not.toHaveBeenCalled()
+    expect(store.notice).toBeNull()
+    expect(api.reattachRun).toHaveBeenCalledTimes(1)
+    expect(api.reattachRun.mock.calls[0]?.[2]).toMatchObject({ lastSeq: 0 })
   }, 15000)
 
   it('存在任意 PENDING 条目（全部 req=false）⇒ suspended 仍置位、activeRunId 指向该轮、照常挂流（I-1）', async () => {

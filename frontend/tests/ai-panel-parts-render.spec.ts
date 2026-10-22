@@ -3704,7 +3704,6 @@ describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 �
     await box.setValue('流式草稿')
     const sendSpy = vi.spyOn(store, 'send')
     const stopSpy = vi.spyOn(store, 'stop')
-    const busySpy = vi.spyOn(store, 'noticeBusySend')
     api.chat.mockClear()
 
     const event = fireEnter(box.element as HTMLTextAreaElement)
@@ -3712,7 +3711,7 @@ describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 �
     expect((box.element as HTMLTextAreaElement).value).toBe('流式草稿')
     expect(sendSpy).not.toHaveBeenCalled()
     expect(stopSpy).not.toHaveBeenCalled()
-    expect(busySpy).not.toHaveBeenCalled()
+    expect(store.notice).toBeNull()
     expect(api.chat).not.toHaveBeenCalled()
     expect(store.notice).toBeNull()
 
@@ -3721,7 +3720,7 @@ describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 �
     expect(shift.defaultPrevented).toBe(false)
     expect(sendSpy).not.toHaveBeenCalled()
     expect(stopSpy).not.toHaveBeenCalled()
-    expect(busySpy).not.toHaveBeenCalled()
+    expect(store.notice).toBeNull()
     wrapper.unmount()
   })
 
@@ -3731,20 +3730,19 @@ describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 �
     const el = box.element as HTMLTextAreaElement
     await box.setValue('ni')
     const sendSpy = vi.spyOn(store, 'send')
-    const busySpy = vi.spyOn(store, 'noticeBusySend')
 
     el.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }))
     const composing = fireEnter(el, { isComposing: true })
     expect(composing.defaultPrevented).toBe(false)
     expect(sendSpy).not.toHaveBeenCalled()
-    expect(busySpy).not.toHaveBeenCalled()
+    expect(store.notice).toBeNull()
 
     // 组合已结束的独立场景：keyCode 229（Safari 乱序确认 Enter）
     el.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }))
     const safari = fireEnter(el, { keyCode: 229 })
     expect(safari.defaultPrevented).toBe(false)
     expect(sendSpy).not.toHaveBeenCalled()
-    expect(busySpy).not.toHaveBeenCalled()
+    expect(store.notice).toBeNull()
     wrapper.unmount()
   })
 
@@ -3776,13 +3774,12 @@ describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 �
     const el = box.element as HTMLTextAreaElement
     await box.setValue('组合草稿')
     const sendSpy = vi.spyOn(store, 'send')
-    const busySpy = vi.spyOn(store, 'noticeBusySend')
 
     el.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }))
     const event = fireEnter(el)
     expect(event.defaultPrevented).toBe(false)
     expect(sendSpy).not.toHaveBeenCalled()
-    expect(busySpy).not.toHaveBeenCalled()
+    expect(store.notice).toBeNull()
     wrapper.unmount()
   })
 
@@ -3812,12 +3809,11 @@ describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 �
     const send = wrapper.find('[data-testid="send-btn"]')
     expect(send.attributes('disabled')).toBeDefined()
     const sendSpy = vi.spyOn(store, 'send')
-    const busySpy = vi.spyOn(store, 'noticeBusySend')
 
     const event = fireEnter(box.element as HTMLTextAreaElement)
     expect(event.defaultPrevented).toBe(true)
     expect(sendSpy).not.toHaveBeenCalled()
-    expect(busySpy).not.toHaveBeenCalled()
+    expect(store.notice).toBeNull()
     wrapper.unmount()
   })
 
@@ -5270,7 +5266,8 @@ describe('问题4 composer v2 阶段二：store send outcome 映射', () => {
     store.loading = true
     await expect(store.send('x')).resolves.toEqual({ outcome: 'not-sent', userMessageId: null })
     expect(api.chat).not.toHaveBeenCalled()
-    expect(store.notice).toContain('本轮进行中')
+    // 批G · G6（用户直裁 2026-10-22）：在途轮里的发送**零提示**（草稿保留、不发请求）
+    expect(store.notice).toBeNull()
   })
 
   it('正常 ok：返回新用户消息 id', async () => {

@@ -356,6 +356,31 @@ class ConvergeMemoryToolCallStatesTest {
 		assertThat(toolCallState(windowed, 1, "tc-1")).containsEntry("status", PendingToolCall.TIMEOUT);
 	}
 
+	/**
+	 * 批G · S4：取消时**保留半截正文**（写进记忆并带 {@code stopped} 标记）。
+	 *
+	 * <p>
+	 * 旧口径"半条消息会污染下一轮记忆"的代价是：停止后刷新，答案永久消失（实证 1b：历史只剩
+	 * {@code USER}）。新口径 = 写半截 + 标记 —— 下一轮把"这是被用户停掉的不完整回答"当事实看，
+	 * 刷新后用户也还能看到自己停在哪。
+	 */
+	@Test
+	void cancelKeepsPartialTextInMemoryWithStoppedMarker() {
+		seed(List.of(new UserMessage("你好")), RunSnapshot.RUNNING);
+
+		List<Message> windowed = driveAndCapture(Flux.concat(
+				Flux.just(chunk("半截正文")),
+				Flux.error(new StreamViolationException(StreamViolationException.CANCELLED, "取消"))));
+
+		assertThat(windowed).anyMatch(message -> message instanceof AssistantMessage assistant
+				&& assistant.getText().contains("半截正文")
+				&& Boolean.TRUE.equals(assistant.getMetadata().get(ResilientChatService.STOPPED_KEY)));
+		// 取消没产出正文时仍不写空气泡（旧口径保留）
+		assertThat(windowed).noneMatch(message -> message instanceof AssistantMessage assistant
+				&& assistant.getText().isBlank()
+				&& Boolean.TRUE.equals(assistant.getMetadata().get(ResilientChatService.STOPPED_KEY)));
+	}
+
 	/** S0 路径①（取消挂起等待中）：当轮 assistant 尚未进 messageJson ⇒ 无消息则无状态需求，不产悬空段。 */
 	@Test
 	void cancelDuringSuspendLeavesNoDanglingToolState() {

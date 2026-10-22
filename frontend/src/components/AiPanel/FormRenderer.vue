@@ -72,8 +72,11 @@
           :aria-describedby="describedBy(field)"
           @input="onNumberInput(field.key, $event)"
         />
-        <!-- boolean：原生 checkbox 自绘双态滑块（28×28 门卡同口径：不引第三方控件、不用 peer 变体） -->
-        <span v-else-if="field.type === 'boolean'" class="relative inline-flex w-[34px] h-[18px] align-middle">
+        <!-- boolean：原生 checkbox 自绘双态滑块（28×28 门卡同口径：不引第三方控件、不用 peer 变体）。
+             批G · G7：外层用 <label> 包裹 —— 装饰层（轨道 + 圆点）绝对定位盖在 input 上，
+             `pointer-events-none` 保证真实点击落到 input；即便装饰层将来改样式，label 的
+             原生激活行为也能把点击转发给控件（实测缺陷：真实鼠标点不动、只有 DOM .click() 生效）。 -->
+        <label v-else-if="field.type === 'boolean'" class="relative inline-flex w-[34px] h-[18px] align-middle">
           <input
             :id="controlId(field)"
             type="checkbox"
@@ -85,16 +88,16 @@
             @change="setValue(field.key, ($event.target as HTMLInputElement).checked)"
           />
           <span
-            class="absolute inset-0 rounded-[999px] transition-colors duration-[150ms]"
+            class="pointer-events-none absolute inset-0 rounded-[999px] transition-colors duration-[150ms]"
             :class="model[field.key] === true ? 'bg-[#2563eb]' : 'bg-[#e3e6ea]'"
             aria-hidden="true"
           ></span>
           <span
-            class="absolute top-[2px] left-[2px] w-[14px] h-[14px] rounded-[50%] bg-white transition-transform duration-[150ms]"
+            class="pointer-events-none absolute top-[2px] left-[2px] w-[14px] h-[14px] rounded-[50%] bg-white transition-transform duration-[150ms]"
             :class="model[field.key] === true ? 'translate-x-[16px]' : ''"
             aria-hidden="true"
           ></span>
-        </span>
+        </label>
         <input
           v-else-if="field.type === 'date'"
           :id="controlId(field)"

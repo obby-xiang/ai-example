@@ -23,6 +23,7 @@ import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.ResilientChatService;
 import com.example.configmgr.ai.run.ResumeService;
 import com.example.configmgr.ai.run.RunRegistry;
+import com.example.configmgr.ai.run.RunLiveness;
 import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.run.SecurityEvents;
@@ -353,6 +354,13 @@ public class AiController {
 		}
 		String runId = UUID.randomUUID().toString();
 		SessionGate.Busy busy = this.sessionGate.acquire(sessionId, runId);
+		// 批G · G6：僵尸轮放行 —— 上一轮所在进程死了，会话门却还留着他的 runId 时，用户会永远
+		// 409（只能刷新）。判据见 RunLiveness（无租约 + 本进程无活连接 + 活动早已超出僵尸窗口）。
+		if (busy != null && isDeadRound(busy.runId())) {
+			log.warn("会话门被死轮占着，放行新发送 sessionId={} deadRunId={} newRunId={}", sessionId, busy.runId(), runId);
+			this.sessionGate.release(sessionId, busy.runId());
+			busy = this.sessionGate.acquire(sessionId, runId);
+		}
 		if (busy != null) {
 			// ADR-5：409 必须携带进行中轮的 runId，前端据此改走 /api/ai/events/{runId}
 			Map<String, Object> body = new LinkedHashMap<>();
@@ -628,6 +636,35 @@ public class AiController {
 	 */
 	private static boolean isTerminal(String status) {
 		return RunSnapshot.isTerminal(status);
+	}
+
+	/**
+	 * 批G · G6：占着会话门的这一轮是否已死（判据本体见 {@link RunLiveness}）。
+	 *
+	 * <p>
+	 * 三路输入都取"活着的证据"：续跑租约（跨实例还有人负责）、本进程写出器（活连接）、
+	 * 最近活动（快照写入 / 末帧 / 心跳取较新）。任一为真即判活 —— 宁可让用户多等一次 409，
+	 * 也不让同一会话并发两轮。
+	 */
+	private boolean isDeadRound(String heldRunId) {
+		RunSnapshot snapshot = this.runStore.get(heldRunId);
+		boolean leaseHeld = false;
+		try {
+			com.example.configmgr.ai.run.LeaseService leases = this.runStore.leaseService();
+			leaseHeld = leases != null && leases.isHeld(this.runStore.runLeaseKey(heldRunId));
+		}
+		catch (Exception ex) {
+			// 租约设施不可读 ⇒ 按"可能有人持有"处理（不放行），与 E3 的保守方向相反是因为
+			// 这里的错误方向是并发双跑，不能靠乐观兜底
+			log.debug("读取续跑租约失败 runId={}：{}", heldRunId, ex.getMessage());
+			leaseHeld = true;
+		}
+		boolean liveInProcess = this.runRegistry.find(heldRunId) != null;
+		long updatedAtMs = snapshot == null ? 0L : snapshot.getUpdatedAtMs();
+		long lastActivityAtMs = this.runStore.lastEventAtMs(heldRunId);
+		long thresholdMs = this.properties.getResume().getZombieAge().toMillis();
+		return RunLiveness.isDead(snapshot == null ? null : snapshot.getStatus(), updatedAtMs, lastActivityAtMs,
+				leaseHeld, liveInProcess, thresholdMs, System.currentTimeMillis());
 	}
 
 	// ── 取消（韧性棒：ADR-8 修正③） ────────────────────────────────────────
@@ -1033,6 +1070,12 @@ public class AiController {
 		}
 		if (message instanceof ToolResponseMessage toolResponse) {
 			item.put("toolResponses", historyToolResponses(toolResponse));
+		}
+		// 批G · S4：被用户停止的半截 assistant 正文带 stopped 标记 —— 前端据此渲染「已停止」，
+		// 而不是把半句话当完整答案（与取消轮 done{cancelled} 的实时口径同源）。
+		if (message instanceof AssistantMessage assistant
+				&& Boolean.TRUE.equals(assistant.getMetadata().get(ResilientChatService.STOPPED_KEY))) {
+			item.put("stopped", true);
 		}
 		Object timestamp = message.getMetadata().get(MessageJsonCodec.FIELD_TIMESTAMP);
 		if (timestamp != null) {
