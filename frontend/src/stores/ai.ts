@@ -17,7 +17,6 @@ import { aiApi } from '@/api/ai'
 import type { SseFrameHandlers, SseStreamOptions } from '@/api/sse'
 import { getPageHandler, onWorkspaceEvent, reportUiEventResult, useWorkspaceStore } from '@/stores/workspace'
 import { useTaskStore } from '@/stores/task'
-import { useAiModelStore } from '@/stores/ai-model'
 import { AI_CONFIG_ERROR_TEXT } from '@/constants/ai-settings-copy'
 import { deriveFrontendToolBudgetMs, executeFrontendTool, parseToolArgs, resolveSheetContext } from '@/utils/frontend-tools'
 import { UI_HANDOFF_TOOLS } from '@/types/tools'
@@ -863,6 +862,15 @@ export const useAiStore = defineStore('ai', {
      * 出「继续」入口；新轮发送时复位 'ok'。
      */
     lastRoundOutcome: 'ok' as 'ok' | 'error' | 'interrupted' | 'cancelled',
+    /**
+     * 批 E · E2：上一轮是否以 **done 正常终态** 收尾（"回复下方出建议"的轮次级判据）。
+     *
+     * 为什么不用 `lastRoundOutcome === 'ok'` 单独判定：`lastRoundOutcome` 的初值就是 'ok'，
+     * 历史的最后一轮也可能是"上一页签的完成"——那会在刷新后凭空冒出一组建议。本标志只在
+     * **本页签收到非取消的 done 帧**时置真，`send()` 起新轮 / error 帧 / 停止 / 换会话即复位。
+     * 挂起、待确认卡、表单、出错等其余闸门由面板按实时状态再判（这里只管"这一轮是不是正常完成"）。
+     */
+    followupReady: false,
     /** 最近一次工作区契约事件（面板"工作区已同步"chip 的数据源） */
     contextSync: null as WorkspaceActionRecord | null,
     /** 最近一次 ui_event 分发结果（AI 驱动工作区的回执展示） */
@@ -1788,6 +1796,8 @@ export const useAiStore = defineStore('ai', {
       this.notice = null
       this.streamInterrupted = false
       this.lastRoundOutcome = 'ok' // R-163 T4：新轮复位「继续」入口判据
+      // 批 E · E2：新轮触发即收起上一轮的建议条（点 chip / 点建议 / 手打发都是这个入口）
+      this.followupReady = false
       this.busyConflict = null
       this.poolSaturated = null
       const controller = new AbortController()
@@ -1843,9 +1853,8 @@ export const useAiStore = defineStore('ai', {
       // 动作只注入这一轮，构造完即清空，避免下一轮重复携带。
       const context = workspace.buildContext()
       workspace.clearRecentActions()
-      // 批③：模型选择 + 参数覆盖（只带变化项；未选/未改时是空对象 —— 与批③ 之前逐字等价）。
-      // 状态在独立 store（stores/ai-model.ts）里，这里只取一次投影，避免两批在同一文件相邻改。
-      const modelPatch = useAiModelStore().patch(this.sessionId)
+      // 批 F · F1（用户裁决 2026-10-22）：参数 popover 也退场，`stores/ai-model.ts` 随之删除 ——
+      // 请求体**既不带 modelId 也不带 params**（模型与采样参数一律用后端配置；后端能力保留）。
       /** 收尾判定：身份已失效优先，其次用户停止 / 断流，最后才是调用方的正常/异常兜底。 */
       const settleOutcome = (fallback: AiSendOutcome): AiSendOutcome => {
         if (!isCurrentRound()) {
@@ -1862,7 +1871,7 @@ export const useAiStore = defineStore('ai', {
       let outcome: AiSendOutcome
       try {
         await aiApi.chat(
-          { sessionId: this.sessionId, message: content, context, ...modelPatch },
+          { sessionId: this.sessionId, message: content, context },
           handlers,
           options
         )
@@ -1958,16 +1967,13 @@ export const useAiStore = defineStore('ai', {
           void this.probeHealth()
           break
         // 批③ 新增的 /chat 稳定码（模型配置面）：前端按 code 查同一份词表，
-        // 不回显后端中文 message（i18n 口径）。MODEL_NOT_FOUND 顺带刷新可用模型清单 ——
-        // 多半是"模型被下架/端点被停用"，选择器要跟着变。
+        // 不回显后端中文 message（i18n 口径）。
+        // 批 E · E1：模型选择已退场，不再刷新「可用模型清单」（清单的唯一消费者是选择器）。
         case 'MODEL_NOT_FOUND':
         case 'INVALID_PARAM':
         case 'PARAMS_LOCKED':
         case 'PROVIDER_GONE':
           this.notice = AI_CONFIG_ERROR_TEXT[error.code] ?? error.message
-          if (error.code === 'MODEL_NOT_FOUND') {
-            void useAiModelStore().ensureModels(true)
-          }
           break
         default:
           this.notice = error.message
@@ -3173,6 +3179,7 @@ export const useAiStore = defineStore('ai', {
       this.activeUploadHandoff = null
       this.stopped = true
       this.lastRoundOutcome = 'cancelled'
+      this.followupReady = false
       try {
         currentAbort?.abort()
       } catch {
@@ -3263,6 +3270,8 @@ export const useAiStore = defineStore('ai', {
       // 轮次级标志一并复位：新会话不该继承上一轮的停止/断流事实（骨架屏见 historyLoaded）
       this.stopped = false
       this.streamInterrupted = false
+      // 批 E · E2：新会话不继承上一会话的建议条
+      this.followupReady = false
       // 上下文专项批①：占用与拆分随会话清空（跨会话串味 = 拿上一会话的 84k 配新会话）
       this.contextUsage = null
       this.contextBreakdown = null
@@ -3746,6 +3755,8 @@ export const useAiStore = defineStore('ai', {
           if (frame.cancelled) {
             this.notice = '本轮已取消'
           }
+          // 批 E · E2：取消的轮次不算"正常完成"—— 建议条只在非取消的 done 后出现
+          this.followupReady = !frame.cancelled
           // 上下文专项批①：轮末占用（唯一刷新点 —— 流式中不跳动，C-36）
           if (frame.context) {
             this.contextUsage = frame.context
@@ -3770,6 +3781,8 @@ export const useAiStore = defineStore('ai', {
           // 它发生的位置内联渲染（绝不做顶部固定）。判据 = 码优先、文案兜底（utils/error-card.ts）。
           message.errorCard = buildErrorCard(frame.code, frame.message)
           this.lastRoundOutcome = 'error'
+          // 批 E · E2：出错轮不出建议（用户下一步是"继续/重试"，不是换话题）
+          this.followupReady = false
           // R-166：与 done 同口径收口提交在途态
           this.clearGateSubmissions()
           break

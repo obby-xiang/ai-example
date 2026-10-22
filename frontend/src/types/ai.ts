@@ -802,7 +802,10 @@ export interface AiChatParams {
  * `POST /api/ai/chat` 的批③ 增量（可选）。
  *
  * - `modelId` 缺省 ⇒ 后端按默认解析链（`is_default` → 首个 enabled → 全局默认 → env）；
- * - `params` 缺省 ⇒ 全部用全局默认；只带用户真正改过的项（见 `stores/ai-model.ts#patch`）。
+ * - `params` 缺省 ⇒ 全部用全局默认。
+ *
+ * <p><b>批 F · F1</b>：两个键都只是<b>后端能力</b>的镜像 —— 界面已无模型选择与参数弹层，
+ * 前端请求体<b>既不带 `modelId` 也不带 `params`</b>（字段保留，重做选择器/调参时零后端改动）。
  */
 export interface AiChatRequest {
   modelId?: string

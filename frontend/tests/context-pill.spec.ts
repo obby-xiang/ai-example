@@ -17,6 +17,7 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
+import { applyLocale } from '@/locales'
 
 const api = vi.hoisted(() => ({
   getContext: vi.fn()
@@ -141,6 +142,24 @@ describe('分项展示（C-34）', () => {
   })
 })
 
+describe('E3 整体占用口径（百分比 = 整体占用，不是每轮增量）', () => {
+  it('tooltip 同时给出 已用 / 上限 / 占比，且措辞是"上下文"而非"本轮"', () => {
+    const title = tierTitle(measured(84213, 128000))
+
+    expect(title).toContain('已用 84.2k')
+    expect(title).toContain('128k')
+    expect(title).toContain('占比 65.8%')
+    expect(title).not.toContain('本轮')
+  })
+
+  it('上限未知：不给占比（没有分母就没有百分比），仍说已用', () => {
+    const title = tierTitle(measured(84213, null))
+
+    expect(title).toContain('已用 84.2k')
+    expect(title).not.toContain('占比')
+  })
+})
+
 describe('组件（C-33 / C-34 的 DOM 面）', () => {
   beforeAll(async () => {
     await import('@/components/AiPanel/ContextPill.vue')
@@ -167,6 +186,9 @@ describe('组件（C-33 / C-34 的 DOM 面）', () => {
     expect(pill.text()).toBe('65.8% · 84.2k/128k')
     expect(pill.attributes('data-tier')).toBe('safe')
     expect(pill.attributes('title')).toContain('84.2k / 128k')
+    // 批 E · E3：hover tooltip 另给占比（已用 / 上限 / 占比 三件齐全），并带 a11y 名
+    expect(pill.attributes('title')).toContain('占比 65.8%')
+    expect(pill.attributes('aria-label')).toContain('65.8')
 
     // 点开：端点拉七项（拆分不进 done 帧）
     api.getContext.mockResolvedValue({
@@ -216,5 +238,21 @@ describe('组件（C-33 / C-34 的 DOM 面）', () => {
     const pill = wrapper.find('[data-testid="context-pill"]')
     expect(pill.text()).toBe('已用 84.2k')
     expect(pill.attributes('data-tier')).toBe('none')
+  })
+
+  it('英文界面 tooltip 走 en-US 文案（已用 / 上限 / 占比 双语）', async () => {
+    applyLocale('en-US')
+    const store = useAiStore()
+    store.contextUsage = measured(84213, 128000)
+    const wrapper = mount(ContextPill)
+    await flushPromises()
+
+    const title = wrapper.find('[data-testid="context-pill"]').attributes('title') ?? ''
+    expect(title).toContain('84.2k')
+    expect(title).toContain('128k')
+    expect(title).toContain('65.8')
+    expect(title).toMatch(/[A-Za-z]/)
+    expect(title).not.toContain('已用')
+    wrapper.unmount()
   })
 })

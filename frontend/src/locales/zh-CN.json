@@ -1,4 +1,30 @@
 {
+  "ai": {
+    "suggestions": {
+      "ariaLabel": "后续建议",
+      "sendAria": "发送：{text}",
+      "listDefs": "列出全部配置定义",
+      "workspaceState": "查看当前工作区状态",
+      "taskProgress": "查看任务 #{id} 进度",
+      "exportEstimate": "预估导出数据行数",
+      "startExport": "启动导出作业",
+      "precheckImport": "预检查导入数据",
+      "startImport": "启动导入作业",
+      "newExportTask": "新建一个导出任务",
+      "dataRowCount": "统计当前数据行数"
+    },
+    "context": {
+      "pillAria": "上下文占用 {percent}%",
+      "pillAriaNoPercent": "上下文占用 {text}",
+      "used": "上下文已用 {used} tokens",
+      "usedLimit": "上下文已用 {used} / {limit} tokens（占比 {percent}%）",
+      "usedLimitNoPercent": "上下文已用 {used} / {limit} tokens",
+      "estimate": "（估算值：上游未返回用量）",
+      "warn": "已超过轻量清理线",
+      "high": "已进入压缩区（工具结果优先清理）",
+      "danger": "接近上限，下一次请求前会先清理历史工具结果"
+    }
+  },
   "common": {
     "app": {
       "title": "配置管理平台"

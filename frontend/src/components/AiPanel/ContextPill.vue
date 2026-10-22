@@ -3,9 +3,13 @@
  * 上下文占用药丸（上下文统计与压缩专项批①；设计稿 §3.4(c)）。
  *
  * <h2>位置（布局裁决）</h2>
- * 放在输入框底栏**右端、发送/停止钮左侧**：`[模型选择器位][参数位] …… [用量 pill][发送/停止]`。
- * 本批只占 pill 位 —— 左端留给模型配置专项批③ 的选择器，两者不得抢同一格。
+ * 放在输入框底栏**右端、发送/停止钮左侧**：`[参数位] …… [用量 pill][发送/停止]`。
+ * 批 E · E1 起模型选择器整段退场，pill 的位置与顺序不变。
  *
+ * <h2>批 E · E3 补充</h2>
+ * 指标是**整体上下文占用**（本轮请求的 prompt 侧真值 = 整个窗口），不是"每轮新增"；
+ * hover tooltip 同时给出 已用 / 上限 / 占比，文案双语（`ai.context.*`，缺键回落内置中文）。
+ * 
  * <h2>口径</h2>
  * - 文本与档位全部走 `utils/context-usage.ts` 的纯函数（逐点可测）；
  * - **流式中不更新**：本组件的值来自 store 的 `contextUsage`，它只在 `done` 帧写入（C-36）；
@@ -14,14 +18,20 @@
  * - 点击展开七项拆分（按需拉端点，见 ContextPopover）。
  */
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { useAiStore } from '@/stores/ai'
 import {
   contextPillText,
   contextTier,
+  defaultContextText,
+  formatPercent,
   tierClass,
-  tierTitle
+  tierTitle,
+  type ContextTextFn
 } from '@/utils/context-usage'
 import ContextPopover from '@/components/AiPanel/ContextPopover.vue'
+
+const { t, te } = useI18n()
 
 const ai = useAiStore()
 
@@ -31,6 +41,28 @@ const rootRef = ref<HTMLElement | null>(null)
 const text = computed(() => contextPillText(ai.contextUsage))
 const tier = computed(() => contextTier(ai.contextUsage?.percent ?? null))
 const visible = computed(() => text.value.length > 0)
+
+/**
+ * 双语文案出口（批 E · E3）：有 `ai.context.*` 键就按当前语言渲染，缺键回落内置中文。
+ * tooltip 三件齐全 —— 已用 / 上限 / 占比（整体占用，不是每轮增量）。
+ */
+const contextText: ContextTextFn = (key, params) => {
+  const i18nKey = `ai.context.${key}`
+  return te(i18nKey) ? t(i18nKey, params) : defaultContextText(key, params)
+}
+
+const tooltip = computed(() => (ai.contextUsage ? tierTitle(ai.contextUsage, contextText) : ''))
+
+const ariaLabel = computed(() => {
+  const usage = ai.contextUsage
+  if (!usage) {
+    return ''
+  }
+  if (usage.percent === null) {
+    return t('ai.context.pillAriaNoPercent', { text: text.value })
+  }
+  return t('ai.context.pillAria', { percent: formatPercent(usage.percent) })
+})
 
 function toggle(): void {
   open.value = !open.value
@@ -77,7 +109,8 @@ onBeforeUnmount(() => {
       :data-tier="tier"
       class="rounded-[6px] border border-solid px-[6px] py-[1px] text-[10.5px] leading-[1.6] tabular-nums transition-colors duration-[150ms] hover:brightness-[0.98]"
       :class="tierClass(tier)"
-      :title="ai.contextUsage ? tierTitle(ai.contextUsage) : ''"
+      :title="tooltip"
+      :aria-label="ariaLabel"
       :aria-expanded="open"
       aria-haspopup="dialog"
       @click="toggle"

@@ -1005,7 +1005,7 @@ describe('R-154：截断角标 / 跟随暂停 / 生成中 / 编辑回填 / 建�
     wrapper.unmount()
   })
 
-  it('#12：空态出静态建议词列表，点击回填输入框', async () => {
+  it('#12：空态出静态建议词列表，点击直接发送（批 E · E2 口径：不再回填输入框）', async () => {
     // 空态挂载会触发 onMounted 的 loadHistory（messages 为空）：桩掉后端历史，避免未处理拒绝
     const store = useAiStore()
     api.history.mockResolvedValue({ sessionId: store.sessionId, count: 0, messages: [] })
@@ -1025,9 +1025,14 @@ describe('R-154：截断角标 / 跟随暂停 / 生成中 / 编辑回填 / 建�
     expect(empty.find('div:nth-child(1)').classes()).toContain('[font-weight:650]')
     expect(chips[0].element.tagName).toBe('BUTTON')
     expect(chips[0].classes()).toEqual(expect.arrayContaining(['rounded-[999px]', 'bg-white', 'border-[#e3e6ea]', 'text-[12.2px]', 'text-[#57606a]', 'hover:text-[#2563eb]']))
+    api.chat.mockReset()
+    api.chat.mockResolvedValue(undefined)
     await chips[0].trigger('click')
+    await flushPromises()
+    expect(api.chat).toHaveBeenCalledTimes(1)
+    expect((api.chat.mock.calls[0][0] as Record<string, unknown>).message).toBe('列出全部配置定义')
     await wrapper.vm.$nextTick()
-    expect((wrapper.find('[data-testid="composer-input"]').element as HTMLTextAreaElement).value).toBe('列出全部配置定义')
+    expect((wrapper.find('[data-testid="composer-input"]').element as HTMLTextAreaElement).value).toBe('')
     wrapper.unmount()
 
     // R-165 S2：骨架屏自绘（el-skeleton 退场）—— v7 `.sk` 渐变条（渐变 + 220% 长度 + 无限律动 + 宽度档）
@@ -3488,15 +3493,18 @@ describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 �
       expect(shell.className).toContain(cls)
     }
 
-    // 盒内底栏：左端 = 批③ 的模型选择器/参数位（原「工具位（预留 · 留空）」虚线占位已按
-    // 上下文专项的布局裁决被填充），随后 flex-1 撑开，右侧仍是用量 pill + 发送钮（顺序未变）
+    // 盒内底栏：批 F · F1 起左端不再有选择/调参面（批 E · E1 退模型选择器、本批退参数 popover），
+    // 第一格就是 flex-1 撑开；右侧仍是用量 pill + 发送钮（顺序未变）
     const footer = shell.lastElementChild as HTMLElement
     expect(footer.className).toContain('flex')
-    // 左端第一格 = 模型位（选择器 / 空态 / 清单未就绪时的空壳），结构稳定
-    expect(footer.firstElementChild?.getAttribute('data-testid')).toBe('model-slot')
-    expect(footer.children[1]?.getAttribute('data-testid')).toBe('params-toggle')
+    // 参数触发器/弹层整段退场（不是“隐藏”：DOM 里不该有）
+    expect(footer.querySelector('[data-testid="params-toggle"]')).toBeNull()
+    expect(footer.querySelector('[data-testid="params-popover"]')).toBeNull()
+    expect(footer.querySelector('[data-testid="model-slot"]')).toBeNull()
     const spacer = Array.from(footer.children).find((child) => child.className.includes('flex-1'))
     expect(spacer).toBeTruthy()
+    // 左端第一格 = 撑开位（去 UI 后不再有靠左的钮）
+    expect(footer.firstElementChild).toBe(spacer)
     expect(Array.from(footer.children).indexOf(spacer as Element))
       .toBeLessThan(Array.from(footer.children).findIndex((child) =>
         child.getAttribute('data-testid') === 'send-btn'))

@@ -76,26 +76,64 @@ export function tierClass(tier: ContextTier): string {
   }
 }
 
-/** 档位 → 措辞（纯文本，禁 emoji；`title` 用完整句，视觉上仍是一行小字）。 */
-export function tierTitle(usage: ContextUsage): string {
+/**
+ * 文案出口（批 E · E3）：默认实现是内置中文；`ContextPill` 注入 vue-i18n 的 `t` 后即为双语。
+ * 纯函数测试不传第二参 ⇒ 与改造前逐字同源（既有断言零改）。
+ */
+export type ContextTextKey = 'used' | 'usedLimit' | 'usedLimitNoPercent' | 'estimate' | 'warn' | 'high' | 'danger'
+
+export type ContextTextFn = (key: ContextTextKey, params: Record<string, string>) => string
+
+/** 内置中文文案（缺省实现；同时也是 i18n 键缺失时的兜底）。 */
+export function defaultContextText(key: ContextTextKey, params: Record<string, string>): string {
+  switch (key) {
+    case 'used':
+      return `上下文已用 ${params.used} tokens`
+    case 'usedLimit':
+      return `上下文已用 ${params.used} / ${params.limit} tokens（占比 ${params.percent}%）`
+    case 'usedLimitNoPercent':
+      return `上下文已用 ${params.used} / ${params.limit} tokens`
+    case 'estimate':
+      return '（估算值：上游未返回用量）'
+    case 'warn':
+      return '已超过轻量清理线'
+    case 'high':
+      return '已进入压缩区（工具结果优先清理）'
+    case 'danger':
+    default:
+      return '接近上限，下一次请求前会先清理历史工具结果'
+  }
+}
+
+/**
+ * 档位 → 措辞（纯文本，禁 emoji；`title` 用完整句，视觉上仍是一行小字）。
+ *
+ * <h2>批 E · E3 口径</h2>
+ * 这里的数是**整体上下文占用**（本轮请求的 prompt 侧真值 = 整个窗口的占用），不是"本轮新增"。
+ * 因此措辞用「上下文已用」而不是「本轮上下文已用」；有上限时同时给出<b>占比</b>——
+ * 用户扫一眼 tooltip 就能拿到 已用 / 上限 / 占比 三件，不必自己做除法。
+ */
+export function tierTitle(usage: ContextUsage, text: ContextTextFn = defaultContextText): string {
   const tier = contextTier(usage.percent)
   const used = formatTokens(usage.usedTokens)
-  const limit = usage.limitTokens === null ? null : formatTokens(usage.limitTokens)
-  const estimated = usage.est ? '（估算值：上游未返回用量）' : ''
-  if (limit === null) {
-    return `本轮上下文已用 ${used} tokens${estimated}`
+  const estimated = usage.est ? text('estimate', {}) : ''
+  if (usage.limitTokens === null) {
+    return `${text('used', { used })}${estimated}`
   }
-  const head = `本轮上下文已用 ${used} / ${limit} tokens${estimated}`
+  const limit = formatTokens(usage.limitTokens)
+  const head = usage.percent === null
+    ? text('usedLimitNoPercent', { used, limit })
+    : text('usedLimit', { used, limit, percent: formatPercent(usage.percent) })
   switch (tier) {
     case 'danger':
       // 批① 只做 L1（清工具结果）；摘要属批③ —— 文案不得承诺尚未落地的手段
-      return `${head}；接近上限，下一次请求前会先清理历史工具结果`
+      return `${head}${estimated}；${text('danger', {})}`
     case 'high':
-      return `${head}；已进入压缩区（工具结果优先清理）`
+      return `${head}${estimated}；${text('high', {})}`
     case 'warn':
-      return `${head}；已超过轻量清理线`
+      return `${head}${estimated}；${text('warn', {})}`
     default:
-      return head
+      return `${head}${estimated}`
   }
 }
 

@@ -1,4 +1,30 @@
 {
+  "ai": {
+    "suggestions": {
+      "ariaLabel": "Suggested follow-ups",
+      "sendAria": "Send: {text}",
+      "listDefs": "List all definitions",
+      "workspaceState": "Show workspace state",
+      "taskProgress": "View task #{id} progress",
+      "exportEstimate": "Estimate export rows",
+      "startExport": "Start export job",
+      "precheckImport": "Precheck import data",
+      "startImport": "Start import job",
+      "newExportTask": "Create an export task",
+      "dataRowCount": "Count current rows"
+    },
+    "context": {
+      "pillAria": "Context usage {percent}%",
+      "pillAriaNoPercent": "Context usage {text}",
+      "used": "Context used {used} tokens",
+      "usedLimit": "Context used {used} / {limit} tokens ({percent}% of limit)",
+      "usedLimitNoPercent": "Context used {used} / {limit} tokens",
+      "estimate": " (estimated: upstream returned no usage)",
+      "warn": "past the light cleanup line",
+      "high": "in the compaction zone (tool results cleared first)",
+      "danger": "near the limit; tool results are cleared before the next request"
+    }
+  },
   "common": {
     "app": {
       "title": "Configuration Manager"
