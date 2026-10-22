@@ -73,6 +73,18 @@ import java.util.stream.Collectors;
 @Service
 public class ResumeService {
 
+	/** 续跑原因（日志面口径，{@code turn_start.resumeReason}）：启动扫描（快照 SUSPENDED）。 */
+	public static final String RESUME_STARTUP = "startup";
+
+	/** 续跑原因：运维/用户显式调 {@code POST /api/ai/runs/{runId}/resume}。 */
+	public static final String RESUME_MANUAL = "manual";
+
+	/** 续跑原因：启动/扫描期接管"状态仍 RUNNING 但已超龄"的死卡（僵尸轮）。 */
+	public static final String RESUME_DEADCARD = "deadcard";
+
+	/** 续跑原因：其余续跑入口（决策回灌、挂起重挂、调试直驱）—— "未标注原因"的兜底口径。 */
+	public static final String RESUME_REATTACH = "reattach";
+
 	private final RunStore store;
 
 	private final RunRegistry registry;
@@ -344,7 +356,21 @@ public class ResumeService {
 	}
 
 	public ResumeResult resume(String runId) {
-		return resume(runId, false);
+		// 调用线程已用 AiTrace#markResumeReason 标注过的，尊重它；未标注（运维端点 / 单测直调）按 manual 记。
+		String marked = AiTrace.currentResumeReason();
+		return resumeWithReason(runId, marked == null || marked.isBlank() ? RESUME_MANUAL : marked);
+	}
+
+	/**
+	 * 续跑（带<b>续跑原因</b>）：原因只影响日志面（{@code turn_start.resumeReason}），不改变续跑判据。
+	 *
+	 * <p>为什么不重载 {@code resume(...)}：第三个参数写成 {@code String} 会让既有的
+	 * {@code resume(runId, false, null)} 变成"String 与 Lease 都匹配"的歧义调用（编译红）。
+	 * 四个取值见 {@link #RESUME_STARTUP} / {@link #RESUME_MANUAL} / {@link #RESUME_DEADCARD} /
+	 * {@link #RESUME_REATTACH}。
+	 */
+	public ResumeResult resumeWithReason(String runId, String resumeReason) {
+		return resumeWithReason(runId, false, resumeReason);
 	}
 
 	/**
@@ -374,6 +400,12 @@ public class ResumeService {
 	 * 运维端点不传这个开关（{@code false}），保持"RUNNING 一律 409"的保守语义。
 	 */
 	public ResumeResult resume(String runId, boolean forceTakeover) {
+		// 调用方只有启动扫描：僵尸接管 = 死卡（deadcard），常规启动扫描 = startup
+		return resumeWithReason(runId, forceTakeover, forceTakeover ? RESUME_DEADCARD : RESUME_STARTUP);
+	}
+
+	/** 续跑（原因 + 僵尸接管开关）：自抢续跑权租约，其余与 {@link #resume(String, boolean, LeaseService.Lease)} 同构。 */
+	public ResumeResult resumeWithReason(String runId, boolean forceTakeover, String resumeReason) {
 		LeaseService leases = this.store.leaseService();
 		boolean fresh = false;
 		LeaseService.Lease lease = null;
@@ -395,7 +427,7 @@ public class ResumeService {
 		}
 		ResumeResult result;
 		try {
-			result = resume(runId, forceTakeover, lease);
+			result = resumeInternal(runId, forceTakeover, lease, resumeReason);
 		}
 		catch (RuntimeException ex) {
 			if (fresh) {
@@ -438,6 +470,12 @@ public class ResumeService {
 	 * 此时只由进程内互斥排他 —— 与批②b 之前的语义一致
 	 */
 	public ResumeResult resume(String runId, boolean forceTakeover, LeaseService.Lease lease) {
+		// 决策回灌/挂起重挂等入口：未显式标注原因时按 reattach 记（"其余续跑入口"的兜底口径）
+		return resumeInternal(runId, forceTakeover, lease, RESUME_REATTACH);
+	}
+
+	private ResumeResult resumeInternal(String runId, boolean forceTakeover, LeaseService.Lease lease,
+			String resumeReason) {
 		if (lease != null) {
 			// I3：归属校验对着 Redis 真值做（一次往返），不用进程内视图 —— 视图在"TTL 已到、续租还没失败"
 			// 的窗口里会说谎，而这个判定正是"要不要驱动这一轮"的入口。
@@ -471,6 +509,8 @@ public class ResumeService {
 			// 日志链路批：续跑可能落在 ResumeService 自己的调用线程上（启动扫描 / 死卡兜底触发池），
 			// 入口先装锚点；真正的驱动线程由 driveResumed 再绑一次。
 			AiTrace.bind(runId, sessionId);
+			// 续跑原因经 MDC 过线程边界（驱动任务在下面提交，TaskDecorator 在提交时刻抓快照）
+			AiTrace.markResumeReason(resumeReason);
 			List<PendingToolCall> pendings = this.store.pendings(runId);
 			Map<String, Object> body = new LinkedHashMap<>();
 			body.put("runId", runId);

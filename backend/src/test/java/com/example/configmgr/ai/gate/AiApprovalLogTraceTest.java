@@ -143,6 +143,37 @@ class AiApprovalLogTraceTest {
 			.containsPattern("waitedMs=\\d{3,}");
 	}
 
+	/**
+	 * 决策行必须能回答"等的是哪种卡、上限多少、挂了多久"：
+	 * {@code kind}（confirm/frontend）、{@code timeoutS}（{@code none} = 无上限）、
+	 * {@code suspendMs}（挂起开始 → 决策，含同批前几张卡的排队；与 {@code waitedMs} = 卡送达 → 决策 区分）。
+	 */
+	@Test
+	void submittingADecisionAlsoReportsKindTimeoutAndSuspendWindow() {
+		Map<String, PendingToolCall> state = new ConcurrentHashMap<>();
+		PendingToolCall waiting = pending();
+		waiting.setReq(Boolean.TRUE);
+		waiting.setReqAtMs(System.currentTimeMillis() - 4321L);
+		state.put(TOOL_CALL_ID, waiting);
+		when(this.store.pendingRaw(RUN_ID, TOOL_CALL_ID)).thenAnswer(invocation -> copyOf(state.get(TOOL_CALL_ID)));
+		when(this.store.pending(RUN_ID, TOOL_CALL_ID)).thenAnswer(invocation -> copyOf(state.get(TOOL_CALL_ID)));
+		doAnswer(invocation -> {
+			PendingToolCall saved = invocation.getArgument(1);
+			state.put(saved.getToolCallId(), copyOf(saved));
+			return null;
+		}).when(this.store).putPending(eq(RUN_ID), any(PendingToolCall.class));
+		when(this.store.tryRecordDecision(RUN_ID, TOOL_CALL_ID, PendingToolCall.APPROVED))
+			.thenReturn(new RunStore.DecisionClaim(true, PendingToolCall.APPROVED));
+		// 挂起批次已登记 ⇒ 决策时刻 - 挂起开始 = suspendMs
+		this.gate.arm(RUN_ID, List.of(TOOL_CALL_ID));
+
+		this.gate.submitDecision(RUN_ID, TOOL_CALL_ID, true, "批准执行");
+
+		String line = line("approval_decided");
+		assertThat(line).contains("kind=confirm").contains("timeoutS=none");
+		assertThat(line).containsPattern("suspendMs=\\d+");
+	}
+
 	@Test
 	void rejectedSubmissionStillLeavesATraceLine() {
 		when(this.store.pendingRaw(RUN_ID, TOOL_CALL_ID)).thenReturn(null);

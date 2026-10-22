@@ -6,6 +6,7 @@ import ch.qos.logback.classic.PatternLayout;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
+import com.example.configmgr.ai.run.InstanceId;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
@@ -58,6 +59,15 @@ class AiLogPatternConfigTest {
 			.contains("%X{sessionId");
 	}
 
+	/**
+	 * 多实例排障的第一问是"这条日志是哪个进程写的"：{@code instanceId} 必须与 runId/sessionId 同在一列，
+	 * 否则双实例下两份 app.log 合并后无法判定"哪一半是我"。
+	 */
+	@Test
+	void consolePatternDeclaresTheInstanceAnchor() throws IOException {
+		assertThat(levelPattern()).as("行首实例锚点（多实例定位）").contains("%X{instanceId");
+	}
+
 	@Test
 	void boundLinesRenderTheAnchorAndUnboundLinesStayClean() throws IOException {
 		PatternLayout layout = new PatternLayout();
@@ -73,10 +83,11 @@ class AiLogPatternConfigTest {
 
 		String bound = layout.doLayout(this.appender.list.get(0));
 		assertThat(bound).as("绑了锚点：行首就是这一轮的 runId/sessionId").contains(RUN_ID).contains(SESSION_ID);
+		assertThat(bound).as("绑了锚点：同一行带本实例标识").contains(InstanceId.get());
 
 		String unbound = layout.doLayout(this.appender.list.get(1));
 		assertThat(unbound).as("没绑锚点：不渲染任何占位（既有行形不变）")
-			.doesNotContain(RUN_ID).doesNotContain(SESSION_ID).doesNotContain("null");
+			.doesNotContain(RUN_ID).doesNotContain(SESSION_ID).doesNotContain(InstanceId.get()).doesNotContain("null");
 	}
 
 	// ───────────────────────── 辅助 ─────────────────────────

@@ -121,6 +121,14 @@ public class SpToolCallingManager implements ToolCallingManager {
 	public static final String SCOPE_VIOLATION_CODE = ErrorCodes.SCOPE_NOT_DISCLOSED;
 
 	/**
+	 * 工具执行段抛错时 {@code tool_call_end.code} 的取值（AI 日志最小补齐批）。
+	 *
+	 * <p>只出现在日志面（事件行），不进帧、不进台账 —— 它是"这一行 end 为什么没有真的结局"的解释，
+	 * 而不是一个新的对外结局码（帧/台账的结局真值仍由条目自身的 outcome/code 承担）。
+	 */
+	public static final String CODE_TOOL_EXECUTION_THREW = "TOOL_EXECUTION_THREW";
+
+	/**
 	 * 步数到顶时的收尾指令（超时面治理批② 第 2 项；决策看板 {@code :14}）。
 	 *
 	 * <p>到顶<b>不判整轮失败</b>：把指令追加到历史末尾，让模型用已有信息收尾（部分完成也要说清缺什么）。
@@ -365,6 +373,8 @@ public class SpToolCallingManager implements ToolCallingManager {
 			for (PendingToolCall pending : pendings) {
 				if (haltedBy != null) {
 					responses.add(skipAsUpstreamFailed(runId, pending, haltedBy));
+					// 日志：被批策略带过（未执行）的调用补一条结局行 —— 否则它只留下"没有 start"这种痕迹
+					traceToolSkipped(runId, snapshot.getSessionId(), pending, ToolOutcome.CODE_UPSTREAM_FAILED);
 					continue;
 				}
 				// 事件边界上的取消检查（ADR-8 修正③：取消在"分片/事件边界"轮询）：
@@ -379,6 +389,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 					out.toolResult(pending, false, false, text);
 					responses.add(new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
 							modelData(pending, text)));
+					traceToolSkipped(runId, snapshot.getSessionId(), pending, pending.effectiveCode());
 					continue;
 				}
 				// 步数笼：到顶后的调用不再执行，结算成 skipped/TOOL_STEP_LIMIT（不判整轮失败）
@@ -386,6 +397,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 					// 帧序：先 tool_start 再 tool_result（与预检未通过分支同形，不破帧序契约）
 					out.toolStart(pending);
 					responses.add(skipAsStepLimit(runId, pending, maxToolSteps));
+					traceToolSkipped(runId, snapshot.getSessionId(), pending, ToolOutcome.CODE_TOOL_STEP_LIMIT);
 					log.warn("工具步数到顶，本调用不再执行 runId={} tool={} toolCallId={} steps={}/{}", runId,
 							pending.getName(), pending.getToolCallId(), stepsUsed, maxToolSteps);
 					continue;
@@ -416,20 +428,35 @@ public class SpToolCallingManager implements ToolCallingManager {
 						};
 					}
 				}
+				catch (RuntimeException ex) {
+					// 执行段抛错（挂起态外置失败 / 等待被打断 / 执行器异常）：先补 end 行再让异常穿出去
+					traceToolAborted(runId, snapshot.getSessionId(), pending, toolStartedAtMs, ex);
+					throw ex;
+				}
 				finally {
 					this.beacon.exit(runId, "done");
 				}
 				// 执行之后再查一次：确认门/前端工具可能正是在等待期间被取消
-				checkCancelled(runId);
+				try {
+					checkCancelled(runId);
+				}
+				catch (RuntimeException ex) {
+					// 取消发生在工具"已经开始"之后：此前只抛异常、不写 end ⇒ 日志里留一条孤儿 start
+					traceToolAborted(runId, snapshot.getSessionId(), pending, toolStartedAtMs, ex);
+					throw ex;
+				}
 				// R6 裁决同口径：信封的 outcome/code 必须在**结算之后**回读待决条目 —— 循环里的
 				// pending 是等待前那份（status 仍 PENDING、outcome=null），拿它取信封会把成功写成
 				// unknown。executeOnce/gate 写的是外置存储里的新副本，故此处重读（缺失则回落原对象）。
 				PendingToolCall settled = this.store.pending(runId, pending.getToolCallId());
 				PendingToolCall source = settled == null ? pending : settled;
 				// 日志链路批：工具生命周期的右端 —— 结局分类沿用条目真值（不另造一套口径）
+				// AI 日志最小补齐批：ms 含审批等待，execMs 把它扣掉（"工具慢"与"人在犹豫"必须可分）
+				long totalToolMs = System.currentTimeMillis() - toolStartedAtMs;
 				AiTrace.eventOn(runId, snapshot.getSessionId(), "tool_call_end", "toolCallId", pending.getToolCallId(),
 						"tool", pending.getName(), "kind", pending.getKind(),
-						"ms", System.currentTimeMillis() - toolStartedAtMs, "ok", source.effectiveOutcome().ok(),
+						"ms", totalToolMs, "execMs", execMsOf(source, totalToolMs), "skipped", false,
+						"ok", source.effectiveOutcome().ok(),
 						"outcome", source.effectiveOutcome().wire(), "code", source.effectiveCode(),
 						"executed", source.isExecuted(), "chars", text == null ? 0 : text.length());
 				// T2：回填模型的是裁剪后的文本；上面的 text 本身（进帧、进台账）保持全文
@@ -577,6 +604,64 @@ public class SpToolCallingManager implements ToolCallingManager {
 	}
 
 	// ── 三通道 ──────────────────────────────────────────────────────────────
+
+	/**
+	 * 工具执行耗时 = 总耗时 − 审批等待（AI 日志最小补齐批）。
+	 *
+	 * <p>只有"等人"的两类（{@code CONFIRM}/{@code FRONTEND}）才扣等待：扣的是
+	 * {@code reqAtMs（请求帧送达）→ resolvedAtMs（决策落地）} 这一段。缺任一端（旧数据 / 未送达的卡）
+	 * 就不扣 —— 宁可少扣也不要凭猜造一个数出来。
+	 */
+	private static long execMsOf(PendingToolCall source, long totalToolMs) {
+		long total = Math.max(0L, totalToolMs);
+		if (source == null) {
+			return total;
+		}
+		boolean humanWait = PendingToolCall.KIND_CONFIRM.equals(source.getKind())
+				|| PendingToolCall.KIND_FRONTEND.equals(source.getKind());
+		if (!humanWait) {
+			return total;
+		}
+		long requested = source.getReqAtMs();
+		long resolved = source.getResolvedAtMs();
+		if (requested <= 0L || resolved <= requested) {
+			return total;
+		}
+		return Math.max(0L, total - (resolved - requested));
+	}
+
+	/**
+	 * "没有执行"的三条路径（预检拦截 / 步数到顶 / 首错即停的连带跳过）的结局行。
+	 *
+	 * <p>它们<b>不发 start</b>：成对性只对真实执行成立。若也补 start，"start 没有 end"这个判据就会被
+	 * 稀释成永远成对 —— 那正是本批要堵的洞。字段里 {@code skipped=true} 是机器可判的"没跑"。
+	 */
+	private static void traceToolSkipped(String runId, String sessionId, PendingToolCall pending, String code) {
+		AiTrace.eventOn(runId, sessionId, "tool_call_end", "toolCallId", pending.getToolCallId(), "tool",
+				pending.getName(), "kind", pending.getKind(), "ms", 0, "execMs", 0, "skipped", true, "ok", false,
+				"outcome", pending.effectiveOutcome().wire(), "code", code == null ? "-" : code, "executed", false,
+				"chars", 0);
+	}
+
+	/**
+	 * "已经开始但没走到结算"的结局行：取消（事件边界轮询命中）与执行段异常。
+	 *
+	 * <p>此前这两条路径只抛异常、不写 end 行 ⇒ 日志里留下一条<b>只有 start 的孤儿调用</b>，
+	 * 排查时无从判断"是卡住了还是被取消了"。
+	 */
+	private void traceToolAborted(String runId, String sessionId, PendingToolCall pending, long startedAtMs,
+			RuntimeException error) {
+		long ms = Math.max(0L, System.currentTimeMillis() - startedAtMs);
+		boolean cancelled = error instanceof StreamViolationException violation
+				&& StreamViolationException.CANCELLED.equals(violation.getCode());
+		PendingToolCall settled = this.store.pending(runId, pending.getToolCallId());
+		PendingToolCall source = settled == null ? pending : settled;
+		AiTrace.eventOn(runId, sessionId, "tool_call_end", "toolCallId", pending.getToolCallId(), "tool",
+				pending.getName(), "kind", pending.getKind(), "ms", ms, "execMs", ms, "skipped", false, "ok", false,
+				"outcome", cancelled ? ToolOutcome.CANCELLED.wire() : ToolOutcome.FAILED.wire(),
+				"code", cancelled ? ToolOutcome.CODE_RUN_CANCELLED : CODE_TOOL_EXECUTION_THREW,
+				"executed", source.isExecuted(), "chars", 0, "cancelled", cancelled);
+	}
 
 	/** 事件边界上的取消检查：命中即抛出，交由 {@code ResilientChatService} 以取消收尾。 */
 	private void checkCancelled(String runId) {

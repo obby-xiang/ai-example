@@ -188,6 +188,14 @@ public class ConfirmGate {
 	private final Set<String> armedKeys = ConcurrentHashMap.newKeySet();
 
 	/**
+	 * runId → 本批挂起的起点（{@link #arm} 置位、{@link #disarm} 清除）。
+	 *
+	 * <p>用途只有一个：{@code approval_decided.suspendMs}（挂起开始 → 决策）。为什么不落 Redis：
+	 * 它是<b>本实例视角</b>的时钟（谁驱动这一轮谁记），跨实例决策读不到时写 {@code -1} 而不是编一个数。
+	 */
+	private final Map<String, Long> suspensionStartedAtMs = new ConcurrentHashMap<>();
+
+	/**
 	 * 提交侧的互斥（S5c-6）：<b>状态落库 → 发回执帧 → 唤醒</b>是一次不可分割的动作。
 	 *
 	 * <p>
@@ -370,6 +378,9 @@ public class ConfirmGate {
 		if (runId == null || toolCallIds == null) {
 			return;
 		}
+		// 挂起起点（AI 日志最小补齐批）：一批多卡时"挂起开始 → 每张卡决策"的间隔各不相同，
+		// 而卡送达 → 决策（waitedMs）只覆盖单张卡。suspendMs 用它当减数。
+		this.suspensionStartedAtMs.putIfAbsent(runId, System.currentTimeMillis());
 		for (String toolCallId : toolCallIds) {
 			if (toolCallId == null) {
 				continue;
@@ -391,6 +402,7 @@ public class ConfirmGate {
 		if (runId == null || toolCallIds == null) {
 			return;
 		}
+		this.suspensionStartedAtMs.remove(runId);
 		for (String toolCallId : toolCallIds) {
 			if (toolCallId == null) {
 				continue;
@@ -983,12 +995,25 @@ public class ConfirmGate {
 	 */
 	private void traceDecision(String runId, String toolCallId, String decision, PendingToolCall pending,
 			String outcome, String actor) {
-		long waitedMs = -1L;
+		// waitedMs = 卡送达（req 位）→ 决策；取不到请求时刻时写 none（不写 -1：-1 会被 awk 当成"负数毫秒"）
+		Object waitedMs = "none";
 		if (pending != null && pending.getResolvedAtMs() > 0 && pending.getReqAtMs() > 0) {
 			waitedMs = Math.max(0L, pending.getResolvedAtMs() - pending.getReqAtMs());
 		}
+		String kind = pending == null ? "none"
+				: (PendingToolCall.KIND_FRONTEND.equals(pending.getKind()) ? "frontend" : "confirm");
+		// timeoutS：本条目等待上限（none = 无上限）；与 approval_suspend 的同一把尺（suspendWaitSeconds）
+		Integer timeoutS = pending == null ? null : suspendWaitSeconds(pending);
+		long resolvedAtMs = pending == null ? 0L : pending.getResolvedAtMs();
+		// suspendMs = 挂起开始（arm，即 suspended 帧之前）→ 决策；与 waitedMs（单张卡送达 → 决策）区分：
+		// 一批多卡时后面的卡 suspendMs 明显更长（它在前几张卡的等待里排过队）
+		long suspendStartedAtMs = this.suspensionStartedAtMs.getOrDefault(runId, 0L);
+		// 同一毫秒内决策 = 0ms（用 >= 而不是 >：毫秒粒度下"同一毫秒"是常态，不能因此写成 -1）
+		long suspendMs = suspendStartedAtMs > 0L && resolvedAtMs >= suspendStartedAtMs
+				? resolvedAtMs - suspendStartedAtMs : -1L;
 		AiTrace.eventOn(runId, sessionOf(runId), "approval_decided", "toolCallId", toolCallId, "decision",
-				decision, "actor", actor, "outcome", outcome, "waitedMs", waitedMs,
+				decision, "actor", actor, "outcome", outcome, "waitedMs", waitedMs, "suspendMs", suspendMs,
+				"kind", kind, "timeoutS", timeoutS == null ? "none" : timeoutS,
 				"tool", pending == null ? null : pending.getName(),
 				"status", pending == null ? null : pending.getStatus());
 	}
@@ -1396,8 +1421,15 @@ public class ConfirmGate {
 						+ "租约留给等待方，不还）", runId);
 				return;
 			}
-			ResumeService.ResumeResult result = lease == null ? service.resume(runId)
-					: service.resume(runId, false, lease);
+			// 续跑原因经 MDC 标注（不改 resume(...) 的调用形状：既有用例的 verify(resume(runId)) 零改动）
+			AiTrace.markResumeReason(ResumeService.RESUME_REATTACH);
+			ResumeService.ResumeResult result;
+			try {
+				result = lease == null ? service.resume(runId) : service.resume(runId, false, lease);
+			}
+			finally {
+				AiTrace.clearResumeReason();
+			}
 			log.info("死卡兜底续跑结局 runId={} outcome={} body={}", runId,
 					result == null ? null : result.outcome(), result == null ? null : result.body());
 			if (lease == null) {

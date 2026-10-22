@@ -237,6 +237,9 @@ public class AiController {
 			HttpServletRequest httpRequest) {
 		ResilientChatService service = this.chatService.getIfAvailable();
 		if (!this.availability.isAvailable() || service == null) {
+			// AI 日志最小补齐批：这条 return 在 AiTrace.bind 之前 ⇒ 此前日志里一行不留（最大盲区）
+			deny(HttpStatus.SERVICE_UNAVAILABLE, this.availability.code(), request == null ? null : request.sessionId(),
+					null, "reason", "ai_unavailable");
 			return json(HttpStatus.SERVICE_UNAVAILABLE, unavailable());
 		}
 		// R4：Redis 不可用时在**开流之前**快速失败（≤ 一次 PING 的超时，见 RedisAvailability）。
@@ -244,9 +247,13 @@ public class AiController {
 		// 必填校验在探活之前（参数错就该报 400，不该被 Redis 状态遮住）；其余三道闸依赖 Redis 计数，
 		// 故排在探活之后 —— 由此产生的既定顺序是：Redis 不可用时，超长请求会先撞 503 而不是 400。
 		if (request == null || !StringUtils.hasText(request.sessionId()) || !StringUtils.hasText(request.message())) {
+			deny(HttpStatus.BAD_REQUEST, ErrorCodes.BAD_REQUEST, request == null ? null : request.sessionId(), null,
+					"reason", "missing_session_or_message");
 			return json(HttpStatus.BAD_REQUEST, Map.of("code", ErrorCodes.BAD_REQUEST, "message", "sessionId 与 message 均为必填"));
 		}
 		if (!this.redisAvailability.isAvailable()) {
+			deny(HttpStatus.SERVICE_UNAVAILABLE, RedisAvailability.code(), request.sessionId(), null,
+					"reason", "redis_unavailable");
 			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
 		}
 		// 批① 闸门 1：限流（§5.1 #3）。**排在归一化/长度之前**（裁决 I2，2026-10-21）：所有 /chat 请求
@@ -257,6 +264,9 @@ public class AiController {
 			if (this.securityEvents != null) {
 				this.securityEvents.rateLimited();
 			}
+			deny(HttpStatus.TOO_MANY_REQUESTS, ErrorCodes.RATE_LIMITED, request.sessionId(), null,
+					"scope", rate.scope(), "used", rate.used(), "limit", rate.limit(),
+					"retryAfterS", rate.retryAfterSeconds());
 			return rateLimited(rate);
 		}
 		// 批① 闸门 2：归一化（只归一不拦截，§5.1 #2）。先归一后量长度 —— 量的是"真正进模型的那份"，
@@ -271,6 +281,8 @@ public class AiController {
 		// 归一后为空 = 原文只由不可见字符构成（"零宽填充"式空转）：与"message 必填"同一口径拒掉，
 		// 否则会带着一条空 user 消息进模型与记忆窗口。
 		if (!StringUtils.hasText(sanitized.text())) {
+			deny(HttpStatus.BAD_REQUEST, ErrorCodes.BAD_REQUEST, request.sessionId(), null, "reason",
+					"empty_after_sanitize", "chars", sanitized.text().length());
 			return json(HttpStatus.BAD_REQUEST,
 					Map.of("code", ErrorCodes.BAD_REQUEST, "message", "message 归一化后为空（原文仅含不可见字符），请重新输入"));
 		}
@@ -280,6 +292,8 @@ public class AiController {
 			if (this.securityEvents != null) {
 				this.securityEvents.inputRejected();
 			}
+			deny(HttpStatus.BAD_REQUEST, ErrorCodes.MESSAGE_TOO_LONG, request.sessionId(), null,
+					"chars", sanitized.text().length(), "limit", maxChars);
 			return json(HttpStatus.BAD_REQUEST, messageTooLong(sanitized.text().length(), maxChars));
 		}
 
@@ -313,11 +327,14 @@ public class AiController {
 		// 显式模型不可用 ⇒ 400 MODEL_NOT_FOUND（不静默回落默认模型：用户点了 A 却跑 B 比报错更糟）。
 		if (this.aiConfigService != null && StringUtils.hasText(effective.modelId())
 				&& this.aiConfigService.resolveChatTarget(effective.modelId()).isEmpty()) {
+			deny(HttpStatus.BAD_REQUEST, ErrorCodes.MODEL_NOT_FOUND, sessionId, null,
+					"model", effective.modelId());
 			return json(HttpStatus.BAD_REQUEST, Map.of("code", ErrorCodes.MODEL_NOT_FOUND,
 					"message", "该模型当前不可用（未在可用端点的模型清单里，或端点已停用/密钥不可用）：" + effective.modelId()));
 		}
 		String paramsRejection = validateParams(effective.params());
 		if (paramsRejection != null) {
+			deny(HttpStatus.BAD_REQUEST, ErrorCodes.INVALID_PARAM, sessionId, null, "reason", paramsRejection);
 			return json(HttpStatus.BAD_REQUEST, Map.of("code", ErrorCodes.INVALID_PARAM, "message", paramsRejection));
 		}
 		String runId = UUID.randomUUID().toString();
@@ -331,6 +348,9 @@ public class AiController {
 			body.put("runId", busy.runId());
 			body.put("degraded", busy.degraded());
 			body.put("reattach", "/api/ai/events/" + busy.runId());
+			// 本轮没有 runId（被拒了）：锚到"占着会话的那一轮"，那才是要看的那条链
+			deny(HttpStatus.CONFLICT, ErrorCodes.SESSION_BUSY, sessionId, busy.runId(), "heldBy", busy.runId(),
+					"degraded", busy.degraded());
 			return json(HttpStatus.CONFLICT, body);
 		}
 
@@ -352,6 +372,11 @@ public class AiController {
 				}
 				catch (Exception ex) {
 					log.error("AI 轮次未捕获异常 sessionId={} runId={}", sessionId, runId, ex);
+					// 每轮必有终态行：压缩/记忆写/快照建/取模型这些"环外"抛错此前只有一行 ERROR，
+					// 没有任何结构化终态 ⇒ 按 runId grep 会看不到收尾。这里补一条终态事件。
+					AiTrace.eventOn(runId, sessionId, "turn_exception", "code", "UNCAUGHT",
+							"type", ex.getClass().getSimpleName(),
+							"msg", ex.getMessage());
 					out.error(ErrorCodes.AI_RUN_FAILED, String.valueOf(ex.getMessage()));
 				}
 				finally {
@@ -827,6 +852,35 @@ public class AiController {
 	 */
 	private ResponseEntity<Map<String, Object>> json(HttpStatus status, Map<String, Object> body) {
 		return ResponseEntity.status(status).contentType(MediaType.APPLICATION_JSON).body(body);
+	}
+
+	/**
+	 * 请求被<b>拒绝</b>时的结构化出口（AI 日志最小补齐批）：{@code event=turn_denied}。
+	 *
+	 * <p>为什么必须有：{@code AiController} 里所有拒绝都发生在 {@link AiTrace#bind} 之前 ——
+	 * 既没有 {@code turn_accepted}，也不会有 {@code turn_end}。用户说"点了没反应"时，日志里
+	 * 一行可 grep 的痕迹都没有，只能去翻 HTTP 访问日志（而它可能根本不在同一台机器上）。
+	 *
+	 * <p>锚点口径：{@code sessionId} 能取到就带上；{@code runId} 只有两种情况有 ——
+	 * 409 会话忙（<b>占着会话的那一轮</b>的 runId，这才是要看的那条链）与"受理之后才被拒"的路径；
+	 * 其余渲染 {@code -}（"这次请求还没有轮次"本身就是信息）。
+	 *
+	 * <p>字段只记元数据：{@code status}/{@code code} + 各拒绝点自己的少量数字/枚举（长度、上限、模型名）。
+	 *
+	 * @param status HTTP 状态（同时进事件字段，便于按 4xx/5xx 切片）
+	 * @param code 稳定机器码（与响应体同源，不另造一套）
+	 * @param sessionId 会话 id（可空）
+	 * @param runId 相关轮次（可空；只有 409 与"受理后拒绝"才有）
+	 * @param extra 追加的 {@code k,v} 对
+	 */
+	private void deny(HttpStatus status, String code, String sessionId, String runId, Object... extra) {
+		Object[] fields = new Object[extra.length + 4];
+		fields[0] = "status";
+		fields[1] = status.value();
+		fields[2] = "code";
+		fields[3] = code;
+		System.arraycopy(extra, 0, fields, 4, extra.length);
+		AiTrace.eventOn(runId, sessionId, "turn_denied", fields);
 	}
 
 	/**

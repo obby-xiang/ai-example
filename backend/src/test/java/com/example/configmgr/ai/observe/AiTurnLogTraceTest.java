@@ -170,7 +170,8 @@ class AiTurnLogTraceTest {
 
 		String start = line("turn_start");
 		assertThat(start).contains("runId=" + RUN_ID).contains("sessionId=" + SESSION_ID)
-			.contains("model=test-model").contains("attempt=1").contains("resumed=false");
+			.contains("model=test-model").contains("attempt=1").contains("resumed=false")
+			.contains("resumeReason=none");
 
 		String firstByte = line("upstream_first_byte");
 		assertThat(firstByte).contains("attempt=1").containsPattern("ms=\\d+");
@@ -179,6 +180,59 @@ class AiTurnLogTraceTest {
 		assertThat(end).contains("status=done").contains("attempts=1").contains("gateWaitMs=").contains("activeMs=")
 			.contains("totalMs=").contains("toolCalls=0").contains("inputTokens=").contains("outputTokens=")
 			.contains("totalTokens=").contains("est=").contains("chars=");
+	}
+
+	// ── L7：turn_end 的跨段/排队/可信度字段（日志最小补齐批） ──
+
+	/**
+	 * 一轮的"慢"分三段：排队（{@code turn_accepted → turn_start}）、机器（{@code activeMs}）、人
+	 * （{@code gateWaitMs}）。缺 queueMs 时"提交后迟迟没开始"会被算进机器耗时，误判成模型慢。
+	 *
+	 * <p>{@code runTotalMs} 从 run 创建算起，跨挂起/续跑两段 —— 与 {@code totalMs}（本段墙钟）分工不同：
+	 * 前者回答"这个 run 从我点发送到现在多久"，后者回答"这一次驱动跑了多久"。
+	 */
+	@Test
+	void turnEndCarriesQueueAndRunTotalAndProviderAndUsageCredibility() {
+		this.upstream.set(Flux.just(chunk(REPLY_TEXT), terminal("stop")));
+		AiTrace.markAccepted();
+
+		runTurn();
+
+		String end = line("turn_end");
+		assertThat(end).as("排队耗时（turn_accepted → turn_start）").containsPattern("queueMs=\\d+");
+		assertThat(end).as("跨段总时长（run 创建 → 终态）").containsPattern("runTotalMs=\\d+");
+		assertThat(end).as("本轮 provider（与 turn_start 同源）").contains("provider=test-provider");
+		assertThat(end).as("usage 可信度：采到的 usage 帧数 / 判脏帧数").containsPattern("frames=\\d+")
+			.containsPattern("dirty=\\d+");
+		assertThat(end).as("终态所在尝试序号").contains("attempt=1");
+	}
+
+	/**
+	 * 没有 {@code turn_accepted}（直接驱动 / 续跑）时 queueMs 必须显式写 -1 —— "没测到"与"排队 0ms"
+	 * 是两件事，不能都渲染成 0。
+	 */
+	@Test
+	void turnEndWithoutAnAcceptedMarkReportsQueueMsAsUnknown() {
+		this.upstream.set(Flux.just(chunk(REPLY_TEXT), terminal("stop")));
+
+		runTurn();
+
+		assertThat(line("turn_end")).contains("queueMs=-1");
+	}
+
+	/**
+	 * 重试行的三问：这次尝试花了多久（{@code attemptMs}）、首包到了没有（{@code firstByteMs}，
+	 * -1 = 一个分片都没到）、这次尝试烧了多少 token（{@code inputTokens}/{@code outputTokens}）。
+	 */
+	@Test
+	void retryCarriesAttemptDurationFirstByteAndPerAttemptTokens() {
+		this.upstream.set(Flux.error(new IllegalStateException("upstream stream error")));
+
+		runTurn();
+
+		String retry = line("turn_retry");
+		assertThat(retry).containsPattern("attemptMs=\\d+").containsPattern("firstByteMs=-1|firstByteMs=\\d+")
+			.containsPattern("inputTokens=\\d+").containsPattern("outputTokens=\\d+");
 	}
 
 	@Test
@@ -261,7 +315,8 @@ class AiTurnLogTraceTest {
 	void resumedTurnIsMarkedResumedAndStillEndsWithTurnEnd() {
 		runResumedTurn();
 
-		assertThat(line("turn_start")).contains("resumed=true").contains("model=test-model");
+		assertThat(line("turn_start")).contains("resumed=true").contains("model=test-model")
+			.contains("resumeReason=reattach");
 		assertThat(line("turn_end")).contains("status=done");
 	}
 

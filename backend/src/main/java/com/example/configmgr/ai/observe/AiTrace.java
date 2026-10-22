@@ -4,6 +4,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 
+import com.example.configmgr.ai.run.InstanceId;
+
 import java.util.Map;
 
 /**
@@ -38,6 +40,15 @@ public final class AiTrace {
 	/** MDC 键：会话 id。 */
 	public static final String SESSION_ID = "sessionId";
 
+	/** MDC 键：本进程实例标识（多实例排障的"哪一半是我"）。 */
+	public static final String INSTANCE_ID = "instanceId";
+
+	/** MDC 键：本轮被受理的时刻（{@code turn_accepted} 那一刻；{@code queueMs} 的减数）。 */
+	public static final String ACCEPTED_AT_MS = "acceptedAtMs";
+
+	/** MDC 键：续跑原因（{@code startup}/{@code manual}/{@code deadcard}/{@code reattach}）。 */
+	public static final String RESUME_REASON = "resumeReason";
+
 	/** 单值最大字符数（超出截断）：一条事件必须能一行读完。 */
 	private static final int MAX_VALUE_CHARS = 160;
 
@@ -63,6 +74,8 @@ public final class AiTrace {
 			MDC.remove(SESSION_ID);
 			MDC.put(RUN_ID, runId);
 		}
+		// 实例标识是"本进程常量"，随锚点一起进 MDC：多实例下两份 app.log 合并后仍能分清来源
+		MDC.put(INSTANCE_ID, InstanceId.get());
 		if (sessionId != null && !sessionId.isBlank()) {
 			MDC.put(SESSION_ID, sessionId);
 		}
@@ -72,6 +85,61 @@ public final class AiTrace {
 	public static void clear() {
 		MDC.remove(RUN_ID);
 		MDC.remove(SESSION_ID);
+		MDC.remove(INSTANCE_ID);
+		MDC.remove(ACCEPTED_AT_MS);
+		MDC.remove(RESUME_REASON);
+	}
+
+	/**
+	 * 记下"本轮被受理"的时刻（HTTP 线程，{@code turn_accepted} 之前）。
+	 *
+	 * <p>为什么放在 MDC 而不是静态表：受理与开始本来就在<b>同一条线程链</b>上（提交时
+	 * {@link AiMdcTaskDecorator} 抓快照），MDC 天然跟过去；静态表要自己管容量与清理，反而多一处泄漏面。
+	 * 取不到（直接驱动/续跑）时 {@code queueMs} 渲染 {@code -1} —— "没测到"与"排队 0ms"必须可区分。
+	 */
+	public static void markAccepted() {
+		MDC.put(ACCEPTED_AT_MS, String.valueOf(System.currentTimeMillis()));
+	}
+
+	/** 受理时刻（毫秒）；未标记返回 {@code -1}。 */
+	public static long acceptedAtMs() {
+		return parseLong(MDC.get(ACCEPTED_AT_MS));
+	}
+
+	/**
+	 * 记下续跑原因（{@code startup}/{@code manual}/{@code deadcard}/{@code reattach}）。
+	 *
+	 * <p>同样借 MDC 过线程边界：{@code ResumeService.resume} 在提交驱动任务<b>之前</b>置位，
+	 * 驱动线程的 {@code turn_start} 读到它 —— 于是"这一轮为什么又跑起来了"不必靠时间戳推断。
+	 */
+	public static void markResumeReason(String reason) {
+		if (reason == null || reason.isBlank()) {
+			MDC.remove(RESUME_REASON);
+			return;
+		}
+		MDC.put(RESUME_REASON, reason);
+	}
+
+	/** 续跑原因；未标注返回 {@code null}（调用方决定回落口径）。 */
+	public static String currentResumeReason() {
+		return MDC.get(RESUME_REASON);
+	}
+
+	/** 只摘续跑原因（不动 runId/sessionId）：临时标注后必须还原，避免"上一个入口的原因"黏在池线程上。 */
+	public static void clearResumeReason() {
+		MDC.remove(RESUME_REASON);
+	}
+
+	private static long parseLong(String text) {
+		if (text == null || text.isBlank()) {
+			return -1L;
+		}
+		try {
+			return Long.parseLong(text.trim());
+		}
+		catch (NumberFormatException ex) {
+			return -1L;
+		}
 	}
 
 	/** 当前 MDC 里的 runId（无则 null）。 */
@@ -155,6 +223,25 @@ public final class AiTrace {
 		if (!log.isInfoEnabled()) {
 			return;
 		}
+		// 行首锚点补绑（AI 日志最小补齐批）：eventOn 的显式锚点此前只进事件体，行首仍可能是空的
+		// （压缩/决策这类"由旁路线程发射"的事件就是这样丢了行首）。这里临时补绑、发射后还原 ——
+		// "显式给了 runId 就一定能在行首看到它"不依赖调用线程的 MDC 运气。
+		Map<String, String> previous = MDC.getCopyOfContextMap();
+		if (currentRunId() == null && runId != null && !runId.isBlank()) {
+			bind(runId, sessionId);
+		}
+		else if (currentSessionId() == null && sessionId != null && !sessionId.isBlank() && currentRunId() != null) {
+			MDC.put(SESSION_ID, sessionId);
+		}
+		try {
+			writeEvent(runId, sessionId, name, kv);
+		}
+		finally {
+			apply(previous);
+		}
+	}
+
+	private static void writeEvent(String runId, String sessionId, String name, Object... kv) {
 		StringBuilder line = new StringBuilder(96);
 		line.append("event=").append(clean(name)).append(' ');
 		appendField(line, RUN_ID, runId == null || runId.isBlank() ? currentRunId() : runId);

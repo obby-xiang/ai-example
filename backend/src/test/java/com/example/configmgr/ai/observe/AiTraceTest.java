@@ -167,4 +167,41 @@ class AiTraceTest {
 				.isEqualTo("event=turn_end runId=- sessionId=- status=done");
 	}
 
+	/**
+	 * 旁路线程（压缩 / 决策 / 跨实例唤醒）用 {@code eventOn} 的<b>显式锚点</b>发射时，行首也必须带上它。
+	 *
+	 * <p>此前显式锚点只进事件体、行首仍靠"当前线程的 MDC 有没有" —— 于是同一行出现
+	 * "事件体说 runId=X、行首却空白"的自相矛盾形态（按行首 grep 的脚本捞不到它）。
+	 * 现在的口径：发射期临时补绑，发射后还原（不在别人的线程上留锚点）。
+	 */
+	@Test
+	void eventOnBindsTheLineHeadAnchorForSideChannelThreads() {
+		AiTrace.eventOn(RUN_ID, SESSION_ID, "compaction", "level", "L1");
+
+		ILoggingEvent emitted = this.appender.list.get(0);
+		assertThat(emitted.getMDCPropertyMap())
+			.as("行首锚点在发射期成立（pattern 从这里取值）")
+			.containsEntry(AiTrace.RUN_ID, RUN_ID)
+			.containsEntry(AiTrace.SESSION_ID, SESSION_ID)
+			.containsEntry(AiTrace.INSTANCE_ID, com.example.configmgr.ai.run.InstanceId.get());
+		assertThat(MDC.get(AiTrace.RUN_ID)).as("发射后还原：不把锚点留给池线程").isNull();
+		assertThat(MDC.get(AiTrace.SESSION_ID)).isNull();
+	}
+
+	/** 受理时刻 / 续跑原因同样借 MDC 过线程边界（取不到时 queueMs 渲染 -1，见 turn_end）。 */
+	@Test
+	void acceptedAtAndResumeReasonTravelWithTheMdc() {
+		assertThat(AiTrace.acceptedAtMs()).as("未标记 = -1（不写 0：0 会被读成'排队 0ms'）").isEqualTo(-1L);
+
+		AiTrace.markAccepted();
+		AiTrace.markResumeReason("startup");
+
+		assertThat(AiTrace.acceptedAtMs()).isPositive();
+		assertThat(AiTrace.currentResumeReason()).isEqualTo("startup");
+
+		AiTrace.clear();
+		assertThat(AiTrace.acceptedAtMs()).isEqualTo(-1L);
+		assertThat(AiTrace.currentResumeReason()).isNull();
+	}
+
 }

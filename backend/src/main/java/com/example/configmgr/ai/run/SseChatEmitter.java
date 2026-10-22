@@ -1390,6 +1390,10 @@ public class SseChatEmitter {
 			EVICTED_TOTAL.incrementAndGet();
 			log.warn("写超时摘除订阅者 runId={} budget={}ms writeTimeouts={}（前端按 onerror/onclose 重挂差量补发）",
 					this.runId, this.writeBudget.timeoutMillis(), SseWriteBudget.writeTimeouts());
+			// 结构化出口（AI 日志最小补齐批）：把"谁被摘了、为什么"从一行中文 WARN 升成可聚合事件
+			AiTrace.eventOn(this.runId, null, "sse_detach", "kind", "write_timeout",
+					"reason", "write_timeout", "budgetMs", this.writeBudget.timeoutMillis(),
+					"writeTimeouts", SseWriteBudget.writeTimeouts(), "subscribers", this.subscribers.size());
 		}
 		completeOne(sub);
 	}
@@ -1421,6 +1425,8 @@ public class SseChatEmitter {
 		}
 		EVICTED_TOTAL.incrementAndGet();
 		log.warn("摘除订阅者 runId={} reason={}", this.runId, reason);
+		AiTrace.eventOn(this.runId, null, "sse_detach", "kind", "evicted", "reason", reason,
+				"subscribers", this.subscribers.size());
 		closeSubscription(sub, "摘除：" + reason);
 		completeOne(sub);
 	}

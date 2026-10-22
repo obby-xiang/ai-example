@@ -5,8 +5,12 @@ import com.example.configmgr.ai.conformance.FrameWire;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.common.sse.SseWriteBudget;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
@@ -98,6 +102,37 @@ class SseChatEmitterWriteBudgetTest {
 	}
 
 	// ── 超时处置：摘除 + 由写出线程收尾（不在调用线程 complete） ──────────────
+
+	/**
+	 * 摘除必须<b>可被聚合</b>：只留一行中文 WARN 时，"这一轮被摘过几次、为什么被摘"只能人肉读日志。
+	 * 结构化事件 {@code sse_detach} 把原因、预算、计数摊成可 grep 的字段。
+	 */
+	@Test
+	void writeTimeoutEmitsAStructuredSseDetachEvent() throws Exception {
+		InMemoryRunStore store = new InMemoryRunStore();
+		SseChatEmitter out = budgeted(store, 256, 300L);
+		MonitorFaithfulEmitter slow = new MonitorFaithfulEmitter(true, false);
+		out.attach(slow.emitter());
+
+		// 事件行由 AiTrace 的 logger 产出（与 WARN 不同源）—— 挂错 logger 会得到"实收 0 行"的假红
+		Logger emitterLogger = (Logger) LoggerFactory.getLogger(com.example.configmgr.ai.observe.AiTrace.class);
+		ListAppender<ILoggingEvent> appender = new ListAppender<>();
+		appender.start();
+		emitterLogger.addAppender(appender);
+		try {
+			out.delta("d1");
+			assertThat(slow.awaitFirstSend(5L)).isTrue();
+			assertThat(awaitSubscriberCount(out, 0, 3L)).as("超预算 ⇒ 摘除").isTrue();
+
+			String detach = awaitEventLine(appender, "sse_detach");
+			assertThat(detach).as("摘除的结构化出口").contains("kind=write_timeout")
+				.contains("runId=" + RUN_ID).containsPattern("budgetMs=\\d+");
+		}
+		finally {
+			emitterLogger.detachAppender(appender);
+			slow.release();
+		}
+	}
 
 	@Test
 	void writeTimeoutEvictsTheSubscriberAndClosesItWhenTheStuckWriteFinallyReturns() throws Exception {
@@ -405,6 +440,22 @@ class SseChatEmitterWriteBudgetTest {
 			TimeUnit.MILLISECONDS.sleep(10L);
 		}
 		assertThat(wire.size()).as("帧线在超时前收到 %d 帧（实际 %d）", size, wire.size()).isEqualTo(size);
+	}
+
+	/** 等一条结构化事件行出现（摘除由投递/写出线程产出，与调用线程不同步）。 */
+	private static String awaitEventLine(ListAppender<ILoggingEvent> appender, String name)
+			throws InterruptedException {
+		long deadline = System.currentTimeMillis() + 5000L;
+		while (System.currentTimeMillis() < deadline) {
+			for (ILoggingEvent event : new CopyOnWriteArrayList<>(appender.list)) {
+				String message = event.getFormattedMessage();
+				if (message.startsWith("event=" + name + " ")) {
+					return message;
+				}
+			}
+			TimeUnit.MILLISECONDS.sleep(20L);
+		}
+		throw new AssertionError("缺少事件行 event=" + name + "；实收 = " + appender.list.size() + " 行");
 	}
 
 	private static PendingToolCall pending(String toolCallId) {

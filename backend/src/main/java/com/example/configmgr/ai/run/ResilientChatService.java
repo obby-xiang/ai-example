@@ -319,9 +319,12 @@ public class ResilientChatService {
 				this.properties.getResilience().getFirstByteTimeout(), this.properties.getResilience().getInterEventTimeout(),
 				this.properties.getResilience().getMaxAttempts(), this.properties.getResilience().getTotalBudget());
 		log.debug("AI 轮次模型身份 runId={} provider={} model={}", runId, runtime.providerCode(), runtime.modelId());
+		// 排队耗时（turn_accepted → turn_start）：在本行<b>发射时</b>取值，窗口与手册字段定义逐字一致
+		long queueMs = queueMs(System.currentTimeMillis());
 		// 日志链路批：成功路径的首条 INFO（此前一轮正常开始/结束在 INFO 级无痕）
+		// AI 日志最小补齐批：resumeReason 一律出现（首轮 = none），续跑四值见手册
 		AiTrace.event("turn_start", "model", runtime.modelId(), "provider", runtime.providerCode(), "attempt", 1,
-				"resumed", false, "context", context.getContextKey(), "tools", tools.size(),
+				"resumed", false, "resumeReason", "none", "context", context.getContextKey(), "tools", tools.size(),
 				"inputEst", inputTokens, "compact", compaction.levelWire(), "newSession", !existed,
 				"maxAttempts", this.properties.getResilience().getMaxAttempts(),
 				"budgetMs", this.properties.getResilience().getTotalBudget().toMillis());
@@ -331,7 +334,8 @@ public class ResilientChatService {
 		try {
 			TurnContext turn = new TurnContext(systemTokens, toolsTokens, inputTokens,
 					systemTokens + toolsTokens + ContextEstimator.estimateMessages(memory) + inputTokens,
-					compaction.limitTokens(), runtime.modelId(), compaction.levelWire(), turnStartedAtMs, paramsLocked);
+					compaction.limitTokens(), runtime.modelId(), compaction.levelWire(), turnStartedAtMs, paramsLocked,
+					runtime.providerCode(), queueMs);
 			runAttempts(runId, sessionId, turnStartedAtMs, out, turn, attempt -> {
 				log.debug("本轮第 {} 次尝试组装请求 runId={} sessionId={}（每轮重建请求）", attempt, runId, sessionId);
 				return Flux.defer(() -> {
@@ -397,10 +401,12 @@ public class ResilientChatService {
 		// 段级预算（决策看板 :14）：续跑 = 一次恢复点 ⇒ 新段从这里起算
 		this.beacon.markSegmentStart(runId, turnStartedAtMs);
 		// 上下文专项批①：续跑侧的分母/分项锚点现算（历史里没有 tools schema，故走披露口径）
-		TurnContext turn = resumedTurn(runId, context, history, runtime.modelId(), turnStartedAtMs);
+		TurnContext turn = resumedTurn(runId, context, history, runtime.modelId(), runtime.providerCode(),
+				turnStartedAtMs);
 		AiTrace.event("turn_start", "model", runtime.modelId(), "provider", runtime.providerCode(), "attempt", 1,
-				"resumed", true, "context", context.getContextKey(), "history", history.size(),
-				"compact", turn.compactionLevel(), "maxAttempts", this.properties.getResilience().getMaxAttempts(),
+				"resumed", true, "resumeReason", resumeReason(), "context", context.getContextKey(), "history",
+				history.size(), "compact", turn.compactionLevel(), "maxAttempts",
+				this.properties.getResilience().getMaxAttempts(),
 				"budgetMs", this.properties.getResilience().getTotalBudget().toMillis());
 		try {
 			runAttempts(runId, sessionId, turnStartedAtMs, out, turn, attempt -> {
@@ -570,9 +576,15 @@ public class ResilientChatService {
 				retryFrame.put("elapsedMs", System.currentTimeMillis() - turnStartedAtMs);
 				out.retry(retryFrame);
 				// 日志链路批：重试是"这一轮为什么慢/为什么贵"的第一解释项，必须有结构化行
+				// AI 日志最小补齐批：补上"这次尝试本身"的三个数（耗时 / 首包 / token），否则重试只能看整轮汇总
+				Map<String, Object> attemptUsage = accumulator.usage(turn.promptEstimate());
 				AiTrace.event("turn_retry", "attempt", attempt, "nextAttempt", attempt + 1, "code", violation.getCode(),
 						"reason", violation.getMessage(), "emitted", emitted, "sideEffect", sideEffect,
 						"upstreamEvents", watchdog.upstreamEvents(),
+						"attemptMs", System.currentTimeMillis() - attemptStartedAtMs,
+						"firstByteMs", accumulator.firstByteMs(attemptStartedAtMs),
+						"inputTokens", attemptUsage.getOrDefault("promptTokens", 0),
+						"outputTokens", attemptUsage.getOrDefault("completionTokens", 0),
 						"elapsedMs", System.currentTimeMillis() - turnStartedAtMs);
 			}
 			finally {
@@ -809,13 +821,39 @@ public class ResilientChatService {
 		long gateWaitMs = Math.max(0L, this.beacon.gateWaitMs(runId));
 		Map<String, Object> usage = accumulator == null ? Map.of() : accumulator.usage(turn.promptEstimate());
 		AiTrace.event("turn_end", "status", status, "code", code == null ? "none" : code, "attempts", attempts,
+				// 终态所在尝试序号（与 turn_start/turn_retry 的 attempt 同一口径）
+				"attempt", attempts,
 				"totalMs", totalMs, "activeMs", Math.max(0L, totalMs - gateWaitMs), "gateWaitMs", gateWaitMs,
+				// 排队耗时（turn_accepted → turn_start）与跨段总时长（run 创建 → 终态）：三个数一起才回答"慢在哪"
+				"queueMs", turn.queueMs(), "runTotalMs", runTotalMs(runId),
 				"toolCalls", this.beacon.startedCount(runId), "chars", accumulator == null ? 0 : accumulator.text().length(),
 				"inputTokens", usage.getOrDefault("promptTokens", 0),
 				"outputTokens", usage.getOrDefault("completionTokens", 0),
 				"totalTokens", usage.getOrDefault("totalTokens", 0), "est", usage.getOrDefault("est", true),
-				"model", doneModel(accumulator, turn),
+				// usage 可信度：采到的非空 usage 帧数 / 被判脏回退的帧数（est=true 时这两个数是唯一佐证）
+				"frames", usage.getOrDefault("frames", 0), "dirty", usage.getOrDefault("dirty", 0),
+				"model", doneModel(accumulator, turn), "provider", turn.provider(),
 				"upstreamEvents", watchdog == null ? 0 : watchdog.upstreamEvents());
+	}
+
+	/**
+	 * 跨段总时长：{@code run 创建 → 现在}。
+	 *
+	 * <p>与 {@code totalMs}（本段墙钟）分工：挂起/续跑后本段时钟被重置，只有这个数回答"这一个 run
+	 * 从我点发送到现在多久"。快照读不到（终态已删 / 单测替身）时写 {@code -1}，不写 0（0 会被读成"瞬间完成"）。
+	 */
+	private long runTotalMs(String runId) {
+		try {
+			RunSnapshot snapshot = this.store.get(runId);
+			if (snapshot == null || snapshot.getCreatedAtMs() <= 0L) {
+				return -1L;
+			}
+			return Math.max(0L, System.currentTimeMillis() - snapshot.getCreatedAtMs());
+		}
+		catch (RuntimeException ex) {
+			// 终态行是"必须有"的那一行：读快照失败不得把它吞掉
+			return -1L;
+		}
 	}
 
 	/**
@@ -1432,7 +1470,8 @@ public class ResilientChatService {
 	 *                       （批③；载体取 {@code done.extra} 的 additive 键，帧型不变）
 	 */
 	private record TurnContext(int systemTokens, int toolsTokens, int inputTokens, int promptEstimate, int limitTokens,
-			String model, String compactionLevel, long turnStartedAtMs, boolean paramsLocked) {
+			String model, String compactionLevel, long turnStartedAtMs, boolean paramsLocked, String provider,
+			long queueMs) {
 	}
 
 	/**
@@ -1609,7 +1648,7 @@ public class ResilientChatService {
 
 	/** 续跑侧的装配锚点（历史里的 system 即是人设 + 工作区快照的合成体；级别来自一次性交接）。 */
 	private TurnContext resumedTurn(String runId, AiContext context, List<Message> history, String model,
-			long turnStartedAtMs) {
+			String provider, long turnStartedAtMs) {
 		int systemTokens = 0;
 		for (Message message : history) {
 			if (message.getMessageType() == MessageType.SYSTEM) {
@@ -1624,7 +1663,35 @@ public class ResilientChatService {
 			level = "none";
 		}
 		return new TurnContext(systemTokens, toolsTokens, 0, systemTokens + toolsTokens + historyTokens, limit, model,
-				level, turnStartedAtMs, false);
+				level, turnStartedAtMs, false, provider, -1L);
+	}
+
+	/**
+	 * 排队耗时（{@code turn_accepted → turn_start}）；没有受理标记（直接驱动 / 续跑 / 单测）返回 {@code -1}。
+	 *
+	 * <p>刻意与 {@code activeMs} 分开：{@code activeMs} 从 {@code turn_start} 起算，这一段落在它之外 ——
+	 * 若没有这个数，"提交后迟迟没开始"会被读成"模型慢"。
+	 *
+	 * <p><b>口径</b>：窗口 = {@code turn_accepted} 那一行 → {@code turn_start} 这一行。它因此<b>含</b>
+	 * 开始前的本地装配（记忆窗口读 + 请求前压缩 + 快照写）—— 那几段既不是模型也不是工具，若无本数
+	 * 就整段不可见。要再拆出"纯池排队"需第三个时间戳，本批不加（手册同口径登记）。
+	 *
+	 * @param turnStartAtMs {@code turn_start} 的发射时刻（调用点取 {@code now}）
+	 */
+	private static long queueMs(long turnStartAtMs) {
+		long acceptedAtMs = AiTrace.acceptedAtMs();
+		return acceptedAtMs <= 0L ? -1L : Math.max(0L, turnStartAtMs - acceptedAtMs);
+	}
+
+	/**
+	 * 续跑原因（{@code startup}/{@code manual}/{@code deadcard}/{@code reattach}）。
+	 *
+	 * <p>由 {@code ResumeService} 在提交驱动任务前经 MDC 标注；未标注（直接驱动 / 单测）按
+	 * {@code reattach} 记 —— 口径见手册：四个值里 {@code reattach} 是"其余续跑入口"的兜底。
+	 */
+	private static String resumeReason() {
+		String reason = AiTrace.currentResumeReason();
+		return reason == null || reason.isBlank() ? "reattach" : reason;
 	}
 
 	/**

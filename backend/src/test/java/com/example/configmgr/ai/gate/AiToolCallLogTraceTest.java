@@ -60,6 +60,9 @@ class AiToolCallLogTraceTest {
 
 	private static final String CALL_ID = "call-toollog-1";
 
+	/** 批内第二个调用（步数到顶被跳过的那一个）。 */
+	private static final String SECOND_CALL_ID = "call-toollog-2";
+
 	/** 参数与结果里的可识别串：它们绝不能出现在事件行里。 */
 	private static final String ARG_MARKER = "taskId-marker-7788";
 
@@ -101,7 +104,8 @@ class AiToolCallLogTraceTest {
 		ConfirmGate gate = new ConfirmGate(this.store, this.registry, this.properties, this.cancellations, this.beacon,
 				List.of());
 		this.manager = new SpToolCallingManager(this.store, this.registry, gate, this.toolRegistry, this.codec,
-				this.beacon, this.cancellations, new ToolResultLimiter(this.properties), List.of());
+				this.beacon, this.cancellations, new ToolResultLimiter(this.properties), List.of(), null, null, null, null,
+				this.properties);
 		RunSnapshot snapshot = this.store.seedRun(RUN_ID, SESSION_ID);
 		snapshot.setContext(AiContext.empty().toMap());
 		this.store.save(snapshot);
@@ -128,6 +132,62 @@ class AiToolCallLogTraceTest {
 		String end = result.line("tool_call_end");
 		assertThat(end).contains("toolCallId=" + CALL_ID).contains("tool=echo").containsPattern("ms=\\d+")
 			.contains("ok=true").contains("outcome=ok").contains("executed=true");
+	}
+
+	/**
+	 * {@code ms} 是"开始到结算"，含等人的时间；{@code execMs} 是<b>扣掉审批等待</b>的执行时间。
+	 * 没有后者时"工具很慢"与"人在犹豫"永远混在一个数里。后端工具不等人 ⇒ 两者相等。
+	 */
+	@Test
+	void toolCallEndSeparatesExecutionTimeFromApprovalWait() {
+		ExecuteResult result = execute("echo", "{\"text\":\"" + ARG_MARKER + "\"}");
+
+		String end = result.line("tool_call_end");
+		assertThat(end).as("执行耗时（= ms − 审批等待）").containsPattern("execMs=\\d+")
+			.contains("skipped=false");
+		assertThat(field(end, "execMs")).as("后端工具不等人 ⇒ execMs == ms").isEqualTo(field(end, "ms"));
+	}
+
+	/**
+	 * 取消发生在"工具已经开始之后"（事件边界轮询）：此前只抛异常、不写 end 行 ——
+	 * 日志里留下一条只有 start 的孤儿调用。取消路径必须补一条 outcome=cancelled 的 end。
+	 */
+	@Test
+	void cancelledRunStillClosesTheToolCallWithAnEndLine() {
+		// 第一次 isCancelled（逐个执行前）= false，让工具真的开始；第二次（执行后）= true ⇒ 取消
+		when(this.cancellations.isCancelled(anyString())).thenReturn(false, true);
+
+		org.assertj.core.api.Assertions
+			.assertThatThrownBy(() -> execute("echo", "{\"text\":\"" + ARG_MARKER + "\"}"))
+			.as("取消以 StreamViolationException(CANCELLED) 收口整轮")
+			.isInstanceOf(com.example.configmgr.ai.run.StreamViolationException.class);
+
+		List<String> lines = capturedLines();
+		String end = lineOf(lines, "tool_call_end");
+		assertThat(end).as("取消也要有 end 行（堵'只有 start 没有 end'的洞）")
+			.contains("toolCallId=" + CALL_ID).contains("outcome=cancelled").contains("code=RUN_CANCELLED")
+			.containsPattern("execMs=\\d+").contains("cancelled=true");
+	}
+
+	/**
+	 * 步数到顶的调用<b>不执行</b>：只补一条 {@code tool_call_end skipped=true}，不再留 start ——
+	 * 于是"这个调用为什么没跑"在一行里说完，而不是从"没有 end"去猜。
+	 */
+	@Test
+	void stepLimitSkippedCallStillLeavesAnEndLine() {
+		this.properties.getResilience().setMaxToolSteps(1);
+
+		List<String> lines = executeTwoCalls();
+		String skipped = lines.stream()
+			.filter(line -> line.startsWith("event=tool_call_end ") && line.contains("skipped=true"))
+			.findFirst()
+			.orElseThrow(() -> new AssertionError("步数到顶未留 skipped 行；实收 = " + lines));
+		assertThat(skipped).contains("toolCallId=" + SECOND_CALL_ID).contains("outcome=skipped")
+			.contains("code=" + com.example.configmgr.ai.tool.ToolOutcome.CODE_TOOL_STEP_LIMIT).contains("executed=false");
+		assertThat(lines.stream().filter(line -> line.startsWith("event=tool_call_start "))
+			.filter(line -> line.contains("toolCallId=" + SECOND_CALL_ID)))
+			.as("未执行的调用不发 start（成对性只对真实执行成立）")
+			.isEmpty();
 	}
 
 	@Test
@@ -161,6 +221,20 @@ class AiToolCallLogTraceTest {
 		out.start(SESSION_ID);
 		this.manager.executeToolCalls(prompt(), response(toolName, args));
 		out.done(Map.of(), "test-model", Map.of("cancelled", false));
+		return new ExecuteResult(capturedLines());
+	}
+
+	/** 一次响应里两个工具调用（用于"步数到顶"这类批内跳过场景）。 */
+	private List<String> executeTwoCalls() {
+		SseChatEmitter out = this.registry.of(RUN_ID);
+		out.start(SESSION_ID);
+		this.manager.executeToolCalls(prompt(),
+				response(CALL_ID, "echo", "{\"text\":\"" + ARG_MARKER + "\"}", SECOND_CALL_ID, "echo", "{\"text\":\"b\"}"));
+		out.done(Map.of(), "test-model", Map.of("cancelled", false));
+		return capturedLines();
+	}
+
+	private List<String> capturedLines() {
 		List<String> lines = new ArrayList<>();
 		// 事件可能由别的线程正在追加：先做一次快照（toArray 语义，不经迭代器 ⇒ 不会 CME）
 		for (ILoggingEvent event : new ArrayList<>(this.appender.list)) {
@@ -168,7 +242,22 @@ class AiToolCallLogTraceTest {
 				lines.add(event.getFormattedMessage());
 			}
 		}
-		return new ExecuteResult(lines);
+		return lines;
+	}
+
+	private static String lineOf(List<String> lines, String name) {
+		return lines.stream().filter(line -> line.startsWith("event=" + name + " ")).findFirst()
+			.orElseThrow(() -> new AssertionError("缺少事件行 event=" + name + "；实收 = " + lines));
+	}
+
+	/** 取一个 {@code k=v} 字段的值（事件行是空格分隔的单行，做断言比较时需要取值而不是子串）。 */
+	private static String field(String line, String key) {
+		for (String token : line.split(" ")) {
+			if (token.startsWith(key + "=")) {
+				return token.substring(key.length() + 1);
+			}
+		}
+		throw new AssertionError("事件行缺字段 " + key + "： " + line);
 	}
 
 	private Prompt prompt() {
@@ -186,6 +275,15 @@ class AiToolCallLogTraceTest {
 	private static ChatResponse response(String tool, String args) {
 		AssistantMessage assistant = AssistantMessage.builder()
 			.toolCalls(List.of(new AssistantMessage.ToolCall(CALL_ID, "function", tool, args)))
+			.build();
+		return new ChatResponse(List.of(new Generation(assistant)));
+	}
+
+	/** 一次响应两个 toolCall（步数到顶场景：第二个必须被跳过）。 */
+	private static ChatResponse response(String id1, String tool1, String args1, String id2, String tool2, String args2) {
+		AssistantMessage assistant = AssistantMessage.builder()
+			.toolCalls(List.of(new AssistantMessage.ToolCall(id1, "function", tool1, args1),
+					new AssistantMessage.ToolCall(id2, "function", tool2, args2)))
 			.build();
 		return new ChatResponse(List.of(new Generation(assistant)));
 	}
