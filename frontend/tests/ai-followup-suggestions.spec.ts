@@ -277,7 +277,7 @@ describe('E2 建议条（DOM 面）', () => {
     expect(wrapper.find('[data-testid="followup-suggestions"]').exists()).toBe(false)
 
     store.suspended = false
-    store.activeForm = { toolCallId: 'c1', runId: 'r1', form: {} as never, status: 'filling', error: null }
+    store.activeForm = { toolCallId: 'c1', runId: 'r1', form: {} as never, status: 'filling', error: null, values: {}, fieldErrors: [] }
     await wrapper.vm.$nextTick()
     expect(wrapper.find('[data-testid="followup-suggestions"]').exists()).toBe(false)
 

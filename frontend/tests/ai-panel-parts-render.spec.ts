@@ -105,7 +105,7 @@ function buildMessage(parts: MessagePart[], pendingCall: PendingToolCall | null 
 
 /** A4' 夹具：造一个指定状态的 activeForm（form schema 本体与本锁无关，走 never 桩）。 */
 function makeActiveForm(toolCallId: string, status: ActiveGenerativeForm['status']): ActiveGenerativeForm {
-  return { toolCallId, runId: 'run-1', form: {} as never, status, error: null }
+  return { toolCallId, runId: 'run-1', form: {} as never, status, error: null, values: {}, fieldErrors: [] }
 }
 
 async function mountPanel(
@@ -2125,7 +2125,7 @@ describe('卡片通道统一：三类型卡头（左裸 SVG / 中标题摘要 / 
     )
     msg.id = 'a-gf-head'
     const store = useAiStore()
-    store.activeForm = { toolCallId: 'gf1', runId: 'run-1', form: GF_FORM, status: 'filling', error: null }
+    store.activeForm = { toolCallId: 'gf1', runId: 'run-1', form: GF_FORM, status: 'filling', error: null, values: {}, fieldErrors: [] }
 
     const wrapper = await mountPanel([msg], { realForm: true })
     // 卡头 = 唯一标题（FormRenderer 默认头被 showHeader=false 抑制）
@@ -4057,7 +4057,7 @@ describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 �
     expect(body.className).toContain('p-[11px]')
 
     // label 口径（12.2px #57606a + mb 4px）
-    const label = wrapper.find('div > span.block')
+    const label = wrapper.find('div > label.block')
     expect(label.classes()).toEqual(expect.arrayContaining(['block', 'text-[12.2px]', 'mb-[4px]', 'text-[#57606a]']))
 
     // 六型控件：原生 input/select/checkbox，无一个 EP 控件
@@ -4097,7 +4097,7 @@ describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 �
 
     const name = wrapper.find('input[type="text"]')
     expect(name.classes()).toEqual(expect.arrayContaining(['border-[#c0392b]', 'bg-[#fdf1ef]']))
-    const label = wrapper.find('div > span.block')
+    const label = wrapper.find('div > label.block')
     expect(label.classes()).toContain('text-[#c0392b]')
     const msg = wrapper.findAll('span').find((item) => item.text().includes('「任务名」为必填项'))
     expect(msg).toBeTruthy()

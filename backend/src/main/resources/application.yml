@@ -25,6 +25,14 @@ spring:
     fallback-to-system-locale: false
     cache-duration: 3600
 
+  servlet:
+    multipart:
+      # GF 优化批（G-E attachment）：固定上传口允许 5MB（与
+      # GenerativeFormAttachmentController.MAX_ATTACHMENT_BYTES 同口径），
+      # 请求体留 1MB 余量给 multipart 边界与表单字段。
+      max-file-size: 5MB
+      max-request-size: 6MB
+
   datasource:
     url: jdbc:h2:file:./data/config_mgr_db;DB_CLOSE_DELAY=-1
     driver-class-name: org.h2.Driver

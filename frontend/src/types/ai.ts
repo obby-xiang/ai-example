@@ -6,7 +6,7 @@
  */
 
 import type { SseFrame, PendingToolCallSnapshot, PendingStatus, ToolKind, ToolOutcome, ToolPreflight } from './sse'
-import type { FormSpec } from './form-schema'
+import type { FormSpec, FormValueIssue } from './form-schema'
 import type { ResultView } from './resultview'
 import type { SheetToolMeta } from '@/utils/sheet-tools'
 import type { ErrorCard } from '@/utils/error-card'
@@ -629,6 +629,16 @@ export interface ActiveGenerativeForm {
   status: GenerativeFormStatus
   /** 客户端复核 / 后端 FORM_RESULT_REJECTED 的提示（null = 无） */
   error: string | null
+  /**
+   * GF 优化批（G-B）：**浏览器草稿快照**（sessionStorage 镜像 `cm.ai.form.draft.<toolCallId>`）。
+   * 只在本机读写：永不进模型上下文、永不写服务器；提交/取消/终态即清。
+   */
+  values: Record<string, unknown>
+  /**
+   * GF 优化批（G-A）：后端回灌拒绝的结构化错误（`{key, code, message}`），
+   * 前端按 `key` 点亮对应字段；`code` 决定是否可重试。
+   */
+  fieldErrors: FormValueIssue[]
 }
 
 /** SSE 一轮的收尾判定结果。 */

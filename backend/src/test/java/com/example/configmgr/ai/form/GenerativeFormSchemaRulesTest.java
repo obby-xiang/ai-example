@@ -80,17 +80,19 @@ class GenerativeFormSchemaRulesTest {
 
 	@Test
 	void rejectsArbitraryAttributeInjection() throws Exception {
+		// GF 优化批（语义变更，单列）：maxLength/format 等已进入字段属性白名单（校验最小集），
+		// 故本反例改用仍在白名单外的 pattern —— 模型自带正则永不接受（ReDoS 面），断言强度不变。
 		String injected = """
 				{"scenario":"CLARIFY","fields":[
 				  {"key":"name","label":"名称","type":"text","html":"<b>x</b>","attributes":{"class":"x"},
-				   "onClick":"alert(1)","style":"color:red","maxLength":5}
+				   "onClick":"alert(1)","style":"color:red","pattern":"^(a+)+$"}
 				]}""";
 		List<String> reasons = GenerativeFormRules.schemaReasons(form(injected));
 		assertThat(joined(reasons)).contains("不允许的属性");
 		// 五个白名单外的属性逐条报出（一次看全，模型不必改一处再被拒一次）
 		assertThat(reasons).hasSize(5);
 		assertThat(joined(reasons)).contains("html").contains("attributes").contains("onClick").contains("style")
-				.contains("maxLength");
+				.contains("pattern");
 	}
 
 	@Test

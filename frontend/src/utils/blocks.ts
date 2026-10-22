@@ -511,7 +511,8 @@ export function cardStatusOf(part: ToolPart): CardStatus {
 
 /**
  * GF 表单定义（`args.form` 的防御性解析）—— 已决只读态要复用**同一张表单**（K1），
- * 六型控件与字段序都取自这里；解析失败返回 null（卡面只留兜底文案，不臆造控件）。
+ * 七型控件（GF 优化批新增 attachment）与字段序都取自这里；解析失败返回 null
+ * （卡面只留兜底文案，不臆造控件）。
  */
 export function formSpecOf(part: ToolPart): FormSpec | null {
   const parsed = parseArgObject(part.args)

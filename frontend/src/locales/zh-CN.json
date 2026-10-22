@@ -23,6 +23,52 @@
       "warn": "已超过轻量清理线",
       "high": "已进入压缩区（工具结果优先清理）",
       "danger": "接近上限，下一次请求前会先清理历史工具结果"
+    },
+    "gf": {
+      "title": "请填写以下信息",
+      "scenario": {
+        "filter": "筛选条件",
+        "clarify": "信息确认"
+      },
+      "selectPlaceholder": "请选择{label}",
+      "cancel": "取消",
+      "submit": "提交",
+      "submitting": "提交中…",
+      "notRetryable": "该表单已无法继续提交，请取消后让 AI 重新发起",
+    "unsupportedType": "字段「{label}」类型不支持（{type}），未渲染",
+      "hintSeparator": "；",
+      "hint": {
+        "required": "必填",
+        "format": "格式：{format}"
+      },
+      "attachment": {
+        "choose": "选择文件",
+        "hint": "支持 png/jpg/webp/pdf/txt/csv/xlsx，单件不超过 5MB",
+        "uploading": "上传中…",
+        "remove": "删除",
+        "failed": "附件上传失败，请重试",
+        "unknownName": "已上传附件"
+      },
+      "errors": {
+        "VALUE_REQUIRED_MISSING": "「{label}」为必填项",
+        "VALUE_TOO_SHORT": "「{label}」过短（至少 {min} 字符）",
+        "VALUE_TOO_LONG": "「{label}」过长（上限 {limit} 字符）",
+        "VALUE_FORMAT_MISMATCH": "「{label}」不符合 {format} 格式",
+        "VALUE_OUT_OF_RANGE": "「{label}」超出允许范围",
+        "VALUE_STEP_MISMATCH": "「{label}」必须按步长取值",
+        "VALUE_NOT_INTEGER": "「{label}」必须是整数",
+        "VALUE_TOO_FEW_ITEMS": "「{label}」选择过少（至少 {min} 项）",
+        "VALUE_TOO_MANY_ITEMS": "「{label}」选择过多（最多 {max} 项）",
+        "VALUE_OUT_OF_OPTIONS": "「{label}」的取值不在选项内",
+        "VALUE_DUPLICATE": "「{label}」的取值不得重复",
+        "VALUE_TYPE_MISMATCH": "「{label}」的取值类型不符",
+        "VALUE_ATTACHMENT_ID_INVALID": "「{label}」的附件无效，请重新上传",
+        "RESULT_UNKNOWN_FIELD": "存在表单之外的字段",
+        "ATTACHMENT_NOT_FOUND": "「{label}」的附件不存在或已过期，请重新上传",
+        "ATTACHMENT_FORBIDDEN": "「{label}」的附件不属于当前表单，请重新上传",
+        "ATTACHMENT_CONSUMED": "「{label}」的附件已被使用，请重新上传",
+        "ATTACHMENT_UPLOAD_FAILED": "「{label}」上传失败，请重试"
+      }
     }
   },
   "common": {

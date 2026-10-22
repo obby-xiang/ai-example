@@ -23,6 +23,7 @@ import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
@@ -553,7 +554,7 @@ public class AiTools {
     @ToolCategory(ToolMeta.Category.H)
     @ToolChannel(ToolMeta.Channel.FRONTEND)
     public String generativeForm(
-            @ToolParam(description = "表单 schema：{\"scenario\":\"FILTER|CLARIFY\",\"title\":\"标题(可选)\",\"fields\":[{\"key\":\"字段键\",\"label\":\"标签\",\"type\":\"text|number|boolean|date|enum|multi_select\",\"required\":true(可选),\"defaultValue\":默认值(可选),\"options\":[{\"value\":\"值\",\"label\":\"文本\"}](enum/multi_select 必填),\"placeholder\":\"占位提示(仅 text/number/date,可选)\"}]}（字段 ≤20）") FormSpec form) {
+            @ToolParam(description = "表单 schema：{\"scenario\":\"FILTER|CLARIFY\",\"title\":\"标题(可选)\",\"fields\":[{\"key\":\"字段键\",\"label\":\"标签\",\"type\":\"text|number|boolean|date|enum|multi_select|attachment\",\"required\":true(可选),\"defaultValue\":默认值(可选),\"options\":[{\"value\":\"值\",\"label\":\"文本\"}](enum/multi_select 必填，或改用 optionsFrom),\"placeholder\":\"占位提示(仅 text/number/date,可选)\",\"variant\":\"longText(text 可选的 textarea 变体,上限2000)\",\"minLength/maxLength\":\"text 长度约束(可选,maxLength 硬顶200,longText 2000)\",\"format\":\"email|tel|url|idcard(仅 text,不接受正则)\",\"min/max/step/integer\":\"number 约束;date 只收 min/max(ISO)\",\"minItems/maxItems\":\"multi_select 选项数约束\",\"visibleWhen/requiredWhen/disabledWhen\":{\"key\":\"依赖字段\",\"op\":\"eq|in|notIn|empty|notEmpty|between\",\"value\":\"或 values 数组\"},\"optionsFrom\":{\"dependsOn\":\"父字段\",\"map\":{\"父值\":[{\"value\":\"值\"}]}} 或 {\"dependsOn\":\"父字段\",\"sourceId\":\"definition_fields\"},\"defaultFrom\":{\"dependsOn\":\"父字段\",\"map\":{\"父值\":默认值}}}]}（字段 ≤20，选项 ≤50；attachment 的值由用户上传产生，不要预填 defaultValue）") FormSpec form) {
         return FRONTEND_STUB;
     }
 
@@ -576,24 +577,100 @@ public class AiTools {
     }
 
     /**
-     * 单个表单字段（白名单属性集：key/label/type/required/defaultValue/options/placeholder）。
+     * 单个表单字段（白名单属性集与 {@code GenerativeFormRules.FIELD_ATTRIBUTES} 逐项对账）。
+     *
+     * <p>GF 优化批新增：{@code variant}（longText 文本域）、{@code minLength/maxLength/format}（text）、
+     * {@code min/max/step/integer}（number）、{@code min/max}（date）、{@code minItems/maxItems}
+     * （multi_select）、三态联动条件与 {@code optionsFrom/defaultFrom}。
      *
      * @param key          字段键（回灌结果按此键给值；字母/下划线开头，≤40 字符，表单内唯一）
      * @param label        字段标签（≤100 字符）
-     * @param type         字段类型（白名单六型）
+     * @param type         字段类型（白名单七型）
      * @param required     是否必填（缺省 false）
      * @param defaultValue 默认值（类型必须与 {@code type} 相符；enum/multi_select 必须在选项内）
-     * @param options      选项（enum/multi_select 必填；其余类型禁止带）
+     * @param options      选项（enum/multi_select 必填，或改用 optionsFrom）
      * @param placeholder  占位提示（仅 text/number/date 可带）
+     * @param variant      仅 text：{@code longText}（textarea 渲染，上限 2000）
+     * @param minLength    text 最小长度
+     * @param maxLength    text 最大长度（硬顶 200；longText 2000）
+     * @param format       text 命名格式：email/tel/url/idcard（不接受正则）
+     * @param min          number 下限 / date 起始日（ISO）
+     * @param max          number 上限 / date 截止日（ISO）
+     * @param step         number 步长
+     * @param integer      number 是否只允许整数
+     * @param minItems     multi_select 最少选项数
+     * @param maxItems     multi_select 最多选项数
+     * @param visibleWhen  显隐联动条件
+     * @param requiredWhen 条件必填
+     * @param disabledWhen 条件禁用
+     * @param optionsFrom  选项级联（静态映射或注册数据源）
+     * @param defaultFrom  默认值静态映射
      */
     public record FormField(
             @ToolParam(description = "字段键（字母或下划线开头，≤40 字符，表单内唯一）") String key,
             @ToolParam(description = "字段标签（≤100 字符）") String label,
-            @ToolParam(description = "字段类型：text/number/boolean/date/enum/multi_select") String type,
+            @ToolParam(description = "字段类型：text/number/boolean/date/enum/multi_select/attachment") String type,
             @ToolParam(description = "是否必填（缺省 false）", required = false) Boolean required,
             @ToolParam(description = "默认值（类型必须与 type 相符；enum/multi_select 必须在选项内）", required = false) Object defaultValue,
             @ToolParam(description = "选项（enum/multi_select 必填，其余类型禁止带）", required = false) List<FormOption> options,
-            @ToolParam(description = "占位提示（仅 text/number/date 可带，≤100 字符）", required = false) String placeholder) {
+            @ToolParam(description = "占位提示（仅 text/number/date 可带，≤100 字符）", required = false) String placeholder,
+            @ToolParam(description = "仅 text 可带的变体：longText（textarea，上限 2000）", required = false) String variant,
+            @ToolParam(description = "text 最小长度", required = false) Integer minLength,
+            @ToolParam(description = "text 最大长度（硬顶 200；longText 2000）", required = false) Integer maxLength,
+            @ToolParam(description = "text 命名格式：email/tel/url/idcard（不接受正则）", required = false) String format,
+            @ToolParam(description = "number 下限 / date 起始日（yyyy-MM-dd）", required = false) Object min,
+            @ToolParam(description = "number 上限 / date 截止日（yyyy-MM-dd）", required = false) Object max,
+            @ToolParam(description = "number 步长（正数）", required = false) Double step,
+            @ToolParam(description = "number 是否只允许整数", required = false) Boolean integer,
+            @ToolParam(description = "multi_select 最少选项数", required = false) Integer minItems,
+            @ToolParam(description = "multi_select 最多选项数", required = false) Integer maxItems,
+            @ToolParam(description = "显隐联动：条件成立才显示", required = false) FormCondition visibleWhen,
+            @ToolParam(description = "条件必填：条件成立时必填", required = false) FormCondition requiredWhen,
+            @ToolParam(description = "条件禁用：条件成立时只读", required = false) FormCondition disabledWhen,
+            @ToolParam(description = "选项级联：{dependsOn,map} 或 {dependsOn,sourceId}（sourceId 只许后端注册数据源）", required = false) FormOptionsFrom optionsFrom,
+            @ToolParam(description = "默认值静态映射：{dependsOn,map}", required = false) FormDefaultFrom defaultFrom) {
+    }
+
+    /**
+     * 联动条件（<b>闭集原语，不是表达式</b>）：{@code op} ∈ eq/in/notIn/empty/notEmpty/between。
+     *
+     * <p>后端 {@code GenerativeFormRules} 拒绝任何非对象形态（{@code visibleWhen:"a===1"} 直接拒），
+     * 前端只按 op 做数据比较、永不执行表达式。
+     *
+     * @param key    依赖字段键（必须已在表单中声明，且不得是字段自身）
+     * @param op     比较操作
+     * @param value  op=eq 时的比较值
+     * @param values op=in/notIn（任意长度）/ between（恰 2 个）时的比较值数组
+     */
+    public record FormCondition(
+            @ToolParam(description = "依赖字段键（必须是本表单已声明的字段，不得自引用）") String key,
+            @ToolParam(description = "比较操作：eq/in/notIn/empty/notEmpty/between") String op,
+            @ToolParam(description = "op=eq 时的比较值", required = false) Object value,
+            @ToolParam(description = "op=in/notIn/between 时的比较值数组", required = false) List<Object> values) {
+    }
+
+    /**
+     * 选项级联：静态映射 {@code {dependsOn,map}} 或后端注册数据源 {@code {dependsOn,sourceId}}。
+     *
+     * @param dependsOn 父字段键
+     * @param map       父值 → 选项数组（静态映射）
+     * @param sourceId  后端注册的数据源 id（本批只有 {@code definition_fields}；URL/脚本一律拒）
+     */
+    public record FormOptionsFrom(
+            @ToolParam(description = "父字段键（必须是本表单已声明的字段）") String dependsOn,
+            @ToolParam(description = "父值 → 选项数组的静态映射", required = false) Map<String, List<FormOption>> map,
+            @ToolParam(description = "后端注册的数据源 id（本批：definition_fields）", required = false) String sourceId) {
+    }
+
+    /**
+     * 默认值静态映射（联动原语 ⑤）。
+     *
+     * @param dependsOn 父字段键
+     * @param map       父值 → 本字段默认值（值类型必须与本字段 type 相符）
+     */
+    public record FormDefaultFrom(
+            @ToolParam(description = "父字段键（必须是本表单已声明的字段）") String dependsOn,
+            @ToolParam(description = "父值 → 默认值的静态映射") Map<String, Object> map) {
     }
 
     /**

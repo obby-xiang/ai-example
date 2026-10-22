@@ -118,7 +118,9 @@ class GenerativeFormDisclosureTest {
     @Test
     void toolBodyIsSentinelStub() {
         AiTools.FormSpec form = new AiTools.FormSpec("FILTER", "筛选条件",
-                List.of(new AiTools.FormField("keyword", "关键字", "text", true, "CNY", null, "如 CNY")));
+                List.of(new AiTools.FormField("keyword", "关键字", "text", true, "CNY", null, "如 CNY",
+                        null, null, null, null, null, null, null, null, null, null,
+                        null, null, null, null, null)));
         assertThat(aiTools.generativeForm(form))
                 .as("后端桩体永不执行（副作用在前端）")
                 .isEqualTo(AiTools.FRONTEND_STUB);

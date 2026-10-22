@@ -1,5 +1,8 @@
 package com.example.configmgr.ai.tool;
 
+import com.example.configmgr.ai.form.FormIssue;
+
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -51,21 +54,77 @@ public interface FrontendToolGuard {
 	Verdict inspectResult(String argumentsJson, String resultJson);
 
 	/**
+	 * 回灌前的结果复核（带<b>归属上下文</b>，GF 优化批 G-E）。
+	 *
+	 * <p>默认实现忽略上下文、退回两参版本 —— 既有复核器（表格写 / UI 原语）零改动。
+	 * 生成式表单用它校验 attachment 的"属本表单 + 一次性"（没有 runId/toolCallId 就无从判定归属）。
+	 *
+	 * @param runId         该次挂起所属轮次（可为 null：兼容调用方）
+	 * @param toolCallId    该次挂起的前端调用 id（可为 null）
+	 * @param argumentsJson 该次调用的入参原文
+	 * @param resultJson    前端回灌的 result 原文
+	 */
+	default Verdict inspectResult(String runId, String toolCallId, String argumentsJson, String resultJson) {
+		return inspectResult(argumentsJson, resultJson);
+	}
+
+	/**
 	 * 复核结论：放行 / 拒绝 + 机器可读码 + 原因清单。
 	 *
-	 * @param accepted 是否放行
-	 * @param code     机器可读码（拒绝时必填，如 {@code FORM_SCHEMA_REJECTED}）
-	 * @param message  人读说明（拒绝时必填）
-	 * @param reasons  被拒原因清单（逐条给出"哪一处、期望什么、实际什么"）
+	 * <p><b>GF 优化批（G-A）</b>：除人读 {@code reasons} 外，另带<b>结构化清单</b>
+	 * {@code issues}（{@code {key, code, message}}）—— 前端据此点亮具体字段、按码决定是否可重试，
+	 * 模型据此精准修复。旧的三参 {@link #reject(String, String, List)} 仍可用（结构化清单为空），
+	 * 因此既有复核器（表格写 / UI 原语）行为一字不变。
+	 *
+	 * @param accepted  是否放行
+	 * @param code      机器可读码（拒绝时必填，如 {@code FORM_SCHEMA_REJECTED}）
+	 * @param message   人读说明（拒绝时必填）
+	 * @param reasons   被拒原因清单（逐条给出"哪一处、期望什么、实际什么"）
+	 * @param issues    结构化清单（与 {@code reasons} 同源；{@code reasons} 即其 {@code message} 投影）
 	 */
-	record Verdict(boolean accepted, String code, String message, List<String> reasons) {
+	record Verdict(boolean accepted, String code, String message, List<String> reasons,
+			List<FormIssue> issues, String resultSuffix) {
+
+		public Verdict {
+			reasons = reasons == null ? List.of() : List.copyOf(reasons);
+			issues = issues == null ? List.of() : List.copyOf(issues);
+			resultSuffix = resultSuffix == null || resultSuffix.isBlank() ? null : resultSuffix;
+		}
 
 		public static Verdict accept() {
-			return new Verdict(true, null, null, List.of());
+			return new Verdict(true, null, null, List.of(), List.of(), null);
 		}
 
 		public static Verdict reject(String code, String message, List<String> reasons) {
-			return new Verdict(false, code, message, reasons == null ? List.of() : List.copyOf(reasons));
+			return new Verdict(false, code, message, reasons, List.of(), null);
+		}
+
+		public static Verdict rejectIssues(String code, String message, List<FormIssue> issues) {
+			List<String> reasons = new ArrayList<>();
+			if (issues != null) {
+				for (FormIssue issue : issues) {
+					reasons.add(issue.message());
+				}
+			}
+			return new Verdict(false, code, message, reasons, issues, null);
+		}
+
+		/**
+		 * 放行时给模型结果补一段<b>元数据</b>（G-E：attachment 只暴露 fileName/fileId/size）。
+		 *
+		 * <p>为什么由复核器给：文件元数据在登记簿里，只有复核器知道；而"文件内容永不进模型上下文"
+		 * 这条边界由同一处把关，补元数据与守边界是同一件事的两面。
+		 */
+		public Verdict withResultSuffix(String suffix) {
+			return new Verdict(this.accepted, this.code, this.message, this.reasons, this.issues, suffix);
+		}
+
+		/**
+		 * 本次拒绝是否"改对后可以重试"：{@code *_RESULT_REJECTED} 语义 = 挂起未消费，可改值重发；
+		 * schema 级拒绝不行（表单根本没下发，必须模型改 schema 重新调用）。
+		 */
+		public boolean retryable() {
+			return this.accepted || (this.code != null && this.code.endsWith("_RESULT_REJECTED"));
 		}
 
 		/**
@@ -84,6 +143,16 @@ public interface FrontendToolGuard {
 				sb.append("\n被拒原因：");
 				for (int i = 0; i < this.reasons.size(); i++) {
 					sb.append("\n").append(i + 1).append(". ").append(this.reasons.get(i));
+				}
+			}
+			// G-A：机器可读清单（与上面的人读清单同源）—— 模型可据此精准定位字段与问题类别
+			if (this.issues != null && !this.issues.isEmpty()) {
+				sb.append("\n机器可读：");
+				for (int i = 0; i < this.issues.size(); i++) {
+					FormIssue issue = this.issues.get(i);
+					sb.append("\n").append(i + 1).append(") key=")
+						.append(issue.key().isEmpty() ? "(form)" : issue.key())
+						.append(" code=").append(issue.code());
 				}
 			}
 			return sb.toString();

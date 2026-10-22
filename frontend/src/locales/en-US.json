@@ -23,6 +23,52 @@
       "warn": "past the light cleanup line",
       "high": "in the compaction zone (tool results cleared first)",
       "danger": "near the limit; tool results are cleared before the next request"
+    },
+    "gf": {
+      "title": "Please fill in the following",
+      "scenario": {
+        "filter": "Filter criteria",
+        "clarify": "Confirm details"
+      },
+      "selectPlaceholder": "Select {label}",
+      "cancel": "Cancel",
+      "submit": "Submit",
+      "submitting": "Submitting…",
+      "notRetryable": "This form can no longer be submitted; cancel and ask the assistant to start over",
+    "unsupportedType": "Field \"{label}\" has an unsupported type ({type}) and was not rendered",
+      "hintSeparator": "; ",
+      "hint": {
+        "required": "required",
+        "format": "format: {format}"
+      },
+      "attachment": {
+        "choose": "Choose file",
+        "hint": "png/jpg/webp/pdf/txt/csv/xlsx, up to 5MB each",
+        "uploading": "Uploading…",
+        "remove": "Remove",
+        "failed": "Attachment upload failed, please retry",
+        "unknownName": "Uploaded attachment"
+      },
+      "errors": {
+        "VALUE_REQUIRED_MISSING": "\"{label}\" is required",
+        "VALUE_TOO_SHORT": "\"{label}\" is too short (at least {min} characters)",
+        "VALUE_TOO_LONG": "\"{label}\" is too long (limit {limit} characters)",
+        "VALUE_FORMAT_MISMATCH": "\"{label}\" is not a valid {format}",
+        "VALUE_OUT_OF_RANGE": "\"{label}\" is out of the allowed range",
+        "VALUE_STEP_MISMATCH": "\"{label}\" must match the allowed step",
+        "VALUE_NOT_INTEGER": "\"{label}\" must be an integer",
+        "VALUE_TOO_FEW_ITEMS": "\"{label}\" needs at least {min} selections",
+        "VALUE_TOO_MANY_ITEMS": "\"{label}\" allows at most {max} selections",
+        "VALUE_OUT_OF_OPTIONS": "\"{label}\" is not one of the available options",
+        "VALUE_DUPLICATE": "\"{label}\" must not contain duplicates",
+        "VALUE_TYPE_MISMATCH": "\"{label}\" has a value of the wrong type",
+        "VALUE_ATTACHMENT_ID_INVALID": "\"{label}\" has an invalid attachment, please upload again",
+        "RESULT_UNKNOWN_FIELD": "The form contains an unknown field",
+        "ATTACHMENT_NOT_FOUND": "\"{label}\" attachment is missing or expired, please upload again",
+        "ATTACHMENT_FORBIDDEN": "\"{label}\" attachment does not belong to this form, please upload again",
+        "ATTACHMENT_CONSUMED": "\"{label}\" attachment has already been used, please upload again",
+        "ATTACHMENT_UPLOAD_FAILED": "\"{label}\" upload failed, please retry"
+      }
     }
   },
   "common": {

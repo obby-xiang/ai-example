@@ -1191,7 +1191,7 @@ public class ConfirmGate {
 		if (cancelled) {
 			return dismiss(runId, pending, source);
 		}
-		FrontendToolGuard.Verdict verdict = inspectResult(pending, result);
+		FrontendToolGuard.Verdict verdict = inspectResult(runId, pending, result);
 		if (verdict != null && !verdict.accepted()) {
 			// 复核不过<b>不落 guard</b>：状态不变、挂起继续等待，用户修正后还能重试
 			// （占了 guard 就再也没有"第二次机会"了 —— 一次不合法的提交不该把卡消费掉）。
@@ -1220,22 +1220,29 @@ public class ConfirmGate {
 		pending.setCode(null);
 		boolean ok = declared == null || declared.ok();
 		pending.setReason("source=" + (source == null || source.isBlank() ? "http-post" : source));
-		pending.setResultText(result == null ? "" : result);
+		// G-E：复核器可在放行时补一段**元数据**（附件只暴露 fileName/fileId/size，内容永不进上下文）
+		String resultText = result == null ? "" : result;
+		if (verdict != null && verdict.resultSuffix() != null) {
+			resultText = resultText + verdict.resultSuffix();
+		}
+		pending.setResultText(resultText);
 		pending.setResolvedAtMs(System.currentTimeMillis());
 		boolean woke;
 		synchronized (this.submitLock) {
 			this.store.putPending(runId, pending);
-			this.registry.of(runId).frontendToolResult(pending, ok, result == null ? "" : result);
+			this.registry.of(runId).frontendToolResult(pending, ok, resultText);
 			woke = signal(runId, toolCallId);
 		}
 		return new Submission(Outcome.ACCEPTED, pending, woke, null, maybeTriggerResume(runId, woke));
 	}
 
 	/** 第一个认领该工具名的复核器的回灌判定；没有复核器返回 null（= 该工具不受闸门约束）。 */
-	private FrontendToolGuard.Verdict inspectResult(PendingToolCall pending, String result) {
+	private FrontendToolGuard.Verdict inspectResult(String runId, PendingToolCall pending, String result) {
 		for (FrontendToolGuard guard : this.frontendGuards) {
 			if (guard.supports(pending.getName())) {
-				return guard.inspectResult(pending.getArguments(), result);
+				// GF 优化批 G-E：带上归属上下文（附件"属本表单 + 一次性"校验需要 runId/toolCallId）；
+				// 未覆写四参版本的复核器走默认实现，退回两参口径，行为不变。
+				return guard.inspectResult(runId, pending.getToolCallId(), pending.getArguments(), result);
 			}
 		}
 		return null;

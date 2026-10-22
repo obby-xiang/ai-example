@@ -67,6 +67,72 @@ export function history(sessionId: string): Promise<AiHistory> {
 }
 
 /**
+ * POST /api/ai/form/attachments（GF 优化批 G-E：attachment 字段的固定上传口）。
+ *
+ * 只上传**文件本体**，回填表单的是返回的 `fileId`；文件内容永不进模型上下文。
+ * `runId + toolCallId` 用于把附件绑定到"本次挂起的这张表单"（回灌时按同一对 id 校验归属，
+ * 成功后一次性消费）。
+ */
+export async function uploadFormAttachment(
+  file: File,
+  context: { runId: string; toolCallId: string; sessionId?: string; signal?: AbortSignal }
+): Promise<{ fileId: string; fileName: string; size: number; contentType?: string }> {
+  const form = new FormData()
+  form.append('file', file)
+  form.append('runId', context.runId)
+  form.append('toolCallId', context.toolCallId)
+  if (context.sessionId) {
+    form.append('sessionId', context.sessionId)
+  }
+  const body = await post<{ success?: boolean; data?: unknown } | Record<string, unknown>>(
+    '/ai/form/attachments',
+    form,
+    context.signal ? { signal: context.signal } : undefined
+  )
+  const payload = unwrapApiData(body) as Partial<{ fileId: string; fileName: string; size: number; contentType: string }>
+  if (!payload || typeof payload.fileId !== 'string') {
+    throw new Error('附件上传失败：响应缺少 fileId')
+  }
+  return {
+    fileId: payload.fileId,
+    fileName: typeof payload.fileName === 'string' ? payload.fileName : file.name,
+    size: typeof payload.size === 'number' ? payload.size : file.size,
+    ...(typeof payload.contentType === 'string' ? { contentType: payload.contentType } : {})
+  }
+}
+
+/**
+ * GET /api/ai/form/option-sources/{sourceId}（联动原语④的数据源解析口）。
+ *
+ * `sourceId` 是**后端注册的闭集**（本批只有 `definition_fields`）——模型无法让前端去请求
+ * 任意 URL；这里的路径参数只是把已通过的 sourceId 交给后端复核。
+ */
+export async function formOptionSource(
+  sourceId: string,
+  value: string
+): Promise<{ options: Array<{ value: string; label?: string }> }> {
+  const body = await get<unknown>(
+    `/ai/form/option-sources/${encodeURIComponent(sourceId)}?value=${encodeURIComponent(value)}`
+  )
+  const payload = unwrapApiData(body) as { options?: unknown } | null
+  const options = Array.isArray(payload?.options) ? payload?.options : []
+  return {
+    options: (options ?? []).filter(
+      (item): item is { value: string; label?: string } =>
+        !!item && typeof item === 'object' && typeof (item as { value?: unknown }).value === 'string'
+    )
+  }
+}
+
+/** 信封拆包：业务端点 `{success,data}` 取 `data`；AI 域的裸对象原样返回（与 http.ts 拦截器同口径）。 */
+function unwrapApiData(body: unknown): unknown {
+  if (body && typeof body === 'object' && typeof (body as { success?: unknown }).success === 'boolean') {
+    return (body as { data?: unknown }).data
+  }
+  return body
+}
+
+/**
  * GET /api/ai/context/{sessionId}（上下文占用：刷新恢复 / 展开分项 / 挂起态）。
  *
  * 姿态与 `/history` 同族：只读、不查 AI key；Redis 不可用或计量未装配时后端回 503

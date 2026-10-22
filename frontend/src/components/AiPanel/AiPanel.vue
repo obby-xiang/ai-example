@@ -584,10 +584,14 @@
                             :schema="liveForm.form"
                             :submitting="liveForm.status === 'submitting'"
                             :error="liveForm.error"
+                            :field-errors="liveForm.fieldErrors"
+                            :initial-values="liveForm.values"
+                            :upload-context="{ runId: liveForm.runId, toolCallId: liveForm.toolCallId, sessionId: ai.sessionId }"
                             :show-header="false"
                             flat
                             @submit="onFormSubmit"
                             @cancel="onFormCancel"
+                            @draft="onFormDraft"
                           />
                         </div>
 
@@ -3247,6 +3251,14 @@ function onFormSubmit(values: Record<string, unknown>): void {
 /** GF-B：表单显式取消 → store 带 cancelled:true 回灌收敛。 */
 function onFormCancel(): void {
   void ai.cancelGenerativeForm()
+}
+
+/**
+ * GF 优化批（G-B）：草稿镜像 —— 只写本机 sessionStorage（按 toolCallId），
+ * 不进模型上下文、不写服务器；提交/取消/终态由 store 清理。
+ */
+function onFormDraft(values: Record<string, unknown>): void {
+  ai.updateFormDraft(values)
 }
 
 // 批2（权威翻转）：滚动指纹基本为 **parts 口径**（§6.3 清单）—— messages.length + 末消息段数 +

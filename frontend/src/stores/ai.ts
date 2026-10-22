@@ -72,6 +72,8 @@ import {
 import { ErrorCode, type SessionBusyConflict, type SuspendPoolSaturated } from '@/types/api'
 import { frameSeq, isTerminalFrame, type ToolOutcome } from '@/types/sse'
 import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiHealth, type AiHistory, type AiHistoryMessage, type AiRunCurrent, type AiRunCurrentEntry, type AiSessionMirror, type ChatMessage, type ContextBreakdownItem, type ContextCompaction, type ContextUsage, type GateSubmission, type MessagePart, type PendingToolCall, type SheetPreviewLevel, type SheetWritePlan, type ToolPart, type ToolPartPatch, type ToolRunStatus } from '@/types/ai'
+import type { FormValueIssue } from '@/types/form-schema'
+import { clearFormDraft, loadFormDraft, saveFormDraft } from '@/utils/form-draft'
 import { parseFormSchema, checkFormValues } from '@/types/form-schema'
 import type { SseFrame } from '@/types/sse'
 import type { ValidationIssue } from '@/types/job'
@@ -1627,7 +1629,10 @@ export const useAiStore = defineStore('ai', {
             runId,
             form: spec,
             status: 'filling',
-            error: null
+            error: null,
+            // G-B：刷新/重建路径同样回填本机草稿（只读 sessionStorage）
+            values: loadFormDraft(entry.toolCallId) ?? {},
+            fieldErrors: []
           }
         }
         // schema 非法：只留挂起卡（用户可取消），不武装表单态
@@ -2344,7 +2349,16 @@ export const useAiStore = defineStore('ai', {
       runId?: string,
       outcome?: ToolOutcome,
       sheetMeta?: SheetToolMeta
-    ): Promise<{ ok: boolean; duplicate?: boolean; rejected?: string; message?: string }> {
+    ): Promise<{
+      ok: boolean
+      duplicate?: boolean
+      rejected?: string
+      message?: string
+      /** G-A：后端结构化错误（按 key 点亮字段） */
+      issues?: FormValueIssue[]
+      /** G-A：改对后可否重试（code 决定） */
+      retryable?: boolean
+    }> {
       // GF-B 修复（红队问题 1）：表单回灌优先用表单创建时捕获的 runId，
       // 缺省才回退当前轮的 activeRunId（避免旧表单错配到新 run）
       const targetRunId = runId ?? this.activeRunId
@@ -2390,11 +2404,27 @@ export const useAiStore = defineStore('ai', {
         if (error instanceof ApiError && error.code === ErrorCode.FORM_RESULT_REJECTED) {
           // 400 + status:"PENDING"：挂起仍在等待 —— 不置 notice 打断填写，由表单卡展示拒绝原因，
           // 用户改值后用同一 toolCallId 重发，或改发取消
-          const reasons = error.bodyAs<{ reasons?: unknown }>()?.reasons
+          const body = error.bodyAs<{ reasons?: unknown; issues?: unknown; retryable?: unknown }>()
+          const reasons = body?.reasons
           const detail = Array.isArray(reasons) && reasons.length > 0
             ? reasons.map((item) => String(item)).join('；')
             : error.message
-          return { ok: false, rejected: detail }
+          // G-A：结构化错误随拒绝体下发 —— 抽出 {key, code, message} 供表单按字段点亮
+          const issues: FormValueIssue[] = Array.isArray(body?.issues)
+            ? body.issues
+              .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object')
+              .map((item) => ({
+                key: typeof item.key === 'string' ? item.key : '',
+                code: typeof item.code === 'string' ? item.code : 'FORM_RESULT_REJECTED',
+                message: typeof item.message === 'string' ? item.message : ''
+              }))
+            : []
+          return {
+            ok: false,
+            rejected: detail,
+            issues,
+            retryable: body?.retryable !== false
+          }
         }
         const message = error instanceof Error ? error.message : '前端工具结果回灌失败'
         this.notice = message
@@ -2460,8 +2490,35 @@ export const useAiStore = defineStore('ai', {
         runId,
         form: spec,
         status: 'filling',
-        error: null
+        error: null,
+        // G-B：刷新恢复 —— 同一 toolCallId 的浏览器镜像回填（草稿从不经服务器）
+        values: loadFormDraft(frame.toolCallId) ?? {},
+        fieldErrors: []
       }
+    },
+
+    /**
+     * GF 优化批（G-B）：写草稿 —— **只写 sessionStorage 镜像**，不触发任何网络请求、
+     * 不进模型上下文。提交 / 取消 / 终态由 {@link clearActiveFormDraft} 清理。
+     */
+    updateFormDraft(values: Record<string, unknown>): void {
+      const form = this.activeForm
+      if (!form || form.status !== 'filling') {
+        return
+      }
+      form.values = { ...values }
+      saveFormDraft(form.toolCallId, form.values)
+    },
+
+    /**
+     * 收起当前表单：先清草稿镜像再置空（停止本轮 / 结局帧 / done / error / 换会话的统一出口）。
+     */
+    dropActiveForm(): void {
+      const form = this.activeForm
+      if (form) {
+        clearFormDraft(form.toolCallId)
+      }
+      this.activeForm = null
     },
 
     /**
@@ -3082,8 +3139,12 @@ export const useAiStore = defineStore('ai', {
       }
       form.status = 'submitting'
       form.error = null
+      form.fieldErrors = []
       const outcome = await this.submitFrontendToolResult(form.toolCallId, JSON.stringify(values), 'http-post', false, form.runId)
       if (outcome.ok || outcome.duplicate) {
+        // G-B：提交成功 ⇒ 草稿镜像即清（草稿只是"未提交"的浏览器临时态）
+        clearFormDraft(form.toolCallId)
+        form.values = {}
         // RC-2：值写回**先于** activeForm 身份守卫 —— 结局帧先到（activeForm 已 null）也要落值；
         // 守卫只留给"回填 form.status/error"这类必须择主的本地态（防瞬时覆写，红队问题 6）。
         // 2A② 边缘②：409 DUPLICATE = 该 toolCallId 已是终态（他端先提交）—— 本地这份值不是
@@ -3101,9 +3162,18 @@ export const useAiStore = defineStore('ai', {
         return
       }
       if (outcome.rejected) {
-        // 400 FORM_RESULT_REJECTED：挂起仍在等待 —— 回填写态，同一 toolCallId 可改值重发或取消
+        // 400 FORM_RESULT_REJECTED：挂起仍在等待 —— 回填写态，同一 toolCallId 可改值重发或取消。
+        // G-A：结构化错误按 key 落到字段；无法归属的部分才留在卡级错误条。
+        const issues = outcome.issues ?? []
+        const keyed = issues.filter((issue) => issue.key !== '')
+        const unkeyed = issues.filter((issue) => issue.key === '')
         form.status = 'filling'
-        form.error = `提交被后端拒绝（挂起仍在等待）：${outcome.rejected}`
+        form.fieldErrors = keyed
+        form.error = unkeyed.length > 0
+          ? unkeyed.map((issue) => issue.message).join('；')
+          : issues.length > 0
+            ? null
+            : `提交被后端拒绝（挂起仍在等待）：${outcome.rejected}`
         return
       }
       form.status = 'filling'
@@ -3120,6 +3190,9 @@ export const useAiStore = defineStore('ai', {
         return
       }
       form.status = 'cancelled'
+      // G-B：取消即清草稿镜像（不再保留任何未提交内容）
+      clearFormDraft(form.toolCallId)
+      form.values = {}
       // T2a-D#2（A2）：本地 cancel 仅乐观置位 —— 只收敛仍处 pending 的 pendingCall 投影；
       // 帧终态为最终裁决，后到帧可覆盖此乐观 cancelled（他端先提交时翻为 succeeded，不降级）
       this.applyPendingTerminal(form.toolCallId, 'cancelled')
@@ -3191,7 +3264,7 @@ export const useAiStore = defineStore('ai', {
       // 覆盖新轮（界面谎报空闲 + 新轮丢失取消句柄）。
       if (this.activeForm !== null) {
         // 用户停止本轮：表单随轮收起（后端取消会让挂起走 TIMEOUT/取消收尾）
-        this.activeForm = null
+        this.dropActiveForm()
       }
       // B1（2026-10-20 裁决 10）：挂起态的"停止"没有连接可 abort（服务端早已收流），
       // 本地挂起态在此收口 —— 否则停止按钮（loading || suspended）会永远亮着。
@@ -3260,7 +3333,7 @@ export const useAiStore = defineStore('ai', {
       this.busyConflict = null
       this.poolSaturated = null
       this.suspended = false
-      this.activeForm = null
+      this.dropActiveForm()
       // R-166（口径③）：提交在途态随会话清空（防跨会话串味）
       this.clearGateSubmissions()
       // 批4④ A5'/D4：折叠展开态随会话清空（防跨会话串味；会话内内存态，不进镜像）
@@ -3680,7 +3753,7 @@ export const useAiStore = defineStore('ai', {
             if (this.activeForm.status === 'filling') {
               this.notice = '该表单已在其他窗口提交，本地填写已停止'
             }
-            this.activeForm = null
+            this.dropActiveForm()
           }
           this.suspended = false
           break
@@ -3749,7 +3822,7 @@ export const useAiStore = defineStore('ai', {
           expireResidueToolParts(message)
           if (this.activeForm !== null) {
             // 轮次收尾时表单未决（如后端侧超时/放弃）：本地一并收起
-            this.activeForm = null
+            this.dropActiveForm()
           }
           this.suspended = false
           if (frame.cancelled) {
@@ -3774,7 +3847,7 @@ export const useAiStore = defineStore('ai', {
           sealTrailingStreamPart(message)
           expireResidueToolParts(message)
           if (this.activeForm !== null) {
-            this.activeForm = null
+            this.dropActiveForm()
           }
           this.notice = `本轮出错（${frame.code}）：${frame.message}`
           // R-165 S5c：错误卡族（demo v7.7 裁决区 08）—— 挂在**本轮这条助手消息**上 ⇒ 面板在

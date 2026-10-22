@@ -1387,6 +1387,10 @@ public class AiController {
 		body.put("code", verdict.code());
 		body.put("message", verdict.message());
 		body.put("reasons", verdict.reasons());
+		// GF 优化批 G-A：结构化错误随拒绝体下发（前端按 key 点亮字段、按 code 决定是否可重试）；
+		// 人读 reasons 保留（E2E 中文断言与模型错误信封逐字不变）。
+		body.put("issues", verdict.issues());
+		body.put("retryable", verdict.retryable());
 		body.put("runId", runId);
 		body.put("toolCallId", toolCallId);
 		body.put("name", submission.pending() == null ? null : submission.pending().getName());
