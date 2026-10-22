@@ -141,7 +141,7 @@ yarn dev
 | --- | --- | --- |
 | 后端框架 | Spring Boot | 3.5.14（`backend/pom.xml` 的 parent） |
 | 运行时 | JDK | 21（`pom.xml` 的 `java.version`） |
-| AI | Spring AI | 1.1.8（`pom.xml` 的 `spring-ai.version`） |
+| AI | Spring AI | 1.1.7（`pom.xml` 的 `spring-ai.version`） |
 | 数据库 | H2 文件库 + Flyway 迁移 | 版本随 Spring Boot 管理（`pom.xml` 只声明依赖、不写版本）；迁移脚本 `backend/src/main/resources/db/migration/` |
 | 缓存/会话 | Redis（会话记忆、挂起态、分布式锁） | 外部依赖，见「快速启动」 |
 | 前端框架 | Vue 3 | `^3.5.13`（`frontend/package.json`） |

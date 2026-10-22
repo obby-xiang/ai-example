@@ -24,7 +24,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
  * {@link Message} 与 JSON 的互转（Redis LIST 的元素格式）。
  *
  * <p>
- * 覆盖 Spring AI 1.1.8 在 {@code OpenAiChatModel.createRequest} 中真正回放到请求体的字段：
+ * 覆盖 Spring AI 1.1.7 在 {@code OpenAiChatModel.createRequest} 中真正回放到请求体的字段：
  * {@code messageType}、{@code text}、{@code AssistantMessage.toolCalls}、
  * {@code ToolResponseMessage.toolResponses}，外加 {@code metadata}（元数据不进入请求体，
  * 但 {@code reasoningContent} 等模型侧信息存在其中，一并保真以避免信息丢失）。

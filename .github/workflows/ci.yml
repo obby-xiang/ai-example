@@ -99,7 +99,7 @@ jobs:
   #     AI 键（ai:run/ai:events/ai:seq）"宁报错不丢帧"：淘汰策略一旦生效，归档帧会无声消失
   #     （回放少帧 = seq 洞）。与本地 Memurai 的 CONFIG SET 实跑口径一致。
   #     该参数是 redis-server 的服务端参数，只能写在 services.redis.command：runner 会把
-  #     command 追加在镜像名之后（docker create redis:7 --maxmemory-policy noeviction），
+  #     command 追加在镜像名之后（docker create redis:7.2.16 --maxmemory-policy noeviction），
   #     由官方镜像 entrypoint 兜底成 redis-server 参数；services.redis.options 只接受
   #     docker create 参数，混入会以 exit 125 使「Initialize containers」直接失败
   #     （2026-10-09 实证：命令行含该 flag 即 exit 125）。
@@ -107,6 +107,10 @@ jobs:
   #     （AiRateLimiterTest 锁滑动窗口语义与降级；AiControllerChatGateTest 锁 20/21、429 形状与
   #     归一化/长度闸）。E2E 的后端启动参数因此把 app.ai.limit.* 显式抬到实际不可达量级
   #     （session 200/分、ip 2000/分），使本 job 的失败只归因于产品，而不是"用例数增长后撞限流"。
+  #   - 依赖合规（2026-10-22）：镜像 tag **钉到 `7.2.16`**，不再浮动。理由 = Redis 自 7.4 起
+  #     由 BSD-3-Clause 改为 `RSALv2 OR SSPLv1` 双许可，浮动 tag `7` 会把 ≥7.4 的镜像拉进 CI
+  #     环境；`7.2.16` 是 7.2.x（最后一个 BSD-3-Clause 线）的最新补丁号（Docker Hub 复核
+  #     2026-10-22）。升 tag 前须先确认目标版本许可未换。
   # ============================================================
   e2e:
     name: E2E 全流程（35 用例 · 桩上游 + redis）
@@ -117,7 +121,7 @@ jobs:
       E2E_STUB_MODE: '1'
     services:
       redis:
-        image: redis:7
+        image: redis:7.2.16
         ports: ['6379:6379']
         command: --maxmemory-policy noeviction
         options: >-

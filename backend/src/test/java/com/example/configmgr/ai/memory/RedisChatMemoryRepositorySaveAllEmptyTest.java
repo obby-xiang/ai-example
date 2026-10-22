@@ -31,7 +31,7 @@ import static org.mockito.Mockito.when;
  * {@code saveAll} 空列表分支的原子性契约（o-R3，批 2）。
  *
  * <p>修复前该分支是 {@code delete} 数据键 + {@code SREM} 索引两次独立往返（非原子），
- * 与 {@code deleteByConversationId} Lua 化之前同构同漏洞。可达性（spring-ai 1.1.8 字节码实测 +
+ * 与 {@code deleteByConversationId} Lua 化之前同构同漏洞。可达性（spring-ai 1.1.7 字节码实测 +
  * 本仓代码走查）：
  * <ul>
  * <li>{@code MessageWindowChatMemory.add} 对空入参<b>无短路</b>，永远

@@ -23,7 +23,7 @@ import org.springframework.util.Assert;
 import org.springframework.util.CollectionUtils;
 
 /**
- * 对 Spring AI 1.1.8 已知缺口的补丁：{@code OpenAiChatModel.createRequest} 的 ASSISTANT
+ * 对 Spring AI 1.1.7 已知缺口的补丁：{@code OpenAiChatModel.createRequest} 的 ASSISTANT
  * 分支把第 9 组件 reasoningContent 硬编码为 null，而 deepseek-flash（思考模式，OpenAI
  * 兼容协议）要求多轮请求回填 assistant 消息时携带本轮 reasoning_content，缺失会 400。
  * 本类放在同名包下以 Override 包私有的 createRequest，逻辑复制父类（USER 媒体分支
@@ -31,6 +31,8 @@ import org.springframework.util.CollectionUtils;
  * 工具定义 resolveToolDefinitions + FunctionTool 构造且合并时保留 extraBody、非流式
  * 移除 streamOptions），唯一差异：ASSISTANT 分支第 9 组件从
  * {@code assistantMessage.getMetadata().get("reasoningContent")} 传播。
+ * 版本面（2026-10-22）：本类与 {@code ChatCompletionMessage} 在 1.1.7 / 1.1.8 上字节码逐字节
+ * 一致（javap 全量比对，见任务看板「批·合规依赖批」），故两版同缺口、补丁副本无需按版本分叉。
  * 升级 Spring AI 版本后应评审官方是否已修复并移除本补丁。
  */
 public class ReasoningAwareOpenAiChatModel extends OpenAiChatModel {

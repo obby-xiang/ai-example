@@ -11,7 +11,7 @@ import java.util.Map;
  * 是推理型模型的独立计费维度）。
  *
  * <h2>为什么走反射而不是强类型</h2>
- * 官方 {@code org.springframework.ai.chat.metadata.Usage} 接口（1.1.8 实测）只有
+ * 官方 {@code org.springframework.ai.chat.metadata.Usage} 接口（1.1.7 实测）只有
  * {@code promptTokens / completionTokens / totalTokens / getNativeUsage()} —— 缓存与推理维度
  * 在<b>各家实现的 native usage</b> 里（OpenAI 兼容：{@code OpenAiApi.Usage} 的
  * {@code promptTokensDetails().cachedTokens()} 与 {@code completionTokenDetails().reasoningTokens()}；

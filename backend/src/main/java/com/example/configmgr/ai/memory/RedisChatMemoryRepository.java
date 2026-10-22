@@ -16,10 +16,10 @@ import org.springframework.data.redis.core.script.RedisScript;
  *
  * <h2>为什么实现这个 SPI，而不是用官方 Redis 实现</h2>
  * <ol>
- * <li><b>1.1.x 线没有官方实现</b>：Spring AI 1.1.8 的 BOM 虽然列出了构件
+ * <li><b>1.1.x 线没有官方实现</b>：Spring AI 1.1.7 的 BOM 虽然列出了构件
  * {@code spring-ai-starter-model-chat-memory-repository-redis}，但该构件在 Maven Central 的
  * 1.1.x 全线从未发布（实测 maven-metadata：官方 Redis ChatMemoryRepository 最早版本为
- * {@code 2.0.0-M1}）。本地 {@code ~/.m2} 解析该坐标只留下空目录，无任何 jar。1.1.8 用不了官方实现。</li>
+ * {@code 2.0.0-M1}）。本地 {@code ~/.m2} 解析该坐标只留下空目录，无任何 jar。1.1.7 用不了官方实现。</li>
  * <li><b>官方 2.0 实现本机跑不起来、且给生产加约束</b>：官方 2.0.x 实现依赖 RedisJSON
  * （{@code jsonSet}）与 RediSearch（{@code ftCreate}/{@code ftSearch}）两个 Redis 模块；
  * {@code <MEMURAI_HOME>} 实测 {@code module list} 仅有 {@code vectorset}，无 JSON/Search 模块，

@@ -19,8 +19,8 @@
 
     <properties>
         <java.version>21</java.version>
-        <spring-ai.version>1.1.8</spring-ai.version>
-        <poi.version>5.4.1</poi.version>
+        <spring-ai.version>1.1.7</spring-ai.version>
+        <poi.version>5.5.1</poi.version>
         <!-- 业务知识问答 v1：Lucene 9.12.2 = 公司库版本（禁升版；Apache-2.0）。
              三个 jar 已按"仅此一次在线"拉入本地 m2，之后构建保持 mvn -o。 -->
         <lucene.version>9.12.2</lucene.version>

@@ -100,7 +100,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <h2>硬规范②：续跑必须重建完整历史（本类也守同一条）</h2>
  * 官方 {@code DefaultToolCallingManager} 返回的 {@code conversationHistory} 是
  * <b>{@code prompt.getInstructions() + [assistant(tool_calls), tool]}</b>
- * （1.1.8 字节码 {@code buildConversationHistoryAfterToolExecution} 实测）；
+ * （1.1.7 字节码 {@code buildConversationHistoryAfterToolExecution} 实测；1.1.8 该类字节码与之逐字节一致）；
  * 若像 SP-02 的 PoC 那样只返回 {@code [assistant, tool]}，官方循环的下一跳请求就会丢掉
  * system/user —— 这正是规格所称"官方循环自身工具后续跑会丢 system/user"的<b>真正来源是 PoC 实现</b>，
  * 官方实现本身不丢。本类按官方口径拼装，因此：

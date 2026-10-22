@@ -305,7 +305,7 @@ public class ResilientChatService {
 				inputTokens, systemTokens, toolsTokens, 0);
 		memory = compaction.memory();
 
-		// 与官方 MessageChatMemoryAdvisor.before 的变换逐字对齐（1.1.8 字节码实测）：
+		// 与官方 MessageChatMemoryAdvisor.before 的变换逐字对齐（1.1.7 字节码实测）：
 		// [首个 SystemMessage] + 记忆窗口 + 其余指令 —— 快照里存的就是模型真正看到的那串消息。
 		List<Message> full = new ArrayList<>(memory.size() + instructions.size());
 		full.add(instructions.get(0));
