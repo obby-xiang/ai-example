@@ -1,5 +1,6 @@
 /**
- * L0（2026-10-21 用户直裁）刷新恢复口径：**只为"请求帧已发"的待决卡重建**。
+ * L0（2026-10-21 用户直裁）刷新恢复口径：**只为"请求帧已发"的待决卡重建**；
+ * M-2b（2026-10-22）起孤儿轮（`req` 缺键）也恢复（判据见下），`req === false` 口径不变。
  *
  * 洞在刷新恢复路径上（B1「挂起即断」之后请求帧是逐条发的，`pendingEntries` 却整批落库）：
  * ① 旧代码遍历全部 PENDING 条目建卡 —— 包括请求帧还没发出的卡 2 / 卡 3，用户可提前点击；
@@ -7,8 +8,10 @@
  * ③ GF 表单随卡一起提前武装 ⇒ 可提前提交（后端根本还没走到那张卡）。
  *
  * 本 spec 锁四条判据（`restoreSuspendedSnapshot`）：
- * - 建卡 = `entryStatus === 'PENDING'` && `kind ∈ {CONFIRM, FRONTEND}` && `req === true`；
- * - `req` 缺键（旧数据 / 旧实例）= 不建卡（宁可少一张卡，不可让用户点到未生效的卡）；
+ * - 建卡 = `entryStatus === 'PENDING'` && `kind ∈ {CONFIRM, FRONTEND}` && `req !== false`；
+ * - `req === false`（同批请求帧还没轮到）= 不建卡，等实时帧（活轮行为不变）；
+ *   `req` 缺键 **不在此列** —— M-2b 起按「升级前遗留的孤儿轮」建卡（见
+ *   `restore-orphan-null-req.spec.ts`；本文件末尾只留一条旧载荷回归锁）；
  * - `suspended` 置位与 req / kind **无关**：只要存在任意 PENDING 条目就置位（输入禁用语义不变）；
  * - 未发卡条目不渲染，也不新增任何占位 UI；**但无卡 ≠ 无后续帧**（I-1，2026-10-21 收口修）：
  *   挂起态下即使一张卡都重建不出来，也照常以 `archiveMaxSeq` 挂差量续收 —— 后续请求帧到达即
@@ -88,13 +91,13 @@ beforeEach(() => {
 })
 
 describe('restoreSuspendedSnapshot：只重建请求帧已发的待决卡', () => {
-  it('一批三卡：只有 req=true 的卡 1 重建；卡 2（req 未置位）与后端条目都不画卡', async () => {
+  it('一批三卡：只有 req=true 的卡 1 重建；卡 2（req=false）与后端条目都不画卡', async () => {
     const store = await freshStore()
     store.sessionId = 'sess-l0'
     store.historyLoaded = true
     api.runsCurrent.mockResolvedValue(snapshot([
       confirmEntry('c1', { req: true }),
-      confirmEntry('c2'), // 请求帧还没发（后端逐条发帧，尚未轮到它）
+      confirmEntry('c2', { req: false }), // 请求帧还没发（后端逐条发帧，尚未轮到它）
       confirmEntry('c3', { kind: 'BACKEND', name: 'read_tasks', req: true }) // 后端直接执行，从不弹卡
     ]))
 
@@ -149,7 +152,10 @@ describe('restoreSuspendedSnapshot：只重建请求帧已发的待决卡', () =
     const store = await freshStore()
     store.sessionId = 'sess-l0-suspend'
     store.historyLoaded = true
-    api.runsCurrent.mockResolvedValue(snapshot([confirmEntry('c1'), confirmEntry('c2')]))
+    api.runsCurrent.mockResolvedValue(snapshot([
+      confirmEntry('c1', { req: false }),
+      confirmEntry('c2', { req: false })
+    ]))
 
     await store.restoreSuspendedSnapshot()
 
@@ -167,7 +173,7 @@ describe('restoreSuspendedSnapshot：只重建请求帧已发的待决卡', () =
     store.historyLoaded = true
     api.runsCurrent.mockResolvedValue(snapshot([
       confirmEntry('c1', { entryStatus: 'APPROVED', req: true }), // 卡 1 已决（其后端工具可能还在执行）
-      confirmEntry('c2') // 卡 2 的请求帧还没发：这一窗口的真实形态
+      confirmEntry('c2', { req: false }) // 卡 2 的请求帧还没发：这一窗口的真实形态
     ]))
 
     await store.restoreSuspendedSnapshot()
@@ -200,7 +206,7 @@ describe('restoreSuspendedSnapshot：只重建请求帧已发的待决卡', () =
     const notRequested = await freshStore()
     notRequested.sessionId = 'sess-l0-gf-a'
     notRequested.historyLoaded = true
-    api.runsCurrent.mockResolvedValue(snapshot([gfEntry('g1')]))
+    api.runsCurrent.mockResolvedValue(snapshot([gfEntry('g1', { req: false })]))
 
     await notRequested.restoreSuspendedSnapshot()
     expect(notRequested.activeForm).toBeNull()
@@ -217,16 +223,18 @@ describe('restoreSuspendedSnapshot：只重建请求帧已发的待决卡', () =
     expect(toolSegments(requested.messages)).toHaveLength(1)
   }, 15000)
 
-  it('旧载荷缺 req 键 ⇒ 不建卡（严格口径：旧实例/旧数据一律按 false）', async () => {
+  it('旧载荷缺 req 键 ⇒ 按孤儿轮建卡（M-2b 无感恢复；不再按 false 处理）', async () => {
     const store = await freshStore()
     store.sessionId = 'sess-l0-legacy'
     store.historyLoaded = true
-    // 不带 req / reqAtMs：本口径引入前的载荷
+    // 不带 req / reqAtMs：本口径引入前的载荷（升级前遗留的挂起轮）
     api.runsCurrent.mockResolvedValue(snapshot([confirmEntry('legacy')]))
 
     await store.restoreSuspendedSnapshot()
 
-    expect(toolSegments(store.messages)).toHaveLength(0)
+    expect(toolSegments(store.messages).map((part) => part.toolCallId)).toEqual(['legacy'])
+    expect(pendingCallHosts(store.messages)).toHaveLength(1)
+    expect(store.messages[0]?.pendingCall).toMatchObject({ toolCallId: 'legacy', kind: 'CONFIRM', status: 'pending' })
     expect(store.suspended).toBe(true)
   }, 15000)
 

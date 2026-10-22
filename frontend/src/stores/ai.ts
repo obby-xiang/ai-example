@@ -51,7 +51,8 @@ import {
   planNormalize,
   planPreviewText,
   planReplace,
-  planUpdate
+  planUpdate,
+  sheetReadOnlyWriteBlocked
 } from '@/utils/sheet-tools'
 import {
   alreadyApplied,
@@ -68,7 +69,7 @@ import {
 } from '@/utils/parts'
 import { ErrorCode, type SessionBusyConflict, type SuspendPoolSaturated } from '@/types/api'
 import { frameSeq, isTerminalFrame, type ToolOutcome } from '@/types/sse'
-import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiHealth, type AiHistory, type AiHistoryMessage, type AiRunCurrent, type AiSessionMirror, type ChatMessage, type ContextBreakdownItem, type ContextCompaction, type ContextUsage, type GateSubmission, type MessagePart, type PendingToolCall, type SheetPreviewLevel, type SheetWritePlan, type ToolPart, type ToolPartPatch, type ToolRunStatus } from '@/types/ai'
+import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiHealth, type AiHistory, type AiHistoryMessage, type AiRunCurrent, type AiRunCurrentEntry, type AiSessionMirror, type ChatMessage, type ContextBreakdownItem, type ContextCompaction, type ContextUsage, type GateSubmission, type MessagePart, type PendingToolCall, type SheetPreviewLevel, type SheetWritePlan, type ToolPart, type ToolPartPatch, type ToolRunStatus } from '@/types/ai'
 import { parseFormSchema, checkFormValues } from '@/types/form-schema'
 import type { SseFrame } from '@/types/sse'
 import type { WorkspaceActionRecord } from '@/types/tools'
@@ -746,6 +747,20 @@ function isFrameDecidedPendingStatus(status: PendingToolCall['status'] | ToolRun
 }
 
 /**
+ * M-2b（2026-10-22 用户直裁「无感恢复」）：快照条目是否可重建为挂起卡。
+ *
+ * - `PENDING` + `kind ∈ {CONFIRM, FRONTEND}`：与 L0 同口径；
+ * - `req !== false`：`true` = 请求帧已发；**缺键 = 升级前遗留的孤儿轮**（无法判定）——
+ *   按可建处理，否则刷新后整轮从界面消失、输入框永久禁用。显式 `false`（同批请求帧
+ *   还没轮到）保持 L0 不建卡，等实时帧到达（活轮行为不变）。
+ */
+function isRestorablePendingEntry(entry: AiRunCurrentEntry): boolean {
+  return entry.entryStatus === 'PENDING'
+    && (entry.kind === 'CONFIRM' || entry.kind === 'FRONTEND')
+    && entry.req !== false
+}
+
+/**
  * AI 可视可操作专项：上传入口的定位（显式 ref 优先，否则取区域声明的 `uploadEntry`）。
  *
  * 只在**已注册区域**里找：区域未注册 = 该页没有上传入口（不可见即不可操作）。
@@ -849,6 +864,14 @@ export const useAiStore = defineStore('ai', {
      * 写工具无超时，若不收口会渲染一张点不动的“应用”卡 —— 面板据此改渲染“预览已失效 + 放弃”。
      */
     stalePreviewToolCallId: null as string | null,
+    /**
+     * M-2b（2026-10-22 用户直裁「无感恢复」）：快照恢复时**尚未呈现**的同批待决条目。
+     *
+     * 串行呈现与实时路径一致（一次只出一张卡）：刷新恢复只建第一张，其余按快照顺序排在这里，
+     * 当前卡决完后由 {@link revealNextRestoredPendingCard} 就地补下一张。只活在内存、不落镜像，
+     * 换会话 / 起新轮 / 停止即清空。
+     */
+    restoredPendingQueue: [] as AiRunCurrentEntry[],
     /**
      * AI 可视可操作专项：上传交接的活动态（设计稿 §3.9）。
      *
@@ -1408,11 +1431,15 @@ export const useAiStore = defineStore('ai', {
      *
      * **规则：本函数内任何新增 await 之后、写回之前都必须重新对账**（对账口径见下方守卫）。
      *
-     * **L0（2026-10-21）：只为"请求帧已发"的待决条目建卡。** 判据三条并列 ——
+     * **M-2b（2026-10-22 用户直裁「无感恢复」）：孤儿轮也重建，且串行呈现。** 判据 ——
      * `entryStatus === 'PENDING'`、`kind ∈ {CONFIRM, FRONTEND}`（快照给的是**三值原文**，
-     * `BACKEND` 条目后端直接执行、从不弹卡）、`req === true`（后端 `ConfirmGate` 在发射
-     * `confirm_request` / `frontend_tool_request` **之前**置位）。一批多调用挂起时请求帧是逐条发的，
-     * 只按"条目存在"建卡会画出请求帧还没发出的卡，用户提前点击 ⇒ 决策早于帧。
+     * `BACKEND` 条目后端直接执行、从不弹卡）、`req !== false`。`req === true` = 请求帧已发；
+     * **缺键 = 升级前遗留的孤儿轮**（是否发过帧已不可知）—— 按可建处理，否则整轮从界面消失、
+     * 输入框永久禁用。显式 `req === false`（同批里请求帧还没轮到）维持 L0 口径：不建卡，
+     * 等实时帧到达（活轮行为不变）。
+     *
+     * 串行呈现与实时路径一致：本函数**只重建第一张**，同批其余待决条目排进
+     * `restoredPendingQueue`；当前卡决完后由 {@link revealNextRestoredPendingCard} 就地补下一张。
      * 未发卡条目不渲染、不新增占位 UI；`suspended` 仍按"存在任意 PENDING 条目"置位（输入禁用语义不变）。
      */
     async restoreSuspendedSnapshot(): Promise<void> {
@@ -1430,6 +1457,8 @@ export const useAiStore = defineStore('ai', {
       if (this.sessionId !== sid || currentAbort !== abortAtEntry) {
         return
       }
+      // M-2b：本次快照是当前会话的权威口径 —— 先作废旧队列，空态/已决态不得残留可补的旧卡
+      this.restoredPendingQueue = []
       if (!current.found || !current.runId || !current.awaitingExternal) {
         // 已决/空态：不重建挂起卡，既有历史渲染与空历史 expired 降级规则兜底
         return
@@ -1448,103 +1477,21 @@ export const useAiStore = defineStore('ai', {
         }
       }
 
-      // 重建：只认 **PENDING + kind ∈ {CONFIRM, FRONTEND} + req === true**（L0，2026-10-21）
+      // 重建（M-2b）：PENDING + kind ∈ {CONFIRM, FRONTEND} + req !== false（缺键 = 孤儿轮，可建）。
       // - PENDING：已决条目不重建挂起卡（勘误 4 同口径：hasDecidedPendingResidue / isFrameDecidedPendingStatus）；
-      // - kind：快照里是**三值原文**，BACKEND 条目（后端直接执行、从不弹卡）不是挂起卡 —— 旧代码
-      //   `entry.kind === 'CONFIRM' ? 'CONFIRM' : 'FRONTEND'` 把未执行的后端条目画成了前端挂起卡；
-      // - req：一批多调用挂起时请求帧逐条发，`pendingEntries` 却整批落库 —— 只为**真的发过请求帧**
-      //   的条目建卡，否则会给用户一张"后端还没走到"的卡（点了会提前决策、后端补帧时瞬时复活）。
-      // 未发卡条目不渲染、也不新增占位 UI：`suspended` 由下方"存在任意 PENDING"单独置位（输入禁用语义不变）。
+      // - kind：快照里是**三值原文**，BACKEND 条目（后端直接执行、从不弹卡）不是挂起卡；
+      // - req：显式 false 的同批条目等实时帧，不进队列（活轮行为不变）。
+      // 串行呈现：只建第一张，其余进 `restoredPendingQueue`，决完一张补一张。
       const pendingEntries = current.pendingEntries.filter((entry) => entry.entryStatus === 'PENDING')
       if (pendingEntries.length > 0) {
         // 输入禁用语义只认"还有未决条目"，与 req / kind 无关
         this.suspended = true
         this.activeRunId = current.runId
       }
-      let host: ChatMessage | null = null
-      for (const entry of pendingEntries) {
-        if (entry.kind !== 'CONFIRM' && entry.kind !== 'FRONTEND') {
-          continue
-        }
-        if (entry.req !== true) {
-          continue
-        }
-        if (this.hasDecidedPendingResidue(entry.toolCallId)) {
-          continue
-        }
-        const kind = entry.kind
-        // 宿主消息：优先镜像/历史里已持该工具**段**的消息；否则最后一条助手消息；都没有才
-        // append 一条空助手消息作宿主 —— 唯一允许的新消息形态（历史/镜像皆无宿主），
-        // 不复制历史工具卡、无双渲染。
-        // 批2（权威翻转）：判据由 `toolRuns.some` 改读 `parts`（段是唯一真值，语义等价）
-        host = this.messages.find((item) => item.parts.some(
-          (part): boolean => part.kind === 'tool' && part.toolCallId === entry.toolCallId
-        ))
-          ?? [...this.messages].reverse().find((item) => item.role === 'assistant')
-          ?? null
-        if (!host) {
-          host = this.appendAssistantMessage('')
-          host.streaming = false
-          host.done = true
-        }
-        // 批2：挂起卡不再是"就地写独立投影"，而是**落段再派生** —— 段侧 requiresAction=true
-        // 因为该条目正是"等人工/前端动作"的那一个（派生出唯一 pendingCall，不新增重复工具卡）
-        // 去超时裁决后快照里的 expiresAt/atMs 只作对账口径：段字段照原样携带，前端不据其
-        // 折算任何倒计时 / 本地超时。
-        this.upsertToolPart(host, {
-          toolCallId: entry.toolCallId,
-          name: entry.name,
-          kind2: kind,
-          status: 'pending',
-          args: entry.arguments ?? undefined,
-          requiresAction: true,
-          ...(entry.expiresAt != null ? { expiresAt: entry.expiresAt, atMs: entry.atMs ?? undefined } : {}),
-          // H1 预检摘要：快照载荷带则原样落段（与 suspended/confirm_request 帧同口径），
-          // 缺省不产生该键 —— 旧载荷重建出的门卡与既有形态一字不差。
-          ...(entry.preflight ? { preflight: entry.preflight } : {})
-        })
-        deriveProjections(host)
-        // AI 表格操作专项 §3.5：刷新后本地 plan 已丢 —— 写工具无超时，必须收口成
-        // “预览已失效 + 放弃”，否则会出现一张点不动的“应用”卡。
-        if (needsSheetPreview(entry.name, parseToolArgs(entry.arguments)) && this.activePreview?.toolCallId !== entry.toolCallId) {
-          this.stalePreviewToolCallId = entry.toolCallId
-        }
-        // AI 可视可操作专项：上传交接**天然可恢复**（不依赖浏览器中间态）—— 区域仍注册即可继续，
-        // 区域不在该页则落 missing（主按钮禁用、只能放弃）。与上面"预览已失效"是两种形态。
-        if (UI_HANDOFF_TOOLS.has(entry.name) && this.activeUploadHandoff?.toolCallId !== entry.toolCallId) {
-          const args = parseToolArgs(entry.arguments)
-          const validated = validateUploadArgs(args)
-          if (validated.ok) {
-            const target = resolveUploadRegion(validated.value.ref)
-            const status: ActiveUploadHandoff['status'] = target && target.region.root.isConnected === true
-              ? 'waiting'
-              : 'missing'
-            this.activeUploadHandoff = {
-              toolCallId: entry.toolCallId,
-              runId: current.runId ?? null,
-              ref: target?.entry ?? validated.value.ref ?? null,
-              accept: validated.value.accept,
-              status,
-              reason: status === 'missing' ? '请先打开导入向导第 1 步' : null,
-              filename: null
-            }
-          }
-        }
-        if (entry.name === GENERATIVE_FORM_TOOL && !this.activeForm) {
-          // 不武装任何本地时限：表单一直可填，收口只认后端结局帧 / 用户取消
-          const spec = parseFormSchema(parseToolArgs(entry.arguments)?.form)
-          if (spec) {
-            this.activeForm = {
-              toolCallId: entry.toolCallId,
-              runId: current.runId,
-              form: spec,
-              status: 'filling',
-              error: null
-            }
-          }
-          // schema 非法：只留挂起卡（用户可取消），不武装表单态
-        }
-      }
+      const restorable = pendingEntries.filter(isRestorablePendingEntry)
+      const first = restorable.find((entry) => !this.hasDecidedPendingResidue(entry.toolCallId)) ?? null
+      const host = first ? this.rebuildPendingCard(first, current.runId) : null
+      this.restoredPendingQueue = restorable.filter((entry) => entry !== first)
 
       if (host) {
         // 增量续收：lastSeq = archiveMaxSeq 只收新帧（见 resumeSnapshotStream）
@@ -1567,6 +1514,114 @@ export const useAiStore = defineStore('ai', {
         return
       }
       void this.resumeSnapshotStream(current.runId, current.archiveMaxSeq)
+    },
+
+    /**
+     * M-2b（2026-10-22）：把一条快照待决条目重建为挂起卡（刷新恢复与「串行补下一张」共用）。
+     *
+     * 宿主消息：优先镜像/历史里已持该工具**段**的消息；否则最后一条助手消息；都没有才
+     * append 一条空助手消息作宿主 —— 唯一允许的新消息形态（历史/镜像皆无宿主），
+     * 不复制历史工具卡、无双渲染。返回宿主供续收连接锚定帧归属。
+     */
+    rebuildPendingCard(entry: AiRunCurrentEntry, runId: string): ChatMessage {
+      // 批2（权威翻转）：判据由 `toolRuns.some` 改读 `parts`（段是唯一真值，语义等价）
+      let host = this.messages.find((item) => item.parts.some(
+        (part): boolean => part.kind === 'tool' && part.toolCallId === entry.toolCallId
+      ))
+        ?? [...this.messages].reverse().find((item) => item.role === 'assistant')
+        ?? null
+      if (!host) {
+        host = this.appendAssistantMessage('')
+        host.streaming = false
+        host.done = true
+      }
+      // 批2：挂起卡不再是"就地写独立投影"，而是**落段再派生** —— 段侧 requiresAction=true
+      // 因为该条目正是"等人工/前端动作"的那一个（派生出唯一 pendingCall，不新增重复工具卡）
+      // 去超时裁决后快照里的 expiresAt/atMs 只作对账口径：段字段照原样携带，前端不据其
+      // 折算任何倒计时 / 本地超时。
+      const kind = entry.kind === 'CONFIRM' ? 'CONFIRM' : 'FRONTEND'
+      this.upsertToolPart(host, {
+        toolCallId: entry.toolCallId,
+        name: entry.name,
+        kind2: kind,
+        status: 'pending',
+        args: entry.arguments ?? undefined,
+        requiresAction: true,
+        ...(entry.expiresAt != null ? { expiresAt: entry.expiresAt, atMs: entry.atMs ?? undefined } : {}),
+        // H1 预检摘要：快照载荷带则原样落段（与 suspended/confirm_request 帧同口径），
+        // 缺省不产生该键 —— 旧载荷重建出的门卡与既有形态一字不差。
+        ...(entry.preflight ? { preflight: entry.preflight } : {})
+      })
+      deriveProjections(host)
+      // AI 表格操作专项 §3.5：刷新后本地 plan 已丢 —— 写工具无超时，必须收口成
+      // “预览已失效 + 放弃”，否则会出现一张点不动的“应用”卡。
+      if (needsSheetPreview(entry.name, parseToolArgs(entry.arguments)) && this.activePreview?.toolCallId !== entry.toolCallId) {
+        this.stalePreviewToolCallId = entry.toolCallId
+      }
+      // AI 可视可操作专项：上传交接**天然可恢复**（不依赖浏览器中间态）—— 区域仍注册即可继续，
+      // 区域不在该页则落 missing（主按钮禁用、只能放弃）。与上面"预览已失效"是两种形态。
+      if (UI_HANDOFF_TOOLS.has(entry.name) && this.activeUploadHandoff?.toolCallId !== entry.toolCallId) {
+        const args = parseToolArgs(entry.arguments)
+        const validated = validateUploadArgs(args)
+        if (validated.ok) {
+          const target = resolveUploadRegion(validated.value.ref)
+          const status: ActiveUploadHandoff['status'] = target && target.region.root.isConnected === true
+            ? 'waiting'
+            : 'missing'
+          this.activeUploadHandoff = {
+            toolCallId: entry.toolCallId,
+            runId,
+            ref: target?.entry ?? validated.value.ref ?? null,
+            accept: validated.value.accept,
+            status,
+            reason: status === 'missing' ? '请先打开导入向导第 1 步' : null,
+            filename: null
+          }
+        }
+      }
+      if (entry.name === GENERATIVE_FORM_TOOL && this.activeForm?.toolCallId !== entry.toolCallId) {
+        // 不武装任何本地时限：表单一直可填，收口只认后端结局帧 / 用户取消。
+        // 同一 toolCallId 保留现有填写态；串行补下一张时（旧表已决/已取消）换成本卡的表单。
+        const spec = parseFormSchema(parseToolArgs(entry.arguments)?.form)
+        if (spec) {
+          this.activeForm = {
+            toolCallId: entry.toolCallId,
+            runId,
+            form: spec,
+            status: 'filling',
+            error: null
+          }
+        }
+        // schema 非法：只留挂起卡（用户可取消），不武装表单态
+      }
+      return host
+    },
+
+    /**
+     * M-2b（2026-10-22 用户直裁「无感恢复」）：串行呈现 —— 当前卡决完后把快照里下一张补上。
+     *
+     * 只消费 `restoreSuspendedSnapshot` 留下的同批队列：**同步、不发请求、不加提示、不新建连接**
+     * （决策路径已按既有口径重连）。活轮里尚未发帧（`req=false`）的条目不在队列中，仍由实时帧
+     * 到达建卡 —— 与升级前完全一致。调用点在 `clearSuspendedIfNoOtherConfirms` 之前：新卡一出现，
+     * 挂起态与输入禁用语义自然延续（全部决完后才收口）。
+     */
+    revealNextRestoredPendingCard(runId: string): void {
+      if (!this.suspended || this.restoredPendingQueue.length === 0) {
+        return
+      }
+      if (this.activeRunId !== runId) {
+        // 轮次身份已变：旧队列整体作废（不得把旧轮的卡补进新轮）
+        this.restoredPendingQueue = []
+        return
+      }
+      const next = this.restoredPendingQueue.find((entry) => !this.hasDecidedPendingResidue(entry.toolCallId)) ?? null
+      if (!next) {
+        this.restoredPendingQueue = []
+        return
+      }
+      // 命中的这张出队；跳过的已决条目留在队里（下次扫描仍会跳过），不会复活
+      this.restoredPendingQueue = this.restoredPendingQueue.filter((entry) => entry !== next)
+      this.rebuildPendingCard(next, runId)
     },
 
     /**
@@ -1693,6 +1748,8 @@ export const useAiStore = defineStore('ai', {
       const workspace = useWorkspaceStore()
       // B1 收口修（C-1）：新消息 = 真正换轮 —— 上一轮在途的前端工具结局自此一律丢弃
       roundEpoch += 1
+      // M-2b：上一轮快照恢复留下的串行队列随换轮作废（不得把旧卡补进新轮）
+      this.restoredPendingQueue = []
       const userMessage = resend.skipUserRecord ? null : this.recordUserMessage(content)
       const userMessageId = userMessage?.id ?? null
       const assistant = this.appendAssistantMessage()
@@ -1907,6 +1964,8 @@ export const useAiStore = defineStore('ai', {
       }
       // B1 收口修（C-1）：重挂 = 接管既有轮（新连接身份）—— 在途的旧轮前端工具结局丢弃
       roundEpoch += 1
+      // M-2b：重挂走实时帧重建，快照串行队列作废（防旧队列在重连后复读旧卡）
+      this.restoredPendingQueue = []
       const previous = currentAbort
       const lastSeq = this.runSeq[targetRunId]
       const assistant = this.appendAssistantMessage('（正在重挂进行中的轮次…）')
@@ -2196,6 +2255,8 @@ export const useAiStore = defineStore('ai', {
         // 顺序先于 clearSuspendedIfNoOtherConfirms：后者在多卡批次里可能把 suspended 置 false，
         // 而重连的触发判据正是"这轮仍在挂起语义里"。
         this.reconnectSuspendedRun(runId, toolCallId)
+        // M-2b：快照恢复的多卡批次串行呈现 —— 先补下一张，再按"是否还有待决卡"决定挂起收口
+        this.revealNextRestoredPendingCard(runId)
         // 多卡并存：本轮还有别的确认门待决时保持挂起态（只清自己这张）
         this.clearSuspendedIfNoOtherConfirms(toolCallId)
       } catch (error) {
@@ -2264,6 +2325,8 @@ export const useAiStore = defineStore('ai', {
         // B1（2026-10-20 裁决 9）：回灌送达 ⇒ 带 lastSeq 重连收流（GF 提交/取消与即时前端工具共用）。
         // 不 await：重连要活到本轮终帧，await 会把"表单已提交"的本地收尾拖到整轮结束之后。
         this.reconnectSuspendedRun(targetRunId, toolCallId)
+        // M-2b：GF / 上传 / 表格预览（放弃）等同族决策 — 快照批次里下一张接着出现
+        this.revealNextRestoredPendingCard(targetRunId)
         return { ok: true }
       } catch (error) {
         if (error instanceof ApiError && error.code === ErrorCode.DUPLICATE_TOOL_CALL_ID) {
@@ -2388,7 +2451,7 @@ export const useAiStore = defineStore('ai', {
         return
       }
       if (resolved.ctx.readOnly) {
-        await fail('任务已结束，仅供查看，未对表格做任何修改。')
+        await fail(sheetReadOnlyWriteBlocked())
         return
       }
       let planned
@@ -2980,6 +3043,8 @@ export const useAiStore = defineStore('ai', {
     async stop(): Promise<void> {
       // B1 收口修（C-1）：停止 = 本轮被放弃 —— 在途前端工具结局不得再写段/回灌（含挂起态无连接可 abort 时）
       roundEpoch += 1
+      // M-2b：停止后不得再把快照队列里的旧卡补出来
+      this.restoredPendingQueue = []
       // AI 可视可操作专项：停止后**后续界面动词立即拒绝**（已执行的不回滚）；
       // 交接卡随本轮收起（后端取消会让挂起走取消收尾）。
       abortUiOperations()
@@ -3037,6 +3102,8 @@ export const useAiStore = defineStore('ai', {
       const oldSessionId = this.sessionId
       // B1 收口修（C-1）：换会话 = 真正换轮 —— 旧会话在途的前端工具结局不得写进新会话
       roundEpoch += 1
+      // M-2b：旧会话的快照串行队列不得落进新会话
+      this.restoredPendingQueue = []
       // R5①（issue#5）：在跑的轮次先中止 —— 否则 loading 不复位（输入区一直禁用到流结束），
       // 且后续帧会写进**已清空**的 messages（按 assistantId 找不到宿主 ⇒ 孤儿消息/孤儿帧）
       try {

@@ -608,10 +608,11 @@ export interface AiRunCurrentEntry {
   /**
    * L0（2026-10-21）：该条目的请求帧（`confirm_request` / `frontend_tool_request`）**真的发过**。
    *
-   * 一批多调用挂起时请求帧是逐条发的，`pendingEntries` 却是整批一起落库的 —— 刷新恢复只为
-   * `req === true` 的条目建卡（`entryStatus === 'PENDING'` 且 `kind ∈ {CONFIRM, FRONTEND}` 且
-   * `req === true`），否则会画出一张"后端还没走到、请求帧还没发出"的卡并被提前点击。
-   * 缺键 / 旧数据 = false（宁可少一张卡，不可让用户点到未生效的卡）；已决条目恒 false。
+   * 一批多调用挂起时请求帧是逐条发的，`pendingEntries` 却是整批一起落库的 —— `req === false`
+   * 的条目（同批尚未轮到）刷新恢复时不建卡，等实时帧到达，否则会画出一张"后端还没走到、
+   * 请求帧还没发出"的卡并被提前点击。
+   * M-2b（2026-10-22）：**缺键 = 升级前遗留的孤儿轮**（无法判定），按可建处理（无感恢复）；
+   * 已决条目恒 false。
    */
   req?: boolean
   /** 上述置位时刻（服务端钟；null/缺键 = 未发射或旧数据） */

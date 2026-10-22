@@ -149,8 +149,9 @@ function assertUnknownTerminalInvariant(part: ToolPart): void {
  * 工具段 → 挂起投影（复刻原 `toPendingCall` 的形状：args 已解析、rawArgs 原样、
  * 倒计时元数据随段持久化）。`kind` 由段 kind2 派生；非 FRONTEND 一律按 CONFIRM 卡展示
  * （段 kind2 是后端三值原文，而落段白名单早已收窄到 CONFIRM/FRONTEND —— 刷新恢复只为
- * `kind ∈ {CONFIRM, FRONTEND}` 且 `req === true` 的条目建段，`suspended` 帧路径同样按
- * `kind === 'CONFIRM' || kind === 'FRONTEND'` 择条，故 BACKEND 条目不会走到这里）。
+ * `kind ∈ {CONFIRM, FRONTEND}` 且 `req !== false`（缺键 = 孤儿轮可建）的条目建段，
+ * `suspended` 帧路径同样按 `kind === 'CONFIRM' || kind === 'FRONTEND'` 择条，
+ * 故 BACKEND 条目不会走到这里）。
  */
 function toPendingCallProjection(part: ToolPart): PendingToolCall {
   return {
