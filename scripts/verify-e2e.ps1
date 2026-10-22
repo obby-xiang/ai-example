@@ -1,9 +1,11 @@
 # ============================================================
-# E2E 验证脚本（main 版）：动态配置管理系统 全流程 159 用例
+# E2E 验证脚本（main 版）：动态配置管理系统 全流程 163 用例
 #   = 既有 35（TC1–TC22 + TC23 + GF1–GF6 + R-137×2 + E2E-CTX-1..4）
 #     + 批① 90（AIE2E-*，设计稿 docs/research/设计-AI对话E2E用例全集-2026-10-22.md §2 十二域
 #       ＋ L-21 两条表格主用例 T-13/T-14，设计稿之外新增、行内登记于 SH 域）
 #     + V1 34（AIE2E-W-*，测试扩充 V1 · 工作区原语全链（桩层）+ 缺口 0 动态披露修复的回归位）
+#     + V2 4（AIE2E-W-35..W-38，测试扩充 V2 · 刷新恢复链的桩级三面：在途轮发现 / 全量重放 /
+#       挂起卡重建源数据 / 增量续收锚点）
 #
 # 移植来源：<REPO_ROOT>/ai-example-code/ai-example-deepseek-v4-pro/scripts/verify-e2e.ps1
 #           （685 行 / TC1–TC22 共 22 用例）。用例编号与源脚本一一对照，
@@ -48,7 +50,7 @@
 # 数据面安全：本脚本只创建/删除自己的 S5B-*/AIE2E-* 任务与 E2E_TEMP 定义；
 #   CURRENCY 演示数据在 TC13 会被替换为 3 行，TC19 用全量导出件恢复为 5 行。
 #
-# 结果口径：159 个用例计入 PASS/FAIL —— 既有 35 + 批① 90（AIE2E-*）+ V1 34（AIE2E-W-*）
+# 结果口径：163 个用例计入 PASS/FAIL —— 既有 35 + 批① 90（AIE2E-*）+ V1 34（AIE2E-W-*）+ V2 4
 #   既有 35：TC1–TC22 共 22 个 + TC23（T3b 收尾：CONFIRM 卡快照重建）+ GF1–GF5 共 5 个
 #   （生成式表单端到端，docs/evidence/GFc-E2E用例设计-GLM-5.3.md）+ GF6（入参闸门，-EnableGf6，
 #   桩模式启用并计入主计数，底座为桩的确定性违规模式 --violate-form-type）+ R-137 红队补测
@@ -60,7 +62,10 @@
 #   V1 34（W 域）：7 个 `ui_*` 原语全链（B1 7 条）+ 拒执码落档（B3 2）+ 动态披露两分支（B4 2，
 #   缺口 0 的回归位）+ 不可撤销位三通道（B9 3）+ 交接卡（B14 2）+ 页面拒执如实落档（B15 2）+
 #   写动词轮内状态归零（B18 1）+ 前端注册表对账（B20 1）+ 停止/恢复五组（A9/A10/A11/A12/A13 共 14）。
-#   移植期缺陷清单（Q8）的两项断言单列计数（Q8 项 PASS/FAIL），不计入 159 与退出码。
+#   V2 4（W 域尾）：刷新恢复链的桩级三面 —— W-35 断开后在途轮发现（runs/current 的 RUNNING +
+#   archiveMaxSeq）/ W-36 断开后 lastSeq=0 全量重放完整 / W-37 断开后挂起卡重建源数据（kind/req/
+#   arguments 与 confirm_request 帧同源）/ W-38 已收末号续收只补新帧。
+#   移植期缺陷清单（Q8）的两项断言单列计数（Q8 项 PASS/FAIL），不计入 163 与退出码。
 # 退出码：任一主用例 FAIL ⇒ exit 1；GF1–GF4 全部 SKIP（本棒零有效验证，硬底线）⇒ exit 1；
 #   E2E_STUB_MODE=1 且 GFSKIP≥1 ⇒ exit 1（桩模式零容忍）；
 #   批① 的 P2 红**单列不阻塞**（设计稿 §4.2 第 5 项：防一门禁把开发卡死），P0/P1 红照常 exit 1。
@@ -4976,6 +4981,98 @@ Add-AiCase 'W-34' 'P1' '挂起中停止不遮挡新轮：同会话下一轮可�
     return $null
 }
 
+# V2 · 刷新恢复链（桩层 4 条）：客户端"刷新"在接口面的等价形态 = **断开后重新取数**。
+# 前端 jsdom 侧的真形态已由 tests/aie2e-refresh-forms.spec.ts 覆盖（全新 store + /history +
+# /runs/current + 帧）；这里补的是那三处持久面在**真进程 / 真 SSE** 下确实可供重建 ——
+# 单测无论怎么 mock 都不能证明"服务端真的还留着这段现场"。
+
+Add-AiCase 'W-35' 'P1' '刷新恢复①在途轮发现：客户端断开后 runs/current 仍报在途轮与归档末号' {
+    $sid = Ai-NewSid 'w35'
+    $head = New-Object System.Collections.ArrayList
+    # 只读到 start 就断开（= 用户刷新页面）：连接没了，但这一轮还在服务端跑
+    Read-Sse '/api/ai/chat' @{ sessionId = $sid; message = '【AIE2E】turn-text stall-frames=2000 刷新恢复在途轮发现。'; context = @{ page = 'tasks' } } @('start') $head
+    $runId = Ai-RunId $head
+    $cur = GetJson "/api/ai/runs/current?sessionId=$sid"
+    if (-not $cur.found) { throw '客户端断开后 runs/current 为空（刷新后无从发现这段在途轮）' }
+    if ($cur.runId -ne $runId) { throw "runs/current 指向 $($cur.runId)，期望 $runId" }
+    if ($cur.snapshotStatus -ne 'RUNNING') { throw "断开后快照状态 $($cur.snapshotStatus)，期望 RUNNING（在途轮发现的判据）" }
+    if ([int]$cur.archiveMaxSeq -lt 1) { throw "archiveMaxSeq=$($cur.archiveMaxSeq)，期望 ≥1（无归档则刷新后无从续收）" }
+    $null = Ai-Cancel $runId
+    $null = Ai-WaitStatus $runId @('CANCELLED') 20
+    return $null
+}
+
+Add-AiCase 'W-36' 'P1' '刷新恢复②全量重放：断开后 lastSeq=0 重连收齐 start/delta/done（seq 严格递增）' {
+    $sid = Ai-NewSid 'w36'
+    $head = New-Object System.Collections.ArrayList
+    Read-Sse '/api/ai/chat' @{ sessionId = $sid; message = '【AIE2E】turn-text stall-frames=600 刷新恢复全量重放。'; context = @{ page = 'tasks' } } @('start') $head
+    $runId = Ai-RunId $head
+    # 刷新恢复的在途路径（restoreInFlightRound）就是 lastSeq=0 全量重放：镜像正文滞后，增量必缺口
+    $replay = Ai-Events $runId 0 @('done', 'error')
+    $starts = @($replay | Where-Object { $_.type -eq 'start' })
+    if ($starts.Count -ne 1) { throw "重放 start 帧 $($starts.Count) 个（期望恰 1）" }
+    if ($starts[0].runId -ne $runId) { throw "重放首帧 runId=$($starts[0].runId)，期望 $runId" }
+    $deltas = @($replay | Where-Object { $_.type -eq 'delta' })
+    if ($deltas.Count -lt 1) { throw '重放没有任何 delta（全量重放不完整）' }
+    $errs = @($replay | Where-Object { $_.type -eq 'error' })
+    if ($errs.Count -gt 0) { throw "重放出现 error 帧（$($errs[0].code)）：断开影响了本轮" }
+    $done = Ai-Done $replay
+    if ($done.cancelled -eq $true) { throw '重放 done.cancelled=true（未停止的轮被标成取消）' }
+    Ai-SeqStrict $replay
+    # 正文拼接必须完整（切片按 24 字符发；有洞会在这里露出来）
+    $text = ($deltas | ForEach-Object { [string]$_.text }) -join ''
+    if ($text -notlike '*命名轮蓝本*' -or $text.Length -lt 40) { throw "重放正文不完整（长度 $($text.Length)）" }
+    return $null
+}
+
+Add-AiCase 'W-37' 'P1' '刷新恢复③挂起卡重建：断开后快照条目自带 kind/req/arguments 且与 confirm_request 帧同源' {
+    $t = Ai-PublishFixture 'AIE2E-W-37-挂起卡重建'
+    $sid = Ai-NewSid 'w37'
+    $frames = New-Object System.Collections.ArrayList
+    Read-Sse '/api/ai/chat' @{ sessionId = $sid; message = ("请立即调用 start_publish 工具发布导入任务 {0}（系统会自动弹出确认卡片，无需再询问我）" -f $t); context = @{ page = 'import'; taskId = $t; taskType = 'IMPORT'; step = 'PUBLISH' } } `
+        @('confirm_request', 'done', 'error') $frames $null
+    $cr = Ai-One $frames 'confirm_request'
+    if (-not $cr) { throw '未挂起到确认门（挂起卡重建无从对账）' }
+    # 读到 confirm_request 即断开 = 用户此刻刷新：挂起现场只能由快照重建
+    $cur = GetJson "/api/ai/runs/current?sessionId=$sid"
+    if (-not $cur.found) { throw '断开后 runs/current 为空（刷新后挂起卡无处重建）' }
+    if ($cur.runId -ne $cr.runId) { throw "runs/current 指向 $($cur.runId)，期望 $($cr.runId)" }
+    if (-not $cur.awaitingExternal) { throw '断开后 awaitingExternal=false（挂起轮被当成"在途续收"而非"等人工"）' }
+    $entry = @($cur.pendingEntries | Where-Object { $_.toolCallId -eq $cr.toolCallId })[0]
+    if (-not $entry) { throw '快照 pendingEntries 缺该条目（卡无从重建）' }
+    if ($entry.entryStatus -ne 'PENDING') { throw "条目状态 $($entry.entryStatus)，期望 PENDING（已决条目不重建卡）" }
+    if ($entry.kind -ne 'CONFIRM') { throw "条目 kind=$($entry.kind)，期望 CONFIRM（三值原文）" }
+    if ($entry.req -ne $true) { throw "条目 req=$($entry.req)，期望 true（请求帧真的发过的条目才可建卡）" }
+    if ($entry.name -ne $cr.name) { throw "条目 name=$($entry.name) 与帧 name=$($cr.name) 不同源" }
+    if ([string]::IsNullOrWhiteSpace([string]$entry.arguments)) { throw '条目缺 arguments（卡面入参无从渲染）' }
+    $pend = @(GetJson "/api/ai/pending/$($cr.runId)" | Where-Object { $_.toolCallId -eq $cr.toolCallId })[0]
+    if (-not $pend -or $pend.status -ne 'PENDING') { throw '/pending 与 runs/current 不同向（同一挂起两个口径）' }
+    if ([int]$cur.archiveMaxSeq -lt [int]$cr.seq) { throw "archiveMaxSeq=$($cur.archiveMaxSeq) < confirm_request.seq=$($cr.seq)（续收锚点落后于已发帧）" }
+    $null = Ai-Cancel $cr.runId
+    $null = Ai-WaitStatus $cr.runId @('CANCELLED') 20
+    return $null
+}
+
+Add-AiCase 'W-38' 'P2' '刷新恢复④增量续收锚点：以已收末号 lastSeq=K 续收只补新帧、不重放旧帧' {
+    $sid = Ai-NewSid 'w38'
+    $head = New-Object System.Collections.ArrayList
+    Read-Sse '/api/ai/chat' @{ sessionId = $sid; message = '【AIE2E】turn-text stall-frames=700 刷新恢复增量续收。'; context = @{ page = 'tasks' } } @('delta') $head
+    $runId = Ai-RunId $head
+    $seen = @($head | Where-Object { $null -ne $_.seq } | ForEach-Object { [int]$_.seq })
+    if ($seen.Count -eq 0) { throw '断开前未收到任何带序号的帧（锚点无从确定）' }
+    $k = ($seen | Measure-Object -Maximum).Maximum
+    $cur = GetJson "/api/ai/runs/current?sessionId=$sid"
+    if (-not $cur.found) { throw '断开后 runs/current 为空' }
+    if ([int]$cur.archiveMaxSeq -lt $k) { throw "archiveMaxSeq=$($cur.archiveMaxSeq) < 已收末号 $k（锚点落后 ⇒ 续收会重放旧帧）" }
+    $tail = Ai-Events $runId $k @('done', 'error')
+    $old = @($tail | Where-Object { $null -ne $_.seq -and [int]$_.seq -le $k })
+    if ($old.Count -gt 0) { throw "增量续收重放了 $($old.Count) 个旧帧（lastSeq=$k 未生效）" }
+    $done = Ai-Done $tail
+    if ($done.cancelled -eq $true) { throw '增量续收收尾为 cancelled（未停止的轮被标成取消）' }
+    Ai-SeqStrict $tail
+    return $null
+}
+
 
 # ============================================================
 # 批① 汇总：逐域 n/m + 计数自校验（MANIFEST 对账）
@@ -4984,9 +5081,12 @@ Add-AiCase 'W-34' 'P1' '挂起中停止不遮挡新轮：同会话下一轮可�
 #           + 8（收编：G-03/G-05/G-06/D-12/C-03..C-06 已由既有 GF3/GF5/GF6/CTX-1..4 断言承载）
 #   本节名单 = 154 − 41 − 10 − 7 − 8；优先级 = §2 逐行 P 列的直接汇总（12/50/26）
 #   V1 追加（测试扩充 V1 · 工作区原语全链）：W 域 34 条（90 → 124），P0 12→15 / P1 52→72 / P2 26→37
+#   V2 追加（测试扩充 V2 · 刷新/停止真形态下沉）：W 域 4 条（124 → 128）——
+#     W-35 在途轮发现 / W-36 全量重放 / W-37 挂起卡重建源数据 / W-38 增量续收锚点，
+#     P1 +3 / P2 +1（前端 jsdom 真形态 26 条见 tests/aie2e-refresh-forms.spec.ts，不计入本节）
 # ============================================================
 Say '============================================================'
-Say '--- 批① · 124 用例执行（桩模式，零 SKIP） ---'
+Say '--- 批① · 128 用例执行（桩模式，零 SKIP） ---'
 $script:aiStat = @{}
 $script:aiExecuted = 0
 $script:aiSkip = 0
@@ -5021,7 +5121,7 @@ foreach ($c in @($script:aiCases)) {
         No ("AIE2E-{0} [{1}] {2}" -f $c.id, $c.p, $c.title) $why
     }
 }
-$expect = [ordered]@{ S = 13; P = 1; H = 11; G = 11; T = 10; K = 6; Q = 4; C = 8; M = 3; D = 11; X = 12; W = 34 }
+$expect = [ordered]@{ S = 13; P = 1; H = 11; G = 11; T = 10; K = 6; Q = 4; C = 8; M = 3; D = 11; X = 12; W = 38 }
 $domainLines = @()
 foreach ($k in $expect.Keys) {
     $st = if ($script:aiStat.ContainsKey($k)) { $script:aiStat[$k] } else { @{ pass = 0; fail = 0 } }
@@ -5031,20 +5131,20 @@ Say (" 批① 逐域：" + ($domainLines -join '  '))
 Say (" 批① 合计：{0}/{1}（P0={2} P1={3} P2={4}）" -f $script:aiPass, $script:aiExecuted, $script:aiP.P0, $script:aiP.P1, $script:aiP.P2)
 
 $manifestWhy = @()
-if ($script:aiCases.Count -ne 124) { $manifestWhy += "用例清单 $($script:aiCases.Count) 条，蓝图要求 124（88 设计稿 + 2 L-21 主用例 + 34 V1 工作区原语）" }
-if ($script:aiExecuted -ne 124) { $manifestWhy += "实际执行 $($script:aiExecuted) 条，期望 124（88 设计稿 + 2 L-21 主用例 + 34 V1 工作区原语）" }
+if ($script:aiCases.Count -ne 128) { $manifestWhy += "用例清单 $($script:aiCases.Count) 条，蓝图要求 128（88 设计稿 + 2 L-21 主用例 + 34 V1 工作区原语 + 4 V2 刷新恢复链）" }
+if ($script:aiExecuted -ne 128) { $manifestWhy += "实际执行 $($script:aiExecuted) 条，期望 128（88 设计稿 + 2 L-21 主用例 + 34 V1 工作区原语 + 4 V2 刷新恢复链）" }
 if ($script:aiSkip -ne 0) { $manifestWhy += "SKIP=$($script:aiSkip) 条（桩下零 SKIP 是硬底线）" }
 foreach ($k in $expect.Keys) {
     $n = @($script:aiCases | Where-Object { $_.id -like "$k-*" }).Count
     if ($n -ne $expect[$k]) { $manifestWhy += "域 $k 有 $n 条，蓝图 $($expect[$k]) 条" }
 }
-if ($script:aiP.P0 -ne 16 -or $script:aiP.P1 -ne 70 -or $script:aiP.P2 -ne 38) {
-    $manifestWhy += "优先级分布 P0/P1/P2=$($script:aiP.P0)/$($script:aiP.P1)/$($script:aiP.P2)，蓝图 16/70/38（88 设计稿 12/50/26 + 2 条 P1 主用例 + V1 的 4/18/12）"
+if ($script:aiP.P0 -ne 16 -or $script:aiP.P1 -ne 73 -or $script:aiP.P2 -ne 39) {
+    $manifestWhy += "优先级分布 P0/P1/P2=$($script:aiP.P0)/$($script:aiP.P1)/$($script:aiP.P2)，蓝图 16/73/39（88 设计稿 12/50/26 + 2 条 P1 主用例 + V1 的 4/18/12 + V2 的 0/3/1）"
 }
 if ($manifestWhy.Count -gt 0) {
     No 'AIE2E-MANIFEST 计数自校验' ($manifestWhy -join '；')
 } else {
-    Ok ("AIE2E-MANIFEST 计数自校验：124 条 / 12 域（S13 P1 H11 G11 T10 K6 Q4 C8 M3 D11 X12 W34）/ P0 {0} · P1 {1} · P2 {2}，与设计稿 §2 逐行 P 列一致 + L-21 两条表格主用例（T-13/T-14，P1）+ V1 的 W 域 34 条" -f $script:aiP.P0, $script:aiP.P1, $script:aiP.P2)
+    Ok ("AIE2E-MANIFEST 计数自校验：128 条 / 12 域（S13 P1 H11 G11 T10 K6 Q4 C8 M3 D11 X12 W38）/ P0 {0} · P1 {1} · P2 {2}，与设计稿 §2 逐行 P 列一致 + L-21 两条表格主用例（T-13/T-14，P1）+ V1 的 W 域 34 条 + V2 的刷新恢复链 4 条" -f $script:aiP.P0, $script:aiP.P1, $script:aiP.P2)
 }
 
 # ============================================================
@@ -5201,7 +5301,7 @@ try {
 } catch { Q8-No 'Q8 项回归' $_.Exception.Message }
 
 Say '============================================================'
-Say (" 结果：PASS={0}  FAIL={1}  （主用例计数，含 TC1–TC22、TC23、GF1–GF6（GF6 需 -EnableGf6）、E2E-CTX-1..4 与批① AIE2E 90 条 + V1 34 条；基数不写死，随用例演进）" -f $script:passed, $script:failed)
+Say (" 结果：PASS={0}  FAIL={1}  （主用例计数，含 TC1–TC22、TC23、GF1–GF6（GF6 需 -EnableGf6）、E2E-CTX-1..4 与批① AIE2E 90 条 + V1 34 条 + V2 4 条；基数不写死，随用例演进）" -f $script:passed, $script:failed)
 # 批① 门禁口径（设计稿 §4.2 第 5 项）：P0/P1 红 ⇒ exit 1；P2 红单列不阻塞（防一门禁把开发卡死）
 $aiP2Fail = [int]$script:aiP2Fail
 Say (" 批① AIE2E：PASS={0}  FAIL={1}（其中 P2 红 {2} 条，不阻塞退出码）" -f $script:aiPass, ($script:aiExecuted - $script:aiPass), $aiP2Fail)
