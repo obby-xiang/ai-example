@@ -175,7 +175,14 @@
         class="flex-1 overflow-y-auto overflow-x-hidden p-3"
         :class="SCROLLBAR_CLASS"
         @scroll.passive="onMsgScroll"
+        @wheel.passive="markUserScrollIntent"
+        @touchstart.passive="markUserScrollIntent"
+        @keydown="markUserScrollIntent"
       >
+      <!-- 批 D · D2②：**内容层**单独一层（RO 的观测目标）。滚动容器自身的盒子被 flex 定死，
+           内容长高时它自己的 box 不变 ⇒ 观测它对内容增长完全不触发；观测内容层才等于
+           "内容高度变了"。纯布局容器：无内边距、无定位，视觉零变化。 -->
+      <div ref="msgContentRef">
       <!-- 历史对账期骨架屏（苞 B 项 4）：消费 store 的 historyLoaded —— 与空态互斥
            （无消息且对账未完 → 骨架屏；对账完成后才轮到空态/消息流）。
            R-165 S2：el-skeleton 退场 → 自绘 demo v7 `.sk` 渐变条（bg-[linear-gradient(...)] +
@@ -801,6 +808,7 @@
         </div>
       </div>
       </div>
+      </div>
 
       <!-- R-154 #5：上滑暂停跟随后浮出的「回到底部」——点击恢复跟随并滚底。
            R-165 S4 项 5（用户直裁）：形态回「水平居中 + 常显文字胶囊」（旧形态见 70a8aa6，
@@ -1239,6 +1247,11 @@ const inputText = ref('')
  */
 const MESSAGE_MAX_CHARS = 8192
 const msgWrapRef = ref<HTMLElement | null>(null)
+/**
+ * 批 D · D2②：滚动容器内的**内容层**。RO 观测它（而不是滚动容器本身）——
+ * 滚动容器的盒子由 flex 定死，内容长高时它自己的 box 不变，观测它对"内容增长"零触发。
+ */
+const msgContentRef = ref<HTMLElement | null>(null)
 /** R-165 S5c：输入框 ref —— 错误卡「改写后重发」把焦点交回输入框（改写是用户动作）。 */
 const composerRef = ref<HTMLTextAreaElement | null>(null)
 
@@ -1260,6 +1273,36 @@ const SHOW_BACK_TO_BOTTOM_PX = 160
 /** R-161 浮钮滞回（R-165 S4 调整为 32）：离底小于它才隐藏。 */
 const HIDE_BACK_TO_BOTTOM_PX = 32
 
+/**
+ * 批 D · D2③：跟随判定的**滞回窗**（ms）。
+ *
+ * 场景：pinBottom 把 scrollTop 钉到新底部之后，浏览器还会为「内容长高 / 钉底本身」补派
+ * scroll 事件 —— 那一刻读到的离底距离可能已经是下一帧内容的（> 32px），跟随闸被误翻成
+ * false，于是自动跟随"自己把自己停了"，下一帧起 `scrollBottom()` 又因 followBottom=false
+ * 整段跳过（用户看到的断续 / 拖回）。
+ *
+ * 口径：**钉底后 150ms 内、且没有用户滚动意图时，scroll 事件只允许"恢复"跟随，不允许"解除"**。
+ * 用户真滚动由 wheel / touch / 键盘的意图标记（{@link markUserScrollIntent}）识别 ——
+ * 意图先于 scroll 事件到达，因此正常上滑一秒都不会被吞。
+ */
+const PIN_SETTLE_MS = 150
+/** 用户滚动意图的保鲜期（ms）：wheel/touch/键盘之后这段时间的 scroll 事件按用户行为判定。 */
+const USER_INTENT_MS = 300
+
+/** 钉底静默期截止时刻（过去时刻 = 不在静默期）。 */
+let pinSettleUntil = 0
+/** 最近一次用户滚动意图时刻。 */
+let userIntentAt = 0
+
+/** wheel/touch/键盘滚动 = 用户显式意图（模板上的被动监听，零阻止、零视觉）。 */
+function markUserScrollIntent(): void {
+  userIntentAt = Date.now()
+}
+
+function userIntentRecent(): boolean {
+  return Date.now() - userIntentAt <= USER_INTENT_MS
+}
+
 /** R-161：pinBottom() 的落点。程序化钉底后浏览器异步派发的 scroll 回声按落点识别
  *  （容差 ≤1px，会审 M1）：回声只刷浮钮显隐，不动跟随闸 —— 否则「已在底部时内容插入」
  *  把 scrollHeight 顶高后回声读中间态离底（demo 打点实证 42px）会误锁跟随。 */
@@ -1275,14 +1318,24 @@ function onMsgScroll(): void {
   if (!wrap) {
     return
   }
+  const dist = bottomDist(wrap)
   // 回声闸：|scrollTop − 落点| ≤ 1px ⇒ 程序化钉底的回声，跳过跟随闸
   if (pinGuardTop !== null && Math.abs(wrap.scrollTop - pinGuardTop) <= 1) {
-    updateBackToBottom(bottomDist(wrap))
+    updateBackToBottom(dist)
+    return
+  }
+  // D2③ 滞回：钉底静默期内、没有用户意图 ⇒ 这是布局补偿 / 内容增长引发的 scroll，
+  // 不参与跟随判定（只允许它把跟随"恢复"回来）。
+  if (Date.now() < pinSettleUntil && !userIntentRecent()) {
+    if (dist < FOLLOW_THRESHOLD_PX) {
+      followBottom.value = true
+    }
+    updateBackToBottom(dist)
     return
   }
   pinGuardTop = null
-  followBottom.value = bottomDist(wrap) < FOLLOW_THRESHOLD_PX
-  updateBackToBottom(bottomDist(wrap))
+  followBottom.value = dist < FOLLOW_THRESHOLD_PX
+  updateBackToBottom(dist)
 }
 
 /** R-161 滞回带显隐：带内（HIDE ~ SHOW，R-165 S4 起 32~160）保持原状，防边界抖动；
@@ -2903,15 +2956,24 @@ function probe(): void {
 /**
  * R-161：统一程序化钉底入口 —— 设 scrollTop=scrollHeight + 记落点 pinGuardTop + 置
  * followBottom=true。一切钉底（scrollBottom / 发送 force / 回到底部 / RO 内容重钉）必经
- * 此口；渲染滞后（watch 先于 DOM 补丁触发）导致的「钉到旧底」由 RO 回调重钉兜底。
+ * 此口；渲染滞后（watch 先于 DOM 补丁触发）导致的「钉到旧底」由 nextTick 后的二次钉底
+ * （批 D · D2①）与 RO 内容重钉（D2②）双重兜底。
  */
 function pinBottom(): void {
   const wrap = msgWrapRef.value
   if (!wrap) {
     return
   }
-  wrap.scrollTop = wrap.scrollHeight
+  const target = wrap.scrollHeight
+  // D2③：只有"真的把视口往上追了一段"（内容长高了）才会引出浏览器的补偿/回声事件 ——
+  // 这类钉底才开静默期。挂载首钉（scrollTop 与 scrollHeight 本就相等）不开，
+  // 否则用户刚进页面就上滑会被误判成"布局回声"（既有跟随口径一格不动）。
+  const caughtUp = target - wrap.scrollTop > 1
+  wrap.scrollTop = target
   pinGuardTop = wrap.scrollTop
+  if (caughtUp) {
+    pinSettleUntil = Date.now() + PIN_SETTLE_MS
+  }
   followBottom.value = true
   updateBackToBottom(bottomDist(wrap))
 }
@@ -3229,11 +3291,16 @@ watch(
     const tailStatus = tail && tail.kind === 'tool' ? tail.status : ''
     return `${ai.messages.length}|${last ? last.parts.length : 0}|${tail ? tail.kind : ''}|${tailText}|${tailStatus}|${last && last.pendingCall ? last.pendingCall.status : ''}`
   },
-  () => {
+  async () => {
     scrollBottom()
     // R-165 S4：用户消息长度也会随历史回读 / 编辑重跑变化 —— 同一帧后重跑单一 measure
     // （内容变化不进滚动指纹的折叠判据，故在本 watch 内顺带兜底）。
     void nextTick(measureUserMsgOverflow)
+    // 批 D · D2①：watch 回调跑在**组件更新之前**（flush:'pre'），此时读到的 scrollHeight 还是
+    // 旧内容的高度 —— 钉底会停在旧底，等 DOM 补丁把内容垫高后视图就离底一截（长段补发尤其明显）。
+    // 因此在同一帧的 DOM 补丁之后再钉一次（跟随态下才钉，尊重用户上滑）。
+    await nextTick()
+    scrollBottom()
   }
 )
 
@@ -3246,9 +3313,15 @@ watch(() => ai.expanded, (expanded) => {
 })
 
 /**
- * R-161（RC-1/2 修复）：RO 内容重钉底 —— 确认门 / 生成式表单 / 工具卡 / 折叠展开等
- * 「只增高度、不进滚动指纹」的内容插入（指纹 watch 盲区）由 ResizeObserver 兜底：
- * msgWrapRef 的 scrollHeight 增大且处于跟随态 ⇒ pinBottom()；高度减小的回调不动作。
+ * R-161（RC-1/2 修复）→ 批 D · D2②：RO 内容重钉底。
+ *
+ * 「只增高度、不进滚动指纹」的内容插入（确认门 / 生成式表单 / 工具卡 / 折叠展开）由
+ * ResizeObserver 兜底：**内容层**（{@link msgContentRef}）长高且处于跟随态 ⇒ pinBottom()；
+ * 高度减小的回调不动作。
+ *
+ * 观测目标改内容层的原因：滚动容器（{@link msgWrapRef}）的盒子由 flex 布局定死，内容在
+ * `overflow-y-auto` 里长高只改它的 scrollHeight、**不改它的 box**，RO 观测它等于观测一个
+ * 不变的目标 —— 真正的"内容长高"信号只有内容层的尺寸变化才给得出。
  */
 let msgResizeObserver: ResizeObserver | null = null
 let lastMsgScrollHeight = 0
@@ -3343,7 +3416,8 @@ onMounted(async () => {
   if (wrap && typeof ResizeObserver !== 'undefined') {
     lastMsgScrollHeight = wrap.scrollHeight
     msgResizeObserver = new ResizeObserver(onMsgWrapResized)
-    msgResizeObserver.observe(wrap)
+    // D2②：观测内容层（滚动容器自身的 box 不随内容变，观测它对内容增长零触发）
+    msgResizeObserver.observe(msgContentRef.value ?? wrap)
   }
   // R-165 S5a 项 5：长表格双区横滚联动（scroll 不冒泡 ⇒ 消息容器上捕获监听）
   wrap?.addEventListener('scroll', onTableScrollCapture, { capture: true, passive: true })

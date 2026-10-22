@@ -1081,13 +1081,43 @@ const HANDLER_NAMES = [
   'import.nextStep',
   'sheet.current',
   // AI 可视可操作专项：上传交接把用户手势选到的 File 交回页面既有上传链
-  'import.receiveFile'
+  'import.receiveFile',
+  // 批 D · D3（问题 6）：AI 触发 start_precheck / start_import 后把作业绑进本页跟踪面
+  'import.syncJob'
 ]
 
 /** AI 可视可操作专项：上传区（区域围栏的 root；`data-ai-ref` 挂在其中的三个按钮上）。 */
 const aiUploadRowRef = ref<HTMLElement | null>(null)
 
 function registerHandlers(): void {
+  // 批 D · D3（问题 6）：AI 触发 start_precheck / start_import 后把作业绑进本页的跟踪面。
+  // 与既有 resumeJobs() 同一条恢复链（刷新/回页也走它）：三种作业各归各位（check/import/publish）；
+  // taskId 对不上就不动本页（别的任务的作业显示在这里 = 说 A 实际给 B）。
+  registerPageHandler('import.syncJob', async (payload) => {
+    const jobId = Number(payload.jobId)
+    const jobTaskId = Number(payload.taskId)
+    if (!Number.isInteger(jobId) || jobId <= 0) {
+      return '未同步：作业号无效'
+    }
+    if (taskId.value === null || taskId.value !== jobTaskId) {
+      return `未同步：该作业属于任务 #${jobTaskId}，当前导入向导绑定的是任务 #${taskId.value ?? '（无）'}`
+    }
+    await resumeJobs()
+    const bound = [checkJob.value, importJob.value, publishJob.value].find((job) => job?.id === jobId)
+    if (!bound) {
+      return `已刷新导入作业列表（未在本任务的作业中找到 #${jobId}）`
+    }
+    // 终态：结果面刷一次（问题清单由 attachJob 按作业拉过；暂存行只在导入完成时才有内容）。
+    // 跑得快的小作业会在结果帧到达前就进入终态 ⇒ 不补这一次，页面会停在空进度上。
+    if (!jobRunning(bound)) {
+      await refreshTaskSnapshot()
+      if (bound.jobType === 'IMPORT' && bound.status === 'COMPLETED') {
+        await loadStaging()
+      }
+    }
+    return `已同步${bound.jobType === 'PRECHECK' ? '预检查' : '导入'}作业 #${jobId}（${bound.status}）到导入向导`
+  })
+
   // AI 表格操作专项：当前激活编辑标签页的表格适配器（与导出向导同一套 `sheet.current` 契约）。
   registerPageHandler('sheet.current', (payload) => {
     const code = String(payload.defCode ?? activeEditorTab.value ?? '')

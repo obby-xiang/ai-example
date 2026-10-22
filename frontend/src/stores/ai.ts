@@ -15,7 +15,7 @@ import { defineStore } from 'pinia'
 import { ApiError } from '@/api/http'
 import { aiApi } from '@/api/ai'
 import type { SseFrameHandlers, SseStreamOptions } from '@/api/sse'
-import { onWorkspaceEvent, reportUiEventResult, useWorkspaceStore } from '@/stores/workspace'
+import { getPageHandler, onWorkspaceEvent, reportUiEventResult, useWorkspaceStore } from '@/stores/workspace'
 import { useTaskStore } from '@/stores/task'
 import { useAiModelStore } from '@/stores/ai-model'
 import { AI_CONFIG_ERROR_TEXT } from '@/constants/ai-settings-copy'
@@ -611,6 +611,19 @@ const DERIVE_FRAME_TYPES: ReadonlySet<string> = new Set([
   'done',
   'error'
 ])
+
+/**
+ * 批 D · D3（问题 6）：**发起作业类工具 → 页面能力名**。
+ *
+ * 这三个工具成功后作业在后端已经跑起来了，但向导页的作业面板没有任何人告诉它"该跟哪个作业"
+ * —— 用户切过去看到的是一张空面板。映射到页面自己注册的能力（页面侧 = 既有 `resumeJobs()`），
+ * 与 R-155 的发布冲突跟踪同体例：AI 侧只给"任务号 + 作业号"，不 import 任何视图。
+ */
+const START_JOB_SYNC: Readonly<Record<string, string>> = {
+  start_export: 'export.syncJob',
+  start_precheck: 'import.syncJob',
+  start_import: 'import.syncJob'
+}
 
 function writeMirror(sessionId: string, messages: ChatMessage[], lastRunId: string | null): void {
   try {
@@ -3569,6 +3582,8 @@ export const useAiStore = defineStore('ai', {
           applyFrameToParts(message, frame)
           // R-155：start_publish 工具结果取号 jobId → 登记并武装发布冲突跟踪
           this.armPublishConflictWatch(message, frame)
+          // 批 D · D3（问题 6）：start_export / start_precheck / start_import 取号 → 同步给向导页
+          this.armStartJobSync(message, frame)
           break
         }
         case 'confirm_request': {
@@ -3899,6 +3914,40 @@ export const useAiStore = defineStore('ai', {
           reportUiEventResult('start_publish', summary)
         }
       })
+    },
+
+    /**
+     * 批 D · D3（问题 6）：AI 触发作业后把"任务号 + 作业号"同步给工作区页面。
+     *
+     * 仿 {@link armPublishConflictWatch} 体例：结果文本取 `作业 #N`、工具段 args 取 `taskId`，
+     * 再调页面自己注册的能力（{@link START_JOB_SYNC}：`export.syncJob` / `import.syncJob`）。
+     * 页面 handler 负责"绑定 + 进跟踪"（既有 `resumeJobs()`），AI 侧不 import 任何视图。
+     *
+     * 任一环取不到（非三件套 / 未执行即 ok=false / 无作业号 / 无 taskId / 当前页没注册该能力）
+     * 一律静默跳过：作业在后端照常跑，用户回到向导页时 `loadTask → resumeJobs` 仍会接上。
+     */
+    armStartJobSync(message: ChatMessage, frame: Extract<SseFrame, { type: 'tool_result' }>): void {
+      const handlerName = START_JOB_SYNC[frame.name]
+      if (!handlerName || !frame.ok || typeof frame.result !== 'string') {
+        return
+      }
+      const matched = /作业 #(\d+)/.exec(frame.result)
+      const jobId = matched ? Number(matched[1]) : Number.NaN
+      if (!Number.isInteger(jobId)) {
+        return
+      }
+      const part = findToolPart(message, frame.toolCallId)
+      const args = part ? parseToolArgs(part.args) : null
+      const taskId = args ? Number(args.taskId) : Number.NaN
+      if (!Number.isInteger(taskId)) {
+        return
+      }
+      const handler = getPageHandler(handlerName)
+      if (!handler) {
+        return
+      }
+      // 页面侧失败不影响对话（作业已在后端运行；页面自己的提示走页面）——只防未处理拒绝
+      void Promise.resolve(handler({ taskId, jobId, toolCallId: frame.toolCallId })).catch(() => undefined)
     },
 
     /**

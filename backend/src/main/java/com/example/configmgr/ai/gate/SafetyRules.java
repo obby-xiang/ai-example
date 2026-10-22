@@ -150,9 +150,15 @@ public final class SafetyRules {
 	 * 缓冲区末尾是否"可能还在某个模式的中间"（决定要不要扣住尾巴）。
 	 *
 	 * <p>
-	 * 判据 = 尾部窗口内是否出现<b>任一规则的起始锚字符</b>（{@code s/A/B/b/j/J/p/P/-/:/@//}）。
-	 * 不用 {@link Matcher#hitEnd()}：对未锚定的模式，一次正常的"扫完没找到"也会让 hitEnd 为真，
-	 * 于是普通中文正文也会被无谓扣住。
+	 * 判据 = 尾部是否停在<b>某条规则的真实字面前缀</b>上（写全了的起手式 + 该起手式之后的续写区），
+	 * 或停在<b>某个字面量前缀的未写全片段</b>上（分片正好切在 {@code sk-} / {@code -----BEGIN }
+	 * 这类字面量中间）。只看最后 {@link #TAIL_WINDOW} 个字符。
+	 *
+	 * <p>
+	 * <b>为什么不再用"起始锚字符集合"</b>（批 D · D1 根因）：旧实现的 {@code ANCHOR_CHARS}
+	 * 是 {@code s/A/k/K/-/:/j/J/b/B/p/P/@//} 这十几个单字符，Markdown 的 {@code -}、
+	 * 半角 {@code :} 与任何含 s/k/p/j 的英文词都在里面 —— 正文只要落在窗口内就恒被扣住，
+	 * 输出侧因此"攒满 128 字符才吐"（用户看到的断续）。现在的扣留量是"前缀本身及其续写区"。
 	 */
 	public static boolean couldExtendMatch(String text) {
 		return holdFrom(text) < (text == null ? 0 : text.length());
@@ -169,16 +175,112 @@ public final class SafetyRules {
 		}
 		int len = text.length();
 		int from = Math.max(0, len - TAIL_WINDOW);
-		for (int i = from; i < len; i++) {
-			if (ANCHOR_CHARS.indexOf(text.charAt(i)) >= 0) {
-				return i;
+		int hold = len;
+		// ① 起手式已成形：前缀 + 其后仍可能是同一候选的续写字符
+		for (Starter starter : STARTERS) {
+			Matcher matcher = starter.opener().matcher(text);
+			matcher.region(from, len);
+			while (matcher.find()) {
+				int end = matcher.end();
+				if (starter.body().matcher(text).region(end, len).matches()) {
+					hold = Math.min(hold, matcher.start());
+					break;
+				}
 			}
+		}
+		// ② 字面量前缀只写出一半：只扣住已写出的那几位（分片切在字面量中间也不漏）
+		for (Prefix prefix : PREFIXES) {
+			hold = Math.min(hold, partialStart(text, prefix, from));
+		}
+		return hold;
+	}
+
+	/** 未写全前缀的起点（无匹配 ⇒ {@code text.length()}，即不扣）。 */
+	private static int partialStart(String text, Prefix prefix, int from) {
+		int len = text.length();
+		String literal = prefix.literal();
+		int maxK = Math.min(literal.length() - 1, len - from);
+		for (int k = maxK; k >= prefix.minPartial(); k--) {
+			int start = len - k;
+			if (start < from) {
+				return len;
+			}
+			if (!text.regionMatches(prefix.ignoreCase(), start, literal, 0, k)) {
+				continue;
+			}
+			if (prefix.leftBoundary() && start > 0 && isAsciiAlnum(text.charAt(start - 1))) {
+				continue;
+			}
+			return prefix.urlScheme() ? schemeStart(text, start) : start;
 		}
 		return len;
 	}
 
-	/** 规则的起始锚字符（任何一条规则的首字符集合；多一个都只是"多扣几个字符"，不会漏检）。 */
-	private static final String ANCHOR_CHARS = "sAkK-:jJbBpP@/";
+	/**
+	 * {@code ://} 只写出 {@code :} / {@code :/} 时，扣留点要退回**scheme 起点** ——
+	 * 否则 {@code https:} 已被发出，下一帧的 {@code //user:pass@host} 里没有 scheme，
+	 * URL 凭据规则认不出来（凭据就漏了）。
+	 */
+	private static int schemeStart(String text, int colonIndex) {
+		int start = colonIndex;
+		while (start > 0 && isSchemeChar(text.charAt(start - 1))) {
+			start--;
+		}
+		return start;
+	}
+
+	/** 与规则里的 {@code (?<![A-Za-z0-9])} 同口径（中文不算 alnum —— 中英混排处照样起手）。 */
+	private static boolean isAsciiAlnum(char c) {
+		return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+	}
+
+	/** URL scheme 允许的续写字符（{@code [a-z0-9+.-]}，大小写都算）。 */
+	private static boolean isSchemeChar(char c) {
+		return isAsciiAlnum(c) || c == '+' || c == '.' || c == '-';
+	}
+
+	/**
+	 * 一条规则的"起手式"：{@code opener} 匹配可能是一条规则的头部（含左边界），
+	 * {@code body} 是头部之后仍算"未写完"的字符类（匹配到缓冲区末尾 ⇒ 扣住）。
+	 */
+	private record Starter(Pattern opener, Pattern body) {
+	}
+
+	/**
+	 * 一条规则的字面前缀（未写全的片段同样要扣住，否则分片正好切在字面量中间就漏）。
+	 *
+	 * @param minPartial  至少写出几位才认为是"未写全前缀"（私钥头取 2：单个 {@code -}
+	 *                    是 Markdown 列表符/分隔线碎片，扣它只会制造无谓延迟；分片切在
+	 *                    5 个连字符的第 1 位属于不现实的情形）
+	 * @param urlScheme   命中点要退回 scheme 起点（只有 {@code ://} 用）
+	 */
+	private record Prefix(String literal, boolean ignoreCase, boolean leftBoundary, int minPartial,
+			boolean urlScheme) {
+	}
+
+	/** 起手式表：**与 {@link #RULES} 的前缀同源**（改规则必须同步改这里）。 */
+	private static final List<Starter> STARTERS = List.of(
+			new Starter(Pattern.compile(P_PEM_HEAD), Pattern.compile("[A-Z0-9 ]{0,40}")),
+			new Starter(Pattern.compile("(?<![A-Za-z0-9])" + P_SK), Pattern.compile("[A-Za-z0-9_\\-]*")),
+			new Starter(Pattern.compile("(?<![A-Za-z0-9])" + P_AKIA), Pattern.compile("[0-9A-Z]{0,17}")),
+			new Starter(Pattern.compile("(?i)(?<![A-Za-z0-9])" + P_BEARER),
+					Pattern.compile("\\s{0,3}[A-Za-z0-9\\-._~+/=]*")),
+			new Starter(Pattern.compile("(?i)(?<![A-Za-z0-9])jdbc:"), Pattern.compile("[^\\s@]*")),
+			new Starter(Pattern.compile("(?i)(?<![A-Za-z0-9])(?:password|passwd|pwd)\\s*=\\s*"),
+					Pattern.compile("[^\\s&;,\"']{0,7}")),
+			new Starter(Pattern.compile("(?i)[a-z][a-z0-9+.\\-]{0,20}://"), Pattern.compile("[^\\s/@]*")));
+
+	/** 字面前缀表：与 {@link #STARTERS} 同一批字面量，只负责"没写全"的那一半。 */
+	private static final List<Prefix> PREFIXES = List.of(
+			new Prefix(P_PEM_HEAD, false, false, 2, false),
+			new Prefix(P_SK, false, true, 1, false),
+			new Prefix(P_AKIA, false, true, 1, false),
+			new Prefix(P_BEARER, true, true, 1, false),
+			new Prefix("jdbc:", true, true, 1, false),
+			new Prefix("password", true, true, 1, false),
+			new Prefix("passwd", true, true, 1, false),
+			new Prefix("pwd", true, true, 1, false),
+			new Prefix("://", false, false, 1, true));
 
 	/**
 	 * 第一个<b>没有配对 END</b> 的私钥头位置（无则 {@code -1}）。

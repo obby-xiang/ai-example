@@ -4,6 +4,7 @@ import com.example.configmgr.common.ConflictException;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -21,6 +22,47 @@ class KbToolsTest {
         assertThat(tools.kbSearch("费率", 5)).contains("知识库加载中");
         assertThat(tools.kbReadDoc("region-tariff", null, null, null)).contains("知识库加载中");
         assertThat(tools.kbLookupTerm("标准费率")).contains("知识库加载中");
+    }
+
+    @Test
+    void notReadyWithoutErrorReadsAsFirstIndexInProgress() throws Exception {
+        // lastError 为空 = 首次建索引还在跑（启动异步建索引的正常窗口）
+        KbTools tools = new KbTools(KbTestSupport.notReadyService());
+
+        String search = tools.kbSearch("费率", 5);
+        String lookup = tools.kbLookupTerm("标准费率");
+
+        assertThat(search).contains("首次建索引进行中");
+        assertThat(lookup).contains("首次建索引进行中");
+        // 这个状态下没有"原因"/"怎么修"可讲 —— 不得凭空给修复指引
+        assertThat(search).doesNotContain("app.ai.kb.dir").doesNotContain("/api/ai/kb/reload");
+    }
+
+    @Test
+    void notReadyAfterAFailedBuildCarriesTheReasonAndTheFix() throws Exception {
+        // 坏 manifest ⇒ refreshNow 失败：ready=false 且 lastError 非空（"首次建索引"的误导面）
+        Path dir = KbTestSupport.tempDir("kb-broken-");
+        KbTestSupport.write(dir, "manifest.json", "{bad");
+        KbService service = new KbService(KbTestSupport.props(dir, KbTestSupport.tempDir("kb-broken-idx-")),
+                KbTestSupport.mapper(), new LocalDirKbSource(dir, KbTestSupport.mapper()));
+        service.refreshNow();
+        assertThat(service.status().ready()).isFalse();
+        assertThat(service.status().lastError()).isNotBlank();
+
+        KbTools tools = new KbTools(service);
+        String search = tools.kbSearch("费率", 5);
+        String read = tools.kbReadDoc("region-tariff", null, null, null);
+        String lookup = tools.kbLookupTerm("标准费率");
+
+        for (String output : List.of(search, read, lookup)) {
+            assertThat(output).contains("知识库索引未建成");
+            assertThat(output).contains(service.status().lastError());
+            assertThat(output).contains("app.ai.kb.dir");
+            assertThat(output).contains("POST /api/ai/kb/reload");
+            // 双语：英文提问的模型/用户同样要能读懂"到底哪一步坏了"
+            assertThat(output).contains("Knowledge base index is unavailable");
+            assertThat(output).doesNotContain("首次建索引进行中");
+        }
     }
 
     @Test

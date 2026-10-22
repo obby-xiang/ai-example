@@ -25,6 +25,12 @@ export type PageHandlerName =
   | 'data.refresh'
   /** AI 可视可操作专项：上传交接把用户手势选到的文件交回页面既有上传链（永不传路径）。 */
   | 'import.receiveFile'
+  /**
+   * 批 D · D3（问题 6）：AI 触发作业后由页面把作业绑进自己的跟踪面（入参 taskId/jobId）。
+   * 导出侧 = 导出作业，导入侧 = 预检查 / 导入作业（页面按 jobType 落到各自的跟踪位）。
+   */
+  | 'export.syncJob'
+  | 'import.syncJob'
 
 /** 页面能力 handler：入参由各页自定，返回说明文本（作为工具结果回灌）。 */
 export type PageHandler = (payload: Record<string, unknown>) => unknown | Promise<unknown>

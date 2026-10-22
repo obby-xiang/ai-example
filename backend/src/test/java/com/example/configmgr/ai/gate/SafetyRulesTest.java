@@ -193,4 +193,64 @@ class SafetyRulesTest {
 		assertThat(SafetyRules.openPrivateKeyHeader("")).isEqualTo(-1);
 	}
 
+	// ── 尾部扣留口径（批 D · D1）：只认规则的真实字面前缀 ─────────────────────
+	//
+	// 根因：旧实现用单字符锚集合 "sAkK-:jJbBpP@/"，Markdown 的 `-` / `:` 与常见字母全命中，
+	// 任何正文都会在最后 128 字符里找到锚点 ⇒ 输出侧恒攒满 TAIL_WINDOW 才吐（"断续"）。
+	// 新口径：只有"窗口尾部真的匹配某条规则的前缀（或该前缀的未写全片段）"才扣，
+	// 扣住量 = 从该前缀起点到末尾（≤ 前缀长度 + 该前缀之后的续写区）。
+
+	@Test
+	void markdownListsAndCjkPunctuationAreNotHeld() {
+		String markdown = "- 导出范围：已选配置项\n"
+				+ "- 字段口径：按条件过滤\n"
+				+ "- 交付形式：xlsx 附件\n"
+				+ "请确认以上口径后再启动导出。";
+
+		assertThat(SafetyRules.holdFrom(markdown)).as("Markdown 的 - 与 ： 都不是任何规则的前缀")
+				.isEqualTo(markdown.length());
+		assertThat(SafetyRules.couldExtendMatch(markdown)).isFalse();
+	}
+
+	@Test
+	void englishIdentifierTailIsNotHeld() {
+		// 尾部是 "class"：末字符 s 的前一个字符是字母 ⇒ 连 sk- 的"未写全片段"都不算
+		assertThat(SafetyRules.holdFrom("请把 exportDefinitions 里的 class")).isEqualTo("请把 exportDefinitions 里的 class".length());
+		assertThat(SafetyRules.holdFrom("改名为 ExportRequest")).isEqualTo("改名为 ExportRequest".length());
+		// 半角冒号也不是 "://" 的未写全片段（只有 : 与 :/ 才可能是）—— 单字符扣留可接受但必须有界
+		String colon = "注意:";
+		assertThat(colon.length() - SafetyRules.holdFrom(colon)).as("最多扣住 1 个字符").isLessThanOrEqualTo(1);
+	}
+
+	@Test
+	void holdAmountEqualsTheMatchedPrefixOrItsContinuation() {
+		// 未写全的前缀：只扣住已写出的那几位
+		assertThat(SafetyRules.holdFrom("一段正文 s")).isEqualTo("一段正文 s".length() - 1);
+		assertThat(SafetyRules.holdFrom("一段正文 s" + "k")).isEqualTo("一段正文 s".length() - 1);
+		// 前缀已成形：扣住整个未完成的候选（前缀起点到末尾）
+		String inProgress = "一段正文 s" + "k-" + "A1b2C3";
+		assertThat(SafetyRules.holdFrom(inProgress)).isEqualTo("一段正文 ".length());
+		// 私钥头：从头位置起扣
+		String pem = "输出 " + pemHead("RSA").substring(0, 14);
+		assertThat(SafetyRules.holdFrom(pem)).isEqualTo("输出 ".length());
+		// 扣住量恒 ≤ TAIL_WINDOW
+		assertThat(inProgress.length() - SafetyRules.holdFrom(inProgress))
+				.isLessThanOrEqualTo(SafetyRules.TAIL_WINDOW);
+		// URL：{@code ://} 只写出冒号时扣留点退回 scheme 起点 —— 否则 next 帧的
+		// {@code //user:pass@host} 里没有 scheme，URL 凭据规则认不出（凭据就漏了）
+		assertThat(SafetyRules.holdFrom("见 https:")).isEqualTo("见 ".length());
+		assertThat(SafetyRules.holdFrom("见 https://appuser:pass")).isEqualTo("见 ".length());
+		// 已出现路径分隔符的普通 URL：候选已结束，不扣
+		String plainUrl = "见 https://example.com/help";
+		assertThat(SafetyRules.holdFrom(plainUrl)).isEqualTo(plainUrl.length());
+	}
+
+	@Test
+	void completedMatchAtTheTailDoesNotNeedHolding() {
+		// 完整密钥后面已经跟了空格 + 中文：这不是"未完成候选"，不必扣住（脱敏仍在 emit 时生效）
+		String done = "key 是 " + apiKey() + " 请保存";
+		assertThat(SafetyRules.holdFrom(done)).isEqualTo(done.length());
+		assertThat(SafetyRules.mask(done).redacted()).isEqualTo(1);
+	}
+
 }

@@ -188,4 +188,61 @@ class OutputGuardTest {
 		assertThat(guard.redacted()).isZero();
 	}
 
+	// ── 批 D · D1：不再攒批（只认规则真实前缀） ──────────────────────────────
+
+	@Test
+	void markdownParagraphIsEmittedImmediatelyWithoutBatching() {
+		String doc = "- 导出范围：已选配置项\n"
+				+ "- 字段口径：按条件过滤\n"
+				+ "- 交付形式：xlsx 附件\n"
+				+ "请确认以上口径后再启动导出。";
+		OutputGuard guard = new OutputGuard();
+
+		assertThat(guard.feed(doc)).as("Markdown 标点不得触发尾部扣留").isEqualTo(doc);
+		assertThat(guard.flush()).isEmpty();
+		assertThat(guard.redacted()).isZero();
+	}
+
+	@Test
+	void longParagraphIsNotHeldBehindTheTailWindow() {
+		OutputGuard guard = new OutputGuard();
+		String head = "这是一段用于验证流式输出不再攒批的中文正文。".repeat(20);
+		StringBuilder out = new StringBuilder();
+
+		out.append(guard.feed(head));
+		out.append(guard.feed("- 第二步：确认字段\n- 第三步：启动导出\n说明：按向导提示操作。"));
+
+		assertThat(out.length()).as("已可发的正文不得被尾部窗口压在缓冲区里")
+				.isGreaterThanOrEqualTo(head.length());
+		assertThat(guard.flush().length()).as("轮末最多只剩尾部候选").isLessThanOrEqualTo(SafetyRulesTailWindow());
+	}
+
+	@Test
+	void keySplitInsideTheLiteralPrefixIsStillMasked() {
+		String key = apiKey();
+		OutputGuard guard = new OutputGuard();
+		StringBuilder out = new StringBuilder();
+
+		// 第一帧只到前缀的第一个字符：旧实现靠"单字符锚"侥幸接住，新实现必须靠"未写全前缀"
+		out.append(guard.feed("你的 key 是 " + key.substring(0, 1)));
+		out.append(guard.feed(key.substring(1, 12)));
+		out.append(guard.feed(key.substring(12) + " 请保存"));
+		out.append(guard.flush());
+
+		assertThat(out.toString()).doesNotContain(key);
+		assertThat(out.toString()).contains("[REDACTED:API_KEY]");
+		assertThat(guard.redacted()).isEqualTo(1);
+	}
+
+	@Test
+	void markdownTextAfterAKeyIsStillMasked() {
+		OutputGuard guard = new OutputGuard();
+		StringBuilder out = new StringBuilder();
+		out.append(guard.feed("- 当前 key：" + apiKey()));
+		out.append(guard.feed("\n- 请勿外发"));
+
+		assertThat(out.toString()).doesNotContain(apiKey()).contains("[REDACTED:API_KEY]");
+		assertThat(guard.flush()).doesNotContain(apiKey());
+	}
+
 }

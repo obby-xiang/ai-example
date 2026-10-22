@@ -1094,7 +1094,9 @@ const HANDLER_NAMES = [
   'export.start',
   'export.nextStep',
   PAGE_HANDLER_OPEN_EXPORT_EDITOR,
-  'sheet.current'
+  'sheet.current',
+  // 批 D · D3（问题 6）：AI 触发 start_export 后把作业绑进本页跟踪面
+  'export.syncJob'
 ]
 
 /** 跨任务绑定的结局（供两个执行器给出互相可区分、对 AI 可行动的文案）。 */
@@ -1241,6 +1243,31 @@ async function preflightDownload(
 }
 
 function registerHandlers(): void {
+  // 批 D · D3（问题 6）：AI 触发 start_export 后把作业绑进本页的跟踪面。
+  // 与既有 resumeJobs() 同一条恢复链（刷新/回页时也走它）——不重复一套绑定逻辑；
+  // taskId 对不上就不动本页（别的任务的作业显示在这里 = 说 A 实际给 B）。
+  registerPageHandler('export.syncJob', async (payload) => {
+    const jobId = Number(payload.jobId)
+    const jobTaskId = Number(payload.taskId)
+    if (!Number.isInteger(jobId) || jobId <= 0) {
+      return '未同步：作业号无效'
+    }
+    if (taskId.value === null || taskId.value !== jobTaskId) {
+      return `未同步：该作业属于任务 #${jobTaskId}，当前导出向导绑定的是任务 #${taskId.value ?? '（无）'}`
+    }
+    await resumeJobs()
+    const bound = exportJob.value
+    if (bound?.id !== jobId) {
+      return `已刷新导出作业列表（未在本任务的作业中找到 #${jobId}）`
+    }
+    // 终态作业 resumeJobs 不建 watch（结果已由文件列表铺开）⇒ 这里把结果面刷一次，
+    // 否则 AI 触发后页面停在上一次的导出结果上。
+    if (bound.status === 'COMPLETED') {
+      await refreshResults()
+    }
+    return `已同步导出作业 #${jobId}（${bound.status}）到导出向导`
+  })
+
   // 补丁②：AI 工作区动作 confirm_step 的页面实现（推进到下一步；与用户点「下一步」同路径）
   registerPageHandler('export.nextStep', async (payload) => {
     // 施工卡 §S3e：只读态拦在 goStep 之前 —— 已结束任务不得借 AI 通道推进步骤（零写）

@@ -95,6 +95,19 @@ class KbDisclosurePromptTest {
     }
 
     @Test
+    void promptWithoutCatalogSaysUnavailableAndForbidsGenericSubstitution() throws Exception {
+        // 批 D · D4 / 问题 7：空目录时的旧文案只说"尚未就绪"，模型很容易拿通用知识顶上去冒充官方口径
+        String text = new KbPromptSection(KbTestSupport.notReadyService()).render();
+
+        assertThat(text).contains("知识库当前不可用");
+        assertThat(text).contains("不要用通用知识冒充官方口径");
+        assertThat(text).contains("/api/ai/kb/status");
+        // 规则 1 的触发面扩到"系统使用说明 / 操作指南 / FAQ"（原来只列制度/流程/口径/术语）
+        assertThat(text).contains("系统使用说明").contains("操作指南").contains("FAQ");
+        assertThat(text).contains("先调用 kb_search 检索");
+    }
+
+    @Test
     void promptSectionIsEmptyWhenDisabled() throws Exception {
         Path dir = KbTestSupport.samples();
         var properties = KbTestSupport.props(dir, KbTestSupport.tempDir("kb-off-idx-"));
