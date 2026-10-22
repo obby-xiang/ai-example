@@ -12,6 +12,7 @@
   - `docs/research/设计-i18n与工具可配置专项-2026-10-21.md`（`error.code` 稳定化、文案 key 化、双受众字符串必须拆 `key/args` 与 `modelSummary`）
 - 体例参照：`docs/research/设计-AI表格操作专项-2026-10-21.md`、`docs/research/设计-AI可视可操作专项-2026-10-21.md`
 - 性质：**设计稿，不构成施工承诺**。§8.2 八项开放问题未裁前不进施工；S6 批 2 仍待发令
+- **裁决状态（2026-10-22）**：§8.2 开放问题经主会话按业界主流**代裁**（用户授权原话「你参考业界主流的，做最佳裁决」）⇒ 本稿由「草案待裁」转为 **S6 批 2 施工依据**；S6 批 2 自身的开工令仍待用户/指挥官发。逐条裁决行落在 §6.1（帧载体）、§7.1（迁移五步）、§8.2（O1/O2/O6 逐条 + 其余项维持「本稿倾向」）—— **原文一律保留、裁决行下加**
 - 已定裁决（设计前提，不得在施工中推翻）：
   1. 用户 2026-10-22 裁「**按业界主流方案做**」（`docs/决策看板.md` 10-22「三项『按业界主流』立项口径裁决」行）；
   2. 契约口径 = **白名单 + 数据引用 + 版本降级**（同批落板：渲染面只认白名单视图键、工具产出走引用不回灌正文、视图版本不兼容时降级而非报错）；
@@ -302,6 +303,8 @@ interface Action {
 - **首选：`tool_result.resultView`**（additive 可选键）。理由：视图天然属于"某一次工具结果"，自带 `toolCallId` 归属；`tool_result` 已是"一次执行的全部结局字段"的落点（`ok`/`outcome`/`code`/`retryable`/`target`/`message`/`preflight` 全在这帧上，`SseChatEmitter.java:763-784`）。
 - **备选（仅当 S6 批 2 只做"轮末一次性汇总"）：`done.resultView`**。可复用既有 `extra` map 管道（`ResilientChatService.java:782-789` → `SseChatEmitter#done` 的 `frame.putAll(extra)`，`:907-909`）。代价：一轮可能有多个工具多张视图，放 `done` 要额外造数组与归属映射 —— **不推荐**，除非明确只做汇总。
 
+> **2026-10-22 已裁：帧载体定 `tool_result.resultView`**（备选 `done.resultView` 不采用）。依据：MCP 的 `structuredContent` 与 AG-UI 的 `ToolCallResult` 都把宿主侧结构挂在**工具结果**上（视图归属 = 某次执行，与 §2.1 Apps SDK 行同向）；且该键是 `tool_result` 的 **additive 可选键**，帧类型集仍是 16、判别联合与 conformance 白名单零改动（§6.2）。`done.resultView` 需自造"多视图数组 + 归属映射"，与"数据单份"（§4-规则 3）冲突。
+
 > **一字之差须写明**：`done.extra` 是 **Java 侧容器名**，线上**不是**嵌套对象。`putAll` 之后出的是 `done.safety` / `done.context` / `done.paramsLocked` 这样的**平铺键**（前端 `types/sse.ts:390-427` 已按平铺建模）。任何"读 `frame.extra.xxx`"的实现都是错的。
 
 ### 6.2 三条"不破"的论证
@@ -324,7 +327,7 @@ interface Action {
    - 字符口径（`originalChars`/`returnedChars`）**由 `TruncationContract` 提供**，本契约不重复定义；
    - `meta.truncated` 只补**行数口径** `{shownRows,totalRows}`（行数 ≠ 字符数，两者并存不冲突）；
    - `status:"partial"` 与 `truncated:true` 必须同时为真（一个说"内容不全"，一个说"怎么不全"）。
-   落 `resultView` 之前须确认该批已合并到基线，否则上表的键名会指向旧名（`application.yml:281-286` / `:303-308`）。
+   落 `resultView` 之前须确认该批已合并到基线，否则上表的键名会指向旧名（`application.yml:281-286` / `:303-308`）。**2026-10-22 复核：该批已合流 `2ca2ceb`，`app.ai.result-budget.*` 键名与 `TruncationContract` 词汇均已在基线** ⇒ 施工按新键名取，"在途"表述作废（原文保留留痕）
 
 ### 6.4 什么时候才需要破冻结
 
@@ -343,6 +346,8 @@ interface Action {
 | **③ 第一个工具：发布冲突** | 按 §5 落 `kind=table`；卡面停止反解 | `parsePublishConflicts` 零调用（负断言）；同屏不双份 | 恢复旧反解分支 |
 | **④ 逐工具迁移** | 排序按"文本反解依赖度"：冲突卡 → GF 只读回执 → 表格写预览 → 普通工具卡 | 每个工具一条"有/无 `resultView` 双形态"用例 | 单工具开关 |
 | **⑤ 按覆盖率删旧卡** | 删 `v-if` 分支与解析函数 | 删除条件 = 该工具 100% 带 `resultView` 且跨一版无回退；**`fallback` 路径不删** | 恢复分支（git revert） |
+
+> **2026-10-22 已裁：迁移五步路径按上表定稿**（①契约落地 ②渲染器骨架 ③发布冲突首个工具 ④逐工具迁移 ⑤按覆盖率删旧卡）。依据：每步有独立回滚点（删构造器调用 / 不挂载渲染器 / 恢复旧反解分支 / 单工具开关 / git revert），与 Adaptive Cards 的 `fallbackText` 退路同姿态 —— **任一步失败都退回"有 fallback 的旧行为"，不出现空白卡**；⑤ 的删卡闸"跨一版无回退"不放松。
 
 ### 7.2 验收判据（逐条可断言）
 
@@ -363,7 +368,7 @@ interface Action {
 
 | # | 风险 | 说明与缓解 |
 |---|---|---|
-| R1 | **256KB 与 64KB 是两把尺** | 契约上限 256KB（调研建议）vs 单帧 65536 字节（`application.yml:308`）。缓解：v1 生效上限取 min，且 `resultView` 构造期自查；**根治大概率已由 G5 批（在途、未提交）以 `app.ai.result-budget.ui.max-frame-bytes` 统一**，本契约须在该批合并后复核键名与取值（§8.2-O1）。**不得**靠帧级截断兜底（见 R3） |
+| R1 | **256KB 与 64KB 是两把尺** | 契约上限 256KB（调研建议）vs 单帧 65536 字节（`application.yml:308`）。缓解：v1 生效上限取 min，且 `resultView` 构造期自查；**根治大概率已由 G5 批（在途、未提交）以 `app.ai.result-budget.ui.max-frame-bytes` 统一**，本契约须在该批合并后复核键名与取值（§8.2-O1）。**不得**靠帧级截断兜底（见 R3）。**2026-10-22 复核已收口**：G5 已合流（`2ca2ceb`），键名以 `app.ai.result-budget.*` 为准、`TruncationContract` 截断词汇就位 ⇒ "在途、未提交"的前提已消除（原文保留留痕） |
 | R2 | **双份真相漂移** | `result` 文本与 `resultView` 数据若各自构造，迟早在某工具上分叉。缓解：§4-规则 3 数据单份 + §7.2-6 同源断言 + 构造器**单入口**（禁止两个方法各自拼） |
 | R3 | **`resultView` 不在可截断面** | `FrameSizeLimiter` 只截 `text`/`result`；`resultView` 超预算会走 `unreachable-limit` 照发超限帧（`:104-110`）。缓解：构造期规模闸；**不放宽** `TRUNCATABLE_FIELDS`（截 JSON 会把结构切坏） |
 | R4 | **落段/镜像遗漏 ⇒ 刷新丢卡** | 用户会读成"AI 忘了刚做的事"。缓解：§6.3-1/2 同批落 `ToolPart` + 镜像 + `loadHistory`；验收加"刷新后表格仍在"用例 |
@@ -378,14 +383,16 @@ interface Action {
 
 ### 8.2 开放问题（待裁，未裁前不进施工）
 
+> **2026-10-22 裁决总注**：本表经主会话按业界主流代裁（用户授权「你参考业界主流的，做最佳裁决」——原话见 `docs/决策看板.md` 10-22 行）⇒ **O1 / O2 / O6 逐条给裁决行**（见各行末），**O3 / O4 / O5 / O7 / O8 维持「本稿倾向」列**（代裁不改倾向，倾向本身即业界主流取向，施工遇冲突回本表）。原「待裁」表述保留不删。
+
 | # | 问题 | 选项 | 本稿倾向 |
 |---|---|---|---|
-| O1 | **帧预算是否统一**：`resultView` 上限 256KB 与单帧 64KB 如何共存？ | (a) v1 取 min、按需拆帧（本稿）；(b) 抬高 `max-bytes`（与 G5 同批）；(c) `resultView` 只留小载荷，大结果走引用端点 | **(a)**。**注**：G5 批（在途、未提交）已在做 (b) 的上位动作 —— 把 `tool-result` 与 `frame` 两组键并成 `app.ai.result-budget.*` 并统一截断词汇（`TruncationContract`）⇒ 本项待该批合并后**复核并收口**，不再单独裁 |
-| O2 | **`chart` v1 是否实现** | (a) 只占位、渲染走 `fallback`；(b) 引 echarts；(c) 用 CSS/SVG 自绘最小柱/线图 | **(a)**：契约先立、能力后补；无图表库时硬做会拖垮 a11y 与降级面 |
+| O1 | **帧预算是否统一**：`resultView` 上限 256KB 与单帧 64KB 如何共存？ | (a) v1 取 min、按需拆帧（本稿）；(b) 抬高 `max-bytes`（与 G5 同批）；(c) `resultView` 只留小载荷，大结果走引用端点 | **(a)**。**注**：G5 批（在途、未提交）已在做 (b) 的上位动作 —— 把 `tool-result` 与 `frame` 两组键并成 `app.ai.result-budget.*` 并统一截断词汇（`TruncationContract`）⇒ 本项待该批合并后**复核并收口**，不再单独裁。**2026-10-22 已裁并关闭**：G5 双通道对齐批**已合流**（`2ca2ceb`，`feat(ai-result-budget)`），复核收口通过 —— `app.ai.result-budget.*` 键名与 `TruncationContract` 截断词汇（`truncated`/`strategy`/`originalChars`/`returnedChars`/`notice`）均已就位，上表 §6.3-5 与本条 R1 的"在途"表述自此作废（原文保留）；v1 生效上限仍 = min(契约上限, 帧预算)，字符口径一律复用该契约 |
+| O2 | **`chart` v1 是否实现** | (a) 只占位、渲染走 `fallback`；(b) 引 echarts；(c) 用 CSS/SVG 自绘最小柱/线图 | **(a)**：契约先立、能力后补；无图表库时硬做会拖垮 a11y 与降级面。**2026-10-22 已裁：取 (a) 只占位不实现** —— `kind: "chart"` 与 `ChartSpec` 五值枚举保留在契约内，v1 渲染走 `fallback`。依据：Adaptive Cards / JSON Forms 均以**小集合起步、能力后补**（先立封闭枚举再扩元素）；且仓内无图表库（`frontend/package.json` 无 echarts / chart.js / d3），v1 硬做等于同批引入新依赖 + 一套 a11y 与降级面，收益不抵风险 |
 | O3 | **`data.ref` 是否允许指向服务端资源** | (a) 只允许同帧（零二次请求，离线安全）；(b) 允许 `ref` + `source:"endpoint"`（大结果） | **(a)**：v1 的规模上限内同帧足够；跨端点会引入鉴权/缓存/断网三个新面 |
 | O4 | **`actions` v1 是否启用** | (a) 只渲"非写工具"动作；(b) 完全不给 `actions`；(c) 写动作也走 `resultView` 直发 | **(a)**；(c) 明确否 —— 那等于绕开确认门 |
 | O5 | **`empty`/`error` 是否并入 `status`** | (a) 保留两个子对象（冗余但显式）；(b) 只留 `status` + `fallback.text` | **(a)**：错误码与提示文案需要独立承载，`fallback` 是最后一道不是第一道 |
-| O6 | **P1-4 本体仍待裁**：`reason` 是否只留一句 | 本契约**不替它裁**，只把它降为模型侧单点决策 | 由用户/指挥官在 S6 批 2 发令时裁 |
+| O6 | **P1-4 本体仍待裁**：`reason` 是否只留一句 | 本契约**不替它裁**，只把它降为模型侧单点决策 | 由用户/指挥官在 S6 批 2 发令时裁。**2026-10-22 已裁：P1-4 的承载方式按 §5.3「依赖倒置」定稿** —— 卡面**停止反解 `reason`**、明细改由 `resultView.kind="table"` 承载（`meta.truncated{shownRows,totalRows}` + 必填 `fallback.text`），于是「`reason` 是否只留一句」**降为纯模型侧决策**（改它不影响卡面、不改它也正确），随 S6 批 2 施工时定，**不阻塞本契约开工**。依据：业界同源两投影（Apps SDK 的 `structuredContent` 与文本分层、Vercel AI SDK 的 `toModelOutput`）—— 拆的是**消费者**而不是字符串；卡面与模型共用一条串必然互相绑死（§5.2-3）。本条与 `docs/决策看板.md` 的「发布冲突 `reason` 字段模型侧口径」销记行同源（该行已于 2026-10-22 销记、状态 ✅） |
 | O7 | **逐工具迁移顺序与"删旧卡"的版本闸** | 按反解依赖度排序（§7.1-④）；删卡是否要求跨一个 minor 版本 | 建议跨一版 |
 | O8 | **`resultView` 是否进可观测面** | (a) 不进（只随段持久化）；(b) 进事件日志（帧体积与日志体积同时上升） | **(a)**：可观测性专项已定「逐帧存 span 无主流做法」，载荷不必二次落盘 |
 
