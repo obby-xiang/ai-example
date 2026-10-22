@@ -93,6 +93,51 @@ class ResultViewTest {
 		assertThat(empty.get("text")).as("§3.2：status=empty 必填 empty.text").isNotNull();
 	}
 
+	/**
+	 * `status=empty` 是「查询成立但零行」，不是「渲不出」：空态文案**不得**复用 `fallback.text`
+	 * （那是"表格无法展示，请去别处看"的失败出口）。复用会让空列表卡面写着"任务列表无法以表格展示" ——
+	 * 表格没问题，只是没行。
+	 */
+	@Test
+	void emptyStatusUsesDedicatedEmptyTextInsteadOfTheFailureFallback() {
+		ResultView view = ResultViews.table("rv-empty-dedicated", null,
+				List.of(ResultViewColumn.of("defCode", ResultViewColumnType.STRING, null, null)),
+				List.of(), FALLBACK, "list_tasks");
+
+		@SuppressWarnings("unchecked")
+		Map<String, Object> empty = (Map<String, Object>) view.toMap().get("empty");
+		assertThat(empty.get("text"))
+				.as("空态文案走独立 key（缺省 resultview.empty.generic）")
+				.isEqualTo(ResultViews.DEFAULT_EMPTY_TEXT)
+				.isNotEqualTo(FALLBACK);
+		// fallback 仍是失败出口，一字不动
+		@SuppressWarnings("unchecked")
+		Map<String, Object> fallback = (Map<String, Object>) view.toMap().get("fallback");
+		assertThat(fallback.get("text")).isEqualTo(FALLBACK);
+	}
+
+	@Test
+	void explicitEmptyTextOverridesTheDefault() {
+		ResultView view = ResultViews.table("rv-empty-custom", null,
+				List.of(ResultViewColumn.of("defCode", ResultViewColumnType.STRING, null, null)),
+				List.of(), FALLBACK, "list_tasks", ResultViews.MAX_BYTES, -1, "i18n:resultview.listTasks.empty");
+
+		@SuppressWarnings("unchecked")
+		Map<String, Object> empty = (Map<String, Object>) view.toMap().get("empty");
+		assertThat(empty.get("text")).isEqualTo("i18n:resultview.listTasks.empty");
+	}
+
+	@Test
+	void blankExplicitEmptyTextFallsBackToTheDefault() {
+		ResultView view = ResultViews.table("rv-empty-blank", null,
+				List.of(ResultViewColumn.of("defCode", ResultViewColumnType.STRING, null, null)),
+				List.of(), FALLBACK, "list_tasks", ResultViews.MAX_BYTES, -1, "   ");
+
+		@SuppressWarnings("unchecked")
+		Map<String, Object> empty = (Map<String, Object>) view.toMap().get("empty");
+		assertThat(empty.get("text")).isEqualTo(ResultViews.DEFAULT_EMPTY_TEXT);
+	}
+
 	// ── 规模上限：§4-规则 8（截断 + partial + meta.truncated 三件同真） ──────
 
 	@Test

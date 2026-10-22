@@ -428,14 +428,17 @@
                           </div>
                         </div>
                       </div>
-                      <div v-if="!isBlankText(part.result)">
+                      <!-- S6 批2 迁移步④（设计稿 §7.1-④）：视图可渲时「输出」区整块让位 —— 同一份真值
+                           不在卡面报两次（原文仍是 part.result，模型侧 / 复制路径不受影响）；
+                           视图渲不出或段上没有视图 ⇒ 本盒照旧（回退路径不删）。 -->
+                      <div v-if="!isBlankText(part.result) && !outputByView(part)">
                         <div class="block text-[11px] tracking-[.5px] uppercase text-[#8b949e] mb-[4px]">输出</div>
                         <!-- R-165 S5a 项 4：工具卡输出 = **纯限高内滚**，原 CollapsibleText 的渐隐 +
                              「显示更多」钮退役（无展开钮）；截断徽标保留。
                              滚动条同走 6px 圆角半透明任意变体类（项 8）。
                              S6 批1 长内容审计清零项：补 break-all + overflow-wrap:anywhere（长串不越界）。
                              2A 批（裁决 §14.4 代码 / 详情族）：限高改双约束 `min(280px,35vh)`。 -->
-                        <div :class="['text-[12.1px] leading-[1.6] font-mono text-[#606266] bg-[#f6f7f9] border border-solid border-[#eef0f3] rounded-[8px] px-[9px] py-[8px] max-h-[min(280px,35vh)] overflow-y-auto whitespace-pre-wrap break-all [overflow-wrap:anywhere]', SCROLLBAR_CLASS]">
+                        <div data-testid="tool-output-text" :class="['text-[12.1px] leading-[1.6] font-mono text-[#606266] bg-[#f6f7f9] border border-solid border-[#eef0f3] rounded-[8px] px-[9px] py-[8px] max-h-[min(280px,35vh)] overflow-y-auto whitespace-pre-wrap break-all [overflow-wrap:anywhere]', SCROLLBAR_CLASS]">
                           {{ part.result }}<span
                             v-if="part.truncated"
                             class="inline-block ml-1 px-1 rounded text-[10px] leading-4 bg-[#8b949e] text-white align-middle"
@@ -1147,6 +1150,7 @@ import {
   type Block
 } from '@/utils/blocks'
 import { deriveCopyText, deriveProjections } from '@/utils/parts'
+import { isRenderableView } from '@/utils/resultview'
 import FormRenderer from '@/components/AiPanel/FormRenderer.vue'
 import ResultViewRenderer from '@/components/AiPanel/resultview/ResultViewRenderer.vue'
 import SheetPreviewCard from '@/components/AiPanel/SheetPreviewCard.vue'
@@ -2800,6 +2804,17 @@ function paramRows(part: ToolPart): FieldRow[] {
 /** 发布冲突明细行（N8）：从段 reason 解析出 `defCode#rowKey：message` 明细 → 表格数据。 */
 function conflictRows(part: ToolPart): ConflictRow[] {
   return parsePublishConflicts(part.reason)
+}
+
+/**
+ * 「输出」区是否由视图通道接管（S6 批2 **迁移步④**，设计稿 §7.1-④）。
+ *
+ * 判据 = {@link isRenderableView}：同一份真值在卡面上只报一次 —— 视图可渲则原文盒让位
+ * （原文仍是 `part.result`，模型侧与复制路径不受影响）；视图渲不出 / 段上没有视图 ⇒ 原文盒照旧。
+ * `data.ref` 的求值域是 `part.result` 原文（与渲染器同源），所以两处传同一份文本。
+ */
+function outputByView(part: ToolPart): boolean {
+  return part.resultView != null && isRenderableView(part.resultView, part.result ?? null)
 }
 
 /**

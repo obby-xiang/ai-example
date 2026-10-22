@@ -50,6 +50,15 @@ public final class ResultViews {
 	public static final String CODE_UNSUPPORTED = "RESULT_VIEW_UNSUPPORTED";
 
 	/**
+	 * {@code status=empty} 的缺省空态文案 key（设计稿 §3.2：`empty` = 空态文案与出口提示）。
+	 *
+	 * <p>空 ≠ 失败：零行**不**复用 {@code fallback.text}（那是"表格渲不出，请去别处看"的失败出口），
+	 * 否则空列表的卡面会写着"任务列表无法以表格展示" —— 表格没问题，只是没有行。
+	 * 逐工具可再传更贴切的 key（如 {@code i18n:resultview.listTasks.empty}）。
+	 */
+	public static final String DEFAULT_EMPTY_TEXT = "i18n:resultview.empty.generic";
+
+	/**
 	 * 禁形：HTML 标签（可执行/可外联的那几个）、{@code javascript:} 协议、事件处理器属性。
 	 *
 	 * <p>刻意<b>不</b>拦裸 {@code <}/{@code >}：配置值里出现 {@code 值 <ABC> 不合法} 是正常业务文本，
@@ -81,7 +90,21 @@ public final class ResultViews {
 	 */
 	public static ResultView table(String id, String title, List<ResultViewColumn> columns,
 			List<Map<String, Object>> rows, String fallbackText, String source, int maxBytes, int totalRows) {
+		return table(id, title, columns, rows, fallbackText, source, maxBytes, totalRows, null);
+	}
+
+	/**
+	 * 同上，另指定 {@code status=empty} 的空态文案 key（缺省 {@link #DEFAULT_EMPTY_TEXT}）。
+	 * 空态与降级是两件事：这张表渲得出，只是零行。
+	 */
+	public static ResultView table(String id, String title, List<ResultViewColumn> columns,
+			List<Map<String, Object>> rows, String fallbackText, String source, int maxBytes, int totalRows,
+			String emptyText) {
 		String safeFallback = requiredText(fallbackText);
+		String safeEmpty = optionalText(emptyText);
+		if (safeEmpty == null) {
+			safeEmpty = DEFAULT_EMPTY_TEXT;
+		}
 		String safeTitle = optionalText(title);
 		List<ResultViewColumn> safeColumns = sanitizeColumns(columns);
 		if (safeColumns.isEmpty()) {
@@ -94,7 +117,7 @@ public final class ResultViews {
 
 		if (total == 0) {
 			return new ResultView(id, 1, ResultViewKind.TABLE, safeTitle, null, ResultViewStatus.EMPTY,
-					inlineData(List.of()), safeColumns, null, Map.of("text", safeFallback), null,
+					inlineData(List.of()), safeColumns, null, Map.of("text", safeEmpty), null,
 					a11y("table", safeTitle), fallback(safeFallback), meta(source, null), 0);
 		}
 

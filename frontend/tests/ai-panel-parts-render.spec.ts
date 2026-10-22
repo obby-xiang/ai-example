@@ -5526,3 +5526,193 @@ describe('S6 批2 · resultView 渲染（发布冲突首个迁移对象）', () 
     wrapper.unmount()
   })
 })
+
+/**
+ * S6 批2 迁移步④（设计稿 §7.1-④）：**普通工具卡的「输出」区**改由通用渲染器接管。
+ *
+ * 判据（每条都对应一个「旧形态是否还在」的显式断言，不靠"页面能打开"兜底）：
+ * - 有**可渲**视图 ⇒ 表格来自渲染器，**旧原文盒（`tool-output-text`）零出现**（同一份真值不同屏报两次 = N8 违规）；
+ * - 无视图 / 视图渲不出（未知 kind、`data.ref` 指不到 JSON、`status=error`）⇒ 旧原文盒照旧，
+ *   视图位渲染 `fallback`（不白屏、不抛错）；回退路径**不删**（旧镜像 / 旧归档的段没有视图）。
+ *
+ * 首个走通的后端工具 = `list_tasks`（后端 `ListTasksResultViewProvider` 认领，行值来自服务层取数）。
+ */
+describe('S6 批2 迁移步④ · 工具卡输出区由 resultView 接管（list_tasks 首个）', () => {
+  const LIST_TASKS_VIEW = {
+    version: '1.0',
+    id: 'rv-lt-1',
+    revision: 1,
+    kind: 'table' as const,
+    title: 'i18n:resultview.listTasks.title',
+    status: 'ok' as const,
+    data: {
+      inline: {
+        rows: [
+          { id: 7, type: 'EXPORT', title: '十月导出', step: '导出中', status: 'RUNNING' },
+          { id: 9, type: 'IMPORT', title: '汇率导入', step: '待执行', status: 'PENDING' }
+        ]
+      }
+    },
+    columns: [
+      { key: 'id', type: 'integer' as const, label: 'i18n:resultview.listTasks.col.id', width: 1 },
+      { key: 'type', type: 'string' as const, label: 'i18n:resultview.listTasks.col.type', width: 2 },
+      { key: 'title', type: 'string' as const, label: 'i18n:resultview.listTasks.col.title', width: 5 },
+      { key: 'step', type: 'string' as const, label: 'i18n:resultview.listTasks.col.step', width: 2 },
+      { key: 'status', type: 'string' as const, label: 'i18n:resultview.listTasks.col.status', width: 2 }
+    ],
+    fallback: { text: 'i18n:resultview.listTasks.fallback', format: 'plain' as const },
+    meta: { catalogId: 'configmgr/resultview/v1', source: 'list_tasks' }
+  }
+  /** 后端 `AiTools#listTasks` 的文本投影（模型侧那份）：若卡面同时渲它 = 同一份真值报两次。 */
+  const LIST_TASKS_RESULT = [
+    '共 2 条任务（按创建时间倒序）',
+    '- #7 [EXPORT] 十月导出（导出中）',
+    '- #9 [IMPORT] 汇率导入（待执行）'
+  ].join('\n')
+
+  function listTasksPart(extra: Partial<ToolPart> = {}): ToolPart {
+    return {
+      kind: 'tool', seg: 0, toolCallId: 'lt1', name: 'list_tasks', kind2: 'BACKEND',
+      status: 'succeeded', args: '{}', result: LIST_TASKS_RESULT, requiresAction: false,
+      ...extra
+    }
+  }
+
+  it('有可渲视图 ⇒ 表格来自渲染器（只渲一次），旧原文盒零出现', async () => {
+    const msg = buildMessage([listTasksPart({ resultView: LIST_TASKS_VIEW as never })])
+    msg.id = 'a-lt1'
+    const wrapper = await mountPanel([msg])
+    await wrapper.find('[data-testid="block-toggle-a-lt1:lt1"]').trigger('click')
+
+    const tables = wrapper.findAll('[data-testid="resultview-table"]')
+    expect(tables).toHaveLength(1)
+    expect(tables[0].text()).toContain('十月导出')
+    expect(tables[0].text()).toContain('汇率导入')
+    // §5.3-4 / §7.2-6 的同源负断言在"输出区"这一层的落法：原文盒零出现
+    expect(wrapper.find('[data-testid="tool-output-text"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('- #7 [EXPORT]')
+    wrapper.unmount()
+  })
+
+  it('无视图（旧镜像 / 未认领工具）⇒ 旧原文盒照旧，不出现空表', async () => {
+    const msg = buildMessage([listTasksPart()])
+    msg.id = 'a-lt2'
+    const wrapper = await mountPanel([msg])
+    await wrapper.find('[data-testid="block-toggle-a-lt2:lt1"]').trigger('click')
+
+    const out = wrapper.find('[data-testid="tool-output-text"]')
+    expect(out.exists()).toBe(true)
+    expect(out.text()).toContain('- #7 [EXPORT] 十月导出（导出中）')
+    expect(wrapper.find('[data-testid="resultview-table"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="resultview-fallback"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('视图渲不出（data.ref 指不到 JSON）⇒ 原文盒保留 + 视图位渲 fallback（不白屏）', async () => {
+    const msg = buildMessage([listTasksPart({
+      resultView: { ...LIST_TASKS_VIEW, id: 'rv-lt-3', data: { ref: '/rows' } } as never
+    })])
+    msg.id = 'a-lt3'
+    const wrapper = await mountPanel([msg])
+    await wrapper.find('[data-testid="block-toggle-a-lt3:lt1"]').trigger('click')
+
+    expect(wrapper.find('[data-testid="tool-output-text"]').text()).toContain('- #9 [IMPORT]')
+    expect(wrapper.find('[data-testid="resultview-table"]').exists()).toBe(false)
+    const fallback = wrapper.find('[data-testid="resultview-fallback"]')
+    expect(fallback.exists()).toBe(true)
+    expect(fallback.text()).toContain('任务列表无法以表格展示')
+    wrapper.unmount()
+  })
+
+  it('status=error（视图构造失败但工具成功）⇒ 原文盒保留（原文比一句错误更可信）', async () => {
+    const msg = buildMessage([listTasksPart({
+      resultView: {
+        ...LIST_TASKS_VIEW,
+        id: 'rv-lt-4',
+        status: 'error' as const,
+        error: { code: 'FRAME_PAYLOAD_INVALID', message: '视图数据无法解析' }
+      } as never
+    })])
+    msg.id = 'a-lt4'
+    const wrapper = await mountPanel([msg])
+    await wrapper.find('[data-testid="block-toggle-a-lt4:lt1"]').trigger('click')
+
+    expect(wrapper.find('[data-testid="tool-output-text"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="resultview-table"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('零任务（真实帧载荷 2026-10-22 实调）⇒ 空态文案不得读成"无法以表格展示"', async () => {    // 逐字取自运行中后端的一次真调 tool_result.resultView（未改一字，作为契约形状对账样本）
+    const REAL_EMPTY_VIEW = {
+      version: '1.0',
+      id: 'rv-call_00_wbyosyxrCozTmlXF3lvi6883',
+      revision: 1,
+      kind: 'table' as const,
+      title: 'i18n:resultview.listTasks.title',
+      status: 'empty' as const,
+      data: { inline: { rows: [] } },
+      columns: [
+        { key: 'id', type: 'integer' as const, label: 'i18n:resultview.listTasks.col.id', width: 1 },
+        { key: 'type', type: 'string' as const, label: 'i18n:resultview.listTasks.col.type', width: 2 },
+        { key: 'title', type: 'string' as const, label: 'i18n:resultview.listTasks.col.title', width: 5 },
+        { key: 'step', type: 'string' as const, label: 'i18n:resultview.listTasks.col.step', width: 2 },
+        { key: 'status', type: 'string' as const, label: 'i18n:resultview.listTasks.col.status', width: 2 }
+      ],
+      empty: { text: 'i18n:resultview.listTasks.fallback' },
+      a11y: { label: 'i18n:resultview.listTasks.title', role: 'table' },
+      fallback: { text: 'i18n:resultview.listTasks.fallback', format: 'plain' as const },
+      meta: { catalogId: 'configmgr/resultview/v1', source: 'list_tasks' }
+    }
+    const msg = buildMessage([listTasksPart({
+      resultView: REAL_EMPTY_VIEW as never,
+      result: '当前没有任务，可以创建一个新任务'
+    })])
+    msg.id = 'a-lt5'
+    const wrapper = await mountPanel([msg])
+    await wrapper.find('[data-testid="block-toggle-a-lt5:lt1"]').trigger('click')
+
+    expect(wrapper.find('[data-testid="resultview-table"]').exists()).toBe(false)
+    const empty = wrapper.find('[data-testid="resultview-empty"]')
+    expect(empty.exists()).toBe(true)
+    // 空 ≠ 失败：该帧的 empty.text 复用了失败出口文案，归一化后必须是中性空态
+    expect(empty.text()).toBe('没有可展示的记录')
+    expect(wrapper.text()).not.toContain('无法以表格展示')
+    wrapper.unmount()
+  })
+
+  /**
+   * 语义变更（单列）：视图接管输出后，**原文盒在冲突卡上也不再出现** —— 判据只有一条
+   * （视图是否可渲），不按工具分叉。红字行仍只留首行摘要（§5.3-1），明细只由表格承载。
+   */
+  it('发布冲突卡：有视图时原文盒让位，红字行仍是首行摘要（单一判据、不按工具分叉）', async () => {
+    const msg = buildMessage([
+      {
+        kind: 'tool', seg: 0, toolCallId: 'rv3', name: 'start_publish', kind2: 'BACKEND',
+        status: 'failed', args: '{"taskId":291}', result: '发布作业已启动（作业 #317）…',
+        reason: '发布作业 #317 校验冲突明细（共 1 处）\n1. CURRENCY#GLOBAL：币种精度与主数据不一致',
+        requiresAction: false,
+        resultView: {
+          version: '1.0', id: 'rv-rv3', revision: 1, kind: 'table' as const, status: 'ok' as const,
+          data: { inline: { rows: [{ defCode: 'CURRENCY', rowKey: 'GLOBAL', message: '币种精度与主数据不一致' }] } },
+          columns: [
+            { key: 'defCode', type: 'string' as const },
+            { key: 'rowKey', type: 'string' as const },
+            { key: 'message', type: 'string' as const }
+          ],
+          fallback: { text: 'i18n:resultview.publishConflict.fallback', format: 'plain' as const }
+        } as never
+      }
+    ])
+    msg.id = 'a-rv3'
+    const wrapper = await mountPanel([msg])
+    await wrapper.find('[data-testid="block-toggle-a-rv3:rv3"]').trigger('click')
+
+    expect(wrapper.find('[data-testid="resultview-table"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="conflict-table"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="tool-output-text"]').exists()).toBe(false)
+    const err = wrapper.find('[data-testid="tool-error"]')
+    expect(err.text()).toContain('校验冲突明细（共 1 处）')
+    expect(err.text()).not.toContain('CURRENCY')
+    wrapper.unmount()
+  })
+})

@@ -261,6 +261,21 @@ describe('S6 批1：回执独立块退役（groupParts 不再派生第二块）+
     expect(hasToolBody(makeTool({ toolCallId: 'e5', kind2: 'CONFIRM', status: 'pending', requiresAction: true, args: '{}' }))).toBe(true)
   })
 
+  it('hasBodyRows：视图通道也是卡体内容（S6 批2 迁移步④：有视图的段不得因原文为空而丢展开入口）', () => {
+    const view = {
+      version: '1.0',
+      id: 'rv-e6',
+      revision: 1,
+      kind: 'text' as const,
+      status: 'ok' as const,
+      fallback: { text: 'i18n:resultview.fallback.generic', format: 'plain' as const }
+    }
+    // 原文 / 参数 / 原因全空，但段上有视图 ⇒ 卡体有内容（否则通用渲染器永远进不去 = 视图静默丢失）
+    expect(hasToolBody(makeTool({ toolCallId: 'e6', args: '{}', result: '', reason: '', resultView: view }))).toBe(true)
+    // 段上没有视图 ⇒ 仍是 0 行（旧判据不放松）
+    expect(hasToolBody(makeTool({ toolCallId: 'e7', args: '{}', result: '', reason: '' }))).toBe(false)
+  })
+
   it('2A/r15：已决只读态全集与默认展开（门卡四态 / 表单两态；六态一律折叠）', () => {
     // 门卡：decision 优先，failed 落「已批准·执行失败」
     expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'running', decision: 'approved' }))).toBe('approved')

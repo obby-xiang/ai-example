@@ -188,6 +188,31 @@ describe('ResultViewRenderer · 安全与 a11y', () => {
     wrapper.unmount()
   })
 
+  /**
+   * 空态文案（后端 `ResultViews.DEFAULT_EMPTY_TEXT` / `list_tasks` 专用 key）必须在两套 locale 里落地：
+   * 缺键时 `resolveViewText` 回落 `fallback`，卡面就会把"暂时没有记录"读成"无法以表格展示"——
+   * 空 ≠ 失败，这一条正是"零行表格被读成降级"的红线。
+   */
+  it('空态：契约默认 key 与 list_tasks 专用 key 都解析成"没有记录"的文案（不得回落失败出口）', () => {
+    const generic = mountView({
+      ...table,
+      status: 'empty',
+      data: { inline: { rows: [] } },
+      empty: { text: 'i18n:resultview.empty.generic' }
+    })
+    expect(generic.find('[data-testid="resultview-empty"]').text()).toBe('没有可展示的记录')
+    generic.unmount()
+
+    const tasks = mountView({
+      ...table,
+      status: 'empty',
+      data: { inline: { rows: [] } },
+      empty: { text: 'i18n:resultview.listTasks.empty' }
+    })
+    expect(tasks.find('[data-testid="resultview-empty"]').text()).toBe('暂无任务')
+    tasks.unmount()
+  })
+
   it('a11y：表格带 aria-label（取 a11y.label → i18n）', () => {
     const wrapper = mountView(table)
     expect(wrapper.find('[data-testid="resultview-table"]').attributes('aria-label')).toBe('发布冲突明细表')

@@ -39,6 +39,12 @@ public class ListTasksResultViewProvider implements ToolResultViewProvider {
 
 	public static final String TOOL_NAME = "list_tasks";
 
+	/**
+	 * 零任务时的空态文案（设计稿 §3.2 `empty`）：**不复用** fallback —— "暂无任务"与
+	 * "任务列表无法以表格展示"是两件事，把前者读成后者会让空列表看起来像降级失败。
+	 */
+	public static final String EMPTY_TEXT = "i18n:resultview.listTasks.empty";
+
 	/** 帧内其余字段（result/truncated 标记等）的预留字节：视图不用满整帧预算。 */
 	private static final int FRAME_RESERVE_BYTES = 4 * 1024;
 
@@ -74,7 +80,7 @@ public class ListTasksResultViewProvider implements ToolResultViewProvider {
 				rows.add(row(task));
 			}
 			return ResultViews.table("rv-" + toolCallId, "i18n:resultview.listTasks.title", columns(), rows,
-					"i18n:resultview.listTasks.fallback", "list_tasks", viewBudget(), tasks.size());
+					"i18n:resultview.listTasks.fallback", "list_tasks", viewBudget(), tasks.size(), EMPTY_TEXT);
 		}
 		catch (RuntimeException ex) {
 			log.warn("list_tasks 视图构造失败（本次不出 resultView，卡面走旧形态）：toolCallId={}", toolCallId, ex);

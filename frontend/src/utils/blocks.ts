@@ -533,7 +533,10 @@ export function formSpecOf(part: ToolPart): FormSpec | null {
 /**
  * 普通工具卡展开体行数 ≥ 1 判据（v7.10 ajv11 / 场景 19-e）：
  * 参数字段表（requiresAction 段不渲参数区 —— 门卡字段表 / GF 表单本身就是待填内容）
- * ＋ 输出 ＋ 原因，三者任一非空即有行；requiresAction 待动作卡例外（恒 true，强制展开）。
+ * ＋ 输出 ＋ 原因 ＋ **视图通道**，四者任一非空即有行；requiresAction 待动作卡例外（恒 true，强制展开）。
+ *
+ * S6 批2 迁移步④：`resultView` 也是卡体内容 —— 只认原文会让"视图能渲但原文为空"的段
+ * 连带丢掉展开入口，视图就永远进不去（静默丢失比降级更糟；降级至少有 fallback 文案）。
  */
 export function hasToolBody(part: ToolPart): boolean {
   if (part.requiresAction) {
@@ -543,6 +546,9 @@ export function hasToolBody(part: ToolPart): boolean {
     return true
   }
   if (!isBlankText(part.result)) {
+    return true
+  }
+  if (part.resultView != null) {
     return true
   }
   return !isBlankText(part.reason)
@@ -561,6 +567,10 @@ export function hasBodyRows(part: ToolPart): boolean {
  *   ① headline = 首行（人话摘要，卡面 reason 行只显这一句）；
  *   ② rows = 编号明细行 `N. defCode#rowKey：message` → 表格数据（配置 / 行键 / 原因）。
  * 非冲突失败（普通错误文案）⇒ rows 为空，reason 原样渲染。
+ *
+ * **删除闸（设计稿 §5.4 / §7.1-⑤，本批不达）**：本函数 + {@link ConflictRow} + AiPanel 的旧反解表分支
+ * 只有在「`start_publish` 的冲突结果 100% 带 `resultView`」且「跨一个发布版本无回退（有视图但渲不出表格的
+ * 告警计数为 0）」两条同时成立时才删；旧镜像 / 旧归档里的段永远没有视图，所以这一支是**兜底**而非死码。
  */
 export function parsePublishConflicts(reason: string | null | undefined): ConflictRow[] {
   if (isBlankText(reason)) {

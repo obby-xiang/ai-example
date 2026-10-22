@@ -10,9 +10,11 @@ import { describe, expect, it } from 'vitest'
 import {
   buildPublishConflictView,
   containsForbiddenMarkup,
+  isRenderableView,
   normalizeResultView,
   resolveJsonPointer,
   resolveViewRows,
+  RESULTVIEW_EMPTY_TEXT,
   RESULTVIEW_LIMITS,
   RESULTVIEW_REDACTED,
   sanitizeResultViewText
@@ -203,5 +205,81 @@ describe('resultview · 数据引用与规模上限', () => {
     expect(kept).toHaveLength(RESULTVIEW_LIMITS.maxRows)
     expect(normalized.view?.status).toBe('partial')
     expect(normalized.view?.meta?.truncated).toEqual({ shownRows: 200, totalRows: 240 })
+  })
+})
+
+/**
+ * S6 批2 迁移步④（设计稿 §7.1-④）：卡面「输出」区由视图接管还是回落旧原文盒，判据必须收敛在
+ * **一个纯函数**里 —— 渲染器与旧路径各自判一次就等于两套口径（迟早出现"渲了视图又渲原文"）。
+ */
+describe('resultview · 旧卡迁移判据 isRenderableView', () => {
+  it('可渲的 table / text 视图 ⇒ true（旧原文盒让位）', () => {
+    expect(isRenderableView(view())).toBe(true)
+    expect(isRenderableView(view({ kind: 'text', columns: undefined, data: undefined, description: '一句话' })))
+      .toBe(true)
+  })
+
+  it('不可渲（未知 kind / 未实现 kind / 未知列类型 / 缺 fallback）⇒ false（回落旧原文盒）', () => {
+    expect(isRenderableView(view({ kind: 'chart' }))).toBe(false)
+    expect(isRenderableView(view({ kind: 'form' }))).toBe(false)
+    expect(isRenderableView(view({ columns: [{ key: 'a', type: 'rich-html' as never }] }))).toBe(false)
+    expect(isRenderableView(view({ fallback: undefined as never }))).toBe(false)
+    expect(isRenderableView(null)).toBe(false)
+    expect(isRenderableView(undefined)).toBe(false)
+  })
+
+  it('data.ref 指向非 JSON 结果 ⇒ false；指向 JSON 文档 ⇒ true（求值域 = result 原文）', () => {
+    const refView = view({ data: { ref: '/rows' } })
+    expect(isRenderableView(refView, '作业已启动，无结构化文档')).toBe(false)
+    expect(isRenderableView(refView, '{"rows":[{"a":"1","b":"2"}]}')).toBe(true)
+    expect(isRenderableView(refView, null)).toBe(false)
+  })
+
+  it('status=error（视图构造失败）⇒ false：原文比一句错误更可信', () => {
+    expect(isRenderableView(view({ status: 'error', error: { code: 'FRAME_PAYLOAD_INVALID', message: '视图数据无法解析' } })))
+      .toBe(false)
+  })
+})
+
+/**
+ * 空态文案的归一化（设计稿 §3.2：`empty` = 空态文案与出口提示，**不是** `fallback`）。
+ *
+ * 后端若把失败出口文案原样塞进 `empty.text`（旧造口行为），卡面会把"暂时没有记录"读成
+ * "无法以表格展示" —— 空 ≠ 失败。归一化把它修成中性空态文案；工具自己的空态 key 不动。
+ */
+describe('resultview · 空态文案归一化', () => {
+  const emptyView = (overrides: Partial<ResultView> = {}): ResultView => view({
+    status: 'empty',
+    data: { inline: { rows: [] } },
+    ...overrides
+  })
+
+  it('empty.text 与 fallback.text 相同（失败出口被复用）⇒ 换成中性空态文案', () => {
+    const normalized = normalizeResultView(emptyView({
+      fallback: { text: 'i18n:resultview.listTasks.fallback', format: 'plain' },
+      empty: { text: 'i18n:resultview.listTasks.fallback' }
+    }))
+    expect(normalized.view?.status).toBe('empty')
+    expect(normalized.view?.empty?.text).toBe(RESULTVIEW_EMPTY_TEXT)
+    expect(normalized.view?.fallback.text).toBe('i18n:resultview.listTasks.fallback')
+  })
+
+  it('工具自己的空态 key ⇒ 原样保留', () => {
+    const normalized = normalizeResultView(emptyView({
+      fallback: { text: 'i18n:resultview.listTasks.fallback', format: 'plain' },
+      empty: { text: 'i18n:resultview.listTasks.empty' }
+    }))
+    expect(normalized.view?.empty?.text).toBe('i18n:resultview.listTasks.empty')
+  })
+
+  it('缺 empty / 空串 ⇒ 补中性空态文案（status=empty 必填）', () => {
+    expect(normalizeResultView(emptyView()).view?.empty?.text).toBe(RESULTVIEW_EMPTY_TEXT)
+    expect(normalizeResultView(emptyView({ empty: { text: '  ' } })).view?.empty?.text)
+      .toBe(RESULTVIEW_EMPTY_TEXT)
+  })
+
+  it('非空态（ok / partial / error）不动：empty 不参与渲染', () => {
+    const ok = normalizeResultView(view())
+    expect(ok.view?.empty).toBeUndefined()
   })
 })

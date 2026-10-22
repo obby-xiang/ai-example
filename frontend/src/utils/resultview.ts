@@ -7,6 +7,8 @@
  * 3. {@link resolveViewRows} / {@link resolveJsonPointer}：`data.ref`（RFC6901）与 `data.inline` 求值；
  * 4. {@link sanitizeResultViewText}：出端消毒（HTML 标签 / 事件处理器 / `javascript:`）。
  *
+ * 另加一条派生判据 {@link isRenderableView}：卡面「视图接管 / 回落旧卡」的唯一分界（迁移步④）。
+ *
  * 与后端 `com.example.configmgr.ai.resultview.ResultViews` 同值同口径（上限、消毒占位符、目录标识），
  * 两侧各有一组用例钉住同一份契约 —— 跨端漂移在任一侧都会红。
  */
@@ -32,6 +34,14 @@ export const RESULTVIEW_REDACTED = '[redacted]'
 
 /** 连 `fallback` 都没有时的通用兜底文案 key。 */
 export const RESULTVIEW_GENERIC_FALLBACK = 'i18n:resultview.fallback.generic'
+
+/**
+ * `status=empty` 的中性空态文案 key（与后端 `ResultViews.DEFAULT_EMPTY_TEXT` 同值）。
+ *
+ * 空 ≠ 失败：`empty.text` 若与 `fallback.text` 相同（后端旧造口把失败出口文案复用到空态），
+ * 归一化换成这一句 —— 否则零行的表会读成"无法以表格展示"。
+ */
+export const RESULTVIEW_EMPTY_TEXT = 'i18n:resultview.empty.generic'
 
 /** 发布冲突视图只展示前 5 条（与旧摘要 `slice(0, 5)` 及模型侧口径一致）。 */
 export const PUBLISH_CONFLICT_SHOWN_ROWS = 5
@@ -218,6 +228,22 @@ function isColumn(raw: unknown): raw is ResultViewColumn {
 }
 
 /**
+ * 空态文案归一化（§3.2：`empty` 是「空态文案与出口提示」，不是 `fallback`）。
+ *
+ * `status=empty` 时 `empty.text` 必填；且**不得**与 `fallback.text` 相同 —— 重合成了一句
+ * "无法以表格展示"的失败话术，会把"零行"读成"渲不出"（后端旧造口就复用过 fallback）。
+ * 工具自己的空态 key（如 `i18n:resultview.listTasks.empty`）原样保留。
+ */
+function repairEmptyText(view: ResultView): ResultView {
+  if (view.status !== 'empty') {
+    return view
+  }
+  const current = view.empty?.text
+  const usable = typeof current === 'string' && current.trim().length > 0 && current !== view.fallback?.text
+  return usable ? view : { ...view, empty: { ...(view.empty ?? {}), text: RESULTVIEW_EMPTY_TEXT } }
+}
+
+/**
  * 入站视图归一化：**只认白名单，未知一律降级**（§4-规则 1）。
  *
  * 归一的动作有三类（都不改语义，只收敛形状）：
@@ -258,7 +284,7 @@ export function normalizeResultView(raw: unknown, documentText?: string | null):
     columns = rawColumns.slice(0, RESULTVIEW_LIMITS.maxColumns)
   }
 
-  const view = { ...(candidate as unknown as ResultView), columns }
+  const view = repairEmptyText({ ...(candidate as unknown as ResultView), columns })
   if (kind !== 'table') {
     return viewBytes(view) > RESULTVIEW_LIMITS.maxBytes ? { view: null, fallbackText } : { view, fallbackText }
   }
@@ -298,6 +324,20 @@ export function normalizeResultView(raw: unknown, documentText?: string | null):
   // §4-规则 8 的第三把尺：超 256KB ⇒ 不渲（走 fallback），绝不把超大载荷交给渲染层。
   // 行数收敛之后仍超预算的情形也由这里兜住（行 / 列 / 字节三把尺都可独立触发降级）。
   return viewBytes(finalView) > RESULTVIEW_LIMITS.maxBytes ? { view: null, fallbackText } : { view: finalView, fallbackText }
+}
+
+/**
+ * 视图能否交给通用渲染器（S6 批2 **迁移步④** 的旧卡让位判据，设计稿 §7.1-④）。
+ *
+ * `false` ⇒ 调用方回落**旧渲染**（工具卡原文盒 / 旧反解表），不是白屏、不抛错：
+ * - {@link normalizeResultView} 判为不可渲（未知 kind / major 不兼容 / 列类型不认识 / `data` 解不出 / 缺 fallback）；
+ * - 或 `status:"error"`（视图构造失败但工具本身可能成功）—— 此时工具原文比一句错误码更可信。
+ *
+ * 判据收敛在这一个纯函数里：渲染器与旧路径各判一次，迟早出现"渲了视图又渲原文"的双份。
+ */
+export function isRenderableView(raw: unknown, documentText?: string | null): boolean {
+  const view = normalizeResultView(raw, documentText).view
+  return view !== null && view.status !== 'error'
 }
 
 // ── 发布冲突视图（首个迁移对象，§5.3） ────────────────────────────────────

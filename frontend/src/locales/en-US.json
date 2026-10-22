@@ -394,6 +394,9 @@
       "generic": "This result cannot be shown as a structured view",
       "blocked": "This result contains content that cannot be displayed"
     },
+    "empty": {
+      "generic": "No records to show"
+    },
     "truncated": "{total} rows in total, showing the first {shown}",
     "table": {
       "caption": "Result details"
@@ -415,6 +418,7 @@
     "listTasks": {
       "title": "Tasks",
       "fallback": "The task list cannot be shown as a table; please check the task center",
+      "empty": "No tasks",
       "col": {
         "id": "ID",
         "type": "Type",

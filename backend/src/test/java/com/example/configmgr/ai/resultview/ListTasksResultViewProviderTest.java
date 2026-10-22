@@ -89,6 +89,19 @@ class ListTasksResultViewProviderTest {
 		assertThat(map).containsKey("fallback");
 	}
 
+	/** 空任务列表 ≠ "任务列表无法以表格展示"：空态文案走工具自己的 key（设计稿 §3.2 `empty`）。 */
+	@Test
+	void emptyTaskListUsesTheTaskSpecificEmptyText() {
+		when(this.taskService.findAll()).thenReturn(List.of());
+		Map<String, Object> map = provider().build("call-2b", "list_tasks", "当前没有任务").toMap();
+		@SuppressWarnings("unchecked")
+		Map<String, Object> empty = (Map<String, Object>) map.get("empty");
+		assertThat(empty.get("text")).isEqualTo("i18n:resultview.listTasks.empty");
+		@SuppressWarnings("unchecked")
+		Map<String, Object> fallback = (Map<String, Object>) map.get("fallback");
+		assertThat(fallback.get("text")).as("失败出口仍是一句可读的降级文案").isEqualTo("i18n:resultview.listTasks.fallback");
+	}
+
 	@Test
 	void serviceFailureYieldsNoViewInsteadOfBreakingTheFrame() {
 		when(this.taskService.findAll()).thenThrow(new IllegalStateException("db down"));
