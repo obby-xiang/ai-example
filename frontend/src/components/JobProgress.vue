@@ -2,12 +2,12 @@
   <div>
     <div v-if="job" class="flex items-center gap-3">
       <el-tag :type="statusType(job.status)" effect="dark">{{ statusLabel(job.status) }}</el-tag>
-      <span v-if="running && currentDefCode" class="text-[#606266] text-[13px]">正在处理：{{ currentDefCode }}</span>
+      <span v-if="running && currentDefCode" class="text-[#606266] text-[13px]">{{ t('job.processing', { code: currentDefCode }) }}</span>
       <span v-if="channelHint" class="text-[#909399] text-xs">{{ channelHint }}</span>
       <span class="ml-auto text-[#909399] text-[13px]">{{ progressText }}</span>
       <!-- R-136 收口修 F1（复核 MAJOR-1）：只读壳内「取消作业」一律隐藏 —— 异类型作业并发态下
            任务 CANCELLED 时本组件仍可能有 PENDING/RUNNING 作业，按钮可见性只看作业态不够 -->
-      <el-button v-if="running && !readOnly" size="small" type="danger" plain @click="emit('cancel')">取消作业</el-button>
+      <el-button v-if="running && !readOnly" size="small" type="danger" plain @click="emit('cancel')">{{ t('job.cancelJob') }}</el-button>
     </div>
     <el-progress
       v-if="job"
@@ -26,49 +26,50 @@
       <el-table-column v-if="hasAnyDetail" type="expand">
         <template #default="{ row }">
           <el-table v-if="detailOf(row).length" :data="detailOf(row)" size="small" class="my-1 mx-4">
-            <el-table-column prop="rowIndex" label="行号" width="80">
+            <el-table-column prop="rowIndex" :label="t('job.rowIndex')" width="80">
               <template #default="{ row: issue }">{{ issue.rowIndex ?? '—' }}</template>
             </el-table-column>
-            <el-table-column label="字段" width="180">
+            <el-table-column :label="t('job.field')" width="180">
               <template #default="{ row: issue }">{{ issue.fieldCode ?? '—' }}</template>
             </el-table-column>
-            <el-table-column label="级别" width="80">
+            <el-table-column :label="t('job.level')" width="80">
               <template #default="{ row: issue }">
                 <el-tag size="small" :type="severityType(issue.severity)">{{ severityLabel(issue.severity) }}</el-tag>
               </template>
             </el-table-column>
-            <el-table-column prop="message" label="说明" />
+            <el-table-column prop="message" :label="t('job.message')" />
           </el-table>
-          <div v-else class="py-2 px-4 text-[#909399]">无明细</div>
+          <div v-else class="py-2 px-4 text-[#909399]">{{ t('job.noDetail') }}</div>
         </template>
       </el-table-column>
-      <el-table-column prop="sortOrder" label="顺序" width="64" />
-      <el-table-column prop="defCode" label="配置项" min-width="160" />
-      <el-table-column label="状态" width="100">
+      <el-table-column prop="sortOrder" :label="t('job.sortOrder')" width="64" />
+      <el-table-column prop="defCode" :label="t('job.definition')" min-width="160" />
+      <el-table-column :label="t('job.status')" width="100">
         <template #default="{ row }">
           <el-tag size="small" :type="statusType(row.status)">{{ statusLabel(row.status) }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column prop="processed" label="已处理" width="90" />
-      <el-table-column prop="total" label="总行数" width="90">
+      <el-table-column prop="processed" :label="t('job.processed')" width="90" />
+      <el-table-column prop="total" :label="t('job.totalRows')" width="90">
         <template #default="{ row }">{{ row.total > 0 ? row.total : '—' }}</template>
       </el-table-column>
-      <el-table-column label="失败" width="80">
+      <el-table-column :label="t('job.failedRows')" width="80">
         <template #default="{ row }">
           <span :class="errorRowsOf(row.defCode) > 0 ? 'text-[#f56c6c]' : ''">
             {{ errorRowsOf(row.defCode) > 0 ? errorRowsOf(row.defCode) : '-' }}
           </span>
         </template>
       </el-table-column>
-      <el-table-column label="说明" min-width="140" show-overflow-tooltip>
+      <el-table-column :label="t('job.message')" min-width="140" show-overflow-tooltip>
         <template #default="{ row }">{{ firstMessageOf(row.defCode) }}</template>
       </el-table-column>
     </el-table>
-    <el-empty v-if="!job" description="尚未启动作业" :image-size="60" />
+    <el-empty v-if="!job" :description="t('job.notStarted')" :image-size="60" />
   </div>
 </template>
 
 <script setup lang="ts">
+import { useI18n } from 'vue-i18n'
 /**
  * 行级作业进度（口径：jobs.progress / jobs.total 是**行级** processed/total，
  * job_items.processed/total 才是配置项级 —— 两者不混用）。
@@ -82,6 +83,8 @@ import { computed } from 'vue'
 import type { Job, JobStatus, Severity, ValidationIssue } from '@/types/job'
 import { progressView } from '@/utils/format'
 import type { JobChannelState } from '@/utils/job-watch'
+
+const { t } = useI18n()
 
 const props = withDefaults(
   defineProps<{

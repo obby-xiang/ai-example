@@ -1,6 +1,6 @@
 <template>
   <TaskWizard
-    title="导出配置向导"
+    :title="t('views.export.title')"
     :subtitle="taskSubtitle"
     :steps="WIZARD_STEPS"
     :active-index="stepIndex"
@@ -22,25 +22,25 @@
         type="warning"
         :closable="false"
         show-icon
-        title="尚未绑定任务"
-        description="导出向导需要挂在一条导出任务上（作业结果按任务存储）。可直接创建任务进入，或从任务中心点任务标题进入。"
+        :title="t('views.export.noTask')"
+        :description="t('views.export.noTaskDesc')"
         class="mb-3"
       >
         <el-button size="small" type="primary" :loading="creatingTask" class="mt-2" @click="createAndBindTask">
-          创建导出任务并进入
+          {{ t('views.export.createAndEnter') }}
         </el-button>
       </el-alert>
       <div ref="aiExportSelectDefsRef">
         <DefSelector v-model="selectedDefs" :defs="defs" :loading="defsLoading" :disabled="isReadOnly" ai-ref-prefix="export.selectDefs" />
       </div>
       <div class="mt-2.5 text-[13px] text-[#909399]">
-        已选 {{ selectedDefs.length }} 个配置项；存在依赖关系的配置项将按依赖顺序导出。
+        {{ t('views.export.selectedSummary', { count: selectedDefs.length }) }}
       </div>
     </div>
 
     <!-- ============ 第 2 步：查询配置 ============ -->
     <div v-show="stepIndex === 1" ref="aiCondRef">
-      <el-empty v-if="!selectedDefs.length" description="请先在第 1 步选择配置项" />
+      <el-empty v-if="!selectedDefs.length" :description="t('views.export.emptySelect')" />
       <el-card v-for="code in selectedDefs" :key="code" shadow="never" class="mb-3">
         <template #header>
           <div class="flex items-center gap-3">
@@ -53,8 +53,8 @@
               data-ai-verbs="click,highlight"
               :data-ai-label="`预览 ${code} 行数`"
               @click="previewCount(code)"
-            >预览行数</el-button>
-            <el-tag v-if="counts[code] !== undefined" size="small" type="success">命中 {{ counts[code] }} 行</el-tag>
+            >{{ t('views.export.previewRows') }}</el-button>
+            <el-tag v-if="counts[code] !== undefined" size="small" type="success">{{ t('views.export.hits', { count: counts[code] }) }}</el-tag>
           </div>
         </template>
         <ConditionForm
@@ -71,18 +71,18 @@
     <div v-show="stepIndex === 2">
       <div class="flex items-center mb-3">
         <el-button v-if="!isReadOnly" type="primary" :loading="startingExport" :disabled="jobRunning" @click="startExport">
-          {{ exportJob ? '重新导出' : '开始导出' }}
+          {{ exportJob ? t('views.export.reExport') : t('views.export.startExport') }}
         </el-button>
         <template v-if="exportResults.length">
           <el-divider direction="vertical" />
           <el-button size="small" :loading="downloading === activeTab" @click="downloadOne(activeTab)">
-            下载当前配置项 xlsx
+            {{ t('views.export.downloadCurrent') }}
           </el-button>
           <el-button size="small" :disabled="!checkedDefs.length" :loading="downloading === 'checked'" @click="downloadChecked">
-            打包下载勾选（{{ checkedDefs.length }}）
+            {{ t('views.export.downloadChecked', { count: checkedDefs.length }) }}
           </el-button>
-          <el-button size="small" :loading="downloading === 'all'" @click="downloadAll">全部打包 zip</el-button>
-          <el-button v-if="!isReadOnly" size="small" :loading="savingFiles" @click="saveEdits">保存编辑到服务端</el-button>
+          <el-button size="small" :loading="downloading === 'all'" @click="downloadAll">{{ t('views.export.downloadAll') }}</el-button>
+          <el-button v-if="!isReadOnly" size="small" :loading="savingFiles" @click="saveEdits">{{ t('views.export.saveEdits') }}</el-button>
         </template>
       </div>
 
@@ -101,7 +101,7 @@
           :closable="false"
           show-icon
           class="my-3"
-          title="可在线编辑表格内容；编辑只影响下载的文件与「保存编辑到服务端」写入的文件，不会直接改数据库。"
+          :title="t('views.export.editorHint')"
         />
         <el-checkbox-group v-model="checkedDefs" class="mb-2">
           <el-checkbox v-for="item in exportResults" :key="item.defCode" :value="item.defCode">
@@ -113,7 +113,7 @@
             v-for="item in exportResults"
             :key="item.defCode"
             :name="item.defCode"
-            :label="`${defName(item.defCode)}（${item.rowCount} 行）`"
+            :label="t('views.export.optionLabel', { name: defName(item.defCode), rows: item.rowCount })"
           >
             <SpreadGrid
               :ref="(el) => setGridRef(item.defCode, el)"
@@ -131,6 +131,7 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from 'vue-i18n'
 /**
  * 导出配置向导（三步：选择配置 → 查询配置 → 导出）。
  *
@@ -182,6 +183,8 @@ import { useAiStore } from '@/stores/ai'
 import { stepLabel } from '@/utils/format'
 import { watchJob, type JobChannelState } from '@/utils/job-watch'
 import { confirmIrreversible } from '@/utils/confirm-irreversible'
+
+const { t } = useI18n()
 
 /** 表格宿主的最小接口（defineExpose 出来的方法）。 */
 interface GridApi {

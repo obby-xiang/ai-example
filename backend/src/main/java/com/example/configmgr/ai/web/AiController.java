@@ -35,6 +35,7 @@ import com.example.configmgr.ai.tool.SheetAudit;
 import com.example.configmgr.ai.tool.SheetSwitches;
 import com.example.configmgr.ai.tool.TruncationContract;
 import com.example.configmgr.common.ApiResponse;
+import com.example.configmgr.common.ErrorBodyFactory;
 import com.example.configmgr.job.service.JobWatchdog;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -219,6 +220,13 @@ public class AiController {
 	@Autowired(required = false)
 	private com.example.configmgr.ai.context.ContextBreakdownService contextBreakdownService;
 
+	/**
+	 * S6 尾项（批3二）：错误体的码级本地化。**字段注入**的理由同既有各组件 —— 构造器签名不变 ⇒
+	 * 既有 {@code new AiController(...)} 用例零触碰；未注入时回落调用方中文原文（zh 字节不变）。
+	 */
+	@Autowired(required = false)
+	private ErrorBodyFactory errorBodyFactory;
+
 	public AiController(AiAvailability availability, ObjectProvider<ResilientChatService> chatService,
 			ObjectProvider<ResumeService> resumeService, ObjectProvider<StartupResumeRunner> startupResumeRunner,
 			ChatMemory chatMemory, ChatMemoryRepository chatMemoryRepository, SessionGate sessionGate,
@@ -264,7 +272,7 @@ public class AiController {
 		if (request == null || !StringUtils.hasText(request.sessionId()) || !StringUtils.hasText(request.message())) {
 			deny(HttpStatus.BAD_REQUEST, ErrorCodes.BAD_REQUEST, request == null ? null : request.sessionId(), null,
 					"reason", "missing_session_or_message");
-			return json(HttpStatus.BAD_REQUEST, Map.of("code", ErrorCodes.BAD_REQUEST, "message", "sessionId 与 message 均为必填"));
+			return json(HttpStatus.BAD_REQUEST, errorBody(ErrorCodes.BAD_REQUEST, "sessionId 与 message 均为必填"));
 		}
 		if (!this.redisAvailability.isAvailable()) {
 			deny(HttpStatus.SERVICE_UNAVAILABLE, RedisAvailability.code(), request.sessionId(), null,
@@ -299,7 +307,7 @@ public class AiController {
 			deny(HttpStatus.BAD_REQUEST, ErrorCodes.BAD_REQUEST, request.sessionId(), null, "reason",
 					"empty_after_sanitize", "chars", sanitized.text().length());
 			return json(HttpStatus.BAD_REQUEST,
-					Map.of("code", ErrorCodes.BAD_REQUEST, "message", "message 归一化后为空（原文仅含不可见字符），请重新输入"));
+					errorBody(ErrorCodes.BAD_REQUEST, "message 归一化后为空（原文仅含不可见字符），请重新输入"));
 		}
 		// 批① 闸门 3：长度（§5.1 #1 / 数据最小化 R5）。超限**拒绝不截断**：截断会让模型基于半句话下结论。
 		int maxChars = this.properties.getInput().getMaxChars();
@@ -344,13 +352,13 @@ public class AiController {
 				&& this.aiConfigService.resolveChatTarget(effective.modelId()).isEmpty()) {
 			deny(HttpStatus.BAD_REQUEST, ErrorCodes.MODEL_NOT_FOUND, sessionId, null,
 					"model", effective.modelId());
-			return json(HttpStatus.BAD_REQUEST, Map.of("code", ErrorCodes.MODEL_NOT_FOUND,
-					"message", "该模型当前不可用（未在可用端点的模型清单里，或端点已停用/密钥不可用）：" + effective.modelId()));
+			return json(HttpStatus.BAD_REQUEST, errorBody(ErrorCodes.MODEL_NOT_FOUND,
+					"该模型当前不可用（未在可用端点的模型清单里，或端点已停用/密钥不可用）：" + effective.modelId()));
 		}
 		String paramsRejection = validateParams(effective.params());
 		if (paramsRejection != null) {
 			deny(HttpStatus.BAD_REQUEST, ErrorCodes.INVALID_PARAM, sessionId, null, "reason", paramsRejection);
-			return json(HttpStatus.BAD_REQUEST, Map.of("code", ErrorCodes.INVALID_PARAM, "message", paramsRejection));
+			return json(HttpStatus.BAD_REQUEST, errorBody(ErrorCodes.INVALID_PARAM, paramsRejection));
 		}
 		String runId = UUID.randomUUID().toString();
 		SessionGate.Busy busy = this.sessionGate.acquire(sessionId, runId);
@@ -365,7 +373,7 @@ public class AiController {
 			// ADR-5：409 必须携带进行中轮的 runId，前端据此改走 /api/ai/events/{runId}
 			Map<String, Object> body = new LinkedHashMap<>();
 			body.put("code", ErrorCodes.SESSION_BUSY);
-			body.put("message", "该会话已有一轮对话在进行中，请先处理或重挂该轮");
+			body.put("message", localize(ErrorCodes.SESSION_BUSY, "该会话已有一轮对话在进行中，请先处理或重挂该轮"));
 			body.put("sessionId", sessionId);
 			body.put("runId", busy.runId());
 			body.put("degraded", busy.degraded());
@@ -458,7 +466,7 @@ public class AiController {
 	public ResponseEntity<?> confirm(@RequestBody(required = false) ConfirmRequest request) {
 		if (request == null || !StringUtils.hasText(request.runId())
 				|| !StringUtils.hasText(request.toolCallId())) {
-			return json(HttpStatus.BAD_REQUEST, Map.of("code", ErrorCodes.BAD_REQUEST, "message", "runId 与 toolCallId 均为必填"));
+			return json(HttpStatus.BAD_REQUEST, errorBody(ErrorCodes.BAD_REQUEST, "runId 与 toolCallId 均为必填"));
 		}
 		// 防护批③ B2-6：{@code reason} 长度闸（与 {@code ai_feedback.reason} 同尺 1024）。
 		// 它是人工路径（误伤面小），但<b>会原样回填模型</b> —— 不闸就等于给了一条无上限的注入通道。
@@ -509,7 +517,7 @@ public class AiController {
 	public ResponseEntity<?> frontendToolResult(@RequestBody(required = false) FrontendToolResultRequest request) {
 		if (request == null || !StringUtils.hasText(request.runId())
 				|| !StringUtils.hasText(request.toolCallId())) {
-			return json(HttpStatus.BAD_REQUEST, Map.of("code", ErrorCodes.BAD_REQUEST, "message", "runId 与 toolCallId 均为必填"));
+			return json(HttpStatus.BAD_REQUEST, errorBody(ErrorCodes.BAD_REQUEST, "runId 与 toolCallId 均为必填"));
 		}
 		// B23L1 批②b：读侧续期（同 /confirm 的口径：先续命再落回灌）
 		this.runStore.touchActiveRun(request.runId());
@@ -803,7 +811,7 @@ public class AiController {
 	@GetMapping("/runs/current")
 	public ResponseEntity<?> runsCurrent(@RequestParam(required = false) String sessionId) {
 		if (!StringUtils.hasText(sessionId)) {
-			return json(HttpStatus.BAD_REQUEST, Map.of("code", ErrorCodes.BAD_REQUEST, "message", "sessionId 为必填"));
+			return json(HttpStatus.BAD_REQUEST, errorBody(ErrorCodes.BAD_REQUEST, "sessionId 为必填"));
 		}
 		String runId = this.runStore.sessionCurrentRunId(sessionId);
 		RunSnapshot snapshot = runId == null ? null : this.runStore.get(runId);
@@ -920,6 +928,19 @@ public class AiController {
 	 */
 	private ResponseEntity<Map<String, Object>> json(HttpStatus status, Map<String, Object> body) {
 		return ResponseEntity.status(status).contentType(MediaType.APPLICATION_JSON).body(body);
+	}
+
+	/**
+	 * 错误体 {@code {code, message}}（S6 尾项）：响应形态不变，只有 {@code message} 走 locale ——
+	 * 中文（默认）取调用方原文，非中文取 {@code messages_en} 的 {@code error.<CODE>}，缺键回落原文。
+	 */
+	private Map<String, Object> errorBody(String code, String fallbackMessage) {
+		return Map.of("code", code, "message", localize(code, fallbackMessage));
+	}
+
+	private String localize(String code, String fallbackMessage) {
+		return this.errorBodyFactory == null ? fallbackMessage
+				: this.errorBodyFactory.message(code, fallbackMessage, null, ErrorBodyFactory.requestLocale());
 	}
 
 	/**
@@ -1167,7 +1188,7 @@ public class AiController {
 	@DeleteMapping("/history/{sessionId}")
 	public ResponseEntity<Map<String, Object>> deleteHistory(@PathVariable String sessionId) {
 		if (!StringUtils.hasText(sessionId)) {
-			return json(HttpStatus.BAD_REQUEST, Map.of("code", ErrorCodes.BAD_REQUEST, "message", "sessionId 必填"));
+			return json(HttpStatus.BAD_REQUEST, errorBody(ErrorCodes.BAD_REQUEST, "sessionId 必填"));
 		}
 		if (!this.redisAvailability.isAvailable()) {
 			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
@@ -1221,14 +1242,14 @@ public class AiController {
 	public ResponseEntity<Map<String, Object>> context(@PathVariable String sessionId,
 			@RequestParam(name = "ledger", required = false) Boolean ledger) {
 		if (!StringUtils.hasText(sessionId)) {
-			return json(HttpStatus.BAD_REQUEST, Map.of("code", ErrorCodes.BAD_REQUEST, "message", "sessionId 必填"));
+			return json(HttpStatus.BAD_REQUEST, errorBody(ErrorCodes.BAD_REQUEST, "sessionId 必填"));
 		}
 		if (!this.redisAvailability.isAvailable()) {
 			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
 		}
 		if (this.contextBreakdownService == null) {
-			return json(HttpStatus.SERVICE_UNAVAILABLE, Map.of("code", ErrorCodes.AI_CONTEXT_UNAVAILABLE,
-					"message", "上下文计量未装配（ContextBreakdownService 缺失）"));
+			return json(HttpStatus.SERVICE_UNAVAILABLE, errorBody(ErrorCodes.AI_CONTEXT_UNAVAILABLE,
+					"上下文计量未装配（ContextBreakdownService 缺失）"));
 		}
 		List<Message> memory;
 		try {
@@ -1504,7 +1525,7 @@ public class AiController {
 		if (messageId == null || sessionId == null || rating == null
 				|| (rating != 1 && rating != -1 && rating != 0)) {
 			return json(HttpStatus.BAD_REQUEST,
-					Map.of("code", ErrorCodes.BAD_REQUEST, "message", "messageId/sessionId 必填，rating ∈ 1/-1/0"));
+					errorBody(ErrorCodes.BAD_REQUEST, "messageId/sessionId 必填，rating ∈ 1/-1/0"));
 		}
 		if (rating == 0) {
 			AiFeedback existing = this.aiFeedbackRepository.findByMessageId(messageId);

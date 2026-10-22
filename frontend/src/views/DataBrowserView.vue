@@ -2,20 +2,20 @@
   <div>
     <div class="flex justify-between items-center mb-4">
       <div>
-        <h2 class="m-0 text-xl text-[#303133]">数据浏览</h2>
+        <h2 class="m-0 text-xl text-[#303133]">{{ t('views.data.title') }}</h2>
         <div class="mt-1 text-[13px] text-[#909399]">
-          已发布配置数据分页浏览 + 范围过滤 + 字段级条件（FR-1.1）
+          {{ t('views.data.subtitle') }}
         </div>
       </div>
       <div>
-        <el-button :icon="Refresh" circle title="刷新" @click="reload" />
-        <el-button @click="resetAll">重置条件</el-button>
+        <el-button :icon="Refresh" circle :title="t('views.data.refresh')" @click="reload" />
+        <el-button @click="resetAll">{{ t('views.data.resetFilters') }}</el-button>
       </div>
     </div>
 
     <el-card shadow="never" class="mb-3">
       <div class="flex items-center gap-2 mb-3">
-        <el-select v-model="defCode" placeholder="选择配置项" class="w-[260px]" @change="onDefChange">
+        <el-select v-model="defCode" :placeholder="t('views.data.selectDefinition')" class="w-[260px]" @change="onDefChange">
           <el-option
             v-for="item in defs"
             :key="item.code"
@@ -23,15 +23,15 @@
             :value="item.code"
           />
         </el-select>
-        <el-select v-model="scopeType" placeholder="范围类型（缺省按定义层级推导）" clearable class="w-[240px]">
-          <el-option label="全局（GLOBAL）" value="GLOBAL" />
-          <el-option label="地区（REGION）" value="REGION" />
-          <el-option label="项目（PROJECT）" value="PROJECT" />
+        <el-select v-model="scopeType" :placeholder="t('views.data.scopePlaceholder')" clearable class="w-[240px]">
+          <el-option :label="t('views.data.global')" value="GLOBAL" />
+          <el-option :label="t('views.data.region')" value="REGION" />
+          <el-option :label="t('views.data.project')" value="PROJECT" />
         </el-select>
         <el-select
           v-if="scopeType === 'REGION'"
           v-model="scopeKey"
-          placeholder="地区"
+          :placeholder="t('views.data.regionShort')"
           clearable
           class="w-[200px]"
         >
@@ -40,26 +40,26 @@
         <el-select
           v-else-if="scopeType === 'PROJECT'"
           v-model="scopeKey"
-          placeholder="项目"
+          :placeholder="t('views.data.projectShort')"
           clearable
           filterable
           class="w-[220px]"
         >
           <el-option v-for="project in projects" :key="project.code" :label="`${project.name}（${project.code}）`" :value="project.code" />
         </el-select>
-        <el-button type="primary" :loading="loading" @click="reload">查询</el-button>
-        <el-button :loading="counting" @click="previewCount">预估命中行数</el-button>
-        <el-tag v-if="serverCount !== null" size="small" type="success">服务端口径命中 {{ serverCount }} 行</el-tag>
+        <el-button type="primary" :loading="loading" @click="reload">{{ t('views.data.search') }}</el-button>
+        <el-button :loading="counting" @click="previewCount">{{ t('views.data.estimateRows') }}</el-button>
+        <el-tag v-if="serverCount !== null" size="small" type="success">{{ t('views.data.serverCount', { count: serverCount }) }}</el-tag>
       </div>
 
       <ConditionForm
         v-if="currentDef"
         :fields="currentDef.fields ?? []"
         :model-value="draftModel"
-        hint="条件随「查询」一并提交服务端（与行数预估同口径）；清空表示不设条件"
+        :hint="t('views.data.hint')"
         @update:model-value="onModelChange"
       />
-      <el-empty v-else description="请选择配置项" :image-size="60" />
+      <el-empty v-else :description="t('views.data.emptyPick')" :image-size="60" />
     </el-card>
 
     <el-alert
@@ -67,7 +67,7 @@
       :closable="false"
       show-icon
       class="mb-3"
-      title="口径说明"
+      :title="t('views.data.scopeHint')"
       :description="browserNote"
     />
 
@@ -75,10 +75,10 @@
       <el-table-column type="expand">
         <template #default="{ row }: { row: ConfigDataRow }">
           <el-descriptions :column="2" border size="small" class="my-1 mx-4">
-            <el-descriptions-item label="业务键">{{ row.rowKey }}</el-descriptions-item>
-            <el-descriptions-item label="范围">{{ row.scopeType }} / {{ row.scopeKey || '—' }}</el-descriptions-item>
-            <el-descriptions-item label="版本">{{ row.version ?? '—' }}</el-descriptions-item>
-            <el-descriptions-item label="更新时间">{{ formatDateTime(row.updatedAt) }}</el-descriptions-item>
+            <el-descriptions-item :label="t('views.data.rowKey')">{{ row.rowKey }}</el-descriptions-item>
+            <el-descriptions-item :label="t('views.data.scope')">{{ row.scopeType }} / {{ row.scopeKey || '—' }}</el-descriptions-item>
+            <el-descriptions-item :label="t('views.data.version')">{{ row.version ?? '—' }}</el-descriptions-item>
+            <el-descriptions-item :label="t('views.data.updatedAt')">{{ formatDateTime(row.updatedAt) }}</el-descriptions-item>
             <el-descriptions-item
               v-for="field in currentFields"
               :key="field.code"
@@ -89,10 +89,10 @@
           </el-descriptions>
         </template>
       </el-table-column>
-      <el-table-column prop="rowKey" label="业务键" width="160" />
+      <el-table-column prop="rowKey" :label="t('views.data.rowKey')" width="160" />
       <el-table-column
         v-if="scopeType !== 'GLOBAL'"
-        label="范围"
+        :label="t('views.data.scope')"
         width="160"
       >
         <template #default="{ row }: { row: ConfigDataRow }">{{ row.scopeType }} / {{ row.scopeKey || '—' }}</template>
@@ -111,12 +111,12 @@
           <span v-else>{{ displayFieldValue(field, dataOf(row)[field.code]) }}</span>
         </template>
       </el-table-column>
-      <el-table-column prop="version" label="版本" width="80" />
-      <el-table-column label="更新时间" width="170">
+      <el-table-column prop="version" :label="t('views.data.version')" width="80" />
+      <el-table-column :label="t('views.data.updatedAt')" width="170">
         <template #default="{ row }: { row: ConfigDataRow }">{{ formatDateTime(row.updatedAt) }}</template>
       </el-table-column>
       <template #empty>
-        <el-empty :description="defCode ? '该范围下暂无数据' : '请选择配置项'" />
+        <el-empty :description="defCode ? t('views.data.emptyScope') : t('views.data.emptyPick')" />
       </template>
     </el-table>
 
@@ -135,6 +135,7 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from 'vue-i18n'
 /**
  * 数据浏览页（五页之⑤，FR-1.1：按定义 + 范围 + 字段级条件查询）。
  *
@@ -166,6 +167,8 @@ import { parseRowData, type ConfigDataRow, type DataQuery, type ScopeType } from
 import type { ConfigDefinition, ConfigField } from '@/types/definition'
 import type { Project, Region } from '@/types/masterdata'
 import { formatDateTime } from '@/utils/format'
+
+const { t } = useI18n()
 
 const route = useRoute()
 const workspace = useWorkspaceStore()

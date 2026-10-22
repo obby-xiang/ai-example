@@ -18,6 +18,12 @@
  *   - 双受众字符串（`stores/workspace.ts#touch`、`PAGE_LABELS`、`types/condition.ts` 的 label 等）
  *     —— 它们进模型，迁进 i18n 会静默改 prompt（C5 红线）。
  *
+ * 硬守卫（批3二 全量试跑后补，防产出废码）：
+ *   - 只处理 `.vue` 模板区 `<template>`：`<script>` 区与 `.ts` 一律跳过（脚本里没有组件级 `t`；
+ *     脚本里生成的 HTML 串需要人工决定 `${t(...)}` 或 `i18n.global.t`）；
+ *   - `aria-label` / `data-ai-label` 不当作 `label` 处理（前者是 ARIA 属性，后者是**模型侧**
+ *     可访问名，属双受众）；已绑定（`:title=`）的也不迁 —— 旧版会产出 `aria-:label` / `::title`。
+ *
  * 键名规则：`<area>.<fileStem>.<seq>`（area 取 `src/` 后的顶层目录：components/views/utils/stores/…）。
  * 机械键只保证"唯一且稳定"，**语义命名请在评审时改**；zh 译文作为值写入 locales，故渲染结果逐字不变。
  *
@@ -33,7 +39,9 @@ const DEFAULT_ROOT = path.resolve(HERE, '..', '..')
 
 const CJK = /[\u4e00-\u9fff]/
 const TEMPLATE_TEXT = /(>)([^<>{}]{1,80}?[\u4e00-\u9fff][^<>{}]{0,80}?)(<)/g
-const STATIC_ATTR = /\b(label|placeholder|title)\s*=\s*"([^"{}]{1,120}?[\u4e00-\u9fff][^"{}]{0,120}?)"/g
+// 词首守卫：`aria-label` / `data-ai-label` 不是可迁移的标签属性（前者是 ARIA，后者是模型侧可访问名），
+// 已绑定（`:title=`）的也不迁 —— 直接改写会产出 `aria-:label` / `::title` 这类废码。
+const STATIC_ATTR = /(?<![-\w:])\b(label|placeholder|title)\s*=\s*"([^"{}]{1,120}?[\u4e00-\u9fff][^"{}]{0,120}?)"/g
 
 const args = process.argv.slice(2)
 const mode = args[0] ?? 'extract'
@@ -64,6 +72,14 @@ function isInsideTemplate(lines, index) {
   return open > close
 }
 
+/** `<script>` 区行号判定：脚本里的 `>中文<` 是字符串内容（生成的 HTML），套 `{{ t() }}` 会产出废码。 */
+function isInsideScript(lines, index) {
+  const upTo = lines.slice(0, index + 1).join('\n')
+  const open = upTo.lastIndexOf('<script')
+  const close = upTo.lastIndexOf('</script>')
+  return open > close
+}
+
 function isCommentLine(line) {
   const trimmed = line.trim()
   return trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*') || trimmed.startsWith('<!--')
@@ -88,9 +104,13 @@ export function extract(options = {}) {
     const relative = path.relative(root, file).split(path.sep).join('/')
     const text = fs.readFileSync(file, 'utf8')
     const lines = text.split(/\r?\n/)
+    // 只有 .vue 模板可机械替换（`.ts` 里没有组件级 `t`；脚本区的字符串需要人工决定走
+    // `i18n.global.t` 还是留在源码里 —— 前者是 DOM 生成串，后者是模型侧双受众文案）。
+    const isVue = file.endsWith('.vue')
     let seq = 0
     lines.forEach((line, index) => {
       if (isCommentLine(line)) return
+      if (!isVue || isInsideScript(lines, index)) return
       if (isInsideTemplate(lines, index)) {
         for (const match of line.matchAll(TEMPLATE_TEXT)) {
           const value = match[2].trim()

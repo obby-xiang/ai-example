@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useI18n } from 'vue-i18n'
 /**
  * 上传交接卡（设计稿 §3.3.7）—— 本专项**唯一**新增的"人围栏"外观。
  *
@@ -11,6 +12,8 @@
  * **主按钮是否可点**与一句可行动说明 —— 禁用态永远伴随"下一步该做什么"。
  */
 import { computed } from 'vue'
+
+const { t } = useI18n()
 
 const props = defineProps<{
   status: 'waiting' | 'degraded' | 'missing' | 'unavailable'
@@ -73,17 +76,16 @@ const hint = computed(() => {
           <path d="M12.4 10l.6 1.6 1.6.6-1.6.6-.6 1.6-.6-1.6-1.6-.6 1.6-.6z" opacity="0.75" />
         </svg>
       </span>
-      <span class="font-semibold">需要你在左侧选择一个文件</span>
+      <span class="font-semibold">{{ t('ai.uploadHandoff.pickFile') }}</span>
     </div>
     <p class="m-0 text-[12.2px] leading-[1.55] text-[#57606a]">
-      只接受 {{ acceptText }}；文件名需包含配置项编码（如 COUNTRY.xlsx）。文件由你在浏览器里选择，
-      AI 不会读取文件内容，也不会经手任何路径。
+      {{ t('ai.uploadHandoff.acceptHint', { accept: acceptText }) }}
     </p>
     <p v-if="hint" class="m-0 text-[12.2px] leading-[1.55] text-[#57606a]" data-testid="upload-handoff-hint">
       {{ hint }}
     </p>
     <p class="m-0 text-[12.2px] leading-[1.55] text-[#57606a]">
-      也可以点左侧高亮按钮「{{ entryLabel }}」，或把文件拖到高亮区域。
+      {{ t('ai.uploadHandoff.orClick', { label: entryLabel }) }}
     </p>
     <div class="flex items-center gap-[9px] pt-1">
       <button
@@ -94,7 +96,7 @@ const hint = computed(() => {
         :disabled="chooseDisabled"
         @click="onChoose"
       >
-        选择文件
+        {{ t('ai.uploadHandoff.choose') }}
       </button>
       <button
         type="button"
@@ -102,7 +104,7 @@ const hint = computed(() => {
         data-testid="upload-handoff-cancel"
         @click="emit('cancel')"
       >
-        放弃
+        {{ t('ai.uploadHandoff.discard') }}
       </button>
     </div>
   </div>

@@ -9,13 +9,14 @@
       v-if="engineState !== 'ready'"
       class="absolute inset-0 flex items-center justify-center bg-white/85 text-[13px] text-[#909399]"
     >
-      <span v-if="engineState === 'loading'">表格引擎加载中…（SpreadJS 按需加载）</span>
+      <span v-if="engineState === 'loading'">{{ t('sheet.engineLoading') }}</span>
       <span v-else class="text-[#f56c6c]">{{ engineError }}</span>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
+import { useI18n } from 'vue-i18n'
 /**
  * SpreadJS 表格宿主（向导在线编辑基座）。
  *
@@ -50,6 +51,8 @@ import { loadSpreadCore, type SpreadSheets } from '@/utils/spreadjs'
 import type { ConfigField } from '@/types/definition'
 import { parseRowData } from '@/types/data'
 import type { SheetAdapter, SheetCellUpdate, SheetSelection } from '@/utils/sheet-tools'
+
+const { t } = useI18n()
 
 const props = withDefaults(
   defineProps<{

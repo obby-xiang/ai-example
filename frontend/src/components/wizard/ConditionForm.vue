@@ -4,7 +4,7 @@
       <el-select
         v-model="row.field"
         :disabled="props.disabled"
-        placeholder="字段"
+        :placeholder="t('wizard.condition.field')"
         class="w-[180px]"
         v-bind="aiAttrs(row, 'field', { role: 'combobox', 'data-ai-verbs': 'highlight,scroll', 'data-ai-label': aiLabelOf(row, '字段') })"
         @change="onFieldChange(row)"
@@ -19,7 +19,7 @@
       <el-select
         v-model="row.operator"
         :disabled="props.disabled"
-        placeholder="操作符"
+        :placeholder="t('wizard.condition.operator')"
         class="w-[130px]"
         v-bind="aiAttrs(row, 'op', { role: 'combobox', 'data-ai-verbs': 'highlight,scroll', 'data-ai-label': aiLabelOf(row, '操作符') })"
       >
@@ -35,7 +35,7 @@
         <el-select
           v-model="row.value"
           :disabled="props.disabled"
-          placeholder="选项"
+          :placeholder="t('wizard.condition.option')"
           class="w-[180px]"
           clearable
           filterable
@@ -53,13 +53,13 @@
         <el-select
           v-model="row.value"
           :disabled="props.disabled"
-          placeholder="取值"
+          :placeholder="t('wizard.condition.value')"
           class="w-[180px]"
           clearable
           v-bind="aiAttrs(row, 'value', { role: 'combobox', 'data-ai-verbs': 'highlight,scroll', 'data-ai-label': aiLabelOf(row, '取值') })"
         >
-          <el-option label="是（true）" value="true" />
-          <el-option label="否（false）" value="false" />
+          <el-option :label="t('wizard.condition.yes')" value="true" />
+          <el-option :label="t('wizard.condition.no')" value="false" />
         </el-select>
       </template>
       <template v-else-if="typeOf(row.field) === 'DATE'">
@@ -68,7 +68,7 @@
           :disabled="props.disabled"
           type="date"
           value-format="YYYY-MM-DD"
-          placeholder="日期"
+          :placeholder="t('wizard.condition.date')"
           class="w-[180px]"
           v-bind="aiAttrs(row, 'value', { role: 'textbox', 'data-ai-verbs': 'highlight,scroll', 'data-ai-label': aiLabelOf(row, '日期') })"
         />
@@ -92,7 +92,7 @@
         v-if="row.operator === 'BETWEEN'"
         v-model="row.value2"
         :disabled="props.disabled"
-        placeholder="至"
+        :placeholder="t('wizard.condition.to')"
         class="w-[140px]"
         v-bind="aiAttrs(row, 'value2', {
           'data-ai-fill': 'allow',
@@ -123,13 +123,14 @@
         :disabled="props.disabled || fields.length === 0"
         v-bind="aiAttrs(null, 'add', { 'data-ai-risk': 'mutate-local', 'data-ai-verbs': 'click,highlight', 'data-ai-label': '添加条件' })"
         @click="addRow"
-      >添加条件</el-button>
+      >{{ t('wizard.condition.add') }}</el-button>
       <span class="text-xs text-[#c0c4cc]">{{ hint }}</span>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
+import { useI18n } from 'vue-i18n'
 /**
  * 动态条件表单（类型感知），导出向导第 2 步与数据浏览页共用。
  *
@@ -156,6 +157,8 @@ import {
   type OperatorOption
 } from '@/types/condition'
 import { parseFieldOptions, type ConfigField, type FieldType } from '@/types/definition'
+
+const { t } = useI18n()
 
 const props = withDefaults(
   defineProps<{

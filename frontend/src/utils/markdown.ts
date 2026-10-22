@@ -36,6 +36,7 @@ import * as hljsNs from 'highlight.js'
 import type HljsType from 'highlight.js'
 // hljs 库默认主题（决策卡 §二.2：高亮用库默认主题色，不计入 UI 用色收敛）
 import 'highlight.js/styles/github.css'
+import { i18n } from '@/locales'
 
 // vitest/vite 下 default 互operability 兜底：命名空间与 default 两个形态取有 getLanguage 的那个
 const hljs: typeof HljsType = ((hljsNs as unknown as { default?: typeof HljsType }).default ?? hljsNs) as typeof HljsType
@@ -587,8 +588,8 @@ function wrapFenceFigures(html: string): string {
       // aj14d ③：稳定身份随容器改写原样带到 figure 上（同一块的 key 不因「裸 pre → 图容器」而变）
       `<figure class="${FIGURE_CODE_CLASS}"${fenceKeyAttr(preAttrs)}><figcaption class="${FIGCAPTION_CLASS}"><span class="${FIG_LANG_CLASS}">${escapeHtml(lang)}</span>` +
       `<span class="${FIG_HLIB_CLASS}">highlight.js</span>` +
-      `<button type="button" class="${COPY_ICON_BTN_CLASS}" aria-label="复制代码">${COPY_ICON_SVGS}` +
-      `<span class="tip ${TIP_CLASS}">复制代码<span class="tip-arrow ${TIP_ARROW_CLASS}" aria-hidden="true"></span></span>` +
+      `<button type="button" class="${COPY_ICON_BTN_CLASS}" aria-label="${i18n.global.t('markdown.copyCode')}">${COPY_ICON_SVGS}` +
+      `<span class="tip ${TIP_CLASS}">${i18n.global.t('markdown.copyCode')}<span class="tip-arrow ${TIP_ARROW_CLASS}" aria-hidden="true"></span></span>` +
       `</button></figcaption>` +
       `<pre${preAttrs}><code class="language-${lang}">${code}</code></pre></figure>`
   )

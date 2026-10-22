@@ -19,7 +19,7 @@
       type="info"
       :closable="false"
       show-icon
-      title="仅供查看"
+      :title="t('task.readOnly')"
       class="mb-4"
       data-testid="view-only-banner"
     />
@@ -44,11 +44,11 @@
               :data-testid="'wizard-step-' + i"
               @click="emit('step-click', i)"
             >
-              {{ step.label }}<span v-if="stepStatuses[i] === 'error'" class="text-[#f56c6c]">（失败）</span>
+              {{ step.label }}<span v-if="stepStatuses[i] === 'error'" class="text-[#f56c6c]">{{ t('task.failedSuffix') }}</span>
             </button>
           </template>
           <template v-else>
-            {{ step.label }}<span v-if="stepStatuses[i] === 'error'" class="text-[#f56c6c]">（失败）</span>
+            {{ step.label }}<span v-if="stepStatuses[i] === 'error'" class="text-[#f56c6c]">{{ t('task.failedSuffix') }}</span>
           </template>
         </template>
       </el-step>
@@ -62,7 +62,7 @@
 
     <div class="mt-5 pt-4 border-t border-solid border-[#ebeef5] flex justify-center gap-3">
       <slot name="actions-extra" />
-      <el-button v-if="showPrev" :disabled="prevDisabled" @click="emit('prev')">上一步</el-button>
+      <el-button v-if="showPrev" :disabled="prevDisabled" @click="emit('prev')">{{ t('task.prev') }}</el-button>
       <el-button v-if="showNext" type="primary" :disabled="nextDisabled" :loading="nextLoading" @click="emit('next')">
         {{ nextLabel }}
       </el-button>
@@ -71,6 +71,7 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from 'vue-i18n'
 /**
  * 向导壳体（标题栏 + 步骤条 + 页脚导航），业务步骤由插槽注入 —— 壳/体分离
  * （规格 §2 部件映射：glm-5.3 `TaskWizard.vue` 取壳，视觉按 kimi-k3 同名页对齐）。
@@ -90,6 +91,8 @@ import { useRouter } from 'vue-router'
 import { ROUTE_NAMES } from '@/router'
 import { mapTaskStatusToStep } from '@/stores/task'
 import type { TaskStatus } from '@/types/task'
+
+const { t } = useI18n()
 
 interface WizardStep {
   key: string

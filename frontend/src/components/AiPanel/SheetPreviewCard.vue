@@ -2,7 +2,7 @@
   <div class="border border-solid border-[#e3e6ea] rounded-[8px] bg-[#fbfcfd] px-[10px] py-[9px]" data-testid="sheet-preview-card">
     <template v-if="plan === null">
       <div class="text-[12.6px] leading-[1.6] text-[#c0392b]" data-testid="sheet-preview-stale">
-        预览已失效（页面刷新导致），本次未改动任何单元格。请让 AI 重新发起。
+        {{ t('ai.sheetCard.expired') }}
       </div>
       <div class="mt-[9px] flex justify-end">
         <button
@@ -10,19 +10,19 @@
           class="rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-[#e3e6ea] bg-white text-[#57606a] hover:border-[#8b949e] hover:text-[#1f2328]"
           data-testid="sheet-preview-abandon"
           @click="emit('abandon')"
-        >放弃</button>
+        >{{ t('ai.sheetCard.discard') }}</button>
       </div>
     </template>
 
     <template v-else>
       <div class="text-[12.8px] leading-[1.6] text-[#1f2328]" data-testid="sheet-preview-summary">
-        将影响 {{ plan.rowsCount }} 行 / {{ plan.cellsCount }} 格
+        {{ t('ai.sheetCard.impact', { rows: plan.rowsCount, cells: plan.cellsCount }) }}
       </div>
       <div class="mt-[3px] text-[11.9px] leading-[1.6] text-[#57606a]" data-testid="sheet-preview-scope">
-        范围：{{ plan.scopeSummary }}<span v-if="plan.predicateSummary"> · {{ plan.predicateSummary }}</span>
+        {{ t('ai.sheetCard.scope', { scope: plan.scopeSummary }) }}<span v-if="plan.predicateSummary"> · {{ plan.predicateSummary }}</span>
       </div>
       <div class="mt-[2px] text-[11.9px] leading-[1.6] text-[#57606a]" data-testid="sheet-preview-rules">
-        规则：{{ plan.rulesText }}
+        {{ t('ai.sheetCard.rules', { rules: plan.rulesText }) }}
       </div>
 
       <div class="mt-[7px] flex items-center gap-[6px]" data-testid="sheet-preview-levels">
@@ -34,7 +34,7 @@
           :data-testid="'sheet-preview-level-' + option.value"
           @click="emit('level', option.value)"
         >{{ option.label }}</button>
-        <span v-if="plan.skippedCount > 0" class="ml-auto text-[11.5px] text-[#8b949e]">跳过 {{ plan.skippedCount }} 格（校验器拒绝）</span>
+        <span v-if="plan.skippedCount > 0" class="ml-auto text-[11.5px] text-[#8b949e]">{{ t('ai.sheetCard.skipped', { count: plan.skippedCount }) }}</span>
       </div>
 
       <div v-if="plan.preview === 'count'" class="mt-[7px] text-[11.9px] leading-[1.6] text-[#57606a]" data-testid="sheet-preview-count">
@@ -47,13 +47,13 @@
         class="mt-[4px] text-[11.9px] leading-[1.6] text-[#57606a]"
         data-testid="sheet-preview-distribution"
       >
-        <span>分布（按 {{ distribution!.byLabel || distribution!.by }}，前 {{ distributionGroups.length }} 组）：</span>
+        <span>{{ t('ai.sheetCard.distribution', { by: distribution!.byLabel || distribution!.by, count: distributionGroups.length }) }}</span>
         <span
           v-for="(group, index) in distributionGroups"
           :key="group.key"
           :data-testid="'sheet-preview-dist-' + group.key"
           :title="group.key"
-        >{{ index > 0 ? ' · ' : '' }}{{ truncateKey(group.key) }} {{ group.rows }} 行 / {{ group.cells }} 格</span>
+        >{{ index > 0 ? ' · ' : '' }}{{ truncateKey(group.key) }} {{ t('ai.sheetCard.groupItem', { rows: group.rows, cells: group.cells }) }}</span>
         <span v-if="(distribution?.otherGroups ?? 0) > 0"> · {{ t('sheet.preview.distributionOthers', { count: distribution?.otherGroups }) }}</span>
         <span v-if="distribution?.truncated">（{{ t('sheet.preview.distributionTruncated') }}）</span>
       </div>
@@ -63,8 +63,8 @@
           v-for="(change, index) in plan.samples"
           :key="index"
           class="text-[11.9px] leading-[1.7] text-[#57606a]"
-        ><span :class="CELL_CHIP" :data-testid="'sheet-preview-cell'">{{ addressOf(change) }}</span>第 {{ change.row + 2 }} 行 列 {{ change.col + 1 }}「{{ display(change.oldValue) }}」→「{{ display(change.newValue) }}」</div>
-        <div v-if="plan.samples.length === 0" class="text-[11.9px] text-[#8b949e]">没有匹配的单元格。</div>
+        ><span :class="CELL_CHIP" :data-testid="'sheet-preview-cell'">{{ addressOf(change) }}</span>{{ t('ai.sheetCard.rowCol', { row: change.row + 2, col: change.col + 1, from: display(change.oldValue), to: display(change.newValue) }) }}</div>
+        <div v-if="plan.samples.length === 0" class="text-[11.9px] text-[#8b949e]">{{ t('ai.sheetCard.noMatches') }}</div>
       </div>
       <div v-if="plan.preview === 'full-diff'" class="mt-[7px]" data-testid="sheet-preview-full">
         <div class="max-h-[min(240px,32vh)] overflow-y-auto border border-solid border-[#eef0f3] rounded-[6px] bg-white px-[8px] py-[4px]">
@@ -75,9 +75,9 @@
           ><span :class="CELL_CHIP" :data-testid="'sheet-preview-cell'">{{ addressOf(change) }}</span>第 {{ change.row + 2 }} 行 列 {{ change.col + 1 }}「{{ display(change.oldValue) }}」→「{{ display(change.newValue) }}」</div>
         </div>
         <div class="mt-[5px] flex items-center gap-[8px] text-[11.5px] text-[#8b949e]">
-          <button type="button" class="border-0 bg-transparent p-0 text-[#57606a] disabled:text-[#c0c4cc]" :disabled="page === 0" @click="page -= 1">上一页</button>
-          <span>第 {{ page + 1 }} / {{ pageCount }} 页（共 {{ plan.changes.length }} 处）</span>
-          <button type="button" class="border-0 bg-transparent p-0 text-[#57606a] disabled:text-[#c0c4cc]" :disabled="page >= pageCount - 1" @click="page += 1">下一页</button>
+          <button type="button" class="border-0 bg-transparent p-0 text-[#57606a] disabled:text-[#c0c4cc]" :disabled="page === 0" @click="page -= 1">{{ t('ai.sheetCard.prevPage') }}</button>
+          <span>{{ t('ai.sheetCard.page', { page: page + 1, total: pageCount, count: plan.changes.length }) }}</span>
+          <button type="button" class="border-0 bg-transparent p-0 text-[#57606a] disabled:text-[#c0c4cc]" :disabled="page >= pageCount - 1" @click="page += 1">{{ t('ai.sheetCard.nextPage') }}</button>
         </div>
       </div>
 
@@ -107,7 +107,7 @@
 
       <label v-if="plan.level === 'large'" class="mt-[8px] flex items-center gap-[6px] text-[11.9px] text-[#57606a]" data-testid="sheet-preview-ack">
         <input v-model="acknowledged" type="checkbox" data-testid="sheet-preview-ack-box" />
-        我了解影响范围（本次将修改 {{ plan.rowsCount }} 行 / {{ plan.cellsCount }} 格，超过 200 行）
+        {{ t('ai.sheetCard.ackLarge', { rows: plan.rowsCount, cells: plan.cellsCount }) }}
       </label>
 
       <div class="mt-[9px] flex items-center justify-end gap-[8px]">
@@ -116,14 +116,14 @@
           class="rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-[#e3e6ea] bg-white text-[#57606a] hover:border-[#8b949e] hover:text-[#1f2328]"
           data-testid="sheet-preview-cancel"
           @click="emit('cancel')"
-        >取消</button>
+        >{{ t('ai.sheetCard.cancel') }}</button>
         <button
           type="button"
           class="rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-transparent bg-[#2563eb] font-semibold text-white hover:brightness-[1.08] disabled:bg-[#8b949e] disabled:font-normal"
           :disabled="plan.level === 'large' && !acknowledged"
           data-testid="sheet-preview-apply"
           @click="emit('apply', acknowledged)"
-        >应用</button>
+        >{{ t('ai.sheetCard.apply') }}</button>
       </div>
     </template>
   </div>

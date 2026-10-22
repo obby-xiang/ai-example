@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useI18n } from 'vue-i18n'
 /**
  * 「AI 设置」页（模型配置专项 §3.7，批②）——三段式：
  * ① provider 卡片（名称/协议/Base URL/路径/密钥/启停/测试连接/来源标签）
@@ -22,6 +23,8 @@ import { aiApi } from '@/api/ai'
 import type { AiHealth } from '@/types/ai'
 import { aiConfigApi, type AiDefaults, type AiModelRow, type AiProbeResult, type AiProviderView } from '@/api/aiConfig'
 import { AI_SETTINGS_COPY as T, describeAiConfigError, errorCodeOf, softDeleteHint } from '@/constants/ai-settings-copy'
+
+const { t } = useI18n()
 
 const loading = ref(true)
 const loadError = ref<unknown>(null)
@@ -494,7 +497,7 @@ async function confirm(message: string): Promise<boolean> {
 
       <!-- ① provider 卡片 -->
       <section class="mb-5" data-testid="provider-section">
-        <h4 class="text-sm font-medium mb-2">端点</h4>
+        <h4 class="text-sm font-medium mb-2">{{ t('views.aiSettings.endpoints') }}</h4>
         <p v-if="isEmpty" class="text-sm text-[#909399]" data-testid="ai-settings-empty">{{ T.empty }}</p>
         <div
           v-for="provider in providers"
@@ -626,7 +629,7 @@ async function confirm(message: string): Promise<boolean> {
             {{ isBusy('pull') ? T.pulling : T.pullModels }}
           </button>
           <span v-if="fetchedModels.length > 0" class="text-[11px] text-[#909399]">
-            {{ fetchedModels.length }} 个{{ fetchedCached ? T.pulledCached : '' }}
+            {{ t('views.aiSettings.modelCount', { count: fetchedModels.length }) }}{{ fetchedCached ? T.pulledCached : '' }}
           </span>
         </div>
 

@@ -109,4 +109,17 @@ public class ErrorBodyFactory {
     private static boolean isChinese(Locale locale) {
         return "zh".equalsIgnoreCase(locale.getLanguage());
     }
+
+    /**
+     * 当前请求 locale（无上下文时硬编码 zh-CN，不回落 JVM 默认 —— CI 是 en-US 机）。
+     *
+     * <p>与 {@code GlobalExceptionHandler} 的拒绝出口同一取值口径：单一源放在这里，
+     * 直接构造 controller 的用例（无 locale 上下文）得到的就是中文原文。
+     */
+    public static Locale requestLocale() {
+        org.springframework.context.i18n.LocaleContext context =
+                org.springframework.context.i18n.LocaleContextHolder.getLocaleContext();
+        Locale locale = context == null ? null : context.getLocale();
+        return locale == null ? Locale.SIMPLIFIED_CHINESE : locale;
+    }
 }

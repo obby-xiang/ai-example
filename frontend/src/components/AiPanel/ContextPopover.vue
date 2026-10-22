@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useI18n } from 'vue-i18n'
 /**
  * 上下文分项浮层（上下文统计与压缩专项批①；设计稿 §3.4(c)）。
  *
@@ -18,6 +19,8 @@ import { computed } from 'vue'
 import { useAiStore } from '@/stores/ai'
 import { formatPartTokens, formatPercent, orderedParts, partLabel } from '@/utils/context-usage'
 
+const { t } = useI18n()
+
 const emit = defineEmits<{ (event: 'close'): void }>()
 
 const ai = useAiStore()
@@ -36,15 +39,15 @@ const limitText = computed(() => (usage.value?.limitTokens === null || usage.val
   <div
     data-testid="context-popover"
     role="dialog"
-    aria-label="上下文用量明细"
+    :aria-label="t('ai.context.detailsAria')"
     class="absolute bottom-full right-0 z-[12] mb-[6px] w-[248px] rounded-[10px] border border-solid border-[#e3e6ea] bg-white p-[10px] text-[11.5px] leading-[1.6] text-[#1f2328] shadow-[0_8px_24px_rgba(0,0,0,0.13)]"
   >
     <div class="mb-[6px] flex items-center gap-[6px]">
-      <b class="[font-weight:650]">上下文用量</b>
+      <b class="[font-weight:650]">{{ t('ai.context.title') }}</b>
       <span class="ml-auto tabular-nums text-[#57606a]">{{ percentText }}</span>
     </div>
 
-    <div v-if="parts.length === 0" class="py-[6px] text-[#8b949e]">正在读取用量明细…</div>
+    <div v-if="parts.length === 0" class="py-[6px] text-[#8b949e]">{{ t('ai.context.loading') }}</div>
     <ul v-else class="m-0 list-none p-0">
       <li
         v-for="part in parts"
@@ -60,16 +63,16 @@ const limitText = computed(() => (usage.value?.limitTokens === null || usage.val
     </ul>
 
     <div class="mt-[6px] border-0 border-t border-solid border-[#eef0f3] pt-[6px] text-[10.5px] leading-[1.6] text-[#8b949e]">
-      <div v-if="limitText">{{ limitText }}：只显示已用，不折算百分比。</div>
-      <div v-if="usage?.est">本数值为估算（上游未返回用量），显示时带 ≈。</div>
-      <div>分项为估算、总量为账单：分项按已用量等比归一，前六项之和等于已用。</div>
+      <div v-if="limitText">{{ t('ai.context.limitOnly', { limit: limitText }) }}</div>
+      <div v-if="usage?.est">{{ t('ai.context.estimateNote') }}</div>
+      <div>{{ t('ai.context.splitNote') }}</div>
     </div>
 
     <button
       type="button"
       data-testid="context-popover-close"
       class="absolute right-[6px] top-[6px] h-[18px] w-[18px] rounded-[4px] border-0 bg-transparent text-[12px] leading-[1] text-[#8b949e] hover:bg-[#f6f7f9] hover:text-[#1f2328]"
-      aria-label="关闭"
+      :aria-label="t('ai.context.close')"
       @click="emit('close')"
     >×</button>
   </div>

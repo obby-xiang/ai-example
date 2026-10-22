@@ -2,75 +2,75 @@
   <div>
     <div class="flex justify-between items-center mb-4">
       <div>
-        <h2 class="m-0 text-xl text-[#303133]">配置定义</h2>
+        <h2 class="m-0 text-xl text-[#303133]">{{ t('views.definitions.title') }}</h2>
         <div class="mt-1 text-[13px] text-[#909399]">
-          定义与字段浏览（层级 / 关键词过滤 + 模板下载 + 字段编辑）；主键标志的 JSON 名是
-          <span class="font-mono">key</span>（不是 isKey）
+          {{ t('views.definitions.subtitle1') }}
+          <span class="font-mono">key</span>{{ t('views.definitions.subtitle2') }}
         </div>
       </div>
       <div>
-        <el-button :icon="Refresh" circle title="刷新" @click="loadDefs" />
-        <el-button type="primary" :icon="Plus" @click="openEditor(null)">新建配置定义</el-button>
+        <el-button :icon="Refresh" circle :title="t('views.definitions.refresh')" @click="loadDefs" />
+        <el-button type="primary" :icon="Plus" @click="openEditor(null)">{{ t('views.definitions.create') }}</el-button>
       </div>
     </div>
 
     <div class="flex items-center gap-2 mb-3">
       <el-radio-group v-model="levelFilter" size="small" @change="loadDefs">
-        <el-radio-button value="">全部层级</el-radio-button>
-        <el-radio-button value="GLOBAL">全局</el-radio-button>
-        <el-radio-button value="REGION">地区</el-radio-button>
-        <el-radio-button value="PROJECT">项目</el-radio-button>
+        <el-radio-button value="">{{ t('views.definitions.allLevels') }}</el-radio-button>
+        <el-radio-button value="GLOBAL">{{ t('views.definitions.global') }}</el-radio-button>
+        <el-radio-button value="REGION">{{ t('views.definitions.region') }}</el-radio-button>
+        <el-radio-button value="PROJECT">{{ t('views.definitions.project') }}</el-radio-button>
       </el-radio-group>
       <el-input
         v-model="keyword"
-        placeholder="搜索编码 / 名称"
+        :placeholder="t('views.definitions.searchPlaceholder')"
         clearable
         class="w-[220px]"
         @keyup.enter="loadDefs"
         @clear="loadDefs"
       />
-      <el-button type="primary" @click="loadDefs">查询</el-button>
+      <el-button type="primary" @click="loadDefs">{{ t('views.definitions.search') }}</el-button>
     </div>
 
     <el-table v-loading="loading" :data="defs" border>
-      <el-table-column prop="code" label="配置编码" width="170" />
-      <el-table-column prop="name" label="配置名称" min-width="160" />
-      <el-table-column label="层级" width="90">
+      <el-table-column prop="code" :label="t('views.definitions.code')" width="170" />
+      <el-table-column prop="name" :label="t('views.definitions.name')" min-width="160" />
+      <el-table-column :label="t('views.definitions.level')" width="90">
         <template #default="{ row }: { row: ConfigDefinition }">
           <el-tag size="small" :type="levelType(row.level)">{{ levelLabel(row.level) }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="字段（表头）" min-width="260" show-overflow-tooltip>
+      <el-table-column :label="t('views.definitions.fields')" min-width="260" show-overflow-tooltip>
         <template #default="{ row }: { row: ConfigDefinition }">
           <span class="text-[#606266]">
             {{ (row.fields ?? []).map((field) => `${field.label}(${typeLabel(field.fieldType)})`).join('、') || '—' }}
           </span>
         </template>
       </el-table-column>
-      <el-table-column label="主键" width="140" show-overflow-tooltip>
+      <el-table-column :label="t('views.definitions.key')" width="140" show-overflow-tooltip>
         <template #default="{ row }: { row: ConfigDefinition }">
           <span class="text-[#606266]">{{ keyFieldsOf(row).join('、') || '—' }}</span>
         </template>
       </el-table-column>
-      <el-table-column label="依赖" width="150" show-overflow-tooltip>
+      <el-table-column :label="t('views.definitions.dependencies')" width="150" show-overflow-tooltip>
         <template #default="{ row }: { row: ConfigDefinition }">
           <span v-if="dependenciesOf(row).length" class="text-[#606266]">{{ dependenciesOf(row).join('、') }}</span>
-          <span v-else class="text-[#c0c4cc]">无</span>
+          <span v-else class="text-[#c0c4cc]">{{ t('views.definitions.none') }}</span>
         </template>
       </el-table-column>
-      <el-table-column prop="description" label="描述" min-width="160" show-overflow-tooltip />
-      <el-table-column label="操作" width="240" fixed="right">
+      <el-table-column prop="description" :label="t('views.definitions.description')" min-width="160" show-overflow-tooltip />
+      <el-table-column :label="t('views.definitions.actions')" width="240" fixed="right">
         <template #default="{ row }: { row: ConfigDefinition }">
-          <el-button size="small" type="primary" link @click="openDetail(row)">详情</el-button>
-          <el-button size="small" type="primary" link @click="openEditor(row)">编辑字段</el-button>
+          <el-button size="small" type="primary" link @click="openDetail(row)">{{ t('views.definitions.detail') }}</el-button>
+          <el-button size="small" type="primary" link @click="openEditor(row)">{{ t('views.definitions.editFields') }}</el-button>
           <el-button size="small" link :loading="templateLoading === row.code" @click="downloadTemplate(row)">
-            下载模板
+            {{ t('views.definitions.downloadTemplate') }}
           </el-button>
-          <el-button size="small" link @click="openData(row)">数据</el-button>
+          <el-button size="small" link @click="openData(row)">{{ t('views.definitions.data') }}</el-button>
         </template>
       </el-table-column>
       <template #empty>
-        <el-empty description="暂无配置定义" :image-size="60" />
+        <el-empty :description="t('views.definitions.empty')" :image-size="60" />
       </template>
     </el-table>
 
@@ -78,35 +78,35 @@
     <el-drawer v-model="detailVisible" size="760px" :title="detailTitle">
       <template v-if="detail">
         <el-descriptions :column="2" border size="small" class="mb-4">
-          <el-descriptions-item label="配置编码">{{ detail.code }}</el-descriptions-item>
-          <el-descriptions-item label="配置名称">{{ detail.name }}</el-descriptions-item>
-          <el-descriptions-item label="层级">{{ levelLabel(detail.level) }}</el-descriptions-item>
-          <el-descriptions-item label="字段数">{{ detail.fields?.length ?? 0 }}</el-descriptions-item>
-          <el-descriptions-item label="依赖配置">{{ dependenciesOf(detail).join('、') || '无' }}</el-descriptions-item>
-          <el-descriptions-item label="主键字段">{{ keyFieldsOf(detail).join('、') || '—' }}</el-descriptions-item>
-          <el-descriptions-item label="描述" :span="2">{{ detail.description || '—' }}</el-descriptions-item>
+          <el-descriptions-item :label="t('views.definitions.code')">{{ detail.code }}</el-descriptions-item>
+          <el-descriptions-item :label="t('views.definitions.name')">{{ detail.name }}</el-descriptions-item>
+          <el-descriptions-item :label="t('views.definitions.level')">{{ levelLabel(detail.level) }}</el-descriptions-item>
+          <el-descriptions-item :label="t('views.definitions.fieldCount')">{{ detail.fields?.length ?? 0 }}</el-descriptions-item>
+          <el-descriptions-item :label="t('views.definitions.dependenciesOf')">{{ dependenciesOf(detail).join('、') || t('views.definitions.none') }}</el-descriptions-item>
+          <el-descriptions-item :label="t('views.definitions.keyFields')">{{ keyFieldsOf(detail).join('、') || '—' }}</el-descriptions-item>
+          <el-descriptions-item :label="t('views.definitions.description')" :span="2">{{ detail.description || '—' }}</el-descriptions-item>
         </el-descriptions>
 
-        <div class="mb-2 text-[13px] text-[#303133]">字段清单（按 sortOrder）</div>
+        <div class="mb-2 text-[13px] text-[#303133]">{{ t('views.definitions.fieldList') }}</div>
         <el-table :data="detail.fields ?? []" size="small" border>
-          <el-table-column prop="sortOrder" label="排序" min-width="48" />
-          <el-table-column prop="code" label="字段编码" min-width="120" />
-          <el-table-column prop="label" label="字段名称（表头）" min-width="134" />
-          <el-table-column label="类型" min-width="120">
+          <el-table-column prop="sortOrder" :label="t('views.definitions.sortOrder')" min-width="48" />
+          <el-table-column prop="code" :label="t('views.definitions.fieldCode')" min-width="120" />
+          <el-table-column prop="label" :label="t('views.definitions.fieldLabel')" min-width="134" />
+          <el-table-column :label="t('views.definitions.type')" min-width="120">
             <template #default="{ row }: { row: ConfigField }">
               <el-tag size="small">{{ typeLabel(row.fieldType) }}</el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="必填" min-width="48">
-            <template #default="{ row }: { row: ConfigField }">{{ row.required ? '是' : '否' }}</template>
+          <el-table-column :label="t('views.definitions.required')" min-width="48">
+            <template #default="{ row }: { row: ConfigField }">{{ row.required ? t('views.definitions.yes') : t('views.definitions.no') }}</template>
           </el-table-column>
-          <el-table-column label="主键" min-width="58">
+          <el-table-column :label="t('views.definitions.key')" min-width="58">
             <template #default="{ row }: { row: ConfigField }">
-              <el-tag v-if="row.key" size="small" type="danger">主键</el-tag>
+              <el-tag v-if="row.key" size="small" type="danger">{{ t('views.definitions.key') }}</el-tag>
               <span v-else>—</span>
             </template>
           </el-table-column>
-          <el-table-column label="选项 / 引用" min-width="184">
+          <el-table-column :label="t('views.definitions.optionsRef')" min-width="184">
             <template #default="{ row }: { row: ConfigField }">
               <span v-if="row.fieldType === 'ENUM'">
                 {{ parseFieldOptions(row).map((option) => `${option.value}=${option.label}`).join('、') || '—' }}
@@ -120,78 +120,78 @@
         </el-table>
 
         <div class="mt-4 flex gap-2">
-          <el-button size="small" @click="downloadTemplate(detail)">下载导入模板</el-button>
-          <el-button size="small" @click="openData(detail)">查看数据行</el-button>
-          <el-button size="small" type="primary" @click="openEditor(detail)">编辑字段</el-button>
+          <el-button size="small" @click="downloadTemplate(detail)">{{ t('views.definitions.downloadImportTemplate') }}</el-button>
+          <el-button size="small" @click="openData(detail)">{{ t('views.definitions.viewData') }}</el-button>
+          <el-button size="small" type="primary" @click="openEditor(detail)">{{ t('views.definitions.editFields') }}</el-button>
         </div>
       </template>
     </el-drawer>
 
     <!-- 定义 / 字段编辑 -->
-    <el-drawer v-model="editorVisible" size="82%" :title="editingCode ? `编辑配置定义 - ${editingCode}` : '新建配置定义'">
+    <el-drawer v-model="editorVisible" size="82%" :title="editingCode ? t('views.definitions.editTitle', { code: editingCode }) : t('views.definitions.create')">
       <el-form label-width="auto" size="small">
         <div class="grid grid-cols-2 gap-x-6">
-          <el-form-item label="配置编码" required>
-            <el-input v-model="form.code" :disabled="editingCode !== null" placeholder="如 TAX_RATE（唯一，用于文件名匹配）" />
+          <el-form-item :label="t('views.definitions.code')" required>
+            <el-input v-model="form.code" :disabled="editingCode !== null" :placeholder="t('views.definitions.codePlaceholder')" />
           </el-form-item>
-          <el-form-item label="配置名称" required>
-            <el-input v-model="form.name" placeholder="如 税率配置" />
+          <el-form-item :label="t('views.definitions.name')" required>
+            <el-input v-model="form.name" :placeholder="t('views.definitions.namePlaceholder')" />
           </el-form-item>
-          <el-form-item label="层级" required>
+          <el-form-item :label="t('views.definitions.level')" required>
             <el-select v-model="form.level" class="w-full">
-              <el-option label="全局（GLOBAL）" value="GLOBAL" />
-              <el-option label="地区（REGION）" value="REGION" />
-              <el-option label="项目（PROJECT）" value="PROJECT" />
+              <el-option :label="t('views.definitions.globalShort')" value="GLOBAL" />
+              <el-option :label="t('views.definitions.regionShort')" value="REGION" />
+              <el-option :label="t('views.definitions.projectShort')" value="PROJECT" />
             </el-select>
           </el-form-item>
-          <el-form-item label="排序">
+          <el-form-item :label="t('views.definitions.sortOrder')">
             <el-input-number v-model="form.sortOrder" :min="0" />
           </el-form-item>
-          <el-form-item label="说明" class="col-span-2">
+          <el-form-item :label="t('views.definitions.message')" class="col-span-2">
             <el-input v-model="form.description" type="textarea" :rows="2" />
           </el-form-item>
         </div>
       </el-form>
 
-      <el-divider content-position="left">字段定义（表头，动态渲染与校验依据）</el-divider>
+      <el-divider content-position="left">{{ t('views.definitions.fieldSection') }}</el-divider>
       <el-table :data="form.fields" size="small" border>
-        <el-table-column label="字段编码" width="150">
+        <el-table-column :label="t('views.definitions.fieldCode')" width="150">
           <template #default="{ row }: { row: EditableField }">
-            <el-input v-model="row.code" size="small" placeholder="如 rate_value" />
+            <el-input v-model="row.code" size="small" :placeholder="t('views.definitions.fieldCodePlaceholder')" />
           </template>
         </el-table-column>
-        <el-table-column label="字段名称（表头）" width="160">
+        <el-table-column :label="t('views.definitions.fieldLabel')" width="160">
           <template #default="{ row }: { row: EditableField }">
-            <el-input v-model="row.label" size="small" placeholder="如 税率值" />
+            <el-input v-model="row.label" size="small" :placeholder="t('views.definitions.labelPlaceholder')" />
           </template>
         </el-table-column>
-        <el-table-column label="类型" width="130">
+        <el-table-column :label="t('views.definitions.type')" width="130">
           <template #default="{ row }: { row: EditableField }">
             <el-select v-model="row.fieldType" size="small">
               <el-option v-for="type in FIELD_TYPES" :key="type.value" :label="type.label" :value="type.value" />
             </el-select>
           </template>
         </el-table-column>
-        <el-table-column label="必填" width="70">
+        <el-table-column :label="t('views.definitions.required')" width="70">
           <template #default="{ row }: { row: EditableField }">
             <el-switch v-model="row.required" size="small" />
           </template>
         </el-table-column>
-        <el-table-column label="主键" width="70">
+        <el-table-column :label="t('views.definitions.key')" width="70">
           <template #default="{ row }: { row: EditableField }">
             <el-switch v-model="row.key" size="small" />
           </template>
         </el-table-column>
-        <el-table-column label="选项 / 引用" min-width="260">
+        <el-table-column :label="t('views.definitions.optionsRef')" min-width="260">
           <template #default="{ row }: { row: EditableField }">
             <el-input
               v-if="row.fieldType === 'ENUM'"
               v-model="row.optionsText"
               size="small"
-              placeholder="逗号分隔：值=标签，如 1=普通,2=优惠"
+              :placeholder="t('views.definitions.optionsPlaceholder')"
             />
             <div v-else-if="row.fieldType === 'REFERENCE'" class="flex gap-1">
-              <el-select v-model="row.refDefCode" size="small" placeholder="引用配置" class="w-1/2">
+              <el-select v-model="row.refDefCode" size="small" :placeholder="t('views.definitions.refDefinition')" class="w-1/2">
                 <el-option
                   v-for="candidate in refCandidates"
                   :key="candidate.code"
@@ -199,31 +199,32 @@
                   :value="candidate.code"
                 />
               </el-select>
-              <el-input v-model="row.refFieldCode" size="small" placeholder="引用字段编码" class="w-1/2" />
+              <el-input v-model="row.refFieldCode" size="small" :placeholder="t('views.definitions.refFieldCode')" class="w-1/2" />
             </div>
             <span v-else class="text-[#c0c4cc]">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="70">
+        <el-table-column :label="t('views.definitions.actions')" width="70">
           <template #default="{ $index }">
-            <el-button size="small" type="danger" link @click="form.fields.splice($index, 1)">删除</el-button>
+            <el-button size="small" type="danger" link @click="form.fields.splice($index, 1)">{{ t('views.definitions.remove') }}</el-button>
           </template>
         </el-table-column>
       </el-table>
-      <el-button size="small" :icon="Plus" class="mt-2" @click="addField">添加字段</el-button>
+      <el-button size="small" :icon="Plus" class="mt-2" @click="addField">{{ t('views.definitions.addField') }}</el-button>
       <div class="mt-1 text-xs text-[#909399]">
-        后端约束：字段编码须以字母开头、同定义内唯一、至少一个主键；REFERENCE 必须指定引用配置与引用字段。
+        {{ t('views.definitions.backendRules') }}
       </div>
 
       <div class="mt-4 pt-3 border-t border-solid border-[#ebeef5] flex gap-2">
-        <el-button type="primary" :loading="saving" @click="save">保存配置定义</el-button>
-        <el-button @click="editorVisible = false">取消</el-button>
+        <el-button type="primary" :loading="saving" @click="save">{{ t('views.definitions.save') }}</el-button>
+        <el-button @click="editorVisible = false">{{ t('views.definitions.cancel') }}</el-button>
       </div>
     </el-drawer>
   </div>
 </template>
 
 <script setup lang="ts">
+import { useI18n } from 'vue-i18n'
 /**
  * 配置定义页（五页之④）：定义列表 / 详情（字段 + 层级 + 依赖）/ 字段编辑 / 模板下载。
  *
@@ -240,6 +241,8 @@ import { definitionsApi } from '@/api/definitions'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { downloadBlob } from '@/utils/excel'
 import { parseFieldOptions, type ConfigDefinition, type ConfigField, type ConfigLevel, type FieldType } from '@/types/definition'
+
+const { t } = useI18n()
 
 interface EditableField {
   code: string

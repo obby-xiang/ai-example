@@ -286,6 +286,12 @@ jobs:
       - name: 文档一致性门禁（6 条断言）
         run: node scripts/ci/check-docs.mjs
 
+      # i18n S7-③（批3二）：残留中文扫描。**报告制**（脚本默认不阻断）——
+      # 现网仍有上千行（语言包未覆盖的业务/模型侧文案）⇒ 按 L-49 口径「只能最后一个开闸」。
+      # 收口动作 = 把本步骤改成 `--strict`（棘轮：超 scripts/ci/i18n-residue-baseline.json 即红）。
+      - name: i18n 残留中文扫描（报告制，不阻断）
+        run: node scripts/ci/check-i18n-residue.mjs
+
   # ============================================================
   # 全历史脱敏扫描（DC-08 兜底；M2-T4 T4-7a-3 接线）
   #   scripts/githooks/scan-history.sh 扫 git rev-list --objects --all 可达的全部唯一 blob

@@ -18,7 +18,7 @@
       <el-input
         v-model="keyword"
         size="small"
-        placeholder="搜索编码 / 名称"
+        :placeholder="t('wizard.defs.searchPlaceholder')"
         clearable
         class="w-[220px]"
         :disabled="props.disabled"
@@ -44,7 +44,7 @@
           <el-checkbox
             :model-value="isSelected(row)"
             :disabled="props.disabled"
-            :aria-label="`选择 ${row.name}（${row.code}）`"
+            :aria-label="t('wizard.defs.selectAria', { name: row.name, code: row.code })"
             v-bind="aiAttrs(row.code, {
               role: 'checkbox',
               'aria-checked': isSelected(row) ? 'true' : 'false',
@@ -57,31 +57,32 @@
           />
         </template>
       </el-table-column>
-      <el-table-column prop="code" label="编码" width="160" />
-      <el-table-column prop="name" label="名称" min-width="140" />
-      <el-table-column label="层级" width="90">
+      <el-table-column prop="code" :label="t('wizard.defs.code')" width="160" />
+      <el-table-column prop="name" :label="t('wizard.defs.name')" min-width="140" />
+      <el-table-column :label="t('wizard.defs.level')" width="90">
         <template #default="{ row }">
           <el-tag size="small" :type="levelType(row.level)">{{ levelLabel(row.level) }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="字段数" width="90">
+      <el-table-column :label="t('wizard.defs.fieldCount')" width="90">
         <template #default="{ row }">{{ row.fields?.length ?? 0 }}</template>
       </el-table-column>
-      <el-table-column label="依赖" min-width="140">
+      <el-table-column :label="t('wizard.defs.dependencies')" min-width="140">
         <template #default="{ row }">
           <span v-if="dependenciesOf(row).length">{{ dependenciesOf(row).join(', ') }}</span>
-          <span v-else class="text-[#c0c4cc]">无</span>
+          <span v-else class="text-[#c0c4cc]">{{ t('wizard.defs.none') }}</span>
         </template>
       </el-table-column>
-      <el-table-column prop="description" label="描述" min-width="160" show-overflow-tooltip />
+      <el-table-column prop="description" :label="t('wizard.defs.description')" min-width="160" show-overflow-tooltip />
       <template #empty>
-        <el-empty description="暂无配置定义" :image-size="60" />
+        <el-empty :description="t('wizard.defs.empty')" :image-size="60" />
       </template>
     </el-table>
   </div>
 </template>
 
 <script setup lang="ts">
+import { useI18n } from 'vue-i18n'
 /**
  * 配置项选择器（导出/导入向导第 1 步共用）。
  *
@@ -96,6 +97,8 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import type { TableInstance } from 'element-plus'
 import type { ConfigDefinition, ConfigLevel } from '@/types/definition'
+
+const { t } = useI18n()
 
 const props = withDefaults(
   defineProps<{

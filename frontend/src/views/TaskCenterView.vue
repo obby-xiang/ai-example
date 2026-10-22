@@ -2,32 +2,32 @@
   <div>
     <div class="flex justify-between items-center mb-4">
       <div>
-        <h2 class="m-0 text-xl text-[#303133]">任务中心</h2>
+        <h2 class="m-0 text-xl text-[#303133]">{{ t('views.tasks.title') }}</h2>
         <div class="mt-1 text-[13px] text-[#909399]">
-          导出配置 / 导入配置 任务管理
-          <span class="ml-1">· 手动刷新（右上角），操作成功后自动更新{{ lastLoadedText }}</span>
+          {{ t('views.tasks.subtitle') }}
+          <span class="ml-1">{{ t('views.tasks.refreshHint') }}{{ lastLoadedText }}</span>
         </div>
       </div>
       <div>
-        <el-button :icon="Refresh" circle title="刷新" @click="taskStore.refreshNow()" />
-        <el-button type="primary" :icon="Plus" @click="createDialogVisible = true">创建任务</el-button>
+        <el-button :icon="Refresh" circle :title="t('views.tasks.refresh')" @click="taskStore.refreshNow()" />
+        <el-button type="primary" :icon="Plus" @click="createDialogVisible = true">{{ t('views.tasks.create') }}</el-button>
       </div>
     </div>
 
     <div class="flex items-center gap-2 mb-3">
-      <el-input v-model="filterKeyword" placeholder="关键词（任务名称）" clearable class="w-[220px]" @keyup.enter="applyFilters" />
-      <el-select v-model="filterType" placeholder="类型" clearable class="w-[130px]">
-        <el-option label="导出配置" value="EXPORT" />
-        <el-option label="导入配置" value="IMPORT" />
+      <el-input v-model="filterKeyword" :placeholder="t('views.tasks.keywordPlaceholder')" clearable class="w-[220px]" @keyup.enter="applyFilters" />
+      <el-select v-model="filterType" :placeholder="t('views.tasks.type')" clearable class="w-[130px]">
+        <el-option :label="t('views.tasks.exportType')" value="EXPORT" />
+        <el-option :label="t('views.tasks.importType')" value="IMPORT" />
       </el-select>
-      <el-select v-model="filterStatus" placeholder="状态" clearable class="w-[130px]">
-        <el-option label="进行中" value="ACTIVE" />
-        <el-option label="已完成" value="COMPLETED" />
-        <el-option label="已取消" value="CANCELLED" />
-        <el-option label="已失败" value="FAILED" />
+      <el-select v-model="filterStatus" :placeholder="t('views.tasks.status')" clearable class="w-[130px]">
+        <el-option :label="t('views.tasks.active')" value="ACTIVE" />
+        <el-option :label="t('views.tasks.completed')" value="COMPLETED" />
+        <el-option :label="t('views.tasks.cancelled')" value="CANCELLED" />
+        <el-option :label="t('views.tasks.failed')" value="FAILED" />
       </el-select>
-      <el-button type="primary" @click="applyFilters">查询</el-button>
-      <el-button @click="resetFilters">重置</el-button>
+      <el-button type="primary" @click="applyFilters">{{ t('views.tasks.search') }}</el-button>
+      <el-button @click="resetFilters">{{ t('views.tasks.reset') }}</el-button>
     </div>
 
     <el-alert
@@ -35,12 +35,12 @@
       type="warning"
       :closable="false"
       show-icon
-      :title="`任务列表加载失败：${taskStore.error}`"
+      :title="t('views.tasks.loadFailed', { error: taskStore.error })"
       class="mb-3"
     />
 
     <el-table v-loading="taskStore.loading" :data="taskStore.items" border>
-      <el-table-column label="任务" min-width="240">
+      <el-table-column :label="t('views.tasks.task')" min-width="240">
         <template #default="{ row }: { row: TaskSummary }">
           <div class="flex items-center gap-2">
             <span class="text-[#c0c4cc]">#{{ row.task.id }}</span>
@@ -48,19 +48,19 @@
           </div>
         </template>
       </el-table-column>
-      <el-table-column label="类型" width="100">
+      <el-table-column :label="t('views.tasks.type')" width="100">
         <template #default="{ row }: { row: TaskSummary }">
           <el-tag size="small" :type="row.task.type === 'EXPORT' ? 'success' : 'primary'">
-            {{ row.task.type === 'EXPORT' ? '导出配置' : '导入配置' }}
+            {{ row.task.type === 'EXPORT' ? t('views.tasks.exportType') : t('views.tasks.importType') }}
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="状态" width="110">
+      <el-table-column :label="t('views.tasks.status')" width="110">
         <template #default="{ row }: { row: TaskSummary }">
           <el-tag size="small" :type="statusType(row.task.status)">{{ statusLabel(row.task.status) }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="进度" width="190">
+      <el-table-column :label="t('views.tasks.progress')" width="190">
         <template #default="{ row }: { row: TaskSummary }">
           <div v-if="row.latestJob" class="flex items-center gap-2">
             <el-progress
@@ -76,16 +76,16 @@
           <span v-else class="text-[#c0c4cc]">—</span>
         </template>
       </el-table-column>
-      <el-table-column label="当前步骤" width="110">
+      <el-table-column :label="t('views.tasks.currentStep')" width="110">
         <template #default="{ row }: { row: TaskSummary }">{{ stepLabel(row.task.currentStep) }}</template>
       </el-table-column>
-      <el-table-column label="创建时间" width="170">
+      <el-table-column :label="t('views.tasks.createdAt')" width="170">
         <template #default="{ row }: { row: TaskSummary }">{{ formatDateTime(row.task.createdAt) }}</template>
       </el-table-column>
-      <el-table-column label="更新时间" width="170">
+      <el-table-column :label="t('views.tasks.updatedAt')" width="170">
         <template #default="{ row }: { row: TaskSummary }">{{ formatDateTime(row.task.updatedAt) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="160" fixed="right">
+      <el-table-column :label="t('views.tasks.actions')" width="160" fixed="right">
         <template #default="{ row }: { row: TaskSummary }">
           <el-button
             size="small"
@@ -95,13 +95,13 @@
             :loading="cancellingId === row.task.id"
             @click="cancelTask(row)"
           >
-            取消
+            {{ t('views.tasks.cancel') }}
           </el-button>
-          <el-button size="small" type="danger" link @click="removeTask(row)">删除</el-button>
+          <el-button size="small" type="danger" link @click="removeTask(row)">{{ t('views.tasks.remove') }}</el-button>
         </template>
       </el-table-column>
       <template #empty>
-        <el-empty description="暂无任务，点击右上角创建" />
+        <el-empty :description="t('views.tasks.empty')" />
       </template>
     </el-table>
 
@@ -117,33 +117,34 @@
       />
     </div>
 
-    <el-dialog v-model="createDialogVisible" title="创建任务" width="440px">
+    <el-dialog v-model="createDialogVisible" :title="t('views.tasks.create')" width="440px">
       <el-form label-width="auto">
-        <el-form-item label="任务类型" required>
+        <el-form-item :label="t('views.tasks.taskType')" required>
           <el-radio-group v-model="createForm.type" class="flex flex-col items-start gap-1">
             <el-radio value="EXPORT" class="!h-auto !whitespace-normal !items-start !mr-0">
-              导出配置
-              <div class="text-xs text-[#909399] font-normal">选择配置项 → 设置查询条件 → 导出 Excel</div>
+              {{ t('views.tasks.exportType') }}
+              <div class="text-xs text-[#909399] font-normal">{{ t('views.tasks.exportDesc') }}</div>
             </el-radio>
             <el-radio value="IMPORT" class="!h-auto !whitespace-normal !items-start !mr-0">
-              导入配置
-              <div class="text-xs text-[#909399] font-normal">上传/编辑 → 检查 → 导入暂存 → 发布生效</div>
+              {{ t('views.tasks.importType') }}
+              <div class="text-xs text-[#909399] font-normal">{{ t('views.tasks.importDesc') }}</div>
             </el-radio>
           </el-radio-group>
         </el-form-item>
-        <el-form-item label="任务名称">
-          <el-input v-model="createForm.title" maxlength="60" placeholder="例如：Q4 税率批量导入（留空则自动命名）" />
+        <el-form-item :label="t('views.tasks.taskName')">
+          <el-input v-model="createForm.title" maxlength="60" :placeholder="t('views.tasks.taskTitlePlaceholder')" />
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="createDialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="creating" @click="createTask">创建</el-button>
+        <el-button @click="createDialogVisible = false">{{ t('views.tasks.cancel') }}</el-button>
+        <el-button type="primary" :loading="creating" @click="createTask">{{ t('views.tasks.createTitle') }}</el-button>
       </template>
     </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
+import { useI18n } from 'vue-i18n'
 /**
  * 任务中心（五页之①）。
  *
@@ -167,6 +168,8 @@ import { formatDateTime, progressView, stepLabel, TASK_TYPE_LABELS } from '@/uti
 import { confirmIrreversible } from '@/utils/confirm-irreversible'
 import type { TaskStatus, TaskSummary, TaskType } from '@/types/task'
 import type { Job } from '@/types/job'
+
+const { t } = useI18n()
 
 const taskStore = useTaskStore()
 const workspace = useWorkspaceStore()

@@ -5855,8 +5855,12 @@ describe('批4-D：不可撤销确认卡的复选框（可逆卡一字不动）'
         'I understand that starting the publish job cannot be undone'
       )
       expect(gate.find('[data-testid="gate-ack-hint"]').text()).toBe('Tick the box above to continue')
-      // 按钮文案不动（2026-10-20 定稿口径）
-      expect(gate.findAll('button').map((btn) => btn.text())).toEqual(['拒绝', '批准'])
+      // 批3二 S3：卡面按钮文案随 locale（zh 逐字不变；en 走 ai.panel.reject / approve）
+      expect(gate.findAll('button').map((btn) => btn.text())).toEqual([
+        i18n.global.t('ai.panel.reject'),
+        i18n.global.t('ai.panel.approve')
+      ])
+      expect(gate.findAll('button').map((btn) => btn.text())).toEqual(['Reject', 'Approve'])
       wrapper.unmount()
     } finally {
       i18n.global.locale.value = 'zh-CN'

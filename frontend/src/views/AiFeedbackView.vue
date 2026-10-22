@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useI18n } from 'vue-i18n'
 /**
  * R-163 T5：设置页「AI 反馈」查看界面（闭环四要素 ③）——
  * 时间 / 消息摘要（messageId+sessionId）/ rating（赞/踩）/ reason，仅当前用户（单用户应用全表）。
@@ -6,6 +7,8 @@
  */
 import { onMounted, ref } from 'vue'
 import { aiApi, type AiFeedbackEntry } from '@/api/ai'
+
+const { t } = useI18n()
 
 const items = ref<AiFeedbackEntry[]>([])
 const loading = ref(true)
@@ -39,18 +42,18 @@ function summaryOf(item: AiFeedbackEntry): string {
 
 <template>
   <div class="p-4 max-w-3xl" data-testid="ai-feedback-view">
-    <h3 class="text-base font-semibold mb-3">AI 反馈</h3>
-    <p class="text-xs text-[#909399] mb-3">赞踩上报记录（最近 100 条，仅当前用户可见），用于人工复盘。</p>
-    <div v-if="loading" class="text-sm text-[#909399]">加载中…</div>
-    <el-alert v-else-if="error" type="error" :closable="false" :title="`加载失败：${error}`" />
-    <el-empty v-else-if="items.length === 0" description="暂无反馈记录" />
+    <h3 class="text-base font-semibold mb-3">{{ t('views.aiFeedback.title') }}</h3>
+    <p class="text-xs text-[#909399] mb-3">{{ t('views.aiFeedback.subtitle') }}</p>
+    <div v-if="loading" class="text-sm text-[#909399]">{{ t('views.aiFeedback.loading') }}</div>
+    <el-alert v-else-if="error" type="error" :closable="false" :title="t('views.aiFeedback.loadFailed', { error })" />
+    <el-empty v-else-if="items.length === 0" :description="t('views.aiFeedback.empty')" />
     <table v-else class="w-full text-[13px] border-collapse" data-testid="ai-feedback-table">
       <thead>
         <tr class="text-left text-[#909399]">
-          <th class="py-1.5 pr-3 font-normal">时间</th>
-          <th class="py-1.5 pr-3 font-normal">消息摘要</th>
-          <th class="py-1.5 pr-3 font-normal">评价</th>
-          <th class="py-1.5 font-normal">原因</th>
+          <th class="py-1.5 pr-3 font-normal">{{ t('views.aiFeedback.time') }}</th>
+          <th class="py-1.5 pr-3 font-normal">{{ t('views.aiFeedback.messageSummary') }}</th>
+          <th class="py-1.5 pr-3 font-normal">{{ t('views.aiFeedback.rating') }}</th>
+          <th class="py-1.5 font-normal">{{ t('views.aiFeedback.reason') }}</th>
         </tr>
       </thead>
       <tbody>

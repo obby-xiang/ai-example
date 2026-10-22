@@ -6,7 +6,7 @@
     @click="ai.toggleExpand()"
   >
     <el-icon><ChatDotRound /></el-icon>
-    <span class="writing-vertical text-[13px]">AI 助手</span>
+    <span class="writing-vertical text-[13px]">{{ t('ai.panel.assistant') }}</span>
   </div>
 
   <!-- R-165 S5a 项 9：focus-visible 聚焦环（demo v7 14b 口径）——根容器一条任意变体覆盖面板内
@@ -16,20 +16,20 @@
     <div class="flex items-center gap-2.5 px-3 py-2.5 border-0 border-b border-solid border-[#ebeef5]">
       <div class="w-[34px] h-[34px] rounded-lg bg-gradient-to-br from-[#409eff] to-[#7b61ff] text-white flex items-center justify-center font-bold">AI</div>
       <div class="flex-1 min-w-0">
-        <div class="text-sm font-semibold text-[#303133]">实施助手</div>
+        <div class="text-sm font-semibold text-[#303133]">{{ t('ai.panel.implementer') }}</div>
         <div class="text-xs text-[#909399]" data-testid="current-model">{{ currentModelLabel }}</div>
       </div>
       <el-button
         size="small"
         text
         data-testid="new-chat"
-        title="新建对话"
+        :title="t('ai.panel.newChat')"
         :disabled="!ai.messages.length"
         @click="newChat"
       >
-        新建对话
+        {{ t('ai.panel.newChat') }}
       </el-button>
-      <el-button size="small" text title="收起" @click="ai.toggleExpand()">
+      <el-button size="small" text :title="t('ai.panel.collapse')" @click="ai.toggleExpand()">
         <el-icon><ArrowRight /></el-icon>
       </el-button>
     </div>
@@ -41,15 +41,15 @@
            硬裁（看不到省略号）。两处补 `min-w-0`，省略号才真落地。 -->
       <div class="flex items-center gap-1.5 flex-wrap">
         <span :class="chipClass(healthTagType)">{{ healthLabel }}</span>
-        <span>会话 {{ shortSessionId }}</span>
+        <span>{{ t('ai.panel.session', { id: shortSessionId }) }}</span>
         <span>·</span>
-        <span class="min-w-0 truncate">工作区 {{ workspace.contextSummary }}</span>
+        <span class="min-w-0 truncate">{{ t('ai.panel.workspace', { summary: workspace.contextSummary }) }}</span>
         <span>·</span>
-        <span>数据版本 {{ workspace.dataVersion }}</span>
-        <el-button link size="small" @click="probe">重新检测</el-button>
+        <span>{{ t('ai.panel.dataVersion', { version: workspace.dataVersion }) }}</span>
+        <el-button link size="small" @click="probe">{{ t('ai.panel.recheck') }}</el-button>
       </div>
       <div v-if="ai.contextSync" class="mt-0.5 min-w-0 truncate">
-        工作区已同步：{{ ai.contextSync.summary }}（v{{ ai.contextSync.version }} · {{ ai.contextSync.source }}）
+        {{ t('ai.panel.contextSynced', { summary: ai.contextSync.summary, version: ai.contextSync.version, source: ai.contextSync.source }) }}
       </div>
     </div>
 
@@ -58,8 +58,8 @@
     <div v-if="ai.poolSaturated" :class="alertBox('primary')" data-testid="alert-pool-saturated">
       <span :class="alertIcon('primary')" aria-hidden="true">▦</span>
       <div class="flex-1 min-w-0">
-        <b class="block text-[12.6px] [font-weight:650] text-[#1f2328]">挂起池已饱和</b>
-        <span class="text-[11.8px] text-[#57606a] break-words [overflow-wrap:anywhere]">挂起专用线程池容量 {{ ai.poolSaturated.poolSize }} 已用满，请等当前挂起轮次确认/超时后再试。</span>
+        <b class="block text-[12.6px] [font-weight:650] text-[#1f2328]">{{ t('ai.panel.suspendPoolFull') }}</b>
+        <span class="text-[11.8px] text-[#57606a] break-words [overflow-wrap:anywhere]">{{ t('ai.panel.poolSaturatedDetail', { size: ai.poolSaturated.poolSize }) }}</span>
       </div>
     </div>
 
@@ -69,7 +69,7 @@
     <div v-if="!ai.available" :class="alertBox('primary')" data-testid="alert-degraded">
       <span :class="alertIcon('primary')" aria-hidden="true">↓</span>
       <div class="flex-1 min-w-0">
-        <b class="block text-[12.6px] [font-weight:650] text-[#1f2328]">AI 能力暂不可用（已降级，业务功能不受影响）</b>
+        <b class="block text-[12.6px] [font-weight:650] text-[#1f2328]">{{ t('ai.panel.unavailableDegraded') }}</b>
         <span class="text-[11.8px] text-[#57606a] break-words [overflow-wrap:anywhere]">{{ degradeReason }}</span>
       </div>
     </div>
@@ -77,8 +77,8 @@
     <div v-if="ai.streamInterrupted" :class="alertBox('error')" data-testid="alert-interrupted">
       <span :class="alertIcon('error')" aria-hidden="true">!</span>
       <div class="flex-1 min-w-0">
-        <b class="block text-[12.6px] [font-weight:650] text-[#1f2328]">连接中断，结果可能不完整</b>
-        <span class="text-[11.8px] text-[#57606a]">本轮没有收到完成帧（done/error）。已生成的内容保留在上方，可重新发送或刷新页面继续接收。</span>
+        <b class="block text-[12.6px] [font-weight:650] text-[#1f2328]">{{ t('ai.panel.interrupted') }}</b>
+        <span class="text-[11.8px] text-[#57606a]">{{ t('ai.panel.noDoneFrame') }}</span>
       </div>
     </div>
 
@@ -106,7 +106,7 @@
     <div v-if="ai.lastUiEventResult" :class="alertBox('gray')" data-testid="alert-ui-event">
       <span :class="alertIcon('gray')" aria-hidden="true">i</span>
       <div class="flex-1 min-w-0">
-        <b class="block text-[12.6px] [font-weight:650] text-[#1f2328] break-words [overflow-wrap:anywhere]">AI 驱动工作区：{{ ai.lastUiEventResult.message }}</b>
+        <b class="block text-[12.6px] [font-weight:650] text-[#1f2328] break-words [overflow-wrap:anywhere]">{{ t('ai.panel.uiEvent', { message: ai.lastUiEventResult.message }) }}</b>
       </div>
     </div>
 
@@ -124,7 +124,7 @@
         </svg>
       </span>
       <span class="min-w-0 flex-1 text-[12.4px] leading-[1.5] text-[#1f2328] break-words [overflow-wrap:anywhere]">
-        AI 正在操作左侧工作区：{{ ai.uiAnnouncement }}
+        {{ t('ai.panel.uiOperating', { text: ai.uiAnnouncement }) }}
       </span>
       <button
         type="button"
@@ -132,7 +132,7 @@
         data-testid="ai-operating-stop"
         @click="ai.stop()"
       >
-        停止
+        {{ t('ai.panel.stop') }}
       </button>
     </div>
     <!-- 读屏播报（只读动词也播报；视觉零占位） -->
@@ -172,12 +172,12 @@
         class="m-3 rounded-[10px] border border-solid border-[#e3e6ea] bg-white px-[14px] py-[16px]"
         data-testid="empty-state"
       >
-        <div class="[font-weight:650] text-[13.2px] mb-[3px]">您好，我是实施助手</div>
+        <div class="[font-weight:650] text-[13.2px] mb-[3px]">{{ t('ai.panel.greeting') }}</div>
         <div class="text-[12.4px] leading-[1.8] text-[#57606a]">
-          我可以帮您查询配置项与字段、查看任务、预估数据行数、<br />
-          打开导出结果在线编辑器、下载导出文件，<br />并启动导出/预检查/导入/发布作业。
+          {{ t('ai.panel.welcome1') }}<br />
+          {{ t('ai.panel.welcome2') }}<br />{{ t('ai.panel.welcome3') }}
         </div>
-        <div class="mt-[6px] text-[11.8px] text-[#8b949e]">对话保存在当前浏览器页签中，关闭页签即结束。</div>
+        <div class="mt-[6px] text-[11.8px] text-[#8b949e]">{{ t('ai.panel.tabOnlyNotice') }}</div>
         <!-- 批 E · E2（用户裁决 2026-10-22）：空态快捷 chips 点击**直接发送**（不再回填输入框）。
              写操作靠既有 HITL 确认卡兜底；文案与"每轮建议"共用一份词表（ai.suggestions.*，双语）。 -->
         <div class="mt-[11px] flex flex-wrap gap-[6px]">
@@ -293,7 +293,7 @@
                     @click="toggleBlock(block)"
                   >
                     <span class="flex-[0_0_15px] w-[15px] h-[15px] rounded-[50%] border-solid border-[1.2px] border-[#e3e6ea] text-[#8b949e] text-[9px] flex items-center justify-center" aria-hidden="true">⋆</span>
-                    <span class="text-[12.4px] text-[#57606a]">思考过程</span>
+                    <span class="text-[12.4px] text-[#57606a]">{{ t('ai.panel.thinking') }}</span>
                     <span class="flex-1 text-[11.5px] text-[#8b949e]">{{ reasoningSummary(part.text, isBlockExpanded(block)) }}</span>
                     <span :class="[TCHEV_CLASS, isBlockExpanded(block) ? 'is-open' : '']">›</span>
                   </button>
@@ -394,7 +394,7 @@
                             :initial-values="readOnlyFormValues(part)"
                           />
                         </div>
-                        <div v-else class="px-[11px] pt-[10px] text-[12.6px] text-[#57606a]">表单定义不可用，无法还原原卡</div>
+                        <div v-else class="px-[11px] pt-[10px] text-[12.6px] text-[#57606a]">{{ t('ai.panel.formUnavailable') }}</div>
                       </template>
                       <!-- 失败 / 拒绝 / 取消收尾的原因单独一行常驻卡面（K3：执行失败原因常驻；F9 同源） -->
                       <div
@@ -416,7 +416,7 @@
                            requiresAction 待动作卡不渲参数区 —— 门卡字段表 / GF 表单本身就是待填内容（消双份）。 -->
                       <!-- 2A 批（裁决 §14.4 字段族）：参数字段表限高改双约束 `min(280px,35vh)`。 -->
                       <div v-if="!part.requiresAction && paramRows(part).length">
-                        <div class="block text-[11px] tracking-[.5px] uppercase text-[#8b949e] mb-[4px]">参数</div>
+                        <div class="block text-[11px] tracking-[.5px] uppercase text-[#8b949e] mb-[4px]">{{ t('ai.panel.args') }}</div>
                         <div :class="['bg-[#f6f7f9] border border-solid border-[#eef0f3] rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto', SCROLLBAR_CLASS]" :data-testid="'args-rows-' + part.toolCallId">
                           <div
                             v-for="row in paramRows(part)"
@@ -432,7 +432,7 @@
                            不在卡面报两次（原文仍是 part.result，模型侧 / 复制路径不受影响）；
                            视图渲不出或段上没有视图 ⇒ 本盒照旧（回退路径不删）。 -->
                       <div v-if="!isBlankText(part.result) && !outputByView(part)">
-                        <div class="block text-[11px] tracking-[.5px] uppercase text-[#8b949e] mb-[4px]">输出</div>
+                        <div class="block text-[11px] tracking-[.5px] uppercase text-[#8b949e] mb-[4px]">{{ t('ai.panel.output') }}</div>
                         <!-- R-165 S5a 项 4：工具卡输出 = **纯限高内滚**，原 CollapsibleText 的渐隐 +
                              「显示更多」钮退役（无展开钮）；截断徽标保留。
                              滚动条同走 6px 圆角半透明任意变体类（项 8）。
@@ -442,9 +442,9 @@
                           {{ part.result }}<span
                             v-if="part.truncated"
                             class="inline-block ml-1 px-1 rounded text-[10px] leading-4 bg-[#8b949e] text-white align-middle"
-                            :title="part.truncatedReason ?? '结果被截断'"
+                            :title="part.truncatedReason ?? t('ai.panel.truncatedFallback')"
                             data-testid="truncated-badge"
-                          >已截断</span>
+                          >{{ t('ai.panel.truncated') }}</span>
                         </div>
                       </div>
                       <!-- AI 可视可操作专项（§3.8 / 裁 6）：操作摘要行的「撤销」按钮。
@@ -454,14 +454,14 @@
                         class="flex items-center gap-[8px]"
                         data-testid="ui-undo-row"
                       >
-                        <span class="text-[12.2px] text-[#57606a]">界面已改动，可撤销最近 1 步。</span>
+                        <span class="text-[12.2px] text-[#57606a]">{{ t('ai.panel.undoHint') }}</span>
                         <button
                           type="button"
                           class="flex-none whitespace-nowrap rounded-[8px] border border-solid border-[#e3e6ea] bg-white px-[11px] py-[4px] text-[12.2px] text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]"
                           data-testid="ui-undo-button"
                           @click="onUiUndo"
                         >
-                          撤销
+                          {{ t('ai.panel.undo') }}
                         </button>
                       </div>
 
@@ -474,7 +474,7 @@
                            2A 批（裁决 §14.4 回执 / 文本族）：原因行限高改 `min(280px,35vh)`。 -->
                       <div v-if="!isBlankText(part.reason)" class="flex items-start gap-[7px] px-[10px] py-[7px] text-[12.4px] text-[#c0392b] bg-[#fdf1ef] border border-solid border-[#f0d5d0] rounded-[9px]" data-testid="tool-error">
                         <span class="mt-px shrink-0 flex-[0_0_14px] w-[14px] h-[14px] flex items-center justify-center rounded-[50%] border-[1.3px] border-[#c0392b] text-[#c0392b] text-[9px] font-bold" aria-hidden="true">!</span>
-                        <span class="flex-1 min-w-0 whitespace-pre-wrap break-words max-h-[min(280px,35vh)] overflow-y-auto">原因：{{ reasonText(part) }}</span>
+                        <span class="flex-1 min-w-0 whitespace-pre-wrap break-words max-h-[min(280px,35vh)] overflow-y-auto">{{ t('ai.panel.reasonPrefix', { text: reasonText(part) }) }}</span>
                       </div>
                       <!-- S6 批2（§5.3 / §7.1-③）：视图通道接管明细表 —— 有 `resultView` 时由通用渲染器渲，
                            旧反解表（`conflict-table`）在本分支下**零出现**（不同屏双份报同一份明细 = 违规）。
@@ -486,7 +486,7 @@
                       />
                       <div v-else-if="conflictRows(part).length" class="border border-solid border-[#eef0f3] rounded-[8px] overflow-hidden" data-testid="conflict-table">
                         <div class="px-[9px] py-[5px] bg-[#f6f7f9] border-0 border-b border-solid border-[#e3e6ea] text-[11.4px] [font-weight:650] text-[#57606a]">
-                          <span class="inline-block w-[34%]">配置</span><span class="inline-block w-[26%]">行键</span><span class="inline-block w-[40%]">原因</span>
+                          <span class="inline-block w-[34%]">{{ t('ai.panel.definition') }}</span><span class="inline-block w-[26%]">{{ t('ai.panel.rowKey') }}</span><span class="inline-block w-[40%]">{{ t('ai.panel.reason') }}</span>
                         </div>
                         <div :class="['max-h-[min(480px,60vh)] overflow-y-auto', SCROLLBAR_CLASS]">
                           <div
@@ -568,20 +568,20 @@
                                 v-if="gateSyncing(part.toolCallId)"
                                 class="text-[12.2px] text-[#57606a]"
                                 data-testid="gate-syncing"
-                              >已提交，同步中…</span>
+                              >{{ t('ai.panel.submitting') }}</span>
                               <span class="ml-auto flex flex-none items-center gap-[8px] whitespace-nowrap">
                                 <button
                                   type="button"
                                   class="flex-none whitespace-nowrap min-w-[56px] rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-[#e3e6ea] transition-all duration-[150ms] bg-white text-[#57606a] hover:border-[#8b949e] hover:text-[#1f2328] disabled:opacity-50 disabled:cursor-default"
                                   :disabled="gateSubmitting(part.toolCallId)"
                                   @click="decide(false, part.toolCallId)"
-                                >拒绝</button>
+                                >{{ t('ai.panel.reject') }}</button>
                                 <button
                                   type="button"
                                   class="flex-none whitespace-nowrap min-w-[72px] rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-transparent transition-all duration-[150ms] bg-[#2563eb] text-white font-semibold hover:brightness-[1.08] disabled:opacity-50 disabled:cursor-default disabled:bg-[#8b949e] disabled:font-normal"
                                   :disabled="gateSubmitting(part.toolCallId) || gateNeedsAck(part)"
                                   @click="decide(true, part.toolCallId)"
-                                >批准</button>
+                                >{{ t('ai.panel.approve') }}</button>
                               </span>
                             </div>
                           </div>
@@ -673,7 +673,7 @@
             :aria-expanded="userMsgExpanded.has(m.id)"
             @click="toggleUserMsg(m.id)"
           >
-            {{ userMsgExpanded.has(m.id) ? '收起 ▴' : '展开 ▾' }}
+            {{ userMsgExpanded.has(m.id) ? t('ai.panel.collapseMsg') : t('ai.panel.expandMsg') }}
           </button>
         </div>
 
@@ -711,7 +711,7 @@
               :data-testid="'copy-hint-' + m.id"
               class="text-xs text-[#c0392b]"
             >
-              {{ '复制失败，请手动选中文本复制' }}
+              {{ t('ai.panel.copyFailed') }}
             </span>
             <!-- 批G · S3：停止可见 —— 消息尾「已停止」标识（与「继续」入口互斥：停掉的轮不出继续） -->
             <span
@@ -727,12 +727,12 @@
               v-if="showContinue(m)"
               type="button"
               data-testid="continue-round"
-              aria-label="继续本轮对话"
+              :aria-label="t('ai.panel.resumeChat')"
               class="group/tip relative inline-flex items-center justify-center w-7 h-7 rounded-[8px] border-0 bg-transparent p-0 text-xs text-[#2563eb] transition hover:bg-[#eff4ff]"
               @click="continueRound"
             >
-              继续
-              <span :class="TIP_CLASS">继续本轮对话<span :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
+              {{ t('ai.panel.continue') }}
+              <span :class="TIP_CLASS">{{ t('ai.panel.resumeChat') }}<span :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
             </button>
             <!-- R-163 T3：赞踩（仅助手行）——28×28 热区、本地态、选中互斥可取消；
                  R-165 S1：全 Tailwind 图标按钮（demo v7 `.icon-btn` 配方），SVG 照搬 v7（描边 1.6/15×15）；
@@ -743,47 +743,47 @@
               v-if="m.role === 'assistant'"
               type="button"
               :data-testid="'feedback-up-' + m.id"
-              :aria-label="feedbackOf(m.id) === 1 ? '取消赞' : '赞'"
+              :aria-label="feedbackOf(m.id) === 1 ? t('ai.panel.unlike') : t('ai.panel.like')"
               :aria-pressed="feedbackOf(m.id) === 1"
               :class="[ICON_BTN_CLASS, feedbackOf(m.id) === 1 ? ICON_BTN_ON_BLUE : ICON_BTN_IDLE]"
               @click="rateMessage(m, 1)"
             >
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3H14z"></path><path d="M7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"></path></svg>
-              <span :class="TIP_CLASS">{{ feedbackOf(m.id) === 1 ? '取消赞' : '赞' }}<span :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
+              <span :class="TIP_CLASS">{{ feedbackOf(m.id) === 1 ? t('ai.panel.unlike') : t('ai.panel.like') }}<span :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
             </button>
             <button
               v-if="m.role === 'assistant'"
               type="button"
               :data-testid="'feedback-down-' + m.id"
-              :aria-label="feedbackOf(m.id) === -1 ? '取消踩' : '踩'"
+              :aria-label="feedbackOf(m.id) === -1 ? t('ai.panel.undislike') : t('ai.panel.dislike')"
               :aria-pressed="feedbackOf(m.id) === -1"
               :class="[ICON_BTN_CLASS, feedbackOf(m.id) === -1 ? ICON_BTN_ON_RED : ICON_BTN_IDLE]"
               @click="rateMessage(m, -1)"
             >
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3H10z"></path><path d="M17 2h2.67A2.31 2.31 0 0 1 22 4v7a2.31 2.31 0 0 1-2.33 2H17"></path></svg>
-              <span :class="TIP_CLASS">{{ feedbackOf(m.id) === -1 ? '取消踩' : '踩' }}<span :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
+              <span :class="TIP_CLASS">{{ feedbackOf(m.id) === -1 ? t('ai.panel.undislike') : t('ai.panel.dislike') }}<span :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
             </button>
             <button
               v-if="m.role === 'user'"
               type="button"
               :class="[ICON_BTN_CLASS, ICON_BTN_IDLE]"
               :data-testid="'edit-msg-' + m.id"
-              aria-label="编辑该条消息（改完从该条重跑）"
+              :aria-label="t('ai.panel.editMessage')"
               @click="editMessage(m)"
             >
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"></path><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"></path></svg>
-              <span :class="TIP_CLASS">编辑该条消息（改完从该条重跑）<span :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
+              <span :class="TIP_CLASS">{{ t('ai.panel.editMessage') }}<span :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
             </button>
             <button
               type="button"
               :class="[ICON_BTN_CLASS, ICON_BTN_IDLE, COPY_STATE_CLASS, isMsgCopied(m.id) ? 'is-copied' : '']"
               :data-testid="'copy-msg-' + m.id"
-              aria-label="复制该条消息正文"
+              :aria-label="t('ai.panel.copyMessage')"
               @click="copyMessage(m)"
             >
               <svg viewBox="0 0 24 24" aria-hidden="true" class="i-copy"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
               <svg viewBox="0 0 24 24" aria-hidden="true" class="i-check"><polyline points="20 6 9 17 4 12"></polyline></svg>
-              <span :class="TIP_CLASS">复制该条消息正文<span :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
+              <span :class="TIP_CLASS">{{ t('ai.panel.copyMessage') }}<span :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
             </button>
           </div>
         </div>
@@ -862,11 +862,11 @@
         v-if="showBackToBottom && ai.messages.length > 0"
         type="button"
         data-testid="back-to-bottom"
-        title="回到底部"
+        :title="t('ai.panel.backToBottom')"
         class="absolute bottom-3 left-1/2 -translate-x-1/2 z-[6] whitespace-nowrap rounded-full border border-solid border-[#e3e6ea] bg-white px-3 py-1.5 text-xs text-[#57606a] shadow-[0_2px_8px_rgba(0,0,0,0.13)] transition-colors duration-[150ms] hover:text-[#1f2328]"
         @click="backToBottom"
       >
-        回到底部
+        {{ t('ai.panel.backToBottom') }}
       </button>
     </div>
 
@@ -932,10 +932,10 @@
             data-testid="send-btn"
             data-composer-tip="send"
             class="group/tip relative ml-auto flex h-[28px] w-[28px] flex-none items-center justify-center rounded-full border-0 bg-[#2563eb] text-[13px] leading-none text-white transition-all duration-[150ms] hover:brightness-[1.08] disabled:cursor-default disabled:bg-[#8b949e] disabled:text-white focus-visible:ring-2 focus-visible:ring-[#2563eb]/40 focus-visible:ring-offset-0"
-            aria-label="发送"
+            :aria-label="t('ai.panel.send')"
             :disabled="composerHardDisabled || !canSubmit"
             @click="send"
-          >↑<span class="tip" :class="[TIP_CLASS, hiddenComposerTips.has('send') ? 'hidden' : '']" aria-hidden="true">发送<span class="tip-arrow" :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span></button>
+          >↑<span class="tip" :class="[TIP_CLASS, hiddenComposerTips.has('send') ? 'hidden' : '']" aria-hidden="true">{{ t('ai.panel.send') }}<span class="tip-arrow" :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span></button>
         </div>
       </div>
       <!-- M5（复审）：播报节流 —— 计数文本自身**不带** aria-live（否则每敲一个字都播报一次），
@@ -954,7 +954,7 @@
       class="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-[22px]"
       role="dialog"
       aria-modal="true"
-      aria-label="mermaid 全屏查看器"
+      :aria-label="t('ai.panel.mermaidViewer')"
       data-testid="mmd-viewer"
       @click.self="closeMmdViewer"
     >
@@ -968,64 +968,64 @@
               type="button"
               :class="MMD_ICON_BTN_CLASS"
               data-testid="mmd-zoom-out"
-              aria-label="缩小"
+              :aria-label="t('ai.panel.zoomOut')"
               @click="zoomMmdViewer(1 / 1.25)"
             >
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"></path></svg>
-              <span class="tip" :class="TIP_CLASS">缩小<span class="tip-arrow" :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
+              <span class="tip" :class="TIP_CLASS">{{ t('ai.panel.zoomOut') }}<span class="tip-arrow" :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
             </button>
             <span class="min-w-[46px] text-center font-mono text-[11.5px] tabular-nums text-[#57606a]" data-testid="mmd-zoom-pct">{{ mmdViewerPct }}%</span>
             <button
               type="button"
               :class="MMD_ICON_BTN_CLASS"
               data-testid="mmd-zoom-in"
-              aria-label="放大"
+              :aria-label="t('ai.panel.zoomIn')"
               @click="zoomMmdViewer(1.25)"
             >
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>
-              <span class="tip" :class="TIP_CLASS">放大<span class="tip-arrow" :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
+              <span class="tip" :class="TIP_CLASS">{{ t('ai.panel.zoomIn') }}<span class="tip-arrow" :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
             </button>
             <span class="mx-[2px] h-[18px] w-[1px] bg-[#e3e6ea]"></span>
             <button
               type="button"
               :class="MMD_ICON_BTN_CLASS"
               data-testid="mmd-reset"
-              aria-label="复位到 100%"
+              :aria-label="t('ai.panel.resetZoom')"
               @click="resetMmdViewer"
             >
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"></path><path d="M3 4v5h5"></path></svg>
-              <span class="tip" :class="TIP_CLASS">复位到 100%<span class="tip-arrow" :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
+              <span class="tip" :class="TIP_CLASS">{{ t('ai.panel.resetZoom') }}<span class="tip-arrow" :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
             </button>
             <button
               type="button"
               :class="[MMD_COPY_ICON_BTN_CLASS, mmdViewerCopied ? 'is-copied' : '']"
               data-testid="mmd-copy"
-              aria-label="复制源码"
+              :aria-label="t('ai.panel.copySource')"
               @click="copyMmdViewerSource"
             >
               <svg viewBox="0 0 24 24" aria-hidden="true" class="i-copy"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
               <svg viewBox="0 0 24 24" aria-hidden="true" class="i-check"><polyline points="20 6 9 17 4 12"></polyline></svg>
-              <span class="tip" :class="TIP_CLASS">复制源码<span class="tip-arrow" :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
+              <span class="tip" :class="TIP_CLASS">{{ t('ai.panel.copySource') }}<span class="tip-arrow" :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
             </button>
             <button
               type="button"
               :class="MMD_ICON_BTN_CLASS"
               data-testid="mmd-download"
-              aria-label="下载 SVG"
+              :aria-label="t('ai.panel.downloadSvg')"
               @click="downloadMmdViewerSvg"
             >
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"></path><path d="m7 10 5 5 5-5"></path><path d="M5 21h14"></path></svg>
-              <span class="tip" :class="TIP_CLASS">下载 SVG<span class="tip-arrow" :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
+              <span class="tip" :class="TIP_CLASS">{{ t('ai.panel.downloadSvg') }}<span class="tip-arrow" :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
             </button>
             <button
               type="button"
               :class="MMD_ICON_BTN_CLASS"
               data-testid="mmd-close"
-              aria-label="关闭全屏"
+              :aria-label="t('ai.panel.closeFullscreen')"
               @click="closeMmdViewer"
             >
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg>
-              <span class="tip" :class="TIP_CLASS">关闭全屏<span class="tip-arrow" :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
+              <span class="tip" :class="TIP_CLASS">{{ t('ai.panel.closeFullscreen') }}<span class="tip-arrow" :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
             </button>
           </span>
         </div>
@@ -2107,17 +2107,17 @@ function buildMermaidCardHtml(svg: string | null): string {
   const hasSvg = svg !== null
   const head =
     `<div class="${MMD_HEAD_CLASS}"><span class="${MMD_MARK_CLASS}">◈</span>` +
-    `<span class="${MMD_NAME_CLASS}">流程图</span>` +
+    `<span class="${MMD_NAME_CLASS}">${t('ai.panel.diagramName')}</span>` +
     (hasSvg
-      ? `<div class="${MMD_TABS_CLASS}" role="tablist" aria-label="流程图视图">` +
-        `<button type="button" class="${MMD_TAB_CLASS} is-on" role="tab" aria-selected="true" data-tab="preview">预览</button>` +
-        `<button type="button" class="${MMD_TAB_CLASS}" role="tab" aria-selected="false" data-tab="source">源码</button></div>`
+      ? `<div class="${MMD_TABS_CLASS}" role="tablist" aria-label="${t('ai.panel.diagramView')}">` +
+        `<button type="button" class="${MMD_TAB_CLASS} is-on" role="tab" aria-selected="true" data-tab="preview">${t('ai.panel.tabPreview')}</button>` +
+        `<button type="button" class="${MMD_TAB_CLASS}" role="tab" aria-selected="false" data-tab="source">${t('ai.panel.tabSource')}</button></div>`
       : '') +
     (hasSvg
       ? '<span class="ml-auto flex items-center gap-[5px]">' +
         '<span class="mmdc-ipct min-w-[36px] text-center font-mono text-[10.5px] tabular-nums text-[#8b949e]">100%</span>' +
-        `<button type="button" class="${MMD_ICON_BTN_CLASS} mmdc-ireset" aria-label="复位到 100%">${MMD_ICON_RESET}${mmdTipSpan('复位到 100%', true)}</button>` +
-        `<button type="button" class="${MMD_ICON_BTN_CLASS} mmdc-full" aria-label="全屏查看">${MMD_ICON_FULL}${mmdTipSpan('全屏查看', true)}</button>` +
+        `<button type="button" class="${MMD_ICON_BTN_CLASS} mmdc-ireset" aria-label="${t('ai.panel.resetZoom')}">${MMD_ICON_RESET}${mmdTipSpan(t('ai.panel.resetZoom'), true)}</button>` +
+        `<button type="button" class="${MMD_ICON_BTN_CLASS} mmdc-full" aria-label="${t('ai.panel.fullscreen')}">${MMD_ICON_FULL}${mmdTipSpan(t('ai.panel.fullscreen'), true)}</button>` +
         '</span>'
       : '') +
     '</div>'
@@ -2127,8 +2127,8 @@ function buildMermaidCardHtml(svg: string | null): string {
     : ''
   const source =
     `<div class="${hasSvg ? MMD_SOURCE_PANE_CLASS : 'mmdc-pane'}" data-pane="source">` +
-    `<div class="${MMD_SOURCE_BAR_CLASS}"><span>mermaid 源码</span><span class="ml-auto">` +
-    `<button type="button" class="${COPY_ICON_BTN_CLASS} mmdc-copy" aria-label="复制源码">${COPY_ICON_SVGS}${mmdTipSpan('复制源码')}</button>` +
+    `<div class="${MMD_SOURCE_BAR_CLASS}"><span>${t('ai.panel.sourceLabel')}</span><span class="ml-auto">` +
+    `<button type="button" class="${COPY_ICON_BTN_CLASS} mmdc-copy" aria-label="${t('ai.panel.copySource')}">${COPY_ICON_SVGS}${mmdTipSpan(t('ai.panel.copySource'))}</button>` +
     '</span></div>' +
     `<div class="${MMD_SOURCE_BOX_CLASS}"></div></div>`
   return head + preview + source

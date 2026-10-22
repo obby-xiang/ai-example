@@ -1,6 +1,6 @@
 <template>
   <TaskWizard
-    title="导入配置向导"
+    :title="t('views.import.title')"
     :subtitle="taskSubtitle"
     :steps="WIZARD_STEPS"
     :active-index="stepIndex"
@@ -22,12 +22,12 @@
         type="warning"
         :closable="false"
         show-icon
-        title="尚未绑定任务"
-        description="导入向导需要挂在一条导入任务上（文件与暂存行按任务存储）。可直接创建任务进入，或从任务中心点任务标题进入。"
+        :title="t('views.import.noTask')"
+        :description="t('views.import.noTaskDesc')"
         class="mb-3"
       >
         <el-button size="small" type="primary" :loading="creatingTask" class="mt-2" @click="createAndBindTask">
-          创建导入任务并进入
+          {{ t('views.import.createAndEnter') }}
         </el-button>
       </el-alert>
 
@@ -42,7 +42,7 @@
         @drop="onAiDrop"
       >
         <el-button v-if="!isReadOnly" size="small" :disabled="!selectedDefs.length" :loading="busy === 'templates'" data-ai-ref="import.upload.templates" data-ai-risk="consequential" @click="downloadTemplates">
-          下载模板（{{ selectedDefs.length > 1 ? 'zip' : 'xlsx' }}）
+          {{ t('views.import.downloadTemplate', { format: selectedDefs.length > 1 ? 'zip' : 'xlsx' }) }}
         </el-button>
         <el-upload
           v-if="!isReadOnly"
@@ -53,14 +53,14 @@
           :on-change="handleUpload"
         >
           <el-button size="small" type="primary" :loading="busy === 'upload'" :disabled="!selectedDefs.length" data-ai-ref="import.upload.choose" data-ai-risk="consequential">
-            上传 xlsx / zip
+            {{ t('views.import.upload') }}
           </el-button>
         </el-upload>
         <el-button v-if="!isReadOnly" size="small" :disabled="!selectedDefs.length" :loading="busy === 'flush'" data-ai-ref="import.upload.flush" data-ai-risk="consequential" @click="flushEditors">
-          保存草稿到服务端
+          {{ t('views.import.saveDraft') }}
         </el-button>
         <span class="text-xs text-[#909399]">
-          按文件名中的配置项编码匹配（如 COUNTRY.xlsx）；zip 内可含多个 xlsx；未上传的配置项按模板在线编辑。
+          {{ t('views.import.matchHint') }}
         </span>
       </div>
 
@@ -77,8 +77,8 @@
                   data-ai-verbs="click,highlight"
                   :data-ai-label="`${def.name}（${def.code}）`"
                 >{{ def.name }}（{{ def.code }}）</span>
-                <el-tag v-if="uploadedFiles[def.code]" size="small" type="success" class="ml-1">已上传</el-tag>
-                <el-tag v-else-if="savedDefs.has(def.code)" size="small" type="info" class="ml-1">草稿已存</el-tag>
+                <el-tag v-if="uploadedFiles[def.code]" size="small" type="success" class="ml-1">{{ t('views.import.uploaded') }}</el-tag>
+                <el-tag v-else-if="savedDefs.has(def.code)" size="small" type="info" class="ml-1">{{ t('views.import.draftSaved') }}</el-tag>
               </template>
               <SpreadGrid
                 :ref="(el) => setGridRef(def.code, el)"
@@ -92,16 +92,16 @@
           </el-tabs>
         </div>
       </template>
-      <el-empty v-else description="请先勾选配置项，再下载模板 / 上传文件 / 在线编辑" :image-size="60" />
+      <el-empty v-else :description="t('views.import.emptyPick')" :image-size="60" />
     </div>
 
     <!-- ============ 第 2 步：检查配置 ============ -->
     <div v-show="stepIndex === 1">
       <div class="flex items-center gap-3 mb-3">
         <el-button v-if="!isReadOnly" type="primary" :loading="busy === 'check'" :disabled="jobRunning(checkJob)" @click="startCheck">
-          启动预检查
+          {{ t('views.import.startPrecheck') }}
         </el-button>
-        <span class="text-xs text-[#909399]">校验必填、类型、枚举与跨配置项引用；不写入任何数据。</span>
+        <span class="text-xs text-[#909399]">{{ t('views.import.precheckHint') }}</span>
       </div>
       <JobProgress
         :job="checkJob"
@@ -117,7 +117,7 @@
         :closable="false"
         show-icon
         class="mt-3"
-        title="预检查通过，可进入下一步导入。"
+        :title="t('views.import.precheckPassed')"
       />
       <el-alert
         v-else-if="checkJob && checkJob.status === 'FAILED'"
@@ -125,7 +125,7 @@
         :closable="false"
         show-icon
         class="mt-3"
-        title="存在校验错误，可返回第 1 步修改数据后重新检查，或直接继续（导入时会再次校验）。"
+        :title="t('views.import.precheckFailed')"
       />
     </div>
 
@@ -133,9 +133,9 @@
     <div v-show="stepIndex === 2">
       <div class="flex items-center gap-3 mb-3">
         <el-button v-if="!isReadOnly" type="primary" :loading="busy === 'import'" :disabled="jobRunning(importJob)" @click="startImport">
-          启动导入
+          {{ t('views.import.startImport') }}
         </el-button>
-        <span class="text-xs text-[#909399]">再次校验后写入暂存区（暂不发布）；有错误的配置项其下游依赖将被跳过。</span>
+        <span class="text-xs text-[#909399]">{{ t('views.import.importHint') }}</span>
       </div>
       <JobProgress
         :job="importJob"
@@ -152,7 +152,7 @@
       <el-card shadow="never" class="mb-3.5">
         <template #header>
           <div class="flex justify-between items-center">
-            <span>暂存数据核查</span>
+            <span>{{ t('views.import.stagingTitle') }}</span>
             <div ref="aiModeRowRef" class="flex items-center gap-2">
               <el-radio-group v-model="importMode" size="small" :disabled="isReadOnly" @change="onImportModeChange">
                 <el-radio-button
@@ -163,7 +163,7 @@
                   data-ai-option="MERGE"
                   data-ai-risk="consequential"
                   data-ai-label="增量合并"
-                >增量合并</el-radio-button>
+                >{{ t('views.import.mergeMode') }}</el-radio-button>
                 <el-radio-button
                   value="REPLACE"
                   data-ai-ref="import.mode.replace"
@@ -172,25 +172,25 @@
                   data-ai-option="REPLACE"
                   data-ai-risk="consequential"
                   data-ai-label="范围内替换"
-                >范围内替换</el-radio-button>
+                >{{ t('views.import.replaceMode') }}</el-radio-button>
               </el-radio-group>
-              <el-button size="small" :loading="stagingLoading" @click="loadStaging">刷新</el-button>
+              <el-button size="small" :loading="stagingLoading" @click="loadStaging">{{ t('views.import.refresh') }}</el-button>
             </div>
           </div>
         </template>
-        <el-empty v-if="!staging.length" description="暂存区暂无数据，请先完成导入" :image-size="60" />
+        <el-empty v-if="!staging.length" :description="t('views.import.emptyStaging')" :image-size="60" />
         <el-collapse v-else v-model="stagingOpen">
           <el-collapse-item v-for="group in staging" :key="group.defCode" :name="group.defCode">
             <template #title>
               <!-- 行高必须落在这个块级元素上：inline 子元素的小 line-height 会被 el-collapse-item__title 的 48px 行高「撑」回去 -->
-              <span class="block whitespace-normal leading-snug">{{ `${defName(group.defCode)}（${group.defCode}）— ${group.rowCount} 行` }}</span>
+              <span class="block whitespace-normal leading-snug">{{ t('views.import.groupTitle', { name: defName(group.defCode), code: group.defCode, rows: group.rowCount }) }}</span>
             </template>
             <el-table :data="group.rows.slice(0, 100)" size="small" border max-height="300">
-              <el-table-column prop="rowKey" label="业务键" width="150" />
-              <el-table-column prop="opType" label="操作" width="90">
+              <el-table-column prop="rowKey" :label="t('views.import.rowKey')" width="150" />
+              <el-table-column prop="opType" :label="t('views.import.actions')" width="90">
                 <template #default="{ row }: { row: ConfigStagingRow }">
                   <el-tag size="small" :type="row.opType === 'DELETE' ? 'danger' : 'success'">
-                    {{ row.opType === 'DELETE' ? '删除' : '写入' }}
+                    {{ row.opType === 'DELETE' ? t('views.import.opDelete') : t('views.import.opWrite') }}
                   </el-tag>
                 </template>
               </el-table-column>
@@ -203,17 +203,17 @@
                 <template #default="{ row }: { row: ConfigStagingRow }">{{ cellValue(row, field.code) }}</template>
               </el-table-column>
             </el-table>
-            <div v-if="group.rowCount > 100" class="py-1.5 text-xs text-[#909399]">仅展示前 100 行</div>
+            <div v-if="group.rowCount > 100" class="py-1.5 text-xs text-[#909399]">{{ t('views.import.first100') }}</div>
           </el-collapse-item>
         </el-collapse>
       </el-card>
 
       <div class="flex items-center gap-3 mb-3">
         <el-button v-if="!isReadOnly" type="primary" :loading="busy === 'publish'" :disabled="jobRunning(publishJob)" @click="startPublish">
-          确认发布
+          {{ t('views.import.publish') }}
         </el-button>
         <span class="text-xs text-[#909399]">
-          {{ importMode === 'REPLACE' ? '发布将按配置项范围内替换正式区数据（范围内未覆盖的旧行删除）。' : '发布将按业务键增量更新正式区数据。' }}
+          {{ importMode === 'REPLACE' ? t('views.import.publishReplace') : t('views.import.publishMerge') }}
         </span>
       </div>
 
@@ -224,8 +224,8 @@
         :closable="false"
         show-icon
         class="mb-3"
-        :title="`发布冲突（异步形态）：${publishConflict.message}`"
-        :description="`作业 #${publishConflict.jobId} 终态 ${publishConflict.jobStatus}；冲突行：${publishConflict.issueKeys.slice(0, 8).join('、')}${publishConflict.issueKeys.length > 8 ? ' 等' : ''}。发布请求本身已受理（201），请按提示重新导入后再发布。`"
+        :title="t('views.import.conflictTitle', { message: publishConflict.message })"
+        :description="t('views.import.conflictDesc', { jobId: publishConflict.jobId, status: publishConflict.jobStatus, keys: publishConflict.issueKeys.slice(0, 8).join('、'), more: publishConflict.issueKeys.length > 8 ? t('views.import.conflictMore') : '' })"
       />
 
       <JobProgress
@@ -241,6 +241,7 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from 'vue-i18n'
 /**
  * 导入配置向导（四步：上传配置 → 检查配置 → 导入配置 → 发布配置）。
  *
@@ -277,6 +278,8 @@ import type { ConfigDefinition, ConfigField } from '@/types/definition'
 import type { Job, ValidationIssue } from '@/types/job'
 import { readImportMode, TaskSteps, type ImportMode, type Task } from '@/types/task'
 import type { WorkspaceActionSource } from '@/types/tools'
+
+const { t } = useI18n()
 
 interface GridApi {
   loadFromXlsx(blob: Blob, fields: readonly ConfigField[]): Promise<{ missingHeaders: string[] }>
