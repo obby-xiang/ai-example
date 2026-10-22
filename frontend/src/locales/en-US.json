@@ -291,5 +291,8 @@
         "title": "Start publish job"
       }
     }
+  },
+  "sheet": {
+    "readOnlyWriteBlocked": "Task finished; read-only. Write actions were not executed and the sheet was not modified."
   }
 }

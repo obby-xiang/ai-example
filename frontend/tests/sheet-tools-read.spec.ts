@@ -12,6 +12,7 @@ import {
   capSheetResult,
   inspectColumns,
   normalizeSuggest,
+  planNormalize,
   readSheetSummary,
   reviewCells
 } from '@/utils/sheet-tools'
@@ -159,7 +160,7 @@ describe('T-27 归一化建议档：commit=false 零写入', () => {
       scope: 'sheet',
       columnCodes: ['code'],
       rules: ['trim', 'case'],
-      case: 'upper'
+      caseMode: 'upper'
     })
     expect(result.ok).toBe(true)
     if (!result.ok) return
@@ -167,5 +168,142 @@ describe('T-27 归一化建议档：commit=false 零写入', () => {
     expect(result.text).toContain('共')
     expect(sheet.writes).toHaveLength(0)
     expect(sheet.rows[0]?.code).toBe(' CNY ')
+  })
+})
+
+// ── 表格工具批A：修错与订正（P0-2 / P0-3 / P0-5 / P1-1） ──────────────────────
+
+describe('P0-2 caseMode 真正生效（参数名与后端 AiTools/SheetWriteGuard 一致）', () => {
+  it('planNormalize(caseMode=lower) ⇒ 变更值真的转小写', () => {
+    const sheet = makeFakeSheet({ fields: baseFields, rows: [{ code: 'AbC', name: '甲' }] })
+    const planned = planNormalize(sheet.ctx, {
+      defCode: 'DEMO',
+      scope: 'sheet',
+      columnCodes: ['code'],
+      rules: ['case'],
+      caseMode: 'lower',
+      commit: true
+    })
+    expect(planned.ok).toBe(true)
+    if (!planned.ok) return
+    expect(planned.plan.changes).toHaveLength(1)
+    expect(planned.plan.changes[0]?.newValue).toBe('abc')
+  })
+
+  it('normalizeSuggest(caseMode=lower) ⇒ 文案标 lower 且样例为小写', () => {
+    const sheet = makeFakeSheet({ fields: baseFields, rows: [{ code: 'AbC', name: '甲' }] })
+    const result = normalizeSuggest(sheet.ctx, {
+      defCode: 'DEMO',
+      scope: 'sheet',
+      columnCodes: ['code'],
+      rules: ['case'],
+      caseMode: 'lower'
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.text).toContain('case → lower')
+    expect(result.text).toContain('「AbC」→「abc」')
+  })
+
+  it('非法 caseMode 仍被拒（upper/lower 之外）', () => {
+    const sheet = makeFakeSheet({ fields: baseFields, rows: [{ code: 'AbC', name: '甲' }] })
+    const result = normalizeSuggest(sheet.ctx, {
+      defCode: 'DEMO',
+      scope: 'sheet',
+      columnCodes: ['code'],
+      rules: ['case'],
+      caseMode: 'title'
+    })
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toContain('upper 或 lower')
+  })
+})
+
+describe('P0-3 scope=rows：rowRange 是字符串区间', () => {
+  it('scope=rows + rowRange="2-41" ⇒ 命中 2..26 行（表尾截断）且 ok', () => {
+    const sheet = makeFakeSheet({ fields: baseFields, rows: rowsOf(25) })
+    const result = readSheetSummary(sheet.ctx, { defCode: 'DEMO', scope: 'rows', rowRange: '2-41', limit: 5 })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.text).toContain('scope=rows')
+    expect(result.text).toContain('（命中 25 行 / 共 25 行）')
+    expect(result.text).toContain('第 2 行')
+    expect(result.text).toContain('第 6 行')
+    expect(result.text).not.toContain('第 7 行')
+  })
+
+  it('scope=rows 缺 rowRange ⇒ 人话拒绝，不猜区间', () => {
+    const sheet = makeFakeSheet({ fields: baseFields, rows: rowsOf(5) })
+    const result = readSheetSummary(sheet.ctx, { defCode: 'DEMO', scope: 'rows' })
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toContain('rowRange')
+  })
+})
+
+describe('P0-5 读侧投影缺省收窄：主键列 + 前 4 列，≤5 列上限', () => {
+  it('12 列未给 columnCodes ⇒ 投影 5 列（主键列优先 + 前 4 列）', () => {
+    const fields = Array.from({ length: 12 }, (_, index) => field(`c${index}`, `列${index}`, { key: index === 7 }))
+    const row: Record<string, unknown> = {}
+    for (let index = 0; index < 12; index += 1) row[`c${index}`] = `v${index}`
+    const sheet = makeFakeSheet({ fields, rows: [row] })
+    const result = readSheetSummary(sheet.ctx, { defCode: 'DEMO', scope: 'sheet', limit: 5 })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.text).toContain('共 5 列')
+    expect(result.text).toContain('另有 7 列未显示')
+    // 主键列 + 前 4 列：c7 在投影内，c5 及以后不在
+    expect(result.text).toContain('c7=v7')
+    expect(result.text).not.toContain('c5=v5')
+    expect(result.text).not.toContain('c11=v11')
+  })
+
+  it('columnCodes 超 5 列 ⇒ 拒绝而非静默全列', () => {
+    const fields = Array.from({ length: 12 }, (_, index) => field(`c${index}`, `列${index}`))
+    const row: Record<string, unknown> = {}
+    for (let index = 0; index < 12; index += 1) row[`c${index}`] = `v${index}`
+    const sheet = makeFakeSheet({ fields, rows: [row] })
+    const result = readSheetSummary(sheet.ctx, {
+      defCode: 'DEMO',
+      scope: 'sheet',
+      columnCodes: ['c0', 'c1', 'c2', 'c3', 'c4', 'c5'],
+      limit: 5
+    })
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toContain('最多 5 列')
+  })
+})
+
+describe('P1-1 尺寸闸覆盖整条结果（表头/空值/重复/采样/尾行全计入 2000 字符）', () => {
+  it('20 行 × 5 列长值 ⇒ 整条结果 ≤2000 字符且带截断标记与“共 N 行”', () => {
+    const fields = Array.from({ length: 5 }, (_, index) =>
+      field(`c${index}`, `列${index}`, { key: index === 0, required: true }))
+    const rows = Array.from({ length: 25 }, (_, rowIndex) => {
+      const row: Record<string, unknown> = {}
+      for (let col = 0; col < 5; col += 1) row[`c${col}`] = `R${rowIndex}-C${col}-${'长'.repeat(80)}`
+      return row
+    })
+    const sheet = makeFakeSheet({ fields, rows })
+    const result = readSheetSummary(sheet.ctx, { defCode: 'DEMO', scope: 'sheet', limit: 20 })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.text.length).toBeLessThanOrEqual(SHEET_TOOL_MAX_RESULT_CHARS)
+    expect(result.text).toContain('表格：DEMO')
+    expect(result.text).toContain('采样（前 20 行')
+    expect(result.text).toContain('已截断')
+    expect(result.text).toContain('共 25 行')
+    const returned = Number(/本次回 (\d+) 行/.exec(result.text)?.[1])
+    expect(Number.isInteger(returned)).toBe(true)
+    expect(returned).toBeLessThanOrEqual(SHEET_TOOL_MAX_SAMPLE_ROWS)
+  })
+
+  it('行数与字符同时触发 ⇒ 报最先触发的 rows（不被 chars 覆盖）', () => {
+    const lines = Array.from({ length: 25 }, (_, index) => `第 ${index + 2} 行 | ${'长'.repeat(300)}`)
+    const capped = capSheetResult({ lines, total: 25, returned: 25, unit: '行' })
+    expect(capped.truncated).toBe(true)
+    expect(capped.truncatedReason).toBe('rows')
+    expect(capped.text).toContain('共 25 行，本次回 20 行')
   })
 })

@@ -97,3 +97,88 @@ describe('T-30 未上线能力：delete_rows 明确不可用', () => {
     expect(execution.result).toContain('当前不支持按条件删除行')
   })
 })
+
+// ── 表格工具批A：注册表/执行器层修错（P0-3 / P0-4 / 文案订正） ──────────────────
+
+function installSheetHandler(input: { readOnly: boolean; rowCount: number }): void {
+  registerPageHandler('sheet.current', () => ({
+    ok: true,
+    defCode: 'DEMO',
+    sheetName: '演示表',
+    readOnly: input.readOnly,
+    version: 1,
+    fields: [
+      { defCode: 'DEMO', code: 'code', label: '编码', fieldType: 'STRING', required: true, key: true, sortOrder: 0 },
+      { defCode: 'DEMO', code: 'name', label: '名称', fieldType: 'STRING', required: false, key: false, sortOrder: 1 }
+    ],
+    adapter: {
+      rowCount: () => input.rowCount,
+      colCount: () => 2,
+      header: (col: number) => (col === 0 ? '编码' : '名称'),
+      getCell: (row: number, col: number) => (col === 0 ? `C${row + 1}` : `名称${row + 1}`),
+      getArray: () => [],
+      writeCells: () => undefined,
+      selection: () => null
+    }
+  }))
+}
+
+describe('P0-3 rowRange 前端登记为字符串：通用校验不得再拒', () => {
+  it('scope=rows + rowRange="2-4" 经 executeFrontendTool ⇒ ok', async () => {
+    installSheetHandler({ readOnly: false, rowCount: 3 })
+    const execution = await executeFrontendTool({
+      name: 'read_sheet_summary',
+      args: { defCode: 'DEMO', scope: 'rows', rowRange: '2-4', limit: 3 },
+      budgetMs: 5_000
+    })
+    expect(execution.outcome).toBe('ok')
+    expect(execution.result).toContain('scope=rows')
+    expect(execution.result).not.toContain('应为对象')
+  })
+})
+
+describe('P0-4 只读壳只拦写工具，读工具放行', () => {
+  it('只读壳 + read_sheet_summary ⇒ 正常回采样（不再误报“未对表格做任何修改”）', async () => {
+    installSheetHandler({ readOnly: true, rowCount: 2 })
+    const execution = await executeFrontendTool({
+      name: 'read_sheet_summary',
+      args: { defCode: 'DEMO', scope: 'sheet' },
+      budgetMs: 5_000
+    })
+    expect(execution.outcome).toBe('ok')
+    expect(execution.result).toContain('共 2 行')
+    expect(execution.result).not.toContain('未对表格做任何修改')
+  })
+
+  it('只读壳 + normalize_column(commit=false) ⇒ 仍可出建议', async () => {
+    installSheetHandler({ readOnly: true, rowCount: 2 })
+    const execution = await executeFrontendTool({
+      name: 'normalize_column',
+      args: { defCode: 'DEMO', scope: 'sheet', columnCodes: ['code'], rules: ['trim'] },
+      budgetMs: 5_000
+    })
+    expect(execution.outcome).toBe('ok')
+    expect(execution.result).toContain('归一化建议')
+  })
+
+  it('只读壳 + normalize_column(commit=true) ⇒ 写路径仍被拦', async () => {
+    installSheetHandler({ readOnly: true, rowCount: 2 })
+    const execution = await executeFrontendTool({
+      name: 'normalize_column',
+      args: { defCode: 'DEMO', scope: 'sheet', columnCodes: ['code'], rules: ['trim'], commit: true },
+      budgetMs: 5_000
+    })
+    expect(execution.outcome).toBe('failed')
+    expect(execution.availability).toBe('degraded')
+    expect(execution.result).toContain('任务已结束')
+  })
+})
+
+describe('文案订正：披露口径不再声称“业务行数据不出浏览器”', () => {
+  it('read_sheet_summary 描述 = 全量业务行不出浏览器 + 仅投影采样进模型', () => {
+    const description = findFrontendTool('read_sheet_summary')?.description ?? ''
+    expect(description).toContain('全量业务行不出浏览器')
+    expect(description).toContain('20 行')
+    expect(description).not.toContain('业务行数据不出浏览器')
+  })
+})

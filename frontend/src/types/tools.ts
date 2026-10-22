@@ -171,7 +171,7 @@ export const FRONTEND_TOOLS: readonly FrontendToolDescriptor[] = [
   {
     name: 'read_sheet_summary',
     displayName: '读取表格摘要',
-    description: '读取当前表格的结构与采样摘要（最多 20 行采样、2000 字符），业务行数据不出浏览器；末尾恒回“共 N 行”',
+    description: '读取当前表格的结构与采样摘要（全量业务行不出浏览器；仅投影采样 ≤20 行 / 2000 字符进模型；缺省投影 = 主键列 + 前 4 列）；末尾恒回“共 N 行”',
     channel: 'FRONTEND',
     riskLevel: 'READ',
     scopePatterns: SHEET_SCOPE_PATTERNS,
@@ -179,7 +179,7 @@ export const FRONTEND_TOOLS: readonly FrontendToolDescriptor[] = [
       { name: 'defCode', type: 'string', required: true, description: '配置定义编码' },
       { name: 'scope', type: 'string', required: false, description: 'selection（默认）/sheet/columns/rows' },
       { name: 'columnCodes', type: 'string[]', required: false, description: '投影列（≤5）' },
-      { name: 'rowRange', type: 'object', required: false, description: 'scope=rows 时的 Excel 行号区间' },
+      { name: 'rowRange', type: 'string', required: false, description: 'scope=rows 时的 Excel 行号区间（字符串，如 2-41）' },
       { name: 'predicate', type: 'object', required: false, description: 'FieldQueryCondition 条件' },
       { name: 'limit', type: 'number', required: false, description: '采样行数 1..20' }
     ]
@@ -234,7 +234,7 @@ export const FRONTEND_TOOLS: readonly FrontendToolDescriptor[] = [
       { name: 'defCode', type: 'string', required: true, description: '配置定义编码' },
       { name: 'columnCodes', type: 'string[]', required: true, description: '要归一化的列（≤5）' },
       { name: 'rules', type: 'string[]', required: true, description: 'trim/case/width（可执行）；space/number/date（仅建议）' },
-      { name: 'case', type: 'string', required: false, description: 'rule=case 时 upper/lower' },
+      { name: 'caseMode', type: 'string', required: false, description: 'rule=case 时 upper/lower' },
       { name: 'commit', type: 'boolean', required: false, description: '默认 false（只建议）' },
       { name: 'preview', type: 'string', required: false, description: 'count/sample-diff/full-diff' }
     ]

@@ -52,6 +52,7 @@
 import { HTTP_TIMEOUT_MS } from '@/utils/time-constants'
 import {
   SHEET_TOOL_NAMES,
+  SHEET_WRITE_TOOLS,
   UI_EVENT_TYPES,
   UI_TOOL_NAMES,
   findFrontendTool,
@@ -80,6 +81,7 @@ import {
   normalizeSuggest,
   readSheetSummary,
   reviewCells,
+  sheetReadOnlyWriteBlocked,
   undoLastSheetEdit,
   type SheetAdapter,
   type SheetContext,
@@ -1005,11 +1007,13 @@ function runSheetTool(name: string, args: Record<string, unknown>): Promise<Fron
       return makeExecution({ outcome: 'failed', availability: 'degraded', result: resolved.reason })
     }
     const ctx = resolved.ctx
-    if (ctx.readOnly && name !== 'normalize_column') {
+    // 只读壳只拦**写**路径：读工具（摘要/聚合/诊断/校验）与 normalize 建议档照常可用。
+    const writeCall = SHEET_WRITE_TOOLS.has(name) && (name !== 'normalize_column' || args.commit === true)
+    if (ctx.readOnly && writeCall) {
       return makeExecution({
         outcome: 'failed',
         availability: 'degraded',
-        result: '任务已结束，仅供查看，未对表格做任何修改。'
+        result: sheetReadOnlyWriteBlocked()
       })
     }
     let outcome: SheetToolOutcome

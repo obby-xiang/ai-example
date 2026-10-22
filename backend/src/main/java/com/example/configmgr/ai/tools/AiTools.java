@@ -152,7 +152,7 @@ public class AiTools {
      *
      * <p>取值依据（业界依据 §8「分页大小主流默认」）：GitHub 默认 30 / 上限 100，Stripe 默认 10，
      * 内网小数据量场景推荐<b>默认 20</b> —— 本值即该推荐值。且必须
-     * <b>&lt; {@code app.ai.tool-result.max-rows}</b>（200，见 application.yml），
+     * <b>&lt; {@code app.ai.result-budget.model.max-rows}</b>（200，见 application.yml），
      * 否则二次截断会先于本上限生效，下方"共 N 条仅显示前 M 条"的告知就成了假话。
      *
      * <p>为什么必须带告知：本工具是模型判断"任务是否存在、处于哪一步"的入口；静默截断会让模型把
@@ -613,15 +613,16 @@ public class AiTools {
     /**
      * 表格工具的公共披露范围：表格只出现在导出结果页（EXPORT/EXPORT）与上传页（IMPORT/UPLOAD）。
      *
-     * <p>8 个工具全部是 {@link ToolMeta.Channel#FRONTEND}（副作用在浏览器，业务行数据不出浏览器）；
+     * <p>8 个工具全部是 {@link ToolMeta.Channel#FRONTEND}（副作用在浏览器，**全量**业务行不出浏览器；
+     * 进模型的只有投影采样 ≤20 行 / 2000 字符）；
      * 写侧 3 个工具额外由前端“人围栏”预览确认（{@code stores/ai.ts} 特判），后端只挂起与回灌。
      * 方法体一律 {@link #FRONTEND_STUB}；入参由 {@code SheetWriteGuard} 在下发前复核。
      *
      * <p>回灌契约（设计稿 §4.2）：读工具恒带“共 N 行/处/组”；写工具成功文本必含“用户已确认”与
      * “未保存/可撤销”；工具描述里写死“最多 20 行”，与前端常量同源。
      */
-    @Tool(name = "read_sheet_summary", description = "读取当前激活表格的结构与采样摘要（采样最多 20 行 / 2000 字符），"
-            + "业务行数据不出浏览器；末尾恒回“共 N 行”。适用于“这表有多少行/某地区几行/有哪些列”")
+    @Tool(name = "read_sheet_summary", description = "读取当前激活表格的结构与采样摘要（全量业务行不出浏览器；"
+            + "仅投影采样 ≤20 行 / 2000 字符进模型；缺省投影 = 主键列 + 前 4 列）；末尾恒回“共 N 行”。适用于“这表有多少行/某地区几行/有哪些列”")
     @ToolScope({ "task:EXPORT/EXPORT", "task:IMPORT/UPLOAD" })
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.R)

@@ -16,11 +16,13 @@ import type { FieldQueryCondition } from '@/types/condition'
 import { conditionSummary } from '@/types/condition'
 import type { SheetChange, SheetPreviewLevel, SheetWritePlan } from '@/types/ai'
 import { excelRowNumber, validateCell, validateRows } from '@/utils/excel'
+import i18n from '@/locales'
 
 // ── 常量（设计稿 §3.3，读侧硬顶 / 写侧分层） ─────────────────────────────────
 
 export const SHEET_TOOL_MAX_SAMPLE_ROWS = 20
 export const SHEET_TOOL_MAX_RESULT_CHARS = 2000
+export const SHEET_TOOL_MAX_COLUMNS = 5
 export const SHEET_TOOL_DEFAULT_SAMPLE_ROWS = 5
 export const SHEET_AGGREGATE_MAX_GROUPS = 20
 export const SHEET_PREVIEW_SAMPLE_PAIRS = 3
@@ -84,6 +86,8 @@ export interface CapSheetInput {
   total: number
   returned: number
   unit: '行' | '处' | '组' | '格' | '列'
+  /** `whole` 模式下：前 N 行属于表头（不占“已回 N 单位”的计数）。 */
+  prefixLines?: number
 }
 
 /**
@@ -92,11 +96,13 @@ export interface CapSheetInput {
  * - 行数先截到 20（`limits.rows`），再按字符截到 2000（`limits.chars`）；
  * - 两者都触发时报**最先触发**的那一个（rows）；
  * - “共 N”恒在末尾（即便未截断）；
- * - 截断必有标记。
+ * - 截断必有标记；
+ * - `limits.whole = true`：调用方把**整条结果**（表头 + 明细）一次交进来，
+ *   字符闸对“正文 + 截断标记 + 尾行”整体生效（缺省只对明细块生效，保留旧口径）。
  */
 export function capSheetResult(
   input: CapSheetInput,
-  limits: { rows?: number; chars?: number } = {}
+  limits: { rows?: number; chars?: number; whole?: boolean } = {}
 ): { text: string; truncated: boolean; truncatedReason?: 'rows' | 'chars' } {
   const rowLimit = Math.max(1, limits.rows ?? SHEET_TOOL_MAX_SAMPLE_ROWS)
   const charLimit = Math.max(1, limits.chars ?? SHEET_TOOL_MAX_RESULT_CHARS)
@@ -105,12 +111,31 @@ export function capSheetResult(
 
   let reason: 'rows' | 'chars' | undefined
   let kept = input.lines
-  if (input.lines.length > rowLimit) {
+  if (!limits.whole && input.lines.length > rowLimit) {
     kept = input.lines.slice(0, rowLimit)
     reason = 'rows'
   }
   let body = kept.join('\n')
-  if (body.length > charLimit) {
+  let returned = Math.min(input.returned, kept.length)
+  const tail = (count: number): string => `共 ${input.total} ${input.unit}，本次回 ${count} ${input.unit}`
+  const charsMarker = (count: number): string =>
+    `…[已截断：原 ${originalLines} 行 / ${originalChars} 字符，已回 ${count} ${input.unit}]`
+  if (limits.whole) {
+    // 整条结果计入字符闸：先按标记 + 尾行预留字数，再从末尾整行回退。
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const marker = charsMarker(returned)
+      const budget = charLimit - marker.length - tail(returned).length - 2
+      if (body.length <= budget) break
+      const clipped = budget > 0 ? body.slice(0, budget) : ''
+      const lastBreak = clipped.lastIndexOf('\n')
+      body = lastBreak > 0 ? clipped.slice(0, lastBreak) : clipped
+      reason = 'chars'
+      const keptLines = body === '' ? 0 : body.split('\n').length
+      const nextReturned = Math.min(input.returned, Math.max(0, keptLines - (input.prefixLines ?? 0)))
+      if (nextReturned === returned) break
+      returned = nextReturned
+    }
+  } else if (body.length > charLimit) {
     const clipped = body.slice(0, charLimit)
     const lastBreak = clipped.lastIndexOf('\n')
     body = lastBreak > 0 ? clipped.slice(0, lastBreak) : clipped
@@ -118,7 +143,6 @@ export function capSheetResult(
       reason = 'chars'
     }
   }
-  const returned = Math.min(input.returned, kept.length)
   const parts: string[] = []
   if (body !== '') {
     parts.push(body)
@@ -129,7 +153,7 @@ export function capSheetResult(
       : `原 ${originalLines} 行 / ${originalChars} 字符，已回 ${returned} ${input.unit}`
     parts.push(`…[已截断：${what}]`)
   }
-  parts.push(`共 ${input.total} ${input.unit}，本次回 ${returned} ${input.unit}`)
+  parts.push(tail(returned))
   return {
     text: parts.join('\n'),
     truncated: reason !== undefined,
@@ -454,9 +478,14 @@ function validateDefCode(ctx: SheetContext, args: SheetArgs): string | null {
   return null
 }
 
+/** 只读壳的写路径拦截文案（单一源，走 locales；读工具不再被它拦）。 */
+export function sheetReadOnlyWriteBlocked(): string {
+  return i18n.global.t('sheet.readOnlyWriteBlocked')
+}
+
 function requireReadable(ctx: SheetContext): string | null {
   if (ctx.readOnly) {
-    return '任务已结束，仅供查看，未对表格做任何修改。'
+    return sheetReadOnlyWriteBlocked()
   }
   return null
 }
@@ -476,6 +505,10 @@ function chunkUpdates(updates: SheetCellUpdate[], size = SHEET_WRITE_CHUNK_ROWS)
 
 // ── 读侧：摘要 ───────────────────────────────────────────────────────────────
 
+/**
+ * 投影列：显式 `columnCodes` 优先；缺省时收窄为「主键列 + 前 4 列」（≤5 列），
+ * 不再回全部列 —— 全列投影会把整行业务值带进模型。
+ */
 function projectedColumns(ctx: SheetContext, args: SheetArgs, resolved: ResolvedScope): number[] {
   if (Array.isArray(args.columnCodes)) {
     return (args.columnCodes as unknown[])
@@ -487,12 +520,19 @@ function projectedColumns(ctx: SheetContext, args: SheetArgs, resolved: Resolved
     return Array.from({ length: Math.max(0, selection.colCount) }, (_, index) => selection.col + index)
       .filter((col) => col >= 0 && col < ctx.adapter.colCount())
   }
-  return ctx.fields.map((_field, index) => index)
+  const defaults: number[] = []
+  ctx.fields.forEach((field, index) => {
+    if (field.key && defaults.length < SHEET_TOOL_MAX_COLUMNS) defaults.push(index)
+  })
+  for (let col = 0; col < ctx.adapter.colCount() && defaults.length < SHEET_TOOL_MAX_COLUMNS; col += 1) {
+    if (!defaults.includes(col)) defaults.push(col)
+  }
+  return defaults
 }
 
 /**
  * `read_sheet_summary`：只回投影列的采样 + 规模/空值/重复摘要，**业务行不出浏览器**
- * 之外的只有这 ≤20 行采样（R3）。
+ * 之外的只有这 ≤20 行采样（R3）。尺寸闸覆盖整条结果（表头/摘要/采样/尾行）。
  */
 export function readSheetSummary(ctx: SheetContext, args: SheetArgs): SheetToolOutcome {
   const defError = validateDefCode(ctx, args)
@@ -502,6 +542,12 @@ export function readSheetSummary(ctx: SheetContext, args: SheetArgs): SheetToolO
     return { ok: false, reason: `limit 只能是 1 到 ${SHEET_TOOL_MAX_SAMPLE_ROWS} 的整数，本次未做任何修改。` }
   }
   if (Array.isArray(args.columnCodes)) {
+    if (args.columnCodes.length > SHEET_TOOL_MAX_COLUMNS) {
+      return {
+        ok: false,
+        reason: `columnCodes 最多 ${SHEET_TOOL_MAX_COLUMNS} 列，请缩小投影范围（或交给缺省投影：主键列 + 前 4 列）。`
+      }
+    }
     for (const code of args.columnCodes as unknown[]) {
       if (resolveColumn(ctx, String(code)) === null) {
         return { ok: false, reason: `投影列 ${String(code)} 不在当前表格中。` }
@@ -558,11 +604,12 @@ export function readSheetSummary(ctx: SheetContext, args: SheetArgs): SheetToolO
     return `  第 ${excelDisplay(row)} 行 | ${values.join(' | ')}`
   })
   const hidden = Math.max(0, ctx.fields.length - columns.length)
+  const allLines = [...lines, ...sampleLines]
   if (hidden > 0) {
-    lines.push(`另有 ${hidden} 列未显示`)
+    allLines.push(`另有 ${hidden} 列未显示`)
   }
-  const capped = capSheetResult({ lines: sampleLines, total, returned: sampleLines.length, unit: '行' })
-  return { ok: true, text: `${lines.join('\n')}\n${capped.text}` }
+  const capped = capSheetResult({ lines: allLines, total, returned: sampleLines.length, unit: '行', prefixLines: lines.length }, { whole: true })
+  return { ok: true, text: capped.text }
 }
 
 // ── 读侧：聚合（兼作计数级预览引擎） ──────────────────────────────────────────
@@ -640,8 +687,8 @@ export function aggregateSheet(ctx: SheetContext, args: SheetArgs): SheetToolOut
   if (groupBy === null) {
     const parts = metrics.map((metric) => `${metric}=${metricValue(resolved.rows, ctx, metricCol ?? 0, metric)}`)
     lines.push(`总计：${resolved.rows.length} 行${metricCol === null ? '' : ` · ${parts.join(' · ')}`}`)
-    const capped = capSheetResult({ lines: [], total: 1, returned: 1, unit: '组' })
-    return { ok: true, text: `${lines.join('\n')}\n${capped.text}` }
+    const capped = capSheetResult({ lines, total: 1, returned: 1, unit: '组' }, { whole: true })
+    return { ok: true, text: capped.text }
   }
 
   const groups = new Map<string, number[]>()
@@ -662,8 +709,8 @@ export function aggregateSheet(ctx: SheetContext, args: SheetArgs): SheetToolOut
     return `  ${label}：${rows.length} 行 · ${parts.join(' · ')}`
   })
   lines.push(`分组：${columnCode(ctx, groupBy)}`)
-  const capped = capSheetResult({ lines: groupLines, total: entries.length, returned: shown.length, unit: '组' })
-  return { ok: true, text: `${lines.join('\n')}\n${capped.text}` }
+  const capped = capSheetResult({ lines: [...lines, ...groupLines], total: entries.length, returned: shown.length, unit: '组', prefixLines: lines.length }, { whole: true })
+  return { ok: true, text: capped.text }
 }
 
 // ── 读侧：列映射诊断 ─────────────────────────────────────────────────────────
@@ -718,12 +765,13 @@ export function inspectColumns(ctx: SheetContext, args: SheetArgs): SheetToolOut
   lines.push(`多余：${extras.length > 0 ? extras.map((item) => item.header).join('、') : '无'}`)
   lines.push(`疑似映射（${Math.min(5, suggestions.length)} 条${suggestions.length > 5 ? `，共 ${suggestions.length} 条` : ''}）：`)
   const capped = capSheetResult({
-    lines: suggestions.slice(0, 5).map((line) => `  ${line}`),
+    lines: [...lines, ...suggestions.slice(0, 5).map((line) => `  ${line}`)],
     total: suggestions.length,
     returned: Math.min(5, suggestions.length),
-    unit: '列'
-  })
-  return { ok: true, text: `${lines.join('\n')}\n${capped.text}` }
+    unit: '列',
+    prefixLines: lines.length
+  }, { whole: true })
+  return { ok: true, text: capped.text }
 }
 
 // ── 读侧：本地校验摘要 ───────────────────────────────────────────────────────
@@ -761,8 +809,8 @@ export function reviewCells(ctx: SheetContext, args: SheetArgs): SheetToolOutcom
   lines.push(`前 ${Math.min(limit, filtered.length)} 条：`)
   const detail = filtered.slice(0, limit).map((issue) =>
     `  第 ${issue.rowIndex} 行 ${issue.fieldCode}「${issue.value}」：${issue.reason}`)
-  const capped = capSheetResult({ lines: detail, total: filtered.length, returned: detail.length, unit: '处' })
-  return { ok: true, text: `${lines.join('\n')}\n${capped.text}` }
+  const capped = capSheetResult({ lines: [...lines, ...detail], total: filtered.length, returned: detail.length, unit: '处', prefixLines: lines.length }, { whole: true })
+  return { ok: true, text: capped.text }
 }
 
 // ── 写侧：计划与预览文本 ─────────────────────────────────────────────────────
@@ -1252,9 +1300,10 @@ function parseNormalizeArgs(ctx: SheetContext, args: SheetArgs): { ok: true; set
       }
     }
   }
-  const upper = String(args.case ?? 'upper').toLowerCase() !== 'lower'
-  if (rules.includes('case') && args.case !== undefined && args.case !== 'upper' && args.case !== 'lower') {
-    return { ok: false, reason: 'rule=case 时 case 只能是 upper 或 lower。' }
+  const caseMode = args.caseMode
+  const upper = String(caseMode ?? 'upper').toLowerCase() !== 'lower'
+  if (rules.includes('case') && caseMode !== undefined && caseMode !== 'upper' && caseMode !== 'lower') {
+    return { ok: false, reason: 'rule=case 时 caseMode 只能是 upper 或 lower。' }
   }
   return { ok: true, setup: { columns, rules, upper, commit } }
 }
