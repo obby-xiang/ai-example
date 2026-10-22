@@ -19,7 +19,9 @@
     "select_definitions",
     "set_condition",
     "confirm_step",
-    "generative_form"
+    "generative_form",
+    "aggregate_sheet",
+    "update_rows"
   ],
   "convergence": {
     "maxCallsPerTurn": 6
@@ -811,6 +813,62 @@
             }
           ]
         }
+      }
+    },
+    {
+      "id": "SHEET-AGG",
+      "note": "L-21 聚合卡主用例（T-13）：aggregate_sheet 纯读聚合。requiresTools 硬闸保证只有读闸开 + 表格上下文（task:EXPORT/EXPORT）才发得出来；arguments 只有结构（定义编码 / 分组列 / 度量），零业务值 —— 业务数据留在浏览器。桩不造表格数据（switches.sheet-big 的 script 层口径）。",
+      "match": {
+        "messageAny": [
+          "scenario=SHEET-AGG"
+        ],
+        "requiresTools": [
+          "aggregate_sheet"
+        ]
+      },
+      "tool": "aggregate_sheet",
+      "arguments": {
+        "defCode": "CURRENCY",
+        "scope": "sheet",
+        "groupBy": "decimalPlaces",
+        "metrics": [
+          "count"
+        ]
+      }
+    },
+    {
+      "id": "SHEET-UPDATE",
+      "note": "L-21 条件更新卡主用例（T-14）：update_rows 条件写入（谓词 + 单条 set）。写闸关（缺省）时该工具**不披露** ⇒ 桩按披露清单退化为文本轮；写闸开时下发工具调用，由用例扮演浏览器回灌预览结论。arguments 只含模型给出的条件与目标值，不含表内其它业务行。",
+      "match": {
+        "messageAny": [
+          "scenario=SHEET-UPDATE"
+        ],
+        "requiresTools": [
+          "update_rows"
+        ]
+      },
+      "tool": "update_rows",
+      "arguments": {
+        "defCode": "CURRENCY",
+        "scope": "predicate",
+        "predicate": {
+          "scopeKeys": [],
+          "fields": [
+            {
+              "fieldCode": "code",
+              "operator": "EQ",
+              "value": "USD"
+            }
+          ]
+        },
+        "set": [
+          {
+            "columnCode": "decimalPlaces",
+            "mode": "literal",
+            "value": 3
+          }
+        ],
+        "preview": "count"
       }
     }
   ]

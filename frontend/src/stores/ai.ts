@@ -48,6 +48,8 @@ import { aiHighlight, clearUiHighlights } from '@/utils/ai-dom-tools'
 import type { UiUndoEntry } from '@/utils/ai-dom-tools'
 import {
   applySheetPlan,
+  clearPreviewMarks,
+  markPreviewCells,
   needsSheetPreview,
   planCancelledText,
   planPreviewText,
@@ -2954,6 +2956,8 @@ export const useAiStore = defineStore('ai', {
       }
       this.activePreview = { ...planned.plan, runId }
       this.stalePreviewToolCallId = null
+      // 预览态高亮（L-23）：计数档没有逐格明细 ⇒ 这里通常是 0 格；切到明细档时再上色。
+      markPreviewCells(resolved.ctx, this.activePreview)
       this.upsertToolPart(message, {
         toolCallId,
         name: frame.name,
@@ -3300,6 +3304,13 @@ export const useAiStore = defineStore('ai', {
       }
       if (level === 'count' || plan.detail === 'full') {
         this.activePreview = { ...plan, preview: level }
+        if (level === 'count') {
+          // 计数档没有逐格明细 ⇒ 预览色随之撤掉（卡面也没有可核对的单元格）
+          const resolved = await resolveSheetContext(plan.defCode)
+          if (resolved.ok) {
+            clearPreviewMarks(resolved.ctx)
+          }
+        }
         return
       }
       const resolved = await resolveSheetContext(plan.defCode)
@@ -3312,12 +3323,15 @@ export const useAiStore = defineStore('ai', {
       if (!replanned.ok) {
         // 两种都收口到"预览已失效"：表格被改（stale）与明细超上限（物化失败）。
         // 前者用户重新发起即可，后者卡面会显示原因（不静默降级成 0 格预览）。
+        clearPreviewMarks(resolved.ctx)
         this.activePreview = null
         this.stalePreviewToolCallId = plan.toolCallId
         this.notice = replanned.reason
         return
       }
       this.activePreview = replanned.plan
+      // 明细算出来了才谈得上"待改格"：此刻上预览色（同一套绘制入口，屏幕态）
+      markPreviewCells(resolved.ctx, replanned.plan)
     },
 
     /** 写工具结局的统一落点：先写段，再回灌（cancelled 走既有 `FRONTEND_CANCELLED` 语义）。 */
@@ -3406,6 +3420,8 @@ export const useAiStore = defineStore('ai', {
         }
         this.activePreview = applied
       }
+      // 预览色先撤：同一格不该同时挂两种底色（已应用色由 applySheetPlan 上）
+      clearPreviewMarks(resolved.ctx)
       const outcome = applySheetPlan(resolved.ctx, applied)
       this.activePreview = null
       if (!outcome.ok) {
@@ -3447,6 +3463,10 @@ export const useAiStore = defineStore('ai', {
         return
       }
       this.activePreview = null
+      const resolved = await resolveSheetContext(plan.defCode)
+      if (resolved.ok) {
+        clearPreviewMarks(resolved.ctx)
+      }
       await this.finishSheetTool({
         toolCallId: plan.toolCallId,
         name: plan.tool,
@@ -3695,8 +3715,16 @@ export const useAiStore = defineStore('ai', {
       this.loading = false
       this.suspended = false
       this.dropActiveForm()
+      const droppingPreview = this.activePreview
       this.activePreview = null
       this.stalePreviewToolCallId = null
+      if (droppingPreview) {
+        // 停止 = 本轮被放弃：预览色跟着撤（表格可能在别的页签，解析不到就随刷新消失）
+        const resolved = await resolveSheetContext(droppingPreview.defCode)
+        if (resolved.ok) {
+          clearPreviewMarks(resolved.ctx)
+        }
+      }
       // S1：段级就地收敛（输入框解禁的直接前提：pendingToolCall 由段派生）
       this.cancelRoundParts()
       // S3/S4：消息尾标记 + 立即落镜像（含 done、stopped 与半截正文）

@@ -390,7 +390,8 @@
       "distributionOthers": "{count} more groups",
       "distributionTruncated": "more than 20 groups; the rest are not itemised",
       "distributionItem": "{key} {rows} rows / {cells} cells",
-      "manualChanges": "your edits since: {count} cells"
+      "manualChanges": "your edits since: {count} cells",
+      "highlightLegend": "Pending cells are tinted in the sheet for review (screen only, never written to the file)"
     },
     "applied": {
       "line": "AI changed {cells} cells (undoable, layer {layer} of 3)"

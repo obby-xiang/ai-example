@@ -67,6 +67,13 @@ export interface SheetSelection {
 }
 
 /**
+ * 屏幕态标记的两种色调（同一套绘制入口，AI 表格工具治理 §5.4）：
+ * `applied` = 已应用的 AI 改动（保留到下一次 apply / 撤销 / 刷新）；
+ * `preview` = 预览期的**待改格**（取消 / 放弃 / 应用前置 / 切回计数档即清）。
+ */
+export type SheetMarkTone = 'applied' | 'preview'
+
+/**
  * 表格适配器窄接口（设计稿 §3.6）。
  *
  * 只暴露纯数据面：**读写都必须走 array 版本**（批量），逐格 `getValue/setValue` 在数千行上会卡主线程。
@@ -89,10 +96,16 @@ export interface SheetAdapter {
    * `toWorkbookJson()` 产物。本仓的导出链（`buildRowsXlsxBlob`）只读 `collectRows()` 的值，
    * 故底色进不了导出文件（U-06 逐字节相同的结构保证）。
    * 适配器不实现该能力时行为不变（纯数据面适配器 / 单测桩）。
+   *
+   * @param tone 缺省 = `applied`（既有调用点语义不变）；预览期显式传 `preview`
    */
-  markCells?(cells: readonly { row: number; col: number }[]): void
-  /** 清除全部标记（撤销后调用；同样只是屏幕态）。 */
-  clearMarks?(): void
+  markCells?(cells: readonly { row: number; col: number }[], tone?: SheetMarkTone): void
+  /**
+   * 清除标记（同样只是屏幕态）。
+   *
+   * @param tone 缺省 = 全清（撤销后调用）；传 `preview` 只清预览色（已应用色保持）
+   */
+  clearMarks?(tone?: SheetMarkTone): void
 }
 
 /** 表格上下文（页面能力 `sheet.current` 的返回值）。 */
@@ -2484,9 +2497,33 @@ export function applySheetPlan(ctx: SheetContext, plan: SheetWritePlan): ApplySh
     }
     // 屏幕态标记（L-23 的复用点）：只画底色，不写 cell style / conditionalFormats
     // —— 后者会污染 toWorkbookJson() 产物（导出走 collectRows()，只读值，故底色进不了文件）。
-    ctx.adapter.markCells?.(plan.changes.map((change) => ({ row: change.row, col: change.col })))
+    ctx.adapter.markCells?.(plan.changes.map((change) => ({ row: change.row, col: change.col })), 'applied')
   }
   return { ok: true, text: planAppliedText(plan, ctx), cells: plan.changes.length }
+}
+
+/**
+ * 预览态高亮（L-23）：把**待改格**在预览期就上屏幕底色 —— 与已应用态共用
+ * {@link SheetAdapter#markCells} 这一条绘制入口（治理方案 §5.4「一次做两次用」）。
+ *
+ * <p>
+ * 计数档没有逐格明细（`changes` 为空）⇒ 清掉预览色而不是留一张过期高亮：卡面此时也没有
+ * 逐格信息可核对，留着只会让人以为"这些格要改"。只走屏幕绘制，预览期写入调用恒为 0（T-31 口径）。
+ *
+ * @return 本次上色的格数（0 = 没有逐格明细 / 适配器无该能力）
+ */
+export function markPreviewCells(ctx: SheetContext, plan: SheetWritePlan | null): number {
+  if (!plan || plan.detail === 'none' || plan.changes.length === 0) {
+    clearPreviewMarks(ctx)
+    return 0
+  }
+  ctx.adapter.markCells?.(plan.changes.map((change) => ({ row: change.row, col: change.col })), 'preview')
+  return plan.changes.length
+}
+
+/** 清预览色（取消 / 放弃 / 应用前置 / 切回计数档）；已应用色的清理仍走 `clearMarks()`（撤销后全清）。 */
+export function clearPreviewMarks(ctx: SheetContext): void {
+  ctx.adapter.clearMarks?.('preview')
 }
 
 /**

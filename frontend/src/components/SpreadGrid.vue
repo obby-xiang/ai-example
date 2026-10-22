@@ -112,10 +112,20 @@ const READY_TIMEOUT_MS = 60_000
 const AI_CHANGED_BACKCOLOR = '#eff4ff'
 
 /**
+ * 预览期待改格的屏幕底色（L-23）：浅琥珀，与已应用态的浅蓝**同形不同色** ——
+ * 预览是"还没发生的事"，必须与应用后可区分（同一格两次上色时后者覆盖前者，
+ * 不会出现混色；两种底色都不是状态色，不占用校验/审批的四族色）。
+ */
+const AI_PREVIEW_BACKCOLOR = '#fff4e0'
+
+/** 色调（与 `sheet-tools.ts#SheetMarkTone` 同值；缺省 = applied，既有调用点语义不变）。 */
+type MarkTone = 'applied' | 'preview'
+
+/**
  * 已打标记的格（清标记只扫这一份，不扫全表 —— 3 万行应用后 `clearMarks` 若逐格
  * `getCell` 会把主线程卡住；这与写路径"批量 setArray"的取舍同源）。
  */
-const markedCells: Array<{ row: number; col: number }> = []
+const markedCells: Array<{ row: number; col: number; tone: MarkTone }> = []
 
 let readyResolve: (() => void) | null = null
 let readyTimer: ReturnType<typeof setTimeout> | null = null
@@ -426,10 +436,12 @@ function getSheetAdapter(): SheetAdapter {
     },
     // 屏幕态标记（AI 表格工具治理 §5.4）：只设底色，不碰 cell style 的持久结构、
     // 不调 conditionalFormats —— 后者会进 toWorkbookJson()，而导出链只读值（collectRows）。
-    markCells: (cells) => {
+    markCells: (cells, tone) => {
       if (cells.length === 0) {
         return
       }
+      const resolvedTone: MarkTone = tone === 'preview' ? 'preview' : 'applied'
+      const color = resolvedTone === 'preview' ? AI_PREVIEW_BACKCOLOR : AI_CHANGED_BACKCOLOR
       restoring = true
       sheet.suspendPaint()
       try {
@@ -437,29 +449,38 @@ function getSheetAdapter(): SheetAdapter {
           if (cell.row < 0 || cell.row >= rowCount() || cell.col < 0 || cell.col >= colCount()) {
             continue
           }
-          sheet.getCell(cell.row + 1, cell.col).backColor(AI_CHANGED_BACKCOLOR)
-          markedCells.push({ row: cell.row, col: cell.col })
+          sheet.getCell(cell.row + 1, cell.col).backColor(color)
+          markedCells.push({ row: cell.row, col: cell.col, tone: resolvedTone })
         }
       } finally {
         sheet.resumePaint()
         restoring = false
       }
     },
-    clearMarks: () => {
+    clearMarks: (tone) => {
       if (markedCells.length === 0) {
         return
       }
+      const colors = tone === 'preview'
+        ? [AI_PREVIEW_BACKCOLOR]
+        : tone === 'applied' ? [AI_CHANGED_BACKCOLOR] : [AI_CHANGED_BACKCOLOR, AI_PREVIEW_BACKCOLOR]
       restoring = true
       sheet.suspendPaint()
       try {
+        let kept = 0
         for (const cell of markedCells) {
+          if (tone !== undefined && cell.tone !== tone) {
+            // 只清指定色调：预览色不能顺手把已应用色一起抹掉
+            markedCells[kept++] = cell
+            continue
+          }
           const target = sheet.getCell(cell.row + 1, cell.col)
           // 按值精确比对：只清自己打的那层底色，不动用户自设的颜色
-          if (target.backColor() === AI_CHANGED_BACKCOLOR) {
+          if (colors.includes(target.backColor())) {
             target.backColor(undefined)
           }
         }
-        markedCells.length = 0
+        markedCells.length = kept
       } finally {
         sheet.resumePaint()
         restoring = false

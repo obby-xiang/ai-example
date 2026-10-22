@@ -63,7 +63,7 @@
           v-for="(change, index) in plan.samples"
           :key="index"
           class="text-[11.9px] leading-[1.7] text-[#57606a]"
-        >第 {{ change.row + 2 }} 行 列 {{ change.col + 1 }}「{{ display(change.oldValue) }}」→「{{ display(change.newValue) }}」</div>
+        ><span :class="CELL_CHIP" :data-testid="'sheet-preview-cell'">{{ addressOf(change) }}</span>第 {{ change.row + 2 }} 行 列 {{ change.col + 1 }}「{{ display(change.oldValue) }}」→「{{ display(change.newValue) }}」</div>
         <div v-if="plan.samples.length === 0" class="text-[11.9px] text-[#8b949e]">没有匹配的单元格。</div>
       </div>
       <div v-if="plan.preview === 'full-diff'" class="mt-[7px]" data-testid="sheet-preview-full">
@@ -72,13 +72,23 @@
             v-for="(change, index) in pageChanges"
             :key="index"
             class="text-[11.7px] leading-[1.7] text-[#57606a]"
-          >第 {{ change.row + 2 }} 行 列 {{ change.col + 1 }}「{{ display(change.oldValue) }}」→「{{ display(change.newValue) }}」</div>
+          ><span :class="CELL_CHIP" :data-testid="'sheet-preview-cell'">{{ addressOf(change) }}</span>第 {{ change.row + 2 }} 行 列 {{ change.col + 1 }}「{{ display(change.oldValue) }}」→「{{ display(change.newValue) }}」</div>
         </div>
         <div class="mt-[5px] flex items-center gap-[8px] text-[11.5px] text-[#8b949e]">
           <button type="button" class="border-0 bg-transparent p-0 text-[#57606a] disabled:text-[#c0c4cc]" :disabled="page === 0" @click="page -= 1">上一页</button>
           <span>第 {{ page + 1 }} / {{ pageCount }} 页（共 {{ plan.changes.length }} 处）</span>
           <button type="button" class="border-0 bg-transparent p-0 text-[#57606a] disabled:text-[#c0c4cc]" :disabled="page >= pageCount - 1" @click="page += 1">下一页</button>
         </div>
+      </div>
+
+      <!-- L-23 预览态高亮的图例：表里那层浅琥珀色只画屏幕，不进导出文件（导出链只读值） -->
+      <div
+        v-if="plan.preview !== 'count' && plan.detail !== 'none'"
+        class="mt-[5px] flex items-center gap-[5px] text-[11.5px] leading-[1.6] text-[#8b949e]"
+        data-testid="sheet-preview-highlight-legend"
+      >
+        <span class="inline-block h-[9px] w-[9px] shrink-0 rounded-[2px] bg-[#fff4e0] ring-1 ring-inset ring-[#e6d3b3]"></span>
+        <span>{{ t('sheet.preview.highlightLegend') }}</span>
       </div>
 
       <!-- 明细未加载（计数档）：独立块放在三档链之外 —— 插在链中间会改写 v-else-if 的配对 -->
@@ -129,6 +139,7 @@
 import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { SheetPreviewLevel, SheetWritePlan } from '@/types/ai'
+import { cellAddress } from '@/utils/sheet-tools'
 
 const props = defineProps<{
   plan: SheetWritePlan | null
@@ -184,6 +195,14 @@ function levelClass(level: SheetPreviewLevel): string {
     'rounded-[6px] px-[8px] py-[3px] text-[11.6px] border border-solid transition-colors duration-[150ms]',
     active ? 'border-[#2563eb] bg-[#eff4ff] text-[#2563eb]' : 'border-[#e3e6ea] bg-white text-[#57606a] hover:border-[#8b949e]'
   ].join(' ')
+}
+
+/** 逐格地址片（L-23）：让「我改了 B3」在卡上直接可核对，颜色与表里预览底色同族。 */
+const CELL_CHIP =
+  'mr-[5px] inline-block rounded-[4px] bg-[#fff4e0] px-[4px] py-[1px] text-[11px] font-medium text-[#8a5a00] tabular-nums'
+
+function addressOf(change: { row: number; col: number }): string {
+  return cellAddress(change.col, change.row)
 }
 
 function display(value: unknown): string {

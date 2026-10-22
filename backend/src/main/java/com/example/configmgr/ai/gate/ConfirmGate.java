@@ -1182,6 +1182,21 @@ public class ConfirmGate {
 		return submission;
 	}
 
+	/**
+	 * 把入口已过白名单的表格元数据落到**当前这份**条目副本上（幂等：重复调用不叠加）。
+	 *
+	 * <p>必须在每次「重新读条目」之后调用一次 —— 外置存储读出来的是新对象，落值不会跟着走。
+	 */
+	private static void applySheetMeta(PendingToolCall pending, Map<String, Object> sheetMeta) {
+		if (pending == null || sheetMeta == null || sheetMeta.isEmpty()) {
+			return;
+		}
+		Map<String, Object> sanitized = SheetAudit.sanitize(sheetMeta);
+		if (!sanitized.isEmpty()) {
+			pending.setSheetMeta(sanitized);
+		}
+	}
+
 	/** 回灌的写入本体（{@link #submitFrontendResult} 去掉结构化留痕的那一层）。 */
 	private Submission doSubmitFrontendResult(String runId, String toolCallId, String result, String source,
 			boolean cancelled, String outcome, Map<String, Object> sheetMeta, String code) {
@@ -1193,13 +1208,9 @@ public class ConfirmGate {
 			return new Submission(Outcome.DUPLICATE, pending, false, null);
 		}
 		// AI 表格工具治理批：采样元数据只写过白名单（入口即丢业务值），且不参与任何判定。
-		// 位置刻意在"幂等判定之后、取消分支之前"—— 取消路径不需要它，重复提交不该覆盖它。
-		if (sheetMeta != null && !sheetMeta.isEmpty()) {
-			Map<String, Object> sanitized = SheetAudit.sanitize(sheetMeta);
-			if (!sanitized.isEmpty()) {
-				pending.setSheetMeta(sanitized);
-			}
-		}
+		// 位置刻意在"幂等判定之后、取消分支之前"—— 取消分支也要它（写侧取消计数按 planId 走台账），
+		// 而重复提交在上一行就已返回，故不会覆盖已落的值。
+		applySheetMeta(pending, sheetMeta);
 		if (cancelled) {
 			return dismiss(runId, pending, source);
 		}
@@ -1225,6 +1236,10 @@ public class ConfirmGate {
 			if (!PendingToolCall.PENDING.equals(pending.getStatus())) {
 				return new Submission(Outcome.DUPLICATE, pending, false, null);
 			}
+			// R4 抢到 guard 后重读了条目（真实 Redis = 反序列化出新对象）：白名单副本要在新副本上
+			// 再落一次，否则它随旧对象一起被丢弃 —— 后果是 tool_call_end 八字段与 ai:safety 台账
+			// 双双缺席，而判定语义完全正常（观测面塌陷，最容易被当成"没数据"而不是"丢了"）。
+			applySheetMeta(pending, sheetMeta);
 		}
 		pending.setStatus(PendingToolCall.FRONTEND_RESULT);
 		ToolOutcome declared = ToolOutcome.fromWire(outcome);
