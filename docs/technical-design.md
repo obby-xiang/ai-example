@@ -320,8 +320,9 @@ R5 全轮无有效候选 ⇒ 回退 `ContextEstimator` 估算并置 `est=true`�
 落进 `ai:ctx:` 的锚点（它们不在历史里，端点无从重建）。
 
 **L1 工具结果清除**：`ratio ≥ 70%` 时把最旧的、非 pin 的
-`ToolResponseMessage.responseData` 换成 `[tool_result 已清理：… ai:ledger:<runId>]`
-（**不删消息、不改 id、不动 `assistant(tool_calls)`** ⇒ 构造上无孤儿对；占位符刻意不复用
+`ToolResponseMessage.responseData` 换成 `[工具结果已清除：<name> · ≈<n> tokens · toolCallId=<id>]`
+（2026-10-22 改版：占位符不再写内部台账键，原文仍可凭 `toolCallId` 回查台账；
+**不删消息、不改 id、不动 `assistant(tool_calls)`** ⇒ 构造上无孤儿对；占位符刻意不复用
 `ToolResultLimiter.TRUNCATION_MARKER`）；pin = 最近 `keep-tool-pairs: 5` 对 + 未决 HITL 条目。
 
 **L2 按 Turn 滑窗 + 递归摘要**：`ratio ≥ 80%` 时把最旧的非 pin 前缀替换为「合成 `UserMessage`

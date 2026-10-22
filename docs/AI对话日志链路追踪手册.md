@@ -1,9 +1,10 @@
 # AI 对话日志链路追踪手册
 
-- 版本：2026-10-21（AI 可观测性专项 · 日志链路追踪批）
+- 版本：2026-10-22（AI 日志最小补齐批；首版 2026-10-21 = AI 可观测性专项 · 日志链路追踪批）
 - 适用基线：`main` 之后含 `feature/ai-logtrace` 的后端
 - 读者：排障值班、开发、评审
 - 定位：**只凭日志就能还原一轮 AI 对话**。帧（SSE）与 Redis 键族仍是真值；日志是本批新增的**可 grep 的骨架**
+- 本批增量（2026-10-22）：新增 3 个事件（`turn_denied` / `turn_exception` / `sse_detach`）、补齐 6 处字段（`turn_end` 的排队/跨段/可信度、`turn_retry` 的单次尝试、`tool_call_end` 的 `execMs`、`approval_decided` 的 `kind/timeoutS/suspendMs`、`turn_start` 的 `resumeReason`、行首第三列 `instanceId`），并订正首版 6 处口径出入（`memory_window` 补登、`upstream_first_byte` 两字段语义、`approval_decided` 与 suspend 分列、`turn_end.status` 取值域、`tool_call` 成对性实况）
 
 ---
 
@@ -29,28 +30,34 @@ grep -F "<runId>" app.log | grep 'event=turn_end'
 
 | 层次 | 形态 | 用途 |
 |---|---|---|
-| **行首锚点**（MDC） | 级别之后紧跟 `runId` 与 `sessionId`（无锚点的行这两位为空） | `grep <runId>` 即可捞到这一轮**所有**日志，包括既有 WARN/ERROR 细节行 |
+| **行首锚点**（MDC） | 级别之后紧跟 `runId` `sessionId` `instanceId` 三列（无锚点的行这三列都为空） | `grep <runId>` 即可捞到这一轮**所有**日志，包括既有 WARN/ERROR 细节行；`instanceId` 回答"多实例下这是哪个进程写的" |
 | **结构化事件**（`event=`） | `event=<名> runId=.. sessionId=.. k=v k=v`，INFO，单行 | 按事件名聚合、按字段切片、机器可读 |
 
 行首锚点由 `logging.pattern.level`（`backend/src/main/resources/application.yml`）渲染：
 
 ```
-%5p %X{runId:-} %X{sessionId:-}
+%5p %X{runId:-} %X{sessionId:-} %X{instanceId:-}
 ```
 
-实测行形（两段前缀之外与批之前逐字相同）：
+实测行形（三段前缀之外与批之前逐字相同）：
 
 ```
-2026-10-21T21:57:48.213+08:00  INFO 1f9c...e2  s-42 27140 --- [ai-suspend-3] c.e.c.ai.o.AiTrace : event=turn_end runId=1f9c...e2 sessionId=s-42 status=done ...
+2026-10-22T10:12:03.311+08:00  INFO 1f9c...e2  s-42  instance-hostA-pid27140-9f3c1a 27140 --- [ai-suspend-3] c.e.c.ai.o.AiTrace : event=turn_end runId=1f9c...e2 sessionId=s-42 status=done ...
 ```
 
 > 锚点为空时不渲染占位符 —— 非 AI 日志的行形与批之前一致，既有按行首匹配的脚本不受影响。
+>
+> **`instanceId` 的取值** = `InstanceId.get()`（`instance-<host>-pid<pid>-<6 位随机>`，进程内恒定），随 `AiTrace.bind` 进 MDC。它只在**绑过锚点的线程**上出现：非 AI 日志不会凭空多出一列。
+>
+> **旁路线程的补绑**：`AiTrace.eventOn` 的显式锚点现在会在发射期临时补绑 MDC（发射后还原）。此前 `compaction` / `approval_decided` 这类"由旁路线程发射"的事件出现过"事件体里 `runId=xxx`、行首却空白"的自相矛盾形态 —— 按行首 grep 的脚本捞不到它。
 
 ---
 
 ## 2. 事件字典
 
 字段约定：所有事件都带 `runId` / `sessionId`（取不到渲染 `-`）；值一律单行、超 160 字符截断；**任何事件都不含对话正文、工具入参、工具出参全文**。
+
+> **`-1` 与 `none` 的分工**（本批统一）：`none` = 语义上不存在/无上限；`-1` = 该测但没测到（缺失/未记录）。两者都不写 `0` —— `0` 是"测到了，值就是 0"。
 
 ### 2.1 `turn_accepted`（INFO，HTTP 入口）
 
@@ -60,6 +67,8 @@ grep -F "<runId>" app.log | grep 'event=turn_end'
 | `model` | 请求指定的模型（未指定 = `default`，实际模型见 `turn_start`） |
 | `chars` | 归一 + DLP 之后的输入字符数 |
 
+> 本行是 `queueMs` 的**起点**（受理时刻另行记在 MDC，见 §2.8 的 `queueMs`）。
+
 ### 2.2 `turn_start`（INFO，一次一轮，必有）
 
 | 字段 | 含义 |
@@ -67,6 +76,7 @@ grep -F "<runId>" app.log | grep 'event=turn_end'
 | `model` / `provider` | 本轮实际使用的模型与端点 |
 | `attempt` | 恒为 `1`（重试另见 `turn_retry`） |
 | `resumed` | `true` = 续跑（挂起后重连、重启接管、死卡兜底）；`false` = 首轮 |
+| `resumeReason` | 续跑原因：`none`（首轮）/ `startup`（启动扫描）/ `manual`（运维或用户显式调 `POST /api/ai/runs/{runId}/resume`）/ `deadcard`（启动扫描接管"状态仍 RUNNING 但已超龄"的僵尸轮）/ `reattach`（其余续跑入口：决策回灌、挂起重挂、调试直驱 —— **未标注原因的兜底口径**）。首轮固定写 `none`，不省略字段（两种口径混用会让 grep 漏行） |
 | `context` | 上下文键（`page:tasks` / `task:IMPORT/PUBLISH` …） |
 | `tools` / `inputEst` | 披露工具数 / 输入估算 token（续跑行为 `history`） |
 | `compact` | 本轮起点时的压缩级别（`none`/`L1`/`L2`/`L3`） |
@@ -78,7 +88,8 @@ grep -F "<runId>" app.log | grep 'event=turn_end'
 |---|---|
 | `attempt` | 第几次尝试 |
 | `ms` | 从"本次尝试开始组装请求"到"第一条上游分片到达"的毫秒数 |
-| `chars` / `events` | 已累计正文长度 / 已收上游事件数 |
+| `chars` | **落定时刻**的正文字符数（不是首包那一瞬的值：本行在尝试落定后才写出，见实现注） |
+| `events` | **采到的非空 usage 帧数**（`ContextMeter.frames()`），不是"上游事件总数"；上游事件总数见 `turn_retry.upstreamEvents` / `turn_end.upstreamEvents` |
 
 > 首包超时（`UPSTREAM_FIRST_BYTE_TIMEOUT`）时本行**不会出现** —— "没有首包行"本身就是判据。
 
@@ -90,9 +101,12 @@ grep -F "<runId>" app.log | grep 'event=turn_end'
 | `code` | 断流分类（`UPSTREAM_CONNECTION_BROKEN` / `UPSTREAM_STREAM_INCOMPLETE` / `UPSTREAM_STREAM_ERROR` …） |
 | `reason` | 归类时的说明（≤160 字符，单行） |
 | `emitted` / `sideEffect` | 是否已产出正文 / 是否已有工具副作用（决定能否重试） |
-| `upstreamEvents` / `elapsedMs` | 已收上游事件数 / 本轮已耗时 |
+| `attemptMs` | **本次尝试**的耗时（本次尝试开始 → 失败落定） |
+| `firstByteMs` | 本次尝试的首包耗时；`-1` = 本次尝试一个分片都没到 |
+| `inputTokens` / `outputTokens` | **本次尝试**的 token（`est` 口径同 `turn_end`：取不到上游真值时是估算） |
+| `upstreamEvents` / `elapsedMs` | 已收上游事件数 / **本轮**已耗时（不是本次尝试） |
 
-### 2.5 `tool_call_start` / `tool_call_end`（INFO，成对）
+### 2.5 `tool_call_start` / `tool_call_end`（INFO）
 
 | 字段 | start | end |
 |---|---|---|
@@ -102,21 +116,39 @@ grep -F "<runId>" app.log | grep 'event=turn_end'
 | `approval` | ✓ 是否需要人/前端参与 | — |
 | `index` | ✓ 本批内序号 | — |
 | `ms` | — | ✓ 开始到结算的毫秒数（**含审批等待**） |
-| `ok` / `outcome` / `code` | — | ✓ 结局真值（`ok`/`failed`/`unknown`/`blocked`…） |
+| `execMs` | — | ✓ **执行耗时 = `ms` − 审批等待**：只对 `CONFIRM`/`FRONTEND` 扣，扣的是 `reqAtMs → resolvedAtMs`，缺任一端就不扣（宁可少扣，不凭猜造数）；后端工具恒等于 `ms` |
+| `skipped` | — | ✓ `true` = 本次调用**没有执行**（预检拦截 / 步数到顶 / 首错即停的连带跳过） |
+| `ok` / `outcome` / `code` | — | ✓ 结局真值（`ok`/`failed`/`unknown`/`blocked`/`skipped`/`cancelled`…） |
 | `executed` / `chars` | — | ✓ 是否真的执行过 / 结果字符数（不记内容） |
+| `cancelled` | — | 仅在"开始之后被取消/抛出"的行上出现（`true`） |
 
-### 2.6 `approval_suspend` / `approval_decided`（INFO）
+**成对性口径（本批施工后的实况）**：`tool_call_start` / `tool_call_end` **不是绝对成对**，三种情形：
+
+1. **未执行（有一行 end，没有 start）** —— 预检拦截、步数到顶、批策略连带跳过：只写一条 `tool_call_end skipped=true`。**刻意不补 start**：补了就把"start 没有 end"这个判据稀释成永远成对，本批要堵的洞会被掩掉。
+2. **开始之后没走到结算（有一行 start，就必定有一行 end）** —— 取消（事件边界轮询命中）与执行段抛错：现在都在异常穿出**之前**补一条 `tool_call_end`（`outcome=cancelled` + `code=RUN_CANCELLED`，或 `code=TOOL_EXECUTION_THREW`），两者都带 `cancelled`。本批之前这两条路径只有 start。
+3. **进程死在 start 与 end 之间** —— 仍是"只有 start"，这是**只有日志才能表达**的事实（`ms` 不会有值）。对齐手段 = 快照 `ai:run:<runId>` 的 `status` + 续跑行的 `turn_start(resumed=true, resumeReason=…)`。
+
+### 2.6 `approval_suspend`（INFO，卡发出、等待开始）
 
 | 字段 | 含义 |
 |---|---|
 | `toolCallId` / `tool` | 哪张卡 |
 | `kind` | `confirm`（人工确认）/ `frontend`（前端工具） |
-| `timeoutS` | 等待上限；`none` = 无上限（确认门与 `generative_form`） |
+| `timeoutS` | 等待上限秒数；`none` = 无上限（确认门与 `generative_form` 等"等人"工具） |
 | `preflight` | 是否带预检报告 |
+
+### 2.6b `approval_decided`（INFO，决策落地；与 suspend 分列）
+
+| 字段 | 含义 |
+|---|---|
+| `toolCallId` / `tool` | 哪张卡 |
+| `kind` | `confirm` / `frontend`（与 `approval_suspend` 同一把尺；条目缺失时 `none`） |
+| `timeoutS` | 本条目等待上限；`none` = 无上限（同上 `suspendWaitSeconds`） |
 | `decision` | `approve` / `reject` / `frontend_result` / `frontend_cancel` / `cancel` / `timeout` |
 | `actor` | `user`（人拍的板）/ `system`（超时等系统动作） |
 | `outcome` | 提交结局（`ACCEPTED`/`DUPLICATE`/`NOT_FOUND`/`REJECTED`） |
-| `waitedMs` | **卡发出 → 决策落地**的毫秒数（`-1` = 未记录到请求时刻） |
+| `waitedMs` | **卡送达（`req` 位）→ 决策落地**的毫秒数；`none` = 没有请求时刻（卡从未送达 / 旧数据）。**不再写 `-1`** |
+| `suspendMs` | **挂起开始（`arm`，即 `suspended` 帧之前）→ 决策落地**的毫秒数；`-1` = 本实例没记到挂起起点（跨实例决策）。一批多卡时后面的卡 `suspendMs` 明显更长（它在前几张卡的等待里排过队），而 `waitedMs` 只算自己那张卡 |
 | `status` | 条目终态（`APPROVED`/`REJECTED`/`FRONTEND_RESULT`/`TIMEOUT` …） |
 
 > `outcome=NOT_FOUND/DUPLICATE` 的行同样会写 —— "有人点了但没生效"也是线索。
@@ -134,30 +166,76 @@ grep -F "<runId>" app.log | grep 'event=turn_end'
 
 > 未压缩**不会**写这行 —— "没发生"与"发生 0 次"可以区分。
 
+### 2.7b `memory_window`（INFO，仅记忆窗口真改动时）
+
+与 `compaction` **同族不同事件**：`compaction` 回答"模型上下文占比到了哪一级"，`memory_window` 回答"读进来的历史为什么变短了"。混成一条会把"窗口本来就这么长"误读成"压缩把历史吃掉了"。
+
+| 字段 | 含义 |
+|---|---|
+| `reason` | `turn_trim`（按轮淘汰）/ `tool_result_clearing`（先清旧工具结果）/ `nothing_to_trim`（判过但没动；本行只在真改动时发） |
+| `before` / `after` | 消息条数（处理前 / 后） |
+| `tokensBefore` / `tokensAfter` | 历史 token 估算（处理前 / 后） |
+| `budget` | `app.ai.memory.token-budget` 的实际值（0 = 关闭预算、只按条数） |
+| `droppedTurns` / `clearedToolResults` | 淘汰的轮数 / 清掉的旧工具结果条数 |
+| `stillOver` | `true` = 处理完仍超预算（触到条数下限 `min-messages` 或只剩最后一轮）—— 这时该看 `compaction` 是否接手 |
+
 ### 2.8 `turn_cancelled` / `turn_end`（INFO，一轮一行）
 
 `turn_cancelled`：`attempts` / `partialChars` / `upstreamEvents`。取消后紧随 `turn_end`。
 
-`turn_end` 字段（**终态出口唯一**：`done` / `failed` / `empty_reply` / `blocked` / `cancelled` 都写）：
+`turn_end` 字段（**唯一终态出口**）：
 
 | 字段 | 含义 |
 |---|---|
-| `status` | `done` / `failed` / `blocked` / `cancelled` |
+| `status` | 只有四值：`done` / `failed` / `blocked` / `cancelled`。**没有 `empty_reply`** —— 空回复 = `failed` + `code=EMPTY_REPLY`（模型没给出任何正文） |
 | `code` | 失败码（成功为 `none`）；含 `_AFTER_TOOL_SIDE_EFFECT` / `_AFTER_PARTIAL` 后缀说明副作用/半截正文 |
-| `attempts` | 尝试次数 |
-| `totalMs` | 墙钟总耗时 |
+| `attempts` / `attempt` | 尝试次数 / 终态所在尝试序号（当前同值：前者给"跑了几次"，后者与 `turn_start`/`turn_retry` 的 `attempt` 同名同口径） |
+| `totalMs` | **本段**墙钟总耗时（段起点见"段级预算重置式"） |
 | `activeMs` | **机器耗时** = `totalMs - gateWaitMs`（与总预算同一口径） |
 | `gateWaitMs` | 人工等待累计（确认门 + 前端工具挂起） |
+| `queueMs` | **排队耗时** = `turn_accepted` 那一行 → `turn_start` 这一行的间隔；`-1` = 没有受理标记（续跑 / 直接驱动）。刻意与 `activeMs` 分开：这一段落在 `activeMs` 之外，"提交后迟迟没开始"不该读成"模型慢"。**口径**：该窗口含"开始前的本地装配"（记忆窗口读 + 请求前压缩 + 快照写）—— 它们既不是模型也不是工具；要再拆出纯池排队需要第三个时间戳，本批不加 |
+| `runTotalMs` | **跨段总时长** = run 创建（`RunSnapshot.createdAtMs`）→ 终态；`-1` = 读不到快照。挂起/续跑后本段时钟被重置，只有这个数回答"这个 run 从我点发送到现在多久" |
 | `toolCalls` | 本轮开始过的工具执行次数 |
 | `chars` | 产出正文字符数（不记内容） |
 | `inputTokens` / `outputTokens` / `totalTokens` | 三维 token（无上游真值时按估算） |
 | `est` | `true` = 上述为估算值 |
-| `model` | 上游回显优先，回落本轮解析值 |
+| `frames` / `dirty` | usage 可信度：采到的非空 usage 帧数 / 被判脏回退的帧数（`est=true` 时这两个数是唯一佐证） |
+| `model` / `provider` | 上游回显模型（回落本轮解析值）/ 本轮 provider（与 `turn_start.provider` 同源） |
 | `upstreamEvents` | 已收上游事件数 |
 
 ### 2.9 `turn_rejected`（INFO，挂起池饱和）
 
 `code=SUSPEND_POOL_SATURATED`。出现在 `turn_accepted` 之后、`turn_start` 之前 —— 该轮**没有真正开始**。
+
+### 2.10 `turn_denied`（INFO，请求在"开始之前"被拒）
+
+**本批补的最大盲区**：所有拒绝都发生在 `AiTrace.bind` 之前（既无 `turn_accepted`，也不会有 `turn_end`），此前日志里一行不留。
+
+| 字段 | 含义 |
+|---|---|
+| `status` | HTTP 状态（400 / 409 / 429 / 503） |
+| `code` | 稳定机器码，**与响应体同源**：`AI_UNAVAILABLE` / `AI_KEY_MISSING` / `KEY_UNREADABLE`（503）、`REDIS_UNAVAILABLE`（503）、`RATE_LIMITED`（429）、`SESSION_BUSY`（409）、`MODEL_NOT_FOUND` / `INVALID_PARAM` / `MESSAGE_TOO_LONG` / `BAD_REQUEST`（400） |
+| `runId` | **只有两种情况有值**：409 会话忙 = **占着会话的那一轮**（与 `heldBy` 同值，那才是要看的那条链）；其余渲染 `-`（"这次请求还没有轮次"本身是信息） |
+| `sessionId` | 能取到就带（必填校验失败时可能也为 `-`） |
+
+各拒绝点追加的少量字段：`reason`（`ai_unavailable` / `redis_unavailable` / `missing_session_or_message` / `empty_after_sanitize` / 参数越界原文）、`chars`+`limit`（超长 / 归一后为空）、`scope`+`used`+`limit`+`retryAfterS`（429）、`model`（模型不存在）、`heldBy`+`degraded`（409）。
+
+### 2.11 `turn_exception`（INFO，环外未捕获异常 = 终态行）
+
+`code=UNCAUGHT` + `type`（异常类简名）+ `msg`（异常消息，单行截断）。覆盖"压缩 / 记忆写 / 快照建 / 取模型"这些跑在**尝试环之外**、异常一路穿到控制器 catch 的位置。
+
+> 与 `turn_end` 的关系：一轮**必有**一条终态行 —— 环内失败走 `turn_end`，环外抛出走 `turn_exception`。按 runId 只看到 `turn_start` 而**没有任何**终态行，才是真正的"进程死了"。
+
+### 2.12 `sse_detach`（INFO，订阅者被摘）
+
+| 字段 | 含义 |
+|---|---|
+| `kind` | `write_timeout`（单帧写出超预算）/ `evicted`（其它摘除：队列溢出、写出被中断等） |
+| `reason` | 摘除原因（`write_timeout` / 自由文本，≤160 字符） |
+| `budgetMs` | 写预算（仅 `write_timeout` 有） |
+| `writeTimeouts` / `subscribers` | 进程内累计写超时次数 / 当前订阅者数（**process 口径**，多实例要手工相加） |
+
+> 摘除 ≠ 本轮失败：前端会带 `lastSeq` 重挂差量补发。它是"这一轮被摘过几次"的唯一可聚合痕迹。
 
 ---
 
@@ -189,9 +267,11 @@ grep -F "<S>" app.log | grep -E '(^|[[:space:]])event=turn_(start|end)'
 
 ```bash
 grep 'event=turn_end' app.log \
- | awk '{for(i=1;i<=NF;i++){split($i,a,"="); v[a[1]]=a[2]} print v["activeMs"], v["totalMs"], v["gateWaitMs"], v["status"], v["runId"]}' \
+ | awk '{for(i=1;i<=NF;i++){split($i,a,"="); v[a[1]]=a[2]} print v["activeMs"], v["totalMs"], v["gateWaitMs"], v["queueMs"], v["runTotalMs"], v["status"], v["runId"]}' \
  | sort -rn | head -20
 ```
+
+三个时间口径别混：`queueMs`（受理→开始）/ `activeMs`（机器，扣人工等待）/ `runTotalMs`（run 创建→终态，跨挂起与续跑）。
 
 ### 3.5 谁的等待耗在人身上
 
@@ -202,6 +282,25 @@ grep 'event=turn_end' app.log \
 ```
 
 `gateWaitMs` 占比高 = 不是模型/工具慢，是在等人（或等前端回执）。
+
+### 3.5b 排队 vs 机器 vs 人（三段拆解）
+
+```bash
+# queueMs 高的轮：请求在池子里等过 —— 去看池/并发，不要去查模型
+grep 'event=turn_end' app.log \
+ | awk '{for(i=1;i<=NF;i++){split($i,a,"="); v[a[1]]=a[2]} if ((v["queueMs"]+0) > 500) print v["queueMs"], v["activeMs"], v["runId"]}' | sort -rn | head
+```
+
+### 3.5c 被拒绝的请求（`turn_denied`）
+
+```bash
+# 按机器码统计拒绝面（429 / 409 / 400 各占多少）
+grep 'event=turn_denied' app.log \
+ | awk '{for(i=1;i<=NF;i++){split($i,a,"="); v[a[1]]=a[2]} print v["status"], v["code"]}' | sort | uniq -c | sort -rn
+
+# 429 的退避建议（retryAfterS）
+grep 'event=turn_denied' app.log | grep 'code=RATE_LIMITED'
+```
 
 ### 3.6 重试与首包
 
@@ -214,17 +313,22 @@ grep -F "<R>" app.log | grep -c 'event=upstream_first_byte'
 ### 3.7 工具面
 
 ```bash
-# 某轮工具清单与耗时
+# 某轮工具清单与耗时（execMs = 扣掉审批等待的执行时间；ms 含等待）
 grep -F "<R>" app.log | grep 'event=tool_call_end' \
- | awk '{for(i=1;i<=NF;i++){split($i,a,"="); v[a[1]]=a[2]} print v["ms"], v["tool"], v["outcome"], v["code"]}' | sort -rn
+ | awk '{for(i=1;i<=NF;i++){split($i,a,"="); v[a[1]]=a[2]} print v["execMs"], v["ms"], v["tool"], v["outcome"], v["code"]}' | sort -rn
 
 # 需要审批的工具
 grep -F "<R>" app.log | grep 'event=tool_call_start' | grep 'approval=true'
 
-# 审批等待分布
-grep 'event=approval_decided' app.log | grep -v 'waitedMs=-1' \
- | awk '{for(i=1;i<=NF;i++){split($i,a,"="); v[a[1]]=a[2]} print v["waitedMs"], v["decision"], v["actor"], v["tool"]}' | sort -rn
+# 没执行的调用（预检拦截 / 步数到顶 / 首错即停连带跳过）
+grep -F "<R>" app.log | grep 'event=tool_call_end' | grep 'skipped=true'
+
+# 审批等待分布（waitedMs 缺失写 none，不再是 -1）
+grep 'event=approval_decided' app.log | grep -v 'waitedMs=none' \
+ | awk '{for(i=1;i<=NF;i++){split($i,a,"="); v[a[1]]=a[2]} print v["waitedMs"], v["suspendMs"], v["decision"], v["actor"], v["tool"]}' | sort -rn
 ```
+
+`waitedMs` 与 `suspendMs` 的差别就是"卡送达 → 决策"与"挂起开始 → 决策"：一批多卡时后者更长（后面的卡在前面的等待里排过队）。
 
 ### 3.8 压缩
 
@@ -234,13 +338,33 @@ grep 'event=compaction' app.log
 grep 'event=compaction' app.log | grep -F "<S>"
 ```
 
+### 3.8b 记忆窗口（`memory_window`）
+
+```bash
+# 历史为什么变短：是窗口淘汰（本事件）还是压缩（compaction）？
+grep 'event=memory_window' app.log | grep -F "<S>"
+# 淘汰了还超预算 ⇒ 该看 compaction 是否接手
+grep 'event=memory_window' app.log | grep 'stillOver=true'
+```
+
+### 3.8c SSE 摘除（`sse_detach`）
+
+```bash
+# 这一轮被摘过几次、为什么被摘
+grep -F "<R>" app.log | grep 'event=sse_detach'
+```
+
 ---
 
 ## 4. 常见故障模式 → 日志行
 
 | 现象 | 先看哪行 | 判据 |
 |---|---|---|
-| 用户说"点了没反应" | `turn_accepted` 后面**没有** `turn_start` | 该轮没跑起来：看是否紧跟 `turn_rejected`（池饱和）；否则看 `AI 轮次未捕获异常` 的 ERROR |
+| 用户说"点了没反应" | **先找有没有 `turn_denied`**；有 `turn_accepted` 却**没有** `turn_start` | ① 有 `turn_denied` = 请求在开始前就被拒（码见 `code`：429 限流 / 409 会话忙 / 400 模型或长度 / 503 不可用）② 没有它但有 `turn_accepted` = 跑起来了却停在半路：看 `turn_rejected`（池饱和）或 `turn_exception`（环外异常） |
+| 一轮日志有 `turn_start` 却**没有任何终态行** | 既无 `turn_end` 也无 `turn_exception` | 进程在环内死了（或日志被截断）；对齐 `ai:run:<runId>` 的 status 与续跑行的 `resumeReason` |
+| "提交后半天才开始跑" | `turn_end.queueMs` 大（`activeMs` 不大） | 排队/池等待，不是模型慢 |
+| "这个 run 从我发到现在多久" | `turn_end.runTotalMs` | 跨挂起与续跑的墙钟总时长（`totalMs` 只是本段） |
+| "这一轮怎么老掉线" | `sse_detach` 行 | `kind=write_timeout` = 单帧写出超预算（客户端太慢/网络差），前端会重挂补差量；不是本轮失败 |
 | "一直在转圈" | 有 `turn_start`、**无** `upstream_first_byte` | 首包从未到达（首包超时 / 上游不可用），随后应出现 `turn_retry` 或 `turn_end(status=failed, code=UPSTREAM_FIRST_BYTE_TIMEOUT)` |
 | "等很久才出字" | `upstream_first_byte.ms` 大 | 上游慢；与 `totalMs` 对比确认不是工具/审批占用 |
 | "卡在确认卡上" | `approval_suspend` 之后**无** `approval_decided` | 卡还挂着（无上限）。`approval_decided.waitedMs` 大 = 人决策慢 |
@@ -248,9 +372,11 @@ grep 'event=compaction' app.log | grep -F "<S>"
 | "工具失败但界面说成功" | `tool_call_end.ok=false` 与帧不同源 | 以 `outcome/code` 为准；帧的 `ok` 是 `outcome` 派生值 |
 | "回答被截断" | `turn_end.chars` 小于预期 + `code` 带 `UPSTREAM_STREAM_INCOMPLETE` | 断流；看 `turn_retry.reason` 与既有 `末帧序列=` 细节行 |
 | "上下文突然变短" | `compaction.level=L3` / `lostTokens>0` | 硬裁剪丢了历史；看 `reason` 与 `/api/ai/context/{sessionId}?ledger=1` |
-| "同一个会话开不了新一轮" | 409 `SESSION_BUSY` 响应体里的 `runId` | 用该 runId grep：多半停在 `approval_suspend`（上一轮还挂着） |
+| "同一个会话开不了新一轮" | `turn_denied status=409 code=SESSION_BUSY` 的 `heldBy`（= 占着会话的 runId） | 用该 runId grep：多半停在 `approval_suspend`（上一轮还挂着） |
 | "重启后自己跑起来了" | `turn_start.resumed=true` + `启动自动续跑` 行 | 启动扫描接管；用 runId 看上一轮停在何处 |
 | "慢，但 CPU/上游都不忙" | `turn_end.gateWaitMs` 占比高 | 人机等待；不是性能问题 |
+| "工具慢还是人在犹豫" | `tool_call_end.ms` vs `execMs` | 差值 = 审批等待；`execMs` 小 = 工具本身不慢 |
+| "token 数可信吗" | `turn_end.est` + `frames` + `dirty` | `est=false` 才是上游真值；`est=true` 时看 `frames`（采到几帧）/`dirty`（几帧被判脏） |
 
 ---
 
@@ -294,7 +420,8 @@ curl -s "$BASE/api/ai/runs/<R>" | jq '.ledger'
 ## 7. 字段速查（一行）
 
 ```
-event=turn_end runId=.. sessionId=.. status=done code=none attempts=1 totalMs=8421 activeMs=7719
-              gateWaitMs=702 toolCalls=2 chars=418 inputTokens=5120 outputTokens=302 totalTokens=5422
-              est=false model=deepseek-chat upstreamEvents=37
+event=turn_end runId=.. sessionId=.. status=done code=none attempts=1 attempt=1 totalMs=8421 activeMs=7719
+              gateWaitMs=702 queueMs=18 runTotalMs=8610 toolCalls=2 chars=418 inputTokens=5120
+              outputTokens=302 totalTokens=5422 est=false frames=3 dirty=0 model=deepseek-chat
+              provider=deepseek upstreamEvents=37
 ```
