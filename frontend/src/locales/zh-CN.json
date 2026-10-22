@@ -144,6 +144,11 @@
       "title": "本地校验摘要",
       "summary": "本地校验摘要"
     },
+    "find_rows": {
+      "title": "查找所在行",
+      "summary": "查找所在行",
+      "withSearch": "查找所在行「{search}」"
+    },
     "normalize_column": {
       "title": "列归一化",
       "summary": "列归一化",

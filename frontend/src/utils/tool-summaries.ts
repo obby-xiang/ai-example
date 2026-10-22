@@ -10,7 +10,7 @@
  * - 后端 @Tool（AiTools.java）：list_config_defs / get_config_def / list_tasks /
  *   get_workspace_state / check_job_status / get_row_count / create_task /
  *   start_export / start_precheck / start_import / start_publish / download_export_files /
- *   navigate_to / open_export_file_editor / generative_form / 8 个表格工具
+ *   navigate_to / open_export_file_editor / generative_form / 9 个表格工具
  * - 前端工具（utils/frontend-tools.ts 执行器）：navigate_to（别名 open_page / restore_task /
  *   goto_step）、open_export_file_editor、download_export_files、generative_form、
  *   select_definitions（别名 select_defs）、set_condition（别名 set_conditions）、
@@ -209,6 +209,10 @@ function summaryFor(name: string, args: ToolArgs): string | null {
       return optional('tool.inspect_columns.summary')
     case 'review_cells':
       return optional('tool.review_cells.summary')
+    case 'find_rows': {
+      const search = str(args, 'search')
+      return search ? optional('tool.find_rows.withSearch', { search }) : optional('tool.find_rows.summary')
+    }
     case 'normalize_column': {
       const rules = args['rules']
       const count = Array.isArray(rules) ? rules.length : 0

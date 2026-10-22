@@ -515,7 +515,7 @@ interface XlsxSheet {
 }
 
 /** 列号 → 列名（0 → A，26 → AA）。 */
-function columnLetter(index: number): string {
+export function columnLetter(index: number): string {
   let value = index + 1
   let letters = ''
   while (value > 0) {

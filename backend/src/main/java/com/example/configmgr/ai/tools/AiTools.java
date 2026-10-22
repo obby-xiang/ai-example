@@ -608,12 +608,12 @@ public class AiTools {
             @ToolParam(description = "选项展示文本（可选，≤100 字符，缺省用 value）", required = false) String label) {
     }
 
-    // ==================== AI 表格操作专项：8 个前端工具（哨兵桩） ====================
+    // ==================== AI 表格操作专项：9 个前端工具（哨兵桩） ====================
 
     /**
      * 表格工具的公共披露范围：表格只出现在导出结果页（EXPORT/EXPORT）与上传页（IMPORT/UPLOAD）。
      *
-     * <p>8 个工具全部是 {@link ToolMeta.Channel#FRONTEND}（副作用在浏览器，**全量**业务行不出浏览器；
+     * <p>9 个工具全部是 {@link ToolMeta.Channel#FRONTEND}（副作用在浏览器，**全量**业务行不出浏览器；
      * 进模型的只有投影采样 ≤20 行 / 2000 字符）；
      * 写侧 3 个工具额外由前端“人围栏”预览确认（{@code stores/ai.ts} 特判），后端只挂起与回灌。
      * 方法体一律 {@link #FRONTEND_STUB}；入参由 {@code SheetWriteGuard} 在下发前复核。
@@ -622,7 +622,8 @@ public class AiTools {
      * “未保存/可撤销”；工具描述里写死“最多 20 行”，与前端常量同源。
      */
     @Tool(name = "read_sheet_summary", description = "读取当前激活表格的结构与采样摘要（全量业务行不出浏览器；"
-            + "仅投影采样 ≤20 行 / 2000 字符进模型；缺省投影 = 主键列 + 前 4 列）；末尾恒回“共 N 行”。适用于“这表有多少行/某地区几行/有哪些列”")
+            + "仅投影采样 ≤20 行 / 2000 字符进模型；缺省投影 = 主键列 + 前 4 列，采样逐格带单元格地址如 E15）；"
+            + "末尾恒回“共 N 行”。适用于“这表有多少行/某地区几行/有哪些列”")
     @ToolScope({ "task:EXPORT/EXPORT", "task:IMPORT/UPLOAD" })
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.R)
@@ -638,7 +639,9 @@ public class AiTools {
     }
 
     @Tool(name = "aggregate_sheet", description = "按条件/分组聚合当前表格（最多 20 组），只回聚合值不回原始行；"
-            + "兼作写操作的计数级预览引擎（0 行业务数据）。适用于“各地区几行/总额/空值率”")
+            + "分组结果默认按首个度量**降序**（Top-N：截断发生在排序之后，故“哪个地区最多”一次可答），"
+            + "sort 可改判定口径（metric/metricAsc/labelAsc/labelDesc/none 或某个度量名）；"
+            + "兼作写操作的计数级预览引擎（0 行业务数据）。适用于“各地区几行/哪个地区最多/总额/空值率”")
     @ToolScope({ "task:EXPORT/EXPORT", "task:IMPORT/UPLOAD" })
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.R)
@@ -649,7 +652,9 @@ public class AiTools {
             @ToolParam(description = "分组列（字段编码）", required = false) String groupBy,
             @ToolParam(description = "度量列（字段编码）", required = false) String columnCode,
             @ToolParam(description = "指标：count/distinct/blankRate/min/max/sum（默认 count）", required = false) String[] metrics,
-            @ToolParam(description = "分组显示上限 1..20（默认 20）", required = false) Integer limit) {
+            @ToolParam(description = "分组排序：metric（默认，按首个度量降序）/metricAsc/labelAsc/labelDesc/none，"
+                    + "或 metrics 里的度量名（如 sum = 按 sum 降序）", required = false) String sort,
+            @ToolParam(description = "分组显示上限 1..20（默认 20；排序后取前 N 组）", required = false) Integer limit) {
         return FRONTEND_STUB;
     }
 
@@ -664,7 +669,7 @@ public class AiTools {
     }
 
     @Tool(name = "review_cells", description = "对当前表格做本地校验并聚合报告（必填/类型/枚举/主键重复），"
-            + "明细最多 20 条、恒回“共 N 处”；只报告不修复，不替代服务端预检")
+            + "明细最多 20 条、恒回“共 N 处”，明细带单元格地址；只报告不修复，不替代服务端预检")
     @ToolScope({ "task:EXPORT/EXPORT", "task:IMPORT/UPLOAD" })
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.R)
@@ -674,6 +679,25 @@ public class AiTools {
             @ToolParam(description = "范围：sheet（默认）/selection", required = false) String scope,
             @ToolParam(description = "字段条件（FieldQueryCondition）", required = false) FieldQueryCondition predicate,
             @ToolParam(description = "明细条数 1..20（默认 5）", required = false) Integer limit) {
+        return FRONTEND_STUB;
+    }
+
+    @Tool(name = "find_rows", description = "在当前表格里检索关键字（默认全列 contains，可 equals/prefix），"
+            + "回命中行号 + 命中单元格地址（如 E15）+ 采样 ≤20 行，恒回“共 N 行”；"
+            + "命中总数不受采样影响，只读不改表格。适用于“哪几行提到某值/这个值在哪一行”")
+    @ToolScope({ "task:EXPORT/EXPORT", "task:IMPORT/UPLOAD" })
+    @ToolRisk(ToolMeta.RiskLevel.READ)
+    @ToolCategory(ToolMeta.Category.R)
+    @ToolChannel(ToolMeta.Channel.FRONTEND)
+    public String findRows(
+            @ToolParam(description = "配置定义编码") String defCode,
+            @ToolParam(description = "要查找的文字（必填非空）") String search,
+            @ToolParam(description = "检索列（字段编码；缺省 = 全部列）", required = false) String[] columnCodes,
+            @ToolParam(description = "匹配方式：contains（默认）/equals/prefix", required = false) String match,
+            @ToolParam(description = "是否忽略大小写（默认 true）", required = false) Boolean ignoreCase,
+            @ToolParam(description = "范围：sheet（默认）/selection/columns/rows/predicate", required = false) String scope,
+            @ToolParam(description = "字段条件（FieldQueryCondition）", required = false) FieldQueryCondition predicate,
+            @ToolParam(description = "采样行数 1..20（默认 5）", required = false) Integer limit) {
         return FRONTEND_STUB;
     }
 

@@ -11,6 +11,7 @@ export interface FakeSheet {
   ctx: SheetContext
   rows: Array<Record<string, unknown>>
   writes: SheetCellUpdate[][]
+  calls: { getCell: number; getArray: number }
   setSelection(selection: SheetSelection | null): void
   setReadOnly(readOnly: boolean): void
 }
@@ -44,20 +45,27 @@ export function makeFakeSheet(input: {
 }): FakeSheet {
   const rows = input.rows.map((row) => ({ ...row }))
   const writes: SheetCellUpdate[][] = []
+  const calls = { getCell: 0, getArray: 0 }
   let selection: SheetSelection | null = input.selection ?? null
   let readOnly = input.readOnly ?? false
+
+  const cellAt = (row: number, col: number): unknown => rows[row]?.[input.fields[col]?.code ?? '']
 
   const adapter: SheetAdapter = {
     rowCount: () => rows.length,
     colCount: () => input.fields.length,
     header: (col) => input.headers?.[col] ?? input.fields[col]?.label ?? '',
-    getCell: (row, col) => rows[row]?.[input.fields[col]?.code ?? ''],
+    getCell: (row, col) => {
+      calls.getCell += 1
+      return cellAt(row, col)
+    },
     getArray: (row, col, rowCount, colCount) => {
+      calls.getArray += 1
       const grid: unknown[][] = []
       for (let r = 0; r < rowCount; r += 1) {
         const line: unknown[] = []
         for (let c = 0; c < colCount; c += 1) {
-          line.push(adapter.getCell(row + r, col + c))
+          line.push(cellAt(row + r, col + c))
         }
         grid.push(line)
       }
@@ -86,6 +94,7 @@ export function makeFakeSheet(input: {
     },
     rows,
     writes,
+    calls,
     setSelection: (next) => {
       selection = next
     },

@@ -264,7 +264,7 @@ class ToolDefinitionOverridesTest {
                 "check_job_status", "get_row_count", "create_task", "start_export", "start_precheck", "start_import",
                 "start_publish", "open_export_file_editor", "download_export_files", "navigate_to",
                 "select_definitions", "set_condition", "confirm_step", "generative_form", "read_sheet_summary",
-                "aggregate_sheet", "inspect_columns", "review_cells", "normalize_column", "replace_values",
+                "aggregate_sheet", "inspect_columns", "review_cells", "find_rows", "normalize_column", "replace_values",
                 "update_rows", "undo_last_sheet_edit");
         for (String tool : declared) {
             assertNotNull(shipped.load().find(tool), "YAML 缺工具条目：" + tool);

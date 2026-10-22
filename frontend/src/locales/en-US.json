@@ -144,6 +144,11 @@
       "title": "Local validation summary",
       "summary": "Local validation summary"
     },
+    "find_rows": {
+      "title": "Find rows",
+      "summary": "Find rows",
+      "withSearch": "Find rows matching {search}"
+    },
     "normalize_column": {
       "title": "Normalize column",
       "summary": "Normalize column",

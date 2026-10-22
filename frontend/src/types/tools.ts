@@ -26,7 +26,7 @@
  * | set_condition | `page:tasks`, `task:EXPORT` | READ | FRONTEND |
  * | confirm_step | `page:tasks`, `task:EXPORT`, `task:IMPORT` | READ | FRONTEND |
  * | generative_form | `page:tasks`, `task:*` | READ | FRONTEND |
- * | read_sheet_summary / aggregate_sheet / inspect_columns / review_cells | `task:EXPORT/EXPORT`, `task:IMPORT/UPLOAD` | READ | FRONTEND |
+ * | read_sheet_summary / aggregate_sheet / inspect_columns / review_cells / find_rows | `task:EXPORT/EXPORT`, `task:IMPORT/UPLOAD` | READ | FRONTEND |
  * | normalize_column / replace_values / update_rows / undo_last_sheet_edit | `task:EXPORT/EXPORT`, `task:IMPORT/UPLOAD` | WRITE（预览卡人确认） | FRONTEND |
  *
  * 两处**已过期的旧口径**（勿再沿用）：① 四个 `start_*` 曾标 WRITE/BACKEND 且不进确认门，
@@ -83,6 +83,7 @@ export const SHEET_TOOL_NAMES = [
   'aggregate_sheet',
   'inspect_columns',
   'review_cells',
+  'find_rows',
   'normalize_column',
   'replace_values',
   'update_rows',
@@ -167,11 +168,12 @@ export const FRONTEND_TOOLS: readonly FrontendToolDescriptor[] = [
       { name: 'defCodes', type: 'string[]', required: true, description: '配置定义编码列表（必填非空）' }
     ]
   },
-  // ── AI 表格操作专项：8 个工具（读侧 5 + 写侧 3 + 撤销 1，normalize 双档） ──
+  // ── AI 表格操作专项：9 个工具（读侧 5 + 写侧 3 + 撤销 1，normalize 双档） ──
   {
     name: 'read_sheet_summary',
     displayName: '读取表格摘要',
-    description: '读取当前表格的结构与采样摘要（全量业务行不出浏览器；仅投影采样 ≤20 行 / 2000 字符进模型；缺省投影 = 主键列 + 前 4 列）；末尾恒回“共 N 行”',
+    description: '读取当前表格的结构与采样摘要（全量业务行不出浏览器；仅投影采样 ≤20 行 / 2000 字符进模型；缺省投影 = 主键列 + 前 4 列，'
+      + '采样逐格带单元格地址如 E15）；末尾恒回“共 N 行”',
     channel: 'FRONTEND',
     riskLevel: 'READ',
     scopePatterns: SHEET_SCOPE_PATTERNS,
@@ -187,7 +189,8 @@ export const FRONTEND_TOOLS: readonly FrontendToolDescriptor[] = [
   {
     name: 'aggregate_sheet',
     displayName: '聚合表格',
-    description: '按条件/分组聚合当前表格（最多 20 组），只回聚合值不回原始行；兼作写操作的计数级预览引擎',
+    description: '按条件/分组聚合当前表格（最多 20 组），只回聚合值不回原始行；分组默认按首个度量降序（Top-N，可答“哪个地区最多”），'
+      + 'sort 可改判定口径；兼作写操作的计数级预览引擎',
     channel: 'FRONTEND',
     riskLevel: 'READ',
     scopePatterns: SHEET_SCOPE_PATTERNS,
@@ -197,7 +200,8 @@ export const FRONTEND_TOOLS: readonly FrontendToolDescriptor[] = [
       { name: 'groupBy', type: 'string', required: false, description: '分组列（字段编码）' },
       { name: 'columnCode', type: 'string', required: false, description: '度量列（字段编码）' },
       { name: 'metrics', type: 'string[]', required: false, description: 'count/distinct/blankRate/min/max/sum' },
-      { name: 'limit', type: 'number', required: false, description: '分组显示上限 1..20' }
+      { name: 'sort', type: 'string', required: false, description: 'metric（默认，首个度量降序）/metricAsc/labelAsc/labelDesc/none，或度量名（如 sum 降序）' },
+      { name: 'limit', type: 'number', required: false, description: '分组显示上限 1..20（排序后取前 N 组）' }
     ]
   },
   {
@@ -212,7 +216,7 @@ export const FRONTEND_TOOLS: readonly FrontendToolDescriptor[] = [
   {
     name: 'review_cells',
     displayName: '本地校验摘要',
-    description: '对当前表格做本地校验并聚合报告（必填/类型/枚举/主键重复），明细最多 20 条、恒回“共 N 处”',
+    description: '对当前表格做本地校验并聚合报告（必填/类型/枚举/主键重复），明细最多 20 条、恒回“共 N 处”，明细带单元格地址',
     channel: 'FRONTEND',
     riskLevel: 'READ',
     scopePatterns: SHEET_SCOPE_PATTERNS,
@@ -221,6 +225,25 @@ export const FRONTEND_TOOLS: readonly FrontendToolDescriptor[] = [
       { name: 'scope', type: 'string', required: false, description: 'sheet（默认）/selection' },
       { name: 'predicate', type: 'object', required: false, description: 'FieldQueryCondition 条件' },
       { name: 'limit', type: 'number', required: false, description: '明细条数 1..20' }
+    ]
+  },
+  {
+    name: 'find_rows',
+    displayName: '查找所在行',
+    description: '在当前表格里检索关键字（默认全列 contains，可 equals/prefix），回命中行号 + 单元格地址 + 采样 ≤20 行，'
+      + '恒回“共 N 行”；命中总数不受采样影响，只读不改表格',
+    channel: 'FRONTEND',
+    riskLevel: 'READ',
+    scopePatterns: SHEET_SCOPE_PATTERNS,
+    args: [
+      { name: 'defCode', type: 'string', required: true, description: '配置定义编码' },
+      { name: 'search', type: 'string', required: true, description: '要查找的文字（必填非空）' },
+      { name: 'columnCodes', type: 'string[]', required: false, description: '检索列（缺省 = 全部列）' },
+      { name: 'match', type: 'string', required: false, description: 'contains（默认）/equals/prefix' },
+      { name: 'ignoreCase', type: 'boolean', required: false, description: '默认 true' },
+      { name: 'scope', type: 'string', required: false, description: 'sheet（默认）/selection/columns/rows/predicate' },
+      { name: 'predicate', type: 'object', required: false, description: 'FieldQueryCondition 条件' },
+      { name: 'limit', type: 'number', required: false, description: '采样行数 1..20（默认 5）' }
     ]
   },
   {

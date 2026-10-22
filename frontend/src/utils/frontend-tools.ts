@@ -1,12 +1,12 @@
 /**
  * 前端工具执行器（规格 §2「契约窄接口」/ §3 前端工具回灌）。
  *
- * **后端口径核对（AI 表格操作专项后复核，勿凭蓝本臆造）**：后端 `AiTools` 共 26 个 `@Tool`，
- * 其中带 `@ToolChannel(FRONTEND)` 的**有 15 个**：`open_export_file_editor`、`download_export_files`、
+ * **后端口径核对（批B 表格读侧补齐后复核，勿凭蓝本臆造）**：后端 `AiTools` 共 34 个 `@Tool`，
+ * 其中带 `@ToolChannel(FRONTEND)` 的**有 23 个**：`open_export_file_editor`、`download_export_files`、
  * `navigate_to`、`select_definitions`、`set_condition`、`confirm_step`、`generative_form`，
- * 加上 AI 表格操作专项的 8 个表格工具（读 5 / 写 3 + 撤销；`normalize_column` 双档同名）。
+ * 加上 AI 表格操作专项的 9 个表格工具（读 5 / 写 3 + 撤销 1；`normalize_column` 双档同名）。
  * 所以：
- * - 路由 1 覆盖 `FRONTEND_TOOLS` 登记的前端工具（10 个：2 个既有 + 8 个表格工具），
+ * - 路由 1 覆盖 `FRONTEND_TOOLS` 登记的前端工具（18 个：2 个既有 + 9 个表格工具 + 7 个界面原语），
  *   完整实现（表格读工具与撤销经 `sheet.current` 页面能力取适配器；写工具由 store 预览特判）；
  * - 路由 2（兜底直调 `dispatchUiEvent`，与路由 3 是**同一落点**，并非"落回路由 3"）是**补丁②**：把蓝本形态的工作区动作（`navigate_to` /
  *   `select_definitions` / `set_condition` / `confirm_step` 及蓝本别名）做成可执行能力表 ——
@@ -22,6 +22,9 @@
  *   执行体在 `utils/ai-dom-tools.ts`；其中 `ui_request_upload` 是「等人」工具，由 `stores/ai.ts`
  *   特判进交接卡（与 GF 同族），**同样不走** 60s 预算。
  *   `ui_*` 的 scope 一律 `*`：真正的围栏在**区域**（`registerAiRegion`）与**元素**（`data-ai-*`）两层。
+ * - **AI 表格操作专项 · 批B（读侧补齐，2026-10-22）**：`FRONTEND_TOOLS` 17 → 18，后端 `@Tool` 33 → 34
+ *   （前端通道 22 → 23）。新增读工具 `find_rows`（全列检索：命中行号 + 单元格地址 + ≤20 行采样），
+ *   与其余读工具同 scope、走**路由 1 + 默认执行器**；`aggregate_sheet` 增加分组排序（Top-N）。
  *
  * 四条路由（AI 经 frontend_tool 帧驱动工作区的统一入口；编号与 `dispatchFrontendTool`
  * 内的分支注释一致，实读该方法确认共 4 条）：
@@ -77,6 +80,7 @@ import { dispatchUiEvent, getPageHandler, useWorkspaceStore } from '@/stores/wor
 import type { ConfigField } from '@/types/definition'
 import {
   aggregateSheet,
+  findRows,
   inspectColumns,
   normalizeSuggest,
   readSheetSummary,
@@ -1029,6 +1033,9 @@ function runSheetTool(name: string, args: Record<string, unknown>): Promise<Fron
         break
       case 'review_cells':
         outcome = reviewCells(ctx, args)
+        break
+      case 'find_rows':
+        outcome = findRows(ctx, args)
         break
       case 'normalize_column':
         outcome = args.commit === true

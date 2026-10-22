@@ -20,10 +20,10 @@ beforeEach(() => {
   unregisterPageHandler('sheet.current')
 })
 
-describe('T-19 注册表：前端工具 2 → 10 → 17', () => {
-  it('八个表格工具全部登记，写侧风险 WRITE、读侧 READ', () => {
-    // 2 既有 + 8 表格 + 7 界面原语（AI 可视可操作专项）；工具族增加时本计数同步提高（只升不降）
-    expect(FRONTEND_TOOLS).toHaveLength(17)
+describe('T-19 注册表：前端工具 2 → 10 → 17 → 18', () => {
+  it('九个表格工具全部登记，写侧风险 WRITE、读侧 READ', () => {
+    // 2 既有 + 9 表格 + 7 界面原语（AI 可视可操作专项）；工具族增加时本计数同步提高（只升不降）
+    expect(FRONTEND_TOOLS).toHaveLength(18)
     for (const name of SHEET_TOOL_NAMES) {
       const descriptor = findFrontendTool(name)
       expect(descriptor, `${name} 已登记`).not.toBeNull()
@@ -70,7 +70,9 @@ describe('T-10 三级兜底：页面能力未注册 ⇒ degraded 可行动文案
         colCount: () => 2,
         header: (col: number) => (col === 0 ? '编码' : '名称'),
         getCell: (row: number, col: number) => (row === 0 && col === 0 ? 'CNY' : '人民币'),
-        getArray: () => [],
+        getArray: (row: number, col: number, rowCount: number, colCount: number) =>
+          Array.from({ length: rowCount }, (_row, r) =>
+            Array.from({ length: colCount }, (_cell, c) => (row + r === 0 && col + c === 0 ? 'CNY' : '人民币'))),
         writeCells: () => undefined,
         selection: () => null
       }
@@ -116,7 +118,9 @@ function installSheetHandler(input: { readOnly: boolean; rowCount: number }): vo
       colCount: () => 2,
       header: (col: number) => (col === 0 ? '编码' : '名称'),
       getCell: (row: number, col: number) => (col === 0 ? `C${row + 1}` : `名称${row + 1}`),
-      getArray: () => [],
+      getArray: (row: number, col: number, rowCount: number, colCount: number) =>
+        Array.from({ length: rowCount }, (_row, r) =>
+          Array.from({ length: colCount }, (_cell, c) => (col + c === 0 ? `C${row + r + 1}` : `名称${row + r + 1}`))),
       writeCells: () => undefined,
       selection: () => null
     }
@@ -180,5 +184,31 @@ describe('文案订正：披露口径不再声称“业务行数据不出浏览�
     expect(description).toContain('全量业务行不出浏览器')
     expect(description).toContain('20 行')
     expect(description).not.toContain('业务行数据不出浏览器')
+  })
+})
+
+describe('批B：find_rows 经执行入口可用（登记 + 默认执行器 + 读路径不受只读壳拦）', () => {
+  it('只读壳 + find_rows ⇒ ok，命中行带单元格地址与“共 N 行”', async () => {
+    installSheetHandler({ readOnly: true, rowCount: 3 })
+    const execution = await executeFrontendTool({
+      name: 'find_rows',
+      args: { defCode: 'DEMO', search: '名称2' },
+      budgetMs: 5_000
+    })
+    expect(execution.outcome).toBe('ok')
+    expect(execution.result).toContain('第 3 行 | B3 name=名称2')
+    expect(execution.result).toContain('共 1 行')
+    expect(execution.result).not.toContain('未对表格做任何修改')
+  })
+
+  it('find_rows 缺 search ⇒ unavailable 且说明 search 必填', async () => {
+    installSheetHandler({ readOnly: false, rowCount: 2 })
+    const execution = await executeFrontendTool({
+      name: 'find_rows',
+      args: { defCode: 'DEMO' },
+      budgetMs: 5_000
+    })
+    expect(execution.outcome).toBe('failed')
+    expect(execution.result).toContain('search')
   })
 })

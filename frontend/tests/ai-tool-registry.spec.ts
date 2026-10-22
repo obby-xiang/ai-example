@@ -54,7 +54,7 @@ describe('T-42：前端登记表与权威名册一致', () => {
   it('既有 9 条登记不受影响（只增不改）', () => {
     const names = FRONTEND_TOOLS.map((tool) => tool.name)
     for (const name of ['open_export_file_editor', 'download_export_files', 'read_sheet_summary',
-      'aggregate_sheet', 'inspect_columns', 'review_cells', 'normalize_column', 'replace_values',
+      'aggregate_sheet', 'inspect_columns', 'review_cells', 'find_rows', 'normalize_column', 'replace_values',
       'update_rows', 'undo_last_sheet_edit']) {
       expect(names).toContain(name)
     }

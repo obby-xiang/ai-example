@@ -153,3 +153,22 @@ describe('工具摘要 zh 逐字快照（C1）', () => {
     expect(toolSummary(part(name, args))).toBe(expected)
   })
 })
+
+describe('批B 新增工具文案（find_rows）：zh/en 双语齐备且摘要不落原始工具名', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    useLocaleStore().setLocale('zh-CN')
+  })
+
+  it('zh 标题与摘要', () => {
+    expect(i18n.global.t('tool.find_rows.title')).toBe('查找所在行')
+    expect(toolSummary(part('find_rows', '{"search":"华东"}'))).toBe('查找所在行「华东」')
+    expect(toolSummary(part('find_rows', '{}'))).toBe('查找所在行')
+  })
+
+  it('en 标题与摘要', () => {
+    useLocaleStore().setLocale('en-US')
+    expect(i18n.global.t('tool.find_rows.title', {}, { locale: 'en-US' })).toBe('Find rows')
+    expect(toolSummary(part('find_rows', '{"search":"East"}'))).toBe('Find rows matching East')
+  })
+})

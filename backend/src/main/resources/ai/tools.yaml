@@ -58,6 +58,8 @@ tools:
     title: 诊断列映射
   - toolKey: review_cells
     title: 本地校验摘要
+  - toolKey: find_rows
+    title: 查找所在行
   - toolKey: normalize_column
     title: 列归一化
   - toolKey: replace_values

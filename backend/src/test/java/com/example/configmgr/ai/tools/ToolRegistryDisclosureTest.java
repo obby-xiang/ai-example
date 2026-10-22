@@ -57,15 +57,15 @@ class ToolRegistryDisclosureTest {
             "navigate_to", "select_definitions", "set_condition", "confirm_step",
             com.example.configmgr.ai.form.GenerativeFormRules.TOOL_NAME);
 
-    /** AI 表格操作专项的 8 个工具（读侧 5 / 写侧 3 + 撤销；normalize 双档同名）。 */
+    /** AI 表格操作专项的 9 个工具（读侧 5 / 写侧 3 + 撤销；normalize 双档同名）。 */
     private static final List<String> SHEET_READ_TOOLS = List.of("read_sheet_summary", "aggregate_sheet",
-            "inspect_columns", "review_cells");
+            "inspect_columns", "review_cells", "find_rows");
 
     private static final List<String> SHEET_WRITE_TOOLS = List.of("replace_values", "update_rows",
             "normalize_column", "undo_last_sheet_edit");
 
     private static final List<String> SHEET_TOOLS = List.of("read_sheet_summary", "aggregate_sheet",
-            "inspect_columns", "review_cells", "normalize_column", "replace_values", "update_rows",
+            "inspect_columns", "review_cells", "find_rows", "normalize_column", "replace_values", "update_rows",
             "undo_last_sheet_edit");
 
     /** AI 可视可操作专项的 7 个通用原语（1 看 + 6 做）。 */
@@ -177,10 +177,12 @@ class ToolRegistryDisclosureTest {
     void sheetToolBodiesAreSentinelStubs() {
         assertThat(aiTools.readSheetSummary("CURRENCY", "sheet", new String[] { "code" }, null, null, 5))
                 .isEqualTo(AiTools.FRONTEND_STUB);
-        assertThat(aiTools.aggregateSheet("CURRENCY", null, "region", "code", new String[] { "count" }, 20))
+        assertThat(aiTools.aggregateSheet("CURRENCY", null, "region", "code", new String[] { "count" }, "metric", 20))
                 .isEqualTo(AiTools.FRONTEND_STUB);
         assertThat(aiTools.inspectColumns("CURRENCY")).isEqualTo(AiTools.FRONTEND_STUB);
         assertThat(aiTools.reviewCells("CURRENCY", "sheet", null, 5)).isEqualTo(AiTools.FRONTEND_STUB);
+        assertThat(aiTools.findRows("CURRENCY", "华东", null, "contains", true, "sheet", null, 5))
+                .isEqualTo(AiTools.FRONTEND_STUB);
         assertThat(aiTools.normalizeColumn("CURRENCY", new String[] { "code" }, new String[] { "trim" }, null, false, null))
                 .isEqualTo(AiTools.FRONTEND_STUB);
         assertThat(aiTools.replaceValues("CURRENCY", "sheet", null, new String[] { "status" }, "wholeCell", true,
@@ -348,7 +350,7 @@ class ToolRegistryDisclosureTest {
                 "start_publish", "open_export_file_editor", "download_export_files", "navigate_to",
                 "select_definitions", "set_condition", "confirm_step",
                 com.example.configmgr.ai.form.GenerativeFormRules.TOOL_NAME,
-                "read_sheet_summary", "aggregate_sheet", "inspect_columns", "review_cells",
+                "read_sheet_summary", "aggregate_sheet", "inspect_columns", "review_cells", "find_rows",
                 "normalize_column", "replace_values", "update_rows", "undo_last_sheet_edit",
                 "ui_snapshot", "ui_click", "ui_fill", "ui_select", "ui_scroll", "ui_highlight",
                 "ui_request_upload");

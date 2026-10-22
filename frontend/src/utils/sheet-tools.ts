@@ -8,6 +8,10 @@
  * - §3.5 行指纹：预览与应用之间表格被改动即整批拒绝（宁可多拒一次，不可改错一行）
  * - §3.6 窄接口：`SheetAdapter`（批量读 `getArray`、批量写 `writeCells`）
  *
+ * 批B（读侧补齐）：读路径一律经 {@link scanRows} 批量 `getArray`（对齐业界 batchGet，不再逐格读）；
+ * 读输出带 A1 单元格地址（列字母 + Excel 行号）；`aggregate_sheet` 分组先排序再截断（Top-N）；
+ * 新增 `find_rows`（全列检索：命中行号 + 地址 + ≤20 行采样 + 共 N 行）。
+ *
  * 行列口径：适配器行 = **数据行下标（0 基）**，对外文案统一 `excelRowNumber(row)`（Excel 行号）；
  * 列 = 适配器列下标（0 基），业务列由字段编码经表头归一化解析。
  */
@@ -15,7 +19,7 @@ import type { ConfigField } from '@/types/definition'
 import type { FieldQueryCondition } from '@/types/condition'
 import { conditionSummary } from '@/types/condition'
 import type { SheetChange, SheetPreviewLevel, SheetWritePlan } from '@/types/ai'
-import { excelRowNumber, validateCell, validateRows } from '@/utils/excel'
+import { columnLetter, excelRowNumber, validateCell, validateRows } from '@/utils/excel'
 import i18n from '@/locales'
 
 // ── 常量（设计稿 §3.3，读侧硬顶 / 写侧分层） ─────────────────────────────────
@@ -32,6 +36,8 @@ export const SHEET_WRITE_HARD_MAX_CELLS = 100_000
 export const SHEET_FINGERPRINT_COLUMNS = 2
 export const SHEET_UNDO_DEPTH = 1
 export const SHEET_WRITE_CHUNK_ROWS = 500
+/** 批量读的批次行数：一段一次 `getArray`（对齐业界 batchGet，避免逐格读卡主线程）。 */
+export const SHEET_READ_BATCH_ROWS = 500
 
 /** 适配器批量写单位（`writeCells` 一条 = 一次 suspendPaint 内的批量落值）。 */
 export interface SheetCellUpdate {
@@ -52,6 +58,8 @@ export interface SheetSelection {
  * 表格适配器窄接口（设计稿 §3.6）。
  *
  * 只暴露纯数据面：**读写都必须走 array 版本**（批量），逐格 `getValue/setValue` 在数千行上会卡主线程。
+ * 批B 起工具内核**不再用 `getCell` 读数据**（全部经 {@link scanRows} 批量 `getArray`），
+ * `getCell` 仅保留给适配器自测与写后回读。
  */
 export interface SheetAdapter {
   rowCount(): number
@@ -300,16 +308,113 @@ function fieldOfColumn(ctx: SheetContext, col: number): ConfigField | null {
   return ctx.fields[col] ?? null
 }
 
-function readRowObject(ctx: SheetContext, row: number, columns: readonly number[]): Record<string, unknown> {
+function rowRecord(ctx: SheetContext, columns: readonly number[], values: readonly unknown[]): Record<string, unknown> {
   const record: Record<string, unknown> = {}
-  for (const col of columns) {
-    record[columnCode(ctx, col)] = ctx.adapter.getCell(row, col)
-  }
+  columns.forEach((col, index) => {
+    record[columnCode(ctx, col)] = values[index]
+  })
   return record
+}
+
+interface RowRun {
+  start: number
+  length: number
+}
+
+/** 升序行下标 → 连续段（每段一次 `getArray`）；乱序/重复行各自成段，结果口径不变。 */
+function rowRuns(rows: readonly number[]): RowRun[] {
+  const runs: RowRun[] = []
+  for (const row of rows) {
+    const last = runs[runs.length - 1]
+    if (last && row === last.start + last.length) {
+      last.length += 1
+    } else {
+      runs.push({ start: row, length: 1 })
+    }
+  }
+  return runs
+}
+
+interface ColumnRun {
+  start: number
+  cols: number[]
+}
+
+function columnRuns(columns: readonly number[]): ColumnRun[] {
+  const runs: ColumnRun[] = []
+  for (const col of columns) {
+    const last = runs[runs.length - 1]
+    const prev = last ? last.cols[last.cols.length - 1] : undefined
+    if (last && prev !== undefined && col === prev + 1) {
+      last.cols.push(col)
+    } else {
+      runs.push({ start: col, cols: [col] })
+    }
+  }
+  return runs
+}
+
+/**
+ * 批量逐行读（`SheetAdapter#getArray`，设计稿 §3.6）：行连续段 × 列连续段，一段一次调用。
+ *
+ * 大表上把「每格一次读」压成「每 500 行每列段一次读」——与业界 batchGet 同口径；
+ * 回调拿到的是与 `columns` **同序对齐**的值数组（缺失格为 `undefined`）。
+ */
+function scanRows(
+  ctx: SheetContext,
+  rows: readonly number[],
+  columns: readonly number[],
+  visit: (row: number, values: readonly unknown[]) => void
+): void {
+  if (rows.length === 0 || columns.length === 0) {
+    return
+  }
+  const colIndex = new Map<number, number>()
+  columns.forEach((col, index) => colIndex.set(col, index))
+  const runs = columnRuns(columns)
+  for (const run of rowRuns(rows)) {
+    for (let offset = 0; offset < run.length; offset += SHEET_READ_BATCH_ROWS) {
+      const span = Math.min(SHEET_READ_BATCH_ROWS, run.length - offset)
+      const buffer: unknown[][] = Array.from({ length: span }, () => new Array<unknown>(columns.length).fill(undefined))
+      for (const colRun of runs) {
+        const grid = ctx.adapter.getArray(run.start + offset, colRun.start, span, colRun.cols.length)
+        for (let r = 0; r < span; r += 1) {
+          const line = grid[r]
+          if (!Array.isArray(line)) continue
+          for (let c = 0; c < colRun.cols.length; c += 1) {
+            const col = colRun.cols[c]
+            if (col === undefined) continue
+            const index = colIndex.get(col)
+            if (index !== undefined) {
+              const target = buffer[r]
+              if (target) target[index] = line[c]
+            }
+          }
+        }
+      }
+      for (let r = 0; r < span; r += 1) {
+        visit(run.start + offset + r, buffer[r] ?? [])
+      }
+    }
+  }
+}
+
+function allColumnsOf(ctx: SheetContext): number[] {
+  const count = ctx.fields.length > 0 ? ctx.fields.length : ctx.adapter.colCount()
+  return Array.from({ length: count }, (_, index) => index)
+}
+
+function allRowIndexes(ctx: SheetContext): number[] {
+  return Array.from({ length: totalRows(ctx) }, (_, index) => index)
 }
 
 function excelDisplay(row: number): string {
   return String(excelRowNumber(row))
+}
+
+/** 单元格地址（A1 形态：列字母 + Excel 行号；表头为第 1 行）。 */
+export function cellAddress(col: number, row: number): string {
+  return `${columnLetter(col)}${excelRowNumber(row)}`
 }
 
 function cellDisplay(value: unknown): string {
@@ -381,13 +486,17 @@ function resolveScope(
   const predicateSummary = predicate && Array.isArray(predicate.fields) && predicate.fields.length > 0
     ? `条件「${conditionSummary(predicate)}」`
     : ''
-  const allRows = Array.from({ length: totalRows(ctx) }, (_, index) => index)
+  const allRows = allRowIndexes(ctx)
   const filterByPredicate = (rows: number[]): number[] => {
     if (!predicate || !Array.isArray(predicate.fields) || predicate.fields.length === 0) {
       return rows
     }
-    const columns = ctx.fields.map((_field, index) => index)
-    return rows.filter((row) => matchesCondition(readRowObject(ctx, row, columns), predicate))
+    const columns = allColumnsOf(ctx)
+    const kept: number[] = []
+    scanRows(ctx, rows, columns, (row, values) => {
+      if (matchesCondition(rowRecord(ctx, columns, values), predicate)) kept.push(row)
+    })
+    return kept
   }
 
   switch (rawScope) {
@@ -463,8 +572,12 @@ function keyColumns(ctx: SheetContext): number[] {
   return keys.slice(0, SHEET_FINGERPRINT_COLUMNS)
 }
 
-function fingerprintRow(ctx: SheetContext, row: number, columns: readonly number[]): string {
-  return columns.map((col) => cellDisplay(ctx.adapter.getCell(row, col)).trim()).join('\u0001')
+function fingerprintRows(ctx: SheetContext, rows: readonly number[], columns: readonly number[]): string[] {
+  const fingerprints: string[] = []
+  scanRows(ctx, rows, columns, (_row, values) => {
+    fingerprints.push(values.map((value) => cellDisplay(value).trim()).join('\u0001'))
+  })
+  return fingerprints
 }
 
 function validateDefCode(ctx: SheetContext, args: SheetArgs): string | null {
@@ -565,43 +678,44 @@ export function readSheetSummary(ctx: SheetContext, args: SheetArgs): SheetToolO
   lines.push(`范围：scope=${resolved.scope}${resolved.predicateSummary ? ` · ${resolved.predicateSummary}` : ''}（命中 ${resolved.rows.length} 行 / 共 ${total} 行）`)
   lines.push(`规模：数据行 ${total} 行 × ${ctx.adapter.colCount()} 列`)
   if (columns.length > 0) {
-    const labels = columns.slice(0, 8).map((col) => `${columnCode(ctx, col)}(${fieldOfColumn(ctx, col)?.label ?? ''})`).join('、')
-    lines.push(`列（前 ${Math.min(8, columns.length)} 列 / 共 ${columns.length} 列）：${labels}`)
+    const labels = columns.slice(0, 8).map((col) => `${columnLetter(col)}=${columnCode(ctx, col)}(${fieldOfColumn(ctx, col)?.label ?? ''})`).join('、')
+    lines.push(`列（前 ${Math.min(8, columns.length)} 列 / 共 ${columns.length} 列；A1=列字母+Excel 行号）：${labels}`)
   }
 
-  const blankParts: string[] = []
-  for (const col of columns.slice(0, 8)) {
-    let blanks = 0
-    for (let row = 0; row < total; row += 1) {
-      if (isBlank(ctx.adapter.getCell(row, col))) blanks += 1
-    }
-    blankParts.push(`${columnCode(ctx, col)} 空 ${blanks} 行`)
-  }
-  if (blankParts.length > 0) {
+  const blankColumns = columns.slice(0, 8)
+  if (blankColumns.length > 0) {
+    const blanks = new Array<number>(blankColumns.length).fill(0)
+    scanRows(ctx, allRowIndexes(ctx), blankColumns, (_row, values) => {
+      values.forEach((value, index) => {
+        if (isBlank(value)) blanks[index] = (blanks[index] ?? 0) + 1
+      })
+    })
+    const blankParts = blankColumns.map((col, index) => `${columnCode(ctx, col)} 空 ${blanks[index] ?? 0} 行`)
     lines.push(`空值：${blankParts.join('；')}`)
   }
 
   const keys = ctx.fields.filter((field) => field.key)
   if (keys.length > 0) {
-    const seen = new Map<string, number>()
+    const keyColumns = keys
+      .map((field) => resolveColumn(ctx, field.code))
+      .filter((col): col is number => col !== null)
+    const seen = new Set<string>()
     let duplicated = 0
-    for (let row = 0; row < total; row += 1) {
-      const text = keys.map((field) => {
-        const col = resolveColumn(ctx, field.code)
-        return col === null ? '' : cellDisplay(ctx.adapter.getCell(row, col)).trim()
-      }).join('|')
-      if (text.replace(/\|/g, '').trim() === '') continue
+    scanRows(ctx, allRowIndexes(ctx), keyColumns, (_row, values) => {
+      const text = values.map((value) => cellDisplay(value).trim()).join('|')
+      if (text.replace(/\|/g, '').trim() === '') return
       if (seen.has(text)) duplicated += 1
-      else seen.set(text, row)
-    }
+      else seen.add(text)
+    })
     lines.push(`重复主键：${keys.map((field) => field.code).join('+')} 重复 ${duplicated} 组`)
   }
 
   const sampleRows = resolved.rows.slice(0, limit)
   lines.push(`采样（前 ${sampleRows.length} 行，投影 ${columns.length} 列）：`)
-  const sampleLines = sampleRows.map((row) => {
-    const values = columns.map((col) => `${columnCode(ctx, col)}=${cellDisplay(ctx.adapter.getCell(row, col))}`)
-    return `  第 ${excelDisplay(row)} 行 | ${values.join(' | ')}`
+  const sampleLines: string[] = []
+  scanRows(ctx, sampleRows, columns, (row, values) => {
+    const cells = columns.map((col, index) => `${cellAddress(col, row)} ${columnCode(ctx, col)}=${cellDisplay(values[index])}`)
+    sampleLines.push(`  第 ${excelDisplay(row)} 行 | ${cells.join(' | ')}`)
   })
   const hidden = Math.max(0, ctx.fields.length - columns.length)
   const allLines = [...lines, ...sampleLines]
@@ -614,41 +728,124 @@ export function readSheetSummary(ctx: SheetContext, args: SheetArgs): SheetToolO
 
 // ── 读侧：聚合（兼作计数级预览引擎） ──────────────────────────────────────────
 
-function metricValue(
-  rows: number[],
-  ctx: SheetContext,
-  col: number,
-  metric: string
-): string {
-  const values = rows.map((row) => ctx.adapter.getCell(row, col))
+interface MetricValue {
+  text: string
+  /** 排序键：count/distinct/sum/blankRate 为数值；min/max 无天然数值序（用 text 比较）。 */
+  order: number | null
+}
+
+function metricFromValues(values: readonly unknown[], metric: string): MetricValue {
   switch (metric) {
     case 'count':
-      return `${values.length}`
-    case 'distinct':
-      return `${new Set(values.map((value) => cellDisplay(value))).size}`
+      return { text: `${values.length}`, order: values.length }
+    case 'distinct': {
+      const size = new Set(values.map((value) => cellDisplay(value))).size
+      return { text: `${size}`, order: size }
+    }
     case 'blankRate': {
       const blanks = values.filter((value) => isBlank(value)).length
-      return values.length === 0 ? '0%' : `${Math.round((blanks / values.length) * 100)}%`
+      const rate = values.length === 0 ? 0 : blanks / values.length
+      return { text: `${Math.round(rate * 100)}%`, order: rate }
     }
     case 'sum': {
       const sum = values.reduce((acc: number, value) => {
         const num = Number(cellDisplay(value))
         return Number.isFinite(num) ? acc + num : acc
       }, 0)
-      return `${sum}`
+      return { text: `${sum}`, order: sum }
     }
     case 'min':
     case 'max': {
       const texts = values.map((value) => cellDisplay(value)).filter((text) => text.trim() !== '')
-      if (texts.length === 0) return '—'
-      return texts.reduce((best, text) => {
-        const cmp = compareValues(text, best)
-        return (metric === 'min' ? cmp < 0 : cmp > 0) ? text : best
+      if (texts.length === 0) return { text: '—', order: null }
+      const best = texts.reduce((acc, text) => {
+        const cmp = compareValues(text, acc)
+        return (metric === 'min' ? cmp < 0 : cmp > 0) ? text : acc
       })
+      return { text: best, order: null }
     }
     default:
-      return ''
+      return { text: '', order: null }
   }
+}
+
+/** 分组排序口径（业界 pivot 默认：按首个度量降序，再取前 N 组）。 */
+type AggregateSort =
+  | { kind: 'metric'; metric: string; desc: boolean }
+  | { kind: 'label'; desc: boolean }
+  | { kind: 'none' }
+
+const AGGREGATE_METRIC_NAMES = new Set(['count', 'distinct', 'blankRate', 'min', 'max', 'sum'])
+
+function parseAggregateSort(
+  raw: unknown,
+  metrics: readonly string[]
+): { ok: true; sort: AggregateSort } | { ok: false; reason: string } {
+  const value = typeof raw === 'string' ? raw : ''
+  const metricSort = (metric: string, desc: boolean): { ok: true; sort: AggregateSort } | { ok: false; reason: string } => {
+    if (!metrics.includes(metric)) {
+      return {
+        ok: false,
+        reason: `sort=${metric} 需要把 ${metric} 列进 metrics（当前 metrics 为 ${metrics.join('/')}）。`
+      }
+    }
+    return { ok: true, sort: { kind: 'metric', metric, desc } }
+  }
+  switch (value) {
+    case '':
+    case 'metric':
+    case 'metricDesc':
+      return { ok: true, sort: { kind: 'metric', metric: metrics[0] ?? 'count', desc: true } }
+    case 'metricAsc':
+      return { ok: true, sort: { kind: 'metric', metric: metrics[0] ?? 'count', desc: false } }
+    case 'label':
+    case 'labelAsc':
+      return { ok: true, sort: { kind: 'label', desc: false } }
+    case 'labelDesc':
+      return { ok: true, sort: { kind: 'label', desc: true } }
+    case 'none':
+      return { ok: true, sort: { kind: 'none' } }
+    default:
+      if (AGGREGATE_METRIC_NAMES.has(value)) {
+        return metricSort(value, true)
+      }
+      return {
+        ok: false,
+        reason: `sort 只支持 metric/metricDesc/metricAsc/labelAsc/labelDesc/none，或 metrics 里的度量名`
+          + `（count/distinct/blankRate/min/max/sum），实际为 ${value}。`
+      }
+  }
+}
+
+function aggregateSortLine(sort: AggregateSort, limit: number): string {
+  if (sort.kind === 'none') return '排序：保持原顺序（未排序）'
+  if (sort.kind === 'label') return `排序：按分组标签${sort.desc ? '降序' : '升序'}`
+  return `排序：按 ${sort.metric} ${sort.desc ? '降序' : '升序'}（取前 ${limit} 组）`
+}
+
+interface GroupEntry {
+  label: string
+  rows: number[]
+  values: unknown[]
+  metrics: Map<string, MetricValue>
+}
+
+function compareGroupEntries(left: GroupEntry, right: GroupEntry, sort: AggregateSort): number {
+  if (sort.kind === 'metric') {
+    const leftMetric = left.metrics.get(sort.metric) ?? { text: '', order: null }
+    const rightMetric = right.metrics.get(sort.metric) ?? { text: '', order: null }
+    const cmp = leftMetric.order !== null && rightMetric.order !== null
+      ? leftMetric.order - rightMetric.order
+      : compareValues(leftMetric.text, rightMetric.text)
+    // 并列按标签升序，保证输出稳定（不受底层遍历顺序影响）
+    if (cmp !== 0) return sort.desc ? -cmp : cmp
+    return compareValues(left.label, right.label)
+  }
+  if (sort.kind === 'label') {
+    const cmp = compareValues(left.label, right.label)
+    return sort.desc ? -cmp : cmp
+  }
+  return 0
 }
 
 export function aggregateSheet(ctx: SheetContext, args: SheetArgs): SheetToolOutcome {
@@ -661,12 +858,15 @@ export function aggregateSheet(ctx: SheetContext, args: SheetArgs): SheetToolOut
   const metrics = Array.isArray(args.metrics) && args.metrics.length > 0
     ? (args.metrics as unknown[]).map((item) => String(item))
     : ['count']
-  const allowed = new Set(['count', 'distinct', 'blankRate', 'min', 'max', 'sum'])
+  const allowed = AGGREGATE_METRIC_NAMES
   for (const metric of metrics) {
     if (!allowed.has(metric)) {
       return { ok: false, reason: `metrics 只支持 count/distinct/blankRate/min/max/sum，实际为 ${metric}。` }
     }
   }
+  const parsedSort = parseAggregateSort(args.sort, metrics)
+  if (!parsedSort.ok) return { ok: false, reason: parsedSort.reason }
+  const sort = parsedSort.sort
   const groupBy = typeof args.groupBy === 'string' && args.groupBy !== '' ? resolveColumn(ctx, args.groupBy) : null
   if (typeof args.groupBy === 'string' && args.groupBy !== '' && groupBy === null) {
     return { ok: false, reason: `分组列 ${args.groupBy} 不在当前表格中。` }
@@ -685,32 +885,56 @@ export function aggregateSheet(ctx: SheetContext, args: SheetArgs): SheetToolOut
   lines.push(`范围：${resolved.predicateSummary || '全部数据'}（命中 ${resolved.rows.length} 行 / 共 ${totalRows(ctx)} 行）`)
 
   if (groupBy === null) {
-    const parts = metrics.map((metric) => `${metric}=${metricValue(resolved.rows, ctx, metricCol ?? 0, metric)}`)
+    const values = readSingleColumn(ctx, resolved.rows, metricCol ?? 0)
+    const parts = metrics.map((metric) => `${metric}=${metricFromValues(values, metric).text}`)
     lines.push(`总计：${resolved.rows.length} 行${metricCol === null ? '' : ` · ${parts.join(' · ')}`}`)
     const capped = capSheetResult({ lines, total: 1, returned: 1, unit: '组' }, { whole: true })
     return { ok: true, text: capped.text }
   }
 
-  const groups = new Map<string, number[]>()
-  for (const row of resolved.rows) {
-    const key = cellDisplay(ctx.adapter.getCell(row, groupBy)).trim()
+  const valueCol = metricCol ?? 0
+  const scanColumns = Array.from(new Set([groupBy, valueCol]))
+  const groupIdx = scanColumns.indexOf(groupBy)
+  const valueIdx = scanColumns.indexOf(valueCol)
+  const groups = new Map<string, GroupEntry>()
+  scanRows(ctx, resolved.rows, scanColumns, (row, values) => {
+    const key = cellDisplay(values[groupIdx]).trim()
     const label = key === '' ? '（空）' : key
-    const list = groups.get(label) ?? []
-    list.push(row)
-    groups.set(label, list)
-  }
-  const entries = [...groups.entries()]
-  const shown = entries.slice(0, limit)
-  const groupLines = shown.map(([label, rows]) => {
-    if (metricCol === null) {
-      return `  ${label}：${rows.length} 行`
+    const entry = groups.get(label) ?? { label, rows: [], values: [], metrics: new Map<string, MetricValue>() }
+    entry.rows.push(row)
+    entry.values.push(values[valueIdx])
+    groups.set(label, entry)
+  })
+  const entries = [...groups.values()]
+  for (const entry of entries) {
+    for (const metric of metrics) {
+      entry.metrics.set(metric, metricFromValues(entry.values, metric))
     }
-    const parts = metrics.map((metric) => `${metric}=${metricValue(rows, ctx, metricCol, metric)}`)
-    return `  ${label}：${rows.length} 行 · ${parts.join(' · ')}`
+  }
+  if (sort.kind !== 'none') {
+    entries.sort((left, right) => compareGroupEntries(left, right, sort))
+  }
+  const shown = entries.slice(0, limit)
+  lines.push(aggregateSortLine(sort, limit))
+  const groupLines = shown.map((entry) => {
+    if (metricCol === null) {
+      return `  ${entry.label}：${entry.rows.length} 行`
+    }
+    const parts = metrics.map((metric) => `${metric}=${entry.metrics.get(metric)?.text ?? ''}`)
+    return `  ${entry.label}：${entry.rows.length} 行 · ${parts.join(' · ')}`
   })
   lines.push(`分组：${columnCode(ctx, groupBy)}`)
   const capped = capSheetResult({ lines: [...lines, ...groupLines], total: entries.length, returned: shown.length, unit: '组', prefixLines: lines.length }, { whole: true })
   return { ok: true, text: capped.text }
+}
+
+/** 单列批读（一次 `getArray` 扫完给定行），供总计/条件计数复用。 */
+function readSingleColumn(ctx: SheetContext, rows: readonly number[], col: number): unknown[] {
+  const values: unknown[] = []
+  scanRows(ctx, rows, [col], (_row, cells) => {
+    values.push(cells[0])
+  })
+  return values
 }
 
 // ── 读侧：列映射诊断 ─────────────────────────────────────────────────────────
@@ -789,11 +1013,15 @@ export function reviewCells(ctx: SheetContext, args: SheetArgs): SheetToolOutcom
   const scope = resolveScope(ctx, args, { defaultScope: 'sheet' })
   if (!scope.ok) return scope
   const { resolved } = scope
-  const allColumns = ctx.fields.map((_field, index) => index)
-  const rows = Array.from({ length: totalRows(ctx) }, (_, row) => readRowObject(ctx, row, allColumns))
+  const allColumns = allColumnsOf(ctx)
+  const rows: Array<Record<string, unknown>> = []
+  scanRows(ctx, allRowIndexes(ctx), allColumns, (_row, values) => {
+    rows.push(rowRecord(ctx, allColumns, values))
+  })
   const issues = validateRows(ctx.fields, rows)
   const wanted = new Set(resolved.rows.map((row) => excelRowNumber(row)))
   const filtered = issues.filter((issue) => wanted.has(issue.rowIndex))
+  const fieldColumns = new Map(ctx.fields.map((field, col) => [field.code, col]))
 
   const byField = new Map<string, number>()
   for (const issue of filtered) {
@@ -806,10 +1034,115 @@ export function reviewCells(ctx: SheetContext, args: SheetArgs): SheetToolOutcom
   const lines: string[] = []
   lines.push(`范围：${resolved.scope === 'selection' ? '当前选区' : '整表'}${resolved.predicateSummary ? ` · ${resolved.predicateSummary}` : ''}（命中 ${resolved.rows.length} 行）`)
   lines.push(`按字段聚合：${byField.size > 0 ? [...byField.entries()].map(([key, count]) => `${key} ${count} 处`).join('、') : '无问题'}`)
-  lines.push(`前 ${Math.min(limit, filtered.length)} 条：`)
-  const detail = filtered.slice(0, limit).map((issue) =>
-    `  第 ${issue.rowIndex} 行 ${issue.fieldCode}「${issue.value}」：${issue.reason}`)
+  lines.push(`前 ${Math.min(limit, filtered.length)} 条（带单元格地址）：`)
+  const detail = filtered.slice(0, limit).map((issue) => {
+    const col = fieldColumns.get(issue.fieldCode)
+    const address = col === undefined ? '' : `${cellAddress(col, issue.rowIndex - 2)} `
+    return `  第 ${issue.rowIndex} 行 ${address}${issue.fieldCode}「${issue.value}」：${issue.reason}`
+  })
   const capped = capSheetResult({ lines: [...lines, ...detail], total: filtered.length, returned: detail.length, unit: '处', prefixLines: lines.length }, { whole: true })
+  return { ok: true, text: capped.text }
+}
+
+// ── 读侧：全文检索（find_rows） ───────────────────────────────────────────────
+
+const FIND_MATCH_MODES = new Set(['contains', 'equals', 'prefix'])
+
+/**
+ * `find_rows`：在当前范围里做**全列包含检索**，回命中行号 + 命中单元格地址 + 采样 + 共 N 行。
+ *
+ * 与业界「查找」同口径：默认 `contains` + 忽略大小写，`equals` 按整格相等、`prefix` 按前缀；
+ * 采样恒走 {@link capSheetResult} 整条闸（≤20 行 / 2000 字符），命中总数不受采样影响。
+ */
+export function findRows(ctx: SheetContext, args: SheetArgs): SheetToolOutcome {
+  const defError = validateDefCode(ctx, args)
+  if (defError) return { ok: false, reason: defError }
+  const search = typeof args.search === 'string' ? args.search : ''
+  if (search.trim() === '') {
+    return { ok: false, reason: 'search 必填且不能为空：请给出要查找的文字（本工具做全列包含检索），本次未做任何修改。' }
+  }
+  const match = typeof args.match === 'string' && args.match !== '' ? args.match : 'contains'
+  if (!FIND_MATCH_MODES.has(match)) {
+    return { ok: false, reason: `match 只支持 contains/equals/prefix，实际为 ${match}。` }
+  }
+  const ignoreCase = args.ignoreCase === undefined ? true : Boolean(args.ignoreCase)
+  const limit = parseLimit(args.limit, SHEET_TOOL_DEFAULT_SAMPLE_ROWS, SHEET_TOOL_MAX_SAMPLE_ROWS)
+  if (limit === null) {
+    return { ok: false, reason: `limit 只能是 1 到 ${SHEET_TOOL_MAX_SAMPLE_ROWS} 的整数，本次未做任何修改。` }
+  }
+  let columns: number[]
+  let columnLabel: string
+  if (Array.isArray(args.columnCodes)) {
+    if (args.columnCodes.length === 0) {
+      return { ok: false, reason: 'columnCodes 不能为空数组：要么不传（检索全部列），要么给出至少 1 个列。' }
+    }
+    columns = []
+    for (const code of args.columnCodes as unknown[]) {
+      const col = resolveColumn(ctx, String(code))
+      if (col === null) {
+        return { ok: false, reason: `检索列 ${String(code)} 不在当前表格中。` }
+      }
+      columns.push(col)
+    }
+    columnLabel = `列 ${(args.columnCodes as unknown[]).map((code) => String(code)).join('、')}`
+    columns = Array.from(new Set(columns))
+  } else {
+    columns = allColumnsOf(ctx)
+    columnLabel = `全部 ${columns.length} 列`
+  }
+  const scope = resolveScope(ctx, args, { defaultScope: 'sheet' })
+  if (!scope.ok) return scope
+  const { resolved } = scope
+
+  const needle = ignoreCase ? search.toLowerCase() : search
+  const hits: number[] = []
+  const perColumn = new Map<number, number>()
+  const sampleLines: string[] = []
+  scanRows(ctx, resolved.rows, columns, (row, values) => {
+    const matchedCells: string[] = []
+    columns.forEach((col, index) => {
+      const text = cellDisplay(values[index])
+      if (text === '') return
+      const haystack = ignoreCase ? text.toLowerCase() : text
+      const hit = match === 'equals'
+        ? haystack === needle
+        : match === 'prefix'
+          ? haystack.startsWith(needle)
+          : haystack.includes(needle)
+      if (!hit) return
+      perColumn.set(col, (perColumn.get(col) ?? 0) + 1)
+      if (matchedCells.length < SHEET_TOOL_MAX_COLUMNS) {
+        matchedCells.push(`${cellAddress(col, row)} ${columnCode(ctx, col)}=${text}`)
+      }
+    })
+    if (matchedCells.length === 0) return
+    hits.push(row)
+    if (sampleLines.length < limit) {
+      sampleLines.push(`  第 ${excelDisplay(row)} 行 | ${matchedCells.join(' | ')}`)
+    }
+  })
+
+  const lines: string[] = []
+  lines.push(`检索：${match}「${search}」（${columnLabel}，区分大小写=${!ignoreCase}）`)
+  lines.push(`范围：${resolved.summary}${resolved.predicateSummary ? ` · ${resolved.predicateSummary}` : ''}（命中 ${hits.length} 行 / 共 ${resolved.rows.length} 行）`)
+  const hitColumns = [...perColumn.entries()]
+    .sort((left, right) => left[0] - right[0])
+    .map(([col, count]) => `${columnCode(ctx, col)} ${count} 行`)
+  if (hitColumns.length > 0) {
+    lines.push(`命中列：${hitColumns.join('、')}`)
+  }
+  if (hits.length === 0) {
+    lines.push('没有命中的行（可换关键字，或去掉 match/columnCodes 收窄条件）。')
+  } else {
+    lines.push(`采样（前 ${sampleLines.length} 行，命中单元格带地址）：`)
+  }
+  const capped = capSheetResult({
+    lines: [...lines, ...sampleLines],
+    total: hits.length,
+    returned: sampleLines.length,
+    unit: '行',
+    prefixLines: lines.length
+  }, { whole: true })
   return { ok: true, text: capped.text }
 }
 
@@ -852,7 +1185,7 @@ function makePlan(input: {
     samples: input.changes.slice(0, SHEET_PREVIEW_SAMPLE_PAIRS),
     changes: input.changes,
     targetRows: input.targetRows,
-    fingerprint: input.targetRows.map((row) => fingerprintRow(input.ctx, row, keyColumns(input.ctx))),
+    fingerprint: fingerprintRows(input.ctx, input.targetRows, keyColumns(input.ctx)),
     warnings: input.warnings,
     rulesText: input.rulesText,
     status: 'pending'
@@ -1029,20 +1362,25 @@ export function planReplace(ctx: SheetContext, args: SheetArgs, toolCallId = '')
 
   const changes: SheetChange[] = []
   let skipped = 0
-  for (const row of scope.resolved.rows) {
-    for (const col of columns) {
-      const oldValue = ctx.adapter.getCell(row, col)
+  const cells: unknown[][] = []
+  scanRows(ctx, scope.resolved.rows, columns, (_row, values) => {
+    cells.push([...values])
+  })
+  scope.resolved.rows.forEach((row, rowIndex) => {
+    const line = cells[rowIndex] ?? []
+    columns.forEach((col, colIndex) => {
+      const oldValue = line[colIndex]
       const text = cellDisplay(oldValue)
       const matched = matcher.match(text)
-      if (!matched.hit || matched.next === text) continue
+      if (!matched.hit || matched.next === text) return
       const field = fieldOfColumn(ctx, col)
       if (field && validateCell(field, matched.next) !== null) {
         skipped += 1
-        continue
+        return
       }
       changes.push({ row, col, oldValue, newValue: matched.next })
-    }
-  }
+    })
+  })
   if (changes.length > SHEET_WRITE_HARD_MAX_CELLS) {
     return {
       ok: false,
@@ -1139,41 +1477,60 @@ export function planUpdate(ctx: SheetContext, args: SheetArgs, toolCallId = ''):
     if (item.mode === 'literal') {
       const value = item.value === undefined ? '' : item.value
       ruleParts.push(`${item.columnCode} ← 「${cellDisplay(value)}」`)
-      for (const row of rows) {
-        const oldValue = ctx.adapter.getCell(row, col)
-        if (cellDisplay(oldValue) === cellDisplay(value)) continue
+      const current = readSingleColumn(ctx, rows, col)
+      rows.forEach((row, index) => {
+        const oldValue = current[index]
+        if (cellDisplay(oldValue) === cellDisplay(value)) return
         if (field && validateCell(field, value) !== null) {
           skipped += 1
-          continue
+          return
         }
         changes.push({ row, col, oldValue, newValue: value })
-      }
+      })
     } else if (item.mode === 'template') {
       const template = typeof item.template === 'string' ? item.template : ''
       if (template === '') {
         return { ok: false, reason: 'mode=template 需要 template（如 "${code}-${name}"）。' }
       }
       ruleParts.push(`${item.columnCode} ← 模板「${template}」`)
-      for (const row of rows) {
-        const oldValue = ctx.adapter.getCell(row, col)
+      const refCodes = Array.from(template.matchAll(/\$\{([^}]+)\}/g), (matched) => String(matched[1]))
+      const resolvedRefs = new Map<string, number | null>()
+      for (const code of refCodes) {
+        if (!resolvedRefs.has(code)) resolvedRefs.set(code, resolveColumn(ctx, code))
+      }
+      const scanColumns = Array.from(new Set([col, ...[...resolvedRefs.values()].filter((ref): ref is number => ref !== null)]))
+      const refIndexByCode = new Map<string, number>()
+      for (const [code, refCol] of resolvedRefs) {
+        refIndexByCode.set(code, refCol === null ? -1 : scanColumns.indexOf(refCol))
+      }
+      const values: unknown[][] = []
+      scanRows(ctx, rows, scanColumns, (_row, cells) => {
+        values.push([...cells])
+      })
+      const startIndex = scanColumns.indexOf(col)
+      rows.forEach((row, index) => {
+        const cells = values[index] ?? []
+        const oldValue = cells[startIndex]
         const next = template.replace(/\$\{([^}]+)\}/g, (_all, code: string) => {
-          const refCol = resolveColumn(ctx, code)
-          return refCol === null ? '' : cellDisplay(ctx.adapter.getCell(row, refCol))
+          const refIndex = refIndexByCode.get(code) ?? -1
+          return refIndex < 0 ? '' : cellDisplay(cells[refIndex])
         })
-        if (next === cellDisplay(oldValue)) continue
+        if (next === cellDisplay(oldValue)) return
         if (field && validateCell(field, next) !== null) {
           skipped += 1
-          continue
+          return
         }
         changes.push({ row, col, oldValue, newValue: next })
-      }
+      })
     } else if (item.mode === 'fillDown') {
       ruleParts.push(`${item.columnCode} ← 用上方最近的非空值补齐空单元格`)
+      const allRows = allRowIndexes(ctx)
+      const current = readSingleColumn(ctx, allRows, col)
       let last: unknown = ''
-      for (let row = 0; row < totalRows(ctx); row += 1) {
-        const current = ctx.adapter.getCell(row, col)
-        if (!isBlank(current)) {
-          last = current
+      for (let row = 0; row < current.length; row += 1) {
+        const value = current[row]
+        if (!isBlank(value)) {
+          last = value
           continue
         }
         if (!rowSet.has(row)) continue
@@ -1183,7 +1540,7 @@ export function planUpdate(ctx: SheetContext, args: SheetArgs, toolCallId = ''):
           skipped += 1
           continue
         }
-        changes.push({ row, col, oldValue: current, newValue: last })
+        changes.push({ row, col, oldValue: value, newValue: last })
       }
     } else {
       const start = Number(item.start ?? 1)
@@ -1192,19 +1549,20 @@ export function planUpdate(ctx: SheetContext, args: SheetArgs, toolCallId = ''):
         return { ok: false, reason: 'mode=fillSeries 需要数值型 start / step。' }
       }
       ruleParts.push(`${item.columnCode} ← 等差数列（start=${start}，step=${step}）`)
+      const current = readSingleColumn(ctx, rows, col)
       let index = 0
-      for (const row of rows) {
-        const current = ctx.adapter.getCell(row, col)
-        if (!isBlank(current)) continue
+      rows.forEach((row, rowIndex) => {
+        const value = current[rowIndex]
+        if (!isBlank(value)) return
         const next = String(start + step * index)
         index += 1
         fillCells += 1
         if (field && validateCell(field, next) !== null) {
           skipped += 1
-          continue
+          return
         }
-        changes.push({ row, col, oldValue: current, newValue: next })
-      }
+        changes.push({ row, col, oldValue: value, newValue: next })
+      })
     }
   }
 
@@ -1320,15 +1678,15 @@ function computeNormalize(ctx: SheetContext, rows: number[], setup: NormalizeSet
   let skipped = 0
   for (const col of setup.columns) {
     const field = fieldOfColumn(ctx, col)
-    for (const row of rows) {
-      const oldValue = ctx.adapter.getCell(row, col)
+    scanRows(ctx, rows, [col], (row, values) => {
+      const oldValue = values[0]
       let next = cellDisplay(oldValue)
       const before = next
       for (const rule of setup.rules) {
         if (!EXECUTABLE_RULES.has(rule)) continue
         next = normalizeText(next, rule, setup.upper)
       }
-      if (next === before) continue
+      if (next === before) return
       // 每条规则的影响计数（对原值单独应用该规则）
       for (const rule of setup.rules) {
         if (!EXECUTABLE_RULES.has(rule)) continue
@@ -1338,10 +1696,10 @@ function computeNormalize(ctx: SheetContext, rows: number[], setup: NormalizeSet
       }
       if (field && validateCell(field, next) !== null) {
         skipped += 1
-        continue
+        return
       }
       changes.push({ row, col, oldValue, newValue: next })
-    }
+    })
   }
   return { changes, ruleCounts, skipped }
 }
@@ -1365,7 +1723,7 @@ export function normalizeSuggest(ctx: SheetContext, args: SheetArgs): SheetToolO
   lines.push(`归一化建议（未做任何修改）：${ctx.defCode}.${parsed.setup.columns.map((col) => columnCode(ctx, col)).join('、')}`)
   for (const rule of parsed.setup.rules) {
     const count = rule === 'space'
-      ? scope.resolved.rows.reduce((sum, row) => sum + parsed.setup.columns.filter((col) => /\S\s+\S/.test(cellDisplay(ctx.adapter.getCell(row, col)))).length, 0)
+      ? countInternalSpaces(ctx, scope.resolved.rows, parsed.setup.columns)
       : rule === 'number'
         ? countNonCanonicalNumbers(ctx, scope.resolved.rows, parsed.setup.columns)
         : rule === 'date'
@@ -1385,26 +1743,36 @@ export function normalizeSuggest(ctx: SheetContext, args: SheetArgs): SheetToolO
 
 function countNonCanonicalNumbers(ctx: SheetContext, rows: number[], columns: number[]): number {
   let count = 0
-  for (const row of rows) {
-    for (const col of columns) {
-      const text = cellDisplay(ctx.adapter.getCell(row, col)).trim()
-      if (text === '') continue
+  scanRows(ctx, rows, columns, (_row, values) => {
+    values.forEach((value) => {
+      const text = cellDisplay(value).trim()
+      if (text === '') return
       const num = Number(text)
       if (Number.isFinite(num) && String(num) !== text) count += 1
-    }
-  }
+    })
+  })
   return count
 }
 
 function countAmbiguousDates(ctx: SheetContext, rows: number[], columns: number[]): number {
   let count = 0
-  for (const row of rows) {
-    for (const col of columns) {
-      const text = cellDisplay(ctx.adapter.getCell(row, col)).trim()
-      if (text === '') continue
+  scanRows(ctx, rows, columns, (_row, values) => {
+    values.forEach((value) => {
+      const text = cellDisplay(value).trim()
+      if (text === '') return
       if (/^\d{8}$/.test(text) || /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(text)) count += 1
-    }
-  }
+    })
+  })
+  return count
+}
+
+function countInternalSpaces(ctx: SheetContext, rows: number[], columns: number[]): number {
+  let count = 0
+  scanRows(ctx, rows, columns, (_row, values) => {
+    values.forEach((value) => {
+      if (/\S\s+\S/.test(cellDisplay(value))) count += 1
+    })
+  })
   return count
 }
 
@@ -1474,10 +1842,11 @@ export function applySheetPlan(ctx: SheetContext, plan: SheetWritePlan): ApplySh
     return { ok: false, reason: '该预览已失效或已处理，本次未应用任何改动。请重新发起。' }
   }
   const columns = keyColumns(ctx)
+  const current = fingerprintRows(ctx, plan.targetRows, columns)
   for (let index = 0; index < plan.targetRows.length; index += 1) {
     const row = plan.targetRows[index]
     if (row === undefined) continue
-    if (fingerprintRow(ctx, row, columns) !== plan.fingerprint[index]) {
+    if (current[index] !== plan.fingerprint[index]) {
       return {
         ok: false,
         reason: `表格在预览期间已变动（第 ${excelRowNumber(row)} 行的主键值已改变），本次未应用任何改动。请重新发起。`
