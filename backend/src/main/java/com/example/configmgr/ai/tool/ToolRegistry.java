@@ -59,9 +59,11 @@ public class ToolRegistry {
                 if (cls == null || cls == Object.class) { cls = bean.getClass(); break; }
             }
 
+            boolean hasToolAnnotation = false;
             for (Method method : cls.getDeclaredMethods()) {
                 Tool toolAnn = method.getAnnotation(Tool.class);
                 if (toolAnn == null) continue;
+                hasToolAnnotation = true;
 
                 String name = toolAnn.name().isBlank() ? method.getName() : toolAnn.name();
                 ToolScope scopeAnn = method.getAnnotation(ToolScope.class);
@@ -89,14 +91,50 @@ public class ToolRegistry {
             try {
                 var provider = MethodToolCallbackProvider.builder().toolObjects(bean).build();
                 for (ToolCallback tc : provider.getToolCallbacks()) {
-                    callbackMap.put(tc.getToolDefinition().name(), tc);
+                    callbackMap.put(tc.getToolDefinition().name(), normalizeSchema(tc));
                 }
             } catch (Exception e) {
-                // Not a tool bean or no @Tool methods
+                // 非工具 bean：MethodToolCallbackProvider 对"没有 @Tool 方法"的 bean 会直接抛错，
+                // 这是扫描期的正常噪音，继续。
+                if (!hasToolAnnotation) {
+                    continue;
+                }
+                // 真工具 bean 的注册失败绝不能吞：schema 归一化/构建出问题而静默掉工具，
+                // 会让应用"看起来启动成功"却少了一批工具（比启动失败更难查）。
+                throw new IllegalStateException("工具 bean " + beanName + " 的回调注册失败", e);
             }
         }
         applyOverrides();
         log.info("ToolRegistry: registered {} tools（定义来源={}）", callbackMap.size(), snapshotVersion);
+    }
+
+    /**
+     * 注册期 schema 归一化（2026-10-22 回归修复）：{@code MethodToolCallbackProvider} 之后、
+     * 入 {@code callbackMap} 之前，把参数级 {@code $defs} 提升到文档根，保证
+     * {@code #/$defs/X} 形态的 {@code $ref} 可解析。
+     *
+     * <p>
+     * 不归一化时，victools 把"被多次引用的类型"提级到<b>参数子 schema</b> 的 {@code $defs}，
+     * 而 {@code $ref} 从文档根解析 ⇒ 上游对整轮请求 400（见
+     * {@code ToolSchemaRefIntegrityTest}）。执行路径不动：只是换 definition，委托沿用
+     * {@link OverriddenToolCallback}（两个 {@code call} 重载都正确转发 ToolContext）。
+     *
+     * <p>
+     * schema 未被改动时<b>原样返回同一个回调</b> —— 其余工具的定义字节不变，prompt 缓存不受影响。
+     */
+    private ToolCallback normalizeSchema(ToolCallback callback) {
+        ToolDefinition definition = callback.getToolDefinition();
+        String normalized = ToolSchemaNormalizer.normalize(definition.name(), definition.inputSchema());
+        if (normalized == null || normalized.equals(definition.inputSchema())) {
+            return callback;
+        }
+        ToolDefinition rebuilt = DefaultToolDefinition.builder()
+                .name(definition.name())
+                .description(definition.description())
+                .inputSchema(normalized)
+                .build();
+        log.info("工具 schema 归一化：{}（参数级 $defs 提升到文档根）", definition.name());
+        return new OverriddenToolCallback(callback, rebuilt);
     }
 
     /**
@@ -138,7 +176,8 @@ public class ToolRegistry {
             String schema = reflected.inputSchema();
             if (override.hasSchema()) {
                 ToolSchemaReconciler.reconcile(override.toolKey(), reflected.inputSchema(), override.inputSchema());
-                schema = override.inputSchema();
+                // 覆盖 schema 同样过归一化：外置定义也可能带参数级 $defs（同一把 $ref 口径）。
+                schema = ToolSchemaNormalizer.normalize(override.toolKey(), override.inputSchema());
             }
             if (!override.hasDescription() && !override.hasSchema()) {
                 continue;
@@ -182,6 +221,19 @@ public class ToolRegistry {
 
     public ToolCallback getCallback(String name) {
         return callbackMap.get(name);
+    }
+
+    /**
+     * 全部已登记回调（只读快照，顺序 = 注册顺序）。
+     *
+     * <p>
+     * 披露面 {@link #forContext} 只给"当前上下文该看的子集"，无法用来遍历全量工具；
+     * 而 schema 级不变量（如 {@code $ref} 必须在文档根可解析，见
+     * {@code ToolSchemaRefIntegrityTest}）必须对<b>每一个</b>工具成立，与页面/任务无关。
+     * 故单独开一个只读入口，避免测试用反射摸私有表。
+     */
+    public List<ToolCallback> allCallbacks() {
+        return List.copyOf(callbackMap.values());
     }
 
     /** 已登记工具总数（只读诊断面 {@code GET /api/ai/tools} 的对照值）。 */
