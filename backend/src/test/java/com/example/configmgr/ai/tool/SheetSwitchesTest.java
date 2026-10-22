@@ -163,4 +163,33 @@ class SheetSwitchesTest {
 		assertThat(SheetSwitches.writeDisabledText()).contains("已被管理员关闭").contains("未做任何修改");
 	}
 
+	/**
+	 * 关闸归因（{@link SheetSwitches#disabledGate(String)}）：回执文案点名**实际关掉的那一侧**。
+	 *
+	 * <p>双档工具是重点：`normalize_column` 要两闸同开，所以「读关写开」与「读开写关」都必须
+	 * 报出真正关着的那扇门 —— 按"是不是读工具"二分会把前者误报成 write-enabled。
+	 */
+	@Test
+	void disabledGateNamesTheSideThatIsActuallyClosed() {
+		AiProperties.Sheet readClosed = new AiProperties.Sheet();
+		readClosed.setReadEnabled(false);
+		readClosed.setWriteEnabled(true);
+		SheetSwitches readGateClosed = new SheetSwitches(readClosed);
+		assertThat(readGateClosed.disabledGate("read_sheet_summary")).isEqualTo("read-enabled");
+		assertThat(readGateClosed.disabledGate("normalize_column")).as("读关写开：双档按读侧报")
+				.isEqualTo("read-enabled");
+		assertThat(readGateClosed.disabledGate("update_rows")).as("写闸开着 ⇒ 写工具不被拦").isNull();
+
+		AiProperties.Sheet writeClosed = new AiProperties.Sheet();
+		writeClosed.setReadEnabled(true);
+		writeClosed.setWriteEnabled(false);
+		SheetSwitches writeGateClosed = new SheetSwitches(writeClosed);
+		assertThat(writeGateClosed.disabledGate("update_rows")).isEqualTo("write-enabled");
+		assertThat(writeGateClosed.disabledGate("normalize_column")).isEqualTo("write-enabled");
+		assertThat(writeGateClosed.disabledGate("find_rows")).as("读闸开着 ⇒ 读工具不被拦").isNull();
+
+		assertThat(writeGateClosed.disabledGate("list_config_defs")).as("非表格工具不归本组件管").isNull();
+		assertThat(writeGateClosed.disabledGate(null)).isNull();
+	}
+
 }

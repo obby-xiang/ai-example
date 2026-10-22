@@ -840,7 +840,11 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 */
 	private String blockSheetDisabled(String runId, AiContext context, PendingToolCall pending) {
 		String name = pending.getName();
-		boolean readSide = SheetSwitches.READ_TOOLS.contains(name);
+		// 「哪侧被关」以开关的真实状态为准；拿不到（未装配 / 未受治理）才回落按工具分类二分。
+		String gate = this.toolRegistry.sheetDisabledGate(name);
+		boolean readSide = gate == null
+				? SheetSwitches.READ_TOOLS.contains(name)
+				: "read-enabled".equals(gate);
 		String human = readSide ? SheetSwitches.readDisabledText() : SheetSwitches.writeDisabledText();
 		String text = ToolOutcome.CODE_SHEET_DISABLED + "：工具 " + name + " 未执行 —— " + human
 				+ "（管理员关闭了 app.ai.sheet." + (readSide ? "read-enabled" : "write-enabled")

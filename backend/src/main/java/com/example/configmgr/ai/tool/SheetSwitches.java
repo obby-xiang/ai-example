@@ -115,6 +115,32 @@ public final class SheetSwitches {
 		return true;
 	}
 
+	/**
+	 * 被关掉的闸门键名（`read-enabled` / `write-enabled`）；未关或非受治理工具返回 {@code null}。
+	 *
+	 * <p>为什么需要"哪一侧"：{@link #allows} 只回答"能不能进披露面"，回执文案还要告诉管理员
+	 * 该去看哪个键。双档工具（`normalize_column`）是"两闸同时开才披露"，<b>关哪侧就报哪侧</b> ——
+	 * 按"是不是读工具"二分会把「读关写开」误报成 write-enabled（管理员去查会发现它本来就是 true）。
+	 */
+	public String disabledGate(String toolName) {
+		if (toolName == null || toolName.isBlank()) {
+			return null;
+		}
+		if (READ_TOOLS.contains(toolName)) {
+			return readEnabled() ? null : "read-enabled";
+		}
+		if (WRITE_TOOLS.contains(toolName)) {
+			return writeEnabled() ? null : "write-enabled";
+		}
+		if (DUAL_TOOLS.contains(toolName)) {
+			if (!readEnabled()) {
+				return "read-enabled";
+			}
+			return writeEnabled() ? null : "write-enabled";
+		}
+		return null;
+	}
+
 	/** {@code /health.sheet} 的配置面（键名与设计稿 §2.5 逐字一致）。 */
 	public Map<String, Object> health() {
 		Map<String, Object> out = new LinkedHashMap<>();

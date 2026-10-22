@@ -168,6 +168,33 @@ class SheetDisabledGateTest {
         assertThat(envelope.outcome()).isEqualTo(ToolOutcome.BLOCKED.wire());
     }
 
+    /**
+     * 双档工具（normalize_column）在「写开读关」下被挡：措辞必须点名<b>实际关掉的那一侧</b>。
+     *
+     * <p>旧实现按 {@code SheetSwitches.READ_TOOLS.contains(name)} 二分，双档工具不在读集里 ⇒ 一律按
+     * 写侧口径说「表格写入功能已被管理员关闭 … app.ai.sheet.write-enabled」——而管理员此时把读闸关了、
+     * 写闸是开的，按文案去查 write-enabled 会查到 true，等于把排障方向指反。
+     */
+    @Test
+    void dualToolNamesTheGateThatIsActuallyClosed() {
+        when(this.toolRegistry.matchesContext(eq("normalize_column"), any(AiContext.class))).thenReturn(false);
+        when(this.toolRegistry.sheetDisabled("normalize_column")).thenReturn(true);
+        when(this.toolRegistry.sheetDisabledGate("normalize_column")).thenReturn("read-enabled");
+        when(this.toolRegistry.channelOf("normalize_column")).thenReturn(ToolMeta.Channel.FRONTEND);
+        when(this.toolRegistry.riskOf("normalize_column")).thenReturn(ToolMeta.RiskLevel.WRITE);
+
+        ToolResultEnvelope envelope = ToolResultEnvelope.fromJson(
+                toolText(execute("normalize_column", "{\"defCode\":\"CURRENCY\"}")));
+
+        assertThat(envelope.code()).isEqualTo("SHEET_DISABLED");
+        assertThat(envelope.message()).contains("表格读取功能已被管理员关闭")
+                .contains("本次未读任何数据")
+                .contains("read-enabled")
+                .doesNotContain("write-enabled");
+        assertThat(capturedPending().getStatus()).isEqualTo(PendingToolCall.SHEET_DISABLED);
+        assertThat(this.audit.metrics()).containsEntry("disabledRejects", 1L);
+    }
+
     // ── 桩与辅助 ────────────────────────────────────────────────────────────
 
     private static RunSnapshot snapshot() {

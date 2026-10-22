@@ -86,7 +86,9 @@
         "ATTACHMENT_NOT_FOUND": "\"{label}\" attachment is missing or expired, please upload again",
         "ATTACHMENT_FORBIDDEN": "\"{label}\" attachment does not belong to this form, please upload again",
         "ATTACHMENT_CONSUMED": "\"{label}\" attachment has already been used, please upload again",
-        "ATTACHMENT_UPLOAD_FAILED": "\"{label}\" upload failed, please retry"
+        "ATTACHMENT_UPLOAD_FAILED": "\"{label}\" upload failed, please retry",
+        "ATTACHMENT_TOO_LARGE": "\"{label}\" attachment must be 5MB or smaller",
+        "ATTACHMENT_TYPE_UNSUPPORTED": "\"{label}\" unsupported file type; allowed: png/jpg/webp/pdf/txt/csv/xlsx"
       }
     },
     "panel": {
@@ -432,6 +434,18 @@
     "refresh_tasks": {
       "title": "Refresh tasks",
       "summary": "Refresh tasks"
+    },
+    "kb_search": {
+      "title": "Search knowledge base",
+      "summary": "Search knowledge base ({query})"
+    },
+    "kb_read_doc": {
+      "title": "Read knowledge doc",
+      "summary": "Read knowledge doc"
+    },
+    "kb_lookup_term": {
+      "title": "Look up term",
+      "summary": "Look up term ({term})"
     },
     "status": {
       "pending": "pending",

@@ -264,8 +264,17 @@ import { uploadFormAttachment, formOptionSource } from '@/api/ai'
 /** 七型取值并集（number 的"未填"用 undefined 表示；attachment 的值是 fileId 字符串）。 */
 type FormModelValue = string | number | boolean | undefined | string[]
 
-/** 附件选择器的可接受类型（与后端 `GenerativeFormAttachmentController` 白名单同源）。 */
-const ATTACHMENT_ACCEPT = '.png,.jpg,.jpeg,.webp,.pdf,.txt,.csv,.xlsx'
+/** 附件扩展名白名单（与后端 `GenerativeFormAttachmentController` 白名单同源，单一事实源）。 */
+const ATTACHMENT_EXTENSIONS = ['png', 'jpg', 'jpeg', 'webp', 'pdf', 'txt', 'csv', 'xlsx'] as const
+
+/** 附件选择器的可接受类型（由白名单派生；浏览器 `accept` 只是软过滤，硬拦在 `onAttachmentChange`）。 */
+const ATTACHMENT_ACCEPT = ATTACHMENT_EXTENSIONS.map((ext) => `.${ext}`).join(',')
+
+/** 单件上限（与后端 `MAX_ATTACHMENT_BYTES` / `spring.servlet.multipart.max-file-size` 同口径）。 */
+const ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024
+
+/** 本地拒绝码（与 `ai.gf.errors.*` 键尾同名，文案走 locales）。 */
+type AttachmentRejection = 'ATTACHMENT_TOO_LARGE' | 'ATTACHMENT_TYPE_UNSUPPORTED'
 
 interface UploadContext {
   runId: string
@@ -378,6 +387,8 @@ const touched = reactive(new Set<string>())
 const attachments = ref<Record<string, AttachmentMeta>>({})
 const uploading = reactive<Record<string, boolean>>({})
 const uploadErrors = reactive<Record<string, string>>({})
+/** 浏览器侧超限/类型拒绝（与后端同口径；不发请求，只点亮字段错误）。 */
+const attachmentRejections = reactive<Record<string, AttachmentRejection>>({})
 /** 数据源级联的结果（optionsFrom.sourceId）：按字段 key 缓存，父值一变就重取。 */
 const externalOptions = ref<Record<string, FormFieldOption[]>>({})
 
@@ -510,6 +521,7 @@ function setValue(key: string, value: FormModelValue): void {
   const withDefaults = applyDefaultFrom(props.schema, model.value, key, { touched })
   model.value = withDefaults as Record<string, FormModelValue>
   delete uploadErrors[key]
+  delete attachmentRejections[key]
   // 数据源级联：父值变了就重取（静态 map 分支由 resolveFieldOptions 同步解析）
   for (const field of props.schema.fields) {
     if (field.optionsFrom?.sourceId && field.optionsFrom.dependsOn === key) {
@@ -583,14 +595,31 @@ function attachmentOf(field: FormFieldSpec): AttachmentMeta | null {
   return attachments.value[field.key] ?? null
 }
 
+/** 本地拒绝判定：大小先于类型（用户最可能踩的是大小），返回 null = 放行。 */
+function rejectAttachment(file: File): AttachmentRejection | null {
+  if (file.size > ATTACHMENT_MAX_BYTES) {
+    return 'ATTACHMENT_TOO_LARGE'
+  }
+  const dot = file.name.lastIndexOf('.')
+  const ext = dot < 0 ? '' : file.name.slice(dot + 1).toLowerCase()
+  return (ATTACHMENT_EXTENSIONS as readonly string[]).includes(ext) ? null : 'ATTACHMENT_TYPE_UNSUPPORTED'
+}
+
 async function onAttachmentChange(field: FormFieldSpec, event: Event): Promise<void> {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
   if (!file || !props.uploadContext) {
     return
   }
-  uploading[field.key] = true
+  delete attachmentRejections[field.key]
   delete uploadErrors[field.key]
+  const rejection = rejectAttachment(file)
+  if (rejection !== null) {
+    attachmentRejections[field.key] = rejection
+    input.value = ''
+    return
+  }
+  uploading[field.key] = true
   try {
     const uploaded = await uploadFormAttachment(file, props.uploadContext)
     attachments.value = { ...attachments.value, [field.key]: uploaded }
@@ -611,6 +640,7 @@ function removeAttachment(key: string): void {
   attachments.value = next
   setValue(key, '')
   delete uploadErrors[key]
+  delete attachmentRejections[key]
 }
 
 function formatBytes(size: number | undefined): string {
@@ -635,6 +665,10 @@ function fieldIssues(field: FormFieldSpec): FormValueIssue[] {
     if (issue.key === field.key) {
       issues.push(issue)
     }
+  }
+  if (attachmentRejections[field.key]) {
+    const code = attachmentRejections[field.key]
+    issues.push({ key: field.key, code, message: t(`ai.gf.errors.${code}`, { label: field.label }) })
   }
   if (uploadErrors[field.key]) {
     issues.push({ key: field.key, code: 'ATTACHMENT_UPLOAD_FAILED', message: uploadErrors[field.key] })

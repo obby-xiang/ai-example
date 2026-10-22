@@ -191,6 +191,16 @@ function summaryFor(name: string, args: ToolArgs): string | null {
       return optional('tool.refresh_data.summary')
     case 'refresh_tasks':
       return optional('tool.refresh_tasks.summary')
+    case 'kb_search': {
+      const query = str(args, 'query')
+      return query ? optional('tool.kb_search.summary', { query }) : optional('tool.kb_search.title')
+    }
+    case 'kb_read_doc':
+      return optional('tool.kb_read_doc.summary')
+    case 'kb_lookup_term': {
+      const term = str(args, 'term')
+      return term ? optional('tool.kb_lookup_term.summary', { term }) : optional('tool.kb_lookup_term.title')
+    }
     case 'read_sheet_summary': {
       const defCode = str(args, 'defCode')
       const scope = str(args, 'scope')

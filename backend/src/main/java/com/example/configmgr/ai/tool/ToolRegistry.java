@@ -282,6 +282,16 @@ public class ToolRegistry {
         return !this.sheetSwitches.allows(name);
     }
 
+    /**
+     * 该工具被哪一扇闸门关掉（{@code read-enabled} / {@code write-enabled}；未关 ⇒ {@code null}）。
+     *
+     * <p>回执文案据此点名"该去看哪个键"—— 双档工具关读闸时不得报 write-enabled（见
+     * {@link SheetSwitches#disabledGate(String)}）。
+     */
+    public String sheetDisabledGate(String name) {
+        return this.sheetSwitches.disabledGate(name);
+    }
+
     /** 未披露的原因码（{@code SHEET_DISABLED} / {@code SCOPE_NOT_DISCLOSED}）。 */
     public String undisclosedCode(String name) {
         return sheetDisabled(name) ? ErrorCodes.SHEET_DISABLED : ErrorCodes.SCOPE_NOT_DISCLOSED;

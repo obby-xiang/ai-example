@@ -86,7 +86,9 @@
         "ATTACHMENT_NOT_FOUND": "「{label}」的附件不存在或已过期，请重新上传",
         "ATTACHMENT_FORBIDDEN": "「{label}」的附件不属于当前表单，请重新上传",
         "ATTACHMENT_CONSUMED": "「{label}」的附件已被使用，请重新上传",
-        "ATTACHMENT_UPLOAD_FAILED": "「{label}」上传失败，请重试"
+        "ATTACHMENT_UPLOAD_FAILED": "「{label}」上传失败，请重试",
+        "ATTACHMENT_TOO_LARGE": "「{label}」附件不能超过 5MB，请压缩后重试",
+        "ATTACHMENT_TYPE_UNSUPPORTED": "「{label}」不支持该文件类型，仅支持 png/jpg/webp/pdf/txt/csv/xlsx"
       }
     },
     "panel": {
@@ -432,6 +434,18 @@
     "refresh_tasks": {
       "title": "刷新任务列表",
       "summary": "刷新任务列表"
+    },
+    "kb_search": {
+      "title": "检索知识库",
+      "summary": "检索知识库（{query}）"
+    },
+    "kb_read_doc": {
+      "title": "读取知识文档",
+      "summary": "读取知识文档"
+    },
+    "kb_lookup_term": {
+      "title": "查询术语解释",
+      "summary": "查询术语解释（{term}）"
     },
     "status": {
       "pending": "待确认",
