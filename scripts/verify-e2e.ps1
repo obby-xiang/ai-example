@@ -2071,8 +2071,11 @@ function Test-CtxCase($frames, $snap, $expect) {
     $sum = 0
     foreach ($part in @($snap.breakdown)) { if ($part.key -ne 'free') { $sum += [int]$part.tokens } }
     if ($sum -ne [int]$snap.usedTokens) { $errors.Add("分项 Σ=$sum ≠ usedTokens=$($snap.usedTokens)（守恒破坏）") | Out-Null }
+    # percent 依赖估算值（used 随工具披露面/人设体量漂），判据只锁取整口径、不锁绝对值。
+    # 后端 ContextBreakdownService.percent = Math.round(used*1000/limit)/10 即 half-up；
+    # [math]::Round 缺省是 ToEven（银行家舍入），只在中点分歧（42.5 → 42），故须显式 AwayFromZero。
     if ($null -ne $snap.limitTokens -and $null -ne $snap.percent) {
-        $wantPercent = [math]::Round([double]$snap.usedTokens * 1000.0 / [double]$snap.limitTokens) / 10.0
+        $wantPercent = [math]::Round([double]$snap.usedTokens * 1000.0 / [double]$snap.limitTokens, 0, [MidpointRounding]::AwayFromZero) / 10.0
         if ([math]::Abs([double]$snap.percent - $wantPercent) -gt 0.05) {
             $errors.Add("端点 percent=$($snap.percent)，期望 $wantPercent（used/limit 的一位小数）") | Out-Null
         }
