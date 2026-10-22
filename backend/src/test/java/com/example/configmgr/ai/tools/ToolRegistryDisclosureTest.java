@@ -123,7 +123,7 @@ class ToolRegistryDisclosureTest {
 
     @Test
     void uiPrimitiveStubsReturnFrontendStub() {
-        assertThat(aiTools.uiSnapshot(null, null, null)).isEqualTo(AiTools.FRONTEND_STUB);
+        assertThat(aiTools.uiSnapshot(null, null, null, null)).isEqualTo(AiTools.FRONTEND_STUB);
         assertThat(aiTools.uiClick("import.upload.choose", "a1b2c3-1")).isEqualTo(AiTools.FRONTEND_STUB);
         assertThat(aiTools.uiFill("import.upload.query", "v", "a1b2c3-1")).isEqualTo(AiTools.FRONTEND_STUB);
         assertThat(aiTools.uiSelect("import.mode.group", "MERGE", "a1b2c3-1")).isEqualTo(AiTools.FRONTEND_STUB);
@@ -141,6 +141,8 @@ class ToolRegistryDisclosureTest {
         String description = callback.getToolDefinition().description();
         assertThat(description).contains("40").contains("2000").contains("共");
         assertThat(description).contains("不是 selector");
+        // 批 C：文本段 600 字符 / 12 行 + 控件行优先（描述与前端常量同源）
+        assertThat(description).contains("600").contains("12").contains("控件行优先");
     }
 
     @Test

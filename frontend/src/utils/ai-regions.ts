@@ -253,21 +253,62 @@ export function resolveAiRef(ref: string): AiRegionHit | null {
 }
 
 function findByRef(region: AiRegion, ref: string): HTMLElement | null {
-  const nodes = region.root.querySelectorAll('[data-ai-ref]')
-  for (const node of Array.from(nodes)) {
+  for (const node of queryRegistered(region.root, '[data-ai-ref]')) {
     if (node.getAttribute('data-ai-ref') === ref) {
-      return node as HTMLElement
+      return node
     }
   }
   return null
 }
 
 function indexRegion(region: AiRegion): void {
-  for (const node of Array.from(region.root.querySelectorAll('[data-ai-ref]'))) {
+  for (const node of queryRegistered(region.root, '[data-ai-ref]')) {
     const ref = node.getAttribute('data-ai-ref')
     if (ref) {
-      refIndex.set(ref, { el: node as HTMLElement, regionId: region.id })
+      refIndex.set(ref, { el: node, regionId: region.id })
     }
+  }
+}
+
+/**
+ * 区域遍历助手（批 C / D10-①）：`querySelectorAll` + **只穿透 open shadow root**。
+ *
+ * <h2>为什么只穿 open</h2>
+ * closed 的 shadow root 在 API 上根本取不到（`el.shadowRoot === null`），所以"穿不过去"
+ * 是浏览器给的边界而不是遗漏：快照与定位如实"看不见"它，不抛错、也不假装命中（C-07）。
+ *
+ * <h2>为什么不额外多扫一遍</h2>
+ * 光层仍只调一次 `scope.querySelectorAll(selector)` —— T-12「同一 epoch 只遍历一次」的
+ * 既有断言不变；影子树只沿 `firstElementChild` / `nextElementSibling` 手写下探，
+ * 每个 shadow root 各自只做一次作用域内查询。
+ */
+export function queryRegistered(scope: ParentNode, selector: string): HTMLElement[] {
+  const out: HTMLElement[] = []
+  collectRegistered(scope, selector, out)
+  return out
+}
+
+function collectRegistered(scope: ParentNode, selector: string, out: HTMLElement[]): void {
+  for (const node of Array.from(scope.querySelectorAll(selector))) {
+    out.push(node as HTMLElement)
+  }
+  const selfShadow = (scope as Node as { shadowRoot?: ShadowRoot | null }).shadowRoot
+  if (selfShadow) {
+    collectRegistered(selfShadow, selector, out)
+  }
+  walkShadowHosts(scope, selector, out)
+}
+
+function walkShadowHosts(scope: ParentNode, selector: string, out: HTMLElement[]): void {
+  let node = (scope as ParentNode).firstElementChild
+  while (node) {
+    const host = node as HTMLElement
+    // closed 状态下这里恒为 null（不可达即不穿）
+    if (host.shadowRoot) {
+      collectRegistered(host.shadowRoot, selector, out)
+    }
+    walkShadowHosts(host, selector, out)
+    node = node.nextElementSibling
   }
 }
 
@@ -325,7 +366,7 @@ export function auditAiRegions(targets?: readonly AiRegionAuditTarget[]): AiRegi
   const scopes: readonly AiRegionAuditTarget[] = targets ?? [...regions.values()].map((region) => ({
     region,
     elements: region.root.isConnected === true
-      ? Array.from(region.root.querySelectorAll('[data-ai-ref]')) as HTMLElement[]
+      ? queryRegistered(region.root, '[data-ai-ref]')
       : []
   }))
   for (const { region, elements } of scopes) {
