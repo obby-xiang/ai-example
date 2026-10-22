@@ -23,7 +23,9 @@ import java.util.Map;
  * <li>{@code step} 只保留"字母/数字/下划线/连字符/点/斜杠/空格"且截 64 字符；</li>
  * <li>{@code taskType} 只认 {@code EXPORT}/{@code IMPORT}（{@code Task.TaskType} 全集）；</li>
  * <li>{@code taskId} ≤ 0 视为未提供；</li>
- * <li>{@code extra} 只留 {@link ContextBuilder#ALLOWED_EXTRA_KEYS}（非白名单键丢弃并计数）。</li>
+ * <li>{@code extra} 只留 {@link ContextBuilder#ALLOWED_EXTRA_KEYS}（非白名单键丢弃并计数）
+ *     <b>加上</b>标签专用旁路 {@link ContextBuilder#TAG_ONLY_EXTRA_KEYS}（只进披露判定、
+ *     不进模型载荷 —— 两条消费面在 {@code ContextBuilder} 内分开，见该常量注释）。</li>
  * </ul>
  *
  * <p>
@@ -128,6 +130,18 @@ public class ContextFieldGate {
 			if (ContextBuilder.ALLOWED_EXTRA_KEYS.contains(entry.getKey())) {
 				kept.put(entry.getKey(), entry.getValue());
 			}
+			else if (ContextBuilder.TAG_ONLY_EXTRA_KEYS.contains(entry.getKey())) {
+				// 标签专用旁路（缺口 0）：这些键不进模型载荷（ContextBuilder 的载荷白名单不含它们），
+				// 但披露判定（ToolRegistry#buildTags）必须看得见 —— 在此丢弃等于 ui:on 恒失败开放。
+				// 只放行可解析的有限数值；其它形态按"缺失"处理（与旧客户端同形，不制造新的拒执面）。
+				Object value = tagValue(entry.getValue());
+				if (value == null) {
+					dropped++;
+				}
+				else {
+					kept.put(entry.getKey(), value);
+				}
+			}
 			else {
 				dropped++;
 			}
@@ -136,6 +150,23 @@ public class ContextFieldGate {
 			reasons.add("extra:" + dropped);
 		}
 		return kept;
+	}
+
+	/** 标签键的值形态闸：只认有限数值（Number / 数字字符串），其余一律 null（= 视为缺失）。 */
+	private static Object tagValue(Object raw) {
+		if (raw instanceof Number number) {
+			return Double.isFinite(number.doubleValue()) ? number : null;
+		}
+		if (raw instanceof String text) {
+			try {
+				double value = Double.parseDouble(text.trim());
+				return Double.isFinite(value) ? text.trim() : null;
+			}
+			catch (NumberFormatException ex) {
+				return null;
+			}
+		}
+		return null;
 	}
 
 }

@@ -21,7 +21,14 @@
     "confirm_step",
     "generative_form",
     "aggregate_sheet",
-    "update_rows"
+    "update_rows",
+    "ui_snapshot",
+    "ui_click",
+    "ui_fill",
+    "ui_select",
+    "ui_scroll",
+    "ui_highlight",
+    "ui_request_upload"
   ],
   "convergence": {
     "maxCallsPerTurn": 6
@@ -869,6 +876,151 @@
           }
         ],
         "preview": "count"
+      }
+    },
+    {
+      "id": "UI-SNAPSHOT",
+      "note": "V1 B1：ui_snapshot 全链底座（1 看）。requiresTools 硬闸 = 披露清单驱动：ui:on 收窄后（显式 uiRegionCount=0）该工具不披露 ⇒ 桩退化为文本轮，用例据此可判「披露面缺席」。arguments 只含调用形状（行数/角色收窄），不含任何页面内容。",
+      "match": {
+        "messageAny": [
+          "scenario=UI-SNAPSHOT"
+        ],
+        "requiresTools": [
+          "ui_snapshot"
+        ]
+      },
+      "tool": "ui_snapshot",
+      "arguments": {
+        "limit": 20,
+        "kinds": [
+          "button",
+          "input"
+        ]
+      }
+    },
+    {
+      "id": "UI-CLICK",
+      "note": "V1 B1：ui_click（做·mutate-local）全链底座。入参只有 ref + epoch（不接受 selector/XPath/HTML）。",
+      "match": {
+        "messageAny": [
+          "scenario=UI-CLICK"
+        ],
+        "requiresTools": [
+          "ui_click"
+        ]
+      },
+      "tool": "ui_click",
+      "arguments": {
+        "ref": "import.upload.choose",
+        "epoch": "a1b2c3-1"
+      }
+    },
+    {
+      "id": "UI-FILL",
+      "note": "V1 B1：ui_fill（做·写值）全链底座。值 ≤200 字符；写后回读由浏览器侧负责，桩只给调用形状。",
+      "match": {
+        "messageAny": [
+          "scenario=UI-FILL"
+        ],
+        "requiresTools": [
+          "ui_fill"
+        ]
+      },
+      "tool": "ui_fill",
+      "arguments": {
+        "ref": "import.upload.name",
+        "value": "E2E",
+        "epoch": "a1b2c3-1"
+      }
+    },
+    {
+      "id": "UI-SELECT",
+      "note": "V1 B1：ui_select（做·选项）全链底座。option 是语义值（不是索引）。",
+      "match": {
+        "messageAny": [
+          "scenario=UI-SELECT"
+        ],
+        "requiresTools": [
+          "ui_select"
+        ]
+      },
+      "tool": "ui_select",
+      "arguments": {
+        "ref": "export.panel.format",
+        "option": "XLSX",
+        "epoch": "a1b2c3-1"
+      }
+    },
+    {
+      "id": "UI-SCROLL",
+      "note": "V1 B1：ui_scroll（看·视口）全链底座。只改视口，不改数据。",
+      "match": {
+        "messageAny": [
+          "scenario=UI-SCROLL"
+        ],
+        "requiresTools": [
+          "ui_scroll"
+        ]
+      },
+      "tool": "ui_scroll",
+      "arguments": {
+        "ref": "export.panel.list",
+        "delta": 400,
+        "block": "center",
+        "epoch": "a1b2c3-1"
+      }
+    },
+    {
+      "id": "UI-HIGHLIGHT",
+      "note": "V1 B1：ui_highlight（看·指路）全链底座。note ≤60 字符；只读、不记撤销点。",
+      "match": {
+        "messageAny": [
+          "scenario=UI-HIGHLIGHT"
+        ],
+        "requiresTools": [
+          "ui_highlight"
+        ]
+      },
+      "tool": "ui_highlight",
+      "arguments": {
+        "ref": "export.panel.start",
+        "note": "在这里点开始",
+        "epoch": "a1b2c3-1"
+      }
+    },
+    {
+      "id": "UI-UPLOAD",
+      "note": "V1 B14：ui_request_upload 交接卡底座（唯一的「等人」工具）。accept 只能收窄页面允许的扩展名；入参永不接受 path/filePath/selector。",
+      "match": {
+        "messageAny": [
+          "scenario=UI-UPLOAD"
+        ],
+        "requiresTools": [
+          "ui_request_upload"
+        ]
+      },
+      "tool": "ui_request_upload",
+      "arguments": {
+        "ref": "import.upload.entry",
+        "accept": [
+          "xlsx"
+        ]
+      }
+    },
+    {
+      "id": "IRREV-PUBLISH",
+      "note": "V1 B9：不可逆动作（@ToolCategory(P)，当前唯一 = start_publish）的确认门底座。与 TC17-PUBLISH 的区别 = 提示词标记独立（scenario=IRREV-PUBLISH），使「不可撤销位三通道同源」用例不必与 TC17 的拒绝/确认语义纠缠；requiresTools 硬闸保证只有 PUBLISH 步上下文才发得出来。",
+      "match": {
+        "messageAny": [
+          "scenario=IRREV-PUBLISH"
+        ],
+        "requiresTools": [
+          "start_publish"
+        ]
+      },
+      "tool": "start_publish",
+      "arguments": {
+        "taskId": "${taskId}"
       }
     }
   ]

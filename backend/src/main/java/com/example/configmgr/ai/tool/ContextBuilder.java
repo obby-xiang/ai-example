@@ -42,9 +42,29 @@ public class ContextBuilder {
      * 它是工具披露标签源（{@code ToolRegistry#buildTags} 的 {@code ui:on}），不是模型输入：
      * 进提示词等于每轮多付 token 换零信息量。因此「前端上报了但这里没有」是<b>设计如此</b>，
      * 不是漂移 —— 见 {@code ContextBuilderExtraTest#uiRegionCountIsADeliberateWhitelistException}。
+     * 它走的是另一张表 {@link #TAG_ONLY_EXTRA_KEYS}。
      */
     public static final List<String> ALLOWED_EXTRA_KEYS = List.of("pageId", "selectedDefs", "importMode",
             "dataVersion", "contractVersion", "recentActions");
+
+    /**
+     * <b>只进披露判定、永不进模型载荷</b>的 {@code extra} 键（批 A / A-13 旁路；缺口 0 收口）。
+     *
+     * <p>
+     * 两条消费面在这里就分开，而不是靠调用方自觉：
+     * <ul>
+     * <li><b>披露判定面</b> = {@code ToolRegistry#buildTags} 读 {@code AiContext.extra} ——
+     * 这张表里的键必须活到上下文里（否则闸门一丢，{@code ui:on} 恒见"缺失" ⇒ 恒 fail-open，
+     * 显式 0 永远收不窄披露面）；</li>
+     * <li><b>模型载荷面</b> = {@link #buildContextMessage} 的 {@code extra} 段 —— 只渲染
+     * {@link #ALLOWED_EXTRA_KEYS}，故本表里的键<b>结构上</b>进不了提示词（不是"记得别加"的约定）。</li>
+     * </ul>
+     *
+     * <p>
+     * 唯一成员 {@code uiRegionCount}：本页已注册 AI 区域数。闸门只放行可解析的有限数值
+     * （其它形态丢弃 = 回落"缺失"，与旧客户端同形）。
+     */
+    public static final List<String> TAG_ONLY_EXTRA_KEYS = List.of("uiRegionCount");
 
     /**
      * 拥有"页面实时选中集"的向导页 id（与前端 {@code stores/workspace.ts} 里

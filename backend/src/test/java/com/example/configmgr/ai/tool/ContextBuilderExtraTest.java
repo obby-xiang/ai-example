@@ -134,6 +134,9 @@ class ContextBuilderExtraTest {
         String message = this.builder.buildContextMessage(
                 AiContext.of("definitions", null, null, null, extra));
         assertThat(message).doesNotContain("uiRegionCount");
+        // 缺口 0：它是走旁路表留在上下文里的（披露判定读得到），而不是"被谁顺手留下"
+        assertThat(ContextBuilder.TAG_ONLY_EXTRA_KEYS).containsExactly("uiRegionCount");
+        assertThat(ContextBuilder.ALLOWED_EXTRA_KEYS).doesNotContain("uiRegionCount");
     }
 
 }

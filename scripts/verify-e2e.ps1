@@ -1,8 +1,9 @@
 # ============================================================
-# E2E 验证脚本（main 版）：动态配置管理系统 全流程 125 用例
+# E2E 验证脚本（main 版）：动态配置管理系统 全流程 159 用例
 #   = 既有 35（TC1–TC22 + TC23 + GF1–GF6 + R-137×2 + E2E-CTX-1..4）
 #     + 批① 90（AIE2E-*，设计稿 docs/research/设计-AI对话E2E用例全集-2026-10-22.md §2 十二域
 #       ＋ L-21 两条表格主用例 T-13/T-14，设计稿之外新增、行内登记于 SH 域）
+#     + V1 34（AIE2E-W-*，测试扩充 V1 · 工作区原语全链（桩层）+ 缺口 0 动态披露修复的回归位）
 #
 # 移植来源：<REPO_ROOT>/ai-example-code/ai-example-deepseek-v4-pro/scripts/verify-e2e.ps1
 #           （685 行 / TC1–TC22 共 22 用例）。用例编号与源脚本一一对照，
@@ -47,7 +48,7 @@
 # 数据面安全：本脚本只创建/删除自己的 S5B-*/AIE2E-* 任务与 E2E_TEMP 定义；
 #   CURRENCY 演示数据在 TC13 会被替换为 3 行，TC19 用全量导出件恢复为 5 行。
 #
-# 结果口径：125 个用例计入 PASS/FAIL —— 既有 35 + 批① 90（AIE2E-*）
+# 结果口径：159 个用例计入 PASS/FAIL —— 既有 35 + 批① 90（AIE2E-*）+ V1 34（AIE2E-W-*）
 #   既有 35：TC1–TC22 共 22 个 + TC23（T3b 收尾：CONFIRM 卡快照重建）+ GF1–GF5 共 5 个
 #   （生成式表单端到端，docs/evidence/GFc-E2E用例设计-GLM-5.3.md）+ GF6（入参闸门，-EnableGf6，
 #   桩模式启用并计入主计数，底座为桩的确定性违规模式 --violate-form-type）+ R-137 红队补测
@@ -56,7 +57,10 @@
 #   批① 90：设计稿 §2 十二域的接口级用例（AIE2E-S01…X13）+ L-21 两条表格主用例（T-13/T-14），
 #   桩开关与路由见 scripts/ci/stub-routes.json
 #   的 `faults.switches`（唯一取数点）；桩下**零 SKIP**，末尾 MANIFEST 自校验条数/逐域/优先级。
-#   移植期缺陷清单（Q8）的两项断言单列计数（Q8 项 PASS/FAIL），不计入 125 与退出码。
+#   V1 34（W 域）：7 个 `ui_*` 原语全链（B1 7 条）+ 拒执码落档（B3 2）+ 动态披露两分支（B4 2，
+#   缺口 0 的回归位）+ 不可撤销位三通道（B9 3）+ 交接卡（B14 2）+ 页面拒执如实落档（B15 2）+
+#   写动词轮内状态归零（B18 1）+ 前端注册表对账（B20 1）+ 停止/恢复五组（A9/A10/A11/A12/A13 共 14）。
+#   移植期缺陷清单（Q8）的两项断言单列计数（Q8 项 PASS/FAIL），不计入 159 与退出码。
 # 退出码：任一主用例 FAIL ⇒ exit 1；GF1–GF4 全部 SKIP（本棒零有效验证，硬底线）⇒ exit 1；
 #   E2E_STUB_MODE=1 且 GFSKIP≥1 ⇒ exit 1（桩模式零容忍）；
 #   批① 的 P2 红**单列不阻塞**（设计稿 §4.2 第 5 项：防一门禁把开发卡死），P0/P1 红照常 exit 1。
@@ -4244,14 +4248,745 @@ Add-AiCase 'X-13' 'P2' '台账不落敏感值：runs/history 不含草稿哨兵�
 }
 
 # ============================================================
+# V1 · 工作区原语全链（桩层）34 条（W-01 … W-34）
+#
+# 两件事一起锁：
+#   ① 缺口 0（动态披露 `ui:on` 在生产链路不生效）：修复前 ContextFieldGate 把 `extra.uiRegionCount`
+#      当非白名单键丢弃 ⇒ ToolRegistry#buildTags 恒见"缺失"⇒ 恒 fail-open，显式 0 收不窄披露面。
+#      修法 = 闸门的 tag 专用旁路（ContextBuilder.TAG_ONLY_EXTRA_KEYS）：披露判定看得见、
+#      模型载荷看不见（A-13 锁不变）。W-10/W-11 是它的 HTTP 全链回归位（红→绿即此两条）。
+#   ② 7 个 `ui_*` 原语的协议半段（披露 → 挂起 → 回灌 → 结局帧 → done 收敛）+ 拒执码落档、
+#      交接卡、停止面（A9/A10/A11/A12/A13）。卡面 DOM 与浏览器内执行属前端 vitest 面，
+#      桩里没有 DOM，故不以接口级断言冒充（同 T-13/T-14 的登记口径）。
+#
+# 断言面（全部用户可观察，不落实现细节）：
+#   - 披露面：后端 DEBUG 行 `上下文=… 披露工具=[…]`（按 runId 取那一轮冻结的清单，与 /api/ai/tools 同源）；
+#   - 行为面：桩按"披露清单驱动"（requiresTools 硬闸）决定是否发起工具调用 ⇒ 缺席/在席两侧都可判；
+#   - 台账面：/api/ai/runs/{runId}（pending / historyRoles）、/runs/current、/api/ai/history、events 归档。
+# ============================================================
+Say '--- V1 · 工作区原语全链（34 条：ui_* 七工具 + 拒执码 + 动态披露 + HITL + 停止面） ---'
+
+# 7 个原语（与 backend @Tool(name) / frontend UI_TOOL_NAMES 严格同名）
+$script:aiUiTools = @('ui_snapshot', 'ui_click', 'ui_fill', 'ui_select', 'ui_scroll', 'ui_highlight',
+    'ui_request_upload')
+
+# 工作区上下文：`ui:on` 的唯一判据 = extra.uiRegionCount（缺省 = 缺失 = fail-open）。
+# -Omit 走"旧客户端 / curl"形态（不带该键）。
+function Ai-UiCtx([object]$regionCount, [switch]$Omit) {
+    $extra = @{ pageId = 'definitions' }
+    if (-not $Omit) { $extra['uiRegionCount'] = $regionCount }
+    return @{ page = 'definitions'; extra = $extra }
+}
+
+# 该 runId 冻结在日志里的披露清单（"AI 轮次开始 … 上下文=… 披露工具=[…]" 行）。
+# 为什么按 runId 取而不是按上下文取：同一上下文会出现多轮，只有 runId 能把"这一轮看到了什么"钉死。
+function Ai-DisclosureOf($runId) {
+    if (-not $runId) { throw '披露取证缺 runId' }
+    $text = Get-LogText
+    $pattern = 'runId=' + [regex]::Escape($runId) + '\s+sessionId=\S+\s+会话已存在=\S+\s+上下文=(\S+)\s+披露工具=\[([^\]]*)\]'
+    $m = [regex]::Match($text, $pattern)
+    if (-not $m.Success) { throw "后端日志里没有 runId=$runId 的披露行（披露取证不可用）" }
+    return @{
+        context = $m.Groups[1].Value
+        tools = @($m.Groups[2].Value -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    }
+}
+
+# 前端工具结果回灌（$extra 合并 outcome / code 等 additive 字段）
+function Ai-FePost($runId, $toolCallId, $result, $extra) {
+    $body = @{ runId = $runId; toolCallId = $toolCallId; result = $result; source = 'aie2e' }
+    if ($extra) { foreach ($k in $extra.Keys) { $body[$k] = $extra[$k] } }
+    return Invoke-Api 'POST' '/api/ai/frontend-tool-result' $body
+}
+
+# 发一轮工作区原语对话（桩按 marker 决定发起哪个 ui_* 调用；会话 id 由调用方给，保证各用例互不串轮）
+function Ai-UiChat($sid, $marker, $context) {
+    $frames = New-Object System.Collections.ArrayList
+    Read-Sse '/api/ai/chat' @{
+        sessionId = $sid
+        message = "【AIE2E】scenario=$marker 按原语执行一次。"
+        context = $context
+    } @('frontend_tool_request', 'done', 'error') $frames $null
+    return $frames
+}
+
+# 回灌 + 收尾断言（结局帧恰 1 条、done 恰 1 条、done 是最后帧、seq 严格递增）
+function Ai-UiConverge($req, $resultText, $bodyExtra) {
+    if (-not $req) { throw '未收到 frontend_tool_request（工具未披露或桩未命中路由）' }
+    $posted = Ai-FePost $req.runId $req.toolCallId $resultText $bodyExtra
+    if (-not $posted.ok) { throw "回灌 HTTP $($posted.status) $($posted.text)" }
+    $after = Ai-Events $req.runId 0 @('done', 'error')
+    $res = @($after | Where-Object {
+        ($_.type -eq 'tool_result' -or $_.type -eq 'frontend_tool_result') -and $_.toolCallId -eq $req.toolCallId
+    })
+    if ($res.Count -ne 1) { throw "结局帧 $($res.Count) 个（期望恰 1）" }
+    Ai-Done $after | Out-Null
+    Ai-DoneIsLast $after
+    Ai-SeqStrict $after
+    return @{ posted = $posted; after = $after; frame = $res[0] }
+}
+
+# 单轮"中途停止"：只读 start 帧即断连（轮次在服务端继续跑），随后 cancel。
+# 为什么这样建模：停止是用户动作，发生在流的中段；读完整轮再 cancel 只能测到"事后取消"。
+function Ai-StopMidTurn($sid, $message, $context) {
+    $head = New-Object System.Collections.ArrayList
+    Read-Sse '/api/ai/chat' @{ sessionId = $sid; message = $message; context = $context } @('start') $head
+    $runId = Ai-RunId $head
+    $cancel = Ai-Cancel $runId
+    if (-not $cancel.cancelled) { throw 'POST /api/ai/cancel 未返回 cancelled=true' }
+    $final = Ai-WaitStatus $runId @('CANCELLED') 20
+    if ($final.snapshot.status -ne 'CANCELLED') { throw "停止后轮次状态 $($final.snapshot.status)，期望 CANCELLED" }
+    return $runId
+}
+
+# 停止的落档是异步的：快照状态先变、归档帧与条目终态后到（收尾线程在事件边界收口）。
+# 因此"停止之后"的读侧断言一律有界轮询，不用一次读到的瞬时值 —— 否则时序抖动会变成假红。
+function Ai-WaitArchivedDone($runId, [int]$sec = 15) {
+    $deadline = (Get-Date).AddSeconds($sec)
+    $frames = @()
+    while ((Get-Date) -lt $deadline) {
+        $frames = Ai-Events $runId 0 @('done', 'error')
+        if (@($frames | Where-Object { $_.type -eq 'done' }).Count -eq 1) { return $frames }
+        Start-Sleep -Milliseconds 300
+    }
+    return $frames
+}
+
+# 条目终态（停止把挂起项收敛为终态也是异步的：等它离开 PENDING）
+function Ai-WaitPendingSettled($runId, $toolCallId, [int]$sec = 15) {
+    $deadline = (Get-Date).AddSeconds($sec)
+    $entry = $null
+    while ((Get-Date) -lt $deadline) {
+        $entry = @(GetJson "/api/ai/pending/$runId" | Where-Object { $_.toolCallId -eq $toolCallId })[0]
+        if ($entry -and $entry.status -ne 'PENDING') { return $entry }
+        Start-Sleep -Milliseconds 300
+    }
+    return $entry
+}
+
+# 该轮不再有 PENDING 条目（含"本来就没有"）
+function Ai-WaitNoPending($runId, [int]$sec = 10) {
+    $deadline = (Get-Date).AddSeconds($sec)
+    $open = @()
+    while ((Get-Date) -lt $deadline) {
+        $open = @(GetJson "/api/ai/pending/$runId" | Where-Object { $_.status -eq 'PENDING' })
+        if ($open.Count -eq 0) { return }
+        Start-Sleep -Milliseconds 300
+    }
+    throw "停止后仍有 $($open.Count) 个条目停在 PENDING（${sec}s 内未收敛）"
+}
+
+Add-AiCase 'W-01' 'P1' 'ui_snapshot 全链：披露 → 挂起 → 回灌 → 结局帧 ok → done 收敛' {
+    $sid = Ai-NewSid 'w01'
+    $frames = Ai-UiChat $sid 'UI-SNAPSHOT' (Ai-UiCtx 1)
+    $req = Ai-One $frames 'frontend_tool_request'
+    if (-not $req) { throw '未收到 frontend_tool_request（ui_snapshot 未命中披露清单）' }
+    if ($req.name -ne 'ui_snapshot') { throw "挂起工具 $($req.name)，期望 ui_snapshot" }
+    $d = Ai-DisclosureOf $req.runId
+    if ($d.tools -notcontains 'ui_snapshot') { throw '披露清单里没有 ui_snapshot（挂起工具与披露面不自洽）' }
+    $a = $req.args | ConvertFrom-Json
+    if ([int]$a.limit -lt 1 -or [int]$a.limit -gt 40) { throw "args.limit=$($a.limit) 越 1..40（快照行硬顶）" }
+    $entry = Gf-PendingEntry $req.runId $req.toolCallId
+    if ($entry.kind -ne 'FRONTEND') { throw "pending.kind=$($entry.kind)，期望 FRONTEND" }
+    $conv = Ai-UiConverge $req '[import.upload.choose] button "选择文件" state=enabled（共 1 个元素，本次回 1 个）' $null
+    if ($conv.frame.outcome -ne 'ok' -or $conv.frame.ok -ne $true) {
+        throw "结局帧 outcome=$($conv.frame.outcome)/ok=$($conv.frame.ok)，期望 ok/true"
+    }
+    return $null
+}
+
+Add-AiCase 'W-02' 'P1' 'ui_click 全链：入参只有 ref+epoch（无 selector 形态），回灌后收敛' {
+    $sid = Ai-NewSid 'w02'
+    $frames = Ai-UiChat $sid 'UI-CLICK' (Ai-UiCtx 1)
+    $req = Ai-One $frames 'frontend_tool_request'
+    if (-not $req) { throw '未收到 frontend_tool_request（ui_click 未命中披露清单）' }
+    if ($req.name -ne 'ui_click') { throw "挂起工具 $($req.name)，期望 ui_click" }
+    $a = $req.args | ConvertFrom-Json
+    if (-not $a.ref) { throw 'args 缺 ref' }
+    if (@($a.ref -split '\.').Count -lt 3) { throw "args.ref=$($a.ref) 不足三段（page.region.name）" }
+    if (-not $a.epoch) { throw 'args 缺 epoch（快照闸无从判定）' }
+    foreach ($k in @('selector', 'xpath', 'html', 'path', 'filePath')) {
+        if ([string]$req.args -like "*$k*") { throw "入参出现禁键 $k（选择器/路径形态一律不接受）" }
+    }
+    $conv = Ai-UiConverge $req '已点击「选择文件」（mutate-local，记撤销点）' $null
+    if ($conv.frame.outcome -ne 'ok') { throw "结局帧 outcome=$($conv.frame.outcome)，期望 ok" }
+    return $null
+}
+
+Add-AiCase 'W-03' 'P1' 'ui_fill 全链：写值与回读由浏览器负责，协议侧结局帧原样回填' {
+    $sid = Ai-NewSid 'w03'
+    $frames = Ai-UiChat $sid 'UI-FILL' (Ai-UiCtx 1)
+    $req = Ai-One $frames 'frontend_tool_request'
+    if (-not $req) { throw '未收到 frontend_tool_request（ui_fill 未命中披露清单）' }
+    if ($req.name -ne 'ui_fill') { throw "挂起工具 $($req.name)，期望 ui_fill" }
+    $a = $req.args | ConvertFrom-Json
+    if ([string]::IsNullOrEmpty([string]$a.value)) { throw 'args 缺 value' }
+    if ($a.value.Length -gt 200) { throw "args.value 长度 $($a.value.Length) 超过 200" }
+    $conv = Ai-UiConverge $req '已写入「E2E」，回读一致' $null
+    if ($conv.frame.outcome -ne 'ok') { throw "结局帧 outcome=$($conv.frame.outcome)，期望 ok" }
+    return $null
+}
+
+Add-AiCase 'W-04' 'P1' 'ui_select 全链：选项是语义值不是索引' {
+    $sid = Ai-NewSid 'w04'
+    $frames = Ai-UiChat $sid 'UI-SELECT' (Ai-UiCtx 1)
+    $req = Ai-One $frames 'frontend_tool_request'
+    if (-not $req) { throw '未收到 frontend_tool_request（ui_select 未命中披露清单）' }
+    if ($req.name -ne 'ui_select') { throw "挂起工具 $($req.name)，期望 ui_select" }
+    $a = $req.args | ConvertFrom-Json
+    if ([string]::IsNullOrEmpty([string]$a.option)) { throw 'args 缺 option（语义值）' }
+    if ($a.option -match '^\d+$') { throw "args.option=$($a.option) 是索引形态（语义值不是索引）" }
+    $conv = Ai-UiConverge $req '已选择 XLSX，回读一致' $null
+    if ($conv.frame.outcome -ne 'ok') { throw "结局帧 outcome=$($conv.frame.outcome)，期望 ok" }
+    return $null
+}
+
+Add-AiCase 'W-05' 'P2' 'ui_scroll 全链：只改视口（入参 delta 在 ±2000 内）' {
+    $sid = Ai-NewSid 'w05'
+    $frames = Ai-UiChat $sid 'UI-SCROLL' (Ai-UiCtx 1)
+    $req = Ai-One $frames 'frontend_tool_request'
+    if (-not $req) { throw '未收到 frontend_tool_request（ui_scroll 未命中披露清单）' }
+    if ($req.name -ne 'ui_scroll') { throw "挂起工具 $($req.name)，期望 ui_scroll" }
+    $a = $req.args | ConvertFrom-Json
+    if ($null -ne $a.delta -and [Math]::Abs([int]$a.delta) -gt 2000) { throw "args.delta=$($a.delta) 超过 ±2000" }
+    $conv = Ai-UiConverge $req '已滚动到 export.panel.list' $null
+    if ($conv.frame.outcome -ne 'ok') { throw "结局帧 outcome=$($conv.frame.outcome)，期望 ok" }
+    return $null
+}
+
+Add-AiCase 'W-06' 'P2' 'ui_highlight 全链：note ≤60 字符，只读不记撤销点' {
+    $sid = Ai-NewSid 'w06'
+    $frames = Ai-UiChat $sid 'UI-HIGHLIGHT' (Ai-UiCtx 1)
+    $req = Ai-One $frames 'frontend_tool_request'
+    if (-not $req) { throw '未收到 frontend_tool_request（ui_highlight 未命中披露清单）' }
+    if ($req.name -ne 'ui_highlight') { throw "挂起工具 $($req.name)，期望 ui_highlight" }
+    $a = $req.args | ConvertFrom-Json
+    if ($null -ne $a.note -and $a.note.Length -gt 60) { throw "args.note 长度 $($a.note.Length) 超过 60" }
+    $conv = Ai-UiConverge $req '已高亮「开始」并把用户送过去' $null
+    if ($conv.frame.outcome -ne 'ok') { throw "结局帧 outcome=$($conv.frame.outcome)，期望 ok" }
+    return $null
+}
+
+Add-AiCase 'W-07' 'P1' 'ui_request_upload 全链：交接卡挂起 → 回灌 fileId → 收敛（永不经手路径）' {
+    $sid = Ai-NewSid 'w07'
+    $frames = Ai-UiChat $sid 'UI-UPLOAD' (Ai-UiCtx 1)
+    $req = Ai-One $frames 'frontend_tool_request'
+    if (-not $req) { throw '未收到 frontend_tool_request（ui_request_upload 未命中披露清单）' }
+    if ($req.name -ne 'ui_request_upload') { throw "挂起工具 $($req.name)，期望 ui_request_upload" }
+    $a = $req.args | ConvertFrom-Json
+    if (@($a.accept) -notcontains 'xlsx') { throw "args.accept=$($a.accept)，期望收窄到 xlsx" }
+    foreach ($k in @('path', 'filePath', 'filename', 'selector')) {
+        if ([string]$req.args -like "*$k*") { throw "入参出现禁键 $k（交接永不经手文件路径）" }
+    }
+    $conv = Ai-UiConverge $req '已选择文件：数据.xlsx（fileId=f-e2e-1）' $null
+    if ($conv.frame.outcome -ne 'ok') { throw "结局帧 outcome=$($conv.frame.outcome)，期望 ok" }
+    return $null
+}
+
+Add-AiCase 'W-08' 'P1' '拒执机器码落档：UI_REF_NOT_SNAPSHOTTED 经 normalizeCode 进帧与台账（同源）' {
+    $sid = Ai-NewSid 'w08'
+    $frames = Ai-UiChat $sid 'UI-CLICK' (Ai-UiCtx 1)
+    $req = Ai-One $frames 'frontend_tool_request'
+    if (-not $req) { throw '未收到 frontend_tool_request' }
+    $conv = Ai-UiConverge $req '未执行：ref 不在本 epoch 快照里' @{ outcome = 'rejected'; code = 'UI_REF_NOT_SNAPSHOTTED' }
+    if ($conv.frame.code -ne 'UI_REF_NOT_SNAPSHOTTED') { throw "结局帧 code=$($conv.frame.code)，期望原样落档" }
+    if ($conv.frame.outcome -ne 'rejected' -or $conv.frame.ok -ne $false) {
+        throw "结局帧 outcome=$($conv.frame.outcome)/ok=$($conv.frame.ok)，期望 rejected/false"
+    }
+    if ($conv.frame.executed -ne $false) { throw "结局帧 executed=$($conv.frame.executed)，期望 false（拒执零副作用）" }
+    $entry = @(GetJson "/api/ai/pending/$($req.runId)" | Where-Object { $_.toolCallId -eq $req.toolCallId })[0]
+    if ($entry.code -ne 'UI_REF_NOT_SNAPSHOTTED') { throw "台账 code=$($entry.code)，与帧不同源" }
+    return $null
+}
+
+Add-AiCase 'W-09' 'P2' '非法机器码容错：不报 400、丢弃后回落状态推导（A-14 口径）' {
+    $sid = Ai-NewSid 'w09'
+    $frames = Ai-UiChat $sid 'UI-FILL' (Ai-UiCtx 1)
+    $req = Ai-One $frames 'frontend_tool_request'
+    if (-not $req) { throw '未收到 frontend_tool_request' }
+    $conv = Ai-UiConverge $req '已写入 E2E' @{ code = 'ui_lower' }
+    if ([string]::IsNullOrWhiteSpace([string]$conv.frame.code)) {
+        # 期望分支：非法码被入口丢弃
+    } else {
+        throw "非法码被落库：code=$($conv.frame.code)"
+    }
+    if ($conv.frame.outcome -ne 'ok') { throw "结局帧 outcome=$($conv.frame.outcome)，期望回落为 ok（成功判定不被诊断字段拖垮）" }
+    return $null
+}
+
+Add-AiCase 'W-10' 'P0' '动态披露 · 显式 0：uiRegionCount=0 ⇒ 7 个 ui_* 不进本轮披露清单（缺口 0 回归位）' {
+    $sid = Ai-NewSid 'w10'
+    $frames = Ai-UiChat $sid 'UI-SNAPSHOT' (Ai-UiCtx 0)
+    $start = Ai-One $frames 'start'
+    if (-not $start) { throw '未收到 start 帧（runId 无法定位）' }
+    $d = Ai-DisclosureOf $start.runId
+    $ui = @($d.tools | Where-Object { $_ -like 'ui_*' })
+    if ($ui.Count -ne 0) { throw "显式 uiRegionCount=0 仍披露了 $($ui.Count) 个 ui_*：$($ui -join ',')（tag 旁路未生效 / 恒 fail-open）" }
+    if (@($d.tools | Where-Object { $_ -eq 'list_config_defs' }).Count -ne 1) {
+        throw '非 ui 工具被连带裁掉（收窄越界：ui:on 只能收窄 ui_*）'
+    }
+    if (Ai-One $frames 'frontend_tool_request') { throw '显式 0 仍下发了 frontend_tool_request（披露闸被绕过）' }
+    Ai-Done $frames | Out-Null
+    Ai-SeqStrict $frames
+    return $null
+}
+
+Add-AiCase 'W-11' 'P0' '动态披露 · 缺失：不带 uiRegionCount（旧客户端/curl）⇒ 7 个 ui_* 仍在披露清单（fail-open）' {
+    $sid = Ai-NewSid 'w11'
+    $frames = Ai-UiChat $sid 'UI-SNAPSHOT' (Ai-UiCtx -Omit)
+    $req = Ai-One $frames 'frontend_tool_request'
+    if (-not $req) { throw '缺失 uiRegionCount 时 ui_* 未披露（fail-open 被破坏：旧客户端工具会静默消失）' }
+    $d = Ai-DisclosureOf $req.runId
+    $ui = @($d.tools | Where-Object { $_ -like 'ui_*' })
+    if ($ui.Count -ne $script:aiUiTools.Count) { throw "缺失时 ui_* 披露 $($ui.Count) 个，期望 $($script:aiUiTools.Count)" }
+    $conv = Ai-UiConverge $req '共 0 个元素（本次回 0 个）' $null
+    if ($conv.frame.outcome -ne 'ok') { throw "结局帧 outcome=$($conv.frame.outcome)，期望 ok" }
+    return $null
+}
+
+Add-AiCase 'W-12' 'P0' '不可撤销位同源①：confirm_request 帧与 suspended 帧的 irreversible 一致（P 类别）' {
+    $t = Ai-PublishFixture 'AIE2E-W-12-不可撤销帧'
+    $sid = Ai-NewSid 'w12'
+    $frames = New-Object System.Collections.ArrayList
+    Read-Sse '/api/ai/chat' @{
+        sessionId = $sid
+        message = ("【AIE2E】scenario=IRREV-PUBLISH 任务 {0} 发布。" -f $t)
+        context = @{ page = 'import'; taskId = $t; taskType = 'IMPORT'; step = 'PUBLISH' }
+    } @('confirm_request', 'done', 'error') $frames $null
+    $cr = Ai-One $frames 'confirm_request'
+    if (-not $cr) { throw '未挂起到确认门（不可撤销位无从核对）' }
+    if ($cr.name -ne 'start_publish') { throw "确认工具 $($cr.name)，期望 start_publish" }
+    if ($cr.irreversible -ne $true) { throw 'confirm_request 帧 irreversible 不是 true（不可撤销位丢失 ⇒ 卡上没有复选框）' }
+    $sus = Ai-One $frames 'suspended'
+    if (-not $sus) { throw '未收到 suspended 帧（挂起公告缺失）' }
+    $tc = @($sus.toolCalls | Where-Object { $_.toolCallId -eq $cr.toolCallId })
+    if ($tc.Count -ne 1) { throw "suspended 帧里没有该条目（$(@($sus.toolCalls).Count) 条）" }
+    if ($tc[0].irreversible -ne $true) { throw 'suspended 帧的 irreversible 与 confirm_request 不一致（两个通道不同源）' }
+    Ai-Cancel $cr.runId | Out-Null
+    return $null
+}
+
+Add-AiCase 'W-13' 'P1' '不可撤销位同源②：runs/current 与 runs/{runId} 的条目 irreversible 一致' {
+    $t = Ai-PublishFixture 'AIE2E-W-13-不可撤销台账'
+    $sid = Ai-NewSid 'w13'
+    $frames = New-Object System.Collections.ArrayList
+    Read-Sse '/api/ai/chat' @{
+        sessionId = $sid
+        message = ("【AIE2E】scenario=IRREV-PUBLISH 任务 {0} 发布。" -f $t)
+        context = @{ page = 'import'; taskId = $t; taskType = 'IMPORT'; step = 'PUBLISH' }
+    } @('confirm_request', 'done', 'error') $frames $null
+    $cr = Ai-One $frames 'confirm_request'
+    if (-not $cr) { throw '未挂起到确认门' }
+    $cur = GetJson "/api/ai/runs/current?sessionId=$sid"
+    if (-not $cur.found) { throw 'runs/current 找不到挂起轮（刷新恢复无数据源）' }
+    $e = @($cur.pendingEntries | Where-Object { $_.toolCallId -eq $cr.toolCallId })
+    if ($e.Count -ne 1) { throw "runs/current 里没有该条目（$(@($cur.pendingEntries).Count) 条）" }
+    if ($e[0].irreversible -ne $true) { throw 'runs/current 的 irreversible 不是 true（刷新恢复会丢复选框）' }
+    if ($e[0].req -ne $true) { throw 'runs/current 的 req 不是 true（条目没有真的发过帧）' }
+    $run = Ai-Run $cr.runId
+    $pe = @($run.pending | Where-Object { $_.toolCallId -eq $cr.toolCallId })
+    if ($pe.Count -ne 1) { throw 'runs/{runId} 台账里没有该条目' }
+    if ($pe[0].irreversible -ne $true) { throw 'runs/{runId} 的 irreversible 与 runs/current 不一致' }
+    Ai-Cancel $cr.runId | Out-Null
+    return $null
+}
+
+Add-AiCase 'W-14' 'P2' '不可撤销位反向：J 类别（start_export）显式 false，两通道一致' {
+    $t = Ai-ExportFixture 'AIE2E-W-14-可逆确认'
+    $sid = Ai-NewSid 'w14'
+    $frames = New-Object System.Collections.ArrayList
+    Read-Sse '/api/ai/chat' @{
+        sessionId = $sid
+        message = ("【AIE2E】start_export 任务 {0} 开始导出。" -f $t)
+        context = @{ page = 'tasks'; taskId = $t; taskType = 'EXPORT'; step = 'EXPORT' }
+    } @('confirm_request', 'done', 'error') $frames $null
+    $cr = Ai-One $frames 'confirm_request'
+    if (-not $cr) { throw '未挂起到确认门（可逆确认卡未触发）' }
+    if ($cr.name -ne 'start_export') { throw "确认工具 $($cr.name)，期望 start_export" }
+    if ($cr.irreversible -ne $false) { throw "可逆动作 irreversible=$($cr.irreversible)，期望显式 false（否则每张卡都会多一个复选框）" }
+    $cur = GetJson "/api/ai/runs/current?sessionId=$sid"
+    if ($cur.found) {
+        $e = @($cur.pendingEntries | Where-Object { $_.toolCallId -eq $cr.toolCallId })
+        if ($e.Count -eq 1 -and $e[0].irreversible -ne $false) { throw 'runs/current 的 irreversible 与 confirm_request 不一致' }
+    }
+    Ai-Cancel $cr.runId | Out-Null
+    return $null
+}
+
+Add-AiCase 'W-15' 'P1' '交接卡语义：ui_request_upload 无超时（等人不武装倒计时）、accept 只能收窄' {
+    $sid = Ai-NewSid 'w15'
+    $frames = Ai-UiChat $sid 'UI-UPLOAD' (Ai-UiCtx 1)
+    $req = Ai-One $frames 'frontend_tool_request'
+    if (-not $req) { throw '未收到 frontend_tool_request' }
+    if ($null -ne $req.timeoutSeconds) { throw "交接型工具下发了 timeoutSeconds=$($req.timeoutSeconds)（等人不该有到期时刻）" }
+    if ($null -ne $req.expiresAt) { throw "交接型工具下发了 expiresAt=$($req.expiresAt)" }
+    $a = $req.args | ConvertFrom-Json
+    $accept = @($a.accept)
+    if ($accept.Count -lt 1) { throw 'args.accept 为空（页面允许的扩展名不会被收窄）' }
+    foreach ($ext in $accept) {
+        if (@('xlsx', 'zip') -notcontains $ext) { throw "args.accept 含 $ext（越出页面白名单 xlsx/zip）" }
+    }
+    $conv = Ai-UiConverge $req '已选择文件：数据.xlsx（fileId=f-e2e-2）' $null
+    if ($conv.frame.outcome -ne 'ok') { throw "结局帧 outcome=$($conv.frame.outcome)，期望 ok" }
+    return $null
+}
+
+Add-AiCase 'W-16' 'P1' '交接卡放弃：cancelled=true ⇒ FRONTEND_CANCELLED 终态 + 结局帧 ok=false + done 收敛' {
+    $sid = Ai-NewSid 'w16'
+    $frames = Ai-UiChat $sid 'UI-UPLOAD' (Ai-UiCtx 1)
+    $req = Ai-One $frames 'frontend_tool_request'
+    if (-not $req) { throw '未收到 frontend_tool_request' }
+    $posted = Invoke-Api 'POST' '/api/ai/frontend-tool-result' @{
+        runId = $req.runId; toolCallId = $req.toolCallId; cancelled = $true; source = 'aie2e'
+    }
+    if (-not $posted.ok) { throw "放弃回灌 HTTP $($posted.status) $($posted.text)" }
+    if ($posted.json.status -ne 'FRONTEND_CANCELLED') { throw "回执状态 $($posted.json.status)，期望 FRONTEND_CANCELLED" }
+    if ($posted.json.cancelled -ne $true -or $posted.json.executed -ne $false) {
+        throw "回执 cancelled=$($posted.json.cancelled)/executed=$($posted.json.executed)"
+    }
+    $after = Ai-Events $req.runId 0 @('done', 'error')
+    $res = @($after | Where-Object { $_.toolCallId -eq $req.toolCallId -and ($_.type -eq 'tool_result' -or $_.type -eq 'frontend_tool_result') })
+    if ($res.Count -ne 1) { throw "结局帧 $($res.Count) 个（期望恰 1）" }
+    if ($res[0].status -ne 'FRONTEND_CANCELLED' -or $res[0].ok -ne $false) {
+        throw "结局帧 status=$($res[0].status)/ok=$($res[0].ok)，期望 FRONTEND_CANCELLED/false"
+    }
+    if ([string]$res[0].result -notlike 'FRONTEND_CANCELLED*') { throw '结局帧 result 缺 FRONTEND_CANCELLED：前缀（前端卡片读不到放弃文案）' }
+    Ai-Done $after | Out-Null
+    Ai-DoneIsLast $after
+    Ai-SeqStrict $after
+    return $null
+}
+
+Add-AiCase 'W-17' 'P1' '写动词被页面拒执：outcome=blocked 如实透出（不谎报成功、零副作用）' {
+    $sid = Ai-NewSid 'w17'
+    # 只读页面上写动词能不能做，判据在浏览器（区域 data-ai-verbs / data-ai-deny）；桩层断言的是
+    # "页面拒执之后协议必须如实落档"这一半段 —— 卡面与元素闸的判定属前端 vitest 面（ai-dom-verbs.spec.ts）。
+    $frames = Ai-UiChat $sid 'UI-SELECT' (Ai-UiCtx 1)
+    $req = Ai-One $frames 'frontend_tool_request'
+    if (-not $req) { throw '未收到 frontend_tool_request' }
+    $conv = Ai-UiConverge $req '该元素不允许「select」动词（data-ai-verbs 收紧了允许集）' @{ outcome = 'blocked' }
+    if ($conv.frame.outcome -ne 'blocked') { throw "结局帧 outcome=$($conv.frame.outcome)，期望 blocked" }
+    if ($conv.frame.ok -ne $false -or $conv.frame.executed -ne $false) {
+        throw "结局帧 ok=$($conv.frame.ok)/executed=$($conv.frame.executed)，期望 false/false（拒执零副作用）"
+    }
+    if (-not [string]::IsNullOrWhiteSpace([string]$conv.frame.code)) {
+        throw "结局帧 code=$($conv.frame.code)（页面没给码时不得臆造）"
+    }
+    return $null
+}
+
+Add-AiCase 'W-18' 'P2' '拒执不产生重试风暴：同一 toolCallId 的请求帧恰 1 条，本轮仍收敛到文本' {
+    $sid = Ai-NewSid 'w18'
+    $frames = Ai-UiChat $sid 'UI-FILL' (Ai-UiCtx 1)
+    $req = Ai-One $frames 'frontend_tool_request'
+    if (-not $req) { throw '未收到 frontend_tool_request' }
+    $conv = Ai-UiConverge $req '未执行：写前原值已被用户手改' @{ outcome = 'rejected'; code = 'UI_PRECONDITION_CHANGED' }
+    if ($conv.frame.code -ne 'UI_PRECONDITION_CHANGED') { throw "结局帧 code=$($conv.frame.code)" }
+    $reAsk = @($conv.after | Where-Object { $_.type -eq 'frontend_tool_request' -and $_.toolCallId -eq $req.toolCallId }).Count
+    if ($reAsk -ne 1) { throw "同一 toolCallId 的 frontend_tool_request $reAsk 条（拒执被当成重试信号）" }
+    if ((Ai-Text $conv.after).Length -lt 1) { throw '拒执后模型没有收到任何正文（本轮无收尾文本）' }
+    return $null
+}
+
+Add-AiCase 'W-19' 'P1' '写动词的轮内状态按轮归零：上一轮的计数/停止位不带进下一轮' {
+    # 轮 1：写动词挂起 → 回灌 → 收敛
+    $sid = Ai-NewSid 'w19'
+    $frames = Ai-UiChat $sid 'UI-FILL' (Ai-UiCtx 1)
+    $first = Ai-One $frames 'frontend_tool_request'
+    if (-not $first) { throw '轮 1 未挂起（写动词未披露）' }
+    $conv = Ai-UiConverge $first '已写入 E2E' $null
+    if ($conv.frame.outcome -ne 'ok') { throw "轮 1 结局 $($conv.frame.outcome)" }
+    # 轮 2（同会话）：必须能发下一条（配额/停止位是轮内的，不是会话级累加）
+    $next = Ai-ChatRaw $sid '【AIE2E】继续：写动词之后再说一句。' @{ page = 'definitions'; extra = @{ pageId = 'definitions'; uiRegionCount = 1 } }
+    if (-not $next.ok) { throw "同会话下一轮 HTTP $($next.status)（被上一轮的状态挡住）" }
+    # 新轮里写动词仍可挂起（配额未被上一轮吃掉）：换会话 = 干净的一轮
+    $sid2 = Ai-NewSid 'w19b'
+    $frames2 = Ai-UiChat $sid2 'UI-FILL' (Ai-UiCtx 1)
+    $second = Ai-One $frames2 'frontend_tool_request'
+    if (-not $second) { throw '新轮写动词未挂起（配额/停止位跨轮残留）' }
+    if ($second.runId -eq $first.runId) { throw '两轮 runId 相同（轮次台账按 runId 归零的前提不成立）' }
+    $conv2 = Ai-UiConverge $second '已写入 E2E' $null
+    if ($conv2.frame.outcome -ne 'ok') { throw "新轮结局 $($conv2.frame.outcome)" }
+    return $null
+}
+
+Add-AiCase 'W-20' 'P1' '前端注册表 18 条与 /api/ai/tools 逐字段对账（名称/风险/通道/标题键/披露标签）' {
+    $tsPath = Join-Path $PSScriptRoot '../frontend/src/types/tools.ts'
+    if (-not (Test-Path $tsPath)) { throw "前端注册表不可读：$tsPath" }
+    $src = Get-Content -Raw -Encoding UTF8 -Path $tsPath
+    $at = $src.IndexOf('export const FRONTEND_TOOLS')
+    if ($at -lt 0) { throw 'tools.ts 里找不到 FRONTEND_TOOLS 注册表' }
+    $block = $src.Substring($at)
+    $end = $block.IndexOf("`n]")
+    if ($end -gt 0) { $block = $block.Substring(0, $end) }
+    $names = @([regex]::Matches($block, "(?m)^\s{4}name: '([a-z_0-9]+)'") | ForEach-Object { $_.Groups[1].Value })
+    if ($names.Count -ne 18) { throw "前端注册表有 $($names.Count) 条，期望 18（7 原语 + 9 表格 + 2 编辑器/下载）" }
+    $h = Ai-SheetHealth
+    $writeOn = [bool]$h.writeEnabled
+    $items = @((GetJson '/api/ai/tools?taskType=EXPORT&step=EXPORT').tools)
+    $byName = @{}
+    foreach ($it in $items) { $byName[$it.name] = $it }
+    $sheetWrite = @('normalize_column', 'replace_values', 'update_rows', 'undo_last_sheet_edit')
+    foreach ($n in $names) {
+        $declared = @()
+        $m = [regex]::Match($block, "(?m)^\s{4}name: '" + [regex]::Escape($n) + "'[\s\S]*?riskLevel: '(READ|WRITE|DANGER)'")
+        if ($m.Success) { $declared = @($m.Groups[1].Value) }
+        $it = $byName[$n]
+        if (-not $it) {
+            if ($sheetWrite -contains $n -and -not $writeOn) { continue }   # 写闸关 = 退出披露面（T-08 口径）
+            throw "注册表工具 $n 不在 /api/ai/tools 的披露清单里（声明漂移）"
+        }
+        if ($it.channel -ne 'FRONTEND') { throw "$n 的通道是 $($it.channel)，注册表期望 FRONTEND" }
+        if ($declared.Count -eq 1 -and $it.riskLevel -ne $declared[0]) {
+            throw "$n 的风险级 $($it.riskLevel) 与前端声明 $($declared[0]) 不一致"
+        }
+        if (-not $it.titleKey) { throw "$n 缺 titleKey（卡面拿不到 i18n 键）" }
+        if ($n -like 'ui_*' -and (@($it.scopePatterns) -join ',') -ne 'ui:on') {
+            throw "$n 的 scopePatterns=$(@($it.scopePatterns) -join ',')，期望 ui:on（披露标签收窄）"
+        }
+    }
+    return $null
+}
+
+Add-AiCase 'W-21' 'P1' '历史恢复段序对账①：/history 段序与归档快照 historyRoles 同源（去 SYSTEM 后逐段相等）' {
+    $sid = Ai-NewSid 'w21'
+    $frames = Ai-UiChat $sid 'UI-CLICK' (Ai-UiCtx 1)
+    $req = Ai-One $frames 'frontend_tool_request'
+    if (-not $req) { throw '未收到 frontend_tool_request' }
+    $conv = Ai-UiConverge $req '已点击「选择文件」' $null
+    $hist = GetJson "/api/ai/history/$sid"
+    $msgs = @($hist.messages)
+    $histTypes = @($msgs | ForEach-Object { $_.type })
+    $run = Ai-Run $req.runId
+    $roles = @($run.historyRoles | Where-Object { $_ -ne 'SYSTEM' })
+    if (($histTypes -join ',') -ne ($roles -join ',')) {
+        throw "段序不一致：history=[$($histTypes -join ',')] snapshot=[$($roles -join ',')]"
+    }
+    if ($histTypes -notcontains 'TOOL') { throw '历史里缺 TOOL 段（工具结果没有进记忆）' }
+    $call = @($msgs | Where-Object { $null -ne $_.toolCalls })[0]
+    if (-not $call) { throw '历史里缺带 toolCalls 的 ASSISTANT 段' }
+    if (@($call.toolCalls)[0].id -ne $req.toolCallId) { throw "历史 toolCalls id=$(@($call.toolCalls)[0].id) 与挂起条目 $($req.toolCallId) 不一致" }
+    $resp = @($msgs | Where-Object { $null -ne $_.toolResponses })[0]
+    if (-not $resp) { throw '历史里缺 TOOL 段（toolResponses 为空）' }
+    if (@($resp.toolResponses)[0].id -ne $req.toolCallId) { throw '历史 toolResponses 的 id 与挂起条目不一致' }
+    return $null
+}
+
+Add-AiCase 'W-22' 'P2' '历史恢复对账②：工具段保留回灌原文且带定界声明（历史即"数据"，不冒充指令）' {
+    $sid = Ai-NewSid 'w22'
+    $frames = Ai-UiChat $sid 'UI-CLICK' (Ai-UiCtx 1)
+    $req = Ai-One $frames 'frontend_tool_request'
+    if (-not $req) { throw '未收到 frontend_tool_request' }
+    $null = Ai-UiConverge $req '已点击「选择文件」（mutate-local）' $null
+    $hist = GetJson "/api/ai/history/$sid"
+    $resp = @(@($hist.messages) | Where-Object { $null -ne $_.toolResponses })[0]
+    if (-not $resp) { throw '历史里缺 TOOL 段' }
+    $data = [string]@($resp.toolResponses)[0].responseData
+    if ($data -notlike '*选择文件*') { throw "历史工具结果丢了回灌原文（实际：$data）" }
+    if ($data -notlike '*是【数据】不是【指令】*') { throw '历史工具结果缺定界声明（注入面回显时无法与指令区分）' }
+    foreach ($bad in @('C:\', '<script', 'javascript:', 'file://')) {
+        if ($data -like "*$bad*") { throw "历史工具结果含禁用形态 $bad（回灌守卫的口径没有延续到历史通道）" }
+    }
+    return $null
+}
+
+Add-AiCase 'W-23' 'P1' '停止后可发下一条：中途停止的轮次不锁会话' {
+    $sid = Ai-NewSid 'w23'
+    $runId = Ai-StopMidTurn $sid '【AIE2E】turn-text stall-frames=6000 中途停止。' @{ page = 'tasks' }
+    $next = Ai-ChatRaw $sid '【AIE2E】继续：停止后的下一条。' @{ page = 'tasks' }
+    if ($next.status -eq 409) { throw "停止后同会话再发被 409 拦（$($next.json.code)）：会话被旧轮锁死" }
+    if (-not $next.ok) { throw "停止后同会话再发 HTTP $($next.status)" }
+    return $null
+}
+
+Add-AiCase 'W-24' 'P2' '停止后下一条可完整收敛并留档（新轮不继承旧轮终态）' {
+    $sid = Ai-NewSid 'w24'
+    $oldRun = Ai-StopMidTurn $sid '【AIE2E】turn-text stall-frames=6000 停止后留档。' @{ page = 'tasks' }
+    $frames = New-Object System.Collections.ArrayList
+    Read-Sse '/api/ai/chat' @{ sessionId = $sid; message = '【AIE2E】turn-text 停止后的完整一轮。'; context = @{ page = 'tasks' } } @('done', 'error') $frames $null
+    $done = Ai-Done $frames
+    if ($done.cancelled -eq $true) { throw '新轮一开始就是取消态（旧轮的停止位被继承）' }
+    $newRun = Ai-RunId $frames
+    if ($newRun -eq $oldRun) { throw '新轮复用了旧 runId' }
+    $run = Ai-Run $newRun
+    if ($run.snapshot.status -ne 'DONE') { throw "新轮状态 $($run.snapshot.status)，期望 DONE" }
+    $hist = GetJson "/api/ai/history/$sid"
+    if (@($hist.messages).Count -lt 2) { throw '停止后的新轮没有留档（历史只有旧轮）' }
+    return $null
+}
+
+Add-AiCase 'W-25' 'P1' '停止归档收敛信号①：重挂归档能读到 done{cancelled:true}' {
+    $sid = Ai-NewSid 'w25'
+    $runId = Ai-StopMidTurn $sid '【AIE2E】turn-text stall-frames=6000 归档收敛。' @{ page = 'tasks' }
+    $replay = Ai-WaitArchivedDone $runId
+    $done = Ai-Done $replay
+    if ($done.cancelled -ne $true) { throw "归档 done.cancelled=$($done.cancelled)，期望 true（停止事实没落档）" }
+    Ai-SeqStrict $replay
+    $starts = @($replay | Where-Object { $_.type -eq 'start' })
+    if ($starts.Count -ne 1) { throw "归档 start 帧 $($starts.Count) 个（期望恰 1）" }
+    return $null
+}
+
+Add-AiCase 'W-26' 'P2' '停止归档收敛信号②：runs / pending / runs-当前 三面同向（无残留 PENDING、不谎报 SUSPENDED）' {
+    $sid = Ai-NewSid 'w26'
+    $runId = Ai-StopMidTurn $sid '【AIE2E】turn-text stall-frames=6000 三面同向。' @{ page = 'tasks' }
+    Ai-WaitNoPending $runId
+    $run = Ai-Run $runId
+    if ($run.snapshot.status -ne 'CANCELLED') { throw "runs/{runId} 状态 $($run.snapshot.status)，期望 CANCELLED" }
+    $open = @($run.pending | Where-Object { $_.status -eq 'PENDING' })
+    if ($open.Count -gt 0) { throw "停止后仍有 $($open.Count) 个条目停在 PENDING" }
+    $cur = GetJson "/api/ai/runs/current?sessionId=$sid"
+    if ($cur.found -and $cur.snapshotStatus -eq 'SUSPENDED') { throw '停止后 runs/current 仍报 SUSPENDED（可发现面说谎）' }
+    $hist = GetJson "/api/ai/history/$sid"
+    if (@($hist.messages).Count -lt 1) { throw '停止后历史为空（用户那句提问丢了）' }
+    return $null
+}
+
+Add-AiCase 'W-27' 'P1' '工具轮编排中停止：工具调用从未下发（零副作用）+ done{cancelled:true}' {
+    $sid = Ai-NewSid 'w27'
+    $runId = Ai-StopMidTurn $sid '【AIE2E】scenario=UI-SNAPSHOT slow-tool=8000 慢编排中途停止。' (Ai-UiCtx 1)
+    $replay = Ai-WaitArchivedDone $runId
+    $done = Ai-Done $replay
+    if ($done.cancelled -ne $true) { throw "done.cancelled=$($done.cancelled)，期望 true" }
+    $toolStarts = @($replay | Where-Object { $_.type -eq 'tool_start' })
+    if ($toolStarts.Count -gt 0) { throw "停止前后已下发 $($toolStarts.Count) 个 tool_start（用户停止后仍推进了工具）" }
+    Ai-WaitNoPending $runId
+    return $null
+}
+
+Add-AiCase 'W-28' 'P2' '工具轮停止后同会话可再发（编排中停止不锁会话）' {
+    $sid = Ai-NewSid 'w28'
+    $runId = Ai-StopMidTurn $sid '【AIE2E】scenario=UI-SNAPSHOT slow-tool=8000 慢编排再发。' (Ai-UiCtx 1)
+    $next = Ai-ChatRaw $sid '【AIE2E】继续：慢编排停止后的下一条。' @{ page = 'tasks' }
+    if ($next.status -eq 409) { throw "停止后同会话再发被 409 拦（$($next.json.code)）" }
+    if (-not $next.ok) { throw "停止后同会话再发 HTTP $($next.status)" }
+    return $null
+}
+
+Add-AiCase 'W-29' 'P0' '确认门挂起中停止：条目终态 + 迟到决策被拒（不产生任何执行）' {
+    $t = Ai-PublishFixture 'AIE2E-W-29-挂起中停止'
+    $sid = Ai-NewSid 'w29'
+    $frames = New-Object System.Collections.ArrayList
+    Read-Sse '/api/ai/chat' @{
+        sessionId = $sid
+        message = ("【AIE2E】scenario=IRREV-PUBLISH 任务 {0} 发布。" -f $t)
+        context = @{ page = 'import'; taskId = $t; taskType = 'IMPORT'; step = 'PUBLISH' }
+    } @('confirm_request', 'done', 'error') $frames $null
+    $cr = Ai-One $frames 'confirm_request'
+    if (-not $cr) { throw '未挂起到确认门' }
+    $cancel = Ai-Cancel $cr.runId
+    if (-not $cancel.cancelled) { throw 'POST /api/ai/cancel 未生效' }
+    $final = Ai-WaitStatus $cr.runId @('CANCELLED') 20
+    if ($final.snapshot.status -ne 'CANCELLED') { throw "停止后状态 $($final.snapshot.status)" }
+    $entry = Ai-WaitPendingSettled $cr.runId $cr.toolCallId
+    if (-not $entry) { throw '台账里条目消失（停止应留下终态而不是抹掉）' }
+    if ($entry.status -eq 'PENDING') { throw '停止后条目仍停在 PENDING（挂起未收敛）' }
+    if ($entry.executed -eq $true) { throw '停止后条目显示已执行（副作用越过了停止）' }
+    $late = Invoke-Api 'POST' '/api/ai/confirm' @{ runId = $cr.runId; toolCallId = $cr.toolCallId; approved = $true; reason = 'late' }
+    if ($late.ok) { throw '停止后的迟到批准被接受（停止面被绕过）' }
+    if ($late.status -ne 409) { throw "迟到批准 HTTP $($late.status)，期望 409" }
+    $jobs = @(GetJson "/api/tasks/$t/jobs" | Where-Object { $_.jobType -eq 'PUBLISH' })
+    if ($jobs.Count -gt 0) { throw '停止后仍创建了发布作业（不可撤销动作越过了停止）' }
+    return $null
+}
+
+Add-AiCase 'W-30' 'P1' '前端工具挂起中停止：迟到回灌 409 + 同会话可发下一轮（不锁死）' {
+    $sid = Ai-NewSid 'w30'
+    $frames = Ai-UiChat $sid 'UI-SCROLL' (Ai-UiCtx 1)
+    $req = Ai-One $frames 'frontend_tool_request'
+    if (-not $req) { throw '未收到 frontend_tool_request' }
+    $cancel = Ai-Cancel $req.runId
+    if (-not $cancel.cancelled) { throw 'cancel 未生效' }
+    $final = Ai-WaitStatus $req.runId @('CANCELLED') 20
+    if ($final.snapshot.status -ne 'CANCELLED') { throw "停止后状态 $($final.snapshot.status)" }
+    $entry = Ai-WaitPendingSettled $req.runId $req.toolCallId
+    if ($entry.status -eq 'PENDING') { throw '停止后条目仍停在 PENDING' }
+    $late = Ai-FePost $req.runId $req.toolCallId '迟到的回灌' $null
+    if ($late.ok) { throw '停止后的迟到回灌被接受（停止后零执行被破坏）' }
+    if ($late.status -ne 409) { throw "迟到回灌 HTTP $($late.status)，期望 409" }
+    $next = Ai-ChatRaw $sid '【AIE2E】继续：挂起停止后的下一条。' @{ page = 'tasks' }
+    if ($next.status -eq 409) { throw '挂起停止后同会话再发被 409 拦（会话锁死）' }
+    if (-not $next.ok) { throw "再发 HTTP $($next.status)" }
+    return $null
+}
+
+Add-AiCase 'W-31' 'P2' '历史分页不改段序：分片拼接 == 全量（offset/limit 只是切片）' {
+    $sid = Ai-NewSid 'w31'
+    $frames = Ai-UiChat $sid 'UI-CLICK' (Ai-UiCtx 1)
+    $req = Ai-One $frames 'frontend_tool_request'
+    if (-not $req) { throw '未收到 frontend_tool_request' }
+    $null = Ai-UiConverge $req '已点击「选择文件」' $null
+    $all = GetJson "/api/ai/history/${sid}"
+    $total = [int]$all.total
+    if ($total -lt 3) { throw "历史只有 $total 条（分页对照无从谈起）" }
+    $joined = @()
+    for ($off = 0; $off -lt $total; $off += 2) {
+        $page = GetJson ("/api/ai/history/${sid}?offset={0}&limit=2" -f $off)
+        if ([int]$page.total -ne $total) { throw "分页 total=$($page.total) 与全量 $total 不一致（切片改写了总量）" }
+        $joined += @($page.messages | ForEach-Object { $_.type })
+    }
+    $full = @($all.messages | ForEach-Object { $_.type })
+    if (($joined -join ',') -ne ($full -join ',')) { throw "分片段序 [$(($joined -join ','))] != 全量 [$(($full -join ','))]" }
+    return $null
+}
+
+Add-AiCase 'W-32' 'P2' '停止归档幂等：同一 runId 重挂两次帧集相同、done 恰 1' {
+    $sid = Ai-NewSid 'w32'
+    $runId = Ai-StopMidTurn $sid '【AIE2E】turn-text stall-frames=6000 归档幂等。' @{ page = 'tasks' }
+    $a = Ai-WaitArchivedDone $runId
+    $b = Ai-Events $runId 0 @('done', 'error')
+    $sa = (@($a | ForEach-Object { [int]$_.seq }) | Sort-Object) -join ','
+    $sb = (@($b | ForEach-Object { [int]$_.seq }) | Sort-Object) -join ','
+    if ($sa -ne $sb) { throw "两次重挂帧集不同：[$sa] vs [$sb]" }
+    $dones = @(@($a | Where-Object { $_.type -eq 'done' })) + @(@($b | Where-Object { $_.type -eq 'done' }))
+    if ($dones.Count -ne 2) { throw "两次重挂合计 done $($dones.Count) 个（期望各 1）" }
+    return $null
+}
+
+Add-AiCase 'W-33' 'P2' '编排中停止零副作用：该轮台账无工具条目、pending 为空、无作业创建' {
+    $t = Ai-ExportFixture 'AIE2E-W-33-零副作用'
+    $sid = Ai-NewSid 'w33'
+    $runId = Ai-StopMidTurn $sid ("【AIE2E】start_export 任务 {0} slow-tool=8000 中途停止。" -f $t) @{ page = 'tasks'; taskId = $t; taskType = 'EXPORT'; step = 'EXPORT' }
+    Ai-WaitNoPending $runId
+    $run = Ai-Run $runId
+    if ($run.snapshot.status -ne 'CANCELLED') { throw "轮次状态 $($run.snapshot.status)" }
+    $jobs = @(GetJson "/api/tasks/$t/jobs" | Where-Object { $_.jobType -eq 'EXPORT' })
+    if ($jobs.Count -gt 0) { throw '停止后仍创建了导出作业（副作用越过停止）' }
+    return $null
+}
+
+Add-AiCase 'W-34' 'P1' '挂起中停止不遮挡新轮：同会话下一轮可再挂起且 runs/current 指向新轮' {
+    $sid = Ai-NewSid 'w34'
+    $frames = Ai-UiChat $sid 'UI-HIGHLIGHT' (Ai-UiCtx 1)
+    $old = Ai-One $frames 'frontend_tool_request'
+    if (-not $old) { throw '轮 1 未挂起' }
+    $cur0 = GetJson "/api/ai/runs/current?sessionId=$sid"
+    if (-not $cur0.found -or $cur0.runId -ne $old.runId) { throw '挂起时 runs/current 未指向该轮（刷新恢复无数据源）' }
+    Ai-Cancel $old.runId | Out-Null
+    $null = Ai-WaitStatus $old.runId @('CANCELLED') 20
+    $cur1 = GetJson "/api/ai/runs/current?sessionId=$sid"
+    if ($cur1.found -and $cur1.snapshotStatus -eq 'SUSPENDED') { throw '停止后 runs/current 仍报 SUSPENDED' }
+    $frames2 = Ai-UiChat $sid 'UI-SCROLL' (Ai-UiCtx 1)
+    $new = Ai-One $frames2 'frontend_tool_request'
+    if (-not $new) { throw '停止后同会话下一轮未能再挂起（旧挂起遮挡了新轮）' }
+    $cur2 = GetJson "/api/ai/runs/current?sessionId=$sid"
+    if (-not $cur2.found) { throw '新轮挂起后 runs/current 为空' }
+    if ($cur2.runId -ne $new.runId) { throw "runs/current 指向 $($cur2.runId)，期望新轮 $($new.runId)" }
+    $null = Ai-UiConverge $new '已滚动到 export.panel.list' $null
+    return $null
+}
+
+
+# ============================================================
 # 批① 汇总：逐域 n/m + 计数自校验（MANIFEST 对账）
 #   名单推导链（设计稿 §4.1/§4.3/§4.4/§4.5/§3）：
 #     154 = 88（本节）+ 10（批② nightly 真模型）+ 41（批③ UI）+ 7（批④ 多实例）
 #           + 8（收编：G-03/G-05/G-06/D-12/C-03..C-06 已由既有 GF3/GF5/GF6/CTX-1..4 断言承载）
 #   本节名单 = 154 − 41 − 10 − 7 − 8；优先级 = §2 逐行 P 列的直接汇总（12/50/26）
+#   V1 追加（测试扩充 V1 · 工作区原语全链）：W 域 34 条（90 → 124），P0 12→15 / P1 52→72 / P2 26→37
 # ============================================================
 Say '============================================================'
-Say '--- 批① · 90 用例执行（桩模式，零 SKIP） ---'
+Say '--- 批① · 124 用例执行（桩模式，零 SKIP） ---'
 $script:aiStat = @{}
 $script:aiExecuted = 0
 $script:aiSkip = 0
@@ -4286,7 +5021,7 @@ foreach ($c in @($script:aiCases)) {
         No ("AIE2E-{0} [{1}] {2}" -f $c.id, $c.p, $c.title) $why
     }
 }
-$expect = [ordered]@{ S = 13; P = 1; H = 11; G = 11; T = 10; K = 6; Q = 4; C = 8; M = 3; D = 11; X = 12 }
+$expect = [ordered]@{ S = 13; P = 1; H = 11; G = 11; T = 10; K = 6; Q = 4; C = 8; M = 3; D = 11; X = 12; W = 34 }
 $domainLines = @()
 foreach ($k in $expect.Keys) {
     $st = if ($script:aiStat.ContainsKey($k)) { $script:aiStat[$k] } else { @{ pass = 0; fail = 0 } }
@@ -4296,20 +5031,20 @@ Say (" 批① 逐域：" + ($domainLines -join '  '))
 Say (" 批① 合计：{0}/{1}（P0={2} P1={3} P2={4}）" -f $script:aiPass, $script:aiExecuted, $script:aiP.P0, $script:aiP.P1, $script:aiP.P2)
 
 $manifestWhy = @()
-if ($script:aiCases.Count -ne 90) { $manifestWhy += "用例清单 $($script:aiCases.Count) 条，蓝图要求 90（88 设计稿 + 2 L-21 主用例）" }
-if ($script:aiExecuted -ne 90) { $manifestWhy += "实际执行 $($script:aiExecuted) 条，期望 90（88 设计稿 + 2 L-21 主用例）" }
+if ($script:aiCases.Count -ne 124) { $manifestWhy += "用例清单 $($script:aiCases.Count) 条，蓝图要求 124（88 设计稿 + 2 L-21 主用例 + 34 V1 工作区原语）" }
+if ($script:aiExecuted -ne 124) { $manifestWhy += "实际执行 $($script:aiExecuted) 条，期望 124（88 设计稿 + 2 L-21 主用例 + 34 V1 工作区原语）" }
 if ($script:aiSkip -ne 0) { $manifestWhy += "SKIP=$($script:aiSkip) 条（桩下零 SKIP 是硬底线）" }
 foreach ($k in $expect.Keys) {
     $n = @($script:aiCases | Where-Object { $_.id -like "$k-*" }).Count
     if ($n -ne $expect[$k]) { $manifestWhy += "域 $k 有 $n 条，蓝图 $($expect[$k]) 条" }
 }
-if ($script:aiP.P0 -ne 12 -or $script:aiP.P1 -ne 52 -or $script:aiP.P2 -ne 26) {
-    $manifestWhy += "优先级分布 P0/P1/P2=$($script:aiP.P0)/$($script:aiP.P1)/$($script:aiP.P2)，蓝图 12/52/26（88 设计稿 12/50/26 + 2 条 P1 主用例）"
+if ($script:aiP.P0 -ne 16 -or $script:aiP.P1 -ne 70 -or $script:aiP.P2 -ne 38) {
+    $manifestWhy += "优先级分布 P0/P1/P2=$($script:aiP.P0)/$($script:aiP.P1)/$($script:aiP.P2)，蓝图 16/70/38（88 设计稿 12/50/26 + 2 条 P1 主用例 + V1 的 4/18/12）"
 }
 if ($manifestWhy.Count -gt 0) {
     No 'AIE2E-MANIFEST 计数自校验' ($manifestWhy -join '；')
 } else {
-    Ok ("AIE2E-MANIFEST 计数自校验：90 条 / 11 域（S13 P1 H11 G11 T10 K6 Q4 C8 M3 D11 X12）/ P0 {0} · P1 {1} · P2 {2}，与设计稿 §2 逐行 P 列一致 + L-21 两条表格主用例（T-13/T-14，P1）" -f $script:aiP.P0, $script:aiP.P1, $script:aiP.P2)
+    Ok ("AIE2E-MANIFEST 计数自校验：124 条 / 12 域（S13 P1 H11 G11 T10 K6 Q4 C8 M3 D11 X12 W34）/ P0 {0} · P1 {1} · P2 {2}，与设计稿 §2 逐行 P 列一致 + L-21 两条表格主用例（T-13/T-14，P1）+ V1 的 W 域 34 条" -f $script:aiP.P0, $script:aiP.P1, $script:aiP.P2)
 }
 
 # ============================================================
@@ -4466,7 +5201,7 @@ try {
 } catch { Q8-No 'Q8 项回归' $_.Exception.Message }
 
 Say '============================================================'
-Say (" 结果：PASS={0}  FAIL={1}  （主用例计数，含 TC1–TC22、TC23、GF1–GF6（GF6 需 -EnableGf6）、E2E-CTX-1..4 与批① AIE2E 90 条；基数不写死，随用例演进）" -f $script:passed, $script:failed)
+Say (" 结果：PASS={0}  FAIL={1}  （主用例计数，含 TC1–TC22、TC23、GF1–GF6（GF6 需 -EnableGf6）、E2E-CTX-1..4 与批① AIE2E 90 条 + V1 34 条；基数不写死，随用例演进）" -f $script:passed, $script:failed)
 # 批① 门禁口径（设计稿 §4.2 第 5 项）：P0/P1 红 ⇒ exit 1；P2 红单列不阻塞（防一门禁把开发卡死）
 $aiP2Fail = [int]$script:aiP2Fail
 Say (" 批① AIE2E：PASS={0}  FAIL={1}（其中 P2 红 {2} 条，不阻塞退出码）" -f $script:aiPass, ($script:aiExecuted - $script:aiPass), $aiP2Fail)

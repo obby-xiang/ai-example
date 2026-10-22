@@ -112,6 +112,35 @@ class ContextFieldGateTest {
 	}
 
 	@Test
+	void uiRegionCountSurvivesTheGateForDisclosureButStaysOutOfThePrompt() {
+		// 缺口 0（A-13 旁路）：闸门此前把它当"非白名单键"丢弃 ⇒ ui:on 恒见缺失 ⇒ 恒 fail-open。
+		// 现在它活到上下文里（披露判定读得到），但模型载荷面只渲染 ALLOWED_EXTRA_KEYS ⇒ 提示词仍无此键。
+		Map<String, Object> extra = new LinkedHashMap<>();
+		extra.put("pageId", "definitions");
+		extra.put("uiRegionCount", 0);
+		ContextFieldGate.Result result = gate.sanitize(new AiChatRequest.Context("definitions", null, null, null, extra));
+
+		assertThat(result.context().extra()).containsEntry("uiRegionCount", 0);
+		assertThat(result.downgraded()).as("旁路键不算降级").isZero();
+		ContextBuilder builder = new ContextBuilder(null, null);
+		assertThat(builder.renderExtra(result.context().extra())).doesNotContain("uiRegionCount");
+		assertThat(builder.buildContextMessage(com.example.configmgr.ai.tool.AiContext.of(
+				result.context().page(), null, null, null, result.context().extra())))
+			.doesNotContain("uiRegionCount");
+	}
+
+	@Test
+	void uiRegionCountWithUnparsableValueIsDroppedAsMissing() {
+		// 非数值形态按"缺失"处理（= fail-open，多披露不误关），并且照常计入降级计数
+		Map<String, Object> extra = new LinkedHashMap<>();
+		extra.put("uiRegionCount", "不是数字");
+		ContextFieldGate.Result result = gate.sanitize(new AiChatRequest.Context("tasks", null, null, null, extra));
+
+		assertThat(result.context().extra()).doesNotContainKey("uiRegionCount");
+		assertThat(result.reasons()).anyMatch(reason -> reason.startsWith("extra:"));
+	}
+
+	@Test
 	void unknownPageRendersAsUnknownLabelInTheWorkspaceSection() {
 		// 闸与渲染同口径：unknown 哨兵在提示词里必须是「未知页面（未识别）」，而不是 id 或原文。
 		// pageLabel 是包内可见的渲染细节 ⇒ 通过 buildContextMessage 的真产物断言（端到端口径）。
