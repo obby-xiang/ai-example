@@ -55,6 +55,7 @@ describe('T-08：跨页 ref（上下文围栏）', () => {
     registerRegion(makeRoot('<button data-ai-ref="import.upload.choose">上传</button>'))
     const spy = vi.spyOn(el('import.upload.choose'), 'click')
     enterExportPage()
+    aiSnapshot({})
     const out = await aiClick({ ref: 'import.upload.choose', epoch: currentAiEpoch() })
     expect(out.outcome).toBe('failed')
     expect(out.result).toContain('当前页面为「export」')
@@ -65,6 +66,7 @@ describe('T-08：跨页 ref（上下文围栏）', () => {
   it('区域声明 allowSteps 时，步骤不符也拒绝', async () => {
     enterImportPage('PRECHECK')
     registerRegion(makeRoot('<button data-ai-ref="import.upload.choose">上传</button>'), { allowSteps: ['UPLOAD'] })
+    aiSnapshot({})
     const out = await aiClick({ ref: 'import.upload.choose', epoch: currentAiEpoch() })
     expect(out.outcome).toBe('failed')
     expect(out.result).toContain('UPLOAD')
@@ -73,6 +75,7 @@ describe('T-08：跨页 ref（上下文围栏）', () => {
   it('区域声明 needsTask 且当前无任务 ⇒ 拒绝', async () => {
     enterImportPage('UPLOAD', null)
     registerRegion(makeRoot('<button data-ai-ref="import.upload.choose">上传</button>'), { needsTask: true })
+    aiSnapshot({})
     const out = await aiClick({ ref: 'import.upload.choose', epoch: currentAiEpoch() })
     expect(out.outcome).toBe('failed')
     expect(out.result).toContain('任务')
@@ -84,6 +87,7 @@ describe('T-09：epoch 竞态', () => {
     enterImportPage()
     registerRegion(makeRoot('<button data-ai-ref="import.upload.choose" data-ai-risk="mutate-local">上传</button>'))
     const spy = vi.spyOn(el('import.upload.choose'), 'click')
+    aiSnapshot({})
     const out = await aiClick({ ref: 'import.upload.choose', epoch: 'abcdef-999' })
     expect(out.outcome).toBe('failed')
     expect(out.result).toContain('epoch')
@@ -94,6 +98,7 @@ describe('T-09：epoch 竞态', () => {
     enterImportPage()
     registerRegion(makeRoot('<button data-ai-ref="import.upload.choose" data-ai-risk="mutate-local">上传</button>'))
     const spy = vi.spyOn(el('import.upload.choose'), 'click')
+    aiSnapshot({})
     expect((await aiClick({ ref: 'import.upload.choose' })).outcome).toBe('failed')
     expect(spy).toHaveBeenCalledTimes(0)
   })
@@ -120,6 +125,7 @@ describe('T-27 / T-28：单轮配额与停止', () => {
     enterImportPage()
     registerRegion(makeRoot('<button data-ai-ref="import.upload.choose" data-ai-risk="mutate-local">上传</button>'))
     const spy = vi.spyOn(el('import.upload.choose'), 'click')
+    aiSnapshot({})
     for (let i = 0; i < UI_WRITE_VERBS_PER_TURN; i += 1) {
       const ok = await aiClick({ ref: 'import.upload.choose', epoch: currentAiEpoch() })
       expect(ok.outcome).toBe('ok')
@@ -134,6 +140,7 @@ describe('T-27 / T-28：单轮配额与停止', () => {
     enterImportPage()
     registerRegion(makeRoot('<button data-ai-ref="import.upload.choose" data-ai-risk="mutate-local">上传</button>'))
     const spy = vi.spyOn(el('import.upload.choose'), 'click')
+    aiSnapshot({})
     expect((await aiClick({ ref: 'import.upload.choose', epoch: currentAiEpoch() })).outcome).toBe('ok')
     abortUiOperations()
     const out = await aiClick({ ref: 'import.upload.choose', epoch: currentAiEpoch() })
@@ -149,6 +156,7 @@ describe('T-27 / T-28：单轮配额与停止', () => {
     registerRegion(makeRoot('<button data-ai-ref="import.upload.choose" data-ai-risk="mutate-local">上传</button>'))
     abortUiOperations()
     beginUiTurn('t-next')
+    aiSnapshot({})
     expect((await aiClick({ ref: 'import.upload.choose', epoch: currentAiEpoch() })).outcome).toBe('ok')
   })
 })
@@ -158,6 +166,7 @@ describe('T-29 / T-30：风险分级', () => {
     enterImportPage()
     registerRegion(makeRoot('<button data-ai-ref="import.upload.tab" data-ai-risk="read">切换</button>'))
     const spy = vi.spyOn(el('import.upload.tab'), 'click')
+    aiSnapshot({})
     const out = await aiClick({ ref: 'import.upload.tab', epoch: currentAiEpoch() })
     expect(out.outcome).toBe('ok')
     expect(spy).toHaveBeenCalledTimes(1)
@@ -174,6 +183,7 @@ describe('T-29 / T-30：风险分级', () => {
     const workspace = useWorkspaceStore()
     const before = workspace.dataVersion
     const spy = vi.spyOn(el('import.selectDefs.CURRENCY'), 'click')
+    aiSnapshot({})
     const out = await aiClick({ ref: 'import.selectDefs.CURRENCY', epoch: currentAiEpoch() })
     expect(out.outcome).toBe('ok')
     expect(spy).toHaveBeenCalledTimes(1)
@@ -192,6 +202,7 @@ describe('T-45：审计（ref + verb + epoch 进回执与 recentActions）', () 
     const workspace = useWorkspaceStore()
     const before = workspace.recentActions.length
     const epoch = currentAiEpoch()
+    aiSnapshot({})
     const out = await aiClick({ ref: 'import.upload.tab', epoch })
     expect(out.result).toContain('import.upload.tab')
     expect(out.result).toContain('click')
@@ -206,8 +217,11 @@ describe('T-48：点击触发跳转后旧 ref 立刻失效', () => {
     const root = makeRoot('<button data-ai-ref="import.upload.go" data-ai-risk="mutate-local">去导出</button>')
     registerRegion(root)
     el('import.upload.go').addEventListener('click', () => enterExportPage())
+    aiSnapshot({})
     const first = await aiClick({ ref: 'import.upload.go', epoch: currentAiEpoch() })
     expect(first.outcome).toBe('ok')
+    // 换页后 epoch 已推进：先重新快照（ref 进新 epoch 的已见集），再验证上下文围栏的归因
+    aiSnapshot({})
     const second = await aiClick({ ref: 'import.upload.go', epoch: currentAiEpoch() })
     expect(second.outcome).toBe('failed')
     expect(second.result).toContain('当前页面为「export」')
@@ -218,6 +232,7 @@ describe('T-52：写动词串行化（≥80ms 间隔）', () => {
   it('两个写动词连发 ⇒ 第二个排队而非并行', async () => {
     enterImportPage()
     registerRegion(makeRoot('<button data-ai-ref="import.upload.choose" data-ai-risk="mutate-local">上传</button>'))
+    aiSnapshot({})
     const starts: number[] = []
     el('import.upload.choose').addEventListener('click', () => starts.push(Date.now()))
     const epoch = currentAiEpoch()
@@ -227,5 +242,48 @@ describe('T-52：写动词串行化（≥80ms 间隔）', () => {
     ])
     expect(starts).toHaveLength(2)
     expect((starts[1] ?? 0) - (starts[0] ?? 0)).toBeGreaterThanOrEqual(60)
+  })
+})
+
+describe('批 A · 快照闸（A-06 / A-07 / A-15）', () => {
+  it('A-06 未快照直接 ui_click ⇒ rejected + UI_REF_NOT_SNAPSHOTTED + 零点击', async () => {
+    enterImportPage()
+    registerRegion(makeRoot('<button data-ai-ref="import.upload.choose">上传</button>'))
+    const spy = vi.spyOn(el('import.upload.choose'), 'click')
+    const out = await aiClick({ ref: 'import.upload.choose', epoch: currentAiEpoch() })
+    expect(out.outcome).toBe('rejected')
+    expect(out.code).toBe('UI_REF_NOT_SNAPSHOTTED')
+    expect(spy).toHaveBeenCalledTimes(0)
+  })
+
+  it('A-07 同 epoch 快照后再点 ⇒ 正常执行（闸不误伤）', async () => {
+    enterImportPage()
+    registerRegion(makeRoot('<button data-ai-ref="import.upload.choose">上传</button>'))
+    aiSnapshot({})
+    const spy = vi.spyOn(el('import.upload.choose'), 'click')
+    const out = await aiClick({ ref: 'import.upload.choose', epoch: currentAiEpoch() })
+    expect(out.outcome).toBe('ok')
+    expect(spy).toHaveBeenCalledTimes(1)
+  })
+
+  it('A-15 停止先于快照闸：停止后的写动词不给「未快照」错误归因', async () => {
+    enterImportPage()
+    const root = makeRoot('<button data-ai-ref="import.upload.old">旧</button>')
+    registerRegion(root)
+    aiSnapshot({})
+    expect((await aiClick({ ref: 'import.upload.old', epoch: currentAiEpoch() })).outcome).toBe('ok')
+
+    // 快照之后才渲染出来的新按钮：本 epoch 快照里没有它
+    const late = document.createElement('button')
+    late.setAttribute('data-ai-ref', 'import.upload.late')
+    root.appendChild(late)
+    const lateSpy = vi.spyOn(late, 'click')
+    abortUiOperations()
+
+    const out = await aiClick({ ref: 'import.upload.late', epoch: currentAiEpoch() })
+    expect(out.outcome).toBe('failed')
+    expect(out.result).toContain('已停止')
+    expect(out.code).not.toBe('UI_REF_NOT_SNAPSHOTTED')
+    expect(lateSpy).toHaveBeenCalledTimes(0)
   })
 })

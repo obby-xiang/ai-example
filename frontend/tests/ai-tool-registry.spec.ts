@@ -13,6 +13,7 @@ import {
   findFrontendTool
 } from '@/types/tools'
 import { UI_SNAPSHOT_MAX_CHARS, UI_SNAPSHOT_MAX_ROWS } from '@/utils/ai-dom-tools'
+import { matchesScope } from '@/utils/frontend-tools'
 
 /** 本专项 7 个工具名（与后端 `@Tool(name=...)` 严格同名）。 */
 const UI_TOOLS = [
@@ -64,8 +65,34 @@ describe('T-42：前端登记表与权威名册一致', () => {
     expect([...UI_HANDOFF_TOOLS]).toEqual(['ui_request_upload'])
   })
 
-  it('scope 一律 *（披露面 ≠ 可达面：围栏在区域与元素两层）', () => {
-    expect([...UI_TOOL_SCOPE_PATTERNS]).toEqual(['*'])
+  it('scope 按区域存在性披露（ui:on）：有区域 / 显式 0 / 缺失三分支', () => {
+    // 语义变更（批 A / A-11·A-12）：披露面从恒真 `*` 收窄为「本页有已注册区域」。
+    // 判据只用于收窄、永不用于授权；缺失（旧客户端 / E2E 桩）必须 fail-open —— 把缺失当 0
+    // 会让旧客户端的工具静默消失（最难查的故障形态）。
+    expect([...UI_TOOL_SCOPE_PATTERNS]).toEqual(['ui:on'])
+
+    // 显式 0 ⇒ 不披露（页面没有可操作区域，模型不该空转快照）
+    expect(matchesScope(UI_TOOL_SCOPE_PATTERNS, {
+      page: 'definitions',
+      taskType: null,
+      step: null,
+      uiRegionCount: 0
+    })).toBe(false)
+
+    // 有区域 ⇒ 披露
+    expect(matchesScope(UI_TOOL_SCOPE_PATTERNS, {
+      page: 'import',
+      taskType: 'IMPORT',
+      step: 'UPLOAD',
+      uiRegionCount: 2
+    })).toBe(true)
+
+    // 缺失 ⇒ 披露（fail-open）
+    expect(matchesScope(UI_TOOL_SCOPE_PATTERNS, {
+      page: 'definitions',
+      taskType: null,
+      step: null
+    })).toBe(true)
   })
 })
 

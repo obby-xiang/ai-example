@@ -41,6 +41,7 @@
 
 import type { JobType } from './job'
 import type { TaskType } from './task'
+import type { ToolOutcome } from './sse'
 
 /** 工具风险等级（ToolMeta.RiskLevel）。 */
 export type ToolRiskLevel = 'READ' | 'WRITE' | 'DANGER'
@@ -135,12 +136,15 @@ export type UiToolName = (typeof UI_TOOL_NAMES)[number]
 export const UI_HANDOFF_TOOLS: ReadonlySet<string> = new Set<string>(['ui_request_upload'])
 
 /**
- * 原语的披露范围 = `*`（设计稿 §4.4）。
+ * 原语的披露范围（批 A：从恒真 `*` 收窄为 `ui:on`，D8-①）。
  *
- * **披露面 ≠ 可达面**：`*` 只决定模型看得见这 7 个工具；「页面上哪个按钮能被操作」
- * 由区域围栏（`registerAiRegion`）与元素标注（`data-ai-*`）两层决定。
+ * `ui:on` 由前端 `matchesScope` 按**本页已注册区域数**判定：有区域 ⇒ 披露；显式 0 ⇒ 不披露；
+ * **缺失即披露**（fail-open，旧客户端 / E2E 桩零回归）。后端由 `extra.uiRegionCount` 产同源标签。
+ *
+ * **披露面 ≠ 可达面**：本标签只决定模型看得见这 7 个工具；「页面上哪个按钮能被操作」
+ * 仍由区域围栏（`registerAiRegion`）与元素标注（`data-ai-*`）两层决定，标签永远不能用来授权。
  */
-export const UI_TOOL_SCOPE_PATTERNS: string[] = ['*']
+export const UI_TOOL_SCOPE_PATTERNS: string[] = ['ui:on']
 
 /** 前端工具注册表。 */
 export const FRONTEND_TOOLS: readonly FrontendToolDescriptor[] = [
@@ -415,16 +419,19 @@ export function findFrontendTool(name: string): FrontendToolDescriptor | null {
 }
 
 /**
- * 前端工具执行结局三态（批3③a「工具结局不得谎报」）：真实结局维度，与
- * `ToolAvailability`（可用性：available/degraded/unavailable）**正交** —— degraded 既可承载
- * 确定性失败（failed）也可承载"结局未知"（unknown）。
- * - ok：已确认成功（执行器给出成功结局 / handler 返回成功字符串）；
- * - failed：**确定性失败** —— 执行器 throw、handler 结构化 `{ok:false}`、契约层/守卫拒绝
- *   （有明确原因，可判定未完成，如 D2 点名的编辑器引擎加载失败）；
- * - unknown：**结局未知** —— 已发起/已受理但时限内无法确认真实结局（执行器预算到期、
- *   等待页面就绪超出上界）。回灌文本如实说"既未确认成功，也未确认失败"。
+ * 前端工具执行结局（批 A：由 3 态**加宽**为线缆既有的 8 态，与 `types/sse.ts` 的
+ * `ToolOutcome` 同源别名，不新造枚举）：真实结局维度，与 `ToolAvailability`
+ * （可用性：available/degraded/unavailable）**正交**。
+ * - ok：已确认成功；
+ * - failed：**确定性失败** —— 执行器 throw、handler 结构化 `{ok:false}`、契约层/守卫拒绝；
+ * - rejected：被规则拒绝执行（未做任何副作用，如快照闸 / 写前前置条件失效）；
+ * - blocked：越权限/越上下文，未执行；
+ * - timeout：预算到期且**可判定未完成**（非下载类）；
+ * - cancelled：用户/整轮取消；
+ * - unknown：**结局未知** —— 已发起/已受理但时限内无法确认真实结局（仅下载类白名单）；
+ * - skipped：上游确定性失败导致本工具未执行。
  */
-export type FrontendToolOutcome = 'ok' | 'failed' | 'unknown'
+export type FrontendToolOutcome = ToolOutcome
 
 /**
  * 前端工具的执行结果（回灌给后端的文本 + 本地痕迹）。
@@ -439,8 +446,10 @@ export interface FrontendToolExecution {
    */
   ok: boolean
   availability: ToolAvailability
-  /** 执行结局（三态，批3③a 新增的真实结局维度）。 */
+  /** 执行结局（8 态，批 A 加宽；未知不等于失败）。 */
   outcome: FrontendToolOutcome
+  /** 机器码（批 A additive；闭集见 `utils/ui-receipt.ts#UI_CODES`，只在前后端/台账流动）。 */
+  code?: string
   /** 结局补充说明（unknown 的原因 / failed 的原因），可选。 */
   reason?: string
   /**

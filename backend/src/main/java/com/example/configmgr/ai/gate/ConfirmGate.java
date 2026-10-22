@@ -1163,8 +1163,20 @@ public class ConfirmGate {
 	 */
 	public Submission submitFrontendResult(String runId, String toolCallId, String result, String source,
 			boolean cancelled, String outcome, Map<String, Object> sheetMeta) {
+		return submitFrontendResult(runId, toolCallId, result, source, cancelled, outcome, sheetMeta, null);
+	}
+
+	/**
+	 * 前端工具结果回灌（批 A：带可选 {@code code}）。
+	 *
+	 * <p>{@code code} 由前端自报（{@code UI_* 闭集}），已在入口归一；它随条目持久化，
+	 * 供 {@code tool_result} 帧 / 台账 / 卡面同源取码（{@link PendingToolCall#effectiveCode()}）。
+	 * 未带时保持现状（按状态推导），旧客户端零改动。
+	 */
+	public Submission submitFrontendResult(String runId, String toolCallId, String result, String source,
+			boolean cancelled, String outcome, Map<String, Object> sheetMeta, String code) {
 		Submission submission = doSubmitFrontendResult(runId, toolCallId, result, source, cancelled, outcome,
-				sheetMeta);
+				sheetMeta, code);
 		traceDecision(runId, toolCallId, cancelled ? "frontend_cancel" : "frontend_result", submission.pending(),
 				String.valueOf(submission.outcome()), "user");
 		return submission;
@@ -1172,7 +1184,7 @@ public class ConfirmGate {
 
 	/** 回灌的写入本体（{@link #submitFrontendResult} 去掉结构化留痕的那一层）。 */
 	private Submission doSubmitFrontendResult(String runId, String toolCallId, String result, String source,
-			boolean cancelled, String outcome, Map<String, Object> sheetMeta) {
+			boolean cancelled, String outcome, Map<String, Object> sheetMeta, String code) {
 		PendingToolCall pending = pendingForWrite(runId, toolCallId);
 		if (pending == null) {
 			return new Submission(Outcome.NOT_FOUND, null, false, null);
@@ -1217,7 +1229,8 @@ public class ConfirmGate {
 		pending.setStatus(PendingToolCall.FRONTEND_RESULT);
 		ToolOutcome declared = ToolOutcome.fromWire(outcome);
 		pending.setOutcome(declared == null ? ToolOutcome.OK.wire() : declared.wire());
-		pending.setCode(null);
+		// 批 A：前端机器码随条目落库（入口已归一；未带 = null，回落状态推导）。
+		pending.setCode(code);
 		boolean ok = declared == null || declared.ok();
 		pending.setReason("source=" + (source == null || source.isBlank() ? "http-post" : source));
 		// G-E：复核器可在放行时补一段**元数据**（附件只暴露 fileName/fileId/size，内容永不进上下文）

@@ -22,7 +22,7 @@ import java.util.Map;
  * 本类按两条规则收紧：
  * <ol>
  * <li><b>键白名单</b>：只注入契约里定义的键（{@code stores/workspace.ts#buildContext} 的
- * {@code extra} 5 键）。非白名单键<b>不进系统消息</b>（仍原样留在快照里，供排障时查看）；</li>
+ * {@code extra} 契约键）。非白名单键<b>不进系统消息</b>（仍原样留在快照里，供排障时查看）；</li>
  * <li><b>序列化截断</b>：每个值序列化后限长（超长即截断并标 {@code …}），整段 extra 另有总预算，
  * 超出即丢弃剩余键并注明"已省略 N 项" —— 上下文成本可控且"被省略"这件事对模型可见
  * （不静默消失）。</li>
@@ -37,6 +37,11 @@ public class ContextBuilder {
      * 允许注入模型的 {@code extra} 键白名单（<b>有序</b>：整段预算截停的顺序即此序）——
      * 与前端工作区契约（{@code frontend/src/stores/workspace.ts#buildContext}）逐键对应。
      * 新增键必须<b>两侧同改</b>：前端多塞的键在这里会被丢弃（这是刻意行为，不是缺陷）。
+     *
+     * <p><b>刻意例外（批 A / A-13）：{@code uiRegionCount} 永远不进本表。</b>
+     * 它是工具披露标签源（{@code ToolRegistry#buildTags} 的 {@code ui:on}），不是模型输入：
+     * 进提示词等于每轮多付 token 换零信息量。因此「前端上报了但这里没有」是<b>设计如此</b>，
+     * 不是漂移 —— 见 {@code ContextBuilderExtraTest#uiRegionCountIsADeliberateWhitelistException}。
      */
     public static final List<String> ALLOWED_EXTRA_KEYS = List.of("pageId", "selectedDefs", "importMode",
             "dataVersion", "contractVersion", "recentActions");

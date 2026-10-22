@@ -7,7 +7,7 @@
 import { createPinia, setActivePinia } from 'pinia'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { registerAiRegion, resetAiRegions, noteAiPage, type AiRegionOptions } from '@/utils/ai-regions'
-import { resetUiRuntime } from '@/utils/ai-dom-tools'
+import { resetUiRuntime, aiSnapshot } from '@/utils/ai-dom-tools'
 
 /** 每个用例前的公共复位：独立 pinia + 清空区域表 / 运行时计数 / 快照缓存。 */
 export function resetAiTestState(): void {
@@ -51,4 +51,16 @@ export function registerRegion(
     label: '上传区',
     ...overrides
   })
+}
+
+/**
+ * 批 A 快照闸夹具：先对当前已注册区域取一次快照（ref 进入本 epoch 的「已见集」），
+ * 再执行被测动词。
+ *
+ * 为什么必须走真实 `aiSnapshot` 而不是直接往集合里塞 ref：快照闸的断言语义是
+ * 「模型手里的 ref 只能来自一次真实快照」，用夹具伪造集合等于把被测物换成了桩。
+ */
+export function snapshotThen<T>(run: () => T): T {
+  aiSnapshot({})
+  return run()
 }

@@ -13,11 +13,13 @@
  * </ol>
  *
  * <h2>为什么原语不直接产 `FrontendToolExecution`</h2>
- * 结局三态的唯一工厂是 `utils/frontend-tools.ts#makeExecution`（D1）。原语只返回
+ * 结局 8 态的唯一工厂是 `utils/frontend-tools.ts#makeExecution`（D1）。原语只返回
  * {@link UiToolOutcome}（无 `ok` 字段），由 `frontend-tools` 的默认执行器过工厂 ——
  * 这样既守住"单点工厂"，也避免 utils 之间形成 import 环。
  */
 import { useWorkspaceStore } from '@/stores/workspace'
+import type { FrontendToolOutcome } from '@/types/tools'
+import { formatUiReceipt } from './ui-receipt'
 import type { AiRisk } from './ai-regions'
 import {
   currentAiEpoch,
@@ -62,9 +64,11 @@ export const UI_UPLOAD_NAME_MAX_CHARS = 64
 
 /** 原语结局（无 `ok` 字段：由 makeExecution 单点推导，见文件头）。 */
 export interface UiToolOutcome {
-  outcome: 'ok' | 'failed'
+  outcome: FrontendToolOutcome
   availability: 'available' | 'degraded' | 'unavailable'
   result: string
+  /** 机器码（UI_* 闭集；只在前后端/台账流动，不进用户可见文案）。 */
+  code?: string
 }
 
 /** 撤销条目（深度 1；`retoggle` 只对声明 `data-ai-undo` 的元素记）。 */
@@ -85,6 +89,18 @@ let announcement: string | null = null
 let snapshotCache: { key: string; text: string } | null = null
 let highlights: Array<{ el: HTMLElement; badge: HTMLElement }> = []
 
+/**
+ * 快照闸状态（批 A）：本 epoch 内被**真实快照遍历过**的 ref 集。
+ *
+ * 为什么不持久到"任何历史快照"：`ref` 的生命周期由当前 epoch 定义 —— 换页/刷新会推 epoch，
+ * 旧 ref 必须重新取；若跨 epoch 放行，"本 epoch 没看过却因旧快照被点"的洞就开了。
+ */
+let snapshotRefEpoch: string | null = null
+const snapshotRefs = new Set<string>()
+
+/** 写动词前置条件（批 A / A-10）：ref → 上次写入后的值 + epoch。 */
+const writePreconditions = new Map<string, { value: string; epoch: string }>()
+
 /** 新一轮开始：token 变化即重置配额与停止位（同一轮内多次调用无副作用）。 */
 export function beginUiTurn(token: string): void {
   if (token === turnToken) {
@@ -99,6 +115,17 @@ export function beginUiTurn(token: string): void {
 /** 用户点「停止」：后续写动词一律拒绝（已执行的不回滚）。 */
 export function abortUiOperations(): void {
   aborted = true
+}
+
+/** 清空快照闸（新轮/复位；真实路径靠 epoch 推进自然失效）。 */
+function clearSnapshotGate(): void {
+  snapshotRefEpoch = null
+  snapshotRefs.clear()
+}
+
+/** 该 ref 是否出现在**当前 epoch** 的一次真实快照遍历里（快照闸判据）。 */
+export function isRefSnapshotted(ref: string): boolean {
+  return snapshotRefEpoch === currentAiEpoch() && snapshotRefs.has(ref)
 }
 
 /** 当前轮写了几个动词（排障/用例用）。 */
@@ -144,16 +171,27 @@ export function resetUiRuntime(): void {
   undoEntry = null
   announcement = null
   snapshotCache = null
+  clearSnapshotGate()
+  writePreconditions.clear()
 }
 
 // ── 小工具 ────────────────────────────────────────────────────────────────────
 
-function ok(result: string, availability: 'available' | 'degraded' = 'available'): UiToolOutcome {
-  return { outcome: 'ok', availability, result }
+function ok(result: string, availability: 'available' | 'degraded' = 'available', code?: string): UiToolOutcome {
+  return code === undefined
+    ? { outcome: 'ok', availability, result }
+    : { outcome: 'ok', availability, result, code }
 }
 
-function fail(result: string, availability: 'available' | 'degraded' | 'unavailable' = 'degraded'): UiToolOutcome {
-  return { outcome: 'failed', availability, result }
+function fail(
+  result: string,
+  availability: 'available' | 'degraded' | 'unavailable' = 'degraded',
+  code?: string,
+  outcome: FrontendToolOutcome = 'failed'
+): UiToolOutcome {
+  return code === undefined
+    ? { outcome, availability, result }
+    : { outcome, availability, result, code }
 }
 
 function asString(value: unknown): string | null {
@@ -450,6 +488,7 @@ export function aiSnapshot(args: Record<string, unknown> = {}): UiToolOutcome {
   const ctx = currentUiContext()
   const selected = listAiRegions().filter((region) => !regionFilter || regionFilter.includes(region.id))
   const rows: string[] = []
+  const seenRefs = new Set<string>()
   let total = 0
   for (const region of selected) {
     for (const node of Array.from(region.root.querySelectorAll('[data-ai-ref]'))) {
@@ -458,6 +497,9 @@ export function aiSnapshot(args: Record<string, unknown> = {}): UiToolOutcome {
       if (!ref) {
         continue
       }
+      // 快照闸只认"被真实快照遍历过"的 ref（含 deny / 角色过滤掉的：拒绝归因仍走各自围栏，
+      // 不能因为"没展示"就把 deny 误报成"未快照"）。
+      seenRefs.add(ref)
       rememberAiRef(ref, el, region.id)
       if (isBuiltinDenied(el) || el.isConnected !== true) {
         continue
@@ -470,6 +512,12 @@ export function aiSnapshot(args: Record<string, unknown> = {}): UiToolOutcome {
       rows.push(formatRow(ref, role, el))
     }
   }
+  // 同一 epoch 内多次快照取并集（"本 epoch 见过的 ref"）：子集快照不应让先前看过的 ref 失效。
+  if (snapshotRefEpoch !== epoch) {
+    snapshotRefEpoch = epoch
+    snapshotRefs.clear()
+  }
+  seenRefs.forEach((ref) => snapshotRefs.add(ref))
 
   const head = `界面快照：${pageLabelOf(ctx.pageId)} · 步骤「${ctx.step ?? '未进入步骤'}」  epoch=${epoch}`
     + `  区域 ${selected.length} 个（${selected.map((region) => region.id).join(' / ') || '无'}）  共 ${total} 个元素`
@@ -552,12 +600,33 @@ interface FenceResult {
 
 type FenceFailure = { ok: false; outcome: UiToolOutcome }
 
+/** 写动词（停止判定只拦这三类；scroll/highlight 是只读）。 */
+const WRITE_VERBS: ReadonlySet<AiVerb> = new Set(['click', 'fill', 'select'])
+
+/** 闸序（设计稿 §4.2 / A-15 锁）：停止 → 快照闸 → 区域闸 → 上下文闸 → 元素闸。 */
 function checkFences(args: Record<string, unknown>, verb: AiVerb): FenceResult | FenceFailure {
+  // ① 停止：必须先于快照闸 —— 否则停止后到达的写动词会被误报成「未快照」（错误归因）。
+  if (aborted && WRITE_VERBS.has(verb)) {
+    return { ok: false, outcome: fail('本轮已停止，后续界面操作一律不执行（已执行的不回滚）。') }
+  }
   const ref = asString(args.ref)
   if (!ref) {
     return { ok: false, outcome: fail(`参数不合法，${verb} 未执行：缺少 ref（请先 ui_snapshot 取得引用）。`, 'unavailable') }
   }
-  // ① 区域围栏
+  // ② 快照闸：ref 必须是本 epoch 在一次真实快照里遍历过的（未看先动一律拒执）。
+  if (!isRefSnapshotted(ref)) {
+    return {
+      ok: false,
+      outcome: fail(
+        `该 ref 未在本轮界面快照中出现（不得凭猜测、记忆或旧快照拼写），${verb} 未执行。`
+          + `请先调用 ui_snapshot 取得当前 ref 与 epoch。ref=${ref}`,
+        'degraded',
+        'UI_REF_NOT_SNAPSHOTTED',
+        'rejected'
+      )
+    }
+  }
+  // ③ 区域围栏
   const hit = resolveAiRef(ref)
   if (!hit) {
     return {
@@ -565,7 +634,7 @@ function checkFences(args: Record<string, unknown>, verb: AiVerb): FenceResult |
       outcome: fail(`该 ref 不在当前页面（可能已切页或刷新），请重新 ui_snapshot。ref=${ref}`)
     }
   }
-  // ② 上下文围栏（page / step / task 三段，与 WORKSPACE_ACTIONS 同口径）
+  // ④ 上下文围栏（page / step / task 三段，与 WORKSPACE_ACTIONS 同口径）
   const ctx = currentUiContext()
   if (ctx.pageId && hit.region.page !== ctx.pageId) {
     return {
@@ -584,7 +653,7 @@ function checkFences(args: Record<string, unknown>, verb: AiVerb): FenceResult |
   if (hit.region.needsTask && ctx.taskId === null) {
     return { ok: false, outcome: fail('当前没有进行中的任务，该控件需要绑定任务后使用。') }
   }
-  // ③ 元素围栏（epoch / detached / deny / verbs）
+  // ⑤ 元素围栏（epoch / detached / deny / verbs）
   const epoch = asString(args.epoch)
   if (!epoch) {
     return { ok: false, outcome: fail('缺少 epoch 参数：该 ref 可能已过期，请重新 ui_snapshot。') }
@@ -722,6 +791,39 @@ function readValueOf(el: HTMLElement): string {
   return el.textContent ?? ''
 }
 
+/**
+ * 写前前置条件（批 A / A-10）：同一 ref 在同一 epoch 内被 AI 写过之后，若当前值又与
+ * 写入值不一致 ⇒ 说明用户手改过，本次写入必须拒执（不覆盖用户输入）。
+ */
+function checkWritePrecondition(
+  ref: string,
+  current: string,
+  epoch: string
+): { ok: false; outcome: UiToolOutcome } | null {
+  const recorded = writePreconditions.get(ref)
+  if (recorded === undefined || recorded.epoch !== epoch || recorded.value === current) {
+    return null
+  }
+  return {
+    ok: false,
+    outcome: fail(
+      formatUiReceipt({
+        tool: '界面写入',
+        conclusion: '未写入（前置条件已变）',
+        reason: '该控件在你上次写入后被用户手动改过，继续写入会覆盖用户的修改',
+        next: '重新 ui_snapshot 并核对当前值；如需覆盖，请先征得用户确认'
+      }) + ` ref=${ref}`,
+      'degraded',
+      'UI_PRECONDITION_CHANGED',
+      'rejected'
+    )
+  }
+}
+
+function rememberWrite(ref: string, value: string, epoch: string): void {
+  writePreconditions.set(ref, { value, epoch })
+}
+
 /** `ui_fill`：只对原生 input/textarea/contenteditable 且 `data-ai-fill="allow"` 生效。 */
 export async function aiFill(args: Record<string, unknown> = {}): Promise<UiToolOutcome> {
   const value = typeof args.value === 'string' ? args.value : null
@@ -744,6 +846,10 @@ export async function aiFill(args: Record<string, unknown> = {}): Promise<UiTool
   if (risk !== 'mutate-local') {
     return fail(`该元素风险为 ${risk}，填写属于本地写动作，只在 mutate-local 元素上允许（ref=${ref}）。`)
   }
+  const precondition = checkWritePrecondition(ref, readValueOf(hit.el), epoch)
+  if (precondition) {
+    return precondition.outcome
+  }
   const slot = await acquireWriteSlot()
   if (slot) {
     return slot
@@ -759,6 +865,7 @@ export async function aiFill(args: Record<string, unknown> = {}): Promise<UiTool
   }
   highlightElement(hit.el, label)
   undoEntry = { kind: 'fill', ref, label, previous }
+  rememberWrite(ref, value, epoch)
   const version = touchWorkspace(`AI 填写：${label}（ref=${ref}，epoch=${epoch}）`)
   return ok(`已填写「${label}」= ${truncate(value, UI_SNAPSHOT_VALUE_MAX_CHARS)}（ref=${ref}，数据版本 #${version}）。`
     + `原值「${truncate(previous, UI_SNAPSHOT_VALUE_MAX_CHARS)}」已记录，可撤销。`)
@@ -823,6 +930,10 @@ export async function aiSelect(args: Record<string, unknown> = {}): Promise<UiTo
   if (risk !== 'mutate-local') {
     return fail(`该元素风险为 ${risk}，选择属于本地写动作，只在 mutate-local 元素上允许（ref=${ref}）。`)
   }
+  const precondition = checkWritePrecondition(ref, readSelectedOption(hit), epoch)
+  if (precondition) {
+    return precondition.outcome
+  }
   const slot = await acquireWriteSlot()
   if (slot) {
     return slot
@@ -852,6 +963,7 @@ export async function aiSelect(args: Record<string, unknown> = {}): Promise<UiTo
   }
   highlightElement(hit.el, label)
   undoEntry = { kind: 'select', ref, label, previous }
+  rememberWrite(ref, option, epoch)
   const version = touchWorkspace(`AI 选择：${label}=${option}（ref=${ref}，epoch=${epoch}）`)
   return ok(`已选择「${label}」= ${option}（ref=${ref}，数据版本 #${version}）。`
     + `原选择「${previous || '（空）'}」已记录，可撤销。`)
@@ -980,15 +1092,17 @@ export function applyUiUndo(entry: UiUndoEntry): UiToolOutcome {
         + `目标是「${truncate(entry.previous, UI_SNAPSHOT_VALUE_MAX_CHARS)}」。`)
     }
     touchWorkspace(`已撤销：填写「${entry.label}」`)
+    writePreconditions.delete(entry.ref)
     return ok(`已撤销「${entry.label}」，值已回到「${truncate(entry.previous, UI_SNAPSHOT_VALUE_MAX_CHARS) || '（空）'}」。`)
   }
-  const setter = hit.region.setters?.[entry.ref]
-  if (setter) {
-    const applied = setter(entry.previous)
-    void applied
-    touchWorkspace(`已撤销：选择「${entry.label}」`)
-    return ok(`已撤销「${entry.label}」，选项已回到「${entry.previous || '（空）'}」。`)
-  }
+    const setter = hit.region.setters?.[entry.ref]
+    if (setter) {
+      const applied = setter(entry.previous)
+      void applied
+      touchWorkspace(`已撤销：选择「${entry.label}」`)
+      writePreconditions.delete(entry.ref)
+      return ok(`已撤销「${entry.label}」，选项已回到「${entry.previous || '（空）'}」。`)
+    }
   return fail(`撤销未生效：「${entry.label}」没有可用于回退的 setter，请提示用户手动改回。`)
 }
 

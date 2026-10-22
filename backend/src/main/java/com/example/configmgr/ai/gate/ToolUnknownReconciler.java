@@ -31,6 +31,9 @@ import java.util.Map;
  * <h2>不参与的通道</h2>
  * {@code FRONTEND} 通道的条目由浏览器侧回灌，后端既没有执行痕迹也没有认领记录，
  * 拿后端的三跳去对账只会得出"无法判定"的噪声结论 ⇒ 直接返回 null（调用方保持原样）。
+ * 前端通道的 {@code unknown} 收敛责任在<b>前端回执</b>（批 A：非下载类超时一律由前端产出
+ * 可判定的 {@code timeout + UI_BUDGET_EXHAUSTED}，{@code unknown} 只留给下载类白名单），
+ * 本类不对前端通道做任何猜测或改写。
  *
  * <h2>口径差异（N-4）：旧台账「没有 outcome 键」在两条路径上结论不同</h2>
  * <ul>

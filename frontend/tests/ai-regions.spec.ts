@@ -14,7 +14,7 @@ import {
   resolveAiRef,
   unregisterAiRegion
 } from '@/utils/ai-regions'
-import { aiClick } from '@/utils/ai-dom-tools'
+import { aiClick, aiSnapshot } from '@/utils/ai-dom-tools'
 import { enterExportPage, enterImportPage, makeRoot, registerRegion, resetAiTestState } from './ai-fixtures'
 
 beforeEach(() => {
@@ -145,6 +145,7 @@ describe('区域解析与风险继承', () => {
     registerRegion(root)
     enterExportPage()
     expect(resolveAiRef('import.upload.choose')).not.toBeNull()
+    aiSnapshot({})
     const out = await aiClick({ ref: 'import.upload.choose', epoch: currentAiEpoch() })
     expect(out.outcome).toBe('failed')
     expect(out.result).toContain('当前页面为「export」')

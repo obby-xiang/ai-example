@@ -20,6 +20,7 @@ import { getPageHandler, onWorkspaceEvent, reportUiEventResult, useWorkspaceStor
 import { useTaskStore } from '@/stores/task'
 import { AI_CONFIG_ERROR_TEXT } from '@/constants/ai-settings-copy'
 import { deriveFrontendToolBudgetMs, executeFrontendTool, parseToolArgs, resolveSheetContext } from '@/utils/frontend-tools'
+import { toolStatusOfOutcome } from '@/utils/ui-receipt'
 import { UI_HANDOFF_TOOLS } from '@/types/tools'
 import type { ActiveUploadHandoff } from '@/types/ui-handoff'
 import {
@@ -30,6 +31,7 @@ import {
   clearUiUndo,
   peekUiAnnouncement,
   peekUiUndo,
+  isRefSnapshotted,
   requestFilePicker,
   supportsFilePicker,
   takeUiUndo,
@@ -2671,7 +2673,8 @@ export const useAiStore = defineStore('ai', {
       cancelled = false,
       runId?: string,
       outcome?: ToolOutcome,
-      sheetMeta?: SheetToolMeta
+      sheetMeta?: SheetToolMeta,
+      code?: string
     ): Promise<{
       ok: boolean
       duplicate?: boolean
@@ -2701,7 +2704,9 @@ export const useAiStore = defineStore('ai', {
                 source,
                 ...(outcome !== undefined ? { outcome } : {}),
                 // 治理批：只有表格工具带（旧形态逐字保留，非表格工具不产 undefined 键）
-                ...(sheetMeta !== undefined ? { sheetMeta } : {})
+                ...(sheetMeta !== undefined ? { sheetMeta } : {}),
+                // 批 A：机器码 additive（非法值在 `makeExecution` 已被闭集丢弃，这里不会产脏码）
+                ...(code !== undefined ? { code } : {})
               }
         )
         // B1（2026-10-20 裁决 9）：回灌送达 ⇒ 带 lastSeq 重连收流（GF 提交/取消与即时前端工具共用）。
@@ -2959,6 +2964,24 @@ export const useAiStore = defineStore('ai', {
       const validated = validateUploadArgs(parseToolArgs(frame.args))
       if (!validated.ok) {
         await fail(validated.outcome.result)
+        return
+      }
+      // 批 A（设计稿 §6 #5）：显式传入的 ref 必须在本轮快照集内 —— 上传是唯一的「等人」入口，
+      // ref 若可猜，等于给了「指向任意按钮」的能力。缺省（取区域声明的 uploadEntry）不走此闸。
+      if (validated.value.ref !== null && !isRefSnapshotted(validated.value.ref)) {
+        const text = `该上传入口的 ref 未在本轮界面快照中出现，上传交接未建立。`
+          + `请先调用 ui_snapshot 取得当前 ref。ref=${validated.value.ref}`
+        this.upsertToolPart(message, {
+          toolCallId,
+          name: frame.name,
+          kind2: 'FRONTEND',
+          status: 'rejected',
+          result: text,
+          requiresAction: false
+        }, false)
+        deriveProjections(message)
+        await this.submitFrontendToolResult(toolCallId, text, 'frontend-executor', false, runId ?? undefined,
+          'rejected', undefined, 'UI_REF_NOT_SNAPSHOTTED')
         return
       }
       const target = resolveUploadRegion(validated.value.ref)
@@ -4579,6 +4602,7 @@ export const useAiStore = defineStore('ai', {
       const execution = await executeFrontendTool({
         name: frame.name,
         toolCallId: frame.toolCallId,
+        runId: frame.runId ?? this.activeRunId ?? undefined,
         args: parseToolArgs(frame.args),
         budgetMs: deriveFrontendToolBudgetMs(frame.timeoutSeconds)
       })
@@ -4592,12 +4616,9 @@ export const useAiStore = defineStore('ai', {
       if (roundEpoch !== epochAtStart) {
         return
       }
-      // 批3③a A8：三态落卡（execution.ok 已 @deprecated，改读 outcome）——
-      // unknown（预算到期 / 等待上界耗尽）如实落 'unknown'，卡面显示「结局未知」且
-      // 回灌文本与卡面不再自相矛盾；unknown 段的回执帧翻写防护在 parts.ts localTerminal。
-      const status: ToolRunStatus = execution.outcome === 'ok'
-        ? 'succeeded'
-        : execution.outcome === 'unknown' ? 'unknown' : 'failed'
+      // 批3③a A8 → 批 A：8 态落卡（unknown 只在下载类白名单出现；rejected/blocked/
+      // cancelled/skipped 各有落点，不再一律折成 failed）。
+      const status: ToolRunStatus = toolStatusOfOutcome(execution.outcome)
       // 批2：浏览器侧执行结局落段（工具段在此之前由 frontend_tool_request 建好），投影随段派生
       this.upsertToolPart(message, {
         toolCallId: frame.toolCallId,
@@ -4619,7 +4640,8 @@ export const useAiStore = defineStore('ai', {
         false,
         undefined,
         execution.outcome,
-        execution.sheetMeta
+        execution.sheetMeta,
+        execution.code
       )
       // AI 可视可操作专项：把原语运行时的一次性状态（撤销点 / 播报）同步给面板
       this.syncUiRuntimeState()

@@ -19,6 +19,8 @@ import java.lang.annotation.*;
  *   "task:EXPORT"             - in any step of EXPORT task
  *   "task:EXPORT/SELECT_DEFS" - in the specific step of EXPORT task
  *   "task:IMPORT/UPLOAD"      - in the specific step of IMPORT task
+ *   "ui:on"                   - 本页有已注册的 AI 区域（批 A / D8-①；由 extra.uiRegionCount
+ *                               计算：缺失即视为存在（fail-open），显式 0 才不披露）
  */
 @Target(ElementType.METHOD)
 @Retention(RetentionPolicy.RUNTIME)

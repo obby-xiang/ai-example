@@ -4,7 +4,7 @@
  * 覆盖：T-20（setter 优先、DOM 零点击）、T-21（回退路径精确匹配）、T-22（选项不存在如实失败）。
  */
 import { describe, expect, it, beforeEach, vi } from 'vitest'
-import { aiSelect, beginUiTurn, peekUiUndo } from '@/utils/ai-dom-tools'
+import { aiSelect, aiSnapshot, beginUiTurn, peekUiUndo } from '@/utils/ai-dom-tools'
 import { currentAiEpoch } from '@/utils/ai-regions'
 import { enterImportPage, makeRoot, registerRegion, resetAiTestState } from './ai-fixtures'
 
@@ -30,6 +30,7 @@ describe('T-20：路径 1 —— 区域 setter（Element Plus 自绘弹层的唯
       return true
     })
     registerRegion(root, { id: 'import.mode', risk: 'mutate-local', setters: { 'import.mode.group': setter } })
+    aiSnapshot({})
     const spy = vi.spyOn(root.querySelector('[data-ai-ref="import.mode.group"]') as HTMLElement, 'click')
     const out = await aiSelect({ ref: 'import.mode.group', option: 'MERGE', epoch: currentAiEpoch() })
     expect(out.outcome).toBe('ok')
@@ -48,6 +49,7 @@ describe('T-20：路径 1 —— 区域 setter（Element Plus 自绘弹层的唯
       risk: 'mutate-local',
       setters: { 'import.mode.group': () => false }
     })
+    aiSnapshot({})
     const out = await aiSelect({ ref: 'import.mode.group', option: 'MERGE', epoch: currentAiEpoch() })
     expect(out.outcome).toBe('failed')
   })
@@ -65,6 +67,7 @@ describe('T-21：路径 2 —— 点开 → 精确匹配 data-ai-option → 点�
     ].join('')
     document.body.appendChild(dropdown)
     registerRegion(root, { id: 'import.mode', risk: 'mutate-local' })
+    aiSnapshot({})
     const out = await aiSelect({ ref: 'import.mode.trigger', option: 'MERGE', epoch: currentAiEpoch() })
     expect(out.outcome).toBe('ok')
     expect((dropdown.querySelector('[data-ai-option="MERGE"]') as HTMLInputElement).checked).toBe(true)
@@ -78,6 +81,7 @@ describe('T-21：路径 2 —— 点开 → 精确匹配 data-ai-option → 点�
     dropdown.innerHTML = '<input type="radio" data-ai-option="MERGE" name="m" />'
     document.body.appendChild(dropdown)
     registerRegion(root, { id: 'import.mode', risk: 'mutate-local' })
+    aiSnapshot({})
     const out = await aiSelect({ ref: 'import.mode.trigger', option: 'MER', epoch: currentAiEpoch() })
     expect(out.outcome).toBe('failed')
     expect((dropdown.querySelector('[data-ai-option="MERGE"]') as HTMLInputElement).checked).toBe(false)
@@ -95,6 +99,7 @@ describe('T-22：选项不存在', () => {
     ].join('')
     document.body.appendChild(dropdown)
     registerRegion(root, { id: 'import.mode', risk: 'mutate-local' })
+    aiSnapshot({})
     const out = await aiSelect({ ref: 'import.mode.trigger', option: 'APPEND', epoch: currentAiEpoch() })
     expect(out.outcome).toBe('failed')
     expect(out.result).toContain('下拉选项里没有「APPEND」')
@@ -108,6 +113,7 @@ describe('风险分级：read 元素拒绝 select', () => {
     enterImportPage()
     const root = makeRoot('<div data-ai-ref="import.upload.group" data-ai-selected="A"></div>')
     registerRegion(root, { id: 'import.upload', risk: 'read' })
+    aiSnapshot({})
     const out = await aiSelect({ ref: 'import.upload.group', option: 'B', epoch: currentAiEpoch() })
     expect(out.outcome).toBe('failed')
     expect(out.result).toContain('风险')

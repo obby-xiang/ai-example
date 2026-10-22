@@ -550,11 +550,19 @@ public class AiController {
 			// AI 表格工具治理批：sheetMeta 在<b>入口</b>就过白名单（任何业务值到此为止），
 			// 之后才交给确认门；不带 meta 时保持六参调用 —— 旧调用方与既有桩的实参形状逐字不变。
 			Map<String, Object> sheetMeta = SheetAudit.sanitize(request.sheetMeta());
-			submission = sheetMeta.isEmpty()
-					? this.confirmGate.submitFrontendResult(request.runId(), request.toolCallId(), result,
-							request.source(), cancelled, request.outcome())
-					: this.confirmGate.submitFrontendResult(request.runId(), request.toolCallId(), result,
-							request.source(), cancelled, request.outcome(), sheetMeta);
+			// 批 A（A-14）：机器码在入口归一到白名单形态；非法值丢弃不报 400（additive、可容错）。
+			String uiCode = FrontendToolResultRequest.normalizeCode(request.code());
+			if (uiCode != null) {
+				submission = this.confirmGate.submitFrontendResult(request.runId(), request.toolCallId(), result,
+						request.source(), cancelled, request.outcome(), sheetMeta, uiCode);
+			}
+			else {
+				submission = sheetMeta.isEmpty()
+						? this.confirmGate.submitFrontendResult(request.runId(), request.toolCallId(), result,
+								request.source(), cancelled, request.outcome())
+						: this.confirmGate.submitFrontendResult(request.runId(), request.toolCallId(), result,
+								request.source(), cancelled, request.outcome(), sheetMeta);
+			}
 		}
 		finally {
 			AiTrace.clear();

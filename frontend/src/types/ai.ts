@@ -90,6 +90,11 @@ export interface FrontendToolResultRequest {
    * scopeSummary）在这里都会被丢弃**，不是靠调用方自觉。
    */
   sheetMeta?: SheetToolMeta
+  /**
+   * 批 A：前端工具机器码（可选 additive；`UI_*` 闭集）。后端入口只认
+   * `^UI_[A-Z_]{2,40}$`，非法值丢弃不报 400；码只进台账/诊断，不进用户可见文案。
+   */
+  code?: string
 }
 
 /** 前端工具回灌结果（响应体同样是裸对象）。 */

@@ -123,4 +123,17 @@ class ContextBuilderExtraTest {
                         "recentActions");
     }
 
+    @Test
+    void uiRegionCountIsADeliberateWhitelistException() {
+        // 批 A（A-13）：uiRegionCount 是**披露标签源**，不是模型输入 —— 刻意不进 ALLOWED_EXTRA_KEYS。
+        // 进提示词等于每轮多付 token 换零信息量；它只在该轮的工具披露判定里被读取。
+        Map<String, Object> extra = new LinkedHashMap<>();
+        extra.put("uiRegionCount", 3);
+
+        assertThat(this.builder.renderExtra(extra)).as("非白名单键不进额外上下文").isEmpty();
+        String message = this.builder.buildContextMessage(
+                AiContext.of("definitions", null, null, null, extra));
+        assertThat(message).doesNotContain("uiRegionCount");
+    }
+
 }

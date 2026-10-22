@@ -59,8 +59,12 @@ describe('executeFrontendTool 统一超时预算（包⑤）', () => {
     const execution = await pending
     expect(execution.ok).toBe(false)
     expect(execution.availability).toBe('degraded')
-    expect(execution.result).toContain('前端超时')
-    expect(execution.result).toContain('结局未知')
+    // 批 A（A-08）语义变更：非下载类超时 = 确定性收口（timeout + UI_BUDGET_EXHAUSTED），
+    // 不再报「结局未知」（unknown 只留给下载类白名单）。
+    expect(execution.outcome).toBe('timeout')
+    expect(execution.code).toBe('UI_BUDGET_EXHAUSTED')
+    expect(execution.result).toContain('执行超时')
+    expect(execution.result).not.toContain('结局未知')
     unregisterPageHandler('probe.never-returns')
   })
 

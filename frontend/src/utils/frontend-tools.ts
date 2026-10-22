@@ -21,7 +21,8 @@
  *   `ui_select` / `ui_scroll` / `ui_highlight` / `ui_request_upload`）走**路由 1 + 默认执行器**，
  *   执行体在 `utils/ai-dom-tools.ts`；其中 `ui_request_upload` 是「等人」工具，由 `stores/ai.ts`
  *   特判进交接卡（与 GF 同族），**同样不走** 60s 预算。
- *   `ui_*` 的 scope 一律 `*`：真正的围栏在**区域**（`registerAiRegion`）与**元素**（`data-ai-*`）两层。
+ *   `ui_*` 的 scope 为 `ui:on`（批 A：按区域存在性披露；缺失即披露，显式 0 才不披露）：
+ *   真正的围栏仍在**区域**（`registerAiRegion`）与**元素**（`data-ai-*`）两层。
  * - **AI 表格操作专项 · 批B（读侧补齐，2026-10-22）**：`FRONTEND_TOOLS` 17 → 18，后端 `@Tool` 33 → 34
  *   （前端通道 22 → 23）。新增读工具 `find_rows`（全列检索：命中行号 + 单元格地址 + ≤20 行采样），
  *   与其余读工具同 scope、走**路由 1 + 默认执行器**；`aggregate_sheet` 增加分组排序（Top-N）。
@@ -77,6 +78,8 @@ import {
   type UiToolOutcome
 } from '@/utils/ai-dom-tools'
 import { dispatchUiEvent, getPageHandler, useWorkspaceStore } from '@/stores/workspace'
+import { listAiRegions } from '@/utils/ai-regions'
+import { formatUiReceipt, sanitizeUiCode } from '@/utils/ui-receipt'
 import type { ConfigField } from '@/types/definition'
 import {
   aggregateSheet,
@@ -96,6 +99,11 @@ import {
 export interface FrontendToolCall {
   name: string
   toolCallId?: string
+  /**
+   * 所属轮次的 runId（批 A：同轮同参去重的作用域）。
+   * 缺失（旧调用方 / 单测直调）⇒ 不去重（宁可多执行一次，也不跨轮误杀）。
+   */
+  runId?: string
   args: Record<string, unknown>
   /**
    * 本次执行的自有超时预算（毫秒）；缺省用 {@link FRONTEND_TOOL_TIMEOUT_BUDGET_MS}。
@@ -140,6 +148,7 @@ export function makeExecution(input: {
   availability: ToolAvailability
   result: string
   reason?: string
+  code?: string
   sheetMeta?: FrontendToolExecution['sheetMeta']
 }): FrontendToolExecution {
   const execution: FrontendToolExecution = {
@@ -147,6 +156,10 @@ export function makeExecution(input: {
     availability: input.availability,
     outcome: input.outcome,
     result: input.result
+  }
+  const code = sanitizeUiCode(input.code)
+  if (code !== null) {
+    execution.code = code
   }
   if (input.reason !== undefined) {
     execution.reason = input.reason
@@ -160,13 +173,21 @@ export function makeExecution(input: {
 /** @ToolScope 标签匹配（'*' / 'page:tasks' / 'task:EXPORT' / 'task:EXPORT/EXPORT' / 'task:*'）。
  *  page:* 的合法值域 = 路由页 id 镜像（tasks / export / import / definitions / data）；
  *  `page:export` / `page:import` 为保留粒度，当前无任何工具使用（向导页披露由 taskType+step 承担）。 */
-export function matchesScope(patterns: readonly string[], scope: { page: string; taskType: string | null; step: string | null }): boolean {
+export function matchesScope(
+  patterns: readonly string[],
+  scope: { page: string; taskType: string | null; step: string | null; uiRegionCount?: number | null }
+): boolean {
   const page = scope.page
   const taskType = scope.taskType ?? ''
   const step = scope.step ?? ''
   return patterns.some((pattern) => {
     if (pattern === '*') {
       return true
+    }
+    if (pattern === 'ui:on') {
+      // 批 A：按区域存在性披露。缺失（旧客户端 / E2E 桩）⇒ 披露（fail-open）；
+      // 显式 0 ⇒ 不披露。该标签只用于收窄，永远不能用来授权。
+      return scope.uiRegionCount === undefined || scope.uiRegionCount === null || scope.uiRegionCount > 0
     }
     if (pattern.startsWith('page:')) {
       return pattern.slice(5) === page
@@ -507,21 +528,24 @@ const DOWNLOAD_TOOL_NAMES: readonly string[] = ['download_export_files', 'downlo
  */
 function timeoutOutcome(call: FrontendToolCall, budgetMs: number, elapsedMs: number): FrontendToolExecution {
   const label = toolDisplayName(call.name)
-  // 两个秒数都写进文案：`waitedSeconds` 是**实际**等待（正常情况下 ≈ 预算；明显大于预算时，
-  // 说明执行器内主线程被长时间阻塞，见 runWithBudget 的分支说明），`budgetSeconds` 是预算本身。
   const waitedSeconds = Math.round(elapsedMs / 1000)
   const budgetSeconds = Math.round(budgetMs / 1000)
-  const result = DOWNLOAD_TOOL_NAMES.includes(call.name)
-    ? `${label}（${call.name}）前端超时：等待 ${waitedSeconds} 秒仍未收到浏览器的完成回执（执行器预算 ${budgetSeconds} 秒）。`
+  if (DOWNLOAD_TOOL_NAMES.includes(call.name)) {
+    // 下载类（副作用可能已发生、只是回执没回来）：`unknown` 白名单的唯一保留者。
+    const result = `${label}（${call.name}）前端超时：等待 ${waitedSeconds} 秒仍未收到浏览器的完成回执（执行器预算 ${budgetSeconds} 秒）。`
       + '该操作可能仍在后台继续，文件也许已经下载到浏览器的下载目录。'
-      + '请让用户先到下载目录确认文件是否已落盘，再决定是否需要重试；不要直接重复触发下载。'
+      + '请让用户先到下载目录确认文件是否已落盘，再决定是否需要重试；请勿重复触发下载。'
       + '本次调用结局未知 —— 既未确认成功，也未确认失败。'
-    : `${label}（${call.name}）前端超时：等待 ${waitedSeconds} 秒仍未返回执行结果（执行器预算 ${budgetSeconds} 秒）。`
-      + '本次调用结局未知 —— 既未确认成功，也未确认失败。'
-      + '请提示用户核对界面上的实际状态（相关卡片、列表或表格，以及数据是否已变化），确认后再决定是否重试。'
-  // 批3③a A2：预算到期 = "结局未知"（已发起但时限内无法确认真实结局）——文本早已如实，
-  // 卡面维度在此补齐：outcome 'unknown'（ok:false 由工厂推导），文案一字不动。
-  return makeExecution({ outcome: 'unknown', availability: 'degraded', result })
+    return makeExecution({ outcome: 'unknown', availability: 'degraded', code: 'UI_BUDGET_EXHAUSTED', result })
+  }
+  // 非下载类：预算到期 = 确定性收口（timeout），不再糊成「结局未知」。
+  const result = formatUiReceipt({
+    tool: `${label}（${call.name}）`,
+    conclusion: `执行超时，本次未完成（等待 ${waitedSeconds} 秒，执行器预算 ${budgetSeconds} 秒）`,
+    reason: '执行器在预算内没有返回结果（页面可能卡住，或浏览器链路未响应）',
+    next: '提示用户核对界面上的实际状态后再决定是否重试；不要在同一轮里连续重试同一调用'
+  })
+  return makeExecution({ outcome: 'timeout', availability: 'degraded', code: 'UI_BUDGET_EXHAUSTED', result })
 }
 
 /** 工具中文名（回灌文案用）：登记工具 / 工作区动作表优先，未知工具回落原始名。 */
@@ -536,6 +560,60 @@ function toolDisplayName(name: string): string {
 
 /** 四条路由的统一派发（不含预算；预算包在 {@link executeFrontendTool} 外层）。 */
 async function dispatchFrontendTool(call: FrontendToolCall): Promise<FrontendToolExecution> {
+  const previous = previousSameCall(call)
+  if (previous) {
+    return makeExecution({
+      outcome: previous.outcome,
+      availability: previous.availability,
+      code: previous.code,
+      result: `本轮已执行过同参调用 ${call.name}（未再次执行）。\n${previous.result}`
+    })
+  }
+  const execution = await dispatchFrontendToolInner(call)
+  rememberSameCall(call, execution)
+  return execution
+}
+
+// ── 同参去重（批 A / D4-②） ──────────────────────────────────────────────────
+
+/**
+ * 去重白名单：只读类（`ui_snapshot` / `ui_scroll` / `ui_highlight`）+ 导航（`navigate_to`）。
+ * 写动词**不在**名单里 —— 同参写两次可能是用户的真实意图（如再点一次切换）。
+ */
+const DEDUPE_TOOL_NAMES: ReadonlySet<string> = new Set(['ui_snapshot', 'ui_scroll', 'ui_highlight', 'navigate_to'])
+
+let dedupeRunId = ''
+const dedupeCache = new Map<string, FrontendToolExecution>()
+
+function sameCallKey(call: FrontendToolCall): string {
+  const sorted: Record<string, unknown> = {}
+  for (const key of Object.keys(call.args).sort()) {
+    sorted[key] = call.args[key]
+  }
+  return `${call.name}|${JSON.stringify(sorted)}`
+}
+
+function previousSameCall(call: FrontendToolCall): FrontendToolExecution | null {
+  if (call.runId === undefined || call.runId === '' || !DEDUPE_TOOL_NAMES.has(call.name)) {
+    return null
+  }
+  if (call.runId !== dedupeRunId) {
+    dedupeRunId = call.runId
+    dedupeCache.clear()
+    return null
+  }
+  return dedupeCache.get(sameCallKey(call)) ?? null
+}
+
+function rememberSameCall(call: FrontendToolCall, execution: FrontendToolExecution): void {
+  if (call.runId === undefined || call.runId === '' || !DEDUPE_TOOL_NAMES.has(call.name)) {
+    return
+  }
+  dedupeCache.set(sameCallKey(call), execution)
+}
+
+/** 四条路由的派发本体。 */
+async function dispatchFrontendToolInner(call: FrontendToolCall): Promise<FrontendToolExecution> {
   const descriptor = findFrontendTool(call.name)
   if (descriptor) {
     return await runRegisteredTool(descriptor, call)
@@ -867,6 +945,22 @@ async function runWorkspaceAction(
     })
   }
 
+  // 批 A（A-01/A-02）：同页同参幂等直返 —— 已在目标页且任务已绑定（或本就不带任务）时，
+  // 不再 router.push（导航重试风暴的根因就是"每次都当真执行"）。
+  if (action.name === 'navigate_to') {
+    const intent = resolveNavigateIntent(args)
+    if (intent !== null && intent.page === context.pageId
+      && (intent.taskId === null || intent.taskId === context.taskId)) {
+      const bound = intent.taskId === null ? '' : `，任务 #${intent.taskId} 已绑定`
+      return makeExecution({
+        outcome: 'ok',
+        availability: 'available',
+        code: 'UI_ALREADY_ON_PAGE',
+        result: `已在目标页（${intent.page}）${bound}，这一步不用再做。`
+      })
+    }
+  }
+
   for (const handlerName of action.handlerNames) {
     const handler = getPageHandler(handlerName)
     if (handler) {
@@ -910,14 +1004,19 @@ async function runWorkspaceAction(
             + `请核对任务 #${expectedTaskId} 是否存在，或提示用户手动在任务中心打开该任务后重试。`
         })
       }
-      // 批3③a D4(a)：等待上界（PAGE_READY_TIMEOUT_MS）内没等到目标页就绪 —— 不是失败
-      // （页面可能只是慢），按"结局未知"如实回灌：outcome 'unknown' + 降 'degraded'
-      // （触发 stores/ai.ts 降级 notice）；文案一字不动，保留"稍后重试/手动操作"指引（R-c）。
+      // 批 A（A-04）：等待上界（PAGE_READY_TIMEOUT_MS）内没等到目标页就绪 ⇒ **可判定失败**
+      // （导航已发生，后置条件未满足）：outcome failed + code UI_PAGE_NOT_READY。
+      // 不再报「结局未知」—— 那会让模型以为是网络抖动而反复导航。
       return makeExecution({
-        outcome: 'unknown',
+        outcome: 'failed',
         availability: 'degraded',
-        result: `${outcome.message}（页面${expectedTaskId === null ? '' : '与任务绑定'}仍在加载中；`
-          + '若要继续在该页动作，请稍后重试或提示用户手动操作）'
+        code: 'UI_PAGE_NOT_READY',
+        result: formatUiReceipt({
+          tool: action.displayName,
+          conclusion: `导航已提交，但目标页面在等待上界内仍未就绪（${target}${expectedTaskId === null ? '' : `，任务 #${expectedTaskId} 待绑定`}）`,
+          reason: '页面加载慢，或该页尚未注册可操作能力',
+          next: '本轮不要重复导航；请稍后重试或提示用户手动打开该页面'
+        })
       })
     }
     return makeExecution({ outcome: 'ok', availability: 'available', result: outcome.message })
@@ -1088,7 +1187,12 @@ async function runRegisteredTool(
 
   const workspace = useWorkspaceStore()
   const context = workspace.snapshot()
-  if (!matchesScope(descriptor.scopePatterns, { page: context.page, taskType: context.taskType, step: context.step })) {
+  if (!matchesScope(descriptor.scopePatterns, {
+    page: context.page,
+    taskType: context.taskType,
+    step: context.step,
+    uiRegionCount: listAiRegions().length
+  })) {
     return makeExecution({
       outcome: 'failed',
       availability: 'unavailable',
@@ -1348,7 +1452,12 @@ async function runUiPrimitive(name: string, args: Record<string, unknown>): Prom
         result: `未知界面原语 ${name}：本次未执行。`
       }
   }
-  return makeExecution({ outcome: outcome.outcome, availability: outcome.availability, result: outcome.result })
+  return makeExecution({
+    outcome: outcome.outcome,
+    availability: outcome.availability,
+    result: outcome.result,
+    code: outcome.code
+  })
 }
 
 /** 契约层自带的默认执行器（页面未覆盖时使用）。 */

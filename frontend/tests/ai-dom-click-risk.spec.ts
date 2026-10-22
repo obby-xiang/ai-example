@@ -5,7 +5,7 @@
  * "点了再提示"是明确禁止的伪确认形态：点击次数一律 spy 钉死。
  */
 import { describe, expect, it, beforeEach, vi } from 'vitest'
-import { aiClick, beginUiTurn } from '@/utils/ai-dom-tools'
+import { aiClick, aiSnapshot, beginUiTurn } from '@/utils/ai-dom-tools'
 import { currentAiEpoch } from '@/utils/ai-regions'
 import { enterExportPage, makeRoot, registerRegion, resetAiTestState } from './ai-fixtures'
 
@@ -20,6 +20,7 @@ describe('T-31：consequential 拒执', () => {
     registerRegion(makeRoot(
       '<button data-ai-ref="export.start" data-ai-risk="consequential">启动导出</button>'
     ), { id: 'export.start', risk: 'consequential' })
+    aiSnapshot({})
     const node = document.querySelector('[data-ai-ref="export.start"]') as HTMLElement
     const spy = vi.spyOn(node, 'click')
     const out = await aiClick({ ref: 'export.start', epoch: currentAiEpoch() })
@@ -35,6 +36,7 @@ describe('T-31：consequential 拒执', () => {
       '<button data-ai-ref="export.save" data-ai-risk="consequential">保存到服务端</button>'
     ), { id: 'export.save', risk: 'consequential' })
     const spy = vi.spyOn(document.querySelector('[data-ai-ref="export.save"]') as HTMLElement, 'click')
+    aiSnapshot({})
     const out = await aiClick({ ref: 'export.save', epoch: currentAiEpoch() })
     expect(out.result).toContain('未执行')
     expect(out.result).toContain('请提示用户手动完成')
@@ -47,6 +49,7 @@ describe('T-31：consequential 拒执', () => {
       '<button data-ai-ref="export.upload.choose" data-ai-risk="consequential">上传</button>'
     ), { id: 'export.upload', risk: 'consequential', uploadEntry: 'export.upload.choose' })
     const spy = vi.spyOn(document.querySelector('[data-ai-ref="export.upload.choose"]') as HTMLElement, 'click')
+    aiSnapshot({})
     const out = await aiClick({ ref: 'export.upload.choose', epoch: currentAiEpoch() })
     expect(out.outcome).toBe('failed')
     expect(out.result).toContain('ui_request_upload')
@@ -62,6 +65,7 @@ describe('T-32：元素级 risk 缺省继承区域风险', () => {
       risk: 'consequential'
     })
     const spy = vi.spyOn(document.querySelector('[data-ai-ref="export.publish.go"]') as HTMLElement, 'click')
+    aiSnapshot({})
     const out = await aiClick({ ref: 'export.publish.go', epoch: currentAiEpoch() })
     expect(out.outcome).toBe('failed')
     expect(out.result).toContain('consequential')
@@ -74,6 +78,7 @@ describe('T-32：元素级 risk 缺省继承区域风险', () => {
       '<button data-ai-ref="export.download.tpl" data-ai-risk="read">下载模板</button>'
     ), { id: 'export.download', risk: 'consequential' })
     const spy = vi.spyOn(document.querySelector('[data-ai-ref="export.download.tpl"]') as HTMLElement, 'click')
+    aiSnapshot({})
     const out = await aiClick({ ref: 'export.download.tpl', epoch: currentAiEpoch() })
     expect(out.outcome).toBe('ok')
     expect(spy).toHaveBeenCalledTimes(1)

@@ -118,7 +118,11 @@ public class PendingToolCall {
 	/** 结果信封的结局（{@code PendingToolCall} 的历史字段；null = 旧数据，按 status 推导）。 */
 	private String outcome;
 
-	/** 结果信封的机器可读码（null = 无码；旧数据按 status/reason 推导）。 */
+	/**
+	 * 结果信封的机器可读码（null = 无码；旧数据按 status/reason 推导）。
+	 * 批 A 起前端也可自报 {@code UI_*} 机器码（回灌体 additive 字段，入口已归一）：
+	 * {@link #effectiveCode()} 优先读本字段，因此前端码与后端码在帧/台账/卡面同源。
+	 */
 	private String code;
 
 	private String reason;

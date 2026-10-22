@@ -24,6 +24,7 @@ import { jobsApi } from '@/api/jobs'
 import { useTaskStore } from '@/stores/task'
 import { stepLabel } from '@/utils/format'
 import { findPublishTool } from '@/utils/publish-links'
+import { listAiRegions } from '@/utils/ai-regions'
 import {
   WORKSPACE_ACTION_LIMIT,
   WORKSPACE_CONTRACT_VERSION,
@@ -241,6 +242,9 @@ export const useWorkspaceStore = defineStore('workspace', {
           importMode: this.importMode,
           dataVersion: this.dataVersion,
           contractVersion: this.contractVersion,
+          // 批 A（A-11/A-12）：披露标签源 —— 只给后端的工具披露判定用，**刻意不进提示词**
+          // （ContextBuilder.ALLOWED_EXTRA_KEYS 不含本键，见那里的刻意例外登记）。
+          uiRegionCount: listAiRegions().length,
           // 契约联动：把"用户刚刚手点了什么"一并交给模型（只带最近若干条）
           recentActions: this.recentActions.map((record) => `${record.summary}（来源：${record.source}）`)
         }

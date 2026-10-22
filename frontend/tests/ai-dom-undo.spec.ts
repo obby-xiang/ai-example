@@ -6,7 +6,7 @@
  */
 import { describe, expect, it, beforeEach, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { aiClick, aiFill, applyUiUndo, beginUiTurn, peekUiUndo, takeUiUndo } from '@/utils/ai-dom-tools'
+import { aiClick, aiFill, aiSnapshot, applyUiUndo, beginUiTurn, peekUiUndo, takeUiUndo } from '@/utils/ai-dom-tools'
 import { currentAiEpoch } from '@/utils/ai-regions'
 import { useAiStore } from '@/stores/ai'
 import { enterImportPage, makeRoot, registerRegion, resetAiTestState } from './ai-fixtures'
@@ -43,6 +43,7 @@ describe('T-25：fill → 撤销 → 再撤销', () => {
     registerRegion(makeRoot('<input type="text" data-ai-ref="import.upload.query" data-ai-fill="allow" value="OLD" />'), { risk: 'mutate-local' })
     const node = document.querySelector('[data-ai-ref="import.upload.query"]') as HTMLInputElement
 
+    aiSnapshot({})
     const filled = await aiFill({ ref: 'import.upload.query', value: 'NEW', epoch: currentAiEpoch() })
     expect(filled.outcome).toBe('ok')
     expect(node.value).toBe('NEW')
@@ -63,6 +64,7 @@ describe('T-25：fill → 撤销 → 再撤销', () => {
   it('深度 1：后一次覆盖前一次（只有最近一步可撤）', async () => {
     enterImportPage()
     registerRegion(makeRoot('<input type="text" data-ai-ref="import.upload.query" data-ai-fill="allow" value="V0" />'), { risk: 'mutate-local' })
+    aiSnapshot({})
     await aiFill({ ref: 'import.upload.query', value: 'V1', epoch: currentAiEpoch() })
     await aiFill({ ref: 'import.upload.query', value: 'V2', epoch: currentAiEpoch() })
     const entry = takeUiUndo()
@@ -76,6 +78,7 @@ describe('T-26：无 data-ai-undo 的点击不记撤销点', () => {
   it('read 元素点击后撤销栈为空', async () => {
     enterImportPage()
     registerRegion(makeRoot('<button data-ai-ref="import.upload.tab" data-ai-risk="read">切换</button>'))
+    aiSnapshot({})
     const out = await aiClick({ ref: 'import.upload.tab', epoch: currentAiEpoch() })
     expect(out.outcome).toBe('ok')
     expect(peekUiUndo()).toBeNull()
@@ -84,6 +87,7 @@ describe('T-26：无 data-ai-undo 的点击不记撤销点', () => {
   it('mutate-local 但无 data-ai-undo ⇒ 同样不记（撤销点靠显式声明）', async () => {
     enterImportPage()
     registerRegion(makeRoot('<button data-ai-ref="import.upload.open" data-ai-risk="mutate-local">打开</button>'))
+    aiSnapshot({})
     const out = await aiClick({ ref: 'import.upload.open', epoch: currentAiEpoch() })
     expect(out.outcome).toBe('ok')
     expect(peekUiUndo()).toBeNull()
@@ -95,6 +99,7 @@ describe('store action：撤销走用户手势（模型无 ui_undo 工具）', (
   it('有撤销点时回执带「已撤销」并 touch', async () => {
     enterImportPage()
     registerRegion(makeRoot('<input type="text" data-ai-ref="import.upload.query" data-ai-fill="allow" value="OLD" />'), { risk: 'mutate-local' })
+    aiSnapshot({})
     await aiFill({ ref: 'import.upload.query', value: 'NEW', epoch: currentAiEpoch() })
     const store = useAiStore()
     const text = await store.undoLastUiAction()

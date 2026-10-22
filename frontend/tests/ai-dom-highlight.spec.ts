@@ -10,6 +10,7 @@ import { describe, expect, it, beforeEach, vi } from 'vitest'
 import {
   aiHighlight,
   aiScroll,
+  aiSnapshot,
   beginUiTurn,
   clearUiHighlights,
   peekUiAnnouncement,
@@ -31,6 +32,7 @@ describe('T-23：三重冗余高亮', () => {
   it('描边类 + data-ai-highlighted + 内联 SVG 徽标 + 播报文案', async () => {
     enterImportPage()
     registerRegion(makeRoot('<button data-ai-ref="import.upload.choose" aria-label="上传入口">上传</button>'))
+    aiSnapshot({})
     const out = await aiHighlight({ ref: 'import.upload.choose', epoch: currentAiEpoch() })
     expect(out.outcome).toBe('ok')
     expect(out.result).toContain('已高亮')
@@ -60,6 +62,7 @@ describe('T-23：三重冗余高亮', () => {
     try {
       enterImportPage()
       registerRegion(makeRoot('<button data-ai-ref="import.upload.choose" aria-label="上传入口">上传</button>'))
+      aiSnapshot({})
       await aiHighlight({ ref: 'import.upload.choose', epoch: currentAiEpoch() })
       const node = document.querySelector('[data-ai-ref="import.upload.choose"]') as HTMLElement
       expect(node.className).toContain('ring-2')
@@ -72,6 +75,7 @@ describe('T-23：三重冗余高亮', () => {
   it('note 参与徽标文案（≤60 字符）', async () => {
     enterImportPage()
     registerRegion(makeRoot('<button data-ai-ref="import.upload.choose" aria-label="上传入口">上传</button>'))
+    aiSnapshot({})
     await aiHighlight({ ref: 'import.upload.choose', note: '请在这里选择文件', epoch: currentAiEpoch() })
     const badge = document.querySelector('[data-ai-highlight-badge]') as HTMLElement
     expect(badge.textContent).toContain('请在这里选择文件')
@@ -82,6 +86,7 @@ describe('T-23：三重冗余高亮', () => {
     const workspace = useWorkspaceStore()
     registerRegion(makeRoot('<button data-ai-ref="import.upload.choose" aria-label="上传入口">上传</button>'))
     const before = workspace.dataVersion
+    aiSnapshot({})
     await aiHighlight({ ref: 'import.upload.choose', epoch: currentAiEpoch() })
     expect(workspace.dataVersion).toBe(before)
     expect(peekUiUndo()).toBeNull()
@@ -96,6 +101,7 @@ describe('T-24：ui_scroll 只改视口', () => {
     registerRegion(root, { id: 'import.grid' })
     const viewport = root.querySelector('[data-ai-ref="import.grid.viewport"]') as HTMLElement
     const before = workspace.dataVersion
+    aiSnapshot({})
     const out = await aiScroll({ ref: 'import.grid.viewport', delta: 120, epoch: currentAiEpoch() })
     expect(out.outcome).toBe('ok')
     expect(viewport.scrollTop).toBe(120)
@@ -107,6 +113,7 @@ describe('T-24：ui_scroll 只改视口', () => {
   it('block=center 时走 scrollIntoView', async () => {
     enterImportPage()
     registerRegion(makeRoot('<div data-ai-ref="import.publish.panel" data-ai-label="发布结果"></div>'), { id: 'import.publish' })
+    aiSnapshot({})
     const out = await aiScroll({ ref: 'import.publish.panel', block: 'center', epoch: currentAiEpoch() })
     expect(out.outcome).toBe('ok')
     expect(out.result).toContain('发布结果')
@@ -115,6 +122,7 @@ describe('T-24：ui_scroll 只改视口', () => {
   it('delta 超 ±2000 拒绝', async () => {
     enterImportPage()
     registerRegion(makeRoot('<div data-ai-ref="import.grid.viewport"></div>'), { id: 'import.grid' })
+    aiSnapshot({})
     const out = await aiScroll({ ref: 'import.grid.viewport', delta: 5000, epoch: currentAiEpoch() })
     expect(out.outcome).toBe('failed')
   })

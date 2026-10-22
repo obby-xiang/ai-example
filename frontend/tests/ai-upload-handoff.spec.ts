@@ -13,6 +13,7 @@ import type { SseFrame } from '@/types/sse'
 import { useAiStore } from '@/stores/ai'
 import { applyFrameToParts } from '@/utils/parts'
 import { unregisterAiRegion } from '@/utils/ai-regions'
+import { aiSnapshot } from '@/utils/ai-dom-tools'
 import UploadHandoffCard from '@/components/AiPanel/UploadHandoffCard.vue'
 import { enterImportPage, makeRoot, resetAiTestState } from './ai-fixtures'
 import { registerAiRegion } from '@/utils/ai-regions'
@@ -76,6 +77,8 @@ function installRegion(options: { readOnly?: boolean } = {}): HTMLElement {
       return '匹配 1 个配置项'
     }
   })
+  // 批 A 快照闸：上传入口也是原语（store 的 degraded 回退会高亮它），先走一次真实快照。
+  aiSnapshot({})
   return root
 }
 
@@ -97,9 +100,9 @@ function armFrame(
   return { message, frame }
 }
 
-function lastSubmitted(): { result?: string; cancelled?: boolean; outcome?: string } {
+function lastSubmitted(): { result?: string; cancelled?: boolean; outcome?: string; code?: string } {
   const calls = api.frontendToolResult.mock.calls
-  return (calls[calls.length - 1]?.[0] ?? {}) as { result?: string; cancelled?: boolean; outcome?: string }
+  return (calls[calls.length - 1]?.[0] ?? {}) as { result?: string; cancelled?: boolean; outcome?: string; code?: string }
 }
 
 beforeEach(() => {
@@ -367,6 +370,20 @@ describe('交接卡组件（三态渲染）', () => {
     expect(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(wrapper.html())).toBe(false)
     expect(wrapper.find('svg').exists()).toBe(true)
     wrapper.unmount()
+  })
+})
+
+describe('批 A：显式 ref 必须来自本轮快照（设计稿 §6 #5）', () => {
+  it('未快照的 ref ⇒ 不建卡 + rejected + UI_REF_NOT_SNAPSHOTTED', async () => {
+    enterImportPage()
+    installRegion()
+    const store = useAiStore()
+    const { message, frame } = armFrame(store, { ref: 'import.upload.late' })
+    await store.openUploadHandoff(message, frame)
+    expect(store.activeUploadHandoff).toBeNull()
+    expect(lastSubmitted().outcome).toBe('rejected')
+    expect(lastSubmitted().code).toBe('UI_REF_NOT_SNAPSHOTTED')
+    expect(lastSubmitted().result).toContain('快照')
   })
 })
 

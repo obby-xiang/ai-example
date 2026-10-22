@@ -327,7 +327,37 @@ public class ToolRegistry {
             tags.add("task:" + ctx.getTaskType());
             if (ctx.getStep() != null) tags.add("task:" + ctx.getTaskType() + "/" + ctx.getStep());
         }
+        if (uiRegionsPresent(ctx)) tags.add("ui:on");
         return tags;
+    }
+
+    /**
+     * 批 A（D8-①）：{@code ui:on} 标签的唯一判据 —— 本页是否有已注册的 AI 区域。
+     *
+     * <p>
+     * 语义：{@code extra.uiRegionCount} <b>缺失即视为存在</b>（fail-open；旧客户端 / curl /
+     * E2E 桩不带该键时工具不得静默消失），<b>显式 0 才不产标签</b>。非数字/非法值同样按
+     * "缺失"处理（宁可多披露，不可误关）。
+     *
+     * <p>
+     * 该标签只用于<b>收窄</b>披露面，永远不能用于授权：伪造 {@code uiRegionCount} 最多让工具
+     * 消失，换不来任何未披露的工具（执行兜底 {@link #matchesContext} 用同一份判定）。
+     */
+    private static boolean uiRegionsPresent(AiContext ctx) {
+        if (ctx == null || ctx.getExtra() == null) {
+            return true;
+        }
+        Object raw = ctx.getExtra().get("uiRegionCount");
+        if (raw == null) {
+            return true;
+        }
+        try {
+            double value = raw instanceof Number number ? number.doubleValue()
+                    : Double.parseDouble(String.valueOf(raw).trim());
+            return value != 0d;
+        } catch (NumberFormatException ex) {
+            return true;
+        }
     }
 
     private boolean matchesAny(String[] patterns, Set<String> tags) {

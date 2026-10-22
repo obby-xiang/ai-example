@@ -19,7 +19,27 @@ import java.util.Map;
  * 只允许 {@code SheetAudit.ALLOWED_FIELDS} 白名单键（dataClass / sampleRows / sampleChars /
  * projCols / totalRows / sheetVer / planId / previewLevel / defCode / page）；<b>其余键在入口丢弃</b>
  * —— 单元格值、条件取值、scopeSummary 原文因此在结构上进不了日志与台账。
+ * @param code 前端自报的机器码（批 A additive；{@code UI_*} 闭集，可空 = 旧客户端）。
+ * 入口只认 {@code ^UI_[A-Z_]{2,40}$}，<b>非法值丢弃不报 400</b>；码随条目持久化，
+ * 供 {@code tool_result} 帧 / 台账 / 卡面同源取码，且<b>永不写进用户可见文案</b>。
  */
 public record FrontendToolResultRequest(String runId, String toolCallId, String result, String source,
-		Boolean cancelled, String outcome, Map<String, Object> sheetMeta) {
+		Boolean cancelled, String outcome, Map<String, Object> sheetMeta, String code) {
+
+	/** 机器码白名单形态（批 A / A-14）：{@code UI_*} 闭集形态，长度 2..40。 */
+	private static final java.util.regex.Pattern UI_CODE = java.util.regex.Pattern.compile("^UI_[A-Z_]{2,40}$");
+
+	/**
+	 * 入口归一：只接受 {@code UI_*} 形态的机器码，其余一律 {@code null}（<b>丢弃不报 400</b>）。
+	 *
+	 * <p>
+	 * 为什么容错而不是拒绝：{@code code} 是诊断字段，回灌的成功判定不能被它拖垮；
+	 * 非法值丢弃后回落到既有的状态推导，与旧客户端（不带该字段）同形。
+	 */
+	public static String normalizeCode(String raw) {
+		if (raw == null) {
+			return null;
+		}
+		return UI_CODE.matcher(raw).matches() ? raw : null;
+	}
 }
