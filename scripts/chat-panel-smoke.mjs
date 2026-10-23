@@ -13,7 +13,10 @@
 //                                             （夹具可置极小值以复现无权限环境的降级路径）
 //      SMOKE_KILL_BACKEND=1                   **破坏性**：授权本脚本按端口 PID 杀后端 java 进程，
 //                                             供苞 B 断言⑫ 制造"真断流"回归对照。默认 **不杀任何进程**，
-//                                             此时 ⑫ 如实报 SKIP（不假绿）。三重闸见 killBackendByListeningPort。
+//                                             此时 ⑫ 如实报 SKIP（不假绿）。**四重闸**见
+//                                             killPrecondition / killBackendByListeningPort：8081 / 5202 /
+//                                             6379 是保护端口，**授权也不杀** ⇒ 标准跑法（页面 5202 →
+//                                             代理 → 8081）下 ⑫ 恒为显式 SKIP [PROTECTED_PORT]。
 //
 // 苞 A（R-100 · 项 1）五条断言（全部 PASS 退出码 0，任一 FAIL 退出码 1）：
 //   ① 空态：无消息时头部「新建对话」按钮置灰（disabled），空态页签语义小字可见；
@@ -26,20 +29,30 @@
 //   ⑤ 置灰态点击无副作用（点不动：sessionId 不变）。
 //
 // 苞 B（R-101）八条断言（同一脚本内追加，不另起脚本；施工卡 §2/§3/§4）：
-//   ⑥ 项 2 结构：每条**正文非空**的消息都有复制按钮，正文为空的消息没有；按钮默认 `opacity: 0`
-//      （未 hover 不显现）；有消息时骨架屏不出现；
-//   ⑦ 项 2 显现：CDP 真实鼠标移到按钮上 → 计算样式 `opacity: 1`（group-hover 生效）；
-//   ⑧ 项 2 主路径：真实点击 → `navigator.clipboard.writeText` 收到的字符串 === `m.content`
-//      **逐字符相等**（不含思考链/工具卡、不 trim）+ 局部提示「已复制」出现
-//      + **`ai.notice` 仍为 null**（提示不占单槽位）；另附剪贴板回读（**非断言**，CDP 下常被拒；
+//   ⑥ 项 2 结构：每条**正文非空**的消息都有复制按钮，正文为空的消息没有；按钮是**图标钮**
+//      （`svg.i-copy` + 隐藏的 `svg.i-check` + 气泡 tooltip，无障碍名由 `aria-label` 承载）且
+//      **常驻可见**（R-165 S4 撤了 `opacity: 0` / group-hover 浮出机制，默认 `opacity: 1`）；
+//      有消息时骨架屏不出现；
+//   ⑦ 项 2 可点性：CDP 真实鼠标移到按钮上 → 按钮仍可见、命中点落在按钮自身（⑧⑨⑩ 的真鼠标
+//      点击依赖这一性质；浮出机制撤掉后本条不再证「hover 才显现」）；
+//   ⑧ 项 2 主路径：真实点击 → `navigator.clipboard.writeText` 收到的字符串 === **全部 text 段
+//      `join('\n\n')`**（R-158 #11 复制口径，与 `deriveCopyText` 同源；不含思考链/工具卡、不 trim）
+//      —— 注意它 ≠ `m.content`（content 是段间无间隔拼接），这是本批修的判据过时项之一；
+//      成功反馈 = 钮挂 `is-copied`（绿勾 2s，v7 `14c` 口径）且**无**失败提示 `copy-hint-{id}`
+//      + **`ai.notice` 仍为 null**（反馈不占单槽位）；另附剪贴板回读（**非断言**，CDP 下常被拒；
 //      带 5s 上界——超时/无权限如实 SKIP 并把理由落盘，详见 readClipboardBounded）；
 //   ⑨ 项 2 回退 A：把 `navigator.clipboard` 置为 undefined（模拟经内网 http 访问的非安全上下文）
-//      → 点击走 `document.execCommand('copy')`，回退文本 === `m.content`，「已复制」仍出现；
+//      → 点击走 `document.execCommand('copy')`，回退文本 === 同一 `join('\n\n')` 口径，`is-copied` 仍出现；
 //   ⑩ 项 2 回退 B：`clipboard.writeText` 存在但**拒绝**（模拟权限/非聚焦被拒）→ 同样落回退路径，
-//      「已复制」仍出现（不得静默失败）；
-//   ⑪ 项 3 主证据：起一轮长跑（DANGER 工具 → 确认门挂起）→ 用户点「停止」→ `ai.streamInterrupted`
-//      **为 false**、页面**无**「连接中断，结果可能不完整」文案、`notice` 只留「已请求取消本轮对话」；
-//   ⑪ 的前置自证：停止前该轮确在飞（`loading && activeRunId && suspended`）——否则断言不成立；
+//      `is-copied` 仍出现（不得静默失败）；
+//   ⑪ 项 3 主证据：**先造在途轮**（甲 = 换新会话后起一轮 DANGER 工具 → 确认门挂起；乙 = 长流轮，
+//      桩用 `turn-text stall-frames` 撑开帧间隔、真模型用长答提示词）→ 用户点「停止」→
+//      `ai.streamInterrupted` **为 false**、页面**无**「连接中断，结果可能不完整」文案、
+//      `notice` 保持 null（现行口径：停止不写单槽提示，证据改由消息尾「已停止」chip 承担）
+//      + 宿主助手消息挂上 `msg-stopped-{id}` + `/runs/{runId}` 3s 内收敛为 CANCELLED；
+//   ⑪ 的前置自证：停止前该轮确在飞（`loading && activeRunId !== null`，且停止钮可见可点）——否则不成立；
+//      本批修的是**前置缺失**：原实现沿用上一阶段的会话（上下文已有纯文本轮），上游不会再发
+//      DANGER 工具调用 ⇒ 从未进入在途态，点停止只是空转（inflightBeforeStop=null、按钮点不动）；
 //   ⑬ 项 4：清镜像后 reload，用 `Fetch` 域把历史请求挂住 → 骨架屏（`data-testid="history-skeleton"`）
 //      出现且空态**不**同框（`historyLoaded === false`）→ 放行历史请求 → 骨架屏消失、空态出现；
 //   ⑫ 项 3 回归对照（**本脚本的最后一步**）：真断流（kill 后端进程，且**未**调 stop）→ 红条
@@ -47,11 +60,19 @@
 //      CDP 断网模拟不出真断流（只拦新请求、不拆在飞流，本苞实测）；dev 形态下 SSE 走 dev server 代理，
 //      代理不结束客户端响应 ⇒ 收尾由产品自己的帧间静默看门狗触发（90s）⇒ 本步约 92s、上界 150s。
 //      需 SMOKE_KILL_BACKEND=1 显式授权，未授权时本断言如实报 SKIP（不假绿）。
+//      **可跑条件（本批写清，避免"永远 SKIP 且没人知道为什么"）**：被杀的后端必须就是**页面正在
+//      说话的那一个**（SSE 经前端 dev server 的 `/api` 代理转给 `SMOKE_API`）。常开口径下页面 =
+//      5202 dev server → 代理 → 8081 后端，而 8081 **禁碰**（本脚本内置 `PROTECTED_PORTS`
+//      硬闸：8081 / 5202 / 6379 即使授权也拒杀）⇒ 标准跑法下本步恒为显式 SKIP。
+//      可跑形态 = 一次性实例对：后端 22730 + 前端 22731（`VITE_API_BASE=http://localhost:22730`）
+//      + Redis DB 2（与其他实例隔离），并令 `SMOKE_API=http://localhost:22730`、
+//      `SMOKE_APP=http://localhost:22731/`、`SMOKE_KILL_BACKEND=1`。
 //
 // 定位纪律：新增按钮一律 data-testid（苞 A `new-chat`；苞 B `copy-msg-{id}` / `copy-hint-{id}` /
-// `history-skeleton`）；其余断言走 `$pinia` 直读 store 状态（手法与 scripts/m2t2a-smoke.mjs 一致），
-// 不耦合 UI 文案 —— 文案改动不再造成静默误判。项 2 的"已复制"提示属**组件局部状态**，故用
-// 其 data-testid 断言而不读 `ai.notice`（后者须保持 null，这正是"不占单槽位"的判据）。
+// `history-skeleton` / `msg-stopped-{id}`）；其余断言走 `$pinia` 直读 store 状态（手法与
+// scripts/m2t2a-smoke.mjs 一致），不耦合 UI 文案 —— 文案改动不再造成静默误判。项 2 的复制成功
+// 反馈属**组件局部状态**（钮上 `is-copied` 类 + 绿勾，2s 自清；失败才出 `copy-hint-{id}`），
+// 故用该类与 data-testid 断言而不读 `ai.notice`（后者须保持 null，这正是"不占单槽位"的判据）。
 // 本脚本只驱动自己启动的 Chrome，不触碰用户浏览器。
 //
 // ── 苞 C（测试扩充 V7 · RLD 真刷新试点）六条断言 ⑭~⑲ ──────────────────────────
@@ -60,13 +81,19 @@
 // 内存态全丢、只剩 sessionStorage 镜像 + 后端历史 —— RLD 域的 P0 场景全部依赖这个形态。
 //   ⑭ R-01 在途轮续显：流式中真刷新 → 刷新后仍在途且有正文（不是"只剩用户气泡无任何提示"），
 //      无红条、无「接管/重挂」类横幅（批G · G5：用户看不到重挂概念）；
-//   ⑮ R-01 收敛：该轮在预算内收尾，正文与桩的确定性文本**逐字相等**（续收到尾，不是停在半截）；
-//   ⑯ R-13 历史+镜像合并不双份：UI 气泡数 == `/history` 条数、同一提问恰 1 条 user 气泡、
-//      assistant 恰 1 条（既不"整替"丢在途，也不双份）；
+//   ⑮ R-01 收敛：该轮在预算内收尾，正文**续收到尾**（不是停在半截）。判据两臂都严格，按环境取一：
+//      桩环境（刷新时刻的部分正文是桩确定性文本的前缀）⇒ 与桩文本**逐字相等**；
+//      非桩环境（真模型 / 上游被换）⇒ 与 `/history` 持久化的该轮 assistant 正文**逐字相等**且比
+//      部分正文更长。为什么不写死桩文本：常开后端若接真模型，逐字比对桩文本永远红（不是产品缺陷）；
+//   ⑯ R-13 历史+镜像合并不双份：同一提问恰 1 条 user 气泡、**user 气泡数 == `/history` 的 USER
+//      条目数**（TOOL 条目不产气泡、同轮多条 ASSISTANT 由 R-150 合并成 1 条）、assistant 恰 1 条且
+//      正文非空（既不"整替"丢在途，也不双份）。原判据「UI 气泡数 == `/history` 条数」只在**纯文本轮**
+//      成立 —— 工具轮的历史含 `assistant(tool_calls)` + `role:tool` 两条，恒不相等；
 //   ⑰ R-12 刷新后在途轮 → 停止入口：停止钮可见可点，点击后 3s 内 `/runs/{runId}` 为 CANCELLED
 //      且输入框随即可用（loading/suspended 都归零）；
-//   ⑱ 停止后真刷新页面态正确：气泡数与正文逐字保留、无红条、`streamInterrupted=false`、
-//      `/runs/current` 明确空态（不出现幽灵在途轮）；
+//   ⑱ 停止后真刷新页面态正确：气泡数不变、**已显示的正文逐字保留**（刷新后正文以 before 为前缀，
+//      允许服务端在停止瞬间多收尾几个字符 —— 那属"历史更完整"，不是丢字；原判据要求长度逐字相等，
+//      实测 280 vs 283 恒红）、无红条、`streamInterrupted=false`、`/runs/current` 明确空态；
 //   ⑲ R-10 对照（防过度修复）：**已完成轮**刷新后完整恢复且**零横幅零提示**。
 // 需要桩的确定性长文本轮（`turn-text stall-frames=<ms>`，见 scripts/ci/stub-upstream.mjs 的
 // FAULT_MARKER）：在途窗口由帧间隔撑开，脚本才有时间 reload。桩侧指纹按首条 user 消息记，
@@ -94,6 +121,13 @@ const CHROME = process.env.SMOKE_CHROME
 const PORT = Number(process.env.SMOKE_CDP_PORT ?? 9334)
 const API = process.env.SMOKE_API ?? 'http://localhost:18330'
 const URL_APP = process.env.SMOKE_APP ?? 'http://localhost:5202/'
+/**
+ * ⑫ 的**硬保护端口**：即使 `SMOKE_KILL_BACKEND=1` 显式授权，也不得杀这三个端口上的进程。
+ * 依据 = 施工口径「严禁起停/重启常开服务 8081（后端）与 5202（前端 dev）」，外加 Redis 6379
+ * （杀它等于把并行 agent 的台账一起打掉）。这一闸与 `SMOKE_KILL_BACKEND` 是**与**关系：
+ * 授权只放开"可以杀自建实例"，不放开"可以杀常开实例"。
+ */
+const PROTECTED_PORTS = new Set(['8081', '5202', '6379'])
 // 剪贴板回读的等待上界（复核 D1：无剪贴板读权限的环境里 readText() 的 promise 永不 settled，
 // 原实现会把整个脚本挂死在阶段 8；此处给显式上界，超时即 SKIP —— 见 readClipboardBounded）
 const CLIPBOARD_READ_TIMEOUT_MS = Number(process.env.SMOKE_CLIPBOARD_TIMEOUT_MS ?? 5000)
@@ -202,6 +236,41 @@ async function waitCount(sessionId, want, { tries = 24 } = {}) {
 }
 
 /**
+ * `/history` 的**完整载荷**（`data` = `{count,total,messages}`）。
+ *
+ * 苞 C 的 ⑮/⑯ 需要按**条目类型**核对（USER / ASSISTANT / TOOL / SYSTEM），只数总数会把
+ * 工具轮误判成"气泡多/少"：`role:tool` 条目不产气泡、同一轮的连续 ASSISTANT 条目由前端
+ * R-150 合并成一条。返回 null = 取不到（调用方据此判红，不静默放过）。
+ */
+async function historyPayload(sessionId) {
+  try {
+    const r = await fetch(`${API}/api/ai/history/${encodeURIComponent(sessionId)}`)
+    if (!r.ok) return null
+    const body = await r.json()
+    return body?.data ?? null
+  } catch {
+    return null
+  }
+}
+
+/** 历史条目的类型分布（大小写归一；缺 type 视作 UNKNOWN）。 */
+function historyComposition(payload) {
+  const items = Array.isArray(payload?.messages) ? payload.messages : []
+  const byType = { USER: 0, ASSISTANT: 0, TOOL: 0, SYSTEM: 0, UNKNOWN: 0 }
+  let assistantWithText = 0
+  let lastAssistantText = ''
+  for (const item of items) {
+    const type = String(item?.type ?? 'UNKNOWN').toUpperCase()
+    byType[type in byType ? type : 'UNKNOWN'] += 1
+    if (type === 'ASSISTANT') {
+      const text = String(item?.text ?? '')
+      if (text.trim() !== '') { assistantWithText += 1; lastAssistantText = text }
+    }
+  }
+  return { total: items.length, byType, assistantWithText, lastAssistantText }
+}
+
+/**
  * 页面侧快照：store 状态 + DOM 事实（按钮置灰 / 小字可见 / 镜像键）。
  * `expectedHint` 逐字比对空态小字，避免"文案被改宽"后静默通过。
  */
@@ -272,6 +341,10 @@ async function sendRound(text) {
  *
  * 为什么必须挂起而不能随便发一句：普通文本轮在桩下几十毫秒即终局，"停止"会打在已收尾的轮次上，
  * 断言就成了"本来就不该有红条"的空转。返回挂起现场（含 runId），null 表示未能进入挂起态。
+ *
+ * ⚠️ **前置：必须换新会话**。上游的路由判定看本轮请求的上下文（真模型看对话语境、桩看
+ * `fingerprint` = 首条 user 消息的轮次台账），沿用"已经聊过一轮纯文本"的会话时，DANGER 工具
+ * 调用不会再被发起 —— 这正是 ⑪ 原实现红在 `inflightBeforeStop=null` 的原因（缺前置，不是产品缺陷）。
  */
 async function startSuspendedRound(prompt) {
   await evaluate(`(() => { void ${AI_EXPR}.send(${JSON.stringify(prompt)}); return true })()`, { awaitPromise: false })
@@ -280,21 +353,76 @@ async function startSuspendedRound(prompt) {
       return (ai.loading && ai.activeRunId !== null && ai.suspended)
         ? { runId: ai.activeRunId, messages: ai.messages.length, notice: ai.notice }
         : null })()`,
-    { tries: 80, intervalMs: 100 }
+    { tries: 100, intervalMs: 100 }
   )
+}
+
+/**
+ * 为 ⑪ 造一轮**真的在飞**的轮次（停止判据的前置）。
+ *
+ * 两臂按序尝试，都要求"在飞"可观测（`loading && activeRunId !== null`）：
+ *   甲 `suspended-confirm-gate` = 新会话 + DANGER 工具 → 确认门挂起（最稳：轮次完全停在等人工）；
+ *   乙 `long-stream` = 新会话 + 长答提示词（桩用 `turn-text stall-frames` 把帧间隔撑开；真模型
+ *      的长答本身就要几秒）→ 等到"已收到首段正文且仍在飞"即算达标。
+ * 返回 `{runId, form, ...}`；两臂都不达标返回 null（调用方据此 SKIP 并落盘理由，不假绿）。
+ */
+async function startInflightRound(confirmPrompt) {
+  for (const form of ['suspended-confirm-gate', 'long-stream']) {
+    await evaluate(`(async () => { await ${AI_EXPR}.resetSession(); return true })()`)
+    await sleep(400)
+    let inflight = null
+    if (form === 'suspended-confirm-gate') {
+      inflight = await startSuspendedRound(confirmPrompt)
+    } else {
+      const prompt = `命名轮蓝本 SMKSTOP-${STAMP}：turn-text stall-frames=${RLD_FRAME_GAP_MS}`
+        + '；请分 10 点逐条说明导出任务的推进步骤，每点三行。'
+      await evaluate(`(() => { void ${AI_EXPR}.send(${JSON.stringify(prompt)}); return true })()`, { awaitPromise: false })
+      inflight = await waitFor(
+        `(() => { const ai = ${AI_EXPR}
+          const last = [...ai.messages].reverse().find((m) => m.role === 'assistant')
+          return (ai.loading && ai.activeRunId !== null && last && last.content && last.content.length > 0)
+            ? { runId: ai.activeRunId, messages: ai.messages.length, notice: ai.notice,
+                partialLen: last.content.length } : null })()`,
+        { tries: 120, intervalMs: 100 }
+      )
+    }
+    if (inflight) return { ...inflight, form }
+    console.log(`[阶段11 前置] ${form} 未达在飞态，换下一臂`)
+  }
+  return null
 }
 
 /** 消息级 + 页面级事实快照（复制按钮/局部提示/降级条/骨架屏，苞 B 三处断言共用）。 */
 function msgFactsExpr(msgId) {
   return `(() => {
     const ai = ${AI_EXPR}
+    const msg = ai.messages.find((m) => m.id === ${JSON.stringify(msgId)}) || null
     const btn = document.querySelector('[data-testid="copy-msg-${msgId}"]')
     const hint = document.querySelector('[data-testid="copy-hint-${msgId}"]')
     const rect = btn ? btn.getBoundingClientRect() : null
+    const tip = btn ? btn.querySelector('span') : null
+    const copyIcon = btn ? btn.querySelector('svg.i-copy') : null
+    const checkIcon = btn ? btn.querySelector('svg.i-check') : null
+    const cs = btn ? getComputedStyle(btn) : null
+    // 复制口径（R-158 #11 / deriveCopyText）：全部 text 段 join('\\n\\n')，与 m.content（段间无间隔拼接）
+    // 有意分家 —— 断言按**复制的契约**取期望值，不按 content 取，也不直接调用产品函数（防自证）。
+    const texts = msg ? msg.parts.filter((p) => p.kind === 'text').map((p) => p.text) : []
+    const reasoning = msg ? msg.parts.filter((p) => p.kind === 'reasoning').map((p) => p.text).join('') : ''
     return {
       buttonExists: !!btn,
       buttonText: btn ? btn.textContent.trim() : null,
-      buttonOpacity: btn ? getComputedStyle(btn).opacity : null,
+      buttonAriaLabel: btn ? btn.getAttribute('aria-label') : null,
+      buttonTipText: tip ? tip.textContent.trim() : null,
+      buttonOpacity: cs ? cs.opacity : null,
+      buttonVisible: btn ? btn.offsetParent !== null : null,
+      buttonColor: cs ? cs.color : null,
+      copiedClass: btn ? btn.classList.contains('is-copied') : null,
+      copyIconDisplay: copyIcon ? getComputedStyle(copyIcon).display : null,
+      checkIconDisplay: checkIcon ? getComputedStyle(checkIcon).display : null,
+      copyTextFromParts: texts.join('\\n\\n'),
+      textSegments: texts.length,
+      contentLen: msg ? (msg.content || '').length : null,
+      reasoningLen: reasoning.length,
       center: rect ? { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } : null,
       hintExists: !!hint,
       hintText: hint ? hint.textContent.trim() : null,
@@ -311,6 +439,27 @@ function msgFactsExpr(msgId) {
       interruptedBanner: document.body.innerText.includes('连接中断，结果可能不完整')
     }
   })()`
+}
+
+/**
+ * 复制成功反馈的现行判据（R-165 S4 / demo v7 `14c`）：钮挂 `is-copied` 类 ⇒ 绿勾露出
+ * （`svg.i-copy` 隐藏、`svg.i-check` 显示）+ 文字转绿（#1a7f45），2s 后自清；
+ * **失败**才出 `copy-hint-{id}` 元素。旧判据读「已复制」文字提示 —— 该提示已不存在（判据过时）。
+ */
+function copyFeedbackOk(f) {
+  return f.copiedClass === true
+    && f.copyIconDisplay === 'none'
+    && f.checkIconDisplay !== 'none'
+    && f.hintExists === false
+}
+
+/** 等复制成功反馈自清（生命周期 2s）——好让下一次点击的"反馈出现"断言有区分度。 */
+async function waitCopyStateCleared(msgId) {
+  return waitFor(
+    `(() => { const b = document.querySelector('[data-testid="copy-msg-${msgId}"]')
+      return !(b && b.classList.contains('is-copied')) })()`,
+    { tries: 20, intervalMs: 200 }
+  )
 }
 
 /**
@@ -335,6 +484,8 @@ function rldFactsExpr() {
       notice: ai.notice,
       historyLoaded: ai.historyLoaded,
       count: msgs.length,
+      roles: msgs.map(m => m.role),
+      textHeads: msgs.map(m => String(m.text || '').slice(0, 24)),
       userTexts: msgs.filter(m => m.role === 'user').map(m => m.text),
       assistantTexts: msgs.filter(m => m.role === 'assistant').map(m => m.text),
       assistantIds: msgs.filter(m => m.role === 'assistant').map(m => m.id),
@@ -380,7 +531,7 @@ async function runCurrentFound(sessionId) {
   }
 }
 
-/** 真实鼠标悬停（CDP Input 域）—— 项 2 的显现条件是 `group-hover`，只能靠真 hover 触发。 */
+/** 真实鼠标悬停（CDP Input 域）—— 项 2 的按钮虽已常驻可见，仍要用真 hover + 真点击驱动（用户可见行为）。 */
 async function mouseHover(x, y) {
   await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none', buttons: 0 })
 }
@@ -395,11 +546,12 @@ const opacityExpr = (msgId) =>
   `getComputedStyle(document.querySelector('[data-testid="copy-msg-${msgId}"]')).opacity`
 
 /**
- * 让复制按钮显现（苞 B 项 2 的显现条件 = `group-hover`）。
+ * 把真鼠标移到复制按钮上（自 R-165 S4 起按钮**常驻可见**，本函数只剩"把鼠标真放上去"的作用；
+ * 阶段 7 的判据改为**可点性**：命中点落在按钮上，为 ⑧⑨⑩ 的真鼠标点击铺路）。
  *
- * 首选**真实鼠标 hover**（用户可见行为）；实测窗口被判为遮挡时 Chrome 会挂起渲染致 hover 不生效，
- * 故重试 3 次后回落 CDP CSS 域的 `forcePseudoState`（对祖先 `.group` 强制 `:hover`）——
- * 两条路径读的是**同一个**计算样式 `opacity`，断言口径不变，落盘里记明用的是哪条。
+ * 实测窗口被判为遮挡时 Chrome 会挂起渲染致 hover 不生效，故重试 3 次后回落 CDP CSS 域的
+ * `forcePseudoState`（对祖先 `.group` 强制 `:hover`）—— 两条路径读的是**同一个**计算样式 `opacity`，
+ * 落盘里记明用的是哪条（`css-forced-hover` 已是兜底路径）。
  */
 async function revealCopyButton(msgId, center) {
   for (let i = 0; i < 3; i++) {
@@ -447,29 +599,55 @@ async function clickCopyAndWait(msgId, center, probe) {
 }
 
 /**
+ * ⑫ 的**非破坏性**前置判定（不打进程、不花模型调用）：一眼看出本跑法能不能跑 ⑫。
+ * 两道前置都过才值得去造在途轮 —— 否则先造轮再发现杀不了，纯属浪费。
+ */
+function killPrecondition() {
+  const port = new URL(API).port || '80'
+  if (PROTECTED_PORTS.has(port)) {
+    return {
+      ok: false,
+      code: 'PROTECTED_PORT',
+      reason: `端口 ${port} 属常开服务（8081 后端 / 5202 前端 dev / 6379 Redis），本脚本拒杀`
+        + '（授权也不放开；可跑形态见文件头 ⑫ 的"可跑条件"）'
+    }
+  }
+  if (process.env.SMOKE_KILL_BACKEND !== '1') {
+    return {
+      ok: false,
+      code: 'NO_AUTH',
+      reason: 'SMOKE_KILL_BACKEND 未置 1（默认不杀进程；本阶段按 SKIP 处理）。'
+        + '可跑条件 = 一次性实例对（后端 22730 + 前端 22731 + Redis DB 2）+ SMOKE_KILL_BACKEND=1'
+    }
+  }
+  return { ok: true, port }
+}
+
+/**
  * 按监听端口反查并杀掉后端进程（苞 B 项 3 的"真断流"回归对照用）。
  *
- * **三重闸**（破坏性动作，默认关闭）：
- *   ① 仅当环境变量 `SMOKE_KILL_BACKEND=1` 显式授权（编排脚本打开，脚本默认不杀任何进程）；
- *   ② 只杀"监听 SMOKE_API 端口"的那一行 PID（netstat 反查，不按名字泛杀）；
- *   ③ 该 PID 的进程名必须是 `java.exe`，否则拒绝执行（防误杀代理/静态服务器）。
- * 授权但三道闸任一不成立 ⇒ 返回 ok=false，调用方如实报 SKIP 而不是假绿。
+ * **四重闸**（破坏性动作，默认关闭）：
+ *   ① **保护端口**：`SMOKE_API` 的端口若在 `PROTECTED_PORTS`（8081 / 5202 / 6379）内一律拒杀 ——
+ *      常开服务禁起停是硬口径，与授权无关（授权只放开"自建实例可以被杀"）；
+ *   ② 仅当环境变量 `SMOKE_KILL_BACKEND=1` 显式授权（编排脚本打开，脚本默认不杀任何进程）；
+ *   ③ 只杀"监听 SMOKE_API 端口"的那一行 PID（netstat 反查，不按名字泛杀）；
+ *   ④ 该 PID 的进程名必须是 `java.exe`，否则拒绝执行（防误杀代理/静态服务器）。
+ * 任一闸不成立 ⇒ 返回 ok=false + 结构化 `code`，调用方如实报 SKIP 而不是假绿。
  */
 async function killBackendByListeningPort() {
-  if (process.env.SMOKE_KILL_BACKEND !== '1') {
-    return { ok: false, reason: 'SMOKE_KILL_BACKEND 未置 1（默认不杀进程；本阶段按 SKIP 处理）' }
-  }
-  const port = new URL(API).port || '80'
+  const pre = killPrecondition()
+  if (!pre.ok) return pre
+  const port = pre.port
   let netstat = ''
   try {
     netstat = execSync('netstat -ano', { encoding: 'utf8' })
   } catch {
-    return { ok: false, reason: 'netstat 执行失败' }
+    return { ok: false, code: 'NETSTAT_FAILED', reason: 'netstat 执行失败' }
   }
   const row = netstat.split(/\r?\n/).find((line) => line.includes('LISTENING') && new RegExp(`:${port}\\s`).test(line))
   const pid = row ? row.trim().split(/\s+/).pop() : null
   if (!pid) {
-    return { ok: false, reason: `未找到监听 ${port} 的进程` }
+    return { ok: false, code: 'NOT_LISTENING', reason: `未找到监听 ${port} 的进程` }
   }
   let tasklist = ''
   try {
@@ -478,12 +656,12 @@ async function killBackendByListeningPort() {
     tasklist = ''
   }
   if (!/java\.exe/i.test(tasklist)) {
-    return { ok: false, reason: `PID ${pid} 不是 java.exe，拒绝杀（tasklist: ${tasklist.trim().slice(0, 60)}）` }
+    return { ok: false, code: 'NOT_JAVA', reason: `PID ${pid} 不是 java.exe，拒绝杀（tasklist: ${tasklist.trim().slice(0, 60)}）` }
   }
   try {
     execSync(`taskkill /PID ${pid} /F`, { encoding: 'utf8' })
   } catch {
-    return { ok: false, reason: `taskkill /PID ${pid} 失败` }
+    return { ok: false, code: 'TASKKILL_FAILED', reason: `taskkill /PID ${pid} 失败` }
   }
   return { ok: true, pid, port, processName: 'java.exe' }
 }
@@ -503,8 +681,8 @@ async function waitHintGone(msgId) {
  *   - 超时（promise 未 settled）→ `TIMEOUT>…`；
  *   - 页面侧 `readText()` 被拒（无权限 / 非聚焦）→ `NO_PERMISSION(NotAllowedError…)`；
  *   - `Runtime.evaluate` 自身报错 → `EVAL_ERR:…`。
- * 不假绿：⑧ 的判据仍只由 `__copyCalls` 的逐字符比对 + 「已复制」+ `notice === null` 承担，
- * 本项 SKIP 不改变 ⑧ 的 PASS/FAIL；不挂死：超时的那次 evaluate 悬空即弃（其 waiter 不再被消费），
+ * 不假绿：⑧ 的判据仍只由 `__copyCalls` 的逐字比对（text 段 `join('\n\n')` 口径）+ 钮 `is-copied`
+ * 反馈 + `notice === null` 承担，本项 SKIP 不改变 ⑧ 的 PASS/FAIL；不挂死：超时的那次 evaluate 悬空即弃（其 waiter 不再被消费），
  * 阶段 9/10 的后续断言不受影响。
  */
 async function readClipboardBounded() {
@@ -645,24 +823,71 @@ try {
     }
   })()`, { awaitPromise: false })
   const s6 = await evaluate(msgFactsExpr(target.id), { awaitPromise: false })
-  RESULT.phases.copyStructure = { ...s6, ...structure, contentLength: target.content.length }
-  console.log('[阶段6 复制按钮结构]', JSON.stringify(RESULT.phases.copyStructure))
+  RESULT.phases.copyStructure = {
+    ...s6, ...structure, contentLength: target.content.length,
+    copyTextLength: s6.copyTextFromParts.length, textSegments: s6.textSegments
+  }
+  console.log('[阶段6 复制按钮结构]', JSON.stringify({
+    buttonExists: s6.buttonExists, buttonVisible: s6.buttonVisible, buttonOpacity: s6.buttonOpacity,
+    ariaLabel: s6.buttonAriaLabel, tipText: s6.buttonTipText, copyIcon: s6.copyIconDisplay,
+    checkIcon: s6.checkIconDisplay, copiedClass: s6.copiedClass, textSegments: s6.textSegments,
+    contentLen: s6.contentLen, copyTextLen: s6.copyTextFromParts.length,
+    withText: structure.withText, blank: structure.blank, missing: structure.missing, leaked: structure.leaked
+  }))
+  // ⑥ 判据（本批对齐现状）：图标钮结构（复制图标 + 隐藏的完成图标 + 气泡 tooltip，无障碍名走
+  // aria-label 且与 tooltip 同源）+ **常驻可见**（opacity 1，R-165 S4 已撤浮出机制）+ 初始未复制态
+  // + 无骨架屏。原判据 `buttonText === '复制'` / `opacity === '0'` 均为过时结构（按钮已图标化、
+  // 文案改为「复制该条消息正文」并移入 tooltip；`opacity: 0` 的 hover 浮出已撤销）。
   assert('⑥', !!target && structure.missing.length === 0 && structure.leaked.length === 0
-    && s6.buttonExists && s6.buttonText === '复制' && s6.buttonOpacity === '0' && s6.skeleton === false,
+    && s6.buttonExists && s6.buttonVisible === true && s6.buttonOpacity === '1'
+    && !!s6.buttonAriaLabel && s6.buttonAriaLabel === s6.buttonTipText
+    && s6.copyIconDisplay !== 'none' && s6.checkIconDisplay === 'none'
+    && s6.copiedClass === false && s6.skeleton === false,
   {
     messagesWithText: structure.withText, blankMessages: structure.blank,
     missingButtons: structure.missing, leakedButtons: structure.leaked,
-    defaultOpacity: s6.buttonOpacity, skeletonWhileMessagesExist: s6.skeleton
+    buttonVisible: s6.buttonVisible, defaultOpacity: s6.buttonOpacity,
+    ariaLabel: s6.buttonAriaLabel, tipText: s6.buttonTipText,
+    copyIconDisplay: s6.copyIconDisplay, checkIconDisplay: s6.checkIconDisplay,
+    copiedClassAtRest: s6.copiedClass, skeletonWhileMessagesExist: s6.skeleton
   })
 
-  // ── 阶段 7：hover 才显现（Tailwind group-hover） ────────────────────────
-  const reveal = await revealCopyButton(target.id, s6.center)
-  RESULT.phases.hoverReveal = { before: s6.buttonOpacity, after: reveal.opacity, mechanism: reveal.mechanism }
-  console.log('[阶段7 hover 显现]', JSON.stringify(RESULT.phases.hoverReveal))
-  assert('⑦', reveal.opacity === '1',
-    { opacityBeforeHover: s6.buttonOpacity, opacityAfterReveal: reveal.opacity, mechanism: reveal.mechanism })
+  // ── 阶段 7：可点性（常驻可见 + 命中点落在按钮自身） ──────────────────────
+  // 判据（本批对齐现状）：R-165 S4 起按钮常驻（撤 `opacity-0` + group-hover 浮出），故本条不再证
+  // 「hover 才显现」，改证 ⑧⑨⑩ 真鼠标点击所依赖的性质 = 按钮在视口内、可见、且该坐标的 hit-test
+  // 落在按钮（或其子元素）上。`revealCopyButton` 保留为"把鼠标真移上去"的动作。
+  // 坐标必须**现取**：元信息行在流式期是「工作中…」呼吸位、收尾后换成时间戳，宽度变化会让按钮
+  // x 位移几十像素（实测按阶段 6 的旧坐标 hit-test 会落到 meta 行本身 ⇒ 假红）。
+  const fx7 = await evaluate(msgFactsExpr(target.id), { awaitPromise: false })
+  const reveal = await revealCopyButton(target.id, fx7.center)
+  const hit7 = await evaluate(`(() => {
+    const b = document.querySelector('[data-testid="copy-msg-${target.id}"]')
+    if (!b) return { opacity: null, visible: false, hitIsButton: false, stack: [] }
+    const r = b.getBoundingClientRect()
+    // 用 elementsFromPoint（整栈）而非 elementFromPoint（只取最顶层）：按钮的悬浮 tooltip 可能压在
+    // 按钮中心上 —— 只要按钮在命中栈里，真鼠标按下就打到它。
+    const x = r.left + r.width / 2
+    const y = r.top + r.height / 2
+    const stack = document.elementsFromPoint(x, y)
+    return {
+      opacity: getComputedStyle(b).opacity,
+      visible: b.offsetParent !== null,
+      hitIsButton: stack.some((el) => el === b || b.contains(el)),
+      point: { x, y },
+      stack: stack.slice(0, 4).map((el) => el.tagName + (el.getAttribute('data-testid') ? '#' + el.getAttribute('data-testid') : ''))
+    }
+  })()`, { awaitPromise: false })
+  RESULT.phases.hoverReveal = {
+    before: s6.buttonOpacity, after: hit7.opacity, hitIsButton: hit7.hitIsButton, hitStack: hit7.stack,
+    point: hit7.point,
+    mechanism: 'always-visible（浮出机制已撤：真 hover 不改变可见性）', hoverMechanism: reveal.mechanism
+  }
+  console.log('[阶段7 可点性]', JSON.stringify(RESULT.phases.hoverReveal))
+  assert('⑦', hit7.opacity === '1' && hit7.visible === true && hit7.hitIsButton === true,
+    { opacityBeforeHover: s6.buttonOpacity, opacityAfterHover: hit7.opacity,
+      visible: hit7.visible, hitIsButton: hit7.hitIsButton, hitStack: hit7.stack })
 
-  // ── 阶段 8：主路径 —— clipboard API + 局部「已复制」（不占 notice） ─────
+  // ── 阶段 8：主路径 —— clipboard API + `is-copied` 反馈（不占 notice） ────
   const clipReady = await evaluate(`(() => {
     window.__clipWasDefined = typeof navigator.clipboard !== 'undefined' && navigator.clipboard !== null
     window.__origClipboard = navigator.clipboard
@@ -673,7 +898,9 @@ try {
     try { c.writeText = (t) => { window.__copyCalls.push(t); return orig(t) } } catch { return false }
     return true
   })()`, { awaitPromise: false })
-  const center8 = (await evaluate(msgFactsExpr(target.id), { awaitPromise: false })).center
+  const fx8 = await evaluate(msgFactsExpr(target.id), { awaitPromise: false })
+  const expected8 = fx8.copyTextFromParts
+  const center8 = fx8.center
   const click8 = await clickCopyAndWait(target.id, center8, async () => {
     const n = await evaluate('window.__copyCalls.length', { awaitPromise: false })
     return typeof n === 'number' && n > 0
@@ -681,25 +908,36 @@ try {
   const s8 = await evaluate(msgFactsExpr(target.id), { awaitPromise: false })
   const calls8 = await evaluate('window.__copyCalls', { awaitPromise: false })
   const read8 = await readClipboardBounded()
-  const exact8 = Array.isArray(calls8) && calls8.length >= 1 && calls8[0] === target.content
+  const exact8 = Array.isArray(calls8) && calls8.length >= 1 && calls8[0] === expected8
   RESULT.phases.copyClipboardPath = {
     clipboardApiAvailable: clipReady, clickVia: click8, writeCalls: Array.isArray(calls8) ? calls8.length : null,
-    exactMatch: exact8, hintText: s8.hintText, notice: s8.notice,
+    exactMatch: exact8, expectedLen: expected8.length, contentLen: fx8.contentLen,
+    textSegments: fx8.textSegments, payloadHead: Array.isArray(calls8) && calls8.length ? String(calls8[0]).slice(0, 40) : null,
+    expectedHead: expected8.slice(0, 40),
+    copiedClass: s8.copiedClass, copyIconDisplay: s8.copyIconDisplay, checkIconDisplay: s8.checkIconDisplay,
+    hintText: s8.hintText, notice: s8.notice,
     clipboardReadback: read8.value, clipboardReadbackStatus: read8.status, clipboardReadbackReason: read8.reason
   }
   if (read8.status !== 'OK') { RESULT.skipped = { ...(RESULT.skipped || {}), '⑧·旁证(剪贴板回读)': `${read8.status}: ${read8.reason}` } }
   const read8Brief = read8.status === 'OK' ? String(read8.value).slice(0, 60) : `SKIP(${read8.reason})`
   console.log('[阶段8 复制·主路径]', JSON.stringify({ ...RESULT.phases.copyClipboardPath, clipboardReadback: read8Brief }))
   if (read8.status !== 'OK') { console.log(`[阶段8 回读旁证] SKIP ${read8.reason}`) }
-  assert('⑧', clipReady === true && click8 !== 'none' && exact8 && s8.hintText === '已复制' && s8.notice === null,
+  // ⑧ 判据（本批对齐现状）：writeText 收到的是**复制契约**的文本（全部 text 段 join('\n\n')，
+  // R-158 #11），成功反馈 = 钮 `is-copied`（绿勾替换复制图标、无失败提示），notice 仍为 null。
+  // 旧判据 `=== m.content` 在"多个 text 段"的消息上恒不等（content 段间无间隔拼接），
+  // 旧判据「已复制文字提示」已随 v7 `14c` 图标化撤销。
+  assert('⑧', clipReady === true && click8 !== 'none' && exact8 && copyFeedbackOk(s8) && s8.notice === null,
   {
     clipboardApiAvailable: clipReady, clickVia: click8, writeCalls: Array.isArray(calls8) ? calls8.length : null,
-    exactMatch: exact8, hintText: s8.hintText, noticeHeldByNotice: s8.notice,
+    exactMatch: exact8, expectedLen: expected8.length, textSegments: fx8.textSegments,
+    copiedClass: s8.copiedClass, copyIconDisplay: s8.copyIconDisplay, checkIconDisplay: s8.checkIconDisplay,
+    failureHint: s8.hintText, noticeHeldByNotice: s8.notice,
     clipboardReadback: read8.status === 'OK' ? String(read8.value).slice(0, 60) : null,
     clipboardReadbackStatus: read8.status, clipboardReadbackReason: read8.reason
   })
 
   // ── 阶段 9：回退 A —— clipboard 不可用（经内网 http 访问的非安全上下文） ──
+  await waitCopyStateCleared(target.id)
   await waitHintGone(target.id)
   const fallbackReady = await evaluate(`(() => {
     window.__execCalls = []
@@ -714,26 +952,32 @@ try {
     Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true })
     return navigator.clipboard === undefined
   })()`, { awaitPromise: false })
-  const center9 = (await evaluate(msgFactsExpr(target.id), { awaitPromise: false })).center
+  const fx9 = await evaluate(msgFactsExpr(target.id), { awaitPromise: false })
+  const expected9 = fx9.copyTextFromParts
+  const center9 = fx9.center
   const click9 = await clickCopyAndWait(target.id, center9, async () => {
     const n = await evaluate('window.__execCalls.length', { awaitPromise: false })
     return typeof n === 'number' && n > 0
   })
   const s9 = await evaluate(msgFactsExpr(target.id), { awaitPromise: false })
   const exec9 = await evaluate('({ calls: window.__execCalls, texts: window.__execTexts })', { awaitPromise: false })
-  const exact9 = Array.isArray(exec9.calls) && exec9.calls.includes('copy') && exec9.texts[0] === target.content
+  const exact9 = Array.isArray(exec9.calls) && exec9.calls.includes('copy') && exec9.texts[0] === expected9
   RESULT.phases.copyFallbackUndefined = {
     clipboardForcedUndefined: fallbackReady, clickVia: click9, execCommands: exec9.calls,
-    exactMatch: exact9, hintText: s9.hintText, notice: s9.notice
+    exactMatch: exact9, expectedLen: expected9.length,
+    copiedClass: s9.copiedClass, checkIconDisplay: s9.checkIconDisplay, hintText: s9.hintText, notice: s9.notice
   }
   console.log('[阶段9 复制·回退A(clipboard 缺失)]', JSON.stringify(RESULT.phases.copyFallbackUndefined))
-  assert('⑨', fallbackReady === true && click9 !== 'none' && exact9 && s9.hintText === '已复制' && s9.notice === null,
+  assert('⑨', fallbackReady === true && click9 !== 'none' && exact9 && copyFeedbackOk(s9) && s9.notice === null,
   {
     clipboardForcedUndefined: fallbackReady, clickVia: click9, execCommands: exec9.calls,
-    exactMatch: exact9, hintText: s9.hintText, noticeHeldByNotice: s9.notice
+    exactMatch: exact9, execTextLen: Array.isArray(exec9.texts) && exec9.texts[0] ? String(exec9.texts[0]).length : null,
+    copiedClass: s9.copiedClass, copyIconDisplay: s9.copyIconDisplay, checkIconDisplay: s9.checkIconDisplay,
+    failureHint: s9.hintText, noticeHeldByNotice: s9.notice
   })
 
   // ── 阶段 10：回退 B —— clipboard 存在但 writeText 被拒 ─────────────────
+  await waitCopyStateCleared(target.id)
   await waitHintGone(target.id)
   const rejectReady = await evaluate(`(() => {
     window.__execCalls = []
@@ -745,23 +989,28 @@ try {
     })
     return typeof navigator.clipboard.writeText === 'function'
   })()`, { awaitPromise: false })
-  const center10 = (await evaluate(msgFactsExpr(target.id), { awaitPromise: false })).center
+  const fx10 = await evaluate(msgFactsExpr(target.id), { awaitPromise: false })
+  const expected10 = fx10.copyTextFromParts
+  const center10 = fx10.center
   const click10 = await clickCopyAndWait(target.id, center10, async () => {
     const n = await evaluate('window.__execCalls.length', { awaitPromise: false })
     return typeof n === 'number' && n > 0
   })
   const s10 = await evaluate(msgFactsExpr(target.id), { awaitPromise: false })
   const exec10 = await evaluate('({ calls: window.__execCalls, texts: window.__execTexts, rejects: window.__clipRejects })', { awaitPromise: false })
-  const exact10 = Array.isArray(exec10.calls) && exec10.calls.includes('copy') && exec10.texts[0] === target.content
+  const exact10 = Array.isArray(exec10.calls) && exec10.calls.includes('copy') && exec10.texts[0] === expected10
   RESULT.phases.copyFallbackRejected = {
     writeTextRejects: exec10.rejects, clickVia: click10, execCommands: exec10.calls,
-    exactMatch: exact10, hintText: s10.hintText, notice: s10.notice
+    exactMatch: exact10, expectedLen: expected10.length,
+    copiedClass: s10.copiedClass, checkIconDisplay: s10.checkIconDisplay, hintText: s10.hintText, notice: s10.notice
   }
   console.log('[阶段10 复制·回退B(writeText 被拒)]', JSON.stringify(RESULT.phases.copyFallbackRejected))
-  assert('⑩', rejectReady === true && click10 !== 'none' && exec10.rejects === 1 && exact10 && s10.hintText === '已复制' && s10.notice === null,
+  assert('⑩', rejectReady === true && click10 !== 'none' && exec10.rejects === 1 && exact10
+    && copyFeedbackOk(s10) && s10.notice === null,
   {
     writeTextRejects: exec10.rejects, clickVia: click10, execCommands: exec10.calls, exactMatch: exact10,
-    hintText: s10.hintText, noticeHeldByNotice: s10.notice
+    copiedClass: s10.copiedClass, copyIconDisplay: s10.copyIconDisplay, checkIconDisplay: s10.checkIconDisplay,
+    failureHint: s10.hintText, noticeHeldByNotice: s10.notice
   })
 
   // 还原被注入的剪贴板/execCommand（后续阶段不再依赖它们）
@@ -773,26 +1022,77 @@ try {
   })()`, { awaitPromise: false })
 
   // ── 阶段 11：停止不误闪红条（项 3 主证据） ──────────────────────────────
+  // 本批修的是**前置缺失**（原红因 = inflightBeforeStop: null / 停止钮点不动）：
+  //   停止只能打在**真的在飞**的轮上。原实现沿用上一阶段的会话（上下文已有纯文本轮），上游
+  //   （真模型 / 桩的轮次台账）都不会再发 DANGER 工具调用 ⇒ 从未进入在途态 ⇒ 点击空转。
+  //   现口径 = 换新会话 + 两臂按序造在途轮（见 startInflightRound），并改用**现行**停止判据：
+  //   `notice` 保持 null（store 已不再写「已请求取消本轮对话」——该文案全文检索为零），
+  //   停止的正向证据改由消息尾 `msg-stopped-{id}` chip + `/runs/{runId}` 收敛为 CANCELLED 承担。
   const CONFIRM_PROMPT = '请立即调用 start_export 工具启动任务 1 的导出作业（系统会自动弹出确认卡片，无需再询问我）'
-  const inflight1 = await startSuspendedRound(CONFIRM_PROMPT)
-  const beforeStop = await evaluate(msgFactsExpr(target.id), { awaitPromise: false })
-  await evaluate(`(async () => { await ${AI_EXPR}.stop(); return true })()`)
-  await sleep(1200)
-  const s11 = await evaluate(msgFactsExpr(target.id), { awaitPromise: false })
+  const inflight1 = await startInflightRound(CONFIRM_PROMPT)
+  let stop11 = null
+  let stopChip11 = null
+  let status11 = null
+  let beforeStop = null
+  let s11 = null
+  let stopClickedAt11 = null
+  let cancelLatency11 = null
+  if (inflight1) {
+    beforeStop = await evaluate(rldFactsExpr(), { awaitPromise: false })
+    stopClickedAt11 = Date.now()
+    stop11 = await evaluate(`(() => {
+      const b = document.querySelector('[data-testid="stop-btn"]')
+      if (!b) return { clicked: false, reason: 'no-stop-btn' }
+      const r = { clicked: true, visible: b.offsetParent !== null, disabled: b.disabled === true }
+      b.click()
+      return r
+    })()`, { awaitPromise: false })
+    await sleep(1200)
+    s11 = await evaluate(rldFactsExpr(), { awaitPromise: false })
+    stopChip11 = await evaluate(`(() => {
+      const ai = ${AI_EXPR}
+      const host = [...ai.messages].reverse().find((m) => m.role === 'assistant')
+      return host
+        ? { id: host.id, chip: !!document.querySelector('[data-testid="msg-stopped-' + host.id + '"]'),
+            textLen: (host.content || '').length }
+        : null
+    })()`, { awaitPromise: false })
+    if (inflight1.runId) {
+      for (let i = 0; i < 30; i++) { // 3s 预算：停止后 /runs/{runId} 应收敛为 CANCELLED
+        status11 = await runStatus(inflight1.runId)
+        if (status11 === 'CANCELLED') { cancelLatency11 = Date.now() - stopClickedAt11; break }
+        await sleep(100)
+      }
+    }
+  }
   RESULT.phases.stopNoRedBanner = {
-    inflightBeforeStop: inflight1, loadingBeforeStop: beforeStop.loading, suspendedBeforeStop: beforeStop.suspended,
-    stopped: s11.stopped, streamInterrupted: s11.streamInterrupted,
-    interruptedBanner: s11.interruptedBanner, notice: s11.notice
+    inflightBeforeStop: inflight1,
+    stopEntry: stop11,
+    loadingBeforeStop: beforeStop ? beforeStop.loading : null,
+    suspendedBeforeStop: beforeStop ? beforeStop.suspended : null,
+    stopped: s11 ? s11.stopped : null, streamInterrupted: s11 ? s11.streamInterrupted : null,
+    interruptedBanner: s11 ? s11.banner : null, notice: s11 ? s11.notice : null,
+    loadingAfterStop: s11 ? s11.loading : null, suspendedAfterStop: s11 ? s11.suspended : null,
+    stoppedChip: stopChip11, runStatusAfterStop: status11,
+    cancelLatencyMs: cancelLatency11
   }
   console.log('[阶段11 停止]', JSON.stringify(RESULT.phases.stopNoRedBanner))
-  assert('⑪', !!inflight1 && beforeStop.loading === true
-    && s11.stopped === true && s11.streamInterrupted === false
-    && s11.interruptedBanner === false && s11.notice === '已请求取消本轮对话',
-  {
-    inflightRunId: inflight1 ? inflight1.runId : null, suspendedBeforeStop: beforeStop.suspended,
-    stopped: s11.stopped, streamInterrupted: s11.streamInterrupted,
-    redBannerPresent: s11.interruptedBanner, notice: s11.notice
-  })
+  if (!inflight1) {
+    RESULT.skipped = { ...(RESULT.skipped || {}), '⑪': '两臂（确认门挂起 / 长流）均未造出在飞轮，判据无前置；不是产品结论' }
+    console.log('[断言⑪] SKIP 未造出在途轮（前置缺失，理由见 startInflightRound）')
+  } else {
+    assert('⑪', beforeStop.loading === true && beforeStop.activeRunId !== null
+      && !!stop11 && stop11.clicked === true && stop11.visible === true && stop11.disabled === false
+      && s11.stopped === true && s11.streamInterrupted === false && s11.notice === null
+      && s11.banner === false && s11.loading === false && s11.suspended === false
+      && !!stopChip11 && stopChip11.chip === true && status11 === 'CANCELLED',
+    {
+      inflightRunId: inflight1.runId, form: inflight1.form,
+      stopEntry: stop11, stopped: s11.stopped, streamInterrupted: s11.streamInterrupted,
+      redBannerPresent: s11.banner, notice: s11.notice,
+      stoppedChip: stopChip11, runStatusAfterStop: status11
+    })
+  }
 
   // ── 阶段 13：骨架屏按 historyLoaded 接线（项 4） ────────────────────────
   // 手法：清镜像后 reload，并用 Fetch 域把历史请求**挂住**（不放行）⇒ 稳定停在"无消息 + 对账未完成"
@@ -837,21 +1137,37 @@ try {
   // ══════════════════════════════════════════════════════════════════════════
 
   // ── 阶段 14：流式中真刷新 → 在途轮续显 + 合并不双份 ─────────────────────
-  // 形态：桩的确定性长文本轮（帧间隔 = RLD_FRAME_GAP_MS，5 帧 ≈ 12s 在途窗口）。
-  // 真刷新（Page.navigate = F5）后内存态全丢，只剩 sessionStorage 镜像 + 后端 /history 与
-  // /runs/current —— 这正是 R-01 / R-13 要求的形态，jsdom 无法表达。
-  await evaluate(`(async () => { await ${AI_EXPR}.resetSession(); return true })()`)
-  await sleep(400)
-  const promptRld1 = `命名轮蓝本 RLD1-${STAMP}：turn-text stall-frames=${RLD_FRAME_GAP_MS}`
-  const sidRld1 = await evaluate(`${AI_EXPR}.sessionId`, { awaitPromise: false })
-  await evaluate(`(() => { void ${AI_EXPR}.send(${JSON.stringify(promptRld1)}); return true })()`, { awaitPromise: false })
-  const inflightRld1 = await waitFor(
-    `(() => { const ai = ${AI_EXPR}
-      const last = [...ai.messages].reverse().find(m => m.role === 'assistant')
-      return (ai.loading && last && last.content && last.content.length > 0)
-        ? { runId: ai.activeRunId, partialLen: last.content.length, count: ai.messages.length } : null })()`,
-    { tries: 120, intervalMs: 100 }
-  )
+  // 形态：长文本轮。桩侧由 `turn-text stall-frames` 撑开帧间隔（确定性 5 帧 ≈ 12s），
+  // 真模型侧由"要求长答"撑开（模型的回答越长，在途窗口越宽）。真刷新（Page.navigate = F5）后
+  // 内存态全丢，只剩 sessionStorage 镜像 + 后端 /history 与 /runs/current —— 这正是 R-01 / R-13
+  // 要求的形态，jsdom 无法表达。
+  //
+  // 在途窗口守门（本批修）：真模型下回答可能 2~4s 就收尾，reload 本身要 1.5~2.5s ⇒ 偶尔 reload 落地时
+  // 该轮**已经结束**（⑭/⑰ 就会红在"刷新后没有在途轮"，那是环境时序，不是产品结论）。故 reload 前
+  // 复查 `ai.loading`，已收尾就换新会话重试一次（最多 2 次）。
+  const RLD_LONG_ASK = '；请用不少于 600 字分点详细说明导出任务的完整推进流程。'
+  let promptRld1 = ''
+  let sidRld1 = null
+  let inflightRld1 = null
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await evaluate(`(async () => { await ${AI_EXPR}.resetSession(); return true })()`)
+    await sleep(400)
+    const tag = attempt === 0 ? '' : '-b'
+    promptRld1 = `命名轮蓝本 RLD1-${STAMP}${tag}：turn-text stall-frames=${RLD_FRAME_GAP_MS}${RLD_LONG_ASK}`
+    sidRld1 = await evaluate(`${AI_EXPR}.sessionId`, { awaitPromise: false })
+    await evaluate(`(() => { void ${AI_EXPR}.send(${JSON.stringify(promptRld1)}); return true })()`, { awaitPromise: false })
+    inflightRld1 = await waitFor(
+      `(() => { const ai = ${AI_EXPR}
+        const last = [...ai.messages].reverse().find(m => m.role === 'assistant')
+        return (ai.loading && last && last.content && last.content.length > 0)
+          ? { runId: ai.activeRunId, partialLen: last.content.length, partialText: last.content,
+              count: ai.messages.length } : null })()`,
+      { tries: 120, intervalMs: 100 }
+    )
+    const stillInFlight = await evaluate(`${AI_EXPR}.loading`, { awaitPromise: false })
+    if (inflightRld1 && stillInFlight) break
+    console.log(`[阶段14] 在途窗口已关闭（第 ${attempt + 1} 次：loading=${stillInFlight}），换新会话重试`)
+  }
   const mirrorBeforeReload = await evaluate(
     `(() => { const raw = sessionStorage.getItem('ai-mirror:' + ${AI_EXPR}.sessionId)
       if (!raw) return null
@@ -861,13 +1177,15 @@ try {
     { awaitPromise: false }
   )
   await realReload('阶段14')
-  // 刷新后仍在途：historyLoaded（历史/镜像合并完成）且 loading（静默续收已接管）
+  // 刷新后仍在途：historyLoaded（历史/镜像合并完成）且 loading（静默续收已接管）**且已续上一段正文**。
+  // 第三个条件不是放宽而是**采样时点**：续收按 `lastSeq=0` 全量重放，`loading` 先真、正文随后到；
+  // 桩下重放是瞬时的，真模型下要等首段 delta（本判据要证的正是"有正文"，故等它出现）。
   const afterReloadRld1 = await waitFor(
     `(() => { const ai = ${AI_EXPR}
       if (!(ai.historyLoaded && ai.loading)) return null
       const f = ${rldFactsExpr()}
-      return f })()`,
-    { tries: 100, intervalMs: 100 }
+      return (f.lastAssistant && f.lastAssistant.text.length > 0) ? f : null })()`,
+    { tries: 120, intervalMs: 100 }
   )
   const phase14 = {
     inflightBeforeReload: inflightRld1,
@@ -898,73 +1216,166 @@ try {
     takeoverHint: afterReloadRld1 ? afterReloadRld1.takeoverHint : null
   })
 
-  // ⑮ 续收到尾：正文与桩的确定性文本逐字相等（不是"停在半截"）
-  const convergedRld1 = await waitFor(
-    `(() => { const ai = ${AI_EXPR}
+  // ⑮ 续收到尾：正文**续上了且收尾完整**（不是"停在半截"）。判据两臂，按环境取一（都严格）：
+  //   桩臂 = 刷新时刻的部分正文是桩确定性文本的前缀（桩下恒真）⇒ 收敛正文与 `TURN_TEXT` **逐字相等**；
+  //   非桩臂 = 上游是别的模型/真模型（常开后端常见）⇒ 收敛正文必须与 `/history` 持久化的该轮
+  //           assistant 正文**逐字相等**（UI 与后端同源收尾），且比部分正文更长。
+  // 为什么加第二臂：写死桩文本时，一旦常开后端接了真模型，本条永远红 —— 那是环境依赖，不是产品结论。
+  //
+  // 收敛判定（本批修正）：只等 `!loading` **不够**。工具轮在"工具段结束 → 续收建立"之间会出现
+  // 短暂的 `loading=false`（实测采到一次正文仅 31 字、而 `/history` 已 278 字的状态，被误判成
+  // "停在半截"）。故判据 = `!loading && 末条 assistant 已 done/非 streaming` **且** 正文与期望
+  // 逐字相等；`/history` 写入滞后靠重读吸收（250ms × 120 = 30s 预算）。
+  const partialTextRld1 = String(inflightRld1?.partialText ?? '')
+  const stubArmRld1 = partialTextRld1 !== '' && TURN_TEXT.startsWith(partialTextRld1)
+  let convergedRld1 = null
+  let lastFactsRld1 = null
+  let convergedTriesRld1 = 0
+  let compRld1 = historyComposition(await historyPayload(sidRld1))
+  for (let i = 0; i < 120; i++) {
+    convergedTriesRld1 = i + 1
+    const facts = await evaluate(`(() => { const ai = ${AI_EXPR}
       if (ai.loading) return null
-      const f = ${rldFactsExpr()}
-      return f })()`,
-    { tries: 120, intervalMs: 250 }
-  )
-  const textRld1 = convergedRld1 ? String(convergedRld1.lastAssistant?.text ?? '') : ''
+      const last = [...ai.messages].reverse().find((m) => m.role === 'assistant')
+      if (!last || last.done === false || last.streaming === true) return null
+      return { id: last.id, text: last.content || '' } })()`, { awaitPromise: false })
+    if (facts) {
+      lastFactsRld1 = facts
+      const expectedNow = stubArmRld1 ? TURN_TEXT : compRld1.lastAssistantText
+      if (expectedNow !== '' && facts.text === expectedNow) {
+        convergedRld1 = await evaluate(rldFactsExpr(), { awaitPromise: false })
+        break
+      }
+    }
+    if (i % 4 === 3) compRld1 = historyComposition(await historyPayload(sidRld1))
+    await sleep(250)
+  }
+  compRld1 = historyComposition(await historyPayload(sidRld1))
+  const textRld1 = String(lastFactsRld1?.text ?? '')
+  const textArmOk = convergedRld1 !== null
   RESULT.phases.rldReloadConverged = {
     converged: !!convergedRld1, textLen: textRld1.length,
-    exactMatch: textRld1 === TURN_TEXT, banner: convergedRld1 ? convergedRld1.banner : null,
+    stubArm: stubArmRld1, exactStubMatch: textRld1 === TURN_TEXT,
+    exactPersistMatch: textRld1 === compRld1.lastAssistantText,
+    persistedLen: compRld1.lastAssistantText.length,
+    partialLenAtReload: partialTextRld1.length,
+    grewAfterReload: textRld1.length >= partialTextRld1.length,
+    convergedTries: convergedTriesRld1,
+    banner: convergedRld1 ? convergedRld1.banner : null,
     streamInterrupted: convergedRld1 ? convergedRld1.streamInterrupted : null,
     lastAssistantId: convergedRld1 && convergedRld1.lastAssistant ? convergedRld1.lastAssistant.id : null
   }
   console.log('[阶段14 续收到底]', JSON.stringify({
     ...RESULT.phases.rldReloadConverged, textHead: textRld1.slice(0, 24)
   }))
-  assert('⑮', !!convergedRld1 && textRld1 === TURN_TEXT
-    && convergedRld1.banner === false && convergedRld1.streamInterrupted === false,
+  assert('⑮', textArmOk
+    && textRld1.length >= partialTextRld1.length
+    && !!convergedRld1 && convergedRld1.banner === false && convergedRld1.streamInterrupted === false,
   {
-    exactMatch: textRld1 === TURN_TEXT, textLen: textRld1.length, expectedLen: TURN_TEXT.length,
+    stubArm: stubArmRld1, exactStubMatch: textRld1 === TURN_TEXT,
+    exactPersistMatch: textRld1 === compRld1.lastAssistantText,
+    textLen: textRld1.length, persistedLen: compRld1.lastAssistantText.length,
+    partialLenAtReload: partialTextRld1.length, convergedTries: convergedTriesRld1,
     textHead: textRld1.slice(0, 24), redBanner: convergedRld1 ? convergedRld1.banner : null
   })
 
-  // ⑯ 历史 + 镜像合并**不双份**：UI 气泡数 == /history 条数；同一提问恰 1 条 user 气泡
-  // 注：用户气泡文本经后端 InputSanitizer 的 NFKC 归一（全角标点折半角），故按**唯一标记**
-  // （提示词里的 stamp 后缀）计数，不逐字比对整串 —— 归一不是缺陷，见批G · R5/R2 口径。
+  // ⑯ 历史 + 镜像合并**不双份**（本批改判据口径）：按**渲染等价**核对，而不是"UI 气泡数 ==
+  // `/history` 条数"。后者只在纯文本轮成立：工具轮的历史含 `assistant(tool_calls)` 与 `role:tool`
+  // 两类**不产气泡**的条目（`role:tool` 不建消息、同轮多条 ASSISTANT 由前端 R-150 合并成 1 条），
+  // 于是"4 条历史 vs 2 个气泡"是正确形态（实证见 2026-10-23 复跑 ⑯ 详单）。
+  // 现行判据 = user 气泡数 == 历史 USER 条目数（不丢不双份）+ 同一提问恰 1 条 + assistant 恰 1 条
+  // 且正文非空（不"整替"）+ 气泡 id 唯一 + 计数自洽（user + assistant == 总气泡）。
+  // 用户气泡文本经后端 InputSanitizer 的 NFKC 归一（全角标点折半角），故按**唯一标记**（提示词的
+  // stamp 后缀，纯 ASCII、归一不动它）计数，不逐字比对整串 —— 归一不是缺陷，见批G · R5/R2 口径。
   const uiCountRld1 = convergedRld1 ? convergedRld1.count : null
-  const historyCountRld1 = await waitCount(sidRld1, (n) => n === uiCountRld1)
+  const pushRld1 = await historyPayload(sidRld1)
+  const compRld1b = historyComposition(pushRld1)
+  const historyCountRld1 = pushRld1 ? pushRld1.count : null
   const markerRld1 = `RLD1-${STAMP}`
   const userBubblesRld1 = convergedRld1
     ? convergedRld1.userTexts.filter((t) => t.includes(markerRld1)).length : null
+  const uiUserRld1 = convergedRld1 ? convergedRld1.userTexts.length : null
+  const uiAssistantRld1 = convergedRld1 ? convergedRld1.assistantTexts.length : null
+  // 渲染等价：USER/SYSTEM 条目各产 1 条气泡；ASSISTANT 条目（不论几条）同轮合并成 1 条气泡；
+  // TOOL 条目不产气泡。
+  const expectedAssistantRld1 = compRld1b.assistantWithText > 0 ? 1 : 0
   RESULT.phases.rldMergeNoDuplicate = {
     uiMessages: uiCountRld1, backendHistoryCount: historyCountRld1,
+    backendHistoryComposition: compRld1b,
+    // 诊断留痕（"samePromptUserBubbles=0 闪红"复核用）：UI 侧角色/文本头 + 历史侧条目类型/文本头
+    uiRoles: convergedRld1 ? convergedRld1.roles : null,
+    uiTextHeads: convergedRld1 ? convergedRld1.textHeads : null,
+    historyItemTypes: (pushRld1?.messages ?? []).map((i) => String(i?.type ?? 'UNKNOWN').toUpperCase()),
+    historyTextHeads: (pushRld1?.messages ?? []).map((i) => String(i?.text ?? '').slice(0, 24)),
+    uiUserBubbles: uiUserRld1, uiAssistantBubbles: uiAssistantRld1,
+    expectedUserBubbles: compRld1b.byType.USER + compRld1b.byType.SYSTEM,
+    expectedAssistantBubbles: expectedAssistantRld1,
     samePromptUserBubbles: userBubblesRld1,
-    assistantBubbles: convergedRld1 ? convergedRld1.assistantTexts.length : null,
     assistantIdsUnique: convergedRld1
       ? new Set(convergedRld1.assistantIds).size === convergedRld1.assistantIds.length : null
   }
-  console.log('[阶段14 合并不双份]', JSON.stringify(RESULT.phases.rldMergeNoDuplicate))
-  assert('⑯', convergedRld1 != null && uiCountRld1 === historyCountRld1
+  console.log('[阶段14 合并不双份]', JSON.stringify({
+    uiMessages: uiCountRld1, backendHistoryCount: historyCountRld1,
+    historyTotal: compRld1b.total, byType: compRld1b.byType,
+    assistantWithText: compRld1b.assistantWithText, lastAssistantLen: compRld1b.lastAssistantText.length,
+    uiRoles: RESULT.phases.rldMergeNoDuplicate.uiRoles,
+    uiUserBubbles: uiUserRld1, uiAssistantBubbles: uiAssistantRld1,
+    expectedUserBubbles: compRld1b.byType.USER + compRld1b.byType.SYSTEM,
+    expectedAssistantBubbles: expectedAssistantRld1,
+    samePromptUserBubbles: userBubblesRld1,
+    assistantIdsUnique: RESULT.phases.rldMergeNoDuplicate.assistantIdsUnique
+  }))
+  assert('⑯', convergedRld1 != null && !!pushRld1
+    && uiUserRld1 === compRld1b.byType.USER + compRld1b.byType.SYSTEM
     && userBubblesRld1 === 1
-    && convergedRld1.assistantTexts.length === 1
+    && uiAssistantRld1 === expectedAssistantRld1
+    && uiCountRld1 === uiUserRld1 + uiAssistantRld1
+    && !!convergedRld1.lastAssistant && convergedRld1.lastAssistant.text.length > 0
     && new Set(convergedRld1.assistantIds).size === convergedRld1.assistantIds.length,
-  RESULT.phases.rldMergeNoDuplicate)
+  // 断言详单只放**摘要**（全文落在 RESULT.phases.rldMergeNoDuplicate，避免日志被整段回答淹没）
+  {
+    uiMessages: uiCountRld1, backendHistoryCount: historyCountRld1,
+    historyTotal: compRld1b.total, byType: compRld1b.byType,
+    lastAssistantLen: compRld1b.lastAssistantText.length,
+    uiRoles: RESULT.phases.rldMergeNoDuplicate.uiRoles,
+    uiUserBubbles: uiUserRld1, uiAssistantBubbles: uiAssistantRld1,
+    expectedUserBubbles: compRld1b.byType.USER + compRld1b.byType.SYSTEM,
+    expectedAssistantBubbles: expectedAssistantRld1,
+    samePromptUserBubbles: userBubblesRld1,
+    assistantIdsUnique: RESULT.phases.rldMergeNoDuplicate.assistantIdsUnique
+  })
 
   // ── 阶段 15：在途轮真刷新 → 停止入口（R-12） ───────────────────────────
-  await evaluate(`(async () => { await ${AI_EXPR}.resetSession(); return true })()`)
-  await sleep(400)
-  const promptRld2 = `命名轮蓝本 RLD2-${STAMP}：turn-text stall-frames=${RLD_FRAME_GAP_MS}`
+  // 同 ⑭ 的在途窗口守门：reload 前复查 `loading`，已收尾就换新会话重试一次。
   const markerRld2 = `RLD2-${STAMP}`
-  await evaluate(`(() => { void ${AI_EXPR}.send(${JSON.stringify(promptRld2)}); return true })()`, { awaitPromise: false })
-  const inflightRld2 = await waitFor(
-    `(() => { const ai = ${AI_EXPR}
-      const last = [...ai.messages].reverse().find(m => m.role === 'assistant')
-      return (ai.loading && last && last.content && last.content.length > 0)
-        ? { runId: ai.activeRunId } : null })()`,
-    { tries: 120, intervalMs: 100 }
-  )
+  let inflightRld2 = null
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await evaluate(`(async () => { await ${AI_EXPR}.resetSession(); return true })()`)
+    await sleep(400)
+    const tag = attempt === 0 ? '' : '-b'
+    const promptRld2 = `命名轮蓝本 RLD2-${STAMP}${tag}：turn-text stall-frames=${RLD_FRAME_GAP_MS}${RLD_LONG_ASK}`
+    await evaluate(`(() => { void ${AI_EXPR}.send(${JSON.stringify(promptRld2)}); return true })()`, { awaitPromise: false })
+    inflightRld2 = await waitFor(
+      `(() => { const ai = ${AI_EXPR}
+        const last = [...ai.messages].reverse().find(m => m.role === 'assistant')
+        return (ai.loading && last && last.content && last.content.length > 0)
+          ? { runId: ai.activeRunId } : null })()`,
+      { tries: 120, intervalMs: 100 }
+    )
+    const stillInFlight = await evaluate(`${AI_EXPR}.loading`, { awaitPromise: false })
+    if (inflightRld2 && stillInFlight) break
+    console.log(`[阶段15] 在途窗口已关闭（第 ${attempt + 1} 次：loading=${stillInFlight}），换新会话重试`)
+  }
   await realReload('阶段15')
   const stopReadyRld2 = await waitFor(
     `(() => { const ai = ${AI_EXPR}
       if (!(ai.historyLoaded && ai.loading)) return null
       const f = ${rldFactsExpr()}
-      return (f.stopVisible && f.stopDisabled === false) ? f : null })()`,
-    { tries: 100, intervalMs: 100 }
+      // 停止要打在**有正文在流**的轮上（⑱ 的前提是"已显示正文逐字保留"）——桩下重放瞬时，
+      // 真模型下要等首段 delta，故把"已有正文"一并作为就绪条件（采样时点，不是放宽判据）。
+      return (f.stopVisible && f.stopDisabled === false
+        && f.lastAssistant && f.lastAssistant.text.length > 0) ? f : null })()`,
+    { tries: 120, intervalMs: 100 }
   )
   const runIdRld2 = stopReadyRld2 ? stopReadyRld2.activeRunId : null
   // 点停止（真实 DOM 点击：用户可见入口，不是 store 直调）
@@ -1023,23 +1434,38 @@ try {
   )
   const currentFoundRld2 = afterStopReload
     ? await runCurrentFound(afterStopReload.sessionId) : null
+  const textBeforeRld2 = String(beforeStopReload?.lastAssistant?.text ?? '')
+  const textAfterRld2 = String(afterStopReload?.lastAssistant?.text ?? '')
+  const appendedRld2 = textAfterRld2.length - textBeforeRld2.length
   RESULT.phases.rldReloadAfterStop = {
     beforeReload: beforeStopReload && {
-      count: beforeStopReload.count, lastAssistantLen: beforeStopReload.lastAssistant?.text.length
+      count: beforeStopReload.count, lastAssistantLen: textBeforeRld2.length,
+      lastAssistantTail: textBeforeRld2.slice(-24),
+      roles: beforeStopReload.roles, textHeads: beforeStopReload.textHeads
     },
     afterReload: afterStopReload && {
-      count: afterStopReload.count, lastAssistantLen: afterStopReload.lastAssistant?.text.length,
+      count: afterStopReload.count, lastAssistantLen: textAfterRld2.length,
+      lastAssistantTail: textAfterRld2.slice(-24),
+      roles: afterStopReload.roles, textHeads: afterStopReload.textHeads,
       loading: afterStopReload.loading, suspended: afterStopReload.suspended,
       streamInterrupted: afterStopReload.streamInterrupted, banner: afterStopReload.banner,
       takeoverHint: afterStopReload.takeoverHint,
       samePromptUserBubbles: afterStopReload.userTexts.filter((t) => t.includes(markerRld2)).length
     },
+    // 诊断留痕（"闪红"复核用）：停止瞬间 UI 正文 vs 刷新后 `/history` 恢复的正文差几个字符、
+    // 差在哪 —— 原判据要求长度逐字相等，实测出现 280 → 283（服务端在停止瞬间多收尾了几个字符），
+    // 那是"历史更完整"，不是丢字。
+    textPrefixPreserved: textAfterRld2.startsWith(textBeforeRld2),
+    appendedAfterStopChars: appendedRld2,
     runsCurrentFound: currentFoundRld2
   }
   console.log('[阶段16 停止后刷新]', JSON.stringify(RESULT.phases.rldReloadAfterStop))
+  // ⑱ 判据（本批改口径）：正文**不丢已显示的部分** = 刷新后正文以停止瞬间的正文为前缀（允许服务端
+  // 多收尾若干字符），而不是长度逐字相等；其余（气泡数、无红条、无幽灵在途轮、用户提问恰 1 条）
+  // 一字不动。
   assert('⑱', !!beforeStopReload && !!afterStopReload
     && afterStopReload.count === beforeStopReload.count
-    && afterStopReload.lastAssistant?.text.length === beforeStopReload.lastAssistant?.text.length
+    && textBeforeRld2.length > 0 && textAfterRld2.startsWith(textBeforeRld2)
     && afterStopReload.streamInterrupted === false && afterStopReload.banner === false
     && afterStopReload.takeoverHint === false
     && afterStopReload.loading === false && afterStopReload.suspended === false
@@ -1099,16 +1525,24 @@ try {
   // 心跳一停即倒计时）→ 判定断流 → reattach（后端已死，失败）→ `onClose(terminal=false)` → 红条。
   // 即：本阶段同时证到"真断流仍会亮红条"与"看门狗兜底有效"，代价是约 92s 的确定性等待。
   //
-  // 破坏性守则（默认关闭 + 三重闸，见 killBackendByListeningPort）：未授权或闸不成立时本阶段
-  // 如实报 **SKIP**（不假绿）；本棒的编排脚本显式 `SMOKE_KILL_BACKEND=1` 打开该闸。
+  // 破坏性守则（默认关闭 + **四重**闸，见 killBackendByListeningPort）：未授权、或在保护端口
+  // （8081 / 5202 / 6379）上、或反查不到 java 进程时，本阶段如实报 **SKIP** 并把 `code` 与
+  // 触发条件一起落盘（不假绿）。标准跑法（页面 5202 → 代理 → 8081）**必然**落在 PROTECTED_PORT 档：
+  // 杀 8081 是施工硬红线，本脚本不提供任何绕过口子。
   //
-  // 先换新会话再起这一轮：桩上游的"轮次台账"以请求里**首条 user 消息**为指纹，同一指纹下同一条
-  // 路由只允许发起一次（桩的收敛契约，防工具循环风暴）——沿用旧会话会退化成文本轮、挂不起来。
-  await evaluate(`(async () => { await ${AI_EXPR}.resetSession(); return true })()`)
-  const inflight2 = await startSuspendedRound(CONFIRM_PROMPT)
-  const killed = inflight2
-    ? await killBackendByListeningPort()
-    : { ok: false, reason: '未进入挂起态（未执行杀进程）' }
+  // 先换新会话再起这一轮：上游的路由判定看本轮上下文（真模型看对话语境、桩看首条 user 消息的
+  // 轮次台账），沿用旧会话会退化成文本轮、挂不起来。
+  // 前置先判（非破坏性）：跑不了就**不造轮、不花模型调用**，直接带 code 落 SKIP。
+  const pre12 = killPrecondition()
+  let inflight2 = null
+  let killed = pre12
+  if (pre12.ok) {
+    await evaluate(`(async () => { await ${AI_EXPR}.resetSession(); return true })()`)
+    inflight2 = await startSuspendedRound(CONFIRM_PROMPT)
+    killed = inflight2
+      ? await killBackendByListeningPort()
+      : { ok: false, code: 'NO_INFLIGHT', reason: '未进入挂起态（未执行杀进程）' }
+  }
   const samples = []
   let sawInterrupt = null
   if (killed.ok) {
@@ -1132,12 +1566,14 @@ try {
     streamInterrupted: s12 ? s12.streamInterrupted : null,
     stopped: s12 ? s12.stopped : null,
     interruptedBanner: s12 ? s12.interruptedBanner : null,
-    notice: s12 ? s12.notice : null
+    notice: s12 ? s12.notice : null,
+    skipCode: killed.ok ? null : killed.code ?? 'UNKNOWN',
+    runnableWhen: 'SMOKE_API/SMOKE_APP 指向一次性实例对（后端 22730 + 前端 22731，前端 VITE_API_BASE=http://localhost:22730，Redis DB 2）+ SMOKE_KILL_BACKEND=1'
   }
   console.log('[阶段12 真断流对照]', JSON.stringify(RESULT.phases.realInterruptStillRed))
   if (!killed.ok) {
-    RESULT.skipped = { ...(RESULT.skipped || {}), '⑫': killed.reason }
-    console.log(`[断言⑫] SKIP ${killed.reason}`)
+    RESULT.skipped = { ...(RESULT.skipped || {}), '⑫': `${killed.code}: ${killed.reason}` }
+    console.log(`[断言⑫] SKIP [${killed.code}] ${killed.reason}`)
   } else {
     assert('⑫', !!inflight2 && !!sawInterrupt && !!s12 && s12.streamInterrupted === true
       && s12.interruptedBanner === true && s12.stopped === false,
