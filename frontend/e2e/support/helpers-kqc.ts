@@ -10,7 +10,7 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import net from 'node:net'
 import { join } from 'node:path'
-import { PORTS, REDIS_DB, RUN_DIR } from './harness'
+import { PORTS, REDIS_DB, RUN_DIR, utf8Sink } from './harness'
 
 export const KQC_RUN_DIR = RUN_DIR
 export const STUB_DIR = join(RUN_DIR, 'stub')
@@ -566,6 +566,9 @@ export function redisExec(args: string[], db = KQC_REDIS_DB): Promise<{ type: st
   return new Promise((done, fail) => {
     const socket = net.connect(port, host)
     let buffer = ''
+    // 跨块的 UTF-8 必须流式解码：逐块 toString 会把被块边界切开的中文解成 U+FFFD
+    //（K07「缓存值不变」的 CI 假红就是这么来的，见 harness.utf8Sink）
+    const sink = utf8Sink()
     let selected = false
     let idle: NodeJS.Timeout | null = null
     let settled = false
@@ -574,7 +577,7 @@ export function redisExec(args: string[], db = KQC_REDIS_DB): Promise<{ type: st
       settled = true
       if (idle) clearTimeout(idle)
       socket.destroy()
-      const text = buffer.replace(/\r\n$/, '')
+      const text = (buffer + sink.end()).replace(/\r\n$/, '')
       if (text.startsWith(':')) return done({ type: 'int', value: text.slice(1) })
       if (text.startsWith('$')) {
         const split = text.indexOf('\r\n')
@@ -594,7 +597,7 @@ export function redisExec(args: string[], db = KQC_REDIS_DB): Promise<{ type: st
     socket.setTimeout(5000, () => failOnce(new Error('redis 超时')))
     socket.on('error', failOnce)
     socket.on('data', (chunk) => {
-      buffer += chunk.toString('utf8')
+      buffer += sink.push(chunk)
       if (idle) clearTimeout(idle)
       idle = setTimeout(finish, 80)
       if (!selected && buffer.includes('\r\n')) {
@@ -623,6 +626,7 @@ export function redisKeys(pattern: string, db = KQC_REDIS_DB): Promise<string[]>
   return new Promise((done, fail) => {
     const socket = net.connect(port, host)
     let buffer = ''
+    const sink = utf8Sink()
     let selected = false
     let settled = false
     const timer = setTimeout(() => failOnce(new Error('redis KEYS 超时')), 5000)
@@ -645,7 +649,7 @@ export function redisKeys(pattern: string, db = KQC_REDIS_DB): Promise<string[]>
     socket.setTimeout(5000, () => failOnce(new Error('redis KEYS 超时')))
     socket.on('error', failOnce)
     socket.on('data', (chunk) => {
-      buffer += chunk.toString('utf8')
+      buffer += sink.push(chunk)
       if (settled) return
       if (!selected && buffer.includes('\r\n')) {
         selected = true
@@ -663,7 +667,7 @@ export function redisKeys(pattern: string, db = KQC_REDIS_DB): Promise<string[]>
           settled = true
           clearTimeout(timer)
           socket.destroy()
-          done(parse(buffer))
+          done(parse(buffer + sink.end()))
         }
       }
     })

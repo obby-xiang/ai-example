@@ -34,6 +34,7 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import net from 'node:net'
 import { delimiter, isAbsolute, join, resolve } from 'node:path'
+import { StringDecoder } from 'node:string_decoder'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 
@@ -131,6 +132,24 @@ async function assertPortFree(port: number, label: string): Promise<void> {
   )
 }
 
+/**
+ * 跨 TCP 分块的 UTF-8 收集器（RESP 回包用）。
+ *
+ * <p>`chunk.toString('utf8')` 是**逐块**解码：一个中文字符（3 字节）正好被块边界切开时，
+ * 两侧各解出一个 U+FFFD ⇒ 读回来的字符串里凭空多出「�」。CI 上 HGET 一篇 2.4KB 中文文档
+ * 就会偶发（本地 loopback 常常一块到底，所以只在 CI 露头）；K07「二次查询缓存值不变」
+ * 就是被这个假红打掉的（两个 `HGET` 只有一次落在这条边界上）。
+ *
+ * <p>`StringDecoder.write()` 会把块尾不完整的字节序列攒到下一块，`end()` 补最后一段。
+ */
+export function utf8Sink(): { push: (chunk: Buffer) => string; end: () => string } {
+  const decoder = new StringDecoder('utf8')
+  return {
+    push: (chunk: Buffer) => decoder.write(chunk),
+    end: () => decoder.end()
+  }
+}
+
 /** 极简 RESP 客户端：仅用于 SELECT + FLUSHDB（不引第三方依赖）。 */
 export function flushRedisDb(db: number): Promise<void> {
   const host = process.env.E2E_REDIS_HOST ?? '127.0.0.1'
@@ -138,6 +157,7 @@ export function flushRedisDb(db: number): Promise<void> {
   return new Promise((done) => {
     const socket = net.connect(port, host)
     let buffer = ''
+    const sink = utf8Sink()
     let step = 0
     let finished = false
     const finish = (): void => {
@@ -149,7 +169,7 @@ export function flushRedisDb(db: number): Promise<void> {
     socket.setTimeout(3000, finish)
     socket.on('error', finish)
     socket.on('data', (chunk) => {
-      buffer += chunk.toString('utf8')
+      buffer += sink.push(chunk)
       while (buffer.includes('\r\n')) {
         if (step === 0) {
           // +OK（SELECT）
@@ -184,6 +204,7 @@ export function redisCommand(db: number, args: string[]): Promise<string> {
   return new Promise((done, fail) => {
     const socket = net.connect(port, host)
     let buffer = ''
+    const sink = utf8Sink()
     let sent = false
     let settled = false
     const timer = setTimeout(() => {
@@ -197,7 +218,7 @@ export function redisCommand(db: number, args: string[]): Promise<string> {
       settled = true
       clearTimeout(timer)
       socket.destroy()
-      done(buffer)
+      done(buffer + sink.end())
     }
     socket.on('error', (error) => {
       if (settled) return
@@ -206,7 +227,7 @@ export function redisCommand(db: number, args: string[]): Promise<string> {
       fail(error)
     })
     socket.on('data', (chunk) => {
-      buffer += chunk.toString('utf8')
+      buffer += sink.push(chunk)
       if (!sent) {
         // 等 SELECT 的完整 +OK 行（只收到半行时不能提前发命令，否则回包会错位）
         if (!buffer.includes('\r\n')) return

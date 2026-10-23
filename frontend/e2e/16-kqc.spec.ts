@@ -358,6 +358,9 @@ test.describe('@stub 16 K 知识问答', () => {
     const contentBefore = await redisExec(['HGET', docKey, 'content'])
     expect(contentBefore.type).toBe('bulk')
     expect(contentBefore.value.length).toBeGreaterThan(1000)
+    // 正文完整性：缓存壳里不得出现 U+FFFD。这条把"读侧把多字节字符切坏"（TCP 分块逐块解码）
+    // 与"写侧用了错误字符集"两种故障都变成一句话可读的红，而不是靠后面"两次读取相等"的难读 diff。
+    expect(contentBefore.value, '缓存正文含 U+FFFD（读侧分块解码或写侧字符集有误）').not.toContain('\uFFFD')
     const shaBefore = await redisExec(['HGET', docKey, 'sha'])
     expect(shaBefore.type).toBe('bulk')
     expect(shaBefore.value.length).toBeGreaterThan(0)
