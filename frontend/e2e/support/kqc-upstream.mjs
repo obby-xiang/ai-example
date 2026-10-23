@@ -11,8 +11,12 @@
  *   - `tool=kb_search|kb_read_doc|kb_lookup_term&args={…}`  让上游发工具调用（结果由**真后端**
  *     真执行：真 Lucene 索引 / 真样例知识仓 / 真 KbText 定界与 8000 字符闸）；带 role=tool 的续轮
  *     只发文本收尾（收敛契约 ③：不制造请求风暴）；
+ *   - `tool=get_config_def&args={…}`  压缩档（C 域）**唯一**额外放行的业务工具：压缩是上下文机制，
+ *     与工具语义无关，而 KB 三工具可能因装配缺陷缺席（见 `C_DOMAIN_TOOLS` 注）；
  *   - `usage-shape=<last|repeat|zero-last|none>`  四种 usage 形状（数值取 `stub-routes.json`
  *     `usageShapes` 的唯一取数点，与本文件不各写一套）；
+ *   - 摘要请求（`RollingSummarizer` 指令头）回确定性六段摘要（L2/L3 的"摘要成功"面）；
+ *   - `summary-500`  摘要请求 500：带标记的**普通轮** arm，其后的**下一条**摘要请求回 5xx（一次性）；
  *   - `context-overflow`  上游 400 + 越窗措辞（措辞取产品 `ContextOverflow.MARKERS` 的真短语）。
  *
  * 未带标记的请求一律走确定性文本轮（与官方桩 `turn-text` 同形态），帧序固定：
@@ -213,6 +217,25 @@ function usageChunk(usage, model) {
 const ZERO_USAGE = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
 
 /**
+ * 非流式补全回执（`POST /chat/completions` 不带 `stream`）。
+ *
+ * 为什么摘要请求必须走这里：`ContextSummaryClient` 用 `ChatModel#call`（**非流式**），
+ * Spring AI 按 `chat.completion` 的 JSON 解析；回 SSE 帧会解析失败 ⇒ 摘要永远失败
+ * （实测：C-13 的 L2 卡在 L1、熔断 3 次打开）。
+ */
+function completion(res, text, model) {
+  const usage = usageOf(usageShapes().last)
+  json(res, 200, {
+    id: `chatcmpl-kqc-${++frameSeq}`,
+    object: 'chat.completion',
+    created: Math.floor(Date.now() / 1000),
+    model,
+    choices: [{ index: 0, message: { role: 'assistant', content: text }, finish_reason: 'stop' }],
+    usage
+  })
+}
+
+/**
  * 文本轮的四种 usage 落点（与官方桩 `textRound` 同语义）：
  * last = 只在末个 usage-only 帧；repeat = 每个分片都挂；zero-last = 首片真值 + 末帧 0/0/0；none = 不发。
  */
@@ -252,6 +275,48 @@ function toolFrames(tool, args, callId, model) {
 
 const KB_TOOLS = new Set(['kb_search', 'kb_read_doc', 'kb_lookup_term'])
 
+/**
+ * 压缩档（C 域）额外放行的**唯一**一个业务工具。
+ *
+ * 压缩是上下文机制，与工具语义无关：只要"真后端真执行过一条工具结果"就够。
+ * 之所以不复用 KB 三工具：L-87 合并后 `KbTools` 经 `ToolResultLimiter` 反向依赖 `ToolRegistry`，
+ * 而 `ToolRegistry` 的 `@PostConstruct` 扫描又在 `getBean` 这三件工具 —— 启动期循环依赖被那段
+ * `catch (Exception) { continue; }` 静默吞掉，三工具**整批消失**（37 → 34 个工具；见施工报告 B-KB-1）。
+ * 压缩谱系用例不该把判据绑在另一条缺陷上，故 C 域压缩档走本仓恒常披露的只读工具 `get_config_def`。
+ */
+const C_DOMAIN_TOOLS = new Set(['get_config_def'])
+
+/**
+ * 摘要请求识别（`RollingSummarizer` 的两段固定指令头；与产品提示词同源，不猜调用方身份）。
+ *
+ * 为什么必须显式区分：摘要请求的正文里带着 transcript（含历史 user 消息的 `tool=` 标记），
+ * 若按普通轮判定会把它当成"再来一次工具调用"，摘要器拿到空正文 ⇒ 被产品判成摘要失败。
+ * 这里的回执必须是**确定性非空文本**，L2 的"摘要成功"路径才有可断言的面。
+ */
+const SUMMARY_REQUEST = /You (summarize an AI assistant conversation|merge partial summaries of one AI assistant conversation)/
+
+/** 摘要回执（六项保留清单与 `RollingSummarizer.REQUIRED_SECTIONS` 同序；文本确定性）。 */
+const SUMMARY_TEXT = [
+  '（压缩摘要 · 桩）',
+  '1) USER GOAL: 反复核对标准费率口径并取工具结果作答。',
+  '2) CONFIRMED WORKSPACE AND PAGE OPERATIONS: 任务中心，未做任何页面写操作。',
+  '3) EXECUTED IRREVERSIBLE ACTIONS AND RESOURCE IDS: none。',
+  '4) UNRESOLVED ERRORS AND NEXT STEPS: none，继续按用户问题作答。',
+  '5) PENDING APPROVALS (toolCallId + tool name + argument digest): none。',
+  '6) COMPLETED - DO NOT REDO: 已完成的工具查询不再重跑。'
+].join('\n')
+
+/**
+ * `summary-500` 的 arm 状态：mark 命中后 **5 秒内 / 最多 8 次**摘要请求一律回 500。
+ *
+ * <p>为什么不是"一次性"：Spring AI 的 `ChatModel#call` 自带重试（5xx 会再试），只 500 一次
+ * 会被重试吃成"摘要成功"（实测：C-10 的熔断计数恒 0、档位直接进 L2）。窗口 + 次数双上限
+ * 既保证这一轮的所有尝试都失败，又不会把后续轮次一起毒死。
+ */
+const summaryFault = { armedUntilMs: 0, remaining: 0 }
+
+const SUMMARY_FAULT_MARKER = /\bsummary-500\b/
+
 function decide(body) {
   const userText = lastUserText(body)
   if (!userText) {
@@ -259,7 +324,7 @@ function decide(body) {
   }
   const wanted = requestToolOf(body)
   if (wanted) {
-    if (!KB_TOOLS.has(wanted.name)) {
+    if (!KB_TOOLS.has(wanted.name) && !C_DOMAIN_TOOLS.has(wanted.name)) {
       return { kind: 'text', text: TURN_TEXT, reason: `请求级工具 ${wanted.name} 不属于本域（K 域只承载 KB 三工具）` }
     }
     if (!disclosedTools(body).includes(wanted.name)) {
@@ -337,12 +402,36 @@ function handleChat(raw, res) {
   const model = typeof body?.model === 'string' && body.model ? body.model : 'kqc-stub'
   const userText = body ? lastUserText(body) : ''
   const shape = usageShapeOf(body)
+  // 摘要请求：LLM 侧旁路调用（`ContextSummaryClient` 单条 UserMessage，指令头固定）
+  const summaryRequest = SUMMARY_REQUEST.test(userText)
 
-  if (/\bcontext-overflow\b/.test(userText)) {
+  if (/\bcontext-overflow\b/.test(userText) && !summaryRequest) {
     record(index, raw, body ?? {}, { kind: 'error', status: 400, reason: 'context-overflow 注入（越窗 400）' })
     LOG(`req-${index} context-overflow → 400`)
     json(res, 400, OVERFLOW_BODY)
     return
+  }
+
+  if (summaryRequest) {
+    // `summary-500`：arm 窗口内（5s / 8 次）摘要请求一律 500 —— 覆盖 Spring AI 的 5xx 重试，
+    // 否则第二次尝试会成功、熔断计数留不下痕（arm 由带标记的普通轮写入：压缩发生在轮起点，
+    // 故 arm 必须早一轮，否则标记还没到上游、摘要请求已经发出）
+    if (summaryFault.remaining > 0 && summaryFault.armedUntilMs > Date.now()) {
+      summaryFault.remaining -= 1
+      record(index, raw, body ?? {}, { kind: 'error', status: 500, reason: 'summary-500 注入（摘要请求回 5xx）' })
+      LOG(`req-${index} summary-500 → 500（余 ${summaryFault.remaining}）`)
+      json(res, 500, { error: { message: 'kqc-stub: summary model unavailable', type: 'server_error' } })
+      return
+    }
+    record(index, raw, body ?? {}, { kind: 'summary', reason: '摘要请求（RollingSummarizer 指令头命中）' })
+    LOG(`req-${index} → summary`)
+    completion(res, SUMMARY_TEXT, model)
+    return
+  }
+  if (SUMMARY_FAULT_MARKER.test(userText)) {
+    summaryFault.armedUntilMs = Date.now() + 5000
+    summaryFault.remaining = 8
+    LOG(`req-${index} summary-500 armed`)
   }
 
   const decision = body === null

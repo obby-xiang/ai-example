@@ -25,7 +25,7 @@ export interface RawResponse {
   json: unknown
 }
 
-export async function httpRaw(method: 'GET' | 'POST', path: string, body?: unknown): Promise<RawResponse> {
+export async function httpRaw(method: 'GET' | 'POST' | 'PUT', path: string, body?: unknown): Promise<RawResponse> {
   const res = await fetch(`${API}${path}`, {
     method,
     headers: body === undefined ? undefined : { 'content-type': 'application/json' },
@@ -47,7 +47,7 @@ export async function apiData<T>(path: string): Promise<T> {
   const res = await httpRaw('GET', path)
   const body = res.json as { success?: boolean; data?: T } | null
   if (res.status !== 200 || body === null || body.success === false) {
-    throw new Error(`GET ${path} => HTTP ${res.status()} ${res.text.slice(0, 400)}`)
+    throw new Error(`GET ${path} => HTTP ${res.status} ${res.text.slice(0, 400)}`)
   }
   return body.data as T
 }
@@ -79,7 +79,14 @@ export interface ContextSnapshot {
   source: 'none' | 'stream' | 'estimate'
   estimated: boolean
   breakdown: Array<{ key: string; tokens: number }> | null
-  compaction: { level: string; circuit: string; reason?: string; lostTokens?: number; compactedTurns?: number } | null
+  compaction: {
+    level: string
+    circuit: string
+    reason?: string
+    lostTokens?: number
+    compactedTurns?: number
+    fuseFails?: number
+  } | null
 }
 
 /** `GET /api/ai/context/{sid}`（裸对象；503 = Redis 不可用，调用方自行判定）。 */
@@ -87,7 +94,7 @@ export async function contextSnapshot(sessionId: string, options: { ledger?: boo
   const suffix = options.ledger === true ? '?ledger=1' : ''
   const res = await httpRaw('GET', `/api/ai/context/${encodeURIComponent(sessionId)}${suffix}`)
   if (res.status !== 200) {
-    throw new Error(`GET /context => HTTP ${res.status()} ${res.text.slice(0, 300)}`)
+    throw new Error(`GET /context => HTTP ${res.status} ${res.text.slice(0, 300)}`)
   }
   return res.json as ContextSnapshot
 }
@@ -96,7 +103,7 @@ export async function contextSnapshot(sessionId: string, options: { ledger?: boo
 export async function contextLedger(sessionId: string): Promise<Array<Record<string, unknown>>> {
   const res = await httpRaw('GET', `/api/ai/context/${encodeURIComponent(sessionId)}?ledger=1`)
   if (res.status !== 200) {
-    throw new Error(`GET /context?ledger=1 => HTTP ${res.status()} ${res.text.slice(0, 300)}`)
+    throw new Error(`GET /context?ledger=1 => HTTP ${res.status} ${res.text.slice(0, 300)}`)
   }
   const body = res.json as { ledger?: Array<Record<string, unknown>> }
   return Array.isArray(body.ledger) ? body.ledger : []
@@ -107,14 +114,117 @@ export interface HealthView {
   contextLimitTokens: number | null
   compactionOn: boolean
   model: string
+  /** 当前默认运行目标的身份（压缩分母与 /health 同一取数点：模型行）。 */
+  providerId?: number | null
+  defaultModelId?: string | null
 }
 
 export function aiHealth(): Promise<HealthView> {
   // /api/ai/health 是**裸对象**（不是标准 {success,data} 包）
   return httpRaw('GET', '/api/ai/health').then((res) => {
-    if (res.status !== 200) throw new Error(`GET /api/ai/health => HTTP ${res.status()}`)
+    if (res.status !== 200) throw new Error(`GET /api/ai/health => HTTP ${res.status}`)
     return res.json as HealthView
   })
+}
+
+// ── 模型配置写面（分母 = `ai_model.max_context`；L-93）────────────────────────────
+//
+// 为什么用例要走写接口而不是 `--app.ai.context.limit-tokens`：自 L-89 起上限的唯一真源是
+// DB 行（`ContextLimitResolver`），过渡键只在"模型行没声明 max_context"时作启动期回退 ——
+// 用 env 压分母**结构性无效**（这正是 L-93 的实测结论：两次窗口配置下 level 恒 none）。
+// 故窗口由 `PUT /api/ai/providers/{id}/models/{modelId}` 改，改完用 `/health.contextLimitTokens`
+// 确认快照已重载（`/health` 与压缩判定同一个 resolver）再开跑。
+
+export interface ModelRowView {
+  modelId: string
+  displayName: string
+  maxContext: number | null
+  maxOutput: number | null
+  enabled: boolean
+  isDefault: boolean
+}
+
+export interface ProviderView {
+  id: number
+  code: string
+  source: string
+  enabled: boolean
+  models: ModelRowView[]
+}
+
+export interface ModelWindow {
+  providerId: number
+  modelId: string
+  maxContext: number | null
+}
+
+export function aiProviders(): Promise<ProviderView[]> {
+  return apiData<ProviderView[]>('/api/ai/providers')
+}
+
+/** 当前默认运行目标的模型行（= 压缩分母的那一行）。 */
+export async function currentModelWindow(): Promise<ModelWindow> {
+  const health = await aiHealth()
+  const providerId = health.providerId ?? null
+  const modelId = health.defaultModelId ?? null
+  if (providerId === null || modelId === null) {
+    throw new Error(`/health 未给出默认运行目标（providerId=${providerId} / modelId=${modelId}）`)
+  }
+  const provider = (await aiProviders()).find((row) => row.id === providerId)
+  const model = provider?.models.find((row) => row.modelId === modelId)
+  return { providerId, modelId, maxContext: model?.maxContext ?? null }
+}
+
+/** 改一行模型的 `max_context`（其余字段不动；写路径 bump 版本号 ⇒ 快照重载）。 */
+export async function writeModelMaxContext(window: ModelWindow, maxContext: number): Promise<void> {
+  const res = await httpRaw(
+    'PUT',
+    `/api/ai/providers/${window.providerId}/models/${encodeURIComponent(window.modelId)}`,
+    { maxContext }
+  )
+  const body = res.json as { success?: boolean; code?: string; message?: string } | null
+  if (res.status !== 200 || body?.success !== true) {
+    throw new Error(
+      `PUT /api/ai/providers/${window.providerId}/models/${window.modelId} maxContext=${maxContext} => ` +
+        `HTTP ${res.status} ${res.text.slice(0, 300)}`
+    )
+  }
+}
+
+/** 等 `/health.contextLimitTokens` 变成期望值（= 快照里那一行真的生效了）。 */
+export async function waitContextLimitTokens(expected: number, timeoutMs = 20_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  let last: number | null = null
+  while (Date.now() < deadline) {
+    last = await aiHealth()
+      .then((health) => health.contextLimitTokens)
+      .catch(() => null)
+    if (last === expected) return
+    await sleep(200)
+  }
+  throw new Error(`上下文分母未在 ${timeoutMs}ms 内变为 ${expected}（当前 = ${String(last)}）`)
+}
+
+/**
+ * 用「小 max_context 的模型行」跑一段，结束后无论如何恢复原值。
+ *
+ * 取值纪律（P3 实测结论）：`max_context` 必须显著大于 `reserve-tokens`（默认 13000），
+ * 否则 `limit − reserve` 被钳到 1，任何轮次都判满、每轮直冲 L3。本域用 17500 / 19000 两档
+ * （见 spec 常量），两档都留 ≥ 4500 的分母余量。
+ */
+export async function withModelWindow<T>(maxContext: number, body: (window: ModelWindow) => Promise<T>): Promise<T> {
+  const before = await currentModelWindow()
+  await writeModelMaxContext(before, maxContext)
+  await waitContextLimitTokens(maxContext)
+  try {
+    return await body({ ...before, maxContext })
+  } finally {
+    const restore = before.maxContext ?? 0
+    if (restore > 0) {
+      await writeModelMaxContext(before, restore).catch(() => undefined)
+      await waitContextLimitTokens(restore).catch(() => undefined)
+    }
+  }
 }
 
 export function toolNames(page?: string): Promise<string[]> {
