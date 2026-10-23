@@ -424,6 +424,11 @@ public class AiConfigService {
         model.setDisplayName(resolveEnvModelId());
         model.setMaxContext(ENV_SEED_MAX_CONTEXT);
         model.setSupportsToolCalling(true);
+        // L-91：env 种子模型按"思考模型"登记 —— 该列此前没人写（DB 缺省 FALSE），
+        // 于是设置页/模型选择器恒显示"不支持推理"，与本机实跑事实相反（deepseek-flash
+        // 直打 /chat/completions 确实返回 reasoning_content）。它是能力描述位，不参与运行闸门：
+        // 后端是否发思考帧只看上游本片有没有 reasoning_content（有则发，无则不发明）。
+        model.setSupportsReasoning(true);
         model.setEnabled(true);
         model.setDefault(true);
         return model;

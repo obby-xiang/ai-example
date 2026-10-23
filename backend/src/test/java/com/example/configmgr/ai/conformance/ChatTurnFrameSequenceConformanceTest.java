@@ -256,6 +256,82 @@ class ChatTurnFrameSequenceConformanceTest {
 				.isEqualTo(concatenated);
 	}
 
+	// ── L-91：思考段（reasoning）在编排层的形态 ─────────────────────────────
+
+	/**
+	 * <b>【L-91】</b>上游 {@code reasoning_content} 必须在帧面上成为<b>独立且闭合</b>的思考段：
+	 * {@code message_start(kind=reasoning) → delta{kind:reasoning}* → message_end(kind=reasoning)}
+	 * 先于正文段，思考文本<b>不进</b>正文（{@code message_end(text).chars} 只数正文、
+	 * {@code finalText} 不含思考）。
+	 *
+	 * <p>
+	 * kill：把 {@code ResilientChatService#consume} 里的 reasoning 分支删掉 ⇒ 帧流只剩正文段，
+	 * 本用例的 {@code delta{kinds}} 断言变红（这正是 L-91 挂账的缺口本身：上游有 reasoning，
+	 * 后端无出口）。
+	 */
+	@Test
+	void reasoningChunksOpenAClosedThinkingSegmentAndNeverLeakIntoTheBody() {
+		when(this.chatModel.stream(any(Prompt.class)))
+				.thenReturn(Flux.just(reasoningChunk("先想"), reasoningChunk("一步"), chunk("答案是 2"),
+						terminal("stop")));
+
+		FrameWire wire = runTurn();
+
+		List<Map<String, Object>> frames = clientView(wire);
+		assertThat(FrameContract.types(frames)).containsExactly("start", "message_start", "delta", "delta",
+				"message_end", "message_start", "delta", "message_end", "done");
+		FrameContract.assertConformant(frames);
+
+		// ① 两段边界同 messageId、kind 各自正确；思考段 chars = 思考 delta 之和
+		List<Map<String, Object>> starts = FrameContract.ofType(frames, "message_start");
+		assertThat(starts).hasSize(2);
+		assertThat(starts.get(0)).containsEntry("kind", "reasoning");
+		assertThat(starts.get(1)).containsEntry("kind", "text");
+		assertThat(starts.get(0).get("messageId")).isEqualTo(starts.get(1).get("messageId"));
+
+		// ② 思考 delta 带 kind=reasoning，正文 delta 不带 kind 键（additive 口径）
+		List<Map<String, Object>> deltas = FrameContract.ofType(frames, "delta");
+		assertThat(deltas).hasSize(3);
+		assertThat(deltas.subList(0, 2)).allSatisfy(frame -> assertThat(frame).containsEntry("kind", "reasoning"));
+		assertThat(deltas.get(2)).doesNotContainKey("kind").containsEntry("text", "答案是 2");
+
+		// ③ 思考段闭合时 chars = 2（"先想"+"一步"），正文段 chars = 4（"答案是 2"）
+		List<Map<String, Object>> ends = FrameContract.ofType(frames, "message_end");
+		assertThat(ends).hasSize(2);
+		assertThat(ends.get(0)).containsEntry("kind", "reasoning").containsEntry("chars", 4L);
+		assertThat(ends.get(1)).containsEntry("kind", "text").containsEntry("chars", 5L);
+
+		// ④ 思考不进落定正文 / 记忆（正文口径与前端正文段同源）
+		assertThat(this.store.get(RUN_ID).getFinalText()).isEqualTo("答案是 2");
+		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.DONE);
+	}
+
+	/**
+	 * <b>【L-91】</b>只吐思考、正文一个字都没有就断流：思考段仍必须先闭合再发 {@code error}
+	 * （与 S5c-5 同一判据：运行关闭前，它打开的一切都必须先关闭）。
+	 *
+	 * <p>
+	 * 这条同时锁住"已产出思考 ⇒ 不重试"：{@code emittedAny()} 只数正文时，纯思考轮会被判成
+	 * "没产出任何内容"，于是重试会在思考段之后补一个 {@code retry} 帧 ——
+	 * {@link FrameContract#orderingContract} 立刻变红。
+	 */
+	@Test
+	void reasoningOnlyThenUpstreamFailureClosesTheThinkingSegmentAndDoesNotRetry() {
+		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.concat(Flux.just(reasoningChunk("只想了没答")),
+				Flux.error(new StreamViolationException(StreamViolationException.STREAM_ERROR, "上游流中断"))));
+
+		FrameWire wire = runTurn();
+
+		List<Map<String, Object>> frames = clientView(wire);
+		assertThat(FrameContract.types(frames)).containsExactly("start", "message_start", "delta", "message_end",
+				"error");
+		FrameContract.assertConformant(frames);
+		assertThat(FrameContract.oneOfType(frames, "message_end")).containsEntry("kind", "reasoning")
+				.containsEntry("chars", 5L);
+		assertThat(FrameContract.ofType(frames, "retry")).as("已产出思考 ⇒ 不得重试（重试三条件：未产出内容）").isEmpty();
+		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.FAILED);
+	}
+
 	// ── S5c-5 回归：失败路径也先关正文段再发终帧 ─────────────────────────────
 
 	/**
@@ -334,6 +410,15 @@ class ChatTurnFrameSequenceConformanceTest {
 	/** 一个正文分片（无 finishReason）。 */
 	private static ChatResponse chunk(String text) {
 		return new ChatResponse(List.of(new Generation(AssistantMessage.builder().content(text).build())));
+	}
+
+	/**
+	 * 一个<b>思考</b>分片（L-91）：正文为空、{@code metadata.reasoningContent} = 思考文本 ——
+	 * 形态与 Spring AI 1.1.7 的流式转换一致（见 {@code ReasoningContentUpstreamProbeTest} 的实证）。
+	 */
+	private static ChatResponse reasoningChunk(String reasoning) {
+		return new ChatResponse(List.of(new Generation(
+				AssistantMessage.builder().content("").properties(Map.of("reasoningContent", reasoning)).build())));
 	}
 
 	/** 一个空正文分片（模拟"只有 role 分片"或纯空白分片）。 */
