@@ -210,6 +210,78 @@ export function buildQueryCondition(model: ConditionDraftModel): FieldQueryCondi
   return condition.scopeKeys || condition.fields ? condition : null
 }
 
+/** 条件草案的本地校验问题（`ConditionForm` 的 `role=alert` 面据此成文）。 */
+export type ConditionIssueCode = 'NUMBER' | 'DATE' | 'RANGE'
+
+export interface ConditionIssue {
+  fieldCode: string
+  code: ConditionIssueCode
+  /** 触发问题的值（BETWEEN 时为下限） */
+  value: string
+  /** BETWEEN 的上限（其余为空串） */
+  value2: string
+}
+
+/** 数字文本判定（空串不算数字；与后端解析同口径的常见形态）。 */
+function isNumberText(text: string): boolean {
+  return text !== '' && Number.isFinite(Number(text))
+}
+
+/** 日期文本判定（表单的日期控件固定 `YYYY-MM-DD`）。 */
+function isDateText(text: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+    return false
+  }
+  const date = new Date(`${text}T00:00:00Z`)
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === text
+}
+
+/**
+ * 条件草案的本地校验（**提交前**的判定点，页面侧 `role=alert` 的数据源）。
+ *
+ * 只覆盖后端会硬拒的三类：数值字段填非数字、日期字段格式不对、区间上下限倒置。
+ * 空值一律不算错 —— 与 {@link buildFieldConditions} 同口径（空 = 该字段未填 → 不提交）。
+ * 返回定位信息而非成文文案：文案走 i18n（双 locale），本函数保持无 UI 依赖。
+ */
+export function validateDraftModel(
+  model: ConditionDraftModel,
+  fields: readonly ConfigField[]
+): ConditionIssue[] {
+  const byCode = new Map(fields.map((field) => [field.code, field]))
+  const issues: ConditionIssue[] = []
+  for (const [fieldCode, draft] of Object.entries(model.fields)) {
+    const field = byCode.get(fieldCode)
+    if (!field || !operatorNeedsValue(draft.operator)) {
+      continue
+    }
+    const value = draft.value.trim()
+    const value2 = draft.operator === 'BETWEEN' ? draft.value2.trim() : ''
+    if (value === '' && value2 === '') {
+      continue
+    }
+    if (field.fieldType === 'NUMBER') {
+      if ((value !== '' && !isNumberText(value)) || (value2 !== '' && !isNumberText(value2))) {
+        issues.push({ fieldCode, code: 'NUMBER', value, value2 })
+        continue
+      }
+      if (value !== '' && value2 !== '' && Number(value) > Number(value2)) {
+        issues.push({ fieldCode, code: 'RANGE', value, value2 })
+      }
+      continue
+    }
+    if (field.fieldType === 'DATE') {
+      if ((value !== '' && !isDateText(value)) || (value2 !== '' && !isDateText(value2))) {
+        issues.push({ fieldCode, code: 'DATE', value, value2 })
+        continue
+      }
+      if (value !== '' && value2 !== '' && value > value2) {
+        issues.push({ fieldCode, code: 'RANGE', value, value2 })
+      }
+    }
+  }
+  return issues
+}
+
 /** 条件是否为空（空 = 导出全部）。 */
 export function isConditionEmpty(condition: FieldQueryCondition | null | undefined): boolean {
   if (!condition) {

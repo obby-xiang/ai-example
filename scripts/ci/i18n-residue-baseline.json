@@ -1,5 +1,5 @@
 {
-  "total": 1258,
+  "total": 1267,
   "files": {
     "src/api/ai.ts": 1,
     "src/api/http.ts": 4,
@@ -22,8 +22,8 @@
     "src/types/condition.ts": 34,
     "src/types/form-schema.ts": 23,
     "src/types/job.ts": 2,
-    "src/types/tools.ts": 123,
-    "src/utils/ai-dom-tools.ts": 94,
+    "src/types/tools.ts": 125,
+    "src/utils/ai-dom-tools.ts": 101,
     "src/utils/ai-regions.ts": 12,
     "src/utils/blocks.ts": 23,
     "src/utils/confirm-irreversible.ts": 2,

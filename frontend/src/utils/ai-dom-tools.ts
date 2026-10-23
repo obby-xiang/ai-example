@@ -320,7 +320,14 @@ function childTextExcludingBadges(el: HTMLElement): string {
 
 type UiRole = 'button' | 'input' | 'select' | 'toggle' | 'tab' | 'link'
 
-const ROLE_FILTER_DEFAULT: readonly UiRole[] = ['button', 'input', 'select', 'toggle']
+/**
+ * 默认角色集（`ui_snapshot` 不带 `kinds` 时生效）。
+ *
+ * 挂账 L-66 裁决（测试扩充 V6）：把 `tab` 纳入默认 —— 编辑区标签页（`import.grid`）对 AI 可见是
+ * 预期能力，此前要模型显式 `kinds:['all']` 才看得见，属能力缺口。`link` 不进默认：
+ * 链接的点击语义与业务动作无关，扩进来只会挤占 2000 字符预算。
+ */
+const ROLE_FILTER_DEFAULT: readonly UiRole[] = ['button', 'input', 'select', 'toggle', 'tab']
 
 function roleOf(el: HTMLElement): UiRole | null {
   const tag = el.tagName.toLowerCase()
@@ -878,7 +885,60 @@ type FenceFailure = { ok: false; outcome: UiToolOutcome }
 /** 写动词（停止判定只拦这三类；scroll/highlight 是只读）。 */
 const WRITE_VERBS: ReadonlySet<AiVerb> = new Set(['click', 'fill', 'select'])
 
-/** 闸序（设计稿 §4.2 / A-15 锁）：停止 → 快照闸 → 区域闸 → 上下文闸 → 元素闸。 */
+/** 写动词的工具显示名（回执三段式的第一段 = 工具名，与 `types/tools.ts` 的 `displayName` 同源）。 */
+const WRITE_VERB_TOOL_NAMES: Record<string, string> = {
+  click: '点击界面元素',
+  fill: '填写输入框',
+  select: '选择选项'
+}
+
+/**
+ * 禁用判定（挂账 L-65）：原生 `disabled` / `disabled` 属性 / `aria-disabled="true"`。
+ *
+ * 祖先容器也认：`el-checkbox` / `el-radio-button` 的 `data-ai-ref` 挂在 label 根元素上，
+ * 只读态的禁用面由根元素的 `aria-disabled` 承载（批4-B 补）；容器禁用时其内层可点节点
+ * 同样点不动（与 ARIA「禁用态作用于自身及全部可聚焦后代」同口径，无子级反向覆盖）。
+ */
+function isDisabledTarget(el: HTMLElement): boolean {
+  if ((el as HTMLButtonElement).disabled === true
+    || el.hasAttribute('disabled')) {
+    return true
+  }
+  let node: HTMLElement | null = el
+  while (node !== null) {
+    if (node.getAttribute('aria-disabled') === 'true') {
+      return true
+    }
+    node = node.parentElement
+  }
+  return false
+}
+
+/**
+ * 写动词命中禁用控件的回执（挂账 L-65 收口）。
+ *
+ * 为什么不"点了再提示"：禁用元素的 `click()` 在浏览器里是空操作，回 `ok` 等于向模型
+ * 谎报"界面已同步"；模型据此继续推进，用户看到的却是页面原地不动。
+ */
+function disabledTargetOutcome(verb: AiVerb, ref: string): UiToolOutcome {
+  return fail(
+    formatUiReceipt({
+      tool: WRITE_VERB_TOOL_NAMES[verb] ?? '界面操作',
+      conclusion: '未执行（目标控件禁用）',
+      reason: '该控件处于禁用 / 只读状态，点击或写入都不会产生任何界面变化',
+      next: '重新 ui_snapshot 确认控件状态；若确需操作，请提示用户先解除只读或满足启用条件'
+    }) + ` ref=${ref}`,
+    'degraded',
+    'UI_TARGET_DISABLED',
+    'blocked'
+  )
+}
+
+/**
+ * 闸序（设计稿 §4.2 / A-15 锁）：停止 → 快照闸 → 区域闸 → 上下文闸 → 元素闸（epoch / detached /
+ * deny / verbs / **disabled**）。禁用闸排在最后：前三档归因更根本，禁用只对已经「看得见、够得着、
+ * 动词也允许」的写动作追加一层事实校验（挂账 L-65）。
+ */
 function checkFences(args: Record<string, unknown>, verb: AiVerb): FenceResult | FenceFailure {
   // ① 停止：必须先于快照闸 —— 否则停止后到达的写动词会被误报成「未快照」（错误归因）。
   if (aborted && WRITE_VERBS.has(verb)) {
@@ -948,6 +1008,11 @@ function checkFences(args: Record<string, unknown>, verb: AiVerb): FenceResult |
   }
   if (!verbAllowed(hit.el, hit.region, verb)) {
     return { ok: false, outcome: fail(`该元素不允许「${verb}」动词（data-ai-verbs 收紧了允许集）。ref=${ref}`) }
+  }
+  // ⑥ 禁用闸（挂账 L-65）：写动词命中禁用 / 只读控件 ⇒ 拒执 + `UI_TARGET_DISABLED`。
+  // 只拦写动词：scroll / highlight 不改任何状态，禁用元素也照样能描边、能滚到（拦了是能力倒退）。
+  if (WRITE_VERBS.has(verb) && isDisabledTarget(hit.el)) {
+    return { ok: false, outcome: disabledTargetOutcome(verb, ref) }
   }
   return { ok: true, hit, label: labelTextOf(hit.el), risk: riskOfElement(hit.el, hit.region) }
 }

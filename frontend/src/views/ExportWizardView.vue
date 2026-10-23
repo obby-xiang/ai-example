@@ -62,7 +62,8 @@
           :model-value="draftModels[code] ?? emptyDraftModel()"
           :disabled="isReadOnly"
           :ai-ref-prefix="`export.cond.${code}`"
-          @update:model-value="(value) => (draftModels[code] = value)"
+          :error="condErrors[code] ?? ''"
+          @update:model-value="(value) => onConditionChange(code, value)"
         />
       </el-card>
     </div>
@@ -228,6 +229,12 @@ const selectedDefs = ref<string[]>([])
 const draftModels = reactive<Record<string, ConditionDraftModel>>({})
 const counts = reactive<Record<string, number | null>>({})
 const countLoading = reactive<Record<string, boolean>>({})
+/**
+ * 第 2 步的**服务端**校验失败原因（按配置项编码）。挂账 L-67：这类失败此前只有
+ * 一闪而过的 `ElMessage`，模型在 `export.cond` 上读不到「为什么不行」；现在它落到
+ * 条件表单区域内的 `role=alert` 承载里，直到用户/AI 改动条件才清空。
+ */
+const condErrors = reactive<Record<string, string>>({})
 
 const persisting = ref(false)
 const startingExport = ref(false)
@@ -683,6 +690,10 @@ async function persistStepData(): Promise<{ ok: boolean; reason?: string }> {
     return { ok: true }
   } catch (error) {
     const reason = error instanceof Error ? error.message : '保存选择与条件失败'
+    // 挂账 L-67：落库失败同样落在条件表单区域内（只弹一次 ElMessage 读不到「为什么不行」）
+    for (const code of selectedDefs.value) {
+      condErrors[code] = reason
+    }
     ElMessage.error(reason)
     return { ok: false, reason }
   } finally {
@@ -692,6 +703,15 @@ async function persistStepData(): Promise<{ ok: boolean; reason?: string }> {
 
 // ── 第 2 步：行数预览 ──────────────────────────────────────────────────────────
 
+/**
+ * 条件表单改动（用户 / AI 回填都走这里）：写入草案模型并清掉该配置项上一次的服务端错误
+ * —— 陈旧告警会误导模型「仍然不合法」（挂账 L-67）。
+ */
+function onConditionChange(code: string, value: ConditionDraftModel): void {
+  draftModels[code] = value
+  delete condErrors[code]
+}
+
 async function previewCount(code: string): Promise<void> {
   countLoading[code] = true
   try {
@@ -699,13 +719,17 @@ async function previewCount(code: string): Promise<void> {
     const condition = buildQueryCondition(model)
     const result = await dataApiCount(code, condition)
     counts[code] = result
+    delete condErrors[code]
     ElMessage.success(
       isConditionEmpty(condition)
         ? `${code}：全部数据 ${result} 行`
         : `${code}：命中 ${result} 行（${conditionSummary(condition)}）`
     )
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '行数预览失败')
+    const reason = error instanceof Error ? error.message : '行数预览失败'
+    // 挂账 L-67：服务端校验失败必须留痕在区域里（`ElMessage` 只负责即时提示，不承担可读性）
+    condErrors[code] = reason
+    ElMessage.error(reason)
   } finally {
     countLoading[code] = false
   }

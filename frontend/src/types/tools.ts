@@ -317,6 +317,8 @@ export const FRONTEND_TOOLS: readonly FrontendToolDescriptor[] = [
     displayName: '查看界面',
     description: '查看当前页面已注册区域内的可操作控件（一行一个：ref / 角色 / 标签 / 状态），'
       + '最多 40 行 / 2000 字符，尾行恒回「共 N 个元素（本次回 M 个）」。'
+      + '默认含 tab：标签页（如编辑区各配置项的标签页）不必额外传 kinds 即可见，'
+      + '要连链接一起看才用 kinds=["all"]。'
       + 'text=true 时在控件行之后追加区域内只读文本（可见文案 / 表头 / 校验错误；≤600 字符 / 12 行，'
       + '计入 2000 总闸且控件行优先），用来回答「这页在说什么 / 刚才为什么失败」。'
       + 'ref 不是 selector：只是本页注册表里的语义键，不可用于 querySelector；'
@@ -326,7 +328,7 @@ export const FRONTEND_TOOLS: readonly FrontendToolDescriptor[] = [
     scopePatterns: UI_TOOL_SCOPE_PATTERNS,
     args: [
       { name: 'regions', type: 'string[]', required: false, description: '区域 id 列表（缺省 = 全部已注册区域）' },
-      { name: 'kinds', type: 'string[]', required: false, description: '角色枚举：button/input/select/toggle/tab/link/all' },
+      { name: 'kinds', type: 'string[]', required: false, description: '角色枚举：button/input/select/toggle/tab/link/all（默认含 tab = button/input/select/toggle/tab；link 需显式声明）' },
       { name: 'limit', type: 'number', required: false, description: '回几行，1..40（默认 20；硬顶 40 行 / 2000 字符）' },
       { name: 'text', type: 'boolean', required: false, description: '是否追加区域内只读文本段（默认 false；≤600 字符 / 12 行，计入 2000 总闸，控件行优先）' }
     ]

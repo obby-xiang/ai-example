@@ -579,7 +579,14 @@
       "yes": "Yes (true)",
       "no": "No (false)",
       "to": "To",
-      "add": "Add condition"
+      "add": "Add condition",
+      "errors": {
+        "title": "Fix these filter issues before exporting:",
+        "number": "\"{field}\" must be a number (got \"{value}\")",
+        "date": "\"{field}\" must be a date in YYYY-MM-DD (got \"{value}\")",
+        "range": "\"{field}\" lower bound must not be greater than the upper bound ({from} > {to})",
+        "server": "Filter check failed: {reason}"
+      }
     },
     "defs": {
       "searchPlaceholder": "Search code / name",

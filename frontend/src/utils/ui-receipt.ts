@@ -19,6 +19,8 @@ export const UI_CODES = [
   'UI_BUDGET_EXHAUSTED',
   /** 写前原值已被用户手改（前置条件失效，不覆盖）。 */
   'UI_PRECONDITION_CHANGED',
+  /** 目标控件处于禁用 / 只读态（写动词一律拒执，不谎报「已点击」）。 */
+  'UI_TARGET_DISABLED',
   /** 已在目标页（同页同参幂等直返）。 */
   'UI_ALREADY_ON_PAGE',
   /** 同一轮同参调用已执行过（去重白名单）。 */

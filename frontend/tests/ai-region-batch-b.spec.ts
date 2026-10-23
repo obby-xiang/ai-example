@@ -179,7 +179,8 @@ describe('B-01：导入向导第 1 步快照（selectDefs / mode / grid 三区�
     expect(out.result).toContain('import.selectDefs.search')
     expect(out.result).toContain('import.selectDefs.CURRENCY')
     expect(out.result).toContain('import.mode.merge')
-    // tab 角色不在快照默认 kinds（button/input/select/toggle）里，需显式声明 kinds=all/tab
+    // 挂账 L-66 已收口：tab 进默认 kinds ⇒ 不带 kinds 的快照同样看得见编辑区标签页
+    expect(aiSnapshot({}).result).toContain('import.grid.tab.CURRENCY')
     expect(out.result).toContain('import.grid.tab.CURRENCY')
     // 尾行的「共 N 个元素」必须与正文行数一致（模型据此判断是否看全）
     const total = Number(/共 (\d+) 个元素/.exec(out.result)?.[1] ?? '-1')

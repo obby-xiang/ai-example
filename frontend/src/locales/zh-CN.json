@@ -579,7 +579,14 @@
       "yes": "是（true）",
       "no": "否（false）",
       "to": "至",
-      "add": "添加条件"
+      "add": "添加条件",
+      "errors": {
+        "title": "查询条件有误，导出前请先修正：",
+        "number": "「{field}」需要数字（当前「{value}」）",
+        "date": "「{field}」日期格式应为 YYYY-MM-DD（当前「{value}」）",
+        "range": "「{field}」的下限不能大于上限（{from} > {to}）",
+        "server": "条件校验未通过：{reason}"
+      }
     },
     "defs": {
       "searchPlaceholder": "搜索编码 / 名称",

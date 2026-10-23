@@ -1,5 +1,22 @@
 <template>
   <div>
+    <!--
+      挂账 L-67：校验错误的**页面侧渲染面**（批4-C 的文本快照按 `role=alert` 取数）。
+      三条来源共用这一条面：本地类型校验 / 服务端校验失败（`error` prop）/ 修正后自动消失。
+      `aria-live="polite"` 让读屏与模型都能读到"为什么不行"，不再只有一闪而过的 ElMessage。
+    -->
+    <div
+      v-if="issues.length > 0 || props.error"
+      role="alert"
+      aria-live="polite"
+      class="mb-2 rounded-[6px] border border-[#f56c6c] bg-[#fef0f0] px-3 py-2 text-xs leading-5 text-[#f56c6c]"
+    >
+      <div class="font-semibold">{{ t('wizard.condition.errors.title') }}</div>
+      <ul class="mt-1 list-disc pl-4">
+        <li v-for="issue in issues" :key="`${issue.fieldCode}:${issue.code}`">{{ issueText(issue) }}</li>
+        <li v-if="props.error">{{ t('wizard.condition.errors.server', { reason: props.error }) }}</li>
+      </ul>
+    </div>
     <div v-for="(row, index) in rows" :key="index" class="flex gap-2 mb-2 items-center">
       <el-select
         v-model="row.field"
@@ -151,8 +168,10 @@ import {
   emptyDraftModel,
   operatorNeedsValue,
   operatorsForFieldType,
+  validateDraftModel,
   type ConditionDraft,
   type ConditionDraftModel,
+  type ConditionIssue,
   type DraftOperator,
   type OperatorOption
 } from '@/types/condition'
@@ -169,11 +188,17 @@ const props = withDefaults(
     disabled?: boolean
     /** AI 标注前缀（形如 `export.cond.CURRENCY`）；缺省不标注（数据浏览页零变化） */
     aiRefPrefix?: string
+    /**
+     * 服务端校验失败的原因（如预览行数接口的 400 文案）；与本地校验共用区域内
+     * `role=alert` 承载 —— 不再只靠一闪而过的 ElMessage（挂账 L-67）。
+     */
+    error?: string
   }>(),
   {
     hint: '不设置条件表示导出全部数据',
     disabled: false,
-    aiRefPrefix: ''
+    aiRefPrefix: '',
+    error: ''
   }
 )
 
@@ -297,16 +322,38 @@ function onFieldChange(row: DraftRow): void {
   }
 }
 
-/** 当前草案展开成后端条件（预览行数/提交共用，保证展示与提交同口径）。 */
-const fieldConditions = computed(() => {
+/** 当前行集 → 草案模型（预览 / 提交 / 本地校验共用同一份，避免三处口径漂移）。 */
+const draftModel = computed<ConditionDraftModel>(() => {
   const model = emptyDraftModel(props.modelValue.scopeKeys)
   for (const row of rows.value) {
     if (row.field) {
       model.fields[row.field] = { operator: row.operator, value: row.value, value2: row.value2 }
     }
   }
-  return buildFieldConditions(model)
+  return model
 })
 
-defineExpose({ fieldConditions })
+/** 当前草案展开成后端条件（预览行数/提交共用，保证展示与提交同口径）。 */
+const fieldConditions = computed(() => buildFieldConditions(draftModel.value))
+
+/**
+ * 本地校验问题（挂账 L-67）：`role=alert` 面的数据源。
+ *
+ * 只读态也保留显示 —— 已结束任务回看时，"这条条件为什么不合法"同样是用户要的信息。
+ */
+const issues = computed(() => validateDraftModel(draftModel.value, props.fields))
+
+/** 单条问题的成文（字段名取定义里的中文标签，找不到回退字段编码）。 */
+function issueText(issue: ConditionIssue): string {
+  const label = fieldMap.value.get(issue.fieldCode)?.label ?? issue.fieldCode
+  const key = issue.code === 'NUMBER' ? 'number' : issue.code === 'DATE' ? 'date' : 'range'
+  return t(`wizard.condition.errors.${key}`, {
+    field: label,
+    value: issue.value,
+    from: issue.value,
+    to: issue.value2
+  })
+}
+
+defineExpose({ fieldConditions, issues })
 </script>
