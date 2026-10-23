@@ -10,7 +10,8 @@ import lombok.extern.slf4j.Slf4j;
  * 优先级（C-08 锁死的三条）：
  * <ol>
  * <li>模型配置的 DB 值 {@code ai_model.max_context}（模型配置专项批① 已建表建列）；</li>
- * <li>过渡键 {@code app.ai.context.limit-tokens}（波次 1 分母 = 128000）；</li>
+ * <li>过渡键 {@code app.ai.context.limit-tokens}（波次 1 分母 = 128000）——<b>自 L-89 起已弃用</b>，
+ * 只作为启动期回退：模型行没声明 {@code max_context}（或调用方没有模型身份）时才用它；</li>
  * <li>都没有 ⇒ <b>0 = 未知</b>：端点 {@code limitTokens:null}、界面只显示已用不显示百分比、
  * 压缩不做比例判定（降级态）。</li>
  * </ol>
@@ -18,7 +19,11 @@ import lombok.extern.slf4j.Slf4j;
  * <p>
  * <b>为什么收敛成一处</b>：模型配置专项落地后 DB 列才是真源，而"上限"会被计量、触发、展示、
  * 端点、健康检查五处消费。分散读会让"某个面还在用过渡键"这种漂移无人发现 —— 这一条是两专项的
- * 接口契约，切换时只改 {@link #resolve}。
+ * 接口契约，切换时只改 {@link #resolve}。L-89 的实测反例：{@code ContextTrigger} 曾自行读过渡键，
+ * 过渡键 1500 / DB 128000 时同一轮日志出现 {@code limit=128000} 与 {@code ratio=1.258}。
+ * 现在触发判定也走 {@link #resolve}（经 {@code ContextCompactor#limitTokens} 注入），
+ * 过渡键只剩本类的回退分支一处读取点，并在启动日志里显式标注 deprecation
+ * （{@link #logStartupDeprecation()}，由 {@link ContextConfig} 装配时调用）。
  *
  * <p>
  * DB 值的<b>脏值容错</b>与 {@code AiProviderRegistry#buildOptions} 同一姿态：非正数视为"没有"、
@@ -90,6 +95,27 @@ public final class ContextLimitResolver {
 			return configured();
 		}
 		return maxContext;
+	}
+
+	/**
+	 * 启动期一次性提示：过渡键的现状与弃用（L-89）。
+	 *
+	 * <p>
+	 * 由 {@link ContextConfig} 在装配本 bean 时调用 —— 那时配置已绑定、DB 快照尚未必要，
+	 * 正是"声明本键只作回退"的时机。措辞固定包含键名、当前值、真源与回退语义，便于日志检索
+	 * 与用例逐条断言。
+	 */
+	public void logStartupDeprecation() {
+		int fallback = configured();
+		if (fallback > 0) {
+			log.warn("配置键 app.ai.context.limit-tokens={} 已弃用（deprecated）：上下文上限的唯一真源是 "
+					+ "ai_model.max_context；本键只在模型行未声明 max_context（或调用方无模型身份）时作为启动期回退，"
+					+ "不再参与触发判定 / 展示口径的选择", fallback);
+		}
+		else {
+			log.warn("配置键 app.ai.context.limit-tokens 已弃用（deprecated）且未设回退（当前 = 0）："
+					+ "未声明 max_context 的模型按未知上限降级（不做比例判定）");
+		}
 	}
 
 	private int configured() {

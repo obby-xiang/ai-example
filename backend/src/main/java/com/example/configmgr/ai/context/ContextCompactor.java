@@ -156,7 +156,13 @@ public final class ContextCompactor {
 		this.summarizer = summarizer;
 	}
 
-	/** 解析本轮分母（端点与健康检查也走这里，保证"分母只有一个取数点"）。 */
+	/**
+	 * 解析本轮分母（触发判定、端点、健康检查、压缩日志都走这里，保证"分母只有一个取数点"）。
+	 *
+	 * <p>L-89：{@link ContextTrigger#decide} 的分母也由 {@link #compact} 从这里取后<b>注入</b> ——
+	 * 触发判定不得再自行读 {@code app.ai.context.limit-tokens}，否则 DB {@code ai_model.max_context}
+	 * 与过渡键漂移时，"显示的百分比"与"触发百分比"会是两套口径。
+	 */
 	public int limitTokens(Long providerId, String model) {
 		return this.resolver.resolve(providerId, model);
 	}
@@ -203,7 +209,7 @@ public final class ContextCompactor {
 					REASON_LIMIT_UNKNOWN, state.circuit());
 		}
 		boolean armed = trigger.hysteresisUnlocked(state.usedTokens(), limit, state.everCompacted());
-		ContextTrigger.Decision decision = trigger.decide(request.usedTokens(), request.completionTokens(),
+		ContextTrigger.Decision decision = trigger.decide(limit, request.usedTokens(), request.completionTokens(),
 				request.inputTokens(), request.toolResultsSinceMeasure(), armed);
 		if (!decision.triggered()) {
 			return noop(request, before, ContextTrigger.Level.fromWire(state.level()), limit, decision.ratio(),

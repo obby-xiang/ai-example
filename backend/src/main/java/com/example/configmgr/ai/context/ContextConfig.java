@@ -30,13 +30,16 @@ public class ContextConfig {
 	@Bean
 	public ContextLimitResolver contextLimitResolver(AiProperties properties,
 			ObjectProvider<AiConfigService> configService) {
-		return new ContextLimitResolver(properties, (providerId, modelId) -> {
+		ContextLimitResolver resolver = new ContextLimitResolver(properties, (providerId, modelId) -> {
 			AiConfigService service = configService.getIfAvailable();
 			if (service == null || modelId == null) {
 				return null;
 			}
 			return maxContextOf(service, providerId, modelId);
 		});
+		// L-89：过渡键只作启动期回退，启动日志显式标 deprecation（口径 = 分母唯一真源是 DB）
+		resolver.logStartupDeprecation();
+		return resolver;
 	}
 
 	@Bean

@@ -19,6 +19,13 @@ import com.example.configmgr.ai.config.AiProperties;
  * 自洽性检查（写进 NUMSPEC 依据列）：128K 下 {@code limit − reserve = 115K}，L3@95% 剩
  * {@code 0.05 × 115K = 5.75K > max-tokens 4096} ⇒ 触发线不会把输出空间吃掉。
  *
+ * <h2>分母由调用方注入（L-89）</h2>
+ * 本类<b>不读</b> {@code app.ai.context.limit-tokens}：分母以参数传入，调用方
+ * （{@link ContextCompactor}）从 {@link ContextLimitResolver} 取 —— 与 {@code /context}、
+ * {@code /health}、压缩日志同一个取数点。本类只保留阈值百分比、预留缓冲这两个"比例参数"。
+ * 早前本类自行读过渡键，DB {@code ai_model.max_context} 与过渡键漂移时会出现
+ * 「日志里 limit=128000、ratio 按 1500 算」的双源（挂账 L-89）。
+ *
  * <p>
  * <b>每次最多升一级</b>由调用方（{@link ContextCompactor}）执行：本类只回答"按占比该到哪一级"，
  * 从当前级往上最多推一格 —— 一次跳到 L2/L3 会把整个前缀改写、缓存整段重建（调研 Q3）。
@@ -96,6 +103,7 @@ public final class ContextTrigger {
 	/**
 	 * 触发判定。
 	 *
+	 * @param limitTokens             分母上限（来自 {@link ContextLimitResolver}；{@code <=0} = 未知 ⇒ 降级态）
 	 * @param usedPrompt              上次成功请求的 {@code promptTokens}（无真值传 0）
 	 * @param lastCompletion          上次成功请求的 {@code completionTokens}
 	 * @param newInputTokens          本轮新输入的估算
@@ -103,19 +111,18 @@ public final class ContextTrigger {
 	 *                                窗口里的工具结果已经计在上次真值里；续跑重建的工具响应才是真增量）
 	 * @param thresholdsArmed         是否允许按阈值触发（滞回锁，见 {@link #hysteresisUnlocked}）
 	 */
-	public Decision decide(int usedPrompt, int lastCompletion, int newInputTokens, int toolResultsSinceMeasure,
-			boolean thresholdsArmed) {
+	public Decision decide(int limitTokens, int usedPrompt, int lastCompletion, int newInputTokens,
+			int toolResultsSinceMeasure, boolean thresholdsArmed) {
 		long nextEst = Math.max(0, usedPrompt) + Math.max(0, lastCompletion) + Math.max(0, newInputTokens)
 				+ Math.max(0, toolResultsSinceMeasure);
-		int limit = this.config.getLimitTokens();
 		int reserve = this.config.getReserveTokens();
-		if (limit <= 0) {
+		if (limitTokens <= 0) {
 			return new Decision(Level.NONE, 0d, (int) nextEst, 0, reserve);
 		}
-		long denominator = Math.max(1L, (long) limit - reserve);
+		long denominator = Math.max(1L, (long) limitTokens - reserve);
 		double ratio = (double) nextEst / denominator;
 		if (!thresholdsArmed) {
-			return new Decision(Level.NONE, ratio, (int) nextEst, limit, reserve);
+			return new Decision(Level.NONE, ratio, (int) nextEst, limitTokens, reserve);
 		}
 		Level level = Level.NONE;
 		if (ratio * 100d >= this.config.getL3Percent()) {
@@ -127,7 +134,7 @@ public final class ContextTrigger {
 		else if (ratio * 100d >= this.config.getL1Percent()) {
 			level = Level.L1;
 		}
-		return new Decision(level, ratio, (int) nextEst, limit, reserve);
+		return new Decision(level, ratio, (int) nextEst, limitTokens, reserve);
 	}
 
 	/**

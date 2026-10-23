@@ -1080,11 +1080,18 @@ public class AiProperties {
 	public static class Context {
 
 		/**
-		 * 上下文上限（token）的<b>过渡键</b>（默认 128000）。
+		 * 上下文上限（token）的<b>过渡键</b>（默认 128000；<b>自 L-89 起已弃用</b>）。
 		 *
 		 * <p>取值依据：本仓当前默认模型（deepseek 系）的 128K 窗口；模型配置专项的
 		 * {@code ai_model.max_context} 落地后由它覆盖（唯一消费点 = {@code ContextLimitResolver}）。
 		 * {@code 0} = 主动声明"未知"（降级态：界面只显示已用、不显示百分比；压缩不做比例判定）。
+		 *
+		 * <p><b>现状（L-89 收口）</b>：唯一真源 = {@code ai_model.max_context}；本键<b>只保留为启动期回退</b>
+		 * —— 模型行未声明 {@code max_context}（或调用方没有模型身份）时，由
+		 * {@code ContextLimitResolver#resolve} 回落到本值。<b>压缩触发判定不得再直接读本键</b>
+		 * （{@code ContextTrigger#decide} 的分母由调用方从 resolver 注入）：否则本键与 DB 值漂移时，
+		 * "显示的百分比"与"触发百分比"会各用一套分母。启动日志由
+		 * {@code ContextLimitResolver#logStartupDeprecation()} 显式标注 deprecation。
 		 */
 		private int limitTokens = 128000;
 
