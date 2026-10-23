@@ -32,3 +32,6 @@ backend/config/*
 *.db
 *.mv.db
 *.trace.db
+
+# Playwright E2E 运行产物（trace/截图/自起实例数据）
+frontend/test-results/

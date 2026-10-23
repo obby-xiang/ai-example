@@ -1,0 +1,195 @@
+name: 真机 E2E（手工触发 · Playwright + 真 key）
+
+# 设计稿：docs/research/设计-真机E2E用例全集-2026-10-23.md §0.1 / §5.1
+#   - **只手工触发**（workflow_dispatch），不挂 push / pull_request；
+#   - 只跑 Chromium，不做浏览器兼容矩阵；
+#   - 两套模式：
+#       ① stub：桩上游（scripts/ci/stub-upstream.mjs，零密钥、确定性）
+#       ② real：真模型（secret/vars 从 GitHub Environment `e2e-real` 注入）
+#   - 真模型用例默认采样 10（C 级概率口径，§0.3），由 E2E_REAL_SAMPLING 传入；
+#   - 失败时上传 trace / screenshot / 控制台日志；仓库内**零 key 字面量**。
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: '跑哪套（stub / real / both）'
+        type: choice
+        options: [stub, real, both]
+        default: stub
+      sample:
+        description: '真模型采样次数（C 级概率口径，默认 10）'
+        type: string
+        default: '10'
+
+permissions:
+  contents: read
+
+jobs:
+  e2e-stub:
+    name: UI 层 E2E（桩上游 · Chromium）
+    if: ${{ inputs.suite == 'stub' || inputs.suite == 'both' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    services:
+      redis:
+        image: redis:7.2.16
+        ports: ['6379:6379']
+        command: --maxmemory-policy noeviction
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    env:
+      E2E_MODE: stub
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: 安装 JDK 21（temurin）
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          cache-dependency-path: backend/pom.xml
+
+      - name: 安装 Node 22
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: yarn
+          cache-dependency-path: frontend/yarn.lock
+
+      - name: 打包后端（classes + 依赖 classpath，harness 不复用 jar）
+        working-directory: backend
+        run: |
+          mvn -B -DskipTests package
+          mvn -B dependency:build-classpath -Dmdep.outputFile=target/e2e-classpath.txt
+
+      - name: 安装前端依赖（严格按锁文件）
+        working-directory: frontend
+        run: yarn install --frozen-lockfile
+
+      - name: 解析 Playwright 版本（浏览器缓存键）
+        id: pw
+        working-directory: frontend
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: 缓存 Playwright 浏览器
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ms-playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
+
+      - name: 安装 Chromium（仅此一款）
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
+      # 前端单独跑 vitest（门禁仍在 ci.yml；这里只确认 e2e 目录未污染 vitest 采集面）
+      - name: vitest 采集面自证（e2e 不参与）
+        working-directory: frontend
+        run: npx vitest run --reporter=dot
+
+      - name: 真机 E2E（桩模式 · 自起三件套）
+        working-directory: frontend
+        run: npx playwright test --grep @stub
+
+      - name: 归档失败证据（trace / screenshot / harness 日志）
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: e2e-stub-evidence
+          # 排除自起实例的依赖解包缓存（可能 ~100MB，属可重生物）
+          path: |
+            frontend/test-results
+            !frontend/test-results/.e2e-run/jar
+          retention-days: 7
+          if-no-files-found: warn
+
+  e2e-real:
+    name: 真模型 E2E 冒烟（真 key · Chromium）
+    if: ${{ inputs.suite == 'real' || inputs.suite == 'both' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # 密钥与端点只来自 Environment：仓库与 workflow 文本零 key 字面量。
+    environment: e2e-real
+    services:
+      redis:
+        image: redis:7.2.16
+        ports: ['6379:6379']
+        command: --maxmemory-policy noeviction
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    env:
+      E2E_MODE: real
+      E2E_REAL_SAMPLING: ${{ inputs.sample }}
+      AI_API_KEY: ${{ secrets.E2E_AI_API_KEY }}
+      AI_BASE_URL: ${{ vars.E2E_AI_BASE_URL }}
+      AI_MODEL: ${{ vars.E2E_AI_MODEL }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: 安装 JDK 21（temurin）
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          cache-dependency-path: backend/pom.xml
+
+      - name: 安装 Node 22
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: yarn
+          cache-dependency-path: frontend/yarn.lock
+
+      - name: 打包后端（classes + 依赖 classpath）
+        working-directory: backend
+        run: |
+          mvn -B -DskipTests package
+          mvn -B dependency:build-classpath -Dmdep.outputFile=target/e2e-classpath.txt
+
+      - name: 安装前端依赖（严格按锁文件）
+        working-directory: frontend
+        run: yarn install --frozen-lockfile
+
+      - name: 解析 Playwright 版本（浏览器缓存键）
+        id: pw
+        working-directory: frontend
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: 缓存 Playwright 浏览器
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ms-playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
+
+      - name: 安装 Chromium（仅此一款）
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
+      # 先证明注入面存在（只断言非空，不打印任何密钥值）
+      - name: 注入面自检（只判非空）
+        run: |
+          test -n "$AI_API_KEY" || { echo "::error::Environment e2e-real 未提供 secret E2E_AI_API_KEY"; exit 1; }
+          echo "AI_BASE_URL=${AI_BASE_URL:-<unset>}"
+          echo "AI_MODEL=${AI_MODEL:-<unset>}"
+
+      - name: 真机 E2E（真模型 · 自起后端 + 前端）
+        working-directory: frontend
+        run: npx playwright test --grep @real
+
+      - name: 归档失败证据（trace / screenshot / harness 日志）
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: e2e-real-evidence
+          path: |
+            frontend/test-results
+            !frontend/test-results/.e2e-run/jar
+          retention-days: 7
+          if-no-files-found: warn
