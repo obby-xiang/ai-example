@@ -1,11 +1,13 @@
 # ============================================================
-# E2E 验证脚本（main 版）：动态配置管理系统 全流程 163 用例
+# E2E 验证脚本（main 版）：动态配置管理系统 全流程 165 用例
 #   = 既有 35（TC1–TC22 + TC23 + GF1–GF6 + R-137×2 + E2E-CTX-1..4）
 #     + 批① 90（AIE2E-*，设计稿 docs/research/设计-AI对话E2E用例全集-2026-10-22.md §2 十二域
 #       ＋ L-21 两条表格主用例 T-13/T-14，设计稿之外新增、行内登记于 SH 域）
 #     + V1 34（AIE2E-W-*，测试扩充 V1 · 工作区原语全链（桩层）+ 缺口 0 动态披露修复的回归位）
 #     + V2 4（AIE2E-W-35..W-38，测试扩充 V2 · 刷新恢复链的桩级三面：在途轮发现 / 全量重放 /
 #       挂起卡重建源数据 / 增量续收锚点）
+#     + V5 2（AIE2E-W-39..W-40，测试扩充 V5 · 不可撤销卡批准后执行（B9 后续链路）+
+#       预览→应用→撤销的协议半段（B13/D7））
 #
 # 移植来源：<REPO_ROOT>/ai-example-code/ai-example-deepseek-v4-pro/scripts/verify-e2e.ps1
 #           （685 行 / TC1–TC22 共 22 用例）。用例编号与源脚本一一对照，
@@ -50,7 +52,7 @@
 # 数据面安全：本脚本只创建/删除自己的 S5B-*/AIE2E-* 任务与 E2E_TEMP 定义；
 #   CURRENCY 演示数据在 TC13 会被替换为 3 行，TC19 用全量导出件恢复为 5 行。
 #
-# 结果口径：163 个用例计入 PASS/FAIL —— 既有 35 + 批① 90（AIE2E-*）+ V1 34（AIE2E-W-*）+ V2 4
+# 结果口径：165 个用例计入 PASS/FAIL —— 既有 35 + 批① 90（AIE2E-*）+ V1 34（AIE2E-W-*）+ V2 4 + V5 2
 #   既有 35：TC1–TC22 共 22 个 + TC23（T3b 收尾：CONFIRM 卡快照重建）+ GF1–GF5 共 5 个
 #   （生成式表单端到端，docs/evidence/GFc-E2E用例设计-GLM-5.3.md）+ GF6（入参闸门，-EnableGf6，
 #   桩模式启用并计入主计数，底座为桩的确定性违规模式 --violate-form-type）+ R-137 红队补测
@@ -65,7 +67,10 @@
 #   V2 4（W 域尾）：刷新恢复链的桩级三面 —— W-35 断开后在途轮发现（runs/current 的 RUNNING +
 #   archiveMaxSeq）/ W-36 断开后 lastSeq=0 全量重放完整 / W-37 断开后挂起卡重建源数据（kind/req/
 #   arguments 与 confirm_request 帧同源）/ W-38 已收末号续收只补新帧。
-#   移植期缺陷清单（Q8）的两项断言单列计数（Q8 项 PASS/FAIL），不计入 163 与退出码。
+#   V5 2（W 域尾）：W-39 不可撤销卡批准后执行（IRREV-PUBLISH 的 irreversible 保真 → 批准 →
+#   tool_result ok → done + 发布作业真实产生）/ W-40 预览→应用→撤销协议半段（SHEET-UPDATE 应用
+#   回灌 + SHEET-UNDO 撤销回灌，两轮同会话各自收敛；写闸关时两工具都不披露、零工具帧）。
+#   移植期缺陷清单（Q8）的两项断言单列计数（Q8 项 PASS/FAIL），不计入 165 与退出码。
 # 退出码：任一主用例 FAIL ⇒ exit 1；GF1–GF4 全部 SKIP（本棒零有效验证，硬底线）⇒ exit 1；
 #   E2E_STUB_MODE=1 且 GFSKIP≥1 ⇒ exit 1（桩模式零容忍）；
 #   批① 的 P2 红**单列不阻塞**（设计稿 §4.2 第 5 项：防一门禁把开发卡死），P0/P1 红照常 exit 1。
@@ -5073,6 +5078,143 @@ Add-AiCase 'W-38' 'P2' '刷新恢复④增量续收锚点：以已收末号 last
     return $null
 }
 
+# V5 · 不可撤销 + 预览→应用→撤销（桩层 2 条）：
+#   B9 已由 W-12/13/14 锁住「irreversible 三通道保真」，缺的是**批准之后**的链路
+#   （复选框语义在协议面的投影 = irreversible=true 的卡被批准后照常执行、作业真的产生）；
+#   B13/D7 的浏览器半段在 vitest（sheet-preview-apply-undo.spec.ts），这里补协议半段：
+#   应用回灌与撤销回灌各自走通「frontend_tool_result ok → done」，两轮同会话。
+Add-AiCase 'W-39' 'P0' '不可撤销卡批准后执行（IRREV-PUBLISH）：irreversible 保真 → 批准 → 工具执行 → done + 发布作业真实产生' {
+    $t = Ai-PublishFixture 'AIE2E-W-39-不可撤销批准'
+    $sid = Ai-NewSid 'w39'
+    $jobsBefore = @(GetJson "/api/tasks/$t/jobs" | Where-Object { $_.jobType -eq 'PUBLISH' }).Count
+    $frames = New-Object System.Collections.ArrayList
+    Read-Sse '/api/ai/chat' @{
+        sessionId = $sid
+        message = ("【AIE2E】scenario=IRREV-PUBLISH 任务 {0} 发布。" -f $t)
+        context = @{ page = 'import'; taskId = $t; taskType = 'IMPORT'; step = 'PUBLISH' }
+    } @('confirm_request', 'done', 'error') $frames $null
+    $cr = Ai-One $frames 'confirm_request'
+    if (-not $cr) { throw '未挂起到确认门（不可撤销批准链路无从核对）' }
+    if ($cr.name -ne 'start_publish') { throw "确认工具 $($cr.name)，期望 start_publish" }
+    if ($cr.irreversible -ne $true) { throw 'confirm_request 帧 irreversible 不是 true（复选框语义丢失）' }
+    $sus = Ai-One $frames 'suspended'
+    if (-not $sus) { throw '未收到 suspended 帧' }
+    $susEntry = @($sus.toolCalls | Where-Object { $_.toolCallId -eq $cr.toolCallId })[0]
+    if (-not $susEntry -or $susEntry.irreversible -ne $true) { throw 'suspended 帧的 irreversible 与 confirm_request 不同源' }
+    $k = Ai-MaxSeq $frames
+    $conf = Invoke-Api 'POST' '/api/ai/confirm' @{ runId = $cr.runId; toolCallId = $cr.toolCallId; approved = $true; reason = 'e2e-w39' }
+    if (-not $conf.ok) { throw "POST /api/ai/confirm => HTTP $($conf.status) $($conf.text)" }
+    $after = Ai-Events $cr.runId $k @('done', 'error')
+    $decisions = Ai-F $after 'confirm_decision'
+    if ($decisions.Count -ne 1) { throw "confirm_decision 帧 $($decisions.Count) 个（期望恰 1）" }
+    if ($decisions[0].approved -ne $true) { throw "confirm_decision.approved=$($decisions[0].approved)" }
+    $results = @($after | Where-Object {
+        ($_.type -eq 'tool_result' -or $_.type -eq 'frontend_tool_result') -and $_.toolCallId -eq $cr.toolCallId
+    })
+    if ($results.Count -ne 1) { throw "结局帧 $($results.Count) 个（期望恰 1：批准后必须真的执行一次）" }
+    if ($results[0].type -ne 'tool_result') { throw "结局帧类型是 $($results[0].type)，期望 tool_result（后端执行类工具）" }
+    if ($results[0].outcome -ne 'ok') { throw "结局帧 outcome=$($results[0].outcome)，期望 ok" }
+    $done = Ai-Done $after
+    if ($done.cancelled -eq $true) { throw '批准执行的轮收尾为 cancelled（未停止的轮被标成取消）' }
+    Ai-DoneIsLast $after
+    Ai-SeqStrict $after
+    $job = Wait-Until {
+        $js = @(GetJson "/api/tasks/$t/jobs" | Where-Object { $_.jobType -eq 'PUBLISH' })
+        if ($js.Count -gt $jobsBefore) { return $js[0] } else { return $null }
+    } 60 '批准后未创建发布作业（复选框只是 UI 语义、执行链没接上）'
+    if ((Wait-Job $job.id).status -ne 'COMPLETED') { throw "发布作业未 COMPLETED（当前 $((Wait-Job $job.id).status)）" }
+    $ledger = @((Ai-Run $cr.runId).ledger | Where-Object { $_.toolCallId -eq $cr.toolCallId })
+    if ($ledger.Count -lt 1) { throw '台账里没有该 toolCallId 的执行记录（批准后没有真的执行）' }
+    if ($ledger[0].outcome -ne 'ok') { throw "台账 outcome=$($ledger[0].outcome)，期望 ok" }
+    if ([string]::IsNullOrWhiteSpace([string]$ledger[0].executedBy)) { throw '台账缺 executedBy（不知道谁执行的）' }
+    return $null
+}
+
+Add-AiCase 'W-40' 'P1' '预览→应用→撤销跨层闭环（桩级协议半段）：update_rows 应用回灌 + undo_last_sheet_edit 撤销回灌各自收敛到 done' {
+    $names = Ai-ToolsOf $script:aiSheetCtx
+    $writeOn = $names -contains 'update_rows'
+    $undoOn = $names -contains 'undo_last_sheet_edit'
+    if ($writeOn -ne $undoOn) { throw "写闸两侧不同源：update_rows=$writeOn / undo_last_sheet_edit=$undoOn（撤销与写必须同一个闸）" }
+    $t = Ai-ExportFixture 'AIE2E-W-40-撤销闭环'
+    $sid = Ai-NewSid 'w40'
+    if (-not $writeOn) {
+        # 写闸关：两个 WRITE 面工具都不披露 ⇒ 两轮都退化为文本轮、零工具帧
+        foreach ($marker in @('SHEET-UPDATE', 'SHEET-UNDO')) {
+            $frames = New-Object System.Collections.ArrayList
+            Read-Sse '/api/ai/chat' @{
+                sessionId = $sid
+                message = "【AIE2E】scenario=$marker 任务 $t 写闸关口径检查。"
+                context = (Ai-SheetCtx $t)
+            } @('frontend_tool_request', 'done', 'error') $frames $null
+            if (Ai-One $frames 'frontend_tool_request') { throw "写闸关但 $marker 仍下发 frontend_tool_request（披露闸被绕过）" }
+            if (@($frames | Where-Object { $_.type -eq 'tool_start' }).Count -gt 0) { throw "写闸关但 $marker 轮仍有 tool_start 帧" }
+            Ai-Done $frames | Out-Null
+            Ai-SeqStrict $frames
+        }
+        return $null
+    }
+    # 轮①：应用（写工具挂起 → 浏览器回灌 → frontend_tool_result + done）
+    $before = Ai-SheetCounters
+    $frames1 = New-Object System.Collections.ArrayList
+    Read-Sse '/api/ai/chat' @{
+        sessionId = $sid
+        message = "【AIE2E】scenario=SHEET-UPDATE 任务 $t 把 code 为 USD 那一行的小数位数改成 3"
+        context = (Ai-SheetCtx $t)
+    } @('frontend_tool_request', 'done', 'error') $frames1 $null
+    $req = Ai-One $frames1 'frontend_tool_request'
+    if (-not $req) { throw '写闸开但未收到 update_rows 的 frontend_tool_request' }
+    if ($req.name -ne 'update_rows') { throw "挂起工具是 $($req.name)，期望 update_rows" }
+    $entry = Gf-PendingEntry $req.runId $req.toolCallId
+    if ($entry.kind -ne 'FRONTEND') { throw "pending.kind=$($entry.kind)，期望 FRONTEND" }
+    $applied = "已应用 1 格（plan #e2e-plan-w40，回到修改前值可撤销）。`n共 1 格"
+    $posted1 = Ai-SheetToolResult $req.runId $req.toolCallId $applied @{
+        dataClass = 'D2'; sampleRows = 1; planId = 'e2e-plan-w40'; previewLevel = 'sample-diff'; sheetVer = 1; defCode = 'CURRENCY'
+    }
+    if (-not $posted1.ok) { throw "应用回灌 HTTP $($posted1.status) $($posted1.text)" }
+    $after1 = Ai-Events $req.runId 0 @('done', 'error')
+    $res1 = @($after1 | Where-Object {
+        ($_.type -eq 'tool_result' -or $_.type -eq 'frontend_tool_result') -and $_.toolCallId -eq $req.toolCallId
+    })
+    if ($res1.Count -ne 1 -or $res1[0].type -ne 'frontend_tool_result') { throw "应用结局帧 $($res1.Count) 个 / 类型 $($res1[0].type)" }
+    if ([string]$res1[0].result -notlike '*plan #e2e-plan-w40*') { throw '应用结局帧 result 不含回灌文本' }
+    if ($res1[0].outcome -ne 'ok') { throw "应用结局帧 outcome=$($res1[0].outcome)，期望 ok" }
+    Ai-Done $after1 | Out-Null
+    Ai-DoneIsLast $after1
+    Ai-SeqStrict $after1
+    # 轮②：撤销（同会话；撤销是另一个 WRITE 面工具，必须同样披露并挂起）
+    $frames2 = New-Object System.Collections.ArrayList
+    Read-Sse '/api/ai/chat' @{
+        sessionId = $sid
+        message = "【AIE2E】scenario=SHEET-UNDO 任务 $t 撤销刚才那次修改。"
+        context = (Ai-SheetCtx $t)
+    } @('frontend_tool_request', 'done', 'error') $frames2 $null
+    $req2 = Ai-One $frames2 'frontend_tool_request'
+    if (-not $req2) { throw '写闸开但未收到 undo_last_sheet_edit 的 frontend_tool_request' }
+    if ($req2.name -ne 'undo_last_sheet_edit') { throw "挂起工具是 $($req2.name)，期望 undo_last_sheet_edit" }
+    if ([string]$req2.args -notlike '*CURRENCY*') { throw "撤销入参缺 defCode（$($req2.args)）" }
+    if ([string]$req2.args -match '人民币|美元|7\.24') { throw '撤销入参出现了表内业务值（越界）' }
+    $entry2 = Gf-PendingEntry $req2.runId $req2.toolCallId
+    if ($entry2.kind -ne 'FRONTEND') { throw "撤销条目 kind=$($entry2.kind)，期望 FRONTEND" }
+    $undone = "已撤销 1 格（plan #e2e-plan-w40，回到修改前值）。剩余可撤销 0 层。`n共 1 格"
+    $posted2 = Ai-SheetToolResult $req2.runId $req2.toolCallId $undone @{
+        dataClass = 'D1'; planId = 'e2e-plan-w40'; previewLevel = 'sample-diff'; sheetVer = 1; defCode = 'CURRENCY'
+    }
+    if (-not $posted2.ok) { throw "撤销回灌 HTTP $($posted2.status) $($posted2.text)" }
+    $after2 = Ai-Events $req2.runId 0 @('done', 'error')
+    $res2 = @($after2 | Where-Object {
+        ($_.type -eq 'tool_result' -or $_.type -eq 'frontend_tool_result') -and $_.toolCallId -eq $req2.toolCallId
+    })
+    if ($res2.Count -ne 1 -or $res2[0].type -ne 'frontend_tool_result') { throw "撤销结局帧 $($res2.Count) 个 / 类型 $($res2[0].type)" }
+    if ([string]$res2[0].result -notlike '*剩余可撤销 0 层*') { throw '撤销结局帧 result 不含层数回执（撤销链在协议面断掉）' }
+    if ($res2[0].outcome -ne 'ok') { throw "撤销结局帧 outcome=$($res2[0].outcome)，期望 ok" }
+    Ai-Done $after2 | Out-Null
+    Ai-DoneIsLast $after2
+    Ai-SeqStrict $after2
+    $counters = Ai-SheetCounters
+    if ([int]$counters.writePlans -le [int]$before.writePlans) { throw "writePlans 未增长（$($before.writePlans) → $($counters.writePlans)）：应用+撤销两轮没进审计面" }
+    return $null
+}
+
 
 # ============================================================
 # 批① 汇总：逐域 n/m + 计数自校验（MANIFEST 对账）
@@ -5084,9 +5226,12 @@ Add-AiCase 'W-38' 'P2' '刷新恢复④增量续收锚点：以已收末号 last
 #   V2 追加（测试扩充 V2 · 刷新/停止真形态下沉）：W 域 4 条（124 → 128）——
 #     W-35 在途轮发现 / W-36 全量重放 / W-37 挂起卡重建源数据 / W-38 增量续收锚点，
 #     P1 +3 / P2 +1（前端 jsdom 真形态 26 条见 tests/aie2e-refresh-forms.spec.ts，不计入本节）
+#   V5 追加（测试扩充 V5 · 不可撤销 & 预览/应用/撤销跨层）：W 域 2 条（128 → 130）——
+#     W-39 不可撤销卡批准后执行（IRREV-PUBLISH，P0；B9 批准后续链路）/
+#     W-40 预览→应用→撤销协议半段（SHEET-UPDATE + SHEET-UNDO，P1；B13/D7），P0 +1 / P1 +1
 # ============================================================
 Say '============================================================'
-Say '--- 批① · 128 用例执行（桩模式，零 SKIP） ---'
+Say '--- 批① · 130 用例执行（桩模式，零 SKIP） ---'
 $script:aiStat = @{}
 $script:aiExecuted = 0
 $script:aiSkip = 0
@@ -5121,7 +5266,7 @@ foreach ($c in @($script:aiCases)) {
         No ("AIE2E-{0} [{1}] {2}" -f $c.id, $c.p, $c.title) $why
     }
 }
-$expect = [ordered]@{ S = 13; P = 1; H = 11; G = 11; T = 10; K = 6; Q = 4; C = 8; M = 3; D = 11; X = 12; W = 38 }
+$expect = [ordered]@{ S = 13; P = 1; H = 11; G = 11; T = 10; K = 6; Q = 4; C = 8; M = 3; D = 11; X = 12; W = 40 }
 $domainLines = @()
 foreach ($k in $expect.Keys) {
     $st = if ($script:aiStat.ContainsKey($k)) { $script:aiStat[$k] } else { @{ pass = 0; fail = 0 } }
@@ -5131,20 +5276,20 @@ Say (" 批① 逐域：" + ($domainLines -join '  '))
 Say (" 批① 合计：{0}/{1}（P0={2} P1={3} P2={4}）" -f $script:aiPass, $script:aiExecuted, $script:aiP.P0, $script:aiP.P1, $script:aiP.P2)
 
 $manifestWhy = @()
-if ($script:aiCases.Count -ne 128) { $manifestWhy += "用例清单 $($script:aiCases.Count) 条，蓝图要求 128（88 设计稿 + 2 L-21 主用例 + 34 V1 工作区原语 + 4 V2 刷新恢复链）" }
-if ($script:aiExecuted -ne 128) { $manifestWhy += "实际执行 $($script:aiExecuted) 条，期望 128（88 设计稿 + 2 L-21 主用例 + 34 V1 工作区原语 + 4 V2 刷新恢复链）" }
+if ($script:aiCases.Count -ne 130) { $manifestWhy += "用例清单 $($script:aiCases.Count) 条，蓝图要求 130（88 设计稿 + 2 L-21 主用例 + 34 V1 工作区原语 + 4 V2 刷新恢复链 + 2 V5 不可撤销/撤销闭环）" }
+if ($script:aiExecuted -ne 130) { $manifestWhy += "实际执行 $($script:aiExecuted) 条，期望 130（88 设计稿 + 2 L-21 主用例 + 34 V1 工作区原语 + 4 V2 刷新恢复链 + 2 V5 不可撤销/撤销闭环）" }
 if ($script:aiSkip -ne 0) { $manifestWhy += "SKIP=$($script:aiSkip) 条（桩下零 SKIP 是硬底线）" }
 foreach ($k in $expect.Keys) {
     $n = @($script:aiCases | Where-Object { $_.id -like "$k-*" }).Count
     if ($n -ne $expect[$k]) { $manifestWhy += "域 $k 有 $n 条，蓝图 $($expect[$k]) 条" }
 }
-if ($script:aiP.P0 -ne 16 -or $script:aiP.P1 -ne 73 -or $script:aiP.P2 -ne 39) {
-    $manifestWhy += "优先级分布 P0/P1/P2=$($script:aiP.P0)/$($script:aiP.P1)/$($script:aiP.P2)，蓝图 16/73/39（88 设计稿 12/50/26 + 2 条 P1 主用例 + V1 的 4/18/12 + V2 的 0/3/1）"
+if ($script:aiP.P0 -ne 17 -or $script:aiP.P1 -ne 74 -or $script:aiP.P2 -ne 39) {
+    $manifestWhy += "优先级分布 P0/P1/P2=$($script:aiP.P0)/$($script:aiP.P1)/$($script:aiP.P2)，蓝图 17/74/39（88 设计稿 12/50/26 + 2 条 P1 主用例 + V1 的 4/18/12 + V2 的 0/3/1 + V5 的 1/1/0）"
 }
 if ($manifestWhy.Count -gt 0) {
     No 'AIE2E-MANIFEST 计数自校验' ($manifestWhy -join '；')
 } else {
-    Ok ("AIE2E-MANIFEST 计数自校验：128 条 / 12 域（S13 P1 H11 G11 T10 K6 Q4 C8 M3 D11 X12 W38）/ P0 {0} · P1 {1} · P2 {2}，与设计稿 §2 逐行 P 列一致 + L-21 两条表格主用例（T-13/T-14，P1）+ V1 的 W 域 34 条 + V2 的刷新恢复链 4 条" -f $script:aiP.P0, $script:aiP.P1, $script:aiP.P2)
+    Ok ("AIE2E-MANIFEST 计数自校验：130 条 / 12 域（S13 P1 H11 G11 T10 K6 Q4 C8 M3 D11 X12 W40）/ P0 {0} · P1 {1} · P2 {2}，与设计稿 §2 逐行 P 列一致 + L-21 两条表格主用例（T-13/T-14，P1）+ V1 的 W 域 34 条 + V2 的刷新恢复链 4 条 + V5 的不可撤销批准/撤销闭环 2 条" -f $script:aiP.P0, $script:aiP.P1, $script:aiP.P2)
 }
 
 # ============================================================

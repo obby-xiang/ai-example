@@ -103,7 +103,8 @@ export interface SheetAdapter {
   /**
    * 清除标记（同样只是屏幕态）。
    *
-   * @param tone 缺省 = 全清（撤销后调用）；传 `preview` 只清预览色（已应用色保持）
+   * @param tone 缺省 = 全清（换会话 / 换页这类「整屏收口」用）；撤销只传 `applied`（只回滚自己那层），
+   *   预览收口只传 `preview`（互不误伤）
    */
   clearMarks?(tone?: SheetMarkTone): void
 }
@@ -1400,6 +1401,8 @@ function makePlan(input: {
   tool: string
   toolCallId: string
   preview: SheetPreviewLevel
+  /** 作用域（B12：选区作用域的计划在选区变化时失效；其余作用域与选区无关） */
+  scope?: SheetWritePlan['scope']
   scopeSummary: string
   predicateSummary: string
   targetRows: number[]
@@ -1427,6 +1430,7 @@ function makePlan(input: {
     tool: input.tool,
     level: rowsCount > SHEET_WRITE_LARGE_ROW_THRESHOLD || cellsCount > SHEET_WRITE_SMALL_DIFF_MAX_CELLS ? 'large' : 'small',
     preview: input.preview,
+    ...(input.scope ? { scope: input.scope } : {}),
     scopeSummary: input.scopeSummary,
     predicateSummary: input.predicateSummary,
     rowsCount,
@@ -1786,6 +1790,7 @@ export function planReplace(ctx: SheetContext, args: SheetArgs, toolCallId = '')
     tool: 'replace_values',
     toolCallId,
     preview,
+    scope: scope.resolved.scope as SheetWritePlan['scope'],
     scopeSummary: scope.resolved.summary,
     predicateSummary: scope.resolved.predicateSummary,
     // 计数档只保留命中行（应用/指纹要用），不保留逐格明细
@@ -2047,6 +2052,7 @@ export function planUpdate(ctx: SheetContext, args: SheetArgs, toolCallId = ''):
     tool: 'update_rows',
     toolCallId,
     preview,
+    scope: scope.resolved.scope as SheetWritePlan['scope'],
     scopeSummary: scope.resolved.summary,
     predicateSummary: scope.resolved.predicateSummary,
     targetRows: countMode ? matchedRows : rows,
@@ -2318,6 +2324,7 @@ export function planNormalize(ctx: SheetContext, args: SheetArgs, toolCallId = '
     tool: 'normalize_column',
     toolCallId,
     preview,
+    scope: scope.resolved.scope as SheetWritePlan['scope'],
     scopeSummary: scope.resolved.summary,
     predicateSummary: scope.resolved.predicateSummary,
     targetRows: countMode ? (diff.matchedRows ?? []) : scope.resolved.rows,
@@ -2574,8 +2581,9 @@ export function undoLastSheetEdit(ctx: SheetContext): SheetToolOutcome {
   if (stack.length === 0) {
     undoStack.delete(ctx.adapter)
   }
-  // 被回滚的格清标记；其余层保留（§5.4 第 3 条）
-  ctx.adapter.clearMarks?.()
+  // 被回滚的格清标记；其余层保留（§5.4 第 3 条）。**只清已应用色**：撤销与"另一张尚未应用
+  // 的预览"无关，无参全清会把那张卡刚上的预览琥珀也一并抹掉（卡还在、高亮没了）。
+  ctx.adapter.clearMarks?.('applied')
   return {
     ok: true,
     text: `已撤销 ${entry.cellsCount} 格（plan #${entry.planId}，回到修改前值）。剩余可撤销 ${stack.length} 层。\n共 ${entry.cellsCount} 格`

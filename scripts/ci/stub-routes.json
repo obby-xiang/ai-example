@@ -22,6 +22,7 @@
     "generative_form",
     "aggregate_sheet",
     "update_rows",
+    "undo_last_sheet_edit",
     "ui_snapshot",
     "ui_click",
     "ui_fill",
@@ -876,6 +877,22 @@
           }
         ],
         "preview": "count"
+      }
+    },
+    {
+      "id": "SHEET-UNDO",
+      "note": "V5 B13/D7：预览→应用→撤销链的协议半段（W-40）。上一轮已由 SHEET-UPDATE 走完「挂起→应用回灌→frontend_tool_result ok」，本轮让模型调 undo_last_sheet_edit —— 它同样是 WRITE 面工具，写闸关时不披露（桩按披露清单退化为文本轮）。arguments 只有 defCode，不含任何单元格值。",
+      "match": {
+        "messageAny": [
+          "scenario=SHEET-UNDO"
+        ],
+        "requiresTools": [
+          "undo_last_sheet_edit"
+        ]
+      },
+      "tool": "undo_last_sheet_edit",
+      "arguments": {
+        "defCode": "CURRENCY"
       }
     },
     {

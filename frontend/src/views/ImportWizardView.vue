@@ -87,6 +87,7 @@
                 :def-code="def.code"
                 :sheet-name="def.name"
                 @data-changed="onGridChanged"
+                @selection-changed="onGridSelectionChanged(def.code)"
               />
             </el-tab-pane>
           </el-tabs>
@@ -694,7 +695,14 @@ async function loadEditors(force = false): Promise<void> {
 }
 
 function onEditorTabChange(name: string | number): void {
+  // B12：换到另一张表才让旧预览计划失效（切回同一张表不动）
+  aiStore.onSheetTabChanged(String(name))
   void ensureEditorLoaded(String(name))
+}
+
+/** B12：用户换选区 ⇒ 选区作用域的预览计划失效（整表/条件计划不受影响）。 */
+function onGridSelectionChanged(defCode: string): void {
+  aiStore.onSheetSelectionChanged(defCode)
 }
 
 async function ensureEditorLoaded(code: string): Promise<void> {
@@ -1418,6 +1426,8 @@ watch(
 )
 
 onBeforeUnmount(() => {
+  // B12：离开承载表格的页面 ⇒ 预览计划失效（屏幕色同步清），不回灌
+  aiStore.onSheetPageLeft()
   // 卸载/结束：释放全部在途订阅（原 registry.disposeAll 语义；dispose 会经 onDisposed 摘柄，
   // 先拷贝再迭代避免遍历中改表）
   for (const dispose of [...jobWatchDisposes.values()]) {

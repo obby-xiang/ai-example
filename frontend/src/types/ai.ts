@@ -488,6 +488,12 @@ export interface SheetWritePlan {
   tool: string
   level: 'small' | 'large'
   preview: SheetPreviewLevel
+  /**
+   * 作用域（B12 收口判据）：`selection` = 用户亲手框选算出来的计划 —— 选区一变，计划即失效；
+   * 其余作用域（sheet / columns / rows / predicate）与选区无关，不得因选区变化被误伤。
+   * 可选：旧载荷 / 手搭计划缺省 = 不可判，收口函数按"非选区"保守处理。
+   */
+  scope?: 'selection' | 'sheet' | 'columns' | 'rows' | 'predicate'
   scopeSummary: string
   predicateSummary: string
   rowsCount: number

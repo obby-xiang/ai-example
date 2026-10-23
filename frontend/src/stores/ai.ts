@@ -59,6 +59,7 @@ import {
   sheetAppliedSummary,
   sheetReadOnlyWriteBlocked,
   type SheetAppliedSummary,
+  type SheetContext,
   type SheetToolMeta
 } from '@/utils/sheet-tools'
 import {
@@ -101,6 +102,15 @@ export interface AiSendResult {
 
 /** 当前轮的 AbortController（模块级：不进响应式状态）。 */
 let currentAbort: AbortController | null = null
+/**
+ * 当前预览计划对应的表格上下文（模块级：不进响应式状态）。
+ *
+ * 为什么单独留一份：预览收口（换选区 / 换页签 / 离开页面 / 换会话 / 停止）必须**同步**清掉
+ * 屏幕上的预览色，而 `resolveSheetContext()` 是异步的、且页面卸载后 handler 已经摘掉 ——
+ * 那时再解析只会拿到「当前页面没有可操作的表格」。这份引用在**建卡时**取一次，
+ * 收口时直接用它把颜色擦掉（与 `activePreview` 同寿，任何清空 activePreview 的路径都同步清它）。
+ */
+let previewSheetCtx: SheetContext | null = null
 /**
  * 当前轮的宿主助手消息 id（模块级：与 `currentAbort` 同为"这一轮"的身份判据）。
  *
@@ -2955,6 +2965,8 @@ export const useAiStore = defineStore('ai', {
         return
       }
       this.activePreview = { ...planned.plan, runId }
+      // 收口用的上下文引用（见模块级 previewSheetCtx 注释）：与 activePreview 同寿
+      previewSheetCtx = resolved.ctx
       this.stalePreviewToolCallId = null
       // 预览态高亮（L-23）：计数档没有逐格明细 ⇒ 这里通常是 0 格；切到明细档时再上色。
       markPreviewCells(resolved.ctx, this.activePreview)
@@ -3308,6 +3320,7 @@ export const useAiStore = defineStore('ai', {
           // 计数档没有逐格明细 ⇒ 预览色随之撤掉（卡面也没有可核对的单元格）
           const resolved = await resolveSheetContext(plan.defCode)
           if (resolved.ok) {
+            previewSheetCtx = resolved.ctx
             clearPreviewMarks(resolved.ctx)
           }
         }
@@ -3316,15 +3329,18 @@ export const useAiStore = defineStore('ai', {
       const resolved = await resolveSheetContext(plan.defCode)
       if (!resolved.ok) {
         this.activePreview = null
+        previewSheetCtx = null
         this.markPreviewStale(plan.toolCallId)
         return
       }
+      previewSheetCtx = resolved.ctx
       const replanned = replanSheet(resolved.ctx, plan, level)
       if (!replanned.ok) {
         // 两种都收口到"预览已失效"：表格被改（stale）与明细超上限（物化失败）。
         // 前者用户重新发起即可，后者卡面会显示原因（不静默降级成 0 格预览）。
         clearPreviewMarks(resolved.ctx)
         this.activePreview = null
+        previewSheetCtx = null
         this.stalePreviewToolCallId = plan.toolCallId
         this.notice = replanned.reason
         return
@@ -3386,6 +3402,7 @@ export const useAiStore = defineStore('ai', {
       const resolved = await resolveSheetContext(plan.defCode)
       if (!resolved.ok) {
         this.activePreview = null
+        previewSheetCtx = null
         await this.finishSheetTool({
           toolCallId: plan.toolCallId,
           name: plan.tool,
@@ -3395,6 +3412,7 @@ export const useAiStore = defineStore('ai', {
         })
         return
       }
+      previewSheetCtx = resolved.ctx
       // 计数档没有逐格新值 ⇒ 落笔前必须先物化明细（§6.2）。这一步是"应用"的必要前提：
       // 没有它就只能"改 0 格"，那是谎。物化超硬上限 ⇒ 如实回灌失败，不静默降级。
       let applied = plan
@@ -3402,6 +3420,7 @@ export const useAiStore = defineStore('ai', {
         const materialized = replanSheet(resolved.ctx, plan, 'sample-diff')
         if (!materialized.ok) {
           this.activePreview = null
+          previewSheetCtx = null
           await this.finishSheetTool({
             toolCallId: plan.toolCallId,
             name: plan.tool,
@@ -3424,6 +3443,7 @@ export const useAiStore = defineStore('ai', {
       clearPreviewMarks(resolved.ctx)
       const outcome = applySheetPlan(resolved.ctx, applied)
       this.activePreview = null
+      previewSheetCtx = null
       if (!outcome.ok) {
         await this.finishSheetTool({
           toolCallId: applied.toolCallId,
@@ -3463,6 +3483,7 @@ export const useAiStore = defineStore('ai', {
         return
       }
       this.activePreview = null
+      previewSheetCtx = null
       const resolved = await resolveSheetContext(plan.defCode)
       if (resolved.ok) {
         clearPreviewMarks(resolved.ctx)
@@ -3482,9 +3503,75 @@ export const useAiStore = defineStore('ai', {
      */
     markPreviewStale(toolCallId: string): void {
       if (this.activePreview?.toolCallId === toolCallId) {
+        // 计划失效 ⇒ 预览色一起撤（卡上说"失效"、屏幕上却还亮着琥珀 = 两套说法）
+        if (previewSheetCtx) {
+          clearPreviewMarks(previewSheetCtx)
+        }
         this.activePreview = null
       }
+      previewSheetCtx = null
       this.stalePreviewToolCallId = toolCallId
+    },
+
+    // ── B12 预览高亮收口（换选区 / 换页签 / 离开页面 / 换会话 / 停止） ────────────
+
+    /**
+     * 预览收口：清预览色 + 计划归零。**只清 `preview` 色调**（已应用色归撤销链管）。
+     *
+     * @param reason `session` / `stop` = 整轮或整会话结束，卡不再需要"失效"提示；
+     *   其余 = 上下文变了但轮次还在 ⇒ 卡面转「预览已失效（可放弃）」，让用户知道为什么不能应用了。
+     */
+    dropSheetPreview(reason: 'session' | 'page' | 'tab' | 'selection' | 'stop' = 'page'): void {
+      const plan = this.activePreview
+      if (reason === 'session' || reason === 'stop') {
+        // 整轮/整会话结束：卡面不再需要「预览已失效」提示，旧失效标记一并清
+        this.stalePreviewToolCallId = null
+      }
+      if (!plan) {
+        previewSheetCtx = null
+        return
+      }
+      if (previewSheetCtx) {
+        clearPreviewMarks(previewSheetCtx)
+      }
+      previewSheetCtx = null
+      this.activePreview = null
+      if (reason !== 'session' && reason !== 'stop') {
+        this.stalePreviewToolCallId = plan.toolCallId
+      }
+    },
+
+    /**
+     * 换选区（B12）：**只有选区作用域的计划**会在选区变化时失效 —— 它本来就是按"当前框选"
+     * 算出来的 diff，选区一换，那份 diff 指的不再是用户眼前选中的行。整表 / 条件 / 列范围
+     * 的计划与选区无关，不得误伤（否则用户点一下单元格就把预览弄没了）。
+     */
+    onSheetSelectionChanged(defCode?: string): void {
+      const plan = this.activePreview
+      if (!plan || plan.scope !== 'selection') {
+        return
+      }
+      if (defCode !== undefined && defCode !== '' && plan.defCode !== defCode) {
+        return
+      }
+      this.dropSheetPreview('selection')
+    },
+
+    /** 换页签（B12）：换到**另一张表**才收口；切回同一张表不动（可能是误触）。 */
+    onSheetTabChanged(defCode: string): void {
+      const plan = this.activePreview
+      if (!plan || plan.defCode === defCode) {
+        return
+      }
+      this.dropSheetPreview('tab')
+    },
+
+    /**
+     * 离开承载表格的页面（B12）：预览计划已不可达（`sheet.current` handler 随卸载摘掉），
+     * 收口为「预览已失效」，卡面给「放弃」入口；屏幕色同步撤掉（组件卸载前最后一帧）。
+     */
+    onSheetPageLeft(): void {
+      this.dropSheetPreview('page')
     },
 
     /** 用户对“预览已失效”卡点“放弃”：回灌 `cancelled=true`，让模型重新发起。 */
@@ -3715,18 +3802,14 @@ export const useAiStore = defineStore('ai', {
       this.loading = false
       this.suspended = false
       this.dropActiveForm()
-      const droppingPreview = this.activePreview
-      this.activePreview = null
+      // 停止 = 本轮被放弃：预览与高亮一起撤（B12 收口矩阵的「停止本轮」格）。
+      // 用建卡时留的上下文引用同步清色 —— 表格可能在别的页签，异步解析不保证拿得到。
+      this.dropSheetPreview('stop')
       this.stalePreviewToolCallId = null
-      if (droppingPreview) {
-        // 停止 = 本轮被放弃：预览色跟着撤（表格可能在别的页签，解析不到就随刷新消失）
-        const resolved = await resolveSheetContext(droppingPreview.defCode)
-        if (resolved.ok) {
-          clearPreviewMarks(resolved.ctx)
-        }
-      }
       // S1：段级就地收敛（输入框解禁的直接前提：pendingToolCall 由段派生）
       this.cancelRoundParts()
+      // 本轮的确认门提交态 / 勾选态随轮收口（stop 不走 done 帧，不能指望结局帧来清）
+      this.clearGateSubmissions()
       // S3/S4：消息尾标记 + 立即落镜像（含 done、stopped 与半截正文）
       this.markStoppedMessage()
       this.writeMirrorNow()
@@ -3859,6 +3942,11 @@ export const useAiStore = defineStore('ai', {
       this.poolSaturated = null
       this.suspended = false
       this.dropActiveForm()
+      // B12：预览属于旧会话 —— 计划与预览色一起丢弃（"新建对话"不是换个盒子继续改这张表）
+      this.dropSheetPreview('session')
+      // AI 可视可操作：界面撤销点 / 高亮 / 播报 / 上传交接随会话收口
+      // （resetUiSurfaces 此前无调用点 = 死代码，本批接到会话与页面两个出口）
+      this.resetUiSurfaces()
       // R-166（口径③）：提交在途态随会话清空（防跨会话串味）
       this.clearGateSubmissions()
       // 批4④ A5'/D4：折叠展开态随会话清空（防跨会话串味；会话内内存态，不进镜像）

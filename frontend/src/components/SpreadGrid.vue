@@ -76,6 +76,11 @@ const emit = defineEmits<{
   (event: 'data-changed'): void
   /** 引擎就绪（含从 xlsx/JSON 载入后的就绪） */
   (event: 'ready'): void
+  /**
+   * 用户换了选区（B12 收口判据）：只带新选区，不带任何单元格值。
+   * `null` = 选区被清空。程序化载入 / 上色期间（`restoring`）不触发。
+   */
+  (event: 'selection-changed', selection: SheetSelection | null): void
 }>()
 
 const host = ref<HTMLDivElement | null>(null)
@@ -186,6 +191,14 @@ onMounted(async () => {
     sheet.bind(events.CellChanged, onChanged)
     sheet.bind(events.RangeChanged, onChanged)
     sheet.bind(events.RowChanged, onChanged)
+    // B12：选区变化是"预览计划可能不再匹配"的唯一信号源（只报坐标，不带值）。
+    // 程序化载入 / 上色期间（restoring）不触发 —— 那是系统动作，不是用户换选区。
+    sheet.bind(events.SelectionChanged, () => {
+      if (restoring) {
+        return
+      }
+      emit('selection-changed', selectionOf(sheet.getSelections()))
+    })
 
     workbook.value = instance
     spreadNs = gs
@@ -234,6 +247,8 @@ onBeforeUnmount(() => {
     // 销毁失败无需上抛（宿主即将移除）
   }
   workbook.value = null
+  // B12：卸载即离开这张表 —— 模块级标记账本一并归零，新实例的 clearMarks 不得去擦旧表坐标
+  markedCells.length = 0
 })
 
 function activeSheet(): SpreadWorksheet | null {
@@ -371,6 +386,22 @@ function validateLocal(): ExcelRowIssue[] {
 }
 
 /**
+ * 视口选区 → 数据面选区（行 = 数据行下标；视口第 0 行是表头）。
+ * 适配器的 `selection()` 与 B12 的 `selection-changed` 事件共用这一份换算，不写两遍。
+ */
+function selectionOf(
+  ranges: ReadonlyArray<{ row: number; rowCount: number; col: number; colCount: number }> | null | undefined
+): SheetSelection | null {
+  const first = ranges && ranges.length > 0 ? ranges[0] : null
+  if (!first) {
+    return null
+  }
+  const row = Math.max(0, first.row - 1)
+  const rowCount = Math.max(0, first.rowCount - (first.row > 0 ? 0 : 1))
+  return { row, col: first.col, rowCount, colCount: first.colCount }
+}
+
+/**
  * 表格适配器（AI 表格操作专项 §3.6 的窄接口）：只暴露纯数据面，不把 SpreadJS 类型漏进 store。
  *
  * 行口径：适配器行 = 数据行下标（0 基）⇒ 视口行 = row + 1（视口第 0 行是表头）。
@@ -427,16 +458,7 @@ function getSheetAdapter(): SheetAdapter {
       }
       emit('data-changed')
     },
-    selection: (): SheetSelection | null => {
-      const ranges = sheet.getSelections()
-      const first = ranges && ranges.length > 0 ? ranges[0] : null
-      if (!first) {
-        return null
-      }
-      const row = Math.max(0, first.row - 1)
-      const rowCount = Math.max(0, first.rowCount - (first.row > 0 ? 0 : 1))
-      return { row, col: first.col, rowCount, colCount: first.colCount }
-    },
+    selection: (): SheetSelection | null => selectionOf(sheet.getSelections()),
     // 屏幕态标记（AI 表格工具治理 §5.4）：只设底色，不碰 cell style 的持久结构、
     // 不调 conditionalFormats —— 后者会进 toWorkbookJson()，而导出链只读值（collectRows）。
     markCells: (cells, tone) => {

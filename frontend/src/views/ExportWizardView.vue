@@ -122,6 +122,7 @@
               :def-code="item.defCode"
               :sheet-name="defName(item.defCode)"
               @data-changed="onGridChanged"
+              @selection-changed="onGridSelectionChanged(item.defCode)"
             />
           </el-tab-pane>
         </el-tabs>
@@ -877,7 +878,14 @@ async function ensureGridLoaded(code: string): Promise<{ ok: boolean; error: str
 }
 
 function onTabChange(name: string | number): void {
+  // B12：换到另一张表 ⇒ 旧预览计划失效（切回同一张表不动）
+  useAiStore().onSheetTabChanged(String(name))
   void ensureGridLoaded(String(name))
+}
+
+/** B12：用户换选区 ⇒ 选区作用域的预览计划失效（整表/条件计划不受影响）。 */
+function onGridSelectionChanged(defCode: string): void {
+  useAiStore().onSheetSelectionChanged(defCode)
 }
 
 function onGridChanged(): void {
@@ -1571,6 +1579,8 @@ function registerAiExportRegions(): void {
 }
 
 onBeforeUnmount(() => {
+  // B12：离开承载表格的页面 ⇒ 预览计划失效（屏幕色同步清），不回灌（用户没点应用/取消）
+  useAiStore().onSheetPageLeft()
   stopWatchJob?.()
   stopWatchJob = null
   HANDLER_NAMES.forEach(unregisterPageHandler)
