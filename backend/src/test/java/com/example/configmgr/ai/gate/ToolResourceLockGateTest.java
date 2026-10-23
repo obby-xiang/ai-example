@@ -99,6 +99,15 @@ class ToolResourceLockGateTest {
 
 	private final LeaseService lease = new LeaseService(this.fake.redis, this.properties, this.renew, "instance-lock");
 
+	/**
+	 * MUL M-04 下沉（V7）：<b>另一个实例</b>的租约设施与锁门面 —— 只共享同一份 Redis
+	 * （{@link FakeLeaseRedis}），进程内视图与 {@link #lease} 完全独立。
+	 */
+	private final LeaseService otherLease = new LeaseService(this.fake.redis, this.properties,
+			new FakeRenewScheduler(), "instance-other");
+
+	private final ToolResourceLocks otherLocks = new ToolResourceLocks(this.otherLease, this.properties);
+
 	private final InMemoryRunStore store = new InMemoryRunStore();
 
 	private final RunRegistry registry = new RunRegistry(this.store, new ObjectMapper(), null);
@@ -404,6 +413,76 @@ class ToolResourceLockGateTest {
 		assertThat(this.exportTool.invocations.get()).isEqualTo(1);
 		assertThat(this.fake.string(LeaseKeys.task(TASK_ID))).as("终态归还 task 锁").isNull();
 		assertThat(this.fake.string(LeaseKeys.job(TASK_ID, "IMPORT"))).as("别的作业类型不受影响").isNotNull();
+	}
+
+	// ── M-04（V7 下沉）：两个实例抢同一任务 —— 恰一个持有、另一个 blocked ──────
+
+	/**
+	 * 设计稿 §2.10 M-04 的进程内形态：<b>两个实例同时改同一任务 ⇒ 一胜一 RESOURCE_LOCKED</b>。
+	 *
+	 * <p>既有 S1–S4 都是"一个实例 + 一个外部 owner 预置语料"，本用例补的是<b>两个独立的
+	 * {@link ToolResourceLocks}（各自背后是不同的 {@link LeaseService} 与 instanceId）
+	 * 在同一份 Redis 上竞争</b>：进程内视图不共享时，"我拿到 / 别人持有"的判定只能来自 Redis 比对；
+	 * 若视图短路（只看裸键的本地记忆），后到者会误报 ACQUIRED。
+	 *
+	 * <p>断言三面 = ①恰一个 ACQUIRED；②被拒者不持锁、不占任务级锁；③赢家释放后对方<b>真能</b>接手
+	 * （释放是跨实例可见的）。
+	 */
+	@Test
+	void twoInstancesContendingForTheSameTaskLeaveExactlyOneHolder() {
+		ToolResourceLocks.LockHandle winner = this.locks.acquire(TASK_ID, "IMPORT", "inst-a:run-a:call-1");
+
+		ToolResourceLocks.LockHandle loser = this.otherLocks.acquire(TASK_ID, "IMPORT", "inst-b:run-b:call-2");
+
+		assertThat(winner.outcome()).isEqualTo(ToolResourceLocks.LockOutcome.ACQUIRED);
+		assertThat(winner.created()).as("赢家拿到两把锁（任务级 + 作业级）").hasSize(2);
+		assertThat(loser.outcome()).as("跨实例同任务 ⇒ 后到者被拒（不等待、不轮询）")
+			.isEqualTo(ToolResourceLocks.LockOutcome.HELD_ELSEWHERE);
+		assertThat(loser.heldElsewhere()).isTrue();
+		assertThat(loser.created()).as("被拒的那次没有释放权").isEmpty();
+		// 键值 = <epoch>|<owner>：owner 带实例前缀 ⇒ 同实例的不同调用也是不同 owner
+		assertThat(this.fake.string(LeaseKeys.task(TASK_ID))).endsWith("|inst-a:run-a:call-1");
+		assertThat(this.fake.string(LeaseKeys.job(TASK_ID, "IMPORT"))).endsWith("|inst-a:run-a:call-1");
+
+		winner.close();
+
+		assertThat(this.fake.string(LeaseKeys.task(TASK_ID))).as("赢家释放后两把键都消失").isNull();
+		assertThat(this.fake.string(LeaseKeys.job(TASK_ID, "IMPORT"))).isNull();
+		try (ToolResourceLocks.LockHandle retry = this.otherLocks.acquire(TASK_ID, "IMPORT",
+				"inst-b:run-b:call-3")) {
+			assertThat(retry.outcome()).as("释放跨实例可见：另一实例能接手（可重试语义成立）")
+				.isEqualTo(ToolResourceLocks.LockOutcome.ACQUIRED);
+		}
+		assertThat(this.fake.string(LeaseKeys.task(TASK_ID))).isNull();
+	}
+
+	/**
+	 * M-04 的第二条断言点：<b>锁顺序固定（先任务后作业）</b>在跨实例下仍然不给活锁留门。
+	 *
+	 * <p>另一实例只持<b>作业级</b>锁（任务级空闲）。本实例按固定顺序先拿任务锁、再撞作业锁 ⇒
+	 * 必须就地归还刚拿到的任务锁：否则一次被拒的调用会把整个任务白占一个 {@code resource-ttl}，
+	 * 期间<b>任何</b>实例连只读作业都进不来。同时钉住"作业锁带类型"（EXPORT 的锁不妨碍 PUBLISH）。
+	 */
+	@Test
+	void fixedLockOrderAcrossInstancesLeavesNoHalfHeldTask() {
+		LeaseService.Lease jobOnly = this.otherLease
+			.acquire(LeaseKeys.job(TASK_ID, "EXPORT"), this.properties.getLease().getResourceTtl(),
+					"inst-b:run-b:call-1")
+			.lease();
+
+		ToolResourceLocks.LockHandle blocked = this.locks.acquire(TASK_ID, "EXPORT", "inst-a:run-a:call-2");
+
+		assertThat(blocked.outcome()).isEqualTo(ToolResourceLocks.LockOutcome.HELD_ELSEWHERE);
+		assertThat(this.fake.string(LeaseKeys.task(TASK_ID)))
+			.as("半途失败不得白占任务级锁（否则整任务被卡一个 resource-ttl）").isNull();
+		assertThat(this.fake.string(LeaseKeys.job(TASK_ID, "EXPORT"))).endsWith("|inst-b:run-b:call-1");
+
+		try (ToolResourceLocks.LockHandle publish = this.locks.acquire(TASK_ID, "PUBLISH",
+				"inst-a:run-a:call-3")) {
+			assertThat(publish.outcome()).as("导出锁不妨碍发布（作业锁带类型）")
+				.isEqualTo(ToolResourceLocks.LockOutcome.ACQUIRED);
+		}
+		this.otherLease.release(jobOnly);
 	}
 
 	// ── 桩与辅助 ────────────────────────────────────────────────────────────

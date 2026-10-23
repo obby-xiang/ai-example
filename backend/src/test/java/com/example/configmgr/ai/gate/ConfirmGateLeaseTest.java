@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -43,7 +44,7 @@ import static org.mockito.Mockito.when;
  * 租约把这条互斥从进程内搬到 Redis：<b>等待方持租 ⇒ 驱动方在别处抢不到 ⇒ 不会双驱动</b>；
  * 决策到达时把租约<b>交棒</b>（不释放），续租由调度器接手，终态由 {@code RunStore.save} 释放。
  *
- * <h2>本类锁的八条（G1–G8）</h2>
+ * <h2>本类锁的九条（G1–G9）</h2>
  * <ol>
  * <li>G1 等待方进 await 即持租、心跳按 {@code lease.renew-interval} 续租、决策到达后离开等待<b>不释放</b>；</li>
  * <li>G2 抢到租 → 派发续跑，且带上<b>同一个 lease</b>（{@code resume(runId,false,lease)}）+ 交调度器续租；</li>
@@ -52,8 +53,12 @@ import static org.mockito.Mockito.when;
  * <li>G5 {@code woke=true} 的快路径<b>不碰租约</b>（回归锁：T3-6a 的 WOKE 分支）；</li>
  * <li>G6 {@code ACTIVE_LATCH} 短路<b>不碰租约</b>（回归锁：连抢都不抢）；</li>
  * <li>G7 holder 存活时重试不派发也不再排重试；holder 死亡后下一次外部输入以<b>严格更大</b>的 epoch 接管；</li>
- * <li>G8 释放是 epoch scoped：等待方迟到的 release 不删新持有者的租约。</li>
+ * <li>G8 释放是 epoch scoped：等待方迟到的 release 不删新持有者的租约；</li>
+ * <li>G9 决策打<b>另一实例</b>（A 的等待方持租、B 侧提交）：B 报 {@code LEASE_HELD_ELSEWHERE} 但决策
+ *     已落库，A 的等待方在轮询节拍里收敛、租约交棒不释放 —— 决策不丢、不双驱动。</li>
  * </ol>
+ *
+ * <p>MUL 用例 M-02 的进程内下沉即 G9（设计稿 §2.10「挂起决策打 B 侧」）。
  *
  * <p>租约侧用真实 {@link LeaseService} + {@link FakeLeaseRedis}（②a 的测试底座）：
  * epoch 单调、脚本语义、TTL 到期后重抢都是真跑的，不是打桩自证。
@@ -114,6 +119,11 @@ class ConfirmGateLeaseTest {
 	private final List<Runnable> dispatched = Collections.synchronizedList(new ArrayList<>());
 
 	private final FakeRetryScheduler retry = new FakeRetryScheduler();
+
+	/** G9：另一实例在这套 harness 里的两个进程内面（各自独立的派发队列与重试调度器）。 */
+	private final List<Runnable> dispatchedOnB = Collections.synchronizedList(new ArrayList<>());
+
+	private final FakeRetryScheduler retryOnB = new FakeRetryScheduler();
 
 	private final ConfirmGate gate;
 
@@ -334,6 +344,66 @@ class ConfirmGateLeaseTest {
 		assertThat(this.fake.scriptDeletes.get()).as("错 epoch 不删").isZero();
 		assertThat(this.fake.string(this.store.runLeaseKey(RUN_ID)))
 			.as("新持有者的租约必须原样活着").isEqualTo(takeoverEpoch + "|inst-b");
+	}
+
+	// ── G9（MUL M-02 下沉）：决策打另一实例 ────────────────────────────────
+
+	/**
+	 * 设计稿 §2.10 M-02 的进程内形态：<b>A 侧挂着人（等待线程持租），决策从 B 侧打进来</b>。
+	 *
+	 * <p>与 G3 互为镜像 —— G3 是"别人持租、我在 A 提交"。真实现场更常见的是反过来的这一半：
+	 * 浏览器把确认 POST 打到了负载均衡后的另一台（B），而挂起线程还在 A 上等。要同时成立的三件事：
+	 * <ol>
+	 * <li><b>决策不丢</b>：B 抢不到续跑权（{@code LEASE_HELD_ELSEWHERE}、不派发），但条目必须落库、
+	 *     回执帧必须发出 —— 否则用户点了「批准」而系统什么都没发生；</li>
+	 * <li><b>A 侧最终收敛</b>：A 的等待线程不等 B 的进程内唤醒（跨进程没有本地 latch 可用），
+	 *     而是按心跳节拍轮询 Redis 里的条目状态发现已决；</li>
+	 * <li><b>不双驱动</b>：B 排的一次性延迟重试在 A 仍持租时不得派发；A 离开等待时交棒（不释放）。</li>
+	 * </ol>
+	 */
+	@Test
+	void decisionSubmittedThroughTheOtherInstanceHoldsItsLeaseAndStillConvergesTheWaiter() throws Exception {
+		seedSuspended(PendingToolCall.PENDING);
+		AtomicReference<PendingToolCall> awaited = new AtomicReference<>();
+		Thread waiter = new Thread(
+				() -> awaited.set(this.gate.awaitDecision(RUN_ID, pendingEntry(PendingToolCall.PENDING))),
+				"g9-await");
+		waiter.setDaemon(true);
+		waiter.start();
+		awaitLatchRegistered(RUN_ID);
+		long epochHeldByA = this.store.heldRunEpoch(RUN_ID);
+		assertThat(this.fake.string(this.store.runLeaseKey(RUN_ID))).isEqualTo(epochHeldByA + "|inst-a");
+
+		// B 侧的闸门：同一份外置状态（= 同一 Redis），独立租约设施与进程内闸门表
+		ConfirmGate gateOnB = new ConfirmGate(this.store, this.registry, this.properties, this.cancellations,
+				this.beacon, List.of(), this.provider, this.dispatchedOnB::add, this.otherLeases, this.retryOnB);
+		ConfirmGate.Submission submission = gateOnB.submitDecision(RUN_ID, TOOL_CALL_ID, true, "同意");
+
+		assertThat(submission.outcome()).as("决策本身落库成功").isEqualTo(ConfirmGate.Outcome.ACCEPTED);
+		assertThat(submission.woke()).as("B 侧没有本进程闸门可唤醒（跨进程唤醒走 Redis）").isFalse();
+		assertThat(submission.resumeTrigger().outcome()).isEqualTo("LEASE_HELD_ELSEWHERE");
+		assertThat(submission.resumeTrigger().triggered()).isFalse();
+		assertThat(this.dispatchedOnB).as("抢不到续跑权 ⇒ B 不派发").isEmpty();
+		assertThat(this.retryOnB.scheduled).as("B 排一次延迟重试（holder 已死的兜底）").isEqualTo(1);
+		assertThat(this.store.pending(RUN_ID, TOOL_CALL_ID).getStatus()).as("决策不丢：条目已决")
+			.isEqualTo(PendingToolCall.APPROVED);
+
+		// A 侧收敛：等待线程按心跳节拍轮询条目状态（不依赖 B 的进程内唤醒）
+		waiter.join(8_000L);
+		assertThat(waiter.isAlive()).as("A 侧等待方在轮询节拍内收敛").isFalse();
+		assertThat(awaited.get()).isNotNull();
+		assertThat(awaited.get().getStatus()).as("A 侧拿到的是 B 落的那一版决策")
+			.isEqualTo(PendingToolCall.APPROVED);
+		assertThat(this.fake.string(this.store.runLeaseKey(RUN_ID)))
+			.as("决策到达 = 交棒给驱动方：A 不得释放").isEqualTo(epochHeldByA + "|inst-a");
+		assertThat(this.fake.scriptDeletes.get()).as("整段没有一次租约删除").isZero();
+		assertThat(this.renewScheduler.activeCount()).as("A 的驱动方已登记续租").isEqualTo(1);
+		verify(this.emitter, times(1)).confirmDecision(any(PendingToolCall.class), anyString(), any(), eq(0L));
+
+		// 不双驱动：A 仍持租时，B 的延迟重试一拍不得派发
+		this.retryOnB.runAll();
+		assertThat(this.dispatchedOnB).as("holder 存活 ⇒ B 的重试静默").isEmpty();
+		verify(this.resumeService, never()).resume(anyString(), anyBoolean(), any());
 	}
 
 	// ── C1 前端超时出口同样要交棒（本轮线程仍在驱动） ──────────────────────

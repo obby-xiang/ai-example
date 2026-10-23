@@ -135,4 +135,52 @@ class RunStoreTouchTest {
 		assertThat(this.fake.expiry(RUN_KEY)).isEqualTo(SESSION_TTL);
 	}
 
+	// ── M-10（V7 下沉）：跨实例读侧续期 + 压缩时钟 ─────────────────────────
+
+	/**
+	 * 设计稿 §2.10 M-10 的进程内形态：<b>挂起 30 分钟（压缩时钟）不掉卡，读侧续期不依赖挂起线程</b>。
+	 *
+	 * <p>多实例下"养着这张卡"的线程可能早已不在（挂起在 A、刷新后的读取落在 B，A 的等待线程随进程
+	 * 重启消失）。本用例把时间压到 40 分钟一档，用<b>可控时钟</b>推进而不是 sleep：
+	 * <ol>
+	 * <li>挂起现场写入后<b>没有任何心跳</b>，30 分钟时键仍在（不被提前过期）；</li>
+	 * <li>另一实例（读侧，即 {@code GET /runs/current} 的调用点）touch 一次 ⇒ 续满；</li>
+	 * <li>累计 65 分钟（已超初始 40 分钟）仍活着，而<b>没人读的对照轮</b>按原 TTL 到期 ——
+	 *     证明确实是读侧续期救的这一轮，不是时钟没走。</li>
+	 * </ol>
+	 */
+	@Test
+	void anotherInstancesReadKeepsASuspensionAliveAcrossAPausedClock() {
+		String controlRunId = "run-touch-control";
+		this.properties.setSessionTtl(Duration.ofMinutes(40));
+		RunSnapshot suspended = this.store.get(RUN_ID);
+		suspended.setStatus(RunSnapshot.SUSPENDED);
+		this.store.save(suspended);
+		PendingToolCall pending = new PendingToolCall();
+		pending.setToolCallId("call-1");
+		pending.setName("start_import");
+		this.store.putPending(RUN_ID, pending);
+		// 对照轮：同样的 40 分钟寿命，但没有任何实例读它
+		RunSnapshot control = new RunSnapshot();
+		control.setRunId(controlRunId);
+		control.setSessionId("s-touch-control");
+		control.setStatus(RunSnapshot.SUSPENDED);
+		this.store.save(control);
+
+		// 压缩时钟：挂起 30 分钟，期间<b>没有</b>任何心跳线程
+		this.fake.advanceTime(Duration.ofMinutes(30));
+
+		assertThat(this.store.get(RUN_ID)).as("挂起 30 分钟不被提前过期").isNotNull();
+		RunStore readerInstance = new RunStore(this.fake.redis, this.mapper, this.properties);
+		assertThat(readerInstance.touchActiveRun(RUN_ID)).as("另一实例的读侧续期（/runs/current 的调用点）")
+			.isTrue();
+
+		// 再走 35 分钟：累计 65 分钟，已超初始 40 分钟
+		this.fake.advanceTime(Duration.ofMinutes(35));
+
+		assertThat(this.store.get(RUN_ID)).as("靠读侧续期活着（不依赖挂起线程）").isNotNull();
+		assertThat(this.store.pendings(RUN_ID)).as("卡的后台数据同样续上").isNotEmpty();
+		assertThat(this.store.get(controlRunId)).as("对照：无人读的轮按原 TTL 到期").isNull();
+	}
+
 }

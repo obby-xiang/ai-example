@@ -53,6 +53,26 @@
 // 不耦合 UI 文案 —— 文案改动不再造成静默误判。项 2 的"已复制"提示属**组件局部状态**，故用
 // 其 data-testid 断言而不读 `ai.notice`（后者须保持 null，这正是"不占单槽位"的判据）。
 // 本脚本只驱动自己启动的 Chrome，不触碰用户浏览器。
+//
+// ── 苞 C（测试扩充 V7 · RLD 真刷新试点）六条断言 ⑭~⑲ ──────────────────────────
+// 承载面 = 决策看板 2026-10-23「UI 层载体 = 扩 chat-panel-smoke.mjs（CDP 零依赖）」。补的是
+// jsdom 结构性覆盖不到的那一面：**真 reload**（`Page.navigate` 等于用户按 F5 / `location.href`）后
+// 内存态全丢、只剩 sessionStorage 镜像 + 后端历史 —— RLD 域的 P0 场景全部依赖这个形态。
+//   ⑭ R-01 在途轮续显：流式中真刷新 → 刷新后仍在途且有正文（不是"只剩用户气泡无任何提示"），
+//      无红条、无「接管/重挂」类横幅（批G · G5：用户看不到重挂概念）；
+//   ⑮ R-01 收敛：该轮在预算内收尾，正文与桩的确定性文本**逐字相等**（续收到尾，不是停在半截）；
+//   ⑯ R-13 历史+镜像合并不双份：UI 气泡数 == `/history` 条数、同一提问恰 1 条 user 气泡、
+//      assistant 恰 1 条（既不"整替"丢在途，也不双份）；
+//   ⑰ R-12 刷新后在途轮 → 停止入口：停止钮可见可点，点击后 3s 内 `/runs/{runId}` 为 CANCELLED
+//      且输入框随即可用（loading/suspended 都归零）；
+//   ⑱ 停止后真刷新页面态正确：气泡数与正文逐字保留、无红条、`streamInterrupted=false`、
+//      `/runs/current` 明确空态（不出现幽灵在途轮）；
+//   ⑲ R-10 对照（防过度修复）：**已完成轮**刷新后完整恢复且**零横幅零提示**。
+// 需要桩的确定性长文本轮（`turn-text stall-frames=<ms>`，见 scripts/ci/stub-upstream.mjs 的
+// FAULT_MARKER）：在途窗口由帧间隔撑开，脚本才有时间 reload。桩侧指纹按首条 user 消息记，
+// 故每轮提示词带唯一后缀（否则同一指纹的第二轮会被桩退化）。
+// 参数化：`SMOKE_API` / `SMOKE_APP` 指向任意一对后端 + 前端 dev server（手工触发口径）；
+// 施工期验证用自建实例（后端 18330 + 前端独立端口），不碰常开的 8081/5202。
 import { execSync, spawn } from 'node:child_process'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -62,6 +82,11 @@ import { setTimeout as sleep } from 'node:timers/promises'
 const TESTID_NEW_CHAT = 'new-chat'
 // 空态页签语义小字（保守版文案，逐字断言；措辞裁决见施工卡 §1.4）
 const TAB_HINT_TEXT = '对话保存在当前浏览器页签中，关闭页签即结束。'
+// 苞 C：桩的确定性文本轮（逐字比对；事实源 = scripts/ci/stub-upstream.mjs 的 TURN_TEXT）
+const TURN_TEXT = '命名轮蓝本：这是一段确定性文本，用于验证纯文本流的帧序完整性（start 恰 1 / delta ≥ 1 / done 恰 1），'
+  + '以及 done 之后零帧的迟到帧闸门。文本按 24 字符切片发送，切片数由本串长度决定，不依赖模型。'
+// 苞 C：在途窗口的帧间隔（ms）—— 撑开 reload + 点击的预算；5 帧 ≈ 12s
+const RLD_FRAME_GAP_MS = Number(process.env.SMOKE_RLD_FRAME_GAP_MS ?? 2500)
 
 const OUT = process.env.SMOKE_OUT ?? new URL('../../chat-panel-smoke-out', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')
 const CHROME = process.env.SMOKE_CHROME
@@ -286,6 +311,73 @@ function msgFactsExpr(msgId) {
       interruptedBanner: document.body.innerText.includes('连接中断，结果可能不完整')
     }
   })()`
+}
+
+/**
+ * 苞 C（V7 · RLD 真刷新试点）：消息面 + 页面面快照 —— 刷新前后用**同一口径**读取，
+ * 于是"续显 / 合并不双份 / 停止后页面态"三件事都能在真刷新前后逐字段对照。
+ */
+function rldFactsExpr() {
+  return `(() => {
+    const ai = ${AI_EXPR}
+    const msgs = ai.messages.map(m => ({
+      id: m.id, role: m.role, text: m.content || '', done: m.done !== false
+    }))
+    const lastAssistant = [...msgs].reverse().find(m => m.role === 'assistant') || null
+    const stop = document.querySelector('[data-testid="stop-btn"]')
+    return {
+      sessionId: ai.sessionId,
+      loading: ai.loading,
+      suspended: ai.suspended,
+      stopped: ai.stopped,
+      streamInterrupted: ai.streamInterrupted,
+      activeRunId: ai.activeRunId,
+      notice: ai.notice,
+      historyLoaded: ai.historyLoaded,
+      count: msgs.length,
+      userTexts: msgs.filter(m => m.role === 'user').map(m => m.text),
+      assistantTexts: msgs.filter(m => m.role === 'assistant').map(m => m.text),
+      assistantIds: msgs.filter(m => m.role === 'assistant').map(m => m.id),
+      lastAssistant,
+      stopVisible: !!stop && stop.offsetParent !== null,
+      stopDisabled: stop ? stop.disabled === true : null,
+      sendVisible: !!document.querySelector('[data-testid="send-btn"]'),
+      banner: document.body.innerText.includes('连接中断，结果可能不完整'),
+      takeoverHint: document.body.innerText.includes('接管') || document.body.innerText.includes('重挂')
+    }
+  })()`
+}
+
+/** 一轮 CRUD：真刷新（等价 F5 / `location.href`）后等应用就绪，并重新展开面板。 */
+async function realReload(why) {
+  await send('Page.navigate', { url: URL_APP })
+  if (!await waitAppReady()) { console.error(`FATAL: ${why} 刷新后应用未就绪`); process.exit(3) }
+  await sleep(300)
+  await evaluate(`${AI_EXPR}.expanded = true`, { awaitPromise: false })
+}
+
+/** `GET /api/ai/runs/{runId}` 的快照状态（null = 取不到 / 不存在）。 */
+async function runStatus(runId) {
+  try {
+    const r = await fetch(`${API}/api/ai/runs/${encodeURIComponent(runId)}`)
+    if (!r.ok) return null
+    const body = await r.json()
+    return body?.data?.snapshot?.status ?? null
+  } catch {
+    return null
+  }
+}
+
+/** `GET /api/ai/runs/current?sessionId=` 的 found 标记（刷新后"有没有幽灵在途轮"的判据）。 */
+async function runCurrentFound(sessionId) {
+  try {
+    const r = await fetch(`${API}/api/ai/runs/current?sessionId=${encodeURIComponent(sessionId)}`)
+    if (!r.ok) return null
+    const body = await r.json()
+    return body?.data?.found === true
+  } catch {
+    return null
+  }
 }
 
 /** 真实鼠标悬停（CDP Input 域）—— 项 2 的显现条件是 `group-hover`，只能靠真 hover 触发。 */
@@ -738,6 +830,259 @@ try {
     && s13.messages === 0 && s13.emptyCard === false
     && !!s13b && s13b.skeleton === false && s13b.emptyCard === true,
   RESULT.phases.historySkeleton)
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 苞 C（V7 · RLD 真刷新试点）：⑭ 在途轮续显 / ⑮ 收敛到底 / ⑯ 合并不双份
+  //    / ⑰ 刷新后停止入口 / ⑱ 停止后刷新页面态 / ⑲ 已完成轮刷新零横幅（对照）
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // ── 阶段 14：流式中真刷新 → 在途轮续显 + 合并不双份 ─────────────────────
+  // 形态：桩的确定性长文本轮（帧间隔 = RLD_FRAME_GAP_MS，5 帧 ≈ 12s 在途窗口）。
+  // 真刷新（Page.navigate = F5）后内存态全丢，只剩 sessionStorage 镜像 + 后端 /history 与
+  // /runs/current —— 这正是 R-01 / R-13 要求的形态，jsdom 无法表达。
+  await evaluate(`(async () => { await ${AI_EXPR}.resetSession(); return true })()`)
+  await sleep(400)
+  const promptRld1 = `命名轮蓝本 RLD1-${STAMP}：turn-text stall-frames=${RLD_FRAME_GAP_MS}`
+  const sidRld1 = await evaluate(`${AI_EXPR}.sessionId`, { awaitPromise: false })
+  await evaluate(`(() => { void ${AI_EXPR}.send(${JSON.stringify(promptRld1)}); return true })()`, { awaitPromise: false })
+  const inflightRld1 = await waitFor(
+    `(() => { const ai = ${AI_EXPR}
+      const last = [...ai.messages].reverse().find(m => m.role === 'assistant')
+      return (ai.loading && last && last.content && last.content.length > 0)
+        ? { runId: ai.activeRunId, partialLen: last.content.length, count: ai.messages.length } : null })()`,
+    { tries: 120, intervalMs: 100 }
+  )
+  const mirrorBeforeReload = await evaluate(
+    `(() => { const raw = sessionStorage.getItem('ai-mirror:' + ${AI_EXPR}.sessionId)
+      if (!raw) return null
+      const m = JSON.parse(raw)
+      const last = (m.messages || []).filter(x => x.role === 'assistant').pop() || null
+      return { inFlight: m.inFlight === true, lastRunId: m.lastRunId ?? null, assistantLen: last ? (last.content || '').length : 0 } })()`,
+    { awaitPromise: false }
+  )
+  await realReload('阶段14')
+  // 刷新后仍在途：historyLoaded（历史/镜像合并完成）且 loading（静默续收已接管）
+  const afterReloadRld1 = await waitFor(
+    `(() => { const ai = ${AI_EXPR}
+      if (!(ai.historyLoaded && ai.loading)) return null
+      const f = ${rldFactsExpr()}
+      return f })()`,
+    { tries: 100, intervalMs: 100 }
+  )
+  const phase14 = {
+    inflightBeforeReload: inflightRld1,
+    mirrorBeforeReload,
+    afterReload: afterReloadRld1
+  }
+  RESULT.phases.rldReloadInFlight = phase14
+  console.log('[阶段14 真刷新后续显]', JSON.stringify({
+    inflightBeforeReload: inflightRld1, mirrorBeforeReload, afterReload: afterReloadRld1 && {
+      count: afterReloadRld1.count, loading: afterReloadRld1.loading, banner: afterReloadRld1.banner,
+      takeoverHint: afterReloadRld1.takeoverHint, assistantLen: afterReloadRld1.lastAssistant?.text.length
+    }
+  }))
+  // ⑭ 不出现「只剩用户气泡且无任何提示」：刷新后必须有 assistant 气泡且正文非空，且在途仍在
+  assert('⑭', !!inflightRld1 && !!afterReloadRld1
+    && afterReloadRld1.loading === true
+    && !!afterReloadRld1.lastAssistant && afterReloadRld1.lastAssistant.text.length > 0
+    && afterReloadRld1.count >= 2
+    && afterReloadRld1.banner === false && afterReloadRld1.takeoverHint === false,
+  {
+    inflightRunId: inflightRld1 ? inflightRld1.runId : null,
+    mirrorInFlightBeforeReload: mirrorBeforeReload ? mirrorBeforeReload.inFlight : null,
+    afterReloadMessages: afterReloadRld1 ? afterReloadRld1.count : null,
+    afterReloadAssistantLen: afterReloadRld1 && afterReloadRld1.lastAssistant
+      ? afterReloadRld1.lastAssistant.text.length : null,
+    afterReloadLoading: afterReloadRld1 ? afterReloadRld1.loading : null,
+    redBanner: afterReloadRld1 ? afterReloadRld1.banner : null,
+    takeoverHint: afterReloadRld1 ? afterReloadRld1.takeoverHint : null
+  })
+
+  // ⑮ 续收到尾：正文与桩的确定性文本逐字相等（不是"停在半截"）
+  const convergedRld1 = await waitFor(
+    `(() => { const ai = ${AI_EXPR}
+      if (ai.loading) return null
+      const f = ${rldFactsExpr()}
+      return f })()`,
+    { tries: 120, intervalMs: 250 }
+  )
+  const textRld1 = convergedRld1 ? String(convergedRld1.lastAssistant?.text ?? '') : ''
+  RESULT.phases.rldReloadConverged = {
+    converged: !!convergedRld1, textLen: textRld1.length,
+    exactMatch: textRld1 === TURN_TEXT, banner: convergedRld1 ? convergedRld1.banner : null,
+    streamInterrupted: convergedRld1 ? convergedRld1.streamInterrupted : null,
+    lastAssistantId: convergedRld1 && convergedRld1.lastAssistant ? convergedRld1.lastAssistant.id : null
+  }
+  console.log('[阶段14 续收到底]', JSON.stringify({
+    ...RESULT.phases.rldReloadConverged, textHead: textRld1.slice(0, 24)
+  }))
+  assert('⑮', !!convergedRld1 && textRld1 === TURN_TEXT
+    && convergedRld1.banner === false && convergedRld1.streamInterrupted === false,
+  {
+    exactMatch: textRld1 === TURN_TEXT, textLen: textRld1.length, expectedLen: TURN_TEXT.length,
+    textHead: textRld1.slice(0, 24), redBanner: convergedRld1 ? convergedRld1.banner : null
+  })
+
+  // ⑯ 历史 + 镜像合并**不双份**：UI 气泡数 == /history 条数；同一提问恰 1 条 user 气泡
+  // 注：用户气泡文本经后端 InputSanitizer 的 NFKC 归一（全角标点折半角），故按**唯一标记**
+  // （提示词里的 stamp 后缀）计数，不逐字比对整串 —— 归一不是缺陷，见批G · R5/R2 口径。
+  const uiCountRld1 = convergedRld1 ? convergedRld1.count : null
+  const historyCountRld1 = await waitCount(sidRld1, (n) => n === uiCountRld1)
+  const markerRld1 = `RLD1-${STAMP}`
+  const userBubblesRld1 = convergedRld1
+    ? convergedRld1.userTexts.filter((t) => t.includes(markerRld1)).length : null
+  RESULT.phases.rldMergeNoDuplicate = {
+    uiMessages: uiCountRld1, backendHistoryCount: historyCountRld1,
+    samePromptUserBubbles: userBubblesRld1,
+    assistantBubbles: convergedRld1 ? convergedRld1.assistantTexts.length : null,
+    assistantIdsUnique: convergedRld1
+      ? new Set(convergedRld1.assistantIds).size === convergedRld1.assistantIds.length : null
+  }
+  console.log('[阶段14 合并不双份]', JSON.stringify(RESULT.phases.rldMergeNoDuplicate))
+  assert('⑯', convergedRld1 != null && uiCountRld1 === historyCountRld1
+    && userBubblesRld1 === 1
+    && convergedRld1.assistantTexts.length === 1
+    && new Set(convergedRld1.assistantIds).size === convergedRld1.assistantIds.length,
+  RESULT.phases.rldMergeNoDuplicate)
+
+  // ── 阶段 15：在途轮真刷新 → 停止入口（R-12） ───────────────────────────
+  await evaluate(`(async () => { await ${AI_EXPR}.resetSession(); return true })()`)
+  await sleep(400)
+  const promptRld2 = `命名轮蓝本 RLD2-${STAMP}：turn-text stall-frames=${RLD_FRAME_GAP_MS}`
+  const markerRld2 = `RLD2-${STAMP}`
+  await evaluate(`(() => { void ${AI_EXPR}.send(${JSON.stringify(promptRld2)}); return true })()`, { awaitPromise: false })
+  const inflightRld2 = await waitFor(
+    `(() => { const ai = ${AI_EXPR}
+      const last = [...ai.messages].reverse().find(m => m.role === 'assistant')
+      return (ai.loading && last && last.content && last.content.length > 0)
+        ? { runId: ai.activeRunId } : null })()`,
+    { tries: 120, intervalMs: 100 }
+  )
+  await realReload('阶段15')
+  const stopReadyRld2 = await waitFor(
+    `(() => { const ai = ${AI_EXPR}
+      if (!(ai.historyLoaded && ai.loading)) return null
+      const f = ${rldFactsExpr()}
+      return (f.stopVisible && f.stopDisabled === false) ? f : null })()`,
+    { tries: 100, intervalMs: 100 }
+  )
+  const runIdRld2 = stopReadyRld2 ? stopReadyRld2.activeRunId : null
+  // 点停止（真实 DOM 点击：用户可见入口，不是 store 直调）
+  const stopClickedAt = Date.now()
+  await evaluate(`(() => {
+    const btn = document.querySelector('[data-testid="stop-btn"]')
+    if (!btn) return false
+    btn.click(); return true
+  })()`, { awaitPromise: false })
+  let cancelledAtMs = null
+  let statusRld2 = null
+  let afterStopRld2 = null
+  for (let i = 0; i < 30; i++) { // 3s 预算（每 100ms 一拍）
+    if (runIdRld2) { statusRld2 = await runStatus(runIdRld2) }
+    afterStopRld2 = await evaluate(rldFactsExpr(), { awaitPromise: false })
+    if (statusRld2 === 'CANCELLED' && afterStopRld2.loading === false && afterStopRld2.suspended === false) {
+      cancelledAtMs = Date.now() - stopClickedAt
+      break
+    }
+    await sleep(100)
+  }
+  RESULT.phases.rldStopAfterReload = {
+    inflightBeforeReload: inflightRld2, stopReady: stopReadyRld2 && {
+      stopVisible: stopReadyRld2.stopVisible, stopDisabled: stopReadyRld2.stopDisabled,
+      activeRunId: stopReadyRld2.activeRunId, count: stopReadyRld2.count
+    },
+    runId: runIdRld2, snapshotStatus: statusRld2, cancelledAfterMs: cancelledAtMs,
+    afterStop: afterStopRld2 && {
+      loading: afterStopRld2.loading, suspended: afterStopRld2.suspended, stopped: afterStopRld2.stopped,
+      banner: afterStopRld2.banner, notice: afterStopRld2.notice, sendVisible: afterStopRld2.sendVisible
+    }
+  }
+  console.log('[阶段15 刷新后停止]', JSON.stringify(RESULT.phases.rldStopAfterReload))
+  assert('⑰', !!stopReadyRld2 && !!runIdRld2
+    && statusRld2 === 'CANCELLED' && cancelledAtMs !== null && cancelledAtMs <= 3000
+    && !!afterStopRld2 && afterStopRld2.loading === false && afterStopRld2.suspended === false
+    && afterStopRld2.sendVisible === true && afterStopRld2.banner === false,
+  {
+    stopVisible: stopReadyRld2 ? stopReadyRld2.stopVisible : null,
+    runId: runIdRld2, snapshotStatus: statusRld2, cancelledAfterMs: cancelledAtMs,
+    loadingAfterStop: afterStopRld2 ? afterStopRld2.loading : null,
+    suspendedAfterStop: afterStopRld2 ? afterStopRld2.suspended : null,
+    sendVisible: afterStopRld2 ? afterStopRld2.sendVisible : null,
+    redBanner: afterStopRld2 ? afterStopRld2.banner : null
+  })
+
+  // ── 阶段 16：停止后再真刷新 → 页面态正确（无幽灵在途轮） ────────────────
+  const beforeStopReload = await evaluate(rldFactsExpr(), { awaitPromise: false })
+  await realReload('阶段16')
+  const afterStopReload = await waitFor(
+    `(() => { const ai = ${AI_EXPR}
+      if (!ai.historyLoaded) return null
+      const f = ${rldFactsExpr()}
+      return f })()`,
+    { tries: 100, intervalMs: 100 }
+  )
+  const currentFoundRld2 = afterStopReload
+    ? await runCurrentFound(afterStopReload.sessionId) : null
+  RESULT.phases.rldReloadAfterStop = {
+    beforeReload: beforeStopReload && {
+      count: beforeStopReload.count, lastAssistantLen: beforeStopReload.lastAssistant?.text.length
+    },
+    afterReload: afterStopReload && {
+      count: afterStopReload.count, lastAssistantLen: afterStopReload.lastAssistant?.text.length,
+      loading: afterStopReload.loading, suspended: afterStopReload.suspended,
+      streamInterrupted: afterStopReload.streamInterrupted, banner: afterStopReload.banner,
+      takeoverHint: afterStopReload.takeoverHint,
+      samePromptUserBubbles: afterStopReload.userTexts.filter((t) => t.includes(markerRld2)).length
+    },
+    runsCurrentFound: currentFoundRld2
+  }
+  console.log('[阶段16 停止后刷新]', JSON.stringify(RESULT.phases.rldReloadAfterStop))
+  assert('⑱', !!beforeStopReload && !!afterStopReload
+    && afterStopReload.count === beforeStopReload.count
+    && afterStopReload.lastAssistant?.text.length === beforeStopReload.lastAssistant?.text.length
+    && afterStopReload.streamInterrupted === false && afterStopReload.banner === false
+    && afterStopReload.takeoverHint === false
+    && afterStopReload.loading === false && afterStopReload.suspended === false
+    && afterStopReload.userTexts.filter((t) => t.includes(markerRld2)).length === 1
+    && currentFoundRld2 === false,
+  RESULT.phases.rldReloadAfterStop)
+
+  // ── 阶段 17：已完成轮刷新 → 完整恢复且**零横幅**（R-10 对照，防过度修复） ──
+  await evaluate(`(async () => { await ${AI_EXPR}.resetSession(); return true })()`)
+  await sleep(400)
+  const promptDone = `你好 V7RLD3-${STAMP}`
+  await sendRound(promptDone)
+  const doneBeforeReload = await evaluate(rldFactsExpr(), { awaitPromise: false })
+  await realReload('阶段17')
+  const doneAfterReload = await waitFor(
+    `(() => { const ai = ${AI_EXPR}
+      if (!ai.historyLoaded) return null
+      const f = ${rldFactsExpr()}
+      return f })()`,
+    { tries: 100, intervalMs: 100 }
+  )
+  RESULT.phases.rldReloadCompletedRound = {
+    beforeReload: doneBeforeReload && {
+      count: doneBeforeReload.count, lastAssistantText: doneBeforeReload.lastAssistant?.text
+    },
+    afterReload: doneAfterReload && {
+      count: doneAfterReload.count, lastAssistantText: doneAfterReload.lastAssistant?.text,
+      loading: doneAfterReload.loading, suspended: doneAfterReload.suspended,
+      banner: doneAfterReload.banner, takeoverHint: doneAfterReload.takeoverHint,
+      notice: doneAfterReload.notice
+    }
+  }
+  console.log('[阶段17 已完成轮刷新]', JSON.stringify({
+    before: { count: doneBeforeReload?.count, textLen: doneBeforeReload?.lastAssistant?.text.length },
+    after: doneAfterReload && { count: doneAfterReload.count, textLen: doneAfterReload.lastAssistant?.text.length },
+    banner: doneAfterReload?.banner, takeoverHint: doneAfterReload?.takeoverHint
+  }))
+  assert('⑲', !!doneBeforeReload && !!doneAfterReload
+    && doneAfterReload.count === doneBeforeReload.count
+    && doneAfterReload.lastAssistant?.text === doneBeforeReload.lastAssistant?.text
+    && doneAfterReload.banner === false && doneAfterReload.takeoverHint === false
+    && doneAfterReload.loading === false && doneAfterReload.suspended === false,
+  RESULT.phases.rldReloadCompletedRound)
 
   // ── 阶段 12：回归对照 —— 真断流（未调 stop）红条照常出现 ────────────────
   // **放在最后**：本阶段按施工卡 §3.3 验收②的原话口径制造真断流（kill 后端进程），后端被杀后

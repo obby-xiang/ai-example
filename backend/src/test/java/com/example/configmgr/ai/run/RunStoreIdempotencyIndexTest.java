@@ -233,6 +233,41 @@ class RunStoreIdempotencyIndexTest {
 		assertThat(this.store.idemFor(RUN_ID, "c-1")).isNull();
 	}
 
+	// ── M-05（V7 下沉）：跨实例同一 runId:toolCallId —— 认领恰一次、台账恰 1 条 ──
+
+	/**
+	 * 设计稿 §2.10 M-05 的进程内形态：<b>同一业务幂等键在另一个实例上再执行一次</b>。
+	 *
+	 * <p>HTTP 层的 409 {@code DUPLICATE_TOOL_CALL_ID} 已由 {@code AiControllerFrontendResultTest} 锁住；
+	 * 本用例补的是它下面那层<b>存储面判据</b>：两个 {@link RunStore}（不同实例、同一份 Redis）看到的是
+	 * 同一份认领表与同一份幂等索引 ——
+	 * <ol>
+	 * <li>B 的认领必须失败（{@code HSETNX} 的"首写者胜"跨实例成立），因此不会出现第二次执行；</li>
+	 * <li>B 读幂等索引命中 A 那一条（O(1)，不回落全表扫描），台账仍然只有 1 条。</li>
+	 * </ol>
+	 */
+	@Test
+	void aSecondInstanceCannotClaimOrReplayTheSameExecution() {
+		RunStore instanceB = new RunStore(this.fake.redis, this.mapper, this.properties);
+		PendingToolCall executed = entry("c-1");
+
+		assertThat(this.store.claimExecution(RUN_ID, "c-1", "inst-a")).isTrue();
+		executed.setExecutedBy("inst-a");
+		this.store.appendLedger(RUN_ID, executed, "导入已受理");
+		this.fake.resetCounters();
+
+		assertThat(instanceB.claimExecution(RUN_ID, "c-1", "inst-b"))
+			.as("同一 runId:toolCallId 在另一实例上认领失败（首写者胜）").isFalse();
+		Map<String, Object> record = instanceB.idemFor(RUN_ID, "c-1");
+
+		assertThat(record).as("B 侧读到的就是 A 侧那一条（同一份 Redis）").isNotNull();
+		assertThat(record).containsEntry("toolCallId", "c-1").containsEntry("executedBy", "inst-a");
+		assertThat(this.fake.listIndexCalls.get()).as("索引命中 = LINDEX（O(1)）").isEqualTo(1);
+		assertThat(this.fake.listRangeCalls.get()).as("命中不得回落 LRANGE 全表扫描").isZero();
+		assertThat(instanceB.ledger(RUN_ID)).as("台账只 1 条（B 的认领失败 ⇒ 不会追加第二条）").hasSize(1);
+		assertThat(instanceB.claimedBy(RUN_ID, "c-1")).as("认领者仍是 A").isEqualTo("inst-a");
+	}
+
 	// ───────────────────────── helpers ─────────────────────────
 
 	private PendingToolCall entry(String toolCallId) {
