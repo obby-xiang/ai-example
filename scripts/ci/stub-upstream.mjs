@@ -248,14 +248,29 @@ function usageOf(shape) {
 //   summary-500                  arm 后下一条摘要请求回 500
 //   slow-reader                  慢生产者：20 帧 × 250ms（配合双订阅验隔离）
 //
+// 批③b 细分注入（L-67~ 系列解耦）：上面三个延迟开关各自罩住"整条链路的一个大段"，
+// 用例要的往往是其中一小段。故按**段**拆成三个只命中一段的开关（与既有开关互不牵连，
+// 未带标记的请求帧逐字节不变）：
+//   slow-first-byte=<ms>         只慢首包：响应头之后、首帧之前（文本轮同样生效）
+//   slow-tool-exec=<ms>          只慢工具执行段：工具轮 / 工具续轮（上下文有 role=tool）的首帧
+//   slow-tail-frames=<ms>        只慢帧间·收尾段：仅工具续轮的帧间静默（首帧不延迟）
+//   late-frames=<n>              [DONE] 之后继续推 n 帧（S-12 迟到帧闸门）
+//
+// 请求级工具路由与 epoch 注入（同为**提示词标记**选择，不受 faults 数值表管辖）：
+//   tool=<name>&args=<json>      直接指定本轮要调的工具与入参；仍受 requiresTools 披露闸约束
+//   epoch=<nonce-N>              把工具入参里的 epoch 换成该 token（真机 epoch 是页面 nonce）
+//
 // 三个非桩层开关（`faults.switches` 里标 layer=script/product）：`fe-tool-hang` 由用例的
 // 挂起处理器停住、`sheet-big` 由用例自建 500 行任务、`preflight-fail` 走产品既有预检语义。
 // 桩只为它们提供触发面（下发工具/表单），不在桩里伪造业务结果 —— 否则"桩绿=产品绿"的假象。
 const FAULT_VALUE_SWITCHES = ['break-at-seq', 'stall-frames', 'stall-headers', 'kill-stream', 'slow-tool',
-  'multi-card', 'huge-frame', 'tool-loop']
+  'multi-card', 'huge-frame', 'tool-loop', 'slow-first-byte', 'slow-tool-exec', 'slow-tail-frames',
+  'late-frames']
 const FAULT_FLAG_SWITCHES = ['turn-text', 'turn-interleave', 'context-overflow', 'summary-500', 'slow-reader',
   'fail-503-once']
 const FAULT_SWITCHES = [...FAULT_VALUE_SWITCHES, ...FAULT_FLAG_SWITCHES]
+/** 非数值标记类开关：`usage-shape=<enum>` / `tool=…&args=…` / `epoch=<token>`（各自独立解析式）。 */
+const REQUEST_LEVEL_SWITCHES = ['usage-shape', 'request-tool', 'epoch']
 const FAULT_MARKER = new RegExp(`(?:^|[\\s【（(,，】：:])(${FAULT_SWITCHES.join('|')})(?:=(\\d+))?(?![\\w-])`, 'g')
 
 /** 本请求要求的故障开关（`{name: number|true}`）；无标记 = 空对象 = 改造前行为。 */
@@ -273,7 +288,8 @@ function faultsOf(body) {
 
 /** 开关默认值（`stub-routes.json` 的 `faults.switches[*].default`；缺失回落内建同值）。 */
 const FAULT_DEFAULTS = { 'break-at-seq': 2, 'stall-frames': 50000, 'stall-headers': 30000, 'kill-stream': 3000,
-  'slow-tool': 130000, 'multi-card': 3, 'huge-frame': 102400, 'tool-loop': 26 }
+  'slow-tool': 130000, 'multi-card': 3, 'huge-frame': 102400, 'tool-loop': 26,
+  'slow-first-byte': 8000, 'slow-tool-exec': 8000, 'slow-tail-frames': 1200, 'late-frames': 2 }
 
 /** 命名轮蓝本的确定性文本（段序基线与"迟到帧不写"用例共用；长度 > 120 字以覆盖多个 delta）。 */
 const TURN_TEXT = '命名轮蓝本：这是一段确定性文本，用于验证纯文本流的帧序完整性（start 恰 1 / delta ≥ 1 / done 恰 1），'
@@ -288,17 +304,108 @@ function numericFault(faults, name) {
 
 /**
  * 故障对"写出计划"的影响 —— **纯函数**（`--self-check` 直接断言，不起服务）：
- * `{ headerDelayMs, firstFrameDelayMs, frameGapMs, killAfterMs, breakAtFrame }`。
+ * `{ headerDelayMs, firstByteDelayMs, toolExecDelayMs, firstFrameDelayMs, frameGapMs, tailFrameGapMs,
+ *    killAfterMs, breakAtFrame, lateFrames }`。
  * `breakAtFrame = K` 表示只写前 K 帧就销毁 socket；`killAfterMs > 0` 表示定时销毁。
+ *
+ * `round` 是本请求的段身份（`kind` = 判定结果，`hasToolResult` = 上下文里是否已有工具结果）：
+ *   - `slow-first-byte`（首包段）与段身份无关，任何一轮都生效；
+ *   - `slow-tool-exec`（工具执行段）只在工具轮 / 工具续轮生效；
+ *   - `slow-tail-frames`（帧间·收尾段）只在工具续轮生效（首帧不延迟）。
+ * 不传 `round` 时三个新开关一律不生效 ⇒ 既有调用点与自检的旧断言逐值不变。
  */
-function writePlan(faults) {
+function writePlan(faults, round = {}) {
+  const toolSegment = round.kind === 'tool_call' || round.hasToolResult === true
+  const tailSegment = round.hasToolResult === true
   return {
     headerDelayMs: faults['stall-headers'] ? numericFault(faults, 'stall-headers') : 0,
     firstFrameDelayMs: faults['slow-tool'] ? numericFault(faults, 'slow-tool') : 0,
+    firstByteDelayMs: faults['slow-first-byte'] ? numericFault(faults, 'slow-first-byte') : 0,
+    toolExecDelayMs: faults['slow-tool-exec'] && toolSegment ? numericFault(faults, 'slow-tool-exec') : 0,
     frameGapMs: faults['stall-frames'] ? numericFault(faults, 'stall-frames') : (faults['slow-reader'] ? 250 : 0),
+    tailFrameGapMs: faults['slow-tail-frames'] && tailSegment ? numericFault(faults, 'slow-tail-frames') : 0,
     killAfterMs: faults['kill-stream'] ? numericFault(faults, 'kill-stream') : 0,
-    breakAtFrame: faults['break-at-seq'] ? numericFault(faults, 'break-at-seq') : 0
+    breakAtFrame: faults['break-at-seq'] ? numericFault(faults, 'break-at-seq') : 0,
+    lateFrames: faults['late-frames'] ? numericFault(faults, 'late-frames') : 0
   }
+}
+
+/**
+ * 请求级工具路由（`tool=<name>&args=<json>`）。
+ *
+ * 为什么要有：`L-02~L-08` 这些「某工具被调一次会怎样」的用例，在桩里没有对应的提示词路由，
+ * 每加一条路由都要重编路由表并受"每路由一次"台账约束。请求级标记把"调哪个工具、带什么入参"
+ * 交给提示词，用例自述意图，桩只做**披露闸 + 参数解析**（不猜调用方身份）。
+ *
+ * 解析规则：`tool=` 后接工具名；可选 `&args=` 后接一个**平衡括号**的 JSON 对象（允许嵌套、
+ * 允许字符串里出现 `}`）。缺 JSON / 括号不平衡 / 非对象 ⇒ 返回 `badArgs`，调用方退化为文本轮。
+ */
+const REQUEST_TOOL_MARKER = /\btool=([A-Za-z_][A-Za-z0-9_]{0,63})\b/
+
+/** 从 `text[from]`（必须是 `{`）起取平衡括号片段（按字符串/转义状态跳过括号）；不平衡返回 null。 */
+function balancedJson(text, from) {
+  let depth = 0
+  let inString = false
+  let escaped = false
+  for (let i = from; i < text.length; i++) {
+    const ch = text[i]
+    if (inString) {
+      if (escaped) escaped = false
+      else if (ch === '\\') escaped = true
+      else if (ch === '"') inString = false
+      continue
+    }
+    if (ch === '"') inString = true
+    else if (ch === '{') depth += 1
+    else if (ch === '}') {
+      depth -= 1
+      if (depth === 0) return text.slice(from, i + 1)
+    }
+  }
+  return null
+}
+
+function requestToolOf(body) {
+  const text = textOf(lastMessageWithRole(messagesOf(body), 'user'))
+  if (!text) return null
+  const m = REQUEST_TOOL_MARKER.exec(text)
+  if (!m) return null
+  const name = m[1]
+  const rest = text.slice(m.index + m[0].length)
+  const argsMark = /^&args=/.exec(rest)
+  if (!argsMark) return { name, args: {} }
+  const from = rest.indexOf('{', argsMark[0].length)
+  if (from < 0) return { name, args: {}, badArgs: '缺少 JSON 对象' }
+  const json = balancedJson(rest, from)
+  if (json === null) return { name, args: {}, badArgs: 'JSON 括号不平衡' }
+  const parsed = safeJson(json)
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { name, args: {}, badArgs: 'JSON 不是对象' }
+  }
+  return { name, args: parsed }
+}
+
+/**
+ * 请求级 epoch 注入（`epoch=<nonce-N>`）：真机 epoch 是模块加载期 random nonce + 计数器
+ * （`ai-regions.ts` 的 `EPOCH_NONCE`），路由表里的固定串必被围栏拒 ⇒ V 域成功路径在模型侧不可达。
+ * 用例把页面当前 epoch 写进提示词，桩把本轮工具入参里**已有的** `epoch` 键换掉（不新增键）。
+ */
+const EPOCH_MARKER = /\bepoch=([a-z0-9]{6}-\d{1,6})\b/
+
+function epochOf(body) {
+  const text = textOf(lastMessageWithRole(messagesOf(body), 'user'))
+  const m = text ? EPOCH_MARKER.exec(text) : null
+  return m ? m[1] : null
+}
+
+/** 把指令里的 epoch 写进工具入参；返回是否真的改写（未改写的请求落盘件逐字节不变）。 */
+function applyEpoch(decision, epoch) {
+  if (!epoch || decision.kind !== 'tool_call') return false
+  if (!decision.args || typeof decision.args !== 'object' || Array.isArray(decision.args)) return false
+  if (!Object.prototype.hasOwnProperty.call(decision.args, 'epoch')) return false
+  decision.args.epoch = epoch
+  decision.epoch = epoch
+  return true
 }
 
 /** 交错轮：一条消息里 text→tool_calls（`t→tool` 半段），下一轮再来一次（`tool→t` 半段）。 */
@@ -533,7 +640,7 @@ function decide(body, routes, turns, overrides = {}) {
   const fp = fingerprint(messages)
   let bucket = turns.get(fp)
   if (!bucket) {
-    bucket = { calls: 0, lastLen: -1, used: [] }
+    bucket = { calls: 0, lastLen: -1, used: [], requestToolUsed: '' }
     turns.set(fp, bucket)
   }
   // 同一提示词的新轮次（重试/换会话）：**仅当消息数严格回退**时才视为新轮次并清零台账。
@@ -542,6 +649,7 @@ function decide(body, routes, turns, overrides = {}) {
   if (messages.length < bucket.lastLen) {
     bucket.calls = 0
     bucket.used = []
+    bucket.requestToolUsed = ''
   }
   bucket.lastLen = messages.length
   bucket.calls += 1
@@ -558,6 +666,31 @@ function decide(body, routes, turns, overrides = {}) {
   const userText = textOf(lastMessageWithRole(messages, 'user'))
   if (!userText) {
     return { kind: 'text', text: CLOSING_TEXT, reason: '无用户消息（探活/异常请求）' }
+  }
+  // 请求级工具路由（`tool=<name>&args=<json>`）：提示词自述要调什么；
+  // 披露闸（收敛契约 ①）与产品工具清单两道闸先行，任一不过 ⇒ 退化为文本轮（不制造请求风暴）。
+  const wanted = requestToolOf(body)
+  if (wanted) {
+    const productTools = new Set(Array.isArray(routes.productTools) ? routes.productTools : [])
+    if (!productTools.has(wanted.name)) {
+      return { kind: 'text', text: CLOSING_TEXT, reason: `请求级工具 ${wanted.name} 不在产品工具清单（productTools）` }
+    }
+    if (!disclosed.has(wanted.name)) {
+      return { kind: 'text', text: CLOSING_TEXT, reason: `请求级工具 ${wanted.name} 未在本轮披露清单（requiresTools 闸）` }
+    }
+    if (wanted.badArgs) {
+      return { kind: 'text', text: CLOSING_TEXT, reason: `请求级工具 ${wanted.name} 入参不可解：${wanted.badArgs}` }
+    }
+    if (bucket.requestToolUsed === wanted.name) {
+      // 幂等闸（收敛契约 ② 的请求级版本）：同一提示词只发一次工具调用，
+      // 流失败后的原样重试因此不会变成"同一轮反复调工具"的请求风暴。
+      return { kind: 'text', text: CLOSING_TEXT, reason: `请求级工具 ${wanted.name} 已在本提示词发过（幂等闸）` }
+    }
+    // 台账（每路由一次）只记路由表路由：请求级标记不占用 route.id 名额，
+    // 同提示词的下一轮由幂等闸 + "续轮只发文本"两条契约收口。
+    bucket.requestToolUsed = wanted.name
+    return { kind: 'tool_call', tool: wanted.name, args: wanted.args, route: 'REQUEST-TOOL',
+      reason: `请求级工具标记 tool=${wanted.name}` }
   }
   for (const route of routes.routes || []) {
     const requires = Array.isArray(route.match?.requiresTools) ? route.match.requiresTools : []
@@ -651,6 +784,15 @@ function toolRound(tool, args, callId, model) {
     chunk({}, 'tool_calls', model),
     'data: [DONE]\n\n'
   ]
+}
+
+/** 迟到帧（S-12）：`[DONE]` 之后继续推的帧，客户端必须整帧丢弃（不入 parts、不改卡、不进镜像）。 */
+function lateFrameChunks(n, model) {
+  const out = []
+  for (let i = 0; i < n; i++) {
+    out.push(chunk({ content: `迟到帧${i + 1}：done 之后不应入库` }, null, model))
+  }
+  return out
 }
 
 // ── 服务与落盘 ─────────────────────────────────────────────────────────────
@@ -753,14 +895,30 @@ async function writeFrames(res, frames, plan) {
     const limit = plan.breakAtFrame > 0 ? Math.min(plan.breakAtFrame, frames.length) : frames.length
     for (let i = 0; i < limit; i++) {
       if (killed) return 'killed'
-      if (i === 0 && plan.firstFrameDelayMs > 0) await sleep(plan.firstFrameDelayMs)
-      if (i > 0 && plan.frameGapMs > 0) await sleep(plan.frameGapMs)
+      if (i === 0) {
+        // 首包段（写头之后、首帧之前）→ 工具执行段 → 既有 slow-tool；三者各自独立，互不叠加语义
+        if (plan.firstByteDelayMs > 0) await sleep(plan.firstByteDelayMs)
+        if (plan.toolExecDelayMs > 0) await sleep(plan.toolExecDelayMs)
+        if (plan.firstFrameDelayMs > 0) await sleep(plan.firstFrameDelayMs)
+      }
+      if (i > 0) {
+        const gap = Math.max(plan.frameGapMs, plan.tailFrameGapMs)
+        if (gap > 0) await sleep(gap)
+      }
       res.write(frames[i])
     }
     if (plan.breakAtFrame > 0 && plan.breakAtFrame < frames.length) {
       // 断流形态：不发 [DONE]、不 res.end，直接销毁 socket（客户端看到 EOF/reset）
       try { res.socket?.destroy() } catch { /* 已断开 */ }
       return 'broken'
+    }
+    // 迟到帧：整轮（含 [DONE]）写完之后继续推 —— 客户端必须整帧丢弃
+    if (plan.lateFrames > 0) {
+      for (const late of lateFrameChunks(plan.lateFrames, plan.model)) {
+        if (killed) break
+        res.write(late)
+        await sleep(20)
+      }
     }
     if (!killed) res.end()
     return killed ? 'killed' : 'ok'
@@ -822,6 +980,10 @@ async function handleChat(req, res, raw) {
   if (usageShape !== 'last') decision.usageShape = usageShape
   const faultNames = Object.keys(faults)
   if (faultNames.length) decision.faults = faultNames
+  // 请求级 epoch 注入（V 域成功路径的模型侧底座）：本轮工具入参里已有的 epoch 换成提示词给的 token
+  if (applyEpoch(decision, epochOf(body ?? {}))) {
+    console.log(`[req-${String(index).padStart(3, '0')}] epoch 注入 → ${decision.epoch}`)
+  }
   // 注入必须先于落盘（T4-S2-6）：`record` 会把 decision **立即** 序列化进 req-NN.decision.json，
   // 它自称"桩收到的原请求与判定"的失败归因三件套之一 —— 若先落盘再注入，GF6 失败时落盘的判定
   // 是注入前的合法 schema，与 SSE 实际回帧（注入后的 html）相反，会把排查方向引偏。
@@ -829,7 +991,13 @@ async function handleChat(req, res, raw) {
   if (violationNote) console.log(`[违规模式] ${violationNote}`)
   record(index, raw, body ?? {}, decision)
 
-  const plan = writePlan(faults)
+  // 段身份（细分延迟注入的判定依据）：本请求既可能是工具轮（要发 tool_calls），
+  // 也可能是工具续轮（上下文里已有 role=tool ⇒ 收尾文本段）。
+  const roundCtx = {
+    kind: decision.kind,
+    hasToolResult: body ? messagesOf(body).some((m) => m?.role === 'tool') : false
+  }
+  const plan = { ...writePlan(faults, roundCtx), model }
   if (plan.headerDelayMs > 0) await sleep(plan.headerDelayMs)
   if (plan.firstFrameDelayMs > 0 && decision.kind !== 'tool_call') plan.firstFrameDelayMs = 0
   res.writeHead(200, {
@@ -1452,8 +1620,9 @@ function selfCheck() {
     if (!['stub', 'script', 'product'].includes(meta.layer)) bad(`faults.switches.${name}.layer=${meta.layer} 非法`)
     if (!Array.isArray(meta.cases) || meta.cases.length === 0) bad(`faults.switches.${name} 未登记支撑用例`)
     if (meta.layer === 'stub') {
-      // 三类实现形态：marker 开关（FAULT_SWITCHES）/ 路由开关（messageAny 命中）/ 既有 usage-shape
-      const byMarker = FAULT_SWITCHES.includes(name) || name === 'usage-shape'
+      // 三类实现形态：marker 开关（FAULT_SWITCHES）/ 路由开关（messageAny 命中）/ 请求级标记
+      // （usage-shape / request-tool / epoch）
+      const byMarker = FAULT_SWITCHES.includes(name) || REQUEST_LEVEL_SWITCHES.includes(name)
       const byRoute = routeMarkers.has(name) || [...routeMarkers].some((m) => m.startsWith(name))
       if (!byMarker && !byRoute) bad(`桩层开关 ${name} 在 faults.switches 里声明但桩内无实现（表与实现漂移）`)
     }
@@ -1487,13 +1656,31 @@ function selfCheck() {
     ['kill-stream=50', { 'kill-stream': 50 }, { killAfterMs: 50 }],
     ['slow-tool=70', { 'slow-tool': 70 }, { firstFrameDelayMs: 70 }],
     ['slow-reader', { 'slow-reader': true }, { frameGapMs: 250 }],
-    ['无开关', {}, { breakAtFrame: 0, frameGapMs: 0, headerDelayMs: 0, killAfterMs: 0, firstFrameDelayMs: 0 }]
+    ['slow-first-byte=90', { 'slow-first-byte': 90 }, { firstByteDelayMs: 90 }],
+    ['late-frames=2', { 'late-frames': 2 }, { lateFrames: 2 }],
+    ['无开关', {}, { breakAtFrame: 0, frameGapMs: 0, headerDelayMs: 0, killAfterMs: 0, firstFrameDelayMs: 0,
+      firstByteDelayMs: 0, toolExecDelayMs: 0, tailFrameGapMs: 0, lateFrames: 0 }]
   ]
   for (const [label, faults, want] of planCases) {
     const plan = writePlan(faults)
     for (const [k, v] of Object.entries(want)) {
       if (plan[k] !== v) bad(`写出计划 ${label} 的 ${k}=${plan[k]}，期望 ${v}`)
     }
+  }
+
+  // ⑨-c2 细分注入的段身份：同一开关在"文本轮 / 工具轮 / 工具续轮"下只命中各自那一段
+  const toolFaults = { 'slow-tool-exec': 70, 'slow-tail-frames': 60 }
+  const textPlan = writePlan(toolFaults, { kind: 'text', hasToolResult: false })
+  const toolPlan = writePlan(toolFaults, { kind: 'tool_call', hasToolResult: false })
+  const tailPlan = writePlan(toolFaults, { kind: 'text', hasToolResult: true })
+  if (textPlan.toolExecDelayMs !== 0 || textPlan.tailFrameGapMs !== 0) {
+    bad('slow-tool-exec / slow-tail-frames 不得在纯文本首轮生效（会把 S-03/P-04 的时序搅在一起）')
+  }
+  if (toolPlan.toolExecDelayMs !== 70 || toolPlan.tailFrameGapMs !== 0) {
+    bad(`slow-tool-exec 在工具轮应生效且不牵连 tailFrameGapMs：得到 toolExec=${toolPlan.toolExecDelayMs} tail=${toolPlan.tailFrameGapMs}`)
+  }
+  if (tailPlan.toolExecDelayMs !== 70 || tailPlan.tailFrameGapMs !== 60) {
+    bad(`工具续轮应同时可注入执行段与收尾帧间：得到 toolExec=${tailPlan.toolExecDelayMs} tail=${tailPlan.tailFrameGapMs}`)
   }
 
   // ⑨-d 命名轮蓝本：turn-text 恒文本；tool-loop 步数收口；interleave 段序 text→tool
@@ -1590,6 +1777,76 @@ function selfCheck() {
   const defField = (optRoute?.arguments?.form?.fields || []).find((f) => f.defaultFrom)
   if (!defField) bad('GF-OPTIONS-FROM 缺 defaultFrom（G-12 无底座）')
   ok(`GF 新能力面自证通过（七型覆盖 / 深联动 ${deepest} 层 > ${MAX_LINKAGE_DEPTH} / optionsFrom+defaultFrom 底座在位）`)
+
+  section()
+  // ⑩ 批③b 桩增强：请求级工具路由 / epoch 注入 / 迟到帧。全部纯函数自证，不起服务。
+  // ⑩-a `tool=<name>&args=<json>` 解析：嵌套对象、字符串里的 `}`、缺 args、非法 JSON、无标记
+  const toolCases = [
+    ['嵌套对象', '前缀 tool=list_tasks&args={"status":"RUNNING","page":{"size":10}} 后缀',
+      { name: 'list_tasks', args: { status: 'RUNNING', page: { size: 10 } } }],
+    ['字符串含右括号', 'tool=get_config_def&args={"code":"A}B"}',
+      { name: 'get_config_def', args: { code: 'A}B' } }],
+    ['只给工具名', 'tool=list_tasks', { name: 'list_tasks', args: {} }],
+    ['无标记', '普通一句', null]
+  ]
+  for (const [label, text, want] of toolCases) {
+    const got = requestToolOf({ messages: [{ role: 'user', content: text }] })
+    if (JSON.stringify(got) !== JSON.stringify(want)) {
+      bad(`请求级工具标记解析失败（${label}）：得到 ${JSON.stringify(got)}，期望 ${JSON.stringify(want)}`)
+    }
+  }
+  const badArgsReq = requestToolOf({ messages: [{ role: 'user', content: 'tool=start_import&args={oops' }] })
+  if (!badArgsReq?.badArgs) bad('请求级工具标记的非法 JSON 必须落到 badArgs（否则会拿半截入参去调工具）')
+
+  // ⑩-b 披露闸与台账：已披露 ⇒ 真发 tool_call；未披露 / 不在产品清单 ⇒ 文本轮；同提示词只发一次
+  const rtPrompt = 'tool=list_tasks&args={"status":"RUNNING"} 用例RT1'
+  const rtBody = { messages: [{ role: 'user', content: rtPrompt }], tools: [{ function: { name: 'list_tasks' } }] }
+  const rtDecision = decide(rtBody, ROUTES, turns)
+  if (rtDecision.kind !== 'tool_call' || rtDecision.tool !== 'list_tasks' || rtDecision.route !== 'REQUEST-TOOL') {
+    bad(`请求级工具在已披露时应发 tool_call(list_tasks)，实际 ${rtDecision.kind}/${rtDecision.tool ?? '-'}`)
+  }
+  if (rtDecision.args?.status !== 'RUNNING') bad('请求级工具的 args 未原样透传（JSON 解析丢值）')
+  const rtNotDisclosed = decide({ messages: [{ role: 'user', content: 'tool=list_tasks 用例RT2' }], tools: [] }, ROUTES, turns)
+  if (rtNotDisclosed.kind !== 'text') bad('未披露的请求级工具必须退化为文本轮（披露闸不得被请求级标记绕过）')
+  const rtUnknown = decide({ messages: [{ role: 'user', content: 'tool=drop_everything 用例RT3' }],
+    tools: [{ function: { name: 'drop_everything' } }] }, ROUTES, turns)
+  if (rtUnknown.kind !== 'text') bad('不在 productTools 的请求级工具必须退化为文本轮（不得调产品没有的工具）')
+  const rtAgain = decide({ messages: [{ role: 'user', content: 'tool=list_tasks&args={"status":"RUNNING"} 用例RT1' }],
+    tools: [{ function: { name: 'list_tasks' } }] }, ROUTES, turns)
+  if (rtAgain.kind !== 'text') bad('同一提示词的请求级工具只允许发一次（否则重试路径会变成请求风暴）')
+  ok('请求级工具路由自证通过（嵌套 args 透传 / 披露闸优先 / 产品清单闸 / 同提示词幂等）')
+
+  // ⑩-c epoch 注入：只改既有 epoch 键，不改其他入参，无键不新增
+  const epochCases = [
+    ['合法 token', 'epoch=ab12cd-7', 'ab12cd-7'],
+    ['非法（大写）', 'epoch=AB12CD-7', null],
+    ['非法（无计数器）', 'epoch=ab12cd', null],
+    ['无标记', '普通一句', null]
+  ]
+  for (const [label, text, want] of epochCases) {
+    const got = epochOf({ messages: [{ role: 'user', content: text }] })
+    if (got !== want) bad(`epoch 标记解析失败（${label}）：得到 ${got}，期望 ${want}`)
+  }
+  const epochDecision = { kind: 'tool_call', tool: 'ui_click', args: { ref: 'import.upload.choose', epoch: 'a1b2c3-1' } }
+  if (!applyEpoch(epochDecision, 'zz9yy8-3')) bad('epoch 注入未生效')
+  if (epochDecision.args.epoch !== 'zz9yy8-3') bad(`epoch 注入值 ${epochDecision.args.epoch}，期望 zz9yy8-3`)
+  if (epochDecision.args.ref !== 'import.upload.choose') bad('epoch 注入不得改动其他入参')
+  const noEpochKey = { kind: 'tool_call', tool: 'list_tasks', args: { status: 'RUNNING' } }
+  applyEpoch(noEpochKey, 'zz9yy8-3')
+  if ('epoch' in noEpochKey.args) bad('epoch 注入不得给没有 epoch 键的工具**新增**入参键')
+  ok('epoch 请求级注入自证通过（形状与产品 Guard 同源 / 只改既有键 / 不新增键）')
+
+  // ⑩-d 迟到帧：`[DONE]` 之后才有内容（帧序 = 正常轮 + n 个迟到帧），且迟到帧自带内容
+  const normalTail = textRound('收尾文本', 'ci-stub')
+  if (normalTail[normalTail.length - 1] !== 'data: [DONE]\n\n') bad('文本轮末帧必须是 [DONE]（迟到帧只能在它之后）')
+  const late = lateFrameChunks(2, 'ci-stub')
+  if (late.length !== 2) bad(`迟到帧数量 ${late.length}，期望 2`)
+  for (const raw of late) {
+    if (!raw.startsWith('data: ') || !raw.endsWith('\n\n')) bad('迟到帧必须是合法 SSE data 帧')
+    const parsed = JSON.parse(raw.replace(/^data: /, '').trim())
+    if (!parsed?.choices?.[0]?.delta?.content) bad('迟到帧必须携带 delta.content（否则客户端丢弃面无从观测）')
+  }
+  ok('迟到帧自证通过（done 之后推 / 数量与内容可判 / 正常轮末帧不变）')
 
   console.log('------------------------------------------------------------')
   if (problems.length) {

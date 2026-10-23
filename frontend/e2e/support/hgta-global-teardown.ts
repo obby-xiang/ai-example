@@ -1,7 +1,7 @@
 /** H/G/T/A 域的 globalTeardown：只收自己起的实例（标记文件由 hgta-global-setup 写）。 */
 import { rmSync } from 'node:fs'
 import { join } from 'node:path'
-import { RUN_DIR, stopServices } from './harness-hgta'
+import { RUN_DIR, stopServices } from './harness'
 
 const MARKER = join(RUN_DIR, 'hgta-started.by-us')
 

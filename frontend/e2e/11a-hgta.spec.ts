@@ -4,7 +4,8 @@
  * 蓝本：docs/research/设计-真机E2E用例全集-2026-10-23.md §2.4 / §2.16。
  * 批① 已覆盖 H-02（拒绝零执行）/ H-09（不可撤销复选框），本文件做其余 H 条 + 全部 A 条。
  *
- * 端口段 18730/18799/18801、Redis DB 11（`support/harness-hgta.ts` 自起自收，不与别路共用
+ * 端口段 18730/18799/18801、Redis DB 11（统一 `support/harness.ts` 按 `playwright.hgta.config.ts`
+ * 提供的 `E2E_*` env 自起自收，RUN_DIR 独立、不与别路共用
  * RUN_DIR/pid 台账）；桩的会话指纹 = 首条 user 消息，故每条提示词都带唯一字母后缀。
  */
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test'
@@ -803,18 +804,18 @@ test.describe('@stub A 附件上传全链', () => {
   })
 
   /**
-   * 交接卡主链（A-06/A-07/A-08/A-09/A-10）在桩模式下**不可达**：桩的路由表把
-   * `ui_request_upload.ref` 写成 `import.upload.entry`，而产品声明的上传入口是
-   * `import.upload.choose`（ImportWizardView 的 uploadEntry）。产品的前置闸（ref 必须在本轮
-   * 真实快照遍历里出现过）因此恒定拒绝，交接卡永远建不起来。本条把**这条拒绝路径**钉住，
-   * 并把"桩 ref 与产品 ref 漂移"做成可回归的断言（任一方向修好，本条会红，提醒同步用例）。
+   * 交接卡前置闸（A-06）。批③b 已修 **L-77**（桩的 `ui_request_upload.ref` 漂移：
+   * `import.upload.entry` → 产品真实入口 `import.upload.choose`，见 ImportWizardView 的 uploadEntry）。
+   * 本条的拒绝**不再**来自 ref 不存在，而是来自产品的前置闸本身：ref 必须在本轮**真实快照遍历**
+   * 里出现过（`isRefSnapshotted`），而本轮没有先调 `ui_snapshot` ⇒ 恒拒。
+   * 双向断言保留：页面里 `import.upload.choose` 恰 1、`import.upload.entry` 恰 0（ref 再漂移即红）。
    */
   test('E2E-A06 交接卡前置闸：未快照的 ref 一律拒绝（UI_REF_NOT_SNAPSHOTTED），零上传、轮继续', async ({ page, request }) => {
     const taskId = await createImportTaskAtUpload(request)
     await openPath(page, `/import?taskId=${taskId}`)
     await expect(page.locator('footer')).toContainText('task:IMPORT/UPLOAD', { timeout: 30_000 })
 
-    // 产品侧真实的上传入口 ref 只有 import.upload.choose 一族（桩用的 entry 根本不存在）
+    // 产品侧真实的上传入口 ref 只有 import.upload.choose 一族（桩已对齐，entry 不存在）
     await expect(page.locator('[data-ai-ref="import.upload.choose"]')).toHaveCount(1, { timeout: 20_000 })
     await expect(page.locator('[data-ai-ref="import.upload.entry"]')).toHaveCount(0)
 

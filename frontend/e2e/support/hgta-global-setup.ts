@@ -3,13 +3,13 @@
  *
  * 三条口径：
  * 1. 已有实例（整仓跑的 globalSetup 或 E2E_EXTERNAL=1）⇒ 一律不动，只写"不是我们起的"标记；
- * 2. 自起时用 `harness-hgta`（独立 RUN_DIR）并写标记文件，teardown 据此决定收不收；
+ * 2. 自起时用**统一 harness** + 本域 env（`playwright.hgta.config.ts` 的 `E2E_RUN_DIR` / `E2E_*_PORT` /
+ *    `E2E_REDIS_DB` 默认值）并写标记文件，teardown 据此决定收不收；
  * 3. setup 中途失败也要先收干净，不占专用端口段。
  */
-import { existsSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { RUN_DIR, startServices, stopServices, URLS } from './harness-hgta'
-import { mkdirSync } from 'node:fs'
+import { RUN_DIR, startServices, stopServices, URLS } from './harness'
 
 const MARKER = join(RUN_DIR, 'hgta-started.by-us')
 

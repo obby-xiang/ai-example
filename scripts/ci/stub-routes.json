@@ -267,6 +267,72 @@
           "S-10"
         ]
       },
+      "slow-first-byte": {
+        "layer": "stub",
+        "value": "ms",
+        "default": 8000,
+        "note": "只慢首包：写响应头之后、首个 SSE 帧之前静默 ms（与 stall-headers 的建连段、slow-tail-frames 的帧间段互不牵连）",
+        "cases": [
+          "S-03",
+          "R-03"
+        ]
+      },
+      "slow-tool-exec": {
+        "layer": "stub",
+        "value": "ms",
+        "default": 8000,
+        "note": "只慢工具执行段：仅工具轮（发 tool_calls）与工具续轮（上下文已有 role=tool）的首帧静默 ms；文本轮不受影响（slow-tool 的细分版）",
+        "cases": [
+          "S-09",
+          "S-11",
+          "R-03"
+        ]
+      },
+      "slow-tail-frames": {
+        "layer": "stub",
+        "value": "ms",
+        "default": 1200,
+        "note": "只慢帧间（收尾段）：仅「上下文已有 role=tool」的续轮按 ms 拉长帧间静默；首帧不延迟、工具轮不受影响（P-04 停止在收尾处）",
+        "cases": [
+          "P-04"
+        ]
+      },
+      "late-frames": {
+        "layer": "stub",
+        "value": "n",
+        "default": 2,
+        "note": "[DONE] 之后继续推 n 帧（迟到帧闸门；客户端必须整帧丢弃、不改卡状态、不进镜像）",
+        "cases": [
+          "S-12"
+        ]
+      },
+      "request-tool": {
+        "layer": "stub",
+        "value": "name+args",
+        "default": 0,
+        "note": "请求级工具路由：提示词写 `tool=<工具名>&args=<JSON>` 直接指定本轮要调的工具与入参；仍受 requiresTools 披露闸约束（未披露 ⇒ 退化为文本轮，不产生请求风暴）",
+        "cases": [
+          "L-02",
+          "L-03",
+          "L-04",
+          "L-05",
+          "L-06",
+          "L-07",
+          "L-08"
+        ]
+      },
+      "epoch": {
+        "layer": "stub",
+        "value": "token",
+        "default": "a1b2c3-1",
+        "note": "请求级 epoch 注入：提示词写 `epoch=<token>` 时，把该轮工具入参里的 epoch 换成该 token（真机 epoch 是页面加载期 nonce，固定串必被围栏拒；不带标记 = 路由表原值不变）",
+        "cases": [
+          "V-02",
+          "V-03",
+          "V-04",
+          "V-06"
+        ]
+      },
       "fe-tool-hang": {
         "layer": "script",
         "value": "none",
@@ -1007,7 +1073,7 @@
     },
     {
       "id": "UI-UPLOAD",
-      "note": "V1 B14：ui_request_upload 交接卡底座（唯一的「等人」工具）。accept 只能收窄页面允许的扩展名；入参永不接受 path/filePath/selector。",
+      "note": "V1 B14：ui_request_upload 交接卡底座（唯一的「等人」工具）。ref 取产品真实上传入口（ImportWizardView 的 uploadEntry = import.upload.choose，L-77 修）；accept 只能收窄页面允许的扩展名；入参永不接受 path/filePath/selector。",
       "match": {
         "messageAny": [
           "scenario=UI-UPLOAD"
@@ -1018,7 +1084,7 @@
       },
       "tool": "ui_request_upload",
       "arguments": {
-        "ref": "import.upload.entry",
+        "ref": "import.upload.choose",
         "accept": [
           "xlsx"
         ]

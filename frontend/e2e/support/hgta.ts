@@ -3,7 +3,7 @@
  *
  * 三件事：
  * 1. **起停幂等**：整仓跑时 globalSetup 已起服务 → 探活命中即跳过自起/收尾；
- *    本域单独跑时用 `harness-hgta`（独立 RUN_DIR）自起自收。
+ *    本域单独跑时用统一 harness + 本域 env（`playwright.hgta.config.ts` 提供默认值；RUN_DIR 独立）自起自收。
  * 2. **桩侧取证**：读 `RUN_DIR/stub/req-NNN.json`（上游请求原文）与 `decision.json`——
  *    "进模型的是什么" 只有这一条真实通道，比断言 UI 文案强得多。
  * 3. **唯一后缀**：桩的会话指纹 = 首条 user 消息，同族用例必须各自带唯一后缀，
@@ -12,7 +12,7 @@
 import { expect, type APIRequestContext, type Page, type Request } from '@playwright/test'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import { RUN_DIR, startServices, stopServices, URLS } from './harness-hgta'
+import { RUN_DIR, startServices, stopServices, URLS } from './harness'
 
 export { RUN_DIR, URLS }
 
@@ -61,7 +61,7 @@ export function uniq(prefix = ''): string {
 // ── 桩侧取证 ────────────────────────────────────────────────────────────────
 
 /**
- * 桩落档目录：本域单独跑时在 `RUN_DIR/stub`（harness-hgta 的独立目录）；
+ * 桩落档目录：本域单独跑时在 `RUN_DIR/stub`（本域 E2E_RUN_DIR 的独立目录）；
  * 整仓跑（既有 global-setup 用共享 RUN_DIR）时在 `test-results/.e2e-run/stub`。
  * 两个都试，取"最近写过文件"的那个，避免换入口跑时读到空目录。
  */

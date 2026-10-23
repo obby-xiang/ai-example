@@ -133,6 +133,12 @@ node scripts/ci/stub-upstream.mjs --self-check [--routes scripts/ci/stub-routes.
 | `stall-frames=<ms>` / `stall-headers=<ms>` | 帧间静默 / 写响应头前静默 | S-04 / S-03 |
 | `kill-stream=<ms>` | 到点销毁 socket（上游 TCP 断） | S-06 / D-09 |
 | `slow-tool=<ms>` / `slow-reader` | 工具轮首帧前静默 / 慢生产者 20×250ms | S-09·S-11 / S-14·D-10 |
+| `slow-first-byte=<ms>` | **只慢首包**：响应头之后、首帧之前（文本轮同样生效） | S-03 / R-03 |
+| `slow-tool-exec=<ms>` | **只慢工具执行段**：工具轮 / 工具续轮（上下文已有 `role=tool`）的首帧 | S-09 / S-11 / R-03 |
+| `slow-tail-frames=<ms>` | **只慢帧间·收尾段**：仅工具续轮的帧间静默（首帧不延迟） | P-04 |
+| `late-frames=<n>` | `[DONE]` 之后继续推 n 帧（迟到帧闸门） | S-12 |
+| `tool=<name>&args=<json>` | **请求级工具路由**：直接指定本轮工具与入参（仍受 `requiresTools` 披露闸 + 同提示词幂等闸） | L-02…L-08 |
+| `epoch=<nonce-N>` | **请求级 epoch 注入**：把工具入参里既有的 `epoch` 换成页面真值（形状与产品 Guard 正则同源） | V-02 / V-03 / V-04 / V-06（模型侧成功路径） |
 | `multi-card=<n>` | 一条消息 n 个 `tool_calls`（id 互异） | H-04 / H-11 |
 | `huge-frame=<bytes>` / `tool-loop=<n>` | 单帧字节数 / 连续 n 次工具调用 | S-13 / S-10 |
 | `fail-503-once` | 同一轮首次 503、之后正常 | S-07 |
@@ -141,8 +147,9 @@ node scripts/ci/stub-upstream.mjs --self-check [--routes scripts/ci/stub-routes.
 
 `fe-tool-hang` / `sheet-big` / `preflight-fail` 三项**不是桩层开关**（`faults.switches` 里标 `layer=script/product`）：
 挂起由用例的处理器停住、大表由用例自建任务、预检失败走产品既有语义 —— 桩只提供触发面，不伪造业务结果。
-`--self-check` 段 ⑨ 断言"表与实现不漂移"（桩层 21 项逐项有实现）、标记解析、写出计划、段序、多卡 id 互异、
-大帧字节数、越窗错误体命中产品 `MARKERS`（读事实源）、摘要识别式与 `RollingSummarizer` 同源。
+`--self-check` 段 ⑨ 断言"表与实现不漂移"（桩层 27 项逐项有实现）、标记解析、写出计划（含三个细分段的段身份）、
+段序、多卡 id 互异、大帧字节数、越窗错误体命中产品 `MARKERS`（读事实源）、摘要识别式与 `RollingSummarizer` 同源；
+段 ⑩ 断言请求级工具路由（嵌套 args / 披露闸 / 产品清单闸 / 幂等）、epoch 注入（只改既有键）与迟到帧。
 
 ### 2.4 记录契约（可归因性）
 

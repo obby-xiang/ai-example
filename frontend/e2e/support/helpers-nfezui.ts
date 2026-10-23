@@ -7,10 +7,12 @@
  */
 import { expect, type APIRequestContext, type Page } from '@playwright/test'
 
-export const NFEZUI_API = process.env.E2E_API_BASE ?? 'http://127.0.0.1:19130'
-export const NFEZUI_DEGRADED_API = process.env.E2E_DEGRADED_API_BASE ?? 'http://127.0.0.1:19131'
-export const NFEZUI_APP = process.env.E2E_APP ?? 'http://127.0.0.1:19201'
-export const NFEZUI_DEGRADED_APP = process.env.E2E_DEGRADED_APP ?? 'http://127.0.0.1:19202'
+export const NFEZUI_API = process.env.E2E_API_BASE ?? `http://127.0.0.1:${process.env.E2E_BACKEND_PORT ?? '19130'}`
+export const NFEZUI_DEGRADED_API = process.env.E2E_DEGRADED_API_BASE
+  ?? `http://127.0.0.1:${process.env.E2E_DEGRADED_BACKEND_PORT ?? '19131'}`
+export const NFEZUI_APP = process.env.E2E_APP ?? `http://127.0.0.1:${process.env.E2E_APP_PORT ?? '19201'}`
+export const NFEZUI_DEGRADED_APP = process.env.E2E_DEGRADED_APP
+  ?? `http://127.0.0.1:${process.env.E2E_DEGRADED_APP_PORT ?? '19202'}`
 export const NFEZUI_REDIS_DB = Number(process.env.E2E_REDIS_DB ?? '13')
 
 /** 桩 turn-text 的确定性文本（事实源 = scripts/ci/stub-upstream.mjs 的 TURN_TEXT）。 */
@@ -187,9 +189,9 @@ export async function panelText(page: Page): Promise<string> {
   return page.locator('.ai-chat').first().innerText()
 }
 
-/** 本域 Redis DB 上的最小命令面（会话 TTL / 过期模拟；只碰 13/14 两个独占库）。 */
+/** 本域 Redis DB 上的最小命令面（会话 TTL / 过期模拟；只碰本域独占库）。 */
 export async function redisEval(db: number, args: string[]): Promise<string> {
-  const { redisCommand } = await import('./harness-nfezui')
+  const { redisCommand } = await import('./harness')
   return redisCommand(db, args)
 }
 

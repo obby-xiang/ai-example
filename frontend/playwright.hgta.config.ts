@@ -3,17 +3,27 @@ import { defineConfig, devices } from '@playwright/test'
 /**
  * H/G/T/A 域真机 E2E 专用配置（并行批隔离用）。
  *
- * 与仓内 `playwright.config.ts` 的差别只有三处，且都为了**多路并行不互相踩**：
- * 1. 不自带 globalSetup/globalTeardown —— 起停由本域 spec 的 beforeAll/afterAll 走
- *    `support/harness-hgta.ts`（`RUN_DIR` 独立，pid 台账不与别路共用）；
- * 2. 产物目录改 `test-results/hgta-*`（不与别路的 artifacts/html 互覆盖）；
- * 3. 其余（单 worker、Chromium、超时、@stub/@real 选择器）与主配置同口径。
+ * 隔离形态（L-81 收口后）= **只差一组环境变量**，不再有 harness 副本：
+ *   1. 本文件在加载期把本域默认值补进 `process.env`（`??=` ⇒ 显式传的 env 永远优先），
+ *      统一 harness 与各 spec 读同一份 —— 所以「裸跑本配置」也不会落回 18330/18401 而与
+ *      config 的 baseURL 对不上（批② 首跑 27 条 ERR_CONNECTION_REFUSED 的根因）；
+ *   2. 产物目录改 `test-results/hgta-*`（不与别路的 artifacts/html 互覆盖）；
+ *   3. 其余（单 worker、Chromium、超时、@stub/@real 选择器）与主配置同口径。
  *
- * 若全局 globalSetup 已经起过服务（整仓跑），spec 内的探活守卫会跳过自起与收尾。
+ * 起停仍由 globalSetup/Teardown 负责（统一 `support/harness.ts`，`E2E_RUN_DIR` 独立、pid 台账不共用）；
+ * 若已有实例在跑，setup 的探活守卫会跳过自起与收尾。
  *
  * 运行：cd frontend && npx playwright test --config playwright.hgta.config.ts e2e/11a-hgta.spec.ts
  */
-const appBase = process.env.E2E_APP ?? `http://127.0.0.1:${process.env.E2E_APP_PORT ?? '18801'}`
+process.env.E2E_RUN_DIR ??= 'test-results/.e2e-run-hgta'
+process.env.E2E_BACKEND_PORT ??= '18730'
+process.env.E2E_DEGRADED_BACKEND_PORT ??= '18731'
+process.env.E2E_STUB_PORT ??= '18799'
+process.env.E2E_APP_PORT ??= '18801'
+process.env.E2E_DEGRADED_APP_PORT ??= '18802'
+process.env.E2E_REDIS_DB ??= '11'
+
+const appBase = process.env.E2E_APP ?? `http://127.0.0.1:${process.env.E2E_APP_PORT}`
 
 export default defineConfig({
   testDir: './e2e',
