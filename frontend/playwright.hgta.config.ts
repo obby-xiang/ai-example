@@ -27,6 +27,9 @@ const appBase = process.env.E2E_APP ?? `http://127.0.0.1:${process.env.E2E_APP_P
 
 export default defineConfig({
   testDir: './e2e',
+  // 与 nfezui / gf2 / 各域 config 同口径：只收本域 spec（避免裸跑本 config 时把别域 spec 一并收集，
+  // 与 L-107 同一类问题；显式传文件参数仍可用）。
+  testMatch: /11[ab]-hgta\.spec\.ts/,
   fullyParallel: false,
   forbidOnly: false,
   retries: 0,

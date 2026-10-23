@@ -5,6 +5,8 @@ name: 真机 E2E（手工触发 · Playwright + 真 key）
 #   - 只跑 Chromium，不做浏览器兼容矩阵；
 #   - 两套模式：
 #       ① stub：桩上游（scripts/ci/stub-upstream.mjs，零密钥、确定性）
+#          —— L-107 后按**域分步**跑：主栈切片 + VL/NFEZUI/GF2/MDXY/MDO/KQC×3/解锁缩阈值，
+#             每步用自己的 config（端口段 / Redis DB / 桩 / 后端参数全隔离），产物目录互不覆盖（L-108）；
 #       ② real：真模型（secret/vars 从 GitHub Environment `e2e-real` 注入）
 #   - 真模型用例默认采样 10（C 级概率口径，§0.3），由 E2E_REAL_SAMPLING 传入；
 #   - 失败时上传 trace / screenshot / 控制台日志；仓库内**零 key 字面量**。
@@ -29,7 +31,8 @@ jobs:
     name: UI 层 E2E（桩上游 · Chromium）
     if: ${{ inputs.suite == 'stub' || inputs.suite == 'both' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    # 9 步 = 主栈切片 + 8 个域专用档（每步各起一套 JVM/vite）；35 分钟不够全量
+    timeout-minutes: 60
     services:
       redis:
         image: redis:7.2.16
@@ -90,9 +93,22 @@ jobs:
         working-directory: frontend
         run: npx vitest run --reporter=dot
 
-      - name: 真机 E2E（桩模式 · 自起三件套）
+      # 主栈切片（00–10、11a/11b、17-unlock）：主 config 已用 testIgnore 排除域专用 spec
+      # （L-107），所以这里不会再撞 12 系 / 13 系 / 14 系 / 15 / 16-kqc 系 / 17b / 11c-gf2。
+      - name: 真机 E2E（桩模式 · 主栈切片）
         working-directory: frontend
         run: npx playwright test --grep @stub
+
+      # VL 域（12a/12b）：自带三件套（18930/18999/19001 + DB 12）且强制本域基址，
+      # 故用独立 config（E2E_EXTERNAL=1 ⇒ 不再起 183xx 那套）。
+      - name: 真机 E2E（桩模式 · VL 域 · 可视可操作/工具全量面）
+        working-directory: frontend
+        run: npx playwright test --config playwright.vl.config.ts
+
+      # NFEZUI 域（13 系）：独占端口段 191xx + Redis DB 13/14 + 本域桩（config 在 e2e/ 内）。
+      - name: 真机 E2E（桩模式 · NFEZUI 域 · 13 系）
+        working-directory: frontend
+        run: npx playwright test --config e2e/playwright.nfezui.config.ts
 
       # GF2 域（同会话两轮生成式表单）单开一棒：本域换桩（e2e/support/gf2-upstream.mjs，
       # 官方桩的两条收敛契约不允许"同会话第二轮再发卡"）⇒ 官方桩路由表是共享契约、不为其扩表。
@@ -101,6 +117,37 @@ jobs:
       - name: 真机 E2E（桩模式 · GF2 域 · 同会话两轮表单）
         working-directory: frontend
         run: npx playwright test --config e2e/playwright.gf2.config.ts
+
+      # MDXY 域（14 系）：本域桩 + KEK。KEK 只在本步内生成（base64 32B，测试用），不落仓库、不进日志。
+      - name: 真机 E2E（桩模式 · MDXY 域 · 14 系）
+        working-directory: frontend
+        run: |
+          AI_SECRET_KEK="$(head -c 32 /dev/urandom | base64 -w 0)"
+          export AI_SECRET_KEK
+          npx playwright test --config playwright.mdxy.config.ts
+
+      # MDO 域（15）：双 JVM 同 Redis DB，验证跨实例扇出/决策/读台账。
+      - name: 真机 E2E（桩模式 · MDO 域 · 多实例/降级/并发）
+        working-directory: frontend
+        run: npx playwright test --config playwright.mdo.config.ts
+
+      # KQC 域（16-kqc 系）三档：主档 / 降级档（K-06、C-02 专用后端参数）/ 压缩档（小分母）。
+      - name: 真机 E2E（桩模式 · KQC 域 · 主档）
+        working-directory: frontend
+        run: npx playwright test --config playwright.kqc.config.ts
+
+      - name: 真机 E2E（桩模式 · KQC 域 · 降级档 K-06/C-02）
+        working-directory: frontend
+        run: npx playwright test --config playwright.kqc-special.config.ts
+
+      - name: 真机 E2E（桩模式 · KQC 域 · 压缩档 C-08/C-10/C-13/C-14）
+        working-directory: frontend
+        run: npx playwright test --config playwright.kqc-compact.config.ts
+
+      # 解锁域缩阈值档（17b）：整棒缩小工具超时/总预算，与主栈切片里的 17-unlock 拆开。
+      - name: 真机 E2E（桩模式 · 解锁域 · 缩阈值档）
+        working-directory: frontend
+        run: npx playwright test --config playwright.unlock-budget.config.ts
 
       - name: 归档失败证据（trace / screenshot / harness 日志）
         if: failure()

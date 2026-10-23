@@ -18,7 +18,8 @@ import {
   vlCall,
   vlOpenApp,
   vlRuntime,
-  vlSnapshot,
+  vlSnapshotWithRegion,
+  vlStableFooter,
   vlWaitRegions
 } from './support/helpers-vl'
 
@@ -44,19 +45,37 @@ async function toolsFor(request: APIRequestContext, query: string): Promise<{ to
 }
 
 
-/** 表格引擎挂载是异步的（SpreadJS 初始化 ~1s）：轮询到工具真能取到适配器再断言。 */
-async function callUntilReady(
+/** 前端工具回执（`executeFrontendTool` 的返回面）。 */
+interface ToolOutcome {
+  outcome?: string
+  availability?: string
+  result?: string
+  code?: string
+}
+
+/**
+ * 轮询一次前端工具调用，直到回执满足**就绪判据**（L-109）。
+ *
+ * 这页面上有三层"晚于断言"的注册：SpreadJS 引擎挂载（~1s）、页面的 `registerPageHandler`
+ * 处理器、以及区域注册表（页面首帧后还可能被 Vite 重载整体重建）。于是同一段代码
+ * 既可能打到"适配器还没就绪"（`0 列` / `当前页面没有可操作的表格`），也可能打到
+ * "页面处理器还没注册"（回执变成后端的 ui_event 错误文案）。旧写法用 `outcome === 'ok'`
+ * 当就绪判据 —— 而 `已匹配 0/4 列` 恰恰是 outcome=ok 的错误数据面，于是假红。
+ * 这里让调用方给出**正向判据**（真拿到期望内容才算就绪），轮询有界，超时返回末次回执由断言报错。
+ */
+async function callUntil(
   page: import('@playwright/test').Page,
   name: string,
   args: Record<string, unknown>,
+  ready: (view: ToolOutcome) => boolean,
   timeoutMs = 30_000
-): Promise<{ outcome?: string; availability?: string; result?: string; code?: string }> {
+): Promise<ToolOutcome> {
   const deadline = Date.now() + timeoutMs
-  let last: { outcome?: string; availability?: string; result?: string; code?: string } = {}
+  let last: ToolOutcome = {}
   while (Date.now() < deadline) {
     last = await vlCall(page, name, args, { snapshot: false })
-    if (last.outcome === 'ok') return last
-    await page.waitForTimeout(1_200)
+    if (ready(last)) return last
+    await page.waitForTimeout(600)
   }
   return last
 }
@@ -105,9 +124,13 @@ test.describe('@stub L 工具全量面（12b）', () => {
     const taskId = await createUploadedImportTask(request, 'CURRENCY')
     await vlOpenApp(page, `/import?taskId=${taskId}`)
     await vlWaitRegions(page, 'import.grid')
-    const footerBefore = await page.locator('footer').innerText()
+    // 页脚在挂载后还会再写几笔（任务详情回填 / 上传件解析推 dataVersion）：基线只取"已静止"的终态
+    const footerBefore = await vlStableFooter(page, 'task:IMPORT/')
 
-    const outcome = await callUntilReady(page, 'inspect_columns', { defCode: 'CURRENCY' })
+    // 引擎挂载 + 上传件解析都是异步的：工具"能跑"不等于"表里已有列"（实测读到 0 列）。
+    // 就绪判据 = 真读到 4 列表头，而不是 outcome==='ok'。
+    const outcome = await callUntil(page, 'inspect_columns', { defCode: 'CURRENCY' },
+      (view) => view.outcome === 'ok' && /已匹配\s*4\/4\s*列/.test(String(view.result ?? '')))
     expect(outcome.outcome).toBe('ok')
     const text = String(outcome.result ?? '')
     // 真表头（上传件 = CURRENCY 导出模板）与字段定义对账：四列全命中
@@ -119,7 +142,7 @@ test.describe('@stub L 工具全量面（12b）', () => {
     expect(String(ghost.outcome)).not.toBe('ok')
     expect(String(ghost.result ?? '')).toContain('NOT_A_DEF')
     // 纯读：数据版本未变、无写动词计数（诊断只建议不改文件）
-    expect(await page.locator('footer').innerText()).toBe(footerBefore)
+    expect(await vlStableFooter(page, 'task:IMPORT/')).toBe(footerBefore)
     expect((await vlRuntime(page)).writeCount).toBe(0)
   })
 
@@ -128,15 +151,18 @@ test.describe('@stub L 工具全量面（12b）', () => {
     await vlOpenApp(page, `/import?taskId=${taskId}`)
     await vlWaitRegions(page, 'import.grid')
 
-    const outcome = await callUntilReady(page, 'review_cells', { defCode: 'CURRENCY' })
+    const outcome = await callUntil(page, 'review_cells', { defCode: 'CURRENCY' },
+      (view) => view.outcome === 'ok' && /共\s*\d+\s*处/.test(String(view.result ?? '')))
     expect(outcome.outcome).toBe('ok')
     const text = String(outcome.result ?? '')
     // 恒回"共 N 处"（含 0 处），明细不超过 20 条上限
     expect(text).toMatch(/共\s*\d+\s*处/)
     const details = text.split(/\r?\n/).filter((line) => /^[A-Z]+\d+$|单元格/.test(line.trim()))
     expect(details.length).toBeLessThanOrEqual(20)
-    // limit 上界：1..20 之外一律拒执（不静默放大明细）
-    const capped = await callUntilReady(page, 'review_cells', { defCode: 'CURRENCY', limit: 999 })
+    // limit 上界：1..20 之外一律拒执（不静默放大明细）。
+    // 就绪判据 = 真拿到参数校验文案（"当前页面没有可操作的表格"是适配器未就绪，不是本断言的面）。
+    const capped = await callUntil(page, 'review_cells', { defCode: 'CURRENCY', limit: 999 },
+      (view) => String(view.result ?? '').includes('limit 只能是 1 到 20 的整数'))
     expect(String(capped.outcome)).not.toBe('ok')
     expect(String(capped.result ?? '')).toContain('limit 只能是 1 到 20 的整数')
   })
@@ -163,14 +189,14 @@ test.describe('@stub L 工具全量面（12b）', () => {
   test('E2E-L12 set_condition：筛选控件值真实变化且落库', async ({ page, request }) => {
     const taskId = await createExportTaskAtQueryCond(request)
     await vlOpenApp(page, `/export?taskId=${taskId}`)
-    await vlWaitRegions(page, 'export.cond')
-    const before = await vlSnapshot(page)
+    // L-109：区域注册可能晚于断言（首帧后页面还会被重载/重挂）⇒ 轮询到区域真出现在快照里
+    const before = await vlSnapshotWithRegion(page, 'export.cond')
     expect(before.regionIds).toContain('export.cond')
 
-    const outcome = await vlCall(page, 'set_condition', {
+    const outcome = await callUntil(page, 'set_condition', {
       defCode: 'CURRENCY',
       conditions: { fields: [{ fieldCode: 'code', operator: 'EQ', value: 'USD' }] }
-    })
+    }, (view) => view.outcome === 'ok' && String(view.result ?? '').includes('CURRENCY'))
     expect(outcome.outcome).toBe('ok')
     expect(String(outcome.result)).toContain('CURRENCY')
 
@@ -180,23 +206,29 @@ test.describe('@stub L 工具全量面（12b）', () => {
     expect(item?.conditionJson ?? '').toContain('USD')
 
     // 非法条件（缺 defCode）结构化失败
-    const bad = await vlCall(page, 'set_condition', { conditions: { fields: [] } })
+    const bad = await callUntil(page, 'set_condition', { conditions: { fields: [] } },
+      (view) => String(view.result ?? '').includes('缺少 defCode'))
     expect(String(bad.result ?? '')).toContain('缺少 defCode')
   })
 
   test('E2E-L13 confirm_step：步骤真实推进、非法步骤被拒（不越级）', async ({ page, request }) => {
     const taskId = await createExportTaskAtQueryCond(request)
     await vlOpenApp(page, `/export?taskId=${taskId}`)
-    await vlWaitRegions(page, 'export.cond')
+    // L-109：区域注册晚于断言 ⇒ 轮询到区域真出现在快照里（页面处理器同批注册）
+    await vlSnapshotWithRegion(page, 'export.cond')
 
-    // 越级/非法目标：明确拒绝并给出可选值
-    const illegal = await vlCall(page, 'confirm_step', { step: 'NOPE' })
+    // 越级/非法目标：明确拒绝并给出可选值。
+    // 就绪判据 = 真拿到**页面侧**的拒绝文案；打到后端 ui_event（"ui_event 处理失败：…步骤序列内"）
+    // 说明页面处理器还没注册好，属就绪问题而非产品回归。
+    const illegal = await callUntil(page, 'confirm_step', { step: 'NOPE' },
+      (view) => String(view.result ?? '').includes('不在导出向导范围内'))
     expect(String(illegal.result ?? '')).toContain('不在导出向导范围内')
     // 界面仍停在原步骤
     await expect(page.locator('footer')).toContainText('task:EXPORT/QUERY_COND', { timeout: 15_000 })
 
     // 合法推进：QUERY_COND → EXPORT
-    const advanced = await vlCall(page, 'confirm_step', { step: 'EXPORT' })
+    const advanced = await callUntil(page, 'confirm_step', { step: 'EXPORT' },
+      (view) => String(view.result ?? '').includes('导出执行'))
     expect(String(advanced.result ?? '')).toContain('导出执行')
     await expect(page.locator('footer')).toContainText('task:EXPORT/EXPORT', { timeout: 30_000 })
     // 落库：任务当前步骤同步
@@ -207,9 +239,11 @@ test.describe('@stub L 工具全量面（12b）', () => {
   test('E2E-L14 open_export_file_editor：真打开编辑器并载入该文件；无产物时结构化失败', async ({ page, request }) => {
     const taskId = await createExportedTask(request)
     await vlOpenApp(page, `/export?taskId=${taskId}`)
-    await vlWaitRegions(page, 'export.selectDefs')
+    await vlSnapshotWithRegion(page, 'export.selectDefs')
 
-    const opened = await vlCall(page, 'open_export_file_editor', { taskId, defCode: 'CURRENCY' })
+    // 就绪判据 = 真打开并载入该文件（文件列表/编辑器容器都晚于页面挂载）
+    const opened = await callUntil(page, 'open_export_file_editor', { taskId, defCode: 'CURRENCY' },
+      (view) => view.outcome === 'ok' && String(view.result ?? '').includes('CURRENCY'))
     expect(opened.outcome).toBe('ok')
     expect(String(opened.result)).toContain('CURRENCY')
     await expect(page.locator('footer')).toContainText('task:EXPORT/EXPORT', { timeout: 30_000 })
@@ -217,7 +251,8 @@ test.describe('@stub L 工具全量面（12b）', () => {
     await expect(page.locator('[data-testid="spread-grid"], .spread-host, canvas').first()).toBeVisible({ timeout: 30_000 })
 
     // 无产物编码：结构化失败，不空白页
-    const missing = await vlCall(page, 'open_export_file_editor', { taskId, defCode: 'DOC_TYPE' })
+    const missing = await callUntil(page, 'open_export_file_editor', { taskId, defCode: 'DOC_TYPE' },
+      (view) => view.outcome !== 'ok' && String(view.result ?? '').includes('DOC_TYPE'))
     expect(String(missing.outcome)).not.toBe('ok')
     expect(String(missing.result)).toContain('DOC_TYPE')
     await expect(page.locator('[data-testid="spread-grid"], .spread-host, canvas').first()).toBeVisible({ timeout: 15_000 })
@@ -226,15 +261,17 @@ test.describe('@stub L 工具全量面（12b）', () => {
   test('E2E-L15 download_export_files：真下载事件 + 文件名与产物一致', async ({ page, request }) => {
     const taskId = await createExportedTask(request)
     await vlOpenApp(page, `/export?taskId=${taskId}`)
-    await vlWaitRegions(page, 'export.selectDefs')
+    await vlSnapshotWithRegion(page, 'export.selectDefs')
 
     // 先把该文件的在线编辑器打开（引擎就绪后再下载，落盘内容是"在线编辑后的当前表格"）
-    const opened = await vlCall(page, 'open_export_file_editor', { taskId, defCode: 'CURRENCY' })
+    const opened = await callUntil(page, 'open_export_file_editor', { taskId, defCode: 'CURRENCY' },
+      (view) => view.outcome === 'ok' && String(view.result ?? '').includes('CURRENCY'))
     expect(opened.outcome).toBe('ok')
     await expect(page.locator('[data-testid="spread-grid"], .spread-host, canvas').first()).toBeVisible({ timeout: 30_000 })
 
     const downloadPromise = page.waitForEvent('download', { timeout: 90_000 })
-    const outcome = await vlCall(page, 'download_export_files', { taskId, defCodes: ['CURRENCY'] })
+    const outcome = await callUntil(page, 'download_export_files', { taskId, defCodes: ['CURRENCY'] },
+      (view) => String(view.result ?? '').includes('CURRENCY'))
     const download = await downloadPromise
     const name = download.suggestedFilename()
     expect(name).toMatch(/CURRENCY/)

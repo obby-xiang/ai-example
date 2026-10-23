@@ -174,6 +174,9 @@ export async function ensureVlStack(): Promise<void> {
     await assertPortFree(port, label)
   }
 
+  // L-97：桩的 `req-NNN` 序号是进程内计数，复用同一运行目录时必须先清上一棒的落档目录，
+  // 否则 `latestStubRequest` / `untilStubRequestAfter` 会读到旧序号（跨棒永等）。
+  rmSync(VL_STUB_DIR, { recursive: true, force: true })
   mkdirSync(VL_STUB_DIR, { recursive: true })
   rmSync(join(VL_RUN_DIR, 'data'), { recursive: true, force: true })
   await flushRedisDb(VL_REDIS_DB)
@@ -535,6 +538,82 @@ export async function vlOpenApp(page: import('@playwright/test').Page, path = '/
   await vlPrepare(page)
   await page.goto(path, { waitUntil: 'domcontentloaded' })
   await page.locator('[data-testid="composer-input"]').waitFor({ state: 'visible', timeout: 30_000 })
+}
+
+/**
+ * 轮询到快照满足条件（L-109）。
+ *
+ * `vlWaitRegions` 只证明区域在**那一刻**的模块实例注册表里；首帧之后页面仍可能被 Vite
+ * 重载（依赖预打包 / HMR 给模块加 `?t=` 版本号）或路由先挂载再重挂，模块级注册表随之清空
+ * 并重新注册 —— 紧跟着的一次 `vlSnapshot` 就可能读到空 `regionIds`（实测窗口毫秒级，
+ * 整栈连跑"4 跑 4 态"即此形态）。凡"快照里应当出现某区域/若干区域"的断言一律走轮询，
+ * 不做一次采样。
+ */
+export async function vlSnapshotUntil(
+  page: import('@playwright/test').Page,
+  predicate: (view: VlSnapshotView) => boolean,
+  label: string,
+  timeoutMs = 30_000
+): Promise<VlSnapshotView> {
+  const deadline = Date.now() + timeoutMs
+  let lastView: VlSnapshotView | null = null
+  let lastError: unknown = null
+  while (Date.now() < deadline) {
+    try {
+      const view = await vlSnapshot(page)
+      lastView = view
+      if (predicate(view)) return view
+    } catch (error) {
+      // 轮询窗口内页面可能正被重载（导航 / Vite 热重载）：evaluate 抛错不是断言结论，继续等
+      lastError = error
+    }
+    await sleep(150)
+  }
+  const detail = lastView
+    ? `末次快照区域：${lastView.regionIds.join(' / ') || '无'}`
+    : `末次错误：${lastError instanceof Error ? lastError.message : String(lastError)}`
+  throw new Error(`等待${label}超时（${timeoutMs}ms；${detail}）`)
+}
+
+/** 轮询到指定区域出现在快照里，返回那一次快照（epoch / refs 都取同一次采样）。 */
+export async function vlSnapshotWithRegion(
+  page: import('@playwright/test').Page,
+  regionId: string,
+  timeoutMs = 30_000
+): Promise<VlSnapshotView> {
+  return vlSnapshotUntil(page, (view) => view.regionIds.includes(regionId), `「${regionId}」出现在界面快照里`, timeoutMs)
+}
+
+/**
+ * 读"已静止"的页脚工作区上下文（L-109 的 footer 上下文 race）。
+ *
+ * 页脚 = `契约版本 ｜ page:/task: 键 ｜ dataVersion`，页面挂载后还会再写几笔
+ * （任务详情回填把 `page:import` 换成 `task:IMPORT/UPLOAD`，上传件解析完成再推 dataVersion）。
+ * 于是"紧跟区域注册读一次"拿到的常是中间态：只读工具本身零副作用，比较却红。
+ * 本函数等到页脚含 `mustContain` 且连续 `quietMs` 不再变化才返回 —— 基线只取终态。
+ */
+export async function vlStableFooter(
+  page: import('@playwright/test').Page,
+  mustContain?: string,
+  quietMs = 500,
+  timeoutMs = 30_000
+): Promise<string> {
+  const footer = page.locator('footer')
+  const deadline = Date.now() + timeoutMs
+  let last = ''
+  let since = Date.now()
+  while (Date.now() < deadline) {
+    const text = await footer.innerText().catch(() => '')
+    const acceptable = text !== '' && (!mustContain || text.includes(mustContain))
+    if (acceptable && text === last) {
+      if (Date.now() - since >= quietMs) return text
+    } else {
+      last = text
+      since = Date.now()
+    }
+    await sleep(120)
+  }
+  return last
 }
 
 /** 等页面把 AI 区域注册上来（区域存在 = 页面挂载并且控件真在 DOM 里）。 */

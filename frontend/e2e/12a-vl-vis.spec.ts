@@ -27,6 +27,9 @@ import {
   vlOpenApp,
   vlRuntime,
   vlSnapshot,
+  vlSnapshotUntil,
+  vlSnapshotWithRegion,
+  vlStableFooter,
   vlWaitRegions
 } from './support/helpers-vl'
 
@@ -82,20 +85,29 @@ async function createPublishedImportTask(request: APIRequestContext): Promise<nu
   return id
 }
 
-/** 读元素的可滚动祖先的 scrollTop（`ui_scroll` 只改视口的判据）。 */
-async function scrollTopOf(page: Page, ref: string): Promise<number> {
-  return page.evaluate((value) => {
-    const el = document.querySelector(`[data-ai-ref="${value}"]`)
-    let node = el?.parentElement ?? null
-    while (node && node !== document.body) {
+/**
+ * 读**表格自身**滚动容器的 scrollTop（L-109 的 V05 判据）。
+ *
+ * 为什么不再量"目标元素的祖先"：V05 的滚动目标是配置项搜索框（本页唯一带 `scroll` 动词的
+ * 控件），它坐在表格**上方**、不在表格的滚动容器里。于是同一段手势会给出两个答案 ——
+ * 行还没到齐时表格不可滚，滚轮落到页面外框（旧断言量到 >0）；行到齐后滚轮被表格吃掉
+ * （旧断言量到 0，即挂账里"`pushed>0` 收到 0"）。"表格被滚了多少"只能问表格自己：
+ * el-table 的真滚动层是 body-wrapper 内的滚动元素（外层 wrapper 本身是 `overflow:hidden`）。
+ */
+async function tableScrollTop(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const wrapper = document.querySelector('.el-table__body-wrapper')
+    if (!wrapper) return 0
+    let top = 0
+    for (const node of Array.from(wrapper.querySelectorAll('*'))) {
+      if (!(node instanceof HTMLElement)) continue
       const style = getComputedStyle(node)
-      if (/(auto|scroll|overlay)/.test(style.overflowY) && node.scrollHeight > node.clientHeight) {
-        return node.scrollTop
-      }
-      node = node.parentElement
+      if (!/(auto|scroll|overlay)/.test(style.overflowY)) continue
+      if (node.scrollHeight <= node.clientHeight) continue
+      top = Math.max(top, node.scrollTop)
     }
-    return 0
-  }, ref)
+    return top
+  })
 }
 
 /** 元素是否在视口内（"落点可见"判据，用视口几何而非坐标断言）。 */
@@ -175,29 +187,32 @@ test.describe('@stub V 可视可操作（12a）', () => {
     expect((await vlRuntime(page)).undo).toBeNull()
   })
 
-  test('E2E-V05 ui_scroll 只改视口：位置变化且夹在 ±2000、数据未改、落点可见', async ({ page, request }) => {
+  test('E2E-V05 ui_scroll 只改视口：表格视口真位移、数据未改、落点可见', async ({ page, request }) => {
     const taskId = await createImportTaskAtUpload(request)
     await openImportUpload(page, taskId)
 
     const targetRef = 'import.selectDefs.search'
-    const dataVersionBefore = await page.locator('footer').innerText()
+    // 行到齐再滚：没有行时表格自身不可滚，滚轮会落到页面外框（旧断言 `pushed>0` 的漂移根因，L-109）
+    await expect(page.locator('[data-ai-ref="import.selectDefs.DOC_TYPE"]')).toBeVisible({ timeout: 30_000 })
+    const dataVersionBefore = await vlStableFooter(page, 'task:IMPORT/')
 
-    // 先用真人手势把表格滚下去（真鼠标悬停 + 真滚轮），再让原语把目标滚回视口
+    // 真人手势：真鼠标悬停在表格上 + 真滚轮 ⇒ **表格自身**滚动容器的 scrollTop 真的变大
     await page.locator('.el-table__body-wrapper').first().hover()
     await page.mouse.wheel(0, 400)
-    const pushed = await scrollTopOf(page, targetRef)
-    expect(pushed).toBeGreaterThan(0)
+    await expect.poll(() => tableScrollTop(page), { timeout: 10_000 }).toBeGreaterThan(0)
+    const pushed = await tableScrollTop(page)
 
+    // 原语把目标（搜索框）滚回视口：只改视口，且不碰表格自己的数据视口
+    // （表格不是搜索框的祖先滚动容器 ⇒ 它的 scrollTop 必须原地不动；±2000 的入参上界在末尾单测）
     const scrolled = await vlCall(page, 'ui_scroll', { ref: targetRef, delta: 0, block: 'center' })
     expect(scrolled.outcome).toBe('ok')
     expect(scrolled.result).toContain('只改了视口')
-    const after = await scrollTopOf(page, targetRef)
-    expect(after).toBeLessThanOrEqual(pushed)
-    expect(pushed - after).toBeLessThanOrEqual(2000)
+    const after = await tableScrollTop(page)
+    expect(after).toBe(pushed)
     expect(await inViewport(page, targetRef)).toBe(true)
 
     // 数据未改：数据版本不变、无写回执、无撤销点
-    expect(await page.locator('footer').innerText()).toBe(dataVersionBefore)
+    expect(await vlStableFooter(page, 'task:IMPORT/')).toBe(dataVersionBefore)
     const runtime = await vlRuntime(page)
     expect(runtime.undo).toBeNull()
     expect(runtime.writeCount).toBe(0)
@@ -441,7 +456,8 @@ test.describe('@stub V 可视可操作（12a）', () => {
   test('E2E-V15 区域注册/注销 ↔ epoch：换页后区域整片关闭、旧 ref 在新文档里失效', async ({ page, request }) => {
     const taskId = await createImportTaskAtUpload(request)
     await openImportUpload(page, taskId)
-    const before = await vlSnapshot(page)
+    // L-109：区域注册可能晚于断言 ⇒ 轮询到它真出现在快照里再取 epoch
+    const before = await vlSnapshotWithRegion(page, 'import.selectDefs')
     expect(before.regionIds).toContain('import.selectDefs')
     const oldRef = 'import.selectDefs.search'
     const oldEpoch = before.epoch
@@ -462,7 +478,9 @@ test.describe('@stub V 可视可操作（12a）', () => {
     await expect(page.locator('footer')).toContainText('page:tasks', { timeout: 30_000 })
     await expect(page).not.toHaveURL(/import/, { timeout: 30_000 })
 
-    const afterPage = await vlSnapshot(page)
+    // 区域注销同理是"晚于断言"的：轮询到区域表真的清空，再断言旧 ref 的结局
+    const afterPage = await vlSnapshotUntil(page, (view) => view.regionIds.length === 0,
+      '导入器区域整片注销（regionIds 空）')
     expect(afterPage.epoch).not.toBe(oldEpoch)
     expect(afterPage.regionIds).toHaveLength(0)
     expect(await resolveOld()).toBeNull()
@@ -473,8 +491,7 @@ test.describe('@stub V 可视可操作（12a）', () => {
 
     // 重新进入导入器：新文档/新 epoch 下旧 ref 仍然失效（快照闸），新快照的 ref 可用
     await vlOpenApp(page, IMPORT_UPLOAD(taskId))
-    await vlWaitRegions(page, 'import.selectDefs')
-    const back = await vlSnapshot(page)
+    const back = await vlSnapshotWithRegion(page, 'import.selectDefs')
     expect(back.epoch).not.toBe(afterPage.epoch)
     expect(await resolveOld()).toBe('import.selectDefs')
     const staleEpoch = await vlCall(page, 'ui_click', { ref: oldRef, epoch: oldEpoch }, { snapshot: false })
@@ -667,7 +684,9 @@ test.describe('@stub V 可视可操作（12a）', () => {
   test('E2E-V22 跨区域 ref 唯一性与解析：全局唯一、前缀即区域、标签 ≤24 字', async ({ page, request }) => {
     const taskId = await createImportTaskAtUpload(request)
     await openImportUpload(page, taskId)
-    const view = await vlSnapshot(page)
+    // L-109：区域注册晚于断言 ⇒ 轮询到三个区域同时出现在一份快照里
+    const view = await vlSnapshotUntil(page, (snapshot) => snapshot.regionIds.length >= 3,
+      '导入上传页至少三个区域同时注册')
 
     // 同一次快照里多个区域同时注册 ⇒ ref 全局唯一（跨区不重名）
     expect(view.regionIds.length).toBeGreaterThanOrEqual(3)

@@ -447,6 +447,10 @@ export async function startServices(options: StartOptions = {}): Promise<void> {
 
   if (needStub) {
     const stubDir = join(RUN_DIR, 'stub')
+    // L-97：桩的请求落档序号（`req-NNN`）是**进程内**计数，每棒从 0 重来；复用同一 RUN_DIR 时
+    // 残留的上一棒文件会让 `maxStubIndex()` 读到旧的大序号 ⇒ `waitStubRequestsAfter` 永远等不到。
+    // 故起桩前整目录清空（与 H2 / Redis 同一清理时点；只在端口检查通过后动手，不碰别域在跑的目录）。
+    rmSync(stubDir, { recursive: true, force: true })
     mkdirSync(stubDir, { recursive: true })
     const stubArgs = [STUB_SCRIPT, '--port', String(PORTS.stub), '--dir', stubDir]
     if (PORTS.stubUpstream > 0 && resolve(STUB_SCRIPT) !== resolve(REPO_ROOT, 'scripts', 'ci', 'stub-upstream.mjs')) {

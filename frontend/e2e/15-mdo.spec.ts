@@ -32,6 +32,7 @@ import {
   seqs,
   tag,
   userBubbles,
+  waitDecisionSettled,
   waitFor,
   waitFrame,
   waitPending,
@@ -197,8 +198,10 @@ test.describe('@stub M 多实例与跨实例重连', () => {
     const decided = await confirmOn(API, runId, toolCallId, true)
     expect(decided.status).toBe(200)
 
-    const settled = await waitPending(runId, toolCallId, (entry) => entry.status !== 'PENDING', 30_000,
-      '条目离开 PENDING')
+    // L-110：谓词必须是**终态白名单**。`status !== 'PENDING'` 会捞到 `APPROVED`
+    // （已批准、待执行）这个中间态 ⇒ 整文件首跑 `Expected BLOCKED, Received APPROVED`
+    // （修前实测同一句：21 passed / 1 failed，红的就是这一行）。
+    const settled = await waitDecisionSettled(runId, toolCallId, 30_000, '条目落到终态（BLOCKED/REJECTED/EXECUTED/FAILED）')
     expect(settled.status).toBe('BLOCKED')
     expect(settled.code).toBe('TARGET_INVALID')
     expect(settled.executed).toBe(false)

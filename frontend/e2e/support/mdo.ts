@@ -272,6 +272,32 @@ export async function waitPending(
   return last as Record<string, unknown>
 }
 
+/**
+ * 决策/回灌条目的**终态白名单**（L-110）。
+ *
+ * `waitPending` 的谓词由调用方给：`status !== 'PENDING'` 这类"离开挂起"的写法会把
+ * **中间态**也算命中 —— 批准后条目先落 `APPROVED`（已批准、待执行），执行完才转
+ * `EXECUTED` / `BLOCKED`。整文件首跑时 M06 因此捞到 `APPROVED`，断言
+ * `Expected BLOCKED, Received APPROVED` 假红（隔离与复跑又绿，只是时序不同）。
+ * 凡"要判结局"的等待一律给白名单，不写"不等于某态"。
+ */
+export const DECISION_SETTLED = ['BLOCKED', 'REJECTED', 'EXECUTED', 'FAILED'] as const
+
+export function settledPredicate(allowed: readonly string[] = DECISION_SETTLED) {
+  return (entry: Record<string, unknown>): boolean => allowed.includes(String(entry.status ?? ''))
+}
+
+/** 等条目落到终态白名单之一（不捞 `APPROVED` 这类中间态）。 */
+export async function waitDecisionSettled(
+  runId: string,
+  toolCallId: string,
+  timeoutMs: number,
+  label: string,
+  base = API
+): Promise<Record<string, unknown>> {
+  return waitPending(runId, toolCallId, settledPredicate(), timeoutMs, label, base)
+}
+
 /** 等轮次收敛到终态（任一实例上读）。 */
 export async function waitTerminal(runId: string, timeoutMs = 90_000, base = API): Promise<RunDetail> {
   const terminal = ['DONE', 'FAILED', 'CANCELLED', 'REJECTED']
