@@ -47,6 +47,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <tr><td>{@link #textSegmentContract}</td><td>{@code message_start(kind=text)} → {@code delta}×N →
  * {@code message_end}；delta 同 {@code messageId}；{@code chars} = delta 文本长度之和</td>
  * <td>把 {@code message_end} 的 chars 改成与 delta 不同的计数源（见 S5c-4）</td></tr>
+ * <tr><td>{@link #reasoningSegmentContract}</td><td><b>L-91</b>：思考段
+ * {@code message_start(kind=reasoning)} → {@code delta{kind:reasoning}}×N →
+ * {@code message_end(kind=reasoning)} 同构成立、chars 对账、与正文段不交叠</td>
+ * <td>把 {@code SseChatEmitter#reasoningEnd} 从 {@code textStart/textEnd} 摘掉（段永不封口）</td></tr>
  * <tr><td>{@link #orderingContract}</td><td>确认门/前端工具的因果顺序；{@code retry} 只在首次产出之前</td>
  * <td>把 {@code confirm_decision} 提前到 {@code confirm_request} 之前，或去掉重试的"未产出内容"条件</td></tr>
  * <tr><td>{@link #terminalConsistencyContract}</td><td>终帧类型与运行终态同向（{@code done{cancelled:true}}
@@ -81,6 +85,7 @@ public final class FrameContract {
 		all.addAll(terminalContract(frames));
 		all.addAll(toolPairingContract(frames));
 		all.addAll(textSegmentContract(frames));
+		all.addAll(reasoningSegmentContract(frames));
 		all.addAll(orderingContract(frames));
 		all.addAll(terminalConsistencyContract(frames));
 		return all;
@@ -283,7 +288,7 @@ public final class FrameContract {
 			else if ("message_end".equals(type) && "text".equals(frame.get("kind"))) {
 				ends.add(i);
 			}
-			else if ("delta".equals(type)) {
+			else if ("delta".equals(type) && isTextDelta(frame)) {
 				deltas.add(i);
 				messageIds.add(frame.get("messageId"));
 				Object text = frame.get("text");
@@ -318,6 +323,98 @@ public final class FrameContract {
 			if (declared != deltaChars) {
 				out.add("message_end.chars=" + declared + "，而 delta 文本长度之和=" + deltaChars
 						+ "（前端拼接所得与落定正文口径不一致）");
+			}
+		}
+		return out;
+	}
+
+	// ── 规则 4b（L-91）：思考段三段式 ────────────────────────────────────────
+
+	/** 正文 delta：{@code kind} 缺省（本批之前的旧帧）或显式 {@code "text"}。 */
+	public static boolean isTextDelta(Map<String, Object> frame) {
+		return "delta".equals(type(frame)) && !"reasoning".equals(frame.get("kind"));
+	}
+
+	/** 思考 delta：{@code delta{kind:'reasoning'}}（L-91 的 additive 键）。 */
+	public static boolean isReasoningDelta(Map<String, Object> frame) {
+		return "delta".equals(type(frame)) && "reasoning".equals(frame.get("kind"));
+	}
+
+	/**
+	 * <b>L-91 思考段</b>：{@code message_start(kind=reasoning)} → {@code delta{kind:reasoning}}×N →
+	 * {@code message_end(kind=reasoning)}，与正文段同构，且两段<b>不交叠</b>（段互斥）。
+	 *
+	 * <p>
+	 * 为什么这条必须有：思考文本在<b>另一条渲染通道</b>（前端 reasoning 段 / 折叠卡），它的
+	 * {@code chars} 与 delta 拼接不一致时，"前端看到的思考"与"帧契约声明的思考"分家 ——
+	 * 与正文段的 S5c-4 是同一类缺陷，只是换了一个通道。
+	 *
+	 * <p>
+	 * kill：把 {@code SseChatEmitter#reasoningEnd} 从 {@code textStart/textEnd} 里摘掉 ⇒
+	 * 思考段永不闭合，终帧后的 {@code message_end} 缺失 ⇒ 本条报"轮次已收终帧，但思考段没有
+	 * message_end"。
+	 */
+	public static List<String> reasoningSegmentContract(List<Map<String, Object>> frames) {
+		List<String> out = new ArrayList<>();
+		List<Integer> starts = new ArrayList<>();
+		List<Integer> ends = new ArrayList<>();
+		List<Integer> deltas = new ArrayList<>();
+		Set<Object> messageIds = new LinkedHashSet<>();
+		long deltaChars = 0L;
+		for (int i = 0; i < frames.size(); i++) {
+			Map<String, Object> frame = frames.get(i);
+			String type = type(frame);
+			if ("message_start".equals(type) && "reasoning".equals(frame.get("kind"))) {
+				starts.add(i);
+			}
+			else if ("message_end".equals(type) && "reasoning".equals(frame.get("kind"))) {
+				ends.add(i);
+			}
+			else if (isReasoningDelta(frame)) {
+				deltas.add(i);
+				messageIds.add(frame.get("messageId"));
+				Object text = frame.get("text");
+				deltaChars += text == null ? 0L : String.valueOf(text).length();
+			}
+		}
+		if (starts.size() > 1) {
+			out.add("思考段 message_start 出现 " + starts.size() + " 次（一轮只有一段思考）");
+		}
+		if (ends.size() > 1) {
+			out.add("思考段 message_end 出现 " + ends.size() + " 次");
+		}
+		if (!deltas.isEmpty() && starts.isEmpty()) {
+			out.add("有 " + deltas.size() + " 个思考 delta 但没有 message_start(kind=reasoning)");
+		}
+		if (!deltas.isEmpty() && !starts.isEmpty() && starts.get(0) > deltas.get(0)) {
+			out.add("思考段 message_start（第 " + starts.get(0) + " 帧）晚于首个思考 delta（第 "
+					+ deltas.get(0) + " 帧）");
+		}
+		if (!deltas.isEmpty() && !ends.isEmpty() && ends.get(0) < deltas.get(deltas.size() - 1)) {
+			out.add("思考段 message_end（第 " + ends.get(0) + " 帧）早于最后一个思考 delta（第 "
+					+ deltas.get(deltas.size() - 1) + " 帧）");
+		}
+		if (messageIds.size() > 1) {
+			out.add("同一思考段的 delta 有多个 messageId：" + messageIds);
+		}
+		if (hasTerminal(frames) && !deltas.isEmpty() && ends.isEmpty()) {
+			out.add("轮次已收终帧，但思考段没有 message_end（chars 无从对账 / 段永不封口）");
+		}
+		if (!ends.isEmpty() && !deltas.isEmpty()) {
+			Object chars = frames.get(ends.get(0)).get("chars");
+			long declared = chars instanceof Number number ? number.longValue() : -1L;
+			if (declared != deltaChars) {
+				out.add("思考段 message_end.chars=" + declared + "，而思考 delta 文本长度之和=" + deltaChars);
+			}
+		}
+		// 段互斥：正文段与思考段不得交叠（思考段必须在正文段开始前闭合）
+		if (!starts.isEmpty() && !ends.isEmpty()) {
+			for (int index : starts) {
+				if (index > ends.get(0)) {
+					out.add("思考段 message_start（第 " + index + " 帧）晚于本段 message_end（第 " + ends.get(0)
+							+ " 帧）—— 思考段与正文段交叠/段边界乱序");
+					break;
+				}
 			}
 		}
 		return out;

@@ -196,6 +196,72 @@ class FrameContractFalsificationTest {
 				.anySatisfy(violation -> assertThat(violation).contains("message_start 出现 2 次"));
 	}
 
+	// ── 规则 4b（L-91）：思考段 ──────────────────────────────────────────────
+
+	/** 正控：带思考段的一轮（思考 → 正文 → 终帧）零违规 —— 新规则不得对合法流量报警。 */
+	@Test
+	void acceptsAConformantReasoningTurn() {
+		List<Map<String, Object>> frames = new ArrayList<>();
+		frames.add(fixture("start", 1, "runId", "r-1", "sessionId", "s-1"));
+		frames.add(fixture("message_start", 2, "messageId", "assistant-r-1", "kind", "reasoning"));
+		frames.add(fixture("delta", 3, "messageId", "assistant-r-1", "kind", "reasoning", "text", "先想"));
+		frames.add(fixture("delta", 4, "messageId", "assistant-r-1", "kind", "reasoning", "text", "一步"));
+		frames.add(fixture("message_end", 5, "messageId", "assistant-r-1", "kind", "reasoning", "chars", 4));
+		frames.add(fixture("message_start", 6, "messageId", "assistant-r-1", "kind", "text"));
+		frames.add(fixture("delta", 7, "messageId", "assistant-r-1", "text", "答案是 2"));
+		frames.add(fixture("message_end", 8, "messageId", "assistant-r-1", "kind", "text", "chars", 5));
+		frames.add(fixture("done", 9, "runId", "r-1", "cancelled", false));
+
+		assertThat(FrameContract.violations(frames)).isEmpty();
+	}
+
+	/** kill：思考 delta 不先开边界（{@code reasoningDelta} 少了 message_start）⇒ 段无起点。 */
+	@Test
+	void killsReasoningDeltaWithoutBoundary() {
+		List<Map<String, Object>> frames = List.of(fixture("start", 1),
+				fixture("delta", 2, "messageId", "m-1", "kind", "reasoning", "text", "先想"),
+				fixture("done", 3, "cancelled", false));
+		assertThat(FrameContract.reasoningSegmentContract(frames))
+				.anySatisfy(violation -> assertThat(violation).contains("没有 message_start(kind=reasoning)"));
+	}
+
+	/** kill：把 {@code reasoningEnd} 从终局路径摘掉 ⇒ 思考段永不封口。 */
+	@Test
+	void killsUnclosedReasoningSegment() {
+		List<Map<String, Object>> frames = List.of(fixture("start", 1),
+				fixture("message_start", 2, "messageId", "m-1", "kind", "reasoning"),
+				fixture("delta", 3, "messageId", "m-1", "kind", "reasoning", "text", "只想了没答"),
+				fixture("done", 4, "cancelled", true));
+		assertThat(FrameContract.reasoningSegmentContract(frames))
+				.anySatisfy(violation -> assertThat(violation).contains("思考段没有 message_end"));
+	}
+
+	/** kill：{@code message_end(kind=reasoning).chars} 换成另一套计数源 ⇒ 与前端的思考拼接分家。 */
+	@Test
+	void killsReasoningCharsMismatch() {
+		List<Map<String, Object>> frames = List.of(fixture("start", 1),
+				fixture("message_start", 2, "messageId", "m-1", "kind", "reasoning"),
+				fixture("delta", 3, "messageId", "m-1", "kind", "reasoning", "text", "先想"),
+				fixture("message_end", 4, "messageId", "m-1", "kind", "reasoning", "chars", 9),
+				fixture("done", 5, "cancelled", false));
+		assertThat(FrameContract.reasoningSegmentContract(frames)).anySatisfy(
+				violation -> assertThat(violation).contains("思考 delta 文本长度之和=2"));
+	}
+
+	/** kill：思考段被重开（{@code reasoningSegmentOpen} 的 CAS 失效 ⇒ 一条消息里两段思考）。 */
+	@Test
+	void killsReopenedReasoningSegment() {
+		List<Map<String, Object>> frames = List.of(fixture("start", 1),
+				fixture("message_start", 2, "messageId", "m-1", "kind", "reasoning"),
+				fixture("delta", 3, "messageId", "m-1", "kind", "reasoning", "text", "想"),
+				fixture("message_end", 4, "messageId", "m-1", "kind", "reasoning", "chars", 1),
+				fixture("message_start", 5, "messageId", "m-1", "kind", "reasoning"),
+				fixture("delta", 6, "messageId", "m-1", "kind", "reasoning", "text", "又想"),
+				fixture("done", 7, "cancelled", false));
+		assertThat(FrameContract.reasoningSegmentContract(frames))
+				.anySatisfy(violation -> assertThat(violation).contains("思考段 message_start 出现 2 次"));
+	}
+
 	// ── 规则 5：因果顺序 ────────────────────────────────────────────────────
 
 	/** kill：让决策回执先于请求发出（或干脆不回执）⇒ 确认门顺序倒置 / 缺回执。 */

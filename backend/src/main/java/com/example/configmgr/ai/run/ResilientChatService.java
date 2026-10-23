@@ -251,6 +251,16 @@ public class ResilientChatService {
 	/** 输出被安全策略阻断的机器可读码（防护批③ B3-3；前端错误卡按"过滤类"变体呈现）。别名到 {@link ErrorCodes}，码值不变。 */
 	public static final String SENSITIVE_OUTPUT_BLOCKED = ErrorCodes.SENSITIVE_OUTPUT_BLOCKED;
 
+	/**
+	 * <b>L-91</b>：思考文本在 {@code AssistantMessage} metadata 里的键名。
+	 *
+	 * <p>
+	 * 与 Spring AI 1.1.7 流式转换写入的键、以及 {@code ReasoningAwareOpenAiChatModel} 回填读取的键
+	 * <b>是同一个</b>（机制实证见 {@code ReasoningContentUpstreamProbeTest}）；写成常量是为了让
+	 * "透传"与"回填"共用一份拼写，升版改键时只需改这一处（且探针用例会先红）。
+	 */
+	public static final String REASONING_METADATA_KEY = "reasoningContent";
+
 	public ResilientChatService(AiProviderRegistry providerRegistry, ChatMemory chatMemory,
 			MessageJsonCodec codec, RunStore store, RunRegistry registry, ToolRegistry toolRegistry,
 			ContextBuilder contextBuilder, AiSessionService sessionService, AiProperties properties,
@@ -1428,6 +1438,16 @@ public class ResilientChatService {
 	// ── 流式消费 ────────────────────────────────────────────────────────────
 
 	private void consume(ChatResponse response, SseChatEmitter out, Accumulator accumulator, OutputGuard guard) {
+		// L-91：先发思考段（模型"先想再答"；同一分片也可能同带 reasoning 与正文）。
+		// reasoning 不进 OutputGuard/累计器 —— 它不是正文：不参与 message_end(text).chars、
+		// 不进落定正文（finalText）、不进记忆。DLP 对思考文本不设闸（与"只脱敏正文"的既有口径一致）。
+		String reasoning = chunkReasoning(response);
+		if (reasoning != null && !reasoning.isEmpty()) {
+			out.reasoningDelta(reasoning);
+			// 已产出思考 = 已产出内容：重试三条件里的"未产出内容"不再成立
+			// （否则 retry 会落在思考段之后，且前端会看到两段重复的思考）。
+			accumulator.reasoning(reasoning.length());
+		}
 		String raw = chunkText(response);
 		// 防护批③ B3-2：脱敏发生在**累计器之前**，且同一个 safe 同时喂给累计器与 delta ——
 		// "message_end.chars / 落定正文 / 记忆 / delta 拼接"四处同源（FrameContract#textSegmentContract）。
@@ -1454,6 +1474,24 @@ public class ResilientChatService {
 			return null;
 		}
 		return generation.getOutput().getText();
+	}
+
+	/**
+	 * <b>L-91</b>：上游分片的思考文本（{@code null}/空串 = 该分片没有思考）。
+	 *
+	 * <p>
+	 * 来源是 Spring AI 1.1.7 的 {@code AssistantMessage} metadata 键 {@value #REASONING_METADATA_KEY}
+	 * —— 它对"本片没有 reasoning"用<b>空串占位</b>（不是缺键），而 {@code createRequest} 侧的
+	 * 回填补丁（{@code ReasoningAwareOpenAiChatModel}）读的正是<b>同一个键</b>，故"透传"与
+	 * "回填"共用一份事实，不存在两套拼写（机制实证见 {@code ReasoningContentUpstreamProbeTest}）。
+	 */
+	private static String chunkReasoning(ChatResponse response) {
+		Generation generation = response == null ? null : response.getResult();
+		if (generation == null || generation.getOutput() == null) {
+			return null;
+		}
+		Object value = generation.getOutput().getMetadata().get(REASONING_METADATA_KEY);
+		return value instanceof String text ? text : null;
 	}
 
 	/**
@@ -1497,6 +1535,9 @@ public class ResilientChatService {
 		private static final int TAIL_SIZE = 6;
 
 		private final StringBuilder text = new StringBuilder();
+
+		/** <b>L-91</b>：本尝试累计发出的思考字符数（只用于 {@link #emittedAny()}，不进正文/记忆）。 */
+		private final AtomicLong reasoningChars = new AtomicLong(0);
 
 		private final AtomicReference<ChatResponse> lastResponse = new AtomicReference<>();
 
@@ -1553,6 +1594,20 @@ public class ResilientChatService {
 			}
 		}
 
+		/**
+		 * <b>L-91</b>：记下本片思考的字符数（<b>不进</b> {@link #text} —— 思考不是正文）。
+		 *
+		 * <p>
+		 * 只为一个判据服务：{@link #emittedAny()}。思考一旦发过帧，它就是"用户已经看到的内容"，
+		 * 断流重试会把它再吐一遍（前端出现两段重复思考），且 {@code retry} 帧会落在思考 delta
+		 * 之后（{@link com.example.configmgr.ai.conformance.FrameContract#orderingContract} 明令禁止）。
+		 */
+		void reasoning(int chars) {
+			if (chars > 0) {
+				this.reasoningChars.addAndGet(chars);
+			}
+		}
+
 
 		/** 末帧形态留档（最多 {@value #TAIL_SIZE} 条）。 */
 		private void record(ChatResponse response, Generation generation) {
@@ -1592,7 +1647,9 @@ public class ResilientChatService {
 		}
 
 		boolean emittedAny() {
-			return this.text.length() > 0;
+			// L-91：思考也算"已产出内容"（前端已看到）——否则纯思考轮的断流会被判成"什么都没发"
+			// 而去重试，重试的思考段会叠在前一段上，且 retry 帧落在 delta 之后。
+			return this.text.length() > 0 || this.reasoningChars.get() > 0;
 		}
 
 		String text() {

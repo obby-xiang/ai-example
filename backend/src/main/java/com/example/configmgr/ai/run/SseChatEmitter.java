@@ -53,6 +53,14 @@ import java.util.concurrent.atomic.AtomicLong;
  * 重复帧按 {@link #lastFanoutSeq} 去重；连接层因此无状态 —— 任何实例都能 serve 任意 run 的 reattach。
  *
  * <p>
+ * <b>L-91（2026-10-23）思考段 = 既有三段式 + 一个可选键</b>：上游 {@code reasoning_content}
+ * （Spring AI 1.1.7 已挂进 {@code AssistantMessage} 的 metadata，见
+ * {@code ReasoningContentUpstreamProbeTest}）不再被丢掉 —— {@link #reasoningDelta(String)}
+ * 发 {@code delta{kind:'reasoning'}}，首片自动带出 {@code message_start(kind=reasoning)}，
+ * 段在正文开始/本轮收尾时闭合。帧类型集<b>仍是 16</b>（{@code kind} 是 delta 的 additive 可选键，
+ * 正文 delta 的键集合逐字不变）—— 因此双端白名单、conformance、桩协议都不必新增帧型。
+ *
+ * <p>
  * 帧类型：{@code start}（首包）→ 若干 {@code delta}/{@code tool_*}/
  * {@code retry}/{@code confirm_*}/{@code frontend_tool_*}/{@code heartbeat}/{@code suspended}/
  * {@code context}（上下文专项批①：压缩事件，仅在真发生压缩时出现）→
@@ -284,6 +292,24 @@ public class SseChatEmitter {
 
 	/** T5：正文消息边界是否已开（start/content/end 三段式的 start 只发一次）。 */
 	private final AtomicBoolean textSegmentOpen = new AtomicBoolean(false);
+
+	/**
+	 * <b>L-91</b>：思考段是否已开（{@code message_start(kind=reasoning)} 只发一次）。
+	 *
+	 * <p>
+	 * 与 {@link #textSegmentOpen} 同构：思考段先于正文段出现（模型先想再答），且一段一轮
+	 * （思考被打断后继续想的内容并回同一段，不新开一段 —— 前端语义是"这一轮的思考过程"）。
+	 */
+	private final AtomicBoolean reasoningSegmentOpen = new AtomicBoolean(false);
+
+	/**
+	 * <b>L-91</b>：当前思考段已发出的字符数（{@code message_end(chars)} 的对账来源）。
+	 *
+	 * <p>
+	 * 与正文段同口径：{@code chars} = 本段 {@code delta} 文本长度之和 —— 前端按 delta 拼接渲染，
+	 * 二者不相等就意味着"前端看到的思考"与"帧契约声明的思考"分家。
+	 */
+	private final AtomicLong reasoningChars = new AtomicLong(0);
 
 	/**
 	 * 轮终态标志（S1-1 修复批）：置位后不再向订阅者收新帧，已入队帧由各自 drain 排空后收尾。
@@ -712,6 +738,58 @@ public class SseChatEmitter {
 	}
 
 	/**
+	 * <b>L-91：思考段增量</b>（{@code delta{kind:'reasoning'}}）。
+	 *
+	 * <p>
+	 * 为什么是<b>喂键</b>而不是新帧型：帧类型集冻结在 16（{@code FrameTypeSetFrozenTest} 是双端
+	 * 比对守卫），而思考段需要的信息只有"这一段属于哪种段"。既有契约里
+	 * {@code message_start/message_end} 早已带 {@code kind}（{@link #messageBoundary}），
+	 * 缺的只是 <b>delta 侧的同一位</b>，故本方法只给 delta 加<b>可选</b>键 {@code kind}：
+	 * <ul>
+	 * <li>{@code kind} 缺省 = 正文（{@link #delta(String)} 一字不动，老客户端/旧归档零影响）；</li>
+	 * <li>{@code kind='reasoning'} = 思考段增量，前端据此分流到 reasoning 段。</li>
+	 * </ul>
+	 * 于是"思考链"从模型到屏幕的通路 = 既有三段式 + 一个可选键，双端白名单、conformance、
+	 * 桩协议都不必新增帧型。
+	 *
+	 * <p>
+	 * 首片思考自动带出 {@code message_start(kind=reasoning)}（前端不必自己造段边界）；
+	 * 空串/空白片<b>不发帧</b> —— Spring AI 对"本片没有 reasoning"用空串占位
+	 * （见 {@code ReasoningContentUpstreamProbeTest}），照发会把每个正文分片
+	 * 都变成一个空思考 delta。
+	 */
+	public void reasoningDelta(String text) {
+		if (text == null || text.isEmpty()) {
+			return;
+		}
+		if (this.reasoningSegmentOpen.compareAndSet(false, true)) {
+			this.reasoningChars.set(0L);
+			messageBoundary("start", "reasoning", null);
+		}
+		Map<String, Object> frame = frame("delta");
+		frame.put("messageId", this.assistantMessageId);
+		frame.put("kind", "reasoning");
+		frame.put("text", text);
+		this.reasoningChars.addAndGet(text.length());
+		emit(frame);
+	}
+
+	/**
+	 * <b>L-91</b>：闭合思考段（{@code message_end(kind=reasoning, chars)}）；未开过段则是幂等空操作。
+	 *
+	 * <p>
+	 * 调用点由"段互斥"隐式保证：{@link #textStart()}（正文段开始前）与 {@link #textEnd(int)}
+	 * （本轮收尾 / 纯思考轮）都会先收口思考段，因此<b>不存在</b>"正文段开了、思考段还开着"的形态。
+	 */
+	public boolean reasoningEnd() {
+		if (!this.reasoningSegmentOpen.compareAndSet(true, false)) {
+			return false;
+		}
+		messageBoundary("end", "reasoning", Map.of("chars", this.reasoningChars.getAndSet(0)));
+		return true;
+	}
+
+	/**
 	 * 消息边界（T5 / R8-2）：正文段（kind={@code text}）或思考段（kind={@code reasoning}）的
 	 * start / end 标记，配合中间的 content 帧（{@code delta}）构成三段式生命周期。
 	 *
@@ -736,6 +814,8 @@ public class SseChatEmitter {
 
 	/** 正文段 start（同一条消息只开一次；重复调用无副作用）。 */
 	public boolean textStart() {
+		// L-91：段互斥 —— 正文开始前思考段必须先闭合（前端按段分流 delta，两段不得交叠）
+		reasoningEnd();
 		if (!this.textSegmentOpen.compareAndSet(false, true)) {
 			return false;
 		}
@@ -745,6 +825,9 @@ public class SseChatEmitter {
 
 	/** 正文段 end（带本段字符数，便于前端与 done 帧对账）；未开过段则不发（幂等）。 */
 	public boolean textEnd(int chars) {
+		// L-91：收尾同样先闭合思考段 —— 纯思考轮（一个字正文都没出）若只靠 textEnd 收尾，
+		// 思考段会永远停在"开着"的状态（前端会看到一段永不封口的段）。
+		reasoningEnd();
 		if (!this.textSegmentOpen.compareAndSet(true, false)) {
 			return false;
 		}
