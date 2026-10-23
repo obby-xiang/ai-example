@@ -135,8 +135,30 @@ async function assertPortFree(port: number, label: string): Promise<void> {
   throw new Error(`端口 ${port}（${label}）已被占用：VL 域用例独占 18930/18999/19001 段，请用 VL_*_PORT 换一段；本助手不杀别人的进程。`)
 }
 
+/**
+ * 域内基址一致性（L-81 残余面）：本域页面固定走 `VL_APP`，而 `support/helpers` 的 `api` /
+ * `request` 基址来自 `E2E_API_BASE ?? E2E_BACKEND_PORT`。两者一旦不一致（典型：忘了
+ * `E2E_EXTERNAL=1`，`harness.ts` 又在 183xx 自起一套），夹具就在两套后端之间来回：
+ * 任务建在 A、模板/上传打到 B ⇒ 模板 404 → 404 的错误体被当 `.xlsx` 上传 → PRECHECK 以
+ * 「未找到上传文件」FAILED —— 看着像产品回归（V17 复扫即此形态）。这里一次性拦住并给出
+ * 可直接抄的运行命令，别让装配错配伪装成红测。
+ */
+function assertSingleApiBase(): void {
+  const strip = (value: string): string => value.replace(/\/+$/, '')
+  const apiBase = strip(process.env.E2E_API_BASE ?? `http://127.0.0.1:${process.env.E2E_BACKEND_PORT ?? '18330'}`)
+  const appBase = strip(process.env.E2E_APP ?? `http://127.0.0.1:${process.env.E2E_APP_PORT ?? '18401'}`)
+  const hint = `VL 域跑法：E2E_EXTERNAL=1 E2E_API_BASE=${VL_API} E2E_APP=${VL_APP} npx playwright test e2e/12a-vl-vis.spec.ts e2e/12b-vl-tol.spec.ts`
+  if (apiBase !== strip(VL_API)) {
+    throw new Error(`本域后端基址不一致：api 助手指向 ${apiBase}，VL 域栈是 ${VL_API}。${hint}`)
+  }
+  if (appBase !== strip(VL_APP)) {
+    throw new Error(`本域页面基址不一致：页面助手指向 ${appBase}，VL 域栈是 ${VL_APP}。${hint}`)
+  }
+}
+
 /** 起三件套（桩上游 + 后端 + 前端 dev server）。已在跑则直接返回。 */
 export async function ensureVlStack(): Promise<void> {
+  assertSingleApiBase()
   const health = await fetch(`${VL_API}/api/ai/health`).then((r) => r.text()).catch(() => '')
   const appUp = await fetch(`${VL_APP}/`).then((r) => r.status === 200).catch(() => false)
   if (health.includes('"available":true') && appUp) {

@@ -39,21 +39,22 @@ test.describe('@stub MD 渲染', () => {
     await expect(body.locator('ol > li')).toHaveCount(2)
     await expect(body.locator('strong')).toHaveText('加粗')
     await expect(body.locator('em')).toHaveText('斜体')
-    // 删除线：markdown-it 产的是 `<s>`，DOMPurify 白名单只放行 `del` ⇒ 标记被剥、文字保留
-    // （发现项 MD-01-D1：删除线样式丢失，见报告）；此处断言"文字在、标记不漏"。
+    // 删除线：markdown-it 产的是 `<s>`；L-86（笔 75530fd）把 `s` 加入 DOMPurify 白名单
+    // （与 `del` 同级、无属性、纯表现型）⇒ 结构元素真的渲染出来（原 MD-01-D1「样式丢失」已收口）。
     await expect(body).toContainText('删除线')
-    expect(await body.locator('s').count()).toBe(0)
+    await expect(body.locator('s')).toHaveText('删除线')
     // 表格：3 列 × 2 数据行（列数正确 = 表头单元格数）
     await expect(body.locator('table thead th')).toHaveCount(3)
     await expect(body.locator('table tbody tr')).toHaveCount(2)
     await expect(body.locator('blockquote')).toHaveCount(1)
     await expect(body.locator('hr')).toHaveCount(1)
 
-    // 原始标记不泄漏（`##` / 表格分隔行 / 引用符都要被解析掉）
+    // 原始标记不泄漏（`##` / 表格分隔行 / 引用符都要被解析掉；删除线的 `~~` 同一条纪律）
     const text = await body.innerText()
     expect(text).not.toContain('##')
     expect(text).not.toContain('| ---')
     expect(text).not.toContain('**加粗**')
+    expect(text).not.toContain('~~')
     expect(text).not.toContain('> 引用行')
   })
 

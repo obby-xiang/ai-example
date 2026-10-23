@@ -969,7 +969,13 @@ test.describe('@stub P 手工停止', () => {
     await stopButton(page).click()
     // ① 不再是可填表单：提交钮退场、字段控件转为只读/禁用（不是留个"待填写"空壳）
     await expect(page.locator('[data-testid="gf-submit"]')).toHaveCount(0, { timeout: 10_000 })
-    await expect(page.locator('#gf-field-f_text')).toBeDisabled()
+    // L-92 随迁：停止后挂起卡换成**只读回放卡**，其字段 DOM id 已改为
+    // `gf-field-<scope>-<key>`（`FormRenderer#controlIdOfKey`，只读卡的 scope 是实例序号、不可预测），
+    // 故不再按 `#gf-field-<key>` 定位；轮次唯一定位走 testid。只读卡卡体是 `v-show` 常挂载，
+    // 折叠态（回合结束自动收卡头）同样能断「禁用」这一条。
+    const readOnlyForm = page.locator('[data-testid^="ro-form-"]')
+    await expect(readOnlyForm).toHaveCount(1)
+    await expect(readOnlyForm.locator('[data-testid$="-f_text"]')).toBeDisabled()
     // ② 卡显示「已取消」并注明"填写内容不作记录"（只读回执形态）
     const badge = page.locator('[data-testid^="ro-badge-"]').last()
     await expect(badge).toContainText('已取消', { timeout: 10_000 })

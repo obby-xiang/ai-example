@@ -562,15 +562,20 @@ test.describe('@stub O 并发与同 tick 竞态', () => {
   })
 
   /**
-   * 已登记缺陷（P2，批③c 实测）：停止与回车落在同一 tick 时，输入框里**新打的草稿**会被
-   * 上一轮的提示词覆盖。
+   * O-02b 停止与回车落在同一 tick：输入框里**新打的草稿**不得被上一轮的提示词覆盖。
    *
-   * 机理（读码推定，未改 src）：`AiPanel.send()` 结尾对 `interrupted/not-sent` 结局做「原稿回流」，
+   * 原缺陷（L-83 收口）：`AiPanel.send()` 结尾对 `interrupted/not-sent` 结局做「原稿回流」，
    * 条件是 `inputText === ''`；同 tick 的 `stop()` 已同步把 `loading` 置 false，于是紧随其后的
    * Enter 又走了一次 `send()`（把 inputText 清空并失败），两次回流的顺序让**旧稿**最后落地。
-   * 本用例以 `test.fail()` 挂账：产品修好之日它会转红并强制更新（不假绿）。
+   * 修法（笔 75530fd = L-83）：`send()` 以 `sendGeneration` 作废被更晚发送取代的那一轮
+   * （被取代者一律不写输入框），并对"用户已在流式中写入新内容"短路 ⇒ 旧稿不再覆盖新草稿。
+   *
+   * 该条原以 `test.fail()` 挂账。缺陷已修（挂账到期），但**同 tick 竞态本身是二选一的**
+   * （与 E2E-O02 同一口径：停止优先或发送优先），故去掉挂账时把断言按分支收口 ——
+   * 只断"输入框非空"会在「发送优先」那一支假红（实测 2/2 命中该支：草稿真的变成了一条
+   * 用户消息，输入框清空是正确行为）。
    */
-  test.fail('E2E-O02b 已知缺陷：停止同 tick 回车后，输入框草稿应保留（现被上一轮原稿覆盖）', async ({ page }) => {
+  test('E2E-O02b 停止同 tick 回车：新草稿不丢（停止优先 ⇒ 原样留存；发送优先 ⇒ 已成新消息）', async ({ page }) => {
     await openApp(page)
     const composer = page.locator('[data-testid="composer-input"]')
     await composer.fill('turn-text stall-frames=1500 o02b')
@@ -587,7 +592,21 @@ test.describe('@stub O 并发与同 tick 竞态', () => {
       input?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
     })
     await waitRoundSettled(page, 90_000)
-    await expect(composer).toHaveValue('草稿必须保留 o02b')
+
+    // 同 tick 竞态天然二选一（与 E2E-O02 同一口径，二者必居其一）：
+    //   停止先落地 ⇒ 新发送被拒，输入框里是**逐字相同**的新草稿（L-83 钉的就是这一支：
+    //                旧轮迟到收尾不得把上一条用户消息回填进来）；
+    //   发送先落地 ⇒ 草稿真的成为一条用户消息，输入框清空是正确行为（不是"草稿被吞"）。
+    // 只看"输入框非空"会在第二支上假红（实测 2/2 落在该支，草稿生成的消息气泡可证）。
+    const bubbles = userBubbles(page)
+    const bubbleCount = await bubbles.count()
+    if (bubbleCount === 1) {
+      await expect(composer).toHaveValue('草稿必须保留 o02b')
+    } else {
+      expect(bubbleCount, '同 tick 只允许「停止优先 1 条」或「发送优先 2 条」').toBe(2)
+      await expect(bubbles.last()).toContainText('草稿必须保留 o02b')
+      await expect(composer).toHaveValue('')
+    }
   })
 
   test('E2E-O03 双连接同时 reattach：两路都收到帧、seq 一致、只收一份 done', async () => {

@@ -43,14 +43,26 @@ async function openImportUpload(page: Page, taskId: number): Promise<void> {
   await vlWaitRegions(page, 'import.selectDefs')
 }
 
-/** 造一条已发布（终态）的导入任务 —— 页面因此进入只读态。 */
+/**
+ * 造一条已发布（终态）的导入任务 —— 页面因此进入只读态。
+ *
+ * 夹具自证（V17 复扫定位）：模板/上传两步**必须校验状态码**。旧写法不校验时，模板 404 的
+ * JSON 错误体会被当成 `.xlsx` 原样上传，随后 PRECHECK 以「未找到上传文件 / 无法解析」报
+ * FAILED —— 读起来像产品回归，实际是夹具把一次 HTTP 失败吞成了"数据文件"。另注：两步用
+ * 域内真基址 `VL_API`（与页面同栈），任务创建走 `api`（= `E2E_API_BASE`）；两者一旦不一致
+ * （典型：忘了 `E2E_EXTERNAL=1`，harness 又自起一套），本函数会立刻以「模板下载失败」自曝，
+ * 而不是伪装成 PRECHECK 红。两个分支都在失败时抛出带响应体的错误，报错即根因。
+ */
 async function createPublishedImportTask(request: APIRequestContext): Promise<number> {
   const task = await api.post<{ id: number }>(request, '/api/tasks', { type: 'IMPORT', title: `E2E-VL-RO-${Date.now()}` })
   const id = task.id
   await api.post(request, `/api/tasks/${id}/select-defs`, { defCodes: ['DOC_TYPE'] })
   const template = await request.get(`${VL_API}/api/tasks/${id}/files/templates?codes=DOC_TYPE`)
+  if (!template.ok()) {
+    throw new Error(`模板下载失败：HTTP ${template.status()} ${await template.text()}（任务 #${id} 是否建在 ${VL_API} 这套后端上？）`)
+  }
   const bytes = await template.body()
-  await request.post(`${VL_API}/api/tasks/${id}/files/upload`, {
+  const upload = await request.post(`${VL_API}/api/tasks/${id}/files/upload`, {
     multipart: {
       file: {
         name: 'DOC_TYPE_e2e.xlsx',
@@ -59,6 +71,9 @@ async function createPublishedImportTask(request: APIRequestContext): Promise<nu
       }
     }
   })
+  if (!upload.ok()) {
+    throw new Error(`上传失败：HTTP ${upload.status()} ${await upload.text()}`)
+  }
   const precheck = await api.post<JobView>(request, `/api/tasks/${id}/jobs`, { jobType: 'PRECHECK' })
   expect((await waitJob(request, precheck.id)).status).toBe('COMPLETED')
   await api.put(request, `/api/tasks/${id}/step`, { step: 'PUBLISH' })
@@ -589,7 +604,10 @@ test.describe('@stub V 可视可操作（12a）', () => {
     expect(mapping.table.unknown).toBe('unknown')
     expect(mapping.table.timeout).not.toBe(mapping.table.unknown)
     expect(mapping.table.rejected).not.toBe(mapping.table.unknown)
-    expect(mapping.codes).toHaveLength(7)
+    // L-82（笔 6321424）新增 `UI_DOWNLOAD_TIMEOUT`（下载类工具前置校验有界化）⇒ 闭集 7 → 8 枚，
+    // 逐枚点名（不只数数）钉住新增那一枚。
+    expect(mapping.codes).toHaveLength(8)
+    expect(mapping.codes).toContain('UI_DOWNLOAD_TIMEOUT')
     expect(mapping.codes).toContain('UI_REF_NOT_SNAPSHOTTED')
     expect(mapping.codes).toContain('UI_TARGET_DISABLED')
 
