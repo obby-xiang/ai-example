@@ -1,5 +1,9 @@
 <template>
-  <div :class="readonly || flat ? 'min-w-0' : 'border border-solid border-[#e3e6ea] rounded-[10px] bg-white overflow-hidden mb-2.5'">
+  <div
+    ref="rootRef"
+    :data-testid="`gf-form-${scope}`"
+    :class="readonly || flat ? 'min-w-0' : 'border border-solid border-[#e3e6ea] rounded-[10px] bg-white overflow-hidden mb-2.5'"
+  >
     <!-- R-165 S3a：GF 表单卡 = demo v7 `.gf` 结构（v7.html:255-272）
          容器细描边 + 圆角 10 + overflow-hidden ｜ 卡头 ▤+标题+胶囊（9px 11px / 底细线 / #f6f7f9 / 12.8px/650）
          ｜ 字段体 p-[11px]。2026-10-20 去超时裁决：时限脚注整块退役（表单一直可填）；
@@ -31,6 +35,7 @@
         <textarea
           v-if="field.type === 'text' && field.variant === 'longText'"
           :id="controlId(field)"
+          :data-testid="controlTestId(field)"
           :class="fieldClass(field)"
           :value="textValue(field.key)"
           :placeholder="field.placeholder"
@@ -45,6 +50,7 @@
         <input
           v-else-if="field.type === 'text'"
           :id="controlId(field)"
+          :data-testid="controlTestId(field)"
           :type="inputTypeOf(field)"
           :class="fieldClass(field)"
           :value="textValue(field.key)"
@@ -59,6 +65,7 @@
         <input
           v-else-if="field.type === 'number'"
           :id="controlId(field)"
+          :data-testid="controlTestId(field)"
           type="number"
           :class="fieldClass(field)"
           :value="numberValue(field.key)"
@@ -79,6 +86,7 @@
         <label v-else-if="field.type === 'boolean'" class="relative inline-flex w-[34px] h-[18px] align-middle">
           <input
             :id="controlId(field)"
+            :data-testid="controlTestId(field)"
             type="checkbox"
             class="absolute inset-0 m-0 w-full h-full appearance-none rounded-[999px] cursor-pointer disabled:cursor-default [outline:none]"
             :checked="model[field.key] === true"
@@ -101,6 +109,7 @@
         <input
           v-else-if="field.type === 'date'"
           :id="controlId(field)"
+          :data-testid="controlTestId(field)"
           type="date"
           :class="fieldClass(field)"
           :value="textValue(field.key)"
@@ -115,6 +124,7 @@
         <select
           v-else-if="field.type === 'enum'"
           :id="controlId(field)"
+          :data-testid="controlTestId(field)"
           :class="fieldClass(field)"
           :value="textValue(field.key)"
           :disabled="isDisabled(field)"
@@ -144,6 +154,7 @@
           >
             <input
               :id="`${controlId(field)}-${option.value}`"
+              :data-testid="`${controlTestId(field)}-${option.value}`"
               type="checkbox"
               class="m-0"
               :checked="multiChecked(field, option.value)"
@@ -157,6 +168,7 @@
         <div v-else-if="field.type === 'attachment'" class="min-w-0">
           <input
             :id="controlId(field)"
+            :data-testid="controlTestId(field)"
             type="file"
             :accept="ATTACHMENT_ACCEPT"
             :class="['block w-full text-[12.2px] text-[#57606a] file:mr-[8px] file:rounded-[6px] file:border file:border-solid file:border-[#e3e6ea] file:bg-white file:px-[9px] file:py-[3px] file:text-[12px] file:text-[#57606a] disabled:cursor-default', fieldIssues(field).length > 0 ? 'rounded-[6px] border border-solid border-[#c0392b] p-[4px]' : '']"
@@ -259,6 +271,7 @@ import {
   type FormValueIssue
 } from '@/types/form-schema'
 import { SCROLLBAR_CLASS } from '@/utils/markdown'
+import { nextReadonlyFormScope } from '@/utils/form-scope'
 import { uploadFormAttachment, formOptionSource } from '@/api/ai'
 
 /** 七型取值并集（number 的"未填"用 undefined 表示；attachment 的值是 fileId 字符串）。 */
@@ -323,6 +336,19 @@ const emit = defineEmits<{
 const { t, te } = useI18n()
 
 /**
+ * 卡作用域（L-92）：同一页面里可以同时出现**上一轮已决的只读卡**与**本轮待填卡**，两卡 schema 同形，
+ * 字段 DOM id 必撞车（`label for` / `aria-describedby` / 首错聚焦都是按 id 取第一个命中）。
+ * 口径：
+ * - 轮次作用域 = 本轮挂起的 `toolCallId`（上传归属已带同一值，无需新增宿主入参）；
+ * - 只读回放卡没有挂起归属 ⇒ 模块级自增序号（同页任意多卡、含多 app 实例都互不相同；
+ *   非交互面无需可预测）；
+ * - **交互卡的 DOM id 保持 `gf-field-<key>` 历史形态**（`#gf-field-*` 的既有用例与外部锚点零变更），
+ *   轮次唯一的定位一律走 `data-testid="gf-field-<scope>-<key>"`。
+ */
+const scope = props.uploadContext?.toolCallId ?? nextReadonlyFormScope()
+const interactive = props.readonly !== true
+
+/**
  * v7 控件配方 `.fi`（w-full + 细描边 + 圆角 8 + padding 6px 9px + 13px）。
  * preflight 关闭（tailwind.config.js corePlugins.preflight=false）⇒ 描边样式一律显式 `border-solid`。
  * focus 态走 `focus:` 变体（伪类抬升特异度，稳定压过静/错两态的底色）。
@@ -379,6 +405,8 @@ function initialModel(): Record<string, FormModelValue> {
 }
 
 const model = ref<Record<string, FormModelValue>>(initialModel())
+/** 本卡根元素（首错聚焦只在本子树里找，同页多卡不串）。 */
+const rootRef = ref<HTMLElement | null>(null)
 /** 本次提交前复核的问题（结构化：按 key 归属字段）。 */
 const localIssues = ref<FormValueIssue[]>([])
 /** 草稿默认值联动的"用户已碰过"集合：被碰过的字段不再被 defaultFrom 覆盖。 */
@@ -437,8 +465,18 @@ const scenarioLabel = computed(() =>
 /** 联动显隐：隐藏字段不渲染、不参与校验、不提交。 */
 const visibleFields = computed(() => props.schema.fields.filter((field) => isFieldVisible(field, model.value)))
 
+/** 控件 DOM id：交互卡保持历史形态；只读回放卡按卡作用域分段（同页多卡不撞车）。 */
+function controlIdOfKey(key: string): string {
+  return interactive ? `gf-field-${key}` : `gf-field-${scope}-${key}`
+}
+
 function controlId(field: FormFieldSpec): string {
-  return `gf-field-${field.key}`
+  return controlIdOfKey(field.key)
+}
+
+/** 轮次唯一的 testid（L-92）：同页多卡时定位只看它，不依赖 DOM id 的唯一性。 */
+function controlTestId(field: FormFieldSpec): string {
+  return `gf-field-${scope}-${field.key}`
 }
 
 function hintId(field: FormFieldSpec): string {
@@ -727,14 +765,17 @@ function fieldClass(field: FormFieldSpec): string {
   return `${FI_BASE} ${disabledTone} ${fieldIssues(field).length > 0 ? FI_BAD : FI_IDLE}`
 }
 
-/** 提交失败聚焦首个错误字段（a11y 硬要求：错误不能只靠视觉颜色）。 */
+/**
+ * 提交失败聚焦首个错误字段（a11y 硬要求：错误不能只靠视觉颜色）。
+ * 只在本卡子树里找 —— 同页多卡时 `document.getElementById` 会取到**别卡**的同名控件（L-92）。
+ */
 async function focusFirstIssue(issues: FormValueIssue[]): Promise<void> {
   await nextTick()
   const first = issues[0]
   if (!first) {
     return
   }
-  const element = document.getElementById(`gf-field-${first.key}`)
+  const element = rootRef.value?.querySelector<HTMLElement>(`[id="${controlIdOfKey(first.key)}"]`)
   element?.focus()
 }
 

@@ -7,7 +7,8 @@
  *
  * 桩的两条硬约束（决定了用例怎么写）：
  * 1. 会话指纹 = 首条 user 消息 ⇒ 每条提示词带唯一字母后缀；
- * 2. 上下文里出现 role=tool 后不再发起工具调用（收敛契约③）⇒ 一个会话只出一张卡/一次工具调用。
+ * 2. 上下文里出现 role=tool 后不再发起工具调用（收敛契约③）⇒ 一个会话只出一张卡/一次工具调用
+ *    （「同会话两轮 GF」这种形态因此单开 11c-gf2.spec.ts + 本域桩，见 L-92）。
  */
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test'
 import {
@@ -350,26 +351,73 @@ test.describe('@stub G 生成式表单', () => {
 
 // @real：真模型链路（stub 模式的 grep 只跑 @stub，本条留给 CI / 后续批）
 test.describe('@real G 生成式表单（真模型）', () => {
+  /** C 级常规行为档（蓝本 §0.3）：N=10 ≥7；`E2E_REAL_SAMPLING` 只调小 N，阈值同比例推导。 */
+  const GF_SAMPLING = Math.max(1, Number(process.env.E2E_REAL_SAMPLING ?? '10'))
+  const GF_THRESHOLD = Math.ceil(GF_SAMPLING * 0.7)
+
   /**
-   * 概率口径缺口（挂账，2026-10-23 真模型批实测）：本条的**触发面**（模型会不会调
-   * `generative_form`）是常规行为概率面，蓝本 §0.3 要求 N=10 / ≥7，但这里仍是单轮。
+   * G-01（蓝本 §2.5 + §0.3）：FILTER 回灌续跑 = **常规行为**概率面 ⇒ N=10 / 阈值 ≥7。
    *
-   * <p>补采样的尝试失败在**用例结构**而非产品：表单字段用的是静态 `id="gf-field-keyword"`，
-   * 同一页面里连跑第二轮时，第二张卡的表单提交后后端收不到 `approval_decided`
-   * （实测：第 1 轮 6.2s 续跑到 done，第 2 轮停在 `approval_suspend`），本轮因此永不收敛。
-   * 采样化前置 = 表单字段带上轮次唯一的 testid（或用 API 层直接回灌 FRONTEND_RESULT）。
+   * <p>采样化前置（L-92，2026-10-23）已落地：表单字段带**轮次唯一** testid
+   * `gf-field-<toolCallId>-<key>`，卡根 `gf-form-<toolCallId>`。修前字段只有静态 `id="gf-field-keyword"`，
+   * 同页留下上一轮的只读卡时第二轮定位就串卡（实测第 2 轮停在 `approval_suspend`）⇒ 只能单轮。
    *
-   * <p>现状保留单轮：本批 4 次独立运行 4/4 触发并续跑到 done（形状与续跑面稳定）。
+   * <p>分层口径（§0.3「C 级只断形状 + 概率下限」）：
+   * <ul>
+   *   <li>**C 级（进概率计数）**：模型这一轮愿不愿意调 `generative_form`（表单卡有没有出现）；</li>
+   *   <li>**A/B 级（逐条硬断言，不计数）**：真出现了就必须对 —— 回灌 200、本轮续跑到落定、
+   *       表单退出可填态、无卡级错误、提交后助手气泡有续写内容。</li>
+   * </ul>
+   *
+   * <p>每轮用 `new-chat` 起**新会话**（采样独立性：不让上一轮的工具结果压进下一轮上下文）。
+   *
+   * <p>**真模型验证待 key**：本机无真 key，本节仅落结构（`E2E_MODE=real` + 真 key 才跑），
+   * 未在真机跑过；最近一次真机证据仍是单轮 4/4（旧结构）。
    */
-  test('E2E-G01 FILTER 回灌续跑（真模型）', async ({ page }) => {
+  test(`E2E-G01 FILTER 回灌续跑（真模型，N=${GF_SAMPLING} ≥${GF_THRESHOLD}）`, async ({ page }) => {
+    test.setTimeout(900_000)
+    let triggered = 0
+    const problems: string[] = []
+
     await openApp(page)
-    await sendMessage(page, '请用生成式表单收集本次导出的筛选条件：关键字、范围（XN/HD），然后等我填写。')
-    await expect(page.locator('[data-testid="gf-fields"]')).toBeVisible({ timeout: 90_000 })
-    await page.locator('#gf-field-keyword').fill('真模型')
-    await page.locator('[data-testid="gf-submit"]').click()
-    await waitRoundSettled(page, 120_000)
-    await expect(page.locator('[data-testid="gf-submit"]')).toHaveCount(0)
-    await expect(page.locator('[data-testid="gf-error"]')).toHaveCount(0)
+    for (let index = 1; index <= GF_SAMPLING; index += 1) {
+      await sendMessage(page, `请用生成式表单收集本次导出的筛选条件：关键字、范围（XN/HD），然后等我填写。采样 ${index}`)
+
+      // 触发面（C 级）：本轮的 live 表单卡（卡根带本轮 toolCallId 作用域）
+      const form = page.locator('[data-testid^="gf-form-"]').last()
+      const appeared = await form
+        .waitFor({ state: 'visible', timeout: 90_000 })
+        .then(() => true)
+        .catch(() => false)
+      if (!appeared) {
+        problems.push(`#${index} 模型未触发 generative_form（本轮按文本收尾）`)
+        await waitRoundSettled(page, 60_000)
+      } else {
+        triggered += 1
+        // ── 以下 A/B 级：真触发了就必须对（不参与概率计数） ──────────────────
+        await form.locator('[data-testid$="-keyword"]').fill(`真模型-${index}`)
+        const posted = page.waitForResponse(
+          (res) => res.url().includes('/api/ai/frontend-tool-result') && res.request().method() === 'POST',
+          { timeout: 30_000 }
+        )
+        await form.locator('[data-testid="gf-submit"]').click()
+        expect((await posted).status(), `#${index} 回灌（FRONTEND_RESULT）非 200`).toBe(200)
+
+        await waitRoundSettled(page, 120_000)
+        await expect(page.locator('[data-testid="gf-submit"]'), `#${index} 提交后表单仍可填`).toHaveCount(0)
+        await expect(page.locator('[data-testid="gf-error"]'), `#${index} 卡级错误`).toHaveCount(0)
+        // 续跑真的跑了：提交后助手气泡有内容（桩面「模型收到值 JSON」由 G-02/G-04 的落档断言承载）
+        const bubbleText = await page.locator('[data-testid^="msg-bubble-"].w-full').last().innerText()
+        expect(bubbleText.trim().length, `#${index} 提交后续跑没有产生助手内容`).toBeGreaterThan(0)
+      }
+
+      await page.locator('[data-testid="new-chat"]').click()
+      await expect(page.locator('[data-testid="empty-state"]')).toBeVisible({ timeout: 20_000 })
+    }
+
+    // eslint-disable-next-line no-console
+    console.log(`[G-01] N=${GF_SAMPLING} 触发=${triggered} 阈值≥${GF_THRESHOLD}`)
+    expect(triggered, `未达阈值的采样：\n${problems.join('\n')}`).toBeGreaterThanOrEqual(GF_THRESHOLD)
   })
 })
 

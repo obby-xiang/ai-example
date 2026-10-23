@@ -293,6 +293,59 @@ describe('G-E attachment 控件', () => {
   })
 })
 
+describe('L-92 同页两卡：字段作用域（轮次唯一 testid / id 不撞车 / 聚焦不串卡）', () => {
+  const ROUND2 = 'call-r2'
+
+  const mounted: Array<() => void> = []
+  afterEach(() => {
+    while (mounted.length > 0) mounted.pop()?.()
+  })
+
+  function mountCard(props: Record<string, unknown>) {
+    const wrapper = mountForm(SCHEMA, props, { attachTo: document.body })
+    mounted.push(() => wrapper.unmount())
+    return wrapper
+  }
+
+  it('「上一轮只读卡 + 本轮待填卡」：待填卡 testid 带轮次作用域、只读卡另占一套、DOM id 不撞车', () => {
+    const round1 = mountCard({ readonly: true })
+    const round2 = mountCard({ uploadContext: { runId: 'run-2', toolCallId: ROUND2 } })
+
+    const live = round2.find(`[data-testid="gf-field-${ROUND2}-name"]`)
+    expect(live.exists()).toBe(true)
+    // 交互卡 id 保持历史形态（`#gf-field-<key>` 的既有用例与外部锚点零变更）
+    expect(live.attributes('id')).toBe('gf-field-name')
+
+    const stale = round1.find('[data-testid$="-name"]')
+    expect(stale.exists()).toBe(true)
+    expect(stale.attributes('id')).not.toBe('gf-field-name')
+    expect(stale.attributes('data-testid')).not.toBe(live.attributes('data-testid'))
+
+    // 同页 `#gf-field-name` 只有一个 ⇒ label for / aria-describedby / getElementById 不再取到别卡
+    expect(document.querySelectorAll('[id="gf-field-name"]')).toHaveLength(1)
+  })
+
+  it('只读回放卡之间也各占一套 id（多轮历史卡不撞车）', () => {
+    const first = mountCard({ readonly: true })
+    const second = mountCard({ readonly: true })
+    const firstId = first.find('[data-testid$="-name"]').attributes('id')
+    const secondId = second.find('[data-testid$="-name"]').attributes('id')
+    expect(firstId).not.toBe(undefined)
+    expect(firstId).not.toBe(secondId)
+  })
+
+  it('首错聚焦落在本卡内：同页已有同 key 的只读卡时不串卡', async () => {
+    mountCard({ readonly: true })
+    const live = mountCard({ uploadContext: { runId: 'run-2', toolCallId: ROUND2 } })
+
+    await live.find('[data-testid="gf-submit"]').trigger('click')
+    await flushPromises()
+
+    expect(document.activeElement?.id).toBe('gf-field-name')
+    expect(live.element.contains(document.activeElement)).toBe(true)
+  })
+})
+
 describe('G-G 文案走 locales', () => {
   it('切到 en-US 后 chrome 文案为英文（默认 zh 不变）', async () => {
     const zh = mountForm(CASCADE, { initialValues: { country: 'CN' } })
