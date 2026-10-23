@@ -2630,13 +2630,23 @@ function isUploadHandoffPart(part: ToolPart): boolean {
   return part.kind2 === 'FRONTEND' && part.requiresAction && UI_HANDOFF_TOOLS.has(part.name)
 }
 
-/** 交接卡状态：活动交接 → 其 status；刷新后丢了本地态 → missing（只能放弃）。 */
+/**
+ * 交接卡状态：**与「可操作性」同源** —— 一律取 store 的 `uploadHandoffAvailability()`
+ * （活动交接存在 ⇒ 其档；无活动交接 / 交接不属于本卡 ⇒ missing）。
+ *
+ * <p>
+ * L-85：旧实现活动交接存在时直接回 `handoff.status`，从不看区域是否还在，
+ * 于是用户离开导入向导页后卡面仍是 `waiting`、主按钮仍可点（点下去旧实现还谎报成功）。
+ * `handoff.status` 只在**建卡 / 刷新重建**那一刻算一次，是"当时"的分流；区域存活是随页面
+ * 变化的，必须在渲染时重算。`uploadHandoffAvailability()` 同时覆盖 degraded（浏览器不支持
+ * picker）与 missing（区域已不在本页 / 只读页），与本卡三态一一对应。
+ */
 function uploadHandoffStatus(part: ToolPart): 'waiting' | 'degraded' | 'missing' | 'unavailable' {
   const handoff = ai.activeUploadHandoff
-  if (handoff && handoff.toolCallId === part.toolCallId) {
-    return handoff.status
+  if (!handoff || handoff.toolCallId !== part.toolCallId) {
+    return 'missing'
   }
-  return 'missing'
+  return ai.uploadHandoffAvailability() ?? 'missing'
 }
 
 function uploadHandoffAccept(part: ToolPart): string[] | null {
@@ -2928,9 +2938,14 @@ function alertIcon(tone: keyof typeof ALERT_TONE): string {
 /**
  * R-165 S2：思考卡摘要（v7 `.rsum` 位）。蓝本写「已用 N 秒 · 点击展开」——本仓 reasoning 段
  * 无时长元数据（帧只带 text），故摘要取**字数 + 折叠动作**，不伪造时长。
+ *
+ * L-91：思考卡从"永不出现的死位"变成真实渲染面（后端开始产 `delta{kind:'reasoning'}`），
+ * 故文案改走词条（`ai.panel.thinkingChars/Expand/Collapse`，zh/en 双份对称）——
+ * 不能把一个中文硬编码摘要带进英文界面。
  */
 function reasoningSummary(text: string, expanded: boolean): string {
-  return `共 ${text.length} 字 · ${expanded ? '点击收起' : '点击展开'}`
+  const action = expanded ? t('ai.panel.thinkingCollapse') : t('ai.panel.thinkingExpand')
+  return `${t('ai.panel.thinkingChars', { n: text.length })} · ${action}`
 }
 
 /**
@@ -3147,6 +3162,17 @@ function readOnlyFormValues(part: ToolPart): Record<string, unknown> | null {
   return readOnlyStateOf(part) === 'submitted' ? (part.submittedValues ?? null) : null
 }
 
+/**
+ * 发送代次（L-83）：每次 `send()` 领一个自增号，收尾只有**仍是当代**时才可写输入框。
+ *
+ * <p>为什么需要：停止与回车同 tick 的竞态里，"被停止的旧轮"与"刚发出的新轮"两个 `send()`
+ * 同时在飞。旧轮的 `ai.send()` 因轮次身份被换掉而收尾为 `interrupted`（不是 `cancelled`），
+ * 于是走失败还原把**旧轮自己的草稿**（= 上一条用户消息）写回输入框；新轮随后被 409 拒，
+ * 其还原又被 `inputText !== ''`（误判成"用户刚输入了新内容"）挡掉 ⇒ 用户刚打的草稿被
+ * 上一条用户消息静默覆盖。代次判定把"输入框的主人"收窄成**最后一次发送**。
+ */
+let sendGeneration = 0
+
 async function send(): Promise<void> {
   const draft = inputText.value
   const text = draft.trim()
@@ -3177,11 +3203,17 @@ async function send(): Promise<void> {
       skipUserRecord = true
     }
   }
+  const generation = ++sendGeneration
   inputText.value = ''
   composerRef.value?.focus({ preventScroll: true })
   const result = skipUserRecord
     ? await ai.send(text, { skipUserRecord: true })
     : await ai.send(text)
+  // 已被更晚的发送取代：这一轮不再拥有输入框 —— 草稿/编辑锚点一律不写（L-83：否则旧轮的
+  // 还原会把上一条用户消息盖到新轮草稿上，新轮再因"输入框非空"放弃还原）。
+  if (generation !== sendGeneration) {
+    return
+  }
   // 成功 / 主动停止：保持已清空，草稿不回流。
   if (result.outcome === 'ok' || result.outcome === 'cancelled') {
     return

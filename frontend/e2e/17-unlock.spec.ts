@@ -139,19 +139,54 @@ test.describe('@stub A 上传交接卡', () => {
   })
 
   /**
-   * A-10 区域消失后的交接卡 —— **本轮不承载（产品未实现，发现项）**。
+   * A-10 区域消失后的交接卡（L-85 修复后转真断言）。
    *
-   * 实测（2026-10-23，本域复现）：应用内离开导入向导后 `import.upload` 区域已注销，
-   * 但卡面仍为 `waiting`、`upload-handoff-choose` **仍可点**。原因在
-   * `components/AiPanel/AiPanel.vue#uploadHandoffStatus`：活动交接存在时直接回 `handoff.status`，
-   * 从不调用 store 的 `uploadHandoffAvailability()`（该函数才会按 `resolveUploadRegion` 判 missing）。
-   * 继续点「选择文件」会走到 `chooseUploadFile`：`region` 取不到 ⇒ `receiveFile` 不执行，
-   * 却仍以 `succeeded` 回灌「用户已选择文件…并交给导入向导」，即**谎报上传成功**。
-   * 修这一条要改既有 `AiPanel.vue`（本批不得改既有文件），故记为发现项 F-UNLOCK-1，
-   * 不写"断言缺陷行为"的假绿用例。
+   * 旧形态（本域 2026-10-23 实测，发现项 F-UNLOCK-1）：应用内离开导入向导后 `import.upload`
+   * 区域已注销，但卡面仍为 `waiting`、`upload-handoff-choose` 仍可点；点下去 `chooseUploadFile`
+   * 取不到 `region` ⇒ `receiveFile` 不执行，却仍以 `succeeded` 回灌「…并交给导入向导」= 谎报。
+   *
+   * <p>修后口径：卡面状态与「可操作性」同源（`uploadHandoffAvailability()`）⇒ 区域不在本页即
+   * `missing`（主按钮禁用 + 指路「请先打开导入向导第 1 步」）；且**即便直达 store 走旧点击路径**
+   * 也以 `failed` + 人话原因收口，回灌文本里不得出现「交给导入向导」。
    */
-  test.skip('E2E-A10 区域消失：交接卡转 missing（产品未实现，见 F-UNLOCK-1）', async () => {
-    /* 见上方说明：缺的是 AiPanel 对 uploadHandoffAvailability() 的消费 */
+  test('E2E-A10 区域消失：交接卡转 missing（不可点），直达 choose 也不谎报成功', async ({ page, request }) => {
+    const taskId = await createImportTaskAtStep(request, 'UPLOAD')
+    await openImportUpload(page, taskId)
+    await startUploadHandoff(page)
+    await expect(page.locator('[data-testid="upload-handoff-choose"]')).toBeEnabled()
+
+    // 应用内离开导入向导（不做刷新：刷新走的是"按快照重建"的另一条路）
+    await page.locator('header .el-menu-item', { hasText: '任务中心' }).first().click()
+    await expect(page.locator('footer')).not.toContainText('task:IMPORT/UPLOAD', { timeout: 30_000 })
+    await expect(page.locator('[data-ai-ref="import.upload.choose"]')).toHaveCount(0, { timeout: 20_000 })
+
+    // ① 卡面转 missing：主按钮不可点 + 指路；放弃仍可用（不是死卡）
+    const choose = page.locator('[data-testid="upload-handoff-choose"]')
+    await expect(choose).toBeDisabled({ timeout: 20_000 })
+    await expect(page.locator('[data-testid="upload-handoff-hint"]')).toContainText('请先打开导入向导')
+    await expect(page.locator('[data-testid="upload-handoff-cancel"]')).toBeEnabled()
+    // ② store 侧判据同向：建卡时记的 status 不变，但"现在能不能交"已为 missing
+    expect((await activeHandoff(page))?.status).toBe('waiting')
+
+    // ③ 直达 choose（旧点击路径）不得谎报成功：回灌文本必须是"本次未执行上传"
+    const results: string[] = []
+    page.on('request', (req) => {
+      if (req.url().includes('/api/ai/frontend-tool-result') && req.method() === 'POST') {
+        results.push(req.postData() ?? '')
+      }
+    })
+    await page.evaluate(async () => {
+      const host = window as unknown as { __unlockImport?: (path: string) => Promise<unknown> }
+      const load = async (path: string) => (host.__unlockImport ? host.__unlockImport(path) : import(path))
+      const mod = await load('/src/stores/ai.ts') as { useAiStore: () => { chooseUploadFile: () => Promise<void> } }
+      await mod.useAiStore().chooseUploadFile()
+    })
+    await expect.poll(() => results.length, { timeout: 20_000 }).toBe(1)
+    expect(results[0]).not.toContain('交给导入向导')
+    expect(results[0]).toContain('本次未执行上传')
+    expect(results[0]).toContain('failed')
+    await expect(handoffCard(page)).toHaveCount(0, { timeout: 20_000 })
+    expect(await activeHandoff(page)).toBeNull()
   })
 
   /**

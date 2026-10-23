@@ -2810,6 +2810,19 @@ describe('R-163：Markdown 正文链路 / 白名单 / 工具摘要 / 赞踩 / �
     expect(html).not.toContain('href="javascript:') // markdown-it validateLink 拒链（残留仅为惰性文本）
   })
 
+  /**
+   * L-86（真机 E2E 批③ MDXY 域观察）：markdown-it 把 `~~x~~` 渲染成 `<s>`，
+   * 而白名单只放行 `del` ⇒ 消毒阶段把元素剥掉、只留文字（页面静默降级成纯文本、`.md-body`
+   * 里 `s` 计数 0）。判据 = **元素保留**且标记不外泄成文字。
+   */
+  it('L-86：~~删除线~~ 消毒后仍是删除线（s 元素保留，不降级成纯文本）', async () => {
+    const { renderMarkdown } = await import('@/utils/markdown')
+    const { html } = renderMarkdown('这句 ~~划掉~~ 了', false)
+    expect(html).toContain('划掉')
+    expect(html).toMatch(/<s>划掉<\/s>/)
+    expect(html).not.toContain('~~')
+  })
+
   it('T1 流式围栏：未闭合尾围栏渲染纯文本（无高亮 class），闭合后二次渲染才 language-*', async () => {
     const { renderMarkdown } = await import('@/utils/markdown')
     const open = renderMarkdown('```js\nconst a = 1\nconst b', true)

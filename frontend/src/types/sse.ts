@@ -185,6 +185,17 @@ export interface SseStartFrame extends SseFrameBase {
 export interface SseDeltaFrame extends SseFrameBase {
   type: 'delta'
   text: string
+  /**
+   * 段归属（L-91 起后端真实产出思考段）：
+   * - **缺省 / `'text'`** = 正文增量 —— 旧帧没有该键，键集合逐字不变（additive 口径）；
+   * - `'reasoning'` = 思考增量（上游 `reasoning_content` 的透传，配
+   *   `message_start/message_end` 的 `kind='reasoning'` 边界，后端 `SseChatEmitter#reasoningDelta`）。
+   *
+   * 为什么是"可选键"而不是第 17 种帧型：帧类型集冻结在 16（后端 `FrameTypeSetFrozenTest`
+   * 双端比对守卫），而思考段需要的信息只有"这一段属于哪种段" —— 边界帧早已带 `kind`，
+   * 补上 delta 侧的同一位即可，双端白名单 / conformance / 桩协议都不必新增帧型。
+   */
+  kind?: 'text' | 'reasoning'
   /** DC-14 T5：本片正文所属的助手消息 id（消息级渲染/去重的判据） */
   messageId?: string
 }
@@ -194,7 +205,8 @@ export interface SseDeltaFrame extends SseFrameBase {
  *
  * 为什么需要它：一条助手消息可能"先思考、再正文、中间夹工具调用"，只有 content 帧时
  * 客户端无法判断两段文本属于同一条消息还是两条（SP-01ab §7.3 的混合消息渲染痛点）。
- * `kind` 区分文本段（`text`）与思考段（`reasoning`，后端今天不产 reasoning 帧，故实际只会出现 text）。
+ * `kind` 区分文本段（`text`）与思考段（`reasoning`）—— **L-91 起两者都是真实产出的**
+ * （思考段由后端 `SseChatEmitter#reasoningDelta` 开出，段内 delta 带 `kind='reasoning'`）。
  */
 export interface SseMessageBoundaryFrame extends SseFrameBase {
   type: 'message_start' | 'message_end'
@@ -390,12 +402,17 @@ export interface SseHeartbeatFrame extends SseFrameBase {
 }
 
 /**
- * 思考链增量（裁决⑦：**有帧才渲染**，无帧不显示空的"思考过程"折叠块）。
+ * 思考链增量的**历史/前向兼容**形态（裁决⑦：**有思考才有块**，无思考不显示空的"思考过程"折叠块）。
  *
- * 与后端实测帧集的差异（如实登记，不臆造）：`SseChatEmitter` **当前不产出该帧**
- * —— deepseek-flash 的 `reasoning_content` 只做回填补丁（ADR-4），不透传前端。
- * 故它**不在** {@link SseFrameTypes}（后端 13 类实测白名单）里，但前端按前向兼容解析：
- * 后端一旦补上该帧，面板的思考链折叠即自动生效，前端契约无需再改。
+ * <p>
+ * L-91（2026-10-23）起后端不再需要独立帧型：上游 `reasoning_content` 经
+ * `delta{kind:'reasoning'}` + `message_start/message_end{kind:'reasoning'}` 透传，
+ * 帧类型集仍是 16。本接口保留是因为**线上仍可能有旧桩/旧归档**发过 `type:'reasoning'`，
+ * 且 `toSseFrame` 对它是放行的（未知帧静默丢弃会让旧流少一段思考）——store/parts 对两种形态
+ * 都有承接（`case 'reasoning'` 与 `case 'delta'` 的 kind 分流）。
+ *
+ * 新代码请按 `SseDeltaFrame.kind === 'reasoning'` 解析；不要新增 `type:'reasoning'` 的发射点
+ * （后端 `FrameTypeSetFrozenTest` 会红）。
  */
 export interface SseReasoningFrame {
   type: 'reasoning'
@@ -496,7 +513,11 @@ export interface SseErrorFrame extends SseFrameBase {
   message: string
 }
 
-/** 一轮对话的 SSE 帧判别联合（后端 16 类 + 前向兼容的 reasoning）。 */
+/**
+ * 一轮对话的 SSE 帧判别联合（后端 **16** 类 + 前向兼容的旧 `reasoning` 帧）。
+ *
+ * 思考段自 L-91 起走 `delta{kind:'reasoning'}`（帧型不增），`SseReasoningFrame` 只兜旧流。
+ */
 export type SseFrame =
   | SseStartFrame
   | SseContextFrame

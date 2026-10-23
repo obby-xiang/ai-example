@@ -51,11 +51,13 @@ const MERMAID_TIMEOUT_MS = 3_000
 /** DOMPurify 白名单（§三.3）。span 仅限 class="hljs-*"（下方 hook 收窄）；
  *  R-163B G4：figure/figcaption/button 为代码块图容器（button 仅 type="button"，hook 强制）；
  *  R-163D D1 → R-165 S5a：div 为表格双区 wrapper（三区标记类，渲染层生成，hook 收窄）；
- *  R-165 S5a：svg/path/rect/polyline 仅承载复制图标钮的自绘图标（几何属性白名单）。 */
+ *  R-165 S5a：svg/path/rect/polyline 仅承载复制图标钮的自绘图标（几何属性白名单）。
+ *  L-86：`s`（markdown-it 的 `~~x~~` 产物）与 `del` 同级 —— 无属性、纯表现型元素，
+ *  缺失时消毒只剥元素留文字（页面静默降级成纯文本）。 */
 const ALLOWED_TAGS = [
   'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
   'ul', 'ol', 'li', 'table', 'thead', 'tbody', 'tr', 'th', 'td',
-  'code', 'pre', 'blockquote', 'em', 'strong', 'del', 'a', 'hr', 'br', 'img', 'span',
+  'code', 'pre', 'blockquote', 'em', 'strong', 'del', 's', 'a', 'hr', 'br', 'img', 'span',
   'figure', 'figcaption', 'button', 'div',
   'svg', 'path', 'rect', 'polyline'
 ]

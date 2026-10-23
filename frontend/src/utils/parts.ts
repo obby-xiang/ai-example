@@ -479,7 +479,8 @@ export function writeSubmittedValuesToMessage(
 /**
  * 帧 → 段序列的写入（只写 `message.parts` 与消息身份/流式标志，**不碰旧投影**）。
  *
- * 覆盖帧集：delta / reasoning / message_start / message_end / tool_start / tool_result /
+ * 覆盖帧集：delta（`kind` 缺省 = 正文 / `'reasoning'` = 思考段，L-91）/ reasoning（旧形态）/
+ * message_start / message_end / tool_start / tool_result /
  * confirm_request / confirm_decision / frontend_tool_request / frontend_tool_result / suspended。
  * 其它帧（start / heartbeat / retry / done / error）的语义留在 store 的 case 分支
  * （它们还带轮次级副作用），此处一律 no-op。
@@ -511,10 +512,14 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
       sealTrailingStreamPart(message)
       break
     case 'delta': {
-      const part = openStreamPart(message, 'text')
+      // L-91：`kind==='reasoning'` = 思考段增量（缺省 = 正文，旧帧行为一字不动）。
+      // 段的开合仍由边界帧/上一个段的状态机决定：`openStreamPart` 会在切换类型时封口末尾段。
+      const part = openStreamPart(message, frame.kind === 'reasoning' ? 'reasoning' : 'text')
       part.text += frame.text
       part.streaming = true
-      message.streaming = true
+      if (frame.kind !== 'reasoning') {
+        message.streaming = true
+      }
       break
     }
     case 'reasoning': {

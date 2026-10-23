@@ -11,6 +11,9 @@ import { createPinia, setActivePinia } from 'pinia'
 import type { ChatMessage } from '@/types/ai'
 import type { FormSpec } from '@/types/form-schema'
 import { useAiStore } from '@/stores/ai'
+import { useWorkspaceStore } from '@/stores/workspace'
+import { registerAiRegion, resetAiRegions, unregisterAiRegion } from '@/utils/ai-regions'
+import { ApiError } from '@/api/http'
 import FormRenderer from '@/components/AiPanel/FormRenderer.vue'
 
 const api = vi.hoisted(() => ({
@@ -223,6 +226,142 @@ describe('Q-05（P1）：流式中 chips 不得发送（不产生 409）', () =>
     expect(api.chat).not.toHaveBeenCalled() // 点击不发送
     expect(store.messages).toHaveLength(0) // 无幻影气泡
     wrapper.unmount()
+  }, 20_000)
+})
+
+describe('L-83（P1）：409 竞态停止时输入框 == 用户原草稿（不被上一条用户消息覆盖）', () => {
+  /**
+   * 真机实证（`e2e/10-srp.spec.ts` P-08 分支 C）：停止与回车同 tick 时，请求赶在停止收口前
+   * 发出、被后端 409 拒；提示与幻影气泡回收都对，输入框却被回填成**上一条用户消息**。
+   *
+   * <p>根因（本用例锁定）：两个 `send()` 同时在飞 —— 被停止的旧轮收尾为 `interrupted`
+   * （轮次身份已被新轮换掉 ⇒ 不是 `cancelled`），走"失败还原草稿"把**旧轮自己的草稿**写回
+   * 输入框；随后新轮 409 的还原被 `inputText !== ''`（误判成"用户刚输入了新内容"）挡掉。
+   * 判据 = 输入框逐字等于**用户刚打的草稿**，且两种收尾次序（旧轮先/409 先）都成立。
+   */
+  async function runRace(busyFirst: boolean): Promise<string> {
+    const store = useAiStore()
+    store.messages = [message('u0', 'user', '更早的消息'), message('a0', 'assistant', '更早的回答')]
+    store.loading = false
+    const wrapper = await mountPanel()
+
+    let releaseStale: (() => void) | null = null
+    let releaseBusy: (() => void) | null = null
+    api.chat
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        releaseStale = () => resolve({ terminal: true })
+      }))
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => {
+        releaseBusy = () => reject(new ApiError('该会话已有一轮对话在进行中', 409, 'SESSION_BUSY', {
+          code: 'SESSION_BUSY', runId: 'run-l83', reattach: '/api/ai/events/run-l83'
+        }))
+      }))
+
+    const composer = wrapper.find('[data-testid="composer-input"]')
+    await composer.setValue('上一条用户消息')
+    ;(wrapper.find('[data-testid="send-btn"]').element as HTMLElement).click()
+    await wrapper.vm.$nextTick()
+    expect(api.chat).toHaveBeenCalledTimes(1)
+
+    // 同 tick：停止 + 回车（用户刚打的草稿在输入框里）
+    await composer.setValue('用户刚打的草稿')
+    ;(wrapper.find('[data-testid="stop-btn"]').element as HTMLElement).click()
+    composer.element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }))
+    await wrapper.vm.$nextTick()
+    expect(api.chat).toHaveBeenCalledTimes(2)
+
+    if (busyFirst) {
+      releaseBusy!()
+      await flushPromises()
+      releaseStale!()
+    } else {
+      releaseStale!()
+      await flushPromises()
+      releaseBusy!()
+    }
+    await flushPromises()
+    const value = (wrapper.find('[data-testid="composer-input"]').element as HTMLTextAreaElement).value
+    wrapper.unmount()
+    return value
+  }
+
+  it('旧轮迟到收尾先到（真机形态）：输入框仍是用户原草稿', async () => {
+    expect(await runRace(false)).toBe('用户刚打的草稿')
+  }, 20_000)
+
+  it('409 先到：输入框仍是用户原草稿（对称次序）', async () => {
+    expect(await runRace(true)).toBe('用户刚打的草稿')
+  }, 20_000)
+})
+
+describe('L-85（P1）：区域消失后交接卡不可点、点下去不谎报', () => {
+  /** 一条待动作的上传交接段（`ui_request_upload` = 唯一的人围栏前端工具）。 */
+  function handoffMessage(): ChatMessage {
+    return {
+      ...message('a-up', 'assistant', '需要你选一个文件。', { streaming: true, done: false }),
+      parts: [
+        { kind: 'text', seg: 0, text: '需要你选一个文件。', streaming: false },
+        {
+          kind: 'tool',
+          seg: 1,
+          toolCallId: 'h1',
+          name: 'ui_request_upload',
+          kind2: 'FRONTEND',
+          status: 'pending',
+          args: JSON.stringify({ accept: ['xlsx'] }),
+          requiresAction: true
+        }
+      ]
+    }
+  }
+
+  function registerUploadRegion(): void {
+    const root = document.createElement('div')
+    root.innerHTML = '<button data-ai-ref="import.upload.choose" aria-label="上传 xlsx / zip">上传</button>'
+    document.body.appendChild(root)
+    registerAiRegion({
+      id: 'import.upload',
+      root,
+      risk: 'consequential',
+      page: 'import',
+      label: '上传区',
+      uploadEntry: 'import.upload.choose',
+      receiveFile: async () => '匹配 1 个配置项'
+    })
+  }
+
+  it('离开导入向导（区域注销）⇒ 卡面转 missing：主按钮 disabled + 指路；区域仍在 ⇒ 可点', async () => {
+    resetAiRegions()
+    registerUploadRegion()
+    const store = useAiStore()
+    store.messages = [message('u-up', 'user', '把这个配置导进去'), handoffMessage()]
+    store.activeUploadHandoff = {
+      toolCallId: 'h1',
+      runId: null,
+      ref: 'import.upload.choose',
+      accept: ['xlsx'],
+      status: 'waiting',
+      reason: null,
+      filename: null
+    }
+    const wrapper = await mountPanel()
+
+    const choose = () => wrapper.get('[data-testid="upload-handoff-choose"]')
+    expect(choose().attributes('disabled')).toBeUndefined() // 区域仍在 ⇒ 可点
+    expect(store.uploadHandoffAvailability()).toBe('waiting')
+
+    // 用户离开导入向导：页面卸载注销区域 + 工作区换页（真实重渲染的触发源）
+    unregisterAiRegion('import.upload')
+    useWorkspaceStore().enterPage({ pageId: 'tasks' })
+    await wrapper.vm.$nextTick()
+
+    expect(store.activeUploadHandoff?.status).toBe('waiting') // 建卡那一刻的分流（"当时"的结论）
+    expect(store.uploadHandoffAvailability()).toBe('missing') // 卡面必须按"现在"算
+    expect(choose().attributes('disabled')).toBeDefined()     // 主按钮不可点
+    expect(wrapper.get('[data-testid="upload-handoff-hint"]').text()).toContain('请先打开导入向导')
+    expect(wrapper.get('[data-testid="upload-handoff-cancel"]').attributes('disabled')).toBeUndefined()
+    wrapper.unmount()
+    resetAiRegions()
   }, 20_000)
 })
 

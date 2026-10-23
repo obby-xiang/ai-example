@@ -878,6 +878,15 @@ function resolveUploadRegion(refArg: string | null): { region: AiRegion; entry: 
   return null
 }
 
+/**
+ * 上传交接的两种"交不出去"人话原因（**模型侧单语串，按 C5 红线留源码**）。
+ *
+ * 三处共用同一份字面量（建卡闸 / 卡面已 missing 时的 choose / 选文件期间区域消失），
+ * 避免同一句话在三处漂移；`check-i18n-residue` 按文件计行，提取成常量不增残留。
+ */
+const UPLOAD_NO_REGION_TEXT = '当前页面没有可用的上传入口（请先打开导入向导的第 1 步），本次未执行上传。'
+const UPLOAD_READONLY_TEXT = '任务已结束，仅供查看；上传入口在只读页面不可用，本次未执行上传。'
+
 /** 高亮上传入口（失败不影响交接主流程：高亮是"引导"，不是前提）。 */
 function highlightUploadEntry(ref: string): void {
   try {
@@ -3071,11 +3080,11 @@ export const useAiStore = defineStore('ai', {
       }
       const target = resolveUploadRegion(validated.value.ref)
       if (!target) {
-        await fail('当前页面没有可用的上传入口（请先打开导入向导的第 1 步），本次未执行上传。')
+        await fail(UPLOAD_NO_REGION_TEXT)
         return
       }
       if (target.region.readOnly?.() === true) {
-        await fail('任务已结束，仅供查看；上传入口在只读页面不可用，本次未执行上传。')
+        await fail(UPLOAD_READONLY_TEXT)
         return
       }
       // 高亮入口（把用户送到上传按钮；视觉零变化，只加描边 + 徽标 + 播报）
@@ -3105,13 +3114,26 @@ export const useAiStore = defineStore('ai', {
     /**
      * 用户点交接卡的「选择文件」。
      *
-     * **手势约束（规范级，不得重构掉）**：本方法第一行就同步调用 `requestFilePicker`
-     * —— 浏览器只在用户手势的同一调用栈里给出 transient activation，首个 `await` 之后再叫
-     * 会被拒（`NotAllowedError`）。
+     * **手势约束（规范级，不得重构掉）**：本方法**首个 `await` 之前**必须同步调用
+     * `requestFilePicker` —— 浏览器只在用户手势的同一调用栈里给出 transient activation，
+     * 首个 `await` 之后再叫会被拒（`NotAllowedError`）。区域存活判定是同步读写，故可放在它之前。
+     *
+     * <p>
+     * **L-85**：可操作性判据**与卡面同源** = `uploadHandoffAvailability()`（不是建卡那一刻的
+     * `handoff.status`）。`missing`（区域已不在当前页 / 只读页）⇒ 不打开文件对话框，
+     * 直接以 `failed` + 人话原因收口。旧实现在 `region === null` 时跳过 `receiveFile` 却仍以
+     * `succeeded` 回灌「已交给导入向导」= 谎报上传成功。
      */
     async chooseUploadFile(): Promise<void> {
       const handoff = this.activeUploadHandoff
-      if (!handoff || handoff.status !== 'waiting') {
+      if (!handoff) {
+        return
+      }
+      if (this.uploadHandoffAvailability() === 'missing') {
+        // 不打开文件对话框：区域都没了，选了也无处可交 —— 直接如实收口（不谎报、不留死卡）。
+        const target = handoff.ref ? resolveUploadRegion(handoff.ref) : null
+        const readOnly = target?.region.readOnly?.() === true
+        await this.finishUploadHandoff(handoff, 'failed', readOnly ? UPLOAD_READONLY_TEXT : UPLOAD_NO_REGION_TEXT, false)
         return
       }
       const picked = requestFilePicker(handoff.accept)
@@ -3143,9 +3165,14 @@ export const useAiStore = defineStore('ai', {
         return
       }
       const name = uploadFileNameOf(file)
+      // 选文件期间区域可能消失（用户切页 / 页面卸载）—— 同一条判据，不得谎报成功。
       const region = handoff.ref ? resolveUploadRegion(handoff.ref)?.region ?? null : null
+      if (region === null || region.root.isConnected !== true) {
+        await this.finishUploadHandoff(handoff, 'failed', UPLOAD_NO_REGION_TEXT, false)
+        return
+      }
       let summary = ''
-      if (region?.receiveFile) {
+      if (region.receiveFile) {
         try {
           summary = await region.receiveFile(file)
         } catch (error) {
@@ -4311,14 +4338,23 @@ export const useAiStore = defineStore('ai', {
           applyFrameToParts(message, frame)
           break
         case 'delta': {
-          // 高频路径（§6.1 性能注）：段文本与派生投影 content **锁步** `+=`，不调 deriveProjections
+          // 高频路径（§6.1 性能注）：段文本与派生投影 **锁步** `+=`，不调 deriveProjections
           //（全量重算会每 token 替换 toolRuns 数组 ⇒ 工具卡列表整列重渲染）
-          message.content += frame.text
+          //
+          // L-91：段归属看帧上的 additive 键 `kind` —— 缺省 = 正文（旧帧）；`'reasoning'` = 思考段。
+          // 思考文本进 `reasoning` 投影、正文进 `content` 投影，两者同源（parts 段）但互不混入
+          //（`deriveProjections` 的 join 口径与这里逐帧累加必须一致，见 utils/parts.ts）。
+          if (frame.kind === 'reasoning') {
+            message.reasoning += frame.text
+          } else {
+            message.content += frame.text
+          }
           applyFrameToParts(message, frame)
           break
         }
         case 'reasoning': {
           // 裁决⑦：有 reasoning 帧才渲染思考链（无帧则 reasoning 恒空 → 面板不显示折叠块）
+          // 旧形态兜底（L-91 起后端改发 delta{kind:'reasoning'}；本条只服务旧桩/旧归档回放）
           message.reasoning += frame.text
           applyFrameToParts(message, frame)
           break

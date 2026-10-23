@@ -310,7 +310,7 @@ export interface ChatMessage {
    * 任何新写入点都必须写段、再派生 —— 直接写旧字段会与段漂移。
    */
   parts: MessagePart[]
-  /** 思考链文本（= reasoning 段 join；后端当前不产 reasoning 帧，留字段供前向兼容） */
+  /** 思考链文本（= reasoning 段 join；L-91 起由 `delta{kind:'reasoning'}` 累积而来） */
   reasoning: string
   toolRuns: ToolRun[]
   /** 当前挂起（待确认 / 待前端执行）的工具调用：= 最后一个 requiresAction 的工具段派生 */
@@ -362,7 +362,7 @@ export interface TextPart extends MessagePartBase {
   streaming: boolean
 }
 
-/** 思考段（reasoning 帧；后端当前不产出，照帧结构预留）。 */
+/** 思考段（`delta{kind:'reasoning'}` 的累积分段；L-91 起后端真实产出）。 */
 export interface ReasoningPart extends MessagePartBase {
   kind: 'reasoning'
   text: string

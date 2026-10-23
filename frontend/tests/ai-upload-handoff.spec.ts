@@ -319,6 +319,65 @@ describe('T-38：刷新恢复（两种形态：可继续 / 已离页）', () => 
   })
 })
 
+/**
+ * L-85（真机 E2E 批③ 解锁域观察）：区域消失后 choose **不得谎报成功**。
+ *
+ * <p>旧形态：`region` 取不到 ⇒ 跳过 `receiveFile` 却仍以 `succeeded` 回灌
+ * 「用户已选择文件…并交给导入向导」—— 用户离开导入向导页后点「选择文件」，模型会被告知
+ * 文件已交给向导（实际什么都没发生）。判据 = 结局为 `failed` + 人话原因 + 零文件交付。
+ */
+describe('L-85：区域消失后的 choose（不谎报、不留死卡）', () => {
+  it('建卡后离开导入向导 ⇒ choose 走 failed，不打开 picker、不回灌「交给导入向导」', async () => {
+    enterImportPage()
+    installRegion()
+    const picker = installPicker([new File(['bytes'], '甲.xlsx')])
+    const store = useAiStore()
+    const { message, frame } = armFrame(store)
+    await store.openUploadHandoff(message, frame)
+    expect(store.activeUploadHandoff?.status).toBe('waiting')
+
+    unregisterAiRegion('import.upload') // 用户离开导入向导页（区域注销）
+    await store.chooseUploadFile()
+
+    expect(picker).not.toHaveBeenCalled() // 区域都没了，不再弹文件对话框
+    expect(received).toHaveLength(0)     // 页面没收到任何文件
+    const submitted = lastSubmitted()
+    expect(submitted.result).not.toContain('并交给导入向导') // 不谎报
+    expect(submitted.result).toContain('导入向导')            // 指路
+    expect(submitted.result).toContain('本次未执行上传')
+    expect(submitted.outcome).toBe('failed')
+    expect(store.activeUploadHandoff).toBeNull() // 死卡收口（不悬挂等人）
+    const segment = store.messages
+      .flatMap((item) => item.parts)
+      .find((part) => part.kind === 'tool' && part.toolCallId === 'ui-up-1')
+    expect(segment?.kind === 'tool' ? segment.status : null).toBe('failed')
+  })
+
+  it('选文件期间区域消失（picker 已给出文件）⇒ 同样 failed，不谎报', async () => {
+    enterImportPage()
+    installRegion()
+    let release: (() => void) | null = null
+    const picker = vi.fn(() => new Promise<Array<{ getFile: () => Promise<File> }>>((resolve) => {
+      release = () => resolve([{ getFile: async () => new File(['bytes'], '乙.xlsx') }])
+    }))
+    ;(window as unknown as { showOpenFilePicker?: unknown }).showOpenFilePicker = picker
+    const store = useAiStore()
+    const { message, frame } = armFrame(store)
+    await store.openUploadHandoff(message, frame)
+
+    const pending = store.chooseUploadFile() // picker 挂着 = 文件对话框开着
+    expect(picker).toHaveBeenCalledTimes(1)
+    unregisterAiRegion('import.upload') // 对话框期间用户切走 / 页面卸载
+    release!()
+    await pending
+
+    expect(received).toHaveLength(0)
+    expect(lastSubmitted().result).not.toContain('并交给导入向导')
+    expect(lastSubmitted().outcome).toBe('failed')
+    expect(store.activeUploadHandoff).toBeNull()
+  })
+})
+
 describe('交接卡组件（三态渲染）', () => {
   function mountCard(status: 'waiting' | 'degraded' | 'missing' | 'unavailable', reason: string | null = null) {
     return mount(UploadHandoffCard, {
