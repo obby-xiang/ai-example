@@ -1,0 +1,431 @@
+name: 夜间全量（选择性测试兜底）
+
+# 设计稿 docs/research/设计-选择性测试落地方案-2026-10-23.md §2.3 / §7.3-④，开放点 O2（用户裁「上」）。
+#
+# 夜间 job 是**四件事的唯一载体**（缺了它，选择性测试就没有兜底面）：
+#   ① 倒排表保鲜 —— 每夜重建 `backend/target/testmap/map.json`（表不落仓，O1；只作 artifact）；
+#   ② 漏测兜底 —— 三个 job 无条件全量跑，本地选择集漏掉的在夜间被抓住；
+#   ③ flake 发现 —— 选择集跑得少 ⇒ 遇 flake 机会少，夜间全量是唯一的稳定发现面（§6.3）；
+#   ④ 确定性校验 —— 连录两次比条目差异（F12 / B7）。
+#
+# 与 ci.yml 的关系（刻意不同）：
+#   - **不复用 `changes` 跳过逻辑**：夜间没有"变更集"，跳过就等于取消兜底。backend / frontend /
+#     e2e 三个 job 无条件执行（这是 §7.3-④「全量三 job」的字面含义）。
+#   - **不作为 required check**：夜间失败不进 PR 闸门，只进通知/看板。
+#   - 后端跑**双 locale**（默认 + JVM en-US）：F13 的 locale/时区面在夜间的全量下才有覆盖。
+#
+# 确定性校验口径（§7.3-④ / §6.1 F12，写死在此避免下次误读）：
+#   本仓存在**异步触达差异**（后台线程/回调在测试结束后落库，探针无线程归属 ⇒ 同一 tree 两次录制
+#   天然会抖）。录制器 `TestmapRecorder` 已内置处置：第二次全量录制会与 `map.json` 逐测试类比对，
+#   记录 `deterministic` / `deterministicDiff` / `unionRepaired` / `unstableTests`，并对差异类**取并集**
+#   （只会多选测试）+ 钉进永久冒烟集。故本 job 的判据 = **并集修复后差异不增长**：
+#     · `deterministicDiff = 0` ⇒ 绿（理想态，连续 14 天恒 0 可把 `DETERMINISM_MAX_DIFF` 收紧到 0）；
+#     · `0 < diff <= DETERMINISM_MAX_DIFF` 且 `unionRepaired = true` ⇒ 绿 + `::warning::`（并集已修复，
+#       差异数打印出来备查；阈值是"不增长"的棘轮，不许上调）；
+#     · `unionRepaired = false` 或 `diff > 阈值` ⇒ 红（差异没被修复，选择集不可信）。
+#
+#   ★ 实测副作用（2026-10-23 本机，必读）：差异类被并集修复后会进 `meta.unstableTests`，而
+#     `select-tests.mjs` 把 `unstableTests` 并入**冒烟集**（§3.6）⇒ 每笔提交都要多跑这些类。
+#     本机实测 33 类不稳定 ⇒ 选择集从 23 类（140 例 / 47 s）膨胀到 54 类（356 例 / 134 s）。
+#     因此录制**必须在静默环境**跑（夜间专用 runner 正是为此），否则一次高负载录制会永久拖慢
+#     所有提交级门禁 —— 这是本 job 能稳定跑满 14 天之外的第二重价值（差异数即负载噪声计）。
+#
+# 触发：schedule（UTC 18:17 = 北京时间 02:17，避开整点排队；GitHub 的 cron 只认 UTC）+
+#   workflow_dispatch（手工重跑/排障）。
+
+on:
+  schedule:
+    - cron: '17 18 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 夜间与手工重跑串行，避免两个全量互相抢 runner/缓存；不取消进行中的（全量的价值就在跑完）。
+concurrency:
+  group: nightly-full
+  cancel-in-progress: false
+
+env:
+  # 并集修复后允许的最大条目差异数（棘轮，**只许下调**）。
+  # 2026-10-23 本机实测：同 tree 连录两次，261 个测试类里 33 类依赖集不同（deterministicDiff=33，
+  # unionRepaired=true，引擎判 BUILD SUCCESS）。该数含"两次录制负载不同"带来的噪声（一次在繁忙
+  # 工作树、一次在静默副本），故阈值先取 40（≈ +20% 余量）；首夜在专用 runner 上跑出真实数字后
+  # 收紧到「实测值 + 1」，再逐步降到 0。**不许上调**：上调等于承认表在变差。
+  DETERMINISM_MAX_DIFF: '40'
+
+jobs:
+  # ============================================================
+  # 后端全量（默认 locale + JVM en-US）
+  #   与 ci.yml 的 backend job 同一命令集，差别只有两个：无 `if`（无条件跑）、多跑一遍 en-US。
+  #   两跑之间清 surefire-reports：计数口径 = `TEST-*.xml` 求和（与看板既有门禁口径一致），
+  #   不清会把上一跑的 XML 一起算进去。
+  # ============================================================
+  backend:
+    name: 后端全量（默认 locale + en-US）
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: 安装 JDK 21（temurin）
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          cache-dependency-path: backend/pom.xml
+
+      - name: 后端全量（默认 locale）
+        run: |
+          rm -rf target/surefire-reports target/surefire-default
+          mvn -B test
+          # 两跑的报告都要留证：en-US 跑会覆盖 target/surefire-reports，故先挪走。
+          cp -r target/surefire-reports target/surefire-default
+
+      - name: 后端全量（JVM en-US）
+        run: |
+          rm -rf target/surefire-reports
+          # L-61 口径：MAVEN_OPTS 只作用于 Maven 自身 JVM，surefire fork 只认 -DargLine。
+          mvn -B test -DargLine="-Duser.language=en -Duser.country=US"
+
+      - name: 归档 surefire 报告（失败也归档，保留 14 天）
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: nightly-surefire
+          path: |
+            backend/target/surefire-reports
+            backend/target/surefire-default
+          retention-days: 14
+          if-no-files-found: warn
+
+  # ============================================================
+  # 前端全量（typecheck + vitest + build）
+  #   与 ci.yml 的 frontend job 同一命令集，无 `if`。
+  # ============================================================
+  frontend:
+    name: 前端全量（typecheck + vitest + build）
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: 安装 Node 22
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: yarn
+          cache-dependency-path: frontend/yarn.lock
+
+      - name: 安装依赖（严格按锁文件）
+        run: yarn install --frozen-lockfile
+
+      - name: 类型检查（vue-tsc --noEmit）
+        run: yarn typecheck
+
+      - name: 单元测试（vitest run，全量）
+        run: yarn test
+
+      - name: 生产构建（vue-tsc + vite build）
+        run: yarn build
+
+  # ============================================================
+  # E2E 全流程（与 ci.yml 的 e2e job 逐字同一命令集）
+  #   差异只在条件：ci.yml 用 `!cancelled() && needs.backend.result == 'success' && 变更集命中`，
+  #   这里去掉变更集一项（夜间无条件跑），保留"后端红则不白跑 25 分钟"。
+  # ============================================================
+  e2e:
+    name: E2E 全流程（35 用例 · 桩上游 + redis）
+    needs: [backend]
+    if: ${{ !cancelled() && needs.backend.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      E2E_STUB_MODE: '1'
+    services:
+      redis:
+        image: redis:7.2.16
+        ports: ['6379:6379']
+        command: --maxmemory-policy noeviction
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: 安装 JDK 21（temurin）
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          cache-dependency-path: backend/pom.xml
+
+      - name: 安装 Node 22
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: 打包后端（跳过单测：单测已由 backend job 全量跑过）
+        run: mvn -B -DskipTests package
+
+      - name: 桩上游自检（路由契约 / 白名单对账 / 收敛自证）
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci/stub-upstream.mjs --self-check
+
+      - name: 启动桩上游（127.0.0.1:18399）
+        working-directory: ${{ github.workspace }}
+        run: |
+          mkdir -p backend/target/e2e-artifacts/stub
+          nohup node scripts/ci/stub-upstream.mjs --port 18399 --violate-form-type \
+            --dir "$GITHUB_WORKSPACE/backend/target/e2e-artifacts/stub" \
+            > >(tee -a backend/target/e2e-artifacts/stub.log) 2>&1 &
+          echo $! > backend/target/e2e-artifacts/stub.pid
+          sleep 2
+          curl -sS -m 5 http://127.0.0.1:18399/probe
+
+      - name: 启动后端（占位 key + 桩上游 + 工作目录在仓库外）
+        working-directory: ${{ github.workspace }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/e2e-run"
+          cd "$RUNNER_TEMP/e2e-run"
+          AI_API_KEY=ci-stub-placeholder \
+          AI_BASE_URL=http://127.0.0.1:18399 \
+          AI_MODEL=ci-stub \
+          nohup java -jar "$GITHUB_WORKSPACE/backend/target/config-mgr.jar" \
+            --server.port=18330 \
+            --spring.datasource.url="jdbc:h2:file:./data/ci_e2e_db;DB_CLOSE_DELAY=-1" \
+            --app.job.batch-size=10 \
+            --app.job.demo-batch-delay-ms=150 \
+            --app.ai.limit.session-per-minute=200 \
+            --app.ai.limit.ip-per-minute=2000 \
+            > "$GITHUB_WORKSPACE/backend/target/e2e-artifacts/boot.log" 2>&1 &
+          echo $! > "$GITHUB_WORKSPACE/backend/target/e2e-artifacts/backend.pid"
+
+      - name: 就绪等待（/api/ai/health：available + redis.available）
+        working-directory: ${{ github.workspace }}
+        run: |
+          for i in $(seq 1 90); do
+            body=$(curl -s -m 3 http://127.0.0.1:18330/api/ai/health || true)
+            if echo "$body" | jq -e '.available == true and .redis.available == true' >/dev/null 2>&1; then
+              echo "后端就绪：$body"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::后端 90s 内未就绪"
+          tail -n 80 backend/target/e2e-artifacts/boot.log
+          exit 1
+
+      - name: 种子就绪等待（/api/definitions 的 data 长度 ≥ 15）
+        working-directory: ${{ github.workspace }}
+        run: |
+          for i in $(seq 1 60); do
+            n=$(curl -s -m 3 http://127.0.0.1:18330/api/definitions | jq '.data | length' 2>/dev/null || echo 0)
+            if [ "${n:-0}" -ge 15 ]; then echo "种子就绪：定义数=$n"; exit 0; fi
+            sleep 1
+          done
+          echo "::error::60s 内 /api/definitions 未达 15"
+          tail -n 40 backend/target/e2e-artifacts/boot.log
+          exit 1
+
+      - name: 运行 E2E（35 用例）
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          ./scripts/verify-e2e.ps1 `
+            -Base http://127.0.0.1:18330 `
+            -BackendLog "$env:GITHUB_WORKSPACE/backend/target/e2e-artifacts/boot.log" `
+            -ArtifactDir "$env:GITHUB_WORKSPACE/backend/target/e2e-artifacts/gfc" `
+            -EnableGf6
+
+      - name: 归档证据（失败也归档，保留 7 天）
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: nightly-e2e-evidence
+          path: backend/target/e2e-artifacts
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: 收尾（结束后端与桩进程）
+        if: always()
+        working-directory: ${{ github.workspace }}
+        run: |
+          dir=backend/target/e2e-artifacts
+          for f in "$dir/backend.pid" "$dir/stub.pid"; do
+            if [ -f "$f" ]; then kill "$(cat "$f")" 2>/dev/null || true; fi
+          done
+
+  # ============================================================
+  # 倒排表：重建 + 保鲜自检 + 确定性校验（§2.3 / §7.3-④）
+  #   顺序即语义：先自检脚本（规则表漂移在这里先红），再连录两次（第二次才比得上差异）。
+  #   表与审计都只作 artifact（O1：不落仓）。
+  # ============================================================
+  testmap:
+    name: 倒排表重建 + 校验
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # 录制器要取 headSha / blobSha / 源码 FQN 集（K2 自测闸），浅克隆拿不到。
+          fetch-depth: 0
+
+      - name: 安装 JDK 21（temurin）
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          cache-dependency-path: backend/pom.xml
+
+      - name: 安装 Node 22
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: 变更集分类器自检（规则表 / 基准解析 / 输出协议）
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci/changed-files.mjs --self-check
+
+      - name: 选择器纯函数单测（F1~F13 兜底规则）
+        working-directory: ${{ github.workspace }}
+        run: node --test scripts/ci/select-tests.test.mjs
+
+      - name: 录制第一遍（全量，JaCoCo 逐测试倒排）
+        run: mvn -B -Ptestmap test
+
+      - name: 键归一自测（K2：报告位 + 具体类口径硬闸）
+        working-directory: ${{ github.workspace }}
+        run: |
+          set +e
+          node scripts/ci/select-tests.mjs --verify-map --map backend/target/testmap/map.json
+          code=$?
+          # 口径分歧（如实记，未改 select-tests.mjs —— C 期工作面不含它）：
+          #   `--verify-map` 的分母是**全量源码 FQN**（含接口/枚举/record 等无字节码可执行体），
+          #   本机实测 221/253 = 87.35% ⇒ 恒 < 95% 而退出 2；录制器自身的 B0 闸用的是
+          #   **具体类**口径（meta.keyOverlapRatioConcrete，同一张表实测 98.19%，录制 BUILD SUCCESS）。
+          #   故此处把 --verify-map 记为报告位，K2 硬闸落在与录制器同源的具体类口径上。
+          if [ "$code" != "0" ]; then
+            echo "::warning::--verify-map 退出码 $code（全量 FQN 口径 < 95%）；K2 硬闸改用具体类口径，见下一步"
+          fi
+          node <<'NODE'
+          const fs = require('node:fs')
+          const meta = JSON.parse(fs.readFileSync('backend/target/testmap/map.json', 'utf8')).meta || {}
+          const min = 0.95
+          console.log(`keyOverlapRatio=${meta.keyOverlapRatio} keyOverlapRatioConcrete=${meta.keyOverlapRatioConcrete} 具体类=${meta.concreteProdClassCount}/${meta.prodClassCount}`)
+          if (!(meta.keyOverlapRatioConcrete >= min)) {
+            console.error(`::error::K2 具体类键重合率 ${meta.keyOverlapRatioConcrete} < ${min}（录制器 B0 闸同源口径）`)
+            process.exit(1)
+          }
+          NODE
+
+      - name: 录制第二遍（确定性校验：与第一遍逐测试类比依赖集）
+        run: |
+          cp target/testmap/map.json target/testmap/map-run1.json
+          mvn -B -Ptestmap test
+
+      - name: 判定确定性（并集修复后差异不增长 · 口径见文件头）
+        working-directory: ${{ github.workspace }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs')
+          const maxDiff = Number(process.env.DETERMINISM_MAX_DIFF)
+          const map = JSON.parse(fs.readFileSync('backend/target/testmap/map.json', 'utf8'))
+          const m = map.meta || {}
+          console.log(`deterministic=${m.deterministic} checked=${m.deterministicChecked} diff=${m.deterministicDiff} unionRepaired=${m.unionRepaired}`)
+          console.log(`不稳定类 ${Array.isArray(m.unstableTests) ? m.unstableTests.length : 0} 个：${(m.unstableTests || []).slice(0, 20).join(', ')}`)
+          console.log(`键归一：keyOverlapRatio=${m.keyOverlapRatio} keyOverlapRatioConcrete=${m.keyOverlapRatioConcrete} 测试类=${m.testClassCount} 生产类=${m.prodClassCount}`)
+          if (m.deterministicChecked !== true) {
+            console.error('::error::两遍录制未能比对（deterministicChecked=false）：第一遍的 map.json 缺失或 mode/headSha 不匹配')
+            process.exit(1)
+          }
+          const diff = Number(m.deterministicDiff)
+          if (m.deterministic === true) {
+            console.log('::notice::两遍录制条目差异 = 0')
+            process.exit(0)
+          }
+          if (m.unionRepaired !== true) {
+            console.error(`::error::条目差异 ${diff} 未被并集修复（unionRepaired=false）：选择集不可信`)
+            process.exit(1)
+          }
+          if (diff > maxDiff) {
+            console.error(`::error::条目差异 ${diff} 超过棘轮阈值 ${maxDiff}（只许下调）：倒排表在变差，先查异步触达面`)
+            process.exit(1)
+          }
+          console.log(`::warning::条目差异 ${diff}（≤ 阈值 ${maxDiff}）已由并集修复吸收；差异类已进永久冒烟集`)
+          NODE
+
+      - name: 归档倒排表与审计（失败也归档，保留 14 天）
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: testmap-nightly
+          path: |
+            backend/target/testmap/map.json
+            backend/target/testmap/map-run1.json
+            backend/target/testmap/selection/
+          retention-days: 14
+          if-no-files-found: warn
+
+  # ============================================================
+  # 夜间汇总（与 ci.yml 的 summary 同口径：不写进 summary 的失败等于没失败）
+  #   夜间无条件全跑，因此这里不存在 "skipped 因变更集" 的合法形态：除 e2e 可能因
+  #   backend 红而跳过（写明原因）外，任何 skipped 都算异常。
+  # ============================================================
+  summary:
+    name: 夜间汇总
+    if: ${{ !cancelled() }}
+    needs: [backend, frontend, e2e, testmap]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 汇总（逐 job 写 result；任一非 success 即红）
+        env:
+          BACKEND: ${{ needs.backend.result }}
+          FRONTEND: ${{ needs.frontend.result }}
+          E2E: ${{ needs.e2e.result }}
+          TESTMAP: ${{ needs.testmap.result }}
+        run: |
+          set -uo pipefail
+          fail=0
+          say() { printf '%s\n' "$@" | tee -a "$GITHUB_STEP_SUMMARY"; }
+          say "## 夜间全量汇总（选择性测试兜底 · O2）" ""
+          say "| job | 结果 | 说明 |" "|---|---|---|"
+          row() { say "| $1 | $2 | $3 |"; }
+          for pair in "backend全量:$BACKEND" "frontend全量:$FRONTEND" "e2e:$E2E" "倒排表重建:$TESTMAP"; do
+            name="${pair%%:*}"; res="${pair#*:}"
+            case "$res" in
+              success) row "$name" "success" "已执行" ;;
+              skipped)
+                if [ "$name" = "e2e" ]; then
+                  row "$name" "skipped" "上游 backend 未成功（${BACKEND:-?}）⇒ 不白跑 25 分钟"
+                else
+                  fail=1; row "$name" "**skipped**" "夜间不容许跳过（无变更集概念）⇒ 报红"
+                fi ;;
+              *) fail=1; row "$name" "**${res:-（空）}**" "失败/取消/未知 ⇒ 报红" ;;
+            esac
+          done
+          say "" ""
+          if [ "$fail" -ne 0 ]; then
+            say "> 结论：**红**。夜间的红 = 兜底面出事（漏测/flake/表腐化），白天要查。"
+            echo "::error::夜间全量存在失败"
+            exit 1
+          fi
+          say "> 结论：**绿**。倒排表已重建（artifact testmap-nightly），差异口径见 testmap job 日志。"
