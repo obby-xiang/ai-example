@@ -12,7 +12,13 @@ import type { ToolPart } from './ai'
 export interface ActiveUploadHandoff {
   toolCallId: string
   runId: string | null
-  /** 上传入口的 ref（区域声明的 `uploadEntry` 或模型显式给的 ref） */
+  /**
+   * 上传入口的 ref（区域声明的 `uploadEntry` 或模型显式给的 ref）。
+   *
+   * <p>`null` = 模型没指定入口，且重建那一刻区域尚未注册（刷新时路由页是懒加载的）。
+   * 这种交接**不是死卡**：落点按区域实况惰性解析（`resolveUploadRegion(null)` 取区域声明的
+   * `uploadEntry`），区域注册后判据自动复原（A09）。
+   */
   ref: string | null
   /** 收窄后的扩展名（缺省 = 页面允许的 .xlsx/.zip） */
   accept: string[] | null

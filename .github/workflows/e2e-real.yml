@@ -95,18 +95,22 @@ jobs:
 
       # 主栈切片（00–10、11a/11b、17-unlock）：主 config 已用 testIgnore 排除域专用 spec
       # （L-107），所以这里不会再撞 12 系 / 13 系 / 14 系 / 15 / 16-kqc 系 / 17b / 11c-gf2。
+      # 各域步一律 `if: !cancelled()`：某一域红不遮其它域的证据（GitHub 默认 success() 链会整串跳过）。
       - name: 真机 E2E（桩模式 · 主栈切片）
+        if: ${{ !cancelled() }}
         working-directory: frontend
         run: npx playwright test --grep @stub
 
       # VL 域（12a/12b）：自带三件套（18930/18999/19001 + DB 12）且强制本域基址，
       # 故用独立 config（E2E_EXTERNAL=1 ⇒ 不再起 183xx 那套）。
       - name: 真机 E2E（桩模式 · VL 域 · 可视可操作/工具全量面）
+        if: ${{ !cancelled() }}
         working-directory: frontend
         run: npx playwright test --config playwright.vl.config.ts
 
       # NFEZUI 域（13 系）：独占端口段 191xx + Redis DB 13/14 + 本域桩（config 在 e2e/ 内）。
       - name: 真机 E2E（桩模式 · NFEZUI 域 · 13 系）
+        if: ${{ !cancelled() }}
         working-directory: frontend
         run: npx playwright test --config e2e/playwright.nfezui.config.ts
 
@@ -115,11 +119,13 @@ jobs:
       # config 自带端口段 225xx + Redis DB 3（与上面主 config 的 183xx / DB 5-6 完全错开），
       # 起停仍由同一套 support/harness.ts 负责。
       - name: 真机 E2E（桩模式 · GF2 域 · 同会话两轮表单）
+        if: ${{ !cancelled() }}
         working-directory: frontend
         run: npx playwright test --config e2e/playwright.gf2.config.ts
 
       # MDXY 域（14 系）：本域桩 + KEK。KEK 只在本步内生成（base64 32B，测试用），不落仓库、不进日志。
       - name: 真机 E2E（桩模式 · MDXY 域 · 14 系）
+        if: ${{ !cancelled() }}
         working-directory: frontend
         run: |
           AI_SECRET_KEK="$(head -c 32 /dev/urandom | base64 -w 0)"
@@ -128,24 +134,29 @@ jobs:
 
       # MDO 域（15）：双 JVM 同 Redis DB，验证跨实例扇出/决策/读台账。
       - name: 真机 E2E（桩模式 · MDO 域 · 多实例/降级/并发）
+        if: ${{ !cancelled() }}
         working-directory: frontend
         run: npx playwright test --config playwright.mdo.config.ts
 
       # KQC 域（16-kqc 系）三档：主档 / 降级档（K-06、C-02 专用后端参数）/ 压缩档（小分母）。
       - name: 真机 E2E（桩模式 · KQC 域 · 主档）
+        if: ${{ !cancelled() }}
         working-directory: frontend
         run: npx playwright test --config playwright.kqc.config.ts
 
       - name: 真机 E2E（桩模式 · KQC 域 · 降级档 K-06/C-02）
+        if: ${{ !cancelled() }}
         working-directory: frontend
         run: npx playwright test --config playwright.kqc-special.config.ts
 
       - name: 真机 E2E（桩模式 · KQC 域 · 压缩档 C-08/C-10/C-13/C-14）
+        if: ${{ !cancelled() }}
         working-directory: frontend
         run: npx playwright test --config playwright.kqc-compact.config.ts
 
       # 解锁域缩阈值档（17b）：整棒缩小工具超时/总预算，与主栈切片里的 17-unlock 拆开。
       - name: 真机 E2E（桩模式 · 解锁域 · 缩阈值档）
+        if: ${{ !cancelled() }}
         working-directory: frontend
         run: npx playwright test --config playwright.unlock-budget.config.ts
 

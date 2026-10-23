@@ -468,3 +468,26 @@ describe('帧路由：frontend_tool_request 的 ui_request_upload 走交接特�
     expect(api.frontendToolResult).not.toHaveBeenCalled()
   })
 })
+
+/**
+ * A09：恢复路（`rebuildUploadHandoffFromFrame`）的 `ref` 缺省形态。
+ *
+ * <p>与 `aie2e-refresh-upload-region.spec.ts` 的 A09 用例同源（那边走 `/history` + `/runs/current`
+ * 快照全链，这里钉死"恢复函数本身"这一层）：模型没给 `ref` + 区域尚未注册 ⇒ 重建出的 `ref`
+ * 落 `null` 且永不回填；区域随后注册后，可用性判据必须跟着复原（不得按 `ref` 一票判死）。
+ */
+describe('A09：恢复路 ref 缺省（区域晚于历史回放注册）', () => {
+  it('rebuildUploadHandoffFromFrame 无 ref ⇒ ref=null；区域随后注册 ⇒ availability 复原 waiting', async () => {
+    enterImportPage()
+    const store = useAiStore()
+    const { message, frame } = armFrame(store, { accept: ['xlsx'] })
+
+    await store.rebuildUploadHandoffFromFrame(message, frame)
+    expect(store.activeUploadHandoff).toMatchObject({ toolCallId: 'ui-up-1', ref: null })
+    expect(store.uploadHandoffAvailability()).toBe('missing') // 区域确实不在 ⇒ 不可操作是对的
+
+    installRegion() // 懒加载路由页挂载：区域注册
+    expect(store.activeUploadHandoff?.ref).toBeNull()
+    expect(store.uploadHandoffAvailability()).toBe('waiting')
+  }, 20_000)
+})

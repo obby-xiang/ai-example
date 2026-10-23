@@ -3224,7 +3224,8 @@ export const useAiStore = defineStore('ai', {
       }
       if (this.uploadHandoffAvailability() === 'missing') {
         // 不打开文件对话框：区域都没了，选了也无处可交 —— 直接如实收口（不谎报、不留死卡）。
-        const target = handoff.ref ? resolveUploadRegion(handoff.ref) : null
+        // A09：ref 缺省时同样按区域实况回落（缺 ref ≠ 没有落点，区域可能刚刚才注册）。
+        const target = resolveUploadRegion(handoff.ref)
         const readOnly = target?.region.readOnly?.() === true
         await this.finishUploadHandoff(handoff, 'failed', readOnly ? UPLOAD_READONLY_TEXT : UPLOAD_NO_REGION_TEXT, false)
         return
@@ -3261,7 +3262,9 @@ export const useAiStore = defineStore('ai', {
       }
       const name = uploadFileNameOf(file)
       // 选文件期间区域可能消失（用户切页 / 页面卸载）—— 同一条判据，不得谎报成功。
-      const region = handoff.ref ? resolveUploadRegion(handoff.ref)?.region ?? null : null
+      // A09：ref 缺省的交接同样要按区域声明的 uploadEntry 回落 —— 否则卡面刚转 waiting，
+      // 用户点下去却在这里被判成"没有入口"（同一缺陷的第二道否决）。
+      const region = resolveUploadRegion(handoff.ref)?.region ?? null
       if (region === null || region.root.isConnected !== true) {
         await this.finishUploadHandoff(handoff, 'failed', UPLOAD_NO_REGION_TEXT, false)
         return
@@ -3313,6 +3316,13 @@ export const useAiStore = defineStore('ai', {
      * 刷新恢复的判据（**只看区域**）：交接不依赖浏览器里算出的中间态，
      * 区域仍注册 ⇒ 可继续；区域已不在该页 ⇒ `missing`（主按钮禁用、只能放弃）。
      * 浏览器 picker 能力在点击时再判（`open` 时的 `degraded` 是"当时"的分流）。
+     *
+     * <p>
+     * **A09**：`ref` 只表示"模型显式指定了入口"，缺省时落点由区域声明的 `uploadEntry`
+     * 决定（`resolveUploadRegion(null)` 回落）。刷新重建那一刻路由页是懒加载的、区域可能
+     * 还没注册 ⇒ 重建出的 `ref` 落 `null` 且不会回填；这里若按 `!handoff.ref` 一票判死，
+     * 区域随后注册了卡也永远停在 `missing`（按钮永不启用）。故缺 `ref` 不得否决 ——
+     * 判据一律交给"区域现在在不在"：区域不在仍取不到目标 ⇒ 依然 `missing`（没有放宽）。
      */
     uploadHandoffAvailability(): 'waiting' | 'missing' | 'degraded' | null {
       const handoff = this.activeUploadHandoff
@@ -3321,9 +3331,6 @@ export const useAiStore = defineStore('ai', {
       }
       if (handoff.status === 'degraded') {
         return 'degraded'
-      }
-      if (!handoff.ref) {
-        return 'missing'
       }
       const target = resolveUploadRegion(handoff.ref)
       if (!target || target.region.root.isConnected !== true) {
