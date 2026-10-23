@@ -14,6 +14,7 @@ import java.time.OffsetDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -62,6 +63,8 @@ final class TestmapRecorder {
     private static final Map<String, Set<String>> DEPS = new ConcurrentHashMap<>();
     /** 测试类 FQN → 探针命中过的生产类 FQN（只做统计与排障，不参与选择）。 */
     private static final Map<String, Set<String>> HITS = new ConcurrentHashMap<>();
+    /** 测试类 FQN → 本类用例体耗时累计（ms）。只用于成本估算（L-101），不参与选择。 */
+    private static final Map<String, Long> DURATIONS = new ConcurrentHashMap<>();
     private static final Set<String> FAILED = ConcurrentHashMap.newKeySet();
     /** 已经出现过的 execution-data id：用于判定「本类区间内首次装载」（M2）。 */
     private static final Set<Long> SEEN_IDS = ConcurrentHashMap.newKeySet();
@@ -76,6 +79,7 @@ final class TestmapRecorder {
     private static volatile String headSha;
     private static volatile Double keyOverlap;
     private static volatile Double keyOverlapConcrete;
+    private static volatile long startedAtMs;
 
     private TestmapRecorder() {
     }
@@ -93,6 +97,9 @@ final class TestmapRecorder {
     static void record(String testClass, boolean reset) {
         if (testClass == null) {
             return;
+        }
+        if (startedAtMs == 0) {
+            startedAtMs = System.currentTimeMillis();
         }
         testClass = normalizeTestKey(testClass);
         lastTestClass = testClass;
@@ -133,6 +140,124 @@ final class TestmapRecorder {
         if (testClass != null) {
             FAILED.add(testClass);
         }
+    }
+
+    static void addDuration(String testClass, long ms) {
+        if (testClass == null || ms < 0) {
+            return;
+        }
+        DURATIONS.merge(normalizeTestKey(testClass), ms, Long::sum);
+    }
+
+    // ------------------------------------------------------- 不稳定集合重估（L-101）
+
+    static int unstableRetireCleanRuns() {
+        return Integer.getInteger("testmap.unstable.retire.cleanRuns", 2);
+    }
+
+    static long unstableMaxAgeMs() {
+        return TimeUnit.DAYS.toMillis(Long.getLong("testmap.unstable.maxAgeDays", 7L));
+    }
+
+    /**
+     * 不稳定集合重估（纯函数，L-101）。
+     *
+     * <p>背景：同 tree 连录两次只要有类不一致，那批类就进 {@code unstableTests} 并被选择器**永久**钉进冒烟集；
+     * 一次高负载录制（33 类）就能把提交级从 107s 拖到 187s，而旧实现里这个集合还会在「不可比录制」时被
+     * 静默清空——既没收敛，也不可解释。这里给出三条规则：
+     *
+     * <ul>
+     *   <li><b>复现即续</b>：本次可比录制仍不一致的类 ⇒ {@code cleanStreak=0}，留在冒烟集；</li>
+     *   <li><b>连续 N 次干净即移出</b>：曾在集合内、连续 {@code cleanRuns} 次可比录制未复现差异 ⇒ 移出
+     *       （夜间录制即重估点）；</li>
+     *   <li><b>时间窗兜底</b>：距最后一次复现超过 {@code maxAgeMs} ⇒ 过期移出（成本必须随时间收敛）。</li>
+     * </ul>
+     *
+     * <p>{@code diffNow == null} 表示本次不可比（换了 tree 或生产源码变了）：条目原样保留、只走时间窗。
+     * 旧实现把「不可比」当成「无差异」整批清空，与「永久常跑」（§3.6）自相矛盾，是 L-101 的口径缺口。
+     *
+     * @return {@code {active: List<String>, retired: List<String>, history: Map<String, Map<String,Object>>}}
+     */
+    static Map<String, Object> reviseUnstable(Map<String, Object> prevHistory,
+                                              List<String> prevActive,
+                                              Collection<String> diffNow,
+                                              long nowMs, int cleanRuns, long maxAgeMs) {
+        Map<String, Map<String, Object>> history = new TreeMap<>();
+        if (prevHistory != null) {
+            for (Map.Entry<String, Object> e : prevHistory.entrySet()) {
+                if (e.getValue() instanceof Map<?, ?> raw) {
+                    Map<String, Object> one = new LinkedHashMap<>();
+                    for (Map.Entry<?, ?> f : raw.entrySet()) {
+                        one.put(String.valueOf(f.getKey()), f.getValue());
+                    }
+                    history.put(e.getKey(), one);
+                }
+            }
+        }
+        Set<String> candidates = new TreeSet<>(prevActive == null ? List.of() : prevActive);
+        if (diffNow != null) {
+            candidates.addAll(diffNow);
+        }
+        Set<String> differed = diffNow == null ? Set.of() : new TreeSet<>(diffNow);
+
+        Set<String> active = new TreeSet<>();
+        List<String> retired = new ArrayList<>();
+        for (String test : candidates) {
+            Map<String, Object> entry = history.computeIfAbsent(test, k -> new LinkedHashMap<>());
+            long firstDiffAt = num(entry.get("firstDiffAt"), nowMs);
+            long lastDiffAt = num(entry.get("lastDiffAt"), nowMs);
+            int streak = (int) num(entry.get("cleanStreak"), 0);
+            boolean differs = diffNow != null && differed.contains(test);
+            if (diffNow != null) {
+                if (differs) {
+                    if (!entry.containsKey("firstDiffAt")) {
+                        firstDiffAt = nowMs;
+                    }
+                    lastDiffAt = nowMs;
+                    streak = 0;
+                } else {
+                    streak += 1;
+                    entry.put("lastCleanAt", nowMs);
+                }
+                entry.put("cleanStreak", streak);
+            }
+            entry.put("firstDiffAt", firstDiffAt);
+            entry.put("lastDiffAt", lastDiffAt);
+            boolean expired = nowMs - lastDiffAt > maxAgeMs;
+            if (expired) {
+                entry.put("retiredAt", nowMs);
+                entry.put("retiredReason", "age-window");
+                retired.add(test);
+            } else if (diffNow != null && !differs && streak >= cleanRuns) {
+                entry.put("retiredAt", nowMs);
+                entry.put("retiredReason", "clean-streak");
+                retired.add(test);
+            } else {
+                active.add(test);
+            }
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("active", new ArrayList<>(active));
+        out.put("retired", retired);
+        out.put("history", new TreeMap<>(history));
+        return out;
+    }
+
+    private static long num(Object value, long fallback) {
+        return value instanceof Number n ? n.longValue() : fallback;
+    }
+
+    private static List<String> stringList(Object value) {
+        if (!(value instanceof List<?> list)) {
+            return new ArrayList<>();
+        }
+        List<String> out = new ArrayList<>();
+        for (Object o : list) {
+            if (o != null) {
+                out.add(String.valueOf(o));
+            }
+        }
+        return out;
     }
 
     /** 收尾：把最后一个类之后迟到的触达并入最后一个类（M4 收尾窗口），然后整表落盘。 */
@@ -504,6 +629,19 @@ final class TestmapRecorder {
         }
         boolean repaired = compared && diff > 0;
 
+        // L-101：不稳定集合不是「一次录制即永久」——按「连续 N 次干净 / 时间窗」重估。
+        Map<String, Object> prevMeta = metaOf(previous);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> revised = reviseUnstable(
+                (Map<String, Object>) prevMeta.get("unstableHistory"),
+                stringList(prevMeta.get("unstableTests")),
+                compared ? unstable : null,
+                System.currentTimeMillis(),
+                unstableRetireCleanRuns(),
+                unstableMaxAgeMs());
+        List<String> activeUnstable = stringList(revised.get("active"));
+        List<String> retiredUnstable = stringList(revised.get("retired"));
+
         Map<String, Object> index = new TreeMap<>();
         int pairs = 0;
         for (Map.Entry<String, List<String>> e : merged.entrySet()) {
@@ -548,7 +686,36 @@ final class TestmapRecorder {
         meta.put("deterministicCompared", compared);
         meta.put("deterministicDiff", compared ? diff : -1);
         meta.put("unionRepaired", repaired);
-        meta.put("unstableTests", unstable);
+        meta.put("unstableTests", activeUnstable);
+        meta.put("unstableRetired", retiredUnstable);
+        meta.put("unstableHistory", revised.get("history"));
+        meta.put("unstablePolicy", Map.of(
+                "cleanRuns", unstableRetireCleanRuns(),
+                "maxAgeDays", TimeUnit.MILLISECONDS.toDays(unstableMaxAgeMs()),
+                "source", "L-101"));
+        meta.put("deterministicDiffClasses", compared ? unstable : null);
+        Map<String, Object> durations = new TreeMap<>();
+        // 增量录制只跑了子集：旧计时先并入，再用本轮实测覆盖（否则子集录制会把其余类的计时清空）
+        if (!fullMode() && prevMeta.get("testClassDurationMs") instanceof Map<?, ?> previousDur) {
+            for (Map.Entry<?, ?> e : previousDur.entrySet()) {
+                if (e.getValue() instanceof Number n) {
+                    durations.put(String.valueOf(e.getKey()), n.longValue());
+                }
+            }
+        }
+        for (Map.Entry<String, Long> e : DURATIONS.entrySet()) {
+            if (merged.containsKey(e.getKey())) {
+                durations.put(e.getKey(), e.getValue());
+            }
+        }
+        durations.keySet().retainAll(merged.keySet());
+        meta.put("testClassDurationMs", durations);
+        // 墙钟只在全量录制时更新；增量录制沿用上一轮（否则「全量墙钟」会被子集耗时污染）
+        Object wall = fullMode() && startedAtMs != 0 ? System.currentTimeMillis() - startedAtMs : null;
+        if (wall == null && prevMeta.get("recordedWallMs") instanceof Number n) {
+            wall = n;
+        }
+        meta.put("recordedWallMs", wall);
         meta.put("testClassCount", merged.size());
         meta.put("prodClassCount", prod.size());
         meta.put("depPairCount", pairs);
@@ -590,6 +757,12 @@ final class TestmapRecorder {
         }
         if (compared && diff != 0) {
             System.out.println("[testmap] 两次录制不一致的测试类（前 10）：" + unstable.stream().limit(10).toList());
+        }
+        if (!activeUnstable.isEmpty() || !retiredUnstable.isEmpty()) {
+            System.out.printf("[testmap] 不稳定集合（L-101）：在用 %d 类、本轮移出 %d 类%s（策略：连续 %d 次干净或超 %d 天）%n",
+                    activeUnstable.size(), retiredUnstable.size(),
+                    retiredUnstable.isEmpty() ? "" : "（" + retiredUnstable + "）",
+                    unstableRetireCleanRuns(), TimeUnit.MILLISECONDS.toDays(unstableMaxAgeMs()));
         }
         if (!blobs.isEmpty() && blobs.size() < prod.size()) {
             System.out.println("[testmap] 提示：有生产类在 HEAD 树里没有 blob（未入库），blobSha 记 null");
