@@ -389,13 +389,23 @@ test.describe('@stub S 流式稳定', () => {
 })
 
 /**
- * S-15 思考链（reasoning 帧）块渲染与折叠：真模型 reasoning 输出（桩不产 reasoning 帧）。
+ * S-15 思考链（reasoning）块渲染与折叠：真模型 reasoning 输出（桩不产 reasoning 帧）。
  *
- * <p>实跑口径（2026-10-23 真模型批）：上游 `deepseek-flash` **确实**返回 `reasoning_content`
- * （直接打 `POST /chat/completions` 可见），但本后端没有任何 reasoning 帧出口
- * （`SseChatEmitter` 只有 `textStart/textEnd`，`delta` 只发正文；`frontend/src/types/sse.ts:197`
- * 也写明「后端今天不产 reasoning 帧」），故本机实测该条恒红。这是产品缺口（挂账），
- * 不是模型不配合 —— 因此本条保持红色、不 SKIP（蓝本 §0.6-1）。
+ * <p><b>定责更新（L-91，2026-10-23）</b>：缺口已补 —— 上游 `deepseek-flash` 返回的
+ * `reasoning_content` 现在有帧出口：后端 `ResilientChatService#consume` 把它映射成
+ * `delta{kind:'reasoning'}`（配 `message_start/message_end{kind:'reasoning'}` 边界，
+ * 帧类型集仍是 16；机制实证见后端 `ReasoningContentUpstreamProbeTest`），
+ * 前端 `stores/ai.ts` / `utils/parts.ts` 按 `kind` 分流到 reasoning 段。
+ *
+ * <p>因此本条的失败定责<b>不再指向后端帧映射</b>，而是"真模型没吐 reasoning"或
+ * "帧→段→块"链路的真实回归。**真模型验证待 CI e2e-real key**（本机无 key，不 SKIP、
+ * 不放宽断言 —— 蓝本 §0.6-1）。
+ *
+ * <p>判据面修订（同一批，非放宽）：
+ * ① 思考块默认折叠（`blocks.ts` 的 defaultExpanded 对纯 reasoning 段为 false），故先点开再读
+ *    思考体 —— 旧写法在"块默认折叠"的前提下直接断言 `reasoning-scroll` 可见，属判据不可满足；
+ * ③ 正文判定从"整条气泡 innerText"改为**正文块 `.md-body`** —— 思考卡渲染在气泡**内部**，
+ *    整气泡 innerText 必然含思考文本；改后判据更强（正文非空 + 不含思考文本），不再是恒假条件。
  */
 test.describe('@real S 思考链', () => {
   test('E2E-S15 思考块独立分框、可折叠、不混入正文', async ({ page }) => {
@@ -406,25 +416,106 @@ test.describe('@real S 思考链', () => {
     const toggle = page.locator('[data-testid^="reasoning-toggle-"]')
     await expect(
       toggle,
-      '零思考块：如果上游有 reasoning_content 而这里没有块，缺口在后端 reasoning 帧映射（挂账），不在渲染层'
+      '零思考块（需真模型）：先看后端本轮流里有没有 delta{kind:"reasoning"}（帧出口 L-91 已就绪），'
+        + '再看 store 是否分流到 reasoning 段；确认真模型本轮是否真返回 reasoning_content'
     ).toHaveCount(1, { timeout: 60_000 })
     const blockId = String(await toggle.getAttribute('data-testid')).replace('reasoning-toggle-', '')
 
-    // ① 思考块与正文分段不同框：思考体在 reasoning-body 内，正文不在其中
+    // ① 思考块独立成框：默认折叠 ⇒ 点开后思考体非空
     const body = page.locator(`[data-testid="reasoning-body-${blockId}"]`)
     const scroll = page.locator(`[data-testid="reasoning-scroll-${blockId}"]`)
+    await expect(body).toBeHidden()
+    await toggle.click()
+    await expect(body).toBeVisible()
     await expect(scroll).toBeVisible()
     const reasoningText = (await scroll.innerText()).trim()
     expect(reasoningText.length).toBeGreaterThan(0)
 
-    // ② 折叠/展开：真鼠标点两次，可见性切换
+    // ② 折叠/展开：真鼠标再点两次，可见性切换
     await toggle.click()
     await expect(body).toBeHidden()
     await toggle.click()
     await expect(body).toBeVisible()
 
-    // ③ 思考文本不混入正文：助手气泡正文里不含思考体的首段文本
-    const prose = await assistantText(page)
+    // ③ 思考文本不混入正文：只看**正文块**（思考卡在气泡内，整气泡 innerText 会含思考文本）
+    const prose = (await page.locator('[data-testid^="msg-bubble-"].w-full .md-body').last().innerText()).trim()
+    expect(prose.length).toBeGreaterThan(0)
+    expect(prose.includes(reasoningText.slice(0, 20))).toBe(false)
+  })
+})
+
+/**
+ * S-15s 思考链（**桩模式**，与 S-15 @real 同构的判据）：L-91 的上游 `reasoning_content`
+ * → `delta{kind:'reasoning'}`（配 `message_start/message_end{kind:'reasoning'}` 边界）
+ * → 前端 `parts` 的 reasoning 段 → 独立折叠块。
+ *
+ * <p><b>为什么不并入 S-15</b>：S-15 的证据是"真模型这一刻确实吐了思考"，只能在真 key 下跑；
+ * 本条把**链路**（上游分片→帧→段→块）变成确定性可跑，桩侧的形态开关是
+ * `stub-upstream.mjs` 的 `reasoning=<chars>`（正文分片之前插 1–2 个 `reasoning_content` 分片，
+ * 关闭时帧逐字节不变）。两条同判据、不同证据面，互不替代。
+ *
+ * <p>断言分两层：① 帧面 = 段边界与增量同源（`message_end.chars` == 思考段字符数）；
+ * ② 块面 = 默认折叠 → 点开文本非空且**长度等于帧面的 `chars`**（块→段同源，不是另一份数据）→
+ * 正文块 `.md-body` 非空且不含思考文本。
+ *
+ * <p><b>证据取值纪律</b>：`captureChat` 拿到的是浏览器对 `text/event-stream` 的解码结果
+ * （响应头不带 charset ⇒ Playwright 侧按单字节解码，中文会被摊成 UTF-8 字节数），
+ * 故**帧面只断言结构、计数与 `chars` 数字**，文本内容一律取自 DOM；两者用"长度相等"打通。
+ */
+test.describe('@stub S 思考链', () => {
+  test('E2E-S15s 思考块独立分框、默认折叠、不混入正文（桩 reasoning 形态）', async ({ page }) => {
+    const chat = captureChat(page)
+    await openApp(page)
+    await sendMessage(page, P('reasoning=240 请先思考再回答 S15s'))
+    await waitRoundSettled(page, 60_000)
+
+    // ① 帧面：思考段有开有合、多次增量、段序在正文之前
+    const frames = parseSse(await chat.body())
+    const reasoningStart = frames.filter((frame) => frame.type === 'message_start' && frame.kind === 'reasoning')
+    const reasoningEnd = frames.filter((frame) => frame.type === 'message_end' && frame.kind === 'reasoning')
+    const reasoningDeltas = frames.filter((frame) => frame.type === 'delta' && frame.kind === 'reasoning')
+    expect(reasoningStart, '整轮应恰有一个思考段边界（首片自动补 message_start）').toHaveLength(1)
+    expect(reasoningEnd, '思考段必须恰闭合一次（message_end(kind=reasoning)）').toHaveLength(1)
+    // 桩的 reasoning=240 发 1–2 片：帧面至少 1 片，且**没有**变成每个正文分片一个空思考片
+    expect(reasoningDeltas.length).toBeGreaterThanOrEqual(1)
+    const reasoningChars = Number(reasoningEnd[0].chars)
+    expect(reasoningChars).toBe(240)
+    // 段序：思考段在正文段之前（正文 message_start(kind=text) 的首帧下标更大）
+    const startIndex = frames.indexOf(reasoningStart[0])
+    const textStartIndex = frames.findIndex((frame) => frame.type === 'message_start' && frame.kind === 'text')
+    expect(textStartIndex).toBeGreaterThan(startIndex)
+    expect(frames.indexOf(reasoningEnd[0])).toBeLessThan(textStartIndex)
+    // 段互斥：思考段闭合之后不得再有思考增量，正文分片也都在闭合之后
+    const lastReasoningIndex = frames.map((frame) => frame.type === 'delta' && frame.kind === 'reasoning')
+      .lastIndexOf(true)
+    expect(lastReasoningIndex).toBeLessThan(textStartIndex)
+    const proseFrames = frames.filter((frame) => frame.type === 'delta' && frame.kind !== 'reasoning')
+    expect(proseFrames.length).toBeGreaterThan(0)
+    expect(frames.indexOf(proseFrames[0])).toBeGreaterThan(frames.indexOf(reasoningEnd[0]))
+
+    // ② 块面：思考块独立成框、默认折叠 ⇒ 点开后思考体非空，长度 = 帧面 chars（同源）
+    const toggle = page.locator('[data-testid^="reasoning-toggle-"]')
+    await expect(toggle, '桩 reasoning 形态下必须出现且只出现一个思考块').toHaveCount(1, { timeout: 20_000 })
+    const blockId = String(await toggle.getAttribute('data-testid')).replace('reasoning-toggle-', '')
+    const body = page.locator(`[data-testid="reasoning-body-${blockId}"]`)
+    const scroll = page.locator(`[data-testid="reasoning-scroll-${blockId}"]`)
+    await expect(body).toBeHidden()
+    await toggle.click()
+    await expect(body).toBeVisible()
+    await expect(scroll).toBeVisible()
+    const reasoningText = (await scroll.innerText()).trim()
+    expect(reasoningText.length).toBeGreaterThan(0)
+    expect(reasoningText.length, '思考块文本长度必须等于思考段 chars（段→块同一份数据）').toBe(reasoningChars)
+
+    // ③ 折叠/展开：真鼠标再点两次，可见性切换
+    await toggle.click()
+    await expect(body).toBeHidden()
+    await toggle.click()
+    await expect(body).toBeVisible()
+
+    // ④ 思考文本不混入正文：只看**正文块** `.md-body`（整气泡 innerText 必然含思考文本）
+    const prose = (await page.locator('[data-testid^="msg-bubble-"].w-full .md-body').last().innerText()).trim()
+    expect(prose.length).toBeGreaterThan(0)
     expect(prose.includes(reasoningText.slice(0, 20))).toBe(false)
   })
 })
@@ -967,12 +1058,13 @@ test.describe('@stub P 手工停止', () => {
       await expect(composer).toHaveValue('', { timeout: 20_000 })
     } else {
       // 分支 C：赶在停止收口前发出、被后端 409 拒（同 tick 的正常竞态）——
-      // 同样不许静默：必须显式提示「没发出去」，且输入框不是空的（草稿没被静默丢弃），
-      // 幻影气泡已回收。（发现项 F-SRP-2：此时输入框被"回填为上一条用户消息"，用户刚打的草稿被覆盖）
+      // 同样不许静默：必须显式提示「没发出去」，且输入框**逐字等于用户原草稿**（L-83：
+      // 旧实现会把它回填成上一条用户消息，用户刚打的草稿被静默覆盖 ⇒「非空」是假绿），
+      // 幻影气泡已回收。
       expect(requests).toContain(409)
       await expect(page.locator('[data-testid="notice-bar"]')).toHaveCount(1, { timeout: 10_000 })
       await expect(page.locator('[data-testid="notice-bar"]')).toContainText('这条消息没有发出去')
-      await expect(composer).not.toHaveValue('', { timeout: 10_000 })
+      await expect(composer).toHaveValue(draft, { timeout: 10_000 })
       await expect(page.locator('[data-testid^="msg-bubble-"]')).toHaveCount(2, { timeout: 15_000 })
     }
   })

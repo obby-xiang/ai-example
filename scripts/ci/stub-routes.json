@@ -248,6 +248,15 @@
           "S-13"
         ]
       },
+      "reasoning": {
+        "layer": "stub",
+        "value": "chars",
+        "default": 0,
+        "note": "思考分片：正文分片之前插 1–2 个 delta.reasoning_content（L-91 上游侧形态）；0/裸标记 = 关闭，帧逐字节不变。与 huge-frame 同开时 >64KB 的思考文本保持单片（字段级截断面）",
+        "cases": [
+          "S-15s"
+        ]
+      },
       "slow-reader": {
         "layer": "stub",
         "value": "none",

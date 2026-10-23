@@ -41,7 +41,9 @@ import {
   toolTextsOf,
   unwrapKnowledge,
   usageShapes,
-  waitStubRequestsAfter
+  waitStubRequestsAfter,
+  withModelWindow,
+  type Frame
 } from './support/helpers-kqc'
 
 /** 策略：本域桩用例依赖本域桩（KB 三工具不在官方桩的共享 `productTools` 表里）。 */
@@ -169,7 +171,19 @@ test.describe('@stub 16 K 知识问答', () => {
     expect(round.frames.filter((frame) => frame.type === 'error')).toHaveLength(0)
   })
 
-  test('E2E-K03 kb_read_doc 首屏/翻页：1200 首屏 + next_offset 连续、max_chars 上限不越输入闸', async () => {
+  /**
+   * K-03 首屏 / 翻页 / 页大小的两把尺子。
+   *
+   * <p><b>判据随迁（L-87，2026-10-23 实测）</b>：L-87 把 `kb_read_doc` 的页大小改为按**模型侧预算**
+   * 派生并复核（`KbTools#readPage`），于是"max_chars=20000 的一页必然被结果限流器 head 截断
+   * （`truncated=true` + `结果已截断`）"不再成立 —— 实测该页 2327 字 / 正文 102 行、
+   * `next_offset=3527`、限流器 `truncated=false`。这是**修复后的期望行为**（整页对模型可见，
+   * 截断标记不再吃掉 `</knowledge>` 与 next_offset），不是"预算没生效"：
+   * 页长被行预算（`max-rows` 200 − 渲染开销）压在 8000 字之下，且 `next_offset` 连续。
+   * 故判据改为「页大小同时受字符与行预算约束、翻页无洞」，截断面仍在（超行预算的长文档，
+   * 每页止于行边界 + `truncated=true next_offset=…`）。
+   */
+  test('E2E-K03 kb_read_doc 首屏/翻页：1200 首屏 + next_offset 连续、页大小受字符与行双预算', async () => {
     const sid = newSessionId('K03')
     const docId = 'region-tariff-long'
 
@@ -206,19 +220,70 @@ test.describe('@stub 16 K 知识问答', () => {
     expect(windowBody.length).toBe(20)
     expect(windowBody).toBe(firstBody.slice(-10) + secondBody.slice(0, 10))
 
-    // max_chars 给到远超上限：单次工具结果整体仍受输入闸约束（不越 8000 字符 / 结果限流器）
+    // ── 页大小的两把尺子（L-87）：「页大小同时受字符与行预算约束、翻页无洞」 ───────────────
+    // 语义随迁（L-87 落地后）：页大小不再"先切满 8000 字再交给限流器 head 截断"，而是
+    // 由**模型侧预算**派生并在返回前复核（`KbTools#readPage`：页 = 限流器行预算 − 渲染开销，
+    // 复核不过就缩页重读）⇒ 旧判据「maxChars=20000 必然被限流器截断、truncated=true」
+    // 已不成立：整页对模型可见，`truncated=false` 正是修复后的**期望**行为（不是预算没生效）。
+    // 改判为下面四条（任何一条红都说明预算/切页真的坏了）：
+    //   ① 字符尺先行：maxChars=300 ⇒ 页恰 300 字，next_offset 连续；
+    //   ② 行尺接管：maxChars ≥ 8000 ⇒ 页长 < 8000 字（字符没到顶），且同一文档换 8000/20000
+    //      给出**同一页**（行预算才是决定量）；03-region-tariff-long 全文 327 行，真超行预算；
+    //   ③ 整页可见：限流器零截断（KbText 8000 字闸 + 模型侧 200 行闸都在页内），这是 L-87 的目的；
+    //   ④ 翻页无洞：`next_offset = 起点 + 本页字数`，跨切点的 20 字窗口 == 上页末 10 字 + 下页前 10 字。
+    const charPage = await kbRound(
+      sid,
+      'K03f',
+      `tool=kb_read_doc&args={"docId":"${docId}","offset":1200,"maxChars":300}`
+    )
+    const charBody = readDocBody(lastToolText(charPage.continuation))
+    const charTail = readDocTail(lastToolText(charPage.continuation))
+    expect(charBody.length, '字符预算（maxChars=300）必须成为页大小').toBe(300)
+    expect(charTail.truncated).toBe(true)
+    expect(charTail.nextOffset).toBe(1200 + charBody.length)
+    // 同一 offset 的两种页大小共用一套切点口径：短页就是长页的前缀（没有第二套切页算法）
+    expect(secondBody.startsWith(charBody)).toBe(true)
+
     const wide = await kbRound(
       sid,
       'K03e',
       `tool=kb_read_doc&args={"docId":"${docId}","offset":1200,"maxChars":20000}`
     )
     const wideContent = lastToolContent(wide.continuation)
+    const wideText = lastToolText(wide.continuation)
+    const wideBody = readDocBody(wideText)
+    const wideTail = readDocTail(wideText)
+    // ① 单次工具结果整体仍在 8000 字输入闸内（max_chars 请求值不越闸）
     expect(wideContent.length).toBeLessThanOrEqual(8000)
-    // 这一页必然被结果限流器 head 截断（200 行上限先于 max_chars 生效，见报告「发现项 F-3」）：
-    // 断言的是"截断被如实告知"，而不是"能拿到 8000 字"
-    const wideEnvelope = toolEnvelope(wideContent)
-    expect(wideEnvelope.truncated).toBe(true)
-    expect(String(wideEnvelope.notice ?? '')).toContain('结果已截断')
+    // ③ 整页对模型可见：限流器零截断（L-87 之后"结果已截断"只应出现在缩页也装不下的极端情形）
+    expect(toolEnvelope(wideContent).truncated).toBe(false)
+    // ② 行预算接管：页长远未到 8000 字 ⇒ 切点是行预算给的；行数仍在模型侧 200 行闸内
+    expect(wideBody.length).toBeLessThan(8000)
+    const wideRows = wideBody.split('\n').length
+    expect(wideRows, '页内行数必须不越模型侧 200 行闸').toBeLessThanOrEqual(200)
+    expect(wideRows, '327 行的文档一页装不下 ⇒ 必须真的在行上被切').toBeGreaterThan(1)
+    expect(wideTail.truncated, '文档还有下一页 ⇒ 尾标必须如实说 truncated=true').toBe(true)
+    // ④ 翻页无洞（行切点）：next_offset = 本页末字的下一位（绝对偏移），跨切点窗口的前半 = 本页末 10 字
+    expect(wideTail.nextOffset).toBe(1200 + wideBody.length)
+    const seam = await kbRound(
+      sid,
+      'K03h',
+      `tool=kb_read_doc&args={"docId":"${docId}","offset":${wideTail.nextOffset - 10},"maxChars":20}`
+    )
+    const seamBody = readDocBody(lastToolText(seam.continuation))
+    expect(seamBody.length).toBe(20)
+    // 重叠即"重"、不等即"漏"：窗口前半必须是本页最后 10 字，后半就是下一页的开头
+    expect(seamBody.slice(0, 10), '行预算切点处出现了缝（本页末 10 字与 next_offset 处读到的内容不一致）')
+      .toBe(wideBody.slice(-10))
+
+    // ② 续：字符预算从 8000 提到 20000，页不变 ⇒ 决定页大小的是行预算，不是字符预算
+    const wide8 = await kbRound(
+      sid,
+      'K03i',
+      `tool=kb_read_doc&args={"docId":"${docId}","offset":1200,"maxChars":8000}`
+    )
+    expect(readDocBody(lastToolText(wide8.continuation)), '8000 与 20000 的字符预算必须给出同一页（行预算接管）')
+      .toBe(wideBody)
   })
 
   test('E2E-K04 kb_lookup_term 精确 + 别名：命中给预制答案、未命中如实 found=false', async () => {
@@ -689,6 +754,13 @@ test.describe('@real 16 KQC 真模型（CI 手工触发；本地不跑）', () =
   // 蓝本 §0.3 常规行为档：N=10、阈值 ≥7（成本敏感档仅 C-13 用，见该条行内注明 N=6 轮）。
   const REAL_SAMPLING = Math.max(1, Number(process.env.E2E_REAL_SAMPLING ?? '10'))
   const REAL_THRESHOLD = Math.ceil(REAL_SAMPLING * 0.7)
+  /**
+   * C-13 的压缩分母（`ai_model.max_context`）：必须显著大于 `reserve-tokens`（默认 13000），
+   * 否则 `limit − reserve` 被钳到 1、逐轮直冲 L3。取 15000 ⇒ 预算 2000，
+   * 真模型 6 轮对话 + 工具结果的体量足够把 L1（清工具结果）走完再进 L2（折叠旧轮）。
+   * 与 `verify-e2e.ps1` 的启动回退值 20000 不同 ⇒ "分母取的是模型行"这件事有断言盯着。
+   */
+  const REAL_LINEAGE_WINDOW = 15000
 
   test('@real E2E-K10 英文查询桥接：英文术语经 aliases_en 命中中文语料，未登记表达如实 no_match', async () => {
     test.setTimeout(900_000)
@@ -744,33 +816,145 @@ test.describe('@real 16 KQC 真模型（CI 手工触发；本地不跑）', () =
   })
 
   // 成本敏感档（蓝本 §0.3）：N=6 轮连续对话（临界 5 轮 + 1 轮观察），不设 10 轮采样。
-  test('@real E2E-C13 压缩级别只升一级 + 滞回：长会话多轮后 level 单调、每次至多一格', async () => {
-    const sid = newSessionId('C13')
-    const levels: string[] = []
-    const percents: number[] = []
-    for (let turn = 0; turn < 6; turn += 1) {
-      const round = await chatRound(sid, `第 ${turn + 1} 轮：请复述上一轮要点并给出一句结论。`)
-      expect(round.done).toBeTruthy()
-      const snapshot = await contextSnapshot(sid)
-      levels.push(String(snapshot.compaction?.level ?? 'none'))
-      percents.push(Number(snapshot.percent ?? 0))
-    }
+  /**
+   * C-13 压缩谱系**真验**（L-93 判据对齐；与 `16-kqc-c.spec.ts` 的 @stub C-13 同构）。
+   *
+   * <p>旧判据只断言"档位单调不减、每次至多一格"——压缩从未触发时它**平凡成立**
+   * （全 none 也满足），于是恒绿而无信息量。本条换成"真的压过"的四张证据面：
+   *   ① 压缩台账（`GET /context/{sid}?ledger=1`）：条数 > 0、首条 L1、逐条只升一格、每条 `after < before`；
+   *   ② 档位谱系：轮级 `level` 单调不减、每次至多一格，且末轮已离开 `none`；
+   *   ③ `compactedTurns / lostTokens` 口径：L1 恒 0/0；L2 起 `turns > 0` 且 `lostTokens > 0`；
+   *   ④ 三面同源：快照 ≡ 台账末条；本轮 SSE `context` 帧 ≡ 该轮台账（level/before/after/savedTokens）。
+   *
+   * <p><b>分母</b>：`ai_model.max_context` 是唯一真源（L-89/L-93，env 的
+   * `app.ai.context.limit-tokens` 只是启动期回退）⇒ 用 `withModelWindow` 压成
+   * {@link REAL_LINEAGE_WINDOW} 并在跑完恢复；断言同时盯住"分母 = 这个窗口"，防止它悄悄回落
+   * 到默认 128000 而整条又变平凡。
+   *
+   * <p><b>为什么提示词要求调一次工具</b>：压缩从 `none` 每次至多升一格 ⇒ 首档只能是 L1，
+   * 而 L1 的动作是**清工具结果**（`tool_result_clearing`，没有可清的就不记账、不推进档位）。
+   * 没有工具结果的会话结构上开不了压，故本轮显式要求模型查一次 `get_config_def`；
+   * 真模型是否照办属 @real 的固有不确定性 —— 红时先看 SSE 里有没有 `tool_start`，
+   * 而不确定性本身由 `16-kqc-c.spec.ts` 的 @stub C-13 用确定性桩守着。
+   *
+   * <p><b>待真 key 验证</b>：本机无 key，本条未在真模型下跑过（不改 SKIP、不放宽断言）。
+   */
+  test('@real E2E-C13 压缩谱系真验：台账 / 档位 / 占用 / 三面同源（真模型）', async () => {
+    test.setTimeout(900_000)
     const order = ['none', 'L1', 'L2', 'L3']
-    for (let index = 1; index < levels.length; index += 1) {
-      const step = order.indexOf(levels[index]) - order.indexOf(levels[index - 1])
-      expect(step, `第 ${index + 1} 轮压缩档跳变：${levels.join(' → ')}`).toBeLessThanOrEqual(1)
-      expect(step, `第 ${index + 1} 轮压缩档回退：${levels.join(' → ')}`).toBeGreaterThanOrEqual(0)
+    const levelOf = (level: unknown): string => (level === undefined || level === null ? 'none' : String(level))
+    const levelIndex = (level: unknown): number => {
+      const index = order.indexOf(levelOf(level))
+      if (index < 0) throw new Error(`未知压缩档位：${String(level)}`)
+      return index
     }
-    // eslint-disable-next-line no-console
-    console.log(`[C-13] 档位=${levels.join(' → ')} 占用=${percents.map((p) => `${p.toFixed(1)}%`).join(' → ')}`)
-    // 诊断面（不断言）：档位只记「最近一次压缩」；是否真压过要看台账与 lostTokens，
-    // 否则「level 恒 none」既可能是没到阈值、也可能是压过又回落，本条的判据会平凡通过。
-    const ledger = await contextLedger(sid).catch(() => [])
-    const last = ledger[ledger.length - 1]
-    // eslint-disable-next-line no-console
-    console.log(
-      `[C-13] 压缩台账条数=${ledger.length} 末条=${last === undefined ? '-' : JSON.stringify(last).slice(0, 200)}`
-    )
+
+    await withModelWindow(REAL_LINEAGE_WINDOW, async () => {
+      const sid = newSessionId('C13')
+      const rounds: Array<{ turn: number; level: string; percent: number | null; frame: Frame | undefined; tools: number }> = []
+      for (let turn = 1; turn <= 6; turn += 1) {
+        const round = await chatRound(
+          sid,
+          `第 ${turn} 轮：先用 get_config_def 查询 CURRENCY 的配置定义，再用一句话复述上一轮结论。`
+        )
+        expect(round.done, `第 ${turn} 轮未收敛`).toBeTruthy()
+        expect(round.errors).toHaveLength(0)
+        const snapshot = await contextSnapshot(sid)
+        // 分母必须来自模型行（写接口写进去的那个值），不是任何 env 回退
+        expect(snapshot.limitTokens, `第 ${turn} 轮分母必须是模型行`).toBe(REAL_LINEAGE_WINDOW)
+        const telemetry = (round.done?.context ?? {}) as { usedTokens?: number; percent?: number }
+        const used = Number(telemetry.usedTokens ?? snapshot.usedTokens)
+        const percent = telemetry.percent === undefined ? snapshot.percent : Number(telemetry.percent)
+        if (percent !== null && Number.isFinite(percent)) {
+          // 触发与展示同分母（L-89）：帧里的百分比就是 used / 模型行窗口
+          expect(Math.abs(percent - (used * 100) / REAL_LINEAGE_WINDOW), `第 ${turn} 轮展示百分比与分母不同源`)
+            .toBeLessThanOrEqual(1)
+        }
+        rounds.push({
+          turn,
+          level: levelOf(snapshot.compaction?.level),
+          percent,
+          frame: round.frames.find((frame) => frame.type === 'context'),
+          tools: round.frames.filter((frame) => frame.type === 'tool_start').length
+        })
+      }
+
+      const levels = rounds.map((row) => row.level)
+      // eslint-disable-next-line no-console
+      console.log(
+        `[C-13] 窗口=${REAL_LINEAGE_WINDOW} 档位=${levels.join(' → ')} ` +
+          `占用=${rounds.map((row) => (row.percent === null ? '-' : `${row.percent.toFixed(1)}%`)).join(' → ')} ` +
+          `工具调用=${rounds.map((row) => row.tools).join('/')}`
+      )
+
+      // ② 档位谱系：单调不减、每次至多一格，且真的离开 none（"全 none 也单调"不再能过）
+      for (let index = 1; index < levels.length; index += 1) {
+        const step = levelIndex(levels[index]) - levelIndex(levels[index - 1])
+        expect(step, `第 ${rounds[index].turn} 轮档位跳变：${levels.join(' → ')}`).toBeLessThanOrEqual(1)
+        expect(step, `第 ${rounds[index].turn} 轮档位回退：${levels.join(' → ')}`).toBeGreaterThanOrEqual(0)
+      }
+      expect(
+        levelIndex(levels[levels.length - 1]),
+        `6 轮内压缩从未触发（档位恒 ${levels.join(' → ')}）：先看工具调用数 ${rounds.map((row) => row.tools).join('/')}`
+          + '（没有工具结果 ⇒ L1 无物可清 ⇒ 结构上开不了压）'
+      ).toBeGreaterThanOrEqual(levelIndex('L1'))
+
+      // ① 台账：条数 > 0、首条 L1 起步、逐条只升一格、每条都真的省了 token
+      const ledger = await contextLedger(sid)
+      const changed = ledger
+        .filter((event) => levelOf(event.level) !== 'none')
+        .sort((left, right) => Number(left.atMs ?? 0) - Number(right.atMs ?? 0))
+      expect(changed.length, '压缩台账必须非空（否则"压过"没有证据）').toBeGreaterThan(0)
+      expect(levelOf(changed[0].level), '谱系必须从 L1 起步').toBe('L1')
+      for (let index = 1; index < changed.length; index += 1) {
+        const step = levelIndex(changed[index].level) - levelIndex(changed[index - 1].level)
+        const trail = changed.map((event) => levelOf(event.level)).join(' → ')
+        expect(step, `台账档位跳变：${trail}`).toBeLessThanOrEqual(1)
+        expect(step, `台账档位回退：${trail}`).toBeGreaterThanOrEqual(0)
+      }
+      for (const event of changed) {
+        const before = Number(event.before ?? 0)
+        const after = Number(event.after ?? 0)
+        expect(after, `压缩未降低占用：level=${levelOf(event.level)} before=${before} after=${after}`).toBeLessThan(before)
+      }
+      // ③ compactedTurns / lostTokens 口径：L1 只清结果不折叠轮 ⇒ 0/0；L2 起必须如实记账
+      expect(Number(changed[0].turns ?? -1), 'L1 不得折叠轮次').toBe(0)
+      expect(Number(changed[0].lostTokens ?? -1), 'L1 不丢轮次 ⇒ lostTokens=0（省下的量另由 savedTokens 表达）').toBe(0)
+      for (const event of changed.filter((item) => levelIndex(item.level) >= levelIndex('L2'))) {
+        expect(Number(event.turns ?? 0), `L2+ 的 compactedTurns 必须 > 0：${JSON.stringify(event).slice(0, 200)}`)
+          .toBeGreaterThan(0)
+        expect(Number(event.lostTokens ?? 0), `L2+ 的 lostTokens 必须 > 0：${JSON.stringify(event).slice(0, 200)}`)
+          .toBeGreaterThan(0)
+      }
+      // ④ 占用真下降：末条的 after 低于首条的 before
+      expect(Number(changed[changed.length - 1].after ?? 0)).toBeLessThan(Number(changed[0].before ?? 0))
+
+      // ⑤ 三面同源之一：快照 ≡ 台账末条
+      const lastEvent = changed[changed.length - 1]
+      const finalSnapshot = await contextSnapshot(sid)
+      expect(levelOf(finalSnapshot.compaction?.level)).toBe(levelOf(lastEvent.level))
+      expect(Number(finalSnapshot.compaction?.compactedTurns ?? 0)).toBe(Number(lastEvent.turns ?? 0))
+      expect(Number(finalSnapshot.compaction?.lostTokens ?? 0)).toBe(Number(lastEvent.lostTokens ?? 0))
+
+      // ⑤ 三面同源之二：SSE `context` 帧 ≡ 该轮台账（压缩真的发生时才发帧）
+      const framed = rounds.filter((row) => row.frame !== undefined)
+      expect(framed.length, '压缩轮必须带 context 帧（即时可见面）').toBeGreaterThan(0)
+      for (const row of framed) {
+        const frame = row.frame as Frame
+        expect(levelOf(frame.level)).toBe(row.level)
+        expect(Number(frame.before ?? 0)).toBeGreaterThan(Number(frame.after ?? 0))
+        expect(Number(frame.savedTokens ?? 0)).toBe(Number(frame.before ?? 0) - Number(frame.after ?? 0))
+        const matched = changed.find((event) => levelOf(event.level) === levelOf(frame.level)
+          && Number(event.after ?? -1) === Number(frame.after ?? -2))
+        expect(matched, `context 帧在台账里找不到同源条目：${JSON.stringify(frame).slice(0, 200)}`).toBeDefined()
+      }
+
+      // eslint-disable-next-line no-console
+      console.log(
+        `[C-13] 台账=${changed.length} 条（${changed.map((event) => `${levelOf(event.level)}:${event.before}→${event.after}`).join(' / ')}）` +
+          ` 末条 turns=${String(lastEvent.turns)} lostTokens=${String(lastEvent.lostTokens)}`
+      )
+    })
   })
 })
 

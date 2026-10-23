@@ -17,9 +17,11 @@
  *   ① **披露清单驱动**：目标工具必须出现在本请求 `tools[]` 里才允许发起调用，否则退化为文本轮
  *      （避免"调用未披露工具 → 后端以 SCOPE_NOT_DISCLOSED 回灌 → 桩再调同一个 → 请求风暴"）；
  *   ② **每个会话轮次的上游调用上限**（`convergence.maxCallsPerTurn`，默认 6）：越界只发文本；
- *   ③ **续轮只发文本**：上下文中已有 `role=tool` 消息时不再发起工具调用；
+ *   ③ **续轮只发文本**：**本轮**已出现 `role=tool` 消息（即最后一条 `user` 之后有工具结果）时不再发起
+ *      工具调用；历史带来的工具结果不算续轮（上一轮的工具结果已进历史、其后又有新用户消息 ⇒ 那是新轮，
+ *      必须照常下发 tool_calls，否则新用户轮的首次请求会被误判成续轮 —— L-84）；
  *   ④ **解析失败不猜**：任何识别/解析失败一律以文本收尾（宁可让用例 FAIL，也不制造请求风暴）。
- *   `--self-check` 用"首轮→工具调用、续轮→文本"的模拟循环逐条证明上述四条成立。
+ *   `--self-check` 用"首轮→工具调用、续轮→文本、新用户轮（历史带工具结果）→工具调用"的模拟循环逐条证明上述四条成立。
  *
  * 记录契约（可归因性，设计草案 §5.2.4）：每请求落 `<dir>/req-NN.json`（请求原文）、
  * `.tools.txt`（本请求实际披露的工具名清单）、`.head.txt`（模型可见消息摘要）、
@@ -51,6 +53,8 @@
  *   slow-tool=<ms>                   工具轮首帧前静默；slow-reader 慢生产者（20 帧 × 250ms）
  *   multi-card=<n>                   一条消息 n 个 tool_calls（id 互异）
  *   huge-frame=<bytes> / tool-loop=<n>   单帧字节数 / 连续 n 次工具调用
+ *   reasoning=<chars>                思考分片：正文分片之前插 1–2 个 `reasoning_content` 分片
+ *                                   （L-91 的上游侧形态；0/缺省 = 关闭，帧逐字节不变）
  *   context-overflow / summary-500   越窗 400（措辞取产品 ContextOverflow.MARKERS）/ 摘要请求 500
  *   gf-seven-types / gf-linkage / gf-expr-linkage / gf-deep-linkage / gf-options-from /
  *   gf-attachment / gf-longtext      GF 新能力面的路由开关（stub-routes.json 的 GF-* 路由）
@@ -243,6 +247,9 @@ function usageOf(shape) {
 //   slow-tool=<ms>               工具轮首个 tool_calls 帧前静默 ms
 //   multi-card=<n>               一条 assistant 消息里 n 个 tool_calls（id 互异）
 //   huge-frame=<bytes>           单个 delta 帧 N 字节
+//   reasoning=<chars>            思考分片：正文分片之前插 1–2 个 `delta.reasoning_content` 分片
+//                                （0 = 关闭；与 huge-frame 可同开，超 64KB 的思考文本保持单片
+//                                ⇒ 覆盖产品帧侧字段级截断面）
 //   tool-loop=<n>                连续 n 次工具调用（步数上限）
 //   context-overflow             上游回 400 + 越窗措辞（ContextOverflow.MARKERS 命中）
 //   summary-500                  arm 后下一条摘要请求回 500
@@ -265,7 +272,7 @@ function usageOf(shape) {
 // 桩只为它们提供触发面（下发工具/表单），不在桩里伪造业务结果 —— 否则"桩绿=产品绿"的假象。
 const FAULT_VALUE_SWITCHES = ['break-at-seq', 'stall-frames', 'stall-headers', 'kill-stream', 'slow-tool',
   'multi-card', 'huge-frame', 'tool-loop', 'slow-first-byte', 'slow-tool-exec', 'slow-tail-frames',
-  'late-frames']
+  'late-frames', 'reasoning']
 const FAULT_FLAG_SWITCHES = ['turn-text', 'turn-interleave', 'context-overflow', 'summary-500', 'slow-reader',
   'fail-503-once']
 const FAULT_SWITCHES = [...FAULT_VALUE_SWITCHES, ...FAULT_FLAG_SWITCHES]
@@ -289,7 +296,10 @@ function faultsOf(body) {
 /** 开关默认值（`stub-routes.json` 的 `faults.switches[*].default`；缺失回落内建同值）。 */
 const FAULT_DEFAULTS = { 'break-at-seq': 2, 'stall-frames': 50000, 'stall-headers': 30000, 'kill-stream': 3000,
   'slow-tool': 130000, 'multi-card': 3, 'huge-frame': 102400, 'tool-loop': 26,
-  'slow-first-byte': 8000, 'slow-tool-exec': 8000, 'slow-tail-frames': 1200, 'late-frames': 2 }
+  'slow-first-byte': 8000, 'slow-tool-exec': 8000, 'slow-tail-frames': 1200, 'late-frames': 2,
+  // reasoning：数值空间以 0 起，0 = 关闭；裸标记（无 `=<chars>`）因此也是关闭，
+  // 这是刻意的 —— 既有用例的精确帧数断言只在"开关关闭"这一种状态下有意义。
+  reasoning: 0 }
 
 /** 命名轮蓝本的确定性文本（段序基线与"迟到帧不写"用例共用；长度 > 120 字以覆盖多个 delta）。 */
 const TURN_TEXT = '命名轮蓝本：这是一段确定性文本，用于验证纯文本流的帧序完整性（start 恰 1 / delta ≥ 1 / done 恰 1），'
@@ -625,6 +635,25 @@ function echoText(messages) {
 }
 
 /**
+ * **本轮**已出现的工具结果 = 最后一条 `user` 消息之后的 `role=tool`（收敛契约 ③ 的判据）。
+ *
+ * 判据必须按「本轮起点」裁，不能按「上下文里有没有 role=tool」：新用户轮的上下文同样带着
+ * 上一轮的工具结果（L-75 起取消轮也会落配对的 `role=tool`）⇒ 按上下文裁会把新轮的首次请求
+ * 误判成续轮、永不下发 tool_calls（L-84）。没有 user 消息时（探活/异常请求）退化为「全部工具结果
+ * 都算本轮」，与旧判据同义。
+ */
+function roundToolResults(messages) {
+  let start = 0
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.role === 'user') {
+      start = i + 1
+      break
+    }
+  }
+  return messages.slice(start).filter((m) => m?.role === 'tool')
+}
+
+/**
  * 本轮判定。返回 `{kind, ...}`；调用方只认 `tool_call` 与 `text` 两种。
  *
  * @param body    上游请求体（OpenAI 兼容）
@@ -654,10 +683,9 @@ function decide(body, routes, turns, overrides = {}) {
   bucket.lastLen = messages.length
   bucket.calls += 1
 
-  const hasToolResult = messages.some((m) => m?.role === 'tool')
-  if (hasToolResult) {
-    // 收敛契约 ③：上下文中已有工具结果 = 续轮，只发文本
-    return { kind: 'text', text: echoText(messages), reason: '续轮（上下文中已有工具结果）' }
+  if (roundToolResults(messages).length > 0) {
+    // 收敛契约 ③：本轮已出现工具结果 = 续轮，只发文本
+    return { kind: 'text', text: echoText(messages), reason: '续轮（本轮已出现工具结果）' }
   }
   if (bucket.calls > maxCalls) {
     // 收敛契约 ②：轮次上限兜底
@@ -743,6 +771,34 @@ function usageChunk(usage, model) {
 
 /** 末块 0/0/0：直读末帧的实现会把它当真值（`ContextMeter` 的 R1 必须跳过）。 */
 const ZERO_USAGE = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+
+/**
+ * 思考分片（`delta.reasoning_content`，OpenAI 兼容线的 snake_case）：L-91 的**上游侧**形态。
+ *
+ * 桩只发上游 chunk，不发 SSE 帧 —— `reasoning_content` → `delta{kind:'reasoning'}`
+ * 与段边界（`message_start/message_end{kind:'reasoning'}`）是产品侧
+ * `ResilientChatService#consume` + `SseChatEmitter#reasoningDelta` 的职责。
+ *
+ * 分片数 1–2：短思考拆 2 片（覆盖"多片累加 + `message_end.chars` 合计"）；
+ * 已达帧侧 64KB 闸的思考文本保持**单片** —— 那正是产品字段级截断
+ * （`truncated/truncatedReason`）的观测面，拆两片反而把每片压回闸下、观测面消失。
+ */
+const REASONING_UNIT = '思考注入面：先核对费率口径与章节位置，再给出结论；本段由桩按需重复填充。'
+const REASONING_FRAME_CAP = 64 * 1024
+
+function reasoningChunks(chars, model) {
+  const total = Math.max(0, Math.floor(Number(chars) || 0))
+  if (total <= 0) return []
+  const text = REASONING_UNIT.repeat(Math.ceil(total / REASONING_UNIT.length)).slice(0, total)
+  if (text.length <= 1 || text.length > REASONING_FRAME_CAP) {
+    return [chunk({ reasoning_content: text }, null, model)]
+  }
+  const cut = Math.ceil(text.length / 2)
+  return [
+    chunk({ reasoning_content: text.slice(0, cut) }, null, model),
+    chunk({ reasoning_content: text.slice(cut) }, null, model)
+  ]
+}
 
 /**
  * 文本轮：分片 content → finish_reason=stop → usage 帧 → [DONE]（硬规范②：必须有终帧）。
@@ -870,12 +926,28 @@ function blueprintDecision(body, faults) {
 function framesFor(decision, faults, index, model, usageShape) {
   const callId = `call-stub-${index}`
   if (decision.kind !== 'tool_call') {
-    if (faults['huge-frame']) return hugeTextRound(numericFault(faults, 'huge-frame'), model)
-    return textRound(decision.text, model, usageShape)
+    const base = faults['huge-frame']
+      ? hugeTextRound(numericFault(faults, 'huge-frame'), model)
+      : textRound(decision.text, model, usageShape)
+    return withReasoning(base, faults, model)
   }
   const n = faults['multi-card'] ? numericFault(faults, 'multi-card') : 1
   if (n > 1) return multiToolRound(decision.tool, decision.args, callId, model, n)
   return toolRound(decision.tool, decision.args, callId, model)
+}
+
+/**
+ * 把思考分片插在**首帧（`{role}`）之后、正文分片之前** ⇒ 收尾顺序恒为
+ * `[{role}, {reasoning_content}…, {content}…, {}, finish_reason]`（与真模型"先想再答"同形）。
+ *
+ * 开关关闭（缺省 / `reasoning=0`）时原样返回入参：既有用例的精确帧数断言零漂移。
+ * 与 `huge-frame` 正交：大帧轮同样是"首帧 role + 单个 text delta"，插在此处即可覆盖
+ * "超 64KB 思考文本"与"超 64KB 正文文本"两个字段级截断面。
+ */
+function withReasoning(frames, faults, model) {
+  const chars = faults.reasoning ? numericFault(faults, 'reasoning') : 0
+  if (chars <= 0) return frames
+  return [frames[0], ...reasoningChunks(chars, model), ...frames.slice(1)]
 }
 
 /**
@@ -1470,6 +1542,40 @@ function selfCheck() {
   ok(`等长重发自证通过（同一 fingerprint、长度不变的重复请求不再重置台账：${repeats} 次请求中仅首轮发工具调用，≤ ${maxCalls} 上限）`)
 
   section()
+  // ④c 新用户轮自证（L-84）：历史带来的工具结果不得把新用户轮的首次请求误判成续轮。
+  // 形态 = 上一轮 user→assistant(tool_calls)→tool→assistant(收尾) 之后，用户再提一句命中同一路由的话。
+  // 判据按「本轮起点」（最后一条 user 之后）裁，故新用户轮照常下发 tool_calls；同一轮内出现工具结果
+  // 之后的请求仍只发文本（上面 ④ 已覆盖续轮面）。
+  const freshSim = new Map()
+  for (const route of ROUTES.routes || []) {
+    const userText = (route.match?.messageAny || [])[0]
+    const tools = route.match?.requiresTools || []
+    const messages = [
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: userText },
+      { role: 'assistant', content: '', tool_calls: [{ id: 'c1', type: 'function', function: { name: route.tool, arguments: '{}' } }] },
+      { role: 'tool', tool_call_id: 'c1', content: '{"ok":true}' },
+      { role: 'assistant', content: '上一轮收尾' },
+      { role: 'user', content: userText }
+    ]
+    const d = decide({}, ROUTES, freshSim, { messages, tools })
+    if (d.kind !== 'tool_call' || d.tool !== route.tool) {
+      bad(`新用户轮自证：路由 ${route.id} 的历史已带工具结果，新用户轮未发出工具调用（${d.kind}/${d.tool ?? '-'}，判据被历史带偏 —— L-84 回归）`)
+      continue
+    }
+    // 新轮内的续轮：工具结果出现在最后一条 user 之后 ⇒ 仍只发文本
+    const tail = decide({}, ROUTES, freshSim, {
+      messages: messages.concat([
+        { role: 'assistant', content: '', tool_calls: [{ id: 'c2', type: 'function', function: { name: route.tool, arguments: '{}' } }] },
+        { role: 'tool', tool_call_id: 'c2', content: '{"ok":true}' }
+      ]),
+      tools
+    })
+    if (tail.kind !== 'text') bad(`新用户轮自证：路由 ${route.id} 的新轮内续轮仍发起工具调用（契约 ③ 被放宽）`)
+  }
+  ok('新用户轮自证通过（历史里的工具结果不被误判为续轮；新轮内的续轮仍只发文本）')
+
+  section()
   // ⑤ 披露清单驱动：tools[] 为空时不得发出任何工具调用
   const emptyToolsSim = new Map()
   for (const route of ROUTES.routes || []) {
@@ -1729,6 +1835,53 @@ function selfCheck() {
   if (hugeDelta.length !== 1) bad(`huge-frame 应是单个 delta 帧，实际 ${hugeDelta.length} 个`)
   else if (hugeDelta[0].choices[0].delta.content.length < 4096) bad('huge-frame 的 delta 未达到请求字节数')
   else if (!huge.some((f) => f.choices?.[0]?.finish_reason === 'stop')) bad('huge-frame 缺 stop 终帧')
+
+  // ⑨-e2 思考分片（`reasoning=<chars>`，L-91 的上游侧形态）：默认关闭零漂移 / 插在正文之前 /
+  //       1–2 片且字符合计等于请求值 / 与 huge-frame 正交（超 64KB 的思考文本保持单片）
+  const parseFrames = (frames) => frames
+    .filter((f) => f !== 'data: [DONE]\n\n')
+    .map((f) => JSON.parse(f.replace(/^data: /, '').trim()))
+  const reasonText = '思考分片用例正文。'
+  const plainRound = textRound(reasonText, 'ci-stub', 'last')
+  // 只比"可观测契约"（帧数 / delta / finish_reason / usage）：`id`/`created` 每次生成都不同，
+  // 拿它们做逐字节比较会把任何一次调用都判成漂移。
+  const shapeOf = (frames) => JSON.stringify(parseFrames(frames).map((f) => ({ choices: f.choices, usage: f.usage ?? null })))
+  const plainShape = shapeOf(plainRound)
+  const sameAsPlain = (faults) => shapeOf(framesFor({ kind: 'text', text: reasonText }, faults, 0, 'ci-stub', 'last'))
+    === plainShape
+  if (!sameAsPlain({})) bad('reasoning 开关关闭时帧序列必须与 textRound 逐字节相同（既有精确帧数断言零漂移）')
+  if (!sameAsPlain({ reasoning: 0 })) bad('reasoning=0 必须等价于关闭（帧逐字节相同）')
+  if (!sameAsPlain({ reasoning: true })) bad('裸 reasoning 标记（无 =<chars>）应等价于关闭（表内默认 0）')
+  const reasonFrames = parseFrames(framesFor({ kind: 'text', text: reasonText }, { reasoning: 120 }, 0, 'ci-stub', 'last'))
+  const reasonDeltas = reasonFrames.filter((f) => f.choices?.[0]?.delta?.reasoning_content !== undefined)
+  const reasonChars = reasonDeltas.reduce((sum, f) => sum + f.choices[0].delta.reasoning_content.length, 0)
+  if (reasonDeltas.length < 1 || reasonDeltas.length > 2) {
+    bad(`reasoning=120 的分片数 ${reasonDeltas.length}，期望 1–2`)
+  }
+  if (reasonChars !== 120) bad(`reasoning=120 的分片字符合计 ${reasonChars}，期望 120`)
+  if (reasonFrames[0]?.choices?.[0]?.delta?.role !== 'assistant') {
+    bad('思考分片必须插在 {role:assistant} 首帧之后（首帧不得被顶掉）')
+  }
+  const firstContent = reasonFrames.findIndex((f) => f.choices?.[0]?.delta?.content)
+  const lastReason = reasonFrames.map((f) => f.choices?.[0]?.delta?.reasoning_content !== undefined).lastIndexOf(true)
+  if (firstContent < 0) bad('reasoning 轮的正文分片缺失（开关只加思考片，不得吞正文）')
+  else if (lastReason > firstContent) bad('思考分片必须全部在正文分片之前（收尾顺序 role→reasoning_content→content）')
+  if (!reasonFrames.some((f) => f.choices?.[0]?.finish_reason === 'stop')) bad('reasoning 轮缺 stop 终帧')
+  const hugeReason = parseFrames(framesFor({ kind: 'text', text: reasonText },
+    { reasoning: 70000, 'huge-frame': 4096 }, 0, 'ci-stub', 'last'))
+  const hugeReasonDeltas = hugeReason.filter((f) => f.choices?.[0]?.delta?.reasoning_content !== undefined)
+  const hugeReasonContent = hugeReason.filter((f) => f.choices?.[0]?.delta?.content)
+  if (hugeReasonDeltas.length !== 1) {
+    bad(`超 64KB 的思考文本应保持单片（帧侧字段级截断的观测面），实际 ${hugeReasonDeltas.length} 片`)
+  } else if (hugeReasonDeltas[0].choices[0].delta.reasoning_content.length !== 70000) {
+    bad(`reasoning=70000 的单片长度 ${hugeReasonDeltas[0].choices[0].delta.reasoning_content.length}，期望 70000`)
+  }
+  if (hugeReasonContent.length !== 1) {
+    bad(`reasoning 与 huge-frame 同开时正文仍应是单个 delta，实际 ${hugeReasonContent.length}`)
+  }
+  const markerReason = faultsOf({ messages: [{ role: 'user', content: '前缀 reasoning=120 后缀' }] })
+  if (markerReason.reasoning !== 120) bad(`reasoning 标记解析 ${JSON.stringify(markerReason)}，期望 {reasoning:120}`)
+  ok(`思考分片自证通过（关闭零漂移 / ${reasonDeltas.length} 片合计 ${reasonChars} 字全在正文之前 / 与 huge-frame 正交）`)
 
   // ⑨-f 越窗/摘要：错误体必须命中产品 ContextOverflow.MARKERS（读事实源，不猜措辞）
   const overflowRel = 'backend/src/main/java/com/example/configmgr/ai/context/ContextOverflow.java'

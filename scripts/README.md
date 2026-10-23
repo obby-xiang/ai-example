@@ -96,7 +96,7 @@ $env:E2E_STUB_MODE = '1'
 
 ### 2.2 收敛契约（硬要求：后端工具循环无迭代上限，桩必须自证终止）
 
-① 披露清单驱动 —— 目标工具必须出现在本请求 `tools[]` 里才允许发起调用；② 每个会话轮次的上游调用上限（`convergence.maxCallsPerTurn`，默认 6）；③ 续轮只发文本（上下文已有 `role=tool` 消息时不再发起工具调用）；④ 解析失败不猜（一律以文本收尾）。`--self-check` 用"首轮→工具调用、续轮→文本"的模拟循环逐条证明上述四条成立。
+① 披露清单驱动 —— 目标工具必须出现在本请求 `tools[]` 里才允许发起调用；② 每个会话轮次的上游调用上限（`convergence.maxCallsPerTurn`，默认 6）；③ 续轮只发文本（**本轮**已出现 `role=tool` 消息——即最后一条 `user` 之后有工具结果——时不再发起工具调用；历史带来的工具结果不算续轮：上一轮的工具结果已进历史、其后又有新用户消息，那属新轮、必须照常下发 `tool_calls`，否则新用户轮的首次请求会被误判成续轮 ⇒ 永不下发工具调用，见挂账 L-84）；④ 解析失败不猜（一律以文本收尾）。`--self-check` 用"首轮→工具调用、续轮→文本、新用户轮（历史带工具结果）→工具调用"的模拟循环逐条证明上述四条成立。
 
 ### 2.3 命令行
 
@@ -141,14 +141,16 @@ node scripts/ci/stub-upstream.mjs --self-check [--routes scripts/ci/stub-routes.
 | `epoch=<nonce-N>` | **请求级 epoch 注入**：把工具入参里既有的 `epoch` 换成页面真值（形状与产品 Guard 正则同源） | V-02 / V-03 / V-04 / V-06（模型侧成功路径） |
 | `multi-card=<n>` | 一条消息 n 个 `tool_calls`（id 互异） | H-04 / H-11 |
 | `huge-frame=<bytes>` / `tool-loop=<n>` | 单帧字节数 / 连续 n 次工具调用 | S-13 / S-10 |
+| `reasoning=<chars>` | **思考分片**：正文分片之前插 1–2 个 `delta.reasoning_content`（L-91 的上游侧形态；`0` / 裸标记 = 关闭，帧逐字节不变）。与 `huge-frame` 可同开：>64KB 的思考文本保持单片，覆盖产品帧侧字段级截断面 | S-15s |
 | `fail-503-once` | 同一轮首次 503、之后正常 | S-07 |
 | `context-overflow` / `summary-500` | 越窗 400（措辞取 `ContextOverflow.MARKERS`）/ 摘要请求 500 | C-12 / C-10 |
 | `gf-seven-types` / `gf-linkage` / `gf-expr-linkage` / `gf-deep-linkage` / `gf-options-from` / `gf-attachment` / `gf-longtext` | GF 新能力面的路由开关（`GF-*` 路由） | G-04…G-15 / X-10 |
 
 `fe-tool-hang` / `sheet-big` / `preflight-fail` 三项**不是桩层开关**（`faults.switches` 里标 `layer=script/product`）：
 挂起由用例的处理器停住、大表由用例自建任务、预检失败走产品既有语义 —— 桩只提供触发面，不伪造业务结果。
-`--self-check` 段 ⑨ 断言"表与实现不漂移"（桩层 27 项逐项有实现）、标记解析、写出计划（含三个细分段的段身份）、
-段序、多卡 id 互异、大帧字节数、越窗错误体命中产品 `MARKERS`（读事实源）、摘要识别式与 `RollingSummarizer` 同源；
+`--self-check` 段 ⑨ 断言"表与实现不漂移"（表 31 项，桩层 28 项逐项有实现）、标记解析、写出计划（含三个细分段的段身份）、
+段序、多卡 id 互异、大帧字节数、思考分片（默认关闭零漂移 / 1–2 片全在正文之前 / 与 `huge-frame` 正交）、
+越窗错误体命中产品 `MARKERS`（读事实源）、摘要识别式与 `RollingSummarizer` 同源；
 段 ⑩ 断言请求级工具路由（嵌套 args / 披露闸 / 产品清单闸 / 幂等）、epoch 注入（只改既有键）与迟到帧。
 
 ### 2.4 记录契约（可归因性）
@@ -160,6 +162,19 @@ node scripts/ci/stub-upstream.mjs --self-check [--routes scripts/ci/stub-routes.
 `stub-upstream.mjs` 的 13 组常量 + 6 项上限仍是 `GenerativeFormRules` 的**桩内副本**，但 `--self-check` 的自检③已改为**读产品事实源 `backend/src/main/java/com/example/configmgr/ai/form/GenerativeFormRules.java` 逐值对账**（13 组常量 + 6 项上限 + 原型三键；不新增端点、不新增生成步骤）——产品侧收紧或改动白名单而桩未同步时，**自检即红、e2e job 即红**，"副本自证仍绿"的漂移窗口已关闭。自检输出会打印事实源路径；对事实源**文本格式**（常量声明书写形态）有依赖，采用宽松解析、解析失败即红。
 
 > 桩 / 前端 / 后端三处"原型键黑名单"另由后端用例 `GenerativeFormContractTest#forbiddenFieldKeysMatchAcrossEnds` 逐键锚定（同一批 T4-5 落地）。
+
+### 2.6 域专用 Playwright config（本域桩 / 本域端口段）
+
+有些专用域与官方桩的两条收敛契约（"本轮已有 `role=tool` 只发文本" / "每条路由每会话只发一次"）直接冲突，
+而 `stub-routes.json` 是共享契约、不为本域扩表 ⇒ 这些域**换桩脚本 + 单开一个 config**（`testMatch` 只收本域 spec）。
+config 只做"加载期 `??=` 补默认值"（显式 env 永远优先），起停仍由统一 `support/harness.ts` 负责。
+
+| 域 | config | 桩脚本 | 端口段 / Redis DB | 跑法（`cd frontend`） |
+| --- | --- | --- | --- | --- |
+| GF2（同会话两轮表单） | `e2e/playwright.gf2.config.ts` | `e2e/support/gf2-upstream.mjs` | 22530 / 22531 / 22599 / 22601 / 22602 + DB 3 | `npx playwright test --config e2e/playwright.gf2.config.ts` |
+
+> CI 侧：`.github/workflows/e2e-real.yml` 的 `e2e-stub` job 在 `--grep @stub` 之后**追加一步**跑 GF2 域
+> （同一步骤序列、同一 Redis service，端口段与主 config 的 183xx 完全错开）；`ci.yml` 不动。
 
 ---
 
