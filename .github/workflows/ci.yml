@@ -14,6 +14,15 @@ name: CI 门禁
 #   step summary 标注，但 job 不让 CI 红；历史命中无法靠改工作树消除，改写历史需用户专项授权）；
 #   工作树口径的阻断面不变 = docs job（断言 ⑤ 命名纪律按 git ls-files 全量扫描；断言 ① 盘符路径
 #   只覆盖 4 个导航/口径入口文档）与 pre-commit（本机暂存区）—— 各 job 的门禁/报告属性见各自节头标注。
+#
+# A 期（选择性测试落地方案 §5.2/§5.3，2026-10-23）：**CI 按变更集跳 job**。
+#   - 新增 `changes` job 计算三面（backend/frontend/e2e）是否需要跑；backend/frontend/e2e 各加 `if:`；
+#     `docs` 与 `scan-history` 保持无条件（它们是"永远会跑"的必需检查）。
+#   - **只用 job 级 if，不启用 workflow 级 paths/paths-ignore**：paths 过滤会让检查停在 Pending，
+#     而 job 级 skip 会报 Success —— 后者才是真风险（假绿），靠末尾 `summary` job 显式写出
+#     "skipped 及原因"来对冲（§5.3）。
+#   - **跳过的 job 一律不作为 required check**；required 建议只设 `docs` + `summary`。
+#   - 被选中执行的后端/前端 job **仍是全量**（CI 不使用测试选择器，§5.1 L3）。
 on:
   push:
     branches: [main]
@@ -25,8 +34,68 @@ permissions:
   contents: read
 
 jobs:
+  # ============================================================
+  # 变更集计算（A 期：CI 按变更集跳 job，设计稿 §5.2 / §7.1）
+  #   - 分类规则**唯一取数点** = scripts/ci/changed-files.mjs 的 RULES 表；workflow 内不重复写路径
+  #     模式，避免"两处规则漂移"。规则自检（--self-check）在本 job 先跑：规则被改窄/改错在这里先红。
+  #   - diff 基准按事件区分（§5.2 原文）：pull_request 用 github.event.pull_request.base.sha；
+  #     push 用 **github.event.before**（推送前一个提交）——不写这条，push 到 main 时基准会算错，
+  #     进而跳过本该跑的 job。before 为空/全零（新分支、强推）或本地不可解析 ⇒ **全跑**。
+  #   - 输出为空（本 job 红/被取消）时 summary job 必须红：空字符串会被误读成"无改动"（§5.3 第三行）。
+  # ============================================================
+  changes:
+    name: 变更集计算（决定 backend/frontend/e2e 是否执行）
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      base: ${{ steps.classify.outputs.base }}
+      basis: ${{ steps.classify.outputs.basis }}
+      backend: ${{ steps.classify.outputs.backend }}
+      frontend: ${{ steps.classify.outputs.frontend }}
+      e2e: ${{ steps.classify.outputs.e2e }}
+      files: ${{ steps.classify.outputs.files }}
+      hits: ${{ steps.classify.outputs.hits }}
+      note: ${{ steps.classify.outputs.note }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # 必须拿到 base→head 的真实 diff：默认 fetch-depth: 1 取不到 push 的 before 提交
+          # （PR 的 base.sha 因 merge commit 的父提交可达而通常可解析，但不依赖这一点）。
+          fetch-depth: 0
+
+      # 与全仓 actions 主版本口径一致：不依赖 runner 镜像预装 node 的偶然可用性。
+      - name: 安装 Node 22
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: 变更集分类器自检（规则表 / 基准解析 / 输出协议）
+        run: node scripts/ci/changed-files.mjs --self-check
+
+      - name: 计算变更集（基准按事件区分）
+        id: classify
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "push" ]; then base="$PUSH_BEFORE_SHA"; else base="$PR_BASE_SHA"; fi
+          echo "::notice::变更集基准：事件=$EVENT_NAME base=${base:-（空）} head=$HEAD_SHA"
+          node scripts/ci/changed-files.mjs \
+            --base "$base" \
+            --head "$HEAD_SHA" \
+            --event "$EVENT_NAME" \
+            --github-output "$GITHUB_OUTPUT" \
+            --summary-out "$GITHUB_STEP_SUMMARY"
+
   backend:
     name: 后端编译与单测
+    # A 期（§5.2）：变更集不含后端面则整 job 跳过。**跳过会报 Success**，故原因由 summary job
+    #   显式写出（§5.3），且本 job 不作为 required check。
+    needs: [changes]
+    if: ${{ needs.changes.outputs.backend == 'true' }}
     # 用例形态：以 @SpringBootTest（真实 Spring 上下文 + H2 内存库 + Flyway 迁移）为主，
     # 少量为纯 JUnit + Mockito 桩（如 SSE 帧序、确认门接线）。
     # 不依赖 Redis、AI key 与 Windows 专属物，故取 ubuntu-latest：启动更快、排队更短。
@@ -52,6 +121,9 @@ jobs:
 
   frontend:
     name: 前端类型检查与构建
+    # A 期（§5.2）：变更集不含前端面则跳过（原因同 backend：由 summary job 写出）。
+    needs: [changes]
+    if: ${{ needs.changes.outputs.frontend == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -86,7 +158,8 @@ jobs:
   # ============================================================
   # E2E 全流程（M2-T1.2）：路线 a —— services:redis 容器 + 本机桩上游，零密钥、零外网。
   #   - 阻塞门禁：push→main 与 pull_request→main 均触发（桩的确定性支撑，裁决 #4）
-  #   - needs: backend：后端单测红时不浪费 E2E 机时（裁决 #8）
+  #   - needs: backend：后端单测红时不浪费 E2E 机时（裁决 #8）。A 期起还多一道门：job 级 if
+  #     （`needs.backend.result == 'success'` + 变更集 e2e 面），见 e2e 节头。
   #   - AI_API_KEY 是固定占位串而非密钥：后端可用性判据只看 key 是否非空（AiAvailability），
   #     故 workflow 内不存在任何仓库密钥引用
   #   - 跑的是**打包 jar**而非 mvn spring-boot:run：stdout 可整条重定向给 -BackendLog，
@@ -116,7 +189,16 @@ jobs:
     name: E2E 全流程（35 用例 · 桩上游 + redis）
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    needs: backend
+    # A 期（§5.2 + 验收④）：
+    #   ① `!cancelled()` 是**状态函数**，出现在 if 里就会关掉 needs 的隐式 success 检查
+    #      （GitHub 口径：if 含状态函数后，作业不再自动要求 needs 成功）—— 因此 backend 的结果必须
+    #      **显式**写进条件，否则"backend 必红"的演练里 e2e 仍会启动，白跑 25 分钟（验收④不成立），
+    #      docs-only PR 上 e2e 也会因 backend **skipped** 而误启动（验收①被破坏）。
+    #      设计稿 §5.2 的示例 `!cancelled() && needs.changes.outputs.e2e == 'true'` 缺这一项，
+    #      照抄不满足验收④；此处补 `needs.backend.result == 'success'`。
+    #   ② `!cancelled()` 而非 `always()`：workflow 被取消时不应再拉起 e2e（官方推荐的替换式）。
+    needs: [changes, backend]
+    if: ${{ !cancelled() && needs.backend.result == 'success' && needs.changes.outputs.e2e == 'true' }}
     env:
       E2E_STUB_MODE: '1'
     services:
@@ -370,3 +452,95 @@ jobs:
           path: backend/target/scan-history-report.txt
           retention-days: 7
           if-no-files-found: warn
+
+  # ============================================================
+  # 门禁汇总（A 期防假绿，设计稿 §5.3）
+  #   - **本 job 必须无条件执行**（`!cancelled()`）：职责就是"把 skipped 与原因写出来"。
+  #     若它也带 `if: success()`，上游一红它就跟着跳过，汇总就变成永远绿（§5.3 第二行）。
+  #     `!cancelled()` 是状态函数 ⇒ needs 的隐式 success 检查被关掉，恰好是本 job 要的语义：
+  #     上游红/跳都要进来如实记账，再自己判红。
+  #   - 上游任一 job 红 ⇒ 本 job 红（逐个 `needs.*.result` 判定），不指望"被跳过的 job 报 Success"。
+  #   - `changes` 输出为空（该 job 红/取消）⇒ 直接红：空串不得当成"无改动"（§5.3 第三行）。
+  #   - **required check 只建议设 `docs` + 本 job**（二者永远会跑）；backend/frontend/e2e 被跳过
+  #     后会报 Success，设成 required 只会在"该跑没跑"时给绿灯。
+  #   - `scan-history` 是报告制（历史命中不使它红），此处只区分"扫描器未完成"（failure ⇒ 红）。
+  # ============================================================
+  summary:
+    name: 门禁汇总（skipped 及原因 · 防假绿）
+    if: ${{ !cancelled() }}
+    needs: [changes, backend, frontend, e2e, docs, scan-history]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 汇总（逐 job 写 result + 跳过原因；任一 failure 即红）
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          BACKEND_RESULT: ${{ needs.backend.result }}
+          FRONTEND_RESULT: ${{ needs.frontend.result }}
+          E2E_RESULT: ${{ needs.e2e.result }}
+          DOCS_RESULT: ${{ needs.docs.result }}
+          SCAN_RESULT: ${{ needs.scan-history.result }}
+          BACKEND_NEEDED: ${{ needs.changes.outputs.backend }}
+          FRONTEND_NEEDED: ${{ needs.changes.outputs.frontend }}
+          E2E_NEEDED: ${{ needs.changes.outputs.e2e }}
+          BASE: ${{ needs.changes.outputs.base }}
+          BASIS: ${{ needs.changes.outputs.basis }}
+          NFILES: ${{ needs.changes.outputs.files }}
+          HITS: ${{ needs.changes.outputs.hits }}
+          NOTE: ${{ needs.changes.outputs.note }}
+        run: |
+          set -uo pipefail
+          fail=0
+          say() { printf '%s\n' "$@" | tee -a "$GITHUB_STEP_SUMMARY"; }
+          row() { say "| $1 | $2 | $3 |"; }
+
+          say "## CI 门禁汇总（A 期：按变更集跳 job）" ""
+          say "- 变更集基准：${BASIS:-?} = ${BASE:-?}；变更文件：${NFILES:-?}；命中规则：${HITS:-?}"
+          say "- 判定依据：${NOTE:-（changes job 未产出 —— 见下表）}" ""
+          say "| job | 结果 | 说明 |" "|---|---|---|"
+
+          # 逐 job 记账。$3 = 该 job 对应面的变更集判定（true/false/always）。
+          judge() {
+            local job="$1" res="$2" needed="$3" ok_note="$4"
+            case "$res" in
+              success)
+                row "$job" "success" "已执行 —— $ok_note" ;;
+              skipped)
+                if [ "$needed" = "true" ]; then
+                  # 只有 e2e 会落到这里：面判定为 true，但上游 backend 未成功（红或跳过）。
+                  row "$job" "skipped" "**因上游未成功而跳过**（e2e 面本应执行，但 backend=${BACKEND_RESULT:-?}；条件含 !cancelled() 与 needs.backend.result==success，不白跑）"
+                else
+                  row "$job" "skipped" "**因变更集不相关而跳过**（面判定=${needed:-空}；命中规则=${HITS:-?}；基准=${BASIS:-?}）"
+                fi ;;
+              failure)
+                fail=1; row "$job" "**failure**" "失败 —— 本汇总报红" ;;
+              cancelled)
+                fail=1; row "$job" "**cancelled**" "被取消 —— 本汇总报红" ;;
+              *)
+                fail=1; row "$job" "${res:-（空）}" "**未知/缺失结果** —— 汇总自欺防线，报红" ;;
+            esac
+          }
+
+          judge changes "$CHANGES_RESULT" "always" "变更集计算完成（基准=${BASIS:-?}）"
+          judge backend "$BACKEND_RESULT" "${BACKEND_NEEDED:-}" "变更集命中后端面，后端全量单测"
+          judge frontend "$FRONTEND_RESULT" "${FRONTEND_NEEDED:-}" "变更集命中前端面，前端全量门禁"
+          judge e2e "$E2E_RESULT" "${E2E_NEEDED:-}" "变更集命中 e2e 面，E2E 全流程"
+          judge docs "$DOCS_RESULT" "always" "无条件执行：文档一致性门禁（阻断）"
+          judge scan-history "$SCAN_RESULT" "always" "无条件执行：全历史脱敏扫描（报告制，历史命中不使 job 红）"
+
+          # §5.3 第三行：变更集输出丢失时必须红（空串不能当成"无改动"）。
+          if [ "${CHANGES_RESULT:-}" != "success" ]; then
+            fail=1
+            say "" "> **changes job 未成功（result=${CHANGES_RESULT:-空}）**：三面判定不可信，本汇总报红（防假绿）。"
+          elif [ -z "${BACKEND_NEEDED:-}" ] || [ -z "${FRONTEND_NEEDED:-}" ] || [ -z "${E2E_NEEDED:-}" ]; then
+            fail=1
+            say "" "> **变更集三面输出丢失**（backend=${BACKEND_NEEDED:-空} / frontend=${FRONTEND_NEEDED:-空} / e2e=${E2E_NEEDED:-空}）：空串不得当作「无改动」，本汇总报红。"
+          fi
+
+          if [ "$fail" -ne 0 ]; then
+            say "" "> 结论：**红**（存在失败 / 未知结果 / 变更集输出缺失）。"
+            echo "::error::门禁汇总：存在失败或不可信结果（详见 job summary）"
+            exit 1
+          fi
+          say "" "> 结论：**绿**（执行过的 job 全部成功；被跳过的 job 已在上表写明原因）。"
+          echo "门禁汇总：绿"
