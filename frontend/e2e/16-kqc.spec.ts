@@ -17,7 +17,9 @@ import { expect, test } from '@playwright/test'
 import { assistantBubble, openApp, sendMessage, sessionId, waitRoundSettled } from './support/helpers'
 import {
   aiHealth,
+  apiData,
   chatRound,
+  contextLedger,
   contextSnapshot,
   deltaTextOf,
   fingerprint,
@@ -42,11 +44,19 @@ import {
   waitStubRequestsAfter
 } from './support/helpers-kqc'
 
-/** 策略：本域用例依赖本域桩（KB 三工具不在官方桩的共享 `productTools` 表里）。 */
+/** 策略：本域桩用例依赖本域桩（KB 三工具不在官方桩的共享 `productTools` 表里）。 */
 const KQC_STUB_ACTIVE = (process.env.E2E_STUB_SCRIPT ?? '').includes('kqc-upstream')
 
+/**
+ * 真模型模式（`E2E_MODE=real`）**不起任何桩**（harness：`needStub = MODE === 'stub'`），
+ * 本域 `@real` 条的证据面是 SSE 帧 / `/context` / `/kb/*` 端点，不依赖桩落档 —— 因此
+ * 「有没有本域桩」不能当作真模型棒的跳过条件（否则 K-10 / C-13 在真机棒里恒 SKIP，
+ * 而蓝本 §0.6-5 要求标「真模型」的条目必须在真 key 下跑过）。
+ */
+const KQC_REAL_MODE = process.env.E2E_MODE === 'real'
+
 test.skip(
-  !KQC_STUB_ACTIVE,
+  !KQC_STUB_ACTIVE && !KQC_REAL_MODE,
   'K/Q/C 域需要在 KQC 域桩下运行：E2E_STUB_SCRIPT=<仓库根>/frontend/e2e/support/kqc-upstream.mjs'
 )
 
@@ -676,34 +686,91 @@ test.describe('@stub 16 C 上下文统计与压缩', () => {
 })
 
 test.describe('@real 16 KQC 真模型（CI 手工触发；本地不跑）', () => {
+  // 蓝本 §0.3 常规行为档：N=10、阈值 ≥7（成本敏感档仅 C-13 用，见该条行内注明 N=6 轮）。
+  const REAL_SAMPLING = Math.max(1, Number(process.env.E2E_REAL_SAMPLING ?? '10'))
+  const REAL_THRESHOLD = Math.ceil(REAL_SAMPLING * 0.7)
+
   test('@real E2E-K10 英文查询桥接：英文术语经 aliases_en 命中中文语料，未登记表达如实 no_match', async () => {
-    const sid = newSessionId('K10')
-    const round = await chatRound(sid, 'How is the regional tariff calculated? Please search the knowledge base.')
-    expect(round.done).toBeTruthy()
-    const text = deltaTextOf(round)
-    expect(text.length).toBeGreaterThan(0)
-    // 形状断言（C 级概率口径，N=10 ≥7）：引用锚定中文 doc_id，且不吐调试信息
-    expect(text).not.toContain('<knowledge>')
-    expect(text).not.toContain('toolCallId=')
-    const requests = await waitStubRequestsAfter(maxStubIndex() - 6, 1, 60_000)
-    expect(requests.length).toBeGreaterThan(0)
+    test.setTimeout(900_000)
+
+    // 前置（B 级确定性）：KB 就绪、三工具在披露清单里 —— 命中失败的归因先排除"没开库"
+    const status = await kbStatus()
+    expect(status.ready, 'KB 未就绪：先看 /api/ai/kb/status').toBe(true)
+    const disclosed = await toolNames()
+    for (const name of ['kb_search', 'kb_lookup_term', 'kb_read_doc']) {
+      expect(disclosed).toContain(name)
+    }
+    const docIds = (await apiData<Array<{ id: string }>>('/api/ai/kb/docs')).map((doc) => doc.id)
+
+    // C 级概率面：英文问句 → 真的调了 kb_* 且答复落在中文语料的概念上
+    let hits = 0
+    const misses: string[] = []
+    for (let index = 1; index <= REAL_SAMPLING; index += 1) {
+      const round = await chatRound(
+        newSessionId(`K10-${index}`),
+        'How is the regional tariff calculated? Please search the knowledge base and answer in Chinese.'
+      )
+      expect(round.done).toBeTruthy()
+      const text = deltaTextOf(round)
+      // 形状：答复非空、不吐内部定界标记与调试字段
+      expect(text.length).toBeGreaterThan(0)
+      expect(text).not.toContain('<knowledge>')
+      expect(text).not.toContain('toolCallId=')
+      const kbCalls = round.frames
+        .filter((frame) => frame.type === 'tool_start' && String(frame.name ?? '').startsWith('kb_'))
+        .map((frame) => String(frame.name))
+      const grounded = /区域费率|费率|跨区|加收/.test(text)
+      if (kbCalls.length > 0 && grounded) {
+        hits += 1
+      } else {
+        misses.push(`#${index} tools=${kbCalls.join(',') || '-'} text=${text.slice(0, 80)}`)
+      }
+    }
+
+    // 未登记表达：召回为空时如实 no_match，不编造 doc_id（单轮确定性口径，不进采样计数）
+    const unknown = await chatRound(
+      newSessionId('K10-absent'),
+      'How does the flurbox quota work? Please search the knowledge base.'
+    )
+    expect(unknown.done).toBeTruthy()
+    const unknownText = deltaTextOf(unknown)
+    expect(unknownText).not.toContain('<knowledge>')
+    const cited = docIds.filter((id) => unknownText.includes(id))
+    expect(cited, `未登记表达被编造成了语料里的 doc_id：${cited.join(',')}`).toHaveLength(0)
+
+    // eslint-disable-next-line no-console
+    console.log(`[K-10] N=${REAL_SAMPLING} 命中=${hits} 阈值≥${REAL_THRESHOLD}`)
+    expect(hits, `未命中采样：\n${misses.join('\n')}`).toBeGreaterThanOrEqual(REAL_THRESHOLD)
   })
 
+  // 成本敏感档（蓝本 §0.3）：N=6 轮连续对话（临界 5 轮 + 1 轮观察），不设 10 轮采样。
   test('@real E2E-C13 压缩级别只升一级 + 滞回：长会话多轮后 level 单调、每次至多一格', async () => {
     const sid = newSessionId('C13')
     const levels: string[] = []
+    const percents: number[] = []
     for (let turn = 0; turn < 6; turn += 1) {
       const round = await chatRound(sid, `第 ${turn + 1} 轮：请复述上一轮要点并给出一句结论。`)
       expect(round.done).toBeTruthy()
       const snapshot = await contextSnapshot(sid)
       levels.push(String(snapshot.compaction?.level ?? 'none'))
+      percents.push(Number(snapshot.percent ?? 0))
     }
     const order = ['none', 'L1', 'L2', 'L3']
     for (let index = 1; index < levels.length; index += 1) {
       const step = order.indexOf(levels[index]) - order.indexOf(levels[index - 1])
-      expect(step).toBeLessThanOrEqual(1)
-      expect(step).toBeGreaterThanOrEqual(0)
+      expect(step, `第 ${index + 1} 轮压缩档跳变：${levels.join(' → ')}`).toBeLessThanOrEqual(1)
+      expect(step, `第 ${index + 1} 轮压缩档回退：${levels.join(' → ')}`).toBeGreaterThanOrEqual(0)
     }
+    // eslint-disable-next-line no-console
+    console.log(`[C-13] 档位=${levels.join(' → ')} 占用=${percents.map((p) => `${p.toFixed(1)}%`).join(' → ')}`)
+    // 诊断面（不断言）：档位只记「最近一次压缩」；是否真压过要看台账与 lostTokens，
+    // 否则「level 恒 none」既可能是没到阈值、也可能是压过又回落，本条的判据会平凡通过。
+    const ledger = await contextLedger(sid).catch(() => [])
+    const last = ledger[ledger.length - 1]
+    // eslint-disable-next-line no-console
+    console.log(
+      `[C-13] 压缩台账条数=${ledger.length} 末条=${last === undefined ? '-' : JSON.stringify(last).slice(0, 200)}`
+    )
   })
 })
 

@@ -47,6 +47,8 @@ test.describe('@real 真模型冒烟', () => {
       await expect(page.locator('[data-testid="empty-state"]')).toBeVisible({ timeout: 20_000 })
     }
     // 形状断言：命中轮里工具卡标题非空；概率下限：≥ 70%
+    // eslint-disable-next-line no-console
+    console.log(`[RM-02] N=${SAMPLING} 工具轮命中=${success} 阈值≥${THRESHOLD}`)
     expect(success).toBeGreaterThanOrEqual(THRESHOLD)
     expect(seen.filter((title) => title.trim() !== '')).toHaveLength(success)
   })

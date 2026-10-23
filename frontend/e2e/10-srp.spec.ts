@@ -390,7 +390,12 @@ test.describe('@stub S 流式稳定', () => {
 
 /**
  * S-15 思考链（reasoning 帧）块渲染与折叠：真模型 reasoning 输出（桩不产 reasoning 帧）。
- * 本批不跑真模型：用例写好并标 @real，stub 模式由 grep 排除。
+ *
+ * <p>实跑口径（2026-10-23 真模型批）：上游 `deepseek-flash` **确实**返回 `reasoning_content`
+ * （直接打 `POST /chat/completions` 可见），但本后端没有任何 reasoning 帧出口
+ * （`SseChatEmitter` 只有 `textStart/textEnd`，`delta` 只发正文；`frontend/src/types/sse.ts:197`
+ * 也写明「后端今天不产 reasoning 帧」），故本机实测该条恒红。这是产品缺口（挂账），
+ * 不是模型不配合 —— 因此本条保持红色、不 SKIP（蓝本 §0.6-1）。
  */
 test.describe('@real S 思考链', () => {
   test('E2E-S15 思考块独立分框、可折叠、不混入正文', async ({ page }) => {
@@ -399,7 +404,10 @@ test.describe('@real S 思考链', () => {
     await waitRoundSettled(page, 120_000)
 
     const toggle = page.locator('[data-testid^="reasoning-toggle-"]')
-    await expect(toggle).toHaveCount(1, { timeout: 60_000 })
+    await expect(
+      toggle,
+      '零思考块：如果上游有 reasoning_content 而这里没有块，缺口在后端 reasoning 帧映射（挂账），不在渲染层'
+    ).toHaveCount(1, { timeout: 60_000 })
     const blockId = String(await toggle.getAttribute('data-testid')).replace('reasoning-toggle-', '')
 
     // ① 思考块与正文分段不同框：思考体在 reasoning-body 内，正文不在其中

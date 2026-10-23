@@ -350,6 +350,17 @@ test.describe('@stub G 生成式表单', () => {
 
 // @real：真模型链路（stub 模式的 grep 只跑 @stub，本条留给 CI / 后续批）
 test.describe('@real G 生成式表单（真模型）', () => {
+  /**
+   * 概率口径缺口（挂账，2026-10-23 真模型批实测）：本条的**触发面**（模型会不会调
+   * `generative_form`）是常规行为概率面，蓝本 §0.3 要求 N=10 / ≥7，但这里仍是单轮。
+   *
+   * <p>补采样的尝试失败在**用例结构**而非产品：表单字段用的是静态 `id="gf-field-keyword"`，
+   * 同一页面里连跑第二轮时，第二张卡的表单提交后后端收不到 `approval_decided`
+   * （实测：第 1 轮 6.2s 续跑到 done，第 2 轮停在 `approval_suspend`），本轮因此永不收敛。
+   * 采样化前置 = 表单字段带上轮次唯一的 testid（或用 API 层直接回灌 FRONTEND_RESULT）。
+   *
+   * <p>现状保留单轮：本批 4 次独立运行 4/4 触发并续跑到 done（形状与续跑面稳定）。
+   */
   test('E2E-G01 FILTER 回灌续跑（真模型）', async ({ page }) => {
     await openApp(page)
     await sendMessage(page, '请用生成式表单收集本次导出的筛选条件：关键字、范围（XN/HD），然后等我填写。')
