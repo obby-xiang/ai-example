@@ -162,4 +162,72 @@
             </plugin>
         </plugins>
     </build>
+
+    <!-- 选择性测试 B 期：倒排录制（设计稿 §3.1/§7.2）。
+         只在 -Ptestmap 时生效；不加 profile 时依赖树、插件列表、argLine 逐项不变。
+         JaCoCo 钉 0.8.15（开放点 O5：0.8.16 仅 snapshot）；三个构件为一次性联网拉入本地 m2，
+         之后仍按 mvn -o 构建。 -->
+    <profiles>
+        <profile>
+            <id>testmap</id>
+            <properties>
+                <jacoco.version>0.8.15</jacoco.version>
+                <!-- 录制开关由 surefire 以系统属性下发给 fork；未加 profile 时两者都为空。 -->
+                <testmap.mode>full</testmap.mode>
+            </properties>
+            <dependencies>
+                <dependency>
+                    <groupId>org.jacoco</groupId>
+                    <artifactId>org.jacoco.agent</artifactId>
+                    <version>${jacoco.version}</version>
+                    <classifier>runtime</classifier>
+                    <scope>test</scope>
+                </dependency>
+                <dependency>
+                    <groupId>org.jacoco</groupId>
+                    <artifactId>org.jacoco.core</artifactId>
+                    <version>${jacoco.version}</version>
+                    <scope>test</scope>
+                </dependency>
+            </dependencies>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.jacoco</groupId>
+                        <artifactId>jacoco-maven-plugin</artifactId>
+                        <version>${jacoco.version}</version>
+                        <executions>
+                            <execution>
+                                <id>testmap-prepare-agent</id>
+                                <phase>initialize</phase>
+                                <goals>
+                                    <goal>prepare-agent</goal>
+                                </goals>
+                                <configuration>
+                                    <destFile>${project.build.directory}/testmap/jacoco.exec</destFile>
+                                    <append>false</append>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <configuration>
+                            <!-- 录制期固定单 fork + 复用 + 字母序（§3.1）：只保证同 tree 两次录制可比，
+                                 正确性由 F10/F12 兜底。开 parallel 或 forkCount>1 即失效。 -->
+                            <forkCount>1</forkCount>
+                            <reuseForks>true</reuseForks>
+                            <runOrder>alphabetical</runOrder>
+                            <systemPropertyVariables>
+                                <testmap.enabled>true</testmap.enabled>
+                                <testmap.mode>${testmap.mode}</testmap.mode>
+                                <junit.jupiter.extensions.autodetection.enabled>true</junit.jupiter.extensions.autodetection.enabled>
+                            </systemPropertyVariables>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>
