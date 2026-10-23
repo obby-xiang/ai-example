@@ -2947,6 +2947,23 @@ describe('R-163：Markdown 正文链路 / 白名单 / 工具摘要 / 赞踩 / �
     wrapper.unmount()
   })
 
+  it('T3（L-80）：上报失败 ⇒ 回退本地选中态 + 一条人话提示（不静默假装成功）', async () => {
+    api.feedbackSubmit.mockRejectedValueOnce(new Error('network down'))
+    const msg = buildMessage([{ kind: 'text', seg: 0, text: '回答', streaming: false }])
+    msg.id = 'a-fb-fail'
+    const wrapper = await mountPanel([msg])
+    const up = wrapper.find('[data-testid="feedback-up-a-fb-fail"]')
+    await up.trigger('click')
+    await flushPromises()
+    // ① 回退：服务端没有记录，按钮不能停在"已选中"（否则用户以为赞过了）
+    expect(up.attributes('aria-pressed')).toBe('false')
+    // ② 有提示：失败必须说出来（此前 catch 静默，用户无从知道这次评价没记上）
+    const notice = wrapper.find('[data-testid="notice-bar"]')
+    expect(notice.exists()).toBe(true)
+    expect(notice.text()).toContain('反馈')
+    wrapper.unmount()
+  })
+
   it('T3：操作行 28×28 热区 + gap≥8（w-7 h-7 / gap-2）', async () => {
     const msg = buildMessage([{ kind: 'text', seg: 0, text: '回答', streaming: false }])
     msg.id = 'a-hit'
@@ -4107,14 +4124,16 @@ describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 �
     await wrapper.find('[data-testid="gf-submit"]').trigger('click')
     const submitted = wrapper.emitted('submit')
     expect(submitted).toBeTruthy()
+    // L-76 语义变更（裁定：前端丢弃空串可选值）：可选日期留空 = 未填 ⇒ 不提交该键
+    // （旧断言把 `startAt: ''` 一起上送，正是「表单认为没填、后端按类型判 400」的成因）。
     expect(submitted![0][0]).toEqual({
       name: '数据同步',
       interval: 300,
       dryRun: false,
-      startAt: '',
       mode: 'fast',
       tags: []
     })
+    expect(Object.prototype.hasOwnProperty.call(submitted![0][0] as Record<string, unknown>, 'startAt')).toBe(false)
     wrapper.unmount()
 
     // 后端拒绝说明（FORM_RESULT_REJECTED）落卡级错误条

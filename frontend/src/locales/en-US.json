@@ -132,6 +132,7 @@
       "unlike": "Remove like",
       "dislike": "Dislike",
       "undislike": "Remove dislike",
+      "feedbackFailed": "Feedback was not submitted — this rating was not saved. Please try again later.",
       "diagramName": "Diagram",
       "diagramView": "Diagram view",
       "tabPreview": "Preview",

@@ -213,7 +213,16 @@ export interface AiHistoryMessage {
   /** assistant 的 toolCalls（Spring AI AssistantMessage.ToolCall 列表，字段结构由上游协议决定） */
   toolCalls?: Array<{ id?: string; type?: string; name?: string; arguments?: string }>
   /** tool 消息的响应（ToolResponseMessage.ToolResponse 列表） */
-  toolResponses?: Array<{ id?: string; name?: string; responseData?: string }>
+  toolResponses?: Array<{
+    id?: string
+    name?: string
+    responseData?: string
+    /**
+     * L-78：历史面的**结果视图**（后端按工具名从注册表重新派生，只对成功结局出）。
+     * 缺省 = 该工具没有声明视图投影 / 旧载荷 ⇒ 卡面走旧形态（与帧内 `resultView` 同契约）。
+     */
+    resultView?: ResultView
+  }>
   /**
    * R-144（后端历史携带状态）：按 toolCallId 映射的段级真态（挂在带 toolCalls 的 ASSISTANT 消息
    * metadata 上随载荷透出）。旧载荷缺该字段 ⇒ 前端占位兜底（status 'succeeded' / kind2 'UNKNOWN'）；

@@ -3067,14 +3067,21 @@ const ICON_BTN_ON_BLUE = 'is-on text-[#2563eb] bg-[#eff4ff]'
 /** 踩选中（红族 —— R-163 T3 赞蓝/踩红语义保留，不随 v7 统一蓝）。 */
 const ICON_BTN_ON_RED = 'is-on text-[#c0392b] bg-[#fdf1ef]'
 
-/** R-163 T3：赞踩本地态（选中互斥、可取消）+ 上报（ rating=0=取消，幂等 upsert 在后端）。 */
+/**
+ * R-163 T3：赞踩本地态（选中互斥、可取消）+ 上报（ rating=0=取消，幂等 upsert 在后端）。
+ *
+ * L-80（反馈失败静默）：上报失败 ⇒ **回退选中态** + 一条人话提示。旧实现乐观置位后
+ * `void` 掉结果，失败时按钮停在"已赞"而服务端什么都没记 —— 用户以为记上了。
+ * 回退目标取**点击前**的本地态（可能是"没选"或反向选中），不是简单置 0。
+ */
 const feedbackState = ref<Map<string, 1 | -1>>(new Map())
 
 function feedbackOf(messageId: string): 1 | -1 | 0 {
   return feedbackState.value.get(messageId) ?? 0
 }
 
-function rateMessage(m: ChatMessage, rating: 1 | -1): void {
+async function rateMessage(m: ChatMessage, rating: 1 | -1): Promise<void> {
+  const before = new Map(feedbackState.value)
   const next = new Map(feedbackState.value)
   const current = next.get(m.id)
   const finalRating = current === rating ? 0 : rating // 选中互斥 + 再点取消
@@ -3085,7 +3092,12 @@ function rateMessage(m: ChatMessage, rating: 1 | -1): void {
   }
   feedbackState.value = next
   // R-163 收口修 F2：上报携被评价消息正文前 200 字符快照（人工复盘可读摘要）
-  void ai.submitFeedback(m.id, finalRating, m.content.slice(0, 200))
+  const saved = await ai.submitFeedback(m.id, finalRating, m.content.slice(0, 200))
+  if (!saved) {
+    // 服务端没记上 ⇒ 本地态不得停在"已选中"
+    feedbackState.value = before
+    ai.notice = t('ai.panel.feedbackFailed')
+  }
 }
 
 /**

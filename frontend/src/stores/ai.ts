@@ -1523,6 +1523,11 @@ export const useAiStore = defineStore('ai', {
             if (matched) {
               consumedResponses.add(matched)
               part.result = matched.responseData ?? null
+              // L-78：历史面的视图（后端按工具名重新派生）随段落位 —— 刷新后卡面仍是表格形态，
+              // 而不是回落到旧文本。缺键 = 该工具没有视图投影（与帧内 `resultView` 同一契约）。
+              if (matched.resultView) {
+                part.resultView = matched.resultView
+              }
             } else {
               unmatchedCalls.push({ name, part }) // 序位兜底候选（见下方统一互配）
             }
@@ -3812,6 +3817,13 @@ export const useAiStore = defineStore('ai', {
       // 用建卡时留的上下文引用同步清色 —— 表格可能在别的页签，异步解析不保证拿得到。
       this.dropSheetPreview('stop')
       this.stalePreviewToolCallId = null
+      // L-79（停止即收敛）：界面撤销点随本轮作废 —— 撤销栈是内存态、按轮归属，本轮已被放弃，
+      // 留着它等于让用户去撤一条"本轮已放弃"的操作（面板那段撤销行也会一直挂在旧卡上）。
+      // 与换会话 / 换页两处出口同一收口函数（`resetUiSurfaces` 会一并清播报与上传交接，
+      // 那两件不该被一次停止带走）⇒ 这里只清撤销点两件。
+      clearUiUndo()
+      this.uiUndoEntry = null
+      this.uiUndoToolCallId = null
       // S1：段级就地收敛（输入框解禁的直接前提：pendingToolCall 由段派生）
       this.cancelRoundParts()
       // 本轮的确认门提交态 / 勾选态随轮收口（stop 不走 done 帧，不能指望结局帧来清）
@@ -3895,15 +3907,24 @@ export const useAiStore = defineStore('ai', {
       last.errorCard = null
     },
 
-    /** R-163 T3/T5：赞踩上报（本地态在面板；上报失败静默——不打扰主对话流）。携正文快照 excerpt（F2）。 */
-    async submitFeedback(messageId: string, rating: 1 | -1 | 0, excerpt?: string): Promise<void> {
+    /**
+     * R-163 T3/T5：赞踩上报（本地态在面板）。携正文快照 excerpt（F2）。
+     *
+     * <p>L-80（反馈失败静默）：返回值 = **是否真的记上了** —— 旧实现 `catch {}` 吞错，面板的选中态
+     * 停在"已赞"，用户以为服务端收到了。现在失败如实返回 `false`，由面板回退本地态并给一条提示
+     * （文案走 i18n，面板持有 `t`）。不在这里写 notice：store 的 notice 是**单槽**且与轮次结局
+     * 同面，反馈失败不该覆盖对话主链的通知；且提示需要本地化文案，store 没有 `t`。
+     */
+    async submitFeedback(messageId: string, rating: 1 | -1 | 0, excerpt?: string): Promise<boolean> {
       if (rating !== 1 && rating !== -1 && rating !== 0) {
-        return
+        return false
       }
       try {
         await aiApi.feedbackSubmit({ messageId, sessionId: this.sessionId, rating, excerpt })
+        return true
       } catch {
-        // 静默：反馈上报失败不打断对话（人工复盘数据，非关键链路）
+        // 不打断对话（人工复盘数据，非关键链路）——但必须让调用方知道"没记上"
+        return false
       }
     },
 

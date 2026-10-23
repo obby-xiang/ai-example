@@ -221,6 +221,20 @@ public class AiController {
 	private com.example.configmgr.ai.context.ContextBreakdownService contextBreakdownService;
 
 	/**
+	 * L-78（真机 E2E 批② NFEZUI 域 Z-06）：历史面的**结果视图投影器**（与帧面同一批 Bean）。
+	 *
+	 * <p>为什么是"读侧重算"而不是"补持久字段"：`resultView` 是 UI 通道的帧内字段，
+	 * {@link com.example.configmgr.ai.resultview.ToolResultViewProvider} 的契约本来就是
+	 * "确定性构造 + 结构化数据源（禁反解 resultText）"—— 同一份真值的另一个投影，
+	 * 历史侧按工具名重建即可，不必往任何持久面（含 Redis 对话面）补数据（🏛️「AI 对话数据不落库」）。
+	 *
+	 * <p>字段注入的理由同既有各组件：构造器签名不变 ⇒ 既有 {@code new AiController(...)} 用例零触碰；
+	 * 未注入时历史载荷**不产** {@code resultView} 键（旧形态逐字不变）。
+	 */
+	@Autowired(required = false)
+	private List<com.example.configmgr.ai.resultview.ToolResultViewProvider> resultViewProviders = List.of();
+
+	/**
 	 * S6 尾项（批3二）：错误体的码级本地化。**字段注入**的理由同既有各组件 —— 构造器签名不变 ⇒
 	 * 既有 {@code new AiController(...)} 用例零触碰；未注入时回落调用方中文原文（zh 字节不变）。
 	 */
@@ -1129,9 +1143,64 @@ public class AiController {
 			item.put("id", response.id());
 			item.put("name", response.name());
 			item.put("responseData", unwrapEnvelope(response.responseData()));
+			Map<String, Object> view = historyResultView(response);
+			if (view != null) {
+				item.put("resultView", view);
+			}
 			out.add(item);
 		}
 		return out;
+	}
+
+	/**
+	 * L-78：历史面的结果视图（按工具名从注册表重新派生；未声明投影的工具不产该键）。
+	 *
+	 * <p>三条口径与帧路径（`SpToolCallingManager#resultViewOf`）逐条对齐：
+	 * ① 只对**成功结局**出视图 —— 失败/取消的卡面本来就该走旧形态（"视图是成功结果的投影"）；
+	 * ② 认领按工具名，投影器异常一律吞掉（展示增强不得让 {@code /history} 500）；
+	 * ③ 返回 {@code null} 时不写键 ⇒ 旧载荷形状逐字不变。
+	 */
+	private Map<String, Object> historyResultView(ToolResponseMessage.ToolResponse response) {
+		if (this.resultViewProviders.isEmpty() || response.name() == null || response.id() == null) {
+			return null;
+		}
+		if (!historyOutcomeOk(response.responseData())) {
+			return null;
+		}
+		String resultText = unwrapEnvelope(response.responseData());
+		for (com.example.configmgr.ai.resultview.ToolResultViewProvider provider : this.resultViewProviders) {
+			if (!provider.supports(response.name())) {
+				continue;
+			}
+			try {
+				com.example.configmgr.ai.resultview.ResultView view = provider.build(response.id(),
+						response.name(), resultText);
+				return view == null ? null : view.toMap();
+			}
+			catch (RuntimeException ex) {
+				log.warn("历史 resultView 构造失败（本次不出视图，卡面走旧形态）：tool={} toolCallId={}",
+						response.name(), response.id(), ex);
+				return null;
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * 历史响应的结局是否成功：信封带 {@code ok=false} ⇒ 否；旧数据（非信封 / 无该键）⇒ 是
+	 * （不是信封就不存在"失败结局"的判据，与帧路径"视图只是展示增强"的取向一致）。
+	 */
+	private boolean historyOutcomeOk(String responseData) {
+		if (responseData == null || !responseData.trim().startsWith("{")) {
+			return true;
+		}
+		try {
+			JsonNode node = this.objectMapper.readTree(responseData);
+			return node == null || !node.isObject() || node.path("ok").asBoolean(true);
+		}
+		catch (Exception ex) {
+			return true;
+		}
 	}
 
 	/** 信封 JSON → {@code message} 原文；识别不了（旧数据/普通 JSON 结果）一律原样返回。 */

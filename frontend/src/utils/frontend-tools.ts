@@ -509,6 +509,20 @@ async function runWithBudget(
 const DOWNLOAD_TOOL_NAMES: readonly string[] = ['download_export_files', 'download']
 
 /**
+ * 下载类前端工具的**显式前置等待上限**（毫秒）。
+ *
+ * <p>L-82（真机 E2E 批② VL 域）：`download_export_files` 在**编辑器未预热**时"前置校验"里的
+ * 串行 HTTP（`ensureTaskBoundForTool` 的任务加载 / 结果清单）可能长时间不落地 —— 真机实测
+ * >90s 既无失败也无成功，回执悬空（模型与用户都拿不到结局，卡面一直"执行中"）。
+ *
+ * <p>与外层统一预算（{@link FRONTEND_TOOL_TIMEOUT_BUDGET_MS}，默认 60s）的分工：
+ * 外层是**兜底**（任何前端工具都受它保护）；本常量是下载工具**自己**的收口点 ——
+ * 取 30s（外层默认 60s 的一半），使"前置卡住"能在预算内先给一个**确定性**结局，
+ * 还留出另一半时间给"前置通过后真正发起下载"。两者冲突时取先到者（外层仍是最终兜底）。
+ */
+export const DOWNLOAD_PREFLIGHT_TIMEOUT_MS = 30_000
+
+/**
  * 超时结局文案（结局驱动，中文，**不谎报**）：说明"结局未知"，并按工具类型给出可行动指引。
  *
  * - 下载类：如实说"可能仍在后台继续 / 请到下载目录确认"（实测确有"拖了 30.6s 仍成功落盘"

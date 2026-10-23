@@ -299,8 +299,16 @@ class ConvergeMemoryToolCallStatesTest {
 
 	// ── 定序 + WARN（快照终态 vs 条目非终态） ──
 
+	/**
+	 * L-75 语义变更（原 `pendingWithCancelledSnapshotFallsBackToCancelledAndWarns`）：取消收尾**先收敛
+	 * 条目、再写记忆** —— 于是"快照已 CANCELLED 而条目仍 PENDING"这个混合态在取消路径上不再出现，
+	 * 也就**不再需要**「以轮次终态为准」的兜底 WARN（该兜底分支保留，见下一条 DONE 快照用例）。
+	 *
+	 * <p>为什么必须改：兜底只补 `status`，`decision` 仍取自条目态 ⇒ 刷新后卡面读成「已超时」。
+	 * 断言从「有 WARN」升级为「**无 WARN + 决策=cancel 落地**」（真值更强，且钉住新定序）。
+	 */
 	@Test
-	void pendingWithCancelledSnapshotFallsBackToCancelledAndWarns() {
+	void cancelSnapshotSettlesPendingBeforeMemorySoNoFallbackWarnIsNeeded() {
 		seed(List.of(new UserMessage("你好"), assistantWithToolCalls("tc-1"), toolResponse("tc-1")),
 				RunSnapshot.RUNNING);
 		this.store.seedPending(RUN_ID, pending("tc-1", PendingToolCall.PENDING, false, PendingToolCall.KIND_CONFIRM));
@@ -308,12 +316,12 @@ class ConvergeMemoryToolCallStatesTest {
 		List<Message> windowed = driveAndCapture(Flux.error(new StreamViolationException(
 				StreamViolationException.CANCELLED, "取消")));
 
-		assertThat(toolCallState(windowed, 1, "tc-1")).containsEntry("status", PendingToolCall.CANCELLED);
-		assertThat(this.appender.list).anyMatch(event -> event.getLevel() == Level.WARN
+		assertThat(toolCallState(windowed, 1, "tc-1"))
+			.containsEntry("status", PendingToolCall.CANCELLED)
+			.containsEntry("decision", "cancel");
+		assertThat(this.appender.list).noneMatch(event -> event.getLevel() == Level.WARN
 				&& event.getFormattedMessage().contains("以轮次终态为准")
-				&& event.getFormattedMessage().contains(RUN_ID)
-				&& event.getFormattedMessage().contains("tc-1")
-				&& event.getFormattedMessage().contains(RunSnapshot.CANCELLED));
+				&& event.getFormattedMessage().contains(RUN_ID));
 	}
 
 	@Test
@@ -392,10 +400,86 @@ class ConvergeMemoryToolCallStatesTest {
 		assertThat(windowed).anyMatch(message -> message instanceof AssistantMessage assistant
 				&& assistant.getText().contains("半截正文")
 				&& Boolean.TRUE.equals(assistant.getMetadata().get(ResilientChatService.STOPPED_KEY)));
-		// 取消没产出正文时仍不写空气泡（旧口径保留）
+		// 取消没产出正文、也没有本轮工具段时仍不写空气泡（旧口径保留，判据收窄到"无工具段"）
 		assertThat(windowed).noneMatch(message -> message instanceof AssistantMessage assistant
 				&& assistant.getText().isBlank()
+				&& !assistant.hasToolCalls()
 				&& Boolean.TRUE.equals(assistant.getMetadata().get(ResilientChatService.STOPPED_KEY)));
+	}
+
+	/**
+	 * L-75 收口修（真机复跑暴露的竞态）：取消收尾**先收敛条目、再写记忆**。
+	 *
+	 * <p>若条目在 convergeMemory 时仍是 PENDING（取消标志先到、闸门还没把条目置 CANCELLED），
+	 * 段级状态会经快照终态兜底成 `CANCELLED`，但 `decision` 取自**条目态** ⇒ 刷新后卡面
+	 * 读成「已超时」（真机 P-12 实测：`ro-badge` 显示 `! 已超时`）。
+	 */
+	@Test
+	void cancelDuringSuspendSettlesEntriesBeforeMemorySoCancelDecisionSurvives() {
+		RunSnapshot snapshot = this.store.seedRun(RUN_ID, SESSION_ID);
+		snapshot.setContext(AiContext.empty().toMap());
+		snapshot.setMessageJson(this.codec.serializeAll(List.of(new UserMessage("发布 P12"))));
+		snapshot.setStatus(RunSnapshot.SUSPENDED);
+		snapshot.setInFlightToolCalls(List.of(pending("tc-1", PendingToolCall.PENDING, false,
+				PendingToolCall.KIND_CONFIRM)));
+		this.store.save(snapshot);
+		// 关键前置：条目仍是 PENDING（闸门的 cancel 还没来得及跑）
+		this.store.seedPending(RUN_ID, pending("tc-1", PendingToolCall.PENDING, false, PendingToolCall.KIND_CONFIRM));
+
+		List<Message> windowed = driveAndCapture(Flux.error(new StreamViolationException(
+				StreamViolationException.CANCELLED, "取消")));
+
+		assertThat(toolCallState(windowed, windowed.size() - 2, "tc-1"))
+			.containsEntry("status", PendingToolCall.CANCELLED)
+			.containsEntry("decision", "cancel");
+	}
+
+	/**
+	 * L-75（真机 E2E 批② SRP 域 P-12 转正）：**纯卡轮被停止后助手消息必须落库**。
+	 *
+	 * <p>缺陷形态：本轮既无正文也无工具执行结果（只有一张待决门卡）时，取消终局只按"半截正文"
+	 * 决定要不要写 assistant —— 空正文 ⇒ 什么都不写 ⇒ 记忆里只剩 USER，刷新后门卡整条消失，
+	 * 只剩用户气泡（与「被停的卡显示已取消且不消失」的既有口径冲突）。
+	 *
+	 * <p>修法口径：挂起那一轮的 {@code assistant(tool_calls)} 由快照的 in-flight 条目重建
+	 * （与续跑 {@code rebuildAssistant} 同源），并补一条配对 {@code role:tool}（结局=取消）——
+	 * 缺了配对，下一轮请求会因"tool_calls 没有对应 tool 响应"被上游拒。消息仍带
+	 * {@code stopped} 标记（批G S4 口径不变）。
+	 */
+	@Test
+	void cancelDuringSuspendPersistsCancelledCardForPureCardRound() {
+		RunSnapshot snapshot = this.store.seedRun(RUN_ID, SESSION_ID);
+		snapshot.setContext(AiContext.empty().toMap());
+		snapshot.setMessageJson(this.codec.serializeAll(List.of(new UserMessage("发布 P12"))));
+		snapshot.setStatus(RunSnapshot.SUSPENDED);
+		// 生产形态：挂起时 saveSuspended 写下 in-flight 副本；取消时 ConfirmGate 已把条目置 CANCELLED
+		snapshot.setInFlightToolCalls(List.of(pending("tc-1", PendingToolCall.CANCELLED, false,
+				PendingToolCall.KIND_CONFIRM)));
+		this.store.save(snapshot);
+		this.store.seedPending(RUN_ID, pending("tc-1", PendingToolCall.CANCELLED, false, PendingToolCall.KIND_CONFIRM));
+
+		List<Message> windowed = driveAndCapture(Flux.error(new StreamViolationException(
+				StreamViolationException.CANCELLED, "取消")));
+
+		// ① 助手消息落库（不再是"只剩 USER"），且带 stopped 标记与那一张卡
+		AssistantMessage assistant = windowed.stream()
+			.filter(AssistantMessage.class::isInstance)
+			.map(AssistantMessage.class::cast)
+			.filter(AssistantMessage::hasToolCalls)
+			.findFirst()
+			.orElseThrow(() -> new AssertionError("纯卡轮停止后必须留下带 toolCalls 的 assistant 消息"));
+		assertThat(assistant.getToolCalls()).extracting(AssistantMessage.ToolCall::id).containsExactly("tc-1");
+		assertThat(assistant.getMetadata()).containsEntry(ResilientChatService.STOPPED_KEY, true);
+		// ② 段级真态随载荷透出：已取消 + 决策=cancel（前端据此渲染「已取消」而不是「已超时」）
+		assertThat(toolCallState(windowed, windowed.indexOf(assistant), "tc-1"))
+			.containsEntry("status", PendingToolCall.CANCELLED)
+			.containsEntry("decision", "cancel")
+			.containsEntry("kind", PendingToolCall.KIND_CONFIRM);
+		// ③ tool 响应配对齐全（悬空 tool_calls 会让下一轮被上游 400）
+		assertThat(windowed).anySatisfy(message -> assertThat(message)
+			.isInstanceOfSatisfying(ToolResponseMessage.class, responses ->
+				assertThat(responses.getResponses()).extracting(ToolResponseMessage.ToolResponse::id)
+					.containsExactly("tc-1")));
 	}
 
 	/** S0 路径①（取消挂起等待中）：当轮 assistant 尚未进 messageJson ⇒ 无消息则无状态需求，不产悬空段。 */

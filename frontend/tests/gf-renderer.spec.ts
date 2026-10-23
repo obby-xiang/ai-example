@@ -154,6 +154,31 @@ describe('G-D 联动在渲染层生效', () => {
     expect(wrapper.find('#gf-field-province-error').text()).toContain('必填')
   })
 
+  /**
+   * L-77（真机 E2E 批② HGTA 域）：**可选字段留空 = 未填，不提交空串**。
+   *
+   * 修前：`filter` 场景的可选日期不填时，`visibleValues` 把 `''` 原样上送，后端按「日期格式不合法」
+   * 判 400 —— 表单侧却认为"没填就不校验"，两侧口径打架。裁定的修法是**前端丢弃空串可选值**
+   * （后端不改），与 `validateDraftModel` 的「空值不算错」同口径。
+   */
+  it('L-77：可选日期留空 ⇒ 提交值里没有该键（不是空串）', async () => {
+    const schema: FormSpec = {
+      scenario: 'FILTER',
+      fields: [
+        { key: 'name', label: '名称', type: 'text', required: true },
+        { key: 'from', label: '起始日期', type: 'date' }
+      ]
+    }
+    const wrapper = mountForm(schema)
+    await wrapper.find('#gf-field-name').setValue('A')
+    await wrapper.find('[data-testid="gf-submit"]').trigger('click')
+    await flushPromises()
+
+    const submitted = wrapper.emitted('submit')?.[0]?.[0] as Record<string, unknown>
+    expect(submitted).toMatchObject({ name: 'A' })
+    expect(Object.prototype.hasOwnProperty.call(submitted, 'from')).toBe(false)
+  })
+
   it('sourceId 级联走后端注册数据源（只认闭集 id）', async () => {
     api.formOptionSource.mockResolvedValue({
       options: [{ value: 'currency_code', label: '币种编码' }]

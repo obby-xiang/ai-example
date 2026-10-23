@@ -17,6 +17,8 @@ export const UI_CODES = [
   'UI_REF_NOT_SNAPSHOTTED',
   /** 执行器预算耗尽（非下载类：确定性收口，不再"结局未知"）。 */
   'UI_BUDGET_EXHAUSTED',
+  /** 下载类工具的前置校验（任务绑定 / 结果清单 / 切页）在显式上限内未落地（L-82：不再无结局挂着）。 */
+  'UI_DOWNLOAD_TIMEOUT',
   /** 写前原值已被用户手改（前置条件失效，不覆盖）。 */
   'UI_PRECONDITION_CHANGED',
   /** 目标控件处于禁用 / 只读态（写动词一律拒执，不谎报「已点击」）。 */

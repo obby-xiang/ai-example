@@ -4,10 +4,13 @@ import com.example.configmgr.ai.config.AiAvailability;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.RedisAvailability;
 import com.example.configmgr.ai.gate.ConfirmGate;
+import com.example.configmgr.ai.resultview.ListTasksResultViewProvider;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.session.SessionGate;
+import com.example.configmgr.task.entity.Task;
+import com.example.configmgr.task.service.TaskService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.memory.ChatMemory;
@@ -19,6 +22,7 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.core.env.Environment;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
 import java.util.List;
@@ -226,6 +230,68 @@ class AiControllerHistoryPayloadTest {
 			.andExpect(jsonPath("$.data.total").value(2))
 			.andExpect(jsonPath("$.data.hasMore").value(false))
 			.andExpect(jsonPath("$.data.messages.length()").value(0));
+	}
+
+	// ── L-78：历史面重新派生结果视图 ──
+
+	/**
+	 * L-78（真机 E2E 批② NFEZUI 域 Z-06 转正）：{@code resultView} 是**帧内字段**，
+	 * 历史重建此前只带 {@code toolCallStates} ⇒ 刷新后卡面回落旧文本形态。
+	 *
+	 * <p>修法 = 历史侧**按工具名从注册表重新派生**（`ToolResultViewProvider` 的契约本身就是
+	 * "确定性构造 + 结构化数据源"）：不新增任何持久面（🏛️「AI 对话数据不落库」），
+	 * 读侧投影与帧侧同源同形。只对**成功结局**出视图（与帧路径 `resultViewOf` 同口径）。
+	 */
+	@Test
+	void historyDerivesResultViewByToolName() throws Exception {
+		Task task = new Task();
+		task.setId(7L);
+		task.setType(Task.TaskType.IMPORT);
+		task.setTitle("发布用例");
+		task.setCurrentStep("PUBLISH");
+		task.setStatus(Task.TaskStatus.ACTIVE);
+		TaskService taskService = mock(TaskService.class);
+		when(taskService.findAll()).thenReturn(List.of(task));
+
+		AiController controller = controller(this.availability);
+		ReflectionTestUtils.setField(controller, "resultViewProviders",
+				List.of(new ListTasksResultViewProvider(taskService, new AiProperties())));
+		MockMvc mvc = MockMvcBuilders.standaloneSetup(controller).build();
+
+		ToolResponseMessage ok = ToolResponseMessage.builder()
+			.responses(List.of(new ToolResponseMessage.ToolResponse("tc-1", "list_tasks",
+					com.example.configmgr.ai.tool.ToolResultEnvelope.ok("- #7 [IMPORT] 发布用例", "{}").toJson())))
+			.build();
+		when(this.chatMemory.get("s-1")).thenReturn(List.of(ok));
+
+		mvc.perform(get("/api/ai/history/s-1"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].resultView.kind").value("table"))
+			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].resultView.id").value("rv-tc-1"))
+			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].resultView.columns[0].key").value("id"))
+			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].resultView.data.inline.rows[0].id").value(7));
+	}
+
+	/** 失败结局不出视图（与帧路径同口径：视图是"成功结果"的投影，失败走旧卡面）。 */
+	@Test
+	void historySkipsResultViewForFailedOutcome() throws Exception {
+		TaskService taskService = mock(TaskService.class);
+		when(taskService.findAll()).thenReturn(List.of());
+		AiController controller = controller(this.availability);
+		ReflectionTestUtils.setField(controller, "resultViewProviders",
+				List.of(new ListTasksResultViewProvider(taskService, new AiProperties())));
+		MockMvc mvc = MockMvcBuilders.standaloneSetup(controller).build();
+
+		ToolResponseMessage failed = ToolResponseMessage.builder()
+			.responses(List.of(new ToolResponseMessage.ToolResponse("tc-1", "list_tasks",
+					com.example.configmgr.ai.tool.ToolResultEnvelope.failed("TOOL_FAILED", "任务列表读取失败", "{}")
+						.toJson())))
+			.build();
+		when(this.chatMemory.get("s-1")).thenReturn(List.of(failed));
+
+		mvc.perform(get("/api/ai/history/s-1"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].resultView").doesNotExist());
 	}
 
 	@SuppressWarnings("unchecked")

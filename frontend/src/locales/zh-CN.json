@@ -132,6 +132,7 @@
       "unlike": "取消赞",
       "dislike": "踩",
       "undislike": "取消踩",
+      "feedbackFailed": "反馈没有提交成功，这次评价未记录，请稍后重试",
       "diagramName": "流程图",
       "diagramView": "流程图视图",
       "tabPreview": "预览",

@@ -783,13 +783,27 @@ export function checkFormValues(spec: FormSpec, values: Record<string, unknown>)
   return checkFormIssues(spec, values).map((issue) => issue.message)
 }
 
-/** 提交值投影：只保留可见字段（隐藏字段不进回灌，与后端"隐藏不校验"同口径）。 */
+/**
+ * 提交值投影：只保留可见字段（隐藏字段不进回灌，与后端"隐藏不校验"同口径）。
+ *
+ * <p>L-77（真机 E2E 批② HGTA 域）：**可选字段的空串 = 未填，不提交**。
+ * 与本地校验同口径（`checkFormIssues` 对空值只判「必填缺失」、不算格式错），
+ * 否则「表单侧认为没填、照常提交」与「后端按类型校验空串」两侧打架：
+ * `filter` 场景的可选日期留空被提交成 `""` ⇒ 后端判 `VALUE_TYPE_MISMATCH` 400。
+ * 裁定修法 = **前端丢弃空串可选值**（后端不改）。必填字段的空值走本地校验拦截，不会走到这里。
+ */
 export function visibleValues(spec: FormSpec, values: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {}
   for (const field of spec.fields) {
-    if (isFieldVisible(field, values)) {
-      out[field.key] = values[field.key]
+    if (!isFieldVisible(field, values)) {
+      continue
     }
+    const value = values[field.key]
+    if (value === '' && !isFieldRequired(field, values)) {
+      // 可选且未填：不提交该键（"没填"不等于"填了空"）
+      continue
+    }
+    out[field.key] = value
   }
   return out
 }

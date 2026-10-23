@@ -382,11 +382,13 @@ test.describe('@stub 13b · Z 结果视图渲染', () => {
     await waitSettled(page, 60_000)
   })
 
-  // Z-06 未通过（发现项，见施工报告）：`resultView` 不随 `/api/ai/history` 恢复 ——
-  // 历史重建只带 toolCallStates（status/kind2/reason），视图是帧内字段；刷新后卡面回落为旧文本形态。
-  // 用例保留并按 fixme 显式挂账（不是静默跳过），产品补上「视图随段持久化」后去掉 fixme 即转绿。
-  test('E2E-Z06 刷新后视图仍在：真 reload 后同一张 table 视图重新渲染，列与行逐值相等', async ({ page }) => {
-    test.fixme(true, 'Z-06 未通过：resultView 不随 /history 恢复（历史重建只带 toolCallStates）')
+  // Z-06（L-78 已修）：`resultView` 随 `/api/ai/history` 恢复 —— 历史载荷的
+  // `toolResponses[].resultView` 由后端**按工具名从注册表重新派生**（不新增持久面），前端历史路落段。
+  test('E2E-Z06 刷新后视图仍在：真 reload 后同一张 table 视图重新渲染，列与行逐值相等', async ({ page, request }) => {
+    // 前置：本域库由 Z-04（13c 末尾）清空，本用例必须先造出一张任务，否则 `list_tasks` 是
+    // `status=empty` 的空视图 —— 空视图渲的是空态文案（不是 table），断言口径会变成"空态也在"，
+    // 与「列与行逐值相等」不是同一件事（修前 fixme 状态下这条前置从未被执行到）。
+    await createTask(request, `Z06 视图任务 ${unique('t')}`, 'EXPORT')
     await openPanel(page, '/tasks')
     await send(page, `${MARK.listTasks} 用例-Z06-${unique('t')}`)
     await expect(page.locator('[data-testid^="tool-card-"]').last()).toBeVisible({ timeout: 60_000 })

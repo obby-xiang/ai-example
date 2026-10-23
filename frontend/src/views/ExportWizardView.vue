@@ -179,7 +179,14 @@ import {
   zipBlobs,
   type ExcelRowIssue
 } from '@/utils/excel'
-import { registerFrontendToolExecutor, unregisterFrontendToolExecutor, PAGE_HANDLER_OPEN_EXPORT_EDITOR } from '@/utils/frontend-tools'
+import {
+  DOWNLOAD_PREFLIGHT_TIMEOUT_MS,
+  makeExecution,
+  registerFrontendToolExecutor,
+  unregisterFrontendToolExecutor,
+  PAGE_HANDLER_OPEN_EXPORT_EDITOR
+} from '@/utils/frontend-tools'
+import { formatUiReceipt } from '@/utils/ui-receipt'
 import type { SheetAdapter } from '@/utils/sheet-tools'
 import { useAiStore } from '@/stores/ai'
 import { stepLabel } from '@/utils/format'
@@ -1303,6 +1310,39 @@ async function preflightDownload(
   return { ok: true, defCodes }
 }
 
+/** 前置校验的结局（L-82）：正常落地 vs 显式上限到点。 */
+type GatedPreflight =
+  | { kind: 'settled'; result: { ok: true; defCodes: string[] } | { ok: false; message: string } }
+  | { kind: 'timeout' }
+
+/**
+ * L-82：给 {@link preflightDownload} 加**显式等待上限**。
+ *
+ * <p>为什么要这一层：前置里的任务绑定 / 结果清单是串行 HTTP，编辑器未预热时可能长时间不落地
+ * （真机 VL 域实测 >90s 无结局）。外层统一预算（`FRONTEND_TOOL_TIMEOUT_BUDGET_MS`）虽是最终兜底，
+ * 但它按"服务端上限 − 回灌余量"折算（默认 60s），且下载类到点只给"**结局未知**"（副作用可能已发生）；
+ * 而前置卡住时其实**一次下载都没发起**，可以、也应该给确定性 `timeout` 结局。
+ *
+ * <p>上限取 {@link DOWNLOAD_PREFLIGHT_TIMEOUT_MS}（30s）：先于外层默认预算收口，又给"前置通过后
+ * 真正发起下载"留足余量。计时器是唯一判定源（不依赖 preflight 是否 settle）。
+ */
+async function preflightWithDeadline(args: Record<string, unknown>): Promise<GatedPreflight> {
+  let timer: ReturnType<typeof setTimeout> | null = null
+  const expired = new Promise<GatedPreflight>((resolve) => {
+    timer = setTimeout(() => resolve({ kind: 'timeout' }), DOWNLOAD_PREFLIGHT_TIMEOUT_MS)
+  })
+  try {
+    return await Promise.race([
+      preflightDownload(args).then((result): GatedPreflight => ({ kind: 'settled', result })),
+      expired
+    ])
+  } finally {
+    if (timer !== null) {
+      clearTimeout(timer)
+    }
+  }
+}
+
 function registerHandlers(): void {
   // 批 D · D3（问题 6）：AI 触发 start_export 后把作业绑进本页的跟踪面。
   // 与既有 resumeJobs() 同一条恢复链（刷新/回页时也走它）——不重复一套绑定逻辑；
@@ -1514,7 +1554,24 @@ function registerHandlers(): void {
   // 「可稍后重试本项」—— 否则模型会以为该文件已在下载、不再补发，而用户实际拿不到它（复核 N-1）。
   // 三处共同纪律：**禁止失败暗示**（不得读作「下载成功」或「下载失败」）。
   registerFrontendToolExecutor('download_export_files', async (call) => {
-    const preflight = await preflightDownload(call.args)
+    const gated = await preflightWithDeadline(call.args)
+    if (gated.kind === 'timeout') {
+      // L-82：前置校验在显式上限内没落地 ⇒ 确定性 timeout 结局（8 态回执 + 三段式人话），
+      // 不再把"卡住"留给外层预算（真机实测 >90s 回执悬空）。此时**未发起任何下载**，
+      // 文案必须如实这么说 —— 不暗示"已下载"、也不诱导"重复触发"。
+      return makeExecution({
+        outcome: 'timeout',
+        availability: 'degraded',
+        code: 'UI_DOWNLOAD_TIMEOUT',
+        result: formatUiReceipt({
+          tool: '下载导出文件（download_export_files）',
+          conclusion: `前置校验超时，本次未完成（等待 ${Math.round(DOWNLOAD_PREFLIGHT_TIMEOUT_MS / 1000)} 秒）`,
+          reason: '任务绑定 / 导出结果清单没有在时限内返回（编辑器或后端链路可能仍在加载）',
+          next: '提示用户核对任务与导出结果是否就绪后重试；本次未触发下载，不需要去下载目录确认'
+        })
+      })
+    }
+    const preflight = gated.result
     if (!preflight.ok) {
       throw new Error(preflight.message)
     }

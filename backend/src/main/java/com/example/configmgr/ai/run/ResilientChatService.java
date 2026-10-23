@@ -17,6 +17,7 @@ import com.example.configmgr.ai.session.AiSessionService;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ContextBuilder;
 import com.example.configmgr.ai.tool.ToolOutcome;
+import com.example.configmgr.ai.tool.ToolResultEnvelope;
 import com.example.configmgr.ai.tool.ToolRegistry;
 import com.example.configmgr.ai.web.AiChatRequest;
 import com.example.configmgr.common.ErrorCodes;
@@ -26,6 +27,7 @@ import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.MessageType;
 import org.springframework.ai.chat.messages.SystemMessage;
+import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
@@ -996,6 +998,68 @@ public class ResilientChatService {
 	}
 
 	/**
+	 * L-75（真机 E2E 批② SRP 域 P-12）：**被停止的那一轮要留下可重建的消息**。
+	 *
+	 * <p>旧口径只看"有没有半截正文"：纯卡轮（本轮只有一张待决门卡、零正文、零工具执行结果）
+	 * 停止后什么都不写 ⇒ `/history` 只剩 USER，刷新后整条卡凭空消失。
+	 *
+	 * <p>新口径（与批G S4「写半截 + {@code stopped} 标记」同一句式，只是补齐了工具段）：
+	 * <ol>
+	 * <li>快照的 in-flight 条目就是"挂起那一轮的 assistant(tool_calls)"（挂起时由
+	 *     {@code RunStore#saveSuspended} 落盘、续跑侧 {@code ResumeService#rebuildAssistant} 同源重建），
+	 *     这里按同一映射重建一条 assistant 消息（正文 = 半截正文，可为空），带 {@code stopped}；</li>
+	 * <li>再补一条**配对**的 {@code role:tool}（结局 = 取消）—— 悬空的 {@code tool_calls} 会让下一轮
+	 *     请求被上游以"tool_calls 没有对应 tool 响应"拒绝，配对完整性是记忆面的硬约束；</li>
+	 * <li>历史里已经出现过该 toolCallId（异常流程下的重复挂起）时不重复造消息。</li>
+	 * </ol>
+	 * 都不满足（无正文且无 in-flight）⇒ 返回空列表（旧口径：不写空气泡）。
+	 */
+	private List<Message> stoppedRoundMessages(List<Message> history, RunSnapshot snapshot, String partial) {
+		List<PendingToolCall> inFlight = snapshot.getInFlightToolCalls() == null ? List.of()
+				: snapshot.getInFlightToolCalls();
+		List<AssistantMessage.ToolCall> calls = new ArrayList<>(inFlight.size());
+		List<ToolResponseMessage.ToolResponse> responses = new ArrayList<>(inFlight.size());
+		for (PendingToolCall item : inFlight) {
+			if (item.getToolCallId() == null || historyHasToolCall(history, item.getToolCallId())) {
+				continue;
+			}
+			calls.add(new AssistantMessage.ToolCall(item.getToolCallId(),
+					item.getType() == null ? "function" : item.getType(), item.getName(), item.getArguments()));
+			String text = StringUtils.hasText(item.getResultText()) ? item.getResultText()
+					: "本轮对话已被用户取消，该工具未执行。";
+			responses.add(new ToolResponseMessage.ToolResponse(item.getToolCallId(), item.getName(),
+					ToolResultEnvelope.of(ToolOutcome.CANCELLED, ToolOutcome.CODE_RUN_CANCELLED, text,
+							item.getArguments()).toJson()));
+		}
+		List<Message> out = new ArrayList<>(2);
+		if (!StringUtils.hasText(partial) && calls.isEmpty()) {
+			return out;
+		}
+		AssistantMessage.Builder builder = AssistantMessage.builder()
+			.content(partial)
+			.properties(new LinkedHashMap<>(Map.of(STOPPED_KEY, true)));
+		if (!calls.isEmpty()) {
+			builder.toolCalls(calls);
+		}
+		out.add(builder.build());
+		if (!responses.isEmpty()) {
+			out.add(ToolResponseMessage.builder().responses(responses).build());
+		}
+		return out;
+	}
+
+	/** 历史里是否已有该 toolCallId 的 assistant 工具调用（防重复造段）。 */
+	private static boolean historyHasToolCall(List<Message> history, String toolCallId) {
+		for (Message message : history) {
+			if (message instanceof AssistantMessage assistant && assistant.hasToolCalls()
+					&& assistant.getToolCalls().stream().anyMatch(call -> toolCallId.equals(call.id()))) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
 	 * 取消终局：快照转 CANCELLED，未决条目落 CANCELLED **并补裁决帧**（S5），
 	 * 半截正文**写进记忆并带 {@code stopped} 标记**（S4），终帧 {@code done{cancelled:true}}。
 	 *
@@ -1008,14 +1072,18 @@ public class ResilientChatService {
 			StreamWatchdog watchdog, SseChatEmitter out, TurnContext turn, OutputGuard guard) {
 		RunSnapshot snapshot = this.store.get(runId);
 		String partial = accumulator == null ? "" : accumulator.text();
+		// L-75：**先**把未决条目收敛成 CANCELLED，再写记忆 —— 否则记忆里的段级状态可能是
+		// 「条目仍 PENDING + 轮次已 CANCELLED」的混合态：状态会经快照终态兜底成 cancelled，
+		// 但 `decision` 取自**条目态**（只认 CANCELLED）⇒ 刷新后卡面读成「已超时」而不是「已取消」。
+		// 取消条目与补发裁决帧是两件事：帧仍按"取消前"的清单补（与既有 S5 口径同形）。
+		List<PendingToolCall> pendingsBeforeCancel = this.store.pendings(runId);
+		this.store.cancelPendings(runId);
 		if (snapshot != null) {
 			List<Message> history = new ArrayList<>(this.codec.deserializeAll(snapshot.getMessageJson()));
-			if (StringUtils.hasText(partial)) {
-				history.add(AssistantMessage.builder()
-					.content(partial)
-					.properties(new LinkedHashMap<>(Map.of(STOPPED_KEY, true)))
-					.build());
+			for (Message stopped : stoppedRoundMessages(history, snapshot, partial)) {
+				history.add(stopped);
 			}
+			snapshot.setMessageJson(this.codec.serializeAll(history));
 			snapshot.setInFlightToolCalls(new ArrayList<>());
 			snapshot.setAssistantContent(null);
 			snapshot.setStatus(RunSnapshot.CANCELLED);
@@ -1025,7 +1093,7 @@ public class ResilientChatService {
 			this.store.save(snapshot);
 			convergeMemory(runId, sessionId, history);
 		}
-		emitCancelOutcomes(runId, this.store, out);
+		emitCancelOutcomes(runId, this.store, out, pendingsBeforeCancel);
 		log.info("AI 轮次取消 runId={} sessionId={} 尝试次数={} 已收上游事件={} 末帧序列=[{}]", runId, sessionId, attempts,
 				watchdog == null ? 0 : watchdog.upstreamEvents(), accumulator == null ? "" : accumulator.tailSummary());
 		Map<String, Object> extra = new LinkedHashMap<>();
@@ -1066,7 +1134,17 @@ public class ResilientChatService {
 	 * <p>返回补发的帧数（可观测/测试断言用）。
 	 */
 	static int emitCancelOutcomes(String runId, RunStore store, SseChatEmitter out) {
-		List<PendingToolCall> before = store.pendings(runId);
+		return emitCancelOutcomes(runId, store, out, store.pendings(runId));
+	}
+
+	/**
+	 * 同 {@link #emitCancelOutcomes(String, RunStore, SseChatEmitter)}，但"取消前清单"由调用方提供。
+	 *
+	 * <p>为什么要这个重载（L-75）：{@code cancelTerminal} 必须**先**收敛条目（否则记忆里的
+	 * 段级 `decision` 读不到 cancel），再补帧；此时条目已被置 CANCELLED，"取消前的清单"只能
+	 * 由调用方在收口前抓取。三参版本保持原语义（自己抓、自己取消），既有用例零改动。
+	 */
+	static int emitCancelOutcomes(String runId, RunStore store, SseChatEmitter out, List<PendingToolCall> before) {
 		store.cancelPendings(runId);
 		Map<String, PendingToolCall> cancelled = new LinkedHashMap<>();
 		for (PendingToolCall pending : store.pendings(runId)) {

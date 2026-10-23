@@ -475,3 +475,59 @@ describe('M-07（P2）：多页签同会话的降级（复制页签不得与原�
     expect(api.chat.mock.calls[0]?.[0]).toMatchObject({ sessionId: next })
   }, 20_000)
 })
+
+describe('Z-06（L-78）：结果视图随历史恢复（刷新后卡面仍是表格，不回落旧文本）', () => {
+  /**
+   * 缺陷形态（修前）：`resultView` 是**帧内字段**，`/history` 只带 `toolCallStates`
+   * ⇒ 刷新后卡面回落旧文本形态，「刷新后视图仍在」不成立（真机 E2E 批② Z-06 以 fixme 钉住）。
+   *
+   * 修法 = 后端历史载荷按工具名重新派生视图（`toolResponses[].resultView`）+ 前端历史路落段。
+   * 本用例锁**前端读回**：同一张表在 `loadHistory` 之后仍挂在工具段上（列/行逐值相等）。
+   */
+  it('历史 toolResponses 带 resultView ⇒ 段上结果视图完整还原', async () => {
+    const store = await freshStore()
+    store.sessionId = SESSION
+    const view = {
+      version: '1.0',
+      id: 'rv-h1',
+      revision: 1,
+      kind: 'table',
+      title: 'i18n:resultview.listTasks.title',
+      status: 'ok',
+      data: { inline: { rows: [{ id: 7, type: 'IMPORT', title: '发布用例', step: 'PUBLISH', status: 'ACTIVE' }] } },
+      columns: [
+        { key: 'id', type: 'integer', label: 'i18n:resultview.listTasks.col.id', width: 1 },
+        { key: 'title', type: 'string', label: 'i18n:resultview.listTasks.col.title', width: 5 }
+      ],
+      fallback: { text: 'i18n:resultview.listTasks.fallback', format: 'plain' },
+      meta: { source: 'list_tasks' }
+    }
+    api.history.mockResolvedValue({
+      sessionId: SESSION,
+      count: 3,
+      messages: [
+        { type: 'USER', text: '列一下任务' },
+        {
+          type: 'ASSISTANT',
+          text: '',
+          toolCalls: [{ id: 'h1', type: 'function', name: 'list_tasks', arguments: '{}' }],
+          toolCallStates: { h1: { status: 'EXECUTED', kind: 'BACKEND' } }
+        },
+        {
+          type: 'TOOL',
+          text: '',
+          toolResponses: [{ id: 'h1', name: 'list_tasks', responseData: '- #7 [IMPORT] 发布用例', resultView: view }]
+        }
+      ]
+    })
+
+    await store.loadHistory()
+
+    const part = store.messages[1]?.parts.find((item) => item.kind === 'tool')
+    expect(part?.kind === 'tool' ? part.resultView?.kind : null).toBe('table')
+    const restored = part?.kind === 'tool' ? part.resultView : undefined
+    expect(restored?.columns?.map((column) => column.key)).toEqual(['id', 'title'])
+    const restoredRows = (restored?.data?.inline as { rows?: unknown } | undefined)?.rows
+    expect(restoredRows).toEqual(view.data.inline.rows)
+  }, 20_000)
+})

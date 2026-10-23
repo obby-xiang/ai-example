@@ -1032,12 +1032,12 @@ test.describe('@stub P 手工停止', () => {
 
   /**
    * P-12 停止后刷新：被停的卡显示「已取消」，不消失、不回退成更早的待决态。
+   *
+   * L-75 已修（真机 E2E 批② SRP 域 P-12 转正）：纯卡轮（本轮既无正文也无工具执行结果，只有一张
+   * 待决门卡）停止后，取消终局按快照的 in-flight 条目重建 `assistant(tool_calls)` + 配对
+   * `role:tool`，并带 `stopped` 标记 ⇒ `/history` 不再只剩 USER。
    */
   test('E2E-P12 停止后刷新：被停卡仍在且为「已取消」，不回退待决', async ({ page, request }) => {
-    // 已知缺陷（本次施工发现，登记为发现项 F-SRP-1）：**纯卡轮**（本轮既无正文也无工具执行结果，
-    // 只有一张待决门卡）被停止后，后端 `/history` 只落 USER 消息（count=1），助手消息整条不落库
-    // ⇒ 刷新后卡消失、只剩用户气泡。断言保留（不降级），以 xfail 形态把缺陷钉在门禁上。
-    test.fail(true, 'F-SRP-1：被停的纯卡轮助手消息不落 history，刷新后卡丢失')
     const taskId = await createPublishableImportTask(request)
     await openPath(page, `/import?taskId=${taskId}`)
     await expect(page.locator('footer')).toContainText('task:IMPORT/PUBLISH', { timeout: 30_000 })

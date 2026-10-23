@@ -1,5 +1,5 @@
 {
-  "total": 1267,
+  "total": 1272,
   "files": {
     "src/api/ai.ts": 1,
     "src/api/http.ts": 4,
@@ -15,7 +15,7 @@
     "src/components/wizard/DefSelector.vue": 6,
     "src/constants/ai-settings-copy.ts": 82,
     "src/main.ts": 1,
-    "src/stores/ai.ts": 82,
+    "src/stores/ai.ts": 83,
     "src/stores/task.ts": 21,
     "src/stores/workspace.ts": 52,
     "src/types/api.ts": 1,
@@ -42,7 +42,7 @@
     "src/views/AiFeedbackView.vue": 4,
     "src/views/DataBrowserView.vue": 9,
     "src/views/DefinitionsView.vue": 22,
-    "src/views/ExportWizardView.vue": 130,
+    "src/views/ExportWizardView.vue": 134,
     "src/views/ImportWizardView.vue": 89,
     "src/views/TaskCenterView.vue": 17
   }

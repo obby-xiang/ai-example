@@ -14,7 +14,7 @@ import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { flushPromises, shallowMount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import ExportWizardView from '@/views/ExportWizardView.vue'
-import { executeFrontendTool } from '@/utils/frontend-tools'
+import { executeFrontendTool, DOWNLOAD_PREFLIGHT_TIMEOUT_MS } from '@/utils/frontend-tools'
 import { useWorkspaceStore } from '@/stores/workspace'
 
 const api = vi.hoisted(() => ({
@@ -199,5 +199,37 @@ describe('R-156 ⑤：同一笔打包重复投递 ⇒ 回灌场景②（不重�
     expect(first.result).toContain('已发起打包下载')
     expect(second.result).toContain('本次未重复发起')
     expect(api.downloadBlob).not.toHaveBeenCalled()
+  })
+})
+
+describe('L-82：前置校验悬挂 ⇒ 显式超时结局（不能再无结局挂着）', () => {
+  it('任务绑定请求永不返回 ⇒ 到点回 timeout 结局 + 人话回执，且一次下载都不发起', async () => {
+    await mountWizard()
+    // 修前形态（真机 VL 域实测 >90s）：`ensureTaskBoundForTool` 的串行 HTTP 迟迟不落地
+    // （编辑器/引擎未预热），执行器既不给失败也不给成功 ⇒ 回灌悬空、模型与用户都拿不到结局。
+    api.getTask.mockReturnValue(new Promise(() => {}))
+
+    vi.useFakeTimers()
+    try {
+      useWorkspaceStore().enterPage({ pageId: 'export', page: 'export', taskType: 'EXPORT', step: 'EXPORT', taskId: 7 })
+      const pending = executeFrontendTool({
+        name: 'download_export_files',
+        args: { taskId: 9, defCodes: ['DEMO'] },
+        // 外层预算放大到真机默认值之上，证明是**下载工具自带的显式超时**在收口
+        budgetMs: 120_000
+      })
+      await vi.advanceTimersByTimeAsync(DOWNLOAD_PREFLIGHT_TIMEOUT_MS + 1_000)
+      const execution = await pending
+
+      expect(execution.outcome).toBe('timeout')
+      expect(execution.code).toBe('UI_DOWNLOAD_TIMEOUT')
+      expect(execution.ok).toBe(false)
+      expect(execution.result).toContain('超时')
+      expect(execution.result).toContain('未触发下载') // 诚实：前置没过，下载没发起
+      expect(api.downloadBlob).not.toHaveBeenCalled()
+      expect(api.zipBlobs).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
