@@ -35,6 +35,13 @@ public record AiChatRequest(String sessionId, String message, Context context, S
 		this(sessionId, message, context, null, null);
 	}
 
+	/**
+	 * 工作区上下文。{@code ignoreUnknown} 是形状闸的前置条件：
+	 * {@code ContextFieldGate} 的裁决是"未知字段一律降级（白名单化 + WARN），不拒绝请求"，
+	 * 而默认的 Jackson 配置会在反序列化阶段就因未知键抛错（表现 = 500 INTERNAL_ERROR），
+	 * 闸门根本轮不到执行。故这里显式放行未知键，由闸门负责丢弃与计数（X-06）。
+	 */
+	@com.fasterxml.jackson.annotation.JsonIgnoreProperties(ignoreUnknown = true)
 	public record Context(String page, String taskType, String step, Long taskId, Map<String, Object> extra) {
 	}
 

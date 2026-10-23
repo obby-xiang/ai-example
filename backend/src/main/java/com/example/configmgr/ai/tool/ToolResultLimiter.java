@@ -56,18 +56,29 @@ public class ToolResultLimiter {
 	 * <p>为什么需要它：{@code per-tool} 是显式清单，未列出的工具默认按 20000 处理；
 	 * 但"具名却从未注册"（历史重放里已被删除的工具）应当收回兜底档 8000 —— 这类结果
 	 * 通常不是当前工具集的产物，放大它只增加上下文风险。
+	 *
+	 * <p><b>为什么延迟取（不是构造器直注入）</b>：{@link ToolRegistry} 的 {@code @PostConstruct}
+	 * 会逐个 {@code getBean} 扫描工具 bean，而工具 bean（如 {@code KbTools}）依赖本类 ——
+	 * 构造期直注入就把这条链闭成环（Registry → KbTools → Limiter → Registry）。环上任何
+	 * 创建顺序抖动都会以"bean 创建失败"被注册表的扫描兜底吞掉，表现为工具静默消失
+	 * （2026-10-23 实测：KB 三工具 37→34）。延迟到判档时再取，环在结构上不存在。
 	 */
-	private final ToolRegistry toolRegistry;
+	private final java.util.function.Supplier<ToolRegistry> toolRegistrySupplier;
 
 	/** 无注册表装配（单测/非 Spring）：具名工具一律按默认档。 */
 	public ToolResultLimiter(AiProperties properties) {
-		this(properties, null);
+		this(properties, (ToolRegistry) null);
+	}
+
+	public ToolResultLimiter(AiProperties properties, ToolRegistry toolRegistry) {
+		this.properties = properties;
+		this.toolRegistrySupplier = () -> toolRegistry;
 	}
 
 	@Autowired
-	public ToolResultLimiter(AiProperties properties, ToolRegistry toolRegistry) {
+	public ToolResultLimiter(AiProperties properties, org.springframework.beans.factory.ObjectProvider<ToolRegistry> toolRegistry) {
 		this.properties = properties;
-		this.toolRegistry = toolRegistry;
+		this.toolRegistrySupplier = toolRegistry::getIfAvailable;
 	}
 
 	/**
@@ -183,7 +194,8 @@ public class ToolResultLimiter {
 		if (explicit != null) {
 			return explicit;
 		}
-		if (this.toolRegistry != null && this.toolRegistry.getMeta(toolName) == null) {
+		ToolRegistry registry = this.toolRegistrySupplier.get();
+		if (registry != null && registry.getMeta(toolName) == null) {
 			return model.getFallbackMaxChars();
 		}
 		return model.getDefaultMaxChars();
