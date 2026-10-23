@@ -126,6 +126,10 @@ test.describe('@stub A 上传交接卡', () => {
 
     // 重建出的卡：等待态 + 主按钮可点（区域仍在）
     await expect(handoffCard(page)).toBeVisible({ timeout: 40_000 })
+    // 前提先钉死：刷新后导入向导第 1 步要重新注册上传入口。
+    // 路由页是懒加载，挂载可能晚于历史回放 ⇒ 这里等"区域已在"，把
+    // "页面还没挂起来"（装载时序）与"卡面不可操作"（产品判据）分开归因。
+    await expect(page.locator('[data-ai-ref="import.upload.choose"]')).toHaveCount(1, { timeout: 40_000 })
     await expect(page.locator('[data-testid="upload-handoff-choose"]')).toBeEnabled()
     // 刷新**不**重跑对话、不重放回灌（否则就是死循环重试）
     expect(chatPosts).toHaveLength(0)

@@ -289,6 +289,21 @@ export function deltaTextOf(round: RoundResult): string {
   return round.frames.filter((frame) => frame.type === 'delta').map((frame) => String(frame.text ?? '')).join('')
 }
 
+/**
+ * **正文**增量（不含思考段）。
+ *
+ * L-91 后 `delta` 帧多了一个可选键 `kind`：`kind='reasoning'` = 思考段增量，缺省 = 正文。
+ * 断言"用户看到什么"（答复内容 / 不吐调试串 / 引用口径）必须只看正文 —— 思考段里模型
+ * 正当地在**候选与排除**之间推演（例如"要不要再看一眼 glm-seed？无关，跳过"），
+ * 把思考段混进答复文本会把这种正常推理判成"编造"。
+ */
+export function answerTextOf(round: RoundResult): string {
+  return round.frames
+    .filter((frame) => frame.type === 'delta' && frame.kind !== 'reasoning')
+    .map((frame) => String(frame.text ?? ''))
+    .join('')
+}
+
 // ── 桩请求记录（披露清单 / 工具调用判定 / 工具结果回灌的唯一真值面）────────────────
 
 export interface StubMessage {

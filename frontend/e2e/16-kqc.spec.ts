@@ -17,6 +17,7 @@ import { expect, test } from '@playwright/test'
 import { assistantBubble, openApp, sendMessage, sessionId, waitRoundSettled } from './support/helpers'
 import {
   aiHealth,
+  answerTextOf,
   apiData,
   chatRound,
   contextLedger,
@@ -783,8 +784,9 @@ test.describe('@real 16 KQC 真模型（CI 手工触发；本地不跑）', () =
         'How is the regional tariff calculated? Please search the knowledge base and answer in Chinese.'
       )
       expect(round.done).toBeTruthy()
-      const text = deltaTextOf(round)
-      // 形状：答复非空、不吐内部定界标记与调试字段
+      const text = answerTextOf(round)
+      // 形状：答复非空、不吐内部定界标记与调试字段（只看正文 —— 思考段是模型的推演草稿，
+      // 不是给用户看的答复；把它算进"答复"会让"思考里念了 doc_id"被误判成编造）
       expect(text.length).toBeGreaterThan(0)
       expect(text).not.toContain('<knowledge>')
       expect(text).not.toContain('toolCallId=')
@@ -805,13 +807,19 @@ test.describe('@real 16 KQC 真模型（CI 手工触发；本地不跑）', () =
       'How does the flurbox quota work? Please search the knowledge base.'
     )
     expect(unknown.done).toBeTruthy()
-    const unknownText = deltaTextOf(unknown)
+    const unknownText = answerTextOf(unknown)
     expect(unknownText).not.toContain('<knowledge>')
+    // 只查**正文**的 doc_id 出现：思考段里模型在候选间推演（"要不要再查 X？无关"）是正常推理，
+    // 不是编造；正文里出现语料的 doc_id 才是把未登记表达挂到某篇文档上。
     const cited = docIds.filter((id) => unknownText.includes(id))
-    expect(cited, `未登记表达被编造成了语料里的 doc_id：${cited.join(',')}`).toHaveLength(0)
+    // 失败信息带答复原文：仅凭 doc_id 名单无法区分"编造命中"与"如实罗列语料条目"
+    expect(cited, `未登记表达被编造成了语料里的 doc_id：${cited.join(',')}\n答复原文：${unknownText}`)
+      .toHaveLength(0)
 
     // eslint-disable-next-line no-console
     console.log(`[K-10] N=${REAL_SAMPLING} 命中=${hits} 阈值≥${REAL_THRESHOLD}`)
+    // eslint-disable-next-line no-console
+    console.log(`[K-10] 未登记表达答复（前 600 字）：${unknownText.slice(0, 600)}`)
     expect(hits, `未命中采样：\n${misses.join('\n')}`).toBeGreaterThanOrEqual(REAL_THRESHOLD)
   })
 

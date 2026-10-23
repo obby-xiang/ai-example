@@ -398,21 +398,32 @@ test.describe('@stub H HITL 确认门（批③ 剩余条）', () => {
     await expect(gate(page)).toBeVisible({ timeout: 40_000 })
 
     const sid = await sidOf(page)
+    const pendingOf = (run: CurrentRun) => (run.pendingEntries ?? []).filter(
+      (entry) => entry.name === 'start_export' && entry.kind === 'CONFIRM' && entry.entryStatus === 'PENDING'
+    )
     const first = await currentRun(request, sid)
-    const pendingIds = (first.pendingEntries ?? [])
-      .filter((entry) => entry.kind === 'CONFIRM' && entry.entryStatus === 'PENDING')
+    expect(pendingOf(first).map((entry) => String(entry.toolCallId))).toHaveLength(2)
+    // 屏上这张卡 = 请求帧已发的那一张（`req=true`，H-04 同一口径）；
+    // 数组顺序不是契约，拿 `pendingIds[0]` 当"第一张"会把决策打到没揭示的卡上。
+    const revealed = pendingOf(first)
+      .filter((entry) => entry.req === true)
       .map((entry) => String(entry.toolCallId))
-    expect(pendingIds).toHaveLength(2)
+    expect(revealed).toHaveLength(1)
 
     // 卡①拒绝（拒绝永远可用，且拒绝不得被画成「已批准 · 执行失败」）
-    const rejectedId = pendingIds[0]
+    const rejectedId = revealed[0]
+    let approvedId = ''
     await gateButton(page, '拒绝').click()
     // 卡②揭示后批准（真实执行）
-    await expect(gate(page)).toBeVisible({ timeout: 40_000 })
-    const second = await currentRun(request, sid)
-    const approvedId = (second.pendingEntries ?? [])
-      .filter((entry) => entry.kind === 'CONFIRM' && entry.entryStatus === 'PENDING' && entry.req === true)
-      .map((entry) => String(entry.toolCallId))[0]
+    // 决策是异步 POST：点完立刻读 /runs/current 会撞在"拒绝还没落账"的窗口上
+    //（那时第一张仍是 PENDING + req=true，读回来还是同一张）⇒ 等判据本身成立，不写死睡眠。
+    await until(async () => {
+      const second = await currentRun(request, sid)
+      approvedId = pendingOf(second)
+        .filter((entry) => entry.req === true)
+        .map((entry) => String(entry.toolCallId))[0] ?? ''
+      return approvedId !== '' && approvedId !== rejectedId
+    }, 40_000, '拒绝落账并揭示第二张卡')
     expect(approvedId).toBeTruthy()
     expect(approvedId).not.toBe(rejectedId)
     await gateButton(page, '批准').click()
