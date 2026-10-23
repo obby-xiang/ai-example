@@ -402,17 +402,37 @@ function selectionOf(
 }
 
 /**
- * 表格适配器（AI 表格操作专项 §3.6 的窄接口）：只暴露纯数据面，不把 SpreadJS 类型漏进 store。
+ * 适配器按工作表实例缓存（L-74）：`sheet-tools.ts` 的撤销栈与 `sheetAppliedSummary()` 都是
+ * **按适配器身份**存取的 WeakMap。每次解析上下文都新建对象 ⇒ 应用时入的栈下一次就取不到，
+ * 卡面「AI 改动 N 格」恒为空、`undo_last_sheet_edit` 恒回「没有可撤销」。
  *
- * 行口径：适配器行 = 数据行下标（0 基）⇒ 视口行 = row + 1（视口第 0 行是表头）。
- * 批量写走 `setArray`（逐格 `setValue` 在数千行上会卡主线程），且**只发一次 `data-changed`**
- * （否则一个 N 格操作会打 N 次事件）。
+ * <p>
+ * 用工作表实例作键而不是"组件实例一个单例"：同一组件换工作表时身份随之更换，各表的撤销栈
+ * 不会串台；`fields` 由 {@link buildSheetAdapter} 闭包读**当前变量**，重载定义不会留旧列数。
  */
+const sheetAdapters = new WeakMap<SpreadWorksheet, SheetAdapter>()
+
+/** 表格适配器（AI 表格操作专项 §3.6 的窄接口）：只暴露纯数据面，不把 SpreadJS 类型漏进 store。 */
 function getSheetAdapter(): SheetAdapter {
   const sheet = activeSheet()
   if (!sheet) {
     throw new Error('表格引擎尚未就绪，无法提供表格适配器')
   }
+  const cached = sheetAdapters.get(sheet)
+  if (cached) {
+    return cached
+  }
+  const adapter = buildSheetAdapter(sheet)
+  sheetAdapters.set(sheet, adapter)
+  return adapter
+}
+
+/**
+ * 行口径：适配器行 = 数据行下标（0 基）⇒ 视口行 = row + 1（视口第 0 行是表头）。
+ * 批量写走 `setArray`（逐格 `setValue` 在数千行上会卡主线程），且**只发一次 `data-changed`**
+ * （否则一个 N 格操作会打 N 次事件）。
+ */
+function buildSheetAdapter(sheet: SpreadWorksheet): SheetAdapter {
   const rowCount = (): number => Math.max(0, sheet.getRowCount() - 1)
   const colCount = (): number => (fields.length > 0 ? fields.length : sheet.getColumnCount())
   return {

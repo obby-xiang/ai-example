@@ -623,20 +623,6 @@
                           />
                         </div>
 
-                        <!-- AI 表格工具治理 §5.4：已应用改动的一行标识（不新增工具、不新增帧字段）。
-                             数据源 = store 的 sheetApplied（现算），`其后人工改动 N 格` 在手改后由
-                             refreshSheetApplied 重算 —— 不显示"应用瞬间的 0"当作现状。 -->
-                        <div
-                          v-else-if="appliedSummaryFor(part)"
-                          class="p-[11px] text-[11.9px] leading-[1.6] text-[#57606a]"
-                          data-testid="sheet-applied-summary"
-                        >
-                          <div>{{ appliedLine(appliedSummaryFor(part)!) }}</div>
-                          <div v-if="(appliedSummaryFor(part)!.manualChanges ?? 0) > 0" class="mt-[2px] text-[#8b949e]">
-                            {{ t('sheet.preview.manualChanges', { count: appliedSummaryFor(part)!.manualChanges }) }}
-                          </div>
-                        </div>
-
                         <!-- AI 可视可操作专项 §3.3.7：上传交接卡（唯一新增的人围栏外观）。
                              「选择文件」= 用户手势（picker 必须在同步栈里被调）；「放弃」= cancelled=true。
                              刷新后区域仍注册 ⇒ 可继续；区域不在该页 ⇒ 主按钮禁用 + 只能放弃。 -->
@@ -651,6 +637,23 @@
                           />
                         </div>
                       </template>
+
+                      <!-- AI 表格工具治理 §5.4：已应用改动的一行标识（不新增工具、不新增帧字段）。
+                           数据源 = store 的 sheetApplied（现算），`其后人工改动 N 格` 在手改后由
+                           refreshSheetApplied 重算 —— 不显示"应用瞬间的 0"当作现状。
+                           L-74：本块**不在**上面那条待动作分支链里 —— 它标的是已 `succeeded` 的段
+                           （`requiresAction` 此时已落回 false），挂在 `v-if="part.requiresAction"`
+                           子树内等于恒不渲染。 -->
+                      <div
+                        v-if="appliedSummaryFor(part)"
+                        class="p-[11px] text-[11.9px] leading-[1.6] text-[#57606a]"
+                        data-testid="sheet-applied-summary"
+                      >
+                        <div>{{ appliedLine(appliedSummaryFor(part)!) }}</div>
+                        <div v-if="(appliedSummaryFor(part)!.manualChanges ?? 0) > 0" class="mt-[2px] text-[#8b949e]">
+                          {{ t('sheet.preview.manualChanges', { count: appliedSummaryFor(part)!.manualChanges }) }}
+                        </div>
+                      </div>
                     </div>
                     </template>
                   </div>
