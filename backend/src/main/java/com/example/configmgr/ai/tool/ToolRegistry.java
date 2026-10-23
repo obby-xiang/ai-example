@@ -8,8 +8,11 @@ import org.springframework.ai.tool.definition.DefaultToolDefinition;
 import org.springframework.ai.tool.definition.ToolDefinition;
 import org.springframework.ai.tool.method.MethodToolCallbackProvider;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.config.BeanDefinition;
+import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
 import org.springframework.context.ApplicationContext;
 import org.springframework.stereotype.Component;
+import org.springframework.util.ClassUtils;
 
 import jakarta.annotation.PostConstruct;
 import java.lang.reflect.Method;
@@ -19,6 +22,12 @@ import java.util.stream.Collectors;
 /**
  * Registry of all AI tools. Scans @Tool methods across all beans,
  * enriches with @ToolScope for progressive disclosure.
+ *
+ * <p>
+ * <b>启动失败 vs. 少工具（L-94）</b>：扫描期<b>工具 bean 创建失败必须启动失败</b>（收集全部失败
+ * bean 名后一次性抛出，消息点名到 bean）。理由 = 本类自述的"少工具比启动失败更难查"：构造期依赖环
+ * 让整批工具静默消失时，应用看起来"正常启动"，症状只剩模型少了一组工具。非工具 bean 的创建失败
+ * 仍按扫描噪音跳过（Spring 在真正用到它时照旧失败）。
  */
 @Slf4j
 @Component
@@ -48,10 +57,26 @@ public class ToolRegistry {
 
     @PostConstruct
     public void init() {
+        // 扫描期创建失败的 bean 名 + 原始异常：工具 bean 的失败必须在扫描结束后整批抛出，
+        // 非工具 bean 的失败仍按"扫描噪音"跳过（MethodToolCallbackProvider 对无 @Tool 的 bean 本身就抛错）。
+        List<String> failedToolBeans = new ArrayList<>();
+        List<RuntimeException> failures = new ArrayList<>();
+
         // Scan all beans for @Tool annotated methods
         for (String beanName : applicationContext.getBeanDefinitionNames()) {
             Object bean;
-            try { bean = applicationContext.getBean(beanName); } catch (Exception e) { continue; }
+            try { bean = applicationContext.getBean(beanName); }
+            catch (RuntimeException e) {
+                if (isDeclaredToolBean(beanName)) {
+                    failedToolBeans.add(beanName);
+                    failures.add(e);
+                    log.error("工具 bean 创建失败：{}（扫描结束后将中止启动）", beanName, e);
+                }
+                else {
+                    log.debug("扫描期跳过创建失败的 bean（非工具 bean）：{}：{}", beanName, e.toString());
+                }
+                continue;
+            }
             Class<?> cls = bean.getClass();
             // Walk through proxy to find real class
             while (cls.isSynthetic() || cls.getName().contains("$$")) {
@@ -104,8 +129,90 @@ public class ToolRegistry {
                 throw new IllegalStateException("工具 bean " + beanName + " 的回调注册失败", e);
             }
         }
+        if (!failedToolBeans.isEmpty()) {
+            // L-94：工具 bean 创建失败绝不能吞（2026-10-23 实证：构造期环让 KB 三工具整批消失，
+            // 注册数 37→34，而应用"正常启动"）。少工具比启动失败更难查 ⇒ 收集全部失败后带清单抛。
+            throw new IllegalStateException("工具 bean 创建失败（" + failedToolBeans.size() + " 个："
+                    + String.join("、", failedToolBeans) + "）—— 启动中止：少一批工具比启动失败更难查",
+                    failures.get(0));
+        }
         applyOverrides();
         log.info("ToolRegistry: registered {} tools（定义来源={}）", callbackMap.size(), snapshotVersion);
+    }
+
+    /**
+     * <b>L-94</b>：该 bean 的<b>声明</b>类型里有没有 {@code @Tool} 方法 —— 只看 BeanDefinition，
+     * 绝不实例化（要判定的恰恰是"创建不出来"的那些 bean）。
+     *
+     * <p>
+     * 类型来源两条：{@code beanClassName}（{@code @Component} 等）或 {@code @Bean} 工厂方法的
+     * <b>返回类型</b>（工厂方法本身此刻不能调用 —— 它就是要失败的那一个）。两者都解析不出来时
+     * 返回 false：无法证明它是工具 bean 就不改变既有语义（宁可漏判，不可误伤）。
+     */
+    private boolean isDeclaredToolBean(String beanName) {
+        try {
+            ConfigurableListableBeanFactory beanFactory =
+                    (ConfigurableListableBeanFactory) applicationContext.getAutowireCapableBeanFactory();
+            return hasToolMethod(declaredType(beanFactory.getBeanDefinition(beanName), beanFactory));
+        }
+        catch (RuntimeException e) {
+            // 手工注册的单例没有 BeanDefinition 等：无法判定 ⇒ 按非工具 bean 处理
+            log.debug("无法解析 bean 的声明类型：{}：{}", beanName, e.toString());
+            return false;
+        }
+    }
+
+    /** BeanDefinition → 声明类型（{@code null} = 解析不出，调用方按"非工具 bean"处理）。 */
+    private static Class<?> declaredType(BeanDefinition definition, ConfigurableListableBeanFactory beanFactory) {
+        if (definition.getBeanClassName() != null) {
+            return resolveClass(definition.getBeanClassName());
+        }
+        String factoryBeanName = definition.getFactoryBeanName();
+        String factoryMethodName = definition.getFactoryMethodName();
+        if (factoryBeanName == null || factoryMethodName == null) {
+            return null;
+        }
+        BeanDefinition factoryDefinition = beanFactory.getBeanDefinition(factoryBeanName);
+        Class<?> factoryType = factoryDefinition.getBeanClassName() == null
+                ? null : resolveClass(factoryDefinition.getBeanClassName());
+        if (factoryType == null) {
+            return null;
+        }
+        // 工厂方法可能是包级私有（测试替身常见），故走 getDeclaredMethods 并沿继承链找
+        for (Class<?> current = ClassUtils.getUserClass(factoryType); current != null && current != Object.class;
+                current = current.getSuperclass()) {
+            for (Method method : current.getDeclaredMethods()) {
+                if (method.getName().equals(factoryMethodName)) {
+                    return method.getReturnType();
+                }
+            }
+        }
+        return null;
+    }
+
+    private static Class<?> resolveClass(String className) {
+        try {
+            return ClassUtils.forName(className, ToolRegistry.class.getClassLoader());
+        }
+        catch (ClassNotFoundException | LinkageError e) {
+            return null;
+        }
+    }
+
+    /** 沿继承链找 {@code @Tool}（{@link ClassUtils#getUserClass} 先剥掉 CGLIB 代理子类）。 */
+    private static boolean hasToolMethod(Class<?> type) {
+        if (type == null) {
+            return false;
+        }
+        for (Class<?> current = ClassUtils.getUserClass(type); current != null && current != Object.class;
+                current = current.getSuperclass()) {
+            for (Method method : current.getDeclaredMethods()) {
+                if (method.getAnnotation(Tool.class) != null) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /**

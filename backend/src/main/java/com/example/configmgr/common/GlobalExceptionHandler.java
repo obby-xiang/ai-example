@@ -8,6 +8,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
@@ -63,6 +64,26 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(ConstraintViolationException.class)
     public ResponseEntity<?> handleConstraint(ConstraintViolationException e, HttpServletRequest request) {
         return respond(HttpStatus.BAD_REQUEST, ErrorCodes.VALIDATION_FAILED, e.getMessage(), null, request);
+    }
+
+    /**
+     * <b>L-96</b>：请求体读不出来（畸形 JSON / 类型不匹配 / 空体）⇒ <b>400</b>。
+     *
+     * <p>
+     * 此前无专门 handler，被 {@link #handleGeneral} 兜成 {@code 500 INTERNAL_ERROR} —— 客户端把
+     * "请求体写错了"读成"服务端炸了"（重试 / 告警 / 上报全指错方向）。口径与其它 400 一致：
+     * 业务信封 {@code code+message}（{@code Accept} 含 {@code application/problem+json} 时切
+     * RFC 9457）；码复用既有 {@link ErrorCodes#BAD_REQUEST}（不新增码 ⇒ 前端镜像与 messages 键集不动）；
+     * zh 用本条原文，en 走 {@code messages_en} 的 {@code error.BAD_REQUEST} 兜底。
+     *
+     * <p>
+     * 不回显 Jackson 的解析细节：那是英文技术栈文本，对终端用户无意义（需要细节时看 DEBUG 日志）。
+     */
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public ResponseEntity<?> handleUnreadableBody(HttpMessageNotReadableException e, HttpServletRequest request) {
+        log.debug("请求体不可读（畸形 JSON / 类型不匹配 / 空体）uri={}：{}",
+                request == null ? null : request.getRequestURI(), e.getMessage());
+        return respond(HttpStatus.BAD_REQUEST, ErrorCodes.BAD_REQUEST, "请求体格式不合法", null, request);
     }
 
     @ExceptionHandler(ResourceNotFoundException.class)
