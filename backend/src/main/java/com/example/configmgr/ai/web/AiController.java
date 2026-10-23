@@ -101,6 +101,15 @@ import java.util.concurrent.RejectedExecutionException;
  * Q2：无 key 时模型侧 bean 不存在，{@code /chat} 与 {@code /resume} 在<b>开流之前</b>返回
  * 503 {@code AI_UNAVAILABLE}；{@code /health} 亦然。历史的读与删除、确认/回灌的写入不依赖 key，
  * 因此保持可用（它们只读写 Redis）。
+ *
+ * <p>
+ * <b>暴露口径（I-1 / L-30，DC-10）</b>：本控制器全族<b>无认证</b> —— 写端点（改 provider/baseUrl、
+ * {@code /test} 等）与 {@code GET /api/ai/history/{sessionId}}（拿到 sessionId 即读该会话历史）一样，
+ * 都只靠"网络层不可达"来保护。收口方式 = 后端默认只绑回环（{@code server.address=127.0.0.1}，
+ * 见 application.yml）+ 生产网关前置鉴权（本仓既定终局方向，本批不引 token 体系）。
+ * <b>残余面</b>：回环只区分"哪台机器"，不区分本机上的用户 / 进程 —— 同机多用户形态仍可读写本族；
+ * 对外暴露必须显式改绑定并自备鉴权（判据与回归锁见 {@code config/ServerBindAddressConfigTest}、
+ * {@code config/Dc10ExposureSurfaceTest}）。
  */
 @Slf4j
 @RestController

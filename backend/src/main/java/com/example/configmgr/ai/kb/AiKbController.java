@@ -24,6 +24,11 @@ import java.util.Map;
  *
  * <p>不提供知识内容的写接口：知识文档由运维按 {@code docs/知识库维护手册.md} 的流程发布
  * （tmp+rename 原子写入 + sha 校验），应用侧只读。
+ *
+ * <p><b>暴露口径（L-59，DC-10）</b>：本控制器无认证 —— 任意可达客户端可 {@code POST /api/ai/kb/reload}
+ * 强制重建索引（CPU/IO 放大、HTTP 知识源额外回源；不泄露知识内容）。收口方式 = 后端默认只绑回环
+ * （{@code server.address=127.0.0.1}）+ 生产网关前置鉴权；<b>残余面</b> = 同机多用户（回环不区分
+ * 本机用户/进程），与 L-30 / I-1 同族、同批处理（回归锁见 {@code config/Dc10ExposureSurfaceTest}）。
  */
 @RestController
 @RequestMapping("/api/ai/kb")

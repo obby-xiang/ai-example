@@ -1,5 +1,15 @@
 server:
   port: 8081
+  # I-1（默认监听面收窄，2026-10-23）：只绑回环 —— 缺省时嵌入式 Tomcat 绑 0.0.0.0（全部网卡），
+  #   同网段任意客户端可 PUT /api/ai/providers/{id} 把 baseUrl 指向自控主机再 POST /providers/{id}/test，
+  #   把既有 Bearer key 送出去（本仓无 Spring Security / 无拦截器 / 无 token，写端点全族无鉴权）。
+  #   本机形态（浏览器 / Vite 代理 / E2E harness / CI）一律走 127.0.0.1 或 localhost，不受影响。
+  # **需对外暴露时必须显式覆盖**：--server.address=0.0.0.0（或由前置网关反代到回环）；
+  #   覆盖前须自备鉴权（网关侧 / token）—— 该形态下 /api/** 写端点、GET /api/ai/history/{sessionId}、
+  #   POST /api/ai/kb/reload 全部无认证可达（L-30 / L-59：生产网关收口为本仓既定终局方向）。
+  # 注意：端口行必须紧跟 `server:`（scripts/ci/check-docs.mjs 的端口事实源正则是
+  #   `^server:\s*\n\s+port:\s*(\d+)`）；本批只收窄地址，端口不动。
+  address: 127.0.0.1
   servlet:
     context-path: /
   tomcat:
@@ -53,7 +63,10 @@ spring:
       enabled: true
       path: /h2-console
       settings:
-        web-allow-others: true
+        # 同一连接器上的第二个暴露面（零认证、可执行 SQL）。I-1 起默认只绑回环已挡住网段；
+        # 这里再把 H2 自己的"允许其它主机"关掉 —— **显式改 server.address=0.0.0.0 时**，
+        # 库内控制台不会跟着一起送出去（同机访问不受影响：本机地址仍判定为 local）。
+        web-allow-others: false
 
   jpa:
     hibernate:
