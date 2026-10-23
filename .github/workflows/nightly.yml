@@ -311,29 +311,16 @@ jobs:
       - name: 录制第一遍（全量，JaCoCo 逐测试倒排）
         run: mvn -B -Ptestmap test
 
-      - name: 键归一自测（K2：报告位 + 具体类口径硬闸）
+      - name: 键归一自测（K2：硬闸 = 可记录类口径 ≥95%）
         working-directory: ${{ github.workspace }}
         run: |
-          set +e
+          # L-100 已收口：--verify-map 与录制器 B0 闸同口径（可记录类 = 剔除接口/注解/package-info/module-info），
+          # 两数都打印，硬闸只看可记录类口径，失败即 exit 2。
           node scripts/ci/select-tests.mjs --verify-map --map backend/target/testmap/map.json
-          code=$?
-          # 口径分歧（如实记，未改 select-tests.mjs —— C 期工作面不含它）：
-          #   `--verify-map` 的分母是**全量源码 FQN**（含接口/枚举/record 等无字节码可执行体），
-          #   本机实测 221/253 = 87.35% ⇒ 恒 < 95% 而退出 2；录制器自身的 B0 闸用的是
-          #   **具体类**口径（meta.keyOverlapRatioConcrete，同一张表实测 98.19%，录制 BUILD SUCCESS）。
-          #   故此处把 --verify-map 记为报告位，K2 硬闸落在与录制器同源的具体类口径上。
-          if [ "$code" != "0" ]; then
-            echo "::warning::--verify-map 退出码 $code（全量 FQN 口径 < 95%）；K2 硬闸改用具体类口径，见下一步"
-          fi
           node <<'NODE'
           const fs = require('node:fs')
           const meta = JSON.parse(fs.readFileSync('backend/target/testmap/map.json', 'utf8')).meta || {}
-          const min = 0.95
-          console.log(`keyOverlapRatio=${meta.keyOverlapRatio} keyOverlapRatioConcrete=${meta.keyOverlapRatioConcrete} 具体类=${meta.concreteProdClassCount}/${meta.prodClassCount}`)
-          if (!(meta.keyOverlapRatioConcrete >= min)) {
-            console.error(`::error::K2 具体类键重合率 ${meta.keyOverlapRatioConcrete} < ${min}（录制器 B0 闸同源口径）`)
-            process.exit(1)
-          }
+          console.log(`meta 对账：keyOverlapRatio=${meta.keyOverlapRatio} keyOverlapRatioConcrete=${meta.keyOverlapRatioConcrete} 具体类=${meta.concreteProdClassCount}/${meta.prodClassCount}`)
           NODE
 
       - name: 录制第二遍（确定性校验：与第一遍逐测试类比依赖集）

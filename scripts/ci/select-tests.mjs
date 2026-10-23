@@ -13,6 +13,10 @@
  *     --map backend/target/testmap/map.json \
  *     --out backend/target/selection/includes.txt \
  *     [--audit backend/target/testmap/selection/<treeSha>.json] [--all] [--verify-map]
+ *
+ * `--verify-map` 核对倒排表键覆盖，分母分两口径：全量源码 FQN 与「可记录类」（剔除顶层声明为
+ * interface / @interface 的生产类——JaCoCo 对它们结构上不产生 execution data）。两数都打印，
+ * 硬闸只看后者，与录制器 TestmapRecorder.assertCoverageFloor 的 B0 闸同口径（L-100）。
  */
 
 import { execFileSync } from 'node:child_process';
@@ -54,6 +58,26 @@ export function isSourceRelevant(path) {
   if (path.startsWith('frontend/node_modules/') || path.startsWith('frontend/dist/')) return false;
   if (/\.(log|db|mv\.db|trace\.db)$/.test(path)) return false;
   return true;
+}
+
+/**
+ * 顶层类型声明。与录制器 `TestmapRecorder.TOP_LEVEL_TYPE` 逐字对应，改一处必须改另一处：
+ * 两边的「可记录类」集合必须相等，否则 --verify-map 与录制器 B0 闸又会各说各话。
+ *
+ * 认不出时返回 'class'（= 可记录），与录制器同默认：读不到/解析失败按可记录处理，
+ * 方向保守（只会把分母算大、覆盖率算低）。
+ */
+const TOP_LEVEL_TYPE = /^(?:public\s+|final\s+|abstract\s+|sealed\s+|non-sealed\s+|strictfp\s+)*(class|interface|@interface|enum|record)\b/m;
+
+export function topLevelKind(source) {
+  const m = TOP_LEVEL_TYPE.exec(source || '');
+  return m ? m[1] : 'class';
+}
+
+/** 可记录类 = 顶层声明不是 interface / @interface（JaCoCo 结构性不产生 execution data）。 */
+export function isRecordableSource(source) {
+  const kind = topLevelKind(source);
+  return kind !== 'interface' && kind !== '@interface';
 }
 
 const ASSEMBLY_ANNOTATION = [
@@ -130,6 +154,39 @@ export function isTableStale(map, now = Date.now()) {
     return { stale: true, reason: 'map-unstable' };
   }
   return { stale: false, reason: null };
+}
+
+/**
+ * 倒排表键覆盖核对（纯函数，--verify-map 用）。
+ *
+ * 两口径同时算：全量源码 FQN（含 interface / @interface）与可记录类 FQN。硬闸只看后者，
+ * 与录制器 B0 闸一致；前者保留在输出里做审计（`sourceCount - recordableCount` 即结构性不可记录类数量）。
+ *
+ * @param {Array<{fqn:string, recordable:boolean}>} mainClasses 生产类清单
+ * @param {object|null} map 倒排表
+ * @param {number} [min] 硬闸阈值（可记录类口径）
+ */
+export function verifyMapCoverage(mainClasses, map, min = MIN_KEY_OVERLAP) {
+  const keys = new Set(Object.keys(map?.index || {}));
+  const covered = mainClasses.filter((c) => keys.has(c.fqn));
+  const recordable = mainClasses.filter((c) => c.recordable);
+  const coveredRecordable = recordable.filter((c) => keys.has(c.fqn));
+  const ratio = (hit, total) => (total === 0 ? 1 : hit / total);
+  const keyOverlapRatio = ratio(covered.length, mainClasses.length);
+  const keyOverlapRatioConcrete = ratio(coveredRecordable.length, recordable.length);
+  return {
+    keyCount: keys.size,
+    sourceCount: mainClasses.length,
+    coveredCount: covered.length,
+    keyOverlapRatio,
+    recordableCount: recordable.length,
+    recordableCoveredCount: coveredRecordable.length,
+    keyOverlapRatioConcrete,
+    missing: mainClasses.filter((c) => !keys.has(c.fqn)).map((c) => c.fqn),
+    missingRecordable: recordable.filter((c) => !keys.has(c.fqn)).map((c) => c.fqn),
+    nonRecordable: mainClasses.filter((c) => !c.recordable).map((c) => c.fqn),
+    pass: keyOverlapRatioConcrete >= min,
+  };
 }
 
 /**
@@ -280,6 +337,12 @@ function git(args, cwd) {
   return execFileSync('git', args, { cwd, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
 }
 
+/** 取源码：工作树优先，回落到索引（新增未落盘/已删除的情形），都拿不到返回 ''。 */
+function readSource(root, relPath) {
+  try { return readFileSync(resolve(root, relPath), 'utf8'); } catch { /* 走索引 */ }
+  try { return git(['show', `:${relPath}`], root); } catch { return ''; }
+}
+
 function parseNameStatus(text) {
   const out = [];
   for (const line of text.split('\n')) {
@@ -323,15 +386,25 @@ function main(argv) {
 
   if (args.verifyMap) {
     const trackedMain = git(['ls-files', '--', MAIN_PREFIX], root)
-      .split('\n').map((s) => s.trim()).filter((p) => p && p.endsWith('.java') && !/\/package-info\.java$/.test(p))
-      .map(toFqn);
-    const keys = new Set(Object.keys(map?.index || {}));
-    const covered = trackedMain.filter((f) => keys.has(f));
-    const ratio = trackedMain.length === 0 ? 1 : covered.length / trackedMain.length;
-    console.log(`[verify-map] 键集 ${keys.size}，源码 FQN ${trackedMain.length}，重合 ${covered.length}，覆盖率 ${(ratio * 100).toFixed(2)}%`);
-    const missing = trackedMain.filter((f) => !keys.has(f));
-    if (missing.length) console.log(`[verify-map] 未覆盖样本（前 10）：${missing.slice(0, 10).join(', ')}`);
-    return ratio >= MIN_KEY_OVERLAP ? 0 : 2;
+      .split('\n').map((s) => s.trim())
+      .filter((p) => p && p.endsWith('.java') && !/\/(package|module)-info\.java$/.test(p));
+    // 可记录类判定按源码内容（与录制器同一条正则）；文件读不到时 readSource 返回 '' ⇒ 按可记录处理
+    const mainClasses = trackedMain.map((p) => ({
+      fqn: toFqn(p),
+      recordable: isRecordableSource(readSource(root, p)),
+    }));
+    const c = verifyMapCoverage(mainClasses, map);
+    const pct = (x) => `${(x * 100).toFixed(2)}%`;
+    console.log(`[verify-map] 键集 ${c.keyCount}；全量口径 ${c.coveredCount}/${c.sourceCount} = ${pct(c.keyOverlapRatio)}` +
+      `（含接口/注解，JaCoCo 结构性不可记录）；可记录类口径 ${c.recordableCoveredCount}/${c.recordableCount} = ${pct(c.keyOverlapRatioConcrete)}`);
+    if (c.nonRecordable.length) {
+      console.log(`[verify-map] 计入全量口径但不计入硬闸（接口/注解 ${c.nonRecordable.length} 个，前 10）：${c.nonRecordable.slice(0, 10).join(', ')}`);
+    }
+    if (c.missingRecordable.length) {
+      console.log(`[verify-map] 未覆盖的可记录类（前 10）：${c.missingRecordable.slice(0, 10).join(', ')}`);
+    }
+    console.log(`[verify-map] 硬闸：可记录类口径 ≥ ${pct(MIN_KEY_OVERLAP)} ⇒ ${c.pass ? '通过' : '未通过'}`);
+    return c.pass ? 0 : 2;
   }
 
   if (args.all) {
@@ -368,10 +441,7 @@ function main(argv) {
   }
   const sticky = readStickyFailures(root);
 
-  const sourceOf = (p) => {
-    try { return readFileSync(resolve(root, p), 'utf8'); } catch { /* 新增未落盘/删除的情形走索引 */ }
-    try { return git(['show', `:${p}`], root); } catch { return ''; }
-  };
+  const sourceOf = (p) => readSource(root, p);
   const blobOf = (p) => {
     try { return git(['rev-parse', `HEAD:${p}`], root).trim(); } catch { return null; }
   };

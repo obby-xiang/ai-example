@@ -1,18 +1,22 @@
 #!/usr/bin/env node
 /**
  * 选择器纯函数单测（零依赖，node --test 运行）。
- * 覆盖 §2.4 兜底规则 F1~F13、F5 的三种子条件、K4 陈旧条目、空变更集、规模封顶。
+ * 覆盖 §2.4 兜底规则 F1~F13、F5 的三种子条件、K4 陈旧条目、空变更集、规模封顶，
+ * 以及 --verify-map 的键覆盖双口径（全量 / 可记录类，L-100）。
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
   isAssemblyClass,
+  isRecordableSource,
   isSourceRelevant,
   isTableStale,
   selectTests,
   staticFallbacks,
   toFqn,
+  topLevelKind,
+  verifyMapCoverage,
 } from './select-tests.mjs';
 
 const MAP = {
@@ -213,4 +217,86 @@ test('静态兜底可多条命中且全列', () => {
     { status: 'M', path: 'backend/src/main/resources/application.yml' },
   ]);
   assert.deepEqual(hits.map((h) => h.rule), ['F1', 'F2', 'F13']);
+});
+
+// --------------------------------------------------- --verify-map 口径（L-100）
+
+test('顶层类型：class/record/enum 可记录，interface/@interface 不可记录', () => {
+  assert.equal(topLevelKind('package p;\n\npublic class A {}\n'), 'class');
+  assert.equal(topLevelKind('abstract class A {}'), 'class');
+  assert.equal(topLevelKind('public final class A {}'), 'class');
+  assert.equal(topLevelKind('public enum A { X }'), 'enum');
+  assert.equal(topLevelKind('public record A(int x) {}'), 'record');
+  assert.equal(topLevelKind('public interface A {}'), 'interface');
+  assert.equal(topLevelKind('@interface A {}'), '@interface');
+
+  assert.equal(isRecordableSource('public interface A {}'), false);
+  assert.equal(isRecordableSource('@Deprecated\npublic @interface A {}'), false);
+  assert.equal(isRecordableSource('public enum A { X }'), true);
+  assert.equal(isRecordableSource('public record A(int x) {}'), true);
+});
+
+test('认不出的源码按可记录处理（与录制器同一默认值）', () => {
+  assert.equal(topLevelKind(''), 'class');
+  assert.equal(isRecordableSource(''), true);
+  // 注释/文本块里的 interface 不算顶层声明
+  assert.equal(topLevelKind('// interface 只是注释\nclass A {}'), 'class');
+  assert.equal(topLevelKind(' * interface 只是注释\npublic interface A {}'), 'interface');
+});
+
+test('verify-map：接口/注解拉低全量口径，硬闸按可记录类口径通过（L-100）', () => {
+  const mainClasses = [
+    ...Array.from({ length: 8 }, (_, i) => ({ fqn: `p.C${i}`, recordable: true })),
+    { fqn: 'p.Iface', recordable: false },
+    { fqn: 'p.Ann', recordable: false },
+  ];
+  const index = {};
+  for (const c of mainClasses) if (c.recordable) index[c.fqn] = { tests: ['t.T'], blobSha: null };
+
+  const r = verifyMapCoverage(mainClasses, { index });
+  assert.equal(r.keyCount, 8);
+  assert.equal(r.keyOverlapRatio, 0.8);
+  assert.equal(r.keyOverlapRatioConcrete, 1);
+  assert.deepEqual(r.missingRecordable, []);
+  assert.deepEqual(r.missing, ['p.Iface', 'p.Ann']);
+  assert.deepEqual(r.nonRecordable, ['p.Iface', 'p.Ann']);
+  assert.equal(r.pass, true);
+});
+
+test('verify-map：可记录类口径不足 95% ⇒ 硬闸不过', () => {
+  const mainClasses = Array.from({ length: 20 }, (_, i) => ({ fqn: `p.C${i}`, recordable: true }));
+  const index = {};
+  mainClasses.slice(0, 18).forEach((c) => { index[c.fqn] = { tests: ['t.T'] }; });
+
+  const r = verifyMapCoverage(mainClasses, { index });
+  assert.equal(r.keyOverlapRatioConcrete, 0.9);
+  assert.deepEqual(r.missingRecordable, ['p.C18', 'p.C19']);
+  assert.equal(r.pass, false);
+});
+
+test('verify-map：可记录类口径恰好 95% ⇒ 硬闸通过', () => {
+  const mainClasses = Array.from({ length: 20 }, (_, i) => ({ fqn: `p.C${i}`, recordable: true }));
+  const index = {};
+  mainClasses.slice(0, 19).forEach((c) => { index[c.fqn] = { tests: ['t.T'] }; });
+
+  const r = verifyMapCoverage(mainClasses, { index });
+  assert.equal(r.keyOverlapRatioConcrete, 0.95);
+  assert.equal(r.pass, true);
+});
+
+test('verify-map：缺表 ⇒ 键集 0、全部未覆盖、闸不过', () => {
+  const r = verifyMapCoverage([{ fqn: 'p.C0', recordable: true }, { fqn: 'p.I0', recordable: false }], null);
+  assert.equal(r.keyCount, 0);
+  assert.deepEqual(r.missing, ['p.C0', 'p.I0']);
+  assert.deepEqual(r.missingRecordable, ['p.C0']);
+  assert.equal(r.keyOverlapRatio, 0);
+  assert.equal(r.keyOverlapRatioConcrete, 0);
+  assert.equal(r.pass, false);
+});
+
+test('verify-map：无生产类 ⇒ 两口径都记 100%', () => {
+  const r = verifyMapCoverage([], { index: {} });
+  assert.equal(r.keyOverlapRatio, 1);
+  assert.equal(r.keyOverlapRatioConcrete, 1);
+  assert.equal(r.pass, true);
 });
