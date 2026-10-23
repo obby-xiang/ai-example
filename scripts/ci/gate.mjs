@@ -298,8 +298,31 @@ function selectStep() {
   } else {
     const hit = (audit?.rulesHit || []).join(', ')
     console.log(`[gate]   选中 ${selected} 类，冒烟 ${audit?.smoke?.length ?? '?'} 类，命中规则：${hit || '无（按倒排查表）'}`)
+    printUnstableCost(audit)
   }
   return { all, selected, selectedClasses: inc?.tests ?? [], audit, code: r.code }
+}
+
+/**
+ * L-101 的可视化半边：不稳定类数 + 预估成本，直接打进提交级门禁输出。
+ * 判据口径 = 看板 L-101（一次高负载录制 33 类 ⇒ 提交级 107s 涨到 187s），超过冒烟成本 30% 点名告警。
+ */
+function printUnstableCost(audit) {
+  const unstable = audit?.unstable || []
+  if (!unstable.length) return
+  const cost = audit?.costEstimate || {}
+  const u = cost.unstable || {}
+  const s = cost.smoke || {}
+  const sec = (x) => (x === null || x === undefined ? '?' : `${x}s`)
+  const share = s.share
+    ? `，占冒烟成本 ${Math.min(100, Math.round(((u.share || 0) / Math.max(s.share, u.share || 0)) * 100))}%`
+    : ''
+  const policy = audit?.unstablePolicy
+  console.log(`[gate]   ⚠ unstable 拖慢（L-101）：${unstable.length} 类 ≈ ${sec(u.estimatedSeconds)}${share}` +
+    `；冒烟合计 ${s.classCount ?? '?'} 类 ≈ ${sec(s.estimatedSeconds)}`)
+  if (policy) {
+    console.log(`[gate]     策略：连续 ${policy.cleanRuns} 次夜间录制无差异即移出冒烟集，或距最后复现超 ${policy.maxAgeDays} 天过期（录制器侧执行）`)
+  }
 }
 
 function commitTier() {

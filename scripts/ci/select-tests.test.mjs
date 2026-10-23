@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
+  costEstimate,
   isAssemblyClass,
   isRecordableSource,
   isSourceRelevant,
@@ -300,3 +301,89 @@ test('verify-map：无生产类 ⇒ 两口径都记 100%', () => {
   assert.equal(r.keyOverlapRatioConcrete, 1);
   assert.equal(r.pass, true);
 });
+
+// ------------------------------------- L-101：不稳定集合的成本可视化（纯函数面）
+
+test('costEstimate：估算秒数 = 录制期逐类耗时之和（上界），另存墙钟折算值', () => {
+  const map = {
+    meta: {
+      testClassDurationMs: { 'p.AlphaTest': 1000, 'p.BetaTest': 3000, 'p.SmokeTest': 2000 },
+      recordedWallMs: 12000,
+    },
+  };
+  const c = costEstimate(map, ['p.AlphaTest', 'p.BetaTest']);
+  assert.equal(c.classCount, 2);
+  assert.equal(c.knownClassCount, 2);
+  assert.equal(c.ownMs, 4000);
+  assert.equal(c.share, 4000 / 6000);
+  assert.equal(c.estimatedSeconds, 4); // 4s（录制期耗时和，上界；实测标定 ~1.4×）
+  assert.equal(c.wallScaledSeconds, 8); // 4/6 × 12s：只作对照，不进结论
+  assert.equal(c.fullSeconds, 12);
+});
+
+test('costEstimate：无计时数据 ⇒ 估算为 null（不假装知道）', () => {
+  const c = costEstimate({ meta: {} }, ['p.AlphaTest']);
+  assert.equal(c.estimatedSeconds, null);
+  assert.equal(c.share, null);
+  assert.equal(c.knownClassCount, 0);
+});
+
+test('costEstimate：只有逐类耗时、无墙钟 ⇒ 退化为用例体秒数下界', () => {
+  const c = costEstimate({ meta: { testClassDurationMs: { 'p.AlphaTest': 2500 } } }, ['p.AlphaTest']);
+  assert.equal(c.estimatedSeconds, 2.5);
+  assert.equal(c.wallScaledSeconds, null);
+  assert.equal(c.fullSeconds, null);
+});
+
+test('costEstimate：表里没有的测试类不计入（不夸大成本）', () => {
+  const c = costEstimate({ meta: { testClassDurationMs: { 'p.AlphaTest': 1000 }, recordedWallMs: 5000 } }, ['p.AlphaTest', 'p.GhostTest']);
+  assert.equal(c.classCount, 2);
+  assert.equal(c.knownClassCount, 1);
+  assert.equal(c.ownMs, 1000);
+  assert.equal(c.estimatedSeconds, 1);
+  assert.equal(c.wallScaledSeconds, 5);
+});
+
+test('不稳定类进冒烟集、进成本、进结果（L-101 可视化）', () => {
+  const map = {
+    ...MAP,
+    meta: {
+      ...MAP.meta,
+      unstableTests: ['p.BetaTest'],
+      unstablePolicy: { cleanRuns: 2, maxAgeDays: 7 },
+      testClassDurationMs: { 'p.AlphaTest': 1000, 'p.BetaTest': 3000, 'p.SmokeTest': 500 },
+      recordedWallMs: 9000,
+    },
+  };
+  const r = selectTests({
+    changed: [{ status: 'M', path: 'backend/src/main/java/p/Alpha.java' }],
+    map,
+    smoke: [],
+    trackedTests: TRACKED,
+    blobOf: () => 'blob-alpha',
+  });
+  assert.deepEqual(r.unstable, ['p.BetaTest']);
+  assert.ok(r.selected.includes('p.BetaTest'));
+  assert.deepEqual(r.unstablePolicy, { cleanRuns: 2, maxAgeDays: 7 });
+  assert.equal(r.cost.unstable.classCount, 1);
+  assert.ok(r.cost.unstable.estimatedSeconds > 0);
+  assert.ok(r.cost.smoke.estimatedSeconds >= r.cost.unstable.estimatedSeconds);
+});
+
+test('空变更集：不稳定类并入冒烟集（§3.6「永久常跑」不留缺口）', () => {
+  const map = { ...MAP, meta: { ...MAP.meta, unstableTests: ['p.BetaTest'] } };
+  const r = selectTests({ changed: [], map, smoke: ['p.SmokeTest'], trackedTests: TRACKED });
+  assert.deepEqual(r.selected, ['p.BetaTest', 'p.SmokeTest']);
+  assert.match(r.warnings[0], /变更集为空/);
+});
+
+test('空变更集也报不稳定成本（「只跑冒烟」同样被拖慢）', () => {
+  const map = {
+    ...MAP,
+    meta: { ...MAP.meta, unstableTests: ['p.BetaTest'], testClassDurationMs: { 'p.BetaTest': 2000 }, recordedWallMs: 4000 },
+  };
+  const r = selectTests({ changed: [], map, smoke: ['p.SmokeTest'], trackedTests: TRACKED });
+  assert.equal(r.cost.unstable.classCount, 1);
+  assert.equal(r.cost.unstable.estimatedSeconds, 2);
+});
+

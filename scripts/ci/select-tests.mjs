@@ -143,6 +143,49 @@ export function staticFallbacks(changed, sourceOf = () => '') {
   return hits;
 }
 
+/**
+ * 选择集/冒烟集的成本估算（纯函数，L-101 的「可视化」半边）。
+ *
+ * 数据源 = 录制器写的 `meta.testClassDurationMs`（逐测试类的用例体耗时，录制期免费拿）与
+ * `meta.recordedWallMs`（整轮录制墙钟，近似全量耗时）。没有任何计时数据时 `estimatedSeconds = null`，
+ * 由输出层打印「无计时数据」，不假装知道。
+ *
+ * 口径 = **录制期耗时之和**（上界）：实测标定（2026-10-24，静默机型）31 个 unstable 类录制期
+ * 耗时和 34.2s，同一批类在正常跑里实测 +24.2s，即 1.4× 上界 —— 录制期的 JaCoCo agent 与逐用例
+ * dump 会让部分类（尤其带实时预算断言的）偏慢。**刻意不按「占全量墙钟比例」折算**：墙钟含 Spring
+ * 上下文建构与 Maven 启动，按比例放大会把 24.2s 说成 74s（实测偏差 2.8×，反而让选择器不可信）。
+ * 折算值另存 `wallScaledSeconds` 供对照，不进结论行。
+ */
+export function costEstimate(map, classes = []) {
+  const durations = map?.meta?.testClassDurationMs || {};
+  let allMs = 0;
+  for (const v of Object.values(durations)) allMs += Number(v) || 0;
+  let ownMs = 0;
+  let known = 0;
+  for (const c of classes) {
+    const d = Number(durations[c]);
+    if (Number.isFinite(d)) {
+      ownMs += d;
+      known += 1;
+    }
+  }
+  const wallMs = Number(map?.meta?.recordedWallMs) || 0;
+  const share = allMs > 0 ? ownMs / allMs : null;
+  const estimatedSeconds = allMs === 0 && ownMs === 0 ? null : Math.round(ownMs / 100) / 10;
+  const wallScaledSeconds = share !== null && wallMs > 0 ? Math.round((share * wallMs) / 100) / 10 : null;
+  return {
+    classCount: classes.length,
+    knownClassCount: known,
+    ownMs,
+    allMs,
+    wallMs,
+    share,
+    estimatedSeconds,
+    wallScaledSeconds,
+    fullSeconds: wallMs > 0 ? Math.round(wallMs / 100) / 10 : null,
+  };
+}
+
 export function isTableStale(map, now = Date.now()) {
   if (!map || !map.meta) return { stale: true, reason: 'map-missing' };
   const meta = map.meta;
@@ -155,6 +198,7 @@ export function isTableStale(map, now = Date.now()) {
   }
   return { stale: false, reason: null };
 }
+
 
 /**
  * 倒排表键覆盖核对（纯函数，--verify-map 用）。
@@ -212,6 +256,8 @@ export function selectTests({
   now = Date.now(),
 }) {
   const relevant = changed.filter((c) => isSourceRelevant(c.path));
+  // 不稳定类（两次录制不一致）：依赖边不可信 ⇒ 常跑（§3.6）；集合由录制器按「连续 N 次干净 / 7 天窗」重估（L-101）
+  const unstable = Array.isArray(map?.meta?.unstableTests) ? map.meta.unstableTests : [];
   const base = {
     changed: relevant.map((c) => c.path),
     rulesHit: [],
@@ -219,18 +265,22 @@ export function selectTests({
     reason: null,
     selected: [],
     smoke: [],
+    unstable,
+    unstablePolicy: map?.meta?.unstablePolicy || null,
     excludedStale: [],
     warnings: [],
+    cost: null,
   };
 
-  // 空变更集：只跑冒烟集，明确打印「未跑全量」（m5）
+  // 空变更集：只跑冒烟集，明确打印「未跑全量」（m5）。不稳定类属于冒烟集（§3.6），必须并入
   if (relevant.length === 0) {
-    const smokeOnly = unique(smoke).sort();
+    const smokeOnly = unique([...smoke, ...unstable]).sort();
     return {
       ...base,
       selected: smokeOnly,
       smoke: smokeOnly,
       warnings: ['变更集为空：只跑固定冒烟集，未跑全量'],
+      cost: { selected: costEstimate(map, smokeOnly), smoke: costEstimate(map, smokeOnly), unstable: costEstimate(map, unstable) },
     };
   }
 
@@ -295,8 +345,7 @@ export function selectTests({
     const deps = (map.tests || {})[t];
     return !Array.isArray(deps) || deps.length === 0;
   });
-  // 不稳定类（两次录制不一致）：依赖边不可信 ⇒ 永久常跑（§3.6），不因此把整表退成全量
-  const unstable = Array.isArray(meta.unstableTests) ? meta.unstableTests : [];
+  // 不稳定类（两次录制不一致）：依赖边不可信 ⇒ 常跑（§3.6），不因此把整表退成全量
   const smokeSet = unique([...smoke, ...unstable, ...missingEntries, ...changedTests]);
   const merged = unique([...fromIndex, ...smokeSet]);
   const trackedSet = new Set(trackedTests);
@@ -320,6 +369,11 @@ export function selectTests({
     smoke: unique(smokeSet).sort(),
     excludedStale,
     warnings: excludedStale.length > 0 ? [`已剔除表内陈旧条目：${excludedStale.join(', ')}`] : [],
+    cost: {
+      selected: costEstimate(map, selected),
+      smoke: costEstimate(map, smokeSet),
+      unstable: costEstimate(map, unstable),
+    },
   };
 }
 
@@ -470,10 +524,43 @@ function main(argv) {
     log(`[select] 选中 ${result.selected.length} 个测试类 / 共 ${map?.meta?.testClassCount ?? '?'}` +
         `${result.smoke.length ? `（其中冒烟 ${result.smoke.length}）` : ''}`);
     log(`[select] 命中规则：${result.rulesHit.join(', ') || '无（按倒排查表）'}`);
+    logCost(result, log);
     log(`[select] 清单：${args.out}${args.audit ? `，审计：${args.audit}` : ''}`);
   }
   result.warnings.forEach((w) => log(`[select] ${w}`));
   return 0;
+}
+
+const secs = (x) => (x === null || x === undefined ? '?' : `${x}s`);
+
+/**
+ * L-101 的可视化半边：把「不稳定类拖慢提交级」从隐性成本变成一行可读数字。
+ * 判据口径与看板 L-101 一致（一次高负载录制 33 类 ⇒ 107s 涨到 187s），所以超过冒烟成本 30% 就点警告。
+ */
+function logCost(result, log) {
+  const c = result.cost;
+  if (!c) return;
+  const sel = c.selected || {};
+  const smoke = c.smoke || {};
+  const unstable = c.unstable || {};
+  log(`[select] 成本估算（录制期上界）：选中 ${sel.classCount} 类 ≈ ${secs(sel.estimatedSeconds)}` +
+      `${smoke.classCount ? `，其中冒烟 ${smoke.classCount} 类 ≈ ${secs(smoke.estimatedSeconds)}` : ''}` +
+      `${sel.fullSeconds ? `；全量墙钟 ≈ ${secs(sel.fullSeconds)}` : '；无计时数据（先跑一次 -Ptestmap 录制）'}`);
+  const n = (result.unstable || []).length;
+  if (n > 0) {
+    const share = smoke.share
+      ? `，占冒烟成本 ${Math.min(100, Math.round(((unstable.share || 0) / Math.max(smoke.share, unstable.share || 0)) * 100))}%`
+      : '';
+    const policy = unstablePolicyNote(result);
+    log(`[select] ⚠ unstable 拖慢（L-101）：${n} 类 ≈ ${secs(unstable.estimatedSeconds)}${share}` +
+        `${policy}；夜间录制连续干净即自动移出（见运行时参数 testmap.unstable.*）`);
+  }
+}
+
+/** 只回显策略，不参与判定（策略在录制器侧执行）。 */
+function unstablePolicyNote(result) {
+  const p = result.unstablePolicy;
+  return p ? `（策略：连续 ${p.cleanRuns} 次干净 / ${p.maxAgeDays} 天窗）` : '';
 }
 
 function readStickyFailures(root) {
@@ -506,6 +593,10 @@ function writeAudit(path, { root, args, base, changed, result, map }) {
     rulesHit: result.rulesHit,
     selected: result.selected,
     smoke: result.smoke,
+    // L-101：不稳定类与成本估算进审计（跨周回答「这 33 类为什么常跑、占多少时间」）
+    unstable: result.unstable || [],
+    unstablePolicy: result.unstablePolicy || null,
+    costEstimate: result.cost || null,
     excludedStale: result.excludedStale,
     tableSha256,
     tableHeadSha: map?.meta?.headSha ?? null,
