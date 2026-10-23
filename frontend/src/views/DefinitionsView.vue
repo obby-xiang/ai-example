@@ -264,14 +264,12 @@ interface EditableDefinition {
   fields: EditableField[]
 }
 
-const FIELD_TYPES: Array<{ value: FieldType; label: string }> = [
-  { value: 'STRING', label: '文本' },
-  { value: 'NUMBER', label: '数字' },
-  { value: 'DATE', label: '日期' },
-  { value: 'ENUM', label: '枚举（下拉）' },
-  { value: 'BOOLEAN', label: '布尔' },
-  { value: 'REFERENCE', label: '引用（跨配置）' }
-]
+/** 字段类型下拉（i18n L-69：label 由 locale 派生 —— 渲染期读 ⇒ 切语言即重算）。 */
+const FIELD_TYPE_VALUES: readonly FieldType[] = ['STRING', 'NUMBER', 'DATE', 'ENUM', 'BOOLEAN', 'REFERENCE']
+const FIELD_TYPES = computed(() => FIELD_TYPE_VALUES.map((value) => ({
+  value,
+  label: t(`views.definitions.types.${value}`)
+})))
 
 const workspace = useWorkspaceStore()
 const router = useRouter()
@@ -290,7 +288,11 @@ const editingCode = ref<string | null>(null)
 const saving = ref(false)
 const form = reactive<EditableDefinition>(emptyForm())
 
-const detailTitle = computed(() => (detail.value ? `配置详情 · ${detail.value.name}` : '配置详情'))
+const detailTitle = computed(() => (
+  detail.value
+    ? t('views.definitions.detailTitle', { name: detail.value.name })
+    : t('views.definitions.detailTitlePlain')
+))
 const refCandidates = computed(() => defs.value.filter((item) => item.code !== editingCode.value))
 
 function emptyForm(): EditableDefinition {
@@ -302,11 +304,11 @@ function levelType(level: ConfigLevel): 'success' | 'warning' | 'primary' {
 }
 
 function levelLabel(level: ConfigLevel): string {
-  return level === 'GLOBAL' ? '全局' : level === 'REGION' ? '地区' : '项目'
+  return t(`views.definitions.${level.toLowerCase()}`)
 }
 
 function typeLabel(type: FieldType): string {
-  return FIELD_TYPES.find((item) => item.value === type)?.label ?? type
+  return FIELD_TYPES.value.find((item) => item.value === type)?.label ?? type
 }
 
 function keyFieldsOf(def: ConfigDefinition): string[] {
@@ -335,7 +337,7 @@ async function loadDefs(): Promise<void> {
     }
     defs.value = await definitionsApi.listDefinitions(params)
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '配置定义加载失败')
+    ElMessage.error(error instanceof Error ? error.message : t('views.definitions.msg.loadFailed'))
   } finally {
     loading.value = false
   }
@@ -355,9 +357,9 @@ async function downloadTemplate(def: ConfigDefinition): Promise<void> {
   try {
     const blob = await definitionsApi.downloadTemplate(def.code)
     downloadBlob(blob, `${def.code}_${def.name}.xlsx`)
-    ElMessage.success(`已下载 ${def.code} 的导入模板`)
+    ElMessage.success(t('views.definitions.msg.templateDownloaded', { code: def.code }))
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '模板下载失败')
+    ElMessage.error(error instanceof Error ? error.message : t('views.definitions.msg.templateDownloadFailed'))
   } finally {
     templateLoading.value = null
   }
@@ -416,32 +418,32 @@ function buildOptionsJson(text: string): string | null {
 
 function validateForm(): string | null {
   if (!form.code.trim()) {
-    return '请填写配置编码'
+    return t('views.definitions.validate.codeRequired')
   }
   if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(form.code.trim())) {
-    return '配置编码须以字母开头，只允许字母、数字、下划线'
+    return t('views.definitions.validate.codeInvalid')
   }
   if (!form.name.trim()) {
-    return '请填写配置名称'
+    return t('views.definitions.validate.nameRequired')
   }
   const codes = new Set<string>()
   for (const field of form.fields) {
     if (!field.code.trim() || !field.label.trim()) {
-      return '字段编码与字段名称不能为空'
+      return t('views.definitions.validate.fieldKeyRequired')
     }
     if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(field.code.trim())) {
-      return `字段编码 [${field.code}] 须以字母开头，只允许字母、数字、下划线`
+      return t('views.definitions.validate.fieldCodeInvalid', { code: field.code })
     }
     if (codes.has(field.code.trim())) {
-      return `字段编码重复：${field.code}`
+      return t('views.definitions.validate.fieldCodeDuplicate', { code: field.code })
     }
     codes.add(field.code.trim())
     if (field.fieldType === 'REFERENCE' && (!field.refDefCode || !field.refFieldCode.trim())) {
-      return `REFERENCE 字段 [${field.code}] 必须指定引用配置与引用字段`
+      return t('views.definitions.validate.referenceRequired', { code: field.code })
     }
   }
   if (form.fields.length > 0 && !form.fields.some((field) => field.key)) {
-    return '至少需要一个主键字段'
+    return t('views.definitions.validate.keyFieldRequired')
   }
   return null
 }
@@ -475,15 +477,15 @@ async function save(): Promise<void> {
   try {
     if (editingCode.value) {
       await definitionsApi.updateDefinition(editingCode.value, payload)
-      ElMessage.success('配置定义已更新（字段结构即时生效）')
+      ElMessage.success(t('views.definitions.msg.savedUpdated'))
     } else {
       await definitionsApi.createDefinition(payload)
-      ElMessage.success('配置定义已创建')
+      ElMessage.success(t('views.definitions.msg.savedCreated'))
     }
     editorVisible.value = false
     await loadDefs()
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '保存失败')
+    ElMessage.error(error instanceof Error ? error.message : t('views.definitions.msg.saveFailed'))
   } finally {
     saving.value = false
   }

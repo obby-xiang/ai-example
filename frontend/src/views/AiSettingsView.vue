@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { useI18n } from 'vue-i18n'
+import { useCopy } from '@/composables/useCopy'
 /**
  * 「AI 设置」页（模型配置专项 §3.7，批②）——三段式：
  * ① provider 卡片（名称/协议/Base URL/路径/密钥/启停/测试连接/来源标签）
@@ -22,9 +22,11 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { aiApi } from '@/api/ai'
 import type { AiHealth } from '@/types/ai'
 import { aiConfigApi, type AiDefaults, type AiModelRow, type AiProbeResult, type AiProviderView } from '@/api/aiConfig'
-import { AI_SETTINGS_COPY as T, describeAiConfigError, errorCodeOf, softDeleteHint } from '@/constants/ai-settings-copy'
+import { useAiSettingsCopy, describeAiConfigError, errorCodeOf, softDeleteHint } from '@/constants/ai-settings-copy'
 
-const { t } = useI18n()
+const { t } = useCopy()
+/** 文案对象：属性是 getter（取值时按当前语言翻译），模板里照旧写 `T.title`。 */
+const T = useAiSettingsCopy()
 
 const loading = ref(true)
 const loadError = ref<unknown>(null)

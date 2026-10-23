@@ -13,6 +13,7 @@
  */
 import { GENERATIVE_FORM_TOOL, type MessagePart, type ReasoningPart, type ToolPart, type ToolRunStatus } from '@/types/ai'
 import { parseFormSchema, type FormSpec } from '@/types/form-schema'
+import { translate } from '@/composables/useCopy'
 
 export type ActivityPart = ToolPart | ReasoningPart
 
@@ -148,13 +149,14 @@ export const MASKED_VALUE = '••••••'
  */
 export function readableValue(value: unknown): string {
   if (typeof value === 'boolean') {
-    return value ? '是' : '否'
+    return value ? translate('ai.value.yes') : translate('ai.value.no')
   }
   if (Array.isArray(value)) {
-    return value.length > 0 ? value.map((item) => readableValue(item)).join('、') : '（空）'
+    const separator = translate('ai.value.listSeparator')
+    return value.length > 0 ? value.map((item) => readableValue(item)).join(separator) : translate('ai.value.empty')
   }
   if (value === null || value === undefined || value === '') {
-    return '（空）'
+    return translate('ai.value.empty')
   }
   if (typeof value === 'number') {
     return String(value)
@@ -163,7 +165,7 @@ export function readableValue(value: unknown): string {
     return fileBasename(value)
   }
   // 对象 / 其它：只报"有值"，不把 JSON 泄进卡面
-  return '（复杂值）'
+  return translate('ai.value.complex')
 }
 
 /** 绝对路径（含 Windows 盘符）且带扩展名 ⇒ 取文件名；其余字符串原样（v7.10 19-f「路径 → 文件名」）。 */
@@ -294,7 +296,8 @@ function optionLabel(field: FormFieldLite, value: unknown): string {
   const pick = (item: unknown): string =>
     typeof item === 'string' && labels.has(item) ? (labels.get(item) as string) : readableValue(item)
   if (Array.isArray(value)) {
-    return value.length > 0 ? value.map(pick).join('、') : '（空）'
+    const separator = translate('ai.value.listSeparator')
+    return value.length > 0 ? value.map(pick).join(separator) : translate('ai.value.empty')
   }
   return pick(value)
 }
@@ -399,11 +402,11 @@ export interface CardStatus {
   tone: CardTone
 }
 
-/** pending 文案按类型分工：普通工具「待执行」、HITL「待确认」（琥珀）、GF「待填写」。 */
-const CARD_PENDING_LABEL: Record<CardType, string> = {
-  tool: '待执行',
-  hitl: '待确认',
-  form: '待填写'
+/** pending 文案按类型分工：普通工具「待执行」、HITL「待确认」（琥珀）、GF「待填写」（i18n L-69：文案走 locale）。 */
+const CARD_PENDING_LABEL_KEY: Record<CardType, string> = {
+  tool: 'ai.card.status.pending.tool',
+  hitl: 'ai.card.status.pending.hitl',
+  form: 'ai.card.status.pending.form'
 }
 
 /**
@@ -433,14 +436,16 @@ const TOOL_STATUS_TONE: Record<ToolRunStatus, CardTone> = {
 /**
  * 已决六态文案（2A 批 §9 K2 / §10 F6 原样；批G · S13 起门卡的 `cancelled` 不再被折叠成
  * 「已超时」—— 用户停止是一次决策，文案与 GF 取消同字：`✗ 已取消`）。
+ *
+ * i18n L-69：这里存 **locale key**，取文案经 {@link translate}（调用点在渲染/computed 内 ⇒ 切语言即重算）。
  */
-const READ_ONLY_LABEL: Record<ReadOnlyState, string> = {
-  approved: '✓ 已批准',
-  rejected: '✗ 已拒绝',
-  expired: '! 已超时',
-  failed: '! 已批准 · 执行失败',
-  submitted: '✓ 已提交',
-  cancelled: '✗ 已取消'
+const READ_ONLY_LABEL_KEY: Record<ReadOnlyState, string> = {
+  approved: 'ai.card.readonly.approved',
+  rejected: 'ai.card.readonly.rejected',
+  expired: 'ai.card.readonly.expired',
+  failed: 'ai.card.readonly.failed',
+  submitted: 'ai.card.readonly.submitted',
+  cancelled: 'ai.card.readonly.cancelled'
 }
 
 /** 已决六态色族（与旧 READONLY_BADGE_TONE 同源：通过琥珀、提交/批准绿、拒绝/失败/取消红）。 */
@@ -470,28 +475,12 @@ export function cardTypeOf(part: ToolPart): CardType {
 /**
  * 普通段状态文案（排除 pending —— 已由 {@link cardStatusOf} 按类型分工先判；
  * 只读六态走 {@link readOnlyStateOf}，不在此重复）。
+ *
+ * i18n L-69：文案走 `ai.card.status.*`；`blocked` 的 en 由「out of scope」改准为
+ * 「超出可展示范围」（zh「超出当前范围」= 工具/结果越出本轮可展示面，不是"不归本功能管"）。
  */
 function toolStatusLabelOf(status: Exclude<ToolRunStatus, 'pending'>): string {
-  switch (status) {
-    case 'running':
-      return '调用中…'
-    case 'succeeded':
-      return '已成功'
-    case 'failed':
-      return '执行失败'
-    case 'rejected':
-      return '已拒绝'
-    case 'blocked':
-      return '超出当前范围'
-    case 'expired':
-      return '会话已失效'
-    case 'cancelled':
-      return '已取消'
-    case 'unknown':
-      return '结局未知（未确认成功/失败）'
-    case 'skipped':
-      return '已跳过'
-  }
+  return translate(`ai.card.status.${status}`)
 }
 
 /**
@@ -504,11 +493,11 @@ function toolStatusLabelOf(status: Exclude<ToolRunStatus, 'pending'>): string {
 export function cardStatusOf(part: ToolPart): CardStatus {
   if (isReadOnlyCard(part)) {
     const state = readOnlyStateOf(part)
-    return { key: state, label: READ_ONLY_LABEL[state], tone: READ_ONLY_TONE[state] }
+    return { key: state, label: translate(READ_ONLY_LABEL_KEY[state]), tone: READ_ONLY_TONE[state] }
   }
   if (part.status === 'pending') {
     const type = cardTypeOf(part)
-    return { key: 'pending', label: CARD_PENDING_LABEL[type], tone: CARD_PENDING_TONE[type] }
+    return { key: 'pending', label: translate(CARD_PENDING_LABEL_KEY[type]), tone: CARD_PENDING_TONE[type] }
   }
   return {
     key: part.status,

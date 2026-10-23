@@ -213,12 +213,12 @@ interface ExportResultItem {
 
 /** 步骤 key（与后端 @ToolScope 标签一致） */
 const STEP_KEYS = TaskSteps.EXPORT
-/** 步骤文案（与蓝本同名页一致） */
-const WIZARD_STEPS = [
-  { key: STEP_KEYS[0], label: '选择配置' },
-  { key: STEP_KEYS[1], label: '查询配置' },
-  { key: STEP_KEYS[2], label: '导出配置' }
-] as const
+/** 步骤文案（与蓝本同名页一致；i18n L-69：label 由 locale 派生，渲染期读 ⇒ 切语言即重算） */
+const WIZARD_STEPS = computed(() => [
+  { key: STEP_KEYS[0], label: t('views.export.steps.select') },
+  { key: STEP_KEYS[1], label: t('views.export.steps.query') },
+  { key: STEP_KEYS[2], label: t('views.export.steps.export') }
+])
 
 const route = useRoute()
 const router = useRouter()
@@ -279,7 +279,7 @@ const jobRunning = computed(() => exportJob.value !== null && ['PENDING', 'RUNNI
 
 const taskSubtitle = computed(() => {
   if (!task.value) {
-    return taskId.value ? `任务 #${taskId.value}` : ''
+    return taskId.value ? t('views.export.taskBound', { id: taskId.value }) : ''
   }
   return `#${task.value.id} · ${task.value.title}`
 })
@@ -318,7 +318,7 @@ const jobErrorMessage = computed(() => {
     return null
   }
   const first = currentIssues.value.find((issue) => issue.severity === 'ERROR')
-  return first ? first.message : `导出作业失败（错误 ${exportJob.value.errorCount} 条），请查看下方明细`
+  return first ? first.message : t('views.export.jobFailed', { count: exportJob.value.errorCount })
 })
 
 // ── 选中集 → 工作区（issue #3：本页唯一写入口） ────────────────────────────────
@@ -380,7 +380,7 @@ async function loadDefinitions(): Promise<void> {
   try {
     defs.value = await definitionsApi.listDefinitions()
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '配置定义加载失败')
+    ElMessage.error(error instanceof Error ? error.message : t('views.export.msg.defsLoadFailed'))
   } finally {
     defsLoading.value = false
   }
@@ -403,7 +403,7 @@ async function loadTask(preloaded?: Task): Promise<TaskLoadOutcome> {
     try {
       loaded = await tasksApi.getTask(taskId.value)
     } catch (error) {
-      ElMessage.error(error instanceof Error ? error.message : '任务加载失败')
+      ElMessage.error(error instanceof Error ? error.message : t('views.export.msg.taskLoadFailed'))
       return { taskOk: false, filesOk: false }
     }
   }
@@ -505,7 +505,7 @@ async function loadExistingResults(): Promise<boolean> {
  */
 function resetTaskScopedState(): void {
   if (gridDirty) {
-    ElMessage.warning('表格有未保存的在线编辑内容，本次切换任务已丢弃这些改动（可先用「保存编辑到服务端」写回再切换）')
+    ElMessage.warning(t('views.export.msg.unsavedDiscarded'))
     gridDirty = false
   }
   exportResults.value = []
@@ -668,7 +668,7 @@ async function syncStepToBackend(): Promise<{ ok: boolean; reason?: string }> {
 
 function nextStep(): void {
   if (stepIndex.value === 0 && selectedDefs.value.length === 0) {
-    ElMessage.warning('请先选择至少一个配置项')
+    ElMessage.warning(t('views.export.msg.pickAtLeastOne'))
     return
   }
   // 批3③a D7：goStep 永不 reject，结局由回灌/界面消费
@@ -755,11 +755,11 @@ async function dataApiCount(code: string, condition: ReturnType<typeof buildQuer
 
 async function startExport(): Promise<void> {
   if (taskId.value === null) {
-    ElMessage.warning('尚未绑定任务，请先创建或从任务中心打开一条导出任务')
+    ElMessage.warning(t('views.export.msg.noTaskBound'))
     return
   }
   if (selectedDefs.value.length === 0) {
-    ElMessage.warning('请先选择配置项')
+    ElMessage.warning(t('views.export.msg.pickDefs'))
     return
   }
   await persistStepData()
@@ -769,10 +769,10 @@ async function startExport(): Promise<void> {
     exportJob.value = job
     exportResults.value = []
     loadedGrids.clear()
-    ElMessage.success(`导出作业已启动（作业 #${job.id}）`)
+    ElMessage.success(t('views.export.msg.jobStarted', { id: job.id ?? '' }))
     beginWatchJob(job.id ?? 0)
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '导出作业启动失败')
+    ElMessage.error(error instanceof Error ? error.message : t('views.export.msg.jobStartFailed'))
   } finally {
     startingExport.value = false
   }
@@ -802,12 +802,12 @@ function beginWatchJob(jobId: number): void {
       exportJob.value = job
       currentIssues.value = (await jobsApi.getIssues(jobId)).content ?? []
       if (job.status === 'COMPLETED') {
-        ElMessage.success('导出完成')
+        ElMessage.success(t('views.export.msg.exportDone'))
         await refreshResults()
       } else if (job.status === 'FAILED') {
-        ElMessage.error('导出失败，请查看作业明细')
+        ElMessage.error(t('views.export.msg.exportFailed'))
       } else {
-        ElMessage.info('导出作业已取消')
+        ElMessage.info(t('views.export.msg.exportCancelled'))
       }
       // 任务状态由后端 JobTerminalWriter 联动作业终态，这里一律刷新快照（失败也要显示 FAILED），
       // 与导入页 refreshTaskSnapshot 同口径（收口修 F3：补上 workspace.setTaskId 状态同步与
@@ -840,7 +840,7 @@ async function cancelJob(): Promise<void> {
   // （EXPORT 单作业类型，任务 CANCELLED ⟹ 该作业同事务 CANCELLED，无「在途残留」窗口），
   // 本守卫与同形未守卫代码对称收口，非「修复可达漏洞」。
   if (isReadOnly.value) {
-    ElMessage.info('任务已结束，仅供查看，未取消作业')
+    ElMessage.info(t('views.export.msg.taskEndedNoCancel'))
     return
   }
   const jobId = exportJob.value?.id
@@ -849,18 +849,18 @@ async function cancelJob(): Promise<void> {
   }
   // 批4-D（用户 2026-10-23 裁决）：取消作业不可撤销 —— 由「一点即发」改为复选框确认。
   const confirmed = await confirmIrreversible({
-    title: '取消作业',
-    message: '作业将立即终止，已处理的部分不会回滚。',
-    ack: '确认取消作业，执行后无法恢复'
+    title: t('views.export.dialog.cancelTitle'),
+    message: t('views.export.dialog.cancelMessage'),
+    ack: t('views.export.dialog.cancelAck')
   })
   if (!confirmed) {
     return
   }
   try {
     await jobsApi.cancelJob(jobId)
-    ElMessage.info('已请求取消作业')
+    ElMessage.info(t('views.export.msg.cancelRequested'))
   } catch (error) {
-    ElMessage.warning(error instanceof Error ? error.message : '取消作业失败')
+    ElMessage.warning(error instanceof Error ? error.message : t('views.export.msg.cancelFailed'))
   }
 }
 
@@ -897,7 +897,7 @@ async function ensureGridLoaded(code: string): Promise<{ ok: boolean; error: str
     const blob = await tasksApi.downloadFile(taskId.value, code)
     const { missingHeaders } = await grid.loadFromXlsx(blob, fieldsOf(code))
     if (missingHeaders.length > 0) {
-      ElMessage.warning(`${code} 的文件缺少字段列：${missingHeaders.join('、')}`)
+      ElMessage.warning(t('views.export.msg.missingHeaders', { code, headers: missingHeaders.join(', ') }))
     }
     return { ok: true, error: '' }
   } catch (error) {
@@ -968,18 +968,18 @@ async function startDownload(code: string): Promise<{ fileName: string }> {
  */
 async function downloadOne(code: string): Promise<DownloadOutcome> {
   if (!code) {
-    ElMessage.warning('请选择要下载的配置项')
+    ElMessage.warning(t('views.export.msg.pickDownload'))
     return { ok: false, reason: '未提供配置编码' }
   }
   if (inFlightDownloads.has(code)) {
-    ElMessage.info(`${code} 的下载已在进行中，本次未重复发起`)
+    ElMessage.info(t('views.export.msg.downloadInFlight', { code }))
     return { ok: false, reason: `${code} 的下载已在进行中` }
   }
   inFlightDownloads.add(code)
   downloading.value = code
   try {
     const { fileName } = await startDownload(code)
-    ElMessage.success(`已下载 ${fileName}`)
+    ElMessage.success(t('views.export.msg.downloaded', { name: fileName }))
     return { ok: true, fileName }
   } catch (error) {
     const reason = error instanceof Error ? error.message : '下载失败'
@@ -1009,10 +1009,10 @@ function startDownloadInBackground(code: string): void {
   downloading.value = code
   startDownload(code)
     .then(({ fileName }) => {
-      ElMessage.success(`已下载 ${fileName}`)
+      ElMessage.success(t('views.export.msg.downloaded', { name: fileName }))
     })
     .catch((error: unknown) => {
-      ElMessage.error(error instanceof Error ? error.message : '下载失败')
+      ElMessage.error(error instanceof Error ? error.message : t('views.export.msg.downloadFailed'))
     })
     .finally(() => {
       inFlightDownloads.delete(code)
@@ -1045,10 +1045,10 @@ function startBatchDownloadInBackground(codes: readonly string[]): void {
     .then((entries) => zipBlobs(entries))
     .then((zipped) => {
       downloadBlob(zipped, `export-${task}.zip`)
-      ElMessage.success(`已打包下载 ${batch.length} 个文件`)
+      ElMessage.success(t('views.export.msg.zipDownloaded', { count: batch.length }))
     })
     .catch((error: unknown) => {
-      ElMessage.error(error instanceof Error ? error.message : '打包下载失败')
+      ElMessage.error(error instanceof Error ? error.message : t('views.export.msg.zipFailed'))
     })
     .finally(() => {
       for (const code of batch) {
@@ -1062,7 +1062,7 @@ function startBatchDownloadInBackground(codes: readonly string[]): void {
 
 async function downloadChecked(): Promise<void> {
   if (checkedDefs.value.length === 0) {
-    ElMessage.warning('请先勾选要打包的配置项')
+    ElMessage.warning(t('views.export.msg.pickZipDefs'))
     return
   }
   downloading.value = 'checked'
@@ -1077,9 +1077,9 @@ async function downloadChecked(): Promise<void> {
       return { name: fileName, blob }
     }))
     downloadBlob(await zipBlobs(entries), `export-selected-${taskId.value ?? 0}.zip`)
-    ElMessage.success(`已打包下载 ${entries.length} 个文件`)
+    ElMessage.success(t('views.export.msg.zipDownloaded', { count: entries.length }))
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '打包下载失败')
+    ElMessage.error(error instanceof Error ? error.message : t('views.export.msg.zipFailed'))
   } finally {
     if (downloading.value === 'checked') {
       downloading.value = null
@@ -1089,7 +1089,7 @@ async function downloadChecked(): Promise<void> {
 
 async function downloadAll(): Promise<void> {
   if (exportResults.value.length === 0) {
-    ElMessage.warning('尚无导出结果')
+    ElMessage.warning(t('views.export.msg.noResults'))
     return
   }
   downloading.value = 'all'
@@ -1104,9 +1104,9 @@ async function downloadAll(): Promise<void> {
       return { name: fileName, blob }
     }))
     downloadBlob(await zipBlobs(entries), `export-${taskId.value ?? 0}.zip`)
-    ElMessage.success(`已打包下载 ${entries.length} 个文件`)
+    ElMessage.success(t('views.export.msg.zipDownloaded', { count: entries.length }))
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '打包下载失败')
+    ElMessage.error(error instanceof Error ? error.message : t('views.export.msg.zipFailed'))
   } finally {
     if (downloading.value === 'all') {
       downloading.value = null
@@ -1122,7 +1122,7 @@ async function downloadAll(): Promise<void> {
  */
 async function saveEdits(): Promise<void> {
   if (taskId.value === null) {
-    ElMessage.warning('尚未绑定任务')
+    ElMessage.warning(t('views.export.msg.noTask'))
     return
   }
   savingFiles.value = true
@@ -1135,16 +1135,21 @@ async function saveEdits(): Promise<void> {
       const issues = grid.validateLocal()
       if (issues.length > 0) {
         const first = issues[0]
-        ElMessage.warning(`${item.defCode} 存在 ${issues.length} 处本地校验问题（如第 ${first?.rowIndex} 行：${first?.reason}），已跳过保存`)
+        ElMessage.warning(t('views.export.msg.localIssues', {
+          code: item.defCode,
+          count: issues.length,
+          row: first?.rowIndex ?? '',
+          reason: first?.reason ?? ''
+        }))
         continue
       }
       const blob = await grid.toXlsxBlob()
       await tasksApi.saveFile(taskId.value, item.defCode, await blob.arrayBuffer())
     }
     gridDirty = false
-    ElMessage.success('编辑结果已写回服务端文件')
+    ElMessage.success(t('views.export.msg.savedToServer'))
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '保存到服务端失败')
+    ElMessage.error(error instanceof Error ? error.message : t('views.export.msg.saveToServerFailed'))
   } finally {
     savingFiles.value = false
   }
@@ -1669,22 +1674,25 @@ onBeforeUnmount(() => {
   unregisterAiRegion('export.selectDefs')
   unregisterAiRegion('export.cond')
   if (gridDirty) {
-    ElMessage.warning('表格有未保存的在线编辑内容（可用「保存编辑到服务端」写回）')
+    ElMessage.warning(t('views.export.msg.unsavedEdits'))
   }
 })
 
 async function createAndBindTask(): Promise<void> {
   creatingTask.value = true
   try {
-    const created = await taskStore.createTask('EXPORT', `导出任务 ${new Date().toLocaleString('zh-CN')}`)
+    const created = await taskStore.createTask('EXPORT', t('views.tasks.autoName', {
+      type: t('views.tasks.exportType'),
+      time: new Date().toLocaleString('zh-CN')
+    }))
     if (!created || created.id === undefined) {
-      ElMessage.error(taskStore.error ?? '创建任务失败')
+      ElMessage.error(taskStore.error ?? t('views.export.msg.taskCreateFailed'))
       return
     }
     taskId.value = created.id
     await router.replace({ name: 'export-wizard', query: { taskId: String(created.id) } })
     await loadTask()
-    ElMessage.success(`已创建导出任务 #${created.id}`)
+    ElMessage.success(t('views.export.msg.taskCreated', { id: created.id }))
   } finally {
     creatingTask.value = false
   }

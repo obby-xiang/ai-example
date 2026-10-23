@@ -1,10 +1,10 @@
 {
-  "total": 1272,
+  "total": 937,
   "files": {
     "src/api/ai.ts": 1,
     "src/api/http.ts": 4,
     "src/api/sse.ts": 22,
-    "src/components/AiPanel/AiPanel.vue": 31,
+    "src/components/AiPanel/AiPanel.vue": 5,
     "src/components/AiPanel/ContextPopover.vue": 1,
     "src/components/AiPanel/SheetPreviewCard.vue": 4,
     "src/components/AiPanel/UploadHandoffCard.vue": 4,
@@ -13,11 +13,10 @@
     "src/components/TaskWizard.vue": 2,
     "src/components/wizard/ConditionForm.vue": 12,
     "src/components/wizard/DefSelector.vue": 6,
-    "src/constants/ai-settings-copy.ts": 82,
     "src/main.ts": 1,
-    "src/stores/ai.ts": 83,
-    "src/stores/task.ts": 21,
-    "src/stores/workspace.ts": 52,
+    "src/stores/ai.ts": 36,
+    "src/stores/task.ts": 11,
+    "src/stores/workspace.ts": 51,
     "src/types/api.ts": 1,
     "src/types/condition.ts": 34,
     "src/types/form-schema.ts": 23,
@@ -25,10 +24,9 @@
     "src/types/tools.ts": 125,
     "src/utils/ai-dom-tools.ts": 101,
     "src/utils/ai-regions.ts": 12,
-    "src/utils/blocks.ts": 23,
     "src/utils/confirm-irreversible.ts": 2,
     "src/utils/context-usage.ts": 16,
-    "src/utils/error-card.ts": 13,
+    "src/utils/error-card.ts": 3,
     "src/utils/excel.ts": 20,
     "src/utils/format.ts": 18,
     "src/utils/frontend-tools.ts": 73,
@@ -40,10 +38,7 @@
     "src/utils/tool-summaries.ts": 1,
     "src/utils/ui-receipt.ts": 1,
     "src/views/AiFeedbackView.vue": 4,
-    "src/views/DataBrowserView.vue": 9,
-    "src/views/DefinitionsView.vue": 22,
-    "src/views/ExportWizardView.vue": 134,
-    "src/views/ImportWizardView.vue": 89,
-    "src/views/TaskCenterView.vue": 17
+    "src/views/ExportWizardView.vue": 90,
+    "src/views/ImportWizardView.vue": 45
   }
 }

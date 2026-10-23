@@ -49,7 +49,7 @@
         <el-button link size="small" @click="probe">{{ t('ai.panel.recheck') }}</el-button>
       </div>
       <div v-if="ai.contextSync" class="mt-0.5 min-w-0 truncate">
-        {{ t('ai.panel.contextSynced', { summary: ai.contextSync.summary, version: ai.contextSync.version, source: ai.contextSync.source }) }}
+        {{ t('ai.panel.contextSynced', { summary: contextSyncText, version: ai.contextSync.version, source: ai.contextSync.source }) }}
       </div>
     </div>
 
@@ -100,7 +100,7 @@
       <span v-else class="flex-[0_0_15px] w-[15px] h-[15px] rounded-[50%] border-solid border-[1.2px] border-[#8b949e] text-[#8b949e] text-[9px] flex items-center justify-center" aria-hidden="true">—</span>
       <!-- S6 批1（长内容审计 #7）：通知文本包一层 span —— 原为匿名 flex 项，不可 min-w-0 缩也不可折行，
            后端 5xx 长文案会顶开通知槽（或被他处 overflow-hidden 硬裁）。 -->
-      <span class="min-w-0 flex-1 break-words [overflow-wrap:anywhere]">{{ ai.notice }}</span>
+      <span class="min-w-0 flex-1 break-words [overflow-wrap:anywhere]">{{ noticeText }}</span>
     </div>
 
     <div v-if="ai.lastUiEventResult" :class="alertBox('gray')" data-testid="alert-ui-event">
@@ -701,7 +701,7 @@
               :class="[BREATH_CLASS, isFading(m) ? FADE_OUT_CLASS : '']"
               data-testid="loading-breath"
             >
-              <span class="w-[7px] h-[7px] rounded-full bg-[#2563eb] animate-breathe"></span><span class="text-[12.2px] text-[#57606a] tracking-[.5px]">工作中…</span>
+              <span class="w-[7px] h-[7px] rounded-full bg-[#2563eb] animate-breathe"></span><span class="text-[12.2px] text-[#57606a] tracking-[.5px]">{{ t('ai.panel.breathing') }}</span>
             </span>
             <span v-else-if="formatProgressiveTs(m.timestamp)" class="text-[#8b949e]" data-testid="msg-timestamp">{{ formatProgressiveTs(m.timestamp) }}</span>
           </span>
@@ -1391,17 +1391,18 @@ const ERROR_CARD_TONE: Record<ErrorCardVariant, { box: string; icon: string; gly
 
 /** 错误卡动作（= 三变体各自引导语的落点，全部复用本组件既有动作，不新增 store 出口）：
  *  「稍后重试」= 重发本轮（`continueRound`，与「继续」同一条路）；「改写后重发」= 把焦点交回输入框
- *  （改写是用户动作，面板只能把落点指过去）；「开新会话」= 既有 `newChat()`（与面板头「新建对话」同一出口）。 */
+ *  （改写是用户动作，面板只能把落点指过去）；「开新会话」= 既有 `newChat()`（与面板头「新建对话」同一出口）。
+ *  分派按 **variant**（i18n L-69 后 `action` 文案随 UI 语言变，字符串比对会断；variant → 动作是一对一）。 */
 function runErrorCardAction(card: ErrorCard): void {
-  if (card.action === '稍后重试') {
+  if (card.variant === 'quota') {
     continueRound()
     return
   }
-  if (card.action === '改写后重发') {
+  if (card.variant === 'filter') {
     composerRef.value?.focus()
     return
   }
-  if (card.action === '开新会话') {
+  if (card.variant === 'context') {
     newChat()
   }
 }
@@ -1529,9 +1530,9 @@ const followups = computed<FollowupSuggestion[]>(() => {
 
 const healthLabel = computed(() => {
   if (ai.health === null && ai.healthError === null) {
-    return '未检测'
+    return t('ai.panel.untested')
   }
-  return ai.available ? '可用' : '已降级'
+  return ai.available ? t('ai.panel.available') : t('ai.panel.degraded')
 })
 
 const healthTagType = computed<'success' | 'warning' | 'info'>(() => {
@@ -1541,7 +1542,7 @@ const healthTagType = computed<'success' | 'warning' | 'info'>(() => {
   return ai.available ? 'success' : 'warning'
 })
 
-const degradeReason = computed(() => ai.unavailableReason ?? '未检测到 AI 可用性，请点击「重新检测」。')
+const degradeReason = computed(() => ai.unavailableReason ?? t('ai.panel.degradeUnknown'))
 
 /**
  * 问题4 composer v2：输入区硬禁用只看真实不可用 / 挂起 / 待处理工具调用。
@@ -1591,11 +1592,11 @@ const composerTier = computed<ComposerTier>(() => {
 const composerTierAnnouncement = computed(() => {
   switch (composerTier.value) {
     case 'near':
-      return '剩余字数不足 500 字'
+      return t('ai.panel.composer.near')
     case 'limit':
-      return `已达 ${MESSAGE_MAX_CHARS} 字上限`
+      return t('ai.panel.composer.limit', { max: MESSAGE_MAX_CHARS })
     case 'over':
-      return '已超出上限，无法发送'
+      return t('ai.panel.composer.over')
     default:
       return ''
   }
@@ -1603,12 +1604,12 @@ const composerTierAnnouncement = computed(() => {
 
 const composerCounterText = computed(() => {
   if (composerOverLimit.value) {
-    return `已超 ${-composerRemaining.value} 字上限`
+    return t('ai.panel.composer.overBy', { n: -composerRemaining.value })
   }
   if (composerRemaining.value === 0) {
-    return `已达 ${MESSAGE_MAX_CHARS} 字上限`
+    return t('ai.panel.composer.limit', { max: MESSAGE_MAX_CHARS })
   }
-  return `剩余 ${composerRemaining.value} 字`
+  return t('ai.panel.composer.remaining', { n: composerRemaining.value })
 })
 
 const composerCounterClass = computed(() => {
@@ -1770,12 +1771,12 @@ function onComposerKeydown(event: KeyboardEvent): void {
 
 const inputPlaceholder = computed(() => {
   if (!ai.available) {
-    return 'AI 当前不可用（已降级，可继续使用页面手动操作）'
+    return t('ai.panel.composer.placeholderUnavailable')
   }
   if (ai.suspended || ai.pendingToolCall) {
-    return '挂起等待中：请先在上方处理确认/执行，或点「停止」结束本轮'
+    return t('ai.panel.composer.placeholderSuspended')
   }
-  return '输入消息，Enter 发送，Shift+Enter 换行'
+  return t('ai.panel.composer.placeholder')
 })
 
 /**
@@ -2663,11 +2664,11 @@ function uploadHandoffReason(part: ToolPart): string | null {
 function uploadHandoffLabel(part: ToolPart): string {
   const handoff = ai.activeUploadHandoff
   if (!handoff || handoff.toolCallId !== part.toolCallId || !handoff.ref) {
-    return '上传 xlsx / zip'
+    return t('ai.panel.uploadFallbackLabel')
   }
   const hit = resolveAiRef(handoff.ref)
   const label = hit?.el.getAttribute('aria-label') ?? hit?.el.textContent?.trim() ?? ''
-  return label === '' ? '上传 xlsx / zip' : label
+  return label === '' ? t('ai.panel.uploadFallbackLabel') : label
 }
 
 /** 操作条：本轮仍在跑/挂起且刚播报过界面动作（停止后自动消失）。 */
@@ -2769,12 +2770,12 @@ function cardHeadClass(part: ToolPart): string {
  */
 function cardTitle(part: ToolPart): string {
   if (cardTypeOf(part) === 'form') {
-    return cardFormSpec(part)?.title?.trim() || '请填写以下信息'
+    return cardFormSpec(part)?.title?.trim() || t('ai.gf.title')
   }
   const target = cardTypeOf(part) === 'hitl' ? part.preflight?.target : undefined
   if (target) {
     const business = `${labelWord(TASK_TYPE_LABELS, target.type)} 任务 #${target.taskId}『${target.title}』`
-    return isReadOnlyCard(part) ? business : `待你确认：${business}`
+    return isReadOnlyCard(part) ? business : t('ai.panel.confirmTitle', { business })
   }
   return toolLabel(part.name)
 }
@@ -2782,7 +2783,7 @@ function cardTitle(part: ToolPart): string {
 /** 待填写 GF 摘要：必填项计数（无必填 / 无 schema ⇒ 空串）。 */
 function formRequiredSummary(part: ToolPart): string {
   const required = cardFormSpec(part)?.fields.filter((field) => field.required).length ?? 0
-  return required > 0 ? `${required} 项必填` : ''
+  return required > 0 ? t('ai.panel.requiredCount', { count: required }) : ''
 }
 
 /**
@@ -2797,7 +2798,7 @@ function cardSummary(part: ToolPart): string {
     if (!isReadOnlyCard(part)) {
       return formRequiredSummary(part)
     }
-    return readOnlyStateOf(part) === 'cancelled' ? '未提交，填写内容不作记录' : generativeFormSummary(part)
+    return readOnlyStateOf(part) === 'cancelled' ? t('ai.panel.formCancelledSummary') : generativeFormSummary(part)
   }
   if (cardTypeOf(part) === 'hitl' && part.preflight?.target) {
     return ''
@@ -2927,6 +2928,24 @@ const ALERT_TONE: Record<'error' | 'primary' | 'success' | 'gray', { box: string
  */
 const noticeIsError = computed(() => ai.notice !== null && ai.lastRoundOutcome === 'error')
 
+/**
+ * 通知槽文本（i18n L-69）：store 里 `notice` 是**设定时**的语言快照，`noticeCode/noticeArgs` 才是
+ * 结构化形态 —— 渲染走后者，切语言即重译；没有 code 的（测试注入 / 后端 message 原文）回落到 `notice`。
+ */
+const noticeText = computed(() => ai.noticeText)
+
+/**
+ * 「工作区已同步」chip 的动作摘要（i18n L-69）：记录带 `display`（结构化 code + args）时按当前语言重译，
+ * 否则回落 `summary`（送模型那一份中文摘要 / 旧记录）。页面名在 `touch()` 时按当时语言取好。
+ */
+const contextSyncText = computed(() => {
+  const record = ai.contextSync
+  if (!record) {
+    return ''
+  }
+  return record.display ? t(record.display.code, record.display.args ?? {}) : record.summary
+})
+
 function alertBox(tone: keyof typeof ALERT_TONE): string {
   return `${ALERT_BOX_BASE} ${ALERT_TONE[tone].box}`
 }
@@ -2958,7 +2977,7 @@ function reasoningSummary(text: string, expanded: boolean): string {
  * - 值可读化：布尔 → 是/否、数组 → 顿号、文件路径 → 文件名、对象 →（复杂值）—— 不渲 raw JSON。
  */
 function gateRows(part: ToolPart): FieldRow[] {
-  return [{ key: '操作', value: toolLabel(part.name) }, ...argRows(part.args, true)]
+  return [{ key: t('ai.panel.actionField'), value: toolLabel(part.name) }, ...argRows(part.args, true)]
 }
 
 /**
@@ -3042,7 +3061,7 @@ const editingMessageId = ref<string | null>(null)
 
 function editMessage(m: ChatMessage): void {
   if (inputText.value.trim() !== '') {
-    const confirmed = window.confirm('输入框已有内容，继续编辑将覆盖现有输入。是否覆盖？')
+    const confirmed = window.confirm(t('ai.panel.overwriteConfirm'))
     if (!confirmed) {
       return
     }
@@ -3111,7 +3130,7 @@ async function rateMessage(m: ChatMessage, rating: 1 | -1): Promise<void> {
   if (!saved) {
     // 服务端没记上 ⇒ 本地态不得停在"已选中"
     feedbackState.value = before
-    ai.notice = t('ai.panel.feedbackFailed')
+    ai.showRawNotice(t('ai.panel.feedbackFailed'))
   }
 }
 
@@ -3452,7 +3471,7 @@ function onMsgWrapResized(): void {
  * 副标题（P5）：展示**后端当前生效的模型**（`/health.model`）——纯展示，不承担切换。
  * 批 E · E1 起不能读前端选择态（那里已没有选择）：健康探针是"当前到底用哪个模型"的唯一真值。
  */
-const currentModelLabel = computed(() => ai.health?.model || '流式对话 · 工具调用')
+const currentModelLabel = computed(() => ai.health?.model || t('ai.panel.modelFallback'))
 
 onMounted(async () => {
   // 批G · R2：订阅必须在读历史**之前**装（刷新后首帧要落盘），但启动期 `messages=[]` 不是

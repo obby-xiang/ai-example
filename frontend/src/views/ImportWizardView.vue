@@ -301,12 +301,13 @@ interface StagingGroup {
 type BusyKind = 'persist' | 'templates' | 'upload' | 'flush' | 'check' | 'import' | 'publish' | null
 
 const STEP_KEYS = TaskSteps.IMPORT
-const WIZARD_STEPS = [
-  { key: STEP_KEYS[0], label: '上传配置' },
-  { key: STEP_KEYS[1], label: '检查配置' },
-  { key: STEP_KEYS[2], label: '导入配置' },
-  { key: STEP_KEYS[3], label: '发布配置' }
-] as const
+/** 步骤文案（i18n L-69：label 由 locale 派生，渲染期读 ⇒ 切语言即重算） */
+const WIZARD_STEPS = computed(() => [
+  { key: STEP_KEYS[0], label: t('views.import.steps.upload') },
+  { key: STEP_KEYS[1], label: t('views.import.steps.check') },
+  { key: STEP_KEYS[2], label: t('views.import.steps.import') },
+  { key: STEP_KEYS[3], label: t('views.import.steps.publish') }
+])
 
 const route = useRoute()
 const router = useRouter()
@@ -365,7 +366,7 @@ const editorDefs = computed(() =>
 
 const taskSubtitle = computed(() => {
   if (!task.value) {
-    return taskId.value ? `任务 #${taskId.value}` : ''
+    return taskId.value ? t('views.import.taskBound', { id: taskId.value }) : ''
   }
   return `#${task.value.id} · ${task.value.title}`
 })
@@ -436,7 +437,7 @@ function errorMessageOf(job: Job | null, issues: readonly ValidationIssue[]): st
     return null
   }
   const first = issues.find((issue) => issue.severity === 'ERROR')
-  return first ? first.message : `作业失败（错误 ${job.errorCount} 条），请展开明细查看`
+  return first ? first.message : t('views.import.jobFailed', { count: job.errorCount })
 }
 
 function cellValue(row: ConfigStagingRow, fieldCode: string): string {
@@ -472,7 +473,7 @@ async function loadDefinitions(): Promise<void> {
   try {
     defs.value = await definitionsApi.listDefinitions()
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '配置定义加载失败')
+    ElMessage.error(error instanceof Error ? error.message : t('views.import.msg.defsLoadFailed'))
   } finally {
     defsLoading.value = false
   }
@@ -485,7 +486,7 @@ async function loadTask(): Promise<void> {
   try {
     task.value = await tasksApi.getTask(taskId.value)
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '任务加载失败')
+    ElMessage.error(error instanceof Error ? error.message : t('views.import.msg.taskLoadFailed'))
     return
   }
   selectedDefs.value = (task.value.items ?? []).map((item) => item.defCode)
@@ -584,11 +585,11 @@ async function persistSelection(): Promise<void> {
 
 async function downloadTemplates(): Promise<void> {
   if (taskId.value === null) {
-    ElMessage.warning('尚未绑定任务')
+    ElMessage.warning(t('views.import.msg.noTaskBound'))
     return
   }
   if (selectedDefs.value.length === 0) {
-    ElMessage.warning('请先勾选配置项')
+    ElMessage.warning(t('views.import.msg.pickDefs'))
     return
   }
   busy.value = 'templates'
@@ -599,9 +600,9 @@ async function downloadTemplates(): Promise<void> {
       ? xlsxFileName(selectedDefs.value[0] ?? '', defName(selectedDefs.value[0] ?? ''))
       : `templates-${taskId.value}.zip`
     downloadBlob(blob, name)
-    ElMessage.success(`已下载模板 ${name}`)
+    ElMessage.success(t('views.import.msg.templateDownloaded', { name }))
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '模板下载失败')
+    ElMessage.error(error instanceof Error ? error.message : t('views.import.msg.templateDownloadFailed'))
   } finally {
     busy.value = null
   }
@@ -616,7 +617,7 @@ async function downloadTemplates(): Promise<void> {
  */
 async function uploadOne(file: File): Promise<string> {
   if (taskId.value === null || selectedDefs.value.length === 0) {
-    ElMessage.warning('请先勾选配置项')
+    ElMessage.warning(t('views.import.msg.pickDefs'))
     return '未上传：请先勾选配置项'
   }
   busy.value = 'upload'
@@ -633,11 +634,11 @@ async function uploadOne(file: File): Promise<string> {
       // 多条目须换行展示：ElMessageBox 的 message 支持 VNode，用 Tailwind whitespace-pre-line 还原 \n
       await ElMessageBox.alert(
         h('span', { class: 'whitespace-pre-line' }, result.unmatchedFiles.join('\n')),
-        '以下文件未匹配到配置项',
+        t('views.import.unmatchedFiles'),
         { type: 'warning' }
       )
     }
-    ElMessage.success(`已上传并匹配 ${matched.length} 个文件`)
+    ElMessage.success(t('views.import.msg.uploadedMatched', { count: matched.length }))
     // 用服务端刚存下的文件刷新编辑区（保证"所见即服务端所有"）
     await nextTick()
     await loadEditors(true)
@@ -681,15 +682,16 @@ async function loadEditors(force = false): Promise<void> {
         const blob = await tasksApi.downloadFile(taskId.value, def.code)
         const { missingHeaders } = await grid.loadFromXlsx(blob, def.fields)
         if (missingHeaders.length > 0) {
-          ElMessage.warning(`${def.code} 的文件缺少字段列：${missingHeaders.join('、')}`)
+          ElMessage.warning(t('views.import.msg.missingHeaders', { code: def.code, headers: missingHeaders.join(', ') }))
         }
       } else {
+        // sheetName 是写进 xlsx 的工作表名（数据面，不随 UI 语言变）
         const json = await buildTemplateWorkbookJson(def.fields, { defCode: def.code, sheetName: '数据', sample: false })
         await grid.loadFromJson(json, def.fields)
       }
       editorLoaded.add(def.code)
     } catch (error) {
-      ElMessage.error(error instanceof Error ? error.message : `${def.code} 编辑区加载失败`)
+      ElMessage.error(error instanceof Error ? error.message : t('views.import.msg.editorLoadFailed', { code: def.code }))
     }
   }
 }
@@ -731,7 +733,7 @@ function activeEditorCode(): string {
  */
 async function flushEditors(): Promise<boolean> {
   if (taskId.value === null || selectedDefs.value.length === 0) {
-    ElMessage.warning('请先勾选配置项')
+    ElMessage.warning(t('views.import.msg.pickDefs'))
     return false
   }
   busy.value = 'flush'
@@ -746,9 +748,12 @@ async function flushEditors(): Promise<boolean> {
       const issues = grid.validateLocal()
       if (issues.length > 0) {
         const first = issues[0]
-        ElMessage.warning(
-          `${def.code} 存在 ${issues.length} 处本地校验问题（如第 ${first?.rowIndex} 行：${first?.reason}），已跳过写回`
-        )
+        ElMessage.warning(t('views.import.msg.localIssues', {
+          code: def.code,
+          count: issues.length,
+          row: first?.rowIndex ?? '',
+          reason: first?.reason ?? ''
+        }))
         ok = false
         continue
       }
@@ -757,10 +762,10 @@ async function flushEditors(): Promise<boolean> {
       savedDefs.add(def.code)
     }
     if (ok) {
-      ElMessage.success('草稿已保存到服务端（作业将读取该文件）')
+      ElMessage.success(t('views.import.msg.draftSaved'))
     }
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '草稿保存失败')
+    ElMessage.error(error instanceof Error ? error.message : t('views.import.msg.draftSaveFailed'))
     ok = false
   } finally {
     busy.value = null
@@ -811,7 +816,7 @@ async function goStep(next: number): Promise<StepAdvanceOutcome> {
   if (next > stepIndex.value && stepIndex.value === 0) {
     const saved = await flushEditors()
     if (!saved) {
-      ElMessage.warning('存在未写回的编辑内容，请先修正后再继续')
+      ElMessage.warning(t('views.import.msg.unsavedEdits'))
       return { ok: false, reason: '存在未写回的编辑内容（保存草稿失败），已中止推进' }
     }
   }
@@ -878,7 +883,7 @@ function goPrev(): void {
 
 async function nextStep(): Promise<void> {
   if (stepIndex.value === 0 && selectedDefs.value.length === 0) {
-    ElMessage.warning('请先选择至少一个配置项')
+    ElMessage.warning(t('views.import.msg.pickAtLeastOne'))
     return
   }
   await goStep(stepIndex.value + 1)
@@ -888,20 +893,20 @@ async function nextStep(): Promise<void> {
 
 async function startJob(kind: 'check' | 'import' | 'publish'): Promise<void> {
   if (taskId.value === null) {
-    ElMessage.warning('尚未绑定任务')
+    ElMessage.warning(t('views.import.msg.noTaskBound'))
     return
   }
   const jobType = kind === 'check' ? 'PRECHECK' : kind === 'import' ? 'IMPORT' : 'PUBLISH'
   busy.value = kind
   try {
     const job = await jobsApi.createJob(taskId.value, jobType)
-    ElMessage.success(`${kind === 'check' ? '预检查' : kind === 'import' ? '导入' : '发布'}作业已启动（作业 #${job.id}）`)
+    ElMessage.success(t('views.import.msg.jobStarted', { kind: t(`views.import.kinds.${kind}`), id: job.id ?? '' }))
     await attachJob(kind, job)
     if (job.id !== undefined) {
       beginWatchJob(kind, job.id)
     }
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '作业启动失败')
+    ElMessage.error(error instanceof Error ? error.message : t('views.import.msg.jobStartFailed'))
   } finally {
     busy.value = null
   }
@@ -959,20 +964,20 @@ function beginWatchJob(kind: 'check' | 'import' | 'publish', jobId: number): voi
         // Q4：发布恒 201，冲突只能从终态 + issues 读出
         if (job.status === 'FAILED') {
           await buildPublishConflict(job)
-          ElMessage.error('发布未成功：请查看冲突明细后重新导入再发布')
+          ElMessage.error(t('views.import.msg.publishConflict'))
         } else if (job.status === 'COMPLETED') {
-          ElMessage.success('发布成功，任务已完成')
+          ElMessage.success(t('views.import.msg.publishDone'))
         } else {
-          ElMessage.info('发布作业已取消')
+          ElMessage.info(t('views.import.msg.publishCancelled'))
         }
         // 任务状态由后端 JobTerminalWriter 联动作业终态，这里一律刷新快照（失败也要显示 FAILED）
         await refreshTaskSnapshot()
         return
       }
       if (job.status === 'COMPLETED') {
-        ElMessage.success(`${kind === 'check' ? '预检查' : '导入'}作业完成`)
+        ElMessage.success(t('views.import.msg.jobDone', { kind: t(`views.import.kinds.${kind}`) }))
       } else if (job.status === 'FAILED') {
-        ElMessage.error(`${kind === 'check' ? '预检查' : '导入'}作业失败，请展开明细查看`)
+        ElMessage.error(t('views.import.msg.jobFailed', { kind: t(`views.import.kinds.${kind}`) }))
       }
       if (kind === 'import' && job.status === 'COMPLETED') {
         await loadStaging()
@@ -1044,7 +1049,7 @@ async function buildPublishConflict(job: Job): Promise<void> {
     jobId,
     jobStatus: 'FAILED',
     issueKeys: errorIssues.map((issue) => `${issue.defCode}#${issue.rowKey ?? issue.rowIndex ?? '-'}`),
-    message: errorIssues[0]?.message ?? '发布作业失败，请查看校验问题清单'
+    message: errorIssues[0]?.message ?? t('views.import.msg.publishJobFailed')
   }
 }
 
@@ -1052,7 +1057,7 @@ async function cancelJob(job: Job | null): Promise<void> {
   // R-136 收口修 F1（复核 MAJOR-1，红队修正版）：只读态守卫。任务 CANCELLED 后 IMPORT/PUBLISH
   // 等异类型作业可同时在途（后端在途互斥按作业类型），只读壳内「取消作业」仍可发出 DELETE —— 拦在此。
   if (isReadOnly.value) {
-    ElMessage.info('任务已结束，仅供查看，未取消作业')
+    ElMessage.info(t('views.import.msg.taskEndedNoCancel'))
     return
   }
   if (!job?.id) {
@@ -1060,18 +1065,18 @@ async function cancelJob(job: Job | null): Promise<void> {
   }
   // 批4-D（用户 2026-10-23 裁决）：取消作业不可撤销 —— 由「一点即发」改为复选框确认。
   const confirmed = await confirmIrreversible({
-    title: '取消作业',
-    message: '作业将立即终止，已处理的部分不会回滚。',
-    ack: '确认取消作业，执行后无法恢复'
+    title: t('views.import.dialog.cancelTitle'),
+    message: t('views.import.dialog.cancelMessage'),
+    ack: t('views.import.dialog.cancelAck')
   })
   if (!confirmed) {
     return
   }
   try {
     await jobsApi.cancelJob(job.id)
-    ElMessage.info('已请求取消作业')
+    ElMessage.info(t('views.import.msg.cancelRequested'))
   } catch (error) {
-    ElMessage.warning(error instanceof Error ? error.message : '取消作业失败')
+    ElMessage.warning(error instanceof Error ? error.message : t('views.import.msg.cancelFailed'))
   }
 }
 
@@ -1099,7 +1104,7 @@ async function loadStaging(): Promise<void> {
     }))
     stagingOpen.value = staging.value.map((group) => group.defCode)
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '暂存数据加载失败')
+    ElMessage.error(error instanceof Error ? error.message : t('views.import.msg.stagingLoadFailed'))
   } finally {
     stagingLoading.value = false
   }
@@ -1112,9 +1117,11 @@ async function onImportModeChange(): Promise<void> {
   try {
     await tasksApi.setImportMode(taskId.value, importMode.value)
     workspace.setImportMode(importMode.value)
-    ElMessage.success(`导入模式已设为${importMode.value === 'REPLACE' ? '范围内替换' : '增量合并'}`)
+    ElMessage.success(t('views.import.msg.importModeSet', {
+      mode: importMode.value === 'REPLACE' ? t('views.import.replaceMode') : t('views.import.mergeMode')
+    }))
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '导入模式设置失败')
+    ElMessage.error(error instanceof Error ? error.message : t('views.import.msg.importModeFailed'))
   }
 }
 
@@ -1446,15 +1453,18 @@ onBeforeUnmount(() => {
 async function createAndBindTask(): Promise<void> {
   creatingTask.value = true
   try {
-    const created = await taskStore.createTask('IMPORT', `导入任务 ${new Date().toLocaleString('zh-CN')}`)
+    const created = await taskStore.createTask('IMPORT', t('views.tasks.autoName', {
+      type: t('views.tasks.importType'),
+      time: new Date().toLocaleString('zh-CN')
+    }))
     if (!created || created.id === undefined) {
-      ElMessage.error(taskStore.error ?? '创建任务失败')
+      ElMessage.error(taskStore.error ?? t('views.import.msg.taskCreateFailed'))
       return
     }
     taskId.value = created.id
     await router.replace({ name: 'import-wizard', query: { taskId: String(created.id) } })
     await loadTask()
-    ElMessage.success(`已创建导入任务 #${created.id}`)
+    ElMessage.success(t('views.import.msg.taskCreated', { id: created.id }))
   } finally {
     creatingTask.value = false
   }

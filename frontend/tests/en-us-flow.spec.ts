@@ -8,6 +8,10 @@
  * <p>已知的脚本侧中文残留（错误卡标题/引导语、notice 模板、占位符文案）属 **L-69 挂账面**，
  * 本批不修、也不把它伪装成已国际化：错误码这一格只断言**后端按 Accept-Language 给的英文原文
  * 逐字上屏、机器码不被改写**这条契约链。
+ *
+ * <p><b>2026-10-23 L-69 落地注记</b>：上述脚本侧面已迁入 locale（notice 走 `code + args`、
+ * 错误卡/占位符/状态徽标走 `ai.*` 键），本文件的「错误码英文原文」契约不变（后端 message 仍是数据）；
+ * C11-03 的卡头徽标断言随之改为英文。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
@@ -202,9 +206,9 @@ describe('C11-03 en-US 工具文案：标题 / 摘要 / 状态词在卡面成链
 
     expect(wrapper.find('[data-testid="card-title-t-sheet"]').text()).toBe('Read sheet summary')
     expect(wrapper.find('[data-testid="tool-summary-t-sheet"]').text()).toContain('CURRENCY')
-    // 状态词链：摘要/兜底侧（tool-summaries）已随语言；**卡头徽标**仍走 blocks.ts 的硬编码中文
-    // （19 个字符串，属 L-69 挂账的脚本侧文案面 —— 本批只钉现状，L-69 落地时本断言随之更新）
-    expect(wrapper.find('[data-testid="card-status-t-sheet"]').text()).toContain('已成功')
+    // 状态词链：摘要/兜底侧（tool-summaries）与**卡头徽标**同随语言（L-69：blocks.ts 的 19 个
+    // 状态词已迁入 `ai.card.*`；本断言随 L-69 落地由「已成功」改为英文）
+    expect(wrapper.find('[data-testid="card-status-t-sheet"]').text()).toBe('Succeeded')
     // 知识库三工具此前无标题键（卡头回落裸工具名）—— 本批补齐后必须是英文标题 + 摘要模板
     expect(wrapper.find('[data-testid="card-title-t-kb"]').text()).toBe('Search knowledge base')
     // 卡头摘要去重：标题已说过的部分不重复 ⇒ 摘要只留参数残段（与语言无关的那一侧另测）
@@ -213,6 +217,7 @@ describe('C11-03 en-US 工具文案：标题 / 摘要 / 状态词在卡面成链
     applyLocale('zh-CN')
     await wrapper.vm.$nextTick()
     expect(wrapper.find('[data-testid="card-title-t-sheet"]').text()).toBe('读取表格摘要')
+    expect(wrapper.find('[data-testid="card-status-t-sheet"]').text()).toBe('已成功')
     expect(wrapper.find('[data-testid="card-title-t-kb"]').text()).toBe('检索知识库')
     expect(wrapper.find('[data-testid="tool-summary-t-kb"]').text()).toBe('（expense）')
     expect(i18n.global.t('tool.status.succeeded')).toBe('已完成')

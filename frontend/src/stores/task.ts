@@ -28,6 +28,7 @@ import { ErrorCode, type PageResult } from '@/types/api'
 import { isJobFinal } from '@/types/job'
 import { TaskSteps, type Task, type TaskStatus, type TaskSummary, type TaskType } from '@/types/task'
 import type { Job, JobStatus, ValidationIssue } from '@/types/job'
+import { translate } from '@/composables/useCopy'
 import { watchJob } from '@/utils/job-watch'
 import type { RouteLocationRaw } from 'vue-router'
 
@@ -163,7 +164,7 @@ export const useTaskStore = defineStore('task', {
         this.total = result.totalElements ?? 0
         this.lastLoadedAt = Date.now()
       } catch (error) {
-        this.error = error instanceof Error ? error.message : '任务列表加载失败'
+        this.error = error instanceof Error ? error.message : translate('views.tasks.msg.loadFailed')
       } finally {
         this.loading = false
         // 被 loading 挡住的 refreshNow 在这里补发（恰好 1 次；正常完成与被挡住两条路径共用此检查点）
@@ -229,7 +230,7 @@ export const useTaskStore = defineStore('task', {
         await this.load()
         return task
       } catch (error) {
-        this.error = error instanceof Error ? error.message : '创建任务失败'
+        this.error = error instanceof Error ? error.message : translate('views.tasks.msg.createFailed')
         return null
       }
     },
@@ -240,7 +241,7 @@ export const useTaskStore = defineStore('task', {
         await this.load()
         return true
       } catch (error) {
-        this.error = error instanceof Error ? error.message : '删除任务失败'
+        this.error = error instanceof Error ? error.message : translate('views.tasks.msg.deleteFailed')
         return false
       }
     },
@@ -249,12 +250,12 @@ export const useTaskStore = defineStore('task', {
     async cancelJob(jobId: number): Promise<{ handled: boolean; message: string }> {
       try {
         await jobsApi.cancelJob(jobId)
-        return { handled: true, message: `已请求取消作业 #${jobId}` }
+        return { handled: true, message: translate('views.tasks.msg.cancelRequested', { jobId }) }
       } catch (error) {
         if (error instanceof ApiError && error.code === ErrorCode.JOB_ALREADY_FINAL) {
-          return { handled: false, message: `作业 #${jobId} 已是终态，无需取消` }
+          return { handled: false, message: translate('views.tasks.msg.jobAlreadyFinal', { jobId }) }
         }
-        return { handled: false, message: error instanceof Error ? error.message : '取消作业失败' }
+        return { handled: false, message: error instanceof Error ? error.message : translate('views.tasks.msg.cancelFailed') }
       }
     },
 
@@ -316,14 +317,17 @@ export const useTaskStore = defineStore('task', {
         },
         onError: (error) => {
           dispose()
-          notifyJobWatch(`发布作业 #${jobId} 的终态跟踪中断：${error instanceof Error ? error.message : '未知错误'}`)
+          notifyJobWatch(translate('views.tasks.msg.watchInterrupted', {
+            jobId,
+            message: error instanceof Error ? error.message : translate('views.tasks.msg.unknownError')
+          }))
         }
       })
       publishWatchers.set(key, dispose)
       // 300s 墙钟：与 watchJob 内部定时器独立；非终态到达 ⇒ 单次提示 + 收摊
       wallClockTimer = setTimeout(() => {
         wallClockTimer = null
-        notifyJobWatch(`发布作业 #${jobId} 等待超时（仍未进入终态），结果请稍后在任务中心刷新查看`)
+        notifyJobWatch(translate('views.tasks.msg.watchTimeout', { jobId }))
         dispose()
       }, PUBLISH_WATCH_WALL_CLOCK_MS)
       return dispose
@@ -355,14 +359,14 @@ export const useTaskStore = defineStore('task', {
         issues = null // 明细拉取失败：提示纪律不变（F5），明细通道降级为无清单形态
       }
       if (issues === null) {
-        notifyJobWatch(`发布作业 #${jobId} 失败，校验问题清单拉取失败，请在任务中心查看`)
+        notifyJobWatch(translate('views.tasks.msg.issuesLoadFailed', { jobId }))
         handlers.onConflict?.(`发布作业 #${jobId} 失败（发布冲突），校验问题明细拉取失败`)
         return
       }
       // 冲突项 = ERROR 级（沿袭原 publishConflict.issueKeys 口径）；无 ERROR 条目时降级用全量清单
       const conflictIssues = issues.filter((issue) => issue.severity === 'ERROR')
       const counted = conflictIssues.length > 0 ? conflictIssues : issues
-      notifyJobWatch(`发布冲突：${counted.length} 处，明细见 AI 面板回执`)
+      notifyJobWatch(translate('views.tasks.msg.conflictSummary', { count: counted.length }))
       handlers.onConflict?.(formatPublishConflictSummary(jobId, counted), counted)
     },
 

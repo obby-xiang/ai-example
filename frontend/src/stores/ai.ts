@@ -18,7 +18,7 @@ import { aiApi } from '@/api/ai'
 import type { SseFrameHandlers, SseStreamOptions } from '@/api/sse'
 import { getPageHandler, onWorkspaceEvent, reportUiEventResult, useWorkspaceStore } from '@/stores/workspace'
 import { useTaskStore } from '@/stores/task'
-import { AI_CONFIG_ERROR_TEXT } from '@/constants/ai-settings-copy'
+import { aiConfigErrorKey } from '@/constants/ai-settings-copy'
 import { deriveFrontendToolBudgetMs, executeFrontendTool, parseToolArgs, resolveSheetContext } from '@/utils/frontend-tools'
 import { toolStatusOfOutcome } from '@/utils/ui-receipt'
 import { UI_HANDOFF_TOOLS } from '@/types/tools'
@@ -87,6 +87,7 @@ import type { WorkspaceActionRecord } from '@/types/tools'
 import { clearPublishToolLinks, findPublishTool, linkPublishTool, unlinkPublishTool } from '@/utils/publish-links'
 import { buildErrorCard } from '@/utils/error-card'
 import { buildPublishConflictView } from '@/utils/resultview'
+import { translate } from '@/composables/useCopy'
 
 /** sessionStorage 键：会话 id 与镜像前缀。 */
 export const SESSION_ID_KEY = 'ai-session-id'
@@ -904,6 +905,44 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+/** 通知槽的写入面（store 的 `this` 只暴露这三个字段时即可调用）。 */
+interface NoticeSink {
+  notice: string | null
+  noticeCode: string | null
+  noticeArgs: Record<string, string | number> | null
+}
+
+/**
+ * 写一条**本地模板**通知：`code` = locale key（`ai.notice.*`），`args` = 命名插值。
+ *
+ * <p>
+ * 同时落一份**设定时刻**的译文到 `notice` —— 既有消费方（单槽字符串断言 / 面板以外的读点）
+ * 不必改；结构化形态才是渲染与切语言的依据（见 store 的 `noticeText` getter）。
+ */
+function setNotice(sink: NoticeSink, code: string, args: Record<string, string | number> = {}): void {
+  sink.noticeCode = code
+  sink.noticeArgs = args
+  sink.notice = translate(code, args)
+}
+
+/**
+ * 写一条**原文**通知：后端 `message`（中文兜底，设计稿 §3.5）与测试注入走这里。
+ *
+ * 不翻译、不带 code —— 原文是数据不是文案（C5 同口径）。
+ */
+function setRawNotice(sink: NoticeSink, text: string): void {
+  sink.noticeCode = null
+  sink.noticeArgs = null
+  sink.notice = text
+}
+
+/** 清空通知槽（code / args 一并清，否则 getter 会把旧模板重新翻出来）。 */
+function clearNotice(sink: NoticeSink): void {
+  sink.noticeCode = null
+  sink.noticeArgs = null
+  sink.notice = null
+}
+
 export const useAiStore = defineStore('ai', {
   state: () => ({
     /** 页签级会话 id（记忆窗口 CONVERSATION_ID） */
@@ -925,6 +964,14 @@ export const useAiStore = defineStore('ai', {
     suspended: false,
     /** 连接/降级提示（断流、重连、池饱和、无 key 等） */
     notice: null as string | null,
+    /**
+     * 通知槽的结构化形态（i18n L-69）：`code` = locale key、`args` = 命名插值。
+     * 只有经过 {@link setNotice} 写入的通知才有（本地模板），后端 `message` 原文与测试注入走
+     * `notice` 裸串、这两个字段为 null。渲染层以 code 为准重译（切语言即变），`notice` 只是**设定时**
+     * 的语言快照（既有断言与「单槽纯字符串」消费方仍可读）。
+     */
+    noticeCode: null as string | null,
+    noticeArgs: null as Record<string, string | number> | null,
     /**
      * 批G · S2：停止请求在途（按钮「停止中」disabled；`stop()` 幂等）。
      * 只由 `stop()` 置位/复位，其它地方不得改写。
@@ -1109,17 +1156,30 @@ export const useAiStore = defineStore('ai', {
       }
       return state.health?.message ?? null
     },
+    /** 通知槽的渲染文本（i18n L-69）：有 code 就按**当前语言**重译，否则回落裸串。
+     *  `notice === null` 一律视为空槽（外部直接置 null / 既有清空写法不得被旧 code 复活）。 */
+    noticeText(state): string | null {
+      if (state.notice === null) {
+        return null
+      }
+      if (state.noticeCode !== null) {
+        return translate(state.noticeCode, state.noticeArgs ?? {})
+      }
+      return state.notice
+    },
     /**
-     * 运行状态文案（N6 裁决：按帧口径区分）。
+     * 运行状态文案（N6 裁决：按帧口径区分；i18n L-69：走 locale，切语言即重算）。
      * - 生成中：本轮进行中且没有挂起等待；
      * - 挂起等待：收到 suspended / confirm_request / frontend_tool_request 后；
      * - 空闲：没有进行中的轮次。
      */
     runStateLabel(state): string {
       if (!state.loading) {
-        return '空闲'
+        return translate('ai.panel.runState.idle')
       }
-      return state.suspended ? '挂起等待中…（待人工确认或待前端执行）' : '生成中…'
+      return state.suspended
+        ? translate('ai.panel.runState.suspended')
+        : translate('ai.panel.runState.generating')
     },
     /** 输入区是否可用（执行中/挂起等待中一律禁发）。 */
     canSend(state): boolean {
@@ -1142,6 +1202,14 @@ export const useAiStore = defineStore('ai', {
   },
 
   actions: {
+    /**
+     * 写一条**原文**通知（i18n L-69）：调用方已按当前语言取好文案（如面板的即时反馈提示），
+     * 或文案本身是后端/工具原文 —— 同时清掉 `noticeCode`，否则旧模板会在渲染时盖掉这条。
+     */
+    showRawNotice(text: string): void {
+      setRawNotice(this, text)
+    },
+
     toggleExpand(): void {
       this.expanded = !this.expanded
       persistExpanded(this.expanded)
@@ -1274,7 +1342,7 @@ export const useAiStore = defineStore('ai', {
         setSheetPolicy(this.health?.sheet ?? null)
       } catch (error) {
         this.health = null
-        this.healthError = error instanceof Error ? error.message : 'AI 可用性探测失败'
+        this.healthError = error instanceof Error ? error.message : translate('ai.notice.healthProbeFailed')
         // 探测失败不清策略：已生效的收紧值比"回到 20"更安全（K-10：兜底是放宽方向，仍安全）
       }
     },
@@ -1980,7 +2048,7 @@ export const useAiStore = defineStore('ai', {
             ref: target?.entry ?? validated.value.ref ?? null,
             accept: validated.value.accept,
             status,
-            reason: status === 'missing' ? '请先打开导入向导第 1 步' : null,
+            reason: status === 'missing' ? translate('ai.notice.uploadNoRegion') : null,
             filename: null
           }
         }
@@ -2070,7 +2138,7 @@ export const useAiStore = defineStore('ai', {
               if (!isCurrentRound()) {
                 return
               }
-              this.notice = `续收中断，${Math.round(delayMs / 1000)} 秒后第 ${attempt} 次重试`
+              setNotice(this, 'ai.notice.resumeRetry', { seconds: Math.round(delayMs / 1000), attempt })
             },
             onClose: (info) => {
               if (!isCurrentRound()) {
@@ -2085,7 +2153,9 @@ export const useAiStore = defineStore('ai', {
               if (!info.terminal && !this.stopped) {
                 this.streamInterrupted = true
                 this.lastRoundOutcome = 'interrupted'
-                this.notice = `连接中断，结果可能不完整（${info.reason ?? '断流'}）。挂起卡保留，可刷新重试。`
+                setNotice(this, 'ai.notice.interruptedSuspended', {
+                  reason: info.reason ?? translate('ai.notice.reasonInterrupted')
+                })
               }
             }
           },
@@ -2158,7 +2228,7 @@ export const useAiStore = defineStore('ai', {
       const assistant = this.appendAssistantMessage()
       this.loading = true
       this.stopped = false
-      this.notice = null
+      clearNotice(this)
       this.streamInterrupted = false
       this.lastRoundOutcome = 'ok' // R-163 T4：新轮复位「继续」入口判据
       // 批 E · E2：新轮触发即收起上一轮的建议条（点 chip / 点建议 / 手打发都是这个入口）
@@ -2185,7 +2255,7 @@ export const useAiStore = defineStore('ai', {
           if (!isCurrentRound()) {
             return // R6：旧轮的迟到重连公告不写进新轮
           }
-          this.notice = `连接中断，${Math.round(delayMs / 1000)} 秒后重挂（第 ${attempt} 次）`
+          setNotice(this, 'ai.notice.reconnect', { seconds: Math.round(delayMs / 1000), attempt })
         },
         onClose: (info) => {
           if (!isCurrentRound()) {
@@ -2205,7 +2275,9 @@ export const useAiStore = defineStore('ai', {
             // ADR-6：缺 done/error 终帧 = 断流，必须显式提示"结果可能不完整"
             this.streamInterrupted = true
             this.lastRoundOutcome = 'interrupted'
-            this.notice = `连接中断，结果可能不完整（${info.reason ?? '未收到完成帧'}）。已生成的内容保留，可重新发送或刷新页面继续接收。`
+            setNotice(this, 'ai.notice.interruptedKeep', {
+              reason: info.reason ?? translate('ai.notice.reasonNoDone')
+            })
             // 断流不是结局：确认卡/表单仍在等用户动作，activeForm 与待决段必须原样保留
             //（重挂或刷新后由 restoreSuspendedSnapshot 按后端快照续上），只认终帧/取消才收口。
           }
@@ -2248,7 +2320,7 @@ export const useAiStore = defineStore('ai', {
           // R-04 真机回归（2026-10-23）：409 与刷新恢复竞态时，本轮身份已在恢复路径上被换掉
           // ⇒ 旧守卫会把这次失败**整段吞掉**（既无提示、也不回收乐观气泡，幻影双份留在屏上并写进镜像）。
           // 失败的是"这次发送"本身而不是别的轮，故照常给一句"没发出去"。
-          this.notice = '这条消息没有发出去，请稍后再试。'
+          setNotice(this, 'ai.notice.sendFailed')
         }
         // 批G · G6：409 SESSION_BUSY 的**乐观气泡回收** —— 先把"以为发出去了"的用户气泡与
         // 空气泡撤掉，草稿只留在输入框一处（旧行为会同时留下"已发送"气泡 + 回填的草稿，
@@ -2296,7 +2368,7 @@ export const useAiStore = defineStore('ai', {
           // 回收，不走这里）；其余错误只在正文为空时补一句人话。
           const hasText = message.parts.some((part) => part.kind === 'text' && part.text !== '')
           const literal = error instanceof Error && !(error instanceof ApiError && error.code === ErrorCode.SESSION_BUSY)
-            ? `（这条消息没有发出去：${error.message}）`
+            ? translate('ai.panel.sendNotSentInline', { message: error.message })
             : null
           if (literal !== null && !hasText) {
             const part = openStreamPart(message, 'text')
@@ -2309,37 +2381,46 @@ export const useAiStore = defineStore('ai', {
       // R-165 S5c：错误卡族（demo v7.7 裁决区 08）—— 内联于**出错那一轮的消息**（非顶部固定）。
       // 分类见 utils/error-card.ts；已有专属 Alert 的码返回 null（不重复出卡）。
       if (assistantId) {
-        const card = error instanceof ApiError ? buildErrorCard(error.code, error.message) : buildErrorCard('', error instanceof Error ? error.message : '对话请求失败')
+        const card = error instanceof ApiError
+          ? buildErrorCard(error.code, error.message)
+          : buildErrorCard('', error instanceof Error ? error.message : translate('ai.notice.chatRequestFailed'))
         const target = this.messages.find((item) => item.id === assistantId)
         if (target && card !== null) {
           target.errorCard = card
         }
       }
       if (!(error instanceof ApiError)) {
-        this.notice = error instanceof Error ? error.message : '对话请求失败'
+        if (error instanceof Error) {
+          setRawNotice(this, error.message)
+        } else {
+          setNotice(this, 'ai.notice.chatRequestFailed')
+        }
         return
       }
       switch (error.code) {
         case ErrorCode.SESSION_BUSY: {
           // 批G · G5/G6：不再暴露 runId / "重挂"等实现概念 —— 用户看到的只有"这条没发出去"。
           // 乐观气泡的回收在 send() 的 catch 里做（这里只管文案与现场标记）。
-          this.notice = '这条消息没有发出去，请稍后再试。'
+          setNotice(this, 'ai.notice.sendFailed')
           break
         }
         case ErrorCode.SUSPEND_POOL_SATURATED: {
           const body = error.bodyAs<SuspendPoolSaturated>()
           this.poolSaturated = body
-          this.notice = body
-            ? `挂起池已饱和（容量 ${body.poolSize}），请稍后重试。`
-            : '挂起池已饱和，请稍后重试。'
+          if (body) {
+            setNotice(this, 'ai.notice.poolSaturatedWithSize', { size: body.poolSize })
+          } else {
+            setNotice(this, 'ai.notice.poolSaturated')
+          }
           break
         }
         case ErrorCode.AI_UNAVAILABLE:
-          this.notice = `AI 未启用：${error.message}`
+          // 后端 message 是中文原文（数据不是文案），只翻本地模板部分。
+          setNotice(this, 'ai.notice.aiDisabled', { message: error.message })
           void this.probeHealth()
           break
         case ErrorCode.AI_REDIS_UNAVAILABLE:
-          this.notice = `AI 运行时依赖的 Redis 不可用：${error.message}`
+          setNotice(this, 'ai.notice.redisUnavailable', { message: error.message })
           void this.probeHealth()
           break
         // 批③ 新增的 /chat 稳定码（模型配置面）：前端按 code 查同一份词表，
@@ -2348,11 +2429,17 @@ export const useAiStore = defineStore('ai', {
         case 'MODEL_NOT_FOUND':
         case 'INVALID_PARAM':
         case 'PARAMS_LOCKED':
-        case 'PROVIDER_GONE':
-          this.notice = AI_CONFIG_ERROR_TEXT[error.code] ?? error.message
+        case 'PROVIDER_GONE': {
+          const key = aiConfigErrorKey(error.code)
+          if (key) {
+            setNotice(this, key)
+          } else {
+            setRawNotice(this, error.message)
+          }
           break
+        }
         default:
-          this.notice = error.message
+          setRawNotice(this, error.message)
       }
     },
 
@@ -2396,7 +2483,7 @@ export const useAiStore = defineStore('ai', {
       // 红队 MINOR-1 收口：新连接 ≠ 被停止的那条连接 —— `stop()` 留下的 stopped 置位只该
       // 作用于被中止的那一轮，不能跨连接生效
       this.stopped = false
-      this.notice = null
+      clearNotice(this)
       const controller = new AbortController()
       currentAbort = controller
       activeRoundHostId = assistant.id
@@ -2414,7 +2501,7 @@ export const useAiStore = defineStore('ai', {
               if (!isCurrentRound()) {
                 return
               }
-              this.notice = `连接中断，${Math.round(delayMs / 1000)} 秒后第 ${attempt} 次重试`
+              setNotice(this, 'ai.notice.resumeRetry', { seconds: Math.round(delayMs / 1000), attempt })
             },
             onClose: (info) => {
               if (!isCurrentRound()) {
@@ -2428,7 +2515,9 @@ export const useAiStore = defineStore('ai', {
               if (!info.terminal && !this.stopped) {
                 this.streamInterrupted = true
                 this.lastRoundOutcome = 'interrupted'
-                this.notice = `连接中断，结果可能不完整（${info.reason ?? '断流'}）。已生成的内容保留。`
+                setNotice(this, 'ai.notice.interruptedKeepShort', {
+                  reason: info.reason ?? translate('ai.notice.reasonInterrupted')
+                })
                 // 接管耗尽同样不是结局：表单/确认卡仍待用户动作，activeForm 与待决段保留
                 //（刷新由 restoreSuspendedSnapshot 续上）。
               }
@@ -2576,7 +2665,7 @@ export const useAiStore = defineStore('ai', {
         this.applyGateReceipt(toolCallId, receipt)
         return
       }
-      this.notice = '确认已提交，但暂未同步到后端真实裁决（可稍后刷新查看）。'
+      setNotice(this, 'ai.notice.decisionPending')
     },
 
     /**
@@ -2647,11 +2736,11 @@ export const useAiStore = defineStore('ai', {
         }
         // 卡片身份校验：只接受仍待决的确认门段（终态段 / 前端工具卡不得经此提交）
         if (!runId || !part) {
-          this.notice = '没有待处理的确认请求'
+          setNotice(this, 'ai.notice.noPendingDecision')
           return
         }
         if (part.kind2 !== 'CONFIRM' || part.status !== 'pending' || !part.requiresAction) {
-          this.notice = '没有待处理的确认请求'
+          setNotice(this, 'ai.notice.noPendingDecision')
           return
         }
         name = part.name
@@ -2659,7 +2748,7 @@ export const useAiStore = defineStore('ai', {
       } else {
         const pending = this.pendingToolCall as PendingToolCall | null
         if (!pending || !runId) {
-          this.notice = '没有待处理的确认请求'
+          setNotice(this, 'ai.notice.noPendingDecision')
           return
         }
         toolCallId = pending.toolCallId
@@ -2673,7 +2762,7 @@ export const useAiStore = defineStore('ai', {
       // R-166 口径③（源头防重）：**点击即入在途表**，同 toolCallId 最多提交一次。
       // 双按钮连点 / 程序化重入在此短路（面板另据 gateSubmissions 禁用按钮，纵深两道）。
       if (this.gateSubmissions[toolCallId]) {
-        this.notice = '该确认已提交，正在同步…'
+        setNotice(this, 'ai.notice.decisionSubmitting')
         return
       }
       // 批4-D（纵深两道）：不可撤销卡必须**已勾选**才放行「批准」—— 面板已把按钮置灰，
@@ -2681,7 +2770,7 @@ export const useAiStore = defineStore('ai', {
       // 勾选态只认段上的 irreversible（旧段无该键 ⇒ 与可逆卡同路，行为一字不动）。
       const targetPart = host ? findToolPart(host, toolCallId) : null
       if (approved && targetPart?.irreversible === true && this.gateAcks[toolCallId] !== true) {
-        this.notice = '不可撤销操作：请先勾选确认项'
+        setNotice(this, 'ai.notice.ackRequired')
         return
       }
       this.gateSubmissions = {
@@ -2722,7 +2811,7 @@ export const useAiStore = defineStore('ai', {
           // 改为不写任何乐观裁决：撤乐观写 → 置「已提交，同步中…」瞬态 → 等 SSE 结局帧 →
           // 3 秒未达则拉 runs/current 落真实裁决回执。
           this.markGateSyncing(toolCallId, { name, kind })
-          this.notice = '该确认已提交过（幂等拒绝），正在与后端同步真实裁决…'
+          setNotice(this, 'ai.notice.decisionIdempotent')
           this.armGateSync(toolCallId)
           return
         }
@@ -2741,7 +2830,11 @@ export const useAiStore = defineStore('ai', {
           })
           deriveProjections(host)
         }
-        this.notice = error instanceof Error ? error.message : '确认提交失败'
+        if (error instanceof Error) {
+          setRawNotice(this, error.message)
+        } else {
+          setNotice(this, 'ai.notice.decisionFailed')
+        }
       }
     },
 
@@ -2779,7 +2872,7 @@ export const useAiStore = defineStore('ai', {
       // 缺省才回退当前轮的 activeRunId（避免旧表单错配到新 run）
       const targetRunId = runId ?? this.activeRunId
       if (!targetRunId) {
-        this.notice = '缺少 runId，无法回灌前端工具结果'
+        setNotice(this, 'ai.notice.missingRunId')
         return { ok: false, message: '缺少 runId' }
       }
       try {
@@ -2816,7 +2909,7 @@ export const useAiStore = defineStore('ai', {
             // 通用 FRONTEND 工具就地收掉挂起投影
             this.applyFrontendToolTerminal(toolCallId, mapped)
           }
-          this.notice = cancelled ? '该工具调用已是终态（幂等拒绝）' : '该工具结果已回灌过（幂等拒绝）'
+          setNotice(this, cancelled ? 'ai.notice.toolTerminal' : 'ai.notice.toolAlreadySubmitted')
           return { ok: false, duplicate: true }
         }
         if (error instanceof ApiError && error.code === ErrorCode.FORM_RESULT_REJECTED) {
@@ -2844,8 +2937,8 @@ export const useAiStore = defineStore('ai', {
             retryable: body?.retryable !== false
           }
         }
-        const message = error instanceof Error ? error.message : '前端工具结果回灌失败'
-        this.notice = message
+        const message = error instanceof Error ? error.message : translate('ai.notice.toolSubmitFailed')
+        setRawNotice(this, message)
         return { ok: false, message }
       }
     },
@@ -3096,7 +3189,7 @@ export const useAiStore = defineStore('ai', {
         ref: target.entry,
         accept: validated.value.accept,
         status: pickerOk ? 'waiting' : 'degraded',
-        reason: pickerOk ? null : '当前浏览器不支持在对话内直接选择文件',
+        reason: pickerOk ? null : translate('ai.notice.uploadPickerUnsupported'),
         filename: null
       }
       this.uiAnnouncement = pickUiAnnouncement()
@@ -3141,7 +3234,7 @@ export const useAiStore = defineStore('ai', {
         this.activeUploadHandoff = {
           ...handoff,
           status: 'degraded',
-          reason: '当前浏览器不支持在对话内直接选择文件'
+          reason: translate('ai.notice.uploadPickerUnsupported')
         }
         this.uiAnnouncement = pickUiAnnouncement()
         return
@@ -3154,14 +3247,16 @@ export const useAiStore = defineStore('ai', {
         this.activeUploadHandoff = {
           ...handoff,
           status: 'degraded',
-          reason: aborted ? '你取消了文件选择，可以重试' : `文件选择失败：${errorText(error)}`
+          reason: aborted
+            ? translate('ai.notice.uploadPickerCancelled')
+            : translate('ai.notice.uploadPickerFailed', { message: errorText(error) })
         }
         this.uiAnnouncement = pickUiAnnouncement()
         return
       }
       const file = files[0]
       if (!file) {
-        this.activeUploadHandoff = { ...handoff, status: 'degraded', reason: '没有拿到文件，请重试' }
+        this.activeUploadHandoff = { ...handoff, status: 'degraded', reason: translate('ai.notice.uploadNoFile') }
         return
       }
       const name = uploadFileNameOf(file)
@@ -3176,7 +3271,11 @@ export const useAiStore = defineStore('ai', {
         try {
           summary = await region.receiveFile(file)
         } catch (error) {
-          this.activeUploadHandoff = { ...handoff, status: 'degraded', reason: `页面接收文件失败：${errorText(error)}` }
+          this.activeUploadHandoff = {
+            ...handoff,
+            status: 'degraded',
+            reason: translate('ai.notice.uploadReceiveFailed', { message: errorText(error) })
+          }
           return
         }
       }
@@ -3252,7 +3351,7 @@ export const useAiStore = defineStore('ai', {
         ref: target?.entry ?? validated.value.ref ?? null,
         accept: validated.value.accept,
         status,
-        reason: status === 'missing' ? '请先打开导入向导第 1 步' : null,
+        reason: status === 'missing' ? translate('ai.notice.uploadNoRegion') : null,
         filename: null
       }
       this.uiAnnouncement = pickUiAnnouncement()
@@ -3308,11 +3407,11 @@ export const useAiStore = defineStore('ai', {
       this.uiUndoEntry = null
       this.uiUndoToolCallId = null
       if (!entry) {
-        this.notice = '没有可撤销的界面操作'
-        return '没有可撤销的界面操作'
+        setNotice(this, 'ai.notice.noUiUndo')
+        return translate('ai.notice.noUiUndo')
       }
       const outcome = applyUiUndo(entry)
-      this.notice = outcome.result
+      setRawNotice(this, outcome.result)
       return outcome.result
     },
 
@@ -3380,7 +3479,7 @@ export const useAiStore = defineStore('ai', {
         this.activePreview = null
         previewSheetCtx = null
         this.stalePreviewToolCallId = plan.toolCallId
-        this.notice = replanned.reason
+        setRawNotice(this, replanned.reason)
         return
       }
       this.activePreview = replanned.plan
@@ -3434,7 +3533,7 @@ export const useAiStore = defineStore('ai', {
         return
       }
       if (plan.level === 'large' && !acknowledged) {
-        this.notice = `本次将修改 ${plan.rowsCount} 行 / ${plan.cellsCount} 格（超过 200 行）：请先勾选「我了解影响范围」再点「应用」。`
+        setNotice(this, 'ai.notice.sheetLargePlan', { rows: plan.rowsCount, cells: plan.cellsCount })
         return
       }
       const resolved = await resolveSheetContext(plan.defCode)
@@ -3722,14 +3821,14 @@ export const useAiStore = defineStore('ai', {
           ? unkeyed.map((issue) => issue.message).join('；')
           : issues.length > 0
             ? null
-            : `提交被后端拒绝（挂起仍在等待）：${outcome.rejected}`
+            : translate('ai.notice.formRejected', { reason: outcome.rejected })
         return
       }
       form.status = 'filling'
       // 红队问题 4：泛化文案并入后端具体原因，表单卡内可见真实失败点
       form.error = outcome.message
-        ? `提交失败：${outcome.message}（可重试或点「取消」放弃）`
-        : '提交失败，请重试或点「取消」放弃'
+        ? translate('ai.notice.formSubmitFailed', { message: outcome.message })
+        : translate('ai.notice.formSubmitFailedPlain')
     },
 
     /** GF-B：显式取消 —— 带 cancelled:true 回灌，挂起立刻收敛。 */
@@ -3753,7 +3852,9 @@ export const useAiStore = defineStore('ai', {
         return
       }
       if (!outcome.ok && !outcome.duplicate) {
-        form.error = `取消回灌未送达（${outcome.message ?? '网络异常'}），后端将在超时后自动收尾`
+        form.error = translate('ai.notice.formCancelFailed', {
+          message: outcome.message ?? translate('ai.notice.networkError')
+        })
         // 批4④ A4'（D3/D11）：同一份文案（同源自 form.error，不两处各写字面量）落段 reason ——
         // 段持久（activeForm 七处清空不影响可见性），卡内 reason 位渲染；不经 applyPendingTerminal
         // （防污染 confirm 路径 reason 语义）。D-C2 钉死形状：requiresAction 显式 false（必填字段，
@@ -3991,7 +4092,7 @@ export const useAiStore = defineStore('ai', {
       this.sessionId = nextId
       this.messages = []
       this.activeRunId = null
-      this.notice = null
+      clearNotice(this)
       this.stopping = false
       this.poolSaturated = null
       this.suspended = false
@@ -4177,7 +4278,7 @@ export const useAiStore = defineStore('ai', {
       } catch {
         // 删除失败不阻断新对话（旧会话记忆到期自然清理）
         if (isCurrentRound()) {
-          this.notice = '旧会话记忆删除失败（不影响新对话）'
+          setNotice(this, 'ai.notice.memoryDeleteFailed')
         }
       }
     },
@@ -4328,7 +4429,7 @@ export const useAiStore = defineStore('ai', {
       switch (frame.type) {
         case 'start':
           this.activeRunId = frame.runId
-          this.notice = null
+          clearNotice(this)
           break
         case 'message_start':
         case 'message_end':
@@ -4461,7 +4562,7 @@ export const useAiStore = defineStore('ai', {
             // 结局帧已到：表单收敛（提交/取消/超时皆自此收尾）。
             // T2a-D#2（B2 缓释）：帧到达时本地仍在填写（未在提交在途）→ 该表单已被他端提交/处理
             if (this.activeForm.status === 'filling') {
-              this.notice = '该表单已在其他窗口提交，本地填写已停止'
+              setNotice(this, 'ai.notice.formSubmittedElsewhere')
             }
             this.dropActiveForm()
           }
@@ -4519,7 +4620,7 @@ export const useAiStore = defineStore('ai', {
           break
         }
         case 'retry':
-          this.notice = '上游连接中断，正在重试（本轮尚未产出内容）'
+          setNotice(this, 'ai.notice.upstreamRetry')
           break
         case 'done': {
           message.streaming = false
@@ -4566,7 +4667,7 @@ export const useAiStore = defineStore('ai', {
           if (this.activeForm !== null) {
             this.dropActiveForm()
           }
-          this.notice = `本轮出错（${frame.code}）：${frame.message}`
+          setNotice(this, 'ai.notice.turnError', { code: frame.code, message: frame.message })
           // R-165 S5c：错误卡族（demo v7.7 裁决区 08）—— 挂在**本轮这条助手消息**上 ⇒ 面板在
           // 它发生的位置内联渲染（绝不做顶部固定）。判据 = 码优先、文案兜底（utils/error-card.ts）。
           message.errorCard = buildErrorCard(frame.code, frame.message)
@@ -4872,7 +4973,7 @@ export const useAiStore = defineStore('ai', {
       })
       deriveProjections(message)
       if (execution.availability === 'degraded' || execution.availability === 'unavailable') {
-        this.notice = execution.result
+        setRawNotice(this, execution.result)
       }
       // 治理 P0-1：前端执行器的结局八态随回灌上送（后端台账/回帧以此为权威结局）
       await this.submitFrontendToolResult(

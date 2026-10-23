@@ -201,11 +201,12 @@ const condition = computed(() => buildQueryCondition(draftModel.value))
 
 const browserNote = computed(() => {
   if (isConditionEmpty(condition.value)) {
-    return '未设置字段条件：展示服务端按范围过滤后的分页数据（分页与命中总数均为服务端口径）。'
+    return t('views.data.conditionNone')
   }
-  return `字段条件：${conditionSummary(condition.value)}；`
-    + '列表与行数预估走同一个服务端 conditions 口径（前端不再做本页求值），'
-    + `当前命中 ${total.value} 行。`
+  return t('views.data.conditionApplied', {
+    summary: conditionSummary(condition.value),
+    total: total.value
+  })
 })
 
 function dataOf(row: ConfigDataRow): Record<string, unknown> {
@@ -227,7 +228,7 @@ async function loadDefs(): Promise<void> {
       onDefChange(initial)
     }
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '配置定义加载失败')
+    ElMessage.error(error instanceof Error ? error.message : t('views.data.msg.defsLoadFailed'))
   }
 }
 
@@ -271,7 +272,7 @@ async function loadData(): Promise<void> {
     rows.value = result.content ?? []
     total.value = result.totalElements ?? 0
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '数据加载失败')
+    ElMessage.error(error instanceof Error ? error.message : t('views.data.msg.dataLoadFailed'))
   } finally {
     loading.value = false
   }
@@ -279,7 +280,7 @@ async function loadData(): Promise<void> {
 
 async function previewCount(): Promise<void> {
   if (!defCode.value) {
-    ElMessage.warning('请先选择配置项')
+    ElMessage.warning(t('views.data.msg.pickDefinition'))
     return
   }
   counting.value = true
@@ -296,9 +297,9 @@ async function previewCount(): Promise<void> {
     }
     const result = await dataApi.countData(defCode.value, params)
     serverCount.value = result.count
-    ElMessage.success(`服务端口径命中 ${result.count} 行`)
+    ElMessage.success(t('views.data.msg.serverCount', { count: result.count }))
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '行数预估失败')
+    ElMessage.error(error instanceof Error ? error.message : t('views.data.msg.estimateFailed'))
   } finally {
     counting.value = false
   }

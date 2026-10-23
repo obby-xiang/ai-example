@@ -538,6 +538,14 @@ export interface WorkspaceActionRecord {
   /** 时刻（epoch 毫秒） */
   at: number
   source: WorkspaceActionSource
+  /**
+   * 展示面的结构化形态（i18n L-69）：`code` = locale key、`args` = 命名插值。
+   *
+   * <p>
+   * 只给**界面**用（面板 chip 的「工作区已同步」）。`summary` 仍是**送模型**那一条（C5：切 en 不变），
+   * 两者是同一动作的两份受众面 —— 不互相替代，也不进 `buildContext()`。
+   */
+  display?: { code: string; args?: Record<string, string | number> }
 }
 
 /** 一轮对话最多携带的历史动作条数（只带最近若干条，避免上下文膨胀）。 */

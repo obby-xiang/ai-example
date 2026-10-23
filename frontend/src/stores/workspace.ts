@@ -25,6 +25,7 @@ import { useTaskStore } from '@/stores/task'
 import { stepLabel } from '@/utils/format'
 import { findPublishTool } from '@/utils/publish-links'
 import { listAiRegions } from '@/utils/ai-regions'
+import { translate } from '@/composables/useCopy'
 import {
   WORKSPACE_ACTION_LIMIT,
   WORKSPACE_CONTRACT_VERSION,
@@ -47,13 +48,25 @@ const PAGE_ROUTES: Record<WorkspacePageId, string> = {
   data: ROUTE_NAMES.dataBrowser
 }
 
-/** 页面 id 的中文名（回灌给模型的说明文本用）。 */
+/** 页面 id 的中文名（**回灌给模型的说明文本用**；C5 红线：切 en 后仍须是中文）。 */
 const PAGE_LABELS: Record<WorkspacePageId, string> = {
   tasks: '任务中心',
   export: '导出向导',
   import: '导入向导',
   definitions: '配置定义',
   data: '数据浏览'
+}
+
+/**
+ * 页面 id → **界面**文案 key（i18n L-69）。与 {@link PAGE_LABELS} 是两份受众面：
+ * 上面那份给模型（C5 锁中文），这里给面板 chip / 上下文摘要（随 UI 语言）。
+ */
+const PAGE_LABEL_KEYS: Record<WorkspacePageId, string> = {
+  tasks: 'ai.workspace.page.tasks',
+  export: 'ai.workspace.page.export',
+  import: 'ai.workspace.page.import',
+  definitions: 'ai.workspace.page.definitions',
+  data: 'ai.workspace.page.data'
 }
 
 /** 发布跟踪的轮次 dispose（S4）：run_job 每发起一轮 publish 跟踪先收上一轮，卸载/收尾不留活口。 */
@@ -107,18 +120,18 @@ export const useWorkspaceStore = defineStore('workspace', {
     inWizard(state): boolean {
       return state.taskType !== null && state.step !== null
     },
-    /** 上下文摘要（AI 面板的上下文 chip 文案）。 */
+    /** 上下文摘要（AI 面板的上下文 chip 文案；i18n L-69：页面名/deco 走 locale，随 UI 语言）。 */
     contextSummary(state): string {
-      const pageText = PAGE_LABELS[state.pageId] ?? state.page
+      const pageText = translate(PAGE_LABEL_KEYS[state.pageId])
       const parts = [pageText]
       if (state.taskId !== null) {
-        parts.push(`任务 #${state.taskId}`)
+        parts.push(translate('ai.workspace.task', { id: state.taskId }))
       }
       if (state.step) {
-        parts.push(`步骤 ${stepLabel(state.step)}`)
+        parts.push(translate('ai.workspace.step', { label: stepLabel(state.step) }))
       }
       if (state.selectedDefs.length > 0) {
-        parts.push(`已选 ${state.selectedDefs.length} 个配置项`)
+        parts.push(translate('ai.workspace.defsSelected', { count: state.selectedDefs.length }))
       }
       return parts.join(' · ')
     }
@@ -156,19 +169,36 @@ export const useWorkspaceStore = defineStore('workspace', {
       if (init.importMode !== undefined) {
         this.importMode = init.importMode
       }
-      this.touch(`进入${PAGE_LABELS[this.pageId] ?? this.page}`)
+      this.touch(`进入${PAGE_LABELS[this.pageId] ?? this.page}`, '界面', {
+        code: 'ai.workspace.enterPage',
+        args: { page: translate(PAGE_LABEL_KEYS[this.pageId]) }
+      })
     },
 
     setStep(step: string | null): void {
       this.step = step
-      this.touch(step ? `切换到步骤「${stepLabel(step)}」` : '退出当前步骤')
+      if (step) {
+        this.touch(`切换到步骤「${stepLabel(step)}」`, '界面', {
+          code: 'ai.workspace.switchStep',
+          args: { step: stepLabel(step) }
+        })
+      } else {
+        this.touch('退出当前步骤', '界面', { code: 'ai.workspace.exitStep' })
+      }
     },
 
     setTaskId(taskId: number | null, taskType?: TaskType | null, status?: TaskStatus | null): void {
       this.taskId = taskId
       this.taskType = taskType === undefined ? this.taskType : taskType
       this.taskStatus = status === undefined ? this.taskStatus : status
-      this.touch(taskId === null ? '解除任务绑定' : `绑定任务 #${taskId}`)
+      if (taskId === null) {
+        this.touch('解除任务绑定', '界面', { code: 'ai.workspace.unbindTask' })
+      } else {
+        this.touch(`绑定任务 #${taskId}`, '界面', {
+          code: 'ai.workspace.bindTask',
+          args: { taskId }
+        })
+      }
     },
 
     /**
@@ -184,17 +214,32 @@ export const useWorkspaceStore = defineStore('workspace', {
       } else {
         this.selectedDefs = [...codes]
       }
-      this.touch(`已选择配置项：${this.selectedDefs.join('、') || '（空）'}`, source)
+      const joined = this.selectedDefs.join('、')
+      this.touch(`已选择配置项：${joined || '（空）'}`, source, {
+        code: 'ai.workspace.selectDefs',
+        args: { defs: joined || translate('ai.workspace.empty') }
+      })
     },
 
     setQueryConditions(defCode: string, conditions: QueryCondition | unknown): void {
       this.queryConditions = { ...this.queryConditions, [defCode]: conditions }
-      this.touch(`设置 ${defCode} 的查询条件`)
+      this.touch(`设置 ${defCode} 的查询条件`, '界面', {
+        code: 'ai.workspace.queryConditions',
+        args: { code: defCode }
+      })
     },
 
     setImportMode(mode: ImportMode | null): void {
       this.importMode = mode
-      this.touch(`导入模式设为 ${mode === null ? '未设置' : mode === 'MERGE' ? '增量合并' : '整体替换'}`)
+      const label = mode === null
+        ? translate('ai.workspace.importModeNone')
+        : mode === 'MERGE'
+          ? translate('ai.workspace.importModeMerge')
+          : translate('ai.workspace.importModeReplace')
+      this.touch(`导入模式设为 ${mode === null ? '未设置' : mode === 'MERGE' ? '增量合并' : '整体替换'}`, '界面', {
+        code: 'ai.workspace.importMode',
+        args: { mode: label }
+      })
     },
 
     /** 纯版本号自增（消息密集的变更用，例如表格连续编辑，避免动作记录被刷爆）。 */
@@ -208,16 +253,19 @@ export const useWorkspaceStore = defineStore('workspace', {
      * 2. 记入 recentActions（随下一轮 AI 请求注入 `context.extra.recentActions`）；
      * 3. 广播 `workspace_changed` 契约事件给 AI 面板（deepseek 蓝本事件形态 + 版本号）。
      *
-     * @param summary 中文动作摘要（同时是给模型看的一句话）
+     * @param summary 中文动作摘要（同时是给模型看的一句话；C5：**不随 UI 语言变**）
      * @param source  界面（用户手点）或 AI（经契约层下发）
+     * @param display 可选的**界面**结构化形态（i18n L-69）：面板 chip 按当前语言重译，
+     *   与 `summary` 是同一动作的两份受众面
      */
-    touch(summary: string, source: WorkspaceActionSource = '界面'): number {
+    touch(summary: string, source: WorkspaceActionSource = '界面', display?: WorkspaceActionRecord['display']): number {
       this.dataVersion += 1
       const record: WorkspaceActionRecord = {
         version: this.dataVersion,
         summary,
         at: Date.now(),
-        source
+        source,
+        ...(display === undefined ? {} : { display })
       }
       this.recentActions = [...this.recentActions, record].slice(-WORKSPACE_ACTION_LIMIT)
       emitWorkspaceEvent('workspace_changed', record)

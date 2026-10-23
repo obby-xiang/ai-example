@@ -20,6 +20,7 @@
  *   不重复出卡（见 `DEDICATED_ALERT_CODES`）。
  */
 import { ErrorCode } from '@/types/api'
+import { translate } from '@/composables/useCopy'
 
 /** 三变体 + 通用红卡（demo 判据里的「其余 = 断流/未分类」）。 */
 export type ErrorCardVariant = 'quota' | 'filter' | 'context' | 'generic'
@@ -54,22 +55,26 @@ const FILTER_RE = /content[_-]?filter|safety|policy|安全策略|内容过滤|�
 /** 上下文长度超限（OpenAI 侧码名 `context_length_exceeded`）。 */
 const CONTEXT_RE = /context[_-]?length|context[_-]?window|max[_-]?tokens|too[_-]?long|上下文(长度)?(超限|超出)|超长|token\s*超/i
 
-/** 三变体文案（demo v7.7 裁决区 08 逐字；`detail` 由调用方喂现实文案）。 */
-const VARIANT_TEXT: Record<Exclude<ErrorCardVariant, 'generic'>, { title: string; guide: string; action: string }> = {
+/** 三变体文案（demo v7.7 裁决区 08 逐字；`detail` 由调用方喂现实文案）。
+ *
+ * i18n L-69：只存 locale key（`ai.card.error.*`），建卡时经 {@link translate} 取当前语言文本 ——
+ * `detail` 本就是"错误发生那一刻的后端原文"，标题/引导/按钮同属**建卡定格**的文本，不随后续
+ * 切语言回翻（卡片是要留档的一轮现场）。 */
+const VARIANT_TEXT_KEY: Record<Exclude<ErrorCardVariant, 'generic'>, { title: string; guide: string; action: string }> = {
   quota: {
-    title: '请求超出配额',
-    guide: '引导：稍后重试；若在批量任务里，先降低并发再重发。',
-    action: '稍后重试'
+    title: 'ai.card.error.quota.title',
+    guide: 'ai.card.error.quota.guide',
+    action: 'ai.card.error.quota.action'
   },
   filter: {
-    title: '内容被安全策略拦截',
-    guide: '引导：改为描述「目标 + 约束」后重发，不要直接贴可执行命令原文。',
-    action: '改写后重发'
+    title: 'ai.card.error.filter.title',
+    guide: 'ai.card.error.filter.guide',
+    action: 'ai.card.error.filter.action'
   },
   context: {
-    title: '上下文长度超限',
-    guide: '引导：开新会话并把关键结论带过去（重试不会变短）。',
-    action: '开新会话'
+    title: 'ai.card.error.context.title',
+    guide: 'ai.card.error.context.guide',
+    action: 'ai.card.error.context.action'
   }
 }
 
@@ -105,13 +110,20 @@ export function buildErrorCard(code: string, message: string): ErrorCard | null 
   if (variant === 'generic') {
     return {
       variant,
-      title: '本轮出错',
+      title: translate('ai.card.error.generic.title'),
       detail: message,
       guide: '',
       action: '',
       code
     }
   }
-  const text = VARIANT_TEXT[variant]
-  return { variant, title: text.title, detail: message, guide: text.guide, action: text.action, code }
+  const text = VARIANT_TEXT_KEY[variant]
+  return {
+    variant,
+    title: translate(text.title),
+    detail: message,
+    guide: translate(text.guide),
+    action: translate(text.action),
+    code
+  }
 }
