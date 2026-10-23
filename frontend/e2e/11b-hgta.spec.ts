@@ -10,7 +10,7 @@
  * 2. 上下文里出现 role=tool 后不再发起工具调用（收敛契约③）⇒ 一个会话只出一张卡/一次工具调用
  *    （「同会话两轮 GF」这种形态因此单开 11c-gf2.spec.ts + 本域桩，见 L-92）。
  */
-import { expect, test, type APIRequestContext, type Page } from '@playwright/test'
+import { expect, test, type APIRequestContext, type Locator, type Page } from '@playwright/test'
 import {
   createExportedTask,
   createSheetImportTask,
@@ -26,12 +26,14 @@ import {
   apiPostRaw,
   chatFrames,
   currentRun,
+  pendingFormFields,
   sidOf,
   stubRequestsFor,
   toolMessagesOf,
   uniq,
   watchPost,
-  type CurrentRun
+  type CurrentRun,
+  type FormFieldSpec
 } from './support/hgta'
 
 const DEF = 'CURRENCY'
@@ -349,7 +351,112 @@ test.describe('@stub G 生成式表单', () => {
 
 })
 
-// @real：真模型链路（stub 模式的 grep 只跑 @stub，本条留给 CI / 后续批）
+// ── 真模型表单填写：schema 驱动（模型生成的字段面不可假设） ────────────────────
+
+/** 选项值（`options[].value` 的字符串形态；`optionsFrom` 级联的字段这里读不到，按"无选项"处理）。 */
+function optionValuesOf(field: FormFieldSpec): string[] {
+  return (field.options ?? [])
+    .map((option) => (option.value === undefined || option.value === null ? '' : String(option.value)))
+    .filter((value) => value !== '')
+}
+
+/** 先 XN（本域 FILTER 场景的取值），其余按 schema 顺序。 */
+function pickOptions(values: string[], want: number): string[] {
+  const ordered = [...values].sort((left, right) => {
+    const leftHit = /^XN$/i.test(left) ? 0 : 1
+    const rightHit = /^XN$/i.test(right) ? 0 : 1
+    return leftHit - rightHit
+  })
+  return ordered.slice(0, Math.max(1, Math.min(want, ordered.length)))
+}
+
+/** 文本取值：按 format 给一个必然过格式的值，否则给本轮的采样本值。 */
+function textValueOf(field: FormFieldSpec, index: number): string {
+  switch (field.format) {
+    case 'email':
+      return 'e2e@example.com'
+    case 'tel':
+      return '13800000000'
+    case 'url':
+      return 'https://example.com/e2e'
+    case 'idcard':
+      return '11010519491231002X'
+    default: {
+      const base = `真模型-${index}`
+      const maxLength = Number(field.maxLength ?? 0)
+      return maxLength > 0 ? base.slice(0, Math.max(1, maxLength)) : base
+    }
+  }
+}
+
+/** 数字取值：落在 `[min,max]` 内的一个值（`min` 缺省取 1；`step` 不做对齐 —— 真生成带 step 的字段就让它红在断言上）。 */
+function numberValueOf(field: FormFieldSpec): string {
+  const min = field.min === undefined ? 1 : Number(field.min)
+  const max = field.max === undefined ? min : Number(field.max)
+  return String(Math.min(Math.max(1, min), Number.isFinite(max) ? max : min))
+}
+
+/**
+ * 按本轮挂起条目的 `form.fields` 把表单填成"能过 schema 复核"的形状。
+ *
+ * <p>本用例测的是「用户填完 → 回灌 200 → 续跑」，不是「模型会生成哪些字段」：
+ * 真模型的字段面不可假设（CI run 39977930803：模型给「范围」生成 `multi_select` + `minItems 1`，
+ * 只填关键字的回灌被后端如实拒成 400 `FORM_RESULT_REJECTED` / `VALUE_TOO_FEW_ITEMS`）。
+ * 故这里按 schema 逐字段给值：多选至少 `minItems` 项、枚举取首个合法值、文本/数字给合法值；
+ * 联动隐藏的字段不渲染 ⇒ 跳过；`attachment`/`date` 不做猜测（真出现就让它红在断言上）。
+ *
+ * <p>**每个动作都带显式超时**（{@link ACTION_TIMEOUT_MS}）：Playwright 默认 `actionTimeout=0`
+ * 会无限等，真模型下"元素永远不可点"就会把整条用例挂到 15 分钟的测试上限上，红得没有任何信息。
+ */
+const ACTION_TIMEOUT_MS = 10_000
+
+async function fillFormBySchema(
+  page: Page,
+  request: APIRequestContext,
+  form: Locator,
+  index: number
+): Promise<void> {
+  const scope = String((await form.getAttribute('data-testid')) ?? '').replace('gf-form-', '')
+  const fields = await pendingFormFields(request, await sidOf(page))
+  if (fields === null) {
+    throw new Error(`#${index} 挂起条目里读不到表单 schema（runs/current 的 generative_form 入参为空）`)
+  }
+  for (const field of fields) {
+    const base = `gf-field-${scope}-${field.key}`
+    const type = String(field.type ?? 'text')
+    if (type === 'multi_select') {
+      const values = optionValuesOf(field)
+      if (values.length === 0) continue // optionsFrom 级联：选项由父字段决定，这里无值可点
+      const minItems = Math.max(1, Number(field.minItems ?? 1))
+      const maxItems = field.maxItems === undefined ? values.length : Math.max(1, Number(field.maxItems))
+      for (const value of pickOptions(values, Math.min(minItems, maxItems))) {
+        const box = page.locator(`[data-testid="${base}-${value}"]`)
+        if ((await box.count()) === 0) continue // 联动隐藏的字段不渲染
+        if (!(await box.isChecked())) await box.check({ timeout: ACTION_TIMEOUT_MS })
+      }
+      continue
+    }
+    const control = page.locator(`[data-testid="${base}"]`)
+    if ((await control.count()) === 0) continue // 联动隐藏 / 只读回放卡
+    if (type === 'enum') {
+      const values = optionValuesOf(field)
+      if (values.length === 0) continue
+      const current = await control.inputValue()
+      if (current === '') await control.selectOption(pickOptions(values, 1)[0], { timeout: ACTION_TIMEOUT_MS })
+      continue
+    }
+    if (type === 'date') continue // ISO 日期与场景无关：不猜（真需要时红在断言上，别猜出一个假值）
+    if (type === 'text' || type === 'number') {
+      if ((await control.inputValue()) !== '') continue // 已填的（关键字）保持用例给的值
+      await control.fill(type === 'text' ? textValueOf(field, index) : numberValueOf(field), {
+        timeout: ACTION_TIMEOUT_MS
+      })
+      continue
+    }
+    // boolean（缺省 false ⇒ 必填也只能点开）/ attachment（值只能由上传产生）：不猜
+  }
+}
+
 test.describe('@real G 生成式表单（真模型）', () => {
   /** C 级常规行为档（蓝本 §0.3）：N=10 ≥7；`E2E_REAL_SAMPLING` 只调小 N，阈值同比例推导。 */
   const GF_SAMPLING = Math.max(1, Number(process.env.E2E_REAL_SAMPLING ?? '10'))
@@ -371,10 +478,13 @@ test.describe('@real G 生成式表单（真模型）', () => {
    *
    * <p>每轮用 `new-chat` 起**新会话**（采样独立性：不让上一轮的工具结果压进下一轮上下文）。
    *
-   * <p>**真模型验证待 key**：本机无真 key，本节仅落结构（`E2E_MODE=real` + 真 key 才跑），
-   * 未在真机跑过；最近一次真机证据仍是单轮 4/4（旧结构）。
+   * <p>**填写面按 schema 驱动（2026-10-23，CI run 39977930803 定位）**：真模型的字段面不可假设 ——
+   * 首跑里模型把「范围」生成成 `multi_select` + `minItems 1`，用例只填关键字就提交，回灌被后端
+   * 按 schema 复核如实拒成 400 `FORM_RESULT_REJECTED`（`VALUE_TOO_FEW_ITEMS`：`scope` 至少 1 项）。
+   * 这是**用例的填写面不完整**，不是产品缺陷（后端拒得对、卡片按 `issues[].key` 点亮了字段）。
+   * 故提交前一律按本轮挂起条目的 `form.fields` 补齐（见 {@link fillFormBySchema}）。
    */
-  test(`E2E-G01 FILTER 回灌续跑（真模型，N=${GF_SAMPLING} ≥${GF_THRESHOLD}）`, async ({ page }) => {
+  test(`E2E-G01 FILTER 回灌续跑（真模型，N=${GF_SAMPLING} ≥${GF_THRESHOLD}）`, async ({ page, request }) => {
     test.setTimeout(900_000)
     let triggered = 0
     const problems: string[] = []
@@ -383,25 +493,45 @@ test.describe('@real G 生成式表单（真模型）', () => {
     for (let index = 1; index <= GF_SAMPLING; index += 1) {
       await sendMessage(page, `请用生成式表单收集本次导出的筛选条件：关键字、范围（XN/HD），然后等我填写。采样 ${index}`)
 
-      // 触发面（C 级）：本轮的 live 表单卡（卡根带本轮 toolCallId 作用域）
-      const form = page.locator('[data-testid^="gf-form-"]').last()
+      // 触发面（C 级）：本轮的 **live** 表单卡 —— 只认"卡内还有提交钮"的那张。
+      // 只用 `[data-testid^="gf-form-"]` 的 `.last()` 会撞上**只读回放卡**（scope 是卡片序号，
+      // 如 `gf-form-ro11`；字段是 disabled 的）。实测（本地 N=10，第 6 轮）：模型一轮内连发两张卡，
+      // 第一张以「未提交 ✗ 已取消」的只读态留在页面上，`.last()` 正好选中它 ⇒ 关键字 `fill` 永远等
+      // 可用状态。只读卡不带 `gf-submit`（渲染器 `v-if="!readonly"`），故用它把 live 卡钉死。
+      const form = page
+        .locator('[data-testid^="gf-form-"]')
+        .filter({ has: page.locator('[data-testid="gf-submit"]') })
+        .last()
       const appeared = await form
         .waitFor({ state: 'visible', timeout: 90_000 })
         .then(() => true)
         .catch(() => false)
       if (!appeared) {
         problems.push(`#${index} 模型未触发 generative_form（本轮按文本收尾）`)
+        // 收干净本轮：真模型可能在本轮里**先被入参闸门拒绝、再挂起一次**（2026-10-23 本地实测：
+        // `前端工具入参被安全闸拒绝` 之后紧跟一次 `approval_suspend`），而卡没渲染出来就没有
+        // 提交/取消入口 ⇒ 面板一直"挂起等待中"，下一轮 composer 落不了键、`sendMessage` 的
+        // `fill`（Playwright 默认 actionTimeout=0）会一直等到 15 分钟的测试上限。
+        const stopBtn = page.locator('[data-testid="stop-btn"]')
+        if ((await stopBtn.count()) > 0) await stopBtn.first().click({ timeout: 15_000 }).catch(() => undefined)
         await waitRoundSettled(page, 60_000)
       } else {
         triggered += 1
         // ── 以下 A/B 级：真触发了就必须对（不参与概率计数） ──────────────────
-        await form.locator('[data-testid$="-keyword"]').fill(`真模型-${index}`)
+        // 场景指定的关键字先填；模型可能没按 `keyword` 命名（那时靠 schema 驱动的文本字段兜底）
+        const keyword = form.locator('[data-testid$="-keyword"]')
+        if ((await keyword.count()) > 0) await keyword.fill(`真模型-${index}`, { timeout: 15_000 })
+        await fillFormBySchema(page, request, form, index)
+
         const posted = page.waitForResponse(
           (res) => res.url().includes('/api/ai/frontend-tool-result') && res.request().method() === 'POST',
           { timeout: 30_000 }
         )
-        await form.locator('[data-testid="gf-submit"]').click()
-        expect((await posted).status(), `#${index} 回灌（FRONTEND_RESULT）非 200`).toBe(200)
+        await form.locator('[data-testid="gf-submit"]').click({ timeout: 15_000 })
+        const response = await posted
+        // 非 200 时把拒绝体带进断言消息（FORM_RESULT_REJECTED 的 issues 是"哪一格没填对"的唯一真值）
+        const rejectBody = response.status() === 200 ? '' : (await response.text()).slice(0, 400)
+        expect(response.status(), `#${index} 回灌（FRONTEND_RESULT）非 200：${rejectBody}`).toBe(200)
 
         await waitRoundSettled(page, 120_000)
         await expect(page.locator('[data-testid="gf-submit"]'), `#${index} 提交后表单仍可填`).toHaveCount(0)
@@ -411,7 +541,7 @@ test.describe('@real G 生成式表单（真模型）', () => {
         expect(bubbleText.trim().length, `#${index} 提交后续跑没有产生助手内容`).toBeGreaterThan(0)
       }
 
-      await page.locator('[data-testid="new-chat"]').click()
+      await page.locator('[data-testid="new-chat"]').click({ timeout: 15_000 })
       await expect(page.locator('[data-testid="empty-state"]')).toBeVisible({ timeout: 20_000 })
     }
 

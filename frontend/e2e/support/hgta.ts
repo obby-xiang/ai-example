@@ -208,6 +208,64 @@ export function sidOf(page: Page): Promise<string> {
   return page.evaluate(() => sessionStorage.getItem('ai-session-id') ?? '')
 }
 
+// ── 生成式表单：从挂起条目取本轮 schema（真模型的字段面不可假设） ──────────────
+
+/** `generative_form` 单个字段的规格（只取"怎么填"用得到的键，其余原样忽略）。 */
+export interface FormFieldSpec {
+  key: string
+  label?: string
+  type?: string
+  required?: boolean
+  requiredWhen?: unknown
+  visibleWhen?: unknown
+  defaultValue?: unknown
+  format?: string
+  min?: number
+  max?: number
+  minLength?: number
+  maxLength?: number
+  minItems?: number
+  maxItems?: number
+  options?: Array<{ value?: unknown; label?: unknown }>
+  optionsFrom?: unknown
+}
+
+/** `arguments` 可能是 JSON 串（`PendingToolCall#getArguments` 原样透出）或已解析对象。 */
+function asObject(raw: unknown): Record<string, unknown> {
+  if (raw === null || raw === undefined) return {}
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw) as unknown
+      return parsed !== null && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {}
+    } catch {
+      return {}
+    }
+  }
+  return typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
+}
+
+/**
+ * 该会话此刻挂起的那张生成式表单的字段表（无挂起表单 ⇒ null）。
+ *
+ * <p>为什么要读它：真模型的 schema **不可假设** —— CI 首跑（run 39977930803）里模型把「范围」
+ * 生成成 `multi_select` + `minItems 1`，只填关键字的回灌被后端按 schema 复核拒掉
+ * （400 `FORM_RESULT_REJECTED`），而桩面（`gf2-upstream` 的 `scope` 是可选 enum）碰不到这一层。
+ * 挂起条目的 `arguments` 就是 `generative_form` 的入参原文（`{form:{scenario,title,fields}}`），
+ * 与卡片渲染用的是同一份 —— 不需要另建通道。
+ */
+export async function pendingFormFields(
+  request: APIRequestContext,
+  sid: string
+): Promise<FormFieldSpec[] | null> {
+  const run = await currentRun(request, sid)
+  const entries = (run.pendingEntries ?? []).filter((entry) => String(entry.name ?? '') === 'generative_form')
+  const live = entries.filter((entry) => String(entry.entryStatus ?? '') === 'PENDING').pop() ?? entries.pop()
+  const args = asObject(live?.arguments)
+  const form = asObject(args.form ?? args.schema ?? args)
+  const fields = form.fields
+  return Array.isArray(fields) ? (fields as FormFieldSpec[]) : null
+}
+
 /**
  * 直投一轮对话（API 层用；前端工具/确认门的"真值三通道"里那条 SSE 帧通道）。
  * 挂起即断连 ⇒ 调用在挂起处就返回，响应体是**已发帧**的原文。

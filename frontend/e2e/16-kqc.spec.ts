@@ -831,13 +831,20 @@ test.describe('@real 16 KQC 真模型（CI 手工触发；本地不跑）', () =
    * {@link REAL_LINEAGE_WINDOW} 并在跑完恢复；断言同时盯住"分母 = 这个窗口"，防止它悄悄回落
    * 到默认 128000 而整条又变平凡。
    *
-   * <p><b>为什么提示词要求调一次工具</b>：压缩从 `none` 每次至多升一格 ⇒ 首档只能是 L1，
-   * 而 L1 的动作是**清工具结果**（`tool_result_clearing`，没有可清的就不记账、不推进档位）。
-   * 没有工具结果的会话结构上开不了压，故本轮显式要求模型查一次 `get_config_def`；
-   * 真模型是否照办属 @real 的固有不确定性 —— 红时先看 SSE 里有没有 `tool_start`，
+   * <p><b>为什么提示词要求每轮调三次工具</b>（2026-10-23，CI run 39977930803 定位）：压缩从 `none`
+   * 每次至多升一格 ⇒ 首档只能是 L1，而 L1 的动作是**清工具结果**（`tool_result_clearing`）。
+   * 但 L1 只清 pin 窗口之外的结果 —— `app.ai.context.keep-tool-pairs` 默认 5，最近 5 条工具结果
+   * 一条都不动。于是"每轮 1 次工具调用 + 6 轮"在结构上**永远清不出东西**：第 N 轮压缩判定发生时，
+   * 历史里只有 N−1 ≤ 5 条结果，全在 pin 窗口内 ⇒ `reason=nothing_to_clear` ⇒ 档位恒 `none`。
+   * 首跑实测正是这一形态（档位全 none、占用已到 74.9%→106.5%、工具调用 1/1/1/1/1/1）——
+   * 阈值根本不是问题，缺的是**可清的对象**。故提示词要求每轮分别查三个配置定义（每轮 3 条结果），
+   * 第 3 轮起总数 > 5，pin 窗口外的旧结果才有得清。
+   * 真模型是否照办属 @real 的固有不确定性 —— 红时先看 SSE 的 `tool_start`/`tool_result` 条数，
+   * 以及快照 `compaction.reason`（`nothing_to_clear` = 前置不足；`under_threshold` = 占比没到）；
    * 而不确定性本身由 `16-kqc-c.spec.ts` 的 @stub C-13 用确定性桩守着。
    *
-   * <p><b>待真 key 验证</b>：本机无 key，本条未在真模型下跑过（不改 SKIP、不放宽断言）。
+   * <p><b>真模型验证</b>：2026-10-23 首跑（run 39977930803）红在"6 轮内从未触发"，根因见上；
+   * 本条的断言口径（档位离开 none、台账非空、三面同源）一字未放宽。
    */
   test('@real E2E-C13 压缩谱系真验：台账 / 档位 / 占用 / 三面同源（真模型）', async () => {
     test.setTimeout(900_000)
@@ -851,11 +858,20 @@ test.describe('@real 16 KQC 真模型（CI 手工触发；本地不跑）', () =
 
     await withModelWindow(REAL_LINEAGE_WINDOW, async () => {
       const sid = newSessionId('C13')
-      const rounds: Array<{ turn: number; level: string; percent: number | null; frame: Frame | undefined; tools: number }> = []
+      const rounds: Array<{
+        turn: number
+        level: string
+        percent: number | null
+        frame: Frame | undefined
+        tools: number
+        results: number
+        reason: string
+      }> = []
       for (let turn = 1; turn <= 6; turn += 1) {
         const round = await chatRound(
           sid,
-          `第 ${turn} 轮：先用 get_config_def 查询 CURRENCY 的配置定义，再用一句话复述上一轮结论。`
+          `第 ${turn} 轮：分别用 get_config_def 查询 CURRENCY、DOC_TYPE、APPROVE_ROLE 三个配置定义的字段详情`
+            + '（三个编码各调用一次工具，不要合并成一次），再用一句话复述上一轮结论。'
         )
         expect(round.done, `第 ${turn} 轮未收敛`).toBeTruthy()
         expect(round.errors).toHaveLength(0)
@@ -875,7 +891,9 @@ test.describe('@real 16 KQC 真模型（CI 手工触发；本地不跑）', () =
           level: levelOf(snapshot.compaction?.level),
           percent,
           frame: round.frames.find((frame) => frame.type === 'context'),
-          tools: round.frames.filter((frame) => frame.type === 'tool_start').length
+          tools: round.frames.filter((frame) => frame.type === 'tool_start').length,
+          results: round.frames.filter((frame) => frame.type === 'tool_result').length,
+          reason: String(snapshot.compaction?.reason ?? '-')
         })
       }
 
@@ -884,7 +902,9 @@ test.describe('@real 16 KQC 真模型（CI 手工触发；本地不跑）', () =
       console.log(
         `[C-13] 窗口=${REAL_LINEAGE_WINDOW} 档位=${levels.join(' → ')} ` +
           `占用=${rounds.map((row) => (row.percent === null ? '-' : `${row.percent.toFixed(1)}%`)).join(' → ')} ` +
-          `工具调用=${rounds.map((row) => row.tools).join('/')}`
+          `工具调用=${rounds.map((row) => row.tools).join('/')} ` +
+          `工具结果=${rounds.map((row) => row.results).join('/')} ` +
+          `跳过原因=${rounds.map((row) => row.reason).join('/')}`
       )
 
       // ② 档位谱系：单调不减、每次至多一格，且真的离开 none（"全 none 也单调"不再能过）
@@ -895,8 +915,12 @@ test.describe('@real 16 KQC 真模型（CI 手工触发；本地不跑）', () =
       }
       expect(
         levelIndex(levels[levels.length - 1]),
-        `6 轮内压缩从未触发（档位恒 ${levels.join(' → ')}）：先看工具调用数 ${rounds.map((row) => row.tools).join('/')}`
-          + '（没有工具结果 ⇒ L1 无物可清 ⇒ 结构上开不了压）'
+        `6 轮内压缩从未触发（档位恒 ${levels.join(' → ')}）；工具调用 ${rounds.map((row) => row.tools).join('/')}、`
+          + `工具结果 ${rounds.map((row) => row.results).join('/')}、占用 `
+          + `${rounds.map((row) => (row.percent === null ? '-' : `${row.percent.toFixed(1)}%`)).join(' → ')}、`
+          + `快照跳过原因 ${rounds.map((row) => row.reason).join('/')}。`
+          + '判据：L1 只清 `keep-tool-pairs`（默认 5）之外的旧工具结果 ⇒ 历史里工具结果总数 ≤ 5 时'
+          + '（reason=nothing_to_clear）结构上开不了压；占比没到 L1 则是 under_threshold'
       ).toBeGreaterThanOrEqual(levelIndex('L1'))
 
       // ① 台账：条数 > 0、首条 L1 起步、逐条只升一格、每条都真的省了 token
