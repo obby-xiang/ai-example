@@ -1,14 +1,17 @@
 package com.example.configmgr.ai.kb;
 
+import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.tool.PlainTextToolResultConverter;
 import com.example.configmgr.ai.tool.ToolCategory;
 import com.example.configmgr.ai.tool.ToolMeta;
 import com.example.configmgr.ai.tool.ToolOutcome;
+import com.example.configmgr.ai.tool.ToolResultLimiter;
 import com.example.configmgr.ai.tool.ToolRisk;
 import com.example.configmgr.ai.tool.ToolScope;
 import com.example.configmgr.common.ConflictException;
-import lombok.RequiredArgsConstructor;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -31,10 +34,18 @@ import java.util.stream.Collectors;
  * <li>风险 READ / 通道 BACKEND / 类别 R ⇒ 不走确认门、不进前端挂起（走既有披露-裁剪-台账全链）；</li>
  * <li>所有正文结果过 {@link KbText}：{@code <knowledge>} 定界 + "数据非指令"声明 + 定界符剥离 +
  * 8000 字符闸（分数与非必要调试信息一律不出现）。</li>
+ * <li>结果转换器 = {@link PlainTextToolResultConverter}（L-88）：三个工具都返回文本，
+ * 不能走官方默认的 JSON 编码（那会把正文再套一层字符串字面量）。</li>
  * </ul>
+ *
+ * <h2>分页与模型侧限流同口径（L-87）</h2>
+ * 页大小同时受 {@link ToolResultLimiter} 的<b>行预算</b>与字符预算约束：一页必须能被模型
+ * <b>整页</b>看到 —— 否则限流器会按行切掉页尾（{@code </knowledge>} 与
+ * {@code next_offset} 一起丢失），模型照 next_offset 翻页就会漏读被切掉的那段。
+ * 故 {@link #kbReadDoc} 用限流器预算派生每页的行/字符上限，并在回填前按同一份判定复核
+ * （不满足就缩小页重读），而不是让限流器去切。
  */
 @Component
-@RequiredArgsConstructor
 public class KbTools {
 
     /**
@@ -57,7 +68,32 @@ public class KbTools {
 
     static final String DISABLED_TEXT = "知识库未启用（app.ai.kb.enabled=false），无法检索业务知识。";
 
+    /** 渲染开销预留行数（定界/声明/表头/目录框/正文框/尾行 + 目录行余量）。 */
+    private static final int RENDER_ROWS_RESERVE = 12;
+
+    /** 页字符收缩的下限（再小就失去翻页意义；只为避免空页死循环）。 */
+    private static final int MIN_PAGE_CHARS = 200;
+
+    /** 缩页重读的最多轮次（正常 1 轮即收敛：正文行数初值已扣预留，目录过长的首屏才需要第二轮）。 */
+    private static final int PAGE_FIT_ATTEMPTS = 4;
+
+    private static final String READ_DOC = "kb_read_doc";
+
     private final KbService kbService;
+
+    private final ToolResultLimiter limiter;
+
+    /** 生产装配：限流器与回填路径同一实例（同一份 {@code app.ai.result-budget.model.*}）。 */
+    @Autowired
+    public KbTools(KbService kbService, ToolResultLimiter limiter) {
+        this.kbService = kbService;
+        this.limiter = limiter;
+    }
+
+    /** 用例/轻装配：无显式限流器时按配置缺省值（与生产默认口径一致：200 行 / 20000 字符）。 */
+    public KbTools(KbService kbService) {
+        this(kbService, new ToolResultLimiter(new AiProperties()));
+    }
 
     /** 未就绪回执（按 {@code status().lastError()} 区分"建索引中"与"建索引失败"）。 */
     private String notReadyText() {
@@ -77,7 +113,8 @@ public class KbTools {
     @Tool(name = "kb_search", description = "检索业务知识库（制度/流程/口径/术语类问题先用它）。"
             + "每条返回 doc_id/title/section/snippet/updated_at/match（high/medium/low）；不返回检索分数。"
             + "空结果状态为 no_match（含检索词与近似标题）或 low_confidence（仅 1–2 条，全部标 low）；"
-            + "拿到片段后如需条款原文，用 kb_read_doc 读取，不要仅凭片段推测")
+            + "拿到片段后如需条款原文，用 kb_read_doc 读取，不要仅凭片段推测",
+            resultConverter = PlainTextToolResultConverter.class)
     @ToolScope("*")
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.R)
@@ -132,9 +169,11 @@ public class KbTools {
     // ---------------------------------------------------------------- kb_read_doc
 
     @Tool(name = "kb_read_doc", description = "读取知识文档原文（按 offset 连续翻页）。"
-            + "省略 section 时先回目录 + 前 1200 字；max_chars 默认 4000、上限 8000；"
+            + "省略 section 时先回目录 + 前 1200 字；max_chars 默认 4000、上限 8000（单页同时受行数预算约束，"
+            + "实际页可能短于 max_chars，next_offset 才是唯一翻页依据）；"
             + "返回 truncated/next_offset —— 还有下一页就用 next_offset 继续读，不要跳读或凭片段推测。"
-            + "doc_id/section 不存在时返回候选，不会报错中断")
+            + "doc_id/section 不存在时返回候选，不会报错中断",
+            resultConverter = PlainTextToolResultConverter.class)
     @ToolScope("*")
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.R)
@@ -156,8 +195,75 @@ public class KbTools {
                     + "）中没有章节“" + section + "”。\n"
                     + candidateLine(result.candidates())
                     + "建议: 省略 section 读取目录，或改用目录中的完整章节路径。");
-            default -> KbText.wrap(renderRead(result, docId));
+            default -> readPage(result, docId, section, offset, maxChars);
         };
+    }
+
+    /**
+     * 读一页并按<b>模型侧预算</b>复核（L-87）：一页必须整页可见。
+     *
+     * <p>页大小 = 限流器预算 − 渲染开销（{@link #RENDER_ROWS_RESERVE}）；
+     * 复核用与回填<b>同一个</b> {@link ToolResultLimiter} 判定 + {@link KbText} 的 8000 字闸：
+     * 任一超限就按观测超出量缩小页重读（页在行/字符边界上切，next_offset 仍连续），
+     * 绝不把"被截断的页"交给模型 —— 那样 {@code </knowledge>} 与 next_offset 会一起丢失，
+     * 模型按 next_offset 翻页就会漏读被切掉的那段。
+     */
+    private String readPage(KbReadResult first, String docId, String section, Integer offset, Integer maxChars) {
+        ToolResultLimiter.ModelBudget budget = this.limiter.modelBudget(READ_DOC);
+        int pageChars = Math.min(maxChars == null || maxChars <= 0 ? KbText.MAX_RESULT_CHARS : maxChars,
+                KbText.MAX_RESULT_CHARS);
+        int pageRows = budget.maxRows() > 0 ? Math.max(1, budget.maxRows() - RENDER_ROWS_RESERVE) : 0;
+
+        KbReadResult page = first;
+        String body = renderRead(page, docId);
+        for (int attempt = 0; attempt < PAGE_FIT_ATTEMPTS; attempt++) {
+            String rendered = KbText.wrap(body);
+            if (fitsModelSide(rendered, body, budget)) {
+                return rendered;
+            }
+            int nextRows = pageRows;
+            if (pageRows > 1 && budget.maxRows() > 0 && ToolResultLimiter.rowsOf(rendered) > budget.maxRows()) {
+                nextRows = Math.max(1, pageRows - (ToolResultLimiter.rowsOf(rendered) - budget.maxRows()) - 1);
+            }
+            int nextChars = pageChars;
+            int excessChars = Math.max(
+                    budget.maxChars() > 0 ? rendered.length() - budget.maxChars() : 0,
+                    body.length() - KbText.bodyBudget());
+            if (excessChars > 0 && pageChars > MIN_PAGE_CHARS) {
+                nextChars = Math.max(MIN_PAGE_CHARS, pageChars - excessChars - 1);
+            }
+            if (nextRows == pageRows && nextChars == pageChars) {
+                // 已到可缩下限：仍按当前页如实返回（限流器的 notice 会说明"被截断"）
+                return rendered;
+            }
+            pageRows = nextRows;
+            pageChars = nextChars;
+            page = this.kbService.readDoc(docId, section, offset, pageChars, pageRows);
+            if (page.state() != KbReadResult.State.OK) {
+                return KbText.plain(page.error().isEmpty() ? "读取知识文档失败。" : "读取知识文档失败：" + page.error());
+            }
+            body = renderRead(page, docId);
+        }
+        return KbText.wrap(body);
+    }
+
+    /**
+     * 本页是否能被模型<b>完整</b>看到：限流器不截断 + KbText 8000 字闸不截断 + 结构尾巴在。
+     *
+     * <p>结构尾巴（{@code [truncated=…]} 行）在 = 正文没被切掉尾部；与限流器判定同源，
+     * 因此"模型看到的这页"与"工具算出的 next_offset"说的是同一段文字。
+     */
+    private boolean fitsModelSide(String rendered, String body, ToolResultLimiter.ModelBudget budget) {
+        if (!KbText.fits(body)) {
+            return false;
+        }
+        if (budget.maxRows() > 0 && ToolResultLimiter.rowsOf(rendered) > budget.maxRows()) {
+            return false;
+        }
+        if (budget.maxChars() > 0 && rendered.length() > budget.maxChars()) {
+            return false;
+        }
+        return rendered.endsWith(KbText.CLOSE) && rendered.contains("[truncated=");
     }
 
     private String renderRead(KbReadResult result, String docId) {
@@ -195,7 +301,8 @@ public class KbTools {
 
     @Tool(name = "kb_lookup_term", description = "查询术语的预制解释（精确匹配 + 别名/口头叫法）。"
             + "命中返回答案与 source_doc/section/updated_at；未命中返回 found=false 与 next=use kb_search，"
-            + "不做模糊兜底 —— 不要把近似词当成命中，也不要自行补写解释")
+            + "不做模糊兜底 —— 不要把近似词当成命中，也不要自行补写解释",
+            resultConverter = PlainTextToolResultConverter.class)
     @ToolScope("*")
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.R)

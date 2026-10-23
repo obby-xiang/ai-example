@@ -91,6 +91,33 @@ public class ToolResultLimiter {
 	}
 
 	/**
+	 * 模型侧的预算快照（行/字符）—— <b>单一事实源</b>仍是 {@code app.ai.result-budget.model.*}，
+	 * 这里只是把 {@link #forModel} 实际会用到的两个数暴露出来，供"分页类工具"按同一口径
+	 * 派生页大小（L-87：{@code kb_read_doc} 的一页必须整页可见，否则截断会丢结构尾巴）。
+	 *
+	 * @param maxRows  行数上限（0 = 不限）
+	 * @param maxChars 字符上限（0 = 不限；已按工具名解析 per-tool/default/fallback 三档）
+	 */
+	public record ModelBudget(int maxRows, int maxChars) {
+	}
+
+	/** 按工具名取模型侧预算（判定口径与 {@link #forModel} 逐字一致）。 */
+	public ModelBudget modelBudget(String toolName) {
+		AiProperties.ResultBudget.Model model = this.properties.getResultBudget().getModel();
+		return new ModelBudget(model.getMaxRows(), maxCharsFor(toolName, model));
+	}
+
+	/**
+	 * 行数口径（与裁剪判定同一实现：真换行与字面 {@code \n} 都算）。
+	 *
+	 * <p>公开它是为了让分页类工具能在<b>回填前</b>用同一把尺子复核"这一页塞不塞得下"，
+	 * 而不是等本类去切。
+	 */
+	public static int rowsOf(String text) {
+		return text == null ? 0 : countRows(text);
+	}
+
+	/**
 	 * 按配置裁剪一份<b>给模型看</b>的工具结果文本。
 	 *
 	 * @param toolName 工具名（决定分档；null/空白/未注册 ⇒ 兜底档 8000）

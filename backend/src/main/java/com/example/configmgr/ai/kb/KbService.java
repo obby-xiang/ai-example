@@ -570,6 +570,18 @@ public class KbService {
     // ---------------------------------------------------------------- read
 
     public KbReadResult readDoc(String docId, String section, Integer offset, Integer maxChars) {
+        return readDoc(docId, section, offset, maxChars, 0);
+    }
+
+    /**
+     * 按 offset 读一页；{@code maxRows} 是<b>本页正文的行数上限</b>（0 = 不限）。
+     *
+     * <p>行预算与模型侧 {@code app.ai.result-budget.model.max-rows} 同源（由调用方
+     * {@code KbTools} 从限流器取数）：<b>在行边界上切页</b>，于是 {@code next_offset} 恰好是
+     * "这一页最后一个可见字符"的下一位 —— 模型照 next_offset 翻页不会跳读（L-87）。
+     * 先按字符切、再按行切，两者谁先到就按谁切；空页不会发生（至少前进 1 字符）。
+     */
+    public KbReadResult readDoc(String docId, String section, Integer offset, Integer maxChars, int maxRows) {
         if (!enabled()) {
             return KbReadResult.disabled();
         }
@@ -606,6 +618,13 @@ public class KbService {
             boolean firstScreen = target == null && from == 0;
             int effectiveLimit = firstScreen ? Math.min(limit, FIRST_SCREEN_CHARS) : limit;
             int to = Math.min(scopeLength, from + effectiveLimit);
+            if (maxRows > 0) {
+                int cut = rowAlignedEnd(doc.content(), scopeStart + from, scopeStart + to, maxRows);
+                to = Math.max(from, cut - scopeStart);
+                if (to == from && from < scopeLength) {
+                    to = Math.min(scopeLength, from + 1);
+                }
+            }
             String text = doc.content().substring(scopeStart + from, scopeStart + to);
             boolean truncated = to < scopeLength;
             int nextOffset = truncated ? to : -1;
@@ -620,6 +639,28 @@ public class KbService {
         finally {
             acquired.release();
         }
+    }
+
+    /**
+     * 在行边界上切到前 {@code maxRows} 行，返回<b>绝对结束下标</b>（不含）。
+     *
+     * <p>行数口径 = 换行符数 + 1（与 {@code ToolResultLimiter} 的 {@code rowsOf} 同一把尺子）。
+     * 切点落在第 {@code maxRows} 个换行符之前 ⇒ 本页恰好 {@code maxRows} 行。
+     * 窗口内行数不足时返回 {@code end}（整段都要）。
+     */
+    private static int rowAlignedEnd(String content, int start, int end, int maxRows) {
+        int newlines = 0;
+        for (int i = start; i < end; i++) {
+            if (content.charAt(i) != '\n') {
+                continue;
+            }
+            if (newlines + 1 >= maxRows) {
+                // 至少前进 1 字符：绝不返回空页（否则 next_offset 原地不动、翻页死循环）
+                return i > start ? i : Math.min(end, start + 1);
+            }
+            newlines++;
+        }
+        return end;
     }
 
     private SectionMatch resolveSection(KbDoc doc, String section) {
