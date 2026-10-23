@@ -97,6 +97,35 @@ class ContextCompactorTest {
 		assertThat(this.store.ledgerCount()).isZero();
 	}
 
+	/**
+	 * L-89 回归：过渡键与 DB 值漂移时，<b>触发判定与展示面必须用同一个分母</b>（DB 值）。
+	 *
+	 * <p>漂移现场（真机 E2E 批③）：过渡键 1500、DB {@code max_context} 128000。此时
+	 * 「显示的百分比」按 128000 算，「触发百分比」按 1500（减预留后钳到 1）算 —— 用 1000 token
+	 * 的历史就会立刻判满。本用例要求触发侧也读 {@code ContextLimitResolver}：对 128000 而言
+	 * 1000 token 远未达线 ⇒ 不压缩，且 ratio 与展示面同一分母。
+	 */
+	@Test
+	void triggerDenominatorFollowsResolverNotTheTransitionalKey() {
+		AiProperties drifted = new AiProperties();
+		drifted.getContext().setLimitTokens(1500);
+		ContextLimitResolver dbBacked = new ContextLimitResolver(drifted, (providerId, modelId) -> 128000);
+		ContextCompactor service = new ContextCompactor(drifted, dbBacked, this.store);
+
+		ContextCompactor.Outcome outcome = service.compact(request(turns(6), 1000, List.of("{}")));
+
+		assertThat(outcome.limitTokens()).as("压缩结局里的分母 = DB 值").isEqualTo(128000);
+		assertThat(outcome.changed()).as("1000/115000 远未到 L1，不该压").isFalse();
+		assertThat(outcome.reason()).isEqualTo(ContextCompactor.REASON_UNDER_THRESHOLD);
+		assertThat(outcome.ratio()).isCloseTo(1000d / 115000d, org.assertj.core.data.Offset.offset(1e-9));
+		// 展示面同一分母（/context 的 limitTokens 走同一个 resolver）。端点重建分母需要模型身份 ⇒ 先记账一次
+		ContextBreakdownService display = new ContextBreakdownService(service, this.store);
+		service.recordTurn(SESSION_ID, "deepseek-flash", 1000, 0, 1, false, 0, 0, 0);
+		Map<String, Object> snapshot = display.snapshot(SESSION_ID, turns(2), false);
+		assertThat(snapshot).containsEntry("limitTokens", 128000);
+		assertThat(snapshot).containsEntry("percent", 0.8d);
+	}
+
 	/** 上限未知（降级态）⇒ 不做比例判定。 */
 	@Test
 	void unknownLimitSkipsCompactionEntirely() {

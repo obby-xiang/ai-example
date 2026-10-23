@@ -1,7 +1,12 @@
 package com.example.configmgr.ai.context;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.example.configmgr.ai.config.AiProperties;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -70,6 +75,47 @@ class ContextLimitResolverTest {
 
 		assertThat(resolver.resolve(1L, null)).isEqualTo(128000);
 		assertThat(resolver.resolve(1L, "  ")).isEqualTo(128000);
+	}
+
+	/** L-89：过渡键在启动日志里显式标 deprecation（含键名 / 当前值 / 真源 / 回退语义）。 */
+	@Test
+	void transitionalKeyIsAnnouncedAsDeprecatedAtStartup() {
+		Logger logger = (Logger) LoggerFactory.getLogger(ContextLimitResolver.class);
+		ListAppender<ILoggingEvent> appender = new ListAppender<>();
+		appender.start();
+		logger.addAppender(appender);
+		try {
+			new ContextLimitResolver(props(1500)).logStartupDeprecation();
+		}
+		finally {
+			logger.detachAppender(appender);
+		}
+
+		assertThat(appender.list).hasSize(1);
+		ILoggingEvent event = appender.list.get(0);
+		assertThat(event.getLevel()).isEqualTo(Level.WARN);
+		assertThat(event.getFormattedMessage()).contains("app.ai.context.limit-tokens=1500")
+			.contains("已弃用")
+			.contains("ai_model.max_context")
+			.contains("启动期回退");
+	}
+
+	/** 没有回退值时同样告警（措辞改为"降级"），不静默。 */
+	@Test
+	void zeroFallbackIsAlsoAnnounced() {
+		Logger logger = (Logger) LoggerFactory.getLogger(ContextLimitResolver.class);
+		ListAppender<ILoggingEvent> appender = new ListAppender<>();
+		appender.start();
+		logger.addAppender(appender);
+		try {
+			new ContextLimitResolver(props(0)).logStartupDeprecation();
+		}
+		finally {
+			logger.detachAppender(appender);
+		}
+
+		assertThat(appender.list).hasSize(1);
+		assertThat(appender.list.get(0).getFormattedMessage()).contains("已弃用").contains("降级");
 	}
 
 }

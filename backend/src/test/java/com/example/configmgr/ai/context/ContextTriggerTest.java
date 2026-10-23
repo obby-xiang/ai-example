@@ -16,14 +16,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ContextTriggerTest {
 
 	private static ContextTrigger trigger() {
-		// 默认配置：limit 128000 / reserve 13000 / 70-80-95 / 滞回 60
+		// 默认比例参数：reserve 13000 / 70-80-95 / 滞回 60；分母由调用方注入（L-89）
 		return new ContextTrigger(new AiProperties.Context());
 	}
 
 	/** C-09：nextEst = used + completion + input + toolResults（四项精确相加）。 */
 	@Test
 	void c09NextEstIsTheExactSumOfFourTerms() {
-		ContextTrigger.Decision decision = trigger().decide(1000, 200, 50, 300, true);
+		ContextTrigger.Decision decision = trigger().decide(128000, 1000, 200, 50, 300, true);
 
 		assertThat(decision.nextEst()).isEqualTo(1550);
 		assertThat(decision.limitTokens()).isEqualTo(128000);
@@ -35,11 +35,30 @@ class ContextTriggerTest {
 	@Test
 	void c09RatioUsesLimitMinusReserve() {
 		// 80500 / 115000 = 0.7 恰好压线
-		ContextTrigger.Decision decision = trigger().decide(80500, 0, 0, 0, true);
+		ContextTrigger.Decision decision = trigger().decide(128000, 80500, 0, 0, 0, true);
 
 		assertThat(decision.ratio()).isCloseTo(0.7d, org.assertj.core.data.Offset.offset(1e-9));
 		assertThat(decision.level()).as("恰好 70% 就算到线（>= 不是 >）").isEqualTo(ContextTrigger.Level.L1);
 		// 若误用 limit 做分母：80500/128000 = 62.9% < 70% ⇒ 这里会红
+	}
+
+	/**
+	 * L-89：分母只认调用方注入的值（resolver 取数），配置里的过渡键<b>不参与判定</b>。
+	 *
+	 * <p>漂移现场 = 过渡键 1500 / DB 128000。若本类仍读过渡键，1000 token 会被判成"已满"；
+	 * 注入后 ratio 与展示面同一分母，结论是"远未到线"。
+	 */
+	@Test
+	void denominatorIsInjectedAndTheTransitionalKeyIsNotConsulted() {
+		AiProperties properties = new AiProperties();
+		properties.getContext().setLimitTokens(1500);
+
+		ContextTrigger.Decision decision = new ContextTrigger(properties.getContext()).decide(128000, 1000, 0, 0, 0,
+				true);
+
+		assertThat(decision.limitTokens()).isEqualTo(128000);
+		assertThat(decision.ratio()).isCloseTo(1000d / 115000d, org.assertj.core.data.Offset.offset(1e-9));
+		assertThat(decision.level()).isEqualTo(ContextTrigger.Level.NONE);
 	}
 
 	/** 谱系：80% / 95% 各自换级（批① 只执行 L1，但判级由本类如实给出）。 */
@@ -47,9 +66,9 @@ class ContextTriggerTest {
 	void ladderStepsAtEachThreshold() {
 		ContextTrigger trigger = trigger();
 
-		assertThat(trigger.decide(80499, 0, 0, 0, true).level()).isEqualTo(ContextTrigger.Level.NONE);
-		assertThat(trigger.decide(92000, 0, 0, 0, true).level()).isEqualTo(ContextTrigger.Level.L2);
-		assertThat(trigger.decide(109250, 0, 0, 0, true).level()).isEqualTo(ContextTrigger.Level.L3);
+		assertThat(trigger.decide(128000, 80499, 0, 0, 0, true).level()).isEqualTo(ContextTrigger.Level.NONE);
+		assertThat(trigger.decide(128000, 92000, 0, 0, 0, true).level()).isEqualTo(ContextTrigger.Level.L2);
+		assertThat(trigger.decide(128000, 109250, 0, 0, 0, true).level()).isEqualTo(ContextTrigger.Level.L3);
 	}
 
 	/** 每次最多升一级：从 L1 只能到 L2，不能一步跳到 L3。 */
@@ -75,7 +94,7 @@ class ContextTriggerTest {
 	/** 滞回锁住时，即便占比已越线也不给级别（但 ratio 照实返回，供观测）。 */
 	@Test
 	void lockedThresholdsNeverReturnALevel() {
-		ContextTrigger.Decision decision = trigger().decide(100000, 0, 0, 0, false);
+		ContextTrigger.Decision decision = trigger().decide(128000, 100000, 0, 0, 0, false);
 
 		assertThat(decision.level()).isEqualTo(ContextTrigger.Level.NONE);
 		assertThat(decision.triggered()).isFalse();
@@ -85,9 +104,7 @@ class ContextTriggerTest {
 	/** 上限未知（降级态）：不发比例判定，ratio 恒 0。 */
 	@Test
 	void degradedWhenLimitUnknown() {
-		AiProperties properties = new AiProperties();
-		properties.getContext().setLimitTokens(0);
-		ContextTrigger.Decision decision = new ContextTrigger(properties.getContext()).decide(100000, 0, 0, 0, true);
+		ContextTrigger.Decision decision = trigger().decide(0, 100000, 0, 0, 0, true);
 
 		assertThat(decision.degraded()).isTrue();
 		assertThat(decision.ratio()).isZero();
