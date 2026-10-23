@@ -2227,16 +2227,22 @@ export const useAiStore = defineStore('ai', {
         )
         outcome = settleOutcome(sawErrorTerminal ? 'error' : 'ok')
       } catch (error) {
+        const busyConflict = error instanceof ApiError && error.code === ErrorCode.SESSION_BUSY
         if (isCurrentRound()) {
           this.handleChatError(error, assistant.id) // R6：旧轮的异常提示不写进新轮
-          // 批G · G6：409 SESSION_BUSY 的**乐观气泡回收** —— 先把"以为发出去了"的用户气泡与
-          // 空气泡撤掉，草稿只留在输入框一处（旧行为会同时留下"已发送"气泡 + 回填的草稿，
-          // 形成幻影双份并随镜像持久化，实证 E）。
-          if (error instanceof ApiError && error.code === ErrorCode.SESSION_BUSY) {
-            this.messages = this.messages.filter(
-              (message) => message.id !== assistant.id && message.id !== userMessageId
-            )
-          }
+        } else if (busyConflict) {
+          // R-04 真机回归（2026-10-23）：409 与刷新恢复竞态时，本轮身份已在恢复路径上被换掉
+          // ⇒ 旧守卫会把这次失败**整段吞掉**（既无提示、也不回收乐观气泡，幻影双份留在屏上并写进镜像）。
+          // 失败的是"这次发送"本身而不是别的轮，故照常给一句"没发出去"。
+          this.notice = '这条消息没有发出去，请稍后再试。'
+        }
+        // 批G · G6：409 SESSION_BUSY 的**乐观气泡回收** —— 先把"以为发出去了"的用户气泡与
+        // 空气泡撤掉，草稿只留在输入框一处（旧行为会同时留下"已发送"气泡 + 回填的草稿，
+        // 形成幻影双份并随镜像持久化，实证 E）。按 id 只撤本次发送造出的两条，与轮次身份无关。
+        if (busyConflict) {
+          this.messages = this.messages.filter(
+            (message) => message.id !== assistant.id && message.id !== userMessageId
+          )
         }
         outcome = settleOutcome('error')
       } finally {

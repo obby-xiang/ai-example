@@ -1236,6 +1236,10 @@ function normalizeExecutorReturn(value: string | FrontendToolExecution): Fronten
     availability: value.availability,
     result: value.result,
     reason: value.reason,
+    // 机器码（UI_* 闭集）必须穿过这一层：本函数是执行器返回值的**重新包装**点，
+    // 丢了它 = 原语在围栏处给出的码到不了 store / 回灌，台账只剩结局文本（同一类
+    // "三面同源"失明，与下面的 sheetMeta 完全同理）。
+    code: value.code,
     // 表格采样元数据必须穿过这一层：本函数是执行器返回值的**重新包装**点，
     // 丢了它 = 后端永远收不到采样事实（日志/台账/计数三面同时失明）
     sheetMeta: value.sheetMeta
