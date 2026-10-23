@@ -12,7 +12,7 @@
  */
 import { expect, test, type Locator, type Page } from '@playwright/test'
 import { assistantBubble, assistantText, openApp, sendMessage, waitRoundSettled } from './support/helpers'
-import { content, uniq } from './support/helpers-mdxy'
+import { content, ensureFullRender, neutralizeRenderBudget, uniq } from './support/helpers-mdxy'
 
 /** 助手气泡里的正文容器（唯一渲染链路 `.md-body`）。 */
 function mdBody(page: Page): Locator {
@@ -26,6 +26,17 @@ function fenceCode(doc: string, lang: string): string {
 }
 
 test.describe('@stub MD 渲染', () => {
+  /**
+   * 前置：把「单次渲染 24ms 预算」这类 **CPU 自适应策略**在用例内中性化。
+   * 不挂它的话，CI 的 2 核争抢会让一条普通正文的首次渲染偶尔越线 ⇒ 产品把该页签切成降级渲染
+   * （不包 `figure.code`、不跑 hljs、不渲染 mermaid），随后 MD02/MD04 这类结构断言就会
+   * 以"0 个元素"误红。单测在 `tests/setup.ts` 里每例 `resetDegradation()` 归零，这里是 e2e 的等价物。
+   * 断言面不变：仍按常规渲染的 DOM 结构断言（降级版没有这些结构）。
+   */
+  test.beforeEach(async ({ page }) => {
+    await neutralizeRenderBudget(page)
+  })
+
   test('E2E-MD01 基础结构：标题/列表/表格/引用/分隔线各自渲染，无原始标记泄漏', async ({ page }) => {
     await openApp(page)
     await sendMessage(page, `md=basic 用例MD01-${uniq()}`)
@@ -62,6 +73,8 @@ test.describe('@stub MD 渲染', () => {
     await openApp(page)
     await sendMessage(page, `md=highlight 用例MD02-${uniq()}`)
     await waitRoundSettled(page)
+    // 前置：本页签不得处于"渲染预算降级"粘滞态（否则产品按设计不包 figure.code / 不跑 hljs）
+    await ensureFullRender(page, '围栏之后收口。')
 
     const body = mdBody(page)
     await expect(body.locator('code.md-code').first()).toHaveText('const inlineValue = 42')
@@ -93,6 +106,7 @@ test.describe('@stub MD 渲染', () => {
     await openApp(page)
     await sendMessage(page, `md=highlight 用例MD03-${uniq()}`)
     await waitRoundSettled(page)
+    await ensureFullRender(page, '围栏之后收口。')
 
     const button = mdBody(page).locator('figure.code button.cpbtn')
     await expect(button).toHaveCount(1)
@@ -116,6 +130,7 @@ test.describe('@stub MD 渲染', () => {
     page.on('pageerror', (error) => errors.push(error.message))
     await sendMessage(page, `md=mermaid 用例MD04-${uniq()}`)
     await waitRoundSettled(page)
+    await ensureFullRender(page, '图之后收口。')
 
     const body = mdBody(page)
     await expect(body.locator('.mmdc')).toHaveCount(1)
@@ -132,6 +147,7 @@ test.describe('@stub MD 渲染', () => {
     await openApp(page)
     await sendMessage(page, `md=mermaid 用例MD05-${uniq()}`)
     await waitRoundSettled(page)
+    await ensureFullRender(page, '图之后收口。')
     await mdBody(page).locator('.mmdc-full').click()
 
     const viewer = page.locator('[data-testid="mmd-viewer"]')
@@ -161,6 +177,7 @@ test.describe('@stub MD 渲染', () => {
     await openApp(page)
     await sendMessage(page, `md=mermaid 用例MD06-${uniq()}`)
     await waitRoundSettled(page)
+    await ensureFullRender(page, '图之后收口。')
     await mdBody(page).locator('.mmdc-full').click()
     const viewer = page.locator('[data-testid="mmd-viewer"]')
     await expect(viewer).toBeVisible()
@@ -193,6 +210,7 @@ test.describe('@stub MD 渲染', () => {
     await openApp(page)
     await sendMessage(page, `md=mermaid-broken 用例MD07-${uniq()}`)
     await waitRoundSettled(page)
+    await ensureFullRender(page, '坏图之后收口。')
 
     const body = mdBody(page)
     await expect(body.locator('.mmdc')).toHaveCount(1)
@@ -224,6 +242,7 @@ test.describe('@stub MD 渲染', () => {
 
     // 闭合后：二次渲染为高亮，前段文字一字不丢
     await waitRoundSettled(page)
+    await ensureFullRender(page, '尾部段落收口。')
     await expect(body.locator('pre span[class*="hljs-"]').first()).toBeVisible()
     const preText = await body.locator('pre').innerText()
     expect(preText).toContain('const first = 1')
