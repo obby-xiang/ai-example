@@ -1,12 +1,15 @@
 # scripts/ 说明
 
-> 本目录放**可执行的验证与门禁脚本**（不是文档目录）。三条内容：E2E 验证脚本、CI 上游桩、提交前敏感信息扫描钩子。
+> 本目录放**可执行的验证与门禁脚本**（不是文档目录）。五类内容：E2E 验证脚本、多实例 harness、CI 上游桩与门禁守卫、Redis 目标形态冒烟与迁移工具、提交前敏感信息扫描钩子。
 > 文档导航见 `docs/README.md`；如何启动前后端见仓库根 `README.md`。
 
 | 路径 | 作用 |
 | --- | --- |
 | `scripts/verify-e2e.ps1` | 端到端验证脚本（123 用例 = 既有 35 + 批① 桩模式 88，PowerShell）。断言对象是**已启动的后端**，脚本自身不启动任何服务 |
 | `scripts/b23l1-dual-instance.ps1` | **双实例 harness**（B23L1 批①）：8081/8082 共享同一 Redis + 桩上游，脚本自己起/等/收（也可 `-NoStart` 接已就绪实例）。只交付、施工期不运行 |
+| `scripts/redis5-cluster-smoke.sh` | **Redis 5.0.14 真集群冒烟网**（3 主 3 从、Docker）。`--static` 只做静态检查（**不连 Redis，不得当"5.0.14 已验证"**）；真集群模式才产出环境级证据，且**不替代**产品链路断言 |
+| `scripts/redis-run-migration.mjs` | **AI run 键族离线迁移**（旧裸键 → `{run:<runId>}` 同槽键）。**默认 dry-run**，`--apply` 才写、`--rollback` 反向；只 `SCAN` 不用 `KEYS`，目标已存在则逐值对账、不一致即失败且不覆盖 |
+| `scripts/ci/forbid-redis-cluster-unsafe.mjs` | **Cluster / 5.0 兼容面 grep 守卫**：禁多库、禁 `KEYS`/`FLUSHDB`/跨键 `SCAN`、禁 6.2+ 的排他流 ID。`--self-check` 自证规则（命中/不命中/命中数），CI 两步均跑 |
 | `scripts/ci/stub-upstream.mjs` | CI E2E 用的**上游替身**（OpenAI 兼容桩），让用例在零密钥、零外网下确定性通过 |
 | `scripts/ci/stub-routes.json` | 桩的路由表（提示词 → 工具调用/表单）+ `usageShapes` + `faults.switches`（§4.6 桩开关清单的唯一取数点），与 `GenerativeFormRules` 白名单**事实源逐值对账** |
 | `scripts/githooks/` | 提交前敏感信息扫描（DC-08 落地），详见 `scripts/githooks/README.md` |
@@ -264,3 +267,44 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/b23l1-dual-insta
 ## 4. `scripts/githooks/` —— 提交前敏感信息扫描
 
 两条防线（`pre-commit` 扫暂存区新增行、`scan-history.sh` 扫全历史 blob），规则共用 `scan-lib.sh`。启用方式、三条规则、豁免清单与自测方法见 **`scripts/githooks/README.md`**。
+
+---
+
+## 5. Redis 目标形态面：集群冒烟 / 迁移工具 / 静态守卫（2026-10-24 批增补）
+
+> **一句话边界**：这三件是**环境与键形态**的验证与迁移设施，不构成"产品已在 Cluster 上验收"的证据。**当前事实（2026-10-24）**：脚本已入库（`882e6c5` 迁移工具 + 冒烟网 + 守卫 + ci 接线 / `b38a95a` 冒烟网改用容器 IP 建 5.0 集群 / `03dbb84` 冒烟网等待 3 主 3 从落定并修 Pub/Sub 缓冲）；**真集群环境级已通过** = run `40097120796`（`completed/success`，headSha `c2f8b2f`）**PASS 73 / FAIL 0 / KNOWN-LIMIT 1 / SKIP 3**（GitHub Actions Ubuntu + Docker `redis:5.0.14` 临时 3 主 3 从）。**范围限定**：这不是生产连接验证，也不是产品 `available`/503 的证明（网内该条 SKIP、且网内不启动后端），更不是迁移工具的真集群执行证明。迁移工具用例 **52/52** 通过；守卫 `--self-check` 通过（12 正向样例）。
+
+### 5.1 `redis5-cluster-smoke.sh` —— 3 主 3 从真集群冒烟
+
+```sh
+bash scripts/redis5-cluster-smoke.sh            # 真集群（需 Docker；CI 用这个）
+bash scripts/redis5-cluster-smoke.sh --static   # 只跑静态检查（无 Docker 也能跑）
+```
+
+- **退出码**：`0` 全绿 / `1` 有 FAIL / `2` 环境或参数错误。
+- **证据目录**（默认 `backend/target/redis5-smoke`，已被 `.gitignore` 覆盖）：`summary.md` / `commands.log` / `cluster-*.txt` / `failover-*.txt` / `log-scan.txt` / `redis-*.log` / `pubsub-subscriber.log` / `slot-map.txt`。
+- **口径（必须如实交代）**：①`--static` 模式**不连接任何 Redis**，不得用来声称"5.0.14 集群已验证"；②故障注入只断言确定性事实（死节点探针的连接失败证据、存活主 PONG、超时内收敛、收敛后可写读），**不对** `RedisAvailability.available` 做瞬时单值预期（取决于连接落点与重连时序，是 flaky 源）；③节点 `docker logs` 只落盘备查、不设门禁，窄门禁只针对 `commands.log` 里三条预期探针之外的错误；④只用公共镜像、容器间走 user-defined network、**不映射宿主端口**（从根上消除端口冲突）；⑤CI 载体 = `.github/workflows/redis-5-smoke.yml`（先 `bash -n` 静态检查，再跑真集群）；产品契约门 = 主代码不得出现 `Range.Bound.exclusive` / 字符串 `(123-0`（5.0 会报非法 stream ID）——该门**修前必红、修后转绿**；⑥**结论（如实，含留痕）** = 最终跑 `40097120796`（headSha `c2f8b2f`）：**PASS 73 / FAIL 0 / KNOWN-LIMIT 1 / SKIP 3**，产品契约静态门已随 `c2f8b2f` 转绿。**历史两跑非当前状态**：`03dbb84` 环境面 72 PASS + 旧后端产品契约门 1 FAIL（`XRANGE` 排他区间）；更早 `40096255321` 集群创建失败。**SKIP 两条要记住**：`RedisAvailability.available` 未在本网验证、未提供 `SMOKE_BACKEND_LOG`（本网不启动后端）。
+
+### 5.2 `redis-run-migration.mjs` —— run 键族同槽迁移
+
+```sh
+node scripts/redis-run-migration.mjs                 # dry-run，只打印计划
+node scripts/redis-run-migration.mjs --apply          # 真写（源默认保留）
+node scripts/redis-run-migration.mjs --rollback       # 反向（tagged → 旧裸键）
+```
+
+- **迁 10 族**：`ai:run:` / `ai:seq:`（STRING）、`ai:pending:` / `ai:claim:` / `ai:idem:` / `ai:req:` / `ai:decided:`（HASH）、`ai:ledger:` / `ai:events:`（LIST）、`ai:xevents:`（STREAM）。
+- **明确不迁**：`ai:fence:run:` / `ai:lease:run:` / `ai:lease:epoch:`（含旧全局 `ai:lease:epoch`）、`ai:runs`、`ai:session:current:`、`ai:beat:` / `ai:cancel:` / `ai:activity:` / `ai:lock:` / `ai:resume:lock:`、`ai:ctx:` / `ai:safety:` / `ai:cfg:ver` / `ai:rate:`；`chat:mem` legacy 由仓储回退读 + 首次成功保存自然迁移。
+- **安全口径**：①节点只从 `AI_REDIS_CLUSTER_NODES` 读、无默认值；②目标不存在才写，已存在则逐值对账（一致跳过、不一致即失败且**绝不覆盖**）；③`seq` 与 `xevents` 必须成对，任一缺失则整 run 跳过（不留下活快照无帧）；④按类型保留全部值/字段/顺序/显式 stream ID/PTTL；⑤`--delete-source` 先做"全部候选值 + PTTL 充分性"校验（校验阶段失败不删任何源）；⑥发现 key 只 `SCAN`（逐 master），**禁止 `KEYS`**；⑦`--apply` 用全局迁移锁串行化、按 token 续租，锁丢失即在下一检查点停止（**不承诺当前命令回滚**）。
+- **离线窗口**：写前停业务写入；同一时间只允许一个迁移进程；任一错误即停并非 0 退出，**不打印成功结论**。
+- **用例** = `node --test scripts/redis-run-migration.test.mjs` **52/52 通过**（2026-10-24 实测；脚本笔 `882e6c5`）。**注意**：这 52 例是**离线用例**，不构成"迁移工具已在真集群执行过"的证据（真集群冒烟网只验环境面，不跑迁移）。
+
+### 5.3 `ci/forbid-redis-cluster-unsafe.mjs` —— 静态守卫
+
+```sh
+node scripts/ci/forbid-redis-cluster-unsafe.mjs              # 扫 backend/src/main
+node scripts/ci/forbid-redis-cluster-unsafe.mjs --self-check # 规则自证
+node scripts/ci/forbid-redis-cluster-unsafe.mjs --root <dir> # 指定目录（排障）
+```
+
+禁止进入 `backend/src/main` 的面：**多库**（`database:` / URL 库号 / `setDatabase`）、**单机全量命令**（`KEYS` / `FLUSHDB` / `FLUSHALL` / 跨键 `SCAN`）、**5.0 不支持的排他流 ID**（`Range.Bound.exclusive` / 字符串 `(123-0`）。keys/scan 规则只认 Redis 侧接收者（避开 JPA 原生 SQL 与业务方法 `scan(` 的误报），配置规则要求文件处于 Redis 上下文；`ci.yml` 里 `--self-check` 与主扫各一步。
