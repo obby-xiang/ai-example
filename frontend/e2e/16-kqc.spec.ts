@@ -731,7 +731,7 @@ test.describe('@stub 16 C 上下文统计与压缩', () => {
     }
   })
 
-  test('E2E-C12 CONTEXT_OVERFLOW 识别：越窗 400 认成上下文超窗、不重试、文案指向压缩', async () => {
+  test('E2E-C12 CONTEXT_OVERFLOW 识别：越窗 400 认成上下文超窗、不重试、用户面安全文案', async () => {
     const sid = newSessionId('C12')
     const before = maxStubIndex()
     const round = await chatRound(sid, `上下文用例 ${fingerprint('C12')} context-overflow`)
@@ -740,11 +740,16 @@ test.describe('@stub 16 C 上下文统计与压缩', () => {
     expect(round.done).toBeUndefined()
     expect(round.errors).toHaveLength(1)
     const error = round.errors[0]
-    // 分类落在 code 上（不可重试的越窗）；message 保留上游原文供排障（见报告「发现项 F-4」）
+    // 分类落在 code 上（不可重试的越窗）。用户面文案 = R-08 白名单预置短句
+    // （ResilientChatService.SAFE_FAILURE_MESSAGES，2026-10-24 裁决：原始 body / 异常只进
+    // 日志与台账，绝不再回到用户面 —— 旧口径“message 保留上游原文”已废弃）。
     expect(String(error.code)).toBe('CONTEXT_OVERFLOW')
-    expect(String(error.message)).toContain('上游返回 HTTP 400')
-    expect(String(error.message)).toContain('maximum context length')
-    expect(String(error.message)).toContain('context_length_exceeded')
+    expect(String(error.message)).toBe('对话内容过长，请开启新会话后重试。')
+    // 反向锁：上游 400 的状态行、body 措辞与错误分类都不得泄漏到用户面
+    for (const leaked of ['上游返回 HTTP 400', 'maximum context length',
+      'context_length_exceeded', 'invalid_request_error', '300001']) {
+      expect(String(error.message)).not.toContain(leaked)
+    }
 
     // 不重试：整轮只打了 1 次上游（越窗重发只会再超一次）
     const requests = await waitStubRequestsAfter(before, 1, 20_000)
