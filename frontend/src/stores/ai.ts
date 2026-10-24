@@ -76,8 +76,8 @@ import {
   writeSubmittedValuesToMessage
 } from '@/utils/parts'
 import { ErrorCode, type SuspendPoolSaturated } from '@/types/api'
-import { frameSeq, isTerminalFrame, type ToolOutcome } from '@/types/sse'
-import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiHealth, type AiHistory, type AiHistoryMessage, type AiRunCurrent, type AiRunCurrentEntry, type AiSessionMirror, type ChatMessage, type ContextBreakdownItem, type ContextCompaction, type ContextUsage, type GateSubmission, type MessagePart, type PendingToolCall, type SheetPreviewLevel, type SheetWritePlan, type ToolPart, type ToolPartPatch, type ToolRunStatus } from '@/types/ai'
+import { frameSeq, isTerminalFrame, type ToolOutcome, type TruncationNoticeCode } from '@/types/sse'
+import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiHealth, type AiHistory, type AiHistoryMessage, type AiRunCurrent, type AiRunCurrentEntry, type AiSessionMirror, type ChatMessage, type ContextBreakdownItem, type ContextCompaction, type ContextUsage, type GateSubmission, type MessagePart, type MessageTruncationFields, type PendingToolCall, type SheetPreviewLevel, type SheetWritePlan, type ToolPart, type ToolPartPatch, type ToolRunStatus } from '@/types/ai'
 import type { FormValueIssue } from '@/types/form-schema'
 import { clearFormDraft, loadFormDraft, saveFormDraft } from '@/utils/form-draft'
 import { parseFormSchema, checkFormValues } from '@/types/form-schema'
@@ -743,6 +743,49 @@ function roleOf(type: string): ChatMessage['role'] {
     return 'system'
   }
   return 'assistant'
+}
+
+/**
+ * 历史载荷的截断元数据（A10 R-15）：只按<b>实际存在的键</b>透传到段上。
+ *
+ * <p>两条来源：① `toolResponses[]` —— 后端从持久化信封里取回
+ * `truncated/noticeCode/originalChars/returnedChars/strategy/truncatedReason`；② 历史条目自身
+ * （additive，文本段可携带同名字段；当前后端不产该键，仅为未来载荷/镜像前向兼容）。缺键一律不写，保证旧历史重建后的段形状
+ * 与既有实现逐字一致（不回退出 `undefined` 键）。
+ */
+function historyTruncationFields(source: unknown): Partial<MessageTruncationFields> {
+  if (source === null || typeof source !== 'object') {
+    return {}
+  }
+  const value = source as {
+    truncated?: unknown
+    noticeCode?: unknown
+    originalChars?: unknown
+    returnedChars?: unknown
+    strategy?: unknown
+    truncatedReason?: unknown
+  }
+  const fields: Partial<MessageTruncationFields> = {}
+  if (typeof value.truncated === 'boolean') {
+    fields.truncated = value.truncated
+  }
+  if (value.noticeCode === 'frame_truncated' || value.noticeCode === 'frame_limit_unreached'
+    || value.noticeCode === 'model_view_truncated') {
+    fields.noticeCode = value.noticeCode as TruncationNoticeCode
+  }
+  if (typeof value.originalChars === 'number') {
+    fields.originalChars = value.originalChars
+  }
+  if (typeof value.returnedChars === 'number') {
+    fields.returnedChars = value.returnedChars
+  }
+  if (typeof value.strategy === 'string' || value.strategy === null) {
+    fields.strategy = value.strategy as string | null
+  }
+  if (typeof value.truncatedReason === 'string' || value.truncatedReason === null) {
+    fields.truncatedReason = value.truncatedReason as string | null
+  }
+  return fields
 }
 
 /** 契约事件载荷 → 工作区动作记录（形态不符则忽略，不抛错）。 */
@@ -1539,7 +1582,9 @@ export const useAiStore = defineStore('ai', {
         const blankText = (item.text ?? '').trim() === ''
         const hasTextPart = !blankText || calls.length === 0
         const parts: MessagePart[] = [
-          ...(hasTextPart ? [{ kind: 'text', seg: 0, text: item.text ?? '', streaming: false } as MessagePart] : []),
+          ...(hasTextPart
+            ? [{ kind: 'text', seg: 0, text: item.text ?? '', streaming: false, ...historyTruncationFields(item) } as MessagePart]
+            : []),
           ...calls.map((call, toolIndex): ToolPart => {
             const name = call.name ?? '未知工具'
             const state = call.id !== null && call.id !== undefined && call.id !== ''
@@ -1571,6 +1616,8 @@ export const useAiStore = defineStore('ai', {
               status: mappedStatus ?? 'succeeded',
               args: call.arguments,
               result: null,
+              // A10 R-15：持久化的模型侧截断元数据随历史响应回到段上（刷新后角标/本地化 hover）。
+              ...historyTruncationFields(matched),
               requiresAction: false
             }
             // R-160 M2/M1：回读决策元数据三字段（写口 R-158 #10 已成，历史路此前丢失 ⇒
@@ -1642,6 +1689,7 @@ export const useAiStore = defineStore('ai', {
         const hit = responsePool[hitIndex] as NonNullable<AiHistoryMessage['toolResponses']>[number]
         consumedResponses.add(hit)
         unmatched.part.result = hit.responseData ?? null
+        Object.assign(unmatched.part, historyTruncationFields(hit))
       }
       // C1（复核 m-1）：序位兜底在 deriveProjections（flatMap 内）**之后**才写 part.result ——
       // 投影按值快照（parts.ts）会滞留 null。对含工具段的受影响消息重跑 deriveProjections
@@ -2367,7 +2415,14 @@ export const useAiStore = defineStore('ai', {
           // 批G · G5：**不再出现**「本轮未开始」这类技术措辞与 runId（SESSION_BUSY 的气泡整体
           // 回收，不走这里）；其余错误只在正文为空时补一句人话。
           const hasText = message.parts.some((part) => part.kind === 'text' && part.text !== '')
-          const literal = error instanceof Error && !(error instanceof ApiError && error.code === ErrorCode.SESSION_BUSY)
+          // R-12：这些码已有本地化通知/错误卡，正文不再回显后端 message（en 下会中英叠加）。
+          const localizedElsewhere = error instanceof ApiError
+            && (error.code === ErrorCode.SESSION_BUSY
+              || error.code === ErrorCode.AI_UNAVAILABLE
+              || error.code === ErrorCode.AI_REDIS_UNAVAILABLE
+              || error.code === ErrorCode.AI_KEY_MISSING
+              || error.code === ErrorCode.AI_KEY_UNREADABLE)
+          const literal = error instanceof Error && !localizedElsewhere
             ? translate('ai.panel.sendNotSentInline', { message: error.message })
             : null
           if (literal !== null && !hasText) {
@@ -2415,12 +2470,21 @@ export const useAiStore = defineStore('ai', {
           break
         }
         case ErrorCode.AI_UNAVAILABLE:
-          // 后端 message 是中文原文（数据不是文案），只翻本地模板部分。
-          setNotice(this, 'ai.notice.aiDisabled', { message: error.message })
+          // R-12：不再是"模板 + 后端原文"（en 下会中英叠加）；整句走本地词表并指向设置页。
+          setNotice(this, 'ai.notice.aiDisabled')
+          void this.probeHealth()
+          break
+        case ErrorCode.AI_KEY_MISSING:
+          // R-12：无 key ⇒ 专门文案 + 专门错误卡（见 utils/error-card.ts），不打后端中文原文。
+          setNotice(this, 'ai.notice.keyMissing')
+          void this.probeHealth()
+          break
+        case ErrorCode.AI_KEY_UNREADABLE:
+          setNotice(this, 'ai.notice.keyUnreadable')
           void this.probeHealth()
           break
         case ErrorCode.AI_REDIS_UNAVAILABLE:
-          setNotice(this, 'ai.notice.redisUnavailable', { message: error.message })
+          setNotice(this, 'ai.notice.redisUnavailable')
           void this.probeHealth()
           break
         // 批③ 新增的 /chat 稳定码（模型配置面）：前端按 code 查同一份词表，
@@ -4250,7 +4314,7 @@ export const useAiStore = defineStore('ai', {
      * 4. **最后** `DELETE /api/ai/history/{oldSessionId}` 删旧记忆（失败只提示，不影响新对话；
      *    提示带「仍是本轮」守卫，见函数末尾与复核 F5）。
      *
-     * 已知代价（施工卡 §5.2，登记；口径按复核 F2 订正为如实版）：旧轮终局的记忆收敛（`clear + add`）
+     * 已知代价（施工卡 §5.2，登记；口径按复核 F2 订正为如实版）：旧轮终局的记忆收敛（整窗 `saveAll`）
      * 会把窗口整体写回同名键，而 `cancel` 只是「置取消标志 + 唤醒收尾」、轮次收盘是异步的
      * ⇒ **在飞路径下 DELETE 必然先于收盘重写**（顺序必然，不是概率竞态；先 cancel 再 delete 也
      * 缩不小这个窗口），即旧键必被写回、残留至 TTL 到期。旧 id 已被前端丢弃，故残留期间无人读取
@@ -4674,7 +4738,8 @@ export const useAiStore = defineStore('ai', {
           if (this.activeForm !== null) {
             this.dropActiveForm()
           }
-          setNotice(this, 'ai.notice.turnError', { code: frame.code, message: frame.message })
+          // R-09：通知槽只给 message，不再展示机器码与派生后缀；码留在 errorCard.code（诊断/取证）。
+          setNotice(this, 'ai.notice.turnError', { message: frame.message })
           // R-165 S5c：错误卡族（demo v7.7 裁决区 08）—— 挂在**本轮这条助手消息**上 ⇒ 面板在
           // 它发生的位置内联渲染（绝不做顶部固定）。判据 = 码优先、文案兜底（utils/error-card.ts）。
           message.errorCard = buildErrorCard(frame.code, frame.message)

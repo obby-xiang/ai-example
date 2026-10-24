@@ -14,6 +14,8 @@
  * 不改写既有断言。
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createPinia, setActivePinia } from 'pinia'
+import { useAiStore } from '@/stores/ai'
 import { SseChunkParser, parseSseFrame, streamChat } from '@/api/sse'
 import type { SseStreamOptions } from '@/api/sse'
 import { frameSeq, type SseFrame } from '@/types/sse'
@@ -264,8 +266,11 @@ describe('C2 帧序异常（跳号 / 回退 / 重复 / 双 runId 交错）', () 
     expect(seen.map((item) => item.type)).toEqual(['start', 'delta'])
   })
 
-  it('C2-03 重复 seq：store 层幂等（文本不重复累加、序号不回退）', async () => {
-    const store = await freshStore()
+  it('C2-03 重复 seq：store 层幂等（文本不重复累加、序号不回退）', () => {
+    // 本用例只验 store 状态机，不需要 freshStore 的 resetModules 模块图隔离；
+    // 新 Pinia 实例已提供独立 state。避免在 5s 用例超时内重付 stores/ai 的首次动态 import（2–5s）。
+    setActivePinia(createPinia())
+    const store = useAiStore()
     store.sessionId = 's-dup'
     store.messages = [textMessage('a-dup', 'assistant', '', { streaming: true, done: false })]
 

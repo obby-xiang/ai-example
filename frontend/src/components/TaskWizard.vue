@@ -10,7 +10,7 @@
       </div>
       <div class="flex items-center gap-2">
         <slot name="header-extra" />
-        <el-button @click="goBack">{{ backLabel }}</el-button>
+        <el-button @click="goBack">{{ backText }}</el-button>
       </div>
     </div>
 
@@ -64,7 +64,7 @@
       <slot name="actions-extra" />
       <el-button v-if="showPrev" :disabled="prevDisabled" @click="emit('prev')">{{ t('task.prev') }}</el-button>
       <el-button v-if="showNext" type="primary" :disabled="nextDisabled" :loading="nextLoading" @click="emit('next')">
-        {{ nextLabel }}
+        {{ nextText }}
       </el-button>
     </div>
   </div>
@@ -76,7 +76,7 @@ import { useI18n } from 'vue-i18n'
  * 向导壳体（标题栏 + 步骤条 + 页脚导航），业务步骤由插槽注入 —— 壳/体分离
  * （规格 §2 部件映射：glm-5.3 `TaskWizard.vue` 取壳，视觉按 kimi-k3 同名页对齐）。
  *
- * 顶部状态标签以**任务状态机**为准（task store 的 mapTaskStatusToStep），
+ * 顶部状态标签以**任务状态机**为准，按当前语言查 `views.tasks.*`（术语与任务中心一致），
  * 不用进度百分比反推状态；`activeIndex` 由页面按任务 currentStep 给出。
  *
  * 步骤条**节点级**状态由页面按"该步作业的终态"给出（`stepStatuses`，下标与 `steps` 对齐），
@@ -89,7 +89,6 @@ import { useI18n } from 'vue-i18n'
 import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { ROUTE_NAMES } from '@/router'
-import { mapTaskStatusToStep } from '@/stores/task'
 import type { TaskStatus } from '@/types/task'
 
 const { t } = useI18n()
@@ -128,13 +127,13 @@ const props = withDefaults(
     stepStatuses: () => [],
     readOnly: false,
     taskStatus: null,
-    backLabel: '返回任务列表',
+    backLabel: '',
     showPrev: true,
     showNext: true,
     prevDisabled: false,
     nextDisabled: false,
     nextLoading: false,
-    nextLabel: '下一步'
+    nextLabel: ''
   }
 )
 
@@ -147,9 +146,22 @@ const emit = defineEmits<{
 
 const router = useRouter()
 
-const stepState = computed(() => mapTaskStatusToStep(props.taskStatus))
+const taskStatusLabel = computed(() => {
+  switch (props.taskStatus) {
+    case 'COMPLETED':
+      return t('views.tasks.completed')
+    case 'FAILED':
+      return t('views.tasks.failed')
+    case 'CANCELLED':
+      return t('views.tasks.cancelled')
+    default:
+      return t('views.tasks.active')
+  }
+})
 
-const taskStatusLabel = computed(() => stepState.value.label)
+const backText = computed(() => props.backLabel || t('task.backToList'))
+
+const nextText = computed(() => props.nextLabel || t('task.next'))
 
 const statusTagType = computed<'success' | 'danger' | 'info' | 'warning'>(() => {
   switch (props.taskStatus) {

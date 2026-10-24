@@ -479,6 +479,7 @@ async function confirm(message: string): Promise<boolean> {
       data-testid="ai-settings-error"
     >
       {{ T.loadFailed }}：{{ describeAiConfigError(loadError) }}
+      <el-button size="small" class="ml-2" data-testid="ai-settings-retry" @click="load">{{ T.retry }}</el-button>
     </div>
 
     <template v-else>

@@ -47,7 +47,7 @@
         >
           <el-option v-for="project in projects" :key="project.code" :label="`${project.name}（${project.code}）`" :value="project.code" />
         </el-select>
-        <el-button type="primary" :loading="loading" @click="reload">{{ t('views.data.search') }}</el-button>
+        <el-button type="primary" :loading="loading" @click="reloadData">{{ t('views.data.search') }}</el-button>
         <el-button :loading="counting" @click="previewCount">{{ t('views.data.estimateRows') }}</el-button>
         <el-tag v-if="serverCount !== null" size="small" type="success">{{ t('views.data.serverCount', { count: serverCount }) }}</el-tag>
       </div>
@@ -218,21 +218,17 @@ function onModelChange(value: ConditionDraftModel): void {
   serverCount.value = null
 }
 
-async function loadDefs(): Promise<void> {
+async function fetchDefinitions(): Promise<ConfigDefinition[] | null> {
   try {
-    defs.value = await definitionsApi.listDefinitions()
-    const queryDef = typeof route.query.defCode === 'string' ? route.query.defCode : ''
-    const initial = queryDef || defs.value[0]?.code || ''
-    if (initial) {
-      defCode.value = initial
-      onDefChange(initial)
-    }
+    return await definitionsApi.listDefinitions()
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : t('views.data.msg.defsLoadFailed'))
+    return null
   }
 }
 
-function onDefChange(code: string): void {
+/** 选中定义后重置范围/条件/分页（不触发请求，由调用方决定拉列表还是只拉数据）。 */
+function applyDefSelection(code: string): void {
   const def = defs.value.find((item) => item.code === code)
   scopeType.value = def ? (def.level as ScopeType) : ''
   scopeKey.value = ''
@@ -246,7 +242,11 @@ function onDefChange(code: string): void {
     step: null,
     selectedDefs: code ? [code] : []
   })
-  void reload()
+}
+
+function onDefChange(code: string): void {
+  applyDefSelection(code)
+  void loadData()
 }
 
 async function loadData(): Promise<void> {
@@ -305,9 +305,37 @@ async function previewCount(): Promise<void> {
   }
 }
 
-async function reload(): Promise<void> {
+/**
+ * 重拉定义列表：当前 defCode 仍有效时**不动**范围/条件/页码（查询/刷新共用）；
+ * 只有失效或未选时才按 route/首项初始化。失败直接返回，不回退任何用户状态。
+ */
+async function refreshDefinitions(): Promise<void> {
+  const list = await fetchDefinitions()
+  if (!list) {
+    return
+  }
+  defs.value = list
+  if (defCode.value && list.some((item) => item.code === defCode.value)) {
+    return
+  }
+  const queryDef = typeof route.query.defCode === 'string' ? route.query.defCode : ''
+  const next = queryDef || list[0]?.code || ''
+  defCode.value = next
+  applyDefSelection(next)
+}
+
+/** 只按当前筛选拉数据（不重拉定义、不隐式重置页码）。 */
+async function reloadData(): Promise<void> {
   serverCount.value = null
-  await loadData()
+  if (defCode.value) {
+    await loadData()
+  }
+}
+
+/** 右上「刷新」：补拉定义 + 按当前筛选重拉数据。 */
+async function reload(): Promise<void> {
+  await refreshDefinitions()
+  await reloadData()
 }
 
 function resetAll(): void {
@@ -315,7 +343,7 @@ function resetAll(): void {
   scopeKey.value = ''
   serverCount.value = null
   page.value = 0
-  void reload()
+  void reloadData()
 }
 
 function onPageChange(next: number): void {
@@ -331,7 +359,7 @@ function onSizeChange(next: number): void {
 
 onMounted(async () => {
   workspace.enterPage({ pageId: 'data', page: 'data', taskType: null, step: null })
-  await loadDefs()
+  await reload()
   const [regionList, projectList] = await Promise.all([
     masterDataApi.listRegions().catch(() => []),
     masterDataApi.listProjects().catch(() => [])

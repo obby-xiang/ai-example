@@ -517,6 +517,14 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
       const part = openStreamPart(message, frame.kind === 'reasoning' ? 'reasoning' : 'text')
       part.text += frame.text
       part.streaming = true
+      // A10 R-15：delta 的 text 也可能被单帧字节预算截断（FrameSizeLimiter fields=text）。
+      // 旧帧缺省 ⇒ 不新增键；新帧把码/数字透传到段上，由 AiPanel 给角标提示。
+      if (frame.truncated !== undefined) part.truncated = frame.truncated
+      if (frame.noticeCode !== undefined) part.noticeCode = frame.noticeCode
+      if (frame.originalChars !== undefined) part.originalChars = frame.originalChars
+      if (frame.returnedChars !== undefined) part.returnedChars = frame.returnedChars
+      if (frame.strategy !== undefined) part.strategy = frame.strategy
+      if (frame.truncatedReason !== undefined) part.truncatedReason = frame.truncatedReason
       if (frame.kind !== 'reasoning') {
         message.streaming = true
       }
@@ -559,6 +567,10 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
           result: frame.result ?? frame.message ?? null,
           truncated: frame.truncated ?? false,
           truncatedReason: frame.truncatedReason ?? null,
+          ...(frame.noticeCode !== undefined ? { noticeCode: frame.noticeCode } : {}),
+          ...(frame.originalChars !== undefined ? { originalChars: frame.originalChars } : {}),
+          ...(frame.returnedChars !== undefined ? { returnedChars: frame.returnedChars } : {}),
+          ...(frame.strategy !== undefined ? { strategy: frame.strategy } : {}),
           ...(frame.outcome !== undefined ? { outcome: frame.outcome } : {}),
           requiresAction: false
         })
@@ -596,10 +608,14 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
         status,
         messageId: frame.messageId,
         result: frame.result ?? null,
-        // R-154 #2：消费帧侧截断标记（FrameSizeLimiter TRUNCATED_FIELD/TRUNCATED_REASON_FIELD），
-        // 随段持久化供卡面「已截断」角标渲染；缺省 = 未截断
+        // R-154 #2 / A10 R-15：消费帧侧截断标记（noticeCode + 结构化数字优先；
+        // truncatedReason 仅作旧帧/旧客户端兼容），随段持久化供卡面「已截断」角标渲染。
         truncated: frame.truncated ?? false,
         truncatedReason: frame.truncatedReason ?? null,
+        ...(frame.noticeCode !== undefined ? { noticeCode: frame.noticeCode } : {}),
+        ...(frame.originalChars !== undefined ? { originalChars: frame.originalChars } : {}),
+        ...(frame.returnedChars !== undefined ? { returnedChars: frame.returnedChars } : {}),
+        ...(frame.strategy !== undefined ? { strategy: frame.strategy } : {}),
         // 治理 P0-1：仅在帧带 outcome 时落段（旧帧不产生 undefined 键，镜像/段口径不变）；
         // 一期卡面不展示，仅供后续阶段读段
         ...(frame.outcome !== undefined ? { outcome: frame.outcome } : {}),
@@ -745,6 +761,14 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
         status,
         messageId: frame.messageId,
         result: frame.result ?? null,
+        // A10 R-15 I-B：frontend_tool_result 帧同样会挂截断四件套（模型侧预裁 / 帧字节裁），
+        // 必须随段透传；缺省帧不产生 undefined 键（旧帧零变化）。
+        ...(frame.truncated !== undefined ? { truncated: frame.truncated } : {}),
+        ...(frame.noticeCode !== undefined ? { noticeCode: frame.noticeCode } : {}),
+        ...(frame.originalChars !== undefined ? { originalChars: frame.originalChars } : {}),
+        ...(frame.returnedChars !== undefined ? { returnedChars: frame.returnedChars } : {}),
+        ...(frame.strategy !== undefined ? { strategy: frame.strategy } : {}),
+        ...(frame.truncatedReason !== undefined ? { truncatedReason: frame.truncatedReason } : {}),
         // 契约增量：skipped 的卡面 reason 取信封 message（缺省回落结果文本；均无则不覆盖原值）
         ...(status === 'skipped' && (frame.message !== undefined || frame.result !== undefined)
           ? { reason: frame.message ?? frame.result ?? null }

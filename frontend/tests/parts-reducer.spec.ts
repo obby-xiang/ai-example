@@ -13,7 +13,7 @@
  */
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import type { ChatMessage, MessagePart, ToolPart } from '@/types/ai'
+import type { ChatMessage, MessagePart, ReasoningPart, TextPart, ToolPart } from '@/types/ai'
 import { GENERATIVE_FORM_TOOL } from '@/types/ai'
 import {
   alreadyApplied,
@@ -555,14 +555,22 @@ describe('R-154 ⑨⑩：截断标记落段 + message_start 时间戳（纯函�
       executed: true,
       result: '前 64KB…',
       truncated: true,
-      truncatedReason: '单帧 64KB 预算超限，结果字段被截断'
+      truncatedReason: 'Result truncated because it exceeded the frame size limit.',
+      noticeCode: 'frame_truncated',
+      originalChars: 9_000,
+      returnedChars: 3_195,
+      strategy: 'head'
     })
 
     expect(toolPart(message, 'c1')).toMatchObject({
       status: 'succeeded',
       result: '前 64KB…',
       truncated: true,
-      truncatedReason: '单帧 64KB 预算超限，结果字段被截断'
+      truncatedReason: 'Result truncated because it exceeded the frame size limit.',
+      noticeCode: 'frame_truncated',
+      originalChars: 9_000,
+      returnedChars: 3_195,
+      strategy: 'head'
     })
 
     // 缺省帧（旧格式 / 未截断）⇒ 显式 false / null，卡面角标判据稳定
@@ -578,6 +586,121 @@ describe('R-154 ⑨⑩：截断标记落段 + message_start 时间戳（纯函�
       result: '全文'
     })
     expect(toolPart(plain, 'c2')).toMatchObject({ truncated: false, truncatedReason: null })
+    expect(toolPart(plain, 'c2').noticeCode).toBeUndefined()
+    expect(toolPart(plain, 'c2').originalChars).toBeUndefined()
+  })
+
+  it('⑨′ frontend_tool_result 同样透传 noticeCode/数字/strategy（缺省帧不产生 undefined 键）', () => {
+    const message = makeMessage()
+    upsertToolPart(message, {
+      toolCallId: 'f1',
+      name: 'generative_form',
+      kind2: 'FRONTEND',
+      status: 'running',
+      requiresAction: true
+    })
+    applyFrameToParts(message, {
+      type: 'frontend_tool_result',
+      toolCallId: 'f1',
+      name: 'generative_form',
+      status: 'FRONTEND_RESULT',
+      ok: true,
+      executed: false,
+      result: '大表单结果',
+      truncated: true,
+      noticeCode: 'model_view_truncated',
+      originalChars: 12_000,
+      returnedChars: 8_000,
+      strategy: 'head',
+      truncatedReason: 'Result truncated for the model; this frame shows the full result.'
+    })
+
+    expect(toolPart(message, 'f1')).toMatchObject({
+      status: 'succeeded',
+      truncated: true,
+      noticeCode: 'model_view_truncated',
+      originalChars: 12_000,
+      returnedChars: 8_000,
+      strategy: 'head',
+      truncatedReason: 'Result truncated for the model; this frame shows the full result.'
+    })
+
+    const plain = makeMessage()
+    upsertToolPart(plain, {
+      toolCallId: 'f2',
+      name: 'generative_form',
+      kind2: 'FRONTEND',
+      status: 'running',
+      requiresAction: true
+    })
+    applyFrameToParts(plain, {
+      type: 'frontend_tool_result',
+      toolCallId: 'f2',
+      name: 'generative_form',
+      status: 'FRONTEND_RESULT',
+      ok: true,
+      executed: false,
+      result: '普通结果'
+    })
+    const plainPart = toolPart(plain, 'f2')
+    expect(plainPart.truncated).toBeUndefined()
+    expect(plainPart.noticeCode).toBeUndefined()
+    expect(plainPart.originalChars).toBeUndefined()
+    expect(plainPart.returnedChars).toBeUndefined()
+    expect(plainPart.strategy).toBeUndefined()
+    expect(plainPart.truncatedReason).toBeUndefined()
+  })
+
+  it('⑨″ delta 正文/思考同样透传截断字段（旧帧不产生新键）', () => {
+    const textMessage = makeMessage()
+    applyFrameToParts(textMessage, {
+      type: 'delta',
+      text: '被截断的正文',
+      truncated: true,
+      noticeCode: 'frame_truncated',
+      originalChars: 20_000,
+      returnedChars: 3_400,
+      strategy: 'head',
+      truncatedReason: 'Result truncated because it exceeded the frame size limit.'
+    })
+    const textPart = textMessage.parts.find((part) => part.kind === 'text') as TextPart
+    expect(textPart).toMatchObject({
+      text: '被截断的正文',
+      truncated: true,
+      noticeCode: 'frame_truncated',
+      originalChars: 20_000,
+      returnedChars: 3_400,
+      strategy: 'head',
+      truncatedReason: 'Result truncated because it exceeded the frame size limit.'
+    })
+
+    const reasoningMessage = makeMessage()
+    applyFrameToParts(reasoningMessage, {
+      type: 'delta',
+      kind: 'reasoning',
+      text: '被截断的思考',
+      truncated: true,
+      noticeCode: 'frame_truncated',
+      originalChars: 9_000,
+      returnedChars: 2_000,
+      strategy: 'head'
+    })
+    const reasoningPart = reasoningMessage.parts.find((part) => part.kind === 'reasoning') as ReasoningPart
+    expect(reasoningPart).toMatchObject({
+      text: '被截断的思考',
+      truncated: true,
+      noticeCode: 'frame_truncated',
+      originalChars: 9_000,
+      returnedChars: 2_000,
+      strategy: 'head'
+    })
+
+    const plain = makeMessage()
+    applyFrameToParts(plain, { type: 'delta', text: '完整正文' })
+    const plainText = plain.parts.find((part) => part.kind === 'text') as TextPart
+    expect(plainText.truncated).toBeUndefined()
+    expect(plainText.noticeCode).toBeUndefined()
+    expect(plainText.originalChars).toBeUndefined()
   })
 
   it('⑩ message_start 帧 atMs ⇒ 消息时间戳（已有值不回填覆盖）', () => {

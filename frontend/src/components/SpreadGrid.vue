@@ -10,7 +10,10 @@
       class="absolute inset-0 flex items-center justify-center bg-white/85 text-[13px] text-[#909399]"
     >
       <span v-if="engineState === 'loading'">{{ t('sheet.engineLoading') }}</span>
-      <span v-else class="text-[#f56c6c]">{{ engineError }}</span>
+      <div v-else class="flex flex-col items-center gap-2">
+        <span class="text-[#f56c6c]">{{ engineError }}</span>
+        <el-button size="small" data-testid="spread-engine-retry" @click="retryEngine">{{ t('sheet.engineRetry') }}</el-button>
+      </div>
     </div>
   </div>
 </template>
@@ -33,6 +36,7 @@ import { useI18n } from 'vue-i18n'
  *
  * 就绪等待契约（B-07）：`readyPromise` 在**成功 / 加载失败 / 超时 / 卸载**四条路径上都结算，
  * 调用方不会无限悬挂；失败时 `loadFromJson` 抛出可展示的错误文本（含引擎失败原文）。
+ * 失败态提供「重新加载表格」重试（重跑 `loadSpreadCore`），旧一轮晚到结果由代数闸丢弃。
  */
 import { onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import type GC from '@grapecity/spread-sheets'
@@ -188,6 +192,11 @@ const markedCells: Array<{ row: number; col: number; tone: MarkTone }> = []
 let readyResolve: (() => void) | null = null
 let readyTimer: ReturnType<typeof setTimeout> | null = null
 
+/** 引擎初始化代数：重试/卸载后旧一轮 `loadSpreadCore` 的晚到结果必须失效。 */
+let engineGeneration = 0
+/** 当前这一轮的就绪等待（失败时已结算；重试会换新的一轮）。 */
+let readyPromise: Promise<void> = new Promise(() => {})
+
 /** 唤醒所有 `await readyPromise` 的等待者（B-07：成功/失败/超时/卸载四条路径都必须走这里）。 */
 function settleReady(): void {
   if (readyTimer !== null) {
@@ -214,23 +223,47 @@ function failReady(message: string): void {
   settleReady()
 }
 
-const readyPromise = new Promise<void>((resolve) => {
-  readyResolve = resolve
-})
+/** 武装一轮新的就绪等待 + 看门狗（初装与失败重试共用）。 */
+function armReadyCycle(): void {
+  engineGeneration += 1
+  const generation = engineGeneration
+  readyPromise = new Promise<void>((resolve) => {
+    readyResolve = resolve
+  })
+  // chunk 拉取没有原生超时，挂起时只能由这里唤醒等待者
+  readyTimer = setTimeout(() => {
+    if (generation !== engineGeneration) {
+      return
+    }
+    readyTimer = null
+    failReady(t('sheet.engineTimeout', { seconds: READY_TIMEOUT_MS / 1000 }))
+  }, READY_TIMEOUT_MS)
+}
 
-// 看门狗与 promise 同点武装：chunk 拉取没有原生超时，挂起时只能由这里唤醒等待者
-readyTimer = setTimeout(() => {
-  readyTimer = null
-  failReady(`表格引擎加载超时（超过 ${READY_TIMEOUT_MS / 1000} 秒未就绪），请检查网络后重试`)
-}, READY_TIMEOUT_MS)
+armReadyCycle()
 
-onMounted(async () => {
+/** 失败态重试：复位状态并重跑 `loadSpreadCore`（旧一轮晚到结果由代数闸丢弃）。 */
+function retryEngine(): void {
+  if (engineState.value !== 'failed') {
+    return
+  }
+  engineState.value = 'loading'
+  engineError.value = ''
+  armReadyCycle()
+  void initEngine()
+}
+
+async function initEngine(): Promise<void> {
+  const generation = engineGeneration
   try {
     const gs: SpreadSheets = await loadSpreadCore()
+    if (generation !== engineGeneration) {
+      return
+    }
     if (!host.value) {
       // 宿主已卸载（与 onBeforeUnmount 的竞态，红队 RR1 场景）：实例无从创建，必须显式结算，
       // 否则 `await readyPromise` 的调用方永久悬挂 —— 整条回灌链（loadTask → 工具执行器）不 settle
-      failReady('表格引擎未挂载（组件已卸载），请重新打开在线编辑')
+      failReady(t('sheet.engineUnmounted'))
       return
     }
     const instance = new gs.Spread.Sheets.Workbook(host.value)
@@ -281,16 +314,25 @@ onMounted(async () => {
     })
     resizeObserver.observe(host.value)
   } catch (error) {
+    if (generation !== engineGeneration) {
+      return
+    }
     // 引擎不可用也必须唤醒等待者（B-07）：否则调用方永久悬挂，回灌链不 settle
-    failReady(`表格引擎加载失败：${error instanceof Error ? error.message : String(error)}`)
+    failReady(t('sheet.engineFailed', { error: error instanceof Error ? error.message : String(error) }))
   }
+}
+
+onMounted(() => {
+  void initEngine()
 })
 
 onBeforeUnmount(() => {
+  // 卸载后旧一轮 chunk 拉取的晚到结果一律作废（代数闸）
+  engineGeneration += 1
   // 卸载竞态兜底（B-07）：此刻起宿主必然消失，再等引擎已无意义 —— 立即结算，
   // 让在途的 `await readyPromise` 在 `waitForReady` 处抛出可读错误（调用方已 try/catch）
   if (engineState.value === 'loading') {
-    failReady('表格引擎未就绪（组件已卸载），请重新打开在线编辑')
+    failReady(t('sheet.engineNotReady'))
   } else {
     settleReady()
   }

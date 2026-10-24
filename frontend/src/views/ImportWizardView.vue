@@ -271,7 +271,8 @@ import { noteAiPage, registerAiRegion, unregisterAiRegion } from '@/utils/ai-reg
 import { buildTemplateWorkbookJson, downloadBlob, xlsxFileName, type ExcelRowIssue } from '@/utils/excel'
 import type { SheetAdapter } from '@/utils/sheet-tools'
 import { watchJob, type JobChannelState } from '@/utils/job-watch'
-import { confirmIrreversible } from '@/utils/confirm-irreversible'
+import { confirmIrreversible, confirmPublishByMode } from '@/utils/confirm-irreversible'
+import { resolvePublishMode } from '@/utils/publish-mode'
 import { stepLabel } from '@/utils/format'
 import type { PublishConflictAsync } from '@/types/api'
 import { parseRowData, type ConfigStagingRow } from '@/types/data'
@@ -346,6 +347,8 @@ const staging = ref<StagingGroup[]>([])
 const stagingLoading = ref(false)
 const stagingOpen = ref<string[]>([])
 const importMode = ref<ImportMode>('MERGE')
+/** R-09 fix round 2：发布确认/读取模式期间的 pending 闸（防双击弹两个确认框）。 */
+const publishPending = ref(false)
 
 const gridRefs: Record<string, GridApi> = {}
 const editorLoaded = new Set<string>()
@@ -768,14 +771,26 @@ function activeEditorCode(): string {
  * 把编辑区内容写回服务端文件（作业读的是文件，不是浏览器内存）。
  *
  * 本地动态校验有问题的配置项**跳过**写回并提示，避免把明显不合法的数据送进检查。
+ *
+ * 返回**实际写入的配置项**（R3-02）：`confirm_step` 从第 1 步推进时会把整表写回服务端文件，
+ * 回执必须按这份结果如实说明，不能一边写盘一边说"未保存、仅在浏览器内存"。
  */
-async function flushEditors(): Promise<boolean> {
+interface FlushOutcome {
+  ok: boolean
+  savedDefs: string[]
+  /** 失败原因（底层错误 / 本地校验摘要），供回执原样带出，不统一甩锅“保存失败” */
+  reason?: string
+}
+
+async function flushEditors(): Promise<FlushOutcome> {
   if (taskId.value === null || selectedDefs.value.length === 0) {
     ElMessage.warning(t('views.import.msg.pickDefs'))
-    return false
+    return { ok: false, savedDefs: [], reason: t('views.import.msg.pickDefs') }
   }
+  const written: string[] = []
   busy.value = 'flush'
   let ok = true
+  let failureReason: string | undefined
   try {
     await persistSelection()
     for (const def of editorDefs.value) {
@@ -793,22 +808,26 @@ async function flushEditors(): Promise<boolean> {
           reason: first?.reason ?? ''
         }))
         ok = false
+        failureReason = `${def.code} 存在 ${issues.length} 处本地校验问题（如第 ${first?.rowIndex ?? ''} 行：${first?.reason ?? ''}）`
         continue
       }
       const blob = await grid.toXlsxBlob()
       await tasksApi.saveFile(taskId.value, def.code, await blob.arrayBuffer())
       savedDefs.add(def.code)
+      written.push(def.code)
     }
     if (ok) {
       ElMessage.success(t('views.import.msg.draftSaved'))
     }
   } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
     ElMessage.error(error instanceof Error ? error.message : t('views.import.msg.draftSaveFailed'))
     ok = false
+    failureReason = detail
   } finally {
     busy.value = null
   }
-  return ok
+  return { ok, savedDefs: written, reason: failureReason }
 }
 
 // ── 步骤导航 ──────────────────────────────────────────────────────────────────
@@ -845,18 +864,26 @@ interface StepAdvanceOutcome {
   reason?: string
   /** syncStepToBackend 失败 ⇒ 不阻断，调用方须把该警告带进回灌/界面 */
   syncWarning?: string
+  /** 离开第 1 步时**实际写回服务端文件**的配置项（R3-02：回执必须按事实说明） */
+  savedDefs?: string[]
 }
 
 async function goStep(next: number): Promise<StepAdvanceOutcome> {
   if (next < 0 || next >= STEP_KEYS.length) {
     return { ok: false, reason: `目标步骤 ${next} 不在导入向导范围内` }
   }
+  let writtenDefs: string[] = []
   if (next > stepIndex.value && stepIndex.value === 0) {
-    const saved = await flushEditors()
-    if (!saved) {
+    const flushed = await flushEditors()
+    if (!flushed.ok) {
       ElMessage.warning(t('views.import.msg.unsavedEdits'))
-      return { ok: false, reason: '存在未写回的编辑内容（保存草稿失败），已中止推进' }
+      return {
+        ok: false,
+        reason: `存在未写回的编辑内容（${flushed.reason ?? '保存草稿失败'}），已中止推进`,
+        savedDefs: flushed.savedDefs
+      }
     }
+    writtenDefs = flushed.savedDefs
   }
   stepIndex.value = next
   workspace.setStep(STEP_KEYS[next] ?? null)
@@ -870,7 +897,7 @@ async function goStep(next: number): Promise<StepAdvanceOutcome> {
     ElMessage.warning(syncWarning)
   }
   await ensureStepLoaded(next)
-  return { ok: true, syncWarning }
+  return { ok: true, syncWarning, savedDefs: writtenDefs }
 }
 
 /**
@@ -929,10 +956,10 @@ async function nextStep(): Promise<void> {
 
 // ── 作业：预检查 / 导入 / 发布 ────────────────────────────────────────────────
 
-async function startJob(kind: 'check' | 'import' | 'publish'): Promise<void> {
+async function startJob(kind: 'check' | 'import' | 'publish'): Promise<Job | null> {
   if (taskId.value === null) {
     ElMessage.warning(t('views.import.msg.noTaskBound'))
-    return
+    return null
   }
   const jobType = kind === 'check' ? 'PRECHECK' : kind === 'import' ? 'IMPORT' : 'PUBLISH'
   busy.value = kind
@@ -943,8 +970,10 @@ async function startJob(kind: 'check' | 'import' | 'publish'): Promise<void> {
     if (job.id !== undefined) {
       beginWatchJob(kind, job.id)
     }
+    return job
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : t('views.import.msg.jobStartFailed'))
+    return null
   } finally {
     busy.value = null
   }
@@ -958,9 +987,64 @@ async function startImport(): Promise<void> {
   await startJob('import')
 }
 
-async function startPublish(): Promise<void> {
-  publishConflict.value = null
-  await startJob('publish')
+/** 发布启动结局（按钮 / handler / 旧 run_job 三入口共用同一套确认语义）。 */
+type PublishStartOutcome =
+  | { kind: 'started'; job: Job }
+  | { kind: 'cancelled' }
+  | { kind: 'failed'; reason: string }
+  | { kind: 'readonly' }
+
+async function startPublish(): Promise<PublishStartOutcome> {
+  // 施工卡 §S3e：只读态不得 createJob
+  if (isReadOnly.value) {
+    return { kind: 'readonly' }
+  }
+  // Minor 1：getTask + 确认框都在 startJob 之前，必须在这之前挡住第二次点击
+  // （否则快速双击会弹两个对话框，后端只受理一个，另一次变成多余 409/报错）。
+  if (publishPending.value) {
+    return { kind: 'failed', reason: '发布请求正在处理中，请勿重复点击' }
+  }
+  publishPending.value = true
+  busy.value = 'publish'
+  try {
+    const id = taskId.value
+    if (id === null) {
+      const reason = t('views.import.msg.noTaskBound')
+      ElMessage.warning(reason)
+      return { kind: 'failed', reason }
+    }
+    // C-1：模式判定只认任务服务端权威值。读取失败 / settings 不可解析 ⇒ fail-closed（不建作业）。
+    const resolution = await resolvePublishMode(id)
+    if (!resolution.ok) {
+      const reason = `${resolution.reason}。本次未启动发布作业`
+      ElMessage.error(reason)
+      return { kind: 'failed', reason }
+    }
+    if (resolution.mode !== importMode.value) {
+      // 本地副本与服务端不一致时以服务端为准，并让单选回到真实模式。
+      importMode.value = resolution.mode
+    }
+    // Minor 2：同一次权威读取也回写工作区（模型上下文/get_workspace_state 的事实源）。
+    // 直接赋字段而非 setImportMode()，避免记一条并不存在的“界面动作”。
+    if (workspace.importMode !== resolution.mode) {
+      workspace.importMode = resolution.mode
+    }
+    // R-09：REPLACE 会删除范围内旧行 ⇒ 复用复选框确认；MERGE 增量更新，免确认。
+    const confirmed = await confirmPublishByMode(resolution.mode)
+    if (!confirmed) {
+      return { kind: 'cancelled' }
+    }
+    // Minor：只有“确认通过、真的要发起”时才清理旧冲突提示；取消不得清掉既有告警。
+    publishConflict.value = null
+    const job = await startJob('publish')
+    return job ? { kind: 'started', job } : { kind: 'failed', reason: t('views.import.msg.jobStartFailed') }
+  } finally {
+    publishPending.value = false
+    // startJob 自己会清 busy；只有我们这层仍持有 'publish'（取消/读取失败）时才复位。
+    if (busy.value === 'publish') {
+      busy.value = null
+    }
+  }
 }
 
 function beginWatchJob(kind: 'check' | 'import' | 'publish', jobId: number): void {
@@ -1152,13 +1236,20 @@ async function onImportModeChange(): Promise<void> {
   if (taskId.value === null) {
     return
   }
+  const requested = importMode.value
+  // C-1：PUT 失败时服务端保持原值；本地 v-model 必须回滚，不能停在“未生效的模式”上。
+  const previous = readImportMode(task.value ?? { settingsJson: null }) ?? 'MERGE'
   try {
-    await tasksApi.setImportMode(taskId.value, importMode.value)
-    workspace.setImportMode(importMode.value)
+    const updated = await tasksApi.setImportMode(taskId.value, requested)
+    if (task.value && updated !== null && typeof updated === 'object') {
+      task.value = { ...task.value, ...updated }
+    }
+    workspace.setImportMode(requested)
     ElMessage.success(t('views.import.msg.importModeSet', {
-      mode: importMode.value === 'REPLACE' ? t('views.import.replaceMode') : t('views.import.mergeMode')
+      mode: requested === 'REPLACE' ? t('views.import.replaceMode') : t('views.import.mergeMode')
     }))
   } catch (error) {
+    importMode.value = previous
     ElMessage.error(error instanceof Error ? error.message : t('views.import.msg.importModeFailed'))
   }
 }
@@ -1260,23 +1351,52 @@ function registerHandlers(): void {
       return '任务已结束，仅供查看，不能推进步骤'
     }
     const target = typeof payload.step === 'string' && payload.step !== '' ? payload.step : null
+    const fromIndex = stepIndex.value
     const index = target ? STEP_KEYS.indexOf(target as (typeof STEP_KEYS)[number]) : stepIndex.value + 1
     if (index < 0 || index >= STEP_KEYS.length) {
-      return `步骤 ${payload.step ?? index} 不在导入向导范围内（可选：${STEP_KEYS.join('、')}）`
+      return {
+        ok: false,
+        reason: `步骤 ${payload.step ?? index} 不在导入向导范围内（可选：${STEP_KEYS.join('、')}）`
+      }
+    }
+    // I-4 / Minor 3：目标就是当前步 ⇒ 在 goStep 之前短路，既不发起无意义的 PUT /step，
+    // 也不产生一个会被丢弃的 syncWarning。
+    if (index === fromIndex) {
+      return `步骤未改变：当前已在「${stepLabel(STEP_KEYS[index])}」，本次未触发写回。`
     }
     // F2（DC-14）：回灌文本必须与真实结局一致 —— 未推进就如实说"未推进 + 为什么"，
     // 否则模型会基于假的成功语义继续往下走（例如直接 start_import，而用户还停在第一步）。
     const advanced = await goStep(index)
     if (!advanced.ok) {
-      return `步骤未推进：当前仍在「${stepLabel(STEP_KEYS[stepIndex.value] ?? '')}」。`
-        + '第 1 步离开前会把在线编辑内容写回服务端文件，存在本地校验问题或保存失败时会中止。'
-        + '请提示用户修正编辑区数据（或先点「保存草稿到服务端」）后重试。'
+      const partial = advanced.savedDefs ?? []
+      const partialNote = partial.length > 0
+        ? `其中 ${partial.length} 个配置项（${partial.join('、')}）的编辑内容已写回服务端文件；`
+        : ''
+      // I-3：确定性失败必须返回结构化 `{ok:false}`，否则工具卡会把“未推进”渲染成成功；
+      // Minor：`advanced.reason` 原样带出（底层错误 / 本地校验），不再统一甩锅“保存失败”。
+      return {
+        ok: false,
+        reason: `步骤未推进：当前仍在「${stepLabel(STEP_KEYS[stepIndex.value] ?? '')}」。`
+          + `${advanced.reason ?? '原因未知'}。`
+          + partialNote
+          + '请提示用户修正编辑区数据（或先点「保存草稿到服务端」）后重试。'
+      }
     }
-    // 批3③b D15（M6）：同步失败警告带进回灌（对齐导出侧 :1202-1203 口径）
-    if (advanced.syncWarning) {
-      return `已推进到导入向导步骤「${stepLabel(STEP_KEYS[index])}」（${advanced.syncWarning}）。`
+    // I-4：只有“真正从第 1 步往后离开”才可能触发整表写回；回退 / 从第 2 步往后
+    // 都不能套用写回话术（否则会出现“已推进到当前步”“没有可写回内容”两句假话）。
+    if (index < fromIndex) {
+      return `已回退到导入向导步骤「${stepLabel(STEP_KEYS[index])}」，本次未从第 1 步离开，未触发整表写回。`
     }
-    return `已推进到导入向导步骤「${stepLabel(STEP_KEYS[index])}」`
+    // R3-02：离开第 1 步会 saveFile（整表写回服务端文件）—— 回执必须按实际写入结果说明，
+    // 不能让模型/用户以为改动还停留在浏览器内存里。
+    const saved = advanced.savedDefs ?? []
+    const writeNote = fromIndex === 0
+      ? (saved.length > 0
+        ? `；离开第 1 步前已把 ${saved.length} 个配置项（${saved.join('、')}）的编辑内容写回服务端文件，后续预检查/导入读取的是这份文件`
+        : '；本次未写回服务端文件（没有可写回的编辑区内容）')
+      : '；本次未从第 1 步离开，未触发整表写回'
+    const syncNote = advanced.syncWarning ? `（${advanced.syncWarning}）` : ''
+    return `已推进到导入向导步骤「${stepLabel(STEP_KEYS[index])}」${syncNote}${writeNote}。`
   })
 
   registerPageHandler('import.selectDefs', (payload) => {
@@ -1334,14 +1454,22 @@ function registerHandlers(): void {
   })
 
   registerPageHandler('import.startPublish', async () => {
-    // 施工卡 §S3e：只读态不得 createJob
-    if (isReadOnly.value) {
-      return '任务已结束，仅供查看，未启动发布作业'
+    // R-09：与页面按钮、旧 run_job 分支同一套确认语义（REPLACE 复选框 / MERGE 免确认）。
+    // 失败/取消统一返回结构化 `{ok:false}`：工具结局落 failed，避免“卡面成功、正文未启动”。
+    const outcome = await startPublish()
+    if (outcome.kind === 'readonly') {
+      return { ok: false, reason: '任务已结束，仅供查看，未启动发布作业' }
     }
-    await startJob('publish')
-    return publishJob.value
-      ? `发布作业 #${publishJob.value.id} 已启动；发布结果按异步形态给出（作业终态 + 问题清单）`
-      : '发布未启动'
+    if (outcome.kind === 'cancelled') {
+      return { ok: false, reason: '用户取消了发布确认，未启动发布作业' }
+    }
+    if (outcome.kind === 'failed') {
+      return { ok: false, reason: outcome.reason }
+    }
+    if (outcome.job.id === undefined) {
+      return '发布作业已启动（服务端未返回作业号）；发布结果按异步形态给出（作业终态 + 问题清单）'
+    }
+    return `发布作业 #${outcome.job.id} 已启动；发布结果按异步形态给出（作业终态 + 问题清单）`
   })
 }
 
@@ -1503,7 +1631,7 @@ async function createAndBindTask(): Promise<void> {
       time: new Date().toLocaleString('zh-CN')
     }))
     if (!created || created.id === undefined) {
-      ElMessage.error(taskStore.error ?? t('views.import.msg.taskCreateFailed'))
+      ElMessage.error(taskStore.actionError ?? t('views.import.msg.taskCreateFailed'))
       return
     }
     taskId.value = created.id

@@ -133,7 +133,8 @@ test.describe('@stub S 流式稳定', () => {
     // ② 两个尝试都超时后：显式错误卡 + 机器码可读（不是无限转圈）
     await expect(errorCard(page)).toBeVisible({ timeout: 75_000 })
     await expect(page.locator('[data-testid="notice-bar"]')).toContainText('本轮出错')
-    await expect(page.locator('[data-testid="notice-bar"]')).toContainText('UPSTREAM_FIRST_BYTE_TIMEOUT')
+    await expect(page.locator('[data-testid="notice-bar"]')).toContainText('AI 响应超时')
+    await expect(page.locator('[data-testid="notice-bar"]')).not.toContainText('UPSTREAM_FIRST_BYTE_TIMEOUT')
     await expect(stopButton(page)).toHaveCount(0)
 
     // ③ 帧级证据：重试与终态码（首包看门狗真在判定，不是前端兜底猜的）
@@ -372,12 +373,19 @@ test.describe('@stub S 流式稳定', () => {
     const delta = frames.find((frame) => frame.type === 'delta')
     expect(delta).toBeTruthy()
     expect(delta!.truncated).toBe(true)
-    expect(String(delta!.truncatedReason ?? '')).toContain('frame-bytes-exceeded')
+    // I-3：新契约 = 稳定展示码 + 结构化数字；旧字段仅作兼容别名，不再承载机器前缀/中文。
+    expect(delta!.noticeCode).toBe('frame_truncated')
     expect(Number(delta!.originalChars)).toBe(102400)
+    expect(Number(delta!.returnedChars)).toBeGreaterThan(0)
     expect(Number(delta!.returnedChars)).toBeLessThan(Number(delta!.originalChars))
+    expect(String(delta!.notice ?? '')).not.toBe('')
+    expect(String(delta!.notice ?? '')).toBe(String(delta!.truncatedReason ?? ''))
+    expect(String(delta!.truncatedReason ?? '')).not.toContain('frame-bytes-exceeded')
+    expect(String(delta!.truncatedReason ?? '')).not.toMatch(/[\u4e00-\u9fff]/)
 
-    // ② 正文渲染长度等于**帧契约里的 returnedChars**（截断口径被 UI 如实兑现），轮次正常收尾
-    const rendered = await assistantText(page)
+    // ② 正文渲染长度等于**帧契约里的 returnedChars**（截断口径被 UI 如实兑现），轮次正常收尾。
+    //    只量 `.md-body` 正文，排除截断提示角标/布局空白（角标不是正文的一部分）。
+    const rendered = (await assistantBubble(page).locator('.md-body').last().innerText()).trim()
     expect(rendered.length).toBe(Number(delta!.returnedChars))
     expect(rendered.length).toBeGreaterThan(0)
     await expect(page.locator('[data-testid="send-btn"]')).toBeVisible({ timeout: 10_000 })

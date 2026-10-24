@@ -1720,7 +1720,7 @@ async function createAndBindTask(): Promise<void> {
       time: new Date().toLocaleString('zh-CN')
     }))
     if (!created || created.id === undefined) {
-      ElMessage.error(taskStore.error ?? t('views.export.msg.taskCreateFailed'))
+      ElMessage.error(taskStore.actionError ?? t('views.export.msg.taskCreateFailed'))
       return
     }
     taskId.value = created.id

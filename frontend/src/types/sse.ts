@@ -156,6 +156,13 @@ export type SseFrameType = (typeof SseFrameTypes)[number]
 /** 前向兼容的思考链帧名（裁决⑦；后端当前不产出，故不在上面的实测白名单里）。 */
 export const REASONING_FRAME_TYPE = 'reasoning'
 
+/**
+ * 截断展示码（A10 R-15 I-3，additive 可选键，不是新帧型）。
+ *
+ * 新客户端据此选 locale 模板；`notice`/`truncatedReason` 只作旧客户端兼容字段。
+ */
+export type TruncationNoticeCode = 'frame_truncated' | 'frame_limit_unreached' | 'model_view_truncated'
+
 export interface SseFrameBase {
   type: SseFrameType
   runId?: string
@@ -172,6 +179,23 @@ export interface SseFrameBase {
    * 即服务端给出的**剩余时长**（T4-3 后半）。
    */
   atMs?: number
+  /**
+   * A10 R-15：帧级截断标记（`text` / `result` 都可能被单帧字节预算降采样）。
+   * 旧帧缺省 = 未截断；新帧同时带 `noticeCode` + 数字，展示层按 locale 拼装。
+   */
+  truncated?: boolean
+  /** 展示码（新客户端优先读它；旧帧没有该键）。 */
+  noticeCode?: TruncationNoticeCode
+  /** 截断前字符数（结构化字段；展示层用于本地化数字）。 */
+  originalChars?: number
+  /** 截断后实际返回字符数（结构化字段）。 */
+  returnedChars?: number
+  /** head / tail / head_tail（结构化字段；展示层不直接展示）。 */
+  strategy?: string | null
+  /** 旧客户端兼容的人读短句（新客户端只在缺 `noticeCode` 时展示）。 */
+  notice?: string | null
+  /** `notice` 的兼容别名（旧帧/历史段仍读它）。 */
+  truncatedReason?: string | null
 }
 
 /** 首包：runId 由服务端生成，前端据此做 reattach。 */
@@ -241,12 +265,6 @@ export interface SseToolResultFrame extends SseFrameBase {
   /** DC-14 T5：结果铸为消息后的消息 id（`tool-<toolCallId>`，重放/重挂不变） */
   messageId?: string
   result?: string | null
-  /**
-   * R-154 #2：单帧 64KB 字段级截断标记（后端 FrameSizeLimiter 的 TRUNCATED_FIELD /
-   * TRUNCATED_REASON_FIELD）——result 被帧预算截断时挂 true 与原因；缺省 = 未截断（全文）。
-   */
-  truncated?: boolean
-  truncatedReason?: string | null
   /**
    * 治理 P0-1（统一结果信封）：结局八态。**可选** —— 旧后端帧没有该字段，此时前端按
    * `ok` 三元回落（{@link ToolOutcome}）。带该字段时它**优先于 `ok`**：业务失败但被

@@ -217,7 +217,7 @@
 
       <div class="mt-4 pt-3 border-t border-solid border-[#ebeef5] flex gap-2">
         <el-button type="primary" :loading="saving" @click="save">{{ t('views.definitions.save') }}</el-button>
-        <el-button @click="editorVisible = false">{{ t('views.definitions.cancel') }}</el-button>
+        <el-button @click="editorVisible = false">{{ t('common.action.cancel') }}</el-button>
       </div>
     </el-drawer>
   </div>

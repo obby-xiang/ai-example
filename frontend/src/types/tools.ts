@@ -24,7 +24,7 @@
  * | navigate_to | `*` | READ | FRONTEND |
  * | select_definitions | `page:tasks`, `task:EXPORT`, `task:IMPORT` | READ | FRONTEND |
  * | set_condition | `page:tasks`, `task:EXPORT` | READ | FRONTEND |
- * | confirm_step | `page:tasks`, `task:EXPORT`, `task:IMPORT` | READ | FRONTEND |
+ * | confirm_step | `page:tasks`, `task:EXPORT`, `task:IMPORT` | **WRITE**（自动执行，不进确认门） | FRONTEND |
  * | generative_form | `page:tasks`, `task:*` | READ | FRONTEND |
  * | read_sheet_summary / aggregate_sheet / inspect_columns / review_cells / find_rows | `task:EXPORT/EXPORT`, `task:IMPORT/UPLOAD` | READ | FRONTEND |
  * | normalize_column / replace_values / update_rows / undo_last_sheet_edit | `task:EXPORT/EXPORT`, `task:IMPORT/UPLOAD` | WRITE（预览卡人确认） | FRONTEND |
@@ -35,6 +35,8 @@
  * S4.4d 起 `navigate_to`/`select_definitions`/`set_condition`/`confirm_step` 也是 FRONTEND，
  * DC-15 起 `generative_form` 亦然（前端接入已落地：GF-B 在 `stores/ai.ts` 对 `frontend_tool_request`
  * 特判 + AiPanel 的 `FormRenderer` 渲染）。
+ * ③ `confirm_step` 曾标 READ；R3-02 起按事实标 **WRITE**（导入向导离开第 1 步会整表写回服务端文件）。
+ * 它仍是 FRONTEND 通道，通道判定优先于风险等级 ⇒ 不会因此新增确认门。
  * 增量执行兜底（DC-14 T1）：越 scope 的调用即使被上游发起，后端也会拦截并回灌结构化错误
  * （帧里 `tool_result.status=BLOCKED`）。
  */
@@ -253,7 +255,7 @@ export const FRONTEND_TOOLS: readonly FrontendToolDescriptor[] = [
   {
     name: 'normalize_column',
     displayName: '列归一化',
-    description: '列归一化：commit=false 只出建议（零写入、采样最多 20 行）；commit=true 只允许 trim/case/width，且必须由用户确认后应用',
+    description: '列归一化：commit=false 只出建议（零写入、采样最多 20 行）；commit=true 只允许 trim/case/width，且必须由用户确认后应用；导入向导第 1 步离开（「下一步」/ confirm_step）会整表写回服务端文件（导出向导需点「保存编辑到服务端」）',
     channel: 'FRONTEND',
     riskLevel: 'WRITE',
     scopePatterns: SHEET_SCOPE_PATTERNS,
@@ -269,7 +271,7 @@ export const FRONTEND_TOOLS: readonly FrontendToolDescriptor[] = [
   {
     name: 'replace_values',
     displayName: '查找替换',
-    description: '按列查找替换（wholeCell/contains/prefix/wildcard/regex），必须先给用户看预览（采样最多 20 行）并由用户确认；只改浏览器内存',
+    description: '按列查找替换（wholeCell/contains/prefix/wildcard/regex），必须先给用户看预览（采样最多 20 行）并由用户确认；导入向导第 1 步离开（「下一步」/ confirm_step）会整表写回服务端文件（导出向导需点「保存编辑到服务端」）',
     channel: 'FRONTEND',
     riskLevel: 'WRITE',
     scopePatterns: SHEET_SCOPE_PATTERNS,
@@ -289,7 +291,7 @@ export const FRONTEND_TOOLS: readonly FrontendToolDescriptor[] = [
   {
     name: 'update_rows',
     displayName: '条件更新行',
-    description: '按条件更新命中行（literal/fillDown/fillSeries/template），必须先给用户看预览（采样最多 20 行）并由用户确认；只改浏览器内存',
+    description: '按条件更新命中行（literal/fillDown/fillSeries/template），必须先给用户看预览（采样最多 20 行）并由用户确认；导入向导第 1 步离开（「下一步」/ confirm_step）会整表写回服务端文件（导出向导需点「保存编辑到服务端」）',
     channel: 'FRONTEND',
     riskLevel: 'WRITE',
     scopePatterns: SHEET_SCOPE_PATTERNS,

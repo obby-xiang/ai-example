@@ -42,7 +42,7 @@ export interface WizardRouteTarget {
 export interface StepStateView {
   /** el-steps 的 status */
   elStatus: 'wait' | 'process' | 'finish' | 'error' | 'success'
-  /** 中文说明 */
+  /** 中文说明（模型侧/旧调用面词表，不随 UI 语言变；TaskWizard 自己按 locale 渲染状态标签） */
   label: string
 }
 
@@ -126,7 +126,10 @@ export const useTaskStore = defineStore('task', {
     filterStatus: null as TaskStatus | null,
     filterKeyword: '',
     loading: false,
-    error: null as string | null,
+    /** 列表加载失败（TaskCenterView 顶部横幅）。 */
+    loadError: null as string | null,
+    /** 写操作失败（创建/删除；只走 ElMessage，不污染列表横幅）。 */
+    actionError: null as string | null,
     lastLoadedAt: 0 as number
   }),
 
@@ -157,14 +160,14 @@ export const useTaskStore = defineStore('task', {
         return
       }
       this.loading = true
-      this.error = null
+      this.loadError = null
       try {
         const result: PageResult<TaskSummary> = await tasksApi.listTasks(this.queryParams)
         this.items = result.content ?? []
         this.total = result.totalElements ?? 0
         this.lastLoadedAt = Date.now()
       } catch (error) {
-        this.error = error instanceof Error ? error.message : translate('views.tasks.msg.loadFailed')
+        this.loadError = error instanceof Error ? error.message : translate('views.tasks.msg.loadFailed')
       } finally {
         this.loading = false
         // 被 loading 挡住的 refreshNow 在这里补发（恰好 1 次；正常完成与被挡住两条路径共用此检查点）
@@ -225,23 +228,25 @@ export const useTaskStore = defineStore('task', {
     },
 
     async createTask(type: TaskType, title?: string): Promise<Task | null> {
+      this.actionError = null
       try {
         const task = await tasksApi.createTask(type, title)
         await this.load()
         return task
       } catch (error) {
-        this.error = error instanceof Error ? error.message : translate('views.tasks.msg.createFailed')
+        this.actionError = error instanceof Error ? error.message : translate('views.tasks.msg.createFailed')
         return null
       }
     },
 
     async removeTask(taskId: number): Promise<boolean> {
+      this.actionError = null
       try {
         await tasksApi.deleteTask(taskId)
         await this.load()
         return true
       } catch (error) {
-        this.error = error instanceof Error ? error.message : translate('views.tasks.msg.deleteFailed')
+        this.actionError = error instanceof Error ? error.message : translate('views.tasks.msg.deleteFailed')
         return false
       }
     },

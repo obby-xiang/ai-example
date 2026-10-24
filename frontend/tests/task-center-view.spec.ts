@@ -17,10 +17,10 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { defineComponent, type PropType, type VNode } from 'vue'
 
-const api = vi.hoisted(() => ({ listTasks: vi.fn(), cancelJob: vi.fn() }))
+const api = vi.hoisted(() => ({ listTasks: vi.fn(), deleteTask: vi.fn(), cancelJob: vi.fn() }))
 const confirmMock = vi.hoisted(() => vi.fn())
 
-vi.mock('@/api/tasks', () => ({ tasksApi: { listTasks: api.listTasks } }))
+vi.mock('@/api/tasks', () => ({ tasksApi: { listTasks: api.listTasks, deleteTask: api.deleteTask } }))
 vi.mock('@/api/jobs', () => ({ jobsApi: { cancelJob: api.cancelJob } }))
 vi.mock('vue-router', () => ({ useRouter: () => ({ push: vi.fn() }) }))
 vi.mock('@/router', () => ({
@@ -42,6 +42,8 @@ vi.mock('element-plus', async (importOriginal) => {
   }
 })
 
+import { ElMessage } from 'element-plus'
+import { ApiError } from '@/api/http'
 import TaskCenterView from '@/views/TaskCenterView.vue'
 import { useTaskStore } from '@/stores/task'
 import type { Job, JobStatus } from '@/types/job'
@@ -134,8 +136,10 @@ beforeEach(() => {
   setActivePinia(createPinia())
   api.listTasks.mockReset()
   api.listTasks.mockResolvedValue(pageOf([]))
+  api.deleteTask.mockReset()
   api.cancelJob.mockReset()
   api.cancelJob.mockResolvedValue({ cancelled: true })
+  vi.mocked(ElMessage.error).mockReset()
   confirmMock.mockReset()
   confirmMock.mockResolvedValue(undefined)
   FakeEventSource.instances = []
@@ -243,6 +247,40 @@ describe('views/TaskCenterView.vue · 全静止 + 手动刷新（M1+F2）', () =
     await cancelButton!.trigger('click')
     await flushPromises()
     expect(api.cancelJob).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('delete-blocked-by-in-flight-job：409 在途作业提示原样展示为错误消息，且不刷新列表', async () => {
+    api.listTasks.mockResolvedValue(pageOf([makeSummary(1, 'RUNNING')]))
+    const message = '任务 #1 仍有未结束作业：作业 #10 [EXPORT] 状态 RUNNING（JOB_ALREADY_RUNNING），'
+      + '暂时无法删除；删除任务会级联清理作业/暂存/文件，请等待作业结束或先取消作业后再删除'
+    api.deleteTask.mockRejectedValueOnce(new ApiError(message, 409, 'JOB_ALREADY_RUNNING', null))
+
+    const wrapper = mount(TaskCenterView, {
+      global: {
+        stubs: {
+          ...stubs,
+          'el-alert': {
+            props: ['title'],
+            template: '<div class="alert-render">{{ title }}</div>'
+          }
+        }
+      }
+    })
+    await flushPromises()
+
+    const deleteButton = wrapper.findAll('button').find((b) => b.text() === '删除')
+    expect(deleteButton).toBeDefined()
+    await deleteButton!.trigger('click')
+    await flushPromises()
+
+    expect(api.deleteTask).toHaveBeenCalledWith(1)
+    expect(ElMessage.error).toHaveBeenCalledWith(message)
+    expect(useTaskStore().actionError).toBe(message)
+    // 409 是写操作错误，不得复用列表加载错误字段（否则顶部出现“任务列表加载失败”横幅）
+    expect(useTaskStore().loadError).toBeNull()
+    expect(wrapper.find('.alert-render').exists()).toBe(false)
+    expect(api.listTasks).toHaveBeenCalledTimes(1) // 失败不触发成功后刷新
     wrapper.unmount()
   })
 

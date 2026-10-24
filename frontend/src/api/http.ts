@@ -10,6 +10,7 @@
 import axios, { AxiosError, type AxiosInstance, type AxiosRequestConfig } from 'axios'
 import type { ApiErrorBody, ApiResponse } from '@/types/api'
 import { acceptLanguage } from '@/locales'
+import { translate } from '@/composables/useCopy'
 import { HTTP_TIMEOUT_MS } from '@/utils/time-constants'
 
 /** 前端侧补充的错误码（后端未定义，仅用于网络层异常）。 */
@@ -53,6 +54,11 @@ function readBodyField(body: unknown, key: 'code' | 'message'): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null
 }
 
+/** 诊断面：技术细节只进 console，不进用户可见串（A10 R-06）。 */
+function logDiagnostic(stage: string, detail: Record<string, unknown>): void {
+  console.warn(`[http] ${stage}`, detail)
+}
+
 /** 从任意响应体/异常中抽出可读错误文案与码。 */
 function normalizeError(error: unknown): ApiError {
   if (error instanceof ApiError) {
@@ -61,9 +67,11 @@ function normalizeError(error: unknown): ApiError {
   if (error instanceof AxiosError) {
     const status = error.response?.status ?? 0
     const body: unknown = error.response?.data
+    const url = error.config?.url ?? ''
     if (status === 0) {
+      logDiagnostic('network error', { url, message: error.message })
       return new ApiError(
-        '后端不可达，请确认服务已启动（/api 代理目标见 VITE_API_BASE）',
+        translate('api.error.network'),
         0,
         FRONTEND_ERROR_CODES.NETWORK_ERROR,
         body
@@ -71,15 +79,29 @@ function normalizeError(error: unknown): ApiError {
     }
     const code = readBodyField(body, 'code') ?? String(status)
     const bodyMessage = readBodyField(body, 'message')
-    // 代理/网关类失败（如 vite 代理目标不可达 → 500 且无 JSON 体）不该把 axios 的英文原文抛给用户
-    const message = bodyMessage
-      ?? (status >= 500 ? `后端服务不可用或未启动（HTTP ${status}）` : error.message || '请求失败')
-    return new ApiError(message, status, code, body)
+    if (bodyMessage) {
+      return new ApiError(bodyMessage, status, code, body)
+    }
+    // 代理/网关类失败（如 vite 代理目标不可达 → 500 且无 JSON 体）不该把 axios 的英文原文抛给用户；
+    // HTTP 状态码属于诊断信息，只进 console。
+    logDiagnostic(status >= 500 ? 'server error' : 'request failed', {
+      status,
+      url,
+      code,
+      message: error.message
+    })
+    return new ApiError(
+      translate(status >= 500 ? 'api.error.server' : 'api.error.request'),
+      status,
+      code,
+      body
+    )
   }
   if (error instanceof Error) {
     return new ApiError(error.message, 0, FRONTEND_ERROR_CODES.UNKNOWN_ERROR, null)
   }
-  return new ApiError('未知错误', 0, FRONTEND_ERROR_CODES.UNKNOWN_ERROR, error)
+  logDiagnostic('unexpected error', { error })
+  return new ApiError(translate('api.error.unknown'), 0, FRONTEND_ERROR_CODES.UNKNOWN_ERROR, error)
 }
 
 /**
@@ -129,7 +151,7 @@ http.interceptors.response.use(
     const body: unknown = resp.data
     if (isApiResponse(body)) {
       if (!body.success) {
-        return Promise.reject(new ApiError(body.message ?? '请求失败', resp.status, body.code ?? String(resp.status), body))
+        return Promise.reject(new ApiError(body.message ?? translate('api.error.request'), resp.status, body.code ?? String(resp.status), body))
       }
       // 信封已拆：调用方拿到的即 data
       return { ...resp, data: body.data } as unknown as typeof resp

@@ -23,6 +23,8 @@ import { tasksApi } from '@/api/tasks'
 import { jobsApi } from '@/api/jobs'
 import { useTaskStore } from '@/stores/task'
 import { stepLabel } from '@/utils/format'
+import { confirmPublishByMode } from '@/utils/confirm-irreversible'
+import { resolvePublishMode } from '@/utils/publish-mode'
 import { findPublishTool } from '@/utils/publish-links'
 import { listAiRegions } from '@/utils/ai-regions'
 import { translate } from '@/composables/useCopy'
@@ -523,6 +525,23 @@ async function runUiEvent(event: UiEvent): Promise<UiEventResult> {
         // 其余任务 id 不在当前只读壳语义内，按原路径放行（后端终态守卫另见 R-137 登记）。
         if (event.taskId === workspace.taskId && (await isCurrentTaskReadOnly(workspace))) {
           return fail('任务已结束，仅供查看，未启动作业')
+        }
+        // R-09（fix round 1 / C-1）：旧 ui_event 分支与页面同口径 —— 发布模式只认服务端权威值。
+        // 读取失败 / settings 不可解析 ⇒ fail-closed：不弹确认、不建作业，回执明确未启动。
+        if (event.jobType === 'PUBLISH') {
+          const resolution = await resolvePublishMode(event.taskId)
+          if (!resolution.ok) {
+            return fail(`${resolution.reason}。本次未启动发布作业`)
+          }
+          // Minor 2：当前任务的权威模式回写工作区（模型上下文的事实源）；直接赋字段，
+          // 不调用 setImportMode()（那会记一条并不存在的“界面动作”）。
+          if (workspace.taskId === event.taskId && workspace.importMode !== resolution.mode) {
+            workspace.importMode = resolution.mode
+          }
+          const confirmed = await confirmPublishByMode(resolution.mode)
+          if (!confirmed) {
+            return fail('用户取消了发布确认，未启动发布作业')
+          }
         }
         const job = await jobsApi.createJob(event.taskId, event.jobType)
         if (event.jobType === 'PUBLISH') {

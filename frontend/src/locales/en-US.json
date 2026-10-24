@@ -50,6 +50,42 @@
         },
         "generic": {
           "title": "Something went wrong this turn"
+        },
+        "emptyReply": {
+          "title": "No content was returned this turn",
+          "guide": "Try again, or rephrase the question."
+        },
+        "cancelled": {
+          "title": "This turn was cancelled",
+          "guide": "You can send it again."
+        },
+        "timeout": {
+          "title": "The AI response timed out",
+          "guide": "Please try again later."
+        },
+        "budget": {
+          "title": "This turn took too long",
+          "guide": "Please try again later."
+        },
+        "interrupted": {
+          "title": "The AI response was interrupted",
+          "guide": "Generated content is kept; please try again."
+        },
+        "connection": {
+          "title": "The connection was interrupted",
+          "guide": "Check your network and try again."
+        },
+        "upstream": {
+          "title": "The AI service returned an error",
+          "guide": "Please try again later."
+        },
+        "keyMissing": {
+          "title": "API key is missing",
+          "guide": "Open Settings → AI and add a key for the provider, then retry."
+        },
+        "keyUnreadable": {
+          "title": "The API key cannot be decrypted",
+          "guide": "Open Settings → AI and re-enter the key, or ask the administrator to restore the encryption configuration."
         }
       }
     },
@@ -65,8 +101,10 @@
       "chatRequestFailed": "Chat request failed",
       "poolSaturated": "The suspended-run pool is full. Please try again later.",
       "poolSaturatedWithSize": "The suspended-run pool is full (capacity {size}). Please try again later.",
-      "aiDisabled": "AI is not enabled: {message}",
-      "redisUnavailable": "The Redis dependency for AI is unavailable: {message}",
+      "aiDisabled": "AI is not enabled. Configure a provider and API key in Settings → AI.",
+      "keyMissing": "AI has no usable API key. Add a provider key in Settings → AI and retry.",
+      "keyUnreadable": "The API key cannot be decrypted. Re-enter it in Settings → AI, or ask the administrator to restore the encryption configuration.",
+      "redisUnavailable": "The AI service is temporarily unavailable (Redis). Please try again later.",
       "healthProbeFailed": "AI availability check failed",
       "decisionPending": "Decision submitted, but not yet confirmed by the backend (refresh later to check).",
       "noPendingDecision": "No pending confirmation request",
@@ -83,7 +121,7 @@
       "memoryDeleteFailed": "Failed to delete the old session memory (the new conversation is unaffected)",
       "formSubmittedElsewhere": "This form was submitted in another window; local editing has stopped",
       "upstreamRetry": "Upstream connection interrupted, retrying (no content produced yet this turn)",
-      "turnError": "Error this turn ({code}): {message}",
+      "turnError": "Error this turn: {message}",
       "uploadNoRegion": "Open step 1 of the import wizard first",
       "uploadPickerUnsupported": "This browser cannot pick files inside the chat",
       "uploadPickerCancelled": "You cancelled the file selection; you can retry",
@@ -134,7 +172,7 @@
         "sourceDb": "Source: database",
         "keyConfigured": "Configured",
         "keyMissing": "Not configured",
-        "keyUnreadable": "Key cannot be decrypted (KEK changed or ciphertext corrupted)",
+        "keyUnreadable": "Key cannot be decrypted (encryption configuration changed or ciphertext corrupted)",
         "keyDisabled": "Disabled",
         "keyLast4": "last 4",
         "keyInputPlaceholder": "Leave blank = unchanged",
@@ -187,9 +225,9 @@
         "probeFailed": "Failed"
       },
       "errors": {
-        "AI_SECRET_KEK_MISSING": "The encryption key (AI_SECRET_KEK) is not configured, so the API key cannot be saved. Ask the administrator to configure it and retry.",
+        "AI_SECRET_KEK_MISSING": "The encryption key is not configured, so the API key cannot be saved. Ask the administrator to configure it and retry.",
         "KEY_EMPTY": "API Key is empty: enter a key, or use \"Clear key\".",
-        "KEY_UNREADABLE": "The stored key cannot be decrypted (encryption key changed or ciphertext corrupted): ask the administrator to restore the encryption key, or re-enter the key.",
+        "KEY_UNREADABLE": "The stored key cannot be decrypted. Re-enter the key in Settings → AI, or ask the administrator to restore the encryption configuration.",
         "INVALID_BASE_URL": "Invalid Base URL: it must be a full http:// or https:// address without credentials.",
         "BLOCKED_PRIVATE_ENDPOINT": "This address points to a private/loopback network and is blocked by default. If it is a real intranet gateway, ask the administrator to enable the allowlist switch.",
         "PROVIDER_NOT_FOUND": "This endpoint no longer exists (it may have been deleted): refresh and try again.",
@@ -251,6 +289,7 @@
     },
     "hitl": {
       "irreversible": "I understand that {action} cannot be undone",
+      "publishIrreversible": "Confirm starting the publish job: if this run uses replace mode, old data in scope will be deleted and cannot be undone",
       "ackHint": "Tick the box above to continue",
       "action": {
         "start_publish": "starting the publish job"
@@ -299,6 +338,7 @@
         "ATTACHMENT_NOT_FOUND": "\"{label}\" attachment is missing or expired, please upload again",
         "ATTACHMENT_FORBIDDEN": "\"{label}\" attachment does not belong to this form, please upload again",
         "ATTACHMENT_CONSUMED": "\"{label}\" attachment has already been used, please upload again",
+        "ATTACHMENT_UNAVAILABLE": "\"{label}\" attachment check is temporarily unavailable, please retry later",
         "ATTACHMENT_UPLOAD_FAILED": "\"{label}\" upload failed, please retry",
         "ATTACHMENT_TOO_LARGE": "\"{label}\" attachment must be 5MB or smaller",
         "ATTACHMENT_TYPE_UNSUPPORTED": "\"{label}\" unsupported file type; allowed: png/jpg/webp/pdf/txt/csv/xlsx"
@@ -352,6 +392,9 @@
       "args": "Arguments",
       "output": "Output",
       "truncated": "Truncated",
+      "truncatedFrame": "The result is too large and has been truncated ({returned} of {original} characters shown). Narrow the query or paginate for more detail.",
+      "truncatedModelView": "The result is long: the model received only {returned} of {original} characters.",
+      "truncatedLimitUnreached": "The result exceeds the frame size limit and could not be compressed further. Narrow the query or paginate for more detail.",
       "undoHint": "The UI changed; the most recent step can be undone.",
       "definition": "Definition",
       "rowKey": "Row key",
@@ -752,7 +795,12 @@
     "applied": {
       "line": "AI changed {cells} cells (undoable, layer {layer} of 3)"
     },
-    "engineLoading": "Loading the spreadsheet engine… (SpreadJS is loaded on demand)"
+    "engineLoading": "Loading the spreadsheet engine… (SpreadJS is loaded on demand)",
+    "engineRetry": "Reload spreadsheet",
+    "engineFailed": "Failed to load the spreadsheet engine: {error}",
+    "engineTimeout": "Loading the spreadsheet engine timed out (not ready after {seconds}s). Check your network and try again.",
+    "engineUnmounted": "The spreadsheet engine is not mounted (component unmounted). Reopen the online editor.",
+    "engineNotReady": "The spreadsheet engine is not ready (component unmounted). Reopen the online editor."
   },
   "resultview": {
     "fallback": {
@@ -801,18 +849,43 @@
     "message": "Message",
     "sortOrder": "Order",
     "definition": "Definition",
-    "status": "Status",
+    "statusLabel": "Status",
     "processed": "Processed",
     "totalRows": "Total rows",
     "failedRows": "Failed",
     "processing": "Processing: {code}",
     "noDetail": "No details",
-    "notStarted": "Job not started"
+    "notStarted": "Job not started",
+    "status": {
+      "PENDING": "Pending",
+      "RUNNING": "Running",
+      "COMPLETED": "Succeeded",
+      "FAILED": "Failed",
+      "CANCELLED": "Cancelled"
+    },
+    "severity": {
+      "ERROR": "Error",
+      "WARNING": "Warning",
+      "INFO": "Info"
+    },
+    "progressUnknown": "Processing · {processed} rows processed (total pending)",
+    "channelPolling": "Realtime channel degraded to polling",
+    "channelRealtime": "Realtime channel connected"
+  },
+  "api": {
+    "error": {
+      "network": "Cannot reach the backend. Check your network and try again.",
+      "server": "The backend service is temporarily unavailable. Try again later.",
+      "request": "Request failed. Try again later.",
+      "unknown": "Something went wrong. Try again later."
+    }
   },
   "task": {
     "readOnly": "View only",
     "failedSuffix": "(failed)",
-    "prev": "Previous"
+    "prev": "Previous",
+    "next": "Next",
+    "backToList": "Back to task list"
   },
   "wizard": {
     "condition": {
@@ -856,6 +929,11 @@
       "rating": "Rating",
       "reason": "Reason",
       "loadFailed": "Load failed: {error}",
+      "unknownError": "Unknown error",
+      "retry": "Retry",
+      "like": "Like",
+      "dislike": "Dislike",
+      "sessionMessage": "Session {session} · message {message}",
       "empty": "No feedback yet"
     },
     "aiSettings": {
@@ -1130,7 +1208,10 @@
       "dialog": {
         "cancelTitle": "Cancel job",
         "cancelMessage": "The job stops immediately; processed data will not be rolled back.",
-        "cancelAck": "Confirm cancelling the job; this cannot be undone"
+        "cancelAck": "Confirm cancelling the job; this cannot be undone",
+        "publishReplaceTitle": "Confirm publish (replace in scope)",
+        "publishReplaceMessage": "Publishing replaces production data within each definition's scope: old rows in scope that are not covered by this import will be deleted. This cannot be undone.",
+        "publishReplaceAck": "I understand publishing will delete old data in scope and cannot be undone"
       }
     },
     "tasks": {

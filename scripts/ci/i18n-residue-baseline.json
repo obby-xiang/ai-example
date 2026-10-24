@@ -1,22 +1,19 @@
 {
-  "total": 937,
+  "total": 925,
   "files": {
     "src/api/ai.ts": 1,
-    "src/api/http.ts": 4,
     "src/api/sse.ts": 22,
-    "src/components/AiPanel/AiPanel.vue": 4,
+    "src/components/AiPanel/AiPanel.vue": 3,
     "src/components/AiPanel/ContextPopover.vue": 1,
     "src/components/AiPanel/SheetPreviewCard.vue": 4,
     "src/components/AiPanel/UploadHandoffCard.vue": 4,
-    "src/components/JobProgress.vue": 9,
-    "src/components/SpreadGrid.vue": 9,
-    "src/components/TaskWizard.vue": 2,
+    "src/components/SpreadGrid.vue": 5,
     "src/components/wizard/ConditionForm.vue": 12,
     "src/components/wizard/DefSelector.vue": 6,
     "src/main.ts": 1,
     "src/stores/ai.ts": 36,
     "src/stores/task.ts": 11,
-    "src/stores/workspace.ts": 51,
+    "src/stores/workspace.ts": 53,
     "src/types/api.ts": 1,
     "src/types/condition.ts": 34,
     "src/types/form-schema.ts": 23,
@@ -24,7 +21,6 @@
     "src/types/tools.ts": 125,
     "src/utils/ai-dom-tools.ts": 101,
     "src/utils/ai-regions.ts": 12,
-    "src/utils/confirm-irreversible.ts": 2,
     "src/utils/context-usage.ts": 16,
     "src/utils/error-card.ts": 3,
     "src/utils/excel.ts": 20,
@@ -33,11 +29,11 @@
     "src/utils/job-watch.ts": 9,
     "src/utils/parts.ts": 9,
     "src/utils/polling.ts": 5,
+    "src/utils/publish-mode.ts": 3,
     "src/utils/sheet-tools.ts": 163,
     "src/utils/tool-summaries.ts": 1,
     "src/utils/ui-receipt.ts": 1,
-    "src/views/AiFeedbackView.vue": 4,
     "src/views/ExportWizardView.vue": 91,
-    "src/views/ImportWizardView.vue": 47
+    "src/views/ImportWizardView.vue": 56
   }
 }

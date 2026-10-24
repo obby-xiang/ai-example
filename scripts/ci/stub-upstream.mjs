@@ -58,6 +58,10 @@
  *   context-overflow / summary-500   越窗 400（措辞取产品 ContextOverflow.MARKERS）/ 摘要请求 500
  *   gf-seven-types / gf-linkage / gf-expr-linkage / gf-deep-linkage / gf-options-from /
  *   gf-attachment / gf-longtext      GF 新能力面的路由开关（stub-routes.json 的 GF-* 路由）
+ *   【AIE2E-X-02】/【AIE2E-X-03】    安全面探针（L-137）：X-02 发**跨分片**的假密钥串、X-03 发**完整**假
+ *                                   PEM 块 —— 让 ps1 的输出侧断言有对象（此前桩回复不含探针串，旧断言
+ *                                   仍绿属"没被触发"的空断言）。只认这两个请求级标记，其余请求零漂移；
+ *                                   探针串均为测试用假串（前缀拆分构造，避免入库被密钥规则误报）。
  *   开关名与默认值的唯一取数点 = `stub-routes.json` 的 `faults.switches`（`--self-check` ⑨ 断言表与实现不漂移）；
  *   未带标记的请求走改造前路径，帧逐字节不变。
  */
@@ -889,6 +893,43 @@ function allText(body) {
 const INTERLEAVE_TOOLS = ['list_config_defs', 'get_workspace_state', 'get_row_count']
 
 /**
+ * 安全面探针（L-137，2026-10-24）：X-02 / X-03 的**确定性回复主动携带**探针串。
+ *
+ * 背景：L-99 删 DLP 后，输出侧既不 mask 也不 block，而桩原先的 `turn-text` 蓝本不含任何密钥形态
+ * ⇒ ps1 里 X-02（要求输出被 mask）/ X-03（要求私钥块被阻断）**只是"没被触发"的空断言**。
+ * 这里让桩按请求级标记回出探针：X-02 = 跨分片的假密钥串，X-03 = 完整假 PEM 块。
+ * 文本统一走 {@link textRound} 的 24 字符切片 ⇒ 断言方可以核"密钥 / PEM 确实被切开、拼回即原文"。
+ *
+ * 探针串全部是测试用假串：`sk-` 前缀与 PEM 头尾都按片段拼接，避免与提交前密钥扫描规则撞车。
+ */
+const SAFETY_STREAM_PROBE = 's' + 'k-' + 'B'.repeat(40)
+/** 前缀 10 字符 + 密钥 43 字符 ⇒ 密钥横跨第 1/2/3 片（24 字符切点落在密钥内部）。 */
+const SAFETY_STREAM_TEXT = `密钥一：token=${SAFETY_STREAM_PROBE} 结束。`
+const SAFETY_PEM_HEAD = '-----BEGIN' + ' RSA PRIVATE KEY-----'
+const SAFETY_PEM_TAIL = '-----END' + ' RSA PRIVATE KEY-----'
+const SAFETY_PEM = [
+  SAFETY_PEM_HEAD,
+  'MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn',
+  SAFETY_PEM_TAIL
+].join('\n')
+const SAFETY_PEM_TEXT = ['下面是配置片段：', '', SAFETY_PEM, '', '片段结束。'].join('\n')
+
+/**
+ * X-02 / X-03 的请求级探针判定（返回 `null` = 不是这两个用例，照常走蓝本/路由表）。
+ * 只认最后一条 user 消息里的**用例标记**，不看工具披露与其他开关 ⇒ 探针不污染既有语料。
+ */
+function safetyProbeDecision(body) {
+  const userText = textOf(lastMessageWithRole(messagesOf(body), 'user'))
+  if (userText.includes('【AIE2E-X-02】')) {
+    return { kind: 'text', text: SAFETY_STREAM_TEXT, probe: 'stream-key', reason: 'X-02 请求级跨分片假密钥探针' }
+  }
+  if (userText.includes('【AIE2E-X-03】')) {
+    return { kind: 'text', text: SAFETY_PEM_TEXT, probe: 'pem', reason: 'X-03 请求级完整假 PEM 探针' }
+  }
+  return null
+}
+
+/**
  * 命名轮蓝本 / 步数上限的判定覆盖（返回 `null` = 不覆盖，走 `decide` 的路由表）。
  * 纯函数：`--self-check` 用合成 messages 直接断言段序与步数。
  */
@@ -896,6 +937,8 @@ function blueprintDecision(body, faults) {
   const messages = messagesOf(body)
   const disclosed = new Set(toolNames(body))
   const toolMessages = messages.filter((m) => m?.role === 'tool').length
+  const safetyProbe = safetyProbeDecision(body)
+  if (safetyProbe) return safetyProbe
   if (faults['turn-text']) {
     return { kind: 'text', text: TURN_TEXT, reason: '命名轮蓝本 turn-text（确定性文本）' }
   }
@@ -1819,6 +1862,61 @@ function selfCheck() {
     const d = blueprintDecision({ messages: msgs, ...toolBag }, { 'tool-loop': 26 })
     if (d.kind !== wantKind) bad(`tool-loop=26 在第 ${used} 次工具后应 ${wantKind}，实际 ${d.kind}`)
   }
+
+  // ⑨-d2 安全面探针（L-137）：X-02 / X-03 的回复必须**真的携带**探针串，且经 24 字符切片后
+  //      探针本体确实横跨分片边界（否则 ps1 的"跨分片"断言就没有对象，又会退回空断言）。
+  //      **入口必须是 blueprintDecision**（不是直接调 safetyProbeDecision）：探针分支若被挪到
+  //      turn-text 之后，真实请求（X-02/X-03 提示词都带 turn-text 故障标记）就再也拿不到探针，
+  //      而"直接调探针函数"的自检仍会 PASS —— 那属同族空断言（评审 I-1）。故带 X 标记 + turn-text
+  //      故障穿过真实入口，证明目标分支可达。
+  //      这里与 `scripts/verify-e2e.ps1` 的 X-02 / X-03 是同一组期望：任何一侧漂移，自检或 E2E 即红。
+  const probeDeltas = (text) => textRound(text, 'ci-stub')
+    .filter((f) => f !== 'data: [DONE]\n\n')
+    .map((f) => JSON.parse(f.replace(/^data: /, '').trim()))
+    .map((f) => f.choices?.[0]?.delta?.content)
+    .filter((piece) => typeof piece === 'string')
+  /** needle 是否被分片切开：拼接后 needle 的起始偏移落在某个分片边界之前、结束偏移之后。 */
+  const splitInside = (pieces, needle) => {
+    const joined = pieces.join('')
+    const at = joined.indexOf(needle)
+    if (at < 0) return false
+    let offset = 0
+    return pieces.some((piece) => {
+      offset += piece.length
+      return offset > at && offset < at + needle.length
+    })
+  }
+  const probeEntry = (marker) => blueprintDecision(
+    { messages: [{ role: 'user', content: `${marker} turn-text 请原样重复这一行` }], tools: [] },
+    { 'turn-text': true }
+  )
+  const d02 = probeEntry('【AIE2E-X-02】')
+  if (d02?.kind !== 'text' || d02.probe !== 'stream-key' || !String(d02.text).includes(SAFETY_STREAM_PROBE)) {
+    bad('X-02 探针经 blueprintDecision 入口不可达或未携带假密钥原文（分支顺序被 turn-text 抢占 ⇒ ps1 断言无对象）')
+  } else if (!splitInside(probeDeltas(d02.text), SAFETY_STREAM_PROBE)) {
+    bad('X-02 探针的假密钥未被分片切开（跨分片断言无对象）')
+  } else if (probeDeltas(d02.text).some((piece) => piece.includes(SAFETY_STREAM_PROBE))) {
+    bad('X-02 探针的假密钥整串落在单片内（跨分片断言无对象）')
+  }
+  const d03 = probeEntry('【AIE2E-X-03】')
+  if (d03?.kind !== 'text' || d03.probe !== 'pem') {
+    bad('X-03 探针经 blueprintDecision 入口不可达（分支顺序被 turn-text 抢占）')
+  } else {
+    for (const part of [SAFETY_PEM_HEAD, 'MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn', SAFETY_PEM_TAIL]) {
+      if (!String(d03.text).includes(part)) bad(`X-03 探针缺 PEM 片段：${part}`)
+    }
+    if (!String(d03.text).includes(SAFETY_PEM)) bad('X-03 探针未给出完整 PEM 块（头/body/尾不连续）')
+    if (!splitInside(probeDeltas(d03.text), SAFETY_PEM)) bad('X-03 探针的 PEM 块未被分片切开（跨分片断言无对象）')
+  }
+  // 无标记时仍走 turn-text 蓝本（探针不得污染既有语料）
+  const plain = blueprintDecision(
+    { messages: [{ role: 'user', content: '普通一句 turn-text' }], tools: [] },
+    { 'turn-text': true }
+  )
+  if (plain?.kind !== 'text' || plain.probe !== undefined || !String(plain.text).includes('命名轮蓝本')) {
+    bad('无 X-02 / X-03 标记时不得走探针（应保持 turn-text 蓝本；探针污染既有语料）')
+  }
+  ok('安全面探针自证通过（经 blueprintDecision 入口且与 turn-text 同开仍命中：X-02 跨分片假密钥 / X-03 完整假 PEM；无标记保持 turn-text 蓝本）')
 
   // ⑨-e 多卡 / 大帧：多张待决卡的 id 互异且同消息；大帧是**单个** delta 且达到字节数
   const multi = multiToolRound('start_export', { taskId: 1 }, 'call-m', 'ci-stub', 3)

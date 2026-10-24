@@ -14,20 +14,28 @@ const items = ref<AiFeedbackEntry[]>([])
 const loading = ref(true)
 const error = ref<string | null>(null)
 
-onMounted(async () => {
+async function load(): Promise<void> {
+  loading.value = true
+  error.value = null
   try {
     items.value = await aiApi.feedbackList()
   } catch (e) {
-    error.value = e instanceof Error ? e.message : '加载失败'
+    error.value = e instanceof Error ? e.message : t('views.aiFeedback.unknownError')
   } finally {
     loading.value = false
   }
-})
+}
+
+onMounted(load)
+
+function retry(): void {
+  void load()
+}
 
 function ratingLabel(rating: number): { text: string; cls: string } {
   return rating === 1
-    ? { text: '赞', cls: 'text-[#409eff]' }
-    : { text: '踩', cls: 'text-[#f56c6c]' }
+    ? { text: t('views.aiFeedback.like'), cls: 'text-[#409eff]' }
+    : { text: t('views.aiFeedback.dislike'), cls: 'text-[#f56c6c]' }
 }
 
 /**
@@ -36,7 +44,10 @@ function ratingLabel(rating: number): { text: string; cls: string } {
 function summaryOf(item: AiFeedbackEntry): string {
   return item.excerpt && item.excerpt.trim() !== ''
     ? item.excerpt
-    : `会话 ${item.sessionId.slice(0, 8)} · 消息 ${item.messageId.slice(0, 8)}`
+    : t('views.aiFeedback.sessionMessage', {
+      session: item.sessionId.slice(0, 8),
+      message: item.messageId.slice(0, 8)
+    })
 }
 </script>
 
@@ -45,7 +56,9 @@ function summaryOf(item: AiFeedbackEntry): string {
     <h3 class="text-base font-semibold mb-3">{{ t('views.aiFeedback.title') }}</h3>
     <p class="text-xs text-[#909399] mb-3">{{ t('views.aiFeedback.subtitle') }}</p>
     <div v-if="loading" class="text-sm text-[#909399]">{{ t('views.aiFeedback.loading') }}</div>
-    <el-alert v-else-if="error" type="error" :closable="false" :title="t('views.aiFeedback.loadFailed', { error })" />
+    <el-alert v-else-if="error" type="error" :closable="false" :title="t('views.aiFeedback.loadFailed', { error })">
+      <el-button size="small" data-testid="ai-feedback-retry" @click="retry">{{ t('views.aiFeedback.retry') }}</el-button>
+    </el-alert>
     <el-empty v-else-if="items.length === 0" :description="t('views.aiFeedback.empty')" />
     <table v-else class="w-full text-[13px] border-collapse" data-testid="ai-feedback-table">
       <thead>

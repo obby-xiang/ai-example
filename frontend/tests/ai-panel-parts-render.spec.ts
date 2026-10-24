@@ -943,6 +943,186 @@ describe('R-154：截断角标 / 跟随暂停 / 生成中 / 编辑回填 / 建�
     wrapper.unmount()
   })
 
+  it('#2 noticeCode：zh 按码+数字拼装；旧帧无 code 回退 truncatedReason', async () => {
+    const wrapper = await mountPanelWith([
+      buildMessage([
+        {
+          kind: 'tool', seg: 0, toolCallId: 'nc1', name: 'get_row_count', kind2: 'BACKEND', status: 'succeeded',
+          args: '{}', result: '前 64KB…', truncated: true,
+          truncatedReason: 'Result truncated because it exceeded the frame size limit.',
+          noticeCode: 'frame_truncated', originalChars: 9_000, returnedChars: 3_195, strategy: 'head',
+          requiresAction: false
+        }
+      ])
+    ])
+    const title = wrapper.find('[data-testid="truncated-badge"]').attributes('title') ?? ''
+    expect(title).toContain('已压缩显示')
+    expect(title).toContain('3195')
+    expect(title).toContain('9000')
+    expect(title).not.toContain('Result truncated because')
+    wrapper.unmount()
+
+    const modelView = await mountPanelWith([
+      buildMessage([
+        {
+          kind: 'tool', seg: 0, toolCallId: 'nc2', name: 'get_row_count', kind2: 'BACKEND', status: 'succeeded',
+          args: '{}', result: '全文', truncated: true, truncatedReason: 'legacy',
+          noticeCode: 'model_view_truncated', originalChars: 25_000, returnedChars: 19_000, strategy: 'head',
+          requiresAction: false
+        }
+      ])
+    ])
+    const modelTitle = modelView.find('[data-testid="truncated-badge"]').attributes('title') ?? ''
+    expect(modelTitle).toContain('模型')
+    expect(modelTitle).toContain('仅收到')
+    expect(modelTitle).toContain('19000')
+    expect(modelTitle).toContain('25000')
+    // I-1：实时/历史都不许声称“此处仍显示完整结果”（历史里模型侧裁剪后的 message 才是持久原文）
+    expect(modelTitle).not.toContain('完整结果')
+    modelView.unmount()
+
+    const limit = await mountPanelWith([
+      buildMessage([
+        {
+          kind: 'tool', seg: 0, toolCallId: 'nc4', name: 'get_row_count', kind2: 'BACKEND', status: 'succeeded',
+          args: '{}', result: '超大结果', truncated: true, truncatedReason: 'legacy',
+          noticeCode: 'frame_limit_unreached', originalChars: 9_000, returnedChars: 0,
+          requiresAction: false
+        }
+      ])
+    ])
+    const limitTitle = limit.find('[data-testid="truncated-badge"]').attributes('title') ?? ''
+    expect(limitTitle).toContain('未能进一步压缩')
+    expect(limitTitle).not.toContain('已压缩')
+    limit.unmount()
+
+    const legacy = await mountPanelWith([
+      buildMessage([
+        {
+          kind: 'tool', seg: 0, toolCallId: 'nc3', name: 'get_row_count', kind2: 'BACKEND', status: 'succeeded',
+          args: '{}', result: '旧结果', truncated: true, truncatedReason: '旧帧原因', requiresAction: false
+        }
+      ])
+    ])
+    expect(legacy.find('[data-testid="truncated-badge"]').attributes('title')).toBe('旧帧原因')
+    legacy.unmount()
+  })
+
+  it('#2 noticeCode：en 全英文；不可压缩码不谎称已压缩', async () => {
+    const { default: i18n } = await import('@/locales')
+    i18n.global.locale.value = 'en-US'
+    try {
+      const wrapper = await mountPanelWith([
+        buildMessage([
+          {
+            kind: 'tool', seg: 0, toolCallId: 'ne1', name: 'get_row_count', kind2: 'BACKEND', status: 'succeeded',
+            args: '{}', result: '前 64KB…', truncated: true,
+            truncatedReason: 'Result truncated because it exceeded the frame size limit.',
+            noticeCode: 'frame_truncated', originalChars: 9_000, returnedChars: 3_195, strategy: 'head',
+            requiresAction: false
+          }
+        ])
+      ])
+      const title = wrapper.find('[data-testid="truncated-badge"]').attributes('title') ?? ''
+      expect(title).toContain('truncated')
+      expect(title).toContain('3195')
+      expect(title).toContain('9000')
+      expect(title).not.toMatch(/[\u4e00-\u9fff]/)
+      wrapper.unmount()
+
+      const model = await mountPanelWith([
+        buildMessage([
+          {
+            kind: 'tool', seg: 0, toolCallId: 'ne-model', name: 'get_row_count', kind2: 'BACKEND', status: 'succeeded',
+            args: '{}', result: '全文', truncated: true, truncatedReason: 'legacy',
+            noticeCode: 'model_view_truncated', originalChars: 25_000, returnedChars: 19_000, strategy: 'head',
+            requiresAction: false
+          }
+        ])
+      ])
+      const modelTitle = model.find('[data-testid="truncated-badge"]').attributes('title') ?? ''
+      expect(modelTitle).toContain('received only')
+      expect(modelTitle).toContain('19000')
+      expect(modelTitle).toContain('25000')
+      expect(modelTitle).not.toContain('full result')
+      model.unmount()
+
+      const limit = await mountPanelWith([
+        buildMessage([
+          {
+            kind: 'tool', seg: 0, toolCallId: 'ne2', name: 'get_row_count', kind2: 'BACKEND', status: 'succeeded',
+            args: '{}', result: '超大结果', truncated: true,
+            truncatedReason: 'Result exceeds the frame size limit and could not be compressed further.',
+            noticeCode: 'frame_limit_unreached', originalChars: 9_000, returnedChars: 0,
+            requiresAction: false
+          }
+        ])
+      ])
+      const limitTitle = limit.find('[data-testid="truncated-badge"]').attributes('title') ?? ''
+      expect(limitTitle).toContain('could not be compressed further')
+      expect(limitTitle).not.toContain('truncated')
+      expect(limitTitle).not.toMatch(/[\u4e00-\u9fff]/)
+      limit.unmount()
+    } finally {
+      i18n.global.locale.value = 'zh-CN'
+    }
+  })
+
+  it('#2 delta 正文/思考截断：段上出角标并本地化', async () => {
+    const wrapper = await mountPanelWith([
+      buildMessage([
+        {
+          kind: 'text', seg: 0, text: '被截断的正文', streaming: false, truncated: true,
+          noticeCode: 'frame_truncated', originalChars: 20_000, returnedChars: 3_400, strategy: 'head',
+          truncatedReason: 'Result truncated because it exceeded the frame size limit.'
+        }
+      ])
+    ])
+    const textBadge = wrapper.find('[data-testid="text-truncated-badge"]')
+    expect(textBadge.exists()).toBe(true)
+    expect(textBadge.attributes('title')).toContain('3400')
+    expect(textBadge.attributes('title')).toContain('20000')
+    wrapper.unmount()
+
+    const reasoning = await mountPanelWith([
+      buildMessage([
+        {
+          kind: 'reasoning', seg: 0, text: '被截断的思考', streaming: false, truncated: true,
+          noticeCode: 'frame_truncated', originalChars: 9_000, returnedChars: 2_000, strategy: 'head',
+          truncatedReason: 'Result truncated because it exceeded the frame size limit.'
+        }
+      ])
+    ])
+    const reasoningBadge = reasoning.find('[data-testid="reasoning-truncated-badge"]')
+    expect(reasoningBadge.exists()).toBe(true)
+    expect(reasoningBadge.attributes('title')).toContain('2000')
+    reasoning.unmount()
+  })
+
+  it('#2 旧帧：zh 保留旧中文；en 遇中文原因改用 locale 兜底', async () => {
+    const legacyPart = {
+      kind: 'tool' as const, seg: 0, toolCallId: 'old1', name: 'get_row_count', kind2: 'BACKEND' as const,
+      status: 'succeeded' as const, args: '{}', result: '旧结果', truncated: true,
+      truncatedReason: '单帧 64KB 预算超限，结果字段被截断', requiresAction: false
+    }
+    const zh = await mountPanelWith([buildMessage([legacyPart])])
+    expect(zh.find('[data-testid="truncated-badge"]').attributes('title'))
+      .toBe('单帧 64KB 预算超限，结果字段被截断')
+    zh.unmount()
+
+    const { default: i18n } = await import('@/locales')
+    i18n.global.locale.value = 'en-US'
+    try {
+      const en = await mountPanelWith([buildMessage([legacyPart])])
+      const title = en.find('[data-testid="truncated-badge"]').attributes('title') ?? ''
+      expect(title).toBe('Result truncated')
+      expect(title).not.toMatch(/[\u4e00-\u9fff]/)
+      en.unmount()
+    } finally {
+      i18n.global.locale.value = 'zh-CN'
+    }
+  })
+
   it('#5：上滑（离底）暂停跟随出浮钮，点「回到底部」恢复跟随并滚底', async () => {
     const wrapper = await mountPanel([
       buildMessage([{ kind: 'text', seg: 0, text: '长文', streaming: false }])
@@ -1090,6 +1270,118 @@ describe('R-154：截断角标 / 跟随暂停 / 生成中 / 编辑回填 / 建�
     await store.loadHistory()
     expect(store.messages[0].timestamp).toBe(1_700_000_000_000)
     expect(store.messages[1].timestamp).toBe('2026-01-01T00:00:00Z')
+  })
+
+  it('A10 R-15 历史重建：截断字段落到 ToolPart/TextPart ⇒ 刷新后角标与 locale hover 不丢', async () => {
+    const store = useAiStore()
+    api.history.mockResolvedValue({
+      sessionId: store.sessionId,
+      count: 2,
+      messages: [
+        {
+          type: 'ASSISTANT',
+          text: '被截断的正文',
+          // 文本侧 additive 字段（实际后端目前只在工具响应侧产；此处锁"载荷带则保留"）
+          truncated: true,
+          noticeCode: 'frame_truncated',
+          originalChars: 9_000,
+          returnedChars: 3_195,
+          strategy: 'head',
+          truncatedReason: '旧帧原因',
+          toolCalls: [{ id: 'h1', name: 'get_row_count', arguments: '{}' }]
+        },
+        {
+          type: 'TOOL',
+          text: '',
+          toolResponses: [
+            {
+              id: 'h1',
+              name: 'get_row_count',
+              responseData: '前 64KB…',
+              truncated: true,
+              noticeCode: 'model_view_truncated',
+              originalChars: 25_000,
+              returnedChars: 19_000,
+              strategy: 'head',
+              truncatedReason: 'Result truncated for model view.'
+            }
+          ]
+        }
+      ]
+    })
+    api.runsCurrent.mockResolvedValue({ found: false, runId: null, snapshotStatus: null, pendingEntries: [], unresolvedExternal: [], archiveMaxSeq: 0 })
+
+    await store.loadHistory()
+    const text = store.messages[0]!.parts.find((part) => part.kind === 'text')
+    const tool = store.messages[0]!.parts.find((part) => part.kind === 'tool') as ToolPart
+    expect(text).toMatchObject({
+      kind: 'text', truncated: true, noticeCode: 'frame_truncated',
+      originalChars: 9_000, returnedChars: 3_195, strategy: 'head', truncatedReason: '旧帧原因'
+    })
+    expect(tool).toMatchObject({
+      toolCallId: 'h1', truncated: true, noticeCode: 'model_view_truncated',
+      originalChars: 25_000, returnedChars: 19_000, strategy: 'head',
+      truncatedReason: 'Result truncated for model view.'
+    })
+
+    const wrapper = await mountPanel(store.messages)
+    const toolTitle = wrapper.find('[data-testid="truncated-badge"]').attributes('title') ?? ''
+    expect(toolTitle).toContain('模型')
+    expect(toolTitle).toContain('仅收到')
+    expect(toolTitle).toContain('19000')
+    expect(toolTitle).toContain('25000')
+    expect(toolTitle).not.toContain('完整结果')
+    const textTitle = wrapper.find('[data-testid="text-truncated-badge"]').attributes('title') ?? ''
+    expect(textTitle).toContain('3195')
+    expect(textTitle).toContain('9000')
+    wrapper.unmount()
+
+    const { default: i18n } = await import('@/locales')
+    i18n.global.locale.value = 'en-US'
+    try {
+      const english = await mountPanel(store.messages)
+      const enTitle = english.find('[data-testid="truncated-badge"]').attributes('title') ?? ''
+      expect(enTitle).toContain('19000')
+      expect(enTitle).toContain('25000')
+      expect(enTitle).not.toMatch(/[\u4e00-\u9fff]/)
+      english.unmount()
+    } finally {
+      i18n.global.locale.value = 'zh-CN'
+    }
+  })
+
+  it('A10 R-15 旧历史无截断字段：段形状与角标回退不变', async () => {
+    const store = useAiStore()
+    api.history.mockResolvedValue({
+      sessionId: store.sessionId,
+      count: 2,
+      messages: [
+        {
+          type: 'ASSISTANT',
+          text: '旧历史正文',
+          toolCalls: [{ id: 'h2', name: 'get_row_count', arguments: '{}' }]
+        },
+        {
+          type: 'TOOL',
+          text: '',
+          toolResponses: [{ id: 'h2', name: 'get_row_count', responseData: '完整结果' }]
+        }
+      ]
+    })
+    api.runsCurrent.mockResolvedValue({ found: false, runId: null, snapshotStatus: null, pendingEntries: [], unresolvedExternal: [], archiveMaxSeq: 0 })
+
+    await store.loadHistory()
+    const text = store.messages[0]!.parts.find((part) => part.kind === 'text')
+    const tool = store.messages[0]!.parts.find((part) => part.kind === 'tool') as ToolPart
+    expect(text?.truncated).toBeUndefined()
+    expect(tool.truncated).toBeUndefined()
+    expect(tool.noticeCode).toBeUndefined()
+    expect(tool.originalChars).toBeUndefined()
+
+    const wrapper = await mountPanel(store.messages)
+    expect(wrapper.find('[data-testid="truncated-badge"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="text-truncated-badge"]').exists()).toBe(false)
+    wrapper.unmount()
   })
 })
 
@@ -4349,7 +4641,7 @@ describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 �
     expect(fab.classes()).not.toContain('bottom-[76px]')
 
     // R11：error 级通知走 v7 `.enotice` 红族；普通通知保持灰底虚线
-    store.notice = '本轮出错（UPSTREAM_STREAM_ERROR）：Service is too busy'
+    store.notice = '本轮出错：Service is too busy'
     store.lastRoundOutcome = 'error'
     await wrapper.vm.$nextTick()
     const notice = wrapper.find('[data-testid="notice-bar"]')
@@ -5005,6 +5297,105 @@ describe('R-165 S5c：错误卡族（三变体分派 + 内联位置 + 动作钮�
     expect(buildErrorCard('AI_RUN_FAILED', 'boom')).toMatchObject({ variant: 'generic', title: '本轮出错', action: '', guide: '' })
   })
 
+  it('A10 新 9 码 + 派生码 + key 码都有专属卡（不再是未分类通用卡），码仍保留在 card.code', async () => {
+    const { buildErrorCard } = await import('@/utils/error-card')
+    const { translate } = await import('@/composables/useCopy')
+    const genericTitle = translate('ai.card.error.generic.title')
+    const codes = [
+      'EMPTY_REPLY',
+      'AI_RUN_CANCELLED',
+      'UPSTREAM_FIRST_BYTE_TIMEOUT',
+      'UPSTREAM_SILENT_TIMEOUT',
+      'TOTAL_BUDGET_EXCEEDED',
+      'UPSTREAM_STREAM_INCOMPLETE',
+      'UPSTREAM_CONNECTION_BROKEN',
+      'UPSTREAM_STREAM_ERROR'
+    ]
+    for (const code of codes) {
+      const card = buildErrorCard(code, '后端原文')
+      expect(card, code).not.toBeNull()
+      expect(card?.title, code).not.toBe(genericTitle)
+      expect(card?.guide, code).not.toBe('')
+      expect(card?.code, code).toBe(code)
+    }
+    // 派生码：展示与基础码同一张卡，但诊断码逐字保留（含后缀）
+    const base = buildErrorCard('UPSTREAM_STREAM_ERROR', '断流')
+    const derived = buildErrorCard('UPSTREAM_STREAM_ERROR_AFTER_PARTIAL', '断流')
+    expect(derived?.title).toBe(base?.title)
+    expect(derived?.code).toBe('UPSTREAM_STREAM_ERROR_AFTER_PARTIAL')
+    expect(buildErrorCard('TOTAL_BUDGET_EXCEEDED_AFTER_TOOL_SIDE_EFFECT', '超时')?.title)
+      .toBe(buildErrorCard('TOTAL_BUDGET_EXCEEDED', '超时')?.title)
+    // R-12：无 key / key 解不开 → 专门卡 + 引导到设置页
+    const missing = buildErrorCard('AI_KEY_MISSING', '后端原文')
+    expect(missing?.title).toBe('缺少 API Key')
+    expect(missing?.guide).toContain('设置 → AI')
+    const unreadable = buildErrorCard('AI_KEY_UNREADABLE', '后端原文')
+    expect(unreadable?.title).toBe('API Key 无法解密')
+    expect(unreadable?.guide).toContain('设置 → AI')
+  })
+
+  it('R-12 开流前 503：AI_KEY_MISSING / AI_KEY_UNREADABLE 用本地文案（不叠后端中文）并出专门卡', async () => {
+    const store = useAiStore()
+    const { ApiError } = await import('@/api/http')
+    const assistant = (id: string) => {
+      const m = buildMessage([{ kind: 'text', seg: 0, text: '', streaming: true }], null, true)
+      m.id = id
+      return m
+    }
+    const m1 = assistant('key-missing')
+    store.messages = [m1]
+    store.handleChatError(new ApiError('AI 能力未启用：已配置的 provider 均无可用 key', 503, 'AI_KEY_MISSING', null), 'key-missing')
+    expect(store.noticeText).not.toContain('AI 能力未启用')
+    expect(store.noticeText).toContain('设置 → AI')
+    expect(m1.errorCard?.title).toBe('缺少 API Key')
+    expect(m1.errorCard?.code).toBe('AI_KEY_MISSING')
+    expect(m1.parts.some((p) => p.kind === 'text' && p.text !== ''), '正文不回显后端中文（防中英叠加）').toBe(false)
+
+    const m2 = assistant('key-unreadable')
+    store.messages = [m2]
+    const unreadableReason = 'AI 能力未启用：请到「设置 → AI」重新录入密钥，或让管理员恢复加密配置'
+    store.handleChatError(new ApiError(unreadableReason, 503, 'AI_KEY_UNREADABLE', null), 'key-unreadable')
+    expect(store.noticeText).not.toContain('AI 能力未启用')
+    expect(m2.errorCard?.title).toBe('API Key 无法解密')
+    expect(m2.errorCard?.code).toBe('AI_KEY_UNREADABLE')
+    expect(m2.errorCard?.detail).toBe(unreadableReason)
+    for (const forbidden of ['AI_API_KEY', 'DEEPSEEK_API_KEY', 'AI_SECRET_KEK', 'KEK', 'provider']) {
+      expect(m2.errorCard?.detail, forbidden).not.toContain(forbidden)
+    }
+
+    // I-1：/health 降级横幅同样不得出现变量名/机制词（zh）
+    const healthBody = {
+      available: false, code: 'AI_KEY_UNREADABLE', message: unreadableReason
+    }
+    api.health.mockResolvedValue(healthBody as never)
+    const panel = await mountPanel(store.messages)
+    await flushPromises()
+    const banner = panel.find('[data-testid="alert-degraded"]')
+    expect(banner.exists()).toBe(true)
+    expect(banner.text()).toContain('设置 → AI')
+    for (const forbidden of ['AI_API_KEY', 'DEEPSEEK_API_KEY', 'AI_SECRET_KEK', 'KEK', 'provider']) {
+      expect(banner.text(), forbidden).not.toContain(forbidden)
+    }
+    panel.unmount()
+
+    // I-1：en 横幅只展示后端已本地化的短句（无中文、无变量名）
+    const { default: i18n } = await import('@/locales')
+    i18n.global.locale.value = 'en-US'
+    try {
+      const enReason = 'The API key cannot be decrypted. Re-enter the key in Settings → AI, or ask the administrator to restore the encryption configuration'
+      api.health.mockResolvedValue({ available: false, code: 'AI_KEY_UNREADABLE', message: enReason } as never)
+      const enPanel = await mountPanel(store.messages)
+      await flushPromises()
+      const enBanner = enPanel.find('[data-testid="alert-degraded"]')
+      expect(enBanner.text()).toContain('Settings → AI')
+      expect(enBanner.text()).not.toMatch(/[\u4e00-\u9fff]/)
+      expect(enBanner.text()).not.toContain('AI_SECRET_KEK')
+      enPanel.unmount()
+    } finally {
+      i18n.global.locale.value = 'zh-CN'
+    }
+  })
+
   it('store：SSE error 帧按 code 分派并把卡挂到**本轮这条消息**上（lastRoundOutcome 与 notice 口径不变）', async () => {
     const { useAiStore: useStore } = await import('@/stores/ai')
     const store = useStore()
@@ -5017,7 +5408,7 @@ describe('R-165 S5c：错误卡族（三变体分派 + 内联位置 + 动作钮�
     expect(msg.errorCard?.detail).toBe('本轮 132k / 128k token')
     expect(msg.streaming).toBe(false)
     expect(store.lastRoundOutcome).toBe('error')
-    expect(store.notice).toBe('本轮出错（context_length_exceeded）：本轮 132k / 128k token') // 既有通知槽口径不回归
+    expect(store.notice).toBe('本轮出错：本轮 132k / 128k token') // 码不再上屏；错误卡 code 仍保留诊断
 
     const msg2 = buildMessage([{ kind: 'text', seg: 0, text: '', streaming: true }], null, true)
     msg2.id = 'a-err2'
@@ -5826,9 +6217,9 @@ describe('批4-D：不可撤销确认卡的复选框（可逆卡一字不动）'
     const rows = gate.find('[data-testid="gate-rows"]')
     expect(rows.element.contains(box.element)).toBe(false)
 
-    // 文案：中文「确认{动作}，执行后无法恢复」，动作名取 tool.<name>.title
+    // 文案：start_publish 必须点名“若本次为整体替换，范围内旧数据会被删除”（不依赖本地模式）
     const ack = gate.find('[data-testid="gate-ack"]')
-    expect(ack.text()).toContain('确认启动发布作业，执行后无法恢复')
+    expect(ack.text()).toContain('确认启动发布作业：若本次为整体替换，范围内旧数据将被删除，执行后无法恢复')
     // 字形面零 emoji（同卡面锁口径）
     expect(ack.text()).not.toMatch(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/u)
 
@@ -5928,7 +6319,7 @@ describe('批4-D：不可撤销确认卡的复选框（可逆卡一字不动）'
       const wrapper = await mountPanel([buildMessage([irreversiblePart('pub-en')])])
       const gate = wrapper.find('[data-testid="pending-card-pub-en"]').find('[data-testid="hitl-gate"]')
       expect(gate.find('[data-testid="gate-ack"]').text()).toBe(
-        'I understand that starting the publish job cannot be undone'
+        'Confirm starting the publish job: if this run uses replace mode, old data in scope will be deleted and cannot be undone'
       )
       expect(gate.find('[data-testid="gate-ack-hint"]').text()).toBe('Tick the box above to continue')
       // 批3二 S3：卡面按钮文案随 locale（zh 逐字不变；en 走 ai.panel.reject / approve）

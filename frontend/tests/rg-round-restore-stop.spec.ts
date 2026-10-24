@@ -93,6 +93,11 @@ async function freshStore() {
   return store
 }
 
+// 预热 stores/ai 的首次 transform/eval：放在用例/钩子超时之外，避免高负载下首个 freshStore 的
+// 动态 import（2–5s）吃掉 5s 用例预算；随后 resetModules，仍由各例 freshStore 重建隔离实例。
+await import('@/stores/ai')
+vi.resetModules()
+
 beforeEach(() => {
   sessionStorage.clear()
   setActivePinia(createPinia())

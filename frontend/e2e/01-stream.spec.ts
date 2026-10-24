@@ -43,10 +43,10 @@ test.describe('@stub S 流式稳定', () => {
       .poll(async () => (await assistantText(page)).length, { timeout: 20_000 })
       .toBeGreaterThan(10)
 
-    // 桩的上游 TCP 被销毁 ⇒ 产品以「本轮出错 + 机器码」收敛，并给「继续」入口
-    await expect(page.locator('[data-testid="notice-bar"]')).toContainText('UPSTREAM_STREAM_ERROR_AFTER_PARTIAL', {
-      timeout: 40_000
-    })
+    // 桩的上游 TCP 被销毁 ⇒ 产品以「本轮出错（人话，不带码）」收敛，并给「继续」入口
+    const notice = page.locator('[data-testid="notice-bar"]')
+    await expect(notice).toContainText('本轮出错', { timeout: 40_000 })
+    await expect(notice).not.toContainText('UPSTREAM_STREAM_ERROR_AFTER_PARTIAL')
     await waitRoundSettled(page, 60_000)
     await expect(page.locator('[data-testid="continue-round"]')).toBeVisible()
 

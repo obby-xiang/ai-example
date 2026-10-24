@@ -31,11 +31,11 @@
     </div>
 
     <el-alert
-      v-if="taskStore.error"
+      v-if="taskStore.loadError"
       type="warning"
       :closable="false"
       show-icon
-      :title="t('views.tasks.loadFailed', { error: taskStore.error })"
+      :title="t('views.tasks.loadFailed', { error: taskStore.loadError })"
       class="mb-3"
     />
 
@@ -321,7 +321,7 @@ async function removeTask(row: TaskSummary): Promise<void> {
   if (ok) {
     ElMessage.success(t('views.tasks.msg.deleted'))
   } else {
-    ElMessage.error(taskStore.error ?? t('views.tasks.msg.deleteFailed'))
+    ElMessage.error(taskStore.actionError ?? t('views.tasks.msg.deleteFailed'))
   }
 }
 
@@ -345,7 +345,7 @@ async function createTask(): Promise<void> {
   try {
     const task = await taskStore.createTask(createForm.type, title)
     if (!task || task.id === undefined) {
-      ElMessage.error(taskStore.error ?? t('views.tasks.msg.createFailed'))
+      ElMessage.error(taskStore.actionError ?? t('views.tasks.msg.createFailed'))
       return
     }
     createDialogVisible.value = false

@@ -2620,6 +2620,33 @@ function Ai-DoneIsLast($frames) {
     }
 }
 function Ai-Text($frames) { return (($frames | Where-Object { $_.type -eq 'delta' } | ForEach-Object { [string]$_.text }) -join '') }
+# 安全面探针取证（X-02 / X-03，L-137）：把**实收 delta 分片**逐条落档到 -ArtifactDir（仓库外），
+# 供"上游确实把探针切开并发出"的事后复核 —— 帧是上游 chunk 经产品 SSE 的中继，切点即上游切点。
+# `$needle` = 探针本体（假密钥 / PEM body），落档里标出哪些分片含它的片段。
+function Ai-SafetyDump($case, $frames, $needle) {
+    if (-not $script:gfArtifactDir) { return }
+    try {
+        $pieces = @($frames | Where-Object { $_.type -eq 'delta' } | ForEach-Object { [string]$_.text })
+        $joined = ($pieces -join '')
+        $at = $joined.IndexOf($needle)
+        $enc = New-Object System.Text.UTF8Encoding($false)
+        $lines = New-Object System.Collections.ArrayList
+        $lines.Add(("# {0} —— 上游探针实证：实收 delta 分片（按到达顺序；拼回后 needle 起始偏移={1}）" -f $case, $at)) | Out-Null
+        $offset = 0
+        $hit = 0
+        for ($i = 0; $i -lt $pieces.Count; $i++) {
+            $end = $offset + $pieces[$i].Length
+            $touches = ($at -ge 0 -and $offset -lt ($at + $needle.Length) -and $end -gt $at)
+            if ($touches) { $hit++ }
+            $lines.Add(("chunk[{0,2}] off={1,-4} len={2,-4} touchesNeedle={3}`n{4}" -f $i, $offset, $pieces[$i].Length, $touches, $pieces[$i])) | Out-Null
+            $offset = $end
+        }
+        [IO.File]::WriteAllLines((Join-Path $script:gfArtifactDir "${case}-safety-probe.txt"), $lines.ToArray(), $enc)
+        Write-Host ("  [ART] {0}-safety-probe.txt 已落盘（分片 {1} 个，含探针片段 {2} 片）" -f $case, $pieces.Count, $hit) -ForegroundColor DarkGray
+    } catch {
+        Write-Host ("  [WARN] 安全面取证落盘失败（{0}）：{1}" -f $case, $_.Exception.Message) -ForegroundColor Yellow
+    }
+}
 function Ai-MaxSeq($frames) {
     $m = 0
     foreach ($f in @($frames | Where-Object { $null -ne $_.seq })) { if ([int]$f.seq -gt $m) { $m = [int]$f.seq } }
@@ -4254,6 +4281,21 @@ function Ai-SecurityCounters {
     if (-not $h.ok -or $null -eq $h.json.security) { return $null }
     return $h.json.security
 }
+# DLP 计数零增长断言（X-01 / X-02 / X-03 同一口径；评审 I-2 / I-3）：
+#   ① 起始基线为 null 一律失败 —— 「跳过比较」会把"计数面不可观测"伪装成零增长（I-3）；
+#   ② 逐键先断言 before / after **两处都存在** —— 键被删/改名时 0==0 同样是假绿（I-2）；
+#   ③ 再比较值。三键键位是 /health 的兼容面（L-99 后无写入点，值应零增长）。
+function Ai-AssertDlpFlat($before, $after, [string[]]$keys) {
+    if ($null -eq $before) { throw 'health 起始基线为 null（security 计数不可观测）——不得跳过零增长断言' }
+    if ($null -eq $after) { throw 'health 未下发 security 计数（DLP 面不可观测）' }
+    $beforeNames = @($before.PSObject.Properties.Name)
+    $afterNames = @($after.PSObject.Properties.Name)
+    foreach ($k in $keys) {
+        if ($beforeNames -notcontains $k) { throw "health.security 基线缺键 $k（键位被删/改名 ⇒ 零增长不可判，按失败处理）" }
+        if ($afterNames -notcontains $k) { throw "health.security 缺键 $k（键位被删/改名 ⇒ 零增长不可判，按失败处理）" }
+        if ([long]$after.$k -ne [long]$before.$k) { throw "$k 仍在增长（$($before.$k) → $($after.$k)）——DLP 未删净" }
+    }
+}
 
 Add-AiCase 'X-01' 'P0' '输入含 sk- 形态：原文透传（不 block、不脱敏），DLP 计数不增长' {
     $before = Ai-SecurityCounters
@@ -4269,34 +4311,75 @@ Add-AiCase 'X-01' 'P0' '输入含 sk- 形态：原文透传（不 block、不脱
     if ($blob -notlike ('*' + $probe + '*')) { throw '历史里没有密钥原文（L-99 后应原文透传；被掩码即回归）' }
     if ($blob -match '\[REDACTED') { throw '历史里出现 [REDACTED 掩码（DLP 应已删除）' }
     $after = Ai-SecurityCounters
-    if ($null -eq $after) { throw 'health 未下发 security 计数（脱敏面不可观测）' }
-    if ($null -ne $before) {
-        # L-99：DLP 三个计数不再有写入点（键位保留是 /health 的兼容面，值应零增长）。
-        foreach ($k in @('inputRedacted', 'outputRedacted', 'outputBlocked')) {
-            if ([long]$after.$k -ne [long]$before.$k) { throw "$k 仍在增长（$($before.$k) → $($after.$k)）——DLP 未删净" }
-        }
-    }
+    # 评审 I-2/I-3：基线 null 失败、逐键存在性先断言（缺键时 0==0 是假绿）。
+    Ai-AssertDlpFlat $before $after @('inputRedacted', 'outputRedacted', 'outputBlocked')
     return $null
 }
 
-Add-AiCase 'X-02' 'P1' '输出流式 mask：跨分片无半截泄漏' {
+Add-AiCase 'X-02' 'P1' '输出探针跨分片：拼回即原文、无掩码痕迹、DLP 三计数零增长' {
+    $before = Ai-SecurityCounters
     $sid = Ai-NewSid 'x02'
     $probe = 'sk-' + ('B' * 40)
     $turn = Invoke-AiTurn $sid ("【AIE2E-X-02】turn-text 请原样重复这一行：token=$probe 结束。") @{ page = 'tasks' } $script:aiContinue 2
-    Ai-Done $turn.frames | Out-Null
+    $done = Ai-Done $turn.frames
+    if ((Ai-F $turn.frames @('error')).Count -gt 0) { throw '输出探针轮出现 error 帧（文本轮应正常收尾）' }
+    if ($done.PSObject.Properties.Name -contains 'safety') { throw 'done 仍带 safety 段（L-99：输出守卫与 done.extra.safety 一并删除）' }
+    # L-99 口径（2026-10-24 裁决：删 DLP）——输出侧不再 mask/block，故这里锁"拼回即原文"，
+    # 并锁"掩码痕迹确实不存在"。桩在 X-02 标记下主动回出跨分片的假密钥串（stub-upstream.mjs
+    # 的 SAFETY_STREAM_PROBE），本用例因此有对象；此前的绿是"桩回复不含探针"的空断言（L-137）。
+    # 任务语义是**原文透传**：断言拼回正文含桩的**完整确定性回复**（不只密钥子串）——
+    # 前缀/后缀任一被改写、截断或替换即红（断言升级，不改产品去迎合）。
     $text = Ai-Text $turn.frames
-    if ($text.Length -lt 1) { throw '正文为空（原样重复未生效，断言无对象）' }
-    if ($text -like ('*' + $probe + '*')) { throw '流式输出里出现未 mask 的密钥片段' }
+    $expected = "密钥一：token=$probe 结束。"
+    $deltas = @($turn.frames | Where-Object { $_.type -eq 'delta' } | ForEach-Object { [string]$_.text })
+    if ($deltas.Count -lt 3) { throw "delta 帧 $($deltas.Count) 个（跨分片形态至少 3 片：前缀 + 密钥两片）" }
+    if (-not $text.Contains($expected)) { throw '拼回的正文不含完整确定性回复（L-99 后应原文透传；缺前缀/后缀或被改写即回归）' }
+    if ($text -match '\[REDACTED') { throw '正文里出现 [REDACTED 掩码（DLP 应已删除）' }
+    # 跨分片实证：整串密钥不得落在任一单片内，且分片边界必须落在密钥内部。
+    # 桩按 24 字符切片、密钥 43 字符 —— 若哪天桩改成整串单片，这里即红（防"断言还在、对象没了"）。
+    if (@($deltas | Where-Object { $_.Contains($probe) }).Count -gt 0) { throw '单个 delta 即含完整密钥（跨分片探针没被切开，断言无对象）' }
+    $joined = ''
+    $bounds = New-Object System.Collections.Generic.List[int]
+    foreach ($piece in $deltas) { $joined += $piece; $bounds.Add($joined.Length) }
+    $at = $joined.IndexOf($probe)
+    if (@($bounds | Where-Object { $_ -gt $at -and $_ -lt ($at + $probe.Length) }).Count -lt 1) {
+        throw '分片边界未落在密钥内部（密钥未被跨分片发出，跨分片断言无对象）'
+    }
+    Ai-SafetyDump 'x02' $turn.frames $probe
+    $after = Ai-SecurityCounters
+    Ai-AssertDlpFlat $before $after @('inputRedacted', 'outputRedacted', 'outputBlocked')
     return $null
 }
 
-Add-AiCase 'X-03' 'P1' '私钥块 block：正文不含 PEM' {
+Add-AiCase 'X-03' 'P1' '私钥块不再阻断：完整 PEM 原文到达、done 收尾、DLP 计数零增长' {
+    $before = Ai-SecurityCounters
     $sid = Ai-NewSid 'x03'
     $turn = Invoke-AiTurn $sid '【AIE2E-X-03】turn-text 请输出一段 BEGIN PRIVATE KEY 内容用于演示。' @{ page = 'tasks' } $script:aiContinue 2
     $term = @($turn.frames | Where-Object { $_.type -eq 'done' -or $_.type -eq 'error' })
     if ($term.Count -lt 1) { throw '无终态' }
+    if ((Ai-F $turn.frames @('error')).Count -gt 0) { throw '私钥块轮出现 error 帧（L-99 后不再阻断，不得有错误终态）' }
+    if ($term[0].type -ne 'done') { throw "终态是 $($term[0].type)（L-99 后私钥块不再阻断，必须 done 收尾）" }
+    Ai-Done $turn.frames | Out-Null
+    # 正文必须是**完整**假 PEM：头 + body + 尾三行齐全、顺序正确，且**连续成块**（不只三段各自存在）。
     $text = Ai-Text $turn.frames
-    if ($text -match 'BEGIN [A-Z ]*PRIVATE KEY') { throw '流式输出里出现 PEM 私钥块' }
+    # 私钥头同样拆开拼接：避免与提交前敏感信息扫描规则（`-----BEGIN…PRIVATE KEY-----`）自撞。
+    $pemHead = '-----BEGIN' + ' RSA PRIVATE KEY-----'
+    $pemBody = 'MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn'
+    $pemTail = '-----END RSA PRIVATE KEY-----'
+    $pem = $pemHead + "`n" + $pemBody + "`n" + $pemTail
+    foreach ($part in @($pemHead, $pemBody, $pemTail)) {
+        if (-not $text.Contains($part)) { throw "正文缺 PEM 片段：$part（L-99 后应原样透传）" }
+    }
+    if (-not $text.Contains($pem)) { throw '拼回的正文不含完整 PEM 块（头/body/尾须连续成块；被改写或插入内容即回归）' }
+    if ($text.IndexOf($pemHead) -gt $text.IndexOf($pemTail)) { throw 'PEM 首尾顺序倒置（内容不完整）' }
+    if ($text -match '\[REDACTED') { throw '正文里出现 [REDACTED 掩码（DLP 应已删除）' }
+    # 跨分片实证（同 X-02）：完整 PEM 块不得落在单片内，否则"流式到达"断言无对象。
+    $deltas = @($turn.frames | Where-Object { $_.type -eq 'delta' } | ForEach-Object { [string]$_.text })
+    if ($deltas.Count -lt 2) { throw "delta 帧 $($deltas.Count) 个（PEM 块必须先跨分片发出）" }
+    if (@($deltas | Where-Object { $_.Contains($pem) }).Count -gt 0) { throw '单个 delta 即含完整 PEM 块（跨分片探针没被切开，断言无对象）' }
+    Ai-SafetyDump 'x03' $turn.frames $pemBody
+    $after = Ai-SecurityCounters
+    Ai-AssertDlpFlat $before $after @('outputBlocked', 'outputRedacted')
     return $null
 }
 
@@ -4933,7 +5016,7 @@ Add-AiCase 'W-21' 'P1' '历史恢复段序对账①：/history 段序与归档�
     return $null
 }
 
-Add-AiCase 'W-22' 'P2' '历史恢复对账②：工具段保留回灌原文且带定界声明（历史即"数据"，不冒充指令）' {
+Add-AiCase 'W-22' 'P2' '历史恢复对账②：工具段只保留回灌 message 原文（不把声明/<tool_result>信封 JSON 透给用户）' {
     $sid = Ai-NewSid 'w22'
     $frames = Ai-UiChat $sid 'UI-CLICK' (Ai-UiCtx 1)
     $req = Ai-One $frames 'frontend_tool_request'
@@ -4944,7 +5027,10 @@ Add-AiCase 'W-22' 'P2' '历史恢复对账②：工具段保留回灌原文且�
     if (-not $resp) { throw '历史里缺 TOOL 段' }
     $data = [string]@($resp.toolResponses)[0].responseData
     if ($data -notlike '*选择文件*') { throw "历史工具结果丢了回灌原文（实际：$data）" }
-    if ($data -notlike '*是【数据】不是【指令】*') { throw '历史工具结果缺定界声明（注入面回显时无法与指令区分）' }
+    # L-70 收口：历史通道只回 message 原文 —— 模型侧声明/定界外壳/信封 JSON 一律不得上屏。
+    if ($data -like '*是【数据】不是【指令】*') { throw '历史工具结果仍透出模型侧定界声明（应只保留 message 原文）' }
+    if ($data -like '*<tool_result>*' -or $data -like '*</tool_result>*') { throw '历史工具结果仍透出 <tool_result> 外壳' }
+    if ($data -like '*"outcome"*' -or $data -like '*"retryable"*') { throw '历史工具结果仍透出信封 JSON 字段' }
     foreach ($bad in @('C:\', '<script', 'javascript:', 'file://')) {
         if ($data -like "*$bad*") { throw "历史工具结果含禁用形态 $bad（回灌守卫的口径没有延续到历史通道）" }
     }

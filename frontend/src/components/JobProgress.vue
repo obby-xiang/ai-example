@@ -25,7 +25,7 @@
     <el-table v-if="job && items.length" :data="items" size="small" border>
       <el-table-column v-if="hasAnyDetail" type="expand">
         <template #default="{ row }">
-          <el-table v-if="detailOf(row).length" :data="detailOf(row)" size="small" class="my-1 mx-4">
+          <el-table v-if="detailOf(row.defCode).length" :data="detailOf(row.defCode)" size="small" class="my-1 mx-4">
             <el-table-column prop="rowIndex" :label="t('job.rowIndex')" width="80">
               <template #default="{ row: issue }">{{ issue.rowIndex ?? '—' }}</template>
             </el-table-column>
@@ -44,7 +44,7 @@
       </el-table-column>
       <el-table-column prop="sortOrder" :label="t('job.sortOrder')" width="64" />
       <el-table-column prop="defCode" :label="t('job.definition')" min-width="160" />
-      <el-table-column :label="t('job.status')" width="100">
+      <el-table-column :label="t('job.statusLabel')" width="100">
         <template #default="{ row }">
           <el-tag size="small" :type="statusType(row.status)">{{ statusLabel(row.status) }}</el-tag>
         </template>
@@ -117,7 +117,7 @@ const progressText = computed(() => {
     return ''
   }
   if (view.value.unknownTotal) {
-    return `处理中 · 已处理 ${props.job.progress} 行（总量待定）`
+    return t('job.progressUnknown', { processed: props.job.progress })
   }
   return `${props.job.progress} / ${props.job.total}`
 })
@@ -127,10 +127,10 @@ const channelHint = computed(() => {
     return ''
   }
   if (props.channel === 'polling') {
-    return '（实时通道已降级为轮询）'
+    return t('job.channelPolling')
   }
   if (props.channel === 'realtime') {
-    return '（实时通道已连接）'
+    return t('job.channelRealtime')
   }
   return ''
 })
@@ -195,15 +195,15 @@ function statusType(status: JobStatus | string): 'primary' | 'success' | 'danger
 function statusLabel(status: JobStatus | string): string {
   switch (status) {
     case 'PENDING':
-      return '等待中'
+      return t('job.status.PENDING')
     case 'RUNNING':
-      return '运行中'
+      return t('job.status.RUNNING')
     case 'COMPLETED':
-      return '成功'
+      return t('job.status.COMPLETED')
     case 'FAILED':
-      return '失败'
+      return t('job.status.FAILED')
     case 'CANCELLED':
-      return '已取消'
+      return t('job.status.CANCELLED')
     default:
       return String(status)
   }
@@ -214,6 +214,13 @@ function severityType(severity: Severity): 'danger' | 'warning' | 'info' {
 }
 
 function severityLabel(severity: Severity): string {
-  return severity === 'ERROR' ? '错误' : severity === 'WARNING' ? '警告' : '提示'
+  switch (severity) {
+    case 'ERROR':
+      return t('job.severity.ERROR')
+    case 'WARNING':
+      return t('job.severity.WARNING')
+    default:
+      return t('job.severity.INFO')
+  }
 }
 </script>

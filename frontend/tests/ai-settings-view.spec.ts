@@ -265,13 +265,13 @@ describe('F2 密钥掩码与「留空不改」', () => {
     expect(toast.warning).not.toHaveBeenCalled()
   })
 
-  it('M-1：探活回 KEY_UNREADABLE 时显示映射文案（不显示后端原文）', async () => {
+  it('M-1：探活回 AI_KEY_UNREADABLE 时显示映射文案（不显示后端原文）', async () => {
     const backendMessage = '库里的密钥无法解密（KEK 缺失）：AES/GCM 失败'
     api.testProvider.mockResolvedValue({
       ok: false,
       status: null,
       latencyMs: 0,
-      code: 'KEY_UNREADABLE',
+      code: 'AI_KEY_UNREADABLE',
       message: backendMessage,
       modelCount: 0
     })
@@ -283,6 +283,35 @@ describe('F2 密钥掩码与「留空不改」', () => {
     const shown = wrapper.find('[data-testid="probe-result"]').text()
     expect(shown).toContain('无法解密')
     expect(shown).not.toContain(backendMessage)
+  })
+
+  it('I-3：AI_KEY_UNREADABLE 的 en 文案同样映射（不显示后端 KEK 原文）', async () => {
+    const backendMessage = '库里的密钥无法解密（KEK 缺失）：AES/GCM 失败'
+    api.testProvider.mockResolvedValue({
+      ok: false,
+      status: null,
+      latencyMs: 0,
+      code: 'AI_KEY_UNREADABLE',
+      message: backendMessage,
+      modelCount: 0
+    })
+    const { default: i18n } = await import('@/locales')
+    i18n.global.locale.value = 'en-US'
+    try {
+      const wrapper = await mountView()
+      await wrapper.find('[data-testid="test-provider"]').trigger('click')
+      await flushPromises()
+
+      const shown = wrapper.find('[data-testid="probe-result"]').text()
+      expect(shown).toContain('decrypted')
+      expect(shown).toContain('Settings → AI')
+      expect(shown).not.toContain(backendMessage)
+      expect(shown).not.toContain('KEK')
+      expect(shown).not.toMatch(/[\u4e00-\u9fff]/)
+    }
+    finally {
+      i18n.global.locale.value = 'zh-CN'
+    }
   })
 
   it('清除密钥要二次确认，取消则不请求', async () => {

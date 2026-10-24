@@ -50,6 +50,42 @@
         },
         "generic": {
           "title": "本轮出错"
+        },
+        "emptyReply": {
+          "title": "本轮没有返回内容",
+          "guide": "请重试，或换一种问法。"
+        },
+        "cancelled": {
+          "title": "本轮已取消",
+          "guide": "可以重新发送。"
+        },
+        "timeout": {
+          "title": "AI 响应超时",
+          "guide": "请稍后重试。"
+        },
+        "budget": {
+          "title": "本轮处理时间过长",
+          "guide": "请稍后重试。"
+        },
+        "interrupted": {
+          "title": "AI 返回中断",
+          "guide": "已生成的内容保留，请重试。"
+        },
+        "connection": {
+          "title": "连接中断",
+          "guide": "请检查网络后重试。"
+        },
+        "upstream": {
+          "title": "AI 服务异常",
+          "guide": "请稍后重试。"
+        },
+        "keyMissing": {
+          "title": "缺少 API Key",
+          "guide": "请到「设置 → AI」为供应商录入密钥后重试。"
+        },
+        "keyUnreadable": {
+          "title": "API Key 无法解密",
+          "guide": "请到「设置 → AI」重新录入密钥，或让管理员恢复加密配置。"
         }
       }
     },
@@ -65,8 +101,10 @@
       "chatRequestFailed": "对话请求失败",
       "poolSaturated": "挂起池已饱和，请稍后重试。",
       "poolSaturatedWithSize": "挂起池已饱和（容量 {size}），请稍后重试。",
-      "aiDisabled": "AI 未启用：{message}",
-      "redisUnavailable": "AI 运行时依赖的 Redis 不可用：{message}",
+      "aiDisabled": "AI 功能未启用：请到「设置 → AI」配置供应商与 API Key。",
+      "keyMissing": "AI 缺少可用的 API Key：请到「设置 → AI」为供应商录入密钥后重试。",
+      "keyUnreadable": "API Key 无法解密：请到「设置 → AI」重新录入密钥，或让管理员恢复加密配置。",
+      "redisUnavailable": "AI 服务暂不可用（Redis），请稍后重试。",
       "healthProbeFailed": "AI 可用性探测失败",
       "decisionPending": "确认已提交，但暂未同步到后端真实裁决（可稍后刷新查看）。",
       "noPendingDecision": "没有待处理的确认请求",
@@ -83,7 +121,7 @@
       "memoryDeleteFailed": "旧会话记忆删除失败（不影响新对话）",
       "formSubmittedElsewhere": "该表单已在其他窗口提交，本地填写已停止",
       "upstreamRetry": "上游连接中断，正在重试（本轮尚未产出内容）",
-      "turnError": "本轮出错（{code}）：{message}",
+      "turnError": "本轮出错：{message}",
       "uploadNoRegion": "请先打开导入向导第 1 步",
       "uploadPickerUnsupported": "当前浏览器不支持在对话内直接选择文件",
       "uploadPickerCancelled": "你取消了文件选择，可以重试",
@@ -134,7 +172,7 @@
         "sourceDb": "来源：数据库",
         "keyConfigured": "已配置",
         "keyMissing": "未配置",
-        "keyUnreadable": "密钥不可解（KEK 变更或密文损坏）",
+        "keyUnreadable": "密钥不可解（加密配置变更或密文损坏）",
         "keyDisabled": "已停用",
         "keyLast4": "末 4 位",
         "keyInputPlaceholder": "留空 = 不修改",
@@ -187,9 +225,9 @@
         "probeFailed": "失败"
       },
       "errors": {
-        "AI_SECRET_KEK_MISSING": "尚未配置加密密钥（AI_SECRET_KEK），无法保存 API Key。请让管理员配置后重试。",
+        "AI_SECRET_KEK_MISSING": "尚未配置加密密钥，无法保存 API Key。请让管理员配置后重试。",
         "KEY_EMPTY": "API Key 为空：请填写密钥，或用「清除密钥」。",
-        "KEY_UNREADABLE": "库里的密钥无法解密（加密密钥变更或密文损坏）：请让管理员恢复加密密钥，或重新录入密钥。",
+        "KEY_UNREADABLE": "库里的密钥无法解密：请到「设置 → AI」重新录入密钥，或让管理员恢复加密配置。",
         "INVALID_BASE_URL": "Base URL 不合法：必须是 http:// 或 https:// 开头的完整地址，且不能带账号密码。",
         "BLOCKED_PRIVATE_ENDPOINT": "该地址指向私网/回环地址，默认禁止。确为内网网关时请联系管理员开启白名单开关。",
         "PROVIDER_NOT_FOUND": "该端点不存在（可能已被删除）：刷新后再试。",
@@ -251,6 +289,7 @@
     },
     "hitl": {
       "irreversible": "确认{action}，执行后无法恢复",
+      "publishIrreversible": "确认启动发布作业：若本次为整体替换，范围内旧数据将被删除，执行后无法恢复",
       "ackHint": "请先勾选上方确认项",
       "action": {
         "start_publish": "启动发布作业"
@@ -299,6 +338,7 @@
         "ATTACHMENT_NOT_FOUND": "「{label}」的附件不存在或已过期，请重新上传",
         "ATTACHMENT_FORBIDDEN": "「{label}」的附件不属于当前表单，请重新上传",
         "ATTACHMENT_CONSUMED": "「{label}」的附件已被使用，请重新上传",
+        "ATTACHMENT_UNAVAILABLE": "「{label}」的附件校验暂不可用，请稍后重试",
         "ATTACHMENT_UPLOAD_FAILED": "「{label}」上传失败，请重试",
         "ATTACHMENT_TOO_LARGE": "「{label}」附件不能超过 5MB，请压缩后重试",
         "ATTACHMENT_TYPE_UNSUPPORTED": "「{label}」不支持该文件类型，仅支持 png/jpg/webp/pdf/txt/csv/xlsx"
@@ -352,6 +392,9 @@
       "args": "参数",
       "output": "输出",
       "truncated": "已截断",
+      "truncatedFrame": "本次结果内容过大，已压缩显示（返回 {returned} 字符，原 {original} 字符）。如需更多细节，请缩小查询范围或分页获取。",
+      "truncatedModelView": "结果较长，模型侧仅收到 {returned}/{original} 字符。",
+      "truncatedLimitUnreached": "本次结果超出单帧大小上限，未能进一步压缩；请缩小查询范围或分页获取。",
       "undoHint": "界面已改动，可撤销最近 1 步。",
       "definition": "配置",
       "rowKey": "行键",
@@ -752,7 +795,12 @@
     "applied": {
       "line": "AI 改动 {cells} 格（可撤销，深度 3 中第 {layer} 层）"
     },
-    "engineLoading": "表格引擎加载中…（SpreadJS 按需加载）"
+    "engineLoading": "表格引擎加载中…（SpreadJS 按需加载）",
+    "engineRetry": "重新加载表格",
+    "engineFailed": "表格引擎加载失败：{error}",
+    "engineTimeout": "表格引擎加载超时（超过 {seconds} 秒未就绪），请检查网络后重试",
+    "engineUnmounted": "表格引擎未挂载（组件已卸载），请重新打开在线编辑",
+    "engineNotReady": "表格引擎未就绪（组件已卸载），请重新打开在线编辑"
   },
   "resultview": {
     "fallback": {
@@ -801,18 +849,43 @@
     "message": "说明",
     "sortOrder": "顺序",
     "definition": "配置项",
-    "status": "状态",
+    "statusLabel": "状态",
     "processed": "已处理",
     "totalRows": "总行数",
     "failedRows": "失败",
     "processing": "正在处理：{code}",
     "noDetail": "无明细",
-    "notStarted": "尚未启动作业"
+    "notStarted": "尚未启动作业",
+    "status": {
+      "PENDING": "等待中",
+      "RUNNING": "运行中",
+      "COMPLETED": "成功",
+      "FAILED": "失败",
+      "CANCELLED": "已取消"
+    },
+    "severity": {
+      "ERROR": "错误",
+      "WARNING": "警告",
+      "INFO": "提示"
+    },
+    "progressUnknown": "处理中 · 已处理 {processed} 行（总量待定）",
+    "channelPolling": "（实时通道已降级为轮询）",
+    "channelRealtime": "（实时通道已连接）"
+  },
+  "api": {
+    "error": {
+      "network": "无法连接后端，请检查网络或稍后重试。",
+      "server": "后端服务暂时不可用，请稍后重试。",
+      "request": "请求失败，请稍后重试。",
+      "unknown": "操作失败，请稍后重试。"
+    }
   },
   "task": {
     "readOnly": "仅供查看",
     "failedSuffix": "（失败）",
-    "prev": "上一步"
+    "prev": "上一步",
+    "next": "下一步",
+    "backToList": "返回任务列表"
   },
   "wizard": {
     "condition": {
@@ -856,6 +929,11 @@
       "rating": "评价",
       "reason": "原因",
       "loadFailed": "加载失败：{error}",
+      "unknownError": "未知错误",
+      "retry": "重试",
+      "like": "赞",
+      "dislike": "踩",
+      "sessionMessage": "会话 {session} · 消息 {message}",
       "empty": "暂无反馈记录"
     },
     "aiSettings": {
@@ -1130,7 +1208,10 @@
       "dialog": {
         "cancelTitle": "取消作业",
         "cancelMessage": "作业将立即终止，已处理的部分不会回滚。",
-        "cancelAck": "确认取消作业，执行后无法恢复"
+        "cancelAck": "确认取消作业，执行后无法恢复",
+        "publishReplaceTitle": "确认发布（整体替换）",
+        "publishReplaceMessage": "发布将按配置项范围内整体替换正式区数据：范围内未被本次导入覆盖的旧行会被删除，执行后无法恢复。",
+        "publishReplaceAck": "确认整体替换发布，范围内旧数据将被删除且无法恢复"
       }
     },
     "tasks": {

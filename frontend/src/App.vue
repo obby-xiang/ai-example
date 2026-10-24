@@ -9,7 +9,7 @@
             mode="horizontal"
             :ellipsis="false"
             router
-            class="!border-b-0"
+            class="app-nav"
           >
             <el-menu-item :index="ROUTE_NAMES.taskCenter" :route="{ name: ROUTE_NAMES.taskCenter }">{{ t('nav.tasks') }}</el-menu-item>
             <el-menu-item :index="ROUTE_NAMES.definitions" :route="{ name: ROUTE_NAMES.definitions }">{{ t('nav.definitions') }}</el-menu-item>
@@ -91,3 +91,11 @@ onMounted(() => {
   workspace.enterPage({ pageId: 'tasks', page: 'tasks' })
 })
 </script>
+
+<style scoped>
+/* EP 横向菜单自带 1px 下边框，与设计不符；用实例类 + EP 类提高特异性，
+   避免 important 后缀与全局覆写。 */
+.app-nav.el-menu--horizontal.el-menu {
+  border-bottom-width: 0;
+}
+</style>

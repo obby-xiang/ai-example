@@ -55,6 +55,40 @@ const FILTER_RE = /content[_-]?filter|safety|policy|安全策略|内容过滤|�
 /** 上下文长度超限（OpenAI 侧码名 `context_length_exceeded`）。 */
 const CONTEXT_RE = /context[_-]?length|context[_-]?window|max[_-]?tokens|too[_-]?long|上下文(长度)?(超限|超出)|超长|token\s*超/i
 
+/**
+ * R-09：终局失败的派生后缀（基础码 + 现场）。用户面文案按**基础码**查表，
+ * 完整码逐字保留在 {@link ErrorCard#code} 供诊断/取证。
+ */
+const DERIVED_SUFFIXES = ['_AFTER_TOOL_SIDE_EFFECT', '_AFTER_PARTIAL'] as const
+
+export function baseErrorCode(code: string): string {
+  for (const suffix of DERIVED_SUFFIXES) {
+    if (code.endsWith(suffix)) {
+      return code.slice(0, -suffix.length)
+    }
+  }
+  return code
+}
+
+/** A10 新 9 码 + R-12 key 码的专属卡文案（不再是"未分类故障"通用卡）。 */
+const CODE_CARD_TEXT: Record<string, { title: string; guide: string }> = {
+  EMPTY_REPLY: { title: 'ai.card.error.emptyReply.title', guide: 'ai.card.error.emptyReply.guide' },
+  AI_RUN_CANCELLED: { title: 'ai.card.error.cancelled.title', guide: 'ai.card.error.cancelled.guide' },
+  UPSTREAM_FIRST_BYTE_TIMEOUT: { title: 'ai.card.error.timeout.title', guide: 'ai.card.error.timeout.guide' },
+  UPSTREAM_SILENT_TIMEOUT: { title: 'ai.card.error.timeout.title', guide: 'ai.card.error.timeout.guide' },
+  TOTAL_BUDGET_EXCEEDED: { title: 'ai.card.error.budget.title', guide: 'ai.card.error.budget.guide' },
+  UPSTREAM_STREAM_INCOMPLETE: { title: 'ai.card.error.interrupted.title', guide: 'ai.card.error.interrupted.guide' },
+  UPSTREAM_CONNECTION_BROKEN: { title: 'ai.card.error.connection.title', guide: 'ai.card.error.connection.guide' },
+  UPSTREAM_STREAM_ERROR: { title: 'ai.card.error.upstream.title', guide: 'ai.card.error.upstream.guide' },
+  AI_KEY_MISSING: { title: 'ai.card.error.keyMissing.title', guide: 'ai.card.error.keyMissing.guide' },
+  AI_KEY_UNREADABLE: { title: 'ai.card.error.keyUnreadable.title', guide: 'ai.card.error.keyUnreadable.guide' }
+}
+
+/** 有专属色族/动作的码（上下文超限走蓝族"开新会话"，文案沿用三变体表）。 */
+const CODE_VARIANT: Record<string, ErrorCardVariant> = {
+  CONTEXT_OVERFLOW: 'context'
+}
+
 /** 三变体文案（demo v7.7 裁决区 08 逐字；`detail` 由调用方喂现实文案）。
  *
  * i18n L-69：只存 locale key（`ai.card.error.*`），建卡时经 {@link translate} 取当前语言文本 ——
@@ -98,8 +132,32 @@ export function classifyErrorVariant(code: string, message: string): ErrorCardVa
  * `code` 允许为空串（网络异常等无码路径 ⇒ 落通用红卡）。
  */
 export function buildErrorCard(code: string, message: string): ErrorCard | null {
-  if (code !== '' && DEDICATED_ALERT_CODES.has(code)) {
+  const base = baseErrorCode(code)
+  if (base !== '' && DEDICATED_ALERT_CODES.has(base)) {
     return null
+  }
+  const forcedVariant = CODE_VARIANT[base]
+  if (forcedVariant === 'context') {
+    const text = VARIANT_TEXT_KEY.context
+    return {
+      variant: forcedVariant,
+      title: translate(text.title),
+      detail: message,
+      guide: translate(text.guide),
+      action: translate(text.action),
+      code
+    }
+  }
+  const dedicated = CODE_CARD_TEXT[base]
+  if (dedicated !== undefined) {
+    return {
+      variant: 'generic',
+      title: translate(dedicated.title),
+      detail: message,
+      guide: translate(dedicated.guide),
+      action: '',
+      code
+    }
   }
   const variant = classifyErrorVariant(code, message)
   if (variant === 'generic') {

@@ -15,6 +15,7 @@ import { useWorkspaceStore } from '@/stores/workspace'
 import { registerAiRegion, resetAiRegions, unregisterAiRegion } from '@/utils/ai-regions'
 import { ApiError } from '@/api/http'
 import FormRenderer from '@/components/AiPanel/FormRenderer.vue'
+import { acceptLanguage, applyLocale, i18n } from '@/locales'
 
 const api = vi.hoisted(() => ({
   health: vi.fn(),
@@ -75,6 +76,16 @@ async function mountPanel(): Promise<ReturnType<typeof mount>> {
   const wrapper = mount(AiPanel, { global: { stubs } })
   await wrapper.vm.$nextTick()
   return wrapper
+}
+
+/**
+ * 按钮的**显示文案** = 首个子文本节点。
+ *
+ * <p>不能用 `button.text()`：它会把同按钮里 tooltip 的 `ai.panel.resumeChat` 文案一起拼进来，
+ * 于是"显示 == 发送"的断言会被 tooltip 满足（M-8）。
+ */
+function buttonLabel(button: { element: Element }): string {
+  return (button.element.firstChild?.textContent ?? '').trim()
 }
 
 beforeEach(() => {
@@ -171,6 +182,88 @@ describe('P-13（P2）：「继续」入口的语义与互斥', () => {
     wrapper.unmount()
   }, 20_000)
 
+  /**
+   * A3-Y8（4B 语言专项，用户裁决 2026-10-24）：`en-US` 界面点「继续」必须发**英文**。
+   *
+   * <p>修复前 `continueRound()` 把硬编码中文 `'继续'` 当用户消息发送 —— en 界面下用户自己气泡变中文，
+   * 且与「回答语言（本轮）」的语言来源（`Accept-Language` = `en-US`）错配。修复口径：
+   * 发送文本与按钮显示**同源**（同一 i18n 键），默认中文因此逐字不变。
+   *
+   * <p><b>证红方式</b>：把 `continueRound()` 改回 `ai.send('继续')` ⇒ 本用例红（收到 '继续' 而非 'Continue'）。
+   */
+  it('A3-Y8：en-US 界面点「继续」⇒ 发送英文标签（显示与发送同源）', async () => {
+    applyLocale('en-US')
+    const store = useAiStore()
+    store.messages = [message('u1', 'user', 'export all'), message('a1', 'assistant', 'failed', { done: true })]
+    store.lastRoundOutcome = 'error'
+    const wrapper = await mountPanel()
+
+    const button = wrapper.find('[data-testid="continue-round"]')
+    expect(button.exists()).toBe(true)
+    const label = i18n.global.t('ai.panel.continue')
+    expect(label).toBe('Continue')
+    // 严格锁"按钮上显示的就是这句"：不用 button.text()（它会把 tooltip 的 resumeChat 文案拼进来）
+    expect(buttonLabel(button)).toBe(label)
+
+    await button.trigger('click')
+    await flushPromises()
+
+    expect(api.chat).toHaveBeenCalledTimes(1)
+    const sent = (api.chat.mock.calls[0]?.[0] as { message?: string } | undefined)?.message
+    expect(sent).toBe(label) // 显示 == 发送：按钮上写着什么，模型就收到什么
+    // 与请求语言同源：Accept-Language 由同一个 activeLocale 供（sse 通道侧另有 sse-language-header 锁定）
+    expect(acceptLanguage()).toBe('en-US')
+    wrapper.unmount()
+  }, 20_000)
+
+  /**
+   * 同一路径的第二入口：错误卡「稍后重试」= `continueRound()`（不是第二份字面量）。
+   * en-US 下它必须与被点的卡片语言一致。
+   */
+  it('A3-Y8：en-US 下错误卡「稍后重试」走同一路径 ⇒ 发送英文标签', async () => {
+    const { buildErrorCard } = await import('@/utils/error-card')
+    applyLocale('en-US')
+    const store = useAiStore()
+    const failed = message('a-q', 'assistant', 'failed', { done: true })
+    failed.errorCard = buildErrorCard('429', 'quota exceeded')
+    store.messages = [message('u-q', 'user', 'export all'), failed]
+    store.lastRoundOutcome = 'error'
+    const wrapper = await mountPanel()
+
+    const action = wrapper.find('[data-testid="error-card-action-a-q"]')
+    expect(action.exists()).toBe(true)
+    await action.trigger('click')
+    await flushPromises()
+
+    expect(api.chat).toHaveBeenCalledTimes(1)
+    expect((api.chat.mock.calls[0]?.[0] as { message?: string } | undefined)?.message)
+      .toBe(i18n.global.t('ai.panel.continue'))
+    wrapper.unmount()
+  }, 20_000)
+
+  /**
+   * 默认中文不变（回归锁）：zh-CN 下发送的仍是「继续」这一个既有字面量 ——
+   * 主提示规则 10 引导用户"请回复「继续」"、存量 E2E 断言都按这条中文判据，不能随本批漂移。
+   */
+  it('A3-Y8：zh-CN（默认）点「继续」⇒ 仍发送「继续」（与显示同源）', async () => {
+    const store = useAiStore()
+    store.messages = [message('u1', 'user', '把定义导出'), message('a1', 'assistant', '出错了', { done: true })]
+    store.lastRoundOutcome = 'error'
+    const wrapper = await mountPanel()
+
+    const button = wrapper.find('[data-testid="continue-round"]')
+    const label = i18n.global.t('ai.panel.continue')
+    expect(label).toBe('继续')
+    expect(buttonLabel(button)).toBe(label)
+
+    await button.trigger('click')
+    await flushPromises()
+
+    expect((api.chat.mock.calls[0]?.[0] as { message?: string } | undefined)?.message).toBe('继续')
+    expect(acceptLanguage()).toBe('zh-CN')
+    wrapper.unmount()
+  }, 20_000)
+
   it('停止轮：不出「继续」（与「已停止」标识互斥，防双语义打架）', async () => {
     const store = useAiStore()
     store.messages = [message('u1', 'user', '问'), message('a1', 'assistant', '半截答案', { stopped: true })]
@@ -206,6 +299,32 @@ describe('Q-01（P1）：空态快捷 chips 点即发（与手输同一入口）
     expect(store.messages.length).toBeGreaterThan(0) // 用户气泡落屏
     await wrapper.vm.$nextTick()
     expect(wrapper.find('[data-testid="empty-state"]').exists()).toBe(false) // chips 随空态消失
+    wrapper.unmount()
+  }, 20_000)
+
+  /**
+   * Y9 的 4B 口径（用户裁决 2026-10-24）：chip 把"当前界面语言"当模型输入是**预期行为** ——
+   * 用户消息语言就是 4B 的"用户使用其它语言"信号，回答语言随之切换。因此这里不改成固定中文，
+   * 只证明 en-US 下发出的确实是英文文案（否则"随用户语言"的输入侧来源就断了）。
+   */
+  it('A3-Y9：en-US 下 chip 发送英文文案（4B：用户输入语言 = 回答语言信号，预期行为）', async () => {
+    applyLocale('en-US')
+    const store = useAiStore()
+    store.messages = []
+    store.historyLoaded = true
+    const wrapper = await mountPanel()
+
+    const chip = wrapper.find('[data-testid="suggestion-chip"]')
+    expect(chip.exists()).toBe(true)
+    const text = chip.text()
+    expect(text).toMatch(/[A-Za-z]/) // 英文界面 ⇒ 英文文案（不是中文规范短语）
+    expect(text).not.toMatch(/[\u4e00-\u9fff]/)
+
+    await chip.trigger('click')
+    await flushPromises()
+
+    expect(api.chat).toHaveBeenCalledTimes(1)
+    expect((api.chat.mock.calls[0]?.[0] as { message?: string } | undefined)?.message).toBe(text)
     wrapper.unmount()
   }, 20_000)
 })

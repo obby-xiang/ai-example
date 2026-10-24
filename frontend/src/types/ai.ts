@@ -5,7 +5,15 @@
  *         FrontendToolResultRequest.java、AiController.java（端点与响应体现场）
  */
 
-import type { SseFrame, PendingToolCallSnapshot, PendingStatus, ToolKind, ToolOutcome, ToolPreflight } from './sse'
+import type {
+  SseFrame,
+  PendingToolCallSnapshot,
+  PendingStatus,
+  ToolKind,
+  ToolOutcome,
+  ToolPreflight,
+  TruncationNoticeCode
+} from './sse'
 import type { FormSpec, FormValueIssue } from './form-schema'
 import type { ResultView } from './resultview'
 import type { SheetToolMeta } from '@/utils/sheet-tools'
@@ -112,7 +120,7 @@ export interface FrontendToolResultAck {
 /** AI 可用性（GET /api/ai/health；不可用时 HTTP 503 + 同样的体）。 */
 export interface AiHealth {
   available: boolean
-  /** AI_AVAILABLE 或不可用原因码（AI_UNAVAILABLE / AI_REDIS_UNAVAILABLE） */
+  /** AI_AVAILABLE 或不可用原因码（AI_UNAVAILABLE / AI_KEY_MISSING / AI_KEY_UNREADABLE / AI_REDIS_UNAVAILABLE） */
   code: string
   model: string
   baseUrl: string
@@ -354,8 +362,18 @@ interface MessagePartBase {
   seg: number
 }
 
+/** A10 R-15：正文/思考 delta 的帧级截断字段（与 ToolPart 同形；旧帧缺省）。 */
+export interface MessageTruncationFields {
+  truncated?: boolean
+  noticeCode?: TruncationNoticeCode
+  originalChars?: number
+  returnedChars?: number
+  strategy?: string | null
+  truncatedReason?: string | null
+}
+
 /** 正文段（一次连续输出；被工具段/思考段打断即封口，后续正文另起一段）。 */
-export interface TextPart extends MessagePartBase {
+export interface TextPart extends MessagePartBase, MessageTruncationFields {
   kind: 'text'
   text: string
   /** 该段是否仍在接收增量（封口后为 false） */
@@ -363,7 +381,7 @@ export interface TextPart extends MessagePartBase {
 }
 
 /** 思考段（`delta{kind:'reasoning'}` 的累积分段；L-91 起后端真实产出）。 */
-export interface ReasoningPart extends MessagePartBase {
+export interface ReasoningPart extends MessagePartBase, MessageTruncationFields {
   kind: 'reasoning'
   text: string
   streaming: boolean
@@ -401,10 +419,19 @@ export interface ToolPart extends MessagePartBase {
   /** R-158 #10：generative_form 提交值回执（提交成功时写入，刷新后可回溯已填值） */
   submittedValues?: Record<string, unknown>
   /**
-   * R-154 #2：帧侧截断标记（FrameSizeLimiter 64KB 字段级截断）——true = result 被截断、
-   * truncatedReason 带原因；缺省 = 全文。历史侧 ToolResultLimiter 内嵌文本标记不在本字段范围。
+   * R-154 #2 / A10 R-15：帧侧截断标记（FrameSizeLimiter 64KB 字段级截断）。
+   * true = result 被截断；`noticeCode` 是新展示契约，`truncatedReason` 仅作旧帧/旧客户端兼容。
    */
   truncated?: boolean
+  /** 展示码（新帧优先；缺省 = 旧帧，回退 `truncatedReason`）。 */
+  noticeCode?: TruncationNoticeCode
+  /** 截断前字符数（展示层按 locale 拼装）。 */
+  originalChars?: number
+  /** 截断后返回字符数（展示层按 locale 拼装）。 */
+  returnedChars?: number
+  /** head / tail / head_tail（结构化字段，不直接展示）。 */
+  strategy?: string | null
+  /** 旧帧/旧客户端兼容原因（新帧只在缺 `noticeCode` 时展示）。 */
   truncatedReason?: string | null
   /**
    * S6 批 2：工具结果的视图通道（`tool_result.resultView` 落段，或发布冲突检出时由前端
@@ -569,8 +596,12 @@ export interface ToolPartPatch {
   decision?: 'approved' | 'rejected' | 'timeout' | 'cancel'
   decidedAt?: number
   submittedValues?: Record<string, unknown>
-  /** 见 {@link ToolPart.truncated}（R-154 #2 帧侧截断标记，随段持久化） */
+  /** 见 {@link ToolPart.truncated}（R-154 #2 / A10 R-15 帧侧截断标记，随段持久化） */
   truncated?: boolean
+  noticeCode?: TruncationNoticeCode
+  originalChars?: number
+  returnedChars?: number
+  strategy?: string | null
   truncatedReason?: string | null
   /** 见 {@link ToolPart.resultView}（S6 批 2 视图通道，随段持久化） */
   resultView?: ResultView

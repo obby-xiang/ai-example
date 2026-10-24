@@ -261,6 +261,14 @@
               @click="onMdBodyClick"
             ></div>
             <span
+              v-if="block.kind === 'text' && textPartOf(block)?.truncated"
+              class="inline-block ml-1 h-[7px] w-[7px] rounded-full bg-[#8b949e] align-middle"
+              role="img"
+              :aria-label="t('ai.panel.truncated')"
+              :title="textTruncationTitle(block)"
+              data-testid="text-truncated-badge"
+            ></span>
+            <span
               v-if="block.kind === 'text' && (showCaret(m, bi) || isFading(m))"
               :class="[CARET_CLASS, isFading(m) ? FADE_OUT_CLASS : '']"
               data-testid="stream-caret"
@@ -295,6 +303,14 @@
                     <span class="flex-[0_0_15px] w-[15px] h-[15px] rounded-[50%] border-solid border-[1.2px] border-[#e3e6ea] text-[#8b949e] text-[9px] flex items-center justify-center" aria-hidden="true">⋆</span>
                     <span class="text-[12.4px] text-[#57606a]">{{ t('ai.panel.thinking') }}</span>
                     <span class="flex-1 text-[11.5px] text-[#8b949e]">{{ reasoningSummary(part.text, isBlockExpanded(block)) }}</span>
+                    <span
+                      v-if="part.truncated"
+                      class="inline-block h-[7px] w-[7px] rounded-full bg-[#8b949e]"
+                      role="img"
+                      :aria-label="t('ai.panel.truncated')"
+                      :title="truncationTitle(part)"
+                      data-testid="reasoning-truncated-badge"
+                    ></span>
                     <span :class="[TCHEV_CLASS, isBlockExpanded(block) ? 'is-open' : '']">›</span>
                   </button>
                   <div v-show="isBlockExpanded(block)" class="pl-[10px] pr-[11px] pb-[10px] border-0 border-l-2 border-solid border-[#e3e6ea]" :data-testid="'reasoning-body-' + block.id">
@@ -442,7 +458,7 @@
                           {{ part.result }}<span
                             v-if="part.truncated"
                             class="inline-block ml-1 px-1 rounded text-[10px] leading-4 bg-[#8b949e] text-white align-middle"
-                            :title="part.truncatedReason ?? t('ai.panel.truncatedFallback')"
+                            :title="truncationTitle(part)"
                             data-testid="truncated-badge"
                           >{{ t('ai.panel.truncated') }}</span>
                         </div>
@@ -725,7 +741,7 @@
               <span class="block h-[6px] w-[6px] rounded-[1px] bg-[#8b949e]" aria-hidden="true"></span>
               {{ t('ai.round.stopped') }}
             </span>
-            <!-- R-163 T4：「继续」入口（error/断流/取消后，最后一条助手消息）——点击直发「继续」 -->
+            <!-- R-163 T4：「继续」入口（error/断流/取消后，最后一条助手消息）——点击直发当前语言的「继续」（A3-Y8） -->
             <button
               v-if="showContinue(m)"
               type="button"
@@ -1184,14 +1200,14 @@ import ResultViewRenderer from '@/components/AiPanel/resultview/ResultViewRender
 import SheetPreviewCard from '@/components/AiPanel/SheetPreviewCard.vue'
 import UploadHandoffCard from '@/components/AiPanel/UploadHandoffCard.vue'
 import ContextPill from '@/components/AiPanel/ContextPill.vue'
-import { GENERATIVE_FORM_TOOL, type ChatMessage, type ToolPart } from '@/types/ai'
+import { GENERATIVE_FORM_TOOL, type ChatMessage, type TextPart, type ToolPart } from '@/types/ai'
 import { SHEET_PREVIEW_TOOLS, UI_HANDOFF_TOOLS } from '@/types/tools'
 import { resolveAiRef } from '@/utils/ai-regions'
 import type { SheetAppliedSummary } from '@/utils/sheet-tools'
 import type { FormSpec } from '@/types/form-schema'
 import type { ErrorCard, ErrorCardVariant } from '@/utils/error-card'
 
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const ai = useAiStore()
 const workspace = useWorkspaceStore()
 
@@ -2900,6 +2916,59 @@ function outputByView(part: ToolPart): boolean {
   return part.resultView != null && isRenderableView(part.resultView, part.result ?? null)
 }
 
+/** 截断文案的公共字段（ToolPart / TextPart / ReasoningPart 同形）。 */
+interface TruncationCarrier {
+  noticeCode?: ToolPart['noticeCode']
+  originalChars?: number
+  returnedChars?: number
+  truncatedReason?: string | null
+}
+
+function containsCjk(text: string): boolean {
+  return /[\u4e00-\u9fff]/.test(text)
+}
+
+function isEnglishLocale(): boolean {
+  return String(locale.value).toLowerCase().startsWith('en')
+}
+
+/**
+ * A10 R-15：截断角标 hover 文案。
+ *
+ * 新帧按 `noticeCode` + `originalChars/returnedChars` 用当前 locale 拼装；旧帧（无 code）
+ * 回退 `truncatedReason`。**en 界面遇到旧帧的中文原因时改用 locale 兜底**，避免中文上屏；
+ * zh 仍原样保留旧文案。
+ */
+function truncationTitle(part: TruncationCarrier): string {
+  const original = part.originalChars
+  const returned = part.returnedChars
+  const hasNumbers = original != null && returned != null
+  if (part.noticeCode === 'frame_truncated' && hasNumbers) {
+    return t('ai.panel.truncatedFrame', { original, returned })
+  }
+  if (part.noticeCode === 'model_view_truncated' && hasNumbers) {
+    return t('ai.panel.truncatedModelView', { original, returned })
+  }
+  if (part.noticeCode === 'frame_limit_unreached') {
+    return t('ai.panel.truncatedLimitUnreached')
+  }
+  const legacy = part.truncatedReason
+  if (legacy) {
+    return isEnglishLocale() && containsCjk(legacy) ? t('ai.panel.truncatedFallback') : legacy
+  }
+  return t('ai.panel.truncatedFallback')
+}
+
+function textPartOf(block: Block): TextPart | null {
+  const part = block.parts[0]
+  return part?.kind === 'text' ? part : null
+}
+
+function textTruncationTitle(block: Block): string {
+  const part = textPartOf(block)
+  return part ? truncationTitle(part) : ''
+}
+
 /**
  * 卡面 reason 红底行文案（S6 批1 / v7.10 N8 → S6 批2 §5.3）：
  * - **有 `resultView`** ⇒ 只留首行摘要，**不调用** `parsePublishConflicts`
@@ -3124,9 +3193,16 @@ function showContinue(message: ChatMessage): boolean {
     && (ai.lastRoundOutcome === 'error' || ai.lastRoundOutcome === 'interrupted' || ai.lastRoundOutcome === 'cancelled')
 }
 
-/** 「继续」= 把「继续」当作用户消息直接发送（参考 Kimi）。 */
+/** 「继续」= 把**当前语言**的「继续」当作用户消息直接发送（参考 Kimi）。
+ *
+ *  <p>A3-Y8（4B 语言专项）：发送文本与按钮显示**同源**（同一 i18n 键 `ai.panel.continue`）——
+ *  en 界面发 "Continue"、zh 界面仍发「继续」。此前硬编码中文会让 en 界面下用户气泡变中文，
+ *  且与请求语言（`Accept-Language` → 系统消息「回答语言（本轮）」段）错配。
+ *  固定指令词的语义不变：它仍是"新一轮的用户消息"，不是续写半截答案。
+ *  提示词侧（主提示规则 10 的「请回复「继续」」）不必跟改 —— 语言段已声明
+ *  「继续/重试」这类固定指令词按本轮声明语言回答。 */
 function continueRound(): void {
-  void ai.send('继续')
+  void ai.send(t('ai.panel.continue'))
 }
 
 /** R-165 S1：操作行图标按钮配方 —— demo v7 `.icon-btn` 工具类逐条照搬（含 preflight 关闭下的
@@ -3396,11 +3472,19 @@ function gateNeedsAck(part: ToolPart): boolean {
 /**
  * 勾选文案：「确认{动作}，执行后无法恢复」（中文）/ 英文动名词组（`ai.hitl.action.<tool>`）。
  *
+ * <p>R-09 fix round 1：`start_publish` 单独使用 `ai.hitl.publishIrreversible`，点名
+ * “若本次为整体替换，范围内旧数据将被删除”——不读本地模式，避免陈旧副本造成误导。
+ *
  * 动作名两段回落，保证"永远有字"：
  * ① `ai.hitl.action.<name>`（仅英文有实质值，中文与 `tool.<name>.title` 同字）；
  * ② 缺键 ⇒ `tool.<name>.title`（工具展示名，与门卡「操作」行同源）；再缺 ⇒ 工具名原文。
  */
 function gateAckText(part: ToolPart): string {
+  // R-09（fix round 1 / I-2）：start_publish 的后果与模式有关，但这里**不读本地模式**
+  // （本地副本可能陈旧）——给出对两种模式都成立的 truthful 提示，由用户按本次实际执行判断。
+  if (part.name === 'start_publish') {
+    return t('ai.hitl.publishIrreversible')
+  }
   const key = `ai.hitl.action.${part.name}`
   const action = t(key)
   return t('ai.hitl.irreversible', { action: action === key ? toolLabel(part.name) : action })

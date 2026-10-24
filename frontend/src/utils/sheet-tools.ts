@@ -1513,7 +1513,12 @@ export function planPreviewText(plan: SheetWritePlan | null): string {
   return lines.join('\n')
 }
 
-/** 成功应用后的回灌文案（必须含“用户已确认 / 未保存”，可断言）。 */
+/**
+ * 成功应用后的回灌文案（必须含“用户已确认 / 未保存”，可断言）。
+ *
+ * <p>R3-02：不得再声称“仅在浏览器内存” —— 导入向导离开第 1 步会整表写回服务端文件，
+ * 回执须把这条写回路径和“此刻尚未保存到服务端”同时说清。
+ */
 export function planAppliedText(plan: SheetWritePlan, ctx?: SheetContext): string {
   const lines: string[] = []
   lines.push(`已应用（用户已确认）：${plan.tool} 改动 ${plan.cellsCount} 格 / ${plan.rowsCount} 行`)
@@ -1525,7 +1530,7 @@ export function planAppliedText(plan: SheetWritePlan, ctx?: SheetContext): strin
   if (plan.skippedCount > 0) {
     lines.push(`跳过：${plan.skippedCount} 格（校验器拒绝）`)
   }
-  lines.push('未保存：改动仅在浏览器内存，需用户点「保存到服务端」才落库；可撤销（undo_last_sheet_edit）')
+  lines.push('未保存到服务端：改动只在当前页面表格内（不在服务端）；导入向导离开第 1 步（「下一步」/ confirm_step）会整表写回服务端文件，导出向导需点「保存编辑到服务端」；可撤销（undo_last_sheet_edit）')
   lines.push(`共 ${plan.cellsCount} 格`)
   return lines.join('\n')
 }

@@ -109,6 +109,9 @@ const ERROR_KEYS: Record<string, string> = {
   KEY_EMPTY: 'ai.settings.errors.KEY_EMPTY',
   // /test 与 /models/fetch 也会回这个码（M-1）：探活前就短路，不再拿 null key 打上游
   KEY_UNREADABLE: 'ai.settings.errors.KEY_UNREADABLE',
+  // I-3：可用性 503 / 探测 / 模型拉取的真实码是 AI_KEY_UNREADABLE，与配置路径同义
+  // （同一句可操作文案；旧码保留兼容）。
+  AI_KEY_UNREADABLE: 'ai.settings.errors.KEY_UNREADABLE',
   INVALID_BASE_URL: 'ai.settings.errors.INVALID_BASE_URL',
   BLOCKED_PRIVATE_ENDPOINT: 'ai.settings.errors.BLOCKED_PRIVATE_ENDPOINT',
   PROVIDER_NOT_FOUND: 'ai.settings.errors.PROVIDER_NOT_FOUND',

@@ -14,6 +14,7 @@
  */
 
 import { ApiError, FRONTEND_ERROR_CODES } from './http'
+import { acceptLanguage } from '@/locales'
 import { frameSeq, isTerminalFrame, toSseFrame } from '@/types/sse'
 import type { SseDoneFrame, SseErrorFrame, SseFrame } from '@/types/sse'
 import type { AiChatRequest, StreamCloseInfo } from '@/types/ai'
@@ -457,6 +458,19 @@ async function readStream(
  *
  * 断流（未收终帧）时：有 runId → 自动 reattach 重挂；无 runId 或重挂用尽 →
  * 以 terminal=false 收尾，由调用方按 ADR-6 提示。
+ *
+ * <h2>为什么这条通道要自己带 `Accept-Language`</h2>
+ *
+ * axios 的请求拦截器给所有 REST 调用加了该头，但本通道是裸 `fetch`（EventSource 只支持 GET，
+ * 且不能设请求头）—— 修复前这里只有 `Content-Type`/`Accept`，后端因此恒按 `zh-CN` 处理：
+ * ① 开流前错误（`SESSION_BUSY`/`MESSAGE_TOO_LONG`/429/503）在英文界面上仍是中文；
+ * ② 后端拿不到本轮 locale，A3-Y1（4B：默认中文、随用户语言）的"回答语言"没有来源。
+ * 取值与 REST 通道同一函数（`acceptLanguage()`），两条通道的语言口径因此不会再分叉。
+ *
+ * <p>覆盖范围（I-1 修完之后）：走 `errorBody()/localize()` 的码**与**5 个专门 helper
+ * （超长 / 限流 / 池饱和 / AI 不可用 / Redis 不可用）以及 `/context` 的 503 都由后端按同一
+ * locale 出文案 —— 前端拿到的 `error.message` 已是目标语言，不再需要在模板里二次拼接。
+ * 未覆盖项：`EventSource` reattach 通道读不到响应体，其 `reason` 文案仍是本地前端字符串。
  */
 export async function streamChat(
   request: AiChatRequest,
@@ -474,7 +488,11 @@ export async function streamChat(
     try {
       response = await fetch(SSE_PATHS.chat, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'text/event-stream',
+          'Accept-Language': acceptLanguage()
+        },
         body: JSON.stringify(request),
         signal: controller.signal
       })

@@ -261,7 +261,7 @@ test.describe('@stub 13a · N 会话管理与页签所有权', () => {
     expect(ttlFresh).toBeGreaterThanOrEqual(ttl1 - 1)
 
     // 静默过期的等价面：会话键 + 记忆键 + 上下文键一并按 TTL 消失
-    for (const key of [`ai:session:${sid}`, `chat:mem:${sid}`, `ai:ctx:${sid}`]) {
+    for (const key of [`ai:session:${sid}`, `chat:mem:{${sid}}`, `ai:ctx:${sid}`]) {
       await redisEval(NFEZUI_REDIS_DB, ['DEL', key])
     }
     expect((await historyOf(request, sid)).count).toBe(0)
@@ -271,7 +271,7 @@ test.describe('@stub 13a · N 会话管理与页签所有权', () => {
     await openPanel(page)
     await seedRound(page, 'N11-a')
     const sid = await sessionIdOf(page)
-    for (const key of [`ai:session:${sid}`, `chat:mem:${sid}`, `ai:ctx:${sid}`]) {
+    for (const key of [`ai:session:${sid}`, `chat:mem:{${sid}}`, `ai:ctx:${sid}`]) {
       await redisEval(NFEZUI_REDIS_DB, ['DEL', key])
     }
 
