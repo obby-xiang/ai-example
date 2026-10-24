@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.config;
 
+import com.example.configmgr.ai.observe.RedisDegradation;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.connection.RedisConnection;
 import org.springframework.data.redis.core.RedisCallback;
@@ -102,13 +103,29 @@ public class RedisAvailability {
 		}
 	}
 
-	/** 探活态（供 {@code GET /api/ai/health} 与证据）。 */
+	/** 探活态（仅供 {@code GET /api/ai/health} 与证据）：含原始 {@code lastError} 与统一降级计数。 */
 	public Map<String, Object> describe() {
+		Map<String, Object> out = describeForResponse();
+		out.put("lastError", this.lastError);
+		// Cluster / 5.0 可观测批：A1/A3/A4/A5/A6 + L-139 + B3 的降级事件计数。
+		// 只进运维健康面；503 响应体（describeForResponse）的键面与判定不改。
+		out.put("degradations", RedisDegradation.snapshot());
+		return out;
+	}
+
+	/**
+	 * 503 响应体里的 redis 子对象：只回安全事实（判据、探活次数、失败次数、时间锚点）。
+	 *
+	 * <p>为什么去掉 {@code lastError}：它含异常类名与连接地址（如
+	 * {@code RedisConnectionFailureException: … 127.0.0.1:6379}），属于实现细节，不该出现在
+	 * 普通用户可见的 503 body 里。诊断不丢 —— 原始值仍进 WARN 日志与 {@code /health} 的
+	 * {@link #describe()}；二者与这里同源（本方法先出安全子集，{@code describe()} 再补诊断字段）。
+	 */
+	public Map<String, Object> describeForResponse() {
 		Map<String, Object> out = new LinkedHashMap<>();
 		out.put("available", this.available);
 		out.put("probes", this.probes.get());
 		out.put("failures", this.failures.get());
-		out.put("lastError", this.lastError);
 		out.put("checkedAgoMs", System.currentTimeMillis() - this.checkedAtMs);
 		out.put("positiveTtlMs", POSITIVE_TTL_MS);
 		out.put("negativeTtlMs", NEGATIVE_TTL_MS);
@@ -120,10 +137,14 @@ public class RedisAvailability {
 		return "AI_REDIS_UNAVAILABLE";
 	}
 
-	/** 503 响应体的 message（带上最后一次失败原因，排障一眼可见）。 */
+	/**
+	 * 503 响应体的 message（用户面）：短句、可操作，不含异常类名/连接地址等内部实现细节。
+	 *
+	 * <p>诊断信息不丢：探活失败的类名与地址仍留在 WARN 日志与 /health 的 {@code lastError}；
+	 * 503 体走 {@link #describeForResponse()}，不带 {@code lastError}。
+	 */
 	public String reason() {
-		return "AI 运行时依赖的 Redis 不可用（探活失败：" + this.lastError
-				+ "）。AI 端点提前失败，未建立 SSE、未触发任何上游调用；业务 API 不受影响。";
+		return "AI 服务暂不可用，请稍后重试。";
 	}
 
 }

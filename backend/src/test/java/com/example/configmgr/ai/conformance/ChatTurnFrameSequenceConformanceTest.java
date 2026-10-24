@@ -29,6 +29,7 @@ import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
 import reactor.core.publisher.Flux;
 
 import java.util.ArrayList;
@@ -365,6 +366,67 @@ class ChatTurnFrameSequenceConformanceTest {
 				.containsEntry("code", StreamViolationException.STREAM_ERROR + "_AFTER_PARTIAL");
 		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.FAILED);
 		assertThat(FrameContract.ofType(wire.frames(), "error")).as("错误终帧是本轮实时流的最后一帧").hasSize(1);
+	}
+
+	/**
+	 * <b>【R-08】</b>上游错误响应体/异常只进日志台账，用户面只看到白名单短句。
+	 *
+	 * <p>kill：把 {@code fail()} 的 message 改回 {@code describeForLog(violation)}（原始 body）
+	 * ⇒ 错误帧与快照里重新出现 {@code sk-...} / {@code 401}，本用例变红。
+	 */
+	@Test
+	void upstreamErrorBodyAndExceptionAreNotExposedToUsers() {
+		this.properties.getResilience().setMaxAttempts(1);
+		String secret = "sk-upstream-secret";
+		byte[] body = ("{\"error\":{\"message\":\"Incorrect API key provided: " + secret + "\"}}")
+				.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.error(WebClientResponseException.create(
+				401, "Unauthorized", org.springframework.http.HttpHeaders.EMPTY, body, null)));
+
+		FrameWire wire = runTurn();
+
+		List<Map<String, Object>> frames = clientView(wire);
+		Map<String, Object> error = FrameContract.oneOfType(frames, "error");
+		assertThat(error).containsEntry("code", StreamViolationException.STREAM_ERROR);
+		assertThat(String.valueOf(error.get("message")))
+				.as("用户面 = 白名单短句（不含原始 body / 异常类名 / key）")
+				.isEqualTo("AI 服务返回异常，请稍后重试。")
+				.doesNotContain(secret)
+				.doesNotContain("\"error\"")
+				.doesNotContain("WebClientResponseException");
+		assertThat(String.valueOf(this.store.get(RUN_ID).getError()))
+				.as("快照台账同样不得写入原始 body")
+				.doesNotContain(secret)
+				.doesNotContain("Incorrect API key");
+	}
+
+	/**
+	 * <b>【R-08 / 4B】</b>同一份白名单短句按请求 locale 取 {@code messages_en}，en 用户不再看到中文。
+	 */
+	@Test
+	void upstreamErrorUsesEnglishForEnglishRequestLocale() {
+		this.properties.getResilience().setMaxAttempts(1);
+		org.springframework.context.support.ResourceBundleMessageSource source =
+				new org.springframework.context.support.ResourceBundleMessageSource();
+		source.setBasename("messages");
+		source.setDefaultEncoding("UTF-8");
+		org.springframework.test.util.ReflectionTestUtils.setField(this.service, "messageSource", source);
+		org.springframework.context.i18n.LocaleContextHolder.setLocale(java.util.Locale.ENGLISH);
+		try {
+			when(this.chatModel.stream(any(Prompt.class)))
+					.thenReturn(Flux.error(new IllegalStateException("upstream exploded: secret-body")));
+
+			FrameWire wire = runTurn();
+
+			Map<String, Object> error = FrameContract.oneOfType(clientView(wire), "error");
+			assertThat(String.valueOf(error.get("message")))
+					.as("en locale 取 messages_en；原始异常文本仍只进日志")
+					.isEqualTo("The AI service returned an error. Please try again later")
+					.doesNotContain("secret-body");
+		}
+		finally {
+			org.springframework.context.i18n.LocaleContextHolder.resetLocaleContext();
+		}
 	}
 
 	// ── 辅助 ────────────────────────────────────────────────────────────────

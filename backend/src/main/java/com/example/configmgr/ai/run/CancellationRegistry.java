@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.observe.RedisDegradation;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
@@ -31,8 +32,10 @@ import java.util.concurrent.atomic.AtomicLong;
  * </ul>
  *
  * <h2>降级</h2>
- * Redis 不可用（异常）时，{@link #isCancelled(String)} 退回进程内标志并记降级事实；
- * 即"单实例等价、跨实例失去取消能力"，与 {@code SessionGate} 的降级口径一致，不静默。
+ * Redis 不可用（异常）时，本地已置位的取消仍然确定（{@link #cancelState(String)} = {@code CANCELLED}）；
+ * 本地未置位而 Redis 读不出来时是 {@code UNKNOWN}（A5），布尔口 {@link #isCancelled(String)} 拒绝作答
+ * 而不是返回 {@code false}。5s 退避期同样返回 {@code UNKNOWN}，不把"没访问 Redis"伪装成"未取消"。
+ * 降级事实（WARN / {@code degraded} / 统一降级计数）照旧保留，不静默。
  *
  * <h2>键的清理</h2>
  * 取消标志<b>故意不随轮终态删除</b>：它要在 TTL 内继续可见（取证），并且"取消后立刻重启"
@@ -82,25 +85,58 @@ public class CancellationRegistry {
 		this.listeners.putIfAbsent(runId, ConcurrentHashMap.newKeySet());
 	}
 
+	/** 最近一次取消标志读取失败的原因（退避期返回 UNKNOWN 时用于保留 cause）。 */
+	private volatile Throwable lastReadFailure;
+
 	/**
 	 * 是否已取消。<b>Redis 为准</b>：进程内为假时读一次 Redis，命中即把加速态一并置位。
+	 *
+	 * <p><b>A5</b>：读失败且本地没有确定的取消事实时，<b>拒绝作答</b>（抛 {@link CancellationUnknownException}），
+	 * 不再返回 {@code false} —— "读不出来"不等于"未取消"。需要显式处理未知的调用点用
+	 * {@link #cancelState(String)}。
+	 *
+	 * @throws CancellationUnknownException Redis 读失败且本地没有确定的取消事实
+	 * @deprecated 布尔口无法表达"未知"；新调用点请用 {@link #cancelState(String)}（A5）。
 	 */
+	@Deprecated
 	public boolean isCancelled(String runId) {
+		CancelState state = cancelState(runId);
+		if (state == CancelState.CANCELLED) {
+			return true;
+		}
+		if (state == CancelState.NOT_CANCELLED) {
+			return false;
+		}
+		throw new CancellationUnknownException(runId, this.lastReadFailure);
+	}
+
+	/**
+	 * 取消判定的三态（A5）：读失败是 {@link CancelState#UNKNOWN}，不是"未取消"。
+	 *
+	 * <p>本地已置位（{@link #cancel(String, String)} 或监听者）时是确定的 {@code CANCELLED}，
+	 * 不依赖 Redis —— 保留单实例加速/降级通道；只有"本地未取消 + Redis 读不出来"才是未知。
+	 *
+	 * <p>Minor 5：成功从 Redis 读到取消事实时，<b>只对已 register 的轮</b>回填本地加速态；
+	 * 续跑扫描/清单观察到的其它轮不建本地 flag（否则进程内 {@code flags} 单调增长且永久 sticky）。
+	 */
+	public CancelState cancelState(String runId) {
 		AtomicBoolean flag = this.flags.get(runId);
 		if (flag != null && flag.get()) {
-			return true;
+			return CancelState.CANCELLED;
 		}
-		if (flag == null) {
-			// 未登记的轮次：只有 Redis 能回答（例如运行在另一个实例上）
-			return Boolean.TRUE.equals(redisFlag(runId));
+		RedisRead read = readRedisFlag(runId);
+		if (read.failed()) {
+			RedisDegradation.record(RedisDegradation.A5_CANCEL_UNKNOWN);
+			return CancelState.UNKNOWN;
 		}
-		Boolean remote = redisFlag(runId);
-		if (Boolean.TRUE.equals(remote)) {
-			this.redisConfirmations.incrementAndGet();
-			markLocal(runId);
-			return true;
+		if (read.value() != null) {
+			if (flag != null) {
+				this.redisConfirmations.incrementAndGet();
+				markLocal(runId);
+			}
+			return CancelState.CANCELLED;
 		}
-		return false;
+		return CancelState.NOT_CANCELLED;
 	}
 
 	/**
@@ -146,13 +182,25 @@ public class CancellationRegistry {
 		Map<String, Object> out = new LinkedHashMap<>();
 		out.put("runId", runId);
 		out.put("key", keyFor(runId));
-		Object value = redisValue(runId);
-		out.put("redisFlag", value);
+		RedisRead read = readRedisFlag(runId);
+		out.put("redisFlag", read.value());
 		AtomicBoolean flag = this.flags.get(runId);
 		out.put("localFlag", flag != null && flag.get());
+		out.put("redisReadFailed", read.failed());
+		if (read.failed()) {
+			out.put("cancelState", CancelState.UNKNOWN.name());
+		}
+		else if (flag != null && flag.get()) {
+			out.put("cancelState", CancelState.CANCELLED.name());
+		}
+		else {
+			out.put("cancelState", read.value() != null ? CancelState.CANCELLED.name()
+					: CancelState.NOT_CANCELLED.name());
+		}
 		out.put("registered", flag != null);
 		out.put("listeners", this.listeners.containsKey(runId) ? this.listeners.get(runId).size() : 0);
 		out.put("redisPolls", this.redisPolls.get());
+		out.put("cancelReadFailures", RedisDegradation.count(RedisDegradation.A5_CANCEL_READ));
 		out.put("degraded", this.degraded);
 		return out;
 	}
@@ -198,34 +246,49 @@ public class CancellationRegistry {
 		return newly;
 	}
 
-	private Boolean redisFlag(String runId) {
-		Object value = redisValue(runId);
-		return value != null;
-	}
-
-	private Object redisValue(String runId) {
+	private RedisRead readRedisFlag(String runId) {
 		// §13.1 降级期的退避：Redis 不可用时，同步 GET 会阻塞到 spring.data.redis.timeout（默认 3s），
 		// 而看门狗每秒一拍 —— 若不做节流，一个不可用的 Redis 会把看门狗线程池按在超时上。
-		// 退避期间直接以进程内标志作答（本就不可能有跨进程信号到达：对面也连不上同一个 Redis）。
+		// 退避期间不访问 Redis，但状态是"未知"而不是"未取消"（A5）：调用方必须知道这一拍没有权威答案。
 		// 恢复后 ≤ 本间隔即重新开始轮询，语义不变（Redis 仍为准）。
 		if (this.degraded
 				&& System.currentTimeMillis() - this.lastDegradedPollAtMs.get() < DEGRADED_POLL_BACKOFF_MS) {
-			return null;
+			// 退避期不访问 Redis，但仍是 UNKNOWN；调用方（cancelState）会计数，这里留 debug 供排障。
+			log.debug("取消标志读取处于 5s 退避期，本拍返回 UNKNOWN runId={}", runId);
+			return RedisRead.unknown(this.lastReadFailure);
 		}
 		this.lastDegradedPollAtMs.set(System.currentTimeMillis());
 		this.redisPolls.incrementAndGet();
 		try {
 			Object value = this.redis.opsForValue().get(keyFor(runId));
 			this.degraded = false;
-			return value;
+			this.lastReadFailure = null;
+			return RedisRead.value(value);
 		}
 		catch (Exception ex) {
+			// 退避期也要计数（Minor 1）：否则一次持续故障只在首次翻转时留下一个"无 cause、只有一次"
+			// 的事实，排障时既看不到频率也看不到根因。
+			RedisDegradation.record(RedisDegradation.A5_CANCEL_READ, ex);
+			this.lastReadFailure = ex;
 			if (!this.degraded) {
 				this.degraded = true;
 				log.warn("取消标志读取失败，降级为进程内取消（单实例等价，跨实例失效）：{}", ex.getMessage());
 			}
-			return null;
+			return RedisRead.unknown(ex);
 		}
+	}
+
+	/** 取消标志的一次读取：{@code failed=true} = 读失败（未知），与"读成功且值为 null"区分。 */
+	private record RedisRead(Object value, boolean failed, Throwable cause) {
+
+		private static RedisRead value(Object value) {
+			return new RedisRead(value, false, null);
+		}
+
+		private static RedisRead unknown(Throwable cause) {
+			return new RedisRead(null, true, cause);
+		}
+
 	}
 
 	private boolean writeRedisFlag(String runId, String requestedBy) {
@@ -264,6 +327,42 @@ public class CancellationRegistry {
 	 * 由轮询/续跑拒绝兜住）
 	 */
 	public record CancelResult(boolean redisWritten, boolean wokeInProcess, String runId) {
+	}
+
+	/** 取消判定的三态（A5）：{@code UNKNOWN} = Redis 读失败且本地没有确定的取消事实。 */
+	public enum CancelState {
+
+		/** 确定已取消（本地加速态或 Redis 命中）。 */
+		CANCELLED,
+
+		/** 确定未取消（Redis 读成功且无该键）。 */
+		NOT_CANCELLED,
+
+		/** 未知（Redis 读失败 / 降级退避期）：调用方不得按"未取消"继续做不可逆动作。 */
+		UNKNOWN
+
+	}
+
+	/**
+	 * 取消状态未知（A5）：Redis 读失败，且本地没有"已取消"的确定事实。
+	 *
+	 * <p>为什么抛而不是返回 false：跨实例取消的权威态只在 Redis，读不出来时"未取消"是猜测；
+	 * 把猜测当事实会让另一个实例发出的取消丢失（运行方一直跑到预算/超时）。需要"未知"这个
+	 * 中间态的调用方用 {@link #cancelState(String)}；布尔口保持诚实，拒绝作答。
+	 */
+	public static class CancellationUnknownException extends com.example.configmgr.common.AiStateUnavailableException {
+
+		private final String runId;
+
+		public CancellationUnknownException(String runId, Throwable cause) {
+			super("取消状态未知（Redis 读失败）runId=" + runId, cause);
+			this.runId = runId;
+		}
+
+		public String runId() {
+			return this.runId;
+		}
+
 	}
 
 }

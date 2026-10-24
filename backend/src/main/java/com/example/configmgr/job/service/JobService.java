@@ -22,9 +22,12 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.io.IOException;
 import java.util.List;
@@ -122,12 +125,15 @@ public class JobService {
     private final ValidationIssueRepository issueRepository;
     private final TaskSseService taskSseService;
     private final JobCancellationRegistry cancellationRegistry;
+    private final JobHeartbeatRegistry heartbeatRegistry;
+    private final JobTerminalWriter terminalWriter;
     private final AsyncJobExecutor asyncJobExecutor;
     private final TaskService taskService;
     private final TaskItemRepository taskItemRepository;
     private final TaskFileRepository taskFileRepository;
     private final FileStorageService fileStorageService;
     private final ObjectMapper objectMapper;
+    private final PlatformTransactionManager transactionManager;
 
     /**
      * 建作业并异步执行（REST {@code POST /api/tasks/{id}/jobs} 与 AI 工具的同一入口）。
@@ -147,8 +153,13 @@ public class JobService {
      */
     @Transactional
     public Job createAndStart(Long taskId, Job.JobType jobType) {
+        // R1-13：与 TaskService.delete 共用任务行锁，锁顺序固定 task → job。
+        // 删除先提交时这里拿不到任务行 → 404；建作业先提交时删除看到 PENDING → 409。
+        taskService.lockForUpdate(taskId);
         assertTaskNotFinalized(taskId, jobType);
         assertNoJobInFlight(taskId, jobType);
+        // P1-3：取消但 runner 未退出的旧作业仍是写者；新建任何类型作业前都查共享 runner 存活。
+        assertNoRunnerInFlight(taskId);
         assertPrecheckPassed(taskId, jobType);
 
         Job job = new Job();
@@ -158,17 +169,98 @@ public class JobService {
         job = jobRepository.save(job);
         cancellationRegistry.register(job.getId());
 
-        // 关键：必须在事务提交之后再启动异步执行。
-        // 否则执行线程可能先于本事务提交就开始更新 Job 行，
-        // 触发 "Row was updated or deleted by another transaction" 竞态失败。
+        // P1-2：runner 登记必须在创建事务内、commit 之前完成，task 行锁覆盖“提交→登记”全窗口。
+        // 回滚时由 afterCompletion 注销本地/Redis 登记，避免键泄漏。
         final Job savedJob = job;
-        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-            @Override
-            public void afterCommit() {
-                asyncJobExecutor.execute(savedJob);
+        boolean synchronizationActive = TransactionSynchronizationManager.isSynchronizationActive();
+        if (synchronizationActive) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCompletion(int status) {
+                    if (status != TransactionSynchronization.STATUS_COMMITTED) {
+                        heartbeatRegistry.endRunner(savedJob.getId());
+                        cancellationRegistry.unregister(savedJob.getId());
+                    }
+                }
+
+                @Override
+                public void afterCommit() {
+                    // 提交后才允许启动执行体；beginRunner 已在事务内成功。
+                    try {
+                        asyncJobExecutor.execute(savedJob);
+                    } catch (RuntimeException e) {
+                        // P1-4：线程池拒绝等“根本没进入 runner”的失败——清 runner/取消注册，
+                        // 作业落 FAILED，不把异常抛回请求线程（避免 500），也不留 PENDING。
+                        heartbeatRegistry.endRunner(savedJob.getId());
+                        heartbeatRegistry.clear(savedJob.getId());
+                        cancellationRegistry.unregister(savedJob.getId());
+                        log.error("作业 #{} 启动异步执行失败，收敛 FAILED", savedJob.getId(), e);
+                        markRunnerStartFailed(savedJob);
+                    }
+                }
+            });
+        }
+
+        if (!heartbeatRegistry.beginRunner(savedJob.getId())) {
+            // P1-1：Redis 共享键写不进去时绝不能开跑，也不能提交一个 PENDING 作业。
+            // 抛业务冲突让事务回滚；afterCompletion 会清理本地/取消注册。
+            heartbeatRegistry.endRunner(savedJob.getId());
+            if (!synchronizationActive) {
+                cancellationRegistry.unregister(savedJob.getId());
             }
-        });
+            throw new ConflictException(ErrorCodes.JOB_ALREADY_RUNNING,
+                    "作业 #" + savedJob.getId() + " 的 runner 活跃登记失败（Redis 不可用），"
+                            + "作业未创建，请稍后重试");
+        }
+
+        if (!synchronizationActive) {
+            try {
+                asyncJobExecutor.execute(savedJob);
+            } catch (RuntimeException e) {
+                heartbeatRegistry.endRunner(savedJob.getId());
+                heartbeatRegistry.clear(savedJob.getId());
+                cancellationRegistry.unregister(savedJob.getId());
+                log.error("作业 #{} 启动异步执行失败，收敛 FAILED", savedJob.getId(), e);
+                markRunnerStartFailed(savedJob);
+            }
+        }
         return job;
+    }
+
+    /**
+     * 异步启动失败（如线程池拒绝，作业已提交）的终态收敛：沿用 JobTerminalWriter 的
+     * REQUIRES_NEW + 条件 finish（取消/其它终态先到者胜），并落一条作业级 issue 让失败可见。
+     */
+    private void markRunnerStartFailed(Job job) {
+        Job current = jobRepository.findById(job.getId()).orElse(null);
+        if (current == null || !IN_FLIGHT.contains(current.getStatus())) {
+            log.info("作业 #{} 已离开在途态（{}），跳过 runner 启动失败收敛",
+                    job.getId(), current == null ? "已删除" : current.getStatus());
+            return;
+        }
+        try {
+            ValidationIssue issue = new ValidationIssue();
+            issue.setJobId(job.getId());
+            issue.setDefCode("-");
+            issue.setSeverity(ValidationIssue.Severity.ERROR);
+            issue.setMessage("作业异步启动失败（如线程池拒绝），作业未执行，已收敛为 FAILED");
+            // afterCommit 里不能复用已完成的旧事务；issue 必须显式 REQUIRES_NEW 才真正落库。
+            TransactionTemplate issueTx = new TransactionTemplate(transactionManager);
+            issueTx.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+            issueTx.executeWithoutResult(status -> issueRepository.save(issue));
+        } catch (Exception e) {
+            log.error("写 runner 启动失败 issue 失败 jobId={}：{}", job.getId(), e.getMessage(), e);
+        }
+        terminalWriter.completeNow(job, Job.JobStatus.FAILED, 1, 0, 0, 0,
+                Map.of("jobId", job.getId(), "jobType", job.getJobType(),
+                        "status", Job.JobStatus.FAILED, "errors", 1));
+        // afterCommit 已把库里的 job 收敛；把返回值对象同步成最终态，避免 201 响应仍显示 PENDING。
+        Job persisted = jobRepository.findById(job.getId()).orElse(null);
+        if (persisted != null) {
+            job.setStatus(persisted.getStatus());
+            job.setFinishedAt(persisted.getFinishedAt());
+            job.setErrorCount(persisted.getErrorCount());
+        }
     }
 
     public Job findById(Long jobId) {
@@ -186,6 +278,32 @@ public class JobService {
         ConflictException conflict = inFlightConflict(taskId, jobType);
         if (conflict != null) {
             throw conflict;
+        }
+    }
+
+    /**
+     * P1-3：同任务旧 runner 存活守卫（不区分作业类型）。
+     *
+     * <p>作业状态 CANCELLED/FAILED 只代表状态已收，runner 可能仍在长事务里写暂存/文件；
+     * 新建作业会引入第二个写者。这里在 task 行锁内读共享 runner 状态，存活即 409；
+     * Redis 读失败同样 fail-closed 409，绝不把“查不到”当“没有 runner”。
+     */
+    private void assertNoRunnerInFlight(Long taskId) {
+        for (Job existing : jobRepository.findByTaskId(taskId)) {
+            boolean alive;
+            try {
+                alive = heartbeatRegistry.isRunnerAlive(existing.getId());
+            } catch (JobHeartbeatRegistry.RunnerActiveStateUnavailableException e) {
+                throw new ConflictException(ErrorCodes.JOB_ALREADY_RUNNING,
+                        "任务 #" + taskId + " 的旧作业收尾状态无法确认（Redis 不可用），"
+                                + "为避免并发写者已拒绝新建；请稍后重试");
+            }
+            if (alive) {
+                throw new ConflictException(ErrorCodes.JOB_ALREADY_RUNNING,
+                        "任务 #" + taskId + " 的旧作业 #" + existing.getId() + " ["
+                                + existing.getJobType() + "] 状态 " + existing.getStatus()
+                                + " 正在收尾，请稍后重试（runner 退出后才允许新建作业）");
+            }
         }
     }
 
@@ -350,29 +468,76 @@ public class JobService {
      * <li><b>⑥ 任务态联动</b>：作业取消 → 任务 CANCELLED。</li>
      * </ul>
      *
+     * <p><b>R1-12 / I-1 事务边界</b>：事务里只做状态 CAS（条件 UPDATE，影响行数判胜负）与任务态联动；
+     * Redis 写与 SSE 推送放在<b>事务模板返回之后</b>执行 —— 此时提交、事务资源解绑与
+     * EntityManager/连接清理都已完成，不再占着 Hikari 连接等网络。仍是调用线程同步执行
+     * （不是 fire-and-forget）；旁路失败只记日志/降级，不回滚已提交的取消，
+     * 响应字段（{@code redisWritten}/{@code wokeInProcess}）语义不变。
+     *
+     * <p><b>任务不存在语义（R1-13 Minor）</b>：先读 job 再锁 task；若任务已被并发删除（或历史孤儿 job），
+     * 抛 {@link ResourceNotFoundException}（404），不返回 {@code JOB_ALREADY_FINAL}——前者是“对象没了”，
+     * 后者是“作业已是终态”，不可混淆。
+     *
      * @return 取消落地形态（供端点/验证取证）
      */
-    @Transactional
     public JobCancellationRegistry.CancelResult cancel(Long jobId, String requestedBy) {
-        Job job = findById(jobId);
-        if (job.getStatus() != Job.JobStatus.PENDING && job.getStatus() != Job.JobStatus.RUNNING) {
-            throw new ConflictException(ErrorCodes.JOB_ALREADY_FINAL,
-                    "作业 #" + jobId + " 已是终态 " + job.getStatus() + "，不可取消");
-        }
+        // 显式 REQUIRES_NEW：模板返回 = 已提交且已完成事务清理；之后才做 Redis/SSE。
+        TransactionTemplate tx = new TransactionTemplate(this.transactionManager);
+        tx.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        Long taskId = tx.execute(status -> {
+            Job job = findById(jobId);
+            if (!IN_FLIGHT.contains(job.getStatus())) {
+                throw finalConflict(jobId, job.getStatus());
+            }
+            // R1-13：任务态写路径统一先锁 task（再写 job），与删除的 task → job 顺序一致。
+            // 删除先发生时这里拿不到任务行；随后 updateStatus 影响 0 行或任务态联动静默跳过。
+            taskService.lockForUpdate(job.getTaskId());
 
-        JobCancellationRegistry.CancelResult result = cancellationRegistry.cancel(jobId, requestedBy);
+            // 条件 UPDATE：读-判-写跨进程不成立；影响 0 行 = 另一个写者已先收终态
+            int updated = jobRepository.updateStatusIfInFlight(jobId, Job.JobStatus.CANCELLED, IN_FLIGHT);
+            if (updated == 0) {
+                Job current = findById(jobId);
+                throw finalConflict(jobId, current.getStatus());
+            }
+            taskService.applyJobOutcome(job.getTaskId(), Job.JobStatus.CANCELLED);
+            return job.getTaskId();
+        });
+        return publishCancellationSideEffects(jobId, requestedBy, taskId);
+    }
+
+    private ConflictException finalConflict(Long jobId, Job.JobStatus status) {
+        return new ConflictException(ErrorCodes.JOB_ALREADY_FINAL,
+                "作业 #" + jobId + " 已是终态 " + status + "，不可取消");
+    }
+
+    /**
+     * 取消提交后的同步旁路：先写共享取消标志（Redis 为准），再推 JOB_DONE。
+     *
+     * <p>I-1：调用点已保证事务模板返回（提交 + 连接/EntityManager 清理完成），
+     * 因此这里不再使用 {@code afterCommit}/{@code isSynchronizationActive} 判断；
+     * 两段失败只归因到旁路本身，不回滚取消、不改变端点响应形态。
+     */
+    private JobCancellationRegistry.CancelResult publishCancellationSideEffects(
+            Long jobId, String requestedBy, Long taskId) {
+        JobCancellationRegistry.CancelResult result;
+        try {
+            result = cancellationRegistry.cancel(jobId, requestedBy);
+        } catch (Exception e) {
+            log.error("取消已提交，但共享取消标志写入失败（提交后归因，不回滚）jobId={}：{}",
+                    jobId, e.getMessage(), e);
+            result = new JobCancellationRegistry.CancelResult(
+                    false, false, jobId, cancellationRegistry.keyFor(jobId));
+        }
         if (!result.redisWritten()) {
             log.warn("取消作业 #{} 的共享标志未写入 Redis（降级：仅本进程可见）", jobId);
         }
-
-        if (job.getStatus() == Job.JobStatus.RUNNING || job.getStatus() == Job.JobStatus.PENDING) {
-            // 立即置终态（取消对快照即刻可见）；执行器随后在分片边界停手并再写一次终态（同值，幂等）
-            job.setStatus(Job.JobStatus.CANCELLED);
-            jobRepository.save(job);
+        try {
+            taskSseService.publish(taskId, "JOB_DONE", Map.of(
+                    "jobId", jobId, "status", "CANCELLED"));
+        } catch (Exception e) {
+            log.error("取消已提交，但 JOB_DONE 推送失败（提交后归因，不回滚）jobId={}：{}",
+                    jobId, e.getMessage(), e);
         }
-        taskService.applyJobOutcome(job.getTaskId(), Job.JobStatus.CANCELLED);
-        taskSseService.publish(job.getTaskId(), "JOB_DONE", Map.of(
-                "jobId", jobId, "status", "CANCELLED"));
         return result;
     }
 }

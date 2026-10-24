@@ -235,6 +235,9 @@ public class JobWatchdog {
                 Map.of("jobId", job.getId(), "jobType", job.getJobType(),
                         "status", Job.JobStatus.FAILED));
         this.cancellationRegistry.cancel(job.getId(), "job-watchdog");
+        // 只清心跳，不结束 runner：看门狗不强杀线程，runner 可能仍活着并在长事务里迟到写。
+        // 删除闸门认 JobHeartbeatRegistry 的 runner 登记；endRunner 只由 AsyncJobExecutor.finally 调用，
+        // 因此“判死/清心跳”不会把卡死作业误判成可删。
         this.heartbeatRegistry.clear(job.getId());
         log.warn("作业 #{} [{}] 被看门狗判{}：{}", job.getId(), job.getJobType(),
                 timeout ? "超时" : "死", reason);

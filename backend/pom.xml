@@ -123,6 +123,33 @@
     <build>
         <finalName>config-mgr</finalName>
         <plugins>
+            <!-- 补丁类 ReasoningAwareOpenAiChatModel 冻结了 spring-ai 1.1.7 的 createRequest 语义：
+                 升级不会编译报错，只会静默行为分叉。故在 validate 阶段钉死已评审版本，
+                 任何未经评审的版本变化（改属性或 -D 覆盖）立即 fail-fast。 -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+                <version>3.5.0</version>
+                <executions>
+                    <execution>
+                        <id>enforce-reviewed-spring-ai-version</id>
+                        <phase>validate</phase>
+                        <goals>
+                            <goal>enforce</goal>
+                        </goals>
+                        <configuration>
+                            <rules>
+                                <requireProperty>
+                                    <property>spring-ai.version</property>
+                                    <regex>^1\.1\.7$</regex>
+                                    <message>spring-ai.version 必须存在且只允许 1.1.7（ReasoningAwareOpenAiChatModel 冻结此版语义）。</message>
+                                    <regexMessage>spring-ai.version 只允许 1.1.7（已评审版本）；升级须先评审补丁去留并更新本断言。</regexMessage>
+                                </requireProperty>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
             <!-- 知识库样例：docs/kb-samples 是仓内唯一事实源，构建期原样拷进 classes/kb-samples
                  （运行时首启自播种从此处读）。filtering=false 保字节不动（manifest 的 sha 按 LF 计算，
                  播种器统一按 LF 落盘）。 -->

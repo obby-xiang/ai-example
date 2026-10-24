@@ -1,9 +1,13 @@
 package com.example.configmgr.common;
 
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -73,7 +77,45 @@ class GlobalExceptionHandlerSseTest {
 		ApiResponse<?> body = (ApiResponse<?>) handled.getBody();
 		assertThat(body.isSuccess()).isFalse();
 		assertThat(body.getCode()).isEqualTo(ErrorCodes.INTERNAL_ERROR);
-		assertThat(body.getMessage()).contains("服务器内部错误").contains("数据库炸了");
+		assertThat(body.getMessage()).isEqualTo("服务器内部错误，请稍后重试。");
+		assertThat(body.getMessage()).doesNotContain("数据库炸了");
+	}
+
+	/** A10 R-13：异常原文只进日志，不上用户 message。 */
+	@Test
+	void internalErrorLogsTheOriginalExceptionButDoesNotEchoIt() {
+		Logger logger = (Logger) LoggerFactory.getLogger(GlobalExceptionHandler.class);
+		ListAppender<ILoggingEvent> appender = new ListAppender<>();
+		appender.start();
+		logger.addAppender(appender);
+		try {
+			HttpServletResponse response = mock(HttpServletResponse.class);
+			when(response.getContentType()).thenReturn(null);
+
+			ResponseEntity<?> handled = this.handler.handleGeneral(new IllegalStateException("数据库炸了"), request(),
+					response);
+
+			ApiResponse<?> body = (ApiResponse<?>) handled.getBody();
+			assertThat(body.getMessage()).doesNotContain("数据库炸了");
+			assertThat(appender.list)
+					.as("异常原文必须仍可在日志里定位")
+					.anySatisfy(event -> assertThat(event.getThrowableProxy().getMessage()).contains("数据库炸了"));
+		} finally {
+			logger.detachAppender(appender);
+		}
+	}
+
+
+	@Test
+	void aiStateUnavailableMapsTo503Not400() {
+		ResponseEntity<?> handled = this.handler.handleAiStateUnavailable(
+				new AiStateUnavailableException("Redis 读失败（内部细节）"), request());
+
+		assertThat(handled.getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+		ApiResponse<?> body = (ApiResponse<?>) handled.getBody();
+		assertThat(body.getCode()).isEqualTo(ErrorCodes.AI_REDIS_UNAVAILABLE);
+		assertThat(body.getMessage()).as("不得把基础设施异常原文当用户面文案")
+				.isEqualTo("AI 服务暂不可用，请稍后重试。");
 	}
 
 	private static HttpServletRequest request() {

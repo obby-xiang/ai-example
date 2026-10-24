@@ -234,7 +234,14 @@ app:
       # 仅续"已有人类结论/无外部输入需求"的轮次；仍 PENDING 的确认门/前端工具一律跳过（不绕开人审）。
       on-startup: true
       startup-delay: 8s
-      zombie-age: 60s
+      # R1-09：僵尸判据只看"最后一条非心跳业务帧"（RunStore#lastActivityAtMs），心跳不得掩盖卡死。
+      #   阈值必须 >= 两类合法静默的最大值 + zombie-margin：
+      #   exec-timeout 120s（工具跑着时无业务帧）/ inter-event-timeout 90s。
+      #   180s = max(120s, 90s) + 60s；启动期由 AiProperties#verifyZombieAge fail-fast 兜底。
+      #   两类超时必须 > 0（0 = 永不超时，合法静默无上界）；zombie-margin >= 0。
+      #   锚点/帧 atMs 是出帧节点墙钟：多实例部署须保证 NTP，偏差远小于 zombie-margin。
+      zombie-age: 180s
+      zombie-margin: 60s
       max-on-startup: 10
       # T3-6a：死卡兜底的"轻量执行器"（确认门 woke=false 且快照 SUSPENDED 时触发续跑）。
       # 容量小 + 队列有界 + 饱和拒绝：resume 内部还会向挂起池提交一次，同池提交即嵌套占用。
@@ -403,6 +410,9 @@ app:
     # 启动期 fail-fast（AppProperties#verifyJobWatchdogKeys）：四项必须 > 0 且
     #   heartbeat-interval × dead-multiplier < max-execution-time。
     heartbeat-interval: 30s
+    # R1-13 多实例：runner 活跃登记的共享存储。生产必须 redis（删除侧 fail-closed）；
+    # 测试 classpath 的 application.properties 覆盖为 memory，多实例用例再显式切回 redis + mock。
+    runner-active-store: redis
     watchdog:
       scan-period: 10s
       dead-multiplier: 3

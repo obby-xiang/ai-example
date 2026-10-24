@@ -30,6 +30,13 @@ import java.util.List;
  *
  * <h2>幂等（重复重启不重复处理）</h2>
  * 处理完即写终态，第二次重启扫描集合为空 —— 无重复处理、无重复事件。
+ *
+ * <h2>多实例（P1-6）</h2>
+ * 共享 DB/Redis 下，PENDING/RUNNING 作业可能属于<b>其它实例仍在运行的 runner</b>。
+ * 恢复前逐个读 {@link JobHeartbeatRegistry#isRunnerAlive(Long)}：活跃则跳过，绝不把它判 FAILED；
+ * 读取失败（Redis 不可用）同样跳过（fail-closed），把“无法确认”留给删除闸门 409，
+ * 而不是用一个错误的终态掩盖不确定性。本机旧 PID 的键由
+ * {@link RunnerActiveKeyCleanupRunner} 在恢复<b>之前</b>清理（@Order 已调至恢复之前）。
  */
 @Slf4j
 @Component
@@ -40,6 +47,7 @@ public class StaleJobRecoveryRunner implements ApplicationRunner {
     private final JobRepository jobRepository;
     private final JobItemRepository jobItemRepository;
     private final TaskService taskService;
+    private final JobHeartbeatRegistry heartbeatRegistry;
 
     @Override
     @Transactional
@@ -52,6 +60,28 @@ public class StaleJobRecoveryRunner implements ApplicationRunner {
             return;
         }
         for (Job job : stale) {
+            // R1-13：任务态写路径统一先锁 task，再写 job；任务已被删除时跳过该作业，
+            // 避免对已被删除的 job 行做 merge 而把它重新插回（历史孤儿作业也走这条跳过路径）。
+            // 跳过后的兜底链：这些 job 保持 PENDING/RUNNING，由 JobWatchdog 的超时判据收敛为 FAILED；
+            // job 行仍存在，validation_issues 的 job_id FK 不会触发，删除闸门也不会把它们误当成
+            // “任务已删即可删”（删除只针对存在的 task）。
+            if (taskService.tryLockForUpdate(job.getTaskId()).isEmpty()) {
+                log.warn("僵尸作业 #{} 的任务 #{} 已不存在，跳过恢复（不重建作业行；交由看门狗按超时收敛）",
+                        job.getId(), job.getTaskId());
+                continue;
+            }
+            // P1-6：共享 DB/Redis 下，这条 PENDING/RUNNING 可能属于别的实例仍在跑的 runner。
+            // 活跃 → 跳过；读失败 → fail-closed 跳过（不用错误终态掩盖“无法确认”）。
+            try {
+                if (heartbeatRegistry.isRunnerAlive(job.getId())) {
+                    log.info("僵尸恢复跳过作业 #{}：runner 仍活跃（其它实例或本机登记未清）", job.getId());
+                    continue;
+                }
+            } catch (JobHeartbeatRegistry.RunnerActiveStateUnavailableException e) {
+                log.error("僵尸恢复跳过作业 #{}：runner 活跃状态无法确认（fail-closed，不改终态）：{}",
+                        job.getId(), e.getMessage());
+                continue;
+            }
             job.setStatus(Job.JobStatus.FAILED);
             job.setFinishedAt(LocalDateTime.now());
             jobRepository.save(job);

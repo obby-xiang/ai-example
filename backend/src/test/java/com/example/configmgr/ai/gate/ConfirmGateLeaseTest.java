@@ -449,7 +449,7 @@ class ConfirmGateLeaseTest {
 	@Test
 	void cancelStillReleasesTheLeaseBecauseTheRunTerminates() throws Exception {
 		seedSuspended(PendingToolCall.PENDING);
-		when(this.cancellations.isCancelled(RUN_ID)).thenReturn(true);
+		when(this.cancellations.cancelState(RUN_ID)).thenReturn(CancellationRegistry.CancelState.CANCELLED);
 		PendingToolCall entry = pendingEntry(PendingToolCall.PENDING);
 		Thread waiter = new Thread(() -> this.gate.awaitDecision(RUN_ID, entry), "c1-cancel");
 		waiter.setDaemon(true);
@@ -462,6 +462,26 @@ class ConfirmGateLeaseTest {
 		assertThat(this.fake.string(this.store.runLeaseKey(RUN_ID))).as("本轮终止 ⇒ 还租").isNull();
 		assertThat(this.store.heldRunEpoch(RUN_ID)).isZero();
 		assertThat(this.renewScheduler.activeCount()).as("不再续租").isZero();
+	}
+
+	/** C2：取消状态 UNKNOWN 不得让确认门等待线程退出；它必须继续等，直到确定取消。 */
+	@Test
+	void unknownCancelStateKeepsWaitingInsteadOfExitingTheGate() throws Exception {
+		seedSuspended(PendingToolCall.PENDING);
+		when(this.cancellations.cancelState(RUN_ID))
+			.thenReturn(CancellationRegistry.CancelState.UNKNOWN,
+					CancellationRegistry.CancelState.CANCELLED);
+		PendingToolCall entry = pendingEntry(PendingToolCall.PENDING);
+		Thread waiter = new Thread(() -> this.gate.awaitDecision(RUN_ID, entry), "c2-unknown-cancel");
+		waiter.setDaemon(true);
+		waiter.start();
+
+		Thread.sleep(300L);
+		assertThat(waiter.isAlive()).as("UNKNOWN 时确认门必须继续等，而不是带异常退出").isTrue();
+
+		waiter.join(6_000L);
+		assertThat(waiter.isAlive()).as("确定取消后正常收尾").isFalse();
+		assertThat(this.store.pending(RUN_ID, TOOL_CALL_ID).getStatus()).isEqualTo(PendingToolCall.CANCELLED);
 	}
 
 	// ── R2 派发路径的续租同样要有存活判据 ─────────────────────────────────

@@ -77,7 +77,7 @@ class AiControllerZombieGateTest {
 		snapshot.setStatus(RunSnapshot.RUNNING);
 		snapshot.setUpdatedAtMs(System.currentTimeMillis() - 10 * 60_000L);
 		when(this.runStore.get(deadRun)).thenReturn(snapshot);
-		when(this.runStore.lastEventAtMs(deadRun)).thenReturn(0L);
+		when(this.runStore.lastActivityAtMs(deadRun)).thenReturn(0L);
 		when(this.runStore.runLeaseKey(deadRun)).thenReturn("ai:lease:run:" + deadRun);
 		when(this.runStore.leaseService()).thenReturn(this.leases);
 		when(this.leases.isHeld("ai:lease:run:" + deadRun)).thenReturn(false);
@@ -107,6 +107,62 @@ class AiControllerZombieGateTest {
 		ResponseEntity<?> response = this.controller.chat(new AiChatRequest(SESSION, "再说一句", null), null);
 
 		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+		verify(this.sessionGate, never()).release(any(), any());
+	}
+
+	/**
+	 * I-4 / R1-09：RUNNING 只看<b>业务</b>活动 —— 心跳新鲜不能把“业务已卡死”的轮判活。
+	 *
+	 * <p>修复前（统一用 lastEventAtMs）这条会 409；修复后必须放行，让用户能重新发送。
+	 */
+	@Test
+	void runningRoundWithFreshHeartbeatButStaleBusinessIsReleased() {
+		String stalledRun = "run-stalled";
+		RunSnapshot snapshot = new RunSnapshot();
+		snapshot.setRunId(stalledRun);
+		snapshot.setSessionId(SESSION);
+		snapshot.setStatus(RunSnapshot.RUNNING);
+		snapshot.setUpdatedAtMs(System.currentTimeMillis() - 10 * 60_000L);
+		when(this.runStore.get(stalledRun)).thenReturn(snapshot);
+		when(this.runStore.lastActivityAtMs(stalledRun)).thenReturn(System.currentTimeMillis() - 10 * 60_000L);
+		when(this.runStore.lastEventAtMs(stalledRun)).thenReturn(System.currentTimeMillis());
+		when(this.runStore.runLeaseKey(stalledRun)).thenReturn("ai:lease:run:" + stalledRun);
+		when(this.runStore.leaseService()).thenReturn(this.leases);
+		when(this.leases.isHeld("ai:lease:run:" + stalledRun)).thenReturn(false);
+		when(this.runRegistry.find(stalledRun)).thenReturn(null);
+		when(this.sessionGate.acquire(eq(SESSION), anyString()))
+			.thenReturn(new SessionGate.Busy(stalledRun, false), null);
+
+		ResponseEntity<?> response = this.controller.chat(new AiChatRequest(SESSION, "重新问", null), null);
+
+		assertThat(response.getStatusCode()).as("心跳不得掩盖 RUNNING 的业务卡死").isEqualTo(HttpStatus.OK);
+		verify(this.sessionGate).release(SESSION, stalledRun);
+	}
+
+	/**
+	 * I-4 / R1-09：SUSPENDED 等人期间本来就没有业务帧 —— 新鲜心跳必须保留 409（不能放第二个轮进来）。
+	 */
+	@Test
+	void suspendedRoundWithFreshHeartbeatIsKept() {
+		String waitingRun = "run-waiting";
+		RunSnapshot snapshot = new RunSnapshot();
+		snapshot.setRunId(waitingRun);
+		snapshot.setSessionId(SESSION);
+		snapshot.setStatus(RunSnapshot.SUSPENDED);
+		snapshot.setUpdatedAtMs(System.currentTimeMillis() - 10 * 60_000L);
+		when(this.runStore.get(waitingRun)).thenReturn(snapshot);
+		when(this.runStore.lastActivityAtMs(waitingRun)).thenReturn(0L);
+		when(this.runStore.lastEventAtMs(waitingRun)).thenReturn(System.currentTimeMillis());
+		when(this.runStore.runLeaseKey(waitingRun)).thenReturn("ai:lease:run:" + waitingRun);
+		when(this.runStore.leaseService()).thenReturn(this.leases);
+		when(this.leases.isHeld("ai:lease:run:" + waitingRun)).thenReturn(false);
+		when(this.runRegistry.find(waitingRun)).thenReturn(null);
+		when(this.sessionGate.acquire(any(), any())).thenReturn(new SessionGate.Busy(waitingRun, false));
+
+		ResponseEntity<?> response = this.controller.chat(new AiChatRequest(SESSION, "插队", null), null);
+
+		assertThat(response.getStatusCode()).as("挂起等人靠心跳证明还在等，不能被放行成双跑")
+			.isEqualTo(HttpStatus.CONFLICT);
 		verify(this.sessionGate, never()).release(any(), any());
 	}
 

@@ -40,6 +40,10 @@ import java.util.*;
 @RequiredArgsConstructor
 public class PrecheckJobRunner {
 
+    /** 指纹摘要只允许写到仍在途的作业行；终态（含取消）后定向 UPDATE 影响 0 行。 */
+    private static final List<Job.JobStatus> IN_FLIGHT =
+            List.of(Job.JobStatus.PENDING, Job.JobStatus.RUNNING);
+
     private final DefinitionService definitionService;
     private final DependencyResolver dependencyResolver;
     private final ConfigDataRowRepository dataRowRepository;
@@ -252,7 +256,8 @@ public class PrecheckJobRunner {
                     finishedDefRows += defTotal;
                     processedRows = finishedDefRows;
                     totalRows = JobProgressTotals.denominator(0, discoveredRows, sorted.size() - startedItems);
-                    progressService.finishItem(itemId, "FAILED", (int) Math.max(defTotal, rowsSeen), defTotal);
+                    // I-4：成功路径已先写条目 COMPLETED（随后快照/任务项更新失败），catch 走补偿降级
+                    progressService.compensateItemFailure(itemId, (int) Math.max(defTotal, rowsSeen), defTotal);
                     taskService.updateItemStatus(taskId, defCode, "FAILED");
                 }
             }
@@ -296,21 +301,27 @@ public class PrecheckJobRunner {
     /**
      * 把指纹摘要写进作业的 {@code result_json}（T3-4 激活死列；{@code setResultJson} 此前全仓零调用）。
      *
-     * <p>写的是<b>重新读出的受管实体</b>（{@code findById}）而不是入参 {@code job}：入参在
-     * "测试直驱执行器"场景下可能是游离态，merge 会连带 {@code items} 级联关系一起处理；
-     * 受管实体写回与 {@code JobService#cancel} 同款，副作用面最小。
+     * <p>I-2：只在父作业仍在途时做<b>定向</b>条件 UPDATE（只写 result_json）。
+     * 旧实现 {@code findById + setResultJson + save} 在长事务里会随整行 UPDATE 把读出时刻的
+     * status（RUNNING）写回，覆盖期间已提交的 CANCELLED；定向条件写不碰 status，
+     * 且取消先提交时影响 0 行（摘要不再写入已取消作业）。
+     *
+     * <p>包级可见以便真实 H2 回归用例直测该写点；生产调用点仍只在 {@link #run}。
      */
-    private void writeFingerprintSummary(Long jobId, Map<String, Map<String, Map<String, Object>>> summary) {
-        jobRepository.findById(jobId).ifPresent(fresh -> {
-            try {
-                fresh.setResultJson(objectMapper.writeValueAsString(summary));
-                jobRepository.save(fresh);
-            }
-            catch (Exception e) {
-                // 摘要写失败不升级为作业失败：从严口径下"摘要缺失"在 IMPORT 侧就是 409 PRECHECK_STALE
-                log.warn("写入预检查指纹摘要失败 jobId={}: {}", jobId, e.getMessage());
-            }
-        });
+    void writeFingerprintSummary(Long jobId, Map<String, Map<String, Map<String, Object>>> summary) {
+        final String json;
+        try {
+            json = objectMapper.writeValueAsString(summary);
+        }
+        catch (Exception e) {
+            // 摘要写失败不升级为作业失败：从严口径下"摘要缺失"在 IMPORT 侧就是 409 PRECHECK_STALE
+            log.warn("序列化预检查指纹摘要失败 jobId={}: {}", jobId, e.getMessage());
+            return;
+        }
+        int updated = jobRepository.writeResultJsonIfInFlight(jobId, json, IN_FLIGHT);
+        if (updated == 0) {
+            log.debug("作业 #{} 已终态，指纹摘要不写入（条件 UPDATE 影响 0 行）", jobId);
+        }
     }
 
     private Map<String, Object> doneEvent(Job job, Job.JobStatus status, int errors) {

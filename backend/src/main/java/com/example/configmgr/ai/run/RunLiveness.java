@@ -12,8 +12,9 @@ package com.example.configmgr.ai.run;
  * <ol>
  * <li>快照已终态或状态不可能是"在跑"（null / 未知）；</li>
  * <li>不是活轮：没有续跑租约（跨实例续跑权）、本进程也没有它的写出器（活连接）；</li>
- * <li>最近活动（快照写入时刻 / 末帧时刻取较新）早已超出僵尸窗口 —— 安静但活着的长轮
- * （只吐思考、或挂起等人）靠这条心跳网兜住。</li>
+ * <li>最近活动（快照写入时刻 / 业务活动时刻取较新）早已超出僵尸窗口 —— 安静但活着的长轮
+ * （只吐思考、或挂起等人）靠这条心跳网兜住。RUNNING 只认<b>业务</b>活动（心跳不得掩盖卡死）；
+ * SUSPENDED 可把心跳算作"还在等"的证据（等人期间本来就没有业务帧）。</li>
  * </ol>
  *
  * <p>
@@ -28,7 +29,8 @@ public final class RunLiveness {
 	/**
 	 * @param status 快照状态（null = 快照已消失）
 	 * @param updatedAtMs 快照最后写入时刻（epoch 毫秒，0 = 未知）
-	 * @param lastActivityAtMs 末帧/心跳活动时刻（epoch 毫秒，0 = 无活动记录）
+	 * @param lastActivityAtMs 最近活动时刻（epoch 毫秒，0 = 无活动记录）。RUNNING 传业务活动
+	 * （不含心跳）；SUSPENDED 可传含心跳的活动时刻（等人期间心跳是唯一证据）
 	 * @param leaseHeld 续跑租约是否仍被持有（跨实例"还有人负责这一轮"的最强证据）
 	 * @param liveInProcess 本进程是否仍有该轮的写出器（活连接）
 	 * @param thresholdMs 僵尸窗口（无活动超过本值才判死）

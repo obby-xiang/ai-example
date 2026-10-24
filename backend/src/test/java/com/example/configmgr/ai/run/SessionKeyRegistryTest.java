@@ -20,38 +20,39 @@ class SessionKeyRegistryTest {
 
 	@Test
 	void registryCoversRunAndSessionScopesWithoutGaps() {
-		assertThat(SessionKeyRegistry.entries()).hasSize(17);
+		assertThat(SessionKeyRegistry.entries()).hasSize(19);
 		assertThat(SessionKeyRegistry.entries()).filteredOn(e -> e.scope() == SessionKeyRegistry.Scope.RUN)
-			.as("run 级 12 条")
-			.hasSize(12);
+			.as("run 级 14 条（含 per-run 取号计数器与业务活动锚点）")
+			.hasSize(14);
 		assertThat(SessionKeyRegistry.entries()).filteredOn(e -> e.scope() == SessionKeyRegistry.Scope.SESSION)
 			.as("session 级 5 条（session:current + ctx 三件套 + safety）")
 			.hasSize(5);
 		assertThat(SessionKeyRegistry.entries()).extracting(SessionKeyRegistry.Entry::prefix)
 			.contains("ai:run:", "ai:pending:", "ai:events:", "ai:seq:", "ai:xevents:", "ai:req:", "ai:decided:",
-					"ai:fence:run:", "ai:cancel:", "ai:beat:", "ai:ledger:", "ai:idem:", "ai:session:current:",
-					"ai:ctx:", "ai:ctx:ledger:", "ai:ctx:archive:", "ai:safety:");
+					"ai:fence:run:", "ai:lease:epoch:", "ai:cancel:", "ai:beat:", "ai:activity:", "ai:ledger:",
+					"ai:idem:", "ai:session:current:", "ai:ctx:", "ai:ctx:ledger:", "ai:ctx:archive:", "ai:safety:");
 	}
 
 	@Test
 	void heartbeatFaceStaysAtExactlyFiveKeys() {
-		// 红线：RunStoreSlidingTtlTest 锁定 renewSuspensionTtl 恰好 5 次 EXPIRE
+		// 红线：RunStoreSlidingTtlTest 断言 renewSuspensionTtl 的 5 个键都续到
+		// （L-139 后逐键 try，不再锁"恰好 5 次调用"的形态）
 		assertThat(SessionKeyRegistry.renewalPrefixes(SessionKeyRegistry.Renewal.HEARTBEAT)).containsExactly(
 				"ai:run:", "ai:pending:", "ai:events:", "ai:seq:", "ai:xevents:");
 		assertThat(SessionKeyRegistry.renewalKeys(SessionKeyRegistry.Renewal.HEARTBEAT)).hasSize(5);
 	}
 
 	@Test
-	void readFaceAddsTheContractSlotsAndTheCancelSignal() {
+	void readFaceAddsTheContractSlotsTheCancelSignalAndTheEpochCounter() {
 		assertThat(SessionKeyRegistry.renewalPrefixes(SessionKeyRegistry.Renewal.READ)).containsExactly(
-				"ai:req:", "ai:decided:", "ai:fence:run:", "ai:cancel:");
+				"ai:req:", "ai:decided:", "ai:fence:run:", "ai:lease:epoch:", "ai:cancel:");
 	}
 
 	@Test
-	void heartbeatAndReadFacesTogetherCoverTheNineTouchKeys() {
-		// touchActiveRun = 心跳 5 + 读侧 4（新增 cancel 之前是 5+3）
+	void heartbeatAndReadFacesTogetherCoverTheTenTouchKeys() {
+		// touchActiveRun = 心跳 5 + 读侧 5（cancel 之前是 5+3；取号计数器与 fence 同面后是 5+5）
 		assertThat(SessionKeyRegistry.renewalKeys(SessionKeyRegistry.Renewal.HEARTBEAT)).hasSize(5);
-		assertThat(SessionKeyRegistry.renewalKeys(SessionKeyRegistry.Renewal.READ)).hasSize(4);
+		assertThat(SessionKeyRegistry.renewalKeys(SessionKeyRegistry.Renewal.READ)).hasSize(5);
 	}
 
 	@Test
@@ -68,11 +69,22 @@ class SessionKeyRegistryTest {
 		assertThat(SessionKeyRegistry.renewalKeys(SessionKeyRegistry.Renewal.READ))
 			.extracting(builder -> builder.apply("r1"))
 			.containsExactly(store.reqKey("r1"), store.decidedKey("r1"), store.fenceKey("r1"),
-					CancellationRegistry.CANCEL_PREFIX + "r1");
+					store.runLeaseEpochKey("r1"), CancellationRegistry.CANCEL_PREFIX + "r1");
 		assertThat(SessionKeyRegistry.renewalKeys(SessionKeyRegistry.Renewal.HEARTBEAT))
 			.extracting(builder -> builder.apply("r1"))
 			.containsExactly(store.runKey("r1"), store.pendingKey("r1"), store.eventsKey("r1"), store.seqKey("r1"),
 					store.xeventsKey("r1"));
+	}
+
+	@Test
+	void activityAnchorIsRegisteredOnTheWriteFaceOnly() {
+		assertThat(SessionKeyRegistry.renewalPrefixes(SessionKeyRegistry.Renewal.WRITE))
+			.as("ai:activity 与 ai:beat 同属随写续期，不挤占心跳/读侧续期面")
+			.contains("ai:activity:");
+		assertThat(SessionKeyRegistry.renewalPrefixes(SessionKeyRegistry.Renewal.HEARTBEAT))
+			.doesNotContain("ai:activity:");
+		assertThat(SessionKeyRegistry.renewalPrefixes(SessionKeyRegistry.Renewal.READ))
+			.doesNotContain("ai:activity:");
 	}
 
 	// ── 取消信号：600s → session-ttl（24h） ────────────────────────────────

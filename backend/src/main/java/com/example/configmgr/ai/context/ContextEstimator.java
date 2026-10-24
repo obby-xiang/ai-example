@@ -7,6 +7,7 @@ import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.tool.ToolCallback;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * token 估算器（上下文统计与压缩专项批①；设计稿 §3.1 末段）。
@@ -36,6 +37,14 @@ public final class ContextEstimator {
 	/** 压缩摘要消息的 metadata 标记（与 {@code ContextBreakdown} 的 {@code summary} 类目同源）。 */
 	public static final String COMPACTED_KEY = "compacted";
 
+	/**
+	 * 回填侧写进 assistant metadata 的思考全文键。
+	 *
+	 * <p>{@code ReasoningAwareOpenAiChatModel} 会把该键的 String 值原样放进下一轮请求体的
+	 * {@code reasoning_content}，所以它是实际发送面的一部分，必须计入估算。
+	 */
+	public static final String REASONING_CONTENT_KEY = "reasoningContent";
+
 	private ContextEstimator() {
 	}
 
@@ -59,9 +68,11 @@ public final class ContextEstimator {
 	}
 
 	/**
-	 * 一整条消息进请求体的体量：正文 + 工具调用入参（assistant）/ 工具结果（tool）。
+	 * 一整条消息进请求体的体量：正文 + assistant 的思考全文 + 工具调用入参 / 工具结果。
 	 *
 	 * <p>
+	 * 思考全文只认 assistant {@code metadata.reasoningContent} 的 String 值：这正是回填侧实际
+	 * 会写进 {@code reasoning_content} 的形态；缺失或非 String 一律按 0 计（不猜测、不抛异常）。
 	 * 角色的"外壳"（{@code role} 键、分隔符）刻意不计：它每条消息恒定几个 token，
 	 * 计入只会让分项看起来更"准"而总量并不会更准。
 	 */
@@ -70,9 +81,16 @@ public final class ContextEstimator {
 			return 0;
 		}
 		int tokens = estimate(message.getText());
-		if (message instanceof AssistantMessage assistant && assistant.hasToolCalls()) {
-			for (AssistantMessage.ToolCall call : assistant.getToolCalls()) {
-				tokens += estimate(call.name()) + estimate(call.arguments());
+		if (message instanceof AssistantMessage assistant) {
+			Map<String, Object> metadata = assistant.getMetadata();
+			Object reasoning = metadata == null ? null : metadata.get(REASONING_CONTENT_KEY);
+			if (reasoning instanceof String text) {
+				tokens += estimate(text);
+			}
+			if (assistant.hasToolCalls()) {
+				for (AssistantMessage.ToolCall call : assistant.getToolCalls()) {
+					tokens += estimate(call.name()) + estimate(call.arguments());
+				}
 			}
 		}
 		if (message instanceof ToolResponseMessage toolResponse) {

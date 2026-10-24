@@ -63,6 +63,8 @@ public final class ErrorCodes {
     public static final String RATE_LIMITED = "RATE_LIMITED";
     /** 400：消息超长。 */
     public static final String MESSAGE_TOO_LONG = "MESSAGE_TOO_LONG";
+    /** 400：拒绝原因超长（决策回灌；只回数字，不回显原因原文）。 */
+    public static final String REASON_TOO_LONG = "REASON_TOO_LONG";
     /** 503：上下文计量不可用。 */
     public static final String AI_CONTEXT_UNAVAILABLE = "AI_CONTEXT_UNAVAILABLE";
     /** 500：未捕获异常。 */
@@ -204,7 +206,16 @@ public final class ErrorCodes {
     public static final String UNREACHABLE = "UNREACHABLE";
     public static final String CODE_IMMUTABLE = "CODE_IMMUTABLE";
     public static final String AI_SECRET_KEK_MISSING = "AI_SECRET_KEK_MISSING";
+    /** 503：已配置的 provider 都没有可用 key（用户可到设置页录入）。 */
     public static final String AI_KEY_MISSING = "AI_KEY_MISSING";
+    /**
+     * 503：可用性判定时 DB 托管 key 解不开（KEK 缺失/变更或密文损坏）。
+     *
+     * <p>与 {@link #KEY_UNREADABLE} 刻意分开：后者的语义是"配置写/探测路径上这条 key 解不开"
+     * （设置页按码给操作建议），本码是"AI 端点因此不可用"（/chat 503 + 前端引导到设置页）。
+     * 两者同源（{@code AiKeyCipher}）但出口不同，混用会让用户不知道是"改配置"还是"整条 AI 停了"。
+     */
+    public static final String AI_KEY_UNREADABLE = "AI_KEY_UNREADABLE";
     public static final String KEY_EMPTY = "KEY_EMPTY";
     public static final String KEY_UNREADABLE = "KEY_UNREADABLE";
 
@@ -212,6 +223,56 @@ public final class ErrorCodes {
 
     /** SSE error 帧：上游流异常。 */
     public static final String UPSTREAM_STREAM_ERROR = "UPSTREAM_STREAM_ERROR";
+    /** SSE error 帧：空回复（去空白后为空，轮次终态 FAILED）。 */
+    public static final String EMPTY_REPLY = "EMPTY_REPLY";
+    /** 轮次终态：cancelled（{@code done{cancelled:true}}），不是 error 帧；永不重试。 */
+    public static final String AI_RUN_CANCELLED = "AI_RUN_CANCELLED";
+    /** SSE error 帧：上游首包超时。 */
+    public static final String UPSTREAM_FIRST_BYTE_TIMEOUT = "UPSTREAM_FIRST_BYTE_TIMEOUT";
+    /** SSE error 帧：上游事件间静默超时。 */
+    public static final String UPSTREAM_SILENT_TIMEOUT = "UPSTREAM_SILENT_TIMEOUT";
+    /** SSE error 帧：单轮总预算耗尽。 */
+    public static final String TOTAL_BUDGET_EXCEEDED = "TOTAL_BUDGET_EXCEEDED";
+    /** SSE error 帧：上游流提前结束（缺终帧）。 */
+    public static final String UPSTREAM_STREAM_INCOMPLETE = "UPSTREAM_STREAM_INCOMPLETE";
+    /** SSE error 帧：上游连接中断（reset / EOF / premature close）。 */
+    public static final String UPSTREAM_CONNECTION_BROKEN = "UPSTREAM_CONNECTION_BROKEN";
+    /** SSE error 帧：上下文超出模型窗口（重试无效，需压缩或新会话）。 */
+    public static final String CONTEXT_OVERFLOW = "CONTEXT_OVERFLOW";
+
+    // ---- 终局失败派生码（R-09）：基础码 + 已产出/副作用后缀 ----
+    //
+    // 为什么仍保留后缀而不是只发基础码：同一基础码在"还没产出任何东西"与"已经给用户看了半截
+    // 正文 / 已经执行过工具"两种现场下，处置完全不同（能否重试、用户看到的内容是否可信）。
+    // 后缀是**诊断事实**，不是第二套错误分类；用户面文案沿用基础码（前端剥后缀查表），
+    // 码本身必须正式登记，否则前端镜像/messages 缺键，用户又看到裸码。
+
+    public static final String UPSTREAM_STREAM_ERROR_AFTER_PARTIAL = "UPSTREAM_STREAM_ERROR_AFTER_PARTIAL";
+    public static final String UPSTREAM_STREAM_ERROR_AFTER_TOOL_SIDE_EFFECT =
+            "UPSTREAM_STREAM_ERROR_AFTER_TOOL_SIDE_EFFECT";
+    public static final String UPSTREAM_CONNECTION_BROKEN_AFTER_PARTIAL =
+            "UPSTREAM_CONNECTION_BROKEN_AFTER_PARTIAL";
+    public static final String UPSTREAM_CONNECTION_BROKEN_AFTER_TOOL_SIDE_EFFECT =
+            "UPSTREAM_CONNECTION_BROKEN_AFTER_TOOL_SIDE_EFFECT";
+    public static final String UPSTREAM_STREAM_INCOMPLETE_AFTER_PARTIAL =
+            "UPSTREAM_STREAM_INCOMPLETE_AFTER_PARTIAL";
+    public static final String UPSTREAM_STREAM_INCOMPLETE_AFTER_TOOL_SIDE_EFFECT =
+            "UPSTREAM_STREAM_INCOMPLETE_AFTER_TOOL_SIDE_EFFECT";
+    public static final String UPSTREAM_SILENT_TIMEOUT_AFTER_PARTIAL =
+            "UPSTREAM_SILENT_TIMEOUT_AFTER_PARTIAL";
+    public static final String UPSTREAM_SILENT_TIMEOUT_AFTER_TOOL_SIDE_EFFECT =
+            "UPSTREAM_SILENT_TIMEOUT_AFTER_TOOL_SIDE_EFFECT";
+    public static final String UPSTREAM_FIRST_BYTE_TIMEOUT_AFTER_PARTIAL =
+            "UPSTREAM_FIRST_BYTE_TIMEOUT_AFTER_PARTIAL";
+    public static final String UPSTREAM_FIRST_BYTE_TIMEOUT_AFTER_TOOL_SIDE_EFFECT =
+            "UPSTREAM_FIRST_BYTE_TIMEOUT_AFTER_TOOL_SIDE_EFFECT";
+    public static final String TOTAL_BUDGET_EXCEEDED_AFTER_PARTIAL =
+            "TOTAL_BUDGET_EXCEEDED_AFTER_PARTIAL";
+    public static final String TOTAL_BUDGET_EXCEEDED_AFTER_TOOL_SIDE_EFFECT =
+            "TOTAL_BUDGET_EXCEEDED_AFTER_TOOL_SIDE_EFFECT";
+    public static final String CONTEXT_OVERFLOW_AFTER_PARTIAL = "CONTEXT_OVERFLOW_AFTER_PARTIAL";
+    public static final String CONTEXT_OVERFLOW_AFTER_TOOL_SIDE_EFFECT =
+            "CONTEXT_OVERFLOW_AFTER_TOOL_SIDE_EFFECT";
     /** SSE error 帧：轮次未捕获异常。 */
     public static final String AI_RUN_FAILED = "AI_RUN_FAILED";
     /** SSE error 帧：续跑失败。 */

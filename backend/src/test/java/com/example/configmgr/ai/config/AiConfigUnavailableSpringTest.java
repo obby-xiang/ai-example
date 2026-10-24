@@ -56,7 +56,7 @@ class AiConfigUnavailableSpringTest {
 		assertThat(this.availability.isAvailable()).isFalse();
 		assertThat(this.availability.code()).isEqualTo("AI_UNAVAILABLE");
 		assertThat(this.availability.reason())
-			.isEqualTo("AI 能力未启用：未配置 AI_API_KEY（或 DEEPSEEK_API_KEY）环境变量，AI 端点已惰性降级");
+			.isEqualTo("AI 能力未启用：请在「设置 → AI」配置供应商与 API Key");
 	}
 
 	@Test
@@ -73,7 +73,7 @@ class AiConfigUnavailableSpringTest {
 			.andExpect(jsonPath("$.providerId").doesNotExist())
 			.andExpect(jsonPath("$.providers").isEmpty())
 			.andExpect(jsonPath("$.message")
-				.value("AI 能力未启用：未配置 AI_API_KEY（或 DEEPSEEK_API_KEY）环境变量，AI 端点已惰性降级"));
+				.value("AI 能力未启用：请在「设置 → AI」配置供应商与 API Key"));
 	}
 
 	@Test
@@ -83,7 +83,7 @@ class AiConfigUnavailableSpringTest {
 			.andExpect(status().isServiceUnavailable())
 			.andExpect(jsonPath("$.code").value("AI_UNAVAILABLE"))
 			.andExpect(jsonPath("$.message")
-				.value("AI 能力未启用：未配置 AI_API_KEY（或 DEEPSEEK_API_KEY）环境变量，AI 端点已惰性降级"));
+				.value("AI 能力未启用：请在「设置 → AI」配置供应商与 API Key"));
 	}
 
 	@Test

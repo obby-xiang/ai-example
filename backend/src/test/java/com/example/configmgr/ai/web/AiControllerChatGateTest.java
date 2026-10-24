@@ -23,6 +23,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.memory.ChatMemoryRepository;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.context.i18n.LocaleContextHolder;
 import org.springframework.core.env.Environment;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -32,8 +33,10 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -327,6 +330,38 @@ class AiControllerChatGateTest {
 		finally {
 			logger.detachAppender(appender);
 		}
+	}
+
+	/**
+	 * A3-Y7 / A3-Y1：请求 locale（{@code Accept-Language}）必须随任务进到<b>工作线程</b>。
+	 *
+	 * <p>回答语言段由 {@code ResilientChatService} 里的 {@code ReplyLanguage.current()} 生成，
+	 * 取值点是线程级 {@code LocaleContextHolder}（与错误体同一来源）。不搬运的话，SSE 这条通道
+	 * 在英文界面上恒按中文回答 —— 这正是 A3-Y1 选"随用户语言"后必须同时修掉的那一半。
+	 *
+	 * <p><b>证红方式</b>：删掉 {@code AiController#chat} 里提交任务前的 locale 捕获或任务内的
+	 * {@code setLocale} ⇒ 工作线程看到的是默认 zh ⇒ 本用例红。
+	 */
+	@Test
+	void chatPropagatesRequestLocaleToTheWorkerThread() {
+		AtomicReference<String> workerLanguage = new AtomicReference<>();
+		org.mockito.Mockito.doAnswer(invocation -> {
+			workerLanguage.set(com.example.configmgr.common.ErrorBodyFactory.requestLocale().getLanguage());
+			return null;
+		}).when(this.service).chat(anyString(), any(AiChatRequest.class), any(SseChatEmitter.class));
+
+		LocaleContextHolder.setLocale(Locale.US);
+		try {
+			this.controller.chat(new AiChatRequest(SESSION + "-locale", "hello", null), null);
+			verify(this.service, timeout(2000)).chat(anyString(), any(AiChatRequest.class),
+					any(SseChatEmitter.class));
+		}
+		finally {
+			LocaleContextHolder.resetLocaleContext();
+		}
+
+		assertThat(workerLanguage.get()).as("工作线程必须看到请求 locale（en），与 /confirm、/health 同一口径")
+				.isEqualTo("en");
 	}
 
 	// ── Servlet 面（MockMvc）：桌面端真正收到的 HTTP 形状 ──────────────────

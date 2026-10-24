@@ -15,14 +15,17 @@ import com.example.configmgr.ai.run.ToolActivityBeacon;
 import com.example.configmgr.ai.tool.FrontendToolGuard;
 import com.example.configmgr.ai.tool.SheetAudit;
 import com.example.configmgr.ai.tool.ToolOutcome;
+import com.example.configmgr.common.ErrorBodyFactory;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.context.i18n.LocaleContextHolder;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -457,8 +460,10 @@ public class ConfirmGate {
 		// Redis 降级）就照常等 —— "抢不到租约"绝不能变成"等不到人"；那条路径的互斥由
 		// woke / ACTIVE_LATCH_IN_PROCESS 与 claimExecution 兜底。
 		LeaseService leases = leases();
+		// 带 fence 抢租（N-1）：三键同槽脚本会在取号时与 fence 对账，计数器先死也不会永久 STALE。
 		LeaseService.Lease lease = leases == null ? null
-				: leases.tryAcquire(this.store.runLeaseKey(runId), this.properties.getLease().getTtl()).orElse(null);
+				: leases.tryAcquireFenced(this.store.runLeaseKey(runId), this.store.fenceKey(runId),
+						this.properties.getLease().getTtl(), null).orElse(null);
 		int renewEveryTicks = leaseRenewEveryTicks();
 		long heartbeatTicks = 0L;
 		// 决策到达 = 把续跑权交棒给驱动方（原循环）；此刻<b>不释放</b>租约：释放会让另一个实例
@@ -513,16 +518,31 @@ public class ConfirmGate {
 				pending.getName(), "kind", confirm ? "confirm" : "frontend",
 				"timeoutS", timeoutSeconds == null ? "none" : timeoutSeconds,
 				"preflight", pending.getPreflight() != null);
+		boolean cancelUnknownWarned = false;
 		try {
 			while (true) {
-				if (this.cancellations.isCancelled(runId)) {
+				CancellationRegistry.CancelState cancelState = this.cancellations.cancelState(runId);
+				if (cancelState == CancellationRegistry.CancelState.CANCELLED) {
 					return cancel(runId, pending, confirm, startedAt);
+				}
+				if (cancelState == CancellationRegistry.CancelState.UNKNOWN) {
+					// C2：确认门不依赖 Redis 才能继续等（心跳续期另算）—— UNKNOWN 按"继续等待"处理，
+					// 每张卡只 WARN 一次，避免 2s 一拍刷日志。
+					if (!cancelUnknownWarned) {
+						log.warn("确认门取消状态未知 runId={}（Redis 读失败；继续等待，不按取消收尾）", runId);
+						cancelUnknownWarned = true;
+					}
+				}
+				else {
+					cancelUnknownWarned = false;
 				}
 				PendingToolCall fresh;
 				// S5c-6：与提交侧读同一把锁 —— 提交方在锁内完成"落库 + 发回执帧 + 唤醒"，
 				// 因此这里读到的"已决"状态一定伴随着已经写出去的回执帧。
 				synchronized (this.submitLock) {
-					fresh = this.store.pending(runId, pending.getToolCallId());
+					// C2：guard 读失败不得让等待线程退出（卡仍 PENDING、工具会被记成执行失败）；
+					// 用非抛读口，把"读不出来"降级为"这一拍没合并 guard"。
+					fresh = this.store.pendingLenient(runId, pending.getToolCallId());
 				}
 				if (fresh != null && fresh.resolved()) {
 					// 决策可能来自本进程（闸门唤醒）也可能来自另一实例（Redis 轮询发现）
@@ -572,7 +592,8 @@ public class ConfirmGate {
 			// 条目保持未决，进程重启后仍可由挂起态外置 + 人决策继续收敛；本轮按中断收尾。
 			Thread.currentThread().interrupt();
 			log.warn("挂起等待被中断 runId={} toolCallId={}（条目保持未决，不写超时结局）", runId, pending.getToolCallId());
-			PendingToolCall fresh = this.store.pending(runId, pending.getToolCallId());
+			// C2：中断出口也不得再抛（否则原始中断被替换）；读不到就退回入参。
+			PendingToolCall fresh = this.store.pendingLenient(runId, pending.getToolCallId());
 			return fresh == null ? pending : fresh;
 		}
 		finally {
@@ -657,11 +678,17 @@ public class ConfirmGate {
 		}
 	}
 
-	/** 租约键 → runId（键形如 {@code ai:lease:run:<runId>}；不匹配返回 null = 判据退化为恒真）。 */
+	/**
+	 * 租约键 → runId（键形 {@code ai:lease:run:{run:<runId>}}，迁移期也认旧的
+	 * {@code ai:lease:run:<runId>}；不匹配返回 null = 判据退化为恒真）。
+	 *
+	 * <p>反解一律交给 {@link RunStore#runIdFromLeaseKey(String)} —— 键形知识只留在 RunStore 一处。
+	 * 这里曾经自己 {@code substring(前缀长度)}，B23L1 批① 给租约键加 {@code {run:<runId>}} tag 之后，
+	 * 那个写法会把 runId 反解成 {@code {run:<runId>}} ⇒ 存活判据读不到快照 ⇒ 每拍"判据转假"并释放
+	 * 租约（续跑权静默丢失）。键形一变就要跟着改的反解点，只应存在于拼键的那个类里。
+	 */
 	private static String runIdOf(LeaseService.Lease lease) {
-		String key = lease == null ? null : lease.key();
-		String prefix = RunStore.LEASE_RUN_PREFIX;
-		return key != null && key.startsWith(prefix) ? key.substring(prefix.length()) : null;
+		return lease == null ? null : RunStore.runIdFromLeaseKey(lease.key());
 	}
 
 	/** 等待期续租的节拍（心跳跳数）= {@code lease.renew-interval} / {@link #HEARTBEAT_SECONDS}，下限 1 跳。 */
@@ -721,7 +748,8 @@ public class ConfirmGate {
 	 */
 	private PendingToolCall reserveRequestSlot(String runId, PendingToolCall pending) {
 		synchronized (this.submitLock) {
-			PendingToolCall fresh = this.store.pending(runId, pending.getToolCallId());
+			// C2：guard 读失败不得让"请求帧发射"路径整体失败；非抛读口仍能拿到原始条目。
+			PendingToolCall fresh = this.store.pendingLenient(runId, pending.getToolCallId());
 			if (fresh != null && fresh.resolved()) {
 				return consumeDecided(runId, pending.getToolCallId(), fresh);
 			}
@@ -760,7 +788,7 @@ public class ConfirmGate {
 	 * 然后由 {@code SpToolCallingManager} 在事件边界终止整轮（终态 {@code done{cancelled:true}}）。
 	 */
 	private PendingToolCall cancel(String runId, PendingToolCall pending, boolean confirm, long startedAt) {
-		PendingToolCall fresh = this.store.pending(runId, pending.getToolCallId());
+		PendingToolCall fresh = this.store.pendingLenient(runId, pending.getToolCallId());
 		if (fresh == null) {
 			fresh = pending;
 		}
@@ -799,7 +827,7 @@ public class ConfirmGate {
 	 * 产生 {@code decision=timeout} 帧。
 	 */
 	private PendingToolCall expireFrontend(String runId, PendingToolCall pending, int timeoutSeconds) {
-		PendingToolCall fresh = this.store.pending(runId, pending.getToolCallId());
+		PendingToolCall fresh = this.store.pendingLenient(runId, pending.getToolCallId());
 		if (fresh == null) {
 			fresh = pending;
 		}
@@ -1389,7 +1417,8 @@ public class ConfirmGate {
 		// 不属于本次调用，释放会把正在等/正在驱动的那一任租约删掉。判据取 {@code created}
 		// （脚本告诉我们"这一任是不是我建的"），不再用"抢占前是否持租"去猜：后者在并发下发同时
 		// 两边都会读到"未持租"（与 ResumeService 同型的缺陷，见该处的注释）。
-		LeaseService.AcquireResult acquired = leases.acquire(leaseKey, this.properties.getLease().getTtl());
+		LeaseService.AcquireResult acquired = leases.acquireFenced(leaseKey, this.store.fenceKey(runId),
+				this.properties.getLease().getTtl(), null);
 		if (acquired.outcome() == LeaseService.AcquireOutcome.UNAVAILABLE) {
 			// I4：设施不可用 ⇒ 无租约降级（与"没有租约设施"同口径）：派发不带租约，
 			// 由 ResumeService 的进程内互斥兜底。把"不知道"当成"别人持有"会让 Redis 抖一下就停止续跑。
@@ -1410,8 +1439,19 @@ public class ConfirmGate {
 
 	/** 把续跑动作交给轻量执行器；池饱和时<b>先还租约</b>再如实回报（A9 口径不变）。 */
 	private ResumeTrigger dispatchResume(String runId, LeaseService.Lease lease, boolean fresh) {
+		// I-5 / 4B：在提交线程（决策回灌的 HTTP 线程；租约重试则是调度线程）取好 locale。
+		// 工作线程不继承请求上下文 —— 不显式搬运，en 用户的确认门续跑仍会落到 zh 白名单。
+		Locale replyLocale = ErrorBodyFactory.requestLocale();
 		try {
-			this.resumeTriggerExecutor.execute(() -> runResume(runId, lease, fresh));
+			this.resumeTriggerExecutor.execute(() -> {
+				LocaleContextHolder.setLocale(replyLocale);
+				try {
+					runResume(runId, lease, fresh);
+				}
+				finally {
+					LocaleContextHolder.resetLocaleContext();
+				}
+			});
 		}
 		catch (RejectedExecutionException ex) {
 			releaseLeaseQuietly(lease, runId, fresh);

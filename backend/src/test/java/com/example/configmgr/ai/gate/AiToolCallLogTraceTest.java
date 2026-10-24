@@ -155,7 +155,8 @@ class AiToolCallLogTraceTest {
 	@Test
 	void cancelledRunStillClosesTheToolCallWithAnEndLine() {
 		// 第一次 isCancelled（逐个执行前）= false，让工具真的开始；第二次（执行后）= true ⇒ 取消
-		when(this.cancellations.isCancelled(anyString())).thenReturn(false, true);
+		when(this.cancellations.cancelState(anyString())).thenReturn(CancellationRegistry.CancelState.NOT_CANCELLED,
+				CancellationRegistry.CancelState.CANCELLED);
 
 		org.assertj.core.api.Assertions
 			.assertThatThrownBy(() -> execute("echo", "{\"text\":\"" + ARG_MARKER + "\"}"))

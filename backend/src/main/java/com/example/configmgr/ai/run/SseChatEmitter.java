@@ -217,8 +217,8 @@ public class SseChatEmitter {
 	 * （{@code app.ai.result-budget.ui.max-frame-bytes}，缺省 64KB）。
 	 *
 	 * <p>出帧路径在"取号 → 落档 → 入队"之前调用 {@link FrameSizeLimiter#apply}：
-	 * 超限帧按<b>字段级</b>降采样并挂统一截断字段（{@code truncated/strategy/originalChars/
-	 * returnedChars/notice}，{@code truncatedReason} 为兼容别名），
+	 * 超限帧按<b>字段级</b>降采样并挂统一截断字段（{@code truncated/noticeCode/strategy/
+	 * originalChars/returnedChars/notice}，{@code truncatedReason} 为兼容别名），
 	 * 归档与投递拿到的是同一份截断后帧（重挂回放与实时流不会分叉）。
 	 */
 	private final int maxFrameBytes;
@@ -596,6 +596,17 @@ public class SseChatEmitter {
 	 * @return 实际入队的回放帧数（异步写出前的入队口径）
 	 */
 	public int replayAndAttach(SseEmitter emitter, Long lastSeq, boolean terminal) {
+		return replayAndAttachWithStatus(emitter, lastSeq, terminal).staged();
+	}
+
+	/**
+	 * 同 {@link #replayAndAttach}，但把"回放是否降级"一并交给调用方（I-1）。
+	 *
+	 * <p>降级（末号探测/XRANGE 失败）时<b>不得</b>把空结果当"正常空回放"直接 {@code completeOne}：
+	 * 终态轮会以"什么都没发生"收尾，前端拿不到 {@code done}。生产入口（AiController）在调用前
+	 * 还会用 {@link FrameStore#lastSeqIfKnown} 预检并回 503；这里保留第二道防线。
+	 */
+	public ReplayResult replayAndAttachWithStatus(SseEmitter emitter, Long lastSeq, boolean terminal) {
 		Subscription sub = new Subscription(emitter, terminal);
 		synchronized (this.emitLock) {
 			// I-1：**先挂订阅（含唤醒订阅）再读回放**。旧顺序（读档 → 挂订阅）之间落档的帧
@@ -605,19 +616,25 @@ public class SseChatEmitter {
 			if (!terminal) {
 				attachSubscription(sub);
 			}
-			int staged = stageReplay(sub, lastSeq);
+			ReplayResult plan = stageReplay(sub, lastSeq);
+			if (plan.degraded()) {
+				log.warn("回放降级 runId={} terminal={} lastSeq={} staged={}（发 typed error 后收尾，不按正常空回放）",
+						this.runId, terminal, lastSeq, plan.staged());
+				finishDegradedReplay(sub, plan);
+				return plan;
+			}
 			if (terminal) {
-				if (staged == 0) {
+				if (plan.staged() == 0) {
 					completeOne(sub);
 				}
 				else {
 					kickDrain(sub);
 				}
 			}
-			else if (staged > 0) {
+			else if (plan.staged() > 0) {
 				kickDrain(sub);
 			}
-			return staged;
+			return plan;
 		}
 	}
 
@@ -642,17 +659,62 @@ public class SseChatEmitter {
 	 * @return 实际入队的回放帧数（异步写出前的入队口径）
 	 */
 	public int replayTo(SseEmitter emitter, Long lastSeq) {
+		return replayToWithStatus(emitter, lastSeq).staged();
+	}
+
+	/** 同 {@link #replayTo}，带降级标记；降级空结果不 {@code completeOne}（I-1）。 */
+	public ReplayResult replayToWithStatus(SseEmitter emitter, Long lastSeq) {
 		Subscription sub = new Subscription(emitter, true);
 		synchronized (this.emitLock) {
-			int staged = stageReplay(sub, lastSeq);
-			if (staged == 0) {
+			ReplayResult plan = stageReplay(sub, lastSeq);
+			if (plan.degraded()) {
+				log.warn("回放降级 runId={} lastSeq={} staged={}（发 typed error 后收尾，不按正常空回放）", this.runId,
+						lastSeq, plan.staged());
+				finishDegradedReplay(sub, plan);
+				return plan;
+			}
+			if (plan.staged() == 0) {
 				completeOne(sub);
 			}
 			else {
 				kickDrain(sub);
 			}
-			return staged;
+			return plan;
 		}
+	}
+
+	/**
+	 * 回放结果：{@code staged} = 实际入队帧数；{@code degraded} = 本次回放有读失败/窗口跳过；
+	 * {@code terminalFrame} = 已读到 done/error 终帧（不得再补 degraded error）。
+	 */
+	public record ReplayResult(int staged, boolean degraded, boolean terminalFrame) {
+	}
+
+	/**
+	 * N-2：降级回放必须给终态。
+	 *
+	 * <p>若已读到 done/error 终帧则不再补（避免重复终帧）；否则补一帧 typed error
+	 * （{@code AI_REDIS_UNAVAILABLE / retryable=true / degraded=true}），再让 drain 把队列写完后
+	 * {@code completeOne}。终态与非终态都走这条出口 —— 非终态也不能悬挂。
+	 */
+	private void finishDegradedReplay(Subscription sub, ReplayResult plan) {
+		if (!plan.terminalFrame()) {
+			Map<String, Object> error = frame("error");
+			error.put("runId", this.runId);
+			error.put("code", ErrorCodes.AI_REDIS_UNAVAILABLE);
+			error.put("message", "AI 服务暂不可用，请稍后重试。");
+			error.put("retryable", true);
+			error.put("degraded", true);
+			try {
+				sub.queue.add(new QueuedFrame(this.objectMapper.writeValueAsString(error), false));
+			}
+			catch (Exception ex) {
+				log.error("降级回放错误帧序列化失败 runId={}：{}", this.runId, ex.getMessage());
+			}
+		}
+		// terminal 订阅本就会在队空后 complete；terminating 让非终态回放同样收尾（不悬挂）。
+		sub.terminating = true;
+		kickDrain(sub);
 	}
 
 	/**
@@ -670,13 +732,22 @@ public class SseChatEmitter {
 	 * 防"发帧后才落档失败"等错位）。回放同时把 {@link #lastFanoutSeq} 顶到已读到的最大号 ——
 	 * 这样随后的跨实例唤醒不会把这些帧再推一遍（重复帧按 seq 去重）。
 	 */
-	private int stageReplay(Subscription sub, Long lastSeq) {
+	private ReplayResult stageReplay(Subscription sub, Long lastSeq) {
 		long afterSeq = lastSeq == null ? 0L : lastSeq;
-		List<Map<String, Object>> frames = this.frames.readFrom(this.runId, afterSeq, 0);
+		FrameStore.ReadResult read = this.frames.readFromWithStatus(this.runId, afterSeq, 0);
+		if (read.degraded() && afterSeq <= 0L && read.frames().isEmpty()) {
+			// I-1：全量回放时末号未知且没有可读帧 —— 不能用"最旧窗口"冒充最新帧，宁可这一拍不回放。
+			return new ReplayResult(0, true, false);
+		}
+		List<Map<String, Object>> frames = read.frames();
 		int staged = 0;
+		boolean terminalFrame = false;
 		long maxReadSeq = 0L;
 		for (Map<String, Object> frame : frames) {
 			String type = String.valueOf(frame.get("type"));
+			if ("done".equals(type) || "error".equals(type)) {
+				terminalFrame = true;
+			}
 			Object seqValue = frame.get("seq");
 			if (seqValue instanceof Number number && number.longValue() > maxReadSeq) {
 				maxReadSeq = number.longValue();
@@ -701,7 +772,7 @@ public class SseChatEmitter {
 		if (maxReadSeq > 0L) {
 			this.lastFanoutSeq.accumulateAndGet(maxReadSeq, Math::max);
 		}
-		return staged;
+		return new ReplayResult(staged, read.degraded(), terminalFrame);
 	}
 
 	/** 孤儿判定：帧序号不大于前端已知的最大序号 ⇒ 该帧前端已有，不重发。 */
@@ -1010,7 +1081,7 @@ public class SseChatEmitter {
 	 *
 	 * <p>
 	 * 反向（帧字节超限而模型侧未超）由 {@link FrameSizeLimiter} 在帧上覆盖说明 ——
-	 * 那时是"前端这一份被压过"，与模型侧无关，notice 会写明。
+	 * 那时是"前端这一份被压过"，与模型侧无关，{@code noticeCode} 会切成帧截断码。
 	 */
 	private void markModelView(Map<String, Object> frame, String toolName, String result) {
 		if (this.resultLimiter == null || result == null || result.isEmpty()) {
@@ -1020,14 +1091,17 @@ public class SseChatEmitter {
 		if (!view.truncated()) {
 			return;
 		}
-		String notice = "模型侧视图已截断：原 " + view.originalChars() + " 字符，模型可见 " + view.returnedChars()
-				+ " 字符（strategy=" + view.strategy() + "）；本帧 result 为全文。";
+		// 旧客户端兼容字段：语言中立短句；数字/strategy 只进结构字段与日志（新客户端按 noticeCode 本地化）。
+		String notice = FrameSizeLimiter.legacyNotice(TruncationContract.NOTICE_CODE_MODEL_VIEW_TRUNCATED);
 		frame.put(TruncationContract.TRUNCATED_FIELD, true);
+		frame.put(TruncationContract.NOTICE_CODE_FIELD, TruncationContract.NOTICE_CODE_MODEL_VIEW_TRUNCATED);
 		frame.put(TruncationContract.STRATEGY_FIELD, view.strategy());
 		frame.put(TruncationContract.ORIGINAL_CHARS_FIELD, view.originalChars());
 		frame.put(TruncationContract.RETURNED_CHARS_FIELD, view.returnedChars());
 		frame.put(TruncationContract.NOTICE_FIELD, notice);
 		frame.put(TruncationContract.LEGACY_REASON_FIELD, notice);
+		log.debug("模型侧视图截断 runId={} tool={} originalChars={} returnedChars={} strategy={}", this.runId,
+				toolName, view.originalChars(), view.returnedChars(), view.strategy());
 	}
 
 
@@ -1157,8 +1231,9 @@ public class SseChatEmitter {
 			final byte[] payloadBytes;
 			if (RunStore.HEARTBEAT_TYPE.equals(String.valueOf(frame.get("type")))) {
 				// T7：心跳照常广播（下面的 subscribers），但不进事件日志 —— 只留一个轻量活动戳，
-				// 让"这轮最近有过活动"仍可跨进程判定（僵尸判据的输入）。事件日志侧的同类跳过见
-				// FrameStore#append（任何其他调用方直接塞心跳帧也不会占位）。
+				// 让"这轮最近有过活动"仍可跨进程判定。R1-09：心跳只证明<b>进程还活着</b>，
+				// 不推进业务活动锚点（否则心跳会掩盖卡死）；僵尸判据读 RunStore#lastActivityAtMs。
+				// 事件日志侧的同类跳过见 FrameStore#append（任何其他调用方直接塞心跳帧也不会占位）。
 				// S5c-1：心跳<b>不取业务 seq</b>，只在独立序号空间里计数 —— 于是事件日志末帧号
 				// 恒等于已发放过的最大业务号，心跳永远不会把它顶到前面去。
 				frame.put("heartbeatSeq", this.heartbeatSeq.incrementAndGet());
@@ -1186,6 +1261,11 @@ public class SseChatEmitter {
 					log.error("SSE 帧序列化失败 runId={} type={}（本帧已跳过）", this.runId, frame.get("type"));
 					return;
 				}
+				// R1-09：任何业务帧（非纯心跳）都推进真实业务活动锚点。必须留在出帧点/锁内 ——
+				// 只靠心跳会掩盖卡死，只靠归档尾部则会漏掉"落档失败但帧已发出"的窗口。
+				Object atMs = frame.get("atMs");
+				this.store.touchBusinessActivity(this.runId,
+						atMs instanceof Number number ? number.longValue() : System.currentTimeMillis());
 				this.frames.append(this.runId, frame);
 				// B23L1：先登记"本地已接手到 seq"，再发唤醒 —— 唤醒分发可能在本线程内同步回调
 				// （同步总线/测试替身），若不先登记，自唤醒会把刚落的这一帧再推一遍。

@@ -68,7 +68,7 @@ public class AiModelCatalog {
         // 位置在缓存读<b>之前</b>：缓存命中也不该掩盖"这行 key 已经解不开"这个更重要的事实。
         if (key.status() == AiConfigService.KeyStatus.UNREADABLE) {
             return new CatalogResult(false, List.of(), false, AiConfigService.CODE_KEY_UNREADABLE,
-                    "库里的密钥无法解密（KEK 缺失/变更或密文损坏）：请恢复 AI_SECRET_KEK 或重新录入 key");
+                    "库里的密钥无法解密：请到「设置 → AI」重新录入密钥，或让管理员恢复加密配置");
         }
         if (!refresh) {
             List<String> cached = readCache(providerId);

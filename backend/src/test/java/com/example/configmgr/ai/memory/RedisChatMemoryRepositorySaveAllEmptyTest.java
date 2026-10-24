@@ -8,103 +8,88 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentCaptor;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.data.redis.core.script.RedisScript;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyList;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 
 /**
- * {@code saveAll} 空列表分支的原子性契约（o-R3，批 2）。
+ * {@code saveAll} 空列表分支 + 旧键迁移的真 Redis 契约（fix round 1）。
  *
- * <p>修复前该分支是 {@code delete} 数据键 + {@code SREM} 索引两次独立往返（非原子），
- * 与 {@code deleteByConversationId} Lua 化之前同构同漏洞。可达性（spring-ai 1.1.7 字节码实测 +
- * 本仓代码走查）：
- * <ul>
- * <li>{@code MessageWindowChatMemory.add} 对空入参<b>无短路</b>，永远
- * {@code findByConversationId} → {@code process} → {@code saveAll}；当既有记忆为空且
- * {@code add(id, List.of())} 时 {@code process} 产出空列表，直达本分支；</li>
- * <li>{@code ResilientChatService.convergeMemory} 的 {@code trimKeepingToolPairs} 在
- * "裁剪点起至末尾全是 TOOL 消息"时返回空列表（{@code subList(size, size)}），此时
- * {@code clear()} + {@code add(id, [])} 同样直达本分支（取消/空回复终局 + 全 TOOL 尾可构造）。</li>
- * </ul>
- * 修复 = 空列表分支委托已 Lua 化的 {@code deleteByConversationId}。本测试锁两件事：
- * 空分支只发一次 {@code execute}（Lua），拆分调用（{@code delete}/{@code opsForSet}）不再出现；
- * 真 Redis 上行为不变（数据键删除 + 索引成员移除）。
+ * <p>空（或 null）列表 = "清空该会话记忆"，委托 {@code deleteByConversationId}：
+ * tagged 单键 DEL + legacy 单键 DEL + 索引单键 SREM；不再做「数据键 + 全局索引」两键 Lua。
+ *
+ * <p>真 Redis 用例使用<b>独立 DB 9</b>（`LettuceConnectionFactory#setDatabase(9)`），
+ * 只清理本用例的随机 cid 键，<b>不碰开发库 DB 0</b>。
  */
 class RedisChatMemoryRepositorySaveAllEmptyTest {
 
 	private static final String IDS_KEY = "chat:mem:__ids__";
 
+	private static final Duration TTL = Duration.ofHours(6);
+
 	@Test
-	@SuppressWarnings("unchecked")
-	void emptySaveAllDelegatesToAtomicScript() {
-		StringRedisTemplate redis = mock(StringRedisTemplate.class);
-		when(redis.execute(any(RedisScript.class), anyList(), any())).thenReturn(1L);
-		RedisChatMemoryRepository repository = repository(redis);
+	void emptySaveAllClearsTaggedLegacyAndIndex() {
+		FakeMemoryRedis fake = new FakeMemoryRedis();
+		RedisChatMemoryRepository repository = new RedisChatMemoryRepository(fake.redis,
+				new MessageJsonCodec(new ObjectMapper()), TTL);
+		fake.lists.put("chat:mem:{s-1}", new java.util.concurrent.CopyOnWriteArrayList<>(List.of("tagged")));
+		fake.lists.put("chat:mem:s-1", new java.util.concurrent.CopyOnWriteArrayList<>(List.of("legacy")));
+		fake.sets.computeIfAbsent(IDS_KEY, ignored -> java.util.concurrent.ConcurrentHashMap.newKeySet()).add("s-1");
 
 		repository.saveAll("s-1", List.of());
 
-		ArgumentCaptor<RedisScript<?>> scriptCaptor = ArgumentCaptor.forClass(RedisScript.class);
-		ArgumentCaptor<List<String>> keysCaptor = ArgumentCaptor.forClass(List.class);
-		verify(redis, times(1)).execute(scriptCaptor.capture(), keysCaptor.capture(), eq("s-1"));
-		assertEquals(List.of("chat:mem:s-1", IDS_KEY), keysCaptor.getValue(), "键序必须是 [数据键, 会话 id 索引键]");
-		String body = scriptCaptor.getValue().getScriptAsString();
-		assertTrue(body.matches("(?s).*redis\\.call\\('DEL'.*"), "脚本必须含数据键 DEL 段，实际为：" + body);
-		assertTrue(body.matches("(?s).*redis\\.call\\('SREM'.*"), "脚本必须含索引 SREM 段，实际为：" + body);
-		// 拆分调用一律不许再出现：出现即意味着原子性丢失
-		verify(redis, never()).delete(anyString());
-		verify(redis, never()).opsForSet();
+		assertFalse(fake.hasKey("chat:mem:{s-1}"));
+		assertFalse(fake.hasKey("chat:mem:s-1"));
+		assertTrue(fake.set(IDS_KEY).isEmpty());
+		assertEquals(0, fake.scriptCalls.get());
+		assertEquals(List.of("chat:mem:{s-1}", "chat:mem:s-1"), fake.deletedKeys);
 	}
 
 	@Test
-	@SuppressWarnings("unchecked")
-	void nullSaveAllDelegatesToAtomicScript() {
-		StringRedisTemplate redis = mock(StringRedisTemplate.class);
-		when(redis.execute(any(RedisScript.class), anyList(), any())).thenReturn(1L);
-		RedisChatMemoryRepository repository = repository(redis);
+	void nullSaveAllClearsBothShapes() {
+		FakeMemoryRedis fake = new FakeMemoryRedis();
+		RedisChatMemoryRepository repository = new RedisChatMemoryRepository(fake.redis,
+				new MessageJsonCodec(new ObjectMapper()), TTL);
+		fake.lists.put("chat:mem:{s-1}", new java.util.concurrent.CopyOnWriteArrayList<>(List.of("tagged")));
+		fake.lists.put("chat:mem:s-1", new java.util.concurrent.CopyOnWriteArrayList<>(List.of("legacy")));
 
 		repository.saveAll("s-1", null);
 
-		verify(redis, times(1)).execute(any(RedisScript.class), anyList(), eq("s-1"));
-		verify(redis, never()).delete(anyString());
-		verify(redis, never()).opsForSet();
+		assertFalse(fake.hasKey("chat:mem:{s-1}"));
+		assertFalse(fake.hasKey("chat:mem:s-1"));
+		assertEquals(0, fake.scriptCalls.get());
 	}
 
-	// ── 真 Redis 行为实证（本机 Memurai 127.0.0.1:6379；不可用时跳过，不算失败） ──
+	// ── 真 Redis 行为实证：独立 DB 9（不可用时跳过） ──────────────────────────
 
-	// 端点默认同本机 Memurai（127.0.0.1:6379）；可被系统属性覆盖（-Dtest.redis.host / -Dtest.redis.port），
-	// 使"Redis 不可达"可被实测复现（CI 后端 job 即无 services.redis）。
+	// 端点默认同本机 Memurai（127.0.0.1:6379）；可被系统属性覆盖（-Dtest.redis.host / -Dtest.redis.port）。
+	// 库号固定 DB 9，避免清理开发库 DB 0 的索引/会话键。
 	private static final String REDIS_HOST = System.getProperty("test.redis.host", "127.0.0.1");
 
 	private static final int REDIS_PORT = Integer.parseInt(System.getProperty("test.redis.port", "6379"));
+
+	private static final int REDIS_DB = Integer.parseInt(System.getProperty("test.redis.db", "9"));
 
 	private LettuceConnectionFactory connectionFactory;
 
 	private StringRedisTemplate template;
 
-	private String conversationId = "o-r3-" + UUID.randomUUID();
+	private final String conversationId = "o-r3-" + UUID.randomUUID();
 
 	@AfterEach
 	void cleanup() {
 		if (this.template != null) {
 			try {
+				this.template.delete("chat:mem:{" + this.conversationId + "}");
 				this.template.delete("chat:mem:" + this.conversationId);
 				this.template.opsForSet().remove(IDS_KEY, this.conversationId);
-			} catch (Exception ignore) {
+			}
+			catch (Exception ignore) {
 				// 不可达态：用例已被 assumeTrue 跳过，清理同样无从执行 —— 不得因此把 SKIP 变成 ERROR
 			}
 			this.connectionFactory.destroy();
@@ -112,38 +97,76 @@ class RedisChatMemoryRepositorySaveAllEmptyTest {
 	}
 
 	@Test
-	void emptySaveAllOnRealRedisRemovesDataAndIndex() {
-		this.connectionFactory = new LettuceConnectionFactory(REDIS_HOST, REDIS_PORT);
-		this.connectionFactory.afterPropertiesSet();
-		this.template = new StringRedisTemplate(this.connectionFactory);
-		// 探活必须先于任何 Redis 调用：不可达时 ping() 直接抛 RedisConnectionFailureException
-		// （非返回非 PONG 字符串），若把 assumeTrue 放在抛点之后则守卫永不生效 ——
-		// 无 Redis 环境下该用例是 ERROR 而非 SKIP（CI 后端 job 实测红因）。
-		boolean reachable;
-		try {
-			reachable = "PONG".equalsIgnoreCase(this.template.getConnectionFactory().getConnection().ping());
-		} catch (Exception e) {
-			reachable = false;
-		}
-		Assumptions.assumeTrue(reachable,
-				"Redis 不可达（" + REDIS_HOST + ":" + REDIS_PORT + "），跳过真 Redis 实证");
+	void emptySaveAllOnRealRedisRemovesBothShapesAndIndex() {
+		Assumptions.assumeTrue(connect(),
+				"Redis 不可达（" + REDIS_HOST + ":" + REDIS_PORT + "）或 DB " + REDIS_DB + " 不可用，跳过真 Redis 实证");
+		MessageJsonCodec codec = new MessageJsonCodec(new ObjectMapper());
+		RedisChatMemoryRepository repository = new RedisChatMemoryRepository(this.template, codec, TTL);
+		String taggedKey = "chat:mem:{" + this.conversationId + "}";
+		String legacyKey = "chat:mem:" + this.conversationId;
 
-		RedisChatMemoryRepository repository = new RedisChatMemoryRepository(this.template,
-				new MessageJsonCodec(new ObjectMapper()), Duration.ofHours(6));
-
-		// 前置：写入一条非空记忆，确认索引与数据键都在（证明空分支被测的是"真有一条可清的东西"）
+		// 前置：tagged 写入成功、带 TTL、legacy 尚不存在
 		repository.saveAll(this.conversationId, List.of(new UserMessage("hello")));
-		assertTrue(Boolean.TRUE.equals(this.template.hasKey("chat:mem:" + this.conversationId)), "前置：数据键应存在");
-		assertTrue(repository.isConversationIndexed(this.conversationId), "前置：索引成员应存在");
+		assertTrue(Boolean.TRUE.equals(this.template.hasKey(taggedKey)), "tagged 数据键应存在");
+		Long ttl = this.template.getExpire(taggedKey);
+		assertNotNull(ttl);
+		assertTrue(ttl > 0 && ttl <= TTL.toSeconds(), "RENAME 后 final TTL 应为配置值，实际 " + ttl);
+		assertFalse(Boolean.TRUE.equals(this.template.hasKey(legacyKey)), "新写入不应产生 legacy 键");
+		assertTrue(repository.isConversationIndexed(this.conversationId));
 
-		// 行为锁定：空列表覆盖写 = 数据键删除 + 索引成员移除（与修复前行为一致，实现换为原子脚本）
+		// 再铺一条 legacy，验证空列表会把两种键形一起清掉
+		this.template.opsForList().rightPushAll(legacyKey, codec.serializeAll(List.of(new UserMessage("legacy"))));
+
 		repository.saveAll(this.conversationId, List.of());
-		assertFalse(Boolean.TRUE.equals(this.template.hasKey("chat:mem:" + this.conversationId)), "数据键应被删除");
-		assertFalse(repository.isConversationIndexed(this.conversationId), "索引成员应被移除");
+		assertFalse(Boolean.TRUE.equals(this.template.hasKey(taggedKey)), "tagged 应删除");
+		assertFalse(Boolean.TRUE.equals(this.template.hasKey(legacyKey)), "legacy 应删除");
+		assertFalse(Boolean.TRUE.equals(this.template.opsForSet().isMember(IDS_KEY, this.conversationId)),
+				"索引成员应被单键 SREM");
+		assertTrue(repository.findByConversationId(this.conversationId).isEmpty(), "历史应读空");
+		assertEquals(List.of(), repository.findByConversationId(this.conversationId));
 	}
 
-	private static RedisChatMemoryRepository repository(StringRedisTemplate redis) {
-		return new RedisChatMemoryRepository(redis, new MessageJsonCodec(new ObjectMapper()), Duration.ofHours(6));
+	@Test
+	void legacyReadFallbackAndNaturalMigrationOnRealRedis() {
+		Assumptions.assumeTrue(connect(),
+				"Redis 不可达（" + REDIS_HOST + ":" + REDIS_PORT + "）或 DB " + REDIS_DB + " 不可用，跳过真 Redis 实证");
+		MessageJsonCodec codec = new MessageJsonCodec(new ObjectMapper());
+		RedisChatMemoryRepository repository = new RedisChatMemoryRepository(this.template, codec, TTL);
+		String taggedKey = "chat:mem:{" + this.conversationId + "}";
+		String legacyKey = "chat:mem:" + this.conversationId;
+
+		this.template.opsForList().rightPushAll(legacyKey, codec.serializeAll(List.of(new UserMessage("legacy"))));
+		this.template.opsForSet().add(IDS_KEY, this.conversationId);
+
+		assertEquals(List.of("legacy"), texts(repository.findByConversationId(this.conversationId)),
+				"tagged 缺失时应回落 legacy");
+		assertTrue(repository.isConversationIndexed(this.conversationId), "legacy 存活应判为在索引");
+
+		repository.saveAll(this.conversationId, List.of(new UserMessage("新")));
+		assertTrue(Boolean.TRUE.equals(this.template.hasKey(taggedKey)));
+		assertFalse(Boolean.TRUE.equals(this.template.hasKey(legacyKey)), "保存成功后应删除 legacy");
+		assertEquals(List.of("新"), texts(repository.findByConversationId(this.conversationId)));
+		Long ttl = this.template.getExpire(taggedKey);
+		assertNotNull(ttl);
+		assertTrue(ttl > 0 && ttl <= TTL.toSeconds());
+	}
+
+	private boolean connect() {
+		this.connectionFactory = new LettuceConnectionFactory(REDIS_HOST, REDIS_PORT);
+		this.connectionFactory.setDatabase(REDIS_DB);
+		this.connectionFactory.afterPropertiesSet();
+		this.template = new StringRedisTemplate(this.connectionFactory);
+		try {
+			assertEquals(REDIS_DB, this.connectionFactory.getDatabase());
+			return "PONG".equalsIgnoreCase(this.template.getConnectionFactory().getConnection().ping());
+		}
+		catch (Exception ex) {
+			return false;
+		}
+	}
+
+	private static List<String> texts(List<org.springframework.ai.chat.messages.Message> messages) {
+		return messages.stream().map(org.springframework.ai.chat.messages.Message::getText).toList();
 	}
 
 }

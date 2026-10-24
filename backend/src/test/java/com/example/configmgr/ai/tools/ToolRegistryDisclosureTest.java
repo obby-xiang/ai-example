@@ -22,8 +22,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>覆盖三类容易在改动中悄悄失守的事：
  * <ol>
- * <li><b>通道与风险（S4.4d）</b>：4 个向导动作必须是 {@code FRONTEND} 通道（后端只挂起、不执行副作用）
- * 且为 {@code READ}（不得误升级成 DANGER —— 那会让前端动作多走一道确认门）；</li>
+ * <li><b>通道与风险（S4.4d；R3-02 修订）</b>：4 个向导动作必须是 {@code FRONTEND} 通道（后端只挂起、不执行副作用）；
+ * 其中 {@code confirm_step} 会经导入向导第 1 步的 flush 写回服务端文件，风险按事实标 {@code WRITE}
+ * （仍不得升级成 DANGER —— FRONTEND 通道优先，WRITE 不会多走确认门）；其余三个动作为 {@code READ}；</li>
  * <li><b>披露边界</b>：向导动作在任务中心与对应任务类型下披露，非向导页面（配置定义/数据浏览）
  * 与空上下文不披露；同时锁住既有 BACKEND 工具的披露范围不回退（{@code start_import}/
  * {@code start_publish} 仍只在导入任务的对应步骤披露），并显式登记 S4.4d 放宽的两档
@@ -52,7 +53,7 @@ class ToolRegistryDisclosureTest {
     private static final List<String> SCOPED_WIZARD_TOOLS = List.of("select_definitions", "set_condition",
             "confirm_step");
 
-    /** 只读前端通道工具（2 个既有 + 4 个工作区动作 + DC-15 的 generative_form）。 */
+    /** 前端通道工具（2 个既有 + 4 个工作区动作 + DC-15 的 generative_form；仅 confirm_step = WRITE）。 */
     private static final List<String> FRONTEND_TOOLS = List.of("open_export_file_editor", "download_export_files",
             "navigate_to", "select_definitions", "set_condition", "confirm_step",
             com.example.configmgr.ai.form.GenerativeFormRules.TOOL_NAME);
@@ -88,15 +89,35 @@ class ToolRegistryDisclosureTest {
     private AiTools aiTools;
 
     @Test
-    void wizardToolsUseFrontendChannelAndReadRisk() {
+    void wizardToolsUseFrontendChannelAndHonestRisk() {
         for (String name : FRONTEND_TOOLS) {
             assertThat(toolRegistry.channelOf(name))
                     .as("%s 的执行通道", name)
                     .isEqualTo(ToolMeta.Channel.FRONTEND);
+            ToolMeta.RiskLevel expected = "confirm_step".equals(name)
+                    ? ToolMeta.RiskLevel.WRITE
+                    : ToolMeta.RiskLevel.READ;
             assertThat(toolRegistry.riskOf(name))
-                    .as("%s 的风险等级（前端动作无后端副作用，不应进确认门）", name)
-                    .isEqualTo(ToolMeta.RiskLevel.READ);
+                    .as("%s 的风险等级（confirm_step 会写回服务端文件；FRONTEND 通道优先，仍不进确认门）", name)
+                    .isEqualTo(expected);
             assertThat(toolRegistry.getMeta(name)).as("%s 已注册元数据", name).isNotNull();
+        }
+    }
+
+    /**
+     * R3-02 / I-5：三个表格写工具的模型侧描述必须如实交代导入向导第 1 步的整表写回，
+     * 不得再出现“只改浏览器内存 / 不落服务端”的绝对句（模型会把这句话原样转述给用户）。
+     */
+    @Test
+    void sheetWriteToolDescriptionsDiscloseImportStepOneWriteBack() {
+        for (String name : List.of("normalize_column", "replace_values", "update_rows")) {
+            String description = toolRegistry.getCallback(name).getToolDefinition().description();
+            assertThat(description).as(name + " 的模型侧描述")
+                    .contains("导入向导第 1 步")
+                    .contains("写回服务端");
+            assertThat(description).as(name + " 不得再声称只在浏览器内存")
+                    .doesNotContain("只改浏览器内存")
+                    .doesNotContain("不落服务端");
         }
     }
 

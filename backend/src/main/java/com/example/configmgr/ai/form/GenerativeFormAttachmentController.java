@@ -101,8 +101,18 @@ public class GenerativeFormAttachmentController {
 		}
 		assertFormIsWaiting(runId, toolCallId);
 		String storagePath = this.fileStorage.store(file.getInputStream(), originalName);
-		FormAttachmentStore.Attachment stored = this.attachments.register(runId, toolCallId, sessionId,
-				originalName, file.getSize(), contentType, storagePath);
+		FormAttachmentStore.Attachment stored;
+		try {
+			stored = this.attachments.register(runId, toolCallId, sessionId,
+					originalName, file.getSize(), contentType, storagePath);
+		}
+		catch (RuntimeException ex) {
+			// I-5：登记失败（B3 fail-closed）时已落盘文件必须回收，不能留下孤儿。
+			this.fileStorage.delete(storagePath);
+			log.warn("附件登记失败，已清理落盘文件 runId={} toolCallId={} path={}：{}", runId, toolCallId,
+					storagePath, ex.getMessage());
+			throw ex;
+		}
 		Map<String, Object> data = new LinkedHashMap<>();
 		data.put("fileId", stored.fileId());
 		data.put("fileName", stored.fileName());

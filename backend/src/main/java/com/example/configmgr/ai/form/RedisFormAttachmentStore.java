@@ -1,5 +1,7 @@
 package com.example.configmgr.ai.form;
 
+import com.example.configmgr.ai.observe.RedisDegradation;
+import com.example.configmgr.common.AiStateUnavailableException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
@@ -15,9 +17,10 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * 附件登记簿的 Redis 实现（{@code ai:form:att:<fileId>}，TTL 见 {@link #TTL}）。
  *
- * <p>降级口径与 AI 模块其他 Redis 设施一致：{@code StringRedisTemplate} 不可用时退回进程内 Map
- * （单实例/测试路径），日志注明降级；<b>不</b>因此拒绝上传 —— 附件是表单体验的一部分，
- * 不是安全边界本身（安全边界由回灌时的存在/归属/一次性三重校验承担）。
+ * <p><b>B3 fail-closed</b>：只要 {@code StringRedisTemplate} 已装配，Redis 就是<b>唯一事实源</b> ——
+ * 登记写失败直接告知上传失败，<b>不再</b>静默回落进程内 Map。原因：多实例下上传在 A、回灌在 B，
+ * 进程内登记会让 B 看不到 A 的附件，表现为"附件不存在/未消费"判定失真；那不是性能降级，是数据面丢失。
+ * 只有模板本身未装配（单测/无 Redis 的轻装配面）才使用进程内 Map。
  *
  * <p><b>与 ui_request_upload 的关系</b>：那条通道是"用浏览器手势把句柄交给网页"的既有交接卡，
  * 与本登记簿并存不冲突 —— 一个走 {@code frontend_tool_request} 挂起，一个走表单字段值；
@@ -65,8 +68,12 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 			redis.opsForValue().set(KEY_PREFIX + fileId, this.objectMapper.writeValueAsString(attachment), TTL);
 		}
 		catch (Exception ex) {
-			log.warn("附件登记写 Redis 失败，降级进程内登记 fileId={}：{}", fileId, ex.getMessage());
-			this.memory.put(fileId, attachment);
+			// B3：多实例下登记失败必须 fail-closed —— 回落进程内 Map 会让"上传在 A、回灌在 B"时
+			// B 看不到登记（判定失真），且日志会把数据面丢失伪装成性能降级。
+			RedisDegradation.record(RedisDegradation.B3_ATTACHMENT_REGISTER, ex);
+			log.error("附件登记写 Redis 失败 fileId={}（多实例下 fail-closed，不回落进程内）：{}", fileId,
+					ex.getMessage());
+			throw new AiStateUnavailableException("附件登记失败（Redis 不可用；不得回退进程内）", ex);
 		}
 		return attachment;
 	}
@@ -77,18 +84,19 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 			return null;
 		}
 		StringRedisTemplate redis = redis();
-		if (redis != null) {
-			try {
-				String json = redis.opsForValue().get(KEY_PREFIX + fileId);
-				if (json != null) {
-					return this.objectMapper.readValue(json, Attachment.class);
-				}
-			}
-			catch (Exception ex) {
-				log.warn("附件读取 Redis 失败，回落进程内登记 fileId={}：{}", fileId, ex.getMessage());
-			}
+		if (redis == null) {
+			return this.memory.get(fileId);
 		}
-		return this.memory.get(fileId);
+		try {
+			String json = redis.opsForValue().get(KEY_PREFIX + fileId);
+			return json == null ? null : this.objectMapper.readValue(json, Attachment.class);
+		}
+		catch (Exception ex) {
+			// 读不出来 ≠ 不存在：多实例下必须让调用方知道无法校验，而不是回落本地 Map 误判。
+			RedisDegradation.record(RedisDegradation.B3_ATTACHMENT_READ, ex);
+			log.error("附件读取 Redis 失败 fileId={}（fail-closed，不回落进程内）：{}", fileId, ex.getMessage());
+			throw new AiStateUnavailableException("附件读取失败（Redis 不可用；不得回退进程内）", ex);
+		}
 	}
 
 	@Override
@@ -97,24 +105,27 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 			return false;
 		}
 		StringRedisTemplate redis = redis();
-		if (redis != null) {
-			try {
-				Boolean deleted = redis.delete(KEY_PREFIX + fileId);
-				if (Boolean.TRUE.equals(deleted)) {
-					redis.opsForValue().set(CONSUMED_PREFIX + fileId, "1", TTL);
-					this.memory.remove(fileId);
-					return true;
-				}
+		if (redis == null) {
+			if (this.memory.remove(fileId) != null) {
+				this.consumed.add(fileId);
+				return true;
 			}
-			catch (Exception ex) {
-				log.warn("附件消费写 Redis 失败，回落进程内登记 fileId={}：{}", fileId, ex.getMessage());
+			return false;
+		}
+		try {
+			Boolean deleted = redis.delete(KEY_PREFIX + fileId);
+			if (Boolean.TRUE.equals(deleted)) {
+				redis.opsForValue().set(CONSUMED_PREFIX + fileId, "1", TTL);
+				this.memory.remove(fileId);
+				return true;
 			}
+			return false;
 		}
-		if (this.memory.remove(fileId) != null) {
-			this.consumed.add(fileId);
-			return true;
+		catch (Exception ex) {
+			RedisDegradation.record(RedisDegradation.B3_ATTACHMENT_CONSUME, ex);
+			log.error("附件消费写 Redis 失败 fileId={}（fail-closed，不回落进程内）：{}", fileId, ex.getMessage());
+			throw new AiStateUnavailableException("附件消费失败（Redis 不可用；不得回退进程内）", ex);
 		}
-		return false;
 	}
 
 	@Override
@@ -123,26 +134,26 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 			return false;
 		}
 		StringRedisTemplate redis = redis();
-		if (redis != null) {
-			try {
-				if (Boolean.TRUE.equals(redis.hasKey(CONSUMED_PREFIX + fileId))) {
-					return true;
-				}
-			}
-			catch (Exception ex) {
-				log.warn("附件墓碑读取 Redis 失败 fileId={}：{}", fileId, ex.getMessage());
-			}
+		if (redis == null) {
+			return this.consumed.contains(fileId);
 		}
-		return this.consumed.contains(fileId);
+		try {
+			return Boolean.TRUE.equals(redis.hasKey(CONSUMED_PREFIX + fileId));
+		}
+		catch (Exception ex) {
+			RedisDegradation.record(RedisDegradation.B3_ATTACHMENT_TOMBSTONE, ex);
+			log.error("附件墓碑读取 Redis 失败 fileId={}（fail-closed，不回落进程内）：{}", fileId, ex.getMessage());
+			throw new AiStateUnavailableException("附件墓碑读取失败（Redis 不可用；不得回退进程内）", ex);
+		}
 	}
 
-	/** 当前可用数据源（Redis 不可用返回 null）。 */
+	/** 当前可用数据源（模板未装配返回 null；获取模板本身失败按 fail-closed 抛错）。 */
 	private StringRedisTemplate redis() {
 		try {
 			return this.redisProvider.getIfAvailable();
 		}
 		catch (Exception ex) {
-			return null;
+			throw new AiStateUnavailableException("无法获取附件登记簿的 Redis 模板", ex);
 		}
 	}
 

@@ -156,6 +156,21 @@ class ResumeServiceLeaseTest {
 		verify(this.chatService, never()).driveResumed(any(), any(), any(), any(), any());
 	}
 
+	/** C2：取消状态未知 = typed 拒绝（不是 RuntimeException），且不驱动、当场还租。 */
+	@Test
+	void unknownCancelStateRefusesWithATypedOutcomeAndReleasesTheLease() {
+		seedResumableRun();
+		when(this.cancellations.cancelState(RUN_ID))
+			.thenReturn(CancellationRegistry.CancelState.UNKNOWN);
+
+		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
+
+		assertThat(result.outcome()).isEqualTo(ResumeService.Outcome.CANCEL_STATE_UNKNOWN);
+		assertThat(result.body()).containsEntry("reason", "CANCEL_STATE_UNKNOWN");
+		verify(this.chatService, never()).driveResumed(any(), any(), any(), any(), any());
+		assertThat(this.store.heldRunEpoch(RUN_ID)).as("未驱动 ⇒ 当场还租").isZero();
+	}
+
 	@Test
 	void legacySignatureReportsHeldElsewhereWithoutCallingTheDriver() {
 		seedResumableRun();
@@ -444,8 +459,12 @@ class ResumeServiceLeaseTest {
 
 		assertThat(keys).containsEntry("lease", this.store.runLeaseKey(RUN_ID))
 			.containsEntry("fence", this.store.fenceKey(RUN_ID));
-		assertThat(this.store.runLeaseKey(RUN_ID)).isEqualTo(RunStore.LEASE_RUN_PREFIX + RUN_ID);
-		assertThat(this.store.fenceKey(RUN_ID)).isEqualTo(RunStore.FENCE_RUN_PREFIX + RUN_ID);
+		assertThat(this.store.runLeaseKey(RUN_ID))
+			.as("租约与其余 11 键同 tag（一轮 12 键同槽）")
+			.isEqualTo(RunStore.runScopedKey(RunStore.LEASE_RUN_PREFIX, RUN_ID));
+		assertThat(this.store.fenceKey(RUN_ID))
+			.as("fence 与快照同槽（{run:<runId>} tag）")
+			.isEqualTo(RunStore.runScopedKey(RunStore.FENCE_RUN_PREFIX, RUN_ID));
 	}
 
 	// ───────────────────────── helpers ─────────────────────────

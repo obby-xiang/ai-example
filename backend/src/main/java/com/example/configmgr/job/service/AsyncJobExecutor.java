@@ -23,6 +23,7 @@ public class AsyncJobExecutor {
     private final ImportJobRunner importJobRunner;
     private final PublishJobRunner publishJobRunner;
     private final JobCancellationRegistry cancellationRegistry;
+    private final JobHeartbeatRegistry heartbeatRegistry;
 
     @Async
     public void execute(Job job) {
@@ -37,6 +38,9 @@ public class AsyncJobExecutor {
         } catch (Exception e) {
             log.error("Job {} failed unexpectedly: {}", job.getId(), e.getMessage(), e);
         } finally {
+            // R1-13/C1：runner 已退出（正常/异常/取消都走这里）才放开删除闸门。
+            heartbeatRegistry.endRunner(job.getId());
+            heartbeatRegistry.clear(job.getId());
             cancellationRegistry.unregister(job.getId());
         }
     }

@@ -2,6 +2,7 @@ package com.example.configmgr.ai.run;
 
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalLong;
 
 /**
  * 轮次事件日志的抽象（B23L1 批① / 设计稿 §2.1）。
@@ -54,12 +55,45 @@ public interface FrameStore {
 	 * 按 {@code seq} 拼接去重（同号以 Stream 为准）；<b>没有 {@code seq} 的老帧一律保留</b>
 	 * （无法判定孤儿，宁可不发不可丢帧，与 {@code isOrphan} 同口径）。
 	 *
+	 * <p><b>空结果 ≠ 证明"没有帧"</b>：读失败（Redis 抖动、目标 5.0 拒绝非法 stream ID 等）
+	 * <b>不会以异常表达，但结果可能为空、也可能缺失失败侧的那部分帧</b>（双侧读是独立进行的：
+	 * Stream 读失败时已读到的兼容期 LIST 帧仍会照常返回，反之亦然）。因此调用方既不得把"空"
+	 * 也不得把"帧少了几条"当成"该 run 确实没有新帧"的证明。实现侧以 WARN 留痕：带
+	 * {@code runId}，其中 Stream 的 {@code XRANGE} 读取失败另带 {@code afterSeq} 与 {@code from}
+	 * （见 {@link RedisFrameStore#readFrom}）；读失败同时计入
+	 * {@link com.example.configmgr.ai.observe.RedisDegradation} 的 A3/A4 计数
+	 * （{@code /api/ai/health} 的 {@code redis.degradations}），"空流"不计数 —— 两者因此可区分。
+	 *
+	 * <p><b>不抛异常只承诺生产实现</b>：{@link RedisFrameStore} 吞掉读失败不抛（回放与唤醒
+	 * 补帧不能被一次读抖动打断）；接口另有兼容实现 {@code RunStoreFrameStore}（生产装配不可达，
+	 * 仅兼容构造器使用），其读路径未做同款吞异常处理，<b>不在本承诺内</b>。
+	 *
 	 * @param afterSeq 前端已知的最大序号（0 = 全量）
 	 * @param limit    最多返回多少帧；{@code <= 0} = 不限（回放批用）
 	 */
 	List<Map<String, Object>> readFrom(String runId, long afterSeq, int limit);
 
-	/** 事件日志里<b>已落档</b>的最大序号（无帧 = 0）。注意：不含"已发放但落档失败"的号。 */
+	/**
+	 * 带降级标记的回读（I-1）：{@code degraded=true} = 本次读有失败/有窗口被跳过，
+	 * 结果<b>不是</b>"该 run 确实没有新帧"的证明。
+	 *
+	 * <p>默认实现把 {@link #readFrom} 视为未降级（兼容测试替身与兼容期 LIST 实现）；
+	 * 生产实现 {@link RedisFrameStore} 覆盖它，把 A3/A4 的失败信号真正传到调用方。
+	 */
+	default ReadResult readFromWithStatus(String runId, long afterSeq, int limit) {
+		return new ReadResult(readFrom(runId, afterSeq, limit), false);
+	}
+
+	/** 事件日志里<b>已落档</b>的最大序号；读失败返回 {@link OptionalLong#empty()}，不得折成 0。 */
+	default OptionalLong lastSeqIfKnown(String runId) {
+		return OptionalLong.of(lastSeq(runId));
+	}
+
+	/** 一次回读的结果 + 是否降级（I-1：API 层可区分"空流"与"读失败"）。 */
+	record ReadResult(List<Map<String, Object>> frames, boolean degraded) {
+	}
+
+	/** 事件日志里<b>已落档</b>的最大序号（无帧 = 0；读失败的生产实现返回 -1，见 {@link #lastSeqIfKnown}）。 */
 	long lastSeq(String runId);
 
 }

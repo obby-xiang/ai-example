@@ -36,6 +36,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
@@ -57,9 +58,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * （<b>明确否掉 409</b>：新建对话不能变成可失败动作）。</li>
  * </ol>
  *
- * <p>复核 F4 追加两条（判存口径）：{@code removedFromIndex} 由 {@code SISMEMBER} 单次判定得出 ——
- * 真 {@code RedisChatMemoryRepository} 装配下不得 {@code SMEMBERS}、也不得逐 id {@code EXISTS}
- * （既有六条用例走 {@code ChatMemoryRepository} 桩，落到 SPI 通用契约的回落分支）。
+ * <p>复核 F4 追加两条（判存口径）：{@code removedFromIndex} 走"单个 id"的判存路径
+ * （{@code SISMEMBER} + 该 id 的数据键 {@code EXISTS}（tagged 优先、回落 legacy），单键往返）—— 真
+ * {@code RedisChatMemoryRepository} 装配下不得 {@code SMEMBERS}、也不得对索引里每个存活 id
+ * 逐个 {@code EXISTS}（既有六条用例走 {@code ChatMemoryRepository} 桩，落到 SPI 通用契约的回落分支）。
  *
  * <p>收口修（红队 MINOR-3）追加一条负断言：删除端点只碰记忆面 —— <b>台账面</b>
  * （{@code ai:session:*} / {@code ai:run:*}）的写方法一概不得被触达：{@link RunStore} 的全部写口
@@ -217,27 +219,52 @@ class AiControllerHistoryDeleteTest {
 	// ── F4（复核收口）：判存只问"这一个 id"，不拉全量索引 ──────────────────────
 
 	/**
-	 * F4：生产装配（{@link RedisChatMemoryRepository}）下 {@code removedFromIndex} 走**单次**
-	 * {@code SISMEMBER} 判定（键 = {@code chat:mem:__ids__}）—— 不得 {@code SMEMBERS}（拉全量索引），
-	 * 也不得对每个存活 id 各来一次 {@code EXISTS}。索引里仍有该 id（在跑轮次收盘写回）→ 如实报 false。
+	 * F4：生产装配（{@link RedisChatMemoryRepository}）下 {@code removedFromIndex} 不做全量索引扫描
+	 * （不得 {@code SMEMBERS}、不得逐 id {@code EXISTS}）。R1-04 根修后删除 = tagged/legacy 各一条单键 {@code DEL} + 索引单键 {@code SREM}，
+	 * 全局索引的 stale 成员由 {@code findConversationIds} 惰性清理 ⇒ 判存改为
+	 * {@code SISMEMBER + EXISTS(数据键)} 两次单键往返（tagged 优先，缺失回落 legacy）：索引成员仍在但
+	 * 数据键已删时，如实报 {@code removedFromIndex=true}。索引与数据键都在（在跑轮次收盘写回）→ 如实报 false。
 	 */
 	@Test
-	void indexedCheckIsSingleSismemberNotFullIndexScan() throws Exception {
+	void indexedCheckIsSingleIdLookupNotFullIndexScan() throws Exception {
 		when(this.redisAvailability.isAvailable()).thenReturn(true);
 		when(this.chatMemory.get("s-1")).thenReturn(List.of(new UserMessage("你好")));
 		SetOperations<String, String> setOps = setOperations();
 		when(setOps.isMember("chat:mem:__ids__", "s-1")).thenReturn(Boolean.TRUE);
+		when(this.redisTemplate.hasKey("chat:mem:{s-1}")).thenReturn(Boolean.TRUE);
 
 		MockMvc redisBacked = MockMvcBuilders
 			.standaloneSetup(controller(this.availability, redisRepository(setOps)))
 			.build();
 		redisBacked.perform(delete("/api/ai/history/s-1"))
 			.andExpect(status().isOk())
-			.andExpect(jsonPath("$.removedFromIndex").value(false));
+			.andExpect(jsonPath("$.removedFromIndex").value(false))
+			.andExpect(jsonPath("$.memoryKey").value("chat:mem:{s-1}"))
+			.andExpect(jsonPath("$.note").value(org.hamcrest.Matchers.containsString("数据键已删除，索引按存活/惰性口径清理")))
+			.andExpect(jsonPath("$.note").value(org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("SREM"))));
 
 		verify(setOps).isMember("chat:mem:__ids__", "s-1");
+		verify(this.redisTemplate, times(2)).hasKey("chat:mem:{s-1}");
 		verify(setOps, never()).members(anyString());
-		verify(this.redisTemplate, never()).hasKey(anyString());
+	}
+
+	/** 迁移期：只有 legacy 数据键时，{@code memoryKey} 必须报真实 legacy 键，而不是不存在的 tagged 键。 */
+	@Test
+	void memoryKeyReportsLegacyWhenOnlyLegacyDataKeyExists() throws Exception {
+		when(this.redisAvailability.isAvailable()).thenReturn(true);
+		when(this.chatMemory.get("s-1")).thenReturn(List.of(new UserMessage("你好")));
+		SetOperations<String, String> setOps = setOperations();
+		when(setOps.isMember("chat:mem:__ids__", "s-1")).thenReturn(Boolean.TRUE);
+		when(this.redisTemplate.hasKey("chat:mem:{s-1}")).thenReturn(Boolean.FALSE);
+		when(this.redisTemplate.hasKey("chat:mem:s-1")).thenReturn(Boolean.TRUE);
+
+		MockMvc redisBacked = MockMvcBuilders
+			.standaloneSetup(controller(this.availability, redisRepository(setOps)))
+			.build();
+		redisBacked.perform(delete("/api/ai/history/s-1"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.memoryKey").value("chat:mem:s-1"))
+			.andExpect(jsonPath("$.removedFromIndex").value(false));
 	}
 
 	/** F4：成员不在索引里（{@code SISMEMBER} 回 null —— Redis 无该成员或未回话）同样判为"已移出"。 */
@@ -257,7 +284,9 @@ class AiControllerHistoryDeleteTest {
 
 		verify(setOps).isMember("chat:mem:__ids__", "s-1");
 		verify(setOps, never()).members(anyString());
-		verify(this.redisTemplate, never()).hasKey(anyString());
+		// memoryKey 的真实键探测会做 tagged/legacy 两次单键 hasKey（不是全量索引扫描）；
+		// 索引成员不在时 isConversationIndexed 不再探测数据键。
+		verify(this.redisTemplate, times(2)).hasKey(anyString());
 	}
 
 	// ── 收口修（红队 MINOR-3）：删除端点不触碰台账面 ─────────────────────────────
@@ -319,7 +348,7 @@ class AiControllerHistoryDeleteTest {
 				mock(com.example.configmgr.job.service.JobWatchdog.class));
 	}
 
-	/** 真仓储（生产装配类型）+ 桩 Redis：只用到判存那一次往返。 */
+	/** 真仓储（生产装配类型）+ 桩 Redis：只用到判存那两次单键往返。 */
 	private RedisChatMemoryRepository redisRepository(SetOperations<String, String> setOps) {
 		when(this.redisTemplate.opsForSet()).thenReturn(setOps);
 		return new RedisChatMemoryRepository(this.redisTemplate, new MessageJsonCodec(new ObjectMapper()),

@@ -30,7 +30,9 @@ import org.springframework.web.servlet.NoHandlerFoundException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 import org.springframework.context.i18n.LocaleContext;
 import org.springframework.context.i18n.LocaleContextHolder;
+import org.springframework.dao.DataIntegrityViolationException;
 
+import java.sql.SQLException;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Locale;
@@ -69,6 +71,20 @@ public class GlobalExceptionHandler {
     public ResponseEntity<?> handleIllegalState(IllegalStateException e, HttpServletRequest request) {
         return respond(HttpStatus.BAD_REQUEST, ErrorBodyFactory.codeOf(e, ErrorCodes.ILLEGAL_STATE),
                 e.getMessage(), null, request);
+    }
+
+    /**
+     * AI 运行时基础设施不可用 ⇒ <b>503 + AI_REDIS_UNAVAILABLE</b>（I-2）。
+     *
+     * <p>必须排在 {@link #handleIllegalState} 之前由 Spring 按最具体类型选中；否则
+     * {@link AiStateUnavailableException} 会被当成普通状态错误回 400，把 Redis 故障报成客户端错。
+     * 用户面文案固定为可重试短句，原始异常只进日志。
+     */
+    @ExceptionHandler(AiStateUnavailableException.class)
+    public ResponseEntity<?> handleAiStateUnavailable(AiStateUnavailableException e, HttpServletRequest request) {
+        log.warn("AI 运行时依赖不可用 uri={}：{}", request == null ? null : request.getRequestURI(), e.getMessage());
+        return respond(HttpStatus.SERVICE_UNAVAILABLE, ErrorCodes.AI_REDIS_UNAVAILABLE,
+                "AI 服务暂不可用，请稍后重试。", null, request);
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
@@ -267,6 +283,40 @@ public class GlobalExceptionHandler {
         return respond(HttpStatus.CONFLICT, e.getCode(), e.getMessage(), null, request);
     }
 
+    /**
+     * R1-13/I-4：子表 FK 冲突（典型：任务/作业被并发删除后插入子行）从 500 收敛为 409 业务冲突。
+     *
+     * <p>只识别外键约束违反（H2 SQLState 23506 / MySQL 1452）；唯一键、非空等其它完整性异常
+     * 仍按 500 处理，避免把“代码写错”误报成“资源被删”。
+     */
+    @ExceptionHandler(DataIntegrityViolationException.class)
+    public ResponseEntity<?> handleDataIntegrity(DataIntegrityViolationException e, HttpServletRequest request) {
+        if (isForeignKeyViolation(e)) {
+            log.warn("数据完整性冲突（外键）按 409 返回 uri={}：{}",
+                    request == null ? null : request.getRequestURI(), e.getMostSpecificCause().getMessage());
+            return respond(HttpStatus.CONFLICT, ErrorCodes.ILLEGAL_STATE,
+                    "关联的任务或作业已被删除/正在变更，请刷新后重试", null, request);
+        }
+        log.error("未归类的数据完整性异常", e);
+        return respond(HttpStatus.INTERNAL_SERVER_ERROR, ErrorCodes.INTERNAL_ERROR,
+                "服务器内部错误", null, request);
+    }
+
+    private static boolean isForeignKeyViolation(Throwable error) {
+        for (Throwable current = error; current != null; current = current.getCause()) {
+            if (current instanceof SQLException sql) {
+                String state = sql.getSQLState();
+                int code = sql.getErrorCode();
+                String message = sql.getMessage() == null ? "" : sql.getMessage().toLowerCase(Locale.ROOT);
+                if ("23506".equals(state) || code == 1452
+                        || message.contains("referential integrity") || message.contains("foreign key")) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     @ExceptionHandler(Exception.class)
     public ResponseEntity<?> handleGeneral(Exception e, HttpServletRequest request,
             HttpServletResponse response) {
@@ -281,9 +331,10 @@ public class GlobalExceptionHandler {
             log.debug("SSE 响应上的未处理异常（栈）uri={}", request.getRequestURI(), e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
+        // A10 R-13：用户 message 固定短句；异常原文只进日志（traceId 由 respond 回填到响应体）。
         log.error("Unhandled exception", e);
         return respond(HttpStatus.INTERNAL_SERVER_ERROR, ErrorCodes.INTERNAL_ERROR,
-                "服务器内部错误: " + e.getMessage(), null, request);
+                "服务器内部错误，请稍后重试。", null, request);
     }
 
     /**

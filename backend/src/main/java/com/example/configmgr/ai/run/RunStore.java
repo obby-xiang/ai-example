@@ -1,19 +1,28 @@
 package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.observe.RedisDegradation;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
+import com.example.configmgr.common.AiStateUnavailableException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.dao.QueryTimeoutException;
+import org.springframework.data.domain.Range;
+import org.springframework.data.redis.connection.Limit;
+import org.springframework.data.redis.connection.stream.ByteRecord;
+import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Component;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -32,6 +41,11 @@ import java.util.concurrent.ConcurrentHashMap;
  * <b>无绝对上限</b>（用户裁决 2026-10-20 第 4 条）：每次写键/心跳都把该键重新养满一个 TTL，
  * 挂起等待期间的心跳（2s 一拍）照常续期 —— 会话活着，卡的后台数据就活着。原 T3-8 的
  * "创建时刻 + session-ttl 绝对封顶"已退役。
+ * <p><b>hash tag（B23L1 批① Cluster 硬阻断）</b>：run 级键的"一轮 13 键"<b>全部</b>带
+ * {@code {run:<runId>}} tag（如 {@code ai:run:{run:<runId>}}），见 {@link #runTag(String)} ——
+ * 既是 {@code FENCED_SET} / {@code IDEM_PUSH} 两条多键脚本的同槽前提，也让 {@link #deleteRun}
+ * 的 13 键 {@code DEL} 回到"一条命令、原子生效"。{@code ai:cancel:} / {@code ai:beat:} 只进单键命令，
+ * 不在这一族里（不加 tag）。下文的键形为可读性省去 tag。</p>
  * <ul>
  * <li>{@code ai:run:<runId>} STRING（JSON）—— {@link RunSnapshot}：完整请求历史 +
  * 挂起中的 {@code assistant(tool_calls)} + 状态 + 上下文；</li>
@@ -49,7 +63,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * <li>{@code ai:decided:<runId>} HASH（field=toolCallId，value={@code <status>|<atMs>|<instanceId>}）——
  * <b>决策 guard / WAL</b>（B23L1 批②a 建设施，ConfirmGate 接入归批②b）：{@code HSETNX} 保证
  * 同一条目全集群只有一次决策能落库；条目未写而 guard 已写时，读侧可据它收敛出结论；</li>
- * <li>{@code ai:lease:run:<runId>} STRING（value={@code <epoch>|<instanceId>}，TTL 30s）——
+ * <li>{@code ai:lease:run:<runId>} STRING（value={@code <epoch>|<instanceId>}，TTL 30s；带 {@code {run:<runId>}} tag）——
  * <b>续跑权租约</b>（B23L1 批②a；{@link LeaseService}）：持租者才是本轮的续跑主人，
  * 续租失败即被别的实例接管；</li>
  * <li>{@code ai:fence:run:<runId>} STRING —— <b>fence</b>：已落库的最大 epoch。
@@ -73,7 +87,11 @@ import java.util.concurrent.ConcurrentHashMap;
  * <li>{@code ai:xevents:<runId>} Stream —— <b>事件日志真值</b>（B23L1 批①）：{@code XADD ... MAXLEN ~ 6000}，
  * 字段 {@code seq} + 帧 JSON；单/多实例同一实现，回放 = 按 {@code seq} 双读拼接（见 {@link FrameStore}）；</li>
  * <li>{@code ai:beat:<runId>} STRING —— 心跳活动戳（毫秒时刻，TTL 随心跳续期）：
- * 心跳不占归档窗口，但"这一轮最近有过活动"仍可跨进程判定（僵尸判据的输入之一）；</li>
+ * 心跳不占归档窗口，但"这一轮最近有过活动"仍可跨进程判定（<b>只证明进程还活着</b>，
+ * 不是业务前进的证据 —— 僵尸判据看 {@code ai:activity}）；</li>
+ * <li>{@code ai:activity:<runId>} STRING —— <b>业务活动锚点</b>（R1-09）：最近一条非心跳业务帧的
+ * {@code atMs}，出帧点与兼容写口都刷新；与事件日志尾部（LIST + Stream）取 max 后作为
+ * {@link #lastActivityAtMs(String)} 的返回值（僵尸判据的输入，心跳不参与）；</li>
  * <li>{@code ai:seq:<runId>} STRING —— <b>已发放的最大业务 seq</b>（T3-2）：每个业务帧发放
  * 序号时 {@code SET} 一次并随帧刷新 TTL=session-ttl（与归档同寿）。delta 帧跳过归档后
  * "归档末帧"不再是可靠的续号锚点，跨进程续号改由本键接管（候选 = max(归档末帧, ai:seq) + 1）。
@@ -154,6 +172,27 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	public static final String BEAT_PREFIX = "ai:beat:";
 
 	/**
+	 * <b>业务活动锚点</b>键前缀（R1-09）：{@code ai:activity:<runId>} = 最近一条
+	 * <b>非心跳</b>业务帧的 {@code atMs}（毫秒）。
+	 *
+	 * <p>与 {@link #BEAT_PREFIX} 的分工：心跳只写 {@code ai:beat}，业务帧只写 {@code ai:activity}
+	 * （读取侧再看事件日志尾部）—— 于是"进程还在发心跳、业务已卡死"不会被当成活轮。
+	 *
+	 * <p>键形是<b>裸前缀</b>（不带 {@code {run:<runId>}} tag），与 {@code ai:beat} 同类：只进单键
+	 * 命令、不进 {@link #deleteRun} 的原子 {@code DEL} 族，按 session-ttl 自清。
+	 */
+	public static final String ACTIVITY_PREFIX = "ai:activity:";
+
+	/**
+	 * 活动锚点读取时探测的尾部帧数（兼容 LIST 与事件 Stream 各探这么多条）。
+	 *
+	 * <p>为什么不是只读最后一条：显式 ID 落档被拒时会改用自动 ID（物理位次与 seq 不再一致），
+	 * 且跨实例并发出帧时 {@code atMs} 未必严格按物理序递增；尾部取 max 才能在"晚到的旧号帧"
+	 * 或轻微钟漂下仍拿到真实的最新活动。
+	 */
+	static final int ACTIVITY_TAIL_PROBE = 16;
+
+	/**
 	 * 事件日志的 Stream 键前缀（B23L1 批①）：{@code ai:xevents:<runId>}。
 	 *
 	 * <p>写入/读取都在 {@link RedisFrameStore}；本类只持有键名，用于"删除轮次"与
@@ -225,6 +264,15 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			return 1
 			""", Long.class);
 
+	/** C1 / Minor3：值匹配才删认领字段（避免误删他人重新认领的值）。 */
+	private static final RedisScript<Long> CLAIM_ROLLBACK_SCRIPT = new DefaultRedisScript<>("""
+			-- CLAIM_ROLLBACK
+			if redis.call('HGET', KEYS[1], ARGV[1]) == ARGV[2] then
+			  return redis.call('HDEL', KEYS[1], ARGV[1])
+			end
+			return 0
+			""", Long.class);
+
 	/**
 	 * 台账落库 + 幂等索引<b>同一个原子步</b>（B23L1 批③a / 裁决 6）。
 	 *
@@ -254,6 +302,41 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			redis.call('PEXPIRE', KEYS[1], ARGV[4])
 			redis.call('PEXPIRE', KEYS[2], ARGV[4])
 			return index
+			""", Long.class);
+
+	/**
+	 * 业务活动锚点的<b>单键原子 max + 续期</b>（R1-09 / I-3）：{@code ai:activity:<runId>}。
+	 *
+	 * <p>
+	 * 为什么必须是 Lua：Java 侧 {@code GET → 比较 → SET} 在多实例并发时存在经典回拨窗口 ——
+	 * A（旧帧 1000）读到 0，B（新帧 2000）先 SET，A 再 SET 1000，锚点被旧帧回拨。读取侧虽然还会与
+	 * 事件日志尾部取 max 兜底，但尾部只探有限条；落后时钟的实例连续写旧帧时，最新帧会滑出探测窗。
+	 * 单键脚本在 Redis 的串行执行语义下"比较 + 写 + 续期"一次完成，既单调又只要 <b>1 次往返</b>
+	 * （流式热路径每个 delta 都走这里，原先 2 次 RTT 会翻倍 emitLock 的持锁时间）。
+	 *
+	 * <p>
+	 * <b>坏值覆盖</b>（复审 M-4）：{@code tonumber} 失败按 0 处理，本次 {@code atMs} 正常写入 ——
+	 * 否则一个坏值会让该 run 的活动锚点失效到 TTL 到期。
+	 *
+	 * <p>
+	 * <b>时钟域</b>（复审 M-2）：{@code atMs} 是出帧节点的墙钟，判死用的是本节点 {@code now}。
+	 * 跨节点负偏会让活轮提前超龄，部署必须保证 NTP 同步；偏差应远小于 {@code zombie-margin}。
+	 *
+	 * @param KEYS[1] {@code ai:activity:<runId>}
+	 * @param ARGV[1] 帧的 {@code atMs}（毫秒）
+	 * @param ARGV[2] TTL（毫秒，{@code app.ai.session-ttl}）
+	 */
+	private static final RedisScript<Long> ACTIVITY_TOUCH_SCRIPT = new DefaultRedisScript<>("""
+			-- ACTIVITY_TOUCH
+			local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+			if not current then current = 0 end
+			local incoming = tonumber(ARGV[1]) or 0
+			if incoming > current then
+			  redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+			else
+			  redis.call('PEXPIRE', KEYS[1], ARGV[2])
+			end
+			return 1
 			""", Long.class);
 
 	/**
@@ -310,25 +393,62 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		return this.instanceId;
 	}
 
+	/**
+	 * run 级键族的 <b>hash tag</b>（B23L1 批① Cluster 硬阻断 / R1-02·R1-03·R1-05）：
+	 * {@code {run:<runId>}}。
+	 *
+	 * <h2>为什么同一轮的键必须同槽</h2>
+	 * 原生 Redis Cluster 下一条 {@code EVAL} 的 KEYS 必须落在同一槽，否则整条命令回
+	 * {@code CROSSSLOT}。本仓有两条多键脚本压在"一轮的几个键"上：
+	 * <ul>
+	 * <li>{@link #FENCED_SET_SCRIPT}（快照 + fence）—— 跨槽就是<b>持租后每次写快照都抛</b>（500）；</li>
+	 * <li>{@link #IDEM_PUSH_SCRIPT}（台账 + 幂等索引）—— 跨槽炸在<b>不可撤销的副作用已经发生之后</b>。</li>
+	 * </ul>
+	 * 两者共用<b>同一个</b> tag，才不会引入第二套键名；{@link #deleteRun} 的多键 {@code DEL} 也随同一
+	 * tag 落回一个槽（同槽 ⇒ 一条命令原子生效）。
+	 *
+	 * <h2>同槽的第三个用处：取号</h2>
+	 * run 租约的计数器（{@code ai:lease:epoch:{run:<runId>}}，见 {@link #runLeaseEpochKey(String)}）
+	 * 也带这个 tag ⇒ {@code INCR} 与 {@code SET} 能回到同一条 Lua（评审 I-1：号与占用必须同序，
+	 * 否则迟到者会用比 fence 更小的号占住租约，让这一轮永久写不进去）。
+	 *
+	 * <h2>tag 形态</h2>
+	 * {@code ai:run:{run:<runId>}} —— tag 放在前缀之后，前缀本身保持可 grep
+	 * （{@link SessionKeyRegistry} 的登记锚点、运维面 {@code keys} 段都按前缀看）。
+	 */
+	public static String runTag(String runId) {
+		return "{run:" + runId + "}";
+	}
+
+	/**
+	 * run 级键名的<b>唯一拼接口</b>：{@code <prefix>{run:<runId>}}。
+	 *
+	 * <p>所有"多键脚本/多键 DEL 会碰到"的 run 级键都从这里出（见 {@link #runTag(String)} 的清单）；
+	 * 只有单键命令使用的键才允许留在裸前缀上。
+	 */
+	public static String runScopedKey(String prefix, String runId) {
+		return prefix + runTag(runId);
+	}
+
 	public String runKey(String runId) {
-		return RUN_PREFIX + runId;
+		return runScopedKey(RUN_PREFIX, runId);
 	}
 
 	public String pendingKey(String runId) {
-		return PENDING_PREFIX + runId;
+		return runScopedKey(PENDING_PREFIX, runId);
 	}
 
 	public String claimKey(String runId) {
-		return CLAIM_PREFIX + runId;
+		return runScopedKey(CLAIM_PREFIX, runId);
 	}
 
 	public String ledgerKey(String runId) {
-		return LEDGER_PREFIX + runId;
+		return runScopedKey(LEDGER_PREFIX, runId);
 	}
 
-	/** 幂等索引的 HASH 键名（{@code ai:idem:<runId>}）。 */
+	/** 幂等索引的 HASH 键名（{@code ai:idem:{run:<runId>}}；与台账同槽）。 */
 	public String idemKey(String runId) {
-		return IDEM_PREFIX + runId;
+		return runScopedKey(IDEM_PREFIX, runId);
 	}
 
 	/**
@@ -341,33 +461,97 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		return runId + ":" + (toolCallId == null ? "" : toolCallId);
 	}
 
+	/**
+	 * 兼容期 LIST 键名（{@code ai:events:{run:<runId>}}）。
+	 *
+	 * <p>与 {@code RedisFrameStore#legacyListKey} 同一拼接口（那边调 {@link #runScopedKey}）——
+	 * "读方（{@code RedisFrameStore#readFrom} 的双读）"与"写方/续期/删除方（本类）"必须是<b>同一个键</b>，
+	 * 否则兼容期历史帧既读不到、也永不过期（B23L1 批① 收口：批①首版曾因两侧各自拼名字留下这个缺口）。
+	 */
 	public String eventsKey(String runId) {
-		return EVENTS_PREFIX + runId;
+		return runScopedKey(EVENTS_PREFIX, runId);
 	}
 
-	/** 已发放最大业务序号的键名（诊断/取证可直读）。 */
+	/** 已发放最大业务序号的键名（{@code ai:seq:{run:<runId>}}；诊断/取证可直读）。 */
 	public String seqKey(String runId) {
-		return SEQ_PREFIX + runId;
+		return runScopedKey(SEQ_PREFIX, runId);
 	}
 
-	/** 请求帧已发位的 HASH 键名。 */
+	/** 请求帧已发位的 HASH 键名（{@code ai:req:{run:<runId>}}）。 */
 	public String reqKey(String runId) {
-		return REQ_PREFIX + runId;
+		return runScopedKey(REQ_PREFIX, runId);
 	}
 
-	/** 决策 guard / WAL 的 HASH 键名。 */
+	/** 决策 guard / WAL 的 HASH 键名（{@code ai:decided:{run:<runId>}}）。 */
 	public String decidedKey(String runId) {
-		return DECIDED_PREFIX + runId;
+		return runScopedKey(DECIDED_PREFIX, runId);
 	}
 
-	/** 续跑权租约键名（批②b 的 ResumeService 接线用同一个入口，不另拼字符串）。 */
+	/**
+	 * 续跑权租约键名（{@code ai:lease:run:{run:<runId>}}；批②b 的 ResumeService 接线用同一个入口）。
+	 *
+	 * <p>租约只进<b>单键</b>脚本（ACQUIRE/RENEW/VERIFY/RELEASE），本不需要同槽；带 tag 是因为它属于
+	 * {@link #deleteRun} 的"一轮 13 键"—— 同 tag 才能把轮次回收收成<b>一条</b>原子的 {@code DEL}。
+	 * 键形里含 runId 之外的字符，反解必须走 {@link #runIdFromLeaseKey(String)}（认新键形，
+	 * 迁移期也认旧裸形态），不要在别处 {@code substring} 猜。
+	 */
 	public String runLeaseKey(String runId) {
-		return LEASE_RUN_PREFIX + runId;
+		return runScopedKey(LEASE_RUN_PREFIX, runId);
 	}
 
-	/** fence 键名。 */
+	/**
+	 * 本轮<b>取号计数器</b>键名：{@code ai:lease:epoch:{run:<runId>}}（与租约键同槽）。
+	 *
+	 * <p>为什么需要它（评审 I-1）：fencing 比较的是"这一轮的 epoch 与这一轮的 fence"，
+	 * 只有<b>与租约键同槽</b>的计数器才能被塞进抢租脚本的同一个原子步里；号与占用一旦分开，
+	 * 迟到者就可能拿到比已落库 fence 更小的号，之后每次写回都被 {@code STALE_EPOCH} 拒 ——
+	 * fail-closed 变成永久卡死。
+	 *
+	 * <p>与 {@link LeaseService#EPOCH_PREFIX} 是同一个键（LeaseService 按租约键的 hash tag 推导），
+	 * 本方法只是给"按 runId 取键"的调用方（deleteRun / 续期 / 运维面）一个入口；
+	 * 两者一致由 {@code ClusterSlotTest} 直接断言，避免各拼一份。
+	 *
+	 * <h2>迁移口径（评审 N-1 后）</h2>
+	 * 抢租脚本是<b>三键</b>的（租约 / 计数器 / fence）：取号时会与 fence 对账，号 ≤ fence 就抬到
+	 * {@code fence+1}。所以<b>搬运方不需要预置任何计数/全局 epoch</b> —— 哪怕只搬 fence 而计数器是空的
+	 * （或反之），下一次 acquire 都会当场自愈。想彻底避开这条自愈路径，最省事的做法仍是
+	 * "fence 与计数器都不搬"（两者都从 0 起，无跨对象不变量）。
+	 */
+	public String runLeaseEpochKey(String runId) {
+		return runScopedKey(LeaseService.EPOCH_PREFIX, runId);
+	}
+
+	/**
+	 * 从续跑租约键反解 runId（{@code ConfirmGate#runIdOf} 的唯一取用口）。
+	 *
+	 * <p>认两种形态：
+	 * <ul>
+	 * <li>新键形 {@code ai:lease:run:{run:<runId>}} —— 取 tag 内层（去 {@code run:} 前缀）；</li>
+	 * <li>旧裸键形 {@code ai:lease:run:<runId>} —— 原样返回前缀之后的部分。
+	 * <b>这是纯防御分支，当前进程内不可达</b>（评审 Minor 8）：租约对象不跨进程传递，新进程只会
+	 * 拿自己 {@code runLeaseKey()} 拼出来的 tagged 键。留着它是为了"键形再过一次渡"时不至于
+	 * 把未识别的键误判成 runId（判据退化比误释放安全）。误解析风险也可忽略：runId 是 UUID，
+	 * 不会自带 {@code {run:}} 形状。</li>
+	 * </ul>
+	 *
+	 * @return runId；键不匹配/为空返回 {@code null}（调用方按"没有可靠判据"处理）
+	 */
+	public static String runIdFromLeaseKey(String key) {
+		if (key == null || !key.startsWith(LEASE_RUN_PREFIX)) {
+			return null;
+		}
+		String tail = key.substring(LEASE_RUN_PREFIX.length());
+		int open = tail.indexOf("{run:");
+		if (open >= 0 && tail.endsWith("}")) {
+			String inner = tail.substring(open + "{run:".length(), tail.length() - 1);
+			return inner.isEmpty() ? null : inner;
+		}
+		return tail.isEmpty() ? null : tail;
+	}
+
+	/** fence 键名（{@code ai:fence:run:{run:<runId>}}；与快照同槽 = FENCED_SET 的前提）。 */
 	public String fenceKey(String runId) {
-		return FENCE_RUN_PREFIX + runId;
+		return runScopedKey(FENCE_RUN_PREFIX, runId);
 	}
 
 	// ── 轮次快照 ────────────────────────────────────────────────────────────
@@ -453,7 +637,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 				this.redis.opsForValue().set(runKey(runId), json, ttlFor(runId));
 			}
 			catch (Exception ex) {
-				throw new IllegalStateException("无法写入轮次快照 " + runId, ex);
+				throw new AiStateUnavailableException("无法写入轮次快照 " + runId, ex);
 			}
 		}
 		// T2b-D#1：快照持久化成功后联动 session → current 轮索引（全部走本方法这一唯一通道，
@@ -513,7 +697,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			return result != null && result > 0L;
 		}
 		catch (Exception ex) {
-			throw new IllegalStateException("无法写入轮次快照 " + runId, ex);
+			throw new AiStateUnavailableException("无法写入轮次快照 " + runId, ex);
 		}
 	}
 
@@ -608,8 +792,31 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		return this.properties.getSessionTtl();
 	}
 
+	/**
+	 * 读一轮快照（{@code ai:run:{run:<runId>}}）。
+	 *
+	 * <h2>异常分类（P1-1）</h2>
+	 * <ul>
+	 * <li><b>Redis 调用失败</b>（断连/超时/命令被拒）⇒ {@link AiStateUnavailableException}
+	 * （{@code AI_REDIS_UNAVAILABLE} ⇒ 全局处理器回 <b>503</b>，客户端可重试）。这条 GET 曾写在
+	 * {@code try} 之外，一次 Redis 抖动会让 {@code /events/{runId}} 与 {@code /runs/current} 的第一跳
+	 * 直接落到兜底 handler 变成 <b>500</b> —— 服务端故障被报成"不可重试"的错误；</li>
+	 * <li><b>值损坏</b>（JSON 解析失败）仍抛 {@link IllegalStateException}：那是数据问题，
+	 * 报成"稍后重试"只会让前端无意义地重试。两类必须分开，不能一个 catch 全兜；</li>
+	 * <li>键不存在返回 {@code null}（"没有这一轮"不是故障）。</li>
+	 * </ul>
+	 *
+	 * <p>与同类读口（{@code pendingRaw} / {@code decidedStatus} / {@code fenceEpoch}）的分类保持一致；
+	 * {@link AiStateUnavailableException} is-a {@code IllegalStateException}，既有 catch 分支不受影响。
+	 */
 	public RunSnapshot get(String runId) {
-		String raw = this.redis.opsForValue().get(runKey(runId));
+		String raw;
+		try {
+			raw = this.redis.opsForValue().get(runKey(runId));
+		}
+		catch (Exception ex) {
+			throw new AiStateUnavailableException("无法读取轮次快照 " + runId + "（Redis 不可用）", ex);
+		}
 		if (raw == null) {
 			return null;
 		}
@@ -617,11 +824,29 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			return this.mapper.readValue(raw, RunSnapshot.class);
 		}
 		catch (Exception ex) {
+			// 值损坏 = 数据问题，不是依赖不可用：保持 IllegalStateException（不得转成 503）
 			throw new IllegalStateException("无法读取轮次快照 " + runId, ex);
 		}
 	}
 
-	/** 池饱和回滚：删掉本轮的全部键（不留半截状态）。 */
+	/**
+	 * 池饱和回滚：删掉本轮<b>需要同生同死</b>的 13 个业务状态键（评审 Minor 1）。
+	 *
+	 * <p><b>不是"这一轮的全部键"</b>：{@code ai:beat:<runId>}（心跳戳）、
+	 * {@code ai:activity:<runId>}（业务活动锚点）与 {@code ai:cancel:<runId>}（取消标志）刻意不在其中
+	 * —— 前两者是观测/判据面（裸前缀、单键命令）、后者要活到驱动线程看见它，各自按 TTL 走；
+	 * {@code ai:lock:* }（taskId 维度）更不在，资源锁的寿命与 run 的生死无关。
+	 *
+	 * <p><b>删后语义 = 原子性恢复</b>（评审 Minor 3）：13 键全部带 {@code {run:<runId>}} tag ⇒ 同槽 ⇒
+	 * 这一条 {@code DEL} 在真集群里是"一条命令、原子生效"。注意这不是"不加 tag 就会 CROSSSLOT"——
+	 * 真实 Lettuce 的 {@code del(Iterable)} 会按槽分区、<b>静默拆成 N 条</b>，故障形态是
+	 * <b>原子性丢失</b>（删到一半崩 = 半截状态），不是报错；测试替身对多键跨槽抛异常比真客户端更严，
+	 * 属刻意选择（把"悄悄不原子"变成可见的红）。
+	 *
+	 * <p>13 键 = 快照 / 待决 / 认领 / 台账 / 幂等索引 / 兼容 LIST / seq / 事件 Stream / 续跑租约 /
+	 * fence / req 位 / 决策 guard / <b>取号计数器</b>。最后那个是 per-run 计数器（无业务语义，
+	 * 但不删就会随轮次永久留存）。
+	 */
 	public void deleteRun(String runId) {
 		// 先放掉本进程持有的租约：删键之后脚本再比对就会扑空，进程内视图会成为幽灵所有权
 		releaseRunLease(runId);
@@ -630,16 +855,20 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		// 批③a：幂等索引随台账一起删（索引是台账的指针，台账没了它只会指向空气）。
 		// 注意：ai:lock:*（LeaseKeys，按 taskId 记）**不在这里** —— 资源锁的寿命与 run 的生死无关，
 		// 由 app.ai.lease.resource-ttl 自清；在轮次回收里删锁会把别人的业务互斥一起放掉。
+		// B23L1 批①（R1-05 + 评审 I-1）：13 键全部带 {run:<runId>} tag ⇒ 同槽 ⇒ 这一条 DEL 在 Cluster 下
+		// 仍是"一条命令、原子生效"（跨槽的 DEL 会被客户端拆成 N 条，原子性随之消失）。
+		// 取号计数器与 fence 必须一起删：留下计数器而删掉 fence 只是浪费一个键；反过来（删计数器留 fence）
+		// 才会让下一任租约从 1 起算、被残留的 fence 拒死 —— 所以两者在同一条命令里。
 		this.redis.delete(List.of(runKey(runId), pendingKey(runId), claimKey(runId), ledgerKey(runId),
 				idemKey(runId), eventsKey(runId), seqKey(runId), xeventsKey(runId), runLeaseKey(runId),
-				fenceKey(runId), reqKey(runId), decidedKey(runId)));
+				fenceKey(runId), reqKey(runId), decidedKey(runId), runLeaseEpochKey(runId)));
 		this.redis.opsForSet().remove(RUN_INDEX, runId);
 	}
 
 	// ── 续跑权租约（B23L1 批②a；ResumeService 接线归批②b） ──────────────────
 
 	/**
-	 * 抢本轮的续跑权租约（{@code ai:lease:run:<runId>}，TTL = {@code app.ai.lease.ttl}）。
+	 * 抢本轮的续跑权租约（{@code ai:lease:run:{run:<runId>}}，TTL = {@code app.ai.lease.ttl}）。
 	 *
 	 * <p>批②a 只建设施：先由 {@link RunStore#save} 的 fence 写与 {@link #claimExecution} 的 epoch 消费；
 	 * 批②b 把 {@code ConfirmGate.maybeTriggerResume} / {@code ResumeService} 的进程内锁与
@@ -661,7 +890,8 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		if (facility == null) {
 			return new LeaseService.AcquireResult(LeaseService.AcquireOutcome.UNAVAILABLE, null);
 		}
-		return facility.acquire(runLeaseKey(runId), this.properties.getLease().getTtl());
+		// 三键同槽（租约 / 计数器 / fence）：取号时与 fence 对账 ⇒ 计数器先死也能自愈（评审 N-1）。
+		return facility.acquireFenced(runLeaseKey(runId), fenceKey(runId), this.properties.getLease().getTtl());
 	}
 
 	/** 释放本实例持有的续跑租约（未持有则无操作）。 */
@@ -687,9 +917,15 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		return this.leaseService;
 	}
 
-	/** 事件日志 Stream 键名（B23L1 批①；写入/读取归 {@link RedisFrameStore}，本类只管键名）。 */
+	/**
+	 * 事件日志 Stream 键名（B23L1 批①；{@code ai:xevents:{run:<runId>}}）。
+	 *
+	 * <p>写入/读取在 {@link RedisFrameStore}，它调的是同一个拼接口
+	 * （{@link #runScopedKey}({@code STREAM_PREFIX}, runId)）—— "写方（XADD/XRANGE）"与
+	 * "续期/删除方（本类）"必须逐字同键，否则长挂起时事件日志失去续期、{@code deleteRun} 删不到真键。
+	 */
 	public String xeventsKey(String runId) {
-		return XEVENTS_PREFIX + runId;
+		return runScopedKey(XEVENTS_PREFIX, runId);
 	}
 
 	/** 全部仍存活的 runId（索引里已过期的惰性剔除）。 */
@@ -751,14 +987,42 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			this.redis.expire(pendingKey(runId), ttlFor(runId));
 		}
 		catch (Exception ex) {
-			throw new IllegalStateException("无法写入待决条目 " + pending.getToolCallId(), ex);
+			throw new AiStateUnavailableException("无法写入待决条目 " + pending.getToolCallId(), ex);
 		}
 	}
 
 	public List<PendingToolCall> pendings(String runId) {
-		Map<Object, Object> all = this.redis.opsForHash().entries(pendingKey(runId));
+		return readPendings(runId, false);
+	}
+
+	/**
+	 * <b>非抛</b>整批读口（展示 / 诊断 / 取消收尾）：决策 guard 读不出来时返回<b>未合并 guard 的
+	 * 原始条目</b>并计数，而不是让调用方整页 500 或缺条目。
+	 *
+	 * <p>为什么需要它：A6 的 fail-closed 只应作用于"回灌/决策"这类会改变状态的读；列表、诊断、
+	 * 取消收尾若也抛，Redis 一次抖动就会让"取消"卡在中间（条目仍 PENDING）或让运维在最需要
+	 * 诊断时看不到任何东西。调用方必须把本方法的结果视为<b>可能未收敛</b>的视图。
+	 */
+	public List<PendingToolCall> pendingsLenient(String runId) {
+		return readPendings(runId, true);
+	}
+
+	private List<PendingToolCall> readPendings(String runId, boolean lenient) {
+		Map<Object, Object> all;
+		try {
+			all = this.redis.opsForHash().entries(pendingKey(runId));
+		}
+		catch (Exception ex) {
+			if (!lenient) {
+				throw new AiStateUnavailableException("无法读取待决条目批次：" + runId, ex);
+			}
+			RedisDegradation.record(RedisDegradation.A6_PENDING_READ, ex);
+			log.warn("读取待决条目失败 runId={}（非抛读口降级为空表，取消收尾/展示继续）：{}", runId,
+					ex.getMessage());
+			return List.of();
+		}
 		Map<Object, Object> markers = requestMarkers(runId);
-		Map<Object, Object> decisions = decisionMarkers(runId);
+		Map<Object, Object> decisions = lenient ? decisionMarkersLenient(runId) : decisionMarkers(runId);
 		List<PendingToolCall> out = new ArrayList<>();
 		for (Map.Entry<Object, Object> entry : all.entrySet()) {
 			try {
@@ -776,21 +1040,37 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	}
 
 	public PendingToolCall pending(String runId, String toolCallId) {
-		String raw = (String) this.redis.opsForHash().get(pendingKey(runId), toolCallId);
-		if (raw == null) {
+		PendingToolCall pending = pendingRaw(runId, toolCallId);
+		if (pending == null) {
 			return null;
-		}
-		PendingToolCall pending;
-		try {
-			pending = this.mapper.readValue(raw, PendingToolCall.class);
-		}
-		catch (Exception ex) {
-			throw new IllegalStateException("无法读取待决条目 " + toolCallId, ex);
 		}
 		applyRequestMarker(pending, requestMarker(runId, toolCallId));
 		// I2①：WAL 的读侧收敛（另一次往返）。单条读多一次 HGET 是刻意的 —— 这里回答的是
 		// "这张卡现在到底算不算已决"，判错的代价是"已决的卡又被当成待人工输入"。
 		applyDecisionMarker(pending, decisionMarker(runId, toolCallId));
+		return pending;
+	}
+
+	/**
+	 * <b>非抛</b>单条读口（确认门等待循环 / 诊断 / 取消收尾）：guard 读不出来时返回原始条目，
+	 * 不把一次 Redis 抖动升级成等待线程退出。需要强一致判定的路径（回灌/决策）仍用 {@link #pending}。
+	 */
+	public PendingToolCall pendingLenient(String runId, String toolCallId) {
+		PendingToolCall pending;
+		try {
+			pending = pendingRaw(runId, toolCallId);
+		}
+		catch (RuntimeException ex) {
+			RedisDegradation.record(RedisDegradation.A6_PENDING_READ, ex);
+			log.warn("读取待决条目失败 runId={} toolCallId={}（非抛读口降级为 null）：{}", runId, toolCallId,
+					ex.getMessage());
+			return null;
+		}
+		if (pending == null) {
+			return null;
+		}
+		applyRequestMarker(pending, requestMarker(runId, toolCallId));
+		applyDecisionMarker(pending, decisionMarkerLenient(runId, toolCallId));
 		return pending;
 	}
 
@@ -804,7 +1084,14 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 * @return 条目原样；不存在返回 null
 	 */
 	public PendingToolCall pendingRaw(String runId, String toolCallId) {
-		String raw = (String) this.redis.opsForHash().get(pendingKey(runId), toolCallId);
+		String raw;
+		try {
+			raw = (String) this.redis.opsForHash().get(pendingKey(runId), toolCallId);
+		}
+		catch (Exception ex) {
+			RedisDegradation.record(RedisDegradation.A6_PENDING_READ, ex);
+			throw new AiStateUnavailableException("无法读取待决条目 " + toolCallId, ex);
+		}
 		if (raw == null) {
 			return null;
 		}
@@ -812,29 +1099,65 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			return this.mapper.readValue(raw, PendingToolCall.class);
 		}
 		catch (Exception ex) {
+			// JSON 损坏是数据错误，不是基础设施故障：保持原 IllegalStateException。
 			throw new IllegalStateException("无法读取待决条目 " + toolCallId, ex);
 		}
 	}
 
-	/** 单条目的 guard 值（null = 未决/读不出来）。 */
+	/**
+	 * 单条目的 guard 值（null = 未决；读失败 <b>抛</b>，不得折成"未决策"）。
+	 *
+	 * <p><b>A6 fail-closed</b>：guard 读失败若按 null 处理，已决的卡会被当成"待人工输入"重新挂起
+	 * （用户被重复问、审批语义漂移）。读成功且无该 field 才是真正的"未决策"。
+	 */
 	private Object decisionMarker(String runId, String toolCallId) {
 		try {
 			return this.redis.opsForHash().get(decidedKey(runId), toolCallId);
 		}
 		catch (Exception ex) {
-			log.debug("读取决策 guard 失败 runId={} toolCallId={}：{}", runId, toolCallId, ex.getMessage());
+			RedisDegradation.record(RedisDegradation.A6_DECISION_GUARD_READ, ex);
+			log.warn("读取决策 guard 失败 runId={} toolCallId={}（读侧 fail-closed：拒绝按未决策重建卡）：{}",
+					runId, toolCallId, ex.getMessage());
+			throw new AiStateUnavailableException("无法读取决策 guard " + toolCallId, ex);
+		}
+	}
+
+	/** 非抛版单条 guard 读口（展示/等待循环/取消收尾）：读失败计为降级并返回 null。 */
+	private Object decisionMarkerLenient(String runId, String toolCallId) {
+		try {
+			return this.redis.opsForHash().get(decidedKey(runId), toolCallId);
+		}
+		catch (Exception ex) {
+			RedisDegradation.record(RedisDegradation.A6_DECISION_GUARD_READ, ex);
+			log.debug("读取决策 guard 失败 runId={} toolCallId={}（非抛读口按未合并 guard 继续）：{}",
+					runId, toolCallId, ex.getMessage());
 			return null;
 		}
 	}
 
-	/** 整批 guard 值（{@link #pendings} 一次读完，避免 N 次往返）。 */
+	/** 整批 guard 值（{@link #pendings} 一次读完，避免 N 次往返；读失败抛，不得折成空表）。 */
 	private Map<Object, Object> decisionMarkers(String runId) {
 		try {
 			Map<Object, Object> markers = this.redis.opsForHash().entries(decidedKey(runId));
 			return markers == null ? Map.of() : markers;
 		}
 		catch (Exception ex) {
-			log.debug("读取决策 guard 失败 runId={}：{}", runId, ex.getMessage());
+			RedisDegradation.record(RedisDegradation.A6_DECISION_GUARD_READ, ex);
+			log.warn("读取决策 guard 失败 runId={}（整批读侧 fail-closed：拒绝按未决策重建卡）：{}", runId,
+					ex.getMessage());
+			throw new AiStateUnavailableException("无法读取决策 guard 批次 " + runId, ex);
+		}
+	}
+
+	/** 非抛版整批 guard 读口（展示/取消收尾）：读失败返回空表并计数。 */
+	private Map<Object, Object> decisionMarkersLenient(String runId) {
+		try {
+			Map<Object, Object> markers = this.redis.opsForHash().entries(decidedKey(runId));
+			return markers == null ? Map.of() : markers;
+		}
+		catch (Exception ex) {
+			RedisDegradation.record(RedisDegradation.A6_DECISION_GUARD_READ, ex);
+			log.debug("读取决策 guard 失败 runId={}（非抛读口按未合并 guard 继续）：{}", runId, ex.getMessage());
 			return Map.of();
 		}
 	}
@@ -1040,36 +1363,113 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			}
 		}
 		String claimValue = epoch + "|" + executedBy;
-		Boolean claimed = this.redis.opsForHash().putIfAbsent(claimKey(runId), toolCallId, claimValue);
-		this.redis.expire(claimKey(runId), ttlFor(runId));
+		Boolean claimed = null;
+		try {
+			claimed = this.redis.opsForHash().putIfAbsent(claimKey(runId), toolCallId, claimValue);
+			this.redis.expire(claimKey(runId), ttlFor(runId));
+		}
+		catch (RuntimeException ex) {
+			// 认领记录可能已落（putIfAbsent 成功、expire 失败）：回滚，避免"写后异常"变成
+			// 24h 假认领（后续重试看到 LOST，用户被告知"可能已执行"）。
+			if (Boolean.TRUE.equals(claimed)) {
+				rollbackClaim(runId, toolCallId, claimValue);
+			}
+			throw ex;
+		}
 		boolean won = Boolean.TRUE.equals(claimed);
 		if (!won) {
 			return new ClaimResult(ClaimOutcome.LOST, epoch, fence);
 		}
-		PendingToolCall pending = pending(runId, toolCallId);
-		if (pending != null) {
-			pending.setClaimedAtMs(System.currentTimeMillis());
-			pending.setClaimedEpoch(epoch);
-			pending.setExecuted(true);
-			pending.setExecutedBy(executedBy);
-			putPending(runId, pending);
+		PendingToolCall marked = null;
+		try {
+			// C1：认领路径只读**原始条目**（pendingRaw），不走 guard 收敛读 —— 否则 A6 读失败会发生在
+			// "claim 已写、执行未做"之间，留下 24h 假认领。任何读/写失败都回滚 claim 后上抛，
+			// 让调用方看到可重试的基础设施故障，而不是 ALREADY_CLAIMED。
+			marked = pendingRaw(runId, toolCallId);
+			if (marked != null) {
+				marked.setClaimedAtMs(System.currentTimeMillis());
+				marked.setClaimedEpoch(epoch);
+				marked.setExecuted(true);
+				marked.setExecutedBy(executedBy);
+				putPending(runId, marked);
+			}
+		}
+		catch (RuntimeException ex) {
+			// Minor3：put 已成功、expire 失败时条目会带 executed=true；回滚 claim 的同时
+			// best-effort 恢复 executed=false，避免续跑把它误判成"已执行"。
+			if (marked != null && marked.isExecuted()) {
+				marked.setExecuted(false);
+				marked.setExecutedBy(null);
+				marked.setClaimedAtMs(0L);
+				marked.setClaimedEpoch(0L);
+				try {
+					putPending(runId, marked);
+				}
+				catch (RuntimeException restoreEx) {
+					log.warn("回滚认领后恢复 executed=false 失败 runId={} toolCallId={}：{}", runId, toolCallId,
+							restoreEx.getMessage());
+				}
+			}
+			rollbackClaim(runId, toolCallId, claimValue);
+			throw ex;
 		}
 		return new ClaimResult(ClaimOutcome.WON, epoch, fence);
 	}
 
-	/** 已落库的最大 epoch（{@code ai:fence:run:<runId>}；0 = 无键/坏值/读不出来）。 */
+	/**
+	 * 回滚本次认领字段：<b>值匹配 CAS</b>（Lua）才删，避免误删他人重新认领的值（Minor3）。
+	 */
+	private void rollbackClaim(String runId, String toolCallId, String expectedValue) {
+		try {
+			Long deleted = this.redis.execute(CLAIM_ROLLBACK_SCRIPT, List.of(claimKey(runId)), toolCallId,
+					expectedValue);
+			if (deleted != null && deleted > 0L) {
+				log.warn("已回滚认领记录 runId={} toolCallId={}（认领后的读/写失败，不得留假认领）", runId,
+						toolCallId);
+			}
+			else {
+				log.warn("认领记录值已变化，跳过回滚 runId={} toolCallId={}（避免误删他人认领）", runId, toolCallId);
+			}
+		}
+		catch (Exception ex) {
+			log.warn("回滚认领记录失败 runId={} toolCallId={}（仍需人工核对 claim）：{}", runId, toolCallId,
+					ex.getMessage());
+		}
+	}
+
+	/** I-3 / Minor4：连接类失败可能被包装（RedisSystemException 等）——沿 cause 链判断。 */
+	private static boolean isConnectionFailure(Throwable error) {
+		for (Throwable current = error; current != null; current = current.getCause()) {
+			if (current instanceof DataAccessResourceFailureException || current instanceof QueryTimeoutException) {
+				return true;
+			}
+			if (current.getCause() == current) {
+				break;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * 已落库的最大 epoch（{@code ai:fence:run:<runId>}；0 = <b>键不存在</b>或值 ≤ 0）。
+	 *
+	 * <p><b>A1 fail-closed</b>：读失败（Cluster 下 MOVED/TRYAGAIN、节点故障）<b>不再</b>折成
+	 * {@code 0} 放行认领 —— "读不出来"不等于"没有 fence"。认领路径会因此拒绝执行（宁可这一拍
+	 * 不执行，也不在 fencing 失效时重复执行副作用）；调用方看到的是明确的写入/读取失败，
+	 * 不是"什么都没发生"。
+	 *
+	 * @throws IllegalStateException fence 读不出来（连接异常 / 坏值）
+	 */
 	public long fenceEpoch(String runId) {
 		try {
 			String raw = this.redis.opsForValue().get(fenceKey(runId));
 			return raw == null ? 0L : Long.parseLong(raw);
 		}
 		catch (Exception ex) {
-			// R7：fence 读失败 ⇒ 认领侧按 0 处理（fail-open：不拒认领）。这是<b>放宽</b>而不是收紧，
-			// 所以必须 WARN —— 否则"Redis 读不出来"会让 fencing 静默失效，现场只会看到"什么都没发生"。
-			// （TOCTOU：GET 与 HSETNX 之间 fence 仍可能推进；合成一条脚本可以消掉，挂账由提交官登记。）
-			log.warn("读取 fence 失败 runId={}（认领侧按 fence=0 放行，fencing 本拍失效）：{}", runId,
+			RedisDegradation.record(RedisDegradation.A1_FENCE_READ, ex);
+			log.warn("读取 fence 失败 runId={}（认领侧 fail-closed：拒绝认领，不按 fence=0 放行）：{}", runId,
 					ex.getMessage());
-			return 0L;
+			throw new AiStateUnavailableException("无法读取 fence " + runId + "：认领侧 fail-closed", ex);
 		}
 	}
 
@@ -1316,7 +1716,8 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 */
 	public int cancelPendings(String runId) {
 		int changed = 0;
-		for (PendingToolCall pending : pendings(runId)) {
+		// C2：取消收尾用非抛读口 —— guard 读失败不能让条目停在 PENDING（用户可见"卡在取消中"）。
+		for (PendingToolCall pending : pendingsLenient(runId)) {
 			if (!PendingToolCall.PENDING.equals(pending.getStatus())) {
 				continue;
 			}
@@ -1349,15 +1750,17 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 * <b>T7（DC-14 / R8-5）：心跳帧<b>不</b>入归档</b> —— 挂起期每 2s 一帧、流式期每 5s 一帧的
 	 * 心跳会挤占 {@value #EVENT_WINDOW} 的归档窗口，把真正有信息量的状态帧挤出窗口
 	 * （回放跟着变瘦）。心跳的"在线推送"语义不受影响（仍在 {@code SseChatEmitter#emit} 里
-	 * 广播给订阅者），只是改由 {@link #touchActivity(String)} 记一个轻量活动戳 ——
-	 * 于是"心跳提供活动证据"这一用途照旧，归档却不被它占位。
+	 * 广播给订阅者），只是改由 {@link #touchActivity(String)} 记一个轻量心跳戳 ——
+	 * <b>R1-09 起它只证明"进程还活着"（会话门用），不推进业务活动锚点</b>（僵尸判据不吃心跳），
+	 * 归档也不被它占位。
 	 *
 	 * <p>
 	 * <b>B1（2026-10-20）：{@code delta} 改为入档</b> —— 挂起即断（流派 B）之后，用户决策 →
 	 * 后端续跑这段窗口内没有实时订阅者，正文帧只能靠归档差量补回（前端带 {@code ?lastSeq}
 	 * 重连）。代价：长轮次的 delta 会加速挤出 {@value #EVENT_WINDOW} 窗口内的早段帧
 	 * （极端长生成的重连补帧可能出现尾部缺口，已在设计稿 §6 留痕，B2 换 Redis Stream 时重估）。
-	 * delta 照旧 {@link #touchActivity(String)} 留活动戳（"只吐 delta 的长轮"僵尸判据不变）。
+	 * 任何非心跳帧都刷新<b>业务活动锚点</b>（{@link #touchBusinessActivity}），"只吐 delta 的长轮"
+	 * 因此仍有业务前进证据（心跳不算）。
 	 *
 	 * <p>
 	 * <b>B23L1 批①（2026-10-21）：本方法已退居兼容写口</b> —— 生产出帧路径改经
@@ -1368,15 +1771,16 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	public void appendEvent(String runId, Map<String, Object> frame) {
 		String type = String.valueOf(frame.get("type"));
 		if (HEARTBEAT_TYPE.equals(type)) {
-			// T7：心跳跳过归档，只留活动戳。
+			// T7：心跳跳过归档，只留心戳 —— 它不是业务活动（R1-09：不得掩盖卡死）。
 			touchActivity(runId);
 			return;
 		}
-		if (DELTA_TYPE.equals(type)) {
-			// B1：delta 入档（差量补帧的真值），活动戳照旧 —— 窗口/TTL 口径不变。
-			touchActivity(runId);
-		}
 		frame.putIfAbsent("atMs", System.currentTimeMillis());
+		// R1-09：任何业务帧（不限于 delta）都推进业务活动锚点；读取侧还会与事件日志尾部取 max，
+		// 因此这里即使写失败，归档本身仍是可见的活动证据。
+		Object atMs = frame.get("atMs");
+		touchBusinessActivity(runId, atMs instanceof Number number ? number.longValue()
+				: System.currentTimeMillis());
 		try {
 			this.redis.opsForList().rightPush(eventsKey(runId), this.mapper.writeValueAsString(frame));
 			this.redis.opsForList().trim(eventsKey(runId), -EVENT_WINDOW, -1);
@@ -1432,10 +1836,13 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 * 心跳的活动戳（T7 的配套）：{@code ai:beat:<runId>} = 毫秒时刻，TTL 随心跳续期。
 	 *
 	 * <p>
-	 * 为什么不干脆"心跳什么都不写"：僵尸判据（{@code ResumeService#activeAtMs}）靠"最近一次活动"
-	 * 区分"活着的长轮"与"上一进程死掉的僵尸轮"。心跳不入归档后，<b>只吐思考不吐正文</b>的
-	 * 长轮会长时间没有归档帧 —— 若不留下任何活动证据，它会被误判成僵尸并被强行接管
-	 * （同一轮被执行两次）。一个 STRING 键就把这条证据链补回来了，代价远低于归档一帧。
+	 * 为什么不干脆"心跳什么都不写"：会话门判死（{@code RunLiveness}）与续跑扫描都需要
+	 * "这一轮最近还有人动过"的证据。心跳不入归档后，挂起等人（确认门 2s 一拍）的轮会长时间
+	 * 没有任何归档帧 —— 一个 STRING 键把"进程还活着"补回来，代价远低于归档一帧。
+	 *
+	 * <p>
+	 * <b>R1-09：心跳只是"进程活着"，不是"业务前进"</b> —— 本方法<b>不</b>推进业务活动锚点
+	 * （{@link #lastActivityAtMs}）。僵尸接管只认业务活动，否则心跳会把卡死的轮永远养年轻。
 	 */
 	public void touchActivity(String runId) {
 		try {
@@ -1443,6 +1850,39 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		}
 		catch (Exception ex) {
 			log.debug("心跳活动戳写入失败 runId={}：{}", runId, ex.getMessage());
+		}
+	}
+
+	/**
+	 * <b>业务活动锚点</b>（R1-09）：任何<b>非心跳</b>帧都调用本方法，写
+	 * {@code ai:activity:<runId>} = 该帧的 {@code atMs}（TTL = session-ttl）。
+	 *
+	 * <p>
+	 * 与 {@link #touchActivity(String)} 的分工是本修复的核心：业务帧推进"这一轮在前进"，心跳只
+	 * 推进"进程还活着"。僵尸判据读 {@link #lastActivityAtMs(String)}，因此"心跳还在、业务卡死"
+	 * 仍会被判死并接管。
+	 *
+	 * <p>
+	 * <b>原子单调</b>（I-3）：比较 + 写 + 续期收在一条单键 Lua（{@link #ACTIVITY_TOUCH_SCRIPT}）里，
+	 * 因此并发/乱序的 {@code atMs} 不会把锚点回拨，且流式热路径只要 1 次往返（不再 GET+SET 两次）。
+	 * 坏锚点值按 0 处理并覆盖（M-4），不会让该轮的活动锚点失效到 TTL 到期。
+	 *
+	 * <p>
+	 * 时钟域（M-2）：{@code atMs} 是出帧节点的墙钟，判死用本节点 {@code now}；部署需保证 NTP，
+	 * 偏差应远小于 {@code app.ai.resume.zombie-margin}。写失败只记 debug —— 帧照常投递/落档，
+	 * 活动证据的兜底在事件日志。
+	 */
+	public void touchBusinessActivity(String runId, long atMs) {
+		if (runId == null) {
+			return;
+		}
+		long stamp = atMs > 0L ? atMs : System.currentTimeMillis();
+		try {
+			this.redis.execute(ACTIVITY_TOUCH_SCRIPT, List.of(activityKey(runId)), String.valueOf(stamp),
+					String.valueOf(ttlFor(runId).toMillis()));
+		}
+		catch (Exception ex) {
+			log.debug("业务活动锚点写入失败 runId={} atMs={}：{}", runId, atMs, ex.getMessage());
 		}
 	}
 
@@ -1464,6 +1904,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 * <b>会话活着，卡的后台数据就活着</b>；不计入预算的等待也因此可以放心地长。
 	 *
 	 * <p>Redis {@code EXPIRE} 对不存在的键是无操作（不报错），故本方法对"尚未写出"的键安全。
+	 * 单个键失败已在 {@link #renew} 内逐键隔离（I-3：连接类失败提前收手），本方法不再整面抛出。
 	 */
 	public void renewSuspensionTtl(String runId) {
 		if (runId == null) {
@@ -1474,7 +1915,8 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			renew(runId, ttl, SessionKeyRegistry.Renewal.HEARTBEAT);
 		}
 		catch (Exception ex) {
-			log.debug("挂起期续期轮键失败 runId={}：{}", runId, ex.getMessage());
+			// 只剩取键/计数等非 Redis 异常（单键 Redis 失败已在下层吞掉并计数）
+			log.debug("挂起期续期轮键的取键/计数失败 runId={}：{}", runId, ex.getMessage());
 		}
 	}
 
@@ -1483,12 +1925,35 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 * {@link SessionKeyRegistry#renewalKeys(SessionKeyRegistry.Renewal)}，本方法只负责发 {@code EXPIRE}。
 	 *
 	 * <p>Redis {@code EXPIRE} 对不存在的键是无操作（不报错），故"该键还没写出"不构成错误。
-	 * 失败语义与改造前一致：<b>整面共用调用方的一个 try</b> —— 首个键抛错即停，由调用方记 debug 并返回
-	 * （续期是尽力而为的养键动作，不该把调用方打成 500）。
+	 * <b>L-139：逐键隔离</b> —— 一个键失败（Cluster 下 MOVED/TRYAGAIN、单节点故障）不得让排在
+	 * 后面的键全部不续期；每次失败计入 {@link RedisDegradation#L139_RENEW_KEY}。
+	 *
+	 * <p><b>I-3：连接类失败立即收手。</b>连接挂死时每个键都要等到 {@code spring.data.redis.timeout}
+	 * （2s），10 个键 = 20s，会把确认门 2s 心跳和请求线程拖垮。因此识别到连接类异常
+	 * （{@link DataAccessResourceFailureException} / {@link QueryTimeoutException}）后不再逐键尝试，
+	 * 剩余键计入 {@link RedisDegradation#L139_RENEW_NOT_ATTEMPTED}；其它单键异常仍继续逐键。
 	 */
 	private void renew(String runId, Duration ttl, SessionKeyRegistry.Renewal renewal) {
-		for (java.util.function.Function<String, String> keyBuilder : SessionKeyRegistry.renewalKeys(renewal)) {
-			this.redis.expire(keyBuilder.apply(runId), ttl);
+		List<java.util.function.Function<String, String>> keys = SessionKeyRegistry.renewalKeys(renewal);
+		for (int i = 0; i < keys.size(); i++) {
+			String key = keys.get(i).apply(runId);
+			try {
+				this.redis.expire(key, ttl);
+			}
+			catch (Exception ex) {
+				// 单键失败只影响该键；其余键照常续期（长挂起卡的后台数据不能因一次抖动整面过期）
+				RedisDegradation.record(RedisDegradation.L139_RENEW_KEY, ex);
+				if (isConnectionFailure(ex)) {
+					int notAttempted = keys.size() - i - 1;
+					for (int skipped = 0; skipped < notAttempted; skipped++) {
+						RedisDegradation.record(RedisDegradation.L139_RENEW_NOT_ATTEMPTED);
+					}
+					log.debug("续期遇到连接类异常 runId={} key={}（剩余 {} 键不再逐个等待超时）：{}", runId, key,
+							notAttempted, ex.getMessage());
+					return;
+				}
+				log.debug("续期键失败 runId={} key={}（其余键继续续期）：{}", runId, key, ex.getMessage());
+			}
 		}
 	}
 
@@ -1534,13 +1999,9 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		renewSuspensionTtl(runId);
 		renewSessionCurrent(snapshot.getSessionId(), runId);
 		Duration ttl = ttlFor(runId);
-		try {
-			// 契约位 / 决策 guard / fence / 取消信号（超时面治理批① 第 11 项：取键走登记表）
-			renew(runId, ttl, SessionKeyRegistry.Renewal.READ);
-		}
-		catch (Exception ex) {
-			log.debug("读侧续期契约位键失败 runId={}：{}", runId, ex.getMessage());
-		}
+		// 契约位 / 决策 guard / fence / 取消信号（超时面治理批① 第 11 项：取键走登记表）。
+		// I-3 起单键失败已在 renew 内隔离，这里不再需要整面 try/catch。
+		renew(runId, ttl, SessionKeyRegistry.Renewal.READ);
 		return true;
 	}
 
@@ -1577,19 +2038,26 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			return new DecisionClaim(false, current == null ? null : String.valueOf(current));
 		}
 		catch (Exception ex) {
-			throw new IllegalStateException("无法写入决策 guard " + toolCallId, ex);
+			throw new AiStateUnavailableException("无法写入决策 guard " + toolCallId, ex);
 		}
 	}
 
-	/** 决策 guard 原文（{@code <status>|<atMs>|<instanceId>}；null = 未决策/旧数据）。 */
+	/**
+	 * 决策 guard 原文（{@code <status>|<atMs>|<instanceId>}；null = 未决策）。
+	 *
+	 * <p><b>A6 fail-closed</b>：读失败抛异常，不返回 null —— null 在这条链上等于"未决策"，
+	 * 会把已决的卡重新挂起。读成功且无该 field 才是 null。
+	 */
 	public String decisionOf(String runId, String toolCallId) {
 		try {
 			Object value = this.redis.opsForHash().get(decidedKey(runId), toolCallId);
 			return value == null ? null : String.valueOf(value);
 		}
 		catch (Exception ex) {
-			log.debug("读取决策 guard 失败 runId={} toolCallId={}：{}", runId, toolCallId, ex.getMessage());
-			return null;
+			RedisDegradation.record(RedisDegradation.A6_DECISION_GUARD_READ, ex);
+			log.warn("读取决策 guard 失败 runId={} toolCallId={}（fail-closed：不得当作未决策）：{}", runId,
+					toolCallId, ex.getMessage());
+			throw new AiStateUnavailableException("无法读取决策 guard " + toolCallId, ex);
 		}
 	}
 
@@ -1604,31 +2072,146 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	}
 
 	/**
-	 * 该轮最近一次活动时刻（毫秒）：取 {@code ai:events:<runId>} 最后一帧的 {@code atMs}
-	 * 与心跳活动戳（{@link #touchActivity}）的<b>较新者</b>。
+	 * 该轮最近一次<b>业务活动</b>的时刻（毫秒）：任何<b>非心跳</b>帧都推进它（R1-09）。
 	 *
 	 * <p>
-	 * 只读最后一帧（{@code LRANGE key -1 -1}）与一个 STRING，不整表回放 —— 这个方法会在
-	 * "每轮的可续跑性判定"里被调用。两者都没有（或旧格式帧没有 atMs）返回 0，
-	 * 调用方据此回落到快照的 {@code updatedAtMs}。
+	 * 取值 = 三方的<b>较新者</b>：
+	 * <ol>
+	 * <li>{@code ai:activity:<runId>} —— 出帧点（{@code SseChatEmitter#emit}）与兼容写口
+	 * （{@link #appendEvent}）直接写入的活动锚点。即使事件日志落档失败（Redis 部分可用），
+	 * 只要帧发出去了，这里仍有证据；</li>
+	 * <li>兼容期 LIST {@code ai:events:<runId>} 尾部 {@value #ACTIVITY_TAIL_PROBE} 帧的 {@code atMs}；</li>
+	 * <li>事件日志 Stream {@code ai:xevents:<runId>} 尾部 {@value #ACTIVITY_TAIL_PROBE} 帧的
+	 * {@code atMs} —— B23L1 批① 起的生产写口，于是<b>重连/唤醒/跨实例</b>都能看到新业务帧。</li>
+	 * </ol>
+	 *
+	 * <p>
+	 * <b>心跳不参与</b>：心跳只刷新 {@link #lastBeatAtMs(String)}。把心跳算成业务活动会让
+	 * "进程还在心跳、业务已经卡死"的轮永远年轻，僵尸接管失效（心跳掩盖卡死）。
+	 *
+	 * <p>
+	 * 两份日志都可能存在升级期数据（LIST 只读、Stream 新写），故取 max 而不是信任"当前写口"；
+	 * 尾部取多条而不是只取最后一条，是为了容忍乱序落档（显式 ID 被拒后改自动 ID）与轻微钟漂。
+	 * 三者都没有（或旧格式帧没有 atMs）返回 0，调用方据此回落到快照的 {@code updatedAtMs}。
+	 *
+	 * <p>
+	 * <b>时钟域（M-2）</b>：{@code atMs} 是出帧节点的墙钟，判死用的是本节点 {@code now}。
+	 * 跨节点负偏会让活轮提前"超龄"，因此多实例部署必须保证 NTP 同步，偏差应远小于
+	 * {@code app.ai.resume.zombie-margin}。
 	 */
-	public long lastEventAtMs(String runId) {
-		long last = 0L;
-		try {
-			List<String> tail = this.redis.opsForList().range(eventsKey(runId), -1, -1);
-			if (tail != null && !tail.isEmpty()) {
-				JsonNode node = this.mapper.readTree(tail.get(0));
-				JsonNode atMs = node.get("atMs");
-				last = atMs == null ? 0L : atMs.asLong();
-			}
-		}
-		catch (Exception ex) {
-			log.debug("读取最近活动时刻失败 runId={}：{}", runId, ex.getMessage());
-		}
-		return Math.max(last, lastBeatAtMs(runId));
+	public long lastActivityAtMs(String runId) {
+		return Math.max(Math.max(activityAnchorAtMs(runId), legacyActivityTailAtMs(runId)),
+				streamActivityTailAtMs(runId));
 	}
 
-	/** 心跳活动戳的时刻（无则 0）。 */
+	/**
+	 * 该轮最近一次<b>任何活动</b>（业务帧或心跳）的时刻（毫秒）。
+	 *
+	 * <p>
+	 * 语义 = {@link #lastActivityAtMs(String)}（业务前进）与 {@link #lastBeatAtMs(String)}
+	 * （进程还活着）的较新者。用于"这一轮是否还有人管"的会话门判定（{@code RunLiveness}）——
+	 * 心跳能让挂起等人的轮保持"活着"，<b>但不能</b>作为僵尸接管的业务活动依据；僵尸判据只读
+	 * {@link #lastActivityAtMs(String)}。
+	 */
+	public long lastEventAtMs(String runId) {
+		return Math.max(lastActivityAtMs(runId), lastBeatAtMs(runId));
+	}
+
+	/** 业务活动锚点键名（{@code ai:activity:<runId>}；诊断/取证可直读）。 */
+	public String activityKey(String runId) {
+		return ACTIVITY_PREFIX + runId;
+	}
+
+	/** {@code ai:activity} 的当前值（无键/坏值 0）。 */
+	private long activityAnchorAtMs(String runId) {
+		try {
+			String raw = this.redis.opsForValue().get(activityKey(runId));
+			return raw == null ? 0L : Long.parseLong(raw);
+		}
+		catch (Exception ex) {
+			log.debug("读取业务活动锚点失败 runId={}：{}", runId, ex.getMessage());
+			return 0L;
+		}
+	}
+
+	/** 兼容期 LIST 尾部的最大业务帧时刻（心跳帧即使被直塞进 LIST 也不计入）。 */
+	private long legacyActivityTailAtMs(String runId) {
+		try {
+			List<String> tail = this.redis.opsForList().range(eventsKey(runId), -ACTIVITY_TAIL_PROBE, -1);
+			if (tail == null || tail.isEmpty()) {
+				return 0L;
+			}
+			long max = 0L;
+			for (String raw : tail) {
+				max = Math.max(max, businessFrameAtMs(raw == null ? null
+						: raw.getBytes(StandardCharsets.UTF_8)));
+			}
+			return max;
+		}
+		catch (Exception ex) {
+			log.debug("读取兼容 LIST 尾部活动时刻失败 runId={}：{}", runId, ex.getMessage());
+			return 0L;
+		}
+	}
+
+	/** 事件日志 Stream 尾部的最大业务帧时刻（一次 {@code XREVRANGE COUNT n}）。 */
+	private long streamActivityTailAtMs(String runId) {
+		try {
+			byte[] key = xeventsKey(runId).getBytes(StandardCharsets.UTF_8);
+			Long max = this.redis.execute((RedisCallback<Long>) connection -> {
+				List<ByteRecord> records = connection.xRevRange(key, Range.unbounded(),
+						Limit.limit().count(ACTIVITY_TAIL_PROBE));
+				if (records == null || records.isEmpty()) {
+					return 0L;
+				}
+				long result = 0L;
+				for (ByteRecord record : records) {
+					result = Math.max(result, businessFrameAtMs(frameFieldOf(record)));
+				}
+				return result;
+			});
+			return max == null ? 0L : max;
+		}
+		catch (Exception ex) {
+			// 读失败 ≠ 没有活动：调用方还会看锚点键与兼容 LIST（取 max），这里按 0 容错。
+			log.debug("读取事件日志尾部活动时刻失败 runId={}：{}", runId, ex.getMessage());
+			return 0L;
+		}
+	}
+
+	/** 一帧的 {@code atMs}；心跳帧返回 0（业务活动锚点必须排除心跳）。 */
+	private long businessFrameAtMs(byte[] raw) {
+		if (raw == null) {
+			return 0L;
+		}
+		try {
+			JsonNode node = this.mapper.readTree(raw);
+			if (HEARTBEAT_TYPE.equals(node.path("type").asText())) {
+				return 0L;
+			}
+			JsonNode atMs = node.get("atMs");
+			return atMs == null ? 0L : atMs.asLong();
+		}
+		catch (Exception ex) {
+			return 0L;
+		}
+	}
+
+	/** Stream 记录里的 {@code frame} 字段原文（字段缺失返回 null）。 */
+	private static byte[] frameFieldOf(ByteRecord record) {
+		for (Map.Entry<byte[], byte[]> entry : record.getValue().entrySet()) {
+			if ("frame".equals(new String(entry.getKey(), StandardCharsets.UTF_8))) {
+				return entry.getValue();
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * 心跳活动戳的时刻（无则 0）。
+	 *
+	 * <p>只由心跳帧（以及作为"任何活动"兜底的写口）刷新，<b>不</b>代表业务前进。
+	 */
 	public long lastBeatAtMs(String runId) {
 		try {
 			String raw = this.redis.opsForValue().get(beatKey(runId));
@@ -1638,6 +2221,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			return 0L;
 		}
 	}
+
 
 	/**
 	 * 该轮已落档帧的最大序号（T6）：序号单调，故只读最后一帧；

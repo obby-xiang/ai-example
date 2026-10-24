@@ -1,0 +1,32 @@
+# 原生 Redis Cluster（3 主 3 从 / 16384 槽）profile —— B23L1 批① Cluster 硬阻断。
+#
+# 用法：`--spring.profiles.active=cluster`（或 SPRING_PROFILES_ACTIVE=cluster）叠加在默认配置之上；
+# **不带该 profile 时行为与改造前完全一致**（standalone 单节点，application.yml 的 host/port 生效）。
+#
+# 为什么单独成 profile：
+#   · 连接拓扑不同（cluster nodes vs host/port），但除拓扑外的超时/连接池口径必须与 standalone 同值
+#     （R4 裁决的 2s 命令超时与连接超时是"Redis 不可用 ⇒ 端点 503 ≤2s"的前提，换拓扑不该改它）；
+#   · 键名与脚本的 Cluster 适配（hash tag / 取号外置）是**代码面**改造，与本 profile 无关 ——
+#     即 profile 只决定"连到哪种拓扑"，不决定"键长什么样"（键名不随 profile 分叉，否则数据面会分裂）。
+spring:
+  config:
+    activate:
+      on-profile: cluster
+
+  data:
+    redis:
+      # 种子节点：Lettuce 从任一种子拉 CLUSTER NODES 得到全拓扑，之后按 MOVED/ASK 重定向。
+      # 三主三从的最小种子 = 3 个主节点地址；env 用逗号分隔（例：10.0.0.11:6379,10.0.0.12:6379,10.0.0.13:6379）。
+      #
+      # **故意不写默认值**（评审 Minor 4）：默认值的后果是"生产漏配 env ⇒ 静默连 127.0.0.1:7000 起不来
+      # 却看不出原因"。写成无默认占位符后，占位符解析失败发生在**绑定 RedisProperties 时**，
+      # 启动直接 fail-fast 并点名 AI_REDIS_CLUSTER_NODES。
+      cluster:
+        nodes: ${AI_REDIS_CLUSTER_NODES}
+        # 重定向跳数上限：跨槽迁移（resharding）期间一次请求最多跟着 MOVED/ASK 跳几次。
+        max-redirects: 3
+      # 与 standalone 同口径（见 application.yml 的 R4 注）；cluster 生效时 host/port 被忽略。
+      timeout: 2s
+      connect-timeout: 2s
+      lettuce:
+        shutdown-timeout: 200ms

@@ -21,22 +21,28 @@ import lombok.Getter;
 public class StreamViolationException extends RuntimeException {
 
 	/** 取消（用户/前端主动取消，终态为 {@code done{cancelled:true}}，永不重试）。 */
-	public static final String CANCELLED = "AI_RUN_CANCELLED";
+	public static final String CANCELLED = ErrorCodes.AI_RUN_CANCELLED;
 
 	/** 首包静默超时（{@code app.ai.resilience.first-byte-timeout}）。 */
-	public static final String FIRST_BYTE_TIMEOUT = "UPSTREAM_FIRST_BYTE_TIMEOUT";
+	public static final String FIRST_BYTE_TIMEOUT = ErrorCodes.UPSTREAM_FIRST_BYTE_TIMEOUT;
 
 	/** 事件间静默超时（{@code app.ai.resilience.inter-event-timeout}）。 */
-	public static final String SILENT_TIMEOUT = "UPSTREAM_SILENT_TIMEOUT";
+	public static final String SILENT_TIMEOUT = ErrorCodes.UPSTREAM_SILENT_TIMEOUT;
 
 	/** 单轮总预算耗尽（{@code app.ai.resilience.total-budget}）。 */
-	public static final String TOTAL_BUDGET = "TOTAL_BUDGET_EXCEEDED";
+	public static final String TOTAL_BUDGET = ErrorCodes.TOTAL_BUDGET_EXCEEDED;
 
 	/** 缺终帧：流"正常"结束却从未出现带 finishReason 的终帧（TCP 静默 FIN 的典型形态）。 */
-	public static final String INCOMPLETE = "UPSTREAM_STREAM_INCOMPLETE";
+	public static final String INCOMPLETE = ErrorCodes.UPSTREAM_STREAM_INCOMPLETE;
 
 	/** 连接被中断（premature close / reset / EOF）。 */
-	public static final String CONNECTION_BROKEN = "UPSTREAM_CONNECTION_BROKEN";
+	public static final String CONNECTION_BROKEN = ErrorCodes.UPSTREAM_CONNECTION_BROKEN;
+
+	/**
+	 * 运行时基础设施状态未知（N-1）：典型是取消标志读不出来。它<b>不是</b>用户取消，
+	 * 不得走 {@link #CANCELLED} 的取消收尾/ALREADY_CANCELLED；按普通可重试错误收尾。
+	 */
+	public static final String STATE_UNAVAILABLE = ErrorCodes.AI_REDIS_UNAVAILABLE;
 
 	/** 其它上游流错误。 */
 	public static final String STREAM_ERROR = ErrorCodes.UPSTREAM_STREAM_ERROR;
@@ -47,7 +53,7 @@ public class StreamViolationException extends RuntimeException {
 	 * <p>刻意<b>不</b>进 {@link #brokenStream()}：同一份超大请求重发一次只会再超一次，
 	 * 重试只会浪费预算并拖长用户等待；它需要的是人工/后续轮次的压缩，不是重连。
 	 */
-	public static final String CONTEXT_OVERFLOW = "CONTEXT_OVERFLOW";
+	public static final String CONTEXT_OVERFLOW = ErrorCodes.CONTEXT_OVERFLOW;
 
 	private final String code;
 
@@ -65,7 +71,7 @@ public class StreamViolationException extends RuntimeException {
 	public boolean brokenStream() {
 		return FIRST_BYTE_TIMEOUT.equals(this.code) || SILENT_TIMEOUT.equals(this.code)
 				|| INCOMPLETE.equals(this.code) || CONNECTION_BROKEN.equals(this.code)
-				|| STREAM_ERROR.equals(this.code);
+				|| STREAM_ERROR.equals(this.code) || STATE_UNAVAILABLE.equals(this.code);
 	}
 
 }

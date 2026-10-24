@@ -41,7 +41,7 @@ class RunStoreSaveSuspendedTest {
 		snapshot.setSessionId("s-1");
 		snapshot.setStatus(RunSnapshot.RUNNING);
 		snapshot.setCreatedAtMs(1L);
-		when(this.redis.opsForValue().get("ai:run:" + RUN_ID)).thenReturn(this.mapper.writeValueAsString(snapshot));
+		when(this.redis.opsForValue().get(RunStore.runScopedKey(RunStore.RUN_PREFIX, RUN_ID))).thenReturn(this.mapper.writeValueAsString(snapshot));
 
 		PendingToolCall settled = pending("c-settled", PendingToolCall.PRECHECK_FAILED);
 		settled.setRequestedAtMs(100L);
@@ -53,8 +53,8 @@ class RunStoreSaveSuspendedTest {
 		assertThat(settled.getRequestedAtMs()).as("已结算条目的请求时刻不得被覆写").isEqualTo(100L);
 		assertThat(settled.getResolvedAtMs()).isEqualTo(200L);
 		assertThat(waiting.getRequestedAtMs()).isPositive();
-		verify(this.redis.opsForHash(), times(1)).put(eq("ai:pending:" + RUN_ID), eq("c-waiting"), anyString());
-		verify(this.redis.opsForHash(), never()).put(eq("ai:pending:" + RUN_ID), eq("c-settled"), any());
+		verify(this.redis.opsForHash(), times(1)).put(eq(RunStore.runScopedKey(RunStore.PENDING_PREFIX, RUN_ID)), eq("c-waiting"), anyString());
+		verify(this.redis.opsForHash(), never()).put(eq(RunStore.runScopedKey(RunStore.PENDING_PREFIX, RUN_ID)), eq("c-settled"), any());
 	}
 
 	private static PendingToolCall pending(String toolCallId, String status) {

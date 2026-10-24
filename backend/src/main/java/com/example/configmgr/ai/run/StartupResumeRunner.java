@@ -33,9 +33,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <li><b>只续"已有人类结论/无外部输入需求"的轮次</b>：仍 {@code PENDING} 的确认门/前端工具一律
  * 跳过（{@code PENDING_UNRESOLVED}）—— 自动补执行的前提永远是"人已经在挂起当时给过决策"
  * （{@code APPROVED}）或"本来就是后端工具"，因此自动续跑不会代替人做危险操作的批准；</li>
- * <li><b>僵尸轮（N3）显式接管</b>：状态停在 {@code RUNNING} 且 {@code updatedAtMs} 超过
- * {@code app.ai.resume.zombie-age} 的轮次判为上一进程的遗体，才允许带 {@code forceTakeover=true}
- * 续跑；否则保持"RUNNING 一律 409"的保守语义。</li>
+ * <li><b>僵尸轮（N3）显式接管</b>：状态停在 {@code RUNNING} 且<b>最后一条非心跳业务帧</b>超过
+ * {@code app.ai.resume.zombie-age} 的轮次判为上一进程的遗体（心跳不算业务活动），才允许带
+ * {@code forceTakeover=true} 续跑；否则保持"RUNNING 一律 409"的保守语义。</li>
  * </ol>
  *
  * <p>

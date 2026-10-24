@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.form;
 
+import com.example.configmgr.common.AiStateUnavailableException;
 import org.junit.jupiter.api.Test;
 
 import java.util.LinkedHashMap;
@@ -75,6 +76,47 @@ class GenerativeFormAttachmentGateTest {
 	}
 
 	@Test
+	void registryUnavailableBecomesTypedRetryableIssue() {
+		InMemoryStore unavailable = new InMemoryStore();
+		unavailable.failReads = true;
+		GenerativeFormGuard failingGuard = new GenerativeFormGuard(
+				new com.fasterxml.jackson.databind.ObjectMapper(), unavailable);
+		FormAttachmentStore.Attachment attachment = new FormAttachmentStore.Attachment("att_blocked0001", "run-1",
+				"call-1", "sess-1", "evidence.pdf", 1024, "application/pdf", "/tmp/evidence.pdf");
+		unavailable.items.put(attachment.fileId(), attachment);
+
+		FrontendToolGuardVerdict verdict = new FrontendToolGuardVerdict(
+				failingGuard.inspectResult("run-1", "call-1", ARGS,
+						"{\"evidence\":\"" + attachment.fileId() + "\"}").accepted(),
+				failingGuard.inspectResult("run-1", "call-1", ARGS,
+						"{\"evidence\":\"" + attachment.fileId() + "\"}").issues(),
+				null);
+
+		assertThat(verdict.accepted()).isFalse();
+		assertThat(verdict.issues()).extracting(FormIssue::code)
+			.containsExactly(FormIssueCodes.ATTACHMENT_UNAVAILABLE);
+		assertThat(verdict.issues().get(0).message()).doesNotContain("AiStateUnavailableException")
+			.doesNotContain("Redis");
+	}
+
+	@Test
+	void consumeUnavailableAlsoBecomesTypedRetryableIssue() {
+		InMemoryStore unavailable = new InMemoryStore();
+		unavailable.failConsume = true;
+		GenerativeFormGuard failingGuard = new GenerativeFormGuard(
+				new com.fasterxml.jackson.databind.ObjectMapper(), unavailable);
+		FormAttachmentStore.Attachment attachment = unavailable.register("run-1", "call-1", "sess-1",
+				"evidence.pdf", 1024, "application/pdf", "/tmp/evidence.pdf");
+
+		var verdict = failingGuard.inspectResult("run-1", "call-1", ARGS,
+				"{\"evidence\":\"" + attachment.fileId() + "\"}");
+
+		assertThat(verdict.accepted()).isFalse();
+		assertThat(verdict.issues()).extracting(FormIssue::code)
+			.containsExactly(FormIssueCodes.ATTACHMENT_UNAVAILABLE);
+	}
+
+	@Test
 	void optionSourceRegistryIsAClosedSet() {
 		FormOptionSource fake = new FormOptionSource() {
 			@Override
@@ -115,6 +157,10 @@ class GenerativeFormAttachmentGateTest {
 
 		private final AtomicInteger seq = new AtomicInteger();
 
+		private boolean failReads;
+
+		private boolean failConsume;
+
 		@Override
 		public Attachment register(String runId, String toolCallId, String sessionId, String fileName, long size,
 				String contentType, String storagePath) {
@@ -127,11 +173,17 @@ class GenerativeFormAttachmentGateTest {
 
 		@Override
 		public Attachment find(String fileId) {
+			if (this.failReads) {
+				throw new AiStateUnavailableException("模拟 Redis 读失败（内部细节）");
+			}
 			return this.items.get(fileId);
 		}
 
 		@Override
 		public boolean consume(String fileId) {
+			if (this.failConsume) {
+				throw new AiStateUnavailableException("模拟 Redis 消费失败（内部细节）");
+			}
 			if (this.items.remove(fileId) != null) {
 				this.consumed.add(fileId);
 				return true;

@@ -4,6 +4,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.context.i18n.LocaleContextHolder;
 import org.springframework.context.support.ResourceBundleMessageSource;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
@@ -11,6 +13,7 @@ import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.web.servlet.LocaleResolver;
 
 import java.nio.charset.StandardCharsets;
+import java.sql.SQLException;
 import java.util.List;
 import java.util.Locale;
 
@@ -178,6 +181,35 @@ class GlobalExceptionHandlerTest {
         traditional.addHeader("Accept-Language", "zh-TW");
         Locale resolved = resolver.resolveLocale(traditional);
         assertEquals("zh", resolved.getLanguage(), "zh-TW 应回落 messages_zh 链");
+    }
+
+    @Test
+    void foreignKeyViolationMapsTo409BusinessConflict() {
+        DataIntegrityViolationException error = new DataIntegrityViolationException(
+                "could not execute statement",
+                new SQLException("Referential integrity constraint violation", "23506", 23506));
+
+        ResponseEntity<?> response = handlerWithMessages().handleDataIntegrity(
+                error, new MockHttpServletRequest("POST", "/api/tasks/1/files/upload"));
+
+        assertEquals(HttpStatus.CONFLICT, response.getStatusCode());
+        ApiResponse<?> body = assertInstanceOf(ApiResponse.class, response.getBody());
+        assertEquals(ErrorCodes.ILLEGAL_STATE, body.getCode());
+        assertNotNull(body.getMessage());
+    }
+
+    @Test
+    void nonForeignKeyIntegrityViolationStays500() {
+        DataIntegrityViolationException error = new DataIntegrityViolationException(
+                "could not execute statement",
+                new SQLException("Unique index or primary key violation", "23505", 23505));
+
+        ResponseEntity<?> response = handlerWithMessages().handleDataIntegrity(
+                error, new MockHttpServletRequest("POST", "/api/tasks/1/files/upload"));
+
+        assertEquals(HttpStatus.INTERNAL_SERVER_ERROR, response.getStatusCode());
+        ApiResponse<?> body = assertInstanceOf(ApiResponse.class, response.getBody());
+        assertEquals(ErrorCodes.INTERNAL_ERROR, body.getCode());
     }
 
     @Test

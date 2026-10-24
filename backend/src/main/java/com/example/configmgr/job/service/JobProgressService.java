@@ -11,6 +11,8 @@ import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * 作业进度快照写入器（ADR-8 修正⑤ / Q16⑤ / W2）。
@@ -34,13 +36,32 @@ import java.time.LocalDateTime;
  * 既有前端 {@code latestJob.progress / latestJob.total} 的百分比算法因此天然成立且运行中非 0。
  *
  * <h2>与执行器事务的关系</h2>
- * 执行器不得在自己事务内写 jobs / job_items 行（否则会与本类争锁）：本类是这两张表
- * 唯一的写入者。作业行终态（COMPLETED/FAILED/CANCELLED）也走这里，由执行器在
- * 数据面事务提交后调用，保证"快照说完成时数据已落库"。
+ * 执行器不得在自己事务内写 jobs / job_items 行（否则会与本类争锁）：运行中的状态/进度写都走这里，
+ * 且本类的作业行/条目行写一律用条件 UPDATE（在途 + 子项未终态）。作业行终态
+ * （COMPLETED/FAILED/CANCELLED）也走这里，由执行器在数据面事务提交后调用，
+ * 保证"快照说完成时数据已落库"。
+ *
+ * <p><b>不再宣称"唯一写入者"</b>：{@link JobService#cancel} 用条件 UPDATE 写作业终态，
+ * {@link PrecheckJobRunner#writeFingerprintSummary} 定向写 {@code result_json}；
+ * {@link StaleJobRecoveryRunner} <b>仍</b>按 {@code findAll → setStatus → save} 整行写
+ * （{@code Job} 无 {@code @DynamicUpdate}），该风险归 R1-10，不在本批收口范围。
  */
 @Slf4j
 @Service
 public class JobProgressService {
+
+    /** 可写入终态/进度的在途状态；条件 UPDATE 的 {@code IN} 白名单。 */
+    private static final List<Job.JobStatus> IN_FLIGHT =
+            List.of(Job.JobStatus.PENDING, Job.JobStatus.RUNNING);
+
+    /** 子项仍未收终态（允许继续写进度/终态）；已 COMPLETED/FAILED/CANCELLED 的条目一律拒绝迟到写。 */
+    private static final List<String> ITEM_OPEN = List.of("PENDING", "RUNNING");
+
+    /**
+     * 失败补偿可降级的条目状态（I-4）：成功路径先写 COMPLETED、后续写盘/任务项更新失败时，
+     * 同一轮 catch 允许 COMPLETED→FAILED。CANCELLED 不在此列，取消语义不可被补偿翻写。
+     */
+    private static final List<String> COMPENSABLE_ITEM = List.of("PENDING", "RUNNING", "COMPLETED");
 
     private final JobRepository jobRepository;
     private final JobItemRepository jobItemRepository;
@@ -67,23 +88,22 @@ public class JobProgressService {
      */
     public void markRunning(Long jobId, int totalRows) {
         heartbeatRegistry.beat(jobId);
-        requiresNew.executeWithoutResult(status -> jobRepository.findById(jobId).ifPresent(job -> {
-            if (job.getStatus() != Job.JobStatus.PENDING) {
-                // 已被取消（或已是终态）：开工写入退让，避免把取消态改回运行态
-                job.setTotal(totalRows);
-                return;
-            }
-            job.setStatus(Job.JobStatus.RUNNING);
-            job.setStartedAt(LocalDateTime.now());
-            job.setTotal(totalRows);
-            jobRepository.save(job);
-        }));
+        // R1-11 同族：开工也走条件 UPDATE —— 读-判-写会让取消在两步之间提交后被整行 save 翻回 RUNNING。
+        requiresNew.executeWithoutResult(status ->
+                jobRepository.markRunningIfPending(jobId, Job.JobStatus.RUNNING, Job.JobStatus.PENDING,
+                        LocalDateTime.now(), totalRows));
     }
 
-    /** 分片边界：回写行级 processed/total（独立事务，只写这两列）。 */
+    /**
+     * 分片边界：回写行级 processed/total（独立事务，只写这两列）。
+     *
+     * <p>R1-11：条件里带 {@code status IN (PENDING, RUNNING)} —— 终态之后到达的旧快照影响 0 行，
+     * 不会把已完成的进度写回低值。
+     */
     public void snapshot(Long jobId, int processed, int total) {
         heartbeatRegistry.beat(jobId);
-        requiresNew.executeWithoutResult(status -> jobRepository.updateProgress(jobId, processed, total));
+        requiresNew.executeWithoutResult(status ->
+                jobRepository.updateProgressIfInFlight(jobId, processed, total, IN_FLIGHT));
     }
 
     /**
@@ -104,24 +124,21 @@ public class JobProgressService {
      */
     public boolean finish(Long jobId, Job.JobStatus jobStatus, int errorCount, int warningCount,
                        int processed, int total) {
+        // 死锁不变量（R1-13/I-3）：本方法必须走内部的 REQUIRES_NEW 事务并先提交 job 行，
+        // 让 job 行锁在 JobTerminalWriter 写 task 前释放。改成 REQUIRED 会形成
+        // “持 job 锁 → 等 task 锁”，与 TaskService.delete 的 task → job 顺序成环。
         heartbeatRegistry.beat(jobId);
-        boolean wroteTerminal = Boolean.TRUE.equals(requiresNew.execute(status -> jobRepository.findById(jobId)
-                .map(job -> {
-                    if (job.getStatus() != Job.JobStatus.PENDING && job.getStatus() != Job.JobStatus.RUNNING) {
-                        return false;
-                    }
-                    job.setStatus(jobStatus);
-                    job.setErrorCount(errorCount);
-                    job.setWarningCount(warningCount);
-                    job.setProgress(processed);
-                    job.setTotal(total);
-                    job.setFinishedAt(LocalDateTime.now());
-                    jobRepository.save(job);
-                    return true;
-                })
-                .orElse(false)));
-        // 入口 beat 已把条目写回登记簿：写入成功与被拦路径都必须清（F1b，否则条目无清理点）
-        heartbeatRegistry.clear(jobId);
+        final boolean wroteTerminal;
+        try {
+            // R1-11：终态判定下沉到数据库 —— 单条条件 UPDATE 的影响行数就是「谁胜出」。
+            // 读-判-写在应用层跨进程不成立（两个写者都读到 RUNNING 时会双双写终态）。
+            wroteTerminal = Boolean.TRUE.equals(requiresNew.execute(status ->
+                    jobRepository.finishIfInFlight(jobId, jobStatus, errorCount, warningCount,
+                            processed, total, LocalDateTime.now(), IN_FLIGHT) > 0));
+        } finally {
+            // 入口 beat 已把条目写回登记簿：写入成功、被拦与异常路径都必须清（F1b）
+            heartbeatRegistry.clear(jobId);
+        }
         if (!wroteTerminal) {
             log.debug("作业 #{} 已收终态，忽略本次 finish({}) 调用（先到者胜，后到者不覆盖）",
                     jobId, jobStatus);
@@ -144,41 +161,154 @@ public class JobProgressService {
         });
     }
 
-    /** 配置项进度：分片边界回写 processed/total。 */
-    public void updateItem(Long itemId, int processed, int total) {
-        requiresNew.executeWithoutResult(status -> jobItemRepository.findById(itemId).ifPresent(item -> {
-            item.setProcessed(processed);
-            item.setTotal(total);
-            jobItemRepository.save(item);
-        }));
+    /**
+     * 配置项进度：分片边界回写 processed/total（I-3：父作业在途 + 条目未终态才写）。
+     *
+     * @return true = 实际落写；false = 父作业已终态或条目已收终态，本次迟到写被丢弃
+     */
+    public boolean updateItem(Long itemId, int processed, int total) {
+        return Boolean.TRUE.equals(requiresNew.execute(status ->
+                jobItemRepository.updateProgressIfJobInFlightAndItemOpen(
+                        itemId, processed, total, ITEM_OPEN, IN_FLIGHT) > 0));
     }
 
-    /** 配置项终态：状态 + 进度。 */
-    public void finishItem(Long itemId, String itemStatus, int processed, int total) {
-        requiresNew.executeWithoutResult(status -> jobItemRepository.findById(itemId).ifPresent(item -> {
-            item.setStatus(itemStatus);
-            item.setProcessed(processed);
-            item.setTotal(total);
-            jobItemRepository.save(item);
+    /**
+     * 配置项终态：状态 + 进度（R1-11 / I-3：同一条 UPDATE 核父作业终态与条目自身终态）。
+     *
+     * <p>作业被取消/判死之后，执行器仍可能在下一个配置项边界写条目终态。
+     * 条件 UPDATE 只允许「父作业在途」或「条目状态与父作业终态一致」两种形态，
+     * 且条目本身必须仍未收终态：
+     * 取消路径的 {@code finishItem(..., "CANCELLED", ...)} 仍能把条目收成 CANCELLED，
+     * 而父作业已 CANCELLED 时迟到的 COMPLETED、或条目已终态后的任何迟到写影响 0 行。
+     *
+     * @return true = 实际落写；false = 父作业终态与条目状态冲突、条目已终态（或不存在），本次写被丢弃
+     */
+    public boolean finishItem(Long itemId, String itemStatus, int processed, int total) {
+        if (itemStatus == null) {
+            log.warn("作业条目 #{} 的终态写缺少目标状态，已丢弃", itemId);
+            return false;
+        }
+        List<Job.JobStatus> allowed = allowedJobStatuses(itemStatus);
+        boolean wrote = Boolean.TRUE.equals(requiresNew.execute(status ->
+                jobItemRepository.finishIfJobStatusAllowed(
+                        itemId, itemStatus, processed, total, ITEM_OPEN, allowed) > 0));
+        if (!wrote) {
+            log.debug("作业条目 #{} 的终态写被丢弃（父作业终态冲突、条目已终态或条目不存在）：{}",
+                    itemId, itemStatus);
+        }
+        return wrote;
+    }
+
+    /** 允许的父作业状态：在途 + 与条目目标一致的那个终态（取消补偿/失败补记同态幂等）。 */
+    private static List<Job.JobStatus> allowedJobStatuses(String itemStatus) {
+        List<Job.JobStatus> allowed = new ArrayList<>(IN_FLIGHT);
+        Job.JobStatus matchingTerminal = matchingTerminal(itemStatus);
+        if (matchingTerminal != null) {
+            allowed.add(matchingTerminal);
+        }
+        return allowed;
+    }
+
+    private static Job.JobStatus matchingTerminal(String itemStatus) {
+        if (itemStatus == null) {
+            return null;
+        }
+        return switch (itemStatus) {
+            case "COMPLETED" -> Job.JobStatus.COMPLETED;
+            case "FAILED" -> Job.JobStatus.FAILED;
+            case "CANCELLED" -> Job.JobStatus.CANCELLED;
+            default -> null;
+        };
+    }
+
+    /**
+     * 失败补偿（I-4，按条目 id）：仅允许父作业仍在途时把条目降级为 FAILED。
+     *
+     * <p>这是执行器 catch 的专用路径，不是通用终态写：允许条目状态
+     * {@code PENDING/RUNNING/COMPLETED} → FAILED（成功路径先写 COMPLETED、随后写盘失败时
+     * 需要回退），但 CANCELLED 条目与已终态父作业一律 0 行 —— 不放松取消保护。
+     *
+     * @return true = 实际降级；false = 父作业已终态或条目已 CANCELLED/FAILED
+     */
+    public boolean compensateItemFailure(Long itemId, int processed, int total) {
+        boolean wrote = Boolean.TRUE.equals(requiresNew.execute(status ->
+                jobItemRepository.compensateFailureIfInFlight(
+                        itemId, processed, total, COMPENSABLE_ITEM, IN_FLIGHT) > 0));
+        if (!wrote) {
+            log.debug("作业条目 #{} 的失败补偿被丢弃（父作业已终态或条目已 CANCELLED/FAILED）", itemId);
+        }
+        return wrote;
+    }
+
+    /**
+     * 失败补偿（I-4，按业务键）：发布硬错误路径只有 jobId + defCode。
+     * 条目存在时走同一条条件降级；缺失时先锁父作业行，仅在父作业仍在途时插入 FAILED 条目。
+     *
+     * @return true = 实际降级/插入；false = 父作业已终态或条目已 CANCELLED/FAILED
+     */
+    public boolean compensateItemFailure(Long jobId, String defCode, int processed, int total) {
+        return Boolean.TRUE.equals(requiresNew.execute(status -> {
+            JobItem existing = jobItemRepository.findByJobIdAndDefCode(jobId, defCode).orElse(null);
+            if (existing != null) {
+                return jobItemRepository.compensateFailureIfInFlight(
+                        existing.getId(), processed, total, COMPENSABLE_ITEM, IN_FLIGHT) > 0;
+            }
+            Job parent = jobRepository.findByIdForUpdate(jobId).orElse(null);
+            if (parent == null || !IN_FLIGHT.contains(parent.getStatus())) {
+                log.debug("作业条目失败补偿未插入（父作业不存在或已终态）：jobId={} defCode={}",
+                        jobId, defCode);
+                return false;
+            }
+            JobItem created = new JobItem();
+            created.setJobId(jobId);
+            created.setDefCode(defCode);
+            created.setStatus("FAILED");
+            created.setProcessed(processed);
+            created.setTotal(total);
+            jobItemRepository.save(created);
+            return true;
         }));
     }
 
     /**
      * 记录一个"已失败/已取消的配置项"，供执行器在数据面回滚之后补记
      * （发布作业硬错误路径：job_items 已由本类提交，补记必须 update 而非 insert）。
+     *
+     * <p>I-3：存在条目时走与 {@link #finishItem} 相同的条件 UPDATE（父作业终态/条目终态冲突即 0 行）；
+     * 不存在时先对父作业行加悲观写锁再检查状态，避免"检查在途 → 取消提交 → 插入终态条目"的窗口。
+     *
+     * @return true = 实际落写/插入；false = 父作业或条目终态不接受本次写
      */
-    public void markItemFinal(Long jobId, String defCode, String itemStatus, int processed, int total) {
-        requiresNew.executeWithoutResult(status -> {
-            JobItem item = jobItemRepository.findByJobIdAndDefCode(jobId, defCode).orElseGet(() -> {
-                JobItem created = new JobItem();
-                created.setJobId(jobId);
-                created.setDefCode(defCode);
-                return created;
-            });
-            item.setStatus(itemStatus);
-            item.setProcessed(processed);
-            item.setTotal(total);
-            jobItemRepository.save(item);
-        });
+    public boolean markItemFinal(Long jobId, String defCode, String itemStatus, int processed, int total) {
+        if (itemStatus == null) {
+            log.warn("作业条目补记缺少目标状态 jobId={} defCode={}，已丢弃", jobId, defCode);
+            return false;
+        }
+        return Boolean.TRUE.equals(requiresNew.execute(status -> {
+            JobItem existing = jobItemRepository.findByJobIdAndDefCode(jobId, defCode).orElse(null);
+            if (existing != null) {
+                boolean wrote = jobItemRepository.finishIfJobStatusAllowed(existing.getId(), itemStatus,
+                        processed, total, ITEM_OPEN, allowedJobStatuses(itemStatus)) > 0;
+                if (!wrote) {
+                    log.debug("作业条目 #{} 的补记被丢弃（父作业/条目已终态）：jobId={} defCode={} status={}",
+                            existing.getId(), jobId, defCode, itemStatus);
+                }
+                return wrote;
+            }
+            Job parent = jobRepository.findByIdForUpdate(jobId).orElse(null);
+            if (parent == null || !allowedJobStatuses(itemStatus).contains(parent.getStatus())) {
+                log.debug("作业条目补记未插入（父作业不存在或已终态）：jobId={} defCode={} status={}",
+                        jobId, defCode, itemStatus);
+                return false;
+            }
+            JobItem created = new JobItem();
+            created.setJobId(jobId);
+            created.setDefCode(defCode);
+            created.setStatus(itemStatus);
+            created.setProcessed(processed);
+            created.setTotal(total);
+            jobItemRepository.save(created);
+            return true;
+        }));
     }
 }

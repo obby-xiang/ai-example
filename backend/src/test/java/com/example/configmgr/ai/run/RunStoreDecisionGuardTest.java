@@ -26,7 +26,7 @@ class RunStoreDecisionGuardTest {
 
 	private static final String CALL_ID = "call-1";
 
-	private static final String DECIDED_KEY = RunStore.DECIDED_PREFIX + RUN_ID;
+	private static final String DECIDED_KEY = RunStore.runScopedKey(RunStore.DECIDED_PREFIX, RUN_ID);
 
 	private final FakeLeaseRedis fake = new FakeLeaseRedis();
 

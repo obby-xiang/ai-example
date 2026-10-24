@@ -198,6 +198,20 @@ public final class ContextCompactor {
 	 * 写台账。任一 L2/L3 步骤失败 ⇒ 返回<b>原消息列表</b>（连 L1 那一步也不落地），fuse 计数 +1。
 	 */
 	public Outcome compact(Request request) {
+		return compact(request, null);
+	}
+
+	/**
+	 * 压缩（带"每次摘要完成"进度回调；R1-09 M-1）。
+	 *
+	 * <p>
+	 * 续跑路径在压缩期间既没有业务帧、也没有心跳：L2 的 N 次串行摘要每次最长 60s，累计可能超过
+	 * 僵尸窗口（租约不可用/丢租时会被别的实例接管）。回调在<b>每次</b> {@code summarize} 返回/抛出后
+	 * 执行一次（失败也算"这一轮还在前进"），由调用方刷新业务锚点，把单次静默压回摘要超时上限。
+	 *
+	 * @param onSummaryProgress 每次摘要尝试结束后的回调（null = 不回调）
+	 */
+	public Outcome compact(Request request, Runnable onSummaryProgress) {
 		List<Message> original = request.messages() == null ? List.of() : request.messages();
 		ContextState state = readState(request.sessionId());
 		int limit = limitTokens(request.providerId(), request.model());
@@ -247,11 +261,12 @@ public final class ContextCompactor {
 		try {
 			if (target == ContextTrigger.Level.L2) {
 				reason = RollingSummarizer.REASON_SUMMARY;
-				if (this.summarizer == null) {
+				RollingSummarizer.Summarizer summarizer = withProgress(this.summarizer, onSummaryProgress);
+				if (summarizer == null) {
 					return failSummary(request, state, fuse, now, before, limit, decision, REASON_SUMMARY_UNAVAILABLE);
 				}
 				RollingSummarizer.Plan summary = RollingSummarizer.plan(current, config.getKeepRecentTurns(),
-						config.getChunkTokens(), request.protectedToolCallIds(), this.summarizer, now);
+						config.getChunkTokens(), request.protectedToolCallIds(), summarizer, now);
 				if (!summary.changed()) {
 					if (!RollingSummarizer.REASON_NOTHING_TO_SUMMARIZE.equals(summary.reason())) {
 						return failSummary(request, state, fuse, now, before, limit, decision, REASON_SUMMARY_FAILED);
@@ -438,6 +453,31 @@ public final class ContextCompactor {
 		event.put("circuit", state.circuit() == null ? CompactionFuse.CLOSED : state.circuit());
 		event.put("fails", state.fuseFails());
 		return event;
+	}
+
+	/**
+	 * 给摘要器包一层"每次尝试结束"回调（成功/失败都算一次前进）。
+	 *
+	 * <p>回调本身必须极轻（续跑路径传的是 {@code touchBusinessActivity}：一条单键 Lua）；
+	 * 回调抛异常也不能改写摘要结果 —— 用 {@code finally} 执行并吃掉回调节点的异常。
+	 */
+	private static RollingSummarizer.Summarizer withProgress(RollingSummarizer.Summarizer delegate, Runnable hook) {
+		if (delegate == null || hook == null) {
+			return delegate;
+		}
+		return prompt -> {
+			try {
+				return delegate.summarize(prompt);
+			}
+			finally {
+				try {
+					hook.run();
+				}
+				catch (RuntimeException ex) {
+					log.debug("摘要进度回调失败（忽略，不影响压缩）：{}", ex.getMessage());
+				}
+			}
+		};
 	}
 
 }

@@ -49,7 +49,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * <ul>
  * <li>{@code key_ref=ENV} ⇒ 运行时从 {@code spring.ai.openai.api-key} 读（env key <b>从不</b>落库）；</li>
  * <li>{@code key_ref=DB} ⇒ 用 {@link AiKeyCipher} 解密 {@code key_cipher}；KEK 缺失/不符 ⇒
- * {@code KEY_UNREADABLE}，<b>绝不</b>回落到 env key（否则"为什么突然用错 key"无从排查）；</li>
+ * {@code AI_KEY_UNREADABLE}，<b>绝不</b>回落到 env key（否则"为什么突然用错 key"无从排查）；</li>
  * <li>{@code key_ref=NONE} ⇒ 缺失。</li>
  * </ul>
  */
@@ -68,15 +68,16 @@ public class AiConfigService {
     /** 种子行的上下文窗口占位值（UI 可改；上下文统计专项的分母初值）。 */
     public static final int ENV_SEED_MAX_CONTEXT = 128000;
 
-    /** 无 provider 时的 503 码与文案 —— 与批①之前<b>逐字相同</b>（前端与 E2E 的兼容基线）。 */
+    /** 无 provider 时的 503 码。 */
     public static final String CODE_UNAVAILABLE = ErrorCodes.AI_UNAVAILABLE;
 
-    public static final String LEGACY_UNAVAILABLE_REASON =
-            "AI 能力未启用：未配置 AI_API_KEY（或 DEEPSEEK_API_KEY）环境变量，AI 端点已惰性降级";
+    /** 无 provider 时的 503 文案（R-12：指向设置页；码仍是 {@code AI_UNAVAILABLE}）。 */
+    public static final String UNAVAILABLE_REASON =
+            "AI 能力未启用：请在「设置 → AI」配置供应商与 API Key";
 
     public static final String CODE_KEY_MISSING = ErrorCodes.AI_KEY_MISSING;
 
-    public static final String CODE_KEY_UNREADABLE = AiKeyCipher.CODE_KEY_UNREADABLE;
+    public static final String CODE_KEY_UNREADABLE = ErrorCodes.AI_KEY_UNREADABLE;
 
     private static final String DEFAULT_MODEL_FALLBACK = "deepseek-flash";
 
@@ -744,8 +745,8 @@ public class AiConfigService {
         ConfigSnapshot snap = current();
         List<AiProvider> enabled = effectiveProviders(snap).stream().filter(AiProvider::isEnabled).toList();
         if (enabled.isEmpty()) {
-            // 空表 + 无 env：与批①之前逐字相同的 503（前端与 E2E 的兼容基线）
-            return new Availability(false, CODE_UNAVAILABLE, LEGACY_UNAVAILABLE_REASON);
+            // 空表 + 无 env：码仍是兼容基线 AI_UNAVAILABLE；文案（R-12）改为指向设置页
+            return new Availability(false, CODE_UNAVAILABLE, UNAVAILABLE_REASON);
         }
         int missing = 0;
         int unreadable = 0;
@@ -760,11 +761,10 @@ public class AiConfigService {
         }
         if (unreadable > 0) {
             return new Availability(false, CODE_KEY_UNREADABLE,
-                    "AI 能力未启用：provider 的 key 无法解密（KEK 缺失/变更或密文损坏），请恢复 AI_SECRET_KEK 或重新录入 key");
+                    "AI 能力未启用：请到「设置 → AI」重新录入密钥，或让管理员恢复加密配置");
         }
         return new Availability(false, CODE_KEY_MISSING,
-                "AI 能力未启用：已配置的 provider 均无可用 key（key_ref=ENV 需设置 AI_API_KEY/DEEPSEEK_API_KEY，"
-                            + "或到设置页录入 key）");
+                "AI 能力未启用：请到「设置 → AI」为供应商录入 API Key");
     }
 
     public boolean hasUsableProvider() {

@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.run;
 
+import com.example.configmgr.common.ErrorBodyFactory;
 import com.example.configmgr.common.ErrorCodes;
 
 import com.example.configmgr.ai.config.AiConfigService;
@@ -22,6 +23,9 @@ import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.context.MessageSource;
+import org.springframework.context.NoSuchMessageException;
+import org.springframework.context.i18n.LocaleContextHolder;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Service;
@@ -30,6 +34,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -85,6 +90,18 @@ public class ResumeService {
 	/** 续跑原因：其余续跑入口（决策回灌、挂起重挂、调试直驱）—— "未标注原因"的兜底口径。 */
 	public static final String RESUME_REATTACH = "reattach";
 
+	/**
+	 * 续跑异常的<b>用户面</b>短句（R-08 白名单）。
+	 *
+	 * <p>原异常消息（上游 body / 客户端栈里带出的内部信息）只进日志；SSE {@code error} 帧、
+	 * 快照/界面能看到的只有这一句。与 {@code ResilientChatService} 的 {@code AI_RESUME_FAILED}
+	 * 白名单原文一致（同一码同一句，不另造第二套文案）。
+	 */
+	public static final String AI_RESUME_FAILED_MESSAGE = "续跑失败，请重试。";
+
+	/** en 白名单兜底（{@code messages_en} 缺失时仍不裸露原文）。 */
+	public static final String AI_RESUME_FAILED_MESSAGE_EN = "Could not resume the previous response. Please try again.";
+
 	private final RunStore store;
 
 	private final RunRegistry registry;
@@ -131,6 +148,15 @@ public class ResumeService {
 	@Autowired(required = false)
 	private AiConfigService aiConfigService;
 
+	/**
+	 * 用户面白名单文案的 locale 来源（I-5）。
+	 *
+	 * <p>字段注入与既有可选依赖同姿态（不改 10 参构造器）。未注入（直接 {@code new} 的单测）时，
+	 * en 回落 {@link #AI_RESUME_FAILED_MESSAGE_EN}，仍不暴露异常原文。
+	 */
+	@Autowired(required = false)
+	private MessageSource messageSource;
+
 	/** 进程内续跑互斥（同进程并发续跑的唯一闸；租约管的是跨实例）。 */
 	private final Map<String, Boolean> resuming = new ConcurrentHashMap<>();
 
@@ -154,6 +180,15 @@ public class ResumeService {
 
 		ACCEPTED, NOT_FOUND, ALREADY_DONE, ALREADY_RUNNING, PENDING_UNRESOLVED, IN_PROGRESS, POOL_SATURATED,
 		ALREADY_CANCELLED,
+
+		/**
+		 * C2：取消状态读不出来（Redis 故障/退避）。续跑是"开始执行"的副作用入口，按 fail-closed
+		 * 拒绝，但必须是 typed 结局（对外 503），不能再以 RuntimeException 穿透。
+		 */
+		CANCEL_STATE_UNKNOWN,
+
+		/** C2：待决条目本体读不出来（不是"没有未决"）；续跑是副作用入口，按未知拒绝。 */
+		STATE_UNKNOWN,
 
 		/**
 		 * B23L1 批②b：本轮的续跑权租约在<b>别的实例</b>手里（或调用方给的租约已过期）。
@@ -200,7 +235,7 @@ public class ResumeService {
 		public boolean releasesLease() {
 			return this == NOT_FOUND || this == ALREADY_DONE || this == ALREADY_CANCELLED
 					|| this == ALREADY_RUNNING || this == PENDING_UNRESOLVED || this == POOL_SATURATED
-					|| this == PROVIDER_GONE;
+					|| this == PROVIDER_GONE || this == CANCEL_STATE_UNKNOWN || this == STATE_UNKNOWN;
 		}
 
 	}
@@ -216,7 +251,8 @@ public class ResumeService {
 			if (snapshot == null) {
 				continue;
 			}
-			List<PendingToolCall> pendings = this.store.pendings(runId);
+			// C2：续跑入口的清单用非抛读口；guard 读失败时仍能拿到原始条目并按 PENDING 保守处理。
+			List<PendingToolCall> pendings = this.store.pendingsLenient(runId);
 			Map<String, Object> item = new LinkedHashMap<>();
 			item.put("runId", runId);
 			item.put("sessionId", snapshot.getSessionId());
@@ -234,13 +270,25 @@ public class ResumeService {
 			item.put("ledgerCounts", this.store.ledgerCounts(runId));
 			// 发现态的"可续跑性"判定（启动自动续跑与运维端点共用同一口径）：
 			// 取消标志（Redis 为准）> 终态 > 未决外部输入 > 僵尸 RUNNING（超龄）。
-			boolean cancelled = this.cancellations.isCancelled(runId);
+			// C2：发现/列表面 UNKNOWN 按"未取消 + 计数继续"（这里只是展示可续跑性，没有副作用）。
+			CancellationRegistry.CancelState cancelState = this.cancellations.cancelState(runId);
+			boolean cancelled = cancelState == CancellationRegistry.CancelState.CANCELLED;
+			if (cancelState == CancellationRegistry.CancelState.UNKNOWN) {
+				log.debug("发现态取消状态未知，按未取消继续展示 runId={}", runId);
+			}
 			long activeAtMs = activeAtMs(snapshot);
 			boolean zombie = RunSnapshot.RUNNING.equals(snapshot.getStatus())
 					&& System.currentTimeMillis() - activeAtMs > this.properties.getResume().getZombieAge()
 						.toMillis();
+			// I-4 / M-3：SUSPENDED 等人期间没有业务帧，心跳才是"还在等"的证据。
+			// 对外展示的 activeAgeMs 按状态取口径：RUNNING = 业务年龄（僵尸判据同源），
+			// SUSPENDED = max(业务, 心跳) 的年龄 —— 否则"挂起三天"会被读成"三天没动"。
+			long heartbeatAtMs = this.store.lastBeatAtMs(runId);
+			long livenessAtMs = RunSnapshot.SUSPENDED.equals(snapshot.getStatus())
+					? Math.max(activeAtMs, heartbeatAtMs) : activeAtMs;
 			item.put("activeAtMs", activeAtMs);
-			item.put("activeAgeMs", System.currentTimeMillis() - activeAtMs);
+			item.put("activeAgeMs", System.currentTimeMillis() - livenessAtMs);
+			item.put("lastHeartbeatAtMs", heartbeatAtMs);
 			item.put("zombieAgeThresholdMs", this.properties.getResume().getZombieAge().toMillis());
 			List<String> unresolvedExternal = pendings.stream()
 				.filter(pending -> PendingToolCall.PENDING.equals(pending.getStatus()))
@@ -260,18 +308,23 @@ public class ResumeService {
 	}
 
 	/**
-	 * 该轮的"活跃时刻"（R3 裁决）：取<b>较新者</b> ——
+	 * 该轮的"活跃时刻"（R3 裁决 / R1-09）：取<b>较新者</b> ——
 	 * 快照 {@code updatedAtMs}（工具落定/挂起/终态写入的时刻）与
-	 * {@link RunStore#lastEventAtMs(String)}（最后一帧的时刻：delta/heartbeat/tool_* 全在内）。
+	 * {@link RunStore#lastActivityAtMs(String)}（最后一条<b>非心跳</b>业务帧的时刻）。
 	 *
 	 * <p>
 	 * 为什么必须双条件：快照只在"轮次结构变化"时刷新，<b>长流式轮次</b>（一次模型调用吐几十秒正文、
 	 * 中途不落定任何工具）会让 {@code updatedAtMs} 长时间不动 —— 只看它就会把正在流式产出的活轮
-	 * 判成僵尸并强行接管（第二次执行同一轮）。帧时间戳覆盖了流式与挂起心跳，两者取较新即
-	 * "只要有活动就不算僵尸"。
+	 * 判成僵尸并强行接管（第二次执行同一轮）。业务帧时间戳覆盖了流式与工具帧，两者取较新即
+	 * "只要有业务前进就不算僵尸"。
+	 *
+	 * <p>
+	 * <b>为什么不用 {@link RunStore#lastEventAtMs(String)}</b>：那个口径包含心跳（"进程还活着"），
+	 * 而僵尸判据问的是"<b>业务</b>是否还在前进"。心跳一拍就刷新会让卡死的轮永远年轻（R1-09 的
+	 * "心跳掩盖卡死"）。挂起等人的轮状态是 {@code SUSPENDED}，本来就不在本判据的 RUNNING 分支里。
 	 */
 	public long activeAtMs(RunSnapshot snapshot) {
-		long lastEvent = this.store.lastEventAtMs(snapshot.getRunId());
+		long lastEvent = this.store.lastActivityAtMs(snapshot.getRunId());
 		return Math.max(snapshot.getUpdatedAtMs(), lastEvent);
 	}
 
@@ -291,7 +344,7 @@ public class ResumeService {
 		out.put("context", snapshot.getContext());
 		out.put("historyRoles", roles);
 		out.put("inFlight", snapshot.getInFlightToolCalls().stream().map(PendingToolCall::asMap).toList());
-		out.put("pending", this.store.pendings(runId).stream().map(PendingToolCall::asMap).toList());
+		out.put("pending", this.store.pendingsLenient(runId).stream().map(PendingToolCall::asMap).toList());
 		out.put("ledger", this.store.ledger(runId));
 		out.put("ledgerCounts", this.store.ledgerCounts(runId));
 		out.put("instanceId", this.store.instanceId());
@@ -358,7 +411,20 @@ public class ResumeService {
 	public ResumeResult resume(String runId) {
 		// 调用线程已用 AiTrace#markResumeReason 标注过的，尊重它；未标注（运维端点 / 单测直调）按 manual 记。
 		String marked = AiTrace.currentResumeReason();
-		return resumeWithReason(runId, marked == null || marked.isBlank() ? RESUME_MANUAL : marked);
+		return resumeWithReason(runId, false, marked == null || marked.isBlank() ? RESUME_MANUAL : marked,
+				ErrorBodyFactory.requestLocale());
+	}
+
+	/**
+	 * 续跑（带<b>请求 locale</b>）：HTTP 入口在提交任务前取好 {@link ErrorBodyFactory#requestLocale()}，
+	 * 由驱动线程 set/reset —— 工作线程不继承请求上下文，否则 en 用户的续跑错误/回答语言恒为中文。
+	 *
+	 * @param replyLocale 请求 locale；{@code null} = 无请求上下文（启动扫描/单测），不设置线程 locale
+	 */
+	public ResumeResult resume(String runId, Locale replyLocale) {
+		String marked = AiTrace.currentResumeReason();
+		return resumeWithReason(runId, false, marked == null || marked.isBlank() ? RESUME_MANUAL : marked,
+				replyLocale);
 	}
 
 	/**
@@ -370,7 +436,7 @@ public class ResumeService {
 	 * {@link #RESUME_REATTACH}。
 	 */
 	public ResumeResult resumeWithReason(String runId, String resumeReason) {
-		return resumeWithReason(runId, false, resumeReason);
+		return resumeWithReason(runId, false, resumeReason, ErrorBodyFactory.requestLocale());
 	}
 
 	/**
@@ -406,6 +472,11 @@ public class ResumeService {
 
 	/** 续跑（原因 + 僵尸接管开关）：自抢续跑权租约，其余与 {@link #resume(String, boolean, LeaseService.Lease)} 同构。 */
 	public ResumeResult resumeWithReason(String runId, boolean forceTakeover, String resumeReason) {
+		return resumeWithReason(runId, forceTakeover, resumeReason, ErrorBodyFactory.requestLocale());
+	}
+
+	private ResumeResult resumeWithReason(String runId, boolean forceTakeover, String resumeReason,
+			Locale replyLocale) {
 		LeaseService leases = this.store.leaseService();
 		boolean fresh = false;
 		LeaseService.Lease lease = null;
@@ -427,7 +498,7 @@ public class ResumeService {
 		}
 		ResumeResult result;
 		try {
-			result = resumeInternal(runId, forceTakeover, lease, resumeReason);
+			result = resumeInternal(runId, forceTakeover, lease, resumeReason, replyLocale);
 		}
 		catch (RuntimeException ex) {
 			if (fresh) {
@@ -471,11 +542,30 @@ public class ResumeService {
 	 */
 	public ResumeResult resume(String runId, boolean forceTakeover, LeaseService.Lease lease) {
 		// 决策回灌/挂起重挂等入口：未显式标注原因时按 reattach 记（"其余续跑入口"的兜底口径）
-		return resumeInternal(runId, forceTakeover, lease, RESUME_REATTACH);
+		return resumeInternal(runId, forceTakeover, lease, RESUME_REATTACH, ErrorBodyFactory.requestLocale());
+	}
+
+	/**
+	 * 续跑失败的用户面短句（R-08 + 4B）：按当前线程 locale 取 {@code messages_en}；未注入
+	 * MessageSource 时走 en 常量，绝不回落到异常原文。
+	 */
+	String resumeFailedMessage() {
+		if (!ReplyLanguage.current().english()) {
+			return AI_RESUME_FAILED_MESSAGE;
+		}
+		if (this.messageSource != null) {
+			try {
+				return this.messageSource.getMessage("error." + ErrorCodes.AI_RESUME_FAILED, null, Locale.ENGLISH);
+			}
+			catch (NoSuchMessageException ex) {
+				log.debug("messages_en 缺 error.{}，回落 en 白名单短句", ErrorCodes.AI_RESUME_FAILED);
+			}
+		}
+		return AI_RESUME_FAILED_MESSAGE_EN;
 	}
 
 	private ResumeResult resumeInternal(String runId, boolean forceTakeover, LeaseService.Lease lease,
-			String resumeReason) {
+			String resumeReason, Locale replyLocale) {
 		if (lease != null) {
 			// I3：归属校验对着 Redis 真值做（一次往返），不用进程内视图 —— 视图在"TTL 已到、续租还没失败"
 			// 的窗口里会说谎，而这个判定正是"要不要驱动这一轮"的入口。
@@ -511,7 +601,21 @@ public class ResumeService {
 			AiTrace.bind(runId, sessionId);
 			// 续跑原因经 MDC 过线程边界（驱动任务在下面提交，TaskDecorator 在提交时刻抓快照）
 			AiTrace.markResumeReason(resumeReason);
-			List<PendingToolCall> pendings = this.store.pendings(runId);
+			// C2：续跑入口的清单用非抛读口；guard 读失败时仍能拿到原始条目并按 PENDING 保守处理。
+			List<PendingToolCall> pendings;
+			try {
+				// C2：续跑入口必须用强一致读口。整表读失败不能当成"没有未决条目"而贸然驱动。
+				pendings = this.store.pendings(runId);
+			}
+			catch (RuntimeException ex) {
+				log.warn("续跑入口读取待决条目失败 runId={}（按未知拒绝，不驱动）", runId, ex);
+				Map<String, Object> body = new LinkedHashMap<>();
+				body.put("runId", runId);
+				body.put("resumed", false);
+				body.put("reason", "STATE_UNKNOWN");
+				body.put("code", com.example.configmgr.common.ErrorCodes.AI_REDIS_UNAVAILABLE);
+				return new ResumeResult(Outcome.STATE_UNKNOWN, body);
+			}
 			Map<String, Object> body = new LinkedHashMap<>();
 			body.put("runId", runId);
 			body.put("sessionId", sessionId);
@@ -521,7 +625,15 @@ public class ResumeService {
 			// 取消优先（ADR-8 修正③）：权威取消标志在 Redis，跨进程同样拦得住续跑 ——
 			// 否则"用户已取消"的轮次会被重启后的自动续跑重新拾起并执行掉。
 			// 位置在统一终态判定<b>之前</b>：即便快照已落 CANCELLED，也要把残留的 PENDING 条目收敛掉。
-			if (this.cancellations.isCancelled(runId)) {
+			CancellationRegistry.CancelState cancelState = this.cancellations.cancelState(runId);
+			if (cancelState == CancellationRegistry.CancelState.UNKNOWN) {
+				// 续跑会启动执行；取消状态未知时拒绝并给出 typed 结局（对外 503），不是 500。
+				body.put("resumed", false);
+				body.put("reason", "CANCEL_STATE_UNKNOWN");
+				body.put("code", com.example.configmgr.common.ErrorCodes.AI_REDIS_UNAVAILABLE);
+				return new ResumeResult(Outcome.CANCEL_STATE_UNKNOWN, body);
+			}
+			if (cancelState == CancellationRegistry.CancelState.CANCELLED) {
 				snapshot.setStatus(RunSnapshot.CANCELLED);
 				snapshot.setCancelled(true);
 				snapshot.setError("AI_RUN_CANCELLED：本轮已由用户取消，续跑被拒绝");
@@ -549,13 +661,14 @@ public class ResumeService {
 					return new ResumeResult(Outcome.ALREADY_RUNNING, body);
 				}
 				// 僵尸接管（N3/R3）：上一进程死在模型调用中间，状态永远停在 RUNNING。
-				// 判据由调用方（启动扫描/运维扫描）给出：本实例刚启动 + 活跃时刻已超龄；
-				// 活跃时刻 = max(快照 updatedAtMs, 最后一帧 atMs)，因此"还在流式吐字"的活轮不会被接管。
+				// 判据由调用方（启动扫描/运维扫描）给出：本实例刚启动 + 业务活动已超龄；
+				// 活跃时刻 = max(快照 updatedAtMs, 最后一条非心跳业务帧 atMs)，因此"还在跑长工具/
+				// 流式吐字"的活轮不会被接管，心跳也不会把卡死的轮养年轻（R1-09）。
 				long activeAtMs = activeAtMs(snapshot);
-				log.warn("僵尸轮接管 runId={} sessionId={} 活跃时刻距今 {}ms（快照 {}ms / 末帧 {}ms，阈值 {}）",
+				log.warn("僵尸轮接管 runId={} sessionId={} 活跃时刻距今 {}ms（快照 {}ms / 末条业务帧 {}ms，阈值 {}）",
 						runId, sessionId, System.currentTimeMillis() - activeAtMs,
 						System.currentTimeMillis() - snapshot.getUpdatedAtMs(),
-						System.currentTimeMillis() - this.store.lastEventAtMs(runId),
+						System.currentTimeMillis() - this.store.lastActivityAtMs(runId),
 						this.properties.getResume().getZombieAge());
 				body.put("zombieTakeover", true);
 				body.put("activeAtMs", activeAtMs);
@@ -660,7 +773,7 @@ public class ResumeService {
 			// 只改"这一轮交棒给模型的视图"：快照保留完整历史（审计/后续续跑的原文），窗口是确定性
 			// 纯函数（同输入同输出），故不落库、不归档（区别于压缩：压缩改写内容且必须归档原文）。
 			Set<String> protectedIds = new LinkedHashSet<>();
-			for (PendingToolCall pending : this.store.pendings(runId)) {
+			for (PendingToolCall pending : this.store.pendingsLenient(runId)) {
 				if (PendingToolCall.PENDING.equals(pending.getStatus())
 						|| (PendingToolCall.APPROVED.equals(pending.getStatus()) && !pending.isExecuted())) {
 					protectedIds.add(pending.getToolCallId());
@@ -690,7 +803,10 @@ public class ResumeService {
 				compaction = this.contextCompactor.compact(new ContextCompactor.Request(sessionId,
 						runId, snapshot.getModelId(), snapshot.getProviderId(), history, this.codec.serializeAll(history),
 						state.usedTokens(), state.completionTokens(), 0, rebuiltToolTokens, systemTokens,
-						this.chatService.disclosedToolTokens(context), protectedIds));
+						this.chatService.disclosedToolTokens(context), protectedIds),
+						// R1-09 M-1：L2 是 N 次串行摘要（每次最长 60s），期间无业务帧/心跳。
+						// 每完成一次摘要就刷新业务锚点，避免长压缩被别的实例判成僵尸并接管。
+						() -> this.store.touchBusinessActivity(runId, System.currentTimeMillis()));
 				if (compaction.changed()) {
 					history = compaction.messages();
 					snapshot.setMessageJson(this.codec.serializeAll(history));
@@ -732,6 +848,14 @@ public class ResumeService {
 			List<Message> resumeHistory = history;
 			try {
 				this.suspendExecutor.execute(() -> {
+					// I-5 / 4B：locale 不能靠线程池继承（工作线程没有请求上下文）。
+					// HTTP 入口在提交前把 locale 传进来；这里 set，finally 一律 reset（池线程复用）。
+					if (replyLocale == null) {
+						LocaleContextHolder.resetLocaleContext();
+					}
+					else {
+						LocaleContextHolder.setLocale(replyLocale);
+					}
 					try {
 						// 批③：有身份的快照按<b>快照身份</b>续跑（上面的 PROVIDER_GONE 检查已保证它此刻可用）。
 						// 旧快照（无 providerId）仍走五参旧签名 —— 语义等价（按默认目标续跑 + WARN），
@@ -745,10 +869,12 @@ public class ResumeService {
 						}
 					}
 					catch (Exception ex) {
-						log.error("续跑未捕获异常 runId={}", runId, ex);
-						out.error(ErrorCodes.AI_RESUME_FAILED, String.valueOf(ex.getMessage()));
+						// R-08：用户面只给白名单短句；原始异常（上游 body / 内部提示）只进日志。
+						log.error("续跑未捕获异常 runId={}：{}", runId, String.valueOf(ex.getMessage()), ex);
+						out.error(ErrorCodes.AI_RESUME_FAILED, resumeFailedMessage());
 					}
 					finally {
+						LocaleContextHolder.resetLocaleContext();
 						// 轮终态：完成订阅者 + 摘掉进程内互斥（ADR-5 的"轮终态主动释放"同族语义）。
 						// 续跑权租约不在这里还：终态写进 RunStore.save 时 best-effort 释放（同一个
 						// 唯一写口），此处再还一次只会在"写终态前"制造一个别人可接管的窗口。

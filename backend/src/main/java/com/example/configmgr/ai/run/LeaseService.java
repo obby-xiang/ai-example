@@ -26,11 +26,18 @@ import java.util.function.BooleanSupplier;
  *
  * <h2>语义</h2>
  * <ul>
- * <li><b>值 = {@code <epoch>|<owner>}</b>：epoch 由 {@code INCR ai:lease:epoch} <b>全局</b>发放
- * （单键、无 TTL）。号不回退是 fencing 的前提 —— 键若过期，旧 epoch 会被当成新租约；</li>
- * <li><b>抢</b>（{@link #tryAcquire}）：Lua 内 {@code GET} → 有则<b>原样返回现值</b>（Java 侧据
- * owner 判"可重入 / 占用拒"，两种判定的差异只在这里，Redis 侧不需要第二段脚本）→ 无则
- * {@code INCR} 取号 + {@code SET PX}。整段是一个原子步；</li>
+ * <li><b>值 = {@code <epoch>|<owner>}</b>：号来自<b>与租约键同槽</b>的计数器
+ * （{@code ai:lease:epoch:{run:<runId>}}，见 {@link #EPOCH_PREFIX} / {@link #epochKeyFor}），
+ * {@code INCR} 与 {@code SET} 在<b>同一条 Lua</b> 里完成 —— 号与占用必然同序
+ * （评审 I-1：取号若在脚本外，迟到者可能用比 fence 更小的号占住租约 ⇒ 这一轮永久 500、无自愈）。
+ * 号跨进程单调由 Redis 的 {@code INCR} 保证，不依赖墙钟，也不依赖任何"每族一个号"的假设
+ * —— 全仓的 epoch 比较只发生在<b>同一个 run 内</b>（{@code fence ≤ epoch}），所以 per-run 计数器语义等价；</li>
+ * <li><b>抢</b>（{@link #tryAcquire} / {@link #acquireFenced}）：<b>三键</b> Lua（租约 / 计数器 / fence）
+ * 内 {@code GET} → 命中<b>有效</b>现值（epoch ≥ fence）则原样返回（Java 侧据 owner 判
+ * "可重入 / 占用拒"）并顺手补齐计数器；命中<b>陈旧</b>现值（epoch &lt; fence）或无现值则
+ * {@code INCR} 取号、必要时抬到 {@code fence+1}，再 {@code SET PX}。整段是一个原子步
+ * （评审 N-1：计数器先死也能自愈）；无 hash tag 的租约（资源锁）走单键变体 + 脚本外取号
+ * （它们的 epoch 不参与 fencing）；</li>
  * <li><b>续</b>（{@link #renew}）与<b>放</b>（{@link #release}）：Lua 内 {@code GET} 比对
  * {@code <epoch>|<owner>} 后再 {@code PEXPIRE} / {@code DEL}。这正是
  * {@code ResumeService#releaseResumeLock}（GET → Java 比对 → DEL）缺陷的根治点：
@@ -52,10 +59,14 @@ import java.util.function.BooleanSupplier;
  * 并发同主双抢时两边读到的是同一个前置状态，推断必然同形。
  *
  * <h2>运维前提（M3）</h2>
- * {@code ai:lease:epoch} 是<b>全局单调</b>的取号键，必须落在 <b>{@code noeviction}</b>（至少不被
- * maxmemory 淘汰）的实例上：号一旦被淘汰就会从 1 重新开始，陈旧的 epoch 会被后来者当成"更大的号"，
- * fencing 写与 {@code ai:claim:} 的比对随之失去意义。租约键本身有 TTL，随内存压力淘汰只等价于
- * "这一任租约到期"；<b>只有这个计数器键不能丢</b>。
+ * <ul>
+ * <li><b>run 租约</b>：号源是 per-slot 计数器，<b>三键脚本会在取号时与 fence 对账</b>
+ * （{@code epoch = max(INCR, fence + 1)}，见 {@link #ACQUIRE_SCRIPT}）⇒ 计数器先过期、
+ * 被 maxmemory 淘汰、甚至迁移时没搬，下一次 acquire 都会自愈。因此
+ * <b>不再需要</b>"某个全局键必须 noeviction"这条硬约束，也<b>不需要</b>迁移前预置任何全局 epoch；</li>
+ * <li><b>资源锁</b>：仍用旧全局键 {@link #EPOCH_KEY}。它只作 token 的可读编号，不参与比较，
+ * 因此即便被淘汰也不会让任何写回失去保护。</li>
+ * </ul>
  *
  * <h2>进程内视图</h2>
  * {@link #heldEpoch} 是"本进程认为自己持有的租约"，只作<b>短路</b>与 fencing 写判据：
@@ -74,37 +85,141 @@ import java.util.function.BooleanSupplier;
 public class LeaseService {
 
 	/**
-	 * 全局 epoch 计数键（<b>无 TTL</b>）：{@code INCR} 是唯一取号口，单/多实例同口径。
+	 * 旧<b>全局</b>取号键：<b>不再参与 fencing</b>。
 	 *
-	 * <p>不做"每租约一族计数器"：fencing 要的是<b>跨键单调可比</b>的号（换主后的写回判据），
-	 * 每族独立号会让不同键的 epoch 不可比；全局单键的代价只是一次 {@code INCR}。
+	 * <p>它只服务"没有 hash tag、也不需要同槽"的租约（{@code ai:lock:task|job:*} 资源锁）——
+	 * 这些租约的 epoch 只作 token 的一部分（续/放按整值比对），从不与任何 fence 比大小，
+	 * 所以"取号在脚本外"留下的乱序窗口对它们无害。
+	 * 带 tag 的租约（run 租约）改用 {@link #EPOCH_PREFIX} 下与租约键<b>同槽</b>的计数器。
+	 *
+	 * <p>留着它是为了运维可观测（一眼看到"总发放量"）与兼容既有诊断；它<b>不许</b>再被当作
+	 * fencing 的号源 —— 号一旦与 fence 不同槽/不同源，就会出现"晚到者号更小"的卡死（评审 I-1）。
 	 */
 	public static final String EPOCH_KEY = "ai:lease:epoch";
 
+	/**
+	 * <b>per-slot</b> 取号键前缀（评审 I-1 的根治）：{@code ai:lease:epoch:{run:<runId>}}。
+	 *
+	 * <p>键名 = 本前缀 + 租约键里的 hash tag ⇒ 与租约键<b>同槽</b>（Cluster 下才能放进同一条
+	 * {@code EVAL}），于是 {@code INCR} 与 {@code SET} 回到<b>同一个原子步</b>：号与占用必然同序，
+	 * "取号后被挂起、醒来用更小的号占住租约"这个窗口在结构上不再存在。
+	 */
+	public static final String EPOCH_PREFIX = "ai:lease:epoch:";
+
 	/** 脚本分派标记（测试替身按它分派；见 {@code FakeLeaseRedis}）。 */
 	static final String ACQUIRE_MARK = "LEASE_ACQUIRE";
+
+	/** 无 tag 租约（资源锁）的抢租标记：取号在脚本外（全局计数器），与带 tag 的脚本区分。 */
+	static final String ACQUIRE_UNTAGGED_MARK = "LEASE_ACQUIRE_UNTAGGED";
+
+	/** 无 fence 的带 tag 租约（两键）的抢租标记。 */
+	static final String ACQUIRE_NOFENCE_MARK = "LEASE_ACQUIRE_NOFENCE";
 
 	static final String RENEW_MARK = "LEASE_RENEW";
 
 	static final String RELEASE_MARK = "LEASE_RELEASE";
 
 	/**
-	 * 抢：现值优先（可重入/占用由调用方判 owner），否则取号 + SET PX。
+	 * 抢：<b>三键一条 Lua</b>（KEYS = 租约键 / 计数器 / fence，三者同槽）。
+	 *
+	 * <h2>为什么必须三键（评审 N-1）</h2>
+	 * 两键版（租约+计数器）挡住了"取号与占用不同序"，但挡不住<b>计数器比 fence 先死</b>：
+	 * {@code fence} 会被每笔 {@code save} 的 {@code FENCED_SET} 反复续期，计数器只有取号/读侧才被动到
+	 * ⇒ 长跑 24h 或 maxmemory 淘汰后，计数器从 1 重来，残留 fence（比如 40）把这一轮<b>永久拒写</b>。
+	 * 把 fence 拉进同一个原子步，脚本就能在取号时对账（"号至少要比 fence 大"），
+	 * 于是 TTL 差、淘汰、重入、迁移预置这四类入口一次消掉。
+	 *
+	 * <h2>语义</h2>
+	 * <ol>
+	 * <li><b>命中的是有效租约</b>（现值 epoch ≥ fence）：原样返回（Java 侧按 owner 判"同主重入 /
+	 * 他主占用"），<b>不推进</b>号；同时把计数器补到 ≥ 该 epoch 并刷新它的 TTL —— 计数器若已过期，
+	 * 这次重入就把它救回来（否则下一次真正的取号仍从 1 起）；</li>
+	 * <li><b>无租约 / 陈旧租约</b>（现值 epoch &lt; fence，本来就写不进去）：{@code INCR} 取号，
+	 * 若仍 ≤ fence 则抬到 {@code fence+1} 并写回计数器，再写新租约。⇒ 陈旧租约被新号替换，
+	 * 有效高号租约永远不会被覆盖（它走第 1 条）；</li>
+	 * <li><b>fence / 计数器缺失</b>：都按 0 处理（{@code tonumber(...) or 0}），全新一轮从 1 起；</li>
+	 * <li><b>SET 失败</b>（OOM 等）：Lua 无回滚，号已推进 —— 只跳号，不影响单调性（下一位取号更大）。</li>
+	 * </ol>
 	 *
 	 * <p>返回值末段是<b>本次是否由我创建</b>（{@code |1} 创建 / {@code |0} 命中现值）——
-	 * 这是"谁创建谁释放"的唯一判据：GET 命中（含同主重入）的一方<b>没有</b>释放权，
-	 * 用"epoch 变了没变"去猜会把并发同主双抢的另一方误判成创建者（见 {@link AcquireResult#created()}）。
+	 * 这是"谁创建谁释放"的唯一判据：GET 命中（含同主重入）的一方<b>没有</b>释放权。
+	 *
+	 * @param KEYS[1] 租约键
+	 * @param KEYS[2] 与 KEYS[1] 同槽的计数器键
+	 * @param KEYS[3] 与 KEYS[1] 同槽的 fence 键（{@code ai:fence:run:{run:<runId>}}）
+	 * @param ARGV[1] owner
+	 * @param ARGV[2] 租约 TTL（毫秒）
+	 * @param ARGV[3] 计数器 TTL（毫秒；与 fence 同寿，见 {@code RunStore} 的续期面）
 	 */
 	private static final RedisScript<String> ACQUIRE_SCRIPT = new DefaultRedisScript<>("""
 			-- LEASE_ACQUIRE
 			local current = redis.call('GET', KEYS[1])
+			local fence = tonumber(redis.call('GET', KEYS[3])) or 0
 			if current then
-			  return current .. '|0'
+			  local sep = string.find(current, '|', 1, true)
+			  local curEpoch = sep and tonumber(string.sub(current, 1, sep - 1)) or 0
+			  if curEpoch >= fence then
+			    local counter = tonumber(redis.call('GET', KEYS[2])) or 0
+			    if counter < curEpoch then
+			      redis.call('SET', KEYS[2], tostring(curEpoch))
+			    end
+			    redis.call('PEXPIRE', KEYS[2], ARGV[3])
+			    return current .. '|0'
+			  end
 			end
 			local epoch = redis.call('INCR', KEYS[2])
+			if epoch <= fence then
+			  epoch = fence + 1
+			  redis.call('SET', KEYS[2], tostring(epoch))
+			end
+			redis.call('PEXPIRE', KEYS[2], ARGV[3])
 			local value = tostring(epoch) .. '|' .. ARGV[1]
 			redis.call('SET', KEYS[1], value, 'PX', ARGV[2])
 			return value .. '|1'
+			""", String.class);
+
+	/**
+	 * 抢：<b>两键</b>（租约 + 计数器，<b>不带 fence</b>）—— 无 fence 的带 tag 租约。
+	 *
+	 * <p>只保留给"没有 fence 概念"的调用方（测试替身/未来其它带 tag 的租约）。它保住了
+	 * "取号与占用同序"，但<b>不能</b>在计数器先死时自愈（没有 fence 可对账）。
+	 * run 租约<b>一律</b>走 {@link #acquireFenced(String, String, Duration, String)}。
+	 */
+	private static final RedisScript<String> ACQUIRE_NOFENCE_SCRIPT = new DefaultRedisScript<>("""
+			-- LEASE_ACQUIRE_NOFENCE
+			local current = redis.call('GET', KEYS[1])
+			if current then
+			  local counter = tonumber(redis.call('GET', KEYS[2])) or 0
+			  local sep = string.find(current, '|', 1, true)
+			  local curEpoch = sep and tonumber(string.sub(current, 1, sep - 1)) or 0
+			  if counter < curEpoch then
+			    redis.call('SET', KEYS[2], tostring(curEpoch))
+			  end
+			  redis.call('PEXPIRE', KEYS[2], ARGV[3])
+			  return current .. '|0'
+			end
+			local epoch = redis.call('INCR', KEYS[2])
+			redis.call('PEXPIRE', KEYS[2], ARGV[3])
+			local value = tostring(epoch) .. '|' .. ARGV[1]
+			redis.call('SET', KEYS[1], value, 'PX', ARGV[2])
+			return value .. '|1'
+			""", String.class);
+
+	/**
+	 * 抢：<b>无 hash tag 的租约</b>（{@code ai:lock:task|job:*}）—— 单键 GET/SET，取号在 Java 侧。
+	 *
+	 * <p>这类租约的 epoch <b>只作 token 的一部分</b>（续/放按 {@code <epoch>|<owner>} 整值比对），
+	 * 全仓没有任何地方拿它与 fence 比大小，所以"号与占用不同序"不产生卡死面；它们的键没有 tag
+	 * （按设计不加），与全局计数器天然不同槽 —— 放进同一条 {@code EVAL} 就是 CROSSSLOT。
+	 */
+	private static final RedisScript<String> ACQUIRE_UNTAGGED_SCRIPT = new DefaultRedisScript<>("""
+			-- LEASE_ACQUIRE_UNTAGGED
+			local current = redis.call('GET', KEYS[1])
+			if current then
+			  return current .. '|0'
+			end
+			redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+			return ARGV[1] .. '|1'
 			""", String.class);
 
 	/** 续：现值 = {@code <epoch>|<owner>} 才 PEXPIRE（比对与续期同一个原子步）。 */
@@ -289,6 +404,54 @@ public class LeaseService {
 	 * 只有 owner 相同才算重入（{@code created=false}，没有释放权）。
 	 */
 	public AcquireResult acquire(String key, Duration ttl, String owner) {
+		return acquire(key, null, ttl, owner);
+	}
+
+	/** 带 fence 的 {@link #acquireFenced(String, String, Duration, String)}（owner 缺省 = 本实例标识）。 */
+	public AcquireResult acquireFenced(String key, String fenceKey, Duration ttl) {
+		return acquireFenced(key, fenceKey, ttl, this.instanceId);
+	}
+
+	/**
+	 * 抢租，<b>带上该租约的 fence 键</b>（run 租约的唯一生产入口）：三键同槽原子自愈（评审 N-1）。
+	 *
+	 * <p>fence 键必须与租约键<b>同槽</b>（同一 {@code {run:<runId>}} tag），否则脚本本身就是 CROSSSLOT。
+	 * {@code fenceKey == null} 等价于无 fence 口径（两键脚本）；无 tag 的租约（资源锁）忽略 fence 参数
+	 * —— 它们没有同槽的 fence，硬塞进来就是 CROSSSLOT。
+	 */
+	public AcquireResult acquireFenced(String key, String fenceKey, Duration ttl, String owner) {
+		return acquire(key, fenceKey, ttl, owner);
+	}
+
+	/** 带 fence 的薄包装（owner 缺省 = 本实例标识；语义同 {@link #acquireFenced}）。 */
+	public Optional<Lease> tryAcquireFenced(String key, String fenceKey, Duration ttl) {
+		return tryAcquireFenced(key, fenceKey, ttl, this.instanceId);
+	}
+
+	/** 带 fence 的薄包装（语义同 {@link #acquireFenced}，只问"拿到没有"）。 */
+	public Optional<Lease> tryAcquireFenced(String key, String fenceKey, Duration ttl, String owner) {
+		return Optional.ofNullable(acquireFenced(key, fenceKey, ttl, owner).lease());
+	}
+
+	private AcquireResult acquire(String key, String fenceKey, Duration ttl, String owner) {
+		String epochKey = epochKeyFor(key);
+		if (epochKey == null && fenceKey != null) {
+			// 编程错误（不是运行时降级面）：无 tag 的租约键与 fence 不同槽，同脚本 = CROSSSLOT。
+			// 放在 try 之外，避免被下面的 catch 折成 UNAVAILABLE 静默吞掉。
+			throw new IllegalArgumentException("无 hash tag 的租约不接受 fence 参数（会跨槽）：key=" + key
+					+ " fence=" + fenceKey);
+		}
+		if (fenceKey != null) {
+			// 入口闸（评审 Minor 1）：fence 必须与租约键<b>同 tag ⇒ 同槽</b>。传错 run 的 fence 会让三键脚本
+			// 跨槽 —— 真集群回 CROSSSLOT，而 CROSSSLOT 会被本方法的 catch 折成 UNAVAILABLE
+			// （整轮静默退化为进程内互斥，最难查）。这是编程错误，不是运行时降级面，故在 try 之外直接抛。
+			String leaseTag = hashTagOf(key);
+			String fenceTag = hashTagOf(fenceKey);
+			if (leaseTag == null || !leaseTag.equals(fenceTag)) {
+				throw new IllegalArgumentException("fenceKey 必须与租约键同槽（同一 hash tag）：key=" + key
+						+ " tag=" + leaseTag + "，fence=" + fenceKey + " tag=" + fenceTag);
+			}
+		}
 		String holder = owner(owner);
 		Duration effective = ttl == null || ttl.isZero() || ttl.isNegative() ? this.properties.getLease().getTtl() : ttl;
 		String viewKey = viewKey(key, holder);
@@ -299,26 +462,68 @@ public class LeaseService {
 			return new AcquireResult(AcquireOutcome.ACQUIRED, already, false);
 		}
 		try {
-			String raw = this.redis.execute(ACQUIRE_SCRIPT, List.of(key, EPOCH_KEY), holder,
-					String.valueOf(effective.toMillis()));
-			Lease current = parse(key, raw);
-			if (current == null) {
-				log.warn("租约脚本返回空值 key={} owner={}（按占用处理，不吞并别人的租约）", key, holder);
-				return new AcquireResult(AcquireOutcome.HELD_ELSEWHERE, null);
+			if (epochKey == null) {
+				// 无 tag（资源锁）：取号走全局计数器（仅 token 用，不参与 fencing），两步式。
+				return acquireUntagged(key, holder, viewKey, effective);
 			}
-			if (!holder.equals(current.owner())) {
-				return new AcquireResult(AcquireOutcome.HELD_ELSEWHERE, null);
+			if (fenceKey != null) {
+				// 带 tag + 有 fence：三键同槽原子自愈（评审 N-1 的根治）。
+				String raw = this.redis.execute(ACQUIRE_SCRIPT, List.of(key, epochKey, fenceKey), holder,
+						String.valueOf(effective.toMillis()), String.valueOf(epochTtlMillis()));
+				return interpret(key, holder, viewKey, raw);
 			}
-			// 双保险：脚本返回的现值就是本次取号的结果，或是"视图丢失但 owner 仍是自己"的重入
-			this.held.put(viewKey, current);
-			// 只有脚本说"是我建的"才算创建者（并发同主双抢时，后到的那个 owner 也是自己，但不是创建者）
-			return new AcquireResult(AcquireOutcome.ACQUIRED, current, createdFlag(raw));
+			// 带 tag 但没有 fence（测试替身/未来其它带 tag 的租约）：两键版，不自愈。
+			String raw = this.redis.execute(ACQUIRE_NOFENCE_SCRIPT, List.of(key, epochKey), holder,
+					String.valueOf(effective.toMillis()), String.valueOf(epochTtlMillis()));
+			return interpret(key, holder, viewKey, raw);
 		}
 		catch (Exception ex) {
 			log.warn("租约抢用降级 key={} owner={}（Redis 不可用 ⇒ 调用方走进程内互斥）：{}", key, holder,
 					ex.getMessage());
 			return new AcquireResult(AcquireOutcome.UNAVAILABLE, null);
 		}
+	}
+
+	/** 无 tag 租约（资源锁）：脚本外取号 + 单键 GET/SET（其 epoch 不参与 fencing，乱序无害）。 */
+	private AcquireResult acquireUntagged(String key, String holder, String viewKey, Duration effective) {
+		String current = this.redis.opsForValue().get(key);
+		if (current != null) {
+			Lease present = parse(key, current);
+			if (present == null) {
+				log.warn("租约现值形态不合法 key={} value={}（按占用处理，不吞并别人的租约）", key, current);
+				return new AcquireResult(AcquireOutcome.HELD_ELSEWHERE, null);
+			}
+			if (!holder.equals(present.owner())) {
+				return new AcquireResult(AcquireOutcome.HELD_ELSEWHERE, null);
+			}
+			// 视图丢失但 Redis 里仍是自己那一任：重入，created=false（没有释放权）
+			this.held.put(viewKey, present);
+			return new AcquireResult(AcquireOutcome.ACQUIRED, present, false);
+		}
+		long epoch = nextEpoch();
+		String raw = this.redis.execute(ACQUIRE_UNTAGGED_SCRIPT, List.of(key), epoch + "|" + holder,
+				String.valueOf(effective.toMillis()));
+		return interpret(key, holder, viewKey, raw);
+	}
+
+	/**
+	 * 把抢租脚本的返回值翻译成三态结论（两条脚本共用）。
+	 *
+	 * <p>脚本返回 {@code <epoch>|<owner>|<created>}：owner 不是自己 ⇒ 别人持有（败方那个号作废，
+	 * 只增不减，跳号无害）；是自己且 {@code |1} ⇒ 本次创建（有释放权）；{@code |0} ⇒ 命中现值
+	 * （同主重入/视图丢失，<b>没有</b>释放权）。
+	 */
+	private AcquireResult interpret(String key, String holder, String viewKey, String raw) {
+		Lease current = parse(key, raw);
+		if (current == null) {
+			log.warn("租约脚本返回空值 key={} owner={}（按占用处理，不吞并别人的租约）", key, holder);
+			return new AcquireResult(AcquireOutcome.HELD_ELSEWHERE, null);
+		}
+		if (!holder.equals(current.owner())) {
+			return new AcquireResult(AcquireOutcome.HELD_ELSEWHERE, null);
+		}
+		this.held.put(viewKey, current);
+		return new AcquireResult(AcquireOutcome.ACQUIRED, current, createdFlag(raw));
 	}
 
 	/**
@@ -597,6 +802,72 @@ public class LeaseService {
 	/** owner 归一：缺省（null/空白）= 本实例标识（批②的旧行为）。 */
 	private String owner(String owner) {
 		return owner == null || owner.isBlank() ? this.instanceId : owner;
+	}
+
+	/**
+	 * 与租约键<b>同槽</b>的取号键（{@link #EPOCH_PREFIX} + 租约键的 hash tag）；键上没有 tag 时返回 null。
+	 *
+	 * <p>hash tag 规则按 Redis 规范：第一个 {@code {} 与其后的第一个 {@code }} 之间非空才算 tag。
+	 * 例：{@code ai:lease:run:{run:abc}} ⇒ {@code ai:lease:epoch:{run:abc}}（同槽）；
+	 * {@code ai:lock:task:7} ⇒ null（无 tag ⇒ 走全局计数器）。
+	 *
+	 * <p>共享同一 tag 的一族键共用一台计数器：run 的 13 个键同 tag，于是"这一轮发过哪些号"
+	 * 是单调的一条线 —— 这正是 fence 比较所需要的语义（比较只发生在同一个 run 内）。
+	 */
+	static String epochKeyFor(String leaseKey) {
+		String tag = hashTagOf(leaseKey);
+		return tag == null ? null : EPOCH_PREFIX + tag;
+	}
+
+	/**
+	 * 键的 hash tag（<b>含花括号</b>，如 {@code {run:abc}}）；无 tag 返回 null。
+	 *
+	 * <p>规则按 Redis 规范：第一个 {@code {} 与其后的第一个 {@code }} 之间非空才算 tag。
+	 * 本类只用它做两件事：推导同槽的计数器键（{@link #epochKeyFor}）、以及校验 fence 与租约键
+	 * <b>确实同槽</b>（{@link #acquire(String, String, Duration, String)} 的入口闸）。
+	 */
+	static String hashTagOf(String key) {
+		if (key == null) {
+			return null;
+		}
+		int open = key.indexOf('{');
+		if (open < 0) {
+			return null;
+		}
+		int close = key.indexOf('}', open + 1);
+		if (close <= open + 1) {
+			return null;
+		}
+		return key.substring(open, close + 1);
+	}
+
+	/**
+	 * 计数器 TTL（毫秒）：与 fence 同寿（{@code app.ai.session-ttl}）。
+	 *
+	 * <p>为什么给 TTL 而不是像旧的全局键那样永久：per-run 计数器是"一轮一个键"，永久留存会随轮次
+	 * 无限增长。它只在 {@code fence} 还活着时才需要活着（fence 比它先死于同一次"无人读"的过期），
+	 * 所以同一 TTL + 同一续期面（{@code SessionKeyRegistry.Renewal.READ}）就够；轮次回收
+	 * （{@code RunStore#deleteRun}）另行显式删除。
+	 */
+	private long epochTtlMillis() {
+		Duration sessionTtl = this.properties.getSessionTtl();
+		// 下限 1ms：{@code session-ttl} 被配成 0/负时，{@code PEXPIRE 0} 会当场删掉计数器 ——
+		// 那正是 N-1 要消灭的"计数器比 fence 先死"。与其它 TTL 口径统一为"至少 1ms"。
+		return Math.max(1L, (sessionTtl == null ? Duration.ofHours(24) : sessionTtl).toMillis());
+	}
+
+	/**
+	 * 全局取号（<b>仅资源锁用</b>）：{@code INCR ai:lease:epoch}。
+	 *
+	 * <p><b>不再参与 fencing</b>：FENCED_SET / 认领的比较对象是同 run 的 per-slot 号
+	 * （{@link #EPOCH_PREFIX}）。这里保留"号只增不减"只为资源锁 token 的可读性与运维观测。
+	 */
+	private long nextEpoch() {
+		Long epoch = this.redis.opsForValue().increment(EPOCH_KEY);
+		if (epoch == null || epoch <= 0L) {
+			throw new IllegalStateException("epoch 取号失败（INCR " + EPOCH_KEY + " 返回 " + epoch + "）");
+		}
+		return epoch;
 	}
 
 	/** {@code <epoch>|<owner>} → 租约；格式不合法返回 null（调用方按占用处理）。 */

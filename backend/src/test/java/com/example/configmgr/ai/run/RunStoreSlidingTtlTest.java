@@ -1,9 +1,11 @@
 package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.observe.RedisDegradation;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.data.redis.RedisConnectionFailureException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
 
@@ -14,6 +16,7 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -111,23 +114,74 @@ class RunStoreSlidingTtlTest {
 	}
 
 	@Test
-	void suspensionHeartbeatRenewsTheCardBackingKeys() {
+	void suspensionHeartbeatRenewsEveryCardBackingKey() {
 		String runId = "run-suspended-renew";
 
 		this.store.renewSuspensionTtl(runId);
 
-		ArgumentCaptor<Duration> ttl = ArgumentCaptor.forClass(Duration.class);
-		verify(this.redis, org.mockito.Mockito.times(5))
-				.expire(anyString(), ttl.capture());
-		assertThat(ttl.getAllValues())
-				.as("快照/待决/归档/序号/事件日志五类键都被整额续期（卡的后台数据不先于会话过期）")
-				.containsOnly(Duration.ofHours(24));
+		// 断言口径 = "每个应续的键都续到了"，不锁调用次数形态（L-139：逐键 try 后，
+		// 单键失败不应改变其余键的续期；times(5) 会在"一个键失败"时变成假红）。
 		verify(this.redis).expire(this.store.runKey(runId), Duration.ofHours(24));
 		verify(this.redis).expire(this.store.pendingKey(runId), Duration.ofHours(24));
 		verify(this.redis).expire(this.store.eventsKey(runId), Duration.ofHours(24));
 		verify(this.redis).expire(this.store.seqKey(runId), Duration.ofHours(24));
 		// B23L1 批①：事件日志 Stream 与其余卡的后台数据同寿（挂起期无 append，靠心跳续期）
 		verify(this.redis).expire(this.store.xeventsKey(runId), Duration.ofHours(24));
+	}
+
+	/**
+	 * L-139：13 键续期必须<b>逐键隔离</b>。原实现首个键抛错即整面退出，排在后面的键全部不续期 ——
+	 * 长挂起（&gt;24h）的卡会在 Redis 里过期，人点批准时"挂起态不存在"。
+	 */
+	@Test
+	void oneFailedRenewalDoesNotStopTheRestAndIsCounted() {
+		String runId = "run-suspended-renew-failure";
+		when(this.redis.expire(eq(this.store.pendingKey(runId)), any(Duration.class)))
+			.thenThrow(new IllegalStateException("模拟单键 EXPIRE 失败"));
+		long before = RedisDegradation.count(RedisDegradation.L139_RENEW_KEY);
+
+		this.store.renewSuspensionTtl(runId);
+
+		verify(this.redis).expire(this.store.runKey(runId), Duration.ofHours(24));
+		verify(this.redis).expire(this.store.eventsKey(runId), Duration.ofHours(24));
+		verify(this.redis).expire(this.store.seqKey(runId), Duration.ofHours(24));
+		verify(this.redis).expire(this.store.xeventsKey(runId), Duration.ofHours(24));
+		assertThat(RedisDegradation.count(RedisDegradation.L139_RENEW_KEY))
+			.as("单键失败必须计数（否则静默丢续期）")
+			.isGreaterThan(before);
+	}
+
+	/** I-3：连接类失败立即收手，不逐个键等 2s；剩余键计为"未尝试"。 */
+	@Test
+	void connectionFailureStopsFurtherRenewalsAndCountsNotAttempted() {
+		String runId = "run-suspended-connection-failure";
+		when(this.redis.expire(eq(this.store.runKey(runId)), any(Duration.class)))
+			.thenThrow(new RedisConnectionFailureException("模拟连接挂死"));
+		long notAttemptedBefore = RedisDegradation.count(RedisDegradation.L139_RENEW_NOT_ATTEMPTED);
+
+		this.store.renewSuspensionTtl(runId);
+
+		verify(this.redis).expire(this.store.runKey(runId), Duration.ofHours(24));
+		verify(this.redis, org.mockito.Mockito.never())
+			.expire(this.store.pendingKey(runId), Duration.ofHours(24));
+		assertThat(RedisDegradation.count(RedisDegradation.L139_RENEW_NOT_ATTEMPTED) - notAttemptedBefore)
+			.as("连接类失败后剩余 4 个键不尝试（不逐个等超时）")
+			.isEqualTo(4L);
+	}
+
+	/** I-3 / Minor4：连接类异常被包装时也要沿 cause 链快速停止。 */
+	@Test
+	void wrappedConnectionFailureAlsoStopsFurtherRenewals() {
+		String runId = "run-suspended-wrapped-connection-failure";
+		when(this.redis.expire(eq(this.store.runKey(runId)), any(Duration.class)))
+			.thenThrow(new RuntimeException("包装层", new RedisConnectionFailureException("连接挂死")));
+		long before = RedisDegradation.count(RedisDegradation.L139_RENEW_NOT_ATTEMPTED);
+
+		this.store.renewSuspensionTtl(runId);
+
+		verify(this.redis, org.mockito.Mockito.never())
+			.expire(this.store.pendingKey(runId), Duration.ofHours(24));
+		assertThat(RedisDegradation.count(RedisDegradation.L139_RENEW_NOT_ATTEMPTED) - before).isEqualTo(4L);
 	}
 
 	// ───────────────────────── 辅助 ─────────────────────────

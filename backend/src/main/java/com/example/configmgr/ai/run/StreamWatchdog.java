@@ -143,7 +143,10 @@ public class StreamWatchdog implements AutoCloseable {
 				return;
 			}
 			// ① 取消（Redis 为准；同进程时监听者可能已提前触发，CAS 保证只生效一次）
-			if (this.cancellations.isCancelled(this.runId)) {
+			// C2：UNKNOWN（Redis 读失败/退避）在看门狗里按"未取消 + 计数继续" —— 看门狗没有不可逆动作，
+			// 不能让一次读抖动静默停摆段预算/首包/静默判据；A5 计数已由 CancellationRegistry 落。
+			CancellationRegistry.CancelState cancelState = this.cancellations.cancelState(this.runId);
+			if (cancelState == CancellationRegistry.CancelState.CANCELLED) {
 				fire(StreamViolationException.CANCELLED, "本轮对话已被取消（取消标志已置位）");
 				return;
 			}

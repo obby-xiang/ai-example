@@ -128,6 +128,9 @@ class AiModelCatalogTest {
 		assertThat(result.ok()).isFalse();
 		assertThat(result.code()).as("M-1：直接报 KEY_UNREADABLE（不是 AUTH_FAILED/UNREACHABLE）")
 			.isEqualTo(AiConfigService.CODE_KEY_UNREADABLE);
+		// ② 直接 API 调用也不得看到变量名/机制词，只给设置指引
+		assertThat(result.message()).contains("设置 → AI")
+			.doesNotContain("AI_SECRET_KEK", "KEK", "provider");
 		verify(this.probe, never()).fetchModels(any(), any(), any(), anyBoolean());
 		assertThat(this.redisStore).doesNotContainKey(AiModelCatalog.CACHE_KEY_PREFIX + PROVIDER_ID);
 	}

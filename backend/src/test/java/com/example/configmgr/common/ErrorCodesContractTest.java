@@ -7,12 +7,14 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -56,6 +58,68 @@ class ErrorCodesContractTest {
         assertEquals(Set.of(), difference(zh, ErrorCodes.ALL), "messages_zh 多出未登记的键");
         assertEquals(Set.of(), difference(ErrorCodes.ALL, en), "messages_en 缺键");
         assertEquals(Set.of(), difference(en, ErrorCodes.ALL), "messages_en 多出未登记的键");
+    }
+
+    /**
+     * A10 R-10：真实发给前端但长期未登记的 9 个码（SSE error 帧与 /chat 拒绝出口）。
+     *
+     * <p>清单取自 A10 报告 §2.1 R-10；本断言只锁"已登记"，文案与前端镜像分别由下方两条用例锁。
+     */
+    @Test
+    void a10WireCodesAreRegistered() {
+        Set<String> expected = Set.of(
+                "REASON_TOO_LONG",
+                "EMPTY_REPLY",
+                "AI_RUN_CANCELLED",
+                "UPSTREAM_FIRST_BYTE_TIMEOUT",
+                "UPSTREAM_SILENT_TIMEOUT",
+                "TOTAL_BUDGET_EXCEEDED",
+                "UPSTREAM_STREAM_INCOMPLETE",
+                "UPSTREAM_CONNECTION_BROKEN",
+                "CONTEXT_OVERFLOW");
+        assertEquals(Set.of(), difference(expected, ErrorCodes.ALL), "A10 R-10 的 9 个码未全部登记");
+    }
+
+    /**
+     * A10 R-10（后半）：响应体里写死的 {@code put("code", "…")} 字面量必须登记进 {@link ErrorCodes}。
+     *
+     * <p>为什么只扫这一种形态：它是"码绕过常量直接上线"的实际写法（{@code REASON_TOO_LONG} 即如此），
+     * 而 {@code Map.of("code", "CNY")} 之类是业务字段、不是错误码，扫进去只会制造误报。
+     */
+    @Test
+    void literalCodesWrittenToBodiesAreRegistered() throws IOException {
+        Pattern literal = Pattern.compile("put\\(\\s*\"code\"\\s*,\\s*\"([A-Z][A-Z0-9_]*)\"\\s*\\)");
+        List<String> offenders = new ArrayList<>();
+        try (Stream<Path> files = Files.walk(Paths.get("src/main/java"))) {
+            for (Path file : files.filter(path -> path.toString().endsWith(".java")).toList()) {
+                String source = Files.readString(file, StandardCharsets.UTF_8);
+                Matcher matcher = literal.matcher(source);
+                while (matcher.find()) {
+                    if (!ErrorCodes.ALL.contains(matcher.group(1))) {
+                        offenders.add(file.toString().replace('\\', '/') + " → " + matcher.group(1));
+                    }
+                }
+            }
+        }
+        assertEquals(List.of(), offenders, "响应体里写死的 code 必须先在 ErrorCodes 登记");
+    }
+
+    /**
+     * I-2 / I-3 强化：可用性三档（+ Redis 503）必须同时存在于后端、前端镜像与双 locale。
+     *
+     * <p>{@link #frontendMirrorMatchesBackendCodes()} 已做全量差集；这里单独锁"会用错码/漏映射"
+     * 的四个可用性出口，避免以后新增一档只改后端。
+     */
+    @Test
+    void availabilityTiersAreMirroredInFrontendAndMessages() throws IOException {
+        Set<String> tiers = Set.of(ErrorCodes.AI_UNAVAILABLE, ErrorCodes.AI_KEY_MISSING,
+                ErrorCodes.AI_KEY_UNREADABLE, ErrorCodes.AI_REDIS_UNAVAILABLE);
+        Set<String> frontend = parseFrontendErrorCodes();
+        Set<String> zh = parseMessageKeys("messages_zh.properties");
+        Set<String> en = parseMessageKeys("messages_en.properties");
+        assertEquals(Set.of(), difference(tiers, frontend), "可用性码前端镜像缺");
+        assertEquals(Set.of(), difference(tiers, zh), "可用性码 messages_zh 缺键");
+        assertEquals(Set.of(), difference(tiers, en), "可用性码 messages_en 缺键");
     }
 
     @Test

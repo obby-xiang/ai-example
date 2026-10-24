@@ -11,6 +11,7 @@ import com.example.configmgr.job.entity.Job;
 import com.example.configmgr.job.repo.JobItemRepository;
 import com.example.configmgr.job.repo.JobRepository;
 import com.example.configmgr.job.repo.ValidationIssueRepository;
+import com.example.configmgr.job.service.JobHeartbeatRegistry;
 import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.entity.TaskItem;
 import com.example.configmgr.task.entity.TaskFile;
@@ -33,6 +34,7 @@ import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 @Slf4j
 @Service
@@ -46,6 +48,7 @@ public class TaskService {
     private final TaskItemRepository taskItemRepository;
     private final TaskFileRepository taskFileRepository;
     private final JobRepository jobRepository;
+    private final JobHeartbeatRegistry heartbeatRegistry;
     private final JobItemRepository jobItemRepository;
     private final ValidationIssueRepository issueRepository;
     private final ConfigStagingRowRepository stagingRowRepository;
@@ -83,10 +86,30 @@ public class TaskService {
     }
 
     /**
+     * R1-13：事务内锁任务行（{@code SELECT ... FOR UPDATE}）。
+     *
+     * <p>删除与建作业共用此锁，调用方必须已处于事务中。锁只覆盖任务行，作业状态写入走各自的
+     * 短事务/条件 UPDATE，不反向往等待任务行，故不形成 job → task 的反向锁环。
+     *
+     * @throws ResourceNotFoundException 任务不存在（删除后又被建作业并发读到的情形）
+     */
+    public Task lockForUpdate(Long id) {
+        return taskRepository.findByIdForUpdate(id)
+                .orElseThrow(() -> ResourceNotFoundException.of("任务", id));
+    }
+
+    /**
+     * 启动作业恢复等“任务可能已被删除”的路径：锁不到任务行时返回 empty，不抛 404。
+     */
+    public Optional<Task> tryLockForUpdate(Long id) {
+        return taskRepository.findByIdForUpdate(id);
+    }
+
+    /**
      * R-137：仅供状态判定的裸取（不水合 items）—— 守卫只读 status/type，
      * 不该为一次布尔判定拉整份任务条目集合。
      */
-    public java.util.Optional<Task> findByIdRaw(Long id) {
+    public Optional<Task> findByIdRaw(Long id) {
         return taskRepository.findById(id);
     }
 
@@ -102,8 +125,10 @@ public class TaskService {
 
     @Transactional
     public Task selectDefs(Long taskId, List<String> defCodes) {
-        Task task = taskRepository.findById(taskId)
-                .orElseThrow(() -> ResourceNotFoundException.of("任务", taskId));
+        // R1-13 / P1-5：入口先取 task 行锁，与 delete 统一 task → child 的加锁顺序。
+        // 若先读后写，delete 持 task 锁等 task_items、本方法持 task_items 行锁等 task 行，
+        // H2 会判死锁并回滚一方（500）。lockForUpdate 返回的就是锁后读到的任务行。
+        Task task = lockForUpdate(taskId);
 
         // Remove items not in new selection
         if (!defCodes.isEmpty()) {
@@ -338,14 +363,70 @@ public class TaskService {
      *
      * <p>删除动作的操作流水（无主体操作流水，ADR-11b）：删除前落一条结构化流水行
      * （动作/对象/前值摘要/来源/时间），流水记录不含主体维度；落库的 AuditLog 表属 DC-10 的 P2。
+     *
+     * <p><b>runner 存活守卫（R1-13 / C1）</b>：存在 PENDING/RUNNING 作业时拒绝删除（409
+     * {@code JOB_ALREADY_RUNNING}）；作业已 CANCELLED/FAILED/COMPLETED 但 runner 尚未退出时同样拒绝，
+     * 文案为“作业正在收尾，请稍后重试”。runner 生命周期由 {@link JobHeartbeatRegistry} 的
+     * {@code beginRunner/endRunner} 跟踪：作业创建事务内登记（回滚注销），{@code AsyncJobExecutor}
+     * 的 finally（正常/异常/取消）注销。只有注销后才允许级联删除。
+     *
+     * <p><b>语义变更</b>：CANCELLED <b>不再立即可删</b>——取消只改 job 行，runner 的长事务仍可能在
+     * 分片边界之后落 {@code config_staging_rows} / {@code task_files} / {@code validation_issues}。
+     * 必须等 runner 自己退出（或进程重启后内存登记簿为空）才放行。
+     *
+     * <p><b>心跳/看门狗边界</b>：{@link JobHeartbeatRegistry#clear} 会被 {@code JobProgressService.finish}
+     * 和 {@code JobWatchdog.judge} 调用；看门狗清心跳时 runner 线程可能仍活着，故删除闸门<b>不以心跳为准</b>，
+     * 而以 runner 登记为准，避免把“卡死”误当成“可删”。V6 子表 FK 仍保留为二阶防线（迟到 INSERT 被拒），
+     * 但不再承担主保证；物理文件（写盘成功、落行失败）仍可能残留。
+     *
+     * <p><b>建作业互斥（R1-13 / Important 1）</b>：本方法以任务行锁作为删除与
+     * {@link com.example.configmgr.job.service.JobService#createAndStart} 的共同互斥点，
+     * 锁顺序固定 task → job；先建作业则删除看到 PENDING 返回 409，先删任务则建作业 404。
      */
     @Transactional
     public void delete(Long taskId) {
-        Task task = taskRepository.findById(taskId)
-                .orElseThrow(() -> ResourceNotFoundException.of("任务", taskId));
+        // 先锁任务行（与 JobService.createAndStart 同一互斥点）：先建则这里看到 PENDING 返回 409；
+        // 先删则建作业拿不到任务行返回 404。锁顺序固定 task → job，不反向等 job 行。
+        Task task = lockForUpdate(taskId);
+
+        List<Job> jobs = jobRepository.findByTaskId(taskId);
+        Job inFlight = jobs.stream()
+                .filter(job -> job.getStatus() == Job.JobStatus.PENDING
+                        || job.getStatus() == Job.JobStatus.RUNNING)
+                .findFirst()
+                .orElse(null);
+        if (inFlight != null) {
+            throw new ConflictException(ErrorCodes.JOB_ALREADY_RUNNING,
+                    "任务 #" + taskId + " 仍有未结束作业：作业 #" + inFlight.getId() + " ["
+                            + inFlight.getJobType() + "] 状态 " + inFlight.getStatus()
+                            + "（JOB_ALREADY_RUNNING），暂时无法删除；删除任务会级联清理作业/暂存/文件，"
+                            + "请等待作业结束或先取消作业后再删除");
+        }
+
+        // C1：CANCELLED/FAILED 等终态也只是“状态已收”，runner 可能仍在自己的长事务里写子表。
+        // 只要 runner 未退出（含看门狗清掉心跳但线程仍活着），一律拒绝级联；只有 AsyncJobExecutor
+        // 的 finally 注销 runner 后才放行。心跳过期/看门狗清心跳不等于 runner 已退出。
+        Job finishing;
+        try {
+            finishing = jobs.stream()
+                    .filter(job -> heartbeatRegistry.isRunnerAlive(job.getId()))
+                    .findFirst()
+                    .orElse(null);
+        } catch (JobHeartbeatRegistry.RunnerActiveStateUnavailableException e) {
+            // C1 / 多实例：Redis 不可用时不能把“查不到”当成“没有 runner”。fail-closed。
+            throw new ConflictException(ErrorCodes.JOB_ALREADY_RUNNING,
+                    "任务 #" + taskId + " 的作业收尾状态无法确认（Redis 不可用），"
+                            + "为避免产生孤儿数据已拒绝删除，请稍后重试");
+        }
+        if (finishing != null) {
+            throw new ConflictException(ErrorCodes.JOB_ALREADY_RUNNING,
+                    "任务 #" + taskId + " 的作业 #" + finishing.getId() + " ["
+                            + finishing.getJobType() + "] 状态 " + finishing.getStatus()
+                            + " 正在收尾，请稍后重试（作业进程退出后才允许删除）");
+        }
 
         List<TaskFile> files = taskFileRepository.findByTaskId(taskId);
-        List<Long> jobIds = jobRepository.findByTaskId(taskId).stream().map(Job::getId).toList();
+        List<Long> jobIds = jobs.stream().map(Job::getId).toList();
         long stagingRows = stagingRowRepository.findByTaskId(taskId).size();
 
         // FR-4.4「删除动作入操作流水」本期落地形态：结构化流水行（动作/对象/前值摘要/来源/时间，
@@ -367,11 +448,22 @@ public class TaskService {
             TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
                 @Override
                 public void afterCommit() {
-                    files.forEach(f -> fileStorage.delete(f.getStoragePath()));
+                    deletePhysicalFiles(files);
                 }
             });
         } else {
-            files.forEach(f -> fileStorage.delete(f.getStoragePath()));
+            deletePhysicalFiles(files);
+        }
+    }
+
+    /** Minor 6：单个文件删除失败不阻断其余文件（FileStorageService 自身吞 IOException，这里兜运行时异常）。 */
+    private void deletePhysicalFiles(List<TaskFile> files) {
+        for (TaskFile file : files) {
+            try {
+                fileStorage.delete(file.getStoragePath());
+            } catch (RuntimeException e) {
+                log.warn("删除任务物理文件失败（继续清理其余文件）path={}：{}", file.getStoragePath(), e.getMessage());
+            }
         }
     }
 

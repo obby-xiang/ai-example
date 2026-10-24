@@ -482,7 +482,16 @@ public class SpToolCallingManager implements ToolCallingManager {
 				// R6 裁决同口径：信封的 outcome/code 必须在**结算之后**回读待决条目 —— 循环里的
 				// pending 是等待前那份（status 仍 PENDING、outcome=null），拿它取信封会把成功写成
 				// unknown。executeOnce/gate 写的是外置存储里的新副本，故此处重读（缺失则回落原对象）。
-				PendingToolCall settled = this.store.pending(runId, pending.getToolCallId());
+				PendingToolCall settled;
+				try {
+					settled = this.store.pendingLenient(runId, pending.getToolCallId());
+				}
+				catch (RuntimeException ex) {
+					// C2：执行后的日志/信封读取失败不得改变工具结局；回落入参副本。
+					log.debug("执行后读待决条目失败，回落入参 runId={} toolCallId={}：{}", runId,
+							pending.getToolCallId(), ex.getMessage());
+					settled = pending;
+				}
 				PendingToolCall source = settled == null ? pending : settled;
 				// 日志链路批：工具生命周期的右端 —— 结局分类沿用条目真值（不另造一套口径）
 				// AI 日志最小补齐批：ms 含审批等待，execMs 把它扣掉（"工具慢"与"人在犹豫"必须可分）
@@ -718,7 +727,16 @@ public class SpToolCallingManager implements ToolCallingManager {
 		long ms = Math.max(0L, System.currentTimeMillis() - startedAtMs);
 		boolean cancelled = error instanceof StreamViolationException violation
 				&& StreamViolationException.CANCELLED.equals(violation.getCode());
-		PendingToolCall settled = this.store.pending(runId, pending.getToolCallId());
+		PendingToolCall settled;
+		try {
+			settled = this.store.pendingLenient(runId, pending.getToolCallId());
+		}
+		catch (RuntimeException readFailure) {
+			// C1：诊断路径不得二次抛（否则原始异常被替换，连 tool_call_end 都写不出）。
+			log.debug("traceToolAborted 读待决条目失败，使用入参 runId={} toolCallId={}：{}", runId,
+					pending.getToolCallId(), readFailure.getMessage());
+			settled = pending;
+		}
 		PendingToolCall source = settled == null ? pending : settled;
 		AiTrace.eventOn(runId, sessionId, "tool_call_end", "toolCallId", pending.getToolCallId(), "tool",
 				pending.getName(), "kind", pending.getKind(), "ms", ms, "execMs", ms, "skipped", false, "ok", false,
@@ -729,9 +747,17 @@ public class SpToolCallingManager implements ToolCallingManager {
 
 	/** 事件边界上的取消检查：命中即抛出，交由 {@code ResilientChatService} 以取消收尾。 */
 	private void checkCancelled(String runId) {
-		if (this.cancellations.isCancelled(runId)) {
+		CancellationRegistry.CancelState state = this.cancellations.cancelState(runId);
+		if (state == CancellationRegistry.CancelState.CANCELLED) {
 			throw new StreamViolationException(StreamViolationException.CANCELLED,
 					"本轮对话已被取消，工具执行在事件边界终止（runId=" + runId + "）");
+		}
+		if (state == CancellationRegistry.CancelState.UNKNOWN) {
+			// N-1：这是"执行副作用前的最后一道门"，UNKNOWN 必须拒绝执行；但它不是用户取消，
+			// 不能用 CANCELLED（否则会被 cancelTerminal 记成“已停止/ALREADY_CANCELLED”）。
+			// 用基础设施不可用码走普通失败/可重试路径。
+			throw new StreamViolationException(StreamViolationException.STATE_UNAVAILABLE,
+					"取消状态未知（Redis 读失败），工具执行在事件边界终止（runId=" + runId + "）");
 		}
 	}
 
@@ -1095,7 +1121,15 @@ public class SpToolCallingManager implements ToolCallingManager {
 		}
 		this.store.appendLedger(runId, pending, text);
 
-		PendingToolCall fresh = this.store.pending(runId, pending.getToolCallId());
+		PendingToolCall fresh;
+		try {
+			fresh = this.store.pendingLenient(runId, pending.getToolCallId());
+		}
+		catch (RuntimeException ex) {
+			log.debug("结算读待决条目失败，回落入参 runId={} toolCallId={}：{}", runId,
+					pending.getToolCallId(), ex.getMessage());
+			fresh = pending;
+		}
 		if (fresh == null) {
 			fresh = pending;
 		}
@@ -1205,7 +1239,15 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 * {@link #RECONCILIATION_NOTE} 提醒人工对账。
 	 */
 	private String settleToolTimeout(String runId, PendingToolCall pending, String text) {
-		PendingToolCall fresh = this.store.pending(runId, pending.getToolCallId());
+		PendingToolCall fresh;
+		try {
+			fresh = this.store.pendingLenient(runId, pending.getToolCallId());
+		}
+		catch (RuntimeException ex) {
+			log.debug("结算读待决条目失败，回落入参 runId={} toolCallId={}：{}", runId,
+					pending.getToolCallId(), ex.getMessage());
+			fresh = pending;
+		}
 		if (fresh == null) {
 			fresh = pending;
 		}

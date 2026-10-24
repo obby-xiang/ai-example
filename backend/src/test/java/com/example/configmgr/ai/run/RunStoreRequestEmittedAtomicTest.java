@@ -31,7 +31,7 @@ class RunStoreRequestEmittedAtomicTest {
 
 	private static final String CALL_ID = "call-1";
 
-	private static final String REQ_KEY = "ai:req:" + RUN_ID;
+	private static final String REQ_KEY = RunStore.runScopedKey(RunStore.REQ_PREFIX, RUN_ID);
 
 	private final FakeLeaseRedis fake = new FakeLeaseRedis();
 

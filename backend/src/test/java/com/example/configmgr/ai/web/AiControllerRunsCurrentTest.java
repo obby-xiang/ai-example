@@ -239,6 +239,7 @@ class AiControllerRunsCurrentTest {
 		when(this.runStore.sessionCurrentRunId(sessionId)).thenReturn(runId);
 		when(this.runStore.get(runId)).thenReturn(snapshot);
 		when(this.runStore.pendings(runId)).thenReturn(pendings);
+		when(this.runStore.pendingsLenient(runId)).thenReturn(pendings);
 		when(this.runStore.lastEventSeq(runId)).thenReturn(0L);
 	}
 
@@ -250,7 +251,7 @@ class AiControllerRunsCurrentTest {
 	void archiveMaxSeqPrefersTheFrameStoreWhenInjected() throws Exception {
 		AiController controller = controller();
 		com.example.configmgr.ai.run.FrameStore frameStore = mock(com.example.configmgr.ai.run.FrameStore.class);
-		when(frameStore.lastSeq("r-1")).thenReturn(77L);
+		when(frameStore.lastSeqIfKnown("r-1")).thenReturn(java.util.OptionalLong.of(77L));
 		org.springframework.test.util.ReflectionTestUtils.setField(controller, "frameStore", frameStore);
 		MockMvc mvc = MockMvcBuilders.standaloneSetup(controller).build();
 
@@ -260,6 +261,22 @@ class AiControllerRunsCurrentTest {
 		mvc.perform(get("/api/ai/runs/current").param("sessionId", "s-1"))
 			.andExpect(status().isOk())
 			.andExpect(jsonPath("$.data.archiveMaxSeq").value(77));
+	}
+
+	/** I-1：末号读失败不得回 0（前端会当全量回放锚点）；端点必须 503 + degraded。 */
+	@Test
+	void archiveMaxSeqUnknownReturns503InsteadOfZero() throws Exception {
+		AiController controller = controller();
+		com.example.configmgr.ai.run.FrameStore frameStore = mock(com.example.configmgr.ai.run.FrameStore.class);
+		when(frameStore.lastSeqIfKnown("r-1")).thenReturn(java.util.OptionalLong.empty());
+		org.springframework.test.util.ReflectionTestUtils.setField(controller, "frameStore", frameStore);
+		MockMvc mvc = MockMvcBuilders.standaloneSetup(controller).build();
+		seedIndex("s-1", "r-1", RunSnapshot.SUSPENDED, List.of());
+
+		mvc.perform(get("/api/ai/runs/current").param("sessionId", "s-1"))
+			.andExpect(status().isServiceUnavailable())
+			.andExpect(jsonPath("$.code").value("AI_REDIS_UNAVAILABLE"))
+			.andExpect(jsonPath("$.degraded").value(true));
 	}
 
 	private static PendingToolCall pending(String toolCallId, String status, String kind) {

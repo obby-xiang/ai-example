@@ -1,8 +1,12 @@
 package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.observe.RedisDegradation;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -25,8 +29,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>
  * 断言对象是<b>存储语义</b>而不是"某方法被调用过"：取号单调不重、按号回读的四个边界、
  * 窗口近似裁剪、TTL 滑动、LIST/Stream 兼容拼接去重。Redis 用进程内替身
- * （{@link FakeFrameRedis}，按 INCR/XADD/XRANGE 的语义实现），不起真实 Redis。
+ * （{@link FakeFrameRedis}，按 INCR/XADD/XRANGE 的语义实现，<b>且按目标部署 5.0.14
+ * 拒绝排他区间</b>），不起真实 Redis。
  */
+@ExtendWith(OutputCaptureExtension.class)
 class RedisFrameStoreTest {
 
 	private static final String RUN_ID = "run-frames";
@@ -349,6 +355,149 @@ class RedisFrameStoreTest {
 		redis.seedList(store.legacyListKey(RUN_ID), MAPPER, List.of(frame("delta", 41L)));
 
 		assertThat(store.nextSeq(RUN_ID)).isEqualTo(42L);
+	}
+
+	// ── 目标部署 Redis 5.0.14：排他区间（`(id`）不可用 ──────────────────────
+	//  排他区间是 6.2 才有；5.0 把 `(123-0` 当非法 stream ID 直接报错，读侧若用它就是整次差量
+	//  读失败（被 catch 吞成空 ⇒ 线上"回放 0 帧"）。替身按 5.0 报错，于是下面三条：
+	//  首次回放 / lastSeq 差量 在排他实现下拿到 0 帧，闭区间实现下才是整窗与差量。
+
+	/**
+	 * 长 run（&gt; 窗口 {@value RedisFrameStore#STREAM_WINDOW}）首次回放：
+	 * {@code afterSeq=0}，但读取下限被夹到 {@code tail − 窗口 &gt; 0} —— 排他实现下即 0 帧。
+	 */
+	@Test
+	void firstReplayOfALongRunReturnsTheNewestWindow() {
+		FakeFrameRedis redis = new FakeFrameRedis();
+		RedisFrameStore store = store(redis);
+		int total = RedisFrameStore.STREAM_WINDOW + 5;
+		for (int i = 0; i < total; i++) {
+			nextAndAppend(store, "delta");
+		}
+
+		List<Long> replayed = seqs(store.readFrom(RUN_ID, 0L, 0));
+		assertThat(replayed).as("首次回放必须拿到最新整窗 %d 帧（排他实现下是 0 帧）", RedisFrameStore.STREAM_WINDOW)
+				.hasSize(RedisFrameStore.STREAM_WINDOW);
+		assertThat(replayed.get(0)).as("窗口头 = tail − 窗口 + 1").isEqualTo(6L);
+		assertThat(replayed.get(replayed.size() - 1)).as("含末帧").isEqualTo((long) total);
+		assertThat(store.lastSeq(RUN_ID)).isEqualTo(total);
+	}
+
+	/** lastSeq 差量：{@code afterSeq=7 ⇒ 8/9/10}（{@code from &gt; 0}，排他实现下被吞成空）。 */
+	@Test
+	void deltaReadAboveLastSeqReturnsOnlyTheNewFrames() {
+		RedisFrameStore store = store(new FakeFrameRedis());
+		for (int i = 0; i < 10; i++) {
+			nextAndAppend(store, "delta");
+		}
+
+		assertThat(seqs(store.readFrom(RUN_ID, 7L, 0))).containsExactly(8L, 9L, 10L);
+		assertThat(store.readFrom(RUN_ID, 10L, 0)).as("afterSeq = 末号：无差量").isEmpty();
+	}
+
+	/** 普通空流：没有帧 ⇒ 空结果，且<b>不</b>得表现为读失败（两条路径必须可区分）。 */
+	@Test
+	void emptyStreamIsNotReportedAsAReadFailure(CapturedOutput output) {
+		RedisFrameStore store = store(new FakeFrameRedis());
+		long rangeBefore = RedisDegradation.count(RedisDegradation.A3_FRAME_RANGE_READ);
+		long tailBefore = RedisDegradation.count(RedisDegradation.A4_FRAME_TAIL_READ);
+
+		assertThat(store.readFrom(RUN_ID, 0L, 0)).isEmpty();
+		assertThat(store.readFrom(RUN_ID, 5L, 0)).as("from > 0 的空流同样只是空").isEmpty();
+		assertThat(store.readFromWithStatus(RUN_ID, 0L, 0).degraded()).as("空流不是降级读").isFalse();
+		assertThat(store.lastSeqIfKnown(RUN_ID)).as("空流末号是已知的 0").hasValue(0L);
+		assertThat(output.getAll()).as("空流不是读失败，不许告警").doesNotContain("读取失败").doesNotContain("探测失败");
+		assertThat(RedisDegradation.count(RedisDegradation.A3_FRAME_RANGE_READ)).as("空流不得计入读失败")
+			.isEqualTo(rangeBefore);
+		assertThat(RedisDegradation.count(RedisDegradation.A4_FRAME_TAIL_READ)).as("空流不得计入末号失败")
+			.isEqualTo(tailBefore);
+	}
+
+	/** 读失败（连接层异常）不得静默折成空：结果仍为空（韧性口径）但必须 WARN + 计数。 */
+	@Test
+	void streamReadFailureIsReportedInsteadOfSilentlyEmpty(CapturedOutput output) {
+		FakeFrameRedis redis = new FakeFrameRedis();
+		RedisFrameStore store = store(redis);
+		for (int i = 0; i < 3; i++) {
+			nextAndAppend(store, "delta");
+		}
+
+		long before = RedisDegradation.count(RedisDegradation.A3_FRAME_RANGE_READ);
+		redis.failRangeRead = true;
+		assertThat(store.readFrom(RUN_ID, 0L, 0)).as("读失败不抛给调用链（挂起重连/唤醒补帧不受牵连）").isEmpty();
+		assertThat(output.getAll()).as("读失败必须可观测：WARN + runId").contains("事件日志读取失败").contains(RUN_ID);
+		assertThat(RedisDegradation.count(RedisDegradation.A3_FRAME_RANGE_READ))
+			.as("A3 读失败必须进统一降级计数")
+			.isGreaterThan(before);
+	}
+
+	/**
+	 * 末号探测失败：必须 WARN + 计数；I-1 起 afterSeq=0 的回放不得退回最旧窗口，
+	 * 必须返回"空 + degraded"由上层回 503/重试；lastSeqIfKnown 也必须为空（不能回 0）。
+	 */
+	@Test
+	void tailProbeFailureIsReportedAndFullReplayReturnsDegradedEmpty(CapturedOutput output) {
+		FakeFrameRedis redis = new FakeFrameRedis();
+		RedisFrameStore store = store(redis);
+		nextAndAppend(store, "delta");
+
+		long before = RedisDegradation.count(RedisDegradation.A4_FRAME_TAIL_READ);
+		redis.failTailRead = true;
+		FrameStore.ReadResult full = store.readFromWithStatus(RUN_ID, 0L, 0);
+		assertThat(full.frames()).as("末号未知时全量回放不得退回最旧窗口").isEmpty();
+		assertThat(full.degraded()).as("API 层必须能区分降级读与空流").isTrue();
+		assertThat(store.lastSeqIfKnown(RUN_ID)).as("末号读失败不得折成 0").isEmpty();
+		assertThat(store.lastSeq(RUN_ID)).isEqualTo(-1L);
+		assertThat(output.getAll()).contains("事件日志末号探测失败").contains(RUN_ID);
+		assertThat(RedisDegradation.count(RedisDegradation.A4_FRAME_TAIL_READ))
+			.as("A4 末号探测失败必须进统一降级计数")
+			.isGreaterThan(before);
+	}
+
+	/** 差量读（afterSeq>0）在末号未知时仍可用 afterSeq 作可靠下界，但必须标记 degraded。 */
+	@Test
+	void tailProbeFailureStillAllowsDeltaReadFromKnownAfterSeq() {
+		FakeFrameRedis redis = new FakeFrameRedis();
+		RedisFrameStore store = store(redis);
+		nextAndAppend(store, "a");
+		nextAndAppend(store, "b");
+		nextAndAppend(store, "c");
+
+		redis.failTailRead = true;
+		FrameStore.ReadResult delta = store.readFromWithStatus(RUN_ID, 2L, 0);
+		assertThat(seqs(delta.frames())).containsExactly(3L);
+		assertThat(delta.degraded()).isTrue();
+	}
+
+	/** 兼容期 LIST 末帧探测失败：整批老帧会被跳过 ⇒ 必须 WARN（不许伪装成空表）。 */
+	@Test
+	void legacyListTailProbeFailureIsReportedInsteadOfSilentlyEmpty(CapturedOutput output) {
+		FakeFrameRedis redis = new FakeFrameRedis();
+		RedisFrameStore store = store(redis);
+		redis.seedList(store.legacyListKey(RUN_ID), MAPPER, List.of(frame("start", 1L)));
+
+		redis.failListTailProbe = true;
+		assertThat(store.readFrom(RUN_ID, 0L, 0)).as("末帧探测失败 ⇒ 整段 LIST 分支被跳过").isEmpty();
+		assertThat(output.getAll()).as("末帧探测失败必须 WARN，且文案与整段读可区分")
+				.contains("末帧探测")
+				.doesNotContain("本批 LIST 帧缺失");
+	}
+
+	/**
+	 * 兼容期 LIST <b>整段读</b>失败：末帧探测成功、{@code readLegacyList} 才抛 —— 这是另一条独立路径
+	 * （I1：老用例用"全挂"开关只命中末帧探测，把 {@code :409} 那条 WARN 改回 debug 仍全绿）。
+	 */
+	@Test
+	void legacyListFullReadFailureIsReportedInsteadOfSilentlyEmpty(CapturedOutput output) {
+		FakeFrameRedis redis = new FakeFrameRedis();
+		RedisFrameStore store = store(redis);
+		redis.seedList(store.legacyListKey(RUN_ID), MAPPER, List.of(frame("start", 1L)));
+
+		redis.failListFullRead = true;
+		assertThat(store.readFrom(RUN_ID, 0L, 0)).as("整段读失败 ⇒ 本批 LIST 帧缺失，返回空").isEmpty();
+		assertThat(output.getAll()).as("整段 LIST 读取失败必须 WARN，且不是靠末帧探测兜住")
+				.contains("本批 LIST 帧缺失")
+				.doesNotContain("末帧探测");
 	}
 
 	// ── M7（存储侧）：心跳不进事件日志 ───────────────────────────────────────

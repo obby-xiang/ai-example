@@ -66,6 +66,17 @@ class ConfirmGateFrontendTimeoutTextTest {
 
     private final RunStore store = mock(RunStore.class);
 
+	{
+		// C2：生产读侧已改为 pendingLenient/pendingsLenient；Mockito 桩只需把非抛读口委托给原桩。
+		when(this.store.pendingLenient(org.mockito.ArgumentMatchers.anyString(),
+				org.mockito.ArgumentMatchers.anyString()))
+			.thenAnswer(invocation -> this.store.pending((String) invocation.getArgument(0),
+					(String) invocation.getArgument(1)));
+		when(this.store.pendingsLenient(org.mockito.ArgumentMatchers.anyString()))
+			.thenAnswer(invocation -> this.store.pendings((String) invocation.getArgument(0)));
+	}
+
+
     private final RunRegistry registry = mock(RunRegistry.class);
 
     private final CancellationRegistry cancellations = mock(CancellationRegistry.class);

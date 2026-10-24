@@ -40,7 +40,6 @@ class DefinitionDeleteTest {
 
     private static final String TARGET = "S44F_DEL_TARGET";
     private static final String HOLDER = "S44F_DEL_REFS";
-    private static final Long TASK_ID_HOLDER = -1L;
 
     @Autowired
     private MockMvc mockMvc;
@@ -81,8 +80,10 @@ class DefinitionDeleteTest {
     @Test
     void deleteUnreferencedDefinitionRemovesItWithItsFieldsAndStagingRows() throws Exception {
         createTarget();
-        stagingRowRepository.save(stagingRow("S44F-ROW-1"));
-        stagingRowRepository.save(stagingRow("S44F-ROW-2"));
+        // V6 的 config_staging_rows.task_id 外键要求真实任务行（原 -1 哨兵在 FK 下不成立）。
+        createdTaskId = taskService.create(Task.TaskType.IMPORT, "S44F 暂存持有任务").getId();
+        stagingRowRepository.save(stagingRow("S44F-ROW-1", createdTaskId));
+        stagingRowRepository.save(stagingRow("S44F-ROW-2", createdTaskId));
 
         mockMvc.perform(delete("/api/definitions/{code}", TARGET))
                 .andExpect(status().isOk())
@@ -194,9 +195,9 @@ class DefinitionDeleteTest {
                 .andExpect(status().isCreated());
     }
 
-    private ConfigStagingRow stagingRow(String rowKey) {
+    private ConfigStagingRow stagingRow(String rowKey, Long taskId) {
         ConfigStagingRow row = new ConfigStagingRow();
-        row.setTaskId(TASK_ID_HOLDER);
+        row.setTaskId(taskId);
         row.setDefCode(TARGET);
         row.setRowKey(rowKey);
         row.setScopeType("GLOBAL");

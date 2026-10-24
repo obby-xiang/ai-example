@@ -50,7 +50,14 @@ import static org.mockito.Mockito.when;
  * <h2>TTL 到期模拟（批③a）</h2>
  * {@link #advanceTime(Duration)} 推进一个<b>可控时钟</b>并清掉到点的键：租约键到点后别的 owner /
  * 实例可以重新取号（S4 资源锁、批③b S9 的前提）。时钟不随真实时间走 —— 用例不该用 sleep 等 TTL。
- * {@link #nowMs()} 是可观测的当前钟面。</li>
+ * {@link #nowMs()} 是可观测的当前钟面。
+ *
+ * <h2>hash slot 维度（B23L1 批① Cluster 硬阻断）</h2>
+ * 真实 Redis 是<b>原生 Cluster</b>（3 主 3 从，16384 槽）：一条 {@code EVAL} 的 KEYS 必须同槽，
+ * 否则整条命令回 {@code CROSSSLOT}。单库替身天然看不见这个约束 —— 于是这里<b>逐字复刻</b>
+ * 槽算法（CRC16-XMODEM mod 16384 + hash tag 优先），并提供 {@link #enableClusterMode()}：
+ * 打开后多键脚本与多键 DEL 一律按真 Redis 口径判槽，跨槽即抛 {@link CrossSlotException}。
+ * 默认关闭（既有用例是单节点语料，不该被槽约束改写语义），{@code ClusterSlotTest} 显式打开。
  *
  * <p>
  * <b>M-2 窗口</b>：{@link #afterPendingGet} 是"读到待决条目之后、返回之前"的并发注入点 ——
@@ -63,6 +70,12 @@ public final class FakeLeaseRedis {
 	/** 脚本分派标记（必须与 {@link LeaseService} 脚本正文里的注释一致）。 */
 	static final String ACQUIRE_MARK = "LEASE_ACQUIRE";
 
+	/** 无 tag 租约的抢租标记（取号在脚本外；与带 tag 的脚本区分）。 */
+	static final String ACQUIRE_UNTAGGED_MARK = "LEASE_ACQUIRE_UNTAGGED";
+
+	/** 无 fence 的带 tag 租约（两键）的抢租标记。 */
+	static final String ACQUIRE_NOFENCE_MARK = "LEASE_ACQUIRE_NOFENCE";
+
 	static final String RENEW_MARK = "LEASE_RENEW";
 
 	static final String VERIFY_MARK = "LEASE_VERIFY";
@@ -73,6 +86,12 @@ public final class FakeLeaseRedis {
 
 	/** 台账 + 幂等索引的同一原子步（B23L1 批③a）。 */
 	static final String IDEM_PUSH_MARK = "IDEM_PUSH";
+
+	/** 认领回滚的值匹配 CAS（Minor3）。 */
+	static final String CLAIM_ROLLBACK_MARK = "CLAIM_ROLLBACK";
+
+	/** 业务活动锚点的单键原子 max + 续期（R1-09 / I-3）。 */
+	static final String ACTIVITY_TOUCH_MARK = "ACTIVITY_TOUCH";
 
 	/** STRING 键面（快照 JSON、租约现值、全局 epoch 计数）。 */
 	final Map<String, String> strings = new ConcurrentHashMap<>();
@@ -100,6 +119,9 @@ public final class FakeLeaseRedis {
 
 	/** 全局 epoch 计数器（{@code INCR ai:lease:epoch} 的替身）。 */
 	final AtomicLong epochCounter = new AtomicLong();
+
+	/** 计数器自增的锁（"读-加-写"必须原子：并发用例会真的从两个线程 INCR 同一个键）。 */
+	private final Object counterLock = new Object();
 
 	/** 产品代码走过的 Lua 脚本次数（L7：写路径只能走脚本）。 */
 	public final AtomicInteger scriptCalls = new AtomicInteger();
@@ -159,8 +181,36 @@ public final class FakeLeaseRedis {
 	/** 模板级 {@code DEL} 次数（L7 断言 {@code never()}：释放不得走裸 DEL）。 */
 	final AtomicInteger templateDeletes = new AtomicInteger();
 
+	/**
+	 * 最近一次<b>模板级</b> {@code DEL} 带的键清单（R1-05：证明 deleteRun 是"一条命令带 12 个键"，
+	 * 而不是 N 条单键删 —— 单键删在 Cluster 下虽然不报错，但"一轮的键同生同死"就没了）。
+	 */
+	volatile List<String> lastDeletedKeys = List.of();
+
 	/** 置 true = 模拟 Redis 宕机（所有命令抛出，租约降级为进程内互斥）。 */
 	volatile boolean down;
+
+	/**
+	 * 置 true = 按<b>原生 Cluster</b> 口径判槽：多键脚本与多键 {@code DEL} 的键必须同槽，
+	 * 否则抛 {@link CrossSlotException}（真 Redis 回 {@code CROSSSLOT}）。
+	 *
+	 * <p>默认关闭：既有 1000+ 例都是单节点语料，语义不该被槽约束改写；{@link ClusterSlotTest}
+	 * 显式 {@link #enableClusterMode()} 打开，用它证明"同槽改造"不是空断言。
+	 */
+	volatile boolean clusterMode;
+
+	/** 最近一次脚本调用各键的槽号（诊断/断言用；跨槽用例失败时可直接看差在哪个键）。 */
+	volatile List<Integer> lastScriptSlots = List.of();
+
+	/**
+	 * 抢租脚本<b>执行前</b>的一次性注入点（I-2 竞争交错的唯一缝）。
+	 *
+	 * <p>为什么要这个缝：真实集群里"A 的请求在路上、B 已经抢完并写了 fence、A 才落地"只能靠
+	 * 调度/网络抖动复现；用例需要<b>确定性地</b>把 B 的完整一轮插进 A 的脚本之前。
+	 * 注意它位于 {@code EVAL} 之外 —— 脚本内部的 INCR+SET（new 口径）不会被它切开，
+	 * 这正是"取号与占用不可分"要证明的东西。
+	 */
+	volatile Runnable beforeAcquire;
 
 	/**
 	 * 读 HASH 字段的并发注入点（读到之后、返回之前调用一次）。
@@ -265,11 +315,15 @@ public final class FakeLeaseRedis {
 						|| this.lists.containsKey((String) invocation.getArgument(0)));
 		when(this.redis.delete(anyString())).thenAnswer(invocation -> {
 			this.templateDeletes.incrementAndGet();
-			return Boolean.TRUE.equals(remove((String) invocation.getArgument(0)));
+			String key = invocation.getArgument(0);
+			this.lastDeletedKeys = List.of(key);
+			return Boolean.TRUE.equals(remove(key));
 		});
 		when(this.redis.delete(anyList())).thenAnswer(invocation -> {
 			this.templateDeletes.incrementAndGet();
 			List<String> keys = invocation.getArgument(0);
+			this.lastDeletedKeys = new ArrayList<>(keys);
+			assertSameSlot(keys);
 			long removed = 0L;
 			for (String key : keys) {
 				if (Boolean.TRUE.equals(remove(key))) {
@@ -291,6 +345,19 @@ public final class FakeLeaseRedis {
 			touchTtl(key, invocation.getArgument(2));
 			return null;
 		}).when(this.values).set(anyString(), anyString(), any(Duration.class));
+		// B23L1 批①：epoch 取号<b>外置</b>为单键 INCR（脚本只剩 GET/SET 单键）。替身按真 Redis 的
+		// INCR 语义：读旧值 +1，只增不减（{@link #seedEpoch} 铺的高位起点也要被尊重）。
+		// INCR 的并发安全（评审 Minor 5）：产品侧的全局取号走这里（资源锁），两个线程同时来必须
+		// 拿到不同的号。{@code strings} 是 ConcurrentHashMap，但"读-加-写"不是原子的，故显式加锁。
+		when(this.values.increment(anyString())).thenAnswer(invocation -> {
+			checkAlive();
+			String key = (String) invocation.getArgument(0);
+			synchronized (this.counterLock) {
+				long next = Math.max(parseOrZero(this.strings.get(key)) + 1L, this.epochCounter.incrementAndGet());
+				this.strings.put(key, String.valueOf(next));
+				return next;
+			}
+		});
 		when(this.hashOps.get(anyString(), any())).thenAnswer(invocation -> {
 			checkAlive();
 			String key = invocation.getArgument(0);
@@ -313,6 +380,11 @@ public final class FakeLeaseRedis {
 					String.valueOf((Object) invocation.getArgument(2)));
 			return null;
 		}).when(this.hashOps).put(anyString(), any(), any());
+		when(this.hashOps.delete(anyString(), any())).thenAnswer(invocation -> {
+			checkAlive();
+			return table((String) invocation.getArgument(0)).remove(String.valueOf((Object) invocation.getArgument(1))) == null
+					? 0L : 1L;
+		});
 		when(this.hashOps.putIfAbsent(anyString(), any(), any())).thenAnswer(invocation -> {
 			checkAlive();
 			String previous = table((String) invocation.getArgument(0)).putIfAbsent(
@@ -333,6 +405,96 @@ public final class FakeLeaseRedis {
 						trailingArguments(invocation.getArguments())));
 	}
 
+	// ── Cluster 槽口径（B23L1 批①） ──────────────────────────────────────────
+
+	/** Redis Cluster 的槽数（{@code CLUSTER COUNTKEYSINSLOT} 的上界同一常数）。 */
+	public static final int SLOT_COUNT = 16384;
+
+	/** 打开 Cluster 口径的槽校验（{@link ClusterSlotTest} 用）。 */
+	public void enableClusterMode() {
+		this.clusterMode = true;
+	}
+
+	/** 关回单节点口径（默认）。 */
+	public void disableClusterMode() {
+		this.clusterMode = false;
+	}
+
+	public boolean clusterMode() {
+		return this.clusterMode;
+	}
+
+	/**
+	 * 键的槽号（<b>真 Redis 口径</b>）：有非空 hash tag 时对 {@code {...}} 内容做 CRC16，
+	 * 否则对整键做；取模 16384。
+	 *
+	 * <p>tag 规则按 Redis 规范：取<b>第一个</b> 左花括号，再取其后的<b>第一个</b> 右花括号，
+	 * 两者之间非空才算 tag（左花括号紧跟右花括号、或只有左花括号时，都按整键散列）。
+	 */
+	public static int slot(String key) {
+		return crc16(hashTagOf(key)) & (SLOT_COUNT - 1);
+	}
+
+	/** CRC16（CCITT/XMODEM，poly 0x1021、初值 0——Redis 用的就是这一支，不是 MODBUS）。 */
+	static int crc16(String value) {
+		int crc = 0;
+		for (byte raw : value.getBytes(java.nio.charset.StandardCharsets.UTF_8)) {
+			crc ^= (raw & 0xFF) << 8;
+			for (int bit = 0; bit < 8; bit++) {
+				crc = (crc & 0x8000) != 0 ? ((crc << 1) ^ 0x1021) : (crc << 1);
+				crc &= 0xFFFF;
+			}
+		}
+		return crc;
+	}
+
+	/** hash tag 内容（无形 tag 返回整键）。 */
+	static String hashTagOf(String key) {
+		int open = key.indexOf('{');
+		if (open < 0) {
+			return key;
+		}
+		int close = key.indexOf('}', open + 1);
+		if (close <= open + 1) {
+			return key;
+		}
+		return key.substring(open + 1, close);
+	}
+
+	/**
+	 * Cluster 口径下的一条命令：KEYS 必须同槽，否则整条回 {@code CROSSSLOT}（真 Redis 服务端拒绝，
+	 * 客户端无法替脚本拆槽）。
+	 */
+	void assertSameSlot(List<?> keys) {
+		this.lastScriptSlots = keys.stream().map(k -> slot(str(k))).toList();
+		if (!this.clusterMode || this.lastScriptSlots.size() < 2) {
+			return;
+		}
+		int first = this.lastScriptSlots.get(0);
+		for (int i = 1; i < this.lastScriptSlots.size(); i++) {
+			if (this.lastScriptSlots.get(i) != first) {
+				throw new CrossSlotException("CROSSSLOT Keys in request don't hash to the same slot"
+						+ "（" + str(keys.get(0)) + " slot=" + first + " / " + str(keys.get(i)) + " slot="
+						+ this.lastScriptSlots.get(i) + "）");
+			}
+		}
+	}
+
+	/**
+	 * 真 Redis Cluster 的硬错误：一条命令里的 KEYS 落在不同槽。
+	 *
+	 * <p>单独成型（而不是塞进 {@link IllegalStateException}）是为了让用例能<b>断言"这是跨槽"</b>，
+	 * 也为了让产品侧的 catch 归类可被检验（{@code ACQUIRE} 的 catch 会把任何异常折成
+	 * {@code UNAVAILABLE}，这正是 R1-01 的静默退化面）。
+	 */
+	public static final class CrossSlotException extends RuntimeException {
+
+		public CrossSlotException(String message) {
+			super(message);
+		}
+
+	}
+
 	// ── 脚本语义（逐行复刻 Lua） ────────────────────────────────────────────
 
 	/**
@@ -346,11 +508,26 @@ public final class FakeLeaseRedis {
 	private synchronized Object handleScript(RedisScript<?> script, List<?> keys, List<Object> args) {
 		this.scriptCalls.incrementAndGet();
 		checkAlive();
+		assertSameSlot(keys);
 		String body = script.getScriptAsString();
 		this.lastScriptBody = body;
 		this.lastScriptKeys = new ArrayList<>(keys);
+		if (body.contains(ACQUIRE_UNTAGGED_MARK)) {
+			runAcquireHook();
+			return acquireUntagged(str(keys.get(0)), str(args.get(0)),
+					Duration.ofMillis(Long.parseLong(str(args.get(1)))));
+		}
+		if (body.contains(ACQUIRE_NOFENCE_MARK)) {
+			runAcquireHook();
+			return acquireNoFence(str(keys.get(0)), str(keys.get(1)), str(args.get(0)),
+					Duration.ofMillis(Long.parseLong(str(args.get(1)))),
+					Duration.ofMillis(Long.parseLong(str(args.get(2)))));
+		}
 		if (body.contains(ACQUIRE_MARK)) {
-			return acquire(str(keys.get(0)), str(keys.get(1)), str(args.get(0)), Duration.ofMillis(Long.parseLong(str(args.get(1)))));
+			runAcquireHook();
+			return acquireFenced(str(keys.get(0)), str(keys.get(1)), str(keys.get(2)), str(args.get(0)),
+					Duration.ofMillis(Long.parseLong(str(args.get(1)))),
+					Duration.ofMillis(Long.parseLong(str(args.get(2)))));
 		}
 		if (body.contains(RENEW_MARK)) {
 			return renew(str(keys.get(0)), str(args.get(0)), Duration.ofMillis(Long.parseLong(str(args.get(1)))));
@@ -369,27 +546,125 @@ public final class FakeLeaseRedis {
 			return idemPush(str(keys.get(0)), str(keys.get(1)), str(args.get(0)), str(args.get(1)), str(args.get(2)),
 					Duration.ofMillis(Long.parseLong(str(args.get(3)))));
 		}
+		if (body.contains(CLAIM_ROLLBACK_MARK)) {
+			String key = str(keys.get(0));
+			String field = str(args.get(0));
+			String expected = str(args.get(1));
+			if (expected.equals(table(key).get(field))) {
+				table(key).remove(field);
+				return 1L;
+			}
+			return 0L;
+		}
+		if (body.contains(ACTIVITY_TOUCH_MARK)) {
+			return activityTouch(str(keys.get(0)), str(args.get(0)),
+					Duration.ofMillis(Long.parseLong(str(args.get(1)))));
+		}
 		throw new UnsupportedOperationException("未建模的脚本：" + body);
 	}
 
+	/** 抢租脚本执行前的一次性注入（I-2 的确定性交错缝；单线程用例，取走即置空）。 */
+	private void runAcquireHook() {
+		Runnable hook = this.beforeAcquire;
+		if (hook != null) {
+			this.beforeAcquire = null;
+			hook.run();
+		}
+	}
+
 	/**
-	 * {@code -- LEASE_ACQUIRE}：GET 现值 → 有则原样返回（Java 侧判 owner 决定重入/占用）→
-	 * 无则 {@code INCR} 全局 epoch 后 {@code SET PX}。
+	 * {@code -- LEASE_ACQUIRE}（<b>两键</b>，带 tag 的租约）：GET 租约 → 命中原样返回 →
+	 * 否则 {@code INCR} 计数器 + {@code PEXPIRE} 计数器 + {@code SET 租约 PX}。
+	 *
+	 * <p>取号与占用在<b>同一个同步块</b>里（真实 Redis 的 {@code EVAL} 串行语义），
+	 * 于是"晚到者用更小的号占租"这条路径在替身里也不存在 —— 用例因此能断言设计意图，
+	 * 而不是替身的巧合。
 	 */
-	private String acquire(String key, String epochKey, String owner, Duration ttl) {
+	/**
+	 * {@code -- LEASE_ACQUIRE}（<b>三键</b>：租约 / 计数器 / fence）：逐行复刻产品的自愈语义
+	 * （评审 N-1）—— 有效租约直返并补计数器、陈旧租约被 fence+1 替换、缺键按 0 处理。
+	 */
+	private String acquireFenced(String key, String epochKey, String fenceKey, String owner, Duration ttl,
+			Duration epochTtl) {
+		long fence = parseOrZero(this.strings.get(fenceKey));
 		String current = this.strings.get(key);
 		if (current != null) {
-			// 命中现值（含同主重入）：created=0 —— 本次调用不是创建者，没有释放权
-			return current + "|0";
+			long currentEpoch = epochOf(current);
+			if (currentEpoch >= fence) {
+				// 有效租约：原样返回（Java 侧按 owner 判重入/占用），并把计数器补到 ≥ 现值 + 刷新 TTL
+				long counter = parseOrZero(this.strings.get(epochKey));
+				if (counter < currentEpoch) {
+					this.strings.put(epochKey, String.valueOf(currentEpoch));
+				}
+				touchTtl(epochKey, epochTtl);
+				return current + "|0";
+			}
+			// 陈旧租约（epoch < fence）：落到下面重建 —— 陈旧持有人本来就写不进去
 		}
-		long epoch = this.epochCounter.incrementAndGet();
-		this.strings.put(epochKey, String.valueOf(epoch));
+		long epoch = incrCounter(epochKey);
+		if (epoch <= fence) {
+			epoch = fence + 1;
+			this.strings.put(epochKey, String.valueOf(epoch));
+		}
+		touchTtl(epochKey, epochTtl);
 		String value = epoch + "|" + owner;
 		this.strings.put(key, value);
 		touchTtl(key, ttl);
 		this.sets.incrementAndGet();
-		// created=1：这一任是本次调用建的
 		return value + "|1";
+	}
+
+	/**
+	 * {@code -- LEASE_ACQUIRE_NOFENCE}（<b>两键</b>：租约 / 计数器）：同上的"命中即补计数器"，
+	 * 但没有 fence 可对账（不自愈）。
+	 */
+	private String acquireNoFence(String key, String epochKey, String owner, Duration ttl, Duration epochTtl) {
+		String current = this.strings.get(key);
+		if (current != null) {
+			long currentEpoch = epochOf(current);
+			long counter = parseOrZero(this.strings.get(epochKey));
+			if (counter < currentEpoch) {
+				this.strings.put(epochKey, String.valueOf(currentEpoch));
+			}
+			touchTtl(epochKey, epochTtl);
+			return current + "|0";
+		}
+		long epoch = incrCounter(epochKey);
+		touchTtl(epochKey, epochTtl);
+		String value = epoch + "|" + owner;
+		this.strings.put(key, value);
+		touchTtl(key, ttl);
+		this.sets.incrementAndGet();
+		return value + "|1";
+	}
+
+	/** 租约值里的 epoch 段（坏值按 0 —— 与 Lua 侧 {@code tonumber(...) or 0} 同口径）。 */
+	private static long epochOf(String leaseValue) {
+		int sep = leaseValue.indexOf('|');
+		return sep <= 0 ? 0L : parseOrZero(leaseValue.substring(0, sep));
+	}
+
+	/**
+	 * {@code -- LEASE_ACQUIRE_UNTAGGED}（<b>单键</b>，无 tag 的资源锁）：GET → SET，值由 Java 侧取号传入。
+	 */
+	private String acquireUntagged(String key, String value, Duration ttl) {
+		String current = this.strings.get(key);
+		if (current != null) {
+			return current + "|0";
+		}
+		this.strings.put(key, value);
+		touchTtl(key, ttl);
+		this.sets.incrementAndGet();
+		return value + "|1";
+	}
+
+	/** 计数器自增（{@code INCR} 语义：读旧值 +1；已由 {@link #handleScript} 的锁串行化）。 */
+	private long incrCounter(String key) {
+		synchronized (this.counterLock) {
+			long next = parseOrZero(this.strings.get(key)) + 1L;
+			this.strings.put(key, String.valueOf(next));
+			return next;
+		}
 	}
 
 	/** {@code -- LEASE_RENEW}：现值 ≠ 期望值（epoch|owner）⇒ 0；相等 ⇒ PEXPIRE + 1。 */
@@ -456,6 +731,37 @@ public final class FakeLeaseRedis {
 		return index;
 	}
 
+	/**
+	 * {@code -- ACTIVITY_TOUCH}：单键原子 max + 续期。
+	 *
+	 * <p>复刻产品 Lua 的关键语义：<b>坏值按 0 处理并覆盖</b>（不是永久失效）；旧帧不回拨；
+	 * 只在键存在时续期（真实 {@code PEXPIRE} 对不存在的键是 no-op）。
+	 */
+	private Long activityTouch(String key, String rawStamp, Duration ttl) {
+		long incoming;
+		try {
+			incoming = Long.parseLong(rawStamp);
+		}
+		catch (NumberFormatException ex) {
+			incoming = 0L;
+		}
+		long current;
+		try {
+			String raw = this.strings.get(key);
+			current = raw == null ? 0L : Long.parseLong(raw);
+		}
+		catch (NumberFormatException ex) {
+			current = 0L;
+		}
+		if (incoming > current) {
+			this.strings.put(key, rawStamp);
+		}
+		if (this.strings.containsKey(key)) {
+			touchTtl(key, ttl);
+		}
+		return 1L;
+	}
+
 	// ── 取证与语料辅助 ──────────────────────────────────────────────────────
 
 	Map<String, String> table(String key) {
@@ -517,6 +823,11 @@ public final class FakeLeaseRedis {
 	/** 直接铺全局 epoch（跨实例语料：让本次抢到的 epoch 从某个高位起算）。 */
 	void seedEpoch(long value) {
 		this.epochCounter.set(value);
+	}
+
+	/** 铺某个<b>per-run 计数器</b>的当前值（新口径：{@code ai:lease:epoch:{run:<runId>}}）。 */
+	void seedEpoch(String epochKey, long value) {
+		this.strings.put(epochKey, String.valueOf(value));
 	}
 
 	/**
@@ -613,6 +924,19 @@ public final class FakeLeaseRedis {
 
 	private static String str(Object value) {
 		return String.valueOf(value);
+	}
+
+	/** 数字串 → long（缺失/坏值按 0，{@code INCR} 的起点口径）。 */
+	private static long parseOrZero(String raw) {
+		if (raw == null) {
+			return 0L;
+		}
+		try {
+			return Long.parseLong(raw);
+		}
+		catch (NumberFormatException ex) {
+			return 0L;
+		}
 	}
 
 }

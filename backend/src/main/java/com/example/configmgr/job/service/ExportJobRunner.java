@@ -199,7 +199,8 @@ public class ExportJobRunner {
                     processedRows = finishedDefRows;
                     totalRows = JobProgressTotals.denominator(estimatedRows, discoveredRows,
                             items.size() - startedItems);
-                    progressService.finishItem(itemId, "FAILED", (int) Math.max(defTotal, rowsSeen), defTotal);
+                    // I-4：成功路径已先写条目 COMPLETED（随后写盘失败），catch 必须走补偿降级
+                    progressService.compensateItemFailure(itemId, (int) Math.max(defTotal, rowsSeen), defTotal);
                     taskService.updateItemStatus(taskId, defCode, "FAILED");
                 }
             }

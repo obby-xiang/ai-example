@@ -21,8 +21,9 @@ import java.util.Map;
  * ② 超限时对 {@code text} / {@code result} 的<b>值</b>按预算做降采样，并挂统一截断字段。
  *
  * <h2>截断字段（G5 统一契约，{@link TruncationContract}）</h2>
- * {@code truncated / strategy / originalChars / returnedChars / notice}；
- * {@code truncatedReason} 保留为 {@code notice} 的兼容别名（前端角标仍读它）。
+ * {@code truncated / strategy / originalChars / returnedChars / noticeCode / notice}；
+ * {@code truncatedReason} 保留为 {@code notice} 的兼容别名（旧客户端仍读它）；
+ * 新客户端按 {@code noticeCode} + 数字本地化，{@code notice} 只作旧客户端英文降级。
  * <b>语义边界</b>：本键是"单帧字节上限"，超限时产出的仍是一份<b>完整合法的帧</b>
  * （字段级降采样 + 标记），<b>不做跨帧分片</b>；分片/续帧协议与超大结果 spill 一并挂账。
  *
@@ -87,43 +88,43 @@ public final class FrameSizeLimiter {
 				originalChars.put(field, value.length());
 			}
 		}
-		boolean modelViewTruncated = Boolean.TRUE.equals(frame.get(TruncationContract.TRUNCATED_FIELD));
-		String reason = "frame-bytes-exceeded: original=" + full.length + " limit=" + maxBytes
-				+ " truncatedFields=" + String.join(",", fields)
-				+ (modelViewTruncated ? " (model-side-view-already-truncated)" : "");
+		// 仅用于估算 notice 的 JSON 开销，不写进帧；真实用户文案由 markTruncated 产出。
+		String noticeProbe = legacyNotice(TruncationContract.NOTICE_CODE_FRAME_TRUNCATED);
 
-		int budget = maxBytes - overhead(frame, mapper, fields, reason) - STRUCTURE_MARGIN_BYTES;
+		int budget = maxBytes - overhead(frame, mapper, fields, noticeProbe) - STRUCTURE_MARGIN_BYTES;
 		if (budget < 0) {
 			budget = 0;
 		}
 		for (int i = 0; i <= MAX_ITERATIONS; i++) {
 			distribute(frame, mapper, fields, budget);
-			markTruncated(frame, fields, originalChars, full.length, maxBytes, modelViewTruncated);
+			int[] chars = markTruncated(frame, fields, originalChars,
+					TruncationContract.NOTICE_CODE_FRAME_TRUNCATED);
 			byte[] retry = serialize(frame, mapper);
 			if (retry == null) {
 				return null;
 			}
 			if (retry.length <= maxBytes) {
-				log.warn("SSE 单帧超限已按字段级降采样 type={} 原 {} 字节 → {} 字节（上限 {}，字段 {}）",
-						frame.get("type"), full.length, retry.length, maxBytes, fields);
+				log.warn("SSE 单帧超限已按字段级降采样 type={} original={} actual={} limit={} fields={} originalChars={} returnedChars={}",
+						frame.get("type"), full.length, retry.length, maxBytes, String.join(",", fields), chars[0], chars[1]);
 				return retry;
 			}
 			// 复测仍超：按超出量收缩预算再算一轮
 			budget = Math.max(0, budget - (retry.length - maxBytes) - STRUCTURE_MARGIN_BYTES);
 		}
 		// 迭代到上限仍不满足（超限来自不可截字段）：只挂标记，保持 JSON 合法（绝不字节截断）
-		markTruncated(frame, fields, originalChars, full.length, maxBytes, modelViewTruncated);
-		frame.put(TruncationContract.NOTICE_FIELD,
-				String.valueOf(frame.get(TruncationContract.NOTICE_FIELD)) + "（unreachable-limit: 其余字段本身已超限）");
-		frame.put(TruncationContract.LEGACY_REASON_FIELD, frame.get(TruncationContract.NOTICE_FIELD));
-		log.warn("SSE 单帧超限且不可截字段占主导 type={} 原 {} 字节（上限 {}）—— 已挂标记但未达上限",
-				frame.get("type"), full.length, maxBytes);
+		markTruncated(frame, fields, originalChars, TruncationContract.NOTICE_CODE_FRAME_LIMIT_UNREACHED);
+		log.warn("SSE 单帧超限且不可截字段占主导 type={} original={} limit={} fields={} —— 已挂标记但未达上限",
+				frame.get("type"), full.length, maxBytes, String.join(",", fields));
 		return serialize(frame, mapper);
 	}
 
-	/** 挂统一截断字段（notice 说明原始字节/上限/被截字段）。 */
-	private static void markTruncated(Map<String, Object> frame, List<String> fields,
-			Map<String, Integer> originalChars, int frameBytes, int maxBytes, boolean modelViewTruncated) {
+	/**
+	 * 挂统一截断字段（notice 只写语言中立的旧客户端短句；数字/字段名进结构化字段与 warn 日志）。
+	 *
+	 * @return {@code [原始字符数, 返回字符数]}，供调用方写诊断日志
+	 */
+	private static int[] markTruncated(Map<String, Object> frame, List<String> fields,
+			Map<String, Integer> originalChars, String noticeCode) {
 		int original = 0;
 		int returned = 0;
 		for (String field : fields) {
@@ -131,18 +132,34 @@ public final class FrameSizeLimiter {
 			String value = frame.get(field) instanceof String text ? text : "";
 			returned += value.length();
 		}
-		String notice = "frame-bytes-exceeded: original=" + frameBytes + " limit=" + maxBytes + " truncatedFields="
-				+ String.join(",", fields) + "；单帧字节超限，已对上述字段做头部降采样（返回 " + returned + " 字符，原 "
-				+ original + " 字符），完整结果见执行台账。";
-		if (modelViewTruncated) {
-			notice = notice + "模型侧视图此前亦已截断。";
-		}
+		String notice = legacyNotice(noticeCode);
 		frame.put(TruncationContract.TRUNCATED_FIELD, true);
-		frame.put(TruncationContract.STRATEGY_FIELD, TruncationContract.STRATEGY_HEAD);
+		frame.put(TruncationContract.NOTICE_CODE_FIELD, noticeCode);
+		if (fields.isEmpty()) {
+			frame.remove(TruncationContract.STRATEGY_FIELD);   // 无可压缩字段 ⇒ 可选键缺省，而非写 null
+		}
+		else {
+			frame.put(TruncationContract.STRATEGY_FIELD, TruncationContract.STRATEGY_HEAD);
+		}
 		frame.put(TruncationContract.ORIGINAL_CHARS_FIELD, original);
 		frame.put(TruncationContract.RETURNED_CHARS_FIELD, returned);
 		frame.put(TruncationContract.NOTICE_FIELD, notice);
 		frame.put(TruncationContract.LEGACY_REASON_FIELD, notice);
+		return new int[] { original, returned };
+	}
+
+	/**
+	 * 旧客户端兼容的 {@code notice/truncatedReason}：语言中立（英文）、不含数字/字段名/机器前缀。
+	 * 新客户端一律按 {@code noticeCode} + 本地模板展示。
+	 */
+	static String legacyNotice(String noticeCode) {
+		return switch (noticeCode) {
+			case TruncationContract.NOTICE_CODE_FRAME_LIMIT_UNREACHED ->
+					"Result exceeds the frame size limit and could not be compressed further.";
+			case TruncationContract.NOTICE_CODE_MODEL_VIEW_TRUNCATED ->
+					"Result truncated for the model; this frame shows the full result.";
+			default -> "Result truncated because it exceeded the frame size limit.";
+		};
 	}
 
 	/** 其余字段（去掉可截字段 + 统一截断字段）的 JSON 开销。 */
@@ -152,6 +169,7 @@ public final class FrameSizeLimiter {
 			probe.remove(field);
 		}
 		probe.put(TruncationContract.TRUNCATED_FIELD, true);
+		probe.put(TruncationContract.NOTICE_CODE_FIELD, TruncationContract.NOTICE_CODE_FRAME_TRUNCATED);
 		probe.put(TruncationContract.STRATEGY_FIELD, TruncationContract.STRATEGY_HEAD);
 		probe.put(TruncationContract.ORIGINAL_CHARS_FIELD, 0);
 		probe.put(TruncationContract.RETURNED_CHARS_FIELD, 0);
@@ -210,8 +228,8 @@ public final class FrameSizeLimiter {
 		if (!TruncationContract.looksStructured(value)) {
 			return takeChars(value, byteBudget, mapper);
 		}
-		String notice = "结构化结果（JSON）超限，未做字符截断（截断会产生非法 JSON）；已整体标记并保留头部预览，"
-				+ "完整结果见执行台账。";
+		// 该 marker 会原样进入帧 result（用户可见）：语言中立英文、不承诺不可达的“台账/记录”路径。
+		String notice = "Structured result exceeded the frame size limit; marked as a JSON envelope with a header preview.";
 		String emptyMarker = TruncationContract.jsonMarker("", value.length(), notice);
 		int remaining = byteBudget - escapedLength(emptyMarker, mapper);
 		String preview = remaining > 0 ? takeChars(value, remaining, mapper) : "";

@@ -146,7 +146,7 @@ public class AiConfigController {
             // 用户去改 key 也修不好（真正要修的是 KEK），排障方向被带偏。
             if (key.status() == AiConfigService.KeyStatus.UNREADABLE) {
                 return new ProbeView(false, null, 0L, AiConfigService.CODE_KEY_UNREADABLE,
-                        "库里的密钥无法解密（KEK 缺失/变更或密文损坏）：请恢复 AI_SECRET_KEK 或重新录入 key", 0);
+                        "库里的密钥无法解密：请到「设置 → AI」重新录入密钥，或让管理员恢复加密配置", 0);
             }
             // 种子行（source=ENV_SEED）是受信来源：私网闸对它例外（CI 的 127.0.0.1 桩）
             boolean trusted = AiProvider.SOURCE_ENV_SEED.equals(provider.getSource());

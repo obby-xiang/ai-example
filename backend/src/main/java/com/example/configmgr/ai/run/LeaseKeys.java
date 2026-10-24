@@ -24,7 +24,8 @@ import java.util.Locale;
  * 都从同一个入口取键。
  *
  * <h2>与续跑权租约的区别</h2>
- * 续跑权（{@code ai:lease:run:<runId>}，见 {@link RunStore#runLeaseKey(String)}）按 <b>runId</b> 记，
+ * 续跑权（{@code ai:lease:run:{run:<runId>}}，见 {@link RunStore#runLeaseKey(String)}；反解走
+ * {@link RunStore#runIdFromLeaseKey(String)}）按 <b>runId</b> 记，
  * 定的是"谁来驱动这一轮"；本类的锁按 <b>taskId</b> 记，定的是"这个业务对象此刻能不能动"。
  * 因此轮次回收（{@link RunStore#deleteRun(String)}）<b>不</b>清本类的键：它们的寿命由使用方
  * 的 TTL（{@code app.ai.lease.resource-ttl}，默认 60s）决定，与 run 的生死无关。

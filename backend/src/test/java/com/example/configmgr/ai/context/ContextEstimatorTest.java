@@ -6,7 +6,9 @@ import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -73,6 +75,49 @@ class ContextEstimatorTest {
 		// 工具走渐进披露（7–18 个 schema 常驻前缀）：不统计它，"system 巨大"的结论会误导排障
 		assertThat(ContextEstimator.estimateToolSchemas(List.of())).isZero();
 		assertThat(ContextEstimator.estimateToolSchemas(null)).isZero();
+	}
+
+	@Test
+	void reasoningContentMetadataIsCountedForAssistantMessages() {
+		// 回填侧（ReasoningAwareOpenAiChatModel）会把 metadata.reasoningContent 原样放进请求体，
+		// 它和正文一样占上游 token；估算器只数正文会把预算判据系统性低估。
+		String body = "最终回答";
+		String reasoning = "先想一步。\n再想一步。";
+		AssistantMessage withoutReasoning = AssistantMessage.builder().content(body).build();
+		AssistantMessage withReasoning = AssistantMessage.builder()
+			.content(body)
+			.properties(Map.of("reasoningContent", reasoning))
+			.build();
+
+		int bodyOnly = ContextEstimator.estimateMessage(withoutReasoning);
+		int withThinking = ContextEstimator.estimateMessage(withReasoning);
+
+		assertThat(withThinking).isEqualTo(bodyOnly + ContextEstimator.estimate(reasoning));
+		assertThat(withThinking).isGreaterThan(bodyOnly);
+		assertThat(ContextEstimator.estimateMessages(List.of(withReasoning)))
+			.isEqualTo(withThinking);
+	}
+
+	@Test
+	void nonStringOrMissingReasoningMetadataIsIgnored() {
+		// 只有 String 才会被回填侧发送；其它类型（或缺失）不参与估算，也不得抛异常。
+		int expected = ContextEstimator.estimate("回答");
+
+		AssistantMessage missing = AssistantMessage.builder().content("回答").build();
+		AssistantMessage nonString = AssistantMessage.builder()
+			.content("回答")
+			.properties(Map.of("reasoningContent", 42))
+			.build();
+		Map<String, Object> nullValueMetadata = new HashMap<>();
+		nullValueMetadata.put("reasoningContent", null);
+		AssistantMessage nullValue = AssistantMessage.builder()
+			.content("回答")
+			.properties(nullValueMetadata)
+			.build();
+
+		assertThat(ContextEstimator.estimateMessage(missing)).isEqualTo(expected);
+		assertThat(ContextEstimator.estimateMessage(nonString)).isEqualTo(expected);
+		assertThat(ContextEstimator.estimateMessage(nullValue)).isEqualTo(expected);
 	}
 
 }

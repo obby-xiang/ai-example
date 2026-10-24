@@ -9,17 +9,21 @@ import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
+import com.example.configmgr.common.ErrorBodyFactory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.context.i18n.LocaleContextHolder;
 
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -68,6 +72,17 @@ class ConfirmGateDeadlockResumeTest {
     private static final String OTHER_TOOL_CALL_ID = "call-other";
 
     private final RunStore store = mock(RunStore.class);
+
+	{
+		// C2：生产读侧已改为 pendingLenient/pendingsLenient；Mockito 桩只需把非抛读口委托给原桩。
+		when(this.store.pendingLenient(org.mockito.ArgumentMatchers.anyString(),
+				org.mockito.ArgumentMatchers.anyString()))
+			.thenAnswer(invocation -> this.store.pending((String) invocation.getArgument(0),
+					(String) invocation.getArgument(1)));
+		when(this.store.pendingsLenient(org.mockito.ArgumentMatchers.anyString()))
+			.thenAnswer(invocation -> this.store.pendings((String) invocation.getArgument(0)));
+	}
+
 
     private final RunRegistry registry = mock(RunRegistry.class);
 
@@ -119,8 +134,36 @@ class ConfirmGateDeadlockResumeTest {
         verify(this.resumeService, times(1)).resume(RUN_ID);
     }
 
-    // ── ① woke=true（同进程活闸门）→ 不触发 ──
+    /**
+     * I-5 / 4B：决策回灌的 HTTP locale 必须随派发任务过线程边界；工作线程 set 后 finally reset
+     * （默认无上下文仍是 zh）。这里捕获 execute 任务后在测试线程 drain，等价于工作线程执行。
+     */
+    @Test
+    void resumeTriggerCarriesEnglishRequestLocaleAndResetsTheWorker() {
+        stubCommon();
+        when(this.store.get(RUN_ID)).thenReturn(snapshot(RunSnapshot.SUSPENDED));
+        when(this.store.pending(RUN_ID, TOOL_CALL_ID)).thenReturn(pending(PendingToolCall.PENDING));
+        AtomicReference<String> workerLanguage = new AtomicReference<>();
+        when(this.resumeService.resume(RUN_ID)).thenAnswer(invocation -> {
+            workerLanguage.set(ErrorBodyFactory.requestLocale().getLanguage());
+            return new ResumeService.ResumeResult(ResumeService.Outcome.NOT_FOUND, java.util.Map.of("runId", RUN_ID));
+        });
 
+        LocaleContextHolder.setLocale(Locale.ENGLISH);
+        try {
+            this.gate.submitDecision(RUN_ID, TOOL_CALL_ID, true, "ok");
+            drainNow();
+
+            assertThat(workerLanguage.get()).as("续跑触发线程必须看到请求 en").isEqualTo("en");
+            assertThat(ErrorBodyFactory.requestLocale().getLanguage()).as("工作线程 locale 必须 reset")
+                .isEqualTo("zh");
+        }
+        finally {
+            LocaleContextHolder.resetLocaleContext();
+        }
+    }
+
+    // ── ① woke=true（同进程活闸门）→ 不触发 ──
     @Test
     void doesNotTriggerWhenInProcessGateWoken() throws Exception {
         stubCommon();

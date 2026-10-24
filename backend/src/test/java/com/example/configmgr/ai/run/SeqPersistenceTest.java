@@ -43,7 +43,9 @@ class SeqPersistenceTest {
 		public void appendEvent(String runId, Map<String, Object> frame) {
 			Object seq = frame.get("seq");
 			if (seq instanceof Number number && this.dropSeqs.contains(number.longValue())) {
-				touchActivity(runId);
+				Object atMs = frame.get("atMs");
+				touchBusinessActivity(runId, atMs instanceof Number value ? value.longValue()
+						: System.currentTimeMillis());
 				this.dropped.add(number.longValue());
 				return;
 			}
@@ -103,7 +105,8 @@ class SeqPersistenceTest {
 		assertThat(store.archivedSeqs(RUN_ID)).containsExactly(1L, 2L, 3L, 4L, 5L, 6L);
 		assertThat(store.lastEventSeq(RUN_ID)).as("归档末帧 = 已发放的最大业务号").isEqualTo(6L);
 		assertThat(store.lastIssuedSeq(RUN_ID)).as("ai:seq = 已发放的最大业务号").isEqualTo(6L);
-		assertThat(store.lastBeatAtMs(RUN_ID)).as("delta/心跳的活动戳仍在（僵尸判据输入）").isPositive();
+		assertThat(store.lastActivityAtMs(RUN_ID)).as("delta 留下业务活动锚点（僵尸判据输入，心跳不算）")
+			.isPositive();
 	}
 
 	/** 终态轮重挂回放与 ai:seq 协同：B1 起 delta 也在回放集里，序号口径不乱。 */

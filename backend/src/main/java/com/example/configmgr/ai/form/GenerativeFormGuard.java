@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.form;
 
 import com.example.configmgr.ai.tool.FrontendToolGuard;
+import com.example.configmgr.common.AiStateUnavailableException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -114,15 +115,26 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 			return Verdict.rejectIssues(GenerativeFormRules.RESULT_REJECTED,
 					"回灌的表单结果未通过类型复核，本次回灌被拒（挂起仍在等待，可修正后重试）", issues);
 		}
-		// 元数据必须在消费前取（消费会把登记条目删掉）
-		String metadata = attachmentMetadata(form, values);
-		if (!consumeAttachments(form, values)) {
-			List<FormIssue> consumed = List.of(FormIssue.form(FormIssueCodes.ATTACHMENT_CONSUMED,
-					"附件已被其它提交消费（同一 fileId 只能使用一次），请重新上传后再提交"));
-			return Verdict.rejectIssues(GenerativeFormRules.RESULT_REJECTED,
-					"回灌的附件已被消费，本次回灌被拒（挂起仍在等待，请重新上传）", consumed);
+		try {
+			// 元数据必须在消费前取（消费会把登记条目删掉）
+			String metadata = attachmentMetadata(form, values);
+			if (!consumeAttachments(form, values)) {
+				List<FormIssue> consumed = List.of(FormIssue.form(FormIssueCodes.ATTACHMENT_CONSUMED,
+						"附件已被其它提交消费（同一 fileId 只能使用一次），请重新上传后再提交"));
+				return Verdict.rejectIssues(GenerativeFormRules.RESULT_REJECTED,
+						"回灌的附件已被消费，本次回灌被拒（挂起仍在等待，请重新上传）", consumed);
+			}
+			return metadata == null ? Verdict.accept() : Verdict.accept().withResultSuffix(metadata);
 		}
-		return metadata == null ? Verdict.accept() : Verdict.accept().withResultSuffix(metadata);
+		catch (AiStateUnavailableException ex) {
+			// I-2：基础设施故障给 typed FormIssue（可重试），不把 Redis 异常原文暴露给用户。
+			log.warn("generative_form 附件登记簿暂不可用 runId={} toolCallId={}：{}", runId, toolCallId,
+					ex.getMessage());
+			List<FormIssue> unavailable = List.of(FormIssue.form(FormIssueCodes.ATTACHMENT_UNAVAILABLE,
+					"附件校验暂不可用，请稍后重试"));
+			return Verdict.rejectIssues(GenerativeFormRules.RESULT_REJECTED,
+					"附件校验暂不可用，本次回灌未执行（挂起仍在等待，请稍后重试）", unavailable);
+		}
 	}
 
 	/**
@@ -135,10 +147,16 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 		}
 		List<String> parts = new ArrayList<>();
 		for (AttachmentRef ref : attachmentRefs(form, values)) {
-			FormAttachmentStore.Attachment stored = this.attachments.find(ref.fileId());
-			if (stored != null) {
-				parts.add(ref.key() + "=" + stored.fileName() + "（" + stored.size() + " 字节，fileId="
-						+ stored.fileId() + "）");
+			try {
+				FormAttachmentStore.Attachment stored = this.attachments.find(ref.fileId());
+				if (stored != null) {
+					parts.add(ref.key() + "=" + stored.fileName() + "（" + stored.size() + " 字节，fileId="
+							+ stored.fileId() + "）");
+				}
+			}
+			catch (AiStateUnavailableException ex) {
+				// 元数据只是模型可见的补充信息；登记簿暂时不可用时不阻断已通过校验的回灌。
+				log.debug("附件元数据读取暂不可用 fileId={}：{}", ref.fileId(), ex.getMessage());
 			}
 		}
 		if (parts.isEmpty()) {
@@ -155,18 +173,26 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 			if (this.attachments == null) {
 				continue;
 			}
-			FormAttachmentStore.Attachment stored = this.attachments.find(ref.fileId());
-			if (stored == null) {
-				if (this.attachments.wasConsumed(ref.fileId())) {
-					issues.add(FormIssue.field(ref.key(), FormIssueCodes.ATTACHMENT_CONSUMED,
-							"字段 " + ref.key() + " 的附件已被消费（同一 fileId 只能使用一次，fileId="
-									+ ref.fileId() + "），请重新上传后再提交"));
+			FormAttachmentStore.Attachment stored;
+			try {
+				stored = this.attachments.find(ref.fileId());
+				if (stored == null) {
+					if (this.attachments.wasConsumed(ref.fileId())) {
+						issues.add(FormIssue.field(ref.key(), FormIssueCodes.ATTACHMENT_CONSUMED,
+								"字段 " + ref.key() + " 的附件已被消费（同一 fileId 只能使用一次，fileId="
+										+ ref.fileId() + "），请重新上传后再提交"));
+					}
+					else {
+						issues.add(FormIssue.field(ref.key(), FormIssueCodes.ATTACHMENT_NOT_FOUND,
+								"字段 " + ref.key() + " 的附件不存在或已过期（fileId=" + ref.fileId()
+										+ "），请重新上传后再提交"));
+					}
+					continue;
 				}
-				else {
-					issues.add(FormIssue.field(ref.key(), FormIssueCodes.ATTACHMENT_NOT_FOUND,
-							"字段 " + ref.key() + " 的附件不存在或已过期（fileId=" + ref.fileId()
-									+ "），请重新上传后再提交"));
-				}
+			}
+			catch (AiStateUnavailableException ex) {
+				issues.add(FormIssue.field(ref.key(), FormIssueCodes.ATTACHMENT_UNAVAILABLE,
+						"字段 " + ref.key() + " 的附件校验暂不可用，请稍后重试"));
 				continue;
 			}
 			if (runId != null && !runId.equals(stored.runId())) {

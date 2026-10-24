@@ -11,11 +11,12 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
-import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -59,10 +60,8 @@ class JobProgressHeartbeatTest {
     @Test
     void markRunningSnapshotAdvanceHeartbeatAndFinishClearsEntry() {
         when(this.transactionManager.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
-        Job job = new Job();
-        job.setId(42L);
-        job.setStatus(Job.JobStatus.PENDING);
-        when(this.jobRepository.findById(42L)).thenReturn(Optional.of(job));
+        when(this.jobRepository.finishIfInFlight(anyLong(), any(), anyInt(), anyInt(),
+                anyInt(), anyInt(), any(), any())).thenReturn(1);
 
         assertThat(this.heartbeatRegistry.lastBeatAtMs(42L)).as("开工前无心跳").isNull();
 
@@ -76,7 +75,8 @@ class JobProgressHeartbeatTest {
         assertThat(this.heartbeatRegistry.lastBeatAtMs(42L)).as("snapshot 心跳前进").isEqualTo(1_000_012L);
 
         this.current.addAndGet(9);
-        this.progressService.finish(42L, Job.JobStatus.COMPLETED, 0, 0, 10, 100);
+        boolean wrote = this.progressService.finish(42L, Job.JobStatus.COMPLETED, 0, 0, 10, 100);
+        assertThat(wrote).as("条件 UPDATE 影响 1 行 = 终态写入成功").isTrue();
         assertThat(this.heartbeatRegistry.lastBeatAtMs(42L))
                 .as("finish 终态写入成功后清理心跳条目（收口修 F3 / 红队 m1）").isNull();
     }
@@ -84,14 +84,12 @@ class JobProgressHeartbeatTest {
     @Test
     void finishClearsHeartbeatEntryAfterNaturalCompletion() {
         when(this.transactionManager.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
-        Job job = new Job();
-        job.setId(11L);
-        job.setStatus(Job.JobStatus.RUNNING);
-        when(this.jobRepository.findById(11L)).thenReturn(Optional.of(job));
+        when(this.jobRepository.finishIfInFlight(anyLong(), any(), anyInt(), anyInt(),
+                anyInt(), anyInt(), any(), any())).thenReturn(1);
 
-        this.progressService.finish(11L, Job.JobStatus.COMPLETED, 0, 0, 5, 5);
+        boolean wrote = this.progressService.finish(11L, Job.JobStatus.COMPLETED, 0, 0, 5, 5);
 
-        assertThat(job.getStatus()).isEqualTo(Job.JobStatus.COMPLETED);
+        assertThat(wrote).as("条件 UPDATE 影响 1 行 = 本次终态写胜出").isTrue();
         assertThat(this.heartbeatRegistry.lastBeatAtMs(11L))
                 .as("正常完成后 lastBeatAtMs(jobId) 为 null（登记簿不随历史作业增长）").isNull();
     }
@@ -100,10 +98,6 @@ class JobProgressHeartbeatTest {
     void heartbeatIsWrittenOutsideTheRequiresNewTransaction() {
         // 挂点纪律：心跳在 REQUIRES_NEW 事务外续期（纯内存无 I/O），事务管理器抛异常也不得吞掉心跳。
         when(this.transactionManager.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
-        Job job = new Job();
-        job.setId(7L);
-        job.setStatus(Job.JobStatus.PENDING);
-        when(this.jobRepository.findById(7L)).thenReturn(Optional.of(job));
 
         this.progressService.markRunning(7L, 50);
 

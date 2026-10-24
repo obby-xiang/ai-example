@@ -31,11 +31,11 @@ class RunStoreFencedWriteTest {
 
 	private static final String RUN_ID = "run-fence";
 
-	private static final String RUN_KEY = RunStore.RUN_PREFIX + RUN_ID;
+	private static final String RUN_KEY = RunStore.runScopedKey(RunStore.RUN_PREFIX, RUN_ID);
 
-	private static final String FENCE_KEY = RunStore.FENCE_RUN_PREFIX + RUN_ID;
+	private static final String FENCE_KEY = RunStore.runScopedKey(RunStore.FENCE_RUN_PREFIX, RUN_ID);
 
-	private static final String LEASE_KEY = RunStore.LEASE_RUN_PREFIX + RUN_ID;
+	private static final String LEASE_KEY = RunStore.runScopedKey(RunStore.LEASE_RUN_PREFIX, RUN_ID);
 
 	private final FakeLeaseRedis fake = new FakeLeaseRedis();
 

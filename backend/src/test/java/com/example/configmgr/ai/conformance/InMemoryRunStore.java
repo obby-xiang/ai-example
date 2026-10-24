@@ -62,6 +62,9 @@ public class InMemoryRunStore extends RunStore {
 
 	private final Map<String, Long> beats = new ConcurrentHashMap<>();
 
+	/** R1-09：{@code ai:activity:<runId>} 的进程内替身（最后一条非心跳业务帧的 atMs）。 */
+	private final Map<String, Long> businessActivity = new ConcurrentHashMap<>();
+
 	/** session → 当前挂起轮（T2b-D#1 索引的进程内替身；无 TTL）。 */
 	private final Map<String, String> sessionCurrent = new ConcurrentHashMap<>();
 
@@ -80,7 +83,7 @@ public class InMemoryRunStore extends RunStore {
 	/** B23L1 批②a：fence（键 = runId → 已落库的最大 epoch）。 */
 	private final Map<String, Long> fenceEpochs = new ConcurrentHashMap<>();
 
-	/** 取号器（与真实 {@code INCR ai:lease:epoch} 同口径：只增不减）。 */
+	/** 取号器（与真实的 per-run 计数器 {@code INCR ai:lease:epoch:{run:<runId>}} 同口径：只增不减）。 */
 	private final java.util.concurrent.atomic.AtomicLong epochSeq = new java.util.concurrent.atomic.AtomicLong();
 
 	/** 与真实 Redis 对齐的往返模式（见类注"对象同一性"）：开启后 {@link #pending} 返回深拷贝。 */
@@ -342,6 +345,7 @@ public class InMemoryRunStore extends RunStore {
 		this.idemIndex.remove(runId);
 		this.events.remove(runId);
 		this.issuedSeqs.remove(runId);
+		// R1-09：ai:activity / ai:beat 与生产一致 —— TTL 型锚点不随 deleteRun 删除（按 session-ttl 自清）。
 		// B23L1 批②a：租约/fence/req/decided 同属"本轮的全部键"
 		this.reqMarks.remove(runId);
 		this.decided.remove(runId);
@@ -393,6 +397,12 @@ public class InMemoryRunStore extends RunStore {
 			out.add(item);
 		}
 		return out;
+	}
+
+	@Override
+	public List<PendingToolCall> pendingsLenient(String runId) {
+		// 进程内替身没有"guard 读失败"这一态；非抛读口与强一致读口同语义。
+		return pendings(runId);
 	}
 
 	// ── session → current 轮索引（T2b-D#1 的进程内替身，语义与真实实现一致） ──
@@ -486,6 +496,11 @@ public class InMemoryRunStore extends RunStore {
 		applyRequestMarker(runId, view);
 		applyDecisionMarker(runId, view);
 		return view;
+	}
+
+	@Override
+	public PendingToolCall pendingLenient(String runId, String toolCallId) {
+		return pending(runId, toolCallId);
 	}
 
 	/** B23L1 批②a：req 位来自独立表（与 {@code ai:req:} 同口径：只授予、不清除）。 */
@@ -652,18 +667,18 @@ public class InMemoryRunStore extends RunStore {
 	public void appendEvent(String runId, Map<String, Object> frame) {
 		String type = String.valueOf(frame.get("type"));
 		if (HEARTBEAT_TYPE.equals(type)) {
+			// T7：心跳只留"进程还活着"的戳，不是业务活动（R1-09）。
 			touchActivity(runId);
 			return;
-		}
-		if (DELTA_TYPE.equals(type)) {
-			// B1（2026-10-20）：与真实 RunStore 同口径 —— delta 入档（挂起即断后的差量补帧靠它），
-			// 活动戳照留。
-			touchActivity(runId);
 		}
 		Map<String, Object> copy = new LinkedHashMap<>(frame);
 		// T4-3 后半：atMs 主赋值在 SseChatEmitter#frame（帧构造时刻），此处 putIfAbsent 仅为
 		// 与真实 RunStore#appendEvent 的兜底语义保持镜像（直塞帧才走这里）。
 		copy.putIfAbsent("atMs", System.currentTimeMillis());
+		// R1-09：与真实实现同口径 —— 任何非心跳帧都推进业务活动锚点。
+		Object atMs = copy.get("atMs");
+		touchBusinessActivity(runId, atMs instanceof Number number ? number.longValue()
+				: System.currentTimeMillis());
 		eventList(runId).add(copy);
 	}
 
@@ -673,14 +688,28 @@ public class InMemoryRunStore extends RunStore {
 	}
 
 	@Override
-	public long lastEventAtMs(String runId) {
-		List<Map<String, Object>> archived = eventList(runId);
-		long last = 0L;
-		if (!archived.isEmpty()) {
-			Object atMs = archived.get(archived.size() - 1).get("atMs");
-			last = atMs instanceof Number number ? number.longValue() : 0L;
+	public void touchBusinessActivity(String runId, long atMs) {
+		this.businessActivity.merge(runId, atMs > 0L ? atMs : System.currentTimeMillis(), Math::max);
+	}
+
+	@Override
+	public long lastActivityAtMs(String runId) {
+		long last = this.businessActivity.getOrDefault(runId, 0L);
+		for (Map<String, Object> frame : eventList(runId)) {
+			if (HEARTBEAT_TYPE.equals(String.valueOf(frame.get("type")))) {
+				continue;
+			}
+			Object atMs = frame.get("atMs");
+			if (atMs instanceof Number number) {
+				last = Math.max(last, number.longValue());
+			}
 		}
-		return Math.max(last, lastBeatAtMs(runId));
+		return last;
+	}
+
+	@Override
+	public long lastEventAtMs(String runId) {
+		return Math.max(lastActivityAtMs(runId), lastBeatAtMs(runId));
 	}
 
 	@Override

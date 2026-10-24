@@ -129,6 +129,19 @@ class StreamWatchdogSegmentBudgetTest {
 		assertThat(this.violation.get().getCode()).isEqualTo(StreamViolationException.TOTAL_BUDGET);
 	}
 
+	/** C2：取消状态 UNKNOWN 不得让看门狗在 ① 处停摆；段预算照常判。 */
+	@Test
+	void unknownCancelStateDoesNotStopTheWatchdog() throws Exception {
+		when(this.cancellations.cancelState(RUN_ID))
+			.thenReturn(CancellationRegistry.CancelState.UNKNOWN);
+		this.watchdog = watchdogWith(Duration.ofMillis(600));
+
+		Thread.sleep(1200L);
+
+		assertThat(this.violation.get()).as("UNKNOWN 按未取消继续，预算判据不能被吞").isNotNull();
+		assertThat(this.violation.get().getCode()).isEqualTo(StreamViolationException.TOTAL_BUDGET);
+	}
+
 	private StreamWatchdog watchdogWith(Duration totalBudget) {
 		AiProperties.Resilience config = new AiProperties.Resilience();
 		config.setTotalBudget(totalBudget);

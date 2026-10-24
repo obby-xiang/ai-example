@@ -294,6 +294,83 @@ class AiControllerHistoryPayloadTest {
 			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].resultView").doesNotExist());
 	}
 
+	/**
+	 * A10 R-15：模型侧截断是持久事实 —— 历史通道把信封五字段透出，刷新后前端仍能重建角标。
+	 * 未截断/旧数据不产这些键（载荷形状逐字不变）。
+	 */
+	@Test
+	void truncatedToolResponseExposesTruncationFieldsInHistory() throws Exception {
+		String truncated = new com.example.configmgr.ai.tool.ToolResultEnvelope(true, null, "ok", false, null, null,
+				"前 64KB…", true, "head", 25_000, 19_000, "Result truncated for model view.")
+			.toJson();
+		ToolResponseMessage toolResponse = ToolResponseMessage.builder()
+			.responses(List.of(new ToolResponseMessage.ToolResponse("tc-1", "get_row_count", truncated)))
+			.build();
+		when(this.chatMemory.get("s-1")).thenReturn(List.of(toolResponse));
+
+		this.mockMvc.perform(get("/api/ai/history/s-1"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].responseData").value("前 64KB…"))
+			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].truncated").value(true))
+			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].noticeCode").value("model_view_truncated"))
+			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].originalChars").value(25_000))
+			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].returnedChars").value(19_000))
+			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].strategy").value("head"))
+			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].truncatedReason")
+				.value("Result truncated for model view."));
+	}
+
+	@Test
+	void wrappedModelSideEnvelopeIsReducedToMessageInHistory() throws Exception {
+		// L-70：生产记忆是 toModelJson 的产物（声明 + <tool_result> 外壳 + 信封 JSON）。
+		String modelJson = com.example.configmgr.ai.tool.ToolResultEnvelope.ok("导入作业已启动", "{}")
+			.toModelJson((com.example.configmgr.ai.tool.ToolResultLimiter) null);
+		ToolResponseMessage toolResponse = ToolResponseMessage.builder()
+			.responses(List.of(new ToolResponseMessage.ToolResponse("tc-1", "start_import", modelJson)))
+			.build();
+		when(this.chatMemory.get("s-1")).thenReturn(List.of(toolResponse));
+
+		this.mockMvc.perform(get("/api/ai/history/s-1"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].responseData").value("导入作业已启动"))
+			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].truncated").doesNotExist());
+	}
+
+	@Test
+	void untruncatedToolResponseProducesNoTruncationFields() throws Exception {
+		String envelope = com.example.configmgr.ai.tool.ToolResultEnvelope.ok("完整结果", "{}").toJson();
+		ToolResponseMessage toolResponse = ToolResponseMessage.builder()
+			.responses(List.of(new ToolResponseMessage.ToolResponse("tc-1", "get_row_count", envelope)))
+			.build();
+		when(this.chatMemory.get("s-1")).thenReturn(List.of(toolResponse));
+
+		this.mockMvc.perform(get("/api/ai/history/s-1"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].responseData").value("完整结果"))
+			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].truncated").doesNotExist())
+			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].noticeCode").doesNotExist());
+	}
+
+	@Test
+	void truncatedModelSideWrappedEnvelopeStillExposesTruncationFields() throws Exception {
+		// 生产形态：记忆里的 responseData 是 toModelJson 的产物（带 <tool_result> 定界外壳）。
+		String longMessage = "x".repeat(25_000);
+		String modelJson = com.example.configmgr.ai.tool.ToolResultEnvelope.ok(longMessage, "{}")
+			.toModelJson(new com.example.configmgr.ai.tool.ToolResultLimiter(new AiProperties()), "get_row_count");
+		ToolResponseMessage toolResponse = ToolResponseMessage.builder()
+			.responses(List.of(new ToolResponseMessage.ToolResponse("tc-1", "get_row_count", modelJson)))
+			.build();
+		when(this.chatMemory.get("s-1")).thenReturn(List.of(toolResponse));
+
+		this.mockMvc.perform(get("/api/ai/history/s-1"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].truncated").value(true))
+			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].noticeCode").value("model_view_truncated"))
+			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].originalChars").value(25_000))
+			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].responseData").value(
+					org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("<tool_result>"))));
+	}
+
 	@SuppressWarnings("unchecked")
 	private AiController controller(AiAvailability availability) {
 		return new AiController(availability, provider(), provider(), provider(), this.chatMemory,

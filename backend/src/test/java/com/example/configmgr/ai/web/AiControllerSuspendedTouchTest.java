@@ -78,6 +78,7 @@ class AiControllerSuspendedTouchTest {
 		when(this.runStore.sessionCurrentRunId(SESSION_ID)).thenReturn(RUN_ID);
 		when(this.runStore.get(RUN_ID)).thenReturn(snapshot);
 		when(this.runStore.pendings(RUN_ID)).thenReturn(List.of());
+        when(this.runStore.pendingsLenient(RUN_ID)).thenReturn(List.of());
 		when(this.runStore.lastEventSeq(RUN_ID)).thenReturn(0L);
 
 		this.mockMvc.perform(get("/api/ai/runs/current").param("sessionId", SESSION_ID))

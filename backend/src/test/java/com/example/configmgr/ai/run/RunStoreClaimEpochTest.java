@@ -27,7 +27,7 @@ class RunStoreClaimEpochTest {
 
 	private static final String CALL_ID = "call-1";
 
-	private static final String CLAIM_KEY = "ai:claim:" + RUN_ID;
+	private static final String CLAIM_KEY = RunStore.runScopedKey(RunStore.CLAIM_PREFIX, RUN_ID);
 
 	private final FakeLeaseRedis fake = new FakeLeaseRedis();
 
@@ -55,9 +55,9 @@ class RunStoreClaimEpochTest {
 	/** E5b：持租时认领值带上该租约 epoch，并回写到条目的 {@code claimedEpoch}。 */
 	@Test
 	void claimValueCarriesTheHeldLeaseEpoch() {
-		this.fake.seedEpoch(4L);
+		this.fake.seedEpoch(this.store.runLeaseEpochKey(RUN_ID), 4L);
 		LeaseService.Lease runLease = this.store.tryAcquireRunLease(RUN_ID).orElseThrow();
-		assertThat(runLease.epoch()).isEqualTo(5L);
+		assertThat(runLease.epoch()).as("per-run 计数器从铺好的 4 起 +1").isEqualTo(5L);
 		seedPending();
 
 		assertThat(this.store.claimExecution(RUN_ID, CALL_ID, this.store.instanceId())).isTrue();

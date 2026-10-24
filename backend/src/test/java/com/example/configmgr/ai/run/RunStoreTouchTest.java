@@ -19,7 +19,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 已终态（或快照已消失）的轮绝不续期 —— 否则删掉的轮会被读侧重新养出一堆孤儿键。
  *
  * <p>红线：心跳本体 {@link RunStore#renewSuspensionTtl} 不动（{@code RunStoreSlidingTtlTest}
- * 锁着它 exactly 5 次 EXPIRE），本方法在它之上再叠会话索引与新键族。
+ * 断言它的 5 个键都续到），本方法在它之上再叠会话索引与新键族。
  */
 class RunStoreTouchTest {
 
@@ -27,7 +27,7 @@ class RunStoreTouchTest {
 
 	private static final String SESSION_ID = "s-touch";
 
-	private static final String RUN_KEY = RunStore.RUN_PREFIX + RUN_ID;
+	private static final String RUN_KEY = RunStore.runScopedKey(RunStore.RUN_PREFIX, RUN_ID);
 
 	private static final String SESSION_KEY = RunStore.SESSION_CURRENT_PREFIX + SESSION_ID;
 
@@ -81,6 +81,9 @@ class RunStoreTouchTest {
 		assertThat(this.fake.expiry(SESSION_KEY)).as("session → current 索引").isEqualTo(SESSION_TTL);
 		assertThat(this.fake.expiry(this.store.reqKey(RUN_ID))).as("req 位（L0 契约位）").isEqualTo(SESSION_TTL);
 		assertThat(this.fake.expiry(this.store.decidedKey(RUN_ID))).as("decided guard").isEqualTo(SESSION_TTL);
+		assertThat(this.fake.expiry(this.store.runLeaseEpochKey(RUN_ID)))
+			.as("per-run 取号计数器（与 fence 同面：号一旦比 fence 先过期，新租约会被残留 fence 拒死）")
+			.isEqualTo(SESSION_TTL);
 		assertThat(this.fake.expiry(this.store.fenceKey(RUN_ID))).as("fence（M1：与快照同寿）")
 			.isEqualTo(SESSION_TTL);
 	}

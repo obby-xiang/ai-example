@@ -13,6 +13,9 @@ import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /**
  * B23L1 批① · 出帧链路（M6/M7）：<b>取号 → 落档 → 唤醒发布 → 本地扇出</b>。
@@ -107,7 +110,88 @@ class SseChatEmitterFrameStoreTest {
 		assertThat(this.frames.lastSeq(RUN_ID)).isEqualTo(2L);
 	}
 
+
+	@Test
+	void terminalDegradedReplaySendsTypedErrorThenCompletes() {
+		InMemoryRunStore store = new InMemoryRunStore();
+		FrameStore frames = mock(FrameStore.class);
+		when(frames.readFromWithStatus(RUN_ID, 0L, 0)).thenReturn(new FrameStore.ReadResult(List.of(), true));
+		SseChatEmitter out = emitter(store, frames);
+		FrameWire wire = new FrameWire();
+
+		SseChatEmitter.ReplayResult result = out.replayAndAttachWithStatus(wire.emitter(), null, true);
+
+		assertThat(result.degraded()).isTrue();
+		assertThat(result.staged()).isZero();
+		List<Map<String, Object>> sent = FrameWire.normalize(wire.frames());
+		assertThat(sent).hasSize(1);
+		assertThat(sent.get(0)).containsEntry("type", "error")
+			.containsEntry("code", "AI_REDIS_UNAVAILABLE")
+			.containsEntry("retryable", true)
+			.containsEntry("degraded", true);
+		verify(wire.emitter()).complete();
+	}
+
+	@Test
+	void nonTerminalDegradedReplayAlsoCompletesWithTypedError() {
+		InMemoryRunStore store = new InMemoryRunStore();
+		FrameStore frames = mock(FrameStore.class);
+		when(frames.readFromWithStatus(RUN_ID, 0L, 0)).thenReturn(new FrameStore.ReadResult(List.of(), true));
+		SseChatEmitter out = emitter(store, frames);
+		FrameWire wire = new FrameWire();
+
+		SseChatEmitter.ReplayResult result = out.replayAndAttachWithStatus(wire.emitter(), null, false);
+
+		assertThat(result.degraded()).isTrue();
+		assertThat(FrameWire.normalize(wire.frames())).anySatisfy(frame ->
+			assertThat(frame).containsEntry("type", "error").containsEntry("code", "AI_REDIS_UNAVAILABLE"));
+		verify(wire.emitter()).complete();
+	}
+
+	@Test
+	void degradedReplayDoesNotDuplicateAnAlreadyReadDone() {
+		InMemoryRunStore store = new InMemoryRunStore();
+		FrameStore frames = mock(FrameStore.class);
+		when(frames.readFromWithStatus(RUN_ID, 0L, 0)).thenReturn(new FrameStore.ReadResult(
+				List.of(Map.of("type", "done", "seq", 1L)), true));
+		SseChatEmitter out = emitter(store, frames);
+		FrameWire wire = new FrameWire();
+
+		SseChatEmitter.ReplayResult result = out.replayAndAttachWithStatus(wire.emitter(), null, true);
+
+		assertThat(result.terminalFrame()).isTrue();
+		List<Map<String, Object>> sent = FrameWire.normalize(wire.frames());
+		assertThat(sent).hasSize(1);
+		assertThat(sent.get(0)).containsEntry("type", "done");
+		assertThat(sent).noneMatch(frame -> "error".equals(frame.get("type")));
+		verify(wire.emitter()).complete();
+	}
+
+	@Test
+	void degradedReplayDoesNotDuplicateAnAlreadyReadError() {
+		InMemoryRunStore store = new InMemoryRunStore();
+		FrameStore frames = mock(FrameStore.class);
+		when(frames.readFromWithStatus(RUN_ID, 0L, 0)).thenReturn(new FrameStore.ReadResult(
+				List.of(Map.of("type", "error", "code", "UPSTREAM_STREAM_ERROR", "seq", 1L)), true));
+		SseChatEmitter out = emitter(store, frames);
+		FrameWire wire = new FrameWire();
+
+		SseChatEmitter.ReplayResult result = out.replayAndAttachWithStatus(wire.emitter(), null, true);
+
+		assertThat(result.terminalFrame()).isTrue();
+		List<Map<String, Object>> sent = FrameWire.normalize(wire.frames());
+		assertThat(sent).hasSize(1);
+		assertThat(sent.get(0)).containsEntry("type", "error").containsEntry("code", "UPSTREAM_STREAM_ERROR");
+		verify(wire.emitter()).complete();
+	}
+
 	// ── 辅助 ────────────────────────────────────────────────────────────────
+
+	private SseChatEmitter emitter(RunStore store, FrameStore frames) {
+		return new SseChatEmitter(RUN_ID, store, frames, this.mapper, Runnable::run,
+				AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY, AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES,
+				SseWriteBudget.direct(), this.bus, null);
+	}
 
 	private SseChatEmitter emitter(RunStore store) {
 		return new SseChatEmitter(RUN_ID, store, this.frames, this.mapper, Runnable::run,

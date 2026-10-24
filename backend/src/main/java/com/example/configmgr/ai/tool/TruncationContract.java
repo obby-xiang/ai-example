@@ -21,18 +21,23 @@ import java.util.Map;
  * 未截断为 null；</li>
  * <li>{@code originalChars}：截断前字符数；</li>
  * <li>{@code returnedChars}：截断后实际拿到/返回的字符数；</li>
- * <li>{@code notice}：人读说明（含原值/上限/被截字段），也用于前端角标 hover。</li>
+ * <li>{@code noticeCode}：可选展示码（{@code frame_truncated} / {@code model_view_truncated} /
+ * {@code frame_limit_unreached}）—— 新客户端按码 + 数字本地化，不把某种语言烧进历史帧；</li>
+ * <li>{@code notice}：旧客户端兼容的人读短句（语言中立的英文降级文案，不含数字/字段名）；
+ * 新客户端只在缺 {@code noticeCode}（旧帧）时回落展示。</li>
  * </ul>
  *
  * <p>
  * {@link #LEGACY_REASON_FIELD}（{@code truncatedReason}）是 {@code notice} 的<b>兼容别名</b>：
- * 前端角标（{@code AiPanel.vue}）与历史段持久化读的是它，本期保留一版、值恒等于 {@code notice}；
- * 新代码一律读 {@code notice}。
+ * 历史段持久化读的是它，本期保留一版、值恒等于 {@code notice}；新代码读
+ * {@code noticeCode} + {@code originalChars/returnedChars}。
  *
  * <h2>结构化结果（JSON）不走字符截断</h2>
  * 对 JSON 文本做 {@code substring} 会产出非法 JSON（下游解析失败 → 结果整段丢失）。
  * 故 JSON 一律走 {@link #jsonMarker}：<b>整体标记</b>成一份合法 JSON
- * （同样的五个字段 + {@code preview} 头部分片），既不破坏解析、又让模型知道"还有更多"。
+ * （{@code truncated/strategy/originalChars/returnedChars/notice} 五个字段 +
+ * {@code preview} 头部分片；{@code noticeCode} 只用于帧级展示，不进模型侧 marker），
+ * 既不破坏解析、又让模型知道"还有更多"。
  */
 public final class TruncationContract {
 
@@ -48,8 +53,20 @@ public final class TruncationContract {
 	/** 截断后返回的字符数。 */
 	public static final String RETURNED_CHARS_FIELD = "returnedChars";
 
-	/** 人读截断说明。 */
+	/** 人读截断说明（旧客户端兼容；新客户端按 {@link #NOTICE_CODE_FIELD} 本地化）。 */
 	public static final String NOTICE_FIELD = "notice";
+
+	/** 可选展示码：新客户端据此选择 locale 模板，不再直接展示 {@link #NOTICE_FIELD}。 */
+	public static final String NOTICE_CODE_FIELD = "noticeCode";
+
+	/** 帧字节超限、已对可截字段做头部降采样。 */
+	public static final String NOTICE_CODE_FRAME_TRUNCATED = "frame_truncated";
+
+	/** 帧字节超限且无可压缩字段（或压缩后仍超限），未能进一步压缩。 */
+	public static final String NOTICE_CODE_FRAME_LIMIT_UNREACHED = "frame_limit_unreached";
+
+	/** 模型侧视图被裁，帧内 result 仍为全文。 */
+	public static final String NOTICE_CODE_MODEL_VIEW_TRUNCATED = "model_view_truncated";
 
 	/** {@code notice} 的兼容别名（前端角标/历史段仍读它）。 */
 	public static final String LEGACY_REASON_FIELD = "truncatedReason";

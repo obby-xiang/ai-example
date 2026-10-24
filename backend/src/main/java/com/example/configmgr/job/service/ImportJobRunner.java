@@ -175,7 +175,8 @@ public class ImportJobRunner {
                     issue.setMessage("导入过程出错: " + e.getMessage());
                     issueRepository.save(issue);
                     errorCount++;
-                    progressService.finishItem(itemId, "FAILED", defProcessed, defTotal);
+                    // I-4：成功路径已先写条目 COMPLETED（随后任务项更新失败），catch 走补偿降级
+                    progressService.compensateItemFailure(itemId, defProcessed, defTotal);
                     taskService.updateItemStatus(taskId, defCode, "FAILED");
                 }
             }

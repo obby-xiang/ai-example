@@ -25,12 +25,25 @@ import static org.mockito.Mockito.verify;
  * 比对与删除之间租约可能已经过期并被别的实例重抢，于是<b>删掉别人的租约</b>（本类 L6 锁的就是它）。
  * 抢/续/放三条路径因此全部收敛成一次 {@code redis.execute(RedisScript, keys, args)}（L7）。
  *
- * <p>epoch 取号是<b>全局单键</b> {@code INCR ai:lease:epoch}（无 TTL）：TTL 只约束"这一任租约活多久"，
- * 不约束号；键若过期，号会回退，陈旧写就会被当成新租约（L4 锁"新 epoch 严格更大"）。
+ * <p>epoch 取号是<b>与租约键同槽</b>的 per-run 计数器（{@code ai:lease:epoch:{run:<runId>}}），
+ * {@code INCR + SET} 在同一条 Lua 里（评审 I-1：取号与占用一旦分开，迟到者会用更小的号占租、
+ * 让这一轮永久写不进去）。计数器与 fence 同面同寿：TTL 只约束"这一任/这一轮活多久"，
+ * 但不允许比 fence 先过期（否则号从 1 重来又被残留 fence 拒死）。L4 锁"新 epoch 严格更大"。
  */
 class LeaseServiceTest {
 
-	private static final String KEY = "ai:lease:run:r-1";
+	/**
+	 * 生产键形（run 租约带 {@code {run:<runId>}} tag）：取号走<b>与租约键同槽</b>的 per-run 计数器，
+	 * {@code INCR + SET} 在同一条 Lua 里 —— 这才是线上跑的那条路径（评审 I-1）。
+	 * 无 tag 的资源锁路径由 {@code LeaseServiceDistinctOwnerTest} 覆盖。
+	 */
+	private static final String KEY = "ai:lease:run:{run:r-1}";
+
+	/** 与 {@link #KEY} 同槽的取号计数器（LeaseService 按 tag 推导，这里直写以免测试自证）。 */
+	private static final String EPOCH_KEY = "ai:lease:epoch:{run:r-1}";
+
+	/** 与 {@link #KEY} 同槽的 fence（生产路径的第三个键：取号时与它对齐）。 */
+	private static final String FENCE_KEY = "ai:fence:run:{run:r-1}";
 
 	private final FakeLeaseRedis fake = new FakeLeaseRedis();
 
@@ -53,34 +66,35 @@ class LeaseServiceTest {
 	/** L1：空键可抢，epoch &gt; 0，TTL = 30s。 */
 	@Test
 	void acquiresAFreeKeyWithAFreshEpochAndTheConfiguredTtl() {
-		Optional<LeaseService.Lease> acquired = this.service.tryAcquire(KEY, this.ttl);
+		Optional<LeaseService.Lease> acquired = this.service.tryAcquireFenced(KEY, FENCE_KEY, this.ttl);
 
 		assertThat(acquired).isPresent();
-		assertThat(acquired.get().epoch()).as("epoch 由全局 INCR 发放，从 1 起").isPositive();
+		assertThat(acquired.get().epoch()).as("epoch 由 per-run INCR 发放，从 1 起").isPositive();
 		assertThat(acquired.get().owner()).isEqualTo("inst-a");
 		assertThat(this.fake.expiry(KEY)).as("租约 TTL = 传入的 30s").isEqualTo(Duration.ofSeconds(30));
 		assertThat(this.fake.string(KEY)).isEqualTo(acquired.get().epoch() + "|inst-a");
-		assertThat(this.fake.string(LeaseService.EPOCH_KEY)).as("全局 epoch 单键").isEqualTo(
+		assertThat(this.fake.string(EPOCH_KEY)).as("per-run 计数器（与租约键同槽）").isEqualTo(
 				String.valueOf(acquired.get().epoch()));
+		assertThat(this.fake.string(LeaseService.EPOCH_KEY)).as("旧全局计数器不再参与 run 租约取号").isNull();
 	}
 
 	/** L2：已被他实例占用 ⇒ 拒绝且不覆盖原值、不消耗新 epoch。 */
 	@Test
 	void refusesAnOccupiedKeyWithoutOverwritingIt() {
-		LeaseService.Lease held = this.service.tryAcquire(KEY, this.ttl).orElseThrow();
-		long epochAfterFirst = this.fake.epochCounter.get();
+		LeaseService.Lease held = this.service.tryAcquireFenced(KEY, FENCE_KEY, this.ttl).orElseThrow();
+		String epochAfterFirst = this.fake.string(EPOCH_KEY);
 
-		assertThat(this.other.tryAcquire(KEY, this.ttl)).as("占用者不是自己 ⇒ 抢不到").isEmpty();
+		assertThat(this.other.tryAcquireFenced(KEY, FENCE_KEY, this.ttl)).as("占用者不是自己 ⇒ 抢不到").isEmpty();
 
 		assertThat(this.fake.string(KEY)).as("原值不得被覆盖").isEqualTo(held.epoch() + "|inst-a");
-		assertThat(this.fake.epochCounter.get()).as("被拒不取号").isEqualTo(epochAfterFirst);
+		assertThat(this.fake.string(EPOCH_KEY)).as("被拒不取号（GET 命中在 INCR 之前返回）").isEqualTo(epochAfterFirst);
 	}
 
 	/** L3：同实例可重入 —— 同一 epoch，且 Redis 只发生一次 SET。 */
 	@Test
 	void reentrantAcquireReturnsTheSameEpochWithASingleSet() {
-		LeaseService.Lease first = this.service.tryAcquire(KEY, this.ttl).orElseThrow();
-		LeaseService.Lease second = this.service.tryAcquire(KEY, this.ttl).orElseThrow();
+		LeaseService.Lease first = this.service.tryAcquireFenced(KEY, FENCE_KEY, this.ttl).orElseThrow();
+		LeaseService.Lease second = this.service.tryAcquireFenced(KEY, FENCE_KEY, this.ttl).orElseThrow();
 
 		assertThat(second.epoch()).as("可重入 ⇒ 同一 epoch").isEqualTo(first.epoch());
 		assertThat(this.fake.sets.get()).as("可重入不得再 SET 一次").isEqualTo(1);
@@ -90,10 +104,10 @@ class LeaseServiceTest {
 	/** L4：TTL 到点后可被别的实例抢到，且新 epoch 严格更大（号不回退）。 */
 	@Test
 	void expiredLeaseCanBeAcquiredWithAStrictlyGreaterEpoch() {
-		LeaseService.Lease first = this.service.tryAcquire(KEY, this.ttl).orElseThrow();
+		LeaseService.Lease first = this.service.tryAcquireFenced(KEY, FENCE_KEY, this.ttl).orElseThrow();
 		this.fake.dropKey(KEY);
 
-		LeaseService.Lease second = this.other.tryAcquire(KEY, this.ttl).orElseThrow();
+		LeaseService.Lease second = this.other.tryAcquireFenced(KEY, FENCE_KEY, this.ttl).orElseThrow();
 
 		assertThat(second.epoch()).as("过期后重抢：新 epoch 严格更大").isGreaterThan(first.epoch());
 		assertThat(second.owner()).isEqualTo("inst-b");
@@ -102,7 +116,7 @@ class LeaseServiceTest {
 	/** L5：续租比对 epoch —— 错 epoch / 错 owner 一律不续（返回 false，TTL 不动）。 */
 	@Test
 	void renewRejectsAMismatchedEpochOrOwner() {
-		LeaseService.Lease lease = this.service.tryAcquire(KEY, this.ttl).orElseThrow();
+		LeaseService.Lease lease = this.service.tryAcquireFenced(KEY, FENCE_KEY, this.ttl).orElseThrow();
 		this.fake.expiries.put(KEY, Duration.ofSeconds(1));
 
 		assertThat(this.service.renew(new LeaseService.Lease(KEY, lease.epoch() + 1, "inst-a"), this.ttl))
@@ -118,7 +132,7 @@ class LeaseServiceTest {
 	/** L6：释放比对 epoch —— 错 epoch 不删（GET-比对-DELETE 非原子的缺陷锁）。 */
 	@Test
 	void releaseOnlyDeletesItsOwnEpoch() {
-		LeaseService.Lease lease = this.service.tryAcquire(KEY, this.ttl).orElseThrow();
+		LeaseService.Lease lease = this.service.tryAcquireFenced(KEY, FENCE_KEY, this.ttl).orElseThrow();
 
 		assertThat(this.service.release(new LeaseService.Lease(KEY, lease.epoch() + 1, "inst-a")))
 				.as("错 epoch ⇒ 不删（否则会删掉新主人的租约）").isFalse();
@@ -132,7 +146,7 @@ class LeaseServiceTest {
 	/** L7：抢/续/放三条写路径都只走 Lua —— 不出现裸 DEL / SET / HSET。 */
 	@Test
 	void allWritePathsGoThroughOneScriptCallEach() {
-		LeaseService.Lease lease = this.service.tryAcquire(KEY, this.ttl).orElseThrow();
+		LeaseService.Lease lease = this.service.tryAcquireFenced(KEY, FENCE_KEY, this.ttl).orElseThrow();
 		this.service.renew(lease, this.ttl);
 		this.service.release(lease);
 
@@ -149,7 +163,7 @@ class LeaseServiceTest {
 		this.fake.down = true;
 
 		assertThatCode(() -> {
-			assertThat(this.service.tryAcquire(KEY, this.ttl)).as("降级 = 调用方走进程内互斥").isEmpty();
+			assertThat(this.service.tryAcquireFenced(KEY, FENCE_KEY, this.ttl)).as("降级 = 调用方走进程内互斥").isEmpty();
 			assertThat(this.service.renew(new LeaseService.Lease(KEY, 1L, "inst-a"), this.ttl)).isFalse();
 			assertThat(this.service.release(new LeaseService.Lease(KEY, 1L, "inst-a"))).isFalse();
 		}).doesNotThrowAnyException();
@@ -166,7 +180,7 @@ class LeaseServiceTest {
 	void heldEpochIsAProcessLocalOwnershipView() {
 		assertThat(this.service.heldEpoch(KEY)).isZero();
 
-		LeaseService.Lease lease = this.service.tryAcquire(KEY, this.ttl).orElseThrow();
+		LeaseService.Lease lease = this.service.tryAcquireFenced(KEY, FENCE_KEY, this.ttl).orElseThrow();
 		assertThat(this.service.heldEpoch(KEY)).isEqualTo(lease.epoch());
 		assertThat(this.service.heldEpoch("ai:lease:run:other")).as("键之间互不影响").isZero();
 		assertThat(this.other.heldEpoch(KEY)).as("别的实例不共享进程内视图").isZero();
@@ -178,7 +192,7 @@ class LeaseServiceTest {
 	/** L10：markDriving 按 renewInterval 续租，release 之后停。 */
 	@Test
 	void markDrivingRenewsOnTheConfiguredIntervalUntilRelease() {
-		LeaseService.Lease lease = this.service.tryAcquire(KEY, this.ttl).orElseThrow();
+		LeaseService.Lease lease = this.service.tryAcquireFenced(KEY, FENCE_KEY, this.ttl).orElseThrow();
 		this.service.markDriving(lease);
 		this.service.markDriving(lease);
 

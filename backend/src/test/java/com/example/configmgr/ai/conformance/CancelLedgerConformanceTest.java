@@ -18,6 +18,7 @@ import com.example.configmgr.ai.run.StreamViolationException;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
 import com.example.configmgr.ai.session.AiSessionService;
 import com.example.configmgr.ai.tool.AiContext;
+import com.example.configmgr.common.ErrorCodes;
 import com.example.configmgr.ai.tool.ContextBuilder;
 import com.example.configmgr.ai.tool.ToolRegistry;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -225,6 +226,33 @@ class CancelLedgerConformanceTest {
 		assertThat(first).isEqualTo(2);
 		assertThat(second).as("幂等：已 CANCELLED 的条目不再被改写").isZero();
 		assertThat(this.store.pendings(RUN_ID)).allMatch(entry -> PendingToolCall.CANCELLED.equals(entry.getStatus()));
+	}
+
+	/**
+	 * N-1：UNKNOWN 基础设施状态不得被记成用户取消。终态必须是 FAILED + AI_REDIS_UNAVAILABLE，
+	 * 条目保持 PENDING（不落 CANCELLED），且不得出现 done{cancelled} / cancelTerminal 的台账。
+	 */
+	@Test
+	void stateUnavailableIsFailureNotUserCancellation() {
+		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.error(
+				new StreamViolationException(StreamViolationException.STATE_UNAVAILABLE, "取消状态未知")));
+
+		FrameWire wire = runTurn();
+
+		RunSnapshot snapshot = this.store.get(RUN_ID);
+		assertThat(snapshot.getStatus()).isEqualTo(RunSnapshot.FAILED);
+		assertThat(snapshot.isCancelled()).as("不是用户取消").isFalse();
+		assertThat(snapshot.getError()).contains(ErrorCodes.AI_REDIS_UNAVAILABLE)
+			.doesNotContain(ErrorCodes.AI_RUN_CANCELLED);
+
+		assertThat(this.store.pendings(RUN_ID)).allSatisfy(entry ->
+			assertThat(entry.getStatus()).as("取消收尾不得被触发").isEqualTo(PendingToolCall.PENDING));
+
+		List<Map<String, Object>> frames = FrameWire.normalize(wire.frames());
+		assertThat(FrameContract.ofType(frames, "done")).as("不得发 done{cancelled}").isEmpty();
+		Map<String, Object> error = FrameContract.oneOfType(frames, "error");
+		assertThat(error).containsEntry("code", ErrorCodes.AI_REDIS_UNAVAILABLE);
+		assertThat(FrameContract.types(frames)).doesNotContain("done");
 	}
 
 	// ── 辅助 ────────────────────────────────────────────────────────────────

@@ -38,7 +38,10 @@ class AiConfigServiceTest {
 
 		assertThat(service.availability().available()).isFalse();
 		assertThat(service.availability().code()).isEqualTo(AiConfigService.CODE_KEY_UNREADABLE);
-		assertThat(service.availability().reason()).contains("无法解密");
+		assertThat(service.availability().reason()).contains("设置 → AI").contains("重新录入");
+		assertThat(service.availability().reason()).as("I-1：变量名/机制词不上屏")
+			.doesNotContain("AI_API_KEY", "DEEPSEEK_API_KEY", "AI_SECRET_KEK", "KEK", "provider")
+			.contains("设置 → AI");
 		// 绝不静默回落到 env key（否则"为什么突然用错 key"无从排查）
 		assertThat(service.resolveDefault()).isEmpty();
 		assertThat(service.resolveKey(this.fixture.providers.get(0)).status())
@@ -70,6 +73,9 @@ class AiConfigServiceTest {
 
 		assertThat(service.availability().available()).isFalse();
 		assertThat(service.availability().code()).isEqualTo(AiConfigService.CODE_KEY_MISSING);
+		// I-1 / R-12：用户面只给可操作指引；变量名/机制词不上屏（只在 /health 诊断面）
+		assertThat(service.availability().reason()).contains("设置 → AI")
+			.doesNotContain("AI_API_KEY", "DEEPSEEK_API_KEY", "AI_SECRET_KEK", "KEK", "provider");
 	}
 
 	// ── 空表 + 无 env / 空表 + env ───────────────────────────────────────────
@@ -84,7 +90,7 @@ class AiConfigServiceTest {
 		assertThat(service.availability().code()).isEqualTo("AI_UNAVAILABLE");
 		// 与批①之前<b>逐字相同</b>的文案（前端降级提示与 E2E 的兼容基线）
 		assertThat(service.availability().reason())
-			.isEqualTo("AI 能力未启用：未配置 AI_API_KEY（或 DEEPSEEK_API_KEY）环境变量，AI 端点已惰性降级");
+			.isEqualTo("AI 能力未启用：请在「设置 → AI」配置供应商与 API Key");
 		assertThat(service.listProviders()).isEmpty();
 		assertThat(service.describeProviders()).isEmpty();
 	}

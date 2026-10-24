@@ -2,6 +2,7 @@ package com.example.configmgr.ai.form;
 
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.RunStore;
+import com.example.configmgr.common.AiStateUnavailableException;
 import com.example.configmgr.common.ApiResponse;
 import com.example.configmgr.file.FileStorageService;
 import org.junit.jupiter.api.Test;
@@ -17,6 +18,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -68,6 +70,43 @@ class GenerativeFormAttachmentEndpointTest {
 		assertThat(data).doesNotContainKey("storagePath");
 		assertThat(data.values()).noneMatch(value -> String.valueOf(value).contains("/data/"));
 		assertThat(this.attachments.find((String) data.get("fileId")).runId()).isEqualTo("run-1");
+	}
+
+	/** I-5：登记失败（B3 fail-closed）时已落盘文件必须回收，不能留下孤儿。 */
+	@Test
+	void uploadDeletesTheStoredFileWhenRegistrationFails() throws Exception {
+		waitingForm("run-1", "call-1");
+		when(this.storage.store(any(), eq("evidence.pdf"))).thenReturn("/data/orphan-evidence.pdf");
+		FormAttachmentStore failing = new FormAttachmentStore() {
+			@Override
+			public Attachment register(String runId, String toolCallId, String sessionId, String fileName, long size,
+					String contentType, String storagePath) {
+				throw new AiStateUnavailableException("模拟 Redis 登记失败");
+			}
+
+			@Override
+			public Attachment find(String fileId) {
+				return null;
+			}
+
+			@Override
+			public boolean consume(String fileId) {
+				return false;
+			}
+
+			@Override
+			public boolean wasConsumed(String fileId) {
+				return false;
+			}
+		};
+		GenerativeFormAttachmentController failingController = new GenerativeFormAttachmentController(this.storage,
+				failing, this.runStore, this.registry);
+		MockMultipartFile file = new MockMultipartFile("file", "evidence.pdf", "application/pdf",
+				"pdf-bytes".getBytes());
+
+		assertThatThrownBy(() -> failingController.upload(file, "run-1", "call-1", "sess-1"))
+			.isInstanceOf(AiStateUnavailableException.class);
+		verify(this.storage).delete("/data/orphan-evidence.pdf");
 	}
 
 	@Test

@@ -36,7 +36,7 @@ class RunStoreWalConvergeTest {
 
 	private static final String CALL_ID = "c-wal";
 
-	private static final String FENCE_KEY = RunStore.FENCE_RUN_PREFIX + RUN_ID;
+	private static final String FENCE_KEY = RunStore.runScopedKey(RunStore.FENCE_RUN_PREFIX, RUN_ID);
 
 	private final FakeLeaseRedis fake = new FakeLeaseRedis();
 
@@ -113,7 +113,7 @@ class RunStoreWalConvergeTest {
 			.as("FRONTEND_RESULT 需要 resultText，裸状态会让卡'已决但没内容'")
 			.isEqualTo(PendingToolCall.PENDING);
 
-		this.fake.table(RunStore.DECIDED_PREFIX + RUN_ID).put(CALL_ID, "APPROVED|1|inst-x");
+		this.fake.table(RunStore.runScopedKey(RunStore.DECIDED_PREFIX, RUN_ID)).put(CALL_ID, "APPROVED|1|inst-x");
 		assertThat(this.store.pending(RUN_ID, CALL_ID).getStatus())
 			.as("APPROVED 需要执行侧字段（executed=false 等），同样不合并")
 			.isEqualTo(PendingToolCall.PENDING);

@@ -298,7 +298,8 @@ public class PublishJobRunner {
             String message = "发布过程出错: " + cause.getMessage();
             for (String def : defCode != null ? List.of(defCode) : List.<String>of()) {
                 saveConflictIssue(job, def, null, message);
-                progressService.markItemFinal(job.getId(), def, "FAILED",
+                // I-4：成功路径已先写条目 COMPLETED（随后任务项/PUBLISHED 更新失败），走补偿降级
+                progressService.compensateItemFailure(job.getId(), def,
                         0, (int) stagingRowRepository.countByTaskIdAndDefCode(job.getTaskId(), def));
             }
             if (defCode == null) {

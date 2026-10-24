@@ -122,4 +122,7 @@ public final class FormIssueCodes {
 	public static final String ATTACHMENT_FORBIDDEN = "ATTACHMENT_FORBIDDEN";
 	public static final String ATTACHMENT_CONSUMED = "ATTACHMENT_CONSUMED";
 
+	/** 登记簿/校验面暂时不可用（Redis 故障）：可重试，不是用户填错。 */
+	public static final String ATTACHMENT_UNAVAILABLE = "ATTACHMENT_UNAVAILABLE";
+
 }

@@ -119,7 +119,7 @@ class RunStoreClaimFenceTest {
 	@Test
 	void claimWithoutALeaseKeepsThePreviousSemantics() {
 		// epoch == 0（本实例未持租）：E3 红线 —— 不看 fence，照旧认领
-		this.fake.strings.put(RunStore.FENCE_RUN_PREFIX + RUN_ID, "9");
+		this.fake.strings.put(RunStore.runScopedKey(RunStore.FENCE_RUN_PREFIX, RUN_ID), "9");
 
 		boolean claimed = this.storeB.claimExecution(RUN_ID, "c-1", this.storeB.instanceId());
 

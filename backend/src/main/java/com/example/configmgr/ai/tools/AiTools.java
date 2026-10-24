@@ -3,6 +3,7 @@ package com.example.configmgr.ai.tools;
 import com.example.configmgr.common.CodedIllegalStateException;
 import com.example.configmgr.common.ErrorCodes;
 
+import com.example.configmgr.ai.tool.PlainTextToolResultConverter;
 import com.example.configmgr.ai.tool.ToolCategory;
 import com.example.configmgr.ai.tool.ToolChannel;
 import com.example.configmgr.ai.tool.ToolMeta;
@@ -93,7 +94,8 @@ public class AiTools {
 
     // ==================== 只读：配置定义 ====================
 
-    @Tool(name = "list_config_defs", description = "列出系统中的配置定义（编码/名称/层级/字段数），可按层级筛选")
+    @Tool(name = "list_config_defs", description = "列出系统中的配置定义（编码/名称/层级/字段数），可按层级筛选",
+            resultConverter = PlainTextToolResultConverter.class)
     @ToolScope("*")
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.R)
@@ -121,7 +123,8 @@ public class AiTools {
                 .collect(Collectors.joining("\n"));
     }
 
-    @Tool(name = "get_config_def", description = "获取指定配置定义的字段详情（编码/标签/类型/必填/主键/引用）")
+    @Tool(name = "get_config_def", description = "获取指定配置定义的字段详情（编码/标签/类型/必填/主键/引用）",
+            resultConverter = PlainTextToolResultConverter.class)
     @ToolScope("*")
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.R)
@@ -164,7 +167,8 @@ public class AiTools {
     // 上限的**调用前**告知：模型据此知道本工具不是"全量返回"，避免把截断后的列表当成任务的完整集合
     // （消除谎报族；数字规格清点 B-1.4）。描述里的"前 20 条"与"超出时给出总条数"是
     // 下方 limit(LIST_TASKS_MAX_ROWS) 与截断告知的现态口径 —— 三者必须同改（改值即改描述）。
-    @Tool(name = "list_tasks", description = "列出最近的任务列表（含类型/步骤/状态），最多返回前 20 条，超出时给出总条数")
+    @Tool(name = "list_tasks", description = "列出最近的任务列表（含类型/步骤/状态），最多返回前 20 条，超出时给出总条数",
+            resultConverter = PlainTextToolResultConverter.class)
     @ToolScope({"*", "page:tasks"})
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.R)
@@ -179,7 +183,8 @@ public class AiTools {
         return rows + "\n（共 " + tasks.size() + " 条，仅显示前 " + LIST_TASKS_MAX_ROWS + " 条）";
     }
 
-    @Tool(name = "get_workspace_state", description = "获取当前工作区的任务状态快照")
+    @Tool(name = "get_workspace_state", description = "获取当前工作区的任务状态快照",
+            resultConverter = PlainTextToolResultConverter.class)
     @ToolScope("*")
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.R)
@@ -199,7 +204,8 @@ public class AiTools {
         return sb.toString();
     }
 
-    @Tool(name = "check_job_status", description = "查询作业状态和进度")
+    @Tool(name = "check_job_status", description = "查询作业状态和进度",
+            resultConverter = PlainTextToolResultConverter.class)
     @ToolScope("task:*")
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.R)
@@ -211,7 +217,8 @@ public class AiTools {
                 job.getProgress(), job.getTotal(), job.getErrorCount());
     }
 
-    @Tool(name = "get_row_count", description = "预估指定配置项的数据行数")
+    @Tool(name = "get_row_count", description = "预估指定配置项的数据行数",
+            resultConverter = PlainTextToolResultConverter.class)
     @ToolScope({"*", "task:EXPORT/QUERY_COND", "task:EXPORT/EXPORT"})
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.R)
@@ -250,7 +257,8 @@ public class AiTools {
      * <p>返回值刻意带上任务 id 与下一个动作（{@code navigate_to} 的目标页面），
      * 让模型不必猜"下一步该拿哪个 id 做什么"。
      */
-    @Tool(name = "create_task", description = "从零创建一个配置管理任务（EXPORT 导出 / IMPORT 导入），创建即落库并返回任务 id；随后用 navigate_to(page=..., taskId=...) 打开它的向导")
+    @Tool(name = "create_task", description = "从零创建一个配置管理任务（EXPORT 导出 / IMPORT 导入），创建即落库并返回任务 id；随后用 navigate_to(page=..., taskId=...) 打开它的向导",
+            resultConverter = PlainTextToolResultConverter.class)
     @ToolScope({ "page:tasks", "task:EXPORT", "task:IMPORT" })
     @ToolRisk(ToolMeta.RiskLevel.WRITE)
     @ToolCategory(ToolMeta.Category.W)
@@ -303,7 +311,8 @@ public class AiTools {
      * 机制完全由风险等级驱动（{@code SpToolCallingManager#kindOf}），
      * 此处不新增工具名清单。披露范围不变。
      */
-    @Tool(name = "start_export", description = "启动配置导出作业，开始将数据导出为Excel文件（高风险，需要用户确认）")
+    @Tool(name = "start_export", description = "启动配置导出作业，开始将数据导出为Excel文件（高风险，需要用户确认）",
+            resultConverter = PlainTextToolResultConverter.class)
     @ToolScope({ "page:tasks", "task:EXPORT/EXPORT" })
     @ToolRisk(ToolMeta.RiskLevel.DANGER)
     @ToolCategory(ToolMeta.Category.J)
@@ -323,7 +332,8 @@ public class AiTools {
      * 风险等级同为 {@code DANGER}（确认门，S4.4e 裁决⑥；FR-5.3 把"启动检查"与"启动导出/导入/发布"
      * 并列写进确认清单）。
      */
-    @Tool(name = "start_precheck", description = "启动预检查作业，验证上传的Excel文件格式和数据（需要用户确认）")
+    @Tool(name = "start_precheck", description = "启动预检查作业，验证上传的Excel文件格式和数据（需要用户确认）",
+            resultConverter = PlainTextToolResultConverter.class)
     @ToolScope({ "page:tasks", "task:IMPORT/PRECHECK" })
     @ToolRisk(ToolMeta.RiskLevel.DANGER)
     @ToolCategory(ToolMeta.Category.J)
@@ -339,7 +349,8 @@ public class AiTools {
      * 只有向导走到「导入执行」步才披露）；风险等级 {@code DANGER}（确认门，S4.4e 裁决⑥）——
      * 它会真正写暂存区，人工确认的必要性不低于导出。
      */
-    @Tool(name = "start_import", description = "启动导入作业，将数据写入暂存区（高风险，需要用户确认）")
+    @Tool(name = "start_import", description = "启动导入作业，将数据写入暂存区（高风险，需要用户确认）",
+            resultConverter = PlainTextToolResultConverter.class)
     @ToolScope("task:IMPORT/IMPORT")
     @ToolRisk(ToolMeta.RiskLevel.DANGER)
     @ToolCategory(ToolMeta.Category.J)
@@ -350,7 +361,8 @@ public class AiTools {
         return String.format("导入作业已启动（作业 #%d），数据将写入暂存区，发布前可预览", job.getId());
     }
 
-    @Tool(name = "start_publish", description = "启动发布作业，将暂存数据正式发布到生产数据（高风险，需要用户确认）")
+    @Tool(name = "start_publish", description = "启动发布作业，将暂存数据正式发布到生产数据（高风险，需要用户确认）",
+            resultConverter = PlainTextToolResultConverter.class)
     @ToolScope("task:IMPORT/PUBLISH")
     @ToolRisk(ToolMeta.RiskLevel.DANGER)
     @ToolCategory(ToolMeta.Category.P)
@@ -485,9 +497,19 @@ public class AiTools {
             @ToolParam(description = "条件值（文本/数字）；EMPTY/NOT_EMPTY 不传，IN 传字符串数组", required = false) Object value) {
     }
 
+    /**
+     * 推进向导步骤。风险等级为 {@code WRITE}（R3-02 修订，用户 2026-10-24 裁决）：
+     * 导入向导从第 1 步离开时，前端 {@code flushEditors} 会把在线编辑的整表写回服务端文件
+     * （后续预检查/导入读的就是这份文件），因此不能再用 {@code READ} 的“无副作用”语义。
+     *
+     * <p>
+     * <b>不加确认门</b>：本工具是 {@code FRONTEND} 通道，{@code SpToolCallingManager#kindOf}
+     * 通道判定优先于风险等级，WRITE 不会触发后端确认卡；用户点页面「下一步」与 AI 调用
+     * {@code confirm_step} 仍是同一条路径。回执必须如实说明实际写回了哪些配置项。
+     */
     @Tool(name = "confirm_step", description = "确认并推进向导步骤（当前步骤校验通过时前端才前进；需已导航到导出/导入向导）")
     @ToolScope({ "page:tasks", "task:EXPORT", "task:IMPORT" })
-    @ToolRisk(ToolMeta.RiskLevel.READ)
+    @ToolRisk(ToolMeta.RiskLevel.WRITE)
     @ToolCategory(ToolMeta.Category.U)
     @ToolChannel(ToolMeta.Channel.FRONTEND)
     public String confirmStep(
@@ -779,7 +801,9 @@ public class AiTools {
     }
 
     @Tool(name = "normalize_column", description = "列归一化：commit=false 只出建议（零写入、采样最多 20 行）；"
-            + "commit=true 只允许 trim/case/width，且必须由用户在预览卡上确认后应用；只改浏览器内存")
+            + "commit=true 只允许 trim/case/width，且必须由用户在预览卡上确认后应用；"
+            + "改动默认只作用于当前表格，导入向导第 1 步离开（「下一步」/ confirm_step）时会整表写回服务端文件"
+            + "（导出向导需点「保存编辑到服务端」）")
     @ToolScope({ "task:EXPORT/EXPORT", "task:IMPORT/UPLOAD" })
     @ToolRisk(ToolMeta.RiskLevel.WRITE)
     @ToolCategory(ToolMeta.Category.W)
@@ -795,7 +819,9 @@ public class AiTools {
     }
 
     @Tool(name = "replace_values", description = "按列查找替换（wholeCell/contains/prefix/wildcard/regex），"
-            + "必须先给用户看预览（采样最多 20 行）并由用户确认；只改浏览器内存，不落服务端")
+            + "必须先给用户看预览（采样最多 20 行）并由用户确认；"
+            + "改动默认只作用于当前表格，导入向导第 1 步离开（「下一步」/ confirm_step）时会整表写回服务端文件"
+            + "（导出向导需点「保存编辑到服务端」）")
     @ToolScope({ "task:EXPORT/EXPORT", "task:IMPORT/UPLOAD" })
     @ToolRisk(ToolMeta.RiskLevel.WRITE)
     @ToolCategory(ToolMeta.Category.W)
@@ -815,7 +841,9 @@ public class AiTools {
     }
 
     @Tool(name = "update_rows", description = "按条件更新命中行（literal/fillDown/fillSeries/template），"
-            + "必须先给用户看预览（采样最多 20 行）并由用户确认；只改浏览器内存，不落服务端")
+            + "必须先给用户看预览（采样最多 20 行）并由用户确认；"
+            + "改动默认只作用于当前表格，导入向导第 1 步离开（「下一步」/ confirm_step）时会整表写回服务端文件"
+            + "（导出向导需点「保存编辑到服务端」）")
     @ToolScope({ "task:EXPORT/EXPORT", "task:IMPORT/UPLOAD" })
     @ToolRisk(ToolMeta.RiskLevel.WRITE)
     @ToolCategory(ToolMeta.Category.W)

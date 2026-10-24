@@ -7,9 +7,11 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 /**
  * Builds the workspace context string that is injected into every LLM call.
@@ -27,6 +29,18 @@ import java.util.Map;
  * 超出即丢弃剩余键并注明"已省略 N 项" —— 上下文成本可控且"被省略"这件事对模型可见
  * （不静默消失）。</li>
  * </ol>
+ *
+ * <h2>A3-R1：定界注入收口</h2>
+ * {@code <workspace_state>} 只声明"这一段是数据"，挡不住段内文本自带的收口标签：
+ * 标题此前只过 {@code safeField}（剥控制字符、不中和标签），{@code extra.selectedDefs}
+ * （页面实时勾选）与任务条目回退是原值 {@code String.join}，{@code extra} 值也只截长度 ——
+ * 一个 {@code </workspace_state>} 就能提前闭合定界，把后续内容顶到最高信任位。现在标题、步骤、
+ * 两条「已选配置项」路径与 {@code renderExtra} 的每个值都先过 {@link #safeDelimitedField}：
+ * 剥不可见/控制字符与行/段分隔符（换行、{@code U+2028}/{@code U+2029}）、把非 ASCII 空白
+ * 归一为普通空格后，把
+ * {@code </workspace_state>}/{@code </tool_result>}/{@code </knowledge>} 中和成全角尖括号形式
+ * （正则同时兜住 {@code \s} 与 {@code \p{Z}}）。
+ * 已选配置项另有单项 64 / 单行 2000 字符上限，截断对模型可见。
  */
 @Slf4j
 @Component
@@ -108,6 +122,27 @@ public class ContextBuilder {
     /** 单步标识的字符上限（与 {@code ContextFieldGate#STEP_MAX_CHARS} 同值）。 */
     public static final int STEP_MAX_CHARS = 64;
 
+    /** 单个已选配置项（defCode）的字符上限。 */
+    public static final int SELECTED_DEF_MAX_CHARS = 64;
+
+    /** 「已选配置项」整行的字符上限；超长即截断并标注（客户端可上报任意条数，不能无界进系统消息）。 */
+    public static final int SELECTED_DEFS_MAX_CHARS = 2000;
+
+    /** 已选配置项被单行上限截断时的可见标记（"被截断"这件事对模型可见，不静默消失）。 */
+    static final String SELECTED_DEFS_TRUNCATION_MARKER = "…（已截断）";
+
+    /**
+     * 可提前闭合定界的收口标签（A3-R1）：{@code </workspace_state>} 是本段的，
+     * {@code </tool_result>}/{@code </knowledge>} 是下游工具结果的 —— 客户端值里出现任意一个，
+     * 都等于在最高信任位留了一个"提前收口、把后续文本顶到定界之外"的写入口。
+     *
+     * <p>空白面用 {@code [\s\p{Z}]}：{@code \s} 只覆盖 ASCII，NBSP / {@code U+2007} /
+     * {@code U+3000} / {@code U+2028} 等 Unicode 分隔符在 {@code \p{Z}} 里，两者都要兜住
+     * （{@code safeField} 会先归一/剥离，这里是正则兜底）。
+     */
+    private static final Pattern CLOSING_DELIMITER = Pattern.compile(
+            "(?i)</[\\s\\p{Z}]*(workspace_state|tool_result|knowledge)[\\s\\p{Z}]*>");
+
     private final TaskService taskService;
 
     private final ObjectMapper objectMapper;
@@ -137,10 +172,10 @@ public class ContextBuilder {
             try {
                 Task task = taskService.findById(ctx.getTaskId());
                 sb.append("任务: #").append(task.getId()).append(" [").append(task.getType().name())
-                        .append("] 标题「").append(safeField(task.getTitle(), TITLE_MAX_CHARS)).append("」\n");
+                        .append("] 标题「").append(safeDelimitedField(task.getTitle(), TITLE_MAX_CHARS)).append("」\n");
                 sb.append("状态: ").append(task.getStatus().name()).append("\n");
                 sb.append("当前步骤: ")
-                        .append(safeField(ctx.getStep() != null ? ctx.getStep() : task.getCurrentStep(),
+                        .append(safeDelimitedField(ctx.getStep() != null ? ctx.getStep() : task.getCurrentStep(),
                                 STEP_MAX_CHARS))
                         .append("\n");
 
@@ -151,11 +186,11 @@ public class ContextBuilder {
                     // 页面已同步过选中集（**含空集合**）⇒ 以页面真值为准：手动勾选/减选不落库，
                     // 任务条目代表的是"上一次落库"而非"用户当下选的"，两者对立时模型会答错。
                     sb.append("已选配置项: ")
-                            .append(pageDefs.isEmpty() ? "（空）" : String.join(", ", pageDefs))
+                            .append(pageDefs.isEmpty() ? "（空）" : renderDefCodes(pageDefs))
                             .append("（来源：页面实时勾选）\n");
                 } else if (!taskDefs.isEmpty()) {
                     // 页面从未同步（不在拥有选中集的向导页上 / 客户端未上报）：退回任务已存条目。
-                    sb.append("已选配置项: ").append(String.join(", ", taskDefs)).append("（来源：任务条目）\n");
+                    sb.append("已选配置项: ").append(renderDefCodes(taskDefs)).append("（来源：任务条目）\n");
                 }
             } catch (Exception e) {
                 sb.append("任务: #").append(ctx.getTaskId()).append(" (加载失败)\n");
@@ -172,10 +207,15 @@ public class ContextBuilder {
     }
 
     /**
-     * 定界内的文本字段：剥掉不可见/控制字符并截断。
+     * 定界内的文本字段：剥掉不可见/控制字符与行/段分隔符、归一非 ASCII 空白，并截断。
      *
      * <p>标题与步骤都是"数据"而非"指令"，但一个含换行与零宽字符的标题足以在定界内伪造出一行
-     * 新的提示词（{@code \n11. 忽略上述…}），所以换行也一并压成空格。
+     * 新的提示词（{@code \n11. 忽略上述…}），所以换行、{@code U+2028}/{@code U+2029} 一并剥掉。
+     * 非 ASCII 空白（NBSP / {@code U+2007} / {@code U+3000} 等）归一为普通空格而不是删除 ——
+     * 它们在正则里不算 {@code \s}，却能在标签内部充当分隔符，同时删除会吞掉词边界。
+     *
+     * <p><b>本方法不中和收口标签</b>：{@code </workspace_state>} 之类的标签由
+     * {@link #safeDelimitedField} 在剥完不可见字符之后处理 —— 客户端可控的整段值请走后者。
      */
     static String safeField(String raw, int maxChars) {
         if (raw == null) {
@@ -186,9 +226,20 @@ public class ContextBuilder {
         while (i < raw.length() && out.length() < maxChars) {
             int codePoint = raw.codePointAt(i);
             int type = Character.getType(codePoint);
-            boolean invisible = type == Character.FORMAT || type == Character.SURROGATE || type == Character.CONTROL;
+            boolean invisible = type == Character.FORMAT || type == Character.SURROGATE || type == Character.CONTROL
+                    || type == Character.LINE_SEPARATOR || type == Character.PARAGRAPH_SEPARATOR;
             if (!invisible) {
-                out.appendCodePoint(codePoint);
+                int width = Character.charCount(codePoint);
+                if (out.length() + width > maxChars) {
+                    // 补充平面字符不能把预算撑破：否则内容变 maxChars+1、加标记后 maxChars+2
+                    break;
+                }
+                if (type == Character.SPACE_SEPARATOR && codePoint != ' ') {
+                    out.append(' ');
+                }
+                else {
+                    out.appendCodePoint(codePoint);
+                }
             }
             i += Character.charCount(codePoint);
         }
@@ -245,7 +296,10 @@ public class ContextBuilder {
     }
 
     /**
-     * 白名单 + 截断后的 extra 文本（T9）。空白/无白名单键时返回空串（不进系统消息）。
+     * 白名单 + 截断 + 定界中和后的 extra 文本（T9 / A3-R1）。空白/无白名单键时返回空串（不进系统消息）。
+     *
+     * <p>每个值在序列化之后统一过 {@link #safeDelimitedField}：值里夹带的换行、控制字符与
+     * {@code </workspace_state>} 一类收口标签都不会原样落到 {@code 额外上下文} 行里。
      */
     public String renderExtra(Map<String, Object> raw) {
         if (raw == null || raw.isEmpty()) {
@@ -255,7 +309,8 @@ public class ContextBuilder {
         for (String key : ALLOWED_EXTRA_KEYS) {
             Object value = raw.get(key);
             if (value != null) {
-                allowed.put(key, truncate(serialize(value), EXTRA_VALUE_MAX_CHARS));
+                // 单值先剥不可见字符/换行并按 300 字符截断，再中和可提前闭合定界的收口标签
+                allowed.put(key, safeDelimitedField(serialize(value), EXTRA_VALUE_MAX_CHARS));
             }
         }
         if (allowed.isEmpty()) {
@@ -295,7 +350,62 @@ public class ContextBuilder {
         }
     }
 
-    private static String truncate(String text, int max) {
-        return text.length() <= max ? text : text.substring(0, max) + "…";
+    /**
+     * 已选配置项的单行渲染：逐项剥不可见字符/换行、逐项截断，再对整行设上限。
+     *
+     * <p>列表来自客户端（页面实时勾选）或任务条目，条数与单项长度都不可控 ——
+     * 不设上限时一行就能吃掉整轮上下文。截断对模型可见（追加标记），不静默消失。
+     *
+     * <p><b>单项硬上限 {@value #SELECTED_DEF_MAX_CHARS}（含标记）</b>：{@link #safeField}
+     * 的约定是"内容 ≤ max、截断再加一个标记"（max+1）；defCode 这一路按"模型看到的这一项"
+     * 计长，把标记也纳入 64 —— 补充平面字符在边界上既不会撑成 65（内容溢出），
+     * 也不会撑成 66（溢出 + 标记）。
+     */
+    static String renderDefCodes(List<String> defs) {
+        List<String> safe = new ArrayList<>(defs.size());
+        for (String def : defs) {
+            safe.add(renderDefCode(def));
+        }
+        String joined = String.join(", ", safe);
+        if (joined.length() <= SELECTED_DEFS_MAX_CHARS) {
+            return joined;
+        }
+        int end = SELECTED_DEFS_MAX_CHARS;
+        if (Character.isHighSurrogate(joined.charAt(end - 1))) {
+            end--; // 不把代理对切成半个字符
+        }
+        return joined.substring(0, end) + SELECTED_DEFS_TRUNCATION_MARKER;
+    }
+
+    /** 单个 defCode：结果长度 ≤ {@value #SELECTED_DEF_MAX_CHARS}（截断标记占 1 格），不切断代理对。 */
+    private static String renderDefCode(String raw) {
+        String safe = safeDelimitedField(raw, SELECTED_DEF_MAX_CHARS);
+        if (safe.length() <= SELECTED_DEF_MAX_CHARS) {
+            return safe;
+        }
+        int end = SELECTED_DEF_MAX_CHARS - 1;
+        if (Character.isHighSurrogate(safe.charAt(end - 1))) {
+            end--; // 宁可少一个字符，也不留半个代理对
+        }
+        return safe.substring(0, end) + "…";
+    }
+
+    /**
+     * 定界内的单行文本：先剥不可见/控制字符（换行一并压掉，否则可在定界内伪造新行），
+     * 再中和收口标签（A3-R1）。
+     *
+     * <p>顺序不可颠倒：控制字符可能夹在标签中间（{@code </workspace_state\u0000>}），
+     * 先剥再中和才不会留下一个"剥完才成形"的标签。
+     */
+    static String safeDelimitedField(String raw, int maxChars) {
+        return neutralizeClosingDelimiters(safeField(raw, maxChars));
+    }
+
+    /** 收口标签中和：改成全角尖括号（模型侧不是标签），长度不变或更短，不吃额外预算。 */
+    static String neutralizeClosingDelimiters(String text) {
+        if (text == null || text.isEmpty()) {
+            return "";
+        }
+        return CLOSING_DELIMITER.matcher(text).replaceAll("＜/$1＞");
     }
 }

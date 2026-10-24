@@ -90,6 +90,16 @@ public class JobTerminalWriter {
         }
     }
 
+    /**
+     * R1-13 / begin 失败收敛：在 {@code afterCommit} 回调里立即执行终态写入，不再注册新的
+     * transaction synchronization（已提交的事务不会再回调它）。内部仍走 REQUIRES_NEW + 条件
+     * finish，取消/先到终态的作业不会被复写。
+     */
+    public void completeNow(Job job, Job.JobStatus jobStatus, int errorCount, int warningCount,
+                            int processed, int total, Map<String, Object> doneEvent) {
+        apply(job, jobStatus, errorCount, warningCount, processed, total, doneEvent, null);
+    }
+
     private void apply(Job job, Job.JobStatus jobStatus, int errorCount, int warningCount,
                        int processed, int total, Map<String, Object> doneEvent, String successStep) {
         try {
@@ -101,9 +111,21 @@ public class JobTerminalWriter {
             // 链上任务在 IMPORT 完成时即已 COMPLETED），故完成步骤走专用收口 writeCompletionStep
             // （不走外部跳步守卫、CANCELLED 仍拒）；任务态写统一走 applyJobOutcome（受 B2 吸收态闸保护）。
             boolean wroteTerminal = Boolean.TRUE.equals(requiresNew.execute(status -> {
+                // 不变量：progressService.finish 内部必须用 REQUIRES_NEW 并先行提交（见
+                // JobProgressService#finish），因此此处已不持有 job 行锁。随后统一按
+                // task → job 之外的方向写 task：先锁 task，再 writeCompletionStep/applyJobOutcome。
+                // 若未来把 finish 改成 REQUIRED，这里会变成“持 job 锁等 task”，与删除的
+                // task → job 形成死锁；JobProgressServiceTerminalGuardTest 固化 REQUIRES_NEW 语义。
                 boolean wrote = progressService.finish(job.getId(), jobStatus, errorCount, warningCount,
                         processed, total);
                 if (wrote) {
+                    // R1-13/I-3：job 终态已独立提交，此刻没有 job 行锁；锁 task 后再写任务态。
+                    // 任务已被删除时不再写（避免对已删 task 做联动），避免与删除的 task 锁互相等待。
+                    if (taskService.tryLockForUpdate(job.getTaskId()).isEmpty()) {
+                        log.info("作业 #{} 的终态已落，但任务 #{} 已被删除，跳过任务态联动",
+                                job.getId(), job.getTaskId());
+                        return wrote;
+                    }
                     if (jobStatus == Job.JobStatus.COMPLETED && successStep != null) {
                         taskService.writeCompletionStep(job.getTaskId(), successStep);
                     }

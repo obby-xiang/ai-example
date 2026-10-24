@@ -32,6 +32,7 @@ import com.example.configmgr.ai.session.SessionGate;
 import com.example.configmgr.ai.tool.FrontendToolGuard;
 import com.example.configmgr.ai.tool.SheetAudit;
 import com.example.configmgr.ai.tool.SheetSwitches;
+import com.example.configmgr.ai.tool.ToolResultEnvelope;
 import com.example.configmgr.ai.tool.TruncationContract;
 import com.example.configmgr.common.ApiResponse;
 import com.example.configmgr.common.ErrorBodyFactory;
@@ -49,6 +50,7 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.env.Environment;
+import org.springframework.context.i18n.LocaleContextHolder;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -67,7 +69,9 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.OptionalLong;
 import java.util.UUID;
 import java.util.concurrent.RejectedExecutionException;
 
@@ -391,8 +395,14 @@ public class AiController {
 						: effective.context().page(),
 				"model", effective.modelId() == null ? "default" : effective.modelId(),
 				"chars", modelText.length());
+		// 回答语言来源（A3-Y1 / A3-Y7）：与错误体本地化**同一个取值点** ——
+		// ErrorBodyFactory.requestLocale() 读 Accept-Language（无头/畸形回落 zh-CN）。
+		// 必须在 HTTP 线程取好：LocaleContextHolder 是线程级的，工作线程拿不到请求上下文，
+		// 不显式搬运的话 SSE 这条通道的回答语言会恒为中文（A3-Y1 选"随用户语言"后遗症）。
+		Locale replyLocale = ErrorBodyFactory.requestLocale();
 		try {
 			this.aiRunExecutor.execute(() -> {
+				LocaleContextHolder.setLocale(replyLocale);
 				try {
 					service.chat(runId, effective, out);
 				}
@@ -403,9 +413,12 @@ public class AiController {
 					AiTrace.eventOn(runId, sessionId, "turn_exception", "code", "UNCAUGHT",
 							"type", ex.getClass().getSimpleName(),
 							"msg", ex.getMessage());
-					out.error(ErrorCodes.AI_RUN_FAILED, String.valueOf(ex.getMessage()));
+					// R-08：用户面只给白名单短句；异常原文（可能含上游 body）已在上一行 ERROR 日志。
+					out.error(ErrorCodes.AI_RUN_FAILED,
+							localize(ErrorCodes.AI_RUN_FAILED, "AI 服务暂时不可用，请稍后重试。"));
 				}
 				finally {
+					LocaleContextHolder.resetLocaleContext();
 					this.sessionGate.release(sessionId, runId);
 					this.runRegistry.close(runId);
 				}
@@ -635,6 +648,14 @@ public class AiController {
 		}
 		// B23L1 批②b：读侧续期（重挂是最强的"有人还在看这张卡"信号；终态/缺失不续期）
 		this.runStore.touchActiveRun(snapshot);
+		// I-1：回放前先确认事件日志末号可读。末号未知时不得进入"按 0 全量回放"（会拿到最旧窗口、
+		// 拿不到 done）；明确回 503 + degraded，让前端下一拍重试。
+		if (this.frameStore != null && this.frameStore.lastSeqIfKnown(runId).isEmpty()) {
+			Map<String, Object> body = new LinkedHashMap<>(errorBody(ErrorCodes.AI_REDIS_UNAVAILABLE,
+					"AI 运行时依赖的 Redis 暂不可用，请稍后重试。"));
+			body.put("degraded", true);
+			return json(HttpStatus.SERVICE_UNAVAILABLE, body);
+		}
 		SseEmitter emitter = new SseEmitter(NO_TRANSPORT_DEADLINE);
 		SseChatEmitter out = this.runRegistry.of(runId);
 		int replayed = out.replayAndAttach(emitter, lastSeq, isTerminal(snapshot.getStatus()));
@@ -655,8 +676,9 @@ public class AiController {
 	 *
 	 * <p>
 	 * 三路输入都取"活着的证据"：续跑租约（跨实例还有人负责）、本进程写出器（活连接）、
-	 * 最近活动（快照写入 / 末帧 / 心跳取较新）。任一为真即判活 —— 宁可让用户多等一次 409，
-	 * 也不让同一会话并发两轮。
+	 * 最近活动（快照写入 + 业务活动；SUSPENDED 时含心跳）。任一为真即判活 —— 宁可让用户多等
+	 * 一次 409，也不让同一会话并发两轮。RUNNING 不把心跳算进活动，避免"进程还心跳、业务已卡死"
+	 * 的轮被放行成双跑（R1-09）。
 	 */
 	private boolean isDeadRound(String heldRunId) {
 		RunSnapshot snapshot = this.runStore.get(heldRunId);
@@ -672,11 +694,16 @@ public class AiController {
 			leaseHeld = true;
 		}
 		boolean liveInProcess = this.runRegistry.find(heldRunId) != null;
+		String status = snapshot == null ? null : snapshot.getStatus();
 		long updatedAtMs = snapshot == null ? 0L : snapshot.getUpdatedAtMs();
-		long lastActivityAtMs = this.runStore.lastEventAtMs(heldRunId);
+		// R1-09：两种状态的"活动"口径不同 ——
+		// · RUNNING：判据是<b>业务</b>是否还在前进，心跳不得掩盖卡死（只认 lastActivityAtMs）；
+		// · SUSPENDED：等人期间本来就没有业务帧，2s 心跳是"还在等"的唯一证据（认 lastEventAtMs）。
+		long lastActivityAtMs = RunSnapshot.SUSPENDED.equals(status)
+				? this.runStore.lastEventAtMs(heldRunId) : this.runStore.lastActivityAtMs(heldRunId);
 		long thresholdMs = this.properties.getResume().getZombieAge().toMillis();
-		return RunLiveness.isDead(snapshot == null ? null : snapshot.getStatus(), updatedAtMs, lastActivityAtMs,
-				leaseHeld, liveInProcess, thresholdMs, System.currentTimeMillis());
+		return RunLiveness.isDead(status, updatedAtMs, lastActivityAtMs, leaseHeld, liveInProcess, thresholdMs,
+				System.currentTimeMillis());
 	}
 
 	// ── 取消（韧性棒：ADR-8 修正③） ────────────────────────────────────────
@@ -821,7 +848,8 @@ public class AiController {
 		body.put("snapshotStatus", snapshot.getStatus());
 		// B23L1 批②b：读侧续期（快照重载，省掉 touch 内部的一次读；终态快照由 RunStore 判掉）
 		this.runStore.touchActiveRun(snapshot);
-		List<PendingToolCall> pendings = this.runStore.pendings(runId);
+		// C2：展示/恢复面用非抛读口（guard 读失败不能把整页打成 500）。
+		List<PendingToolCall> pendings = this.runStore.pendingsLenient(runId);
 		List<Map<String, Object>> pendingEntries = new ArrayList<>();
 		List<String> unresolvedExternal = new ArrayList<>();
 		for (PendingToolCall pending : pendings) {
@@ -858,7 +886,15 @@ public class AiController {
 		body.put("pendingEntries", pendingEntries);
 		body.put("unresolvedExternal", unresolvedExternal);
 		body.put("awaitingExternal", RunSnapshot.SUSPENDED.equals(snapshot.getStatus()) && !unresolvedExternal.isEmpty());
-		body.put("archiveMaxSeq", archiveMaxSeq(runId));
+		Long maxSeq = archiveMaxSeq(runId);
+		if (maxSeq == null) {
+			// I-1：末号读失败不得回 0（前端会把 0 当全量回放锚点）；503 + degraded 让前端重试。
+			Map<String, Object> error = new LinkedHashMap<>(errorBody(ErrorCodes.AI_REDIS_UNAVAILABLE,
+					"AI 运行时依赖的 Redis 暂不可用，请稍后重试。"));
+			error.put("degraded", true);
+			return json(HttpStatus.SERVICE_UNAVAILABLE, error);
+		}
+		body.put("archiveMaxSeq", maxSeq);
 		return ResponseEntity.ok(ApiResponse.ok(body));
 	}
 
@@ -871,9 +907,13 @@ public class AiController {
 	 * 因此末号必须问事件日志（{@link FrameStore#lastSeq} 内部会把 LIST 尾巴也算进来），
 	 * 不能再看 LIST 末帧（那会在迁移后恒为 0，前端于是全量重放）。
 	 */
-	private long archiveMaxSeq(String runId) {
+	private Long archiveMaxSeq(String runId) {
 		FrameStore frames = this.frameStore;
-		return frames != null ? frames.lastSeq(runId) : this.runStore.lastEventSeq(runId);
+		if (frames == null) {
+			return this.runStore.lastEventSeq(runId);
+		}
+		OptionalLong known = frames.lastSeqIfKnown(runId);
+		return known.isPresent() ? known.getAsLong() : null;
 	}
 
 	/** 索引缺失/快照消失时的明确空态（进程已死分支）。 */
@@ -899,13 +939,14 @@ public class AiController {
 		if (!this.redisAvailability.isAvailable()) {
 			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
 		}
-		ResumeService.ResumeResult result = service.resume(runId);
+		ResumeService.ResumeResult result = service.resume(runId, ErrorBodyFactory.requestLocale());
 		return switch (result.outcome()) {
 			case ACCEPTED -> ResponseEntity.accepted().contentType(MediaType.APPLICATION_JSON).body(result.body());
 			case ALREADY_DONE, ALREADY_CANCELLED ->
 				ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body(result.body());
 			case NOT_FOUND -> json(HttpStatus.NOT_FOUND, result.body());
-			case POOL_SATURATED -> json(HttpStatus.SERVICE_UNAVAILABLE, result.body());
+			case POOL_SATURATED, CANCEL_STATE_UNKNOWN, STATE_UNKNOWN ->
+				json(HttpStatus.SERVICE_UNAVAILABLE, result.body());
 			// 409 家族（B23L1 批②b 显式列出）：续跑权在别的实例手里 = 这一轮已经有主，
 			// 不是"服务不可用"（不该 503 让运维误以为要扩容），也不是"没找到"。
 			case LEASE_HELD_ELSEWHERE, IN_PROGRESS, ALREADY_RUNNING -> json(HttpStatus.CONFLICT, result.body());
@@ -969,13 +1010,18 @@ public class AiController {
 	}
 
 	/**
-	 * 400 {@code MESSAGE_TOO_LONG}（批① 闸门 2）。稳定码 + 中文文案 + 两枚数字 ——
+	 * 400 {@code MESSAGE_TOO_LONG}（批① 闸门 2）。稳定码 + 两枚数字 ——
 	 * <b>不回显原文</b>（它可能本身就是敏感数据，且长度已足够定位问题）。
+	 *
+	 * <p>A3-Y7 / I-1：message 走 {@code localize()} —— 中文（默认）逐字不变，非中文取
+	 * {@code messages_en} 的码级兜底；{@code length}/{@code limit} 两枚数字仍在结构字段里，
+	 * 本地化不吞掉可定位信息。
 	 */
-	private static Map<String, Object> messageTooLong(int length, int limit) {
+	private Map<String, Object> messageTooLong(int length, int limit) {
 		Map<String, Object> body = new LinkedHashMap<>();
 		body.put("code", ErrorCodes.MESSAGE_TOO_LONG);
-		body.put("message", "消息长度 " + length + " 字符，超过单条上限 " + limit + " 字符；请拆分或缩短后重发（本接口不做截断）");
+		body.put("message", localize(ErrorCodes.MESSAGE_TOO_LONG,
+				"消息长度 " + length + " 字符，超过单条上限 " + limit + " 字符；请拆分或缩短后重发（本接口不做截断）"));
 		body.put("length", length);
 		body.put("limit", limit);
 		return body;
@@ -983,11 +1029,14 @@ public class AiController {
 
 	/**
 	 * 400 {@code REASON_TOO_LONG}（防护批③ B2-6）。稳定码 + 两枚数字，<b>不回显原因原文</b>。
+	 *
+	 * <p>I-1：该码已登记进 {@link ErrorCodes}（A10 R-10），故与其他拒绝出口共用同一本地化机制。
 	 */
-	private static Map<String, Object> reasonTooLong(int length) {
+	private Map<String, Object> reasonTooLong(int length) {
 		Map<String, Object> body = new LinkedHashMap<>();
-		body.put("code", "REASON_TOO_LONG");
-		body.put("message", "拒绝原因 " + length + " 字符，超过上限 " + REASON_MAX_CHARS + " 字符；请缩短后重新提交决策");
+		body.put("code", ErrorCodes.REASON_TOO_LONG);
+		body.put("message", localize(ErrorCodes.REASON_TOO_LONG,
+				"拒绝原因 " + length + " 字符，超过上限 " + REASON_MAX_CHARS + " 字符；请缩短后重新提交决策"));
 		body.put("length", length);
 		body.put("limit", REASON_MAX_CHARS);
 		return body;
@@ -996,13 +1045,16 @@ public class AiController {
 	/**
 	 * 429 {@code RATE_LIMITED}（批① 闸门 3）。带 {@code Retry-After}（秒，向上取整）——
 	 * 客户端据此退避，而不是盲目重试把窗口继续打满。
+	 *
+	 * <p>A3-Y7 / I-1：message 走 {@code localize()}；退避秒数、维度、用量都在结构字段里。
 	 */
-	private static ResponseEntity<Map<String, Object>> rateLimited(AiRateLimiter.Decision decision) {
+	private ResponseEntity<Map<String, Object>> rateLimited(AiRateLimiter.Decision decision) {
 		String scopeName = AiRateLimiter.SCOPE_SESSION.equals(decision.scope()) ? "该会话" : "当前来源";
 		Map<String, Object> body = new LinkedHashMap<>();
 		body.put("code", ErrorCodes.RATE_LIMITED);
-		body.put("message", scopeName + "对话请求过于频繁：每 " + decision.limit() + " 次/分钟（"
-				+ decision.scope() + " 维度）已达上限，请约 " + decision.retryAfterSeconds() + " 秒后重试");
+		body.put("message", localize(ErrorCodes.RATE_LIMITED,
+				scopeName + "对话请求过于频繁：每 " + decision.limit() + " 次/分钟（"
+						+ decision.scope() + " 维度）已达上限，请约 " + decision.retryAfterSeconds() + " 秒后重试"));
 		body.put("scope", decision.scope());
 		body.put("used", decision.used());
 		body.put("limit", decision.limit());
@@ -1098,7 +1150,13 @@ public class AiController {
 			Map<String, Object> item = new LinkedHashMap<>();
 			item.put("id", response.id());
 			item.put("name", response.name());
-			item.put("responseData", unwrapEnvelope(response.responseData()));
+			item.put("responseData", historyMessageText(response.responseData()));
+			// A10 R-15：模型侧视图截断是**持久事实**（信封五字段），历史通道必须原样透出，
+			// 否则刷新后截断角标与 locale hover 消失（帧只活在实时流里）。
+			Map<String, Object> truncation = historyTruncation(response.responseData());
+			if (truncation != null) {
+				item.putAll(truncation);
+			}
 			Map<String, Object> view = historyResultView(response);
 			if (view != null) {
 				item.put("resultView", view);
@@ -1106,6 +1164,59 @@ public class AiController {
 			out.add(item);
 		}
 		return out;
+	}
+
+	/**
+	 * 历史通道的截断元数据（A10 R-15）：从持久化的工具结果信封里取回
+	 * {@code truncated/strategy/originalChars/returnedChars/notice}，并映射成前端段字段
+	 * （{@code noticeCode=model_view_truncated}、{@code truncatedReason=notice} 兼容旧客户端）。
+	 *
+	 * <p>为什么读信封而不是另存一份：模型侧裁剪就发生在
+	 * {@code ToolResultEnvelope#toModelJson}，信封是这份事实的唯一持久来源；实时帧的截断字段
+	 * 也由同一个 limiter 现算（{@code SseChatEmitter#markModelView}），两侧因此同源。
+	 *
+	 * <p>只对 {@code truncated=true} 出键：未截断/旧数据（无信封）保持载荷形状逐字不变。
+	 * 信封可能带模型侧定界外壳（{@code <tool_result>}），先剥壳再解析。
+	 */
+	private Map<String, Object> historyTruncation(String responseData) {
+		if (responseData == null || responseData.isBlank()) {
+			return null;
+		}
+		try {
+			String json = ToolResultEnvelope.unwrapModelJson(responseData);
+			if (json == null || !json.trim().startsWith("{")) {
+				return null;
+			}
+			JsonNode node = this.objectMapper.readTree(json);
+			if (node == null || !node.isObject() || !isToolResultEnvelope(node)
+					|| !node.path(TruncationContract.TRUNCATED_FIELD).asBoolean(false)) {
+				return null;
+			}
+			Map<String, Object> fields = new LinkedHashMap<>();
+			fields.put(TruncationContract.TRUNCATED_FIELD, true);
+			fields.put(TruncationContract.NOTICE_CODE_FIELD, TruncationContract.NOTICE_CODE_MODEL_VIEW_TRUNCATED);
+			JsonNode strategy = node.get(TruncationContract.STRATEGY_FIELD);
+			if (strategy != null && strategy.isTextual()) {
+				fields.put(TruncationContract.STRATEGY_FIELD, strategy.asText());
+			}
+			for (String key : List.of(TruncationContract.ORIGINAL_CHARS_FIELD,
+					TruncationContract.RETURNED_CHARS_FIELD)) {
+				JsonNode value = node.get(key);
+				if (value != null && value.isNumber()) {
+					fields.put(key, value.asInt());
+				}
+			}
+			JsonNode notice = node.get(TruncationContract.NOTICE_FIELD);
+			if (notice != null && notice.isTextual()) {
+				fields.put(TruncationContract.LEGACY_REASON_FIELD, notice.asText());
+			}
+			return fields;
+		}
+		catch (Exception ex) {
+			// 展示增强不得让 /history 500：解析失败按"无截断元数据"处理（旧载荷语义）
+			log.debug("历史工具结果截断元数据解析失败，按无字段透传：{}", ex.getMessage());
+			return null;
+		}
 	}
 
 	/**
@@ -1123,7 +1234,7 @@ public class AiController {
 		if (!historyOutcomeOk(response.responseData())) {
 			return null;
 		}
-		String resultText = unwrapEnvelope(response.responseData());
+		String resultText = historyMessageText(response.responseData());
 		for (com.example.configmgr.ai.resultview.ToolResultViewProvider provider : this.resultViewProviders) {
 			if (!provider.supports(response.name())) {
 				continue;
@@ -1147,16 +1258,28 @@ public class AiController {
 	 * （不是信封就不存在"失败结局"的判据，与帧路径"视图只是展示增强"的取向一致）。
 	 */
 	private boolean historyOutcomeOk(String responseData) {
-		if (responseData == null || !responseData.trim().startsWith("{")) {
+		String json = ToolResultEnvelope.unwrapModelJson(responseData);
+		if (json == null || !json.trim().startsWith("{")) {
 			return true;
 		}
 		try {
-			JsonNode node = this.objectMapper.readTree(responseData);
+			JsonNode node = this.objectMapper.readTree(json);
 			return node == null || !node.isObject() || node.path("ok").asBoolean(true);
 		}
 		catch (Exception ex) {
 			return true;
 		}
+	}
+
+	/**
+	 * 历史工具结果的<b>用户面原文</b>（L-70 收口）：先剥模型侧定界外壳，再解信封取 {@code message}。
+	 *
+	 * <p>生产记忆里的 {@code responseData} 是 {@code toModelJson} 的产物
+	 * （{@code （声明）<tool_result>{…}</tool_result>}）。只做 {@link #unwrapEnvelope} 会因"整串不是以
+	 * {@code {} 开头"而原样返回 ⇒ 卡面出现声明与内部信封 JSON。两步固定顺序：外壳 → 信封。</p>
+	 */
+	private String historyMessageText(String responseData) {
+		return unwrapEnvelope(ToolResultEnvelope.unwrapModelJson(responseData));
 	}
 
 	/** 信封 JSON → {@code message} 原文；识别不了（旧数据/普通 JSON 结果）一律原样返回。 */
@@ -1168,8 +1291,7 @@ public class AiController {
 			JsonNode node = this.objectMapper.readTree(responseData);
 			// 三键同现才当信封（outcome + retryable + message）：避免把"恰好也有 outcome/message
 			// 字段的普通工具 JSON 结果"误判成信封而吞掉原数据。
-			if (node != null && node.isObject() && node.path("outcome").isTextual()
-					&& node.path("retryable").isBoolean() && node.path("message").isTextual()) {
+			if (node != null && node.isObject() && isToolResultEnvelope(node)) {
 				return node.path("message").asText();
 			}
 		}
@@ -1177,6 +1299,12 @@ public class AiController {
 			log.debug("历史工具结果不是可解析的信封 JSON，按原文透传：{}", ex.getMessage());
 		}
 		return responseData;
+	}
+
+	/** 工具结果信封的三键签名（{@code outcome} 文本 + {@code retryable} 布尔 + {@code message} 文本）。 */
+	private static boolean isToolResultEnvelope(JsonNode node) {
+		return node.path("outcome").isTextual() && node.path("retryable").isBoolean()
+				&& node.path("message").isTextual();
 	}
 
 	/**
@@ -1193,14 +1321,15 @@ public class AiController {
 	 * 不假装成功）。</li>
 	 * <li><b>删除范围 = 只删记忆面</b>：走官方 {@code ChatMemory#clear}（DC-05），
 	 * {@code MessageWindowChatMemory} 落到仓储的 {@code deleteByConversationId}
-	 * = {@code DEL chat:mem:<id>} + {@code SREM chat:mem:__ids__}。
+	 * = tagged 单键 DEL + legacy 单键 DEL + 索引单键 SREM（SREM 失败只 WARN，由
+	 * {@code findConversationIds} 的惰性剔除与 {@code isConversationIndexed} 的数据键存活判定兜底）。
 	 * <b>不删</b> {@code ai:session:<sessionId>}（会话滑动 TTL，{@code AiSessionService} 维护）
 	 * 与 {@code ai:run:*}（轮次台账/快照，删了会让重启续跑与取证失去依据）—— 两者各有自己的 TTL。</li>
 	 * </ul>
 	 *
 	 * <h2>会话门：只报告，不阻塞</h2>
 	 * 该会话若仍有在跑轮次，该轮终局会做记忆收敛（{@code ResilientChatService#convergeMemory}
-	 * 的 {@code clear + add}）把窗口整体写回，故本次删除可能被覆盖。这个事实以
+	 * 的整窗 {@code saveAll}）把窗口整体写回，故本次删除可能被覆盖。这个事实以
 	 * {@code runActive} / {@code activeRunId} 报告并留 WARN 日志，
 	 * <b>不返回 409</b> —— 硬拒绝会把「新建对话」变成可能失败的动作，破坏「点了就干净」的心智。
 	 * <b>前端顺序不关闭该覆盖</b>（口径订正：复核 F2）：{@code cancel} 只是置取消标志 + 唤醒收尾，
@@ -1226,19 +1355,21 @@ public class AiController {
 			log.warn("删除会话记忆时该会话仍有在跑轮次（记忆可能被该轮收尾的收敛写回）sessionId={} activeRunId={}",
 					sessionId, activeRunId);
 		}
+		// 先取"实际可读键"再删：迁移期只有 legacy 键时，报 tagged 会指向一个不存在的键。
+		String dataKey = memoryKey(sessionId);
 		this.chatMemory.clear(sessionId);
 		Map<String, Object> body = new LinkedHashMap<>();
 		body.put("sessionId", sessionId);
 		// deleted 恒为 true：幂等语义 = "已处于删除状态"（上面已 clear，故不再复核一次读取）
 		body.put("deleted", true);
 		body.put("existed", existed);
-		body.put("memoryKey", RedisChatMemoryRepository.KEY_PREFIX + sessionId);
-		// 判存量只问"这一个 id 在不在索引里"：单次 SISMEMBER（复核 F4），不拉全量索引
+		body.put("memoryKey", dataKey);
+		// 判存量只问"这一个 id 在不在索引里"：SISMEMBER + 数据键 EXISTS（tagged/legacy），不拉全量索引
 		body.put("removedFromIndex", !isConversationIndexed(sessionId));
 		body.put("runActive", activeRunId != null);
 		body.put("activeRunId", activeRunId);
 		body.put("storedBy", this.runStore.instanceId());
-		body.put("note", "只删记忆面（chat:mem:<sessionId> 与其会话 id 索引）；不删 ai:session:<sessionId> 与 ai:run:*（两者各有自己的 TTL）。"
+		body.put("note", "数据键已删除，索引按存活/惰性口径清理；不删 ai:session:<sessionId> 与 ai:run:*（两者各有自己的 TTL）。"
 				+ "删除不存在的会话同样 200（幂等）。runActive=true 表示该会话仍有在跑轮次，"
 				+ "该轮收尾的记忆收敛可能把窗口重新写回同名键。");
 		return ResponseEntity.ok(body);
@@ -1273,8 +1404,11 @@ public class AiController {
 			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
 		}
 		if (this.contextBreakdownService == null) {
+			// R-16：用户面文案不得出现 Java 类名（"ContextBreakdownService 缺失"这类内部实现细节
+			// 只留在日志里）；message 与其它 503 同一本地化出口。
+			log.warn("/context 计量未装配 sessionId={}：ContextBreakdownService 缺失", sessionId);
 			return json(HttpStatus.SERVICE_UNAVAILABLE, errorBody(ErrorCodes.AI_CONTEXT_UNAVAILABLE,
-					"上下文计量未装配（ContextBreakdownService 缺失）"));
+					"上下文计量暂不可用，请稍后重试"));
 		}
 		List<Message> memory;
 		try {
@@ -1288,15 +1422,31 @@ public class AiController {
 	}
 
 	/**
+	 * 该会话数据键的<b>实际拼写</b>（响应字段 {@code memoryKey}）。
+	 *
+	 * <p>生产仓储的键形带 Redis hash tag（{@code chat:mem:{<escapedId>}}），迁移期还可能只有
+	 * legacy {@code chat:mem:<raw id>}。因此用
+	 * {@link RedisChatMemoryRepository#readableKeyFor(String)} 返回<b>实际可读</b>的键
+	 * （tagged 存活 → tagged；仅 legacy → legacy；都不存在 → 规范 tagged）。
+	 * 非该实现的测试桩/将来实现回落到旧拼写（纯展示字段）。
+	 */
+	private String memoryKey(String sessionId) {
+		if (this.chatMemoryRepository instanceof RedisChatMemoryRepository redisRepository) {
+			return redisRepository.readableKeyFor(sessionId);
+		}
+		return RedisChatMemoryRepository.KEY_PREFIX + sessionId;
+	}
+
+	/**
 	 * 该会话 id 是否仍在记忆仓储的会话 id 索引内 —— {@code removedFromIndex} 的唯一判据。
 	 *
 	 * <p>
-	 * 生产装配是 {@link RedisChatMemoryRepository}（索引键 {@code chat:mem:__ids__}），走单次
-	 * {@code SISMEMBER}。此前的写法是 {@code findConversationIds().contains(sessionId)}，而那个 SPI
+	 * 生产装配是 {@link RedisChatMemoryRepository}（索引键 {@code chat:mem:__ids__}），走
+	 * {@code SISMEMBER} + 数据键 {@code EXISTS}（tagged 优先、缺失回落 legacy）。此前的写法是 {@code findConversationIds().contains(sessionId)}，而那个 SPI
 	 * 方法的语义面是"列出**全部**存活 id"（{@code SMEMBERS} + 逐 id 一次 {@code EXISTS} + 惰性清理），
 	 * 拿它做单点判定会引入 N 倍 Redis 往返（复核 F4）。语义等价：本端点在上面刚做过
-	 * {@code chatMemory.clear()}（= {@code DEL} + {@code SREM}），故此刻成员只可能被在跑轮次收尾的
-	 * {@code clear + add} 重新写回（那个 {@code add} 同时建数据键），两种写法在此处判定一致。
+	 * {@code chatMemory.clear()}（删除数据键），故此刻成员只可能被在跑轮次收尾的整窗
+	 * {@code saveAll} 重新写回（那个 {@code saveAll} 同时建数据键），两种写法在此处判定一致。
 	 *
 	 * <p>
 	 * 非 {@link RedisChatMemoryRepository} 的实现（测试桩 / 将来换实现）回落到 SPI 的通用契约面。
@@ -1317,7 +1467,8 @@ public class AiController {
 	public ResponseEntity<Map<String, Object>> health() {
 		Map<String, Object> body = new LinkedHashMap<>();
 		body.put("available", this.availability.isAvailable());
-		body.put("code", this.availability.isAvailable() ? "AI_AVAILABLE" : this.availability.code());
+		String availabilityCode = this.availability.isAvailable() ? "AI_AVAILABLE" : this.availability.code();
+		body.put("code", availabilityCode);
 		// 模型配置专项批①（additive）：model/baseUrl 仍<b>保留</b>同名同语义，值优先取配置快照的
 		// 默认目标；快照里没有可用 provider 时回落 env 回读 —— "空表 + 无 env" 下与批①之前逐值相同。
 		AiConfigService.ResolvedProvider resolved = this.aiConfigService == null ? null
@@ -1395,10 +1546,36 @@ public class AiController {
 			body.put("sheet", sheet);
 		}
 		if (!this.availability.isAvailable()) {
-			body.put("message", this.availability.reason());
+			// I-2 / 4B：/health 的 503 message 与 /chat 同一本地化出口 —— zh 由 ErrorBodyFactory
+			// 直接返回 fallback（= availability.reason() 原文，逐字不变），en 取 messages_en。
+			body.put("message", localize(availabilityCode,
+					this.availability.reason() == null ? "" : this.availability.reason()));
+			// I-1：变量名/机制词只留在 /health 诊断面，不进任何用户面 message/卡片/横幅。
+			Map<String, Object> diagnostics = keyDiagnostics(availabilityCode);
+			if (!diagnostics.isEmpty()) {
+				body.put("keyDiagnostics", diagnostics);
+			}
 			return json(HttpStatus.SERVICE_UNAVAILABLE, body);
 		}
 		return ResponseEntity.ok(body);
+	}
+
+	/**
+	 * 可用性 503 的运维诊断（I-1）：变量名与恢复路径只在这里出现，用户面文案不带机制词。
+	 *
+	 * <p>只列变量名，不含任何值；未知/可用状态返回空 Map（不产键，保持既有载荷形状）。
+	 */
+	private static Map<String, Object> keyDiagnostics(String code) {
+		if (ErrorCodes.AI_KEY_MISSING.equals(code)) {
+			return Map.of("envVars", List.of("AI_API_KEY", "DEEPSEEK_API_KEY"));
+		}
+		if (ErrorCodes.AI_KEY_UNREADABLE.equals(code)) {
+			return Map.of("envVars", List.of("AI_SECRET_KEK"));
+		}
+		if (ErrorCodes.AI_UNAVAILABLE.equals(code)) {
+			return Map.of("envVars", List.of("AI_API_KEY", "DEEPSEEK_API_KEY", "AI_SECRET_KEK"));
+		}
+		return Map.of();
 	}
 
 	/**
@@ -1429,22 +1606,38 @@ public class AiController {
 	// ── 错误体 ──────────────────────────────────────────────────────────────
 
 	private Map<String, Object> unavailable() {
-		return Map.of("code", this.availability.code(), "message", this.availability.reason());
-	}
-
-	/** R4：Redis 不可用的 503 体（带探活事实，便于前端与排障区分"没 key"与"没 Redis"）。 */
-	private Map<String, Object> redisUnavailable() {
+		String code = this.availability.code();
+		String reason = this.availability.reason();
 		Map<String, Object> body = new LinkedHashMap<>();
-		body.put("code", RedisAvailability.code());
-		body.put("message", this.redisAvailability.reason());
-		body.put("redis", this.redisAvailability.describe());
+		body.put("code", code);
+		// A3-Y7 / I-1：与错误体同一本地化出口（zh 逐字不变）。AI_UNAVAILABLE / AI_KEY_MISSING /
+		// AI_KEY_UNREADABLE 三档都已在 messages_en 登记，en 不再回落中文原文。
+		body.put("message", localize(code, reason == null ? "" : reason));
 		return body;
 	}
 
+	/**
+	 * R4：Redis 不可用的 503 体（带探活事实，便于前端与排障区分"没 key"与"没 Redis"）。
+	 *
+	 * <p>I-1：用户面的 {@code message} 走 {@code localize()}（{@code AI_REDIS_UNAVAILABLE} 已有 en 文案）；
+	 * {@code redis} 子对象是**安全事实面**（available/probes/failures/时间锚点）。R-11 残留收口：
+	 * 这里<b>不再带</b> {@code lastError}（含异常类名/连接地址）—— 原始诊断只进 WARN 日志与
+	 * {@code /health} 的 {@code redis.lastError}。
+	 */
+	private Map<String, Object> redisUnavailable() {
+		Map<String, Object> body = new LinkedHashMap<>();
+		body.put("code", RedisAvailability.code());
+		body.put("message", localize(RedisAvailability.code(), this.redisAvailability.reason()));
+		body.put("redis", this.redisAvailability.describeForResponse());
+		return body;
+	}
+
+	/** 503 挂起池饱和：message 本地化，{@code poolSize}/{@code runId} 仍是结构字段。 */
 	private Map<String, Object> poolSaturated(String runId) {
 		Map<String, Object> body = new LinkedHashMap<>();
 		body.put("code", ErrorCodes.SUSPEND_POOL_SATURATED);
-		body.put("message", "挂起专用线程池已饱和（池容量 = app.ai.suspend.pool-size），请稍后重试");
+		body.put("message", localize(ErrorCodes.SUSPEND_POOL_SATURATED,
+				"挂起专用线程池已饱和（池容量 = app.ai.suspend.pool-size），请稍后重试"));
 		body.put("runId", runId);
 		body.put("poolSize", this.properties.getSuspend().getPoolSize());
 		return body;
@@ -1525,7 +1718,7 @@ public class AiController {
 	@GetMapping("/pending/{runId}")
 	public ApiResponse<List<Map<String, Object>>> pending(@PathVariable String runId) {
 		List<Map<String, Object>> items = new ArrayList<>();
-		for (PendingToolCall pending : this.runStore.pendings(runId)) {
+		for (PendingToolCall pending : this.runStore.pendingsLenient(runId)) {
 			items.add(pending.asMap());
 		}
 		return ApiResponse.ok(items);

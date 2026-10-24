@@ -1,10 +1,17 @@
 package com.example.configmgr.ai.run;
 
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
+import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.conformance.FrameWire;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
+import com.example.configmgr.ai.tool.ToolResultLimiter;
 import com.example.configmgr.ai.tool.TruncationContract;
+import com.example.configmgr.common.sse.SseWriteBudget;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -19,7 +26,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <ol>
  * <li>超限帧被<b>字段级</b>截断后仍是合法 JSON，且 {@code RunStore#events} 回放读不丢帧
  *     （R5 的反例防线：坏 JSON 会被静默忽略 = seq 洞）；</li>
- * <li>{@code truncated}/{@code truncatedReason} 两个标记字段存在且可被读取；</li>
+ * <li>{@code truncated}/数字/{@code noticeCode} 标记字段存在且可被读取（{@code truncatedReason}
+ *     仅作旧客户端兼容别名）；</li>
  * <li>未超限帧<b>一字不改</b>（不误伤：无标记、值原样）；</li>
  * <li>边界：恰好等于上限不截断、上限 + 1 触发截断且落地 ≤ 上限（截后复测）；</li>
  * <li>回放 seq 无洞（超限帧照旧占号）。</li>
@@ -87,13 +95,114 @@ class SseFrameSizeLimitTest {
 		this.out.toolResult(pending("call-1"), true, false, "y".repeat(9_000));
 
 		Map<String, Object> frame = this.store.events(RUN_ID).get(0);
-		assertThat(frame).containsEntry(FrameSizeLimiter.TRUNCATED_FIELD, true);
-		assertThat(String.valueOf(frame.get(FrameSizeLimiter.TRUNCATED_REASON_FIELD)))
-				.contains("frame-bytes-exceeded")
-				.contains("limit=" + LIMIT)
-				.contains("result");
+		assertThat(frame).containsEntry(FrameSizeLimiter.TRUNCATED_FIELD, true)
+				.containsEntry("noticeCode", "frame_truncated");
+		String legacyNotice = String.valueOf(frame.get(FrameSizeLimiter.TRUNCATED_REASON_FIELD));
+		assertThat(legacyNotice)
+				.as("旧客户端兼容字段：英文降级短句，不含机器前缀/数字/中文")
+				.isEqualTo("Result truncated because it exceeded the frame size limit.")
+				.doesNotContain("frame-bytes-exceeded")
+				.doesNotContain("limit=")
+				.doesNotContain("truncatedFields")
+				.doesNotContainPattern("\\d")
+				.doesNotContainPattern("[\\u4e00-\\u9fff]");
+		assertThat(frame.get(TruncationContract.NOTICE_FIELD)).isEqualTo(legacyNotice);
 		assertThat(frame.get("toolCallId")).as("其余字段原样保留").isEqualTo("call-1");
 		assertThat(frame.get("name")).isEqualTo("list_config_defs");
+	}
+
+	/** I-2：没有可压缩字段时不得谎称“已压缩”，noticeCode 单独区分该结局。 */
+	@Test
+	void uncompressibleOversizeFrameDoesNotClaimCompression() throws Exception {
+		Map<String, Object> frame = new LinkedHashMap<>();
+		frame.put("type", "tool_result");
+		frame.put("payload", "z".repeat(9_000));
+
+		byte[] bytes = FrameSizeLimiter.apply(frame, this.mapper, LIMIT);
+
+		assertThat(bytes).isNotNull();
+		assertThat(bytes.length).as("不可截字段占主导时无法压到上限内").isGreaterThan(LIMIT);
+		assertThat(frame).containsEntry(FrameSizeLimiter.TRUNCATED_FIELD, true)
+				.containsEntry("noticeCode", "frame_limit_unreached")
+				.containsEntry(TruncationContract.ORIGINAL_CHARS_FIELD, 0)
+				.containsEntry(TruncationContract.RETURNED_CHARS_FIELD, 0);
+		assertThat(frame).doesNotContainKey(TruncationContract.STRATEGY_FIELD);
+		String legacyNotice = String.valueOf(frame.get(TruncationContract.NOTICE_FIELD));
+		assertThat(legacyNotice)
+				.isEqualTo("Result exceeds the frame size limit and could not be compressed further.")
+				.doesNotContain("truncated because")
+				.doesNotContainPattern("[\\u4e00-\\u9fff]");
+		assertThat(frame.get(TruncationContract.LEGACY_REASON_FIELD)).isEqualTo(legacyNotice);
+	}
+
+	/** I-3 / Minor 6：模型侧先裁、帧字节再裁时，帧码必须覆盖模型码（不能留下“此处仍为全文”的假话）。 */
+	@Test
+	void frameTruncationOverridesModelViewNoticeCode() {
+		ToolResultLimiter limiter = new ToolResultLimiter(new AiProperties());
+		SseChatEmitter emitter = new SseChatEmitter(RUN_ID, this.store, RunStoreFrameStore.of(this.store),
+				this.mapper, Runnable::run, 256, LIMIT, SseWriteBudget.direct(), null, null, limiter);
+		String full = "p".repeat(25_000);
+
+		emitter.toolResult(pending("call-both"), true, false, full);
+
+		Map<String, Object> frame = this.store.events(RUN_ID).get(0);
+		assertThat(frame).containsEntry(FrameSizeLimiter.TRUNCATED_FIELD, true)
+				.containsEntry("noticeCode", "frame_truncated")
+				.containsEntry(TruncationContract.STRATEGY_FIELD, TruncationContract.STRATEGY_HEAD);
+		assertThat(String.valueOf(frame.get(TruncationContract.NOTICE_FIELD)))
+				.isEqualTo("Result truncated because it exceeded the frame size limit.")
+				.doesNotContain("full result")
+				.doesNotContainPattern("[\\u4e00-\\u9fff]");
+		assertThat((String) frame.get("result")).as("帧字节超限后 result 已不是全文").hasSizeLessThan(full.length());
+		assertThat((Integer) frame.get(TruncationContract.ORIGINAL_CHARS_FIELD)).isEqualTo(25_000);
+		assertThat((Integer) frame.get(TruncationContract.RETURNED_CHARS_FIELD)).isPositive()
+				.isLessThan(25_000);
+	}
+
+	/** I-3：模型侧视图截断与帧字节截断共用同一 noticeCode 契约。 */
+	@Test
+	void modelViewTruncationCarriesItsOwnNoticeCode() {
+		ToolResultLimiter limiter = new ToolResultLimiter(new AiProperties());
+		SseChatEmitter emitter = new SseChatEmitter(RUN_ID, this.store, RunStoreFrameStore.of(this.store),
+				this.mapper, Runnable::run, 256, AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES,
+				SseWriteBudget.direct(), null, null, limiter);
+		String full = "m".repeat(25_000);
+
+		emitter.toolResult(pending("call-model-view"), true, false, full);
+
+		Map<String, Object> frame = this.store.events(RUN_ID).get(0);
+		assertThat(frame).containsEntry(FrameSizeLimiter.TRUNCATED_FIELD, true)
+				.containsEntry("noticeCode", "model_view_truncated")
+				.containsEntry(TruncationContract.STRATEGY_FIELD, TruncationContract.STRATEGY_HEAD);
+		assertThat(frame.get("result")).as("模型侧被裁，帧 result 仍为全文").isEqualTo(full);
+		assertThat((Integer) frame.get(TruncationContract.ORIGINAL_CHARS_FIELD)).isEqualTo(25_000);
+		assertThat((Integer) frame.get(TruncationContract.RETURNED_CHARS_FIELD)).isPositive()
+				.isLessThan(25_000);
+		String legacyNotice = String.valueOf(frame.get(TruncationContract.NOTICE_FIELD));
+		assertThat(legacyNotice)
+				.isEqualTo("Result truncated for the model; this frame shows the full result.")
+				.doesNotContainPattern("\\d")
+				.doesNotContainPattern("[\\u4e00-\\u9fff]");
+		assertThat(frame.get(TruncationContract.LEGACY_REASON_FIELD)).isEqualTo(legacyNotice);
+	}
+
+	/** A10 R-15：诊断数字与字段名进 warn 日志（用户 notice 不再承载）。 */
+	@Test
+	void truncationDiagnosticsGoToWarnLog() {
+		Logger logger = (Logger) LoggerFactory.getLogger(FrameSizeLimiter.class);
+		ListAppender<ILoggingEvent> appender = new ListAppender<>();
+		appender.start();
+		logger.addAppender(appender);
+		try {
+			this.out.toolResult(pending("call-1"), true, false, "y".repeat(9_000));
+
+			assertThat(appender.list).anySatisfy(event -> assertThat(event.getFormattedMessage())
+					.contains("original=")
+					.contains("limit=" + LIMIT)
+					.contains("fields=result"));
+		} finally {
+			logger.detachAppender(appender);
+		}
 	}
 
 	// ── ③ 未超限帧一字不改（不误伤） ──
@@ -163,11 +272,13 @@ class SseFrameSizeLimitTest {
 
 		Map<String, Object> frame = this.store.events(RUN_ID).get(0);
 		assertThat(frame).containsEntry(TruncationContract.TRUNCATED_FIELD, true)
+				.containsEntry("noticeCode", "frame_truncated")
 				.containsEntry(TruncationContract.STRATEGY_FIELD, TruncationContract.STRATEGY_HEAD);
 		assertThat(frame.get(TruncationContract.ORIGINAL_CHARS_FIELD)).isEqualTo(9_000);
 		assertThat((Integer) frame.get(TruncationContract.RETURNED_CHARS_FIELD)).isPositive()
 				.isLessThan(9_000);
-		assertThat(String.valueOf(frame.get(TruncationContract.NOTICE_FIELD))).contains("单帧");
+		assertThat(String.valueOf(frame.get(TruncationContract.NOTICE_FIELD)))
+				.isEqualTo("Result truncated because it exceeded the frame size limit.");
 		assertThat(frame.get(TruncationContract.LEGACY_REASON_FIELD))
 				.as("truncatedReason 保留为 notice 的兼容别名").isEqualTo(frame.get(TruncationContract.NOTICE_FIELD));
 	}
@@ -195,6 +306,12 @@ class SseFrameSizeLimitTest {
 		assertThat(String.valueOf(marker.get("preview"))).isNotEmpty();
 		assertThat(marker.get("strategy")).isEqualTo(TruncationContract.STRATEGY_HEAD);
 		assertThat(((Number) marker.get("originalChars")).intValue()).isEqualTo(json.length());
+		assertThat(String.valueOf(marker.get("notice")))
+				.as("A10 R-15 I-A：结构化 marker 也进用户可见 result，必须是语言中立英文且不承诺台账")
+				.isEqualTo("Structured result exceeded the frame size limit; marked as a JSON envelope with a header preview.")
+				.doesNotContainPattern("[\\u4e00-\\u9fff]")
+				.doesNotContain("执行台账")
+				.doesNotContain("台账");
 	}
 
 	// ───────────────────────── 辅助 ─────────────────────────

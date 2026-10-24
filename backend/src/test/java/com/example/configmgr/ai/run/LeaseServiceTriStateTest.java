@@ -29,7 +29,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class LeaseServiceTriStateTest {
 
-	private static final String KEY = "ai:lease:run:r-tri";
+	/** 生产键形：run 租约带 {@code {run:<runId>}} tag（三键同槽脚本才可能成立）。 */
+	private static final String KEY = "ai:lease:run:{run:r-tri}";
+
+	/** 与租约键同槽的 fence 键（三键脚本的第三键）。 */
+	private static final String FENCE_KEY = "ai:fence:run:{run:r-tri}";
 
 	private final FakeLeaseRedis fake = new FakeLeaseRedis();
 
@@ -55,7 +59,7 @@ class LeaseServiceTriStateTest {
 	void acquireDistinguishesOccupiedFromUnavailable() {
 		this.other.tryAcquire(KEY, this.ttl).orElseThrow();
 
-		LeaseService.AcquireResult occupied = this.service.acquire(KEY, this.ttl);
+		LeaseService.AcquireResult occupied = this.service.acquireFenced(KEY, FENCE_KEY, this.ttl);
 
 		assertThat(occupied.outcome()).as("别人持有 ⇒ HELD_ELSEWHERE（语义：这一轮已有主）")
 			.isEqualTo(LeaseService.AcquireOutcome.HELD_ELSEWHERE);
@@ -81,17 +85,17 @@ class LeaseServiceTriStateTest {
 	 */
 	@Test
 	void createdFlagPinpointsTheCreatorEvenUnderReentrantAcquire() {
-		LeaseService.AcquireResult first = this.service.acquire(KEY, this.ttl);
+		LeaseService.AcquireResult first = this.service.acquireFenced(KEY, FENCE_KEY, this.ttl);
 		assertThat(first.outcome()).isEqualTo(LeaseService.AcquireOutcome.ACQUIRED);
 		assertThat(first.created()).as("首抢 = 创建者").isTrue();
 
-		LeaseService.AcquireResult reentrant = this.service.acquire(KEY, this.ttl);
+		LeaseService.AcquireResult reentrant = this.service.acquireFenced(KEY, FENCE_KEY, this.ttl);
 		assertThat(reentrant.outcome()).isEqualTo(LeaseService.AcquireOutcome.ACQUIRED);
 		assertThat(reentrant.lease().epoch()).as("可重入：同一任").isEqualTo(first.lease().epoch());
 		assertThat(reentrant.created()).as("进程内视图短路 ⇒ 不是创建者（没有释放权）").isFalse();
 
 		// 另一个实例：命中现值（owner 不是自己）⇒ 占用，且同样没有释放权
-		LeaseService.AcquireResult occupied = this.other.acquire(KEY, this.ttl);
+		LeaseService.AcquireResult occupied = this.other.acquireFenced(KEY, FENCE_KEY, this.ttl);
 		assertThat(occupied.outcome()).isEqualTo(LeaseService.AcquireOutcome.HELD_ELSEWHERE);
 		assertThat(occupied.created()).isFalse();
 

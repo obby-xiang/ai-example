@@ -59,6 +59,17 @@ class SpToolCallingManagerGateArmTest {
 
     private final RunStore store = mock(RunStore.class);
 
+	{
+		// C2：生产读侧已改为 pendingLenient/pendingsLenient；Mockito 桩只需把非抛读口委托给原桩。
+		when(this.store.pendingLenient(org.mockito.ArgumentMatchers.anyString(),
+				org.mockito.ArgumentMatchers.anyString()))
+			.thenAnswer(invocation -> this.store.pending((String) invocation.getArgument(0),
+					(String) invocation.getArgument(1)));
+		when(this.store.pendingsLenient(org.mockito.ArgumentMatchers.anyString()))
+			.thenAnswer(invocation -> this.store.pendings((String) invocation.getArgument(0)));
+	}
+
+
     private final RunRegistry registry = mock(RunRegistry.class);
 
     private final CancellationRegistry cancellations = mock(CancellationRegistry.class);
@@ -109,9 +120,29 @@ class SpToolCallingManagerGateArmTest {
     }
 
     @Test
+    void unknownCancelStateRejectsAtTheLastGateAsInfrastructureFailure() {
+        stubRun();
+        when(this.cancellations.cancelState(RUN_ID)).thenReturn(CancellationRegistry.CancelState.UNKNOWN);
+        when(this.toolRegistry.channelOf("start_import")).thenReturn(ToolMeta.Channel.BACKEND);
+        when(this.toolRegistry.riskOf("start_import")).thenReturn(ToolMeta.RiskLevel.DANGER);
+        when(this.toolRegistry.matchesContext(eq("start_import"), any(AiContext.class))).thenReturn(true);
+
+        assertThatThrownBy(() -> this.manager.executeToolCalls(prompt("start_import"), response("start_import")))
+            .as("执行副作用前的最后闸：UNKNOWN 必须拒绝，但不得记成用户取消")
+            .isInstanceOf(com.example.configmgr.ai.run.StreamViolationException.class)
+            .satisfies(ex -> {
+                com.example.configmgr.ai.run.StreamViolationException violation =
+                        (com.example.configmgr.ai.run.StreamViolationException) ex;
+                assertThat(violation.getCode()).isEqualTo(com.example.configmgr.common.ErrorCodes.AI_REDIS_UNAVAILABLE)
+                        .isNotEqualTo(com.example.configmgr.common.ErrorCodes.AI_RUN_CANCELLED);
+            });
+        assertThat(this.gate.hasActiveLatch(RUN_ID)).isFalse();
+    }
+
+    @Test
     void cancelledBeforeToolsLeavesNoArmedGate() {
         stubRun();
-        when(this.cancellations.isCancelled(RUN_ID)).thenReturn(true);
+        when(this.cancellations.cancelState(RUN_ID)).thenReturn(CancellationRegistry.CancelState.CANCELLED);
         when(this.toolRegistry.channelOf("start_import")).thenReturn(ToolMeta.Channel.BACKEND);
         when(this.toolRegistry.riskOf("start_import")).thenReturn(ToolMeta.RiskLevel.DANGER);
         when(this.toolRegistry.matchesContext(eq("start_import"), any(AiContext.class))).thenReturn(true);

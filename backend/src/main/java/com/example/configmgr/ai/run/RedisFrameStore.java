@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.observe.RedisDegradation;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -19,6 +20,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
@@ -29,6 +31,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * 单实例与多实例同一份代码。
  *
  * <h2>键族</h2>
+ * <p>三族键名都带 {@code {run:<runId>}} hash tag（{@code <prefix>{run:<runId>}}，见
+ * {@link RunStore#runScopedKey(String, String)}）：它们与快照/台账等同属 {@code deleteRun} 的
+ * "一轮 13 键"，同 tag 才能让轮次回收是一条原子 {@code DEL}。下列键形为可读性省去 tag。</p>
  * <ul>
  * <li>{@code ai:xevents:<runId>} Stream —— 帧事件日志：{@code XADD key MAXLEN ~ 6000 <seq>-0
  * seq <n> frame <json>}（近似裁剪 {@link #STREAM_WINDOW}；<b>entry ID = {@code seq}-0</b>），
@@ -43,9 +48,11 @@ import java.util.concurrent.atomic.AtomicLong;
  *
  * <h2>顺序口径（I-2 收口）</h2>
  * entry ID 用<b>显式 {@code <seq>-0}</b> ⇒ <b>物理序 = seq 序</b>（自动 ID 兜底态除外），{@link #readFrom} 因此可以用
- * {@code XRANGE key (<afterSeq>-0 +} 精确取差量（O(差量)，且不依赖"低号帧一定先落"）。
+ * {@code XRANGE key <afterSeq+1>-0 +}（<b>闭区间</b>，见 {@code streamFramesAbove}）精确取差量
+ * （O(差量)，且不依赖"低号帧一定先落"）。<b>不用排他下限 {@code (afterSeq-0}：那是 Redis 6.2 的语法，
+ * 目标部署 5.0.14 会直接报错</b>，报错被 catch 折成空 ⇒ 差量读 0 帧。
  * 跨实例并发出帧时显式 ID 可能被 Redis 拒（新 ID 必须大于表尾）⇒ 落档改用**自动 ID 兜底**并 WARN 一次：
- * 该帧物理位次靠后但 {@code seq} 字段仍是原号，读者从 {@code (afterSeq-0} 起读时仍会看到它
+ * 该帧物理位次靠后但 {@code seq} 字段仍是原号，读者从 {@code <afterSeq+1>-0} 起读时仍会看到它
  * （自动 ID 远大于任何 {@code seq-0}），再按 {@code seq} 过滤。
  *
  * <p>另：{@link #readFrom} 的输出一律按 {@code seq} 升序（同号以 Stream 为准），
@@ -101,18 +108,21 @@ public class RedisFrameStore implements FrameStore {
 	}
 
 	// ── 键名 ────────────────────────────────────────────────────────────────
+	// B23L1 批①（收口版）：三族键名一律走 {@link RunStore#runScopedKey}（{@code <prefix>{run:<runId>}}），
+	// 与 RunStore 的续期/删除口**逐字同键**。这里加 tag 的目的不是本类需要同槽（本类的读都是单键命令），
+	// 而是"一轮 13 键同槽"—— 写方在旧键名、删方在新键名，就等于事件日志永不回收、也永不续期。
 
 	public String streamKey(String runId) {
-		return STREAM_PREFIX + runId;
+		return RunStore.runScopedKey(STREAM_PREFIX, runId);
 	}
 
 	public String seqKey(String runId) {
-		return RunStore.SEQ_PREFIX + runId;
+		return RunStore.runScopedKey(RunStore.SEQ_PREFIX, runId);
 	}
 
 	/** 兼容期 LIST 键（只读）。 */
 	public String legacyListKey(String runId) {
-		return RunStore.EVENTS_PREFIX + runId;
+		return RunStore.runScopedKey(RunStore.EVENTS_PREFIX, runId);
 	}
 
 	// ── FrameStore ──────────────────────────────────────────────────────────
@@ -157,7 +167,13 @@ public class RedisFrameStore implements FrameStore {
 		if (issued > 1L && issued > fallbackLast) {
 			return issued;
 		}
-		long anchor = Math.max(Math.max(legacyTailSeq(runId), streamTailSeq(runId)), fallbackLast);
+		StreamTail streamTail = streamTailSeq(runId);
+		if (!streamTail.ok()) {
+			// A4：末号未知时不得拿 0 当锚点修复（会把号抬不到位）；本次不修复，等下一拍/下一帧再试。
+			log.debug("号回退修复跳过 runId={} issued={}（Stream 末号未知，不能按 0 锚定）", runId, issued);
+			return issued;
+		}
+		long anchor = Math.max(Math.max(legacyTailSeq(runId), streamTail.seq()), fallbackLast);
 		if (anchor < issued) {
 			return issued;
 		}
@@ -195,7 +211,7 @@ public class RedisFrameStore implements FrameStore {
 		}
 		catch (Exception ex) {
 			// 显式 ID 被拒 = 物理序已经越过这个号（跨实例并发出帧 / 降级号回退）。帧不能丢：
-			// 改用自动 ID 追加（物理位次靠后，但 seq 字段仍在，读侧按 (afterSeq-0 起读 + 按 seq 过滤仍可读到）。
+			// 改用自动 ID 追加（物理位次靠后，但 seq 字段仍在，读侧按 <afterSeq+1>-0 起读 + 按 seq 过滤仍可读到）。
 			if (this.outOfOrderWarned.add(runId)) {
 				log.warn("事件日志显式 ID 落档被拒 runId={} seq={}（改用自动 ID 兜底；物理序与 seq 序将不再一致）：{}",
 						runId, seq, ex.getMessage());
@@ -217,7 +233,7 @@ public class RedisFrameStore implements FrameStore {
 	 * <p>
 	 * <b>为什么用原始命令而不是 {@code StreamOperations} / {@code RedisConnection#xAdd(record, options)}</b>：
 	 * 后者无法指定 entry ID（一律自动），而本批的正确性依赖 <b>ID = {@code seq}-0</b>：
-	 * 物理序恒等于 seq 序（自动 ID 兜底态除外），于是"按 {@code XRANGE (afterSeq-0 +} 读差量"既完整又只要 O(差量) ——
+	 * 物理序恒等于 seq 序（自动 ID 兜底态除外），于是"按 {@code XRANGE <afterSeq+1>-0 +} 读差量"既完整又只要 O(差量) ——
 	 * 这是 I-2（物理序 ≠ seq 序时低号帧永久不可读）的根治口径。{@code MAXLEN ~} 仍走近似裁剪。
 	 *
 	 * @param idToken 显式 ID（{@code "<seq>-0"}）或 {@code "*"}（乱序兜底）
@@ -239,25 +255,42 @@ public class RedisFrameStore implements FrameStore {
 	 *
 	 * <p>
 	 * <b>Stream 侧按 entry ID 读差量</b>：落档用的是显式 ID {@code <seq>-0}，所以
-	 * {@code XRANGE key (afterSeq-0 + COUNT 窗口} 拿到的<b>恰好</b>是 {@code seq > afterSeq} 的记录
+	 * {@code XRANGE key <afterSeq+1>-0 + COUNT 窗口} 拿到的<b>恰好</b>是 {@code seq > afterSeq} 的记录
 	 * ——完整（不依赖物理序与 seq 序一致）且代价 O(差量)。这是 I-2 的根治：旧实现按
 	 * {@code 末号 − afterSeq} 估条数取尾，一旦低号帧后到（跨实例并发出帧 / 降级号回退），
-	 * 它会被所有读者永久漏掉。
+	 * 它会被所有读者永久漏掉。下限用<b>闭区间 {@code afterSeq+1}</b>（不是 6.2 才支持的排他
+	 * {@code (afterSeq}）：目标部署 5.0.14 会拒绝排他区间，而拒绝会被折成空结果 ⇒ 0 帧。
 	 *
 	 * <p>
 	 * <b>乱序兜底</b>：显式 ID 被拒时落档会改用自动 ID（见 {@code append}），这类记录的 ID
-	 * 远大于任何 {@code seq-0}，因此同样落在 {@code (afterSeq-0} 的读取范围内，再按 {@code seq}
+	 * 远大于任何 {@code seq-0}，因此同样落在 {@code <afterSeq+1>-0} 的读取范围内，再按 {@code seq}
 	 * 字段过滤；代价是这种降级态下读取会退化为整窗（≤ 窗口条），并在 {@code append} 处 WARN 一次。
+	 *
+	 * <p>
+	 * <b>空流与读失败</b>：两者返回值都是空列表（调用链只把"空"当"暂无差量"，抛异常会让
+	 * 挂起重连与唤醒补帧整体失败），但读失败一律 WARN 留痕（带 runId/区间/异常），
+	 * 不静默折成空 —— 否则"日志读不出来"会伪装成"没有新帧"。
 	 */
 	@Override
 	public List<Map<String, Object>> readFrom(String runId, long afterSeq, int limit) {
+		return readFromWithStatus(runId, afterSeq, limit).frames();
+	}
+
+	@Override
+	public FrameStore.ReadResult readFromWithStatus(String runId, long afterSeq, int limit) {
 		List<Map<String, Object>> legacy = legacyFramesAbove(runId, afterSeq);
-		List<Map<String, Object>> stream = streamFramesAbove(runId, afterSeq);
-		List<Map<String, Object>> result = mergeBySeq(legacy, stream, afterSeq);
-		if (limit > 0 && result.size() > limit) {
-			return new ArrayList<>(result.subList(0, limit));
+		FrameStore.ReadResult stream = streamFramesAbove(runId, afterSeq);
+		boolean degraded = stream.degraded();
+		if (degraded) {
+			// 结果可能仍非空（例如末号探测失败但 XRANGE 成功）——但它是"降级读"，不是完整差量。
+			// 计数已在 streamTailSeq / streamFramesAbove 落；这里把信号继续传给调用方（API 层可拒绝）。
+			log.debug("事件日志差量读降级 runId={} afterSeq={}（读失败已计数，结果不保证完整）", runId, afterSeq);
 		}
-		return result;
+		List<Map<String, Object>> result = mergeBySeq(legacy, stream.frames(), afterSeq);
+		if (limit > 0 && result.size() > limit) {
+			result = new ArrayList<>(result.subList(0, limit));
+		}
+		return new FrameStore.ReadResult(result, degraded);
 	}
 
 	/**
@@ -274,7 +307,16 @@ public class RedisFrameStore implements FrameStore {
 	}
 
 	/**
-	 * Stream 差量读：{@code XRANGE key (<from>-0 + COUNT 窗口}（ID 区间，O(差量)）。
+	 * Stream 差量读：{@code XRANGE key <from+1>-0 + COUNT 窗口}（闭区间 ID 区间，O(差量)）。
+	 *
+	 * <p>
+	 * <b>为什么是 {@code from+1} 而不是排他下限</b>：排他区间（{@code (id}）是 Redis 6.2 才有的语法，
+	 * 目标部署 <b>5.0.14 会把 {@code (123-0} 当非法 stream ID 直接报错</b>（真实响应
+	 * {@code ERR Invalid stream ID specified as stream command argument}），而报错会被本方法的
+	 * catch 折成空结果 —— 表现就是<b>差量读回 0 帧</b>。长 run 首次回放同样中招：{@code afterSeq=0}
+	 * 但下限已被夹到 {@code tail − 窗口 > 0}。改用 {@code inclusive (from+1)-0} 等价：
+	 * 记录 ID 只可能是 {@code <seq>-0} 或远大于任何 {@code seq-0} 的自动 ID，两者都
+	 * {@code ≥ (from+1)-0 ⇔ seq > from}，语义与排他下限完全一致，且 5.0 可用。
 	 *
 	 * <p>
 	 * <b>读取下限夹到窗口头</b>（M′，复核确认轮）：{@code from = max(afterSeq, tailSeq − 窗口)}。
@@ -287,16 +329,32 @@ public class RedisFrameStore implements FrameStore {
 	 * <p>{@code afterSeq >= tail − 窗口} 时夹取不改变下限（走差量），因此热路径的 O(差量) 不变；
 	 * 代价是每次读多一次 {@code XREVRANGE COUNT 1}（取 {@code tailSeq}）。
 	 */
-	private List<Map<String, Object>> streamFramesAbove(String runId, long afterSeq) {
-		long tail = streamTailSeq(runId);
-		if (tail <= afterSeq) {
-			return List.of();
+	private FrameStore.ReadResult streamFramesAbove(String runId, long afterSeq) {
+		StreamTail tail = streamTailSeq(runId);
+		boolean degraded = !tail.ok();
+		long from;
+		if (tail.ok()) {
+			if (tail.seq() <= afterSeq) {
+				return new FrameStore.ReadResult(List.of(), false);
+			}
+			from = Math.max(afterSeq, tail.seq() - this.streamWindow);
 		}
-		long from = Math.max(afterSeq, tail - this.streamWindow);
+		else if (afterSeq <= 0L) {
+			// I-1：afterSeq=0 是"全量回放"最典型的形态。末号未知时无界 XRANGE 会拿**最旧**窗口
+			// （升序 + COUNT 截尾），正好丢掉含 done 的最新帧 —— 宁可返回空 + degraded，
+			// 让上层回 503/下一拍重试，也不回错窗。
+			log.warn("事件日志末号未知且要求全量回放 runId={}（拒绝退回最旧窗口，返回降级空结果）", runId);
+			return new FrameStore.ReadResult(List.of(), true);
+		}
+		else {
+			// 差量读：afterSeq 是可靠下界，无需末号夹窗口；可能被窗口 COUNT 截掉最新几帧，
+			// 但不会回错窗，且 degraded 会让上层知道结果不完整。
+			from = afterSeq;
+		}
 		List<Map<String, Object>> out = new ArrayList<>();
 		Range<String> range = from <= 0L
 				? Range.unbounded()
-				: Range.from(Range.Bound.exclusive(from + "-0")).to(Range.Bound.unbounded());
+				: Range.from(Range.Bound.inclusive((from + 1) + "-0")).to(Range.Bound.unbounded());
 		try {
 			byte[] key = bytes(streamKey(runId));
 			this.redis.execute((RedisCallback<Object>) connection -> {
@@ -315,15 +373,30 @@ public class RedisFrameStore implements FrameStore {
 			});
 		}
 		catch (Exception ex) {
-			log.debug("事件日志读取失败 runId={}：{}", runId, ex.getMessage());
-			return List.of();
+			// 读失败 ≠ 空流：返回值对调用链仍是"暂无差量"（挂起重连 / 唤醒补帧不能被一次抖动打断，
+			// 抛异常会让整条订阅路径失败），但必须 WARN + 计数 —— 静默折成空会把"日志读不出来"
+			// 伪装成"没有新帧"，正是本批要消灭的形态。
+			RedisDegradation.record(RedisDegradation.A3_FRAME_RANGE_READ, ex);
+			log.warn("事件日志读取失败 runId={} afterSeq={} from={}（本次按无差量处理，不重试）：{}",
+					runId, afterSeq, from, ex.toString());
+			return new FrameStore.ReadResult(out, true);
 		}
-		return out;
+		return new FrameStore.ReadResult(out, degraded);
 	}
 
 	@Override
 	public long lastSeq(String runId) {
-		return Math.max(legacyTailSeq(runId), streamTailSeq(runId));
+		return lastSeqIfKnown(runId).orElse(-1L);
+	}
+
+	@Override
+	public OptionalLong lastSeqIfKnown(String runId) {
+		StreamTail tail = streamTailSeq(runId);
+		if (!tail.ok()) {
+			// A4：末号探测失败不得折成 0（前端会把 0 当"全量回放"的锚点）；返回 empty 让端点回 503/degraded。
+			return OptionalLong.empty();
+		}
+		return OptionalLong.of(Math.max(legacyTailSeq(runId), tail.seq()));
 	}
 
 	// ── 兼容读：LIST + Stream 按 seq 拼接去重 ────────────────────────────────
@@ -386,7 +459,7 @@ public class RedisFrameStore implements FrameStore {
 			}
 		}
 		catch (Exception ex) {
-			log.debug("兼容期 LIST 读取失败 runId={}：{}", runId, ex.getMessage());
+			log.warn("兼容期 LIST 读取失败 runId={}（整段不可读，本批 LIST 帧缺失）：{}", runId, ex.toString());
 		}
 		return out;
 	}
@@ -413,6 +486,8 @@ public class RedisFrameStore implements FrameStore {
 			return tail == null || tail.isEmpty() ? null : tail.get(0);
 		}
 		catch (Exception ex) {
+			// 探测失败若按"键空"处理，整批老帧会被跳过 —— 必须留痕，不能伪装成空表。
+			log.warn("兼容期 LIST 读取失败 runId={}（末帧探测，按空表处理）：{}", runId, ex.toString());
 			return null;
 		}
 	}
@@ -426,7 +501,7 @@ public class RedisFrameStore implements FrameStore {
 	 * 同一 run 的 seq 由 {@code INCR} 单调发放，乱序只会发生在个别晚到帧上，因此末尾 16 条取 max
 	 * 在工程上足够（且仍是一次往返、只解析 {@code seq} 字段、不做 JSON 反序列化）。
 	 */
-	private long streamTailSeq(String runId) {
+	private StreamTail streamTailSeq(String runId) {
 		try {
 			byte[] key = bytes(streamKey(runId));
 			Long tail = this.redis.execute((RedisCallback<Long>) connection -> {
@@ -441,11 +516,19 @@ public class RedisFrameStore implements FrameStore {
 				}
 				return max;
 			});
-			return tail == null ? 0L : tail;
+			return new StreamTail(tail == null ? 0L : tail, true);
 		}
 		catch (Exception ex) {
-			return 0L;
+			// A4：末号探测失败按"未知"表达（ok=false），不再伪装成"末号 0"。
+			// 调用方据此区分"空流"与"读失败"；readFrom 会退化为不夹窗口的 XRANGE，而不是直接空。
+			RedisDegradation.record(RedisDegradation.A4_FRAME_TAIL_READ, ex);
+			log.warn("事件日志末号探测失败 runId={}（末号未知，本次回读退化为不夹窗口）：{}", runId, ex.toString());
+			return new StreamTail(0L, false);
 		}
+	}
+
+	/** 末号探测结果：{@code ok=false} = 读失败（末号未知），与"确实没有记录（seq=0, ok=true）"区分。 */
+	private record StreamTail(long seq, boolean ok) {
 	}
 
 	/** 只取一条 Stream 记录的 {@code seq} 字段（不反序列化帧体）。 */
@@ -496,7 +579,7 @@ public class RedisFrameStore implements FrameStore {
 	// ── 内部 ────────────────────────────────────────────────────────────────
 
 	private AtomicLong fallbackSeq(String runId) {
-		return this.fallbackSeqs.computeIfAbsent(runId, id -> new AtomicLong(lastSeq(id)));
+		return this.fallbackSeqs.computeIfAbsent(runId, id -> new AtomicLong(Math.max(0L, lastSeq(id))));
 	}
 
 	private Duration ttl() {

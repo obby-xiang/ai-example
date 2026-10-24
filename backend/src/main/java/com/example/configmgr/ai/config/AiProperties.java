@@ -232,6 +232,59 @@ public class AiProperties {
 	}
 
 	/**
+	 * 启动期校验 {@code app.ai.resume.zombie-age} 必须 ≥ "配置允许的合法静默 + 余量"（R1-09 / I-1）。
+	 *
+	 * <p>
+	 * 两类合法静默：工具执行上限 {@code app.ai.tool.exec-timeout}（工具跑着时不出业务帧）与
+	 * 上游事件间静默上限 {@code app.ai.resilience.inter-event-timeout}。僵尸阈值一旦 ≤ 它们，
+	 * 长工具 / 慢吐字的<b>活轮</b>会被别的实例判死并接管 —— 同一轮执行两遍，且第二遍是新的模型
+	 * 请求 + 新的工具副作用（{@code toolCallId} 不同，认领去重救不了）。
+	 *
+	 * <p>
+	 * <b>为什么还要求余量</b>（{@code app.ai.resume.zombie-margin}，缺省 60s）：只做到"大于上限"
+	 * 时，工具刚好跑满上限、上游静默刚到线，调度延迟/边界抖动/跨节点时钟偏差就会把活轮推进判死窗。
+	 * 余量把"合法静默上界"与"判死阈值"真正分开。出厂 180s = max(120s, 90s) + 60s。
+	 *
+	 * <p>
+	 * <b>两类超时必须 &gt; 0</b>：{@code SpToolCallingManager} 把 {@code exec-timeout <= 0} 解释为
+	 * "无超时"，此时"合法静默"没有上界，拿它做僵尸基线没有意义。
+	 *
+	 * <p>
+	 * 与 {@link #verifySseWriteTimeout()} 同一姿态：这不是"性能调参"，配错即语义被静默改写，
+	 * 故 <b>fail-fast</b> 并点名具体键与当前值。
+	 */
+	@PostConstruct
+	void verifyZombieAge() {
+		Duration zombieAge = this.resume == null ? null : this.resume.getZombieAge();
+		Duration margin = this.resume == null ? null : this.resume.getZombieMargin();
+		Duration execTimeout = this.tool == null ? null : this.tool.getExecTimeout();
+		Duration interEvent = this.resilience == null ? null : this.resilience.getInterEventTimeout();
+		if (zombieAge == null || margin == null || execTimeout == null || interEvent == null) {
+			throw new IllegalStateException("app.ai.resume.zombie-age / app.ai.resume.zombie-margin / "
+					+ "app.ai.tool.exec-timeout / app.ai.resilience.inter-event-timeout 至少一项缺失："
+					+ "僵尸判据无法与合法静默对齐");
+		}
+		if (execTimeout.isZero() || execTimeout.isNegative() || interEvent.isZero() || interEvent.isNegative()) {
+			throw new IllegalStateException("app.ai.tool.exec-timeout（当前 = " + execTimeout
+					+ "）与 app.ai.resilience.inter-event-timeout（当前 = " + interEvent
+					+ "）必须 > 0：0/负值等于永不超时，合法静默没有上界，不能作为僵尸判据的基线");
+		}
+		if (margin.isNegative()) {
+			throw new IllegalStateException("app.ai.resume.zombie-margin 必须 >= 0（当前 = " + margin
+					+ "）：负余量会让僵尸阈值落到合法静默之内");
+		}
+		Duration legalSilence = execTimeout.compareTo(interEvent) >= 0 ? execTimeout : interEvent;
+		Duration required = legalSilence.plus(margin);
+		if (zombieAge.compareTo(legalSilence) <= 0 || zombieAge.compareTo(required) < 0) {
+			throw new IllegalStateException("app.ai.resume.zombie-age（当前 = " + zombieAge
+					+ "）必须 >= max(app.ai.tool.exec-timeout = " + execTimeout
+					+ ", app.ai.resilience.inter-event-timeout = " + interEvent
+					+ ") + app.ai.resume.zombie-margin（当前 = " + margin + "，即 >= " + required
+					+ "）：否则正在跑长工具/慢吐字的活轮会被判成僵尸并接管（同一轮双执行）");
+		}
+	}
+
+	/**
 	 * 启动期校验 {@code app.ai.limit.*} 必须为正（复审 M1；与上面 {@link #verifySseWriteTimeout()} 同一姿态）。
 	 *
 	 * <p>
@@ -749,8 +802,35 @@ public class AiProperties {
 		/** 启动扫描的延迟（等 Web 容器与 Redis 连接就绪，避免与启动路径抢资源）。 */
 		private Duration startupDelay = Duration.ofSeconds(8);
 
-		/** 僵尸判定：状态 {@code RUNNING} 且 {@code updatedAtMs} 超过本值 ⇒ 判为僵尸轮并接管（N3）。 */
-		private Duration zombieAge = Duration.ofSeconds(60);
+		/**
+		 * 僵尸判定：状态 {@code RUNNING} 且<b>最后一条非心跳业务帧</b>超过本值 ⇒ 判为僵尸轮并接管（N3）。
+		 *
+		 * <p>
+		 * <b>R1-09：必须大于"配置允许的合法静默"</b> —— 后端工具执行上限
+		 * {@code app.ai.tool.exec-timeout}（缺省 120s）与上游事件间静默上限
+		 * {@code app.ai.resilience.inter-event-timeout}（缺省 90s）。阈值比它们短时，正在跑长工具 /
+		 * 慢吐字的活轮会被跨实例判死并接管（同一轮执行两遍）。出厂值 = 180s
+		 * （max(120s, 90s) + {@code zombie-margin} 60s），并由 {@link #verifyZombieAge()} 在启动期
+		 * 强制校验 {@code >= max(exec, inter) + margin}。
+		 *
+		 * <p>
+		 * 判据只看业务活动（{@link com.example.configmgr.ai.run.RunStore#lastActivityAtMs}）：
+		 * 心跳只证明进程还活着，不能把卡死的轮永远养年轻。
+		 */
+		private Duration zombieAge = Duration.ofSeconds(180);
+
+		/**
+		 * 僵尸阈值相对"配置允许的合法静默"必须留出的余量（缺省 60s）。
+		 *
+		 * <p>
+		 * 启动校验要求 {@code zombie-age >= max(tool.exec-timeout, resilience.inter-event-timeout) + 本值}：
+		 * 只做到"大于上限"仍可能在工具刚跑满上限、或上游静默刚到线时判死（边界抖动、调度延迟、
+		 * 跨节点时钟偏差都会吃掉那几毫秒）。余量把"合法静默的上界"与"判死阈值"真正分开。
+		 *
+		 * <p>
+		 * 与 {@code zombie-age} 一样由 {@link #verifyZombieAge()} 在启动期校验；负值即配置错误。
+		 */
+		private Duration zombieMargin = Duration.ofSeconds(60);
 
 		/** 单次启动扫描最多自动续跑多少轮（防止启动瞬间把挂起池占满）。 */
 		private int maxOnStartup = 10;
@@ -965,8 +1045,10 @@ public class AiProperties {
 	/**
 	 * 租约（fencing）设施参数（B23L1 批②a；设计稿 §2.2）。
 	 *
-	 * <p>与本专项的 B3（续跑权 fencing）和 L1（目标资源互斥）共用同一组原语：epoch 由
-	 * {@code INCR ai:lease:epoch} 全局发放（无 TTL，号不回退），租约键带 TTL 并由持有者续租。
+	 * <p>与本专项的 B3（续跑权 fencing）和 L1（目标资源互斥）共用同一组原语：run 租约的 epoch 由
+	 * <b>与租约键同槽</b>的 per-run 计数器（{@code ai:lease:epoch:{run:<runId>}}）在抢租脚本内
+	 * {@code INCR+SET} 发放（与 fence 同面同寿；号与占用必然同序，评审 I-1）；资源锁仍用旧的全局
+	 * {@code ai:lease:epoch}，只作 token 编号、不参与 fencing。租约键带 TTL 并由持有者续租。
 	 *
 	 * <p>取值口径：TTL 30s = "持租进程卡顿/死亡后，别的实例多快能接管" 的上界；续租 10s = TTL/3，
 	 * 容忍两次连续续租失败（网络抖动）而不丢租约；重试 35s = TTL + 5s 余量，抢租失败的一方按它

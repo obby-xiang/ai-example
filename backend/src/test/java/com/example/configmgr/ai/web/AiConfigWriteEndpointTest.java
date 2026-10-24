@@ -246,6 +246,12 @@ class AiConfigWriteEndpointTest {
 			.andExpect(status().isOk())
 			.andExpect(jsonPath("$.data.ok").value(false))
 			.andExpect(jsonPath("$.data.code").value(AiConfigService.CODE_KEY_UNREADABLE))
+			.andExpect(jsonPath("$.data.message").value(
+					org.hamcrest.Matchers.containsString("设置 → AI")))
+			.andExpect(jsonPath("$.data.message").value(
+					org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("KEK"))))
+			.andExpect(jsonPath("$.data.message").value(
+					org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("AI_SECRET_KEK"))))
 			.andExpect(jsonPath("$.data.modelCount").value(0));
 		verify(this.probe, org.mockito.Mockito.never()).fetchModels(any(), any(), any(), anyBoolean());
 	}

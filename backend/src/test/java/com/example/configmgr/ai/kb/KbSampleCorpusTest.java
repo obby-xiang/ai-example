@@ -51,6 +51,14 @@ class KbSampleCorpusTest {
     }
 
     @Test
+    void aiPanelGuideDoesNotClaimSheetEditsNeverReachServer() throws Exception {
+        String text = Files.readString(KbTestSupport.samples().resolve("16-ai-panel-guide.md"),
+                StandardCharsets.UTF_8);
+        assertThat(text).doesNotContain("只改浏览器内存，不落服务端");
+        assertThat(text).contains("导入向导第 1 步").contains("写回服务端");
+    }
+
+    @Test
     void complexityElementsAreCovered() throws Exception {
         StringBuilder all = new StringBuilder();
         try (var stream = Files.list(KbTestSupport.samples())) {

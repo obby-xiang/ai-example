@@ -68,7 +68,7 @@ class AiAvailabilityDynamicTest {
 		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
 		assertThat(asMap(response).get("code")).isEqualTo("AI_UNAVAILABLE");
 		assertThat(asMap(response).get("message"))
-			.isEqualTo("AI 能力未启用：未配置 AI_API_KEY（或 DEEPSEEK_API_KEY）环境变量，AI 端点已惰性降级");
+			.isEqualTo("AI 能力未启用：请在「设置 → AI」配置供应商与 API Key");
 		assertThat(this.availability.isAvailable()).isFalse();
 	}
 

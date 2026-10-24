@@ -327,6 +327,33 @@ class ContextCompactorTest {
 		assertThat(outcome.clearedPairs()).isPositive();
 	}
 
+	/** R1-09 M-1：续跑期 L2 压缩的每次摘要尝试都要回调（成功/失败都算“这一轮还在前进”）。 */
+	@Test
+	void summaryProgressHookFiresForEverySummaryAttempt() {
+		seed("L1", 70000);
+		java.util.concurrent.atomic.AtomicInteger progress = new java.util.concurrent.atomic.AtomicInteger();
+
+		ContextCompactor.Outcome outcome = compactorWith(prompt -> "摘要正文").compact(
+				requestWith(longTurns(), 70000, 25000, Set.of()), progress::incrementAndGet);
+
+		assertThat(outcome.level()).isEqualTo(ContextTrigger.Level.L2);
+		assertThat(progress.get()).as("至少一次摘要完成就应刷新一次业务锚点").isPositive();
+	}
+
+	/** 摘要失败同样算一次“尝试结束”——否则失败也要等满 60s 才可能被外部判死。 */
+	@Test
+	void summaryProgressHookFiresEvenWhenTheSummaryFails() {
+		seed("L1", 70000);
+		java.util.concurrent.atomic.AtomicInteger progress = new java.util.concurrent.atomic.AtomicInteger();
+
+		ContextCompactor.Outcome outcome = compactorWith(prompt -> {
+			throw new IllegalStateException("摘要失败");
+		}).compact(requestWith(longTurns(), 70000, 25000, Set.of()), progress::incrementAndGet);
+
+		assertThat(outcome.changed()).isFalse();
+		assertThat(progress.get()).as("失败路径也必须回调（每次尝试结束都算活动）").isPositive();
+	}
+
 	/** P7：有未决 HITL 条目时（挂起期）比例到 L2 也只做 L1。 */
 	@Test
 	void suspendedSessionOnlyAllowsL1() {

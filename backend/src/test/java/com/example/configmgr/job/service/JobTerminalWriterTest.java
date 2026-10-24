@@ -1,6 +1,7 @@
 package com.example.configmgr.job.service;
 
 import com.example.configmgr.job.entity.Job;
+import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.service.TaskService;
 import com.example.configmgr.task.service.TaskSseService;
 import org.junit.jupiter.api.BeforeEach;
@@ -9,6 +10,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.SimpleTransactionStatus;
 
 import java.util.Map;
+import java.util.Optional;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -41,6 +43,7 @@ class JobTerminalWriterTest {
     @BeforeEach
     void passThroughTransaction() {
         when(this.transactionManager.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
+        when(this.taskService.tryLockForUpdate(anyLong())).thenReturn(Optional.of(new Task()));
         this.writer = new JobTerminalWriter(this.progressService, this.taskService,
                 this.taskSseService, this.transactionManager);
     }
@@ -109,6 +112,21 @@ class JobTerminalWriterTest {
     }
 
     /** 锚 3（历史形态保持）：无 successStep 的重载（Import/Precheck/Watchdog 路径）行为与 B1 前一致。 */
+    @Test
+    void deletedTaskSkipsTaskLinkageAfterTerminalWrite() {
+        Job job = new Job();
+        job.setId(6L);
+        job.setTaskId(60L);
+        when(this.progressService.finish(anyLong(), any(), anyInt(), anyInt(), anyInt(), anyInt()))
+                .thenReturn(true);
+        when(this.taskService.tryLockForUpdate(60L)).thenReturn(Optional.empty());
+
+        this.writer.complete(job, Job.JobStatus.COMPLETED, 0, 0, 10, 10, Map.of(), "EXPORT");
+
+        verify(this.taskService, never()).writeCompletionStep(anyLong(), anyString());
+        verify(this.taskService, never()).applyJobOutcome(anyLong(), any());
+    }
+
     @Test
     void legacyOverloadWithoutStepKeepsOldShape() {
         Job job = new Job();

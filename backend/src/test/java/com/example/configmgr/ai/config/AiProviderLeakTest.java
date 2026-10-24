@@ -65,7 +65,7 @@ class AiProviderLeakTest {
 
 	@Test
 	void unreadableKeyWarnCarriesOnlyTheStableCode() {
-		// 用 KEK_B 加密，服务侧持有 KEK_A ⇒ 解不开 ⇒ 走 KEY_UNREADABLE 的 WARN（节流一次）
+		// 用 KEK_B 加密，服务侧持有 KEK_A ⇒ 解不开 ⇒ 走 AI_KEY_UNREADABLE 的 WARN（节流一次）
 		String envelope = new AiKeyCipher(AiConfigTestFixture.KEK_B).encrypt(SECRET, "deepseek",
 				AiProvider.KEY_REF_DB);
 		this.fixture.addDbProvider("deepseek", "http://x", envelope);
@@ -74,7 +74,7 @@ class AiProviderLeakTest {
 		AiConfigService.Availability availability = service.availability();
 
 		assertThat(availability.available()).isFalse();
-		assertThat(availability.code()).isEqualTo(AiKeyCipher.CODE_KEY_UNREADABLE);
+		assertThat(availability.code()).isEqualTo(AiConfigService.CODE_KEY_UNREADABLE);
 		List<String> messages = this.appender.list.stream().map(ILoggingEvent::getFormattedMessage).toList();
 		assertThat(messages).isNotEmpty();
 		assertThat(messages).allSatisfy(message -> assertThat(message).doesNotContain(envelope)
@@ -87,10 +87,13 @@ class AiProviderLeakTest {
 	void diagnosticViewAndAvailabilityReasonNeverCarryKeyMaterial() {
 		String envelope = this.cipher.encrypt(SECRET, "deepseek", AiProvider.KEY_REF_DB);
 		this.fixture.addDbProvider("deepseek", "http://x", envelope);
-		AiConfigService service = this.fixture.service();
+		AiConfigService service = this.fixture.service(AiConfigTestFixture.KEK_B);
 
 		String rendered = String.valueOf(service.describeProviders()) + service.availability().reason();
 		assertThat(rendered).doesNotContain(SECRET).doesNotContain(envelope).doesNotContain("v1.k1.");
+		// I-1：用户面 reason 不再带变量名/机制词；诊断变量只允许出现在 /health.keyDiagnostics
+		assertThat(service.availability().reason())
+			.doesNotContain("AI_API_KEY", "DEEPSEEK_API_KEY", "AI_SECRET_KEK", "KEK", "provider");
 	}
 
 }

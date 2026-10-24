@@ -15,9 +15,11 @@ import com.example.configmgr.task.repo.TaskFileRepository;
 import com.example.configmgr.task.repo.TaskItemRepository;
 import com.example.configmgr.task.repo.TaskRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -47,8 +49,10 @@ public class FileController {
     private final ExcelTemplateBuilder templateBuilder;
 
     @PostMapping("/upload")
+    @Transactional
     public ApiResponse<Map<String, Object>> upload(@PathVariable Long taskId,
                                                     @RequestParam("file") MultipartFile file) throws Exception {
+        lockTask(taskId);
         String originalName = file.getOriginalFilename() != null ? file.getOriginalFilename() : "upload.xlsx";
 
         if (originalName.toLowerCase().endsWith(".zip")) {
@@ -56,19 +60,26 @@ public class FileController {
             List<ZipFileEntry> entries = readZipEntries(file.getBytes());
             List<Map<String, String>> matched = new ArrayList<>();
             List<String> unmatched = new ArrayList<>();
-            for (ZipFileEntry entry : entries) {
-                String name = entry.name();
-                if (!name.toLowerCase().endsWith(".xlsx")) {
-                    unmatched.add(name + "（非 Excel 文件）");
-                    continue;
+            List<String> storedPaths = new ArrayList<>();
+            try {
+                for (ZipFileEntry entry : entries) {
+                    String name = entry.name();
+                    if (!name.toLowerCase().endsWith(".xlsx")) {
+                        unmatched.add(name + "（非 Excel 文件）");
+                        continue;
+                    }
+                    String defCode = matchDefCode(taskId, name);
+                    if (defCode == null) {
+                        unmatched.add(name + "（无法匹配配置编码）");
+                        continue;
+                    }
+                    storedPaths.add(storeUploadFile(taskId, defCode, name, entry.content()));
+                    matched.add(Map.of("defCode", defCode, "fileName", name));
                 }
-                String defCode = matchDefCode(taskId, name);
-                if (defCode == null) {
-                    unmatched.add(name + "（无法匹配配置编码）");
-                    continue;
-                }
-                storeUploadFile(taskId, defCode, name, entry.content());
-                matched.add(Map.of("defCode", defCode, "fileName", name));
+            } catch (RuntimeException e) {
+                // 任一条目落库失败（典型：任务被并发删除导致 FK 冲突）时，清理本次已写盘的文件。
+                storedPaths.forEach(fileStorage::delete);
+                throw e;
             }
             if (matched.isEmpty()) {
                 throw new IllegalArgumentException(
@@ -90,7 +101,17 @@ public class FileController {
                     "无法从文件名匹配配置编码，请使用“编码_xxx.xlsx”命名（如 CURRENCY.xlsx），或先下载模板编辑后上传");
         }
         String storagePath = fileStorage.store(file.getInputStream(), originalName);
-        saveUploadFile(taskId, defCode, originalName, storagePath);
+        try {
+            saveUploadFile(taskId, defCode, originalName, storagePath);
+        } catch (DataIntegrityViolationException e) {
+            // 预检后任务被并发删除：FK 拒绝落行，清理刚写入的文件并返回 404 语义。
+            fileStorage.delete(storagePath);
+            throw ResourceNotFoundException.of("任务", taskId);
+        } catch (RuntimeException e) {
+            // 其它落库失败同样清理本次新文件（避免“库没写、盘上多一份”）。
+            fileStorage.delete(storagePath);
+            throw e;
+        }
 
         return ApiResponse.ok(Map.of(
                 "defCode", defCode,
@@ -99,9 +120,18 @@ public class FileController {
                 "count", 1));
     }
 
-    private void storeUploadFile(Long taskId, String defCode, String fileName, byte[] content) throws IOException {
+    private String storeUploadFile(Long taskId, String defCode, String fileName, byte[] content) throws IOException {
         String storagePath = fileStorage.store(new java.io.ByteArrayInputStream(content), fileName);
-        saveUploadFile(taskId, defCode, fileName, storagePath);
+        try {
+            saveUploadFile(taskId, defCode, fileName, storagePath);
+        } catch (DataIntegrityViolationException e) {
+            fileStorage.delete(storagePath);
+            throw ResourceNotFoundException.of("任务", taskId);
+        } catch (RuntimeException e) {
+            fileStorage.delete(storagePath);
+            throw e;
+        }
+        return storagePath;
     }
 
     private void saveUploadFile(Long taskId, String defCode, String fileName, String storagePath) {
@@ -165,16 +195,19 @@ public class FileController {
     }
 
     @PutMapping("/{defCode}")
+    @Transactional
     public ApiResponse<?> save(@PathVariable Long taskId,
                                 @PathVariable String defCode,
                                 @RequestBody byte[] data) throws Exception {
+        lockTask(taskId);
         Optional<TaskFile> fileOpt = taskFileRepository
                 .findByTaskIdAndDefCodeAndFileType(taskId, defCode, "EXPORT");
         if (fileOpt.isEmpty()) {
             fileOpt = taskFileRepository.findByTaskIdAndDefCodeAndFileType(taskId, defCode, "UPLOAD");
         }
         TaskFile tf;
-        if (fileOpt.isEmpty()) {
+        boolean createdNew = fileOpt.isEmpty();
+        if (createdNew) {
             tf = new TaskFile();
             tf.setTaskId(taskId);
             tf.setDefCode(defCode);
@@ -185,7 +218,16 @@ public class FileController {
             tf = fileOpt.get();
         }
         fileStorage.write(tf.getStoragePath(), data);
-        taskFileRepository.save(tf);
+        try {
+            taskFileRepository.save(tf);
+        } catch (DataIntegrityViolationException e) {
+            // 预检后任务被并发删除：FK 拒绝落行。新建文件删掉；复用旧行时只有确认任务已不存在
+            // 才删盘（否则可能是其它完整性异常，删盘会破坏既有导出件）。
+            if (createdNew || !taskRepository.existsById(taskId)) {
+                fileStorage.delete(tf.getStoragePath());
+            }
+            throw ResourceNotFoundException.of("任务", taskId);
+        }
         return ApiResponse.ok();
     }
 
@@ -275,6 +317,18 @@ public class FileController {
                 .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=templates-" + taskId + ".zip")
                 .contentType(MediaType.parseMediaType("application/zip"))
                 .body(bos.toByteArray());
+    }
+
+    /**
+     * R1-13/I-4：写盘前锁任务行（而不是只 exists 一次）。
+     *
+     * <p>只 exists 仍有 C1 同类窗口：INSERT 已发出未提交 → 删除提交看不到 → INSERT 后提交成孤儿；
+     * H2 FK 不挡这个窗口。与 TaskService.delete 共用 task 行锁后，先写则删除等待并级联，
+     * 先删则这里拿不到任务行直接 404。FK 冲突的兜底仍由各写入点 catch 后映射 404。
+     */
+    private void lockTask(Long taskId) {
+        taskRepository.findByIdForUpdate(taskId)
+                .orElseThrow(() -> ResourceNotFoundException.of("任务", taskId));
     }
 
     private String matchDefCode(Long taskId, String filename) {
