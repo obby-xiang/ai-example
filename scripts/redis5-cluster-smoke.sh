@@ -549,10 +549,29 @@ start_cluster() {
 		fatal "集群 90s 内未就绪" "$info"
 	fi
 
+	# 5.0.14 建集群后，replica 的 flags 可能短暂仍为 master（无槽）；等 3/3 角色落定再断言，
+	# 否则会把“复制链接尚未建立”误判成拓扑不对。
+	local nodes="" topology_ready=0 m s
+	for i in $(seq 1 60); do
+		nodes="$(rcluster_nodes "${NODES[0]}")"
+		m=$(printf '%s\n' "$nodes" | awk '$3 ~ /master/ && $3 !~ /fail/ && NF >= 9 {c++} END {print c+0}')
+		s=$(printf '%s\n' "$nodes" | awk '$3 ~ /slave|replica/ {c++} END {print c+0}')
+		if [ "$m" = "3" ] && [ "$s" = "3" ]; then
+			topology_ready=1
+			break
+		fi
+		sleep 1
+	done
+	if [ "$topology_ready" = "1" ]; then
+		pass "3 主 3 从角色落定（建集群后等 replica flags 切换）" "master=$m slave=$s"
+	else
+		fail "60s 内 replica 角色未落定（仍非 3 主 3 从）" "master=$m slave=$s"
+	fi
+
 	rcli_capture "${NODES[0]}" CLUSTER NODES
 	RCLI_OUT=$(printf '%s' "$RCLI_OUT" | tr -d '\r')
 	printf '%s\n' "$RCLI_OUT" >"$ARTIFACT_DIR/cluster-nodes-before.txt"
-	local nodes=$RCLI_OUT
+	nodes=$RCLI_OUT
 	printf '%s\n' "$info" >"$ARTIFACT_DIR/cluster-info-before.txt"
 
 	local masters slaves mid replica_n master_count slave_count
@@ -744,13 +763,14 @@ check_pubsub() {
 	local sub="${PREFIX}-sub"
 	local pub_ret logs="" ok ready=0
 
+	# redis-cli 的 stdout 在管道里是块缓冲；不套 stdbuf 时 docker logs 10s 内看不到 subscribe。
 	docker run -d \
 		--name "$sub" \
 		--network "$NET" \
 		--label "redis5smoke.run=$RUN_ID" \
 		--label "redis5smoke=1" \
-		--entrypoint redis-cli "$REDIS_IMAGE" \
-		--raw -h "${NODES[0]}" -p 6379 SUBSCRIBE "$channel" >/dev/null \
+		--entrypoint stdbuf "$REDIS_IMAGE" \
+		-oL -eL redis-cli --raw -h "${NODES[0]}" -p 6379 SUBSCRIBE "$channel" >/dev/null \
 		|| { fail "订阅容器启动失败" "$sub"; return; }
 
 	for i in $(seq 1 20); do
