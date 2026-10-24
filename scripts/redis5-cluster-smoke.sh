@@ -452,7 +452,8 @@ start_cluster() {
 		--label "redis5smoke=1" \
 		"$NET" >/dev/null || fatal "创建 Docker 网络失败" "$NET"
 
-	local i name
+	local i name ip
+	local create_addrs=()
 	for i in 1 2 3 4 5 6; do
 		name="${PREFIX}-n${i}"
 		docker run -d \
@@ -503,16 +504,22 @@ start_cluster() {
 		fail "存在宿主端口映射，端口冲突风险"
 	fi
 
+	# 5.0.14 的 CLUSTER MEET 只认 IP，不接受容器名（会报 Invalid node address specified）；
+	# 这里先把 6 个节点解析成容器 IP，再用 IP 建集群。容器名只用于 docker exec。
+	local create_out create_rc
+	for name in "${NODES[@]}"; do
+		ip="$(container_ip "$name")"
+		if [ -z "$ip" ]; then
+			fatal "无法获取节点容器 IP" "$name"
+		fi
+		create_addrs+=("$ip:6379")
+	done
+	pass "集群地址已解析为容器 IP（5.0 CLUSTER MEET 不接受主机名）" "${#create_addrs[@]} 个"
+
 	# 5.0.14 的 clusterManagerWaitForClusterJoin() 没有总超时；这里给 240s 硬上限，
 	# 避免总线不通时白等 workflow 的 25 分钟。with_timeout 的参数是秒数（10s 那套只给死节点探针）。
-	local create_out create_rc
 	create_out="$(with_timeout 240 docker exec "${NODES[0]}" redis-cli --cluster create \
-		"${NODES[0]}:6379" \
-		"${NODES[1]}:6379" \
-		"${NODES[2]}:6379" \
-		"${NODES[3]}:6379" \
-		"${NODES[4]}:6379" \
-		"${NODES[5]}:6379" \
+		"${create_addrs[@]}" \
 		--cluster-replicas 1 --cluster-yes 2>&1)"
 	create_rc=$?
 	printf '%s\n' "$create_out" >"$ARTIFACT_DIR/cluster-create.txt"
