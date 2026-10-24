@@ -4255,24 +4255,26 @@ function Ai-SecurityCounters {
     return $h.json.security
 }
 
-Add-AiCase 'X-01' 'P0' '输入含 sk- 形态：mask 后继续（不 block），并计入安全计数' {
+Add-AiCase 'X-01' 'P0' '输入含 sk- 形态：原文透传（不 block、不脱敏），DLP 计数不增长' {
     $before = Ai-SecurityCounters
     $sid = Ai-NewSid 'x01'
     $probe = 'sk-' + ('A' * 40)
     $turn = Invoke-AiTurn $sid ("【AIE2E-X-01】turn-text 我的密钥是 $probe 请确认收到。") @{ page = 'tasks' } $script:aiContinue 2
     Ai-Done $turn.frames | Out-Null
-    if ((Ai-F $turn.frames @('error')).Count -gt 0) { throw '含密钥形态的输入被 block（应 mask 后继续）' }
+    if ((Ai-F $turn.frames @('error')).Count -gt 0) { throw '含密钥形态的输入被 block（L-99：不 block，原文透传）' }
+    # L-99 口径（2026-10-24 裁决：删 DLP）——输入侧不再脱敏，归一层之后的文本逐字进模型与记忆。
+    # 故这里锁"历史里是原文"（旧口径锁的是"历史里已 mask"），并额外锁"掩码痕迹确实不存在"。
     $hist = GetJson "/api/ai/history/$sid"
     $blob = ($hist.messages | ConvertTo-Json -Depth 8 -Compress)
-    if ($blob -like ('*' + $probe + '*')) { throw '历史里留了未 mask 的密钥原文' }
+    if ($blob -notlike ('*' + $probe + '*')) { throw '历史里没有密钥原文（L-99 后应原文透传；被掩码即回归）' }
+    if ($blob -match '\[REDACTED') { throw '历史里出现 [REDACTED 掩码（DLP 应已删除）' }
     $after = Ai-SecurityCounters
-    if ($null -eq $after) { throw 'health 未下发 security 计数（脱敏不可观测）' }
+    if ($null -eq $after) { throw 'health 未下发 security 计数（脱敏面不可观测）' }
     if ($null -ne $before) {
-        # security 段含非计数键（scope="process"），求和必须先判数值型 —— 否则 [int]"process" 直接抛错。
-        $sumBefore = 0; $sumAfter = 0
-        foreach ($p in @($before.PSObject.Properties)) { if ($p.Value -is [int] -or $p.Value -is [long]) { $sumBefore += [int]$p.Value } }
-        foreach ($p in @($after.PSObject.Properties)) { if ($p.Value -is [int] -or $p.Value -is [long]) { $sumAfter += [int]$p.Value } }
-        if ($sumAfter -le $sumBefore) { throw "安全计数未增长（$sumBefore → $sumAfter）——mask 可能被跳过" }
+        # L-99：DLP 三个计数不再有写入点（键位保留是 /health 的兼容面，值应零增长）。
+        foreach ($k in @('inputRedacted', 'outputRedacted', 'outputBlocked')) {
+            if ([long]$after.$k -ne [long]$before.$k) { throw "$k 仍在增长（$($before.$k) → $($after.$k)）——DLP 未删净" }
+        }
     }
     return $null
 }
