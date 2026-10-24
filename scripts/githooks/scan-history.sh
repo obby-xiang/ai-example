@@ -61,10 +61,31 @@ TMP_MAP=$(mktemp) || exit 2
 TMP_TYPES=$(mktemp) || exit 2
 TMP_LIST=$(mktemp) || exit 2
 TMP_HITS=$(mktemp) || exit 2
-trap 'rm -f "$TMP_MAP" "$TMP_TYPES" "$TMP_LIST" "$TMP_HITS" "$TMP_HITS.sorted"' EXIT HUP INT TERM
+TMP_SCAN=$(mktemp) || exit 2
+TMP_HITS_DIR=$(mktemp -d) || exit 2
+TMP_WORKER=$(mktemp) || exit 2
+trap 'rm -rf "$TMP_MAP" "$TMP_TYPES" "$TMP_LIST" "$TMP_HITS" "$TMP_HITS.sorted" "$TMP_SCAN" "$TMP_HITS_DIR" "$TMP_WORKER"' EXIT HUP INT TERM
 
 scan_init
 scan_user_note
+
+# 并行的 worker 通过环境变量拿规则，避免每个 blob 重新 source scan-lib。
+export SCAN_AWK_BODY
+export TAB
+export SCAN_HITS_DIR="$TMP_HITS_DIR"
+
+# 单 blob worker：与旧串行循环的 git cat-file | scan_engine_blob | sort -u 完全同构。
+cat >"$TMP_WORKER" <<'WORKER'
+#!/bin/sh
+set -u
+sha=$1
+path=$2
+git cat-file blob "$sha" 2>/dev/null \
+  | SCAN_MODE=blob SCAN_CUR_PATH="$path" LC_ALL=C awk "$SCAN_AWK_BODY" \
+  | LC_ALL=C sort -u \
+  | LC_ALL=C awk -F"$TAB" -v b="$sha" '{ printf "%s\t%s\t%s\t%s\t%s\n", $1, $2, $3, $4, substr(b, 1, 8) }' \
+  >"$SCAN_HITS_DIR/$sha"
+WORKER
 
 # 1) 枚举全历史对象，建立 blob -> 首个可见路径 的映射
 git rev-list --objects --all \
@@ -92,19 +113,12 @@ if [ "$total" = "0" ]; then
   echo "✖ 未取到任何 blob（仓库为空或 rev-list 异常）" >&2
   exit 2
 fi
-echo "扫描范围: $total 个唯一 blob（git rev-list --objects --all，串行逐个读取）" >&2
-[ "$max_size_kb" != "0" ] && echo "  体积上限: ${max_size_kb}KB（超过则跳过）" >&2
-
-# 3) 逐个 blob 扫描
-#    二进制/图片类 blob 先跳过：它们的字节流会让路径规则产生无意义命中
-n=0
+# 3) 先按旧规则过滤二进制/图片 blob（只有未知扩展名才读 2KB 探测 NUL），
+#    再把文本 blob 交给并行 worker。扫描集合与旧串行循环完全一致。
 skip_binary=0
+: > "$TMP_SCAN"
 while IFS="$TAB" read -r sha path; do
   [ -z "$sha" ] && continue
-  n=$((n + 1))
-  if [ $((n % 200)) -eq 0 ]; then
-    printf '  ... 已扫描 %d/%d\n' "$n" "$total" >&2
-  fi
   case "$path" in
     *.png|*.jpg|*.jpeg|*.gif|*.ico|*.bmp|*.webp|*.pdf|*.zip|*.gz|*.jar|*.class|\
     *.woff|*.woff2|*.ttf|*.eot|*.mp4|*.mov|*.mp3|*.sqlite|*.db|*.exe|*.dll|*.so|\
@@ -122,14 +136,45 @@ while IFS="$TAB" read -r sha path; do
         skip_binary=$((skip_binary + 1)); continue
       fi ;;
   esac
-  hits=$(git cat-file blob "$sha" 2>/dev/null \
-           | scan_engine_blob "$path" \
-           | LC_ALL=C sort -u)
-  [ -z "$hits" ] && continue
-  printf '%s\n' "$hits" \
-    | LC_ALL=C awk -F"$TAB" -v b="$sha" '{ printf "%s\t%s\t%s\t%s\t%s\n", $1, $2, $3, $4, substr(b, 1, 8) }' \
-    >> "$TMP_HITS"
+  printf '%s\t%s\n' "$sha" "$path" >> "$TMP_SCAN"
 done < "$TMP_LIST"
+
+text_total=$(LC_ALL=C wc -l < "$TMP_SCAN" | tr -d ' ')
+jobs=${SCAN_JOBS:-}
+if [ -z "$jobs" ]; then
+  if command -v nproc >/dev/null 2>&1; then jobs=$(nproc 2>/dev/null || echo 4); else jobs=4; fi
+fi
+case "$jobs" in
+  ''|*[!0-9]*) jobs=4 ;;
+esac
+[ "$jobs" -ge 1 ] || jobs=1
+[ "$jobs" -gt 8 ] && jobs=8
+
+echo "扫描范围: $total 个唯一 blob（文本 $text_total 个；并行 jobs=$jobs）" >&2
+[ "$max_size_kb" != "0" ] && echo "  体积上限: ${max_size_kb}KB（超过则跳过）" >&2
+
+# 3b) 每个 worker 仍是 git cat-file | scan_engine_blob | sort -u，只是并行执行。
+if [ "$text_total" -gt 0 ]; then
+  if command -v xargs >/dev/null 2>&1 && printf '' | xargs -P 1 true >/dev/null 2>&1; then
+    # 以 NUL 传 sha/path 两个参数；path 内的 TAB 保留（旧 read 语义），仅换行路径仍受既有行式限制。
+    LC_ALL=C awk -v tab="$TAB" '{
+      p = index($0, tab)
+      if (p == 0) next
+      printf "%s%c%s%c", substr($0, 1, p - 1), 0, substr($0, p + 1), 0
+    }' "$TMP_SCAN" \
+      | xargs -0 -n 2 -P "$jobs" sh "$TMP_WORKER" \
+      || { echo "✖ 并行扫描失败（xargs 退出码非 0）" >&2; exit 2; }
+  else
+    echo "  注: xargs -P 不可用，退回串行 worker" >&2
+    while IFS="$TAB" read -r sha path; do
+      sh "$TMP_WORKER" "$sha" "$path" || { echo "✖ 串行扫描失败" >&2; exit 2; }
+    done < "$TMP_SCAN"
+  fi
+fi
+if ! find "$TMP_HITS_DIR" -type f -exec cat {} + > "$TMP_HITS"; then
+  echo "✖ 汇总扫描结果失败（无法读取 worker 输出）" >&2
+  exit 2
+fi
 
 echo "" >&2
 hit_count=$(LC_ALL=C wc -l < "$TMP_HITS" | tr -d ' ')
