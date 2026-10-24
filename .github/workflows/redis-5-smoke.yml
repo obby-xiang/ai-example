@@ -1,0 +1,66 @@
+name: Redis 5.0.14 集群冒烟网（手工触发）
+
+# 目的：在**真实** Redis 5.0.14（3 主 3 从）上验证生产拓扑的命令语义与故障行为。
+# 设计依据：docs/research/排查-A4-Cluster与5.0代码级兼容穷尽-2026-10-24.md §十「批次 0」。
+#
+# 触发口径（按仓现有惯例取最小）：
+#   - ci.yml 是提交级门禁（push/PR）；e2e-real.yml 对"环境/拓扑专用验证"只开 workflow_dispatch。
+#     本网验证的是目标生产拓扑，不是提交级门禁，且要起 6 个容器 + 注入主节点故障，
+#     挂 push 会拖慢每笔提交，故**只开 workflow_dispatch**，不挂 push / pull_request / schedule。
+#   - 需要验收产品修复时：`gh workflow run redis-5-smoke.yml`，或在 Actions 页面 Run workflow。
+#     若将来要自动化回归，建议挂 schedule（夜间）而不是 push，且不作为 required check。
+#
+# 不跑任何模型、不注入任何 secret；只用公共镜像 redis:5.0.14（版本由脚本硬断言）。
+# 边界：本网只验环境级 Redis 语义与分阶段故障证据；产品 RedisAvailability.available / 503 口径未验，
+# 需产品链路或单测后续补（summary 里会显式登记）。节点 docker logs 只归档备查，不设门禁。
+# 证据：backend/target/redis5-smoke（summary.md 同时追加到 job summary）。
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 真集群冒烟要独占 Docker 资源；同一时刻只跑一套，排队而不取消（取消会留下半套证据）。
+concurrency:
+  group: redis-5-smoke
+  cancel-in-progress: false
+
+env:
+  REDIS_IMAGE: redis:5.0.14
+  SMOKE_ARTIFACT_DIR: backend/target/redis5-smoke
+
+jobs:
+  cluster-smoke:
+    name: 5.0.14 · 3 主 3 从 · 语义与故障冒烟
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+
+      # 先做纯语法预检：脚本自身写坏时，不要等到拉起 6 个容器才红。
+      - name: 脚本语法预检（bash -n）
+        run: bash -n scripts/redis5-cluster-smoke.sh
+
+      - name: 运行冒烟网（真实 5.0.14 集群）
+        run: bash scripts/redis5-cluster-smoke.sh
+
+      # 失败也要给出可读结论；summary 由脚本生成，工作流只负责搬运。
+      - name: 追加作业摘要
+        if: always()
+        run: |
+          if [ -f "$SMOKE_ARTIFACT_DIR/summary.md" ]; then
+            cat "$SMOKE_ARTIFACT_DIR/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo '::warning::未生成 summary.md（脚本可能未启动或证据目录被清理）' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # 版本核对（2026-10-24）：本仓 actions 取 v5（仓库现行 major 口径）；
+      # upload-artifact 也取 v5，与 ci.yml / e2e-real.yml 一致。
+      - name: 归档证据（失败也归档，保留 14 天）
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: redis5-cluster-smoke-${{ github.run_id }}
+          path: backend/target/redis5-smoke
+          retention-days: 14
+          if-no-files-found: warn

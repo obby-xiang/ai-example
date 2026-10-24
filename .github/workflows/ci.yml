@@ -119,6 +119,31 @@ jobs:
       - name: 编译并运行单测（mvn test，全量用例）
         run: mvn -B test
 
+  # ============================================================
+  # Redis Cluster / 5.0 安全守卫（Cluster 迁移专项 §十 批次 4）
+  #   - 无条件执行、零依赖、秒级：只 grep backend/src/main 的 Redis 调用形态与配置面。
+  #   - 禁止项：database: / SELECT / KEYS / FLUSHDB / FLUSHALL / SCAN。
+  #   - 脚本先跑 --self-check（命中样例 + SQL / runner.scan(true) / 小写 select 反例），
+  #     规则被改窄或改宽都在这里先红，避免"守卫绿着但什么都没查"。
+  # ============================================================
+  redis-guard:
+    name: Redis Cluster 安全守卫（database/SELECT/KEYS/FLUSHDB/SCAN）
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: 安装 Node 22
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: 规则自证（命中样例 / 反例）
+        run: node scripts/ci/forbid-redis-cluster-unsafe.mjs --self-check
+
+      - name: 扫描 backend/src/main
+        run: node scripts/ci/forbid-redis-cluster-unsafe.mjs
+
   frontend:
     name: 前端类型检查与构建
     # A 期（§5.2）：变更集不含前端面则跳过（原因同 backend：由 summary job 写出）。
@@ -468,7 +493,7 @@ jobs:
   summary:
     name: 门禁汇总（skipped 及原因 · 防假绿）
     if: ${{ !cancelled() }}
-    needs: [changes, backend, frontend, e2e, docs, scan-history]
+    needs: [changes, backend, frontend, e2e, docs, scan-history, redis-guard]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -480,6 +505,7 @@ jobs:
           E2E_RESULT: ${{ needs.e2e.result }}
           DOCS_RESULT: ${{ needs.docs.result }}
           SCAN_RESULT: ${{ needs.scan-history.result }}
+          REDIS_GUARD_RESULT: ${{ needs.redis-guard.result }}
           BACKEND_NEEDED: ${{ needs.changes.outputs.backend }}
           FRONTEND_NEEDED: ${{ needs.changes.outputs.frontend }}
           E2E_NEEDED: ${{ needs.changes.outputs.e2e }}
@@ -527,6 +553,7 @@ jobs:
           judge e2e "$E2E_RESULT" "${E2E_NEEDED:-}" "变更集命中 e2e 面，E2E 全流程"
           judge docs "$DOCS_RESULT" "always" "无条件执行：文档一致性门禁（阻断）"
           judge scan-history "$SCAN_RESULT" "always" "无条件执行：全历史脱敏扫描（报告制，历史命中不使 job 红）"
+          judge redis-guard "$REDIS_GUARD_RESULT" "always" "无条件执行：Redis Cluster 安全守卫（规则自证 + backend/src/main 扫描）"
 
           # §5.3 第三行：变更集输出丢失时必须红（空串不能当成"无改动"）。
           if [ "${CHANGES_RESULT:-}" != "success" ]; then

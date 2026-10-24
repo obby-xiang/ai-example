@@ -535,6 +535,31 @@ function Wait-RedisKeyGone($key, [int]$timeoutSec = 10) {
     return ($null -eq (Invoke-RedisCommand @('GET', $key)))
 }
 
+# hash tag 内容（与 Redis 规范一致：第一个 `{` 与其后的第一个 `}` 之间非空才算 tag）。
+function Get-RedisHashTag([string]$key) {
+    $open = $key.IndexOf('{')
+    if ($open -lt 0) { return $key }
+    $close = $key.IndexOf('}', $open + 1)
+    if ($close -le ($open + 1)) { return $key }
+    return $key.Substring($open + 1, $close - $open - 1)
+}
+
+# 键的槽号（CRC16-XMODEM mod 16384，cluster 口径；自检：foo=12182 / bar=5061 / hello=866）。
+# 为什么 harness 要自己算：单节点 Redis 不判槽，跨槽的 DEL/EVAL 在这里永远绿 ——
+# 只有把槽算出来，才能证明"一轮 13 键同槽"不是靠单机侥幸。
+function Get-RedisSlot([string]$key) {
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes((Get-RedisHashTag $key))
+    $crc = 0
+    foreach ($b in $bytes) {
+        $crc = $crc -bxor (([int]$b -band 0xFF) -shl 8)
+        for ($i = 0; $i -lt 8; $i++) {
+            if (($crc -band 0x8000) -ne 0) { $crc = (($crc -shl 1) -bxor 0x1021) } else { $crc = $crc -shl 1 }
+            $crc = $crc -band 0xFFFF
+        }
+    }
+    return ($crc -band 0x3FFF)
+}
+
 # 挂起骨架（wake / suspend-decision / instance-kill / lease-scripts / 批③ 共用）：
 # 建真实 EXPORT 任务（或复用 -TaskId）→ select-defs → 带 context 发 start_export → 读到 confirm_request 为止。
 # -Base 缺省 A；SharedDb 资源锁用例的第二条必须在 B 侧发起（run 的挂起者 = 该实例）。
@@ -1087,11 +1112,14 @@ function Case-Idempotency {
     $starts = Count-Frames $full2 'tool_start' $run.toolCallId
     if ($starts -ne 1) { throw "二次决策后 tool_start 仍应恰 1，实得 $starts" }
 
-    # 批③ 幂等索引只读取证：ai:idem:<runId> 的 field = <runId>:<toolCallId>（RunStore#idemField）。
+    # 批③ 幂等索引只读取证：ai:idem:{run:<runId>} 的 field = <runId>:<toolCallId>（RunStore#idemField）。
+    # B23L1 批① Cluster 硬阻断后 run 级键族带 {run:<runId>} hash tag（幂等索引与台账必须同槽，
+    # 否则 IDEM_PUSH 在原生 Cluster 上 CROSSSLOT —— 炸点正好在"副作用已执行之后"）。
     $idemField = $run.runId + ':' + $run.toolCallId
-    $idemVal = Invoke-RedisCommand @('HGET', ('ai:idem:' + $run.runId), $idemField)
+    $idemKey = 'ai:idem:{run:' + $run.runId + '}'
+    $idemVal = Invoke-RedisCommand @('HGET', $idemKey, $idemField)
     if ([string]::IsNullOrWhiteSpace([string]$idemVal)) {
-        throw "幂等索引缺失：HGET ai:idem:$($run.runId) $idemField 为空"
+        throw "幂等索引缺失：HGET $idemKey $idemField 为空"
     }
     Ok $name
 }
@@ -1233,6 +1261,74 @@ function Case-Lease-Scripts {
     if ([string]::IsNullOrWhiteSpace([string]$leaseVal)) { throw "ACQUIRE 未生效：Redis 中 $leaseKey 不存在" }
     Say ("  租约已存在：" + $leaseKey + " = " + $leaseVal)
 
+    # 批① Cluster 硬阻断取证（R1-01 + 评审 I-1）：epoch 取号在<b>与租约键同槽的 per-run 计数器</b>上
+    # （`ai:lease:epoch:{run:<runId>}`），`INCR + SET` 在<b>同一条 Lua</b> 里 —— 号与占用必然同序。
+    # 判据三条：① 租约值仍是 `<epoch>|<owner>` 且 > 0；② 计数器键存在且 == 该租约 epoch
+    # （脚本内的 INCR 是这一任的唯一号源）；③ 旧全局 `ai:lease:epoch` <b>不再</b>参与 run 租约
+    # （资源锁仍会用它，所以它可能存在，但不能等于/小于本租约 epoch 的"号源校验"）。
+    $leaseEpoch = [int64](([string]$leaseVal).Split('|')[0])
+    if ($leaseEpoch -le 0) { throw "租约值形态异常（期望 <epoch>|<owner>，实得 '$leaseVal'）：epoch 未由计数器发放" }
+    $runTag = '{run:' + $runId + '}'
+    $runEpochKey = 'ai:lease:epoch:' + $runTag
+    $epochRaw = Invoke-RedisCommand @('GET', $runEpochKey)
+    if ([string]::IsNullOrWhiteSpace([string]$epochRaw)) {
+        throw ('取号未落 per-run 计数器 ' + $runEpochKey + '（取号没有回到脚本内？）')
+    }
+    if ([int64]$epochRaw -ne $leaseEpoch) {
+        throw ('per-run 计数器与租约 epoch 不一致：' + $runEpochKey + '=' + $epochRaw + '，租约 epoch=' + $leaseEpoch +
+            '（号源不是同一条原子步 ⇒ 存在迟到者用更小号占租的窗口）')
+    }
+    Say ("  ACQUIRE 证据：epoch=" + $leaseEpoch + "，per-run 计数器 " + $runEpochKey + "=" + $epochRaw + "（脚本内 INCR+SET 同槽原子）")
+
+    # ── 批① 收口：一轮 13 键同槽 + 真实写读（R1-05 / R1-02 / R1-03 / 评审 I-1） ──────────────
+    # 判据三条：① slot 算法自检（Redis 官方示例 foo=12182）；② 13 个键全部带 {run:<runId>} tag
+    # 且落同一槽（deleteRun 的那条 13 键 DEL 才可能原子生效）；③ 帧/序号/req 位真的写在 tagged 键上
+    # —— 写方（RedisFrameStore / RunStore）与删方键形不一致时，第 ③ 条必红。
+    # 说明：deleteRun 目前**没有生产调用点**（池饱和回滚用），所以"13 键一条 DEL 原子生效"的取证
+    # 落在单测 ClusterSlotTest；harness 这边能证的是"13 键同槽 + 写读同一批键"。
+    if ((Get-RedisSlot 'foo') -ne 12182 -or (Get-RedisSlot 'bar') -ne 5061) {
+        throw ("slot 自检失败：foo/bar 期望 12182/5061，实得 " + (Get-RedisSlot 'foo') + "/" + (Get-RedisSlot 'bar') + "（CRC16 或 hash tag 实现不对，后续同槽判定不可信）")
+    }
+    $tag = '{run:' + $runId + '}'
+    $keyRun = 'ai:run:' + $tag
+    $keyPending = 'ai:pending:' + $tag
+    $keyClaim = 'ai:claim:' + $tag
+    $keyLedger = 'ai:ledger:' + $tag
+    $keyIdem = 'ai:idem:' + $tag
+    $keyEvents = 'ai:events:' + $tag
+    $keySeq = 'ai:seq:' + $tag
+    $keyXevents = 'ai:xevents:' + $tag
+    $keyLease = 'ai:lease:run:' + $tag
+    $keyFence = 'ai:fence:run:' + $tag
+    $keyReq = 'ai:req:' + $tag
+    $keyDecided = 'ai:decided:' + $tag
+    $keyEpoch = 'ai:lease:epoch:' + $tag
+    $family = @($keyRun, $keyPending, $keyClaim, $keyLedger, $keyIdem, $keyEvents, $keySeq, $keyXevents, $keyLease, $keyFence, $keyReq, $keyDecided, $keyEpoch)
+    $slots = @($family | ForEach-Object { Get-RedisSlot $_ } | Sort-Object -Unique)
+    if ($slots.Count -ne 1) {
+        $detailLines = ($family | ForEach-Object { "    $_ -> slot " + (Get-RedisSlot $_) }) -join "`n"
+        throw ("13 键不同槽（期望同槽，实得 $($slots.Count) 个槽）：`n" + $detailLines)
+    }
+    if ($leaseKey -ne $keyLease) {
+        throw ("租约键形不符（服务端 keys.lease=$leaseKey，期望 $keyLease）：写新删旧/写旧删新会让 deleteRun 与续期落空")
+    }
+    Say ("  13 键同槽证据：slot=" + $slots[0] + "（run/pending/claim/ledger/idem/events/seq/xevents/lease/fence/req/decided/epoch）")
+
+    # 真实写读（帧族三键）：Stream 有帧、序号已发放、请求帧位已置位 —— 三者都在 tagged 键上。
+    $xlen = Invoke-RedisCommand @('XLEN', $keyXevents)
+    if ($null -eq $xlen -or [int64]$xlen -lt 1) {
+        throw ("事件 Stream 未落在 tagged 键：" + $keyXevents + " XLEN=" + $xlen + "（写方仍在旧裸键名？）")
+    }
+    $seqRaw = Invoke-RedisCommand @('GET', $keySeq)
+    if ([string]::IsNullOrWhiteSpace([string]$seqRaw) -or [int64]$seqRaw -le 0) {
+        throw ("序号键未落在 tagged 键：" + $keySeq + " = '" + $seqRaw + "'（RedisFrameStore#seqKey 与 RunStore#seqKey 键形不一致？）")
+    }
+    $reqRaw = Invoke-RedisCommand @('HGET', $keyReq, $toolCallId)
+    if ([string]::IsNullOrWhiteSpace([string]$reqRaw)) {
+        throw ("请求帧位缺失：HGET " + $keyReq + " " + $toolCallId + " 为空")
+    }
+    Say ("  写读证据：XLEN " + $keyXevents + "=" + $xlen + "，ai:seq=" + $seqRaw + "，req 位已置位")
+
     # 等待方每 10s 续租一次：睡 12s 后 PTTL 应回到 ~28s（未续租则只剩 ~18s）——RENEW 执行证据。
     Start-Sleep -Seconds 12
     $pttl = Invoke-RedisCommand @('PTTL', $leaseKey)
@@ -1322,6 +1418,18 @@ function Case-Lease-Scripts {
     # RELEASE：终态 save 释放租约 → Redis 中该键应消失。
     $after = Invoke-RedisCommand @('GET', $leaseKey)
     if ($null -ne $after) { throw "RELEASE 未生效：终态后 Redis 仍存在 $leaseKey" }
+
+    # 写读删的收口（批① 12 键）：执行完成后，台账/决策 guard 仍应留在各自的 tagged 键上；
+    # 租约键（唯一会被终态主动删掉的那个）已在上一条验过消失。三者键形不一致时这里会红。
+    $ledgerLen = Invoke-RedisCommand @('LLEN', $keyLedger)
+    if ($null -eq $ledgerLen -or [int64]$ledgerLen -ne 1) {
+        throw ("台账键 " + $keyLedger + " LLEN=" + $ledgerLen + "（期望 1；写方/读方键形不一致？）")
+    }
+    $decidedRaw = Invoke-RedisCommand @('HGET', $keyDecided, $toolCallId)
+    if ([string]::IsNullOrWhiteSpace([string]$decidedRaw)) {
+        throw ("决策 guard 缺失：HGET " + $keyDecided + " " + $toolCallId + " 为空")
+    }
+    Say ("  写读删证据：台账 1 条、decided=" + $decidedRaw + "、租约键已删（deleteRun 的 12 键单 DEL 由 ClusterSlotTest 取证）")
     Say ("  租约脚本覆盖：ACQUIRE / RENEW / FENCED-SET(fence=" + $fenceShown + ",runEpoch=" + $runEpoch + ",ledgerEpoch=" + $ledgerEpoch + ") / RELEASE(键已删) 各命中一次")
     Ok $name
 }
