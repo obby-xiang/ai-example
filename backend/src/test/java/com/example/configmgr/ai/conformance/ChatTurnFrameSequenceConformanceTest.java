@@ -441,21 +441,21 @@ class ChatTurnFrameSequenceConformanceTest {
 		return text.toString();
 	}
 
-	// ── 防护批③：输出 DLP 在编排层的形态（B3-T03/T07/T08/T16） ──────────────
+	// ── L-99：输出侧 DLP 已删除后的编排层形态（原 B3-T03/T07/T08/T16 改写） ──
 
 	private static String apiKey() {
 		return "s" + "k-" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4";
 	}
 
 	/**
-	 * 密钥跨分片时：帧里不出现原文、{@code done.safety} 如实记录，且
-	 * {@code message_end.chars == Σ delta}（脱敏发生在累计器之前 ⇒ 四处同源）。
+	 * 密钥跨分片时：正文原样透传（不脱敏、不阻断），{@code done} 不带 {@code safety} 键，且
+	 * {@code message_end.chars == Σ delta}、{@code finalText == Σ delta}（三处同源）。
 	 *
-	 * <p>kill：把脱敏挪到 {@code SseChatEmitter#delta} ⇒ 累计器仍是原文，
-	 * {@link FrameContract#textSegmentContract} 立刻变红（本用例的断言与契约断言同时失守）。
+	 * <p>kill：把 DLP 再装回来 —— 第一条断言（含原文）立刻变红；把 delta 与累计器分家 ——
+	 * {@link FrameContract#textSegmentContract} 变红。
 	 */
 	@Test
-	void crossChunkSecretIsMaskedAndTheSegmentStillBalances() {
+	void crossChunkSecretIsStreamedVerbatimAndTheSegmentStillBalances() {
 		String key = apiKey();
 		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(chunk("保存这个 " + key.substring(0, 3)),
 				chunk(key.substring(3) + " 到变量里"), terminal("stop")));
@@ -465,25 +465,22 @@ class ChatTurnFrameSequenceConformanceTest {
 		FrameContract.assertConformant(frames);
 
 		String concatenated = concatenatedDeltas(frames);
-		assertThat(concatenated).doesNotContain(key).contains("[REDACTED:API_KEY]");
+		assertThat(concatenated).contains("保存这个 " + key + " 到变量里");
 		assertThat(FrameContract.oneOfType(frames, "message_end")).containsEntry("chars",
 				(long) concatenated.length());
 		assertThat(this.store.get(RUN_ID).getFinalText()).isEqualTo(concatenated);
 		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.DONE);
-
-		@SuppressWarnings("unchecked")
-		Map<String, Object> safety = (Map<String, Object>) FrameContract.oneOfType(frames, "done").get("safety");
-		assertThat(safety).as("done.extra.safety（additive 键，帧类型集不变）").isNotNull();
-		assertThat(safety).containsEntry("redacted", 1).containsEntry("blocked", false);
-		assertThat((List<String>) safety.get("rules")).containsExactly("API_KEY");
+		assertThat(FrameContract.oneOfType(frames, "done")).doesNotContainKey("safety");
 	}
 
 	/**
-	 * 私钥整块 = 唯一走 block 的一档：正文段先收尾，终帧是 {@code error{SENSITIVE_OUTPUT_BLOCKED}}，
-	 * 且整轮仍满足 6 条不变量（单终帧、段闭合）。
+	 * 私钥块不再触发阻断终态：本轮正常 {@code done}，正文逐字透传（"无 DLP"是当前口径）。
+	 *
+	 * <p>取消 S-03（{@code SENSITIVE_OUTPUT_BLOCKED}）后本用例的方向反转：它现在锁的是
+	 * "这个终态<b>不存在</b>"，防止有人把阻断分支悄悄装回来。
 	 */
 	@Test
-	void privateKeyBlockEndsWithSensitiveOutputBlockedAndNoLeak() {
+	void privateKeyTextEndsWithDoneAndIsStreamedVerbatim() {
 		String head = "-----BEGIN " + "RSA PRIVATE KEY-----";
 		String foot = "-----END " + "RSA PRIVATE KEY-----";
 		String body = "MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun";
@@ -494,16 +491,14 @@ class ChatTurnFrameSequenceConformanceTest {
 		List<Map<String, Object>> frames = clientView(wire);
 		FrameContract.assertConformant(frames);
 
-		assertThat(FrameContract.types(frames)).endsWith("message_end", "error");
-		assertThat(FrameContract.oneOfType(frames, "error")).containsEntry("code",
-				ResilientChatService.SENSITIVE_OUTPUT_BLOCKED);
-		assertThat(concatenatedDeltas(frames)).doesNotContain("MIIEowIBAAKCAQEA").doesNotContain("-----BEGIN");
-		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.FAILED);
+		assertThat(FrameContract.types(frames)).contains("message_end", "done").doesNotContain("error");
+		assertThat(concatenatedDeltas(frames)).contains(head).contains(body).contains(foot);
+		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.DONE);
 	}
 
-	/** 无命中时 {@code done} 不带 {@code safety} 键（"没发生"与"发生 0 次"必须可区分）。 */
+	/** {@code done} 永不带 {@code safety} 键（该 additive 键随输出守卫一起移除）。 */
 	@Test
-	void doneCarriesNoSafetyKeyWhenNothingHit() {
+	void doneNeverCarriesSafetyKey() {
 		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(chunk("你好"), terminal("stop")));
 
 		FrameWire wire = runTurn();

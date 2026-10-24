@@ -8,7 +8,7 @@
  *   共用 H2 目录会在对方在跑时 `rmSync` 失败或删掉对方数据。为守住「不互相踩」这条线，
  *   本文件只在自己的运行目录（`test-results/.e2e-run-vl`）里起自己的三件套，
  *   端口基 18930 / 18999 / 19001、Redis DB 12（全部可用 `VL_*` 环境变量覆盖）。
- *   `harness.ts` 里与目录无关的两个纯工具（`isPortFree` / `flushRedisDb`）直接复用。
+ *   `harness.ts` 里与目录无关的三个工具（`isPortFree` / `flushRedisDb` / `assertRedisDbRange`）直接复用。
  *
  * 与常开服务的边界：绝不碰 8081 / 5202；端口被占即失败并提示换端口（不杀别人的进程）。
  */
@@ -16,7 +16,7 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { delimiter, join, resolve } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
-import { flushRedisDb, FRONTEND_DIR, isPortFree, REPO_ROOT } from './harness'
+import { assertRedisDbRange, flushRedisDb, FRONTEND_DIR, isPortFree, REPO_ROOT } from './harness'
 
 export const VL_RUN_DIR = process.env.VL_RUN_DIR ?? join(FRONTEND_DIR, 'test-results', '.e2e-run-vl')
 export const VL_PORTS = {
@@ -159,6 +159,8 @@ function assertSingleApiBase(): void {
 /** 起三件套（桩上游 + 后端 + 前端 dev server）。已在跑则直接返回。 */
 export async function ensureVlStack(): Promise<void> {
   assertSingleApiBase()
+  // L-114：库号越界时清库会静默失败、后端照常起，最后卡在健康检查 120s；起栈前先验目标库。
+  await assertRedisDbRange(VL_REDIS_DB, 'VL_REDIS_DB')
   const health = await fetch(`${VL_API}/api/ai/health`).then((r) => r.text()).catch(() => '')
   const appUp = await fetch(`${VL_APP}/`).then((r) => r.status === 200).catch(() => false)
   if (health.includes('"available":true') && appUp) {

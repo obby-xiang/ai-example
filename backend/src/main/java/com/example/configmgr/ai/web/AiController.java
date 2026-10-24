@@ -9,10 +9,9 @@ import com.example.configmgr.ai.config.RedisAvailability;
 import com.example.configmgr.ai.gate.ConfirmGate;
 import com.example.configmgr.ai.gate.AiRateLimiter;
 import com.example.configmgr.ai.gate.ContextFieldGate;
-import com.example.configmgr.ai.gate.InputDlp;
 import com.example.configmgr.ai.gate.InputSanitizer;
-import com.example.configmgr.ai.gate.SafetyRules;
 import com.example.configmgr.ai.feedback.AiFeedback;
+import com.example.configmgr.ai.feedback.ExcerptGuard;
 import com.example.configmgr.ai.feedback.AiFeedbackRepository;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.memory.RedisChatMemoryRepository;
@@ -101,15 +100,6 @@ import java.util.concurrent.RejectedExecutionException;
  * Q2：无 key 时模型侧 bean 不存在，{@code /chat} 与 {@code /resume} 在<b>开流之前</b>返回
  * 503 {@code AI_UNAVAILABLE}；{@code /health} 亦然。历史的读与删除、确认/回灌的写入不依赖 key，
  * 因此保持可用（它们只读写 Redis）。
- *
- * <p>
- * <b>暴露口径（I-1 / L-30，DC-10）</b>：本控制器全族<b>无认证</b> —— 写端点（改 provider/baseUrl、
- * {@code /test} 等）与 {@code GET /api/ai/history/{sessionId}}（拿到 sessionId 即读该会话历史）一样，
- * 都只靠"网络层不可达"来保护。收口方式 = 后端默认只绑回环（{@code server.address=127.0.0.1}，
- * 见 application.yml）+ 生产网关前置鉴权（本仓既定终局方向，本批不引 token 体系）。
- * <b>残余面</b>：回环只区分"哪台机器"，不区分本机上的用户 / 进程 —— 同机多用户形态仍可读写本族；
- * 对外暴露必须显式改绑定并自备鉴权（判据与回归锁见 {@code config/ServerBindAddressConfigTest}、
- * {@code config/Dc10ExposureSurfaceTest}）。
  */
 @Slf4j
 @RestController
@@ -178,13 +168,6 @@ public class AiController {
 	 */
 	@Autowired
 	private AiRateLimiter aiRateLimiter;
-
-	/**
-	 * 防护批③ B3-1：输入侧 DLP（脱敏后继续）。字段注入的理由同 {@link #inputSanitizer}：
-	 * 既有 {@code new AiController(...)} 的用例零触碰。
-	 */
-	@Autowired(required = false)
-	private InputDlp inputDlp;
 
 	/**
 	 * 防护批③ B2-5：{@code context} 形状闸（白名单化 + 降级不回显）。未注入时退化为"不闸"。
@@ -345,8 +328,8 @@ public class AiController {
 
 		String sessionId = request.sessionId();
 		// 批② 新段（追加在既有五道闸之后，既有闸顺序不变）：
-		// ① context 形状闸 —— 白名单化 + **降级不回显**（用户裁决 2026-10-21 第 1 条：不拒绝请求）；
-		// ② 输入 DLP —— 高置信凭据 mask 后继续（同裁决第 2 条）。
+		// context 形状闸 —— 白名单化 + **降级不回显**（用户裁决 2026-10-21 第 1 条：不拒绝请求）。
+		// L-99：输入侧 DLP 已删除 —— 归一层（InputSanitizer）之后的文本原样进模型与记忆。
 		ContextFieldGate.Result gated = this.contextFieldGate == null ? null : this.contextFieldGate.sanitize(request.context());
 		AiChatRequest.Context effectiveContext = gated == null ? request.context() : gated.context();
 		if (gated != null && gated.downgraded() > 0) {
@@ -354,17 +337,7 @@ public class AiController {
 				this.securityEvents.contextDowngraded(gated.downgraded());
 			}
 		}
-		InputDlp.Result dlp = this.inputDlp == null ? null : this.inputDlp.mask(sanitized.text());
 		String modelText = sanitized.text();
-		if (dlp != null && dlp.hit()) {
-			modelText = dlp.text();
-			// 只记规则 id 与处数（命中原文可能是密钥，日志里不得出现）
-			log.info("输入 DLP 脱敏 sessionId={} 命中={} 处 规则={}", sessionId, dlp.redacted(), dlp.rules());
-			if (this.securityEvents != null) {
-				this.securityEvents.inputRedacted(dlp.redacted());
-			}
-			appendSafety(sessionId, null, "input", dlp.hits());
-		}
 		// 归一后的文本 / 闸后的 context 才是进模型/进记忆的那份（原始 request 不可变，故换一个新 record）
 		AiChatRequest effective = new AiChatRequest(sessionId, modelText, effectiveContext, request.modelId(),
 				request.params());
@@ -996,32 +969,6 @@ public class AiController {
 	}
 
 	/**
-	 * 安全台账（防护批③ B3-7；{@code ai:safety:<sessionId>}）。
-	 *
-	 * <p>
-	 * 只记 {@code atMs/runId/side/ruleId/offset/length/action} —— <b>命中原文一律不落盘</b>
-	 * （它本身就是凭据）。输入侧命中的 block 档规则也只记 {@code masked}：
-	 * 输入侧从不阻断，写成 blocked 会误导复盘。
-	 */
-	private void appendSafety(String sessionId, String runId, String side, List<SafetyRules.Hit> hits) {
-		if (hits == null || hits.isEmpty()) {
-			return;
-		}
-		long now = System.currentTimeMillis();
-		for (SafetyRules.Hit hit : hits) {
-			Map<String, Object> entry = new LinkedHashMap<>();
-			entry.put("atMs", now);
-			entry.put("runId", runId);
-			entry.put("side", side);
-			entry.put("ruleId", hit.ruleId());
-			entry.put("offset", hit.start());
-			entry.put("length", hit.end() - hit.start());
-			entry.put("action", "input".equals(side) || !hit.block() ? "masked" : "blocked");
-			this.runStore.appendSafetyEvent(sessionId, entry);
-		}
-	}
-
-	/**
 	 * 400 {@code MESSAGE_TOO_LONG}（批① 闸门 2）。稳定码 + 中文文案 + 两枚数字 ——
 	 * <b>不回显原文</b>（它可能本身就是敏感数据，且长度已足够定位问题）。
 	 */
@@ -1628,10 +1575,10 @@ public class AiController {
 			entry.setReason(reason.length() > 1024 ? reason.substring(0, 1024) : reason);
 		}
 		if (excerpt != null) {
-			// 防护批③ B3-8：摘录<b>永久入库</b>（H2），误伤不可逆 ⇒ 命中高置信凭据即整条替换为 [已隐去]，
-			// 而不是逐处脱敏（逐处脱敏会把"这条曾被脱敏"的事实一起模糊掉）。
-			SafetyRules.Masked maskedExcerpt = SafetyRules.mask(excerpt);
-			String safeExcerpt = maskedExcerpt.redacted() > 0 ? "[已隐去]" : maskedExcerpt.text();
+			// 防护批③ B3-8（L-99 裁定下保留）：摘录<b>永久入库</b>（H2），误伤不可逆 ⇒ 命中高置信凭据
+			// 即整条替换为 [已隐去]，而不是逐处脱敏（逐处脱敏会把"这条曾被脱敏"的事实一起模糊掉）。
+			// 判据来自 {@link ExcerptGuard}：它不是 DLP 管道的一部分，只服务这一个写点（见类注）。
+			String safeExcerpt = ExcerptGuard.sensitive(excerpt) ? "[已隐去]" : excerpt;
 			entry.setMessageExcerpt(safeExcerpt.length() > 200 ? safeExcerpt.substring(0, 200) : safeExcerpt);
 		}
 		this.aiFeedbackRepository.save(entry);

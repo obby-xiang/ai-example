@@ -16,7 +16,7 @@
  *   | `E2E_STATE_FILE` | `<RUN_DIR>/state.json` | pid 台账（跨进程收尾的唯一依据） |
  *   | `E2E_DATA_DIR` / `E2E_DEGRADED_DATA_DIR` | `<RUN_DIR>/data` / `<RUN_DIR>/data-degraded` | 两个 H2 数据目录 |
  *   | `E2E_BACKEND_PORT` / `E2E_DEGRADED_BACKEND_PORT` / `E2E_STUB_PORT` / `E2E_STUB_UPSTREAM_PORT` / `E2E_APP_PORT` / `E2E_DEGRADED_APP_PORT` | 18330 / 18331 / 18399 / （不启） / 18401 / 18402 | 端口 |
- *   | `E2E_REDIS_DB` / `E2E_REDIS_DB_DEGRADED` | 5 / 6 | Redis 库号 |
+ *   | `E2E_REDIS_DB` / `E2E_REDIS_DB_DEGRADED` | 5 / 6 | Redis 库号（合法 0-15；起栈前 SELECT 校验，越界立即失败） |
  *   | `E2E_AI_LIMIT_SESSION_PER_MINUTE` / `E2E_AI_LIMIT_IP_PER_MINUTE` | 200 / 2000 | 限流抬高（E2E 不在限流覆盖面） |
  *   | `E2E_EXTRA_BACKEND_ARGS` | 空 | 追加给 java 的 `--k=v`（空格分隔，如 `--app.ai.suspend.pool-size=3`） |
  *   | `E2E_READY_TIMEOUT_MS` / `E2E_SEED_TIMEOUT_MS` / `E2E_APP_READY_TIMEOUT_MS` | 120000 / 90000 / 90000 | 就绪等待 |
@@ -34,9 +34,9 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import net from 'node:net'
 import { delimiter, isAbsolute, join, resolve } from 'node:path'
-import { StringDecoder } from 'node:string_decoder'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
+import Redis from 'ioredis'
 
 const HERE = fileURLToPath(new URL('.', import.meta.url))
 export const FRONTEND_DIR = resolve(HERE, '../..')
@@ -132,117 +132,142 @@ async function assertPortFree(port: number, label: string): Promise<void> {
   )
 }
 
-/**
- * 跨 TCP 分块的 UTF-8 收集器（RESP 回包用）。
- *
- * <p>`chunk.toString('utf8')` 是**逐块**解码：一个中文字符（3 字节）正好被块边界切开时，
- * 两侧各解出一个 U+FFFD ⇒ 读回来的字符串里凭空多出「�」。CI 上 HGET 一篇 2.4KB 中文文档
- * 就会偶发（本地 loopback 常常一块到底，所以只在 CI 露头）；K07「二次查询缓存值不变」
- * 就是被这个假红打掉的（两个 `HGET` 只有一次落在这条边界上）。
- *
- * <p>`StringDecoder.write()` 会把块尾不完整的字节序列攒到下一块，`end()` 补最后一段。
- */
-export function utf8Sink(): { push: (chunk: Buffer) => string; end: () => string } {
-  const decoder = new StringDecoder('utf8')
+// ── Redis（ioredis；SELECT 越界前置校验见 assertRedisDbRange / L-114）──────────────
+
+const REDIS_DB_MIN = 0
+const REDIS_DB_MAX = 15
+
+function redisEndpoint(): { host: string; port: number } {
   return {
-    push: (chunk: Buffer) => decoder.write(chunk),
-    end: () => decoder.end()
+    host: process.env.E2E_REDIS_HOST ?? '127.0.0.1',
+    port: Number(process.env.E2E_REDIS_PORT ?? '6379')
   }
 }
 
-/** 极简 RESP 客户端：仅用于 SELECT + FLUSHDB（不引第三方依赖）。 */
-export function flushRedisDb(db: number): Promise<void> {
-  const host = process.env.E2E_REDIS_HOST ?? '127.0.0.1'
-  const port = Number(process.env.E2E_REDIS_PORT ?? '6379')
-  return new Promise((done) => {
-    const socket = net.connect(port, host)
-    let buffer = ''
-    const sink = utf8Sink()
-    let step = 0
-    let finished = false
-    const finish = (): void => {
-      if (finished) return
-      finished = true
-      socket.destroy()
-      done()
-    }
-    socket.setTimeout(3000, finish)
-    socket.on('error', finish)
-    socket.on('data', (chunk) => {
-      buffer += sink.push(chunk)
-      while (buffer.includes('\r\n')) {
-        if (step === 0) {
-          // +OK（SELECT）
-          if (buffer.startsWith('+OK')) {
-            buffer = buffer.slice(buffer.indexOf('\r\n') + 2)
-            step = 1
-            socket.write('*1\r\n$7\r\nFLUSHDB\r\n')
-            continue
-          }
-          return
-        }
-        // +OK（FLUSHDB）
-        if (buffer.startsWith('+OK')) {
-          finish()
-        }
-        return
-      }
-    })
-    socket.on('connect', () => {
-      socket.write(`*2\r\n$6\r\nSELECT\r\n$${String(db).length}\r\n${db}\r\n`)
-    })
+function redisDbHint(): string {
+  return '合法范围 0-15。库号来源：E2E_REDIS_DB / E2E_REDIS_DB_DEGRADED（各域 playwright.*.config.ts 或 harness 默认值）、'
+    + 'VL 域的 VL_REDIS_DB；请改对应环境变量或 config 里的默认值。'
+}
+
+function redisDbRangeError(db: number, variable?: string): Error {
+  const shown = Number.isNaN(db) ? 'NaN（不是数字）' : String(db)
+  const source = variable ? `${variable}=${shown}` : `Redis 库号 ${shown}`
+  return new Error(`Redis 库号越界：${source}；${redisDbHint()}`)
+}
+
+function isDbIndexOutOfRange(error: unknown): boolean {
+  return error instanceof Error && /DB index is out of range/i.test(error.message)
+}
+
+function translateRedisError(error: unknown, db: number, variable?: string): Error {
+  if (isDbIndexOutOfRange(error)) return redisDbRangeError(db, variable)
+  const message = error instanceof Error ? error.message : String(error)
+  if (/ECONNREFUSED|ECONNRESET|ETIMEDOUT|Connection is closed|connect/i.test(message)) {
+    const { host, port } = redisEndpoint()
+    return new Error(
+      `连接 Redis 失败（${host}:${port}）：${message.replace(/[。.]$/, '')}。E2E 需要本机 Redis 在线`
+        + '（可用 E2E_REDIS_HOST / E2E_REDIS_PORT 指向别的实例）。'
+    )
+  }
+  return error instanceof Error ? error : new Error(message)
+}
+
+/** 一次性连接：lazyConnect 让错误走 Promise；不重试（E2E 要快速失败，不要静默挂住）。 */
+function createRedisClient(): Redis {
+  const client = new Redis({
+    ...redisEndpoint(),
+    lazyConnect: true,
+    connectTimeout: 3000,
+    commandTimeout: 5000,
+    maxRetriesPerRequest: 1,
+    retryStrategy: () => null
   })
+  // ioredis 在连接层失败时会发 'error'；没有监听器会变成未捕获异常。
+  // 单条命令的失败仍由各自的 Promise 拒绝送出（这里只兜底，不把错误吞成成功）。
+  client.on('error', () => {})
+  return client
+}
+
+/** 连接 → SELECT → 执行 → 断开。SELECT / 连接失败在这里统一翻成人话。 */
+async function withRedis<T>(db: number, run: (client: Redis) => Promise<T>, variable?: string): Promise<T> {
+  if (!Number.isInteger(db) || db < REDIS_DB_MIN || db > REDIS_DB_MAX) {
+    throw redisDbRangeError(db, variable)
+  }
+  const client = createRedisClient()
+  try {
+    await client.connect()
+    await client.select(db)
+    return await run(client)
+  } catch (error) {
+    throw translateRedisError(error, db, variable)
+  } finally {
+    client.disconnect()
+  }
 }
 
 /**
- * 通用 Redis 命令（仅本域 DB）：`SELECT <db>` 之后发一条命令，返回原始回包前缀。
- * NFEZUI 域的 TTL/键断言与脚本侧清键共用这一条，避免各域自己抄一份 RESP 客户端。
+ * L-114：起栈前先验“目标库号能不能选中”。
+ *
+ * 旧形态下库号写超 15 时，清库在 socket 层静默失败 → 后端照常起 → 最后卡在健康检查 120s 超时，
+ * 报错完全指错方向。这里对目标库真发一次 SELECT：越界立刻以「哪个变量 / 当前值 / 合法范围 /
+ * 去哪改」失败（毫秒级），而不是烧满 120s。
  */
-export function redisCommand(db: number, args: string[]): Promise<string> {
-  const host = process.env.E2E_REDIS_HOST ?? '127.0.0.1'
-  const port = Number(process.env.E2E_REDIS_PORT ?? '6379')
-  return new Promise((done, fail) => {
-    const socket = net.connect(port, host)
-    let buffer = ''
-    const sink = utf8Sink()
-    let sent = false
-    let settled = false
-    const timer = setTimeout(() => {
-      if (settled) return
-      settled = true
-      socket.destroy()
-      fail(new Error('redis 命令超时'))
-    }, 5000)
-    const finish = (): void => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      socket.destroy()
-      done(buffer + sink.end())
-    }
-    socket.on('error', (error) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      fail(error)
-    })
-    socket.on('data', (chunk) => {
-      buffer += sink.push(chunk)
-      if (!sent) {
-        // 等 SELECT 的完整 +OK 行（只收到半行时不能提前发命令，否则回包会错位）
-        if (!buffer.includes('\r\n')) return
-        buffer = ''
-        const bulk = `*${args.length}\r\n${args.map((a) => `$${Buffer.byteLength(a)}\r\n${a}\r\n`).join('')}`
-        sent = true
-        socket.write(bulk)
-        return
-      }
-      if (buffer.length > 0 && (buffer.includes('\r\n') || buffer.startsWith('$-1'))) finish()
-    })
-    socket.on('connect', () => {
-      socket.write(`*2\r\n$6\r\nSELECT\r\n$${String(db).length}\r\n${db}\r\n`)
-    })
+export async function assertRedisDbRange(db: number, variable: string): Promise<void> {
+  await withRedis(db, async () => undefined, variable)
+}
+
+/** 清空本域专用库（SELECT + FLUSHDB；ioredis 负责完整收包与 UTF-8）。 */
+export async function flushRedisDb(db: number): Promise<void> {
+  await withRedis(db, async (client) => {
+    await client.flushdb()
   })
+}
+
+function respBulk(value: string): string {
+  return `$${Buffer.byteLength(value)}\r\n${value}\r\n`
+}
+
+/** ioredis 的已解析回包 → RESP 原文（`redisCommand` 的历史返回形态）。 */
+function encodeResp(reply: unknown): string {
+  if (reply === null || reply === undefined) return '$-1\r\n'
+  if (typeof reply === 'number') return `:${reply}\r\n`
+  if (Buffer.isBuffer(reply)) return respBulk(reply.toString('utf8'))
+  if (Array.isArray(reply)) return `*${reply.length}\r\n${reply.map((item) => encodeResp(item)).join('')}`
+  return respBulk(String(reply))
+}
+
+/**
+ * 通用 Redis 命令（仅本域 DB）：`SELECT <db>` 之后发一条命令，返回 RESP 原文。
+ * 导出签名与返回形态保持兼容（helpers-mdxy 的 LRANGE 解析、helpers-nfezui 的 TTL/整数前缀）。
+ * 注意：状态回包（`+OK`）在 ioredis 里与 bulk string 无法区分，这里统一编码为 bulk（`$2\r\nOK`）——
+ * 现有调用方只做 trim / 取 `:` 或用 RESP 数组解析，不依赖 `+` 前缀。
+ */
+export async function redisCommand(db: number, args: string[]): Promise<string> {
+  return withRedis(db, async (client) => {
+    const [command, ...rest] = args
+    const reply = await client.call(command ?? '', rest)
+    return encodeResp(reply)
+  })
+}
+
+/** KQC 域的命令面（`{ type, value }`）；类型与取值口径与旧自写客户端一致。 */
+export async function redisExec(db: number, args: string[]): Promise<{ type: 'int' | 'bulk' | 'array'; value: string }> {
+  return withRedis(db, async (client) => {
+    const [command, ...rest] = args
+    const reply = await client.call(command ?? '', rest)
+    if (reply === null || reply === undefined) return { type: 'bulk' as const, value: '' }
+    if (typeof reply === 'number') return { type: 'int' as const, value: String(reply) }
+    if (Array.isArray(reply)) {
+      return { type: 'array' as const, value: reply.map((item) => (item === null ? '' : String(item))).join('\n') }
+    }
+    if (Buffer.isBuffer(reply)) return { type: 'bulk' as const, value: reply.toString('utf8') }
+    return { type: 'bulk' as const, value: String(reply) }
+  })
+}
+
+/** `KEYS <pattern>`（本域独占 DB，量小无需 SCAN 分页）。 */
+export async function redisKeys(db: number, pattern: string): Promise<string[]> {
+  return withRedis(db, async (client) => client.keys(pattern))
 }
 
 // ── Java classpath（classes + 依赖，避免 jar 锁） ─────────────────────────────
@@ -419,6 +444,11 @@ export async function startServices(options: StartOptions = {}): Promise<void> {
   const needStub = MODE === 'stub' && only.includes('main')
   const extraArgs = [...EXTRA_BACKEND_ARGS, ...(options.backendArgs ?? [])]
 
+  // L-114：库号写超 15 时，清库会静默失败、后端照常起，最后卡在健康检查 120s 超时上。
+  // 起栈前先对目标库真发一次 SELECT（本机预检 + 服务端回包），毫秒级给出「哪个变量 / 合法范围 / 去哪改」。
+  await assertRedisDbRange(REDIS_DB, 'E2E_REDIS_DB')
+  if (only.includes('degraded')) await assertRedisDbRange(DEGRADED_REDIS_DB, 'E2E_REDIS_DB_DEGRADED')
+
   mkdirSync(RUN_DIR, { recursive: true })
 
   const portChecks: Array<[number, string]> = [
@@ -563,7 +593,10 @@ export async function startServices(options: StartOptions = {}): Promise<void> {
     if (!existsSync(viteBin)) throw new Error('缺少 frontend/node_modules/vite：请先 yarn install')
     const child = spawnLogged(name, process.execPath, [viteBin, '--port', String(port), '--strictPort', '--host', '127.0.0.1'], {
       cwd: FRONTEND_DIR,
-      env: { ...process.env, VITE_API_BASE: apiBase, VITE_DEV_PORT: String(port) }
+      // L-115：E2E 的页面必须看到的是一份**运行期不变**的模块图 —— 工作树被并发编辑时，
+      // HMR 的 `?t=` 重新取模块会让同一页面里出现两份 `stores/workspace.ts`（页面能力注册表
+      // 是模块级 Map）⇒ 「当前页面没有可操作的表格」/ SpreadGrid 中途重挂。故关掉 HMR。
+      env: { ...process.env, VITE_API_BASE: apiBase, VITE_DEV_PORT: String(port), VITE_HMR: '0' }
     })
     if (child.pid) pids[name === 'app' ? 'app' : 'app_degraded'] = child.pid
     persist()
@@ -633,9 +666,14 @@ export async function stopServices(): Promise<void> {
     }
   }
   await sleep(1500)
-  await flushRedisDb(REDIS_DB)
-  // 只有本棒真起过降级面才清降级库（与 startServices 的清理条件对称）。
-  if (state.pids.backend_degraded !== undefined) await flushRedisDb(DEGRADED_REDIS_DB)
+  // 收尾阶段清库是 best-effort：库号错 / Redis 不可达时不能让 teardown 掩盖 setup 的原始报错。
+  try {
+    await flushRedisDb(REDIS_DB)
+    // 只有本棒真起过降级面才清降级库（与 startServices 的清理条件对称）。
+    if (state.pids.backend_degraded !== undefined) await flushRedisDb(DEGRADED_REDIS_DB)
+  } catch (error) {
+    log(`收尾清库失败（忽略，不覆盖 setup 的原始报错）：${error instanceof Error ? error.message : String(error)}`)
+  }
   rmSync(STATE_FILE, { force: true })
 }
 

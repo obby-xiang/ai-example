@@ -147,8 +147,6 @@ export const ErrorCode = {
   AI_SUMMARY_UNAVAILABLE: 'AI_SUMMARY_UNAVAILABLE',
   STORE_IO_FAILED: 'STORE_IO_FAILED',
   TASK_SETTINGS_UNREADABLE: 'TASK_SETTINGS_UNREADABLE',
-  /** SSE error 帧（防护批③ B3-3）：输出含高置信敏感凭据（私钥块），本轮被安全策略阻断 */
-  SENSITIVE_OUTPUT_BLOCKED: 'SENSITIVE_OUTPUT_BLOCKED',
   /** 前端独有：请求未到达后端（网络/代理不可达；后端不发此码） */
   NETWORK_ERROR: 'NETWORK_ERROR',
   /** 前端独有：非预期响应形态或未知异常（后端不发此码） */

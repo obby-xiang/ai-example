@@ -104,27 +104,35 @@ class AiControllerChatGateTest {
 	}
 
 	/**
-	 * 防护批③ B3-T05：输入侧 DLP 是 <b>mask 后继续</b>（HTTP 200），且脱敏发生在送模型之前。
+	 * L-99（口径变更）：输入侧 DLP 已删除 —— 凭据形态的文本<b>原样</b>进模型（HTTP 200），
+	 * 且 {@code /health.security.inputRedacted} 不再增长。
 	 *
-	 * <p>kill：把 mask 改成"命中即 400" ⇒ 第一条断言立刻变红（那会打断"用户来粘配置"这个主场景）。
+	 * <p>本用例原先锁的是"mask 后继续 + inputRedacted=1"（防护批③ B3-T05）；删掉 DLP 后
+	 * 断言的<b>方向</b>反过来：同一份文本必须逐字到达 {@code service.chat(...)}。
 	 */
 	@Test
-	void inputDlpMasksSecretsBeforeTheyReachTheModel() {
+	void secretsReachTheModelVerbatimSinceDlpWasRemoved() {
 		String key = "s" + "k-" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4";
+		String message = "我的 key 是 " + key + " 帮我看看对不对";
 
-		ResponseEntity<?> response = this.controller.chat(
-				new AiChatRequest(SESSION, "我的 key 是 " + key + " 帮我看看对不对", null), null);
+		ResponseEntity<?> response = this.controller.chat(new AiChatRequest(SESSION, message, null), null);
 
-		assertThat(response.getStatusCode()).as("输入命中只脱敏，不拒绝").isEqualTo(HttpStatus.OK);
+		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
 
 		ArgumentCaptor<AiChatRequest> captor = ArgumentCaptor.forClass(AiChatRequest.class);
 		verify(this.service, timeout(2000)).chat(anyString(), captor.capture(), any(SseChatEmitter.class));
-		assertThat(captor.getValue().message()).doesNotContain(key).contains("[REDACTED:API_KEY]");
-		assertThat(this.securityEvents.metrics()).containsEntry("inputRedacted", 1L);
+		assertThat(captor.getValue().message()).as("输入侧不再脱敏，原文进模型").isEqualTo(message).contains(key);
+		assertThat(this.securityEvents.metrics()).containsEntry("inputRedacted", 0L);
 	}
 
+	/**
+	 * L-99：输入侧不再有 DLP 脱敏日志行（也不得出现命中原文以外的任何"脱敏"事实）。
+	 *
+	 * <p>原用例（B3-T05 的第二半）断言"日志含『输入 DLP 脱敏 命中=1』且不含原文"；
+	 * 该日志点随 InputDlp 删除，本用例反向锁住"不再产生该行"。
+	 */
 	@Test
-	void inputDlpLogsOnlyRuleIdsAndNeverTheSecret() {
+	void inputDlpLogLineNoLongerExists() {
 		String key = "s" + "k-" + "Zz9Yy8Xx7Ww6Vv5Uu4Tt3Ss2Rr1";
 		ListAppender<ILoggingEvent> appender = new ListAppender<>();
 		appender.start();
@@ -135,10 +143,7 @@ class AiControllerChatGateTest {
 			this.controller.chat(new AiChatRequest(SESSION, "看看这个 " + key, null), null);
 
 			List<String> messages = appender.list.stream().map(ILoggingEvent::getFormattedMessage).toList();
-			assertThat(messages).anySatisfy((message) -> {
-				assertThat(message).contains("输入 DLP 脱敏").contains("命中=1");
-				assertThat(message).as("日志不得含命中原文").doesNotContain(key);
-			});
+			assertThat(messages).noneSatisfy(message -> assertThat(message).contains("输入 DLP 脱敏"));
 		}
 		finally {
 			logger.detachAppender(appender);
@@ -384,8 +389,7 @@ class AiControllerChatGateTest {
 		AiController built = rawController(props);
 		ReflectionTestUtils.setField(built, "inputSanitizer", new InputSanitizer());
 		ReflectionTestUtils.setField(built, "aiRateLimiter", new AiRateLimiter(this.redis.redis, props));
-		// 防护批②③ 的三件（同为字段注入）
-		ReflectionTestUtils.setField(built, "inputDlp", new com.example.configmgr.ai.gate.InputDlp());
+		// 防护批② 的形状闸与安全计数（同为字段注入）
 		ReflectionTestUtils.setField(built, "contextFieldGate", new com.example.configmgr.ai.gate.ContextFieldGate());
 		ReflectionTestUtils.setField(built, "securityEvents", this.securityEvents);
 		return built;

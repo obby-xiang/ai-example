@@ -216,8 +216,6 @@ public final class ErrorCodes {
     public static final String AI_RUN_FAILED = "AI_RUN_FAILED";
     /** SSE error 帧：续跑失败。 */
     public static final String AI_RESUME_FAILED = "AI_RESUME_FAILED";
-    /** SSE error 帧：输出含高置信敏感凭据（私钥块），本轮被安全策略阻断（防护批③ B3-3）。 */
-    public static final String SENSITIVE_OUTPUT_BLOCKED = "SENSITIVE_OUTPUT_BLOCKED";
 
     // ---------------------------------------------------------------- 内部错误
 

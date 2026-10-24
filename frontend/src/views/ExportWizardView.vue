@@ -203,6 +203,8 @@ interface GridApi {
   toXlsxBlob(): Promise<Blob>
   validateLocal(): ExcelRowIssue[]
   getSheetAdapter(): SheetAdapter
+  /** L-115：等表格内容落定（载入在途时挂起，无在途载入立即结算） */
+  whenLoaded(): Promise<void>
 }
 
 interface ExportResultItem {
@@ -512,6 +514,9 @@ function resetTaskScopedState(): void {
   checkedDefs.value = []
   activeTab.value = ''
   loadedGrids.clear()
+  // 在途载入也是任务级：旧任务的下载/解析不能给新任务的 `sheet.current` 交底（L-115）。
+  // 旧 promise 仍会自行收尾（finally 里有 `gridLoads.get(code) === run` 身份守卫），不会误删新条目。
+  gridLoads.clear()
   // 在途集合也是任务级状态：跨任务改绑后残留的是**旧任务**的编码，AI 侧 preflight 读到它会把
   // 「旧任务在途的同码下载」当成新任务的在途，回灌 ack 分支②的"无需重试"（issue #2 的同源失真），
   // 用户侧 downloadOne 也会被误拦。复位安全：在途 promise 的 finally 有 `downloading.value === code`
@@ -877,14 +882,35 @@ async function cancelJob(): Promise<void> {
  * （`READY_TIMEOUT_MS`），而前端工具预算折算后也是 60s（120s − 60s）——两者同值时预算可能
  * 先到，那次回灌会是**通用超时文案**（同样声明"结局未知"、不谎报），本函数的失败结局来不及
  * 被回灌；只有预算后到时才会回灌下面 handler 产出的"表格未就绪 + 引擎原文"。
+ *
+ * <p>**L-115 并发去重**：`loadedGrids` 在下载**之前**就置位（防止重复下载），因此并发调用者
+ * 会拿到"已加载"的假肯定 —— 页面能力若据此交出适配器，读到的是还没载入的空表。
+ * 故这里按 code 记住在途 promise：后来者**等同一个结局**，而不是提前放行。
  */
-async function ensureGridLoaded(code: string): Promise<{ ok: boolean; error: string }> {
+const gridLoads = new Map<string, Promise<{ ok: boolean; error: string }>>()
+
+function ensureGridLoaded(code: string): Promise<{ ok: boolean; error: string }> {
   if (!code) {
-    return { ok: false, error: '缺少配置编码' }
+    return Promise.resolve({ ok: false, error: '缺少配置编码' })
+  }
+  const inFlight = gridLoads.get(code)
+  if (inFlight) {
+    return inFlight
   }
   if (loadedGrids.has(code)) {
-    return { ok: true, error: '' }
+    return Promise.resolve({ ok: true, error: '' })
   }
+  const run = loadGrid(code)
+  gridLoads.set(code, run)
+  void run.finally(() => {
+    if (gridLoads.get(code) === run) {
+      gridLoads.delete(code)
+    }
+  })
+  return run
+}
+
+async function loadGrid(code: string): Promise<{ ok: boolean; error: string }> {
   if (taskId.value === null) {
     return { ok: false, error: '当前未绑定任务，无法读取结果文件' }
   }
@@ -1461,7 +1487,7 @@ function registerHandlers(): void {
 
   // AI 表格操作专项：把**当前激活结果标签页**的表格适配器反向暴露给 AI 工具。
   // 只作用于当前标签页（设计稿 §7-裁 5）；非激活/未挂载一律给出可行动文案，不代开标签。
-  registerPageHandler('sheet.current', (payload) => {
+  registerPageHandler('sheet.current', async (payload) => {
     const code = String(payload.defCode ?? activeTab.value ?? '')
     if (!code) {
       return { ok: false, reason: '当前没有激活的表格标签页。请先切到导出结果步骤并打开对应配置的标签。' }
@@ -1477,6 +1503,14 @@ function registerHandlers(): void {
       return { ok: false, reason: `${code} 的结果表格未挂载（请重开该标签页后重试）。` }
     }
     try {
+      // L-115：表格可能仍在载入（首次进入该步 / 换任务重载）—— 必须等**内容**落定再交出适配器，
+      // 否则工具读到空表（T05 的「0 行」/ T13 的「0 组」）。`ensureGridLoaded` 会并入同一在途载入，
+      // 不会重复下载；`whenLoaded()` 覆盖"已过下载、还在 fromJSON/写行"的那一段。
+      const loaded = await ensureGridLoaded(code)
+      if (!loaded.ok) {
+        return { ok: false, reason: `${code} 的结果表格未就绪：${loaded.error}` }
+      }
+      await grid.whenLoaded()
       return {
         ok: true,
         defCode: code,

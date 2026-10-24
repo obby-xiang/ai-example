@@ -2500,8 +2500,62 @@ watch(mmdViewerOpen, (open) => {
  * R-163B G4 → R-165 S5a → S5b：mermaid 卡片化（demo v7.7 裁决区 12/07）——卡头双态 tab +
  * 预览态内联缩放/平移 + 源码态 200px 内滚 + 卡头图标钮组（复位/全屏）。
  * 卡片下外边距 `mb-3.5`（S5a 项 1 统一卡片节奏）。
+ *
+ * 性能专项（2026-10-24）：水合改为 **IntersectionObserver 门控** —— 只有进入消息容器视口
+ * （rootMargin 200px）的源码块才真正渲染 SVG，完成后即 unobserve；长会话的历史消息不再在
+ * 打开面板的瞬间排队渲染。无 IO 实现的环境（jsdom / 老浏览器）退化为立即渲染（行为兼容）。
  */
-async function hydrateMermaid(messageId: string, blocks: Array<{ index: number; key: string; source: string }>): Promise<void> {
+const mermaidPending = new Map<Element, { source: string; bubble: Element }>()
+let mermaidObserver: IntersectionObserver | null = null
+
+/** 把一个 mermaid 源码块替换成卡片（`bubble.contains` 判活：v-html 重建后旧槽位不再回填）。 */
+async function renderMermaidSlot(bubble: Element, code: Element, source: string): Promise<void> {
+  const svg = await renderMermaidSvg(source)
+  if (!bubble.contains(code)) {
+    // 期间又渲了一帧（v-html 重建）：旧槽位作废，避免把卡塞进已脱离的节点
+    return
+  }
+  const card = document.createElement('div')
+  card.className = MMD_CARD_CLASS
+  // svg === null（render error / 3s 超时 / 超上限）⇒ 源码态卡兜底（§三.7 口径；不留无 handler 的钮）
+  card.innerHTML = buildMermaidCardHtml(svg === null ? null : prepareMermaidSvg(svg))
+  const codeBox = card.querySelector('.mmdc-src')
+  if (codeBox) {
+    // textContent 赋值 = 纯文本，零 HTML 注入面
+    codeBox.textContent = source
+  }
+  initMermaidInline(card)
+  code.parentElement?.replaceWith(card)
+}
+
+/** 视口门控：可见才渲染。root = 消息滚动容器（无 IO / 无容器 ⇒ 立即渲染）。 */
+function scheduleMermaidSlot(bubble: Element, code: Element, source: string): void {
+  const root = msgWrapRef.value
+  if (typeof IntersectionObserver === 'undefined' || root === null) {
+    void renderMermaidSlot(bubble, code, source)
+    return
+  }
+  if (mermaidObserver === null) {
+    mermaidObserver = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) {
+          continue
+        }
+        const target = entry.target
+        mermaidObserver?.unobserve(target)
+        const pending = mermaidPending.get(target)
+        mermaidPending.delete(target)
+        if (pending !== undefined) {
+          void renderMermaidSlot(pending.bubble, target, pending.source)
+        }
+      }
+    }, { root, rootMargin: '200px' })
+  }
+  mermaidPending.set(code, { source, bubble })
+  mermaidObserver.observe(code)
+}
+
+function hydrateMermaid(messageId: string, blocks: Array<{ index: number; key: string; source: string }>): void {
   const bubble = msgWrapRef.value?.querySelector(`[data-testid="msg-bubble-${messageId}"]`)
   if (!bubble) {
     return
@@ -2521,17 +2575,7 @@ async function hydrateMermaid(messageId: string, blocks: Array<{ index: number; 
     if (!code) {
       continue
     }
-    const svg = await renderMermaidSvg(item.source)
-    const card = document.createElement('div')
-    card.className = MMD_CARD_CLASS
-    // svg === null（render error / 3s 超时）⇒ 源码态卡兜底（§三.7 口径；不留无 handler 的钮）
-    card.innerHTML = buildMermaidCardHtml(svg === null ? null : prepareMermaidSvg(svg))
-    const codeBox = card.querySelector('.mmdc-src')
-    if (codeBox) {
-      codeBox.textContent = item.source // textContent 赋值 = 纯文本，零 HTML 注入面
-    }
-    initMermaidInline(card)
-    code.parentElement?.replaceWith(card)
+    scheduleMermaidSlot(bubble, code, item.source)
   }
 }
 
@@ -3538,6 +3582,10 @@ onBeforeUnmount(() => {
   }
   // 问题1 偏差修正批 aj14d ②：注销流式防抖 flush 回调（面板卸载后不再重入渲染）
   setStreamFlushHandler(null)
+  // 性能专项（2026-10-24）：mermaid 视口观察器与待渲染登记随面板销毁（避免持有已脱离的源码块）
+  mermaidObserver?.disconnect()
+  mermaidObserver = null
+  mermaidPending.clear()
   ai.stopWorkspaceSync()
 })
 </script>

@@ -138,7 +138,6 @@ class AiControllerZombieGateTest {
 				this.properties, mock(Environment.class), mock(com.example.configmgr.job.service.JobWatchdog.class));
 		ReflectionTestUtils.setField(built, "inputSanitizer", new InputSanitizer());
 		ReflectionTestUtils.setField(built, "aiRateLimiter", new AiRateLimiter(this.redis.redis, this.properties));
-		ReflectionTestUtils.setField(built, "inputDlp", new com.example.configmgr.ai.gate.InputDlp());
 		ReflectionTestUtils.setField(built, "contextFieldGate", new com.example.configmgr.ai.gate.ContextFieldGate());
 		return built;
 	}

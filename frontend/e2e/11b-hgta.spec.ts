@@ -573,7 +573,13 @@ async function openExportedSheet(page: Page, taskId: number): Promise<void> {
   await expect(page.locator('.el-tab-pane canvas').first()).toBeVisible({ timeout: 60_000 })
 }
 
-/** 在页面里跑产品自己的表格工具函数，返回它的文本结果（真实 SpreadJS 数据）。 */
+/**
+ * 在页面里跑产品自己的表格工具函数，返回它的文本结果（真实 SpreadJS 数据）。
+ *
+ * <p>L-115：根因修在产线（`SpreadGrid` 适配器 live 绑定 + `sheet.current` 等载入落定），这里只做
+ * **有界重取一次**的韧性补充 —— 仅当失败形态是"表格正在重建/尚未就绪"这类瞬态时才重取一次，
+ * 其余失败照旧一次判红（不给断言降级留口子）。
+ */
 async function runSheetTool(
   page: Page,
   tool: 'readSheetSummary' | 'findRows' | 'aggregateSheet',
@@ -586,15 +592,33 @@ async function runSheetTool(
           { ok: false; reason: string } | { ok: true; ctx: unknown }
         >
       }
-      const resolved = await ft.resolveSheetContext(defCode)
-      if (!resolved.ok) return { ok: false, text: `resolve 失败：${resolved.reason}` }
       const st = (await import('/src/utils/sheet-tools.ts')) as unknown as Record<
         string,
         (ctx: unknown, toolArgs2: unknown) => { ok: boolean; text?: string; reason?: string }
       >
-      const fn = st[toolName]
-      const out = fn(resolved.ctx, toolArgs)
-      return { ok: out.ok, text: out.ok ? (out.text ?? '') : `拒绝：${out.reason ?? ''}` }
+      const transient = (text: string): boolean => /重建|尚未就绪|还没有可操作|请重试/.test(text)
+      const attempt = async (): Promise<{ ok: boolean; text: string; transient: boolean }> => {
+        const resolved = await ft.resolveSheetContext(defCode)
+        if (!resolved.ok) {
+          const text = `resolve 失败：${resolved.reason}`
+          return { ok: false, text, transient: transient(text) }
+        }
+        try {
+          const fn = st[toolName]
+          const out = fn(resolved.ctx, toolArgs)
+          const text = out.ok ? (out.text ?? '') : `拒绝：${out.reason ?? ''}`
+          return { ok: out.ok, text, transient: false }
+        } catch (error) {
+          const text = `读取失败：${error instanceof Error ? error.message : String(error)}`
+          return { ok: false, text, transient: transient(text) }
+        }
+      }
+      let out = await attempt()
+      if (out.transient) {
+        await new Promise((resolve) => setTimeout(resolve, 150))
+        out = await attempt()
+      }
+      return { ok: out.ok, text: out.text }
     },
     { toolName: tool, args, defCode: DEF }
   )
@@ -727,7 +751,9 @@ ${panelText}`
     await expect(card).toBeVisible({ timeout: 60_000 })
 
     // 预览生成后，真实改一格（走页面自己的适配器写口），指纹随即失效
-    const touched = await page.evaluate(async (defCode) => {
+    // L-115 诊断：失败信息里带**具体分支**（解析失败的原因 / 表里到底有什么），
+    // 避免「touched=false」把"表格不可用"和"表里没有 USD"混成一条红。
+    const probe = await page.evaluate(async (defCode) => {
       const ft = (await import('/src/utils/frontend-tools.ts')) as unknown as {
         resolveSheetContext: (code: string) => Promise<
           | { ok: false; reason: string }
@@ -744,18 +770,20 @@ ${panelText}`
         >
       }
       const resolved = await ft.resolveSheetContext(defCode)
-      if (!resolved.ok) return false
+      if (!resolved.ok) return { touched: false, reason: `resolve 失败：${resolved.reason}` }
       const { adapter } = resolved.ctx
-      for (let row = 0; row < adapter.rowCount(); row += 1) {
+      const rows = adapter.rowCount()
+      for (let row = 0; row < rows; row += 1) {
         if (adapter.getCell(row, 0) === 'USD') {
           // 行指纹取「主键列」的值 ⇒ 改主键才构成"预览期间表被改动"
           adapter.writeCells([{ row, col: 0, value: 'USD-改过' }])
-          return true
+          return { touched: true, reason: '' }
         }
       }
-      return false
+      const head = Array.from({ length: Math.min(rows, 5) }, (_, row) => String(adapter.getCell(row, 0))).join(',')
+      return { touched: false, reason: `表里没有 code=USD 的行（rowCount=${rows}，首列前 5 行=${head || '（空）'}）` }
     }, DEF)
-    expect(touched).toBe(true)
+    expect(probe.touched, probe.reason).toBe(true)
 
     await card.locator('[data-testid="sheet-preview-apply"]').click()
     // 整批拒绝：卡面出现「预览期间已变动 / 未应用任何改动」的失败结论

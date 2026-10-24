@@ -290,6 +290,8 @@ interface GridApi {
   toXlsxBlob(): Promise<Blob>
   validateLocal(): ExcelRowIssue[]
   getSheetAdapter(): SheetAdapter
+  /** L-115：等表格内容落定（载入在途时挂起，无在途载入立即结算） */
+  whenLoaded(): Promise<void>
 }
 
 interface StagingGroup {
@@ -663,8 +665,34 @@ async function handleUpload(uploadFile: UploadFile): Promise<void> {
   await uploadOne(file)
 }
 
-/** 载入各配置项的编辑区：有 UPLOAD 文件用文件，否则用客户端生成的模板。 */
+/**
+ * 载入各配置项的编辑区：有 UPLOAD 文件用文件，否则用客户端生成的模板。
+ *
+ * <p>L-115：`editorLoaded` 是"载入完成"判据，但并发调用会各扫一遍（同一张表被重复 `fromJSON`）。
+ * 用 `editorLoadInFlight` 把并发调用并到同一次载入上 —— 页面能力 `sheet.current` 等待的必须是
+ * **这一次真的载入**，而不是"已经有人在载入了"就提前放行。
+ */
+let editorLoadInFlight: Promise<void> | null = null
+
 async function loadEditors(force = false): Promise<void> {
+  if (editorLoadInFlight !== null) {
+    await editorLoadInFlight
+    if (!force) {
+      return
+    }
+  }
+  const run = loadEditorsNow(force)
+  editorLoadInFlight = run
+  try {
+    await run
+  } finally {
+    if (editorLoadInFlight === run) {
+      editorLoadInFlight = null
+    }
+  }
+}
+
+async function loadEditorsNow(force: boolean): Promise<void> {
   if (stepIndex.value !== 0 || taskId.value === null) {
     return
   }
@@ -707,11 +735,21 @@ function onGridSelectionChanged(defCode: string): void {
   aiStore.onSheetSelectionChanged(defCode)
 }
 
-async function ensureEditorLoaded(code: string): Promise<void> {
+/**
+ * 等某个配置项的编辑区**真的载入完成**（L-115：页面能力交出适配器前的关闸）。
+ *
+ * <p>返回真实结局而不是静默 void：载入失败时 `editorLoaded` 不会置位，调用方（`sheet.current`）
+ * 必须能把失败如实说出来，而不是交出一张空表让工具读成「0 行」。
+ */
+async function ensureEditorLoaded(code: string): Promise<{ ok: boolean; error: string }> {
   if (editorLoaded.has(code)) {
-    return
+    return { ok: true, error: '' }
   }
   await loadEditors()
+  if (editorLoaded.has(code)) {
+    return { ok: true, error: '' }
+  }
+  return { ok: false, error: '编辑区表格未能载入（请重试，或重新打开该配置的编辑标签页）' }
 }
 
 function onGridChanged(): void {
@@ -1178,7 +1216,7 @@ function registerHandlers(): void {
   })
 
   // AI 表格操作专项：当前激活编辑标签页的表格适配器（与导出向导同一套 `sheet.current` 契约）。
-  registerPageHandler('sheet.current', (payload) => {
+  registerPageHandler('sheet.current', async (payload) => {
     const code = String(payload.defCode ?? activeEditorTab.value ?? '')
     if (!code) {
       return { ok: false, reason: '当前没有激活的编辑标签页。请先在第 1 步勾选配置项并打开编辑区。' }
@@ -1194,6 +1232,13 @@ function registerHandlers(): void {
       return { ok: false, reason: `${code} 的编辑区表格未挂载（请重开该标签页后重试）。` }
     }
     try {
+      // L-115：编辑区可能还在载入（首次勾选 / 换文件后 `loadEditors` 在飞）—— 等**内容**落定
+      // 再交出适配器，否则工具读到空表（T05 的「0 行」/ T13 的「0 组」）。
+      const loaded = await ensureEditorLoaded(code)
+      if (!loaded.ok) {
+        return { ok: false, reason: `${code} 的${loaded.error}` }
+      }
+      await grid.whenLoaded()
       return {
         ok: true,
         defCode: code,

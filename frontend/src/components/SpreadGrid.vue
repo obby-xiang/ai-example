@@ -97,6 +97,56 @@ let resizeTimer: ReturnType<typeof setTimeout> | null = null
 let pendingLoad: { fields: readonly ConfigField[]; rows: readonly Record<string, unknown>[] } | null = null
 
 /**
+ * 在途载入计数（L-115）。
+ *
+ * <p>用计数而不是布尔：`loadFromXlsx → loadFromJson` 会嵌套，二者各持一层。
+ * `whenLoaded()` 靠它把「表格位置已挂载」与「表格内容已就绪」分开 —— 页面能力（`sheet.current`）
+ * 必须在它归零后才交出适配器，否则工具读到的是空表（E2E-T05 的「0 行」/ E2E-T13 的「0 组」）。
+ */
+let loadDepth = 0
+let loadIdleWaiters: Array<() => void> = []
+
+function beginLoad(): void {
+  loadDepth += 1
+}
+
+function finishLoad(): void {
+  if (loadDepth > 0) {
+    loadDepth -= 1
+  }
+  if (loadDepth > 0) {
+    return
+  }
+  const waiters = loadIdleWaiters
+  loadIdleWaiters = []
+  waiters.forEach((resolve) => resolve())
+}
+
+/** 引擎失败/超时时载入永远不会落定 —— 必须唤醒等待者，否则 `whenLoaded()` 悬挂。 */
+function abandonLoads(): void {
+  pendingLoad = null
+  loadDepth = 0
+  const waiters = loadIdleWaiters
+  loadIdleWaiters = []
+  waiters.forEach((resolve) => resolve())
+}
+
+/**
+ * 等表格**内容**落定（页面能力 `sheet.current` 用）。
+ *
+ * <p>无在途载入时立即结算 —— 对"表格确实是空的（0 行）"不制造假等待；
+ * 只有真有一次载入在飞时才等它，从而区分「空表」与「还没载入」。
+ */
+async function whenLoaded(): Promise<void> {
+  if (loadDepth === 0) {
+    return
+  }
+  await new Promise<void>((resolve) => {
+    loadIdleWaiters.push(resolve)
+  })
+}
+
+/**
  * 等待引擎就绪的兜底上限（B-07 双侧兜底）。
  *
  * 论证（对齐既有常量，非拍脑袋）：这里的等待实质是"同一条网络栈上拉一个 ~4.7MB 的
@@ -158,6 +208,9 @@ function settleReady(): void {
 function failReady(message: string): void {
   engineState.value = 'failed'
   engineError.value = message
+  // 载入永远不会落定（引擎就绪前 / 引擎挂了）⇒ 先放行 `whenLoaded()` 的等待者，
+  // 免得页面能力在失败路径上永久悬挂（与 readyPromise 的四路径结算同一条纪律）。
+  abandonLoads()
   settleReady()
 }
 
@@ -207,7 +260,12 @@ onMounted(async () => {
     if (pendingLoad) {
       const request = pendingLoad
       pendingLoad = null
-      applyLoad(request.fields, request.rows)
+      try {
+        applyLoad(request.fields, request.rows)
+      } finally {
+        // 挂起的载入在 `loadData` 里记了一层，这里补落定（L-115）
+        finishLoad()
+      }
     }
     settleReady()
     emit('ready')
@@ -299,9 +357,16 @@ function loadData(fieldDefs: readonly ConfigField[], rows: readonly Record<strin
   fields = fieldDefs
   if (!workbook.value || !spreadNs) {
     pendingLoad = { fields: fieldDefs, rows }
+    // 挂起到引擎就绪也算"在途载入"：`whenLoaded()` 不能在补做之前放行（L-115）
+    beginLoad()
     return
   }
-  applyLoad(fieldDefs, rows)
+  beginLoad()
+  try {
+    applyLoad(fieldDefs, rows)
+  } finally {
+    finishLoad()
+  }
 }
 
 /**
@@ -318,23 +383,28 @@ async function waitForReady(): Promise<void> {
 
 /** 从工作簿 JSON 载入（模板 JSON / 已保存的编辑结果）。 */
 async function loadFromJson(json: string, fieldDefs: readonly ConfigField[]): Promise<void> {
-  await waitForReady()
-  const instance = workbook.value
-  if (!instance || !spreadNs) {
-    throw new Error('表格引擎尚未就绪')
-  }
-  restoring = true
+  beginLoad()
   try {
-    instance.fromJSON(json)
-    const sheet = findDataSheet(instance) ?? instance.getActiveSheet()
-    fields = fieldDefs
-    if (fieldDefs.length > 0) {
-      applyColumnsToSheet(spreadNs, sheet, fieldDefs)
+    await waitForReady()
+    const instance = workbook.value
+    if (!instance || !spreadNs) {
+      throw new Error('表格引擎尚未就绪')
     }
+    restoring = true
+    try {
+      instance.fromJSON(json)
+      const sheet = findDataSheet(instance) ?? instance.getActiveSheet()
+      fields = fieldDefs
+      if (fieldDefs.length > 0) {
+        applyColumnsToSheet(spreadNs, sheet, fieldDefs)
+      }
+    } finally {
+      restoring = false
+    }
+    applyReadOnly()
   } finally {
-    restoring = false
+    finishLoad()
   }
-  applyReadOnly()
 }
 
 /**
@@ -343,14 +413,19 @@ async function loadFromJson(json: string, fieldDefs: readonly ConfigField[]): Pr
  * 返回缺失表头，供页面提示"文件缺少字段列"（不静默丢列）。
  */
 async function loadFromXlsx(blob: Blob, fieldDefs: readonly ConfigField[]): Promise<{ missingHeaders: string[] }> {
-  const json = await blobToWorkbookJson(blob)
-  await loadFromJson(json, fieldDefs)
-  const instance = workbook.value
-  if (!instance || fieldDefs.length === 0) {
-    return { missingHeaders: fieldDefs.map((field) => field.label) }
+  beginLoad()
+  try {
+    const json = await blobToWorkbookJson(blob)
+    await loadFromJson(json, fieldDefs)
+    const instance = workbook.value
+    if (!instance || fieldDefs.length === 0) {
+      return { missingHeaders: fieldDefs.map((field) => field.label) }
+    }
+    const sheet = findDataSheet(instance) ?? instance.getActiveSheet()
+    return { missingHeaders: readRows(sheet, fieldDefs).missingHeaders }
+  } finally {
+    finishLoad()
   }
-  const sheet = findDataSheet(instance) ?? instance.getActiveSheet()
-  return { missingHeaders: readRows(sheet, fieldDefs).missingHeaders }
 }
 
 /** 读回非空行（字段编码 → 字符串值），全空行自动跳过。 */
@@ -409,6 +484,11 @@ function selectionOf(
  * <p>
  * 用工作表实例作键而不是"组件实例一个单例"：同一组件换工作表时身份随之更换，各表的撤销栈
  * 不会串台；`fields` 由 {@link buildSheetAdapter} 闭包读**当前变量**，重载定义不会留旧列数。
+ *
+ * <p>
+ * **L-115**：缓存的键必须是「当前活着的 worksheet」。`workbook.fromJSON()` 会重建工作表集
+ * （旧实例被引擎丢弃），所以重建后 `activeSheet()` 已是新实例 ⇒ 缓存键随之更换；
+ * 而重建前取走的适配器由 {@link buildSheetAdapter} 的 live 绑定跟到新实例（见该函数说明）。
  */
 const sheetAdapters = new WeakMap<SpreadWorksheet, SheetAdapter>()
 
@@ -428,20 +508,68 @@ function getSheetAdapter(): SheetAdapter {
 }
 
 /**
+ * 工作表实例是否仍被当前工作簿持有（L-115 的判据）。
+ *
+ * <p>`fromJSON()`（载入 xlsx / 模板 JSON）会**重建工作表集**：旧实例被引擎丢弃，内部引用置空。
+ * 此后对旧实例的 `getRowCount()` 抛 `TypeError: Cannot read properties of null`，
+ * `getValue/getArray` 读回 `null` —— 11b 的 E2E-T02/T03 就是这样红的。
+ */
+function isLiveSheet(sheet: SpreadWorksheet): boolean {
+  const instance = workbook.value
+  if (!instance) {
+    return false
+  }
+  try {
+    // 常态：适配器绑的就是活动工作表（O(1) 快路径）
+    if (instance.getActiveSheet() === sheet) {
+      return true
+    }
+    const count = instance.getSheetCount()
+    for (let index = 0; index < count; index += 1) {
+      if (instance.getSheet(index) === sheet) {
+        return true
+      }
+    }
+  } catch {
+    return false
+  }
+  return false
+}
+
+/**
  * 行口径：适配器行 = 数据行下标（0 基）⇒ 视口行 = row + 1（视口第 0 行是表头）。
  * 批量写走 `setArray`（逐格 `setValue` 在数千行上会卡主线程），且**只发一次 `data-changed`**
  * （否则一个 N 格操作会打 N 次事件）。
+ *
+ * <p>**live 绑定（L-115）**：闭包不再信任建对象那一刻的 sheet，每次操作先 `live()` 解析一次。
+ * 适配器可能被调用方持有到重建之后（工具解析上下文 → 引擎重建 → 读取），此时旧实例已不可读：
+ * - 仍被工作簿持有（多 sheet 的常规切换）⇒ 照旧用它，不跨表；
+ * - 已被引擎丢弃（fromJSON 重建 / 换文件）⇒ 改绑到当前活动表，读到的始终是**活数据**；
+ * - 整本工作簿都没了（组件卸载）⇒ 抛可读错误，让调用方按"重新打开表格"处置，而不是读回空值。
  */
-function buildSheetAdapter(sheet: SpreadWorksheet): SheetAdapter {
-  const rowCount = (): number => Math.max(0, sheet.getRowCount() - 1)
-  const colCount = (): number => (fields.length > 0 ? fields.length : sheet.getColumnCount())
+function buildSheetAdapter(initial: SpreadWorksheet): SheetAdapter {
+  let bound = initial
+  const live = (): SpreadWorksheet => {
+    if (isLiveSheet(bound)) {
+      return bound
+    }
+    const current = activeSheet()
+    if (!current) {
+      throw new Error('表格已重建或已关闭，请重新打开表格后重试')
+    }
+    bound = current
+    return bound
+  }
+  const rowCount = (): number => Math.max(0, live().getRowCount() - 1)
+  const colCount = (): number => (fields.length > 0 ? fields.length : live().getColumnCount())
   return {
     rowCount,
     colCount,
-    header: (col) => String(sheet.getValue(0, col) ?? ''),
-    getCell: (row, col) => sheet.getValue(row + 1, col),
-    getArray: (row, col, rows, cols) => sheet.getArray(row + 1, col, rows, cols) as unknown[][],
+    header: (col) => String(live().getValue(0, col) ?? ''),
+    getCell: (row, col) => live().getValue(row + 1, col),
+    getArray: (row, col, rows, cols) => live().getArray(row + 1, col, rows, cols) as unknown[][],
     writeCells: (updates) => {
+      const sheet = live()
       const list = updates.filter((update) => update.row >= 0 && update.row < rowCount() && update.col >= 0 && update.col < colCount())
       if (list.length === 0) {
         return
@@ -478,13 +606,14 @@ function buildSheetAdapter(sheet: SpreadWorksheet): SheetAdapter {
       }
       emit('data-changed')
     },
-    selection: (): SheetSelection | null => selectionOf(sheet.getSelections()),
+    selection: (): SheetSelection | null => selectionOf(live().getSelections()),
     // 屏幕态标记（AI 表格工具治理 §5.4）：只设底色，不碰 cell style 的持久结构、
     // 不调 conditionalFormats —— 后者会进 toWorkbookJson()，而导出链只读值（collectRows）。
     markCells: (cells, tone) => {
       if (cells.length === 0) {
         return
       }
+      const sheet = live()
       const resolvedTone: MarkTone = tone === 'preview' ? 'preview' : 'applied'
       const color = resolvedTone === 'preview' ? AI_PREVIEW_BACKCOLOR : AI_CHANGED_BACKCOLOR
       restoring = true
@@ -506,6 +635,7 @@ function buildSheetAdapter(sheet: SpreadWorksheet): SheetAdapter {
       if (markedCells.length === 0) {
         return
       }
+      const sheet = live()
       const colors = tone === 'preview'
         ? [AI_PREVIEW_BACKCOLOR]
         : tone === 'applied' ? [AI_CHANGED_BACKCOLOR] : [AI_CHANGED_BACKCOLOR, AI_PREVIEW_BACKCOLOR]
@@ -551,6 +681,7 @@ defineExpose({
   toWorkbookJson,
   toXlsxBlob,
   validateLocal,
-  getSheetAdapter
+  getSheetAdapter,
+  whenLoaded
 })
 </script>

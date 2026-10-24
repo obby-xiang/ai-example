@@ -15,7 +15,12 @@
  *   （DOMPurify 默认协议过滤）/class/src/alt 与图标几何集合；禁 style / on* 事件 / iframe / script / 表单控件。
  * - 流式策略（§三.2 + m1）：hljs 高亮 memo（已完成围栏不重解析高亮 = 块级 memo 的落点）；
  *   未闭合围栏（流式尾块）渲染为纯文本规避闪烁，闭合后二次渲染才高亮/进 mermaid；
- *   长文 >10k 字符降级（关高亮与 mermaid，结构照渲）；单次渲染超耗时预算（24ms）后续渲染同降级。
+ *   长文 >10k 字符**按条**降级（关高亮与 mermaid，结构照渲；不粘滞、不影响下一条）。
+ * - **流式块级「净化后 HTML」前缀缓存（2026-10-24 性能专项）**：markdown-it 顶层 token 流定出
+ *   「最后一个顶层块之前」的冻结前缀，前缀产物（sanitize 之后）按源文本前缀复用 ⇒ 每帧只
+ *   重新净化新增块（DOMPurify 是瓶颈，md.parse ≈ 1.2ms/4k）；前缀 / 新增块各自独立过同一套白名单；
+ *   `data-fence-key` 按前缀围栏数续号保证全局唯一；原生 HTML 跨块 / 引用式链接定义退回全文渲染；
+ *   流式结束整篇重渲一次。
  * - **流式代码块防抖口径（问题1 偏差修正批 aj14d 落地：立即渲染 + 75ms 防抖 + 块级稳定 key）**：
  *   ① **未闭合 fence 立即渲染**（纯文本、不高亮、不折叠）—— 防抖目标是「高亮闪烁」而非「结构出现」，
  *      让未闭合块延后出现只会让流式观感变空；
@@ -26,27 +31,75 @@
  *      `data-fence-key="f{n}-{lang}"`（fence 规则内自增，见 `nextFenceKey`），
  *      流式未闭合阶段与闭合之后序号/语言均不变 ⇒ 渲染产物带稳定身份，
  *      mermaid 卡按该 key 绑定槽位（不再靠位置下标），「代码块 → mermaid 卡」的替换不会打到别的块上。
- * - mermaid（§三.7）：securityLevel:'strict' + htmlLabels:false + suppressErrorRendering:true，
- *   渲染产物 SVG 过 DOMPurify SVG profile；失败（render error/超时 3s）保留源码块。
+ * - mermaid（§三.7）：securityLevel:'strict' + htmlLabels:false + suppressErrorRendering:true +
+ *   maxTextSize / maxEdges 硬上限，渲染产物 SVG 过 DOMPurify SVG profile；
+ *   失败（render error / 超时 3s / 超上限）保留源码块；组件侧按可见性惰性水合。
  */
 import MarkdownIt from 'markdown-it'
 import type { MarkdownIt as MarkdownItInstance } from 'markdown-it'
 import DOMPurify from 'dompurify'
-import * as hljsNs from 'highlight.js'
-import type HljsType from 'highlight.js'
+// 高亮瘦身（2026-10-24 性能专项）：全量入口 ~1.0MB（gzip ~310KB）里绝大部分是语言定义，
+// 改 core + 常用语言白名单（15 种，~78KB / gzip ~25KB）；未注册语言走既有 escapeHtml 兜底（行为兼容）。
+import hljs from 'highlight.js/lib/core'
+import javascript from 'highlight.js/lib/languages/javascript'
+import typescript from 'highlight.js/lib/languages/typescript'
+import java from 'highlight.js/lib/languages/java'
+import python from 'highlight.js/lib/languages/python'
+import sql from 'highlight.js/lib/languages/sql'
+import json from 'highlight.js/lib/languages/json'
+import bash from 'highlight.js/lib/languages/bash'
+import yaml from 'highlight.js/lib/languages/yaml'
+import xml from 'highlight.js/lib/languages/xml'
+import css from 'highlight.js/lib/languages/css'
+import markdownLanguage from 'highlight.js/lib/languages/markdown'
+import diff from 'highlight.js/lib/languages/diff'
+import go from 'highlight.js/lib/languages/go'
+import csharp from 'highlight.js/lib/languages/csharp'
+import kotlin from 'highlight.js/lib/languages/kotlin'
 // hljs 库默认主题（决策卡 §二.2：高亮用库默认主题色，不计入 UI 用色收敛）
 import 'highlight.js/styles/github.css'
 import { i18n } from '@/locales'
 
-// vitest/vite 下 default 互operability 兜底：命名空间与 default 两个形态取有 getLanguage 的那个
-const hljs: typeof HljsType = ((hljsNs as unknown as { default?: typeof HljsType }).default ?? hljsNs) as typeof HljsType
+/**
+ * 常用语言白名单（15 种）。别名随语言定义自带：xml → html/svg 等、markdown → md、
+ * typescript → ts、javascript → js、bash → sh、yaml → yml、python → py。
+ */
+const HLJS_LANGUAGES = {
+  javascript,
+  typescript,
+  java,
+  python,
+  sql,
+  json,
+  bash,
+  yaml,
+  xml,
+  css,
+  markdown: markdownLanguage,
+  diff,
+  go,
+  csharp,
+  kotlin
+}
+for (const [name, definition] of Object.entries(HLJS_LANGUAGES)) {
+  hljs.registerLanguage(name, definition)
+}
 
-/** 长文降级阈值（字符数，决策卡 §三.2「>10k」）。 */
+/** 已注册语言（诊断/回归用：hljs 白名单必须保持收敛，防全量包回流）。 */
+export function highlightLanguages(): string[] {
+  return hljs.listLanguages()
+}
+
+/** 长文降级阈值（字符数，决策卡 §三.2「>10k」；**按条**短路、不粘滞）。 */
 export const DEGRADE_AT_CHARS = 10_000
-/** 单次渲染耗时预算（ms）——超出即后续渲染降级（m1 耗时预算）。 */
-export const RENDER_BUDGET_MS = 24
 /** mermaid 单次渲染超时（ms），超时按失败兜底（源码块保留）。 */
 const MERMAID_TIMEOUT_MS = 3_000
+/** mermaid 图源硬上限（字符）——超出由 mermaid 抛错，回源码卡（防超长图卡死主线程）。 */
+export const MERMAID_MAX_TEXT_SIZE = 30_000
+/** mermaid 边数硬上限——同上。 */
+export const MERMAID_MAX_EDGES = 300
+/** mermaid SVG 渲染缓存上限（源码指纹 → 净化后 SVG）。 */
+export const MERMAID_CACHE_MAX = 64
 
 /** DOMPurify 白名单（§三.3）。span 仅限 class="hljs-*"（下方 hook 收窄）；
  *  R-163B G4：figure/figcaption/button 为代码块图容器（button 仅 type="button"，hook 强制）；
@@ -176,28 +229,7 @@ function highlightCode(lang: string, code: string): string {
   return out
 }
 
-/** 降级开关：长文阈值或耗时预算触发后，后续渲染关高亮/mermaid（结构照渲）。 */
-let degraded = false
-
-export function isDegraded(): boolean {
-  return degraded
-}
-
-/**
- * 归零自适应降级开关。
- *
- * <p>产品语义里 {@code degraded} 是<b>页签级（模块全局）粘滞</b>的：一次慢渲染后本页签不再尝试
- * 高亮/ mermaid，免得反复越预算；实现上它就是模块级单例 —— 同页签内的下一批渲染继承判定，
- * 刷新页签才归零。单测用例跑在同一个模块实例上（等价于"同一页签"），故必须每例归零。
- *
- * <p>若漏归零，一条慢渲染就污染其后全部用例。实测（2026-10-21）：
- * 并行 worker 下 CPU 抖动会让首个用例的单次渲染越过 {@link RENDER_BUDGET_MS}（24ms），
- * 随后 12 条 mermaid / 代码块用例连带变红；同一现象在父提交上以同样 CPU 压力可复现
- * ⇒ 既有缺陷，与本批改动无关（见 {@code tests/setup.ts} 的全局 beforeEach）。
- */
-export function resetDegradation(): void {
-  degraded = false
-}
+/** 长文降级已收敛为**按条短路**（>10k 的这条消息关高亮/mermaid，结构照渲）；不再有任何粘滞开关。 */
 
 /* ---------- R-165 S5c：正文排版工具类（原 src/styles/ai-chat.css 的 .md-body / 表格 / figure.code 族
    逐值迁移；类串写在本 .ts 源码里 ⇒ 被 tailwind.config.js 的 content 扫到并编译进产物） ---------- */
@@ -323,7 +355,8 @@ function applyTypographyRules(instance: MarkdownItInstance): void {
  * 白名单净化（唯一链路的安全面不在解析层双保险，而在净化层单点收口；复核 F3 更正 stale 注释）。
  */
 const md = new MarkdownIt({
-  html: true, // 原生 HTML 经 markdown-it 透传，统一由 DOMPurify 白名单净化（唯一链路的本意）
+  // 原生 HTML 经 markdown-it 透传，统一由 DOMPurify 白名单净化（唯一链路的本意）
+  html: true,
   linkify: true,
   breaks: false,
   highlight: (code, lang) => {
@@ -337,7 +370,8 @@ const md = new MarkdownIt({
 
 /** 降级实例：无 highlight（围栏内纯文本转义），markdown 结构照渲。 */
 const mdDegraded = new MarkdownIt({
-  html: true, // 原生 HTML 经 markdown-it 透传，统一由 DOMPurify 白名单净化（唯一链路的本意）
+  // 原生 HTML 经 markdown-it 透传，统一由 DOMPurify 白名单净化（唯一链路的本意）
+  html: true,
   linkify: true,
   breaks: false,
   highlight: (code) => escapeHtml(code)
@@ -638,7 +672,7 @@ function wrapTables(html: string): string {
  */
 let fenceRenderSeq = 0
 
-/** 当前围栏块的稳定身份（fence 规则内取值；`renderNow` 每次渲染前归零）。 */
+/** 当前围栏块的稳定身份（fence 规则内取值；`renderNow` 每块渲染前置位到该块的起始序号）。 */
 function nextFenceKey(info: string | undefined): string {
   fenceRenderSeq += 1
   const lang = (info ?? '').trim().split(/\s+/)[0] ?? ''
@@ -663,6 +697,7 @@ function fenceKeyAttr(attrs: string): string {
  * 产物一律经白名单（新增 svg 图标与表格区标记类已登记在 ALLOWED_TAGS / RENDER_MARKER_CLASSES）。
  *
  * 问题1 偏差修正批 aj14d：`blockKey` 给定时，流式块走 75ms 防抖准入（见 `STREAM_DEBOUNCE_MS`）。
+ * 性能专项（2026-10-24）：流式块另走「净化后 HTML 前缀缓存」（见下方 {@link renderNow}）。
  */
 export function renderMarkdown(text: string, streaming: boolean, blockKey?: string): MarkdownRender {
   if (streaming && blockKey !== undefined) {
@@ -676,7 +711,7 @@ export function renderMarkdown(text: string, streaming: boolean, blockKey?: stri
       }
     }
   }
-  const render = renderNow(text, streaming)
+  const render = renderNow(text, streaming, blockKey)
   if (streaming && blockKey !== undefined) {
     if (streamRenders.size >= STREAM_RENDER_MAX) {
       const first = streamRenders.keys().next().value
@@ -689,8 +724,197 @@ export function renderMarkdown(text: string, streaming: boolean, blockKey?: stri
   return render
 }
 
-/** 单块渲染本体（防抖准入之外的全部逻辑，含降级判定与耗时预算记账）。 */
-function renderNow(text: string, streaming: boolean): MarkdownRender {
+/* ---------- 性能专项（2026-10-24）：流式块级「净化后 HTML」前缀缓存 ----------
+ *
+ * 瓶颈不在解析（md.parse ≈ 1.2ms/4k）而在 DOMPurify，且流式每帧都从字符 0 全量重净化 ⇒ O(n²)。
+ * 做法（Streamdown / LobeChat 同构）：用 markdown-it 顶层 token 流定出「已定型前缀」，
+ * 前缀的**净化后 HTML** 按源文本前缀（`startsWith`）复用，只对新增块重新 render + sanitize。
+ * 净化口径一字不改：每块仍独立过同一套白名单与 hook；缓存里只存 sanitizeHtml 之后的字符串。
+ * 流式结束（streaming=false）必须整篇重渲一次（分块边界可能带来细微结构差异，如表格补齐、
+ * 尾围栏闭合后的图容器/高亮恢复）。
+ * ------------------------------------------------------------------------- */
+
+interface PrefixEntry {
+  /** 冻结的源文本前缀（下一帧的文本必须 `startsWith` 它才可复用）。 */
+  src: string
+  /** 该前缀的**净化后 HTML**。 */
+  html: string
+  /** 前缀内的围栏数（`data-fence-key` 续号用 —— 错号会让 mermaid 卡绑错槽位）。 */
+  fences: number
+  /** 构建时的降级态（跨越 >10k 阈值会换渲染实例，高亮口径不同 ⇒ 必须重切）。 */
+  degraded: boolean
+}
+
+const prefixCache = new Map<string, PrefixEntry>()
+const PREFIX_CACHE_MAX = 16
+
+/** 渲染诊断（测试/基准用）：分块与全文路径的次数。 */
+export interface MarkdownRenderStats {
+  /** 走整篇渲染的次数。 */
+  fullRenders: number
+  /** 命中已冻结前缀的次数。 */
+  prefixHits: number
+  /** 首次为某块构建冻结前缀的次数（含降级态切换后的重切）。 */
+  prefixBuilds: number
+  /** 分块（前缀 + 新增块）渲染的次数。 */
+  chunkRenders: number
+}
+
+const renderStats: MarkdownRenderStats = { fullRenders: 0, prefixHits: 0, prefixBuilds: 0, chunkRenders: 0 }
+
+/** 当前渲染诊断快照（只读副本）。 */
+export function getMarkdownRenderStats(): MarkdownRenderStats {
+  return { ...renderStats }
+}
+
+/** 归零渲染诊断（测试/基准用）。 */
+export function resetMarkdownRenderStats(): void {
+  renderStats.fullRenders = 0
+  renderStats.prefixHits = 0
+  renderStats.prefixBuilds = 0
+  renderStats.chunkRenders = 0
+}
+
+/** 已解析源码（token + env）——让「定边界」与「渲染」共用一次 parse。 */
+interface ParsedSource {
+  tokens: ReturnType<MarkdownItInstance['parse']>
+  env: Record<string, unknown>
+}
+
+interface PrefixProbe {
+  /** 可冻结前缀的字符长度（0 = 无可用前缀；-1 = 本帧必须整篇渲染）。 */
+  length: number
+  /** 整篇解析结果（仅在 `length <= 0` 时由调用方直接拿去渲染，省掉第二次 parse）。 */
+  parsed: ParsedSource | null
+}
+
+/**
+ * 探测稳定前缀（0 = 无可用前缀；-1 = 本帧必须整篇渲染）。
+ *
+ * <p>判据来自 markdown-it 顶层 token 流（不换解析器）：冻结边界 = **最后一个顶层块的起始行**。
+ * 该行之后的内容仍可能增长（流式尾块），此前的块已定型 ⇒ 只对它们复用净化产物。
+ *
+ * <p>两类必须退回全文的情形：
+ * <ul>
+ *   <li>`env.references` 非空（引用式链接定义可出现在文末，反向影响前缀里的 `[x][ref]`）；</li>
+ *   <li>前缀内含原生 HTML token（`html:true` 下未闭合标签会跨块吞内容，分块净化会就地闭合
+ *       —— `<div>` + 后续段落的形态见 `markdown-render-perf.spec.ts`）。</li>
+ * </ul>
+ */
+function probePrefix(text: string): PrefixProbe {
+  if (text.includes('\r')) {
+    // 行号→字符偏移按 LF 计（CRLF 由 markdown-it 归一，原串偏移不可直接复用）
+    return { length: -1, parsed: null }
+  }
+  const env: Record<string, unknown> = {}
+  let tokens
+  try {
+    tokens = md.parse(text, env)
+  } catch {
+    return { length: -1, parsed: null }
+  }
+  const parsed: ParsedSource = { tokens, env }
+  const references = env.references
+  if (references !== null && typeof references === 'object' && Object.keys(references).length > 0) {
+    return { length: -1, parsed }
+  }
+  let lastStart = -1
+  let boundaryToken = -1
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i]
+    if (token.level !== 0 || token.map === null) {
+      continue
+    }
+    lastStart = token.map[0]
+    boundaryToken = i
+  }
+  if (lastStart <= 0 || boundaryToken <= 0) {
+    return { length: 0, parsed }
+  }
+  for (let i = 0; i < boundaryToken; i += 1) {
+    const token = tokens[i]
+    if (token.type === 'html_block') {
+      return { length: -1, parsed }
+    }
+    // 行内原生 HTML 挂在 inline token 的 children 上（顶层 token 流里看不到 html_inline 类型）
+    if (token.children?.some((child) => child.type === 'html_inline') === true) {
+      return { length: -1, parsed }
+    }
+  }
+  return { length: lineOffset(text, lastStart), parsed }
+}
+
+/** 第 `line` 行（0 起）的行首字符偏移（LF 口径；CR 已在调用方拦下）。 */
+function lineOffset(text: string, line: number): number {
+  let offset = 0
+  for (let i = 0; i < line; i += 1) {
+    const nl = text.indexOf('\n', offset)
+    if (nl < 0) {
+      return text.length
+    }
+    offset = nl + 1
+  }
+  return offset
+}
+
+interface ChunkResult {
+  html: string
+  fences: number
+  mermaid: Array<{ index: number; key: string; source: string }>
+}
+
+/**
+ * 单块渲染流水线（全文路径 = 一个 chunk；前缀缓存路径 = 冻结前缀 chunk + 新增块 chunk）。
+ * `mermaidBase` 是该 chunk 在整篇里的 mermaid 起始下标（跨 chunk 合并后 index 仍是全局序号）。
+ * `stripTailLanguage` 只对「含未闭合流式尾围栏」的那个 chunk 为真。
+ */
+function renderChunk(
+  source: string,
+  instance: MarkdownItInstance,
+  options: { collectMermaid: boolean; mermaidBase: number; stripTailLanguage: boolean },
+  parsed?: ParsedSource | null
+): ChunkResult {
+  const startSeq = fenceRenderSeq
+  // 已有整篇 token 时直接走 renderer（等价 instance.render，但省掉一次 parse）
+  let html =
+    parsed === undefined || parsed === null
+      ? instance.render(source)
+      : instance.renderer.render(parsed.tokens, instance.options, parsed.env)
+  const fences = fenceRenderSeq - startSeq
+  html = wrapTables(html)
+  const mermaid: Array<{ index: number; key: string; source: string }> = []
+  if (options.collectMermaid) {
+    // 登记闭合 mermaid 围栏（按出现序）；源码块本身留在净化后 HTML 里。
+    // aj14d ③：key 直接读该围栏 pre 上的稳定身份（渲染期已盖，不另算序号）。
+    let match: RegExpExecArray | null
+    mermaidIndexRe.lastIndex = 0
+    while ((match = mermaidIndexRe.exec(html)) !== null) {
+      mermaid.push({
+        index: options.mermaidBase + mermaid.length,
+        key: /data-fence-key="([^"]*)"/.exec(match[1])?.[1] ?? '',
+        source: unescapeHtml(match[2])
+      })
+    }
+    // G4：非 mermaid 围栏包成图容器（语言标签 + 复制按钮）
+    html = wrapFenceFigures(html)
+  }
+  if (options.stripTailLanguage) {
+    // 未闭合尾围栏：剥掉尾块 language-* class（纯文本口径，闭合后二次渲染才恢复高亮）
+    const at = html.lastIndexOf('class="language-')
+    if (at >= 0) {
+      html = html.slice(0, at) + html.slice(at).replace(/class="language-[^"]*"/, 'class=""')
+    }
+  }
+  return { html: sanitizeHtml(html), fences, mermaid }
+}
+
+/**
+ * 单块渲染本体（防抖准入之外的全部逻辑）。
+ *
+ * <p>流式且给了 `blockKey` 时走前缀缓存；否则（非流式 / 无 key）整篇渲染并清掉该块的旧前缀
+ * —— 流式结束必须整篇重渲一次，校正分块边界带来的细微结构差异。
+ */
+function renderNow(text: string, streaming: boolean, blockKey?: string): MarkdownRender {
   const fenceOpen = streaming && hasUnclosedFence(text)
   // 指纹 = 尾围栏 info 行之后的代码体（与 markdown-it 传给 highlight 的 code 逐字相等）
   let tailSource: string | null = null
@@ -699,38 +923,97 @@ function renderNow(text: string, streaming: boolean): MarkdownRender {
     const nl = tailRaw.indexOf('\n')
     tailSource = nl >= 0 ? tailRaw.slice(nl + 1) : ''
   }
-  tailFenceFingerprint = tailSource
+  const useDegraded = text.length > DEGRADE_AT_CHARS
+  const instance = useDegraded ? mdDegraded : md
+  const cacheKey = streaming && blockKey !== undefined ? blockKey : null
   try {
-    const useDegraded = degraded || text.length > DEGRADE_AT_CHARS
-    const started = performance.now()
-    fenceRenderSeq = 0 // aj14d ③：本次渲染的围栏序号归零（key 恒为「本次渲染内出现序」）
-    let html = (useDegraded ? mdDegraded : md).render(text)
-    html = wrapTables(html)
-    const mermaid: Array<{ index: number; key: string; source: string }> = []
-    if (!useDegraded && !streaming) {
-      // 登记闭合 mermaid 围栏（按出现序）；源码块本身留在净化后 HTML 里。
-      // aj14d ③：key 直接读该围栏 pre 上的稳定身份（渲染期已盖，不另算序号）。
-      let match: RegExpExecArray | null
-      let index = 0
-      mermaidIndexRe.lastIndex = 0
-      while ((match = mermaidIndexRe.exec(html)) !== null) {
-        mermaid.push({ index, key: /data-fence-key="([^"]*)"/.exec(match[1])?.[1] ?? '', source: unescapeHtml(match[2]) })
-        index++
+    if (cacheKey === null) {
+      if (blockKey !== undefined) {
+        // 流式结束/非流式：整篇重渲，前缀缓存作废
+        prefixCache.delete(blockKey)
       }
-      // G4：非 mermaid 围栏包成图容器（语言标签 + 复制按钮）
-      html = wrapFenceFigures(html)
+      renderStats.fullRenders += 1
+      fenceRenderSeq = 0
+      tailFenceFingerprint = tailSource
+      const chunk = renderChunk(text, instance, {
+        collectMermaid: !useDegraded && !streaming,
+        mermaidBase: 0,
+        stripTailLanguage: fenceOpen
+      })
+      return { html: chunk.html, mermaid: chunk.mermaid }
     }
-    if (fenceOpen) {
-      // 未闭合尾围栏：剥掉尾块 language-* class（纯文本口径，闭合后二次渲染才恢复高亮）
-      const at = html.lastIndexOf('class="language-')
-      if (at >= 0) {
-        html = html.slice(0, at) + html.slice(at).replace(/class="language-[^"]*"/, 'class=""')
+    const probe = probePrefix(text)
+    const boundary = probe.length
+    if (boundary <= 0) {
+      // 只有一个顶层块（或本帧不可切）：整篇渲染；结果不进前缀缓存（下一帧边界可能前移）
+      renderStats.fullRenders += 1
+      fenceRenderSeq = 0
+      tailFenceFingerprint = tailSource
+      const chunk = renderChunk(
+        text,
+        instance,
+        { collectMermaid: false, mermaidBase: 0, stripTailLanguage: fenceOpen },
+        probe.parsed
+      )
+      return { html: chunk.html, mermaid: chunk.mermaid }
+    }
+    let prefix: PrefixEntry
+    const cached = prefixCache.get(cacheKey)
+    if (
+      cached === undefined ||
+      cached.degraded !== useDegraded ||
+      cached.src.length > boundary ||
+      !text.startsWith(cached.src)
+    ) {
+      renderStats.prefixBuilds += 1
+      fenceRenderSeq = 0
+      // 前缀里的围栏恒为闭合块，不得被尾围栏指纹抑制高亮
+      tailFenceFingerprint = null
+      const built = renderChunk(text.slice(0, boundary), instance, {
+        collectMermaid: false,
+        mermaidBase: 0,
+        stripTailLanguage: false
+      })
+      prefix = { src: text.slice(0, boundary), html: built.html, fences: built.fences, degraded: useDegraded }
+    } else if (cached.src.length < boundary) {
+      // 边界前移（新块已定型）：只渲染「新完成的块」，按序追加到已冻结的净化产物后面
+      renderStats.prefixHits += 1
+      fenceRenderSeq = cached.fences
+      tailFenceFingerprint = null
+      const gap = renderChunk(text.slice(cached.src.length, boundary), instance, {
+        collectMermaid: false,
+        mermaidBase: 0,
+        stripTailLanguage: false
+      })
+      prefix = {
+        src: text.slice(0, boundary),
+        html: cached.html + gap.html,
+        fences: cached.fences + gap.fences,
+        degraded: useDegraded
+      }
+    } else {
+      renderStats.prefixHits += 1
+      prefix = cached
+    }
+    // 刷新 LRU 位置（活跃增长的前缀不被最旧淘汰误伤）
+    prefixCache.delete(cacheKey)
+    if (prefixCache.size >= PREFIX_CACHE_MAX) {
+      const first = prefixCache.keys().next().value
+      if (first !== undefined) {
+        prefixCache.delete(first)
       }
     }
-    if (performance.now() - started > RENDER_BUDGET_MS) {
-      degraded = true
-    }
-    return { html: sanitizeHtml(html), mermaid }
+    prefixCache.set(cacheKey, prefix)
+    renderStats.chunkRenders += 1
+    // 续号：键值在整篇内连续且唯一（mermaid 卡按 key 绑槽位）
+    fenceRenderSeq = prefix.fences
+    tailFenceFingerprint = tailSource
+    const rest = renderChunk(text.slice(prefix.src.length), instance, {
+      collectMermaid: false,
+      mermaidBase: 0,
+      stripTailLanguage: fenceOpen
+    })
+    return { html: prefix.html + rest.html, mermaid: rest.mermaid }
   } finally {
     tailFenceFingerprint = null
   }
@@ -749,19 +1032,28 @@ function unescapeHtml(s: string): string {
     .replace(/&amp;/g, '&')
 }
 
-/** mermaid 模块惰性初始化（securityLevel:'strict' / htmlLabels:false / suppressErrorRendering:true）。 */
+/** mermaid 模块惰性初始化（securityLevel:'strict' / htmlLabels:false / suppressErrorRendering:true / 图源硬上限）。 */
 let mermaidPromise: Promise<typeof import('mermaid')> | null = null
 
 function loadMermaid(): Promise<typeof import('mermaid')> {
-  mermaidPromise ??= import('mermaid').then((mod) => {
-    mod.default.initialize({
-      startOnLoad: false,
-      securityLevel: 'strict',
-      htmlLabels: false,
-      suppressErrorRendering: true
+  mermaidPromise ??= import('mermaid')
+    .then((mod) => {
+      mod.default.initialize({
+        startOnLoad: false,
+        securityLevel: 'strict',
+        htmlLabels: false,
+        suppressErrorRendering: true,
+        maxTextSize: MERMAID_MAX_TEXT_SIZE,
+        maxEdges: MERMAID_MAX_EDGES
+      })
+      return mod
     })
-    return mod
-  })
+    .catch((error: unknown) => {
+      // 失败不缓存（与 spreadjs.ts 同纪律）：动态 import 抖动/失败后下一次调用重试，
+      // 而不是把一次失败永久钉成"mermaid 不可用"。
+      mermaidPromise = null
+      throw error
+    })
   return mermaidPromise
 }
 
@@ -786,7 +1078,7 @@ export async function renderMermaidSvg(source: string): Promise<string | null> {
     )
     const result = (await Promise.race([mod.default.render(id, source), timeout])) as { svg: string }
     const svg = sanitizeSvg(result.svg)
-    if (mermaidCache.size >= 20) {
+    if (mermaidCache.size >= MERMAID_CACHE_MAX) {
       const first = mermaidCache.keys().next().value
       if (first !== undefined) {
         mermaidCache.delete(first)

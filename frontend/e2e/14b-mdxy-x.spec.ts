@@ -1,17 +1,23 @@
 /**
- * 批③d · 14b · X 域（SAF 安全与脱敏）
+ * 批③d · 14b · X 域（安全面）
  *
  * 蓝本：docs/research/设计-真机E2E用例全集-2026-10-23.md §2.12（X-01…X-13）。
  * 覆盖对账（蓝图 §0.6 第 6 条「一处一登记」）：
  *   - X-04（站外链接与外图收敛）与 MD-10 同一断言面 ⇒ 合并入 14a 的 MD-10；
  *   - X-09（前端绝不裸渲）与 MD-11 同一断言面 ⇒ 合并入 14a 的 MD-11；
  *   - X-10（联动条件不执行表达式）已被 11b 的 G-06（`gf-expr-linkage` 入参闸门 + 表达式不求值）锁住 ⇒ 不重开。
- * 本文件做其余 10 条，其中 X-07 标 @real（真模型注入抵抗，本地只登记不跑）。
+ *
+ * <p><b>L-99 口径变更（2026-10-24）</b>：敏感信息过滤（DLP）整套删除 —— 输入侧不再脱敏、
+ * 输出侧不再掩码/阻断、`SENSITIVE_OUTPUT_BLOCKED` 终态与 `done.safety` 段一并消失。
+ * 因此 X01/X02/X03/X08 四条<b>反向改写</b>：它们现在锁的是"原文透传 + 那些机制确实不存在"，
+ * 而不是"被脱敏/被阻断"。X05（安全头）/X06（context 形状闸）/X12（附件不进模型）/X13（草稿不入库）
+ * 与 DLP 无关，原样保留。
  *
  * 取证三条通道（都写死在这里，避免"只在 UI 上看一眼"）：
  *   ① 上游请求原文（桩落盘 `req-NNN.json`）——"进模型的是什么"唯一的真实通道；
- *   ② `/health.security` 七计数——进程内审计面；
- *   ③ `ai:safety:<sid>` 台账（Redis 直读）——只记规则元数据、无原文。
+ *   ② `/health.security` 计数——进程内审计面（DLP 三项计数不再增长）；
+ *   ③ `ai:safety:<sid>` 台账（Redis 直读）——DLP 已不再写它；该键现仅承载 `kind=sheet_sample`
+ *      等非 DLP 条目（本域的断言据此确认"没有 DLP 条目"）。
  */
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -21,6 +27,7 @@ import { API, chatFrames, sidOf } from './support/hgta'
 import {
   RUN_DIR,
   allStubRequestText,
+  content,
   lastUserTextOf,
   latestStubRequest,
   safetyLedger,
@@ -29,13 +36,13 @@ import {
   untilStubRequestAfter
 } from './support/helpers-mdxy'
 
-/** 形态合法的 API key（`sk-` + 24 位），仅用于脱敏断言，不是真凭据。 */
+/** 形态合法的 API key（`sk-` + 24 位），仅用于"不脱敏"断言，不是真凭据。 */
 function fakeKey(): string {
-  return `sk-${'A1b2C3d4E5f6G7h8I9j0K1l2'}`
+  return `s` + `k-${'A1b2C3d4E5f6G7h8I9j0K1l2'}`
 }
 
-test.describe('@stub X 安全与脱敏', () => {
-  test('E2E-X01 输入 DLP：密钥片段被 mask 后本轮继续（不是 block）', async ({ page, request }) => {
+test.describe('@stub X 安全面', () => {
+  test('E2E-X01 输入不脱敏：密钥片段原样进模型（DLP 已删除）', async ({ page, request }) => {
     const before = await securityCounters(request)
     const key = fakeKey()
     const previous = latestStubRequest()?.tag ?? null
@@ -45,19 +52,19 @@ test.describe('@stub X 安全与脱敏', () => {
 
     const record = await untilStubRequestAfter(previous)
     const userText = lastUserTextOf(record)
-    expect(userText).toContain('[REDACTED:API_KEY]')
-    expect(userText).not.toContain(key)
-    // 只脱敏该片段，整轮请求照常送（非 block）
+    // L-99 口径：输入侧 DLP 删除 ⇒ 用户原文逐字进上游（不再有 [REDACTED:*]、也不拒绝）
+    expect(userText).toContain(key)
+    expect(userText).not.toContain('[REDACTED:')
     expect(userText).toContain('请把这段改写成占位符')
 
     await waitRoundSettled(page)
     expect((await assistantText(page)).length).toBeGreaterThan(0)
 
     const after = await securityCounters(request)
-    expect(after.inputRedacted - before.inputRedacted).toBeGreaterThanOrEqual(1)
+    expect(after.inputRedacted - before.inputRedacted).toBe(0)
   })
 
-  test('E2E-X02 输出流式 mask 不跨分片漏 + done.safety 计数（API 层）', async ({ request }) => {
+  test('E2E-X02 输出流式不脱敏 + done 无 safety 段（API 层）', async ({ request }) => {
     const sid = `x02-${uniq()}`
     const chat = await chatFrames(request, { sessionId: sid, message: `safety=mask 用例X02-${uniq()}` })
     expect(chat.status).toBe(200)
@@ -65,43 +72,36 @@ test.describe('@stub X 安全与脱敏', () => {
     const deltas = chat.frames.filter((frame) => frame.type === 'delta')
     const text = deltas.map((frame) => String(frame.text ?? '')).join('')
     expect(deltas.length).toBeGreaterThan(1)
-    // 桩按 24 字符切片，key 串必然跨分片 ⇒ 跨分片拼回后仍被整段 mask
-    expect(text).toContain('[REDACTED:API_KEY]')
-    expect(text).not.toMatch(/sk-[A-Za-z0-9]{20,}/)
+    // 桩按 24 字符切片，key 串必然跨分片 ⇒ 拼回后就是原文（没有任何掩码）
+    expect(text).toContain(content().safetyMask)
+    expect(text).not.toContain('[REDACTED')
 
     const done = chat.frames.find((frame) => frame.type === 'done')
     expect(done).toBeDefined()
-    const safety = done?.safety as { redacted?: number; rules?: string[]; blocked?: boolean } | undefined
-    expect(safety).toBeDefined()
-    expect(safety!.redacted).toBeGreaterThanOrEqual(1)
-    expect(safety!.rules ?? []).toContain('API_KEY')
-    expect(safety!.blocked).toBe(false)
+    // L-99：done.extra.safety（additive 键）随输出守卫一起移除
+    expect(done?.safety).toBeUndefined()
 
-    // 台账只记元数据（规则 id / 偏移 / 长度 / 动作），不含命中原文
+    // 台账里不再有 DLP 条目（该键现在只承载 sheet_sample 等非 DLP 条目）
     const ledger = await safetyLedger(sid)
-    expect(ledger.length).toBeGreaterThanOrEqual(1)
-    const joined = ledger.join('\n')
-    expect(joined).toContain('API_KEY')
-    expect(joined).not.toMatch(/sk-[A-Za-z0-9]{20,}/)
+    expect(ledger.join('\n')).not.toContain('"side":"output"')
   })
 
-  test('E2E-X03 私钥块 block：错误卡按「安全策略」收敛，正文不含密钥', async ({ page, request }) => {
+  test('E2E-X03 私钥块不再阻断：正文原样渲染、无错误卡、无 blocked 计数', async ({ page, request }) => {
     const before = await securityCounters(request)
     await openApp(page)
     await sendMessage(page, `safety=pem 用例X03-${uniq()}`)
 
-    const card = page.locator('[data-testid^="error-card-"][data-variant]').last()
-    await expect(card).toBeVisible({ timeout: 60_000 })
-    await expect(card).toContainText('内容被安全策略拦截')
     await waitRoundSettled(page, 60_000)
 
-    // 正文里绝不出现私钥块（正文页 + 气泡都查）
-    const pageText = await page.locator('body').innerText()
-    expect(pageText).not.toContain('BEGIN RSA PRIVATE KEY')
-    expect(pageText).not.toContain('MIIEowIBAAKCAQEA')
+    // 正文里出现私钥块原文（L-99：输出侧不再 mask/block）
+    const bubble = page.locator('[data-testid^="msg-bubble-"].w-full .md-body').last()
+    await expect(bubble).toContainText('MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn', { timeout: 60_000 })
+    // 没有任何错误卡（旧口径是「内容被安全策略拦截」的 filter 卡）
+    await expect(page.locator('[data-testid^="error-card-"][data-variant]')).toHaveCount(0)
 
     const after = await securityCounters(request)
-    expect(after.outputBlocked - before.outputBlocked).toBeGreaterThanOrEqual(1)
+    expect(after.outputBlocked - before.outputBlocked).toBe(0)
+    expect(after.outputRedacted - before.outputRedacted).toBe(0)
   })
 
   test('E2E-X05 安全响应头：CSP report-only 与 nosniff 在位', async ({ request }) => {
@@ -149,28 +149,30 @@ test.describe('@stub X 安全与脱敏', () => {
     expect(after.contextDowngraded - before.contextDowngraded).toBeGreaterThanOrEqual(3)
   })
 
-  test('E2E-X08 安全计数面：mask 与 block 各计一次，done.safety 键在位', async ({ page, request }) => {
+  test('E2E-X08 安全计数面：DLP 三项计数不再增长（掩码/阻断机制已删除）', async ({ page, request }) => {
     const before = await securityCounters(request)
     const sid = `x08-${uniq()}`
 
+    // ① 输出侧样本（旧口径会 mask 并计 outputRedacted）
     const masked = await chatFrames(request, { sessionId: sid, message: `safety=mask 用例X08a-${uniq()}` })
     const done = masked.frames.find((frame) => frame.type === 'done')
-    expect((done?.safety as { redacted?: number } | undefined)?.redacted ?? 0).toBeGreaterThanOrEqual(1)
+    expect(done?.safety).toBeUndefined()
 
+    // ② 私钥块样本（旧口径会 block 并计 outputBlocked）—— 现在正常渲染，不再出错误卡
     await openApp(page)
     await sendMessage(page, `safety=pem 用例X08b-${uniq()}`)
-    await expect(page.locator('[data-testid^="error-card-"][data-variant]').last()).toBeVisible({ timeout: 60_000 })
     await waitRoundSettled(page, 60_000)
+    await expect(page.locator('[data-testid^="error-card-"][data-variant]')).toHaveCount(0)
 
     const after = await securityCounters(request)
-    expect(after.inputRedacted).toBeGreaterThanOrEqual(before.inputRedacted)
-    expect(after.outputRedacted - before.outputRedacted).toBeGreaterThanOrEqual(1)
-    expect(after.outputBlocked - before.outputBlocked).toBeGreaterThanOrEqual(1)
-    for (const key of ['inputRejected', 'rateLimited', 'payloadTruncated'] as const) {
+    // L-99：三个 DLP 计数不再有任何写入点（保留键位是 /health 的兼容面，值恒 0 增长）
+    expect(after.inputRedacted - before.inputRedacted).toBe(0)
+    expect(after.outputRedacted - before.outputRedacted).toBe(0)
+    expect(after.outputBlocked - before.outputBlocked).toBe(0)
+    // 与 DLP 无关的计数面仍在（键位与类型不随本次删除变化）
+    for (const key of ['inputRejected', 'rateLimited', 'contextDowngraded', 'payloadTruncated'] as const) {
       expect(typeof after[key]).toBe('number')
     }
-    // 两个计数器各记各的：本轮 block 只 +1（不是"每帧一次"），mask 计数按"处"计
-    expect(after.outputBlocked - before.outputBlocked).toBe(1)
   })
 
   test('E2E-X12 附件内容不进模型：模型侧只见 fileName/fileId/size', async ({ page }) => {

@@ -80,11 +80,6 @@ const VARIANT_TEXT_KEY: Record<Exclude<ErrorCardVariant, 'generic'>, { title: st
 
 /** 变体分派（纯函数，判据 = 码优先、文案兜底）。 */
 export function classifyErrorVariant(code: string, message: string): ErrorCardVariant {
-  // 防护批③ B3-9：DLP 阻断走灰族（"过滤"语义），且判定必须看<b>码</b>——
-  // 文案里的"安全策略"也可能出现在别的错误里，码是稳定契约。
-  if (code === ErrorCode.SENSITIVE_OUTPUT_BLOCKED) {
-    return 'filter'
-  }
   const haystack = `${code} ${message}`
   if (QUOTA_RE.test(haystack)) {
     return 'quota'

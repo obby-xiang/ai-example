@@ -8,9 +8,14 @@
  * 纪律：等待一律走条件轮询（不 sleep 断言）；断言面 = 桩落档 / SSE 帧 / 端点载荷 / data-testid。
  */
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
-import net from 'node:net'
 import { join } from 'node:path'
-import { PORTS, REDIS_DB, RUN_DIR, utf8Sink } from './harness'
+import {
+  PORTS,
+  REDIS_DB,
+  RUN_DIR,
+  redisExec as redisExecOn,
+  redisKeys as redisKeysOn
+} from './harness'
 
 export const KQC_RUN_DIR = RUN_DIR
 export const STUB_DIR = join(RUN_DIR, 'stub')
@@ -554,127 +559,21 @@ export function fingerprint(caseId: string): string {
   return `${caseId.toLowerCase()}-${Date.now().toString(36)}`
 }
 
-// ── Redis（本域 DB；harness 的 redisCommand 在 GET 上只等首行，这里等整包）────────────
-
-/**
- * 发一条命令并读**完整**回包（空闲 80ms 视为收完；不引第三方依赖）。
- * 返回 `{ type, value }`：`:1` → `{type:'int', value:'1'}`；`$5\r\ndata\r\n` → `{type:'bulk', value:'data'}`。
- */
-export function redisExec(args: string[], db = KQC_REDIS_DB): Promise<{ type: string; value: string }> {
-  const host = process.env.E2E_REDIS_HOST ?? '127.0.0.1'
-  const port = Number(process.env.E2E_REDIS_PORT ?? '6379')
-  return new Promise((done, fail) => {
-    const socket = net.connect(port, host)
-    let buffer = ''
-    // 跨块的 UTF-8 必须流式解码：逐块 toString 会把被块边界切开的中文解成 U+FFFD
-    //（K07「缓存值不变」的 CI 假红就是这么来的，见 harness.utf8Sink）
-    const sink = utf8Sink()
-    let selected = false
-    let idle: NodeJS.Timeout | null = null
-    let settled = false
-    const finish = (): void => {
-      if (settled) return
-      settled = true
-      if (idle) clearTimeout(idle)
-      socket.destroy()
-      const text = (buffer + sink.end()).replace(/\r\n$/, '')
-      if (text.startsWith(':')) return done({ type: 'int', value: text.slice(1) })
-      if (text.startsWith('$')) {
-        const split = text.indexOf('\r\n')
-        const payload = split >= 0 ? text.slice(split + 2) : ''
-        return done({ type: 'bulk', value: payload.replace(/\r\n$/, '') })
-      }
-      if (text.startsWith('+')) return done({ type: 'status', value: text.slice(1) })
-      done({ type: 'raw', value: text })
-    }
-    const failOnce = (error: Error): void => {
-      if (settled) return
-      settled = true
-      if (idle) clearTimeout(idle)
-      socket.destroy()
-      fail(error)
-    }
-    socket.setTimeout(5000, () => failOnce(new Error('redis 超时')))
-    socket.on('error', failOnce)
-    socket.on('data', (chunk) => {
-      buffer += sink.push(chunk)
-      if (idle) clearTimeout(idle)
-      idle = setTimeout(finish, 80)
-      if (!selected && buffer.includes('\r\n')) {
-        selected = true
-        buffer = ''
-        const bulk = `*${args.length}\r\n${args.map((part) => `$${Buffer.byteLength(part)}\r\n${part}\r\n`).join('')}`
-        if (idle) clearTimeout(idle)
-        socket.write(bulk)
-      }
-    })
-    socket.on('connect', () => {
-      socket.write(`*2\r\n$6\r\nSELECT\r\n$${String(db).length}\r\n${db}\r\n`)
-    })
-  })
-}
-
 /** 新会话 id（每个用例独立会话，避免跨用例记忆污染）。 */
 export function newSessionId(caseId: string): string {
   return `kqc-${caseId.toLowerCase()}-${Date.now().toString(36)}`
 }
 
+// ── Redis（本域 DB；统一走 harness 的 ioredis 客户端，不再自带 RESP 解析）──────────────
+
+/** 发一条命令 → `{ type, value }`。收包 / UTF-8 / SELECT 由 harness 的 ioredis 客户端负责。 */
+export function redisExec(args: string[], db = KQC_REDIS_DB): Promise<{ type: 'int' | 'bulk' | 'array'; value: string }> {
+  return redisExecOn(db, args)
+}
+
 /** `KEYS <pattern>`（本域独占 DB，量小无需 SCAN 分页）。 */
 export function redisKeys(pattern: string, db = KQC_REDIS_DB): Promise<string[]> {
-  const host = process.env.E2E_REDIS_HOST ?? '127.0.0.1'
-  const port = Number(process.env.E2E_REDIS_PORT ?? '6379')
-  return new Promise((done, fail) => {
-    const socket = net.connect(port, host)
-    let buffer = ''
-    const sink = utf8Sink()
-    let selected = false
-    let settled = false
-    const timer = setTimeout(() => failOnce(new Error('redis KEYS 超时')), 5000)
-    const failOnce = (error: Error): void => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      socket.destroy()
-      fail(error)
-    }
-    const parse = (text: string): string[] => {
-      const values: string[] = []
-      const body = text.replace(/^\*\d+\r\n/, '')
-      for (const part of body.split(/\r\n\$(?=\d)/)) {
-        const chunk = part.replace(/^\d+\r\n/, '')
-        if (chunk !== '') values.push(chunk)
-      }
-      return values
-    }
-    socket.setTimeout(5000, () => failOnce(new Error('redis KEYS 超时')))
-    socket.on('error', failOnce)
-    socket.on('data', (chunk) => {
-      buffer += sink.push(chunk)
-      if (settled) return
-      if (!selected && buffer.includes('\r\n')) {
-        selected = true
-        buffer = ''
-        const args = ['KEYS', pattern]
-        const bulk = `*${args.length}\r\n${args.map((part) => `$${Buffer.byteLength(part)}\r\n${part}\r\n`).join('')}`
-        socket.write(bulk)
-        return
-      }
-      if (selected && (buffer.startsWith('*') || buffer.startsWith('-'))) {
-        const lines = buffer.split('\r\n').length
-        // `*N` 之后应有 N 条 `$len` + 内容 ⇒ 行数 ≥ 2N+1 才算收全
-        const count = Number(/^\*(\d+)/.exec(buffer)?.[1] ?? '-1')
-        if (count >= 0 && lines >= 2 * count + 2) {
-          settled = true
-          clearTimeout(timer)
-          socket.destroy()
-          done(parse(buffer + sink.end()))
-        }
-      }
-    })
-    socket.on('connect', () => {
-      socket.write(`*2\r\n$6\r\nSELECT\r\n$${String(db).length}\r\n${db}\r\n`)
-    })
-  })
+  return redisKeysOn(db, pattern)
 }
 
 /** `TTL <key>`（秒；-1 = 无过期，-2 = 键不存在）。 */

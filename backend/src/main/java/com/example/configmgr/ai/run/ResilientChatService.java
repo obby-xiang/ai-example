@@ -20,7 +20,6 @@ import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.ai.tool.ToolResultEnvelope;
 import com.example.configmgr.ai.tool.ToolRegistry;
 import com.example.configmgr.ai.web.AiChatRequest;
-import com.example.configmgr.common.ErrorCodes;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -242,22 +241,18 @@ public class ResilientChatService {
 	private KbPromptSection kbPromptSection;
 
 	/**
-	 * 安全事件计数（防护批③ B3-5）。同为<b>字段注入</b>：单测直接 {@code new} 本类时缺席，
-	 * 计数退化为"不记"（安全计数不该成为跑一轮对话的前提）。
-	 */
-	@Autowired(required = false)
-	private SecurityEvents securityEvents;
-
-	/** 输出被安全策略阻断的机器可读码（防护批③ B3-3；前端错误卡按"过滤类"变体呈现）。别名到 {@link ErrorCodes}，码值不变。 */
-	public static final String SENSITIVE_OUTPUT_BLOCKED = ErrorCodes.SENSITIVE_OUTPUT_BLOCKED;
-
-	/**
-	 * <b>L-91</b>：思考文本在 {@code AssistantMessage} metadata 里的键名。
+	 * <b>L-91 / L-98</b>：思考文本在 {@code AssistantMessage} metadata 里的键名。
 	 *
 	 * <p>
 	 * 与 Spring AI 1.1.7 流式转换写入的键、以及 {@code ReasoningAwareOpenAiChatModel} 回填读取的键
 	 * <b>是同一个</b>（机制实证见 {@code ReasoningContentUpstreamProbeTest}）；写成常量是为了让
 	 * "透传"与"回填"共用一份拼写，升版改键时只需改这一处（且探针用例会先红）。
+	 *
+	 * <p>
+	 * L-98 起它同时是<b>记忆的写入键</b>：落定（{@link #finish}）与取消半截
+	 * （{@link #stoppedRoundMessages}）都把本段思考全文写进 assistant 消息的 metadata，
+	 * 经 {@link MessageJsonCodec} 存进 {@code chat:mem:<sid>} —— 下一轮请求因此能回填
+	 * {@code reasoning_content}（DeepSeek 带 tools 时缺它会 400）。
 	 */
 	public static final String REASONING_METADATA_KEY = "reasoningContent";
 
@@ -533,9 +528,6 @@ public class ResilientChatService {
 			long attemptStartedAtMs = System.currentTimeMillis();
 			long beaconBefore = this.beacon.startedCount(runId);
 			Accumulator accumulator = new Accumulator();
-			// 输出侧 DLP 的守卫：每次 attempt 一个新实例（重试不串尾巴）。
-			// 落点铁律见 OutputGuard 类注 —— 必须在 accumulator 之前，且不经 SseChatEmitter。
-			OutputGuard guard = new OutputGuard();
 			CompletableFuture<Void> settled = new CompletableFuture<>();
 			StreamWatchdog watchdog = new StreamWatchdog(runId, this.watchdogExecutor, config, this.beacon,
 					this.cancellations, turnStartedAtMs, settled::completeExceptionally);
@@ -560,7 +552,7 @@ public class ResilientChatService {
 							beat.put("upstreamEvents", watchdog.upstreamEvents());
 							out.heartbeat(beat);
 						}
-						consume(response, out, accumulator, guard);
+						consume(response, out, accumulator);
 					}, settled::completeExceptionally, () -> settled.complete(null));
 				watchdog.bind(subscription);
 
@@ -573,26 +565,15 @@ public class ResilientChatService {
 							"上游流已结束但缺少 finishReason 终帧——按断流处理，已收上游事件 "
 									+ watchdog.upstreamEvents() + " 个");
 				}
-				drain(guard, out, accumulator);
-				if (guard.blocked()) {
-					blockTerminal(runId, sessionId, accumulator, out, turn, guard);
-					return;
-				}
-				finish(runId, sessionId, accumulator, attempt, watchdog, out, turn, guard);
+				finish(runId, sessionId, accumulator, attempt, watchdog, out, turn);
 				return;
 			}
 			catch (Throwable error) {
-				drain(guard, out, accumulator);
 				// 首包可能已经到过（随后才断流）：先把"首包耗时"落在断流日志之前
 				emitFirstByte(attempt, attemptStartedAtMs, accumulator);
 				StreamViolationException violation = classify(error, watchdog.upstreamEvents());
 				if (StreamViolationException.CANCELLED.equals(violation.getCode())) {
-					cancelTerminal(runId, sessionId, accumulator, attempt, watchdog, out, turn, guard);
-					return;
-				}
-				if (guard.blocked()) {
-					// 私钥已判定外泄：无论上游怎么收场，本轮都必须以阻断终态结束（不可重试）
-					blockTerminal(runId, sessionId, accumulator, out, turn, guard);
+					cancelTerminal(runId, sessionId, accumulator, attempt, watchdog, out, turn);
 					return;
 				}
 				boolean emitted = accumulator.emittedAny();
@@ -811,7 +792,7 @@ public class ResilientChatService {
 	 * "用过工具"只说明这一轮做过事，不改变"模型没给出任何正文"这一事实。
 	 */
 	private void finish(String runId, String sessionId, Accumulator accumulator, int attempts, StreamWatchdog watchdog,
-			SseChatEmitter out, TurnContext turn, OutputGuard guard) {
+			SseChatEmitter out, TurnContext turn) {
 		String text = accumulator.text();
 		if (!StringUtils.hasText(text)) {
 			emptyReply(runId, sessionId, accumulator, attempts, out, turn);
@@ -821,7 +802,8 @@ public class ResilientChatService {
 		List<Message> history = new ArrayList<>();
 		if (snapshot != null) {
 			history = new ArrayList<>(this.codec.deserializeAll(snapshot.getMessageJson()));
-			history.add(AssistantMessage.builder().content(text).build());
+			// L-98：思考全文随 assistant 消息一起落记忆（键与 ReasoningAwareOpenAiChatModel 的回填读取同源）
+			history.add(assistantMessage(text, accumulator.reasoningText()));
 			snapshot.setMessageJson(this.codec.serializeAll(history));
 			snapshot.setInFlightToolCalls(new ArrayList<>());
 			snapshot.setAssistantContent(null);
@@ -840,8 +822,6 @@ public class ResilientChatService {
 		extra.put("upstreamEvents", watchdog == null ? 0 : watchdog.upstreamEvents());
 		extra.put("terminalSignal", accumulator.terminalSignal());
 		putParamsLocked(extra, turn);
-		// 防护批③ B3-4：安全事件走 done.extra（additive 可选键）—— SseChatEmitter 零改动
-		attachSafety(extra, guard, runId, sessionId);
 		// T5：正文段收尾（未开过段则不发 —— 纯工具轮没有正文）
 		out.textEnd(text.length());
 		// 上下文专项批①：先记账（真值回填 ai:ctx:），再发终帧（done.context 与端点必须同源）
@@ -853,7 +833,7 @@ public class ResilientChatService {
 	/**
 	 * 一轮的<b>唯一摘要行</b>（日志链路批）：{@code event=turn_end}。
 	 *
-	 * <p>五个终态出口（done / failed / empty_reply / blocked / cancelled）全都经过这里 ——
+	 * <p>四个终态出口（done / failed / empty_reply / cancelled）全都经过这里 ——
 	 * "按 runId grep 一定有收尾行"是排查手册的第一条，缺一个出口就等于缺一条线索。
 	 * 只记元数据：耗时、审批等待、工具次数、三维 token 与估算标记；<b>不含任何正文</b>。
 	 */
@@ -895,80 +875,6 @@ public class ResilientChatService {
 		catch (RuntimeException ex) {
 			// 终态行是"必须有"的那一行：读快照失败不得把它吞掉
 			return -1L;
-		}
-	}
-
-	/**
-	 * 敏感输出阻断终局（防护批③ B3-3）：正文段先收尾，再发<b>唯一</b>终帧
-	 * {@code error{SENSITIVE_OUTPUT_BLOCKED}}。
-	 *
-	 * <p>
-	 * 帧序与 {@link #fail} 完全同姿态（{@code textEnd} → {@code error}）：运行关闭前，
-	 * 它打开过的正文段必须先关闭；不写半截 assistant 正文进历史（半条含凭据的消息会污染记忆），
-	 * 快照转 {@code FAILED} 并带机器可读码。
-	 *
-	 * <p>
-	 * <b>不重试</b>：阻断是确定性结论（模型确实吐出了私钥块），重试只会再吐一次。
-	 */
-	private void blockTerminal(String runId, String sessionId, Accumulator accumulator, SseChatEmitter out,
-			TurnContext turn, OutputGuard guard) {
-		String message = "本轮回复包含高置信敏感凭据（私钥块），已按安全策略阻断并隐去；"
-				+ "如需排查该凭据，请在本地文件中查看，不要直接贴进对话。";
-		log.warn("输出被安全策略阻断 runId={} sessionId={} 规则={} 命中处数={} 已产出字符={}", runId, sessionId,
-				guard == null ? List.of() : guard.rules(), guard == null ? 0 : guard.redacted(),
-				accumulator == null ? 0 : accumulator.text().length());
-		RunSnapshot snapshot = this.store.get(runId);
-		if (snapshot != null) {
-			snapshot.setInFlightToolCalls(new ArrayList<>());
-			snapshot.setAssistantContent(null);
-			snapshot.setStatus(RunSnapshot.FAILED);
-			snapshot.setError(SENSITIVE_OUTPUT_BLOCKED + "：" + message);
-			this.store.save(snapshot);
-		}
-		recordSafety(runId, sessionId, guard);
-		out.textEnd(accumulator == null ? 0 : accumulator.text().length());
-		out.error(SENSITIVE_OUTPUT_BLOCKED, message);
-		emitTurnEnd(runId, sessionId, "blocked", SENSITIVE_OUTPUT_BLOCKED, 1, accumulator, turn, null);
-	}
-
-	/**
-	 * 终帧的 {@code safety} 段 + 安全事件记账（终态路径统一入口）。
-	 *
-	 * <p>未命中时<b>不写</b> {@code safety} 键（"没发生"与"发生 0 次"必须可区分，与 {@code done.context} 同姿态）。
-	 */
-	private void attachSafety(Map<String, Object> extra, OutputGuard guard, String runId, String sessionId) {
-		if (guard == null) {
-			return;
-		}
-		Map<String, Object> safety = guard.safety();
-		if (safety != null) {
-			extra.put("safety", safety);
-		}
-		recordSafety(runId, sessionId, guard);
-	}
-
-	/** 安全计数 + {@code ai:safety:} 台账（只记规则 id / 偏移 / 长度 / 动作，<b>无原文</b>）。 */
-	private void recordSafety(String runId, String sessionId, OutputGuard guard) {
-		if (guard == null) {
-			return;
-		}
-		if (this.securityEvents != null) {
-			this.securityEvents.outputRedacted(guard.redacted());
-			if (guard.blocked()) {
-				this.securityEvents.outputBlocked();
-			}
-		}
-		long now = System.currentTimeMillis();
-		for (OutputGuard.Event event : guard.events()) {
-			Map<String, Object> entry = new LinkedHashMap<>();
-			entry.put("atMs", now);
-			entry.put("runId", runId);
-			entry.put("side", "output");
-			entry.put("ruleId", event.ruleId());
-			entry.put("offset", event.offset());
-			entry.put("length", event.length());
-			entry.put("action", event.action());
-			this.store.appendSafetyEvent(sessionId, entry);
 		}
 	}
 
@@ -1023,8 +929,12 @@ public class ResilientChatService {
 	 * <li>历史里已经出现过该 toolCallId（异常流程下的重复挂起）时不重复造消息。</li>
 	 * </ol>
 	 * 都不满足（无正文且无 in-flight）⇒ 返回空列表（旧口径：不写空气泡）。
+	 *
+	 * <p><b>L-98</b>：这条半截 assistant 同时携带本段已产生的思考全文（键
+	 * {@link #REASONING_METADATA_KEY}）—— 取消不是"丢历史"的理由，后续每一轮都要能回填。
 	 */
-	private List<Message> stoppedRoundMessages(List<Message> history, RunSnapshot snapshot, String partial) {
+	private List<Message> stoppedRoundMessages(List<Message> history, RunSnapshot snapshot, String partial,
+			String reasoning) {
 		List<PendingToolCall> inFlight = snapshot.getInFlightToolCalls() == null ? List.of()
 				: snapshot.getInFlightToolCalls();
 		List<AssistantMessage.ToolCall> calls = new ArrayList<>(inFlight.size());
@@ -1047,7 +957,7 @@ public class ResilientChatService {
 		}
 		AssistantMessage.Builder builder = AssistantMessage.builder()
 			.content(partial)
-			.properties(new LinkedHashMap<>(Map.of(STOPPED_KEY, true)));
+			.properties(stoppedMetadata(reasoning));
 		if (!calls.isEmpty()) {
 			builder.toolCalls(calls);
 		}
@@ -1056,6 +966,31 @@ public class ResilientChatService {
 			out.add(ToolResponseMessage.builder().responses(responses).build());
 		}
 		return out;
+	}
+
+	/**
+	 * <b>L-98</b>：assistant 消息的元数据 —— 思考全文随消息一起进快照/记忆。
+	 *
+	 * <p>
+	 * 键名与 Spring AI 流式转换写入的键、以及 {@link #REASONING_METADATA_KEY} 的记录一致；
+	 * 空思考不写键（"没想过"与"想过但为空"必须可区分，也不给历史添空元数据）。
+	 */
+	private static AssistantMessage assistantMessage(String content, String reasoning) {
+		Map<String, Object> metadata = new LinkedHashMap<>();
+		if (reasoning != null && !reasoning.isEmpty()) {
+			metadata.put(REASONING_METADATA_KEY, reasoning);
+		}
+		return AssistantMessage.builder().content(content).properties(metadata).build();
+	}
+
+	/** 取消半截的元数据：{@code stopped} 标记 + 本段已产生的思考全文（可空）。 */
+	private static Map<String, Object> stoppedMetadata(String reasoning) {
+		Map<String, Object> metadata = new LinkedHashMap<>();
+		metadata.put(STOPPED_KEY, true);
+		if (reasoning != null && !reasoning.isEmpty()) {
+			metadata.put(REASONING_METADATA_KEY, reasoning);
+		}
+		return metadata;
 	}
 
 	/** 历史里是否已有该 toolCallId 的 assistant 工具调用（防重复造段）。 */
@@ -1079,7 +1014,7 @@ public class ResilientChatService {
 	 * 记忆与历史都看得见"这一轮被用户停在哪里"，而 {@code stopped} 标记让下一轮知道它不完整。
 	 */
 	private void cancelTerminal(String runId, String sessionId, Accumulator accumulator, int attempts,
-			StreamWatchdog watchdog, SseChatEmitter out, TurnContext turn, OutputGuard guard) {
+			StreamWatchdog watchdog, SseChatEmitter out, TurnContext turn) {
 		RunSnapshot snapshot = this.store.get(runId);
 		String partial = accumulator == null ? "" : accumulator.text();
 		// L-75：**先**把未决条目收敛成 CANCELLED，再写记忆 —— 否则记忆里的段级状态可能是
@@ -1090,7 +1025,8 @@ public class ResilientChatService {
 		this.store.cancelPendings(runId);
 		if (snapshot != null) {
 			List<Message> history = new ArrayList<>(this.codec.deserializeAll(snapshot.getMessageJson()));
-			for (Message stopped : stoppedRoundMessages(history, snapshot, partial)) {
+			for (Message stopped : stoppedRoundMessages(history, snapshot, partial,
+					accumulator == null ? "" : accumulator.reasoningText())) {
 				history.add(stopped);
 			}
 			snapshot.setMessageJson(this.codec.serializeAll(history));
@@ -1112,7 +1048,6 @@ public class ResilientChatService {
 		extra.put("upstreamEvents", watchdog == null ? 0 : watchdog.upstreamEvents());
 		extra.put("partialChars", accumulator == null ? 0 : accumulator.text().length());
 		putParamsLocked(extra, turn);
-		attachSafety(extra, guard, runId, sessionId);
 		// T5：取消也收尾正文段（半截正文不写进历史，但"这一段到此为止"必须显式告知前端）
 		out.textEnd(accumulator == null ? 0 : accumulator.text().length());
 		// 上下文专项批①：取消轮同样如实报占用（半轮的真值仍是真值，est 标注照旧）
@@ -1437,23 +1372,26 @@ public class ResilientChatService {
 
 	// ── 流式消费 ────────────────────────────────────────────────────────────
 
-	private void consume(ChatResponse response, SseChatEmitter out, Accumulator accumulator, OutputGuard guard) {
+	/**
+	 * 消费一个上游分片：思考段先发帧（并累全文），随后正文原样进累计器并发 delta。
+	 *
+	 * <p><b>L-99</b>：输出侧 DLP 已删除 —— 正文<b>原样</b>发帧与落记忆，不再有脱敏、尾部保留窗口
+	 * 或"阻断终态"。{@code message_end.chars == Σ delta 长度} 的同源判据因此更直接：
+	 * 累计器与 delta 吃的是同一份上游文本。
+	 */
+	private void consume(ChatResponse response, SseChatEmitter out, Accumulator accumulator) {
 		// L-91：先发思考段（模型"先想再答"；同一分片也可能同带 reasoning 与正文）。
-		// reasoning 不进 OutputGuard/累计器 —— 它不是正文：不参与 message_end(text).chars、
-		// 不进落定正文（finalText）、不进记忆。DLP 对思考文本不设闸（与"只脱敏正文"的既有口径一致）。
+		// L-98：reasoning 不进正文（不参与 message_end(text).chars、不进 finalText），
+		// 但**全文**由累加器保留，随落定/取消写进 assistant 消息 metadata（下一轮回填）。
 		String reasoning = chunkReasoning(response);
 		if (reasoning != null && !reasoning.isEmpty()) {
 			out.reasoningDelta(reasoning);
 			// 已产出思考 = 已产出内容：重试三条件里的"未产出内容"不再成立
 			// （否则 retry 会落在思考段之后，且前端会看到两段重复的思考）。
-			accumulator.reasoning(reasoning.length());
+			accumulator.reasoning(reasoning);
 		}
-		String raw = chunkText(response);
-		// 防护批③ B3-2：脱敏发生在**累计器之前**，且同一个 safe 同时喂给累计器与 delta ——
-		// "message_end.chars / 落定正文 / 记忆 / delta 拼接"四处同源（FrameContract#textSegmentContract）。
-		// 注意 guard.feed 可能扣住尾部（尾部保留窗口）而返回空串：此时一个字都不发也不累计。
-		String safe = guard == null ? raw : guard.feed(raw);
-		accumulator.accept(response, safe);
+		String text = chunkText(response);
+		accumulator.accept(response);
 		// T5：正文消息边界三段式（start/content/end）——start 只在首段前补一次，
 		// 后续每一片文本都是 content（delta）；end 在轮终态补（见 finish / cancelTerminal / fail）。
 		//
@@ -1461,9 +1399,9 @@ public class ResilientChatService {
 		// 而 Accumulator 无条件拼接每一个分片。于是模型单独吐一个纯空白分片（空格或换行，
 		// 流式分片边界上很常见）时，message_end.chars 会大于 delta 拼接长度，前端渲染的正文
 		// 与落定正文（finalText）分家。改为"非空即发"：空白也是正文的一部分，三处口径归一。
-		if (safe != null && !safe.isEmpty()) {
+		if (text != null && !text.isEmpty()) {
 			out.textStart();
-			out.delta(safe);
+			out.delta(text);
 		}
 	}
 
@@ -1494,26 +1432,6 @@ public class ResilientChatService {
 		return value instanceof String text ? text : null;
 	}
 
-	/**
-	 * 轮末清仓：把输出守卫里扣住的尾段一次性发出（并与累计器同源）。
-	 *
-	 * <p>四个终态路径（finish / emptyReply / cancelTerminal / fail）之前都必须先清仓，
-	 * 否则"最后 128 字符"会凭空消失（且 {@code message_end.chars} 与实际 delta 仍一致，
-	 * 只是内容少了一截 —— 这种"一致地丢字"最难查）。
-	 */
-	private void drain(OutputGuard guard, SseChatEmitter out, Accumulator accumulator) {
-		if (guard == null) {
-			return;
-		}
-		String tail = guard.flush();
-		if (tail == null || tail.isEmpty()) {
-			return;
-		}
-		accumulator.append(tail);
-		out.textStart();
-		out.delta(tail);
-	}
-
 
 	/**
 	 * 本次尝试的累计状态。
@@ -1536,8 +1454,8 @@ public class ResilientChatService {
 
 		private final StringBuilder text = new StringBuilder();
 
-		/** <b>L-91</b>：本尝试累计发出的思考字符数（只用于 {@link #emittedAny()}，不进正文/记忆）。 */
-		private final AtomicLong reasoningChars = new AtomicLong(0);
+		/** <b>L-91/L-98</b>：本尝试累计的思考全文（不进 {@link #text} —— 思考不是正文；原样进记忆元数据）。 */
+		private final StringBuilder reasoning = new StringBuilder();
 
 		private final AtomicReference<ChatResponse> lastResponse = new AtomicReference<>();
 
@@ -1557,15 +1475,8 @@ public class ResilientChatService {
 
 		private volatile String terminalSignal;
 
+		/** 累计一个上游分片：思考不入正文（见 {@link #reasoning(String)}），正文原样拼接。 */
 		void accept(ChatResponse response) {
-			accept(response, null);
-		}
-
-		/**
-		 * @param textOverride 非 null 时用<b>它</b>替代上游分片文本（输出 DLP 脱敏后的那份）；
-		 * null = 用原文（无守卫/测试直连路径）
-		 */
-		void accept(ChatResponse response, String textOverride) {
 			if (this.firstByteAtMs == 0L) {
 				this.firstByteAtMs = System.currentTimeMillis();
 			}
@@ -1578,7 +1489,7 @@ public class ResilientChatService {
 					this.terminalSignal = "finishReason=" + finishReason;
 				}
 				if (generation.getOutput() != null) {
-					String chunk = textOverride != null ? textOverride : generation.getOutput().getText();
+					String chunk = generation.getOutput().getText();
 					if (chunk != null) {
 						this.text.append(chunk);
 					}
@@ -1587,25 +1498,25 @@ public class ResilientChatService {
 			record(response, generation);
 		}
 
-		/** 追加一段文本（轮末清仓用：守卫里扣住的尾段）。 */
-		void append(String text) {
-			if (text != null) {
-				this.text.append(text);
+		/**
+		 * <b>L-91/L-98</b>：记下本片思考的全文（<b>不进</b> {@link #text} —— 思考不是正文）。
+		 *
+		 * <p>
+		 * 两个用途：① {@link #emittedAny()} —— 思考一旦发过帧，它就是"用户已经看到的内容"，
+		 * 断流重试会把它再吐一遍（前端出现两段重复思考），且 {@code retry} 帧会落在思考 delta
+		 * 之后（{@link com.example.configmgr.ai.conformance.FrameContract#orderingContract} 明令禁止）；
+		 * ② 落定/取消时随 assistant 消息写进记忆（键 {@code reasoningContent}），供下一轮回填
+		 * （{@code ReasoningAwareOpenAiChatModel}）。体积口径：不截断，随会话记忆 TTL 走。
+		 */
+		void reasoning(String chunk) {
+			if (chunk != null && !chunk.isEmpty()) {
+				this.reasoning.append(chunk);
 			}
 		}
 
-		/**
-		 * <b>L-91</b>：记下本片思考的字符数（<b>不进</b> {@link #text} —— 思考不是正文）。
-		 *
-		 * <p>
-		 * 只为一个判据服务：{@link #emittedAny()}。思考一旦发过帧，它就是"用户已经看到的内容"，
-		 * 断流重试会把它再吐一遍（前端出现两段重复思考），且 {@code retry} 帧会落在思考 delta
-		 * 之后（{@link com.example.configmgr.ai.conformance.FrameContract#orderingContract} 明令禁止）。
-		 */
-		void reasoning(int chars) {
-			if (chars > 0) {
-				this.reasoningChars.addAndGet(chars);
-			}
+		/** 本尝试的思考全文（未产生思考 = 空串）。 */
+		String reasoningText() {
+			return this.reasoning.toString();
 		}
 
 
@@ -1649,7 +1560,7 @@ public class ResilientChatService {
 		boolean emittedAny() {
 			// L-91：思考也算"已产出内容"（前端已看到）——否则纯思考轮的断流会被判成"什么都没发"
 			// 而去重试，重试的思考段会叠在前一段上，且 retry 帧落在 delta 之后。
-			return this.text.length() > 0 || this.reasoningChars.get() > 0;
+			return this.text.length() > 0 || this.reasoning.length() > 0;
 		}
 
 		String text() {

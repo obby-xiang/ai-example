@@ -4,14 +4,15 @@
  * <h2>为什么本域要自建一个桩</h2>
  * 官方 `scripts/ci/stub-upstream.mjs` 的路由表是**共享契约**（只读）：它只发固定纯文本
  * {@code TURN_TEXT}，不含 markdown 结构、mermaid 围栏、站外图链、敏感凭据样本 ——
- * MD（渲染）/ X（DLP）两域的核心断言面恰好就是这些正文形状。Y 域（配置页）需要
+ * MD（渲染）/ X（安全面）两域的核心断言面恰好就是这些正文形状。Y 域（配置页）需要
  * `GET /models` 的确定性响应，官方桩虽有，但本域仍需把"模型字段真值"落盘核对。
  * 因此本桩由 `E2E_STUB_SCRIPT` 注入（harness 已全 env 参数化），**不改共享桩一个字节**。
  *
  * <h2>选择口径（请求级标记，不猜调用方身份）</h2>
  * 提示词里的标记决定本轮正文形状，未带标记 ⇒ 默认纯文本轮（与官方桩同族的确定性文本）：
  *   - `md=basic|highlight|mermaid|mermaid-broken|xss|long|stream|deltas`
- *   - `safety=mask|pem`（输出侧 DLP 样本：跨分片被切开的 `sk-` 串 / 完整私钥块）
+ *   - `safety=mask|pem`（安全面样本：跨分片被切开的 key 串 / 完整私钥块）。L-99 删除输出侧
+ *     DLP 后，这两个样本的用途反转为"证明不再掩码/不再阻断"（桩行为不变，仍是原样切片发出）
  *   - `tool=<name>&args=<json>`（工具轮；受披露闸约束 —— 未披露 ⇒ 退化为文本轮）
  *
  * <h2>落盘（与官方桩同形，便于用例读同一套解析）</h2>
@@ -161,9 +162,9 @@ const LONG = buildLong()
 /**
  * 流式未闭合围栏：前半段停在围栏内，后半段才闭合（MD-08 的唯一载体）。
  *
- * 必须**足够长**：输出侧 DLP 有 128 字符的尾部保留窗口（`SafetyRules.TAIL_WINDOW`），
- * 正文末尾 128 字符要等下一片才放行 ⇒ 短样本在"停顿期"一个字节都到不了浏览器，
- * 未闭合围栏的中间态就无从观测。故前半段带一段围栏内填充（≥300 字符）。
+ * 必须**足够长**：MD-08 要观测"未闭合围栏的中间态"，前半段得在停顿期就渲染出来。
+ * 原设计还要绕过输出侧 DLP 的 128 字符尾部保留窗口（`SafetyRules.TAIL_WINDOW`，L-99 已删除）；
+ * 该窗口不存在后填充仍保留 —— 它同时给前端一个可观测的"长正文流式过程中"窗口。
  */
 const STREAM_PAD = Array.from({ length: 24 }, (_v, i) => `const pad${String(i).padStart(3, '0')} = ${i}`)
 const STREAM_PART1 = ['## 流式标题', '', '```js', 'const first = 1', ...STREAM_PAD].join('\n')
@@ -174,9 +175,9 @@ function deltaPieces() {
   return Array.from({ length: 300 }, (_v, i) => `<${String(i).padStart(3, '0')}>`)
 }
 
-/** 输出侧 DLP 样本：key 串会被 24 字符切片切开（跨分片检测）。前缀按仓内扫描库同款手法拆分，避免入库被密钥规则误报。 */
+/** 安全面样本：key 串会被 24 字符切片切开（跨分片形态）。前缀按仓内扫描库同款手法拆分，避免入库被密钥规则误报。 */
 const SAFETY_MASK = '密钥一：s' + 'k-abcdefghijklmnopqrstuvwxyz012345 出现在这里，其后是普通正文收口。'
-/** 输出侧 DLP 私钥块（唯一走 block 的一档）。私钥头同样拆分构造。 */
+/** 安全面样本：完整私钥块（旧口径唯一走 block 的一档；L-99 后仅用于证明不再阻断）。私钥头同样拆分构造。 */
 const PEM_HEAD = '-----BEGIN' + ' RSA PRIVATE KEY-----'
 const PEM_TAIL = '-----END' + ' RSA PRIVATE KEY-----'
 const SAFETY_PEM = [

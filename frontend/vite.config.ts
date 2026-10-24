@@ -14,6 +14,17 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), 'VITE_')
   const apiBase = env.VITE_API_BASE || DEFAULT_API_BASE
   const devPort = Number(env.VITE_DEV_PORT || DEFAULT_DEV_PORT)
+  /**
+   * E2E 隔离（L-115）：真机 E2E 的 dev server 跑在**活动工作树**上，若运行期有人改源码，
+   * Vite 的 HMR 会用 `?t=` 时间戳重新取模块 —— 于是同一页面里可能同时活着两份
+   * `stores/workspace.ts`（页面能力注册表 `pageHandlers` 是模块级 Map）：
+   * 视图把 `sheet.current` 注册在旧实例上，工具/用例读到新实例 ⇒ 「当前页面没有可操作的表格」；
+   * SFC 热替换还会让 `SpreadGrid` 在页面中途重挂（SpreadJS 退回「需要 HTML5 Canvas」的兜底 DOM）。
+   * 这正是 11b 的 E2E-T13 / T05 在全量串跑里红、单跑绿的形态。
+   * 因此 harness 起 dev server 时设 `VITE_HMR=0`：一次页面生命期内模块图不可变
+   * （每个用例都是新 page，新代码照常生效）。默认（5202 开发）保持 HMR。
+   */
+  const hmr = env.VITE_HMR === '0' ? false : undefined
 
   return {
     plugins: [vue()],
@@ -25,6 +36,7 @@ export default defineConfig(({ mode }) => {
       port: devPort,
       strictPort: true,
       open: false,
+      hmr,
       proxy: {
         '/api': {
           target: apiBase,

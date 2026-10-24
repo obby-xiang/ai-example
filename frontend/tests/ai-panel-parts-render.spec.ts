@@ -4920,6 +4920,50 @@ describe('R-165 S5b：mermaid 卡双态（预览 | 源码）+ 全屏查看器', 
     expect(copy.classList.contains('is-copied')).toBe(true)
     wrapper.unmount()
   })
+
+  /**
+   * 性能专项（2026-10-24）：mermaid 由「闭合即渲染」改为 **IntersectionObserver 门控** ——
+   * 只有进入消息容器视口（rootMargin 200px）才真正渲染；渲染完成即 unobserve，
+   * 长会话里历史消息的图不再在打开面板的瞬间一起排队。
+   */
+  it('性能专项：IO 门控 —— 不可见不渲染，进入视口后渲染并 unobserve', async () => {
+    const observed: Element[] = []
+    const unobserved: Element[] = []
+    const callbacks: IntersectionObserverCallback[] = []
+    class IntersectionObserverStub {
+      constructor(cb: IntersectionObserverCallback) {
+        callbacks.push(cb)
+      }
+      observe(el: Element): void {
+        observed.push(el)
+      }
+      unobserve(el: Element): void {
+        unobserved.push(el)
+      }
+      disconnect(): void {}
+      takeRecords(): IntersectionObserverEntry[] {
+        return []
+      }
+    }
+    vi.stubGlobal('IntersectionObserver', IntersectionObserverStub)
+    try {
+      mmdRender.svg = MMD_SVG
+      const wrapper = await mountPanel([buildMessage([{ kind: 'text', seg: 0, text: MMD_FENCE, streaming: false }])])
+      await flushPromises()
+      expect(observed).toHaveLength(1)
+      // 未进入视口：源码块保留，不发起渲染
+      expect(wrapper.find('.md-body .mmdc').exists()).toBe(false)
+      callbacks[0]!([{ target: observed[0]!, isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver)
+      await flushPromises()
+      await flushPromises()
+      await wrapper.vm.$nextTick()
+      expect(wrapper.find('.md-body .mmdc').exists()).toBe(true)
+      expect(unobserved).toContain(observed[0])
+      wrapper.unmount()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
 })
 
 /**

@@ -297,8 +297,15 @@ class AiTurnLogTraceTest {
 			.contains("code=" + ResilientChatService.EMPTY_REPLY_CODE);
 	}
 
+	/**
+	 * L-99（口径变更）：输出里的私钥块不再被阻断 —— 本轮以 {@code status=done, code=none} 收尾。
+	 *
+	 * <p>本用例原先锁的是 {@code status=blocked + code=SENSITIVE_OUTPUT_BLOCKED}
+	 * （防护批③ B3-3 的阻断终态）；该终态已随输出 DLP 整套删除。断言方向反转为
+	 * "阻断终态不存在"，防止回归时装回来。
+	 */
 	@Test
-	void blockedOutputEndsWithTurnEndCarryingTheBlockCode() {
+	void privateKeyOutputEndsWithDoneInsteadOfBlocked() {
 		String head = "-----BEGIN " + "RSA PRIVATE KEY-----";
 		String foot = "-----END " + "RSA PRIVATE KEY-----";
 		String body = "MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun";
@@ -306,8 +313,7 @@ class AiTurnLogTraceTest {
 
 		runTurn();
 
-		assertThat(line("turn_end")).contains("status=blocked")
-			.contains("code=" + ResilientChatService.SENSITIVE_OUTPUT_BLOCKED);
+		assertThat(line("turn_end")).contains("status=done").contains("code=none").doesNotContain("status=blocked");
 	}
 
 	// ── L4：续跑轮 ──

@@ -206,7 +206,6 @@ class AiControllerDeniedLogTraceTest {
 				mock(com.example.configmgr.job.service.JobWatchdog.class));
 		ReflectionTestUtils.setField(built, "inputSanitizer", new InputSanitizer());
 		ReflectionTestUtils.setField(built, "aiRateLimiter", new AiRateLimiter(this.redis.redis, this.properties));
-		ReflectionTestUtils.setField(built, "inputDlp", new com.example.configmgr.ai.gate.InputDlp());
 		ReflectionTestUtils.setField(built, "contextFieldGate", new com.example.configmgr.ai.gate.ContextFieldGate());
 		ReflectionTestUtils.setField(built, "securityEvents", new com.example.configmgr.ai.run.SecurityEvents());
 		ReflectionTestUtils.setField(built, "aiConfigService", this.aiConfigService);
