@@ -84,6 +84,30 @@ $env:E2E_STUB_MODE = '1'
 
 ---
 
+### 1.7 安全面探针 X-01 / X-02 / X-03（**请求级**，L-99 删 DLP 后的新口径）
+
+这一组用例的语义是**原文透传**：AI 输入/输出不再脱敏、不再阻断。因此断言方向与旧 DLP 时代**相反** —— 锁「原文确实到达」，并额外锁「掩码痕迹确实不存在」。
+
+| 用例 | 级别 | 探针 | 判据（任一条不成立即 FAIL） |
+| --- | --- | --- | --- |
+| `X-01` | P0 | **输入侧**假密钥：`sk-` + 40 个 `A`（拼字符串生成，不是真 key） | ①无 `error` 帧（不 block）②`GET /api/ai/history/{sid}` 里**有**密钥原文（被掩码即回归）③历史里**无** `[REDACTED` 痕迹 ④DLP 三计数零增长 |
+| `X-02` | P1 | **输出侧**假密钥：`sk-` + 40 个 `B`，由桩在 `【AIE2E-X-02】` 标记下回出 | ①`done` 帧**不带** `safety` 段 ②`delta` ≥ 3 片 ③拼回正文含**完整确定性回复**（`密钥一：token=<探针> 结束。`，前缀/后缀被改写即红）④正文无 `[REDACTED` ⑤**任一单片都不含完整密钥**、且分片边界落在密钥内部（跨分片实证，防「断言还在、对象没了」）⑥DLP 三计数零增长 |
+| `X-03` | P1 | **输出侧**假 PEM 块（头 / body / 尾三段由**片段拼接**生成，避开提交前密钥扫描规则） | ①无 `error` 帧、终态必须是 `done`（不再阻断）②头/body/尾三片段齐全、**连续成块**、首尾顺序不倒置 ③正文无 `[REDACTED` ④`delta` ≥ 2 片且**完整 PEM 块不落在单片内**（跨分片实证）⑤DLP 计数（`outputBlocked` / `outputRedacted`）零增长 |
+
+**DLP 三计数零增长的判法**（`Ai-AssertDlpFlat`，三条都是防假绿）：
+
+1. 起始基线为 `null` **一律判 FAIL** —— 跳过比较会把「计数面不可观测」伪装成零增长；
+2. 逐键先断言 `before` / `after` **两处键都存在** —— 键被删或改名时 `0 == 0` 同样是假绿；
+3. 再比值。三键 = `inputRedacted` / `outputRedacted` / `outputBlocked`；L-99 后已无写入点，键位保留属 `/health` 兼容面，故「值不增长」才是正确形态。
+
+**分片证据落盘**（`-ArtifactDir`，仓库外）：X-02 / X-03 各写一份 `<case>-safety-probe.txt`（`x02-safety-probe.txt` / `x03-safety-probe.txt`），内容是**实收 `delta` 分片按到达顺序逐条列出**（每行带 `off` / `len` / `touchesNeedle`），并在首行给「拼回后 needle 起始偏移」。用途 = 事后复核「上游确实把探针切开并发出」——帧是上游 chunk 经产品 SSE 的中继，切点即上游切点。未传 `-ArtifactDir` 时该步静默跳过，不影响判定。
+
+**桩侧底座（`scripts/ci/stub-upstream.mjs`）**：`safetyProbeDecision` 只认**最后一条 `user` 消息**里的用例标记（`【AIE2E-X-02】` / `【AIE2E-X-03】`），不看工具披露、不看其它开关 ⇒ 探针**不污染**既有语料；无标记时仍走 `turn-text` 蓝本。探针分支挂在 **`blueprintDecision` 入口之内且先于 `turn-text`**（X-02 / X-03 的提示词同时带 `turn-text` 故障标记，顺序被抢占就会退回「空断言」）。`--self-check` 段 ⑨-d2 从**真实入口**验证可达性 + 探针串确实跨分片 + 无标记不被污染；与 `verify-e2e.ps1` 的 X-02 / X-03 是同一组期望，任何一侧漂移，自检或 E2E 即红。
+
+> 探针串全部是测试用**假串**：`sk-` 前缀与 PEM 头尾都按片段拼接，避免与提交前敏感信息扫描规则自撞；仓内不写真实密钥。
+
+---
+
 ## 2. `scripts/ci/stub-upstream.mjs` —— CI 上游替身
 
 ### 2.1 用途边界（引用文件头口径，**不得扩大解释**）
@@ -145,6 +169,7 @@ node scripts/ci/stub-upstream.mjs --self-check [--routes scripts/ci/stub-routes.
 | `fail-503-once` | 同一轮首次 503、之后正常 | S-07 |
 | `context-overflow` / `summary-500` | 越窗 400（措辞取 `ContextOverflow.MARKERS`）/ 摘要请求 500 | C-12 / C-10 |
 | `gf-seven-types` / `gf-linkage` / `gf-expr-linkage` / `gf-deep-linkage` / `gf-options-from` / `gf-attachment` / `gf-longtext` | GF 新能力面的路由开关（`GF-*` 路由） | G-04…G-15 / X-10 |
+| `【AIE2E-X-02】` / `【AIE2E-X-03】`（提示词标记，非 `faults` 键） | **安全面探针**：桩主动回出跨分片假密钥 / 完整假 PEM（请求级，只认最后一条 `user` 消息、先于 `turn-text` 判定） | X-02 / X-03（见 §1.7） |
 
 `fe-tool-hang` / `sheet-big` / `preflight-fail` 三项**不是桩层开关**（`faults.switches` 里标 `layer=script/product`）：
 挂起由用例的处理器停住、大表由用例自建任务、预检失败走产品既有语义 —— 桩只提供触发面，不伪造业务结果。
