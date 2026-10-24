@@ -268,11 +268,13 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/b23l1-dual-insta
 
 两条防线（`pre-commit` 扫暂存区新增行、`scan-history.sh` 扫全历史 blob），规则共用 `scan-lib.sh`。启用方式、三条规则、豁免清单与自测方法见 **`scripts/githooks/README.md`**。
 
+**扫描性能（2026-10-24，笔 `904cd20`/`784f0ce`）**：`scan-history.sh` 改**并行扫历史 blob**、NUL 走 `printf`（避开 awk 实现差异）⇒ 修复后一次全历史扫描 **4m26s**；**扫描面未缩小**（仍是全历史 blob × 三条规则，命中语义不变），CI 里 `scan-history` job 已随 run `40099230125` 绿。
+
 ---
 
 ## 5. Redis 目标形态面：集群冒烟 / 迁移工具 / 静态守卫（2026-10-24 批增补）
 
-> **一句话边界**：这三件是**环境与键形态**的验证与迁移设施，不构成"产品已在 Cluster 上验收"的证据。**当前事实（2026-10-24）**：脚本已入库（`882e6c5` 迁移工具 + 冒烟网 + 守卫 + ci 接线 / `b38a95a` 冒烟网改用容器 IP 建 5.0 集群 / `03dbb84` 冒烟网等待 3 主 3 从落定并修 Pub/Sub 缓冲）；**真集群环境级已通过** = run `40097120796`（`completed/success`，headSha `c2f8b2f`）**PASS 73 / FAIL 0 / KNOWN-LIMIT 1 / SKIP 3**（GitHub Actions Ubuntu + Docker `redis:5.0.14` 临时 3 主 3 从）。**范围限定**：这不是生产连接验证，也不是产品 `available`/503 的证明（网内该条 SKIP、且网内不启动后端），更不是迁移工具的真集群执行证明。迁移工具用例 **52/52** 通过；守卫 `--self-check` 通过（12 正向样例）。
+> **一句话边界**：这三件是**环境与键形态**的验证与迁移设施，不构成"产品已在 Cluster 上验收"的证据。**当前事实（2026-10-24）**：脚本已入库（`882e6c5` 迁移工具 + 冒烟网 + 守卫 + ci 接线 / `b38a95a` 冒烟网改用容器 IP 建 5.0 集群 / `03dbb84` 冒烟网等待 3 主 3 从落定并修 Pub/Sub 缓冲）；**真集群环境级已通过** = run `40097120796`（`completed/success`，headSha `c2f8b2f`）**PASS 73 / FAIL 0 / KNOWN-LIMIT 1 / SKIP 3**（GitHub Actions Ubuntu + Docker `redis:5.0.14` 临时 3 主 3 从）；整仓 CI run `40099230125`（`784f0ce`）**success、全部 job 绿**。**范围限定**：这不是生产连接验证，也不是产品 `available`/503 的证明（网内该条 SKIP、且网内不启动后端），更不是迁移工具的真集群执行证明；**真集群上的迁移执行、双 JVM runner 删除/恢复仍未验证**。迁移工具用例 **52/52** 通过；守卫 `--self-check` 通过（12 正向样例）。
 
 ### 5.1 `redis5-cluster-smoke.sh` —— 3 主 3 从真集群冒烟
 
