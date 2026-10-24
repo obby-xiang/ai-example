@@ -157,11 +157,10 @@ echo "扫描范围: $total 个唯一 blob（文本 $text_total 个；并行 jobs
 if [ "$text_total" -gt 0 ]; then
   if command -v xargs >/dev/null 2>&1 && printf '' | xargs -P 1 true >/dev/null 2>&1; then
     # 以 NUL 传 sha/path 两个参数；path 内的 TAB 保留（旧 read 语义），仅换行路径仍受既有行式限制。
-    LC_ALL=C awk -v tab="$TAB" '{
-      p = index($0, tab)
-      if (p == 0) next
-      printf "%s%c%s%c", substr($0, 1, p - 1), 0, substr($0, p + 1), 0
-    }' "$TMP_SCAN" \
+    # 用 shell printf 发 NUL（dash/bash 均支持），不依赖 awk 的 NUL 能力。
+    while IFS="$TAB" read -r sha path; do
+      printf '%s\0%s\0' "$sha" "$path"
+    done < "$TMP_SCAN" \
       | xargs -0 -n 2 -P "$jobs" sh "$TMP_WORKER" \
       || { echo "✖ 并行扫描失败（xargs 退出码非 0）" >&2; exit 2; }
   else
