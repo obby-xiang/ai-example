@@ -493,6 +493,12 @@ app:
       probe-timeout: 2s
       probe-threads: 4
       probe-queue-capacity: 8
+      # draining 窗口：关闭时 /health/ready 先变 503，并在这段窗口内**保持连接器可接受连接**，
+      # 让 LB 真的能探测到 503 再摘流（详见 health/ShutdownDrainGate）。
+      # 缺省 0 = 不等待（单实例/无 LB 形态，行为与改造前一致）；多实例 profile
+      # （cluster / h2tcp / postgresql）各自覆盖为 5s —— 必须 ≥ LB 的"探测间隔 × 失败阈值"。
+      # 上界 60s（启动期校验）：它 + timeout-per-shutdown-phase 就是停机总时长。
+      drain-window: 0s
 
 logging:
   level:

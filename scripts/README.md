@@ -309,4 +309,4 @@ node scripts/ci/forbid-redis-cluster-unsafe.mjs --self-check # 规则自证
 node scripts/ci/forbid-redis-cluster-unsafe.mjs --root <dir> # 指定目录（排障）
 ```
 
-禁止进入 `backend/src/main` 的面：**多库**（`database:` / URL 库号 / `setDatabase`）、**单机全量命令**（`KEYS` / `FLUSHDB` / `FLUSHALL` / 跨键 `SCAN`）、**5.0 不支持的排他流 ID**（`Range.Bound.exclusive` / 字符串 `(123-0`）。keys/scan 规则只认 Redis 侧接收者（避开 JPA 原生 SQL 与业务方法 `scan(` 的误报），配置规则要求文件处于 Redis 上下文；`ci.yml` 里 `--self-check` 与主扫各一步。
+禁止进入 `backend/src/main` 的面：**多库**（`database:` / URL 库号 / `setDatabase`）、**单机全量命令**（`KEYS` / `FLUSHDB` / `FLUSHALL` / 跨键 `SCAN`）、**5.0 不支持的排他流 ID**（`Range.Bound.exclusive` / 字符串 `(123-0`）。keys/scan 规则只认 Redis 侧接收者（避开 JPA 原生 SQL 与业务方法 `scan(` 的误报），配置规则要求文件处于 Redis 上下文；原生命令字面量同样按接收者判定，且豁免 fail-closed：先剥离注释与字符串字面量、再按"同文件 + 同作用域包住调用点 + 同名无其它类型遮蔽"认定 `Statement` / `PreparedStatement` / `CallableStatement` 变量为 JDBC，Redis 侧别名（`conn` / `client` / `connection` …）永不豁免 —— 例如 `statement.execute("SELECT pg_advisory_lock(...)")` 是 PostgreSQL SQL，不是 Redis `SELECT`。`ci.yml` 里 `--self-check` 与主扫各一步。

@@ -155,6 +155,11 @@ public class PublishJobRunner {
             }
 
             Long itemId = progressService.startItem(jobId, defCode);
+            if (itemId == null) {
+                // 父作业已终态（收敛已提交）：终态作业下不得再新增在途条目（评审 I-1）。
+                cancelled = true;
+                break;
+            }
             startedItems++;
             boolean defCancelled = false;
             int defProcessed = 0;

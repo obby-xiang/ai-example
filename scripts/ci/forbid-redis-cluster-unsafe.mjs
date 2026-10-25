@@ -14,6 +14,12 @@
  *     裸匹配 `SELECT` / `scan(` 会把它们误报成红线。
  *   - 因此 keys/scan 规则只认 Redis 侧接收者（含 lambda 别名 `c` / `rt` / `conn` / `client`），
  *     配置规则要求文件处于 Redis 上下文（同文件出现 `redis:` 或显式 redis 键）。
+ *   - 原生命令字面量同样按接收者判定：同文件、同作用域内声明为 `Statement` /
+ *     `PreparedStatement` / `CallableStatement` 的变量是 JDBC 语句
+ *     （`statement.execute("SELECT pg_advisory_lock(...)")` 是 PostgreSQL SQL），
+ *     其 `execute` 只跑 SQL、发不出 Redis 协议命令。豁免 fail-closed：先剥离注释与字符串
+ *     字面量再找声明，声明必须包住调用点，同名另有其它类型声明（遮蔽）则不豁免，
+ *     Redis 侧别名（`conn` / `client` / `connection` …）永不豁免；判定见 analyzeDeclarations。
  *
  * 用法：
  *   node scripts/ci/forbid-redis-cluster-unsafe.mjs              # 扫 backend/src/main
@@ -38,7 +44,12 @@ function arg(name, fallback = '') {
 
 // Redis 侧接收者白名单（含 lambda 形参常见别名）。刻意不写 `redis\w*`：
 // 否则 `redisKeys.keys()` 这类业务变量会误报。
-const REDIS_RECEIVER = String.raw`(?:redis|redisTemplate|redisConnection|connection|conn|client|c|rt|template|jedis|lettuce)`
+// 同一份名单也是"永不豁免"名单：别名即使被声明成 Statement 也按 Redis 通道看待。
+const REDIS_RECEIVER_NAMES = [
+  'redis', 'redisTemplate', 'redisConnection', 'connection', 'conn', 'client', 'c', 'rt', 'template', 'jedis', 'lettuce',
+]
+const REDIS_RECEIVER = String.raw`(?:${REDIS_RECEIVER_NAMES.join('|')})`
+const REDIS_RECEIVER_SET = new Set(REDIS_RECEIVER_NAMES)
 
 // ── 规则表（唯一取数点）────────────────────────────────────────────────────
 // kind: config = 只扫 *.yml / *.yaml / *.properties；java = 只扫 Java 源码。
@@ -90,8 +101,10 @@ const RULES = [
   {
     id: 'redis-raw-command',
     kind: 'java',
-    // connection.execute("FLUSHDB") —— 只认命令字面量，不认 SQL 字符串
-    regex: /\.execute\s*\(\s*["'](?:SELECT|KEYS|FLUSHDB|FLUSHALL|SCAN)\b/i,
+    // connection.execute("FLUSHDB") —— 只认 Redis 侧接收者上的命令字面量，不认 SQL 字符串。
+    // 接收者落进第 1 个捕获组，供 analyzeDeclarations 判定 JDBC（见该函数注释）。
+    regex: /(\b[A-Za-z_$][\w$]*)?\.execute\s*\(\s*["'](?:SELECT|KEYS|FLUSHDB|FLUSHALL|SCAN)\b/i,
+    receiverGroup: 1,
     why: '原生命令字面量绕过类型化 API，同样属于禁止项',
   },
   {
@@ -126,16 +139,163 @@ function applicability(rule, file, text) {
   return true
 }
 
+/** 把注释、字符串/字符字面量的内容换成空格（保留长度与换行），供声明与作用域分析用。 */
+function stripCommentsAndLiterals(text) {
+  const blank = (s) => s.replace(/[^\n]/g, ' ')
+  let out = ''
+  let i = 0
+  while (i < text.length) {
+    const ch = text[i]
+    const next = text[i + 1]
+    if (ch === '/' && next === '/') {
+      const nl = text.indexOf('\n', i)
+      const end = nl < 0 ? text.length : nl
+      out += blank(text.slice(i, end))
+      i = end
+      continue
+    }
+    if (ch === '/' && next === '*') {
+      const close = text.indexOf('*/', i + 2)
+      const end = close < 0 ? text.length : close + 2
+      out += blank(text.slice(i, end))
+      i = end
+      continue
+    }
+    // 文本块 """..."""（Java 15+）与普通 "..." / '...'
+    const quote = text.startsWith('"""', i) ? '"""' : ch
+    if (quote === '"' || quote === "'") {
+      let j = i + quote.length
+      while (j < text.length) {
+        if (text[j] === '\\' && quote !== '"""') {
+          j += 2
+          continue
+        }
+        if (text.startsWith(quote, j)) {
+          j += quote.length
+          break
+        }
+        if (quote !== '"""' && text[j] === '\n') break
+        j++
+      }
+      out += blank(text.slice(i, j))
+      i = j
+      continue
+    }
+    out += ch
+    i++
+  }
+  return out
+}
+
+/** 所有成对 `{}` 的偏移区间（用于近似作用域）。 */
+function braceSpans(code) {
+  const spans = []
+  const stack = []
+  for (let i = 0; i < code.length; i++) {
+    if (code[i] === '{') stack.push(i)
+    else if (code[i] === '}') {
+      const open = stack.pop()
+      if (open != null) spans.push({ open, close: i })
+    }
+  }
+  return spans
+}
+
+/** 包住该偏移的最内层 `{}`；不在任何块内返回 null。 */
+function enclosingSpan(spans, offset) {
+  let best = null
+  for (const s of spans) {
+    if (s.open < offset && offset < s.close && (best == null || s.open > best.open)) best = s
+  }
+  return best
+}
+
+/**
+ * 声明的作用域块：
+ *   - 形参（`f(RedisConnection statement) {`）/ try-with-resources（`try (Statement s = ...) {`）
+ *     这类未以 `;` 结束的声明，作用域是紧随其后的 `{}` 块，不是外层类体；
+ *   - 其余（字段、局部变量）作用域就是声明所在的块。
+ * 这样同名的 Redis 形参只遮蔽它自己方法体里的调用，不会把同类里其它方法的 JDBC 调用一起拖下水。
+ */
+function declarationScope(code, spans, offset) {
+  const braceAfter = code.indexOf('{', offset)
+  const semiAfter = code.indexOf(';', offset)
+  if (braceAfter >= 0 && (semiAfter < 0 || braceAfter < semiAfter)) {
+    const body = spans.find((s) => s.open === braceAfter)
+    if (body) return body
+  }
+  return enclosingSpan(spans, offset)
+}
+
+/**
+ * JDBC-vs-Redis 声明分析（`Statement.execute(String)` 只有 SQL 语义；Redis 的 execute 在
+ * RedisConnection / RedisTemplate 上，没有 Statement 这种类型）。
+ *
+ * 为了让豁免"有据可依、失败即命中"（fail-closed）：
+ *   - 只在剥离注释/字符串字面量后的代码里找声明，散文与文档串不会造出 JDBC 变量；
+ *   - 每条声明记录其作用域块（形参/资源声明取紧随其后的方法体/try 体，见 declarationScope）：
+ *     调用点必须被该块包住才可能豁免，跨方法/跨 try 的同名声明不互相外溢；同名若还有
+ *     别的类型声明也包住调用点（遮蔽），则宁可不豁免；
+ *   - `REDIS_RECEIVER_NAMES` 里的接收者别名一律不豁免（按其 Redis 语义处理）。
+ * 局限（刻意保守）：只认同文件、同块可见的声明；`var`/跨文件/链式 `createStatement().execute(...)` 不豁免。
+ */
+function analyzeDeclarations(text) {
+  const code = stripCommentsAndLiterals(text)
+  const spans = braceSpans(code)
+  const jdbc = new Map()
+  const other = new Map()
+  const record = (map, name, offset) => {
+    if (!map.has(name)) map.set(name, [])
+    map.get(name).push(declarationScope(code, spans, offset))
+  }
+  const jdbcDecl = /\b(PreparedStatement|CallableStatement|Statement)\s+([A-Za-z_$][\w$]*)/g
+  let m
+  while ((m = jdbcDecl.exec(code))) record(jdbc, m[2], m.index)
+  // 其它类型声明：`Type name` / `var name`（只看首字母大写的类型与 var，避免把 return/throw 当类型）。
+  const otherDecl = /\b((?:[a-z][\w$]*\.)*[A-Z][\w$]*(?:\s*<[^;{}()]*>)?|var)\s+([a-z_$][\w$]*)\s*(?=[=;,:)])/g
+  while ((m = otherDecl.exec(code))) {
+    if (/^(?:PreparedStatement|CallableStatement|Statement)$/.test(m[1])) continue
+    record(other, m[2], m.index)
+  }
+  return { jdbc, other }
+}
+
+/** 该接收者在该偏移处是否可按 JDBC 语句豁免（任一条不成立就照常命中）。 */
+function isJdbcExempt(decls, receiver, offset) {
+  if (!receiver || REDIS_RECEIVER_SET.has(receiver)) return false
+  const jdbcBlocks = decls.jdbc.get(receiver)
+  if (!jdbcBlocks) return false
+  const contains = (span) => span != null && span.open < offset && offset < span.close
+  if (!jdbcBlocks.some(contains)) return false
+  const shadows = decls.other.get(receiver)
+  return !(shadows != null && shadows.some(contains))
+}
+
+/** 该规则在该行是否命中；带接收者的规则按调用逐个判定，豁免只作用于被豁免的那次调用。 */
+function ruleHits(rule, line, lineStart, decls) {
+  if (rule.receiverGroup == null) return rule.regex.test(line)
+  const re = new RegExp(rule.regex.source, 'gi')
+  let m
+  while ((m = re.exec(line))) {
+    if (!isJdbcExempt(decls, m[rule.receiverGroup], lineStart + m.index)) return true
+  }
+  return false
+}
+
 function scanText(file, text) {
   const hits = []
   const lines = text.split(/\r?\n/)
+  const lineStarts = [0]
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '\n') lineStarts.push(i + 1)
+  }
+  const decls = analyzeDeclarations(text)
   for (const rule of RULES) {
     if (!applicability(rule, file, text)) continue
     for (let i = 0; i < lines.length; i++) {
-      if (rule.regex.test(lines[i])) {
+      if (ruleHits(rule, lines[i], lineStarts[i] ?? 0, decls)) {
         hits.push({ file, line: i + 1, rule: rule.id, why: rule.why, text: lines[i].trim() })
       }
-      rule.regex.lastIndex = 0
     }
   }
   return hits
@@ -269,6 +429,145 @@ function selfCheck() {
       file: 'backend/src/main/java/x/Y.java',
       text: 'c.keys("a"); c.scan(ScanOptions.scanOptions().build());',
       hits: 2,
+    },
+    {
+      // 真实行取自 config/FlywayStartupLock.java:159（PostgreSQL 会话级 advisory lock）。
+      name: 'JDBC pg_advisory_lock（反例：PostgreSQL SQL 不是 Redis SELECT）',
+      file: 'backend/src/main/java/com/example/configmgr/config/FlywayStartupLock.java',
+      text: 'class X {\n'
+        + '    void acquirePostgres(Connection connection) throws SQLException {\n'
+        + '        try (Statement statement = connection.createStatement()) {\n'
+        + '            statement.execute("SELECT pg_advisory_lock(" + PG_LOCK_KEY + ")");\n'
+        + '        }\n'
+        + '    }\n'
+        + '}',
+      hits: 0,
+    },
+    {
+      // 真实行取自 config/FlywayStartupLock.java:165。
+      name: 'JDBC pg_advisory_unlock（反例：PostgreSQL SQL 不是 Redis SELECT）',
+      file: 'backend/src/main/java/com/example/configmgr/config/FlywayStartupLock.java',
+      text: 'class X {\n'
+        + '    void releasePostgres(Connection connection) throws SQLException {\n'
+        + '        try (Statement statement = connection.createStatement()) {\n'
+        + '            statement.execute("SELECT pg_advisory_unlock(" + PG_LOCK_KEY + ")");\n'
+        + '        }\n'
+        + '    }\n'
+        + '}',
+      hits: 0,
+    },
+    {
+      name: 'JDBC Statement 上任意 SQL SELECT（反例：不是 Redis 命令）',
+      file: 'backend/src/main/java/x/Y.java',
+      text: 'class X {\n'
+        + '    void load(Connection connection) throws SQLException {\n'
+        + '        PreparedStatement statement = connection.prepareStatement("x");\n'
+        + '        statement.execute("SELECT 1");\n'
+        + '    }\n'
+        + '}',
+      hits: 0,
+    },
+    {
+      name: 'JDBC CallableStatement 仍豁免（反例：SQL 存储过程调用不是 Redis 命令）',
+      file: 'backend/src/main/java/x/Y.java',
+      text: 'class X {\n'
+        + '    void run(Connection connection) throws SQLException {\n'
+        + '        CallableStatement call = connection.prepareCall("{call p()}");\n'
+        + '        call.execute("SELECT p()");\n'
+        + '    }\n'
+        + '}',
+      hits: 0,
+    },
+    {
+      name: 'JDBC 语句字段在方法内使用仍豁免（反例：字段作用域不丢）',
+      file: 'backend/src/main/java/x/Y.java',
+      text: 'class X {\n'
+        + '    private final Statement statement;\n'
+        + '    void a() { statement.execute("SELECT 1"); }\n'
+        + '}',
+      hits: 0,
+    },
+    {
+      name: 'JDBC 豁免不外溢：同行 Redis 原生命令仍命中（数量断言）',
+      file: 'backend/src/main/java/x/Y.java',
+      text: 'class X {\n'
+        + '    void run(Connection connection) throws SQLException {\n'
+        + '        Statement statement = connection.createStatement();\n'
+        + '        statement.execute("SELECT 1"); connection.execute("FLUSHDB");\n'
+        + '    }\n'
+        + '}',
+      hits: 1,
+    },
+    {
+      name: 'Redis 原生 SELECT 字面量（RedisConnection）',
+      file: 'backend/src/main/java/x/Y.java',
+      text: 'connection.execute("SELECT 1");',
+      hits: 1,
+    },
+    {
+      name: 'Redis 原生 KEYS 字面量（redisTemplate）',
+      file: 'backend/src/main/java/x/Y.java',
+      text: 'redisTemplate.execute("KEYS ai:*");',
+      hits: 1,
+    },
+    {
+      name: 'Redis 原生 SCAN 字面量（lambda 别名 rt）',
+      file: 'backend/src/main/java/x/Y.java',
+      text: 'rt.execute("SCAN 0");',
+      hits: 1,
+    },
+    {
+      name: 'Redis 原生 FLUSHALL 字面量（客户端别名 client）',
+      file: 'backend/src/main/java/x/Y.java',
+      text: 'client.execute("FLUSHALL");',
+      hits: 1,
+    },
+    {
+      name: '类型化 CommandType.SCAN',
+      file: 'backend/src/main/java/x/Y.java',
+      text: 'statement.execute(CommandType.SCAN);',
+      hits: 1,
+    },
+    {
+      name: '变量名叫 statement 但类型是 RedisConnection（反例：不得按名豁免）',
+      file: 'backend/src/main/java/x/Y.java',
+      text: 'class X {\n'
+        + '    private final Statement statement;\n'
+        + '    void use(RedisConnection c2) {\n'
+        + '        RedisConnection statement = c2.getConnection();\n'
+        + '        statement.execute("FLUSHDB");\n'
+        + '    }\n'
+        + '}',
+      hits: 1,
+    },
+    {
+      // 评审 I-1 探针 2：注释里的 "Statement conn" 不得把 Redis 连接别名 conn 变成 JDBC。
+      name: '注释污染：// Statement conn 不得豁免 conn.execute（反例）',
+      file: 'backend/src/main/java/x/Y.java',
+      text: '// The JDBC Statement conn above is unrelated to this Redis connection.\n'
+        + 'conn.execute("FLUSHDB");',
+      hits: 1,
+    },
+    {
+      // 评审 I-1 探针 3：字符串字面量里的 "PreparedStatement client" 同理。
+      name: '字符串污染："PreparedStatement client" 不得豁免 client.execute（反例）',
+      file: 'backend/src/main/java/x/Y.java',
+      text: 'String doc = "legacy PreparedStatement client";\n'
+        + 'client.execute("SCAN 0");',
+      hits: 1,
+    },
+    {
+      // 评审 I-1 探针 1：方法 A 的 JDBC 声明不得豁免方法 B 里同名的 RedisConnection。
+      name: '跨作用域同名不同型：A 方法 JDBC statement 不豁免 B 方法 Redis statement（反例）',
+      file: 'backend/src/main/java/x/Y.java',
+      text: 'void sql(Connection connection) {\n'
+        + '    Statement statement = connection.createStatement();\n'
+        + '    statement.execute("SELECT 1");\n'
+        + '}\n'
+        + 'void redis(RedisConnection statement) {\n'
+        + '    statement.execute("FLUSHDB");\n'
+        + '}',
+      hits: 1,
     },
   ]
 

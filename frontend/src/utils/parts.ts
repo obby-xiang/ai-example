@@ -536,7 +536,16 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
       part.streaming = true
       break
     }
-    case 'tool_start':
+    case 'tool_start': {
+      // 帧序防御（真模型 G-01）：park 开启时后端把「本批请求帧」提前公布，`tool_start` 可能
+      // 晚于 `frontend_tool_request` 到达。已建立的等动作卡（pending + requiresAction）不得被
+      // 复位成只读 running —— 一旦 requiresAction 归零，deriveProjections 不再产出 pendingCall，
+      // 生成式表单的提交入口（gf-submit）就永远消失。契约顺序（tool_start → request）不变；
+      // 这里只保证"顺序反过来时也不丢用户的提交路径"。
+      const pending = findToolPart(message, frame.toolCallId)
+      if (pending && pending.requiresAction) {
+        break
+      }
       upsertToolPart(message, {
         toolCallId: frame.toolCallId,
         name: frame.name,
@@ -546,6 +555,7 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
         requiresAction: false
       })
       break
+    }
     case 'tool_result': {
       // 契约增量（SKIPPED 一等状态）：上游确定性失败导致本工具**未执行** —— 帧以
       // outcome='skipped'（或 status='SKIPPED'）声明时直接落 skipped。本支先于下方既有判据序，

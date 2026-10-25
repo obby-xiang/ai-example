@@ -272,29 +272,62 @@ public class FileController {
     }
 
     /**
-     * 下载勾选的导出文件（打包 zip）。
+     * 下载勾选的文件：<b>单个编码回该文件本身的字节</b>，多编码才打包 zip。
+     *
+     * <p>修复前不论命中几个文件一律 {@code buildZip}：单编码下载回的是"再包一层的 zip"，
+     * 字节与库里的文件不同（多实例验收 shared-file-download：A 上传 sha256=4172fd…、
+     * B 下载 sha256=2207a8…），而响应头仍声称 xlsx —— 调用方按字节比对、按类型解析都会错。
+     * 前端 {@code api/tasks.ts#downloadSelected} 的契约本来就是"单个 xlsx 或 zip"。
+     *
+     * <p>每个编码只取<b>一个</b>文件（EXPORT 优先、回退 UPLOAD，与 {@code GET /files/{defCode}}
+     * 同一优先级）：修复前同一编码若同时存在 EXPORT 与 UPLOAD 行，zip 里会出现两个同名 entry。
      */
     @GetMapping("/download")
     public ResponseEntity<byte[]> downloadSelected(@PathVariable Long taskId,
                                                      @RequestParam List<String> codes) throws Exception {
-        List<TaskFile> files = taskFileRepository.findByTaskId(taskId).stream()
-                .filter(f -> codes.contains(f.getDefCode())
-                        && ("EXPORT".equals(f.getFileType()) || "UPLOAD".equals(f.getFileType())))
-                .toList();
-        if (files.isEmpty()) {
+        List<TaskFile> selected = selectOnePerCode(taskFileRepository.findByTaskId(taskId), codes);
+        if (selected.isEmpty()) {
             throw ResourceNotFoundException.of("导出文件", String.join(",", codes));
         }
-        byte[] zip = buildZip(taskId, files);
-        String filename = files.size() == 1
-                ? (files.get(0).getFileName() != null ? files.get(0).getFileName() : files.get(0).getDefCode() + ".xlsx")
-                : "export-selected-" + taskId + ".zip";
+        if (selected.size() == 1) {
+            TaskFile only = selected.get(0);
+            byte[] bytes = fileStorage.read(only.getStoragePath());
+            String filename = only.getFileName() != null ? only.getFileName() : only.getDefCode() + ".xlsx";
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_DISPOSITION,
+                            "attachment; filename*=UTF-8''" + URLEncoder.encode(filename, StandardCharsets.UTF_8))
+                    .contentType(MediaType.parseMediaType(
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
+                    .body(bytes);
+        }
+        byte[] zip = buildZip(taskId, selected);
         return ResponseEntity.ok()
                 .header(HttpHeaders.CONTENT_DISPOSITION,
-                        "attachment; filename*=UTF-8''" + URLEncoder.encode(filename, StandardCharsets.UTF_8))
-                .contentType(MediaType.parseMediaType(files.size() == 1
-                        ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                        : "application/zip"))
+                        "attachment; filename*=UTF-8''" + URLEncoder.encode("export-selected-" + taskId + ".zip",
+                                StandardCharsets.UTF_8))
+                .contentType(MediaType.parseMediaType("application/zip"))
                 .body(zip);
+    }
+
+    /** 每个请求编码挑一个文件（EXPORT 优先、回退 UPLOAD；保持请求顺序、编码去重）。 */
+    private static List<TaskFile> selectOnePerCode(List<TaskFile> taskFiles, List<String> codes) {
+        List<TaskFile> selected = new ArrayList<>();
+        for (String code : codes) {
+            if (selected.stream().anyMatch(f -> f.getDefCode().equals(code))) {
+                continue;
+            }
+            TaskFile pick = taskFiles.stream()
+                    .filter(f -> code.equals(f.getDefCode()) && "EXPORT".equals(f.getFileType()))
+                    .findFirst()
+                    .or(() -> taskFiles.stream()
+                            .filter(f -> code.equals(f.getDefCode()) && "UPLOAD".equals(f.getFileType()))
+                            .findFirst())
+                    .orElse(null);
+            if (pick != null) {
+                selected.add(pick);
+            }
+        }
+        return selected;
     }
 
     private byte[] buildZip(Long taskId, List<TaskFile> files) throws IOException {

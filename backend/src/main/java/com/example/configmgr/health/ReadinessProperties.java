@@ -19,6 +19,9 @@ import java.time.Duration;
 @ConfigurationProperties(prefix = "app.health.readiness")
 public class ReadinessProperties {
 
+	/** draining 窗口上界：与 {@code timeout-per-shutdown-phase} 相加即停机总时长，必须有上界。 */
+	static final Duration MAX_DRAIN_WINDOW = Duration.ofSeconds(60);
+
 	/**
 	 * 一次就绪判定的**共享**总时限（所有维度合计，不是每维度各一份）。
 	 * 缺省 2s：LB/编排器探测超时通常 1–5s，留出代理侧余量。
@@ -35,6 +38,20 @@ public class ReadinessProperties {
 	 */
 	private int probeQueueCapacity = ReadinessProbeRunner.DEFAULT_QUEUE_CAPACITY;
 
+	/**
+	 * draining 窗口（{@code app.health.readiness.drain-window}；缺省 {@code 0} = 关闭，单实例形态行为不变）。
+	 *
+	 * <p>关闭流程里 {@code /health/ready} 变成 503 之后，必须<b>还给 LB 一段能探测到 503 的时间</b>，
+	 * 再让 web 连接器停止接受新连接。Spring Boot 的 {@code server.shutdown=graceful} 只保证
+	 * "停接新请求 + 等在途请求收尾"，它在同一个 {@code ContextClosedEvent} 里<b>立刻</b>关闭监听
+	 * socket（实测：SIGTERM 后约 55ms 起新连接全部 ECONNREFUSED），因此没有窗口时摘流链只剩
+	 * 一条事后日志 —— 探针永远读不到 {@code ready=false/draining=true}。
+	 *
+	 * <p>取值必须覆盖 LB 的"探测间隔 × 失败阈值"，且与
+	 * {@code spring.lifecycle.timeout-per-shutdown-phase} 一起构成停机总时长上界。
+	 */
+	private Duration drainWindow = Duration.ZERO;
+
 	@PostConstruct
 	void verify() {
 		if (this.probeTimeout == null || this.probeTimeout.isZero() || this.probeTimeout.isNegative()) {
@@ -48,6 +65,15 @@ public class ReadinessProperties {
 		if (this.probeQueueCapacity <= 0) {
 			throw new IllegalStateException("app.health.readiness.probe-queue-capacity 必须 > 0（当前 = "
 					+ this.probeQueueCapacity + "）：0 容量的有界队列不合法");
+		}
+		if (this.drainWindow == null || this.drainWindow.isNegative()) {
+			throw new IllegalStateException("app.health.readiness.drain-window 不得为负（当前 = "
+					+ this.drainWindow + "）：0 = 关闭 draining 窗口，负值没有语义");
+		}
+		if (this.drainWindow.compareTo(MAX_DRAIN_WINDOW) > 0) {
+			throw new IllegalStateException("app.health.readiness.drain-window 不得超过 " + MAX_DRAIN_WINDOW
+					+ "（当前 = " + this.drainWindow + "）：它与 timeout-per-shutdown-phase 相加就是停机总时长，"
+					+ "过大会被编排器的 SIGKILL 宽限期截断");
 		}
 	}
 

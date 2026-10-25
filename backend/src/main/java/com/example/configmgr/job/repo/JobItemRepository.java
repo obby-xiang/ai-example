@@ -20,6 +20,30 @@ public interface JobItemRepository extends JpaRepository<JobItem, Long> {
     void deleteByJobIdIn(@Param("jobIds") List<Long> jobIds);
 
     /**
+     * 条目收敛（作业终态落写时调用）：把该作业下仍未收终态的条目（{@code PENDING/RUNNING}）
+     * 一次性改成 {@code :terminalStatus}。
+     *
+     * <p>两个调用点（各自在写作业终态的同一事务内，保证"作业终态 / 条目终态"原子）：
+     * {@code JobProgressService#finish} → {@code "FAILED"}（判死/判超时/执行器失败）、
+     * {@code JobService#cancel} → {@code "CANCELLED"}（取消；条目终态由取消方负责）。
+     * 已 COMPLETED 的条目永不匹配 ⇒ 不覆盖成功终态。
+     *
+     * <p>为什么必须由终态写入方兜住：被 SIGKILL 打断的执行器不会再有任何
+     * {@code finishItem}/{@code updateItem} 调用，条目行由 {@code startItem} 以 {@code RUNNING}
+     * 独立提交（{@code REQUIRES_NEW}）⇒ 只剩数据库里那一行；看门狗/僵尸恢复只写作业行时，
+     * 条目会永久停在 RUNNING（三实例验收 job-kill-a：job #5 FAILED 而 job_items 残留
+     * {@code RUNNING, processed=1}）。
+     *
+     * <p>幂等：只匹配在途条目 ⇒ 重复调用/多实例并发都是 0 行；已 COMPLETED/CANCELLED/FAILED
+     * 的条目一律不动（取消语义与失败补偿不被翻写）。
+     */
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query("UPDATE JobItem i SET i.status = :terminalStatus "
+            + "WHERE i.jobId = :jobId "
+            + "AND i.status IN ('PENDING', 'RUNNING')")
+    int convergeOpenItems(@Param("jobId") Long jobId, @Param("terminalStatus") String terminalStatus);
+
+    /**
      * 条目终态/进度条件写入（R1-11 / I-3）：同一条 UPDATE 里核父作业是否接受本次条目状态，
      * 且条目自身必须仍未收终态。
      *

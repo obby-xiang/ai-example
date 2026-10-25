@@ -59,7 +59,7 @@ class SseChatEmitterCrossInstanceWakeTest {
 	 * M9：重复唤醒（上界不高于已推上界）幂等 —— 同一帧不二次下发。
 	 *
 	 * <p>
-	 * kill：去掉 {@code lastFanoutSeq} 判据 ⇒ 第二次唤醒会把 1..3 再推一遍，本用例变红。
+	 * kill：去掉 {@code onWake} 的"seq &lt;= 本订阅者 wakeFloor 即跳过"判据 ⇒ 第二次唤醒会把帧再推一遍，本用例变红。
 	 */
 	@Test
 	void repeatedWakeIsIdempotent() {
@@ -111,10 +111,12 @@ class SseChatEmitterCrossInstanceWakeTest {
 	 * 那一帧<b>只能投一次</b>（本地快路径已投）。
 	 *
 	 * <p>
-	 * 形态说明：生产总线是异步容器线程，这里的替身是同步回调，属于"更严的时序"；
-	 * 水位在<b>发布之前</b>登记，因此即使回调在 emit 内部就发生，自唤醒也只会看到"无差量"。
+	 * 形态说明：生产总线是异步容器线程，这里的替身是同步回调，属于"更严的时序"——
+	 * 唤醒回调在 emit 内部就重入 {@code onWake}，从归档补到的正是刚落的这一帧，并且先于本地扇出
+	 * 把它入队、把<b>本订阅者</b>的游标推到该号；随后本地扇出看到"游标已越过该号"即跳过。
 	 *
-	 * <p>kill：把水位登记挪到本地扇出之后（或删掉）⇒ 本用例收到两帧，变红。
+	 * <p>kill：去掉本地扇出的 {@code liveSeq &lt;= sub.wakeFloor} 跳过（或者让游标在成功入队之前推进）
+	 * ⇒ 本用例收到两帧，变红。
 	 */
 	@Test
 	void selfWakeOnTheSameInstanceDoesNotDuplicateTheFrame() {

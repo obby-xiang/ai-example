@@ -7,6 +7,8 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.event.ContextClosedEvent;
 import org.springframework.context.event.EventListener;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
@@ -16,7 +18,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * 就绪判定（{@code GET /health/ready} 的唯一取数点）。
@@ -48,11 +49,20 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * {@code /api/ai/health} 的既有语义不变。
  *
  * <h2>路由摘除（draining）</h2>
- * 应用开始关闭时（{@link ContextClosedEvent}）立刻置 draining，之后 {@code /health/ready} 一律 503
- * 且**不再探测依赖**（快路径：摘流判定不需要知道依赖此刻的状态），让 LB 在连接被容器切断之前
- * 先把本实例摘掉；配合 {@code server.shutdown=graceful}（见 application-postgresql.yml）
- * 实现"先摘流、后在途请求收尾"。LB 侧"探测到 503 → 真正停止转发"有一段间隔，
- * 需由部署侧 preStop/deregistration delay 覆盖。
+ * 应用开始关闭时（{@link ContextClosedEvent}，由 {@link ShutdownDrainGate} 以最高优先级监听）立刻置
+ * draining，之后 {@code /health/ready} 一律 503 且**不再探测依赖**（快路径：摘流判定不需要知道依赖
+ * 此刻的状态），并保持一段可配置的 draining 窗口（{@code app.health.readiness.drain-window}）——
+ * 在这段窗口里 web 连接器仍接受连接，LB/探针**真的能读到 503**；窗口结束后
+ * {@code server.shutdown=graceful} 才停止接受新请求并在途请求收尾。
+ *
+ * <p>为什么必须有窗口：Spring Boot 的 {@code GracefulShutdown} 是同一个 {@code ContextClosedEvent}
+ * 的监听器，它<b>立刻</b> pause 连接器并关闭监听 socket（三实例实测：SIGTERM 后 +2ms 还是 200，
+ * +53ms 起全部 ECONNREFUSED）。只靠"事件里写一行日志"等于没有摘流链。
+ *
+ * <h2>draining 是终态</h2>
+ * {@code drainingSince} 是<b>唯一真源</b>（volatile，先写后读一次取齐）：一旦置位永不清除，
+ * 因此端点不会在 draining 期间"恢复 available"；也避免"draining=false 但 drainingSince 已存在"
+ * 这种自相矛盾的快照（修复前两个字段各自读，跨线程会读到半更新状态）。
  *
  * <h2>fail 的口径</h2>
  * 探针抛异常不会让端点 500：收敛成该维度 DOWN + 异常摘要（诊断可读、不带堆栈）。
@@ -67,8 +77,7 @@ public class ReadinessService {
 
 	private final AiConfigService aiConfigService;
 
-	private final AtomicBoolean draining = new AtomicBoolean(false);
-
+	/** draining 起始时刻 = "是否 draining"的唯一真源（null = 未进入 draining；置位后永不清除）。 */
 	private volatile Instant drainingSince;
 
 	@Autowired
@@ -89,21 +98,33 @@ public class ReadinessService {
 		this(probes, null, runner);
 	}
 
-	/** 关闭开始：后续 ready 一律 503（幂等）。 */
+	/** 关闭开始：后续 ready 一律 503（幂等、终态）。先写 {@code drainingSince} 再对读方可见。 */
 	public void markDraining() {
-		if (this.draining.compareAndSet(false, true)) {
-			this.drainingSince = Instant.now();
-			log.info("实例进入 draining：/health/ready 将返回 503，等待 LB 摘流");
+		if (this.drainingSince != null) {
+			return;
 		}
+		synchronized (this) {
+			if (this.drainingSince != null) {
+				return;
+			}
+			this.drainingSince = Instant.now();
+		}
+		log.info("实例进入 draining：/health/ready 将返回 503，等待 LB 摘流（drainingSince={}）",
+				this.drainingSince);
 	}
 
+	/**
+	 * 关闭事件的<b>兜底</b>监听（与 {@link ShutdownDrainGate} 同序，二者都只做幂等的置位）：
+	 * 真正负责"窗口"的是 drain gate —— 它保证本方法所置的状态在连接器停接之前可见。
+	 */
 	@EventListener(ContextClosedEvent.class)
+	@Order(Ordered.HIGHEST_PRECEDENCE)
 	public void onContextClosed(ContextClosedEvent event) {
 		markDraining();
 	}
 
 	public boolean isDraining() {
-		return this.draining.get();
+		return this.drainingSince != null;
 	}
 
 	/**
@@ -112,7 +133,8 @@ public class ReadinessService {
 	 * @return 快照；{@link Snapshot#ready()} 为 false 时端点回 503
 	 */
 	public Snapshot check() {
-		boolean isDraining = this.draining.get();
+		Instant since = this.drainingSince;
+		boolean isDraining = since != null;
 		Map<String, Object> checks = new LinkedHashMap<>();
 		List<String> down = new ArrayList<>();
 		List<String> degraded = new ArrayList<>();
@@ -149,8 +171,8 @@ public class ReadinessService {
 		Map<String, Object> body = new LinkedHashMap<>();
 		body.put("status", ready ? "UP" : "DOWN");
 		body.put("draining", isDraining);
-		if (this.drainingSince != null) {
-			body.put("drainingSince", this.drainingSince.toString());
+		if (since != null) {
+			body.put("drainingSince", since.toString());
 		}
 		body.put("ready", ready);
 		body.put("down", down);

@@ -50,7 +50,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * {@code INCR ai:seq:<runId>}）→ 截断 → 落档（{@link FrameStore#append}）→
  * {@code PUBLISH ai:wake:<runId>（仅上界 seq）} → 本地扇出（同实例快路径）。
  * 其它实例的连接由 {@link FrameWakeListener} 收到唤醒后从事件日志补差量，
- * 重复帧按 {@link #lastFanoutSeq} 去重；连接层因此无状态 —— 任何实例都能 serve 任意 run 的 reattach。
+ * 去重按<b>每订阅者</b>的已投递游标（{@link Subscription#wakeFloor}，回放/实时/唤醒共同推进）：
+ * 读取下界取各订阅者游标的最小值，逐订阅者只投其未见的帧；
+ * 连接层因此无状态 —— 任何实例都能 serve 任意 run 的 reattach。
  *
  * <p>
  * <b>L-91（2026-10-23）思考段 = 既有三段式 + 一个可选键</b>：上游 {@code reasoning_content}
@@ -252,16 +254,17 @@ public class SseChatEmitter {
 	private final List<Subscription> subscribers = new CopyOnWriteArrayList<>();
 
 	/**
-	 * B23L1 批①：<b>本地已接手</b>的最大 seq（跨实例唤醒按它取差量，重复帧按它去重）。
+	 * B23L1 批①：<b>本实例这条写出器已处置到的最大 seq</b>（出帧在落档之后登记，回放批、唤醒补帧也会推进）。
 	 *
 	 * <p>
-	 * 语义 = "本实例这条写出器已经处置到哪一帧"：出帧路径在<b>落档之后、发布唤醒之前</b>登记，
-	 * 回放批、唤醒补帧也会推进它。三个后果：
+	 * <b>它只是 emitter 级的高水位（诊断/观测），没有任何判据读它</b> —— 重复帧的去重与唤醒补帧的
+	 * 读取下界都<b>不</b>由它决定：
 	 * <ul>
-	 * <li>同一帧不会被"本地扇出 + 唤醒"投递两次（本地先登记，自唤醒的回调看到上界 ≤ 水位即 no-op）；</li>
-	 * <li>唤醒载荷只带上界也不漏中间帧（差量由 {@link FrameStore#readFrom} 给齐）；</li>
-	 * <li>登记早于本地入队一步 —— 代价是"入队途中被中断"的那一帧不会被唤醒补投，
-	 * 但那种中断本身就是订阅者被摘除（前端按 lastSeq 重挂补帧），口径与 S2-1 一致。</li>
+	 * <li>去重按<b>每订阅者</b>的已投递游标 {@link Subscription#wakeFloor}：自唤醒与本地扇出都先看
+	 * 本订阅者是否已过该号（见 {@link #emit} 的扇出循环与 {@link #onWake}），同一帧因此只投一次。
+	 * 它不能在发布唤醒<b>之前</b>推进游标 —— 游标只在成功入队之后推进；</li>
+	 * <li>唤醒读取下界取各订阅者游标的最小值（{@link #minDeliveredSeq()}），不是本水位（F3：
+	 * 另一个订阅者的回放会把共享水位推高，一旦本次唤醒丢失，落后订阅者会永久缺那一帧）。</li>
 	 * </ul>
 	 */
 	private final AtomicLong lastFanoutSeq = new AtomicLong(0);
@@ -660,6 +663,8 @@ public class SseChatEmitter {
 	 */
 	public ReplayResult replayAndAttachWithStatus(SseEmitter emitter, Long lastSeq, boolean terminal) {
 		Subscription sub = new Subscription(emitter, false);
+		// 本订阅者的补帧下界 = 客户端已收到的最大 seq（?lastSeq）：唤醒补帧只投 > 它的帧。
+		sub.wakeFloor = lastSeq == null ? 0L : Math.max(0L, lastSeq);
 		synchronized (this.emitLock) {
 			// I-1：**先挂订阅（含唤醒订阅）再读回放**。旧顺序（读档 → 挂订阅）之间落档的帧
 			// 谁也接不住：回放快照已读完、唤醒订阅还没建立，而挂起/终局帧之后不会再有下一次唤醒
@@ -827,8 +832,9 @@ public class SseChatEmitter {
 	 * <b>B23L1 批①：回放源从 {@code ai:events:} LIST 切到 {@link FrameStore#readFrom}</b>
 	 * （兼容期内部仍会把旧 LIST 串在 Stream 前面并按 seq 去重）。差量下推口径不变：
 	 * 给了 {@code lastSeq} 就只要 {@code seq > lastSeq}（孤儿过滤仍在本方法兜一层，
-	 * 防"发帧后才落档失败"等错位）。回放同时把 {@link #lastFanoutSeq} 顶到已读到的最大号 ——
-	 * 这样随后的跨实例唤醒不会把这些帧再推一遍（重复帧按 seq 去重）。
+	 * 防"发帧后才落档失败"等错位）。回放同时把<b>本订阅者</b>的已投递游标顶到
+	 * {@code max(读到的最大号, lastSeq)} —— 随后的跨实例唤醒不会把这些帧再推一遍，
+	 * 且"落在归档尾部、回放暂存 0 帧"时游标仍是 {@code lastSeq}（重复帧按 seq 去重）。
 	 */
 	private ReplayResult stageReplay(Subscription sub, Long lastSeq) {
 		long afterSeq = lastSeq == null ? 0L : lastSeq;
@@ -867,6 +873,13 @@ public class SseChatEmitter {
 				break;
 			}
 		}
+		// 本订阅者的补帧下界 = max(读到的最大号, 它的 ?lastSeq)。后者必须计入：重挂落在归档尾部时
+		// 差量读为空（暂存 0 帧），若只按 maxReadSeq 记下界，下一次跨实例唤醒会从 0 补起，
+		// 把客户端已见的 1..N 重发一遍（三实例 streaming-kill 实测：lastSeq=2 的重挂先收到 seq=1）。
+		// 只推进<b>本订阅者</b>的下界；emitter 级上界仍按实际读到的号走 —— 别人带一个荒谬的 lastSeq
+		// 只会让它自己少收，不会饿死同一 emitter 上的其它连接。
+		long deliveredUpTo = Math.max(maxReadSeq, lastSeq == null ? 0L : Math.max(0L, lastSeq));
+		sub.wakeFloor = Math.max(sub.wakeFloor, deliveredUpTo);
 		if (maxReadSeq > 0L) {
 			this.lastFanoutSeq.accumulateAndGet(maxReadSeq, Math::max);
 		}
@@ -1105,6 +1118,51 @@ public class SseChatEmitter {
 		frame.put("kind", pending.getKind());
 		frame.put("args", pending.getArguments());
 		emit(frame);
+	}
+
+	/**
+	 * <b>幂等补发 {@code tool_start}</b>（续跑/接管侧的帧册收口；真实集群 {@code suspend-kill-a} 的缺口）。
+	 *
+	 * <p>缺陷形态：首轮是"状态先落、帧后发" —— {@code saveSuspended} 之后快照已是合法恢复态，
+	 * 而 {@code tool_start} 还没落档。原实例死在这段窗口里，归档里就<b>永远</b>没有这一帧；
+	 * 接管方的结算（{@code resolvePending → claimAndExecute}）只发结局帧，于是帧册永久停在
+	 * "有 result、没有 start"，前端无法把工具卡与结果帧配对（重放/审计同受影响）。
+	 *
+	 * <p>判据是<b>事件日志</b>（跨实例同一份，生产 = Redis Stream）：该 {@code toolCallId} 已有
+	 * {@code tool_start} ⇒ 一条都不补；没有才补。读降级时<b>保守不补</b> —— "读不到"不是"不存在"的
+	 * 证明，宁可留缺口也不重复建段（重复 start 会让前端把同一工具渲染成两段）。
+	 *
+	 * <p>不阻塞、不新增锁：只是"读归档 + 一次既有出帧"，取号/落档仍在 {@link #emitLock} 内。
+	 *
+	 * @return {@code true} = 本次补发了一帧；{@code false} = 归档已有 / 读降级 / 无 toolCallId
+	 */
+	public boolean ensureToolStart(PendingToolCall pending) {
+		String toolCallId = pending == null ? null : pending.getToolCallId();
+		if (toolCallId == null) {
+			return false;
+		}
+		FrameStore.ReadResult archived;
+		try {
+			archived = this.frames.readFromWithStatus(this.runId, 0L, 0);
+		}
+		catch (RuntimeException ex) {
+			log.warn("续跑补发 tool_start 前读事件日志失败 runId={} toolCallId={}：{}（保守不补，避免重复帧）",
+					this.runId, toolCallId, ex.getMessage());
+			return false;
+		}
+		if (archived.degraded()) {
+			log.warn("续跑补发 tool_start 跳过：事件日志差量读降级 runId={} toolCallId={}（读不全 ≠ 没有，不补）",
+					this.runId, toolCallId);
+			return false;
+		}
+		for (Map<String, Object> frame : archived.frames()) {
+			if ("tool_start".equals(String.valueOf(frame.get("type")))
+					&& toolCallId.equals(frame.get("toolCallId"))) {
+				return false;
+			}
+		}
+		toolStart(pending);
+		return true;
 	}
 
 	/**
@@ -1386,7 +1444,8 @@ public class SseChatEmitter {
 	 * <li><b>落档后发唤醒</b>：{@code PUBLISH ai:wake:<runId> <上界seq>}（载荷不含帧体），
 	 * 让持有该 run 连接的<b>其它实例</b>去事件日志补差量；</li>
 	 * <li><b>本地扇出保留</b>（同实例快路径）：唤醒是"补"，本地扇出是"快"，
-	 * 两者按 {@link #lastFanoutSeq} 去重，不会把同一帧投两遍。</li>
+	 * 两者按<b>每订阅者</b>的已投递游标（{@link Subscription#wakeFloor}，回放/实时/唤醒共同推进）
+	 * 去重，不会把同一帧投两遍。</li>
 	 * </ol>
 	 *
 	 * <p>
@@ -1433,6 +1492,8 @@ public class SseChatEmitter {
 		// 由投递池异步完成（T3-1 慢订阅者隔离），单订阅者 FIFO 由 CAS drain 独占标志保证。
 		synchronized (this.emitLock) {
 			final byte[] payloadBytes;
+			// 本地实时帧的业务号（心跳为 0）：用于把每个订阅者的已投递游标推进到本帧。
+			long liveSeq = 0L;
 			if (RunStore.HEARTBEAT_TYPE.equals(String.valueOf(frame.get("type")))) {
 				// T7：心跳照常广播（下面的 subscribers），但不进事件日志 —— 只留一个轻量活动戳，
 				// 让"这轮最近有过活动"仍可跨进程判定。R1-09：心跳只证明<b>进程还活着</b>，
@@ -1473,8 +1534,11 @@ public class SseChatEmitter {
 				this.store.touchBusinessActivity(this.runId,
 						atMs instanceof Number number ? number.longValue() : System.currentTimeMillis());
 				this.frames.append(this.runId, frame);
-				// B23L1：先登记"本地已接手到 seq"，再发唤醒 —— 唤醒分发可能在本线程内同步回调
-				// （同步总线/测试替身），若不先登记，自唤醒会把刚落的这一帧再推一遍。
+				// B23L1：唤醒在锁内发布 —— 同步总线/测试替身会在本线程内重入 onWake，
+				// 从归档补的正是刚落的这一帧。自唤醒的幂等不靠"先登记水位"：它靠每订阅者
+				// 游标 —— onWake 只在成功入队后推进 wakeFloor，下面的扇出按同一游标跳过已交付的号
+				// （见 liveSeq <= sub.wakeFloor 分支）。
+				liveSeq = seq;
 				this.lastFanoutSeq.accumulateAndGet(seq, Math::max);
 				publishWake(seq);
 			}
@@ -1489,11 +1553,22 @@ public class SseChatEmitter {
 					// S3-1：生命周期回调已清理该订阅者（COW 快照与摘除的窄窗）—— 不再入队、不再抢 drain
 					continue;
 				}
+				if (liveSeq > 0L && liveSeq <= sub.wakeFloor) {
+					// 自唤醒（同步总线 / 进程内分发）已经把这一帧投给本订阅者：publishWake 在本扇出
+					// 之前，回调在 emit 内部重入 onWake，从归档补的正是刚落的这一帧并推进了游标。
+					// 游标只在成功入队之后推进（onWake 与下面分支同一口径），故"游标已过该号"
+					// 等价于"这一帧已交付"；此处再投就会让订阅者收到同一个 seq 两次。
+					continue;
+				}
 				if (!enqueueLive(sub, payload)) {
 					// S2-1：溢出摘除 = 主动断连 —— 显式 complete 触发前端 onerror/onclose，
 					// 前端带 lastSeq 重挂走差量补发（seq 无洞），胜过静默丢帧。
 					evict(sub, "实时队列溢出（容量 " + this.queueCapacity + "）");
 					continue;
+				}
+				if (liveSeq > 0L) {
+					// 本地已投递 ⇒ 本订阅者的游标推进（唤醒补帧的读下界取各订阅者最小值）。
+					sub.wakeFloor = Math.max(sub.wakeFloor, liveSeq);
 				}
 				kickDrain(sub);
 			}
@@ -1515,17 +1590,20 @@ public class SseChatEmitter {
 	}
 
 	/**
-	 * B23L1：收到跨实例唤醒 —— 从事件日志补 {@code > lastFanoutSeq} 的差量，推给本实例该 run 的连接。
+	 * B23L1：收到跨实例唤醒 —— 从事件日志补差量，推给本实例该 run 的连接。
 	 *
 	 * <p>
-	 * 去重口径（设计稿 §2.1 第 3 条）：<b>按 seq</b> 与本地扇出快路径共用同一个上界
-	 * （{@link #lastFanoutSeq}）—— 本地已经推过的帧不会被唤醒再推一遍；
+	 * 去重口径（设计稿 §2.1 第 3 条 + F3 收口）：每个订阅者各记一个<b>已投递游标</b>
+	 * （{@link Subscription#wakeFloor}：回放、本地实时扇出、唤醒补帧三条路径共同推进）。
+	 * 读取下界取<b>所有活订阅者的最小游标</b>，而不是 emitter 级的 {@link #lastFanoutSeq} ——
+	 * 后者会被"另一个订阅者的回放"推进，一旦本次唤醒丢失，落后订阅者就会永久缺那一帧
+	 * （独立复审 F3：无游标订阅者缺 seq=4）。取最小游标后：慢订阅者能补齐，快订阅者按自己的
+	 * 游标跳过已见帧，互不影响。
+	 *
+	 * <p>
 	 * 唤醒载荷只带上界，中间帧由 {@link FrameStore#readFrom} 给齐，因此"唤醒丢一条"不会造成永久缺口
-	 * （下一次唤醒或客户端 {@code ?lastSeq} 重连都能补齐）。
-	 *
-	 * <p>
-	 * 与 {@link #emit} 共用 {@code emitLock}：唤醒补帧与实时出帧在同一把锁下串行入队，
-	 * 单订阅者队列保持 FIFO 且 seq 单调。
+	 * （下一次唤醒或客户端 {@code ?lastSeq} 重连都能补齐）；同一订阅者的投递顺序仍是归档顺序，
+	 * 与本地实时帧共用同一把 {@link #emitLock} 串行入队（FIFO、seq 单调）。
 	 */
 	void onWake(String runId, long upperBoundSeq) {
 		if (!this.runId.equals(runId)) {
@@ -1535,9 +1613,12 @@ public class SseChatEmitter {
 			if (this.subscribers.isEmpty() || this.terminating.get()) {
 				return;
 			}
-			long from = this.lastFanoutSeq.get();
+			long from = minDeliveredSeq();
+			if (from < 0L) {
+				return;
+			}
 			if (upperBoundSeq > 0L && upperBoundSeq <= from) {
-				// 上界不高于本地已推上界 ⇒ 没有差量（重复唤醒幂等）。
+				// 上界不高于"所有订阅者都已投递到的最小游标" ⇒ 没有差量（重复唤醒幂等）。
 				// 收口注记（I-2）：晚到的**低号**帧（乱序落档兜底）也没有差量 —— 那一帧同样不会被
 				// 实时补发，这是协议要求（订阅者已看到更大的 seq，补发会破坏 seq 单调）；
 				// 它仍对 lastSeq < 该号的读者可见（重挂回放走 FrameStore#readFrom，按 ID 区间读）。
@@ -1566,16 +1647,41 @@ public class SseChatEmitter {
 					if (sub.closed) {
 						continue;
 					}
+					if (seq <= sub.wakeFloor) {
+						// 该订阅者已经见过这一帧（?lastSeq 重挂的客户端）：补帧不得变成重发。
+						continue;
+					}
 					if (!enqueueLive(sub, payload)) {
 						evict(sub, "唤醒补帧超出实时队列容量（容量 " + this.queueCapacity + "）");
 						continue;
 					}
+					sub.wakeFloor = seq;
 					kickDrain(sub);
 				}
 				this.lastFanoutSeq.accumulateAndGet(seq, Math::max);
 				from = Math.max(from, seq);
 			}
 		}
+	}
+
+	/**
+	 * 所有<b>活订阅者</b>里最小的已投递游标（唤醒补帧的读取下界）；没有活订阅者返回 {@code -1}。
+	 *
+	 * <p>为什么是"最小"而不是 emitter 级上界（F3）：另一个订阅者的回放会把共享上界推高，
+	 * 一旦本次唤醒丢失，落后订阅者就会永久缺那一帧；按最小游标读，慢的能补齐、快的按自己的
+	 * {@code wakeFloor} 跳过已见帧（见 {@link #onWake}）。
+	 */
+	private long minDeliveredSeq() {
+		long min = -1L;
+		for (Subscription sub : this.subscribers) {
+			if (sub.closed) {
+				continue;
+			}
+			if (min < 0L || sub.wakeFloor < min) {
+				min = sub.wakeFloor;
+			}
+		}
+		return min;
 	}
 
 	/**
@@ -2101,6 +2207,17 @@ public class SseChatEmitter {
 
 		/** 包②：本订阅者是否因<b>写超时</b>被摘除（去重日志/计数用；与 {@link #evicted} 分开口径）。 */
 		final AtomicBoolean writeTimedOut = new AtomicBoolean(false);
+
+		/**
+		 * 本订阅者的<b>已投递游标</b>（收到的最大 seq；0 = 全量）。三条投递路径共同推进：
+		 * 回放（{@code stageReplay}）、本地实时扇出（{@code emit}）、唤醒补帧（{@code onWake}）。
+		 *
+		 * <p>作用有两个：① 客户端带 {@code ?lastSeq=N} 重挂、而归档此刻没有新帧时，回放暂存 0 帧
+		 * ⇒ 游标仍须是 N（否则下一次唤醒把 1..N 重发一遍）；② 唤醒补帧的<b>读取下界</b>取所有活订阅者
+		 * 游标的<b>最小值</b>（{@link SseChatEmitter#minDeliveredSeq()}）—— 别的订阅者回放推进共享上界
+		 * 不会让落后的订阅者永久缺帧（独立复审 F3）。
+		 */
+		volatile long wakeFloor;
 
 		/**
 		 * true = 回放发完即收尾的投递上下文（{@link #replayToWithStatus} 的一次性回放，

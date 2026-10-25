@@ -442,6 +442,18 @@ public class ConfirmGate {
 	}
 
 	/**
+	 * 本批请求帧是否会在执行循环之前被<b>整批</b>公布（= park 开启）。
+	 *
+	 * <p>帧序契约要求每张卡先 {@code tool_start} 再 {@code frontend_tool_request}/{@code confirm_request}。
+	 * 请求帧被前移时，{@code tool_start} 必须同样前移（见 {@code SpToolCallingManager}）；
+	 * 判定统一以本方法为准 —— 单一事实源就是 {@link #publishRequestsForParkedBatch} 的同一条件，
+	 * 避免"管理器自己的 properties 实例"与闸门的实例不一致时帧序错位。
+	 */
+	public boolean publishesRequestsAheadOfLoop() {
+		return this.properties.getPark().isEnabled();
+	}
+
+	/**
 	 * <b>C1：park 前把本批每张卡的请求帧都公布出去</b>。
 	 *
 	 * <p>缺陷形态：帧原本是在各卡的 {@code await} 里<b>逐条</b>发的，而 park 让第一张卡的
@@ -590,6 +602,27 @@ public class ConfirmGate {
 			if (this.cancellations.cancelState(runId) == CancellationRegistry.CancelState.CANCELLED) {
 				return cancel(runId, pending, confirm, startedAt);
 			}
+			// ===== park 退出 = 一次原子生命周期切换（与决策写共用 submitLock）=====
+			// 缺陷形态（主 CI run 40174289141 / H-01）：旧实现在"预登记闸门之后、还租之前"无锁地做
+			// 还租（Redis 往返 1–3ms）。决策落在窗口内 ⇒ signal 命中这把<b>没人 await</b> 的闸门
+			// （woke=true）⇒ 决策侧按 WOKE_IN_PROCESS_GATE 静默跳过派发；本线程随后还租、退出
+			// ⇒ 一轮既没有驱动方也没有终帧，快照停在 SUSPENDED。
+			// 切换在锁内复读条目，于是只有两个确定出口：已决 ⇒ 本线程接手驱动；未决 ⇒ 还租 + 摘闸门
+			// 后 park（之后的 signal 必 miss，走死卡兜底）。
+			PendingToolCall settled = switchParkedLifecycle(runId, pending, lease);
+			if (settled != null) {
+				// 决策已落库且本线程还在：由它接手驱动（不 park、不派发续跑）。
+				// 决策侧此前的 woke=true 因此成立 —— 它唤醒的就是这个线程。
+				// 本分支不在下方 try/finally 内，取消监听者要在这里注销。
+				closeCancelHandle(cancelHandle, runId);
+				handedOff = true;
+				handOffLease(lease);
+				return settled;
+			}
+			// 未决：还租与摘闸门已在锁内完成，lease 已归还，finally 不得重复释放。
+			lease = null;
+			// 同上：park 在 try 之前退出，取消监听者不会走 finally。
+			closeCancelHandle(cancelHandle, runId);
 			AiTrace.eventOn(runId, sessionId, "approval_park", "toolCallId", pending.getToolCallId(), "tool",
 					pending.getName(), "kind", confirm ? "confirm" : "frontend");
 			log.info("人工等待 park runId={} toolCallId={} tool={} kind={}（请求帧已投递并收流；线程交还，"
@@ -601,12 +634,9 @@ public class ConfirmGate {
 			// 到点仍 PENDING ⇒ 写 TIMEOUT/FRONTEND_TIMEOUT + 发结局帧，并<b>派发一次续跑</b>让本轮收尾
 			// （到期是系统裁决；不派发会留下"没有驱动方也没有终帧"的悬轮）。
 			// 确认门无上限（timeoutSeconds == null）不排。
-			// 交还驱动租约：park 期间本进程不是驱动方；决策/到期触发方会重新抢租。
 			if (!confirm && timeoutSeconds != null) {
 				scheduleParkedFrontendExpiry(runId, pending, timeoutSeconds);
 			}
-			releaseWaitingLease(lease, runId);
-			lease = null;
 			throw new RunParkedException(runId, pending.getToolCallId(), pending.getKind());
 		}
 		// 人机预算分离（裁决第 3 条）：等待窗口内的时间累计到信标上，总预算判据据此扣除
@@ -712,12 +742,68 @@ public class ConfirmGate {
 			if (lease != null && !handedOff) {
 				releaseWaitingLease(lease, runId);
 			}
-			try {
-				cancelHandle.close();
+			closeCancelHandle(cancelHandle, runId);
+		}
+	}
+
+	/** 注销取消监听者（幂等；失败只留痕，不影响正在收尾的这一轮）。 */
+	private static void closeCancelHandle(AutoCloseable cancelHandle, String runId) {
+		try {
+			cancelHandle.close();
+		}
+		catch (Exception ex) {
+			log.debug("注销取消监听者失败 runId={}：{}", runId, ex.getMessage());
+		}
+	}
+
+	/**
+	 * <b>park 退出的原子生命周期切换</b>：与 {@code submitDecision}/{@code submitFrontendResult} 的
+	 * "落库 → 回执帧 → 唤醒"共用 {@link #submitLock}。
+	 *
+	 * <p>为什么必须原子：旧实现把"还租"留在锁外，形成"闸门已预登记、但没人 {@code await}"的窗口。
+	 * 决策落在窗口内时 {@code signal} 返回 true（唤醒的是预登记闸门），决策侧据此不再派发续跑；
+	 * 随后 park 线程摘闸门退出 ⇒ 一轮没有任何驱动方（主 CI run 40174289141 的 H-01）。
+	 *
+	 * <p>两个出口：
+	 * <ul>
+	 * <li>锁内复读<b>已决</b> ⇒ 返回该条目：调用方按"决策到达"口径交棒并继续驱动 ——
+	 *     恰一个驱动方，决策侧 {@code woke=true} 的跳过因此是正确的；</li>
+	 * <li>锁内复读<b>未决</b> ⇒ 先还租、再摘本 run 全部闸门，返回 {@code null}，调用方 park。
+	 *     顺序不可交换：先摘闸门再还租，决策方会以同 owner 重入抢到本线程手里的租约并派发，
+	 *     随后本线程的还租又把这任租约删掉（fencing 被削弱）。两步同在锁内，决策要么看到
+	 *     "闸门还在"（signal 命中 ⇒ 本线程接手），要么看到"闸门已摘"（signal 必 miss ⇒
+	 *     死卡兜底派发）；不存在"命中却无人接力"的第三种。</li>
+	 * </ul>
+	 */
+	private PendingToolCall switchParkedLifecycle(String runId, PendingToolCall pending, LeaseService.Lease lease) {
+		synchronized (this.submitLock) {
+			// C2：非抛读口 —— 读失败不得把"还租 + 摘闸门 + park"整条路变成异常出口。
+			PendingToolCall fresh = this.store.pendingLenient(runId, pending.getToolCallId());
+			if (fresh != null && fresh.resolved()) {
+				return fresh;
 			}
-			catch (Exception ex) {
-				log.debug("注销取消监听者失败 runId={}：{}", runId, ex.getMessage());
+			releaseWaitingLease(lease, runId);
+			clearWaiterLatches(runId);
+			return null;
+		}
+	}
+
+	/**
+	 * 摘掉本 run 的<b>全部</b>等待闸门（先摘闸门、后摘预登记标记，与 {@link #disarm} / {@code await.finally}
+	 * 同序）。只摘单张卡不够：同批其余卡也不会再被 {@code await}，留下的闸门会让
+	 * {@link #hasActiveLatch} 恒真，挡住死卡兜底。
+	 */
+	private void clearWaiterLatches(String runId) {
+		String prefix = runId + "|";
+		for (String key : this.latches.keySet()) {
+			if (!key.startsWith(prefix)) {
+				continue;
 			}
+			Latch latch = this.latches.get(key);
+			if (latch != null) {
+				this.latches.remove(key, latch);
+			}
+			this.armedKeys.remove(key);
 		}
 	}
 
@@ -1494,7 +1580,25 @@ public class ConfirmGate {
 		boolean woke;
 		synchronized (this.submitLock) {
 			this.store.putPending(runId, pending);
-			this.registry.of(runId).frontendToolResult(pending, ok, resultText);
+			// ===== 决策侧帧册收口（suspend-kill-a 的 FRONTEND_RESULT 残支）=====
+			// 前端卡的结局帧由本方法发出、<b>早于</b>续跑 —— 续跑侧再补只会排在 result 之后，
+			// 所以补发点必须在这里：同一把 submitLock 内、发结局帧之前。判据是事件日志（跨实例），
+			// 原实例的 tool_start 已在归档则一条不补。写出器取 registry.of(runId) 这同一个身份，
+			// 保证补发帧与结局帧走同一条取号/落档/订阅扇出路径。
+			// 决策幂等不受影响：走到这里之前 tryRecordDecision 已经决出唯一写者，重复回灌在上面就返回。
+			SseChatEmitter out = this.registry.of(runId);
+			try {
+				if (out.ensureToolStart(pending)) {
+					log.info("决策侧补发缺失的 tool_start runId={} toolCallId={} name={}", runId, toolCallId,
+							pending.getName());
+				}
+			}
+			catch (RuntimeException ex) {
+				// 补发是帧册修复面：失败只 WARN，绝不改变决策语义（落库与唤醒都必须照常完成）
+				log.warn("决策侧补发 tool_start 失败（不影响决策）runId={} toolCallId={}：{}", runId, toolCallId,
+						ex.getMessage());
+			}
+			out.frontendToolResult(pending, ok, resultText);
 			woke = signal(runId, toolCallId);
 		}
 		return new Submission(Outcome.ACCEPTED, pending, woke, null, maybeTriggerResume(runId, woke));

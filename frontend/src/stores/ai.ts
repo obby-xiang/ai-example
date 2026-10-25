@@ -430,6 +430,10 @@ function lockManager(): LockManager | null {
  * 会话锁探活（RC-4 ②）：'granted' = 锁到手（本页签是原页签，持锁至文档销毁）；
  * 回调收到 `null` = 'occupied'（别的页签持着该会话 ⇒ 本页签是复制品）；无锁能力 = 'unsupported'。
  * 调用入口已先判锁能力（`ensureTabOwnership`），这里的 'unsupported' 只服务认领/让渡两个补路。
+ *
+ * <p>API 失败（`request` 同步抛错 / promise reject）一律判 'unsupported'，**绝不**判 'occupied'：
+ * 前者只说明"无法确认"，后者是"另一文档确持锁"的正面证据。判定下游连着不可恢复的整份清空
+ * （{@link clearDuplicatedTabStorage}），把"问不到"当"确认复制"会误删现场。
  */
 async function probeSessionLock(sessionId: string): Promise<'granted' | 'occupied' | 'unsupported'> {
   const locks = lockManager()
@@ -461,7 +465,7 @@ async function probeSessionLock(sessionId: string): Promise<'granted' | 'occupie
         return new Promise<void>((release) => {
           heldLock = { name, release }
         })
-      }).catch(() => settle('occupied'))
+      }).catch(() => settle('unsupported'))
     } catch {
       settle('unsupported')
     }
@@ -553,12 +557,15 @@ function takeReturnIntent(sessionId: string): boolean {
 /**
  * 三层握手的判定入口（RC-4）：锁被占**限次重试**（`LOCK_PROBE_ATTEMPTS` × `LOCK_PROBE_RETRY_MS`）
  * —— 刷新场景里旧文档的锁可能尚未随文档销毁释放，早判会把刷新误判成复制品。
+ *
+ * <p>`duplicate` 只能由**每一次探活都真实收到 `null` 回调**得出；探活 API 失败（'unsupported'）
+ * 按无 Web Locks 保守处理，返回终态 'unsupported'（不换身份、不清空、不重试）。
  */
 async function resolveTabOwnership(sessionId: string): Promise<TabOwnership> {
   for (let attempt = 1; attempt <= LOCK_PROBE_ATTEMPTS; attempt += 1) {
     const verdict = await probeSessionLock(sessionId)
     if (verdict === 'unsupported') {
-      return 'unknown'
+      return 'unsupported'
     }
     if (verdict === 'granted') {
       return 'owner'
@@ -624,6 +631,27 @@ function clearMirrorRefs(): void {
     doomed.forEach((key) => sessionStorage.removeItem(key))
   } catch {
     // 隐私模式/配额：清不掉不影响"本页签用新 id"的口径
+  }
+}
+
+/**
+ * 复制页签（用户批准口径）：对本页签**从原页签继承**来的整份 sessionStorage 执行**一次** `clear()`。
+ *
+ * <p>只在这一条路径上允许整份清空 —— 调用点必须已经由 {@link resolveTabOwnership} 用 Web Locks
+ * **证实**"该会话锁被另一个文档持有"（每一次 `ifAvailable` 探活都真实收到 `null` 回调；
+ * 探活 API 失败只算 'unsupported'，不构成复制的证据），且不是带着返回意向回来的原页签。清空发生在
+ * `adoptFreshSession()` / `rotatePageId()` **之前**：先抹掉继承现场（会话镜像、未提交表单草稿、
+ * 业务页签键），再写回全新的 sessionId 与 pageId；顺序反了会把刚建的新身份一起抹掉。
+ *
+ * <p>边界：**只清本页签**（sessionStorage 按页签隔离），`localStorage` 一个字不碰；原页签的锁、
+ * 广播与服务端会话都不受影响。`clear()` 不可用（隐私模式/被禁用）时退回镜像前缀清理 ——
+ * 宁可残留，也不抛错打断"本页签用新 id"。
+ */
+function clearDuplicatedTabStorage(): void {
+  try {
+    sessionStorage.clear()
+  } catch {
+    clearMirrorRefs()
   }
 }
 
@@ -1167,7 +1195,8 @@ function clearNotice(sink: NoticeSink): void {
  * <p>只删两处：<b>该会话</b>的镜像键 `ai-mirror:<sid>`（响应值必须与期望键一致，否则回落期望键，
  * 防止服务端字段异常删到别的键）与<b>枚举到的</b> `draftToolCallIds` 对应草稿键（由
  * `clearFormDraft` 固定拼 `cm.ai.form.draft.<id>`）。<b>严禁</b> `sessionStorage.clear()` 或前缀
- * 通配：同一页签可能已换到新会话，其它页签/业务状态也在同一 sessionStorage 里。
+ * 通配：同一页签可能已换到新会话，业务状态也在同一 sessionStorage 里。整份清空只有复制页签
+ * 确认那一条路径（{@link clearDuplicatedTabStorage}），与"删旧会话残留"不是同一件事。
  *
  * <p>响应缺字段（旧后端/旧版本）时仍清该会话镜像；草稿只在有 id 时清（当前活动表单已由
  * `adoptFreshSession` 的 `dropActiveForm` 清掉）。
@@ -4562,9 +4591,10 @@ export const useAiStore = defineStore('ai', {
      * - **环境无 Web Locks**（旧浏览器 / jsdom）⇒ 'unsupported'，按**恢复**处理（保守）：
      *   这一段**同步**收口并返回 `null` —— 调用方（面板 onMounted）不必为一次空判定多等
      *   一个 microtask，既有挂载时序一格不动；
-     * - **复制页签**（锁被原页签持有）⇒ `adoptFreshSession()` 起新会话 + 轮换 pageId：
-     *   **不接管**原会话、**不删**原会话的后端记忆；让渡监听随之装上（原页签关闭后由
-     *   `onOwnershipMessage` 决定是否接手）；
+     * - **复制页签**（锁被原页签持有）⇒ 对本页签整份 `sessionStorage` 清**一次**（继承的会话镜像、
+     *   未提交表单草稿、业务页签键都不带走；`localStorage` 不动），随后 `adoptFreshSession()` 起
+     *   新会话 + 轮换 pageId：**不接管**原会话、**不删**原会话的后端记忆；让渡监听随之装上
+     *   （原页签关闭后由 `onOwnershipMessage` 决定是否接手）；
      * - **慢重载回来的原页签**（带着 `pagehide` 写下的返回意向、锁却已被副本接手）⇒ 只把角色
      *   降级为 'duplicate'：**不清会话、不清屏、不轮换 pageId、不认领锁**。这是"比宽限还慢的重载"
      *   那条兜底 —— 会话确实不归本页签了，但用户眼前的记录不该被当成复制品抹掉。
@@ -4608,9 +4638,10 @@ export const useAiStore = defineStore('ai', {
             // 回来的原页签：会话已被别人接手 —— 降级但不清场（见方法注释）
             return
           }
-          // 复制页签：先清掉从原页签**继承**来的镜像引用，再起新会话；pageId 轮换（同源广播里
-          // 两个页签的 pageId 必须可区分）。
-          clearMirrorRefs()
+          // 复制页签：确认复制之后，先对本页签整份 sessionStorage 清一次（继承来的镜像、未提交
+          // 草稿、业务页签键一律不带走），再起新会话、轮换 pageId（同源广播里两个页签的 pageId
+          // 必须可区分）。顺序不可反：先 adopt/rotate 再 clear 会把刚写下的新身份抹掉。
+          clearDuplicatedTabStorage()
           this.adoptFreshSession()
           rotatePageId()
           await this.claimSessionOwnership(this.sessionId)

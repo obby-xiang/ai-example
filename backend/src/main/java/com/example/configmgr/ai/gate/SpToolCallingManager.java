@@ -389,6 +389,8 @@ public class SpToolCallingManager implements ToolCallingManager {
 		List<PendingToolCall> suspended = new ArrayList<>(pendings.size());
 		Set<String> preflightBlocked = new HashSet<>();
 		Set<String> frontendRejected = new HashSet<>();
+		// 已发过 tool_start 的 toolCallId（park 前置批次 + 执行循环共用）：每张卡恰一条，不重发。
+		Set<String> toolStarted = new HashSet<>();
 		for (PendingToolCall pending : pendings) {
 			if (!budgetArmed && this.preflight != null && PendingToolCall.KIND_CONFIRM.equals(pending.getKind())
 					&& ToolPreflightService.supports(pending.getName())
@@ -472,6 +474,24 @@ public class SpToolCallingManager implements ToolCallingManager {
 						assistant.getMetadata());
 				out.suspended(suspended, this.store.runKey(runId), this.store.pendingKey(runId),
 						this.store.instanceId());
+				// ===== 帧序契约：tool_start 必须先于 request（park 开启时两者都前移）=====
+				// C1 把请求帧提前公布是为了"首张卡 park 后其余卡仍可决策"；但 tool_start 仍留在
+				// 执行循环里逐张发，真实帧序就变成 suspended → request → tool_start（真模型 G-01 实测）——
+				// 前端 tool_start 分支会把已建立的等动作卡复位成只读 running，卡再也提交不了。
+				// 因此 park 开启时先把本批每张卡的 tool_start 一并前移，执行循环不再重发（toolStarted）。
+				//
+				// 语义（裁决记录，独立复审 F2）：tool_start 对<b>每个被接受（进入 suspended）的工具</b>都发，
+				// 它是"公告/已排期事件"，<b>不是</b>"已执行"的证明：
+				//   · 混合批次（backend_a, confirm_b, backend_c）里，首张卡 park 后本调用就返回，
+				//     排在后面的 backend_c 在整段人工等待期间显示 running —— 这是刻意可见的语义，
+				//     本批不为此收窄前端交互；
+				//   · 续跑用 ResumeService#resolvePending 结算这些条目，<b>不会再发一次 start</b>；
+				//   · 若把预发收窄成"只发门卡"，这些工具就一条 start 都没有（旧缺口复现），故不做。
+				if (this.gate.publishesRequestsAheadOfLoop()) {
+					for (PendingToolCall pending : suspended) {
+						emitToolStartOnce(runId, toolStarted, pending);
+					}
+				}
 				// ===== C1：park 前把本批每张卡的请求帧都公布 =====
 				// 逐条发（在各卡自己的 await 里）会让 park 后的第二张卡永远收不到请求帧：
 				// 它既没 req 也没帧，前端不会渲染，也就永远没人能决策它。
@@ -496,7 +516,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 				// 轮内上下文预算：armed 之后新工具<b>一律不执行</b>（副作用到此为止）。
 				// 帧照发（前端能看到"这步为什么没跑"），回填模型的是统一信封 + 未执行说明。
 				if (budgetArmed) {
-					out.toolStart(pending);
+					emitToolStartOnce(runId, toolStarted, pending);
 					responses.add(skipAsBudgetExhausted(runId, pending));
 					traceToolSkipped(runId, snapshot.getSessionId(), pending, ToolOutcome.CODE_TOOL_BUDGET_EXHAUSTED);
 					log.warn("轮内上下文预算已耗尽，本调用不再执行 runId={} tool={} toolCallId={}", runId,
@@ -507,7 +527,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 				// （与预检未通过同形的两条帧：tool_start → frontend_tool_result）。
 				if (frontendRejected.contains(pending.getToolCallId())) {
 					String text = frameText(pending.getResultText());
-					out.toolStart(pending);
+					emitToolStartOnce(runId, toolStarted, pending);
 					out.frontendToolResult(pending, false, text);
 					responses.add(new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
 							modelData(pending, text)));
@@ -519,7 +539,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 				// 它不在"首错即停"的判据内（retryable=true，见 ToolOutcome#retryable）—— 用户修好可重试。
 				if (preflightBlocked.contains(pending.getToolCallId())) {
 					String text = frameText(pending.getResultText());
-					out.toolStart(pending);
+					emitToolStartOnce(runId, toolStarted, pending);
 					out.toolResult(pending, false, false, text);
 					responses.add(new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
 							modelData(pending, text)));
@@ -529,7 +549,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 				// 步数笼：到顶后的调用不再执行，结算成 skipped/TOOL_STEP_LIMIT（不判整轮失败）
 				if (stepsUsed >= maxToolSteps) {
 					// 帧序：先 tool_start 再 tool_result（与预检未通过分支同形，不破帧序契约）
-					out.toolStart(pending);
+					emitToolStartOnce(runId, toolStarted, pending);
 					responses.add(skipAsStepLimit(runId, pending, maxToolSteps));
 					traceToolSkipped(runId, snapshot.getSessionId(), pending, ToolOutcome.CODE_TOOL_STEP_LIMIT);
 					log.warn("工具步数到顶，本调用不再执行 runId={} tool={} toolCallId={} steps={}/{}", runId,
@@ -537,7 +557,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 					continue;
 				}
 				stepsUsed++;
-				out.toolStart(pending);
+				emitToolStartOnce(runId, toolStarted, pending);
 				// 副作用信标（韧性棒）：工具开始执行即留下痕迹 ——
 				// ① 让看门狗在工具执行期间不计静默（硬规范①）；② 让"已产出内容前先有副作用"的重试被拦住。
 				this.beacon.enter(runId, pending.getName(), pending.getKind());
@@ -692,6 +712,20 @@ public class SpToolCallingManager implements ToolCallingManager {
 		}
 		finally {
 			this.gate.disarm(runId, gateWaitIds);
+		}
+	}
+
+	/**
+	 * {@code tool_start} 的<b>唯一发射口</b>（每张卡恰一条）。
+	 *
+	 * <p>park 开启时本批的 tool_start 与请求帧都前移到执行循环之前公布（帧序契约：tool_start 先于
+	 * request）。执行循环随后还会走到同一条卡（预算/预检/步数/主路径四个分支），必须靠本集合去重 ——
+	 * 否则同一张卡会出现两条 tool_start（前端会重复建段/重复动画）。非 park 路径集合恒空，
+	 * 行为与改造前逐字一致。
+	 */
+	private void emitToolStartOnce(String runId, Set<String> toolStarted, PendingToolCall pending) {
+		if (toolStarted.add(pending.getToolCallId())) {
+			this.registry.of(runId).toolStart(pending);
 		}
 	}
 
@@ -1787,12 +1821,17 @@ public class SpToolCallingManager implements ToolCallingManager {
 		if (PendingToolCall.APPROVED.equals(status) && PendingToolCall.KIND_FRONTEND.equals(pending.getKind())) {
 			log.warn("续跑发现 APPROVED+FRONTEND（历史假批准/错入口决策）runId={} toolCallId={} name={}："
 					+ "显式 blocked，不执行后端桩、不写台账", runId, pending.getToolCallId(), pending.getName());
+			ensureToolStartBeforeSettlement(runId, pending);
 			return settleBlocked(runId, pending, ToolOutcome.CODE_TOOL_KIND_MISMATCH, KIND_MISMATCH_TEXT);
 		}
 		boolean shouldExecute = PendingToolCall.APPROVED.equals(status)
 				|| (PendingToolCall.PENDING.equals(status) && PendingToolCall.KIND_BACKEND.equals(pending.getKind()))
 				|| (PendingToolCall.EXECUTED.equals(status) && !pending.isExecuted());
 		if (shouldExecute) {
+			// 结算侧帧册不变量：本分支的所有出口（台账重放 / 目标校验 / 资源锁 / 认领 / 执行 / 超时）
+			// 都会发 tool_result，而原实例可能死在 tool_start 落档之前（suspend-kill-a）——
+			// 结算之前按归档幂等补一次，已有则不补。
+			ensureToolStartBeforeSettlement(runId, pending);
 			return executeOnce(runId, prompt, pending);
 		}
 		// B23L1 批③b：已终态但结局是 unknown 的条目，先经三跳对账（台账 → 认领 → 资源锁）再回填 ——
@@ -1806,6 +1845,33 @@ public class SpToolCallingManager implements ToolCallingManager {
 		log.debug("续跑结算复用结果 runId={} toolCallId={} status={} executedBy={}", runId, pending.getToolCallId(),
 				status, pending.getExecutedBy());
 		return text;
+	}
+
+	/**
+	 * 续跑结算前<b>幂等补发</b>缺失的 {@code tool_start}（帧册不变量：每个被执行工具恰一条 start）。
+	 *
+	 * <p>缺陷形态（真实集群 {@code suspend-kill-a}）：首轮"状态先落、帧后发"，原实例死在
+	 * {@code tool_start} 落档之前，归档里就永远没有这一帧；续跑（本方法只被
+	 * {@link com.example.configmgr.ai.run.ResumeService} 调用）只发结局帧 ⇒ 永久"有 result、没有 start"。
+	 *
+	 * <p>为什么挂在这里而不是 {@link #executeOnce}：后者也是<b>首轮</b>执行路径的出口，而首轮
+	 * 发帧顺序（{@code suspended → tool_start → 请求帧 → 执行}）由 {@code emitToolStartOnce} 保证、
+	 * 不允许被一次归档读改写；本方法是续跑结算的唯一入口，覆盖面相同而工作面最小。
+	 *
+	 * <p>判据在事件日志（跨实例同一份）——已有该 {@code toolCallId} 的 {@code tool_start} 就一条不补。
+	 * 发帧是观测面：失败只 WARN，绝不阻断结算。
+	 */
+	private void ensureToolStartBeforeSettlement(String runId, PendingToolCall pending) {
+		try {
+			if (this.registry.of(runId).ensureToolStart(pending)) {
+				log.info("续跑补发缺失的 tool_start runId={} toolCallId={} name={}", runId,
+						pending.getToolCallId(), pending.getName());
+			}
+		}
+		catch (RuntimeException ex) {
+			log.warn("续跑补发 tool_start 失败（不阻断结算）runId={} toolCallId={}：{}", runId,
+					pending.getToolCallId(), ex.getMessage());
+		}
 	}
 
 	/**

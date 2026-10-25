@@ -61,8 +61,16 @@ spring:
     timeout-per-shutdown-phase: 20s
 
 server:
-  # readiness 摘除 → 优雅停机：先让 /health/ready 变 503（ReadinessService 在 ContextClosedEvent
-  # 置 draining），再由容器停止接收新请求、等在途请求收尾。
-  # 注意：LB/网关侧的"发现 503 到真正摘流"有一段探测间隔，部署侧仍需 preStop/deregistration delay
-  # 覆盖它（本仓没有 K8s 清单，这一段留运维侧配置）。
+  # readiness 摘除 → 优雅停机：先让 /health/ready 变 503（ShutdownDrainGate 在 ContextClosedEvent
+  # 以最高优先级置 draining 并保持 draining 窗口），再由容器停止接收新请求、等在途请求收尾。
+  # 注意：LB/网关侧的"发现 503 到真正摘流"有一段探测间隔 —— 进程内的 drain-window（见下）
+  # 覆盖它；若编排器在 SIGTERM 后另有 preStop/deregistration delay，两段可以叠加。
   shutdown: graceful
+
+app:
+  health:
+    readiness:
+      # 多实例必须有 draining 窗口：Spring Boot 的 graceful shutdown 会在同一个
+      # ContextClosedEvent 里立刻关闭监听 socket，没有窗口时 503 无法被反代探测到。
+      # 5s ≥ 常见 LB 的"探测间隔 2s × 失败阈值 2"＋余量；上界 60s（启动期校验）。
+      drain-window: 5s

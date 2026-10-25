@@ -24,6 +24,30 @@
  * 结果口径：只有 PASS / FAIL（自证里断言 RESULT_STATUSES 不含 SKIP）。产品缺陷未修完时
  * 探针**如实 FAIL**，绝不把未跑到的检查写成 SKIP 或绿。
  *
+ * 挂起/接管的时序口径（2026-10-25 裁决 + 真实拓扑 run 40174291244 的证据）：
+ *   - **合入基线**：本探针与"多实例挂起/接管"候选分支同批合入；该候选已含 `SseChatEmitter#ensureToolStart`、
+ *     续跑结算前补发（`SpToolCallingManager#ensureToolStartBeforeSettlement`）、park 退出的原子生命周期切换
+ *     （`ConfirmGate#switchParkedLifecycle`）与 frontend-result 路径（均有独立复审与定向测试）。
+ *     **这些是前置产品补丁，不在本探针的交付物里** —— 单独把探针贴到 `ae883fb` 上跑真实拓扑，
+ *     `suspend-kill-a` 的 `tool_start` 不变量会按预期红（那正是该用例要暴露的产品缺口）。
+ *   - **park 边界屏障**（只用于"非 kill 的编排"）：请求帧之后产品主动收流（B1）。稳定基线的用例
+ *     （`suspend-cross-instance` / 幂等）等这条连接被服务端收尾再继续，于是 park 帧集
+ *     （确认卡 + `tool_start`）一定已落档，决策前的重挂与决策后的续跑都从确定的起点出发。
+ *   - **早杀覆盖保留**（`suspend-kill-a`）：拿到确认卡就 SIGKILL，**不等**收流 —— 继续覆盖
+ *     "快照已 SUSPENDED、本批 `tool_start` 可能还没落档"的崩溃窗口。产品侧由候选分支的
+ *     `ensureToolStart` 在续跑结算前按归档幂等补发，因此断言是**最终帧册不变量**：
+ *     `tool_start` 恰一次且先于 `tool_result`；探针只记录"kill 前客户端是否已见"，不推断来源。
+ *   - **决策前的重挂只回放后收流**（用户 park 规则：保留非阻塞收流，不恢复悬挂连接/阻塞执行）：
+ *     用例断言"回放完整 + 被服务端收流 + 不含终帧 + 状态仍 SUSPENDED"，
+ *     终帧改在**决策 200 之后**的重挂上收（产品自述的标准时序）。
+ *   - **证据先落盘再断言**：帧类（`saveFrames`）与状态类（`/runs/current`、`run-detail`、`jobs`、`history`、
+ *     `confirm`、`takeover`）证据都排在可能失败的断言之前（`evidenceFirst` 或 `finally`）。
+ *     park 帧集允许 `heartbeat/message_start/delta/message_end/context/retry` 等 pre-park 噪声，
+ *     不做"只许 4 帧"的硬编码（心跳不带业务 seq，不算断号）。
+ *   - **末号口径**：终态帧册里的 `done.seq` 断言的是"**本次全量回放**的末号"（`lastSeqScope=full-replay`），
+ *     **不是**服务端 `archiveMaxSeq`（终态会清 session→current 索引，权威末号只在 SUSPENDED/RUNNING
+ *     时通过 `/runs/current` 可读，见 park/kill 边界的两处断言）。
+ *
  * 用法：
  *   node scripts/ci/cluster3-probe.mjs --self-check
  *   node scripts/ci/cluster3-probe.mjs --run --artifacts <dir> --run-dir <dir> --jar <jar>
@@ -373,6 +397,390 @@ function checkStrictlyIncreasing(seqs, label) {
   checkEq(new Set(seqs).size, seqs.length, `${label}：seq 重复`)
 }
 
+/** seq 必须从 `from` 起逐号连续（1,2,3…）：断号 = 归档少了一帧或多发了一号，两者都是缺陷。 */
+function checkSeqContiguous(seqs, from, label) {
+  checkStrictlyIncreasing(seqs, label)
+  checkEq(seqs[0], from, `${label}：起始 seq`)
+  for (let i = 1; i < seqs.length; i += 1) {
+    checkEq(seqs[i], seqs[i - 1] + 1, `${label}：seq 断号（第 ${i} 项）`)
+  }
+}
+
+/** 心跳不占业务号、不入归档（`FrameStore#append` 对心跳是 no-op）—— 唯一允许没有 seq 的帧型。 */
+const HEARTBEAT_TYPE = 'heartbeat'
+
+function isHeartbeat(frame) {
+  return Boolean(frame) && frame.type === HEARTBEAT_TYPE
+}
+
+/**
+ * 业务帧的 seq 列。**缺 seq 直接报错，不再过滤跳过**：
+ * 旧实现 `filter(f => typeof f.seq === 'number')` 会把"某帧没有 seq"静默忽略 —— 只要其余号仍是
+ * 1..N，连续性断言照样通过（复审 I2 的 false-pass）。心跳是唯一的例外（它本就不占号）。
+ */
+function seqsOf(frames, label = 'seq 列') {
+  const out = []
+  frames.forEach((frame, index) => {
+    if (isHeartbeat(frame)) return
+    if (!Number.isInteger(frame.seq)) {
+      throw new Error(`${label}：第 ${index} 帧（type=${frame.type}）缺少整数 seq —— 缺号不得被跳过`)
+    }
+    out.push(frame.seq)
+  })
+  return out
+}
+
+function businessFrames(frames) {
+  return frames.filter((frame) => !isHeartbeat(frame))
+}
+
+function typesOf(frames) {
+  return frames.map((f) => f.type)
+}
+
+/**
+ * 证据优先：先把"当时看到的快照"落盘，再跑任何可能失败的断言。
+ *
+ * <p>复审 B1 的教训：断言失败时才最需要帧证据。所有 <c>saveFrames</c> 调用点都经本函数
+ * （或 <c>finally</c>）排在 <c>check*</c> 之前；自证 <c>selfTestEvidenceBeforeAssertions</c>
+ * 用"断言必抛"的用例证明顺序与失败留存。
+ */
+function evidenceFirst(write, snapshot, assertions) {
+  write(snapshot())
+  return assertions()
+}
+
+function checkNonEmptyString(value, label) {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new Error(`${label}：期望非空字符串，实得 ${JSON.stringify(value)}`)
+  }
+}
+
+function checkPresent(value, label) {
+  if (value === null || value === undefined) {
+    throw new Error(`${label}：字段缺失（null/undefined）`)
+  }
+}
+
+/**
+ * 这些帧型可以合法地出现在确认卡之前（流式正文/思考段/压缩/重试/心跳）——
+ * 它们是产品允许的噪声，既不该被当成缺陷（复审 I3 的 false-fail），也不属于 park 帧集本身。
+ */
+const PRE_PARK_NOISE_TYPES = Object.freeze(['context', 'message_start', 'delta', 'message_end', 'retry', HEARTBEAT_TYPE])
+
+const PRE_PARK_BUSINESS_TYPES = Object.freeze(['start', 'suspended', 'confirm_request', 'tool_start'])
+
+/**
+ * <b>"确认卡已到"的最小帧契约</b>（早杀路径用：收到 `confirm_request` 就返回，不等 park 收流）。
+ *
+ * <p>只断言"到这一刻为止产品必须已经给出的东西"：
+ * <ul>
+ *   <li>首帧是 `start`、恰一个；</li>
+ *   <li>`suspended` 恰一个且先于 `confirm_request`（`SpToolCallingManager` 先发 suspended 再公布请求帧）；</li>
+ *   <li>该 `toolCallId` 的 `confirm_request` 恰一个；</li>
+ *   <li>没有终帧；业务帧 seq 从 1 逐号连续；除业务帧外只允许 `PRE_PARK_NOISE_TYPES`；</li>
+ *   <li>**不**要求 `tool_start`：park 转换期间被杀时它可能还没落档（正是要测的窗口）。</li>
+ * </ul>
+ */
+function assertCardReachedFrameSet(frames, toolCallId, label = '确认卡到达帧集') {
+  check(frames.length > 0, `${label}：一帧都没收到（已收=${typesOf(frames).join(',') || '空'}）`)
+  const seqs = seqsOf(frames, label)
+  const business = businessFrames(frames)
+  check(business.length > 0, `${label}：一个业务帧都没收到（已收=${typesOf(frames).join(',')}）`)
+  checkEq(business[0].type, 'start', `${label}：首个业务帧必须是 start（实得 ${typesOf(business).join(',')}）`)
+  checkEq(countOf(business, 'start'), 1, `${label}：start 帧数`)
+  checkEq(countOf(business, 'suspended'), 1, `${label}：suspended 帧数`)
+  checkEq(countOf(business, 'confirm_request', toolCallId), 1, `${label}：confirm_request 帧数（toolCallId=${toolCallId}）`)
+  checkEq(countOf(business, 'done') + countOf(business, 'error'), 0, `${label}：确认卡之前不得出现终帧`)
+  const allowed = new Set([...PRE_PARK_BUSINESS_TYPES, ...PRE_PARK_NOISE_TYPES])
+  const unexpected = typesOf(business).filter((type) => !allowed.has(type))
+  checkEq(unexpected.join(','), '', `${label}：出现确认卡之前不该有的帧型（已收=${typesOf(business).join(',')}）`)
+  check(
+    indexOf(business, 'suspended') < indexOf(business, 'confirm_request'),
+    `${label}：suspended 必须先于 confirm_request（实得 ${typesOf(business).join(',')}）`
+  )
+  checkSeqContiguous(seqs, 1, label)
+  return { lastSeq: seqs[seqs.length - 1], types: typesOf(business).join(','), heartbeats: frames.length - business.length }
+}
+
+/**
+ * <b>park 边界帧集</b>（已收流 = park 转换完成）。
+ *
+ * <p>在"确认卡已到"的契约之上只多要求一件事：`tool_start` 恰一次 —— 因为服务端收流
+ * （`ConfirmGate#await` 里的 `completeSubscriptions`）发生在本批 `tool_start` 之后，
+ * 客户端看到收流就说明该帧已经落档。`confirm_request` 与 `tool_start` 的先后是产品实现细节
+ * （C1 前/后都出现过），这里不作约束。
+ */
+function assertParkedFrameSet(frames, toolCallId, label = 'park 边界帧集') {
+  const summary = assertCardReachedFrameSet(frames, toolCallId, label)
+  checkEq(
+    countOf(businessFrames(frames), 'tool_start', toolCallId),
+    1,
+    `${label}：tool_start 帧数（收流完成 ⇒ 该帧必须已落档；toolCallId=${toolCallId}）`
+  )
+  return summary
+}
+
+/**
+ * 服务端字段投影：去掉客户端解析时附加的 `_recvAtMs`/`_event`，其余**全字段**参与比对。
+ *
+ * <p>不再用固定键白名单（复审 I1：白名单漏了 `toolCalls`/`runId`/`context`/`preflight` 等，
+ * 载荷被清空或替换仍能 false-pass）。这里比较"同一份归档帧的完整服务端内容"，
+ * 因此任何字段级差异（`suspended.toolCalls` 被清空、`start.runId` 被换、`context` 载荷被改坏、
+ * `atMs` 被改写）都会红。
+ */
+function serverFields(frame) {
+  const out = {}
+  for (const [key, value] of Object.entries(frame)) {
+    if (key === '_recvAtMs' || key === '_event') continue
+    out[key] = value
+  }
+  return out
+}
+
+/** 稳定序列化（递归按 key 排序）：两条序列化路径的 key 顺序不同不应造成假红。 */
+function stableStringify(value) {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`
+  if (value && typeof value === 'object') {
+    const keys = Object.keys(value).sort()
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
+/**
+ * park 阶段的关键载荷（复审 I1：只比 type+seq 会让"载荷被清空/替换"的回放 false-pass）。
+ */
+function assertParkedPayloads(frames, { toolCallId, label = 'park 载荷' }) {
+  const card = findOf(frames, 'confirm_request', toolCallId)
+  check(card, `${label}：缺少 confirm_request（toolCallId=${toolCallId}）`)
+  checkNonEmptyString(card.name, `${label}：confirm_request.name`)
+  checkPresent(card.args, `${label}：confirm_request.args`)
+  checkPresent(card.summary, `${label}：confirm_request.summary`)
+  check(card.irreversible === undefined || typeof card.irreversible === 'boolean', `${label}：confirm_request.irreversible 类型`)
+
+  const suspended = findOf(frames, 'suspended')
+  check(suspended, `${label}：缺少 suspended 帧`)
+  checkNonEmptyString(suspended.runId, `${label}：suspended.runId`)
+  check(Array.isArray(suspended.toolCalls), `${label}：suspended.toolCalls 必须是数组`)
+  const entry = suspended.toolCalls.find((item) => item && item.toolCallId === toolCallId)
+  check(entry, `${label}：suspended.toolCalls 未列出 ${toolCallId}`)
+  checkEq(entry.name, card.name, `${label}：suspended.toolCalls[].name 必须与确认卡一致`)
+  checkEq(entry.kind, 'CONFIRM', `${label}：suspended.toolCalls[].kind`)
+  checkEq(String(entry.arguments), String(card.args), `${label}：suspended.toolCalls[].arguments 必须等于 confirm_request.args`)
+
+  const start = findOf(frames, 'tool_start', toolCallId)
+  if (start) {
+    checkEq(start.name, card.name, `${label}：tool_start.name 必须等于 confirm_request.name`)
+    checkEq(start.kind, 'CONFIRM', `${label}：tool_start.kind`)
+    checkEq(JSON.stringify(start.args), JSON.stringify(card.args), `${label}：tool_start.args 必须等于 confirm_request.args`)
+  }
+  return { name: card.name }
+}
+
+/**
+ * "决策 + 执行 + 正文"的关键载荷（复审 I1）。可作用于一段**完整**帧册，也可作用于
+ * 决策后重挂的差量连接（那时 `confirm_request`/`suspended` 在 `lastSeq` 之前，不在这一条连接里）。
+ *
+ * @param expectedName 期望的工具名（差量连接没有确认卡时由调用方给）
+ */
+function assertConfirmedToolPayloads(frames, { toolCallId, expectedName = null, label = '结论载荷' }) {
+  const result = findOf(frames, 'tool_result', toolCallId)
+  check(result, `${label}：缺少 tool_result（toolCallId=${toolCallId}）`)
+  checkEq(result.ok, true, `${label}：tool_result.ok`)
+  checkEq(result.outcome, 'ok', `${label}：tool_result.outcome`)
+  if (expectedName) checkEq(result.name, expectedName, `${label}：tool_result.name`)
+  checkNonEmptyString(result.result, `${label}：tool_result.result 不得为空`)
+
+  const decision = findOf(frames, 'confirm_decision', toolCallId)
+  check(decision, `${label}：缺少 confirm_decision（toolCallId=${toolCallId}）`)
+  checkEq(decision.decision, 'approve', `${label}：confirm_decision.decision`)
+  checkEq(decision.approved, true, `${label}：confirm_decision.approved`)
+  if (expectedName) checkEq(decision.name, expectedName, `${label}：confirm_decision.name`)
+
+  const deltas = frames.filter((frame) => frame.type === 'delta')
+  check(deltas.length > 0, `${label}：必须至少有一帧 delta（正文）`)
+  deltas.forEach((delta, index) => {
+    check(typeof delta.text === 'string', `${label}：第 ${index} 帧 delta.text 必须是字符串（实得 ${typeof delta.text}）`)
+  })
+  check(deltas.some((delta) => delta.text.length > 0), `${label}：delta 文本不得全为空`)
+  return { name: result.name, deltas: deltas.length }
+}
+
+/** 完整生命周期的关键载荷：park 阶段 + 结论阶段（一轮已 done 时两段都必须存在）。 */
+function assertCompletedPayloads(frames, { toolCallId, label = '帧册载荷' }) {
+  const { name } = assertParkedPayloads(frames, { toolCallId, label })
+  const confirmed = assertConfirmedToolPayloads(frames, { toolCallId, expectedName: name, label })
+  return { name, deltas: confirmed.deltas }
+}
+
+/**
+ * 决策前重挂的安全契约（用户 park 规则的裁决口径：**保留非阻塞收流，不恢复悬挂连接/阻塞执行**）。
+ *
+ * 因此这里不断言"连接活到 done"，而是断言实际安全契约：
+ * ① 回放内容 = 归档此刻的全部帧（逐帧 **全字段**一致），差量起点 = lastSeq + 1；
+ * ② 回放完即被服务端收流（不悬挂、不阻塞）；
+ * ③ 不含终帧（收流不是终态伪造）。
+ *
+ * <p>载荷断言在这里就地执行（复审 I1：C 的决策前回放此前只比投影键，`toolCalls`/`runId`/`context`
+ * 被改坏仍能过）。回放既然必须与 park 帧集逐帧相等，park 阶段的载荷断言同样必须成立。
+ */
+function assertPreDecisionReplay(frames, parkedFrames, toolCallId, label) {
+  const actual = businessFrames(frames)
+  const expected = businessFrames(parkedFrames)
+  checkEq(
+    stableStringify(actual.map(serverFields)),
+    stableStringify(expected.map(serverFields)),
+    `${label}：回放内容必须与 park 边界帧集逐帧全字段一致（期望 ${typesOf(expected).join(',')}，实得 ${typesOf(actual).join(',') || '空'}）`
+  )
+  checkEq(countOf(actual, 'done') + countOf(actual, 'error'), 0, `${label}：决策前的回放不得含终帧`)
+  assertParkedPayloads(actual, { toolCallId, label: `${label}载荷` })
+  return { frames: actual.length }
+}
+
+/** B 侧差量的"不重不漏"：必须从 `fromSeq` 起逐号连续（复审 I2）。 */
+function assertDeltaContiguous(frames, fromSeq, label) {
+  const seqs = seqsOf(frames, label)
+  checkSeqContiguous(seqs, fromSeq, label)
+  return seqs
+}
+
+/**
+ * **决策后重挂的差量连接**的帧型/载荷契约（复审 I1(b)(c)：此前只验 seq，载荷坏了仍能过）。
+ *
+ * <p>差量从 `lastSeq+1` 起，因此 `start`/`suspended`/`confirm_request` 这些"前缀帧"**不应出现**
+ * （出现说明回放口径错、重发了客户端已有的帧）；必须恰好一帧 `done` 且是末帧，
+ * 恰好一条 `confirm_decision(approve)`、一条 `tool_result(ok, 非空 result)`、至少一帧正文 `delta`。
+ *
+ * @param allowToolStart 早杀路径允许差量里出现 `tool_start`（原实例抢在窗口后落档，或续跑补发）；
+ *                       非 kill 编排（park 屏障之后）不允许 —— 它一定在 `lastSeq` 之前。
+ */
+function assertDeltaFrames(frames, { toolCallId, expectedName = null, label = '决策后差量', allowToolStart = false }) {
+  check(frames.length > 0, `${label}：一帧都没收到`)
+  seqsOf(frames, label)
+  const business = businessFrames(frames)
+  const unknown = typesOf(business).filter((type) => !ARCHIVED_FRAME_TYPES.includes(type))
+  checkEq(unknown.join(','), '', `${label}：出现白名单外的帧型（已收=${typesOf(business).join(',')}）`)
+  checkEq(countOf(business, 'error'), 0, `${label}：不得出现 error 帧`)
+  checkEq(countOf(business, 'start') + countOf(business, 'suspended') + countOf(business, 'confirm_request'), 0,
+    `${label}：差量不得重发前缀帧（start/suspended/confirm_request）`)
+  checkEq(countOf(business, 'done'), 1, `${label}：done 帧数`)
+  checkEq(business[business.length - 1].type, 'done', `${label}：末帧必须是 done（实得 ${typesOf(business).join(',')}）`)
+  checkEq(countOf(business, 'confirm_decision', toolCallId), 1, `${label}：confirm_decision 帧数`)
+  checkEq(countOf(business, 'tool_result', toolCallId), 1, `${label}：tool_result 帧数`)
+  const toolStarts = countOf(business, 'tool_start', toolCallId)
+  if (allowToolStart) {
+    check(toolStarts <= 1, `${label}：tool_start 帧数必须 <= 1（实得 ${toolStarts}）`)
+    if (toolStarts === 1) {
+      const start = findOf(business, 'tool_start', toolCallId)
+      if (expectedName) checkEq(start.name, expectedName, `${label}：tool_start.name`)
+      checkPresent(start.args, `${label}：tool_start.args`)
+      check(
+        indexOf(business, 'tool_start', toolCallId) < indexOf(business, 'tool_result', toolCallId),
+        `${label}：tool_start 必须先于 tool_result`
+      )
+    }
+  } else {
+    checkEq(toolStarts, 0, `${label}：park 之后 tool_start 不应出现在差量里`)
+  }
+  const confirmed = assertConfirmedToolPayloads(business, { toolCallId, expectedName, label })
+  return { frames: business.length, toolStarts, deltas: confirmed.deltas }
+}
+
+/**
+ * 全量回放帧册：一轮完整生命周期的帧面契约（比"某类型恰一次"更强）。
+ *
+ * 断言：每个非心跳帧都带整数 seq 且从 1 逐号连续；start 首帧、done 末帧且唯一、
+ * `done.seq === 本次全量回放末号（replay tip）`；无 error；suspended / confirm_request / tool_start / tool_result /
+ * confirm_decision 各恰一次；顺序 = suspended 先于 confirm_request、tool_start 先于 tool_result、
+ * confirm_decision 先于 tool_result；关键载荷（name/args/ok/outcome/result/decision/delta.text）
+ * 必须自洽；帧型必须落在产品 16 型白名单内（`frontend/src/types/sse.ts` 的 `SseFrameTypes`）。
+ */
+const ARCHIVED_FRAME_TYPES = Object.freeze([
+  'start',
+  'context',
+  'message_start',
+  'delta',
+  'message_end',
+  'tool_start',
+  'tool_result',
+  'confirm_request',
+  'confirm_decision',
+  'frontend_tool_request',
+  'frontend_tool_result',
+  'suspended',
+  'heartbeat',
+  'retry',
+  'done',
+  'error'
+])
+
+/** 帧册末号的口径（复审 N2）：这里是"**本次全量回放**看到的末号"，不是服务端归档末号。 */
+const FULL_REPLAY_TIP_SCOPE = 'full-replay'
+
+function assertFrameLedger(frames, { toolCallId, label = '全量回放帧册' }) {
+  check(frames.length > 0, `${label}：一帧都没收到`)
+  const seqs = seqsOf(frames, label)
+  const business = businessFrames(frames)
+  const unknown = typesOf(business).filter((type) => !ARCHIVED_FRAME_TYPES.includes(type))
+  checkEq(unknown.join(','), '', `${label}：出现白名单外的帧型（已收=${typesOf(business).join(',')}）`)
+  checkEq(business[0].type, 'start', `${label}：首帧必须是 start（实得 ${typesOf(business).join(',')}）`)
+  checkEq(business[business.length - 1].type, 'done', `${label}：末帧必须是 done（实得 ${typesOf(business).join(',')}）`)
+  checkEq(countOf(business, 'done'), 1, `${label}：done 帧数`)
+  checkEq(countOf(business, 'error'), 0, `${label}：不得出现 error 帧`)
+  checkEq(countOf(business, 'start'), 1, `${label}：start 帧数`)
+  checkEq(countOf(business, 'suspended'), 1, `${label}：suspended 帧数`)
+  checkEq(countOf(business, 'confirm_request', toolCallId), 1, `${label}：confirm_request 帧数`)
+  checkEq(countOf(business, 'confirm_decision', toolCallId), 1, `${label}：confirm_decision 帧数`)
+  checkEq(countOf(business, 'tool_start', toolCallId), 1, `${label}：tool_start 帧数`)
+  checkEq(countOf(business, 'tool_result', toolCallId), 1, `${label}：tool_result 帧数`)
+  check(
+    indexOf(business, 'suspended') < indexOf(business, 'confirm_request'),
+    `${label}：suspended 必须先于 confirm_request（实得 ${typesOf(business).join(',')}）`
+  )
+  check(
+    indexOf(business, 'tool_start', toolCallId) < indexOf(business, 'tool_result', toolCallId),
+    `${label}：tool_start 必须先于 tool_result（实得 ${typesOf(business).join(',')}）`
+  )
+  check(
+    indexOf(business, 'confirm_decision', toolCallId) < indexOf(business, 'tool_result', toolCallId),
+    `${label}：confirm_decision 必须先于 tool_result（实得 ${typesOf(business).join(',')}）`
+  )
+  checkSeqContiguous(seqs, 1, label)
+  const lastSeq = seqs[seqs.length - 1]
+  // 复审 N2：这里能证明的是"done 是**本次全量回放**的末帧/末号"（回放里 done 之后再无业务帧），
+  // 不是"done.seq == 服务端 archiveMaxSeq"：终态会清掉 session→current 索引，
+  // `/runs/current` 的 archiveMaxSeq 此时不可读。服务端权威末号只在 park/kill 边界
+  // （仍 SUSPENDED/RUNNING）可用，见 createSuspendedRun 与 caseSuspendKillA。
+  checkEq(
+    findOf(business, 'done').seq,
+    lastSeq,
+    `${label}：done.seq 必须等于本次全量回放的末号（replay tip，不是服务端 archiveMaxSeq）`
+  )
+  const payload = assertCompletedPayloads(frames, { toolCallId, label })
+  return {
+    lastSeq,
+    lastSeqScope: FULL_REPLAY_TIP_SCOPE,
+    types: typesOf(business).join(','),
+    deltas: payload.deltas,
+    name: payload.name
+  }
+}
+
+function countOf(frames, type, toolCallId = null) {
+  return frames.filter((f) => f.type === type && (toolCallId === null || f.toolCallId === toolCallId)).length
+}
+
+function indexOf(frames, type, toolCallId = null) {
+  return frames.findIndex((f) => f.type === type && (toolCallId === null || f.toolCallId === toolCallId))
+}
+
+function findOf(frames, type, toolCallId = null) {
+  const index = indexOf(frames, type, toolCallId)
+  return index < 0 ? null : frames[index]
+}
+
+
 // ── HTTP / 路由日志 ────────────────────────────────────────────────────────
 
 function initRouteLog() {
@@ -606,6 +1014,56 @@ class SseStream {
     return this.waitFor((frame) => frame.type === 'done' || frame.type === 'error', {
       timeoutMs,
       label: '等待终帧（done/error）'
+    })
+  }
+
+  /**
+   * 等连接被**服务端**收尾（park 收流 / 回放完收尾）。
+   *
+   * 返回 `'end'`（服务端正常 `res.end()`）或 `'close'`（未见正常 end 的提前关闭）。
+   * 两者必须可区分：park 契约要求的是前者，连接被重置不得冒充"已 park"。
+   * 超时抛错 —— 悬挂连接正是本方法要抓的缺陷形态（用户 park 规则：不得恢复悬挂连接）。
+   */
+  waitClosed(timeoutMs = 30000, label = '等待流自然结束') {
+    if (this.ended) return Promise.resolve('end')
+    if (this.endError) return Promise.reject(this.endError)
+    return new Promise((resolve, reject) => {
+      let settled = false
+      const cleanup = () => {
+        clearTimeout(timer)
+        this.res.removeListener('end', onEnd)
+        this.res.removeListener('close', onClose)
+        this.res.removeListener('error', onError)
+        this.req.removeListener('error', onError)
+      }
+      const onEnd = () => {
+        if (settled) return
+        settled = true
+        cleanup()
+        resolve('end')
+      }
+      const onClose = () => {
+        if (settled) return
+        settled = true
+        cleanup()
+        resolve('close')
+      }
+      const onError = (e) => {
+        if (settled) return
+        settled = true
+        cleanup()
+        reject(e)
+      }
+      const timer = setTimeout(() => {
+        if (settled) return
+        settled = true
+        cleanup()
+        reject(new Error(`${label}：${timeoutMs}ms 内连接未被服务端收流（已收=${this.frames.map((f) => f.type).join(',') || '空'}）`))
+      }, timeoutMs)
+      this.res.once('end', onEnd)
+      this.res.once('close', onClose)
+      this.res.once('error', onError)
+      this.req.once('error', onError)
     })
   }
 
@@ -1524,12 +1982,23 @@ async function confirmOn(key, { runId, toolCallId, approved = true, reason = 'cl
   return postJson(key, '/api/ai/confirm', { runId, toolCallId, approved, reason })
 }
 
-async function fullReplay(key, runId, timeoutMs = 90000) {
+/**
+ * 全量回放到终帧。`evidenceName` 给了就在**退出前**（成功或失败）把当时收到的帧落盘 ——
+ * 「done 缺失」正是最需要帧证据的形态，不能只在成功路径写。
+ */
+async function fullReplay(key, runId, timeoutMs = 90000, evidenceName = null) {
   const stream = await reattachOn(key, runId, 0, { timeoutMs })
   try {
     await stream.waitTerminal(timeoutMs)
     return stream.frames.slice()
   } finally {
+    if (evidenceName) {
+      try {
+        saveFrames(evidenceName, stream.frames)
+      } catch {
+        /* 证据写失败不覆盖原始失败 */
+      }
+    }
     stream.close()
   }
 }
@@ -1538,12 +2007,13 @@ async function fullReplay(key, runId, timeoutMs = 90000) {
  * 终态全量回放到终帧。产品存在一个窄窗：finish() 先写 DONE、done 帧稍后才落档，
  * 恰好在此窗口到达的全量回放会停在 message_end（双实例 harness 的已知形态）。
  * 这里短延迟重试，只有 4 次仍无终帧才 FAIL —— 不掩盖真实的 done 缺失。
+ * 每次尝试都会（按 evidenceName）覆盖同一份证据文件，于是最后一次失败的帧也能留下。
  */
-async function fullReplayToTerminal(key, runId, timeoutMs = 90000) {
+async function fullReplayToTerminal(key, runId, timeoutMs = 90000, evidenceName = null) {
   let lastError = null
   for (let attempt = 1; attempt <= 4; attempt += 1) {
     try {
-      return await fullReplay(key, runId, timeoutMs)
+      return await fullReplay(key, runId, timeoutMs, evidenceName)
     } catch (e) {
       lastError = e
       await sleep(500)
@@ -1576,39 +2046,141 @@ function ledgerFor(detail, toolCallId) {
   return (detail.ledger || []).filter((entry) => entry.toolCallId === toolCallId)
 }
 
-/** 从暂停的 run 里取「任务确认卡」的参数；不触发模型。 */
-async function createSuspendedRun(key, { prefix, taskId, messageSuffix = '', contextPage = 'tasks' }) {
+/**
+ * park 收流的时间上界。请求帧之后产品主动收流（B1），收流是本探针的**park 边界屏障**：
+ * 只有它到了，才能确定 park 前该发的帧（含 `tool_start`）已经发出并落档。
+ */
+const PARK_SETTLE_TIMEOUT_MS = 20000
+
+/**
+ * 等这一轮真的 park 完，并校验 park 边界帧集。**证据先落盘**：
+ * 收流一到（或超时/被重置）就先把当时的帧写进 `evidenceName`，再断言 —— 这样断言失败时
+ * artifact 里仍有"当时收到了哪些帧"（复审 B1）。
+ */
+async function settleParkBoundary(stream, { toolCallId, timeoutMs = PARK_SETTLE_TIMEOUT_MS, evidenceName = null } = {}) {
+  let how = null
+  try {
+    how = await stream.waitClosed(timeoutMs, '等待 park 收流')
+  } finally {
+    // 证据优先：收流/超时/被重置，都先把当时收到的帧落盘，再让断言去判。
+    if (evidenceName) saveFrames(evidenceName, stream.frames)
+  }
+  checkEq(how, 'end', 'park 收流必须是服务端正常收尾（连接重置不算已 park）')
+  const frames = stream.frames
+  const summary = assertParkedFrameSet(frames, toolCallId)
+  const payload = assertParkedPayloads(frames, { toolCallId, label: 'park 载荷' })
+  return { frames, lastSeq: summary.lastSeq, types: summary.types, name: payload.name, heartbeats: summary.heartbeats }
+}
+
+/**
+ * 从暂停的 run 里取「任务确认卡」的参数；不触发模型。
+ *
+ * <p>`waitForPark`（默认 true）= 等 park 收流后再返回（稳定基线：suspend-cross-instance /
+ * 幂等用例用它）。`waitForPark: false` = **确认卡一到就返回**，把"park 转换窗口"留给调用方
+ * （`suspend-kill-a` 收到卡立刻 SIGKILL —— 复审 B2 要求恢复的早杀覆盖；随本探针同批合入的候选分支
+ * 已含 `ensureToolStart` 补发，断言的是"最终帧册恰一条 tool_start"这一不变量，而不是"哪一侧发的"）。
+ */
+async function createSuspendedRun(
+  key,
+  { prefix, taskId, messageSuffix = '', contextPage = 'tasks', waitForPark = true, evidenceName = null }
+) {
   const sessionId = uniqueId(prefix)
   const context = { page: contextPage, taskType: 'EXPORT', step: 'EXPORT', taskId }
   const message = `start_export 帮我导出 taskId=${taskId}${messageSuffix}`
+  const evidence = evidenceName || (waitForPark ? 'A-parked.jsonl' : 'A-park-transition.jsonl')
   const stream = await chatOn(key, { sessionId, message, context })
   let runId = null
   let toolCallId = null
-  let lastSeq = 0
-  const deadline = Date.now() + 120000
+  let observed = null
   try {
-    while (Date.now() < deadline) {
-      const frame = await stream.waitFor((f) => f.type === 'confirm_request' || f.type === 'done' || f.type === 'error', {
-        timeoutMs: Math.max(1000, deadline - Date.now()),
-        label: '等待确认卡'
-      })
-      if (frame.type === 'confirm_request') {
-        toolCallId = frame.toolCallId
-        break
-      }
+    const frame = await stream.waitFor((f) => f.type === 'confirm_request' || f.type === 'done' || f.type === 'error', {
+      timeoutMs: 120000,
+      label: '等待确认卡'
+    })
+    if (frame.type !== 'confirm_request') {
       throw new Error(`期望确认卡，实得 ${frame.type}：${JSON.stringify(frame).slice(0, 500)}`)
     }
-    for (const frame of stream.frames) {
-      if (frame.type === 'start') runId = frame.runId
-      if (typeof frame.seq === 'number') lastSeq = Math.max(lastSeq, frame.seq)
-    }
+    toolCallId = frame.toolCallId
+    // 证据优先：确认卡一到就把"客户端此刻看到的帧"落盘（早杀路径的 kill 之前也在这一步）。
+    saveFrames(evidence, stream.frames)
+    observed = waitForPark
+      ? await settleParkBoundary(stream, { toolCallId, evidenceName: evidence })
+      : (() => {
+          const summary = assertCardReachedFrameSet(stream.frames, toolCallId)
+          const payload = assertParkedPayloads(stream.frames, { toolCallId, label: '确认卡载荷' })
+          return {
+            frames: stream.frames.slice(),
+            lastSeq: summary.lastSeq,
+            types: summary.types,
+            name: payload.name,
+            heartbeats: summary.heartbeats
+          }
+        })()
+    const start = observed.frames.find((f) => f.type === 'start')
+    runId = start ? start.runId : null
   } finally {
+    // 兜底取证：连"等卡超时/异常"也要留下当时收到的帧（写失败不得覆盖原始失败）。
+    try {
+      saveFrames(evidence, stream.frames)
+    } catch {
+      /* 证据写失败不覆盖原始失败 */
+    }
     stream.close()
   }
-  check(runId, `未收到 start 帧（runId 缺失）；已收帧=${stream.types().join(',')}`)
-  check(toolCallId, `确认卡缺少 toolCallId；已收帧=${stream.types().join(',')}`)
-  return { sessionId, taskId, runId, toolCallId, lastSeq, message }
+  check(runId, `未收到 start 帧（runId 缺失）；已收帧=${observed ? observed.types : '空'}`)
+  check(toolCallId, `确认卡缺少 toolCallId；已收帧=${observed ? observed.types : '空'}`)
+  const result = {
+    sessionId,
+    taskId,
+    runId,
+    toolCallId,
+    lastSeq: observed.lastSeq,
+    frames: observed.frames,
+    toolName: observed.name,
+    heartbeats: observed.heartbeats,
+    waitForPark,
+    evidence,
+    message
+  }
+  if (waitForPark) {
+    // 客户端已收到的末号必须等于服务端归档末号：否则"已收流"与"已落档"之间有洞。
+    // 早杀路径不做这条（被杀后归档可能比客户端多一帧 —— 那正是要观测的信息）。
+    const current = await currentRun(key, sessionId)
+    checkEq(current.runId, runId, `park 后 /runs/current 指向的 runId（${key}）`)
+    checkEq(current.snapshotStatus, 'SUSPENDED', `park 后快照状态（${key}）`)
+    checkEqNumber(current.archiveMaxSeq, observed.lastSeq, `park 后归档末号（${key}）`)
+  }
+  return result
 }
+
+function checkEqNumber(actual, expected, label) {
+  const n = Number(actual)
+  if (!Number.isFinite(n) || n !== expected) {
+    throw new Error(`${label}：期望 ${expected}，实得 ${JSON.stringify(actual)}`)
+  }
+}
+
+function checkGeNumber(actual, minimum, label) {
+  const n = Number(actual)
+  if (!Number.isFinite(n) || n < minimum) {
+    throw new Error(`${label}：期望 >= ${minimum}，实得 ${JSON.stringify(actual)}`)
+  }
+}
+
+/**
+ * 早杀观测（复审 N3）：<b>只</b>记录"客户端在 SIGKILL 之前有没有看到 `tool_start`"。
+ *
+ * <p>不推断这一帧是谁发的：A 完全可能在客户端关闭之后、SIGKILL 之前把它写进归档
+ * （此时续跑补发是 no-op），而客户端证据无法区分"A 落档"与"续跑补发"。
+ * 判据只用于取证与排障，不参与 pass/fail（帧册不变量由 `assertFrameLedger` 保证）。
+ */
+function killToolStartObservation(frames, toolCallId) {
+  const seen = countOf(frames, 'tool_start', toolCallId) === 1
+  return { toolStartSeenBeforeKill: seen, toolStartNotObservedBeforeKill: !seen }
+}
+
+
+
 
 // ── 用例注册（逐条覆盖用户清单；顺序即执行顺序）────────────────────────────
 
@@ -1619,12 +2191,12 @@ const CASES = [
   { id: 'reattach-any-instance', title: '任意实例 reattach（B 全量 / C 差量）与 history', fn: caseReattachAnyInstance },
   { id: 'history-pagination', title: '完整历史游标分页：B/C 跨实例正序翻页（afterSeq/limit、hasMore/nextCursor、seq 连续）', fn: caseHistoryPagination },
   { id: 'seq-cross-instance', title: '跨实例 seq：实时流 / 增量重挂 / 全量回放同号同序', fn: caseSeqCrossInstance },
-  { id: 'suspend-cross-instance', title: '挂起在 A → B/C 重挂 → C 决策 → 两连接都收到续跑终帧', fn: caseSuspendCrossInstance },
+  { id: 'suspend-cross-instance', title: '挂起在 A → 决策前 B/C 重挂回放后即收流 → C 决策 → 决策后 B/C 重挂都收到续跑终帧', fn: caseSuspendCrossInstance },
   { id: 'idempotency-cross-instance', title: '跨实例幂等：重复决策 409 + 并发双决策恰一胜 + 副作用恰一次', fn: caseIdempotencyCrossInstance },
   { id: 'session-purge-cross-instance', title: '跨实例会话销毁：B 删 → C 验无残留；在途慢流 deferred → 终态重试 complete', fn: caseSessionPurgeCrossInstance },
   { id: 'config-hot-reload', title: '配置热更新：A 写入 → B/C 在 reload 周期内看到新版本与新值', fn: caseConfigHotReload },
   { id: 'shared-file-download', title: '共享文件：A 上传 → B/C/代理下载字节一致', fn: caseSharedFileDownload },
-  { id: 'suspend-kill-a', title: '挂起态 kill A → B 决策接管执行（台账 executedBy=B）→ C history', fn: caseSuspendKillA },
+  { id: 'suspend-kill-a', title: '挂起态 kill A（早杀：确认卡后立即 SIGKILL，不等 park 收流）→ B 决策接管执行（台账 executedBy=B）→ C history', fn: caseSuspendKillA },
   { id: 'streaming-kill-a', title: '流式中 kill A → 僵尸扫描接管 → 跨实例补帧到终帧（seq 无洞）', fn: caseStreamingKillA },
   { id: 'job-kill-a', title: '作业中 kill A → 幸存实例看门狗收敛 FAILED → 重启清理后 B 重试成功', fn: caseJobKillA },
   { id: 'readiness-removal', title: 'readiness 摘除：无 key 不摘 A；SIGTERM/draining 摘 A 并由 B/C 接管；重启后重新纳入', fn: caseReadinessRemoval },
@@ -2144,65 +2716,183 @@ async function caseSeqCrossInstance() {
   }
 }
 
-// ── 用例 6：挂起在 A → B/C 重挂 → C 决策 ──────────────────────────────────
+// ── 用例 6：挂起在 A → 决策前 B/C 重挂（回放后收流）→ C 决策 → 决策后重挂收终帧 ──
 
+/**
+ * 决策前重挂的语义（用户 park 规则的裁决口径）：产品**保留非阻塞收流** ——
+ * 回放完已归档的帧就把连接收尾，不悬挂连接、不阻塞执行、不伪造终帧。
+ *
+ * 因此本用例按实际安全契约断言，而不是按"连接活到 done"断言：
+ * ① park 边界（A）：确认卡帧集 + `tool_start`，收流到点；帧证据先落盘；
+ * ② 决策前重挂（B 差量 / C 全量）：回放**逐帧全字段**与 park 帧集一致（含 `toolCalls`/`runId`/`context`）、
+ *    不含终帧、被服务端收流；状态/ledger 类证据同样先落盘；
+ * ③ 收流没把这一轮弄死：仍 SUSPENDED、仍 awaitingExternal、pending 条目仍在；
+ * ④ 决策（C）后按产品自述标准时序重挂：B 差量做 **seq 连续 + 帧型/载荷**校验，C 全量做**整本帧册**校验，
+ *    两条连接都必须收到 done；
+ * ⑤ A 全量回放帧册：seq 逐号连续、关键帧各恰一次、顺序、帧型白名单与关键载荷（`done` = 本次回放末号）。
+ */
 async function caseSuspendCrossInstance() {
   await ensureUp()
   const suffix = uniqueId('cross')
   const task = await createTask('c', 'EXPORT', `cluster3-suspend-${suffix}`)
   await selectDefs('c', task.id, ['CURRENCY'])
   const run = await createSuspendedRun('a', { prefix: 'cluster3-suspend', taskId: task.id, messageSuffix: ` ${suffix}` })
-  caseLog(`挂起 runId=${run.runId} toolCallId=${run.toolCallId} taskId=${task.id} lastSeq=${run.lastSeq}`)
+  caseLog(`挂起在 A（已 park 收流）runId=${run.runId} toolCallId=${run.toolCallId} taskId=${task.id} lastSeq=${run.lastSeq} 帧=${run.frames.map((f) => f.type).join(',')}（证据 ${run.evidence}）`)
 
-  const bPromise = reattachOn('b', run.runId, run.lastSeq, { timeoutMs: 120000 })
-  // 先挂一个空 catch，避免 B 的请求在 confirm 之前失败时成为 unhandledRejection；
-  // 下面仍会 await 原 promise 并把真实错误抛给用例。
-  bPromise.catch(() => {})
-  const streamC = await reattachOn('c', run.runId, 0, { timeoutMs: 120000 })
-  let streamB = null
+  // ① 决策前的两条重挂（B 带 lastSeq 的差量 / C 从 0 的全量）。帧在断言之前先落盘。
+  const preB = await reattachOn('b', run.runId, run.lastSeq, { timeoutMs: 30000 })
+  let preBHow = null
   try {
-    const confirm = await confirmOn('c', { runId: run.runId, toolCallId: run.toolCallId, reason: 'cluster3 cross-instance decision' })
-    checkEq(confirm.record.status, 200, 'C 侧决策 HTTP')
-    check(confirm.body && confirm.body.accepted === true, `C 侧决策未被接受：${confirm.record.text.slice(0, 500)}`)
-    checkEq(confirm.body.storedBy, STATE.instanceIds.c, '决策 storedBy 必须是 C 的 instanceId')
-    checkIn(confirm.body.resumeOutcome, ['LEASE_HELD_ELSEWHERE', 'SCHEDULED'], 'C 侧 resumeOutcome')
-    saveEvidence('confirm.json', confirm.body)
-
-    streamB = await bPromise
-    const terminalB = await streamB.waitTerminal(RUN.killTakeoverTimeoutMs)
-    checkEq(terminalB.type, 'done', 'B 侧重挂终帧')
-    const terminalC = await streamC.waitTerminal(RUN.killTakeoverTimeoutMs)
-    checkEq(terminalC.type, 'done', 'C 侧重挂终帧')
-    checkStrictlyIncreasing(streamB.seqs(), 'B 侧续跑补帧 seq')
-    checkStrictlyIncreasing(streamC.seqs(), 'C 侧续跑补帧 seq')
-
-    const full = await fullReplayToTerminal('a', run.runId, 90000)
-    checkEq(frameCount(full, 'tool_start', run.toolCallId), 1, '全量回放 tool_start 恰一次')
-    checkEq(frameCount(full, 'tool_result', run.toolCallId), 1, '全量回放 tool_result 恰一次')
-    checkEq(frameCount(full, 'confirm_decision', run.toolCallId), 1, '全量回放 confirm_decision 恰一次')
-
-    const detail = await runDetail('b', run.runId)
-    checkEq(detail.snapshot.status, 'DONE', 'run 终态')
-    checkEq(Number(detail.ledgerCounts.start_export), 1, '台账 start_export 恰一次')
-    const ledger = ledgerFor(detail, run.toolCallId)
-    checkEq(ledger.length, 1, '该 toolCallId 台账条目数')
-    checkIn(ledger[0].executedBy, [STATE.instanceIds.a, STATE.instanceIds.c], '台账执行实例（A 的等待方或 C 的接管者）')
-
-    const jobs = await jobsOf('c', task.id)
-    checkEq(jobs.length, 1, '跨实例决策后作业数恰 1')
-    const historyB = await historyStable('b', run.sessionId, suffix)
-    const historyC = await historyStable('c', run.sessionId, suffix)
-    checkEq(historyC.total, historyB.total, 'B/C history total')
-
-    saveFrames('B-reattach.jsonl', streamB.frames)
-    saveFrames('C-reattach.jsonl', streamC.frames)
-    saveFrames('A-full.jsonl', full)
-    saveEvidence('run-detail.json', { status: detail.snapshot.status, ledgerCounts: detail.ledgerCounts, ledger })
-    caseLog(`决策落 C（storedBy=C，outcome=${confirm.body.resumeOutcome}）；B/C 两连接都收到 done；台账 executedBy=${ledger[0].executedBy}`)
+    preBHow = await preB.waitClosed(PARK_SETTLE_TIMEOUT_MS, 'B 决策前重挂收流')
+    saveFrames('B-predecision-reattach.jsonl', preB.frames)
+    checkEq(preBHow, 'end', 'B 决策前重挂必须是服务端正常收尾（连接重置不算）')
+    checkEq(
+      businessFrames(preB.frames).length,
+      0,
+      `B 决策前重挂（lastSeq=${run.lastSeq}）不得有未归档帧（已收=${typesOf(preB.frames).join(',') || '空'}）`
+    )
   } finally {
-    if (streamB) streamB.close()
+    saveFrames('B-predecision-reattach.jsonl', preB.frames)
+    preB.close()
+  }
+
+  const preC = await reattachOn('c', run.runId, 0, { timeoutMs: 30000 })
+  let preCHow = null
+  let preCReplay = null
+  try {
+    preCHow = await preC.waitClosed(PARK_SETTLE_TIMEOUT_MS, 'C 决策前重挂收流')
+    saveFrames('C-predecision-reattach.jsonl', preC.frames)
+    checkEq(preCHow, 'end', 'C 决策前重挂必须是服务端正常收尾（连接重置不算）')
+    // 全字段比对 + park 载荷断言（toolCalls/runId/context 等被改坏同样红）。
+    preCReplay = assertPreDecisionReplay(preC.frames.slice(), run.frames, run.toolCallId, 'C 决策前重挂')
+  } finally {
+    saveFrames('C-predecision-reattach.jsonl', preC.frames)
+    preC.close()
+  }
+
+  // ② 收流不等于"这一轮死了"：状态、等待面、待决条目都必须原样还在。
+  // 证据优先（复审 N1）：先把 /runs/current 的响应落盘，再做五项断言。
+  const still = await currentRun('b', run.sessionId)
+  evidenceFirst(
+    (body) => saveEvidence('runs-current-b.json', body),
+    () => still,
+    () => {
+      checkEq(still.runId, run.runId, '决策前重挂收流后 /runs/current 指向的 runId')
+      checkEq(still.snapshotStatus, 'SUSPENDED', '决策前重挂收流后的快照状态')
+      check(still.awaitingExternal === true, '决策前重挂收流后 awaitingExternal 必须仍为 true')
+      check(
+        (still.pendingEntries || []).some((entry) => entry.toolCallId === run.toolCallId && entry.entryStatus === 'PENDING'),
+        '决策前重挂收流后 pendingEntries 必须仍列出该 PENDING 条目'
+      )
+      checkEqNumber(still.archiveMaxSeq, run.lastSeq, '决策前重挂收流后的归档末号（服务端权威值）')
+    }
+  )
+
+  // ③ 决策落 C。证据优先：回执先落盘，再断言（失败也留得下当时的响应体）。
+  const confirm = await confirmOn('c', { runId: run.runId, toolCallId: run.toolCallId, reason: 'cluster3 cross-instance decision' })
+  evidenceFirst(
+    (body) => saveEvidence('confirm.json', body),
+    () => confirm.body || { status: confirm.record.status, text: confirm.record.text },
+    () => {
+      checkEq(confirm.record.status, 200, 'C 侧决策 HTTP')
+      check(confirm.body && confirm.body.accepted === true, `C 侧决策未被接受：${confirm.record.text.slice(0, 500)}`)
+      checkEq(confirm.body.storedBy, STATE.instanceIds.c, '决策 storedBy 必须是 C 的 instanceId')
+      checkIn(confirm.body.resumeOutcome, ['LEASE_HELD_ELSEWHERE', 'SCHEDULED'], 'C 侧 resumeOutcome')
+    }
+  )
+
+  // ④ 决策后的重挂（产品自述标准时序）：B 差量 + C 全量都必须收到终帧。
+  //    B 差量：seq 连续 + **帧型/载荷**（复审 I1(b)(c)：只验 seq 时 tool_result.ok=false 仍能过）。
+  const streamB = await reattachOn('b', run.runId, run.lastSeq, { timeoutMs: RUN.killTakeoverTimeoutMs })
+  let terminalB = null
+  let bDeltaSeqs = null
+  let bDeltaSummary = null
+  try {
+    terminalB = await streamB.waitTerminal(RUN.killTakeoverTimeoutMs)
+    saveFrames('B-reattach.jsonl', streamB.frames)
+    checkEq(terminalB.type, 'done', 'B 侧决策后重挂终帧')
+    bDeltaSeqs = assertDeltaContiguous(streamB.frames, run.lastSeq + 1, 'B 侧补帧 seq（必须从 lastSeq+1 逐号连续）')
+    bDeltaSummary = assertDeltaFrames(streamB.frames, {
+      toolCallId: run.toolCallId,
+      expectedName: run.toolName,
+      label: 'B 侧决策后差量',
+      allowToolStart: false
+    })
+    checkEqNumber(bDeltaSeqs[bDeltaSeqs.length - 1], terminalB.seq, 'B 侧补帧末号 = 终帧 seq')
+  } finally {
+    saveFrames('B-reattach.jsonl', streamB.frames)
+    streamB.close()
+  }
+
+  //    C 连接是从 0 全量重挂 ⇒ 整本帧册都要满足（不再只验 seq）。
+  const streamC = await reattachOn('c', run.runId, 0, { timeoutMs: RUN.killTakeoverTimeoutMs })
+  let terminalC = null
+  let cSeqs = null
+  let cLedger = null
+  try {
+    terminalC = await streamC.waitTerminal(RUN.killTakeoverTimeoutMs)
+    saveFrames('C-reattach.jsonl', streamC.frames)
+    checkEq(terminalC.type, 'done', 'C 侧决策后重挂终帧')
+    cLedger = assertFrameLedger(streamC.frames, { toolCallId: run.toolCallId, label: 'C 侧决策后重挂帧册' })
+    cSeqs = seqsOf(streamC.frames, 'C 侧决策后重挂')
+  } finally {
+    saveFrames('C-reattach.jsonl', streamC.frames)
     streamC.close()
   }
+
+  // ⑤ 全量回放帧册（关键帧各恰一次 + 顺序 + seq 逐号连续 + 帧型白名单 + 关键载荷）。
+  const full = await fullReplayToTerminal('a', run.runId, 90000, 'A-full.jsonl')
+  const ledgerSummary = assertFrameLedger(full, { toolCallId: run.toolCallId })
+  checkEq(
+    JSON.stringify(seqsOf(full, 'A 全量回放')),
+    JSON.stringify(cSeqs),
+    'A 全量回放 seq 与 C 决策后重挂 seq（两条独立连接必须同号同序）'
+  )
+  checkEq(
+    JSON.stringify(bDeltaSeqs),
+    JSON.stringify(cSeqs.filter((seq) => seq > run.lastSeq)),
+    'B 差量必须是 C 全量的连续后缀（不重不漏）'
+  )
+
+  // 证据优先（复审 N1）：run-detail / jobs / history 各自先落盘再断言，且增量补齐。
+  const detail = await runDetail('b', run.runId)
+  const ledger = ledgerFor(detail, run.toolCallId)
+  const detailEvidence = {
+    runId: run.runId,
+    status: detail.snapshot ? detail.snapshot.status : null,
+    ledgerCounts: detail.ledgerCounts,
+    ledger,
+    frameLedger: ledgerSummary.types,
+    lastSeqScope: ledgerSummary.lastSeqScope,
+    parkedSeq: run.lastSeq,
+    preDecisionReplayFrames: preCReplay.frames,
+    bDeltaSeqs,
+    cSeqs
+  }
+  evidenceFirst(
+    (snapshot) => saveEvidence('run-detail.json', snapshot),
+    () => detailEvidence,
+    () => {
+      checkEq(detail.snapshot.status, 'DONE', 'run 终态')
+      checkEq(Number(detail.ledgerCounts.start_export), 1, '台账 start_export 恰一次')
+      checkEq(ledger.length, 1, '该 toolCallId 台账条目数')
+      checkIn(ledger[0].executedBy, [STATE.instanceIds.a, STATE.instanceIds.c], '台账执行实例（A 的等待方或 C 的接管者）')
+      checkEq(ledger[0].outcome, 'ok', '跨实例台账 outcome 必须是 ok')
+      checkNonEmptyString(ledger[0].resultText, '跨实例台账 resultText')
+    }
+  )
+
+  const jobs = await jobsOf('c', task.id)
+  detailEvidence.jobs = jobs.length
+  saveEvidence('run-detail.json', detailEvidence)
+  checkEq(jobs.length, 1, '跨实例决策后作业数恰 1')
+  const historyB = await historyStable('b', run.sessionId, suffix)
+  const historyC = await historyStable('c', run.sessionId, suffix)
+  detailEvidence.history = { b: historyB.total, c: historyC.total }
+  saveEvidence('run-detail.json', detailEvidence)
+  checkEq(historyC.total, historyB.total, 'B/C history total')
+
+  caseLog(`决策落 C（storedBy=C，outcome=${confirm.body.resumeOutcome}）；决策前重挂回放后即收流（B 差量=0 帧 / C 全量=${preCReplay.frames} 帧，逐帧全字段一致），收流后仍 SUSPENDED；决策后 B 差量 ${bDeltaSeqs[0]}..${bDeltaSeqs[bDeltaSeqs.length - 1]}（${bDeltaSummary.deltas} delta，含 decision/result 载荷校验）、C 全量帧册=${cLedger.types} 都收到 done；A 全量帧册=${ledgerSummary.types}；台账 executedBy=${ledger[0].executedBy} outcome=ok`)
 }
 
 // ── 用例 7：跨实例幂等 ─────────────────────────────────────────────────────
@@ -2682,74 +3372,173 @@ async function redownloadAfterKill(label, fixture) {
   checkEq(sha256(record.body), fixture.sha256, `A 死亡后共享文件下载（${label}）sha256`)
 }
 
+/**
+ * 挂起态 kill A → B 决策接管执行。
+ *
+ * <p><b>早杀（复审 B2 恢复的覆盖）</b>：拿到确认卡就 SIGKILL，<b>不等 park 收流</b>。这条用例
+ * 因此继续覆盖产品真实的崩溃窗口 —— 快照已是 SUSPENDED、本批 `tool_start` 可能还没落档。
+ * 随本探针同批合入的候选分支用 `SseChatEmitter#ensureToolStart`（续跑结算前按归档幂等补发）收口；
+ * 探针断言的是**一轮最终帧册"恰一条 tool_start、且先于 tool_result"这一不变量**，
+ * 只记录"kill 前客户端有没有看到该帧"（观测），**不推断**这一帧由谁发出。
+ *
+ * <p>能力边界（如实登记）：客户端触发不可能**确定性**命中"tool_start 落档之前"的窗口
+ * （同一线程先发帧、客户端才看到前一帧；观测延迟 ≫ 发帧延迟）。强制命中需要故障注入，
+ * 由候选分支的产品侧 `ResumeToolStartBackfillConformanceTest` 覆盖；本用例负责端到端不变量 +
+ * 把"卡到之前客户端到底看到了什么"作为证据落盘（`A-park-transition.jsonl` / `park-transition.json`）。
+ */
 async function caseSuspendKillA() {
   await ensureUp()
   const fixture = await createUploadedFixture('cluster3-suspend-kill')
   const taskId = fixture.taskId
-  const run = await createSuspendedRun('a', { prefix: 'cluster3-suspend-kill', taskId, messageSuffix: ` ${uniqueId('sk')}` })
-  caseLog(`挂起在 A：runId=${run.runId} toolCallId=${run.toolCallId} taskId=${taskId}（独立文件 fixture）`)
+  // waitForPark=false：确认卡一到就返回（原探针的早杀时序）。
+  const run = await createSuspendedRun('a', {
+    prefix: 'cluster3-suspend-kill',
+    taskId,
+    messageSuffix: ` ${uniqueId('sk')}`,
+    waitForPark: false
+  })
+  // 观测口径（复审 N3）：这里只记录"**客户端在 SIGKILL 之前有没有看到** tool_start"，
+  // 不推断这一帧是谁发的 —— A 完全可能在客户端关闭之后、被 SIGKILL 之前把帧写进归档，
+  // 与"续跑补发"在客户端证据上不可区分。
+  const observation = killToolStartObservation(run.frames, run.toolCallId)
+  caseLog(`挂起在 A（早杀，不等 park 收流）：runId=${run.runId} toolCallId=${run.toolCallId} taskId=${taskId} lastSeq=${run.lastSeq} 帧=${run.frames.map((f) => f.type).join(',')} kill 前是否已见 tool_start=${observation.toolStartSeenBeforeKill}（独立文件 fixture）`)
+  // 证据优先：kill 之前就把"客户端此刻看到什么"落盘（createSuspendedRun 已写 A-park-transition.jsonl）。
+  saveEvidence('park-transition.json', {
+    runId: run.runId,
+    toolCallId: run.toolCallId,
+    toolName: run.toolName,
+    lastSeq: run.lastSeq,
+    types: run.frames.map((f) => f.type),
+    ...observation,
+    heartbeats: run.heartbeats
+  })
   const killedAt = Date.now()
+  // 早杀前的最后一次观测：把"客户端此刻看到的帧"再落一版，`A-park-transition.jsonl` 与
+  // `park-transition.json` 因此指的是同一时刻（kill 之前）。
+  saveFrames('A-park-transition.jsonl', run.frames)
   const kill = await killInstance('a')
   saveEvidence('kill-a.json', kill)
 
+  // takeover.json 增量写：每拿到一批新事实就落一版，任何后续断言失败都留得下已有部分。
+  const takeover = {
+    runId: run.runId,
+    toolCallId: run.toolCallId,
+    parkTransitionSeq: run.lastSeq,
+    parkTransitionTypes: run.frames.map((f) => f.type),
+    ...observation,
+    kill
+  }
+  saveEvidence('takeover.json', takeover)
+
+  // 证据优先（复审 N1）：/runs/current 的响应先落盘，再做五项断言。
   const current = await currentRun('b', run.sessionId)
+  Object.assign(takeover, { archiveMaxSeqAfterKill: current.archiveMaxSeq })
+  saveEvidence('runs-current-b.json', current)
+  saveEvidence('takeover.json', takeover)
   check(current.found === true, 'B 侧 /runs/current 未找到该会话的挂起轮')
   checkEq(current.runId, run.runId, 'B 侧 /runs/current 指向的 runId')
   checkEq(current.snapshotStatus, 'SUSPENDED', 'B 侧快照状态')
   check(current.awaitingExternal === true, 'B 侧 awaitingExternal 必须为 true')
   check((current.pendingEntries || []).some((entry) => entry.toolCallId === run.toolCallId), 'B 侧 pendingEntries 未列出待决条目')
+  // A 已死，归档末号不得回退（SIGKILL 不得抹掉已落档的帧）。早杀路径允许它 > 客户端末号
+  // —— 那说明原实例在被杀前把 tool_start 落进了归档（观测值，不当缺陷）。
+  checkGeNumber(current.archiveMaxSeq, run.lastSeq, 'SIGKILL 后归档末号（不得回退）')
 
   const confirm = await confirmOn('b', { runId: run.runId, toolCallId: run.toolCallId, reason: 'cluster3 suspend-kill takeover' })
-  checkEq(confirm.record.status, 200, `B 侧决策 HTTP：${confirm.record.text.slice(0, 400)}`)
-  check(confirm.body && confirm.body.accepted === true, `B 侧决策未被接受：${confirm.record.text.slice(0, 400)}`)
-  checkIn(confirm.body.resumeOutcome, ['LEASE_HELD_ELSEWHERE', 'SCHEDULED'], 'B 侧 resumeOutcome')
-  checkEq(confirm.body.storedBy, STATE.instanceIds.b, '决策 storedBy 必须是 B')
+  evidenceFirst(
+    (body) => saveEvidence('confirm.json', body),
+    () => confirm.body || { status: confirm.record.status, text: confirm.record.text },
+    () => {
+      checkEq(confirm.record.status, 200, `B 侧决策 HTTP：${confirm.record.text.slice(0, 400)}`)
+      check(confirm.body && confirm.body.accepted === true, `B 侧决策未被接受：${confirm.record.text.slice(0, 400)}`)
+      checkIn(confirm.body.resumeOutcome, ['LEASE_HELD_ELSEWHERE', 'SCHEDULED'], 'B 侧 resumeOutcome')
+      checkEq(confirm.body.storedBy, STATE.instanceIds.b, '决策 storedBy 必须是 B')
+    }
+  )
+  Object.assign(takeover, { resumeOutcome: confirm.body.resumeOutcome })
+  saveEvidence('takeover.json', takeover)
 
   const streamB = await reattachOn('b', run.runId, run.lastSeq, { timeoutMs: RUN.killTakeoverTimeoutMs })
+  let terminal = null
+  let bDeltaSeqs = null
+  let bDeltaSummary = null
   try {
-    const terminal = await streamB.waitTerminal(RUN.killTakeoverTimeoutMs)
-    checkEq(terminal.type, 'done', 'B 侧接管终帧')
-    checkStrictlyIncreasing(streamB.seqs(), 'B 侧接管补帧 seq')
-    const takeoverMs = Date.now() - killedAt
-
-    const full = await fullReplayToTerminal('c', run.runId, 90000)
-    checkEq(terminalType(full), 'done', 'C 侧全量回放终帧')
-    checkEq(frameCount(full, 'tool_start', run.toolCallId), 1, '接管后 tool_start 恰一次')
-    checkEq(frameCount(full, 'tool_result', run.toolCallId), 1, '接管后 tool_result 恰一次')
-
-    const detail = await runDetail('c', run.runId)
-    checkEq(detail.snapshot.status, 'DONE', 'run 终态')
-    checkEq(Number(detail.ledgerCounts.start_export), 1, '共享库台账 start_export 恰一次')
-    const ledger = ledgerFor(detail, run.toolCallId)
-    checkEq(ledger.length, 1, '台账条目数')
-    checkEq(ledger[0].executedBy, STATE.instanceIds.b, '台账 executedBy 必须是接管实例 B（共享库形态）')
-    checkEq(ledger[0].outcome, 'ok', '台账 outcome 必须是成功（ok）')
-
-    const jobs = await jobsOf('c', taskId)
-    checkEq(jobs.length, 1, '接管执行后作业数恰 1')
-    const history = await historyStable('c', run.sessionId, 'start_export')
-    checkGe(history.total, 2, 'A 死亡后 C 侧 history 至少 user + assistant')
-
-    await redownloadAfterKill('b', fixture)
-    await redownloadAfterKill('c', fixture)
-
+    terminal = await streamB.waitTerminal(RUN.killTakeoverTimeoutMs)
+    // 证据优先：终帧到手先落盘，再断言（下面的 finally 保证失败/超时也有帧）。
     saveFrames('B-takeover.jsonl', streamB.frames)
-    saveFrames('C-full.jsonl', full)
-    saveEvidence('takeover.json', {
-      kill,
-      resumeOutcome: confirm.body.resumeOutcome,
-      takeoverMs,
-      snapshotStatus: detail.snapshot.status,
-      ledgerCounts: detail.ledgerCounts,
-      ledger,
-      jobs: jobs.length,
-      historyTotal: history.total,
-      fixture
+    checkEq(terminal.type, 'done', 'B 侧接管终帧')
+    bDeltaSeqs = assertDeltaContiguous(streamB.frames, run.lastSeq + 1, 'B 侧接管补帧 seq（必须从 lastSeq+1 逐号连续）')
+    // 差量的帧型/载荷（复审 I1(c)）：此处允许 tool_start（窗口里原实例可能落档、或续跑补发）。
+    bDeltaSummary = assertDeltaFrames(streamB.frames, {
+      toolCallId: run.toolCallId,
+      expectedName: run.toolName,
+      label: 'B 侧接管差量',
+      allowToolStart: true
     })
-    caseLog(`kill A → B 接管：outcome=${confirm.body.resumeOutcome}，${takeoverMs}ms 收到 done；台账 executedBy=B；A 死后 B/C 仍能下载共享文件`)
+    Object.assign(takeover, {
+      takeoverMs: Date.now() - killedAt,
+      bDeltaSeqs,
+      bDeltaToolStartFrames: bDeltaSummary.toolStarts,
+      bDeltaDeltas: bDeltaSummary.deltas
+    })
+    saveEvidence('takeover.json', takeover)
   } finally {
+    saveFrames('B-takeover.jsonl', streamB.frames)
     streamB.close()
   }
+
+  const full = await fullReplayToTerminal('c', run.runId, 90000, 'C-full.jsonl')
+  const ledgerSummary = assertFrameLedger(full, { toolCallId: run.toolCallId })
+  checkEq(
+    JSON.stringify(bDeltaSeqs),
+    JSON.stringify(seqsOf(full, 'C 全量回放').filter((seq) => seq > run.lastSeq)),
+    'B 差量必须是 C 全量的连续后缀（不重不漏）'
+  )
+  // 帧册收口（复审 N3）：只记录观测 —— "SIGKILL 前客户端有没有看到 tool_start"；
+  // 不推断这一帧是谁发的（A 落档 vs 续跑补发，在客户端证据上不可区分）。
+  Object.assign(takeover, {
+    frameLedger: ledgerSummary.types,
+    frameLedgerTipScope: ledgerSummary.lastSeqScope,
+    ...observation
+  })
+  saveEvidence('takeover.json', takeover)
+  checkEq(terminalType(full), 'done', 'C 侧全量回放终帧')
+  checkEq(frameCount(full, 'tool_start', run.toolCallId), 1, '接管后 tool_start 恰一次')
+  checkEq(frameCount(full, 'tool_result', run.toolCallId), 1, '接管后 tool_result 恰一次')
+  checkEq(frameCount(full, 'confirm_decision', run.toolCallId), 1, '接管后 confirm_decision 恰一次')
+
+  // 证据优先（复审 N1）：run-detail / ledger 先落盘，再断言（takeover.json 增量补齐）。
+  const detail = await runDetail('c', run.runId)
+  const ledger = ledgerFor(detail, run.toolCallId)
+  Object.assign(takeover, {
+    snapshotStatus: detail.snapshot ? detail.snapshot.status : null,
+    ledgerCounts: detail.ledgerCounts,
+    ledger,
+    lastSeqScope: ledgerSummary.lastSeqScope
+  })
+  saveEvidence('run-detail.json', { runId: run.runId, snapshot: detail.snapshot, ledgerCounts: detail.ledgerCounts, ledger })
+  saveEvidence('takeover.json', takeover)
+  checkEq(detail.snapshot.status, 'DONE', 'run 终态')
+  checkEq(Number(detail.ledgerCounts.start_export), 1, '共享库台账 start_export 恰一次')
+  checkEq(ledger.length, 1, '台账条目数')
+  checkEq(ledger[0].executedBy, STATE.instanceIds.b, '台账 executedBy 必须是接管实例 B（共享库形态）')
+  checkEq(ledger[0].outcome, 'ok', '台账 outcome 必须是成功（ok）')
+
+  const jobs = await jobsOf('c', taskId)
+  takeover.jobs = jobs.length
+  saveEvidence('takeover.json', takeover)
+  checkEq(jobs.length, 1, '接管执行后作业数恰 1')
+  const history = await historyStable('c', run.sessionId, 'start_export')
+  takeover.historyTotal = history.total
+  saveEvidence('takeover.json', takeover)
+  checkGe(history.total, 2, 'A 死亡后 C 侧 history 至少 user + assistant')
+
+  await redownloadAfterKill('b', fixture)
+  await redownloadAfterKill('c', fixture)
+
+  Object.assign(takeover, { fixture })
+  saveEvidence('takeover.json', takeover)
+  caseLog(`kill A → B 接管：outcome=${confirm.body.resumeOutcome}，${takeover.takeoverMs}ms 收到 done；帧册=${ledgerSummary.types}；kill 前已见 tool_start=${observation.toolStartSeenBeforeKill}（观测值，不推断来源）；台账 executedBy=B outcome=ok；A 死后 B/C 仍能下载共享文件`)
 }
 
 // ── 用例 11：流式中 kill A → 僵尸扫描接管 ─────────────────────────────────
@@ -3436,6 +4225,14 @@ function writeSummary(exitCode) {
     '- `haproxy.log`（由 shell 在收尾时从容器导出）：代理侧 `%ci:%cp` 与 `%b/%s` 路由日志。',
     '- `instances/instance-{a,b,c}.log`：三实例标准输出（被杀实例保留到 kill 前）。',
     '- `results.json` / `results.md` / `cases/<id>/`：逐用例结果与断言证据。',
+    '- 挂起/接管类用例的**证据先落盘再断言**（`evidenceFirst` 或 `finally`）——帧类：`A-parked.jsonl` /',
+    '  `A-park-transition.jsonl`（早杀前客户端看到的帧）/ `B-predecision-reattach.jsonl` /',
+    '  `C-predecision-reattach.jsonl` / `B-reattach.jsonl` / `C-reattach.jsonl` / `A-full.jsonl` /',
+    '  `B-takeover.jsonl` / `C-full.jsonl`；状态类：`park-transition.json` / `confirm.json` /',
+    '  `runs-current-b.json`（/runs/current 原样）/ `run-detail.json`（终态/台账/jobs/history 增量）/',
+    '  `takeover.json`（增量）—— 断言失败时也留得下当时的帧与状态（`A-full`/`C-full` 由 `fullReplay`',
+    '  的 finally 写，4 次重试都失败时也留最后一份）。帧册的 `lastSeqScope` 字段标明末号口径是',
+    '  `full-replay`（本次全量回放末号），不是服务端 `archiveMaxSeq`。',
     '- `stub/`：桩上游请求判定（req-*.json）。',
     '',
     '## 口径与边界（未自证项）',
@@ -3700,6 +4497,563 @@ function selfTestStatsCsv() {
   return `${parsed.rows.length} 行`
 }
 
+const SELF_TOOL_CALL_ID = 'tc-park'
+const SELF_TOOL_NAME = 'start_export'
+const SELF_ARGS = '{"taskId":7,"defCode":"CURRENCY"}'
+
+/** 确认卡请求帧的载荷（`SseChatEmitter#confirmRequest` 的字段面）。 */
+function cardFrame(seq, overrides = {}) {
+  return {
+    type: 'confirm_request',
+    seq,
+    toolCallId: SELF_TOOL_CALL_ID,
+    name: SELF_TOOL_NAME,
+    args: SELF_ARGS,
+    summary: SELF_ARGS,
+    irreversible: false,
+    callback: 'POST /api/ai/confirm {runId, toolCallId, approved, reason}',
+    ...overrides
+  }
+}
+
+/** 自检夹具：一次 park 之后客户端能看到的帧集（含产品要求的载荷）。 */
+function parkedFixture() {
+  return [
+    { type: 'start', seq: 1, runId: 'r-park' },
+    {
+      type: 'suspended',
+      seq: 2,
+      runId: 'r-park',
+      toolCalls: [
+        { toolCallId: SELF_TOOL_CALL_ID, name: SELF_TOOL_NAME, kind: 'CONFIRM', status: 'PENDING', arguments: SELF_ARGS }
+      ],
+      stateKey: 'ai:run:r-park',
+      pendingKey: 'ai:pending:r-park',
+      writtenBy: 'instance-self'
+    },
+    cardFrame(3),
+    { type: 'tool_start', seq: 4, toolCallId: SELF_TOOL_CALL_ID, name: SELF_TOOL_NAME, kind: 'CONFIRM', args: SELF_ARGS }
+  ]
+}
+
+/** 自检夹具：一轮完整生命周期（全量回放帧册的正例）。 */
+function ledgerFixture() {
+  return [
+    ...parkedFixture(),
+    { type: 'confirm_decision', seq: 5, toolCallId: SELF_TOOL_CALL_ID, name: SELF_TOOL_NAME, decision: 'approve', approved: true, status: 'APPROVED', reason: 'self' },
+    {
+      type: 'tool_result',
+      seq: 6,
+      toolCallId: SELF_TOOL_CALL_ID,
+      name: SELF_TOOL_NAME,
+      kind: 'CONFIRM',
+      ok: true,
+      outcome: 'ok',
+      code: null,
+      executed: true,
+      executedBy: 'instance-self',
+      status: 'EXECUTED',
+      result: '导出作业已启动（作业 #1）'
+    },
+    { type: 'message_start', seq: 7 },
+    { type: 'delta', seq: 8, text: '导出任务已创建' },
+    { type: 'message_end', seq: 9 },
+    { type: 'done', seq: 10, cancelled: false }
+  ]
+}
+
+function selfExpectThrow(fn, label) {
+  let threw = false
+  try {
+    fn()
+  } catch {
+    threw = true
+  }
+  check(threw, label)
+}
+
+/**
+ * 证据优先（复审 B1）：先落盘"当时看到的快照"，再跑可能失败的断言；
+ * 断言抛错时证据已经在磁盘上。
+ */
+function selfTestEvidenceBeforeAssertions() {
+  const order = []
+  const frames = parkedFixture()
+  let threw = false
+  try {
+    evidenceFirst(
+      (value) => order.push(`write:${value.length}`),
+      () => frames,
+      () => {
+        order.push('assert')
+        throw new Error('自检：断言故意失败')
+      }
+    )
+  } catch {
+    threw = true
+  }
+  check(threw, '自检：断言抛错必须向外传播（不得被证据写吞掉）')
+  checkEq(JSON.stringify(order), JSON.stringify(['write:4', 'assert']), '自检：写证据必须先于断言')
+
+  // 正例：断言成功时同样先写。
+  const okOrder = []
+  const result = evidenceFirst(
+    (value) => okOrder.push(`write:${value}`),
+    () => 'snapshot',
+    () => {
+      okOrder.push('assert')
+      return 'value'
+    }
+  )
+  checkEq(result, 'value', '自检：evidenceFirst 必须返回断言结果')
+  checkEq(JSON.stringify(okOrder), JSON.stringify(['write:snapshot', 'assert']), '自检：正例顺序')
+  return '失败留存 + 正常返回'
+}
+
+function selfTestParkBoundaryContract() {
+  const parked = parkedFixture()
+  const summary = assertParkedFrameSet(parked, SELF_TOOL_CALL_ID)
+  checkEq(summary.lastSeq, 4, '自检 park 边界 lastSeq')
+  checkEq(summary.types, 'start,suspended,confirm_request,tool_start', '自检 park 边界业务帧型')
+
+  selfExpectThrow(() => assertParkedFrameSet(parked.slice(0, 3), SELF_TOOL_CALL_ID), '自检：缺 tool_start 必须红')
+  selfExpectThrow(
+    () => assertParkedFrameSet([...parked, { type: 'done', seq: 5 }], SELF_TOOL_CALL_ID),
+    '自检：park 边界出现终帧必须红'
+  )
+  selfExpectThrow(
+    () => assertParkedFrameSet([parked[0], parked[1], cardFrame(3), cardFrame(3)], SELF_TOOL_CALL_ID),
+    '自检：重复请求帧必须红'
+  )
+  selfExpectThrow(
+    () => assertParkedFrameSet([parked[0], parked[1], cardFrame(3), { ...parked[3], seq: 5 }], SELF_TOOL_CALL_ID),
+    '自检：seq 断号必须红'
+  )
+  selfExpectThrow(
+    () => assertParkedFrameSet([parked[0], cardFrame(2), { ...parked[1], seq: 3 }, { ...parked[3], seq: 4 }], SELF_TOOL_CALL_ID),
+    '自检：suspended 晚于请求帧必须红'
+  )
+  selfExpectThrow(
+    () => assertParkedFrameSet([...parked.slice(0, 3), { ...parked[3], toolCallId: 'other' }], SELF_TOOL_CALL_ID),
+    '自检：tool_start 的 toolCallId 不匹配必须红'
+  )
+  return '4 帧 + 6 个反例'
+}
+
+/**
+ * 允许的 pre-park 噪声（复审 I3）：心跳（无 seq）、文本段、压缩、重试都可以出现在确认卡之前，
+ * 不得因此误判；缺 `tool_start` 仍然是缺陷。
+ */
+function selfTestAllowedPreParkFrames() {
+  const parked = parkedFixture()
+  const noisy = [
+    parked[0],
+    { type: 'context', seq: 2, level: 'l1', before: 1000, after: 800 },
+    { type: 'heartbeat', heartbeatSeq: 1 }, // 心跳：无业务 seq，合法
+    { type: 'message_start', seq: 3, messageId: 'm-1' },
+    { type: 'delta', seq: 4, text: '正在准备导出…', messageId: 'm-1' },
+    { type: 'message_end', seq: 5, messageId: 'm-1' },
+    { type: 'retry', seq: 6 },
+    { ...parked[1], seq: 7 },
+    { ...parked[2], seq: 8 },
+    { type: 'heartbeat', heartbeatSeq: 2 },
+    { ...parked[3], seq: 9 }
+  ]
+  const summary = assertParkedFrameSet(noisy, SELF_TOOL_CALL_ID)
+  checkEq(summary.lastSeq, 9, '自检噪声帧集的 lastSeq（心跳不占号）')
+  checkEq(summary.heartbeats, 2, '自检心跳计数')
+  assertParkedPayloads(noisy, { toolCallId: SELF_TOOL_CALL_ID, label: '自检噪声载荷' })
+
+  // "确认卡已到"的契约（早杀路径）：不要求 tool_start。
+  const cardOnly = [parked[0], { type: 'heartbeat', heartbeatSeq: 1 }, parked[1], parked[2]]
+  const cardSummary = assertCardReachedFrameSet(cardOnly, SELF_TOOL_CALL_ID)
+  checkEq(cardSummary.lastSeq, 3, '自检"卡已到"契约 lastSeq')
+
+  selfExpectThrow(
+    () => assertCardReachedFrameSet([parked[0], parked[1], { type: 'brand_new', seq: 3 }, parked[2]], SELF_TOOL_CALL_ID),
+    '自检：卡之前出现未允许帧型必须红'
+  )
+  selfExpectThrow(
+    () => assertCardReachedFrameSet([parked[0], parked[1], { type: 'delta', text: 'x' }, parked[2]], SELF_TOOL_CALL_ID),
+    '自检：卡之前出现缺 seq 的业务帧必须红'
+  )
+  return '心跳/文本/压缩/重试 + 卡已到契约 + 2 个反例'
+}
+
+/** 缺 seq 的帧必须被拒绝，而不是被过滤掉（复审 I2）。 */
+function selfTestMissingSeqRejected() {
+  const ledger = ledgerFixture()
+  checkEq(seqsOf(ledger, '自检 seq').length, 10, '自检 seq 列长度')
+  // 心跳允许没有 seq。
+  checkEq(seqsOf([...ledger, { type: 'heartbeat', heartbeatSeq: 3 }], '自检心跳').length, 10, '自检心跳不占号')
+
+  selfExpectThrow(() => seqsOf([{ type: 'delta', text: 'x' }], '自检缺号'), '自检：缺 seq 的业务帧必须抛错')
+  const noSeq = ledger.map((frame) => (frame.type === 'done' ? { ...frame, seq: undefined } : frame))
+  selfExpectThrow(() => assertFrameLedger(noSeq, { toolCallId: SELF_TOOL_CALL_ID }), '自检：done 缺 seq 必须红')
+  const middle = ledger.map((frame) => (frame.seq === 8 ? { ...frame, seq: undefined } : frame))
+  selfExpectThrow(() => assertFrameLedger(middle, { toolCallId: SELF_TOOL_CALL_ID }), '自检：中间帧缺 seq 必须红')
+  checkEq(seqsOf(ledger).length, businessFrames(ledger).length, '自检：非心跳帧数 = seq 数')
+  return '缺号 3 个反例 + 心跳例外'
+}
+
+/** 载荷断言：空壳/错值不得 false-pass（复审 I1）。 */
+function selfTestBadPayloadRejected() {
+  const ledger = ledgerFixture()
+  const summary = assertFrameLedger(ledger, { toolCallId: SELF_TOOL_CALL_ID })
+  checkEq(summary.lastSeq, 10, '自检帧册 lastSeq')
+  checkEq(summary.deltas, 1, '自检帧册 delta 数')
+
+  const mutate = (predicate, patch) => ledger.map((frame) => (predicate(frame) ? { ...frame, ...patch(frame) } : frame))
+  selfExpectThrow(
+    () => assertFrameLedger(mutate((f) => f.type === 'tool_result', () => ({ ok: false, outcome: 'failed' })), { toolCallId: SELF_TOOL_CALL_ID }),
+    '自检：tool_result.ok/outcome 错误必须红'
+  )
+  selfExpectThrow(
+    () => assertFrameLedger(mutate((f) => f.type === 'tool_result', () => ({ result: '' })), { toolCallId: SELF_TOOL_CALL_ID }),
+    '自检：tool_result.result 为空必须红'
+  )
+  selfExpectThrow(
+    () => assertFrameLedger(mutate((f) => f.type === 'confirm_request', () => ({ name: '' })), { toolCallId: SELF_TOOL_CALL_ID }),
+    '自检：confirm_request.name 为空必须红'
+  )
+  selfExpectThrow(
+    () => assertFrameLedger(mutate((f) => f.type === 'tool_start', () => ({ args: '{"taskId":999}' })), { toolCallId: SELF_TOOL_CALL_ID }),
+    '自检：tool_start.args 与请求帧不一致必须红'
+  )
+  selfExpectThrow(
+    () => assertFrameLedger(mutate((f) => f.type === 'confirm_decision', () => ({ decision: 'reject', approved: false })), { toolCallId: SELF_TOOL_CALL_ID }),
+    '自检：confirm_decision 非 approve 必须红'
+  )
+  selfExpectThrow(
+    () => assertFrameLedger(mutate((f) => f.type === 'delta', () => ({ text: '' })), { toolCallId: SELF_TOOL_CALL_ID }),
+    '自检：delta 文本为空必须红'
+  )
+  selfExpectThrow(
+    () => assertFrameLedger(ledger.filter((f) => f.type !== 'delta'), { toolCallId: SELF_TOOL_CALL_ID }),
+    '自检：没有 delta（正文）必须红'
+  )
+  selfExpectThrow(
+    () => assertFrameLedger(mutate((f) => f.type === 'suspended', (frame) => ({ toolCalls: [] })), { toolCallId: SELF_TOOL_CALL_ID }),
+    '自检：suspended.toolCalls 未列出条目必须红'
+  )
+  return '1 正例 + 8 个载荷反例'
+}
+
+/** 帧册的结构契约（缺帧/断号/乱序/未知帧型）。 */
+function selfTestFrameLedger() {
+  const ledger = ledgerFixture()
+  const summary = assertFrameLedger(ledger, { toolCallId: SELF_TOOL_CALL_ID })
+  checkEq(
+    summary.types,
+    'start,suspended,confirm_request,tool_start,confirm_decision,tool_result,message_start,delta,message_end,done',
+    '自检帧册帧型'
+  )
+
+  selfExpectThrow(
+    () => assertFrameLedger(ledger.filter((f) => f.type !== 'tool_start'), { toolCallId: SELF_TOOL_CALL_ID }),
+    '自检：帧册缺 tool_start 必须红'
+  )
+  selfExpectThrow(
+    () => assertFrameLedger(ledger.filter((f) => f.seq !== 8), { toolCallId: SELF_TOOL_CALL_ID }),
+    '自检：帧册 seq 断号必须红'
+  )
+  const reordered = ledger.map((f) => {
+    if (f.type === 'tool_start') return { ...f, seq: 6 }
+    if (f.type === 'tool_result') return { ...f, seq: 4 }
+    return f
+  })
+  selfExpectThrow(() => assertFrameLedger(reordered, { toolCallId: SELF_TOOL_CALL_ID }), '自检：tool_result 早于 tool_start 必须红')
+  selfExpectThrow(
+    () => assertFrameLedger([...ledger, { type: 'brand_new_frame', seq: 11 }], { toolCallId: SELF_TOOL_CALL_ID }),
+    '自检：未知帧型必须红'
+  )
+  // done 不是末号（归档里 done 之后还有业务帧）必须红。
+  selfExpectThrow(
+    () => assertFrameLedger([...ledger, { type: 'delta', seq: 11, text: '迟到' }], { toolCallId: SELF_TOOL_CALL_ID }),
+    '自检：done 之后又出现业务帧必须红'
+  )
+  return '10 帧 + 5 个反例'
+}
+
+/** B 侧差量的连续性（复审 I2）：中间缺一帧必须红。 */
+/**
+ * 决策后**差量连接**的帧型/载荷（复审 I1(b)(c)）：只验 seq 时 `tool_result.ok=false`、
+ * 空 `delta.text`、未知帧型、多一帧 `done` 都能过。
+ */
+function selfTestDeltaConnectionFrames() {
+  const delta = [
+    { type: 'confirm_decision', seq: 5, toolCallId: SELF_TOOL_CALL_ID, name: SELF_TOOL_NAME, decision: 'approve', approved: true },
+    {
+      type: 'tool_result',
+      seq: 6,
+      toolCallId: SELF_TOOL_CALL_ID,
+      name: SELF_TOOL_NAME,
+      ok: true,
+      outcome: 'ok',
+      result: '导出作业已启动（作业 #1）'
+    },
+    { type: 'message_start', seq: 7 },
+    { type: 'delta', seq: 8, text: '导出任务已创建' },
+    { type: 'done', seq: 9 }
+  ]
+  const summary = assertDeltaFrames(delta, { toolCallId: SELF_TOOL_CALL_ID, expectedName: SELF_TOOL_NAME })
+  checkEq(summary.frames, 5, '自检差量帧数')
+  checkEq(summary.toolStarts, 0, '自检差量 tool_start 帧数')
+
+  // 早杀路径允许差量里有一条 tool_start（且必须先于 tool_result）。
+  const withStart = [
+    { type: 'confirm_decision', seq: 5, toolCallId: SELF_TOOL_CALL_ID, name: SELF_TOOL_NAME, decision: 'approve', approved: true },
+    { type: 'tool_start', seq: 6, toolCallId: SELF_TOOL_CALL_ID, name: SELF_TOOL_NAME, kind: 'CONFIRM', args: SELF_ARGS },
+    { ...delta[1], seq: 7 },
+    { ...delta[2], seq: 8 },
+    { ...delta[3], seq: 9 },
+    { ...delta[4], seq: 10 }
+  ]
+  const startSummary = assertDeltaFrames(withStart, { toolCallId: SELF_TOOL_CALL_ID, expectedName: SELF_TOOL_NAME, allowToolStart: true })
+  checkEq(startSummary.toolStarts, 1, '自检差量允许的 tool_start 帧数')
+  selfExpectThrow(
+    () => assertDeltaFrames(withStart, { toolCallId: SELF_TOOL_CALL_ID, expectedName: SELF_TOOL_NAME, allowToolStart: false }),
+    '自检：非早杀差量出现 tool_start 必须红'
+  )
+
+  const mutate = (predicate, patch) => delta.map((frame) => (predicate(frame) ? { ...frame, ...patch } : frame))
+  selfExpectThrow(
+    () => assertDeltaFrames(delta.filter((f) => f.type !== 'tool_result'), { toolCallId: SELF_TOOL_CALL_ID }),
+    '自检：差量缺 tool_result 必须红'
+  )
+  selfExpectThrow(
+    () => assertDeltaFrames(mutate((f) => f.type === 'tool_result', { ok: false, outcome: 'failed' }), { toolCallId: SELF_TOOL_CALL_ID }),
+    '自检：差量 tool_result.ok/outcome 错误必须红'
+  )
+  selfExpectThrow(
+    () => assertDeltaFrames(mutate((f) => f.type === 'tool_result', { result: '' }), { toolCallId: SELF_TOOL_CALL_ID }),
+    '自检：差量 tool_result.result 为空必须红'
+  )
+  selfExpectThrow(
+    () => assertDeltaFrames(mutate((f) => f.type === 'confirm_decision', { decision: 'reject', approved: false }), { toolCallId: SELF_TOOL_CALL_ID }),
+    '自检：差量 confirm_decision 非 approve 必须红'
+  )
+  selfExpectThrow(
+    () => assertDeltaFrames(mutate((f) => f.type === 'delta', { text: '' }), { toolCallId: SELF_TOOL_CALL_ID }),
+    '自检：差量 delta 文本为空必须红'
+  )
+  selfExpectThrow(
+    () => assertDeltaFrames([...delta, { type: 'brand_new', seq: 10 }], { toolCallId: SELF_TOOL_CALL_ID }),
+    '自检：差量出现白名单外帧型必须红'
+  )
+  selfExpectThrow(
+    () => assertDeltaFrames([...delta, { type: 'delta', seq: 10, text: '迟到' }], { toolCallId: SELF_TOOL_CALL_ID }),
+    '自检：差量 done 之后又有业务帧必须红'
+  )
+  selfExpectThrow(
+    () => assertDeltaFrames([{ type: 'suspended', seq: 5 }, ...delta], { toolCallId: SELF_TOOL_CALL_ID }),
+    '自检：差量重发前缀帧（suspended）必须红'
+  )
+  return '2 正例 + 8 个反例'
+}
+
+/**
+ * 状态类证据的落盘顺序（复审 N1）：`/runs/current` / `run-detail` / `jobs` / `history`
+ * 都必须"先写快照、再断言"，断言抛错也要留下已写的证据。
+ */
+function selfTestStateEvidenceOrder() {
+  const order = []
+  const cases = [
+    ['current', () => ({ snapshotStatus: 'SUSPENDED', archiveMaxSeq: 4 }), (v) => checkEq(v.snapshotStatus, 'MUST_FAIL', '自检 current')],
+    ['detail', () => ({ status: 'DONE', ledger: [{ outcome: 'ok' }] }), (v) => checkEq(v.status, 'MUST_FAIL', '自检 detail')],
+    ['jobs', () => ({ length: 1 }), (v) => checkEq(v.length, 99, '自检 jobs')],
+    ['history', () => ({ total: 3 }), (v) => checkEq(v.total, 99, '自检 history')]
+  ]
+  for (const [tag, snapshot, assertion] of cases) {
+    let threw = false
+    try {
+      evidenceFirst(
+        (value) => order.push(`write:${tag}:${stableStringify(value)}`),
+        snapshot,
+        () => {
+          order.push(`assert:${tag}`)
+          assertion(snapshot())
+        }
+      )
+    } catch {
+      threw = true
+    }
+    check(threw, `自检：${tag} 的断言必须抛错（用于验证失败留存）`)
+  }
+  checkEq(
+    JSON.stringify(order),
+    JSON.stringify([
+      'write:current:{"archiveMaxSeq":4,"snapshotStatus":"SUSPENDED"}',
+      'assert:current',
+      'write:detail:{"ledger":[{"outcome":"ok"}],"status":"DONE"}',
+      'assert:detail',
+      'write:jobs:{"length":1}',
+      'assert:jobs',
+      'write:history:{"total":3}',
+      'assert:history'
+    ]),
+    '自检：四项状态证据都必须先写后断言'
+  )
+  return '4 项状态证据的顺序'
+}
+
+/** 帧册末号口径（复审 N2）：返回的是"本次全量回放末号"，不是服务端 archiveMaxSeq。 */
+function selfTestLedgerTipScope() {
+  const ledger = ledgerFixture()
+  const summary = assertFrameLedger(ledger, { toolCallId: SELF_TOOL_CALL_ID })
+  checkEq(summary.lastSeqScope, 'full-replay', '自检末号口径')
+  checkEq(summary.lastSeq, findOf(ledger, 'done').seq, '自检末号 = done.seq')
+  // 末号声明为 full-replay 时，与"服务端 archiveMaxSeq"是两个口径：这里只断言回放内的一致性。
+  const truncatedAfterDone = ledger.slice(0, ledger.length - 1) // 去掉 done → 必须红（不是"末号"问题，而是缺终帧）
+  selfExpectThrow(
+    () => assertFrameLedger(truncatedAfterDone, { toolCallId: SELF_TOOL_CALL_ID }),
+    '自检：缺 done 必须红'
+  )
+  return `scope=${summary.lastSeqScope}`
+}
+
+/** 早杀观测（复审 N3）：只记录"kill 前客户端是否看到 tool_start"，不推断来源。 */
+function selfTestKillObservation() {
+  const withStart = killToolStartObservation(parkedFixture(), SELF_TOOL_CALL_ID)
+  checkEq(withStart.toolStartSeenBeforeKill, true, '自检：kill 前已见 tool_start')
+  checkEq(withStart.toolStartNotObservedBeforeKill, false, '自检：kill 前已见的反义字段')
+  const withoutStart = killToolStartObservation(parkedFixture().slice(0, 3), SELF_TOOL_CALL_ID)
+  checkEq(withoutStart.toolStartSeenBeforeKill, false, '自检：kill 前未见 tool_start')
+  checkEq(withoutStart.toolStartNotObservedBeforeKill, true, '自检：kill 前未见的反义字段')
+  check(
+    !Object.prototype.hasOwnProperty.call(withStart, 'toolStartBackfilled'),
+    '自检：观测对象不得包含"谁补发"的推断字段'
+  )
+  return 'kill 前已见/未见两态'
+}
+
+function selfTestDeltaContiguous() {
+  const delta = [
+    { type: 'confirm_decision', seq: 5 },
+    { type: 'tool_result', seq: 6 },
+    { type: 'delta', seq: 7, text: 'x' },
+    { type: 'done', seq: 8 }
+  ]
+  checkEq(JSON.stringify(assertDeltaContiguous(delta, 5, '自检差量')), JSON.stringify([5, 6, 7, 8]), '自检差量 seq')
+  selfExpectThrow(
+    () => assertDeltaContiguous([delta[0], delta[2], delta[3]], 5, '自检差量缺帧'),
+    '自检：差量中间缺帧（5,7）必须红'
+  )
+  selfExpectThrow(() => assertDeltaContiguous(delta, 4, '自检差量起点'), '自检：差量起点不符必须红')
+  selfExpectThrow(
+    () => assertDeltaContiguous([...delta, { type: 'delta', seq: 8, text: 'dup' }], 5, '自检差量重复'),
+    '自检：差量重复号必须红'
+  )
+  return '1 正例 + 3 个反例'
+}
+
+function selfTestPreDecisionReplay() {
+  const parked = parkedFixture()
+  assertPreDecisionReplay(parked, parked, SELF_TOOL_CALL_ID, '自检决策前重挂')
+  selfExpectThrow(
+    () => assertPreDecisionReplay(parked.slice(0, 3), parked, SELF_TOOL_CALL_ID, '自检决策前重挂'),
+    '自检：回放缺 tool_start 必须红'
+  )
+  selfExpectThrow(
+    () => assertPreDecisionReplay([...parked, { type: 'done', seq: 5 }], parked, SELF_TOOL_CALL_ID, '自检决策前重挂'),
+    '自检：决策前回放出现终帧必须红'
+  )
+  selfExpectThrow(
+    () => assertPreDecisionReplay([parked[0], parked[2], parked[1], parked[3]], parked, SELF_TOOL_CALL_ID, '自检决策前重挂'),
+    '自检：决策前回放帧序被改动必须红'
+  )
+  // 载荷被清空/替换也必须红（只比 type+seq / 只比固定键都会 false-pass，复审 I1(a)）。
+  const tamperedName = parked.map((frame) =>
+    frame.type === 'confirm_request' ? { ...frame, name: 'someone_else' } : frame
+  )
+  selfExpectThrow(
+    () => assertPreDecisionReplay(tamperedName, parked, SELF_TOOL_CALL_ID, '自检决策前重挂载荷'),
+    '自检：回放载荷与 park 帧集不一致必须红'
+  )
+  const clearedToolCalls = parked.map((frame) => (frame.type === 'suspended' ? { ...frame, toolCalls: [] } : frame))
+  selfExpectThrow(
+    () => assertPreDecisionReplay(clearedToolCalls, parked, SELF_TOOL_CALL_ID, '自检决策前重挂 toolCalls'),
+    '自检：回放把 suspended.toolCalls 清空必须红'
+  )
+  const swappedRunId = parked.map((frame) => (frame.type === 'start' ? { ...frame, runId: 'r-other' } : frame))
+  selfExpectThrow(
+    () => assertPreDecisionReplay(swappedRunId, parked, SELF_TOOL_CALL_ID, '自检决策前重挂 runId'),
+    '自检：回放把 start.runId 换掉必须红'
+  )
+  // context 载荷属于"全字段"比对范围（白名单里没有它，必须靠全字段/深比较覆盖）。
+  const noisyExpected = [
+    parked[0],
+    { type: 'context', seq: 2, level: 'l1', before: 1000, after: 800 },
+    { ...parked[1], seq: 3 },
+    { ...parked[2], seq: 4 },
+    { ...parked[3], seq: 5 }
+  ]
+  assertPreDecisionReplay(noisyExpected, noisyExpected, SELF_TOOL_CALL_ID, '自检含 context 正例')
+  const contextTampered = noisyExpected.map((frame) =>
+    frame.type === 'context' ? { ...frame, after: 999 } : frame
+  )
+  selfExpectThrow(
+    () => assertPreDecisionReplay(contextTampered, noisyExpected, SELF_TOOL_CALL_ID, '自检 context 载荷'),
+    '自检：回放把 context 载荷改坏必须红'
+  )
+  return '2 正例 + 7 个反例'
+}
+
+/**
+ * park 收流屏障：真实 HTTP 上验证「请求帧之后等连接被服务端收尾」是本用例的时序屏障。
+ * 正例 = 发完 park 帧集就 end()；空回放正例 = 直接 end()（决策前带 lastSeq 的重挂就是这个形态）；
+ * 反例 = 帧发完但不收流（必须超时红，证明屏障不是空转）。
+ */
+function selfTestParkCloseBarrier() {
+  const parked = parkedFixture()
+  const startServer = (frames, holdOpen) =>
+    new Promise((resolve) => {
+      const server = http.createServer((req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream', 'X-Cluster-Node': 'node-selftest' })
+        for (const frame of frames) res.write(`data: ${JSON.stringify(frame)}\n\n`)
+        if (!holdOpen) res.end()
+      })
+      server.listen(0, '127.0.0.1', () => resolve(server))
+    })
+  return (async () => {
+    const bounded = await startServer(parked, false)
+    const empty = await startServer([], false)
+    const held = await startServer(parked, true)
+    try {
+      const okStream = await openSse(`http://127.0.0.1:${bounded.address().port}/events`, { timeoutMs: 10000 })
+      const settled = await settleParkBoundary(okStream, { toolCallId: 'tc-park', timeoutMs: 5000 })
+      checkEq(settled.lastSeq, 4, '自检 park 收流后的 lastSeq')
+      checkEq(settled.types, 'start,suspended,confirm_request,tool_start', '自检 park 收流帧型')
+      okStream.close()
+
+      // 决策前带 lastSeq 的重挂：归档里没有新帧 ⇒ 0 帧 + 服务端收流（用例断言 businessFrames(preB.frames).length === 0）。
+      const emptyStream = await openSse(`http://127.0.0.1:${empty.address().port}/events`, { timeoutMs: 10000 })
+      checkEq(await emptyStream.waitClosed(5000, '自检空回放收流'), 'end', '自检空回放必须是服务端正常收尾')
+      checkEq(emptyStream.frames.length, 0, '自检空回放帧数')
+      emptyStream.close()
+
+      const heldStream = await openSse(`http://127.0.0.1:${held.address().port}/events`, { timeoutMs: 10000 })
+      let failed = false
+      let failure = ''
+      try {
+        await settleParkBoundary(heldStream, { toolCallId: 'tc-park', timeoutMs: 300 })
+      } catch (e) {
+        failed = true
+        failure = e.message
+      }
+      heldStream.close()
+      check(failed, '自检：未收流的连接不得被当成"已 park"')
+      checkIncludes(failure, '等待 park 收流', '自检 park 收流超时的错误面')
+      return '收流正例 + 空回放正例 + 悬挂反例'
+    } finally {
+      for (const server of [bounded, empty, held]) {
+        server.closeAllConnections?.()
+        server.close()
+      }
+    }
+  })()
+}
+
 function selfTestSeqAndAssertions() {
   checkStrictlyIncreasing([1, 2, 3, 5], '自检 seq')
   let threw = false
@@ -3910,6 +5264,19 @@ async function selfCheckMain() {
   selfCheck('端口段 231xx 且禁用端口不出现', selfTestPortHygiene)
   selfCheck('静态 import 全部为 node: 内置模块', selfTestStaticImports)
   selfCheck('seq 断言（递增/乱序/重复）', selfTestSeqAndAssertions)
+  selfCheck('park 边界帧集契约（含 tool_start 与终帧禁止）', selfTestParkBoundaryContract)
+  selfCheck('允许的 pre-park 帧（心跳/文本/压缩/重试不得误判）', selfTestAllowedPreParkFrames)
+  selfCheck('全量回放帧册（seq 连续/恰一次/顺序/帧型白名单）', selfTestFrameLedger)
+  selfCheck('缺 seq 必须拒绝（不得静默过滤）', selfTestMissingSeqRejected)
+  selfCheck('载荷断言（tool_result/decision/delta/args 不得空壳或错值）', selfTestBadPayloadRejected)
+  selfCheck('B 差量连续性（不重不漏）', selfTestDeltaContiguous)
+  selfCheck('决策后差量连接的帧型/载荷（I1(b)(c)）', selfTestDeltaConnectionFrames)
+  selfCheck('状态类证据先落盘再断言（current/detail/jobs/history）', selfTestStateEvidenceOrder)
+  selfCheck('帧册末号口径 = 本次全量回放末号（N2）', selfTestLedgerTipScope)
+  selfCheck('早杀观测只记"kill 前是否已见"（N3）', selfTestKillObservation)
+  selfCheck('决策前重挂契约（回放完整且不收终帧）', selfTestPreDecisionReplay)
+  selfCheck('证据先落盘再断言（断言失败仍留证据）', selfTestEvidenceBeforeAssertions)
+  await selfCheckAsync('park 收流屏障（真实 HTTP：收流/空回放正例 + 悬挂反例）', selfTestParkCloseBarrier)
   selfCheck('HAProxy stats CSV 解析', selfTestStatsCsv)
   selfCheck('产品端点/字段静态契约', selfTestProductContract)
   selfCheck('桩路由表契约（TC16-EXPORT）', selfTestStubContract)

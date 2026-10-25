@@ -763,9 +763,32 @@ public class AiController {
 		// 续跑在即（快照要等驱动方才能翻 RUNNING），此刻收流会把续跑随后产出的 done/error 挡在
 		// 连接之外 —— E2E 的标准时序正是「POST 决策/回灌 200 → 立刻 GET /events 收终帧」，
 		// 这条竞态就是 GF4 / W-01..W-22 / H-10 / S-11 / T-13 的"done 缺失"。
-		if (this.properties.getPark().isEnabled() && RunSnapshot.SUSPENDED.equals(snapshot.getStatus())
-				&& stillWaitingForInput(runId)) {
-			out.completeSubscriptions();
+		if (this.properties.getPark().isEnabled() && RunSnapshot.SUSPENDED.equals(snapshot.getStatus())) {
+			if (stillWaitingForInput(runId)) {
+				out.completeSubscriptions();
+			}
+			else {
+				// ===== 已决但无驱动方的自愈对账（H-01）=====
+				// 条目全决 + 快照仍 SUSPENDED ⇒ 决策已落库却没有线程在驱动（park 退出窗口内的决策
+				// 曾命中预登记闸门导致无派发；续跑派发也可能失败）。重挂是最可靠的"有人在看"信号，
+				// 这里走与死卡兜底同一条判定：本进程无闸门才派发、租约/幂等由既有路径保证 ——
+				// 已有驱动方时只会得到 ALREADY_RUNNING / LEASE_HELD_ELSEWHERE 的跳过。
+				// 对账要读快照（RunStore.get 在 Redis 故障时抛 AiStateUnavailableException），而此刻
+				// 订阅已由 replayAndAttach 挂上、emitter 还没交给容器：异常上抛 = 500，且这条 emitter 的
+				// onCompletion/onTimeout/onError 永不触发 ⇒ 订阅留到进程结束（hasLiveSubscriber 常真、
+				// recycleIfIdle 永不放行、唤醒/回放继续往死订阅排队）。按 stillWaitingForInput 的同口径
+				// 就地降级：记 warn + 收流；不补 error 帧 —— 那是归档里的终态帧，会把这轮后续的重挂回放
+				// 当成"已终止"而漏掉真正的 done。
+				try {
+					ConfirmGate.ResumeTrigger healed = this.confirmGate.triggerResumeForParked(runId);
+					log.debug("reattach 已决无驱动方的自愈对账 runId={} outcome={}", runId,
+							healed == null ? null : healed.outcome());
+				}
+				catch (RuntimeException ex) {
+					log.warn("reattach 自愈对账失败 runId={}（收流，不泄漏订阅）：{}", runId, ex.getMessage());
+					out.completeSubscriptions();
+				}
+			}
 		}
 		return ResponseEntity.ok(emitter);
 	}

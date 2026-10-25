@@ -84,6 +84,12 @@ public class ImportJobRunner {
                     break;
                 }
                 Long itemId = progressService.startItem(jobId, defCode);
+                if (itemId == null) {
+                    // 父作业已终态（收敛已提交）：终态作业下不得再新增在途条目（评审 I-1）。
+                    // 走既有取消收尾：本方法末尾的终态写会被 CAS 丢弃，不会翻写任务态、不发 JOB_DONE。
+                    cancelled = true;
+                    break;
+                }
                 startedItems++;
                 int defTotal = 0;
                 int defProcessed = 0;

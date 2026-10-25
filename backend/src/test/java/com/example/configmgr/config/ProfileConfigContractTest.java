@@ -5,6 +5,7 @@ import org.springframework.boot.env.YamlPropertySourceLoader;
 import org.springframework.core.env.PropertySource;
 import org.springframework.core.io.ClassPathResource;
 
+import java.time.Duration;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -66,6 +67,25 @@ class ProfileConfigContractTest {
 				.doesNotContain("jdbc:h2:file:");
 		assertThat(url).as("等待方要能等完整一轮播种（H2 缺省锁等待 1s 会先超时）")
 				.contains("LOCK_TIMEOUT=");
+	}
+
+	@Test
+	void readinessDrainWindowDefaultsToZeroAndMultiInstanceProfilesUseFiveSeconds() throws Exception {
+		assertThat(load("application.yml").getProperty("app.health.readiness.drain-window"))
+				.as("默认单实例必须显式为 0s（不等待）")
+				.isEqualTo("0s");
+
+		for (String profile : List.of("cluster", "h2tcp", "postgresql")) {
+			List<PropertySource<?>> sources = new YamlPropertySourceLoader()
+					.load(profile, new ClassPathResource("application-" + profile + ".yml"));
+			Duration configured = new org.springframework.boot.context.properties.bind.Binder(
+					org.springframework.boot.context.properties.source.ConfigurationPropertySources.from(sources))
+					.bind("app.health.readiness.drain-window", Duration.class)
+					.orElse(null);
+			assertThat(configured)
+					.as("%s profile 必须有 5s draining 窗口（readiness 摘流链依赖它）", profile)
+					.isEqualTo(Duration.ofSeconds(5));
+		}
 	}
 
 	@Test

@@ -34,3 +34,11 @@ spring:
       connect-timeout: 2s
       lettuce:
         shutdown-timeout: 200ms
+
+app:
+  health:
+    readiness:
+      # 多实例（Redis Cluster 形态必然多实例）必须有 draining 窗口：Spring Boot 的 graceful
+      # shutdown 会立刻关闭监听 socket，没有窗口时 /health/ready 的 503 无法被反代探测到。
+      # 5s ≥ 常见 LB 的"探测间隔 2s × 失败阈值 2"＋余量；上界 60s（启动期校验）。
+      drain-window: 5s

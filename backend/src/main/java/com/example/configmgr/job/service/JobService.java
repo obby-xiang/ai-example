@@ -6,6 +6,7 @@ import com.example.configmgr.common.ResourceNotFoundException;
 import com.example.configmgr.file.FileStorageService;
 import com.example.configmgr.job.entity.Job;
 import com.example.configmgr.job.entity.ValidationIssue;
+import com.example.configmgr.job.repo.JobItemRepository;
 import com.example.configmgr.job.repo.JobRepository;
 import com.example.configmgr.job.repo.ValidationIssueRepository;
 import com.example.configmgr.task.entity.Task;
@@ -130,6 +131,7 @@ public class JobService {
     private final AsyncJobExecutor asyncJobExecutor;
     private final TaskService taskService;
     private final TaskItemRepository taskItemRepository;
+    private final JobItemRepository jobItemRepository;
     private final TaskFileRepository taskFileRepository;
     private final FileStorageService fileStorageService;
     private final ObjectMapper objectMapper;
@@ -500,6 +502,16 @@ public class JobService {
                 throw finalConflict(jobId, current.getStatus());
             }
             taskService.applyJobOutcome(job.getTaskId(), Job.JobStatus.CANCELLED);
+            // 取消也要收敛"未收终态"的条目：执行器可能已被 kill（SIGKILL 后不再有任何 finishItem），
+            // 只写作业行会让条目永久停在 RUNNING（作业详情/任务中心与终态自相矛盾）。
+            // 放在取消事务内（而不是 JobProgressService#finish）：取消语义下"条目记 CANCELLED"由取消方
+            // 负责，事务原子提交 ⇒ 不会出现"作业 CANCELLED、条目还在 RUNNING"的中间态；条件 UPDATE
+            // 只匹配 PENDING/RUNNING，已 COMPLETED 的条目一律不动（不覆盖成功终态）。
+            int convergedItems = this.jobItemRepository.convergeOpenItems(jobId, "CANCELLED");
+            if (convergedItems > 0) {
+                log.info("作业 #{} 取消：收敛 {} 条在途条目为 CANCELLED（执行器已不再写条目）",
+                        jobId, convergedItems);
+            }
             return job.getTaskId();
         });
         return publishCancellationSideEffects(jobId, requestedBy, taskId);

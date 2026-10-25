@@ -121,6 +121,17 @@ public class JobProgressService {
      * <p>被守卫拦下的调用同样清理（终审微补丁 F1b，红队 m1 残余）：入口的无条件 beat 会把
      * 已终态作业的条目重新塞回登记簿，该路径若不清则条目永无人清理（终态作业不再有
      * 后续分片边界 beat，其唯一清理点是本方法）—— 作业已是终态，清理语义与写入成功路径一致。
+     *
+     * <p><b>条目收敛（多实例 job 接管批 · kill 后终态一致）</b>：终态<b>实际落写且为 FAILED</b> 时，
+     * 同一条 {@code REQUIRES_NEW} 事务里把该作业下仍未收终态的条目（{@code PENDING/RUNNING}）
+     * 一并记为 FAILED。没有这一步时，被 SIGKILL 打断的执行器不会再有 {@code finishItem}，
+     * 看门狗把作业判 FAILED 后条目会永久停在 {@code RUNNING}（三实例验收：job #5 FAILED 而
+     * {@code job_items} 残留 {@code RUNNING, processed=1}）——作业详情与任务中心长期自相矛盾。
+     *
+     * <p>收敛范围只到 FAILED：{@code CANCELLED} 在 {@link JobService#cancel} 的事务内收敛
+     * （取消路径的条目写归属取消方），{@code COMPLETED} 不臆断（见
+     * {@link #convergeOpenItemsLocked}）。条件 UPDATE 只匹配在途条目 ⇒ 幂等，重复扫描/
+     * 多实例并发都不会翻写已终态条目。
      */
     public boolean finish(Long jobId, Job.JobStatus jobStatus, int errorCount, int warningCount,
                        int processed, int total) {
@@ -132,9 +143,14 @@ public class JobProgressService {
         try {
             // R1-11：终态判定下沉到数据库 —— 单条条件 UPDATE 的影响行数就是「谁胜出」。
             // 读-判-写在应用层跨进程不成立（两个写者都读到 RUNNING 时会双双写终态）。
-            wroteTerminal = Boolean.TRUE.equals(requiresNew.execute(status ->
-                    jobRepository.finishIfInFlight(jobId, jobStatus, errorCount, warningCount,
-                            processed, total, LocalDateTime.now(), IN_FLIGHT) > 0));
+            wroteTerminal = Boolean.TRUE.equals(requiresNew.execute(status -> {
+                int rows = jobRepository.finishIfInFlight(jobId, jobStatus, errorCount, warningCount,
+                        processed, total, LocalDateTime.now(), IN_FLIGHT);
+                if (rows > 0) {
+                    convergeOpenItemsLocked(jobId, jobStatus);
+                }
+                return rows > 0;
+            }));
         } finally {
             // 入口 beat 已把条目写回登记簿：写入成功、被拦与异常路径都必须清（F1b）
             heartbeatRegistry.clear(jobId);
@@ -148,11 +164,66 @@ public class JobProgressService {
         return wroteTerminal;
     }
 
+    /**
+     * 把仍未收终态的条目收敛为 FAILED（调用方必须已在 {@code REQUIRES_NEW} 事务内，且作业终态刚刚落写）。
+     *
+     * <p><b>只处理 FAILED</b>，其余终态刻意不碰：
+     * <ul>
+     * <li><b>COMPLETED</b>：成功作业理论上没有在途条目，真出现了是执行器的缺陷，
+     *     用 COMPLETED 盖过去只会让"少跑了一个配置项"更晚被发现；</li>
+     * <li><b>CANCELLED</b>：取消语义下"条目记 CANCELLED"是<b>取消方/执行器</b>的写（
+     *     {@code finishItem}/{@code markItemFinal} 的 CANCELLED 分支有专门用例守着：父作业已 CANCELLED
+     *     时仍允许补记 CANCELLED）。在这里抢先收敛会把那次写变成 0 行，等于偷走取消路径的归属。</li>
+     * </ul>
+     * FAILED 没有这个归属问题：判死/判超时/执行器失败这三条路径下都不会再有 runner 来写条目
+     * （SIGKILL 后更是只剩数据库里那一行），必须由终态写入方兜住。
+     */
+    private void convergeOpenItemsLocked(Long jobId, Job.JobStatus jobStatus) {
+        if (jobStatus != Job.JobStatus.FAILED) {
+            return;
+        }
+        int converged = jobItemRepository.convergeOpenItems(jobId, "FAILED");
+        if (converged > 0) {
+            log.warn("作业 #{} 终态 FAILED：收敛 {} 条在途条目为 FAILED（执行器已不再写条目）",
+                    jobId, converged);
+        }
+    }
+
     // ── 作业条目（job_items）：同一独立事务口径，供详情抽屉逐配置项实时进度 ──────────
 
-    /** 配置项开工：新建 job_item（RUNNING），返回其 id。 */
+    /**
+     * 配置项开工：<b>父作业仍在途才</b>新建 job_item（RUNNING），返回其 id；否则返回 {@code null}。
+     *
+     * <h2>为什么插入点必须持父作业行锁（评审 I-1）</h2>
+     * 条目收敛只发生在"写作业终态"的那一刻（{@code finish} 的 FAILED、{@code JobService#cancel} 的
+     * CANCELLED）。若 {@code startItem} 无条件插入，<b>收敛之后</b>的迟到开工会在终态作业下插一条
+     * 永久 RUNNING 的条目：它的 {@code finishItem}/{@code updateItem} 都因父作业已终态恒为 0 行，
+     * 再没有任何路径能收它。可达路径（都是毫秒级真实窗口）：
+     * <ul>
+     * <li>取消：{@code JobService#cancel} 先提交"状态 + 收敛"，之后才写共享取消标志；runner 在
+     *     条目循环顶部才检查标志 ⇒ 两次检查之间会走到下一项的 startItem；</li>
+     * <li>看门狗判死/判超时：同样先写终态、后写取消标志；</li>
+     * <li>跨实例 + Redis 降级：取消标志写 Redis 失败时只剩发起实例本地生效，另一实例上的 runner
+     *     读不到 ⇒ 会在 FAILED/CANCELLED 作业下继续按条目推进。</li>
+     * </ul>
+     *
+     * <p><b>为什么是行锁而不是"先查后插"</b>：终态写走的是 {@code UPDATE jobs ... WHERE status IN
+     * (PENDING,RUNNING)}（数据库行锁 + 语句级判据）。这里对同一行加 {@code SELECT ... FOR UPDATE}：
+     * 谁先拿到行锁谁先成立 —— 终态先提交则本方法读到终态、返回 null；本方法先提交则终态写随后
+     * 在同一事务里收敛这条新条目。两种次序都不会留下在途条目，且跨 JVM 成立（锁在数据库里）。
+     * 纯应用层 check-then-insert 在 READ COMMITTED 下仍可插到终态之后，不能替代本锁。
+     *
+     * @return 新条目 id；{@code null} = 父作业已终态或已删除（调用方必须停止开工并走既有收尾）
+     */
     public Long startItem(Long jobId, String defCode) {
         return requiresNew.execute(status -> {
+            // 与 finish/cancel 的 jobs 条件 UPDATE 串行化（同一把行锁）；markItemFinal 的插入分支同法。
+            Job parent = jobRepository.findByIdForUpdate(jobId).orElse(null);
+            if (parent == null || !IN_FLIGHT.contains(parent.getStatus())) {
+                log.info("作业 #{} 已离开在途态（{}），拒绝迟到开工的配置项 {}（终态作业不得新增在途条目）",
+                        jobId, parent == null ? "已删除" : parent.getStatus(), defCode);
+                return null;
+            }
             JobItem item = new JobItem();
             item.setJobId(jobId);
             item.setDefCode(defCode);
