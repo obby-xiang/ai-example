@@ -25,8 +25,8 @@ spring:
       maximum-pool-size: 10
       # 取连接上限 5s（默认 30s）：本 profile 下 /health/ready 的 DB 探针与业务查询共用本池，
       # 池被占满时探针必须在 LB 的探测超时内给出结论，而不是把探测线程吊在 30s 上。
-      connection-timeout: 5s
-      validation-timeout: 2s
+      connection-timeout: 5000
+      validation-timeout: 2000
       # 会话级**锁等待**上限 60s，与 H2 的 LOCK_TIMEOUT=60000 同一上界（种子单飞的等待方要能等
       # 完整一轮播种，但不能无限等：PG 缺省 lock_timeout=0 会一直挂着）。
       # 只限"等锁"，不限语句执行时长（不设 statement_timeout：本仓没有把慢查询升级成失败的裁决，

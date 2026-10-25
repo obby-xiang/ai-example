@@ -19,7 +19,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * （H2 文件库同刻只允许一个进程打开，多实例等于"每 JVM 一个库"）。</li>
  * </ul>
  *
- * <p>这里只解析 YAML 文本（不启动上下文、不连库），所以 CI 与本机都能跑。
+ * <p>这里解析 YAML 并按 Hikari 的真实类型绑定（不启动上下文、不连库），所以 CI 与本机都能跑。
  */
 class ProfileConfigContractTest {
 
@@ -75,6 +75,21 @@ class ProfileConfigContractTest {
 		assertThat(defaults.getProperty("app.web.trusted-proxies"))
 				.as("默认不信任任何转发头（直连形态），与改造前一致")
 				.isNotNull();
+	}
+
+	@Test
+	void hikariTimeoutValuesAreMilliseconds() throws Exception {
+		for (String profile : List.of("h2tcp", "postgresql")) {
+			List<PropertySource<?>> sources = new YamlPropertySourceLoader()
+					.load(profile, new ClassPathResource("application-" + profile + ".yml"));
+			com.zaxxer.hikari.HikariConfig bound = new org.springframework.boot.context.properties.bind.Binder(
+					org.springframework.boot.context.properties.source.ConfigurationPropertySources.from(sources))
+					.bind("spring.datasource.hikari", com.zaxxer.hikari.HikariConfig.class).get();
+			assertThat(bound.getConnectionTimeout()).as("%s 的连接超时应为 5000ms", profile).isEqualTo(5000L);
+			if (profile.equals("postgresql")) {
+				assertThat(bound.getValidationTimeout()).isEqualTo(2000L);
+			}
+		}
 	}
 
 	private static PropertySource<?> load(String resource) throws Exception {

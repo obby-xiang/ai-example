@@ -29,7 +29,7 @@ spring:
     hikari:
       # 与默认口径一致（10）。三个实例 = 30 条连接，H2 服务侧无 max_connections 限制，可接受。
       maximum-pool-size: 10
-      connection-timeout: 5s
+      connection-timeout: 5000
 
   h2:
     console:
