@@ -1,0 +1,108 @@
+name: 三实例集群验证网（A/B/C · 共享 Redis/H2-TCP/文件 · 统一反向代理）
+
+# 目的：在**真实**三实例拓扑（JVM A/B/C）上验证多实例适配面：
+#   - 连接层无状态：同一 TCP 连接连续请求、固定 Cookie/XFF 都覆盖 A/B/C（代理按请求轮询，无粘滞）；
+#   - 任意实例可 reattach / confirm / history；跨实例 seq 同号同序、幂等副作用恰一次；
+#   - 流式 kill A、挂起 kill A、作业中 kill A 的接管/收敛；
+#   - 共享文件下载、配置热更新、三实例冷启动、Redis 故障恢复、readiness 摘除。
+#
+# 触发口径：只开 workflow_dispatch。
+#   - 本网要起 3 个 JVM + H2 TCP + Redis 容器 + HAProxy 容器，并主动 SIGKILL 实例、暂停 Redis；
+#     挂 push/PR 会显著拖慢每笔提交，也不适合作为 required check。
+#   - 需要验收时：`gh workflow run cluster-3node.yml`，或在 Actions 页面 Run workflow。
+#
+# 安全边界：
+#   - **零密钥**：上游是 scripts/ci/stub-upstream.mjs（零依赖、确定性），后端只拿到固定占位串；
+#     本 workflow 不出现任何 secrets 引用，也不读写密钥。
+#   - 端口只取 231xx 段（Redis 23179 / HAProxy 23180 / A/B/C 23181-23183 /
+#     stats 23189 / H2 TCP 23190 / 桩 23199）；不复用旧双实例证据的端口与产物目录。
+#   - 真实集群只在本 workflow 的 ubuntu-latest 上跑；本机只允许 `--self-check`。
+#
+# 失败口径：探针只产出 PASS/FAIL（无 SKIP）。产品缺陷未修完时允许真实 FAIL；
+#   证据（三实例日志 / HAProxy 路由日志 / 逐用例结果 / 桩请求判定）在失败时也归档。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 同一时刻只跑一套；排队而不取消（取消会留下半套证据）。
+concurrency:
+  group: cluster-3node
+  cancel-in-progress: false
+
+env:
+  CLUSTER3_JAR: backend/target/config-mgr.jar
+  CLUSTER3_ARTIFACT_DIR: backend/target/cluster3-artifacts
+  REDIS_IMAGE: redis:7.2.16
+  HAPROXY_IMAGE: haproxy:2.9-alpine
+
+jobs:
+  cluster3:
+    name: 三实例 · 共享 Redis/H2-TCP/文件 · 无粘滞代理
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: 安装 JDK 21（temurin）
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          cache-dependency-path: backend/pom.xml
+
+      - name: 安装 Node 22
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      # 先做纯语法预检：脚本自身写坏时，不要等到拉起 3 个 JVM 才红。
+      - name: 语法预检（bash -n / node --check）
+        run: |
+          bash -n scripts/ci/cluster3-run.sh
+          node --check scripts/ci/cluster3-probe.mjs
+          node --check scripts/ci/stub-upstream.mjs
+
+      # 静态/协议自证（不启动 Java/Docker、不连端口）：
+      #   - 探针自身：SSE 解析、keep-alive 单连接判定、stats CSV、产品端点静态契约、桩路由契约；
+      #   - 代理配置：roundrobin + readiness 探针，且无 stick-table / cookie / source 粘滞；
+      #   - 工作流：只手工触发、只读权限、不引用 secrets、无禁用端口、失败也归档；
+      #   - 工作树：除本批三个文件外无改动（不碰产品代码与 docs）。
+      - name: 静态/协议自证（cluster3-run.sh --self-check）
+        run: bash scripts/ci/cluster3-run.sh --self-check
+
+      - name: 打包后端（跳过单测：单测由 CI 主门禁负责）
+        working-directory: backend
+        run: mvn -B -DskipTests package
+
+      # 真实三实例：H2 TCP 单进程 + 共享 Redis 容器 + HAProxy 容器 + 3 个 JVM。
+      # 探针负责 JVM/H2 生命周期与全部用例，shell 负责容器与桩生命周期。
+      - name: 运行真实三实例集群验证
+        run: bash scripts/ci/cluster3-run.sh
+
+      - name: 追加作业摘要
+        if: always()
+        run: |
+          dir="${CLUSTER3_ARTIFACT_DIR}"
+          echo "## 三实例集群验证网" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f "$dir/summary.md" ]; then
+            cat "$dir/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo '> 未生成 summary.md（基础设施可能未起来；见 artifact 的 ci.log）' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f "$dir/results.md" ]; then
+            cat "$dir/results.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # 失败也归档：三实例日志 / H2 / Redis / HAProxy（含路由日志）/ 桩请求判定 / 逐用例结果。
+      - name: 归档证据（失败也归档，保留 14 天）
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: cluster3-evidence-${{ github.run_id }}
+          path: backend/target/cluster3-artifacts
+          retention-days: 14
+          if-no-files-found: warn
