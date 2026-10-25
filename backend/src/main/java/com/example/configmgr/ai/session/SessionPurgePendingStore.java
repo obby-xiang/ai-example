@@ -4,7 +4,6 @@ import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.common.AiStateUnavailableException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.data.redis.core.Cursor;
 import org.springframework.data.redis.core.ScanOptions;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
@@ -238,40 +237,30 @@ public class SessionPurgePendingStore {
 	 * @param maxKeys SCAN 回填上限（有界）
 	 */
 	public int recoverOrphans(int maxKeys) {
-		int scanned = 0;
 		int recovered = 0;
-		try (Cursor<String> cursor = this.redis.scan(
-				ScanOptions.scanOptions().match(PENDING_PREFIX + "*").count(256).build())) {
-			if (cursor == null) {
-				return 0;
+		// 逐 master 扫描（standalone 走单连接）；任一节点失败上抛，调用方不得报 complete。
+		List<String> keys = RedisClusterScanSupport.scan(this.redis,
+				ScanOptions.scanOptions().match(PENDING_PREFIX + "*").count(256).build(), maxKeys);
+		for (String key : keys) {
+			if (key == null || !key.startsWith(PENDING_PREFIX)) {
+				continue;
 			}
-			while (cursor.hasNext() && scanned < maxKeys) {
-				String key = cursor.next();
-				scanned++;
-				if (key == null || !key.startsWith(PENDING_PREFIX)) {
-					continue;
-				}
-				String sessionId = key.substring(PENDING_PREFIX.length());
-				if (sessionId.isBlank()) {
-					continue;
-				}
-				Pending pending = current(sessionId);
-				if (pending == null) {
-					continue;
-				}
-				this.redis.opsForList().remove(QUEUE_KEY, 0, sessionId);
-				this.redis.opsForList().rightPush(QUEUE_KEY, sessionId);
-				recovered++;
+			String sessionId = key.substring(PENDING_PREFIX.length());
+			if (sessionId.isBlank()) {
+				continue;
 			}
-			if (recovered > 0) {
-				log.info("会话销毁 pending SCAN 兜底：扫描 {} 键，补回 {} 条待重试", scanned, recovered);
+			Pending pending = current(sessionId);
+			if (pending == null) {
+				continue;
 			}
-			return recovered;
+			this.redis.opsForList().remove(QUEUE_KEY, 0, sessionId);
+			this.redis.opsForList().rightPush(QUEUE_KEY, sessionId);
+			recovered++;
 		}
-		catch (RuntimeException ex) {
-			log.warn("会话销毁 pending SCAN 兜底失败（本轮不猜状态）：{}", ex.getMessage());
-			return -1;
+		if (recovered > 0) {
+			log.info("会话销毁 pending SCAN 兜底：扫描 {} 键，补回 {} 条待重试", keys.size(), recovered);
 		}
+		return recovered;
 	}
 
 	/**

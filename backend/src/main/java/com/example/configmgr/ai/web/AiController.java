@@ -758,11 +758,38 @@ public class AiController {
 		SseChatEmitter out = this.runRegistry.of(runId);
 		int replayed = out.replayAndAttach(emitter, lastSeq, isTerminal(snapshot.getStatus()));
 		log.debug("reattach runId={} status={} lastSeq={} 回放帧数={}", runId, snapshot.getStatus(), lastSeq, replayed);
-		// park 的挂起轮没有驱动方：回放（含请求帧）完成后主动收流，决策/回灌再触发续跑。
-		if (this.properties.getPark().isEnabled() && RunSnapshot.SUSPENDED.equals(snapshot.getStatus())) {
+		// park 的挂起轮：回放（含请求帧）完成后主动收流，决策/回灌再触发续跑。
+		// 只在<b>确实还在等人</b>（仍有 PENDING 条目）时收流：条目已全部结算 ⇒ 决策/回灌已落库、
+		// 续跑在即（快照要等驱动方才能翻 RUNNING），此刻收流会把续跑随后产出的 done/error 挡在
+		// 连接之外 —— E2E 的标准时序正是「POST 决策/回灌 200 → 立刻 GET /events 收终帧」，
+		// 这条竞态就是 GF4 / W-01..W-22 / H-10 / S-11 / T-13 的"done 缺失"。
+		if (this.properties.getPark().isEnabled() && RunSnapshot.SUSPENDED.equals(snapshot.getStatus())
+				&& stillWaitingForInput(runId)) {
 			out.completeSubscriptions();
 		}
 		return ResponseEntity.ok(emitter);
+	}
+
+	/**
+	 * 该轮是否仍有<b>等人/等前端</b>的条目（PENDING）。{@code true} ⇒ park 可以安全收流；
+	 * {@code false} ⇒ 条目已全部结算、续跑即将/正在产出终帧，连接必须保留。
+	 *
+	 * <p>读失败按"仍在等"处理：状态不可知时回到旧的 park 收流（不把连接悬挂在一个说不清
+	 * 状态的轮上），也不冒充"续跑在即"。
+	 */
+	private boolean stillWaitingForInput(String runId) {
+		try {
+			for (PendingToolCall pending : this.runStore.pendings(runId)) {
+				if (PendingToolCall.PENDING.equals(pending.getStatus())) {
+					return true;
+				}
+			}
+			return false;
+		}
+		catch (RuntimeException ex) {
+			log.warn("reattach 读取待决条目失败 runId={}（按 park 收流，不悬挂连接）：{}", runId, ex.getMessage());
+			return true;
+		}
 	}
 
 	/**

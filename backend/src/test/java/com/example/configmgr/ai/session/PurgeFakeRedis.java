@@ -9,6 +9,11 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.data.redis.connection.DataType;
+import org.springframework.data.redis.connection.RedisClusterConnection;
+import org.springframework.data.redis.connection.RedisClusterNode;
+import org.springframework.data.redis.connection.RedisConnection;
+import org.springframework.data.redis.connection.RedisConnectionFactory;
+import org.springframework.data.redis.connection.RedisKeyCommands;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -20,7 +25,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
+import java.nio.charset.StandardCharsets;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyCollection;
@@ -59,6 +67,35 @@ final class PurgeFakeRedis {
 	volatile boolean failScan;
 
 	final StringRedisTemplate redis = mock(StringRedisTemplate.class);
+
+	final RedisConnectionFactory connectionFactory = mock(RedisConnectionFactory.class);
+
+	final RedisConnection standaloneConnection = mock(RedisConnection.class);
+
+	private final RedisKeyCommands keyCommands = mock(RedisKeyCommands.class);
+
+	final RedisClusterConnection clusterConnection = mock(RedisClusterConnection.class);
+
+	/** cluster 模式 = factory 返回 RedisClusterConnection；默认 standalone。 */
+	volatile boolean clusterMode;
+
+	/** cluster masters（顺序即扫描顺序）。 */
+	final List<RedisClusterNode> clusterMasters = new CopyOnWriteArrayList<>();
+
+	/** 每个 master 的键（模拟 Cluster 分片；未分配的键不会被该节点扫到）。 */
+	final Map<RedisClusterNode, Set<String>> clusterNodeKeys = new java.util.IdentityHashMap<>();
+
+	/** 观测：连接/cursor 是否被关闭。 */
+	final AtomicInteger standaloneConnectionCloses = new AtomicInteger();
+
+	final AtomicInteger clusterConnectionCloses = new AtomicInteger();
+
+	final List<RedisClusterNode> closedNodeCursors = new CopyOnWriteArrayList<>();
+
+	volatile int standaloneCursorCloses;
+
+	/** 指定该 master 扫描抛错（模拟单节点失败）。 */
+	volatile RedisClusterNode failNode;
 
 	private final ValueOperations<String, String> values = mock(ValueOperations.class);
 
@@ -284,12 +321,40 @@ final class PurgeFakeRedis {
 			}
 			return removed;
 		});
-		when(this.redis.scan(any(ScanOptions.class))).thenAnswer(invocation -> {
+		// Cluster-safe scanner 的真实调用路径：StringRedisTemplate -> ConnectionFactory -> Connection。
+		// 不再为 template.scan 打桩（生产已禁止该调用；替身也不应替它自证）。
+		when(this.redis.getConnectionFactory()).thenReturn(this.connectionFactory);
+		when(this.connectionFactory.getConnection()).thenAnswer(invocation -> this.clusterMode
+				? this.clusterConnection : this.standaloneConnection);
+		doAnswer(invocation -> {
+			this.standaloneConnectionCloses.incrementAndGet();
+			return null;
+		}).when(this.standaloneConnection).close();
+		doAnswer(invocation -> {
+			this.clusterConnectionCloses.incrementAndGet();
+			return null;
+		}).when(this.clusterConnection).close();
+		when(this.standaloneConnection.keyCommands()).thenReturn(this.keyCommands);
+		when(this.keyCommands.scan(any(ScanOptions.class))).thenAnswer(invocation -> {
 			if (this.failScan) {
 				throw new IllegalStateException("模拟 SCAN 失败");
 			}
 			ScanOptions options = invocation.getArgument(0);
-			return cursorMatching(options == null ? null : options.getPattern());
+			return cursorMatching(options == null ? null : options.getPattern(), allKeys(), () -> {
+				this.standaloneCursorCloses++;
+			});
+		});
+		when(this.clusterConnection.clusterGetNodes()).thenReturn(this.clusterMasters);
+		when(this.clusterConnection.scan(any(RedisClusterNode.class), any(ScanOptions.class))).thenAnswer(invocation -> {
+			RedisClusterNode node = invocation.getArgument(0);
+			if (this.failScan || node == this.failNode) {
+				throw new IllegalStateException("模拟 master SCAN 失败");
+			}
+			ScanOptions options = invocation.getArgument(1);
+			Set<String> source = this.clusterNodeKeys.getOrDefault(node, Set.of());
+			return cursorMatching(options == null ? null : options.getPattern(), source, () -> {
+				this.closedNodeCursors.add(node);
+			});
 		});
 		when(this.redis.execute(any(RedisScript.class), anyList(), any(Object[].class))).thenAnswer(invocation -> {
 			RedisScript<?> script = invocation.getArgument(0);
@@ -368,15 +433,32 @@ final class PurgeFakeRedis {
 		return values.toArray();
 	}
 
-	private Cursor<String> cursorMatching(String glob) {
-		List<String> keys = new ArrayList<>();
+	private Cursor<byte[]> cursorMatching(String glob, Collection<String> source, Runnable onClose) {
+		List<byte[]> keys = new ArrayList<>();
 		Pattern pattern = glob == null ? null : globToRegex(glob);
-		for (String key : allKeys()) {
+		for (String key : source) {
 			if (pattern == null || pattern.matcher(key).matches()) {
-				keys.add(key);
+				keys.add(key.getBytes(StandardCharsets.UTF_8));
 			}
 		}
-		return new ListCursor(keys);
+		return new BytesCursor(keys, onClose);
+	}
+
+	/** 增加一个 cluster master（默认无键；测试显式分配）。 */
+	RedisClusterNode addClusterMaster(String host, int port) {
+		RedisClusterNode node = mock(RedisClusterNode.class);
+		when(node.isMaster()).thenReturn(true);
+		when(node.getHost()).thenReturn(host);
+		when(node.getPort()).thenReturn(port);
+		this.clusterMasters.add(node);
+		this.clusterNodeKeys.put(node, ConcurrentHashMap.newKeySet());
+		return node;
+	}
+
+	/** 把一个键分配给指定 master（模拟 Cluster 分片）。 */
+	void assignToMaster(RedisClusterNode node, String... keys) {
+		this.clusterNodeKeys.computeIfAbsent(node, ignored -> ConcurrentHashMap.newKeySet())
+			.addAll(List.of(keys));
 	}
 
 	private Set<String> allKeys() {
@@ -411,14 +493,17 @@ final class PurgeFakeRedis {
 		return Pattern.compile(regex.append('$').toString());
 	}
 
-	private static final class ListCursor implements Cursor<String> {
+	private static final class BytesCursor implements Cursor<byte[]> {
 
-		private final Iterator<String> iterator;
+		private final Iterator<byte[]> iterator;
+
+		private final Runnable onClose;
 
 		private boolean closed;
 
-		ListCursor(List<String> keys) {
+		BytesCursor(List<byte[]> keys, Runnable onClose) {
 			this.iterator = keys.iterator();
+			this.onClose = onClose;
 		}
 
 		@Override
@@ -427,13 +512,16 @@ final class PurgeFakeRedis {
 		}
 
 		@Override
-		public String next() {
+		public byte[] next() {
 			return this.iterator.next();
 		}
 
 		@Override
 		public void close() {
-			this.closed = true;
+			if (!this.closed) {
+				this.closed = true;
+				this.onClose.run();
+			}
 		}
 
 		@Override
@@ -457,5 +545,4 @@ final class PurgeFakeRedis {
 		}
 
 	}
-
 }

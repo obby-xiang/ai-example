@@ -19,6 +19,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.data.redis.connection.RedisClusterNode;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -488,6 +489,26 @@ class AiSessionPurgeServiceTest {
 		assertThat(result.runs()).extracting(AiSessionPurgeService.RunView::runId)
 			.containsExactlyInAnyOrder("run-old", "run-new");
 		assertThat(this.fixture.fake.strings).doesNotContainKey(this.fixture.store.runKey("run-old"));
+	}
+
+	@Test
+	void archiveScanNodeFailureAbortsPurgeWithoutComplete() throws Exception {
+		seedFullSession(SESSION_A, "run-a", "call-a");
+		this.fixture.fake.clusterMode = true;
+		RedisClusterNode m1 = this.fixture.fake.addClusterMaster("10.0.0.1", 7001);
+		RedisClusterNode m2 = this.fixture.fake.addClusterMaster("10.0.0.2", 7001);
+		this.fixture.fake.assignToMaster(m1, RunStore.CONTEXT_ARCHIVE_PREFIX + SESSION_A + ":1");
+		this.fixture.fake.assignToMaster(m2, RunStore.CONTEXT_ARCHIVE_PREFIX + SESSION_A + ":2");
+		this.fixture.fake.failNode = m2;
+
+		AiSessionPurgeService.PurgeResult result = this.fixture.service.purge(SESSION_A, "test");
+
+		assertThat(result.complete()).isFalse();
+		assertThat(result.phase()).isEqualTo("enumerate");
+		assertThat(this.fixture.fake.strings).containsKey(this.fixture.store.runKey("run-a"));
+		assertThat(this.fixture.fake.strings)
+			.containsKey(RunStore.CONTEXT_ARCHIVE_PREFIX + SESSION_A + ":1");
+		assertThat(this.fixture.fake.clusterConnectionCloses).as("失败路径关闭 cluster 连接").hasValue(1);
 	}
 
 	// ── durable pending + 自动重试闭环 ────────────────────────────────────────

@@ -598,9 +598,10 @@ public class ConfirmGate {
 			// ===== I4：park 之后即时前端工具的到期收敛 =====
 			// 即时类前端工具（navigate_to 等）有回执上限；旧实现靠<b>等待线程</b>到期后写 TIMEOUT。
 			// park 后没有等待线程 ⇒ 条目会永远 PENDING。这里按 expiresAt 排一次收敛：
-			// 到点仍 PENDING ⇒ 写 TIMEOUT/FRONTEND_TIMEOUT + 发结局帧；<b>不触发续跑</b>
-			// （无人时不得继续下一段模型调用）。确认门无上限（timeoutSeconds == null）不排。
-			// 交还驱动租约：park 期间本进程不是驱动方；决策到达后触发方会重新抢租。
+			// 到点仍 PENDING ⇒ 写 TIMEOUT/FRONTEND_TIMEOUT + 发结局帧，并<b>派发一次续跑</b>让本轮收尾
+			// （到期是系统裁决；不派发会留下"没有驱动方也没有终帧"的悬轮）。
+			// 确认门无上限（timeoutSeconds == null）不排。
+			// 交还驱动租约：park 期间本进程不是驱动方；决策/到期触发方会重新抢租。
 			if (!confirm && timeoutSeconds != null) {
 				scheduleParkedFrontendExpiry(runId, pending, timeoutSeconds);
 			}
@@ -955,8 +956,12 @@ public class ConfirmGate {
 	 *
 	 * <p>park 把等待线程交还了，到期判定不能随之消失：即时类前端工具（有
 	 * {@code app.ai.hitl.frontend-tool-timeout} 上限）到点仍 {@code PENDING} ⇒ 走
-	 * {@link #expireFrontend}（{@code TIMEOUT} + 结局帧 + 落库），但<b>不触发续跑</b> ——
-	 * 无人时不得替用户继续下一段模型调用；轮保持 {@code SUSPENDED}，由下一次交互/启动扫描推进。
+	 * {@link #expireFrontend}（{@code TIMEOUT} + 结局帧 + 落库），并<b>派发一次续跑</b>。
+	 *
+	 * <p>为什么必须派发：到期是<b>系统裁决</b>（不是"无人时替用户继续"）—— 条目已收敛，这一轮如果
+	 * 既不驱动也不终帧，用户只会看到一张超时卡、永远等不到回答（E2E S-09 的契约是"卡收敛为终态、
+	 * 轮次继续到 done"）。派发与决策/回灌同一条有界通路（租约、池饱和重试、跨实例恢复都不变），
+	 * park 仍成立：不驻留线程，恢复依据全在 Redis。
 	 */
 	private void scheduleParkedFrontendExpiry(String runId, PendingToolCall pending, int timeoutSeconds) {
 		long atMs = pending.getAtMs() == null || pending.getAtMs() <= 0 ? System.currentTimeMillis() : pending.getAtMs();
@@ -976,7 +981,10 @@ public class ConfirmGate {
 					AiTrace.eventOn(runId, snapshotSessionId(runId), "frontend_parked_expired", "toolCallId",
 							toolCallId, "tool", toolName, "timeoutS", timeoutSeconds);
 					log.info("park 后的前端回执到期，条目已收敛 runId={} toolCallId={} tool={} timeoutS={}"
-							+ "（不触发续跑；轮保持 SUSPENDED）", runId, toolCallId, toolName, timeoutSeconds);
+							+ "（派发一次续跑：轮次必须继续收尾，不能停在「没有驱动方也没有终帧」）",
+							runId, toolCallId, toolName, timeoutSeconds);
+					// 到期 = 系统裁决：条目已收敛，这一轮必须继续；与决策/回灌同一条有界派发。
+					triggerResume(runId, false, true);
 				}
 				catch (RuntimeException ex) {
 					log.warn("park 后的前端回执到期收敛失败 runId={} toolCallId={}：{}", runId, toolCallId,

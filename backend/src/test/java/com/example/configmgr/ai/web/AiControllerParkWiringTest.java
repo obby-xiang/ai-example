@@ -5,6 +5,7 @@ import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.RedisAvailability;
 import com.example.configmgr.ai.gate.ConfirmGate;
 import com.example.configmgr.ai.run.CancellationRegistry;
+import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.ResumeService;
 import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunSnapshot;
@@ -24,6 +25,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -43,7 +45,8 @@ import static org.mockito.Mockito.when;
  * <li><b>空写出器不再冒充活轮</b>：会话门判死只看<b>真实订阅</b>与<b>业务活动锚点</b>（读侧 touch）。
  * 旧实现把 {@code registry.find != null} 与 {@code ai:beat} 心跳当活证据 —— park 的轮既没有等待线程
  * 也没有心跳，却会因此永久 409；</li>
- * <li><b>挂起态 reattach 回放后收尾</b>：park 的轮没有驱动方，连接不能悬着等人；</li>
+ * <li><b>挂起态 reattach 回放后收尾</b>：park 的轮没有驱动方，<b>仍在等人（有 PENDING 条目）</b>时
+ * 连接不能悬着；条目已全部结算 ⇒ 连接保留（续跑在即，终帧要从这条连接到达）；</li>
  * <li><b>park 后主动 stop 能推动收敛</b>：{@code POST /cancel/{runId}} 对 SUSPENDED 轮触发一次
  * 死卡兜底派发（续跑侧看到取消标志 → 收敛 CANCELLED）。</li>
  * </ol>
@@ -100,6 +103,9 @@ class AiControllerParkWiringTest {
 	void suspendedReattachReplaysThenClosesWhenParkIsEnabled() {
 		RunSnapshot snapshot = snapshot(RunSnapshot.SUSPENDED);
 		when(this.runStore.get(RUN_ID)).thenReturn(snapshot);
+		// 仍在等人（还有 PENDING 条目）⇒ park 的收流语义成立；条目全部结算时连接必须保留
+		// （覆盖在 AiControllerEventsParkCloseTest：续跑的终帧只能从这条连接到达）。
+		when(this.runStore.pendings(RUN_ID)).thenReturn(List.of(pending(PendingToolCall.PENDING)));
 		when(this.runRegistry.of(RUN_ID)).thenReturn(this.out);
 		when(this.out.replayAndAttach(any(), any(), anyBoolean())).thenReturn(3);
 		when(this.out.completeSubscriptions()).thenReturn(1);
@@ -166,6 +172,15 @@ class AiControllerParkWiringTest {
 		ObjectProvider<T> provider = mock(ObjectProvider.class);
 		when(provider.getIfAvailable()).thenReturn(bean);
 		return provider;
+	}
+
+	private static PendingToolCall pending(String status) {
+		PendingToolCall pending = new PendingToolCall();
+		pending.setToolCallId("call-park-wiring-1");
+		pending.setName("navigate_to");
+		pending.setKind(PendingToolCall.KIND_FRONTEND);
+		pending.setStatus(status);
+		return pending;
 	}
 
 }

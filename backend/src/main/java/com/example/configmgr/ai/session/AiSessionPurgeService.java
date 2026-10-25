@@ -11,7 +11,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.memory.ChatMemoryRepository;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.connection.DataType;
-import org.springframework.data.redis.core.Cursor;
 import org.springframework.data.redis.core.ScanOptions;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
@@ -605,19 +604,16 @@ public class AiSessionPurgeService {
 		String prefix = RunStore.CONTEXT_ARCHIVE_PREFIX + sessionId + ":";
 		String pattern = RunStore.CONTEXT_ARCHIVE_PREFIX + escapeGlob(sessionId) + ":*";
 		List<String> archives = new ArrayList<>();
-		try (Cursor<String> cursor = this.redis.scan(ScanOptions.scanOptions().match(pattern).count(256).build())) {
-			if (cursor == null) {
-				return archives;
+		// 逐 master 扫描（standalone 走单连接）；任一节点失败上抛，枚举阶段整体中止。
+		List<String> scanned = RedisClusterScanSupport.scan(this.redis,
+				ScanOptions.scanOptions().match(pattern).count(256).build(), 0);
+		for (String key : scanned) {
+			if (key == null || !key.startsWith(prefix)) {
+				continue;
 			}
-			while (cursor.hasNext()) {
-				String key = cursor.next();
-				if (key == null || !key.startsWith(prefix)) {
-					continue;
-				}
-				String turnNo = key.substring(prefix.length());
-				if (TURN_NO.matcher(turnNo).matches()) {
-					archives.add(key);
-				}
+			String turnNo = key.substring(prefix.length());
+			if (TURN_NO.matcher(turnNo).matches()) {
+				archives.add(key);
 			}
 		}
 		return archives;

@@ -2508,10 +2508,11 @@ try {
     if ($conf23.accepted -ne $true) { throw "TC23 confirm 未 accepted：$($conf23 | ConvertTo-Json -Compress -Depth 5)" }
     if ($null -eq $conf23.resumeTriggered) { throw 'TC23 confirm 响应缺 resumeTriggered（A10 契约字段）' }
     if ([string]::IsNullOrWhiteSpace([string]$conf23.resumeOutcome)) { throw 'TC23 confirm 响应缺 resumeOutcome（A10 契约字段）' }
-    if ($conf23.resumeTriggered -ne $false -or $conf23.resumeOutcome -ne 'WOKE_IN_PROCESS_GATE') {
-        throw "TC23 进程存活时应 woke=true 且不触发死卡兜底续跑，实际 resumeTriggered=$($conf23.resumeTriggered)/$($conf23.resumeOutcome)"
+    # park 没有人工等待线程：决策应走有界续跑派发，不能声称唤醒了进程内等待方。
+    if ($conf23.resumeTriggered -ne $true -or $conf23.resumeOutcome -ne 'SCHEDULED') {
+        throw "TC23 park 下应由决策触发有界续跑，实际 resumeTriggered=$($conf23.resumeTriggered)/$($conf23.resumeOutcome)"
     }
-    if ($conf23.wokeInProcessGate -ne $true) { throw 'TC23 确认未唤醒同进程等待方' }
+    if ($conf23.wokeInProcessGate -ne $false) { throw 'TC23 park 语义下不应声称唤醒进程内等待方（没有等待线程）' }
 
     # ⑥ 收敛：重挂回放整轮状态帧（confirm_decision → tool_result → done），台账里该条目已执行
     $after23 = New-Object System.Collections.ArrayList

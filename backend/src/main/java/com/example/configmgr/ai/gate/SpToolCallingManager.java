@@ -388,6 +388,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 		// retryable=true），既不出现在 suspended 帧里，也不会被 arm 成闸门、不会发 confirm_request。
 		List<PendingToolCall> suspended = new ArrayList<>(pendings.size());
 		Set<String> preflightBlocked = new HashSet<>();
+		Set<String> frontendRejected = new HashSet<>();
 		for (PendingToolCall pending : pendings) {
 			if (!budgetArmed && this.preflight != null && PendingToolCall.KIND_CONFIRM.equals(pending.getKind())
 					&& ToolPreflightService.supports(pending.getName())
@@ -416,6 +417,18 @@ public class SpToolCallingManager implements ToolCallingManager {
 					continue;
 				}
 				pending.setPreflight(report.asMap());
+			}
+			// 前端通道条目的入参复核：与确认门预检<b>同一位置</b> —— 必须在 suspended 公告与请求帧之前。
+			// 复核对入参是确定性的；放到 await 里再判，"不挂起、不下发"的契约会被
+			// publishRequestsForParkedBatch 打破（非法 schema 先拿到 suspended + frontend_tool_request，
+			// 随后才被判 REJECTED_ARGUMENTS —— E2E GF6/G-13/X-10 的实测帧序正是如此）。
+			if (!budgetArmed && PendingToolCall.KIND_FRONTEND.equals(pending.getKind())) {
+				FrontendToolGuard.Verdict verdict = inspectFrontendArguments(pending);
+				if (verdict != null && !verdict.accepted()) {
+					settleFrontendRejected(runId, pending, verdict);
+					frontendRejected.add(pending.getToolCallId());
+					continue;
+				}
 			}
 			suspended.add(pending);
 		}
@@ -488,6 +501,17 @@ public class SpToolCallingManager implements ToolCallingManager {
 					traceToolSkipped(runId, snapshot.getSessionId(), pending, ToolOutcome.CODE_TOOL_BUDGET_EXHAUSTED);
 					log.warn("轮内上下文预算已耗尽，本调用不再执行 runId={} tool={} toolCallId={}", runId,
 							pending.getName(), pending.getToolCallId());
+					continue;
+				}
+				// 挂起前被入参闸门拒掉的条目：没有卡、没有请求帧，只有一张「未执行」的结局帧
+				// （与预检未通过同形的两条帧：tool_start → frontend_tool_result）。
+				if (frontendRejected.contains(pending.getToolCallId())) {
+					String text = frameText(pending.getResultText());
+					out.toolStart(pending);
+					out.frontendToolResult(pending, false, text);
+					responses.add(new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
+							modelData(pending, text)));
+					traceToolSkipped(runId, snapshot.getSessionId(), pending, pending.effectiveCode());
 					continue;
 				}
 				// F5：预检未通过的条目没有确认卡（没有 suspended/confirm_request），只有一张
@@ -1230,8 +1254,19 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 * <p>结局帧用 {@code frontend_tool_result}（ok=false）：这次调用走的是前端通道且就此收敛，
 	 * 与"前端超时"（{@code FRONTEND_TIMEOUT}）同帧型 —— 前端不必为"没被问到的那次调用"再解析
 	 * 一种新帧；待决条目不留在 {@code PENDING}（否则续跑会把它当成"等人/等前端"）。
+	 *
+	 * <p>正常路径（挂起前的预检）只做 {@link #settleFrontendRejected}（写条目 + 日志），帧由
+	 * 执行循环按既有帧序发；本方法保留给 {@link #awaitFrontend} 的兜底复查（预检后入参不会变，
+	 * 走到这里说明装配被人为改动，仍要收敛成同一结局）。
 	 */
 	private String rejectFrontendArguments(String runId, PendingToolCall pending, FrontendToolGuard.Verdict verdict) {
+		String text = settleFrontendRejected(runId, pending, verdict);
+		this.registry.of(runId).frontendToolResult(pending, false, text);
+		return text;
+	}
+
+	/** 入参拒绝的<b>结算</b>（状态/码/原因/结果文本 + 落库 + WARN）；不发帧、不认领、不记台账。 */
+	private String settleFrontendRejected(String runId, PendingToolCall pending, FrontendToolGuard.Verdict verdict) {
 		String text = verdict.render();
 		pending.setStatus(PendingToolCall.REJECTED_ARGUMENTS);
 		pending.setOutcome(ToolOutcome.REJECTED.wire());
@@ -1242,7 +1277,6 @@ public class SpToolCallingManager implements ToolCallingManager {
 		pending.setResolvedAtMs(System.currentTimeMillis());
 		pending.setResultText(text);
 		this.store.putPending(runId, pending);
-		this.registry.of(runId).frontendToolResult(pending, false, text);
 		log.warn("前端工具入参被安全闸拒绝 runId={} tool={} code={}（未挂起、未下发、未执行）：{}",
 				runId, pending.getName(), verdict.code(), verdict.reasons());
 		return text;

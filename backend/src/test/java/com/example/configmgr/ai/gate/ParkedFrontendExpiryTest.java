@@ -36,7 +36,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -49,9 +49,11 @@ import static org.mockito.Mockito.when;
  * 没有等待线程 ⇒ 条目会<b>永远 PENDING</b>，既不收敛也不报错。
  *
  * <h2>本批口径</h2>
- * park 时按 {@code expiresAt} 排一次到期收敛：到点把条目写成 {@code TIMEOUT}（结局未知）
- * 并发结局帧；<b>但不触发续跑</b> —— 无人时不得继续下一段模型调用。决策/回灌之后由
- * 用户下一次动作（或启动扫描）再推进。
+ * park 时按 {@code expiresAt} 排一次到期收敛：到点把条目写成 {@code TIMEOUT}（结局未知）、
+ * 发结局帧，并<b>派发一次续跑</b>（与决策/回灌同一条有界派发：租约、池饱和重试、跨实例恢复都不变）。
+ * 理由是到期本身就是<b>系统裁决</b>——条目已收敛、这一轮不能停在"没有驱动方也没有终帧"：
+ * E2E S-09 的契约是"卡收敛为终态、<b>轮次继续到 done</b>"，否则用户只看到一张超时卡、
+ * 永远等不到回答。park 仍然成立（不驻留线程，续跑走 Redis 状态 + 派发）。
  */
 class ParkedFrontendExpiryTest {
 
@@ -104,7 +106,7 @@ class ParkedFrontendExpiryTest {
 	}
 
 	@Test
-	void parkedFrontendCardConvergesToTimedOutWithoutDrivingTheModel() {
+	void parkedFrontendCardConvergesToTimedOutAndDispatchesTheResume() {
 		awaitTrue(() -> this.store.archivedTypes(RUN_ID).contains("frontend_tool_result"),
 				5000, "park 后的即时前端工具必须在 expiresAt 到期收敛并发结局帧（不能永远 PENDING）");
 
@@ -115,11 +117,12 @@ class ParkedFrontendExpiryTest {
 		assertThat(expired.getReason()).isEqualTo("FRONTEND_TIMEOUT");
 		assertThat(this.store.archivedTypes(RUN_ID)).as("结局帧入档（重挂可见）")
 			.contains("frontend_tool_result");
-		assertThat(this.store.archivedTypes(RUN_ID)).as("到期收敛不是轮终态，也不继续模型")
+		assertThat(this.store.archivedTypes(RUN_ID)).as("到期收敛本身不是轮终态（终帧由续跑产出）")
 			.doesNotContain("done", "error");
-		assertThat(this.store.get(RUN_ID).getStatus()).as("轮仍是 SUSPENDED（等人/等下一次动作）")
+		assertThat(this.store.get(RUN_ID).getStatus()).as("派发不改变快照状态（驱动方负责翻 RUNNING）")
 			.isEqualTo(RunSnapshot.SUSPENDED);
-		verify(this.resumeService, never()).resume(anyString());
+		// 到期是系统裁决：条目已收敛，这一轮必须继续收尾（E2E S-09 的"轮次继续到 done"）
+		verify(this.resumeService, timeout(3000)).resume(RUN_ID);
 	}
 
 	// ── 辅助 ────────────────────────────────────────────────────────────────
