@@ -30,6 +30,8 @@ import java.util.List;
 import java.util.Map;
 
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -262,20 +264,16 @@ class AiControllerHistoryPayloadTest {
 	 * L-78（真机 E2E 批② NFEZUI 域 Z-06 转正）：{@code resultView} 是**帧内字段**，
 	 * 历史重建此前只带 {@code toolCallStates} ⇒ 刷新后卡面回落旧文本形态。
 	 *
-	 * <p>修法 = 历史侧**按工具名从注册表重新派生**（`ToolResultViewProvider` 的契约本身就是
-	 * "确定性构造 + 结构化数据源"）：不新增任何持久面（🏛️「AI 对话数据不落库」），
-	 * 读侧投影与帧侧同源同形。只对**成功结局**出视图（与帧路径 `resultViewOf` 同口径）。
+	 * <p>修法 = 历史侧**按工具名从注册表重新派生**：不新增任何持久面（🏛️「AI 对话数据不落库」），
+	 * 读侧投影与帧侧同形。只对**成功结局**出视图（与帧路径 `resultViewOf` 同口径）。
+	 *
+	 * <p>Task 6（BZ-33）：历史侧的行值取自<b>当时那次调用的结果原文</b>，
+	 * 不再重取实时库 —— 本用例故意让实时库返回空列表，行仍必须来自历史文本。
 	 */
 	@Test
 	void historyDerivesResultViewByToolName() throws Exception {
-		Task task = new Task();
-		task.setId(7L);
-		task.setType(Task.TaskType.IMPORT);
-		task.setTitle("发布用例");
-		task.setCurrentStep("PUBLISH");
-		task.setStatus(Task.TaskStatus.ACTIVE);
 		TaskService taskService = mock(TaskService.class);
-		when(taskService.findAll()).thenReturn(List.of(task));
+		when(taskService.findAll()).thenReturn(List.of());
 
 		AiController controller = controller(this.availability);
 		ReflectionTestUtils.setField(controller, "resultViewProviders",
@@ -284,7 +282,8 @@ class AiControllerHistoryPayloadTest {
 
 		ToolResponseMessage ok = ToolResponseMessage.builder()
 			.responses(List.of(new ToolResponseMessage.ToolResponse("tc-1", "list_tasks",
-					com.example.configmgr.ai.tool.ToolResultEnvelope.ok("- #7 [IMPORT] 发布用例", "{}").toJson())))
+					com.example.configmgr.ai.tool.ToolResultEnvelope.ok(
+							"- #7 [IMPORT] 发布用例 步骤:PUBLISH 状态:ACTIVE", "{}").toJson())))
 			.build();
 		when(this.chatMemory.get("s-1")).thenReturn(List.of(ok));
 
@@ -294,6 +293,80 @@ class AiControllerHistoryPayloadTest {
 			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].resultView.id").value("rv-tc-1"))
 			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].resultView.columns[0].key").value("id"))
 			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].resultView.data.inline.rows[0].id").value(7));
+	}
+
+	/**
+	 * BZ-33（S3）：<b>历史 {@code list_tasks} 不得被当前库改写</b>。
+	 *
+	 * <p>缺陷（修复前实测）：历史投影走的是与实时帧同一个 {@code build}，
+	 * 而它只做 {@code taskService.findAll()} —— {@code /history} 因此每次刷新都用<b>今天</b>的任务表
+	 * 重造归档卡面：任务被改名/推进/删除后，归档表格与同轮 assistant 文本自相矛盾；
+	 * {@code meta.truncated{shownRows,totalRows}} 也跟着重算，"共 N 条"可变成与当时不同的数字。
+	 *
+	 * <p>判据：实时库返回一条<b>完全不同</b>的任务（#9，新标题），历史文本记的是当时的 #7；
+	 * 卡面必须显示 #7 的原标题，且 {@code findAll()} <b>一次都不许被调用</b>。
+	 */
+	@Test
+	void historyListViewKeepsTheResultOfThatMomentNotTheCurrentDatabase() throws Exception {
+		Task renamedToday = new Task();
+		renamedToday.setId(9L);
+		renamedToday.setType(Task.TaskType.EXPORT);
+		renamedToday.setTitle("今天的标题");
+		renamedToday.setCurrentStep("EXPORT");
+		renamedToday.setStatus(Task.TaskStatus.COMPLETED);
+		TaskService taskService = mock(TaskService.class);
+		when(taskService.findAll()).thenReturn(List.of(renamedToday));
+
+		AiController controller = controller(this.availability);
+		ReflectionTestUtils.setField(controller, "resultViewProviders",
+				List.of(new ListTasksResultViewProvider(taskService, new AiProperties())));
+		MockMvc mvc = MockMvcBuilders.standaloneSetup(controller).build();
+
+		String historicalText = "- #7 [IMPORT] 当时的标题 步骤:PRECHECK 状态:ACTIVE\n"
+				+ "- #8 [EXPORT] 另一条 步骤:SELECT_DEFS 状态:ACTIVE";
+		ToolResponseMessage ok = ToolResponseMessage.builder()
+			.responses(List.of(new ToolResponseMessage.ToolResponse("tc-1", "list_tasks",
+					com.example.configmgr.ai.tool.ToolResultEnvelope.ok(historicalText, "{}").toJson())))
+			.build();
+		when(this.chatMemory.get("s-1")).thenReturn(List.of(ok));
+
+		mvc.perform(get("/api/ai/history/s-1"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].resultView.data.inline.rows[0].id").value(7))
+			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].resultView.data.inline.rows[0].title")
+				.value("当时的标题"))
+			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].resultView.data.inline.rows[0].step")
+				.value("PRECHECK"))
+			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].resultView.data.inline.rows[1].id").value(8));
+
+		verify(taskService, never()).findAll();
+	}
+
+	/**
+	 * BZ-33 的另一面：历史文本不是当前行格式（旧会话/其它形态）时<b>不出视图</b>，
+	 * 也不得偷偷回落到实时库 —— 宁可让卡面回到原始文本形态，也不能用今天的库冒充当时的结果。
+	 */
+	@Test
+	void unparseableHistoryTextYieldsNoViewInsteadOfLiveRows() throws Exception {
+		TaskService taskService = mock(TaskService.class);
+		when(taskService.findAll()).thenReturn(List.of());
+
+		AiController controller = controller(this.availability);
+		ReflectionTestUtils.setField(controller, "resultViewProviders",
+				List.of(new ListTasksResultViewProvider(taskService, new AiProperties())));
+		MockMvc mvc = MockMvcBuilders.standaloneSetup(controller).build();
+
+		ToolResponseMessage ok = ToolResponseMessage.builder()
+			.responses(List.of(new ToolResponseMessage.ToolResponse("tc-1", "list_tasks",
+					com.example.configmgr.ai.tool.ToolResultEnvelope.ok("- #7 [IMPORT] 旧形态只有三列", "{}").toJson())))
+			.build();
+		when(this.chatMemory.get("s-1")).thenReturn(List.of(ok));
+
+		mvc.perform(get("/api/ai/history/s-1"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].resultView").doesNotExist());
+
+		verify(taskService, never()).findAll();
 	}
 
 	/** 失败结局不出视图（与帧路径同口径：视图是"成功结果"的投影，失败走旧卡面）。 */

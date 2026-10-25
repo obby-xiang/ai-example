@@ -77,8 +77,22 @@ public class PublishJobRunner {
     private final JobTerminalWriter terminalWriter;
     private final JobHeartbeatRegistry heartbeatRegistry;
 
+    /** 作业级 issue 的 {@code def_code} 哨兵（{@code validation_issues.def_code} 为 NOT NULL；同 ExportJobRunner 口径）。 */
+    private static final String JOB_LEVEL_DEF_CODE = "-";
+
     /** 发布入口：作业状态在数据面事务外编排（RUNNING 独立事务 + 失败补记 + 终态）。 */
     public void run(Job job) {
+        // BZ-01 零数据不假成功：零条目时 doPublish 的循环一次都不跑，totalErrors 恒 0 ⇒ 旧实现报
+        // COMPLETED 并把任务推进到 COMPLETED/PUBLISH（零暂存仍可发布的 FE-49 入口，
+        // 之后任何新作业都被 TASK_FINALIZED 拒绝）。这里显式收敛 FAILED + 作业级 issue。
+        if (taskItemRepository.findByTaskIdOrderBySortOrder(job.getTaskId()).isEmpty()) {
+            saveConflictIssue(job, JOB_LEVEL_DEF_CODE, null,
+                    "任务 #" + job.getTaskId() + " 没有任何配置项（0 条目），发布作业没有可发布的数据，作业未成功");
+            terminalWriter.complete(job, Job.JobStatus.FAILED, 1, 0, 0, 0,
+                    Map.of("jobId", job.getId(), "jobType", "PUBLISH",
+                            "status", Job.JobStatus.FAILED, "errors", 1));
+            return;
+        }
         progressService.markRunning(job.getId(), 0);
 
         PublishOutcome outcome = null;

@@ -20,13 +20,15 @@ import static org.mockito.Mockito.when;
  * <p>判据：
  * <ul>
  * <li>只认领 {@code list_tasks}，其余工具一律不认（缺视图 = 旧卡面）；</li>
- * <li>行来自服务层<b>结构化数据</b>（不是把结果文本反解回来）；</li>
+ * <li>实时帧的行来自服务层<b>结构化数据</b>（不是把结果文本反解回来）；归档通道见下。</li>
  * <li>行数超过工具自身上限（20）⇒ {@code status=partial} + {@code meta.truncated}；</li>
  * <li>零任务 ⇒ {@code status=empty} + {@code empty.text}；</li>
  * <li>取数异常 ⇒ 返回 null（视图构造失败不能拖垮工具执行/帧）。</li>
  * </ul>
  *
- * <p>kill：把 provider 改成解析结果文本、或去掉截断三件套、或让异常穿出，本类必红。
+ * <p>kill：把 provider 的<b>实时帧</b>分支改成解析结果文本、或去掉截断三件套、或让异常穿出，本类必红。
+ * （归档分支的反解是 Task 6 / BZ-33 的另一条通道，用例见 {@link ListTasksHistoryProjectionTest}：
+ * 归档不许查当前的库，实时帧不许反解文本。）
  */
 class ListTasksResultViewProviderTest {
 

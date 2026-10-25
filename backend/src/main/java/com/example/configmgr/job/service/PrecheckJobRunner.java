@@ -26,6 +26,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.util.*;
 
@@ -67,6 +69,10 @@ public class PrecheckJobRunner {
         final Long jobId = job.getId();
         final Long taskId = job.getTaskId();
 
+        // BZ-02 回滚收敛（与 ExportJobRunner 同款）：terminalWriter.complete 走 afterCommit，
+        // 事务回滚时终态写永不执行 ⇒ 作业停在 RUNNING 挡重跑，直到看门狗 30min 上限。
+        registerRollbackConvergence(job);
+
         boolean cancelled = false;
         int totalErrors = 0;
         int totalWarnings = 0;
@@ -85,6 +91,16 @@ public class PrecheckJobRunner {
         Map<String, Map<String, Map<String, Object>>> fingerprintSummary = new LinkedHashMap<>();
 
         var items = taskItemRepository.findByTaskIdOrderBySortOrder(taskId);
+
+        // BZ-01 零数据不假成功：零条目时 totalErrors 恒 0 ⇒ 旧实现报 COMPLETED 且 errorCount==0，
+        // 恰好满足 precheckConflict 的"预检查已通过"判据（等于把"什么都没校验"当放行凭证）。
+        if (items.isEmpty()) {
+            issueRepository.save(jobLevelIssue(jobId, taskId));
+            terminalWriter.complete(job, Job.JobStatus.FAILED, 1, 0, 0, 0,
+                    doneEvent(job, Job.JobStatus.FAILED, 1));
+            return;
+        }
+
         List<String> defCodes = items.stream().map(i -> i.getDefCode()).toList();
         List<String> sorted = dependencyResolver.sort(defCodes);
 
@@ -333,6 +349,42 @@ public class PrecheckJobRunner {
     private Map<String, Object> doneEvent(Job job, Job.JobStatus status, int errors) {
         return Map.of("jobId", job.getId(), "jobType", "PRECHECK",
                 "status", status, "errors", errors);
+    }
+
+    /** 作业级 issue 的 {@code def_code} 哨兵（{@code validation_issues.def_code} 为 NOT NULL；同 ExportJobRunner 口径）。 */
+    private ValidationIssue jobLevelIssue(Long jobId, Long taskId) {
+        ValidationIssue issue = new ValidationIssue();
+        issue.setJobId(jobId);
+        issue.setDefCode("-");
+        issue.setSeverity(ValidationIssue.Severity.ERROR);
+        issue.setMessage("任务 #" + taskId + " 没有任何配置项（0 条目），预检查没有可校验的数据，作业未成功");
+        return issue;
+    }
+
+    /**
+     * 回滚收敛（BZ-02，与 {@link ExportJobRunner} 同款）：数据面事务非提交结局时补写 FAILED 终态。
+     *
+     * <p>{@link JobTerminalWriter#complete} 把终态登记在 {@code afterCommit}，回滚时那次登记永不执行；
+     * 进度写（{@code REQUIRES_NEW}）却已独立提交 ⇒ 作业以 RUNNING 悬置到看门狗 30min 上限。
+     * 补写走 {@code completeNow}（{@code finish} 的条件 UPDATE，先到者胜），不覆盖取消/既有终态，
+     * 条目由 {@code finish} 的 FAILED 分支收敛。
+     */
+    private void registerRollbackConvergence(Job job) {
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCompletion(int status) {
+                if (status == TransactionSynchronization.STATUS_COMMITTED) {
+                    return;
+                }
+                log.warn("预检查作业 #{} 的数据面事务回滚/提交失败，补写 FAILED 终态（避免停在 RUNNING 挡重跑）",
+                        job.getId());
+                terminalWriter.completeNow(job, Job.JobStatus.FAILED, 1, 0, 0, 0,
+                        doneEvent(job, Job.JobStatus.FAILED, 1));
+            }
+        });
     }
 
     private String buildRowKey(Map<String, Object> row, List<ConfigField> keyFields) {

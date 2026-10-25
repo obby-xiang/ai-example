@@ -250,10 +250,9 @@ public class AiController {
 	/**
 	 * L-78（真机 E2E 批② NFEZUI 域 Z-06）：历史面的**结果视图投影器**（与帧面同一批 Bean）。
 	 *
-	 * <p>为什么是"读侧重算"而不是"补持久字段"：`resultView` 是 UI 通道的帧内字段，
-	 * {@link com.example.configmgr.ai.resultview.ToolResultViewProvider} 的契约本来就是
-	 * "确定性构造 + 结构化数据源（禁反解 resultText）"—— 同一份真值的另一个投影，
-	 * 历史侧按工具名重建即可，不必往任何持久面（含 Redis 对话面）补数据（🏛️「AI 对话数据不落库」）。
+	 * <p>`resultView` 分两种通道：实时帧仍由结构化数据源确定性构造；归档历史保留当时的结果原文，
+	 * 可解析时才重建视图，解析失败则保留原文，绝不改用当前数据库重算历史。这样不必往
+	 * 任何持久面（含 Redis 对话面）补数据，也不会用今天的任务状态改写过去。
 	 *
 	 * <p>字段注入的理由同既有各组件：构造器签名不变 ⇒ 既有 {@code new AiController(...)} 用例零触碰；
 	 * 未注入时历史载荷**不产** {@code resultView} 键（旧形态逐字不变）。
@@ -1470,6 +1469,11 @@ public class AiController {
 	 * ① 只对**成功结局**出视图 —— 失败/取消的卡面本来就该走旧形态（"视图是成功结果的投影"）；
 	 * ② 认领按工具名，投影器异常一律吞掉（展示增强不得让 {@code /history} 500）；
 	 * ③ 返回 {@code null} 时不写键 ⇒ 旧载荷形状逐字不变。
+	 *
+	 * <p><b>与帧路径唯一的差别</b>（Task 6 / BZ-33）：这里显式标 {@code historical=true}。
+	 * 归档是"重放"，不允许再查一次业务库 —— 否则刷新后卡面显示的是今天的任务/数据，
+	 * 与同轮 assistant 文本和历史"共 N 条"口径自相矛盾（旧实现每次 {@code /history} 都为每条历史
+	 * {@code list_tasks} 重跑一次 {@code taskService.findAll()}）。
 	 */
 	private Map<String, Object> historyResultView(ToolResponseMessage.ToolResponse response) {
 		if (this.resultViewProviders.isEmpty() || response.name() == null || response.id() == null) {
@@ -1484,8 +1488,10 @@ public class AiController {
 				continue;
 			}
 			try {
+				// Task 6 / BZ-33：历史是"重放"，不是"重新查库"。投影器据此改用那次调用的结果原文，
+				// 不得用当前业务库改写归档卡面（旧实现每次 /history 都重跑 taskService.findAll()）。
 				com.example.configmgr.ai.resultview.ResultView view = provider.build(response.id(),
-						response.name(), resultText);
+						response.name(), resultText, true);
 				return view == null ? null : view.toMap();
 			}
 			catch (RuntimeException ex) {

@@ -164,6 +164,31 @@ public class AiTools {
      */
     public static final int LIST_TASKS_MAX_ROWS = 20;
 
+    /**
+     * {@code list_tasks} 结果行格式（{@code - #7 [EXPORT] 标题 步骤:SELECT_DEFS 状态:ACTIVE}）。
+     *
+     * <p><b>为什么把格式点亮出来</b>：历史归档的 {@code list_tasks} 卡面必须显示<b>当时</b>的结果
+     * （BZ-33：{@code /history} 曾用当前任务表重造卡面，刷新即与同轮文本自相矛盾），
+     * 而当时那次调用的唯一持久事实就是这段回填文本 —— 归档投影按下面这组标记反解它。
+     * 因此格式一改，历史卡面的可解析性就跟着改：生产者（{@link #listTasks()}）与归档投影
+     * （{@code ListTasksResultViewProvider}）必须共用这组常量，不得各写一份字面量。
+     */
+    public static final String LIST_TASKS_ROW_PREFIX = "- #";
+
+    /** 行内的步骤标记（标题之后、状态之前）。 */
+    public static final String LIST_TASKS_STEP_TOKEN = " 步骤:";
+
+    /** 行内的状态标记（行尾）。 */
+    public static final String LIST_TASKS_STATUS_TOKEN = " 状态:";
+
+    /** 零任务时的原文（归档投影据此识别"当时确实没有任务"的空态）。 */
+    public static final String LIST_TASKS_EMPTY_TEXT = "当前没有任务，可以创建一个新任务";
+
+    /** 超限告知的前缀与后缀（中间是总条数；归档投影据此还原"共 N 条"）。 */
+    public static final String LIST_TASKS_TOTAL_PREFIX = "（共 ";
+
+    public static final String LIST_TASKS_TOTAL_SUFFIX = " 条，仅显示前 " + LIST_TASKS_MAX_ROWS + " 条）";
+
     // 上限的**调用前**告知：模型据此知道本工具不是"全量返回"，避免把截断后的列表当成任务的完整集合
     // （消除谎报族；数字规格清点 B-1.4）。描述里的"前 20 条"与"超出时给出总条数"是
     // 下方 limit(LIST_TASKS_MAX_ROWS) 与截断告知的现态口径 —— 三者必须同改（改值即改描述）。
@@ -174,13 +199,15 @@ public class AiTools {
     @ToolCategory(ToolMeta.Category.R)
     public String listTasks() {
         List<Task> tasks = taskService.findAll();
-        if (tasks.isEmpty()) return "当前没有任务，可以创建一个新任务";
+        if (tasks.isEmpty()) return LIST_TASKS_EMPTY_TEXT;
         String rows = tasks.stream().limit(LIST_TASKS_MAX_ROWS).map(t ->
-                String.format("- #%d [%s] %s 步骤:%s 状态:%s",
-                        t.getId(), t.getType(), t.getTitle(), t.getCurrentStep(), t.getStatus()))
+                String.format("%s%d [%s] %s%s%s%s%s",
+                        LIST_TASKS_ROW_PREFIX, t.getId(), t.getType(), t.getTitle(),
+                        LIST_TASKS_STEP_TOKEN, t.getCurrentStep(),
+                        LIST_TASKS_STATUS_TOKEN, t.getStatus()))
                 .collect(Collectors.joining("\n"));
         if (tasks.size() <= LIST_TASKS_MAX_ROWS) return rows;
-        return rows + "\n（共 " + tasks.size() + " 条，仅显示前 " + LIST_TASKS_MAX_ROWS + " 条）";
+        return rows + "\n" + LIST_TASKS_TOTAL_PREFIX + tasks.size() + LIST_TASKS_TOTAL_SUFFIX;
     }
 
     @Tool(name = "get_workspace_state", description = "获取当前工作区的任务状态快照",

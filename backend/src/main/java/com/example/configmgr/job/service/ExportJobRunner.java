@@ -111,6 +111,18 @@ public class ExportJobRunner {
 
         var items = taskItemRepository.findByTaskIdOrderBySortOrder(taskId);
 
+        // BZ-01 零数据不假成功：没有配置项时下面的循环一次都不跑，errorCount 恒 0 ⇒ 旧实现落到
+        // COMPLETED，并经 terminalWriter 的 successStep 把任务写成 COMPLETED/EXPORT；
+        // 之后 finalizedConflict 对任何新导出作业恒抛 TASK_FINALIZED（零数据的成功把任务永久锁死）。
+        // 这里显式收敛 FAILED + 作业级 issue：任务态由 applyJobOutcome(FAILED) 联动，不是 COMPLETED。
+        if (items.isEmpty()) {
+            saveIssue(jobId, JOB_LEVEL_DEF_CODE,
+                    "任务 #" + taskId + " 没有任何配置项（0 条目），导出作业没有可处理的数据，作业未成功");
+            terminalWriter.complete(job, Job.JobStatus.FAILED, 1, 0, 0, 0,
+                    doneEvent(job, Job.JobStatus.FAILED));
+            return;
+        }
+
         // ③ 分母下限：导出作业的行数能便宜地预估（各配置已发布行数合计），故开工即写终值，
         //    不再"边发现边长"——首配置收尾瞬间不会出现 progress==total 的 100% 闪现。
         int estimatedRows = items.stream()
