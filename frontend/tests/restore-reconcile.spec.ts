@@ -26,6 +26,12 @@ const api = vi.hoisted(() => ({
 }))
 
 vi.mock('@/api/ai', () => ({ aiApi: api }))
+// 收集期预热：用例内的动态 import（`freshStore()` / `mountPanel()`）在**首条用例**里要付
+// "首次 transform + 首次装配"的一次性成本 —— 空载 1.9–3.4s，并发满载可涨到十几秒，直接吃掉
+// 该用例自己的 timeout 预算（实测：首条超时、同文件后续用例 10–40ms 通过）。这里放到收集期
+// 付掉（收集不受单用例 timeout 约束），用例内动态 import 只剩重执行（~20ms）；断言与 timeout 不变。
+import '@/stores/ai'
+
 
 /** 手控 deferred：把 store 停在 runs/current 的 await 上，测试独占该窗口。 */
 function deferred<T>() {

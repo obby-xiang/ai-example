@@ -264,6 +264,7 @@
         "PROVIDER_GONE": "This endpoint has been deleted.",
         "PARAMS_LOCKED": "The current configuration does not allow adjusting parameters.",
         "INVALID_PARAM": "A parameter is out of range, or the default target is invalid. Check the range and reselect the provider in the Default model dropdown, then retry.",
+        "KEY_BOUND_TO_HOST": "This provider's API key is bound to its original host. Re-enter the key (or clear it first) when you change the host (scheme, domain or port).",
         "INVALID_MODEL": "Invalid model ID: it must not be empty or contain spaces.",
         "NETWORK_ERROR": "The backend is unreachable; make sure the service is running.",
         "UNKNOWN_ERROR": "Operation failed; please retry."

@@ -351,7 +351,44 @@ const importMode = ref<ImportMode>('MERGE')
 const publishPending = ref(false)
 
 const gridRefs: Record<string, GridApi> = {}
-const editorLoaded = new Set<string>()
+/**
+ * 编辑区当前内容的**来源**（按任务代次记账）。
+ *
+ * 为什么不是"载入过"的布尔：这里必须回答"表格里现在是什么字节"，否则两类失真无法区分：
+ * - `file` = 服务端文件字节（写回它可以覆盖同名文件，内容一致）；
+ * - `template` = 客户端空模板 —— 只有**确认过服务端没有该文件**时才允许写回，
+ *   否则就是把模板当内容覆盖真文件（换任务、文件清单晚到都会走到这里）。
+ * 代次写在记录里：旧代次的记录天然失效，不需要"谁去 delete 谁的标记"这种会误清新标记的操作。
+ */
+interface EditorState {
+  generation: number
+  source: 'file' | 'template'
+}
+const editorState = new Map<string, EditorState>()
+
+/** 该配置项的编辑区是否已按**当前代次**载入过内容。 */
+function editorReady(code: string): boolean {
+  return editorState.get(code)?.generation === taskGeneration
+}
+
+/**
+ * 任务代次（A→B 改绑 = 新一代）：在途的载入/写回结局一旦发现代次变了就作废。
+ *
+ * 为什么需要：`editorState` / `uploadedFiles` / `savedDefs` 是进程级状态，而任务绑定可以在
+ * **同一个组件实例**上换掉（`navigate_to` 只改路由 query）。不换代次，旧任务回来的文件清单、
+ * 载入完成标记、甚至整本工作簿字节都会落到新任务的页面上（A 的数据写进 B）。
+ */
+let taskGeneration = 0
+/**
+ * 当前任务的服务端文件清单是否读到（`GET /files`）。
+ *
+ * `false` 的含义是"**不知道**服务端有哪些文件"，不是"没有文件"：把它当空清单会让第 1 步
+ * 用客户端空模板 `PUT` 上去，直接覆盖服务端已有文件。所以它是**载入的前置条件**：
+ * 清单未知时 `loadEditors` 不构造模板（见 `ensureFileList`），写回闸也不放行（`flushEditors`）。
+ */
+const filesOk = ref(false)
+/** 文件清单的在途请求（单飞：清单只拉一次，载入/写回/重试共用同一笔）。 */
+let filesInFlight: Promise<boolean> | null = null
 /**
  * 作业跟踪 dispose 柄表（check / import / publish 三个 kind 可并存，R-148 B2 直调形态）。
  *
@@ -427,7 +464,10 @@ function fieldsOf(code: string): readonly ConfigField[] {
 function setGridRef(code: string, el: unknown): void {
   if (!el) {
     delete gridRefs[code]
-    editorLoaded.delete(code)
+    // 只摘同代次的记录：卸载发生在换任务之后时不得清掉新代次已载入的标记
+    if (editorState.get(code)?.generation === taskGeneration) {
+      editorState.delete(code)
+    }
     return
   }
   gridRefs[code] = el as GridApi
@@ -484,14 +524,36 @@ async function loadDefinitions(): Promise<void> {
   }
 }
 
+/**
+ * 加载任务详情 + 文件清单 + 作业/暂存面。
+ *
+ * **顺序纪律（C1 根面）**：文件清单必须在 `selectedDefs` 之前落定。`selectedDefs` 的赋值会
+ * 触发 watch → `loadEditors(true)`，而编辑区走"下载服务端文件"还是"构造空模板"取决于
+ * `uploadedFiles`。若先赋选中集再等清单，编辑区必然先构造出模板并置位"已载入"，
+ * 清单回来后**没有任何东西会重载它** ⇒ 第 1 步「下一步」就把模板 PUT 覆盖 B 的真实文件。
+ */
 async function loadTask(): Promise<void> {
   if (taskId.value === null) {
     return
   }
+  const generation = taskGeneration
+  let loaded: Task
   try {
-    task.value = await tasksApi.getTask(taskId.value)
+    loaded = await tasksApi.getTask(taskId.value)
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : t('views.import.msg.taskLoadFailed'))
+    if (generation === taskGeneration) {
+      ElMessage.error(error instanceof Error ? error.message : t('views.import.msg.taskLoadFailed'))
+    }
+    return
+  }
+  // 旧任务的详情晚到：不得覆盖新任务的标题/步骤/勾选（I5）
+  if (generation !== taskGeneration) {
+    return
+  }
+  task.value = loaded
+  // 清单先落定：编辑区的"文件 / 模板"分支只能基于已知清单决定
+  await ensureFileList()
+  if (generation !== taskGeneration) {
     return
   }
   selectedDefs.value = (task.value.items ?? []).map((item) => item.defCode)
@@ -512,29 +574,130 @@ async function loadTask(): Promise<void> {
     selectedDefs: [...selectedDefs.value],
     importMode: importMode.value
   })
-  await loadUploadedFiles()
   await resumeJobs()
+  if (generation !== taskGeneration) {
+    return
+  }
   if (stepIndex.value === 3) {
     await loadStaging()
   }
 }
 
-/** 已上传文件（UPLOAD 类型）→ 标签与编辑区内容来源。 */
-async function loadUploadedFiles(): Promise<void> {
+/**
+ * 已上传文件（UPLOAD 类型）→ 标签与编辑区内容来源。
+ *
+ * @returns 文件清单是否读到。`false` 时页面**不知道**服务端有哪些文件，写回闸必须关闭。
+ */
+async function loadUploadedFiles(): Promise<boolean> {
   if (taskId.value === null) {
-    return
+    filesOk.value = false
+    return false
   }
+  const generation = taskGeneration
   try {
     const files = await tasksApi.getFiles(taskId.value)
+    // 换任务期间回来的清单属于旧任务：不得挂到新任务的标签上
+    if (generation !== taskGeneration) {
+      return false
+    }
     for (const file of files) {
       if (file.fileType === 'UPLOAD') {
         uploadedFiles[file.defCode] = file.fileName ?? `${file.defCode}.xlsx`
         savedDefs.add(file.defCode)
       }
     }
+    filesOk.value = true
+    // 清单晚到（首次失败后补读成功 / 迟到的首次清单）：此前按"无文件"构造的模板不是服务端内容，
+    // 必须作废，等调用方按文件重载（`flushEditors` 会 `await loadEditors(true)`）。
+    for (const [code, state] of [...editorState]) {
+      if (state.generation === generation && state.source === 'template' && uploadedFiles[code] !== undefined) {
+        editorState.delete(code)
+      }
+    }
+    return true
   } catch {
-    // 文件列表失败不影响向导
+    // 文件列表失败不影响向导本身 —— 但"不知道有哪些文件"绝不能当成"没有文件"
+    if (generation === taskGeneration) {
+      filesOk.value = false
+    }
+    return false
   }
+}
+
+/**
+ * 保证文件清单已落定（单飞：并发调用共享同一笔请求）。
+ *
+ * 这是编辑区载入的**前置条件**：清单未知时不允许构造模板（否则模板会被当成内容写回）。
+ */
+async function ensureFileList(): Promise<boolean> {
+  if (filesOk.value) {
+    return true
+  }
+  if (filesInFlight !== null) {
+    return await filesInFlight
+  }
+  const run = loadUploadedFiles()
+  filesInFlight = run
+  try {
+    return await run
+  } finally {
+    if (filesInFlight === run) {
+      filesInFlight = null
+    }
+  }
+}
+
+/**
+ * 换任务（A→B）时的页面态复位。
+ *
+ * 与 `ExportWizardView#resetTaskScopedState` 同因同修：下列状态此前是**跨任务**的进程级状态。
+ * 同一路由记录下换成任务 B、而 B 有同名配置项时：
+ * 1. `editorState` 仍说"已载入" ⇒ 不重新载入，编辑区里还是 **A 的字节**；
+ * 2. `uploadedFiles` 仍是 A 的文件名 ⇒ 载入分支选错（去下载 B 根本没有的文件）；
+ * 3. 随后第 1 步的 `flushEditors` 把 A 的字节 `PUT /tasks/B/files/{code}` ⇒ **A 的数据写进 B**。
+ * 另外旧任务的作业跟踪（watcher）会继续按旧 jobId 取数、把旧作业的进度/终态写回本页。
+ */
+function resetTaskScopedState(): void {
+  taskGeneration += 1
+  filesOk.value = false
+  filesInFlight = null
+  editorLoadInFlight = null
+  for (const code of Object.keys(uploadedFiles)) {
+    delete uploadedFiles[code]
+  }
+  savedDefs.clear()
+  editorState.clear()
+  // 导入模式是任务设置（settingsJson）：不复位会让 B 继承 A 的模式（界面与 AI 上下文都错）
+  importMode.value = 'MERGE'
+  // 表格视口里显示的仍是上一个任务的内容：清空，B 的载入成功后才会有内容
+  for (const [code, grid] of Object.entries(gridRefs)) {
+    try {
+      grid.loadData(fieldsOf(code), [])
+    } catch {
+      // 引擎未就绪等情形：真正的载入由 loadEditors 覆盖，清屏失败不影响读闸
+    }
+  }
+  for (const dispose of [...jobWatchDisposes.values()]) {
+    dispose()
+  }
+  jobWatchDisposes.clear()
+  checkJob.value = null
+  importJob.value = null
+  publishJob.value = null
+  checkIssues.value = []
+  importIssues.value = []
+  publishIssues.value = []
+  checkChannel.value = null
+  importChannel.value = null
+  publishChannel.value = null
+  publishConflict.value = null
+  staging.value = []
+  stagingOpen.value = []
+  // 任务级 loading 标志（N1）：在途操作的 finally 有"仅同代次复位"的守卫，换任务后不会自己清；
+  // 不在这里复位，新任务的页面上就是永久转圈的按钮（保存草稿/刷新暂存/发布…直到刷新页面）。
+  busy.value = null
+  stagingLoading.value = false
+  publishPending.value = false
 }
 
 /** 恢复未完成的作业（刷新页面后仍能看到进度与明细）。 */
@@ -542,24 +705,36 @@ async function resumeJobs(): Promise<void> {
   if (taskId.value === null) {
     return
   }
+  const generation = taskGeneration
   const jobs = await jobsApi.listJobs(taskId.value).catch(() => [])
+  // 旧任务的作业列表晚到：不得挂到新任务的作业面板，更不得为新任务登记旧作业的 watcher（I5）
+  if (generation !== taskGeneration) {
+    return
+  }
   const latest = (type: 'PRECHECK' | 'IMPORT' | 'PUBLISH'): Job | undefined =>
     jobs.filter((job) => job.jobType === type)[0]
   const check = latest('PRECHECK')
   if (check) {
-    await attachJob('check', check)
+    await attachJob('check', check, generation)
   }
   const importOne = latest('IMPORT')
   if (importOne) {
-    await attachJob('import', importOne)
+    await attachJob('import', importOne, generation)
   }
   const publish = latest('PUBLISH')
   if (publish) {
-    await attachJob('publish', publish)
+    await attachJob('publish', publish, generation)
   }
 }
 
-async function attachJob(kind: 'check' | 'import' | 'publish', job: Job): Promise<void> {
+async function attachJob(
+  kind: 'check' | 'import' | 'publish',
+  job: Job,
+  generation: number = taskGeneration
+): Promise<void> {
+  if (generation !== taskGeneration) {
+    return
+  }
   if (kind === 'check') {
     checkJob.value = job
   } else if (kind === 'import') {
@@ -568,10 +743,13 @@ async function attachJob(kind: 'check' | 'import' | 'publish', job: Job): Promis
     publishJob.value = job
   }
   if (job.id !== undefined) {
-    await refreshIssues(kind, job.id)
+    await refreshIssues(kind, job.id, generation)
+  }
+  if (generation !== taskGeneration) {
+    return
   }
   if (jobRunning(job) && job.id !== undefined) {
-    beginWatchJob(kind, job.id)
+    beginWatchJob(kind, job.id, generation)
   } else if (kind === 'publish' && job.status === 'FAILED') {
     await buildPublishConflict(job)
   }
@@ -579,11 +757,12 @@ async function attachJob(kind: 'check' | 'import' | 'publish', job: Job): Promis
 
 // ── 第 1 步：模板 / 上传 / 在线编辑 ────────────────────────────────────────────
 
-async function persistSelection(): Promise<void> {
-  if (taskId.value === null || selectedDefs.value.length === 0) {
+/** 选中集落库（默认写到当前绑定任务；换任务在途的调用方传入口捕获的任务号）。 */
+async function persistSelection(forTask: number | null = taskId.value): Promise<void> {
+  if (forTask === null || selectedDefs.value.length === 0) {
     return
   }
-  await tasksApi.selectDefs(taskId.value, [...selectedDefs.value])
+  await tasksApi.selectDefs(forTask, [...selectedDefs.value])
   // issue #3：与 watch / AI handler 共用同一收敛点（勾选早已同步时此处短路）
   syncSelectedDefsToWorkspace()
 }
@@ -625,15 +804,21 @@ async function uploadOne(file: File): Promise<string> {
     ElMessage.warning(t('views.import.msg.pickDefs'))
     return '未上传：请先勾选配置项'
   }
+  const generation = taskGeneration
+  const forTask = taskId.value
   busy.value = 'upload'
   try {
-    await persistSelection()
-    const result = await tasksApi.uploadFile(taskId.value!, file)
+    await persistSelection(forTask)
+    const result = await tasksApi.uploadFile(forTask, file)
+    // 上传在途时换了任务：结果属于旧任务，不得把文件名/标签挂到新任务上（I5）
+    if (generation !== taskGeneration) {
+      return '上传已提交给原任务，但页面已切换到别的任务，本次结果未应用到当前页面'
+    }
     const matched = result.matchedFiles ?? []
     for (const item of matched) {
       uploadedFiles[item.defCode] = item.fileName
       savedDefs.add(item.defCode)
-      editorLoaded.delete(item.defCode)
+      editorState.delete(item.defCode)
       // 上传新文件 ⇒ 该配置项的旧预览立即失效（内容即将被新文件替换）
       aiStore.onSheetReloaded(item.defCode)
     }
@@ -673,9 +858,12 @@ async function handleUpload(uploadFile: UploadFile): Promise<void> {
 /**
  * 载入各配置项的编辑区：有 UPLOAD 文件用文件，否则用客户端生成的模板。
  *
- * <p>L-115：`editorLoaded` 是"载入完成"判据，但并发调用会各扫一遍（同一张表被重复 `fromJSON`）。
- * 用 `editorLoadInFlight` 把并发调用并到同一次载入上 —— 页面能力 `sheet.current` 等待的必须是
- * **这一次真的载入**，而不是"已经有人在载入了"就提前放行。
+ * <p>L-115：并发调用会各扫一遍（同一张表被重复 `fromJSON`），用 `editorLoadInFlight` 并到
+ * 同一次载入上 —— 页面能力 `sheet.current` 等待的必须是**这一次真的载入**。
+ *
+ * <p>**前置条件（C1）**：文件清单必须先落定。清单未知时既不能下载（不知道有没有文件），
+ * 更不能构造模板（模板会被当成内容写回）。所以这里先 `ensureFileList()`；拉不到就不载入，
+ * 由写回闸如实拦下并提示重试。
  */
 let editorLoadInFlight: Promise<void> | null = null
 
@@ -701,9 +889,24 @@ async function loadEditorsNow(force: boolean): Promise<void> {
   if (stepIndex.value !== 0 || taskId.value === null) {
     return
   }
+  const generation = taskGeneration
+  const forTask = taskId.value
+  const listed = await ensureFileList()
+  if (generation !== taskGeneration) {
+    return
+  }
+  if (!listed) {
+    // 清单未知：不构造模板（否则模板会被当成 B 的文件内容写回）。用户可见地说明一次。
+    ElMessage.warning('服务端文件清单读取失败，编辑区暂不能载入（请稍后重试或点「保存草稿到服务端」重试）')
+    return
+  }
   await nextTick()
   for (const def of editorDefs.value) {
-    if (editorLoaded.has(def.code) && !force) {
+    // 换任务后本次载入属于旧任务：直接丢弃，不写标记、不画字节
+    if (generation !== taskGeneration) {
+      return
+    }
+    if (editorReady(def.code) && !force) {
       continue
     }
     const grid = gridRefs[def.code]
@@ -712,21 +915,37 @@ async function loadEditorsNow(force: boolean): Promise<void> {
     }
     try {
       if (uploadedFiles[def.code]) {
-        const blob = await tasksApi.downloadFile(taskId.value, def.code)
+        const blob = await tasksApi.downloadFile(forTask, def.code)
+        // 下载在途时换了任务：A 的字节不得画进 B 的面板（I3）
+        if (generation !== taskGeneration) {
+          return
+        }
         const { missingHeaders } = await grid.loadFromXlsx(blob, def.fields)
         if (missingHeaders.length > 0) {
           ElMessage.warning(t('views.import.msg.missingHeaders', { code: def.code, headers: missingHeaders.join(', ') }))
         }
+        if (generation !== taskGeneration) {
+          return
+        }
+        editorState.set(def.code, { generation, source: 'file' })
       } else {
         // sheetName 是写进 xlsx 的工作表名（数据面，不随 UI 语言变）
         const json = await buildTemplateWorkbookJson(def.fields, { defCode: def.code, sheetName: '数据', sample: false })
+        if (generation !== taskGeneration) {
+          return
+        }
         await grid.loadFromJson(json, def.fields)
+        if (generation !== taskGeneration) {
+          return
+        }
+        editorState.set(def.code, { generation, source: 'template' })
       }
-      editorLoaded.add(def.code)
       // 交互专项：程序化载入（新文件/重载）⇒ 旧预览立即失效（硬闸仍是 previewId）
       aiStore.onSheetReloaded(def.code)
     } catch (error) {
-      ElMessage.error(error instanceof Error ? error.message : t('views.import.msg.editorLoadFailed', { code: def.code }))
+      if (generation === taskGeneration) {
+        ElMessage.error(error instanceof Error ? error.message : t('views.import.msg.editorLoadFailed', { code: def.code }))
+      }
     }
   }
 }
@@ -745,15 +964,15 @@ function onGridSelectionChanged(defCode: string): void {
 /**
  * 等某个配置项的编辑区**真的载入完成**（L-115：页面能力交出适配器前的关闸）。
  *
- * <p>返回真实结局而不是静默 void：载入失败时 `editorLoaded` 不会置位，调用方（`sheet.current`）
+ * <p>返回真实结局而不是静默 void：载入失败时 `editorState` 不会置位，调用方（`sheet.current`）
  * 必须能把失败如实说出来，而不是交出一张空表让工具读成「0 行」。
  */
 async function ensureEditorLoaded(code: string): Promise<{ ok: boolean; error: string }> {
-  if (editorLoaded.has(code)) {
+  if (editorReady(code)) {
     return { ok: true, error: '' }
   }
   await loadEditors()
-  if (editorLoaded.has(code)) {
+  if (editorReady(code)) {
     return { ok: true, error: '' }
   }
   return { ok: false, error: '编辑区表格未能载入（请重试，或重新打开该配置的编辑标签页）' }
@@ -791,15 +1010,54 @@ async function flushEditors(): Promise<FlushOutcome> {
     ElMessage.warning(t('views.import.msg.pickDefs'))
     return { ok: false, savedDefs: [], reason: t('views.import.msg.pickDefs') }
   }
+  const generation = taskGeneration
+  const forTask = taskId.value
   const written: string[] = []
+  const skipped: string[] = []
   busy.value = 'flush'
   let ok = true
   let failureReason: string | undefined
   try {
-    await persistSelection()
+    // 写回闸①：文件清单没落定时不得写回 —— 此时编辑区可能什么都没有，或（更糟）是
+    // "清单未知期间"留下的模板；PUT 上去就是拿空工作簿覆盖服务端真文件。先补读一次。
+    if (!filesOk.value) {
+      const listed = await ensureFileList()
+      if (generation !== taskGeneration || forTask !== taskId.value) {
+        return { ok: false, savedDefs: [], reason: '任务已切换，本次写回中止（未把上一个任务的内容写到新任务上）' }
+      }
+      if (!listed) {
+        const reason = `任务 #${forTask} 的服务端文件清单读取失败（GET /files），本次未写回任何文件`
+          + '（否则会用空模板覆盖服务端已有文件）'
+        ElMessage.error(reason)
+        return { ok: false, savedDefs: [], reason }
+      }
+      // 清单刚补到：编辑区必须按文件重来（此前若按"无文件"构造过模板，那内容不是服务端文件）
+      await loadEditors(true)
+      if (generation !== taskGeneration || forTask !== taskId.value) {
+        return { ok: false, savedDefs: [], reason: '任务已切换，本次写回中止（未把上一个任务的内容写到新任务上）' }
+      }
+    }
+    await persistSelection(forTask)
     for (const def of editorDefs.value) {
+      // 写回闸②：换任务期间（A→B）一律停手 —— 字节属于 A，任务号已经是 B
+      if (generation !== taskGeneration || forTask !== taskId.value) {
+        ok = false
+        failureReason = '任务已切换，本次写回中止（未把上一个任务的内容写到新任务上）'
+        break
+      }
       const grid = gridRefs[def.code]
       if (!grid) {
+        continue
+      }
+      // 写回闸③：内容来源必须与"服务端文件清单"一致才可写：
+      // - `file`：表格里就是服务端文件字节，写回不会改内容；
+      // - `template`：只有清单确认过"没有该文件"时才是合法的新建导入，否则一律不写。
+      const state = editorState.get(def.code)
+      const current = state !== undefined && state.generation === generation ? state : null
+      const writable = current !== null
+        && (current.source === 'file' || uploadedFiles[def.code] === undefined)
+      if (!writable) {
+        skipped.push(def.code)
         continue
       }
       const issues = grid.validateLocal()
@@ -816,9 +1074,22 @@ async function flushEditors(): Promise<FlushOutcome> {
         continue
       }
       const blob = await grid.toXlsxBlob()
-      await tasksApi.saveFile(taskId.value, def.code, await blob.arrayBuffer())
+      // 序列化期间可能已经换了任务：再确认一次才真正发 PUT
+      if (generation !== taskGeneration || forTask !== taskId.value) {
+        ok = false
+        failureReason = '任务已切换，本次写回中止（未把上一个任务的内容写到新任务上）'
+        break
+      }
+      await tasksApi.saveFile(forTask, def.code, await blob.arrayBuffer())
       savedDefs.add(def.code)
       written.push(def.code)
+    }
+    if (skipped.length > 0) {
+      ok = false
+      const skippedReason = `${skipped.join('、')} 的编辑区未载入（文件读取失败或载入未完成），本次未写回`
+        + ' —— 请先重试打开对应编辑区，再推进'
+      ElMessage.warning(skippedReason)
+      failureReason = failureReason ? `${failureReason}；${skippedReason}` : skippedReason
     }
     if (ok) {
       ElMessage.success(t('views.import.msg.draftSaved'))
@@ -876,9 +1147,14 @@ async function goStep(next: number): Promise<StepAdvanceOutcome> {
   if (next < 0 || next >= STEP_KEYS.length) {
     return { ok: false, reason: `目标步骤 ${next} 不在导入向导范围内` }
   }
+  const generation = taskGeneration
   let writtenDefs: string[] = []
   if (next > stepIndex.value && stepIndex.value === 0) {
     const flushed = await flushEditors()
+    // 换任务途中写回已中止：不得把这次推进算到新任务的页面上（步骤/工作区都是任务级状态）
+    if (generation !== taskGeneration) {
+      return { ok: false, reason: '任务已切换，本次未推进步骤' }
+    }
     if (!flushed.ok) {
       ElMessage.warning(t('views.import.msg.unsavedEdits'))
       return {
@@ -894,13 +1170,15 @@ async function goStep(next: number): Promise<StepAdvanceOutcome> {
   // 批3③a D9（D7 同款语义最小接入）/ 批3③b D15（对齐导出侧）：服务端步骤同步失败**不阻断**
   // 推进，但警告必须可见（单点 warning 在本函数弹）且**带进 AI 回灌** —— 原实现只弹
   // ElMessage、回灌文本仍是干净成功文案（与导出侧不对称，M6 承接项）。
-  const synced = await syncStepToBackend()
+  const synced = await syncStepToBackend(generation, taskId.value)
   let syncWarning: string | undefined
   if (!synced.ok) {
     syncWarning = '步骤已推进但服务端步骤同步失败，下次切步会重试'
     ElMessage.warning(syncWarning)
   }
-  await ensureStepLoaded(next)
+  if (generation === taskGeneration) {
+    await ensureStepLoaded(next)
+  }
   return { ok: true, syncWarning, savedDefs: writtenDefs }
 }
 
@@ -925,8 +1203,11 @@ async function viewStep(index: number): Promise<void> {
  * 后端 `currentStep` 是刷新恢复与 AI 上下文（`task:IMPORT/<step>` 的渐进披露子集）
  * 的唯一权威：只在前端切步不进后端，刷新会退回首步，模型也会读到旧步骤。
  */
-async function syncStepToBackend(): Promise<{ ok: boolean; reason?: string }> {
-  if (taskId.value === null) {
+async function syncStepToBackend(
+  generation: number = taskGeneration,
+  forTask: number | null = taskId.value
+): Promise<{ ok: boolean; reason?: string }> {
+  if (forTask === null) {
     return { ok: true }
   }
   const step = STEP_KEYS[stepIndex.value]
@@ -934,7 +1215,10 @@ async function syncStepToBackend(): Promise<{ ok: boolean; reason?: string }> {
     return { ok: true }
   }
   try {
-    task.value = await tasksApi.goToStep(taskId.value, step)
+    const updated = await tasksApi.goToStep(forTask, step)
+    if (generation === taskGeneration) {
+      task.value = updated
+    }
     return { ok: true }
   } catch (error) {
     // 批3③b D11（R-143①）：单点提示 —— 本函数**不自弹**（原 ElMessage.error 删除），由调用方
@@ -960,26 +1244,82 @@ async function nextStep(): Promise<void> {
 
 // ── 作业：预检查 / 导入 / 发布 ────────────────────────────────────────────────
 
-async function startJob(kind: 'check' | 'import' | 'publish'): Promise<Job | null> {
+/**
+ * `startJob` 的结局。
+ *
+ * 判据只有一个：**作业有没有真的被建出来**。只要建出来了，回执就必须以"已发生的事实"叙述
+ * （`job` 非空 ⇒ 调用方回成功/信息形，绝不回"未启动"），因为"未启动"会诱发模型重发；
+ * `detached`/`attachError` 只说明**本页有没有跟踪它**。
+ */
+interface JobStartOutcome {
+  job: Job | null
+  /** 发起时的任务/代次已变：作业确实建在**原任务**上，但不得挂到当前任务的面板/跟踪面 */
+  detached: boolean
+  /** 发起时绑定的任务号（回执里点明作业归属，换任务后仍能说清） */
+  taskId: number | null
+  /** 作业已建但本页挂接（问题清单/watcher）失败：仍然不是"未启动" */
+  attachError?: string
+  error?: string
+}
+
+/**
+ * 创建并挂接作业。
+ *
+ * **代次纪律（N2）**：任务号与代次在**入口捕获**。`createJob` 在途时换任务的话，返回的作业属于
+ * 原任务 —— 此时不写 `checkJob/importJob/publishJob`、不拉 issues、不登记 watcher（reset 已经先跑过，
+ * 那时登记的 watcher 不会被回收，会一直替旧作业打后端）。回执由调用方按 `detached` 如实说明。
+ *
+ * **真实性纪律**：`createJob` 一旦成功，后续任何失败（含 `attachJob`/`beginWatchJob` 抛错、或
+ * 挂接期间换任务）都**不得**退化成 `job: null` / `detached: false` —— 那会让回执说"未启动"
+ * 而作业其实已经在后端跑（同一类"说没发生、其实发生了"的失真）。
+ */
+async function startJob(kind: 'check' | 'import' | 'publish'): Promise<JobStartOutcome> {
   if (taskId.value === null) {
     ElMessage.warning(t('views.import.msg.noTaskBound'))
-    return null
+    return { job: null, detached: false, taskId: null }
   }
+  const generation = taskGeneration
+  const forTask = taskId.value
   const jobType = kind === 'check' ? 'PRECHECK' : kind === 'import' ? 'IMPORT' : 'PUBLISH'
+  let created: Job | null = null
+  let attachError: string | undefined
   busy.value = kind
   try {
-    const job = await jobsApi.createJob(taskId.value, jobType)
-    ElMessage.success(t('views.import.msg.jobStarted', { kind: t(`views.import.kinds.${kind}`), id: job.id ?? '' }))
-    await attachJob(kind, job)
-    if (job.id !== undefined) {
-      beginWatchJob(kind, job.id)
+    const job = await jobsApi.createJob(forTask, jobType)
+    created = job
+    if (generation !== taskGeneration) {
+      return { job, detached: true, taskId: forTask }
     }
-    return job
+    ElMessage.success(t('views.import.msg.jobStarted', { kind: t(`views.import.kinds.${kind}`), id: job.id ?? '' }))
+    try {
+      await attachJob(kind, job, generation)
+      if (job.id !== undefined) {
+        beginWatchJob(kind, job.id, generation)
+      }
+    } catch (error) {
+      // 作业已建、只是本页没挂上：带着错误回去，让回执说"已启动但本页未跟踪"
+      attachError = error instanceof Error ? error.message : String(error)
+    }
+    // 挂接期间也可能换了任务：返回值必须与真实归属一致（否则回执会说"在本页已启动"）
+    return { job, detached: generation !== taskGeneration, taskId: forTask, attachError }
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : t('views.import.msg.jobStartFailed'))
-    return null
+    if (created === null) {
+      const reason = error instanceof Error ? error.message : String(error)
+      if (generation === taskGeneration) {
+        ElMessage.error(reason || t('views.import.msg.jobStartFailed'))
+      }
+      return { job: null, detached: generation !== taskGeneration, taskId: forTask, error: reason }
+    }
+    return {
+      job: created,
+      detached: generation !== taskGeneration,
+      taskId: forTask,
+      attachError: error instanceof Error ? error.message : String(error)
+    }
   } finally {
-    busy.value = null
+    if (generation === taskGeneration) {
+      busy.value = null
+    }
   }
 }
 
@@ -993,8 +1333,10 @@ async function startImport(): Promise<void> {
 
 /** 发布启动结局（按钮 / handler / 旧 run_job 三入口共用同一套确认语义）。 */
 type PublishStartOutcome =
-  | { kind: 'started'; job: Job }
+  | { kind: 'started'; job: Job; warning?: string }
   | { kind: 'cancelled' }
+  /** 确认窗口期间任务被切换：A 的确认不得落到 B（**没有**建任何作业） */
+  | { kind: 'switched'; from: number; to: number | null }
   | { kind: 'failed'; reason: string }
   | { kind: 'readonly' }
 
@@ -1008,10 +1350,15 @@ async function startPublish(): Promise<PublishStartOutcome> {
   if (publishPending.value) {
     return { kind: 'failed', reason: '发布请求正在处理中，请勿重复点击' }
   }
+  // **确认窗口的代次纪律（N2/③）**：模式读取（网络）与用户确认（人）是两个长 await。
+  // 用户确认的是**发起时那个任务**；期间换了任务就必须中止 —— 否则会拿 A 的确认在 B 上建发布作业
+  // （REPLACE 会删范围内旧行），而用户从未对 B 确认过。
+  const generation = taskGeneration
+  const forTask = taskId.value
   publishPending.value = true
   busy.value = 'publish'
   try {
-    const id = taskId.value
+    const id = forTask
     if (id === null) {
       const reason = t('views.import.msg.noTaskBound')
       ElMessage.warning(reason)
@@ -1019,6 +1366,9 @@ async function startPublish(): Promise<PublishStartOutcome> {
     }
     // C-1：模式判定只认任务服务端权威值。读取失败 / settings 不可解析 ⇒ fail-closed（不建作业）。
     const resolution = await resolvePublishMode(id)
+    if (generation !== taskGeneration) {
+      return { kind: 'switched', from: id, to: taskId.value }
+    }
     if (!resolution.ok) {
       const reason = `${resolution.reason}。本次未启动发布作业`
       ElMessage.error(reason)
@@ -1035,13 +1385,26 @@ async function startPublish(): Promise<PublishStartOutcome> {
     }
     // R-09：REPLACE 会删除范围内旧行 ⇒ 复用复选框确认；MERGE 增量更新，免确认。
     const confirmed = await confirmPublishByMode(resolution.mode)
+    if (generation !== taskGeneration || forTask !== taskId.value) {
+      return { kind: 'switched', from: id, to: taskId.value }
+    }
     if (!confirmed) {
       return { kind: 'cancelled' }
     }
     // Minor：只有“确认通过、真的要发起”时才清理旧冲突提示；取消不得清掉既有告警。
     publishConflict.value = null
-    const job = await startJob('publish')
-    return job ? { kind: 'started', job } : { kind: 'failed', reason: t('views.import.msg.jobStartFailed') }
+    const started = await startJob('publish')
+    if (!started.job) {
+      // 作业真的没建出来（createJob 失败）——这才是"未启动"
+      return { kind: 'failed', reason: t('views.import.msg.jobStartFailed') }
+    }
+    // 作业已建：若期间换了任务/挂接失败，回执必须说"已建在任务 #N、本页未跟踪"，绝不能说失败
+    const note = started.detached || started.attachError !== undefined
+      ? `发布作业 #${started.job.id} 已建在任务 #${started.taskId ?? id}`
+        + (started.detached ? '（页面已切换到别的任务，本页未跟踪）' : '（本页未能跟踪该作业）')
+        + '；作业仍在后端继续，请勿重复发起'
+      : undefined
+    return { kind: 'started', job: started.job, warning: note }
   } finally {
     publishPending.value = false
     // startJob 自己会清 busy；只有我们这层仍持有 'publish'（取消/读取失败）时才复位。
@@ -1051,10 +1414,15 @@ async function startPublish(): Promise<PublishStartOutcome> {
   }
 }
 
-function beginWatchJob(kind: 'check' | 'import' | 'publish', jobId: number): void {
-  if (taskId.value === null) {
+function beginWatchJob(
+  kind: 'check' | 'import' | 'publish',
+  jobId: number,
+  generation: number = taskGeneration
+): void {
+  if (taskId.value === null || generation !== taskGeneration) {
     return
   }
+  const forTask = taskId.value
   // 同 kind 重跑：先回收旧 watcher（不同 kind 互不回收，三者可并存）——原 registry.recycle 语义
   const previous = jobWatchDisposes.get(kind)
   if (previous) {
@@ -1062,7 +1430,7 @@ function beginWatchJob(kind: 'check' | 'import' | 'publish', jobId: number): voi
     previous()
   }
   const dispose = watchJob({
-    taskId: taskId.value,
+    taskId: forTask,
     jobId,
     // F10：跟踪器自制 dispose（终态）不经登记入口 —— 结束时同步摘柄；对已摘 kind 是幂等空操作，
     // 外部回收路径不会双 dispose。
@@ -1072,20 +1440,37 @@ function beginWatchJob(kind: 'check' | 'import' | 'publish', jobId: number): voi
       }
     },
     onProgress: (payload) => {
+      if (generation !== taskGeneration) {
+        return
+      }
       const current = jobOf(kind)
       if (current) {
         setJob(kind, { ...current, status: 'RUNNING', progress: payload.processed, total: payload.total })
       }
     },
     onSnapshot: (job) => {
+      if (generation !== taskGeneration) {
+        return
+      }
       setJob(kind, job)
     },
     onChannel: (state) => {
+      if (generation !== taskGeneration) {
+        return
+      }
       setChannel(kind, state)
     },
     onFinal: async (job) => {
+      if (generation !== taskGeneration) {
+        return
+      }
       setJob(kind, job)
-      await refreshIssues(kind, jobId)
+      await refreshIssues(kind, jobId, generation)
+      // 取问题清单也是 await：之后一律按**入口捕获**的 (generation, forTask) 继续，
+      // 不得用实时 taskId 去刷新另一个任务的快照（N2）
+      if (generation !== taskGeneration) {
+        return
+      }
       if (kind === 'publish') {
         // Q4：发布恒 201，冲突只能从终态 + issues 读出
         if (job.status === 'FAILED') {
@@ -1097,7 +1482,7 @@ function beginWatchJob(kind: 'check' | 'import' | 'publish', jobId: number): voi
           ElMessage.info(t('views.import.msg.publishCancelled'))
         }
         // 任务状态由后端 JobTerminalWriter 联动作业终态，这里一律刷新快照（失败也要显示 FAILED）
-        await refreshTaskSnapshot()
+        await refreshTaskSnapshot(generation, forTask)
         return
       }
       if (job.status === 'COMPLETED') {
@@ -1108,20 +1493,33 @@ function beginWatchJob(kind: 'check' | 'import' | 'publish', jobId: number): voi
       if (kind === 'import' && job.status === 'COMPLETED') {
         await loadStaging()
       }
-      await refreshTaskSnapshot()
+      await refreshTaskSnapshot(generation, forTask)
     }
   })
   jobWatchDisposes.set(kind, dispose)
 }
 
-/** 刷新任务快照（状态/步骤），失败时不让页面停在旧状态上。 */
-async function refreshTaskSnapshot(): Promise<void> {
-  if (taskId.value === null) {
+/**
+ * 刷新任务快照（状态/步骤），失败时不让页面停在旧状态上。
+ *
+ * **代次纪律（N2）**：用入口捕获的 `(generation, forTask)`。旧作业的 `onFinal` 在换任务后回来时，
+ * 实时读 `taskId.value` 会把 A 的状态写到 B 的任务位（`workspace.setTaskId(B, A 的状态)`），
+ * 进而让 B 的 `isReadOnly` 判错（按钮消失/出现）。
+ */
+async function refreshTaskSnapshot(
+  generation: number = taskGeneration,
+  forTask: number | null = taskId.value
+): Promise<void> {
+  if (forTask === null) {
     return
   }
   try {
-    task.value = await tasksApi.getTask(taskId.value)
-    workspace.setTaskId(taskId.value, 'IMPORT', task.value.status)
+    const snapshot = await tasksApi.getTask(forTask)
+    if (generation !== taskGeneration) {
+      return
+    }
+    task.value = snapshot
+    workspace.setTaskId(forTask, 'IMPORT', snapshot.status)
   } catch {
     // 任务快照刷新失败不阻断作业结果的展示
   }
@@ -1151,9 +1549,17 @@ function setChannel(kind: 'check' | 'import' | 'publish', state: JobChannelState
   }
 }
 
-async function refreshIssues(kind: 'check' | 'import' | 'publish', jobId: number): Promise<void> {
+async function refreshIssues(
+  kind: 'check' | 'import' | 'publish',
+  jobId: number,
+  generation: number = taskGeneration
+): Promise<void> {
   try {
     const page = await jobsApi.getIssues(jobId, 0, 200)
+    // 旧任务的作业问题晚到：不得写进新任务的问题清单
+    if (generation !== taskGeneration) {
+      return
+    }
     const list = page.content ?? []
     if (kind === 'check') {
       checkIssues.value = list
@@ -1209,6 +1615,7 @@ async function cancelJob(job: Job | null): Promise<void> {
 // ── 第 4 步：暂存核查与发布模式 ────────────────────────────────────────────────
 
 async function loadStaging(): Promise<void> {
+  const generation = taskGeneration
   const jobId = importJob.value?.id
   if (!jobId) {
     staging.value = []
@@ -1217,6 +1624,10 @@ async function loadStaging(): Promise<void> {
   stagingLoading.value = true
   try {
     const rows = await jobsApi.getDiff(jobId)
+    // 旧任务的暂存行晚到：不得渲染到新任务（I5）
+    if (generation !== taskGeneration) {
+      return
+    }
     const grouped = new Map<string, ConfigStagingRow[]>()
     for (const row of rows) {
       const list = grouped.get(row.defCode) ?? []
@@ -1230,9 +1641,13 @@ async function loadStaging(): Promise<void> {
     }))
     stagingOpen.value = staging.value.map((group) => group.defCode)
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : t('views.import.msg.stagingLoadFailed'))
+    if (generation === taskGeneration) {
+      ElMessage.error(error instanceof Error ? error.message : t('views.import.msg.stagingLoadFailed'))
+    }
   } finally {
-    stagingLoading.value = false
+    if (generation === taskGeneration) {
+      stagingLoading.value = false
+    }
   }
 }
 
@@ -1442,19 +1857,34 @@ function registerHandlers(): void {
   registerPageHandler('import.startPrecheck', async () => {
     // 施工卡 §S3e：只读态不得 createJob（不许在已结束任务上建新作业）
     if (isReadOnly.value) {
-      return '任务已结束，仅供查看，未启动预检查作业'
+      return { ok: false, reason: '任务已结束，仅供查看，未启动预检查作业' }
     }
-    await startJob('check')
-    return checkJob.value ? `预检查作业 #${checkJob.value.id} 已启动` : '预检查未启动'
+    const started = await startJob('check')
+    if (!started.job) {
+      return { ok: false, reason: started.error ?? '预检查未启动' }
+    }
+    // 作业已建但本页没跟踪（切任务/挂接失败）⇒ 成功形回执 + 明确的"请勿重复发起"
+    const note = jobStartedNote('预检查', started)
+    if (note) {
+      return note
+    }
+    return `预检查作业 #${started.job.id} 已启动`
   })
 
   registerPageHandler('import.startImport', async () => {
     // 施工卡 §S3e：只读态不得 createJob
     if (isReadOnly.value) {
-      return '任务已结束，仅供查看，未启动导入作业'
+      return { ok: false, reason: '任务已结束，仅供查看，未启动导入作业' }
     }
-    await startJob('import')
-    return importJob.value ? `导入作业 #${importJob.value.id} 已启动` : '导入未启动'
+    const started = await startJob('import')
+    if (!started.job) {
+      return { ok: false, reason: started.error ?? '导入未启动' }
+    }
+    const note = jobStartedNote('导入', started)
+    if (note) {
+      return note
+    }
+    return `导入作业 #${started.job.id} 已启动`
   })
 
   registerPageHandler('import.startPublish', async () => {
@@ -1467,14 +1897,44 @@ function registerHandlers(): void {
     if (outcome.kind === 'cancelled') {
       return { ok: false, reason: '用户取消了发布确认，未启动发布作业' }
     }
+    if (outcome.kind === 'switched') {
+      // 没有建任何作业：如实说明"没在哪个任务上发布"，并要求重新确认（不是盲重重发）
+      return {
+        ok: false,
+        reason: `发布确认期间任务已切换（确认的是任务 #${outcome.from}，当前是任务 #${outcome.to ?? '（无）'}）：`
+          + '本次未发起任何发布作业。如仍需发布，请在当前任务上重新发起并再次确认'
+      }
+    }
     if (outcome.kind === 'failed') {
       return { ok: false, reason: outcome.reason }
+    }
+    if (outcome.warning) {
+      return { ok: true, result: outcome.warning }
     }
     if (outcome.job.id === undefined) {
       return '发布作业已启动（服务端未返回作业号）；发布结果按异步形态给出（作业终态 + 问题清单）'
     }
     return `发布作业 #${outcome.job.id} 已启动；发布结果按异步形态给出（作业终态 + 问题清单）`
   })
+}
+
+/**
+ * "作业已建但本页没跟踪"的回执（成功/信息形）。
+ *
+ * 为什么不能是 `{ok:false}`：`interpretHandlerOutcome` 把 `{ok:false}` 判成**确定性失败**，
+ * 模型会照"失败"重发 —— 而作业其实已经在后端跑（发布作业带 REPLACE 语义会真删行）。
+ * 这里的语义是"事情已发生，只是不在这个页面上跟踪"，所以回成功形 + 明确的"请勿重复发起"。
+ */
+function jobStartedNote(label: string, started: JobStartOutcome): { ok: true; result: string } | null {
+  if (!started.job || (!started.detached && started.attachError === undefined)) {
+    return null
+  }
+  const where = started.taskId === null ? '原任务' : `任务 #${started.taskId}`
+  const why = started.detached ? '页面已切换到别的任务，本页未跟踪' : `本页未能跟踪（${started.attachError ?? '未知原因'}）`
+  return {
+    ok: true,
+    result: `${label}作业 #${started.job.id ?? ''} 已建在${where}（${why}）。作业仍在后端继续，请勿重复发起。`
+  }
 }
 
 /**
@@ -1627,6 +2087,24 @@ onBeforeUnmount(() => {
   unregisterAiRegion('import.grid')
 })
 
+/**
+ * 绑定任务（**唯一**的改绑入口）：换代次 → 复位页面态 → 同步工作区 → 拉详情/清单/作业。
+ *
+ * 路由换任务、新建任务两条入口都走这里 —— 之前 `createAndBindTask` 自己赋值 `taskId` 再
+ * `router.replace`，而路由 watch 见到 `id === taskId.value` 直接 return ⇒ 既不复位也不换代次，
+ * 旧任务的 `uploadedFiles` / `filesOk` / `importMode` 会残留到新任务（新任务里勾同名配置时
+ * 会去下载根本不存在的文件，编辑区永远载不进来）。
+ */
+async function bindTask(id: number): Promise<void> {
+  // 交互专项：换任务 ⇒ 旧任务的表格预览一律失效（不允许拿旧计划改新任务的数据）
+  aiStore.onSheetPageLeft()
+  // 换任务 = 新一代：旧任务的载入态/文件清单/作业跟踪一律作废（否则 A 的字节会写进 B）
+  resetTaskScopedState()
+  taskId.value = id
+  workspace.setTaskId(id, 'IMPORT', null)
+  await loadTask()
+}
+
 async function createAndBindTask(): Promise<void> {
   creatingTask.value = true
   try {
@@ -1638,9 +2116,8 @@ async function createAndBindTask(): Promise<void> {
       ElMessage.error(taskStore.actionError ?? t('views.import.msg.taskCreateFailed'))
       return
     }
-    taskId.value = created.id
+    await bindTask(created.id)
     await router.replace({ name: 'import-wizard', query: { taskId: String(created.id) } })
-    await loadTask()
     ElMessage.success(t('views.import.msg.taskCreated', { id: created.id }))
   } finally {
     creatingTask.value = false
@@ -1670,11 +2147,7 @@ watch(
     if (id === null || id === taskId.value) {
       return
     }
-    // 交互专项：换任务 ⇒ 旧任务的表格预览一律失效（不允许拿旧计划改新任务的数据）
-    aiStore.onSheetPageLeft()
-    taskId.value = id
-    workspace.setTaskId(id, 'IMPORT', null)
-    await loadTask()
+    await bindTask(id)
   }
 )
 

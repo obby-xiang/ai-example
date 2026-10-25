@@ -3,7 +3,7 @@
  *
  * 两个后端响应族必须都容得下：
  * 1. 业务端点：`{ success, message?, code?, data? }`（common/ApiResponse）→ 拦截器拆信封取 data；
- * 2. AI 端点：**裸对象**（如 409 SESSION_BUSY 的 {code,message,runId,reattach}、
+ * 2. AI 端点：**裸对象**（如 409 SESSION_BUSY 的 {code,message,runId?,reattach?,degraded,unknown?}、
  *    /api/ai/confirm 的 {accepted,duplicate,...}）→ 原样放行，由调用方按类型收窄。
  */
 

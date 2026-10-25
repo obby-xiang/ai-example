@@ -173,10 +173,37 @@ public class AiConfigService {
 
     /** 强制重载（种子写完、批② 写路径、测试用）。 */
     public ConfigSnapshot reload() {
+        return reloadWithOutcome().snapshot();
+    }
+
+    /**
+     * 一次强制重载的结局（B2 三态判据的输入）。
+     *
+     * @param snapshot 重载后的快照（{@code ok=false} 时是"上一份好快照或空快照"）
+     * @param ok <b>本次</b>读库是否真的成功（{@link #load()} 没有吞掉异常）
+     */
+    public record ReloadResult(ConfigSnapshot snapshot, boolean ok) {
+    }
+
+    /**
+     * 强制重载，并把"到底刷新成功没有"如实回报。
+     *
+     * <h2>为什么必须新增一个入口，而不是改 {@link #reload()} 的返回</h2>
+     * {@link #load()} 会吞掉读库异常（这是对的：{@code /health} 与 {@code /chat} 不该因此 500），
+     * 于是 {@code reload()} 在 Hikari 超时 / 迁移锁 / 只读切换时<b>既不抛也不报</b> —— 调用方只看到
+     * "快照还是那份旧的"（或空快照），无法区分"刷新过，库里确实没有"与"压根没刷新成功"。
+     * 后者若被当成"确定不可用"，一次瞬时抖动就会变成不可恢复的判死。
+     *
+     * <p>
+     * 改 {@code reload()} 的返回类型会打破既有契约（写路径 afterCommit、种子、单测都以"返回快照"
+     * 编写），故并列一个带结局的入口；{@code reload()} 改为委托它，<b>行为逐字不变</b>。
+     */
+    public ReloadResult reloadWithOutcome() {
         synchronized (this.refreshLock) {
-            applyLoad(load(), readRedisVersion());
+            LoadOutcome outcome = load();
+            applyLoad(outcome, readRedisVersion());
             this.lastCheckAtMs = System.currentTimeMillis();
-            return this.snapshot;
+            return new ReloadResult(this.snapshot, outcome.ok());
         }
     }
 
@@ -675,6 +702,108 @@ public class AiConfigService {
         return targetFor(snap, bound, preferred)
             .map(resolved -> new ChatTarget(resolved, resolved.modelId(),
                     supportsToolCalling(resolved.providerId(), resolved.modelId())));
+    }
+
+    /**
+     * 续跑精确绑定的<b>行级可用性</b>（B2 三态判据）：解析为空时用它区分"确定不可用"与"此刻不可知"。
+     *
+     * <p>
+     * 为什么不直接用 {@link #resolveChatTarget(Long, String)} 的空与否：那个判据把三类事实压在一起 ——
+     * 行没了、没声明 key、key 解不开。前两者是**确定**的配置状态（删了就是删了），第三类是
+     * **环境**问题（KEK 缺失/轮换/密文损坏），KEK 修好这一轮就能续。判死只允许对前两者做。
+     */
+    public enum BindingState {
+
+        /** 行、模型、key 三者都就绪（正常情况下 {@code resolveChatTarget} 不会为空）。 */
+        RESOLVED,
+
+        /**
+         * <b>确定不可用</b>：provider/模型不存在、被停用、模型不在 allowlist，或该 provider
+         * <b>从未声明 key</b>（{@code key_ref=NONE} / env key 为空）—— 都是配置层面可判定的状态。
+         */
+        ABSENT,
+
+        /**
+         * <b>此刻不可知</b>：行与模型都在、key 也声明了，但本进程此刻解不开
+         * （KEK 缺失/轮换/密文损坏）。修好 KEK 就能续 ⇒ 不得判死。
+         */
+        KEY_UNREADABLE
+
+    }
+
+    /**
+     * 续跑精确绑定的行级判据（见 {@link BindingState}）。
+     *
+     * <p>
+     * 只看<b>快照</b>，不查库 —— 快照此刻可不可信由调用方用 {@link #reloadWithOutcome()} 的结局判定
+     * （读库失败时"没有这一行"不代表库里没有）。
+     *
+     * @param providerId provider 主键；{@code null} = 旧/冻结快照，退化为按模型名判
+     * @param modelId 快照里的模型名；空白 = 该 provider 自己的默认模型
+     */
+    public BindingState bindingState(Long providerId, String modelId) {
+        ConfigSnapshot snap = current();
+        if (providerId == null) {
+            // 无 providerId 的旧/冻结快照没有稳定身份：按"声明了这个模型名的 provider"逐个看 key，
+            // 与下面 providerId 分支<b>同一口径</b>（复核 I-1）：
+            //   没有任何 enabled provider 声明它              ⇒ ABSENT（确定不在）
+            //   有声明，且其中至少一个 key 解不开、也没有可用的 ⇒ KEY_UNREADABLE（不可知）
+            //   全部只是"没声明 key"（key_ref=NONE / env key 为空）⇒ ABSENT（确定的配置状态）
+            // 旧实现把"有声明"一律当不可知，会让"从未声明 key"的旧快照永不收敛 —— 与本类自己的口径相反。
+            return bindingStateByName(snap, modelId);
+        }
+        AiProvider bound = effectiveProviders(snap)
+            .stream()
+            .filter(provider -> providerId.equals(provider.getId()))
+            .findFirst()
+            .orElse(null);
+        if (bound == null || !bound.isEnabled()) {
+            return BindingState.ABSENT;
+        }
+        String preferred = StringUtils.hasText(modelId) ? modelId.trim() : null;
+        if (ownModelId(snap, bound, preferred) == null) {
+            return BindingState.ABSENT;
+        }
+        KeyResolution key = resolveKey(bound);
+        if (key.status() == KeyStatus.OK) {
+            return BindingState.RESOLVED;
+        }
+        // 只有"声明了密文却解不开"才是不可知；"从来没声明 key"是确定的配置状态（与既有口径一致：
+        // ResumeService.Outcome#PROVIDER_GONE 的注释把"密钥不可用"列为确定不可用）。
+        return key.status() == KeyStatus.UNREADABLE ? BindingState.KEY_UNREADABLE : BindingState.ABSENT;
+    }
+
+    /**
+     * 模型名维度（旧/冻结快照）的行级判据：见 {@link #bindingState(Long, String)} 的分支说明。
+     *
+     * <p>
+     * {@code OK} 出现在这里说明"按名字解析本该成功"（解析为空只可能来自别的分支），按<b>保守</b>处理成
+     * 不可知 —— 宁可多等一次，也不把说不清的状态判死。
+     */
+    private BindingState bindingStateByName(ConfigSnapshot snap, String modelId) {
+        if (!StringUtils.hasText(modelId)) {
+            return BindingState.ABSENT;
+        }
+        String wanted = modelId.trim();
+        boolean sawDeclared = false;
+        boolean sawUnreadable = false;
+        for (AiProvider provider : effectiveProviders(snap)) {
+            if (!provider.isEnabled() || selectableModel(snap, provider, wanted) == null) {
+                continue;
+            }
+            sawDeclared = true;
+            KeyResolution key = resolveKey(provider);
+            if (key.status() == KeyStatus.OK) {
+                return BindingState.KEY_UNREADABLE;
+            }
+            if (key.status() == KeyStatus.UNREADABLE) {
+                sawUnreadable = true;
+            }
+        }
+        if (!sawDeclared) {
+            return BindingState.ABSENT;
+        }
+        return sawUnreadable ? BindingState.KEY_UNREADABLE : BindingState.ABSENT;
     }
 
     /**

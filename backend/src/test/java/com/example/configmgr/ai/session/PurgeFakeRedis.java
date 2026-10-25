@@ -27,7 +27,6 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.regex.Pattern;
 import java.nio.charset.StandardCharsets;
 
 import static org.mockito.ArgumentMatchers.any;
@@ -63,6 +62,14 @@ final class PurgeFakeRedis {
 	final List<String> deleted = new ArrayList<>();
 
 	volatile boolean failDelete;
+
+	/**
+	 * 只让<b>包含该子串</b>的键 DEL 失败（{@code null} = 关闭）。
+	 *
+	 * <p>为什么不只用 {@link #failDelete}：整面失败会让"按 run 删 13 键"先抛错，
+	 * 后续的观测键删除根本走不到 —— 那样就测不到"某个具体键删不掉"这条可重试语义。
+	 */
+	volatile String failDeleteContaining;
 
 	volatile boolean failScan;
 
@@ -411,6 +418,9 @@ final class PurgeFakeRedis {
 	}
 
 	private Boolean remove(String key) {
+		if (this.failDeleteContaining != null && key.contains(this.failDeleteContaining)) {
+			throw new IllegalStateException("模拟 DEL 失败：" + key);
+		}
 		this.deleted.add(key);
 		boolean existed = this.strings.remove(key) != null;
 		existed |= this.hashes.remove(key) != null;
@@ -435,9 +445,8 @@ final class PurgeFakeRedis {
 
 	private Cursor<byte[]> cursorMatching(String glob, Collection<String> source, Runnable onClose) {
 		List<byte[]> keys = new ArrayList<>();
-		Pattern pattern = glob == null ? null : globToRegex(glob);
 		for (String key : source) {
-			if (pattern == null || pattern.matcher(key).matches()) {
+			if (glob == null || globMatches(glob, key)) {
 				keys.add(key.getBytes(StandardCharsets.UTF_8));
 			}
 		}
@@ -470,27 +479,120 @@ final class PurgeFakeRedis {
 		return keys;
 	}
 
-	private static Pattern globToRegex(String glob) {
-		StringBuilder regex = new StringBuilder("^");
-		for (int i = 0; i < glob.length(); i++) {
-			char current = glob.charAt(i);
-			if (current == '\\' && i + 1 < glob.length()) {
-				regex.append(Pattern.quote(String.valueOf(glob.charAt(++i))));
+	/**
+	 * Redis {@code stringmatchlen} 的忠实复刻（本替身只建模产品代码真正用到的 glob 子集）。
+	 *
+	 * <h2>为什么不能再用正则翻译</h2>
+	 * 旧实现把 {@code [} / {@code ]} 当<b>字面字符</b>转义，比真 Redis 宽松得多：
+	 * 真 Redis 里 {@code [} 开启字符类（{@code [^…]} 取反、{@code a-c} 区间、无 {@code ]} 时吃到模式末尾），
+	 * {@code \} 转义下一字符。用它验证"sessionId 含 {@code [} 时销毁是否漏删自己的 staging 键"
+	 * 会得到<b>假绿</b>——正是 review I1 指出的"替身掩盖缺陷"。因此这里直接按字符逐位匹配。
+	 */
+	static boolean globMatches(String pattern, String key) {
+		int p = 0;
+		int k = 0;
+		int starP = -1;
+		int starK = -1;
+		while (k < key.length()) {
+			char pc = p < pattern.length() ? pattern.charAt(p) : 0;
+			if (pc == '*') {
+				starP = ++p;
+				starK = k;
+				continue;
 			}
-			else if (current == '*') {
-				regex.append(".*");
+			boolean matched = false;
+			int next = 0;
+			if (p < pattern.length()) {
+				next = singleMatches(pattern, p, key.charAt(k));
+				matched = next > 0;
 			}
-			else if (current == '?') {
-				regex.append('.');
+			if (matched) {
+				p = next;
+				k++;
+				continue;
 			}
-			else if ("[](){}.+^$|".indexOf(current) >= 0) {
-				regex.append('\\').append(current);
+			if (starP >= 0) {
+				// 回溯到上一个 '*'：让它多吃一个字符
+				p = starP;
+				k = ++starK;
+				continue;
 			}
-			else {
-				regex.append(current);
-			}
+			return false;
 		}
-		return Pattern.compile(regex.append('$').toString());
+		while (p < pattern.length() && pattern.charAt(p) == '*') {
+			p++;
+		}
+		return p == pattern.length();
+	}
+
+	/**
+	 * 单个模式单元对单个字符的匹配。
+	 *
+	 * @return 匹配时返回<b>下一个模式位置</b>（&gt;0）；不匹配返回 0
+	 */
+	private static int singleMatches(String pattern, int p, char c) {
+		char pc = pattern.charAt(p);
+		switch (pc) {
+			case '\\':
+				if (p + 1 >= pattern.length()) {
+					return c == '\\' ? p + 1 : 0;
+				}
+				return pattern.charAt(p + 1) == c ? p + 2 : 0;
+			case '[': {
+				int i = p + 1;
+				boolean negate = i < pattern.length() && pattern.charAt(i) == '^';
+				if (negate) {
+					i++;
+				}
+				boolean matched = false;
+				boolean closed = false;
+				while (i < pattern.length()) {
+					char current = pattern.charAt(i);
+					if (current == '\\' && i + 1 < pattern.length()) {
+						if (pattern.charAt(i + 1) == c) {
+							matched = true;
+						}
+						i += 2;
+						continue;
+					}
+					if (current == ']') {
+						closed = true;
+						i++;
+						break;
+					}
+					if (i + 2 < pattern.length() && pattern.charAt(i + 1) == '-' && pattern.charAt(i + 2) != ']') {
+						char from = current;
+						char to = pattern.charAt(i + 2);
+						if (from > to) {
+							char swap = from;
+							from = to;
+							to = swap;
+						}
+						if (c >= from && c <= to) {
+							matched = true;
+						}
+						i += 3;
+						continue;
+					}
+					if (current == c) {
+						matched = true;
+					}
+					i++;
+				}
+				if (negate) {
+					matched = !matched;
+				}
+				if (!matched) {
+					return 0;
+				}
+				// 未闭合的字符类吃到模式末尾：真 Redis 里它仍然只匹配一个字符，之后就要求键结束。
+				return closed ? i : pattern.length();
+			}
+			case '?':
+				return p + 1;
+			default:
+				return pc == c ? p + 1 : 0;
+		}
 	}
 
 	private static final class BytesCursor implements Cursor<byte[]> {

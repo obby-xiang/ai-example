@@ -412,24 +412,35 @@ public class AiController {
 		SessionGate.Busy busy = this.sessionGate.acquire(sessionId, runId);
 		// 批G · G6：僵尸轮放行 —— 上一轮所在进程死了，会话门却还留着他的 runId 时，用户会永远
 		// 409（只能刷新）。判据见 RunLiveness（无租约 + 本进程无活连接 + 活动早已超出僵尸窗口）。
-		if (busy != null && isDeadRound(busy.runId())) {
+		// RT-35：持有者不可知（{@code busy.unknown()}、runId=null）时没有可判的轮 —— 不拿 null 去读
+		// 快照/租约（Redis 抖动时那会把"如实 409"变成异常），也不做任何强释放。
+		if (busy != null && !busy.unknown() && isDeadRound(busy.runId())) {
 			log.warn("会话门被死轮占着，放行新发送 sessionId={} deadRunId={} newRunId={}", sessionId, busy.runId(), runId);
 			// 死轮已判定不再推进：按 runId 强释放，仅当会话门仍属于这个死轮才生效。
 			this.sessionGate.releaseDeadHeld(sessionId, busy.runId());
 			busy = this.sessionGate.acquire(sessionId, runId);
 		}
 		if (busy != null) {
-			// ADR-5：409 必须携带进行中轮的 runId，前端据此改走 /api/ai/events/{runId}
+			// ADR-5：409 携带进行中轮的 runId，前端据此改走 /api/ai/events/{runId}
+			// —— 仅当持有者可知；不可知时不写 runId/reattach（不编造指向不存在流的地址）。
 			Map<String, Object> body = new LinkedHashMap<>();
 			body.put("code", ErrorCodes.SESSION_BUSY);
 			body.put("message", localize(ErrorCodes.SESSION_BUSY, "该会话已有一轮对话在进行中，请先处理或重挂该轮"));
 			body.put("sessionId", sessionId);
-			body.put("runId", busy.runId());
+			if (busy.unknown()) {
+				// RT-35：持有者不可知 ⇒ 没有可指向的轮，**不编造** runId 与 reattach
+				// （否则对外给出 /api/ai/events/null 这条不存在的流，把调用方粘死在假地址上）。
+				// 状态码与 degraded 不变：调用方按既有重试/退避即可恢复（无粘滞、不改状态码语义）。
+				body.put("unknown", true);
+			}
+			else {
+				body.put("runId", busy.runId());
+				body.put("reattach", "/api/ai/events/" + busy.runId());
+			}
 			body.put("degraded", busy.degraded());
-			body.put("reattach", "/api/ai/events/" + busy.runId());
 			// 本轮没有 runId（被拒了）：锚到"占着会话的那一轮"，那才是要看的那条链
-			deny(HttpStatus.CONFLICT, ErrorCodes.SESSION_BUSY, sessionId, busy.runId(), "heldBy", busy.runId(),
-					"degraded", busy.degraded());
+			deny(HttpStatus.CONFLICT, ErrorCodes.SESSION_BUSY, sessionId, busy.runId(), "heldBy",
+					busy.unknown() ? "unknown" : busy.runId(), "degraded", busy.degraded());
 			return json(HttpStatus.CONFLICT, body);
 		}
 
@@ -1650,6 +1661,11 @@ public class AiController {
 		body.put("activeSuspendGates", this.confirmGate.pendingGates());
 		body.put("heldSessions", this.sessionGate.heldSessions());
 		body.put("sessionLockRenewals", this.sessionGate.renewals());
+		// RT-34 的聚合面（additive）：续期累计丢锁 + 当前仍降级的持有者。两条来源都必须算进来 ——
+		// 取门时 Redis 不可用只置 holder.degraded、**不**累加 lockLost，只看计数会把那次降级漏报。
+		body.put("sessionLockLost", this.sessionGate.lockLost());
+		body.put("sessionLockDegraded", this.sessionGate.lockLost() > 0 || this.sessionGate.degradedSessions() > 0);
+
 		body.put("resilience", Map.of(
 				"firstByteTimeout", String.valueOf(this.properties.getResilience().getFirstByteTimeout()),
 				"interEventTimeout", String.valueOf(this.properties.getResilience().getInterEventTimeout()),

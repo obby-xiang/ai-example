@@ -118,6 +118,16 @@ public class ResumeService {
 	/** en 白名单兜底（{@code messages_en} 缺失时仍不裸露原文）。 */
 	public static final String AI_RESUME_FAILED_MESSAGE_EN = "Could not resume the previous response. Please try again.";
 
+	/**
+	 * {@code PROVIDER_GONE} 的用户面短句：与 409 响应体的 {@code message} 同一句，
+	 * 终帧 {@code code=AI_PROVIDER_GONE} 的文案也取它（一处文案，两处出口）。
+	 */
+	public static final String PROVIDER_GONE_MESSAGE = "该轮使用的模型端点已被删除或停用，无法按原模型续跑；请重新发送一轮。";
+
+	/** en 白名单兜底（{@code messages_en} 缺失时仍不裸露内部信息）。 */
+	public static final String PROVIDER_GONE_MESSAGE_EN = "The model endpoint this turn used has been removed or disabled, "
+			+ "so it cannot be resumed with the same model. Please send a new message.";
+
 	private final RunStore store;
 
 	private final RunRegistry registry;
@@ -678,23 +688,9 @@ public class ResumeService {
 			// 取消优先（ADR-8 修正③）：权威取消标志在 Redis，跨进程同样拦得住续跑 ——
 			// 否则"用户已取消"的轮次会被重启后的自动续跑重新拾起并执行掉。
 			// 位置在统一终态判定<b>之前</b>：即便快照已落 CANCELLED，也要把残留的 PENDING 条目收敛掉。
-			CancellationRegistry.CancelState cancelState = this.cancellations.cancelState(runId);
-			if (cancelState == CancellationRegistry.CancelState.UNKNOWN) {
-				// 续跑会启动执行；取消状态未知时拒绝并给出 typed 结局（对外 503），不是 500。
-				body.put("resumed", false);
-				body.put("reason", "CANCEL_STATE_UNKNOWN");
-				body.put("code", com.example.configmgr.common.ErrorCodes.AI_REDIS_UNAVAILABLE);
-				return new ResumeResult(Outcome.CANCEL_STATE_UNKNOWN, body);
-			}
-			if (cancelState == CancellationRegistry.CancelState.CANCELLED) {
-				snapshot.setStatus(RunSnapshot.CANCELLED);
-				snapshot.setCancelled(true);
-				snapshot.setError("AI_RUN_CANCELLED：本轮已由用户取消，续跑被拒绝");
-				this.store.save(snapshot);
-				this.store.cancelPendings(runId);
-				body.put("resumed", false);
-				body.put("reason", "ALREADY_CANCELLED");
-				return new ResumeResult(Outcome.ALREADY_CANCELLED, body);
+			ResumeResult cancelAtEntry = cancelStateOutcome(runId, body);
+			if (cancelAtEntry != null) {
+				return cancelAtEntry;
 			}
 			// 统一终态判定（T3-7 / A14）：DONE/FAILED/CANCELLED（+ REJECTED 归一）一律不再续跑。
 			// 结局码保持既有对外语义：取消 → ALREADY_CANCELLED；完成 → ALREADY_DONE（reason ALREADY_DONE）；
@@ -738,19 +734,26 @@ public class ResumeService {
 			boolean frozenIdentity = snapshot.paramsFrozen()
 					&& snapshot.getModelId() != null && !snapshot.getModelId().isBlank();
 			if (this.aiConfigService != null && snapshot.getProviderId() != null) {
-				AiConfigService.ChatTarget bound = this.aiConfigService
-					.resolveChatTarget(snapshot.getProviderId(), snapshot.getModelId())
-					.orElse(null);
-				if (bound == null) {
+				ResolvedIdentity identity = resolveForResume(runId,
+						() -> this.aiConfigService.resolveChatTarget(snapshot.getProviderId(), snapshot.getModelId()),
+						() -> this.aiConfigService.bindingState(snapshot.getProviderId(), snapshot.getModelId()));
+				if (identity.unknown()) {
+					return stateUnknown(runId, snapshot, identity.detail());
+				}
+				if (identity.target() == null) {
 					return providerGone(runId, snapshot, "该 provider/模型此刻不可用");
 				}
 			}
 			else if (this.aiConfigService != null && frozenIdentity) {
 				// env 合成行（无 providerId）没有稳定身份可比：退化为"这个模型名此刻是否仍可解析"
-				AiConfigService.ChatTarget target = this.aiConfigService
-					.resolveChatTarget(snapshot.getModelId())
-					.orElse(null);
-				if (target == null || !snapshot.getModelId().equalsIgnoreCase(target.modelId())) {
+				ResolvedIdentity identity = resolveForResume(runId,
+						() -> this.aiConfigService.resolveChatTarget(snapshot.getModelId()),
+						() -> this.aiConfigService.bindingState(null, snapshot.getModelId()));
+				if (identity.unknown()) {
+					return stateUnknown(runId, snapshot, identity.detail());
+				}
+				if (identity.target() == null
+						|| !snapshot.getModelId().equalsIgnoreCase(identity.target().modelId())) {
 					return providerGone(runId, snapshot, "该模型此刻已不可解析");
 				}
 			}
@@ -839,7 +842,37 @@ public class ResumeService {
 								+ "（将显式 blocked、不执行后端桩、不写台账）", runId, effective.getToolCallId(),
 								effective.getName());
 					}
-					String text = this.toolCallingManager.resolvePending(runId, prompt, effective);
+					ResumeResult cancelBeforeTool = cancelStateOutcome(runId, body);
+					if (cancelBeforeTool != null) {
+						return cancelBeforeTool;
+					}
+					// ===== UNKNOWN 的翻译（取消状态在重建/认领窗口抖动）=====
+					// 认领前复核为 fail-closed：读到 UNKNOWN 会抛既有 STATE_UNAVAILABLE（inline 路径的既有语义）。
+					// 它若直接穿出 resume()，HTTP 会把"取消状态不可知"变成 500 —— 违反已批准的 UNKNOWN/503 契约。
+					// 这里的职责只是把**同一个既有异常**翻译成**同一个既有 typed 结局**（与首次 unknown
+					// 逐字同形，见 cancelStateOutcome）；不重新读取消状态、不放行、不落终态。
+					String text;
+					try {
+						text = this.toolCallingManager.resolvePending(runId, prompt, effective);
+					}
+					catch (StreamViolationException ex) {
+						if (!StreamViolationException.STATE_UNAVAILABLE.equals(ex.getCode())) {
+							throw ex;
+						}
+						log.warn("续跑重建期间取消状态不可知，按既有 UNKNOWN 结局收口 runId={} toolCallId={}：{}",
+								runId, effective.getToolCallId(), ex.getMessage());
+						return cancelUnknownOutcome(body);
+					}
+					// ===== R1：认领前复核命中取消 ⇒ 这一轮必须走取消终态 =====
+					// resolvePending 内部会在真正认领前复核取消（命中即放弃执行、条目收敛为 CANCELLED），
+					// 但执行方没有"结束这一轮"的能力（它不持有 chat/终态面）。若在这里继续重建历史并
+					// 交棒给模型，用户已经按下的停止会被一条 CANCELLED 工具结果"吞掉"：模型照常作答、
+					// 轮次以 done 收尾。故紧接着复用同一个入口（它会 chatService.cancelParked → 取消终态
+					// + 补裁决帧 + 结算行），"取消优先"因此覆盖到认领窗口。
+					ResumeResult cancelAfterTool = cancelStateOutcome(runId, body);
+					if (cancelAfterTool != null) {
+						return cancelAfterTool;
+					}
 					// R6 裁决：标签必须在**结算之后**回读 Redis 才算准 ——
 					// executeOnce 的认领/完成是写在 Redis 里的新副本上，传入的 effective 可能仍是旧值
 					// （旧实现因此在"本次刚执行完"时显示 reused(null)）。
@@ -1145,12 +1178,179 @@ public class ResumeService {
 		return SystemMessages.reattach(systems, rest);
 	}
 
+	/** 续跑入口与每次工具派发前共用的取消门；null = 可以继续。 */
+	private ResumeResult cancelStateOutcome(String runId, Map<String, Object> body) {
+		CancellationRegistry.CancelState state = this.cancellations.cancelState(runId);
+		if (state == CancellationRegistry.CancelState.UNKNOWN) {
+			return cancelUnknownOutcome(body);
+		}
+		if (state == CancellationRegistry.CancelState.CANCELLED) {
+			this.chatService.cancelParked(runId);
+			body.put("resumed", false);
+			body.put("reason", "ALREADY_CANCELLED");
+			return new ResumeResult(Outcome.ALREADY_CANCELLED, body);
+		}
+		return null;
+	}
+
 	/**
-	 * {@code PROVIDER_GONE} 结局（409 语义）：快照的 provider/model 此刻不可用，<b>不跨 provider、
-	 * 不换模型</b>续跑。
+	 * {@code UNKNOWN}（取消状态不可知）的<b>唯一</b> typed 结局（既有契约，未新增码）：
+	 * {@code CANCEL_STATE_UNKNOWN} + {@code reason=CANCEL_STATE_UNKNOWN} + {@code AI_REDIS_UNAVAILABLE}。
+	 *
+	 * <p>两个使用点共用同一份口径：①入口/逐条检查首次读到 {@code UNKNOWN}（{@link #cancelStateOutcome}）；
+	 * ②<b>认领前复核</b>读到 {@code UNKNOWN} 后抛出的既有 {@code STATE_UNAVAILABLE}（在重建循环里翻译）。
+	 * 两处必须逐字一致 —— 否则同一个"Redis 读抖动"会因落在窗口前/后而给出两种对外结局。
+	 */
+	private ResumeResult cancelUnknownOutcome(Map<String, Object> body) {
+		body.put("resumed", false);
+		body.put("reason", "CANCEL_STATE_UNKNOWN");
+		body.put("code", ErrorCodes.AI_REDIS_UNAVAILABLE);
+		return new ResumeResult(Outcome.CANCEL_STATE_UNKNOWN, body);
+	}
+
+	/**
+	 * 续跑身份判据的<b>三态</b>：确定可用 / 确定不可用 / 此刻不可知。
+	 *
+	 * <p>
+	 * 第三态是 B2 修正的核心：配置读不到、或行在但 key 解不开，都属于"此刻不知道"，
+	 * 既不能放行（会让"答得出、存不下"的幽灵续跑跑起来），也<b>不能判死</b>
+	 * （一次读库抖动 ⇒ 永久 FAILED）。
+	 */
+	private record ResolvedIdentity(AiConfigService.ChatTarget target, boolean unknown, String detail) {
+
+		static ResolvedIdentity present(AiConfigService.ChatTarget target) {
+			return new ResolvedIdentity(target, false, null);
+		}
+
+		static ResolvedIdentity absent() {
+			return new ResolvedIdentity(null, false, null);
+		}
+
+		static ResolvedIdentity unknown(String detail) {
+			return new ResolvedIdentity(null, true, detail);
+		}
+
+	}
+
+	/**
+	 * 续跑身份解析：<b>硬否定（{@code PROVIDER_GONE}）之前必须先强制重载一次配置，且只有
+	 * "重载成功 + 仍为空 + 行级声明也没有"才算确定不可用</b>。
+	 *
+	 * <h2>为什么先刷新</h2>
+	 * {@code resolveChatTarget} 读的是<b>配置快照</b>，而快照只在版本变化时重载。跨实例场景里"另一个
+	 * 实例刚把 provider 写进共享库"与"本实例的快照还没看到"完全可能同时成立（run 40182796512 的
+	 * B/C 就是快照永久停在空列表）。此时按旧快照判 {@code PROVIDER_GONE} 是<b>把缓存陈旧当成端点消失</b>。
+	 *
+	 * <h2>为什么"刷新失败"不能算否</h2>
+	 * {@link AiConfigService#load()} 会吞掉读库异常（{@code /health}、{@code /chat} 不该因此 500），
+	 * 于是 {@code reload()} 在读库故障时<u>既不抛也不报</u>：调用方只看到"快照仍是旧的/空的"。
+	 * 如果据此判死，一次 Hikari 超时 / 迁移锁 / 只读切换就会把这一轮变成<b>永久 FAILED</b>
+	 * （本批把硬否定升级成了终态收敛，所以这条区分从"更好"变成"必需"）。
+	 * 因此这里用 {@link AiConfigService#reloadWithOutcome()} 拿"这次到底刷新成功没有"：
+	 * 不成功 ⇒ 第三态（{@code STATE_UNKNOWN}，快照保持原样，稍后重试）。
+	 *
+	 * <h2>为什么"行在但 key 解不开"也不能算否</h2>
+	 * {@code resolveChatTarget} 要求 key 可解析；KEK 缺失/轮换/密文损坏时它同样返回空，但端点并没有
+	 * 被删 —— 那种情形由 {@code binding}（{@link AiConfigService#bindingState(Long, String)} 的
+	 * {@code KEY_UNREADABLE}）识别为第三态。只有"行确实没了/停用了/模型下架/从未声明 key"
+	 * （{@code ABSENT}）才落 {@link #providerGone}。
+	 */
+	private ResolvedIdentity resolveForResume(String runId,
+			java.util.function.Supplier<java.util.Optional<AiConfigService.ChatTarget>> lookup,
+			java.util.function.Supplier<AiConfigService.BindingState> binding) {
+		java.util.Optional<AiConfigService.ChatTarget> cached = lookup.get();
+		if (cached.isPresent()) {
+			return ResolvedIdentity.present(cached.get());
+		}
+		AiConfigService.ReloadResult reload;
+		try {
+			reload = this.aiConfigService.reloadWithOutcome();
+		}
+		catch (RuntimeException ex) {
+			log.warn("续跑身份判据重载配置抛错 runId={}（按不可知处理，不判死不写终态）：{}", runId, ex.getMessage());
+			return ResolvedIdentity.unknown("配置重载抛错");
+		}
+		if (reload == null || !reload.ok()) {
+			// reload == null = 替身没打桩/实现缺失：同样按"不可知"处理（宁可不判死）。
+			log.warn("续跑身份判据重载未成功 runId={}（读库不可用；按不可知处理，不判死不写终态）", runId);
+			return ResolvedIdentity.unknown("配置快照刷新未成功");
+		}
+		java.util.Optional<AiConfigService.ChatTarget> refreshed = lookup.get();
+		if (refreshed.isPresent()) {
+			return ResolvedIdentity.present(refreshed.get());
+		}
+		AiConfigService.BindingState state;
+		try {
+			state = binding.get();
+		}
+		catch (RuntimeException ex) {
+			log.warn("续跑身份判据读取行级状态失败 runId={}（按不可知处理）：{}", runId, ex.getMessage());
+			return ResolvedIdentity.unknown("行级判据不可读");
+		}
+		if (state == AiConfigService.BindingState.KEY_UNREADABLE) {
+			return ResolvedIdentity.unknown("provider/模型仍在配置里，但 key 此刻不可用");
+		}
+		if (state == AiConfigService.BindingState.RESOLVED) {
+			// 不应发生（行/模型/key 都就绪时解析不会为空）。宁可当"不可知"也不判死。
+			log.warn("续跑身份判据自相矛盾 runId={}（行级状态=RESOLVED 但解析为空）—— 按不可知处理", runId);
+			return ResolvedIdentity.unknown("行级判据与解析结果不一致");
+		}
+		return ResolvedIdentity.absent();
+	}
+
+	/**
+	 * {@code STATE_UNKNOWN} 结局（B2 修正）：配置此刻<b>不可确认</b>，这一轮既不判死也不放行。
+	 *
+	 * <p>
+	 * 对外 503 + {@code reason=STATE_UNKNOWN, code=AI_REDIS_UNAVAILABLE}（与"待决条目读失败"、
+	 * "取消状态未知"同口径）；快照保持 {@code SUSPENDED}、<b>不写终态、不出业务终帧</b>
+	 * （出终帧就是判死）；只把"没人会再推进"的当前订阅收掉 —— 否则重挂会挂上一条永远不会再有帧的
+	 * 连接（服务端 emitter 无传输超时），客户端只能等自己的超时。
+	 */
+	private ResumeResult stateUnknown(String runId, RunSnapshot snapshot, String detail) {
+		log.warn("续跑暂缓：配置状态不可确认 runId={} providerId={} model={}（{}）—— 不判死、不写终态、不出业务帧，"
+				+ "快照保持 {}，由派发方/重挂稍后重试", runId, snapshot.getProviderId(), snapshot.getModelId(),
+				detail, snapshot.getStatus());
+		Map<String, Object> body = new LinkedHashMap<>();
+		body.put("runId", runId);
+		body.put("resumed", false);
+		body.put("reason", "STATE_UNKNOWN");
+		body.put("code", ErrorCodes.AI_REDIS_UNAVAILABLE);
+		body.put("providerId", snapshot.getProviderId());
+		body.put("modelId", snapshot.getModelId());
+		releaseSubscriptionsWithoutFrame(runId);
+		return new ResumeResult(Outcome.STATE_UNKNOWN, body);
+	}
+
+	/**
+	 * 只收掉这一轮<b>当下的订阅</b>（不置终态标志、不写终帧、不摘注册表条目）：
+	 * 与 park 的"挂起即断"同一条语义 —— 连接不再悬挂，归档里的帧不受影响，重挂仍可回放并重试。
+	 */
+	private void releaseSubscriptionsWithoutFrame(String runId) {
+		try {
+			SseChatEmitter out = this.registry == null ? null : this.registry.find(runId);
+			if (out != null) {
+				out.completeSubscriptions();
+			}
+		}
+		catch (RuntimeException ex) {
+			log.debug("续跑暂缓收流失败 runId={}：{}", runId, ex.getMessage());
+		}
+	}
+
+	/**
+	 * {@code PROVIDER_GONE} 结局（409 语义）：快照的 provider/model 此刻<b>确定</b>不可用，<b>不跨
+	 * provider、不换模型</b>续跑。
 	 *
 	 * <p>I3 起判据是<b>精确绑定</b>（{@code resolveChatTarget(providerId, modelId)}）：同名模型挂在
 	 * 别家不算数；env 合成行（无 providerId）退化为"该模型名是否仍可解析"。
+	 *
+	 * <p><b>只有"确定"才走到这里</b>（B2 修正）：调用方已确认①配置刷新成功、②行级状态为
+	 * {@code ABSENT}（行/模型不在、停用，或从未声明 key）。"刷新失败"或"key 解不开"
+	 * （{@code KEY_UNREADABLE}）走 {@link #stateUnknown}。
+	 *
+	 * <p><b>B1（run 40182796512）</b>：判到硬否定就必须收敛 —— 快照落 {@code FAILED} + 机器可读的
+	 * 终帧，而不是把这一轮留在 {@code SUSPENDED} 且"无人驱动、无帧可等"（客户端只能等到超时）。
 	 */
 	private ResumeResult providerGone(String runId, RunSnapshot snapshot, String detail) {
 		log.warn("续跑拒绝：快照的 provider/模型已不可用 runId={} providerId={} model={}（{}）", runId,
@@ -1160,8 +1360,76 @@ public class ResumeService {
 		body.put("reason", "PROVIDER_GONE");
 		body.put("providerId", snapshot.getProviderId());
 		body.put("modelId", snapshot.getModelId());
-		body.put("message", "该轮使用的模型端点已被删除或停用，无法按原模型续跑；请重新发送一轮。");
+		body.put("message", PROVIDER_GONE_MESSAGE);
+		convergeProviderGone(runId, snapshot);
 		return new ResumeResult(Outcome.PROVIDER_GONE, body);
+	}
+
+	/**
+	 * {@code PROVIDER_GONE} 的终态收敛（B1）：<b>快照 FAILED + 机器可读终帧 + 收流</b>。
+	 *
+	 * <h2>为什么必须做（而不是只回 409）</h2>
+	 * 409 只回答<b>这一次</b>调用方；这一轮本身仍停在 {@code SUSPENDED}，条目已全部结算却没有任何
+	 * 驱动方 —— 后续重挂会挂上一条"不会再有帧"的连接（服务端用无传输超时的 emitter），客户端要么
+	 * 永久等待，要么等到自己的超时（实测 120s）。{@link ProviderGoneException} 的类注早已明确这条
+	 * 红线："必须落成明确终态，而不是只发一帧 error 就把快照留在非终态"。
+	 *
+	 * <p>
+	 * <b>只对"确定不可用"生效</b>：调用点只有本类的身份预检（精确绑定解析为空）。租约不可读 /
+	 * 状态未知 / 另一驱动方在跑，都<b>不</b>走这里 —— 那些是"此刻不知道"，不是"确定没了"：
+	 * 写终态与出终帧都会被 {@link RunStore#save} / {@code SseChatEmitter#emit} 的只读判据拦下
+	 * （见 {@code LeaseService.LeaseAuthority#readOnly()}），这里先显式跳过，避免"连接被收了但既无
+	 * 终帧也无终态"的半死形态。
+	 */
+	private void convergeProviderGone(String runId, RunSnapshot snapshot) {
+		if (runId == null) {
+			return;
+		}
+		try {
+			LeaseService.LeaseAuthority authority = this.store.runLeaseAuthority(runId);
+			if (authority != null && authority.readOnly()) {
+				log.warn("续跑硬否定未收敛 runId={}：写权限 {}（丢租/不可确认）—— 不写终态、不出终帧，"
+						+ "由新主人按同一判据收尾", runId, authority);
+				return;
+			}
+			RunSnapshot latest = this.store.get(runId);
+			RunSnapshot target = latest == null ? snapshot : latest;
+			if (target == null || RunSnapshot.isTerminal(target.getStatus())) {
+				return;
+			}
+			target.setStatus(RunSnapshot.FAILED);
+			target.setError("PROVIDER_GONE：" + PROVIDER_GONE_MESSAGE);
+			target.setInFlightToolCalls(new ArrayList<>());
+			this.store.save(target);
+			SseChatEmitter out = this.registry == null ? null : this.registry.of(runId);
+			if (out == null) {
+				return;
+			}
+			out.error(ErrorCodes.AI_PROVIDER_GONE, providerGoneMessage());
+			this.registry.close(runId);
+			log.info("续跑硬否定已收敛 runId={} status=FAILED code={}（重挂会回放该终帧后收流）", runId,
+					ErrorCodes.AI_PROVIDER_GONE);
+		}
+		catch (RuntimeException ex) {
+			log.warn("续跑硬否定收敛失败 runId={}（快照/终帧未落地，由后续重挂或启动扫描再收敛）：{}", runId,
+					ex.getMessage());
+		}
+	}
+
+	/** 用户面文案：与 409 同一句；en 走 {@code messages_en}，绝不回落到内部信息。 */
+	String providerGoneMessage() {
+		if (!ReplyLanguage.current().english()) {
+			return PROVIDER_GONE_MESSAGE;
+		}
+		if (this.messageSource != null) {
+			try {
+				return this.messageSource.getMessage("error." + ErrorCodes.AI_PROVIDER_GONE, null, Locale.ENGLISH);
+			}
+			catch (NoSuchMessageException ex) {
+				log.debug("messages_en 缺 error.{}，回落 en 白名单短句", ErrorCodes.AI_PROVIDER_GONE);
+			}
+		}
+		return PROVIDER_GONE_MESSAGE_EN;
 	}
 
 	/**

@@ -150,6 +150,8 @@ export const ErrorCode = {
   MODELS_UNSUPPORTED: 'MODELS_UNSUPPORTED',
   INVALID_MODEL: 'INVALID_MODEL',
   INVALID_PARAM: 'INVALID_PARAM',
+  /** 改主机名却保留旧 key：需重录或先清空（与 INVALID_PARAM 的通用校验分开） */
+  KEY_BOUND_TO_HOST: 'KEY_BOUND_TO_HOST',
   INVALID_BASE_URL: 'INVALID_BASE_URL',
   BLOCKED_PRIVATE_ENDPOINT: 'BLOCKED_PRIVATE_ENDPOINT',
   AUTH_FAILED: 'AUTH_FAILED',
@@ -205,6 +207,8 @@ export const ErrorCode = {
   CONTEXT_OVERFLOW_AFTER_TOOL_SIDE_EFFECT: 'CONTEXT_OVERFLOW_AFTER_TOOL_SIDE_EFFECT',
   AI_RUN_FAILED: 'AI_RUN_FAILED',
   AI_RESUME_FAILED: 'AI_RESUME_FAILED',
+  /** 续跑被确定拒绝（快照绑定的 provider/模型已不可用）：终态语义，重发一轮而不是重试续跑 */
+  AI_PROVIDER_GONE: 'AI_PROVIDER_GONE',
   CONFIG_INVALID: 'CONFIG_INVALID',
   SHA256_UNAVAILABLE: 'SHA256_UNAVAILABLE',
   AI_SUMMARY_UNAVAILABLE: 'AI_SUMMARY_UNAVAILABLE',
@@ -227,16 +231,26 @@ export type ErrorCodeValue = (typeof ErrorCode)[keyof typeof ErrorCode]
  */
 export const STRUCTURED_RESULT_MAX_CHARS = 8000
 
-/** 409 SESSION_BUSY 的响应体形态（ADR-5：必须携进行中轮的 runId）。 */
+/**
+ * 409 SESSION_BUSY 的响应体形态。
+ *
+ * 契约（ADR-5）：**持有者可知时**必须携进行中轮的 `runId` 与 `reattach`
+ * （前端据此改走 `/api/ai/events/{runId}`）。**持有者不可知**时（会话锁诊断读失败 /
+ * 锁已消失、无法给出 runId）后端**不编造**这两个字段：它们缺省、`unknown` 为 true，
+ * 其余不变（仍是 409 + `SESSION_BUSY` + `degraded`）。此时**不得**自行拼接重挂路径
+ * （如 `/api/ai/events/null`），按既有重试/退避恢复即可（无粘滞）。
+ */
 export interface SessionBusyConflict {
   code: typeof ErrorCode.SESSION_BUSY
   message: string
   sessionId: string
-  /** 进行中那一轮的 runId，前端据此改走 /api/ai/events/{runId} */
-  runId: string
+  /** 进行中那一轮的 runId；持有者可知时必在，不可知时缺省 */
+  runId?: string
   degraded?: boolean
-  /** 后端直接给出的重挂路径：/api/ai/events/{runId} */
-  reattach: string
+  /** 重挂路径 `/api/ai/events/{runId}`；与 `runId` 同进同缺 */
+  reattach?: string
+  /** 持有者不可知（没有可指向的轮）；与 `runId`/`reattach` 互斥 */
+  unknown?: boolean
 }
 
 /** 410 SESSION_PURGED：旧 sessionId 已销毁，必须走既有新建对话路径。 */

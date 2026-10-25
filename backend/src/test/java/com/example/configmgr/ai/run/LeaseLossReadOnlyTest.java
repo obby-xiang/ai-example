@@ -210,6 +210,48 @@ class LeaseLossReadOnlyTest {
 			.as("进程退出才清空墓碑；设施自证正常 ⇒ 之后按从未持租").isEqualTo(LeaseService.LeaseAuthority.NEVER_HELD);
 	}
 
+	@Test
+	void lostLeaseCannotHalfWriteSuspendedState() {
+		seedRun();
+		LeaseService.Lease a = this.storeA.tryAcquireRunLease(RUN_ID).orElseThrow();
+		this.fake.dropKey(LEASE_KEY);
+		this.storeB.tryAcquireRunLease(RUN_ID).orElseThrow();
+		assertThat(this.leaseA.renewState(a, ttl())).isEqualTo(LeaseService.RenewOutcome.LOST);
+		PendingToolCall pending = new PendingToolCall();
+		pending.setToolCallId("call-suspend-lost");
+		pending.setName("navigate_to");
+		pending.setKind(PendingToolCall.KIND_FRONTEND);
+		pending.setStatus(PendingToolCall.PENDING);
+		pending.setArguments("{}");
+
+		org.assertj.core.api.Assertions.assertThatThrownBy(() -> this.storeA.saveSuspended(RUN_ID, "",
+				List.of(pending), List.of(new UserMessage("hi")), this.codec))
+			.isInstanceOf(com.example.configmgr.common.AiStateUnavailableException.class);
+		assertThat(this.storeA.pendings(RUN_ID)).isEmpty();
+		assertThat(this.storeA.get(RUN_ID).getStatus()).isNotEqualTo(RunSnapshot.SUSPENDED);
+	}
+
+	@Test
+	void fenceAheadWithoutRenewalDropsProductionEmitterFrames() {
+		seedRun();
+		LeaseService.Lease a = this.storeA.tryAcquireRunLease(RUN_ID).orElseThrow();
+		this.fake.dropKey(LEASE_KEY);
+		this.storeB.tryAcquireRunLease(RUN_ID).orElseThrow();
+		RunSnapshot byB = this.storeB.get(RUN_ID);
+		byB.setStatus(RunSnapshot.SUSPENDED);
+		this.storeB.save(byB);
+		assertThat(this.storeA.fenceEpoch(RUN_ID)).isGreaterThan(a.epoch());
+		assertThat(this.storeA.runLeaseAuthority(RUN_ID)).isEqualTo(LeaseService.LeaseAuthority.HELD);
+		RedisFrameStore productionFrames = new RedisFrameStore(this.fake.redis, this.mapper, this.properties);
+		SseChatEmitter oldDriver = new RunRegistry(this.storeA, this.mapper, null, productionFrames, null, null)
+			.of(RUN_ID);
+
+		oldDriver.delta("stale");
+
+		assertThat(this.fake.redis.opsForValue().get(productionFrames.seqKey(RUN_ID))).isNull();
+		assertThat(productionFrames.readFrom(RUN_ID, 0L, 10)).isEmpty();
+	}
+
 	private void seedRun() {
 		this.storeA.create(RUN_ID, SESSION_ID, AiContext.empty(), List.of(new UserMessage("hi")), this.codec, null,
 				null);

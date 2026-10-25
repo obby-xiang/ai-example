@@ -2239,6 +2239,101 @@ function saveHealthSnapshot(name, entries) {
   return path.relative(RUN.artifacts, file)
 }
 
+// ── 冷启动种子身份（T1：run 40182796512） ───────────────────────────────────
+
+/**
+ * `/api/ai/health` 的"种子身份"视图：providers 里**库里的行**（`synthetic !== true`）。
+ *
+ * 为什么认 `synthetic` 而不是"id 键是否存在"：全局 Jackson `default-property-inclusion=non_null`
+ * 会省略 `id`（`AiConfigService#describeProviders` 的类注即写明合成行判据是 `synthetic`）。
+ *
+ * 返回 `{ providerId, ids, codes, synthetic, malformed }`：`ids` 为空 = 该实例只看到 env 合成行
+ * （= 配置快照里根本没有库行，正是本轮 B/C 的形态）。
+ */
+function seededProviderIdentity(body) {
+  const providerId = body && body.providerId !== undefined ? body.providerId : null
+  if (!body || !Array.isArray(body.providers)) {
+    return { providerId, ids: [], codes: [], synthetic: [], malformed: 'providers 缺失/不是数组' }
+  }
+  const seeded = body.providers.filter((row) => row && row.synthetic !== true && row.id !== undefined && row.id !== null)
+  const synthetic = body.providers.filter((row) => row && row.synthetic === true).map((row) => row.code)
+  return {
+    providerId,
+    ids: seeded.map((row) => Number(row.id)),
+    codes: seeded.map((row) => row.code),
+    synthetic,
+    malformed: null
+  }
+}
+
+/**
+ * 三实例的种子身份必须是**同一行库行**：每个实例至少一条非合成行、默认 `providerId` 落在其中，
+ * 且三实例的 id 列表与默认 providerId 逐字相同（"各自看到不同的库行"同样有问题）。
+ */
+function assertColdProviderIdentity(snapshots) {
+  const keys = Object.keys(snapshots)
+  for (const key of keys) {
+    const snap = snapshots[key]
+    check(!snap.malformed, `实例 ${key} /api/ai/health 的 providers 形态异常：${snap.malformed}`)
+    check(
+      snap.ids.length >= 1,
+      `实例 ${key} 的 provider 列表没有库行（synthetic=${JSON.stringify(snap.synthetic)}）：` +
+        '冷启动种子没有发布配置版本，该实例的配置快照停在空列表（env 合成行会掩盖成 AI_AVAILABLE）'
+    )
+    check(
+      snap.providerId !== null && snap.providerId !== undefined,
+      `实例 ${key} /api/ai/health 的 providerId 为空（默认目标未绑定到库行）`
+    )
+    check(
+      snap.ids.includes(Number(snap.providerId)),
+      `实例 ${key} 的默认 providerId=${snap.providerId} 不在库行 id 列表 ${JSON.stringify(snap.ids)} 中`
+    )
+  }
+  for (const key of keys.slice(1)) {
+    checkEq(
+      JSON.stringify(snapshots[key].ids),
+      JSON.stringify(snapshots[keys[0]].ids),
+      `三实例必须看到同一批种子 provider id（${key} vs ${keys[0]}）`
+    )
+    checkEq(
+      snapshots[key].providerId,
+      snapshots[keys[0]].providerId,
+      `三实例的默认 providerId 必须一致（${key} vs ${keys[0]}）`
+    )
+  }
+  return { providerId: snapshots[keys[0]].providerId, ids: snapshots[keys[0]].ids }
+}
+
+/**
+ * 有界等待"三实例看到同一行种子 provider"（默认 30s；种子写发布版本后一个 reload 周期（1s）即收敛，
+ * 这里留足并发冷启动 + H2 首连的余量）。超时把**最后观测**写进报文，便于直接判因。
+ */
+async function waitColdSeededProvider(timeoutMs = 30000) {
+  const deadline = Date.now() + timeoutMs
+  let lastSnapshots = null
+  let lastError = null
+  while (Date.now() < deadline) {
+    const snapshots = {}
+    for (const inst of INSTANCES) {
+      const health = await healthOf(inst.key)
+      snapshots[inst.key] = seededProviderIdentity(health.body)
+    }
+    lastSnapshots = snapshots
+    try {
+      return assertColdProviderIdentity(snapshots)
+    } catch (error) {
+      lastError = error
+    }
+    await sleep(250)
+  }
+  // 证据先落盘再抛（复审 N1 同口径）：失败时也要留得下"三实例各自看到了什么"。
+  saveHealthSnapshot('cold-provider-identity-last.json', lastSnapshots)
+  throw new Error(
+    `冷启动种子身份未在 ${timeoutMs}ms 内收敛：${lastError ? lastError.message : '未知'}；` +
+      `最后观测=${JSON.stringify(lastSnapshots)}`
+  )
+}
+
 // ── 用例 1：三实例冷启动 ───────────────────────────────────────────────────
 
 async function startAllConcurrently() {
@@ -2274,6 +2369,14 @@ async function verifyColdState() {
   }
   checkEq(new Set(Object.values(ids)).size, 3, '三实例 instanceId 必须互异')
   saveHealthSnapshot('instance-ids.json', ids)
+
+  // T1（run 40182796512）：冷启动必须看到**库里的种子行**，且三实例看到的是同一行。
+  // 只断言 available === true 会漏掉本类缺陷：provider 快照为空时 /health 仍因 env 合成行回
+  // AI_AVAILABLE（实测 B/C 的 providers[0].synthetic=true），失败因此推迟到第 7 例的 120s 超时。
+  // 版本发布（种子写路径）保证 1s reload 周期内收敛，故这里做**有界**等待而不是拍一张快照。
+  const coldProvider = await waitColdSeededProvider()
+  saveHealthSnapshot('cold-provider-identity.json', coldProvider)
+  caseLog(`冷启动种子身份：providerId=${coldProvider.providerId} ids=${JSON.stringify(coldProvider.ids)}`)
 
   // /health 200 之后 ApplicationReady 的种子监听器仍可能在本实例里跑；等定义齐再判一致性。
   await Promise.all(INSTANCES.map((inst) => waitSeeded(inst.key)))
@@ -5237,6 +5340,46 @@ function selfTestReviewContracts() {
   return `${needles.length + 1} 项`
 }
 
+/**
+ * 冷启动种子身份断言的自证（T1：run 40182796512）。
+ *
+ * 锁三件事：① 三实例同库行 ⇒ 通过；② 只看得到 env 合成行（B/C 的实测形态）⇒ 红；
+ * ③ 三实例看到的库行不一致 / 默认 providerId 不落在库行上 ⇒ 红。
+ */
+function selfTestColdProviderIdentity() {
+  const healthy = { providerId: 1, providers: [{ id: 1, code: 'deepseek', synthetic: false }] }
+  const ok = assertColdProviderIdentity({ a: seededProviderIdentity(healthy), b: seededProviderIdentity(healthy), c: seededProviderIdentity(healthy) })
+  checkEq(ok.providerId, 1, '自检：三实例同库行应通过')
+
+  // 实测形态：B/C 的 providers 只有 env 合成行（id 被 non_null 省略，synthetic=true）
+  const syntheticOnly = { providers: [{ code: 'deepseek', synthetic: true }] }
+  selfExpectThrow(
+    () => assertColdProviderIdentity({ a: seededProviderIdentity(healthy), b: seededProviderIdentity(syntheticOnly) }),
+    '自检：只有 env 合成行必须红（env 兜底会把它掩盖成 AI_AVAILABLE）'
+  )
+  // 合成行存在但默认目标没绑定到库行
+  selfExpectThrow(
+    () => assertColdProviderIdentity({ a: seededProviderIdentity({ providers: [{ id: 1, synthetic: false }] }) }),
+    '自检：默认 providerId 为空必须红'
+  )
+  // 三实例看到不同的库行 id
+  selfExpectThrow(
+    () => assertColdProviderIdentity({
+      a: seededProviderIdentity(healthy),
+      b: seededProviderIdentity({ providerId: 2, providers: [{ id: 2, code: 'deepseek', synthetic: false }] })
+    }),
+    '自检：三实例库行 id 不一致必须红'
+  )
+  // 默认 providerId 不在库行里
+  selfExpectThrow(
+    () => assertColdProviderIdentity({ a: seededProviderIdentity({ providerId: 9, providers: [{ id: 1, synthetic: false }] }) }),
+    '自检：默认 providerId 不在库行列表里必须红'
+  )
+  // 形态异常（providers 缺失）
+  selfExpectThrow(() => assertColdProviderIdentity({ a: seededProviderIdentity({}) }), '自检：providers 缺失必须红')
+  return '1 正例 + 5 反例'
+}
+
 function selfTestHygiene() {
   const files = [
     'scripts/ci/cluster3-run.sh',
@@ -5282,6 +5425,7 @@ async function selfCheckMain() {
   selfCheck('桩路由表契约（TC16-EXPORT）', selfTestStubContract)
   selfCheck('实例启动参数（h2tcp / LOCK_TIMEOUT / trusted-proxies）', selfTestInstanceArgs)
   selfCheck('复审契约（SIGSTOP/deferred / 分档码 / >40 分页 / providerId 绑定）', selfTestReviewContracts)
+  selfCheck('冷启动种子身份（非合成库行 + 三实例一致）', selfTestColdProviderIdentity)
   selfCheck('三个交付文件的卫生（LF/无盘符/无密钥/无禁用端口）', selfTestHygiene)
   await selfCheckAsync('SSE 解析器（任意 chunk 边界 / CRLF / 多行 data / [DONE]）', selfTestSseParser)
   await selfCheckAsync('keep-alive 单连接判定（同客户端端口覆盖 3 节点）', selfTestKeepAlive)

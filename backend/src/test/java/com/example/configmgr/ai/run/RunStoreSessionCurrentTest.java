@@ -4,6 +4,7 @@ import com.example.configmgr.ai.config.AiProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.data.redis.core.HashOperations;
+import org.springframework.data.redis.core.SetOperations;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
 
@@ -11,6 +12,7 @@ import java.time.Duration;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -43,6 +45,8 @@ class RunStoreSessionCurrentTest {
 
 	private final HashOperations<String, Object, Object> hashOps = mock(HashOperations.class);
 
+	private final SetOperations<String, String> setOps = mock(SetOperations.class);
+
 	/** 与 RunStore 同源注入的属性实例：TTL 期望值从这里实读，不硬编码默认值（红队 S3-7）。 */
 	private final AiProperties properties = new AiProperties();
 
@@ -59,6 +63,7 @@ class RunStoreSessionCurrentTest {
 			.thenAnswer(invocation -> this.strings.remove(invocation.getArgument(0)) != null);
 		when(this.redis.expire(anyString(), any(Duration.class))).thenReturn(Boolean.TRUE);
 		when(this.redis.opsForHash()).thenReturn(this.hashOps);
+		when(this.redis.opsForSet()).thenReturn(this.setOps);
 		doAnswer(invocation -> {
 			this.hashes.computeIfAbsent(invocation.getArgument(0), key -> new LinkedHashMap<>())
 				.put(invocation.getArgument(1), invocation.getArgument(2));
@@ -160,6 +165,19 @@ class RunStoreSessionCurrentTest {
 
 		assertEquals(1, this.store.pendings("r-1").size());
 		assertEquals(PendingToolCall.FRONTEND_RESULT, this.store.pendings("r-1").get(0).getStatus());
+	}
+
+	@Test
+	void newerTerminalRoundRestoresTheOlderSuspendedPointer() {
+		this.store.save(snapshot("r-parked", "s-1", RunSnapshot.SUSPENDED));
+		this.store.save(snapshot("r-next", "s-1", RunSnapshot.RUNNING));
+		when(this.setOps.members(this.store.sessionRunsKey("s-1"))).thenReturn(Set.of("r-parked", "r-next"));
+
+		this.store.save(snapshot("r-next", "s-1", RunSnapshot.DONE));
+
+		assertEquals("r-parked", this.store.sessionCurrentRunId("s-1"));
+		this.store.save(snapshot("r-parked", "s-1", RunSnapshot.CANCELLED));
+		assertNull(this.store.sessionCurrentRunId("s-1"));
 	}
 
 	private static RunSnapshot snapshot(String runId, String sessionId, String status) {

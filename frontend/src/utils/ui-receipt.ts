@@ -23,6 +23,9 @@ export const UI_CODES = [
   'UI_PRECONDITION_CHANGED',
   /** 目标控件处于禁用 / 只读态（写动词一律拒执，不谎报「已点击」）。 */
   'UI_TARGET_DISABLED',
+  /** 目标控件当前未显示（隐藏步骤 / 折叠面板 / aria-hidden 区域）：写动词拒执，不谎报「界面已同步」。
+   *  Task 5 / FE-32 增量：与 `UI_TARGET_DISABLED` 分开归因 —— 下一步是"切到该步骤"而不是"再点一次"。 */
+  'UI_TARGET_HIDDEN',
   /** 已在目标页（同页同参幂等直返）。 */
   'UI_ALREADY_ON_PAGE',
   /** 同一轮同参调用已执行过（去重白名单）。 */

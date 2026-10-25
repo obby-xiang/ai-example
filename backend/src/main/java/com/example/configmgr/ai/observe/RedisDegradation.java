@@ -89,10 +89,20 @@ public final class RedisDegradation {
 	 */
 	public static final String W1_MEMORY_WRITE = "w1.memoryWrite";
 
+	/**
+	 * O1：结算观测位（{@code ai:observed:<runId>}）抢位失败 ⇒ fail-open（本条结算不仲裁、照发）。
+	 *
+	 * <p>为什么必须可观测：fail-open 是"宁可极小概率双记"的取舍，静默发生时跨实例"恰好一条
+	 * {@code tool_call_end}"整体失效而日志/健康面全无信号（独立复审 task-2-rereview1 R-C-1/R-I-4
+	 * 的现场就是"每次抢位都抛、每次都被吞"）。一次失败的抢位计一次；不改变返回语义。
+	 */
+	public static final String O1_OBSERVATION_CLAIM = "o1.observationClaim";
+
 	private static final String[] KNOWN = { A1_FENCE_READ, A3_FRAME_RANGE_READ, A4_FRAME_TAIL_READ, A5_CANCEL_READ,
 			A5_CANCEL_UNKNOWN, A6_DECISION_GUARD_READ, A6_PENDING_READ, L139_RENEW_KEY, L139_RENEW_NOT_ATTEMPTED,
 			B3_ATTACHMENT_REGISTER, B3_ATTACHMENT_READ, B3_ATTACHMENT_CONSUME, B3_ATTACHMENT_TOMBSTONE,
-			C1_STREAM_BYTE_CAP, C1_STREAM_BYTE_FLOOR, C1_STREAM_REPLAY_GAP, C1_RUN_INDEX_PRUNE, W1_MEMORY_WRITE };
+			C1_STREAM_BYTE_CAP, C1_STREAM_BYTE_FLOOR, C1_STREAM_REPLAY_GAP, C1_RUN_INDEX_PRUNE, W1_MEMORY_WRITE,
+			O1_OBSERVATION_CLAIM };
 
 	private static final Map<String, Counter> COUNTERS = new ConcurrentHashMap<>();
 

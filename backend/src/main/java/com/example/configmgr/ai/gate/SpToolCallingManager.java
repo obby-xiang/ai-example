@@ -13,6 +13,7 @@ import com.example.configmgr.ai.history.AiChatHistoryRecorder;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.memory.ReasoningOrigin;
 import com.example.configmgr.ai.observe.AiTrace;
+import com.example.configmgr.ai.observe.SettlementObservationStore;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.RunParkedException;
@@ -278,6 +279,18 @@ public class SpToolCallingManager implements ToolCallingManager {
 	@Autowired(required = false)
 	public void setSheetAudit(SheetAudit audit) {
 		this.sheetAudit = audit;
+	}
+
+	/**
+	 * 结算观测位（跨实例恰好一次的仲裁面）。null = 未注入（轻装配/单测）——
+	 * 此时每个发点各自发一行，与引入仲裁之前同形（单实例恒等价）。
+	 */
+	private SettlementObservationStore settlementObservations;
+
+	/** 可选注入（观测面，不是判定面；缺失不影响任何工具的执行语义）。 */
+	@Autowired(required = false)
+	public void setSettlementObservationStore(SettlementObservationStore observations) {
+		this.settlementObservations = observations;
 	}
 
 	/** 可选注入（视图投影是展示增强，不是判定面；缺失 = 所有工具走旧卡面）。 */
@@ -628,42 +641,12 @@ public class SpToolCallingManager implements ToolCallingManager {
 				// 日志链路批：工具生命周期的右端 —— 结局分类沿用条目真值（不另造一套口径）
 				// AI 日志最小补齐批：ms 含审批等待，execMs 把它扣掉（"工具慢"与"人在犹豫"必须可分）
 				long totalToolMs = System.currentTimeMillis() - toolStartedAtMs;
-				// AI 表格工具治理批（2026-10-22 §4.2）：表格工具的采样元数据挂同一行的 additive 字段
-				// （8 键；非表格工具一个键都不写 —— "逐键可缺席"）。字段值一律来自条目上的
-				// sheetMeta 白名单副本（SheetAudit#sanitize 在入口就丢掉了任何业务值）。
-				Map<String, Object> sheetMeta = source.getSheetMeta();
-				// 用 add 而不是 List.of：code/kind 允许为 null（成功条目没有 code），List.of 会 NPE
-				List<Object> tracePairs = new ArrayList<>();
-				tracePairs.add("toolCallId");
-				tracePairs.add(pending.getToolCallId());
-				tracePairs.add("tool");
-				tracePairs.add(pending.getName());
-				tracePairs.add("kind");
-				tracePairs.add(pending.getKind());
-				tracePairs.add("ms");
-				tracePairs.add(totalToolMs);
-				tracePairs.add("execMs");
-				tracePairs.add(execMsOf(source, totalToolMs));
-				tracePairs.add("skipped");
-				tracePairs.add(false);
-				tracePairs.add("ok");
-				tracePairs.add(source.effectiveOutcome().ok());
-				tracePairs.add("outcome");
-				tracePairs.add(source.effectiveOutcome().wire());
-				tracePairs.add("code");
-				tracePairs.add(source.effectiveCode());
-				tracePairs.add("executed");
-				tracePairs.add(source.isExecuted());
-				tracePairs.add("chars");
-				tracePairs.add(text == null ? 0 : text.length());
-				if (sheetMeta != null && !sheetMeta.isEmpty()) {
-					tracePairs.addAll(SheetAudit.logPairs(sheetMeta));
-				}
-				AiTrace.eventOn(runId, snapshot.getSessionId(), "tool_call_end", tracePairs.toArray());
-				// 台账 + 计数（同一时点；SheetAudit 未注入时只是少了观测面，判定语义不变）
-				if (this.sheetAudit != null && sheetMeta != null && !sheetMeta.isEmpty()) {
-					this.sheetAudit.record(snapshot.getSessionId(), source);
-				}
+				// 载荷构造统一走 ToolCallEndTrace：同一批表格工具的另一半结算发生在 park 之后
+				// （决策/认领的胜者），两条路径的键序与取值口径不允许各写一遍。
+				// 台账 + 计数与这一行同一时点（SheetAudit 未注入时只是少了观测面，判定语义不变）。
+				ToolCallEndTrace.emitOnce(this.settlementObservations, runId, snapshot.getSessionId(), source,
+						pending.getToolCallId(), pending.getName(), pending.getKind(), totalToolMs,
+						execMsOf(source, totalToolMs), text, this.sheetAudit);
 				// T2：回填模型的是裁剪后的文本；上面的 text 本身（进帧、进台账）保持全文
 				// P0-1：模型侧 = 统一信封 JSON（先裁剪 message，再组装，见 ToolResultEnvelope#toModelJson）
 				// P1-10：执行中抛出异常的失败，executeOnce 已把对账措辞追加进 resultText
@@ -1064,6 +1047,17 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 *
 	 * <p>此前这两条路径只抛异常、不写 end 行 ⇒ 日志里留下一条<b>只有 start 的孤儿调用</b>，
 	 * 排查时无从判断"是卡住了还是被取消了"。
+	 *
+	 * <p><b>条目已终态时它也是结算发点，故必须参与同一套仲裁</b>（M-2′ 残余）：取消若是在
+	 * {@code await} 里被看到的，条目此刻已经是 {@code CANCELLED}，取消收尾
+	 * （{@code ConfirmGate#settleCancelledToolCalls}）还会再结同一条 —— 两侧各发一行就成了
+	 * "同一 toolCallId 两条 end"。判据复用 {@code ToolCallEndTrace#emitCustomOnce}
+	 * （{@code CONFIRM/FRONTEND} 抢 {@code ai:observed} 首写者，{@code BACKEND} 照旧直发、不占位），
+	 * <b>载荷与业务语义逐字不变</b>。
+	 *
+	 * <p><b>条目仍 {@code PENDING} 时不占位</b>：这时 abort 行只是"本次尝试没走完"的诊断，
+	 * 没有结算任何结论；占位会把该条之后真正执行成功的结算行挡掉（从"多一行"变成"少一行"）。
+	 * 未决条目的取消收尾在别处也不存在（取消会先把它转成 CANCELLED，届时走的是已终态分支）。
 	 */
 	private void traceToolAborted(String runId, String sessionId, PendingToolCall pending, long startedAtMs,
 			RuntimeException error) {
@@ -1080,12 +1074,23 @@ public class SpToolCallingManager implements ToolCallingManager {
 					pending.getToolCallId(), readFailure.getMessage());
 			settled = pending;
 		}
-		PendingToolCall source = settled == null ? pending : settled;
-		AiTrace.eventOn(runId, sessionId, "tool_call_end", "toolCallId", pending.getToolCallId(), "tool",
-				pending.getName(), "kind", pending.getKind(), "ms", ms, "execMs", ms, "skipped", false, "ok", false,
-				"outcome", cancelled ? ToolOutcome.CANCELLED.wire() : ToolOutcome.FAILED.wire(),
-				"code", cancelled ? ToolOutcome.CODE_RUN_CANCELLED : CODE_TOOL_EXECUTION_THREW,
-				"executed", source.isExecuted(), "chars", 0, "cancelled", cancelled);
+		if (settled == null) {
+			settled = pending;
+		}
+		PendingToolCall source = settled;
+		Runnable line = () -> AiTrace.eventOn(runId, sessionId, "tool_call_end", "toolCallId",
+				pending.getToolCallId(), "tool", pending.getName(), "kind", pending.getKind(), "ms", ms, "execMs", ms,
+				"skipped", false, "ok", false, "outcome",
+				cancelled ? ToolOutcome.CANCELLED.wire() : ToolOutcome.FAILED.wire(), "code",
+				cancelled ? ToolOutcome.CODE_RUN_CANCELLED : CODE_TOOL_EXECUTION_THREW, "executed", source.isExecuted(),
+				"chars", 0, "cancelled", cancelled);
+		if (PendingToolCall.PENDING.equals(source.getStatus())) {
+			line.run();
+		}
+		else {
+			ToolCallEndTrace.emitCustomOnce(this.settlementObservations, runId, pending.getToolCallId(),
+					pending.getKind(), line);
+		}
 	}
 
 	/** 事件边界上的取消检查：命中即抛出，交由 {@code ResilientChatService} 以取消收尾。 */
@@ -1341,6 +1346,12 @@ public class SpToolCallingManager implements ToolCallingManager {
 			+ "：该调用是前端通道工具（kind=FRONTEND），后端不执行它的桩体、也不写执行台账；"
 			+ "本次未执行（blocked）。前端结果只能经 /api/ai/frontend-tool-result 回灌。";
 
+	/**
+	 * 认领前复核命中取消时的统一文本（与 {@code cancelPendings} / {@code ConfirmGate#cancel} 逐字同源）：
+	 * 模型与前端都据此知道"没执行"，而不是"失败"或"未知"。
+	 */
+	static final String CANCELLED_BEFORE_CLAIM_TEXT = "本轮对话已被用户取消，该工具未执行。";
+
 	/** 工具被"目标资源不成立"挡下时的固定口径（细节由 {@link ToolTargetResolver} 给出）。 */
 	public static String targetInvalidText(ToolTargetResolver.Verdict verdict) {
 		String detail = verdict == null || verdict.detail() == null || verdict.detail().isBlank() ? "目标资源不成立"
@@ -1370,6 +1381,17 @@ public class SpToolCallingManager implements ToolCallingManager {
 	}
 
 	private String executeOnce(String runId, Prompt prompt, PendingToolCall pending, AiContext context) {
+		return executeOnce(runId, prompt, pending, context, false);
+	}
+
+	/**
+	 * @param settleObservation 本次调用的结算行是否由<b>本方法</b>发（续跑路径 = {@code true}）。
+	 * 内联批循环传 {@code false}：它在该条目结算之后统一发一行（并记台账）—— 两处都发会让同一个
+	 * {@code toolCallId} 出现两条 {@code tool_call_end}、{@code readCalls} 被记两次。
+	 * <b>发点仍然只有一个</b>：{@code tryClaimExecution} 的胜者那一支（见 {@link #claimAndExecute}）。
+	 */
+	private String executeOnce(String runId, Prompt prompt, PendingToolCall pending, AiContext context,
+			boolean settleObservation) {
 		// ⓪ 入口 kind 硬闸（入口 kind 校验批）：前端通道工具的桩体永不由后端执行。
 		// 位置在台账重放与认领<b>之前</b>：既不能"重放"一条历史成功台账把假执行说成成功，
 		// 也不能占认领、写新台账。正常路径走不到这里（FRONTEND 走 awaitFrontend），本闸是兜底。
@@ -1400,12 +1422,89 @@ public class SpToolCallingManager implements ToolCallingManager {
 			return settleBlocked(runId, pending, ToolOutcome.CODE_RESOURCE_LOCKED, RESOURCE_LOCKED_TEXT);
 		}
 		try {
-			return claimAndExecute(runId, prompt, pending);
+			return claimAndExecute(runId, prompt, pending, settleObservation);
 		}
 		finally {
 			// 终态与异常路径都必须归还（只放本次创建的那一任；重入没有释放权）
 			locks.close();
 		}
+	}
+
+	/**
+	 * <b>认领前的取消复核</b>（R1）：取消标志已在 ⇒ 放弃执行，并在"可证明未认领未执行"时把条目
+	 * 如实收敛为 {@code CANCELLED}。
+	 *
+	 * <p>为什么放在这里：批准只写决策、执行在续跑；上游的执行前检查（{@code ResumeService} 的
+	 * {@code cancelStateOutcome}）与真正的 {@code HSETNX} 之间还隔着台账重放、目标校验、资源锁。
+	 * 只修上游检查会留下这个窗口 —— 用户在"已批准、还没跑"时按停止，不可逆工具照样执行。
+	 *
+	 * <p><b>不碰已认领/已执行</b>：判据交 {@link RunStore#cancellableBeforeExecution}（含跨实例的
+	 * 认领表），有认领证据时返回 {@code null} 走既有 claim 失败口径 —— 绝不把真实发生的副作用
+	 * 说成"没执行"。
+	 *
+	 * <p><b>不发结算行</b>：本方法只收敛条目。结算的所有权仍在取消侧（{@code cancelTerminal} 的
+	 * {@code settleCancelledToolCalls}）或内联批循环的 abort 行，两侧都经 {@code ai:observed} 仲裁；
+	 * 这里补一条会变成第三个来源（同一 toolCallId 两条 end）。
+	 *
+	 * @return 放弃执行时的工具结果文本；{@code null} = 未命中取消（正常走认领）
+	 */
+	private String settleIfCancelledBeforeClaim(String runId, PendingToolCall pending) {
+		CancellationRegistry.CancelState state;
+		try {
+			state = this.cancellations.cancelState(runId);
+		}
+		catch (RuntimeException ex) {
+			log.warn("认领前读取取消状态失败，按 UNKNOWN 处理（不执行不可逆工具）runId={} toolCallId={}：{}", runId,
+					pending.getToolCallId(), ex.getMessage());
+			state = CancellationRegistry.CancelState.UNKNOWN;
+		}
+		if (state == CancellationRegistry.CancelState.UNKNOWN) {
+			// 与相邻的 checkCancelled 同一口径（fail-closed）：读不出来 = 证明不了"未取消" ⇒ 不执行。
+			// 条目状态与终帧一概不动 —— 基础设施不可知不是"已取消"，写成 CANCELLED 会发一张假终帧。
+			throw new StreamViolationException(StreamViolationException.STATE_UNAVAILABLE,
+					"取消状态未知（Redis 读失败），工具执行在认领前终止（runId=" + runId + "）");
+		}
+		if (state != CancellationRegistry.CancelState.CANCELLED) {
+			return null;
+		}
+		PendingToolCall fresh;
+		try {
+			fresh = this.store.pendingLenient(runId, pending.getToolCallId());
+		}
+		catch (RuntimeException ex) {
+			fresh = null;
+		}
+		if (fresh == null) {
+			fresh = pending;
+		}
+		if (this.store.hasExecutionEvidence(runId, fresh)) {
+			// 已认领/已执行/认领表已有 → 绝不伪装未执行；交给既有 claim 失败与对账口径。
+			return null;
+		}
+		if (PendingToolCall.CANCELLED.equals(fresh.getStatus())) {
+			// 存储里已经是取消终态、且没有任何执行证据（调用方手里是旧的 APPROVED/PENDING 副本）：
+			// 不认领、不执行，直接返回既有取消文本。旧口径在这里返回 null ⇒ 掉回 tryClaimExecution，
+			// 会把一条已取消的调用真正执行掉。
+			String text = fresh.getResultText();
+			log.info("认领前发现条目已取消（无执行证据），放弃执行 runId={} tool={} toolCallId={}", runId,
+					pending.getName(), pending.getToolCallId());
+			return text == null || text.isBlank() ? CANCELLED_BEFORE_CLAIM_TEXT : text;
+		}
+		if (!PendingToolCall.PENDING.equals(fresh.getStatus())
+				&& !PendingToolCall.APPROVED.equals(fresh.getStatus())) {
+			return null;
+		}
+		fresh.setStatus(PendingToolCall.CANCELLED);
+		fresh.setOutcome(ToolOutcome.CANCELLED.wire());
+		fresh.setCode(ToolOutcome.CODE_RUN_CANCELLED);
+		fresh.setReason("RUN_CANCELLED");
+		fresh.setExecuted(false);
+		fresh.setResolvedAtMs(System.currentTimeMillis());
+		fresh.setResultText(CANCELLED_BEFORE_CLAIM_TEXT);
+		this.store.putPending(runId, fresh);
+		log.info("认领前复核到取消，放弃执行 runId={} tool={} toolCallId={}", runId, pending.getName(),
+				pending.getToolCallId());
+		return CANCELLED_BEFORE_CLAIM_TEXT;
 	}
 
 	/**
@@ -1418,8 +1517,22 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 *
 	 * <p>轻装配面（Mockito 底座只桩了布尔口）从三态口读回 null —— 这不是生产形态（两个实现都返回非 null），
 	 * 回落到布尔口只是为了不改动既有的 mock 用例。
+	 *
+	 * <p><b>观测面的 exactly-once 就是这里</b>：只有认领胜者真正执行了工具，故只有它发
+	 * {@code tool_call_end}（{@code settleObservation=true} 时）。重挂/重试走到认领失败——
+	 * 那时不补，否则"重挂一次"就等于"多记一次工具调用"。
 	 */
-	private String claimAndExecute(String runId, Prompt prompt, PendingToolCall pending) {
+	private String claimAndExecute(String runId, Prompt prompt, PendingToolCall pending, boolean settleObservation) {
+		// ===== R1：认领前的最后一道取消复核 =====
+		// 上游的执行前检查（ResumeService 的 cancelStateOutcome）与真正的 claim 之间还有一段
+		// 台账/目标校验/资源锁的路程；取消恰好落在那里时，只靠上游检查就会"取消后仍执行不可逆工具"。
+		// 命中取消 ⇒ 不认领、不执行；条目只在"可证明未认领未执行"时收敛为 CANCELLED
+		// （已认领/已执行一律不碰，交给下面的 claim 失败口径）。结算行不在这里补：取消侧与批循环
+		// 各按所有权、经 ai:observed 只发一条，本处补发会多一个来源。
+		String cancelledBeforeClaim = settleIfCancelledBeforeClaim(runId, pending);
+		if (cancelledBeforeClaim != null) {
+			return cancelledBeforeClaim;
+		}
 		RunStore.ClaimResult claim = this.store.tryClaimExecution(runId, pending.getToolCallId(),
 				this.store.instanceId());
 		if (claim == null) {
@@ -1493,7 +1606,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 			pending.setCode(code);
 		}
 		if (timedOut) {
-			return settleToolTimeout(runId, pending, text);
+			return settleToolTimeout(runId, pending, text, settleObservation);
 		}
 		this.store.appendLedger(runId, pending, text);
 
@@ -1528,6 +1641,11 @@ public class SpToolCallingManager implements ToolCallingManager {
 		}
 		else {
 			this.registry.of(runId).toolResult(fresh, ok, false, frameText(text), resultView);
+		}
+		// 续跑侧的唯一发点：认领胜者 = 真的执行过的那一次（内联路径由批循环自己发，settleObservation=false）
+		if (settleObservation) {
+			ToolCallEndTrace.emitForSettledEntry(this.settlementObservations, runId, sessionIdOf(runId), fresh, text,
+					this.sheetAudit);
 		}
 		return text;
 	}
@@ -1613,8 +1731,11 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 * 超时结算（{@code executed=false} + 结局帧 + 回填模型）：<b>不写台账</b>、不占重放索引 ——
 	 * 台账记的是"执行过且知道结局"的事实，超时的结局是"不知道有没有副作用"，由
 	 * {@link #RECONCILIATION_NOTE} 提醒人工对账。
+	 *
+	 * <p>超时也是认领胜者的结算（只有认领成功才会执行并超时），故续跑侧同样由这里发
+	 * {@code tool_call_end}（{@code settleObservation=true}）。
 	 */
-	private String settleToolTimeout(String runId, PendingToolCall pending, String text) {
+	private String settleToolTimeout(String runId, PendingToolCall pending, String text, boolean settleObservation) {
 		PendingToolCall fresh;
 		try {
 			fresh = this.store.pendingLenient(runId, pending.getToolCallId());
@@ -1637,6 +1758,10 @@ public class SpToolCallingManager implements ToolCallingManager {
 		fresh.setStatus(PendingToolCall.TIMEOUT);
 		this.store.putPending(runId, fresh);
 		this.registry.of(runId).toolResult(fresh, false, false, frameText(text));
+		if (settleObservation) {
+			ToolCallEndTrace.emitForSettledEntry(this.settlementObservations, runId, sessionIdOf(runId), fresh, text,
+					this.sheetAudit);
+		}
 		log.warn("工具执行超时已结算（executed=false，轮继续）runId={} tool={} toolCallId={}", runId,
 				pending.getName(), pending.getToolCallId());
 		return text;
@@ -1706,9 +1831,16 @@ public class SpToolCallingManager implements ToolCallingManager {
 	}
 
 	/**
-	 * 阻断的<b>统一出口</b>（资源锁冲突 / 目标不成立 / 写回权转移）：落库为终态、发一条
-	 * {@code ok=false} 的结局帧、回填模型，然后正常返回 —— <b>不 appendLedger、不占认领、不抛异常、
-	 * 不动 suspended</b>，同批后续调用照常（{@code haltsBatch} 只认 FAILED）。
+	 * 阻断的<b>统一出口</b>（资源锁冲突 / 目标不成立 / 写回权转移）：落库为终态、回填模型，然后
+	 * 正常返回 —— <b>不 appendLedger、不占认领、不抛异常、不动 suspended</b>，同批后续调用照常
+	 * （{@code haltsBatch} 只认 FAILED）。
+	 *
+	 * <p><b>帧面不保证</b>（RT-21 裁决）：这里只<b>请求</b>一条 {@code ok=false} 的结局帧，是否真的
+	 * 落档/扇出由 {@link com.example.configmgr.ai.run.SseChatEmitter} 的写门判定。写回权已转移的
+	 * 旧驱动（{@code fence > 本进程 epoch}）会被写门丢弃该帧：它没有续跑权，不得再写共享事件/帧，
+	 * <b>不给这份旧驱动任何帧豁免</b>。但"没有共享帧"不等于"结果可以被吞"：{@code blocked} 文本与
+	 * 机器可读结局（{@code outcome}/{@code code}）仍由本方法返回，沿原工具调用链进入模型的
+	 * {@code ToolResponseMessage}（"本次未执行、需由接管方完成"），不得伪装成成功。
 	 */
 	private String settleBlocked(String runId, PendingToolCall pending, String code, String text) {
 		pending.setStatus(PendingToolCall.BLOCKED);
@@ -1811,6 +1943,12 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 * 一律复用 {@code resultText}，<b>不执行</b>。</li>
 	 * </ul>
 	 *
+	 * <h2>观测面：本方法<b>不是</b> {@code tool_call_end} 的发点</h2>
+	 * 前端结果/放弃的结算行由写入方（{@code ConfirmGate} 的决策/放弃胜者）发，后端执行的结算行由
+	 * {@link #executeOnce} 在<b>认领胜者</b>那一支发 —— 于是"挂起一次 ⇒ 一条 end"与所有权一一对应。
+	 * 上面那个"复用 {@code resultText}"的兜底分支刻意不补：重挂/重试会反复经过它，
+	 * 在那里记账会把 {@code SheetAudit} 计数放大成"重挂次数"（park 缺陷的反向坑）。
+	 *
 	 * @return 该条目对应的工具结果文本（用于重建 {@code role:tool} 消息）
 	 */
 	public String resolvePending(String runId, Prompt prompt, PendingToolCall pending) {
@@ -1829,10 +1967,11 @@ public class SpToolCallingManager implements ToolCallingManager {
 				|| (PendingToolCall.EXECUTED.equals(status) && !pending.isExecuted());
 		if (shouldExecute) {
 			// 结算侧帧册不变量：本分支的所有出口（台账重放 / 目标校验 / 资源锁 / 认领 / 执行 / 超时）
-			// 都会发 tool_result，而原实例可能死在 tool_start 落档之前（suspend-kill-a）——
-			// 结算之前按归档幂等补一次，已有则不补。
+			// 都会<b>请求</b>发 tool_result（失去续跑权的旧驱动那条会被写门丢弃，见 {@link #settleBlocked}），
+			// 而原实例可能死在 tool_start 落档之前（suspend-kill-a）—— 结算之前按归档幂等补一次，
+			// 已有则不补；写门同样会拦住旧驱动的补帧。
 			ensureToolStartBeforeSettlement(runId, pending);
-			return executeOnce(runId, prompt, pending);
+			return executeOnce(runId, prompt, pending, contextOf(runId), true);
 		}
 		// B23L1 批③b：已终态但结局是 unknown 的条目，先经三跳对账（台账 → 认领 → 资源锁）再回填 ——
 		// 台账里有确定结局就采用它（含原文与执行者），否则如实保持 UNKNOWN 并给出"为什么"。
@@ -1900,6 +2039,22 @@ public class SpToolCallingManager implements ToolCallingManager {
 		log.info("续跑结算经 UNKNOWN 对账 runId={} toolCallId={} adopted={} outcome={}", runId,
 				pending.getToolCallId(), reconciliation.adopted(), pending.effectiveOutcome().wire());
 		return text;
+	}
+
+	/**
+	 * 续跑结算行的事件锚点：{@code sessionId} 必须显式读一次快照 —— 续跑线程（跨实例唤醒 /
+	 * 续跑池）的 MDC 未必装着会话，而 {@code ai:safety:<sessionId>} 台账就挂在这个键上。
+	 * 读失败/快照缺失返回 {@code null}，由 {@code AiTrace#eventOn} 回落 MDC。
+	 */
+	private String sessionIdOf(String runId) {
+		try {
+			RunSnapshot snapshot = this.store.get(runId);
+			return snapshot == null ? null : snapshot.getSessionId();
+		}
+		catch (RuntimeException ex) {
+			log.debug("结算行读取 sessionId 失败 runId={}：{}", runId, ex.getMessage());
+			return null;
+		}
 	}
 
 	/** 挂起种类由基座元数据决定：通道优先（前端工具不可被后端执行），其次风险等级。 */

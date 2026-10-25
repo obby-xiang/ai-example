@@ -1477,7 +1477,7 @@ public class SseChatEmitter {
 							ex.getMessage());
 				}
 			}
-			if (authority != null && authority.readOnly()) {
+			if (authority != null && (authority.readOnly() || !this.store.permittedToWrite(this.runId, "事件帧"))) {
 				if (this.readOnlyWarned.compareAndSet(false, true)) {
 					log.warn("续跑权 {}：丢弃本轮业务帧（含终帧）runId={} type={} —— 本轮已由新主人接管，"
 							+ "本实例只读恢复", authority, this.runId, frameType);

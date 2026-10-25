@@ -123,6 +123,11 @@ class AiConfigSeederTest {
 		assertThat(model.isEnabled()).isTrue();
 		assertThat(model.isSupportsToolCalling()).isTrue();
 		assertThat(model.getMaxContext()).isEqualTo(AiConfigService.ENV_SEED_MAX_CONTEXT);
+
+		// 种子写路径必须发布版本（run 40182796512 的根因 A）：迁移常量是 1，种完必须是 2。
+		// 停在 1 ⇒ 别的实例的版本比对永远相等 ⇒ 它们的 provider 快照永久为空（env 合成行）。
+		assertThat(configVersion()).as("种子写必须 bump ai_setting['config.version']（同一事务）")
+			.isEqualTo(2L);
 	}
 
 	@Test
@@ -235,6 +240,7 @@ class AiConfigSeederTest {
 		this.providerRepository.deleteAll();
 		this.modelRepository.deleteAll();
 		assertThat(this.providerRepository.count()).isZero();
+		long versionBefore = configVersion();
 
 		ExecutorService pool = Executors.newFixedThreadPool(2);
 		CountDownLatch start = new CountDownLatch(1);
@@ -264,8 +270,18 @@ class AiConfigSeederTest {
 		assertThat(failures).as("并发双启动不得把异常抛给启动路径").isEmpty();
 		assertThat(this.providerRepository.findAllByOrderBySortOrderAscIdAsc()).hasSize(1);
 		assertThat(this.modelRepository.count()).isEqualTo(1);
+		// 输掉竞争的一方整个事务回滚（版本 +1 也在其中）⇒ 版本恰好只推进一次：
+		// 既不能"两人都 bump"（版本跳两格），也不能"都以为别人写了"（版本一格没动 ⇒ 别的实例看不到行）。
+		assertThat(configVersion()).as("并发双启动的版本推进必须恰好一次").isEqualTo(versionBefore + 1);
 		// 复原：让上下文回到"已种好"的状态（后续若有用例依赖）
 		this.seeder.seed();
+	}
+
+	/** {@code ai_setting['config.version']} 的当前值（读库，不读快照）。 */
+	private long configVersion() {
+		return Long.parseLong(
+				this.jdbcTemplate.queryForObject("SELECT value_json FROM ai_setting WHERE setting_key = ?",
+						String.class, "config.version"));
 	}
 
 }

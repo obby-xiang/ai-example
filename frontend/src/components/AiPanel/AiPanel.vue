@@ -649,7 +649,7 @@
                             :label="uploadHandoffLabel(part)"
                             :reason="uploadHandoffReason(part)"
                             @choose="ai.chooseUploadFile()"
-                            @cancel="ai.cancelUploadHandoff()"
+                            @cancel="ai.cancelUploadHandoff(part.toolCallId)"
                           />
                         </div>
                       </template>

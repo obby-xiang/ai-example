@@ -44,7 +44,9 @@ import com.example.configmgr.ai.session.SessionPurgeGuard;
  * <li>{@code chat:mem:staging:{<escapedId>}:<uuid>} — 非空 {@link #saveAll} 的临时 LIST，
  * 与 final 共享同一个 hash tag，因此 RENAME 同槽。</li>
  * <li>{@code chat:mem:<id>} — <b>迁移期 legacy 键</b>（无 tag，旧版本写入）。读侧 tagged 缺失时回落；
- * 保存成功 RENAME 后删除它，完成自然迁移。</li>
+ * 保存成功 RENAME 后删除它，完成自然迁移。<b>只在 {@code id} 不落进别的键族命名空间时可用</b>
+ * （见 {@code legacyEligible}）：{@code id="{x}"} 的 legacy 键正是会话 {@code x} 的 tagged 键，
+ * {@code id="__ids__"} 的 legacy 键正是全局索引 —— 那两类 id 一律不做 legacy 回落/清理/删除。</li>
  * <li>{@code chat:mem:__ids__} — Redis SET，会话 id 索引，<b>刻意不加 hash tag</b>：给全局索引
  * 打 tag 会把所有会话压进同一个 slot（自造热点）。索引与数据键天然分属不同槽，因此不做跨键 Lua，
  * 只用单键命令序列。</li>
@@ -60,7 +62,11 @@ import com.example.configmgr.ai.session.SessionPurgeGuard;
  * （带 conversationId / 数据键，便于对账），<b>不回退已提交的新历史</b>；下一次成功保存会自愈。</li>
  * <li><b>删除 = tagged 单键 DEL + legacy 单键 DEL + 索引单键 SREM</b>：三条单键命令，任何一条都不跨槽；
  * SREM 让索引在删除时立即收敛，避免 {@code chat:mem:__ids__} 随会话数无界增长。SREM 失败只 WARN，
- * 数据删除结果不受影响。</li>
+ * 数据删除结果不受影响。legacy 只在命名空间守卫允许时参与（见上）。</li>
+ * <li><b>销毁与写回的交错</b>：{@code saveAll} 入口问一次销毁守卫，RENAME 之后<b>再复检一次</b>
+ * （复检放在 {@code finally}：RENAME 可能<b>服务端已生效、回包丢失</b>，那时异常虽已抛出，落地仍要撤销）
+ * —— 入口通过之后销毁才装守卫的窗口里，复检命中即删掉该会话的记忆键并<b>不写索引</b>；异常照旧上抛。
+ * 复检读失败按"已装守卫"处理（fail-closed），否则销毁后仍可能复活一整窗历史。</li>
  * <li><b>空 / null 列表</b>等价于"清空该会话记忆"，委托 {@link #deleteByConversationId}。</li>
  * <li><b>空白 conversationId 拒绝</b>：空串 / 纯空白 / null 在触碰 Redis 前抛
  * {@link IllegalArgumentException}（空 id 会产生空 hash tag，Cluster 下 staging/final 不同槽）。</li>
@@ -81,6 +87,9 @@ import com.example.configmgr.ai.session.SessionPurgeGuard;
  * <p>新写入使用 tagged 键；旧 {@code chat:mem:<id>} 在迁移期仍可读。上线后首次成功保存会删除该会话的
  * legacy 键。若长期不保存，legacy 键仍随原 TTL 过期。本类不做批量迁移：旧索引成员在
  * {@link #findConversationIds()} 中只要 legacy 数据键还在就不会被当 stale 清掉。</p>
+ * <p><b>例外（安全优先）</b>：id 以 {@code {} 开头、以 {@code staging:{ 开头、或等于 {@code __ids__} 时，
+ * 它的 legacy 键与其它键族逐字冲突（别人的数据键 / 在飞 staging / 全局索引），本类<b>不</b>对这类 id
+ * 做 legacy 回落与清理 —— 老数据按原 TTL 自然过期，宁少一次迁移也不读写别的会话的数据。</p>
  *
  * <h2>已知未覆盖</h2>
  * <ul>
@@ -90,6 +99,8 @@ import com.example.configmgr.ai.session.SessionPurgeGuard;
  * 由下次保存自愈。</li>
  * <li>删除的 SREM 与并发保存的 SADD 仍有窄窗口：SREM 可能抹掉刚 SADD 的活成员，由下次保存自愈；
  * 不引入跨槽 Lua 换取索引的强一致。</li>
+ * <li>销毁与写回的交错只能"事后撤销"：复检命中后那次撤销 DEL 本身失败时仍会留一份带 TTL 的键
+ * （WARN 里带键名，由销毁重试对账补删）——不为此引入跨键事务。</li>
  * </ul>
  */
 public class RedisChatMemoryRepository implements ChatMemoryRepository {
@@ -178,7 +189,7 @@ public class RedisChatMemoryRepository implements ChatMemoryRepository {
 			return tagged;
 		}
 		String legacy = legacyKey(conversationId);
-		if (Boolean.TRUE.equals(this.redis.hasKey(legacy))) {
+		if (legacyEligible(conversationId) && Boolean.TRUE.equals(this.redis.hasKey(legacy))) {
 			return legacy;
 		}
 		return tagged;
@@ -195,12 +206,50 @@ public class RedisChatMemoryRepository implements ChatMemoryRepository {
 	 * {@code chat:mem:{<escapedId>}} 的 tag 逐字相同，{@code RENAME} 在 Cluster 下同槽。
 	 */
 	static String stagingKey(String conversationId, String token) {
-		return STAGING_PREFIX + "{" + escapedId(conversationId) + "}:" + token;
+		return stagingKeyPrefix(conversationId) + token;
+	}
+
+	/**
+	 * 该会话 staging 键的<b>精确前缀</b>：{@code chat:mem:staging:{<escapedId>}:}。
+	 *
+	 * <p>会话销毁要扫出"在飞 saveAll 的中间态"并逐个删除（它们不在 tagged/legacy 的口径里）。
+	 * 扫描用的 glob 依赖 {@code escapedId}（无花括号 ⇒ tag 无碰撞），但 glob 里的
+	 * {@code * ? [ ] \} 仍需调用方过滤：<b>只接受以此前缀逐字开头的键</b>，这样
+	 * sessionId 自带通配符（如 {@code a*b}）时也不会命中别的会话。
+	 */
+	public static String stagingKeyPrefix(String conversationId) {
+		return STAGING_PREFIX + "{" + escapedId(conversationId) + "}:";
 	}
 
 	/** 迁移期旧键形（无 hash tag，id 原样，不转义）。 */
 	private static String legacyKey(String conversationId) {
 		return KEY_PREFIX + requireId(conversationId);
+	}
+
+	/**
+	 * 迁移期 legacy 键对该 id 是否<b>可用</b>（读回落 / 保存后清理 / 删除都要先问它）。
+	 *
+	 * <h2>为什么必须问</h2>
+	 * legacy 键把 id <b>原样</b>拼在 {@code chat:mem:} 后面，而其它三个键族也是这个前缀：于是
+	 * 某些 id 的 legacy 键会与<b>别的会话的数据键</b>或<b>全局索引键</b>逐字相同：
+	 * <ul>
+	 * <li>{@code id = "{x}"} ⇒ legacy = {@code chat:mem:{x}} = 会话 {@code x} 的 tagged 键
+	 *     （读会读到别人的历史，删会删掉别人的历史，保存后的 legacy 清理也会删掉）；</li>
+	 * <li>{@code id = "__ids__"} ⇒ legacy = {@code chat:mem:__ids__} = <b>全局会话索引</b>
+	 *     （删这个会话会把所有会话的索引一起删掉）；</li>
+	 * <li>{@code id = "staging:{...}:..."} ⇒ legacy 落在 staging 命名空间（删到在飞写回的中间态）。</li>
+	 * </ul>
+	 * 因此 legacy 只在"不可能属于其它命名空间"时可用：不以 {@code chat:mem:{} /
+	 * chat:mem:staging:{} 起头、也不是索引键本身。
+	 *
+	 * <p><b>代价</b>：这类特殊 id 的老数据（旧版本用原样 id 写的）不再被回落读取/清理 ——
+	 * 它们与新键形无法区分，<b>宁可放弃一次迁移，也不能读写别的会话的数据或删掉全局索引</b>。
+	 * 这类 id 的旧键仍按原 TTL 自然过期。
+	 */
+	private static boolean legacyEligible(String conversationId) {
+		String legacy = legacyKey(conversationId);
+		return !legacy.startsWith(KEY_PREFIX + "{") && !legacy.startsWith(STAGING_PREFIX + "{")
+				&& !legacy.equals(CONVERSATION_IDS_KEY);
 	}
 
 	private static String requireId(String conversationId) {
@@ -267,21 +316,31 @@ public class RedisChatMemoryRepository implements ChatMemoryRepository {
 		return hasLiveMemory(conversationId);
 	}
 
-	private boolean hasLiveMemory(String conversationId) {
-		return Boolean.TRUE.equals(this.redis.hasKey(key(conversationId)))
-				|| Boolean.TRUE.equals(this.redis.hasKey(legacyKey(conversationId)));
+	/**
+	 * 该会话是否仍有<b>存活</b>的记忆数据键（tagged 或迁移期 legacy）。
+	 *
+	 * <p>对外公开是给会话销毁用的"删净判据"：销毁不能只凭索引（stale/缺成员都见过），
+	 * 必须看数据键本身是否真的不在了。legacy 只在 {@link #legacyEligible} 允许时才参与判定。
+	 */
+	public boolean hasLiveMemory(String conversationId) {
+		if (Boolean.TRUE.equals(this.redis.hasKey(key(conversationId)))) {
+			return true;
+		}
+		return legacyEligible(conversationId)
+				&& Boolean.TRUE.equals(this.redis.hasKey(legacyKey(conversationId)));
 	}
 
 	/**
 	 * 读会话历史：tagged 优先；tagged 不存在时回落迁移期 legacy 键。
 	 *
 	 * <p>不回写、不迁移 —— 迁移发生在下一次成功 {@link #saveAll} 之后（RENAME 成功后删除 legacy）。
+	 * legacy 回落受 {@link #legacyEligible} 约束（特殊 id 的 legacy 键会撞别的会话/索引）。
 	 */
 	@Override
 	public List<Message> findByConversationId(String conversationId) {
 		String taggedKey = key(conversationId);
 		List<String> rawMessages = this.redis.opsForList().range(taggedKey, 0, -1);
-		if (rawMessages == null || rawMessages.isEmpty()) {
+		if ((rawMessages == null || rawMessages.isEmpty()) && legacyEligible(conversationId)) {
 			rawMessages = this.redis.opsForList().range(legacyKey(conversationId), 0, -1);
 		}
 		if (rawMessages == null || rawMessages.isEmpty()) {
@@ -311,7 +370,7 @@ public class RedisChatMemoryRepository implements ChatMemoryRepository {
 					conversationId, finalKey);
 			return;
 		}
-		String legacyKey = legacyKey(conversationId);
+		String legacyKeyOrNull = legacyEligible(conversationId) ? legacyKey(conversationId) : null;
 		if (messages == null || messages.isEmpty()) {
 			deleteByConversationId(conversationId);
 			return;
@@ -320,6 +379,7 @@ public class RedisChatMemoryRepository implements ChatMemoryRepository {
 		List<String> payload = this.codec.serializeAll(messages);
 		String stagingKey = stagingKey(conversationId, UUID.randomUUID().toString());
 		boolean renamed = false;
+		boolean aborted = false;
 		try {
 			Object[] args = new Object[payload.size() + 1];
 			args[0] = Long.toString(stagingTtlMillis());
@@ -334,9 +394,65 @@ public class RedisChatMemoryRepository implements ChatMemoryRepository {
 			if (!renamed) {
 				deleteStagingQuietly(stagingKey);
 			}
+			// 复检必须放在 finally：RENAME 可能<b>服务端已生效、回包丢失</b>（Lettuce 超时/断连）——
+			// 那时异常从 try 抛出、renamed 仍是 false，但 final 键已经落地。复检放在 try 之后就会
+			// 被异常整个跳过，正是"销毁已 complete、写回却复活"的那个窗口。
+			// 异常本身照旧向上抛（不吞错误）：这里只负责"若已落地且守卫已装，就撤销它"。
+			if (purgeArmedAfterWrite(conversationId, finalKey)) {
+				// 入口检查通过之后销毁流程才装了守卫（并已删过一次记忆）：这一笔落地就是"复活"。
+				discardWrittenMemory(conversationId, finalKey);
+				aborted = true;
+			}
 		}
-		deleteLegacyQuietly(legacyKey, conversationId);
+		if (aborted) {
+			return;
+		}
+		deleteLegacyQuietly(legacyKeyOrNull, conversationId);
 		addToIndex(conversationId, finalKey);
+	}
+
+	/**
+	 * RENAME 之后的守卫<b>复检</b>（销毁与写回的交错窗口）。
+	 *
+	 * <p>为什么入口检查不够：{@code saveAll} 的入口检查与 RENAME 之间隔着 staging 写入，
+	 * 销毁流程完全可以在这个窗口里装守卫并删完记忆 —— 那一笔 RENAME 就把刚销毁的历史写了回来。
+	 * 复检是这类残留的唯一确定拦点（销毁侧只能事后对账，索引也看不见它：SREM 早已执行）。
+	 *
+	 * <p>读失败按"已装守卫"处理（fail-closed）：与入口检查同一口径 —— 守卫状态不可知时
+	 * 宁可让本次写回作废，也不能把已销毁会话的历史悄悄写回来。
+	 */
+	private boolean purgeArmedAfterWrite(String conversationId, String finalKey) {
+		if (this.purgeGuard == null) {
+			return false;
+		}
+		try {
+			return this.purgeGuard.isArmed(conversationId);
+		}
+		catch (RuntimeException ex) {
+			log.warn("会话销毁守卫复检失败（fail-closed：撤销本次写回）conversationId={} key={}：{}", conversationId,
+					finalKey, ex.getMessage());
+			return true;
+		}
+	}
+
+	/**
+	 * 撤销一次写回：删掉该会话的记忆数据键。
+	 *
+	 * <p>为什么在守卫命中时<b>无条件</b>删（而不是先判断"这一笔是否真的落地"）：守卫已装 = 该会话
+	 * 正在被销毁 ⇒ 它的记忆键本来就不该留下任何一份。删除成功时键可能装着本笔刚写出的新历史，
+	 * 也可能装着 RENAME 未生效时的旧历史 —— 两者都属于"已销毁会话的历史"，都不许留。
+	 * 键带 TTL，删除失败只 WARN 并留键名以便对账/销毁重试补删。
+	 */
+	private void discardWrittenMemory(String conversationId, String finalKey) {
+		try {
+			this.redis.delete(finalKey);
+			log.warn("会话已销毁（purge guard 生效）：删除该会话记忆键 conversationId={} key={}"
+					+ "（本笔写回未确认落地或已落地，均不得保留）", conversationId, finalKey);
+		}
+		catch (RuntimeException ex) {
+			log.warn("撤销记忆写回失败（键带 TTL，可按此键对账/删除）conversationId={} key={}：{}", conversationId,
+					finalKey, ex.getMessage());
+		}
 	}
 
 	/**
@@ -345,11 +461,16 @@ public class RedisChatMemoryRepository implements ChatMemoryRepository {
 	 * <p>不再把数据键与全局索引合成 Lua：两者不同槽，Cluster 下整条脚本 {@code CROSSSLOT}。
 	 * SREM 让索引立即收敛；SREM 失败只 WARN（数据已删，索引 stale 由
 	 * {@link #findConversationIds()} / {@link #isConversationIndexed(String)} 兜住）。
+	 *
+	 * <p>legacy 只在 {@link #legacyEligible} 允许时删（特殊 id 的 legacy 键可能正是别的会话的数据键
+	 * 或全局索引键）。
 	 */
 	@Override
 	public void deleteByConversationId(String conversationId) {
 		this.redis.delete(key(conversationId));
-		this.redis.delete(legacyKey(conversationId));
+		if (legacyEligible(conversationId)) {
+			this.redis.delete(legacyKey(conversationId));
+		}
 		removeFromIndexQuietly(conversationId);
 	}
 
@@ -380,8 +501,11 @@ public class RedisChatMemoryRepository implements ChatMemoryRepository {
 		}
 	}
 
-	/** legacy 是迁移期残留；清理失败不影响新历史，留 WARN 供对账。 */
+	/** legacy 是迁移期残留；清理失败不影响新历史，留 WARN 供对账。{@code legacyKey == null} = 该 id 不做迁移面。 */
 	private void deleteLegacyQuietly(String legacyKey, String conversationId) {
+		if (legacyKey == null) {
+			return;
+		}
 		try {
 			this.redis.delete(legacyKey);
 		}

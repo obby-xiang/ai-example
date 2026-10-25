@@ -107,6 +107,20 @@ class RunStoreRequestEmittedAtomicTest {
 		assertThat(stored.isExecuted()).isFalse();
 	}
 
+	@Test
+	void requestMarkerReadFailureDoesNotAbortOrPoisonTheRound() {
+		this.fake.afterPendingGet = (key, field) -> {
+			throw new IllegalStateException("模拟 HGET 失败");
+		};
+
+		org.assertj.core.api.Assertions.assertThatCode(() -> this.store.markRequestEmitted(RUN_ID, CALL_ID, 1_000L))
+			.doesNotThrowAnyException();
+
+		this.fake.afterPendingGet = null;
+		this.store.markRequestEmitted(RUN_ID, CALL_ID, 2_000L);
+		assertThat(this.store.pending(RUN_ID, CALL_ID).getReq()).isTrue();
+	}
+
 	// ── 语料 ────────────────────────────────────────────────────────────────
 
 	private void seedPending(String status) {

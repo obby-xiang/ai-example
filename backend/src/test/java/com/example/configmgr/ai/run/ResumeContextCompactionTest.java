@@ -31,6 +31,7 @@ import java.util.ArrayList;
 import java.util.Map;
 import java.util.List;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -259,6 +260,40 @@ class ResumeContextCompactionTest {
 			invocation.getArgument(0, Runnable.class).run();
 			return null;
 		}).when(this.executor).execute(any(Runnable.class));
+	}
+
+	@Test
+	void cancellationDuringHistoryRebuildSkipsApprovedIrreversibleTool() {
+		seedSuspendedRun();
+		PendingToolCall approved = entry();
+		approved.setKind(PendingToolCall.KIND_CONFIRM);
+		approved.setStatus(PendingToolCall.APPROVED);
+		approved.setExecuted(false);
+		approved.setExecutedBy(null);
+		approved.setOutcome(null);
+		approved.setResultText(null);
+		approved.setIrreversible(true);
+		RunSnapshot snapshot = this.store.get(RUN_ID);
+		snapshot.setInFlightToolCalls(new ArrayList<>(List.of(approved)));
+		this.store.save(snapshot);
+		this.store.seedPending(RUN_ID, approved);
+		AtomicBoolean cancelled = new AtomicBoolean();
+		when(this.cancellations.cancelState(RUN_ID)).thenAnswer(invocation -> cancelled.get()
+				? CancellationRegistry.CancelState.CANCELLED : CancellationRegistry.CancelState.NOT_CANCELLED);
+		when(this.chatService.buildResumedPrompt(eq(RUN_ID), eq(SESSION_ID), any(AiContext.class), any()))
+			.thenAnswer(invocation -> {
+				cancelled.set(true);
+				return new Prompt(List.of());
+			});
+		when(this.toolCallingManager.resolvePending(eq(RUN_ID), any(Prompt.class), any(PendingToolCall.class)))
+			.thenReturn("发布作业已启动");
+
+		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
+
+		verify(this.toolCallingManager, never()).resolvePending(eq(RUN_ID), any(Prompt.class),
+				any(PendingToolCall.class));
+		assertThat(result.outcome()).isEqualTo(ResumeService.Outcome.ALREADY_CANCELLED);
+		verify(this.chatService).cancelParked(RUN_ID);
 	}
 
 	private void seedSuspendedRun() {

@@ -85,6 +85,13 @@ final class FakeMemoryRedis {
 	/** 置 true = 模拟 {@code RENAME} 失败。 */
 	volatile boolean failRename;
 
+	/**
+	 * 置 true = 模拟 {@code RENAME} <b>服务端已生效、回包丢失</b>（Lettuce 超时/断连的典型形态）：
+	 * 覆盖照常发生，然后向调用方抛错。与 {@link #failRename}（没生效就失败）必须区分 ——
+	 * 前者是"写者以为失败、数据其实已经在 Redis 里"的窗口。
+	 */
+	volatile boolean loseRenameReply;
+
 	/** 置 true = 模拟索引 {@code SADD} 失败（RENAME 已成功之后）。 */
 	volatile boolean failIndexAdd;
 
@@ -209,6 +216,10 @@ final class FakeMemoryRedis {
 			this.renameSources.add(source);
 			this.lastRenameSource = source;
 			this.lastRenameTarget = target;
+			if (this.loseRenameReply) {
+				// 服务端已生效、回包丢失：数据在 Redis 里（final 键已就位），调用方只看到异常。
+				throw new IllegalStateException("RENAME 回包丢失（模拟 Lettuce 超时：服务端已生效）");
+			}
 			return null;
 		}).when(this.redis).rename(anyString(), anyString());
 

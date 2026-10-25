@@ -20,11 +20,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
+import org.springframework.ai.model.tool.ToolExecutionResult;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
@@ -55,7 +57,9 @@ import static org.mockito.Mockito.when;
  * <li>I1b（U4）台账命中 {@code outcome=unknown} ⇒ <b>保持 UNKNOWN</b>（不再写成成功，红测基线）；</li>
  * <li>I4 认领失败后二次对账：命中 → 回原结果；未命中 → 既有 {@code TOOL_ALREADY_CLAIMED} 文案；</li>
  * <li>I5 {@code STALE_FENCE} ⇒ 独立文案（"写回权已转移"），{@code executed=false}，
- * 且不再出现"由实例 null 认领"（红测基线）。</li>
+ * 且不再出现"由实例 null 认领"（红测基线）。RT-21 裁决后，旧驱动<b>没有共享帧写权</b>：
+ * 结局只沿工具调用链回模型（{@code ToolResponseMessage} 含 blocked + 独立文案），
+ * 共享 {@code tool_result} 帧被写门丢弃 —— "不吞结果"与"不许旧驱动写共享帧"同时成立。</li>
  * </ol>
  */
 class ToolIdempotencyTest {
@@ -192,34 +196,76 @@ class ToolIdempotencyTest {
 		assertThat(this.store.ledger(RUN_ID)).isEmpty();
 	}
 
-	// ── I5：STALE_FENCE 独立文案（现状即红） ────────────────────────────────
+	// ── I5：STALE_FENCE 的结局只沿工具调用链返回（旧驱动不再写共享帧） ─────────
 
+	/**
+	 * <b>缺陷背景（旧契约，保留为反例）</b>：旧实现让失去续跑权的旧驱动照常发一条
+	 * {@code tool_result} 共享帧（{@code ok=false} + "写回权已转移"），断言的是"帧里有结论"。
+	 * RT-21 写门落地后，同一段代码在旧驱动上不再落任何业务帧 —— 旧断言因此变成
+	 * "要求旧驱动写共享帧"，与写门直接冲突。
+	 *
+	 * <p><b>现契约（控制者裁决）</b>：失去续跑权的旧驱动<b>不得写共享事件/帧</b>（无帧豁免），
+	 * 但 {@code settleBlocked} 返回的 {@code BLOCKED} 文本与机器可读结局
+	 * （{@code outcome=blocked} / {@code code}）必须沿原工具调用链回到模型，不能吞结果，
+	 * 也不能让模型以为成功。本用例把五件事一起钉住：零真实执行、零台账、模型侧结论、
+	 * 条目终态、无旧驱动共享帧。
+	 */
 	@Test
 	void staleFenceHasIndependentConclusionAndText() {
 		// 本进程仍持 epoch 1，但 fence 已被接管方推进到 2
 		this.store.seedHeldRunEpoch(RUN_ID, 1L);
 		this.store.seedFence(RUN_ID, 2L);
+		// 替身的 fence 读口必须与生产同语义（读自己的 fence 投影，而不是落到 null redis 上 NPE）：
+		// 否则下面"没有共享帧"只是"读口坏了 ⇒ fail-closed 丢弃"的巧合，测试会因错误理由变绿。
+		assertThat(this.store.fenceEpoch(RUN_ID)).as("替身 fence 读口与生产同源（seedFence 即已落库的 fence）")
+			.isEqualTo(2L);
 		FrameWire wire = attach();
 
-		this.manager.executeToolCalls(prompt(), response("start_import", "{\"taskId\":7}"));
+		ToolExecutionResult result = this.manager
+			.executeToolCalls(prompt(), response("start_import", "{\"taskId\":7}"));
 		finish();
 
-		assertThat(this.tool.invocations.get()).isZero();
-		assertThat(this.store.ledger(RUN_ID)).isEmpty();
+		// ① 零真实执行、零台账：没有续跑权就没有副作用，也不得留下"执行过"的痕迹
+		assertThat(this.tool.invocations.get()).as("旧驱动不得执行工具").isZero();
+		assertThat(this.store.ledger(RUN_ID)).as("旧驱动不得写台账").isEmpty();
+		assertThat(this.store.claimedBy(RUN_ID, CALL_ID)).as("STALE_FENCE 不占认领").isNull();
 
-		Map<String, Object> frame = FrameContract.oneOfType(wire.frames(), "tool_result");
-		assertThat(frame).containsEntry("ok", false)
-			.containsEntry("outcome", ToolOutcome.BLOCKED.wire())
-			.containsEntry("executed", false)
-			.containsEntry("status", PendingToolCall.BLOCKED);
-		String text = String.valueOf(frame.get("result"));
-		assertThat(text).contains("本轮写回权已转移，本次未执行")
-			.as("不得再写'由实例 null 认领'").doesNotContain("实例 null");
+		// ② RT-21：旧驱动不得写共享事件/帧（不给"结算必须发帧"任何豁免）
+		assertThat(wire.types()).as("旧驱动不得发 tool_result 共享帧（含实时扇出）").doesNotContain("tool_result");
+		assertThat(this.store.archivedTypes(RUN_ID)).as("旧驱动不得把 tool_result 落进事件日志")
+			.doesNotContain("tool_result");
 
+		// ③ 结果不能被吞：机器可读结局 + 独立文案沿原工具调用链回到模型
+		ToolResponseMessage.ToolResponse response = result.conversationHistory()
+			.stream()
+			.filter(ToolResponseMessage.class::isInstance)
+			.map(ToolResponseMessage.class::cast)
+			.flatMap(message -> message.getResponses().stream())
+			.filter(candidate -> CALL_ID.equals(candidate.id()))
+			.findFirst()
+			.orElseThrow(() -> new AssertionError("模型侧缺少该 toolCallId 的结果（结果被吞）"));
+		String modelData = response.responseData();
+		assertThat(modelData).as("机器可读结局：blocked + 既有认领码，不能让模型以为成功")
+			.contains("\"ok\":false")
+			.contains("\"outcome\":\"" + ToolOutcome.BLOCKED.wire() + "\"")
+			.contains(ToolOutcome.CODE_ALREADY_CLAIMED);
+		assertThat(modelData).as("独立文案：写回权已转移、本次未执行，且不伪造执行者")
+			.contains("本轮写回权已转移，本次未执行")
+			.doesNotContain("实例 null")
+			.doesNotContain("导入作业已启动");
+
+		// ④ 条目终态：blocked/未执行，且不伪造认领实例
 		PendingToolCall pending = this.store.pending(RUN_ID, CALL_ID);
 		assertThat(pending.getStatus()).isEqualTo(PendingToolCall.BLOCKED);
+		assertThat(pending.effectiveOutcome()).isEqualTo(ToolOutcome.BLOCKED);
+		assertThat(pending.effectiveCode()).isEqualTo(ToolOutcome.CODE_ALREADY_CLAIMED);
 		assertThat(pending.isExecuted()).isFalse();
 		assertThat(pending.getExecutedBy()).isNull();
+		assertThat(pending.getResultText()).contains("本轮写回权已转移，本次未执行").doesNotContain("实例 null");
+
+		// ⑤ 丢帧的<b>理由</b>是写门（fence 越过本进程 epoch），不是读口故障
+		assertThat(this.store.permittedToWrite(RUN_ID, "事件帧")).as("写门：fence 已越过本进程 epoch")
+			.isFalse();
 	}
 
 	// ── 桩与辅助 ────────────────────────────────────────────────────────────

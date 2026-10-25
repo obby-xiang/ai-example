@@ -129,7 +129,9 @@ class RunMigrationFamilyContractTest {
 		// 不搬的 run 级键族必须在排除清单里明说不搬（含 Registry 不登记的租约键）。
 		assertThat(excluded).contains(RunStore.FENCE_RUN_PREFIX, RunStore.LEASE_RUN_PREFIX,
 				LeaseService.EPOCH_PREFIX, RunStore.BEAT_PREFIX, RunStore.ACTIVITY_PREFIX,
-				CancellationRegistry.CANCEL_PREFIX);
+				CancellationRegistry.CANCEL_PREFIX,
+				// 结算观测位（Task 2）：一次性仲裁位，按"不搬"登记（销毁面负责 DEL，TTL 兜底）
+				com.example.configmgr.ai.observe.SettlementObservationStore.KEY_PREFIX);
 		assertThat(excluded).contains(RunStore.SESSION_RUNS_PREFIX,
 				com.example.configmgr.ai.session.SessionPurgeGuard.KEY_PREFIX,
 				com.example.configmgr.ai.session.SessionPurgePendingStore.PENDING_PREFIX,

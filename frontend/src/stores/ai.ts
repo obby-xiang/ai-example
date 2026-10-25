@@ -163,6 +163,17 @@ let activeRoundHostId: string | null = null
 let roundEpoch = 0
 
 /**
+ * 轮终态序号（M-d / fix2）：`done` / `error` 各递增一次，且只在**本轮**的终帧上递增
+ * （帧归属守卫已在前置 `ownedByActiveRound` 分支返回旧轮帧）。
+ *
+ * <p>为什么需要它：决策 POST 在途时，本轮的结局帧可能先到（帧与决策同锁发出）——
+ * `suspended` 会被结局帧清掉，此后 `reconnectSuspendedRun` 的"帧先于 POST"补救分支就
+ * 必须能区分"帧只是清了挂起（本轮仍在服务端挂起，要续收）"与"本轮已经收口（绝不重连终态）"。
+ * 决策入口捕获本值，送达后不等 ⇒ 不重连。不响应式、不落镜像。
+ */
+let roundTerminalSeq = 0
+
+/**
  * R-166（口径③）：409 幂等拒绝后**等待真实裁决**的宽限（毫秒）—— 到点仍未收到结局帧，
  * 就拉一次 `GET /api/ai/runs/current` 校正（见 `syncGateFromAuthority`）。
  * 取值 3s：挂起期心跳节拍 2s，结局帧与决策同锁发出（`ConfirmGate.submitDecision` 的
@@ -170,8 +181,19 @@ let roundEpoch = 0
  */
 export const GATE_SYNC_GRACE_MS = 3000
 
+/**
+ * FE-17：409 后权威校正的**次数上限**（有界重试，含首次）。
+ *
+ * 旧口径只查一次：条目仍 PENDING（滞后读）/ 轮次快照取不到时，门卡就永久停在
+ * 「已提交，同步中…」——双按钮与输入区一直禁用，只能刷新。改成有界退避（3s / 6s / 12s，
+ * 合计 21s）后，用尽即**解锁并如实提示**：409 是幂等拒绝，用户重试不会翻转已落的裁决。
+ */
+export const GATE_SYNC_MAX_ATTEMPTS = 3
+
 /** 409 后的校正在途计时器（按 toolCallId 记账；模块级，不进响应式状态）。 */
 const gateSyncTimers = new Map<string, ReturnType<typeof setTimeout>>()
+/** 已完成的校正轮次（按 toolCallId 记账；`armGateSync` 的退避指数与"用尽"判据）。 */
+const gateSyncAttempts = new Map<string, number>()
 
 function disarmGateSync(toolCallId: string): void {
   const timer = gateSyncTimers.get(toolCallId)
@@ -179,11 +201,13 @@ function disarmGateSync(toolCallId: string): void {
     clearTimeout(timer)
     gateSyncTimers.delete(toolCallId)
   }
+  gateSyncAttempts.delete(toolCallId)
 }
 
 function disarmAllGateSync(): void {
   gateSyncTimers.forEach((timer) => clearTimeout(timer))
   gateSyncTimers.clear()
+  gateSyncAttempts.clear()
 }
 /** 会话镜像是否已启动（防止重复 $subscribe）。 */
 let mirrorStarted = false
@@ -2486,16 +2510,36 @@ export const useAiStore = defineStore('ai', {
      * 复用 {@link resumeSnapshotStream}：**续写原宿主消息**（不新起助手消息、不引入任何新 UI），
      * 失败提示沿用该路径既有的 `onClose` / `onReconnect` 口径（不新增元素）。
      * 只在 `suspended` 为真时动作：非挂起轮的 POST（如 409 幂等收敛）不需要重连。
+     *
+     * <p><b>M-d（fix2）：帧先于 POST 时也要续收。</b>结局帧与决策同锁发出，`confirm_decision` /
+     * `frontend_tool_result` 可能**先于** POST 响应抵达并把 `suspended` 清掉（"这张卡不再等人"
+     * 是真话，但**本轮**仍在服务端挂起：后面还有 `req=false` 的卡要发请求帧、还有工具结果与终帧）。
+     * 此时若不续收，本轮再无连接 ⇒ 后续帧与下一张卡永远不到，用户下一条消息撞 409。
+     * 补救分支的判据（任一不满足即不连，**绝不盲连**）：决策前确实处于挂起（`parkedAtDecision`）、
+     * 本轮没换（`activeRunId` 一致）、没被停止、当前没有在跑的连接（`loading === false`：
+     * inline 前端工具回灌时流还开着，另开一条就是重复连接）、且 POST 期间没有收口
+     * （`roundTerminalSeq` 未变 —— 不对终态重连）。
+     *
+     * @param parkedAtDecision 提交那一刻是否处于挂起（`suspended`）—— 由调用方在 await **之前**捕获
+     * @param terminalSeqAtDecision 提交那一刻的 {@link roundTerminalSeq} 快照
      */
-    reconnectSuspendedRun(runId: string, toolCallId: string): void {
-      if (!this.suspended) {
-        return
-      }
+    reconnectSuspendedRun(
+      runId: string,
+      toolCallId: string,
+      parkedAtDecision: boolean,
+      terminalSeqAtDecision: number
+    ): void {
       const host = this.messages.find((item) => item.parts.some(
         (part): boolean => part.kind === 'tool' && part.toolCallId === toolCallId
       ))
       if (!host) {
         return
+      }
+      if (!this.suspended) {
+        if (!parkedAtDecision || this.stopped || this.loading
+          || this.activeRunId !== runId || roundTerminalSeq !== terminalSeqAtDecision) {
+          return
+        }
       }
       void this.resumeSnapshotStream(runId, this.runSeq[runId] ?? 0, host.id)
     },
@@ -2965,13 +3009,19 @@ export const useAiStore = defineStore('ai', {
       deriveProjections(host)
     },
 
-    /** 409 后武装权威校正计时器（`GATE_SYNC_GRACE_MS` 到点仍未落结局帧 ⇒ 拉 runs/current）。 */
-    armGateSync(toolCallId: string): void {
+    /**
+     * 409 后武装权威校正计时器（首次 `GATE_SYNC_GRACE_MS`，之后按指数退避，见
+     * {@link GATE_SYNC_MAX_ATTEMPTS}）。
+     *
+     * @param attempt 已完成的校正轮次（0 = 首次宽限）
+     */
+    armGateSync(toolCallId: string, attempt = 0): void {
       disarmGateSync(toolCallId)
+      gateSyncAttempts.set(toolCallId, attempt)
       gateSyncTimers.set(toolCallId, setTimeout(() => {
         gateSyncTimers.delete(toolCallId)
         void this.syncGateFromAuthority(toolCallId)
-      }, GATE_SYNC_GRACE_MS))
+      }, GATE_SYNC_GRACE_MS * 2 ** attempt))
     },
 
     /**
@@ -2982,8 +3032,8 @@ export const useAiStore = defineStore('ai', {
      * 用户停止是一次决策，与 confirm_decision(decision=cancel) 帧同口径） /
      * BLOCKED→越界，不进审批只读卡 —— 2A 批裁决 §9 K2 的门卡四态由此增为五态）。
      *
-     * 条目仍未定（PENDING）、条目缺失、或轮次已不存在时 ⇒ **绝不伪造裁决**：保留提交态
-     * （按钮继续禁用，同 id 不再提交），只给一条提示。
+     * 条目仍未定（PENDING）、条目缺失、取数失败或轮次已不存在时 ⇒ **绝不伪造裁决**，
+     * 但也不无限等待：走 {@link retryOrGiveUpGateSync} 有界重试，用尽即解锁（FE-17）。
      */
     async syncGateFromAuthority(toolCallId: string): Promise<void> {
       const sid = this.sessionId
@@ -2991,7 +3041,8 @@ export const useAiStore = defineStore('ai', {
       try {
         current = await aiApi.runsCurrent(sid)
       } catch {
-        // 取数不可用：不写任何推测性裁决（等 SSE 结局帧 / 用户刷新）
+        // 取数不可用：不写任何推测性裁决（重试/解锁口径同"仍未定"）
+        this.retryOrGiveUpGateSync(toolCallId)
         return
       }
       if (this.sessionId !== sid) {
@@ -3003,19 +3054,81 @@ export const useAiStore = defineStore('ai', {
         : undefined
       const receipt = entry ? gateReceiptOfStatus(entry.entryStatus) : null
       if (receipt) {
-        this.applyGateReceipt(toolCallId, receipt)
+        // M-a（fix2）：同一份 `pendingEntries` 一并交给校正口 —— 补下一张前必须先按它分流
+        this.applyGateReceipt(
+          toolCallId,
+          receipt,
+          Array.isArray(current?.pendingEntries) ? current.pendingEntries : undefined
+        )
         return
       }
+      this.retryOrGiveUpGateSync(toolCallId)
+    },
+
+    /**
+     * 权威校正的收尾（FE-17）：仍有余量 ⇒ 退避再试；用尽 ⇒ **解锁提交态**并如实提示。
+     *
+     * <p>为什么解锁是安全的：409 DUPLICATE 表示该 toolCallId 已有决策，重试只会再吃一次
+     * 幂等拒绝（不会把已批准的翻成拒绝）。锁死按钮则让用户连"再试一次/再确认"都做不到。
+     */
+    retryOrGiveUpGateSync(toolCallId: string): void {
+      if (this.gateSubmissions[toolCallId] === undefined) {
+        // 提交态已被别的路径收口（结局帧 / 会话重置 / 终态）：不再重试
+        gateSyncAttempts.delete(toolCallId)
+        return
+      }
+      const attempt = (gateSyncAttempts.get(toolCallId) ?? 0) + 1
+      if (attempt < GATE_SYNC_MAX_ATTEMPTS) {
+        setNotice(this, 'ai.notice.decisionPending')
+        this.armGateSync(toolCallId, attempt)
+        return
+      }
+      this.clearGateSubmission(toolCallId)
       setNotice(this, 'ai.notice.decisionPending')
     },
 
     /**
-     * 挂起态收口的唯一判据：本次结局只清自己这张卡 —— 仍有其它待决确认段时保持 `suspended`。
-     * 调用方必须**先**把目标卡落终态再调用（终态段不在 `pendingConfirms` 中，自然不计入）。
+     * 本轮是否还有**别人**在等人（人围栏判据的唯一实现）。
+     *
+     * <p>FE-22：此前只数 `pendingConfirms`（CONFIRM 段）。一轮里同时有确认门 + 前端卡
+     * （生成式表单 / 上传交接 / 表格预览）时，决掉确认门就把 `suspended` 置 false ——
+     * ① 输入区在还有卡等人时被解锁；② 后续那张非 CONFIRM 卡提交后
+     * `reconnectSuspendedRun` 因 `suspended=false` 早退、`revealNextRestoredPendingCard`
+     * 同样早退 ⇒ 本轮再无连接、队列里的下一张永不出现，下一次发送撞 409。
+     *
+     * <p>判据只看"是否仍在等动作"（`requiresAction` + `status='pending'` + 人围栏两类 kind），
+     * 不新建任何投影：BACKEND 条目后端直接执行、从不弹卡，自然不计入。
+     *
+     * <p><b>I-1（审查）：还必须计入"尚未建段"的恢复队列。</b>`restoreSuspendedSnapshot` 只把
+     * 第一张建成段，其余进 `restoredPendingQueue` —— 在 `revealNextRestoredPendingCard` 之前
+     * 它们没有段，只看段会漏判。于是当 `confirm_decision` 帧**先于** confirm POST 响应到达
+     * （合法时序：帧与决策同锁发出）时，帧 handler 看到"没有别的段"就把 `suspended` 清掉，
+     * POST 返回后 `reconnectSuspendedRun` / `revealNextRestoredPendingCard` 双双早退 ⇒
+     * 不重连、第二张永不出现、输入区被解锁而后端这一轮仍 SUSPENDED。
+     * 队列里只剩已决条目时不计入（`revealNext` 会跳过并清队，不会造成永久锁）。
+     */
+    hasOtherPendingCards(toolCallId: string): boolean {
+      const hasPendingPart = this.messages.some((message) => message.parts.some(
+        (part): boolean => part.kind === 'tool'
+          && part.toolCallId !== toolCallId
+          && part.requiresAction === true
+          && part.status === 'pending'
+          && (part.kind2 === 'CONFIRM' || part.kind2 === 'FRONTEND')
+      ))
+      if (hasPendingPart) {
+        return true
+      }
+      // ② 计划已从快照恢复、但还没轮到建段的卡（串行呈现的队列）
+      return this.restoredPendingQueue.some((entry) => !this.hasDecidedPendingResidue(entry.toolCallId))
+    },
+
+    /**
+     * 挂起态收口的唯一判据：本次结局只清自己这张卡 —— 本轮还有**任何**待人卡
+     * （确认门 / 前端卡）时保持 `suspended`。调用方必须**先**把目标卡落终态再调用
+     * （终态段 `requiresAction=false`，自然不计入）。
      */
     clearSuspendedIfNoOtherConfirms(toolCallId: string): void {
-      const hasOther = this.pendingConfirms.some((item) => item.toolCallId !== toolCallId)
-      if (!hasOther) {
+      if (!this.hasOtherPendingCards(toolCallId)) {
         this.suspended = false
       }
     },
@@ -3023,10 +3136,14 @@ export const useAiStore = defineStore('ai', {
     /**
      * 把权威裁决落成段终态 + 回执元数据，并撤提交态。
      * 段侧 first-wins：已终态段（含乐观写后已非 `pending`）不覆盖。
+     *
+     * @param authorities 触发本次校正的**同一份** `runs/current.pendingEntries`（可选）——
+     *   用于在补下一张之前先校正恢复队列（M-a，见 {@link reconcileRestoredQueueWithAuthority}）
      */
     applyGateReceipt(
       toolCallId: string,
-      receipt: { decision?: 'approved' | 'rejected' | 'cancel'; status: ToolRunStatus }
+      receipt: { decision?: 'approved' | 'rejected' | 'cancel'; status: ToolRunStatus },
+      authorities?: readonly AiRunCurrentEntry[]
     ): void {
       for (const message of this.messages) {
         const part = findToolPart(message, toolCallId)
@@ -3049,8 +3166,110 @@ export const useAiStore = defineStore('ai', {
         deriveProjections(message)
       }
       this.clearGateSubmission(toolCallId)
-      // 段已落终态后才计数：仅当无其它待决确认段时才撤挂起态
+      // M-a（fix2）：先用**同一份**权威快照校正恢复队列（已非 PENDING 的条目按真实状态分流），
+      // 再补卡 —— 否则会把权威已决的那张补成可点卡（点下去必 409，再落到锁死链）。
+      if (authorities !== undefined) {
+        this.reconcileRestoredQueueWithAuthority(authorities)
+      }
+      // I-1 收容：409 → 权威校正拿到真实裁决（`syncGateFromAuthority` 是唯一调用点）时，
+      // 决策已经落地，与 confirm() 成功路径同口径把恢复队列里的下一张补上 ——
+      // 否则 `suspended` 会因"队列里还有人"而保持为真，却没有任何卡可点（输入区锁死无入口）。
+      // 这里不主动重连：本轮仍处于挂起语义，用户决策那一张时 `submitFrontendToolResult` 会续流；
+      // 人等人期间本来就没有连接（park 非阻塞语义）。
+      const runId = this.activeRunId
+      if (runId) {
+        this.revealNextRestoredPendingCard(runId)
+      }
+      // 段已落终态后才计数：仅当无其它待决卡（含尚未建段的队列）时才撤挂起态
       this.clearSuspendedIfNoOtherConfirms(toolCallId)
+    },
+
+    /**
+     * M-a（fix2）：用**同一份** `runs/current.pendingEntries` 校正恢复队列，避免 409 校正补出一张
+     * 权威已决的卡（点下去必 409，再落到"锁死且无卡可点"）。
+     *
+     * <p>按权威条目的**真实状态**分流，不是简单丢弃：
+     * <ul>
+     * <li>`PENDING` / 快照未列该条目 / 无法识别的状态 ⇒ 原样保留（信息不足不猜，语义不变）；</li>
+     * <li>`APPROVED`（已裁决、尚未执行）⇒ **仍要展现**，但按帧同口径落 `running` + `requiresAction=false`
+     * —— 一张"已批准、执行中"的只读卡。`running` 在 `isFrameDecidedPendingStatus` 里**不是**已决，
+     * 故不能当"已决"丢掉（丢掉等于把一条正在执行的条目从界面抹掉）；</li>
+     * <li>真终态（`EXECUTED` / `REJECTED` / `TIMEOUT` / `BLOCKED` 经 `gateReceiptOfStatus`，
+     * `FRONTEND_RESULT` / `FRONTEND_CANCELLED` / `CANCELLED` 等经 `frameStatusToPendingStatus`）
+     * ⇒ 出队且**不重建**：该条目已收口，
+     * 没有任何需要用户动作的面（重建只会得到一张点了必 409 的卡）。</li>
+     * </ul>
+     *
+     * <p>本地已有段的条目一律不动：它归实时帧路径（`hasDecidedPendingResidue` / first-wins）管，
+     * 这里只处置"尚未建段"的队列条目。
+     */
+    reconcileRestoredQueueWithAuthority(authorities: readonly AiRunCurrentEntry[]): void {
+      if (this.restoredPendingQueue.length === 0 || authorities.length === 0) {
+        return
+      }
+      const byId = new Map(authorities.map((entry) => [entry.toolCallId, entry] as const))
+      const remaining: AiRunCurrentEntry[] = []
+      for (const entry of this.restoredPendingQueue) {
+        const materialized = this.messages.some((message) => message.parts.some(
+          (part): boolean => part.kind === 'tool' && part.toolCallId === entry.toolCallId
+        ))
+        if (materialized) {
+          remaining.push(entry)
+          continue
+        }
+        const authority = byId.get(entry.toolCallId)
+        if (!authority || authority.entryStatus === 'PENDING') {
+          remaining.push(entry)
+          continue
+        }
+        const receipt = gateReceiptOfStatus(authority.entryStatus)
+        const status = receipt?.status ?? frameStatusToPendingStatus(authority.entryStatus)
+        if (!status) {
+          // 快照给了无法识别的状态：不猜（保留原语义，交给后到的帧/下次快照收敛）
+          remaining.push(entry)
+          continue
+        }
+        if (status === 'running') {
+          // APPROVED：已裁决、执行中 —— 展现，但只能是不等动作的只读卡
+          this.materializeRestoredDecidedCard(entry, { decision: receipt?.decision ?? 'approved', status })
+          continue
+        }
+        if (isFrameDecidedPendingStatus(status)) {
+          continue
+        }
+        remaining.push(entry)
+      }
+      this.restoredPendingQueue = remaining
+    },
+
+    /**
+     * M-a（fix2）：把一条**权威已裁决、尚未执行**的恢复条目落成只读卡（`running`）。
+     *
+     * <p>宿主口径与 `rebuildPendingCard` 一致（有段用段宿主，否则末条助手消息，都没有才新建），
+     * 但**不**武装表单 / 上传交接 / 预览 —— 那些单例只服务"等用户动作"的卡；这张卡不能点。
+     */
+    materializeRestoredDecidedCard(
+      entry: AiRunCurrentEntry,
+      receipt: { decision?: 'approved' | 'rejected' | 'cancel'; status: ToolRunStatus }
+    ): void {
+      let host = this.messages.find((item) => item.parts.some(
+        (part): boolean => part.kind === 'tool' && part.toolCallId === entry.toolCallId
+      )) ?? [...this.messages].reverse().find((item) => item.role === 'assistant') ?? null
+      if (!host) {
+        host = this.appendAssistantMessage('')
+        host.streaming = false
+        host.done = true
+      }
+      this.upsertToolPart(host, {
+        toolCallId: entry.toolCallId,
+        name: entry.name,
+        kind2: entry.kind === 'CONFIRM' ? 'CONFIRM' : 'FRONTEND',
+        status: receipt.status,
+        ...(receipt.decision !== undefined ? { decision: receipt.decision } : {}),
+        decidedAt: Date.now(),
+        requiresAction: false
+      })
+      deriveProjections(host)
     },
 
     /**
@@ -3133,14 +3352,18 @@ export const useAiStore = defineStore('ai', {
         })
         deriveProjections(host)
       }
+      // M-d（fix2）：提交前的现场快照（帧可能先于 POST 响应抵达并清掉 suspended / 收口本轮）
+      const parkedAtDecision = this.suspended
+      const terminalSeqAtDecision = roundTerminalSeq
       try {
         await aiApi.confirm({ runId, toolCallId, approved, reason: reason ?? null })
         // 批4-D：决策送达 ⇒ 勾选态复位（该卡已收尾，不留"已同意"的残影）
         this.clearGateAck(toolCallId)
         // B1（2026-10-20 裁决 9）：决策送达 ⇒ 带 lastSeq 重连收流（挂起期连接已被服务端收掉）。
         // 顺序先于 clearSuspendedIfNoOtherConfirms：后者在多卡批次里可能把 suspended 置 false，
-        // 而重连的触发判据正是"这轮仍在挂起语义里"。
-        this.reconnectSuspendedRun(runId, toolCallId)
+        // 而重连的触发判据正是"这轮仍在挂起语义里"。M-d：帧先到时 `suspended` 已被清掉，
+        // 由 `parkedAtDecision` + 轮次身份补回这条连接（终态/已停/已有连接一律不连）。
+        this.reconnectSuspendedRun(runId, toolCallId, parkedAtDecision, terminalSeqAtDecision)
         // M-2b：快照恢复的多卡批次串行呈现 —— 先补下一张，再按"是否还有待决卡"决定挂起收口
         this.revealNextRestoredPendingCard(runId)
         // 多卡并存：本轮还有别的确认门待决时保持挂起态（只清自己这张）
@@ -3218,6 +3441,9 @@ export const useAiStore = defineStore('ai', {
         setNotice(this, 'ai.notice.missingRunId')
         return { ok: false, message: '缺少 runId' }
       }
+      // M-d（fix2）：提交前的现场快照（结局帧可能先于 POST 响应抵达；inline 执行时不在挂起态）
+      const parkedAtDecision = this.suspended
+      const terminalSeqAtDecision = roundTerminalSeq
       try {
         await aiApi.frontendToolResult(
           cancelled
@@ -3237,7 +3463,9 @@ export const useAiStore = defineStore('ai', {
         )
         // B1（2026-10-20 裁决 9）：回灌送达 ⇒ 带 lastSeq 重连收流（GF 提交/取消与即时前端工具共用）。
         // 不 await：重连要活到本轮终帧，await 会把"表单已提交"的本地收尾拖到整轮结束之后。
-        this.reconnectSuspendedRun(targetRunId, toolCallId)
+        // M-d：帧先到时 `suspended` 已被清掉，由 `parkedAtDecision` + 轮次身份补回这条连接；
+        // inline 执行（流还开着）与终态/已停一律不连。
+        this.reconnectSuspendedRun(targetRunId, toolCallId, parkedAtDecision, terminalSeqAtDecision)
         // M-2b：GF / 上传 / 表格预览（放弃）等同族决策 — 快照批次里下一张接着出现
         this.revealNextRestoredPendingCard(targetRunId)
         return { ok: true }
@@ -3252,6 +3480,12 @@ export const useAiStore = defineStore('ai', {
             // 通用 FRONTEND 工具就地收掉挂起投影
             this.applyFrontendToolTerminal(toolCallId, mapped)
           }
+          // M-b（fix2）：409 = 这张卡**已有裁决**，本页签不会再收到它的结局帧。此前的落点只收敛
+          // 这张卡：恢复队列里的下一张永不出现、`suspended` 也不按真实待决重算 ⇒ 输入区锁死且
+          // 屏上无可点卡（只能刷新）。与成功路径同口径补出下一张，再只按**真实待决**（段 + 队列）
+          // 决定挂起收口；**不重连**（本轮仍在挂起时由那张卡的决策续流，人等人期间没有连接）。
+          this.revealNextRestoredPendingCard(targetRunId)
+          this.clearSuspendedIfNoOtherConfirms(toolCallId)
           setNotice(this, cancelled ? 'ai.notice.toolTerminal' : 'ai.notice.toolAlreadySubmitted')
           return { ok: false, duplicate: true }
         }
@@ -3388,6 +3622,24 @@ export const useAiStore = defineStore('ai', {
         clearFormDraft(form.toolCallId)
       }
       this.activeForm = null
+    },
+
+    /**
+     * 轮终态的"人围栏单例"收口（FE-25）：`done` / `error` 帧到达时调用一次。
+     *
+     * <p>收什么：活动表单（连同草稿镜像）、上传交接单例、表格预览计划 + 失效标记、快照恢复的
+     * 串行队列。为什么要一起收：这些单例一旦残留，就等于"已结束的一轮仍能被界面推动"——
+     * 上传交接会把 `frontend_tool_result` 打到收口的 run 上、预览还能再"应用"一次写入、
+     * 队列会在换轮前把旧卡补进新现场。段侧的 `requiresAction` 由 `expireResidueToolParts`
+     * 同口径收掉，故这里只清单例、不碰段。
+     */
+    cleanupTerminalInteractionState(): void {
+      this.dropActiveForm()
+      this.activeUploadHandoff = null
+      this.stalePreviewToolCallId = null
+      // reason='stop'：整轮结束，卡面不再需要"预览已失效"提示（同 stop() 口径）
+      this.dropSheetPreview('stop')
+      this.restoredPendingQueue = []
     },
 
     /**
@@ -3667,10 +3919,18 @@ export const useAiStore = defineStore('ai', {
       )
     },
 
-    /** 用户点「放弃」：`cancelled=true` 走既有 `FRONTEND_CANCELLED`，卡落终态。 */
-    async cancelUploadHandoff(): Promise<void> {
+    /**
+     * 用户点「放弃」：`cancelled=true` 走既有 `FRONTEND_CANCELLED`，卡落终态。
+     *
+     * @param toolCallId 卡面所属的 toolCallId（卡面显式传入）。多张交接卡同屏时单例只记一张，
+     *   不带身份会"点了这张、断的是那张"（PK-12）；身份不匹配 ⇒ 空操作，绝不误杀另一张。
+     */
+    async cancelUploadHandoff(toolCallId?: string): Promise<void> {
       const handoff = this.activeUploadHandoff
       if (!handoff) {
+        return
+      }
+      if (toolCallId !== undefined && toolCallId !== '' && toolCallId !== handoff.toolCallId) {
         return
       }
       await this.finishUploadHandoff(handoff, 'cancelled', '用户已放弃本次上传交接，未上传任何文件。', true)
@@ -5118,7 +5378,9 @@ export const useAiStore = defineStore('ai', {
             }
             this.dropActiveForm()
           }
-          this.suspended = false
+          // M2 / FE-22：只清**这张卡**的挂起语义 —— 同轮还有别的待人卡（确认门 / 另一张前端卡）
+          // 时保持挂起，否则那一张的提交将失去重连判据（`reconnectSuspendedRun` 认 suspended）。
+          this.clearSuspendedIfNoOtherConfirms(frame.toolCallId)
           break
         }
         case 'suspended': {
@@ -5175,6 +5437,8 @@ export const useAiStore = defineStore('ai', {
           setNotice(this, 'ai.notice.upstreamRetry')
           break
         case 'done': {
+          // M-d（fix2）：本轮已收口 —— 决策 POST 在途时据此判定"不得再续收"
+          roundTerminalSeq += 1
           message.streaming = false
           message.done = true
           // o-R1：轮终态封口末尾流式段（否则已完成的消息里仍留着 streaming 段的假态，且会被
@@ -5183,10 +5447,10 @@ export const useAiStore = defineStore('ai', {
           // 已删除 —— 挂起卡由段派生（requiresAction=false ⇒ 派生为 null）
           sealTrailingStreamPart(message)
           expireResidueToolParts(message)
-          if (this.activeForm !== null) {
-            // 轮次收尾时表单未决（如后端侧超时/放弃）：本地一并收起
-            this.dropActiveForm()
-          }
+          // FE-25：轮终态 ⇒ 所有"等人"类单例一并收口（表单 / 上传交接 / 表格预览 + 失效标记）。
+          // 旧口径只收 activeForm：已收口的轮仍能被卡片推动（上传交接继续回灌、预览还能"应用"），
+          // 而组件声明的 `unavailable`（任务已结束，仅供查看）没有任何生产者。
+          this.cleanupTerminalInteractionState()
           this.suspended = false
           if (frame.cancelled) {
             // 批G · S1/S3：取消轮把仍 pending/running 的段一并收敛（后端不会再发 tool_result），
@@ -5216,14 +5480,19 @@ export const useAiStore = defineStore('ai', {
           break
         }
         case 'error': {
+          // M-d（fix2）：与 done 同口径 —— 收口后不得再续收（不对终态重连）
+          roundTerminalSeq += 1
           message.streaming = false
           message.done = true
           // 出错收尾与 done 同口径：封口末尾流式段 + 待决工具段过期降级
           sealTrailingStreamPart(message)
           expireResidueToolParts(message)
-          if (this.activeForm !== null) {
-            this.dropActiveForm()
-          }
+          // FE-25：与 done 同口径 —— 人围栏单例全部收口（轮已经结束，卡不能再推动它）
+          this.cleanupTerminalInteractionState()
+          // I-2（审查）：与 done 同口径解掉挂起态。`expireResidueToolParts` 已把待决段收口
+          // （`pendingToolCall` 变 null），若 `suspended` 还留在真值，输入区会永久锁在
+          // 「正在等待你的确认…」而屏上没有任何可点的卡 —— 只能刷新。
+          this.suspended = false
           // R-09：通知槽只给 message，不再展示机器码与派生后缀；码留在 errorCard.code（诊断/取证）。
           setNotice(this, 'ai.notice.turnError', { message: frame.message })
           // R-165 S5c：错误卡族（demo v7.7 裁决区 08）—— 挂在**本轮这条助手消息**上 ⇒ 面板在

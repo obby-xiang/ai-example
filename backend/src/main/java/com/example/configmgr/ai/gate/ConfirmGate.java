@@ -3,6 +3,7 @@ package com.example.configmgr.ai.gate;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.form.GenerativeFormRules;
 import com.example.configmgr.ai.observe.AiTrace;
+import com.example.configmgr.ai.observe.SettlementObservationStore;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.LeaseService;
 import com.example.configmgr.ai.run.PendingToolCall;
@@ -316,6 +317,34 @@ public class ConfirmGate {
 		this.resumeTriggerExecutor = resumeTriggerExecutor;
 		this.leaseService = leaseService;
 		this.retryScheduler = retryScheduler == null ? DEFAULT_RETRY_SCHEDULER : retryScheduler;
+	}
+
+	/**
+	 * 表格采样/改动审计面（AI 表格工具治理批）。null = 未注入（轻装配面 / 单元测试）——
+	 * 此时只是少了计数与台账，{@code tool_call_end} 照常发射（字段来自条目自身的 {@code sheetMeta}）。
+	 *
+	 * <p>为什么确认门也要它：park 之后工具的结算发生在<b>决策/放弃的写入方</b>（本类），
+	 * 不再经过 {@code SpToolCallingManager} 的内联批循环 —— 观测面必须跟着所有权走
+	 * （见 {@link #settleParkedToolCall}）。
+	 */
+	private SheetAudit sheetAudit;
+
+	/** 可选注入（{@code SheetAudit} 是观测面，不是判定面；缺失不影响任何决策语义）。 */
+	@Autowired(required = false)
+	public void setSheetAudit(SheetAudit audit) {
+		this.sheetAudit = audit;
+	}
+
+	/**
+	 * 结算观测位（跨实例恰好一次的仲裁面）。null = 未注入（轻装配/单测）：每个发点各自发一行，
+	 * 与引入仲裁之前同形（单实例恒等价）。
+	 */
+	private SettlementObservationStore settlementObservations;
+
+	/** 可选注入（观测面，不是判定面；缺失不影响任何决策语义）。 */
+	@Autowired(required = false)
+	public void setSettlementObservationStore(SettlementObservationStore observations) {
+		this.settlementObservations = observations;
 	}
 
 	/**
@@ -634,7 +663,19 @@ public class ConfirmGate {
 			// 到点仍 PENDING ⇒ 写 TIMEOUT/FRONTEND_TIMEOUT + 发结局帧，并<b>派发一次续跑</b>让本轮收尾
 			// （到期是系统裁决；不派发会留下"没有驱动方也没有终帧"的悬轮）。
 			// 确认门无上限（timeoutSeconds == null）不排。
-			if (!confirm && timeoutSeconds != null) {
+			boolean scheduled = false;
+			for (PendingToolCall parked : this.store.pendingsLenient(runId)) {
+				if (!PendingToolCall.PENDING.equals(parked.getStatus())
+						|| !PendingToolCall.KIND_FRONTEND.equals(parked.getKind())) {
+					continue;
+				}
+				Integer parkedTimeout = suspendWaitSeconds(parked);
+				if (parkedTimeout != null) {
+					scheduleParkedFrontendExpiry(runId, parked, parkedTimeout);
+					scheduled = true;
+				}
+			}
+			if (!scheduled && !confirm && timeoutSeconds != null) {
 				scheduleParkedFrontendExpiry(runId, pending, timeoutSeconds);
 			}
 			throw new RunParkedException(runId, pending.getToolCallId(), pending.getKind());
@@ -1063,7 +1104,8 @@ public class ConfirmGate {
 					if (fresh == null || !PendingToolCall.PENDING.equals(fresh.getStatus())) {
 						return;
 					}
-					expireFrontend(runId, fresh, timeoutSeconds);
+					PendingToolCall expired = expireFrontend(runId, fresh, timeoutSeconds);
+					settleParkedToolCall(runId, expired, expired.getResultText());
 					AiTrace.eventOn(runId, snapshotSessionId(runId), "frontend_parked_expired", "toolCallId",
 							toolCallId, "tool", toolName, "timeoutS", timeoutSeconds);
 					log.info("park 后的前端回执到期，条目已收敛 runId={} toolCallId={} tool={} timeoutS={}"
@@ -1261,6 +1303,19 @@ public class ConfirmGate {
 			this.store.putPending(runId, pending);
 			this.registry.of(runId).confirmDecision(pending, approved ? "approve" : "reject", pending.getReason(), 0L);
 			woke = signal(runId, toolCallId);
+		}
+		// ===== park 结算：拒绝也是"这张卡的结论"（独立复审 M-2′）=====
+		// park 开启时整批 tool_start 已前移公布，而首张确认卡在 await 处直接穿出批循环
+		// （RunParkedException）—— 循环末尾的 emitOnce 永远不会执行。用户拒绝落在另一个请求/实例上，
+		// 若这里不结算，这条调用就永久停在"有 start、没有 end"，与"进程死在 start 与 end 之间"
+		// 在日志里不可区分，ai:observed 的对应 field 也永远空着。
+		// ① <b>只拒绝</b>：放行后由续跑的认领胜者（claimExecution）结算，决策侧补会双发；
+		// ② <b>只 park</b>：park 关闭时等待线程在场，它接手后自会结算（同 submitFrontendResult /
+		//    dismiss 的判据）；
+		// ③ 必须在 submitLock <b>之外</b>（锁内不做 Redis 往返，理由同 submitFrontendResult）；
+		// ④ 与批循环/续跑认领的那一条由 ai:observed 的首写者仲裁（决策恰落在交接窗口时只发一条）。
+		if (!approved && publishesRequestsAheadOfLoop()) {
+			settleParkedToolCall(runId, pending, pending.getResultText());
 		}
 		return new Submission(Outcome.ACCEPTED, pending, woke, null, maybeTriggerResume(runId, woke));
 	}
@@ -1601,6 +1656,15 @@ public class ConfirmGate {
 			out.frontendToolResult(pending, ok, resultText);
 			woke = signal(runId, toolCallId);
 		}
+		// ===== park 结算：决策写胜者也是候选发点（在 submitLock 之外）=====
+		// ① 不判 woke（那是实例内事实，见 settleParkedToolCall 的方法注）：park 开启时本行与源实例
+		//    批循环可能先后都到，由 ai:observed 的首写者仲裁；非 park 时结算权始终在等待线程手上。
+		// ② 必须在锁外：submitLock 是实例级（跨 run）决策/挂起锁，每次回灌都持锁做一次 Redis 往返
+		//    会把无关 run 的决策一起排队（独立复审 I-2）。次序不变：落库 → 结局帧 → 唤醒 之后才发这一行，
+		//    再往后才是续跑派发（maybeTriggerResume），因此"帧先于 end、end 先于续跑"仍然成立。
+		if (publishesRequestsAheadOfLoop()) {
+			settleParkedToolCall(runId, pending, resultText);
+		}
 		return new Submission(Outcome.ACCEPTED, pending, woke, null, maybeTriggerResume(runId, woke));
 	}
 
@@ -1647,8 +1711,126 @@ public class ConfirmGate {
 			this.registry.of(runId).frontendToolResult(pending, false, text);
 			woke = signal(runId, pending.getToolCallId());
 		}
+		// 与回灌同一口径：锁外发、按 ai:observed 仲裁、次序在结局帧与唤醒之后、续跑派发之前
+		if (publishesRequestsAheadOfLoop()) {
+			settleParkedToolCall(runId, pending, text);
+		}
 		log.info("前端工具被用户取消 runId={} toolCallId={} name={}", runId, pending.getToolCallId(), pending.getName());
 		return new Submission(Outcome.ACCEPTED, pending, woke, null, maybeTriggerResume(runId, woke));
+	}
+
+	/**
+	 * <b>park 结算的观测收口</b>：{@code tool_call_end} + 表格审计计数/台账，恰一次。
+	 *
+	 * <h2>为什么发在这里</h2>
+	 * park 之后"等人/等前端"这件事不再占用线程，工具的结算可能发生在决策落库之后的<b>续跑</b>里
+	 * （{@code ResumeService} 重建历史 → 该条目走"复用结果"分支）。那条分支是重挂/重试的公共通道，
+	 * 在它那里记账会被放大成"重挂次数"，故<b>不是</b>发点。真正的发点由
+	 * {@link com.example.configmgr.ai.observe.SettlementObservationStore} 的首写者仲裁选出：
+	 * 本类（决策 / 放弃 / 整轮取消 / 前端回执到期收敛的胜者）、{@code SpToolCallingManager}
+	 * 的内联批循环与 abort 结算、续跑认领胜者共抢
+	 * {@code ai:observed:<runId>} 的同一 field，抢到者发一行并记一次审计。
+	 *
+	 * <p><b>覆盖边界（如实登记）</b>：发点现已覆盖 <b>已决 / 放弃 / 整轮取消 / 前端回执到期（park 后
+	 * 的 {@code expireFrontend} 收敛，见 {@link #scheduleParkedFrontendExpiry}）/ 执行认领</b> 五类 ——
+	 * 超时与取消不再缺席（历史注释曾把它们写成"存量缺口"，已过时）。仍缺席的只有两条存量形态：
+	 * ①{@code convergeOnDecided}（决策 guard 已被别的写者持有）<b>刻意不补</b> —— 发点归 guard 持有者，
+	 * 胜者若死在"落库 → 结算"之间，该条仍是 0 行；②非 park 且全集群都没有等待方（进程死在等待中、
+	 * 尚未续跑），那一行仍缺席，与 park 缺陷之前的存量口径一致。
+	 *
+	 * <h2>为什么<b>不</b>用 {@code woke} 判发不发（独立复审 I-1 / I-2）</h2>
+	 * {@code woke} 是<b>本进程</b>有没有等待方，而"这条调用会不会被别处结算"是<b>跨实例</b>事实：
+	 * <ul>
+	 * <li>I-1：源实例把整批请求帧前移公布后仍在跑前序后端工具；回灌落到另一个实例
+	 * （那边 {@code woke=false}）发了一行，源实例随后走到该卡又发一行 ⇒ 两条 end；</li>
+	 * <li>I-2：整批 {@code arm} 预登记让"先答第二张卡"命中（{@code woke=true}）因而本侧不发；
+	 * 随后循环在第一张卡处 park，{@code clearWaiterLatches} 把那张<b>已唤醒、尚无人 await</b>
+	 * 的闸门一并摘掉 ⇒ 该卡永久 0 条 end。</li>
+	 * </ul>
+	 * 两条都说明"发不发"必须由<b>持久、跨实例</b>的首写者裁决 —— 即
+	 * {@code ai:observed:<runId>}（见 {@link SettlementObservationStore}）。
+	 * 于是本侧与批循环、续跑认领胜者谁先到谁发，其余自动让位；续跑的"复用结果"分支仍不参与。
+	 *
+	 * <h2>为什么仍要 {@code park 开启}</h2>
+	 * 关掉 park 时"等人"始终占着一条线程（即使决策落在别的实例，它也会在下一拍轮询到"已决"
+	 * 并自己结算）——结算权在等待方，决策侧<b>不参与</b>，这是既有口径。
+	 * 判据与 {@code SpToolCallingManager} 前移 {@code tool_start} 的那条同源
+	 * （{@link #publishesRequestsAheadOfLoop()}）。
+	 *
+	 * <p>失败只 WARN：帧册/审计是观测面，不得改变决策语义（决策已落库、结局帧已发）。
+	 */
+	private void settleParkedToolCall(String runId, PendingToolCall pending, String text) {
+		try {
+			ToolCallEndTrace.emitForSettledEntry(this.settlementObservations, runId, snapshotSessionId(runId), pending,
+					text, this.sheetAudit);
+		}
+		catch (RuntimeException ex) {
+			log.warn("park 结算的 tool_call_end 发射失败（不影响决策）runId={} toolCallId={}：{}", runId,
+					pending.getToolCallId(), ex.getMessage());
+		}
+	}
+
+	/**
+	 * <b>整轮取消的 park 结算</b>：把本次取消收敛成 {@code CANCELLED} 的
+	 * {@code CONFIRM}/{@code FRONTEND} 条目逐条补一行 {@code tool_call_end}。
+	 *
+	 * <h2>为什么由本类出这个入口（而不是取消侧自己拼一行）</h2>
+	 * park 开启时没有驱动线程：批循环早在 {@code RunParkedException} 处穿出，取消侧
+	 * （{@code ResilientChatService#cancelTerminal}）只把条目转 {@code CANCELLED} 并补裁决帧 ——
+	 * 这条调用的结算行再没有别的发点。结算的<b>载荷与跨实例仲裁</b>只有一份
+	 * （{@link ToolCallEndTrace} + {@code ai:observed}），取消侧需要的正是这一份；
+	 * 让它自己构造一遍就是"同一调用两种行"的第二来源。故本类提供入口，取消侧只决定<b>时机</b>。
+	 *
+	 * <h2>边界（刻意不动）</h2>
+	 * <ul>
+	 * <li><b>只在 park 开启时结算</b>：park 关闭时等待线程还在，它会在下一拍轮询到取消并自行结算
+	 * （{@code SpToolCallingManager} 的批循环）—— 这里再发就是第二条；</li>
+	 * <li><b>只结算 CANCELLED 的 {@code CONFIRM}/{@code FRONTEND}</b>：{@code BACKEND} 的结算权
+	 * 归执行认领（{@code tryClaimExecution}），且它在 {@link ToolCallEndTrace} 里<b>不走仲裁</b>
+	 * （{@code requiresArbitration=false}）—— 由取消侧补发会变成无条件一条，故必须在入口挡掉；
+	 * 已终态（回灌/超时/放弃）的条目各有自己的发点，取消不是它们的结论；</li>
+	 * <li><b>不为计数虚构元数据</b>：审计只认条目自带的 {@code sheetMeta}。确认卡从来没有 ⇒
+	 * 取消/超时的计数为 0 是<b>正确</b>口径；本方法只补"结算行"，不碰计数。</li>
+	 * </ul>
+	 *
+	 * <p>幂等：重复取消仍会走到这里（条目还是 CANCELLED），{@code ai:observed} 的首写者仲裁让
+	 * 后来者一条都不发；同一次取消只调用一次本方法，冷装配（无仲裁面）也不会重复。
+	 *
+	 * @param cancelledBefore 取消<b>之前</b>抓取的条目清单（{@code cancelTerminal} 在
+	 *                        {@code cancelPendings} 之前取得）；只有同时出现在当前 CANCELLED 集合里的
+	 *                        才结算 —— 防止把上一轮已取消的条目再结算一次
+	 * @return 走到结算口的条目数（观测/断言用；真正发出的行数由仲裁决定，可能更少）
+	 */
+	public int settleCancelledToolCalls(String runId, List<PendingToolCall> cancelledBefore) {
+		if (runId == null || cancelledBefore == null || cancelledBefore.isEmpty()
+				|| !publishesRequestsAheadOfLoop()) {
+			return 0;
+		}
+		Map<String, PendingToolCall> cancelled = new LinkedHashMap<>();
+		for (PendingToolCall pending : this.store.pendingsLenient(runId)) {
+			if (pending != null && pending.getToolCallId() != null
+					&& PendingToolCall.CANCELLED.equals(pending.getStatus())) {
+				cancelled.put(pending.getToolCallId(), pending);
+			}
+		}
+		int settled = 0;
+		for (PendingToolCall before : cancelledBefore) {
+			PendingToolCall entry = before == null ? null : cancelled.get(before.getToolCallId());
+			if (entry == null || !settlesOnPark(entry.getKind())) {
+				continue;
+			}
+			settleParkedToolCall(runId, entry, entry.getResultText());
+			settled++;
+		}
+		return settled;
+	}
+
+	/**
+	 * 挂起后可能被"决策/放弃/取消/认领"在<b>别处</b>结算的两个通道 —— 与
+	 * {@link ToolCallEndTrace} 的仲裁口径同源（{@code BACKEND} 由执行认领独占，不占观测位）。
+	 */
+	private static boolean settlesOnPark(String kind) {
+		return PendingToolCall.KIND_CONFIRM.equals(kind) || PendingToolCall.KIND_FRONTEND.equals(kind);
 	}
 
 	/**

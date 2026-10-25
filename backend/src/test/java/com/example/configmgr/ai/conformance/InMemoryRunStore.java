@@ -294,6 +294,24 @@ public class InMemoryRunStore extends RunStore {
 		return this.heldEpochs.getOrDefault(runLeaseKey(runId), 0L);
 	}
 
+	/**
+	 * fence 的进程内替身（{@code ai:fence:run:<runId>}）。
+	 *
+	 * <p>生产实现从 Redis 读同一个键；本替身的该键是 {@link #fenceEpochs} —— 由 {@link #save}
+	 * 在持租时推进（epoch 取自 {@link #heldRunEpoch}，装配 {@code leaseFacility} 时即设施语义）、
+	 * {@link #seedFence} 铺语料。不覆写会落到生产读口：本类的 {@code redis} 为 null ⇒
+	 * {@code opsForValue()} NPE，被写门的 fail-closed 分支当成"fence 读不出来" ⇒ 帧被丢弃的
+	 * <b>理由</b>就从"fence 越过本进程 epoch"变成"替身读口坏了"，缺陷被掩盖。
+	 *
+	 * <p>与 {@link #tryClaimExecution} 读同一张表（认领与写门同源判据）。跨实例的 fence 推进
+	 * 由生产 {@code RunStore} 用例覆盖（{@code LeaseLossReadOnlyTest} /
+	 * {@code RunStoreFenceAheadWriteGateTest}）：本替身的 {@code fenceEpochs} 不跨实例共享。
+	 */
+	@Override
+	public long fenceEpoch(String runId) {
+		return this.fenceEpochs.getOrDefault(runId, 0L);
+	}
+
 	@Override
 	public PendingToolCall markRequestEmitted(String runId, String toolCallId, long atMs) {
 		PendingToolCall pending = pending(runId, toolCallId);
@@ -676,7 +694,8 @@ public class InMemoryRunStore extends RunStore {
 	public int cancelPendings(String runId) {
 		int changed = 0;
 		for (PendingToolCall pending : pendings(runId)) {
-			if (!PendingToolCall.PENDING.equals(pending.getStatus())) {
+			// 与生产同判据（R1）：PENDING，或 APPROVED 且可证明未认领未执行。
+			if (!cancellableBeforeExecution(runId, pending)) {
 				continue;
 			}
 			pending.setStatus(PendingToolCall.CANCELLED);
@@ -866,6 +885,15 @@ public class InMemoryRunStore extends RunStore {
 
 	private Map<String, String> claimTable(String runId) {
 		return this.claims.computeIfAbsent(runId, key -> new ConcurrentHashMap<>());
+	}
+
+	/**
+	 * <b>只写认领表、不回写条目</b>（测试缝）：复现跨实例认领的中间窗口 —— 对方
+	 * {@code tryClaimExecution} 的 {@code HSETNX} 已落，而 {@code ai:pending} 的
+	 * {@code executed/claimedAt} 还没写回。取消收尾必须据此**不**把条目伪造成"未执行"。
+	 */
+	public void seedClaimOnly(String runId, String toolCallId, String claimValue) {
+		claimTable(runId).put(toolCallId, claimValue);
 	}
 
 	private Map<String, String> reqTable(String runId) {

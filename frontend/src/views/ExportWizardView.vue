@@ -258,7 +258,22 @@ const checkedDefs = ref<string[]>([])
 const activeTab = ref('')
 
 const gridRefs: Record<string, GridApi> = {}
+/**
+ * **已成功载入**的结果表格（内容字节确实在表格里）。
+ *
+ * 语义严格是"载入成功之后"才置位：`loadGrid` 原先在下载**之前**就 `add`，于是"下载在途"与
+ * "已载入"无法区分 —— 在途时点「保存编辑到服务端」会拿 `toXlsxBlob()`（= 空工作簿）覆盖服务端
+ * 真实导出结果（C2）。并发去重由 `gridLoads` 承担，不需要这个集合提前置位。
+ */
 const loadedGrids = new Set<string>()
+/**
+ * 任务代次（A→B 改绑 = 新一代）：在途的保存/建作业/载入结局一旦发现代次变了就作废。
+ *
+ * 导出页此前完全没有代次：`saveEdits` 在 `await toXlsxBlob()` 之后实时读 `taskId.value` 发 PUT，
+ * `startExport` 在 `persistStepData()` 的多个 await 之后实时读 `taskId.value` 建作业 ——
+ * 换任务发生在这些窗口里时，A 的选中集/条件/表格字节会落到 B（"A 写进 B"的同族）。
+ */
+let taskGeneration = 0
 /**
  * 在途下载的配置编码（批 A 补：同码并发防重）。
  *
@@ -400,14 +415,21 @@ async function loadTask(preloaded?: Task): Promise<TaskLoadOutcome> {
   if (taskId.value === null) {
     return { taskOk: false, filesOk: false }
   }
+  const generation = taskGeneration
   let loaded = preloaded ?? null
   if (loaded === null) {
     try {
       loaded = await tasksApi.getTask(taskId.value)
     } catch (error) {
-      ElMessage.error(error instanceof Error ? error.message : t('views.export.msg.taskLoadFailed'))
+      if (generation === taskGeneration) {
+        ElMessage.error(error instanceof Error ? error.message : t('views.export.msg.taskLoadFailed'))
+      }
       return { taskOk: false, filesOk: false }
     }
+  }
+  // 旧任务的详情晚到：不得覆盖新任务的标题/步骤/勾选/条件
+  if (generation !== taskGeneration) {
+    return { taskOk: false, filesOk: false }
   }
   task.value = loaded
   selectedDefs.value = (loaded.items ?? []).map((item) => item.defCode)
@@ -426,6 +448,9 @@ async function loadTask(preloaded?: Task): Promise<TaskLoadOutcome> {
     selectedDefs: [...selectedDefs.value]
   })
   await resumeJobs()
+  if (generation !== taskGeneration) {
+    return { taskOk: false, filesOk: false }
+  }
   return { taskOk: true, filesOk: await loadExistingResults() }
 }
 
@@ -441,7 +466,12 @@ async function resumeJobs(): Promise<void> {
   if (taskId.value === null) {
     return
   }
+  const generation = taskGeneration
   const jobs = await jobsApi.listJobs(taskId.value).catch(() => [])
+  // 旧任务的作业列表晚到：不得挂到新任务的作业面板，更不得为新任务登记旧作业的 watcher
+  if (generation !== taskGeneration) {
+    return
+  }
   const job = jobs.filter((item) => item.jobType === 'EXPORT')[0]
   if (!job) {
     return
@@ -452,12 +482,18 @@ async function resumeJobs(): Promise<void> {
     return
   }
   try {
-    currentIssues.value = (await jobsApi.getIssues(jobId)).content ?? []
+    const issues = (await jobsApi.getIssues(jobId)).content ?? []
+    if (generation === taskGeneration) {
+      currentIssues.value = issues
+    }
   } catch {
     // 问题清单拉取失败不阻断主流程（同导入页 refreshIssues 的兜底口径）
   }
+  if (generation !== taskGeneration) {
+    return
+  }
   if (job.status === 'PENDING' || job.status === 'RUNNING') {
-    beginWatchJob(jobId)
+    beginWatchJob(jobId, generation)
   }
 }
 
@@ -472,8 +508,14 @@ async function loadExistingResults(): Promise<boolean> {
   if (taskId.value === null) {
     return false
   }
+  const generation = taskGeneration
+  const forTask = taskId.value
   try {
-    const files: TaskFile[] = await tasksApi.getFiles(taskId.value)
+    const files: TaskFile[] = await tasksApi.getFiles(forTask)
+    // 旧任务的文件列表晚到：不得渲染到新任务的结果面
+    if (generation !== taskGeneration) {
+      return false
+    }
     exportResults.value = files
       .filter((file) => file.fileType === 'EXPORT')
       .map((file) => ({
@@ -506,6 +548,7 @@ async function loadExistingResults(): Promise<boolean> {
  * 留着它只会在组件卸载时再报一次"有未保存编辑"的假警报。
  */
 function resetTaskScopedState(): void {
+  taskGeneration += 1
   if (gridDirty) {
     ElMessage.warning(t('views.export.msg.unsavedDiscarded'))
     gridDirty = false
@@ -523,6 +566,14 @@ function resetTaskScopedState(): void {
   // 守卫、`Set.delete` 幂等，中途清空不会误改新任务的状态。
   inFlightDownloads.clear()
   downloading.value = null
+  // 任务级 loading 标志（N1）：在途操作的 finally 有"仅同代次复位"的守卫，换任务后不会自己清；
+  // 不复位就是新任务页面上的按钮永久转圈（下一步/保存编辑/开始导出/预览行数，直到刷新页面）。
+  persisting.value = false
+  startingExport.value = false
+  savingFiles.value = false
+  for (const code of Object.keys(countLoading)) {
+    delete countLoading[code]
+  }
 }
 
 /**
@@ -610,8 +661,14 @@ async function goStep(next: number): Promise<StepAdvanceOutcome> {
   if (next < 0 || next >= STEP_KEYS.length) {
     return { ok: false, reason: `目标步骤 ${next} 不在导出向导范围内` }
   }
+  // 代次捕获（N2 导出孪生）：落库与步骤同步都是 await，换任务后不得把 A 的推进/响应算到 B 上
+  const generation = taskGeneration
+  const forTask = taskId.value
   // D7：先落库当前步数据再切步 —— persist 失败时界面必须停在原步（阻断推进）。
-  const persisted = await persistStepData()
+  const persisted = await persistStepData(generation, forTask)
+  if (generation !== taskGeneration) {
+    return { ok: false, reason: '任务已切换，本次未推进步骤' }
+  }
   if (!persisted.ok) {
     return { ok: false, reason: persisted.reason ?? '保存选择与条件失败' }
   }
@@ -621,7 +678,10 @@ async function goStep(next: number): Promise<StepAdvanceOutcome> {
   // 由页面自身错误提示承载，发后不管。
   void ensureStepLoaded(next)
   // D7/D8：服务端 currentStep 同步失败不阻断界面，但警告必须可见、可回灌。
-  const synced = await syncStepToBackend()
+  const synced = await syncStepToBackend(generation, forTask)
+  if (generation !== taskGeneration) {
+    return { ok: false, reason: '任务已切换，本次未推进步骤' }
+  }
   if (!synced.ok) {
     const syncWarning = '步骤已推进但服务端步骤同步失败，下次切步会重试'
     ElMessage.warning(syncWarning)
@@ -652,9 +712,15 @@ async function viewStep(index: number): Promise<void> {
  *
  * 为什么必须有这一步：后端 `currentStep` 是刷新恢复与 AI 上下文（`task:EXPORT/<step>` 的
  * 渐进披露子集）的唯一权威；只在前端切步不进后端，刷新会退回首步、且模型拿到的是旧步骤。
+ *
+ * **代次纪律（N2，与导入同形）**：任务号入口捕获、响应写回前复检 —— A 的步骤响应晚到时
+ * 不得写进 B 的 `task.value`（那会让 B 的只读态/按钮按 A 的状态算）。
  */
-async function syncStepToBackend(): Promise<{ ok: boolean; reason?: string }> {
-  if (taskId.value === null) {
+async function syncStepToBackend(
+  generation: number = taskGeneration,
+  forTask: number | null = taskId.value
+): Promise<{ ok: boolean; reason?: string }> {
+  if (forTask === null) {
     return { ok: true }
   }
   const step = STEP_KEYS[stepIndex.value]
@@ -662,7 +728,10 @@ async function syncStepToBackend(): Promise<{ ok: boolean; reason?: string }> {
     return { ok: true }
   }
   try {
-    task.value = await tasksApi.goToStep(taskId.value, step)
+    const updated = await tasksApi.goToStep(forTask, step)
+    if (generation === taskGeneration) {
+      task.value = updated
+    }
     return { ok: true }
   } catch (error) {
     // 批3③b D11（R-143①）：单点提示 —— 本函数**不自弹**（原 ElMessage.error 删除），由调用方
@@ -682,28 +751,49 @@ function nextStep(): void {
   void goStep(stepIndex.value + 1)
 }
 
-/** 选中集与查询条件落库（后端是这两者的权威存储）。返回结构化结局（批3③a D7 阻断判据）。 */
-async function persistStepData(): Promise<{ ok: boolean; reason?: string }> {
-  if (taskId.value === null) {
+/**
+ * 选中集与查询条件落库（后端是这两者的权威存储）。返回结构化结局（批3③a D7 阻断判据）。
+ *
+ * 任务号与代次都在**入口捕获**：落库跨多个 await，实时读 `taskId.value` 会在"落库途中换任务"时
+ * 把 A 的选中集/条件写到 B（I2）。代次变了即中止并如实回报，调用方不得据此建作业。
+ */
+async function persistStepData(
+  generation: number = taskGeneration,
+  forTask: number | null = taskId.value
+): Promise<{ ok: boolean; reason?: string }> {
+  if (forTask === null) {
     return { ok: true }
   }
   persisting.value = true
   try {
-    await tasksApi.selectDefs(taskId.value, [...selectedDefs.value])
+    await tasksApi.selectDefs(forTask, [...selectedDefs.value])
+    if (generation !== taskGeneration) {
+      return { ok: false, reason: '任务已切换，本次未落库（未把上一个任务的选中集写到新任务上）' }
+    }
     for (const code of selectedDefs.value) {
       const model = draftModels[code]
       if (!model) {
         continue
       }
       const condition = buildQueryCondition(model)
-      await tasksApi.setCondition(taskId.value, code, stringifyCondition(condition))
+      await tasksApi.setCondition(forTask, code, stringifyCondition(condition))
+      if (generation !== taskGeneration) {
+        return { ok: false, reason: '任务已切换，本次未完成落库（未把上一个任务的条件写到新任务上）' }
+      }
     }
-    task.value = await tasksApi.getTask(taskId.value)
+    const refreshed = await tasksApi.getTask(forTask)
+    if (generation !== taskGeneration) {
+      return { ok: false, reason: '任务已切换，本次未完成落库' }
+    }
+    task.value = refreshed
     // issue #3：与 watch / AI handler 共用同一收敛点（此处落库后工作区通常已相等 ⇒ 短路，不重复记动作）
     syncSelectedDefsToWorkspace()
     return { ok: true }
   } catch (error) {
     const reason = error instanceof Error ? error.message : '保存选择与条件失败'
+    if (generation !== taskGeneration) {
+      return { ok: false, reason: '任务已切换，本次未完成落库' }
+    }
     // 挂账 L-67：落库失败同样落在条件表单区域内（只弹一次 ElMessage 读不到「为什么不行」）
     for (const code of selectedDefs.value) {
       condErrors[code] = reason
@@ -711,7 +801,9 @@ async function persistStepData(): Promise<{ ok: boolean; reason?: string }> {
     ElMessage.error(reason)
     return { ok: false, reason }
   } finally {
-    persisting.value = false
+    if (generation === taskGeneration) {
+      persisting.value = false
+    }
   }
 }
 
@@ -760,56 +852,121 @@ async function dataApiCount(code: string, condition: ReturnType<typeof buildQuer
 
 // ── 第 3 步：导出作业 ──────────────────────────────────────────────────────────
 
-async function startExport(): Promise<void> {
+/**
+ * 启动导出作业（按钮 / `export.start` 页面能力共用）。
+ *
+ * **落库闸**：导出作业读的是服务端 `TaskItem.conditionJson`，所以"条件没落库"就等于按**旧条件**
+ * 导出（旧条件为空 ⇒ 导出全量），而界面会用用户看到的条件去解释结果 —— W-06 的"说 A 实际给 B"。
+ * 故 `persistStepData()` 失败时**不建作业**，并把原因如实交给调用方。
+ *
+ * **真实性**：`createJob` 一旦成功，后续失败（挂接抛错、建作业期间换任务）都不得退化成"未启动"——
+ * 作业已在后端跑，回执必须是"已建在任务 #N、本页未跟踪、请勿重复发起"（`detached`/`attachError`）。
+ */
+async function startExport(): Promise<{
+  ok: boolean
+  reason?: string
+  job?: Job
+  taskId?: number
+  detached?: boolean
+  attachError?: string
+}> {
   if (taskId.value === null) {
-    ElMessage.warning(t('views.export.msg.noTaskBound'))
-    return
+    const reason = t('views.export.msg.noTaskBound')
+    ElMessage.warning(reason)
+    return { ok: false, reason }
   }
   if (selectedDefs.value.length === 0) {
-    ElMessage.warning(t('views.export.msg.pickDefs'))
-    return
+    const reason = t('views.export.msg.pickDefs')
+    ElMessage.warning(reason)
+    return { ok: false, reason }
   }
-  await persistStepData()
+  // 任务号与代次在入口捕获：落库 + createJob 都是 await，实时读 taskId.value 会在换任务后
+  // 把 A 的条件落到 B、并在 B 上建作业（"旧条件启动作业"的跨任务变体）
+  const generation = taskGeneration
+  const forTask = taskId.value
+  const persisted = await persistStepData(generation, forTask)
+  if (!persisted.ok) {
+    const reason = `查询条件与选中集未能落库（${persisted.reason ?? '保存失败'}），本次未启动导出作业`
+      + ' —— 否则会按服务端旧条件导出（可能是全量数据）'
+    return { ok: false, reason }
+  }
+  if (generation !== taskGeneration || forTask !== taskId.value) {
+    return { ok: false, reason: '任务已切换，本次未启动导出作业（避免把作业建到另一个任务上）' }
+  }
   startingExport.value = true
+  let created: Job | null = null
   try {
-    const job = await jobsApi.createJob(taskId.value, 'EXPORT')
+    const job = await jobsApi.createJob(forTask, 'EXPORT')
+    created = job
+    // 建作业在途时换了任务：作业属于 forTask，但不得显示/跟踪在新任务的页面上
+    if (generation !== taskGeneration || forTask !== taskId.value) {
+      return { ok: true, job, taskId: forTask, detached: true }
+    }
     exportJob.value = job
     // 重跑导出 ⇒ 结果表格将被新文件替换：旧预览立即失效（硬闸仍是 previewId/loadGeneration）
     useAiStore().onSheetPageLeft()
     exportResults.value = []
     loadedGrids.clear()
     ElMessage.success(t('views.export.msg.jobStarted', { id: job.id ?? '' }))
-    beginWatchJob(job.id ?? 0)
+    beginWatchJob(job.id ?? 0, generation)
+    return { ok: true, job, taskId: forTask, detached: generation !== taskGeneration }
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : t('views.export.msg.jobStartFailed'))
+    const reason = error instanceof Error ? error.message : t('views.export.msg.jobStartFailed')
+    if (created !== null) {
+      // 作业已建：不能说"未启动"
+      return { ok: true, job: created, taskId: forTask, detached: generation !== taskGeneration, attachError: reason }
+    }
+    if (generation === taskGeneration) {
+      ElMessage.error(reason)
+    }
+    return { ok: false, reason }
   } finally {
-    startingExport.value = false
+    if (generation === taskGeneration) {
+      startingExport.value = false
+    }
   }
 }
 
-function beginWatchJob(jobId: number): void {
+function beginWatchJob(jobId: number, generation: number = taskGeneration): void {
   stopWatchJob?.()
   currentIssues.value = []
-  if (taskId.value === null || jobId <= 0) {
+  if (taskId.value === null || jobId <= 0 || generation !== taskGeneration) {
     return
   }
+  const forTask = taskId.value
   stopWatchJob = watchJob({
-    taskId: taskId.value,
+    taskId: forTask,
     jobId,
     onProgress: (payload) => {
+      if (generation !== taskGeneration) {
+        return
+      }
       if (exportJob.value) {
         exportJob.value = { ...exportJob.value, status: 'RUNNING', progress: payload.processed, total: payload.total }
       }
     },
     onSnapshot: (job) => {
+      if (generation !== taskGeneration) {
+        return
+      }
       exportJob.value = job
     },
     onChannel: (state) => {
+      if (generation !== taskGeneration) {
+        return
+      }
       channelState.value = state
     },
     onFinal: async (job) => {
+      if (generation !== taskGeneration) {
+        return
+      }
       exportJob.value = job
-      currentIssues.value = (await jobsApi.getIssues(jobId)).content ?? []
+      const issues = (await jobsApi.getIssues(jobId)).content ?? []
+      if (generation !== taskGeneration) {
+        return
+      }
+      currentIssues.value = issues
       if (job.status === 'COMPLETED') {
         ElMessage.success(t('views.export.msg.exportDone'))
         await refreshResults()
@@ -821,10 +978,13 @@ function beginWatchJob(jobId: number): void {
       // 任务状态由后端 JobTerminalWriter 联动作业终态，这里一律刷新快照（失败也要显示 FAILED），
       // 与导入页 refreshTaskSnapshot 同口径（收口修 F3：补上 workspace.setTaskId 状态同步与
       // try/catch 兜底 —— getTask 失败时不再裸 reject）；刷新后 isReadOnly 才能在场内随导出成功翻为 true。
-      if (taskId.value !== null) {
+      if (forTask !== null && generation === taskGeneration) {
         try {
-          task.value = await tasksApi.getTask(taskId.value)
-          workspace.setTaskId(taskId.value, 'EXPORT', task.value.status)
+          const snapshot = await tasksApi.getTask(forTask)
+          if (generation === taskGeneration) {
+            task.value = snapshot
+            workspace.setTaskId(forTask, 'EXPORT', snapshot.status)
+          }
         } catch {
           // 任务快照刷新失败不阻断作业结果的展示（同导入页 refreshTaskSnapshot 口径）
         }
@@ -834,8 +994,12 @@ function beginWatchJob(jobId: number): void {
 }
 
 async function refreshResults(): Promise<void> {
+  const generation = taskGeneration
   loadedGrids.clear()
   await loadExistingResults()
+  if (generation !== taskGeneration) {
+    return
+  }
   const first = exportResults.value[0]?.defCode ?? ''
   if (first) {
     activeTab.value = first
@@ -887,9 +1051,9 @@ async function cancelJob(): Promise<void> {
  * 先到，那次回灌会是**通用超时文案**（同样声明"结局未知"、不谎报），本函数的失败结局来不及
  * 被回灌；只有预算后到时才会回灌下面 handler 产出的"表格未就绪 + 引擎原文"。
  *
- * <p>**L-115 并发去重**：`loadedGrids` 在下载**之前**就置位（防止重复下载），因此并发调用者
- * 会拿到"已加载"的假肯定 —— 页面能力若据此交出适配器，读到的是还没载入的空表。
- * 故这里按 code 记住在途 promise：后来者**等同一个结局**，而不是提前放行。
+ * <p>**L-115 并发去重**：并发调用会拿到"已加载"的假肯定 —— 后来者若据此提前放行，读到的是
+ * 还没载入的空表。故这里按 code 记住在途 promise：后来者**等同一个结局**，而不是提前放行；
+ * `loadedGrids` 只在 `loadFromXlsx` **成功之后**置位（"在途"≠"已载入"，见 C2）。
  */
 const gridLoads = new Map<string, Promise<{ ok: boolean; error: string }>>()
 
@@ -918,14 +1082,24 @@ async function loadGrid(code: string): Promise<{ ok: boolean; error: string }> {
   if (taskId.value === null) {
     return { ok: false, error: '当前未绑定任务，无法读取结果文件' }
   }
+  const generation = taskGeneration
+  const forTask = taskId.value
   const grid = gridRefs[code]
   if (!grid) {
     return { ok: false, error: `${code} 的结果表格组件未挂载（请重开该标签页重试）` }
   }
-  loadedGrids.add(code)
   try {
-    const blob = await tasksApi.downloadFile(taskId.value, code)
+    const blob = await tasksApi.downloadFile(forTask, code)
+    // 下载在途时换了任务：旧任务的字节不得画进新任务的面板
+    if (generation !== taskGeneration) {
+      return { ok: false, error: '任务已切换，本次结果未载入' }
+    }
     const { missingHeaders } = await grid.loadFromXlsx(blob, fieldsOf(code))
+    if (generation !== taskGeneration) {
+      return { ok: false, error: '任务已切换，本次结果未载入' }
+    }
+    // 内容真的进了表格才置位（C2：此前在下载前就置位 ⇒ 在途保存会写空工作簿）
+    loadedGrids.add(code)
     if (missingHeaders.length > 0) {
       ElMessage.warning(t('views.export.msg.missingHeaders', { code, headers: missingHeaders.join(', ') }))
     }
@@ -933,10 +1107,13 @@ async function loadGrid(code: string): Promise<{ ok: boolean; error: string }> {
     useAiStore().onSheetReloaded(code)
     return { ok: true, error: '' }
   } catch (error) {
-    loadedGrids.delete(code)
-    const reason = error instanceof Error ? error.message : `${code} 结果文件加载失败`
-    ElMessage.error(reason)
-    return { ok: false, error: reason }
+    if (generation === taskGeneration) {
+      loadedGrids.delete(code)
+      const reason = error instanceof Error ? error.message : `${code} 结果文件加载失败`
+      ElMessage.error(reason)
+      return { ok: false, error: reason }
+    }
+    return { ok: false, error: '任务已切换，本次结果未载入' }
   }
 }
 
@@ -1151,17 +1328,33 @@ async function downloadAll(): Promise<void> {
  *
  * 为什么要这一步：后端后续步骤（导入/发布/AI 工具）读的是**服务端文件**，
  * 只在浏览器里改 excel 不回写，别的入口看到的还是旧内容。
+ *
+ * **读闸**：只写 `loadedGrids` 里的配置项（= `loadFromXlsx` 已成功，表格里确实是这个文件的内容；
+ * "下载在途"不在其中）。未载入的表格 `toXlsxBlob()` 是一本空工作簿 —— PUT 上去就是拿空文件
+ * 覆盖服务端已有导出结果（下载失败 / 在途 / 只打开部分标签页都会走到这条路径）。
+ *
+ * **代次闸**：任务号与代次入口捕获，逐项复检 —— `toXlsxBlob()` 是 await，期间换任务时
+ * A 的表格字节不得写到 B。
  */
 async function saveEdits(): Promise<void> {
   if (taskId.value === null) {
     ElMessage.warning(t('views.export.msg.noTask'))
     return
   }
+  const generation = taskGeneration
+  const forTask = taskId.value
   savingFiles.value = true
+  const skipped: string[] = []
+  let aborted = false
   try {
     for (const item of exportResults.value) {
+      if (generation !== taskGeneration || forTask !== taskId.value) {
+        aborted = true
+        break
+      }
       const grid = gridRefs[item.defCode]
-      if (!grid) {
+      if (!grid || !loadedGrids.has(item.defCode)) {
+        skipped.push(item.defCode)
         continue
       }
       const issues = grid.validateLocal()
@@ -1176,14 +1369,30 @@ async function saveEdits(): Promise<void> {
         continue
       }
       const blob = await grid.toXlsxBlob()
-      await tasksApi.saveFile(taskId.value, item.defCode, await blob.arrayBuffer())
+      if (generation !== taskGeneration || forTask !== taskId.value) {
+        aborted = true
+        break
+      }
+      await tasksApi.saveFile(forTask, item.defCode, await blob.arrayBuffer())
+    }
+    if (aborted) {
+      ElMessage.warning('任务已切换，本次保存中止（未把上一个任务的内容写到新任务上）')
+      return
+    }
+    if (skipped.length > 0) {
+      ElMessage.warning(`${skipped.join('、')} 的结果表格未载入（文件读取失败、仍在下载或标签页尚未打开），本次未保存 —— 请先打开对应标签页并等载入完成后再保存`)
+      return
     }
     gridDirty = false
     ElMessage.success(t('views.export.msg.savedToServer'))
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : t('views.export.msg.saveToServerFailed'))
+    if (generation === taskGeneration) {
+      ElMessage.error(error instanceof Error ? error.message : t('views.export.msg.saveToServerFailed'))
+    }
   } finally {
-    savingFiles.value = false
+    if (generation === taskGeneration) {
+      savingFiles.value = false
+    }
   }
 }
 
@@ -1485,10 +1694,26 @@ function registerHandlers(): void {
   registerPageHandler('export.start', async () => {
     // 施工卡 §S3e（§2.4 零写清单：createJob 在列）：只读态不得借 AI 通道新建导出作业
     if (isReadOnly.value) {
-      return '任务已结束，仅供查看，未启动导出作业'
+      return { ok: false, reason: '任务已结束，仅供查看，未启动导出作业' }
     }
-    await startExport()
-    return exportJob.value ? `导出作业 #${exportJob.value.id} 已启动` : '导出未启动（请检查配置项选择）'
+    const outcome = await startExport()
+    if (!outcome.ok) {
+      // 条件没落库/建作业失败 ⇒ 未建作业：结构化失败 + 重试引导（此时重试是安全的）
+      return {
+        ok: false,
+        reason: `${outcome.reason ?? '导出未启动'}。请提示用户核对网络后重试，或手动在界面上重新设置查询条件`
+      }
+    }
+    if (outcome.detached || outcome.attachError !== undefined) {
+      // 作业**已建**：成功形回执 + 明确"请勿重复发起"（不得再追加重试引导，否则会重复导出）
+      const where = outcome.taskId === undefined ? '原任务' : `任务 #${outcome.taskId}`
+      const why = outcome.detached ? '页面已切换到别的任务，本页未跟踪' : `本页未能跟踪（${outcome.attachError}）`
+      return {
+        ok: true,
+        result: `导出作业 #${outcome.job?.id ?? ''} 已建在${where}（${why}）。作业仍在后端继续，请勿重复发起；结果可在任务中心查看`
+      }
+    }
+    return `导出作业 #${outcome.job?.id ?? ''} 已启动`
   })
 
   // AI 表格操作专项：把**当前激活结果标签页**的表格适配器反向暴露给 AI 工具。
@@ -1718,6 +1943,12 @@ onBeforeUnmount(() => {
   }
 })
 
+/**
+ * 新建并绑定任务：与路由换任务走**同一条**绑定链路（{@link applyTaskBinding}）。
+ *
+ * 之前这里自己赋值 `taskId` 再 `router.replace`，路由 watch 因 `id === taskId.value` 直接 return
+ * ⇒ 既不复位页面态也不换代次：上一个任务的导出结果/勾选/在途下载集合会残留到新任务上。
+ */
 async function createAndBindTask(): Promise<void> {
   creatingTask.value = true
   try {
@@ -1729,9 +1960,7 @@ async function createAndBindTask(): Promise<void> {
       ElMessage.error(taskStore.actionError ?? t('views.export.msg.taskCreateFailed'))
       return
     }
-    taskId.value = created.id
-    await router.replace({ name: 'export-wizard', query: { taskId: String(created.id) } })
-    await loadTask()
+    await applyTaskBinding(created.id)
     ElMessage.success(t('views.export.msg.taskCreated', { id: created.id }))
   } finally {
     creatingTask.value = false

@@ -89,6 +89,9 @@ export const EXCLUDED_KEY_PREFIXES = Object.freeze([
 	'ai:cancel:',
 	'ai:lock:',
 	'ai:activity:',
+	// 结算观测位（park 结算审计面）：一次性仲裁位，跨世代没有要保留的事实 ⇒ 不搬。
+	// 生命周期 = 会话销毁时由销毁方 DEL（SettlementObservationStore#purge / observedKey），TTL 仅兜底。
+	'ai:observed:',
 	'ai:resume:lock:',
 	'ai:ctx:',
 	'ai:safety:',

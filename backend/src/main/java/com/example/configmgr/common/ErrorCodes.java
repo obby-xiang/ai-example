@@ -244,6 +244,19 @@ public final class ErrorCodes {
     public static final String MODELS_UNSUPPORTED = "MODELS_UNSUPPORTED";
     public static final String INVALID_MODEL = "INVALID_MODEL";
     public static final String INVALID_PARAM = "INVALID_PARAM";
+    /**
+     * 400：provider 的 key 与主机（origin）绑定 —— 改主机名却保留旧 key 被拒（复核 ID-03 / I-2）。
+     *
+     * <p>
+     * 与 {@link #INVALID_PARAM} 分工：后者是"入参/取值范围不合法"的通用校验码；本码是<b>可自解释的
+     * 操作指引</b>（"改主机需重新录入 key 或先清空"）。前端按码查表，因此它必须在
+     * {@code ai.settings.errors.*} 有专属文案，否则用户只会看到一条与"重录 key"无关的通用提示。
+     *
+     * <p>
+     * 语义边界：只拦"换 origin（scheme/host/port）且不重录 key"。同 origin 的改名/改路径/改开关不受影响，
+     * 任意 OpenAI 兼容端点仍可配置（换新端点时重录 key 即可）。
+     */
+    public static final String KEY_BOUND_TO_HOST = "KEY_BOUND_TO_HOST";
     public static final String INVALID_BASE_URL = "INVALID_BASE_URL";
     public static final String BLOCKED_PRIVATE_ENDPOINT = "BLOCKED_PRIVATE_ENDPOINT";
     public static final String AUTH_FAILED = "AUTH_FAILED";
@@ -350,6 +363,15 @@ public final class ErrorCodes {
     public static final String AI_RUN_FAILED = "AI_RUN_FAILED";
     /** SSE error 帧：续跑失败。 */
     public static final String AI_RESUME_FAILED = "AI_RESUME_FAILED";
+    /**
+     * SSE error 帧：续跑被<b>确定</b>拒绝 —— 快照绑定的 provider/模型此刻已不可用（删除/停用/模型下架）。
+     *
+     * <p>
+     * 与 {@link #AI_RESUME_FAILED} 分工：后者是"续跑执行失败"（可重试的通用失败），本码是
+     * <b>终态语义</b> —— 这一轮不能按原模型继续，也不会跨 provider 换模型；快照随之为 {@code FAILED}，
+     * 前端应引导用户重新发一轮，而不是重试续跑。
+     */
+    public static final String AI_PROVIDER_GONE = "AI_PROVIDER_GONE";
 
     // ---------------------------------------------------------------- 内部错误
 

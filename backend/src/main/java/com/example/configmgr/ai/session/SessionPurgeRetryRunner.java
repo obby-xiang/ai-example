@@ -26,6 +26,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <h2>有界</h2>
  * <ul>
  * <li>每轮最多 {@value #MAX_CANDIDATES} 个候选；单候选一次 {@code retry}；</li>
+ * <li><b>fix4 复核态</b>：台账带 {@code verifyAtMs}（删除主体完成后的一次性记忆复核）时，
+ * 到点只调 {@link AiSessionPurgeService#verifyMemoryOnly}（只碰 {@code chat:mem:*}），
+ * <b>不</b>重跑整轮 {@code retry}；复核是独立阶段、自带 {@code attempts} 预算
+ * （{@link SessionPurgePendingStore#scheduleVerify} 重开为 0），失败沿用同一退避/上限、耗尽后同样只重排；</li>
  * <li>每会话最多 {@value #MAX_ATTEMPTS} 次自动尝试；退避由 {@link SessionPurgePendingStore} 指数封顶；
  * <b>耗尽后只重排</b>（owner-CAS 把 nextAt 推到有界未来 + 移到队尾，不再自动执行第 11 次）——
  * 否则"永远 due、永远不执行"的条目会永久占满队头窗口，把其它会话饿死在候选预算之外；</li>
@@ -181,6 +185,32 @@ public class SessionPurgeRetryRunner {
 					skipped++;
 					continue;
 				}
+				if (pending.verifyAtMs() != null) {
+					// fix4：这条台账的删除主体已完成，只剩一次"记忆面"复核（崩溃残留补偿）。
+					// 到点只做 delete+staging+删后复核 —— 不重跑整轮 retry（那会再删 DB/附件）。
+					attempted++;
+					AiSessionPurgeService.MemoryVerify verify;
+					try {
+						verify = this.purgeService.verifyMemoryOnly(pending.sessionId(), pending.purgeId());
+					}
+					catch (RuntimeException ex) {
+						failed++;
+						recordVerifyFailure(pending, "verify exception: " + ex.getMessage());
+						continue;
+					}
+					if (verify == null) {
+						skipped++;
+					}
+					else if (verify.verified()) {
+						completed++;
+					}
+					else {
+						failed++;
+						// 失败沿用有限退避/MAX_ATTEMPTS（verifyAtMs 保留 ⇒ 下一次仍是记忆面复核）。
+						recordVerifyFailure(pending, "memory verify: " + String.join("; ", verify.errors()));
+					}
+					continue;
+				}
 				attempted++;
 				try {
 					AiSessionPurgeService.PurgeResult result = this.purgeService.retry(pending.sessionId(),
@@ -219,6 +249,17 @@ public class SessionPurgeRetryRunner {
 					log.warn("释放会话销毁重试锁失败（TTL 会自清）：{}", ex.getMessage());
 				}
 			}
+		}
+	}
+
+	/** 复核失败记一次退避（不删台账、不 disarm）；记录本身失败只 WARN，台账保持原状。 */
+	private void recordVerifyFailure(SessionPurgePendingStore.Pending pending, String error) {
+		try {
+			this.pendingStore.recordFailure(pending.sessionId(), pending.purgeId(), error);
+		}
+		catch (RuntimeException ex) {
+			log.warn("记录会话销毁记忆复核失败 sessionId={}（pending/guard 保持）：{}", pending.sessionId(),
+					ex.getMessage());
 		}
 	}
 

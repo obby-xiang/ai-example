@@ -132,6 +132,17 @@ export interface AiHealth {
   activeSuspendGates: number
   heldSessions: number
   sessionLockRenewals: number
+  /**
+   * 会话锁**累计丢锁**次数（续期失败：脚本返 0 或异常）—— additive 观测键。
+   * 计数是进程内累计值（不随轮次释放回落）。
+   */
+  sessionLockLost?: number
+  /**
+   * 会话锁已降级（跨实例互斥失效，仅剩进程内单值门）—— additive 观测键。
+   * 两条来源：①累计丢锁 > 0；②取门时锁服务不可确认（只置持有者降级、不累加丢锁计数）。
+   * 缺省 = 该实例未上报此键（旧装配）⇒ 按未知处理，**不得**据此判为健康。
+   */
+  sessionLockDegraded?: boolean
   resumeOnStartup: boolean
   instanceId: string
   /** ISO 时刻 */

@@ -5,6 +5,8 @@ import com.example.configmgr.ai.observe.RedisDegradation;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.common.AiStateUnavailableException;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonToken;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -277,6 +279,14 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 
 	/** "丢租/不可用 ⇒ 已拒绝推进"的告警节流（每个 runId 一条，避免逐帧逐写刷屏）。 */
 	private final Set<String> readOnlyWarned = ConcurrentHashMap.newKeySet();
+
+	/**
+	 * "HELD 但 fence 已推进到更高 epoch ⇒ 已拒绝推进"的告警节流（RT-21；每个 runId 一条）。
+	 *
+	 * <p>与 {@link #fenceAheadWarned} 分开：那一个是"无租约写回的旁路观测"（plain SET 路径），
+	 * 本集合是"持租但续跑权已被接管"的拒写留痕，两者的处置完全不同。
+	 */
+	private final Set<String> fenceStaleWarned = ConcurrentHashMap.newKeySet();
 
 	private static final int FENCE_AHEAD_WARNED_CAP = 512;
 
@@ -926,15 +936,45 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		}
 	}
 
-	/** 清除：仅当值仍是自己这一轮的 runId 才 {@code DEL}（同 {@code SessionGate.release} 口径）。 */
+	/** 当前轮终态后回指同会话仍活跃的最新一轮；没有才删除，且只处理仍指向自己的索引。 */
 	public void clearSessionCurrent(String sessionId, String runId) {
 		if (sessionId == null || runId == null) {
 			return;
 		}
 		try {
-			String value = this.redis.opsForValue().get(sessionCurrentKey(sessionId));
-			if (runId.equals(value)) {
-				this.redis.delete(sessionCurrentKey(sessionId));
+			String key = sessionCurrentKey(sessionId);
+			String value = this.redis.opsForValue().get(key);
+			if (!runId.equals(value)) {
+				return;
+			}
+			SessionRunIndex index = sessionRunIndex(sessionId);
+			if (!index.readable()) {
+				log.warn("终态后复核 session→current 失败 sessionId={} runId={}（保留原索引，不猜活跃轮）",
+						sessionId, runId);
+				return;
+			}
+			RunSnapshot fallback = null;
+			for (String candidateId : index.runIds()) {
+				if (runId.equals(candidateId)) {
+					continue;
+				}
+				RunSnapshot candidate = get(candidateId);
+				if (candidate == null || (!RunSnapshot.SUSPENDED.equals(candidate.getStatus())
+						&& !RunSnapshot.RUNNING.equals(candidate.getStatus()))) {
+					continue;
+				}
+				if (fallback == null || candidate.getUpdatedAtMs() > fallback.getUpdatedAtMs()
+						|| (candidate.getUpdatedAtMs() == fallback.getUpdatedAtMs()
+								&& RunSnapshot.SUSPENDED.equals(candidate.getStatus())
+								&& !RunSnapshot.SUSPENDED.equals(fallback.getStatus()))) {
+					fallback = candidate;
+				}
+			}
+			if (fallback == null) {
+				this.redis.delete(key);
+			}
+			else {
+				this.redis.opsForValue().set(key, fallback.getRunId(), sessionCurrentTtl());
 			}
 		}
 		catch (Exception ex) {
@@ -1006,6 +1046,133 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			// 值损坏 = 数据问题，不是依赖不可用：保持 IllegalStateException（不得转成 503）
 			throw new IllegalStateException("无法读取轮次快照 " + runId, ex);
 		}
+	}
+
+	/**
+	 * <b>快照归属的轻量读取（RT-28 成本收口）</b>：只回答"这一轮属于哪个会话"，<b>不</b>物化
+	 * {@link RunSnapshot}。
+	 *
+	 * <h2>为什么不能先 {@link #get(String)} 再读 sessionId</h2>
+	 * {@code ai:runs} 的成员可能是<b>海量无关轮次</b>。{@code get()} 会把整份快照（含整窗
+	 * {@code messageJson} 的每一条消息）反序列化成对象图 —— 会话销毁的"索引缺口复核"要为每个无关
+	 * 轮次付出这份 CPU/内存（O(总轮次 × 快照大小)），而真正要判的只是一个字段。
+	 *
+	 * <p>本方法只取<b>原始 JSON</b> 并<b>流式</b>扫描<b>顶层</b>字段：找到 {@code sessionId} 立即返回
+	 * （它在序列化顺序里紧跟 {@code runId}，通常只解析几十字节），不构造任何消息对象。
+	 * 只认顶层字段名（按嵌套深度判断），因此 {@code context} 里同名的键不会被误当成归属。
+	 *
+	 * <h2>四态与失败口径（调用方必须 fail-closed）</h2>
+	 * <ul>
+	 * <li>{@link SnapshotOwner.State#ATTRIBUTED}：读到字符串型顶层 {@code sessionId}；</li>
+	 * <li>{@link SnapshotOwner.State#MISSING}：<b>键已消失</b>（索引里的死成员）—— 这是"没有快照"，
+	 *     与"有快照但读不出归属"必须区分：销毁侧对点名（会话门/当前轮索引）的死成员保留
+	 *     {@code UNKNOWN}/active 旧语义，对其余死成员跳过；</li>
+	 * <li>{@link SnapshotOwner.State#ABSENT}：键在、JSON 合法，但<b>没有可用的 sessionId</b>
+	 *     （旧快照没有该字段，或显式 {@code null}）—— 只能"无法归属"，<b>不得</b>因此把它当死成员
+	 *     删掉 13 键（那可能是他会话、甚至本会话的老轮次），也不得断言"属于别的会话"；</li>
+	 * <li>{@link SnapshotOwner.State#UNREADABLE}：Redis 读失败、JSON 坏值、或 {@code sessionId}
+	 *     存在但不是字符串/不是 null（数字/对象/数组…）—— <b>不得</b>当作"另一个会话"
+	 *     （那会漏删本会话的键），也不得当"本会话"（那可能删到他会话）。枚举侧必须中止，复核侧记
+	 *     可重试错误。</li>
+	 * </ul>
+	 *
+	 * <p>不抛异常：判定必须总能给出结论（与 {@code authority} 同姿态）；错误事实放进返回值，
+	 * 由调用方折算成"中止枚举/可重试错误"。
+	 */
+	public SnapshotOwner snapshotOwner(String runId) {
+		if (runId == null || runId.isBlank()) {
+			return SnapshotOwner.missing();
+		}
+		String raw;
+		try {
+			raw = this.redis.opsForValue().get(runKey(runId));
+		}
+		catch (RuntimeException ex) {
+			log.warn("读取轮次快照归属失败 runId={}（按不可读处理，调用方须 fail-closed）：{}", runId, ex.getMessage());
+			return SnapshotOwner.unreadable();
+		}
+		if (raw == null) {
+			return SnapshotOwner.missing();
+		}
+		try {
+			return topLevelOwner(raw);
+		}
+		catch (Exception ex) {
+			// 坏值 = 数据问题：不得猜成"他会话"，交给调用方中止/记可重试错误。
+			log.warn("轮次快照坏值 runId={}（归属不可读，调用方须 fail-closed）：{}", runId, ex.getMessage());
+			return SnapshotOwner.unreadable();
+		}
+	}
+
+	/**
+	 * 顶层 {@code sessionId} 的归属判定（流式；只认顶层字段名，因此 {@code context} 里的同名键不会被误读）。
+	 *
+	 * <p>四态映射：字符串 ⇒ {@code ATTRIBUTED}；字段缺失或 {@code null} ⇒ {@code ABSENT}；
+	 * 非字符串非 null（数字/对象/数组/布尔）⇒ {@code UNREADABLE}（结构不符 RunSnapshot，
+	 * 旧实现会被 Jackson 强转成字符串后再被当"他会话"静默跳过）；顶层不是 JSON 对象 ⇒ {@code UNREADABLE}。
+	 */
+	private SnapshotOwner topLevelOwner(String rawJson) throws java.io.IOException {
+		try (JsonParser parser = this.mapper.getFactory().createParser(rawJson)) {
+			if (parser.nextToken() != JsonToken.START_OBJECT) {
+				return SnapshotOwner.unreadable();
+			}
+			while (parser.nextToken() == JsonToken.FIELD_NAME) {
+				String name = parser.currentName();
+				JsonToken value = parser.nextToken();
+				if ("sessionId".equals(name)) {
+					if (value == JsonToken.VALUE_STRING) {
+						return SnapshotOwner.attributed(parser.getText());
+					}
+					if (value == JsonToken.VALUE_NULL) {
+						return SnapshotOwner.absent();
+					}
+					return SnapshotOwner.unreadable();
+				}
+				// 只跳过当前字段的子树：嵌套对象里的同名键不会被误读成归属。
+				parser.skipChildren();
+			}
+			return SnapshotOwner.absent();
+		}
+	}
+
+	/**
+	 * 快照归属读取结果（四态，见 {@link #snapshotOwner(String)}）。
+	 *
+	 * @param state 见 {@link State}
+	 * @param sessionId 仅 {@link State#ATTRIBUTED} 时非空
+	 */
+	public record SnapshotOwner(State state, String sessionId) {
+
+		/** 归属读取的四种结论。 */
+		public enum State {
+
+			/** 读到字符串型顶层 sessionId。 */
+			ATTRIBUTED,
+			/** 键在、JSON 合法但没有可用 sessionId（旧快照/显式 null）：无法归属。 */
+			ABSENT,
+			/** 键已消失（索引里的死成员）。 */
+			MISSING,
+			/** 读失败、坏值、或 sessionId 不是字符串/不是 null：不可知（调用方必须 fail-closed）。 */
+			UNREADABLE
+
+		}
+
+		static SnapshotOwner attributed(String sessionId) {
+			return new SnapshotOwner(State.ATTRIBUTED, sessionId);
+		}
+
+		static SnapshotOwner absent() {
+			return new SnapshotOwner(State.ABSENT, null);
+		}
+
+		static SnapshotOwner missing() {
+			return new SnapshotOwner(State.MISSING, null);
+		}
+
+		static SnapshotOwner unreadable() {
+			return new SnapshotOwner(State.UNREADABLE, null);
+		}
+
 	}
 
 	/**
@@ -1142,6 +1309,79 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		}
 		else {
 			log.debug("续跑权只读：拒绝{} runId={}（{}，本 run 已告警过）", action, runId, detail);
+		}
+	}
+
+	/**
+	 * <b>写门前置（RT-21）</b>：{@code authority} 回答"本实例的租约视图还在不在"，但回答不了
+	 * "<b>fence 是否已被推进到更高 epoch</b>"。后者是第三种形态 —— 租约 TTL 到期、新实例接管并
+	 * 写过快照（fence=新 epoch），而本实例的续租还没到点（续租间隔内）时，本实例仍是
+	 * {@code HELD}：此时再落帧/写台账/取号，就是"旧驱动与新主人同时推进"。
+	 *
+	 * <p>判据 = {@code fence <= 本进程 epoch}（与 {@code tryClaimExecution} 的 I5 复核同源）。
+	 * {@code epoch == 0}（无租约设施 / 从没持租）保持 E3 的普通写语义，<b>不</b>读 fence。
+	 *
+	 * <p>fence 读不出来 ⇒ <b>不放行</b>（无法证明"我仍是主人"；与认领侧的 fail-closed 同口径）。
+	 *
+	 * <p><b>成本</b>：持租时每笔多一次单键 {@code GET}。出帧路径本来就有 XADD/INCR/PUBLISH
+	 * 数跳，这里换的是正确性（RT-21）；不为此加进程内缓存 —— 缓存窗口内的复用恰好会放过
+	 * 这段"HELD-but-fence-ahead"。
+	 *
+	 * <p><b>唯一写门</b>：本方法同时被 {@link com.example.configmgr.ai.run.ResilientChatService}
+	 * 的"答案面"写口（DB 历史 / 记忆整窗）复用（RT-20）—— 帧、台账、序号、历史、记忆因此共享
+	 * 同一套判据，不会出现"快照拒写、但答案已经落库"的半只读状态。
+	 */
+	public boolean permittedToWrite(String runId, String action) {
+		LeaseService.LeaseAuthority authority = runLeaseAuthority(runId);
+		if (authority.readOnly()) {
+			warnReadOnly(runId, authority, action);
+			return false;
+		}
+		long epoch = heldRunEpoch(runId);
+		if (epoch <= 0L) {
+			return true;
+		}
+		long fence;
+		try {
+			fence = fenceEpoch(runId);
+		}
+		catch (RuntimeException ex) {
+			warnFenceUnreadable(runId, action, ex);
+			return false;
+		}
+		if (fence > epoch) {
+			warnFenceStale(runId, action, epoch, fence);
+			return false;
+		}
+		return true;
+	}
+
+	/** fence 已越过本进程 epoch 的拒写留痕（每个 runId 一条 WARN，其后 debug）。 */
+	private void warnFenceStale(String runId, String action, long epoch, long fence) {
+		if (this.fenceStaleWarned.size() > FENCE_AHEAD_WARNED_CAP) {
+			this.fenceStaleWarned.clear();
+		}
+		if (this.fenceStaleWarned.add(runId)) {
+			log.warn("续跑权已失效：拒绝{} runId={}（fence={} 已推进到本实例 epoch={} 之上：另一实例已接管本轮的"
+					+ "续跑权，本实例只读恢复，不再落帧/写台账/取号）", action, runId, fence, epoch);
+		}
+		else {
+			log.debug("续跑权已失效：拒绝{} runId={}（fence={} > epoch={}，本 run 已告警过）", action, runId,
+					fence, epoch);
+		}
+	}
+
+	/** fence 读不出来（Redis 抖动/不可用）⇒ 按"无法证明仍是主人"拒写，与认领侧 fail-closed 同口径。 */
+	private void warnFenceUnreadable(String runId, String action, RuntimeException ex) {
+		if (this.fenceStaleWarned.size() > FENCE_AHEAD_WARNED_CAP) {
+			this.fenceStaleWarned.clear();
+		}
+		if (this.fenceStaleWarned.add(runId)) {
+			log.warn("无法确认续跑权：拒绝{} runId={}（fence 读取失败，按不可确认处理）：{}", action, runId,
+					ex.getMessage());
+		}
+		else {
+			log.debug("无法确认续跑权：拒绝{} runId={}（已告警过）：{}", action, runId, ex.getMessage());
 		}
 	}
 
@@ -1296,6 +1536,9 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 */
 	public void saveSuspended(String runId, String assistantContent, List<PendingToolCall> pendings,
 			List<Message> history, MessageJsonCodec codec, Map<String, Object> assistantMetadata) {
+		if (!permittedToWrite(runId, "挂起快照")) {
+			throw new AiStateUnavailableException("无法确认续跑权，拒绝写入挂起状态 " + runId);
+		}
 		for (PendingToolCall pending : pendings) {
 			// 只给真正挂起的条目打"请求时刻"：预检失败等已结算条目（非 PENDING）在挂起前就写了
 			// requestedAtMs/resolvedAtMs，这里再覆写会造出 resolvedAtMs < requestedAtMs 的时间倒挂。
@@ -1631,7 +1874,15 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 * @return 置位后的条目（已并入 req 位）；条目不存在返回 null
 	 */
 	public PendingToolCall markRequestEmitted(String runId, String toolCallId, long atMs) {
-		PendingToolCall pending = pending(runId, toolCallId);
+		PendingToolCall pending;
+		try {
+			pending = pending(runId, toolCallId);
+		}
+		catch (AiStateUnavailableException ex) {
+			log.warn("读取请求帧条目失败 runId={} toolCallId={}（按未知降级，不阻断本轮）：{}", runId, toolCallId,
+					ex.getMessage());
+			pending = pendingLenient(runId, toolCallId);
+		}
 		if (pending == null || !PendingToolCall.PENDING.equals(pending.getStatus())) {
 			return pending;
 		}
@@ -1644,8 +1895,15 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			log.warn("写入请求帧标记失败 runId={} toolCallId={}（本次请求帧仍会发出）：{}", runId, toolCallId,
 					ex.getMessage());
 		}
-		PendingToolCall fresh = pending(runId, toolCallId);
-		return fresh == null ? pending : fresh;
+		try {
+			PendingToolCall fresh = pending(runId, toolCallId);
+			return fresh == null ? pending : fresh;
+		}
+		catch (AiStateUnavailableException ex) {
+			log.warn("请求帧置位后复核失败 runId={} toolCallId={}（保留已知条目，不阻断本轮）：{}", runId, toolCallId,
+					ex.getMessage());
+			return pending;
+		}
 	}
 
 	// ── 执行认领 / 台账（跨进程不重放） ────────────────────────────────────
@@ -1860,9 +2118,8 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	public void appendLedger(String runId, PendingToolCall pending, String resultText) {
 		// 续租 fencing 收口批：台账是"已执行"的跨进程判据 —— 丢租后不得追加（B 的台账才是真值），
 		// 否则 A 的迟到执行会让续跑回放出一个新主人没有执行过的结果。
-		LeaseService.LeaseAuthority authority = runLeaseAuthority(runId);
-		if (authority.readOnly()) {
-			warnReadOnly(runId, authority, "工具执行台账落档");
+		// RT-21：持租但 fence 已被推进（HELD-but-fence-ahead）同样是"没有续跑权"，一并拒写。
+		if (!permittedToWrite(runId, "工具执行台账落档")) {
 			return;
 		}
 		long atMs = System.currentTimeMillis();
@@ -2054,13 +2311,19 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	}
 
 	/**
-	 * 取消落地：把该轮仍未决（{@code PENDING}）的挂起条目一次性标为
-	 * {@link PendingToolCall#CANCELLED} 且 {@code executed=false}。
+	 * 取消落地：把该轮**可证明未执行**的挂起条目一次性标为 {@link PendingToolCall#CANCELLED}
+	 * 且 {@code executed=false}。
 	 *
 	 * <p>
 	 * 为什么重要：取消之后若进程死亡、又被启动续跑拾起，未决条目仍会躺在 Redis 里 ——
 	 * 若状态还是 {@code PENDING} 而续跑把它们当"待外部输入"，就会永久卡住（或更糟：
 	 * 被误当"未执行的后端工具"补执行）。取消即落库，跨进程也生效。
+	 *
+	 * <p>
+	 * <b>R1：{@code APPROVED} 且未认领未执行也要收敛</b>。批准（{@code ConfirmGate}）只写决策、
+	 * 不执行；执行由续跑的认领（{@link #tryClaimExecution}）负责。两步之间用户按停止时，条目
+	 * 既不是 {@code PENDING}（旧口径不碰），也不该继续挂着一个"随时可被执行"的批准 ——
+	 * 那正是"取消后仍执行不可逆工具"的一半来源。判据见 {@link #cancellableBeforeExecution}。
 	 *
 	 * @return 被改写的条目数
 	 */
@@ -2068,7 +2331,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		int changed = 0;
 		// C2：取消收尾用非抛读口 —— guard 读失败不能让条目停在 PENDING（用户可见"卡在取消中"）。
 		for (PendingToolCall pending : pendingsLenient(runId)) {
-			if (!PendingToolCall.PENDING.equals(pending.getStatus())) {
+			if (!cancellableBeforeExecution(runId, pending)) {
 				continue;
 			}
 			pending.setStatus(PendingToolCall.CANCELLED);
@@ -2080,6 +2343,58 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			changed++;
 		}
 		return changed;
+	}
+
+	/**
+	 * <b>取消收尾/认领前复核共用的"是否已有执行证据"判据</b>（R1）。
+	 *
+	 * <p>证据面 = 条目上的 {@code executed} / {@code claimedAtMs} / {@code claimedEpoch} /
+	 * {@code executedBy} / {@code executedAtMs}，<b>加上</b>认领表（{@code ai:claim:<runId>}）：
+	 * 后者覆盖跨实例认领的中间窗口 —— 对方 {@code tryClaimExecution} 的 {@code HSETNX} 已落、
+	 * 而 {@code ai:pending} 还没回写认领字段。
+	 *
+	 * <p>方向：<b>证明不了"没有"就当有</b>（认领表读失败、条目为 null 都返回 true）——
+	 * 错误方向的代价不对称：把已认领的说成未执行会让取消"抹掉"一次真实副作用。
+	 */
+	public boolean hasExecutionEvidence(String runId, PendingToolCall pending) {
+		if (pending == null) {
+			return true;
+		}
+		if (pending.isExecuted() || pending.getClaimedAtMs() > 0L || pending.getClaimedEpoch() > 0L
+				|| pending.getExecutedBy() != null || pending.getExecutedAtMs() > 0L) {
+			return true;
+		}
+		try {
+			return claimedBy(runId, pending.getToolCallId()) != null;
+		}
+		catch (RuntimeException ex) {
+			log.warn("读认领表失败，按\"已有执行证据\"处理 runId={} toolCallId={}：{}", runId,
+					pending.getToolCallId(), ex.getMessage());
+			return true;
+		}
+	}
+
+	/**
+	 * <b>取消收尾的可收敛判据</b>（R1）：{@code PENDING}（原口径）或
+	 * <b>{@code APPROVED} 且可证明未认领未执行</b>。
+	 *
+	 * <p><b>只认"零证据"</b>：证据面见 {@link #hasExecutionEvidence}（含跨实例认领表）——
+	 * 有证据一律<b>不碰</b>。取消不得把一次真实发生的副作用说成没发生，也不得抹掉
+	 * 正在执行/已完成的结果。
+	 *
+	 * <p>认领表读失败同样不碰（证明不了"未认领"就不收敛）；本判据不抛，失败只留 WARN。
+	 */
+	public boolean cancellableBeforeExecution(String runId, PendingToolCall pending) {
+		if (pending == null) {
+			return false;
+		}
+		if (PendingToolCall.PENDING.equals(pending.getStatus())) {
+			return true;
+		}
+		if (!PendingToolCall.APPROVED.equals(pending.getStatus())) {
+			return false;
+		}
+		return !hasExecutionEvidence(runId, pending);
 	}
 
 	// ── 帧外置（重挂回放） ──────────────────────────────────────────────────
@@ -2127,9 +2442,9 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		}
 		// 续租 fencing 收口批：兼容写口也要过权威判定 —— 丢租/设施不可确认时不得落档
 		// （生产出帧已在 SseChatEmitter#emit 拦截；这里是"绕过发射器直塞帧"的第二道闸）。
-		LeaseService.LeaseAuthority authority = runLeaseAuthority(runId);
-		if (authority.readOnly()) {
-			warnReadOnly(runId, authority, "事件帧落档");
+		// RT-21：HELD-but-fence-ahead（租约视图还在、fence 已被接管方推进）同样不得落档，
+		// 否则旧主人在事件日志里继续写业务帧、唤醒其它实例补到一份作废的流。
+		if (!permittedToWrite(runId, "事件帧落档")) {
 			return;
 		}
 		frame.putIfAbsent("atMs", System.currentTimeMillis());
@@ -2182,9 +2497,8 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	public void recordIssuedSeq(String runId, long seq) {
 		// 续租 fencing 收口批：丢租后不得再取/登记业务号（新主人从自己的号锚续号，
 		// 旧主人继续推进会把 seq 空间搅乱，且意味着还在落档）。
-		LeaseService.LeaseAuthority authority = runLeaseAuthority(runId);
-		if (authority.readOnly()) {
-			warnReadOnly(runId, authority, "业务序号登记");
+		// RT-21：HELD-but-fence-ahead 也不得登记 —— 那一任的号空间已归新主人。
+		if (!permittedToWrite(runId, "业务序号登记")) {
 			return;
 		}
 		try {

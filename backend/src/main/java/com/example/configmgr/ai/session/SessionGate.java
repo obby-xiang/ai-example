@@ -63,6 +63,17 @@ import java.util.concurrent.atomic.AtomicLong;
  * <h2>§13.1 降级</h2>
  * 锁服务不可用（Redis 异常）时降级为进程内单值门：M1 单实例下等价，冲突照样 409 提示重试，
  * 只是失去了跨实例互斥；降级事实写进返回体（{@code degraded=true}）与 WARN 日志，不静默。
+ *
+ * <h2>降级必须"事后也可见"（RT-34 / RT-35）</h2>
+ * 两条曾经只在日志里说一句的路子现在已经收口：
+ * <ul>
+ * <li><b>续期失败</b>（脚本返回 0 或异常）⇒ 置 holder 的 {@code degraded} 并累加
+ * {@link #lockLost()}：跨实例互斥已失效，后续 409 的 {@code degraded} 字段会把事实带给调用方，
+ * 不再"日志里说一句、对外一切如常"；</li>
+ * <li><b>诊断 GET 失败</b> ⇒ 持有者<b>不可知</b>（{@link Busy#unknown()}，{@code runId = null}），
+ * <b>绝不</b>回退成调用方自己的 runId —— 否则续跑方会把"没取到门"读成"取到了"，
+ * 在没有跨实例会话门的情况下与另一实例并发。</li>
+ * </ul>
  */
 @Slf4j
 @Component
@@ -153,6 +164,16 @@ public class SessionGate {
 
 	private final AtomicLong renewals = new AtomicLong();
 
+	/**
+	 * 续期失败（脚本返回 0 或异常）累计次数 —— RT-34 的可观测面。
+	 *
+	 * <p>为什么必须有计数而不只是日志：续期失败把"跨实例互斥"降级成进程内互斥，属于必须能聚合
+	 * 告警的降级，而日志会被轮询节拍刷掉。对外接线在 {@code AiController} 的 {@code /api/ai/health}
+	 * （{@code sessionLockLost} / {@code sessionLockDegraded} 两个 additive 键；后者 =
+	 * 本计数 &gt; 0 <b>或</b> {@link #degradedSessions()} &gt; 0，因为取门降级只置 holder 不累加本计数）。
+	 */
+	private final AtomicLong lockLost = new AtomicLong();
+
 	public SessionGate(StringRedisTemplate redis, AiProperties properties) {
 		this.redis = redis;
 		this.lockProperties = properties.getSession().getLock();
@@ -207,7 +228,7 @@ public class SessionGate {
 			if (Boolean.FALSE.equals(taken)) {
 				// 锁已被另一轮拿走（park 期间锁到期后别人接管）：不覆盖、不续看门狗，
 				// holder 保持原 token（本轮进程内仍是它的门），对外如实报"另一轮在跑"
-				return new Busy(observedRunId(sessionId, runId), false);
+				return busyHeldByAnother(sessionId);
 			}
 			// 结果不可知：<b>不宣称 Redis 接管成功</b> —— 不重启 watchdog、不更新 lockValue，
 			// 已有 watchdog 仍按上一次确认的值续期（续不上就自停）。
@@ -225,9 +246,9 @@ public class SessionGate {
 			return null;
 		}
 		if (Boolean.FALSE.equals(taken)) {
-			// 另一实例持有：让出进程内门，按对方 runId 拒绝
+			// 另一实例持有：让出进程内门，按对方 runId 拒绝（读不到持有者 ⇒ unknown，不回退成自己）
 			this.inProcess.remove(sessionId, candidate);
-			return new Busy(observedRunId(sessionId, runId), false);
+			return busyHeldByAnother(sessionId);
 		}
 		// §13.1：锁服务不可用/结果不可知 → 降级为进程内单值门（M1 单实例下等价）。
 		// 刻意不写兜底 SET：若脚本其实已执行而回包丢失，锁按 TTL 自行过期（fencing 由续跑租约兜底）；
@@ -297,6 +318,12 @@ public class SessionGate {
 	 * {@code runId|*} 形态的锁；另一轮的锁一个字节都不动。
 	 */
 	public void releaseDeadHeld(String sessionId, String runId) {
+		if (runId == null || runId.isBlank()) {
+			// 持有者不可知（RT-35 的 busy.unknown）：没有任何 runId 可以匹配，强释放必须放弃 ——
+			// 猜一个 id 去删锁，删到别人那一任就是"静默抢门"。
+			log.warn("会话门强释放缺少 runId sessionId={}（持有者不可知：不猜、不删任何锁）", sessionId);
+			return;
+		}
 		Holder holder = this.inProcess.get(sessionId);
 		if (holder != null && holder.runId.equals(runId)) {
 			this.inProcess.remove(sessionId, holder);
@@ -329,6 +356,28 @@ public class SessionGate {
 
 	public long renewals() {
 		return this.renewals.get();
+	}
+
+	/** 续期失败（0/异常）累计次数：会话锁降级的观测面（RT-34）。 */
+	public long lockLost() {
+		return this.lockLost.get();
+	}
+
+	/**
+	 * 当前仍标记为降级的持有者数 —— {@link #lockLost()} 的<b>必要补充</b>。
+	 *
+	 * <p>取门时 Redis 不可用/结果不可知只把 holder 置 {@code degraded}（见
+	 * {@code acquire} 的降级分支），<b>不</b>累加 {@code lockLost}（那条路径没走到续期）。
+	 * 只按丢锁计数报降级会把这种最常见的降级形态漏报 —— 而它同样是"跨实例互斥已失效"。
+	 */
+	public int degradedSessions() {
+		int degraded = 0;
+		for (Holder holder : this.inProcess.values()) {
+			if (holder.degraded) {
+				degraded++;
+			}
+		}
+		return degraded;
 	}
 
 	/**
@@ -368,14 +417,35 @@ public class SessionGate {
 		}
 	}
 
-	/** 失败的诊断口径：脚本已判定"不是本 run 的锁"，这里只读一次来填 409 的 heldBy（不参与任何写决策）。 */
-	private String observedRunId(String sessionId, String fallback) {
+	/**
+	 * 脚本已判定"不是本 run 的锁"时构造对外结论（RT-35）。
+	 *
+	 * <p>持有者读得到 ⇒ 按它报（调用方据此 reattach）；<b>读不到/键已消失 ⇒ unknown</b>：
+	 * 宁可如实报"不知道是谁"，也<b>不得</b>回退成调用方自己的 runId（见 {@link Busy} 的注）。
+	 * 诊断 GET 失败同时说明跨实例视图此刻不可确认 ⇒ {@code degraded=true}。
+	 */
+	private Busy busyHeldByAnother(String sessionId) {
+		String observed = observedRunId(sessionId);
+		if (observed == null) {
+			log.warn("会话门被占用但持有者不可知 sessionId={}（诊断读失败/锁已消失：按 unknown 拒绝，"
+					+ "不回退成调用方 runId）", sessionId);
+			return new Busy(null, true, true);
+		}
+		return new Busy(observed, false);
+	}
+
+	/**
+	 * 诊断口径：只读一次锁值来填 409 的 heldBy / reattach（<b>不参与任何写决策</b>）。
+	 *
+	 * @return 锁值的 runId 段；读失败或锁已消失返回 {@code null}（持有者不可知，<b>不</b>回退兜底值）
+	 */
+	private String observedRunId(String sessionId) {
 		try {
-			String observed = runIdOfValue(this.redis.opsForValue().get(LOCK_PREFIX + sessionId));
-			return observed == null ? fallback : observed;
+			return runIdOfValue(this.redis.opsForValue().get(LOCK_PREFIX + sessionId));
 		}
 		catch (Exception ex) {
-			return fallback;
+			log.debug("读取会话门持有者失败 sessionId={}（按不可知处理）：{}", sessionId, ex.getMessage());
+			return null;
 		}
 	}
 
@@ -392,12 +462,19 @@ public class SessionGate {
 		holder.watchdog = this.watchdog.scheduleAtFixedRate(() -> {
 			try {
 				if (!renewLockOnce(sessionId, expectedValue)) {
-					log.warn("会话锁已失效或换主，停止续期 sessionId={} runId={}", sessionId, runId);
+					// RT-34：续期返回 0 是"锁已失效/换主"的确定结论 —— 必须与异常同口径记降级，
+					// 否则只在日志里说一句就没了，调用方看到的仍是"一切正常"。
+					holder.degraded = true;
+					this.lockLost.incrementAndGet();
+					log.warn("会话锁已失效或换主：停止续期并标记降级 sessionId={} runId={}"
+							+ "（进程内门仍持有；跨实例互斥已失效，后续 409 的 degraded 会如实上报）", sessionId,
+							runId);
 					cancelWatchdog(holder);
 				}
 			}
 			catch (Exception ex) {
 				holder.degraded = true;
+				this.lockLost.incrementAndGet();
 				log.warn("会话锁续期异常，降级为进程内单值门 sessionId={}：{}", sessionId, ex.getMessage());
 			}
 		}, period, period, TimeUnit.MILLISECONDS);
@@ -425,10 +502,29 @@ public class SessionGate {
 	/**
 	 * 占用失败的结局。
 	 *
-	 * @param runId 进行中那一轮的 runId（前端据此 reattach）
-	 * @param degraded 是否为锁降级形态（Redis 锁不可用，仅进程内互斥）
+	 * <h2>为什么需要 {@code unknown}（RT-35）</h2>
+	 * 脚本判定"另一轮持有"后，本类会再读一次锁值来填 409 的 {@code heldBy}/{@code reattach}
+	 * （<b>只用于诊断</b>，不参与任何写决策）。这次诊断 GET <b>可能失败或键已消失</b> —— 那时
+	 * 持有者<b>不可知</b>，绝不能回退成调用方自己的 runId：
+	 * <ul>
+	 * <li>{@code AiController} 会拿它去判"死轮"并强释放，还会把 {@code reattach} 指到一个不存在的流；</li>
+	 * <li>{@code ResumeService} 的判据是 {@code runId.equals(busy.runId())} —— 回退成自己就等于把
+	 *     "没取到门"读成"取到了"，在没有跨实例会话门的情况下与另一实例并发（RT-35 的 V1 形态）。</li>
+	 * </ul>
+	 * 因此不可知时 {@code runId = null} + {@code unknown = true}：两个消费方都会把它当"被占用"
+	 * 而不是"自己持有"，也<b>不会</b>用它去猜着删锁。
+	 *
+	 * @param runId 进行中那一轮的 runId（前端据此 reattach）；{@code null} = 持有者不可知
+	 * @param degraded 是否为降级/不可确认形态（Redis 锁未确认，仅进程内互斥）
+	 * @param unknown 持有者是否不可知（诊断 GET 失败/锁已消失）
 	 */
-	public record Busy(String runId, boolean degraded) {
+	public record Busy(String runId, boolean degraded, boolean unknown) {
+
+		/** 兼容构造：持有者已知（例如进程内门被另一轮占着）。 */
+		public Busy(String runId, boolean degraded) {
+			this(runId, degraded, false);
+		}
+
 	}
 
 	private static final class Holder {

@@ -60,7 +60,21 @@ export interface ExcelRowIssue {
   reason: string
 }
 
-/** 逐类型的取值规范化：空串 → null；布尔 → true/false；数值 → 数字串。 */
+/**
+ * NUMBER 字段的取值 → 数字（能原样往返的才转数字，否则保留文本）。
+ *
+ * 判据是"解析后再序列化回同一串"：不同则说明转数字会**改值或改写法**，此时保留文本。
+ * 两类真实失真（都是主键/引用字段的标识符，改坏等于换了一条数据）：
+ * - 超过 2^53 的长标识符被 double 舍入：`9007199254740993` → `9007199254740992`；
+ * - 书写形态被吃掉：`007` → `7`、`1.50` → `1.5`。
+ * 数字单元格本身也只能装 double，所以"保真"的唯一出路是按文本落格。
+ */
+export function numericCellValue(text: string): number | string {
+  const num = Number(text)
+  return Number.isFinite(num) && String(num) === text ? num : text
+}
+
+/** 逐类型的取值规范化：空串 → null；布尔 → true/false；数值 → 数字串（保真优先）。 */
 export function normalizeCellValue(field: ConfigField, value: unknown): string {
   if (value === null || value === undefined) {
     return ''
@@ -72,10 +86,8 @@ export function normalizeCellValue(field: ConfigField, value: unknown): string {
   switch (field.fieldType) {
     case 'BOOLEAN':
       return isTruthyText(text) ? 'true' : isFalsyText(text) ? 'false' : text
-    case 'NUMBER': {
-      const num = Number(text)
-      return Number.isFinite(num) ? String(num) : text
-    }
+    case 'NUMBER':
+      return String(numericCellValue(text))
     default:
       return text
   }
@@ -348,8 +360,7 @@ function spreadValue(field: ConfigField, value: unknown): string | number | bool
     return ''
   }
   if (field.fieldType === 'NUMBER') {
-    const num = Number(text)
-    return Number.isFinite(num) ? num : text
+    return numericCellValue(text)
   }
   if (field.fieldType === 'BOOLEAN') {
     return text === 'true'
@@ -499,8 +510,7 @@ function cellValueForXlsx(field: ConfigField, value: unknown): XlsxCell {
     return null
   }
   if (field.fieldType === 'NUMBER') {
-    const num = Number(text)
-    return Number.isFinite(num) ? num : text
+    return numericCellValue(text)
   }
   return text
 }

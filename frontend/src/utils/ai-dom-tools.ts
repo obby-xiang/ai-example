@@ -117,6 +117,28 @@ let writeChain: Promise<void> = Promise.resolve()
 let undoEntry: UiUndoEntry | null = null
 let announcement: string | null = null
 let snapshotCache: { key: string; text: string } | null = null
+/**
+ * 界面写入版本（FE-33 层①）：**写动词真的改了界面**、或新一轮开始，就推进一格。
+ *
+ * <p>为什么需要它：快照缓存的键原本只有 `epoch|args`，而 epoch 只在"换页 / 区域注册注销 /
+ * 显式推进"时变 —— 同一页里 AI 自己写完界面后 epoch 不动，同参重拍逐字返回**动作前**文本。
+ * 模型据此判"没生效"再点一次，勾选被点回原态；回执里"可再 ui_snapshot 确认"也就不可兑现。
+ *
+ * <p>口径：只由写动作与换轮推进（只读的 snapshot / scroll / highlight 不推进）——
+ * 没有写动作时同参去重照旧，既有能力不丢。
+ */
+let domVersion = 0
+
+/** 当前界面写入版本（`frontend-tools` 的同参去重把它并进作用域，见 FE-33 层②）。 */
+export function currentUiDomVersion(): number {
+  return domVersion
+}
+
+/** 界面已被改写：推进版本并丢掉快照缓存（写动词成功路径 / 撤销的唯一调用口）。 */
+function markUiMutation(): void {
+  domVersion += 1
+  snapshotCache = null
+}
 let highlights: Array<{ el: HTMLElement; badge: HTMLElement }> = []
 
 /**
@@ -140,6 +162,8 @@ export function beginUiTurn(token: string): void {
   writeVerbCount = 0
   aborted = false
   lastWriteAt = 0
+  // 换轮 = 新现场：上一轮的快照缓存不得跨轮复用（FE-33 层①，页面可能已刷新过数据）
+  markUiMutation()
 }
 
 /** 用户点「停止」：后续写动词一律拒绝（已执行的不回滚）。 */
@@ -201,6 +225,7 @@ export function resetUiRuntime(): void {
   undoEntry = null
   announcement = null
   snapshotCache = null
+  domVersion += 1
   clearSnapshotGate()
   writePreconditions.clear()
 }
@@ -421,6 +446,81 @@ function fillAllowed(el: HTMLElement): boolean {
   return el.getAttribute('data-ai-fill') === 'allow'
 }
 
+// ── 可见性（"在 DOM 里" ≠ "在用户眼前"） ─────────────────────────────────────
+//
+// FE-32：两个向导的步骤是 `v-show`（所有步骤常驻 DOM），`el-tab-pane` 与折叠面板同理。
+// 只判 `isConnected` 时第 4 步能写第 1 步的控件，回执还报"界面已同步"—— 而屏幕没变。
+
+/** 跨 open shadow root 取父元素（closed root 不可达，与 `queryRegistered` 同口径）。 */
+function parentAcrossShadow(node: HTMLElement): HTMLElement | null {
+  const parent = node.parentElement
+  if (parent) {
+    return parent
+  }
+  const root = node.getRootNode?.()
+  if (root && root.nodeType === 11) {
+    const host = (root as ShadowRoot).host
+    if (host && host.nodeType === 1) {
+      return host as HTMLElement
+    }
+  }
+  return null
+}
+
+/**
+ * 该元素是否**当前真的显示在界面上**（可见性围栏的唯一判据）。
+ *
+ * <p>判据按"能不能看见"取最保守的交集，全部来自标准语义，不按类名猜：
+ * `hidden` 属性 / `aria-hidden="true"` / `inert` 的祖先、`display:none`、
+ * `visibility:hidden|collapse`（自身与祖先，含 open shadow 宿主）；有 `checkVisibility()`
+ * 的真浏览器再让它兜一层（覆盖 `content-visibility` 等布局级隐藏）。
+ *
+ * <p>为什么走祖先链而不是只看元素本身：`display` 不继承，隐藏父容器的子元素
+ * `getComputedStyle` 仍是 `block`；jsdom 也没有布局（`getClientRects` 恒空），
+ * 只用几何判据会在单测里把所有控件判成隐藏。
+ */
+export function isElementVisibleForAi(el: HTMLElement): boolean {
+  if (el.isConnected !== true) {
+    return false
+  }
+  let node: HTMLElement | null = el
+  while (node) {
+    if (node.hasAttribute('hidden') || node.hasAttribute('inert')) {
+      return false
+    }
+    if (node.getAttribute('aria-hidden') === 'true') {
+      return false
+    }
+    const inline = node.style
+    if (inline && (inline.display === 'none' || inline.visibility === 'hidden' || inline.visibility === 'collapse')) {
+      return false
+    }
+    const view = node.ownerDocument?.defaultView
+    if (view && typeof view.getComputedStyle === 'function') {
+      try {
+        const computed = view.getComputedStyle(node)
+        if (computed.display === 'none' || computed.visibility === 'hidden' || computed.visibility === 'collapse') {
+          return false
+        }
+      } catch {
+        // 拿不到计算样式（脱离文档/被裁剪）：按"可见"处理，不因环境缺陷拒执
+      }
+    }
+    node = parentAcrossShadow(node)
+  }
+  const check = (el as unknown as { checkVisibility?: () => boolean }).checkVisibility
+  if (typeof check === 'function') {
+    try {
+      if (check.call(el) === false) {
+        return false
+      }
+    } catch {
+      // 同上
+    }
+  }
+  return true
+}
+
 /** `fill=allow` 的输入框才回显值，且 ≤24 字符。 */
 function valueEchoOf(el: HTMLElement): string | null {
   if (!fillAllowed(el)) {
@@ -529,7 +629,8 @@ export function aiSnapshot(args: Record<string, unknown> = {}): UiToolOutcome {
   }
   const { regions: regionFilter, kinds, limit, text } = parsed.value
   const epoch = currentAiEpoch()
-  const cacheKey = `${epoch}|${JSON.stringify([regionFilter, kinds, limit, text])}`
+  // 缓存键含写入版本（FE-33 层①）：写动作后（或换轮后）同参重拍必须重新遍历 DOM
+  const cacheKey = `${epoch}|${domVersion}|${JSON.stringify([regionFilter, kinds, limit, text])}`
   if (snapshotCache && snapshotCache.key === cacheKey) {
     return ok(snapshotCache.text)
   }
@@ -564,6 +665,11 @@ export function aiSnapshot(args: Record<string, unknown> = {}): UiToolOutcome {
       }
       const role = roleOf(el)
       if (!role || !kinds.includes(role)) {
+        continue
+      }
+      // FE-32：隐藏步骤/折叠面板里的控件不进快照 —— 模型看得见才会去点，而"看见"的定义
+      // 必须是"在用户眼前"，不是"在 DOM 里"。ref 仍在已见集里（拒绝归因走可见性围栏）。
+      if (!isElementVisibleForAi(el)) {
         continue
       }
       total += 1
@@ -935,9 +1041,30 @@ function disabledTargetOutcome(verb: AiVerb, ref: string): UiToolOutcome {
 }
 
 /**
+ * 写动词命中**当前不可见**控件的回执（FE-32 收口）。
+ *
+ * <p>为什么不"点了再说"：`display:none` 的控件在浏览器里点/填都不产生任何界面变化
+ * （`el.click()` 对隐藏元素照样派发事件，但用户既看不到也没法感知），回 `ok` + "界面已同步"
+ * 就是谎报。归因给 `UI_TARGET_HIDDEN`，下一步是"切到那个步骤/展开面板"而不是"再点一次"。
+ */
+function hiddenTargetOutcome(verb: AiVerb, ref: string): UiToolOutcome {
+  return fail(
+    formatUiReceipt({
+      tool: WRITE_VERB_TOOL_NAMES[verb] ?? '界面操作',
+      conclusion: '未执行（目标控件当前未显示）',
+      reason: '该控件在非当前步骤 / 已折叠面板 / 隐藏区域里，屏幕上没有它，写入不会产生任何可见变化',
+      next: '先切到该控件所在的步骤或展开面板，再 ui_snapshot 取当前可见控件；不要把隐藏步骤的写入当成已生效'
+    }) + ` ref=${ref}`,
+    'degraded',
+    'UI_TARGET_HIDDEN',
+    'rejected'
+  )
+}
+
+/**
  * 闸序（设计稿 §4.2 / A-15 锁）：停止 → 快照闸 → 区域闸 → 上下文闸 → 元素闸（epoch / detached /
- * deny / verbs / **disabled**）。禁用闸排在最后：前三档归因更根本，禁用只对已经「看得见、够得着、
- * 动词也允许」的写动作追加一层事实校验（挂账 L-65）。
+ * deny / verbs / **disabled** / **hidden**）。后两档排在最后：前三档归因更根本，它们只对已经
+ * 「看得见、够得着、动词也允许」的写动作追加事实校验（挂账 L-65 与 FE-32）。
  */
 function checkFences(args: Record<string, unknown>, verb: AiVerb): FenceResult | FenceFailure {
   // ① 停止：必须先于快照闸 —— 否则停止后到达的写动词会被误报成「未快照」（错误归因）。
@@ -1013,6 +1140,12 @@ function checkFences(args: Record<string, unknown>, verb: AiVerb): FenceResult |
   // 只拦写动词：scroll / highlight 不改任何状态，禁用元素也照样能描边、能滚到（拦了是能力倒退）。
   if (WRITE_VERBS.has(verb) && isDisabledTarget(hit.el)) {
     return { ok: false, outcome: disabledTargetOutcome(verb, ref) }
+  }
+  // ⑦ 可见性闸（FE-32）：写动词只对**用户眼前**的控件生效。隐藏步骤（`v-show`）/
+  // 折叠面板 / `aria-hidden` 区域里的控件一律拒执 —— 否则回执说"界面已同步"而屏幕没变。
+  // 与禁用闸同口径：scroll / highlight 不拦（描边到隐藏元素不影响任何状态）。
+  if (WRITE_VERBS.has(verb) && !isElementVisibleForAi(hit.el)) {
+    return { ok: false, outcome: hiddenTargetOutcome(verb, ref) }
   }
   return { ok: true, hit, label: labelTextOf(hit.el), risk: riskOfElement(hit.el, hit.region) }
 }
@@ -1275,6 +1408,8 @@ export async function aiClick(args: Record<string, unknown> = {}): Promise<UiToo
     }
   }
   const version = touchWorkspace(`AI 点击：${label}（ref=${ref}，epoch=${epoch}）`)
+  // FE-33 层①：真的点完了 ⇒ 界面可能已变，同参重拍不得再拿动作前缓存
+  markUiMutation()
   const base = `已点击「${label}」（ref=${ref}，verb=click，risk=${risk}，epoch=${epoch}）。`
     + `界面已同步（数据版本 #${version}）。`
   const settlePart = settled === null ? '' : settleNote(settled)
@@ -1382,6 +1517,7 @@ export async function aiFill(args: Record<string, unknown> = {}): Promise<UiTool
   highlightElement(hit.el, label)
   undoEntry = { kind: 'fill', ref, label, previous }
   rememberWrite(ref, value, epoch)
+  markUiMutation()
   const version = touchWorkspace(`AI 填写：${label}（ref=${ref}，epoch=${epoch}）`)
   return ok(`已填写「${label}」= ${truncate(value, UI_SNAPSHOT_VALUE_MAX_CHARS)}（ref=${ref}，数据版本 #${version}）。`
     + `原值「${truncate(previous, UI_SNAPSHOT_VALUE_MAX_CHARS)}」已记录，可撤销。`)
@@ -1483,6 +1619,7 @@ export async function aiSelect(args: Record<string, unknown> = {}): Promise<UiTo
   highlightElement(hit.el, label)
   undoEntry = { kind: 'select', ref, label, previous }
   rememberWrite(ref, option, epoch)
+  markUiMutation()
   const version = touchWorkspace(`AI 选择：${label}=${option}（ref=${ref}，epoch=${epoch}）`)
   return ok(`已选择「${label}」= ${option}（ref=${ref}，数据版本 #${version}）。`
     + `原选择「${previous || '（空）'}」已记录，可撤销。`)
@@ -1599,6 +1736,7 @@ export function applyUiUndo(entry: UiUndoEntry): UiToolOutcome {
   if (entry.kind === 'retoggle') {
     hit.el.click()
     touchWorkspace(`已撤销：${entry.label}`)
+    markUiMutation()
     return ok(`已撤销「${entry.label}」（ref=${entry.ref}），界面回到点击前的状态。`)
   }
   if (entry.kind === 'fill') {
@@ -1612,6 +1750,7 @@ export function applyUiUndo(entry: UiUndoEntry): UiToolOutcome {
     }
     touchWorkspace(`已撤销：填写「${entry.label}」`)
     writePreconditions.delete(entry.ref)
+    markUiMutation()
     return ok(`已撤销「${entry.label}」，值已回到「${truncate(entry.previous, UI_SNAPSHOT_VALUE_MAX_CHARS) || '（空）'}」。`)
   }
     const setter = hit.region.setters?.[entry.ref]
@@ -1620,6 +1759,7 @@ export function applyUiUndo(entry: UiUndoEntry): UiToolOutcome {
       void applied
       touchWorkspace(`已撤销：选择「${entry.label}」`)
       writePreconditions.delete(entry.ref)
+      markUiMutation()
       return ok(`已撤销「${entry.label}」，选项已回到「${entry.previous || '（空）'}」。`)
     }
   return fail(`撤销未生效：「${entry.label}」没有可用于回退的 setter，请提示用户手动改回。`)

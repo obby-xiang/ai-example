@@ -29,6 +29,16 @@ import java.util.Optional;
  * （{@code model_id=env AI_MODEL}、{@code is_default=true}）。
  * <b>env key 不落库</b>：运维手里的 env 不进 DB（泄露面最小），运行时按 {@code key_ref=ENV} 现读。
  *
+ * <h2>写种子 = 写数据行 + 推进配置版本（与人工保存同一口径）</h2>
+ * 数据行与 {@code ai_setting['config.version']}+1 在<b>同一事务</b>里提交，提交之后才发布跨实例
+ * 失效信号（{@code INCR ai:cfg:ver}）并重载本实例快照（{@link AiConfigVersionPublisher}）。
+ *
+ * <p>
+ * 这不是可选步骤：读侧（{@link AiConfigService#current()}）只按版本比对决定要不要重载，种子若不推进
+ * 版本，<b>其它实例</b>的 provider 列表就永远是空的（对外表现为 env 合成行），续跑的精确绑定判据随即
+ * 误判 {@code PROVIDER_GONE} —— run 40182796512 的三实例失败正是这一条。
+ * 只有<b>真的写了数据</b>才推进版本（no-op / 并发冲突里输掉的那一方不制造版本抖动）。
+ *
  * <h2>strict seed</h2>
  * 表非空 ⇒ env <b>完全不参与</b>（不覆盖、不追加、不做 env 兜底）；需要重灌时显式
  * {@code app.ai.config.seed-force=true}，且只刷新 {@code source=ENV_SEED} 的行。
@@ -51,13 +61,18 @@ public class AiConfigSeeder implements ApplicationRunner {
 
     private final TransactionTemplate transactionTemplate;
 
+    /** 版本发布（写路径与种子共用的唯一实现）：种子写了数据就必须让别的实例看得见。 */
+    private final AiConfigVersionPublisher versions;
+
     public AiConfigSeeder(AiProviderRepository providerRepository, AiProviderModelRepository modelRepository,
-            AiConfigService configService, AiProperties properties, PlatformTransactionManager transactionManager) {
+            AiConfigService configService, AiProperties properties, PlatformTransactionManager transactionManager,
+            AiConfigVersionPublisher versions) {
         this.providerRepository = providerRepository;
         this.modelRepository = modelRepository;
         this.configService = configService;
         this.properties = properties;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
+        this.versions = versions;
     }
 
     @Override
@@ -95,20 +110,44 @@ public class AiConfigSeeder implements ApplicationRunner {
             return false;
         }
         try {
-            this.transactionTemplate.executeWithoutResult(status -> writeSeed(force));
-            this.configService.reload();
+            boolean[] wrote = new boolean[1];
+            this.transactionTemplate.executeWithoutResult(status -> wrote[0] = writeSeed(force));
+            if (!wrote[0]) {
+                // 没写数据就不发版本：no-op 种子（表非空 / seed-force 只撞到用户改过的行）不得让版本抖动，
+                // 否则每个实例都会为一次"什么都没改"白重载一次全表。
+                return false;
+            }
+            // 数据行与 config.version 已在同一事务里落库；提交之后才发布跨实例信号 + 本实例重载
+            // （与写路径 AiConfigWriter 同一口径：种子/人工保存必须让别的实例看得见）。
+            this.versions.publishAfterCommit();
             log.info("AI 配置种子已写入：provider={} key_ref=ENV（env key 不落库）", AiConfigService.ENV_PROVIDER_CODE);
             return true;
         }
         catch (DataIntegrityViolationException | org.hibernate.exception.ConstraintViolationException ex) {
-            // 唯一约束兜底：另一实例在同一瞬间种好了。重载快照让对方写的那行生效。
+            // 唯一约束兜底：另一实例在同一瞬间种好了。重载快照让对方写的那行生效
+            // （对方的版本发布（DB +1 / INCR ai:cfg:ver）在它提交之后才发生，本实例的 1s 版本比对会补上）。
             log.info("AI 配置种子并发冲突（另一实例已写入，本次不写）：{}", ex.getClass().getSimpleName());
             this.configService.reload();
             return false;
         }
     }
 
-    private void writeSeed(boolean force) {
+    /**
+     * 写种子行（与 {@code config.version}+1 同一事务）。
+     *
+     * <h2>并发交错下也必须"恰好一次"</h2>
+     * {@link #seed()} 的 {@code count()==0} 判据在事务<b>外</b>：实例 C 可能读到 0，随后实例 A 完整种好并提交，
+     * 然后 C 才进事务并<b>看得见</b> A 写的行（READ_COMMITTED）。旧实现这时会把这行原样"重灌"一遍并再
+     * bump 一次版本 ⇒ 同一份种子数据、同一次冷启动，版本与失效信号各推进两次（三个实例白 reload 一轮）。
+     *
+     * <p>现在的口径：行已存在且<b>本次不是 seed-force</b> ⇒ 先判"这一版种子是否已经完整落地"
+     * （provider 的四个 env 派生字段 + 目标模型行 enabled/is_default + 没有第二个默认行）。
+     * 完全一致 = 真 no-op：不写、不 bump、不 INCR；只要有一项不一致（env 变了 / 模型行缺失或停用 /
+     * 存在第二个默认行）就照常修好并 bump <b>一次</b>。
+     *
+     * @return true = 本次真的写了数据行（调用方据此决定要不要发布版本）
+     */
+    private boolean writeSeed(boolean force) {
         Optional<AiProvider> existing = this.providerRepository.findByCode(AiConfigService.ENV_PROVIDER_CODE);
         AiProvider provider;
         if (existing.isPresent()) {
@@ -117,14 +156,21 @@ public class AiConfigSeeder implements ApplicationRunner {
                 // 用户在 UI 改过这一行 ⇒ 不碰（seed-force 也只重灌"来源=ENV_SEED"的行）
                 log.info("AI 配置种子跳过重灌：provider={} 的来源是 {}（非 ENV_SEED）",
                         provider.getCode(), provider.getSource());
-                return;
+                return false;
+            }
+            if (!force && seedAlreadyLanded(provider)) {
+                // 并发交错："count 检查之后别人才种好"。值完全一致 ⇒ 真 no-op，不制造版本抖动。
+                log.debug("AI 配置种子跳过：provider={} 与 env 一致且模型行齐备（另一实例已种好）",
+                        provider.getCode());
+                return false;
             }
             provider.setDisplayName(AiConfigService.ENV_PROVIDER_DISPLAY_NAME);
             provider.setBaseUrl(this.configService.resolveEnvBaseUrl());
             provider.setCompletionsPath(this.configService.resolveEnvCompletionsPath());
             provider.setKeyLast4(AiKeyCipher.last4(this.configService.envApiKey()));
             provider = this.providerRepository.saveAndFlush(provider);
-            log.info("AI 配置种子按 seed-force 重灌 provider={}", provider.getCode());
+            log.info("AI 配置种子重灌 provider={}（force={}：env 与库不一致时才需要这一步）",
+                    provider.getCode(), force);
         }
         else {
             provider = this.providerRepository.saveAndFlush(this.configService.envSeedProvider());
@@ -148,5 +194,40 @@ public class AiConfigSeeder implements ApplicationRunner {
                 this.modelRepository.save(other);
             }
         }
+        // 版本 +1 必须在<b>本事务内</b>：改了数据却没动版本，别的实例的快照永远看不到这行。
+        this.versions.bumpInTransaction();
+        return true;
+    }
+
+    /**
+     * 这一版种子是否<b>已经完整落地</b>（no-op 判据）：只比"种子会写的那些字段"，不看用户可改的其它列。
+     *
+     * <p>
+     * 用"将要写的值 vs 行里的值"比较，而不是"行存在 ⇒ 跳过"：模型行可以因为半途失败/人工删除而缺失，
+     * 那种情况必须补齐（否则实例永远拿不到可用模型）。
+     */
+    private boolean seedAlreadyLanded(AiProvider provider) {
+        if (!java.util.Objects.equals(provider.getDisplayName(), AiConfigService.ENV_PROVIDER_DISPLAY_NAME)
+                || !java.util.Objects.equals(provider.getBaseUrl(), this.configService.resolveEnvBaseUrl())
+                || !java.util.Objects.equals(provider.getCompletionsPath(),
+                        this.configService.resolveEnvCompletionsPath())
+                || !java.util.Objects.equals(provider.getKeyLast4(),
+                        AiKeyCipher.last4(this.configService.envApiKey()))) {
+            return false;
+        }
+        Long providerId = provider.getId();
+        String modelId = this.configService.resolveEnvModelId();
+        AiProviderModel model = this.modelRepository.findByProviderIdAndModelId(providerId, modelId).orElse(null);
+        if (model == null || !model.isEnabled() || !model.isDefault()) {
+            // 目标模型行缺失/停用/非默认 ⇒ 数据不齐，仍要补（并 bump）
+            return false;
+        }
+        for (AiProviderModel other : this.modelRepository.findByProviderId(providerId)) {
+            if (other.isDefault() && !other.getId().equals(model.getId())) {
+                // 还有第二个默认行 ⇒ 仍需清理
+                return false;
+            }
+        }
+        return true;
     }
 }

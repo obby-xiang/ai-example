@@ -215,12 +215,14 @@ class AiConfigWriterTest {
 				"probe-key-1234abcd"));
 		String cipher = created.getKeyCipher();
 
+		// 留空 = 不改 key：同 origin 的编辑（显示名/路径/开关）一律保留密文。
+		// （换 origin 的情形由 providerProbeCannotSendRetainedKeyToChangedHost 单独锁：那里要求重录 key。）
 		AiProvider updated = writer.updateProvider(created.getId(),
-				new AiConfigWriter.ProviderCommand(null, "新名字", null, "https://gw.example.com", null, null, null,
-						null, Boolean.FALSE, null));
+				new AiConfigWriter.ProviderCommand(null, "新名字", null, "https://api.deepseek.com/v1", null, null,
+						null, null, Boolean.FALSE, null));
 
 		assertThat(updated.getDisplayName()).isEqualTo("新名字");
-		assertThat(updated.getBaseUrl()).isEqualTo("https://gw.example.com");
+		assertThat(updated.getBaseUrl()).isEqualTo("https://api.deepseek.com/v1");
 		assertThat(updated.getKeyCipher()).isEqualTo(cipher);
 		assertThat(updated.getKeyRef()).isEqualTo(AiProvider.KEY_REF_DB);
 		assertThat(updated.isEnabled()).isFalse();
@@ -235,6 +237,92 @@ class AiConfigWriterTest {
 		AiProvider updated = writer.updateProvider(created.getId(),
 				new AiConfigWriter.ProviderCommand(null, null, null, null, null, null, "   ", null, null, null));
 		assertThat(updated.getKeyCipher()).isEqualTo(created.getKeyCipher());
+	}
+
+	// ── 复核 ID-03：供应商 key 的主机边界（探测不得把旧 key 发往新主机） ──────────
+
+	/**
+	 * 改 host 却保留旧 key ⇒ 必须整体拒绝。
+	 *
+	 * <p>
+	 * {@code /test} 与 {@code /models/fetch} 读的就是库里的 {@code (baseUrl, key)} 对：允许这条更新，
+	 * 等于把库里的 key 交给攻击者的主机（改 URL + 点「测试连接」两步即外带）。因此边界放在<b>配对产生处</b>：
+	 * 换主机必须重新录入 key（或先清空），旧 key 永远只会发往它被录入时的那台主机。
+	 */
+	@Test
+	void providerProbeCannotSendRetainedKeyToChangedHost() {
+		AiConfigWriter writer = writer(AiConfigTestFixture.KEK_A);
+		AiProvider created = writer.createProvider(provider("custom-1", "https://api.deepseek.com",
+				"probe-key-1234abcd"));
+		String cipher = created.getKeyCipher();
+
+		assertThatThrownBy(() -> writer.updateProvider(created.getId(),
+				new AiConfigWriter.ProviderCommand(null, "改名", null, "https://attacker.example.net", null, null,
+						null, null, null, null)))
+			.as("改 host 又保留旧 key = 把旧 key 交给新主机")
+			.isInstanceOf(AiConfigException.class)
+			.extracting(ex -> ((AiConfigException) ex).getCode())
+			.as("专用码：前端据此给'重新录入 key'的文案（不是通用的 INVALID_PARAM）")
+			.isEqualTo(AiConfigWriter.CODE_KEY_BOUND_TO_HOST);
+
+		AiProvider after = this.fixture.providers.get(0);
+		assertThat(after.getBaseUrl()).as("整体拒绝：库里的 baseUrl 仍是原主机（探活只能打它）")
+			.isEqualTo("https://api.deepseek.com");
+		assertThat(after.getKeyCipher()).as("key 原样保留（不是被清空、也没被重封）").isEqualTo(cipher);
+		assertThat(after.getDisplayName()).as("不得半行写入").isEqualTo("端点 custom-1");
+		assertThat(this.fixture.version()).as("拒绝即无版本变更").isEqualTo(2);
+	}
+
+	/** 同一主机上的编辑（显示名/路径/开关）照旧保留旧 key —— 边界只针对"换主机"。 */
+	@Test
+	void sameHostEditsKeepTheRetainedKey() {
+		AiConfigWriter writer = writer(AiConfigTestFixture.KEK_A);
+		AiProvider created = writer.createProvider(provider("custom-1", "https://api.deepseek.com",
+				"probe-key-1234abcd"));
+
+		AiProvider updated = writer.updateProvider(created.getId(),
+				new AiConfigWriter.ProviderCommand(null, "新名字", null, "https://api.deepseek.com/openai", null,
+						null, null, null, null, null));
+
+		assertThat(updated.getBaseUrl()).isEqualTo("https://api.deepseek.com/openai");
+		assertThat(updated.getKeyCipher()).as("同主机 ⇒ 留空仍等于不改").isEqualTo(created.getKeyCipher());
+		assertThat(updated.getDisplayName()).isEqualTo("新名字");
+	}
+
+	/** 换主机 + 重新录入 key ⇒ 允许（新 key 与新主机是同一个配对）。 */
+	@Test
+	void hostChangeWithAFreshKeyIsAllowed() {
+		AiConfigWriter writer = writer(AiConfigTestFixture.KEK_A);
+		AiProvider created = writer.createProvider(provider("custom-1", "https://api.deepseek.com",
+				"probe-key-1234abcd"));
+
+		AiProvider updated = writer.updateProvider(created.getId(),
+				new AiConfigWriter.ProviderCommand(null, null, null, "https://gw.example.com", null, null,
+						"rotated-key-5678efgh", null, null, null));
+
+		assertThat(updated.getBaseUrl()).isEqualTo("https://gw.example.com");
+		assertThat(updated.getKeyCipher()).as("换主机必须重新封一把 key").isNotEqualTo(created.getKeyCipher());
+		assertThat(updated.getKeyLast4()).isEqualTo("efgh");
+		assertThat(updated.getKeyRef()).isEqualTo(AiProvider.KEY_REF_DB);
+	}
+
+	/**
+	 * 私网规则是<b>另一条独立判据</b>（本批不动它）：改成私网地址时先被 URL 闸拦下，
+	 * 报的是 {@code BLOCKED_PRIVATE_ENDPOINT}，与"换主机要重录 key"的 {@code INVALID_PARAM} 可区分。
+	 */
+	@Test
+	void privateHostChangeIsStillBlockedByTheEndpointGuard() {
+		AiConfigWriter writer = writer(AiConfigTestFixture.KEK_A);
+		AiProvider created = writer.createProvider(provider("custom-1", "https://api.deepseek.com",
+				"probe-key-1234abcd"));
+
+		assertThatThrownBy(() -> writer.updateProvider(created.getId(),
+				new AiConfigWriter.ProviderCommand(null, null, null, "http://127.0.0.1:9999", null, null, null,
+						null, null, null)))
+			.as("私网闸先于主机边界生效（两条判据不互相掩盖）")
+			.isInstanceOf(AiConfigException.class)
+			.extracting(ex -> ((AiConfigException) ex).getCode())
+			.isEqualTo(AiEndpointGuard.CODE_BLOCKED_PRIVATE_ENDPOINT);
 	}
 
 	@Test
@@ -506,9 +594,11 @@ class AiConfigWriterTest {
 		assertThat(seeded.getKeyLast4()).isEqualTo("1111");
 		assertThat(seeded.getBaseUrl()).isEqualTo("http://env-endpoint:1234");
 
+		// 用户编辑（同 origin：只改路径）—— 换 origin 的情形需要重录 key（见主机边界用例），
+		// 与本用例要锁的"source 翻转"无关，故这里保持同主机。
 		AiProvider updated = writer(AiConfigTestFixture.KEK_A)
 			.updateProvider(seeded.getId(),
-					new AiConfigWriter.ProviderCommand(null, null, null, "https://user-edited.example.com", null,
+					new AiConfigWriter.ProviderCommand(null, null, null, "http://env-endpoint:1234/v1", null,
 							null, null, null, null, null));
 		assertThat(updated.getSource()).as("用户一改即脱离种子").isEqualTo(AiProvider.SOURCE_DB);
 
@@ -520,7 +610,7 @@ class AiConfigWriterTest {
 
 		AiProvider afterForce = this.fixture.providers.get(0);
 		assertThat(afterForce.getBaseUrl()).as("seed-force 不覆盖用户改过的行")
-			.isEqualTo("https://user-edited.example.com");
+			.isEqualTo("http://env-endpoint:1234/v1");
 		assertThat(afterForce.getKeyLast4()).as("key_last4 的 seed-force 赋值同属 ENV_SEED 分支 ⇒ 一并跳过")
 			.isEqualTo("1111");
 		assertThat(afterForce.getSource()).isEqualTo(AiProvider.SOURCE_DB);
@@ -528,7 +618,8 @@ class AiConfigWriterTest {
 
 	private AiConfigSeeder seeder(AiConfigService service) {
 		return new AiConfigSeeder(this.fixture.providerRepository, this.fixture.modelRepository, service,
-				this.fixture.properties, this.transactionManager);
+				this.fixture.properties, this.transactionManager,
+				new AiConfigVersionPublisher(this.fixture.settingRepository, this.redis, service, null));
 	}
 
 }

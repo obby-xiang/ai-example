@@ -131,6 +131,7 @@ const ERROR_KEYS: Record<string, string> = {
   PROVIDER_GONE: 'ai.settings.errors.PROVIDER_GONE',
   PARAMS_LOCKED: 'ai.settings.errors.PARAMS_LOCKED',
   INVALID_PARAM: 'ai.settings.errors.INVALID_PARAM',
+  KEY_BOUND_TO_HOST: 'ai.settings.errors.KEY_BOUND_TO_HOST',
   INVALID_MODEL: 'ai.settings.errors.INVALID_MODEL',
   NETWORK_ERROR: 'ai.settings.errors.NETWORK_ERROR',
   UNKNOWN_ERROR: 'ai.settings.errors.UNKNOWN_ERROR'

@@ -10,6 +10,7 @@ import com.example.configmgr.ai.context.ContextEstimator;
 import com.example.configmgr.ai.context.ContextMeter;
 import com.example.configmgr.ai.context.ContextState;
 import com.example.configmgr.ai.context.MemoryWindow;
+import com.example.configmgr.ai.gate.ConfirmGate;
 import com.example.configmgr.ai.history.AiChatHistoryRecorder;
 import com.example.configmgr.ai.kb.KbPromptSection;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
@@ -297,6 +298,33 @@ public class ResilientChatService {
 	 */
 	@Autowired(required = false)
 	private MessageSource messageSource;
+
+	/**
+	 * 取消收尾的 <b>park 结算面</b>（观测面，不是判定面）。
+	 *
+	 * <p><b>为什么本类需要它</b>：park 开启时"等人"不占线程，{@code POST /api/ai/cancel} 经
+	 * {@link #cancelParked} 走到 {@link #cancelTerminal} —— 那是这些卡<b>唯一的终局</b>。
+	 * 批循环早已在 park 处穿出（{@code RunParkedException}），那条 {@code tool_call_end} 再没有
+	 * 别的发点，用户取消因此在日志里与"进程死在 start 与 end 之间"不可区分。
+	 *
+	 * <p><b>为什么只拿一个入口、不自己发</b>：结算行的载荷与跨实例仲裁只有一份
+	 * （{@code gate/ToolCallEndTrace} + {@code ai:observed}），本类复刻一遍就是"同一调用两种行"的
+	 * 第二来源。本类只决定<b>时机</b>；"结算哪几条"由
+	 * {@link ConfirmGate#settleCancelledToolCalls} 判定（只 park-on、只 CANCELLED 的
+	 * CONFIRM/FRONTEND，重复由观测位仲裁）。
+	 *
+	 * <p><b>为什么字段注入（可选 setter）</b>：本类构造器被多份 conformance/run 用例直接 {@code new}
+	 * （改签名等于要求它们跟改），轻装配面本来也没有闸门。缺席时取消面与引入之前逐字同形：只是少
+	 * 一条结算行，判定/帧/记忆一个都不变。方向也不成环：闸门不引用本类（续跑经
+	 * {@code ObjectProvider<ResumeService>} 惰性解环）。
+	 */
+	private ConfirmGate parkSettlement;
+
+	/** 可选注入（观测面，不是判定面；缺失不影响任何取消语义）。 */
+	@Autowired(required = false)
+	public void setParkSettlement(ConfirmGate gate) {
+		this.parkSettlement = gate;
+	}
 
 	/**
 	 * <b>L-91 / L-98</b>：思考文本在 {@code AssistantMessage} metadata 里的键名。
@@ -999,11 +1027,16 @@ public class ResilientChatService {
 			snapshot.setAttempts(attempts);
 			// 完整历史：最终 assistant 与实时流使用同一份正文（text），先落历史再存快照；
 			// 崩溃在两者之间时，重启 resume 会按同一 messageId 幂等命中。
-			if (this.historyRecorder != null) {
-				this.historyRecorder.recordFinalAssistant(sessionId, runId, finalAssistant);
+			// RT-20：DB 历史是 first-write-wins 且没有 fencing —— 旧驱动先落库就会把答案钉死成
+			// 作废的那一份。因此（与快照写共享同一个续跑权判定，且在<b>写之前</b>问一次）：
+			// 丢租/不可确认/fence 已被接管时，历史与记忆一律不写。
+			if (persistAllowed(runId, "终态 DB 历史/快照/记忆")) {
+				if (this.historyRecorder != null) {
+					this.historyRecorder.recordFinalAssistant(sessionId, runId, finalAssistant);
+				}
+				this.store.save(snapshot);
+				convergeMemory(runId, sessionId, history);
 			}
-			this.store.save(snapshot);
-			convergeMemory(runId, sessionId, history);
 			log.debug("AI 轮次结束 runId={} sessionId={} 历史条数={} 尝试次数={} 终帧=done 末帧序列=[{}]", runId, sessionId,
 					history.size(), attempts, accumulator.tailSummary());
 		}
@@ -1175,9 +1208,14 @@ public class ResilientChatService {
 		if (!StringUtils.hasText(partial) && calls.isEmpty()) {
 			return out;
 		}
+		Map<String, Object> metadata = new LinkedHashMap<>();
+		if (snapshot.getAssistantMetadata() != null) {
+			metadata.putAll(snapshot.getAssistantMetadata());
+		}
+		metadata.putAll(stoppedMetadata(reasoning));
 		AssistantMessage.Builder builder = AssistantMessage.builder()
 			.content(partial)
-			.properties(stoppedMetadata(reasoning));
+			.properties(metadata);
 		if (!calls.isEmpty()) {
 			builder.toolCalls(calls);
 		}
@@ -1238,6 +1276,22 @@ public class ResilientChatService {
 	}
 
 	/**
+	 * park 后没有驱动线程，取消仍走同一终局；只重建计量锚点，不调用模型。
+	 */
+	public void cancelParked(String runId) {
+		RunSnapshot snapshot = this.store.get(runId);
+		if (snapshot == null) {
+			return;
+		}
+		String sessionId = snapshot.getSessionId();
+		List<Message> history = this.codec.deserializeAll(snapshot.getMessageJson());
+		TurnContext turn = resumedTurn(runId, AiContext.fromMap(snapshot.getContext()), history, snapshot.getModelId(),
+				snapshot.getProviderId() == null ? null : String.valueOf(snapshot.getProviderId()),
+				System.currentTimeMillis(), snapshot);
+		cancelTerminal(runId, sessionId, null, snapshot.getAttempts(), null, this.registry.of(runId), turn);
+	}
+
+	/**
 	 * 取消终局：快照转 CANCELLED，未决条目落 CANCELLED **并补裁决帧**（S5），
 	 * 半截正文**写进记忆并带 {@code stopped} 标记**（S4），终帧 {@code done{cancelled:true}}。
 	 *
@@ -1249,7 +1303,9 @@ public class ResilientChatService {
 	private void cancelTerminal(String runId, String sessionId, Accumulator accumulator, int attempts,
 			StreamWatchdog watchdog, SseChatEmitter out, TurnContext turn) {
 		RunSnapshot snapshot = this.store.get(runId);
-		String partial = accumulator == null ? "" : accumulator.text();
+		String partial = accumulator != null ? accumulator.text()
+				: snapshot == null ? "" : snapshot.getAssistantContent();
+		int partialChars = partial == null ? 0 : partial.length();
 		// L-75：**先**把未决条目收敛成 CANCELLED，再写记忆 —— 否则记忆里的段级状态可能是
 		// 「条目仍 PENDING + 轮次已 CANCELLED」的混合态：状态会经快照终态兜底成 cancelled，
 		// 但 `decision` 取自**条目态**（只认 CANCELLED）⇒ 刷新后卡面读成「已超时」而不是「已取消」。
@@ -1273,29 +1329,36 @@ public class ResilientChatService {
 			snapshot.setAttempts(attempts);
 			snapshot.setError("AI_RUN_CANCELLED：本轮由用户取消（上游连接已断开，工具未再继续）");
 			// 完整历史：取消半截 + 配对 tool 响应按原落定点写入；stopped 由消息 metadata 决定。
-			if (this.historyRecorder != null) {
-				this.historyRecorder.recordStopped(sessionId, runId, stoppedMessages);
+			// RT-20：同样是 first-write-wins 的答案面 —— 旧驱动（丢租/fence 已被接管）不得写入。
+			if (persistAllowed(runId, "取消态 DB 历史/快照/记忆")) {
+				if (this.historyRecorder != null) {
+					this.historyRecorder.recordStopped(sessionId, runId, stoppedMessages);
+				}
+				this.store.save(snapshot);
+				convergeMemory(runId, sessionId, history);
 			}
-			this.store.save(snapshot);
-			convergeMemory(runId, sessionId, history);
 		}
 		emitCancelOutcomes(runId, this.store, out, pendingsBeforeCancel);
+		// park 结算（独立复审 M-2′）：取消是这些卡的终局 —— 批循环早在 park 处穿出，这条
+		// tool_call_end 再没有别的发点。放在补发裁决帧之后、终帧之前，与决策路径同序
+		// （落库 → 帧 → 结算行 → 续跑/终帧）；只 park-on 的 CANCELLED CONFIRM/FRONTEND 会被结算，
+		// 判定与幂等都在闸门侧（见 ConfirmGate#settleCancelledToolCalls），本类只决定时机。
+		settleCancelledFromPark(runId, pendingsBeforeCancel);
 		log.info("AI 轮次取消 runId={} sessionId={} 尝试次数={} 已收上游事件={} 末帧序列=[{}]", runId, sessionId, attempts,
 				watchdog == null ? 0 : watchdog.upstreamEvents(), accumulator == null ? "" : accumulator.tailSummary());
 		Map<String, Object> extra = new LinkedHashMap<>();
 		extra.put("cancelled", true);
 		extra.put("attempts", attempts);
 		extra.put("upstreamEvents", watchdog == null ? 0 : watchdog.upstreamEvents());
-		extra.put("partialChars", accumulator == null ? 0 : accumulator.text().length());
+		extra.put("partialChars", partialChars);
 		putParamsLocked(extra, turn);
 		// T5：取消也收尾正文段（半截正文不写进历史，但"这一段到此为止"必须显式告知前端）
-		out.textEnd(accumulator == null ? 0 : accumulator.text().length());
+		out.textEnd(partialChars);
 		// 上下文专项批①：取消轮同样如实报占用（半轮的真值仍是真值，est 标注照旧）
 		Map<String, Object> context = contextTelemetry(sessionId, turn, accumulator);
 		out.done(accumulator == null ? Map.of() : accumulator.usage(turn.promptEstimate()),
 				doneModel(accumulator, turn), extra, context);
-		AiTrace.event("turn_cancelled", "attempts", attempts, "partialChars",
-				accumulator == null ? 0 : accumulator.text().length(), "upstreamEvents",
+		AiTrace.event("turn_cancelled", "attempts", attempts, "partialChars", partialChars, "upstreamEvents",
 				watchdog == null ? 0 : watchdog.upstreamEvents());
 		emitTurnEnd(runId, sessionId, "cancelled", StreamViolationException.CANCELLED, attempts, accumulator, turn,
 				watchdog);
@@ -1356,6 +1419,24 @@ public class ResilientChatService {
 	}
 
 	/**
+	 * 取消收尾的 park 结算（见 {@link #parkSettlement}）：把"时机"交给本方法，"发不发/发哪几条"
+	 * 交给闸门 —— 未注入（轻装配/直接 new 的单测）时什么都不做，与非 park 的既有口径同形。
+	 *
+	 * <p>失败只 WARN：取消的条目/快照/帧/记忆都已落定，观测面不得改变取消语义。
+	 */
+	private void settleCancelledFromPark(String runId, List<PendingToolCall> cancelledBefore) {
+		if (this.parkSettlement == null) {
+			return;
+		}
+		try {
+			this.parkSettlement.settleCancelledToolCalls(runId, cancelledBefore);
+		}
+		catch (RuntimeException ex) {
+			log.warn("取消收尾的 park 结算失败（不影响取消）runId={}：{}", runId, ex.getMessage());
+		}
+	}
+
+	/**
 	 * {@code done.model} 的口径（批③ 裁决 F3）：<b>上游回显优先，回落本轮解析值</b>。
 	 *
 	 * <p>
@@ -1412,6 +1493,12 @@ public class ResilientChatService {
 	 * 不凭 pendings 凭空造（禁悬空段）。
 	 */
 	private void convergeMemory(String runId, String sessionId, List<Message> history) {
+		// RT-20：旧驱动（丢租/不可确认/续跑权已被接管）不得写回记忆，也不得把答案补进 DB 历史。
+		// 这一条与出帧/台账/认领的拦截同源 —— 否则"新主人答完、旧驱动收尾"会把旧答案写进
+		// ai_chat_message 与 chat:mem（刷新后看到作废回答），而快照写早已被 fence 拒绝。
+		if (!persistAllowed(runId, "记忆/历史收敛")) {
+			return;
+		}
 		// 完整历史：以"最后一个真实 user"为界补齐当前 run 的 assistant/tool 消息。
 		// 幂等键 (runId, messageId) ⇒ finish/cancel/empty 重复收敛、resume 重放都不会重复插入。
 		if (this.historyRecorder != null) {
@@ -1423,7 +1510,7 @@ public class ResilientChatService {
 		if (memoryPortion.isEmpty()) {
 			// 空窗 = 删除（saveAll(empty) 在 Redis 实现里等价于 deleteByConversationId）。
 			// 不再"空窗直接 return"：旧历史若在（例如只剩 system 提示的异常轮），必须被清掉。
-			persistMemory(sessionId, List.of(), "记忆收敛");
+			persistMemory(runId, sessionId, List.of(), "记忆收敛");
 			return;
 		}
 		RunSnapshot snapshot = this.store.get(runId);
@@ -1445,7 +1532,7 @@ public class ResilientChatService {
 		}
 		List<Message> windowed = trimKeepingToolPairs(withStates,
 				this.properties.getMemory().getMaxMessages());
-		persistMemory(sessionId, windowed, "记忆收敛");
+		persistMemory(runId, sessionId, windowed, "记忆收敛");
 	}
 
 	/**
@@ -1459,12 +1546,18 @@ public class ResilientChatService {
 	 * <p>未注入（直接 {@code new} 的单测）时回落旧 {@link ChatMemory} 写入口；失败不重试、只 WARN +
 	 * 计一次 {@link RedisDegradation#W1_MEMORY_WRITE} —— 记忆写不得让本轮对话失败，但"刷新后可能
 	 * 丢本轮历史"必须可观测。</p>
+	 *
+	 * <p><b>RT-20</b>：带上 runId 时先问一次续跑权（{@link #persistAllowed}）—— 丢租/不可确认/
+	 * fence 已被接管的旧驱动<b>不得</b>整窗覆写会话记忆（新主人的回答才是真值）。
 	 */
-	void persistMemory(String sessionId, List<Message> messages, String stage) {
+	void persistMemory(String runId, String sessionId, List<Message> messages, String stage) {
 		// null = "调用方没算出窗口"（异常/误传），不等于"窗口确知为空"。
 		// 后者才是删除语义（saveAll(empty)）；把 null 当空列表会静默清掉真实旧记忆。
 		if (messages == null) {
 			log.warn("{}收到 null 消息窗口（不当作空窗删除）sessionId={}", stage, sessionId);
+			return;
+		}
+		if (!persistAllowed(runId, stage)) {
 			return;
 		}
 		try {
@@ -1483,6 +1576,41 @@ public class ResilientChatService {
 			// 一次失败的写只计一次（不重试、不改写协议）；计数在唯一 catch 里 ⇒ 不会重复。
 			RedisDegradation.record(RedisDegradation.W1_MEMORY_WRITE, ex);
 			log.warn("{}失败 sessionId={}：{}", stage, sessionId, ex.getMessage());
+		}
+	}
+
+	/**
+	 * 兼容口（无 runId）：装配层/单测直接调用时的旧签名，<b>不做续跑权判定</b>
+	 * （没有 runId 就无从判定，猜一个 runId 去判是更糟的错）。
+	 */
+	void persistMemory(String sessionId, List<Message> messages, String stage) {
+		persistMemory(null, sessionId, messages, stage);
+	}
+
+	/**
+	 * <b>RT-20：持久面（DB 历史 / 记忆）的续跑权闸</b>。
+	 *
+	 * <p>丢租（LOST）、不可确认（UNAVAILABLE）、以及 {@code HELD-but-fence-ahead}（续跑权已被
+	 * 新主人接管）都<b>不得</b>再写"答案面"数据：这些写没有 fencing 保护（DB 历史是
+	 * first-write-wins、记忆是整窗覆盖），一旦落库就是"旧答案盖新答案"，且刷新后用户看到的是
+	 * 作废的那一份。判定本身读不出来 ⇒ 按不可知处理（不写）。
+	 *
+	 * @param runId 本轮 id；{@code null}/{@code blank} = 调用方没有 run 语义（兼容口），放行
+	 */
+	private boolean persistAllowed(String runId, String stage) {
+		if (runId == null || runId.isBlank() || this.store == null) {
+			return true;
+		}
+		try {
+			// 与帧/台账/序号共用同一道写门（RunStore#permittedToWrite）：它同时回答
+			// ① 租约视图是否仍属于本实例（LOST/UNAVAILABLE ⇒ 否）与
+			// ② fence 是否已被推进到本实例 epoch 之上（HELD-but-fence-ahead ⇒ 否）。
+			return this.store.permittedToWrite(runId, stage);
+		}
+		catch (RuntimeException ex) {
+			log.warn("续跑权判定不可读：跳过{} runId={}（不写历史/记忆，避免旧驱动覆盖新答案）：{}", stage, runId,
+					ex.getMessage());
+			return false;
 		}
 	}
 
@@ -1970,7 +2098,7 @@ public class ResilientChatService {
 		MemoryWindow.emit(runId, sessionId, window, windowBudget);
 		List<Message> windowed = window.messages();
 		if (this.contextCompactor == null) {
-			writeBackMemory(sessionId, windowed, window.changed(), "记忆窗口");
+			writeBackMemory(runId, sessionId, windowed, window.changed(), "记忆窗口");
 			return new Compaction(windowed, 0, null);
 		}
 		// ── ② 上下文压缩：按模型上限占比兜底（窗口之后的历史才是它的输入） ──
@@ -1980,7 +2108,7 @@ public class ResilientChatService {
 				state.completionTokens(), inputTokens, toolResultsSinceMeasure, systemTokens, toolsTokens,
 				protectedIds, runtime));
 		List<Message> finalMessages = outcome.changed() ? outcome.messages() : windowed;
-		writeBackMemory(sessionId, finalMessages, window.changed() || outcome.changed(), "记忆窗口/压缩");
+		writeBackMemory(runId, sessionId, finalMessages, window.changed() || outcome.changed(), "记忆窗口/压缩");
 		return new Compaction(finalMessages, limit, outcome);
 	}
 
@@ -2017,11 +2145,12 @@ public class ResilientChatService {
 	 * 不留"快照已裁、记忆未裁"组合。写失败只 WARN：观测面/存储抖动不得让本轮对话直接失败
 	 * （这一轮仍按裁剪后的列表发请求，快照也写这一份 —— 三者的一致性由返回值保证）。
 	 */
-	private void writeBackMemory(String sessionId, List<Message> messages, boolean changed, String stage) {
+	private void writeBackMemory(String runId, String sessionId, List<Message> messages, boolean changed,
+			String stage) {
 		if (!changed || messages == null) {
 			return;
 		}
-		persistMemory(sessionId, messages, stage + "后记忆写回");
+		persistMemory(runId, sessionId, messages, stage + "后记忆写回");
 	}
 
 	/**

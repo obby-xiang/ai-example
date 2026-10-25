@@ -21,7 +21,8 @@ import java.util.concurrent.atomic.AtomicLong;
  * <li><b>零组件日志面</b>（{@code docs/决策看板.md:42}）：不引 OTel / Micrometer，计数用
  * {@link AtomicLong} 手写快照（与 {@code SecurityEvents} 同一范式）；</li>
  * <li><b>不新增事件名、不新增键族、不新增持久层</b>：采样事实挂既有 {@code tool_call_end} 的
- * additive 字段（由 {@code SpToolCallingManager} 发射）、台账复用 {@code ai:safety:<sessionId>}
+ * additive 字段（由 {@code gate/ToolCallEndTrace} 这一处载荷构造点发射 —— 内联批循环与 park 结算
+ * 共用同一份键序）、台账复用 {@code ai:safety:<sessionId>}
  * 的 {@code kind=sheet_sample} 条目、计数挂 {@code /health.sheet}。</li>
  * </ol>
  *
@@ -136,7 +137,8 @@ public class SheetAudit {
 	}
 
 	/**
-	 * 记一次表格工具结算（{@code tool_call_end} 的同一时点；由 {@code SpToolCallingManager} 调用）。
+	 * 记一次表格工具结算（{@code tool_call_end} 的同一时点；由 {@code gate/ToolCallEndTrace} 在
+	 * 两个所有权边界上各调一次：内联批循环、park 结算的胜者 —— 决策 guard 或执行认领）。
 	 *
 	 * <p>计数口径（进程内，多实例各一份 —— 与 {@code /health.security} 同一缺口，见 §4.4）：
 	 * <ul>

@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><link rel="stylesheet" href="../../node_modules/element-plus/dist/index.css"><title>el-tab-pane mount premise</title></head>
+<body>
+<div id="app"></div>
+<script src="../../node_modules/vue/dist/vue.global.prod.js"></script>
+<script src="../../node_modules/element-plus/dist/index.full.min.js"></script>
+<script>
+  // 与 ImportWizardView 第 1 步编辑区同构：<el-tabs v-model><el-tab-pane v-for :name><SpreadGrid 等价子组件/></el-tab-pane></el-tabs>
+  // 记录每个子组件"何时挂载/何时卸载"，用来判定「未激活标签页是否已挂载」这一前提是否成立。
+  const events = []
+  window.__probe = { events }
+  const { createApp, h, defineComponent, ref, onMounted, onBeforeUnmount } = Vue
+
+  const Child = defineComponent({
+    name: 'GridProbe',
+    props: { code: { type: String, required: true } },
+    setup(props) {
+      onMounted(() => events.push('mount:' + props.code))
+      onBeforeUnmount(() => events.push('unmount:' + props.code))
+      return () => h('div', { class: 'grid-probe', 'data-code': props.code }, props.code)
+    }
+  })
+
+  const App = defineComponent({
+    setup() {
+      const active = ref('CURRENCY')
+      return () => h(ElementPlus.ElTabs, {
+        modelValue: active.value,
+        'onUpdate:modelValue': (v) => { active.value = v },
+        type: 'border-card'
+      }, () => ['CURRENCY', 'DEMO', 'PROJECT'].map((code) => h(ElementPlus.ElTabPane, { name: code, label: code }, () => h(Child, { code }))))
+    }
+  })
+
+  createApp(App).use(ElementPlus).mount('#app')
+</script>
+</body>
+</html>

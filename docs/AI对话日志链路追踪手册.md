@@ -116,7 +116,7 @@ grep -F "<runId>" app.log | grep 'event=turn_end'
 | `approval` | ✓ 是否需要人/前端参与 | — |
 | `index` | ✓ 本批内序号 | — |
 | `ms` | — | ✓ 开始到结算的毫秒数（**含审批等待**） |
-| `execMs` | — | ✓ **执行耗时 = `ms` − 审批等待**：只对 `CONFIRM`/`FRONTEND` 扣，扣的是 `reqAtMs → resolvedAtMs`，缺任一端就不扣（宁可少扣，不凭猜造数）；后端工具恒等于 `ms` |
+| `execMs` | — | ✓ **执行耗时 = `ms` − 审批等待**：只对 `CONFIRM`/`FRONTEND` 扣，扣的是 `reqAtMs → resolvedAtMs`，缺任一端就不扣（宁可少扣，不凭猜造数）；后端工具恒等于 `ms`。**park 结算**（见下）发生在另一个执行体，钟点全取自条目：`ms` 的起点取 `reqAtMs`/`claimedAtMs` 里较早的那个、终点 `executedAtMs → resolvedAtMs → now` 逐级回落；前端工具没有认领 ⇒ `execMs=0`（后端确实没执行它的桩体） |
 | `skipped` | — | ✓ `true` = 本次调用**没有执行**（预检拦截 / 步数到顶 / 首错即停的连带跳过） |
 | `ok` / `outcome` / `code` | — | ✓ 结局真值（`ok`/`failed`/`unknown`/`blocked`/`skipped`/`cancelled`…） |
 | `executed` / `chars` | — | ✓ 是否真的执行过 / 结果字符数（不记内容） |
@@ -126,6 +126,7 @@ grep -F "<runId>" app.log | grep 'event=turn_end'
 
 1. **未执行（有一行 end，没有 start）** —— 预检拦截、步数到顶、批策略连带跳过：只写一条 `tool_call_end skipped=true`。**刻意不补 start**：补了就把"start 没有 end"这个判据稀释成永远成对，本批要堵的洞会被掩掉。
 2. **开始之后没走到结算（有一行 start，就必定有一行 end）** —— 取消（事件边界轮询命中）与执行段抛错：现在都在异常穿出**之前**补一条 `tool_call_end`（`outcome=cancelled` + `code=RUN_CANCELLED`，或 `code=TOOL_EXECUTION_THREW`），两者都带 `cancelled`。本批之前这两条路径只有 start。
+   **park 结算（2026-10-25 补；同日按独立复审 I-1/I-2 收紧）**：人工等待 park 之后线程已交还，结算可能发生在续跑里，也可能发生在**另一个实例**的决策入口上 —— 因此这一行不再用"本进程有没有等待方"（`woke`）判发不发，而是由**持久首写者**仲裁：发点抢 `ai:observed:<runId>` 的 `HSETNX`（field=`toolCallId`），**抢到才发、且同时记一次审计计数**；后端执行另有 `ai:claim` 认领胜者兜住"恰执行一次"。候选发点 = ① 决策/放弃写胜者（park 开启时一律参与）② 内联批循环 ③ 续跑认领胜者；谁先到谁发，其余自动让位（跨实例双记、多卡乱序 0 条两条序都由这一处收口）。续跑的"复用结果"分支**刻意不补**：重挂/重试会反复经过它，在那里补会把 `readCalls` 与 end 行数放大成"重挂次数"。字段口径见上表 `ms`/`execMs` 的 park 注。
 3. **进程死在 start 与 end 之间** —— 仍是"只有 start"，这是**只有日志才能表达**的事实（`ms` 不会有值）。对齐手段 = 快照 `ai:run:<runId>` 的 `status` + 续跑行的 `turn_start(resumed=true, resumeReason=…)`。
 
 ### 2.6 `approval_suspend`（INFO，卡发出、等待开始）

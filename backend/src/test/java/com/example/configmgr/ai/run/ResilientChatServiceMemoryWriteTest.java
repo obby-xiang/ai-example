@@ -6,12 +6,17 @@ import com.example.configmgr.ai.config.ProviderRuntime;
 import com.example.configmgr.ai.conformance.FrameContract;
 import com.example.configmgr.ai.conformance.FrameWire;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
+import com.example.configmgr.ai.context.ContextCompactor;
+import com.example.configmgr.ai.context.ContextLimitResolver;
+import com.example.configmgr.ai.context.InMemoryContextStateStore;
+import com.example.configmgr.ai.gate.SpToolCallingManager;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.observe.RedisDegradation;
 import com.example.configmgr.ai.session.AiSessionService;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ContextBuilder;
 import com.example.configmgr.ai.tool.ToolRegistry;
+import com.example.configmgr.ai.tool.ToolResultLimiter;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -31,6 +36,9 @@ import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+import org.springframework.test.util.ReflectionTestUtils;
 import reactor.core.publisher.Flux;
 
 import java.util.ArrayList;
@@ -255,6 +263,53 @@ class ResilientChatServiceMemoryWriteTest {
 			.isEqualTo("第二轮回答");
 		// 输入历史 + 本轮回答 = 3 条；maxMessages=2 ⇒ 裁掉最旧一条（第一轮问题）
 		assertThat(this.repository.findByConversationId(SESSION_ID).get(0)).isInstanceOf(AssistantMessage.class);
+	}
+
+	@Test
+	void parkedCancellationSettlesHistoryFramesAndEstimatedContext() {
+		RunSnapshot snapshot = this.store.get(RUN_ID);
+		snapshot.setStatus(RunSnapshot.SUSPENDED);
+		snapshot.setModelId("test-model");
+		snapshot.setAssistantContent("未完成的半截正文");
+		snapshot.setAssistantMetadata(Map.of("provider_trace", "opaque-value"));
+		PendingToolCall pending = new PendingToolCall();
+		pending.setToolCallId("call-parked-cancel");
+		pending.setName("start_publish");
+		pending.setType("function");
+		pending.setArguments("{}");
+		pending.setKind(PendingToolCall.KIND_CONFIRM);
+		pending.setStatus(PendingToolCall.PENDING);
+		snapshot.setInFlightToolCalls(new ArrayList<>(List.of(pending)));
+		snapshot.setMessageJson(this.codec.serializeAll(List.of(new UserMessage("请发布"))));
+		this.store.save(snapshot);
+		this.store.putPending(RUN_ID, pending);
+		SseChatEmitter out = this.registry.of(RUN_ID);
+		FrameWire wire = FrameWire.attachTo(out);
+		out.start(SESSION_ID);
+		InMemoryContextStateStore contextStore = new InMemoryContextStateStore();
+		ReflectionTestUtils.setField(this.service, "contextCompactor", new ContextCompactor(this.properties,
+				new ContextLimitResolver(this.properties), contextStore));
+		when(this.cancellations.cancelState(RUN_ID)).thenReturn(CancellationRegistry.CancelState.CANCELLED);
+		ResumeService resume = new ResumeService(this.store, this.registry, this.codec, this.service,
+				mock(SpToolCallingManager.class), mock(ThreadPoolTaskExecutor.class), mock(StringRedisTemplate.class),
+				this.properties, this.cancellations, new ToolResultLimiter(this.properties));
+
+		ResumeService.ResumeResult result = resume.resume(RUN_ID);
+
+		assertThat(result.outcome()).isEqualTo(ResumeService.Outcome.ALREADY_CANCELLED);
+		assertThat(FrameContract.types(wire.frames())).contains("done");
+		assertThat(FrameContract.oneOfType(wire.frames(), "done")).containsEntry("cancelled", true);
+		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.CANCELLED);
+		assertThat(this.store.pending(RUN_ID, "call-parked-cancel").getStatus()).isEqualTo(PendingToolCall.CANCELLED);
+		assertThat(contextStore.read(SESSION_ID).usedTokens()).isPositive();
+		assertThat(contextStore.read(SESSION_ID).est()).isTrue();
+		assertThat(this.repository.findByConversationId(SESSION_ID)).anySatisfy(message -> {
+			assertThat(message).isInstanceOf(AssistantMessage.class);
+			AssistantMessage assistant = (AssistantMessage) message;
+			assertThat(assistant.getText()).isEqualTo("未完成的半截正文");
+			assertThat(assistant.getMetadata()).containsEntry("provider_trace", "opaque-value")
+				.containsEntry("stopped", true);
+		});
 	}
 
 	// ───────────────────────── 辅助 ─────────────────────────

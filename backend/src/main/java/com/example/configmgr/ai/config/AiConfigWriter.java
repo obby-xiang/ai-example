@@ -22,7 +22,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.regex.Pattern;
 
 /**
@@ -81,6 +80,15 @@ public class AiConfigWriter {
 
     /** 本批新增：数值/长度/格式类校验（temperature 越界、key 过短等统一落这里）。 */
     public static final String CODE_INVALID_PARAM = ErrorCodes.INVALID_PARAM;
+
+    /**
+     * 改主机名却保留旧 key（复核 I-2）：<b>专用码</b>，前端有"重新录入 key"的专属文案。
+     *
+     * <p>与 {@link #CODE_INVALID_PARAM} 分开的理由：那一条是"参数不在允许范围"的通用校验，
+     * 用户看到它只会去改数值/重选供应商，永远学不到"改主机要重录 key"。语义边界见
+     * {@code ErrorCodes#KEY_BOUND_TO_HOST}。
+     */
+    public static final String CODE_KEY_BOUND_TO_HOST = ErrorCodes.KEY_BOUND_TO_HOST;
 
     /** 本批新增：模型名不合法（空白/超长/含空白符）。 */
     public static final String CODE_INVALID_MODEL = ErrorCodes.INVALID_MODEL;
@@ -144,9 +152,6 @@ public class AiConfigWriter {
 
     private final AiEndpointGuard guard;
 
-    /** 可为 null（单测）：无 Redis ⇒ 跳过跨实例失效信号（DB 版本号仍推进）。 */
-    private final StringRedisTemplate redis;
-
     private final TransactionTemplate transactionTemplate;
 
     private final AiConfigService configService;
@@ -154,10 +159,10 @@ public class AiConfigWriter {
     private final ObjectMapper objectMapper;
 
     /**
-     * 运行态缓存（热生效的落点）：默认参数（temperature/topP/maxTokens）烙在已缓存的实例 options 上，
-     * 改完配置必须淘汰缓存，否则下一轮仍用旧值。可为 null（单测/未装配）⇒ 跳过淘汰。
+     * 版本发布（与 env 种子共用的唯一实现）：数据行 + {@code config.version} 同一事务，
+     * 提交后 {@code INCR ai:cfg:ver} + reload + 淘汰运行态缓存。
      */
-    private final AiProviderRegistry runtimeRegistry;
+    private final AiConfigVersionPublisher versions;
 
     public AiConfigWriter(AiProviderRepository providerRepository, AiProviderModelRepository modelRepository,
             AiSettingRepository settingRepository, AiConfigAuditRepository auditRepository, AiKeyCipher cipher,
@@ -169,14 +174,13 @@ public class AiConfigWriter {
         this.auditRepository = auditRepository;
         this.cipher = cipher;
         this.guard = guard;
-        this.redis = redis;
         // N-6（复审）：事务边界是写路径的正确性前提，装配期就 fail-fast —— 不要在运行时才 NPE
         this.transactionTemplate = new TransactionTemplate(
                 Objects.requireNonNull(transactionManager, "AiConfigWriter 需要 PlatformTransactionManager："
                         + "写路径的“数据行 + 版本号 + 审计行”必须同一提交点"));
         this.configService = configService;
         this.objectMapper = objectMapper;
-        this.runtimeRegistry = runtimeRegistry;
+        this.versions = new AiConfigVersionPublisher(settingRepository, redis, configService, runtimeRegistry);
     }
 
     // ── 请求命令（controller 的 @RequestBody 直接反序列化成这三条 record） ──────────
@@ -312,6 +316,19 @@ public class AiConfigWriter {
         }
         else {
             key = null;
+        }
+
+        // ── key 的主机边界（复核 ID-03 / S1）────────────────────────────────────────
+        // key 属于"某一台主机"：{@code /test} 与 {@code /models/fetch} 直接把库里的 (baseUrl, key) 对
+        // 发出去。若允许"换主机 + 保留旧 key"，攻击者只要 改 baseUrl → 点一次「测试连接」就能把库里的
+        // key 外带到自己的主机（ID-03 实测路径：4 个请求即外带，默认任意外部主机都放行）。
+        // 因此边界放在<b>配对产生处</b>：换 origin（scheme+host+port）就必须重新录入 key 或显式清空。
+        // 私网判定是另一条独立判据（上一行 checkBaseUrl 先跑），两者互不掩盖。
+        if (key == null && existing.isKeyDeclared()
+                && !originOf(existing.getBaseUrl()).equals(originOf(baseUrl))) {
+            throw new AiConfigException(CODE_KEY_BOUND_TO_HOST,
+                    "改主机名（origin）后必须重新录入 key 或先清空 key：已有 key 只会发往它被录入时的那台主机（旧 "
+                            + originOf(existing.getBaseUrl()) + " → 新 " + originOf(baseUrl) + "）");
         }
 
         KeyMaterial finalKey = key;
@@ -666,65 +683,20 @@ public class AiConfigWriter {
     }
 
     /**
-     * {@code ai_setting['config.version']} +1（DB 真源）。
+     * {@code ai_setting['config.version']} +1（DB 真源），在<b>当前事务</b>内。
      *
      * <p>
-     * 读侧（{@link AiConfigService#current()}）在 Redis 不可用时就是靠比较本值决定要不要重载，
-     * 所以它必须与数据行<b>同一个事务</b>：改了数据却没动版本 = 读侧永远看不到（比报错更糟）。
-     *
-     * <h2>为什么是"读-改-写"而不是原子 UPDATE（复审 M-3）</h2>
-     * 配置写路径是<b>低频人工操作</b>（点一次保存），不存在并发抢版本号的场景；JPA 下走
-     * {@code find → set → save} 能复用实体与 {@code @UpdateTimestamp}，可读性也最好。
-     * 真要并发写同一键，两个事务都会读到旧值 ⇒ 版本号只 +1 一次 —— 但<b>配置数据本身</b>也会
-     * 有一个事务被覆盖，版本号少跳一格并不改变"读侧最终会看到最新值"这个结论（DB 版本单调不减、
-     * Redis {@code INCR} 每次都动）。故不做 {@code UPDATE ... SET value=value+1} 的原生 SQL：
-     * 那是给高并发计数器的写法，在这里只会换来一个绕过实体层的特例。
-     *
-     * <p>
-     * N-5（复审）：只查一次 {@code findBySettingKey}（旧实现查两次：一次算值、一次取实体）。
+     * 实现只有一份 —— {@link AiConfigVersionPublisher#bumpInTransaction()}：读侧靠比较本值决定要不要
+     * 重载，所以它必须与数据行同一提交点；env 种子（{@link AiConfigSeeder}）走同一实现，
+     * 于是"某条写路径改了数据却没动版本"在结构上不可能再出现。
      */
     private void bumpVersion() {
-        Optional<AiSetting> current = this.settingRepository.findBySettingKey(AiSetting.CONFIG_VERSION);
-        long next = current.map(AiSetting::getValueJson).map(AiConfigWriter::parseVersion).orElse(0L) + 1L;
-        AiSetting setting = current.orElseGet(() -> {
-            AiSetting fresh = new AiSetting();
-            fresh.setSettingKey(AiSetting.CONFIG_VERSION);
-            return fresh;
-        });
-        setting.setValueJson(String.valueOf(next));
-        this.settingRepository.save(setting);
+        this.versions.bumpInTransaction();
     }
 
-    private static long parseVersion(String raw) {
-        if (!StringUtils.hasText(raw)) {
-            return 0L;
-        }
-        try {
-            return Long.parseLong(raw.trim());
-        }
-        catch (NumberFormatException ex) {
-            return 0L;
-        }
-    }
-
-    /** 提交之后：跨实例失效信号 + 本实例快照重载。两者失败都不回滚（数据已经落库了）。 */
+    /** 提交之后：跨实例失效信号 + 本实例快照重载 + 运行态缓存淘汰（{@link AiConfigVersionPublisher}）。 */
     private void afterCommit() {
-        if (this.redis != null) {
-            try {
-                this.redis.opsForValue().increment(AiConfigService.REDIS_VERSION_KEY);
-            }
-            catch (Exception ex) {
-                log.warn("INCR {} 失败（Redis 不可用）：本实例已 reload，其他实例要等 DB 版本比对兜底 —— {}",
-                        AiConfigService.REDIS_VERSION_KEY, ex.getMessage());
-            }
-        }
-        this.configService.reload();
-        // 热生效：默认参数（temperature/topP/maxTokens）烙在已缓存的运行态 options 上。
-        // 不淘汰 ⇒ 下一轮仍用旧值（设置页显示已保存，实际行为没变）。淘汰代价只是下一次请求
-        // 重建一个实例（复用同一套装配），远小于"改完不生效"。
-        if (this.runtimeRegistry != null) {
-            this.runtimeRegistry.evictAll();
-        }
+        this.versions.publishAfterCommit();
     }
 
     private void audit(String action, String targetType, String targetId, Map<String, Object> diff) {
@@ -901,6 +873,35 @@ public class AiConfigWriter {
         catch (AiEndpointGuard.GuardException ex) {
             throw new AiConfigException(ex.getCode(), ex.getMessage());
         }
+    }
+
+    /**
+     * {@code baseUrl} 的 <b>origin</b>（{@code scheme://host:port}，默认端口归一化），用于判定
+     * "key 还能不能用在这台主机上"。
+     *
+     * <p>
+     * 为什么是 origin 而不是 host：https→http 或换端口同样会把 key 发到另一个服务上
+     * （同一台机器上监听 8080 的任意进程都能收到明文 key）。解析失败时退化为原串（会与任何
+     * 合法 origin 不等 ⇒ 走"必须重录 key"的保守分支，不会静默放行）。
+     */
+    private static String originOf(String baseUrl) {
+        if (!StringUtils.hasText(baseUrl)) {
+            return "";
+        }
+        try {
+            java.net.URI uri = new java.net.URI(baseUrl.trim());
+            String scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase(java.util.Locale.ROOT);
+            String host = uri.getHost() == null ? "" : uri.getHost().toLowerCase(java.util.Locale.ROOT);
+            int port = uri.getPort() == -1 ? defaultPort(scheme) : uri.getPort();
+            return scheme + "://" + host + ":" + port;
+        }
+        catch (java.net.URISyntaxException ex) {
+            return baseUrl.trim();
+        }
+    }
+
+    private static int defaultPort(String scheme) {
+        return "https".equals(scheme) ? 443 : ("http".equals(scheme) ? 80 : -1);
     }
 
     /** 加密 + 指纹 + last4（一次算好，事务里只落结果；失败在事务外 ⇒ 表里不留半行）。 */

@@ -1173,6 +1173,7 @@ test('排除审计清单包含运行态索引、销毁墓碑与 activity/resume/
 		'ai:purge:retry:queue',
 		'ai:purge:retry:lock',
 		'ai:activity:',
+		'ai:observed:',
 		'ai:resume:lock:',
 		'ai:ctx:',
 		'ai:safety:',

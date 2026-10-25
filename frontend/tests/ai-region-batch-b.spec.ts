@@ -61,7 +61,7 @@ vi.mock('@/api/data', () => ({ dataApi: { countData: api.countData } }))
 import ElementPlus from 'element-plus'
 import ImportWizardView from '@/views/ImportWizardView.vue'
 import ExportWizardView from '@/views/ExportWizardView.vue'
-import { bumpAiEpoch, currentAiEpoch, listAiRegions, resetAiRegions } from '@/utils/ai-regions'
+import { currentAiEpoch, listAiRegions, resetAiRegions } from '@/utils/ai-regions'
 import { aiClick, aiFill as aiFillTool, aiSnapshot, resetUiRuntime } from '@/utils/ai-dom-tools'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { applyLocale } from '@/locales'
@@ -170,7 +170,7 @@ afterEach(() => {
 })
 
 describe('B-01：导入向导第 1 步快照（selectDefs / mode / grid 三区域可见）', () => {
-  it('三个新区域全部注册，且快照里能看见配置项勾选框、模式单选、表格视口 tab', async () => {
+  it('三个新区域全部注册；第 1 步只披露本步控件（第 4 步的模式单选不得冒充可见）', async () => {
     await mountView(ImportWizardView)
     expect(regionIds()).toEqual(expect.arrayContaining(['import.selectDefs', 'import.mode', 'import.grid']))
 
@@ -178,7 +178,12 @@ describe('B-01：导入向导第 1 步快照（selectDefs / mode / grid 三区�
     expect(out.outcome).toBe('ok')
     expect(out.result).toContain('import.selectDefs.search')
     expect(out.result).toContain('import.selectDefs.CURRENCY')
-    expect(out.result).toContain('import.mode.merge')
+    // FE-32（Task 5）：模式单选在**第 4 步**（`v-show="stepIndex === 3"`）——
+    // 第 1 步快照把它列成 state=enabled 正是"隐藏步骤被披露为可写"的缺陷。
+    // 标注本身仍在 DOM 上（区域注册面没退化），只是不进当前步骤的快照。
+    const modeNode = document.querySelector('[data-ai-ref="import.mode.merge"]')
+    expect(modeNode).not.toBeNull()
+    expect(out.result).not.toContain('import.mode.merge')
     // 挂账 L-66 已收口：tab 进默认 kinds ⇒ 不带 kinds 的快照同样看得见编辑区标签页
     expect(aiSnapshot({}).result).toContain('import.grid.tab.CURRENCY')
     expect(out.result).toContain('import.grid.tab.CURRENCY')
@@ -189,6 +194,8 @@ describe('B-01：导入向导第 1 步快照（selectDefs / mode / grid 三区�
   })
 
   it('模式单选与勾选框的风险档位正确：mode = consequential，勾选框 = mutate-local', async () => {
+    // 站到第 4 步（PUBLISH）才看得见模式单选 —— 隐藏步骤的写入必须被拒（见 ai-dom-visibility）
+    api.getTask.mockResolvedValue({ ...IMPORT_TASK, currentStep: 'PUBLISH' })
     await mountView(ImportWizardView)
     const out = aiSnapshot({})
     expect(out.result).toMatch(/\[import\.mode\.merge\].*state=/)
@@ -234,7 +241,8 @@ describe('B-01b：导出向导 SELECT_DEFS / COND 快照', () => {  it('两个�
   })
 
   it('COND 步能看见查询条件字段（含值框可填）', async () => {
-    api.getTask.mockResolvedValue(EXPORT_TASK)
+    // 条件表单在第 2 步（QUERY_COND）：站到该步才"看得见"（FE-32 后隐藏步骤不再披露）
+    api.getTask.mockResolvedValue({ ...EXPORT_TASK, currentStep: 'QUERY_COND' })
     await mountView(ExportWizardView)
     const out = aiSnapshot({ regions: ['export.cond'] })
     expect(out.result).toContain('export.cond.CURRENCY.code.field')
@@ -273,7 +281,7 @@ describe('批 B 验收口径：快照元素数 ≥ 页面可操作控件盘点�
   })
 
   it('导出向导第 2 步：12 个可操作控件，覆盖 ≥80%', async () => {
-    api.getTask.mockResolvedValue(EXPORT_TASK)
+    api.getTask.mockResolvedValue({ ...EXPORT_TASK, currentStep: 'QUERY_COND' })
     await mountView(ExportWizardView)
     const snap = aiSnapshot({ regions: ['export.cond'] }).result
     const refs = refsOf(snap)
@@ -305,9 +313,14 @@ describe('B-07：i18n 稳定性 —— 切语言后 ref 逐字不变', () => {
 
 describe('B-08：尺寸闸 —— 最复杂的导出 COND 快照 ≤2000 字符且尾行恒在', () => {
   it('两个配置项各带条件时仍受 2000 字符硬顶，尾行「共 N 个元素」不丢', async () => {
-    api.getTask.mockResolvedValue(EXPORT_TASK)
+    // 必须站到第 2 步（QUERY_COND）才量到「最复杂的 COND 快照」：
+    // FE-32 后隐藏步骤不再披露，停在 SELECT_DEFS 只会量到第 1 步的简单快照（覆盖实质降级）。
+    api.getTask.mockResolvedValue({ ...EXPORT_TASK, currentStep: 'QUERY_COND' })
     await mountView(ExportWizardView)
     const out = aiSnapshot({})
+    // 先证明量到的确实是 COND 的快照（不是第 1 步的简单快照）
+    const refs = refsOf(out.result)
+    expect(refs.filter((ref) => ref.startsWith('export.cond.'))).not.toHaveLength(0)
     expect(out.result.length).toBeLessThanOrEqual(2000)
     expect(out.result).toMatch(/共 \d+ 个元素/)
   })
@@ -342,6 +355,8 @@ describe('与批4-A 机制的联动（快照闸 / 风险分流）', () => {
   })
 
   it('模式单选是后果性动作：一次不点，回执指路注册动作 set_import_mode', async () => {
+    // 模式单选在第 4 步；站到该步（可见）才能验证"风险分流"这条围栏本身
+    api.getTask.mockResolvedValue({ ...IMPORT_TASK, currentStep: 'PUBLISH' })
     await mountView(ImportWizardView)
     aiSnapshot({})
     const out = await aiClick({ ref: 'import.mode.replace', epoch: currentAiEpoch() })
@@ -360,8 +375,8 @@ describe('可操作闭环：新增区域除了「看得见」还要「点得着�
     const out = await aiClick({ ref: 'import.grid.tab.REGION', epoch: currentAiEpoch() })
     expect(out.outcome).toBe('ok')
     await flushPromises()
-    // 快照按 epoch 缓存（同 epoch 同参直返），所以点完要看新画面必须先失效 epoch
-    bumpAiEpoch()
+    // 写动词成功即 `markUiMutation()` 推进界面写入版本 ⇒ 快照缓存与同参去重自动失效，
+    // 不需要（也不再依赖）外部 `bumpAiEpoch()` 才能看到动作后的画面（FE-33 两层）。
     const after = aiSnapshot({ kinds: ['all'] }).result
     expect(after).toMatch(/\[import\.grid\.tab\.REGION\][^\n]*state=selected/)
     expect(after).toMatch(/\[import\.grid\.tab\.CURRENCY\][^\n]*state=unselected/)
@@ -375,7 +390,7 @@ describe('可操作闭环：新增区域除了「看得见」还要「点得着�
     const out = await aiFillTool({ ref: 'export.selectDefs.search', value: 'CUR', epoch })
     expect(out.outcome).toBe('ok')
     await flushPromises()
-    bumpAiEpoch()
+    // 同上：填写成功已推进界面写入版本，同参重拍必然重新遍历
     const refs = refsOf(aiSnapshot({ regions: ['export.selectDefs'] }).result)
     expect(refs).toContain('export.selectDefs.CURRENCY')
     expect(refs).not.toContain('export.selectDefs.REGION')

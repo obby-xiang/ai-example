@@ -74,6 +74,11 @@ class ResumeProviderGoneTest {
 				mock(SpToolCallingManager.class), executor, mock(StringRedisTemplate.class), this.properties,
 				mock(CancellationRegistry.class), mock(ToolResultLimiter.class));
 		ReflectionTestUtils.setField(this.service, "aiConfigService", this.configService);
+		// 复核 Critical-1 之后的默认口径：刷新成功 + 行级声明也没有（= "确定不可用"）才判死
+		when(this.configService.reloadWithOutcome())
+			.thenReturn(new AiConfigService.ReloadResult(AiConfigService.ConfigSnapshot.empty(), true));
+		when(this.configService.bindingState(any(Long.class), anyString()))
+			.thenReturn(AiConfigService.BindingState.ABSENT);
 	}
 
 	@Test
@@ -135,7 +140,10 @@ class ResumeProviderGoneTest {
 
 		assertThat(result.outcome()).as("换了端点就不是'原样续跑'：历史里的 provider 已不存在")
 			.isEqualTo(ResumeService.Outcome.PROVIDER_GONE);
-		verify(this.configService).resolveChatTarget(7L, "deepseek-flash");
+		// B2：第一次解析为空后强制重载一次再判（缓存陈旧不得当成端点消失），故这里是"至少一次"；
+		// 但绝不按模型名去别家借同名模型。
+		verify(this.configService, org.mockito.Mockito.atLeastOnce()).resolveChatTarget(7L, "deepseek-flash");
+		verify(this.configService).reloadWithOutcome();
 		verify(this.configService, never()).resolveChatTarget(anyString());
 	}
 

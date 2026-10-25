@@ -213,4 +213,22 @@ describe('L-69-⑤ AI 设置文案键表（ai-settings-copy）随语言', () => 
     expect(describeAiConfigError({ code: 'NO_SUCH_CODE', message: '后端细节' })).toBe('Operation failed; please retry.')
     expect(describeAiConfigError(new Error('后端细节'))).toBe('Operation failed; please retry.')
   })
+
+  /**
+   * 复核 I-2：改主机名保留旧 key 的拒绝必须有<b>专属</b>文案（告诉用户重录 key），
+   * 不能落进通用 INVALID_PARAM 的"参数不在允许范围/重选供应商"。
+   *
+   * <p>缺映射或缺任一语言词条 ⇒ 这里会退化成兜底文案，用例即红（两种语言都断言）。
+   */
+  it('KEY_BOUND_TO_HOST 有专属 zh/en 文案（不是通用参数错误）', () => {
+    const zh = describeAiConfigError({ code: 'KEY_BOUND_TO_HOST', message: '后端细节' })
+    expect(zh).toContain('重新录入密钥')
+    expect(zh).not.toContain('参数不在允许范围')
+    expect(zh).not.toBe(describeAiConfigError({ code: 'INVALID_PARAM' }))
+    applyLocale('en-US')
+    const en = describeAiConfigError({ code: 'KEY_BOUND_TO_HOST', message: 'details' })
+    expect(en.toLowerCase()).toContain('re-enter the key')
+    expect(en).not.toBe(describeAiConfigError({ code: 'INVALID_PARAM' }))
+    expect(en).not.toBe('Operation failed; please retry.')
+  })
 })

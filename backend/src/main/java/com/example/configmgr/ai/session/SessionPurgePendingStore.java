@@ -2,6 +2,7 @@ package com.example.configmgr.ai.session;
 
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.common.AiStateUnavailableException;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.ScanOptions;
@@ -107,9 +108,31 @@ public class SessionPurgePendingStore {
 		this.properties = properties;
 	}
 
-	/** 一条 pending 台账（JSON 落 Redis；无 TTL）。 */
+	/**
+	 * 一条 pending 台账（JSON 落 Redis；无 TTL）。
+	 *
+	 * <p><b>{@code verifyAtMs}（fix4，additive）</b>：非空 = 这条台账已"删除主体完成"，只剩一次
+	 * <b>记忆面复核</b>要到点执行（{@code chat:mem:*} 的崩溃残留补偿）。为 {@code null} 时是普通
+	 * 待重试台账，语义与本字段引入前完全一致。
+	 *
+	 * <p>老 JSON 没有该字段 ⇒ 反序列化为 {@code null}（= 普通台账）；{@code null} 值不写出
+	 * （{@link JsonInclude}），因此普通台账的 JSON 形态逐字不变。
+	 *
+	 * <p>为什么复用 {@code nextAtMs} 而不加状态枚举：到点语义本来就由 {@code nextAtMs} 驱动
+	 * （{@code listDue} 只取 due 项），复核排程只需把 {@code nextAtMs} 对齐 {@code verifyAtMs}；
+	 * 复核失败沿用 {@link #recordFailure} 的退避。复核是<b>独立阶段</b>：排程时 attempts 重开为 0
+	 * （见 {@link #scheduleVerify}），普通台账不经过这条路径，其 10 次上限不变。
+	 */
+	@JsonInclude(JsonInclude.Include.NON_NULL)
 	public record Pending(String sessionId, String purgeId, String requestedBy, int attempts, long nextAtMs,
-			long createdAtMs, String lastError) {
+			long createdAtMs, String lastError, Long verifyAtMs) {
+
+		/** 兼容构造（老 JSON/既有调用点）：{@code verifyAtMs = null} = 普通待重试台账。 */
+		public Pending(String sessionId, String purgeId, String requestedBy, int attempts, long nextAtMs,
+				long createdAtMs, String lastError) {
+			this(sessionId, purgeId, requestedBy, attempts, nextAtMs, createdAtMs, lastError, null);
+		}
+
 	}
 
 	/**
@@ -264,7 +287,51 @@ public class SessionPurgePendingStore {
 	}
 
 	/**
+	 * <b>fix4：把"删除主体已完成"的台账改排成一次记忆面复核</b>（owner-CAS，<b>复核阶段重开自己的有界预算</b>）。
+	 *
+	 * <p>为什么必须保留台账而不是直接 {@code complete}：写者在 RENAME 生效后、复检完成前 crash 时，
+	 * 那份历史会留在 {@code chat:mem:*} 上，而销毁侧已经报过 complete —— 没有台账就没有任何人
+	 * 会再清它。排程一次短期复核把"事后补偿"接到既有 runner 上，失败沿用
+	 * {@link #recordFailure} 的有限退避与 {@code MAX_ATTEMPTS}（耗尽后只重排、不再自动执行）。
+	 *
+	 * <p><b>fix5：{@code attempts} 从 0 重开</b>。删除主体与"记忆复核"是两个阶段：主体可能已经耗光
+	 * 自动尝试（deferred / Redis 抖动）之后，才被一次手动 {@code DELETE} 做成；若沿用旧计数，
+	 * {@code SessionPurgeRetryRunner#runOnce} 的 {@code attempts >= MAX_ATTEMPTS} 短路排在复核分支
+	 * <b>之前</b> —— 复核一次都跑不到，崩溃残留只能等记忆键自身 TTL，pending/守卫/队列项永久驻留。
+	 * 重开后复核最多自动跑 {@code MAX_ATTEMPTS} 次（同一退避递增），耗尽后同样只 {@link #defer}
+	 * （<b>有界，不是无限重试</b>）。普通台账永远不带 {@code verifyAtMs}，其 10 次上限/退避/defer
+	 * 语义逐字不变。
+	 *
+	 * @param verifyAtMs 复核时刻（同时作为 {@code nextAtMs}，{@code listDue} 到点才取到）
+	 * @return true = 仍归该 purgeId 且已排程；false = 台账已换主/不存在（旧调用点不得改写新一轮）
+	 */
+	public boolean scheduleVerify(String sessionId, String purgeId, long verifyAtMs) {
+		Pending pending = current(sessionId);
+		if (pending == null || !purgeId.equals(pending.purgeId())) {
+			return false;
+		}
+		// fix5：复核是新阶段 —— 预算从 0 起；沿用主体阶段的旧计数会被 MAX_ATTEMPTS 短路在复核分支之前。
+		Pending next = new Pending(sessionId, purgeId, pending.requestedBy(), 0, verifyAtMs,
+				pending.createdAtMs(), pending.lastError(), verifyAtMs);
+		try {
+			Long updated = this.redis.execute(CAS_SET, List.of(pendingKey(sessionId)), token(purgeId), json(next));
+			if (updated == null || updated <= 0L) {
+				return false;
+			}
+			this.redis.opsForList().remove(QUEUE_KEY, 0, sessionId);
+			this.redis.opsForList().rightPush(QUEUE_KEY, sessionId);
+			return true;
+		}
+		catch (RuntimeException ex) {
+			throw new AiStateUnavailableException("排程会话销毁记忆复核失败 sessionId=" + sessionId, ex);
+		}
+	}
+
+	/**
 	 * 记录一次失败并退避（purgeId 条件；旧重试不得改写新 pending）。
+	 *
+	 * <p><b>fix4</b>：复核失败必须保留 {@code verifyAtMs} —— 否则下一次到点会退化成"整轮 retry"
+	 * （再删一遍 DB/附件），而本意只是记忆面复核。
 	 *
 	 * @return true = 本条 pending 仍归该 purgeId 且已更新
 	 */
@@ -276,7 +343,7 @@ public class SessionPurgePendingStore {
 		int attempts = pending.attempts() + 1;
 		long nextAt = System.currentTimeMillis() + backoffMs(attempts);
 		Pending next = new Pending(sessionId, purgeId, pending.requestedBy(), attempts, nextAt,
-				pending.createdAtMs(), error);
+				pending.createdAtMs(), error, pending.verifyAtMs());
 		try {
 			Long updated = this.redis.execute(CAS_SET, List.of(pendingKey(sessionId)),
 					token(purgeId), json(next));
@@ -308,7 +375,7 @@ public class SessionPurgePendingStore {
 			return false;
 		}
 		Pending next = new Pending(sessionId, purgeId, pending.requestedBy(), pending.attempts(), nextAtMs,
-				pending.createdAtMs(), pending.lastError());
+				pending.createdAtMs(), pending.lastError(), pending.verifyAtMs());
 		try {
 			Long updated = this.redis.execute(CAS_SET, List.of(pendingKey(sessionId)), token(purgeId), json(next));
 			if (updated == null || updated <= 0L) {

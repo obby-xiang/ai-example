@@ -75,6 +75,7 @@ import {
   aiScroll,
   aiSelect,
   aiSnapshot,
+  currentUiDomVersion,
   type UiToolOutcome
 } from '@/utils/ai-dom-tools'
 import { dispatchUiEvent, getPageHandler, useWorkspaceStore } from '@/stores/workspace'
@@ -600,7 +601,7 @@ async function dispatchFrontendTool(call: FrontendToolCall): Promise<FrontendToo
 const DEDUPE_TOOL_NAMES: ReadonlySet<string> = new Set(['ui_snapshot', 'ui_scroll', 'ui_highlight', 'navigate_to'])
 
 /**
- * 去重作用域 = `runId + 页面 epoch`；完整键 = 作用域 + 工具名 + 规范化 args。
+ * 去重作用域 = `runId + 页面 epoch + 界面写入版本`；完整键 = 作用域 + 工具名 + 规范化 args。
  *
  * <h2>为什么 epoch 必须进键（第 7 项）</h2>
  * `ui_snapshot` 的结果是对**某一份 DOM 现场**的描述，而 ref 的生命周期由 epoch 定义：
@@ -609,19 +610,26 @@ const DEDUPE_TOOL_NAMES: ReadonlySet<string> = new Set(['ui_snapshot', 'ui_scrol
  * （连头行的 epoch 都是旧的），据此操作旧 ref 必被元素围栏以「epoch 不匹配」拒执，白跑一轮；
  * 更糟的是它没有任何理由怀疑这份"成功"的快照已过期。
  *
+ * <h2>为什么写入版本也要进键（FE-33 层②）</h2>
+ * 这是与 `ai-dom-tools` 快照缓存**不同的第二层**：`ui_snapshot` 在同轮同 epoch 的同参调用
+ * 直接返回上一次的回灌文本。AI 自己 `ui_fill` / `ui_click` 之后 epoch 不动，于是"动作后
+ * 再拍一张确认"拿回的是**动作前**的画面 —— 模型判没生效，再点一次，勾选被点回原态。
+ * `currentUiDomVersion()` 在每次真实写入（含撤销）与换轮时推进，写动作 ⇒ 新作用域 ⇒
+ * 清表重拍；**没有写动作时仍去重**（既有能力不丢）。
+ *
  * <h2>为什么作用域一变就整表清空</h2>
- * 旧 epoch 的条目按定义不可达（键里带着 epoch），留着只是内存垃圾；清表也让
- * "换页 / 注册 / 注销 / 显式推进 ⇒ 新现场，同参也要重新遍历 DOM"这条语义在代码里可读。
- * 同 epoch 同参仍走去重（不因绑定 epoch 而丢掉既有的去重能力）。
+ * 旧作用域的条目按定义不可达（键里带着作用域），留着只是内存垃圾；清表也让
+ * "换页 / 注册 / 注销 / 显式推进 / 写动作 ⇒ 新现场，同参也要重新遍历 DOM"这条语义在代码里可读。
+ * 同作用域同参仍走去重（不因绑定现场而丢掉既有的去重能力）。
  */
 let dedupeScope = ''
 const dedupeCache = new Map<string, FrontendToolExecution>()
 
 /** 一次去重的槽位：`scope` 用于判定现场是否换过，`key` 是完整去重键。 */
 interface DedupeSlot {
-  /** `runId|epoch` */
+  /** `runId|epoch|写入版本` */
   scope: string
-  /** `runId|epoch|工具名|规范化 args` */
+  /** `runId|epoch|写入版本|工具名|规范化 args` */
   key: string
 }
 
@@ -630,7 +638,7 @@ function dedupeSlotOf(call: FrontendToolCall): DedupeSlot | null {
   if (call.runId === undefined || call.runId === '' || !DEDUPE_TOOL_NAMES.has(call.name)) {
     return null
   }
-  const scope = `${call.runId}|${currentAiEpoch()}`
+  const scope = `${call.runId}|${currentAiEpoch()}|${currentUiDomVersion()}`
   return { scope, key: `${scope}|${call.name}|${stableArgsKey(call.args)}` }
 }
 

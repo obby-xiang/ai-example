@@ -415,8 +415,14 @@ public class LeaseService {
 	/** 上次 {@code PING} 自证的时刻（毫秒；{@link #facilityHealthy()} 的节流锚点）。 */
 	private final java.util.concurrent.atomic.AtomicLong lastHealthProbeMs = new java.util.concurrent.atomic.AtomicLong();
 
-	/** 上次 {@code PING} 自证的结论（节流窗口内复用）。 */
-	private volatile boolean lastProbeOk = true;
+	/**
+	 * 上次 {@code PING} 自证的结论（节流窗口内复用）。
+	 *
+	 * <p><b>初值 false = "还没有结论"</b>：{@code facilityHealthy} 为假说明设施刚被观测到失败，
+	 * 此时"尚未探出结论"不能当"健康"。旧实现初值为 true，一次在飞探针期间的并发判定会拿到它，
+	 * 把"设施已知不可用"读成"从未持租 ⇒ 可写"。
+	 */
+	private volatile boolean lastProbeOk;
 
 	/** 设施健康自证的最小间隔（毫秒）：避免断连时每帧/每笔写都等一次 PING 超时。 */
 	private static final long HEALTH_PROBE_INTERVAL_MS = 1000L;
@@ -560,7 +566,7 @@ public class LeaseService {
 			return interpret(key, holder, viewKey, raw);
 		}
 		catch (Exception ex) {
-			this.facilityHealthy = false;
+			markFacilityUnhealthy();
 			log.warn("租约抢用降级 key={} owner={}（Redis 不可用 ⇒ 调用方走进程内互斥）：{}", key, holder,
 					ex.getMessage());
 			return new AcquireResult(AcquireOutcome.UNAVAILABLE, null);
@@ -653,7 +659,7 @@ public class LeaseService {
 			return Hold.LOST;
 		}
 		catch (Exception ex) {
-			this.facilityHealthy = false;
+			markFacilityUnhealthy();
 			markEnded(viewKey, LeaseAuthority.UNAVAILABLE);
 			log.warn("租约归属校验降级 key={} owner={} epoch={}（Redis 不可用 ⇒ 只读，不推进）：{}", key, holder,
 					epoch, ex.getMessage());
@@ -701,7 +707,7 @@ public class LeaseService {
 			return RenewOutcome.LOST;
 		}
 		catch (Exception ex) {
-			this.facilityHealthy = false;
+			markFacilityUnhealthy();
 			markEnded(viewKey, LeaseAuthority.UNAVAILABLE);
 			log.debug("租约续期失败 key={} epoch={}：{}", lease.key(), lease.epoch(), ex.getMessage());
 			return RenewOutcome.UNAVAILABLE;
@@ -734,7 +740,7 @@ public class LeaseService {
 			return released != null && released > 0L;
 		}
 		catch (Exception ex) {
-			this.facilityHealthy = false;
+			markFacilityUnhealthy();
 			log.debug("租约释放失败 key={} epoch={}：{}", lease.key(), lease.epoch(), ex.getMessage());
 			return false;
 		}
@@ -818,6 +824,11 @@ public class LeaseService {
 	 * <p>正常路径零额外往返（上一次成功命令已把 {@code facilityHealthy} 置真）。只有观测到失败后
 	 * 才做一次有节流的 {@code PING}：断连时每帧都等 PING 超时会把流式路径拖垮。
 	 * {@code PING} 成功即恢复"正常"——Redis 恢复后不需要重启进程。
+	 *
+	 * <p><b>节流窗口内复用的结论永远不会比最后一次观测更乐观</b>：任何一次观测到失败都会把
+	 * {@code lastProbeOk} 一起作废（{@link #markFacilityUnhealthy}），所以这里不可能返回一个
+	 * "设施其实刚刚已经坏了"的 {@code true}。探针在飞时（抢不到节流令牌 / 未出结论）同样返回
+	 * 缓存值 —— 此时缓存已被失败观测置假，结果是"状态不可知 ⇒ 只读"，不会放大成可写。
 	 */
 	private boolean facilityHealthy() {
 		if (this.facilityHealthy) {
@@ -838,6 +849,17 @@ public class LeaseService {
 			log.info("租约设施自证恢复（PING 成功）：写权限回到「从未持租 ⇒ 普通写」口径");
 		}
 		return ok;
+	}
+
+	/**
+	 * 观测到设施失败：<b>同时</b>作废"设施正常"与"上一拍探针结论"两份记忆。
+	 *
+	 * <p>只清前者不够：探针结论有 1s 节流，若仍留下上一次的 {@code true}，节流窗口内的
+	 * {@link #authority} 会把"设施刚刚已经坏了"读成 {@code NEVER_HELD}（可写）。
+	 */
+	private void markFacilityUnhealthy() {
+		this.facilityHealthy = false;
+		this.lastProbeOk = false;
 	}
 
 	/** 记一次"这一任已结束"的墓碑；LOST 是终局，不会被随后的 UNAVAILABLE 覆盖。 */
@@ -991,7 +1013,7 @@ public class LeaseService {
 			return ok;
 		}
 		catch (Exception ex) {
-			this.facilityHealthy = false;
+			markFacilityUnhealthy();
 			log.debug("租约探针失败：{}", ex.getMessage());
 			return false;
 		}

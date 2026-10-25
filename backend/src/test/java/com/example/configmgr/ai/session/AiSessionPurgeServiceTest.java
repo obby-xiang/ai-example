@@ -441,7 +441,11 @@ class AiSessionPurgeServiceTest {
 		AiSessionPurgeService.PurgeResult result = service.purge(SESSION_A, "test");
 
 		assertThat(result.complete()).isTrue();
-		org.mockito.Mockito.verify(spyStore, org.mockito.Mockito.never()).get("run-b");
+		// RT-28：销毁<b>枚举</b>阶段仍只用本会话索引（不逐个反序列化他会话快照做候选发现）；
+		// 但删除尾部必须按全局索引做一次"本会话 run 残留"复核（哨兵在、成员缺时唯一的兜底）——
+		// 他会话的 run 因此至多被读一次快照，且**不会被当成候选**。
+		assertThat(result.runs()).extracting(AiSessionPurgeService.RunView::runId).containsExactly("run-a");
+		org.mockito.Mockito.verify(spyStore, org.mockito.Mockito.atMost(1)).get("run-b");
 		assertThat(this.fixture.fake.sets.getOrDefault(RunStore.RUN_INDEX, Set.of())).contains("run-b");
 		assertThat(this.fixture.fake.strings).containsKey(this.fixture.store.runKey("run-b"));
 		assertThat(this.fixture.store.sessionRunIndex(SESSION_A).runIds()).isEmpty();
@@ -531,7 +535,10 @@ class AiSessionPurgeServiceTest {
 
 		assertThat(report.completed()).isEqualTo(1);
 		assertThat(report.failed()).isZero();
-		assertThat(this.fixture.pendingStore.current(SESSION_A)).as("完成后 pending 必须移除").isNull();
+		// fix4：complete 后不再立刻移除台账 —— 保留为"一次性记忆复核"（崩溃残留补偿），到点后才移除。
+		// API 语义不变：report.completed()/PurgeResult.complete() 仍然是"删除主体完成"。
+		assertThat(this.fixture.pendingStore.current(SESSION_A))
+			.as("完成后保留一次性记忆复核台账（fix4）").isNotNull();
 		assertThat(this.fixture.fake.strings).doesNotContainKey(this.fixture.store.runKey("run-a"));
 		assertThat(this.fixture.fake.strings).doesNotContainKey(RunStore.CONTEXT_PREFIX + SESSION_A);
 		assertThat(this.fixture.guard.isArmed(SESSION_A)).as("完成后进入有限保留期").isTrue();
@@ -575,7 +582,8 @@ class AiSessionPurgeServiceTest {
 
 		assertThat(report.recovered()).isEqualTo(1);
 		assertThat(report.completed()).isEqualTo(1);
-		assertThat(this.fixture.pendingStore.current(SESSION_A)).isNull();
+		// fix4：完成的那一轮会把台账改排成一次性记忆复核，因此台账此刻仍在（到点复核成功才移除）。
+		assertThat(this.fixture.pendingStore.current(SESSION_A)).isNotNull();
 	}
 
 	@Test
@@ -641,7 +649,8 @@ class AiSessionPurgeServiceTest {
 		SessionPurgeRetryRunner.RetryReport report = runner.runOnce(System.currentTimeMillis() + 3_600_000L);
 
 		assertThat(report.completed()).isEqualTo(1);
-		assertThat(this.fixture.pendingStore.current(SESSION_A)).isNull();
+		// fix4：同上 —— 保留一次性记忆复核台账。
+		assertThat(this.fixture.pendingStore.current(SESSION_A)).isNotNull();
 		assertThat(this.fixture.fake.strings).doesNotContainKey(this.fixture.store.runKey("run-a"));
 	}
 
@@ -817,6 +826,218 @@ class AiSessionPurgeServiceTest {
 	private int countChat(String sessionId) {
 		return this.fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ai_chat_message WHERE session_id = ?",
 				Integer.class, sessionId);
+	}
+
+	// ── fix4：complete 之后的一次有界"记忆面"复核（crash 残留补偿） ────────────
+
+	/**
+	 * <b>RED（fix4）：complete=true 之后必须保留一次"只复核记忆面"的台账</b>。
+	 *
+	 * <h2>缺陷形态</h2>
+	 * 写者在 <b>RENAME 已生效、finally 复检完成之前</b> crash（JVM 死/线程被 Error 打断）时，
+	 * 销毁早已报 {@code complete=true} 并把 pending 移除 —— 那份额外落地到 {@code chat:mem:*} 的历史
+	 * <b>再没有人会清</b>，只能等 TTL。
+	 *
+	 * <h2>本批口径</h2>
+	 * complete 时不再立刻移除台账：把它保留到一次<b>短期</b> {@code verifyAt}（静态常量，不新增配置面），
+	 * 由既有 runner 到点只做记忆面 delete + staging + 删后复核，成功才移除台账。
+	 * <b>API 语义不变</b>：{@code complete=true} 仍表示"本次删除主体已完成"。
+	 */
+	@Test
+	void completedPurgeKeepsAOneShotVerifyPendingForCrashResidue() throws Exception {
+		seedFullSession(SESSION_A, "run-a", "call-a");
+
+		AiSessionPurgeService.PurgeResult result = this.fixture.service.purge(SESSION_A, "test");
+
+		assertThat(result.complete()).as("API 语义不变：删除主体仍然完成").isTrue();
+		assertThat(this.fixture.pendingStore.current(SESSION_A))
+			.as("complete 后必须保留一次记忆复核台账（否则 crash 残留永远无人清）").isNotNull();
+		assertThat(this.fixture.guard.isArmed(SESSION_A)).as("复核窗口内守卫必须仍 armed").isTrue();
+	}
+
+	/**
+	 * <b>RED（fix4）：崩溃残留只在"到点"后被清掉，且复核只碰记忆面（DB/附件/业务数据全不动）</b>。
+	 *
+	 * <p>崩溃残留直接用"最终键还在"表达（写者已死，没有任何代码再运行）——不依赖 sleep/线程运气；
+	 * 时间由 {@code runner.runOnce(nowMs)} 注入。
+	 */
+	@Test
+	void crashResidueIsRemovedOnlyAfterTheOneShotVerifyAndDbAttachmentsBusinessAreUntouched() throws Exception {
+		seedFullSession(SESSION_A, "run-a", "call-a");
+		assertThat(this.fixture.service.purge(SESSION_A, "test").complete()).isTrue();
+		// 模拟"RENAME 生效后、finally 复检前 crash"：最终键上留着整窗历史（写者不再运行）
+		List<String> lateHistory = List.of("{\"type\":\"USER\",\"content\":\"崩溃前的写回\"}",
+				"{\"type\":\"ASSISTANT\",\"content\":\"崩溃前的回答\"}");
+		this.fixture.fake.lists.put(this.fixture.memory.keyFor(SESSION_A), new ArrayList<>(lateHistory));
+		Path businessFile = writeFile("business-fix4.bin", "keep");
+		this.fixture.fake.strings.put("jobs", "business");
+		// 复核前后可能还有新的 DB 行（例如别的写口）：复核绝不能再删/增它们
+		this.fixture.jdbc.update("INSERT INTO ai_feedback (message_id, session_id, rating) VALUES (?, ?, ?)",
+				"msg-after-" + SESSION_A, SESSION_A, 1);
+		int feedbackBefore = countFeedback(SESSION_A);
+		int chatBefore = countChat(SESSION_A);
+
+		SessionPurgeRetryRunner runner = new SessionPurgeRetryRunner(this.fixture.pendingStore,
+				this.fixture.service, grantedLease());
+		long completeAt = System.currentTimeMillis();
+
+		SessionPurgeRetryRunner.RetryReport early = runner.runOnce(completeAt);
+		assertThat(early.attempted()).as("未到 verifyAt：一条都不许执行").isZero();
+		assertThat(this.fixture.fake.lists).as("未到点不得删（窗口内旧写者可能仍在收尾）")
+			.containsKey(this.fixture.memory.keyFor(SESSION_A));
+
+		runner.runOnce(completeAt + 120_000L);
+
+		assertThat(this.fixture.fake.lists).as("到点后崩溃残留必须删净")
+			.doesNotContainKey(this.fixture.memory.keyFor(SESSION_A));
+		assertThat(this.fixture.pendingStore.current(SESSION_A)).as("复核成功后台账才移除").isNull();
+		assertThat(countFeedback(SESSION_A)).as("复核不得再删 DB（行数不变）").isEqualTo(feedbackBefore);
+		assertThat(countChat(SESSION_A)).as("复核不得再增删 DB").isEqualTo(chatBefore);
+		assertThat(Files.exists(businessFile)).as("复核不得碰业务文件").isTrue();
+		assertThat(this.fixture.fake.strings).as("复核不得碰业务键").containsKey("jobs");
+		assertThat(this.fixture.guard.isArmed(SESSION_A)).as("复核后守卫仍按保留期 armed").isTrue();
+	}
+
+	/**
+	 * <b>复核失败沿用既有有界退避/MAX_ATTEMPTS 语义</b>：删不掉就不删台账、不 disarm，
+	 * 故障恢复后由同一条台账继续复核并删净（不重跑整轮销毁）。
+	 */
+	@Test
+	void failedVerifyKeepsThePendingAndSucceedsAfterTheFailureClears() throws Exception {
+		seedFullSession(SESSION_A, "run-a", "call-a");
+		assertThat(this.fixture.service.purge(SESSION_A, "test").complete()).isTrue();
+		this.fixture.fake.lists.put(this.fixture.memory.keyFor(SESSION_A), new ArrayList<>(List.of("{}")));
+		this.fixture.fake.failDeleteContaining = "chat:mem:";
+		SessionPurgeRetryRunner runner = new SessionPurgeRetryRunner(this.fixture.pendingStore,
+				this.fixture.service, grantedLease());
+		long completeAt = System.currentTimeMillis();
+
+		SessionPurgeRetryRunner.RetryReport failed = runner.runOnce(completeAt + 120_000L);
+
+		assertThat(failed.failed()).isEqualTo(1);
+		assertThat(this.fixture.pendingStore.current(SESSION_A)).as("复核失败不得删台账").isNotNull();
+		assertThat(this.fixture.fake.lists).as("残留仍在（如实失败）").containsKey(this.fixture.memory.keyFor(SESSION_A));
+		assertThat(this.fixture.guard.isArmed(SESSION_A)).as("失败不得 disarm").isTrue();
+
+		this.fixture.fake.failDeleteContaining = null;
+		runner.runOnce(completeAt + 240_000L);
+
+		assertThat(this.fixture.fake.lists).as("恢复后同一条台账继续复核并删净")
+			.doesNotContainKey(this.fixture.memory.keyFor(SESSION_A));
+		assertThat(this.fixture.pendingStore.current(SESSION_A)).isNull();
+	}
+
+	/**
+	 * <b>老台账 JSON（没有 {@code verifyAtMs}）必须逐字兼容</b>：解析成"普通待重试"，
+	 * 由 runner 走原有 retry 路径（不是复核态）；retry 完成后同样转入一次性记忆复核。
+	 */
+	@Test
+	void legacyPendingJsonWithoutVerifyFieldIsTreatedAsANormalRetry() {
+		String legacyJson = "{\"sessionId\":\"" + SESSION_A + "\",\"purgeId\":\"purge-old\",\"requestedBy\":\"t\","
+				+ "\"attempts\":0,\"nextAtMs\":1000,\"createdAtMs\":1000,\"lastError\":null}";
+		this.fixture.fake.strings.put(SessionPurgeGuard.PENDING_PREFIX + SESSION_A, legacyJson);
+
+		SessionPurgeRetryRunner runner = new SessionPurgeRetryRunner(this.fixture.pendingStore,
+				this.fixture.service, grantedLease());
+		SessionPurgeRetryRunner.RetryReport report = runner.runOnce(10_000L);
+
+		assertThat(report.attempted()).as("老 JSON 必须能解析，并走普通 retry（本会话无数据也照样收敛）")
+			.isEqualTo(1);
+		assertThat(report.completed()).isEqualTo(1);
+		assertThat(this.fixture.pendingStore.current(SESSION_A)).as("retry 完成后转入一次性记忆复核").isNotNull();
+	}
+
+	// ── 复核阶段的独立预算（fix5 / M-7） ────────────────────────────────────
+
+	/**
+	 * <b>RED（fix5 / M-7）：台账已经耗尽 {@code MAX_ATTEMPTS}，之后那次成功销毁排出的 60s 记忆复核仍必须执行</b>。
+	 *
+	 * <p>真实路径：销毁主体连续失败/延后把 {@code attempts} 推到上限（这里用台账 API 精确铺出同一状态，
+	 * 不靠 sleep/时钟运气）→ 运维再发一次 DELETE，这次主体成功 → {@code scheduleVerify} 排一次记忆复核 →
+	 * runner 到点执行。修复前 {@code scheduleVerify} 原样保留 {@code attempts=10}，而 runner 的
+	 * {@code attempts >= MAX_ATTEMPTS} 短路排在复核分支<b>之前</b> ⇒ 复核 <b>0 次</b>：
+	 * 崩溃残留只能等记忆键自身 TTL，pending/守卫/队列项永久驻留。
+	 */
+	@Test
+	void verifyStillRunsAfterTheLedgerAlreadyBurnedItsRetryBudget() throws Exception {
+		seedFullSession(SESSION_A, "run-a", "call-a");
+		String purgeId = "purge-exhausted";
+		this.fixture.pendingStore.register(SESSION_A, purgeId, "test", 1_000L);
+		for (int attempt = 0; attempt < SessionPurgeRetryRunner.MAX_ATTEMPTS; attempt++) {
+			assertThat(this.fixture.pendingStore.recordFailure(SESSION_A, purgeId, "boom")).isTrue();
+		}
+		assertThat(this.fixture.pendingStore.current(SESSION_A).attempts())
+			.as("前置：台账已耗尽历史自动尝试")
+			.isEqualTo(SessionPurgeRetryRunner.MAX_ATTEMPTS);
+
+		// 耗尽之后重发 DELETE（复用同一台账），这次删除主体成功 ⇒ 排一次记忆复核。
+		AiSessionPurgeService.PurgeResult result = this.fixture.service.purge(SESSION_A, "test");
+		assertThat(result.complete()).as("API 语义不变：删除主体仍然完成").isTrue();
+		SessionPurgePendingStore.Pending scheduled = this.fixture.pendingStore.current(SESSION_A);
+		assertThat(scheduled).as("complete 后仍留一条待复核台账").isNotNull();
+		assertThat(scheduled.verifyAtMs()).isNotNull();
+		int feedbackAfterPurge = countFeedback(SESSION_A);
+		int chatAfterPurge = countChat(SESSION_A);
+
+		// 崩溃残留：RENAME 已生效、写者在复检完成前死掉 ⇒ 最终键上留着历史。
+		this.fixture.fake.lists.put(this.fixture.memory.keyFor(SESSION_A),
+				new ArrayList<>(List.of("{\"type\":\"USER\",\"content\":\"崩溃前的写回\"}")));
+		SessionPurgeRetryRunner runner = new SessionPurgeRetryRunner(this.fixture.pendingStore,
+				this.fixture.service, grantedLease());
+		long completeAt = System.currentTimeMillis();
+
+		SessionPurgeRetryRunner.RetryReport report = runner.runOnce(completeAt + 120_000L);
+
+		assertThat(report.attempted()).as("复核必须真的被执行（修复前被 attempts 短路，恒为 0）").isEqualTo(1);
+		assertThat(report.completed()).isEqualTo(1);
+		assertThat(scheduled.attempts()).as("复核是新阶段：自带一次有界预算，不从耗尽的旧计数继续").isZero();
+		assertThat(this.fixture.fake.lists).as("到点后崩溃残留必须删净").doesNotContainKey(
+				this.fixture.memory.keyFor(SESSION_A));
+		assertThat(this.fixture.pendingStore.current(SESSION_A)).as("复核成功后台账才移除（不永久驻留）").isNull();
+		assertThat(countFeedback(SESSION_A)).as("复核不得再删 DB").isEqualTo(feedbackAfterPurge);
+		assertThat(countChat(SESSION_A)).as("复核不得再删 DB").isEqualTo(chatAfterPurge);
+	}
+
+	/**
+	 * <b>反例锁（fix5）：普通待重试台账的上限与退避逐字不变</b>。
+	 *
+	 * <p>复核的新预算只属于"删除主体已完成"这一新阶段；普通 pending（{@code verifyAtMs == null}）
+	 * 到 {@code MAX_ATTEMPTS} 后仍然只 defer —— 不执行 retry（一个业务数据都不动）、不重置 attempts、
+	 * 下一轮也不会偷偷再试（没有无限重试）。
+	 */
+	@Test
+	void exhaustedNormalPendingStillOnlyDefersAndKeepsItsAttemptBudget() throws Exception {
+		seedFullSession(SESSION_A, "run-a", "call-a");
+		String purgeId = "purge-normal";
+		this.fixture.pendingStore.register(SESSION_A, purgeId, "test", 1_000L);
+		for (int attempt = 0; attempt < SessionPurgeRetryRunner.MAX_ATTEMPTS; attempt++) {
+			assertThat(this.fixture.pendingStore.recordFailure(SESSION_A, purgeId, "boom")).isTrue();
+		}
+		SessionPurgeRetryRunner runner = new SessionPurgeRetryRunner(this.fixture.pendingStore,
+				this.fixture.service, grantedLease());
+		long later = System.currentTimeMillis() + 3_600_000L;
+
+		SessionPurgeRetryRunner.RetryReport report = runner.runOnce(later);
+
+		assertThat(report.attempted()).as("普通台账耗尽后不得再执行第 11 次").isZero();
+		assertThat(report.skipped()).isEqualTo(1);
+		SessionPurgePendingStore.Pending pending = this.fixture.pendingStore.current(SESSION_A);
+		assertThat(pending).as("耗尽项仍是有主的 durable 台账（手动 DELETE 可续）").isNotNull();
+		assertThat(pending.attempts()).as("defer 不得重置 attempts").isEqualTo(SessionPurgeRetryRunner.MAX_ATTEMPTS);
+		assertThat(pending.verifyAtMs()).isNull();
+		assertThat(pending.nextAtMs()).as("nextAt 必须推到有界未来").isGreaterThan(later);
+		assertThat(this.fixture.fake.lists).as("不得执行 retry：记忆仍在")
+			.containsKey(this.fixture.memory.keyFor(SESSION_A));
+		assertThat(countFeedback(SESSION_A)).as("不得执行 retry：DB 行仍在").isEqualTo(1);
+		assertThat(countChat(SESSION_A)).as("不得执行 retry：DB 行仍在").isEqualTo(1);
+		assertThat(this.fixture.fake.strings).as("没有成功销毁就不得装墓碑（守卫只因 pending 仍 armed）")
+			.doesNotContainKey(this.fixture.guard.keyFor(SESSION_A));
+
+		SessionPurgeRetryRunner.RetryReport next = runner.runOnce(later + 1_000L);
+		assertThat(next.attempted()).as("推到有界未来后没到点 ⇒ 依然一次都不执行").isZero();
+		assertThat(this.fixture.pendingStore.current(SESSION_A).attempts())
+			.as("跨轮也不得重置 attempts")
+			.isEqualTo(SessionPurgeRetryRunner.MAX_ATTEMPTS);
 	}
 
 	// ── 装配 ────────────────────────────────────────────────────────────────
