@@ -101,8 +101,12 @@ import java.util.concurrent.atomic.AtomicLong;
  * + 一个 CAS drain 独占标志：入队后 CAS 抢占 drain 权，抢不到说明在跑的 drain 会带走新帧
  * —— 单订阅者 FIFO 且一条慢连接至多占一个工作线程，慢订阅者的 TCP 背压不再阻塞整轮
  * （含心跳与同轮其他订阅者）；</li>
- * <li><b>drain 收尾顺序固定（R2）</b>：先清 CAS 独占标志、再复查队列非空则重新 CAS 抢回
- * —— 倒序会丢"判空 → 他线程入队 CAS 失败 → 清标志退出"的 drain 窗口；</li>
+ * <li><b>drain 收尾顺序固定（R2 + L-143）</b>：先清 CAS 独占标志、再<b>抢回</b>投递权后判空 ——
+ * 倒序会丢"判空 → 他线程入队 CAS 失败 → 清标志退出"的 drain 窗口；而"抢回"是收尾的前置条件：
+ * 抢不到说明另一个 drain 可能已取走尾帧、尚未写出，旧 drain 若此刻 {@code completeOne} 会抢在
+ * 写出前关闭连接（W-01）。释放后的那一拍还要同时观察<b>终态收尾意图</b>：{@code completeWhenDrained}
+ * 的 CAS 失败（本 drain 仍持权）后，责任回到本线程，只看帧面会漏掉它（I-1）；
+ * <b>handoff 与 complete 二选一</b>，不靠无限等待兜底；</li>
  * <li><b>池拒绝语义（R3）</b>：池任务提交被拒（池队列满）时摘除触发本次提交的订阅者
  * （显式 {@code emitter.complete()}，前端 onerror/onclose 后带 lastSeq 重挂补帧）；</li>
  * <li><b>溢出摘除 = 主动断连（S2-1）</b>：实时队列满即摘除并 complete，不静默丢帧
@@ -124,7 +128,13 @@ import java.util.concurrent.atomic.AtomicLong;
  * 轮终态线程的 {@code finally}，同步等排空会拖住轮次收尾）；</li>
  * <li><b>回放批豁免（R1 裁决）</b>：{@code replayAndAttach} 锁内收集回放帧（{@code LRANGE}
  * 只读，不做 IO 写）入队不受实时容量 256 约束，上界 = 归档窗口 {@code EVENT_WINDOW}
- * （3000，{@code RunStore#events} 天然裁剪）——"队列容量 &lt; 归档窗口"不变量只约束实时段。</li>
+ * （3000，{@code RunStore#events} 天然裁剪）——"队列容量 &lt; 归档窗口"不变量只约束实时段；</li>
+ * <li><b>重挂收尾口径（L-143）</b>：快照终态的写入早于 {@code done} 落档，故 {@code terminal}
+ * 参数不决定是否订阅 —— <b>归档里有没有终帧</b>才决定"回放完收尾"还是"留挂等实时终帧"；
+ * 差量空回放但 {@code lastSeq == done.seq} 由尾部探测关闭。保留挂接的边界：进程若死在
+ * "快照终态、done 未落档"之间，连接会一直 loading，<b>由前端看门狗收敛</b>（本轮不加服务端
+ * 定时器）。反向窗口（快照非终态、回放已含终帧即收尾）的前提是<b>终帧之后不再追加业务帧</b> ——
+ * 该前提在协议侧由"恰好一个 done/error 且它是最后一帧"保证。</li>
  * </ul>
  *
  * <h2>包②：SSE 写侧超时预算（{@link SseWriteBudget}）</h2>
@@ -592,7 +602,8 @@ public class SseChatEmitter {
 	 * 为什么必须原子：{@code 回放 → attach} 两段之间若有实时帧写出，那一帧既不在回放快照里、
 	 * 也还没被这个订阅者接住 = 丢帧窗口（且 SSE 丢帧不报错，只会静默少一段）。
 	 *
-	 * @param terminal true = 该轮已终态（回放完即收尾，不再订阅）
+	 * @param terminal 该轮快照是否已终态（只作诊断口径：真正决定"回放完是否收尾"的是
+	 * 归档里有没有 {@code done}/{@code error}，见 {@link #replayAndAttachWithStatus}）
 	 * @return 实际入队的回放帧数（异步写出前的入队口径）
 	 */
 	public int replayAndAttach(SseEmitter emitter, Long lastSeq, boolean terminal) {
@@ -605,37 +616,105 @@ public class SseChatEmitter {
 	 * <p>降级（末号探测/XRANGE 失败）时<b>不得</b>把空结果当"正常空回放"直接 {@code completeOne}：
 	 * 终态轮会以"什么都没发生"收尾，前端拿不到 {@code done}。生产入口（AiController）在调用前
 	 * 还会用 {@link FrameStore#lastSeqIfKnown} 预检并回 503；这里保留第二道防线。
+	 *
+	 * <p>
+	 * <b>L-143：收尾判据 = 归档里有没有终帧，而不是快照是否终态。</b>终态快照的写入早于
+	 * {@code done} 帧的落档（{@code ResilientChatService#finish} 的顺序是
+	 * {@code store.save(DONE)} → 记忆/遥测收敛 → {@code out.done} → {@code out.complete}）。
+	 * 若在这里按"快照终态"就不挂订阅，回放排空后立即 EOF，随后才落档的 {@code done}
+	 * 永远到不了这条连接 —— 重连者看到的是"整轮没有 done"。
+	 * <ul>
+	 * <li>回放已读到 {@code done}/{@code error}：回放排空后收尾（客户端已拿到终帧）；</li>
+	 * <li>回放没有终帧、本轮也还没 {@code complete}：<b>保留原子挂接</b>，等实时
+	 * {@code done}/{@code error} 到达后再由 {@link #complete()} 统一收尾；</li>
+	 * <li>反向窗口（快照非终态但回放已含终帧）：同样回放完即收尾 —— 否则连接挂在一个
+	 * 已经结束的轮次上，永远等不到下一帧。该分支的前提是<b>终帧之后不再追加业务帧</b>
+	 * （协议保证恰好一个 {@code done}/{@code error} 且它是最后一帧）；</li>
+	 * </ul>
+	 * 差量读为空时还要探一格归档尾部（{@link #tailFrameIsTerminal}）：{@code lastSeq}
+	 * 恰好等于 {@code done.seq}（客户端收到 done 后连接才断）时，差量里看不到终帧，
+	 * 不能据此又挂上去等一个永远不会再发的 done。
+	 *
+	 * <p>
+	 * <b>边界（如实保留）</b>：保留挂接只保证"写方还活着并会发终帧"的正常收尾窗口。进程若死在
+	 * 快照终态与 {@code done} 落档之间，连接会一直 loading —— 由<b>前端看门狗</b>收敛，
+	 * 本轮<b>不</b>加服务端定时器（也不把无限等待当作其它竞态的兜底）。
 	 */
 	public ReplayResult replayAndAttachWithStatus(SseEmitter emitter, Long lastSeq, boolean terminal) {
-		Subscription sub = new Subscription(emitter, terminal);
+		Subscription sub = new Subscription(emitter, false);
 		synchronized (this.emitLock) {
 			// I-1：**先挂订阅（含唤醒订阅）再读回放**。旧顺序（读档 → 挂订阅）之间落档的帧
 			// 谁也接不住：回放快照已读完、唤醒订阅还没建立，而挂起/终局帧之后不会再有下一次唤醒
 			// ⇒ B 侧连接永远等不到那一帧。两段同在 emitLock 内，先挂不会改变"回放帧先于实时帧入队"
 			// 的 FIFO 语义（实时入队同样要求这把锁）。
-			if (!terminal) {
-				attachSubscription(sub);
+			attachSubscription(sub);
+			ReplayResult plan;
+			try {
+				plan = stageReplay(sub, lastSeq);
 			}
-			ReplayResult plan = stageReplay(sub, lastSeq);
+			catch (RuntimeException ex) {
+				// M-2：回放读取抛异常（兼容读口 RunStoreFrameStore 不在 FrameStore#readFrom 的
+				// "不抛"承诺内）时，刚挂上的订阅必须摘掉：它留在订阅表里会挡住唤醒订阅的释放，
+				// 而这条连接根本不会交给客户端（异常让 controller 走错误响应）。
+				// 异常原样上抛，由 API 层决定 5xx。
+				closeSubscription(sub, "回放读取异常：" + ex.getClass().getSimpleName());
+				throw ex;
+			}
 			if (plan.degraded()) {
 				log.warn("回放降级 runId={} terminal={} lastSeq={} staged={}（发 typed error 后收尾，不按正常空回放）",
 						this.runId, terminal, lastSeq, plan.staged());
 				finishDegradedReplay(sub, plan);
 				return plan;
 			}
-			if (terminal) {
-				if (plan.staged() == 0) {
-					completeOne(sub);
-				}
-				else {
+			boolean archivedTerminal = plan.terminalFrame()
+					|| (plan.staged() == 0 && tailFrameIsTerminal(lastSeq));
+			// 归档没有终帧且本轮还没收尾 ⇒ 后面还有（或即将有）实时帧，订阅必须留着。
+			boolean waitForLiveTerminalFrame = !archivedTerminal && !this.terminating.get();
+			if (waitForLiveTerminalFrame) {
+				if (plan.staged() > 0) {
 					kickDrain(sub);
 				}
+				return plan;
 			}
-			else if (plan.staged() > 0) {
+			// 回放已含终帧（或本轮已 complete，不会再有新帧）：排空回放后收尾，不悬挂。
+			sub.terminating = true;
+			if (sub.queue.isEmpty()) {
+				completeOne(sub);
+			}
+			else {
 				kickDrain(sub);
 			}
 			return plan;
 		}
+	}
+
+	/**
+	 * 探一格归档尾部：{@code lastSeq} 那一帧是否是 {@code done}/{@code error}。
+	 *
+	 * <p>
+	 * 只在"差量回放为空且没读到终帧"时调用。{@code lastSeq} = 客户端已收到的最大号；
+	 * 若那恰好就是终帧（客户端收完 done 后连接才断），差量读（{@code seq > lastSeq}）自然是空的，
+	 * 但本轮<b>确实已经结束</b>，再挂订阅就会一直等一个不会再发的 done。
+	 *
+	 * <p>探测失败（读抖动/兼容读口抛异常）一律按"没探到"处理：宁可多挂一次，不误关活连接。
+	 */
+	private boolean tailFrameIsTerminal(Long lastSeq) {
+		if (lastSeq == null || lastSeq <= 0L) {
+			return false;
+		}
+		List<Map<String, Object>> tail;
+		try {
+			tail = this.frames.readFrom(this.runId, lastSeq - 1L, 1);
+		}
+		catch (Exception ex) {
+			log.debug("回放终帧探测失败 runId={} lastSeq={}：{}", this.runId, lastSeq, ex.getMessage());
+			return false;
+		}
+		if (tail == null || tail.isEmpty()) {
+			return false;
+		}
+		String type = String.valueOf(tail.get(0).get("type"));
+		return "done".equals(type) || "error".equals(type);
 	}
 
 	/**
@@ -712,7 +791,8 @@ public class SseChatEmitter {
 				log.error("降级回放错误帧序列化失败 runId={}：{}", this.runId, ex.getMessage());
 			}
 		}
-		// terminal 订阅本就会在队空后 complete；terminating 让非终态回放同样收尾（不悬挂）。
+		// terminating 让回放订阅在队列排空后收尾（无论快照终态与否；L-143 起回放订阅一律挂在
+		// 订阅表里，收尾判据统一走 drain 的队空分支）。
 		sub.terminating = true;
 		kickDrain(sub);
 	}
@@ -1437,9 +1517,17 @@ public class SseChatEmitter {
 	 * 把队列里的帧按 FIFO 写给一个订阅者（T3-1：一条慢连接至多占一个工作线程）。
 	 *
 	 * <p>
-	 * <b>R2 收尾顺序（固定，不可调换）</b>：先清 CAS 独占标志，再复查队列非空则重新 CAS
-	 * 抢回并补投 —— 若先复查后清标志，"判空 → 他线程入队后 CAS 失败（以为有在跑 drain）
-	 * → 清标志退出"会让那一帧永远无人投递（drain 窗口丢失）。
+	 * <b>R2 收尾顺序（固定，不可调换）</b>：先清 CAS 独占标志，再<b>抢回</b>并复查 —— 若先复查后清标志，
+	 * "判空 → 他线程入队后 CAS 失败（以为有在跑 drain）→ 清标志退出"会让那一帧永远无人投递
+	 * （drain 窗口丢失）。
+	 *
+	 * <p>
+	 * <b>L-143/W-01：抢回是收尾的前置条件。</b>抢不到标志 ⇒ 已有另一个 drain 持有投递权
+	 * （生产者 kick 或上一轮接管），它可能刚 `poll` 走尾帧、还没进 {@code writeFrame}
+	 * （{@code writeInFlight} 尚未置位）。此时旧 drain 若再看 {@code queue.isEmpty()} 就会误判
+	 * "队列已空"并 {@code completeOne}，抢在写出前关闭 emitter ⇒ 帧静默丢失。故：
+	 * <b>抢不到就只退出</b>（收尾归持权者）；抢到且还有帧 ⇒ 提交接管 drain 后也只退出
+	 * （handoff 与 complete 二选一）；抢到且队列真空 ⇒ 判空稳定，才允许收尾。
 	 *
 	 * <p>
 	 * <b>修复批第 2 轮的两点加固</b>：① 复查里的 CAS 移到<b>整条条件链的最后</b>（前置条件
@@ -1464,14 +1552,52 @@ public class SseChatEmitter {
 			}
 		}
 		finally {
-			sub.draining.set(false);
-			if (canTakeOverDrain(sub) && sub.draining.compareAndSet(false, true)) {
-				submitDrain(sub);
+			finishDrain(sub);
+		}
+	}
+
+	/**
+	 * drain 收尾：先清投递权，再按"帧面 + 终态收尾意图"决定 handoff / complete / 退出。
+	 *
+	 * <p>
+	 * <b>L-143/W-01：收尾前必须重新持权。</b>抢不到标志 ⇒ 另一个 drain 可能已经 `poll` 走尾帧、
+	 * 还没进 {@code writeFrame}（{@code writeInFlight} 尚未置位）；此时若按 {@code queue.isEmpty()}
+	 * 收尾，会抢在写出前关闭 emitter（SSE 完成后写必然失败 = 静默丢帧）。故 handoff 与 complete
+	 * 二选一，且判空只在本线程持权时做。
+	 *
+	 * <p>
+	 * <b>L-143/I-1：释放后的观察必须同时看终态收尾意图。</b>{@code completeWhenDrained} 先写
+	 * {@code sub.terminating=true}、再 CAS 拿投递权；若因本 drain 持权而失败，那次写一定发生在
+	 * <b>本线程本次释放之前</b>。本线程在释放<b>之后</b>重新观察，必然读到它（volatile）并回到
+	 * 持权拍完成收尾；若由其他持权者接管，它的 {@code finishDrain} 也会重新观察。
+	 * 同一拍还要接住"释放瞬间入队、生产者 kick 失败"的帧（R2 的丢唤醒窗口）。
+	 */
+	private void finishDrain(Subscription sub) {
+		sub.draining.set(false);
+		while (true) {
+			if (!sub.draining.compareAndSet(false, true)) {
+				// 别的 drain（生产者 kick 或上一轮接管）持有投递权：帧与收尾都归它。
+				return;
 			}
-			// S1-1：终态（回放批 sub.terminal / 轮终态 sub.terminating）只在队列<b>真正空了</b>
-			// 才收尾 —— drain 可能因补投而多跑一轮，早一步 complete 就丢掉队列里还没写出的尾帧。
-			if ((sub.terminal || sub.terminating) && sub.queue.isEmpty()) {
+			if (canTakeOverDrain(sub)) {
+				// 还有帧没写完：交给新 drain，收尾也只能由它做（handoff 与 complete 二选一）。
+				submitDrain(sub);
+				return;
+			}
+			if (!sub.closed && (sub.terminal || sub.terminating) && sub.queue.isEmpty()) {
+				// S1-1：终态只在队列<b>真正空了</b>才收尾。判空发生在<b>持权期间</b>，没有别的
+				// drain 能在这中间取走帧，因此这个判空是稳定的。
 				completeOne(sub);
+				return;
+			}
+			sub.draining.set(false);
+			// 释放后再观察一拍：帧面（生产者 kick 失败的帧）与终态收尾意图（completeWhenDrained
+			// 的 CAS 失败）都只能由本线程接住；都没有才允许退出。终态意图必须在 canTakeOverDrain
+			// <b>之后</b>读：它可能正好落在本次观察期间（那时 CAS 失败，责任在本线程）。
+			boolean takeOver = canTakeOverDrain(sub);
+			boolean terminalIntent = !sub.closed && (sub.terminal || sub.terminating);
+			if (!takeOver && !terminalIntent) {
+				return;
 			}
 		}
 	}
@@ -1850,7 +1976,11 @@ public class SseChatEmitter {
 		/** 包②：本订阅者是否因<b>写超时</b>被摘除（去重日志/计数用；与 {@link #evicted} 分开口径）。 */
 		final AtomicBoolean writeTimedOut = new AtomicBoolean(false);
 
-		/** true = 终态回放订阅（不入订阅表，回放发完即 complete）。 */
+		/**
+		 * true = 回放发完即收尾的投递上下文（{@link #replayToWithStatus} 的一次性回放，
+		 * 不入订阅表）。{@link #replayAndAttachWithStatus} 自 L-143 起一律以 false 构造 ——
+		 * 它是否收尾由"归档里有没有终帧 + 本轮是否已 complete"决定（见该方法）。
+		 */
 		final boolean terminal;
 
 		Subscription(SseEmitter emitter, boolean terminal) {

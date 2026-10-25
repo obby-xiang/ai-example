@@ -13,6 +13,7 @@ import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -183,6 +184,20 @@ class SseChatEmitterFrameStoreTest {
 		assertThat(sent).hasSize(1);
 		assertThat(sent.get(0)).containsEntry("type", "error").containsEntry("code", "UPSTREAM_STREAM_ERROR");
 		verify(wire.emitter()).complete();
+	}
+
+	@Test
+	void replayReadFailureDetachesTheSubscriptionAndRethrows() {
+		InMemoryRunStore store = new InMemoryRunStore();
+		FrameStore frames = mock(FrameStore.class);
+		IllegalStateException boom = new IllegalStateException("read boom");
+		when(frames.readFromWithStatus(RUN_ID, 0L, 0)).thenThrow(boom);
+		SseChatEmitter out = emitter(store, frames);
+		FrameWire wire = new FrameWire();
+
+		assertThatThrownBy(() -> out.replayAndAttach(wire.emitter(), null, false)).as("异常必须原样上抛，不得吞掉")
+				.isSameAs(boom);
+		assertThat(out.subscriberCount()).as("回放读异常后不得留下已挂订阅（否则订阅表/唤醒订阅泄漏）").isZero();
 	}
 
 	// ── 辅助 ────────────────────────────────────────────────────────────────

@@ -225,6 +225,80 @@ class ReattachLastSeqConformanceTest {
 	}
 
 	/**
+	 * <b>【L-143】</b>终态快照的写入<b>早于</b> {@code done} 落档
+	 * （{@code ResilientChatService#finish}：{@code store.save(DONE)} → 记忆/遥测收敛 →
+	 * {@code out.done} → {@code out.complete}）。这个窗口里的重连若按"快照终态"就只回放、
+	 * 不挂订阅，回放排空即 EOF；随后落档的 {@code done} 到不了这条连接 ⇒ 客户端看到"整轮没有 done"
+	 * （E2E 的 GF1/GF3 形态）。
+	 *
+	 * <p>
+	 * 正确口径：<b>归档里有没有终帧</b>才决定回放完是否收尾。没有就保留原子挂接，
+	 * 等实时 {@code done} 到达、{@code out.complete()} 统一收尾。
+	 *
+	 * <p>
+	 * kill：把 {@code replayAndAttachWithStatus} 的挂接条件改回 {@code if (!terminal)} ⇒ 只回放出
+	 * {@code start}，本用例在 {@code ["start", "done"]} 断言处变红。
+	 */
+	@Test
+	void terminalSnapshotWithoutTerminalFrameKeepsConnectionAttachedUntilDoneArrives() {
+		this.out.start("s-1");
+		FrameWire reattached = new FrameWire();
+
+		int replayed = this.out.replayAndAttach(reattached.emitter(), null, true);
+		this.out.done(Map.of(), "deepseek-flash", Map.of("cancelled", false));
+
+		assertThat(replayed).isEqualTo(1);
+		assertThat(reattached.types()).as("快照已终态但 done 尚未落档时，重连必须续等 done，不能提前 EOF")
+				.containsExactly("start", "done");
+		this.out.complete();
+		org.mockito.Mockito.verify(reattached.emitter()).complete();
+	}
+
+	/**
+	 * 反向窗口：快照还在 RUNNING/SUSPENDED（非终态），但归档里已经有 {@code done}（快照写入滞后）。
+	 * 回放完必须收尾 —— 否则连接挂在一个已经结束的轮次上，永远等不到下一帧。
+	 *
+	 * <p>
+	 * kill：把"回放含终帧即收尾"的分支去掉（只在 {@code terminal} 时收尾）⇒ 本用例的
+	 * {@code complete()} 校验变红（连接悬挂）。
+	 */
+	@Test
+	void nonTerminalSnapshotWithArchivedTerminalFrameClosesAfterReplay() {
+		this.out.start("s-1");
+		this.out.done(Map.of(), "deepseek-flash", Map.of("cancelled", false));
+
+		FrameWire reattached = new FrameWire();
+		int replayed = this.out.replayAndAttach(reattached.emitter(), null, false);
+
+		assertThat(replayed).isEqualTo(2);
+		assertThat(reattached.types()).as("回放必须把归档里的 start + done 都给到重连者")
+				.containsExactly("start", "done");
+		org.mockito.Mockito.verify(reattached.emitter()).complete();
+	}
+
+	/**
+	 * 差量回放为空但 {@code lastSeq} 恰好是 {@code done.seq}（客户端收完 done 后连接才断）：
+	 * 差量里看不到终帧，不能据此又挂上去等一个不会再发的 done。
+	 *
+	 * <p>
+	 * kill：去掉 {@code tailFrameIsTerminal} 的尾部探测 ⇒ 本用例变成"挂接等待"，
+	 * {@code complete()} 校验变红（悬挂）。
+	 */
+	@Test
+	void terminalSnapshotAtTheDoneSeqClosesInsteadOfWaitingForAnotherDone() {
+		this.out.start("s-1");
+		this.out.done(Map.of(), "deepseek-flash", Map.of("cancelled", false));
+		long doneSeq = this.store.lastEventSeq(RUN_ID);
+
+		FrameWire reattached = new FrameWire();
+		int replayed = this.out.replayAndAttach(reattached.emitter(), doneSeq, true);
+
+		assertThat(replayed).isZero();
+		assertThat(reattached.frames()).isEmpty();
+		org.mockito.Mockito.verify(reattached.emitter()).complete();
+	}
+
+	/**
 	 * 进程重启后，续跑的新写出器从归档末帧续号（{@code RunStore#lastEventSeq}）——
 	 * 否则归档里会出现两段重叠序号，前端的 lastSeq 差量会漏帧。
 	 *
