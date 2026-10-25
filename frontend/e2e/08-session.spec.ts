@@ -20,6 +20,15 @@ test.describe('@stub N 会话 / F 消息操作 / Q 快捷操作', () => {
     const mirrorBefore = await page.evaluate((sid) => sessionStorage.getItem(`ai-mirror:${sid}`) !== null, before)
     expect(mirrorBefore).toBe(true)
 
+    // 销毁是**异步**的（`resetSession` 点击即清屏/换 id，`DELETE /api/ai/session/{old}` 在其后发出并等待）；
+    // 镜像键在换 id 的同一帧就被删掉，所以"旧镜像为 null"只证明换 id 成功，**不证明**后端已销毁。
+    // 因此先挂上"等产品自己那条 DELETE 的响应"，把读 /history 的时刻钉在销毁完成之后 ——
+    // 响应返回时记忆面已删完（实测：早读会读到销毁前那一窗 2 条 = [user, assistant]）。
+    const purgeResponse = page.waitForResponse(
+      (res) => res.request().method() === 'DELETE' && res.url().includes(`/api/ai/session/${before}`),
+      { timeout: 30_000 }
+    )
+
     await page.locator('[data-testid="new-chat"]').click()
     await expect(page.locator('[data-testid="empty-state"]')).toBeVisible()
     await expect(page.locator('[data-testid="new-chat"]')).toBeDisabled()
@@ -31,7 +40,12 @@ test.describe('@stub N 会话 / F 消息操作 / Q 快捷操作', () => {
       newMirror: sessionStorage.getItem(`ai-mirror:${newSid}`)
     }), { oldSid: before, newSid: after })
     expect(state.oldMirror).toBeNull()
-    // 后端旧会话记忆已清空（新建对话是"离开旧会话"，不是仅清屏）
+    // 后端旧会话记忆已清空（新建对话是"离开旧会话"，不是仅清屏）：等产品自己那条销毁响应，
+    // 再读后端 —— 时序由响应确定（不是等一个固定延迟），并顺带钉住"产品确实发了销毁且报 complete"。
+    const purge = await purgeResponse
+    expect(purge.status()).toBe(200)
+    const purgeBody = (await purge.json()) as { complete?: boolean }
+    expect(purgeBody.complete).toBe(true)
     const history = await api.get<{ count: number }>(request, `/api/ai/history/${before}`)
     expect(history.count).toBe(0)
   })

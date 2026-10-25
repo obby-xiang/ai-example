@@ -4,16 +4,14 @@
  * 编号沿用 `docs/research/设计-真机E2E用例全集-2026-10-23.md` §2.10 / §2.11 / §2.22；
  * 批①② 已覆盖的条目（D-02 见 07-empty-error）不重复登记。
  *
- * 拓扑（M 域地基）：harness 起两实例 —— A（有 key + 桩上游）与 B（无 key 的降级面），
- * 本域令 `E2E_REDIS_DB == E2E_REDIS_DB_DEGRADED`（同一 Redis 库）⇒ 两个**不同 JVM** 看到同一份
- * 轮次台账：/events 扇出、跨实例决策、跨实例读台账都是真的跨进程，不是同进程模拟。
+ * 拓扑：`E2E_MDO_GROUP=multi` 时两个不同 JVM 共用 H2、Redis、上游与模型配置，
+ * 验证跨实例订阅、决策与接管；`degraded` 时各用独立 H2、B 无模型，验证 D/O 降级与并发。
+ * 两组端口默认相同，必须串行；RUN_DIR 与产物目录分开，避免互相清理。
  *
  * 启动（端口基与 Redis 库为本域独占；DB 18 在本机 Memurai 上不存在 —— 只有 0..15 库，
  * 故本域用 **12**，见批③c 报告"装配偏差"一条）：
- *   cd frontend && E2E_BACKEND_PORT=19530 E2E_DEGRADED_BACKEND_PORT=19531 E2E_STUB_PORT=19599 \
- *     E2E_APP_PORT=19601 E2E_DEGRADED_APP_PORT=19602 E2E_REDIS_DB=12 E2E_REDIS_DB_DEGRADED=12 \
- *     E2E_EXTRA_BACKEND_ARGS=--app.ai.hitl.frontend-tool-timeout=15s \
- *     E2E_RUN_DIR=test-results/.e2e-run-mdo npx playwright test e2e/15-mdo.spec.ts
+ *   cd frontend && npx playwright test --config playwright.mdo.config.ts
+ *   cd frontend && E2E_MDO_GROUP=degraded npx playwright test --config playwright.mdo.config.ts
  */
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test'
 import { createPublishableImportTask, openApp, until, waitRoundSettled, type JobView } from './support/helpers'
@@ -128,17 +126,20 @@ test.describe('@stub M 多实例与跨实例重连', () => {
     const onB = await waitPending(runId, toolCallId, (entry) => entry.status === 'PENDING', 20_000,
       'B 侧读到 PENDING 条目', API_B)
     expect(onB.req).toBe(true)
+    await waitFor(async () => (await health(API)).body.activeSuspendGates === 0, 20_000,
+      'A 侧已 park 并交还等待线程')
 
     // 决策**打在 B**（不是发起挂起的 A）
     const decided = await confirmOn(API_B, runId, toolCallId, true)
     expect(decided.status).toBe(200)
     expect(decided.body.accepted).toBe(true)
     expect(decided.body.duplicate).toBe(false)
+    const aInstance = (await health(API)).body.instanceId
     const bInstance = (await health(API_B)).body.instanceId
     expect(decided.body.storedBy).toBe(bInstance)
-    expect(String(decided.body.resumeOutcome ?? '')).not.toBe('DISPATCHED')
+    expect(['SCHEDULED', 'LEASE_HELD_ELSEWHERE']).toContain(String(decided.body.resumeOutcome ?? ''))
 
-    // 决策不丢：条目转已决 + 台账 executedBy = A 的实例（真正执行的是 A 的挂起线程）
+    // 决策不丢：条目转已决；真正执行者必须是取得租约的合法实例，不绑定固定节点
     const settled = await waitPending(runId, toolCallId, (entry) => entry.status !== 'PENDING', 20_000,
       '条目离开 PENDING')
     expect(['APPROVED', 'EXECUTED', 'BLOCKED']).toContain(String(settled.status))
@@ -179,9 +180,11 @@ test.describe('@stub M 多实例与跨实例重连', () => {
     expect(done.snapshot?.status).toBe('DONE')
     const ledger = done.ledger ?? []
     expect(ledger.length).toBe(1)
-    expect(String(ledger[0].executedBy ?? '')).toContain('instance-')
-    // A 侧真实执行了发布作业（决策被消费，不是只落库）
-    await until(async () => (await publishJobs(request, taskId)).length > 0, 30_000, '发布作业创建')
+    const executingInstance = String(ledger[0].executedBy ?? '')
+    expect([aInstance, bInstance]).toContain(executingInstance)
+    expect(done.snapshot?.resumedBy ?? []).toContain(executingInstance)
+    // 共享模型配置的实例真实执行：恰好一个发布作业，不是只落库或重复执行
+    await until(async () => (await publishJobs(request, taskId)).length === 1, 30_000, '发布作业恰创建一次')
   })
 
   test('E2E-M05 业务幂等键：同一 toolCallId 二次决策 409，台账只 1 条', async ({ request }) => {

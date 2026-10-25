@@ -3,16 +3,20 @@ import { defineConfig, devices } from '@playwright/test'
 /**
  * MDO 域（15-mdo：M 多实例 / D 降级 / O 并发）专用 Playwright 配置。
  *
- * 本域拓扑与别域不同：令 `E2E_REDIS_DB == E2E_REDIS_DB_DEGRADED` ⇒ harness 起的 A（有 key）与
- * B（无 key 的降级面）两个**不同 JVM** 看同一份轮次台账；跨实例 `/events` 扇出、跨实例决策、
- * 跨实例读台账才是真的跨进程。
- *
- * 其余与 `playwright.hgta.config.ts` 同构 = 一组环境变量（RUNDIR / 端口段 215xx / DB 12 / 追加后端参数）；
- * 起停仍由统一 `support/harness.ts` 负责，产物目录独立。
+ * 两组使用不同拓扑，不能共用旧的“A 有模型、B 无模型且不同库”装配：
+ * - multi：A/B 共享 H2、Redis、上游与模型配置，验证无粘滞下的跨实例订阅、决策与接管；
+ * - degraded：A/B 各自独立 H2，B 无模型，验证 D/O 的降级与并发边界。
+ * 两组串行运行，RUN_DIR、报告和产物目录分开。默认只跑 multi；另一组必须显式选择。
  *
  * 运行：cd frontend && npx playwright test --config playwright.mdo.config.ts
+ * 另一组：cd frontend && E2E_MDO_GROUP=degraded npx playwright test --config playwright.mdo.config.ts
  */
-process.env.E2E_RUN_DIR ??= 'test-results/.e2e-run-mdo'
+const group = process.env.E2E_MDO_GROUP ?? 'multi'
+if (group !== 'multi' && group !== 'degraded') {
+  throw new Error(`E2E_MDO_GROUP 只支持 multi/degraded，收到：${group}`)
+}
+process.env.E2E_SHARED_AI_STACK = group === 'multi' ? '1' : '0'
+process.env.E2E_RUN_DIR ??= `test-results/.e2e-run-mdo-${group}`
 process.env.E2E_BACKEND_PORT ??= '21530'
 process.env.E2E_DEGRADED_BACKEND_PORT ??= '21531'
 process.env.E2E_STUB_PORT ??= '21599'
@@ -20,7 +24,6 @@ process.env.E2E_APP_PORT ??= '21601'
 process.env.E2E_DEGRADED_APP_PORT ??= '21602'
 process.env.E2E_REDIS_DB ??= '12'
 process.env.E2E_REDIS_DB_DEGRADED ??= '12'
-// 本域需要「挂起确认门」在 15s 内到期的那一面（跨实例重连 / 超时终态）
 process.env.E2E_EXTRA_BACKEND_ARGS ??= '--app.ai.hitl.frontend-tool-timeout=15s'
 
 const appBase = process.env.E2E_APP ?? `http://127.0.0.1:${process.env.E2E_APP_PORT}`
@@ -37,10 +40,10 @@ export default defineConfig({
   expect: { timeout: 15_000 },
   reporter: [
     ['list'],
-    ['html', { outputFolder: process.env.E2E_REPORT_DIR ?? 'test-results/html-mdo', open: 'never' }]
+    ['html', { outputFolder: process.env.E2E_REPORT_DIR ?? `test-results/html-mdo-${group}`, open: 'never' }]
   ],
-  outputDir: process.env.E2E_OUTPUT_DIR ?? 'test-results/artifacts-mdo',
-  grep: new RegExp(process.env.E2E_MODE === 'real' ? '@real' : '@stub'),
+  outputDir: process.env.E2E_OUTPUT_DIR ?? `test-results/artifacts-mdo-${group}`,
+  grep: new RegExp(process.env.E2E_MODE === 'real' ? '@real' : (group === 'multi' ? '@stub M ' : '@stub [DO] ')),
   globalSetup: './e2e/support/global-setup.ts',
   globalTeardown: './e2e/support/global-teardown.ts',
   use: {

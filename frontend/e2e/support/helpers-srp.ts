@@ -1,11 +1,13 @@
 /**
  * S 域（流式）/ R 域（真刷新）/ P 域（手工停止）专用助手 —— 10-srp.spec.ts 私有。
  *
- * 只读复用 `support/helpers.ts` 的公共面，不改动任何既有文件。
  * 端点/帧口径见 backend `ai/web/AiController.java` 与 `frontend/src/types/sse.ts`。
  */
 import { expect, type APIRequestContext, type Page } from '@playwright/test'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { join } from 'node:path'
 import { api } from './helpers'
+import { RUN_DIR } from './harness'
 
 export const API_BASE = process.env.E2E_API_BASE
   ?? `http://127.0.0.1:${process.env.E2E_BACKEND_PORT ?? '18330'}`
@@ -42,6 +44,44 @@ export async function chatFrames(
   })
   const text = await res.text()
   return parseSse(text)
+}
+
+/** 桩侧一次上游请求的落档（`<RUN_DIR>/stub/req-NNN.*`）。 */
+export interface StubRequest {
+  /** 桩进程内的落档序号（单调递增 ⇒ 到达顺序）。 */
+  index: number
+  /** 落档写入时刻（epoch ms，桩进程/文件系统的钟，与后端帧的 `atMs` 相互独立）。 */
+  atMs: number
+  /** 桩对该请求的应答状态（`decision.json` 无 `status` = 正常 200 流）。 */
+  status: number
+}
+
+/**
+ * 按请求体里的**一次性标记**找桩落档 —— 这是"上游真的收到了几次请求、隔了多久"的唯一证据面
+ * （后端 `retry`/`delta` 帧的 `atMs` 是产品自报的钟，不能单独用来证明"真的等过"）。
+ *
+ * 落档在请求处理入口写（`record()`），故 `mtime` = 该请求到达桩的时刻；
+ * 两次落档之差 ≥ 两次请求之间产品真实等待的时长。
+ */
+export function stubRequestsContaining(marker: string): StubRequest[] {
+  const dir = join(RUN_DIR, 'stub')
+  if (!existsSync(dir)) return []
+  const found: StubRequest[] = []
+  for (const name of readdirSync(dir)) {
+    const match = /^req-(\d+)\.json$/.exec(name)
+    if (!match) continue
+    const [, tag] = match
+    const raw = readFileSync(join(dir, name), 'utf8')
+    if (!raw.includes(marker)) continue
+    let status = 200
+    const decisionPath = join(dir, `req-${tag}.decision.json`)
+    if (existsSync(decisionPath)) {
+      const decision = JSON.parse(readFileSync(decisionPath, 'utf8')) as { status?: number }
+      if (typeof decision.status === 'number') status = decision.status
+    }
+    found.push({ index: Number(tag), atMs: statSync(join(dir, name)).mtimeMs, status })
+  }
+  return found.sort((a, b) => a.index - b.index)
 }
 
 /** 打开 GET /api/ai/events/{runId}?lastSeq= 直读文本（回放/续收通道）。 */

@@ -225,6 +225,7 @@ export interface HealthBody {
   frontendToolTimeoutSeconds?: number
   leaseOk?: boolean
   resumeOnStartup?: boolean
+  activeSuspendGates?: number
 }
 
 export async function health(base = API): Promise<{ status: number; body: HealthBody }> {

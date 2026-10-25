@@ -132,11 +132,20 @@ jobs:
           export AI_SECRET_KEK
           npx playwright test --config playwright.mdxy.config.ts
 
-      # MDO 域（15）：双 JVM 同 Redis DB，验证跨实例扇出/决策/读台账。
-      - name: 真机 E2E（桩模式 · MDO 域 · 多实例/降级/并发）
+      # MDO 域（15）：两组都实跑，不能因拆分拓扑而漏掉 D/O 或 M。
+      - name: MDO 分组契约自检（多实例共享配置 / 降级独立配置）
+        if: ${{ !cancelled() }}
+        run: node --test scripts/ci/mdo-group-contract.test.mjs
+
+      - name: 真机 E2E（桩模式 · M 多实例 · 共享 H2/Redis/模型配置）
         if: ${{ !cancelled() }}
         working-directory: frontend
-        run: npx playwright test --config playwright.mdo.config.ts
+        run: E2E_MDO_GROUP=multi npx playwright test --config playwright.mdo.config.ts
+
+      - name: 真机 E2E（桩模式 · D/O 降级与并发 · B 无模型）
+        if: ${{ !cancelled() }}
+        working-directory: frontend
+        run: E2E_MDO_GROUP=degraded npx playwright test --config playwright.mdo.config.ts
 
       # KQC 域（16-kqc 系）三档：主档 / 降级档（K-06、C-02 专用后端参数）/ 压缩档（小分母）。
       - name: 真机 E2E（桩模式 · KQC 域 · 主档）

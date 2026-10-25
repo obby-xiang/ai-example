@@ -5,7 +5,7 @@
  *   - 桩上游  scripts/ci/stub-upstream.mjs（或 `E2E_STUB_SCRIPT` 指定的本域桩）  默认 18399（桩模式）
  *   - 可选二级桩 `E2E_STUB_UPSTREAM_PORT`（本域桩转发用的官方桩，如 NFEZUI 的 19198）
  *   - 后端 A  独立 H2 + 独立 Redis DB                   默认 18330 / DB 5（真 key 或桩上游）
- *   - 后端 B  无 key（降级面）                           默认 18331 / DB 6
+ *   - 后端 B  无 key（降级面；共享模式与 A 同库同模型） 默认 18331 / DB 6
  *   - 前端 A  vite dev server（代理到后端 A）            默认 18401
  *   - 前端 B  vite dev server（代理到后端 B）            默认 18402
  *
@@ -17,6 +17,7 @@
  *   | `E2E_DATA_DIR` / `E2E_DEGRADED_DATA_DIR` | `<RUN_DIR>/data` / `<RUN_DIR>/data-degraded` | 两个 H2 数据目录 |
  *   | `E2E_BACKEND_PORT` / `E2E_DEGRADED_BACKEND_PORT` / `E2E_STUB_PORT` / `E2E_STUB_UPSTREAM_PORT` / `E2E_APP_PORT` / `E2E_DEGRADED_APP_PORT` | 18330 / 18331 / 18399 / （不启） / 18401 / 18402 | 端口 |
  *   | `E2E_REDIS_DB` / `E2E_REDIS_DB_DEGRADED` | 5 / 6 | Redis 库号（合法 0-15；起栈前 SELECT 校验，越界立即失败） |
+ *   | `E2E_SHARED_AI_STACK` | `0` | `1` 时 A/B 共用 H2（AUTO_SERVER）、Redis 与模型配置；仅供多实例组 |
  *   | `E2E_AI_LIMIT_SESSION_PER_MINUTE` / `E2E_AI_LIMIT_IP_PER_MINUTE` | 200 / 2000 | 限流抬高（E2E 不在限流覆盖面） |
  *   | `E2E_EXTRA_BACKEND_ARGS` | 空 | 追加给 java 的 `--k=v`（空格分隔，如 `--app.ai.suspend.pool-size=3`） |
  *   | `E2E_READY_TIMEOUT_MS` / `E2E_SEED_TIMEOUT_MS` / `E2E_APP_READY_TIMEOUT_MS` | 120000 / 90000 / 90000 | 就绪等待 |
@@ -50,8 +51,11 @@ function pathFromEnv(value: string | undefined, fallback: string): string {
 
 export const RUN_DIR = pathFromEnv(process.env.E2E_RUN_DIR, join(FRONTEND_DIR, 'test-results', '.e2e-run'))
 const STATE_FILE = pathFromEnv(process.env.E2E_STATE_FILE, join(RUN_DIR, 'state.json'))
+const SHARED_AI_STACK = process.env.E2E_SHARED_AI_STACK === '1'
 export const DATA_DIR = pathFromEnv(process.env.E2E_DATA_DIR, join(RUN_DIR, 'data'))
-export const DEGRADED_DATA_DIR = pathFromEnv(process.env.E2E_DEGRADED_DATA_DIR, join(RUN_DIR, 'data-degraded'))
+export const DEGRADED_DATA_DIR = SHARED_AI_STACK
+  ? DATA_DIR
+  : pathFromEnv(process.env.E2E_DEGRADED_DATA_DIR, join(RUN_DIR, 'data-degraded'))
 
 export const MODE: 'stub' | 'real' = process.env.E2E_MODE === 'real' ? 'real' : 'stub'
 
@@ -353,7 +357,7 @@ function javaArgs(port: number, redisDb: number, dataDir: string, extra: string[
   return [
     '-cp', classpath, MAIN_CLASS,
     `--server.port=${port}`,
-    `--spring.datasource.url=jdbc:h2:file:${dataDir}/e2e;DB_CLOSE_DELAY=-1`,
+    `--spring.datasource.url=jdbc:h2:file:${dataDir}/e2e;DB_CLOSE_DELAY=-1${SHARED_AI_STACK ? ';AUTO_SERVER=TRUE;LOCK_TIMEOUT=60000' : ''}`,
     `--spring.data.redis.database=${redisDb}`,
     '--app.job.batch-size=10',
     '--app.job.demo-batch-delay-ms=150',
@@ -426,6 +430,46 @@ function envWithoutAi(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return copy
 }
 
+function envWithAi(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const copy = { ...env }
+  if (MODE === 'stub') {
+    copy.AI_API_KEY = 'e2e-stub-placeholder'
+    copy.AI_BASE_URL = URLS.stub
+    copy.AI_MODEL = 'e2e-stub-model'
+  } else {
+    const key = process.env.AI_API_KEY ?? process.env.DEEPSEEK_API_KEY
+    if (!key) throw new Error('E2E_MODE=real 需要 AI_API_KEY（CI 从 environment e2e-real 注入；本地只经环境变量传入）')
+    copy.AI_API_KEY = key
+    copy.AI_BASE_URL = process.env.AI_BASE_URL ?? 'https://api.deepseek.com'
+    copy.AI_MODEL = process.env.AI_MODEL ?? 'deepseek-flash'
+  }
+  return copy
+}
+
+async function waitForMainReady(): Promise<void> {
+  await waitForHttp(
+    `${URLS.api}/api/ai/health`,
+    '后端 A（available + redis.available）',
+    (body) => {
+      try {
+        const json = JSON.parse(body) as { available?: boolean; redis?: { available?: boolean } }
+        return json.available === true && json.redis?.available === true
+      } catch {
+        return false
+      }
+    },
+    READY_TIMEOUT_MS
+  )
+  await waitForHttp(`${URLS.api}/api/definitions`, '后端 A 种子', (body) => {
+    try {
+      const json = JSON.parse(body) as { data?: unknown[] }
+      return Array.isArray(json.data) && json.data.length >= 15
+    } catch {
+      return false
+    }
+  }, SEED_TIMEOUT_MS)
+}
+
 export interface StartOptions {
   /** 只起指定组件（调试用）；缺省全起。 */
   only?: Array<'main' | 'degraded' | 'app' | 'degradedApp'>
@@ -455,14 +499,16 @@ export async function startServices(options: StartOptions = {}): Promise<void> {
     [PORTS.backend, '后端 A'],
     [PORTS.app, '前端 A']
   ]
-  if (only.includes('degraded')) portChecks.push([PORTS.degradedBackend, '后端 B（降级面）'])
+  if (only.includes('degraded')) {
+    portChecks.push([PORTS.degradedBackend, SHARED_AI_STACK ? '后端 B（共享模型面）' : '后端 B（降级面）'])
+  }
   if (only.includes('degradedApp')) portChecks.push([PORTS.degradedApp, '前端 B（降级面）'])
   if (needStub) portChecks.push([PORTS.stub, '桩上游'])
   if (needStub && PORTS.stubUpstream > 0) portChecks.push([PORTS.stubUpstream, '二级官方桩'])
   for (const [port, label] of portChecks) await assertPortFree(port, label)
 
   // 每棒从干净的数据面开始（H2 文件 + 专用 Redis DB），避免上一棒的在途轮/会话污染。
-  for (const dir of [DATA_DIR, DEGRADED_DATA_DIR]) {
+  for (const dir of new Set([DATA_DIR, DEGRADED_DATA_DIR])) {
     rmSync(dir, { recursive: true, force: true })
   }
   // 旧版 URL（jdbc:h2:file:./data）留下的库文件也要清：否则 ai_provider 残留会让 strict seed 跳种。
@@ -520,63 +566,50 @@ export async function startServices(options: StartOptions = {}): Promise<void> {
       // 挂起确认门永不超时；续跑扫描在每棒干净数据面下无需参与。
       '--app.ai.resume.on-startup=false'
     ]
-    const env: NodeJS.ProcessEnv = { ...process.env }
-    if (MODE === 'stub') {
-      env.AI_API_KEY = 'e2e-stub-placeholder'
-      env.AI_BASE_URL = URLS.stub
-      env.AI_MODEL = 'e2e-stub-model'
-    } else {
-      const key = process.env.AI_API_KEY ?? process.env.DEEPSEEK_API_KEY
-      if (!key) throw new Error('E2E_MODE=real 需要 AI_API_KEY（CI 从 environment e2e-real 注入；本地只经环境变量传入）')
-      env.AI_API_KEY = key
-      env.AI_BASE_URL = process.env.AI_BASE_URL ?? 'https://api.deepseek.com'
-      env.AI_MODEL = process.env.AI_MODEL ?? 'deepseek-flash'
-    }
     const backend = spawnLogged('backend', javaBin(), javaArgs(PORTS.backend, REDIS_DB, DATA_DIR, extra), {
       cwd: RUN_DIR,
-      env
+      env: envWithAi(process.env)
     })
     if (backend.pid) pids.backend = backend.pid
     persist()
   }
 
+  if (only.includes('main') && SHARED_AI_STACK) {
+    // 共享空库先由 A 完成 Flyway 迁移和种子，再让 B 连接，避免两个 JVM 同时初始化。
+    await waitForMainReady()
+  }
+
   if (only.includes('degraded')) {
-    // 降级面：无 key、无上游 → /api/ai/health 的 available 必须为 false（D-02/E-07 的底座）。
     const backend = spawnLogged(
       'backend-degraded',
       javaBin(),
       javaArgs(PORTS.degradedBackend, DEGRADED_REDIS_DB, DEGRADED_DATA_DIR, extraArgs),
-      { cwd: RUN_DIR, env: envWithoutAi(process.env) }
+      { cwd: RUN_DIR, env: SHARED_AI_STACK ? envWithAi(process.env) : envWithoutAi(process.env) }
     )
     if (backend.pid) pids.backend_degraded = backend.pid
     persist()
   }
 
-  if (only.includes('main')) {
-    await waitForHttp(
-      `${URLS.api}/api/ai/health`,
-      '后端 A（available + redis.available）',
-      (body) => {
-        try {
-          const json = JSON.parse(body) as { available?: boolean; redis?: { available?: boolean } }
-          return json.available === true && json.redis?.available === true
-        } catch {
-          return false
-        }
-      },
-      READY_TIMEOUT_MS
-    )
-    await waitForHttp(`${URLS.api}/api/definitions`, '后端 A 种子', (body) => {
+  if (only.includes('main') && !SHARED_AI_STACK) {
+    await waitForMainReady()
+  }
+
+  if (only.includes('degraded') && SHARED_AI_STACK) {
+    await waitForHttp(`${URLS.degradedApi}/api/ai/health`, '后端 B（共享模型面）', (body) => {
       try {
-        const json = JSON.parse(body) as { data?: unknown[] }
-        return Array.isArray(json.data) && json.data.length >= 15
+        const json = JSON.parse(body) as {
+          available?: boolean
+          redis?: { available?: boolean }
+          providers?: Array<{ synthetic?: boolean; keyConfigured?: boolean; baseUrl?: string }>
+        }
+        return json.available === true && json.redis?.available === true
+          && (json.providers ?? []).some((provider) => provider.synthetic === false
+            && provider.keyConfigured === true && provider.baseUrl === URLS.stub)
       } catch {
         return false
       }
-    }, SEED_TIMEOUT_MS)
-  }
-
-  if (only.includes('degraded')) {
+    }, READY_TIMEOUT_MS)
+  } else if (only.includes('degraded')) {
     await waitForHttp(`${URLS.degradedApi}/api/ai/health`, '后端 B（降级面）', (body, status) => {
       if (status !== 503) return false
       try {

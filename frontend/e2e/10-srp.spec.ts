@@ -36,8 +36,10 @@ import {
   readMirror,
   segmentOrder,
   sessionStorageKeys,
+  stubRequestsContaining,
   API_BASE
 } from './support/helpers-srp'
+import { RUN_DIR } from './support/harness'
 
 /**
  * 桩的会话指纹 = 首条 user 消息：同一提示词重复使用会让桩把"该路由已用过"的轮次退化成文本轮。
@@ -48,6 +50,22 @@ function P(prompt: string): string {
   promptSeq += 1
   return `${prompt} ${Date.now().toString(36)}${promptSeq}${Math.random().toString(36).slice(2, 6)}`
 }
+
+/**
+ * S-07 的退避判定区间，唯一事实源 = backend `RetryBackoff`
+ * （BASE_MS=500 / JITTER_RATIO=0.25 / MAX_MS=5000）：第 1 次重试 `500×(1±0.25)` = `[375, 625]`ms。
+ * 上界额外留出一次本地上游往返 + JVM 冷路径的余量（实测 15~180ms）；
+ * 原上界 5000 与"数秒档"不可区分，本值把它收窄到能区分"500ms 档"的量级。
+ */
+const S07_BACKOFF_FLOOR_MS = 375
+const S07_BACKOFF_CEILING_MS = 2_000
+
+/**
+ * S-07 的独立轮次数：单轮间隔 = 真实退避 + 产品固定开销，开销偶发可顶过下界（实测突变体下
+ * 3 次里出现 1 次 559ms 的"没睡却过线"），多轮取样要求**每轮**都达标
+ * ⇒ 漏判概率 ≈（单轮被掩盖的概率）^N。5 轮在"每轮 1/3 被掩盖"的极端假设下仍 < 1%。
+ */
+const S07_ROUNDS = 5
 
 /** 本轮在途的停止钮（loading / suspended 才有，别的轮没有）。 */
 function stopButton(page: Page) {
@@ -278,36 +296,71 @@ test.describe('@stub S 流式稳定', () => {
   })
 
   /**
-   * S-07 上游 5xx 重试退避：一次 503 → 退避 500ms×2^n → 第二次成功；只 1 个 done。
+   * S-07 上游 5xx 重试退避：一次 503 → 退避 500ms 档（±25% 抖动）→ 第二次成功；只 1 个 done。
+   *
+   * 退避是「**每一次**重试都 ≥ 契约下界」的全称命题，而单轮测得的间隔 = 真实退避 + 产品自身
+   * 固定开销（`retry` 帧落档 → 第二次请求装配；冷 JVM / GC 抖动实测可达 ~0.5s）⇒ 只测一轮时，
+   * "根本没睡"的缺陷也能被这段开销顶过下界（突变实验里 3 次有 1 次 559ms 过线）。故本用例跑
+   * `S07_ROUNDS` 个独立轮次、每轮都要满足下界：缺陷作用于**每一轮**，开销掩盖只会偶发。
    */
   test('E2E-S07 上游 503：同一轮重试一次（≤ max-attempts=2），成功路径只有 1 个 done', async () => {
-    const sid = `srp-s07-${Date.now()}`
-    const frames = await chatFrames(sid, P('turn-text fail-503-once S07'))
-    const start = frames.find((frame) => frame.type === 'start')
-    const retries = frames.filter((frame) => frame.type === 'retry')
-    const done = frames.find((frame) => frame.type === 'done')
+    for (let round = 1; round <= S07_ROUNDS; round += 1) {
+      const tag = `第 ${round}/${S07_ROUNDS} 轮`
+      const sid = `srp-s07-${Date.now()}-${round}`
+      const message = P('turn-text fail-503-once S07')
+      const frames = await chatFrames(sid, message)
+      const start = frames.find((frame) => frame.type === 'start')
+      const retries = frames.filter((frame) => frame.type === 'retry')
+      const done = frames.find((frame) => frame.type === 'done')
 
-    // ① 恰 1 次重试、attempt=2，码为「上游暂时不可用」且可重试。
-    //    契约来源（2026-10-25）：`ErrorCodes#UPSTREAM_UNAVAILABLE`（408/5xx/网络层 ——
-    //    "这一轮请求根本没拿到可用响应"）与 `UpstreamErrorClassifier#byStatus`
-    //    （status 408 或 5xx ⇒ new Outcome(UPSTREAM_UNAVAILABLE, retryable=true, null, status)）。
-    //    能收到 `retry` 帧本身就是"已判为可重试"的实证：不可重试的分支直接走 error 终帧。
-    expect(retries).toHaveLength(1)
-    expect(Number(retries[0].nextAttempt)).toBe(2)
-    expect(String(retries[0].code)).toBe('UPSTREAM_UNAVAILABLE')
+      // ① 恰 1 次重试、attempt=2，码为「上游暂时不可用」且可重试。
+      //    契约来源（2026-10-25）：`ErrorCodes#UPSTREAM_UNAVAILABLE`（408/5xx/网络层 ——
+      //    "这一轮请求根本没拿到可用响应"）与 `UpstreamErrorClassifier#byStatus`
+      //    （status 408 或 5xx ⇒ new Outcome(UPSTREAM_UNAVAILABLE, retryable=true, null, status)）。
+      //    能收到 `retry` 帧本身就是"已判为可重试"的实证：不可重试的分支直接走 error 终帧。
+      expect(retries, tag).toHaveLength(1)
+      expect(Number(retries[0].nextAttempt), tag).toBe(2)
+      expect(String(retries[0].code), tag).toBe('UPSTREAM_UNAVAILABLE')
 
-    // ② 退避可观测：retry 之后到首个正文帧的间隔 ≈ 500ms 档（不是立即重打）
-    const firstDelta = frames.find((frame) => frame.type === 'delta')
-    const backoffMs = Number(firstDelta!.atMs) - Number(retries[0].atMs)
-    expect(backoffMs).toBeGreaterThanOrEqual(400)
-    expect(backoffMs).toBeLessThanOrEqual(5_000)
+      // ② 退避可观测：retry 之后到首个正文帧的间隔落在「500ms 档」的**抖动区间**里（不是立即重打）。
+      //    区间口径的唯一事实源 = backend `RetryBackoff`：BASE_MS=500、JITTER_RATIO=0.25、MAX_MS=5000
+      //    ⇒ 第 1 次重试的合法时长 = 500×(1±0.25) = [375, 625]ms。抖动是设计的一部分（防共振），
+      //    不是测量误差 —— 故下界是 375 而不是旧值 400：400 比契约更窄，抖动抽样落在下沿
+      //    （sample ≲ 0.05 ⇒ 375~399ms）时会误红（run 40228606894 实测 398ms；本机同一用例连跑 30 次
+      //    复现 3 次红灯 = 392/397/399ms，同批后端日志的实际退避落到 375/381/383/385ms —— 下界 375 实测可达）。
+      //    上界 = 625 + 一次本地上游往返/冷路径余量；旧值 5000 区分不了"500ms 档"与"数秒档"。
+      const firstDelta = frames.find((frame) => frame.type === 'delta')
+      const backoffMs = Number(firstDelta!.atMs) - Number(retries[0].atMs)
+      expect(backoffMs, `${tag} retry→首个 delta 间隔`).toBeGreaterThanOrEqual(S07_BACKOFF_FLOOR_MS)
+      expect(backoffMs, `${tag} retry→首个 delta 间隔`).toBeLessThanOrEqual(S07_BACKOFF_CEILING_MS)
 
-    // ③ 成功路径只 1 个 done，正文完整
-    expect(done).toBeTruthy()
-    expect(Number(done!.attempts)).toBe(2)
-    expect(countType(frames, 'done')).toBe(1)
-    expect(deltaText(frames)).toBe(TURN_TEXT)
-    expect(Number(done!.atMs) - Number(start!.atMs)).toBeLessThan(30_000)
+      // ②' 桩侧实证（与产品自报的 `atMs` 相互独立的另一条钟）：本轮恰 2 次上游请求，
+      //     503 在前、200 在后，第二次请求落在 `retry` 帧**之后**，两次落档间隔也 ≥ 抖动下界。
+      //     这样"第二次上游请求确实等过"不依赖产品自己的时间戳；同时排除把别轮请求配错。
+      const upstream = stubRequestsContaining(message)
+      expect(upstream, `${tag}：桩落档不可见（${RUN_DIR}/stub）`).toHaveLength(2)
+      expect(upstream.map((request) => request.status), tag).toEqual([503, 200])
+      expect(upstream[0].atMs, `${tag} 首次 503 应在 retry 帧之前`).toBeLessThanOrEqual(
+        Number(retries[0].atMs)
+      )
+      expect(upstream[1].atMs, `${tag} 第二次请求应在 retry 帧之后`).toBeGreaterThanOrEqual(
+        Number(retries[0].atMs)
+      )
+      const upstreamGapMs = upstream[1].atMs - upstream[0].atMs
+      expect(upstreamGapMs, `${tag} 桩侧 503→第二次请求间隔`).toBeGreaterThanOrEqual(
+        S07_BACKOFF_FLOOR_MS
+      )
+      expect(upstreamGapMs, `${tag} 桩侧 503→第二次请求间隔`).toBeLessThanOrEqual(
+        S07_BACKOFF_CEILING_MS
+      )
+
+      // ③ 成功路径只 1 个 done，正文完整
+      expect(done, tag).toBeTruthy()
+      expect(Number(done!.attempts), tag).toBe(2)
+      expect(countType(frames, 'done'), tag).toBe(1)
+      expect(deltaText(frames), tag).toBe(TURN_TEXT)
+      expect(Number(done!.atMs) - Number(start!.atMs), `${tag} 总耗时`).toBeLessThan(30_000)
+    }
   })
 
   /**
